@@ -1,0 +1,26 @@
+{
+  "name": "lark-proxy",
+  "version": "1.0.0",
+  "description": "Lark event proxy for lane-based routing",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "start": "bun dist/index.js",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "koa": "^2.15.0",
+    "@koa/router": "^12.0.1",
+    "@larksuiteoapi/node-sdk": "^1.23.0",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/koa": "^2.15.0",
+    "@types/koa__router": "^12.0.4",
+    "@types/pg": "^8.11.0",
+    "@types/bun": "latest"
+  }
+}
