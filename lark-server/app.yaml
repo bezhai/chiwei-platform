@@ -1,0 +1,42 @@
+# 应用声明文件 — 平台层读取此文件生成 Dockerfile、K8s manifest、构建配置
+# 详见 docs/platform-design.md
+
+name: lark-server
+runtime: bun
+version: 1-alpine
+
+build:
+  method: bun-build
+  entry: dist/index.js
+  workspace_deps:       # monorepo 内部依赖包
+    - packages/ts-shared
+    - packages/pixiv-client
+    - packages/lark-utils
+  log_dir: /var/log/lark-server
+
+serve:
+  port: 3000
+  health: /api/health
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+workers:
+  - name: recall-worker
+    entry: dist/workers/recall-worker.js
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+env_overrides:
+  POSTGRES_PORT: "5432"
+  REDIS_PORT: "6379"
