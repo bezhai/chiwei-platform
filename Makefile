@@ -103,5 +103,6 @@ self-deploy:
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	$(MAKE) build-wait APP=paas-engine BUILD_ID=$$BUILD_ID && \
 	$(MAKE) release APP=paas-engine LANE=prod TAG=$(TAG) && \
+	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
 	$(MAKE) release APP=paas-engine LANE=blue TAG=$(TAG) && \
 	echo ">>> 蓝绿自部署完成"
