@@ -17,7 +17,8 @@ COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
 # 安装依赖后手动重建 workspace 符号链接（kaniko snapshot 会丢弃 bun 创建的链接）
-RUN bun install --frozen-lockfile \
+# --backend=copyfile 强制复制文件而非 hardlink，避免 kaniko snapshot 丢失链接
+RUN bun install --frozen-lockfile --backend=copyfile \
     && mkdir -p node_modules/@inner \
     && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
     && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
