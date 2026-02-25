@@ -8,27 +8,17 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /repo
 
-# 先复制工作区元数据和 lockfile，利用 Docker layer cache
+# 复制所有 workspace 元数据和共享包源码（bun install 需要包目录存在才能创建 workspace 链接）
 COPY package.json bun.lock ./
 COPY apps/lark-server/package.json ./apps/lark-server/package.json
 COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
-COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
-COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
-COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
-
-RUN bun install --frozen-lockfile \
-    && echo "=== DEBUG: node_modules/@inner ===" \
-    && ls -la node_modules/@inner/ \
-    && echo "=== DEBUG: feishu-card ===" \
-    && ls node_modules/feishu-card/package.json \
-    && echo "=== DEBUG: symlink targets ===" \
-    && readlink node_modules/@inner/shared || true
-
-# 复制并构建共享包
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
+RUN bun install --frozen-lockfile
+
+# 构建共享包
 RUN cd packages/ts-shared && bun run build
 RUN cd packages/pixiv-client && bun run build
 RUN cd packages/lark-utils && bun run build
