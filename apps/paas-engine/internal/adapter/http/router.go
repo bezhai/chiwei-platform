@@ -12,6 +12,7 @@ func NewRouter(
 	buildH *BuildHandler,
 	releaseH *ReleaseHandler,
 	laneH *LaneHandler,
+	logH *LogHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -33,6 +34,7 @@ func NewRouter(
 				r.Get("/", appH.Get)
 				r.Put("/", appH.Update)
 				r.Delete("/", appH.Delete)
+				r.Get("/logs", logH.GetLogs)
 
 				// Builds
 				r.Route("/builds", func(r chi.Router) {

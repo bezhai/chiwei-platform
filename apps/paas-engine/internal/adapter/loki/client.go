@@ -68,6 +68,56 @@ func (c *Client) QueryBuildLogs(ctx context.Context, namespace, buildID string, 
 	return extractLogs(result.Data), nil
 }
 
+// QueryAppLogs 查询已部署应用的运行时日志。
+// lane 为空时匹配所有泳道；limit 上限 5000。
+func (c *Client) QueryAppLogs(ctx context.Context, namespace, appName, lane string, start, end time.Time, limit int) (string, error) {
+	var query string
+	if lane != "" {
+		query = fmt.Sprintf(`{namespace=%q, app=%q, lane=%q}`, namespace, appName, lane)
+	} else {
+		query = fmt.Sprintf(`{namespace=%q, app=%q}`, namespace, appName)
+	}
+
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+
+	params := url.Values{
+		"query":     {query},
+		"start":     {fmt.Sprintf("%d", start.UnixNano())},
+		"end":       {fmt.Sprintf("%d", end.UnixNano())},
+		"direction": {"forward"},
+		"limit":     {fmt.Sprintf("%d", limit)},
+	}
+
+	reqURL := c.baseURL + "/loki/api/v1/query_range?" + params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("loki: app log request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("loki: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("loki: unexpected status %d", resp.StatusCode)
+	}
+
+	var result queryRangeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("loki: decode response: %w", err)
+	}
+
+	if result.Status != "success" {
+		return "", fmt.Errorf("loki: query status %q", result.Status)
+	}
+
+	return extractLogs(result.Data), nil
+}
+
 // Loki query_range 响应结构（只建模需要的字段）。
 
 type queryRangeResponse struct {

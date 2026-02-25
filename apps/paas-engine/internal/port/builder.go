@@ -13,6 +13,7 @@ type BuildStatusCallback func(buildID string, status domain.BuildStatus, log str
 // LogQuerier 查询历史构建日志（如 Loki）。
 type LogQuerier interface {
 	QueryBuildLogs(ctx context.Context, namespace, buildID string, start, end time.Time) (string, error)
+	QueryAppLogs(ctx context.Context, namespace, appName, lane string, start, end time.Time, limit int) (string, error)
 }
 
 // BuildExecutor 负责驱动 Kaniko Job 的生命周期。
