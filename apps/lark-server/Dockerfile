@@ -8,7 +8,7 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /repo
 
-# 复制所有 workspace 元数据和共享包源码（bun install 需要包目录存在才能创建 workspace 链接）
+# 复制所有 workspace 元数据和共享包源码
 COPY package.json bun.lock ./
 COPY apps/lark-server/package.json ./apps/lark-server/package.json
 COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
@@ -16,11 +16,12 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
+# 安装依赖后手动重建 workspace 符号链接（kaniko snapshot 会丢弃 bun 创建的链接）
 RUN bun install --frozen-lockfile \
-    && echo "=== DEBUG ===" \
-    && ls -la node_modules/@inner/ \
-    && ls -la node_modules/feishu-card/ \
-    && file node_modules/feishu-card
+    && mkdir -p node_modules/@inner \
+    && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
+    && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
+    && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils
 
 # 构建共享包
 RUN cd packages/ts-shared && bun run build
