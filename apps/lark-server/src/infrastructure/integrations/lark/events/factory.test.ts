@@ -1,11 +1,13 @@
+import { describe, it, expect, mock } from 'bun:test';
+
 // Mock heavy dependencies that factory.ts imports but tests don't need
-jest.mock('core/models/message', () => ({
-    Message: { fromEvent: jest.fn() },
+mock.module('core/models/message', () => ({
+    Message: { fromEvent: mock() },
 }));
-jest.mock('@lark/utils/mention-utils', () => ({
+mock.module('@lark/utils/mention-utils', () => ({
     MentionUtils: {
-        addMentions: jest.fn(() => []),
-        addMentionMap: jest.fn(() => ({})),
+        addMentions: mock(() => []),
+        addMentionMap: mock(() => ({})),
     },
 }));
 

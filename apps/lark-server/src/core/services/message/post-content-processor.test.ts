@@ -1,3 +1,4 @@
+import { describe, it, expect } from 'bun:test';
 import { markdownToPostContent } from './post-content-processor';
 
 describe('markdownToPostContent', () => {

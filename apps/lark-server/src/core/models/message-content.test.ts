@@ -1,9 +1,11 @@
-import { ContentType, MessageContentUtils, MessageContent } from './message-content';
+import { describe, it, expect, mock } from 'bun:test';
 
 // Mock the bot-var module to avoid pulling in real dependencies
-jest.mock('@core/services/bot/bot-var', () => ({
-    getBotUnionId: jest.fn(() => 'bot_union_id'),
+mock.module('@core/services/bot/bot-var', () => ({
+    getBotUnionId: mock(() => 'bot_union_id'),
 }));
+
+import { ContentType, MessageContentUtils, MessageContent } from './message-content';
 
 describe('MessageContentUtils.toMarkdown', () => {
     const makeContent = (

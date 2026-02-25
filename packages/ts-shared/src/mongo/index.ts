@@ -5,10 +5,5 @@ export { MongoService, getMongoService, resetMongoService, createMongoService } 
 export { MongoCollection } from './collection';
 
 // Types and utilities
-export {
-    MongoConfig,
-    createDefaultMongoConfig,
-    buildMongoUrl,
-    IndexDefinition,
-    BulkWriteResult,
-} from './types';
+export { createDefaultMongoConfig, buildMongoUrl } from './types';
+export type { MongoConfig, IndexDefinition, BulkWriteResult } from './types';

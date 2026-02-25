@@ -1,4 +1,4 @@
-import { Document } from 'mongodb';
+import type { Document } from 'mongodb';
 
 /**
  * MongoDB 配置选项
