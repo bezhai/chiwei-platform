@@ -22,7 +22,12 @@ RUN cd packages/ts-shared && bun run build
 RUN cd packages/pixiv-client && bun run build
 RUN cd packages/lark-utils && bun run build
 
-# Stage 2: Production（保持 workspace 目录结构，bun 原生运行 TS）
+RUN bun install --production
+
+# 检查 workspace 符号链接的目标路径，确保后续 COPY 能正确处理
+RUN ls -la node_modules/@inner/ && readlink node_modules/@inner/shared
+
+# Stage 2: Production（保持与 builder 相同的 /repo 目录结构）
 FROM oven/bun:1-alpine
 
 RUN apk add --no-cache tzdata
@@ -33,23 +38,15 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /repo
 
-# 复制 workspace 元数据
-COPY package.json bun.lock ./
-COPY apps/lark-server/package.json ./apps/lark-server/package.json
-COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
-COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
-COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
-COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
-
-# 复制已构建的共享包
+# 从 builder 复制 node_modules（包含所有生产依赖）
+# 注意：workspace 符号链接指向 ../../packages/*，需要对应的包也在相同位置
+COPY --from=builder /repo/node_modules ./node_modules
 COPY --from=builder /repo/packages/ts-shared ./packages/ts-shared
 COPY --from=builder /repo/packages/pixiv-client ./packages/pixiv-client
 COPY --from=builder /repo/packages/lark-utils ./packages/lark-utils
 
-# 安装生产依赖并重建 workspace 链接
-RUN bun install --production --frozen-lockfile
-
 # 复制源码
+COPY apps/lark-server/package.json ./apps/lark-server/package.json
 COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
 COPY apps/lark-server/src ./apps/lark-server/src
 
