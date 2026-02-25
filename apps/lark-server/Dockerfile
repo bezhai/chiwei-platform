@@ -16,7 +16,11 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile \
+    && echo "=== DEBUG ===" \
+    && ls -la node_modules/@inner/ \
+    && ls -la node_modules/feishu-card/ \
+    && file node_modules/feishu-card
 
 # 构建共享包
 RUN cd packages/ts-shared && bun run build
