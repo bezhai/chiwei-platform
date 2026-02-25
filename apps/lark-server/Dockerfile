@@ -16,7 +16,13 @@ COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
 COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
 COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
 
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile \
+    && echo "=== DEBUG: node_modules/@inner ===" \
+    && ls -la node_modules/@inner/ \
+    && echo "=== DEBUG: feishu-card ===" \
+    && ls node_modules/feishu-card/package.json \
+    && echo "=== DEBUG: symlink targets ===" \
+    && readlink node_modules/@inner/shared || true
 
 # 复制并构建共享包
 COPY packages/ts-shared ./packages/ts-shared
