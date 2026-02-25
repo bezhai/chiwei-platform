@@ -187,6 +187,7 @@ const (
 )
 
 // waitForRollout 轮询 Deployment 直到所有副本就绪或超时。
+// 除了检查 Deployment 级别状态，还会检测 Pod 级别的 CrashLoopBackOff 以快速失败。
 func (d *K8sDeployer) waitForRollout(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, rolloutTimeout)
 	defer cancel()
@@ -211,6 +212,11 @@ func (d *K8sDeployer) waitForRollout(ctx context.Context, name string) error {
 				}
 			}
 
+			// 检测 Pod 级别的 CrashLoopBackOff，快速失败而非等待超时
+			if reason, ok := d.detectPodFailure(ctx, deploy); ok {
+				return fmt.Errorf("deployment %s failed: %s", name, reason)
+			}
+
 			spec := deploy.Spec
 			status := deploy.Status
 			if status.ObservedGeneration >= deploy.Generation &&
@@ -221,4 +227,54 @@ func (d *K8sDeployer) waitForRollout(ctx context.Context, name string) error {
 			}
 		}
 	}
+}
+
+// detectPodFailure 检查 Deployment 管理的 Pod 是否存在不可恢复的失败状态。
+// 返回失败原因和是否检测到失败。
+func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deployment) (string, bool) {
+	selector := deploy.Spec.Selector.MatchLabels
+	labelSelector := ""
+	for k, v := range selector {
+		if labelSelector != "" {
+			labelSelector += ","
+		}
+		labelSelector += k + "=" + v
+	}
+
+	pods, err := d.client.CoreV1().Pods(d.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		slog.Warn("failed to list pods for crash detection", "error", err)
+		return "", false
+	}
+
+	for _, pod := range pods.Items {
+		// 只检查属于当前 ReplicaSet（最新版本）的 Pod
+		if pod.Labels["pod-template-hash"] == "" {
+			continue
+		}
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				return fmt.Sprintf("pod %s is in CrashLoopBackOff: %s",
+					pod.Name, cs.State.Waiting.Message), true
+			}
+			// ImagePullBackOff 同样不可恢复，提前失败
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ImagePullBackOff" {
+				return fmt.Sprintf("pod %s failed to pull image: %s",
+					pod.Name, cs.State.Waiting.Message), true
+			}
+		}
+
+		// 也检查 init container
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				return fmt.Sprintf("pod %s init container is in CrashLoopBackOff: %s",
+					pod.Name, cs.State.Waiting.Message), true
+			}
+		}
+	}
+
+	return "", false
 }
