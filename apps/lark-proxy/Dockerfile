@@ -1,4 +1,4 @@
-# Stage 1: Build
+# Stage 1: Install dependencies
 FROM oven/bun:1-alpine AS builder
 
 WORKDIR /repo
@@ -13,10 +13,6 @@ COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
 
 RUN bun install --frozen-lockfile
 
-COPY apps/lark-proxy ./apps/lark-proxy
-
-RUN cd apps/lark-proxy && bun build src/index.ts --target=bun --outdir=dist --packages external
-
 RUN bun install --production
 
 # Stage 2: Production
@@ -30,8 +26,9 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /usr/src/app
 
-COPY --from=builder /repo/apps/lark-proxy/dist ./dist
 COPY --from=builder /repo/node_modules ./node_modules
-COPY --from=builder /repo/apps/lark-proxy/package.json ./package.json
+COPY apps/lark-proxy/package.json ./package.json
+COPY apps/lark-proxy/tsconfig.json ./tsconfig.json
+COPY apps/lark-proxy/src ./src
 
-CMD ["bun", "dist/index.js"]
+CMD ["bun", "src/index.ts"]
