@@ -23,8 +23,8 @@ RUN cd packages/ts-shared && bun run build
 RUN cd packages/pixiv-client && bun run build
 RUN cd packages/lark-utils && bun run build
 
-# 构建主服务
-RUN cd apps/lark-server && bun run build
+# 构建主服务（--packages external 避免 bundler 在 workspace 中找不到 hoisted node_modules）
+RUN cd apps/lark-server && bun build src/index.ts --target=bun --outdir=dist --packages external
 
 RUN bun install --production
 
