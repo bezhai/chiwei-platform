@@ -5,7 +5,7 @@ COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN bun build src/index.ts --target=bun --outdir=dist
+RUN bun build src/index.ts --target=bun --outdir=dist --external pg-cloudflare
 RUN bun install --production
 
 # Stage 2: Production
