@@ -25,6 +25,7 @@ type CreateAppRequest struct {
 	ServiceAccount string            `json:"service_account"`
 	EnvFromSecrets []string          `json:"env_from_secrets"`
 	Envs           map[string]string `json:"envs"`
+	ContextDir     string            `json:"context_dir"`
 }
 
 func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*domain.App, error) {
@@ -33,6 +34,9 @@ func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*doma
 	}
 	if req.Port <= 0 {
 		return nil, domain.ErrInvalidInput
+	}
+	if err := domain.ValidateContextDir(req.ContextDir); err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	app := &domain.App{
@@ -43,6 +47,7 @@ func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*doma
 		ServiceAccount: req.ServiceAccount,
 		EnvFromSecrets: req.EnvFromSecrets,
 		Envs:           req.Envs,
+		ContextDir:     req.ContextDir,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -67,11 +72,15 @@ type UpdateAppRequest struct {
 	ServiceAccount string            `json:"service_account"`
 	EnvFromSecrets []string          `json:"env_from_secrets"`
 	Envs           map[string]string `json:"envs"`
+	ContextDir     string            `json:"context_dir"`
 }
 
 func (s *AppService) UpdateApp(ctx context.Context, name string, req UpdateAppRequest) (*domain.App, error) {
 	app, err := s.appRepo.FindByName(ctx, name)
 	if err != nil {
+		return nil, err
+	}
+	if err := domain.ValidateContextDir(req.ContextDir); err != nil {
 		return nil, err
 	}
 	app.Description = req.Description
@@ -82,6 +91,7 @@ func (s *AppService) UpdateApp(ctx context.Context, name string, req UpdateAppRe
 	app.ServiceAccount = req.ServiceAccount
 	app.EnvFromSecrets = req.EnvFromSecrets
 	app.Envs = req.Envs
+	app.ContextDir = req.ContextDir
 	app.UpdatedAt = time.Now()
 	if err := s.appRepo.Update(ctx, app); err != nil {
 		return nil, err

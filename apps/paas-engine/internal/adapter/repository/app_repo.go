@@ -92,6 +92,7 @@ func appToModel(a *domain.App) (*AppModel, error) {
 		ServiceAccount: a.ServiceAccount,
 		EnvFromSecrets: string(envFromSecretsJSON),
 		Envs:           string(envsJSON),
+		ContextDir:     a.ContextDir,
 		CreatedAt:      a.CreatedAt,
 		UpdatedAt:      a.UpdatedAt,
 	}, nil
@@ -118,6 +119,7 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 		ServiceAccount: m.ServiceAccount,
 		EnvFromSecrets: envFromSecrets,
 		Envs:           envs,
+		ContextDir:     m.ContextDir,
 		CreatedAt:      m.CreatedAt,
 		UpdatedAt:      m.UpdatedAt,
 	}, nil

@@ -11,6 +11,7 @@ type AppModel struct {
 	ServiceAccount string
 	EnvFromSecrets string // JSON 序列化的 []string
 	Envs           string // JSON 序列化的 map[string]string
+	ContextDir     string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

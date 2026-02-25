@@ -58,8 +58,11 @@ func (s *BuildService) CreateBuild(ctx context.Context, appName string, req Crea
 		req.ImageTag = fmt.Sprintf("%s/%s:%s", app.Image, appName, req.GitRef)
 	}
 
-	// ContextDir 验证
+	// ContextDir: 请求值 → App 默认值 → "."
 	contextDir := req.ContextDir
+	if contextDir == "" {
+		contextDir = app.ContextDir
+	}
 	if contextDir == "" {
 		contextDir = "."
 	}

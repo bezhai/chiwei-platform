@@ -12,6 +12,7 @@ type App struct {
 	ServiceAccount string            `json:"service_account,omitempty"` // K8s ServiceAccount 名称
 	EnvFromSecrets []string          `json:"env_from_secrets,omitempty"`
 	Envs           map[string]string `json:"envs,omitempty"`
+	ContextDir     string            `json:"context_dir,omitempty"` // 默认构建上下文子目录
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }

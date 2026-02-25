@@ -7,7 +7,6 @@
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
 # TAG        — 镜像 tag，默认 git short hash
 # GIT_REF    — 构建分支/tag/commit，默认当前分支
-# CONTEXT    — 构建上下文子目录，默认 apps/$(APP)
 # BUILD_ID   — build-status / build-wait 需要
 # LANE       — release 需要
 
@@ -15,7 +14,6 @@ GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
 GIT_SHORT := $(shell git rev-parse --short HEAD)
 TAG      ?= $(GIT_SHORT)
 GIT_REPO := https://github.com/bezhai/chiwei-platform.git
-CONTEXT  ?= apps/$(APP)
 IMAGE     = $(REGISTRY)/inner-bot/$(APP):$(TAG)
 
 define require_app
@@ -31,7 +29,7 @@ build:
 	@curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
 	  -H 'Content-Type: application/json' \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
-	  -d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)","context_dir":"$(CONTEXT)"}' \
+	  -d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)"}' \
 	  | python3 -m json.tool
 
 ## 查看构建状态
@@ -86,7 +84,7 @@ deploy:
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)","context_dir":"$(CONTEXT)"}' \
+		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	$(MAKE) build-wait APP=$(APP) BUILD_ID=$$BUILD_ID && \
@@ -100,7 +98,7 @@ self-deploy:
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(REGISTRY)/inner-bot/paas-engine:$(TAG)","context_dir":"apps/paas-engine"}' \
+		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(REGISTRY)/inner-bot/paas-engine:$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	$(MAKE) build-wait APP=paas-engine BUILD_ID=$$BUILD_ID && \
