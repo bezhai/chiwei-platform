@@ -1,0 +1,67 @@
+{
+    "name": "lark-server",
+    "version": "1.0.0",
+    "description": "Lark bot server",
+    "type": "module",
+    "scripts": {
+        "start": "bun src/index.ts",
+        "build": "bun build src/index.ts --target=bun --outdir=dist",
+        "format": "prettier --write \"src/**/*.ts\"",
+        "lint": "eslint src --ext .ts",
+        "lint:fix": "eslint src --ext .ts --fix",
+        "test": "bun test",
+        "test:watch": "bun test --watch",
+        "test:coverage": "bun test --coverage"
+    },
+    "lint-staged": {
+        "src/**/*.ts": [
+            "prettier --write"
+        ]
+    },
+    "author": "Chiwei",
+    "license": "MIT",
+    "devDependencies": {
+        "@types/ali-oss": "^6.16.11",
+        "@types/koa": "^2.15.0",
+        "@types/koa__cors": "^5.0.0",
+        "@types/koa__router": "^12.0.4",
+        "@types/lodash": "^4.17.13",
+        "@types/node-cron": "^3.0.11",
+        "@types/sharp": "^0.31.1",
+        "@types/supertest": "^6.0.3",
+        "@types/amqplib": "^0.10.6",
+        "@types/uuid": "^10.0.0",
+        "@types/bun": "latest",
+        "@typescript-eslint/eslint-plugin": "^8.38.0",
+        "@typescript-eslint/parser": "^8.38.0",
+        "eslint": "^9.32.0",
+        "lint-staged": "^15.4.3",
+        "prettier": "^3.4.2",
+        "supertest": "^6.3.4",
+        "typescript": "^5.6.3"
+    },
+    "dependencies": {
+        "@inner/pixiv-client": "workspace:*",
+        "@inner/shared": "workspace:*",
+        "@koa/cors": "^5.0.0",
+        "@koa/router": "^12.0.1",
+        "@larksuiteoapi/node-sdk": "^1.23.0",
+        "ali-oss": "^6.23.0",
+        "amqplib": "^0.10.5",
+        "@volcengine/tos-sdk": "^0.0.0-preview-2.7.7-20251211024611",
+        "async-mutex": "^0.5.0",
+        "axios": "^1.6.2",
+        "dayjs": "^1.11.13",
+        "feishu-card": "^1.0.0",
+        "ioredis": "^5.3.2",
+        "koa": "^2.14.2",
+        "koa-body": "^6.0.1",
+        "mongodb": "^5.8.0",
+        "node-cron": "^4.2.1",
+        "pg": "^8.11.3",
+        "sharp": "^0.34.5",
+        "typeorm": "^0.3.17",
+        "uuid": "^10.0.0",
+        "winston": "^3.11.0"
+    }
+}

@@ -1,0 +1,41 @@
+FROM oven/bun:1-alpine
+
+RUN apk add --no-cache tzdata
+ENV TZ=Asia/Shanghai
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
+WORKDIR /repo
+
+# 复制所有 workspace 元数据和共享包源码
+COPY package.json bun.lock ./
+COPY apps/lark-server/package.json ./apps/lark-server/package.json
+COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
+COPY packages/ts-shared ./packages/ts-shared
+COPY packages/pixiv-client ./packages/pixiv-client
+COPY packages/lark-utils ./packages/lark-utils
+
+# 安装依赖后手动重建 workspace 符号链接（kaniko snapshot 会丢弃 bun 创建的链接）
+# --backend=copyfile 强制复制文件而非 hardlink，避免 kaniko snapshot 丢失链接
+RUN bun install --frozen-lockfile --backend=copyfile \
+    && mkdir -p node_modules/@inner \
+    && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
+    && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
+    && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils
+
+# 构建共享包
+RUN cd packages/ts-shared && bun run build
+RUN cd packages/pixiv-client && bun run build
+RUN cd packages/lark-utils && bun run build
+
+# 复制源码
+COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
+COPY apps/lark-server/src ./apps/lark-server/src
+
+RUN mkdir -p /var/log/lark-server && \
+    chmod 777 /var/log/lark-server
+
+WORKDIR /repo/apps/lark-server
+
+CMD ["bun", "src/index.ts"]

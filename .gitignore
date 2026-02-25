@@ -26,8 +26,23 @@ profile.cov
 go.work
 go.work.sum
 
+# Node / Bun
+node_modules/
+dist/
+*.log
+
 # env file
 .env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
 
 # Editor/IDE
 # .idea/

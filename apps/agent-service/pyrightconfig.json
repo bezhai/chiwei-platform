@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/pyright/schema/pyrightconfig.schema.json",
+  "include": [
+    "app"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    ".ruff_cache",
+    "htmlcov",
+    "tests",
+    "scripts"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "venvPath": ".",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": "app",
+      "extraPaths": [
+        "./app"
+      ]
+    }
+  ],
+  "pythonVersion": "3.11"
+}

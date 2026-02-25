@@ -1,0 +1,26 @@
+# 应用声明文件 — 平台层读取此文件生成 Dockerfile、K8s manifest、构建配置
+# 详见 docs/platform-design.md
+
+name: lark-proxy
+runtime: bun
+version: 1-alpine
+
+build:
+  method: bun-build
+  entry: dist/index.js
+
+serve:
+  port: 3003
+  health: /api/health
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+env_overrides:
+  LARK_PROXY_PORT: "3003"
+  POSTGRES_PORT: "5432"
