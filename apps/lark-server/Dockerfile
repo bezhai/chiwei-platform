@@ -16,10 +16,14 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# 安装依赖后手动重建 workspace 符号链接（kaniko snapshot 会丢弃 bun 创建的链接）
-# --backend=copyfile 强制复制文件而非 hardlink，避免 kaniko snapshot 丢失链接
-RUN bun install --frozen-lockfile --backend=copyfile \
+# 安装依赖：kaniko snapshot 会丢弃 bun 的 symlink store，
+# 用 cp -rL 将所有 symlink 展开为真实文件，再重建 workspace 链接。
+RUN bun install --frozen-lockfile \
+    && cp -rL node_modules node_modules_real \
+    && rm -rf node_modules \
+    && mv node_modules_real node_modules \
     && mkdir -p node_modules/@inner \
+    && rm -rf node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils \
     && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
     && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
     && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils
