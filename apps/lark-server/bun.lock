@@ -5,8 +5,8 @@
     "": {
       "name": "lark-server",
       "dependencies": {
-        "@inner/pixiv-client": "file:../packages/pixiv-client",
-        "@inner/shared": "file:../packages/ts-shared",
+        "@inner/pixiv-client": "file:../../packages/pixiv-client",
+        "@inner/shared": "file:../../packages/ts-shared",
         "@koa/cors": "^5.0.0",
         "@koa/router": "^12.0.1",
         "@larksuiteoapi/node-sdk": "^1.23.0",
@@ -135,9 +135,9 @@
 
     "@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.34.5", "https://bnpm.byted.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.34.5.tgz", { "os": "win32", "cpu": "x64" }, "sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw=="],
 
-    "@inner/pixiv-client": ["@inner/pixiv-client@file:../packages/pixiv-client", { "dependencies": { "axios": "^1.6.2" }, "devDependencies": { "@types/node": "^18.0.0", "typescript": "^5.6.3" } }],
+    "@inner/pixiv-client": ["@inner/pixiv-client@file:../../packages/pixiv-client", { "dependencies": { "axios": "^1.6.2" }, "devDependencies": { "@types/node": "^18.0.0", "typescript": "^5.6.3" } }],
 
-    "@inner/shared": ["@inner/shared@file:../packages/ts-shared", { "dependencies": { "async-mutex": "^0.5.0", "axios": "^1.6.2", "ioredis": "^5.3.2", "mongodb": "^6.10.0", "uuid": "^10.0.0", "winston": "^3.11.0" }, "devDependencies": { "@types/koa": "^2.15.0", "@types/node": "^18.0.0", "@types/uuid": "^10.0.0", "typescript": "^5.6.3" }, "peerDependencies": { "koa": "^2.14.2" }, "optionalPeers": ["koa"] }],
+    "@inner/shared": ["@inner/shared@file:../../packages/ts-shared", { "dependencies": { "async-mutex": "^0.5.0", "axios": "^1.6.2", "ioredis": "^5.3.2", "mongodb": "^6.10.0", "uuid": "^10.0.0", "winston": "^3.11.0" }, "devDependencies": { "@types/koa": "^2.15.0", "@types/node": "^18.0.0", "@types/uuid": "^10.0.0", "typescript": "^5.6.3" }, "peerDependencies": { "koa": "^2.14.2" }, "optionalPeers": ["koa"] }],
 
     "@ioredis/commands": ["@ioredis/commands@1.5.0", "https://bnpm.byted.org/@ioredis/commands/-/commands-1.5.0.tgz", {}, "sha512-eUgLqrMf8nJkZxT24JvVRrQya1vZkQh8BBeYNwGDqa5I0VUi8ACx7uFvAaLxintokpTenkK6DASvo/bvNbBGow=="],
 
