@@ -22,10 +22,7 @@ RUN cd packages/ts-shared && bun run build
 RUN cd packages/pixiv-client && bun run build
 RUN cd packages/lark-utils && bun run build
 
-RUN bun install --production
-
-# 检查 workspace 符号链接的目标路径，确保后续 COPY 能正确处理
-RUN ls -la node_modules/@inner/ && readlink node_modules/@inner/shared
+# 注意：不用 bun install --production，因为它会移除 workspace 符号链接
 
 # Stage 2: Production（保持与 builder 相同的 /repo 目录结构）
 FROM oven/bun:1-alpine

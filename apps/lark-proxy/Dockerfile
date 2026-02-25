@@ -24,16 +24,8 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /repo
 
-# 复制 workspace 元数据
-COPY package.json bun.lock ./
-COPY apps/lark-server/package.json ./apps/lark-server/package.json
-COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
-COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
-COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
-COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
-
-# 安装生产依赖并建立 workspace 链接
-RUN bun install --production --frozen-lockfile
+# 从 builder 复制 node_modules（保留 workspace 符号链接）
+COPY --from=builder /repo/node_modules ./node_modules
 
 # 复制源码
 COPY apps/lark-proxy/tsconfig.json ./apps/lark-proxy/tsconfig.json
