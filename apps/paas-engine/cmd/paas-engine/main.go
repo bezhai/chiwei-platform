@@ -71,6 +71,7 @@ func main() {
 	appSvc := service.NewAppService(appRepo, releaseRepo)
 	buildSvc := service.NewBuildService(appRepo, buildRepo, buildExecutor, lokiClient)
 	releaseSvc := service.NewReleaseService(appRepo, laneRepo, releaseRepo, deployer, vsReconciler)
+	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 
 	// 确保 prod 泳道存在
 	ctx := context.Background()
@@ -94,6 +95,7 @@ func main() {
 		httpadapter.NewBuildHandler(buildSvc),
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLaneHandler(laneSvc),
+		httpadapter.NewLogHandler(logSvc),
 		cfg.APIToken,
 	)
 
