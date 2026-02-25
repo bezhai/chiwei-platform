@@ -1,4 +1,4 @@
-# Ruff configuration for ai-service
+# Ruff configuration for agent-service
 
 # Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
 select = [

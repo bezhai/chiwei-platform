@@ -459,7 +459,7 @@ async def main():
     signal.signal(signal.SIGTERM, _handle_signal)
 
     # 配置日志（JSON 格式 + 文件输出，供 ELK 采集）
-    setup_logging(log_dir="/logs/ai-service", log_file="vectorize-worker.log")
+    setup_logging(log_dir="/logs/agent-service", log_file="vectorize-worker.log")
 
     await consume_stream()
 

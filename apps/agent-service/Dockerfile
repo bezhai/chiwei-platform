@@ -17,33 +17,33 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
 RUN pip install uv
 
 # 复制项目配置文件（monorepo：apps + packages）
-COPY apps/ai-service/pyproject.toml apps/ai-service/uv.lock apps/ai-service/uv.toml ./apps/ai-service/
+COPY apps/agent-service/pyproject.toml apps/agent-service/uv.lock apps/agent-service/uv.toml ./apps/agent-service/
 COPY packages/py-shared ./packages/py-shared
 
 # 配置uv使用阿里云镜像源并同步依赖
-RUN cd apps/ai-service && uv sync --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://mirrors.aliyun.com/pypi/simple/ --allow-insecure-host mirrors.aliyun.com
+RUN cd apps/agent-service && uv sync --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://mirrors.aliyun.com/pypi/simple/ --allow-insecure-host mirrors.aliyun.com
 
 # GIT_SHA 放在 COPY 源码之前：改了 commit 就会使源码层缓存失效，
 # 而上方的依赖安装（uv sync）仍然走缓存。
 ARG GIT_SHA=unknown
 
 # 复制应用代码
-COPY apps/ai-service/app /app/apps/ai-service/app
+COPY apps/agent-service/app /app/apps/agent-service/app
 
 # 设置时区为东八区
 ENV TZ=Asia/Shanghai
-ENV PYTHONPATH=/app/apps/ai-service
+ENV PYTHONPATH=/app/apps/agent-service
 ENV UV_CACHE_DIR=/tmp/uv-cache
 ENV GIT_SHA=${GIT_SHA}
 
-RUN mkdir -p /logs/ai-service && chown -R appuser:appuser /logs
+RUN mkdir -p /logs/agent-service && chown -R appuser:appuser /logs
 
 RUN chown -R appuser:appuser /app
 
 USER appuser
 
 # 切换到项目目录，让 uv run 能找到虚拟环境
-WORKDIR /app/apps/ai-service
+WORKDIR /app/apps/agent-service
 
 EXPOSE 8000
 

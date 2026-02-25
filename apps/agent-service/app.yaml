@@ -1,7 +1,7 @@
 # 应用声明文件 — 平台层读取此文件生成 Dockerfile、K8s manifest、构建配置
 # 详见 docs/platform-design.md
 
-name: ai-service
+name: agent-service
 runtime: python
 version: "3.11-slim"
 
@@ -11,7 +11,7 @@ build:
   framework: uvicorn
   workspace_deps:
     - packages/py-shared
-  log_dir: /logs/ai-service
+  log_dir: /logs/agent-service
   uvicorn_extra_args:
     - "--log-config"
     - "app/config/logging_config.json"

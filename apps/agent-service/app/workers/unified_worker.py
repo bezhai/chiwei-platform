@@ -28,7 +28,7 @@ async def task_executor_job(ctx) -> None:
 
 async def on_startup(ctx) -> None:
     """Worker 启动时配置日志"""
-    setup_logging(log_dir="/logs/ai-service", log_file="arq-worker.log")
+    setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
     logger.info("arq-worker started, file logging enabled")
 
 

@@ -33,7 +33,7 @@ async def health_check():
     return {
         "status": "ok",
         "timestamp": import_time(),
-        "service": "ai-service",
+        "service": "agent-service",
         "version": os.environ.get("GIT_SHA", "unknown"),
     }
 

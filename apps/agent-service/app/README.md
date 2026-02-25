@@ -260,7 +260,7 @@ graph TB
 ## 项目结构
 
 ```
-ai-service/app/
+agent-service/app/
 ├── api/                    # API路由层
 │   ├── chat.py            # 聊天API（SSE流式接口）
 │   ├── extraction.py      # 文本提取API
@@ -577,8 +577,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 # 使用Docker
-docker build -t ai-service .
-docker run -p 8000:8000 ai-service
+docker build -t agent-service .
+docker run -p 8000:8000 agent-service
 ```
 
 ## API文档
@@ -598,7 +598,7 @@ curl http://localhost:8000/health
 {
     "status": "ok",
     "timestamp": "2024-01-01T12:00:00Z",
-    "service": "ai-service"
+    "service": "agent-service"
 }
 ```
 
