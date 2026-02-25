@@ -36,6 +36,14 @@ dist/
 .env.*
 !.env.example
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
 # Editor/IDE
 # .idea/
 # .vscode/
