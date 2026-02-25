@@ -6,23 +6,23 @@ PaaS Engine 通过 Kaniko 在 K8s 中构建 Docker 镜像。构建时需要指�
 
 ### 模式一：独立构建（默认）
 
-适用于不依赖 `packages/` 共享包的服务。
+适用于不依赖 `packages/` 共享包、也不在 Bun/pnpm workspace 中的服务。
 
-- `context_dir` 设为服务目录，如 `apps/lark-proxy`
+- `context_dir` 设为服务目录，如 `apps/my-standalone-service`
 - Kaniko 使用 `--context-sub-path` 将上下文限定到该子目录
-- Dockerfile 必须在该子目录根下，即 `apps/lark-proxy/Dockerfile`
+- Dockerfile 必须在该子目录根下
 
 ```
-POST /api/v1/apps/lark-proxy/builds/
+POST /api/v1/apps/my-standalone-service/builds/
 {
   "git_ref": "main",
-  "context_dir": "apps/lark-proxy"
+  "context_dir": "apps/my-standalone-service"
 }
 ```
 
 ### 模式二：Monorepo 根目录构建
 
-适用于依赖 `packages/` 共享包的服务（如 lark-server、agent-service）。
+适用于 Bun workspace 中的 TS 服务（如 lark-server、lark-proxy）或依赖 `packages/` 共享包的服务。所有 TS 服务统一使用此模式。
 
 - `context_dir` 设为 `.`（repo 根目录）
 - Kaniko 不使用 `--context-sub-path`，上下文为整个仓库
@@ -67,27 +67,48 @@ packages/
 
 ### 2. 编写 Dockerfile
 
-#### TypeScript（依赖共享包）
+#### TypeScript / Bun Workspace
+
+所有 TS 服务使用 Bun workspace，构建时需 `context_dir=.`。
 
 ```dockerfile
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/my-service/package.json apps/my-service/
-COPY packages/ts-shared/package.json packages/ts-shared/
-RUN corepack enable && pnpm install --frozen-lockfile
-COPY apps/my-service/ apps/my-service/
-COPY packages/ts-shared/ packages/ts-shared/
-RUN pnpm --filter my-service build
+FROM oven/bun:1-alpine AS builder
+WORKDIR /repo
 
-FROM node:20-alpine
-WORKDIR /app
-COPY --from=builder /app/apps/my-service/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-CMD ["node", "dist/index.js"]
+# 复制工作区元数据和 lockfile（必须包含所有 workspace 成员的 package.json）
+COPY package.json bun.lock ./
+COPY apps/my-service/package.json ./apps/my-service/package.json
+COPY apps/other-service/package.json ./apps/other-service/package.json
+COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
+# ... 列出根 package.json workspaces 中声明的所有成员
+
+RUN bun install --frozen-lockfile
+
+# 复制本服务源码及依赖的共享包
+COPY apps/my-service ./apps/my-service
+COPY packages/ts-shared ./packages/ts-shared
+
+# 构建共享包（如果有 build 步骤）
+RUN cd packages/ts-shared && bun run build
+
+# 构建主服务
+RUN cd apps/my-service && bun build src/index.ts --target=bun --outdir=dist --packages external
+
+RUN bun install --production
+
+FROM oven/bun:1-alpine
+WORKDIR /usr/src/app
+COPY --from=builder /repo/apps/my-service/dist ./dist
+COPY --from=builder /repo/node_modules ./node_modules
+COPY --from=builder /repo/apps/my-service/package.json ./package.json
+CMD ["bun", "dist/index.js"]
 ```
 
-> **注意**：使用根目录构建时，COPY 路径相对于 repo 根目录。
+> **注意**：
+> - 使用根目录构建，COPY 路径相对于 repo 根目录
+> - `--packages external` 避免 bundler 尝试解析 workspace 依赖
+> - 所有 workspace 成员的 `package.json` 都必须 COPY，否则 `bun install` 会报 workspace not found
+> - workspace 内部依赖使用 `workspace:*` 协议，不要用 `file:` 协议
 
 #### Python（依赖共享包）
 

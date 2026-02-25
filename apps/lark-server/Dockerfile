@@ -11,7 +11,7 @@ COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
 COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
 COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
 
-RUN bun install
+RUN bun install --frozen-lockfile
 
 COPY apps/lark-server ./apps/lark-server
 COPY packages/ts-shared ./packages/ts-shared
