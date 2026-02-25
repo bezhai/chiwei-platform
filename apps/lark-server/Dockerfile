@@ -6,6 +6,7 @@ WORKDIR /repo
 # 先复制工作区元数据和 lockfile，利用 Docker layer cache
 COPY package.json bun.lock ./
 COPY apps/lark-server/package.json ./apps/lark-server/package.json
+COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
 COPY packages/ts-shared/package.json ./packages/ts-shared/package.json
 COPY packages/pixiv-client/package.json ./packages/pixiv-client/package.json
 COPY packages/lark-utils/package.json ./packages/lark-utils/package.json
