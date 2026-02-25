@@ -26,8 +26,8 @@
       "name": "lark-server",
       "version": "1.0.0",
       "dependencies": {
-        "@inner/pixiv-client": "file:../../packages/pixiv-client",
-        "@inner/shared": "file:../../packages/ts-shared",
+        "@inner/pixiv-client": "workspace:*",
+        "@inner/shared": "workspace:*",
         "@koa/cors": "^5.0.0",
         "@koa/router": "^12.0.1",
         "@larksuiteoapi/node-sdk": "^1.23.0",
@@ -37,7 +37,7 @@
         "async-mutex": "^0.5.0",
         "axios": "^1.6.2",
         "dayjs": "^1.11.13",
-        "feishu-card": "^1.0.0",
+        "feishu-card": "1.0.1",
         "ioredis": "^5.3.2",
         "koa": "^2.14.2",
         "koa-body": "^6.0.1",
@@ -572,7 +572,7 @@
 
     "fecha": ["fecha@4.2.3", "https://bnpm.byted.org/fecha/-/fecha-4.2.3.tgz", {}, "sha512-OP2IUU6HeYKJi3i0z4A19kHMQoLVs4Hc+DPqqxI2h/DPZHTm/vjsfC6P0b4jCMy14XizLBqvndQ+UilD7707Jw=="],
 
-    "feishu-card": ["feishu-card@1.0.0", "https://bnpm.byted.org/feishu-card/-/feishu-card-1.0.0.tgz", {}, "sha512-l+RssjuifZ1UVviOyYiJgwh2YyS6JTD4hqz/a7knUwV/d3tpxZfNbjO4NOScmFdpjylA5VceIwkY8MHrGP6WmA=="],
+    "feishu-card": ["feishu-card@1.0.1", "", {}, "sha512-sARZ4D/axmHkDf4VGGcdRFpWMdeGrv1QVTsamc3GwxuNlA1MXwZ2NPQ3oRFQb+PDYnvHcePqqgerurQm+mnNHw=="],
 
     "file-entry-cache": ["file-entry-cache@8.0.0", "https://bnpm.byted.org/file-entry-cache/-/file-entry-cache-8.0.0.tgz", { "dependencies": { "flat-cache": "^4.0.0" } }, "sha512-XXTUwCvisa5oacNGRP9SfNtYBNAMi+RPwBFmblZEF7N7swHYQS6/Zfk7SRwx4D5j3CH211YNRco1DEMNVfZCnQ=="],
 
