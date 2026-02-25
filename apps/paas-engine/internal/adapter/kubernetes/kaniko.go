@@ -81,9 +81,13 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, build *domain.Build) (
 		"--cache=true",
 	}
 
-	// 指定子目录作为构建上下文，Kaniko 会在子目录下查找 Dockerfile
+	// 构建上下文与 Dockerfile 路径推导
 	if build.ContextDir != "" && build.ContextDir != "." {
+		// 独立构建：子目录既是上下文也包含 Dockerfile
 		args = append(args, fmt.Sprintf("--context-sub-path=%s", build.ContextDir))
+	} else if build.ContextDir == "." {
+		// monorepo 根目录构建：上下文为 repo 根，Dockerfile 按约定在 apps/<app>/Dockerfile
+		args = append(args, fmt.Sprintf("--dockerfile=apps/%s/Dockerfile", build.AppName))
 	}
 	for _, mirror := range e.registryMirrors {
 		args = append(args, fmt.Sprintf("--registry-mirror=%s", mirror))
