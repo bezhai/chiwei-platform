@@ -35,7 +35,7 @@ describe('EventForwarder', () => {
         await (forwarder as any).doForward('im.message.receive_v1', 'my-bot', { test: 1 });
 
         expect(mockFetch).toHaveBeenCalledWith(
-            'http://main-server.prod.svc.cluster.local:3000/api/internal/lark-event',
+            'http://lark-server-prod.prod.svc.cluster.local:3000/api/internal/lark-event',
             expect.objectContaining({
                 method: 'POST',
                 headers: expect.objectContaining({
@@ -56,7 +56,7 @@ describe('EventForwarder', () => {
         await (forwarder as any).doForward('im.message.receive_v1', 'dev-bot', {});
 
         expect(mockFetch).toHaveBeenCalledWith(
-            'http://main-server.lane-feat-xxx.svc.cluster.local:3000/api/internal/lark-event',
+            'http://lark-server-prod.lane-feat-xxx.svc.cluster.local:3000/api/internal/lark-event',
             expect.anything(),
         );
     });
@@ -75,7 +75,7 @@ describe('EventForwarder', () => {
         expect(result).toEqual({});
     });
 
-    it('should log error when main-server responds with non-ok status', async () => {
+    it('should log error when lark-server responds with non-ok status', async () => {
         mockResolver.resolve.mockImplementation(() => Promise.resolve(null));
         mockFetch.mockImplementation(() =>
             Promise.resolve({
@@ -90,7 +90,7 @@ describe('EventForwarder', () => {
         await (forwarder as any).doForward('im.message.receive_v1', 'my-bot', {});
 
         expect(consoleSpy).toHaveBeenCalledWith(
-            expect.stringContaining('main-server responded 500'),
+            expect.stringContaining('lark-server responded 500'),
         );
         consoleSpy.mockRestore();
     });

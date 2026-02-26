@@ -3,7 +3,7 @@ import { LaneResolver } from './lane-resolver';
 
 /**
  * 事件转发器
- * 将 Lark SDK 解析后的事件 POST 到目标 namespace 的 main-server 统一接口
+ * 将 Lark SDK 解析后的事件 POST 到目标 namespace 的 lark-server 统一接口
  */
 export class EventForwarder {
     private secret: string;
@@ -16,7 +16,7 @@ export class EventForwarder {
     }
 
     /**
-     * 转发事件到 main-server（fire-and-forget）
+     * 转发事件到 lark-server（fire-and-forget）
      */
     forward(eventType: string, botName: string, params: unknown): void {
         this.doForward(eventType, botName, params).catch((err) => {
@@ -27,7 +27,7 @@ export class EventForwarder {
     private async doForward(eventType: string, botName: string, params: unknown): Promise<void> {
         const lane = await this.laneResolver.resolve('bot', botName);
         const namespace = lane ? `lane-${lane}` : 'prod';
-        const url = `http://main-server.${namespace}.svc.cluster.local:3000/api/internal/lark-event`;
+        const url = `http://lark-server-prod.${namespace}.svc.cluster.local:3000/api/internal/lark-event`;
         const traceId = randomUUID();
 
         console.info(
@@ -48,7 +48,7 @@ export class EventForwarder {
         if (!resp.ok) {
             const body = await resp.text().catch(() => '');
             console.error(
-                `[forwarder] main-server responded ${resp.status} for ${eventType}: ${body}`,
+                `[forwarder] lark-server responded ${resp.status} for ${eventType}: ${body}`,
             );
         }
     }
