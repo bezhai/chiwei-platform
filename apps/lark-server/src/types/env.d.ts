@@ -29,6 +29,9 @@ declare namespace NodeJS {
         OSS_ACCESS_KEY_SECRET: string;
         OSS_BUCKET: string;
         END_POINT: string;
+        // tool-service（图片处理）
+        TOOL_SERVICE_HOST: string;
+        TOOL_SERVICE_PORT: string;
         // TOS（聊天图片等迁移/新增）
         TOS_ACCESS_KEY_ID: string;
         TOS_ACCESS_KEY_SECRET: string;

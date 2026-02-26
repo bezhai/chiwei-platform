@@ -1,4 +1,5 @@
 import { downloadResource, downloadSelfImage, uploadImage } from '@integrations/lark-client';
+import { processImage } from '@integrations/tool-service/image-client';
 import { getTos } from '@volcengine/tos';
 import { cache } from '@cache/cache-decorator';
 import { RedisLock } from '@cache/redis-lock';
@@ -302,14 +303,27 @@ export class ImageProcessorService {
     }
 
     /**
-     * 将图片流转为 Buffer（图片压缩功能待 tool-service 就绪后恢复）
+     * 压缩图片：通过 tool-service 缩放并转为 JPEG
      */
     private async compressImage(imageStream: Readable): Promise<Buffer> {
         const chunks: Buffer[] = [];
         for await (const chunk of imageStream) {
             chunks.push(chunk);
         }
-        return Buffer.concat(chunks);
+        const buffer = Buffer.concat(chunks);
+
+        try {
+            const { data } = await processImage(buffer, {
+                maxWidth: 1440,
+                maxHeight: 1440,
+                quality: 80,
+                format: 'JPEG',
+            });
+            return data;
+        } catch (error) {
+            console.warn('tool-service 压缩失败，返回原图:', error);
+            return buffer;
+        }
     }
 
     /**
