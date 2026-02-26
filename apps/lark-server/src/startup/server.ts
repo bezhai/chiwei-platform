@@ -1,6 +1,7 @@
 import Koa from 'koa';
 import Router from '@koa/router';
-import koaBody from 'koa-body';
+import koaBodyModule from 'koa-body';
+const koaBody = (koaBodyModule as any).default ?? koaBodyModule;
 import cors from '@koa/cors';
 import { errorHandler } from '@middleware/error-handler';
 import { traceMiddleware } from '@middleware/trace';
