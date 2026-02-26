@@ -24,13 +24,22 @@ RUN cd apps/lark-server \
          -e 's|"@inner/pixiv-client": "workspace:\*"|"@inner/pixiv-client": "file:../../packages/pixiv-client"|' \
          package.json \
     && npm install --include=dev 2>&1 | tail -5 \
+    && echo "--- resolve file: symlinks (kaniko strips symlinks) ---" \
+    && for pkg in node_modules/@inner/shared node_modules/@inner/pixiv-client; do \
+         if [ -L "$pkg" ]; then \
+           target=$(readlink -f "$pkg"); \
+           rm "$pkg"; \
+           cp -r "$target" "$pkg"; \
+           rm -rf "$pkg/node_modules"; \
+           echo "  resolved $pkg -> $target"; \
+         fi; \
+       done \
     && echo "=== Verify ===" \
     && ls node_modules/lodash/package.json \
     && ls node_modules/koa/package.json \
     && ls node_modules/uuid/package.json \
     && ls node_modules/vary/package.json \
     && ls node_modules/@inner/shared/package.json \
-    && ls node_modules/@inner/lark-utils/package.json 2>/dev/null || echo "@inner/lark-utils check" \
     && echo "=== package count: $(ls node_modules/ | wc -l) ===" \
     && echo "=== All OK ==="
 
