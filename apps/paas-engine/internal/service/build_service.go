@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -12,82 +11,74 @@ import (
 )
 
 type BuildService struct {
-	appRepo    port.AppRepository
-	buildRepo  port.BuildRepository
-	executor   port.BuildExecutor
-	logQuerier port.LogQuerier
+	imageRepoRepo port.ImageRepoRepository
+	buildRepo     port.BuildRepository
+	executor      port.BuildExecutor
+	logQuerier    port.LogQuerier
 }
 
 func NewBuildService(
-	appRepo port.AppRepository,
+	imageRepoRepo port.ImageRepoRepository,
 	buildRepo port.BuildRepository,
 	executor port.BuildExecutor,
 	logQuerier port.LogQuerier,
 ) *BuildService {
 	return &BuildService{
-		appRepo:    appRepo,
-		buildRepo:  buildRepo,
-		executor:   executor,
-		logQuerier: logQuerier,
+		imageRepoRepo: imageRepoRepo,
+		buildRepo:     buildRepo,
+		executor:      executor,
+		logQuerier:    logQuerier,
 	}
 }
 
 type CreateBuildRequest struct {
-	GitRepo    string `json:"git_repo"`
-	GitRef     string `json:"git_ref"`
-	ImageTag   string `json:"image_tag"`
-	ContextDir string `json:"context_dir"`
+	GitRef   string `json:"git_ref"`
+	ImageTag string `json:"image_tag"` // tag 部分（如 abc123），service 层拼完整 URL
 }
 
-func (s *BuildService) CreateBuild(ctx context.Context, appName string, req CreateBuildRequest) (*domain.Build, error) {
-	if err := domain.ValidateGitRepo(req.GitRepo); err != nil {
+func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, req CreateBuildRequest) (*domain.Build, error) {
+	imageRepo, err := s.imageRepoRepo.FindByName(ctx, imageRepoName)
+	if err != nil {
 		return nil, err
+	}
+
+	if req.GitRef == "" {
+		req.GitRef = "main"
 	}
 	if err := domain.ValidateGitRef(req.GitRef); err != nil {
 		return nil, err
 	}
 
-	app, err := s.appRepo.FindByName(ctx, appName)
-	if err != nil {
-		return nil, err
+	// image tag: 请求值 → git ref
+	tag := req.ImageTag
+	if tag == "" {
+		tag = req.GitRef
 	}
-	if req.GitRef == "" {
-		req.GitRef = "main"
-	}
-	if req.ImageTag == "" {
-		req.ImageTag = fmt.Sprintf("%s/%s:%s", app.Image, appName, req.GitRef)
-	}
-
-	// ContextDir: 请求值 → App 默认值 → "."
-	contextDir := req.ContextDir
-	if contextDir == "" {
-		contextDir = app.ContextDir
-	}
-	if contextDir == "" {
-		contextDir = "."
-	}
-	if err := domain.ValidateContextDir(contextDir); err != nil {
-		return nil, err
-	}
+	fullImageRef := imageRepo.FullImageRef(tag)
 
 	now := time.Now()
 	build := &domain.Build{
-		ID:         uuid.New().String(),
-		AppName:    appName,
-		GitRepo:    req.GitRepo,
-		GitRef:     req.GitRef,
-		ImageTag:   req.ImageTag,
-		ContextDir: contextDir,
-		Status:     domain.BuildStatusPending,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:            uuid.New().String(),
+		ImageRepoName: imageRepoName,
+		GitRef:        req.GitRef,
+		ImageTag:      fullImageRef,
+		Status:        domain.BuildStatusPending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := s.buildRepo.Save(ctx, build); err != nil {
 		return nil, err
 	}
 
 	if s.executor != nil {
-		jobName, err := s.executor.Submit(ctx, build)
+		sub := &port.BuildSubmission{
+			BuildID:    build.ID,
+			GitRepo:    imageRepo.GitRepo,
+			GitRef:     req.GitRef,
+			ContextDir: imageRepo.ContextDir,
+			ImageTag:   fullImageRef,
+		}
+		jobName, err := s.executor.Submit(ctx, sub)
 		if err != nil {
 			build.Status = domain.BuildStatusFailed
 			build.Log = err.Error()
@@ -102,26 +93,26 @@ func (s *BuildService) CreateBuild(ctx context.Context, appName string, req Crea
 	return build, nil
 }
 
-func (s *BuildService) GetBuild(ctx context.Context, appName, id string) (*domain.Build, error) {
+func (s *BuildService) GetBuild(ctx context.Context, imageRepoName, id string) (*domain.Build, error) {
 	build, err := s.buildRepo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if build.AppName != appName {
+	if build.ImageRepoName != imageRepoName {
 		return nil, domain.ErrBuildNotFound
 	}
 	return build, nil
 }
 
-func (s *BuildService) ListBuilds(ctx context.Context, appName string) ([]*domain.Build, error) {
-	if _, err := s.appRepo.FindByName(ctx, appName); err != nil {
+func (s *BuildService) ListBuilds(ctx context.Context, imageRepoName string) ([]*domain.Build, error) {
+	if _, err := s.imageRepoRepo.FindByName(ctx, imageRepoName); err != nil {
 		return nil, err
 	}
-	return s.buildRepo.FindByApp(ctx, appName)
+	return s.buildRepo.FindByImageRepo(ctx, imageRepoName)
 }
 
-func (s *BuildService) CancelBuild(ctx context.Context, appName, id string) error {
-	build, err := s.GetBuild(ctx, appName, id)
+func (s *BuildService) CancelBuild(ctx context.Context, imageRepoName, id string) error {
+	build, err := s.GetBuild(ctx, imageRepoName, id)
 	if err != nil {
 		return err
 	}
@@ -139,13 +130,12 @@ func (s *BuildService) CancelBuild(ctx context.Context, appName, id string) erro
 }
 
 // GetBuildLogs 获取构建日志。三级降级：Pod logs → Loki → build.Log。
-func (s *BuildService) GetBuildLogs(ctx context.Context, appName, id string) (string, error) {
-	build, err := s.GetBuild(ctx, appName, id)
+func (s *BuildService) GetBuildLogs(ctx context.Context, imageRepoName, id string) (string, error) {
+	build, err := s.GetBuild(ctx, imageRepoName, id)
 	if err != nil {
 		return "", err
 	}
 
-	// pending 状态还没有 Pod，返回空
 	if build.Status == domain.BuildStatusPending {
 		return "", nil
 	}
@@ -184,7 +174,6 @@ func (s *BuildService) OnBuildStatusChange(buildID string, status domain.BuildSt
 		slog.Error("OnBuildStatusChange: failed to find build", "build_id", buildID, "error", err)
 		return
 	}
-	// 终态不允许被覆盖
 	if build.Status.IsTerminal() {
 		return
 	}

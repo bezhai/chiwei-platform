@@ -17,13 +17,13 @@ func NewBuildHandler(svc *service.BuildService) *BuildHandler {
 }
 
 func (h *BuildHandler) Create(w http.ResponseWriter, r *http.Request) {
-	appName := chi.URLParam(r, "app")
+	repoName := chi.URLParam(r, "repo")
 	var req service.CreateBuildRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, err)
 		return
 	}
-	build, err := h.svc.CreateBuild(r.Context(), appName, req)
+	build, err := h.svc.CreateBuild(r.Context(), repoName, req)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -32,8 +32,8 @@ func (h *BuildHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BuildHandler) List(w http.ResponseWriter, r *http.Request) {
-	appName := chi.URLParam(r, "app")
-	builds, err := h.svc.ListBuilds(r.Context(), appName)
+	repoName := chi.URLParam(r, "repo")
+	builds, err := h.svc.ListBuilds(r.Context(), repoName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -42,9 +42,9 @@ func (h *BuildHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BuildHandler) Get(w http.ResponseWriter, r *http.Request) {
-	appName := chi.URLParam(r, "app")
+	repoName := chi.URLParam(r, "repo")
 	id := chi.URLParam(r, "id")
-	build, err := h.svc.GetBuild(r.Context(), appName, id)
+	build, err := h.svc.GetBuild(r.Context(), repoName, id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -53,9 +53,9 @@ func (h *BuildHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BuildHandler) Cancel(w http.ResponseWriter, r *http.Request) {
-	appName := chi.URLParam(r, "app")
+	repoName := chi.URLParam(r, "repo")
 	id := chi.URLParam(r, "id")
-	if err := h.svc.CancelBuild(r.Context(), appName, id); err != nil {
+	if err := h.svc.CancelBuild(r.Context(), repoName, id); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -63,9 +63,9 @@ func (h *BuildHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BuildHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
-	appName := chi.URLParam(r, "app")
+	repoName := chi.URLParam(r, "repo")
 	id := chi.URLParam(r, "id")
-	logs, err := h.svc.GetBuildLogs(r.Context(), appName, id)
+	logs, err := h.svc.GetBuildLogs(r.Context(), repoName, id)
 	if err != nil {
 		writeError(w, err)
 		return

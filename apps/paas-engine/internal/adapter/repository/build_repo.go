@@ -36,9 +36,9 @@ func (r *BuildRepo) FindByID(ctx context.Context, id string) (*domain.Build, err
 	return modelToBuild(&m), nil
 }
 
-func (r *BuildRepo) FindByApp(ctx context.Context, appName string) ([]*domain.Build, error) {
+func (r *BuildRepo) FindByImageRepo(ctx context.Context, imageRepoName string) ([]*domain.Build, error) {
 	var models []BuildModel
-	if err := r.db.WithContext(ctx).Where("app_name = ?", appName).Order("created_at desc").Find(&models).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("image_repo_name = ?", imageRepoName).Order("created_at desc").Find(&models).Error; err != nil {
 		return nil, err
 	}
 	builds := make([]*domain.Build, 0, len(models))
@@ -55,32 +55,28 @@ func (r *BuildRepo) Update(ctx context.Context, build *domain.Build) error {
 
 func buildToModel(b *domain.Build) *BuildModel {
 	return &BuildModel{
-		ID:         b.ID,
-		AppName:    b.AppName,
-		GitRepo:    b.GitRepo,
-		GitRef:     b.GitRef,
-		ImageTag:   b.ImageTag,
-		ContextDir: b.ContextDir,
-		Status:     string(b.Status),
-		JobName:    b.JobName,
-		Log:        b.Log,
-		CreatedAt:  b.CreatedAt,
-		UpdatedAt:  b.UpdatedAt,
+		ID:            b.ID,
+		ImageRepoName: b.ImageRepoName,
+		GitRef:        b.GitRef,
+		ImageTag:      b.ImageTag,
+		Status:        string(b.Status),
+		JobName:       b.JobName,
+		Log:           b.Log,
+		CreatedAt:     b.CreatedAt,
+		UpdatedAt:     b.UpdatedAt,
 	}
 }
 
 func modelToBuild(m *BuildModel) *domain.Build {
 	return &domain.Build{
-		ID:         m.ID,
-		AppName:    m.AppName,
-		GitRepo:    m.GitRepo,
-		GitRef:     m.GitRef,
-		ImageTag:   m.ImageTag,
-		ContextDir: m.ContextDir,
-		Status:     domain.BuildStatus(m.Status),
-		JobName:    m.JobName,
-		Log:        m.Log,
-		CreatedAt:  m.CreatedAt,
-		UpdatedAt:  m.UpdatedAt,
+		ID:            m.ID,
+		ImageRepoName: m.ImageRepoName,
+		GitRef:        m.GitRef,
+		ImageTag:      m.ImageTag,
+		Status:        domain.BuildStatus(m.Status),
+		JobName:       m.JobName,
+		Log:           m.Log,
+		CreatedAt:     m.CreatedAt,
+		UpdatedAt:     m.UpdatedAt,
 	}
 }

@@ -13,6 +13,7 @@ func NewRouter(
 	releaseH *ReleaseHandler,
 	laneH *LaneHandler,
 	logH *LogHandler,
+	imageRepoH *ImageRepoHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -35,17 +36,6 @@ func NewRouter(
 				r.Put("/", appH.Update)
 				r.Delete("/", appH.Delete)
 				r.Get("/logs", logH.GetLogs)
-
-				// Builds
-				r.Route("/builds", func(r chi.Router) {
-					r.Post("/", buildH.Create)
-					r.Get("/", buildH.List)
-					r.Route("/{id}", func(r chi.Router) {
-						r.Get("/", buildH.Get)
-						r.Post("/cancel", buildH.Cancel)
-						r.Get("/logs", buildH.GetLogs)
-					})
-				})
 			})
 		})
 
@@ -67,6 +57,28 @@ func NewRouter(
 			r.Route("/{lane}", func(r chi.Router) {
 				r.Get("/", laneH.Get)
 				r.Delete("/", laneH.Delete)
+			})
+		})
+
+		// Image Repos
+		r.Route("/image-repos", func(r chi.Router) {
+			r.Post("/", imageRepoH.Create)
+			r.Get("/", imageRepoH.List)
+			r.Route("/{repo}", func(r chi.Router) {
+				r.Get("/", imageRepoH.Get)
+				r.Put("/", imageRepoH.Update)
+				r.Delete("/", imageRepoH.Delete)
+
+				// Builds (under image-repos)
+				r.Route("/builds", func(r chi.Router) {
+					r.Post("/", buildH.Create)
+					r.Get("/", buildH.List)
+					r.Route("/{id}", func(r chi.Router) {
+						r.Get("/", buildH.Get)
+						r.Post("/cancel", buildH.Cancel)
+						r.Get("/logs", buildH.GetLogs)
+					})
+				})
 			})
 		})
 	})

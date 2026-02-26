@@ -5,6 +5,7 @@
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
+# REPO       — ImageRepo 名，默认与 APP 相同
 # TAG        — 镜像 tag，默认 git short hash
 # GIT_REF    — 构建分支/tag/commit，默认当前分支
 # BUILD_ID   — build-status / build-wait 需要
@@ -13,8 +14,7 @@
 GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
 GIT_SHORT := $(shell git rev-parse --short HEAD)
 TAG      ?= $(GIT_SHORT)
-GIT_REPO := https://github.com/bezhai/chiwei-platform.git
-IMAGE     = $(REGISTRY)/inner-bot/$(APP):$(TAG)
+REPO     ?= $(APP)
 
 define require_app
 	$(if $(APP),,$(error APP 未指定。用法: make $@ APP=<应用名>))
@@ -25,18 +25,18 @@ endef
 ## 触发远程构建
 build:
 	@$(call require_app)
-	@echo ">>> 构建 $(APP): $(GIT_REF) -> $(IMAGE)"
-	@curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
+	@echo ">>> 构建 $(REPO): $(GIT_REF) -> $(TAG)"
+	@curl -sf -X POST $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/ \
 	  -H 'Content-Type: application/json' \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
-	  -d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)"}' \
+	  -d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 	  | python3 -m json.tool
 
 ## 查看构建状态
 build-status:
 	@$(call require_app)
 	$(if $(BUILD_ID),,$(error BUILD_ID 未指定))
-	@curl -sf $(PAAS_API)/api/v1/apps/$(APP)/builds/$(BUILD_ID)/ \
+	@curl -sf $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/$(BUILD_ID)/ \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool
 
@@ -46,7 +46,7 @@ build-wait:
 	$(if $(BUILD_ID),,$(error BUILD_ID 未指定))
 	@echo ">>> 等待构建 $(BUILD_ID) 完成..."
 	@while true; do \
-		STATUS=$$(curl -sf $(PAAS_API)/api/v1/apps/$(APP)/builds/$(BUILD_ID)/ \
+		STATUS=$$(curl -sf $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/$(BUILD_ID)/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
@@ -69,39 +69,39 @@ status:
 release:
 	@$(call require_app)
 	$(if $(LANE),,$(error LANE 未指定))
-	@echo ">>> 发布 $(APP) -> $(LANE), 镜像: $(IMAGE)"
+	@echo ">>> 发布 $(APP) -> $(LANE), tag: $(TAG)"
 	@curl -sf -X POST $(PAAS_API)/api/v1/releases/ \
 	  -H 'Content-Type: application/json' \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
-	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image":"$(IMAGE)","replicas":1}' \
+	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(TAG)","replicas":1}' \
 	  | python3 -m json.tool
 
 ## 普通服务一键部署：构建 → 等待 → release 到 prod
-## 用法: make deploy APP=my-service
+## 用法: make deploy APP=my-service [REPO=my-repo]
 deploy:
 	@$(call require_app)
-	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(IMAGE)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
+	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG)"
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(IMAGE)"}' \
+		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
-	$(MAKE) build-wait APP=$(APP) BUILD_ID=$$BUILD_ID && \
+	$(MAKE) build-wait APP=$(APP) REPO=$(REPO) BUILD_ID=$$BUILD_ID && \
 	$(MAKE) release APP=$(APP) LANE=prod TAG=$(TAG) && \
 	echo ">>> 部署完成"
 
 ## paas-engine 自部署（蓝绿）：构建 → 等待 → 对面泳道 → 本泳道
 ## 用法: make self-deploy
 self-deploy:
-	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(REGISTRY)/inner-bot/paas-engine:$(TAG)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/paas-engine/builds/ \
+	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/image-repos/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_repo":"$(GIT_REPO)","git_ref":"$(GIT_REF)","image_tag":"$(REGISTRY)/inner-bot/paas-engine:$(TAG)"}' \
+		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
-	$(MAKE) build-wait APP=paas-engine BUILD_ID=$$BUILD_ID && \
+	$(MAKE) build-wait APP=paas-engine REPO=paas-engine BUILD_ID=$$BUILD_ID && \
 	$(MAKE) release APP=paas-engine LANE=prod TAG=$(TAG) && \
 	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
 	$(MAKE) release APP=paas-engine LANE=blue TAG=$(TAG) && \

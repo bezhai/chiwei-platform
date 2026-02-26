@@ -24,8 +24,16 @@ type LaneRepository interface {
 type BuildRepository interface {
 	Save(ctx context.Context, build *domain.Build) error
 	FindByID(ctx context.Context, id string) (*domain.Build, error)
-	FindByApp(ctx context.Context, appName string) ([]*domain.Build, error)
+	FindByImageRepo(ctx context.Context, imageRepoName string) ([]*domain.Build, error)
 	Update(ctx context.Context, build *domain.Build) error
+}
+
+type ImageRepoRepository interface {
+	Save(ctx context.Context, repo *domain.ImageRepo) error
+	FindByName(ctx context.Context, name string) (*domain.ImageRepo, error)
+	FindAll(ctx context.Context) ([]*domain.ImageRepo, error)
+	Update(ctx context.Context, repo *domain.ImageRepo) error
+	Delete(ctx context.Context, name string) error
 }
 
 type ReleaseRepository interface {

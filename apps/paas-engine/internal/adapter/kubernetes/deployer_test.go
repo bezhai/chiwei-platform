@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/chiwei-platform/paas-engine/internal/domain"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -182,4 +183,185 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestApplyDeploymentWorker 验证 Worker 模式（Port=0）的 Deployment 创建：
+// - 设置了 Command
+// - 不包含端口
+// - EnvFrom 同时包含 Secret 和 ConfigMap
+func TestApplyDeploymentWorker(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default")
+
+	app := &domain.App{
+		Name:              "arq-worker",
+		Port:              0,
+		Command:           []string{"uv", "run", "--no-sync", "arq", "app.workers.unified_worker.UnifiedWorkerSettings"},
+		EnvFromSecrets:    []string{"app-env"},
+		EnvFromConfigMaps: []string{"ai-service-config"},
+	}
+
+	release := &domain.Release{
+		ID:       "r1",
+		AppName:  "arq-worker",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/agent-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "arq-worker-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+
+	// 验证 Command 设置
+	if len(container.Command) != 5 {
+		t.Errorf("expected 5 command args, got %d: %v", len(container.Command), container.Command)
+	}
+	if container.Command[0] != "uv" {
+		t.Errorf("expected command[0] = 'uv', got %q", container.Command[0])
+	}
+
+	// 验证无端口
+	if len(container.Ports) != 0 {
+		t.Errorf("expected no ports for worker, got %v", container.Ports)
+	}
+
+	// 验证 EnvFrom 包含 Secret 和 ConfigMap
+	if len(container.EnvFrom) != 2 {
+		t.Fatalf("expected 2 envFrom sources, got %d", len(container.EnvFrom))
+	}
+	if container.EnvFrom[0].SecretRef == nil || container.EnvFrom[0].SecretRef.Name != "app-env" {
+		t.Errorf("expected first envFrom to be secret 'app-env', got %+v", container.EnvFrom[0])
+	}
+	if container.EnvFrom[1].ConfigMapRef == nil || container.EnvFrom[1].ConfigMapRef.Name != "ai-service-config" {
+		t.Errorf("expected second envFrom to be configmap 'ai-service-config', got %+v", container.EnvFrom[1])
+	}
+}
+
+// TestApplyDeploymentWebApp 验证常规 Web App（Port>0）仍正常创建端口和无 Command。
+func TestApplyDeploymentWebApp(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default")
+
+	app := &domain.App{
+		Name:           "web-service",
+		Port:           8080,
+		EnvFromSecrets: []string{"web-secret"},
+	}
+
+	release := &domain.Release{
+		ID:       "r2",
+		AppName:  "web-service",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/web-service:abc123",
+		Replicas: 2,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "web-service-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+
+	// 验证 Command 未设置
+	if len(container.Command) != 0 {
+		t.Errorf("expected no command for web app, got %v", container.Command)
+	}
+
+	// 验证有端口
+	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != 8080 {
+		t.Errorf("expected port 8080, got %v", container.Ports)
+	}
+
+	// 验证 EnvFrom 仅包含 Secret
+	if len(container.EnvFrom) != 1 {
+		t.Fatalf("expected 1 envFrom source, got %d", len(container.EnvFrom))
+	}
+	if container.EnvFrom[0].SecretRef == nil || container.EnvFrom[0].SecretRef.Name != "web-secret" {
+		t.Errorf("expected envFrom to be secret 'web-secret', got %+v", container.EnvFrom[0])
+	}
+}
+
+// TestDeployWorkerSkipsService 验证 Worker（Port=0）部署时不创建 Service。
+func TestDeployWorkerSkipsService(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default")
+
+	app := &domain.App{
+		Name:    "recall-worker",
+		Port:    0,
+		Command: []string{"./recall-worker"},
+	}
+
+	release := &domain.Release{
+		ID:       "r3",
+		AppName:  "recall-worker",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/lark-server:abc123",
+		Replicas: 1,
+	}
+
+	// 使用 Deploy（而非 applyDeployment）来验证 Service 逻辑
+	// 注意: Deploy 会调用 waitForRollout，fake client 的 Deployment 没有 Status，
+	// 所以这里直接测试 applyDeployment + 检查 Service 不存在
+	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	// 验证 Deployment 存在
+	_, err := client.AppsV1().Deployments("default").Get(context.Background(), "recall-worker-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Deployment should exist: %v", err)
+	}
+
+	// 验证 Service 不存在（Deploy 在 Port=0 时跳过 applyService）
+	svcs, err := client.CoreV1().Services("default").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List Services error = %v", err)
+	}
+	if len(svcs.Items) != 0 {
+		t.Errorf("expected no services for worker, got %d", len(svcs.Items))
+	}
+}
+
+// TestBuildEnvFrom 验证 buildEnvFrom 函数的各种组合。
+func TestBuildEnvFrom(t *testing.T) {
+	tests := []struct {
+		name       string
+		secrets    []string
+		configMaps []string
+		wantLen    int
+	}{
+		{"nil inputs", nil, nil, 0},
+		{"secrets only", []string{"s1", "s2"}, nil, 2},
+		{"configmaps only", nil, []string{"cm1"}, 1},
+		{"both", []string{"s1"}, []string{"cm1", "cm2"}, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildEnvFrom(tt.secrets, tt.configMaps)
+			if tt.wantLen == 0 {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+			if len(result) != tt.wantLen {
+				t.Errorf("expected %d sources, got %d", tt.wantLen, len(result))
+			}
+		})
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
+	"github.com/chiwei-platform/paas-engine/internal/port"
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -14,28 +15,22 @@ func TestSubmit_ContextDirArgs(t *testing.T) {
 	tests := []struct {
 		name       string
 		contextDir string
-		appName    string
-		wantArg    string   // 期望包含的参数
-		wantAbsent string   // 期望不包含的参数前缀
+		wantArg    string // 期望包含的参数
+		wantAbsent string // 期望不包含的参数前缀
 	}{
 		{
 			name:       "子目录构建：使用 --context-sub-path",
 			contextDir: "apps/lark-proxy",
-			appName:    "lark-proxy",
 			wantArg:    "--context-sub-path=apps/lark-proxy",
-			wantAbsent: "--dockerfile=",
 		},
 		{
-			name:       "根目录构建：使用 --dockerfile 推导路径",
-			contextDir: ".",
-			appName:    "lark-server",
-			wantArg:    "--dockerfile=apps/lark-server/Dockerfile",
+			name:       "空 context_dir：不追加子路径",
+			contextDir: "",
 			wantAbsent: "--context-sub-path=",
 		},
 		{
-			name:       "空 context_dir：不追加子路径也不追加 dockerfile",
-			contextDir: "",
-			appName:    "simple-app",
+			name:       "根目录构建(.)：不追加子路径",
+			contextDir: ".",
 			wantAbsent: "--context-sub-path=",
 		},
 	}
@@ -48,21 +43,19 @@ func TestSubmit_ContextDirArgs(t *testing.T) {
 				KanikoImage: "gcr.io/kaniko-project/executor:latest",
 			})
 
-			build := &domain.Build{
-				ID:         "test-build-id",
-				AppName:    tt.appName,
+			sub := &port.BuildSubmission{
+				BuildID:    "test-build-id",
 				GitRepo:    "https://github.com/example/repo",
 				GitRef:     "main",
 				ImageTag:   "registry.example.com/app:latest",
 				ContextDir: tt.contextDir,
 			}
 
-			_, err := executor.Submit(context.Background(), build)
+			_, err := executor.Submit(context.Background(), sub)
 			if err != nil {
 				t.Fatalf("Submit() error = %v", err)
 			}
 
-			// 获取创建的 Job
 			jobs, err := client.BatchV1().Jobs("paas-builds").List(context.Background(), metav1.ListOptions{})
 			if err != nil {
 				t.Fatalf("List jobs error = %v", err)

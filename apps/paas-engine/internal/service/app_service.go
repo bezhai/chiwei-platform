@@ -9,47 +9,54 @@ import (
 )
 
 type AppService struct {
-	appRepo     port.AppRepository
-	releaseRepo port.ReleaseRepository
+	appRepo       port.AppRepository
+	imageRepoRepo port.ImageRepoRepository
+	releaseRepo   port.ReleaseRepository
 }
 
-func NewAppService(appRepo port.AppRepository, releaseRepo port.ReleaseRepository) *AppService {
-	return &AppService{appRepo: appRepo, releaseRepo: releaseRepo}
+func NewAppService(appRepo port.AppRepository, imageRepoRepo port.ImageRepoRepository, releaseRepo port.ReleaseRepository) *AppService {
+	return &AppService{appRepo: appRepo, imageRepoRepo: imageRepoRepo, releaseRepo: releaseRepo}
 }
 
 type CreateAppRequest struct {
-	Name           string            `json:"name"`
-	Description    string            `json:"description"`
-	Image          string            `json:"image"`
-	Port           int               `json:"port"`
-	ServiceAccount string            `json:"service_account"`
-	EnvFromSecrets []string          `json:"env_from_secrets"`
-	Envs           map[string]string `json:"envs"`
-	ContextDir     string            `json:"context_dir"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description"`
+	ImageRepoName     string            `json:"image_repo"`
+	Port              int               `json:"port"`
+	ServiceAccount    string            `json:"service_account"`
+	Command           []string          `json:"command"`
+	EnvFromSecrets    []string          `json:"env_from_secrets"`
+	EnvFromConfigMaps []string          `json:"env_from_config_maps"`
+	Envs              map[string]string `json:"envs"`
 }
 
 func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*domain.App, error) {
 	if err := domain.ValidateK8sName(req.Name); err != nil {
 		return nil, err
 	}
-	if req.Port <= 0 {
+	if req.Port < 0 {
 		return nil, domain.ErrInvalidInput
 	}
-	if err := domain.ValidateContextDir(req.ContextDir); err != nil {
-		return nil, err
+	// 校验 ImageRepo 存在
+	if req.ImageRepoName != "" {
+		if _, err := s.imageRepoRepo.FindByName(ctx, req.ImageRepoName); err != nil {
+			return nil, err
+		}
 	}
+
 	now := time.Now()
 	app := &domain.App{
-		Name:           req.Name,
-		Description:    req.Description,
-		Image:          req.Image,
-		Port:           req.Port,
-		ServiceAccount: req.ServiceAccount,
-		EnvFromSecrets: req.EnvFromSecrets,
-		Envs:           req.Envs,
-		ContextDir:     req.ContextDir,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Name:              req.Name,
+		Description:       req.Description,
+		ImageRepoName:     req.ImageRepoName,
+		Port:              req.Port,
+		ServiceAccount:    req.ServiceAccount,
+		Command:           req.Command,
+		EnvFromSecrets:    req.EnvFromSecrets,
+		EnvFromConfigMaps: req.EnvFromConfigMaps,
+		Envs:              req.Envs,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := s.appRepo.Save(ctx, app); err != nil {
 		return nil, err
@@ -66,13 +73,14 @@ func (s *AppService) ListApps(ctx context.Context) ([]*domain.App, error) {
 }
 
 type UpdateAppRequest struct {
-	Description    string            `json:"description"`
-	Image          string            `json:"image"`
-	Port           int               `json:"port"`
-	ServiceAccount string            `json:"service_account"`
-	EnvFromSecrets []string          `json:"env_from_secrets"`
-	Envs           map[string]string `json:"envs"`
-	ContextDir     string            `json:"context_dir"`
+	Description       string            `json:"description"`
+	ImageRepoName     string            `json:"image_repo"`
+	Port              int               `json:"port"`
+	ServiceAccount    string            `json:"service_account"`
+	Command           []string          `json:"command"`
+	EnvFromSecrets    []string          `json:"env_from_secrets"`
+	EnvFromConfigMaps []string          `json:"env_from_config_maps"`
+	Envs              map[string]string `json:"envs"`
 }
 
 func (s *AppService) UpdateApp(ctx context.Context, name string, req UpdateAppRequest) (*domain.App, error) {
@@ -80,18 +88,21 @@ func (s *AppService) UpdateApp(ctx context.Context, name string, req UpdateAppRe
 	if err != nil {
 		return nil, err
 	}
-	if err := domain.ValidateContextDir(req.ContextDir); err != nil {
-		return nil, err
+	// 校验 ImageRepo 存在
+	if req.ImageRepoName != "" {
+		if _, err := s.imageRepoRepo.FindByName(ctx, req.ImageRepoName); err != nil {
+			return nil, err
+		}
 	}
+
 	app.Description = req.Description
-	app.Image = req.Image
-	if req.Port > 0 {
-		app.Port = req.Port
-	}
+	app.ImageRepoName = req.ImageRepoName
+	app.Port = req.Port
 	app.ServiceAccount = req.ServiceAccount
+	app.Command = req.Command
 	app.EnvFromSecrets = req.EnvFromSecrets
+	app.EnvFromConfigMaps = req.EnvFromConfigMaps
 	app.Envs = req.Envs
-	app.ContextDir = req.ContextDir
 	app.UpdatedAt = time.Now()
 	if err := s.appRepo.Update(ctx, app); err != nil {
 		return nil, err
@@ -113,4 +124,3 @@ func (s *AppService) DeleteApp(ctx context.Context, name string) error {
 	}
 	return s.appRepo.Delete(ctx, name)
 }
-

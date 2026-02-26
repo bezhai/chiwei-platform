@@ -16,10 +16,19 @@ type LogQuerier interface {
 	QueryAppLogs(ctx context.Context, namespace, appName, lane string, start, end time.Time, limit int) (string, error)
 }
 
+// BuildSubmission 封装提交给 BuildExecutor 的构建参数，解耦 domain.Build 与基础设施。
+type BuildSubmission struct {
+	BuildID    string
+	GitRepo    string
+	GitRef     string
+	ContextDir string
+	ImageTag   string // 完整镜像地址含 tag
+}
+
 // BuildExecutor 负责驱动 Kaniko Job 的生命周期。
 type BuildExecutor interface {
 	// Submit 创建 Kaniko Job 并返回 Job 名称。
-	Submit(ctx context.Context, build *domain.Build) (jobName string, err error)
+	Submit(ctx context.Context, sub *BuildSubmission) (jobName string, err error)
 	// Cancel 删除对应 Job。
 	Cancel(ctx context.Context, jobName string) error
 	// Watch 启动 Informer 监听，状态变更时调用 callback。

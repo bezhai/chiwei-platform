@@ -16,6 +16,7 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 
 	if err := db.AutoMigrate(
 		&AppModel{},
+		&ImageRepoModel{},
 		&LaneModel{},
 		&BuildModel{},
 		&ReleaseModel{},

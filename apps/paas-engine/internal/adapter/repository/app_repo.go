@@ -84,17 +84,26 @@ func appToModel(a *domain.App) (*AppModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	commandJSON, err := json.Marshal(a.Command)
+	if err != nil {
+		return nil, err
+	}
+	envFromConfigMapsJSON, err := json.Marshal(a.EnvFromConfigMaps)
+	if err != nil {
+		return nil, err
+	}
 	return &AppModel{
-		Name:           a.Name,
-		Description:    a.Description,
-		Image:          a.Image,
-		Port:           a.Port,
-		ServiceAccount: a.ServiceAccount,
-		EnvFromSecrets: string(envFromSecretsJSON),
-		Envs:           string(envsJSON),
-		ContextDir:     a.ContextDir,
-		CreatedAt:      a.CreatedAt,
-		UpdatedAt:      a.UpdatedAt,
+		Name:              a.Name,
+		Description:       a.Description,
+		ImageRepoName:     a.ImageRepoName,
+		Port:              a.Port,
+		ServiceAccount:    a.ServiceAccount,
+		Command:           string(commandJSON),
+		EnvFromSecrets:    string(envFromSecretsJSON),
+		EnvFromConfigMaps: string(envFromConfigMapsJSON),
+		Envs:              string(envsJSON),
+		CreatedAt:         a.CreatedAt,
+		UpdatedAt:         a.UpdatedAt,
 	}, nil
 }
 
@@ -111,16 +120,29 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 			return nil, err
 		}
 	}
+	var command []string
+	if m.Command != "" {
+		if err := json.Unmarshal([]byte(m.Command), &command); err != nil {
+			return nil, err
+		}
+	}
+	var envFromConfigMaps []string
+	if m.EnvFromConfigMaps != "" {
+		if err := json.Unmarshal([]byte(m.EnvFromConfigMaps), &envFromConfigMaps); err != nil {
+			return nil, err
+		}
+	}
 	return &domain.App{
-		Name:           m.Name,
-		Description:    m.Description,
-		Image:          m.Image,
-		Port:           m.Port,
-		ServiceAccount: m.ServiceAccount,
-		EnvFromSecrets: envFromSecrets,
-		Envs:           envs,
-		ContextDir:     m.ContextDir,
-		CreatedAt:      m.CreatedAt,
-		UpdatedAt:      m.UpdatedAt,
+		Name:              m.Name,
+		Description:       m.Description,
+		ImageRepoName:     m.ImageRepoName,
+		Port:              m.Port,
+		ServiceAccount:    m.ServiceAccount,
+		Command:           command,
+		EnvFromSecrets:    envFromSecrets,
+		EnvFromConfigMaps: envFromConfigMaps,
+		Envs:              envs,
+		CreatedAt:         m.CreatedAt,
+		UpdatedAt:         m.UpdatedAt,
 	}, nil
 }

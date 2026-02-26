@@ -28,74 +28,70 @@ func (s *stubReleaseRepo) FindByLane(_ context.Context, _ string) ([]*domain.Rel
 	return nil, nil
 }
 
-func TestCreateApp_WithContextDir(t *testing.T) {
+func TestCreateApp_Success(t *testing.T) {
 	appRepo := &stubAppRepo{}
-	svc := NewAppService(appRepo, &stubReleaseRepo{})
+	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{Name: "myapp"}}
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
 
 	app, err := svc.CreateApp(context.Background(), CreateAppRequest{
-		Name:       "myapp",
-		Image:      "registry.example.com",
-		Port:       8080,
-		ContextDir: "apps/myapp",
+		Name:          "myapp",
+		ImageRepoName: "myapp",
+		Port:          8080,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if app.ContextDir != "apps/myapp" {
-		t.Errorf("ContextDir = %q, want %q", app.ContextDir, "apps/myapp")
+	if app.ImageRepoName != "myapp" {
+		t.Errorf("ImageRepoName = %q, want %q", app.ImageRepoName, "myapp")
 	}
 }
 
-func TestCreateApp_InvalidContextDir(t *testing.T) {
+func TestCreateApp_ImageRepoNotFound(t *testing.T) {
 	appRepo := &stubAppRepo{}
-	svc := NewAppService(appRepo, &stubReleaseRepo{})
+	imageRepoRepo := &stubImageRepoRepo{err: domain.ErrImageRepoNotFound}
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
 
 	_, err := svc.CreateApp(context.Background(), CreateAppRequest{
-		Name:       "myapp",
-		Image:      "registry.example.com",
-		Port:       8080,
-		ContextDir: "../etc/passwd",
+		Name:          "myapp",
+		ImageRepoName: "nonexistent",
+		Port:          8080,
+	})
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestCreateApp_InvalidName(t *testing.T) {
+	appRepo := &stubAppRepo{}
+	imageRepoRepo := &stubImageRepoRepo{}
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+
+	_, err := svc.CreateApp(context.Background(), CreateAppRequest{
+		Name: "INVALID",
+		Port: 8080,
 	})
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
 }
 
-func TestUpdateApp_WithContextDir(t *testing.T) {
+func TestUpdateApp_Success(t *testing.T) {
 	appRepo := &stubAppRepo{app: &domain.App{
-		Name:  "myapp",
-		Image: "registry.example.com",
-		Port:  8080,
+		Name:          "myapp",
+		ImageRepoName: "myapp",
+		Port:          8080,
 	}}
-	svc := NewAppService(appRepo, &stubReleaseRepo{})
+	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{Name: "myapp"}}
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
 
 	app, err := svc.UpdateApp(context.Background(), "myapp", UpdateAppRequest{
-		Image:      "registry.example.com",
-		Port:       8080,
-		ContextDir: "apps/myapp",
+		ImageRepoName: "myapp",
+		Port:          9090,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if app.ContextDir != "apps/myapp" {
-		t.Errorf("ContextDir = %q, want %q", app.ContextDir, "apps/myapp")
-	}
-}
-
-func TestUpdateApp_InvalidContextDir(t *testing.T) {
-	appRepo := &stubAppRepo{app: &domain.App{
-		Name:  "myapp",
-		Image: "registry.example.com",
-		Port:  8080,
-	}}
-	svc := NewAppService(appRepo, &stubReleaseRepo{})
-
-	_, err := svc.UpdateApp(context.Background(), "myapp", UpdateAppRequest{
-		Image:      "registry.example.com",
-		Port:       8080,
-		ContextDir: "/absolute/path",
-	})
-	if !errors.Is(err, domain.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput, got %v", err)
+	if app.Port != 9090 {
+		t.Errorf("Port = %d, want %d", app.Port, 9090)
 	}
 }

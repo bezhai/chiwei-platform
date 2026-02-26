@@ -36,8 +36,10 @@ func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *
 	if err := d.applyDeployment(ctx, release, app); err != nil {
 		return fmt.Errorf("apply deployment: %w", err)
 	}
-	if err := d.applyService(ctx, release, app); err != nil {
-		return fmt.Errorf("apply service: %w", err)
+	if app.Port > 0 { // Worker 无端口，跳过 Service
+		if err := d.applyService(ctx, release, app); err != nil {
+			return fmt.Errorf("apply service: %w", err)
+		}
 	}
 	if err := d.waitForRollout(ctx, release.ResourceName()); err != nil {
 		return fmt.Errorf("wait for rollout: %w", err)
@@ -66,6 +68,21 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	envVars := envsToK8s(mergeEnvs(app.Envs, release.Envs))
 	replicas := release.Replicas
 
+	container := corev1.Container{
+		Name:    app.Name,
+		Image:   release.Image,
+		EnvFrom: buildEnvFrom(app.EnvFromSecrets, app.EnvFromConfigMaps),
+		Env:     envVars,
+	}
+	if len(app.Command) > 0 {
+		container.Command = app.Command
+	}
+	if app.Port > 0 {
+		container.Ports = []corev1.ContainerPort{
+			{ContainerPort: int32(app.Port)},
+		}
+	}
+
 	revisionHistoryLimit := int32(2)
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -81,17 +98,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: app.ServiceAccount,
-					Containers: []corev1.Container{
-						{
-							Name:  app.Name,
-							Image: release.Image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: int32(app.Port)},
-							},
-							EnvFrom: secretRefsToEnvFrom(app.EnvFromSecrets),
-						Env:     envVars,
-						},
-					},
+					Containers:         []corev1.Container{container},
 				},
 			},
 		},
@@ -158,17 +165,25 @@ func mergeEnvs(base, override map[string]string) map[string]string {
 	return merged
 }
 
-func secretRefsToEnvFrom(secrets []string) []corev1.EnvFromSource {
-	if len(secrets) == 0 {
-		return nil
-	}
-	sources := make([]corev1.EnvFromSource, len(secrets))
-	for i, name := range secrets {
-		sources[i] = corev1.EnvFromSource{
+// buildEnvFrom 合并 Secret 和 ConfigMap 的 envFrom sources。
+func buildEnvFrom(secrets, configMaps []string) []corev1.EnvFromSource {
+	sources := make([]corev1.EnvFromSource, 0, len(secrets)+len(configMaps))
+	for _, name := range secrets {
+		sources = append(sources, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: name},
 			},
-		}
+		})
+	}
+	for _, name := range configMaps {
+		sources = append(sources, corev1.EnvFromSource{
+			ConfigMapRef: &corev1.ConfigMapEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			},
+		})
+	}
+	if len(sources) == 0 {
+		return nil
 	}
 	return sources
 }

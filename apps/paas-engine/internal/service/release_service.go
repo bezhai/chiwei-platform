@@ -12,33 +12,36 @@ import (
 )
 
 type ReleaseService struct {
-	appRepo     port.AppRepository
-	laneRepo    port.LaneRepository
-	releaseRepo port.ReleaseRepository
-	deployer    port.Deployer
-	vsReconciler port.VirtualServiceReconciler
+	appRepo       port.AppRepository
+	imageRepoRepo port.ImageRepoRepository
+	laneRepo      port.LaneRepository
+	releaseRepo   port.ReleaseRepository
+	deployer      port.Deployer
+	vsReconciler  port.VirtualServiceReconciler
 }
 
 func NewReleaseService(
 	appRepo port.AppRepository,
+	imageRepoRepo port.ImageRepoRepository,
 	laneRepo port.LaneRepository,
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
 	vsReconciler port.VirtualServiceReconciler,
 ) *ReleaseService {
 	return &ReleaseService{
-		appRepo:      appRepo,
-		laneRepo:     laneRepo,
-		releaseRepo:  releaseRepo,
-		deployer:     deployer,
-		vsReconciler: vsReconciler,
+		appRepo:       appRepo,
+		imageRepoRepo: imageRepoRepo,
+		laneRepo:      laneRepo,
+		releaseRepo:   releaseRepo,
+		deployer:      deployer,
+		vsReconciler:  vsReconciler,
 	}
 }
 
 type CreateReleaseRequest struct {
 	AppName  string            `json:"app_name"`
 	Lane     string            `json:"lane"`
-	Image    string            `json:"image"`
+	ImageTag string            `json:"image_tag"` // tag 部分，完整 URL 由 App → ImageRepo 拼出
 	Replicas int32             `json:"replicas"`
 	Envs     map[string]string `json:"envs"`
 }
@@ -47,6 +50,16 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	app, err := s.appRepo.FindByName(ctx, req.AppName)
 	if err != nil {
 		return nil, err
+	}
+
+	// 通过 App → ImageRepo 拼完整镜像地址
+	var fullImage string
+	if app.ImageRepoName != "" {
+		imageRepo, err := s.imageRepoRepo.FindByName(ctx, app.ImageRepoName)
+		if err != nil {
+			return nil, err
+		}
+		fullImage = imageRepo.FullImageRef(req.ImageTag)
 	}
 
 	lane := req.Lane
@@ -61,7 +74,6 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		req.Replicas = 1
 	}
 
-	// 查找是否已有该 app+lane 的 Release
 	existing, err := s.releaseRepo.FindByAppAndLane(ctx, req.AppName, lane)
 	if err != nil && !errors.Is(err, domain.ErrReleaseNotFound) {
 		return nil, err
@@ -71,7 +83,7 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	var release *domain.Release
 
 	if existing != nil {
-		existing.Image = req.Image
+		existing.Image = fullImage
 		existing.Replicas = req.Replicas
 		existing.Envs = req.Envs
 		existing.Status = domain.ReleaseStatusPending
@@ -82,7 +94,7 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 			ID:        uuid.New().String(),
 			AppName:   req.AppName,
 			Lane:      lane,
-			Image:     req.Image,
+			Image:     fullImage,
 			Replicas:  req.Replicas,
 			Envs:      req.Envs,
 			Status:    domain.ReleaseStatusPending,
@@ -113,8 +125,8 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		}
 	}
 
-	// 重算 VirtualService
-	if s.vsReconciler != nil {
+	// 重算 VirtualService（Worker 无端口，跳过）
+	if s.vsReconciler != nil && app.Port > 0 {
 		releases, err := s.releaseRepo.FindAll(ctx, req.AppName, "")
 		if err != nil {
 			slog.Warn("failed to list releases for VS reconcile", "app", req.AppName, "error", err)
@@ -160,8 +172,9 @@ func (s *ReleaseService) DeleteRelease(ctx context.Context, id string) error {
 		return err
 	}
 
-	// 重算 VirtualService
-	if s.vsReconciler != nil {
+	// 重算 VirtualService（Worker 无端口，跳过）
+	app, appErr := s.appRepo.FindByName(ctx, release.AppName)
+	if s.vsReconciler != nil && appErr == nil && app.Port > 0 {
 		releases, err := s.releaseRepo.FindAll(ctx, release.AppName, "")
 		if err != nil {
 			slog.Warn("failed to list releases for VS reconcile on delete", "app", release.AppName, "error", err)

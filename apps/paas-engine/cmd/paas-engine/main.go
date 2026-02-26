@@ -31,6 +31,7 @@ func main() {
 
 	// 存储层
 	appRepo := repository.NewAppRepo(db)
+	imageRepoRepo := repository.NewImageRepoRepo(db)
 	laneRepo := repository.NewLaneRepo(db)
 	buildRepo := repository.NewBuildRepo(db)
 	releaseRepo := repository.NewReleaseRepo(db)
@@ -68,9 +69,10 @@ func main() {
 
 	// 服务层
 	laneSvc := service.NewLaneService(laneRepo, releaseRepo)
-	appSvc := service.NewAppService(appRepo, releaseRepo)
-	buildSvc := service.NewBuildService(appRepo, buildRepo, buildExecutor, lokiClient)
-	releaseSvc := service.NewReleaseService(appRepo, laneRepo, releaseRepo, deployer, vsReconciler)
+	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo)
+	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
+	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
+	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, laneRepo, releaseRepo, deployer, vsReconciler)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 
 	// 确保 prod 泳道存在
@@ -96,6 +98,7 @@ func main() {
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLaneHandler(laneSvc),
 		httpadapter.NewLogHandler(logSvc),
+		httpadapter.NewImageRepoHandler(imageRepoSvc),
 		cfg.APIToken,
 	)
 

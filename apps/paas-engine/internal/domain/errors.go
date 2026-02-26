@@ -15,5 +15,6 @@ var (
 	ErrAppNotFound     = fmt.Errorf("app %w", ErrNotFound)
 	ErrLaneNotFound    = fmt.Errorf("lane %w", ErrNotFound)
 	ErrBuildNotFound   = fmt.Errorf("build %w", ErrNotFound)
-	ErrReleaseNotFound = fmt.Errorf("release %w", ErrNotFound)
+	ErrReleaseNotFound  = fmt.Errorf("release %w", ErrNotFound)
+	ErrImageRepoNotFound = fmt.Errorf("image repo %w", ErrNotFound)
 )

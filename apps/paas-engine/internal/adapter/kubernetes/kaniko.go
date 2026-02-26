@@ -54,18 +54,17 @@ func NewKanikoBuildExecutor(client kubernetes.Interface, cfg KanikoBuildConfig) 
 	}
 }
 
-func (e *KanikoBuildExecutor) Submit(ctx context.Context, build *domain.Build) (string, error) {
-	jobName := fmt.Sprintf("kaniko-%s", strings.ReplaceAll(build.ID, "-", ""))
+func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmission) (string, error) {
+	jobName := fmt.Sprintf("kaniko-%s", strings.ReplaceAll(sub.BuildID, "-", ""))
 	ttl := int32(3600)
 	backoff := int32(0)
 
-	gitContext := build.GitRepo
+	gitContext := sub.GitRepo
 	if strings.HasPrefix(gitContext, "https://") || strings.HasPrefix(gitContext, "http://") {
 		gitContext = "git://" + strings.TrimPrefix(strings.TrimPrefix(gitContext, "https://"), "http://")
 	}
-	gitRef := build.GitRef
+	gitRef := sub.GitRef
 	if gitRef != "" && !strings.HasPrefix(gitRef, "refs/") {
-		// commit hash (hex, 7-40 chars) 不需要加前缀
 		if isCommitHash(gitRef) {
 			// kaniko git context 直接使用 commit hash
 		} else if looksLikeTag(gitRef) {
@@ -77,17 +76,13 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, build *domain.Build) (
 
 	args := []string{
 		fmt.Sprintf("--context=%s#%s", gitContext, gitRef),
-		fmt.Sprintf("--destination=%s", build.ImageTag),
+		fmt.Sprintf("--destination=%s", sub.ImageTag),
 		"--cache=true",
 	}
 
-	// 构建上下文与 Dockerfile 路径推导
-	if build.ContextDir != "" && build.ContextDir != "." {
-		// 独立构建：子目录既是上下文也包含 Dockerfile
-		args = append(args, fmt.Sprintf("--context-sub-path=%s", build.ContextDir))
-	} else if build.ContextDir == "." {
-		// monorepo 根目录构建：上下文为 repo 根，Dockerfile 按约定在 apps/<app>/Dockerfile
-		args = append(args, fmt.Sprintf("--dockerfile=apps/%s/Dockerfile", build.AppName))
+	// 构建上下文子目录
+	if sub.ContextDir != "" && sub.ContextDir != "." {
+		args = append(args, fmt.Sprintf("--context-sub-path=%s", sub.ContextDir))
 	}
 	for _, mirror := range e.registryMirrors {
 		args = append(args, fmt.Sprintf("--registry-mirror=%s", mirror))
@@ -102,7 +97,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, build *domain.Build) (
 			Name:      jobName,
 			Namespace: e.namespace,
 			Labels: map[string]string{
-				labelBuildID: build.ID,
+				labelBuildID: sub.BuildID,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -110,7 +105,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, build *domain.Build) (
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{labelBuildID: build.ID},
+					Labels: map[string]string{labelBuildID: sub.BuildID},
 				},
 				Spec: e.podSpec(args),
 			},

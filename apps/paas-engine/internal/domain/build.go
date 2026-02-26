@@ -20,17 +20,15 @@ func (s BuildStatus) IsTerminal() bool {
 
 // Build 代表一次镜像构建任务，对应 K8s 中的 Kaniko Job。
 type Build struct {
-	ID         string      `json:"id"`
-	AppName    string      `json:"app_name"`
-	GitRepo    string      `json:"git_repo"`
-	GitRef     string      `json:"git_ref"` // branch / tag / commit
-	ImageTag   string      `json:"image_tag"`
-	ContextDir string      `json:"context_dir,omitempty"` // 构建上下文子目录，默认 "."
-	Status     BuildStatus `json:"status"`
-	JobName    string      `json:"job_name,omitempty"`
-	Log        string      `json:"log,omitempty"`
-	CreatedAt  time.Time   `json:"created_at"`
-	UpdatedAt  time.Time   `json:"updated_at"`
+	ID            string      `json:"id"`
+	ImageRepoName string      `json:"image_repo_name"`
+	GitRef        string      `json:"git_ref"` // branch / tag / commit
+	ImageTag      string      `json:"image_tag"`
+	Status        BuildStatus `json:"status"`
+	JobName       string      `json:"job_name,omitempty"`
+	Log           string      `json:"log,omitempty"`
+	CreatedAt     time.Time   `json:"created_at"`
+	UpdatedAt     time.Time   `json:"updated_at"`
 }
 
 // CanCancel 判断当前状态是否允许取消。
