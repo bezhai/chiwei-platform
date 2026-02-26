@@ -16,35 +16,24 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# 安装依赖，然后用 tar -h 解析所有 node_modules 中的 symlink
-# Bun workspace 会将一些包安装到子目录 node_modules（如 apps/lark-server/node_modules），
-# 必须对所有 node_modules 目录都做 symlink 解析。
+# 调试：看看 bun install 之后的目录结构
 RUN bun install --frozen-lockfile \
-    && for nm in $(find /repo -name node_modules -not -path '*/node_modules/*'); do \
-         parent=$(dirname "$nm"); \
-         cd "$parent" \
-         && tar -chf /tmp/_nm.tar node_modules \
-         && rm -rf node_modules \
-         && tar -xf /tmp/_nm.tar \
-         && rm /tmp/_nm.tar; \
-       done \
-    && cd /repo \
-    && find /repo -type d -name .bun -exec rm -rf {} + 2>/dev/null; true \
-    && mkdir -p node_modules/@inner \
-    && rm -rf node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils \
-    && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
-    && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
-    && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils \
-    && echo "=== Verify root ===" && ls node_modules/koa/package.json \
-    && echo "=== Verify workspace ===" && ls apps/lark-server/node_modules/lodash/package.json
-
-# 复制源码
-COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
-COPY apps/lark-server/src ./apps/lark-server/src
-
-RUN mkdir -p /var/log/lark-server && \
-    chmod 777 /var/log/lark-server
-
-WORKDIR /repo/apps/lark-server
-
-CMD ["bun", "src/index.ts"]
+    && echo "=== ROOT node_modules (top 30) ===" \
+    && ls node_modules/ | head -30 \
+    && echo "=== lodash? ===" \
+    && ls -la node_modules/lodash 2>/dev/null || echo "NO lodash in root nm" \
+    && echo "=== koa? ===" \
+    && ls -la node_modules/koa 2>/dev/null || echo "NO koa in root nm" \
+    && echo "=== .bun dir? ===" \
+    && ls node_modules/.bun/ 2>/dev/null | head -5 || echo "NO .bun dir" \
+    && echo "=== workspace nm dirs ===" \
+    && find /repo -name node_modules -not -path '*/node_modules/*' -type d \
+    && echo "=== apps/lark-server/node_modules? ===" \
+    && ls apps/lark-server/node_modules/ 2>/dev/null | head -20 || echo "NO apps/lark-server/nm" \
+    && echo "=== apps/lark-server/nm/lodash? ===" \
+    && ls -la apps/lark-server/node_modules/lodash 2>/dev/null || echo "NO lodash in app nm" \
+    && echo "=== type of root nm/koa ===" \
+    && file node_modules/koa 2>/dev/null || echo "cannot file koa" \
+    && echo "=== readlink koa ===" \
+    && readlink -f node_modules/koa 2>/dev/null || echo "cannot readlink koa" \
+    && echo "=== DEBUG DONE ==="
