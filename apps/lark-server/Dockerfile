@@ -22,6 +22,7 @@ RUN bun install --frozen-lockfile \
     && cp -rL node_modules node_modules_real \
     && rm -rf node_modules \
     && mv node_modules_real node_modules \
+    && rm -rf node_modules/.bun \
     && mkdir -p node_modules/@inner \
     && rm -rf node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils \
     && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
