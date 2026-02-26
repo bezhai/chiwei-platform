@@ -1,0 +1,11 @@
+{
+  "name": "chiwei-platform",
+  "private": true,
+  "workspaces": [
+    "apps/lark-server",
+    "apps/lark-proxy",
+    "packages/ts-shared",
+    "packages/pixiv-client",
+    "packages/lark-utils"
+  ]
+}

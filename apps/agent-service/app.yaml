@@ -1,0 +1,56 @@
+# 应用声明文件 — 平台层读取此文件生成 Dockerfile、K8s manifest、构建配置
+# 详见 docs/platform-design.md
+
+name: agent-service
+runtime: python
+version: "3.11-slim"
+
+build:
+  method: uv            # uv sync
+  entry: app.main:app   # uvicorn 入口
+  framework: uvicorn
+  workspace_deps:
+    - packages/py-shared
+  log_dir: /logs/agent-service
+  uvicorn_extra_args:
+    - "--log-config"
+    - "app/config/logging_config.json"
+
+serve:
+  port: 8000
+  health: /health
+  k8s_service_name: ai-app   # K8s Service 名称与 deployment 名不同
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+workers:
+  - name: arq-worker
+    entry: app.workers.unified_worker.UnifiedWorkerSettings
+    runner: arq          # uv run --no-sync arq <entry>
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  - name: vectorize-worker
+    entry: app.workers.vectorize_worker
+    runner: python-m     # uv run --no-sync python -m <entry>
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+env_overrides:
+  POSTGRES_PORT: "5432"
+  REDIS_PORT: "6379"
