@@ -20,6 +20,7 @@ COPY apps/lark-server/src ./apps/lark-server/src
 # 编译为独立二进制
 WORKDIR /repo/apps/lark-server
 RUN bun build src/index.ts --compile --outfile=server
+RUN bun build src/workers/recall-worker.ts --compile --outfile=recall-worker
 
 # --- Runtime（同样基于 Debian/glibc）---
 FROM debian:bookworm-slim
@@ -33,6 +34,7 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /app
 COPY --from=builder /repo/apps/lark-server/server ./server
+COPY --from=builder /repo/apps/lark-server/recall-worker ./recall-worker
 
 RUN mkdir -p /var/log/lark-server && chmod 777 /var/log/lark-server
 
