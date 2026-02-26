@@ -52,4 +52,4 @@ RUN mkdir -p /var/log/lark-server && \
 
 WORKDIR /repo/apps/lark-server
 
-CMD ["sh", "-c", "echo '=== @inner/shared contents ===' && ls -la node_modules/@inner/shared/ && echo '=== package.json ===' && cat node_modules/@inner/shared/package.json | head -8 && echo '=== src dir? ===' && ls node_modules/@inner/shared/src/ 2>&1 || echo 'NO src dir' && echo '=== Starting ===' && exec bun src/index.ts"]
+CMD ["sh", "-c", "echo '=== koa from @inner/shared ===' && ls node_modules/@inner/shared/node_modules/koa 2>&1 || echo 'no nested koa' && ls node_modules/koa/package.json 2>&1 && echo '=== try import ===' && bun -e \"import '@inner/shared'\" 2>&1 | head -5 && echo '=== Starting ===' && exec bun src/index.ts"]
