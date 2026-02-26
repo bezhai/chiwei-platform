@@ -4,7 +4,7 @@ ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /bin/paas-engine ./cmd/paas-engine
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/paas-engine ./cmd/paas-engine
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
