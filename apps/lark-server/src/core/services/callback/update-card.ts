@@ -1,4 +1,4 @@
-import { LarkCallbackInfo } from 'types/lark';
+import type { LarkCallbackInfo } from 'types/lark';
 import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/repositories';
 import { sendReq } from '@lark-client';
 import { searchAndBuildPhotoCard, searchAndBuildDailyPhotoCard } from '@core/services/media/photo/photo-card';

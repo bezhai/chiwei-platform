@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "start": "bun src/index.ts",
-        "build": "bun build src/index.ts --target=bun --outdir=dist",
+        "build": "bun build src/index.ts --compile --outfile=server",
         "format": "prettier --write \"src/**/*.ts\"",
         "lint": "eslint src --ext .ts",
         "lint:fix": "eslint src --ext .ts --fix",
@@ -27,7 +27,6 @@
         "@types/koa__router": "^12.0.4",
         "@types/lodash": "^4.17.13",
         "@types/node-cron": "^3.0.11",
-        "@types/sharp": "^0.31.1",
         "@types/supertest": "^6.0.3",
         "@types/amqplib": "^0.10.6",
         "@types/uuid": "^10.0.0",
@@ -63,7 +62,6 @@
         "pg": "^8.11.3",
         "pg-cloudflare": "^1.2.7",
         "proxy-agent": "^6.5.0",
-        "sharp": "^0.34.5",
         "typeorm": "^0.3.17",
         "uuid": "^10.0.0",
         "winston": "^3.11.0"

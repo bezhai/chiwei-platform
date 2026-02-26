@@ -4,7 +4,6 @@ import { cache } from '@cache/cache-decorator';
 import { RedisLock } from '@cache/redis-lock';
 import { get as redisGet, setWithExpire as redisSetWithExpire } from '@cache/redis-client';
 import { Readable } from 'node:stream';
-import sharp from 'sharp';
 
 /**
  * 图片处理请求接口
@@ -303,43 +302,14 @@ export class ImageProcessorService {
     }
 
     /**
-     * 压缩图片 - 简单版本
+     * 将图片流转为 Buffer（图片压缩功能待 tool-service 就绪后恢复）
      */
     private async compressImage(imageStream: Readable): Promise<Buffer> {
-        try {
-            // 将流转为Buffer
-            const chunks: Buffer[] = [];
-            for await (const chunk of imageStream) {
-                chunks.push(chunk);
-            }
-            const originalBuffer = Buffer.concat(chunks);
-
-            // 使用Sharp压缩
-            const compressedBuffer = await sharp(originalBuffer)
-                .resize(1440, 1440, {
-                    fit: 'inside',
-                    withoutEnlargement: true,
-                })
-                .jpeg({
-                    quality: 80,
-                    progressive: true,
-                })
-                .toBuffer();
-
-            console.debug(
-                `图片压缩完成: ${originalBuffer.length} -> ${compressedBuffer.length} bytes`,
-            );
-            return compressedBuffer;
-        } catch (error) {
-            console.warn('图片压缩失败，使用原图:', error);
-
-            // 压缩失败时，将流转为Buffer返回原图
-            const chunks: Buffer[] = [];
-            for await (const chunk of imageStream) {
-                chunks.push(chunk);
-            }
-            return Buffer.concat(chunks);
+        const chunks: Buffer[] = [];
+        for await (const chunk of imageStream) {
+            chunks.push(chunk);
         }
+        return Buffer.concat(chunks);
     }
 
     /**

@@ -8,7 +8,7 @@ import {
     FileContent,
     AudioContent,
 } from 'types/content-types';
-import { LarkReceiveMessage } from 'types/lark';
+import type { LarkReceiveMessage } from 'types/lark';
 import { ContentType, ContentItem } from 'core/models/message-content';
 import { MentionUtils } from '@lark/utils/mention-utils';
 

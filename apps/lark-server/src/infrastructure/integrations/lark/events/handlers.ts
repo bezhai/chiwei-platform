@@ -1,4 +1,4 @@
-import {
+import type {
     LarkReceiveMessage,
     LarkCallbackInfo,
     LarkGroupMemberChangeInfo,
@@ -32,7 +32,7 @@ import {
 } from 'infrastructure/dal/repositories/repositories';
 import { getBotAppId } from '@core/services/bot/bot-var';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
-import { LarkEnterChatEvent } from 'types/lark';
+import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { ImageProcessorService } from '@core/services/media/image-processor';

@@ -1,5 +1,5 @@
 // 策略接口
-export { ReplyStrategy, ReplyStrategyContext, ReplyMode, SaveMessageCallback } from './reply-strategy.interface';
+export type { ReplyStrategy, ReplyStrategyContext, ReplyMode, SaveMessageCallback } from './reply-strategy.interface';
 
 // 策略实现
 export { CardReplyStrategy } from './card-reply.strategy';

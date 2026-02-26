@@ -1,4 +1,4 @@
-import { LarkReceiveMessage, LarkHistoryMessage } from 'types/lark';
+import type { LarkReceiveMessage, LarkHistoryMessage } from 'types/lark';
 import { LarkMessageMetaInfo } from 'types/mongo';
 import { LarkBaseChatInfo, LarkUser } from 'infrastructure/dal/entities';
 import { getBotUnionId } from '@core/services/bot/bot-var';
