@@ -229,9 +229,15 @@ func (d *K8sDeployer) waitForRollout(ctx context.Context, name string) error {
 	}
 }
 
-// detectPodFailure 检查 Deployment 管理的 Pod 是否存在不可恢复的失败状态。
+// detectPodFailure 检查 Deployment 最新 ReplicaSet 的 Pod 是否存在不可恢复的失败状态。
 // 返回失败原因和是否检测到失败。
 func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deployment) (string, bool) {
+	// 找到最新 ReplicaSet 的 pod-template-hash
+	latestHash := d.getLatestRSHash(ctx, deploy)
+	if latestHash == "" {
+		return "", false
+	}
+
 	selector := deploy.Spec.Selector.MatchLabels
 	labelSelector := ""
 	for k, v := range selector {
@@ -240,6 +246,8 @@ func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deplo
 		}
 		labelSelector += k + "=" + v
 	}
+	// 直接用 label selector 过滤到最新 RS 的 Pod
+	labelSelector += ",pod-template-hash=" + latestHash
 
 	pods, err := d.client.CoreV1().Pods(d.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -250,24 +258,17 @@ func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deplo
 	}
 
 	for _, pod := range pods.Items {
-		// 只检查属于当前 ReplicaSet（最新版本）的 Pod
-		if pod.Labels["pod-template-hash"] == "" {
-			continue
-		}
-
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
 				return fmt.Sprintf("pod %s is in CrashLoopBackOff: %s",
 					pod.Name, cs.State.Waiting.Message), true
 			}
-			// ImagePullBackOff 同样不可恢复，提前失败
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ImagePullBackOff" {
 				return fmt.Sprintf("pod %s failed to pull image: %s",
 					pod.Name, cs.State.Waiting.Message), true
 			}
 		}
 
-		// 也检查 init container
 		for _, cs := range pod.Status.InitContainerStatuses {
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
 				return fmt.Sprintf("pod %s init container is in CrashLoopBackOff: %s",
@@ -277,4 +278,43 @@ func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deplo
 	}
 
 	return "", false
+}
+
+// getLatestRSHash 获取 Deployment 最新 ReplicaSet 的 pod-template-hash。
+// 最新 RS 通过 revision annotation 判断。
+func (d *K8sDeployer) getLatestRSHash(ctx context.Context, deploy *appsv1.Deployment) string {
+	selector := deploy.Spec.Selector.MatchLabels
+	labelSelector := ""
+	for k, v := range selector {
+		if labelSelector != "" {
+			labelSelector += ","
+		}
+		labelSelector += k + "=" + v
+	}
+
+	rsList, err := d.client.AppsV1().ReplicaSets(d.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		slog.Warn("failed to list replicasets for hash lookup", "error", err)
+		return ""
+	}
+
+	var latestRevision int64
+	var latestHash string
+	for _, rs := range rsList.Items {
+		revStr := rs.Annotations["deployment.kubernetes.io/revision"]
+		if revStr == "" {
+			continue
+		}
+		var rev int64
+		if _, err := fmt.Sscanf(revStr, "%d", &rev); err != nil {
+			continue
+		}
+		if rev > latestRevision {
+			latestRevision = rev
+			latestHash = rs.Labels["pod-template-hash"]
+		}
+	}
+	return latestHash
 }

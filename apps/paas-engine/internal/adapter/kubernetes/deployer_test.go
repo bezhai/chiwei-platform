@@ -13,35 +13,58 @@ import (
 
 func TestDetectPodFailure(t *testing.T) {
 	labels := map[string]string{"app": "myapp", "lane": "prod"}
+	const latestHash = "abc123"
+	const oldHash = "old456"
+
+	// 最新 ReplicaSet（revision 2），pod-template-hash = abc123
+	latestRS := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "myapp-prod-" + latestHash,
+			Namespace:   "default",
+			Labels:      map[string]string{"app": "myapp", "lane": "prod", "pod-template-hash": latestHash},
+			Annotations: map[string]string{"deployment.kubernetes.io/revision": "2"},
+		},
+	}
+	// 旧 ReplicaSet（revision 1），pod-template-hash = old456
+	oldRS := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "myapp-prod-" + oldHash,
+			Namespace:   "default",
+			Labels:      map[string]string{"app": "myapp", "lane": "prod", "pod-template-hash": oldHash},
+			Annotations: map[string]string{"deployment.kubernetes.io/revision": "1"},
+		},
+	}
+
+	crashStatus := &corev1.ContainerStatus{
+		Name: "myapp",
+		State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{
+				Reason:  "CrashLoopBackOff",
+				Message: "back-off 5m0s restarting failed container",
+			},
+		},
+	}
 
 	tests := []struct {
 		name       string
-		pods       []runtime.Object
+		objects    []runtime.Object
 		wantFail   bool
 		wantReason string
 	}{
 		{
 			name:     "healthy pods",
-			pods:     []runtime.Object{makePod("myapp-prod-abc", labels, nil)},
+			objects:  []runtime.Object{latestRS, oldRS, makePod("myapp-prod-abc", labels, latestHash, nil)},
 			wantFail: false,
 		},
 		{
-			name: "CrashLoopBackOff detected",
-			pods: []runtime.Object{makePod("myapp-prod-abc", labels, &corev1.ContainerStatus{
-				Name: "myapp",
-				State: corev1.ContainerState{
-					Waiting: &corev1.ContainerStateWaiting{
-						Reason:  "CrashLoopBackOff",
-						Message: "back-off 5m0s restarting failed container",
-					},
-				},
-			})},
+			name: "CrashLoopBackOff detected on latest RS",
+			objects: []runtime.Object{latestRS, oldRS, makePod("myapp-prod-abc", labels, latestHash, crashStatus)},
 			wantFail:   true,
 			wantReason: "CrashLoopBackOff",
 		},
 		{
-			name: "ImagePullBackOff detected",
-			pods: []runtime.Object{makePod("myapp-prod-abc", labels, &corev1.ContainerStatus{
+			name: "ImagePullBackOff detected on latest RS",
+			objects: []runtime.Object{latestRS, oldRS, makePod("myapp-prod-abc", labels, latestHash, &corev1.ContainerStatus{
 				Name: "myapp",
 				State: corev1.ContainerState{
 					Waiting: &corev1.ContainerStateWaiting{
@@ -54,21 +77,30 @@ func TestDetectPodFailure(t *testing.T) {
 			wantReason: "failed to pull image",
 		},
 		{
-			name: "init container CrashLoopBackOff",
-			pods: []runtime.Object{makeInitCrashPod("myapp-prod-abc", labels)},
+			name:       "init container CrashLoopBackOff on latest RS",
+			objects:    []runtime.Object{latestRS, oldRS, makeInitCrashPod("myapp-prod-abc", labels, latestHash)},
 			wantFail:   true,
 			wantReason: "init container",
 		},
 		{
 			name:     "no pods",
-			pods:     nil,
+			objects:  []runtime.Object{latestRS},
+			wantFail: false,
+		},
+		{
+			name: "old RS pod in CrashLoopBackOff should be ignored",
+			objects: []runtime.Object{
+				latestRS, oldRS,
+				makePod("myapp-prod-old", labels, oldHash, crashStatus),
+				makePod("myapp-prod-new", labels, latestHash, nil),
+			},
 			wantFail: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fakeclient.NewSimpleClientset(tt.pods...)
+			client := fakeclient.NewSimpleClientset(tt.objects...)
 			deployer := NewK8sDeployer(client, "default")
 
 			deploy := &appsv1.Deployment{
@@ -90,12 +122,12 @@ func TestDetectPodFailure(t *testing.T) {
 	}
 }
 
-func makePod(name string, labels map[string]string, cs *corev1.ContainerStatus) *corev1.Pod {
+func makePod(name string, labels map[string]string, hash string, cs *corev1.ContainerStatus) *corev1.Pod {
 	podLabels := make(map[string]string)
 	for k, v := range labels {
 		podLabels[k] = v
 	}
-	podLabels["pod-template-hash"] = "abc123"
+	podLabels["pod-template-hash"] = hash
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -110,12 +142,12 @@ func makePod(name string, labels map[string]string, cs *corev1.ContainerStatus) 
 	return pod
 }
 
-func makeInitCrashPod(name string, labels map[string]string) *corev1.Pod {
+func makeInitCrashPod(name string, labels map[string]string, hash string) *corev1.Pod {
 	podLabels := make(map[string]string)
 	for k, v := range labels {
 		podLabels[k] = v
 	}
-	podLabels["pod-template-hash"] = "abc123"
+	podLabels["pod-template-hash"] = hash
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
