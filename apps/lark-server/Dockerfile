@@ -1,4 +1,4 @@
-FROM oven/bun:1-slim AS builder
+FROM oven/bun:1.3.9-slim AS builder
 
 WORKDIR /repo
 
