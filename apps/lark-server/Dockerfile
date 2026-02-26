@@ -1,10 +1,7 @@
-FROM oven/bun:1-alpine
-
-RUN apk add --no-cache tzdata
-ENV TZ=Asia/Shanghai
-
-ARG GIT_SHA=unknown
-ENV GIT_SHA=${GIT_SHA}
+###############################################
+# Stage 1: 安装依赖（保留 Bun symlink store）
+###############################################
+FROM oven/bun:1-alpine AS deps
 
 WORKDIR /repo
 
@@ -16,26 +13,32 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# 安装依赖：kaniko snapshot 会丢弃 bun 的 symlink store，
-# 用 cp -rL 将所有 symlink 展开为真实文件，再重建 workspace 链接。
-RUN bun install --frozen-lockfile \
-    # kaniko snapshot 丢弃 bun 的 symlink store，展开根 node_modules
-    && cp -rL node_modules node_modules_real \
-    && rm -rf node_modules \
-    && mv node_modules_real node_modules \
-    && rm -rf node_modules/.bun \
-    # 删除 workspace 子目录的 node_modules（含断裂 symlink），让解析回退到根
-    && rm -rf apps/lark-server/node_modules \
-    && rm -rf apps/lark-proxy/node_modules \
-    && rm -rf packages/*/node_modules \
-    # 重建 workspace 包链接
-    && mkdir -p node_modules/@inner \
+RUN bun install --frozen-lockfile
+
+###############################################
+# Stage 2: 构建运行镜像
+# COPY --from 会自动解析 symlink，无需手动处理
+###############################################
+FROM oven/bun:1-alpine
+
+RUN apk add --no-cache tzdata
+ENV TZ=Asia/Shanghai
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
+WORKDIR /repo
+
+# COPY --from 会将 symlink 解析为真实文件
+COPY --from=deps /repo/node_modules ./node_modules
+COPY --from=deps /repo/packages ./packages
+
+# 重建 workspace 包的 symlink（指向本地源码）
+RUN mkdir -p node_modules/@inner \
     && rm -rf node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils \
     && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
     && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
     && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils
-
-# Bun 直接运行 TypeScript，无需构建共享包
 
 # 复制源码
 COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
