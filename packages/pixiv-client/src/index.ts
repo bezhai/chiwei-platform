@@ -4,11 +4,10 @@ export { PixivClient, getPixivClient, resetPixivClient, createPixivClient } from
 // Auth utilities
 export { generateSalt, generateToken, sendAuthenticatedRequest, urlEncode } from './auth';
 
-// Types
-export {
+// Types - interfaces re-exported with 'type' for Bun runtime compatibility
+export type {
     // Config
     PixivClientConfig,
-    createDefaultPixivConfig,
     // Pixiv API types
     PixivGenericResponse,
     PixivProxyRequestBody,
@@ -24,9 +23,10 @@ export {
     ImageForLark,
     BaseResponse,
     PaginationResponse,
-    StatusMode,
     ListPixivImageDto,
     UploadImageToLarkDto,
     ReportLarkUploadDto,
     UploadLarkResp,
 } from './types';
+// Runtime values (enum, function) exported separately
+export { StatusMode, createDefaultPixivConfig } from './types';
