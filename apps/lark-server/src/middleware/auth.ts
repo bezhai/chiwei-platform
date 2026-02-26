@@ -2,5 +2,5 @@
 export {
     bearerAuthMiddleware,
     createBearerAuthMiddleware,
-    BearerAuthOptions,
 } from '@inner/shared';
+export type { BearerAuthOptions } from '@inner/shared';

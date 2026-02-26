@@ -1,11 +1,6 @@
 // Re-export base validation utilities from shared
-export {
-    ValidationError,
-    ValidationRule,
-    ValidationRules,
-    validateBody,
-    validateQuery,
-} from '@inner/shared';
+export { ValidationError, validateBody, validateQuery } from '@inner/shared';
+export type { ValidationRule, ValidationRules } from '@inner/shared';
 
 // Business-specific validation rules
 

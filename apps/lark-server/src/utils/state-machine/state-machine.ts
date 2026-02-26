@@ -1,6 +1,6 @@
 // Re-export state machine from shared
-export {
-    StateMachine,
+export { StateMachine } from '@inner/shared';
+export type {
     StateTransition,
     StateHandler,
     StateMachineContext,

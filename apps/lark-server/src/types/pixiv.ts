@@ -1,5 +1,5 @@
 // Re-export types from @inner/pixiv-client
-export {
+export type {
     PixivGenericResponse,
     FollowerInfo,
     FollowerBody,
@@ -10,18 +10,18 @@ export {
     IllustrationPageDetail,
     PaginationResponse,
     BaseResponse,
-    StatusMode,
     ListPixivImageDto,
     UploadImageToLarkDto,
     UploadLarkResp,
     ReportLarkUploadDto,
-    // 直接使用 @inner/pixiv-client 的 ImageForLark
     ImageForLark,
     MultiTag,
 } from '@inner/pixiv-client';
+// StatusMode is an enum (runtime value), export separately
+export { StatusMode } from '@inner/pixiv-client';
 
 // IllustData 类保留在本地
-import { IllustDetail } from '@inner/pixiv-client';
+import type { IllustDetail } from '@inner/pixiv-client';
 
 export class IllustData {
     data: IllustDetail[];
