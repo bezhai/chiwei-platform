@@ -16,11 +16,7 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# Bun workspace 的安装结构:
-#   - node_modules/.bun/ 是真实文件 store
-#   - 每个 workspace 的 node_modules/ 内都是指向 .bun store 的 symlink
-# Kaniko snapshot 会丢弃 symlink，所以需要把每个 workspace 的
-# node_modules 用 cp -rL 展开为真实文件，再删掉 .bun store。
+# 安装并解析 symlink
 RUN bun install --frozen-lockfile \
     && for nm_dir in apps/lark-server/node_modules apps/lark-proxy/node_modules packages/ts-shared/node_modules packages/pixiv-client/node_modules packages/lark-utils/node_modules; do \
          if [ -d "$nm_dir" ]; then \
@@ -34,12 +30,19 @@ RUN bun install --frozen-lockfile \
     && ln -sf ../../../packages/ts-shared apps/lark-server/node_modules/@inner/shared \
     && ln -sf ../../../packages/pixiv-client apps/lark-server/node_modules/@inner/pixiv-client \
     && ln -sf ../../../packages/lark-utils apps/lark-server/node_modules/@inner/lark-utils \
-    && echo "=== Verify ===" \
+    && echo "=== Same-layer verify ===" \
+    && ls apps/lark-server/node_modules/lodash/package.json
+
+# 独立 RUN 步骤：如果 Kaniko snapshot 丢弃了文件，这里会失败
+RUN echo "=== Cross-layer verify ===" \
     && ls apps/lark-server/node_modules/lodash/package.json \
     && ls apps/lark-server/node_modules/koa/package.json \
     && ls apps/lark-server/node_modules/uuid/package.json \
-    && ls apps/lark-server/node_modules/@inner/shared/package.json \
-    && echo "=== All OK ==="
+    && echo "=== Symlink check ===" \
+    && find apps/lark-server/node_modules -maxdepth 2 -type l | head -20 \
+    && echo "=== Node_modules top ===" \
+    && ls apps/lark-server/node_modules/ | head -30 \
+    && echo "=== All cross-layer OK ==="
 
 # 复制源码
 COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
