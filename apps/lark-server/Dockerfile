@@ -29,10 +29,7 @@ RUN bun install --frozen-lockfile \
     && ln -sf ../../packages/pixiv-client node_modules/@inner/pixiv-client \
     && ln -sf ../../packages/lark-utils node_modules/@inner/lark-utils
 
-# 构建共享包
-RUN cd packages/ts-shared && bun run build
-RUN cd packages/pixiv-client && bun run build
-RUN cd packages/lark-utils && bun run build
+# Bun 直接运行 TypeScript，无需构建共享包
 
 # 复制源码
 COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
