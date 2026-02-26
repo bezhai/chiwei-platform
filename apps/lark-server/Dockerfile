@@ -19,10 +19,16 @@ COPY packages/lark-utils ./packages/lark-utils
 # 安装依赖：kaniko snapshot 会丢弃 bun 的 symlink store，
 # 用 cp -rL 将所有 symlink 展开为真实文件，再重建 workspace 链接。
 RUN bun install --frozen-lockfile \
+    # kaniko snapshot 丢弃 bun 的 symlink store，展开根 node_modules
     && cp -rL node_modules node_modules_real \
     && rm -rf node_modules \
     && mv node_modules_real node_modules \
     && rm -rf node_modules/.bun \
+    # 删除 workspace 子目录的 node_modules（含断裂 symlink），让解析回退到根
+    && rm -rf apps/lark-server/node_modules \
+    && rm -rf apps/lark-proxy/node_modules \
+    && rm -rf packages/*/node_modules \
+    # 重建 workspace 包链接
     && mkdir -p node_modules/@inner \
     && rm -rf node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils \
     && ln -sf ../../packages/ts-shared node_modules/@inner/shared \
