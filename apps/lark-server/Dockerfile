@@ -5,6 +5,7 @@ WORKDIR /repo
 # 复制 workspace 结构 + lockfile
 COPY package.json bun.lock ./
 COPY apps/lark-server/package.json ./apps/lark-server/
+COPY apps/lark-proxy/package.json ./apps/lark-proxy/
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
