@@ -52,4 +52,4 @@ RUN mkdir -p /var/log/lark-server && \
 
 WORKDIR /repo/apps/lark-server
 
-CMD ["bun", "src/index.ts"]
+CMD ["sh", "-c", "echo '=== Runtime check ===' && ls -la node_modules/ | head -10 && ls node_modules/lodash/package.json 2>&1 && ls node_modules/@inner/shared/package.json 2>&1 && ls -la node_modules/ | wc -l && echo '=== Starting ===' && exec bun src/index.ts"]
