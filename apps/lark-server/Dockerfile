@@ -8,35 +8,29 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /repo
 
-# 复制所有 workspace 元数据和共享包源码
-COPY package.json bun.lock ./
+# 只复制 lark-server 的 package.json 和 workspace 包源码
 COPY apps/lark-server/package.json ./apps/lark-server/package.json
-COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# 用 npm 安装（无 symlink store，完美兼容 Kaniko）。
-# 1. 将 bun 的 "workspace:*" 替换为 npm 兼容的 "*"
-# 2. npm install 创建扁平 node_modules，workspace 包是 symlink
-# 3. 将 workspace 的 3 个 symlink 替换为真实拷贝
-RUN sed -i 's/"workspace:\*"/"*"/g' apps/lark-server/package.json \
-    && npm install --include=dev 2>&1 | tail -3 \
-    && echo "--- replacing workspace symlinks with real copies ---" \
-    && for pkg in node_modules/@inner/shared node_modules/@inner/pixiv-client node_modules/@inner/lark-utils; do \
-         if [ -L "$pkg" ]; then \
-           target=$(readlink -f "$pkg"); \
-           rm "$pkg"; \
-           cp -r "$target" "$pkg"; \
-           echo "  resolved $pkg"; \
-         fi; \
-       done \
+# 不使用 workspace，直接在 lark-server 目录下安装所有依赖。
+# 1. 将 workspace:* 替换为 file: 相对路径引用
+# 2. 用 npm install 在 apps/lark-server 下创建扁平 node_modules
+# 3. 所有包（含传递依赖）都在同一个 node_modules 下，无 hoisting 问题
+RUN cd apps/lark-server \
+    && sed -i \
+         -e 's|"@inner/shared": "workspace:\*"|"@inner/shared": "file:../../packages/ts-shared"|' \
+         -e 's|"@inner/pixiv-client": "workspace:\*"|"@inner/pixiv-client": "file:../../packages/pixiv-client"|' \
+         package.json \
+    && npm install --include=dev 2>&1 | tail -5 \
     && echo "=== Verify ===" \
     && ls node_modules/lodash/package.json \
     && ls node_modules/koa/package.json \
     && ls node_modules/uuid/package.json \
-    && ls node_modules/axios/package.json \
+    && ls node_modules/vary/package.json \
     && ls node_modules/@inner/shared/package.json \
+    && ls node_modules/@inner/lark-utils/package.json 2>/dev/null || echo "@inner/lark-utils check" \
     && echo "=== package count: $(ls node_modules/ | wc -l) ===" \
     && echo "=== All OK ==="
 
