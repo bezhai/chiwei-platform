@@ -1,6 +1,6 @@
 FROM oven/bun:1-alpine
 
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata coreutils
 ENV TZ=Asia/Shanghai
 
 ARG GIT_SHA=unknown
@@ -16,33 +16,44 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# 安装并解析 symlink
+# Bun workspace 用 .bun store + symlink 安装依赖。
+# Kaniko snapshot 丢弃 symlink → 需要展开为真实文件。
+# 使用 GNU cp (coreutils) 的 -rL 确保正确跟随 symlink。
 RUN bun install --frozen-lockfile \
-    && for nm_dir in apps/lark-server/node_modules apps/lark-proxy/node_modules packages/ts-shared/node_modules packages/pixiv-client/node_modules packages/lark-utils/node_modules; do \
+    && echo "--- resolving workspace node_modules ---" \
+    && for nm_dir in \
+         apps/lark-server/node_modules \
+         apps/lark-proxy/node_modules \
+         packages/ts-shared/node_modules \
+         packages/pixiv-client/node_modules \
+         packages/lark-utils/node_modules; do \
          if [ -d "$nm_dir" ]; then \
-           cp -rL "$nm_dir" "${nm_dir}_real" \
+           echo "  resolving $nm_dir" \
+           && /usr/bin/cp -rL "$nm_dir" "${nm_dir}_real" \
            && rm -rf "$nm_dir" \
-           && mv "${nm_dir}_real" "$nm_dir"; \
+           && mv "${nm_dir}_real" "$nm_dir" \
+           || echo "  WARN: failed to resolve $nm_dir"; \
          fi; \
        done \
     && rm -rf node_modules/.bun \
+    && echo "--- rebuilding workspace links ---" \
     && mkdir -p apps/lark-server/node_modules/@inner \
+    && rm -rf apps/lark-server/node_modules/@inner/shared \
+              apps/lark-server/node_modules/@inner/pixiv-client \
+              apps/lark-server/node_modules/@inner/lark-utils \
     && ln -sf ../../../packages/ts-shared apps/lark-server/node_modules/@inner/shared \
     && ln -sf ../../../packages/pixiv-client apps/lark-server/node_modules/@inner/pixiv-client \
     && ln -sf ../../../packages/lark-utils apps/lark-server/node_modules/@inner/lark-utils \
-    && echo "=== Same-layer verify ===" \
-    && ls apps/lark-server/node_modules/lodash/package.json
-
-# 独立 RUN 步骤：如果 Kaniko snapshot 丢弃了文件，这里会失败
-RUN echo "=== Cross-layer verify ===" \
+    && echo "=== Verify ===" \
     && ls apps/lark-server/node_modules/lodash/package.json \
     && ls apps/lark-server/node_modules/koa/package.json \
     && ls apps/lark-server/node_modules/uuid/package.json \
-    && echo "=== Symlink check ===" \
-    && find apps/lark-server/node_modules -maxdepth 2 -type l | head -20 \
-    && echo "=== Node_modules top ===" \
-    && ls apps/lark-server/node_modules/ | head -30 \
-    && echo "=== All cross-layer OK ==="
+    && ls apps/lark-server/node_modules/axios/package.json \
+    && ls apps/lark-server/node_modules/ioredis/package.json \
+    && ls apps/lark-server/node_modules/@inner/shared/package.json \
+    && echo "=== package count ===" \
+    && ls apps/lark-server/node_modules/ | wc -l \
+    && echo "=== All OK ==="
 
 # 复制源码
 COPY apps/lark-server/tsconfig.json ./apps/lark-server/tsconfig.json
