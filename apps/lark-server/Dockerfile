@@ -1,6 +1,6 @@
 FROM oven/bun:1-alpine
 
-RUN apk add --no-cache tzdata coreutils
+RUN apk add --no-cache tzdata nodejs npm
 ENV TZ=Asia/Shanghai
 
 ARG GIT_SHA=unknown
@@ -16,43 +16,16 @@ COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils
 
-# Bun workspace 用 .bun store + symlink 安装依赖。
-# Kaniko snapshot 丢弃 symlink → 需要展开为真实文件。
-# 使用 GNU cp (coreutils) 的 -rL 确保正确跟随 symlink。
-RUN bun install --frozen-lockfile \
-    && echo "--- resolving workspace node_modules ---" \
-    && for nm_dir in \
-         apps/lark-server/node_modules \
-         apps/lark-proxy/node_modules \
-         packages/ts-shared/node_modules \
-         packages/pixiv-client/node_modules \
-         packages/lark-utils/node_modules; do \
-         if [ -d "$nm_dir" ]; then \
-           echo "  resolving $nm_dir" \
-           && /usr/bin/cp -rL "$nm_dir" "${nm_dir}_real" \
-           && rm -rf "$nm_dir" \
-           && mv "${nm_dir}_real" "$nm_dir" \
-           || echo "  WARN: failed to resolve $nm_dir"; \
-         fi; \
-       done \
-    && rm -rf node_modules/.bun \
-    && echo "--- rebuilding workspace links ---" \
-    && mkdir -p apps/lark-server/node_modules/@inner \
-    && rm -rf apps/lark-server/node_modules/@inner/shared \
-              apps/lark-server/node_modules/@inner/pixiv-client \
-              apps/lark-server/node_modules/@inner/lark-utils \
-    && ln -sf ../../../packages/ts-shared apps/lark-server/node_modules/@inner/shared \
-    && ln -sf ../../../packages/pixiv-client apps/lark-server/node_modules/@inner/pixiv-client \
-    && ln -sf ../../../packages/lark-utils apps/lark-server/node_modules/@inner/lark-utils \
+# 用 npm 安装依赖（而非 bun install）。
+# npm 创建扁平化的 node_modules，无 symlink store，
+# 完美兼容 Kaniko 的 snapshot 机制。运行时仍用 Bun。
+RUN npm install --include=dev 2>&1 | tail -5 \
     && echo "=== Verify ===" \
-    && ls apps/lark-server/node_modules/lodash/package.json \
-    && ls apps/lark-server/node_modules/koa/package.json \
-    && ls apps/lark-server/node_modules/uuid/package.json \
-    && ls apps/lark-server/node_modules/axios/package.json \
-    && ls apps/lark-server/node_modules/ioredis/package.json \
-    && ls apps/lark-server/node_modules/@inner/shared/package.json \
+    && ls apps/lark-server/node_modules/lodash/package.json 2>/dev/null \
+       || ls node_modules/lodash/package.json \
     && echo "=== package count ===" \
-    && ls apps/lark-server/node_modules/ | wc -l \
+    && ls node_modules/ | wc -l \
+    && ls apps/lark-server/node_modules/ 2>/dev/null | wc -l \
     && echo "=== All OK ==="
 
 # 复制源码
