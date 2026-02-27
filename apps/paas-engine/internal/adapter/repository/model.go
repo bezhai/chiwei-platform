@@ -25,6 +25,7 @@ type ImageRepoModel struct {
 	Registry   string
 	GitRepo    string
 	ContextDir string
+	Dockerfile string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }

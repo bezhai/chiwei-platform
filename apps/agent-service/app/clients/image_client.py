@@ -7,8 +7,8 @@ import logging
 
 import httpx
 
-from app.config.config import settings
-from app.utils.middlewares.trace import get_app_name, get_trace_id
+from app.config.config import settings  # for inner_http_secret, main_server_timeout
+from app.utils.middlewares.trace import get_app_name, get_lane, get_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ class ImageProcessClient:
     """Main-server图片处理客户端"""
 
     def __init__(self):
-        self.base_url = settings.main_server_base_url
+        self.base_url = "http://lark-server:3000"
         self.timeout = settings.main_server_timeout
 
     async def process_image(
@@ -34,10 +34,6 @@ class ImageProcessClient:
         Returns:
             str: 图片URL，如果失败返回None
         """
-        if not self.base_url:
-            logger.warning("Main-server base URL未配置")
-            return None
-
         # 优先使用传入的 bot_name，否则从上下文获取
         app_name = bot_name or get_app_name() or ""
 
@@ -53,6 +49,7 @@ class ImageProcessClient:
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
+                        **({"x-lane": lane} if (lane := get_lane()) else {}),
                     },
                 )
 
@@ -91,10 +88,6 @@ class ImageProcessClient:
         Returns:
             str: image_key，如果失败返回None
         """
-        if not self.base_url:
-            logger.warning("Main-server base URL未配置")
-            return None
-
         # 优先使用传入的 bot_name，否则从上下文获取
         app_name = bot_name or get_app_name() or ""
 
@@ -111,6 +104,7 @@ class ImageProcessClient:
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
+                        **({"x-lane": lane} if (lane := get_lane()) else {}),
                     },
                 )
 

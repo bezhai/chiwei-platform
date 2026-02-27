@@ -5,7 +5,7 @@ import { ChatStateMachineManager } from './chat-state-machine';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 
-const BASE_URL = `http://${process.env.AI_SERVER_HOST}:${process.env.AI_SERVER_PORT}`;
+const BASE_URL = 'http://agent-service:8000';
 
 /**
  * 扩展版本：支持更多回调和状态监控
@@ -33,6 +33,7 @@ export async function sseChat(options: SSEChatOptions): Promise<() => void> {
             'Content-Type': 'application/json',
             'X-Trace-Id': context.getTraceId(),
             'X-App-Name': context.getBotName(),
+            ...(context.getLane() && { 'x-lane': context.getLane() }),
         },
         body: options.req,
         retries: 5, // 增加重试次数以处理504等网络错误

@@ -22,6 +22,7 @@ type BuildSubmission struct {
 	GitRepo    string
 	GitRef     string
 	ContextDir string
+	Dockerfile string // Dockerfile 路径（相对 context），空则使用默认
 	ImageTag   string // 完整镜像地址含 tag
 }
 

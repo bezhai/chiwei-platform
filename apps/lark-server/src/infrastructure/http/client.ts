@@ -14,6 +14,10 @@ const http = createHttpClient({
         if (appName) {
             headers['X-App-Name'] = appName;
         }
+        const lane = context.getLane();
+        if (lane) {
+            headers['x-lane'] = lane;
+        }
         return headers;
     },
 });

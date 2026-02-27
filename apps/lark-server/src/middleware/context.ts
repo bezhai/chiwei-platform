@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
  */
 export interface RequestContext extends BaseRequestContext {
     botName?: string;
+    lane?: string;
 }
 
 // Re-export the base asyncLocalStorage for compatibility
@@ -23,6 +24,10 @@ export const context = {
     getBotName: () => {
         const store = asyncLocalStorage.getStore() as RequestContext | undefined;
         return store?.botName || '';
+    },
+    getLane: () => {
+        const store = asyncLocalStorage.getStore() as RequestContext | undefined;
+        return store?.lane || '';
     },
     getAll: () => {
         return (asyncLocalStorage.getStore() as RequestContext) || { traceId: '' };

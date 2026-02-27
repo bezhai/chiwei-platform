@@ -70,6 +70,7 @@ func imageRepoToModel(ir *domain.ImageRepo) *ImageRepoModel {
 		Registry:   ir.Registry,
 		GitRepo:    ir.GitRepo,
 		ContextDir: ir.ContextDir,
+		Dockerfile: ir.Dockerfile,
 		CreatedAt:  ir.CreatedAt,
 		UpdatedAt:  ir.UpdatedAt,
 	}
@@ -81,6 +82,7 @@ func modelToImageRepo(m *ImageRepoModel) *domain.ImageRepo {
 		Registry:   m.Registry,
 		GitRepo:    m.GitRepo,
 		ContextDir: m.ContextDir,
+		Dockerfile: m.Dockerfile,
 		CreatedAt:  m.CreatedAt,
 		UpdatedAt:  m.UpdatedAt,
 	}

@@ -19,7 +19,7 @@ build:
 serve:
   port: 8000
   health: /health
-  k8s_service_name: ai-app   # K8s Service 名称与 deployment 名不同
+
 
 resources:
   requests:

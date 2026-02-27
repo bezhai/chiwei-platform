@@ -76,6 +76,7 @@ func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, re
 			GitRepo:    imageRepo.GitRepo,
 			GitRef:     req.GitRef,
 			ContextDir: imageRepo.ContextDir,
+			Dockerfile: imageRepo.Dockerfile,
 			ImageTag:   fullImageRef,
 		}
 		jobName, err := s.executor.Submit(ctx, sub)
