@@ -12,6 +12,7 @@ type ImageRepo struct {
 	Registry   string    `json:"registry"`    // 镜像仓库地址前缀，如 harbor.local/inner-bot/agent-service
 	GitRepo    string    `json:"git_repo"`    // Git 仓库地址
 	ContextDir string    `json:"context_dir"` // 构建上下文子目录
+	Dockerfile string    `json:"dockerfile"`  // Dockerfile 路径（相对 context），空则使用默认 Dockerfile
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }

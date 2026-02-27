@@ -84,6 +84,10 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	if sub.ContextDir != "" && sub.ContextDir != "." {
 		args = append(args, fmt.Sprintf("--context-sub-path=%s", sub.ContextDir))
 	}
+	// 自定义 Dockerfile 路径
+	if sub.Dockerfile != "" {
+		args = append(args, fmt.Sprintf("--dockerfile=%s", sub.Dockerfile))
+	}
 	for _, mirror := range e.registryMirrors {
 		args = append(args, fmt.Sprintf("--registry-mirror=%s", mirror))
 	}
