@@ -11,7 +11,7 @@
 # BUILD_ID   — build-status / build-wait 需要
 # LANE       — release 需要
 
-GIT_REF  ?= $(shell git rev-parse --short HEAD)
+GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
 GIT_SHORT := $(shell git rev-parse --short HEAD)
 TAG      ?= $(GIT_SHORT)
 REPO     ?= $(APP)
