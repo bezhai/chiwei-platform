@@ -5,7 +5,7 @@ import { ChatStateMachineManager } from './chat-state-machine';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 
-const BASE_URL = `http://${process.env.AI_SERVER_HOST}:${process.env.AI_SERVER_PORT}`;
+const BASE_URL = 'http://agent-service:8000';
 
 /**
  * 扩展版本：支持更多回调和状态监控

@@ -17,11 +17,7 @@ export interface ProcessImageResult {
     height: number;
 }
 
-function getBaseUrl(): string {
-    const host = process.env.TOOL_SERVICE_HOST || 'localhost';
-    const port = process.env.TOOL_SERVICE_PORT || '8000';
-    return `http://${host}:${port}`;
-}
+const BASE_URL = 'http://tool-service:8000';
 
 /**
  * 调用 tool-service 处理图片（缩放 + 格式转换）
@@ -36,7 +32,7 @@ export async function processImage(
     if (options.quality) params.set('quality', String(options.quality));
     if (options.format) params.set('format', options.format);
 
-    const url = `${getBaseUrl()}/api/image/process?${params.toString()}`;
+    const url = `${BASE_URL}/api/image/process?${params.toString()}`;
 
     const formData = new FormData();
     formData.append('file', new Blob([buffer]), 'image.bin');

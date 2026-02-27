@@ -26,12 +26,11 @@ export class EventForwarder {
 
     private async doForward(eventType: string, botName: string, params: unknown): Promise<void> {
         const lane = await this.laneResolver.resolve('bot', botName);
-        const targetService = `lark-server-${lane || 'prod'}`;
-        const url = `http://${targetService}:3000/api/internal/lark-event`;
+        const url = 'http://lark-server:3000/api/internal/lark-event';
         const traceId = randomUUID();
 
         console.info(
-            `[forwarder] ${eventType} for ${botName} → ${targetService} (trace: ${traceId})`,
+            `[forwarder] ${eventType} for ${botName} → lark-server (lane: ${lane || 'default'}, trace: ${traceId})`,
         );
 
         const headers: Record<string, string> = {

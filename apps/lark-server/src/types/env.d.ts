@@ -5,9 +5,7 @@ declare namespace NodeJS {
         MONGO_INITDB_ROOT_PASSWORD: string;
         MONGO_INITDB_ROOT_USERNAME: string;
         MONGO_HOST: string;
-        AI_SERVER_HOST: string;
-        AI_SERVER_PORT: string;
-        POSTGRES_USER: string;
+POSTGRES_USER: string;
         POSTGRES_PASSWORD: string;
         POSTGRES_DB: string;
         POSTGRES_HOST: string;
@@ -29,10 +27,7 @@ declare namespace NodeJS {
         OSS_ACCESS_KEY_SECRET: string;
         OSS_BUCKET: string;
         END_POINT: string;
-        // tool-service（图片处理）
-        TOOL_SERVICE_HOST: string;
-        TOOL_SERVICE_PORT: string;
-        // TOS（聊天图片等迁移/新增）
+// TOS（聊天图片等迁移/新增）
         TOS_ACCESS_KEY_ID: string;
         TOS_ACCESS_KEY_SECRET: string;
         TOS_BUCKET: string;

@@ -30,7 +30,7 @@ async function extractBatchWithWeight(
     try {
         const response = await requestWithRetry(
             () => http.post(
-                `http://${process.env.AI_SERVER_HOST}:${process.env.AI_SERVER_PORT}/extract_batch`,
+                'http://agent-service:8000/extract_batch',
                 {
                     texts,
                     top_n: topN,

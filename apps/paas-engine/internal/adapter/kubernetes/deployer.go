@@ -40,6 +40,9 @@ func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *
 		if err := d.applyService(ctx, release, app); err != nil {
 			return fmt.Errorf("apply service: %w", err)
 		}
+		if err := d.applyBaseService(ctx, release, app); err != nil {
+			return fmt.Errorf("apply base service: %w", err)
+		}
 	}
 	if err := d.waitForRollout(ctx, release.ResourceName()); err != nil {
 		return fmt.Errorf("wait for rollout: %w", err)
@@ -132,6 +135,46 @@ func (d *K8sDeployer) applyService(ctx context.Context, release *domain.Release,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       int32(app.Port),
+					TargetPort: intstr.FromInt(app.Port),
+				},
+			},
+		},
+	}
+
+	existing, err := d.client.CoreV1().Services(d.namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		_, err = d.client.CoreV1().Services(d.namespace).Create(ctx, svc, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	existing.Spec.Ports = svc.Spec.Ports
+	_, err = d.client.CoreV1().Services(d.namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+// applyBaseService 创建或更新 base Service（name=appName，无 lane 后缀）。
+// selector 默认指向 prod lane，作为 sidecar 不在时的 fallback；
+// 当 Istio sidecar 注入后，VirtualService 根据 x-lane header 路由到对应 lane。
+func (d *K8sDeployer) applyBaseService(ctx context.Context, release *domain.Release, app *domain.App) error {
+	name := release.AppName
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: d.namespace,
+			Labels: map[string]string{
+				"app": release.AppName,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app":  release.AppName,
+				"lane": "prod",
+			},
 			Ports: []corev1.ServicePort{
 				{
 					Port:       int32(app.Port),
