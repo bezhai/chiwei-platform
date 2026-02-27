@@ -6,7 +6,7 @@ router.get('/api/health', (ctx) => {
     ctx.body = {
         status: 'ok',
         service: 'lark-proxy',
-        version: process.env.GIT_SHA || 'unknown',
+        version: process.env.VERSION || process.env.GIT_SHA || 'unknown',
         timestamp: new Date().toISOString(),
     };
 });

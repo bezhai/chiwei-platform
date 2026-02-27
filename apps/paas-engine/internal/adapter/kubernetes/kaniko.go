@@ -77,7 +77,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	args := []string{
 		fmt.Sprintf("--context=%s#%s", gitContext, gitRef),
 		fmt.Sprintf("--destination=%s", sub.ImageTag),
-		"--cache=true",
+		"--cache=false",
 	}
 
 	// 构建上下文子目录

@@ -44,6 +44,7 @@ type CreateReleaseRequest struct {
 	ImageTag string            `json:"image_tag"` // tag 部分，完整 URL 由 App → ImageRepo 拼出
 	Replicas int32             `json:"replicas"`
 	Envs     map[string]string `json:"envs"`
+	Version  string            `json:"version"` // 自定义版本标识，可选
 }
 
 func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateReleaseRequest) (*domain.Release, error) {
@@ -86,6 +87,7 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		existing.Image = fullImage
 		existing.Replicas = req.Replicas
 		existing.Envs = req.Envs
+		existing.Version = req.Version
 		existing.Status = domain.ReleaseStatusPending
 		existing.UpdatedAt = now
 		release = existing
@@ -97,6 +99,7 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 			Image:     fullImage,
 			Replicas:  req.Replicas,
 			Envs:      req.Envs,
+			Version:   req.Version,
 			Status:    domain.ReleaseStatusPending,
 			CreatedAt: now,
 			UpdatedAt: now,
