@@ -2,6 +2,8 @@
  * tool-service 图片处理客户端
  */
 
+import { context } from '@middleware/context';
+
 export interface ProcessImageOptions {
     maxWidth?: number;
     maxHeight?: number;
@@ -39,8 +41,17 @@ export async function processImage(
     const formData = new FormData();
     formData.append('file', new Blob([buffer]), 'image.bin');
 
+    const headers: Record<string, string> = {};
+    const traceId = context.getTraceId();
+    if (traceId) headers['X-Trace-Id'] = traceId;
+    const appName = context.getBotName();
+    if (appName) headers['X-App-Name'] = appName;
+    const lane = context.getLane();
+    if (lane) headers['x-lane'] = lane;
+
     const response = await fetch(url, {
         method: 'POST',
+        headers,
         body: formData,
     });
 

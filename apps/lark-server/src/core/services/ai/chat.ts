@@ -33,6 +33,7 @@ export async function sseChat(options: SSEChatOptions): Promise<() => void> {
             'Content-Type': 'application/json',
             'X-Trace-Id': context.getTraceId(),
             'X-App-Name': context.getBotName(),
+            ...(context.getLane() && { 'x-lane': context.getLane() }),
         },
         body: options.req,
         retries: 5, // 增加重试次数以处理504等网络错误

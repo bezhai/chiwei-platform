@@ -8,7 +8,7 @@ import logging
 import httpx
 
 from app.config.config import settings
-from app.utils.middlewares.trace import get_app_name, get_trace_id
+from app.utils.middlewares.trace import get_app_name, get_lane, get_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class ImageProcessClient:
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
+                        **({"x-lane": lane} if (lane := get_lane()) else {}),
                     },
                 )
 
@@ -111,6 +112,7 @@ class ImageProcessClient:
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
+                        **({"x-lane": lane} if (lane := get_lane()) else {}),
                     },
                 )
 

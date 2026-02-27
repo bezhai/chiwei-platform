@@ -25,6 +25,11 @@ HEADER_CONFIG = {
         "default_factory": lambda: None,
         "required": False,
     },
+    "x-lane": {
+        "var_name": "lane",
+        "default_factory": lambda: None,
+        "required": False,
+    },
 }
 
 # 初始化context变量
@@ -92,3 +97,8 @@ def get_trace_id() -> str | None:
 def get_app_name() -> str | None:
     """获取当前请求的appId"""
     return get_header_var("app_name")
+
+
+def get_lane() -> str | None:
+    """获取当前请求的泳道标识"""
+    return get_header_var("lane")

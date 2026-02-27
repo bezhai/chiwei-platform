@@ -26,22 +26,26 @@ export class EventForwarder {
 
     private async doForward(eventType: string, botName: string, params: unknown): Promise<void> {
         const lane = await this.laneResolver.resolve('bot', botName);
-        const namespace = lane ? `lane-${lane}` : 'prod';
-        const url = `http://lark-server-prod.${namespace}.svc.cluster.local:3000/api/internal/lark-event`;
+        const url = `http://lark-server:3000/api/internal/lark-event`;
         const traceId = randomUUID();
 
         console.info(
-            `[forwarder] ${eventType} for ${botName} → ${namespace} (trace: ${traceId})`,
+            `[forwarder] ${eventType} for ${botName} → lane:${lane || 'prod'} (trace: ${traceId})`,
         );
+
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'X-App-Name': botName,
+            'x-trace-id': traceId,
+            Authorization: `Bearer ${this.secret}`,
+        };
+        if (lane) {
+            headers['x-lane'] = lane;
+        }
 
         const resp = await fetch(url, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-App-Name': botName,
-                'x-trace-id': traceId,
-                Authorization: `Bearer ${this.secret}`,
-            },
+            headers,
             body: JSON.stringify({ event_type: eventType, params }),
         });
 
