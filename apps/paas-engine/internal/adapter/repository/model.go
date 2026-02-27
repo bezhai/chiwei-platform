@@ -65,6 +65,7 @@ type ReleaseModel struct {
 	Image      string
 	Replicas   int32
 	Envs       string // JSON 序列化
+	Version    string // 自定义版本标识，用于环境变量注入
 	Status     string
 	DeployName string
 	CreatedAt  time.Time
