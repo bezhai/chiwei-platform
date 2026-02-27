@@ -21,6 +21,7 @@ type Release struct {
 	Image      string            `json:"image"` // 完整镜像地址，含 tag
 	Replicas   int32             `json:"replicas"`
 	Envs       map[string]string `json:"envs,omitempty"`
+	Version    string            `json:"version,omitempty"` // 自定义版本标识，将注入为 VERSION 环境变量
 	Status     ReleaseStatus     `json:"status"`
 	DeployName string            `json:"deploy_name,omitempty"` // K8s Deployment 名称
 	CreatedAt  time.Time         `json:"created_at"`

@@ -63,7 +63,7 @@ export class HttpServerManager {
                     status: 'ok',
                     timestamp: new Date().toISOString(),
                     service: 'lark-server',
-                    version: process.env.GIT_SHA || 'unknown',
+                    version: process.env.VERSION || process.env.GIT_SHA || 'unknown',
                     bots: allBots.map((bot) => ({
                         name: bot.bot_name,
                         app_id: bot.app_id,
