@@ -17,7 +17,6 @@ type ReleaseService struct {
 	laneRepo      port.LaneRepository
 	releaseRepo   port.ReleaseRepository
 	deployer      port.Deployer
-	vsReconciler  port.VirtualServiceReconciler
 }
 
 func NewReleaseService(
@@ -26,7 +25,6 @@ func NewReleaseService(
 	laneRepo port.LaneRepository,
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
-	vsReconciler port.VirtualServiceReconciler,
 ) *ReleaseService {
 	return &ReleaseService{
 		appRepo:       appRepo,
@@ -34,7 +32,6 @@ func NewReleaseService(
 		laneRepo:      laneRepo,
 		releaseRepo:   releaseRepo,
 		deployer:      deployer,
-		vsReconciler:  vsReconciler,
 	}
 }
 
@@ -128,16 +125,6 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		}
 	}
 
-	// 重算 VirtualService（Worker 无端口，跳过）
-	if s.vsReconciler != nil && app.Port > 0 {
-		releases, err := s.releaseRepo.FindAll(ctx, req.AppName, "")
-		if err != nil {
-			slog.Warn("failed to list releases for VS reconcile", "app", req.AppName, "error", err)
-		} else if err := s.vsReconciler.Reconcile(ctx, req.AppName, releases); err != nil {
-			slog.Warn("failed to reconcile VirtualService", "app", req.AppName, "error", err)
-		}
-	}
-
 	return release, nil
 }
 
@@ -184,23 +171,6 @@ func (s *ReleaseService) deleteRelease(ctx context.Context, release *domain.Rele
 
 	if err := s.releaseRepo.Delete(ctx, release.ID); err != nil {
 		return err
-	}
-
-	// 重算 VirtualService（Worker 无端口，跳过）
-	app, appErr := s.appRepo.FindByName(ctx, release.AppName)
-	if s.vsReconciler != nil && appErr == nil && app.Port > 0 {
-		releases, err := s.releaseRepo.FindAll(ctx, release.AppName, "")
-		if err != nil {
-			slog.Warn("failed to list releases for VS reconcile on delete", "app", release.AppName, "error", err)
-		} else if len(releases) == 0 {
-			if err := s.vsReconciler.Delete(ctx, release.AppName); err != nil {
-				slog.Warn("failed to delete VirtualService", "app", release.AppName, "error", err)
-			}
-		} else {
-			if err := s.vsReconciler.Reconcile(ctx, release.AppName, releases); err != nil {
-				slog.Warn("failed to reconcile VirtualService on delete", "app", release.AppName, "error", err)
-			}
-		}
 	}
 
 	return nil

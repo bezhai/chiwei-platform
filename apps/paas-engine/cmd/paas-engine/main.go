@@ -16,7 +16,6 @@ import (
 	"github.com/chiwei-platform/paas-engine/internal/config"
 	"github.com/chiwei-platform/paas-engine/internal/port"
 	"github.com/chiwei-platform/paas-engine/internal/service"
-	k8sdynamic "k8s.io/client-go/dynamic"
 )
 
 func main() {
@@ -37,13 +36,12 @@ func main() {
 	releaseRepo := repository.NewReleaseRepo(db)
 
 	// K8s 客户端（可选，无集群时降级运行）
-	cs, restCfg, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
+	cs, _, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
 	if k8sErr != nil {
 		slog.Warn("k8s client unavailable, running without k8s integration", "error", k8sErr)
 	}
 
 	var deployer port.Deployer
-	var vsReconciler port.VirtualServiceReconciler
 	var buildExecutor port.BuildExecutor
 
 	if cs != nil {
@@ -58,11 +56,6 @@ func main() {
 			HttpProxy:          cfg.BuildHttpProxy,
 			NoProxy:            cfg.BuildNoProxy,
 		})
-
-		dynClient, dynErr := k8sdynamic.NewForConfig(restCfg)
-		if dynErr == nil {
-			vsReconciler = kubernetes.NewIstioVirtualServiceReconciler(dynClient, cfg.DeployNamespace)
-		}
 	}
 
 	// Loki 日志查询
@@ -73,7 +66,7 @@ func main() {
 	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo)
 	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
-	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, laneRepo, releaseRepo, deployer, vsReconciler)
+	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, laneRepo, releaseRepo, deployer)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 
 	// 确保 prod 泳道存在
