@@ -7,6 +7,7 @@ Monorepo，所有应用在 `apps/` 下。部署在 K8s `prod` namespace。
 ```
 apps/
   paas-engine/    # PaaS 引擎 (Go) - 管理应用构建和蓝绿部署
+  lite-registry/  # 泳道注册表 (Go) - Watch K8s Services，提供泳道路由数据
 ```
 
 ## 通用规范
@@ -31,7 +32,7 @@ apps/
 | **App** | 运行配置（关联 ImageRepo、端口、命令、环境变量等），port=0 表示 Worker（不暴露端口） |
 | **Build** | 一次镜像构建（Kaniko Job），挂在 ImageRepo 下 |
 | **Release** | 将某个镜像 tag 部署到某个泳道，生成 K8s Deployment + Service |
-| **Lane** | 部署泳道（prod/blue/dev/feature-xxx），通过 Istio `x-lane` header 路由 |
+| **Lane** | 部署泳道（prod/blue/dev/feature-xxx），通过 LaneRouter SDK + K8s Service DNS 路由 |
 
 关系：`ImageRepo（构建配置）→ Build（构建镜像）`，`App（运行配置）→ Release（部署到泳道）`，App 通过 `image_repo` 字段关联 ImageRepo。
 
@@ -96,7 +97,7 @@ make latest-build APP=<app>
 | 资源 | Namespace | 说明 |
 |---|---|---|
 | SA `deploy-api` | prod | paas-engine 的 ServiceAccount |
-| ClusterRole `deploy-api` | - | deployments, services, jobs, secrets, virtualservices |
+| ClusterRole `deploy-api` | - | deployments, services, jobs, secrets |
 | Secret `paas-engine-secret` | prod | DATABASE_URL, API_TOKEN |
 | Secret `harbor-secret` | prod, paas-builds | Harbor registry 凭证 |
 
@@ -142,6 +143,15 @@ GET    /api/v1/lanes/                                   # 列出泳道
 GET    /api/v1/lanes/{lane}/                            # 获取泳道
 DELETE /api/v1/lanes/{lane}/                            # 删除泳道
 ```
+
+### 泳道路由
+
+泳道路由基于 K8s Service DNS，不依赖 Istio。核心组件：
+
+- **Lite-Registry**（`apps/lite-registry/`）：Watch K8s Services，聚合 `service → {lanes, port}` 映射，API: `GET /v1/routes`
+- **LaneRouter SDK**（`packages/ts-shared/`, `packages/py-shared/`）：轮询 Lite-Registry，根据 `x-lane` header 拼接 `{app}-{lane}:port`，泳道不存在时 fallback 到 `{app}:port`（prod）
+
+详见 [docs/archive/lane-routing.md](docs/archive/lane-routing.md)。
 
 ### 注意事项
 
