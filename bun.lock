@@ -8,6 +8,7 @@
       "name": "lark-proxy",
       "version": "1.0.0",
       "dependencies": {
+        "@inner/shared": "workspace:*",
         "@koa/router": "^12.0.1",
         "@larksuiteoapi/node-sdk": "^1.23.0",
         "koa": "^2.15.0",
