@@ -35,6 +35,9 @@ from .utils import (
     split_time,
 )
 
+# LaneRouter
+from .lane_router import LaneRouter
+
 __all__ = [
     # Decorators
     "log_io",
@@ -61,6 +64,8 @@ __all__ = [
     "BackfillWindowGenerator",
     "BackfillWindow",
     "split_time",
+    # LaneRouter
+    "LaneRouter",
     # Misc
     "hello",
 ]

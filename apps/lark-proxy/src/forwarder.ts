@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { LaneRouter } from '@inner/shared';
 import { LaneResolver } from './lane-resolver';
 
 /**
@@ -8,7 +9,10 @@ import { LaneResolver } from './lane-resolver';
 export class EventForwarder {
     private secret: string;
 
-    constructor(private laneResolver: LaneResolver) {
+    constructor(
+        private laneResolver: LaneResolver,
+        private laneRouter: LaneRouter,
+    ) {
         this.secret = process.env.INNER_HTTP_SECRET || '';
         if (!this.secret) {
             console.warn('INNER_HTTP_SECRET not set, forwarding will fail auth');
@@ -26,7 +30,7 @@ export class EventForwarder {
 
     private async doForward(eventType: string, botName: string, params: unknown): Promise<void> {
         const lane = await this.laneResolver.resolve('bot', botName);
-        const url = 'http://lark-server:3000/api/internal/lark-event';
+        const url = this.laneRouter.resolveUrl('lark-server', '/api/internal/lark-event', lane || undefined);
         const traceId = randomUUID();
 
         console.info(

@@ -4,8 +4,7 @@ import { SSEClient } from '@inner/shared';
 import { ChatStateMachineManager } from './chat-state-machine';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
-
-const BASE_URL = 'http://agent-service:8000';
+import { laneRouter } from '@infrastructure/lane-router';
 
 /**
  * 扩展版本：支持更多回调和状态监控
@@ -27,7 +26,7 @@ export interface SSEChatOptions {
  * 向ai-service发送sse请求
  */
 export async function sseChat(options: SSEChatOptions): Promise<() => void> {
-    const client = new SSEClient<ChatResponse>(`${BASE_URL}/chat/sse`, {
+    const client = new SSEClient<ChatResponse>(laneRouter.resolveUrl('agent-service', '/chat/sse'), {
         method: 'POST' as const,
         headers: {
             'Content-Type': 'application/json',

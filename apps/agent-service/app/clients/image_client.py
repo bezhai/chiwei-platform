@@ -7,8 +7,9 @@ import logging
 
 import httpx
 
+from app.clients.lane_router_instance import lane_router
 from app.config.config import settings  # for inner_http_secret, main_server_timeout
-from app.utils.middlewares.trace import get_app_name, get_lane, get_trace_id
+from app.utils.middlewares.trace import get_app_name, get_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,6 @@ class ImageProcessClient:
     """Main-server图片处理客户端"""
 
     def __init__(self):
-        self.base_url = "http://lark-server:3000"
         self.timeout = settings.main_server_timeout
 
     async def process_image(
@@ -40,16 +40,17 @@ class ImageProcessClient:
         try:
             request_data = {"message_id": message_id, "file_key": file_key}
 
+            base_url = lane_router.base_url("lark-server")
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{self.base_url}/api/image/process",
+                    f"{base_url}/api/image/process",
                     json=request_data,
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
-                        **({"x-lane": lane} if (lane := get_lane()) else {}),
+                        **lane_router.get_headers(),
                     },
                 )
 
@@ -95,16 +96,17 @@ class ImageProcessClient:
             # logger.info(f"上传base64图片到飞书，base64_data: {base64_data}")
             request_data = {"base64_data": base64_data}
 
+            base_url = lane_router.base_url("lark-server")
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{self.base_url}/api/image/upload-base64",
+                    f"{base_url}/api/image/upload-base64",
                     json=request_data,
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {settings.inner_http_secret}",
                         "X-Trace-Id": get_trace_id() or "",
                         "X-App-Name": app_name,
-                        **({"x-lane": lane} if (lane := get_lane()) else {}),
+                        **lane_router.get_headers(),
                     },
                 )
 
