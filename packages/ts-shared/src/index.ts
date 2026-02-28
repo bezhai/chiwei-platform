@@ -66,3 +66,7 @@ export { ConversationMessage, LarkUser, LarkGroupChatInfo } from './entities';
 // MongoDB exports
 export type { MongoConfig, IndexDefinition, BulkWriteResult } from './mongo';
 export { MongoService, getMongoService, resetMongoService, createMongoService, MongoCollection } from './mongo';
+
+// LaneRouter exports
+export type { ServiceInfo, LaneRouterOptions } from './lane-router';
+export { LaneRouter } from './lane-router';

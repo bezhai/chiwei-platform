@@ -5,6 +5,7 @@ import { LaneResolver } from './lane-resolver';
 import { EventForwarder } from './forwarder';
 import { BotManager } from './bot-manager';
 import healthRouter from './health';
+import { laneRouter } from './lane-router-instance';
 
 const PORT = parseInt(process.env.LARK_PROXY_PORT || '3003', 10);
 
@@ -22,7 +23,7 @@ async function main(): Promise<void> {
     console.info('PostgreSQL connected');
 
     const laneResolver = new LaneResolver(pool);
-    const forwarder = new EventForwarder(laneResolver);
+    const forwarder = new EventForwarder(laneResolver, laneRouter);
     const botManager = new BotManager(pool, forwarder);
 
     const app = new Koa();

@@ -1,7 +1,9 @@
 import { cloudSkipWords } from './word-utils';
 import _ from 'lodash';
-import http from '@http/client';
 import { requestWithRetry } from '@inner/shared';
+import { laneRouter } from '@infrastructure/lane-router';
+
+const agentClient = laneRouter.createClient('agent-service');
 
 /**
  * 检查一个词是否有意义
@@ -29,8 +31,8 @@ async function extractBatchWithWeight(
 ): Promise<{ text: string; keywords: { word: string; weight: number }[] }[]> {
     try {
         const response = await requestWithRetry(
-            () => http.post(
-                'http://agent-service:8000/extract_batch',
+            () => agentClient.post(
+                '/extract_batch',
                 {
                     texts,
                     top_n: topN,

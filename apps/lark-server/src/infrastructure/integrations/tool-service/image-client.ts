@@ -2,7 +2,7 @@
  * tool-service 图片处理客户端
  */
 
-import { context } from '@middleware/context';
+import { laneRouter } from '@infrastructure/lane-router';
 
 export interface ProcessImageOptions {
     maxWidth?: number;
@@ -17,8 +17,6 @@ export interface ProcessImageResult {
     height: number;
 }
 
-const BASE_URL = 'http://tool-service:8000';
-
 /**
  * 调用 tool-service 处理图片（缩放 + 格式转换）
  */
@@ -32,22 +30,11 @@ export async function processImage(
     if (options.quality) params.set('quality', String(options.quality));
     if (options.format) params.set('format', options.format);
 
-    const url = `${BASE_URL}/api/image/process?${params.toString()}`;
-
     const formData = new FormData();
     formData.append('file', new Blob([buffer]), 'image.bin');
 
-    const headers: Record<string, string> = {};
-    const traceId = context.getTraceId();
-    if (traceId) headers['X-Trace-Id'] = traceId;
-    const appName = context.getBotName();
-    if (appName) headers['X-App-Name'] = appName;
-    const lane = context.getLane();
-    if (lane) headers['x-lane'] = lane;
-
-    const response = await fetch(url, {
+    const response = await laneRouter.fetch('tool-service', `/api/image/process?${params.toString()}`, {
         method: 'POST',
-        headers,
         body: formData,
     });
 
