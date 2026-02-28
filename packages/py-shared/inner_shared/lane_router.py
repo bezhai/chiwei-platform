@@ -62,7 +62,8 @@ class LaneRouter:
             with httpx.Client(timeout=5.0) as client:
                 resp = client.get(f"{self._registry_url}/v1/routes")
                 if resp.status_code == 200:
-                    self._services = resp.json()
+                    data = resp.json()
+                    self._services = data.get("services", data)
                 else:
                     logger.warning(
                         "[LaneRouter] registry responded %d", resp.status_code

@@ -45,7 +45,8 @@ export class LaneRouter {
         try {
             const resp = await fetch(`${this.registryUrl}/v1/routes`);
             if (resp.ok) {
-                this.services = await resp.json();
+                const data = await resp.json();
+                this.services = data.services ?? data;
             } else {
                 console.warn(`[LaneRouter] registry responded ${resp.status}`);
             }
