@@ -243,6 +243,11 @@ func TestApplyDeploymentWorker(t *testing.T) {
 	if container.EnvFrom[1].ConfigMapRef == nil || container.EnvFrom[1].ConfigMapRef.Name != "ai-service-config" {
 		t.Errorf("expected second envFrom to be configmap 'ai-service-config', got %+v", container.EnvFrom[1])
 	}
+
+	// 验证 NodeSelector 调度到 app 节点
+	if deploy.Spec.Template.Spec.NodeSelector["node-role"] != "app" {
+		t.Errorf("expected nodeSelector node-role=app, got %v", deploy.Spec.Template.Spec.NodeSelector)
+	}
 }
 
 // TestApplyDeploymentWebApp 验证常规 Web App（Port>0）仍正常创建端口和无 Command。
@@ -291,6 +296,11 @@ func TestApplyDeploymentWebApp(t *testing.T) {
 	}
 	if container.EnvFrom[0].SecretRef == nil || container.EnvFrom[0].SecretRef.Name != "web-secret" {
 		t.Errorf("expected envFrom to be secret 'web-secret', got %+v", container.EnvFrom[0])
+	}
+
+	// 验证 NodeSelector 调度到 app 节点
+	if deploy.Spec.Template.Spec.NodeSelector["node-role"] != "app" {
+		t.Errorf("expected nodeSelector node-role=app, got %v", deploy.Spec.Template.Spec.NodeSelector)
 	}
 }
 

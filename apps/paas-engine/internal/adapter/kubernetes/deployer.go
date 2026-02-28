@@ -105,6 +105,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: app.ServiceAccount,
+					NodeSelector:       map[string]string{"node-role": "app"},
 					Containers:         []corev1.Container{container},
 				},
 			},
