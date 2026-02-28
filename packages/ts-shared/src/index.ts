@@ -60,6 +60,9 @@ export type {
 } from './utils';
 export { StateMachine, SSEClient, RateLimiter, TextUtils } from './utils';
 
+// Entity exports
+export { ConversationMessage, LarkUser, LarkGroupChatInfo } from './entities';
+
 // MongoDB exports
 export type { MongoConfig, IndexDefinition, BulkWriteResult } from './mongo';
 export { MongoService, getMongoService, resetMongoService, createMongoService, MongoCollection } from './mongo';

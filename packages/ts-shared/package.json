@@ -28,10 +28,18 @@
     "typescript": "^5.6.3"
   },
   "peerDependencies": {
-    "koa": "^2.14.2"
+    "koa": "^2.14.2",
+    "typeorm": "^0.3.17",
+    "pg": "^8.11.3"
   },
   "peerDependenciesMeta": {
     "koa": {
+      "optional": true
+    },
+    "typeorm": {
+      "optional": true
+    },
+    "pg": {
       "optional": true
     }
   }

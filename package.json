@@ -4,6 +4,8 @@
   "workspaces": [
     "apps/lark-server",
     "apps/lark-proxy",
+    "apps/monitor-dashboard",
+    "apps/monitor-dashboard-web",
     "packages/ts-shared",
     "packages/pixiv-client",
     "packages/lark-utils"
