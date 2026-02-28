@@ -1,0 +1,24 @@
+routes:
+  # 部署引擎 API
+  - prefix: /api/paas/
+    service: paas-engine
+    port: 8080
+    strip_prefix: /api/paas
+    rewrite_prefix: /api/v1
+
+  # Lark webhook 回调入口
+  - prefix: /webhook/
+    service: lark-proxy
+    port: 3003
+
+  # 监控面板 API（JWT 认证）
+  - prefix: /dashboard/api/
+    service: monitor-dashboard
+    port: 3002
+    strip_prefix: /dashboard/api
+    rewrite_prefix: /dashboard
+
+  # 监控面板前端 SPA（静态资源）
+  - prefix: /dashboard/
+    service: monitor-dashboard-web
+    port: 80

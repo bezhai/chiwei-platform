@@ -25,14 +25,14 @@ endef
 deploy:
 	@$(call require_app)
 	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG) -> $(LANE)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	while true; do \
-		STATUS=$$(curl -sf $(PAAS_API)/api/v1/apps/$(APP)/builds/$$BUILD_ID/ \
+		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/$(APP)/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
@@ -43,7 +43,7 @@ deploy:
 		sleep 5; \
 	done && \
 	echo ">>> 发布 $(APP) -> $(LANE), tag: $(TAG)" && \
-	curl -sf -X POST $(PAAS_API)/api/v1/releases/ \
+	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(TAG)","replicas":1}' \
@@ -54,14 +54,14 @@ deploy:
 ## 用法: make self-deploy
 self-deploy:
 	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/paas-engine/builds/ \
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	while true; do \
-		STATUS=$$(curl -sf $(PAAS_API)/api/v1/apps/paas-engine/builds/$$BUILD_ID/ \
+		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/paas-engine/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
@@ -72,14 +72,14 @@ self-deploy:
 		sleep 5; \
 	done && \
 	echo ">>> 发布 paas-engine -> prod, tag: $(TAG)" && \
-	curl -sf -X POST $(PAAS_API)/api/v1/releases/ \
+	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"app_name":"paas-engine","lane":"prod","image_tag":"$(TAG)","replicas":1}' \
 		| python3 -m json.tool && \
 	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
 	echo ">>> 发布 paas-engine -> blue, tag: $(TAG)" && \
-	curl -sf -X POST $(PAAS_API)/api/v1/releases/ \
+	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"app_name":"paas-engine","lane":"blue","image_tag":"$(TAG)","replicas":1}' \
@@ -92,7 +92,7 @@ release:
 	@$(call require_app)
 	$(if $(LANE),,$(error LANE 未指定))
 	@echo ">>> 发布 $(APP) -> $(LANE), tag: $(TAG)"
-	@curl -sf -X POST $(PAAS_API)/api/v1/releases/ \
+	@curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 	  -H 'Content-Type: application/json' \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(TAG)","replicas":1}' \
@@ -104,7 +104,7 @@ undeploy:
 	@$(call require_app)
 	$(if $(LANE),,$(error LANE 未指定))
 	@echo ">>> 删除 $(APP) 的 $(LANE) 泳道 Release"
-	@curl -sf -X DELETE "$(PAAS_API)/api/v1/releases/?app=$(APP)&lane=$(LANE)" \
+	@curl -sf -X DELETE "$(PAAS_API)/api/paas/releases/?app=$(APP)&lane=$(LANE)" \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool
 
@@ -113,12 +113,12 @@ undeploy:
 status:
 	@if [ -n "$(APP)" ]; then \
 		echo ">>> $(APP) 泳道状态"; \
-		curl -sf "$(PAAS_API)/api/v1/releases/?app=$(APP)" \
+		curl -sf "$(PAAS_API)/api/paas/releases/?app=$(APP)" \
 			-H 'X-API-Key: $(PAAS_TOKEN)' \
 			| python3 -c "import sys,json; [print(f\"  {r['lane']:10s} | {r['status']:10s} | {r['image']}\") for r in json.load(sys.stdin).get('data', [])]"; \
 	else \
 		echo ">>> 全部 Release 状态"; \
-		curl -sf "$(PAAS_API)/api/v1/releases/" \
+		curl -sf "$(PAAS_API)/api/paas/releases/" \
 			-H 'X-API-Key: $(PAAS_TOKEN)' \
 			| python3 -c "import sys,json; [print(f\"  {r['app_name']:20s} | {r['lane']:10s} | {r['status']:10s} | {r['image']}\") for r in json.load(sys.stdin).get('data', [])]"; \
 	fi
@@ -128,6 +128,6 @@ status:
 latest-build:
 	@$(call require_app)
 	@echo ">>> $(APP) 最近成功构建"
-	@curl -sf "$(PAAS_API)/api/v1/apps/$(APP)/builds/latest" \
+	@curl -sf "$(PAAS_API)/api/paas/apps/$(APP)/builds/latest" \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool
