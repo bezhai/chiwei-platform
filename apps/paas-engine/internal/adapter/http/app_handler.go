@@ -9,11 +9,12 @@ import (
 )
 
 type AppHandler struct {
-	svc *service.AppService
+	svc      *service.AppService
+	buildSvc *service.BuildService
 }
 
-func NewAppHandler(svc *service.AppService) *AppHandler {
-	return &AppHandler{svc: svc}
+func NewAppHandler(svc *service.AppService, buildSvc *service.BuildService) *AppHandler {
+	return &AppHandler{svc: svc, buildSvc: buildSvc}
 }
 
 func (h *AppHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -71,4 +72,100 @@ func (h *AppHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
+}
+
+// getImageRepoName resolves app name to its ImageRepoName.
+func (h *AppHandler) getImageRepoName(w http.ResponseWriter, r *http.Request) (string, bool) {
+	appName := chi.URLParam(r, "app")
+	app, err := h.svc.GetApp(r.Context(), appName)
+	if err != nil {
+		writeError(w, err)
+		return "", false
+	}
+	return app.ImageRepoName, true
+}
+
+func (h *AppHandler) CreateBuild(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	var req service.CreateBuildRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, err)
+		return
+	}
+	build, err := h.buildSvc.CreateBuild(r.Context(), repoName, req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, build)
+}
+
+func (h *AppHandler) ListBuilds(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	builds, err := h.buildSvc.ListBuilds(r.Context(), repoName)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, builds)
+}
+
+func (h *AppHandler) GetLatestBuild(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	build, err := h.buildSvc.GetLatestSuccessfulBuild(r.Context(), repoName)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, build)
+}
+
+func (h *AppHandler) GetBuild(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	build, err := h.buildSvc.GetBuild(r.Context(), repoName, id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, build)
+}
+
+func (h *AppHandler) CancelBuild(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.buildSvc.CancelBuild(r.Context(), repoName, id); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"cancelled": id})
+}
+
+func (h *AppHandler) GetBuildLogs(w http.ResponseWriter, r *http.Request) {
+	repoName, ok := h.getImageRepoName(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	logs, err := h.buildSvc.GetBuildLogs(r.Context(), repoName, id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
 }

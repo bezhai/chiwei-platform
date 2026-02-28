@@ -5,7 +5,6 @@
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
-# REPO       — ImageRepo 名，默认与 APP 相同
 # TAG        — 镜像 tag，默认 git short hash
 # GIT_REF    — 构建分支/tag/commit，默认当前分支
 # LANE       — 部署泳道，默认 prod
@@ -13,7 +12,6 @@
 GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
 GIT_SHORT := $(shell git rev-parse --short HEAD)
 TAG      ?= $(GIT_SHORT)
-REPO     ?= $(APP)
 LANE     ?= prod
 
 define require_app
@@ -23,18 +21,18 @@ endef
 # ---------- 命令 ----------
 
 ## 一键部署：构建 → 等待 → 发布到指定泳道
-## 用法: make deploy APP=my-service [LANE=dev] [REPO=my-repo]
+## 用法: make deploy APP=my-service [LANE=dev]
 deploy:
 	@$(call require_app)
 	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG) -> $(LANE)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/ \
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	while true; do \
-		STATUS=$$(curl -sf $(PAAS_API)/api/v1/image-repos/$(REPO)/builds/$$BUILD_ID/ \
+		STATUS=$$(curl -sf $(PAAS_API)/api/v1/apps/$(APP)/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
@@ -56,14 +54,14 @@ deploy:
 ## 用法: make self-deploy
 self-deploy:
 	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/image-repos/paas-engine/builds/ \
+	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/v1/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
 		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID" && \
 	while true; do \
-		STATUS=$$(curl -sf $(PAAS_API)/api/v1/image-repos/paas-engine/builds/$$BUILD_ID/ \
+		STATUS=$$(curl -sf $(PAAS_API)/api/v1/apps/paas-engine/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
@@ -129,7 +127,7 @@ status:
 ## 用法: make latest-build APP=xxx
 latest-build:
 	@$(call require_app)
-	@echo ">>> $(REPO) 最近成功构建"
-	@curl -sf "$(PAAS_API)/api/v1/image-repos/$(REPO)/builds/latest" \
+	@echo ">>> $(APP) 最近成功构建"
+	@curl -sf "$(PAAS_API)/api/v1/apps/$(APP)/builds/latest" \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool

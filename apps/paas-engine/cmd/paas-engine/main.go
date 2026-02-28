@@ -94,8 +94,7 @@ func main() {
 
 	// HTTP 路由
 	handler := httpadapter.NewRouter(
-		httpadapter.NewAppHandler(appSvc),
-		httpadapter.NewBuildHandler(buildSvc),
+		httpadapter.NewAppHandler(appSvc, buildSvc),
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLaneHandler(laneSvc),
 		httpadapter.NewLogHandler(logSvc),

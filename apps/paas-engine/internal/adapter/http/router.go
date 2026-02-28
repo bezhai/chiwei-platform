@@ -9,7 +9,6 @@ import (
 
 func NewRouter(
 	appH *AppHandler,
-	buildH *BuildHandler,
 	releaseH *ReleaseHandler,
 	laneH *LaneHandler,
 	logH *LogHandler,
@@ -36,6 +35,18 @@ func NewRouter(
 				r.Put("/", appH.Update)
 				r.Delete("/", appH.Delete)
 				r.Get("/logs", logH.GetLogs)
+
+				// Builds (under apps)
+				r.Route("/builds", func(r chi.Router) {
+					r.Post("/", appH.CreateBuild)
+					r.Get("/", appH.ListBuilds)
+					r.Get("/latest", appH.GetLatestBuild)
+					r.Route("/{id}", func(r chi.Router) {
+						r.Get("/", appH.GetBuild)
+						r.Post("/cancel", appH.CancelBuild)
+						r.Get("/logs", appH.GetBuildLogs)
+					})
+				})
 			})
 		})
 
@@ -69,18 +80,6 @@ func NewRouter(
 				r.Get("/", imageRepoH.Get)
 				r.Put("/", imageRepoH.Update)
 				r.Delete("/", imageRepoH.Delete)
-
-				// Builds (under image-repos)
-				r.Route("/builds", func(r chi.Router) {
-					r.Post("/", buildH.Create)
-					r.Get("/", buildH.List)
-					r.Get("/latest", buildH.GetLatest)
-					r.Route("/{id}", func(r chi.Router) {
-						r.Get("/", buildH.Get)
-						r.Post("/cancel", buildH.Cancel)
-						r.Get("/logs", buildH.GetLogs)
-					})
-				})
 			})
 		})
 	})
