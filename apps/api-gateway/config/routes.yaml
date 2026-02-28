@@ -15,8 +15,6 @@ routes:
   - prefix: /dashboard/api/
     service: monitor-dashboard
     port: 3002
-    strip_prefix: /dashboard/api
-    rewrite_prefix: /dashboard
 
   # 监控面板前端 SPA（静态资源）
   - prefix: /dashboard/
