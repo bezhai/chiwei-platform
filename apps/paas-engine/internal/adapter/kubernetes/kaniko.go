@@ -27,6 +27,7 @@ type KanikoBuildExecutor struct {
 	registrySecret     string
 	registryMirrors    []string
 	insecureRegistries []string
+	cacheRepo          string
 	httpProxy          string
 	noProxy            string
 }
@@ -37,6 +38,7 @@ type KanikoBuildConfig struct {
 	RegistrySecret     string
 	RegistryMirrors    []string
 	InsecureRegistries []string
+	CacheRepo          string
 	HttpProxy          string
 	NoProxy            string
 }
@@ -49,6 +51,7 @@ func NewKanikoBuildExecutor(client kubernetes.Interface, cfg KanikoBuildConfig) 
 		registrySecret:     cfg.RegistrySecret,
 		registryMirrors:    cfg.RegistryMirrors,
 		insecureRegistries: cfg.InsecureRegistries,
+		cacheRepo:          cfg.CacheRepo,
 		httpProxy:          cfg.HttpProxy,
 		noProxy:            cfg.NoProxy,
 	}
@@ -77,7 +80,11 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	args := []string{
 		fmt.Sprintf("--context=%s#%s", gitContext, gitRef),
 		fmt.Sprintf("--destination=%s", sub.ImageTag),
-		"--cache=false",
+	}
+	if e.cacheRepo != "" {
+		args = append(args, "--cache=true", "--cache-repo="+e.cacheRepo)
+	} else {
+		args = append(args, "--cache=false")
 	}
 
 	// 构建上下文子目录

@@ -24,6 +24,9 @@ func (s *stubBuildRepo) FindByID(_ context.Context, _ string) (*domain.Build, er
 func (s *stubBuildRepo) FindByImageRepo(_ context.Context, _ string) ([]*domain.Build, error) {
 	return nil, nil
 }
+func (s *stubBuildRepo) FindLatestSuccessful(_ context.Context, _ string) (*domain.Build, error) {
+	return nil, domain.ErrBuildNotFound
+}
 func (s *stubBuildRepo) Update(_ context.Context, _ *domain.Build) error { return nil }
 
 func TestCreateBuild_UsesImageRepoConfig(t *testing.T) {

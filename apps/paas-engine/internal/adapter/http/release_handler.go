@@ -74,3 +74,17 @@ func (h *ReleaseHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
+
+func (h *ReleaseHandler) DeleteByAppAndLane(w http.ResponseWriter, r *http.Request) {
+	appName := r.URL.Query().Get("app")
+	lane := r.URL.Query().Get("lane")
+	if appName == "" || lane == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "app and lane query params required"})
+		return
+	}
+	if err := h.svc.DeleteReleaseByAppAndLane(r.Context(), appName, lane); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": appName + "/" + lane})
+}

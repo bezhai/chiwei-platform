@@ -105,6 +105,13 @@ func (s *BuildService) GetBuild(ctx context.Context, imageRepoName, id string) (
 	return build, nil
 }
 
+func (s *BuildService) GetLatestSuccessfulBuild(ctx context.Context, imageRepoName string) (*domain.Build, error) {
+	if _, err := s.imageRepoRepo.FindByName(ctx, imageRepoName); err != nil {
+		return nil, err
+	}
+	return s.buildRepo.FindLatestSuccessful(ctx, imageRepoName)
+}
+
 func (s *BuildService) ListBuilds(ctx context.Context, imageRepoName string) ([]*domain.Build, error) {
 	if _, err := s.imageRepoRepo.FindByName(ctx, imageRepoName); err != nil {
 		return nil, err

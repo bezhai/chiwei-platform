@@ -54,6 +54,7 @@ func main() {
 			RegistrySecret:     cfg.RegistrySecret,
 			RegistryMirrors:    cfg.RegistryMirrors,
 			InsecureRegistries: cfg.InsecureRegistries,
+			CacheRepo:          cfg.KanikoCacheRepo,
 			HttpProxy:          cfg.BuildHttpProxy,
 			NoProxy:            cfg.BuildNoProxy,
 		})

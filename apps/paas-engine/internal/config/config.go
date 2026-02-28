@@ -16,6 +16,7 @@ type Config struct {
 	RegistryMirrors   []string
 	InsecureRegistries []string
 	RegistryBase      string
+	KanikoCacheRepo   string
 	BuildHttpProxy    string
 	BuildNoProxy      string
 	APIToken        string
@@ -34,6 +35,7 @@ func Load() *Config {
 		RegistryMirrors:    splitCSV(os.Getenv("REGISTRY_MIRRORS")),
 		InsecureRegistries: splitCSV(os.Getenv("INSECURE_REGISTRIES")),
 		RegistryBase:      getEnv("REGISTRY_BASE", "registry.example.com"),
+		KanikoCacheRepo:   os.Getenv("KANIKO_CACHE_REPO"),
 		BuildHttpProxy:    os.Getenv("BUILD_HTTP_PROXY"),
 		BuildNoProxy:      os.Getenv("BUILD_NO_PROXY"),
 		APIToken:        os.Getenv("API_TOKEN"),

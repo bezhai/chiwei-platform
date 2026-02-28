@@ -43,6 +43,7 @@ func NewRouter(
 		r.Route("/releases", func(r chi.Router) {
 			r.Post("/", releaseH.Create)
 			r.Get("/", releaseH.List)
+			r.Delete("/", releaseH.DeleteByAppAndLane)
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", releaseH.Get)
 				r.Put("/", releaseH.Update)
@@ -73,6 +74,7 @@ func NewRouter(
 				r.Route("/builds", func(r chi.Router) {
 					r.Post("/", buildH.Create)
 					r.Get("/", buildH.List)
+					r.Get("/latest", buildH.GetLatest)
 					r.Route("/{id}", func(r chi.Router) {
 						r.Get("/", buildH.Get)
 						r.Post("/cancel", buildH.Cancel)

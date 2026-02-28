@@ -62,6 +62,16 @@ func (h *BuildHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"cancelled": id})
 }
 
+func (h *BuildHandler) GetLatest(w http.ResponseWriter, r *http.Request) {
+	repoName := chi.URLParam(r, "repo")
+	build, err := h.svc.GetLatestSuccessfulBuild(r.Context(), repoName)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, build)
+}
+
 func (h *BuildHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	repoName := chi.URLParam(r, "repo")
 	id := chi.URLParam(r, "id")

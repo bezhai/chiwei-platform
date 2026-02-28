@@ -23,6 +23,18 @@ apps/
 - Kaniko 构建 Job 在 `paas-builds` namespace
 - 认证: `X-API-Key` header
 
+### 核心概念
+
+| 概念 | 说明 |
+|---|---|
+| **ImageRepo** | 镜像构建配置（registry 地址、git 仓库、Dockerfile 路径等），多个 App 可共享同一个 ImageRepo |
+| **App** | 运行配置（关联 ImageRepo、端口、命令、环境变量等），port=0 表示 Worker（不暴露端口） |
+| **Build** | 一次镜像构建（Kaniko Job），挂在 ImageRepo 下 |
+| **Release** | 将某个镜像 tag 部署到某个泳道，生成 K8s Deployment + Service |
+| **Lane** | 部署泳道（prod/blue/dev/feature-xxx），通过 Istio `x-lane` header 路由 |
+
+关系：`ImageRepo（构建配置）→ Build（构建镜像）`，`App（运行配置）→ Release（部署到泳道）`，App 通过 `image_repo` 字段关联 ImageRepo。
+
 ### 开发
 
 ```bash
@@ -37,18 +49,23 @@ make lint     # go vet
 通用命令通过 `APP=` 参数指定应用，适用于任意服务。
 
 ```bash
-# 普通服务一键部署（构建 → 等待 → release 到 prod）
-make deploy APP=my-service
+# 一键部署：构建 → 等待 → 发布到指定泳道（默认 prod）
+make deploy APP=my-service [LANE=dev]
 
 # paas-engine 蓝绿自部署（构建 → 等待 → prod → blue）
 make self-deploy
 
-# 分步操作
-make build APP=<app>                          # 触发构建
-make build-status APP=<app> BUILD_ID=<id>     # 查看构建状态
-make build-wait APP=<app> BUILD_ID=<id>       # 轮询等待构建完成
-make status APP=<app>                         # 查看各泳道状态
-make release APP=<app> LANE=prod              # 发布到指定泳道
+# 仅发布（不构建），用于切换泳道/回滚
+make release APP=<app> LANE=prod [TAG=zzz]
+
+# 按 app+lane 删除 Release
+make undeploy APP=<app> LANE=dev
+
+# 查看状态（不传 APP 看全部）
+make status [APP=xxx]
+
+# 查看最近成功构建
+make latest-build APP=<app>
 ```
 
 ### 关键路径
@@ -69,6 +86,7 @@ make release APP=<app> LANE=prod              # 发布到指定泳道
 | `API_TOKEN` | API 认证 token | Secret `paas-engine-secret` |
 | `DEPLOY_NAMESPACE` | 部署 namespace | App envs |
 | `KANIKO_IMAGE` | Kaniko 镜像 | App envs |
+| `KANIKO_CACHE_REPO` | Kaniko 远程层缓存 repo（空则禁用缓存） | App envs |
 | `BUILD_HTTP_PROXY` | 构建 Pod 代理 | App envs |
 | `REGISTRY_MIRRORS` | Docker Hub 镜像源 | App envs |
 | `INSECURE_REGISTRIES` | 不安全 registry | App envs |
@@ -85,15 +103,44 @@ make release APP=<app> LANE=prod              # 发布到指定泳道
 ### API
 
 ```
-GET    /healthz                                # 健康检查（无需认证）
-POST   /api/v1/apps/                           # 创建应用
-PUT    /api/v1/apps/{app}/                      # 更新应用
-POST   /api/v1/apps/{app}/builds/               # 触发构建
-POST   /api/v1/apps/{app}/builds/{id}/cancel    # 取消构建
-GET    /api/v1/apps/{app}/builds/{id}/logs      # 构建日志
-POST   /api/v1/releases/                        # 创建/更新 Release
-DELETE /api/v1/releases/{id}/                    # 删除 Release
-POST   /api/v1/lanes/                           # 创建泳道
+GET    /healthz                                        # 健康检查（无需认证）
+
+# Apps
+POST   /api/v1/apps/                                   # 创建应用
+GET    /api/v1/apps/                                    # 列出应用
+GET    /api/v1/apps/{app}/                              # 获取应用
+PUT    /api/v1/apps/{app}/                              # 更新应用
+DELETE /api/v1/apps/{app}/                              # 删除应用
+GET    /api/v1/apps/{app}/logs                          # 运行日志
+
+# Image Repos（镜像构建配置）
+POST   /api/v1/image-repos/                             # 创建 ImageRepo
+GET    /api/v1/image-repos/                             # 列出 ImageRepo
+GET    /api/v1/image-repos/{repo}/                      # 获取 ImageRepo
+PUT    /api/v1/image-repos/{repo}/                      # 更新 ImageRepo
+DELETE /api/v1/image-repos/{repo}/                      # 删除 ImageRepo
+
+# Builds（挂在 ImageRepo 下）
+POST   /api/v1/image-repos/{repo}/builds/               # 触发构建
+GET    /api/v1/image-repos/{repo}/builds/               # 列出构建
+GET    /api/v1/image-repos/{repo}/builds/latest         # 最近成功构建
+GET    /api/v1/image-repos/{repo}/builds/{id}/          # 获取构建状态
+POST   /api/v1/image-repos/{repo}/builds/{id}/cancel    # 取消构建
+GET    /api/v1/image-repos/{repo}/builds/{id}/logs      # 构建日志
+
+# Releases
+POST   /api/v1/releases/                                # 创建/更新 Release
+GET    /api/v1/releases/                                # 列出 Release
+DELETE /api/v1/releases/?app=xxx&lane=yyy               # 按 app+lane 删除 Release
+GET    /api/v1/releases/{id}/                           # 获取 Release
+PUT    /api/v1/releases/{id}/                           # 更新 Release
+DELETE /api/v1/releases/{id}/                           # 删除 Release
+
+# Lanes（泳道）
+POST   /api/v1/lanes/                                   # 创建泳道
+GET    /api/v1/lanes/                                   # 列出泳道
+GET    /api/v1/lanes/{lane}/                            # 获取泳道
+DELETE /api/v1/lanes/{lane}/                            # 删除泳道
 ```
 
 ### 注意事项

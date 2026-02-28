@@ -159,19 +159,30 @@ func (s *ReleaseService) UpdateRelease(ctx context.Context, id string, req Creat
 	return s.CreateOrUpdateRelease(ctx, req)
 }
 
+func (s *ReleaseService) DeleteReleaseByAppAndLane(ctx context.Context, appName, lane string) error {
+	release, err := s.releaseRepo.FindByAppAndLane(ctx, appName, lane)
+	if err != nil {
+		return err
+	}
+	return s.deleteRelease(ctx, release)
+}
+
 func (s *ReleaseService) DeleteRelease(ctx context.Context, id string) error {
 	release, err := s.releaseRepo.FindByID(ctx, id)
 	if err != nil {
 		return err
 	}
+	return s.deleteRelease(ctx, release)
+}
 
+func (s *ReleaseService) deleteRelease(ctx context.Context, release *domain.Release) error {
 	if s.deployer != nil {
 		if err := s.deployer.Delete(ctx, release); err != nil {
-			slog.Warn("failed to delete K8s resources", "release_id", id, "error", err)
+			slog.Warn("failed to delete K8s resources", "release_id", release.ID, "error", err)
 		}
 	}
 
-	if err := s.releaseRepo.Delete(ctx, id); err != nil {
+	if err := s.releaseRepo.Delete(ctx, release.ID); err != nil {
 		return err
 	}
 

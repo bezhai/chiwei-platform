@@ -25,6 +25,7 @@ type BuildRepository interface {
 	Save(ctx context.Context, build *domain.Build) error
 	FindByID(ctx context.Context, id string) (*domain.Build, error)
 	FindByImageRepo(ctx context.Context, imageRepoName string) ([]*domain.Build, error)
+	FindLatestSuccessful(ctx context.Context, imageRepoName string) (*domain.Build, error)
 	Update(ctx context.Context, build *domain.Build) error
 }
 
