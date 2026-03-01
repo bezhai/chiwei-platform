@@ -35,7 +35,8 @@ import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/b
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
-import { ImageProcessorService } from '@core/services/media/image-processor';
+import { laneRouter } from '@infrastructure/lane-router';
+import { context } from '@middleware/context';
 
 /**
  * Lark事件处理器类
@@ -59,16 +60,21 @@ export class LarkEventHandlers {
             }
 
             if (message.allowDownloadResource()) {
-                const uploadPhotoService = ImageProcessorService.getInstance();
+                const toolClient = laneRouter.createClient('tool-service');
+                const botName = context.getBotName();
                 for (const imageKey of message.imageKeys()) {
-                    uploadPhotoService
-                        .processImage({
-                            message_id: message.messageId,
-                            file_key: imageKey,
-                        })
-                        .catch((err) => {
-                            console.error('Error in upload image:', err);
-                        });
+                    toolClient.post(
+                        '/api/image-pipeline/process',
+                        { message_id: message.messageId, file_key: imageKey },
+                        {
+                            headers: {
+                                Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
+                                'X-App-Name': botName,
+                            },
+                        },
+                    ).catch((err) => {
+                        console.error('Error in upload image:', err);
+                    });
                 }
             }
 
