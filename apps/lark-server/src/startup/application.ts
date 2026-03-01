@@ -4,6 +4,7 @@ import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { botInitialization } from './initializers/bot';
 import { initializeLarkClients } from '@integrations/lark-client';
 import { initializeCrontabs } from '@crontab/index';
+import { rabbitmqClient } from '@integrations/rabbitmq';
 
 /**
  * 应用程序配置
@@ -45,11 +46,16 @@ export class ApplicationManager {
         await botInitialization();
         console.info('Bot initialized successfully!');
 
-        // 5. 启动所有定时任务
+        // 5. 连接 RabbitMQ（storeMessage 需要）
+        await rabbitmqClient.connect();
+        await rabbitmqClient.declareTopology();
+        console.info('RabbitMQ connected!');
+
+        // 6. 启动所有定时任务
         initializeCrontabs();
         console.info('All crontab tasks initialized!');
 
-        // 6. 显示当前加载的机器人配置
+        // 7. 显示当前加载的机器人配置
         this.logBotConfigurations();
 
         console.info('Application initialization completed!');
@@ -78,6 +84,8 @@ export class ApplicationManager {
         console.info('Gracefully shutting down...');
 
         try {
+            // 关闭 RabbitMQ 连接
+            await rabbitmqClient.close();
             // 关闭数据库连接
             await DatabaseManager.close();
             console.info('Application shutdown completed');
