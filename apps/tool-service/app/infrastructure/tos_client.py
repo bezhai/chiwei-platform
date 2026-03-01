@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import tos
+from tos.enum import HttpMethodType
 
 from app.config.config import settings
 
@@ -39,7 +40,7 @@ async def upload_file(file_name: str, data: bytes) -> None:
 async def get_file_url(file_name: str) -> str:
     def _get_url():
         return _get_sync_client().pre_signed_url(
-            http_method="GET",
+            http_method=HttpMethodType.Http_Method_Get,
             bucket=_bucket(),
             key=file_name,
             expires=int(1.5 * 60 * 60),  # 1.5 hours
