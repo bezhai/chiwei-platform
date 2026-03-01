@@ -11,13 +11,7 @@ from inner_shared import (
     split_time,
 )
 
-from .split_word import BatchExtractRequest, ExtractResult, extract_batch
-
 __all__ = [
-    # Local
-    "extract_batch",
-    "BatchExtractRequest",
-    "ExtractResult",
     # From inner_shared
     "AsyncIntervalChecker",
     "BackfillWindow",

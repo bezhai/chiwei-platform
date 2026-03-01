@@ -6,7 +6,6 @@ import cors from '@koa/cors';
 import { errorHandler } from '@middleware/error-handler';
 import { traceMiddleware } from '@middleware/trace';
 import { botContextMiddleware } from '@middleware/bot-context';
-import imageProcessRoutes from '@api/routes/image.route';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
 
@@ -90,7 +89,6 @@ export class HttpServerManager {
         this.registerHealthCheck();
         this.app.use(this.router.routes());
         this.app.use(internalLarkRoutes.routes());
-        this.app.use(imageProcessRoutes.routes());
 
         // 启动服务器
         this.app.listen(this.config.port);
@@ -105,8 +103,6 @@ export class HttpServerManager {
         console.info('Available routes:');
         console.info('  - /api/health (health check)');
         console.info('  - /api/internal/lark-event (lane-proxy forwarded events)');
-        console.info('  - /api/image/process (image processing)');
-        console.info('  - /api/image/upload-base64 (base64 image upload)');
     }
 
     /**

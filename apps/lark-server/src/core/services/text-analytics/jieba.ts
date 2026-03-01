@@ -3,7 +3,7 @@ import _ from 'lodash';
 import { requestWithRetry } from '@inner/shared';
 import { laneRouter } from '@infrastructure/lane-router';
 
-const agentClient = laneRouter.createClient('agent-service');
+const toolClient = laneRouter.createClient('tool-service');
 
 /**
  * 检查一个词是否有意义
@@ -31,7 +31,7 @@ async function extractBatchWithWeight(
 ): Promise<{ text: string; keywords: { word: string; weight: number }[] }[]> {
     try {
         const response = await requestWithRetry(
-            () => agentClient.post(
+            () => toolClient.post(
                 '/extract_batch',
                 {
                     texts,

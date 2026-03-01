@@ -40,10 +40,10 @@ class ImageProcessClient:
         try:
             request_data = {"message_id": message_id, "file_key": file_key}
 
-            base_url = lane_router.base_url("lark-server")
+            base_url = lane_router.base_url("tool-service")
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{base_url}/api/image/process",
+                    f"{base_url}/api/image-pipeline/process",
                     json=request_data,
                     headers={
                         "Content-Type": "application/json",
@@ -96,10 +96,10 @@ class ImageProcessClient:
             # logger.info(f"上传base64图片到飞书，base64_data: {base64_data}")
             request_data = {"base64_data": base64_data}
 
-            base_url = lane_router.base_url("lark-server")
+            base_url = lane_router.base_url("tool-service")
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{base_url}/api/image/upload-base64",
+                    f"{base_url}/api/image-pipeline/upload-base64",
                     json=request_data,
                     headers={
                         "Content-Type": "application/json",
