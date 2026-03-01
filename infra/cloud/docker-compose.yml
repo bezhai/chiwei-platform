@@ -1,0 +1,49 @@
+# 云服务器基础设施
+# 部署在轻量应用服务器上，为 Cronjob 提供元数据存储服务
+
+services:
+  web:
+    image: "chiwiio/bot-website"
+    ports:
+      - "80:80"
+    restart: always
+
+  mongo:
+    image: "mongo:7"
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    restart: always
+
+  redis:
+    image: redis:7.4
+    restart: always
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./conf/redis.conf:/etc/redis/redis.conf
+      - redis_data:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    privileged: true
+
+  mysql:
+    image: mysql:8.0.36-debian
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
+volumes:
+  mongo_data:
+  mysql_data:
+  redis_data:

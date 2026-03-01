@@ -1,0 +1,21 @@
+# Infisical Secrets Operator Helm values.
+#
+# Install:
+#   helm install infisical-secrets-operator infisical-helm-charts/secrets-operator \
+#     --namespace infisical \
+#     -f infra/k8s/infisical/operator-values.yaml
+
+# Point operator to cluster-internal Infisical instance
+infisicalAddress: http://infisical-infisical-standalone-infisical.infisical.svc.cluster.local:8080
+
+# Operator resources
+resources:
+  requests:
+    memory: 64Mi
+    cpu: 50m
+  limits:
+    memory: 128Mi
+    cpu: 100m
+
+nodeSelector:
+  node-role: infra

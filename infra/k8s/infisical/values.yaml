@@ -1,0 +1,48 @@
+# Infisical Standalone Helm values — generic config (no secrets).
+# Sensitive values go in values.local.yaml (gitignored).
+#
+# Chart: infisical-helm-charts/infisical-standalone
+#
+# Install:
+#   helm install infisical infisical-helm-charts/infisical-standalone \
+#     --namespace infisical --create-namespace \
+#     -f infra/k8s/infisical/values.yaml \
+#     -f infra/k8s/infisical/values.local.yaml
+
+# -- Disable bundled sub-charts (reuse cluster PG & Redis) --
+postgresql:
+  enabled: false
+redis:
+  enabled: false
+
+# -- Infisical backend --
+infisical:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: infisical/infisical
+    tag: "v0.151.0"
+    pullPolicy: IfNotPresent
+
+  # Reference to K8s Secret containing all env vars (ENCRYPTION_KEY, AUTH_SECRET, DB_CONNECTION_URI, etc.)
+  kubeSecretRef: "infisical-secrets"
+
+  service:
+    type: NodePort
+    nodePort: "30040"
+
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 100m
+    limits:
+      memory: 1Gi
+      cpu: 500m
+
+  nodeSelector:
+    node-role: infra
+
+# -- Disable ingress (use NodePort directly) --
+ingress:
+  enabled: false

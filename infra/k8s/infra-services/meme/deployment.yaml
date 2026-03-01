@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meme
+  namespace: prod
+  labels:
+    app: meme
+    tier: infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meme
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: meme
+        tier: infra
+    spec:
+      nodeSelector:
+        node-role: infra
+      containers:
+        - name: meme
+          image: chiwiio/meme-generator:main
+          ports:
+            - containerPort: 2233
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /memes/keys
+              port: 2233
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /memes/keys
+              port: 2233
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3

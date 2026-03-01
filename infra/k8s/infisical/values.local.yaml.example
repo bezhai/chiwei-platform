@@ -1,0 +1,30 @@
+# Copy this file to values.local.yaml and fill in real values.
+# values.local.yaml is gitignored — never commit it.
+#
+# Generate secrets:
+#   ENCRYPTION_KEY: openssl rand -hex 16
+#   AUTH_SECRET:    openssl rand -base64 32
+#
+# Bootstrap backup (SOPS + age):
+#   age-keygen -o infra/k8s/infisical/age-key.txt
+#   sops --encrypt --age $(cat infra/k8s/infisical/age-key.txt | grep "public key" | cut -d: -f2 | tr -d ' ') \
+#     infra/k8s/infisical/values.local.yaml > infra/k8s/infisical/values.local.yaml.enc
+#
+# After filling this file, create the K8s Secret:
+#   kubectl create namespace infisical --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n infisical create secret generic infisical-secrets \
+#     --from-literal=ENCRYPTION_KEY=<value> \
+#     --from-literal=AUTH_SECRET=<value> \
+#     --from-literal=DB_CONNECTION_URI='postgres://<USER>:<PASS>@postgres.prod.svc.cluster.local:5432/infisical' \
+#     --from-literal=REDIS_URL='redis://:<PASS>@redis.prod.svc.cluster.local:6379' \
+#     --from-literal=SITE_URL='http://<INFRA_NODE_IP>:30040' \
+#     --from-literal=TELEMETRY_ENABLED=false \
+#     --from-literal=NODE_ENV=production
+
+# These values are for reference / SOPS backup.
+# The actual runtime config is in K8s Secret "infisical-secrets".
+ENCRYPTION_KEY: "<CHANGE_ME>"       # openssl rand -hex 16
+AUTH_SECRET: "<CHANGE_ME>"          # openssl rand -base64 32
+SITE_URL: "http://<INFRA_NODE_IP>:30040"
+DB_CONNECTION_URI: "postgres://<PG_USER>:<PG_PASSWORD>@postgres.prod.svc.cluster.local:5432/infisical"
+REDIS_URL: "redis://:<REDIS_PASSWORD>@redis.prod.svc.cluster.local:6379"

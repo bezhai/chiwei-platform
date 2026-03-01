@@ -1,0 +1,68 @@
+# Harbor Helm values — generic config (no secrets).
+# Sensitive values (IP, password) go in values.local.yaml (gitignored).
+#
+# Install:
+#   helm install harbor harbor/harbor -n harbor --create-namespace \
+#     -f infra/k8s/harbor/values.yaml -f infra/k8s/harbor/values.local.yaml
+
+expose:
+  type: nodePort
+  tls:
+    enabled: true
+    certSource: auto
+  nodePort:
+    ports:
+      http:
+        port: 80
+        nodePort: 30001
+      https:
+        port: 443
+        nodePort: 30002
+
+# Override in values.local.yaml with real host
+externalURL: https://REPLACE_ME:30002
+
+persistence:
+  enabled: true
+  persistentVolumeClaim:
+    registry:
+      storageClass: local-path
+      size: 100Gi
+    database:
+      storageClass: local-path
+      size: 5Gi
+    redis:
+      storageClass: local-path
+      size: 2Gi
+    jobservice:
+      jobLog:
+        storageClass: local-path
+        size: 2Gi
+
+# Disable unnecessary components
+trivy:
+  enabled: false
+notary:
+  enabled: false
+
+# Pin all components to infra node
+core:
+  nodeSelector:
+    node-role: infra
+portal:
+  nodeSelector:
+    node-role: infra
+registry:
+  nodeSelector:
+    node-role: infra
+database:
+  internal:
+    nodeSelector:
+      node-role: infra
+redis:
+  internal:
+    nodeSelector:
+      node-role: infra
+jobservice:
+  nodeSelector:
+    node-role: infra

@@ -1,0 +1,14 @@
+# Copy this file to values.local.yaml and fill in real values.
+# values.local.yaml is gitignored — never commit it.
+
+externalURL: https://harbor.local:30002
+harborAdminPassword: "<CHANGE_ME>"
+
+expose:
+  tls:
+    enabled: true
+    certSource: auto
+    auto:
+      commonName: harbor.local
+      subjectAltNames:
+        - harbor.local

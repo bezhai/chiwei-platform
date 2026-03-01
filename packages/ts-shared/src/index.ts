@@ -60,7 +60,7 @@ export type {
 } from './utils';
 export { StateMachine, SSEClient, RateLimiter, TextUtils } from './utils';
 
-// Entity exports
+// Entity exports (requires typeorm as peer dependency)
 export { ConversationMessage, LarkUser, LarkGroupChatInfo } from './entities';
 
 // MongoDB exports

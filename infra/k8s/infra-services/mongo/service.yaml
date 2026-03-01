@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: prod
+  labels:
+    app: mongodb
+    tier: infra
+spec:
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+      protocol: TCP

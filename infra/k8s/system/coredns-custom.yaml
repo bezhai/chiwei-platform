@@ -1,0 +1,30 @@
+# CoreDNS custom zone for harbor.local
+#
+# k3s 管理的 CoreDNS ConfigMap（kube-system/coredns）不可直接修改（被 objectset.rio.cattle.io 注解保护，
+# 写入后会被自动还原）。k3s CoreDNS 支持通过 coredns-custom ConfigMap 扩展配置：
+#   - .override 文件：追加到主 server block → 会与已有 hosts 插件冲突（每个 block 只能有一个 hosts）
+#   - .server 文件：创建独立的 server block → 正确做法
+#
+# 此配置将 harbor.local 解析到集群 infra 节点 IP（Harbor NodePort 所在节点）。
+# Kaniko 构建时需要将镜像推送到 harbor.local:30002，Pod 内 DNS 必须能解析该域名。
+#
+# 应用方式（不由 ArgoCD 管理，需手动执行）：
+#   make apply-coredns-custom
+#
+# 验证：
+#   kubectl run dns-test --rm -it --restart=Never --image=busybox -- nslookup harbor.local
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  harbor.server: |
+    harbor.local:53 {
+        hosts {
+          10.37.6.235 harbor.local
+          fallthrough
+        }
+        cache 30
+        log
+    }

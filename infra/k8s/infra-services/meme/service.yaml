@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: meme
+  namespace: prod
+  labels:
+    app: meme
+    tier: infra
+spec:
+  selector:
+    app: meme
+  ports:
+    - port: 2233
+      targetPort: 2233
+      protocol: TCP

@@ -28,7 +28,7 @@ export interface LaneRouterOptions {
  */
 export class LaneRouter {
     private services: Record<string, ServiceInfo> = {};
-    private timer: Timer | null = null;
+    private timer: ReturnType<typeof setInterval> | null = null;
     private registryUrl: string;
     private pollInterval: number;
 

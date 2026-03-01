@@ -1,0 +1,44 @@
+grafana:
+  # adminPassword set via --set grafana.adminPassword=... at install time
+  service:
+    type: NodePort
+    nodePort: 30030
+  persistence:
+    enabled: true
+    storageClassName: ""
+    existingClaim: pvc-grafana
+  nodeSelector:
+    node-role: infra
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki-gateway.monitoring.svc.cluster.local
+      access: proxy
+      isDefault: false
+
+prometheus:
+  prometheusSpec:
+    nodeSelector:
+      node-role: infra
+    securityContext:
+      runAsUser: 0
+      runAsGroup: 0
+      fsGroup: 0
+      runAsNonRoot: false
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ""
+          volumeName: pv-prometheus
+          resources:
+            requests:
+              storage: 10Gi
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+alertmanager:
+  enabled: false

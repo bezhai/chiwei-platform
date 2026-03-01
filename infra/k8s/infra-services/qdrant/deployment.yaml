@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  namespace: prod
+  labels:
+    app: qdrant
+    tier: infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: qdrant
+        tier: infra
+    spec:
+      nodeSelector:
+        node-role: infra
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.16.3
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          env:
+            - name: QDRANT__SERVICE__API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-env
+                  key: QDRANT_SERVICE_API_KEY
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6333
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 6333
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+      volumes:
+        - name: qdrant-data
+          persistentVolumeClaim:
+            claimName: pvc-qdrant
