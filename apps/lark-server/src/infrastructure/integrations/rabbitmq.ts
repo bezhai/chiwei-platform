@@ -5,9 +5,30 @@ const DLX_NAME = 'post_processing_dlx';
 const DLQ_NAME = 'dead_letters';
 
 export const QUEUE_RECALL = 'recall';
+export const QUEUE_VECTORIZE = 'vectorize';
 export const RK_RECALL = 'action.recall';
+export const RK_VECTORIZE = 'task.vectorize';
+
+const NON_PROD_EXPIRES_MS = 86_400_000;
 
 export type MessageHandler = (msg: ConsumeMessage) => Promise<void>;
+
+/** 获取当前泳道：读环境变量，prod/空返回 undefined */
+export function getLane(): string | undefined {
+    const lane = process.env.LANE;
+    if (!lane || lane === 'prod') return undefined;
+    return lane;
+}
+
+/** 泳道队列名：base 或 base_{lane} */
+export function laneQueue(base: string, lane?: string): string {
+    return lane ? `${base}_${lane}` : base;
+}
+
+/** 泳道 routing key：base 或 base.{lane} */
+export function laneRK(base: string, lane?: string): string {
+    return lane ? `${base}.${lane}` : base;
+}
 
 class RabbitMQClient {
     private static instance: RabbitMQClient;
@@ -51,6 +72,7 @@ class RabbitMQClient {
 
     async declareTopology(): Promise<void> {
         const ch = this.getChannel();
+        const lane = getLane();
 
         // DLX + DLQ
         await ch.assertExchange(DLX_NAME, 'fanout', { durable: true });
@@ -63,14 +85,23 @@ class RabbitMQClient {
             arguments: { 'x-delayed-type': 'topic' },
         });
 
-        // recall queue
-        await ch.assertQueue(QUEUE_RECALL, {
-            durable: true,
-            arguments: { 'x-dead-letter-exchange': DLX_NAME },
-        });
-        await ch.bindQueue(QUEUE_RECALL, EXCHANGE_NAME, RK_RECALL);
+        // 非 prod 队列额外参数
+        const extraArgs: Record<string, unknown> = lane
+            ? { 'x-expires': NON_PROD_EXPIRES_MS }
+            : {};
+        const baseArgs = { 'x-dead-letter-exchange': DLX_NAME, ...extraArgs };
 
-        console.info('[RabbitMQ] topology declared');
+        // recall queue
+        const recallQ = laneQueue(QUEUE_RECALL, lane);
+        await ch.assertQueue(recallQ, { durable: true, arguments: baseArgs });
+        await ch.bindQueue(recallQ, EXCHANGE_NAME, laneRK(RK_RECALL, lane));
+
+        // vectorize queue
+        const vectorizeQ = laneQueue(QUEUE_VECTORIZE, lane);
+        await ch.assertQueue(vectorizeQ, { durable: true, arguments: baseArgs });
+        await ch.bindQueue(vectorizeQ, EXCHANGE_NAME, laneRK(RK_VECTORIZE, lane));
+
+        console.info(`[RabbitMQ] topology declared (lane=${lane || 'prod'})`);
     }
 
     async publish(
@@ -78,14 +109,21 @@ class RabbitMQClient {
         body: Record<string, unknown>,
         delayMs?: number,
         headers?: Record<string, unknown>,
+        lane?: string,
     ): Promise<void> {
         const ch = this.getChannel();
+
+        // 默认取当前泳道；传入 lane 则使用传入值
+        const effectiveLane =
+            lane !== undefined ? (lane === 'prod' ? undefined : lane) : getLane();
+        const actualRK = laneRK(routingKey, effectiveLane);
+
         const msgHeaders: Record<string, unknown> = { ...headers };
         if (delayMs !== undefined) {
             msgHeaders['x-delay'] = delayMs;
         }
 
-        ch.publish(EXCHANGE_NAME, routingKey, Buffer.from(JSON.stringify(body)), {
+        ch.publish(EXCHANGE_NAME, actualRK, Buffer.from(JSON.stringify(body)), {
             persistent: true,
             contentType: 'application/json',
             headers: Object.keys(msgHeaders).length > 0 ? msgHeaders : undefined,

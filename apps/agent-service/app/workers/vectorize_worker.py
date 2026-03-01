@@ -1,30 +1,31 @@
 """
-向量化 Worker - 消费 Redis Stream 中的消息并进行向量化处理
-
-使用 Redis Stream + Consumer Group 实现可靠的消息队列：
-1. 消息持久化 - 消息写入后不会丢失
-2. ACK 机制 - 只有消费者确认后消息才算处理完成
-3. Pending 重试 - 消费者挂掉后，pending 消息可以被其他消费者接管
+向量化 Worker - 消费 RabbitMQ 中的向量化任务
 
 启动命令：
     uv run python -m app.workers.vectorize_worker
 """
 
 import asyncio
+import json
 import logging
-import os
 import signal
 import time
 import uuid
 
+from aio_pika.abc import AbstractIncomingMessage
 from inner_shared.logger import setup_logging
-from redis.asyncio import Redis
-from redis.exceptions import ResponseError
 from sqlalchemy import update
 from sqlalchemy.future import select
 
 from app.agents import InstructionBuilder, create_client
 from app.clients.image_client import image_client
+from app.clients.rabbitmq import (
+    QUEUE_VECTORIZE,
+    RK_VECTORIZE,
+    RabbitMQClient,
+    _current_lane,
+    _lane_queue,
+)
 from app.clients.redis import AsyncRedisClient
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage, LarkGroupChatInfo
@@ -32,15 +33,6 @@ from app.services.qdrant import qdrant_service
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
-
-# Redis Stream 配置
-STREAM_NAME = "vectorize_stream"
-GROUP_NAME = "vectorize_workers"
-CONSUMER_NAME = f"worker-{os.getpid()}"
-
-# 重试配置
-MAX_RETRIES = 3  # 最大重试次数
-RETRY_DELAY_MS = 60000  # 重试间隔（毫秒）
 
 # 并发配置
 CONCURRENCY_LIMIT = 10  # 并发处理数量
@@ -240,7 +232,7 @@ async def vectorize_message(message: ConversationMessage) -> bool:
     return True
 
 
-async def process_message(redis: Redis, stream_id: str, message_id: str) -> None:
+async def process_message(message_id: str) -> None:
     """处理单条消息（带并发控制）"""
     async with _get_semaphore():
         try:
@@ -248,7 +240,6 @@ async def process_message(redis: Redis, stream_id: str, message_id: str) -> None
             message = await get_message_by_id(message_id)
             if not message:
                 logger.warning(f"消息 {message_id} 不存在，跳过")
-                await redis.xack(STREAM_NAME, GROUP_NAME, stream_id)
                 return
 
             # 2. 检查状态，已处理过的直接跳过
@@ -256,7 +247,6 @@ async def process_message(redis: Redis, stream_id: str, message_id: str) -> None
                 logger.debug(
                     f"消息 {message_id} 已处理（{message.vector_status}），跳过"
                 )
-                await redis.xack(STREAM_NAME, GROUP_NAME, stream_id)
                 return
 
             # 3. 执行向量化
@@ -270,99 +260,31 @@ async def process_message(redis: Redis, stream_id: str, message_id: str) -> None
                 await update_vector_status(message_id, "skipped")
                 logger.info(f"消息 {message_id} 内容为空，已跳过")
 
-            # 5. ACK 消息
-            await redis.xack(STREAM_NAME, GROUP_NAME, stream_id)
-
         except Exception as e:
             logger.error(f"消息 {message_id} 向量化失败: {e}")
-            # 更新状态为失败，但不 ACK，消息会保留在 pending 中
             await update_vector_status(message_id, "failed")
 
 
-async def consume_stream() -> None:
-    """消费 Redis Stream"""
-    redis = AsyncRedisClient.get_instance()
+async def handle_vectorize(message: AbstractIncomingMessage) -> None:
+    """RabbitMQ 消费回调"""
+    async with message.process(requeue=False):
+        body = json.loads(message.body)
+        message_id = body.get("message_id")
+        if not message_id:
+            logger.warning("收到无 message_id 的向量化消息，跳过")
+            return
+        await process_message(message_id)
 
-    # 创建消费者组（如果不存在）
-    try:
-        await redis.xgroup_create(STREAM_NAME, GROUP_NAME, id="0", mkstream=True)
-        logger.info(f"创建消费者组 {GROUP_NAME}")
-    except ResponseError as e:
-        if "BUSYGROUP" not in str(e):
-            raise
-        # 组已存在，忽略
 
-    logger.info(f"启动向量化 Worker: {CONSUMER_NAME}")
-
-    while _running:
-        try:
-            # 1. 先处理 pending 消息（之前消费失败的）
-            pending_info = await redis.xpending(STREAM_NAME, GROUP_NAME)
-            if pending_info and pending_info["pending"] > 0:
-                # 获取 pending 消息
-                pending_messages = await redis.xpending_range(
-                    STREAM_NAME, GROUP_NAME, min="-", max="+", count=10
-                )
-                for pending in pending_messages:
-                    stream_id = pending["message_id"]
-                    times_delivered = pending["times_delivered"]
-
-                    # 检查是否超过最大重试次数
-                    if times_delivered > MAX_RETRIES:
-                        logger.warning(
-                            f"消息 {stream_id} 已重试 {times_delivered} 次，放弃重试"
-                        )
-                        # 超过重试次数，ACK 消息避免无限堆积
-                        await redis.xack(STREAM_NAME, GROUP_NAME, stream_id)
-                        continue
-
-                    # 如果消息已经 pending 超过重试间隔，尝试重新处理
-                    if pending["time_since_delivered"] > RETRY_DELAY_MS:
-                        # 认领消息
-                        claimed = await redis.xclaim(
-                            STREAM_NAME,
-                            GROUP_NAME,
-                            CONSUMER_NAME,
-                            min_idle_time=RETRY_DELAY_MS,
-                            message_ids=[stream_id],
-                        )
-                        for claimed_id, data in claimed:
-                            if data and "message_id" in data:
-                                logger.info(
-                                    f"重试消息 {data['message_id']}，"
-                                    f"第 {times_delivered} 次尝试"
-                                )
-                                await process_message(
-                                    redis, claimed_id, data["message_id"]
-                                )
-
-            # 2. 读取新消息
-            messages = await redis.xreadgroup(
-                GROUP_NAME,
-                CONSUMER_NAME,
-                streams={STREAM_NAME: ">"},
-                count=10,
-                block=5000,  # 阻塞 5 秒
-            )
-
-            if messages:
-                # 收集所有待处理的任务
-                tasks = []
-                for _stream_name, entries in messages:
-                    for stream_id, data in entries:
-                        if data and "message_id" in data:
-                            tasks.append(
-                                process_message(redis, stream_id, data["message_id"])
-                            )
-                # 并发执行（并发数由 semaphore 控制）
-                if tasks:
-                    await asyncio.gather(*tasks)
-
-        except Exception as e:
-            logger.error(f"消费循环异常: {e}")
-            await asyncio.sleep(5)  # 出错后等待重试
-
-    logger.info("Worker 已停止")
+async def start_vectorize_consumer() -> None:
+    """连接 RabbitMQ 并消费向量化队列"""
+    client = RabbitMQClient.get_instance()
+    await client.connect()
+    await client.declare_topology()
+    lane = _current_lane()
+    queue = _lane_queue(QUEUE_VECTORIZE, lane)
+    await client.consume(queue, handle_vectorize)
+    logger.info("Vectorize consumer started (queue=%s)", queue)
 
 
 # ==================== 定时任务：捞取 pending 消息 ====================
@@ -376,14 +298,14 @@ PENDING_SCAN_DAYS = 7  # 只捞取 N 天内的消息
 
 async def scan_pending_messages() -> int:
     """
-    扫描数据库中 pending 状态的消息，推送到 Redis Stream
+    扫描数据库中 pending 状态的消息，推送到 RabbitMQ
 
     Returns:
         int: 推送的消息数量
     """
     from datetime import datetime, timedelta
 
-    redis = AsyncRedisClient.get_instance()
+    client = RabbitMQClient.get_instance()
 
     # 计算 7 天前的时间戳（毫秒）
     cutoff_time = datetime.now() - timedelta(days=PENDING_SCAN_DAYS)
@@ -408,9 +330,9 @@ async def scan_pending_messages() -> int:
         if not message_ids:
             break
 
-        # 推送到 Redis Stream
+        # 推送到 RabbitMQ
         for message_id in message_ids:
-            await redis.xadd(STREAM_NAME, {"message_id": message_id})
+            await client.publish(RK_VECTORIZE, {"message_id": message_id})
             total_pushed += 1
 
         logger.info(f"已推送 {len(message_ids)} 条 pending 消息到队列")
@@ -461,7 +383,13 @@ async def main():
     # 配置日志（JSON 格式 + 文件输出，供 ELK 采集）
     setup_logging(log_dir="/logs/agent-service", log_file="vectorize-worker.log")
 
-    await consume_stream()
+    await start_vectorize_consumer()
+
+    # 保持进程运行
+    while _running:
+        await asyncio.sleep(1)
+
+    logger.info("Worker 已停止")
 
 
 if __name__ == "__main__":

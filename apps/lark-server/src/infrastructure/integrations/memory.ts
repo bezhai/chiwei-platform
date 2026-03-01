@@ -1,10 +1,7 @@
 import { ChatMessage } from 'types/chat';
 import { ConversationMessageRepository } from 'infrastructure/dal/repositories/repositories';
-import { xadd } from 'infrastructure/cache/redis-client';
 import { context } from '@middleware/context';
-
-// Redis Stream 名称，用于向量化任务队列
-const VECTORIZE_STREAM = 'vectorize_stream';
+import { rabbitmqClient, RK_VECTORIZE } from '@integrations/rabbitmq';
 
 /**
  * 判断消息内容是否为空
@@ -15,11 +12,11 @@ function isEmptyContent(content: string | undefined | null): boolean {
 }
 
 /**
- * 存储消息到 PostgreSQL 并推送向量化任务到 Redis Stream
+ * 存储消息到 PostgreSQL 并推送向量化任务到 RabbitMQ
  *
  * 解耦设计：
  * 1. 消息直接写入 PostgreSQL，不依赖 ai-service
- * 2. 向量化任务通过 Redis Stream 异步处理
+ * 2. 向量化任务通过 RabbitMQ 异步处理
  * 3. 即使 ai-service 不可用，消息也不会丢失
  * 4. 空消息不推送到向量化队列，直接标记为 skipped
  */
@@ -47,9 +44,16 @@ export async function storeMessage(message: ChatMessage): Promise<void> {
             bot_name: botName,
         });
 
-        // 2. 仅非空消息推送向量化任务到 Redis Stream
+        // 2. 仅非空消息推送向量化任务到 RabbitMQ
         if (!isEmpty) {
-            await xadd(VECTORIZE_STREAM, '*', 'message_id', message.message_id);
+            const lane = context.getLane() || undefined;
+            await rabbitmqClient.publish(
+                RK_VECTORIZE,
+                { message_id: message.message_id, lane: lane },
+                undefined,
+                undefined,
+                lane,
+            );
         }
     } catch (error: unknown) {
         console.error('Failed to store message:', (error as Error).message);

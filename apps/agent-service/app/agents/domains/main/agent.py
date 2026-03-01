@@ -311,6 +311,7 @@ async def _publish_post_check(
     """发布 post safety check 消息到 RabbitMQ"""
     try:
         from app.clients.rabbitmq import RK_SAFETY_CHECK, RabbitMQClient
+        from app.utils.middlewares.trace import get_lane
 
         client = RabbitMQClient.get_instance()
         await client.publish(
@@ -320,6 +321,7 @@ async def _publish_post_check(
                 "response_text": response_text,
                 "chat_id": chat_id,
                 "trigger_message_id": trigger_message_id,
+                "lane": get_lane(),
             },
         )
         logger.info(f"Published post safety check: session_id={session_id}")
