@@ -45,10 +45,11 @@ export const context = {
     /**
      * 创建带有traceId和botName的上下文数据
      */
-    createContext: (botName?: string, traceId?: string): RequestContext => {
+    createContext: (botName?: string, traceId?: string, lane?: string): RequestContext => {
         return {
             traceId: traceId || uuidv4(),
             botName,
+            lane,
         };
     },
 };
