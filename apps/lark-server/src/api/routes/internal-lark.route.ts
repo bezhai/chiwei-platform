@@ -42,6 +42,7 @@ router.post('/api/internal/lark-event', async (ctx: Context) => {
     // 2. 从 header 提取上下文
     const botName = ctx.get('X-App-Name');
     const traceId = ctx.get('x-trace-id');
+    const lane = ctx.get('x-lane') || undefined;
 
     // 3. 从 body 提取事件数据
     const { event_type, params } = ctx.request.body as {
@@ -64,7 +65,7 @@ router.post('/api/internal/lark-event', async (ctx: Context) => {
     ensureHandlersInitialized();
 
     // 6. 在 bot 上下文中异步执行 handler
-    const contextData = context.createContext(botName || undefined, traceId || undefined);
+    const contextData = context.createContext(botName || undefined, traceId || undefined, lane);
     context.run(contextData, async () => {
         const handler = EventRegistry.getHandlerByEventType(event_type);
         if (handler) {

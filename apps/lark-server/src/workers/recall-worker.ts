@@ -18,7 +18,13 @@ LoggerFactory.createLogger({
 
 import AppDataSource from 'ormconfig';
 import { AgentResponse } from '@entities/agent-response';
-import { rabbitmqClient, RK_RECALL, QUEUE_RECALL } from '@integrations/rabbitmq';
+import {
+    rabbitmqClient,
+    RK_RECALL,
+    QUEUE_RECALL,
+    getLane,
+    laneQueue,
+} from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { initializeLarkClients } from '@integrations/lark-client';
 import { deleteMessage } from '@lark-client';
@@ -34,6 +40,7 @@ interface RecallPayload {
     trigger_message_id?: string;
     reason: string;
     detail?: string;
+    lane?: string;
 }
 
 async function handleRecall(msg: ConsumeMessage): Promise<void> {
@@ -59,6 +66,7 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
                 payload as unknown as Record<string, unknown>,
                 delayMs,
                 { 'x-retry-count': retryCount + 1 },
+                payload.lane,
             );
             rabbitmqClient.ack(msg);
             return;
@@ -135,9 +143,11 @@ async function main(): Promise<void> {
     await rabbitmqClient.declareTopology();
     console.info('[RecallWorker] RabbitMQ connected');
 
-    // 4. 开始消费
-    await rabbitmqClient.consume(QUEUE_RECALL, handleRecall);
-    console.info('[RecallWorker] Consuming recall queue, waiting for messages...');
+    // 4. 开始消费（按泳道）
+    const lane = getLane();
+    const queue = laneQueue(QUEUE_RECALL, lane);
+    await rabbitmqClient.consume(queue, handleRecall);
+    console.info(`[RecallWorker] Consuming queue: ${queue}, waiting for messages...`);
 }
 
 main().catch((err) => {

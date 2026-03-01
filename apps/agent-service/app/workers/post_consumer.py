@@ -17,6 +17,8 @@ from app.clients.rabbitmq import (
     QUEUE_SAFETY_CHECK,
     RK_RECALL,
     RabbitMQClient,
+    _current_lane,
+    _lane_queue,
 )
 from app.orm.base import AsyncSessionLocal
 
@@ -56,8 +58,9 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
         response_text = body.get("response_text", "")
         chat_id = body.get("chat_id")
         trigger_message_id = body.get("trigger_message_id")
+        lane = body.get("lane")  # 从消息 payload 中读取泳道
 
-        logger.info("Post safety check: session_id=%s", session_id)
+        logger.info("Post safety check: session_id=%s, lane=%s", session_id, lane)
 
         result = await run_post_safety(response_text)
         checked_at = datetime.now(UTC).isoformat()
@@ -77,7 +80,9 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
                     "trigger_message_id": trigger_message_id,
                     "reason": result.reason,
                     "detail": result.detail,
+                    "lane": lane,
                 },
+                lane=lane,
             )
         else:
             logger.info("Post safety passed: session_id=%s", session_id)
@@ -93,5 +98,7 @@ async def start_post_consumer() -> None:
     client = RabbitMQClient.get_instance()
     await client.connect()
     await client.declare_topology()
-    await client.consume(QUEUE_SAFETY_CHECK, handle_safety_check)
-    logger.info("Post safety consumer started")
+    lane = _current_lane()
+    queue = _lane_queue(QUEUE_SAFETY_CHECK, lane)
+    await client.consume(queue, handle_safety_check)
+    logger.info("Post safety consumer started (queue=%s)", queue)
