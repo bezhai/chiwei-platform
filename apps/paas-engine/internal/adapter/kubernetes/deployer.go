@@ -72,6 +72,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	if release.Version != "" {
 		mergedEnvs["VERSION"] = release.Version
 	}
+	mergedEnvs["LANE"] = release.Lane
 	envVars := envsToK8s(mergedEnvs)
 	replicas := release.Replicas
 
