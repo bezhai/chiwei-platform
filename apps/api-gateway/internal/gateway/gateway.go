@@ -15,17 +15,24 @@ import (
 // Gateway is the core HTTP handler that routes requests based on path prefix
 // and x-lane header, then proxies to the appropriate upstream service.
 type Gateway struct {
-	matcher  *route.Matcher
-	registry *registry.Client
-	timeout  time.Duration
+	matcher   *route.Matcher
+	registry  *registry.Client
+	timeout   time.Duration
+	transport *http.Transport
 }
 
 // New creates a Gateway with the given matcher, registry client, and proxy timeout.
 func New(matcher *route.Matcher, reg *registry.Client, timeout time.Duration) *Gateway {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 100
+	t.MaxIdleConnsPerHost = 100
+	t.ResponseHeaderTimeout = timeout
+
 	return &Gateway{
-		matcher:  matcher,
-		registry: reg,
-		timeout:  timeout,
+		matcher:   matcher,
+		registry:  reg,
+		timeout:   timeout,
+		transport: t,
 	}
 }
 
@@ -73,9 +80,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				req.Header.Set("User-Agent", "")
 			}
 		},
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: g.timeout,
-		},
+		Transport: g.transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Error("proxy error",
 				"service", rt.Service,
