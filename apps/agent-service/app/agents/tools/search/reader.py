@@ -44,7 +44,15 @@ async def read_webpage(url: str) -> str:
             response.raise_for_status()
             data = response.json()
 
-        if not data or len(data) == 0:
+        if not data:
+            return ""
+
+        # Handle dictionary response format (e.g. {'contents': [...]})
+        if isinstance(data, dict):
+            # Try to extract the list from known keys
+            data = data.get("contents") or data.get("results") or []
+
+        if len(data) == 0:
             return ""
 
         result = data[0]
