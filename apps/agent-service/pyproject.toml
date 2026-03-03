@@ -43,6 +43,7 @@ dependencies = [
     "bidict>=0.23.1",
     "volcengine-python-sdk[ark]>=5.0.3",
     "inner-shared",
+    "beautifulsoup4>=4.14.3",
 ]
 
 [project.optional-dependencies]

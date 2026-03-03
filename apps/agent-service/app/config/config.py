@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     qdrant_service_port: int = 6333
     qdrant_service_api_key: str | None = None
 
-    search_api_key: str | None = None
+    # You Search 配置
+    you_search_host: str | None = None
+    you_search_api_key: str | None = None
 
     bangumi_access_token: str | None = None
 

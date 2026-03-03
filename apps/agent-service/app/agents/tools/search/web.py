@@ -1,6 +1,7 @@
 """Web 搜索工具"""
 
 import asyncio
+import logging
 
 import httpx
 from langchain.tools import tool
@@ -8,6 +9,8 @@ from langchain.tools import tool
 from app.agents.tools.search.reader import read_webpage
 from app.config import settings
 from app.utils.decorators import dict_serialize, log_io
+
+logger = logging.getLogger(__name__)
 
 
 async def _fetch_content(result: dict) -> dict:
@@ -31,39 +34,63 @@ async def _fetch_content(result: dict) -> dict:
 @dict_serialize
 async def search_web(
     query: str,
-    gl: str = "cn",
-    hl: str = "zh-cn",
+    gl: str = "CN",
+    hl: str = "ZH-HANS",
     num: int = 5,
 ) -> list[dict]:
-    """Google 网页搜索，返回搜索结果及其网页内容。
+    """网页搜索，返回搜索结果及其网页内容。
 
     Args:
         query: 搜索关键词。
-        gl: 结果地域代码，默认 "cn"。
-        hl: 界面语言代码，默认 "zh-cn"。
+        gl: 结果地域代码，默认 "CN"。
+        hl: 界面语言代码，默认 "ZH-HANS"。
         num: 返回结果条数，默认 5。
 
     Returns:
         搜索结果列表，每个结果包含 title, link, snippet, content。
     """
-    url = "https://api.302.ai/serpapi/search"
+    if not settings.you_search_host or not settings.you_search_api_key:
+        logger.error("You Search not configured")
+        return []
+
+    url = f"{settings.you_search_host}/v1/search"
 
     params: dict[str, str | int] = {
-        "engine": "google_light",
-        "api_key": settings.search_api_key or "",
-        "q": query,
-        "hl": hl,
-        "gl": gl,
-        "num": num,
+        "query": query,
+        "count": num,
+        "country": gl,
+        "language": hl,
     }
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+    headers = {
+        "X-API-Key": settings.you_search_api_key,
+    }
 
-    # 只保留 organic_results
-    organic_results = data.get("organic_results", [])
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.TimeoutException:
+        logger.error("Timeout during web search")
+        return []
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error during web search: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error during web search: {e}")
+        return []
+
+    # 转换响应结构
+    web_results = data.get("results", {}).get("web", [])
+    organic_results = [
+        {
+            "link": r.get("url", ""),
+            "title": r.get("title", ""),
+            "snippet": r.get("description", ""),
+        }
+        for r in web_results
+    ]
 
     # 并发抓取每个结果的网页内容
     tasks = [_fetch_content(result) for result in organic_results]
