@@ -1,0 +1,125 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: chiwei-platform-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # --- Phase 1: 基础设施告警 ---
+    - name: pod-alerts
+      rules:
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="prod"}[15m]) > 3
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} 频繁重启"
+            description: "Pod {{ $labels.pod }} 在过去 15 分钟内重启了 {{ $value }} 次。"
+
+        - alert: PodNotReady
+          expr: kube_pod_status_ready{namespace="prod", condition="true"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} 未就绪"
+            description: "Pod {{ $labels.pod }} 已持续 5 分钟未就绪。"
+
+    - name: node-alerts
+      rules:
+        - alert: NodeHighMemory
+          expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "节点 {{ $labels.instance }} 内存使用率过高"
+            description: "节点内存使用率已达 {{ $value | humanizePercentage }}，持续超过 10 分钟。"
+
+        - alert: NodeHighCPU
+          expr: 1 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "节点 {{ $labels.instance }} CPU 使用率过高"
+            description: "节点 CPU 使用率已达 {{ $value | humanizePercentage }}，持续超过 10 分钟。"
+
+        - alert: NodeDiskPressure
+          expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) > 0.85
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "节点 {{ $labels.instance }} 磁盘空间不足"
+            description: "挂载点 {{ $labels.mountpoint }} 磁盘使用率已达 {{ $value | humanizePercentage }}。"
+
+    - name: deployment-alerts
+      rules:
+        - alert: KubeDeploymentReplicasMismatch
+          expr: kube_deployment_spec_replicas{namespace="prod"} != kube_deployment_status_ready_replicas{namespace="prod"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} 副本数不匹配"
+            description: "期望 {{ $value }} 个副本，但实际就绪副本数不一致，已持续 10 分钟。"
+
+        - alert: KubeJobFailed
+          expr: kube_job_status_failed{namespace=~"prod|paas-builds"} > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} 失败"
+            description: "Job {{ $labels.job_name }} 执行失败。"
+
+    # --- Phase 2: 应用级告警 ---
+    - name: application-alerts
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace="prod", status=~"5.."}[5m])) by (job)
+            /
+            sum(rate(http_requests_total{namespace="prod"}[5m])) by (job)
+            > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "服务 {{ $labels.job }} 5xx 错误率过高"
+            description: "5xx 请求占比已达 {{ $value | humanizePercentage }}，持续超过 5 分钟。"
+
+        - alert: HighLatencyP99
+          expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace="prod"}[5m])) by (job, le)) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "服务 {{ $labels.job }} P99 延迟过高"
+            description: "P99 延迟已达 {{ $value }}s，持续超过 5 分钟。"
+
+        - alert: BuildQueueBacklog
+          expr: paas_builds_in_progress > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PaaS Engine 构建队列积压"
+            description: "当前有 {{ $value }} 个构建正在进行，已持续 10 分钟。"
+
+        - alert: BuildFailureRate
+          expr: |
+            sum(rate(paas_builds_total{status="failed"}[1h]))
+            /
+            sum(rate(paas_builds_total[1h]))
+            > 0.5
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PaaS Engine 构建失败率过高"
+            description: "最近 1 小时构建失败率已达 {{ $value | humanizePercentage }}。"

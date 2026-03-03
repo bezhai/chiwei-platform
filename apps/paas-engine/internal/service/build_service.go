@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
+	"github.com/chiwei-platform/paas-engine/internal/metrics"
 	"github.com/chiwei-platform/paas-engine/internal/port"
 	"github.com/google/uuid"
 )
@@ -84,11 +85,13 @@ func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, re
 			build.Status = domain.BuildStatusFailed
 			build.Log = err.Error()
 			_ = s.buildRepo.Update(ctx, build)
+			metrics.BuildsTotal.WithLabelValues("failed").Inc()
 			return build, nil
 		}
 		build.JobName = jobName
 		build.Status = domain.BuildStatusRunning
 		_ = s.buildRepo.Update(ctx, build)
+		metrics.BuildsInProgress.Inc()
 	}
 
 	return build, nil
@@ -134,7 +137,12 @@ func (s *BuildService) CancelBuild(ctx context.Context, imageRepoName, id string
 	}
 	build.Status = domain.BuildStatusCancelled
 	build.UpdatedAt = time.Now()
-	return s.buildRepo.Update(ctx, build)
+	if err := s.buildRepo.Update(ctx, build); err != nil {
+		return err
+	}
+	metrics.BuildsInProgress.Dec()
+	metrics.BuildsTotal.WithLabelValues("cancelled").Inc()
+	return nil
 }
 
 // GetBuildLogs 获取构建日志。三级降级：Pod logs → Loki → build.Log。
@@ -190,5 +198,9 @@ func (s *BuildService) OnBuildStatusChange(buildID string, status domain.BuildSt
 	build.UpdatedAt = time.Now()
 	if err := s.buildRepo.Update(ctx, build); err != nil {
 		slog.Error("OnBuildStatusChange: failed to update build", "build_id", buildID, "error", err)
+	}
+	if status.IsTerminal() {
+		metrics.BuildsInProgress.Dec()
+		metrics.BuildsTotal.WithLabelValues(string(status)).Inc()
 	}
 }

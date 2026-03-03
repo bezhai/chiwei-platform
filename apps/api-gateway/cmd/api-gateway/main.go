@@ -14,6 +14,7 @@ import (
 	"github.com/chiwei-platform/api-gateway/internal/middleware"
 	"github.com/chiwei-platform/api-gateway/internal/registry"
 	"github.com/chiwei-platform/api-gateway/internal/route"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -45,11 +46,13 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/", gw)
 
 	// Apply middleware chain
 	handler := middleware.Chain(
 		middleware.Recovery,
+		middleware.Metrics,
 		middleware.RequestID,
 		middleware.Logging,
 	)(mux)

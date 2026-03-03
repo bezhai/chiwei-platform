@@ -87,7 +87,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	}
 	if app.Port > 0 {
 		container.Ports = []corev1.ContainerPort{
-			{ContainerPort: int32(app.Port)},
+			{Name: "http", ContainerPort: int32(app.Port)},
 		}
 	}
 
@@ -143,6 +143,7 @@ func (d *K8sDeployer) applyService(ctx context.Context, release *domain.Release,
 			Selector: labels,
 			Ports: []corev1.ServicePort{
 				{
+					Name:       "http",
 					Port:       int32(app.Port),
 					TargetPort: intstr.FromInt(app.Port),
 				},
@@ -182,6 +183,7 @@ func (d *K8sDeployer) applyBaseService(ctx context.Context, release *domain.Rele
 			},
 			Ports: []corev1.ServicePort{
 				{
+					Name:       "http",
 					Port:       int32(app.Port),
 					TargetPort: intstr.FromInt(app.Port),
 				},

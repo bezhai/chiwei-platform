@@ -8,7 +8,8 @@ import (
 
 	"github.com/chiwei-platform/lite-registry/internal/registry"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Handler struct {
@@ -19,11 +20,13 @@ func NewRouter(reg *registry.Registry) http.Handler {
 	h := &Handler{reg: reg}
 
 	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
+	r.Use(chimw.Recoverer)
+	r.Use(metricsMiddleware)
 	r.Use(loggingMiddleware)
 
 	r.Get("/healthz", h.healthz)
 	r.Get("/readyz", h.readyz)
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/routes", h.listRoutes)
@@ -79,7 +82,7 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
 		log.Printf("%s %s %d %s", r.Method, r.URL.Path, ww.Status(), time.Since(start))
 	})

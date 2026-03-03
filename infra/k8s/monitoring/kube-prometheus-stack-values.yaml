@@ -41,4 +41,30 @@ kubeStateMetrics:
   enabled: true
 
 alertmanager:
-  enabled: false
+  enabled: true
+  alertmanagerSpec:
+    nodeSelector:
+      node-role: infra
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ""
+          volumeName: pv-alertmanager
+          resources:
+            requests:
+              storage: 2Gi
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: feishu
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+    receivers:
+      - name: feishu
+        webhook_configs:
+          - url: 'http://alert-webhook.prod.svc.cluster.local:8080/webhook'
+            send_resolved: true
+      - name: "null"

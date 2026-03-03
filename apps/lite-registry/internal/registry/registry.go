@@ -30,8 +30,9 @@ type Registry struct {
 	services  map[string]ServiceInfo
 	updatedAt time.Time
 
-	ready  atomic.Bool
-	lister corelister.ServiceNamespaceLister
+	ready     atomic.Bool
+	lister    corelister.ServiceNamespaceLister
+	onRebuild func(serviceCount int, durationSeconds float64)
 }
 
 func New(client kubernetes.Interface, namespace string, resync time.Duration) *Registry {
@@ -41,6 +42,10 @@ func New(client kubernetes.Interface, namespace string, resync time.Duration) *R
 		resync:    resync,
 		services:  make(map[string]ServiceInfo),
 	}
+}
+
+func (r *Registry) SetOnRebuild(fn func(serviceCount int, durationSeconds float64)) {
+	r.onRebuild = fn
 }
 
 func (r *Registry) Ready() bool {
@@ -116,6 +121,8 @@ func (r *Registry) rebuildIfReady() {
 }
 
 func (r *Registry) rebuild() {
+	start := time.Now()
+
 	svcs, err := r.lister.List(labels.Everything())
 	if err != nil {
 		log.Printf("registry: failed to list services: %v", err)
@@ -151,6 +158,10 @@ func (r *Registry) rebuild() {
 	r.services = result
 	r.updatedAt = time.Now()
 	r.mu.Unlock()
+
+	if r.onRebuild != nil {
+		r.onRebuild(len(result), time.Since(start).Seconds())
+	}
 }
 
 func portFromService(svc *corev1.Service) int32 {

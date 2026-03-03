@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
+	"github.com/chiwei-platform/paas-engine/internal/metrics"
 	"github.com/chiwei-platform/paas-engine/internal/port"
 	"github.com/google/uuid"
 )
@@ -123,6 +124,10 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		if err := s.releaseRepo.Save(ctx, release); err != nil {
 			return nil, err
 		}
+	}
+
+	if release.Status == domain.ReleaseStatusDeployed {
+		metrics.ReleasesTotal.WithLabelValues(release.Lane).Inc()
 	}
 
 	return release, nil

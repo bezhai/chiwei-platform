@@ -25,6 +25,10 @@ func main() {
 	}
 
 	reg := registry.New(clientset, cfg.Namespace, time.Duration(cfg.ResyncSeconds)*time.Second)
+	reg.SetOnRebuild(func(serviceCount int, durationSeconds float64) {
+		handler.RegistryServicesTotal.Set(float64(serviceCount))
+		handler.RegistrySyncDuration.Observe(durationSeconds)
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

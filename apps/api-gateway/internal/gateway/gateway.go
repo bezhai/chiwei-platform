@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"time"
 
+	"github.com/chiwei-platform/api-gateway/internal/middleware"
 	"github.com/chiwei-platform/api-gateway/internal/registry"
 	"github.com/chiwei-platform/api-gateway/internal/route"
 )
@@ -71,6 +73,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create reverse proxy
+	proxyStart := time.Now()
+	pw := &proxyResponseWriter{ResponseWriter: w, status: http.StatusOK}
+
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL = target
@@ -91,5 +96,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(pw, r)
+
+	middleware.ProxyRequestsTotal.WithLabelValues(rt.Service, strconv.Itoa(pw.status)).Inc()
+	middleware.ProxyDuration.WithLabelValues(rt.Service).Observe(time.Since(proxyStart).Seconds())
+}
+
+type proxyResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *proxyResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
