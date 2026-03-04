@@ -6,8 +6,12 @@ const DLQ_NAME = 'dead_letters';
 
 export const QUEUE_RECALL = 'recall';
 export const QUEUE_VECTORIZE = 'vectorize';
+export const QUEUE_CHAT_REQUEST = 'chat_request';
+export const QUEUE_CHAT_RESPONSE = 'chat_response';
 export const RK_RECALL = 'action.recall';
 export const RK_VECTORIZE = 'task.vectorize';
+export const RK_CHAT_REQUEST = 'chat.request';
+export const RK_CHAT_RESPONSE = 'chat.response';
 
 const NON_PROD_EXPIRES_MS = 86_400_000;
 
@@ -100,6 +104,16 @@ class RabbitMQClient {
         const vectorizeQ = laneQueue(QUEUE_VECTORIZE, lane);
         await ch.assertQueue(vectorizeQ, { durable: true, arguments: baseArgs });
         await ch.bindQueue(vectorizeQ, EXCHANGE_NAME, laneRK(RK_VECTORIZE, lane));
+
+        // chat_request queue
+        const chatReqQ = laneQueue(QUEUE_CHAT_REQUEST, lane);
+        await ch.assertQueue(chatReqQ, { durable: true, arguments: baseArgs });
+        await ch.bindQueue(chatReqQ, EXCHANGE_NAME, laneRK(RK_CHAT_REQUEST, lane));
+
+        // chat_response queue
+        const chatRespQ = laneQueue(QUEUE_CHAT_RESPONSE, lane);
+        await ch.assertQueue(chatRespQ, { durable: true, arguments: baseArgs });
+        await ch.bindQueue(chatRespQ, EXCHANGE_NAME, laneRK(RK_CHAT_RESPONSE, lane));
 
         console.info(`[RabbitMQ] topology declared (lane=${lane || 'prod'})`);
     }

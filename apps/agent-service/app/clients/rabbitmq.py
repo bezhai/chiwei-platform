@@ -22,10 +22,14 @@ DLQ_NAME = "dead_letters"
 QUEUE_SAFETY_CHECK = "safety_check"
 QUEUE_RECALL = "recall"
 QUEUE_VECTORIZE = "vectorize"
+QUEUE_CHAT_REQUEST = "chat_request"
+QUEUE_CHAT_RESPONSE = "chat_response"
 
 RK_SAFETY_CHECK = "post.safety.check"
 RK_RECALL = "action.recall"
 RK_VECTORIZE = "task.vectorize"
+RK_CHAT_REQUEST = "chat.request"
+RK_CHAT_RESPONSE = "chat.response"
 
 # 非 prod 队列空闲自动删除（24h）
 _NON_PROD_EXPIRES_MS = 86_400_000
@@ -137,6 +141,26 @@ class RabbitMQClient:
         )
         await q_vectorize.bind(
             self._exchange, routing_key=_lane_rk(RK_VECTORIZE, lane)
+        )
+
+        # chat_request queue
+        q_chat_req = await self._channel.declare_queue(
+            _lane_queue(QUEUE_CHAT_REQUEST, lane),
+            durable=True,
+            arguments=base_args,
+        )
+        await q_chat_req.bind(
+            self._exchange, routing_key=_lane_rk(RK_CHAT_REQUEST, lane)
+        )
+
+        # chat_response queue
+        q_chat_resp = await self._channel.declare_queue(
+            _lane_queue(QUEUE_CHAT_RESPONSE, lane),
+            durable=True,
+            arguments=base_args,
+        )
+        await q_chat_resp.bind(
+            self._exchange, routing_key=_lane_rk(RK_CHAT_RESPONSE, lane)
         )
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")

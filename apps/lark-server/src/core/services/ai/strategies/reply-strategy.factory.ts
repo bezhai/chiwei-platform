@@ -30,12 +30,22 @@ export class ReplyStrategyFactory {
     /**
      * 从数据库读取灰度配置，判断回复模式
      */
-    private async resolveMode(context: ReplyStrategyContext): Promise<ReplyMode> {
+    async resolveMode(context: ReplyStrategyContext): Promise<ReplyMode> {
         try {
             const chatInfo = await BaseChatInfoRepository.findOne({
                 where: { chat_id: context.chatId },
             });
 
+            // 优先检查 reply_mode 配置
+            const replyMode = chatInfo?.gray_config?.reply_mode;
+            if (replyMode === 'card') {
+                return 'card';
+            }
+            if (replyMode === 'text') {
+                return 'text';
+            }
+
+            // 兼容旧的 multi_message 配置
             const value = chatInfo?.gray_config?.multi_message;
             if (value === 'on' || value === 'true' || value === '1') {
                 return 'multi_message';
@@ -44,7 +54,8 @@ export class ReplyStrategyFactory {
             console.error('[ReplyStrategyFactory] 读取灰度配置失败:', error);
         }
 
-        return 'card';
+        // 默认使用 text 模式（队列模式）
+        return 'text';
     }
 }
 
