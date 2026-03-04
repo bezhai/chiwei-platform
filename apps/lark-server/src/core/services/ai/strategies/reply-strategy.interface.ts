@@ -50,4 +50,4 @@ export interface ReplyStrategy {
 /**
  * 回复模式类型
  */
-export type ReplyMode = 'card' | 'multi_message';
+export type ReplyMode = 'card' | 'multi_message' | 'text';

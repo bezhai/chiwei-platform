@@ -20,6 +20,23 @@ from app.utils.decorators import auto_json_serialize
 logger = logging.getLogger(__name__)
 
 
+async def process_chat(message_id: str, session_id: str | None = None) -> str:
+    """非流式聊天处理，收集完整输出后返回。
+
+    Args:
+        message_id: 触发消息 ID
+        session_id: 会话追踪 ID
+
+    Returns:
+        完整的回复文本
+    """
+    last_content = ""
+    async for chunk in stream_chat(message_id, session_id=session_id):
+        if chunk.content:
+            last_content = chunk.content
+    return last_content
+
+
 class ChatService:
     """聊天服务类"""
 

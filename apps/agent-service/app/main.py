@@ -24,24 +24,28 @@ async def lifespan(app: FastAPI):
     await init_qdrant_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 
-    # 启动 post safety consumer（仅当 RabbitMQ 配置存在时）
-    consumer_task = None
+    # 启动 MQ consumers（仅当 RabbitMQ 配置存在时）
+    consumer_tasks: list[asyncio.Task] = []
     if settings.rabbitmq_url:
+        from app.workers.chat_consumer import start_chat_consumer
         from app.workers.post_consumer import start_post_consumer
 
-        consumer_task = asyncio.create_task(start_post_consumer())
+        consumer_tasks.append(asyncio.create_task(start_post_consumer()))
         logger.info("Post safety consumer started")
+
+        consumer_tasks.append(asyncio.create_task(start_chat_consumer()))
+        logger.info("Chat request consumer started")
 
     yield
 
-    # 关闭 consumer
-    if consumer_task:
-        consumer_task.cancel()
+    # 关闭 consumers
+    for task in consumer_tasks:
+        task.cancel()
         try:
-            await consumer_task
+            await task
         except (asyncio.CancelledError, Exception) as e:
             if not isinstance(e, asyncio.CancelledError):
-                logger.warning("Post consumer task ended with error: %s", e)
+                logger.warning("Consumer task ended with error: %s", e)
     # 关闭 RabbitMQ 连接
     if settings.rabbitmq_url:
         from app.clients.rabbitmq import RabbitMQClient

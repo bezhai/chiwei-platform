@@ -18,7 +18,7 @@ import {
     NotBlocked,
 } from './rule';
 import { sendPhoto } from '@core/services/media/photo/send-photo';
-import { makeCardReply } from 'core/services/ai/reply';
+import { makeTextReply } from 'core/services/ai/reply';
 import { sendBalance } from './admin/balance';
 
 // 工具函数：执行规则链
@@ -116,7 +116,7 @@ const chatRules: RuleConfig[] = [
     },
     {
         rules: [NeedRobotMention],
-        handler: makeCardReply,
+        handler: makeTextReply,
         comment: '聊天',
     },
 ];
