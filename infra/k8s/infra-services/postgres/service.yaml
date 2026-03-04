@@ -1,3 +1,6 @@
+# PostgreSQL 运行在宿主机 Docker 上，通过 headless Service + Endpoints 代理
+# Endpoints 包含宿主机 IP，不纳入版本管理，需手动 kubectl apply
+# 参考: kubectl -n prod apply -f <endpoints.yaml>
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,14 +10,9 @@ metadata:
     app: postgres
     tier: infra
 spec:
-  selector:
-    app: postgres
   ports:
     - name: postgres
       port: 5432
       targetPort: 5432
       protocol: TCP
-    - name: metrics
-      port: 9187
-      targetPort: 9187
-      protocol: TCP
+  clusterIP: None

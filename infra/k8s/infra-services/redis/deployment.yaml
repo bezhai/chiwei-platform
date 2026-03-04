@@ -30,6 +30,10 @@ spec:
             - redis-server
             - --requirepass
             - $(REDIS_PASSWORD)
+            - --maxmemory
+            - 256mb
+            - --maxmemory-policy
+            - allkeys-lru
           env:
             - name: REDIS_PASSWORD
               valueFrom:
@@ -84,7 +88,7 @@ spec:
               cpu: 50m
               memory: 32Mi
             limits:
-              cpu: 200m
+              cpu: 500m
               memory: 128Mi
       volumes:
         - name: redis-data

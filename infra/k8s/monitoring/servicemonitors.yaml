@@ -237,3 +237,8 @@ spec:
     - port: http
       path: /metrics
       interval: 15s
+      authorization:
+        type: Bearer
+        credentials:
+          name: qdrant-metrics-token
+          key: token

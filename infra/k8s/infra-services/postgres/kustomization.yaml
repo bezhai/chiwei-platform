@@ -4,6 +4,4 @@ kind: Kustomization
 namespace: prod
 
 resources:
-  - deployment.yaml
-  - pvc.yaml
   - service.yaml
