@@ -34,6 +34,21 @@ prometheus:
             requests:
               storage: 10Gi
 
+# k3s 内嵌了这些组件，没有独立 Pod/endpoint，禁用相关误报规则
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+defaultRules:
+  rules:
+    kubeSchedulerAlerting: false
+    kubeControllerManager: false
+
 nodeExporter:
   enabled: true
 

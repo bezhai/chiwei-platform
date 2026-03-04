@@ -44,6 +44,8 @@ spec:
                 secretKeyRef:
                   name: app-env
                   key: RABBITMQ_PASS
+            - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
+              value: "+S 1:1"
           resources:
             requests:
               cpu: 200m
@@ -62,14 +64,11 @@ spec:
             timeoutSeconds: 15
             failureThreshold: 3
           readinessProbe:
-            exec:
-              command:
-                - rabbitmq-diagnostics
-                - -q
-                - ping
+            tcpSocket:
+              port: 5672
             initialDelaySeconds: 20
             periodSeconds: 10
-            timeoutSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           volumeMounts:
             - name: rabbitmq-data
