@@ -18,6 +18,7 @@ from app.clients.rabbitmq import (
     _lane_queue,
 )
 from app.services.chat_service import process_chat
+from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +34,20 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
         root_id = body.get("root_id")
         user_id = body.get("user_id")
         lane = body.get("lane")
+        bot_name = body.get("bot_name")
+
+        # MQ consumer 不走 HTTP 中间件，手动注入 contextvars
+        if bot_name:
+            header_vars["app_name"].set(bot_name)
+        if lane:
+            header_vars["lane"].set(lane)
 
         logger.info(
-            "Chat request received: session_id=%s, message_id=%s, lane=%s",
+            "Chat request received: session_id=%s, message_id=%s, lane=%s, bot_name=%s",
             session_id,
             message_id,
             lane,
+            bot_name,
         )
 
         client = RabbitMQClient.get_instance()
