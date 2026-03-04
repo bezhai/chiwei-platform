@@ -2,7 +2,7 @@ import { Counter, Histogram, Gauge, Registry, collectDefaultMetrics } from 'prom
 import type { Context, Next } from 'koa';
 import Router from '@koa/router';
 
-const register = new Registry();
+export const register = new Registry();
 collectDefaultMetrics({ register });
 
 const httpRequestsTotal = new Counter({

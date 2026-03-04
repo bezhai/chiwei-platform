@@ -1,8 +1,24 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { context } from '@middleware/context';
+import { register } from '@middleware/metrics';
+import { Counter, Histogram } from 'prom-client';
 import { Readable } from 'node:stream';
 import { ReadStream } from 'node:fs';
+
+const larkApiRequestsTotal = new Counter({
+    name: 'lark_api_requests_total',
+    help: 'Total Lark API requests',
+    labelNames: ['operation', 'status'] as const,
+    registers: [register],
+});
+
+const larkApiDuration = new Histogram({
+    name: 'lark_api_duration_seconds',
+    help: 'Lark API request duration in seconds',
+    labelNames: ['operation'] as const,
+    registers: [register],
+});
 
 const errorMap: Record<number, string> = {
     41050: '无用户权限，请将当前操作的用户添加到应用或用户的权限范围内',
@@ -101,19 +117,28 @@ interface LarkResp<T> {
     data?: T;
 }
 
-async function handleResponse<T>(promise: Promise<LarkResp<T>>): Promise<T> {
+async function handleResponse<T>(promise: Promise<LarkResp<T>>, operation: string): Promise<T> {
+    const start = performance.now();
+    let status = 'error';
     try {
         const res = await promise;
         if (res.code !== 0) {
+            status = `lark_${res.code}`;
             throw new Error(res.msg);
         }
+        status = 'ok';
         return res.data!;
     } catch (e: any) {
         console.error(JSON.stringify(e.response?.data || e, null, 4));
         if (e.response?.data?.code) {
+            status = `lark_${e.response.data.code}`;
             throw new Error(errorMap[e.response?.data?.code] || e.response?.data?.msg);
         }
         throw e;
+    } finally {
+        const duration = (performance.now() - start) / 1000;
+        larkApiRequestsTotal.inc({ operation, status });
+        larkApiDuration.observe({ operation }, duration);
     }
 }
 
@@ -124,6 +149,7 @@ export async function getUserInfo(unionId: string) {
             path: { user_id: unionId },
             params: { user_id_type: 'union_id' },
         }),
+        'get_user_info',
     );
 }
 
@@ -138,6 +164,7 @@ export async function send(chat_id: string, content: any, msgType: string) {
                 msg_type: msgType,
             },
         }),
+        'send_message',
     );
 }
 
@@ -157,6 +184,7 @@ export async function reply(
                 reply_in_thread: replyInThread,
             },
         }),
+        'reply_message',
     );
 }
 
@@ -168,6 +196,7 @@ export async function sendReq<T>(url: string, data: any, method: string) {
             method,
             data,
         }),
+        'send_request',
     );
 }
 
@@ -177,6 +206,7 @@ export async function getChatList(page_token?: string) {
         client.im.chat.list({
             params: { page_size: 100, page_token, sort_type: 'ByCreateTimeAsc' },
         }),
+        'get_chat_list',
     );
 }
 
@@ -187,6 +217,7 @@ export async function getChatInfo(chat_id: string) {
             path: { chat_id },
             params: { user_id_type: 'union_id' },
         }),
+        'get_chat_info',
     );
 }
 
@@ -201,6 +232,7 @@ export async function searchAllMembers(
             path: { chat_id },
             params: { page_size: 50, page_token, member_id_type },
         }),
+        'search_members',
     );
 }
 
@@ -211,6 +243,7 @@ export async function getMessageInfo(message_id: string) {
             path: { message_id },
             params: { user_id_type: 'union_id' },
         }),
+        'get_message',
     );
 }
 
@@ -220,6 +253,7 @@ export async function deleteMessage(message_id: string) {
         client.im.message.delete({
             path: { message_id },
         }),
+        'delete_message',
     );
 }
 
@@ -242,6 +276,7 @@ export async function getMessageList(
                 sort_type: 'ByCreateTimeAsc',
             },
         }),
+        'get_message_list',
     );
 }
 
@@ -287,5 +322,6 @@ export async function addChatMember(chat_id: string, open_id: string) {
                 id_list: [open_id],
             },
         }),
+        'add_chat_member',
     );
 }

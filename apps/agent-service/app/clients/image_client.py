@@ -4,6 +4,7 @@ Main-server图片处理客户端
 
 import base64
 import logging
+import time
 
 import httpx
 
@@ -11,7 +12,23 @@ from app.clients.lane_router_instance import lane_router
 from app.config.config import settings  # for inner_http_secret, main_server_timeout
 from app.utils.middlewares.trace import get_app_name, get_trace_id
 
+try:
+    from inner_shared.lane_router import OUTBOUND_REQUESTS_TOTAL, OUTBOUND_REQUEST_DURATION, _HAS_METRICS
+except ImportError:
+    _HAS_METRICS = False
+
 logger = logging.getLogger(__name__)
+
+
+def _record_outbound(method: str, status: str, duration: float) -> None:
+    """Record outbound metrics for tool-service calls."""
+    if _HAS_METRICS:
+        OUTBOUND_REQUESTS_TOTAL.labels(
+            target_service="tool-service", method=method, status=status
+        ).inc()
+        OUTBOUND_REQUEST_DURATION.labels(
+            target_service="tool-service", method=method
+        ).observe(duration)
 
 
 class ImageProcessClient:
@@ -37,6 +54,8 @@ class ImageProcessClient:
         # 优先使用传入的 bot_name，否则从上下文获取
         app_name = bot_name or get_app_name() or ""
 
+        start = time.monotonic()
+        status = "network_error"
         try:
             request_data = {"message_id": message_id, "file_key": file_key}
 
@@ -54,6 +73,7 @@ class ImageProcessClient:
                     },
                 )
 
+                status = str(response.status_code)
                 response.raise_for_status()
                 data = response.json()
 
@@ -75,6 +95,8 @@ class ImageProcessClient:
         except Exception as e:
             logger.error(f"调用图片处理接口失败: {str(e)}")
             return None
+        finally:
+            _record_outbound("POST", status, time.monotonic() - start)
 
     async def upload_base64_image(
         self, base64_data: str, bot_name: str | None = None
@@ -92,6 +114,8 @@ class ImageProcessClient:
         # 优先使用传入的 bot_name，否则从上下文获取
         app_name = bot_name or get_app_name() or ""
 
+        start = time.monotonic()
+        status = "network_error"
         try:
             # logger.info(f"上传base64图片到飞书，base64_data: {base64_data}")
             request_data = {"base64_data": base64_data}
@@ -110,6 +134,7 @@ class ImageProcessClient:
                     },
                 )
 
+                status = str(response.status_code)
                 response.raise_for_status()
                 data = response.json()
 
@@ -135,6 +160,8 @@ class ImageProcessClient:
         except Exception as e:
             logger.error(f"调用base64图片上传接口失败: {str(e)}")
             return None
+        finally:
+            _record_outbound("POST", status, time.monotonic() - start)
 
     async def download_image_as_base64(
         self, file_key: str, message_id: str | None, bot_name: str | None = None

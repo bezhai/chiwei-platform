@@ -175,13 +175,13 @@ spec:
 
         # RabbitMQ
         - alert: RabbitmqQueueMessagesReady
-          expr: rabbitmq_queue_messages_ready{namespace="prod"} > 1000
-          for: 10m
+          expr: rabbitmq_queue_messages_ready{namespace="prod"} > 50
+          for: 5m
           labels:
             severity: warning
           annotations:
             summary: "RabbitMQ 队列 {{ $labels.queue }} 消息积压"
-            description: "队列 {{ $labels.queue }} 积压 {{ $value }} 条消息，持续超过 10 分钟。"
+            description: "队列 {{ $labels.queue }} 积压 {{ $value }} 条消息，持续超过 5 分钟。"
 
         - alert: RabbitmqNodeDown
           expr: rabbitmq_identity_info{namespace="prod"} < 1
@@ -210,3 +210,126 @@ spec:
           annotations:
             summary: "MongoDB 连接数过高"
             description: "MongoDB 当前连接数为 {{ $value }}，持续超过 5 分钟。"
+
+        # RabbitMQ - 队列消息持续增长（consumer 跟不上）
+        - alert: RabbitmqQueueGrowing
+          expr: deriv(rabbitmq_queue_messages_ready{namespace="prod"}[5m]) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RabbitMQ 队列 {{ $labels.queue }} 消息持续增长"
+            description: "队列 {{ $labels.queue }} 消息增长速率为 {{ $value }}/s，consumer 可能跟不上。"
+
+        # RabbitMQ - 有消息但无 consumer
+        - alert: RabbitmqQueueNoConsumers
+          expr: rabbitmq_queue_consumers{namespace="prod"} == 0 and rabbitmq_queue_messages_ready{namespace="prod"} > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RabbitMQ 队列 {{ $labels.queue }} 无消费者"
+            description: "队列 {{ $labels.queue }} 有 {{ $value }} 条消息但没有消费者连接。"
+
+        # RabbitMQ - 已知业务队列 consumer 断开
+        - alert: RabbitmqConsumerDown
+          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize).*"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RabbitMQ 业务队列 {{ $labels.queue }} consumer 断开"
+            description: "关键业务队列 {{ $labels.queue }} 的 consumer 已断开超过 1 分钟。"
+
+    # --- Phase 4: 健康探针告警 ---
+    - name: probe-alerts
+      rules:
+        - alert: ServiceHealthCheckDown
+          expr: probe_success == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "服务 {{ $labels.instance }} 健康检查失败"
+            description: "服务 {{ $labels.instance }} 健康探测失败，持续超过 1 分钟。"
+
+        - alert: ServiceHealthCheckSlow
+          expr: probe_duration_seconds > 3
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "服务 {{ $labels.instance }} 健康检查响应慢"
+            description: "服务 {{ $labels.instance }} 健康探测响应时间为 {{ $value }}s，持续超过 3 分钟。"
+
+    # --- Phase 5: 服务间调用告警 ---
+    - name: outbound-alerts
+      rules:
+        - alert: OutboundHighErrorRate
+          expr: |
+            sum(rate(http_outbound_requests_total{status=~"5..|network_error"}[5m])) by (job, target_service)
+            /
+            sum(rate(http_outbound_requests_total[5m])) by (job, target_service)
+            > 0.1
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "服务 {{ $labels.job }} → {{ $labels.target_service }} 调用错误率过高"
+            description: "出站调用错误率已达 {{ $value | humanizePercentage }}，持续超过 3 分钟。"
+
+        - alert: OutboundHighLatencyP99
+          expr: histogram_quantile(0.99, sum(rate(http_outbound_request_duration_seconds_bucket[5m])) by (job, target_service, le)) > 5
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "服务 {{ $labels.job }} → {{ $labels.target_service }} P99 延迟过高"
+            description: "出站调用 P99 延迟已达 {{ $value }}s，持续超过 3 分钟。"
+
+    # --- Phase 6: 外部依赖告警 ---
+    - name: external-dependency-alerts
+      rules:
+        - alert: LarkApiHighErrorRate
+          expr: |
+            sum(rate(lark_api_requests_total{status!="ok"}[5m]))
+            /
+            sum(rate(lark_api_requests_total[5m]))
+            > 0.1
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "飞书 API 错误率过高"
+            description: "飞书 API 错误率已达 {{ $value | humanizePercentage }}，持续超过 3 分钟。"
+
+        - alert: LarkApiHighLatency
+          expr: histogram_quantile(0.99, sum(rate(lark_api_duration_seconds_bucket[5m])) by (le)) > 5
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "飞书 API P99 延迟过高"
+            description: "飞书 API P99 延迟已达 {{ $value }}s，持续超过 3 分钟。"
+
+        - alert: YouSearchHighErrorRate
+          expr: |
+            sum(rate(you_search_requests_total{status!="ok"}[10m]))
+            /
+            sum(rate(you_search_requests_total[10m]))
+            > 0.3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "You Search 错误率过高"
+            description: "You Search 错误率已达 {{ $value | humanizePercentage }}，持续超过 5 分钟。"
+
+        - alert: YouSearchHighLatency
+          expr: histogram_quantile(0.99, sum(rate(you_search_duration_seconds_bucket[5m])) by (le)) > 15
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "You Search P99 延迟过高"
+            description: "You Search P99 延迟已达 {{ $value }}s，持续超过 5 分钟。"

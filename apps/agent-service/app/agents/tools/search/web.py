@@ -2,15 +2,27 @@
 
 import asyncio
 import logging
+import time
 
 import httpx
 from langchain.tools import tool
+from prometheus_client import Counter, Histogram
 
 from app.agents.tools.search.reader import read_webpage
 from app.config import settings
 from app.utils.decorators import dict_serialize, log_io
 
 logger = logging.getLogger(__name__)
+
+YOU_SEARCH_REQUESTS_TOTAL = Counter(
+    "you_search_requests_total",
+    "Total You Search API requests",
+    ["status"],
+)
+YOU_SEARCH_DURATION = Histogram(
+    "you_search_duration_seconds",
+    "You Search API request duration in seconds",
+)
 
 
 async def _fetch_content(result: dict) -> dict:
@@ -66,20 +78,29 @@ async def search_web(
         "X-API-Key": settings.you_search_api_key,
     }
 
+    start = time.monotonic()
+    status = "error"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
+        status = "ok"
     except httpx.TimeoutException:
+        status = "timeout"
         logger.error("Timeout during web search")
         return []
     except httpx.HTTPStatusError as e:
+        status = f"http_{e.response.status_code}"
         logger.error(f"HTTP error during web search: {e}")
         return []
     except Exception as e:
         logger.error(f"Unexpected error during web search: {e}")
         return []
+    finally:
+        duration = time.monotonic() - start
+        YOU_SEARCH_REQUESTS_TOTAL.labels(status=status).inc()
+        YOU_SEARCH_DURATION.observe(duration)
 
     # 转换响应结构
     web_results = data.get("results", {}).get("web", [])
