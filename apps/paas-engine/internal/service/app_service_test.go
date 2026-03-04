@@ -24,9 +24,6 @@ func (s *stubReleaseRepo) FindByAppAndLane(_ context.Context, _, _ string) (*dom
 func (s *stubReleaseRepo) FindAll(_ context.Context, _, _ string) ([]*domain.Release, error) {
 	return nil, nil
 }
-func (s *stubReleaseRepo) FindByLane(_ context.Context, _ string) ([]*domain.Release, error) {
-	return nil, nil
-}
 
 func TestCreateApp_Success(t *testing.T) {
 	appRepo := &stubAppRepo{}

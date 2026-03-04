@@ -31,7 +31,6 @@ func main() {
 	// 存储层
 	appRepo := repository.NewAppRepo(db)
 	imageRepoRepo := repository.NewImageRepoRepo(db)
-	laneRepo := repository.NewLaneRepo(db)
 	buildRepo := repository.NewBuildRepo(db)
 	releaseRepo := repository.NewReleaseRepo(db)
 
@@ -62,21 +61,14 @@ func main() {
 	lokiClient := loki.NewClient(cfg.LokiURL)
 
 	// 服务层
-	laneSvc := service.NewLaneService(laneRepo, releaseRepo)
 	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo)
 	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
-	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, laneRepo, releaseRepo, deployer)
+	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, releaseRepo, deployer)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 
-	// 确保 prod 泳道存在
-	ctx := context.Background()
-	if err := laneSvc.EnsureDefaultLane(ctx); err != nil {
-		slog.Error("failed to ensure default lane", "error", err)
-		os.Exit(1)
-	}
-
 	// 启动 Build Informer
+	ctx := context.Background()
 	if buildExecutor != nil {
 		go func() {
 			if err := buildExecutor.Watch(ctx, buildSvc.OnBuildStatusChange); err != nil {
@@ -89,7 +81,6 @@ func main() {
 	handler := httpadapter.NewRouter(
 		httpadapter.NewAppHandler(appSvc, buildSvc),
 		httpadapter.NewReleaseHandler(releaseSvc),
-		httpadapter.NewLaneHandler(laneSvc),
 		httpadapter.NewLogHandler(logSvc),
 		httpadapter.NewImageRepoHandler(imageRepoSvc),
 		cfg.APIToken,

@@ -14,13 +14,6 @@ type AppRepository interface {
 	Delete(ctx context.Context, name string) error
 }
 
-type LaneRepository interface {
-	Save(ctx context.Context, lane *domain.Lane) error
-	FindByName(ctx context.Context, name string) (*domain.Lane, error)
-	FindAll(ctx context.Context) ([]*domain.Lane, error)
-	Delete(ctx context.Context, name string) error
-}
-
 type BuildRepository interface {
 	Save(ctx context.Context, build *domain.Build) error
 	FindByID(ctx context.Context, id string) (*domain.Build, error)
@@ -44,5 +37,4 @@ type ReleaseRepository interface {
 	FindAll(ctx context.Context, appName, lane string) ([]*domain.Release, error)
 	Update(ctx context.Context, release *domain.Release) error
 	Delete(ctx context.Context, id string) error
-	FindByLane(ctx context.Context, lane string) ([]*domain.Release, error)
 }

@@ -15,7 +15,6 @@ import (
 type ReleaseService struct {
 	appRepo       port.AppRepository
 	imageRepoRepo port.ImageRepoRepository
-	laneRepo      port.LaneRepository
 	releaseRepo   port.ReleaseRepository
 	deployer      port.Deployer
 }
@@ -23,14 +22,12 @@ type ReleaseService struct {
 func NewReleaseService(
 	appRepo port.AppRepository,
 	imageRepoRepo port.ImageRepoRepository,
-	laneRepo port.LaneRepository,
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
 ) *ReleaseService {
 	return &ReleaseService{
 		appRepo:       appRepo,
 		imageRepoRepo: imageRepoRepo,
-		laneRepo:      laneRepo,
 		releaseRepo:   releaseRepo,
 		deployer:      deployer,
 	}
@@ -64,9 +61,6 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	lane := req.Lane
 	if lane == "" {
 		lane = domain.DefaultLane
-	}
-	if _, err := s.laneRepo.FindByName(ctx, lane); err != nil {
-		return nil, err
 	}
 
 	if req.Replicas <= 0 {

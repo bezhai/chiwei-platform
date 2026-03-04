@@ -2,6 +2,8 @@ package domain
 
 import "time"
 
+const DefaultLane = "prod"
+
 // ReleaseStatus 是 Release 的部署状态。
 type ReleaseStatus string
 

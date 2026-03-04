@@ -94,22 +94,6 @@ func (r *ReleaseRepo) Delete(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Delete(&ReleaseModel{}, "id = ?", id).Error
 }
 
-func (r *ReleaseRepo) FindByLane(ctx context.Context, lane string) ([]*domain.Release, error) {
-	var models []ReleaseModel
-	if err := r.db.WithContext(ctx).Where("lane = ?", lane).Find(&models).Error; err != nil {
-		return nil, err
-	}
-	releases := make([]*domain.Release, 0, len(models))
-	for i := range models {
-		rel, err := modelToRelease(&models[i])
-		if err != nil {
-			return nil, err
-		}
-		releases = append(releases, rel)
-	}
-	return releases, nil
-}
-
 func releaseToModel(r *domain.Release) (*ReleaseModel, error) {
 	envsJSON, err := json.Marshal(r.Envs)
 	if err != nil {
