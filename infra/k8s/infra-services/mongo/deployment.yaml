@@ -67,6 +67,33 @@ spec:
           volumeMounts:
             - name: mongo-data
               mountPath: /data/db
+        - name: mongodb-exporter
+          image: percona/mongodb_exporter:0.42.0
+          ports:
+            - name: metrics
+              containerPort: 9216
+          env:
+            - name: MONGO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-env
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: app-env
+                  key: MONGO_INITDB_ROOT_PASSWORD
+            - name: MONGODB_URI
+              value: "mongodb://$(MONGO_USER):$(MONGO_PASS)@localhost:27017/admin"
+          args:
+            - --compatible-mode
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       volumes:
         - name: mongo-data
           persistentVolumeClaim:

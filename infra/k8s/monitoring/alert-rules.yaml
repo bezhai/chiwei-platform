@@ -123,3 +123,90 @@ spec:
           annotations:
             summary: "PaaS Engine 构建失败率过高"
             description: "最近 1 小时构建失败率已达 {{ $value | humanizePercentage }}。"
+
+    # --- Phase 3: 中间件告警 ---
+    - name: middleware-alerts
+      rules:
+        # PostgreSQL
+        - alert: PostgresqlTooManyConnections
+          expr: |
+            pg_stat_activity_count{namespace="prod"}
+            /
+            pg_settings_max_connections{namespace="prod"}
+            > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL 连接数过高"
+            description: "PostgreSQL 连接数已达最大连接数的 {{ $value | humanizePercentage }}，持续超过 5 分钟。"
+
+        - alert: PostgresqlReplicationLag
+          expr: pg_replication_lag{namespace="prod"} > 30
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL 复制延迟过高"
+            description: "PostgreSQL 复制延迟已达 {{ $value }}s，持续超过 5 分钟。"
+
+        # Redis
+        - alert: RedisHighMemoryUsage
+          expr: |
+            redis_memory_used_bytes{namespace="prod"}
+            /
+            redis_memory_max_bytes{namespace="prod"}
+            > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Redis 内存使用率过高"
+            description: "Redis 内存使用率已达 {{ $value | humanizePercentage }}，持续超过 5 分钟。"
+
+        - alert: RedisTooManyConnections
+          expr: redis_connected_clients{namespace="prod"} > 100
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Redis 连接数过高"
+            description: "Redis 当前连接数为 {{ $value }}，持续超过 5 分钟。"
+
+        # RabbitMQ
+        - alert: RabbitmqQueueMessagesReady
+          expr: rabbitmq_queue_messages_ready{namespace="prod"} > 1000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RabbitMQ 队列 {{ $labels.queue }} 消息积压"
+            description: "队列 {{ $labels.queue }} 积压 {{ $value }} 条消息，持续超过 10 分钟。"
+
+        - alert: RabbitmqNodeDown
+          expr: rabbitmq_identity_info{namespace="prod"} < 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RabbitMQ 节点不可用"
+            description: "RabbitMQ 节点已不可用，持续超过 1 分钟。"
+
+        # MongoDB
+        - alert: MongodbCursorsTimeOut
+          expr: increase(mongodb_ss_metrics_cursor_timedOut{namespace="prod"}[5m]) > 100
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "MongoDB 游标超时过多"
+            description: "MongoDB 过去 5 分钟内有 {{ $value }} 个游标超时。"
+
+        - alert: MongodbTooManyConnections
+          expr: mongodb_ss_connections{conn_type="current",namespace="prod"} > 500
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "MongoDB 连接数过高"
+            description: "MongoDB 当前连接数为 {{ $value }}，持续超过 5 分钟。"

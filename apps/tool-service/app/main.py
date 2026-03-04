@@ -33,6 +33,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="tool-service", version=os.getenv("GIT_SHA", "dev"), lifespan=lifespan)
 
+# 添加 Prometheus metrics 中间件（最外层，记录所有请求）
+from app.middleware.metrics import PrometheusMiddleware
+
+app.add_middleware(PrometheusMiddleware)
+
 app.include_router(api_router, prefix="/api")
 app.include_router(extraction_router)
 

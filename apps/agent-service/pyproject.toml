@@ -44,6 +44,7 @@ dependencies = [
     "volcengine-python-sdk[ark]>=5.0.3",
     "inner-shared",
     "beautifulsoup4>=4.14.3",
+    "prometheus-client>=0.21.0",
 ]
 
 [project.optional-dependencies]

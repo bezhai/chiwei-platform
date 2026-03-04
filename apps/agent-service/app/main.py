@@ -52,6 +52,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# 添加 Prometheus metrics 中间件（最外层，记录所有请求）
+from app.middleware.metrics import PrometheusMiddleware
+
+app.add_middleware(PrometheusMiddleware)
+
 # 添加TraceId中间件
 app.add_middleware(HeaderContextMiddleware)
 

@@ -10,6 +10,11 @@ spec:
   selector:
     app: postgres
   ports:
-    - port: 5432
+    - name: postgres
+      port: 5432
       targetPort: 5432
+      protocol: TCP
+    - name: metrics
+      port: 9187
+      targetPort: 9187
       protocol: TCP

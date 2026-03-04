@@ -33,7 +33,11 @@ spec:
               containerPort: 5672
             - name: management
               containerPort: 15672
+            - name: metrics
+              containerPort: 15692
           env:
+            - name: RABBITMQ_PLUGINS
+              value: "rabbitmq_management,rabbitmq_prometheus"
             - name: RABBITMQ_DEFAULT_USER
               valueFrom:
                 secretKeyRef:
