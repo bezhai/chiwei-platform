@@ -86,6 +86,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	} else {
 		args = append(args, "--cache=false")
 	}
+	args = append(args, "--snapshot-mode=redo")
 
 	// 构建上下文子目录
 	if sub.ContextDir != "" && sub.ContextDir != "." {
