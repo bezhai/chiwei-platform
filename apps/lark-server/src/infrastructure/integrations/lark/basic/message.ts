@@ -16,12 +16,14 @@ export async function replyMessage(messageId: string, message: string, replyInTh
     await reply(messageId, { text: message }, 'text', replyInThread);
 }
 
-export async function sendPost(chat_id: string, content: PostContent) {
-    await send(chat_id, { zh_cn: content }, 'post');
+export async function sendPost(chat_id: string, content: PostContent): Promise<string | undefined> {
+    const resp = await send(chat_id, { zh_cn: content }, 'post');
+    return resp?.message_id;
 }
 
-export async function replyPost(messageId: string, content: PostContent, replyInThread?: boolean) {
-    await reply(messageId, { zh_cn: content }, 'post', replyInThread);
+export async function replyPost(messageId: string, content: PostContent, replyInThread?: boolean): Promise<string | undefined> {
+    const resp = await reply(messageId, { zh_cn: content }, 'post', replyInThread);
+    return resp?.message_id;
 }
 
 export async function sendCard(chat_id: string, card: ValidLarkCard) {

@@ -1,7 +1,7 @@
 """Chat request MQ consumer
 
-消费 chat_request queue，执行 agent 聊天，
-将完整回复发布到 chat_response queue。
+消费 chat_request queue，流式执行 agent 聊天，
+检测 ---split--- 分隔符实时切分发送到 chat_response queue。
 """
 
 import json
@@ -10,6 +10,7 @@ import traceback
 
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.agents import stream_chat
 from app.clients.rabbitmq import (
     QUEUE_CHAT_REQUEST,
     RK_CHAT_RESPONSE,
@@ -17,14 +18,16 @@ from app.clients.rabbitmq import (
     _current_lane,
     _lane_queue,
 )
-from app.services.chat_service import process_chat
 from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 
+SPLIT_MARKER = "---split---"
+MAX_MESSAGES = 4
+
 
 async def handle_chat_request(message: AbstractIncomingMessage) -> None:
-    """消费 chat_request queue 中的消息"""
+    """消费 chat_request queue 中的消息，流式切分发送"""
     async with message.process(requeue=False):
         body = json.loads(message.body)
         session_id = body.get("session_id")
@@ -64,18 +67,78 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
         }
 
         try:
-            content = await process_chat(message_id, session_id=session_id)
+            sent_length = 0  # 已发送内容的长度
+            messages_sent = 0  # 已发送消息条数
+            full_content = ""  # 累积的完整内容
 
-            await client.publish(
-                RK_CHAT_RESPONSE,
-                {
-                    **base_response,
-                    "content": content,
-                    "status": "success",
-                },
-                lane=lane,
+            async for chunk in stream_chat(message_id, session_id=session_id):
+                if not chunk.content:
+                    continue
+                full_content = chunk.content  # chunk.content 是累积的
+
+                # 检测分隔符，逐段发送
+                pending = full_content[sent_length:]
+                while SPLIT_MARKER in pending and messages_sent < MAX_MESSAGES - 1:
+                    idx = pending.index(SPLIT_MARKER)
+                    part = pending[:idx].strip()
+                    if part:
+                        await client.publish(
+                            RK_CHAT_RESPONSE,
+                            {
+                                **base_response,
+                                "content": part,
+                                "status": "success",
+                                "part_index": messages_sent,
+                            },
+                            lane=lane,
+                        )
+                        messages_sent += 1
+                        logger.info(
+                            "Chat response part %d published: session_id=%s",
+                            messages_sent - 1,
+                            session_id,
+                        )
+                    sent_length += idx + len(SPLIT_MARKER)
+                    pending = full_content[sent_length:]
+
+            # 流结束，发送剩余内容（去掉残留的 split marker）
+            remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
+            # 全量文本（去掉所有 split marker），用于数据库存储
+            clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
+
+            if remaining or messages_sent == 0:
+                await client.publish(
+                    RK_CHAT_RESPONSE,
+                    {
+                        **base_response,
+                        "content": remaining or full_content,
+                        "full_content": clean_full,
+                        "status": "success",
+                        "part_index": messages_sent,
+                        "is_last": True,
+                    },
+                    lane=lane,
+                )
+            else:
+                # split marker 后没有内容，仍需通知 worker 结束
+                await client.publish(
+                    RK_CHAT_RESPONSE,
+                    {
+                        **base_response,
+                        "content": "",
+                        "full_content": clean_full,
+                        "status": "success",
+                        "part_index": messages_sent,
+                        "is_last": True,
+                    },
+                    lane=lane,
+                )
+
+            logger.info(
+                "Chat response final part %d published: session_id=%s",
+                messages_sent,
+                session_id,
             )
-            logger.info("Chat response published: session_id=%s", session_id)
 
         except Exception as e:
             logger.error(

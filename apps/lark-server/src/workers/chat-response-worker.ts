@@ -2,8 +2,9 @@
  * Chat Response Worker — 独立进程
  *
  * 消费 RabbitMQ chat_response queue，
- * 使用 TextReplyStrategy 发送 post 消息到飞书，
- * 更新 agent_responses 状态并保存 conversation_messages。
+ * 按 part_index 直接发送 post 消息到飞书，
+ * 每条消息发送后立即存 conversation_messages 并追加 agent_responses.replies，
+ * is_last 时更新 response_text 和状态为 completed。
  */
 
 import { LoggerFactory } from '@inner/shared';
@@ -27,12 +28,14 @@ import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { initializeLarkClients } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
-import { TextReplyStrategy } from '@core/services/ai/strategies/text-reply.strategy';
-import { multiMessageConfig } from '@config/multi-message.config';
+import { replyPost, sendPost } from '@lark/basic/message';
+import { markdownToPostContent } from 'core/services/message/post-content-processor';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
 import dayjs from 'dayjs';
 import type { ConsumeMessage } from 'amqplib';
+
+const SEND_DELAY_MS = 2500;
 
 interface ChatResponsePayload {
     session_id: string;
@@ -42,17 +45,36 @@ interface ChatResponsePayload {
     root_id?: string;
     user_id?: string;
     content: string;
+    full_content?: string;
     status: 'success' | 'failed';
     error?: string;
     lane?: string;
+    part_index?: number;
+    is_last?: boolean;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     const payload: ChatResponsePayload = JSON.parse(msg.content.toString());
-    const { session_id, message_id, chat_id, is_p2p, root_id, content, status, error } = payload;
+    const {
+        session_id,
+        message_id,
+        chat_id,
+        is_p2p,
+        root_id,
+        content,
+        full_content,
+        status,
+        error,
+        part_index = 0,
+        is_last = true,
+    } = payload;
 
     console.info(
-        `[ChatResponseWorker] Processing: session_id=${session_id}, status=${status}`,
+        `[ChatResponseWorker] Processing: session_id=${session_id}, status=${status}, part=${part_index}, is_last=${is_last}`,
     );
 
     const repo = AppDataSource.getRepository(AgentResponse);
@@ -69,61 +91,83 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             console.error(
                 `[ChatResponseWorker] Agent failed: session_id=${session_id}, error=${error}`,
             );
-            // 更新状态为 failed
             await repo.update({ session_id }, { status: 'failed' });
             rabbitmqClient.ack(msg);
             return;
         }
 
         if (!content) {
-            console.warn(`[ChatResponseWorker] Empty content: session_id=${session_id}`);
-            await repo.update({ session_id }, { status: 'completed' });
+            console.warn(`[ChatResponseWorker] Empty content: session_id=${session_id}, part=${part_index}`);
+            if (is_last) {
+                await repo.update({ session_id }, { status: 'completed' });
+            }
             rabbitmqClient.ack(msg);
             return;
         }
 
         try {
-            // 使用 TextReplyStrategy 发送消息
-            const strategy = new TextReplyStrategy(
-                { messageId: message_id, chatId: chat_id, isP2P: is_p2p, rootId: root_id },
-                multiMessageConfig,
-            );
-            await strategy.sendReply(content);
+            const postContent = markdownToPostContent(content);
 
-            // 更新 agent_responses
-            await repo.update(
-                { session_id },
-                {
-                    response_text: content,
-                    replies: [
-                        {
-                            message_id: message_id,
-                            content_type: 'post',
-                            sent_at: new Date().toISOString(),
-                        },
-                    ] as any,
-                    status: 'completed',
-                },
-            );
+            // 发送消息并捕获 AI 消息 ID
+            let aiMessageId: string | undefined;
+            if (part_index === 0) {
+                // 第一条作为回复
+                aiMessageId = await replyPost(message_id, postContent);
+            } else {
+                // 后续消息带延迟后发送
+                await sleep(SEND_DELAY_MS);
+                aiMessageId = await sendPost(chat_id, postContent);
+            }
 
-            // 保存 assistant 消息到 conversation_messages
+            const effectiveMessageId = aiMessageId || `${message_id}_part${part_index}`;
+
+            // 每条消息发完后立即存 conversation_messages
             const now = dayjs().valueOf();
             await storeMessage({
                 user_id: getBotUnionId(),
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
-                message_id: message_id,
+                message_id: effectiveMessageId,
                 message_type: 'post',
                 chat_id: chat_id,
                 chat_type: is_p2p ? 'p2p' : 'group',
                 create_time: String(now),
-                root_message_id: root_id,
+                root_message_id: root_id || message_id,
                 reply_message_id: message_id,
             });
 
-            console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}`);
+            // 每条消息追加到 agent_responses.replies jsonb 数组
+            const replyEntry = JSON.stringify([
+                {
+                    message_id: effectiveMessageId,
+                    content_type: 'post',
+                    sent_at: new Date().toISOString(),
+                },
+            ]);
+            await repo
+                .createQueryBuilder()
+                .update(AgentResponse)
+                .set({
+                    replies: () =>
+                        `COALESCE(replies, '[]'::jsonb) || '${replyEntry}'::jsonb`,
+                })
+                .where('session_id = :sid', { sid: session_id })
+                .execute();
+
+            // is_last 时更新 response_text 和状态
+            if (is_last) {
+                await repo.update(
+                    { session_id },
+                    {
+                        response_text: full_content || content,
+                        status: 'completed',
+                    },
+                );
+            }
+
+            console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}, part=${part_index}, ai_msg_id=${effectiveMessageId}`);
         } catch (e) {
-            console.error(`[ChatResponseWorker] Failed to send reply: session_id=${session_id}`, e);
+            console.error(`[ChatResponseWorker] Failed to send reply: session_id=${session_id}, part=${part_index}`, e);
             await repo.update({ session_id }, { status: 'failed' });
         }
     });
