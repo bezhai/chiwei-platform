@@ -32,7 +32,6 @@ apps/
 | **App** | 运行配置（关联 ImageRepo、端口、命令、环境变量等），port=0 表示 Worker（不暴露端口） |
 | **Build** | 一次镜像构建（Kaniko Job），挂在 ImageRepo 下 |
 | **Release** | 将某个镜像 tag 部署到某个泳道，生成 K8s Deployment + Service |
-| **Lane** | 部署泳道（prod/blue/dev/feature-xxx），通过 LaneRouter SDK + K8s Service DNS 路由 |
 
 关系：`ImageRepo（构建配置）→ Build（构建镜像）`，`App（运行配置）→ Release（部署到泳道）`，App 通过 `image_repo` 字段关联 ImageRepo。
 
@@ -136,12 +135,6 @@ DELETE /api/v1/releases/?app=xxx&lane=yyy               # 按 app+lane 删除 Re
 GET    /api/v1/releases/{id}/                           # 获取 Release
 PUT    /api/v1/releases/{id}/                           # 更新 Release
 DELETE /api/v1/releases/{id}/                           # 删除 Release
-
-# Lanes（泳道）
-POST   /api/v1/lanes/                                   # 创建泳道
-GET    /api/v1/lanes/                                   # 列出泳道
-GET    /api/v1/lanes/{lane}/                            # 获取泳道
-DELETE /api/v1/lanes/{lane}/                            # 删除泳道
 ```
 
 ### 泳道路由

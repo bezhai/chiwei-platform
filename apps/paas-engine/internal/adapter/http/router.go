@@ -11,7 +11,6 @@ import (
 func NewRouter(
 	appH *AppHandler,
 	releaseH *ReleaseHandler,
-	laneH *LaneHandler,
 	logH *LogHandler,
 	imageRepoH *ImageRepoHandler,
 	apiToken string,
@@ -62,16 +61,6 @@ func NewRouter(
 				r.Get("/", releaseH.Get)
 				r.Put("/", releaseH.Update)
 				r.Delete("/", releaseH.Delete)
-			})
-		})
-
-		// Lanes
-		r.Route("/lanes", func(r chi.Router) {
-			r.Post("/", laneH.Create)
-			r.Get("/", laneH.List)
-			r.Route("/{lane}", func(r chi.Router) {
-				r.Get("/", laneH.Get)
-				r.Delete("/", laneH.Delete)
 			})
 		})
 

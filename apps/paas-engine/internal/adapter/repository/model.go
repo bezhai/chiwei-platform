@@ -33,16 +33,6 @@ type ImageRepoModel struct {
 
 func (ImageRepoModel) TableName() string { return "image_repos" }
 
-// LaneModel 是 Lane 的数据库持久化模型。
-type LaneModel struct {
-	Name        string `gorm:"primaryKey"`
-	Description string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}
-
-func (LaneModel) TableName() string { return "lanes" }
-
 // BuildModel 是 Build 的数据库持久化模型。
 type BuildModel struct {
 	ID            string `gorm:"primaryKey"`
