@@ -100,6 +100,6 @@ spec:
         - http://paas-engine.prod:8080/healthz
         - http://lite-registry.prod:8080/healthz
         - http://lark-server.prod:3000/api/health
-        - http://lark-proxy.prod:3000/api/health
-        - http://agent-service.prod:8000/api/health
+        - http://lark-proxy.prod:3003/api/health
+        - http://agent-service.prod:8000/health
         - http://tool-service.prod:8000/health
