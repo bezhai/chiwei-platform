@@ -26,6 +26,7 @@ type ImageRepoModel struct {
 	GitRepo    string
 	ContextDir string
 	Dockerfile string
+	NoCache    bool
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }

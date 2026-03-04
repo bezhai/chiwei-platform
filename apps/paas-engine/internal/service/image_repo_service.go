@@ -23,6 +23,7 @@ type CreateImageRepoRequest struct {
 	GitRepo    string `json:"git_repo"`
 	ContextDir string `json:"context_dir"`
 	Dockerfile string `json:"dockerfile"`
+	NoCache    bool   `json:"no_cache"`
 }
 
 func (s *ImageRepoService) CreateImageRepo(ctx context.Context, req CreateImageRepoRequest) (*domain.ImageRepo, error) {
@@ -46,6 +47,7 @@ func (s *ImageRepoService) CreateImageRepo(ctx context.Context, req CreateImageR
 		GitRepo:    req.GitRepo,
 		ContextDir: req.ContextDir,
 		Dockerfile: req.Dockerfile,
+		NoCache:    req.NoCache,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -68,6 +70,7 @@ type UpdateImageRepoRequest struct {
 	GitRepo    string `json:"git_repo"`
 	ContextDir string `json:"context_dir"`
 	Dockerfile string `json:"dockerfile"`
+	NoCache    bool   `json:"no_cache"`
 }
 
 func (s *ImageRepoService) UpdateImageRepo(ctx context.Context, name string, req UpdateImageRepoRequest) (*domain.ImageRepo, error) {
@@ -89,6 +92,7 @@ func (s *ImageRepoService) UpdateImageRepo(ctx context.Context, name string, req
 	repo.GitRepo = req.GitRepo
 	repo.ContextDir = req.ContextDir
 	repo.Dockerfile = req.Dockerfile
+	repo.NoCache = req.NoCache
 	repo.UpdatedAt = time.Now()
 	if err := s.imageRepoRepo.Update(ctx, repo); err != nil {
 		return nil, err

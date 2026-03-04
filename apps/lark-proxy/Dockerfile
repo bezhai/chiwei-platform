@@ -3,9 +3,6 @@ FROM oven/bun:1.3.9-alpine
 RUN apk add --no-cache tzdata
 ENV TZ=Asia/Shanghai
 
-ARG GIT_SHA=unknown
-ENV GIT_SHA=${GIT_SHA}
-
 WORKDIR /repo
 
 # 复制所有 workspace 元数据和共享包源码
@@ -26,6 +23,9 @@ RUN bun install --frozen-lockfile --backend=copyfile \
     && cp -rL packages/ts-shared node_modules/@inner/shared \
     && cp -rL packages/pixiv-client node_modules/@inner/pixiv-client \
     && cp -rL packages/lark-utils node_modules/@inner/lark-utils
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 
 # 复制源码
 COPY apps/lark-proxy/tsconfig.json ./apps/lark-proxy/tsconfig.json

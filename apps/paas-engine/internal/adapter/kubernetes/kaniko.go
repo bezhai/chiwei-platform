@@ -81,11 +81,12 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 		fmt.Sprintf("--context=%s#%s", gitContext, gitRef),
 		fmt.Sprintf("--destination=%s", sub.ImageTag),
 	}
-	if e.cacheRepo != "" {
+	if !sub.NoCache && e.cacheRepo != "" {
 		args = append(args, "--cache=true", "--cache-repo="+e.cacheRepo)
 	} else {
 		args = append(args, "--cache=false")
 	}
+	args = append(args, "--snapshot-mode=redo")
 
 	// 构建上下文子目录
 	if sub.ContextDir != "" && sub.ContextDir != "." {
