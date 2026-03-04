@@ -140,7 +140,7 @@ if [ -n "$failures" ]; then
     # 当前异常
     if [ "$prev_state" != "fail" ]; then
         # 状态变更：ok → fail，发告警
-        details=$(echo -e "$failures" | sed '/^$/d' | tr '\n' '，' | sed 's/，$//')
+        details=$(echo -e "$failures" | sed '/^$/d' | paste -sd ',' | sed 's/,/、/g')
         send_feishu_card "firing" "控制节点不可达 🚨" "$details"
         echo "[$(date)] 告警已发送: $details"
     else
