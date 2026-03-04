@@ -16,6 +16,7 @@ dependencies = [
     "lark-oapi>=1.5.3",
     "sqlalchemy>=2.0.47",
     "asyncpg>=0.31.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [build-system]

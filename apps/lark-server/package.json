@@ -64,6 +64,7 @@
         "proxy-agent": "^6.5.0",
         "typeorm": "^0.3.17",
         "uuid": "^10.0.0",
-        "winston": "^3.11.0"
+        "winston": "^3.11.0",
+        "prom-client": "^15.1.0"
     }
 }

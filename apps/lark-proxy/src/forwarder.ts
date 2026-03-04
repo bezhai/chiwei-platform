@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { LaneRouter } from '@inner/shared/src/lane-router';
+import { LaneRouter } from '@inner/shared/lane-router';
 import { LaneResolver } from './lane-resolver';
 
 /**

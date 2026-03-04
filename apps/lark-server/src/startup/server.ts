@@ -6,6 +6,7 @@ import cors from '@koa/cors';
 import { errorHandler } from '@middleware/error-handler';
 import { traceMiddleware } from '@middleware/trace';
 import { botContextMiddleware } from '@middleware/bot-context';
+import { metricsMiddleware, metricsRouter } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
 
@@ -39,6 +40,7 @@ export class HttpServerManager {
      * 设置中间件
      */
     private setupMiddleware(): void {
+        this.app.use(metricsMiddleware); // Prometheus metrics（最外层）
         this.app.use(cors());
         this.app.use(traceMiddleware); // 先注入 traceId（为后续日志与错误处理提供上下文）
         this.app.use(errorHandler); // 统一错误处理（依赖 traceId 贯穿）
@@ -85,7 +87,8 @@ export class HttpServerManager {
      * 启动 HTTP 服务器
      */
     async start(): Promise<void> {
-        // 注册健康检查和其他路由
+        // 注册 /metrics 和健康检查路由
+        this.app.use(metricsRouter.routes());
         this.registerHealthCheck();
         this.app.use(this.router.routes());
         this.app.use(internalLarkRoutes.routes());

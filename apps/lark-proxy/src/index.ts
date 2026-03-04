@@ -6,6 +6,7 @@ import { EventForwarder } from './forwarder';
 import { BotManager } from './bot-manager';
 import healthRouter from './health';
 import { laneRouter } from './lane-router-instance';
+import { metricsMiddleware, metricsRouter } from './metrics';
 
 const PORT = parseInt(process.env.LARK_PROXY_PORT || '3003', 10);
 
@@ -28,6 +29,10 @@ async function main(): Promise<void> {
 
     const app = new Koa();
     const router = new Router();
+
+    // Prometheus metrics（最外层）
+    app.use(metricsMiddleware);
+    app.use(metricsRouter.routes());
 
     // 注册 health check
     app.use(healthRouter.routes());
