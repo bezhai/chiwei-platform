@@ -79,6 +79,7 @@ func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, re
 			ContextDir: imageRepo.ContextDir,
 			Dockerfile: imageRepo.Dockerfile,
 			ImageTag:   fullImageRef,
+			NoCache:    imageRepo.NoCache,
 		}
 		jobName, err := s.executor.Submit(ctx, sub)
 		if err != nil {

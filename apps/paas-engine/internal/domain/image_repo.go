@@ -13,6 +13,7 @@ type ImageRepo struct {
 	GitRepo    string    `json:"git_repo"`    // Git 仓库地址
 	ContextDir string    `json:"context_dir"` // 构建上下文子目录
 	Dockerfile string    `json:"dockerfile"`  // Dockerfile 路径（相对 context），空则使用默认 Dockerfile
+	NoCache    bool      `json:"no_cache"`    // true = 强制关闭构建缓存，忽略全局 cacheRepo 配置
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
