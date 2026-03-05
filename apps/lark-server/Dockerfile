@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.9-slim AS builder
+FROM harbor.local:30002/library/bun:1.3.9-slim AS builder
 
 WORKDIR /repo
 
@@ -26,7 +26,7 @@ RUN bun build src/workers/recall-worker.ts --compile --outfile=recall-worker
 RUN bun build src/workers/chat-response-worker.ts --compile --outfile=chat-response-worker
 
 # --- Runtime（同样基于 Debian/glibc）---
-FROM debian:bookworm-slim
+FROM harbor.local:30002/library/debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
