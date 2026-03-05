@@ -79,7 +79,7 @@ alertmanager:
       repeat_interval: 4h
       routes:
         - matchers:
-            - alertname = "InfoInhibitor"
+            - alertname =~ "InfoInhibitor|Watchdog"
           receiver: "null"
     receivers:
       - name: feishu
