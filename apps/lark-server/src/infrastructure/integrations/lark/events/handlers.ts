@@ -12,14 +12,9 @@ import {
     UpdatePhotoCard,
     FetchPhotoDetails,
     UpdateDailyPhotoCard,
-    LarkCardRetry,
-    LarkCardThumbsDown,
-    LarkCardThumbsUp,
 } from 'types/lark';
 import { fetchAndSendPhotoDetail } from '@core/services/callback/fetch-photo-detail';
 import { handleUpdatePhotoCard, handleUpdateDailyPhotoCard } from '@core/services/callback/update-card';
-import { handleRetryCard } from '@core/services/callback/retry-card';
-import { handleFeedback } from '@core/services/callback/feedback';
 import { LarkGroupMember, LarkUser } from 'infrastructure/dal/entities';
 import { LarkUserOpenId } from 'infrastructure/dal/entities/lark-user-open-id';
 import { getUserInfo } from 'infrastructure/integrations/lark-client';
@@ -123,15 +118,6 @@ export class LarkEventHandlers {
                 break;
             case UpdateDailyPhotoCard:
                 handleUpdateDailyPhotoCard(data, data.action.value.start_time);
-                break;
-            case LarkCardRetry:
-                handleRetryCard(data.action.value);
-                break;
-            case LarkCardThumbsDown:
-                handleFeedback(data.action.value, data.operator.union_id);
-                break;
-            case LarkCardThumbsUp:
-                handleFeedback(data.action.value, data.operator.union_id);
                 break;
             default:
                 console.warn('unknown card action', data);

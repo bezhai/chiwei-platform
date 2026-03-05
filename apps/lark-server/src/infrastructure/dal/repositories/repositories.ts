@@ -5,9 +5,7 @@ import {
     LarkGroupChatInfo,
     LarkGroupMember,
     LarkUser,
-    LarkCardContext,
     LarkUserOpenId,
-    ResponseFeedback,
     UserBlacklist,
     ConversationMessage,
     AgentResponse,
@@ -20,9 +18,9 @@ export const BaseChatInfoRepository = AppDataSource.getRepository(LarkBaseChatIn
 export const GroupChatInfoRepository = AppDataSource.getRepository(LarkGroupChatInfo);
 export const GroupMemberRepository = AppDataSource.getRepository(LarkGroupMember);
 export const LarkUserOpenIdRepository = AppDataSource.getRepository(LarkUserOpenId);
-export const CardContextRepository = AppDataSource.getRepository(LarkCardContext);
+
 export const UserGroupBindingRepository = new CustomUserGroupBindingRepository(AppDataSource);
-export const ResponseFeedbackRepository = AppDataSource.getRepository(ResponseFeedback);
+
 export const UserBlacklistRepository = AppDataSource.getRepository(UserBlacklist);
 export const ConversationMessageRepository = AppDataSource.getRepository(ConversationMessage);
 export const AgentResponseRepository = AppDataSource.getRepository(AgentResponse);
