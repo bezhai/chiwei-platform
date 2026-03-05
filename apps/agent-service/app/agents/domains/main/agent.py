@@ -1,7 +1,6 @@
 """主聊天 Agent"""
 
 import asyncio
-import copy
 import logging
 import uuid
 from collections.abc import AsyncGenerator
@@ -23,29 +22,24 @@ from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import Complexity, run_pre
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.memory_context import build_memory_context
-from app.types.chat import ChatStreamChunk
-from app.utils.async_interval import AsyncIntervalChecker
 from app.utils.content_parser import parse_content
-from app.utils.status_processor import AIMessageChunkProcessor
 
 logger = logging.getLogger(__name__)
 
-YIELD_INTERVAL = 0.5
-
 # 统一的拒绝响应
-GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
+GUARD_REJECT_MESSAGE = "���发了一些赤尾不想讨论的话题呢~"
 
 # 复杂度行为引导
 COMPLEXITY_HINTS = {
     Complexity.SIMPLE: "【简洁模式】倾向于直接回答或单次工具调用，快速响应用户。",
-    Complexity.COMPLEX: "【深度模式】可以多步推理，充分利用工具收集信息后再综合回答。",
+    Complexity.COMPLEX: "【深度���式】可以多步推理，充分利用工具收集信息后再综合回答。",
     Complexity.SUPER_COMPLEX: "【研究模式】这是一个复杂的研究任务，可以进行深入分析和多轮工具调用。",
 }
 
 
 async def stream_chat(
     message_id: str, session_id: str | None = None
-) -> AsyncGenerator[ChatStreamChunk, None]:
+) -> AsyncGenerator[str, None]:
     """主聊天流式响应入口
 
     Args:
@@ -53,7 +47,7 @@ async def stream_chat(
         session_id: 会话追踪 ID（由 main-server 生成）
 
     Yields:
-        ChatStreamChunk: 聊天流式响应块
+        str: 原始 token 文本片段
     """
     # 0. 创建父 trace，pre 和 main 的 CallbackHandler 会自动嵌套其下
     langfuse = get_langfuse()
@@ -65,7 +59,7 @@ async def stream_chat(
             raw_content = await get_message_content(message_id)
             if not raw_content:
                 logger.warning(f"No message found for message_id: {message_id}")
-                yield ChatStreamChunk(content="抱歉，未找到相关消息记录")
+                yield "抱歉，未找到相关消息记录"
                 return
 
             # 解析 v2 内容，提取纯文本供 pre 使用
@@ -87,7 +81,7 @@ async def stream_chat(
                         f"消息被拦截: message_id={message_id}, "
                         f"reason={pre_result['block_reason']}"
                     )
-                    yield ChatStreamChunk(content=GUARD_REJECT_MESSAGE)
+                    yield GUARD_REJECT_MESSAGE
                     return
 
                 complexity_result = pre_result["complexity_result"]
@@ -98,10 +92,10 @@ async def stream_chat(
                 )
                 logger.info(f"复杂度路由: complexity={complexity.value}")
 
-                async for chunk in _build_and_stream(
+                async for text in _build_and_stream(
                     message_id, complexity, gray_config, request_id
                 ):
-                    yield chunk
+                    yield text
             else:
                 # === 并行模式：pre 在后台运行，主模型同时流式生成 ===
                 logger.info(f"并行模式启动: message_id={message_id}")
@@ -109,28 +103,28 @@ async def stream_chat(
                     message_id, Complexity.SIMPLE, gray_config, request_id
                 )
 
-                async for chunk in _buffer_until_pre(raw_stream, pre_task, message_id):
-                    yield chunk
+                async for text in _buffer_until_pre(raw_stream, pre_task, message_id):
+                    yield text
 
 
 async def _buffer_until_pre(
-    raw_stream: AsyncGenerator[ChatStreamChunk, None],
+    raw_stream: AsyncGenerator[str, None],
     pre_task: asyncio.Task,
     message_id: str,
-) -> AsyncGenerator[ChatStreamChunk, None]:
-    """用 pre_task 结果守护一个原始 chunk 流：缓冲直到 pre 通过后释放，被拦截则丢弃。
+) -> AsyncGenerator[str, None]:
+    """用 pre_task 结果守护一个原始 token 流：缓冲直到 pre 通过后释放，被拦截则丢弃。
 
-    - 每收到一个 chunk 时检查 pre_task 是否已完成
+    - 每收到一个 token 时检查 pre_task 是否已完成
     - pre 通过 → 释放全部 buffer，后续直接 yield
     - pre 拦截 → 丢弃 buffer，yield 拒绝消息
     - 流结束后 pre 仍未完成 → await 再决定
     """
-    buffer: list[ChatStreamChunk] = []
+    buffer: list[str] = []
     pre_resolved = False
 
     try:
-        async for chunk in raw_stream:
-            # 每个 chunk 到达时，探测 pre 是否已完成
+        async for text in raw_stream:
+            # 每个 token 到达时，探测 pre 是否已完成
             if not pre_resolved and pre_task.done():
                 pre_result = pre_task.result()
                 pre_resolved = True
@@ -140,7 +134,7 @@ async def _buffer_until_pre(
                         f"并行模式拦截: message_id={message_id}, "
                         f"reason={pre_result['block_reason']}"
                     )
-                    yield ChatStreamChunk(content=GUARD_REJECT_MESSAGE)
+                    yield GUARD_REJECT_MESSAGE
                     return
 
                 # pre 通过，释放 buffer
@@ -149,11 +143,9 @@ async def _buffer_until_pre(
                 buffer.clear()
 
             if pre_resolved:
-                yield chunk
+                yield text
             else:
-                # copy: accumulate_chunk 是同一个可变对象被反复 yield，
-                # 需要快照当前状态（content 是 str，浅拷贝即可）
-                buffer.append(copy.copy(chunk))
+                buffer.append(text)
     except Exception:
         # 确保 pre_task 不会悬空
         if not pre_task.done():
@@ -176,7 +168,7 @@ async def _buffer_until_pre(
                 f"并行模式拦截（流结束后）: message_id={message_id}, "
                 f"reason={pre_result['block_reason']}"
             )
-            yield ChatStreamChunk(content=GUARD_REJECT_MESSAGE)
+            yield GUARD_REJECT_MESSAGE
             return
 
         for buffered in buffer:
@@ -188,7 +180,7 @@ async def _build_and_stream(
     complexity: Complexity,
     gray_config: dict,
     session_id: str | None = None,
-) -> AsyncGenerator[ChatStreamChunk, None]:
+) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
     # 构建 prompt 变量（注入复杂度引导）
     now = datetime.now()
@@ -223,7 +215,7 @@ async def _build_and_stream(
 
     if not messages:
         logger.warning(f"No results found for message_id: {message_id}")
-        yield ChatStreamChunk(content="抱歉，未找到相关消息记录")
+        yield "抱歉，未找到相关消息记录"
         return
 
     # 私聊时注入用户信息，帮助模型了解对话对象
@@ -243,14 +235,7 @@ async def _build_and_stream(
     else:
         prompt_vars["memory_context"] = ""
 
-    accumulate_chunk = ChatStreamChunk(
-        content="",
-        reason_content="",
-    )
-
-    interval_checker = AsyncIntervalChecker(YIELD_INTERVAL)
-    processor = AIMessageChunkProcessor()
-    should_continue = True
+    full_content = ""
 
     try:
         async for token in agent.stream(
@@ -265,41 +250,30 @@ async def _build_and_stream(
             if isinstance(token, AIMessageChunk):
                 finish_reason = token.response_metadata.get("finish_reason")
 
+                if finish_reason == "content_filter":
+                    yield "小尾有点不想讨论这个话题呢~"
+                    return
+                if finish_reason == "length":
+                    yield "(后续内容被截断)"
+                    return
                 if finish_reason == "stop":
-                    yield accumulate_chunk
-                elif finish_reason == "content_filter":
-                    yield ChatStreamChunk(content="小尾有点不想讨论这个话题呢~")
-                    should_continue = False
-                elif finish_reason == "length":
-                    yield ChatStreamChunk(content="(后续内容被截断)")
-                    should_continue = False
+                    break
 
-                if not should_continue:
-                    continue
-
-                status_message = processor.process_chunk(token)
-                if status_message:
-                    yield ChatStreamChunk(status_message=status_message)
-
-                accumulate_chunk.content += token.text or ""
-
-                if interval_checker.check():
-                    yield accumulate_chunk
-
-        yield accumulate_chunk
+                if token.text:
+                    full_content += token.text
+                    yield token.text
 
         # Fire-and-forget: publish to post safety check queue
-        full_response = accumulate_chunk.content or ""
-        if full_response and session_id:
+        if full_content and session_id:
             asyncio.create_task(
-                _publish_post_check(session_id, full_response, chat_id, message_id)
+                _publish_post_check(session_id, full_content, chat_id, message_id)
             )
 
     except Exception as e:
         import traceback
 
         logger.error(f"stream_chat error: {str(e)}\n{traceback.format_exc()}")
-        yield ChatStreamChunk(content="赤尾好像遇到了一些问题呢QAQ")
+        yield "赤尾好像遇到了一些问题呢QAQ"
 
 
 async def _publish_post_check(

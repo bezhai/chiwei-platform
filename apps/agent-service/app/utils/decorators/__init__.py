@@ -4,7 +4,6 @@ Decorators module - re-exports from inner_shared with local extensions.
 
 # Re-export from inner_shared
 from inner_shared.decorators import (
-    auto_json_serialize,
     dict_serialize,
     handle_errors,
     log_io,
@@ -18,5 +17,4 @@ __all__ = [
     "dict_serialize",
     "log_io",
     "redis_cache",
-    "auto_json_serialize",
 ]

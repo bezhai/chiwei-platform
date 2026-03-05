@@ -55,10 +55,8 @@ export type {
     StateHandler,
     StateMachineContext,
     StateMachineOptions,
-    SSEClientOptions,
-    SSEMessage,
 } from './utils';
-export { StateMachine, SSEClient, RateLimiter, TextUtils } from './utils';
+export { StateMachine, RateLimiter, TextUtils } from './utils';
 
 // Entity exports (requires typeorm as peer dependency)
 export { ConversationMessage, LarkUser, LarkGroupChatInfo } from './entities';

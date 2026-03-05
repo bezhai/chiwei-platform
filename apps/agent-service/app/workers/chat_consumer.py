@@ -71,10 +71,10 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             messages_sent = 0  # 已发送消息条数
             full_content = ""  # 累积的完整内容
 
-            async for chunk in stream_chat(message_id, session_id=session_id):
-                if not chunk.content:
+            async for text in stream_chat(message_id, session_id=session_id):
+                if not text:
                     continue
-                full_content = chunk.content  # chunk.content 是累积的
+                full_content += text
 
                 # 检测分隔符，逐段发送
                 pending = full_content[sent_length:]

@@ -1,20 +1,4 @@
-from enum import Enum
-
 from pydantic import BaseModel
-
-
-class Step(str, Enum):
-    """
-    接收到消息后，服务器返回的步骤
-    Server step after receiving message
-    """
-
-    ACCEPT = "accept"  # 收到消息 / Message received
-    START_REPLY = "start_reply"  # 开始回复消息 / Start replying
-    SEND = "send"  # 发送消息 / Message sent
-    FAILED = "failed"  # 回复失败 / Reply failed
-    SUCCESS = "success"  # 回复成功 / Reply succeeded
-    END = "end"  # 结束 / End
 
 
 class ChatMessage(BaseModel):
@@ -59,47 +43,3 @@ class ChatRequest(BaseModel):
     message_id: str  # 消息id / Message ID
     session_id: str | None = None  # 会话追踪 ID / Session tracking ID
     is_canary: bool | None = False  # 是否开启灰度
-
-
-class ChatStreamChunk(BaseModel):
-    """
-    聊天流式响应
-    Chat stream response
-    """
-
-    reason_content: str | None = None  # 思维链内容 / Reasoning content
-    content: str | None = None  # 回复内容 / Reply content
-    status_message: str | None = None  # 状态消息 / Status message
-
-
-class ChatProcessResponse(BaseModel):
-    """
-    聊天处理响应（带思维链内容）
-    Chat process response (with reasoning content)
-    """
-
-    step: Step = Step.SEND  # 步骤 / Step
-    reason_content: str | None = None  # 思维链内容 / Reasoning content
-    content: str | None = None  # 回复内容 / Reply content
-
-
-class ChatNormalResponse(BaseModel):
-    """
-    聊天普通响应
-    Chat normal response
-    """
-
-    step: Step  # 步骤 / Step
-
-
-class ChatStatusResponse(BaseModel):
-    """
-    聊天状态响应（用于更新底部栏状态）
-    Chat status response (for updating bottom bar status)
-    """
-
-    step: Step = Step.SEND  # 步骤 / Step
-    status_message: str  # 状态消息 / Status message
-
-
-ChatResponse = ChatProcessResponse | ChatNormalResponse | ChatStatusResponse
