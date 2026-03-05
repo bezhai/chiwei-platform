@@ -1,10 +1,5 @@
 import { Message } from 'core/models/message';
-import { MessageContentUtils } from 'core/models/message-content';
-import { sseChat } from './chat';
-import { CardLifecycleManager } from '@lark/basic/card-lifecycle-manager';
-import { getBotUnionId } from '@core/services/bot/bot-var';
 import { context } from '@middleware/context';
-import dayjs from 'dayjs';
 import { v4 as uuidv4 } from 'uuid';
 import { AgentResponseRepository } from '@repositories/repositories';
 import { AgentResponse } from '@entities/agent-response';
@@ -54,57 +49,4 @@ export async function makeTextReply(message: Message): Promise<void> {
     console.info(
         `[makeTextReply] Published chat.request: session_id=${sessionId}, message_id=${message.messageId}`,
     );
-}
-
-/**
- * 重试已有卡片（仍使用 SSE + 卡片模式，因为它是重试现有卡片）
- */
-export async function reCreateCard(
-    messageId: string,
-    parentMessageId: string,
-    chatId: string,
-    rootId: string,
-    isP2P: boolean,
-): Promise<void> {
-    const cardManager = await CardLifecycleManager.loadFromMessage(messageId);
-
-    if (!cardManager) {
-        return;
-    }
-
-    cardManager.appendCardContext({
-        parent_message_id: parentMessageId,
-        chat_id: chatId,
-        root_id: rootId,
-        is_p2p: isP2P,
-    });
-
-    const onSaveMessage = async (content: string) => {
-        if (!cardManager.getMessageId()) {
-            return undefined;
-        }
-        return {
-            user_id: getBotUnionId(),
-            user_name: '赤尾',
-            content: MessageContentUtils.wrapMarkdownAsV2(content),
-            is_mention_bot: false,
-            role: 'assistant',
-            message_id: cardManager.getMessageId()!,
-            message_type: 'post',
-            chat_id: chatId,
-            chat_type: isP2P ? 'p2p' : 'group',
-            create_time: String(dayjs(cardManager.getCreateTime()).valueOf()),
-            root_message_id: rootId,
-            reply_message_id: parentMessageId,
-        } as const;
-    };
-
-    await sseChat({
-        req: {
-            message_id: parentMessageId,
-        },
-        ...cardManager.createAdvancedCallbacks(parentMessageId),
-        onStartReply: async () => {},
-        onSaveMessage,
-    });
 }
