@@ -1,4 +1,4 @@
-import { UserGroupBindingRepository, GroupMemberRepository, BaseChatInfoRepository, UserBlacklistRepository } from '@infrastructure/dal/repositories/repositories';
+import { UserGroupBindingRepository, GroupMemberRepository, BaseChatInfoRepository, UserBlacklistRepository, ConversationMessageRepository, AgentResponseRepository } from '@infrastructure/dal/repositories/repositories';
 import { Message } from '@core/models/message';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { replyMessage } from '@lark/basic/message';
@@ -232,6 +232,45 @@ const commandRules = [
                 .join('\n');
 
             replyMessage(message.messageId, `黑名单列表:\n${text}`, true);
+        },
+    },
+    {
+        key: 'session',
+        handler: async (message: Message) => {
+            if (!message.parentMessageId) {
+                replyMessage(message.messageId, '人家找不到要查询的消息啦，请回复人家说的某条消息再试试～', true);
+                return;
+            }
+
+            const convMsg = await ConversationMessageRepository.findOne({
+                where: { message_id: message.parentMessageId },
+            });
+
+            if (!convMsg) {
+                replyMessage(message.messageId, '唔...这条消息人家不认识，找不到记录呢 (´•ω•`)', true);
+                return;
+            }
+
+            if (convMsg.role !== 'assistant') {
+                replyMessage(message.messageId, '这条消息不是人家发的哦，要回复人家的消息才能查 session 呀～', true);
+                return;
+            }
+
+            if (!convMsg.reply_message_id) {
+                replyMessage(message.messageId, '找不到对应的触发消息，session 不见了呢 (；´д｀)', true);
+                return;
+            }
+
+            const agentResp = await AgentResponseRepository.findOne({
+                where: { trigger_message_id: convMsg.reply_message_id },
+            });
+
+            if (!agentResp) {
+                replyMessage(message.messageId, '找遍了也没有找到 session 记录，可能已经消失了呢 (´；ω；`)', true);
+                return;
+            }
+
+            replyMessage(message.messageId, `找到啦！session_id 是：\n${agentResp.session_id}`, true);
         },
     },
     {
