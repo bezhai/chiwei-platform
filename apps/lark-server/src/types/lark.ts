@@ -148,10 +148,6 @@ export interface LarkHistoryMessageResp {
 export const UpdatePhotoCard = 'update-photo-card';
 export const FetchPhotoDetails = 'fetch-photo-details';
 export const UpdateDailyPhotoCard = 'update-daily-photo-card';
-export const LarkCardThumbsUp = 'lark_card_thumbs_up';
-export const LarkCardThumbsDown = 'lark_card_thumbs_down';
-export const LarkCardRetry = 'lark_card_retry';
-
 export interface UpdatePhotoCardCallback {
     type: typeof UpdatePhotoCard;
     tags: string[];
@@ -167,38 +163,10 @@ export interface FetchPhotoDetailsCallback {
     images: string[];
 }
 
-export interface LarkCardThumbsUpCallback {
-    type: typeof LarkCardThumbsUp;
-    message_id: string;
-    chat_id: string;
-    parent_message_id: string;
-    union_id: string;
-}
-
-export interface LarkCardThumbsDownCallback {
-    type: typeof LarkCardThumbsDown;
-    message_id: string;
-    chat_id: string;
-    parent_message_id: string;
-    union_id: string;
-}
-
-export interface LarkCardRetryCallback {
-    type: typeof LarkCardRetry;
-    message_id: string;
-    chat_id: string;
-    root_id: string;
-    is_p2p: boolean;
-    parent_message_id: string;
-}
-
 type LarkCallbackValue =
     | UpdatePhotoCardCallback
     | FetchPhotoDetailsCallback
-    | UpdateDailyPhotoCardCallback
-    | LarkCardThumbsUpCallback
-    | LarkCardThumbsDownCallback
-    | LarkCardRetryCallback;
+    | UpdateDailyPhotoCardCallback;
 
 export interface LarkCallbackInfo {
     action: {
