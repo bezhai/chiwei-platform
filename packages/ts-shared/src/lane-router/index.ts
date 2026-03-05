@@ -19,6 +19,45 @@ export interface LaneRouterOptions {
     pollInterval?: number;
 }
 
+// prom-client types (optional peer dependency)
+interface PromCounter {
+    inc(labels: Record<string, string>): void;
+}
+interface PromHistogram {
+    observe(labels: Record<string, string>, value: number): void;
+}
+interface PromRegistry {
+    registerMetric(metric: any): void;
+}
+
+// 模块级 metrics 实例（懒初始化，所有 LaneRouter 实例共享）
+let outboundRequestsTotal: PromCounter | null = null;
+let outboundRequestDuration: PromHistogram | null = null;
+let metricsInitialized = false;
+
+function initMetrics(registry: PromRegistry): void {
+    if (metricsInitialized) return;
+    try {
+        // 动态 require prom-client（optional peer dep）
+        const prom = require('prom-client');
+        outboundRequestsTotal = new prom.Counter({
+            name: 'http_outbound_requests_total',
+            help: 'Total outbound HTTP requests via LaneRouter',
+            labelNames: ['target_service', 'method', 'status'],
+            registers: [registry],
+        });
+        outboundRequestDuration = new prom.Histogram({
+            name: 'http_outbound_request_duration_seconds',
+            help: 'Outbound HTTP request duration in seconds',
+            labelNames: ['target_service', 'method'],
+            registers: [registry],
+        });
+        metricsInitialized = true;
+    } catch {
+        // prom-client not available, metrics disabled
+    }
+}
+
 /**
  * LaneRouter - 泳道感知的服务路由器
  *
@@ -32,9 +71,13 @@ export class LaneRouter {
     private registryUrl: string;
     private pollInterval: number;
 
-    constructor(registryUrl: string, pollInterval = 30_000) {
+    constructor(registryUrl: string, pollInterval = 30_000, promRegistry?: PromRegistry) {
         this.registryUrl = registryUrl.replace(/\/+$/, '');
         this.pollInterval = pollInterval;
+
+        if (promRegistry) {
+            initMetrics(promRegistry);
+        }
 
         // 立即拉取一次，然后启动轮询
         this.poll();
@@ -120,10 +163,22 @@ export class LaneRouter {
             ...(init?.headers as Record<string, string>),
         };
 
-        return fetch(url, {
-            ...init,
-            headers: mergedHeaders,
-        });
+        const method = init?.method?.toUpperCase() || 'GET';
+        const start = performance.now();
+        let status = 'network_error';
+
+        try {
+            const resp = await fetch(url, {
+                ...init,
+                headers: mergedHeaders,
+            });
+            status = String(resp.status);
+            return resp;
+        } finally {
+            const duration = (performance.now() - start) / 1000;
+            outboundRequestsTotal?.inc({ target_service: service, method, status });
+            outboundRequestDuration?.observe({ target_service: service, method }, duration);
+        }
     }
 
     /**
@@ -143,8 +198,36 @@ export class LaneRouter {
                     config.headers[key] = value;
                 }
             }
+            // Attach start time for duration tracking
+            (config as any).__startTime = performance.now();
             return config;
         });
+
+        // Response interceptor: record success metrics
+        client.interceptors.response.use(
+            (response) => {
+                const start = (response.config as any).__startTime;
+                if (start) {
+                    const duration = (performance.now() - start) / 1000;
+                    const method = (response.config.method || 'get').toUpperCase();
+                    outboundRequestsTotal?.inc({ target_service: service, method, status: String(response.status) });
+                    outboundRequestDuration?.observe({ target_service: service, method }, duration);
+                }
+                return response;
+            },
+            (error) => {
+                const config = error.config;
+                const start = config?.__startTime;
+                if (start) {
+                    const duration = (performance.now() - start) / 1000;
+                    const method = (config.method || 'get').toUpperCase();
+                    const status = error.response ? String(error.response.status) : 'network_error';
+                    outboundRequestsTotal?.inc({ target_service: service, method, status });
+                    outboundRequestDuration?.observe({ target_service: service, method }, duration);
+                }
+                return Promise.reject(error);
+            },
+        );
 
         return client;
     }

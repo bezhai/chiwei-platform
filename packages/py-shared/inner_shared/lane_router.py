@@ -6,12 +6,57 @@ LaneRouter - 泳道感知的服务路由器 (Python SDK)
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# --- Outbound metrics (prometheus_client) ---
+try:
+    from prometheus_client import Counter, Histogram
+
+    OUTBOUND_REQUESTS_TOTAL = Counter(
+        "http_outbound_requests_total",
+        "Total outbound HTTP requests via LaneRouter",
+        ["target_service", "method", "status"],
+    )
+    OUTBOUND_REQUEST_DURATION = Histogram(
+        "http_outbound_request_duration_seconds",
+        "Outbound HTTP request duration in seconds",
+        ["target_service", "method"],
+    )
+    _HAS_METRICS = True
+except ImportError:
+    _HAS_METRICS = False
+
+
+class _MetricsTransport(httpx.AsyncBaseTransport):
+    """Async transport wrapper that records outbound HTTP metrics."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport, service: str):
+        self._transport = transport
+        self._service = service
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        method = request.method.upper()
+        status = "network_error"
+        start = time.monotonic()
+        try:
+            response = await self._transport.handle_async_request(request)
+            status = str(response.status_code)
+            return response
+        finally:
+            if _HAS_METRICS:
+                duration = time.monotonic() - start
+                OUTBOUND_REQUESTS_TOTAL.labels(
+                    target_service=self._service, method=method, status=status
+                ).inc()
+                OUTBOUND_REQUEST_DURATION.labels(
+                    target_service=self._service, method=method
+                ).observe(duration)
 
 
 class LaneRouter:
@@ -120,6 +165,36 @@ class LaneRouter:
         if lane:
             headers["x-lane"] = lane
         return headers
+
+    def create_client(
+        self,
+        service: str,
+        timeout: float = 30.0,
+        **kwargs: Any,
+    ) -> httpx.AsyncClient:
+        """
+        创建绑定到某服务的 httpx.AsyncClient，自动记录 outbound metrics。
+
+        Args:
+            service: 目标服务名
+            timeout: 请求超时（秒）
+            **kwargs: 传递给 httpx.AsyncClient 的额外参数
+        """
+        base_url = self.base_url(service)
+        transport = httpx.AsyncHTTPTransport()
+
+        if _HAS_METRICS:
+            transport_wrapper = _MetricsTransport(transport, service)
+        else:
+            transport_wrapper = transport  # type: ignore[assignment]
+
+        return httpx.AsyncClient(
+            base_url=base_url,
+            transport=transport_wrapper,
+            timeout=timeout,
+            headers=self.get_headers(),
+            **kwargs,
+        )
 
     def stop(self) -> None:
         """停止后台轮询。"""
