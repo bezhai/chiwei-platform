@@ -1,5 +1,5 @@
 # Stage 1: Build frontend with Bun
-FROM oven/bun:1.3.9-alpine AS builder
+FROM harbor.local:30002/library/bun:1.3.9-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY src ./src
 RUN bunx vite build
 
 # Stage 2: Serve with Nginx
-FROM nginx:alpine
+FROM harbor.local:30002/library/nginx:alpine
 
 RUN apk add --no-cache tzdata
 ENV TZ=Asia/Shanghai
