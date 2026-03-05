@@ -1,14 +1,14 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 
-const router = new Router();
+const health = new Hono();
 
-router.get('/api/health', (ctx) => {
-    ctx.body = {
+health.get('/api/health', (c) => {
+    return c.json({
         status: 'ok',
         service: 'lark-proxy',
         version: process.env.VERSION || process.env.GIT_SHA || 'unknown',
         timestamp: new Date().toISOString(),
-    };
+    });
 });
 
-export default router;
+export default health;

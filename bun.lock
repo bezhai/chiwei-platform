@@ -10,16 +10,13 @@
       "version": "1.0.0",
       "dependencies": {
         "@inner/shared": "workspace:*",
-        "@koa/router": "^12.0.1",
         "@larksuiteoapi/node-sdk": "^1.23.0",
-        "koa": "^2.15.0",
+        "hono": "^4.7.0",
         "pg": "^8.11.5",
         "prom-client": "^15.1.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
-        "@types/koa": "^2.15.0",
-        "@types/koa__router": "^12.0.4",
         "@types/pg": "^8.11.0",
         "typescript": "^5.4.0",
       },
@@ -892,6 +889,8 @@
     "has-tostringtag": ["has-tostringtag@1.0.2", "https://bnpm.byted.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz", { "dependencies": { "has-symbols": "^1.0.3" } }, "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw=="],
 
     "hasown": ["hasown@2.0.2", "https://bnpm.byted.org/hasown/-/hasown-2.0.2.tgz", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ=="],
+
+    "hono": ["hono@4.12.5", "", {}, "sha512-3qq+FUBtlTHhtYxbxheZgY8NIFnkkC/MR8u5TTsr7YZ3wixryQ3cCwn3iZbg8p8B88iDBBAYSfZDS75t8MN7Vg=="],
 
     "http-assert": ["http-assert@1.5.0", "https://bnpm.byted.org/http-assert/-/http-assert-1.5.0.tgz", { "dependencies": { "deep-equal": "~1.0.1", "http-errors": "~1.8.0" } }, "sha512-uPpH7OKX4H25hBmU6G1jWNaqJGpTXxey+YOUizJUAgu0AjLUeC8D73hTrhvDS5D+GJN1DN1+hhc/eF/wpxtp0w=="],
 
