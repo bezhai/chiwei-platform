@@ -6,6 +6,11 @@ routes:
     strip_prefix: /api/paas
     rewrite_prefix: /api/v1
 
+  # Lark 管理 API（泳道绑定等）
+  - prefix: /api/lark/
+    service: lark-proxy
+    port: 3003
+
   # Lark webhook 回调入口
   - prefix: /webhook/
     service: lark-proxy

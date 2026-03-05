@@ -1,11 +1,9 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
-import Router from '@koa/router';
+import type { Hono } from 'hono';
 import { Pool } from 'pg';
 import { EventForwarder } from './forwarder';
+import { adaptHono } from './lark-adapter';
 
-/**
- * 从 DB 加载的 bot 配置（仅需 proxy 用到的字段）
- */
 interface BotConfig {
     bot_name: string;
     app_id: string;
@@ -17,9 +15,6 @@ interface BotConfig {
     is_dev: boolean;
 }
 
-/**
- * proxy 需要注册的固定事件列表（从 handlers.ts 提取）
- */
 const REGISTERED_EVENT_TYPES = [
     'im.message.receive_v1',
     'im.message.recalled_v1',
@@ -34,20 +29,13 @@ const REGISTERED_EVENT_TYPES = [
     'im.chat.updated_v1',
 ];
 
-/**
- * Bot 管理器
- * 从 DB 加载 bot_config，为每个 HTTP bot 创建 EventDispatcher + Koa 路由
- */
 export class BotManager {
     constructor(
         private pool: Pool,
         private forwarder: EventForwarder,
     ) {}
 
-    /**
-     * 从 DB 加载 bot 配置并注册到 router
-     */
-    async registerBots(router: Router): Promise<void> {
+    async registerBots(app: Hono): Promise<void> {
         const bots = await this.loadBotConfigs();
 
         const httpBots = bots.filter((b) => b.init_type === 'http');
@@ -57,7 +45,7 @@ export class BotManager {
         }
 
         for (const bot of httpBots) {
-            this.registerBot(router, bot);
+            this.registerBot(app, bot);
         }
 
         console.info(`Registered ${httpBots.length} HTTP bot(s)`);
@@ -75,8 +63,7 @@ export class BotManager {
         });
     }
 
-    private registerBot(router: Router, bot: BotConfig): void {
-        // 创建 EventDispatcher 并注册所有事件
+    private registerBot(app: Hono, bot: BotConfig): void {
         const handler = this.forwarder.createHandler(bot.bot_name);
         const eventHandlers: Record<string, (params: unknown) => Record<string, never>> = {};
         for (const eventType of REGISTERED_EVENT_TYPES) {
@@ -88,7 +75,6 @@ export class BotManager {
             encryptKey: bot.encrypt_key,
         }).register(eventHandlers);
 
-        // 创建 CardActionHandler
         const cardHandler = this.forwarder.createCardHandler(bot.bot_name);
         const cardActionHandler = new Lark.CardActionHandler(
             {
@@ -98,16 +84,11 @@ export class BotManager {
             cardHandler,
         );
 
-        // 转为 Koa 中间件
-        const eventMiddleware = Lark.adaptKoaRouter(eventDispatcher, { autoChallenge: true });
-        const cardMiddleware = Lark.adaptKoaRouter(cardActionHandler, { autoChallenge: true });
-
-        // 注册路由
         const eventPath = `/webhook/${bot.bot_name}/event`;
         const cardPath = `/webhook/${bot.bot_name}/card`;
 
-        router.post(eventPath, eventMiddleware);
-        router.post(cardPath, cardMiddleware);
+        app.post(eventPath, adaptHono(eventDispatcher));
+        app.post(cardPath, adaptHono(cardActionHandler));
 
         console.info(
             `Registered bot: ${bot.bot_name} (${bot.app_id}) → ${eventPath}, ${cardPath}`,

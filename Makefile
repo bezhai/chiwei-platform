@@ -1,4 +1,4 @@
-.PHONY: deploy self-deploy release undeploy status latest-build
+.PHONY: deploy self-deploy release undeploy status latest-build lane-bind lane-unbind lane-bindings
 
 # 从 .env 加载配置（PAAS_API, PAAS_TOKEN, REGISTRY 等）
 -include .env
@@ -131,3 +131,36 @@ latest-build:
 	@curl -sf "$(PAAS_API)/api/paas/apps/$(APP)/builds/latest" \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool
+
+# ---------- 泳道绑定 ----------
+
+## 绑定 bot/chat 到泳道
+## 用法: make lane-bind TYPE=bot KEY=my-bot LANE=feat-test
+lane-bind:
+	$(if $(TYPE),,$(error TYPE 未指定（bot 或 chat）))
+	$(if $(KEY),,$(error KEY 未指定))
+	$(if $(LANE),,$(error LANE 未指定))
+	@echo ">>> 绑定 $(TYPE):$(KEY) -> $(LANE)"
+	@curl -sf -X POST $(PAAS_API)/api/lark/lane-bindings \
+	  -H 'Content-Type: application/json' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -d '{"route_type":"$(TYPE)","route_key":"$(KEY)","lane_name":"$(LANE)"}' \
+	  | python3 -m json.tool
+
+## 解绑 bot/chat 的泳道
+## 用法: make lane-unbind TYPE=bot KEY=my-bot
+lane-unbind:
+	$(if $(TYPE),,$(error TYPE 未指定（bot 或 chat）))
+	$(if $(KEY),,$(error KEY 未指定))
+	@echo ">>> 解绑 $(TYPE):$(KEY)"
+	@curl -sf -X DELETE "$(PAAS_API)/api/lark/lane-bindings?type=$(TYPE)&key=$(KEY)" \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  | python3 -m json.tool
+
+## 列出所有活跃泳道绑定
+## 用法: make lane-bindings
+lane-bindings:
+	@echo ">>> 活跃泳道绑定"
+	@curl -sf $(PAAS_API)/api/lark/lane-bindings \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  | python3 -c "import sys,json; [print(f\"  {r['route_type']:6s} | {r['route_key']:30s} | {r['lane_name']}\") for r in json.load(sys.stdin).get('data', [])]"
