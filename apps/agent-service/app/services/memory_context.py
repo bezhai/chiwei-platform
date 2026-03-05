@@ -18,13 +18,16 @@ MAX_CHARS = 400
 _MIN_CONFIDENCE = 0.6
 
 
-async def build_memory_context(user_id: str, chat_id: str, chat_type: str) -> str:
+async def build_memory_context(
+    user_id: str, chat_id: str, chat_type: str, *, username: str = ""
+) -> str:
     """构建记忆上下文文本，注入 system prompt
 
     Args:
         user_id: 触发用户 ID
         chat_id: 聊天 ID（预留）
         chat_type: 聊天类型
+        username: 触发用户名，用于画像归属
 
     Returns:
         渲染后的记忆文本，或空字符串
@@ -33,10 +36,10 @@ async def build_memory_context(user_id: str, chat_id: str, chat_type: str) -> st
     if not knowledge:
         return ""
 
-    return _render_knowledge(knowledge)
+    return _render_knowledge(knowledge, username=username)
 
 
-def _render_knowledge(knowledge: UserKnowledge) -> str:
+def _render_knowledge(knowledge: UserKnowledge, *, username: str = "") -> str:
     """将 UserKnowledge 渲染为赤尾视角的自然语言描述"""
     parts: list[str] = []
 
@@ -77,7 +80,8 @@ def _render_knowledge(knowledge: UserKnowledge) -> str:
 
     # personality_note
     if knowledge.personality_note:
-        parts.append(f"你对这个人的印象：{knowledge.personality_note}")
+        label = f"你对 {username} 的印象" if username else "你的印象"
+        parts.append(f"{label}：{knowledge.personality_note}")
 
     # communication_style
     if knowledge.communication_style:

@@ -4,8 +4,6 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import datetime
-
 from langchain.messages import AIMessageChunk
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
@@ -183,12 +181,9 @@ async def _build_and_stream(
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
     # 构建 prompt 变量（注入复杂度引导）
-    now = datetime.now()
     prompt_vars = {
         "complexity_hint": COMPLEXITY_HINTS.get(complexity, ""),
-        "curr_date": now.strftime("%Y-%m-%d"),
-        "curr_time": now.strftime("%H:%M"),
-        "user_info": "",
+        "user_context": "",
     }
 
     # 创建 agent
@@ -211,6 +206,7 @@ async def _build_and_stream(
         trigger_username,
         chat_type,
         trigger_user_id,
+        chat_name,
     ) = await build_chat_context(message_id)
 
     if not messages:
@@ -218,22 +214,34 @@ async def _build_and_stream(
         yield "抱歉，未找到相关消息记录"
         return
 
-    # 私聊时注入用户信息，帮助模型了解对话对象
-    if chat_type == "p2p" and trigger_username:
-        prompt_vars["user_info"] = f"你正在和 {trigger_username} 私聊。"
+    # 构建 user_context
+    context_lines: list[str] = []
+    if chat_type == "p2p":
+        if trigger_username:
+            context_lines.append(f"你正在和 {trigger_username} 私聊。")
+    else:  # group
+        if chat_name:
+            context_lines.append(f"你在群聊「{chat_name}」中。")
+        if trigger_username:
+            context_lines.append(
+                f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
+            )
 
-    # 注入记忆上下文
+    # 注入记忆上下文（p2p 和 group 通用）
     if trigger_user_id:
         try:
             memory_text = await build_memory_context(
-                trigger_user_id, chat_id, chat_type
+                trigger_user_id, chat_id, chat_type, username=trigger_username or ""
             )
-            prompt_vars["memory_context"] = memory_text
+            if memory_text:
+                context_lines.append(
+                    f"你对 {trigger_username or '对方'} 的了解："
+                )
+                context_lines.append(memory_text)
         except Exception as e:
             logger.error(f"Failed to build memory context: {e}")
-            prompt_vars["memory_context"] = ""
-    else:
-        prompt_vars["memory_context"] = ""
+
+    prompt_vars["user_context"] = "\n".join(context_lines)
 
     full_content = ""
 
