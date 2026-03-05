@@ -238,7 +238,7 @@ const commandRules = [
         key: 'session',
         handler: async (message: Message) => {
             if (!message.parentMessageId) {
-                replyMessage(message.messageId, '人家找不到要查询的消息啦，请回复一条 AI 消息再试试～', true);
+                replyMessage(message.messageId, '人家找不到要查询的消息啦，请回复人家说的某条消息再试试～', true);
                 return;
             }
 
