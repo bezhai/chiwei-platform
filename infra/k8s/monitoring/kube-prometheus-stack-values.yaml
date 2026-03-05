@@ -77,6 +77,10 @@ alertmanager:
       group_wait: 30s
       group_interval: 5m
       repeat_interval: 4h
+      routes:
+        - matchers:
+            - alertname = "InfoInhibitor"
+          receiver: "null"
     receivers:
       - name: feishu
         webhook_configs:
