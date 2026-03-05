@@ -13,7 +13,7 @@ router.post('/api/auth/login', async (ctx) => {
   }
 
   const secret = process.env.DASHBOARD_JWT_SECRET!;
-  const token = jwt.sign({ role: 'admin' }, secret, { expiresIn: '24h' });
+  const token = jwt.sign({ role: 'admin' }, secret, { expiresIn: '365d' });
 
   ctx.body = { token };
 });
