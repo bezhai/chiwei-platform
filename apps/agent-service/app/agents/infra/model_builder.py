@@ -159,7 +159,7 @@ class ModelBuilder:
                 # 使用 AzureChatOpenAI
                 chat_params = {
                     "openai_api_type": "azure",
-                    "openai_api_version": "2024-03-01-preview",
+                    "openai_api_version": "2024-08-01-preview",
                     "azure_endpoint": model_info["base_url"],
                     "openai_api_key": model_info["api_key"],
                     "deployment_name": model_info["model_name"],
