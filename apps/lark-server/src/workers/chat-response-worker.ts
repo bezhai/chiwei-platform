@@ -84,7 +84,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     const botName = agentResponse?.bot_name;
 
     // 设置 bot context
-    const contextData = context.createContext(botName || undefined);
+    const contextData = context.createContext(botName || undefined, undefined, payload.lane);
 
     await context.run(contextData, async () => {
         if (status === 'failed') {

@@ -14,6 +14,7 @@ export const RK_CHAT_REQUEST = 'chat.request';
 export const RK_CHAT_RESPONSE = 'chat.response';
 
 const NON_PROD_EXPIRES_MS = 86_400_000;
+const LANE_FALLBACK_TTL_MS = 10_000;
 
 export type MessageHandler = (msg: ConsumeMessage) => Promise<void>;
 
@@ -89,30 +90,40 @@ class RabbitMQClient {
             arguments: { 'x-delayed-type': 'topic' },
         });
 
-        // 非 prod 队列额外参数
-        const extraArgs: Record<string, unknown> = lane
-            ? { 'x-expires': NON_PROD_EXPIRES_MS }
-            : {};
-        const baseArgs = { 'x-dead-letter-exchange': DLX_NAME, ...extraArgs };
+        // 队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod
+        function queueArgs(prodRK: string): Record<string, unknown> {
+            const extra: Record<string, unknown> = lane
+                ? { 'x-expires': NON_PROD_EXPIRES_MS }
+                : {};
+            if (!lane) {
+                return { 'x-dead-letter-exchange': DLX_NAME, ...extra };
+            }
+            return {
+                'x-message-ttl': LANE_FALLBACK_TTL_MS,
+                'x-dead-letter-exchange': EXCHANGE_NAME,
+                'x-dead-letter-routing-key': prodRK,
+                ...extra,
+            };
+        }
 
         // recall queue
         const recallQ = laneQueue(QUEUE_RECALL, lane);
-        await ch.assertQueue(recallQ, { durable: true, arguments: baseArgs });
+        await ch.assertQueue(recallQ, { durable: true, arguments: queueArgs(RK_RECALL) });
         await ch.bindQueue(recallQ, EXCHANGE_NAME, laneRK(RK_RECALL, lane));
 
         // vectorize queue
         const vectorizeQ = laneQueue(QUEUE_VECTORIZE, lane);
-        await ch.assertQueue(vectorizeQ, { durable: true, arguments: baseArgs });
+        await ch.assertQueue(vectorizeQ, { durable: true, arguments: queueArgs(RK_VECTORIZE) });
         await ch.bindQueue(vectorizeQ, EXCHANGE_NAME, laneRK(RK_VECTORIZE, lane));
 
         // chat_request queue
         const chatReqQ = laneQueue(QUEUE_CHAT_REQUEST, lane);
-        await ch.assertQueue(chatReqQ, { durable: true, arguments: baseArgs });
+        await ch.assertQueue(chatReqQ, { durable: true, arguments: queueArgs(RK_CHAT_REQUEST) });
         await ch.bindQueue(chatReqQ, EXCHANGE_NAME, laneRK(RK_CHAT_REQUEST, lane));
 
         // chat_response queue
         const chatRespQ = laneQueue(QUEUE_CHAT_RESPONSE, lane);
-        await ch.assertQueue(chatRespQ, { durable: true, arguments: baseArgs });
+        await ch.assertQueue(chatRespQ, { durable: true, arguments: queueArgs(RK_CHAT_RESPONSE) });
         await ch.bindQueue(chatRespQ, EXCHANGE_NAME, laneRK(RK_CHAT_RESPONSE, lane));
 
         console.info(`[RabbitMQ] topology declared (lane=${lane || 'prod'})`);
