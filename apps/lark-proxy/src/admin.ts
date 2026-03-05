@@ -36,7 +36,7 @@ export function createAdminApp(pool: Pool, laneResolver: LaneResolver): Hono {
         await pool.query(
             `INSERT INTO lane_routing (route_type, route_key, lane_name, is_active)
              VALUES ($1, $2, $3, true)
-             ON CONFLICT (route_type, route_key) DO UPDATE SET lane_name = $3, is_active = true`,
+             ON CONFLICT (route_type, route_key) WHERE is_active = true DO UPDATE SET lane_name = $3`,
             [route_type, route_key, lane_name],
         );
         laneResolver.clearCache();
