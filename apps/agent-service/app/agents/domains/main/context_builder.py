@@ -135,13 +135,18 @@ async def _build_group_messages(
     """
     chain, other = _extract_reply_chain(messages, trigger_id)
 
+    # 全局图片计数器，跨回复链和其他消息连续编号
+    image_count = 0
+
     # 格式化回复链消息（有序链，不需要编号和回复标记）
     chain_lines = []
     for msg in chain:
         time_str = msg.create_time.strftime("%H:%M:%S")
         username = msg.username or "未知用户"
         parsed = parse_content(msg.content)
-        text = parsed.render()
+        base = image_count
+        text = parsed.render(image_fn=lambda i, _key: f"【图片{base + i + 1}】")
+        image_count += len(parsed.image_keys)
         marker = " ⭐" if msg.message_id == trigger_id else ""
         chain_lines.append(f"[{time_str}] {username}: {text}{marker}")
 
@@ -151,7 +156,9 @@ async def _build_group_messages(
         time_str = msg.create_time.strftime("%H:%M:%S")
         username = msg.username or "未知用户"
         parsed = parse_content(msg.content)
-        text = parsed.render()
+        base = image_count
+        text = parsed.render(image_fn=lambda i, _key: f"【图片{base + i + 1}】")
+        image_count += len(parsed.image_keys)
         other_lines.append(f"[{time_str}] {username}: {text}")
 
     # 用 context_builder 模板组装
