@@ -3,7 +3,7 @@
 轻量级分类，判断任务复杂度：
 - simple: 直接回答或单次工具调用
 - complex: 需要多步推理或多次工具调用
-- super_complex: 预留，��来可启用子 Agent
+- super_complex: 预留，将来可启用子 Agent
 """
 
 import logging

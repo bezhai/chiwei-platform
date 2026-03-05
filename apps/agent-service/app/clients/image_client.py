@@ -172,7 +172,7 @@ class ImageProcessClient:
         Args:
             file_key: 图片文件key
             message_id: 消息ID
-            bot_name: 机器人名称（���于多 bot 场景）
+            bot_name: 机器人名称（用于多 bot 场景）
 
         Returns:
             str: Base64格式图片 data:image/{format};base64,{base64_data}
