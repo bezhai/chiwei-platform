@@ -33,6 +33,7 @@ RK_CHAT_RESPONSE = "chat.response"
 
 # 非 prod 队列空闲自动删除（24h）
 _NON_PROD_EXPIRES_MS = 86_400_000
+_LANE_FALLBACK_TTL_MS = 10_000
 
 
 def _current_lane() -> str | None:
@@ -110,18 +111,25 @@ class RabbitMQClient:
             arguments={"x-delayed-type": "topic"},
         )
 
-        # 非 prod 队列额外参数
-        extra_args: dict[str, Any] = {}
-        if lane:
-            extra_args["x-expires"] = _NON_PROD_EXPIRES_MS
-
-        base_args = {"x-dead-letter-exchange": DLX_NAME, **extra_args}
+        # 队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod
+        def queue_args(prod_rk: str) -> dict[str, Any]:
+            extra: dict[str, Any] = {}
+            if lane:
+                extra["x-expires"] = _NON_PROD_EXPIRES_MS
+            if not lane:
+                return {"x-dead-letter-exchange": DLX_NAME, **extra}
+            return {
+                "x-message-ttl": _LANE_FALLBACK_TTL_MS,
+                "x-dead-letter-exchange": EXCHANGE_NAME,
+                "x-dead-letter-routing-key": prod_rk,
+                **extra,
+            }
 
         # safety_check queue
         q_safety = await self._channel.declare_queue(
             _lane_queue(QUEUE_SAFETY_CHECK, lane),
             durable=True,
-            arguments=base_args,
+            arguments=queue_args(RK_SAFETY_CHECK),
         )
         await q_safety.bind(self._exchange, routing_key=_lane_rk(RK_SAFETY_CHECK, lane))
 
@@ -129,7 +137,7 @@ class RabbitMQClient:
         q_recall = await self._channel.declare_queue(
             _lane_queue(QUEUE_RECALL, lane),
             durable=True,
-            arguments=base_args,
+            arguments=queue_args(RK_RECALL),
         )
         await q_recall.bind(self._exchange, routing_key=_lane_rk(RK_RECALL, lane))
 
@@ -137,7 +145,7 @@ class RabbitMQClient:
         q_vectorize = await self._channel.declare_queue(
             _lane_queue(QUEUE_VECTORIZE, lane),
             durable=True,
-            arguments=base_args,
+            arguments=queue_args(RK_VECTORIZE),
         )
         await q_vectorize.bind(
             self._exchange, routing_key=_lane_rk(RK_VECTORIZE, lane)
@@ -147,7 +155,7 @@ class RabbitMQClient:
         q_chat_req = await self._channel.declare_queue(
             _lane_queue(QUEUE_CHAT_REQUEST, lane),
             durable=True,
-            arguments=base_args,
+            arguments=queue_args(RK_CHAT_REQUEST),
         )
         await q_chat_req.bind(
             self._exchange, routing_key=_lane_rk(RK_CHAT_REQUEST, lane)
@@ -157,7 +165,7 @@ class RabbitMQClient:
         q_chat_resp = await self._channel.declare_queue(
             _lane_queue(QUEUE_CHAT_RESPONSE, lane),
             durable=True,
-            arguments=base_args,
+            arguments=queue_args(RK_CHAT_RESPONSE),
         )
         await q_chat_resp.bind(
             self._exchange, routing_key=_lane_rk(RK_CHAT_RESPONSE, lane)

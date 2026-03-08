@@ -81,7 +81,7 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
 
     // 设置 bot context 以使用正确的 Lark client
     const botName = agentResponse.bot_name;
-    const contextData = context.createContext(botName || undefined);
+    const contextData = context.createContext(botName || undefined, undefined, payload.lane);
     let recalledCount = 0;
     let failedCount = 0;
 

@@ -59,6 +59,10 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
         chat_id = body.get("chat_id")
         trigger_message_id = body.get("trigger_message_id")
         lane = body.get("lane")  # 从消息 payload 中读取泳道
+        if lane:
+            from app.utils.middlewares.trace import header_vars
+
+            header_vars["lane"].set(lane)
 
         logger.info("Post safety check: session_id=%s, lane=%s", session_id, lane)
 

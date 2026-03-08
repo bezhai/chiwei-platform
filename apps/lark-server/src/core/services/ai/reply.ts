@@ -27,7 +27,7 @@ export async function makeTextReply(message: Message): Promise<void> {
     }
 
     // 发布到 chat.request 队列
-    const lane = getLane();
+    const lane = context.getLane() || getLane() || undefined;
     await rabbitmqClient.publish(
         RK_CHAT_REQUEST,
         {
