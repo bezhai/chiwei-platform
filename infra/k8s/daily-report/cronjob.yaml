@@ -1,0 +1,173 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-report
+  namespace: prod
+spec:
+  # 1:00 UTC = 9:00 CST
+  schedule: "0 1 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            node-role: infra
+          containers:
+            - name: daily-report
+              image: alpine:3.21
+              command: ["/bin/sh", "-c", "apk add --no-cache curl jq >/dev/null 2>&1 && /bin/sh /scripts/script.sh"]
+              env:
+                - name: FEISHU_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: daily-report-secret
+                      key: FEISHU_WEBHOOK_URL
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+          volumes:
+            - name: script
+              configMap:
+                name: daily-report-script
+                defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: daily-report-script
+  namespace: prod
+data:
+  script.sh: |
+    #!/bin/sh
+    set -eu
+
+    PROMETHEUS="${PROMETHEUS_URL:-http://kube-prometheus-stack-prometheus.monitoring:9090}"
+    FEISHU_URL="${FEISHU_WEBHOOK_URL:?FEISHU_WEBHOOK_URL is required}"
+
+    now_cst() {
+      date -u -d "+8 hours" '+%m-%d %H:%M:%S' 2>/dev/null \
+        || date -u '+%m-%d %H:%M:%S'
+    }
+
+    prom_query() {
+      curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
+        | jq -r '.data.result[0].value[1] // empty'
+    }
+
+    # --- 1. Service Health ---
+    health_lines=""
+    healthy=0
+    total=0
+
+    for entry in \
+      "api-gateway|http://api-gateway.prod:8080/healthz" \
+      "paas-engine|http://paas-engine.prod:8080/healthz" \
+      "lite-registry|http://lite-registry.prod:8080/healthz" \
+      "lark-server|http://lark-server.prod:3000/api/health" \
+      "lark-proxy|http://lark-proxy.prod:3003/api/health" \
+      "agent-service|http://agent-service.prod:8000/health" \
+      "tool-service|http://tool-service.prod:8000/health"
+    do
+      name="${entry%%|*}"
+      url="${entry##*|}"
+      total=$((total + 1))
+      if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
+        healthy=$((healthy + 1))
+        health_lines="${health_lines}✅ ${name}  "
+      else
+        health_lines="${health_lines}❌ ${name}  "
+      fi
+    done
+
+    # --- 2. Node Resources ---
+    cpu_pct=$(prom_query '100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
+    mem_pct=$(prom_query '(1 - avg(node_memory_AvailableBytes / node_memory_MemTotalBytes)) * 100' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
+    disk_pct=$(prom_query 'max(100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100)' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
+
+    # --- 3. Pod Status ---
+    not_running=$(prom_query 'count(kube_pod_status_phase{namespace="prod",phase!="Running",phase!="Succeeded"}) or vector(0)' | xargs printf '%.0f' 2>/dev/null || echo "0")
+
+    # --- 4. Active Alerts ---
+    alerts_count=$(prom_query 'count(ALERTS{alertstate="firing"}) or vector(0)' | xargs printf '%.0f' 2>/dev/null || echo "0")
+
+    # --- Status ---
+    if [ "$healthy" -lt "$total" ] || [ "$not_running" != "0" ] || [ "$alerts_count" != "0" ]; then
+      color="red"
+      title="📋 每日系统巡检报告（有异常）"
+    else
+      color="blue"
+      title="📋 每日系统巡检报告"
+    fi
+
+    report_time=$(now_cst)
+
+    # --- Send Feishu Card ---
+    cat <<ENDJSON | curl -sf --max-time 10 -X POST "$FEISHU_URL" -H 'Content-Type: application/json' -d @-
+    {
+      "msg_type": "interactive",
+      "card": {
+        "header": {
+          "title": {"tag": "plain_text", "content": "${title}"},
+          "template": "${color}"
+        },
+        "elements": [
+          {
+            "tag": "div",
+            "fields": [
+              {
+                "is_short": false,
+                "text": {"tag": "lark_md", "content": "**🟢 服务状态 (${healthy}/${total} 正常)**\n${health_lines}"}
+              }
+            ]
+          },
+          {
+            "tag": "div",
+            "fields": [
+              {
+                "is_short": true,
+                "text": {"tag": "lark_md", "content": "**📊 节点资源**\nCPU: ${cpu_pct}%  内存: ${mem_pct}%  磁盘: ${disk_pct}%"}
+              }
+            ]
+          },
+          {
+            "tag": "div",
+            "fields": [
+              {
+                "is_short": true,
+                "text": {"tag": "lark_md", "content": "**🔔 当前活跃告警:** ${alerts_count} 条"}
+              },
+              {
+                "is_short": true,
+                "text": {"tag": "lark_md", "content": "**⚠️ 异常 Pod:** ${not_running} 个"}
+              }
+            ]
+          },
+          {
+            "tag": "div",
+            "fields": [
+              {
+                "is_short": false,
+                "text": {"tag": "lark_md", "content": "**⏰ 报告时间:** ${report_time}"}
+              }
+            ]
+          }
+        ]
+      }
+    }
+    ENDJSON
+
+    echo ""
+    echo "Report sent at ${report_time}"
