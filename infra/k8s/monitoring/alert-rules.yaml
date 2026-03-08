@@ -20,7 +20,10 @@ spec:
             description: "Pod {{ $labels.pod }} 在过去 15 分钟内重启了 {{ $value }} 次。"
 
         - alert: PodNotReady
-          expr: kube_pod_status_ready{namespace="prod", condition="true"} == 0
+          expr: |-
+            kube_pod_status_ready{namespace="prod", condition="true"} == 0
+            unless on(namespace, pod)
+            kube_pod_status_phase{namespace="prod", phase=~"Succeeded|Failed"} == 1
           for: 5m
           labels:
             severity: warning
