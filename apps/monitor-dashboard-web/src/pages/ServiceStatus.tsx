@@ -123,7 +123,7 @@ export default function ServiceStatus() {
           return <Text type="secondary">未部署</Text>;
         }
         return (
-          <Space size={[0, 6]} wrap>
+          <Space size={[8, 6]} wrap>
             {row.releases.map((rel) => {
               const tag = getImageTag(rel.image);
               const cfg = statusConfig[rel.status] || statusConfig.pending;
