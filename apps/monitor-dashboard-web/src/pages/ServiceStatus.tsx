@@ -25,14 +25,20 @@ interface App {
 }
 
 interface Release {
-  id: number;
+  id: string;
   app_name: string;
   lane: string;
-  image_tag: string;
+  image: string;
   status: string;
   created_at: string;
   updated_at: string;
 }
+
+const getImageTag = (image?: string) => {
+  if (!image) return '';
+  const idx = image.lastIndexOf(':');
+  return idx >= 0 ? image.slice(idx + 1) : image;
+};
 
 interface ServiceRow {
   key: string;
@@ -122,9 +128,9 @@ export default function ServiceStatus() {
             <Tag color={cfg.color} icon={cfg.icon}>
               {rel.status}
             </Tag>
-            <Tooltip title={rel.image_tag}>
+            <Tooltip title={getImageTag(rel.image)}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {rel.image_tag?.slice(0, 8)}
+                {getImageTag(rel.image)?.slice(0, 8)}
               </Text>
             </Tooltip>
           </Space>
