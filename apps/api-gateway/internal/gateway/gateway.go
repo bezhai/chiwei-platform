@@ -55,8 +55,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rt := result.Route
 
-	// Determine lane from header
+	// Determine lane: header > query param > cookie
 	lane := r.Header.Get("x-lane")
+	if lane == "" {
+		lane = r.URL.Query().Get("x-lane")
+	}
+	if lane == "" {
+		if c, err := r.Cookie("x-lane"); err == nil {
+			lane = c.Value
+		}
+	}
 
 	// Resolve upstream host:port via registry (with fallback)
 	host, port := g.registry.Resolve(rt.Service, lane, rt.Port)
