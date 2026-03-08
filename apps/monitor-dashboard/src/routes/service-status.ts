@@ -22,8 +22,8 @@ router.get('/api/service-status', async (ctx) => {
   ]);
 
   ctx.body = {
-    apps: appsRes.data,
-    releases: releasesRes.data,
+    apps: appsRes.data?.data ?? appsRes.data,
+    releases: releasesRes.data?.data ?? releasesRes.data,
   };
 });
 
