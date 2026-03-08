@@ -66,6 +66,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Set cookie when lane comes from query param so subsequent
+	// browser requests (static assets) carry the lane automatically.
+	if lane != "" && r.Header.Get("x-lane") == "" {
+		http.SetCookie(w, &http.Cookie{Name: "x-lane", Value: lane, Path: "/"})
+	}
+
 	// Resolve upstream host:port via registry (with fallback)
 	host, port := g.registry.Resolve(rt.Service, lane, rt.Port)
 
