@@ -144,7 +144,10 @@ export default function App() {
             selectedKeys={[currentPath]}
             // @ts-ignore
             items={menuItems}
-            onClick={({ key }) => navigate(key)}
+            onClick={({ key }) => {
+              const lane = getLane();
+              navigate(lane ? `${key}?x-lane=${lane}` : key);
+            }}
             style={{ borderRight: 0, padding: '16px 0' }}
           />
         </Sider>
