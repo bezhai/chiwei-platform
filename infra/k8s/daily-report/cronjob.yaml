@@ -21,7 +21,7 @@ spec:
           containers:
             - name: daily-report
               image: alpine:3.21
-              command: ["/bin/sh", "-c", "apk add --no-cache curl jq >/dev/null 2>&1 && /bin/sh /scripts/script.sh"]
+              command: ["/bin/sh", "-c", "apk add --no-cache curl jq tzdata >/dev/null 2>&1 && /bin/sh /scripts/script.sh"]
               env:
                 - name: FEISHU_WEBHOOK_URL
                   valueFrom:
@@ -58,13 +58,23 @@ data:
     FEISHU_URL="${FEISHU_WEBHOOK_URL:?FEISHU_WEBHOOK_URL is required}"
 
     now_cst() {
-      date -u -d "+8 hours" '+%m-%d %H:%M:%S' 2>/dev/null \
-        || date -u '+%m-%d %H:%M:%S'
+      TZ=Asia/Shanghai date '+%m-%d %H:%M:%S'
     }
 
     prom_query() {
-      curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
-        | jq -r '.data.result[0].value[1] // empty'
+      val=$(curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
+        | jq -r '.data.result[0].value[1] // empty')
+      if [ -z "$val" ]; then echo ""; else echo "$val"; fi
+    }
+
+    fmt_pct() {
+      val=$(prom_query "$1")
+      if [ -z "$val" ]; then echo "N/A"; else printf '%.0f' "$val"; fi
+    }
+
+    fmt_int() {
+      val=$(prom_query "$1")
+      if [ -z "$val" ]; then echo "0"; else printf '%.0f' "$val"; fi
     }
 
     # --- 1. Service Health ---
@@ -86,22 +96,40 @@ data:
       total=$((total + 1))
       if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
         healthy=$((healthy + 1))
-        health_lines="${health_lines}✅ ${name}  "
+        health_lines="${health_lines}\\n✅ ${name}"
       else
-        health_lines="${health_lines}❌ ${name}  "
+        health_lines="${health_lines}\\n❌ ${name}"
       fi
     done
 
-    # --- 2. Node Resources ---
-    cpu_pct=$(prom_query '100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
-    mem_pct=$(prom_query '(1 - avg(node_memory_AvailableBytes / node_memory_MemTotalBytes)) * 100' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
-    disk_pct=$(prom_query 'max(100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100)' | xargs printf '%.0f' 2>/dev/null || echo "N/A")
+    # --- 2. Node Resources (per node) ---
+    prom_query_nodes() {
+      curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
+        | jq -r '.data.result[] | "\(.metric.instance)=\(.value[1])"'
+    }
 
-    # --- 3. Pod Status ---
-    not_running=$(prom_query 'count(kube_pod_status_phase{namespace="prod",phase!="Running",phase!="Succeeded"}) or vector(0)' | xargs printf '%.0f' 2>/dev/null || echo "0")
+    node_lines=""
+    # Collect per-node metrics into associative temp files
+    prom_query_nodes '100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' > /tmp/cpu.txt
+    prom_query_nodes '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100' > /tmp/mem.txt
+    prom_query_nodes '100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100' > /tmp/disk.txt
 
-    # --- 4. Active Alerts ---
-    alerts_count=$(prom_query 'count(ALERTS{alertstate="firing"}) or vector(0)' | xargs printf '%.0f' 2>/dev/null || echo "0")
+    # Build node resource lines
+    while IFS='=' read -r inst cpu_raw; do
+      short=$(echo "$inst" | sed 's/:9100//' | sed 's/.*\.//')
+      cpu=$(printf '%.0f' "$cpu_raw" 2>/dev/null || echo "N/A")
+      mem_raw=$(grep "^${inst}=" /tmp/mem.txt | cut -d= -f2)
+      mem=$(printf '%.0f' "$mem_raw" 2>/dev/null || echo "N/A")
+      disk_raw=$(grep "^${inst}=" /tmp/disk.txt | cut -d= -f2)
+      disk=$(printf '%.0f' "$disk_raw" 2>/dev/null || echo "N/A")
+      node_lines="${node_lines}\\n${inst%:*}  CPU: ${cpu}%  内存: ${mem}%  磁盘: ${disk}%"
+    done < /tmp/cpu.txt
+
+    # --- 3. Pod Status (prod namespace, only count pods actually in that phase: value=1) ---
+    not_running=$(fmt_int 'count(kube_pod_status_phase{namespace="prod",phase=~"Pending|Failed|Unknown"} == 1) or vector(0)')
+
+    # --- 4. Active Alerts (exclude internal watchdog/inhibitor) ---
+    alerts_count=$(fmt_int 'count(ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"}) or vector(0)')
 
     # --- Status ---
     if [ "$healthy" -lt "$total" ] || [ "$not_running" != "0" ] || [ "$alerts_count" != "0" ]; then
@@ -138,7 +166,7 @@ data:
             "fields": [
               {
                 "is_short": true,
-                "text": {"tag": "lark_md", "content": "**📊 节点资源**\nCPU: ${cpu_pct}%  内存: ${mem_pct}%  磁盘: ${disk_pct}%"}
+                "text": {"tag": "lark_md", "content": "**📊 节点资源**${node_lines}"}
               }
             ]
           },
