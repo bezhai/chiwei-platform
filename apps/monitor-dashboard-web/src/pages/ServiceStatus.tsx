@@ -140,23 +140,6 @@ export default function ServiceStatus() {
       },
     },
     {
-      title: '镜像版本',
-      key: 'imageTag',
-      width: 120,
-      render: (_: unknown, row: ServiceRow) => {
-        const tags = [...new Set(row.releases.map((r) => getImageTag(r.image)))].filter(Boolean);
-        if (tags.length === 0) return '-';
-        if (tags.length === 1) return <Text copyable={{ text: tags[0] }}>{tags[0].slice(0, 8)}</Text>;
-        return (
-          <Space direction="vertical" size={0}>
-            {tags.map((t) => (
-              <Text key={t} copyable={{ text: t }} style={{ fontSize: 12 }}>{t.slice(0, 8)}</Text>
-            ))}
-          </Space>
-        );
-      },
-    },
-    {
       title: '最后更新',
       key: 'updatedAt',
       width: 140,
