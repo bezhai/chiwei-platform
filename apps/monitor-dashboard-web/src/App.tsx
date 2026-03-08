@@ -1,4 +1,4 @@
-import { Layout, Menu, ConfigProvider, Button, Dropdown, Avatar, Space, Typography } from 'antd';
+import { Layout, Menu, ConfigProvider, Button, Dropdown, Avatar, Space, Typography, Tag } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
@@ -30,7 +30,7 @@ const Providers = lazy(() => import('./pages/Providers'));
 const ModelMappings = lazy(() => import('./pages/ModelMappings'));
 const MongoExplorer = lazy(() => import('./pages/MongoExplorer'));
 import { themeConfig } from './theme';
-import { clearToken } from './api/client';
+import { clearToken, getLane } from './api/client';
 
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
@@ -144,7 +144,10 @@ export default function App() {
             selectedKeys={[currentPath]}
             // @ts-ignore
             items={menuItems}
-            onClick={({ key }) => navigate(key)}
+            onClick={({ key }) => {
+              const lane = getLane();
+              navigate(lane ? `${key}?x-lane=${lane}` : key);
+            }}
             style={{ borderRight: 0, padding: '16px 0' }}
           />
         </Sider>
@@ -172,6 +175,7 @@ export default function App() {
             </div>
 
             <Space size={16}>
+              {getLane() && <Tag color="blue">{getLane()}</Tag>}
               <Dropdown menu={userMenu} placement="bottomRight">
                 <Space style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: 6 }} className="user-dropdown">
                   <Avatar icon={<UserOutlined />} style={{ backgroundColor: primaryColor }} size="small" />

@@ -541,6 +541,8 @@ export default function Messages() {
     params.page = currentPage.toString();
     params.pageSize = currentPageSize.toString();
     
+    const lane = sessionStorage.getItem('x-lane');
+    if (lane) params['x-lane'] = lane;
     setSearchParams(params);
   };
 
@@ -590,7 +592,8 @@ export default function Messages() {
   const handleReset = () => {
     const newFilters = { ...emptyFilters };
     setFilters(newFilters);
-    setSearchParams({}); // Clear URL
+    const lane = sessionStorage.getItem('x-lane');
+    setSearchParams(lane ? { 'x-lane': lane } : {}); // Clear URL but keep lane
     setPage(1);
     
     // Call API with empty filters
