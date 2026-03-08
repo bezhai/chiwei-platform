@@ -115,28 +115,47 @@ export default function ServiceStatus() {
       render: (port: number | string) =>
         port === 0 ? <Tag>Worker</Tag> : port,
     },
-    ...lanes.map((lane) => ({
-      title: lane,
-      key: `lane-${lane}`,
-      width: 160,
+    {
+      title: '部署泳道',
+      key: 'lanes',
       render: (_: unknown, row: ServiceRow) => {
-        const rel = row.releases.find((r) => r.lane === lane);
-        if (!rel) return <Text type="secondary">-</Text>;
-        const cfg = statusConfig[rel.status] || statusConfig.pending;
+        if (row.releases.length === 0) {
+          return <Text type="secondary">未部署</Text>;
+        }
         return (
-          <Space direction="vertical" size={0}>
-            <Tag color={cfg.color} icon={cfg.icon}>
-              {rel.status}
-            </Tag>
-            <Tooltip title={getImageTag(rel.image)}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {getImageTag(rel.image)?.slice(0, 8)}
-              </Text>
-            </Tooltip>
+          <Space size={[0, 6]} wrap>
+            {row.releases.map((rel) => {
+              const tag = getImageTag(rel.image);
+              const cfg = statusConfig[rel.status] || statusConfig.pending;
+              return (
+                <Tooltip key={rel.id} title={`${rel.status} · ${tag}`}>
+                  <Tag color={cfg.color} icon={cfg.icon} style={{ marginRight: 0 }}>
+                    {rel.lane}
+                  </Tag>
+                </Tooltip>
+              );
+            })}
           </Space>
         );
       },
-    })),
+    },
+    {
+      title: '镜像版本',
+      key: 'imageTag',
+      width: 120,
+      render: (_: unknown, row: ServiceRow) => {
+        const tags = [...new Set(row.releases.map((r) => getImageTag(r.image)))].filter(Boolean);
+        if (tags.length === 0) return '-';
+        if (tags.length === 1) return <Text copyable={{ text: tags[0] }}>{tags[0].slice(0, 8)}</Text>;
+        return (
+          <Space direction="vertical" size={0}>
+            {tags.map((t) => (
+              <Text key={t} copyable={{ text: t }} style={{ fontSize: 12 }}>{t.slice(0, 8)}</Text>
+            ))}
+          </Space>
+        );
+      },
+    },
     {
       title: '最后更新',
       key: 'updatedAt',
