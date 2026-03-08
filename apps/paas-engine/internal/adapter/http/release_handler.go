@@ -75,6 +75,24 @@ func (h *ReleaseHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
+func (h *ReleaseHandler) GetOrphans(w http.ResponseWriter, r *http.Request) {
+	report, err := h.svc.DetectOrphans(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *ReleaseHandler) CleanupOrphans(w http.ResponseWriter, r *http.Request) {
+	report, err := h.svc.CleanupOrphans(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 func (h *ReleaseHandler) DeleteByAppAndLane(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	lane := r.URL.Query().Get("lane")

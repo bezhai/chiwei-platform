@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -163,14 +163,106 @@ func (s *ReleaseService) DeleteRelease(ctx context.Context, id string) error {
 
 func (s *ReleaseService) deleteRelease(ctx context.Context, release *domain.Release) error {
 	if s.deployer != nil {
-		if err := s.deployer.Delete(ctx, release); err != nil {
-			slog.Warn("failed to delete K8s resources", "release_id", release.ID, "error", err)
+		// 查询该 app 是否还有其他 release
+		others, err := s.releaseRepo.FindAll(ctx, release.AppName, "")
+		if err != nil {
+			return err
+		}
+		hasOthers := false
+		for _, r := range others {
+			if r.ID != release.ID {
+				hasOthers = true
+				break
+			}
+		}
+		// K8s 删除失败直接返回错误，不删 DB
+		if err := s.deployer.Delete(ctx, release, hasOthers); err != nil {
+			return fmt.Errorf("delete k8s resources: %w", err)
 		}
 	}
 
-	if err := s.releaseRepo.Delete(ctx, release.ID); err != nil {
-		return err
+	return s.releaseRepo.Delete(ctx, release.ID)
+}
+
+// OrphanReport 包含 K8s 和 DB 中的孤儿资源。
+type OrphanReport struct {
+	K8sOrphans []port.ManagedResource `json:"k8s_orphans"` // K8s 存在但 DB 无记录
+	DBOrphans  []*domain.Release      `json:"db_orphans"`  // DB 存在但 K8s 无对应资源
+}
+
+// DetectOrphans 对比 K8s 资源和 DB release 记录，返回孤儿资源。
+func (s *ReleaseService) DetectOrphans(ctx context.Context) (*OrphanReport, error) {
+	if s.deployer == nil {
+		return &OrphanReport{}, nil
 	}
 
-	return nil
+	k8sResources, err := s.deployer.ListManagedResources(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list managed resources: %w", err)
+	}
+
+	dbReleases, err := s.releaseRepo.FindAll(ctx, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("list releases: %w", err)
+	}
+
+	// 构建 DB release 索引: resourceName -> release, appName -> true
+	dbResourceNames := make(map[string]bool)
+	dbAppNames := make(map[string]bool)
+	for _, r := range dbReleases {
+		dbResourceNames[r.ResourceName()] = true
+		dbAppNames[r.AppName] = true
+	}
+
+	// K8s 孤儿: K8s 中存在但 DB 无对应 release
+	var k8sOrphans []port.ManagedResource
+	for _, res := range k8sResources {
+		if res.Lane != "" {
+			// lane resource: 对应 {app}-{lane}
+			resourceName := res.AppName + "-" + res.Lane
+			if !dbResourceNames[resourceName] {
+				k8sOrphans = append(k8sOrphans, res)
+			}
+		} else {
+			// base service (无 lane): 只要该 app 在 DB 中还有任何 release 就不算孤儿
+			if !dbAppNames[res.AppName] {
+				k8sOrphans = append(k8sOrphans, res)
+			}
+		}
+	}
+
+	// DB 孤儿: DB 中存在但 K8s 无对应 Deployment
+	k8sDeployments := make(map[string]bool)
+	for _, res := range k8sResources {
+		if res.Kind == "Deployment" {
+			k8sDeployments[res.Name] = true
+		}
+	}
+	var dbOrphans []*domain.Release
+	for _, r := range dbReleases {
+		if !k8sDeployments[r.ResourceName()] {
+			dbOrphans = append(dbOrphans, r)
+		}
+	}
+
+	return &OrphanReport{
+		K8sOrphans: k8sOrphans,
+		DBOrphans:  dbOrphans,
+	}, nil
+}
+
+// CleanupOrphans 删除所有 K8s 孤儿资源。
+func (s *ReleaseService) CleanupOrphans(ctx context.Context) (*OrphanReport, error) {
+	report, err := s.DetectOrphans(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, res := range report.K8sOrphans {
+		if err := s.deployer.DeleteResource(ctx, res.Kind, res.Name); err != nil {
+			return nil, fmt.Errorf("delete orphan %s %s: %w", res.Kind, res.Name, err)
+		}
+	}
+
+	return report, nil
 }

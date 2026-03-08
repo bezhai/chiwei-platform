@@ -50,7 +50,7 @@ func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *
 	return nil
 }
 
-func (d *K8sDeployer) Delete(ctx context.Context, release *domain.Release) error {
+func (d *K8sDeployer) Delete(ctx context.Context, release *domain.Release, hasOtherReleases bool) error {
 	name := release.ResourceName()
 	if err := d.client.AppsV1().Deployments(d.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete deployment %s: %w", name, err)
@@ -58,7 +58,66 @@ func (d *K8sDeployer) Delete(ctx context.Context, release *domain.Release) error
 	if err := d.client.CoreV1().Services(d.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete service %s: %w", name, err)
 	}
+	// 当该 app 没有其他 release 时，清理 base service
+	if !hasOtherReleases {
+		baseName := release.AppName
+		if err := d.client.CoreV1().Services(d.namespace).Delete(ctx, baseName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete base service %s: %w", baseName, err)
+		}
+	}
 	return nil
+}
+
+func (d *K8sDeployer) DeleteResource(ctx context.Context, kind, name string) error {
+	switch kind {
+	case "Deployment":
+		if err := d.client.AppsV1().Deployments(d.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete deployment %s: %w", name, err)
+		}
+	case "Service":
+		if err := d.client.CoreV1().Services(d.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete service %s: %w", name, err)
+		}
+	default:
+		return fmt.Errorf("unsupported resource kind: %s", kind)
+	}
+	return nil
+}
+
+func (d *K8sDeployer) ListManagedResources(ctx context.Context) ([]port.ManagedResource, error) {
+	var resources []port.ManagedResource
+
+	deployments, err := d.client.AppsV1().Deployments(d.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list deployments: %w", err)
+	}
+	for _, dep := range deployments.Items {
+		resources = append(resources, port.ManagedResource{
+			Kind:    "Deployment",
+			Name:    dep.Name,
+			AppName: dep.Labels["app"],
+			Lane:    dep.Labels["lane"],
+		})
+	}
+
+	services, err := d.client.CoreV1().Services(d.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	for _, svc := range services.Items {
+		resources = append(resources, port.ManagedResource{
+			Kind:    "Service",
+			Name:    svc.Name,
+			AppName: svc.Labels["app"],
+			Lane:    svc.Labels["lane"],
+		})
+	}
+
+	return resources, nil
 }
 
 func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App) error {
