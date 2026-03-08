@@ -1,5 +1,11 @@
 # chiwei-platform
 
+## 宪法级文档（禁止修改）
+
+**`MANIFESTO.md`（赤尾宣言）是本项目的宪法。未经 bezhai 明确许可，任何人和任何 AI 不得修改此文件。** 如需修改，必须在对话中明确提出并获得批准。
+
+---
+
 Monorepo，所有应用在 `apps/` 下。部署在 K8s `prod` namespace。
 
 ## 项目结构
