@@ -7,6 +7,7 @@ import {
   CloudServerOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  DollarOutlined,
   FileSearchOutlined,
   MessageOutlined,
   MonitorOutlined,
@@ -22,7 +23,8 @@ dayjs.locale('zh-cn');
 import AuthGuard from './components/AuthGuard';
 
 const Login = lazy(() => import('./pages/Login'));
-const Dashboard = lazy(() => import('./pages/Dashboard'));
+const ServiceStatus = lazy(() => import('./pages/ServiceStatus'));
+const TokenStats = lazy(() => import('./pages/TokenStats'));
 const Kibana = lazy(() => import('./pages/Kibana'));
 const Langfuse = lazy(() => import('./pages/Langfuse'));
 const Messages = lazy(() => import('./pages/Messages'));
@@ -43,7 +45,8 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
-  { key: '/', icon: <DashboardOutlined />, label: '概览' },
+  { key: '/', icon: <DashboardOutlined />, label: '服务状态' },
+  { key: '/token-stats', icon: <DollarOutlined />, label: '用量统计' },
   { key: '/messages', icon: <MessageOutlined />, label: '消息记录' },
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
@@ -188,7 +191,8 @@ export default function App() {
             <AuthGuard>
               <Suspense fallback={null}>
                 <Routes>
-                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/" element={<ServiceStatus />} />
+                  <Route path="/token-stats" element={<TokenStats />} />
                   <Route path="/kibana" element={<Kibana />} />
                   <Route path="/langfuse" element={<Langfuse />} />
                   <Route path="/messages" element={<Messages />} />

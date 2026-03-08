@@ -16,6 +16,7 @@ import providersRoutes from './routes/providers';
 import modelMappingsRoutes from './routes/model-mappings';
 import mongoRoutes from './routes/mongo';
 import migrationsRoutes from './routes/migrations';
+import serviceStatusRoutes from './routes/service-status';
 
 const PORT = Number(process.env.DASHBOARD_PORT || 3002);
 
@@ -47,6 +48,7 @@ const bootstrap = async () => {
   router.use(modelMappingsRoutes.routes());
   router.use(mongoRoutes.routes());
   router.use(migrationsRoutes.routes());
+  router.use(serviceStatusRoutes.routes());
 
   app.use(router.routes());
   app.use(router.allowedMethods());

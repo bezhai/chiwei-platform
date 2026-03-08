@@ -80,7 +80,7 @@ const formatSeconds = (value?: number) => {
   return `${minutes}m ${total % 60}s`;
 };
 
-export default function Dashboard() {
+export default function TokenStats() {
   const [stats, setStats] = useState<TokenStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
