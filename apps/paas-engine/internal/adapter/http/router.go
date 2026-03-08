@@ -57,6 +57,8 @@ func NewRouter(
 			r.Post("/", releaseH.Create)
 			r.Get("/", releaseH.List)
 			r.Delete("/", releaseH.DeleteByAppAndLane)
+			r.Get("/orphans", releaseH.GetOrphans)
+			r.Delete("/orphans", releaseH.CleanupOrphans)
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", releaseH.Get)
 				r.Put("/", releaseH.Update)
