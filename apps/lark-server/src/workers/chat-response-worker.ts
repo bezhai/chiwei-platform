@@ -92,7 +92,6 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 `[ChatResponseWorker] Agent failed: session_id=${session_id}, error=${error}`,
             );
             await repo.update({ session_id }, { status: 'failed' });
-            rabbitmqClient.ack(msg);
             return;
         }
 
@@ -101,7 +100,6 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             if (is_last) {
                 await repo.update({ session_id }, { status: 'completed' });
             }
-            rabbitmqClient.ack(msg);
             return;
         }
 

@@ -40,6 +40,7 @@ class RabbitMQClient {
     private conn: ChannelModel | null = null;
     private channel: Channel | null = null;
     private reconnecting = false;
+    private consumers: { queue: string; handler: MessageHandler }[] = [];
 
     private constructor() {}
 
@@ -156,6 +157,10 @@ class RabbitMQClient {
     }
 
     async consume(queueName: string, handler: MessageHandler): Promise<void> {
+        // 记录 consumer 以便重连后恢复
+        if (!this.consumers.find((c) => c.queue === queueName)) {
+            this.consumers.push({ queue: queueName, handler });
+        }
         const ch = this.getChannel();
         await ch.consume(queueName, async (msg) => {
             if (!msg) return;
@@ -203,6 +208,10 @@ class RabbitMQClient {
             try {
                 await this.connect();
                 await this.declareTopology();
+                // 恢复所有 consumer
+                for (const { queue, handler } of this.consumers) {
+                    await this.consume(queue, handler);
+                }
                 console.info('[RabbitMQ] reconnected');
             } catch (err) {
                 console.error('[RabbitMQ] reconnect failed:', err);
