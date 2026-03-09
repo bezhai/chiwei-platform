@@ -30,6 +30,7 @@ import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 import { replyPost, sendPost } from '@lark/basic/message';
 import { markdownToPostContent } from 'core/services/message/post-content-processor';
+import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
 import dayjs from 'dayjs';
@@ -106,7 +107,11 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         }
 
         try {
-            const postContent = markdownToPostContent(content);
+            // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
+            const resolvedContent = is_p2p
+                ? content
+                : await resolveMentionsForGroup(content, chat_id);
+            const postContent = markdownToPostContent(resolvedContent);
 
             // 发送消息并捕获 AI 消息 ID
             let aiMessageId: string | undefined;
