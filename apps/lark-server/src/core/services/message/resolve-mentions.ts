@@ -43,7 +43,7 @@ export async function resolveMentionsForGroup(
 
     let result = content;
     for (const { union_id, name } of members) {
-        result = result.replaceAll(`@${name}`, `<at union_id="${union_id}">${name}</at>`);
+        result = result.replaceAll(`@${name}`, `<at user_id="${union_id}">${name}</at>`);
     }
     return result;
 }
