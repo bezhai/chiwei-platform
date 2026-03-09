@@ -178,6 +178,7 @@ class ModelBuilder:
 
                 chat_params = {
                     "api_key": model_info["api_key"],
+                    "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
                     **kwargs,
