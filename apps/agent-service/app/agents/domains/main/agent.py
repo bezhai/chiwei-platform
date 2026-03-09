@@ -105,72 +105,116 @@ async def stream_chat(
                     yield text
 
 
+_STREAM_END = object()
+
+
 async def _buffer_until_pre(
     raw_stream: AsyncGenerator[str, None],
     pre_task: asyncio.Task,
     message_id: str,
 ) -> AsyncGenerator[str, None]:
-    """用 pre_task 结果守护一个原始 token 流：缓冲直到 pre 通过后释放，被拦截则丢弃。
+    """用 pre_task 结果守护一个原始 token 流。
 
-    - 每收到一个 token 时检查 pre_task 是否已完成
-    - pre 通过 → 释放全部 buffer，后续直接 yield
-    - pre 拦截 → 丢弃 buffer，yield 拒绝消息
-    - 流结束后 pre 仍未完成 → await 再决定
+    使用 Queue + asyncio.wait 实现 race：pre 完成后立即响应，
+    不再被动等待下一个 token 到达才检查。
     """
     buffer: list[str] = []
-    pre_resolved = False
+    q: asyncio.Queue = asyncio.Queue()
+
+    async def _drain_stream():
+        try:
+            async for text in raw_stream:
+                await q.put(text)
+        except Exception as e:
+            await q.put(e)
+        finally:
+            await q.put(_STREAM_END)
+
+    drain_task = asyncio.create_task(_drain_stream())
 
     try:
-        async for text in raw_stream:
-            # 每个 token 到达时，探测 pre 是否已完成
-            if not pre_resolved and pre_task.done():
-                pre_result = pre_task.result()
-                pre_resolved = True
+        # Phase 1: Race pre vs stream tokens
+        while not pre_task.done():
+            get_task = asyncio.ensure_future(q.get())
+            done, _ = await asyncio.wait(
+                {get_task, pre_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
+            if pre_task in done:
+                pre_result = pre_task.result()
                 if pre_result["is_blocked"]:
                     logger.info(
                         f"并行模式拦截: message_id={message_id}, "
                         f"reason={pre_result['block_reason']}"
                     )
+                    get_task.cancel()
                     yield GUARD_REJECT_MESSAGE
                     return
-
-                # pre 通过，释放 buffer
-                for buffered in buffer:
-                    yield buffered
+                # pre passed → flush buffer
+                for b in buffer:
+                    yield b
                 buffer.clear()
+                # Await pending get
+                item = await get_task
+                if isinstance(item, Exception):
+                    raise item
+                if item is _STREAM_END:
+                    return
+                yield item
+                break  # → Phase 2
 
-            if pre_resolved:
-                yield text
-            else:
-                buffer.append(text)
-    except Exception:
-        # 确保 pre_task 不会悬空
-        if not pre_task.done():
-            pre_task.cancel()
-        raise
+            # Token arrived, pre still running
+            item = await get_task
+            if isinstance(item, Exception):
+                raise item
+            if item is _STREAM_END:
+                # Stream ended before pre → await pre
+                try:
+                    pre_result = await pre_task
+                except Exception as e:
+                    logger.error(f"pre_task 异常: {e}")
+                    for b in buffer:
+                        yield b
+                    return
+                if pre_result["is_blocked"]:
+                    logger.info(
+                        f"并行模式拦截（流结束后）: message_id={message_id}, "
+                        f"reason={pre_result['block_reason']}"
+                    )
+                    yield GUARD_REJECT_MESSAGE
+                    return
+                for b in buffer:
+                    yield b
+                return
+            buffer.append(item)
 
-    # 流结束后 pre 仍未完成 → await 再处理
-    if not pre_resolved:
-        try:
-            pre_result = await pre_task
-        except Exception as e:
-            logger.error(f"pre_task 异常: {e}")
-            # pre 异常时放行，释放 buffer
-            for buffered in buffer:
-                yield buffered
-            return
+        # Edge: pre done between loop iterations
+        if buffer:
+            pre_result = pre_task.result()
+            if pre_result["is_blocked"]:
+                logger.info(
+                    f"并行模式拦截: message_id={message_id}, "
+                    f"reason={pre_result['block_reason']}"
+                )
+                yield GUARD_REJECT_MESSAGE
+                return
+            for b in buffer:
+                yield b
+            buffer.clear()
 
-        if pre_result["is_blocked"]:
-            logger.info(
-                f"并行模式拦截（流结束后）: message_id={message_id}, "
-                f"reason={pre_result['block_reason']}"
-            )
-            yield GUARD_REJECT_MESSAGE
-            return
+        # Phase 2: Pre passed, stream directly from queue
+        while True:
+            item = await q.get()
+            if isinstance(item, Exception):
+                raise item
+            if item is _STREAM_END:
+                return
+            yield item
 
-        for buffered in buffer:
-            yield buffered
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
 
 
 async def _build_and_stream(

@@ -111,7 +111,7 @@ async def check_sensitive_politics(state: PreState, config) -> dict:
             messages, config=config
         )
 
-        if result.is_sensitive and result.confidence >= 0.7:
+        if result.is_sensitive and result.confidence >= 0.85:
             logger.warning(f"检测到敏感政治话题: confidence={result.confidence}")
             return {
                 "safety_results": [
