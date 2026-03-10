@@ -176,6 +176,8 @@ class ModelBuilder:
             elif client_type == "google":
                 from langchain_google_genai import ChatGoogleGenerativeAI
 
+                from app.config.config import settings
+
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
@@ -183,6 +185,10 @@ class ModelBuilder:
                     "max_retries": max_retries,
                     **kwargs,
                 }
+                if settings.forward_proxy_url:
+                    chat_params["client_args"] = {
+                        "proxy": settings.forward_proxy_url
+                    }
 
                 logger.info(
                     f"为模型 {model_id} 构建ChatGoogleGenerativeAI实例，"

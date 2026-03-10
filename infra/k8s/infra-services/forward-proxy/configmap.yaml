@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forward-proxy-config
+  namespace: prod
+  labels:
+    app: forward-proxy
+    tier: infra
+data:
+  tinyproxy.conf: |
+    Port 8888
+    Listen 0.0.0.0
+    Timeout 60
+    MaxClients 500
+
+    # Only allow CONNECT to standard HTTPS port
+    ConnectPort 443
+
+    # Allow K8s Pod/Service/Node CIDRs
+    Allow 10.42.0.0/16
+    Allow 10.43.0.0/16
+    Allow 10.37.0.0/16
+    Allow 10.251.0.0/16
+    Allow 127.0.0.1/8
+
+    # Logging
+    LogLevel Warning
+
+    # Disable Via header for cleaner requests
+    DisableViaHeader Yes

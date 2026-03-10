@@ -4,10 +4,6 @@ kind: Kustomization
 namespace: prod
 
 resources:
-  - postgres/
-  - mongo/
-  - redis/
-  - qdrant/
-  - rabbitmq/
-  - meme/
-  - forward-proxy/
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
