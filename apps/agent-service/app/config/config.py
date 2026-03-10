@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     long_task_batch_size: int = 5
     long_task_lock_timeout: int = 1800  # 30分钟
 
+    # 日记生成
+    diary_chat_ids: str = ""  # 逗号分隔的 chat_id 列表
+    diary_model: str = "diary-model"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
