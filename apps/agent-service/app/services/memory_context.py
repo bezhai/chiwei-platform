@@ -5,11 +5,33 @@
 
 import logging
 from collections import defaultdict
+from datetime import date
 
-from app.orm.crud import get_user_knowledge
+from app.orm.crud import get_recent_diaries, get_user_knowledge
 from app.orm.models import UserKnowledge
 
 logger = logging.getLogger(__name__)
+
+# 日记注入硬上限：约 2 篇日记
+MAX_DIARY_CHARS = 1500
+
+
+async def build_diary_context(chat_id: str) -> str:
+    """构建日记记忆文本，注入群聊 system prompt
+
+    查 today 之前最近 2 篇日记，时间正序拼接。
+    """
+    today = date.today().isoformat()
+    diaries = await get_recent_diaries(chat_id, today, limit=2)
+    if not diaries:
+        return ""
+    parts = []
+    for diary in reversed(diaries):  # DB 返回 desc，reversed 变正序（旧→新）
+        parts.append(f"--- {diary.diary_date} ---\n{diary.content}")
+    text = "\n\n".join(parts)
+    if len(text) > MAX_DIARY_CHARS:
+        text = text[:MAX_DIARY_CHARS] + "……"
+    return text
 
 # 硬上限：约 600 tokens，中文 ~1.5 token/字 → ~400 字
 MAX_CHARS = 400
