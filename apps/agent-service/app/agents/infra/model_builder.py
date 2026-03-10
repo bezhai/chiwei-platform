@@ -174,31 +174,30 @@ class ModelBuilder:
 
                 return AzureChatOpenAI(**chat_params)
             elif client_type == "google":
-                from app.agents.clients.google_client import (
-                    CustomChatGoogleGenerativeAI,
-                )
+                from langchain_google_genai import ChatGoogleGenerativeAI
 
                 chat_params = {
                     "api_key": model_info["api_key"],
-                    "client_options": model_info["base_url"],
+                    "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
                     **kwargs,
                 }
 
                 logger.info(
-                    f"为模型 {model_id} 构建CustomChatGoogleGenerativeAI实例，"
+                    f"为模型 {model_id} 构建ChatGoogleGenerativeAI实例，"
                     f"参数: {list(chat_params.keys())}"
                 )
 
-                return CustomChatGoogleGenerativeAI(**chat_params)
+                return ChatGoogleGenerativeAI(**chat_params)
             else:
-                # 默认使用 ChatOpenAI
+                # 默认使用 ChatOpenAI（Response API）
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
+                    "use_responses_api": True,
                     **kwargs,
                 }
 

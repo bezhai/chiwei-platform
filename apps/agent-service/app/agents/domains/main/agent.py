@@ -308,9 +308,6 @@ async def _build_and_stream(
                 if finish_reason == "length":
                     yield "(后续内容被截断)"
                     return
-                if finish_reason == "stop":
-                    break
-
                 if token.text:
                     full_content += token.text
                     yield token.text
