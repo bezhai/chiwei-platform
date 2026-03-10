@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forward-proxy
+  namespace: prod
+  labels:
+    app: forward-proxy
+    tier: infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forward-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: forward-proxy
+        tier: infra
+    spec:
+      nodeSelector:
+        node-role: proxy
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: proxy
+          effect: NoSchedule
+      containers:
+        - name: tinyproxy
+          image: alpine:3.21
+          command:
+            - sh
+            - -c
+            - apk add --no-cache tinyproxy && exec tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf
+          ports:
+            - containerPort: 8888
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - -x
+                - tinyproxy
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pgrep
+                - -x
+                - tinyproxy
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tinyproxy/tinyproxy.conf
+              subPath: tinyproxy.conf
+      volumes:
+        - name: config
+          configMap:
+            name: forward-proxy-config

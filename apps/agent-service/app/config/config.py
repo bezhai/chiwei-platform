@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str | None = None
 
+    # 正向代理（供 Google 等需要代理的供应商使用）
+    forward_proxy_url: str | None = None
+
     # 长期任务配置
     long_task_batch_size: int = 5
     long_task_lock_timeout: int = 1800  # 30分钟
