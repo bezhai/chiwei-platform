@@ -75,7 +75,7 @@ async def check_prompt_injection(state: PreState, config) -> dict:
             messages, config=config
         )
 
-        if result.is_injection and result.confidence >= 0.7:
+        if result.is_injection and result.confidence >= 0.85:
             logger.warning(f"检测到提示词注入: confidence={result.confidence}")
             return {
                 "safety_results": [
