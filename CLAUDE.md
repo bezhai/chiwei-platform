@@ -108,40 +108,7 @@ make latest-build APP=<app>
 
 ### API
 
-```
-GET    /healthz                                        # 健康检查（无需认证）
-
-# Apps
-POST   /api/v1/apps/                                   # 创建应用
-GET    /api/v1/apps/                                    # 列出应用
-GET    /api/v1/apps/{app}/                              # 获取应用
-PUT    /api/v1/apps/{app}/                              # 更新应用
-DELETE /api/v1/apps/{app}/                              # 删除应用
-GET    /api/v1/apps/{app}/logs                          # 运行日志
-
-# Builds（挂在 App 下，内部通过 app.image_repo 关联）
-POST   /api/v1/apps/{app}/builds/                      # 触发构建
-GET    /api/v1/apps/{app}/builds/                       # 列出构建
-GET    /api/v1/apps/{app}/builds/latest                 # 最近成功构建
-GET    /api/v1/apps/{app}/builds/{id}/                  # 获取构建状态
-POST   /api/v1/apps/{app}/builds/{id}/cancel            # 取消构建
-GET    /api/v1/apps/{app}/builds/{id}/logs              # 构建日志
-
-# Image Repos（镜像构建配置）
-POST   /api/v1/image-repos/                             # 创建 ImageRepo
-GET    /api/v1/image-repos/                             # 列出 ImageRepo
-GET    /api/v1/image-repos/{repo}/                      # 获取 ImageRepo
-PUT    /api/v1/image-repos/{repo}/                      # 更新 ImageRepo
-DELETE /api/v1/image-repos/{repo}/                      # 删除 ImageRepo
-
-# Releases
-POST   /api/v1/releases/                                # 创建/更新 Release
-GET    /api/v1/releases/                                # 列出 Release
-DELETE /api/v1/releases/?app=xxx&lane=yyy               # 按 app+lane 删除 Release
-GET    /api/v1/releases/{id}/                           # 获取 Release
-PUT    /api/v1/releases/{id}/                           # 更新 Release
-DELETE /api/v1/releases/{id}/                           # 删除 Release
-```
+API 端点详见 `apps/paas-engine/internal/adapter/http/router.go`
 
 ### 泳道路由
 
