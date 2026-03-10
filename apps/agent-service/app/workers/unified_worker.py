@@ -14,6 +14,7 @@ from inner_shared.logger import setup_logging
 
 from app.config.config import settings
 from app.long_tasks.executor import poll_and_execute_tasks
+from app.workers.diary_worker import cron_generate_diaries
 from app.workers.memory_worker import cron_consolidate_profiles
 from app.workers.vectorize_worker import cron_scan_pending_messages
 
@@ -64,4 +65,6 @@ class UnifiedWorkerSettings:
             hour={2, 6, 10, 14, 18, 22},
             minute={15},
         ),
+        # 4. 日记生成：每天 UTC 19:00（CST 03:00）
+        cron(cron_generate_diaries, hour={19}, minute={0}),
     ]

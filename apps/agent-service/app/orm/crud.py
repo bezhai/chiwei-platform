@@ -6,6 +6,7 @@ from sqlalchemy.future import select
 from .base import AsyncSessionLocal
 from .models import (
     ConversationMessage,
+    DiaryEntry,
     LarkBaseChatInfo,
     LarkUser,
     ModelMapping,
@@ -299,6 +300,74 @@ async def get_active_users_for_consolidation(
             }
             for row in result.all()
         ]
+
+
+
+# ==================== Diary CRUD ====================
+
+
+async def get_chat_messages_in_range(
+    chat_id: str, start_time: int, end_time: int, limit: int = 2000
+) -> list[ConversationMessage]:
+    """获取指定群在时间范围内的所有消息（user + assistant）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ConversationMessage)
+            .where(ConversationMessage.chat_id == chat_id)
+            .where(ConversationMessage.create_time >= start_time)
+            .where(ConversationMessage.create_time < end_time)
+            .order_by(ConversationMessage.create_time.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def upsert_diary_entry(
+    chat_id: str,
+    diary_date: str,
+    content: str,
+    message_count: int,
+    model: str | None = None,
+) -> None:
+    """插入或更新日记（upsert by chat_id + diary_date）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.chat_id == chat_id)
+            .where(DiaryEntry.diary_date == diary_date)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.content = content
+            existing.message_count = message_count
+            existing.model = model
+        else:
+            session.add(
+                DiaryEntry(
+                    chat_id=chat_id,
+                    diary_date=diary_date,
+                    content=content,
+                    message_count=message_count,
+                    model=model,
+                )
+            )
+        await session.commit()
+
+
+async def get_recent_diaries(
+    chat_id: str, before_date: str, limit: int = 3
+) -> list[DiaryEntry]:
+    """查最近 N 篇日记（before_date 之前）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.chat_id == chat_id)
+            .where(DiaryEntry.diary_date < before_date)
+            .order_by(DiaryEntry.diary_date.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 async def get_username(user_id: str) -> str | None:
