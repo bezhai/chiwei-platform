@@ -4,8 +4,8 @@ metadata:
   name: daily-report
   namespace: prod
 spec:
-  # 1:00 UTC = 9:00 CST
-  schedule: "0 1 * * *"
+  # kube-controller-manager 时区为 Asia/Shanghai，9:00 CST 直接写 9
+  schedule: "0 9 * * *"
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   concurrencyPolicy: Forbid
@@ -78,7 +78,7 @@ data:
     }
 
     # --- 1. Service Health ---
-    health_lines=""
+    health_table="| 服务 | 状态 |\n| --- | --- |"
     healthy=0
     total=0
 
@@ -96,9 +96,9 @@ data:
       total=$((total + 1))
       if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
         healthy=$((healthy + 1))
-        health_lines="${health_lines}\\n✅ ${name}"
+        health_table="${health_table}\n| ${name} | ✅ 正常 |"
       else
-        health_lines="${health_lines}\\n❌ ${name}"
+        health_table="${health_table}\n| ${name} | ❌ 异常 |"
       fi
     done
 
@@ -108,21 +108,20 @@ data:
         | jq -r '.data.result[] | "\(.metric.instance)=\(.value[1])"'
     }
 
-    node_lines=""
+    node_table="| 节点 | CPU | 内存 | 磁盘 |\n| --- | --- | --- | --- |"
     # Collect per-node metrics into associative temp files
     prom_query_nodes '100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' > /tmp/cpu.txt
     prom_query_nodes '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100' > /tmp/mem.txt
     prom_query_nodes '100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100' > /tmp/disk.txt
 
-    # Build node resource lines
+    # Build node resource table
     while IFS='=' read -r inst cpu_raw; do
-      short=$(echo "$inst" | sed 's/:9100//' | sed 's/.*\.//')
       cpu=$(printf '%.0f' "$cpu_raw" 2>/dev/null || echo "N/A")
       mem_raw=$(grep "^${inst}=" /tmp/mem.txt | cut -d= -f2)
       mem=$(printf '%.0f' "$mem_raw" 2>/dev/null || echo "N/A")
       disk_raw=$(grep "^${inst}=" /tmp/disk.txt | cut -d= -f2)
       disk=$(printf '%.0f' "$disk_raw" 2>/dev/null || echo "N/A")
-      node_lines="${node_lines}\\n${inst%:*}  CPU: ${cpu}%  内存: ${mem}%  磁盘: ${disk}%"
+      node_table="${node_table}\n| ${inst%:*} | ${cpu}% | ${mem}% | ${disk}% |"
     done < /tmp/cpu.txt
 
     # --- 3. Pod Status (prod namespace, only count pods actually in that phase: value=1) ---
@@ -142,57 +141,55 @@ data:
 
     report_time=$(now_cst)
 
-    # --- Send Feishu Card ---
+    # --- Send Feishu Card (v2 schema with markdown tables) ---
     cat <<ENDJSON | curl -sf --max-time 10 -X POST "$FEISHU_URL" -H 'Content-Type: application/json' -d @-
     {
       "msg_type": "interactive",
       "card": {
+        "schema": "2.0",
         "header": {
           "title": {"tag": "plain_text", "content": "${title}"},
           "template": "${color}"
         },
-        "elements": [
-          {
-            "tag": "div",
-            "fields": [
-              {
-                "is_short": false,
-                "text": {"tag": "lark_md", "content": "**🟢 服务状态 (${healthy}/${total} 正常)**\n${health_lines}"}
-              }
-            ]
-          },
-          {
-            "tag": "div",
-            "fields": [
-              {
-                "is_short": true,
-                "text": {"tag": "lark_md", "content": "**📊 节点资源**${node_lines}"}
-              }
-            ]
-          },
-          {
-            "tag": "div",
-            "fields": [
-              {
-                "is_short": true,
-                "text": {"tag": "lark_md", "content": "**🔔 当前活跃告警:** ${alerts_count} 条"}
-              },
-              {
-                "is_short": true,
-                "text": {"tag": "lark_md", "content": "**⚠️ 异常 Pod:** ${not_running} 个"}
-              }
-            ]
-          },
-          {
-            "tag": "div",
-            "fields": [
-              {
-                "is_short": false,
-                "text": {"tag": "lark_md", "content": "**⏰ 报告时间:** ${report_time}"}
-              }
-            ]
-          }
-        ]
+        "body": {
+          "elements": [
+            {
+              "tag": "markdown",
+              "content": "**🟢 服务状态** (${healthy}/${total} 正常)\n${health_table}"
+            },
+            {"tag": "hr"},
+            {
+              "tag": "markdown",
+              "content": "**📊 节点资源**\n${node_table}"
+            },
+            {"tag": "hr"},
+            {
+              "tag": "column_set",
+              "flex_mode": "bisect",
+              "background_style": "default",
+              "columns": [
+                {
+                  "tag": "column",
+                  "width": "weighted",
+                  "weight": 1,
+                  "elements": [{"tag": "markdown", "content": "**🔔 活跃告警**\n${alerts_count} 条"}]
+                },
+                {
+                  "tag": "column",
+                  "width": "weighted",
+                  "weight": 1,
+                  "elements": [{"tag": "markdown", "content": "**⚠️ 异常 Pod**\n${not_running} 个"}]
+                }
+              ]
+            },
+            {"tag": "hr"},
+            {
+              "tag": "markdown",
+              "content": "⏰ ${report_time}",
+              "text_size": "notation"
+            }
+          ]
+        }
       }
     }
     ENDJSON
