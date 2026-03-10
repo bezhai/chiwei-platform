@@ -101,6 +101,12 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
     )
 
     diary_content = response.content
+    # Gemini 返回 list[dict]，提取文本
+    if isinstance(diary_content, list):
+        diary_content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in diary_content
+        )
     if not diary_content:
         logger.warning(f"LLM returned empty content for {chat_id} on {date_str}")
         return None
