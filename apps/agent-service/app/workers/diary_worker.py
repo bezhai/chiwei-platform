@@ -8,8 +8,6 @@
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from langfuse import get_client as get_langfuse
-
 from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
@@ -62,86 +60,65 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
     Returns:
         生成的日记内容，无消息时返回 None
     """
-    langfuse = get_langfuse()
     date_str = target_date.isoformat()  # "2026-03-10"
     weekday = _WEEKDAY_CN[target_date.weekday()]
 
-    trace = langfuse.trace(
-        name="diary-generation",
-        input={"chat_id": chat_id, "date": date_str},
+    # 1. 收集当天消息（CST 00:00 ~ 次日 00:00）
+    day_start_cst = datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=CST
+    )
+    day_end_cst = day_start_cst + timedelta(days=1)
+    # 转为毫秒时间戳（create_time 是毫秒级 BigInteger）
+    start_ts = int(day_start_cst.timestamp() * 1000)
+    end_ts = int(day_end_cst.timestamp() * 1000)
+
+    messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
+
+    # 2. 格式化消息时间线
+    timeline = await _format_messages_timeline(messages)
+
+    if not timeline:
+        logger.info(f"No messages for {chat_id} on {date_str}, skip")
+        return None
+
+    # 3. 查最近 3 篇日记
+    recent = await get_recent_diaries(chat_id, date_str, limit=3)
+    recent_diaries_text = _format_recent_diaries(recent)
+
+    # 4. 获取 Langfuse prompt 并编译
+    prompt_template = get_prompt("diary_generation")
+    compiled_prompt = prompt_template.compile(
+        date=date_str,
+        weekday=weekday,
+        messages=timeline,
+        recent_diaries=recent_diaries_text,
     )
 
-    try:
-        # 1. 收集当天消息（CST 00:00 ~ 次日 00:00）
-        day_start_cst = datetime(
-            target_date.year, target_date.month, target_date.day, tzinfo=CST
-        )
-        day_end_cst = day_start_cst + timedelta(days=1)
-        # 转为毫秒时间戳（create_time 是毫秒级 BigInteger）
-        start_ts = int(day_start_cst.timestamp() * 1000)
-        end_ts = int(day_end_cst.timestamp() * 1000)
+    # 5. 调用 LLM
+    model = await ModelBuilder.build_chat_model(settings.diary_model)
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled_prompt}],
+    )
 
-        messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
+    diary_content = response.content
+    if not diary_content:
+        logger.warning(f"LLM returned empty content for {chat_id} on {date_str}")
+        return None
 
-        # 2. 格式化消息时间线
-        timeline = await _format_messages_timeline(messages)
+    # 6. 写入数据库（upsert）
+    await upsert_diary_entry(
+        chat_id=chat_id,
+        diary_date=date_str,
+        content=diary_content,
+        message_count=len(messages),
+        model=settings.diary_model,
+    )
 
-        if not timeline:
-            logger.info(f"No messages for {chat_id} on {date_str}, skip")
-            trace.update(output={"status": "no_messages"})
-            return None
-
-        # 3. 查最近 3 篇日记
-        recent = await get_recent_diaries(chat_id, date_str, limit=3)
-        recent_diaries_text = _format_recent_diaries(recent)
-
-        # 4. 获取 Langfuse prompt 并编译
-        prompt_template = get_prompt("diary_generation")
-        compiled_prompt = prompt_template.compile(
-            date=date_str,
-            weekday=weekday,
-            messages=timeline,
-            recent_diaries=recent_diaries_text,
-        )
-
-        # 5. 调用 LLM
-        model = await ModelBuilder.build_chat_model(settings.diary_model)
-        response = await model.ainvoke(
-            [{"role": "user", "content": compiled_prompt}],
-        )
-
-        diary_content = response.content
-        if not diary_content:
-            logger.warning(f"LLM returned empty content for {chat_id} on {date_str}")
-            trace.update(output={"status": "empty_response"})
-            return None
-
-        # 6. 写入数据库（upsert）
-        await upsert_diary_entry(
-            chat_id=chat_id,
-            diary_date=date_str,
-            content=diary_content,
-            message_count=len(messages),
-            model=settings.diary_model,
-        )
-
-        logger.info(
-            f"Diary generated for {chat_id} on {date_str}: "
-            f"{len(messages)} messages, {len(diary_content)} chars"
-        )
-        trace.update(
-            output={
-                "status": "success",
-                "message_count": len(messages),
-                "diary_length": len(diary_content),
-            },
-        )
-        return diary_content
-
-    except Exception as e:
-        logger.error(f"generate_diary_for_chat failed: {e}")
-        trace.update(output={"status": "error", "error": str(e)})
-        raise
+    logger.info(
+        f"Diary generated for {chat_id} on {date_str}: "
+        f"{len(messages)} messages, {len(diary_content)} chars"
+    )
+    return diary_content
 
 
 # ==================== 辅助函数 ====================
