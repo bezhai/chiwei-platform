@@ -65,34 +65,44 @@ func (s *ImageRepoService) ListImageRepos(ctx context.Context) ([]*domain.ImageR
 	return s.imageRepoRepo.FindAll(ctx)
 }
 
-type UpdateImageRepoRequest struct {
-	Registry   string `json:"registry"`
-	GitRepo    string `json:"git_repo"`
-	ContextDir string `json:"context_dir"`
-	Dockerfile string `json:"dockerfile"`
-	NoCache    bool   `json:"no_cache"`
-}
-
-func (s *ImageRepoService) UpdateImageRepo(ctx context.Context, name string, req UpdateImageRepoRequest) (*domain.ImageRepo, error) {
+func (s *ImageRepoService) UpdateImageRepo(ctx context.Context, name string, body []byte) (*domain.ImageRepo, error) {
 	repo, err := s.imageRepoRepo.FindByName(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	if req.Registry == "" {
+
+	fields, err := ParseFields(body)
+	if err != nil {
 		return nil, domain.ErrInvalidInput
 	}
-	if err := domain.ValidateGitRepo(req.GitRepo); err != nil {
+
+	if err := ApplyField(fields, "registry", &repo.Registry); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "git_repo", &repo.GitRepo); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "context_dir", &repo.ContextDir); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "dockerfile", &repo.Dockerfile); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "no_cache", &repo.NoCache); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// 合并后校验
+	if repo.Registry == "" {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := domain.ValidateGitRepo(repo.GitRepo); err != nil {
 		return nil, err
 	}
-	if err := domain.ValidateContextDir(req.ContextDir); err != nil {
+	if err := domain.ValidateContextDir(repo.ContextDir); err != nil {
 		return nil, err
 	}
 
-	repo.Registry = req.Registry
-	repo.GitRepo = req.GitRepo
-	repo.ContextDir = req.ContextDir
-	repo.Dockerfile = req.Dockerfile
-	repo.NoCache = req.NoCache
 	repo.UpdatedAt = time.Now()
 	if err := s.imageRepoRepo.Update(ctx, repo); err != nil {
 		return nil, err

@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/chiwei-platform/paas-engine/internal/service"
@@ -51,12 +52,12 @@ func (h *ImageRepoHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 func (h *ImageRepoHandler) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "repo")
-	var req service.UpdateImageRepoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	repo, err := h.svc.UpdateImageRepo(r.Context(), name, req)
+	repo, err := h.svc.UpdateImageRepo(r.Context(), name, body)
 	if err != nil {
 		writeError(w, err)
 		return
