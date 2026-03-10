@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/chiwei-platform/paas-engine/internal/service"
@@ -52,12 +53,12 @@ func (h *AppHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 func (h *AppHandler) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "app")
-	var req service.UpdateAppRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	app, err := h.svc.UpdateApp(r.Context(), name, req)
+	app, err := h.svc.UpdateApp(r.Context(), name, body)
 	if err != nil {
 		writeError(w, err)
 		return

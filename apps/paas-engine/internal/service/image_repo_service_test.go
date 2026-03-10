@@ -107,6 +107,39 @@ func TestCreateImageRepo_InvalidGitRepo(t *testing.T) {
 	}
 }
 
+func TestUpdateImageRepo_PartialKeepsExisting(t *testing.T) {
+	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
+		Name:       "myrepo",
+		Registry:   "harbor.local/inner-bot/test",
+		GitRepo:    "https://github.com/example/repo.git",
+		ContextDir: "apps/test",
+		Dockerfile: "Dockerfile.prod",
+		NoCache:    false,
+	}}
+	svc := NewImageRepoService(imageRepoRepo, &stubAppRepo{})
+
+	// 只传 no_cache，其他字段保持不变
+	repo, err := svc.UpdateImageRepo(context.Background(), "myrepo", []byte(`{"no_cache":true}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !repo.NoCache {
+		t.Error("NoCache should be true")
+	}
+	if repo.Registry != "harbor.local/inner-bot/test" {
+		t.Errorf("Registry = %q, want %q", repo.Registry, "harbor.local/inner-bot/test")
+	}
+	if repo.GitRepo != "https://github.com/example/repo.git" {
+		t.Errorf("GitRepo = %q, want %q", repo.GitRepo, "https://github.com/example/repo.git")
+	}
+	if repo.ContextDir != "apps/test" {
+		t.Errorf("ContextDir = %q, want %q", repo.ContextDir, "apps/test")
+	}
+	if repo.Dockerfile != "Dockerfile.prod" {
+		t.Errorf("Dockerfile = %q, want %q", repo.Dockerfile, "Dockerfile.prod")
+	}
+}
+
 func TestImageRepo_FullImageRef(t *testing.T) {
 	repo := &domain.ImageRepo{
 		Registry: "harbor.local/inner-bot/agent-service",

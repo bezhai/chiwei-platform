@@ -72,37 +72,53 @@ func (s *AppService) ListApps(ctx context.Context) ([]*domain.App, error) {
 	return s.appRepo.FindAll(ctx)
 }
 
-type UpdateAppRequest struct {
-	Description       string            `json:"description"`
-	ImageRepoName     string            `json:"image_repo"`
-	Port              int               `json:"port"`
-	ServiceAccount    string            `json:"service_account"`
-	Command           []string          `json:"command"`
-	EnvFromSecrets    []string          `json:"env_from_secrets"`
-	EnvFromConfigMaps []string          `json:"env_from_config_maps"`
-	Envs              map[string]string `json:"envs"`
-}
-
-func (s *AppService) UpdateApp(ctx context.Context, name string, req UpdateAppRequest) (*domain.App, error) {
+func (s *AppService) UpdateApp(ctx context.Context, name string, body []byte) (*domain.App, error) {
 	app, err := s.appRepo.FindByName(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	// 校验 ImageRepo 存在
-	if req.ImageRepoName != "" {
-		if _, err := s.imageRepoRepo.FindByName(ctx, req.ImageRepoName); err != nil {
+
+	fields, err := ParseFields(body)
+	if err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// 标量/切片字段：出现则更新
+	if err := ApplyField(fields, "description", &app.Description); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "image_repo", &app.ImageRepoName); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "port", &app.Port); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "service_account", &app.ServiceAccount); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "command", &app.Command); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "env_from_secrets", &app.EnvFromSecrets); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "env_from_config_maps", &app.EnvFromConfigMaps); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// Map 字段：按 key 合并
+	app.Envs, err = MergeEnvs(app.Envs, fields["envs"])
+	if err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// 合并后校验 ImageRepo 存在
+	if app.ImageRepoName != "" {
+		if _, err := s.imageRepoRepo.FindByName(ctx, app.ImageRepoName); err != nil {
 			return nil, err
 		}
 	}
 
-	app.Description = req.Description
-	app.ImageRepoName = req.ImageRepoName
-	app.Port = req.Port
-	app.ServiceAccount = req.ServiceAccount
-	app.Command = req.Command
-	app.EnvFromSecrets = req.EnvFromSecrets
-	app.EnvFromConfigMaps = req.EnvFromConfigMaps
-	app.Envs = req.Envs
 	app.UpdatedAt = time.Now()
 	if err := s.appRepo.Update(ctx, app); err != nil {
 		return nil, err

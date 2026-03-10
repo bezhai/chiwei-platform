@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -135,14 +136,77 @@ func (s *ReleaseService) ListReleases(ctx context.Context, appName, lane string)
 	return s.releaseRepo.FindAll(ctx, appName, lane)
 }
 
-func (s *ReleaseService) UpdateRelease(ctx context.Context, id string, req CreateReleaseRequest) (*domain.Release, error) {
+func (s *ReleaseService) UpdateRelease(ctx context.Context, id string, body []byte) (*domain.Release, error) {
 	release, err := s.releaseRepo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	req.AppName = release.AppName
-	req.Lane = release.Lane
-	return s.CreateOrUpdateRelease(ctx, req)
+
+	fields, err := ParseFields(body)
+	if err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	app, err := s.appRepo.FindByName(ctx, release.AppName)
+	if err != nil {
+		return nil, err
+	}
+
+	// image_tag 特殊处理：出现则通过 App → ImageRepo 重建完整镜像地址
+	if raw, ok := fields["image_tag"]; ok {
+		var tag string
+		if err := json.Unmarshal(raw, &tag); err != nil {
+			return nil, domain.ErrInvalidInput
+		}
+		if app.ImageRepoName != "" {
+			imageRepo, err := s.imageRepoRepo.FindByName(ctx, app.ImageRepoName)
+			if err != nil {
+				return nil, err
+			}
+			release.Image = imageRepo.FullImageRef(tag)
+		}
+	}
+
+	if err := ApplyField(fields, "replicas", &release.Replicas); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if release.Replicas <= 0 {
+		release.Replicas = 1
+	}
+	if err := ApplyField(fields, "version", &release.Version); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// Map 字段：按 key 合并
+	release.Envs, err = MergeEnvs(release.Envs, fields["envs"])
+	if err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	// Deploy
+	release.Status = domain.ReleaseStatusPending
+	release.UpdatedAt = time.Now()
+	release.DeployName = release.ResourceName()
+
+	if s.deployer != nil {
+		if err := s.deployer.Deploy(ctx, release, app); err != nil {
+			release.Status = domain.ReleaseStatusFailed
+		} else {
+			release.Status = domain.ReleaseStatusDeployed
+		}
+	} else {
+		release.Status = domain.ReleaseStatusDeployed
+	}
+
+	if err := s.releaseRepo.Update(ctx, release); err != nil {
+		return nil, err
+	}
+
+	if release.Status == domain.ReleaseStatusDeployed {
+		metrics.ReleasesTotal.WithLabelValues(release.Lane).Inc()
+	}
+
+	return release, nil
 }
 
 func (s *ReleaseService) DeleteReleaseByAppAndLane(ctx context.Context, appName, lane string) error {
