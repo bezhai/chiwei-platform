@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, text
 from sqlalchemy.future import select
@@ -305,6 +305,25 @@ async def get_active_users_for_consolidation(
 
 
 # ==================== Diary CRUD ====================
+
+
+async def get_active_diary_chat_ids(
+    min_replies: int = 5, days: int = 7
+) -> list[str]:
+    """查询近 N 天内赤尾回复 >= min_replies 次的群 chat_id"""
+    async with AsyncSessionLocal() as session:
+        cutoff_ms = int(
+            (datetime.now(UTC) - timedelta(days=days)).timestamp() * 1000
+        )
+        result = await session.execute(
+            select(ConversationMessage.chat_id)
+            .where(ConversationMessage.chat_type == "group")
+            .where(ConversationMessage.role == "assistant")
+            .where(ConversationMessage.create_time > cutoff_ms)
+            .group_by(ConversationMessage.chat_id)
+            .having(func.count() >= min_replies)
+        )
+        return [row[0] for row in result.all()]
 
 
 async def get_chat_messages_in_range(

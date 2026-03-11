@@ -14,6 +14,7 @@ from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
 from app.orm.crud import (
+    get_active_diary_chat_ids,
     get_all_impressions_for_chat,
     get_chat_messages_in_range,
     get_recent_diaries,
@@ -34,13 +35,12 @@ _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周�
 
 
 async def cron_generate_diaries(ctx) -> None:
-    """cron 入口：为所有配置的群生成昨天的日记"""
-    chat_ids = [
-        cid.strip() for cid in settings.diary_chat_ids.split(",") if cid.strip()
-    ]
+    """cron 入口：为近7天赤尾活跃的群生成昨天的日记"""
+    chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
     if not chat_ids:
-        logger.info("No diary_chat_ids configured, skip")
+        logger.info("No active diary chats found, skip")
         return
+    logger.info(f"Active diary chats: {len(chat_ids)}")
 
     yesterday = date.today() - timedelta(days=1)
 
