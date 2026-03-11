@@ -96,5 +96,5 @@ make latest-build APP=<app>                # 最近成功构建
 
 ## 环境配置
 
-- **GitHub CLI**: 必须用 `ghc` 而不是 `gh`（`/usr/local/bin/gh` 是公司内部工具）
+- **GitHub CLI**: 因特殊原因，必须用 `ghc` 而不是 `gh`
 - **PaaS API PUT /apps/{app}/**: merge 语义，无需带完整字段
