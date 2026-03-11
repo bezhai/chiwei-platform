@@ -38,7 +38,7 @@ PaaS Engine API
   → 发布: K8s Deployment + Service (prod ns)
 ```
 
-蓝绿部署：prod 和 blue 泳道互相部署对方。
+蓝绿部署仅限 paas-engine 自身：prod 和 blue 泳道互相部署对方（`make self-deploy`）。其他服务直接部署到 prod。
 
 ### 泳道路由
 
