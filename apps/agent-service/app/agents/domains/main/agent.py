@@ -277,7 +277,7 @@ async def _build_and_stream(
         try:
             diary_text = await build_diary_context(chat_id)
             if diary_text:
-                context_lines.append("你最近的日记：")
+                context_lines.append("\n---\n你最近的日记：")
                 context_lines.append(diary_text)
         except Exception as e:
             logger.error(f"Failed to build diary context: {e}")
@@ -287,7 +287,7 @@ async def _build_and_stream(
                 chat_id, chain_user_ids
             )
             if impression_text:
-                context_lines.append(impression_text)
+                context_lines.append("\n---\n" + impression_text)
         except Exception as e:
             logger.error(f"Failed to build impression context: {e}")
 
