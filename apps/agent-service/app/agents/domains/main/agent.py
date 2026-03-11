@@ -251,6 +251,7 @@ async def _build_and_stream(
         chat_type,
         trigger_user_id,
         chat_name,
+        chain_user_ids,
     ) = await build_chat_context(message_id)
 
     if not messages:
@@ -283,7 +284,7 @@ async def _build_and_stream(
 
         try:
             impression_text = await build_impression_context(
-                chat_id, [trigger_user_id] if trigger_user_id else []
+                chat_id, chain_user_ids
             )
             if impression_text:
                 context_lines.append(impression_text)

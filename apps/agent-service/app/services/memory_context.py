@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 MAX_DIARY_CHARS = 1500
 
 
+MAX_IMPRESSION_USERS = 10
+
+
 async def build_impression_context(chat_id: str, user_ids: list[str]) -> str:
     """构建人物印象文本，注入群聊 system prompt"""
     if not user_ids:
         return ""
-    impressions = await get_impressions_for_users(chat_id, user_ids)
+    impressions = await get_impressions_for_users(chat_id, user_ids[:MAX_IMPRESSION_USERS])
     if not impressions:
         return ""
     lines = []

@@ -6,6 +6,7 @@
 from app.agents.tools.history.members import list_group_members
 from app.agents.tools.history.search import search_group_history
 from app.agents.tools.image import generate_image
+from app.agents.tools.memory import load_memory
 from app.agents.tools.search.allcpp import search_donjin_event
 from app.agents.tools.search.web import search_web
 
@@ -16,4 +17,5 @@ ALL_TOOLS = [
     search_group_history,
     list_group_members,
     generate_image,
+    load_memory,
 ]

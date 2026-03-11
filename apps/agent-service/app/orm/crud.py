@@ -407,6 +407,28 @@ async def get_all_impressions_for_chat(chat_id: str) -> list[PersonImpression]:
         return list(result.scalars().all())
 
 
+async def get_diary_by_date(chat_id: str, diary_date: str) -> DiaryEntry | None:
+    """查指定群指定日期的日记"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.chat_id == chat_id)
+            .where(DiaryEntry.diary_date == diary_date)
+        )
+        return result.scalar_one_or_none()
+
+
+async def search_user_by_name(name: str) -> list[LarkUser]:
+    """按名字模糊查 lark_user"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(LarkUser)
+            .where(LarkUser.name.ilike(f"%{name}%"))
+            .limit(5)
+        )
+        return list(result.scalars().all())
+
+
 async def upsert_person_impression(
     chat_id: str, user_id: str, impression_text: str
 ) -> None:

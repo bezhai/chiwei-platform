@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 async def build_chat_context(
     message_id: str, limit: int = 10
-) -> tuple[list[HumanMessage | AIMessage], list[str], str, str, str, str, str]:
+) -> tuple[list[HumanMessage | AIMessage], list[str], str, str, str, str, str, list[str]]:
     """构建聊天上下文，支持私聊和群聊使用不同组装策略
 
     群聊: 按回复链分组，组装成一条 HumanMessage
@@ -29,14 +29,14 @@ async def build_chat_context(
         limit: 获取的历史消息数量限制
 
     Returns:
-        tuple: (消息列表, 图片URL列表, chat_id, 触发用户名, 聊天类型, 触发用户ID, 群聊名称)
+        tuple: (消息列表, 图片URL列表, chat_id, 触发用户名, 聊天类型, 触发用户ID, 群聊名称, 回复链用户ID列表)
     """
     # L1: 使用 quick_search 拉取近期历史
     l1_results = await quick_search(message_id=message_id, limit=limit)
 
     if not l1_results:
         logger.warning(f"No results found for message_id: {message_id}")
-        return [], [], "", "", "p2p", "", ""
+        return [], [], "", "", "p2p", "", "", []
 
     chat_type = l1_results[-1].chat_type or "p2p"  # 默认私聊
 
@@ -84,6 +84,12 @@ async def build_chat_context(
     # 提取群聊名称
     chat_name = l1_results[-1].chat_name or ""
 
+    # 提取回复链中所有用户ID（去重，排除 assistant）
+    chain_user_ids = list({
+        r.user_id for r in l1_results
+        if r.role != "assistant" and r.user_id
+    })
+
     return (
         messages,
         image_urls,
@@ -92,6 +98,7 @@ async def build_chat_context(
         chat_type,
         trigger_user_id,
         chat_name,
+        chain_user_ids,
     )
 
 
