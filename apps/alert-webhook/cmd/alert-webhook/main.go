@@ -181,8 +181,8 @@ func buildFeishuCard(alert Alert) map[string]interface{} {
 	}
 
 	title := fmt.Sprintf("[%s] %s", alertName, summary)
-	if len(title) > 80 {
-		title = title[:80]
+	if runes := []rune(title); len(runes) > 80 {
+		title = string(runes[:80])
 	}
 
 	return map[string]interface{}{
