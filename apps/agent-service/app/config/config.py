@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     you_search_host: str | None = None
     you_search_api_key: str | None = None
 
-    # Google Custom Search（via proxy）
-    google_search_host: str | None = None
+    # Google Custom Search
+    google_search_host: str | None = None  # 完整 endpoint URL
     google_search_api_key: str | None = None
     google_search_cx: str | None = None
 

@@ -58,18 +58,18 @@ async def _google_search(query: str, num: int) -> list[dict]:
     }
 
     async with httpx.AsyncClient(timeout=15) as client:
-        url = f"{settings.google_search_host}/gpt/openapi/online/v2/crawl/google/custom_search"
-        response = await client.get(url, params=params)
+        response = await client.get(settings.google_search_host, params=params)
         response.raise_for_status()
         data = response.json()
 
     return [
         {
-            "link": r.get("link", ""),
-            "title": r.get("title", ""),
-            "snippet": r.get("snippet", ""),
+            "link": item.get("link", ""),
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "displayLink": item.get("displayLink", ""),
         }
-        for r in data.get("items", [])
+        for item in data.get("items", [])
     ]
 
 
