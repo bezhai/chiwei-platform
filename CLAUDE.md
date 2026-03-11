@@ -90,9 +90,11 @@ make latest-build APP=<app>                # 最近成功构建
 
 ### 基础设施
 
+- **禁止使用 kubectl 修改线上资源（Secret、Deployment、ConfigMap 等）。** 所有配置变更必须通过 PaaS API 进行。kubectl 仅允许只读操作（get、logs、describe）用于排查问题。
 - **用户说怎么做就怎么做，不要自作主张换方案。**
 - **$PAAS_API 前面有反向代理，支持 x-lane 路由。** 测试用 `$PAAS_API` + `x-lane` header，不需要 port-forward。
 - **不要在没有充分验证的情况下否定用户的方案。**
+- **同一操作失败两次，必须停下来分析根因或问用户，禁止暴力重试。**
 
 ## 环境配置
 
