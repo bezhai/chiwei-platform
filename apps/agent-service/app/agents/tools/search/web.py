@@ -9,6 +9,7 @@ from langchain.tools import tool
 from prometheus_client import Counter, Histogram
 
 from app.agents.tools.search.reader import read_webpage
+from app.agents.tools.search.reranker import rerank_chunks
 from app.config import settings
 from app.utils.decorators import dict_serialize, log_io
 
@@ -23,6 +24,12 @@ YOU_SEARCH_DURATION = Histogram(
     "you_search_duration_seconds",
     "You Search API request duration in seconds",
 )
+RERANK_DURATION = Histogram(
+    "search_rerank_duration_seconds",
+    "Search rerank (chunk embedding) duration in seconds",
+)
+
+PAGE_MAX_CHARS = 16000
 
 
 async def _fetch_content(result: dict) -> dict:
@@ -33,7 +40,7 @@ async def _fetch_content(result: dict) -> dict:
 
     try:
         content = await read_webpage(link)
-        result["content"] = content
+        result["content"] = content[:PAGE_MAX_CHARS]
     except Exception:
         # 抓取失败时降级到 snippet
         result["content"] = result.get("snippet", "")
@@ -117,4 +124,14 @@ async def search_web(
     tasks = [_fetch_content(result) for result in organic_results]
     results = await asyncio.gather(*tasks)
 
-    return list(results)
+    # 切片级 embedding 重排
+    rerank_start = time.monotonic()
+    try:
+        ranked = await rerank_chunks(query, list(results))
+    except Exception:
+        logger.exception("rerank_chunks failed in search_web")
+        ranked = list(results)
+    finally:
+        RERANK_DURATION.observe(time.monotonic() - rerank_start)
+
+    return ranked
