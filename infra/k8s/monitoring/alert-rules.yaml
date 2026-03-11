@@ -236,13 +236,23 @@ spec:
 
         # RabbitMQ - 已知业务队列 consumer 断开
         - alert: RabbitmqConsumerDown
-          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize).*"} == 0
+          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize|chat_response).*"} == 0
           for: 1m
           labels:
             severity: critical
           annotations:
             summary: "RabbitMQ 业务队列 {{ $labels.queue }} consumer 断开"
             description: "关键业务队列 {{ $labels.queue }} 的 consumer 已断开超过 1 分钟。"
+
+        # chat_response 队列积压超过 20s（10s 是泳道 fallback TTL，20s 说明 prod consumer 也没在消费）
+        - alert: ChatResponseQueueBacklog
+          expr: rabbitmq_queue_messages_ready{namespace="prod", queue="chat_response"} > 0
+          for: 20s
+          labels:
+            severity: critical
+          annotations:
+            summary: "chat_response 队列积压超过 20s"
+            description: "chat_response 队列有 {{ $value }} 条消息积压超过 20 秒，consumer 可能已崩溃或断连。"
 
     # --- Phase 4: 健康探针告警 ---
     - name: probe-alerts

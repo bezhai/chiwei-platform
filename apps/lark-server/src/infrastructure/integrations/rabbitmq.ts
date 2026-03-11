@@ -179,11 +179,19 @@ class RabbitMQClient {
     }
 
     ack(msg: ConsumeMessage): void {
-        this.getChannel().ack(msg);
+        try {
+            this.getChannel().ack(msg);
+        } catch (e) {
+            console.warn('[RabbitMQ] ack failed (channel likely closed):', (e as Error).message);
+        }
     }
 
     nack(msg: ConsumeMessage, requeue = false): void {
-        this.getChannel().nack(msg, false, requeue);
+        try {
+            this.getChannel().nack(msg, false, requeue);
+        } catch (e) {
+            console.warn('[RabbitMQ] nack failed (channel likely closed):', (e as Error).message);
+        }
     }
 
     getChannel(): Channel {
