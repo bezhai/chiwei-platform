@@ -15,6 +15,13 @@ loki:
         index:
           prefix: loki_index_
           period: 24h
+  rulerConfig:
+    alertmanager_url: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+    storage:
+      type: local
+      local:
+        directory: /var/loki/rules
+    enable_api: true
 
 singleBinary:
   replicas: 1
@@ -24,6 +31,14 @@ singleBinary:
     enabled: true
     storageClass: ""
     size: 10Gi
+  extraVolumes:
+    - name: loki-alert-rules
+      configMap:
+        name: loki-alert-rules
+  extraVolumeMounts:
+    - name: loki-alert-rules
+      mountPath: /var/loki/rules/fake
+      readOnly: true
 
 # Disable all scalable components
 backend:
