@@ -63,6 +63,21 @@ func (r *BuildRepo) FindLatestSuccessful(ctx context.Context, imageRepoName stri
 	return modelToBuild(&m), nil
 }
 
+func (r *BuildRepo) FindByImageTag(ctx context.Context, imageTag string) (*domain.Build, error) {
+	var m BuildModel
+	result := r.db.WithContext(ctx).
+		Where("image_tag = ?", imageTag).
+		Order("created_at desc").
+		First(&m)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, domain.ErrBuildNotFound
+		}
+		return nil, result.Error
+	}
+	return modelToBuild(&m), nil
+}
+
 func (r *BuildRepo) Update(ctx context.Context, build *domain.Build) error {
 	m := buildToModel(build)
 	return r.db.WithContext(ctx).Save(m).Error

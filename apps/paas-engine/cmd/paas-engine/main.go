@@ -64,7 +64,7 @@ func main() {
 	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo)
 	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
-	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, releaseRepo, deployer)
+	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 
 	// 启动 Build Informer
