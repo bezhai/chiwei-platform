@@ -62,6 +62,8 @@ async def _google_search(query: str, num: int) -> list[dict]:
         response.raise_for_status()
         data = response.json()
 
+    items = data.get("items", [])
+    logger.info("Google Custom Search returned %d items", len(items))
     return [
         {
             "link": item.get("link", ""),
@@ -69,7 +71,7 @@ async def _google_search(query: str, num: int) -> list[dict]:
             "snippet": item.get("snippet", ""),
             "displayLink": item.get("displayLink", ""),
         }
-        for item in data.get("items", [])
+        for item in items
     ]
 
 
@@ -90,6 +92,7 @@ async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
         data = response.json()
 
     web_results = data.get("results", {}).get("web", [])
+    logger.info("You Search returned %d results", len(web_results))
     return [
         {
             "link": r.get("url", ""),
