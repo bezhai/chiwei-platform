@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str | None = None
 
+    # SiliconFlow（rerank 模型）
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_api_key: str | None = None
+
     # 正向代理（供 Google 等需要代理的供应商使用）
     forward_proxy_url: str | None = None
 
