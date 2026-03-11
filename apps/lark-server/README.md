@@ -81,7 +81,7 @@ sequenceDiagram
 
 ## 配置
 
-请将仓库根目录的 .env.example 复制为 .env 并按需填写。关键项：
+PaaS 相关变量（PAAS_API, PAAS_TOKEN）已通过 shell 环境加载（见 ~/.zshrc）。其他关键项：
 - 数据库：POSTGRES_* / MONGO_* / REDIS_*
 - AI 服务：AI_SERVER_HOST / AI_SERVER_PORT
 - 代理/日志：PROXY_* / LOG_LEVEL 等

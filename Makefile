@@ -1,8 +1,5 @@
 .PHONY: deploy self-deploy release undeploy status latest-build lane-bind lane-unbind lane-bindings
 
-# 从 .env 加载配置（PAAS_API, PAAS_TOKEN, REGISTRY 等）
--include .env
-
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
 # TAG        — 镜像 tag，默认 git short hash
