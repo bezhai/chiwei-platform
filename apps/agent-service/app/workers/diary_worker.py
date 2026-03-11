@@ -204,7 +204,15 @@ async def post_process_impressions(
         diary_content: 刚生成的日记内容
         user_names: user_id → 用户名 映射
     """
-    # 1. 查已有印象
+    # 1. 过滤出日记中提到的用户（减少噪音，提升 LLM 匹配准确率）
+    relevant_users = {
+        uid: name for uid, name in user_names.items() if name in diary_content
+    }
+    if not relevant_users:
+        logger.info(f"No users mentioned in diary for {chat_id}, skip impression")
+        return
+
+    # 2. 查已有印象
     existing = await get_all_impressions_for_chat(chat_id)
     if existing:
         existing_text = "\n".join(
@@ -215,12 +223,12 @@ async def post_process_impressions(
     else:
         existing_text = "（暂无）"
 
-    # 2. 格式化 user_mapping
+    # 3. 格式化 user_mapping（只包含日记中提到的人）
     user_mapping_text = "\n".join(
-        f"- {uid} → {name}" for uid, name in user_names.items()
+        f"- {uid} → {name}" for uid, name in relevant_users.items()
     )
 
-    # 3. 获取 Langfuse prompt 并编译
+    # 4. 获取 Langfuse prompt 并编译
     prompt_template = get_prompt("diary_extract_impressions")
     compiled_prompt = prompt_template.compile(
         diary=diary_content,
@@ -228,7 +236,7 @@ async def post_process_impressions(
         user_mapping=user_mapping_text,
     )
 
-    # 4. 调用 LLM
+    # 5. 调用 LLM
     model = await ModelBuilder.build_chat_model(settings.diary_model)
     response = await model.ainvoke(
         [{"role": "user", "content": compiled_prompt}],
@@ -241,7 +249,7 @@ async def post_process_impressions(
             for part in raw
         )
 
-    # 5. 解析 JSON
+    # 6. 解析 JSON
     # 去掉可能的 markdown 代码块包裹
     raw = raw.strip()
     if raw.startswith("```"):
@@ -255,7 +263,7 @@ async def post_process_impressions(
         logger.warning(f"Impression extraction returned non-list: {type(impressions)}")
         return
 
-    # 6. Upsert 每条印象
+    # 7. Upsert 每条印象
     count = 0
     for item in impressions:
         uid = item.get("user_id")
