@@ -15,12 +15,21 @@ define require_app
 	$(if $(APP),,$(error APP 未指定。用法: make $@ APP=<应用名>))
 endef
 
+define require_main_for_prod
+	@if [ "$(LANE)" = "prod" ] && [ "$(GIT_REF)" != "main" ]; then \
+		echo ">>> 错误: 禁止将非 main 分支 ($(GIT_REF)) 部署到 prod 泳道"; \
+		echo ">>>   请先合并到 main，或指定 LANE=<泳道名> 部署到非 prod 泳道"; \
+		exit 1; \
+	fi
+endef
+
 # ---------- 命令 ----------
 
 ## 一键部署：构建 → 等待 → 发布到指定泳道
 ## 用法: make deploy APP=my-service [LANE=dev]
 deploy:
 	@$(call require_app)
+	$(call require_main_for_prod)
 	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG) -> $(LANE)"
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
@@ -50,6 +59,7 @@ deploy:
 ## paas-engine 蓝绿自部署：构建 → 等待 → prod → blue
 ## 用法: make self-deploy
 self-deploy:
+	$(call require_main_for_prod)
 	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \

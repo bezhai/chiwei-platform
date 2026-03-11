@@ -16,6 +16,7 @@ import (
 type ReleaseService struct {
 	appRepo       port.AppRepository
 	imageRepoRepo port.ImageRepoRepository
+	buildRepo     port.BuildRepository
 	releaseRepo   port.ReleaseRepository
 	deployer      port.Deployer
 }
@@ -23,12 +24,14 @@ type ReleaseService struct {
 func NewReleaseService(
 	appRepo port.AppRepository,
 	imageRepoRepo port.ImageRepoRepository,
+	buildRepo port.BuildRepository,
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
 ) *ReleaseService {
 	return &ReleaseService{
 		appRepo:       appRepo,
 		imageRepoRepo: imageRepoRepo,
+		buildRepo:     buildRepo,
 		releaseRepo:   releaseRepo,
 		deployer:      deployer,
 	}
@@ -62,6 +65,15 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	lane := req.Lane
 	if lane == "" {
 		lane = domain.DefaultLane
+	}
+
+	// prod 泳道只允许 main 分支构建的镜像
+	if lane == domain.DefaultLane && fullImage != "" {
+		build, err := s.buildRepo.FindByImageTag(ctx, fullImage)
+		if err == nil && build.GitRef != "main" {
+			return nil, fmt.Errorf("%w (got %q)", domain.ErrNonMainProdDeploy, build.GitRef)
+		}
+		// build not found → 外部镜像，放行
 	}
 
 	if req.Replicas <= 0 {
