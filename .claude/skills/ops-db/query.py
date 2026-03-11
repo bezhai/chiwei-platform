@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe read-only query against PaaS Engine PostgreSQL."""
+"""Safe read-only query against PostgreSQL databases."""
 
 import json
 import re
@@ -16,6 +16,13 @@ SCHEMA_SQL = (
     "SELECT table_name FROM information_schema.tables "
     "WHERE table_schema='public' ORDER BY table_name"
 )
+
+DB_ALIASES = {
+    "paas-engine": "paas_engine",
+    "paas_engine": "paas_engine",
+    "chiwei": "chiwei",
+}
+DEFAULT_DB = "paas_engine"
 
 
 def get_secret_value(key: str) -> str:
@@ -38,10 +45,25 @@ def get_endpoint_ip() -> str:
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: query.py <SQL | schema>", file=sys.stderr)
+        print("用法: query.py [@数据库] <SQL | schema>", file=sys.stderr)
+        print(f"可用数据库: {', '.join(sorted(set(DB_ALIASES.values())))}", file=sys.stderr)
         sys.exit(1)
 
-    sql = " ".join(sys.argv[1:]).strip()
+    args = sys.argv[1:]
+    dbname = DEFAULT_DB
+
+    # Parse @db prefix
+    if args[0].startswith("@"):
+        alias = args.pop(0)[1:]
+        if alias not in DB_ALIASES:
+            print(f"ERROR: 未知数据库 '{alias}'，可用: {', '.join(sorted(set(DB_ALIASES.values())))}", file=sys.stderr)
+            sys.exit(1)
+        dbname = DB_ALIASES[alias]
+        if not args:
+            print("ERROR: 缺少 SQL 查询", file=sys.stderr)
+            sys.exit(1)
+
+    sql = " ".join(args).strip()
     if sql.lower() == "schema":
         sql = SCHEMA_SQL
 
@@ -61,7 +83,7 @@ def main():
         port=parsed.port or 5432,
         user=parsed.username,
         password=parsed.password,
-        dbname=parsed.path.lstrip("/"),
+        dbname=dbname,
     )
     conn.set_session(readonly=True)
 

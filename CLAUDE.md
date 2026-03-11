@@ -2,7 +2,7 @@
 
 ## 宪法级文档（禁止修改）
 
-**`MANIFESTO.md`（赤尾宣言）是本项目的宪法。未经 bezhai 明确许可，任何人和任何 AI 不得修改此文件。** 如需修改，必须在对话中明确提出并获得批准。
+**`MANIFESTO.md`（赤尾宣言）是本项目的宪法。未经 bezhai 明确许可，任何人和任何 AI 不得修改此文件。**
 
 ---
 
@@ -16,111 +16,85 @@ apps/
   lite-registry/  # 泳道注册表 (Go) - Watch K8s Services，提供泳道路由数据
 ```
 
-## 通用规范
+## 核心数据流
 
-- 镜像 tag: git short hash（如 `fd8ebe9`）
-- 镜像仓库、代理、registry 等敏感配置通过环境变量和 K8s Secret 管理，不写入代码
+### 飞书消息处理
 
-## PaaS Engine
-
-### 架构
-
-- Go 1.25, chi 路由 + GORM ORM + PostgreSQL
-- 蓝绿双泳道（blue/prod），互相部署对方
-- Kaniko 构建 Job 在 `paas-builds` namespace
-- 认证: `X-API-Key` header
-
-### 核心概念
-
-| 概念 | 说明 |
-|---|---|
-| **ImageRepo** | 镜像构建配置（registry 地址、git 仓库、Dockerfile 路径等），多个 App 可共享同一个 ImageRepo |
-| **App** | 运行配置（关联 ImageRepo、端口、命令、环境变量等），port=0 表示 Worker（不暴露端口） |
-| **Build** | 一次镜像构建（Kaniko Job），挂在 ImageRepo 下 |
-| **Release** | 将某个镜像 tag 部署到某个泳道，生成 K8s Deployment + Service |
-
-关系：`ImageRepo（构建配置）→ Build（构建镜像）`，`App（运行配置）→ Release（部署到泳道）`，App 通过 `image_repo` 字段关联 ImageRepo。
-
-### 开发
-
-```bash
-cd apps/paas-engine
-make build    # 编译
-make test     # 测试
-make lint     # go vet
+```
+飞书 → lark-proxy:3003 (webhook 入口, 查 lane_routing 决定路由)
+     → lark-server:3000 (消息处理, 注入 x-lane 到 context)
+     → agent-service:8000 (AI 对话, 工具调用)
+     → RabbitMQ: safety_check → vectorize → recall 队列
+     → chat-response-worker → lark-server → 飞书回复
 ```
 
-### 部署（根目录 Makefile）
+未部署泳道的服务自动 fallback 到 prod（基于 K8s Service DNS，不依赖 Istio）。
 
-通用命令通过 `APP=` 参数指定应用，适用于任意服务。
+### 部署链路
 
-```bash
-# 一键部署：构建 → 等待 → 发布到指定泳道（默认 prod）
-make deploy APP=my-service [LANE=dev]
-
-# paas-engine 蓝绿自部署（构建 → 等待 → prod → blue）
-make self-deploy
-
-# 仅发布（不构建），用于切换泳道/回滚
-make release APP=<app> LANE=prod [TAG=zzz]
-
-# 按 app+lane 删除 Release
-make undeploy APP=<app> LANE=dev
-
-# 查看状态（不传 APP 看全部）
-make status [APP=xxx]
-
-# 查看最近成功构建
-make latest-build APP=<app>
+```
+PaaS Engine API
+  → 构建: Kaniko Job (paas-builds ns) → Harbor Registry
+  → 发布: K8s Deployment + Service (prod ns)
 ```
 
-### 关键路径
-
-| 层 | 路径 |
-|---|---|
-| 入口 | `apps/paas-engine/cmd/paas-engine/main.go` |
-| HTTP 路由 | `apps/paas-engine/internal/adapter/http/router.go` |
-| 领域模型 | `apps/paas-engine/internal/domain/` |
-| K8s 适配器 | `apps/paas-engine/internal/adapter/kubernetes/` |
-| 配置 | `apps/paas-engine/internal/config/config.go` |
-
-### 环境变量
-
-| 变量 | 说明 | 存储位置 |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL 连接串 | Secret `paas-engine-secret` |
-| `API_TOKEN` | API 认证 token | Secret `paas-engine-secret` |
-| `DEPLOY_NAMESPACE` | 部署 namespace | App envs |
-| `KANIKO_IMAGE` | Kaniko 镜像 | App envs |
-| `KANIKO_CACHE_REPO` | Kaniko 远程层缓存 repo（空则禁用缓存） | App envs |
-| `BUILD_HTTP_PROXY` | 构建 Pod 代理 | App envs |
-| `REGISTRY_MIRRORS` | Docker Hub 镜像源 | App envs |
-| `INSECURE_REGISTRIES` | 不安全 registry | App envs |
-
-### K8s 资源
-
-| 资源 | Namespace | 说明 |
-|---|---|---|
-| SA `deploy-api` | prod | paas-engine 的 ServiceAccount |
-| ClusterRole `deploy-api` | - | deployments, services, jobs, secrets |
-| Secret `paas-engine-secret` | prod | DATABASE_URL, API_TOKEN |
-| Secret `harbor-secret` | prod, paas-builds | Harbor registry 凭证 |
-
-### API
-
-API 端点详见 `apps/paas-engine/internal/adapter/http/router.go`
+蓝绿部署：prod 和 blue 泳道互相部署对方。
 
 ### 泳道路由
 
-泳道路由基于 K8s Service DNS，不依赖 Istio。核心组件：
+```
+请求 → 反向代理 ($PAAS_API, 支持 x-lane header)
+     → lite-registry (Watch K8s Services, 聚合 service → {lanes, port})
+     → LaneRouter SDK (拼接 {app}-{lane}:port, 不存在则 fallback {app}:port)
+```
 
-- **Lite-Registry**（`apps/lite-registry/`）：Watch K8s Services，聚合 `service → {lanes, port}` 映射，API: `GET /v1/routes`
-- **LaneRouter SDK**（`packages/ts-shared/`, `packages/py-shared/`）：轮询 Lite-Registry，根据 `x-lane` header 拼接 `{app}-{lane}:port`，泳道不存在时 fallback 到 `{app}:port`（prod）
+SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 
-详见 [docs/archive/lane-routing.md](docs/archive/lane-routing.md)。
+## 通用规范
 
-### 注意事项
+- 镜像 tag: git short hash（如 `fd8ebe9`）
+- 敏感配置通过环境变量和 K8s Secret 管理，不写入代码
 
-- kaniko git context 必须用 `git://` 前缀，不能用 `https://`
-- git ref 支持分支名、tag（`v*` 开头）、commit hash
-- paas-engine 的 Makefile（`apps/paas-engine/Makefile`）仅用于开发编译测试
+## 开发流程
+
+**禁止直接在 main 分支上修改代码。** 每次需求变更：
+
+1. 从 main 切分支（可用 `/worktree` skill）
+2. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
+3. 部署独立泳道（如 `feat-alert-v2`），不直接用 `dev`
+4. 飞书测试必须绑定 dev bot: `make lane-bind TYPE=bot KEY=dev LANE=<lane>`
+5. 验收后解绑 + 下泳道: `make lane-unbind TYPE=bot KEY=dev` → `make undeploy APP=<app> LANE=<lane>`
+6. `ghc pr merge --squash` 合并到 main
+7. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
+
+## 部署命令
+
+```bash
+make deploy APP=<app> [LANE=dev]          # 构建 → 等待 → 发布
+make self-deploy                           # paas-engine 蓝绿自部署
+make release APP=<app> LANE=prod [TAG=x]   # 仅发布（不构建）
+make undeploy APP=<app> LANE=dev           # 删除 Release
+make status [APP=xxx]                      # 查看状态
+make latest-build APP=<app>                # 最近成功构建
+```
+
+## AI 行为约束
+
+### 生产环境操作
+
+- **写操作（PUT/POST/DELETE）影响线上前，必须先告知用户并等确认。** GET 随便做。
+- **不熟悉的 API，先确认语义。** PUT 是 partial 还是 full replace？先问。
+- **遇到不理解的现象，问用户而不是猜测然后改线上。**
+- **出事故时聚焦用户关心的点，不要撒网式检查。**
+- **e2e 测试禁止直接改线上真实资源。**
+
+### 基础设施
+
+- **用户说怎么做就怎么做，不要自作主张换方案。**
+- **$PAAS_API 前面有反向代理，支持 x-lane 路由。** 测试用 `$PAAS_API` + `x-lane` header，不需要 port-forward。
+- **不要在没有充分验证的情况下否定用户的方案。**
+
+## 环境配置
+
+- **GitHub CLI**: 必须用 `ghc` 而不是 `gh`（`/usr/local/bin/gh` 是公司内部工具）
+- **PaaS API PUT /apps/{app}/**: merge 语义，无需带完整字段
