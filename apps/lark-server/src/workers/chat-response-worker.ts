@@ -59,7 +59,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
-    const payload: ChatResponsePayload = JSON.parse(msg.content.toString());
+    let payload: ChatResponsePayload;
+    try {
+        payload = JSON.parse(msg.content.toString());
+    } catch (e) {
+        console.error('[ChatResponseWorker] Malformed message, sending to DLQ:', msg.content.toString().slice(0, 200));
+        rabbitmqClient.nack(msg, false);
+        return;
+    }
+
     const {
         session_id,
         message_id,
@@ -82,9 +90,14 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
     // 查询 agent_response 获取 bot_name
     const agentResponse = await repo.findOneBy({ session_id });
-    const botName = agentResponse?.bot_name;
+    if (!agentResponse) {
+        console.error(`[ChatResponseWorker] No agent_response found: session_id=${session_id}`);
+        rabbitmqClient.ack(msg);
+        return;
+    }
+    const botName = agentResponse.bot_name;
 
-    // 设置 bot context
+    // 设置 bot context — ack 统一在 context.run 之后，callback 内部禁止 ack/nack
     const contextData = context.createContext(botName || undefined, undefined, payload.lane);
 
     await context.run(contextData, async () => {
@@ -93,7 +106,6 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 `[ChatResponseWorker] Agent failed: session_id=${session_id}, error=${error}`,
             );
             await repo.update({ session_id }, { status: 'failed' });
-            rabbitmqClient.ack(msg);
             return;
         }
 
@@ -102,7 +114,6 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             if (is_last) {
                 await repo.update({ session_id }, { status: 'completed' });
             }
-            rabbitmqClient.ack(msg);
             return;
         }
 
@@ -141,21 +152,22 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 reply_message_id: message_id,
             });
 
-            // 每条消息追加到 agent_responses.replies jsonb 数组
-            const replyEntry = JSON.stringify([
+            // 每条消息追加到 agent_responses.replies jsonb 数组（参数化）
+            const replyEntry = [
                 {
                     message_id: effectiveMessageId,
                     content_type: 'post',
                     sent_at: new Date().toISOString(),
                 },
-            ]);
+            ];
             await repo
                 .createQueryBuilder()
                 .update(AgentResponse)
                 .set({
                     replies: () =>
-                        `COALESCE(replies, '[]'::jsonb) || '${replyEntry}'::jsonb`,
+                        `COALESCE(replies, '[]'::jsonb) || :replyEntry::jsonb`,
                 })
+                .setParameter('replyEntry', JSON.stringify(replyEntry))
                 .where('session_id = :sid', { sid: session_id })
                 .execute();
 
@@ -173,7 +185,11 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}, part=${part_index}, ai_msg_id=${effectiveMessageId}`);
         } catch (e) {
             console.error(`[ChatResponseWorker] Failed to send reply: session_id=${session_id}, part=${part_index}`, e);
-            await repo.update({ session_id }, { status: 'failed' });
+            try {
+                await repo.update({ session_id }, { status: 'failed' });
+            } catch (dbErr) {
+                console.error(`[ChatResponseWorker] DB update also failed: session_id=${session_id}`, dbErr);
+            }
         }
     });
 
