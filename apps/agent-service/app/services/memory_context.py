@@ -7,13 +7,35 @@ import logging
 from collections import defaultdict
 from datetime import date
 
-from app.orm.crud import get_recent_diaries, get_user_knowledge
+from app.orm.crud import (
+    get_impressions_for_users,
+    get_recent_diaries,
+    get_user_knowledge,
+    get_username,
+)
 from app.orm.models import UserKnowledge
 
 logger = logging.getLogger(__name__)
 
 # 日记注入硬上限：约 2 篇日记
 MAX_DIARY_CHARS = 1500
+
+
+MAX_IMPRESSION_USERS = 10
+
+
+async def build_impression_context(chat_id: str, user_ids: list[str]) -> str:
+    """构建人物印象文本，注入群聊 system prompt"""
+    if not user_ids:
+        return ""
+    impressions = await get_impressions_for_users(chat_id, user_ids[:MAX_IMPRESSION_USERS])
+    if not impressions:
+        return ""
+    lines = []
+    for imp in impressions:
+        name = await get_username(imp.user_id) or imp.user_id[:8]
+        lines.append(f"【{name}】{imp.impression_text}")
+    return "你对群友的印象：\n" + "\n".join(lines)
 
 
 async def build_diary_context(chat_id: str) -> str:

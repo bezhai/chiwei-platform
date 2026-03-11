@@ -19,7 +19,7 @@ from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import Complexity, run_pre
 from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_diary_context
+from app.services.memory_context import build_diary_context, build_impression_context
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,7 @@ async def _build_and_stream(
         chat_type,
         trigger_user_id,
         chat_name,
+        chain_user_ids,
     ) = await build_chat_context(message_id)
 
     if not messages:
@@ -271,15 +272,24 @@ async def _build_and_stream(
                 f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
             )
 
-    # 群聊注入日记记忆
+    # 群聊注入日记记忆 + 人物印象
     if chat_type != "p2p":
         try:
             diary_text = await build_diary_context(chat_id)
             if diary_text:
-                context_lines.append("你最近的日记：")
+                context_lines.append("\n---\n你最近的日记：")
                 context_lines.append(diary_text)
         except Exception as e:
             logger.error(f"Failed to build diary context: {e}")
+
+        try:
+            impression_text = await build_impression_context(
+                chat_id, chain_user_ids
+            )
+            if impression_text:
+                context_lines.append("\n---\n" + impression_text)
+        except Exception as e:
+            logger.error(f"Failed to build impression context: {e}")
 
     prompt_vars["user_context"] = "\n".join(context_lines)
 
