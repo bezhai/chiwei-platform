@@ -79,7 +79,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         status,
         error,
         part_index = 0,
-        is_last = true,
+        is_last = false,
     } = payload;
 
     console.info(
