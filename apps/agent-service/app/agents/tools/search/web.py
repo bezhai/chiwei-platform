@@ -15,18 +15,18 @@ from app.utils.decorators import dict_serialize, log_io
 
 logger = logging.getLogger(__name__)
 
-YOU_SEARCH_REQUESTS_TOTAL = Counter(
-    "you_search_requests_total",
-    "Total You Search API requests",
+WEB_SEARCH_REQUESTS_TOTAL = Counter(
+    "web_search_requests_total",
+    "Total web search API requests",
     ["status"],
 )
-YOU_SEARCH_DURATION = Histogram(
-    "you_search_duration_seconds",
-    "You Search API request duration in seconds",
+WEB_SEARCH_DURATION = Histogram(
+    "web_search_duration_seconds",
+    "Web search API request duration in seconds",
 )
 RERANK_DURATION = Histogram(
     "search_rerank_duration_seconds",
-    "Search rerank (chunk embedding) duration in seconds",
+    "Search rerank duration in seconds",
 )
 
 PAGE_MAX_CHARS = 16000
@@ -46,6 +46,58 @@ async def _fetch_content(result: dict) -> dict:
         result["content"] = result.get("snippet", "")
 
     return result
+
+
+async def _google_search(query: str, num: int) -> list[dict]:
+    """通过 Google Custom Search 代理搜索。"""
+    params = {
+        "q": query,
+        "ak": settings.google_search_api_key,
+        "cx": settings.google_search_cx,
+        "num": num,
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        url = f"{settings.google_search_host}/gpt/openapi/online/v2/crawl/google/custom_search"
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+    return [
+        {
+            "link": r.get("link", ""),
+            "title": r.get("title", ""),
+            "snippet": r.get("snippet", ""),
+        }
+        for r in data.get("items", [])
+    ]
+
+
+async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
+    """通过 You Search API 搜索（fallback）。"""
+    params: dict[str, str | int] = {
+        "query": query,
+        "count": num,
+        "country": gl,
+        "language": hl,
+    }
+    headers = {"X-API-Key": settings.you_search_api_key or ""}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        url = f"{settings.you_search_host}/v1/search"
+        response = await client.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    web_results = data.get("results", {}).get("web", [])
+    return [
+        {
+            "link": r.get("url", ""),
+            "title": r.get("title", ""),
+            "snippet": r.get("description", ""),
+        }
+        for r in web_results
+    ]
 
 
 @tool
@@ -68,30 +120,17 @@ async def search_web(
     Returns:
         搜索结果列表，每个结果包含 title, link, snippet, content。
     """
-    if not settings.you_search_host or not settings.you_search_api_key:
-        logger.error("You Search not configured")
-        return []
-
-    url = f"{settings.you_search_host}/v1/search"
-
-    params: dict[str, str | int] = {
-        "query": query,
-        "count": num,
-        "country": gl,
-        "language": hl,
-    }
-
-    headers = {
-        "X-API-Key": settings.you_search_api_key,
-    }
-
     start = time.monotonic()
     status = "error"
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url, params=params, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        # 优先 Google Custom Search，fallback You Search
+        if settings.google_search_host and settings.google_search_api_key:
+            organic_results = await _google_search(query, num)
+        elif settings.you_search_host and settings.you_search_api_key:
+            organic_results = await _you_search(query, num, gl, hl)
+        else:
+            logger.error("No search provider configured")
+            return []
         status = "ok"
     except httpx.TimeoutException:
         status = "timeout"
@@ -106,25 +145,14 @@ async def search_web(
         return []
     finally:
         duration = time.monotonic() - start
-        YOU_SEARCH_REQUESTS_TOTAL.labels(status=status).inc()
-        YOU_SEARCH_DURATION.observe(duration)
-
-    # 转换响应结构
-    web_results = data.get("results", {}).get("web", [])
-    organic_results = [
-        {
-            "link": r.get("url", ""),
-            "title": r.get("title", ""),
-            "snippet": r.get("description", ""),
-        }
-        for r in web_results
-    ]
+        WEB_SEARCH_REQUESTS_TOTAL.labels(status=status).inc()
+        WEB_SEARCH_DURATION.observe(duration)
 
     # 并发抓取每个结果的网页内容
     tasks = [_fetch_content(result) for result in organic_results]
     results = await asyncio.gather(*tasks)
 
-    # 切片级 embedding 重排
+    # 切片级 rerank 重排
     rerank_start = time.monotonic()
     try:
         ranked = await rerank_chunks(query, list(results))

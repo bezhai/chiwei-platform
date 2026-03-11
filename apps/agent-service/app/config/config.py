@@ -17,9 +17,14 @@ class Settings(BaseSettings):
     qdrant_service_port: int = 6333
     qdrant_service_api_key: str | None = None
 
-    # You Search 配置
+    # You Search 配置（已弃用，保留兼容）
     you_search_host: str | None = None
     you_search_api_key: str | None = None
+
+    # Google Custom Search（via proxy）
+    google_search_host: str | None = None
+    google_search_api_key: str | None = None
+    google_search_cx: str | None = None
 
     bangumi_access_token: str | None = None
 
