@@ -1,23 +1,21 @@
-"""切片 + Embedding 重排模块
+"""切片 + Rerank 模型重排模块
 
-将搜索结果的网页内容切片，通过 embedding cosine similarity 跨页面重排，
+将搜索结果的网页内容切片，通过 cross-encoder rerank 模型跨页面重排，
 返回与 query 最相关的 top-K chunks。
 """
 
-import asyncio
 import logging
 
-import numpy as np
+import httpx
 
-from app.agents.clients import create_client
-from app.agents.infra.embedding import InstructionBuilder, Modality
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
 RESULT_TOP_K = 5
-MAX_CONCURRENT_EMBEDS = 10
+RERANK_MODEL = "Qwen/Qwen3-Reranker-4B"
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -64,11 +62,11 @@ async def rerank_chunks(
     results: list[dict],
     top_k: int = RESULT_TOP_K,
 ) -> list[dict]:
-    """对搜索结果做切片级 embedding 重排。
+    """对搜索结果做切片级 rerank 模型重排。
 
     1. 对每个 result 的 content 切片
-    2. 并发 embed query + 所有 chunks
-    3. cosine similarity 排序 → 取 top_k
+    2. 调用 SiliconFlow rerank API（cross-encoder）
+    3. 按 relevance_score 排序 → 取 top_k
     4. 异常时 fallback 到每页 content 的前 CHUNK_SIZE 字符
 
     Args:
@@ -79,6 +77,10 @@ async def rerank_chunks(
     Returns:
         [{title, link, content (=chunk), score}]
     """
+    if not settings.siliconflow_api_key:
+        logger.warning("SiliconFlow API key not configured, falling back to truncation")
+        return _fallback(results, top_k)
+
     # 构建所有 chunks
     all_chunks: list[dict] = []
     for r in results:
@@ -98,48 +100,34 @@ async def rerank_chunks(
         return _fallback(results, top_k)
 
     try:
-        # 构建 embedding instructions
-        query_instructions = InstructionBuilder.for_query(
-            target_modality=Modality.TEXT,
-            instruction="为这个搜索查询生成表示以用于检索相关网页内容片段",
-        )
-        corpus_instructions = InstructionBuilder.for_corpus(modality=Modality.TEXT)
+        documents = [c["chunk"] for c in all_chunks]
 
-        sem = asyncio.Semaphore(MAX_CONCURRENT_EMBEDS)
-
-        async def _embed(text: str, instructions: str) -> list[float]:
-            async with sem:
-                async with await create_client("embedding-model") as client:
-                    return await client.embed(text=text, instructions=instructions)
-
-        # 并发 embed query + 所有 chunks
-        tasks = [_embed(query, query_instructions)]
-        for c in all_chunks:
-            tasks.append(_embed(c["chunk"], corpus_instructions))
-
-        embeddings = await asyncio.gather(*tasks)
-
-        query_vec = np.array(embeddings[0])
-        chunk_vecs = np.array(embeddings[1:])
-
-        # cosine similarity
-        query_norm = np.linalg.norm(query_vec)
-        chunk_norms = np.linalg.norm(chunk_vecs, axis=1)
-        # 避免除零
-        chunk_norms = np.where(chunk_norms == 0, 1e-10, chunk_norms)
-        similarities = chunk_vecs @ query_vec / (chunk_norms * query_norm)
-
-        # 排序取 top_k
-        top_indices = np.argsort(similarities)[::-1][:top_k]
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{settings.siliconflow_base_url}/rerank",
+                headers={
+                    "Authorization": f"Bearer {settings.siliconflow_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": RERANK_MODEL,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": top_k,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
         ranked = []
-        for idx in top_indices:
+        for item in data.get("results", []):
+            idx = item["index"]
             c = all_chunks[idx]
             ranked.append({
                 "title": c["title"],
                 "link": c["link"],
                 "content": c["chunk"],
-                "score": float(similarities[idx]),
+                "score": item.get("relevance_score", 0),
             })
 
         return ranked
