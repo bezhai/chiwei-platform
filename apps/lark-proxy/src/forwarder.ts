@@ -29,7 +29,10 @@ export class EventForwarder {
     }
 
     private async doForward(eventType: string, botName: string, params: unknown): Promise<void> {
-        const lane = await this.laneResolver.resolve('bot', botName);
+        const chatId = this.extractChatId(params);
+        const lane =
+            (chatId ? await this.laneResolver.resolve('chat', chatId) : null) ??
+            (await this.laneResolver.resolve('bot', botName));
         const url = this.laneRouter.resolveUrl('lark-server', '/api/internal/lark-event', lane || 'prod');
         const traceId = randomUUID();
 
@@ -71,6 +74,23 @@ export class EventForwarder {
             this.forward(eventType, botName, params);
             return {};
         };
+    }
+
+    /**
+     * 从事件 params 中提取 chat_id（尽力而为）
+     */
+    private extractChatId(params: unknown): string | null {
+        if (!params || typeof params !== 'object') return null;
+        const p = params as Record<string, unknown>;
+        // im.message.receive_v1 等消息事件
+        const msg = p.message as Record<string, unknown> | undefined;
+        if (typeof msg?.chat_id === 'string') return msg.chat_id;
+        // 成员变更 / 群聊更新等事件
+        if (typeof p.chat_id === 'string') return p.chat_id;
+        // card.action.trigger
+        const ctx = p.context as Record<string, unknown> | undefined;
+        if (typeof ctx?.open_chat_id === 'string') return ctx.open_chat_id;
+        return null;
     }
 
     /**
