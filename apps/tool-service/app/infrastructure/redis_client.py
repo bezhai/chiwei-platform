@@ -17,7 +17,7 @@ async def init_redis() -> None:
         port=settings.redis_port,
         password=settings.redis_password,
         decode_responses=True,
-        max_connections=10,
+        max_connections=50,
     )
     _client = Redis(connection_pool=_pool)
     logger.info("Redis client initialized")
