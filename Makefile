@@ -7,8 +7,7 @@
 # LANE       — 部署泳道，默认 prod
 
 GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
-GIT_SHORT := $(shell git rev-parse --short HEAD)
-TAG      ?= $(GIT_SHORT)
+TAG      ?= $(shell git rev-parse --short $(GIT_REF))
 LANE     ?= prod
 
 define require_app
@@ -23,6 +22,29 @@ define require_main_for_prod
 	fi
 endef
 
+define require_pushed
+	@if git show-ref --verify --quiet refs/heads/$(GIT_REF) 2>/dev/null; then \
+		if ! git show-ref --verify --quiet refs/remotes/origin/$(GIT_REF) 2>/dev/null; then \
+			echo ">>> 错误: 分支 $(GIT_REF) 未推送到远端，请先 git push"; \
+			exit 1; \
+		fi; \
+		LOCAL_SHA=$$(git rev-parse refs/heads/$(GIT_REF)); \
+		REMOTE_SHA=$$(git rev-parse refs/remotes/origin/$(GIT_REF)); \
+		if [ "$$LOCAL_SHA" != "$$REMOTE_SHA" ]; then \
+			echo ">>> 错误: 分支 $(GIT_REF) 有未推送的 commit，请先 git push"; \
+			echo ">>>   本地: $$LOCAL_SHA"; \
+			echo ">>>   远端: $$REMOTE_SHA"; \
+			exit 1; \
+		fi; \
+		CURRENT_BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
+		if [ "$(GIT_REF)" = "$$CURRENT_BRANCH" ]; then \
+			if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet HEAD 2>/dev/null; then \
+				echo ">>> 警告: 工作区有未提交的改动，不会包含在构建中"; \
+			fi; \
+		fi; \
+	fi
+endef
+
 # ---------- 命令 ----------
 
 ## 一键部署：构建 → 等待 → 发布到指定泳道
@@ -30,6 +52,7 @@ endef
 deploy:
 	@$(call require_app)
 	$(call require_main_for_prod)
+	$(call require_pushed)
 	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG) -> $(LANE)"
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
@@ -60,6 +83,7 @@ deploy:
 ## 用法: make self-deploy
 self-deploy:
 	$(call require_main_for_prod)
+	$(call require_pushed)
 	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
 	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
