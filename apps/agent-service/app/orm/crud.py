@@ -11,6 +11,7 @@ from .models import (
     LarkUser,
     ModelMapping,
     ModelProvider,
+    PersonImpression,
     UserKnowledge,
 )
 
@@ -377,3 +378,55 @@ async def get_username(user_id: str) -> str | None:
             select(LarkUser.name).where(LarkUser.union_id == user_id)
         )
         return result.scalar_one_or_none()
+
+
+# ==================== PersonImpression CRUD ====================
+
+
+async def get_impressions_for_users(
+    chat_id: str, user_ids: list[str]
+) -> list[PersonImpression]:
+    """查询指定群中指定用户的印象"""
+    if not user_ids:
+        return []
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PersonImpression)
+            .where(PersonImpression.chat_id == chat_id)
+            .where(PersonImpression.user_id.in_(user_ids))
+        )
+        return list(result.scalars().all())
+
+
+async def get_all_impressions_for_chat(chat_id: str) -> list[PersonImpression]:
+    """查询指定群的所有已有印象"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PersonImpression).where(PersonImpression.chat_id == chat_id)
+        )
+        return list(result.scalars().all())
+
+
+async def upsert_person_impression(
+    chat_id: str, user_id: str, impression_text: str
+) -> None:
+    """插入或更新人物印象"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PersonImpression)
+            .where(PersonImpression.chat_id == chat_id)
+            .where(PersonImpression.user_id == user_id)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.impression_text = impression_text
+        else:
+            session.add(
+                PersonImpression(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    impression_text=impression_text,
+                )
+            )
+        await session.commit()
