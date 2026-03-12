@@ -42,7 +42,7 @@ export class DailyPhotoService {
      * 发新图给特定群聊
      * 每天 19:30 执行
      */
-    @Crontab('10 16 * * *', { taskName: 'daily-new-photo', botName: 'bytedance' })
+    @Crontab('30 19 * * *', { taskName: 'daily-new-photo', botName: 'bytedance' })
     async dailySendNewPhoto(): Promise<void> {
         try {
             const card = await searchAndBuildDailyPhotoCard(dayjs().add(-1, 'day').valueOf());
