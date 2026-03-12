@@ -1,15 +1,21 @@
 """Langfuse 集成
 
 惰性初始化单例客户端 + prompt 缓存（SDK 原生 cache_ttl_seconds）
+泳道支持：非 prod 泳道自动尝试 label=lane，失败 fallback production
 """
+
+import logging
 
 from langfuse import Langfuse
 
 from app.config import settings
+from app.utils.middlewares.trace import get_lane
 
 _client: Langfuse | None = None
 
-_PROMPT_CACHE_TTL_SECONDS: int = 300  # 5 分钟
+_PROMPT_CACHE_TTL_SECONDS: int = 60
+
+logger = logging.getLogger(__name__)
 
 
 def get_client() -> Langfuse:
@@ -29,13 +35,20 @@ def get_prompt(
     label: str | None = None,
     cache_ttl_seconds: int = _PROMPT_CACHE_TTL_SECONDS,
 ):
-    """获取 Langfuse prompt（带 SDK 原生缓存）
+    """获取 Langfuse prompt（带 SDK 原生缓存 + 泳道路由）
 
-    Args:
-        prompt_id: Prompt 标识
-        label: 可选标签（如 production/staging）
-        cache_ttl_seconds: 缓存 TTL 秒数，默认 300s（Langfuse SDK >=3.3.4 支持）
+    非 prod 泳道时先尝试 label=lane，找不到则 fallback production。
     """
+    lane = get_lane()
+    effective_label = label
+    if not effective_label and lane and lane != "prod":
+        try:
+            return get_client().get_prompt(
+                prompt_id, label=lane, cache_ttl_seconds=cache_ttl_seconds
+            )
+        except Exception:
+            logger.debug("prompt %s 无泳道 label=%s，fallback production", prompt_id, lane)
+
     return get_client().get_prompt(
-        prompt_id, label=label, cache_ttl_seconds=cache_ttl_seconds
+        prompt_id, label=effective_label, cache_ttl_seconds=cache_ttl_seconds
     )
