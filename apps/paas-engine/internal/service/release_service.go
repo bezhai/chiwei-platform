@@ -72,8 +72,8 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		build, err := s.buildRepo.FindByImageTag(ctx, fullImage)
 		if err == nil {
 			if build.Channel == domain.ChannelTest {
-				return nil, fmt.Errorf("测试版本 %s (channel=%s, git_ref=%s) 不允许部署到 prod 泳道",
-					build.Version, build.Channel, build.GitRef)
+				return nil, fmt.Errorf("%w: 测试版本 %s (channel=%s, git_ref=%s) 不允许部署到 prod 泳道",
+					domain.ErrInvalidInput, build.Version, build.Channel, build.GitRef)
 			}
 			// 向后兼容：旧 Build 无 channel，fallback 到检查 GitRef
 			if build.Channel == "" && build.GitRef != "main" {
