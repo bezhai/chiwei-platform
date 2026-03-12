@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator
-from langchain.messages import AIMessageChunk
+from langchain.messages import AIMessageChunk, ToolMessage
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
 
@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # 统一的拒绝响应
 GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
+
+# 分段标记（consumer 侧检测并拆分为多条消息）
+SPLIT_MARKER = "---split---"
 
 # 复杂度行为引导
 COMPLEXITY_HINTS = {
@@ -294,6 +297,7 @@ async def _build_and_stream(
     prompt_vars["user_context"] = "\n".join(context_lines)
 
     full_content = ""
+    has_text_in_current_turn = False
 
     try:
         async for token in agent.stream(
@@ -314,9 +318,19 @@ async def _build_and_stream(
                 if finish_reason == "length":
                     yield "(后续内容被截断)"
                     return
+
                 if token.text:
+                    has_text_in_current_turn = True
                     full_content += token.text
                     yield token.text
+
+                # text → tool call 边界，注入分隔符
+                if token.tool_call_chunks and has_text_in_current_turn:
+                    yield SPLIT_MARKER
+                    has_text_in_current_turn = False
+
+            elif isinstance(token, ToolMessage):
+                has_text_in_current_turn = False
 
         # Fire-and-forget: publish to post safety check queue
         if full_content and session_id:
