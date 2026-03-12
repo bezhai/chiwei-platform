@@ -39,6 +39,8 @@ type BuildModel struct {
 	ImageRepoName string `gorm:"index"`
 	GitRef        string
 	ImageTag      string
+	Version       string
+	Channel       string
 	Status        string
 	JobName       string
 	Log           string `gorm:"type:text"`

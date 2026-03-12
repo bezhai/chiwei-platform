@@ -2,12 +2,14 @@
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
-# TAG        — 镜像 tag，默认 git short hash
+# VERSION    — 显式指定版本号（可选）
+# BUMP       — 版本递进："major"/"minor"/"patch"/""（可选）
 # GIT_REF    — 构建分支/tag/commit，默认当前分支
 # LANE       — 部署泳道，默认 prod
 
 GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
-TAG      ?= $(shell git rev-parse --short $(GIT_REF))
+VERSION  ?=
+BUMP     ?=
 LANE     ?= prod
 
 define require_app
@@ -48,18 +50,19 @@ endef
 # ---------- 命令 ----------
 
 ## 一键部署：构建 → 等待 → 发布到指定泳道
-## 用法: make deploy APP=my-service [LANE=dev]
+## 用法: make deploy APP=my-service [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1]
 deploy:
 	@$(call require_app)
 	$(call require_main_for_prod)
 	$(call require_pushed)
-	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(TAG) -> $(LANE)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
+	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(LANE)"
+	@BUILD_RESP=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
-		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
-	echo ">>> 构建已触发: $$BUILD_ID" && \
+		-d '{"git_ref":"$(GIT_REF)","version":"$(VERSION)","bump":"$(BUMP)"}') && \
+	BUILD_ID=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
+	BUILD_VER=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['version'])") && \
+	echo ">>> 构建已触发: $$BUILD_ID (版本: $$BUILD_VER)" && \
 	while true; do \
 		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/$(APP)/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
@@ -71,26 +74,27 @@ deploy:
 		esac; \
 		sleep 5; \
 	done && \
-	echo ">>> 发布 $(APP) -> $(LANE), tag: $(TAG)" && \
+	echo ">>> 发布 $(APP) -> $(LANE), 版本: $$BUILD_VER" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(TAG)","replicas":1}' \
+		-d "{\"app_name\":\"$(APP)\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 部署完成"
 
 ## paas-engine 蓝绿自部署：构建 → 等待 → prod → blue
-## 用法: make self-deploy
+## 用法: make self-deploy [BUMP=minor]
 self-deploy:
 	$(call require_main_for_prod)
 	$(call require_pushed)
-	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> $(TAG)"
-	@BUILD_ID=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
+	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> prod+blue"
+	@BUILD_RESP=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"git_ref":"$(GIT_REF)","image_tag":"$(TAG)"}' \
-		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
-	echo ">>> 构建已触发: $$BUILD_ID" && \
+		-d '{"git_ref":"$(GIT_REF)","version":"$(VERSION)","bump":"$(BUMP)"}') && \
+	BUILD_ID=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
+	BUILD_VER=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['version'])") && \
+	echo ">>> 构建已触发: $$BUILD_ID (版本: $$BUILD_VER)" && \
 	while true; do \
 		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/paas-engine/builds/$$BUILD_ID/ \
 			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
@@ -102,31 +106,32 @@ self-deploy:
 		esac; \
 		sleep 5; \
 	done && \
-	echo ">>> 发布 paas-engine -> prod, tag: $(TAG)" && \
+	echo ">>> 发布 paas-engine -> prod, 版本: $$BUILD_VER" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"app_name":"paas-engine","lane":"prod","image_tag":"$(TAG)","replicas":1}' \
+		-d "{\"app_name\":\"paas-engine\",\"lane\":\"prod\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
-	echo ">>> 发布 paas-engine -> blue, tag: $(TAG)" && \
+	echo ">>> 发布 paas-engine -> blue, 版本: $$BUILD_VER" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d '{"app_name":"paas-engine","lane":"blue","image_tag":"$(TAG)","replicas":1}' \
+		-d "{\"app_name\":\"paas-engine\",\"lane\":\"blue\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 蓝绿自部署完成"
 
 ## 仅发布（不构建），用于切换泳道/回滚
-## 用法: make release APP=xxx LANE=yyy [TAG=zzz]
+## 用法: make release APP=xxx LANE=yyy VERSION=1.0.0.5
 release:
 	@$(call require_app)
+	$(if $(VERSION),,$(error VERSION 未指定。用法: make release APP=<app> LANE=<lane> VERSION=<version>))
 	$(if $(LANE),,$(error LANE 未指定))
-	@echo ">>> 发布 $(APP) -> $(LANE), tag: $(TAG)"
+	@echo ">>> 发布 $(APP) -> $(LANE), 版本: $(VERSION)"
 	@curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 	  -H 'Content-Type: application/json' \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
-	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(TAG)","replicas":1}' \
+	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(VERSION)","replicas":1}' \
 	  | python3 -m json.tool
 
 ## 按 app+lane 删除 Release

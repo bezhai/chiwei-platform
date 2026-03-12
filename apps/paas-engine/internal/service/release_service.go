@@ -67,11 +67,22 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		lane = domain.DefaultLane
 	}
 
-	// prod 泳道只允许 main 分支构建的镜像
+	// prod 泳道禁止 test channel 镜像
 	if lane == domain.DefaultLane && fullImage != "" {
 		build, err := s.buildRepo.FindByImageTag(ctx, fullImage)
-		if err == nil && build.GitRef != "main" {
-			return nil, fmt.Errorf("%w (got %q)", domain.ErrNonMainProdDeploy, build.GitRef)
+		if err == nil {
+			if build.Channel == domain.ChannelTest {
+				return nil, fmt.Errorf("测试版本 %s (channel=%s, git_ref=%s) 不允许部署到 prod 泳道",
+					build.Version, build.Channel, build.GitRef)
+			}
+			// 向后兼容：旧 Build 无 channel，fallback 到检查 GitRef
+			if build.Channel == "" && build.GitRef != "main" {
+				return nil, fmt.Errorf("%w (got %q)", domain.ErrNonMainProdDeploy, build.GitRef)
+			}
+			// 自动继承 Build 版本到 Release
+			if req.Version == "" && build.Version != "" {
+				req.Version = build.Version
+			}
 		}
 		// build not found → 外部镜像，放行
 	}
