@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -33,8 +35,9 @@ func NewBuildService(
 }
 
 type CreateBuildRequest struct {
-	GitRef   string `json:"git_ref"`
-	ImageTag string `json:"image_tag"` // tag 部分（如 abc123），service 层拼完整 URL
+	GitRef  string `json:"git_ref"`
+	Version string `json:"version,omitempty"` // 显式指定版本（可选）
+	Bump    string `json:"bump,omitempty"`    // "major"/"minor"/"patch"/""（可选）
 }
 
 func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, req CreateBuildRequest) (*domain.Build, error) {
@@ -50,12 +53,34 @@ func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, re
 		return nil, err
 	}
 
-	// image tag: 请求值 → git ref
-	tag := req.ImageTag
-	if tag == "" {
-		tag = req.GitRef
+	// 解析当前版本
+	var currentVersion domain.Version
+	latestBuild, err := s.buildRepo.FindLatestVersioned(ctx, imageRepoName)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return nil, err
 	}
+	if latestBuild != nil {
+		currentVersion, _ = domain.ParseVersion(latestBuild.Version)
+	}
+
+	// 计算下一版本
+	var nextVersion domain.Version
+	if req.Version != "" {
+		nextVersion, err = domain.ParseVersion(req.Version)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", domain.ErrInvalidInput, err)
+		}
+		if nextVersion.Compare(currentVersion) <= 0 {
+			return nil, fmt.Errorf("%w: version %s must be greater than current %s",
+				domain.ErrInvalidInput, nextVersion, currentVersion)
+		}
+	} else {
+		nextVersion = currentVersion.Next(req.Bump)
+	}
+
+	tag := nextVersion.String()
 	fullImageRef := imageRepo.FullImageRef(tag)
+	channel := domain.ResolveChannel(req.GitRef)
 
 	now := time.Now()
 	build := &domain.Build{
@@ -63,6 +88,8 @@ func (s *BuildService) CreateBuild(ctx context.Context, imageRepoName string, re
 		ImageRepoName: imageRepoName,
 		GitRef:        req.GitRef,
 		ImageTag:      fullImageRef,
+		Version:       nextVersion.String(),
+		Channel:       channel,
 		Status:        domain.BuildStatusPending,
 		CreatedAt:     now,
 		UpdatedAt:     now,

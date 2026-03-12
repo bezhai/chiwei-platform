@@ -52,7 +52,7 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 
 ## 通用规范
 
-- 镜像 tag: git short hash（如 `fd8ebe9`）
+- 镜像 tag: 语义化版本号（如 `1.0.0.2`），由 PaaS Engine 服务端分配
 - 敏感配置通过环境变量和 K8s Secret 管理，不写入代码
 
 ## 开发流程
@@ -70,12 +70,12 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 ## 部署命令
 
 ```bash
-make deploy APP=<app> [LANE=dev]          # 构建 → 等待 → 发布
-make self-deploy                           # paas-engine 蓝绿自部署
-make release APP=<app> LANE=prod [TAG=x]   # 仅发布（不构建）
-make undeploy APP=<app> LANE=dev           # 删除 Release
-make status [APP=xxx]                      # 查看状态
-make latest-build APP=<app>                # 最近成功构建
+make deploy APP=<app> [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1]  # 构建 → 等待 → 发布
+make self-deploy [BUMP=minor]                                      # paas-engine 蓝绿自部署
+make release APP=<app> LANE=prod VERSION=1.0.0.5                   # 仅发布（不构建，用于回滚）
+make undeploy APP=<app> LANE=dev                                   # 删除 Release
+make status [APP=xxx]                                              # 查看状态
+make latest-build APP=<app>                                        # 最近成功构建
 ```
 
 ## AI 行为约束
