@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 
@@ -36,9 +37,10 @@ async def process_image_pipeline(
                 else:
                     image_bytes = await lark_client.download_image(bot_name, file_key)
 
-                # Compress: 1440x1440, JPEG q80
-                compressed, _, _ = process_image(
-                    image_bytes, max_width=1440, max_height=1440, quality=80, format="JPEG"
+                # Compress: 1440x1440, JPEG q80 (CPU-bound, offload to thread)
+                compressed, _, _ = await asyncio.to_thread(
+                    process_image,
+                    image_bytes, max_width=1440, max_height=1440, quality=80, format="JPEG",
                 )
 
                 # Upload to TOS
