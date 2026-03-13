@@ -1,4 +1,4 @@
-.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query lane-bind lane-unbind lane-bindings
+.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query logs lane-bind lane-unbind lane-bindings
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
@@ -220,6 +220,43 @@ exit(print(f'ERROR: {err}') or 1) if err else None; \
 print(' | '.join(cols)); \
 print(' | '.join(['---']*len(cols))); \
 [print(' | '.join(str(c) for c in r)) for r in rows]"
+
+# ---------- 日志查询 ----------
+
+KEYWORD   ?=
+EXCLUDE   ?=
+REGEXP    ?=
+SINCE     ?= 1h
+LIMIT     ?= 200
+DIRECTION ?= backward
+POD       ?=
+START     ?=
+END       ?=
+
+## 查询应用运行时日志
+## 用法: make logs APP=agent-service KEYWORD=error SINCE=30m
+##       make logs KEYWORD=timeout EXCLUDE=health              （全 namespace）
+##       make logs APP=lark-server,agent-service KEYWORD=trace  （多 app）
+##       make logs APP=lark-server POD=lark-server-abc          （Pod 前缀）
+##       make logs APP=lark-server START=2024-01-01T10:00:00Z END=2024-01-01T11:00:00Z
+logs:
+	@PARAMS="limit=$(LIMIT)&direction=$(DIRECTION)"; \
+	if [ -n "$(APP)" ]; then PARAMS="$$PARAMS&app=$(APP)"; fi; \
+	if [ -n "$(KEYWORD)" ]; then PARAMS="$$PARAMS&keyword=$(KEYWORD)"; fi; \
+	if [ -n "$(EXCLUDE)" ]; then PARAMS="$$PARAMS&exclude=$(EXCLUDE)"; fi; \
+	if [ -n "$(REGEXP)" ]; then PARAMS="$$PARAMS&regexp=$(REGEXP)"; fi; \
+	if [ -n "$(POD)" ]; then PARAMS="$$PARAMS&pod=$(POD)"; fi; \
+	if [ -n "$(filter-out prod,$(LANE))" ]; then PARAMS="$$PARAMS&lane=$(LANE)"; fi; \
+	if [ -n "$(START)" ]; then \
+		PARAMS="$$PARAMS&start=$(START)"; \
+		if [ -n "$(END)" ]; then PARAMS="$$PARAMS&end=$(END)"; fi; \
+	else \
+		PARAMS="$$PARAMS&since=$(SINCE)"; \
+	fi; \
+	echo ">>> 查询日志: $$PARAMS"; \
+	curl -sf "$(PAAS_API)/api/paas/logs?$$PARAMS" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+		| python3 -c "import sys,json; print(json.loads(sys.stdin.buffer.read(),strict=False).get('data',{}).get('logs','(无日志)'))"
 
 # ---------- 泳道绑定 ----------
 

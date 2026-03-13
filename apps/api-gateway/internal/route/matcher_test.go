@@ -6,7 +6,7 @@ func newTestMatcher() *Matcher {
 	routes := []Route{
 		{Prefix: "/dashboard/api/", Service: "monitor-dashboard", Port: 3002, StripPrefix: "/dashboard/api", RewritePrefix: "/dashboard"},
 		{Prefix: "/dashboard/", Service: "monitor-dashboard-web", Port: 80},
-		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080, StripPrefix: "/api/paas", RewritePrefix: "/api/v1"},
+		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080},
 		{Prefix: "/webhook/", Service: "lark-proxy", Port: 3003},
 	}
 	sortRoutes(routes)
@@ -55,8 +55,8 @@ func TestRewritePath(t *testing.T) {
 	}{
 		{
 			"/api/paas/apps/",
-			Route{StripPrefix: "/api/paas", RewritePrefix: "/api/v1"},
-			"/api/v1/apps/",
+			Route{},
+			"/api/paas/apps/",
 		},
 		{
 			"/dashboard/api/metrics",

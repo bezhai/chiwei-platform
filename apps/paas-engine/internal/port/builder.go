@@ -10,10 +10,25 @@ import (
 // BuildStatusCallback 在 Job 状态变更时被调用。
 type BuildStatusCallback func(buildID string, status domain.BuildStatus, log string)
 
+// AppLogQuery 封装应用日志查询的所有参数。
+type AppLogQuery struct {
+	Namespace string
+	Apps      []string // 空=不限 app，支持多 app
+	Lane      string
+	Pod       string // 前缀匹配
+	Keyword   string // |= filter
+	Exclude   string // != filter
+	Regexp    string // |~ filter
+	Start     time.Time
+	End       time.Time
+	Limit     int
+	Direction string // "forward" / "backward"
+}
+
 // LogQuerier 查询历史构建日志（如 Loki）。
 type LogQuerier interface {
 	QueryBuildLogs(ctx context.Context, namespace, buildID string, start, end time.Time) (string, error)
-	QueryAppLogs(ctx context.Context, namespace, appName, lane string, start, end time.Time, limit int) (string, error)
+	QueryAppLogs(ctx context.Context, query AppLogQuery) (string, error)
 }
 
 // BuildSubmission 封装提交给 BuildExecutor 的构建参数，解耦 domain.Build 与基础设施。
