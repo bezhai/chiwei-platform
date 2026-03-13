@@ -27,8 +27,7 @@ func NewRouter(
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
-	// 注册 API 路由到指定前缀
-	mountAPI := func(r chi.Router) {
+	r.Route("/api/paas", func(r chi.Router) {
 		r.Use(authMiddleware(apiToken))
 
 		// Logs (通用查询)
@@ -88,10 +87,7 @@ func NewRouter(
 				r.Delete("/", imageRepoH.Delete)
 			})
 		})
-	}
-
-	r.Route("/api/paas", mountAPI)
-	r.Route("/api/v1", mountAPI) // 临时兼容：网关 rewrite 升级后移除
+	})
 
 	return r
 }
