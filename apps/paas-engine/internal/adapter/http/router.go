@@ -63,6 +63,7 @@ func NewRouter(
 				r.Get("/", releaseH.Get)
 				r.Put("/", releaseH.Update)
 				r.Delete("/", releaseH.Delete)
+				r.Get("/status", releaseH.GetStatus)
 			})
 		})
 

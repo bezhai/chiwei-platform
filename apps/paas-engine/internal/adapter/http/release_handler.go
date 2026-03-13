@@ -94,6 +94,16 @@ func (h *ReleaseHandler) CleanupOrphans(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, report)
 }
 
+func (h *ReleaseHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	status, err := h.svc.GetReleaseStatus(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
 func (h *ReleaseHandler) DeleteByAppAndLane(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	lane := r.URL.Query().Get("lane")

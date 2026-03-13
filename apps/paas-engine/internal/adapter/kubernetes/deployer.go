@@ -120,6 +120,66 @@ func (d *K8sDeployer) ListManagedResources(ctx context.Context) ([]port.ManagedR
 	return resources, nil
 }
 
+func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*domain.DeploymentStatus, error) {
+	deploy, err := d.client.AppsV1().Deployments(d.namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get deployment %s: %w", name, err)
+	}
+
+	var desired int32
+	if deploy.Spec.Replicas != nil {
+		desired = *deploy.Spec.Replicas
+	}
+
+	status := &domain.DeploymentStatus{
+		DeployName: name,
+		Desired:    desired,
+		Ready:      deploy.Status.ReadyReplicas,
+		Available:  deploy.Status.AvailableReplicas,
+	}
+
+	// 通过 Deployment selector 查找 Pods
+	selector := deploy.Spec.Selector.MatchLabels
+	labelSelector := ""
+	for k, v := range selector {
+		if labelSelector != "" {
+			labelSelector += ","
+		}
+		labelSelector += k + "=" + v
+	}
+
+	pods, err := d.client.CoreV1().Pods(d.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods for %s: %w", name, err)
+	}
+
+	for _, pod := range pods.Items {
+		ps := domain.PodStatus{
+			Name:   pod.Name,
+			Status: string(pod.Status.Phase),
+		}
+
+		// 计算 ready 状态和 restarts
+		allReady := len(pod.Status.ContainerStatuses) > 0
+		for _, cs := range pod.Status.ContainerStatuses {
+			ps.Restarts += cs.RestartCount
+			if !cs.Ready {
+				allReady = false
+			}
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+				ps.Reason = cs.State.Waiting.Reason + ": " + cs.State.Waiting.Message
+			}
+		}
+		ps.Ready = allReady
+
+		status.Pods = append(status.Pods, ps)
+	}
+
+	return status, nil
+}
+
 func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App) error {
 	name := release.ResourceName()
 	labels := map[string]string{

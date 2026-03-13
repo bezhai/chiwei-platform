@@ -60,6 +60,7 @@ type ReleaseModel struct {
 	Envs       string // JSON 序列化
 	Version    string // 自定义版本标识，用于环境变量注入
 	Status     string
+	Message    string `gorm:"type:text"`
 	DeployName string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
