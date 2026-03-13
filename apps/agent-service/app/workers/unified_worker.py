@@ -65,6 +65,6 @@ class UnifiedWorkerSettings:
             hour={2, 6, 10, 14, 18, 22},
             minute={15},
         ),
-        # 4. 日记生成：每天 UTC 19:00（CST 03:00）
-        cron(cron_generate_diaries, hour={19}, minute={0}),
+        # 4. 日记生成：每天 CST 03:00
+        cron(cron_generate_diaries, hour={3}, minute={0}),
     ]
