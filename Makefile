@@ -74,11 +74,14 @@ deploy:
 		esac; \
 		sleep 5; \
 	done && \
-	echo ">>> 发布 $(APP) -> $(LANE), 版本: $$BUILD_VER" && \
+	ACTUAL_TAG=$$(curl -sf $(PAAS_API)/api/paas/apps/$(APP)/builds/$$BUILD_ID/ \
+		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['image_tag'].rsplit(':',1)[-1])") && \
+	echo ">>> 发布 $(APP) -> $(LANE), tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d "{\"app_name\":\"$(APP)\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
+		-d "{\"app_name\":\"$(APP)\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 部署完成"
 
@@ -106,18 +109,21 @@ self-deploy:
 		esac; \
 		sleep 5; \
 	done && \
-	echo ">>> 发布 paas-engine -> prod, 版本: $$BUILD_VER" && \
+	ACTUAL_TAG=$$(curl -sf $(PAAS_API)/api/paas/apps/paas-engine/builds/$$BUILD_ID/ \
+		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['image_tag'].rsplit(':',1)[-1])") && \
+	echo ">>> 发布 paas-engine -> prod, tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d "{\"app_name\":\"paas-engine\",\"lane\":\"prod\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
+		-d "{\"app_name\":\"paas-engine\",\"lane\":\"prod\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
-	echo ">>> 发布 paas-engine -> blue, 版本: $$BUILD_VER" && \
+	echo ">>> 发布 paas-engine -> blue, tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
 		-H 'X-API-Key: $(PAAS_TOKEN)' \
-		-d "{\"app_name\":\"paas-engine\",\"lane\":\"blue\",\"image_tag\":\"$$BUILD_VER\",\"replicas\":1}" \
+		-d "{\"app_name\":\"paas-engine\",\"lane\":\"blue\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 蓝绿自部署完成"
 
