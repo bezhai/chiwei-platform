@@ -1,4 +1,4 @@
-.PHONY: deploy self-deploy release undeploy status latest-build lane-bind lane-unbind lane-bindings
+.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query lane-bind lane-unbind lane-bindings
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
@@ -173,6 +173,51 @@ latest-build:
 	@curl -sf "$(PAAS_API)/api/paas/apps/$(APP)/builds/latest" \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' \
 	  | python3 -m json.tool
+
+# ---------- 运维查询 ----------
+
+## 查看 Pod 状态（替代 kubectl get pods）
+## 用法: make pods APP=xxx [LANE=prod]
+pods:
+	@$(call require_app)
+	@echo ">>> $(APP) [$(LANE)] Pod 状态"
+	@RELEASE_ID=$$(curl -sf "$(PAAS_API)/api/paas/releases/?app=$(APP)&lane=$(LANE)" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		| python3 -c "import sys,json; d=json.load(sys.stdin).get('data',[]); print(d[0]['id'] if d else '')" 2>/dev/null) && \
+	if [ -z "$$RELEASE_ID" ]; then \
+		echo "  未找到 $(APP) 在 $(LANE) 泳道的 Release"; \
+		exit 1; \
+	fi && \
+	curl -sf "$(PAAS_API)/api/paas/releases/$$RELEASE_ID/status" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		| python3 -c "\
+import sys,json; \
+d=json.load(sys.stdin).get('data',{}); \
+print(f\"  Deployment: {d.get('deploy_name','?')}  Desired: {d.get('desired',0)}  Ready: {d.get('ready',0)}  Available: {d.get('available',0)}\"); \
+[print(f\"  {p['name']:50s} {p['status']:10s} ready={p['ready']}  restarts={p['restarts']}  {p.get('reason','')}\") for p in d.get('pods',[])]"
+
+SQL ?=
+
+## 执行只读 SQL 查询（替代 kubectl + psql）
+## 用法: make ops-query SQL="SELECT count(*) FROM apps"
+## 用法: make ops-query SQL="SELECT 1" DB=chiwei
+ops-query:
+	$(if $(SQL),,$(error SQL 未指定。用法: make ops-query SQL="<query>" [DB=paas_engine]))
+	@echo ">>> 执行查询 [$(or $(DB),paas_engine)]"
+	@curl -sf -X POST $(PAAS_API)/api/paas/ops/query \
+		-H 'Content-Type: application/json' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-d "{\"db\":\"$(or $(DB),paas_engine)\",\"sql\":\"$(SQL)\"}" \
+		| python3 -c "\
+import sys,json; \
+d=json.load(sys.stdin); \
+err=d.get('error'); \
+dat=d.get('data',{}); \
+cols=dat.get('columns',[]); rows=dat.get('rows',[]); \
+exit(print(f'ERROR: {err}') or 1) if err else None; \
+print(' | '.join(cols)); \
+print(' | '.join(['---']*len(cols))); \
+[print(' | '.join(str(c) for c in r)) for r in rows]"
 
 # ---------- 泳道绑定 ----------
 

@@ -19,8 +19,9 @@ type Config struct {
 	KanikoCacheRepo   string
 	BuildHttpProxy    string
 	BuildNoProxy      string
-	APIToken        string
-	LokiURL         string
+	APIToken          string
+	LokiURL           string
+	ChiweiDatabaseURL string
 }
 
 func Load() *Config {
@@ -38,8 +39,9 @@ func Load() *Config {
 		KanikoCacheRepo:   os.Getenv("KANIKO_CACHE_REPO"),
 		BuildHttpProxy:    os.Getenv("BUILD_HTTP_PROXY"),
 		BuildNoProxy:      os.Getenv("BUILD_NO_PROXY"),
-		APIToken:        os.Getenv("API_TOKEN"),
-		LokiURL:         getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
+		APIToken:          os.Getenv("API_TOKEN"),
+		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
+		ChiweiDatabaseURL: os.Getenv("CHIWEI_DATABASE_URL"),
 	}
 }
 

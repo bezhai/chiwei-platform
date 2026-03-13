@@ -16,6 +16,7 @@ import (
 	"github.com/chiwei-platform/paas-engine/internal/config"
 	"github.com/chiwei-platform/paas-engine/internal/port"
 	"github.com/chiwei-platform/paas-engine/internal/service"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -77,12 +78,24 @@ func main() {
 		}()
 	}
 
+	// Ops 数据库连接池（只读查询）
+	opsDbs := map[string]*gorm.DB{"paas_engine": db}
+	if cfg.ChiweiDatabaseURL != "" {
+		chiweiDB, err := repository.OpenReadOnlyDB(cfg.ChiweiDatabaseURL)
+		if err != nil {
+			slog.Warn("chiwei database unavailable for ops queries", "error", err)
+		} else {
+			opsDbs["chiwei"] = chiweiDB
+		}
+	}
+
 	// HTTP 路由
 	handler := httpadapter.NewRouter(
 		httpadapter.NewAppHandler(appSvc, buildSvc),
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLogHandler(logSvc),
 		httpadapter.NewImageRepoHandler(imageRepoSvc),
+		httpadapter.NewOpsHandler(opsDbs),
 		cfg.APIToken,
 	)
 

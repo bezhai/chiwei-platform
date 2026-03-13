@@ -85,7 +85,7 @@ make lane-unbind TYPE=bot KEY=dev
 ### 7. 验证并输出
 
 ```bash
-kubectl -n prod get pods -l app=<APP>
+make pods APP=<APP>
 ```
 
 一行总结：`✅ <APP> 已部署到生产环境，镜像: <version>`

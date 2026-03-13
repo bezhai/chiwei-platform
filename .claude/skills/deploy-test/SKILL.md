@@ -46,7 +46,7 @@ make deploy APP=<APP> GIT_REF=<branch> LANE=<LANE>
 ### 4. 验证并输出
 
 ```bash
-kubectl -n prod get pods -l app=<APP>,lane=<LANE>
+make pods APP=<APP> LANE=<LANE>
 ```
 
 确认 pod Running 后，自动绑定飞书 dev bot：
