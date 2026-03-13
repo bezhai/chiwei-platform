@@ -78,6 +78,21 @@ func (r *BuildRepo) FindByImageTag(ctx context.Context, imageTag string) (*domai
 	return modelToBuild(&m), nil
 }
 
+func (r *BuildRepo) FindLatestVersioned(ctx context.Context, imageRepoName string) (*domain.Build, error) {
+	var m BuildModel
+	result := r.db.WithContext(ctx).
+		Where("image_repo_name = ? AND version != ''", imageRepoName).
+		Order("created_at desc").
+		First(&m)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, domain.ErrBuildNotFound
+		}
+		return nil, result.Error
+	}
+	return modelToBuild(&m), nil
+}
+
 func (r *BuildRepo) Update(ctx context.Context, build *domain.Build) error {
 	m := buildToModel(build)
 	return r.db.WithContext(ctx).Save(m).Error
@@ -89,6 +104,8 @@ func buildToModel(b *domain.Build) *BuildModel {
 		ImageRepoName: b.ImageRepoName,
 		GitRef:        b.GitRef,
 		ImageTag:      b.ImageTag,
+		Version:       b.Version,
+		Channel:       b.Channel,
 		Status:        string(b.Status),
 		JobName:       b.JobName,
 		Log:           b.Log,
@@ -103,6 +120,8 @@ func modelToBuild(m *BuildModel) *domain.Build {
 		ImageRepoName: m.ImageRepoName,
 		GitRef:        m.GitRef,
 		ImageTag:      m.ImageTag,
+		Version:       m.Version,
+		Channel:       m.Channel,
 		Status:        domain.BuildStatus(m.Status),
 		JobName:       m.JobName,
 		Log:           m.Log,

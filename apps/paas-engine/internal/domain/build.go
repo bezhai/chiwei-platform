@@ -24,6 +24,8 @@ type Build struct {
 	ImageRepoName string      `json:"image_repo_name"`
 	GitRef        string      `json:"git_ref"` // branch / tag / commit
 	ImageTag      string      `json:"image_tag"`
+	Version       string      `json:"version"`           // 语义化版本号，如 "1.0.0.2"
+	Channel       string      `json:"channel"`           // "stable" 或 "test"
 	Status        BuildStatus `json:"status"`
 	JobName       string      `json:"job_name,omitempty"`
 	Log           string      `json:"log,omitempty"`
