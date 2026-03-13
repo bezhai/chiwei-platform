@@ -1,0 +1,61 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(kubectl apply *)",
+      "Bash(kubectl delete *)",
+      "Bash(kubectl edit *)",
+      "Bash(kubectl patch *)",
+      "Bash(kubectl create *)",
+      "Bash(kubectl exec *)",
+      "Bash(kubectl run *)",
+      "Bash(kubectl replace *)",
+      "Bash(kubectl scale *)",
+      "Bash(kubectl rollout *)",
+      "Bash(kubectl label *)",
+      "Bash(kubectl annotate *)",
+      "Bash(kubectl taint *)",
+      "Bash(kubectl drain *)",
+      "Bash(kubectl cordon *)",
+      "Bash(kubectl uncordon *)",
+      "Bash(kubectl cp *)",
+      "Bash(kubectl port-forward *)",
+      "Bash(kubectl proxy *)"
+    ],
+    "ask": [
+      "Bash(kubectl *)",
+      "Bash(curl -X POST *)",
+      "Bash(curl -X PUT *)",
+      "Bash(curl -X DELETE *)",
+      "Bash(curl -X PATCH *)",
+      "Bash(curl -sf -X POST *)",
+      "Bash(curl -sf -X PUT *)",
+      "Bash(curl -sf -X DELETE *)"
+    ],
+    "allow": [
+      "Bash(make *)",
+      "Bash(ghc *)",
+      "Bash(git status*)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git branch *)",
+      "Bash(git show *)",
+      "Bash(git worktree *)",
+      "Bash(git rev-parse *)",
+      "Bash(git show-ref *)",
+      "Bash(python3 *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/validate-bash.sh \"$TOOL_INPUT\""
+          }
+        ]
+      }
+    ]
+  }
+}

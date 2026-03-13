@@ -13,6 +13,7 @@ func NewRouter(
 	releaseH *ReleaseHandler,
 	logH *LogHandler,
 	imageRepoH *ImageRepoHandler,
+	opsH *OpsHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -65,6 +66,11 @@ func NewRouter(
 				r.Delete("/", releaseH.Delete)
 				r.Get("/status", releaseH.GetStatus)
 			})
+		})
+
+		// Ops
+		r.Route("/ops", func(r chi.Router) {
+			r.Post("/query", opsH.Query)
 		})
 
 		// Image Repos

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Safe read-only query against PostgreSQL databases."""
+"""Safe read-only query via PaaS Engine ops/query API."""
 
 import json
+import os
 import re
 import subprocess
 import sys
-from urllib.parse import urlparse
 
 WRITE_KEYWORDS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|REVOKE)\b",
@@ -23,24 +23,6 @@ DB_ALIASES = {
     "chiwei": "chiwei",
 }
 DEFAULT_DB = "paas_engine"
-
-
-def get_secret_value(key: str) -> str:
-    raw = subprocess.check_output(
-        ["kubectl", "get", "secret", "paas-engine-secret", "-n", "prod",
-         "-o", f"jsonpath={{.data.{key}}}"],
-        text=True,
-    )
-    import base64
-    return base64.b64decode(raw).decode()
-
-
-def get_endpoint_ip() -> str:
-    return subprocess.check_output(
-        ["kubectl", "get", "endpoints", "postgres", "-n", "prod",
-         "-o", "jsonpath={.subsets[0].addresses[0].ip}"],
-        text=True, stderr=subprocess.DEVNULL,
-    ).strip()
 
 
 def main():
@@ -67,36 +49,46 @@ def main():
     if sql.lower() == "schema":
         sql = SCHEMA_SQL
 
-    # Safety check
+    # Safety check (client-side, server also enforces)
     if WRITE_KEYWORDS.search(sql):
         print(f"ERROR: 拒绝执行写操作: {sql}", file=sys.stderr)
         sys.exit(1)
 
-    # Get connection info
-    db_url = get_secret_value("DATABASE_URL")
-    endpoint_ip = get_endpoint_ip()
-    parsed = urlparse(db_url)
+    # Call PaaS API via make ops-query
+    paas_api = os.environ.get("PAAS_API", "")
+    paas_token = os.environ.get("PAAS_TOKEN", "")
 
-    import psycopg2
-    conn = psycopg2.connect(
-        host=endpoint_ip,
-        port=parsed.port or 5432,
-        user=parsed.username,
-        password=parsed.password,
-        dbname=dbname,
+    if not paas_api:
+        print("ERROR: PAAS_API 环境变量未设置", file=sys.stderr)
+        sys.exit(1)
+
+    result = subprocess.run(
+        [
+            "curl", "-sf", "-X", "POST",
+            f"{paas_api}/api/paas/ops/query",
+            "-H", "Content-Type: application/json",
+            "-H", f"X-API-Key: {paas_token}",
+            "-d", json.dumps({"db": dbname, "sql": sql}),
+        ],
+        capture_output=True,
+        text=True,
     )
-    conn.set_session(readonly=True)
 
-    try:
-        cur = conn.cursor()
-        cur.execute(sql)
-        columns = [desc[0] for desc in cur.description]
-        rows = cur.fetchall()
-        # Output as JSON for easy parsing
-        print(json.dumps({"columns": columns, "rows": [list(r) for r in rows]},
-                         default=str, ensure_ascii=False))
-    finally:
-        conn.close()
+    if result.returncode != 0:
+        print(f"ERROR: API 调用失败: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    resp = json.loads(result.stdout)
+    if "error" in resp and resp["error"]:
+        print(f"ERROR: {resp['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    data = resp.get("data", {})
+    print(json.dumps(
+        {"columns": data.get("columns", []), "rows": data.get("rows", [])},
+        default=str,
+        ensure_ascii=False,
+    ))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-.PHONY: deploy self-deploy release undeploy status latest-build lane-bind lane-unbind lane-bindings
+.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query lane-bind lane-unbind lane-bindings
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
@@ -6,11 +6,13 @@
 # BUMP       — 版本递进："major"/"minor"/"patch"/""（可选）
 # GIT_REF    — 构建分支/tag/commit，默认当前分支
 # LANE       — 部署泳道，默认 prod
+# X_LANE     — API 路由泳道（可选），指定后所有请求加 x-lane header 路由到该泳道的 paas-engine
 
 GIT_REF  ?= $(shell git rev-parse --abbrev-ref HEAD)
 VERSION  ?=
 BUMP     ?=
 LANE     ?= prod
+CURL_LANE := $(if $(X_LANE),-H 'x-lane: $(X_LANE)')
 
 define require_app
 	$(if $(APP),,$(error APP 未指定。用法: make $@ APP=<应用名>))
@@ -58,14 +60,14 @@ deploy:
 	@echo ">>> 部署 $(APP): $(GIT_REF) -> $(LANE)"
 	@BUILD_RESP=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/$(APP)/builds/ \
 		-H 'Content-Type: application/json' \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d '{"git_ref":"$(GIT_REF)","version":"$(VERSION)","bump":"$(BUMP)"}') && \
 	BUILD_ID=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	BUILD_VER=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['version'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID (版本: $$BUILD_VER)" && \
 	while true; do \
 		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/$(APP)/builds/$$BUILD_ID/ \
-			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
 			succeeded) echo ">>> 构建成功"; break;; \
@@ -75,12 +77,12 @@ deploy:
 		sleep 5; \
 	done && \
 	ACTUAL_TAG=$$(curl -sf $(PAAS_API)/api/paas/apps/$(APP)/builds/$$BUILD_ID/ \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['image_tag'].rsplit(':',1)[-1])") && \
 	echo ">>> 发布 $(APP) -> $(LANE), tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d "{\"app_name\":\"$(APP)\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 部署完成"
@@ -93,14 +95,14 @@ self-deploy:
 	@echo ">>> 蓝绿自部署 paas-engine: $(GIT_REF) -> prod+blue"
 	@BUILD_RESP=$$(curl -sf -X POST $(PAAS_API)/api/paas/apps/paas-engine/builds/ \
 		-H 'Content-Type: application/json' \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d '{"git_ref":"$(GIT_REF)","version":"$(VERSION)","bump":"$(BUMP)"}') && \
 	BUILD_ID=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])") && \
 	BUILD_VER=$$(echo "$$BUILD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['version'])") && \
 	echo ">>> 构建已触发: $$BUILD_ID (版本: $$BUILD_VER)" && \
 	while true; do \
 		STATUS=$$(curl -sf $(PAAS_API)/api/paas/apps/paas-engine/builds/$$BUILD_ID/ \
-			-H 'X-API-Key: $(PAAS_TOKEN)' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['status'])"); \
 		echo "    状态: $$STATUS"; \
 		case $$STATUS in \
 			succeeded) echo ">>> 构建成功"; break;; \
@@ -110,19 +112,19 @@ self-deploy:
 		sleep 5; \
 	done && \
 	ACTUAL_TAG=$$(curl -sf $(PAAS_API)/api/paas/apps/paas-engine/builds/$$BUILD_ID/ \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		| python3 -c "import sys,json; print(json.load(sys.stdin)['data']['image_tag'].rsplit(':',1)[-1])") && \
 	echo ">>> 发布 paas-engine -> prod, tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d "{\"app_name\":\"paas-engine\",\"lane\":\"prod\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 等待 prod 泳道就绪..." && sleep 10 && \
 	echo ">>> 发布 paas-engine -> blue, tag: $$ACTUAL_TAG" && \
 	curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 		-H 'Content-Type: application/json' \
-		-H 'X-API-Key: $(PAAS_TOKEN)' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d "{\"app_name\":\"paas-engine\",\"lane\":\"blue\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
 	echo ">>> 蓝绿自部署完成"
@@ -136,7 +138,7 @@ release:
 	@echo ">>> 发布 $(APP) -> $(LANE), 版本: $(VERSION)"
 	@curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
 	  -H 'Content-Type: application/json' \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(VERSION)","replicas":1}' \
 	  | python3 -m json.tool
 
@@ -147,7 +149,7 @@ undeploy:
 	$(if $(LANE),,$(error LANE 未指定))
 	@echo ">>> 删除 $(APP) 的 $(LANE) 泳道 Release"
 	@curl -sf -X DELETE "$(PAAS_API)/api/paas/releases/?app=$(APP)&lane=$(LANE)" \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  | python3 -m json.tool
 
 ## 查看状态（不传 APP 看全部，传 APP 看单应用）
@@ -156,12 +158,12 @@ status:
 	@if [ -n "$(APP)" ]; then \
 		echo ">>> $(APP) 泳道状态"; \
 		curl -sf "$(PAAS_API)/api/paas/releases/?app=$(APP)" \
-			-H 'X-API-Key: $(PAAS_TOKEN)' \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 			| python3 -c "import sys,json; [print(f\"  {r['lane']:10s} | {r['status']:10s} | {r['image']}\") for r in json.load(sys.stdin).get('data', [])]"; \
 	else \
 		echo ">>> 全部 Release 状态"; \
 		curl -sf "$(PAAS_API)/api/paas/releases/" \
-			-H 'X-API-Key: $(PAAS_TOKEN)' \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 			| python3 -c "import sys,json; [print(f\"  {r['app_name']:20s} | {r['lane']:10s} | {r['status']:10s} | {r['image']}\") for r in json.load(sys.stdin).get('data', [])]"; \
 	fi
 
@@ -171,8 +173,53 @@ latest-build:
 	@$(call require_app)
 	@echo ">>> $(APP) 最近成功构建"
 	@curl -sf "$(PAAS_API)/api/paas/apps/$(APP)/builds/latest" \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  | python3 -m json.tool
+
+# ---------- 运维查询 ----------
+
+## 查看 Pod 状态（替代 kubectl get pods）
+## 用法: make pods APP=xxx [LANE=prod]
+pods:
+	@$(call require_app)
+	@echo ">>> $(APP) [$(LANE)] Pod 状态"
+	@RELEASE_ID=$$(curl -sf "$(PAAS_API)/api/paas/releases/?app=$(APP)&lane=$(LANE)" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+		| python3 -c "import sys,json; d=json.load(sys.stdin).get('data',[]); print(d[0]['id'] if d else '')" 2>/dev/null) && \
+	if [ -z "$$RELEASE_ID" ]; then \
+		echo "  未找到 $(APP) 在 $(LANE) 泳道的 Release"; \
+		exit 1; \
+	fi && \
+	curl -sf "$(PAAS_API)/api/paas/releases/$$RELEASE_ID/status" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+		| python3 -c "\
+import sys,json; \
+d=json.load(sys.stdin).get('data',{}); \
+print(f\"  Deployment: {d.get('deploy_name','?')}  Desired: {d.get('desired',0)}  Ready: {d.get('ready',0)}  Available: {d.get('available',0)}\"); \
+[print(f\"  {p['name']:50s} {p['status']:10s} ready={p['ready']}  restarts={p['restarts']}  {p.get('reason','')}\") for p in d.get('pods',[])]"
+
+SQL ?=
+
+## 执行只读 SQL 查询（替代 kubectl + psql）
+## 用法: make ops-query SQL="SELECT count(*) FROM apps"
+## 用法: make ops-query SQL="SELECT 1" DB=chiwei
+ops-query:
+	$(if $(SQL),,$(error SQL 未指定。用法: make ops-query SQL="<query>" [DB=paas_engine]))
+	@echo ">>> 执行查询 [$(or $(DB),paas_engine)]"
+	@curl -sf -X POST $(PAAS_API)/api/paas/ops/query \
+		-H 'Content-Type: application/json' \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+		-d "{\"db\":\"$(or $(DB),paas_engine)\",\"sql\":\"$(SQL)\"}" \
+		| python3 -c "\
+import sys,json; \
+d=json.load(sys.stdin); \
+err=d.get('error'); \
+dat=d.get('data',{}); \
+cols=dat.get('columns',[]); rows=dat.get('rows',[]); \
+exit(print(f'ERROR: {err}') or 1) if err else None; \
+print(' | '.join(cols)); \
+print(' | '.join(['---']*len(cols))); \
+[print(' | '.join(str(c) for c in r)) for r in rows]"
 
 # ---------- 泳道绑定 ----------
 
@@ -185,7 +232,7 @@ lane-bind:
 	@echo ">>> 绑定 $(TYPE):$(KEY) -> $(LANE)"
 	@curl -sf -X POST $(PAAS_API)/api/lark/lane-bindings \
 	  -H 'Content-Type: application/json' \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  -d '{"route_type":"$(TYPE)","route_key":"$(KEY)","lane_name":"$(LANE)"}' \
 	  | python3 -m json.tool
 
@@ -196,7 +243,7 @@ lane-unbind:
 	$(if $(KEY),,$(error KEY 未指定))
 	@echo ">>> 解绑 $(TYPE):$(KEY)"
 	@curl -sf -X DELETE "$(PAAS_API)/api/lark/lane-bindings?type=$(TYPE)&key=$(KEY)" \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  | python3 -m json.tool
 
 ## 列出所有活跃泳道绑定
@@ -204,5 +251,5 @@ lane-unbind:
 lane-bindings:
 	@echo ">>> 活跃泳道绑定"
 	@curl -sf $(PAAS_API)/api/lark/lane-bindings \
-	  -H 'X-API-Key: $(PAAS_TOKEN)' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  | python3 -c "import sys,json; [print(f\"  {r['route_type']:6s} | {r['route_key']:30s} | {r['lane_name']}\") for r in json.load(sys.stdin).get('data', [])]"
