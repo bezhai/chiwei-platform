@@ -59,6 +59,8 @@ class ParsedContent:
                 if image_fn:
                     parts.append(image_fn(img_idx, value))
                     img_idx += 1
+                else:
+                    parts.append("[图片]")
             elif item_type == "sticker":
                 parts.append("[表情包]")
             elif item_type == "media":

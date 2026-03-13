@@ -163,6 +163,24 @@ class LarkGroupMember(Base):
     )
 
 
+class WeeklyReview(Base):
+    """赤尾周记"""
+
+    __tablename__ = "weekly_review"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    week_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10" (周一)
+    week_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-16" (周日)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("chat_id", "week_start"),)
+
+
 class PersonImpression(Base):
     """赤尾对群友的人物印象"""
 

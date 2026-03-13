@@ -8,6 +8,7 @@
 
 import json
 import logging
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from app.agents.infra.langfuse_client import get_prompt
@@ -17,10 +18,12 @@ from app.orm.crud import (
     get_active_diary_chat_ids,
     get_all_impressions_for_chat,
     get_chat_messages_in_range,
+    get_diaries_in_range,
     get_recent_diaries,
     get_username,
     upsert_diary_entry,
     upsert_person_impression,
+    upsert_weekly_review,
 )
 from app.utils.content_parser import parse_content
 
@@ -149,29 +152,85 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
 
 
 def _format_messages_timeline(messages: list, user_names: dict[str, str]) -> str:
-    """将消息列表格式化为时间线文本
+    """将消息列表格式化为树状时间线
 
-    格式: [14:32] 群友A: 今天吃什么
-    跳过纯图片/表情包/空内容
+    利用 reply_message_id 构建回复链，用 tree 风格连接符展示层级关系：
+
+    [14:30] 群友A: 今天吃什么
+    ├─ [14:33] 群友B: 火锅吧
+    │  └─ [14:35] 群友C: 好主意
+    └─ [14:36] 群友D: 我也想吃
+    [14:32] 群友E: 那个停车事件看了吗
+    └─ [14:34] 群友F: 看了 太离谱了
     """
-    lines: list[str] = []
+    MAX_DEPTH = 3
+
+    # 1. 过滤并格式化每条消息
+    formatted: dict[str, str] = {}  # msg_id → formatted line
+    msg_order: list[str] = []  # 按时间顺序的 msg_id 列表
     for msg in messages:
-        # 渲染内容（跳过图片）
         rendered = parse_content(msg.content).render()
         if not rendered or not rendered.strip():
             continue
-
-        # 时间戳 → CST 时间
         msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
         time_str = msg_time.strftime("%H:%M")
+        speaker = (
+            "赤尾"
+            if msg.role == "assistant"
+            else user_names.get(msg.user_id, msg.user_id[:8])
+        )
+        formatted[msg.message_id] = f"[{time_str}] {speaker}: {rendered}"
+        msg_order.append(msg.message_id)
 
-        # 发言者名称
-        if msg.role == "assistant":
-            speaker = "赤尾"
+    # 2. 构建树：记录每个节点的深度，超过 MAX_DEPTH 的回退为根节点
+    children: dict[str, list[str]] = defaultdict(list)
+    roots: list[str] = []
+    depth_of: dict[str, int] = {}
+
+    for msg in messages:
+        if msg.message_id not in formatted:
+            continue
+        parent = msg.reply_message_id
+        if parent and parent in formatted:
+            parent_depth = depth_of.get(parent, 0)
+            child_depth = parent_depth + 1
+            if child_depth > MAX_DEPTH:
+                roots.append(msg.message_id)
+                depth_of[msg.message_id] = 0
+            else:
+                children[parent].append(msg.message_id)
+                depth_of[msg.message_id] = child_depth
         else:
-            speaker = user_names.get(msg.user_id, msg.user_id[:8])
+            roots.append(msg.message_id)
+            depth_of[msg.message_id] = 0
 
-        lines.append(f"[{time_str}] {speaker}: {rendered}")
+    # 3. 树状渲染
+    lines: list[str] = []
+    rendered_set: set[str] = set()
+
+    def render_node(msg_id: str, prefix: str, is_last: bool, is_root: bool):
+        if msg_id in rendered_set:
+            return
+        rendered_set.add(msg_id)
+        if is_root:
+            lines.append(formatted[msg_id])
+            child_prefix = ""
+        else:
+            connector = "└─ " if is_last else "├─ "
+            lines.append(f"{prefix}{connector}{formatted[msg_id]}")
+            child_prefix = prefix + ("   " if is_last else "│  ")
+
+        child_ids = children.get(msg_id, [])
+        for i, child_id in enumerate(child_ids):
+            render_node(child_id, child_prefix, i == len(child_ids) - 1, False)
+
+    for root_id in roots:
+        render_node(root_id, "", False, True)
+
+    # 4. 兜底：处理未被渲染的消息（循环引用等边界情况）
+    for msg_id in msg_order:
+        if msg_id not in rendered_set and msg_id in formatted:
+            lines.append(formatted[msg_id])
 
     return "\n".join(lines)
 
@@ -273,3 +332,105 @@ async def post_process_impressions(
             count += 1
 
     logger.info(f"Impressions updated for {chat_id}: {count} people")
+
+
+# ==================== 周记生成 ====================
+
+
+async def cron_generate_weekly_reviews(ctx) -> None:
+    """cron 入口：每周一为活跃群生成上周的周记"""
+    chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
+    if not chat_ids:
+        logger.info("No active chats for weekly review, skip")
+        return
+    logger.info(f"Weekly review chats: {len(chat_ids)}")
+
+    for chat_id in chat_ids:
+        try:
+            await generate_weekly_review_for_chat(chat_id)
+        except Exception as e:
+            logger.error(f"Weekly review failed for {chat_id}: {e}")
+
+
+async def generate_weekly_review_for_chat(
+    chat_id: str, target_monday: date | None = None
+) -> str | None:
+    """为指定群生成周记
+
+    Args:
+        chat_id: 群 ID
+        target_monday: 目标周的周一日期，默认为上周一
+
+    Returns:
+        生成的周记内容，无日记时返回 None
+    """
+    # 1. 计算上周日期范围
+    if target_monday is None:
+        today = date.today()
+        # 上周一 = 本周一 - 7天
+        target_monday = today - timedelta(days=today.weekday() + 7)
+    week_start = target_monday.isoformat()
+    week_end = (target_monday + timedelta(days=6)).isoformat()  # 周日
+
+    # 2. 查上周的日记
+    diaries = await get_diaries_in_range(chat_id, week_start, week_end)
+    if not diaries:
+        logger.info(f"No diaries for {chat_id} in {week_start}~{week_end}, skip")
+        return None
+
+    diaries_text = "\n\n".join(
+        f"--- {d.diary_date} ({_WEEKDAY_CN[date.fromisoformat(d.diary_date).weekday()]}) ---\n{d.content}"
+        for d in diaries
+    )
+
+    # 3. 查当前人物印象（作为参考上下文）
+    impressions = await get_all_impressions_for_chat(chat_id)
+    if impressions:
+        # 需要 user_id → name 映射
+        impressions_text = []
+        for imp in impressions:
+            name = await get_username(imp.user_id) or imp.user_id[:8]
+            impressions_text.append(f"- {name}: {imp.impression_text}")
+        impressions_context = "\n".join(impressions_text)
+    else:
+        impressions_context = "（暂无）"
+
+    # 4. 获取 Langfuse prompt 并编译
+    prompt_template = get_prompt("weekly_review_generation")
+    compiled_prompt = prompt_template.compile(
+        week_start=week_start,
+        week_end=week_end,
+        diaries=diaries_text,
+        impressions=impressions_context,
+    )
+
+    # 5. 调用 LLM
+    model = await ModelBuilder.build_chat_model(settings.diary_model)
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled_prompt}],
+    )
+
+    content = response.content
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    if not content:
+        logger.warning(f"LLM returned empty weekly review for {chat_id}")
+        return None
+
+    # 6. 写入数据库
+    await upsert_weekly_review(
+        chat_id=chat_id,
+        week_start=week_start,
+        week_end=week_end,
+        content=content,
+        model=settings.diary_model,
+    )
+
+    logger.info(
+        f"Weekly review generated for {chat_id} ({week_start}~{week_end}): "
+        f"{len(diaries)} diaries, {len(content)} chars"
+    )
+    return content
