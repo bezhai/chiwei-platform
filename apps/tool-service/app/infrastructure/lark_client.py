@@ -57,7 +57,7 @@ async def download_message_resource(bot_name: str, message_id: str, file_key: st
         .file_key(file_key) \
         .type("image") \
         .build()
-    response = client.im.v1.message_resource.get(request)
+    response = await client.im.v1.message_resource.aget(request)
     if not response.success():
         raise RuntimeError(f"Download resource failed: {response.code} {response.msg}")
     return response.file.read()
@@ -69,7 +69,7 @@ async def download_image(bot_name: str, image_key: str) -> bytes:
     request = GetImageRequest.builder() \
         .image_key(image_key) \
         .build()
-    response = client.im.v1.image.get(request)
+    response = await client.im.v1.image.aget(request)
     if not response.success():
         raise RuntimeError(f"Download image failed: {response.code} {response.msg}")
     return response.file.read()
@@ -86,7 +86,7 @@ async def upload_image(bot_name: str, image_data: bytes) -> str:
             .build()
         ) \
         .build()
-    response = client.im.v1.image.create(request)
+    response = await client.im.v1.image.acreate(request)
     if not response.success():
         raise RuntimeError(f"Upload image failed: {response.code} {response.msg}")
     return response.data.image_key
