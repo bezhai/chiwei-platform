@@ -5,16 +5,7 @@ user_invocable: true
 
 # /deploy-test
 
-将当前分支构建并部署到测试泳道进行验证。
-
-## 用法
-
-```
-/deploy-test APP [LANE]
-```
-
-- `APP` — 应用名（必填），如 `paas-engine`、`agent-service`
-- `LANE` — 泳道名（可选），默认从分支名生成
+一键将当前分支部署到测试泳道。
 
 ## 参数
 
@@ -22,49 +13,51 @@ user_invocable: true
 !`echo "$ARGUMENTS"`
 ```
 
-## 指令
+可选传入 `APP`。不传则自动从 `git diff --name-only main...HEAD` 检测改动的 `apps/<APP>/`。
 
-按以下步骤执行：
+## 执行流程
 
-### 1. 解析参数
+### 1. 自动检测
 
-从上面的参数中提取 `APP` 和 `LANE`。如果参数为空或缺少 APP，提示用法并停止。
+- **APP**: 从参数获取，或从改动文件自动检测。涉及多个 app 且未指定时才问用户。
+- **LANE**: 从当前分支名生成（`/` → `-`，截前 20 字符）。
+- **分支**: `git branch --show-current`，禁止在 main 上执行。
 
-LANE 默认规则：取当前分支名，将 `/` 替换为 `-`，截取前 20 个字符。
+### 2. 自动处理脏状态
 
-### 2. 前置检查
-
-- 确认当前不在 main 分支上（`git branch --show-current`），main 分支禁止泳道测试部署
-- 确认没有未提交的改动（`git status --porcelain`），如有则先用 `/commit` 提交
-
-### 3. 推送到远端
+不要问，直接做：
 
 ```bash
+# 有未提交改动 → 自动 commit
+git add -A && git commit -m "wip: auto commit before deploy-test"
+
+# 未推送 → 自动 push
 git push -u origin <branch>
 ```
 
-Kaniko 从 git remote 拉代码，本地 commit 不够。
-
-### 4. 部署
+### 3. 部署
 
 ```bash
 make deploy APP=<APP> GIT_REF=<branch> LANE=<LANE>
 ```
 
-超时上限 5 分钟。如果构建或部署失败，展示错误信息并停止。
+超时 5 分钟。失败则展示错误信息并停止。
 
-### 5. 验证
+### 4. 验证并输出
 
-部署成功后：
+```bash
+kubectl -n prod get pods -l app=<APP>,lane=<LANE>
+```
 
-1. `kubectl -n prod get pods -l app=<APP>,lane=<LANE>` 确认 pod Running
-2. 输出泳道访问方式：通过 `$PAAS_API` + `x-lane: <LANE>` header 访问
+确认 pod Running 后，自动绑定飞书 dev bot：
 
-### 6. 总结
+```bash
+make lane-bind TYPE=bot KEY=dev LANE=<LANE>
+```
 
-输出一行总结：`<APP> 已部署到 <LANE> 泳道，镜像: <image>`
+输出一行总结：
 
-## 注意
-
-- 部署命令在当前 worktree 执行即可，不需要切到主仓库
-- 如果部署失败，用 `make undeploy APP=<APP> LANE=<LANE>` 清理
+```
+✅ <APP> 已部署到 <LANE> 泳道，dev bot 已绑定
+访问: $PAAS_API + header `x-lane: <LANE>`
+```

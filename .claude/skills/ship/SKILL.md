@@ -5,17 +5,7 @@ user_invocable: true
 
 # /ship
 
-创建 PR、合码、部署到生产环境的一键流程。
-
-## 用法
-
-```
-/ship [APP]
-```
-
-- `APP` — 应用名（可选）。如果本次改动只涉及一个 app，自动检测；涉及多个则必须指定。
-  - 对于 `paas-engine`，自动使用 `make self-deploy`（蓝绿部署）
-  - 对于其他应用，使用 `make deploy APP=<APP> GIT_REF=main`
+一键完成：PR → 合码 → 部署生产。用户敲 `/ship` 即表示授权合并和部署。
 
 ## 参数
 
@@ -23,70 +13,71 @@ user_invocable: true
 !`echo "$ARGUMENTS"`
 ```
 
-## 指令
+可选传入 `APP`。不传则自动检测。
 
-按以下步骤执行：
+## 执行流程
 
-### 1. 前置检查
+### 1. 自动检测
 
-- 确认当前不在 main 分支（`git branch --show-current`）
-- 确认没有未提交的改动，如有则先用 `/commit` 提交
-- 确认已推送到远端（`git push`）
+- **APP**: 从参数获取，或从 `git diff --name-only main...HEAD` 检测。涉及多个 app 且未指定时才问。如果只改了根目录文件（Makefile、CLAUDE.md 等），标记为"仅合码，无需部署"。
+- **分支**: `git branch --show-current`，禁止在 main 上执行。
 
-### 2. 检测改动涉及的 APP
+### 2. 自动处理脏状态
 
-运行 `git diff --name-only main...HEAD` 检查改动文件：
-- 如果只涉及 `apps/<APP>/`，自动识别 APP
-- 如果涉及根目录文件（如 Makefile、CLAUDE.md），不需要部署 APP，仅合码
-- 如果涉及多个 app 且未指定参数，询问用户
-
-### 3. 创建 PR
-
-用 `ghc pr create` 创建 PR（如果已存在则跳过）：
-- title: 从 commit 历史中提取，保持简洁（<70 字符）
-- body: 包含 Summary（改动要点）和 Test plan
-
-### 4. 合码
+不要问，直接做：
 
 ```bash
-ghc pr merge <PR_NUMBER> --squash
+# 有未提交改动 → 自动 commit
+git add -A && git commit -m "wip: auto commit before ship"
+
+# 未推送 → 自动 push
+git push -u origin <branch>
 ```
 
-如果有合并冲突，解决冲突后重新推送并重试。
+### 3. 创建 PR 并合码
 
-### 5. 部署
+```bash
+# 创建 PR（已存在则跳过）
+ghc pr create --fill 2>/dev/null || true
 
-**必须在主仓库执行部署**（路径: 当前 worktree 路径去掉 `-worktrees/<name>` 后缀，或通过 `git worktree list` 获取主仓库路径）。
+# 直接合码
+ghc pr merge --squash --delete-branch
+```
+
+合并冲突时：自动 rebase，解决冲突后重新 push 并重试。
+
+### 4. 部署
+
+如果标记为"无需部署"，跳到步骤 5。
+
+**必须在主仓库的 main 分支执行部署**。通过 `git worktree list` 找到主仓库路径（bare 或 main worktree）。
 
 ```bash
 cd <主仓库路径>
-git pull
+git checkout main && git pull
 ```
 
-然后根据 APP 类型：
+根据 APP 类型：
 - `paas-engine`: `make self-deploy GIT_REF=main`
-- 其他 APP: `make deploy APP=<APP> GIT_REF=main`
-- 无需部署（仅根目录文件改动）: 跳过此步
+- 其他: `make deploy APP=<APP> GIT_REF=main`
 
-超时上限 10 分钟。
+超时 10 分钟。
 
-### 6. 验证
+### 5. 清理当前分支的测试泳道
 
-部署完成后：
-- `kubectl -n prod get pods -l app=<APP>` 确认 pod Running
-- 展示部署结果
+只清理**当前分支对应的泳道**（即步骤 1 中按分支名生成的 LANE：`/` → `-`，截前 20 字符），不要动其他泳道。
 
-### 7. 清理测试泳道（如有）
-
-检查是否有该 APP 的非 prod/blue 泳道残留：
 ```bash
-make status APP=<APP>
+make undeploy APP=<APP> LANE=<当前分支对应的泳道名>
+make lane-unbind TYPE=bot KEY=dev
 ```
 
-如有测试泳道，提示用户是否清理。
+如果该泳道不存在则跳过，不报错。
 
-## 注意
+### 6. 验证并输出
 
-- 部署命令**必须在主仓库的 main 分支执行**，不能在 worktree 中执行
-- GIT_REF 必须显式写 `main`
-- 合并后如果不需要部署（如只改了文档），直接跳到清理步骤
+```bash
+kubectl -n prod get pods -l app=<APP>
+```
+
+一行总结：`✅ <APP> 已部署到生产环境，镜像: <version>`
