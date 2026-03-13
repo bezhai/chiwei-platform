@@ -16,12 +16,6 @@ routes:
     service: lark-proxy
     port: 3003
 
-  # Agent Service（日记/周记调试等）
-  - prefix: /api/agent/
-    service: agent-service
-    port: 8000
-    strip_prefix: /api/agent
-
   # 监控面板 API（JWT 认证）
   - prefix: /dashboard/api/
     service: monitor-dashboard
