@@ -10,7 +10,6 @@ import { jwtAuth } from './middleware/jwt-auth';
 
 import authRoutes from './routes/auth';
 import configRoutes from './routes/config';
-import tokenStatsRoutes from './routes/token-stats';
 import messagesRoutes from './routes/messages';
 import providersRoutes from './routes/providers';
 import modelMappingsRoutes from './routes/model-mappings';
@@ -42,7 +41,6 @@ const bootstrap = async () => {
 
   router.use(authRoutes.routes());
   router.use(configRoutes.routes());
-  router.use(tokenStatsRoutes.routes());
   router.use(messagesRoutes.routes());
   router.use(providersRoutes.routes());
   router.use(modelMappingsRoutes.routes());
