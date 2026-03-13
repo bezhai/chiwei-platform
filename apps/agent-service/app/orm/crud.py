@@ -13,6 +13,7 @@ from .models import (
     ModelProvider,
     PersonImpression,
     UserKnowledge,
+    WeeklyReview,
 )
 
 
@@ -385,6 +386,72 @@ async def get_recent_diaries(
             .where(DiaryEntry.chat_id == chat_id)
             .where(DiaryEntry.diary_date < before_date)
             .order_by(DiaryEntry.diary_date.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def get_diaries_in_range(
+    chat_id: str, start_date: str, end_date: str
+) -> list[DiaryEntry]:
+    """查日期范围内的日记（含首尾）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.chat_id == chat_id)
+            .where(DiaryEntry.diary_date >= start_date)
+            .where(DiaryEntry.diary_date <= end_date)
+            .order_by(DiaryEntry.diary_date.asc())
+        )
+        return list(result.scalars().all())
+
+
+# ==================== WeeklyReview CRUD ====================
+
+
+async def upsert_weekly_review(
+    chat_id: str,
+    week_start: str,
+    week_end: str,
+    content: str,
+    model: str | None = None,
+) -> None:
+    """插入或更新周记（upsert by chat_id + week_start）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WeeklyReview)
+            .where(WeeklyReview.chat_id == chat_id)
+            .where(WeeklyReview.week_start == week_start)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.content = content
+            existing.week_end = week_end
+            existing.model = model
+        else:
+            session.add(
+                WeeklyReview(
+                    chat_id=chat_id,
+                    week_start=week_start,
+                    week_end=week_end,
+                    content=content,
+                    model=model,
+                )
+            )
+        await session.commit()
+
+
+async def get_latest_weekly_review(
+    chat_id: str, before_date: str, limit: int = 1
+) -> list[WeeklyReview]:
+    """查最近 N 篇周记（week_start 在 before_date 之前）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WeeklyReview)
+            .where(WeeklyReview.chat_id == chat_id)
+            .where(WeeklyReview.week_start < before_date)
+            .order_by(WeeklyReview.week_start.desc())
             .limit(limit)
         )
         return list(result.scalars().all())
