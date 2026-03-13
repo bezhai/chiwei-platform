@@ -3,7 +3,7 @@ import { context } from '@middleware/context';
 import { v4 as uuidv4 } from 'uuid';
 import { AgentResponseRepository } from '@repositories/repositories';
 import { AgentResponse } from '@entities/agent-response';
-import { rabbitmqClient, RK_CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
+import { rabbitmqClient, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
 
 /**
  * 队列模式回复：发布 chat.request 到 RabbitMQ，立即返回。
@@ -29,7 +29,7 @@ export async function makeTextReply(message: Message): Promise<void> {
     // 发布到 chat.request 队列
     const lane = context.getLane() || getLane() || undefined;
     await rabbitmqClient.publish(
-        RK_CHAT_REQUEST,
+        CHAT_REQUEST,
         {
             session_id: sessionId,
             message_id: message.messageId,

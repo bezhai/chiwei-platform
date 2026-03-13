@@ -20,7 +20,7 @@ import AppDataSource from 'ormconfig';
 import { AgentResponse } from '@entities/agent-response';
 import {
     rabbitmqClient,
-    QUEUE_CHAT_RESPONSE,
+    CHAT_RESPONSE,
     getLane,
     laneQueue,
 } from '@integrations/rabbitmq';
@@ -215,7 +215,7 @@ async function main(): Promise<void> {
 
     // 4. 开始消费
     const lane = getLane();
-    const queue = laneQueue(QUEUE_CHAT_RESPONSE, lane);
+    const queue = laneQueue(CHAT_RESPONSE.queue, lane);
     await rabbitmqClient.consume(queue, handleChatResponse);
     console.info(
         `[ChatResponseWorker] Consuming queue: ${queue}, waiting for messages...`,
