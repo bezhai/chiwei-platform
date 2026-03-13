@@ -14,8 +14,8 @@ from sqlalchemy import text
 
 from app.agents.graphs.post import run_post_safety
 from app.clients.rabbitmq import (
-    QUEUE_SAFETY_CHECK,
-    RK_RECALL,
+    RECALL,
+    SAFETY_CHECK,
     RabbitMQClient,
     _current_lane,
     _lane_queue,
@@ -77,7 +77,7 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
             )
             client = RabbitMQClient.get_instance()
             await client.publish(
-                RK_RECALL,
+                RECALL,
                 {
                     "session_id": session_id,
                     "chat_id": chat_id,
@@ -103,6 +103,6 @@ async def start_post_consumer() -> None:
     await client.connect()
     await client.declare_topology()
     lane = _current_lane()
-    queue = _lane_queue(QUEUE_SAFETY_CHECK, lane)
+    queue = _lane_queue(SAFETY_CHECK.queue, lane)
     await client.consume(queue, handle_safety_check)
     logger.info("Post safety consumer started (queue=%s)", queue)

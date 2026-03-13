@@ -20,8 +20,7 @@ from sqlalchemy.future import select
 from app.agents import InstructionBuilder, create_client
 from app.clients.image_client import image_client
 from app.clients.rabbitmq import (
-    QUEUE_VECTORIZE,
-    RK_VECTORIZE,
+    VECTORIZE,
     RabbitMQClient,
     _current_lane,
     _lane_queue,
@@ -282,7 +281,7 @@ async def start_vectorize_consumer() -> None:
     await client.connect()
     await client.declare_topology()
     lane = _current_lane()
-    queue = _lane_queue(QUEUE_VECTORIZE, lane)
+    queue = _lane_queue(VECTORIZE.queue, lane)
     await client.consume(queue, handle_vectorize)
     logger.info("Vectorize consumer started (queue=%s)", queue)
 
@@ -332,7 +331,7 @@ async def scan_pending_messages() -> int:
 
         # 推送到 RabbitMQ
         for message_id in message_ids:
-            await client.publish(RK_VECTORIZE, {"message_id": message_id})
+            await client.publish(VECTORIZE, {"message_id": message_id})
             total_pushed += 1
 
         logger.info(f"已推送 {len(message_ids)} 条 pending 消息到队列")

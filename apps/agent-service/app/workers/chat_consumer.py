@@ -12,8 +12,8 @@ from aio_pika.abc import AbstractIncomingMessage
 
 from app.agents import stream_chat
 from app.clients.rabbitmq import (
-    QUEUE_CHAT_REQUEST,
-    RK_CHAT_RESPONSE,
+    CHAT_REQUEST,
+    CHAT_RESPONSE,
     RabbitMQClient,
     _current_lane,
     _lane_queue,
@@ -83,7 +83,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                     part = pending[:idx].strip()
                     if part:
                         await client.publish(
-                            RK_CHAT_RESPONSE,
+                            CHAT_RESPONSE,
                             {
                                 **base_response,
                                 "content": part,
@@ -108,7 +108,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
 
             if remaining or messages_sent == 0:
                 await client.publish(
-                    RK_CHAT_RESPONSE,
+                    CHAT_RESPONSE,
                     {
                         **base_response,
                         "content": remaining or full_content,
@@ -122,7 +122,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             else:
                 # split marker 后没有内容，仍需通知 worker 结束
                 await client.publish(
-                    RK_CHAT_RESPONSE,
+                    CHAT_RESPONSE,
                     {
                         **base_response,
                         "content": "",
@@ -148,7 +148,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                 traceback.format_exc(),
             )
             await client.publish(
-                RK_CHAT_RESPONSE,
+                CHAT_RESPONSE,
                 {
                     **base_response,
                     "content": "",
@@ -165,6 +165,6 @@ async def start_chat_consumer() -> None:
     await client.connect()
     await client.declare_topology()
     lane = _current_lane()
-    queue = _lane_queue(QUEUE_CHAT_REQUEST, lane)
+    queue = _lane_queue(CHAT_REQUEST.queue, lane)
     await client.consume(queue, handle_chat_request)
     logger.info("Chat request consumer started (queue=%s)", queue)

@@ -20,8 +20,7 @@ import AppDataSource from 'ormconfig';
 import { AgentResponse } from '@entities/agent-response';
 import {
     rabbitmqClient,
-    RK_RECALL,
-    QUEUE_RECALL,
+    RECALL,
     getLane,
     laneQueue,
 } from '@integrations/rabbitmq';
@@ -62,7 +61,7 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
                     `retrying (${retryCount + 1}/${MAX_RETRY}) with delay ${delayMs}ms`,
             );
             await rabbitmqClient.publish(
-                RK_RECALL,
+                RECALL,
                 payload as unknown as Record<string, unknown>,
                 delayMs,
                 { 'x-retry-count': retryCount + 1 },
@@ -145,7 +144,7 @@ async function main(): Promise<void> {
 
     // 4. 开始消费（按泳道）
     const lane = getLane();
-    const queue = laneQueue(QUEUE_RECALL, lane);
+    const queue = laneQueue(RECALL.queue, lane);
     await rabbitmqClient.consume(queue, handleRecall);
     console.info(`[RecallWorker] Consuming queue: ${queue}, waiting for messages...`);
 }

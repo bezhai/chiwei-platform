@@ -1,7 +1,7 @@
 import { ChatMessage } from 'types/chat';
 import { ConversationMessageRepository } from 'infrastructure/dal/repositories/repositories';
 import { context } from '@middleware/context';
-import { rabbitmqClient, RK_VECTORIZE } from '@integrations/rabbitmq';
+import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
 
 /**
  * 判断消息内容是否为空
@@ -48,7 +48,7 @@ export async function storeMessage(message: ChatMessage): Promise<void> {
         if (!isEmpty) {
             const lane = context.getLane() || undefined;
             await rabbitmqClient.publish(
-                RK_VECTORIZE,
+                VECTORIZE,
                 { message_id: message.message_id, lane: lane },
                 undefined,
                 undefined,

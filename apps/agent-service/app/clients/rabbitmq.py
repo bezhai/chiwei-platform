@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, NamedTuple
 
 import aio_pika
 from aio_pika import DeliveryMode, ExchangeType, Message
@@ -19,17 +19,20 @@ EXCHANGE_NAME = "post_processing"
 DLX_NAME = "post_processing_dlx"
 DLQ_NAME = "dead_letters"
 
-QUEUE_SAFETY_CHECK = "safety_check"
-QUEUE_RECALL = "recall"
-QUEUE_VECTORIZE = "vectorize"
-QUEUE_CHAT_REQUEST = "chat_request"
-QUEUE_CHAT_RESPONSE = "chat_response"
 
-RK_SAFETY_CHECK = "post.safety.check"
-RK_RECALL = "action.recall"
-RK_VECTORIZE = "task.vectorize"
-RK_CHAT_REQUEST = "chat.request"
-RK_CHAT_RESPONSE = "chat.response"
+# Route 当前假设 queue:rk = 1:1，未来如果需要演进为更灵活的结构需另行讨论。
+class Route(NamedTuple):
+    queue: str
+    rk: str
+
+
+CHAT_REQUEST = Route("chat_request", "chat.request")
+CHAT_RESPONSE = Route("chat_response", "chat.response")
+SAFETY_CHECK = Route("safety_check", "post.safety.check")
+RECALL = Route("recall", "action.recall")
+VECTORIZE = Route("vectorize", "task.vectorize")
+
+ALL_ROUTES = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE]
 
 # 非 prod 队列空闲自动删除（24h）
 _NON_PROD_EXPIRES_MS = 86_400_000
@@ -60,6 +63,21 @@ def _lane_rk(base: str, lane: str | None) -> str:
     """返回泳道 routing key：base 或 base.{lane}"""
     return f"{base}.{lane}" if lane else base
 
+def _build_queue_args(prod_rk: str, lane: str | None) -> dict[str, Any]:
+    """构建队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod"""
+    extra: dict[str, Any] = {}
+    if lane:
+        extra["x-expires"] = _NON_PROD_EXPIRES_MS
+    if not lane:
+        return {"x-dead-letter-exchange": DLX_NAME, **extra}
+    return {
+        "x-message-ttl": _LANE_FALLBACK_TTL_MS,
+        "x-dead-letter-exchange": EXCHANGE_NAME,
+        "x-dead-letter-routing-key": prod_rk,
+        **extra,
+    }
+
+
 MessageHandler = Callable[[AbstractIncomingMessage], Coroutine[Any, Any, None]]
 
 
@@ -72,6 +90,7 @@ class RabbitMQClient:
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractRobustChannel | None = None
         self._exchange: aio_pika.abc.AbstractExchange | None = None
+        self._declared_lane_queues: set[str] = set()
 
     @classmethod
     def get_instance(cls) -> "RabbitMQClient":
@@ -88,6 +107,7 @@ class RabbitMQClient:
         self._connection = await aio_pika.connect_robust(url)
         self._channel = await self._connection.channel()
         await self._channel.set_qos(prefetch_count=10)
+        self._declared_lane_queues = set()
         logger.info("RabbitMQ connected: %s", url.split("@")[-1])
 
     async def declare_topology(self) -> None:
@@ -111,71 +131,36 @@ class RabbitMQClient:
             arguments={"x-delayed-type": "topic"},
         )
 
-        # 队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod
-        def queue_args(prod_rk: str) -> dict[str, Any]:
-            extra: dict[str, Any] = {}
-            if lane:
-                extra["x-expires"] = _NON_PROD_EXPIRES_MS
-            if not lane:
-                return {"x-dead-letter-exchange": DLX_NAME, **extra}
-            return {
-                "x-message-ttl": _LANE_FALLBACK_TTL_MS,
-                "x-dead-letter-exchange": EXCHANGE_NAME,
-                "x-dead-letter-routing-key": prod_rk,
-                **extra,
-            }
-
-        # safety_check queue
-        q_safety = await self._channel.declare_queue(
-            _lane_queue(QUEUE_SAFETY_CHECK, lane),
-            durable=True,
-            arguments=queue_args(RK_SAFETY_CHECK),
-        )
-        await q_safety.bind(self._exchange, routing_key=_lane_rk(RK_SAFETY_CHECK, lane))
-
-        # recall queue
-        q_recall = await self._channel.declare_queue(
-            _lane_queue(QUEUE_RECALL, lane),
-            durable=True,
-            arguments=queue_args(RK_RECALL),
-        )
-        await q_recall.bind(self._exchange, routing_key=_lane_rk(RK_RECALL, lane))
-
-        # vectorize queue
-        q_vectorize = await self._channel.declare_queue(
-            _lane_queue(QUEUE_VECTORIZE, lane),
-            durable=True,
-            arguments=queue_args(RK_VECTORIZE),
-        )
-        await q_vectorize.bind(
-            self._exchange, routing_key=_lane_rk(RK_VECTORIZE, lane)
-        )
-
-        # chat_request queue
-        q_chat_req = await self._channel.declare_queue(
-            _lane_queue(QUEUE_CHAT_REQUEST, lane),
-            durable=True,
-            arguments=queue_args(RK_CHAT_REQUEST),
-        )
-        await q_chat_req.bind(
-            self._exchange, routing_key=_lane_rk(RK_CHAT_REQUEST, lane)
-        )
-
-        # chat_response queue
-        q_chat_resp = await self._channel.declare_queue(
-            _lane_queue(QUEUE_CHAT_RESPONSE, lane),
-            durable=True,
-            arguments=queue_args(RK_CHAT_RESPONSE),
-        )
-        await q_chat_resp.bind(
-            self._exchange, routing_key=_lane_rk(RK_CHAT_RESPONSE, lane)
-        )
+        for route in ALL_ROUTES:
+            q = await self._channel.declare_queue(
+                _lane_queue(route.queue, lane),
+                durable=True,
+                arguments=_build_queue_args(route.rk, lane),
+            )
+            await q.bind(
+                self._exchange, routing_key=_lane_rk(route.rk, lane)
+            )
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 
+    async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
+        """懒声明泳道队列：publish 时若目标泳道队列尚未声明，则自动创建并绑定"""
+        cache_key = f"{route.queue}_{lane}"
+        if cache_key in self._declared_lane_queues:
+            return
+        assert self._channel is not None, "must call connect() first"
+        q = await self._channel.declare_queue(
+            _lane_queue(route.queue, lane),
+            durable=True,
+            arguments=_build_queue_args(route.rk, lane),
+        )
+        await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
+        self._declared_lane_queues.add(cache_key)
+        logger.info("Lazy-declared lane queue: %s_%s", route.queue, lane)
+
     async def publish(
         self,
-        routing_key: str,
+        route: Route,
         body: dict,
         delay_ms: int | None = None,
         headers: dict | None = None,
@@ -190,7 +175,10 @@ class RabbitMQClient:
         if lane == "prod":
             lane = None
 
-        actual_rk = _lane_rk(routing_key, lane)
+        if lane:
+            await self._ensure_lane_queue(route, lane)
+
+        actual_rk = _lane_rk(route.rk, lane)
 
         msg_headers: dict[str, Any] = headers or {}
         if delay_ms is not None:
