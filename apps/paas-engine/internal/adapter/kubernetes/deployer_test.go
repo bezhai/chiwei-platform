@@ -347,6 +347,138 @@ func TestDeployWorkerSkipsService(t *testing.T) {
 }
 
 // TestBuildEnvFrom 验证 buildEnvFrom 函数的各种组合。
+func TestGetDeploymentStatus(t *testing.T) {
+	labels := map[string]string{"app": "myapp", "lane": "prod"}
+	replicas := int32(2)
+
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-prod",
+			Namespace: "default",
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+		},
+		Status: appsv1.DeploymentStatus{
+			ReadyReplicas:     2,
+			AvailableReplicas: 2,
+		},
+	}
+
+	healthyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-prod-abc-1",
+			Namespace: "default",
+			Labels:    labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "myapp", Ready: true, RestartCount: 0},
+			},
+		},
+	}
+
+	crashPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-prod-abc-2",
+			Namespace: "default",
+			Labels:    labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "myapp",
+					Ready:        false,
+					RestartCount: 5,
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "CrashLoopBackOff",
+							Message: "back-off restarting failed container",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		objects       []runtime.Object
+		wantDesired   int32
+		wantReady     int32
+		wantPodCount  int
+		wantPodReason string // 检查第一个有 reason 的 pod
+	}{
+		{
+			name:         "healthy deployment",
+			objects:      []runtime.Object{deploy, healthyPod},
+			wantDesired:  2,
+			wantReady:    2,
+			wantPodCount: 1,
+		},
+		{
+			name:          "deployment with crash pod",
+			objects:       []runtime.Object{deploy, healthyPod, crashPod},
+			wantDesired:   2,
+			wantReady:     2,
+			wantPodCount:  2,
+			wantPodReason: "CrashLoopBackOff",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fakeclient.NewSimpleClientset(tt.objects...)
+			deployer := NewK8sDeployer(client, "default")
+
+			status, err := deployer.GetDeploymentStatus(context.Background(), "myapp-prod")
+			if err != nil {
+				t.Fatalf("GetDeploymentStatus() error = %v", err)
+			}
+
+			if status.DeployName != "myapp-prod" {
+				t.Errorf("DeployName = %q, want %q", status.DeployName, "myapp-prod")
+			}
+			if status.Desired != tt.wantDesired {
+				t.Errorf("Desired = %d, want %d", status.Desired, tt.wantDesired)
+			}
+			if status.Ready != tt.wantReady {
+				t.Errorf("Ready = %d, want %d", status.Ready, tt.wantReady)
+			}
+			if len(status.Pods) != tt.wantPodCount {
+				t.Errorf("Pods count = %d, want %d", len(status.Pods), tt.wantPodCount)
+			}
+
+			if tt.wantPodReason != "" {
+				found := false
+				for _, p := range status.Pods {
+					if containsSubstring(p.Reason, tt.wantPodReason) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("no pod with reason containing %q", tt.wantPodReason)
+				}
+			}
+		})
+	}
+}
+
+func TestGetDeploymentStatusNotFound(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default")
+
+	_, err := deployer.GetDeploymentStatus(context.Background(), "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent deployment, got nil")
+	}
+}
+
 func TestBuildEnvFrom(t *testing.T) {
 	tests := []struct {
 		name       string

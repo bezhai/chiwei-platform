@@ -116,11 +116,14 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	if s.deployer != nil {
 		if err := s.deployer.Deploy(ctx, release, app); err != nil {
 			release.Status = domain.ReleaseStatusFailed
+			release.Message = err.Error()
 		} else {
 			release.Status = domain.ReleaseStatusDeployed
+			release.Message = ""
 		}
 	} else {
 		release.Status = domain.ReleaseStatusDeployed
+		release.Message = ""
 	}
 
 	if existing != nil {
@@ -142,6 +145,17 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 
 func (s *ReleaseService) GetRelease(ctx context.Context, id string) (*domain.Release, error) {
 	return s.releaseRepo.FindByID(ctx, id)
+}
+
+func (s *ReleaseService) GetReleaseStatus(ctx context.Context, id string) (*domain.DeploymentStatus, error) {
+	release, err := s.releaseRepo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.deployer == nil {
+		return nil, fmt.Errorf("deployer not configured")
+	}
+	return s.deployer.GetDeploymentStatus(ctx, release.DeployName)
 }
 
 func (s *ReleaseService) ListReleases(ctx context.Context, appName, lane string) ([]*domain.Release, error) {
@@ -203,11 +217,14 @@ func (s *ReleaseService) UpdateRelease(ctx context.Context, id string, body []by
 	if s.deployer != nil {
 		if err := s.deployer.Deploy(ctx, release, app); err != nil {
 			release.Status = domain.ReleaseStatusFailed
+			release.Message = err.Error()
 		} else {
 			release.Status = domain.ReleaseStatusDeployed
+			release.Message = ""
 		}
 	} else {
 		release.Status = domain.ReleaseStatusDeployed
+		release.Message = ""
 	}
 
 	if err := s.releaseRepo.Update(ctx, release); err != nil {
