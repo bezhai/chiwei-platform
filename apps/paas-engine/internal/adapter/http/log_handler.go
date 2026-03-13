@@ -16,7 +16,7 @@ func NewLogHandler(svc *service.LogService) *LogHandler {
 	return &LogHandler{svc: svc}
 }
 
-// QueryLogs 通用日志查询端点 GET /api/v1/logs
+// QueryLogs 通用日志查询端点 GET /api/paas/logs
 func (h *LogHandler) QueryLogs(w http.ResponseWriter, r *http.Request) {
 	opts := parseLogQueryOptions(r)
 
@@ -28,7 +28,7 @@ func (h *LogHandler) QueryLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
 }
 
-// GetLogs 向后兼容端点 GET /api/v1/apps/{app}/logs
+// GetLogs 向后兼容端点 GET /api/paas/apps/{app}/logs
 func (h *LogHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	appName := chi.URLParam(r, "app")
 
