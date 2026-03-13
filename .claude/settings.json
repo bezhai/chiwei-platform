@@ -115,7 +115,8 @@
       "Bash(mkdir *)",
       "Bash(cp *)",
       "Bash(mv *)",
-      "Bash(rm *)"
+      "Bash(rm *)",
+      "Bash(curl *)"
     ]
   },
   "hooks": {
