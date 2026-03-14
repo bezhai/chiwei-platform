@@ -45,15 +45,9 @@ make deploy APP=<APP> GIT_REF=<branch> LANE=<LANE>
 
 ### 4. 验证并输出
 
-```bash
-make pods APP=<APP> LANE=<LANE>
-```
+执行 `/ops pods <APP> <LANE>`，确认 pod Running。
 
-确认 pod Running 后，自动绑定飞书 dev bot：
-
-```bash
-make lane-bind TYPE=bot KEY=dev LANE=<LANE>
-```
+然后执行 `/ops bind bot dev <LANE>` 绑定飞书 dev bot。
 
 输出一行总结：
 

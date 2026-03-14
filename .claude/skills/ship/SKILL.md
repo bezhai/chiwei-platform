@@ -77,15 +77,14 @@ git checkout main && git pull
 
 ```bash
 make undeploy APP=<APP> LANE=<当前分支对应的泳道名>
-make lane-unbind TYPE=bot KEY=dev
 ```
+
+执行 `/ops unbind bot dev` 解绑 dev bot。
 
 如果该泳道不存在则跳过，不报错。
 
 ### 7. 验证并输出
 
-```bash
-make pods APP=<APP>
-```
+执行 `/ops pods <APP>` 确认 pod Running。
 
 一行总结：`✅ <APP> 已部署到生产环境，镜像: <version>`
