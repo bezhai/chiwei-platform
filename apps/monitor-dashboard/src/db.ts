@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { ConversationMessage, LarkUser, LarkGroupChatInfo } from '@inner/shared';
-import { ModelProvider, ModelMapping, SchemaMigration, AuditLog } from './entities';
+import { ModelProvider, ModelMapping, SchemaMigration, AuditLog, DiaryEntry, WeeklyReview } from './entities';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -12,8 +12,8 @@ export const AppDataSource = new DataSource({
   database: process.env.POSTGRES_DB || 'postgres',
   synchronize: false,
   logging: ['error'],
-  entities: [ConversationMessage, ModelProvider, ModelMapping, LarkUser, LarkGroupChatInfo, SchemaMigration, AuditLog],
+  entities: [ConversationMessage, ModelProvider, ModelMapping, LarkUser, LarkGroupChatInfo, SchemaMigration, AuditLog, DiaryEntry, WeeklyReview],
 });
 
 export { ConversationMessage, LarkUser, LarkGroupChatInfo };
-export { ModelProvider, ModelMapping, SchemaMigration, AuditLog };
+export { ModelProvider, ModelMapping, SchemaMigration, AuditLog, DiaryEntry, WeeklyReview };
