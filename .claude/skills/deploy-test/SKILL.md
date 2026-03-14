@@ -45,22 +45,9 @@ make deploy APP=<APP> GIT_REF=<branch> LANE=<LANE>
 
 ### 4. 验证并输出
 
-通过 Dashboard API 查询 Pod 状态（自动审计）：
+执行 `/ops pods <APP> <LANE>`，确认 pod Running。
 
-```bash
-.claude/skills/api-test/scripts/http.sh GET \
-  "$PAAS_API/dashboard/api/ops/services/<APP>/pods?lane=<LANE>" \
-  "X-API-Key: $DASHBOARD_CC_TOKEN"
-```
-
-确认 pod Running 后，自动绑定飞书 dev bot：
-
-```bash
-.claude/skills/api-test/scripts/http.sh POST \
-  "$PAAS_API/dashboard/api/ops/lane-bindings" \
-  '{"route_type":"bot","route_key":"dev","lane_name":"<LANE>"}' \
-  "X-API-Key: $DASHBOARD_CC_TOKEN"
-```
+然后执行 `/ops bind bot dev <LANE>` 绑定飞书 dev bot。
 
 输出一行总结：
 
