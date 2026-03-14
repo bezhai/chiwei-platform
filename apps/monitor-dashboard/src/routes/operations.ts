@@ -8,8 +8,8 @@ const router = new Router();
 /** GET /api/ops/services — 全部服务 + Release 状态 */
 router.get('/api/ops/services', async (ctx) => {
   const [apps, releases] = await Promise.all([
-    paasClient.get('/api/v1/apps/'),
-    paasClient.get('/api/v1/releases/'),
+    paasClient.get('/api/paas/apps/'),
+    paasClient.get('/api/paas/releases/'),
   ]);
   ctx.body = { apps, releases };
 });

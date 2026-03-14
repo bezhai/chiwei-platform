@@ -17,8 +17,8 @@ router.get('/api/service-status', async (ctx) => {
   const timeout = 10000;
 
   const [appsRes, releasesRes] = await Promise.all([
-    axios.get(`${paasApi}/api/v1/apps/`, { headers, timeout }),
-    axios.get(`${paasApi}/api/v1/releases/`, { headers, timeout }),
+    axios.get(`${paasApi}/api/paas/apps/`, { headers, timeout }),
+    axios.get(`${paasApi}/api/paas/releases/`, { headers, timeout }),
   ]);
 
   ctx.body = {
