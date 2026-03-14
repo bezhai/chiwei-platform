@@ -41,6 +41,23 @@ const bootstrap = async () => {
   }
 
   app.use(bodyParser({ jsonLimit: '2mb' }));
+
+  // Global error handler — return JSON instead of crashing
+  app.use(async (ctx, next) => {
+    try {
+      await next();
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+        || (err as { status?: number })?.status
+        || 500;
+      ctx.status = status;
+      ctx.body = {
+        message: err instanceof Error ? err.message : String(err),
+        status,
+      };
+    }
+  });
+
   app.use(jwtAuth);
   app.use(auditMiddleware);
 
