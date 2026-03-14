@@ -80,4 +80,36 @@ describe('markdownToPostContent', () => {
             ],
         });
     });
+
+    it('should skip external URL images (https)', () => {
+        const md = 'before ![photo](https://example.com/pic.png) after';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [
+                [{ tag: 'md', text: 'before' }],
+                [{ tag: 'md', text: 'after' }],
+            ],
+        });
+    });
+
+    it('should skip external URL images (http)', () => {
+        const md = '![image](http://r.jina.ai/some-image.jpg)';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '' }]],
+        });
+    });
+
+    it('should keep valid image_key but skip external URLs in mixed content', () => {
+        const md = 'Text ![a](img_v3_abc) middle ![b](https://files.oaiusercontent.com/fake.png) end';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [
+                [{ tag: 'md', text: 'Text' }],
+                [{ tag: 'img', image_key: 'img_v3_abc' }],
+                [{ tag: 'md', text: 'middle' }],
+                [{ tag: 'md', text: 'end' }],
+            ],
+        });
+    });
 });
