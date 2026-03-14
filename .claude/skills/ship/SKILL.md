@@ -77,15 +77,26 @@ git checkout main && git pull
 
 ```bash
 make undeploy APP=<APP> LANE=<当前分支对应的泳道名>
-make lane-unbind TYPE=bot KEY=dev
+```
+
+通过 Dashboard API 解绑 dev bot（自动审计）：
+
+```bash
+.claude/skills/api-test/scripts/http.sh DELETE \
+  "$PAAS_API/dashboard/api/ops/lane-bindings?type=bot&key=dev" \
+  "X-API-Key: $DASHBOARD_CC_TOKEN"
 ```
 
 如果该泳道不存在则跳过，不报错。
 
 ### 7. 验证并输出
 
+通过 Dashboard API 查询 Pod 状态（自动审计）：
+
 ```bash
-make pods APP=<APP>
+.claude/skills/api-test/scripts/http.sh GET \
+  "$PAAS_API/dashboard/api/ops/services/<APP>/pods" \
+  "X-API-Key: $DASHBOARD_CC_TOKEN"
 ```
 
 一行总结：`✅ <APP> 已部署到生产环境，镜像: <version>`

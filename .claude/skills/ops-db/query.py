@@ -54,9 +54,9 @@ def main():
         print(f"ERROR: 拒绝执行写操作: {sql}", file=sys.stderr)
         sys.exit(1)
 
-    # Call PaaS API via make ops-query
+    # Call Dashboard API for audited db-query
     paas_api = os.environ.get("PAAS_API", "")
-    paas_token = os.environ.get("PAAS_TOKEN", "")
+    cc_token = os.environ.get("DASHBOARD_CC_TOKEN", "")
 
     if not paas_api:
         print("ERROR: PAAS_API 环境变量未设置", file=sys.stderr)
@@ -65,9 +65,9 @@ def main():
     result = subprocess.run(
         [
             "curl", "-sf", "-X", "POST",
-            f"{paas_api}/api/paas/ops/query",
+            f"{paas_api}/dashboard/api/ops/db-query",
             "-H", "Content-Type: application/json",
-            "-H", f"X-API-Key: {paas_token}",
+            "-H", f"X-API-Key: {cc_token}",
             "-d", json.dumps({"db": dbname, "sql": sql}),
         ],
         capture_output=True,
@@ -83,9 +83,8 @@ def main():
         print(f"ERROR: {resp['error']}", file=sys.stderr)
         sys.exit(1)
 
-    data = resp.get("data", {})
     print(json.dumps(
-        {"columns": data.get("columns", []), "rows": data.get("rows", [])},
+        {"columns": resp.get("columns", []), "rows": resp.get("rows", [])},
         default=str,
         ensure_ascii=False,
     ))
