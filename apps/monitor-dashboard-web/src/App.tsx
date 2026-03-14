@@ -7,7 +7,6 @@ import {
   CloudServerOutlined,
   DashboardOutlined,
   DatabaseOutlined,
-  DollarOutlined,
   FileSearchOutlined,
   MessageOutlined,
   MonitorOutlined,
@@ -15,6 +14,8 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  ThunderboltOutlined,
+  AuditOutlined,
 } from '@ant-design/icons';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useState, lazy, Suspense } from 'react';
@@ -24,13 +25,14 @@ import AuthGuard from './components/AuthGuard';
 
 const Login = lazy(() => import('./pages/Login'));
 const ServiceStatus = lazy(() => import('./pages/ServiceStatus'));
-const TokenStats = lazy(() => import('./pages/TokenStats'));
+const Activity = lazy(() => import('./pages/Activity'));
 const Kibana = lazy(() => import('./pages/Kibana'));
 const Langfuse = lazy(() => import('./pages/Langfuse'));
 const Messages = lazy(() => import('./pages/Messages'));
 const Providers = lazy(() => import('./pages/Providers'));
 const ModelMappings = lazy(() => import('./pages/ModelMappings'));
 const MongoExplorer = lazy(() => import('./pages/MongoExplorer'));
+const AuditLogs = lazy(() => import('./pages/AuditLogs'));
 import { themeConfig } from './theme';
 import { clearToken, getLane } from './api/client';
 
@@ -45,9 +47,11 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
-  { key: '/', icon: <DashboardOutlined />, label: '服务状态' },
-  { key: '/token-stats', icon: <DollarOutlined />, label: '用量统计' },
+  { key: '/', icon: <DashboardOutlined />, label: '总览' },
+  { key: '/activity', icon: <ThunderboltOutlined />, label: '赤尾动态' },
   { key: '/messages', icon: <MessageOutlined />, label: '消息记录' },
+  { key: '/audit-logs', icon: <AuditOutlined />, label: '审计日志' },
+  { type: 'divider' },
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
   { type: 'divider' },
@@ -192,7 +196,8 @@ export default function App() {
               <Suspense fallback={null}>
                 <Routes>
                   <Route path="/" element={<ServiceStatus />} />
-                  <Route path="/token-stats" element={<TokenStats />} />
+                  <Route path="/activity" element={<Activity />} />
+                  <Route path="/audit-logs" element={<AuditLogs />} />
                   <Route path="/kibana" element={<Kibana />} />
                   <Route path="/langfuse" element={<Langfuse />} />
                   <Route path="/messages" element={<Messages />} />

@@ -7,16 +7,19 @@ import bodyParser from 'koa-bodyparser';
 import { AppDataSource } from './db';
 import { initMongo } from './mongo';
 import { jwtAuth } from './middleware/jwt-auth';
+import { auditMiddleware } from './middleware/audit';
 
 import authRoutes from './routes/auth';
 import configRoutes from './routes/config';
-import tokenStatsRoutes from './routes/token-stats';
 import messagesRoutes from './routes/messages';
 import providersRoutes from './routes/providers';
 import modelMappingsRoutes from './routes/model-mappings';
 import mongoRoutes from './routes/mongo';
 import migrationsRoutes from './routes/migrations';
 import serviceStatusRoutes from './routes/service-status';
+import operationsRoutes from './routes/operations';
+import auditLogsRoutes from './routes/audit-logs';
+import activityRoutes from './routes/activity';
 
 const PORT = Number(process.env.DASHBOARD_PORT || 3002);
 
@@ -39,16 +42,19 @@ const bootstrap = async () => {
 
   app.use(bodyParser({ jsonLimit: '2mb' }));
   app.use(jwtAuth);
+  app.use(auditMiddleware);
 
   router.use(authRoutes.routes());
   router.use(configRoutes.routes());
-  router.use(tokenStatsRoutes.routes());
   router.use(messagesRoutes.routes());
   router.use(providersRoutes.routes());
   router.use(modelMappingsRoutes.routes());
   router.use(mongoRoutes.routes());
   router.use(migrationsRoutes.routes());
   router.use(serviceStatusRoutes.routes());
+  router.use(operationsRoutes.routes());
+  router.use(auditLogsRoutes.routes());
+  router.use(activityRoutes.routes());
 
   app.use(router.routes());
   app.use(router.allowedMethods());
