@@ -27,8 +27,12 @@ func NewRouter(
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
-	r.Route("/api/v1", func(r chi.Router) {
+	r.Route("/api/paas", func(r chi.Router) {
 		r.Use(authMiddleware(apiToken))
+
+		// Logs (通用查询)
+		r.Get("/logs", logH.QueryLogs)
+
 		// Apps
 		r.Route("/apps", func(r chi.Router) {
 			r.Post("/", appH.Create)

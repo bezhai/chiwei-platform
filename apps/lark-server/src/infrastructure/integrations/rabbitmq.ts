@@ -4,14 +4,19 @@ const EXCHANGE_NAME = 'post_processing';
 const DLX_NAME = 'post_processing_dlx';
 const DLQ_NAME = 'dead_letters';
 
-export const QUEUE_RECALL = 'recall';
-export const QUEUE_VECTORIZE = 'vectorize';
-export const QUEUE_CHAT_REQUEST = 'chat_request';
-export const QUEUE_CHAT_RESPONSE = 'chat_response';
-export const RK_RECALL = 'action.recall';
-export const RK_VECTORIZE = 'task.vectorize';
-export const RK_CHAT_REQUEST = 'chat.request';
-export const RK_CHAT_RESPONSE = 'chat.response';
+// Route 当前假设 queue:rk = 1:1，未来如果需要演进为更灵活的结构需另行讨论。
+export interface Route {
+    readonly queue: string;
+    readonly rk: string;
+}
+
+export const CHAT_REQUEST: Route = { queue: 'chat_request', rk: 'chat.request' };
+export const CHAT_RESPONSE: Route = { queue: 'chat_response', rk: 'chat.response' };
+export const SAFETY_CHECK: Route = { queue: 'safety_check', rk: 'post.safety.check' };
+export const RECALL: Route = { queue: 'recall', rk: 'action.recall' };
+export const VECTORIZE: Route = { queue: 'vectorize', rk: 'task.vectorize' };
+
+const ALL_ROUTES: Route[] = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE];
 
 const NON_PROD_EXPIRES_MS = 86_400_000;
 const LANE_FALLBACK_TTL_MS = 10_000;
@@ -35,12 +40,28 @@ export function laneRK(base: string, lane?: string): string {
     return lane ? `${base}.${lane}` : base;
 }
 
+function buildQueueArgs(prodRK: string, lane?: string): Record<string, unknown> {
+    const extra: Record<string, unknown> = lane
+        ? { 'x-expires': NON_PROD_EXPIRES_MS }
+        : {};
+    if (!lane) {
+        return { 'x-dead-letter-exchange': DLX_NAME, ...extra };
+    }
+    return {
+        'x-message-ttl': LANE_FALLBACK_TTL_MS,
+        'x-dead-letter-exchange': EXCHANGE_NAME,
+        'x-dead-letter-routing-key': prodRK,
+        ...extra,
+    };
+}
+
 class RabbitMQClient {
     private static instance: RabbitMQClient;
     private conn: ChannelModel | null = null;
     private channel: Channel | null = null;
     private reconnecting = false;
     private consumers: Array<{ queue: string; handler: MessageHandler }> = [];
+    private declaredLaneQueues = new Set<string>();
 
     private constructor() {}
 
@@ -91,47 +112,28 @@ class RabbitMQClient {
             arguments: { 'x-delayed-type': 'topic' },
         });
 
-        // 队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod
-        function queueArgs(prodRK: string): Record<string, unknown> {
-            const extra: Record<string, unknown> = lane
-                ? { 'x-expires': NON_PROD_EXPIRES_MS }
-                : {};
-            if (!lane) {
-                return { 'x-dead-letter-exchange': DLX_NAME, ...extra };
-            }
-            return {
-                'x-message-ttl': LANE_FALLBACK_TTL_MS,
-                'x-dead-letter-exchange': EXCHANGE_NAME,
-                'x-dead-letter-routing-key': prodRK,
-                ...extra,
-            };
+        for (const route of ALL_ROUTES) {
+            const qName = laneQueue(route.queue, lane);
+            await ch.assertQueue(qName, { durable: true, arguments: buildQueueArgs(route.rk, lane) });
+            await ch.bindQueue(qName, EXCHANGE_NAME, laneRK(route.rk, lane));
         }
-
-        // recall queue
-        const recallQ = laneQueue(QUEUE_RECALL, lane);
-        await ch.assertQueue(recallQ, { durable: true, arguments: queueArgs(RK_RECALL) });
-        await ch.bindQueue(recallQ, EXCHANGE_NAME, laneRK(RK_RECALL, lane));
-
-        // vectorize queue
-        const vectorizeQ = laneQueue(QUEUE_VECTORIZE, lane);
-        await ch.assertQueue(vectorizeQ, { durable: true, arguments: queueArgs(RK_VECTORIZE) });
-        await ch.bindQueue(vectorizeQ, EXCHANGE_NAME, laneRK(RK_VECTORIZE, lane));
-
-        // chat_request queue
-        const chatReqQ = laneQueue(QUEUE_CHAT_REQUEST, lane);
-        await ch.assertQueue(chatReqQ, { durable: true, arguments: queueArgs(RK_CHAT_REQUEST) });
-        await ch.bindQueue(chatReqQ, EXCHANGE_NAME, laneRK(RK_CHAT_REQUEST, lane));
-
-        // chat_response queue
-        const chatRespQ = laneQueue(QUEUE_CHAT_RESPONSE, lane);
-        await ch.assertQueue(chatRespQ, { durable: true, arguments: queueArgs(RK_CHAT_RESPONSE) });
-        await ch.bindQueue(chatRespQ, EXCHANGE_NAME, laneRK(RK_CHAT_RESPONSE, lane));
 
         console.info(`[RabbitMQ] topology declared (lane=${lane || 'prod'})`);
     }
 
+    private async ensureLaneQueue(route: Route, lane: string): Promise<void> {
+        const cacheKey = `${route.queue}_${lane}`;
+        if (this.declaredLaneQueues.has(cacheKey)) return;
+        const ch = this.getChannel();
+        const qName = laneQueue(route.queue, lane);
+        await ch.assertQueue(qName, { durable: true, arguments: buildQueueArgs(route.rk, lane) });
+        await ch.bindQueue(qName, EXCHANGE_NAME, laneRK(route.rk, lane));
+        this.declaredLaneQueues.add(cacheKey);
+        console.info(`[RabbitMQ] Lazy-declared lane queue: ${route.queue}_${lane}`);
+    }
+
     async publish(
-        routingKey: string,
+        route: Route,
         body: Record<string, unknown>,
         delayMs?: number,
         headers?: Record<string, unknown>,
@@ -142,7 +144,12 @@ class RabbitMQClient {
         // 默认取当前泳道；传入 lane 则使用传入值
         const effectiveLane =
             lane !== undefined ? (lane === 'prod' ? undefined : lane) : getLane();
-        const actualRK = laneRK(routingKey, effectiveLane);
+
+        if (effectiveLane) {
+            await this.ensureLaneQueue(route, effectiveLane);
+        }
+
+        const actualRK = laneRK(route.rk, effectiveLane);
 
         const msgHeaders: Record<string, unknown> = { ...headers };
         if (delayMs !== undefined) {
@@ -215,6 +222,7 @@ class RabbitMQClient {
     private scheduleReconnect(): void {
         if (this.reconnecting) return;
         this.reconnecting = true;
+        this.declaredLaneQueues.clear();
         setTimeout(async () => {
             this.reconnecting = false;
             try {
