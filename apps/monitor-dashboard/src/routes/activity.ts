@@ -21,36 +21,44 @@ router.get('/api/activity/overview', async (ctx) => {
   );
 
   // Per-group stats with daily breakdown for sparkline
+  // Two lightweight queries instead of one expensive CROSS JOIN LATERAL
   const groupStats = await AppDataSource.query(
     `SELECT
        cm.chat_id,
        COALESCE(g.name, cm.chat_id) AS group_name,
-       COUNT(*) AS message_count,
-       COUNT(*) FILTER (WHERE cm.role = 'assistant') AS bot_replies,
-       json_agg(
-         json_build_object('date', d.date::text, 'count', COALESCE(dc.cnt, 0))
-         ORDER BY d.date
-       ) AS daily_counts
+       COUNT(*)::int AS message_count,
+       COUNT(*) FILTER (WHERE cm.role = 'assistant')::int AS bot_replies
      FROM conversation_messages cm
      LEFT JOIN lark_group_chat_info g ON g.chat_id = cm.chat_id
-     CROSS JOIN LATERAL (
-       SELECT generate_series(
-         (NOW() - make_interval(days => $1))::date,
-         NOW()::date,
-         '1 day'::interval
-       )::date AS date
-     ) d
-     LEFT JOIN LATERAL (
-       SELECT COUNT(*) AS cnt
-       FROM conversation_messages cm2
-       WHERE cm2.chat_id = cm.chat_id
-         AND cm2.created_at::date = d.date
-     ) dc ON true
      WHERE cm.created_at >= NOW() - make_interval(days => $1)
      GROUP BY cm.chat_id, g.name
      ORDER BY message_count DESC`,
     [days],
   );
+
+  // Daily counts per group — simple GROUP BY, no CROSS JOIN
+  const dailyCounts = await AppDataSource.query(
+    `SELECT
+       chat_id,
+       created_at::date AS date,
+       COUNT(*)::int AS count
+     FROM conversation_messages
+     WHERE created_at >= NOW() - make_interval(days => $1)
+     GROUP BY chat_id, created_at::date
+     ORDER BY date`,
+    [days],
+  );
+
+  // Merge daily counts into group stats
+  const dailyMap = new Map<string, Array<{ date: string; count: number }>>();
+  for (const row of dailyCounts) {
+    const arr = dailyMap.get(row.chat_id) || [];
+    arr.push({ date: row.date, count: row.count });
+    dailyMap.set(row.chat_id, arr);
+  }
+  for (const group of groupStats) {
+    group.daily_counts = dailyMap.get(group.chat_id) || [];
+  }
 
   ctx.body = {
     summary: summary[0] || {},
