@@ -81,34 +81,22 @@ export default function Activity() {
     try {
       const [overviewRes, diaryRes] = await Promise.all([
         api.get('/activity/overview', { params: { days: 7 } }),
-        api.get('/activity/diary-status').catch(() => ({ data: { diary: { rows: [] }, weekly: { rows: [] } } })),
+        api.get('/activity/diary-status').catch(() => ({ data: { diary: [], weekly: [] } })),
       ]);
 
       setSummary(overviewRes.data.summary || {});
       setGroups(overviewRes.data.groups || []);
 
-      // Parse diary/weekly data from ops/query result format
+      // diary-status returns arrays of {chat_id, latest_diary_date, diary_count_7d}
       const dMap = new Map<string, DiaryRow>();
-      const diaryData = diaryRes.data.diary;
-      if (diaryData?.rows) {
-        for (const row of diaryData.rows) {
-          const cols = diaryData.columns || [];
-          const obj: Record<string, string> = {};
-          cols.forEach((c: string, i: number) => { obj[c] = row[i]; });
-          dMap.set(obj.chat_id, obj as unknown as DiaryRow);
-        }
+      for (const row of (diaryRes.data.diary || [])) {
+        dMap.set(row.chat_id, row);
       }
       setDiaryMap(dMap);
 
       const wMap = new Map<string, WeeklyRow>();
-      const weeklyData = diaryRes.data.weekly;
-      if (weeklyData?.rows) {
-        for (const row of weeklyData.rows) {
-          const cols = weeklyData.columns || [];
-          const obj: Record<string, string> = {};
-          cols.forEach((c: string, i: number) => { obj[c] = row[i]; });
-          wMap.set(obj.chat_id, obj as unknown as WeeklyRow);
-        }
+      for (const row of (diaryRes.data.weekly || [])) {
+        wMap.set(row.chat_id, row);
       }
       setWeeklyMap(wMap);
     } catch (e) {
