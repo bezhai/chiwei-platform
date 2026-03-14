@@ -150,8 +150,14 @@ export function markdownToPostContent(markdown: string): PostContent {
                 content.push([{ tag: 'md', text } as MdPostNode]);
             }
         }
-        content.push([{ tag: 'img', image_key: match[1] } as ImgPostNode]);
         lastIndex = match.index + match[0].length;
+
+        const imageKey = match[1];
+        if (imageKey.startsWith('http://') || imageKey.startsWith('https://')) {
+            // 外部 URL，跳过图片节点（模型编造的链接无法显示）
+            continue;
+        }
+        content.push([{ tag: 'img', image_key: imageKey } as ImgPostNode]);
     }
 
     if (lastIndex < markdown.length) {
@@ -162,7 +168,8 @@ export function markdownToPostContent(markdown: string): PostContent {
     }
 
     if (content.length === 0) {
-        content.push([{ tag: 'md', text: markdown } as MdPostNode]);
+        // lastIndex > 0 说明匹配到了图片但全被跳过（外部 URL），不输出原始 markdown
+        content.push([{ tag: 'md', text: lastIndex > 0 ? '' : markdown } as MdPostNode]);
     }
 
     return { content };
