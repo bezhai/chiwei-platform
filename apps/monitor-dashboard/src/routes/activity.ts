@@ -25,34 +25,24 @@ router.get('/api/activity/overview', async (ctx) => {
 
   const repo = AppDataSource.getRepository(ConversationMessage);
 
-  // 4 simple count queries
-  const [periodTotal, todayTotal, todayBotReplies, todayActiveGroups] = await Promise.all([
-    repo.createQueryBuilder('cm')
-      .where('cm.create_time >= :since', { since })
-      .getCount(),
-
-    repo.createQueryBuilder('cm')
-      .where('cm.create_time >= :todayMs', { todayMs })
-      .getCount(),
-
-    repo.createQueryBuilder('cm')
-      .where('cm.create_time >= :todayMs', { todayMs })
-      .andWhere('cm.role = :role', { role: 'assistant' })
-      .getCount(),
-
-    repo.createQueryBuilder('cm')
-      .select('cm.chat_id')
-      .where('cm.create_time >= :todayMs', { todayMs })
-      .groupBy('cm.chat_id')
-      .getCount(),
-  ]);
-
-  // Fetch raw rows, aggregate in JS
+  // Single query, all aggregation in JS
   const rows = await repo
     .createQueryBuilder('cm')
     .select(['cm.chat_id', 'cm.create_time', 'cm.role'])
     .where('cm.create_time >= :since', { since })
     .getMany();
+
+  // Compute summary from rows
+  const todayChats = new Set<string>();
+  let todayTotal = 0;
+  let todayBotReplies = 0;
+  for (const row of rows) {
+    if (Number(row.create_time) >= Number(todayMs)) {
+      todayTotal++;
+      todayChats.add(row.chat_id);
+      if (row.role === 'assistant') todayBotReplies++;
+    }
+  }
 
   // Group name lookup
   const chatIds = [...new Set(rows.map((r) => r.chat_id))];
@@ -102,10 +92,10 @@ router.get('/api/activity/overview', async (ctx) => {
 
   ctx.body = {
     summary: {
-      period_total: periodTotal,
+      period_total: rows.length,
       today_total: todayTotal,
       today_bot_replies: todayBotReplies,
-      today_active_groups: todayActiveGroups,
+      today_active_groups: todayChats.size,
     },
     groups,
   };
