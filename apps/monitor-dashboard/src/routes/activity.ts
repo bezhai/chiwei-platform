@@ -43,7 +43,7 @@ router.get('/api/activity/overview', async (ctx) => {
     repo.createQueryBuilder('cm')
       .select('cm.chat_id')
       .where('cm.create_time >= :todayMs', { todayMs })
-      .distinctOn(['cm.chat_id'])
+      .groupBy('cm.chat_id')
       .getCount(),
   ]);
 
