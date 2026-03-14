@@ -34,6 +34,8 @@ func main() {
 	imageRepoRepo := repository.NewImageRepoRepo(db)
 	buildRepo := repository.NewBuildRepo(db)
 	releaseRepo := repository.NewReleaseRepo(db)
+	ciConfigRepo := repository.NewCIConfigRepo(db)
+	pipelineRunRepo := repository.NewPipelineRunRepo(db)
 
 	// K8s 客户端（可选，无集群时降级运行）
 	cs, _, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
@@ -43,6 +45,7 @@ func main() {
 
 	var deployer port.Deployer
 	var buildExecutor port.BuildExecutor
+	var testExecutor port.TestExecutor
 
 	if cs != nil {
 		deployer = kubernetes.NewK8sDeployer(cs, cfg.DeployNamespace)
@@ -56,6 +59,12 @@ func main() {
 			HttpProxy:          cfg.BuildHttpProxy,
 			NoProxy:            cfg.BuildNoProxy,
 		})
+		testExecutor = kubernetes.NewK8sTestExecutor(cs, kubernetes.TestExecutorConfig{
+			Namespace: cfg.CINamespace,
+			GitRepo:   cfg.CIGitRepo,
+			HttpProxy: cfg.BuildHttpProxy,
+			NoProxy:   cfg.BuildNoProxy,
+		})
 	}
 
 	// Loki 日志查询
@@ -67,6 +76,7 @@ func main() {
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
 	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
+	pipelineSvc := service.NewPipelineService(ciConfigRepo, pipelineRunRepo, testExecutor, buildSvc, releaseSvc, appRepo, imageRepoRepo)
 
 	// 启动 Build Informer
 	ctx := context.Background()
@@ -74,6 +84,15 @@ func main() {
 		go func() {
 			if err := buildExecutor.Watch(ctx, buildSvc.OnBuildStatusChange); err != nil {
 				slog.Error("build informer error", "error", err)
+			}
+		}()
+	}
+
+	// 启动 Test Informer
+	if testExecutor != nil {
+		go func() {
+			if err := testExecutor.Watch(ctx, pipelineSvc.OnTestJobStatusChange); err != nil {
+				slog.Error("test informer error", "error", err)
 			}
 		}()
 	}
@@ -96,6 +115,7 @@ func main() {
 		httpadapter.NewLogHandler(logSvc),
 		httpadapter.NewImageRepoHandler(imageRepoSvc),
 		httpadapter.NewOpsHandler(opsDbs),
+		httpadapter.NewPipelineHandler(pipelineSvc),
 		cfg.APIToken,
 	)
 

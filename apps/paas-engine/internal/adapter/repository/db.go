@@ -19,6 +19,10 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 		&ImageRepoModel{},
 		&BuildModel{},
 		&ReleaseModel{},
+		&CIConfigModel{},
+		&PipelineRunModel{},
+		&StageRunModel{},
+		&JobRunModel{},
 	); err != nil {
 		return nil, err
 	}

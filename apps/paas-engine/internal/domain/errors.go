@@ -18,4 +18,7 @@ var (
 	ErrImageRepoNotFound = fmt.Errorf("image repo %w", ErrNotFound)
 
 	ErrNonMainProdDeploy = fmt.Errorf("%w: prod lane only accepts images built from main branch", ErrInvalidInput)
+
+	ErrCIConfigNotFound   = fmt.Errorf("ci config %w", ErrNotFound)
+	ErrPipelineRunNotFound = fmt.Errorf("pipeline run %w", ErrNotFound)
 )

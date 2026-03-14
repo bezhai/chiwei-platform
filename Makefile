@@ -1,4 +1,4 @@
-.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query logs lane-bind lane-unbind lane-bindings
+.PHONY: deploy self-deploy release undeploy status latest-build pods ops-query logs lane-bind lane-unbind lane-bindings ci-init ci-status ci-logs ci-cleanup ci-trigger ci-list
 
 # ---------- 参数 ----------
 # APP        — 应用名（必填），对应 apps/<APP> 和 PaaS 注册的应用名
@@ -290,3 +290,87 @@ lane-bindings:
 	@curl -sf $(PAAS_API)/api/lark/lane-bindings \
 	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  | python3 -c "import sys,json; [print(f\"  {r['route_type']:6s} | {r['route_key']:30s} | {r['lane_name']}\") for r in json.load(sys.stdin).get('data', [])]"
+
+# ---------- CI Pipeline ----------
+
+BRANCH   ?= $(shell git rev-parse --abbrev-ref HEAD)
+SERVICES ?=
+
+## 注册 CI 泳道
+## 用法: make ci-init LANE=feat-auth BRANCH=feat/auth-rework SERVICES=agent-service,lark-server
+ci-init:
+	$(if $(LANE),,$(error LANE 未指定))
+	$(if $(BRANCH),,$(error BRANCH 未指定))
+	$(if $(SERVICES),,$(error SERVICES 未指定。用法: make ci-init LANE=<lane> BRANCH=<branch> SERVICES=svc1,svc2))
+	@echo ">>> 注册 CI 泳道: $(LANE) <- $(BRANCH) [$(SERVICES)]"
+	@SVC_JSON=$$(echo '$(SERVICES)' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip().split(',')))") && \
+	curl -sf -X POST $(PAAS_API)/api/paas/ci/register \
+	  -H 'Content-Type: application/json' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+	  -d "{\"lane\":\"$(LANE)\",\"branch\":\"$(BRANCH)\",\"services\":$$SVC_JSON}" \
+	  | python3 -c "\
+import sys,json; \
+d=json.load(sys.stdin); \
+err=d.get('error'); \
+exit(print(f'ERROR: {err}') or 1) if err else print(json.dumps(d.get('data',{}), indent=2))"
+
+## 查看最近 pipeline run 状态
+## 用法: make ci-status LANE=feat-auth
+ci-status:
+	$(if $(LANE),,$(error LANE 未指定))
+	@echo ">>> CI 状态: $(LANE)"
+	@curl -sf "$(PAAS_API)/api/paas/ci/$(LANE)/runs?limit=5" \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+	  | python3 -c "\
+import sys,json; \
+runs=json.load(sys.stdin).get('data',[]); \
+[print(f\"  {r['id'][:8]}  {r['status']:10s}  {r['commit_sha'][:8]}  {r.get('message','')}\") for r in runs] if runs else print('  (无 pipeline 记录)')"
+
+## 查看 pipeline run 详情（含 stages + jobs）
+## 用法: make ci-logs LANE=feat-auth [RUN_ID=xxx]
+ci-logs:
+	$(if $(LANE),,$(error LANE 未指定))
+	@if [ -n "$(RUN_ID)" ]; then \
+		curl -sf "$(PAAS_API)/api/paas/ci/runs/$(RUN_ID)/" \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+			| python3 -m json.tool; \
+	else \
+		RUN_ID=$$(curl -sf "$(PAAS_API)/api/paas/ci/$(LANE)/runs?limit=1" \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+			| python3 -c "import sys,json; runs=json.load(sys.stdin).get('data',[]); print(runs[0]['id'] if runs else '')" 2>/dev/null) && \
+		if [ -z "$$RUN_ID" ]; then echo "  无 pipeline 记录"; exit 0; fi && \
+		curl -sf "$(PAAS_API)/api/paas/ci/runs/$$RUN_ID/" \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+			| python3 -m json.tool; \
+	fi
+
+## 注销 CI 泳道 + 删除泳道 Release
+## 用法: make ci-cleanup LANE=feat-auth
+ci-cleanup:
+	$(if $(LANE),,$(error LANE 未指定))
+	@echo ">>> 清理 CI 泳道: $(LANE)"
+	@curl -sf -X DELETE "$(PAAS_API)/api/paas/ci/$(LANE)/" \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+	  | python3 -m json.tool
+
+## 手动触发 pipeline（调试用）
+## 用法: make ci-trigger LANE=feat-auth
+ci-trigger:
+	$(if $(LANE),,$(error LANE 未指定))
+	@echo ">>> 手动触发 CI: $(LANE)"
+	@curl -sf -X POST "$(PAAS_API)/api/paas/ci/$(LANE)/trigger" \
+	  -H 'Content-Type: application/json' \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+	  -d '{}' \
+	  | python3 -m json.tool
+
+## 列出所有 CI 配置
+## 用法: make ci-list
+ci-list:
+	@echo ">>> 活跃 CI 配置"
+	@curl -sf "$(PAAS_API)/api/paas/ci/" \
+	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+	  | python3 -c "\
+import sys,json; \
+configs=json.load(sys.stdin).get('data',[]); \
+[print(f\"  {c['lane']:20s} | {c['branch']:30s} | {','.join(c.get('services',[]))}\") for c in configs] if configs else print('  (无活跃 CI 配置)')"

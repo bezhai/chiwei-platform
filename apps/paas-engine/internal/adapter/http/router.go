@@ -14,6 +14,7 @@ func NewRouter(
 	logH *LogHandler,
 	imageRepoH *ImageRepoHandler,
 	opsH *OpsHandler,
+	pipelineH *PipelineHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -85,6 +86,22 @@ func NewRouter(
 				r.Get("/", imageRepoH.Get)
 				r.Put("/", imageRepoH.Update)
 				r.Delete("/", imageRepoH.Delete)
+			})
+		})
+
+		// CI Pipeline
+		r.Route("/ci", func(r chi.Router) {
+			r.Post("/register", pipelineH.Register)
+			r.Get("/", pipelineH.List)
+			r.Route("/runs/{id}", func(r chi.Router) {
+				r.Get("/", pipelineH.GetRun)
+				r.Post("/cancel", pipelineH.CancelRun)
+				r.Get("/logs", pipelineH.GetLogs)
+			})
+			r.Route("/{lane}", func(r chi.Router) {
+				r.Delete("/", pipelineH.Unregister)
+				r.Get("/runs", pipelineH.ListRuns)
+				r.Post("/trigger", pipelineH.Trigger)
 			})
 		})
 	})

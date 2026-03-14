@@ -67,3 +67,62 @@ type ReleaseModel struct {
 }
 
 func (ReleaseModel) TableName() string { return "releases" }
+
+// CIConfigModel 是 CIConfig 的数据库持久化模型。
+type CIConfigModel struct {
+	ID        string `gorm:"primaryKey"`
+	Lane      string `gorm:"uniqueIndex"`
+	Branch    string `gorm:"index"`
+	Services  string // JSON 序列化的 []string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (CIConfigModel) TableName() string { return "ci_configs" }
+
+// PipelineRunModel 是 PipelineRun 的数据库持久化模型。
+type PipelineRunModel struct {
+	ID         string `gorm:"primaryKey"`
+	CIConfigID string `gorm:"index"`
+	GitRef     string
+	CommitSHA  string `gorm:"index"`
+	Lane       string `gorm:"index"`
+	Services   string // JSON 序列化的 []string
+	Status     string
+	Message    string `gorm:"type:text"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+func (PipelineRunModel) TableName() string { return "pipeline_runs" }
+
+// StageRunModel 是 StageRun 的数据库持久化模型。
+type StageRunModel struct {
+	ID            string `gorm:"primaryKey"`
+	PipelineRunID string `gorm:"index"`
+	Stage         string
+	Seq           int
+	Status        string
+	Message       string `gorm:"type:text"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+func (StageRunModel) TableName() string { return "stage_runs" }
+
+// JobRunModel 是 JobRun 的数据库持久化模型。
+type JobRunModel struct {
+	ID         string `gorm:"primaryKey"`
+	StageRunID string `gorm:"index"`
+	Name       string
+	JobType    string
+	RefID      string
+	K8sJobName string
+	Status     string
+	Log        string `gorm:"type:text"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+func (JobRunModel) TableName() string { return "job_runs" }
