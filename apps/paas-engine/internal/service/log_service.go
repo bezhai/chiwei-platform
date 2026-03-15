@@ -29,6 +29,7 @@ type LogQueryOptions struct {
 	App       string // 逗号分隔多 app，空=查全部
 	Lane      string
 	Pod       string
+	Namespace string // 可选，覆盖默认 deployNamespace
 	Since     string // 与 Start/End 二选一
 	Start     string // RFC3339，优先于 Since
 	End       string // RFC3339，不填=now
@@ -104,8 +105,13 @@ func (s *LogService) QueryLogs(ctx context.Context, opts LogQueryOptions) (strin
 		direction = "backward"
 	}
 
+	namespace := s.deployNamespace
+	if opts.Namespace != "" {
+		namespace = opts.Namespace
+	}
+
 	query := port.AppLogQuery{
-		Namespace: s.deployNamespace,
+		Namespace: namespace,
 		Apps:      apps,
 		Lane:      opts.Lane,
 		Pod:       opts.Pod,

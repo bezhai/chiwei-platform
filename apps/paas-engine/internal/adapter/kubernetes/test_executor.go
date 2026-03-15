@@ -20,11 +20,11 @@ var _ port.TestExecutor = (*K8sTestExecutor)(nil)
 
 const labelJobRunID = "paas.chiwei/jobrun-id"
 
-// runtimeImages 定义每种 runtime 对应的测试镜像。
+// runtimeImages 定义每种 runtime 对应的测试镜像（使用 Harbor 内部镜像）。
 var runtimeImages = map[string]string{
-	"go":     "golang:1.25",
-	"python": "python:3.12-slim",
-	"bun":    "oven/bun:1.2",
+	"go":     "harbor.local:30002/library/golang:1.25-alpine",
+	"python": "harbor.local:30002/library/python:3.11-slim",
+	"bun":    "harbor.local:30002/library/bun:1.3.9-slim",
 }
 
 type K8sTestExecutor struct {
@@ -62,8 +62,8 @@ func (e *K8sTestExecutor) Submit(ctx context.Context, sub *port.TestSubmission) 
 		return "", fmt.Errorf("unsupported runtime %q", sub.Runtime)
 	}
 
-	// 构建 git clone URL
-	gitURL := sub.GitRepo
+	// 拼装 https:// 前缀用于 git clone
+	gitURL := "https://github.com/" + sub.GitRepo
 	gitRef := sub.GitRef
 	if gitRef == "" {
 		gitRef = "main"
@@ -72,10 +72,10 @@ func (e *K8sTestExecutor) Submit(ctx context.Context, sub *port.TestSubmission) 
 	// Init container: clone repo
 	initContainer := corev1.Container{
 		Name:    "git-clone",
-		Image:   "alpine/git:latest",
+		Image:   "harbor.local:30002/library/alpine:latest",
 		Command: []string{"sh", "-c"},
 		Args: []string{
-			fmt.Sprintf("git clone --depth 1 --branch %s %s /workspace", gitRef, gitURL),
+			fmt.Sprintf("apk add --no-cache git && git clone --depth 1 --branch '%s' '%s' /workspace", gitRef, gitURL),
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "workspace", MountPath: "/workspace"},

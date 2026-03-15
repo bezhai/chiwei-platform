@@ -76,7 +76,7 @@ func main() {
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
 	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
-	pipelineSvc := service.NewPipelineService(ciConfigRepo, pipelineRunRepo, testExecutor, buildSvc, releaseSvc, appRepo, imageRepoRepo)
+	pipelineSvc := service.NewPipelineService(ciConfigRepo, pipelineRunRepo, testExecutor, buildSvc, releaseSvc, appRepo, imageRepoRepo, lokiClient, cfg.CINamespace)
 
 	// 启动 Build Informer
 	ctx := context.Background()

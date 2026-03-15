@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ type PipelineService struct {
 	releaseSvc   *ReleaseService
 	appRepo      port.AppRepository
 	imageRepo    port.ImageRepoRepository
+	logQuerier   port.LogQuerier
+	ciNamespace  string
 }
 
 func NewPipelineService(
@@ -30,6 +33,8 @@ func NewPipelineService(
 	releaseSvc *ReleaseService,
 	appRepo port.AppRepository,
 	imageRepo port.ImageRepoRepository,
+	logQuerier port.LogQuerier,
+	ciNamespace string,
 ) *PipelineService {
 	return &PipelineService{
 		ciConfigRepo: ciConfigRepo,
@@ -39,6 +44,8 @@ func NewPipelineService(
 		releaseSvc:   releaseSvc,
 		appRepo:      appRepo,
 		imageRepo:    imageRepo,
+		logQuerier:   logQuerier,
+		ciNamespace:  ciNamespace,
 	}
 }
 
@@ -210,21 +217,46 @@ func (s *PipelineService) CancelPipelineRun(ctx context.Context, id string) erro
 	return s.pipelineRepo.Update(ctx, run)
 }
 
-// GetJobLogs 获取指定 job 的日志。
+// GetJobLogs 获取指定 job 的日志。三级降级：Pod → Loki → DB。
 func (s *PipelineService) GetJobLogs(ctx context.Context, jobRunID string) (string, error) {
 	job, err := s.pipelineRepo.FindJobByID(ctx, jobRunID)
 	if err != nil {
 		return "", err
 	}
 
-	// 尝试从 K8s Pod 读实时日志
+	// 1. 尝试从 K8s Pod 读实时日志
 	if s.testExecutor != nil && job.JobType == string(domain.StageUnitTest) {
 		logs, err := s.testExecutor.GetLogs(ctx, job.ID)
 		if err == nil && logs != "" {
 			return logs, nil
 		}
+		if err != nil {
+			slog.Warn("failed to get pod logs for ci job, trying loki", "job_id", jobRunID, "error", err)
+		}
 	}
 
+	// 2. 尝试从 Loki 查询历史日志
+	if s.logQuerier != nil && s.ciNamespace != "" && job.JobType == string(domain.StageUnitTest) {
+		podPrefix := "ci-test-" + strings.ReplaceAll(job.ID, "-", "")[:24]
+		start := job.CreatedAt.Add(-1 * time.Minute)
+		end := job.UpdatedAt.Add(5 * time.Minute)
+		query := port.AppLogQuery{
+			Namespace: s.ciNamespace,
+			Pod:       podPrefix,
+			Start:     start,
+			End:       end,
+			Limit:     5000,
+			Direction: "forward",
+		}
+		logs, err := s.logQuerier.QueryAppLogs(ctx, query)
+		if err != nil {
+			slog.Warn("failed to get loki logs for ci job, falling back to db", "job_id", jobRunID, "error", err)
+		} else if logs != "" {
+			return logs, nil
+		}
+	}
+
+	// 3. 降级：返回 DB 中存储的日志
 	return job.Log, nil
 }
 

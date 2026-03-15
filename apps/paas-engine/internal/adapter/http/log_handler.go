@@ -62,6 +62,7 @@ func parseLogQueryOptions(r *http.Request) service.LogQueryOptions {
 		App:       q.Get("app"),
 		Lane:      q.Get("lane"),
 		Pod:       q.Get("pod"),
+		Namespace: q.Get("namespace"),
 		Since:     since,
 		Start:     q.Get("start"),
 		End:       q.Get("end"),
