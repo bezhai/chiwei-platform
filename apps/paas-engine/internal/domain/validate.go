@@ -21,13 +21,16 @@ func ValidateK8sName(name string) error {
 // gitRefRegex 白名单：字母、数字、-、_、.、/
 var gitRefRegex = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
-// ValidateGitRepo 校验 Git 仓库地址，只允许 https:// 或 git:// 协议，防止 SSRF。
+// gitRepoRegex 匹配 user/repo 格式（如 bezhai/chiwei-platform.git）。
+var gitRepoRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$`)
+
+// ValidateGitRepo 校验 Git 仓库地址，要求 user/repo 格式，由调用方拼装协议前缀。
 func ValidateGitRepo(repo string) error {
 	if repo == "" {
 		return fmt.Errorf("%w: git_repo is required", ErrInvalidInput)
 	}
-	if !strings.HasPrefix(repo, "https://") && !strings.HasPrefix(repo, "git://") {
-		return fmt.Errorf("%w: git_repo must use https:// or git:// protocol", ErrInvalidInput)
+	if !gitRepoRegex.MatchString(repo) {
+		return fmt.Errorf("%w: git_repo must be in user/repo format (e.g. bezhai/chiwei-platform.git)", ErrInvalidInput)
 	}
 	return nil
 }
