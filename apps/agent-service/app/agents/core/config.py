@@ -58,7 +58,7 @@ AgentRegistry.register(
     "research",
     AgentConfig(
         prompt_id="research_agent",
-        model_id="main-chat-model",
+        model_id="research-model",
         trace_name="research",
     ),
 )
