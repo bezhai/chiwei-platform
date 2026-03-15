@@ -11,10 +11,12 @@ from app.agents.core.context import (
     MediaContext,
     MessageContext,
 )
+from app.agents.core.sub_agent import SubAgent
 
 __all__ = [
     # Agent
     "ChatAgent",
+    "SubAgent",
     # Context
     "AgentContext",
     "MessageContext",
