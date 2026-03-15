@@ -72,10 +72,10 @@ func (e *K8sTestExecutor) Submit(ctx context.Context, sub *port.TestSubmission) 
 	// Init container: clone repo
 	initContainer := corev1.Container{
 		Name:    "git-clone",
-		Image:   "harbor.local:30002/library/alpine:latest",
+		Image:   "harbor.local:30002/library/alpine-git:latest",
 		Command: []string{"sh", "-c"},
 		Args: []string{
-			fmt.Sprintf("apk add --no-cache git && git clone --depth 1 --branch '%s' '%s' /workspace", gitRef, gitURL),
+			fmt.Sprintf("git clone --depth 1 --branch '%s' '%s' /workspace", gitRef, gitURL),
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "workspace", MountPath: "/workspace"},
