@@ -62,3 +62,12 @@ AgentRegistry.register(
         trace_name="pre",
     ),
 )
+
+AgentRegistry.register(
+    "research",
+    AgentConfig(
+        prompt_id="research_agent",
+        model_id="main-chat-model",
+        trace_name="research",
+    ),
+)

@@ -46,7 +46,11 @@ CORRECTION_MESSAGE = (
 COMPLEXITY_HINTS = {
     Complexity.SIMPLE: "【简洁模式】倾向于直接回答或单次工具调用，快速响应用户。",
     Complexity.COMPLEX: "【深度模式】可以多步推理，充分利用工具收集信息后再综合回答。",
-    Complexity.SUPER_COMPLEX: "【研究模式】这是一个复杂的研究任务，可以进行深入分析和多轮工具调用。",
+    Complexity.SUPER_COMPLEX: (
+        "【研究模式】这是一个需要深入研究的复杂任务。"
+        "请优先使用 deep_research 工具委派给调研 Agent 进行多轮搜索和信息综合，"
+        "拿到调研报告后再用你自己的风格组织回答。"
+    ),
 }
 
 
