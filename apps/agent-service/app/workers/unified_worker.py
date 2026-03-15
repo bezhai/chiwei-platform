@@ -15,7 +15,6 @@ from inner_shared.logger import setup_logging
 from app.config.config import settings
 from app.long_tasks.executor import poll_and_execute_tasks
 from app.workers.diary_worker import cron_generate_diaries, cron_generate_weekly_reviews
-from app.workers.memory_worker import cron_consolidate_profiles
 from app.workers.vectorize_worker import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
@@ -59,14 +58,8 @@ class UnifiedWorkerSettings:
         cron(task_executor_job, minute=None),
         # 2. 向量化 pending 消息扫描：每 10 分钟一次
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
-        # 3. 记忆画像沉淀：每 4 小时一次
-        cron(
-            cron_consolidate_profiles,
-            hour={2, 6, 10, 14, 18, 22},
-            minute={15},
-        ),
-        # 4. 日记生成：每天 CST 03:00
+        # 3. 日记生成：每天 CST 03:00
         cron(cron_generate_diaries, hour={3}, minute={0}),
-        # 5. 周记生成：每周一 CST 04:00（日记 cron 之后 1 小时）
+        # 4. 周记生成：每周一 CST 04:00（日记 cron 之后 1 小时）
         cron(cron_generate_weekly_reviews, weekday={0}, hour={4}, minute={0}),
     ]

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal
@@ -12,7 +12,6 @@ from .models import (
     ModelMapping,
     ModelProvider,
     PersonImpression,
-    UserKnowledge,
     WeeklyReview,
 )
 
@@ -118,191 +117,6 @@ async def get_message_content(message_id: str) -> str | None:
             ConversationMessage.message_id == message_id
         )
         return await session.scalar(stmt)
-
-
-# ==================== UserKnowledge CRUD ====================
-
-
-async def get_user_knowledge(user_id: str) -> UserKnowledge | None:
-    """根据 user_id 获取用户知识"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(UserKnowledge).where(UserKnowledge.user_id == user_id)
-        )
-        return result.scalar_one_or_none()
-
-
-async def upsert_user_knowledge(
-    user_id: str,
-    facts: list,
-    personality_note: str | None,
-    communication_style: str | None,
-    last_consolidation_message_time: int,
-) -> None:
-    """插入或更新用户知识"""
-    async with AsyncSessionLocal() as session:
-        existing = await session.get(UserKnowledge, user_id)
-        now = datetime.now(UTC)
-
-        if existing is None:
-            session.add(
-                UserKnowledge(
-                    user_id=user_id,
-                    facts=facts,
-                    personality_note=personality_note,
-                    communication_style=communication_style,
-                    last_consolidation_at=now,
-                    last_consolidation_message_time=last_consolidation_message_time,
-                    consolidation_count=1,
-                )
-            )
-        else:
-            existing.facts = facts
-            if personality_note is not None:
-                existing.personality_note = personality_note
-            if communication_style is not None:
-                existing.communication_style = communication_style
-            existing.last_consolidation_at = now
-            existing.last_consolidation_message_time = last_consolidation_message_time
-            existing.consolidation_count = (existing.consolidation_count or 0) + 1
-
-        await session.commit()
-
-
-async def advance_consolidation_cursor(
-    user_id: str,
-    last_consolidation_message_time: int,
-) -> None:
-    """仅前移沉淀游标，不修改 facts（用于 skip 路径）"""
-    async with AsyncSessionLocal() as session:
-        existing = await session.get(UserKnowledge, user_id)
-        now = datetime.now(UTC)
-
-        if existing is None:
-            session.add(
-                UserKnowledge(
-                    user_id=user_id,
-                    facts=[],
-                    last_consolidation_at=now,
-                    last_consolidation_message_time=last_consolidation_message_time,
-                    consolidation_count=0,
-                )
-            )
-        else:
-            existing.last_consolidation_at = now
-            existing.last_consolidation_message_time = last_consolidation_message_time
-
-        await session.commit()
-
-
-async def get_user_messages_since(
-    user_id: str, since_time: int, limit: int = 200
-) -> list[ConversationMessage]:
-    """获取用户在所有 chat 中自 since_time 以来的消息（仅用户发的，不含 assistant）"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ConversationMessage)
-            .where(ConversationMessage.user_id == user_id)
-            .where(ConversationMessage.role == "user")
-            .where(ConversationMessage.create_time > since_time)
-            .order_by(ConversationMessage.create_time.asc())
-            .limit(limit)
-        )
-        return list(result.scalars().all())
-
-
-async def get_surrounding_messages(
-    chat_id: str, create_time: int, before: int = 3, after: int = 2
-) -> list[ConversationMessage]:
-    """获取指定消息周围的上下文消息"""
-    async with AsyncSessionLocal() as session:
-        # 前 N 条
-        before_result = await session.execute(
-            select(ConversationMessage)
-            .where(ConversationMessage.chat_id == chat_id)
-            .where(ConversationMessage.create_time < create_time)
-            .order_by(ConversationMessage.create_time.desc())
-            .limit(before)
-        )
-        before_msgs = list(before_result.scalars().all())
-        before_msgs.reverse()
-
-        # 后 N 条
-        after_result = await session.execute(
-            select(ConversationMessage)
-            .where(ConversationMessage.chat_id == chat_id)
-            .where(ConversationMessage.create_time > create_time)
-            .order_by(ConversationMessage.create_time.asc())
-            .limit(after)
-        )
-        after_msgs = list(after_result.scalars().all())
-
-        return before_msgs + after_msgs
-
-
-async def get_message_by_id(message_id: str) -> ConversationMessage | None:
-    """根据 message_id 获取单条消息"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ConversationMessage).where(
-                ConversationMessage.message_id == message_id
-            )
-        )
-        return result.scalar_one_or_none()
-
-
-async def get_active_users_for_consolidation(
-    min_messages: int = 10, max_users: int = 50
-) -> list[dict]:
-    """找出需要画像沉淀的用户
-
-    条件：自上次沉淀以来有 >= min_messages 条新消息的用户
-    返回 [{user_id, message_count, since_time}]
-    """
-    async with AsyncSessionLocal() as session:
-        # 子查询：获取每个用户上次沉淀的时间戳
-        profile_subq = select(
-            UserKnowledge.user_id,
-            UserKnowledge.last_consolidation_message_time,
-        ).subquery()
-
-        # 统计每个用户自上次沉淀以来的消息数
-        stmt = (
-            select(
-                ConversationMessage.user_id,
-                func.count().label("message_count"),
-                func.coalesce(profile_subq.c.last_consolidation_message_time, 0).label(
-                    "since_time"
-                ),
-            )
-            .outerjoin(
-                profile_subq,
-                ConversationMessage.user_id == profile_subq.c.user_id,
-            )
-            .where(ConversationMessage.role == "user")
-            .where(
-                ConversationMessage.create_time
-                > func.coalesce(profile_subq.c.last_consolidation_message_time, 0)
-            )
-            .group_by(
-                ConversationMessage.user_id,
-                profile_subq.c.last_consolidation_message_time,
-            )
-            .having(func.count() >= min_messages)
-            .order_by(text("message_count DESC"))
-            .limit(max_users)
-        )
-
-        result = await session.execute(stmt)
-        return [
-            {
-                "user_id": row.user_id,
-                "message_count": row.message_count,
-                "since_time": row.since_time,
-            }
-            for row in result.all()
-        ]
-
 
 
 # ==================== Diary CRUD ====================
