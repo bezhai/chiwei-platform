@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -24,8 +25,10 @@ type Config struct {
 	ChiweiDatabaseURL string
 
 	// CI Pipeline
-	CINamespace string // K8s namespace for CI test jobs
-	CIGitRepo   string // monorepo git URL for CI test jobs
+	CINamespace     string        // K8s namespace for CI test jobs
+	CIGitRepo       string        // monorepo git URL for CI test jobs
+	GitHubToken     string        // GitHub PAT for polling branch commits
+	GitPollInterval time.Duration // git polling interval (default 60s)
 }
 
 func Load() *Config {
@@ -47,8 +50,10 @@ func Load() *Config {
 		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
 		ChiweiDatabaseURL: os.Getenv("CHIWEI_DATABASE_URL"),
 
-		CINamespace: getEnv("CI_NAMESPACE", "paas-builds"),
-		CIGitRepo:   os.Getenv("CI_GIT_REPO"),
+		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),
+		CIGitRepo:       os.Getenv("CI_GIT_REPO"),
+		GitHubToken:     os.Getenv("GITHUB_TOKEN"),
+		GitPollInterval: parseDuration(os.Getenv("GIT_POLL_INTERVAL"), 60*time.Second),
 	}
 }
 
@@ -64,6 +69,17 @@ func splitCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+func parseDuration(s string, defaultVal time.Duration) time.Duration {
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultVal
+	}
+	return d
 }
 
 func getEnv(key, defaultVal string) string {
