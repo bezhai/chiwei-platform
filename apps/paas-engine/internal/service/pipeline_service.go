@@ -375,7 +375,7 @@ func (s *PipelineService) runUnitTestStage(ctx context.Context, run *domain.Pipe
 
 			sub := &port.TestSubmission{
 				JobRunID: job.ID,
-				GitRepo:  s.resolveGitRepo(ctx),
+				GitRepo:  s.resolveGitRepo(ctx, svc),
 				GitRef:   run.GitRef,
 				Runtime:  runtime,
 				Command:  cmd,
@@ -564,13 +564,17 @@ func (s *PipelineService) fillRunDetails(ctx context.Context, run *domain.Pipeli
 	return run, nil
 }
 
-// resolveGitRepo 获取 monorepo 的 git 地址。
-func (s *PipelineService) resolveGitRepo(ctx context.Context) string {
-	repos, err := s.imageRepo.FindAll(ctx)
-	if err != nil || len(repos) == 0 {
+// resolveGitRepo 通过 app → imageRepo 获取 git 仓库地址。
+func (s *PipelineService) resolveGitRepo(ctx context.Context, appName string) string {
+	app, err := s.appRepo.FindByName(ctx, appName)
+	if err != nil || app.ImageRepoName == "" {
 		return ""
 	}
-	return repos[0].GitRepo
+	repo, err := s.imageRepo.FindByName(ctx, app.ImageRepoName)
+	if err != nil {
+		return ""
+	}
+	return repo.GitRepo
 }
 
 // resolveUnitTestCommand 根据服务名推断 runtime 和测试命令。
