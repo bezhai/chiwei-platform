@@ -62,10 +62,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	ttl := int32(3600)
 	backoff := int32(0)
 
-	gitContext := sub.GitRepo
-	if strings.HasPrefix(gitContext, "https://") || strings.HasPrefix(gitContext, "http://") {
-		gitContext = "git://" + strings.TrimPrefix(strings.TrimPrefix(gitContext, "https://"), "http://")
-	}
+	gitContext := "git://github.com/" + sub.GitRepo
 	gitRef := sub.GitRef
 	if gitRef != "" && !strings.HasPrefix(gitRef, "refs/") {
 		if isCommitHash(gitRef) {

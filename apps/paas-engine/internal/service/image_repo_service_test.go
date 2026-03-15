@@ -41,7 +41,7 @@ func TestCreateImageRepo_Success(t *testing.T) {
 	repo, err := svc.CreateImageRepo(context.Background(), CreateImageRepoRequest{
 		Name:       "agent-service",
 		Registry:   "harbor.local/inner-bot/agent-service",
-		GitRepo:    "https://github.com/bezhai/chiwei-platform.git",
+		GitRepo:    "bezhai/chiwei-platform.git",
 		ContextDir: "apps/agent-service",
 	})
 	if err != nil {
@@ -61,7 +61,7 @@ func TestCreateImageRepo_InvalidName(t *testing.T) {
 	_, err := svc.CreateImageRepo(context.Background(), CreateImageRepoRequest{
 		Name:     "INVALID_NAME",
 		Registry: "harbor.local/inner-bot/test",
-		GitRepo:  "https://github.com/example/repo.git",
+		GitRepo:  "example/repo.git",
 	})
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
@@ -73,7 +73,7 @@ func TestCreateImageRepo_MissingRegistry(t *testing.T) {
 
 	_, err := svc.CreateImageRepo(context.Background(), CreateImageRepoRequest{
 		Name:    "myrepo",
-		GitRepo: "https://github.com/example/repo.git",
+		GitRepo: "example/repo.git",
 	})
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
@@ -86,7 +86,7 @@ func TestCreateImageRepo_InvalidContextDir(t *testing.T) {
 	_, err := svc.CreateImageRepo(context.Background(), CreateImageRepoRequest{
 		Name:       "myrepo",
 		Registry:   "harbor.local/inner-bot/test",
-		GitRepo:    "https://github.com/example/repo.git",
+		GitRepo:    "example/repo.git",
 		ContextDir: "../etc/passwd",
 	})
 	if !errors.Is(err, domain.ErrInvalidInput) {
@@ -111,7 +111,7 @@ func TestUpdateImageRepo_PartialKeepsExisting(t *testing.T) {
 	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
 		Name:       "myrepo",
 		Registry:   "harbor.local/inner-bot/test",
-		GitRepo:    "https://github.com/example/repo.git",
+		GitRepo:    "example/repo.git",
 		ContextDir: "apps/test",
 		Dockerfile: "Dockerfile.prod",
 		NoCache:    false,
@@ -129,8 +129,8 @@ func TestUpdateImageRepo_PartialKeepsExisting(t *testing.T) {
 	if repo.Registry != "harbor.local/inner-bot/test" {
 		t.Errorf("Registry = %q, want %q", repo.Registry, "harbor.local/inner-bot/test")
 	}
-	if repo.GitRepo != "https://github.com/example/repo.git" {
-		t.Errorf("GitRepo = %q, want %q", repo.GitRepo, "https://github.com/example/repo.git")
+	if repo.GitRepo != "example/repo.git" {
+		t.Errorf("GitRepo = %q, want %q", repo.GitRepo, "example/repo.git")
 	}
 	if repo.ContextDir != "apps/test" {
 		t.Errorf("ContextDir = %q, want %q", repo.ContextDir, "apps/test")
