@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { markdownToPostContent } from './post-content-processor';
+import { markdownToPostContent, sanitizeFeishuMarkdown } from './post-content-processor';
 
 describe('markdownToPostContent', () => {
     it('should convert plain text to a single md node', () => {
@@ -111,5 +111,59 @@ describe('markdownToPostContent', () => {
                 [{ tag: 'md', text: 'end' }],
             ],
         });
+    });
+
+    it('should strip bold markers wrapping CJK punctuation like 《》', () => {
+        const md = '**《Python入门》**是一本好书';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '《Python入门》是一本好书' }]],
+        });
+    });
+
+    it('should strip bold markers ending with CJK punctuation', () => {
+        const md = '推荐**重要的概念：**这是说明';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '推荐重要的概念：这是说明' }]],
+        });
+    });
+
+    it('should keep bold markers wrapping normal CJK text', () => {
+        const md = '这是**重要概念**的说明';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '这是**重要概念**的说明' }]],
+        });
+    });
+});
+
+describe('sanitizeFeishuMarkdown', () => {
+    it('should strip bold markers adjacent to CJK punctuation', () => {
+        expect(sanitizeFeishuMarkdown('**《重要》**')).toBe('《重要》');
+        expect(sanitizeFeishuMarkdown('**概念：**')).toBe('概念：');
+        expect(sanitizeFeishuMarkdown('**！注意**')).toBe('！注意');
+        expect(sanitizeFeishuMarkdown('**（注意）**')).toBe('（注意）');
+    });
+
+    it('should keep bold markers for normal text', () => {
+        expect(sanitizeFeishuMarkdown('**重要**')).toBe('**重要**');
+        expect(sanitizeFeishuMarkdown('**bold text**')).toBe('**bold text**');
+    });
+
+    it('should handle mixed bold in one line', () => {
+        const input = '**变量和类型** — **《Python入门》** 是好书';
+        const result = sanitizeFeishuMarkdown(input);
+        expect(result).toContain('**变量和类型**');
+        expect(result).toContain('《Python入门》');
+        expect(result).not.toContain('**《');
+    });
+
+    it('should not modify plain text', () => {
+        expect(sanitizeFeishuMarkdown('普通文本')).toBe('普通文本');
+    });
+
+    it('should handle empty string', () => {
+        expect(sanitizeFeishuMarkdown('')).toBe('');
     });
 });

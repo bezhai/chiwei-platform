@@ -134,18 +134,46 @@ export async function createPostContentFromText(text: string): Promise<PostConte
 }
 
 /**
+ * CJK 及全角标点字符集
+ * 飞书 md 标签的 markdown 解析器不支持 ** 紧邻这些字符作为加粗定界符，
+ * 类似 CommonMark 对 Unicode 标点的左/右定界规则。
+ */
+const CJK_PUNCT = /[\u3000-\u303F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]/;
+
+/**
+ * 修复加粗标记与 CJK/全角标点相邻导致飞书 md 标签无法渲染的问题。
+ *
+ * 飞书 markdown 解析器要求 ** 紧邻的字符是"词字符"才能识别为加粗定界符，
+ * 当 ** 后紧跟 《、（、：等 CJK 标点时不会被识别为加粗开始符，
+ * 结果是原始 ** 直接显示在消息中。
+ *
+ * 此函数检测这类无法渲染的 **text** 模式并去除 ** 标记。
+ */
+export function sanitizeFeishuMarkdown(text: string): string {
+    return text.replace(/\*\*((?:[^*]|\*(?!\*))+?)\*\*/g, (match, content: string) => {
+        const firstChar = content.charAt(0);
+        const lastChar = content.charAt(content.length - 1);
+        if (CJK_PUNCT.test(firstChar) || CJK_PUNCT.test(lastChar)) {
+            return content;
+        }
+        return match;
+    });
+}
+
+/**
  * 将 markdown 文本转换为 PostContent，识别 ![alt](image_key) 图片语法
  * 图片之间的文本使用 md 节点渲染（支持加粗、斜体等 markdown 格式）
  */
 export function markdownToPostContent(markdown: string): PostContent {
+    const sanitized = sanitizeFeishuMarkdown(markdown);
     const IMAGE_PATTERN = /!\[.*?\]\(([^)]+)\)/g;
     const content: PostNode[][] = [];
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
-    while ((match = IMAGE_PATTERN.exec(markdown)) !== null) {
+    while ((match = IMAGE_PATTERN.exec(sanitized)) !== null) {
         if (match.index > lastIndex) {
-            const text = markdown.slice(lastIndex, match.index).trim();
+            const text = sanitized.slice(lastIndex, match.index).trim();
             if (text) {
                 content.push([{ tag: 'md', text } as MdPostNode]);
             }
@@ -160,8 +188,8 @@ export function markdownToPostContent(markdown: string): PostContent {
         content.push([{ tag: 'img', image_key: imageKey } as ImgPostNode]);
     }
 
-    if (lastIndex < markdown.length) {
-        const text = markdown.slice(lastIndex).trim();
+    if (lastIndex < sanitized.length) {
+        const text = sanitized.slice(lastIndex).trim();
         if (text) {
             content.push([{ tag: 'md', text } as MdPostNode]);
         }
@@ -169,7 +197,7 @@ export function markdownToPostContent(markdown: string): PostContent {
 
     if (content.length === 0) {
         // lastIndex > 0 说明匹配到了图片但全被跳过（外部 URL），不输出原始 markdown
-        content.push([{ tag: 'md', text: lastIndex > 0 ? '' : markdown } as MdPostNode]);
+        content.push([{ tag: 'md', text: lastIndex > 0 ? '' : sanitized } as MdPostNode]);
     }
 
     return { content };
