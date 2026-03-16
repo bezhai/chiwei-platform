@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { markdownToPostContent } from './post-content-processor';
+import { markdownToPostContent, sanitizeFeishuMarkdown } from './post-content-processor';
 
 describe('markdownToPostContent', () => {
     it('should convert plain text to a single md node', () => {
@@ -111,5 +111,97 @@ describe('markdownToPostContent', () => {
                 [{ tag: 'md', text: 'end' }],
             ],
         });
+    });
+
+    it('should strip bold markers around CJK book title marks 《》', () => {
+        const md = '推荐**《三体》**这本书';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '推荐《三体》这本书' }]],
+        });
+    });
+
+    it('should strip bold markers around CJK brackets 【】', () => {
+        const md = '**【重要】请注意**';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '【重要】请注意' }]],
+        });
+    });
+
+    it('should preserve bold markers around normal CJK text', () => {
+        const md = '这是**重要通知**请查收';
+        const result = markdownToPostContent(md);
+        expect(result).toEqual({
+            content: [[{ tag: 'md', text: '这是**重要通知**请查收' }]],
+        });
+    });
+});
+
+describe('sanitizeFeishuMarkdown', () => {
+    it('should strip bold around text starting with 《', () => {
+        expect(sanitizeFeishuMarkdown('**《三体》**')).toBe('《三体》');
+    });
+
+    it('should strip bold around text ending with 》', () => {
+        expect(sanitizeFeishuMarkdown('推荐**《三体》**')).toBe('推荐《三体》');
+    });
+
+    it('should strip bold around text starting with 【', () => {
+        expect(sanitizeFeishuMarkdown('**【重要】通知**')).toBe('【重要】通知');
+    });
+
+    it('should strip bold around text ending with 】', () => {
+        expect(sanitizeFeishuMarkdown('**标题【注意】**')).toBe('标题【注意】');
+    });
+
+    it('should strip bold around text with 「」', () => {
+        expect(sanitizeFeishuMarkdown('**「引用内容」**')).toBe('「引用内容」');
+    });
+
+    it('should strip bold around text with （）', () => {
+        expect(sanitizeFeishuMarkdown('**（备注内容）**')).toBe('（备注内容）');
+    });
+
+    it('should preserve bold around normal text', () => {
+        expect(sanitizeFeishuMarkdown('**重要通知**')).toBe('**重要通知**');
+    });
+
+    it('should preserve bold around English text', () => {
+        expect(sanitizeFeishuMarkdown('**important**')).toBe('**important**');
+    });
+
+    it('should handle mixed bold with and without CJK punctuation', () => {
+        expect(sanitizeFeishuMarkdown('推荐**《三体》**和**重要通知**'))
+            .toBe('推荐《三体》和**重要通知**');
+    });
+
+    it('should not affect text without bold markers', () => {
+        expect(sanitizeFeishuMarkdown('普通文本《三体》')).toBe('普通文本《三体》');
+    });
+
+    it('should strip italic around text with CJK paired punctuation', () => {
+        expect(sanitizeFeishuMarkdown('*《三体》*')).toBe('《三体》');
+    });
+
+    it('should preserve italic around normal text', () => {
+        expect(sanitizeFeishuMarkdown('*重要*')).toBe('*重要*');
+    });
+
+    it('should handle multiple problematic bold segments', () => {
+        expect(sanitizeFeishuMarkdown('**《三体》**和**《黑暗森林》**'))
+            .toBe('《三体》和《黑暗森林》');
+    });
+
+    it('should handle empty string', () => {
+        expect(sanitizeFeishuMarkdown('')).toBe('');
+    });
+
+    it('should strip bold around text with Chinese double quotes ""', () => {
+        expect(sanitizeFeishuMarkdown('**\u201C三体\u201D**')).toBe('\u201C三体\u201D');
+    });
+
+    it('should strip bold around text with Chinese single quotes \u2018\u2019', () => {
+        expect(sanitizeFeishuMarkdown('**\u2018重要\u2019**')).toBe('\u2018重要\u2019');
     });
 });
