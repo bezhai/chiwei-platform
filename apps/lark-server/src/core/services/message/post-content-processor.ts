@@ -138,7 +138,7 @@ export async function createPostContentFromText(text: string): Promise<PostConte
  * 飞书 md 标签的 markdown 解析器不支持 ** 紧邻这些字符作为加粗定界符，
  * 类似 CommonMark 对 Unicode 标点的左/右定界规则。
  */
-const CJK_PUNCT = /[\u3000-\u303F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]/;
+const CJK_PUNCT = /[\u2010-\u2027\u3000-\u303F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]/;
 
 /**
  * 修复加粗标记与 CJK/全角标点相邻导致飞书 md 标签无法渲染的问题。

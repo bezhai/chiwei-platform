@@ -144,6 +144,9 @@ describe('sanitizeFeishuMarkdown', () => {
         expect(sanitizeFeishuMarkdown('**概念：**')).toBe('概念：');
         expect(sanitizeFeishuMarkdown('**！注意**')).toBe('！注意');
         expect(sanitizeFeishuMarkdown('**（注意）**')).toBe('（注意）');
+        // 中文引号
+        expect(sanitizeFeishuMarkdown(`**\u201C重要\u201D**`)).toBe(`\u201C重要\u201D`);
+        expect(sanitizeFeishuMarkdown(`**\u2018注意\u2019**`)).toBe(`\u2018注意\u2019`);
     });
 
     it('should keep bold markers for normal text', () => {
