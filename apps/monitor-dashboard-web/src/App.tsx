@@ -1,4 +1,4 @@
-import { Layout, Menu, ConfigProvider, Button, Dropdown, Avatar, Space, Typography, Tag } from 'antd';
+import { Layout, Menu, ConfigProvider, Button, Dropdown, Avatar, Space, Typography, Tag, Drawer, Grid, Spin } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
@@ -18,7 +18,7 @@ import {
   AuditOutlined,
 } from '@ant-design/icons';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useState, lazy, Suspense } from 'react';
+import { useEffect, useState, lazy, Suspense } from 'react';
 
 dayjs.locale('zh-cn');
 import AuthGuard from './components/AuthGuard';
@@ -38,6 +38,8 @@ import { clearToken, getLane } from './api/client';
 
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
+const { useBreakpoint } = Grid;
+const COLLAPSED_STORAGE_KEY = 'monitor_dashboard_sidebar_collapsed';
 
 interface MenuItem {
   key?: string;
@@ -63,12 +65,33 @@ const menuItems: MenuItem[] = [
 export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
-  const [collapsed, setCollapsed] = useState(false);
+  const screens = useBreakpoint();
+  const isMobile = !screens.lg;
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return localStorage.getItem(COLLAPSED_STORAGE_KEY) === '1';
+  });
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const isLogin = location.pathname === '/login';
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSED_STORAGE_KEY, collapsed ? '1' : '0');
+  }, [collapsed]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname, location.search]);
 
   const handleLogout = () => {
     clearToken();
     navigate('/login');
+  };
+
+  const navigateWithLane = (path: string) => {
+    const lane = getLane();
+    navigate(lane ? `${path}?x-lane=${lane}` : path);
   };
 
   const userMenu = {
@@ -99,68 +122,103 @@ export default function App() {
   // @ts-ignore
   const pageTitle = menuItems.find(item => item.key === currentPath)?.label || 'Dashboard';
   const primaryColor = themeConfig.token?.colorPrimary as string;
+  const siderWidth = collapsed ? 80 : 240;
+  const pageLoadingFallback = (
+    <div className="route-loading-shell">
+      <div className="route-loading-card">
+        <Spin size="large" />
+        <Text type="secondary">页面加载中</Text>
+      </div>
+    </div>
+  );
+
+  const navigationMenu = (
+    <Menu
+      mode="inline"
+      selectedKeys={[currentPath]}
+      // @ts-ignore
+      items={menuItems}
+      onClick={({ key }) => {
+        navigateWithLane(String(key));
+      }}
+      style={{ borderRight: 0, padding: '16px 0', background: 'transparent' }}
+    />
+  );
+
+  const brand = (
+    <div
+      className="app-logo"
+      style={{
+        height: 64,
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 24px',
+        justifyContent: collapsed && !isMobile ? 'center' : 'flex-start',
+        borderBottom: '1px solid #f1f5f9'
+      }}
+    >
+      <div style={{
+        width: 32,
+        height: 32,
+        background: `linear-gradient(135deg, ${primaryColor}, #3b82f6)`,
+        borderRadius: 8,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: collapsed && !isMobile ? 0 : 12,
+        color: '#fff',
+        fontWeight: 'bold',
+        fontSize: 20,
+        flexShrink: 0,
+        boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.3)'
+      }}>🔭</div>
+      {(!collapsed || isMobile) && (
+        <Text strong style={{ fontSize: 18, color: '#0f172a' }}>赤尾观测中心</Text>
+      )}
+    </div>
+  );
 
   return (
     <ConfigProvider theme={themeConfig} locale={zhCN}>
       <Layout className="app-shell" style={{ minHeight: '100vh' }}>
-        <Sider
-          width={240}
-          theme="light"
-          className="app-sider"
-          collapsible
-          collapsed={collapsed}
-          trigger={null}
-          style={{
-            borderRight: '1px solid #e2e8f0',
-            position: 'fixed',
-            left: 0,
-            top: 0,
-            bottom: 0,
-            zIndex: 10,
-          }}
-        >
-          <div className="app-logo" style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            padding: collapsed ? '0 24px' : '0 24px',
-            justifyContent: collapsed ? 'center' : 'flex-start',
-            borderBottom: '1px solid #f1f5f9'
-          }}>
-             <div style={{
-               width: 32,
-               height: 32,
-               background: `linear-gradient(135deg, ${primaryColor}, #3b82f6)`,
-               borderRadius: 8,
-               display: 'flex',
-               alignItems: 'center',
-               justifyContent: 'center',
-               marginRight: collapsed ? 0 : 12,
-               color: '#fff',
-               fontWeight: 'bold',
-               fontSize: 20,
-               flexShrink: 0,
-               boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.3)'
-             }}>🔭</div>
-             {!collapsed && (
-               <Text strong style={{ fontSize: 18, color: '#0f172a' }}>赤尾观测中心</Text>
-             )}
-          </div>
-          <Menu
-            mode="inline"
-            selectedKeys={[currentPath]}
-            // @ts-ignore
-            items={menuItems}
-            onClick={({ key }) => {
-              const lane = getLane();
-              navigate(lane ? `${key}?x-lane=${lane}` : key);
+        {!isMobile && (
+          <Sider
+            width={240}
+            theme="light"
+            className="app-sider"
+            collapsible
+            collapsed={collapsed}
+            trigger={null}
+            style={{
+              borderRight: '1px solid #e2e8f0',
+              position: 'fixed',
+              left: 0,
+              top: 0,
+              bottom: 0,
+              zIndex: 10,
             }}
-            style={{ borderRight: 0, padding: '16px 0' }}
-          />
-        </Sider>
-        <Layout style={{ marginLeft: collapsed ? 80 : 240, transition: 'all 0.2s' }}>
+          >
+            {brand}
+            {navigationMenu}
+          </Sider>
+        )}
+        {isMobile && (
+          <Drawer
+            title={null}
+            placement="left"
+            closable={false}
+            open={mobileNavOpen}
+            onClose={() => setMobileNavOpen(false)}
+            bodyStyle={{ padding: 0 }}
+            width={280}
+          >
+            {brand}
+            {navigationMenu}
+          </Drawer>
+        )}
+        <Layout style={{ marginLeft: isMobile ? 0 : siderWidth, transition: 'all 0.2s' }}>
           <Header style={{
-            padding: '0 24px',
+            padding: isMobile ? '0 16px' : '0 24px',
             background: 'rgba(255, 255, 255, 0.8)',
             backdropFilter: 'blur(8px)',
             display: 'flex',
@@ -174,26 +232,39 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <Button
                 type="text"
-                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                onClick={() => setCollapsed(!collapsed)}
+                icon={isMobile || collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => {
+                  if (isMobile) {
+                    setMobileNavOpen(true);
+                    return;
+                  }
+                  setCollapsed(!collapsed);
+                }}
                 style={{ fontSize: '16px', width: 32, height: 32, marginRight: 16 }}
               />
-              <Text strong style={{ fontSize: 18, color: '#0f172a' }}>{pageTitle}</Text>
+              <div>
+                <Text strong style={{ fontSize: 18, color: '#0f172a', display: 'block', lineHeight: 1.1 }}>{pageTitle}</Text>
+                {!isMobile && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    统一监控、检索与运维操作台
+                  </Text>
+                )}
+              </div>
             </div>
 
-            <Space size={16}>
-              {getLane() && <Tag color="blue">{getLane()}</Tag>}
+            <Space size={isMobile ? 8 : 16}>
+              {getLane() && <Tag color="blue" style={{ marginInlineEnd: 0 }}>{getLane()}</Tag>}
               <Dropdown menu={userMenu} placement="bottomRight">
                 <Space style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: 6 }} className="user-dropdown">
                   <Avatar icon={<UserOutlined />} style={{ backgroundColor: primaryColor }} size="small" />
-                  <Text strong style={{ fontSize: 14 }}>Admin</Text>
+                  {!isMobile && <Text strong style={{ fontSize: 14 }}>Admin</Text>}
                 </Space>
               </Dropdown>
             </Space>
           </Header>
-          <Content style={{ padding: '24px', minHeight: 280, maxWidth: 1600, margin: '0 auto', width: '100%' }}>
+          <Content style={{ padding: isMobile ? '16px' : '24px', minHeight: 280, maxWidth: 1600, margin: '0 auto', width: '100%' }}>
             <AuthGuard>
-              <Suspense fallback={null}>
+              <Suspense fallback={pageLoadingFallback}>
                 <Routes>
                   <Route path="/" element={<ServiceStatus />} />
                   <Route path="/activity" element={<Activity />} />
