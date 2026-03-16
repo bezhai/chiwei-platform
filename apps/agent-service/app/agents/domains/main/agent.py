@@ -22,6 +22,7 @@ from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import Complexity, run_pre
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.memory_context import build_diary_context, build_impression_context
+from app.services.persona_context import build_persona_context
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -239,10 +240,11 @@ async def _build_and_stream(
     session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
-    # 构建 prompt 变量（注入复杂度引导）
+    # 构建 prompt 变量（注入复杂度引导 + 人设动态上下文）
     prompt_vars = {
         "complexity_hint": COMPLEXITY_HINTS.get(complexity, ""),
         "user_context": "",
+        "persona_context": build_persona_context(),
     }
 
     # 创建 agent
