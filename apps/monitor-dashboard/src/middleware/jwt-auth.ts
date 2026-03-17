@@ -11,6 +11,10 @@ export const jwtAuth: Middleware = async (ctx, next) => {
   if (!ctx.path.startsWith('/dashboard/api')) {
     return next();
   }
+  if (ctx.path === '/dashboard/api/grafana' || ctx.path.startsWith('/dashboard/api/grafana/')) {
+    ctx.state.caller = 'public';
+    return next();
+  }
   if (PUBLIC_PATHS.has(ctx.path)) {
     ctx.state.caller = 'public';
     return next();

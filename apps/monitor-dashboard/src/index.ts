@@ -20,6 +20,7 @@ import serviceStatusRoutes from './routes/service-status';
 import operationsRoutes from './routes/operations';
 import auditLogsRoutes from './routes/audit-logs';
 import activityRoutes from './routes/activity';
+import grafanaProxyRoutes from './routes/grafana-proxy';
 
 const PORT = Number(process.env.DASHBOARD_PORT || 3002);
 
@@ -72,6 +73,7 @@ const bootstrap = async () => {
   router.use(operationsRoutes.routes());
   router.use(auditLogsRoutes.routes());
   router.use(activityRoutes.routes());
+  router.use(grafanaProxyRoutes.routes());
 
   app.use(router.routes());
   app.use(router.allowedMethods());
