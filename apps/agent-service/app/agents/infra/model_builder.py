@@ -19,12 +19,32 @@ logger = logging.getLogger(__name__)
 class _ReasoningChatOpenAI(ChatOpenAI):
     """ChatOpenAI 子类，保留 reasoning_content 供 DeepSeek 等推理模型使用。
 
-    langchain-openai 的 _format_message_content 会丢弃 reasoning_content block，
-    导致 DeepSeek reasoner 在多轮 tool calling 时报 400。
-    此子类在 payload 构建后将 reasoning_content 从 additional_kwargs 注入回去。
+    langchain-openai 在两个阶段丢失 reasoning_content：
+    1. _convert_dict_to_message 解析响应时不提取 reasoning_content
+    2. _format_message_content 构建请求时丢弃 reasoning_content block
+
+    此子类通过重写 _create_chat_result 和 _get_request_payload 修复这两个环节。
     """
 
+    def _create_chat_result(self, response, generation_info=None):
+        """从原始响应中提取 reasoning_content 存入 additional_kwargs。"""
+        import openai
+
+        result = super()._create_chat_result(response, generation_info)
+
+        response_dict = (
+            response if isinstance(response, dict) else response.model_dump()
+        )
+        choices = response_dict.get("choices") or []
+        for choice, gen in zip(choices, result.generations):
+            rc = choice.get("message", {}).get("reasoning_content")
+            if rc is not None and isinstance(gen.message, AIMessage):
+                gen.message.additional_kwargs["reasoning_content"] = rc
+
+        return result
+
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        """将 additional_kwargs 中的 reasoning_content 注入回 message dict。"""
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
