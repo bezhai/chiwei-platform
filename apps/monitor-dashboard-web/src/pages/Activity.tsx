@@ -13,7 +13,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { getLane } from '../api/client';
 
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
 
 interface GroupStat {
   chat_id: string;
@@ -26,13 +26,19 @@ interface GroupStat {
 interface DiaryRow {
   chat_id: string;
   latest_diary_date: string;
+  latest_diary_content: string;
   diary_count_7d: number;
 }
 
 interface WeeklyRow {
   chat_id: string;
   latest_week_start: string;
+  latest_weekly_content: string;
   review_count_4w: number;
+}
+
+function normalizePreviewContent(content?: string) {
+  return content?.replace(/\s+/g, ' ').trim() || '';
 }
 
 function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
@@ -142,29 +148,44 @@ export default function Activity() {
       key: 'message_count',
       width: 90,
       sorter: (a: GroupStat, b: GroupStat) => a.message_count - b.message_count,
-      defaultSortOrder: 'descend' as const,
     },
     {
       title: '赤尾回复',
       dataIndex: 'bot_replies',
       key: 'bot_replies',
       width: 100,
+      sorter: (a: GroupStat, b: GroupStat) => a.bot_replies - b.bot_replies,
+      defaultSortOrder: 'descend' as const,
     },
     {
       title: '最近日记',
       key: 'diary',
-      width: 120,
+      width: 360,
       render: (_: unknown, record: GroupStat) => {
         const d = diaryMap.get(record.chat_id);
         if (!d?.latest_diary_date) return <Text type="secondary">-</Text>;
         const isRecent = dayjs().diff(dayjs(d.latest_diary_date), 'day') <= 1;
+        const preview = normalizePreviewContent(d.latest_diary_content);
         return (
-          <Space size={4}>
-            <BookOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9' }} />
-            <Text type={isRecent ? undefined : 'secondary'}>
-              {dayjs(d.latest_diary_date).format('MM-DD')}
-            </Text>
-            <Tag style={{ fontSize: 11 }}>{d.diary_count_7d}/7d</Tag>
+          <Space size={8} style={{ width: '100%' }}>
+            <BookOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9', flex: 'none' }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <Space size={6} wrap>
+                <Text type={isRecent ? undefined : 'secondary'}>
+                  {dayjs(d.latest_diary_date).format('MM-DD')}
+                </Text>
+                <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{d.diary_count_7d}/7d</Tag>
+              </Space>
+              <Tooltip title={preview || '无内容'}>
+                <Paragraph
+                  type={preview ? undefined : 'secondary'}
+                  style={{ marginBottom: 0 }}
+                  ellipsis={{ rows: 2, tooltip: false }}
+                >
+                  {preview || '无内容'}
+                </Paragraph>
+              </Tooltip>
+            </div>
           </Space>
         );
       },
@@ -172,18 +193,32 @@ export default function Activity() {
     {
       title: '最近周记',
       key: 'weekly',
-      width: 120,
+      width: 360,
       render: (_: unknown, record: GroupStat) => {
         const w = weeklyMap.get(record.chat_id);
         if (!w?.latest_week_start) return <Text type="secondary">-</Text>;
         const isRecent = dayjs().diff(dayjs(w.latest_week_start), 'day') <= 7;
+        const preview = normalizePreviewContent(w.latest_weekly_content);
         return (
-          <Space size={4}>
-            <FileTextOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9' }} />
-            <Text type={isRecent ? undefined : 'secondary'}>
-              {dayjs(w.latest_week_start).format('MM-DD')}
-            </Text>
-            <Tag style={{ fontSize: 11 }}>{w.review_count_4w}/4w</Tag>
+          <Space size={8} style={{ width: '100%' }}>
+            <FileTextOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9', flex: 'none' }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <Space size={6} wrap>
+                <Text type={isRecent ? undefined : 'secondary'}>
+                  {dayjs(w.latest_week_start).format('MM-DD')}
+                </Text>
+                <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{w.review_count_4w}/4w</Tag>
+              </Space>
+              <Tooltip title={preview || '无内容'}>
+                <Paragraph
+                  type={preview ? undefined : 'secondary'}
+                  style={{ marginBottom: 0 }}
+                  ellipsis={{ rows: 2, tooltip: false }}
+                >
+                  {preview || '无内容'}
+                </Paragraph>
+              </Tooltip>
+            </div>
           </Space>
         );
       },
@@ -247,6 +282,7 @@ export default function Activity() {
           loading={loading}
           pagination={false}
           size="middle"
+          scroll={{ x: 1200 }}
         />
       </Card>
     </div>
