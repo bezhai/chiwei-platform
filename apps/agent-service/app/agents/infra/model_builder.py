@@ -8,11 +8,79 @@ import time
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from .exceptions import ModelBuilderError, ModelConfigError, UnsupportedModelError
 
 logger = logging.getLogger(__name__)
+
+
+class _ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI 子类，保留 reasoning_content 供 DeepSeek 等推理模型使用。
+
+    langchain-openai 在两个阶段丢失 reasoning_content：
+    1. _convert_dict_to_message 解析响应时不提取 reasoning_content
+    2. _format_message_content 构建请求时丢弃 reasoning_content block
+
+    此子类通过重写 _create_chat_result 和 _get_request_payload 修复这两个环节。
+    """
+
+    def _create_chat_result(self, response, generation_info=None):
+        """从原始响应中提取 reasoning_content 存入 additional_kwargs。"""
+        import openai
+
+        result = super()._create_chat_result(response, generation_info)
+
+        response_dict = (
+            response if isinstance(response, dict) else response.model_dump()
+        )
+        choices = response_dict.get("choices") or []
+        for choice, gen in zip(choices, result.generations):
+            rc = choice.get("message", {}).get("reasoning_content")
+            if rc is not None and isinstance(gen.message, AIMessage):
+                gen.message.additional_kwargs["reasoning_content"] = rc
+
+        return result
+
+    @staticmethod
+    def _normalize_content(content):
+        """将 content 归一化为字符串（DeepSeek API 只接受字符串，不接受 null 或数组）。"""
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            return "".join(text_parts)
+        if content is None:
+            return ""
+        return content
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        """DeepSeek API 适配：注入 reasoning_content + content 归一化。"""
+        messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        if "messages" not in payload:
+            return payload
+
+        # 1) assistant 消息：注入 reasoning_content
+        for lc_msg, api_msg in zip(messages, payload["messages"]):
+            if (
+                isinstance(lc_msg, AIMessage)
+                and api_msg.get("role") == "assistant"
+            ):
+                rc = lc_msg.additional_kwargs.get("reasoning_content")
+                if rc is not None:
+                    api_msg["reasoning_content"] = rc
+
+        # 2) 所有消息：content 归一化为字符串
+        for api_msg in payload["messages"]:
+            api_msg["content"] = self._normalize_content(api_msg.get("content"))
+
+        return payload
 
 # ---------------------------------------------------------------------------
 # 模块级 TTL 缓存（asyncio 单线程安全，无需锁）
@@ -196,8 +264,7 @@ class ModelBuilder:
                 )
 
                 return ChatGoogleGenerativeAI(**chat_params)
-            else:
-                # 默认使用 ChatOpenAI（Response API）
+            elif client_type == "openai-responses":
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
@@ -206,12 +273,36 @@ class ModelBuilder:
                     "use_responses_api": True,
                     **kwargs,
                 }
-
                 logger.info(
-                    f"为模型 {model_id} 构建ChatOpenAI实例，"
-                    f"参数: {list(chat_params.keys())}"
+                    f"为模型 {model_id} 构建ChatOpenAI（Responses API）"
                 )
-
+                return ChatOpenAI(**chat_params)
+            elif client_type == "deepseek":
+                chat_params = {
+                    "api_key": model_info["api_key"],
+                    "base_url": model_info["base_url"],
+                    "model": model_info["model_name"],
+                    "max_retries": max_retries,
+                    "use_responses_api": False,
+                    **kwargs,
+                }
+                logger.info(
+                    f"为模型 {model_id} 构建DeepSeek ChatOpenAI（Completions API）"
+                )
+                return _ReasoningChatOpenAI(**chat_params)
+            else:
+                # openai 及其他: 标准 Chat Completions API
+                chat_params = {
+                    "api_key": model_info["api_key"],
+                    "base_url": model_info["base_url"],
+                    "model": model_info["model_name"],
+                    "max_retries": max_retries,
+                    "use_responses_api": False,
+                    **kwargs,
+                }
+                logger.info(
+                    f"为模型 {model_id} 构建ChatOpenAI（Completions API）"
+                )
                 return ChatOpenAI(**chat_params)
 
         except Exception as e:

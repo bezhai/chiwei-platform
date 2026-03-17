@@ -12,7 +12,7 @@ const maskApiKey = (apiKey: string) => {
   return `****${tail}`;
 };
 
-const allowedClientTypes = new Set(['openai', 'ark', 'azure-http', 'google']);
+const allowedClientTypes = new Set(['openai', 'openai-responses', 'deepseek', 'ark', 'azure-http', 'google']);
 
 router.get('/api/providers', async (ctx) => {
   const repo = AppDataSource.getRepository(ModelProvider);
