@@ -29,9 +29,9 @@ class ClientType:
     """底层客户端类型枚举。
 
     主要通过 model_provider.client_type 进行配置：
+    - "openai": 标准 OpenAI 兼容（Chat Completions API）
     - "openai-responses": OpenAI Responses API（仅 OpenAI 原生端点）
-    - "openai-completion": OpenAI Chat Completions API（兼容第三方如 DeepSeek）
-    - "openai": 等同于 openai-completion（向后兼容）
+    - "deepseek": DeepSeek 专用（Completions API + reasoning_content 保留）
     - "ark": 火山引擎 Ark Runtime 客户端
     - "azure-http": 仅支持生图的 HTTP 客户端
     - "google": Google Generative AI 客户端
@@ -39,7 +39,7 @@ class ClientType:
 
     OPENAI = "openai"
     OPENAI_RESPONSES = "openai-responses"
-    OPENAI_COMPLETION = "openai-completion"
+    DEEPSEEK = "deepseek"
     ARK = "ark"
     AZURE_HTTP = "azure-http"
     GOOGLE = "google"

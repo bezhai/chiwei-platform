@@ -233,16 +233,11 @@ class ModelBuilder:
                     "use_responses_api": True,
                     **kwargs,
                 }
-
                 logger.info(
-                    f"为模型 {model_id} 构建ChatOpenAI实例（Responses API），"
-                    f"参数: {list(chat_params.keys())}"
+                    f"为模型 {model_id} 构建ChatOpenAI（Responses API）"
                 )
-
                 return ChatOpenAI(**chat_params)
-            else:
-                # openai / openai-completion / 其他: Chat Completions API
-                # 使用 _ReasoningChatOpenAI 保留 reasoning_content
+            elif client_type == "deepseek":
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
@@ -250,13 +245,23 @@ class ModelBuilder:
                     "max_retries": max_retries,
                     **kwargs,
                 }
-
                 logger.info(
-                    f"为模型 {model_id} 构建ChatOpenAI实例（Completions API），"
-                    f"参数: {list(chat_params.keys())}"
+                    f"为模型 {model_id} 构建DeepSeek ChatOpenAI（Completions API）"
                 )
-
                 return _ReasoningChatOpenAI(**chat_params)
+            else:
+                # openai 及其他: 标准 Chat Completions API
+                chat_params = {
+                    "api_key": model_info["api_key"],
+                    "base_url": model_info["base_url"],
+                    "model": model_info["model_name"],
+                    "max_retries": max_retries,
+                    **kwargs,
+                }
+                logger.info(
+                    f"为模型 {model_id} 构建ChatOpenAI（Completions API）"
+                )
+                return ChatOpenAI(**chat_params)
 
         except Exception as e:
             if isinstance(e, ModelBuilderError):
