@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Card, Col, Row, Statistic, Table, Typography, Tooltip, Space, Tag, Button } from 'antd';
+import { Card, Col, Row, Statistic, Table, Typography, Tooltip, Space, Tag, Button, Modal } from 'antd';
 import {
   MessageOutlined,
   RobotOutlined,
@@ -37,8 +37,65 @@ interface WeeklyRow {
   review_count_4w: number;
 }
 
+interface PreviewModalState {
+  title: string;
+  content: string;
+}
+
 function normalizePreviewContent(content?: string) {
   return content?.replace(/\s+/g, ' ').trim() || '';
+}
+
+function renderMarkdownLikeContent(content: string) {
+  return content
+    .split(/\n\s*\n/)
+    .filter((block) => block.trim())
+    .map((block, index) => {
+      const trimmed = block.trim();
+
+      if (trimmed.startsWith('### ')) {
+        return <Title key={index} level={5}>{trimmed.slice(4)}</Title>;
+      }
+      if (trimmed.startsWith('## ')) {
+        return <Title key={index} level={4}>{trimmed.slice(3)}</Title>;
+      }
+      if (trimmed.startsWith('# ')) {
+        return <Title key={index} level={3}>{trimmed.slice(2)}</Title>;
+      }
+
+      const lines = trimmed.split('\n');
+      const isUnorderedList = lines.every((line) => /^[-*]\s+/.test(line.trim()));
+      if (isUnorderedList) {
+        return (
+          <ul key={index} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+            {lines.map((line, lineIndex) => (
+              <li key={lineIndex} style={{ marginBottom: 6 }}>
+                {line.trim().replace(/^[-*]\s+/, '')}
+              </li>
+            ))}
+          </ul>
+        );
+      }
+
+      const isOrderedList = lines.every((line) => /^\d+\.\s+/.test(line.trim()));
+      if (isOrderedList) {
+        return (
+          <ol key={index} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+            {lines.map((line, lineIndex) => (
+              <li key={lineIndex} style={{ marginBottom: 6 }}>
+                {line.trim().replace(/^\d+\.\s+/, '')}
+              </li>
+            ))}
+          </ol>
+        );
+      }
+
+      return (
+        <Paragraph key={index} style={{ whiteSpace: 'pre-wrap' }}>
+          {trimmed}
+        </Paragraph>
+      );
+    });
 }
 
 function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
@@ -81,6 +138,7 @@ export default function Activity() {
   const [groups, setGroups] = useState<GroupStat[]>([]);
   const [diaryMap, setDiaryMap] = useState<Map<string, DiaryRow>>(new Map());
   const [weeklyMap, setWeeklyMap] = useState<Map<string, WeeklyRow>>(new Map());
+  const [previewModal, setPreviewModal] = useState<PreviewModalState | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -185,6 +243,17 @@ export default function Activity() {
                   {preview || '无内容'}
                 </Paragraph>
               </Tooltip>
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0, height: 'auto' }}
+                onClick={() => setPreviewModal({
+                  title: `${record.group_name} · ${dayjs(d.latest_diary_date).format('YYYY-MM-DD')} 日记`,
+                  content: d.latest_diary_content || '无内容',
+                })}
+              >
+                查看全文
+              </Button>
             </div>
           </Space>
         );
@@ -218,6 +287,17 @@ export default function Activity() {
                   {preview || '无内容'}
                 </Paragraph>
               </Tooltip>
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0, height: 'auto' }}
+                onClick={() => setPreviewModal({
+                  title: `${record.group_name} · ${dayjs(w.latest_week_start).format('YYYY-MM-DD')} 周记`,
+                  content: w.latest_weekly_content || '无内容',
+                })}
+              >
+                查看全文
+              </Button>
             </div>
           </Space>
         );
@@ -285,6 +365,19 @@ export default function Activity() {
           scroll={{ x: 1200 }}
         />
       </Card>
+
+      <Modal
+        open={!!previewModal}
+        title={previewModal?.title}
+        footer={null}
+        onCancel={() => setPreviewModal(null)}
+        width={860}
+        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
+      >
+        <div style={{ fontSize: 14, lineHeight: 1.8 }}>
+          {renderMarkdownLikeContent(previewModal?.content || '无内容')}
+        </div>
+      </Modal>
     </div>
   );
 }
