@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Result, Spin } from 'antd';
-import { LinkOutlined } from '@ant-design/icons';
+import { Spin } from 'antd';
 import { api } from '../api/client';
 
 export default function Kibana() {
@@ -27,24 +26,8 @@ export default function Kibana() {
       <div className="page-header">
         <h1 className="page-title">Grafana</h1>
       </div>
-      <div className="content-card" style={{ padding: '48px 24px', display: 'flex', justifyContent: 'center' }}>
-        <Result
-          status="info"
-          title="Grafana 需要在新窗口中打开"
-          subTitle="当前 Grafana 返回 X-Frame-Options: deny，浏览器会阻止嵌入访问。"
-          extra={
-            <Button
-              type="primary"
-              icon={<LinkOutlined />}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              size="large"
-            >
-              打开 Grafana
-            </Button>
-          }
-        />
+      <div className="iframe-container" style={{ height: 'calc(100vh - 180px)', minHeight: 600 }}>
+        <iframe src={url} title="Grafana" style={{ border: 0, width: '100%', height: '100%' }} />
       </div>
     </div>
   );
