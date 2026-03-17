@@ -45,16 +45,18 @@ class _ReasoningChatOpenAI(ChatOpenAI):
 
     @staticmethod
     def _normalize_content(content):
-        """将 list content 归一化为字符串（DeepSeek API 只接受字符串）。"""
-        if not isinstance(content, list):
-            return content
-        text_parts = []
-        for block in content:
-            if isinstance(block, str):
-                text_parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                text_parts.append(block.get("text", ""))
-        return "".join(text_parts) or None
+        """将 content 归一化为字符串（DeepSeek API 只接受字符串，不接受 null 或数组）。"""
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            return "".join(text_parts)
+        if content is None:
+            return ""
+        return content
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         """DeepSeek API 适配：注入 reasoning_content + content 归一化。"""
