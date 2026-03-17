@@ -219,6 +219,8 @@ export default function App() {
         <Layout style={{ marginLeft: isMobile ? 0 : siderWidth, transition: 'all 0.2s' }}>
           <Header style={{
             padding: isMobile ? '0 16px' : '0 24px',
+            height: isMobile ? 64 : 72,
+            lineHeight: 'normal',
             background: 'rgba(255, 255, 255, 0.8)',
             backdropFilter: 'blur(8px)',
             display: 'flex',
@@ -243,9 +245,11 @@ export default function App() {
                 style={{ fontSize: '16px', width: 32, height: 32, marginRight: 16 }}
               />
               <div>
-                <Text strong style={{ fontSize: 18, color: '#0f172a', display: 'block', lineHeight: 1.1 }}>{pageTitle}</Text>
+                <Text strong style={{ fontSize: 18, color: '#0f172a', display: 'block', lineHeight: 1.2, marginBottom: isMobile ? 0 : 2 }}>
+                  {pageTitle}
+                </Text>
                 {!isMobile && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.2, display: 'block' }}>
                     统一监控、检索与运维操作台
                   </Text>
                 )}
