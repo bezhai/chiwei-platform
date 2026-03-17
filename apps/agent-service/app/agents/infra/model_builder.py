@@ -8,11 +8,39 @@ import time
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from .exceptions import ModelBuilderError, ModelConfigError, UnsupportedModelError
 
 logger = logging.getLogger(__name__)
+
+
+class _ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI 子类，保留 reasoning_content 供 DeepSeek 等推理模型使用。
+
+    langchain-openai 的 _format_message_content 会丢弃 reasoning_content block，
+    导致 DeepSeek reasoner 在多轮 tool calling 时报 400。
+    此子类在 payload 构建后将 reasoning_content 从 additional_kwargs 注入回去。
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        if "messages" not in payload:
+            return payload
+
+        for lc_msg, api_msg in zip(messages, payload["messages"]):
+            if (
+                isinstance(lc_msg, AIMessage)
+                and api_msg.get("role") == "assistant"
+            ):
+                rc = lc_msg.additional_kwargs.get("reasoning_content")
+                if rc is not None:
+                    api_msg["reasoning_content"] = rc
+
+        return payload
 
 # ---------------------------------------------------------------------------
 # 模块级 TTL 缓存（asyncio 单线程安全，无需锁）
@@ -196,26 +224,39 @@ class ModelBuilder:
                 )
 
                 return ChatGoogleGenerativeAI(**chat_params)
-            else:
-                # openai-responses: OpenAI Responses API
-                # openai-completion 或其他: 标准 Chat Completions API
-                use_responses_api = client_type == "openai-responses"
-
+            elif client_type == "openai-responses":
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
-                    "use_responses_api": use_responses_api,
+                    "use_responses_api": True,
                     **kwargs,
                 }
 
                 logger.info(
-                    f"为模型 {model_id} 构建ChatOpenAI实例，"
+                    f"为模型 {model_id} 构建ChatOpenAI实例（Responses API），"
                     f"参数: {list(chat_params.keys())}"
                 )
 
                 return ChatOpenAI(**chat_params)
+            else:
+                # openai / openai-completion / 其他: Chat Completions API
+                # 使用 _ReasoningChatOpenAI 保留 reasoning_content
+                chat_params = {
+                    "api_key": model_info["api_key"],
+                    "base_url": model_info["base_url"],
+                    "model": model_info["model_name"],
+                    "max_retries": max_retries,
+                    **kwargs,
+                }
+
+                logger.info(
+                    f"为模型 {model_id} 构建ChatOpenAI实例（Completions API），"
+                    f"参数: {list(chat_params.keys())}"
+                )
+
+                return _ReasoningChatOpenAI(**chat_params)
 
         except Exception as e:
             if isinstance(e, ModelBuilderError):
