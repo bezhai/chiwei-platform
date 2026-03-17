@@ -43,39 +43,40 @@ class _ReasoningChatOpenAI(ChatOpenAI):
 
         return result
 
-    def _get_request_payload(self, input_, *, stop=None, **kwargs):
-        """将 additional_kwargs 中的 reasoning_content 注入回 message dict。
+    @staticmethod
+    def _normalize_content(content):
+        """将 list content 归一化为字符串（DeepSeek API 只接受字符串）。"""
+        if not isinstance(content, list):
+            return content
+        text_parts = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+        return "".join(text_parts) or None
 
-        同时将 assistant 消息的 content 归一化为字符串——
-        AIMessage.content 属性会自动注入 reasoning block 导致 content 变成数组，
-        DeepSeek API 只接受字符串。
-        """
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        """DeepSeek API 适配：注入 reasoning_content + content 归一化。"""
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
         if "messages" not in payload:
             return payload
 
+        # 1) assistant 消息：注入 reasoning_content
         for lc_msg, api_msg in zip(messages, payload["messages"]):
             if (
                 isinstance(lc_msg, AIMessage)
                 and api_msg.get("role") == "assistant"
             ):
-                # 注入 reasoning_content 为顶层字段
                 rc = lc_msg.additional_kwargs.get("reasoning_content")
                 if rc is not None:
                     api_msg["reasoning_content"] = rc
 
-                # content 归一化：数组 → 字符串（提取纯文本，丢弃 reasoning block）
-                content = api_msg.get("content")
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, str):
-                            text_parts.append(block)
-                        elif isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    api_msg["content"] = "".join(text_parts) or None
+        # 2) 所有消息：content 归一化为字符串
+        for api_msg in payload["messages"]:
+            api_msg["content"] = self._normalize_content(api_msg.get("content"))
 
         return payload
 
