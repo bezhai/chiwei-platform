@@ -283,6 +283,7 @@ class ModelBuilder:
                     "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
+                    "use_responses_api": False,
                     **kwargs,
                 }
                 logger.info(
@@ -296,6 +297,7 @@ class ModelBuilder:
                     "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
+                    "use_responses_api": False,
                     **kwargs,
                 }
                 logger.info(
