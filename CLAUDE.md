@@ -69,8 +69,10 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 
 ## 部署命令
 
+部署命令必须显式写 `GIT_REF`，如 `make deploy APP=lark-proxy GIT_REF=main`，禁止省略。
+
 ```bash
-make deploy APP=<app> [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1]  # 构建 → 等待 → 发布
+make deploy APP=<app> [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1] [GIT_REF=main]  # 构建 → 等待 → 发布
 make self-deploy [BUMP=minor]                                      # paas-engine 蓝绿自部署
 make release APP=<app> LANE=prod VERSION=1.0.0.5                   # 仅发布（不构建，用于回滚）
 make undeploy APP=<app> LANE=dev                                   # 删除 Release
