@@ -197,13 +197,16 @@ class ModelBuilder:
 
                 return ChatGoogleGenerativeAI(**chat_params)
             else:
-                # 默认使用 ChatOpenAI（Response API）
+                # openai-responses: OpenAI Responses API
+                # openai-completion 或其他: 标准 Chat Completions API
+                use_responses_api = client_type == "openai-responses"
+
                 chat_params = {
                     "api_key": model_info["api_key"],
                     "base_url": model_info["base_url"],
                     "model": model_info["model_name"],
                     "max_retries": max_retries,
-                    "use_responses_api": True,
+                    "use_responses_api": use_responses_api,
                     **kwargs,
                 }
 
