@@ -63,6 +63,54 @@ async def process_image_pipeline(
     return {"url": url, "file_key": file_key}
 
 
+async def upload_to_tos(source_type: str, data: str) -> dict:
+    """
+    Upload image to TOS from base64 or external URL.
+    Compress (1440x1440 JPEG q80) then upload, return pre-signed URL.
+
+    Args:
+        source_type: "base64" or "url"
+        data: base64 string or URL
+    """
+    import hashlib
+    import uuid
+
+    if source_type == "base64":
+        raw = data
+        if "," in raw:
+            raw = raw.split(",", 1)[1]
+        image_bytes = base64.b64decode(raw)
+        file_id = hashlib.md5(image_bytes).hexdigest()[:16]
+    elif source_type == "url":
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(data)
+            resp.raise_for_status()
+            image_bytes = resp.content
+        file_id = hashlib.md5(image_bytes).hexdigest()[:16]
+    else:
+        raise ValueError(f"Invalid source_type: {source_type}, expected 'base64' or 'url'")
+
+    # Compress: 1440x1440, JPEG q80
+    compressed, _, _ = await asyncio.to_thread(
+        process_image,
+        image_bytes, max_width=1440, max_height=1440, quality=80, format="JPEG",
+    )
+
+    # Upload to TOS
+    file_name = f"temp/tos_{file_id}_{uuid.uuid4().hex[:8]}.jpg"
+    await tos_client.upload_file(file_name, compressed)
+    logger.info(f"Image uploaded to TOS: {file_name}")
+
+    # Get pre-signed URL
+    url_cache_key = f"image_url:{file_name}"
+    url = await tos_client.get_file_url(file_name)
+    await redis_client.redis_set_with_expire(url_cache_key, url, _URL_CACHE_TTL)
+
+    return {"url": url, "file_name": file_name}
+
+
 async def upload_base64_image(base64_data: str, bot_name: str) -> dict:
     """
     Upload a base64 image to Lark, return image_key.

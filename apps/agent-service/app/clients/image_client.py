@@ -163,6 +163,65 @@ class ImageProcessClient:
         finally:
             _record_outbound("POST", status, time.monotonic() - start)
 
+    async def upload_to_tos(
+        self, source_type: str, data: str
+    ) -> str | None:
+        """
+        Upload image to TOS (compress + store), return pre-signed URL.
+
+        Args:
+            source_type: "base64" or "url"
+            data: base64 string or external URL
+
+        Returns:
+            str: TOS pre-signed URL, or None on failure
+        """
+        start = time.monotonic()
+        status = "network_error"
+        try:
+            request_data = {"source_type": source_type, "data": data}
+
+            base_url = lane_router.base_url("tool-service")
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{base_url}/api/image-pipeline/to-tos",
+                    json=request_data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {settings.inner_http_secret}",
+                        "X-Trace-Id": get_trace_id() or "",
+                        **lane_router.get_headers(),
+                    },
+                )
+
+                status = str(response.status_code)
+                response.raise_for_status()
+                resp = response.json()
+
+                if resp.get("success") and resp.get("data"):
+                    url = resp["data"]["url"]
+                    logger.info(f"Image uploaded to TOS: {source_type} -> {url[:80]}...")
+                    return url
+                else:
+                    logger.error(
+                        f"Upload to TOS failed: {resp.get('message', 'unknown')}"
+                    )
+                    return None
+
+        except httpx.TimeoutException:
+            logger.warning(f"Upload to TOS timeout: {self.timeout}s")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"Upload to TOS HTTP error: {e.response.status_code} - {e.response.text}"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Upload to TOS failed: {str(e)}")
+            return None
+        finally:
+            _record_outbound("POST", status, time.monotonic() - start)
+
     async def download_image_as_base64(
         self, file_key: str, message_id: str | None, bot_name: str | None = None
     ) -> str | None:

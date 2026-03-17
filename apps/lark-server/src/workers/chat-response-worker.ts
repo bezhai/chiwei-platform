@@ -25,7 +25,7 @@ import {
     laneQueue,
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { initializeLarkClients } from '@integrations/lark-client';
+import { initializeLarkClients, uploadImage } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 import { replyPost, sendPost } from '@lark/basic/message';
@@ -33,10 +33,76 @@ import { markdownToPostContent } from 'core/services/message/post-content-proces
 import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
+import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
+import { Readable } from 'stream';
 import type { ConsumeMessage } from 'amqplib';
 
 const SEND_DELAY_MS = 2500;
+const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@(\d+\.png)\)/g;
+
+/**
+ * Resolve @N.png references in markdown image syntax.
+ * Downloads TOS URL → uploads to Lark → replaces with image_key.
+ */
+async function resolveImageReferences(content: string, messageId: string): Promise<string> {
+    const matches = [...content.matchAll(IMAGE_REF_PATTERN)];
+    if (matches.length === 0) return content;
+
+    // Load registry from Redis
+    const registry = await hgetall(`image_registry:${messageId}`);
+    if (!registry || Object.keys(registry).length === 0) {
+        console.warn(`[ChatResponseWorker] No image registry found for message_id=${messageId}`);
+        return content;
+    }
+
+    let result = content;
+
+    for (const match of matches) {
+        const fullMatch = match[0];
+        const alt = match[1];
+        const filename = match[2];
+
+        const tosUrl = registry[filename];
+        if (!tosUrl) {
+            console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
+            // Remove the unresolved image reference
+            result = result.replace(fullMatch, `(图片 ${filename} 不可用)`);
+            continue;
+        }
+
+        try {
+            // Download from TOS
+            const response = await fetch(tosUrl);
+            if (!response.ok) {
+                console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
+                result = result.replace(fullMatch, `(图片 ${filename} 下载失败)`);
+                continue;
+            }
+
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const stream = Readable.from(buffer);
+
+            // Upload to Lark
+            const uploadResult = await uploadImage(stream);
+            const imageKey = uploadResult?.data?.image_key;
+            if (!imageKey) {
+                console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark`);
+                result = result.replace(fullMatch, `(图片 ${filename} 上传失败)`);
+                continue;
+            }
+
+            // Replace with Lark image_key
+            result = result.replace(fullMatch, `![${alt}](${imageKey})`);
+            console.info(`[ChatResponseWorker] Resolved ${filename} -> ${imageKey}`);
+        } catch (e) {
+            console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
+            result = result.replace(fullMatch, `(图片 ${filename} 处理失败)`);
+        }
+    }
+
+    return result;
+}
 
 interface ChatResponsePayload {
     session_id: string;
@@ -119,9 +185,13 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
         try {
             // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
-            const resolvedContent = is_p2p
+            let resolvedContent = is_p2p
                 ? content
                 : await resolveMentionsForGroup(content, chat_id);
+
+            // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
+            resolvedContent = await resolveImageReferences(resolvedContent, message_id);
+
             const postContent = markdownToPostContent(resolvedContent);
 
             // 发送消息并捕获 AI 消息 ID

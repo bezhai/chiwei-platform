@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.middleware.auth import verify_bearer_token
-from app.services.image_pipeline import process_image_pipeline, upload_base64_image
+from app.services.image_pipeline import process_image_pipeline, upload_base64_image, upload_to_tos
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +14,11 @@ router = APIRouter(dependencies=[Depends(verify_bearer_token)])
 class ProcessRequest(BaseModel):
     message_id: str | None = None
     file_key: str
+
+
+class UploadToTosRequest(BaseModel):
+    source_type: str  # "base64" or "url"
+    data: str
 
 
 class UploadBase64Request(BaseModel):
@@ -33,6 +38,21 @@ async def process(request: ProcessRequest, x_app_name: str = Header(alias="X-App
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Image process failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/to-tos")
+async def to_tos(request: UploadToTosRequest):
+    try:
+        result = await upload_to_tos(
+            source_type=request.source_type,
+            data=request.data,
+        )
+        return {"success": True, "data": result, "message": "ok"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Upload to TOS failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
