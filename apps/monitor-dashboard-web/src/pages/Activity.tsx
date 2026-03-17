@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { Card, Col, Row, Statistic, Table, Typography, Tooltip, Space, Tag, Button, Modal } from 'antd';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
+import { Card, Col, Row, Statistic, Table, Typography, Space, Tag, Button, Modal } from 'antd';
 import {
   MessageOutlined,
   RobotOutlined,
@@ -46,56 +46,148 @@ function normalizePreviewContent(content?: string) {
   return content?.replace(/\s+/g, ' ').trim() || '';
 }
 
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_)/g);
+
+  return parts.filter(Boolean).map((part, index) => {
+    if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
+      return <em key={index}>{part.slice(1, -1)}</em>;
+    }
+    if (part.startsWith('~~') && part.endsWith('~~')) {
+      return <del key={index}>{part.slice(2, -2)}</del>;
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return <Text key={index} code>{part.slice(1, -1)}</Text>;
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
 function renderMarkdownLikeContent(content: string) {
-  return content
-    .split(/\n\s*\n/)
-    .filter((block) => block.trim())
-    .map((block, index) => {
-      const trimmed = block.trim();
+  const lines = content.split('\n');
+  const blocks: ReactNode[] = [];
+  let index = 0;
 
-      if (trimmed.startsWith('### ')) {
-        return <Title key={index} level={5}>{trimmed.slice(4)}</Title>;
-      }
-      if (trimmed.startsWith('## ')) {
-        return <Title key={index} level={4}>{trimmed.slice(3)}</Title>;
-      }
-      if (trimmed.startsWith('# ')) {
-        return <Title key={index} level={3}>{trimmed.slice(2)}</Title>;
-      }
+  while (index < lines.length) {
+    const line = lines[index].trimEnd();
+    const trimmed = line.trim();
 
-      const lines = trimmed.split('\n');
-      const isUnorderedList = lines.every((line) => /^[-*]\s+/.test(line.trim()));
-      if (isUnorderedList) {
-        return (
-          <ul key={index} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
-            {lines.map((line, lineIndex) => (
-              <li key={lineIndex} style={{ marginBottom: 6 }}>
-                {line.trim().replace(/^[-*]\s+/, '')}
-              </li>
-            ))}
-          </ul>
-        );
-      }
+    if (!trimmed) {
+      index++;
+      continue;
+    }
 
-      const isOrderedList = lines.every((line) => /^\d+\.\s+/.test(line.trim()));
-      if (isOrderedList) {
-        return (
-          <ol key={index} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
-            {lines.map((line, lineIndex) => (
-              <li key={lineIndex} style={{ marginBottom: 6 }}>
-                {line.trim().replace(/^\d+\.\s+/, '')}
-              </li>
-            ))}
-          </ol>
-        );
-      }
+    if (trimmed.startsWith('### ')) {
+      blocks.push(<Title key={blocks.length} level={5}>{renderInlineMarkdown(trimmed.slice(4))}</Title>);
+      index++;
+      continue;
+    }
+    if (trimmed.startsWith('## ')) {
+      blocks.push(<Title key={blocks.length} level={4}>{renderInlineMarkdown(trimmed.slice(3))}</Title>);
+      index++;
+      continue;
+    }
+    if (trimmed.startsWith('# ')) {
+      blocks.push(<Title key={blocks.length} level={3}>{renderInlineMarkdown(trimmed.slice(2))}</Title>);
+      index++;
+      continue;
+    }
 
-      return (
-        <Paragraph key={index} style={{ whiteSpace: 'pre-wrap' }}>
-          {trimmed}
-        </Paragraph>
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ''));
+        index++;
+      }
+      blocks.push(
+        <ul key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex} style={{ marginBottom: 6 }}>
+              {renderInlineMarkdown(item)}
+            </li>
+          ))}
+        </ul>,
       );
-    });
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^\d+\.\s+/, ''));
+        index++;
+      }
+      blocks.push(
+        <ol key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex} style={{ marginBottom: 6 }}>
+              {renderInlineMarkdown(item)}
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith('>')) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+        index++;
+      }
+      blocks.push(
+        <div
+          key={blocks.length}
+          style={{
+            borderInlineStart: '3px solid #d9d9d9',
+            paddingInlineStart: 12,
+            color: '#595959',
+            marginBottom: 16,
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {quoteLines.map((quoteLine, quoteIndex) => (
+            <div key={quoteIndex}>{renderInlineMarkdown(quoteLine)}</div>
+          ))}
+        </div>,
+      );
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index].trimEnd();
+      const currentTrimmed = current.trim();
+      if (
+        !currentTrimmed ||
+        currentTrimmed.startsWith('# ') ||
+        currentTrimmed.startsWith('## ') ||
+        currentTrimmed.startsWith('### ') ||
+        /^[-*]\s+/.test(currentTrimmed) ||
+        /^\d+\.\s+/.test(currentTrimmed) ||
+        currentTrimmed.startsWith('>')
+      ) {
+        break;
+      }
+      paragraphLines.push(current);
+      index++;
+    }
+    blocks.push(
+      <Paragraph key={blocks.length} style={{ whiteSpace: 'pre-wrap' }}>
+        {paragraphLines.map((paragraphLine, paragraphIndex) => (
+          <span key={paragraphIndex}>
+            {paragraphIndex > 0 ? <br /> : null}
+            {renderInlineMarkdown(paragraphLine)}
+          </span>
+        ))}
+      </Paragraph>,
+    );
+  }
+
+  return blocks;
 }
 
 function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
@@ -234,15 +326,13 @@ export default function Activity() {
                 </Text>
                 <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{d.diary_count_7d}/7d</Tag>
               </Space>
-              <Tooltip title={preview || '无内容'}>
-                <Paragraph
-                  type={preview ? undefined : 'secondary'}
-                  style={{ marginBottom: 0 }}
-                  ellipsis={{ rows: 2, tooltip: false }}
-                >
-                  {preview || '无内容'}
-                </Paragraph>
-              </Tooltip>
+              <Paragraph
+                type={preview ? undefined : 'secondary'}
+                style={{ marginBottom: 0 }}
+                ellipsis={{ rows: 2, tooltip: false }}
+              >
+                {preview || '无内容'}
+              </Paragraph>
               <Button
                 type="link"
                 size="small"
@@ -278,15 +368,13 @@ export default function Activity() {
                 </Text>
                 <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{w.review_count_4w}/4w</Tag>
               </Space>
-              <Tooltip title={preview || '无内容'}>
-                <Paragraph
-                  type={preview ? undefined : 'secondary'}
-                  style={{ marginBottom: 0 }}
-                  ellipsis={{ rows: 2, tooltip: false }}
-                >
-                  {preview || '无内容'}
-                </Paragraph>
-              </Tooltip>
+              <Paragraph
+                type={preview ? undefined : 'secondary'}
+                style={{ marginBottom: 0 }}
+                ellipsis={{ rows: 2, tooltip: false }}
+              >
+                {preview || '无内容'}
+              </Paragraph>
               <Button
                 type="link"
                 size="small"
