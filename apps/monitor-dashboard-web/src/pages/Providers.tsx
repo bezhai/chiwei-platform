@@ -27,7 +27,9 @@ interface Provider {
 }
 
 const clientTypeOptions = [
-  { value: 'openai', label: 'openai' },
+  { value: 'openai', label: 'openai (Completions)' },
+  { value: 'openai-responses', label: 'openai-responses (Responses API)' },
+  { value: 'openai-completion', label: 'openai-completion (Completions API)' },
   { value: 'ark', label: 'ark' },
   { value: 'azure-http', label: 'azure-http' },
   { value: 'google', label: 'google' },
