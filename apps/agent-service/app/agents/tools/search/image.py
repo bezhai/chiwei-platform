@@ -43,7 +43,12 @@ async def search_images(
             response.raise_for_status()
             data = response.json()
 
-        images = data.get("images", [])
+        raw_images = data.get("images", [])
+        # You Search API may return {"results": [...]} or a plain list
+        if isinstance(raw_images, dict):
+            images = raw_images.get("results", [])
+        else:
+            images = raw_images
         if not images:
             return "未搜索到相关图片"
 
@@ -56,11 +61,11 @@ async def search_images(
         context = get_runtime(AgentContext).context
         registry = context.media.registry
 
-        # Upload concurrently
+        # Upload concurrently (API returns image_url field)
         upload_tasks = [
-            image_client.upload_to_tos("url", img.get("url", ""))
+            image_client.upload_to_tos("url", img.get("image_url") or img.get("url", ""))
             for img in images
-            if img.get("url")
+            if img.get("image_url") or img.get("url")
         ]
         tos_urls = await asyncio.gather(*upload_tasks, return_exceptions=True)
 
