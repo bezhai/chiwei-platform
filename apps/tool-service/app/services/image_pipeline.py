@@ -83,8 +83,10 @@ async def upload_to_tos(source_type: str, data: str) -> dict:
         file_id = hashlib.md5(image_bytes).hexdigest()[:16]
     elif source_type == "url":
         import httpx
+        from app.config.config import settings as _settings
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        proxy = _settings.forward_proxy_url
+        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
             resp = await client.get(data)
             resp.raise_for_status()
             image_bytes = resp.content
