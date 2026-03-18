@@ -58,7 +58,7 @@ const imageResolveTotal = new Counter({
 });
 
 const SEND_DELAY_MS = 2500;
-const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@(\d+\.png)\)/g;
+const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@?(\d+\.png)\)/g;
 
 /**
  * Resolve @N.png references in markdown image syntax.
