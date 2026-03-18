@@ -144,6 +144,10 @@ export class MessageContentUtils {
         let match: RegExpExecArray | null;
 
         while ((match = IMAGE_PATTERN.exec(markdown)) !== null) {
+            const imageRef = match[1];
+            // @N.png 是 ImageRegistry 引用，不是真实 image_key，保留为文本
+            const isUnresolved = /^@?\d+\.png$/.test(imageRef);
+
             // match 之前的文本部分
             if (match.index > lastIndex) {
                 items.push({
@@ -151,11 +155,18 @@ export class MessageContentUtils {
                     value: markdown.slice(lastIndex, match.index),
                 });
             }
-            // image item
-            items.push({
-                type: ContentType.Image,
-                value: match[1],
-            });
+            if (isUnresolved) {
+                // 未解析的引用保留为文本，不创建 image item
+                items.push({
+                    type: ContentType.Text,
+                    value: match[0],
+                });
+            } else {
+                items.push({
+                    type: ContentType.Image,
+                    value: imageRef,
+                });
+            }
             lastIndex = match.index + match[0].length;
         }
 
