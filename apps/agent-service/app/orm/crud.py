@@ -9,6 +9,7 @@ from .models import (
     ConversationMessage,
     DiaryEntry,
     LarkBaseChatInfo,
+    LarkGroupChatInfo,
     LarkUser,
     ModelMapping,
     ModelProvider,
@@ -140,6 +141,50 @@ async def get_active_diary_chat_ids(
             .having(func.count() >= min_replies)
         )
         return [row[0] for row in result.all()]
+
+
+async def get_active_p2p_chat_ids(
+    min_replies: int = 2, days: int = 1
+) -> list[str]:
+    """查询近 N 天内赤尾回复 >= min_replies 次的私聊 chat_id"""
+    async with AsyncSessionLocal() as session:
+        cutoff_ms = int(
+            (datetime.now(UTC) - timedelta(days=days)).timestamp() * 1000
+        )
+        result = await session.execute(
+            select(ConversationMessage.chat_id)
+            .where(ConversationMessage.chat_type == "p2p")
+            .where(ConversationMessage.role == "assistant")
+            .where(ConversationMessage.create_time > cutoff_ms)
+            .group_by(ConversationMessage.chat_id)
+            .having(func.count() >= min_replies)
+        )
+        return [row[0] for row in result.all()]
+
+
+async def get_cross_group_impressions(
+    user_id: str, limit: int = 5
+) -> list[tuple[PersonImpression, str]]:
+    """查询某用户在所有群聊中的印象（按更新时间倒序）
+
+    JOIN lark_group_chat_info 自然过滤掉 P2P chat_id，
+    确保只返回群聊来源的印象。
+
+    Returns:
+        list of (PersonImpression, group_name)
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PersonImpression, LarkGroupChatInfo.name)
+            .join(
+                LarkGroupChatInfo,
+                PersonImpression.chat_id == LarkGroupChatInfo.chat_id,
+            )
+            .where(PersonImpression.user_id == user_id)
+            .order_by(PersonImpression.updated_at.desc())
+            .limit(limit)
+        )
+        return [(row[0], row[1]) for row in result.all()]
 
 
 async def get_chat_messages_in_range(
