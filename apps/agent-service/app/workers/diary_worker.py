@@ -16,6 +16,7 @@ from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
 from app.orm.crud import (
     get_active_diary_chat_ids,
+    get_active_p2p_chat_ids,
     get_all_impressions_for_chat,
     get_chat_messages_in_range,
     get_diaries_in_range,
@@ -47,16 +48,24 @@ def _get_persona_lite() -> str:
 
 
 async def cron_generate_diaries(ctx) -> None:
-    """cron 入口：为近7天赤尾活跃的群生成昨天的日记"""
-    chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
-    if not chat_ids:
-        logger.info("No active diary chats found, skip")
-        return
-    logger.info(f"Active diary chats: {len(chat_ids)}")
-
+    """cron 入口：为活跃的群聊和私聊生成昨天的日记"""
     yesterday = date.today() - timedelta(days=1)
 
-    for chat_id in chat_ids:
+    # 群聊：近 7 天赤尾回复 >= 5 次
+    group_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
+    # 私聊：近 1 天赤尾回复 >= 2 次
+    p2p_ids = await get_active_p2p_chat_ids(min_replies=2, days=1)
+
+    all_ids = group_ids + p2p_ids
+    if not all_ids:
+        logger.info("No active diary chats found, skip")
+        return
+    logger.info(
+        f"Active diary chats: {len(all_ids)} "
+        f"(group={len(group_ids)}, p2p={len(p2p_ids)})"
+    )
+
+    for chat_id in all_ids:
         try:
             await generate_diary_for_chat(chat_id, yesterday)
         except Exception as e:
@@ -67,10 +76,10 @@ async def cron_generate_diaries(ctx) -> None:
 
 
 async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None:
-    """为指定群生成指定日期的日记
+    """为指定群或私聊生成指定日期的日记
 
     Args:
-        chat_id: 群 ID
+        chat_id: 群/私聊 ID
         target_date: 目标日期
 
     Returns:
@@ -104,15 +113,29 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
         logger.info(f"No messages for {chat_id} on {date_str}, skip")
         return None
 
+    # 判断聊天类型，构建 chat_hint 供 prompt 区分
+    is_p2p = messages[0].chat_type == "p2p" if messages else False
+    if is_p2p:
+        # 私聊对象 = 非 assistant 的用户
+        peer_names = [
+            user_names[uid] for uid in user_ids
+            if any(m.user_id == uid and m.role != "assistant" for m in messages)
+        ]
+        peer = peer_names[0] if peer_names else "对方"
+        chat_hint = f"这是你和 {peer} 的私聊记录。记录你们之间的对话、话题和感受。"
+    else:
+        chat_hint = "这是群聊记录。记录群里发生的事、话题和你观察到的群友动态。"
+
     # 4. 查最近 3 篇日记
     recent = await get_recent_diaries(chat_id, date_str, limit=3)
     recent_diaries_text = _format_recent_diaries(recent)
 
-    # 5. 获取 Langfuse prompt 并编译（注入 persona_core）
+    # 5. 获取 Langfuse prompt 并编译
     persona_lite = _get_persona_lite()
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
         persona_lite=persona_lite,
+        chat_hint=chat_hint,
         date=date_str,
         weekday=weekday,
         messages=timeline,

@@ -7,6 +7,7 @@ import logging
 from datetime import date
 
 from app.orm.crud import (
+    get_cross_group_impressions,
     get_impressions_for_users,
     get_latest_weekly_review,
     get_recent_diaries,
@@ -20,6 +21,7 @@ MAX_DIARY_CHARS = 2000
 
 
 MAX_IMPRESSION_USERS = 10
+MAX_CROSS_GROUP_IMPRESSIONS = 5
 
 
 async def build_impression_context(chat_id: str, user_ids: list[str]) -> str:
@@ -62,3 +64,20 @@ async def build_diary_context(chat_id: str) -> str:
     if len(text) > MAX_DIARY_CHARS:
         text = text[:MAX_DIARY_CHARS] + "……"
     return text
+
+
+async def build_cross_group_impression_context(
+    user_id: str, trigger_username: str
+) -> str:
+    """构建跨群人物印象文本，注入私聊 system prompt
+
+    从所有群聊中取该用户的印象（JOIN lark_group_chat_info 自然过滤 P2P），
+    按 updated_at 倒序取最多 5 条，标注来源群名。
+    """
+    rows = await get_cross_group_impressions(user_id, limit=MAX_CROSS_GROUP_IMPRESSIONS)
+    if not rows:
+        return ""
+    lines = []
+    for imp, group_name in rows:
+        lines.append(f"【{group_name}】{imp.impression_text}")
+    return f"你在群聊中对 {trigger_username} 的印象：\n" + "\n".join(lines)

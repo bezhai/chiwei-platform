@@ -20,7 +20,11 @@ from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_diary_context, build_impression_context
+from app.services.memory_context import (
+    build_cross_group_impression_context,
+    build_diary_context,
+    build_impression_context,
+)
 from app.services.schedule_context import build_schedule_context
 from app.utils.content_parser import parse_content
 
@@ -254,6 +258,26 @@ async def _build_and_stream(
     if chat_type == "p2p":
         if trigger_username:
             context_lines.append(f"你正在和 {trigger_username} 私聊。")
+
+        # 私聊注入日记记忆
+        try:
+            diary_text = await build_diary_context(chat_id)
+            if diary_text:
+                context_lines.append("\n---\n你最近的日记：")
+                context_lines.append(diary_text)
+        except Exception as e:
+            logger.error(f"Failed to build p2p diary context: {e}")
+
+        # 私聊注入跨群人物印象（群→私聊，不反向）
+        try:
+            cross_imp = await build_cross_group_impression_context(
+                trigger_user_id, trigger_username
+            )
+            if cross_imp:
+                context_lines.append("\n---\n" + cross_imp)
+        except Exception as e:
+            logger.error(f"Failed to build cross-group impression: {e}")
+
     else:  # group
         if chat_name:
             context_lines.append(f"你在群聊「{chat_name}」中。")
@@ -262,8 +286,7 @@ async def _build_and_stream(
                 f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
             )
 
-    # 群聊注入日记记忆 + 人物印象
-    if chat_type != "p2p":
+        # 群聊注入日记记忆 + 本群人物印象
         try:
             diary_text = await build_diary_context(chat_id)
             if diary_text:
