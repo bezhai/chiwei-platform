@@ -85,9 +85,9 @@ async function resolveImageReferences(content: string, messageId: string): Promi
 
             // Upload to Lark
             const uploadResult = await uploadImage(stream);
-            const imageKey = uploadResult?.data?.image_key;
+            const imageKey = uploadResult?.image_key || uploadResult?.data?.image_key;
             if (!imageKey) {
-                console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark`);
+                console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
                 result = result.replace(fullMatch, `(图片 ${filename} 上传失败)`);
                 continue;
             }
