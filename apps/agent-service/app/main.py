@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from inner_shared import hello as shared_hello
 
 from app.api.router import api_router
+from app.api.schedule import router as schedule_router
 from app.config import settings
 from app.services.qdrant import init_qdrant_collections
 from app.utils.middlewares import HeaderContextMiddleware
@@ -66,3 +67,4 @@ app.add_middleware(HeaderContextMiddleware)
 
 # 注册API路由
 app.include_router(api_router)
+app.include_router(schedule_router)

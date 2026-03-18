@@ -125,6 +125,63 @@ class DiaryEntry(Base):
     )
 
 
+class AkaoSchedule(Base):
+    """赤尾日程条目
+
+    支持三层时间维度的计划：
+    - monthly: 月度方向（兴趣倾向、生活基调）
+    - weekly: 周计划（本周大致安排）
+    - daily: 日计划（逐时段活动、心情、精力）
+
+    月/周计划由 LLM 离线生成，给出方向而非限制。
+    日计划继承月/周计划，填充具体时段。
+    event 类型覆盖同时段的 routine。
+    """
+
+    __tablename__ = "akao_schedule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 计划层级: "monthly" | "weekly" | "daily"
+    plan_type: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # 时间周期
+    period_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-01"
+    period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-31"
+
+    # 日计划专用：当天内的时间段
+    time_start: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "07:00"
+    time_end: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "08:30"
+
+    # 内容：叙事性描述（所有层级都有）
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # 结构化元数据（主要用于日计划时段）
+    mood: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    energy_level: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1-5
+    response_style_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Phase 2: 主动行为配置
+    proactive_action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    target_chats: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # 生成元信息
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        # 月/周计划：同类型同周期只有一条
+        UniqueConstraint("plan_type", "period_start", "period_end", "time_start"),
+    )
+
+
 class LarkGroupMember(Base):
     """群成员信息"""
 
