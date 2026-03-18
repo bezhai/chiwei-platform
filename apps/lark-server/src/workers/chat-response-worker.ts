@@ -25,7 +25,7 @@ import {
     laneQueue,
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { initializeLarkClients } from '@integrations/lark-client';
+import { initializeLarkClients, uploadImage } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 import { replyPost, sendPost } from '@lark/basic/message';
@@ -33,10 +33,126 @@ import { markdownToPostContent } from 'core/services/message/post-content-proces
 import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
+import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
+import { Readable } from 'stream';
+import { Counter, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import type { ConsumeMessage } from 'amqplib';
 
+// Metrics (chat-response-worker is a standalone process, needs its own registry)
+const metricsRegistry = new Registry();
+collectDefaultMetrics({ register: metricsRegistry });
+
+const imageResolveDuration = new Histogram({
+    name: 'image_resolve_step_duration_seconds',
+    help: 'Duration of each image resolve step',
+    labelNames: ['step'] as const,  // redis, download_tos, upload_lark
+    registers: [metricsRegistry],
+});
+
+const imageResolveTotal = new Counter({
+    name: 'image_resolve_requests_total',
+    help: 'Total image resolve outcomes',
+    labelNames: ['status'] as const,  // success, not_found, download_failed, upload_failed
+    registers: [metricsRegistry],
+});
+
 const SEND_DELAY_MS = 2500;
+const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@(\d+\.png)\)/g;
+
+/**
+ * Resolve @N.png references in markdown image syntax.
+ * Downloads TOS URL → uploads to Lark → replaces with image_key.
+ */
+async function resolveImageReferences(content: string, messageId: string): Promise<string> {
+    const matches = [...content.matchAll(IMAGE_REF_PATTERN)];
+    if (matches.length === 0) return content;
+
+    const tStart = Date.now();
+
+    // Load registry from Redis
+    const registry = await hgetall(`image_registry:${messageId}`);
+    const tRedis = (Date.now() - tStart) / 1000;
+    imageResolveDuration.labels({ step: 'redis' }).observe(tRedis);
+
+    if (!registry || Object.keys(registry).length === 0) {
+        console.warn(`[ChatResponseWorker] No image registry found for message_id=${messageId}`);
+        return content;
+    }
+
+    let result = content;
+
+    // Resolve single image: download TOS → upload Lark → return replacement
+    async function resolveSingle(match: RegExpExecArray): Promise<{ fullMatch: string; replacement: string }> {
+        const fullMatch = match[0];
+        const alt = match[1];
+        const filename = match[2];
+
+        const tosUrl = registry[filename];
+        if (!tosUrl) {
+            console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
+            imageResolveTotal.labels({ status: 'not_found' }).inc();
+            return { fullMatch, replacement: `(图片 ${filename} 不可用)` };
+        }
+
+        try {
+            // Download from TOS
+            const tDl0 = Date.now();
+            const response = await fetch(tosUrl);
+            if (!response.ok) {
+                console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
+                imageResolveTotal.labels({ status: 'download_failed' }).inc();
+                return { fullMatch, replacement: `(图片 ${filename} 下载失败)` };
+            }
+
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const tDownload = (Date.now() - tDl0) / 1000;
+            imageResolveDuration.labels({ step: 'download_tos' }).observe(tDownload);
+
+            // Upload to Lark
+            const tUp0 = Date.now();
+            const stream = Readable.from(buffer);
+            const uploadResult = await uploadImage(stream);
+            const imageKey = uploadResult?.image_key || uploadResult?.data?.image_key;
+            const tUpload = (Date.now() - tUp0) / 1000;
+            imageResolveDuration.labels({ step: 'upload_lark' }).observe(tUpload);
+
+            if (!imageKey) {
+                console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
+                imageResolveTotal.labels({ status: 'upload_failed' }).inc();
+                return { fullMatch, replacement: `(图片 ${filename} 上传失败)` };
+            }
+
+            imageResolveTotal.labels({ status: 'success' }).inc();
+            console.info(
+                `[ChatResponseWorker] Resolved ${filename} -> ${imageKey} ` +
+                `(size=${Math.round(buffer.length / 1024)}KB download=${Math.round(tDownload * 1000)}ms upload=${Math.round(tUpload * 1000)}ms)`,
+            );
+            return { fullMatch, replacement: `![${alt}](${imageKey})` };
+        } catch (e) {
+            console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
+            return { fullMatch, replacement: `(图片 ${filename} 处理失败)` };
+        }
+    }
+
+    // Process in batches of 5 concurrently
+    const CONCURRENCY = 5;
+    for (let i = 0; i < matches.length; i += CONCURRENCY) {
+        const batch = matches.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map(m => resolveSingle(m)));
+        for (const { fullMatch, replacement } of results) {
+            result = result.replace(fullMatch, replacement);
+        }
+    }
+
+    const tTotal = Date.now() - tStart;
+    console.info(
+        `[ChatResponseWorker] resolveImageReferences done: ${matches.length} refs, ` +
+        `redis=${Math.round(tRedis * 1000)}ms total=${tTotal}ms`,
+    );
+
+    return result;
+}
 
 interface ChatResponsePayload {
     session_id: string;
@@ -119,9 +235,13 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
         try {
             // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
-            const resolvedContent = is_p2p
+            let resolvedContent = is_p2p
                 ? content
                 : await resolveMentionsForGroup(content, chat_id);
+
+            // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
+            resolvedContent = await resolveImageReferences(resolvedContent, message_id);
+
             const postContent = markdownToPostContent(resolvedContent);
 
             // 发送消息并捕获 AI 消息 ID

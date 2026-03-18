@@ -3,8 +3,13 @@
 使用组合模式设计上下文，将必需字段和可选字段分离。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.clients.image_registry import ImageRegistry
 
 
 @dataclass(frozen=True)
@@ -19,7 +24,7 @@ class MessageContext:
 class MediaContext:
     """媒体上下文（可选）"""
 
-    image_urls: list[str] = field(default_factory=list)
+    registry: ImageRegistry | None = None
 
 
 @dataclass

@@ -2,11 +2,10 @@
 
 import asyncio
 import logging
-import re
 import uuid
 from collections.abc import AsyncGenerator
 
-from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain.messages import AIMessageChunk, ToolMessage
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
 
@@ -31,16 +30,6 @@ GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
 
 # 分段标记（consumer 侧检测并拆分为多条消息）
 SPLIT_MARKER = "---split---"
-
-# 重试标记（consumer 侧检测并丢弃已累积内容）
-RETRY_MARKER = "---retry---"
-
-# 外部图片 URL 检测（模型可能编造 ![image](https://...) 而非调用 generate_image）
-EXTERNAL_IMAGE_URL_PATTERN = re.compile(r"!\[.*?\]\((https?://[^\)]+)\)")
-CORRECTION_MESSAGE = (
-    "你的回复中包含了外部图片URL链接（![image](https://...)），"
-    "但这不会显示任何图片。请使用 generate_image 工具重新生成图片。"
-)
 
 
 
@@ -244,7 +233,7 @@ async def _build_and_stream(
     # 构建上下文
     (
         messages,
-        image_urls,
+        image_registry,
         chat_id,
         trigger_username,
         chat_type,
@@ -300,7 +289,7 @@ async def _build_and_stream(
             messages,
             context=AgentContext(
                 message=MessageContext(message_id=message_id, chat_id=chat_id),
-                media=MediaContext(image_urls=image_urls or []),
+                media=MediaContext(registry=image_registry),
                 features=FeatureFlags(flags=gray_config or {}),
             ),
             prompt_vars=prompt_vars,
@@ -327,43 +316,6 @@ async def _build_and_stream(
 
             elif isinstance(token, ToolMessage):
                 has_text_in_current_turn = False
-
-        # 检测外部图片 URL，注入纠错消息重试一次
-        if EXTERNAL_IMAGE_URL_PATTERN.search(full_content):
-            logger.warning(
-                "检测到外部图片URL，注入纠错消息重试: %s", message_id
-            )
-            yield RETRY_MARKER
-
-            retry_messages = messages + [
-                AIMessage(content=full_content),
-                HumanMessage(content=CORRECTION_MESSAGE),
-            ]
-            full_content = ""
-            async for token in agent.stream(
-                retry_messages,
-                context=AgentContext(
-                    message=MessageContext(
-                        message_id=message_id, chat_id=chat_id
-                    ),
-                    media=MediaContext(image_urls=image_urls or []),
-                    features=FeatureFlags(flags=gray_config or {}),
-                ),
-                prompt_vars=prompt_vars,
-            ):
-                if isinstance(token, AIMessageChunk):
-                    finish_reason = token.response_metadata.get(
-                        "finish_reason"
-                    )
-                    if finish_reason == "content_filter":
-                        yield "小尾有点不想讨论这个话题呢~"
-                        return
-                    if finish_reason == "length":
-                        yield "(后续内容被截断)"
-                        return
-                    if token.text:
-                        full_content += token.text
-                        yield token.text
 
         # Fire-and-forget: publish to post safety check queue
         if full_content and session_id:

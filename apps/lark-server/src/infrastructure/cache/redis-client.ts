@@ -297,3 +297,12 @@ export async function evalScript(script: string, numKeys: number, ...keysAndArgs
 export async function exists(key: string): Promise<number> {
     return redis.exists(key);
 }
+
+/**
+ * 获取 Hash 的所有字段和值
+ * @param key Hash 键名
+ * @returns 字段-值映射对象
+ */
+export async function hgetall(key: string): Promise<Record<string, string>> {
+    return redis.hgetall(key);
+}

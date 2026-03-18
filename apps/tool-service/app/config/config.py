@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_password: str | None = None
 
+    # Proxy
+    forward_proxy_url: str | None = None  # e.g. http://forward-proxy:8888
+
     # TOS
     tos_access_key_id: str | None = None
     tos_access_key_secret: str | None = None

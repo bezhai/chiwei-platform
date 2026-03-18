@@ -1,6 +1,5 @@
 """图片生成工具"""
 
-import asyncio
 import logging
 from typing import Annotated, Any
 
@@ -27,35 +26,33 @@ async def generate_image(
         Field(description="图片尺寸。可选值：1K、2K、4K 或像素值如 2048x2048"),
     ] = "2048x2048",
     image_list: Annotated[
-        list[int] | None,
-        Field(description="参考图片列表，使用文本中的图片编号，从1开始"),
+        list[str] | None,
+        Field(description="参考图片列表，使用 @N.png 文件名，如 [\"4.png\", \"5.png\"]"),
     ] = None,
-) -> str | dict[str, Any]:
+) -> str | list[dict[str, Any]]:
     """
-    通过文本提示词生成图片, 返回图片image_key
+    通过文本提示词生成图片，返回生成结果（含 @N.png 引用和图片内容）
     """
     try:
         context = get_runtime(AgentContext).context
-        image_url_list = context.media.image_urls
+        registry = context.media.registry
 
+        # Resolve reference images from registry
         reference_urls = []
-        if image_list and image_url_list:
-            for idx in image_list:
-                array_index = idx - 1
-                if 0 <= array_index < len(image_url_list):
-                    reference_urls.append(image_url_list[array_index])
+        if image_list and registry:
+            for filename in image_list:
+                url = await registry.resolve(filename)
+                if url:
+                    reference_urls.append(url)
                 else:
-                    logger.warning(
-                        f"图片编号 {idx} 超出范围（总共 {len(image_url_list)} 张图片）"
-                    )
+                    logger.warning(f"参考图片未找到: {filename}")
 
         if reference_urls:
-            logger.info(f"使用参考图片: {reference_urls}")
+            logger.info(f"使用参考图片: {len(reference_urls)} 张")
 
         logger.info(f"生成图片请求: {query}")
 
         model_name = "default-generate-image-model"
-
         if context.features.get("image_model"):
             model_name = context.features.get("image_model")
             logger.info(f"灰度配置覆盖图片模型为: {model_name}")
@@ -67,33 +64,30 @@ async def generate_image(
                 reference_images=reference_urls if reference_urls else None,
             )
 
-            image_keys = await batch_upload_images(base64_images=base64_images)
-            return {
-                "image_keys": image_keys,
-            }
+            # Upload to TOS and register
+            from app.clients.image_client import image_client
+
+            content_blocks: list[dict[str, Any]] = []
+            filenames: list[str] = []
+
+            for b64 in base64_images:
+                tos_url = await image_client.upload_to_tos("base64", b64)
+                if not tos_url:
+                    logger.error("图片上传 TOS 失败")
+                    continue
+
+                if registry:
+                    filename = await registry.register(tos_url)
+                    filenames.append(filename)
+                    content_blocks.append({"type": "text", "text": f"生成了图片: @{filename}"})
+                    content_blocks.append({"type": "text", "text": f"@{filename}:"})
+                    content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
+
+            if not content_blocks:
+                return "图片生成失败，请稍后重试"
+
+            return content_blocks
 
     except Exception as e:
         logger.exception(f"Image agent执行失败: {str(e)}")
         return f"抱歉，处理您的请求时出现错误: {str(e)}"
-
-
-async def batch_upload_images(base64_images: list[str]) -> list[str]:
-    """
-    批量上传图片, 返回图片 keys 列表
-    """
-    from app.clients.image_client import image_client
-
-    tasks = [
-        image_client.upload_base64_image(base64_data=base64_image)
-        for base64_image in base64_images
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    image_keys = []
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error(f"图片上传失败: {str(result)}")
-        elif isinstance(result, str) and result:
-            image_keys.append(result)
-
-    return image_keys

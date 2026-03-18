@@ -7,18 +7,21 @@ BASE_TOOLS 是子 Agent 可复用的基础工具集（不含委派工具）。
 from app.agents.tools.delegation.research import deep_research
 from app.agents.tools.history.members import list_group_members
 from app.agents.tools.history.search import search_group_history
-from app.agents.tools.image import generate_image
+from app.agents.tools.image import generate_image, read_images
 from app.agents.tools.memory import load_memory
 from app.agents.tools.search.allcpp import search_donjin_event
+from app.agents.tools.search.image import search_images
 from app.agents.tools.search.web import search_web
 
 # 基础工具（子 Agent 默认继承此集合）
 BASE_TOOLS = [
     search_web,
+    search_images,
     search_donjin_event,
     search_group_history,
     list_group_members,
     generate_image,
+    read_images,
     load_memory,
 ]
 

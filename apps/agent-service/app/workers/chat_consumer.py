@@ -23,7 +23,6 @@ from app.utils.middlewares.trace import header_vars
 logger = logging.getLogger(__name__)
 
 SPLIT_MARKER = "---split---"
-RETRY_MARKER = "---retry---"
 MAX_MESSAGES = 4
 
 
@@ -74,12 +73,6 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
 
             async for text in stream_chat(message_id, session_id=session_id):
                 if not text:
-                    continue
-                if text == RETRY_MARKER:
-                    # 外部图片URL检测触发重试，丢弃已累积内容
-                    full_content = ""
-                    sent_length = 0
-                    messages_sent = 0
                     continue
                 full_content += text
 
