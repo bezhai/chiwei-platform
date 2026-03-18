@@ -49,8 +49,12 @@ async function resolveImageReferences(content: string, messageId: string): Promi
     const matches = [...content.matchAll(IMAGE_REF_PATTERN)];
     if (matches.length === 0) return content;
 
+    const tStart = Date.now();
+
     // Load registry from Redis
     const registry = await hgetall(`image_registry:${messageId}`);
+    const tRedis = Date.now() - tStart;
+
     if (!registry || Object.keys(registry).length === 0) {
         console.warn(`[ChatResponseWorker] No image registry found for message_id=${messageId}`);
         return content;
@@ -66,13 +70,13 @@ async function resolveImageReferences(content: string, messageId: string): Promi
         const tosUrl = registry[filename];
         if (!tosUrl) {
             console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
-            // Remove the unresolved image reference
             result = result.replace(fullMatch, `(图片 ${filename} 不可用)`);
             continue;
         }
 
         try {
             // Download from TOS
+            const tDl0 = Date.now();
             const response = await fetch(tosUrl);
             if (!response.ok) {
                 console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
@@ -81,11 +85,15 @@ async function resolveImageReferences(content: string, messageId: string): Promi
             }
 
             const buffer = Buffer.from(await response.arrayBuffer());
-            const stream = Readable.from(buffer);
+            const tDownload = Date.now() - tDl0;
 
             // Upload to Lark
+            const tUp0 = Date.now();
+            const stream = Readable.from(buffer);
             const uploadResult = await uploadImage(stream);
             const imageKey = uploadResult?.image_key || uploadResult?.data?.image_key;
+            const tUpload = Date.now() - tUp0;
+
             if (!imageKey) {
                 console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
                 result = result.replace(fullMatch, `(图片 ${filename} 上传失败)`);
@@ -94,12 +102,21 @@ async function resolveImageReferences(content: string, messageId: string): Promi
 
             // Replace with Lark image_key
             result = result.replace(fullMatch, `![${alt}](${imageKey})`);
-            console.info(`[ChatResponseWorker] Resolved ${filename} -> ${imageKey}`);
+            console.info(
+                `[ChatResponseWorker] Resolved ${filename} -> ${imageKey} ` +
+                `(size=${Math.round(buffer.length / 1024)}KB download=${tDownload}ms upload=${tUpload}ms)`,
+            );
         } catch (e) {
             console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
             result = result.replace(fullMatch, `(图片 ${filename} 处理失败)`);
         }
     }
+
+    const tTotal = Date.now() - tStart;
+    console.info(
+        `[ChatResponseWorker] resolveImageReferences done: ${matches.length} refs, ` +
+        `redis=${tRedis}ms total=${tTotal}ms`,
+    );
 
     return result;
 }

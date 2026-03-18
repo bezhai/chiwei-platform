@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Annotated, Any
 
 import httpx
@@ -38,10 +39,14 @@ async def search_images(
     headers = {"X-API-Key": settings.you_search_api_key}
 
     try:
+        t_start = time.monotonic()
+
+        # 1. Search API
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
+        t_search = time.monotonic() - t_start
 
         raw_images = data.get("images", [])
         # You Search API may return {"results": [...]} or a plain list
@@ -55,12 +60,13 @@ async def search_images(
         # Take top N results
         images = images[:_MAX_RESULTS]
 
-        # Upload each to TOS and register
+        # 2. Upload each to TOS and register
         from app.clients.image_client import image_client
 
         context = get_runtime(AgentContext).context
         registry = context.media.registry
 
+        t0 = time.monotonic()
         # Upload concurrently (API returns image_url field)
         upload_tasks = [
             image_client.upload_to_tos("url", img.get("image_url") or img.get("url", ""))
@@ -68,13 +74,16 @@ async def search_images(
             if img.get("image_url") or img.get("url")
         ]
         tos_urls = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        t_upload = time.monotonic() - t0
 
         content_blocks: list[dict[str, Any]] = []
         result_lines: list[str] = []
+        failed = 0
 
         for i, tos_url in enumerate(tos_urls):
             if isinstance(tos_url, Exception) or not tos_url:
-                logger.warning(f"图片 {i} 上传 TOS 失败")
+                failed += 1
+                logger.warning(f"图片 {i} 上传 TOS 失败: {tos_url if isinstance(tos_url, Exception) else 'empty'}")
                 continue
 
             if registry:
@@ -82,6 +91,14 @@ async def search_images(
                 result_lines.append(f"@{filename}")
                 content_blocks.append({"type": "text", "text": f"@{filename}:"})
                 content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
+
+        t_total = time.monotonic() - t_start
+        logger.info(
+            "search_images done: query=%r search=%.2fs upload=%.2fs total=%.2fs "
+            "results=%d/%d failed=%d",
+            query, t_search, t_upload, t_total,
+            len(result_lines), len(upload_tasks), failed,
+        )
 
         if not content_blocks:
             return "图片搜索成功但上传失败，请稍后重试"
