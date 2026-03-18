@@ -53,6 +53,15 @@ def _schedule_model() -> str:
     return settings.diary_model
 
 
+def _get_persona_core() -> str:
+    """加载 persona_core prompt 作为人设上下文注入生成器"""
+    try:
+        return get_prompt("persona_core").compile()
+    except Exception as e:
+        logger.warning(f"Failed to load persona_core prompt: {e}")
+        return ""
+
+
 # ==================== ArQ cron 入口 ====================
 
 
@@ -121,9 +130,10 @@ async def generate_monthly_plan(target_date: date | None = None) -> str | None:
     season = _get_season(month_start.month)
     month_cn = f"{month_start.year}年{month_start.month}月"
 
-    # 获取 Langfuse prompt
+    # 获取 Langfuse prompt（注入 persona_core）
     prompt_template = get_prompt("schedule_monthly")
     compiled = prompt_template.compile(
+        persona_core=_get_persona_core(),
         month=month_cn,
         season=season,
         previous_monthly_plan=prev_plan_text,
@@ -197,9 +207,10 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
 
-    # 获取 Langfuse prompt
+    # 获取 Langfuse prompt（注入 persona_core）
     prompt_template = get_prompt("schedule_weekly")
     compiled = prompt_template.compile(
+        persona_core=_get_persona_core(),
         week=week_desc,
         monthly_plan=monthly_text,
         previous_weekly_plan=prev_plan_text,
@@ -308,9 +319,10 @@ async def generate_daily_plan(target_date: date | None = None) -> list[dict] | N
     else:
         yesterday_plan = "（暂无昨天的日计划）"
 
-    # 获取 Langfuse prompt
+    # 获取 Langfuse prompt（注入 persona_core）
     prompt_template = get_prompt("schedule_daily")
     compiled = prompt_template.compile(
+        persona_core=_get_persona_core(),
         date=date_str,
         weekday=weekday,
         is_weekend="是" if is_weekend else "否",
