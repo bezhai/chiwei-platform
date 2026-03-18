@@ -157,6 +157,10 @@ export function markdownToPostContent(markdown: string): PostContent {
             // 外部 URL，跳过图片节点（模型编造的链接无法显示）
             continue;
         }
+        if (/^@?\d+\.png$/.test(imageKey)) {
+            // 未解析的 ImageRegistry 引用，不能作为飞书 image_key
+            continue;
+        }
         content.push([{ tag: 'img', image_key: imageKey } as ImgPostNode]);
     }
 
