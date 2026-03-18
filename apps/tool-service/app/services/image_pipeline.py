@@ -10,6 +10,21 @@ from app.services.image_service import process_image
 
 logger = logging.getLogger(__name__)
 
+
+class UpstreamError(Exception):
+    """Error from an upstream service (Lark API, external URL)."""
+
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class UpstreamTimeoutError(UpstreamError):
+    """Timeout from an upstream service."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status_code=504)
+
 IMAGE_PIPELINE_DURATION = Histogram(
     "image_pipeline_step_duration_seconds",
     "Duration of each image pipeline step",
@@ -73,7 +88,17 @@ async def process_image_pipeline(
         url = await tos_client.get_file_url(file_name)
         await redis_client.redis_set_with_expire(url_cache_key, url, _URL_CACHE_TTL)
 
-    return {"url": url, "file_key": file_key}
+    return {"url": url, "file_key": file_key, "file_name": file_name}
+
+
+async def get_file_url(file_name: str) -> dict:
+    """Get pre-signed URL for an already-uploaded TOS file. No Lark download."""
+    url_cache_key = f"image_url:{file_name}"
+    url = await redis_client.redis_get(url_cache_key)
+    if not url:
+        url = await tos_client.get_file_url(file_name)
+        await redis_client.redis_set_with_expire(url_cache_key, url, _URL_CACHE_TTL)
+    return {"url": url, "file_name": file_name}
 
 
 async def upload_to_tos(source_type: str, data: str) -> dict:
@@ -104,10 +129,18 @@ async def upload_to_tos(source_type: str, data: str) -> dict:
         from app.config.config import settings as _settings
 
         proxy = _settings.forward_proxy_url
-        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
-            resp = await client.get(data)
-            resp.raise_for_status()
-            image_bytes = resp.content
+        try:
+            async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+                resp = await client.get(data)
+                resp.raise_for_status()
+                image_bytes = resp.content
+        except httpx.TimeoutException:
+            raise UpstreamTimeoutError(f"URL download timed out: {data[:200]}")
+        except httpx.HTTPStatusError as e:
+            raise UpstreamError(
+                f"URL download failed: {e.response.status_code}",
+                status_code=e.response.status_code,
+            )
         t_download = time.monotonic() - t_start
         IMAGE_PIPELINE_DURATION.labels(step="download_url").observe(t_download)
         file_id = hashlib.md5(image_bytes).hexdigest()[:16]

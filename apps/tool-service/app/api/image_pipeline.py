@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.middleware.auth import verify_bearer_token
-from app.services.image_pipeline import process_image_pipeline, upload_base64_image, upload_to_tos
+from app.services.image_pipeline import (
+    UpstreamError,
+    get_file_url,
+    process_image_pipeline,
+    upload_base64_image,
+    upload_to_tos,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +20,10 @@ router = APIRouter(dependencies=[Depends(verify_bearer_token)])
 class ProcessRequest(BaseModel):
     message_id: str | None = None
     file_key: str
+
+
+class GetUrlRequest(BaseModel):
+    file_name: str
 
 
 class UploadToTosRequest(BaseModel):
@@ -41,6 +51,17 @@ async def process(request: ProcessRequest, x_app_name: str = Header(alias="X-App
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/get-url")
+async def get_url(request: GetUrlRequest):
+    """Get pre-signed URL for an already-uploaded TOS file. No Lark download."""
+    try:
+        result = await get_file_url(file_name=request.file_name)
+        return {"success": True, "data": result, "message": "ok"}
+    except Exception as e:
+        logger.error(f"Get URL failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/to-tos")
 async def to_tos(request: UploadToTosRequest):
     try:
@@ -51,6 +72,9 @@ async def to_tos(request: UploadToTosRequest):
         return {"success": True, "data": result, "message": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except UpstreamError as e:
+        logger.warning(f"Upload to TOS upstream error: {e}")
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except Exception as e:
         logger.error(f"Upload to TOS failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

@@ -12,8 +12,12 @@ from langchain.messages import AIMessage, HumanMessage
 from app.agents.infra.langfuse_client import get_prompt
 from app.clients.image_client import image_client
 from app.clients.image_registry import ImageRegistry
+from sqlalchemy import select
+
+from app.orm.base import AsyncSessionLocal
+from app.orm.models import ConversationMessage
 from app.services.quick_search import QuickSearchResult, quick_search
-from app.utils.content_parser import parse_content
+from app.utils.content_parser import parse_content, update_tos_files
 
 logger = logging.getLogger(__name__)
 
@@ -40,28 +44,54 @@ async def build_chat_context(
 
     chat_type = l1_results[-1].chat_type or "p2p"  # 默认私聊
 
-    # 1. 从 content 里批量提取图片 keys
-    all_image_keys: list[tuple[str, str, str]] = []  # (key, message_id, role)
+    # 1. 从 content 里批量提取图片 keys，区分已缓存 vs 未缓存
+    cached_keys: list[tuple[str, str]]  = []  # (image_key, tos_file)
+    uncached_keys: list[tuple[str, str, str]] = []  # (image_key, message_id, role)
     for msg in l1_results:
         parsed = parse_content(msg.content)
         for key in parsed.image_keys:
-            all_image_keys.append((key, msg.message_id, msg.role))
+            tos_file = parsed.tos_files.get(key)
+            if tos_file:
+                cached_keys.append((key, tos_file))
+            else:
+                uncached_keys.append((key, msg.message_id, msg.role))
 
-    # 2. 批量处理所有图片 → TOS URL
+    # 2a. 已缓存的图片：只签 URL，不走飞书下载
     image_key_to_url: dict[str, str] = {}
-    if all_image_keys:
-        image_tasks = [
-            image_client.process_image(key, msg_id if role == "user" else None)
-            for key, msg_id, role in all_image_keys
-        ]
-        image_results = await asyncio.gather(*image_tasks, return_exceptions=True)
-
-        for i, result in enumerate(image_results):
-            key, msg_id, _ = all_image_keys[i]
+    image_key_to_file: dict[str, str] = {}  # 用于回写 DB
+    if cached_keys:
+        url_tasks = [image_client.get_url(tos_file) for _, tos_file in cached_keys]
+        url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
+        for i, result in enumerate(url_results):
+            key, tos_file = cached_keys[i]
             if isinstance(result, str) and result:
                 image_key_to_url[key] = result
+                image_key_to_file[key] = tos_file
+            else:
+                # URL 签名失败（文件可能被清理），回退到完整 pipeline
+                uncached_keys.append((key, "", ""))
+                logger.warning(f"TOS URL 签名失败，回退完整 pipeline: {key}")
+
+    # 2b. 未缓存的图片：走完整 pipeline（飞书下载 → 压缩 → TOS）
+    if uncached_keys:
+        process_tasks = [
+            image_client.process_image(key, msg_id if role == "user" else None)
+            for key, msg_id, role in uncached_keys
+        ]
+        process_results = await asyncio.gather(*process_tasks, return_exceptions=True)
+
+        for i, result in enumerate(process_results):
+            key, msg_id, _ = uncached_keys[i]
+            if isinstance(result, dict) and result:
+                image_key_to_url[key] = result["url"]
+                if result.get("file_name"):
+                    image_key_to_file[key] = result["file_name"]
             else:
                 logger.warning(f"图片处理失败: key={key}, message_id={msg_id}")
+
+    # 2c. 将新获取的 tos_file 回写到消息 content（后台执行，不阻塞）
+    if image_key_to_file:
+        asyncio.create_task(_persist_tos_files(l1_results, image_key_to_file))
 
     # 3. 注册所有图片到 ImageRegistry
     registry = ImageRegistry(message_id)
@@ -104,6 +134,42 @@ async def build_chat_context(
         chat_name,
         chain_user_ids,
     )
+
+
+async def _persist_tos_files(
+    messages: list[QuickSearchResult], image_key_to_file: dict[str, str]
+) -> None:
+    """后台将 tos_file 回写到消息 content 的 image items 中。"""
+    try:
+        # 按 message_id 聚合需要更新的 image_key → file_name
+        msg_updates: dict[str, dict[str, str]] = {}  # message_id → {key: file_name}
+        for msg in messages:
+            parsed = parse_content(msg.content)
+            new_mappings = {}
+            for key in parsed.image_keys:
+                if key in image_key_to_file and key not in parsed.tos_files:
+                    new_mappings[key] = image_key_to_file[key]
+            if new_mappings:
+                msg_updates[msg.message_id] = new_mappings
+
+        if not msg_updates:
+            return
+
+        async with AsyncSessionLocal() as session:
+            for mid, mapping in msg_updates.items():
+                row = await session.scalar(
+                    select(ConversationMessage).where(
+                        ConversationMessage.message_id == mid
+                    )
+                )
+                if row:
+                    updated = update_tos_files(row.content, mapping)
+                    if updated:
+                        row.content = updated
+            await session.commit()
+            logger.info(f"tos_file 回写完成: {len(msg_updates)} 条消息")
+    except Exception:
+        logger.warning("tos_file 回写失败", exc_info=True)
 
 
 def _extract_reply_chain(

@@ -39,9 +39,9 @@ class ImageProcessClient:
 
     async def process_image(
         self, file_key: str, message_id: str | None, bot_name: str | None = None
-    ) -> str | None:
+    ) -> dict | None:
         """
-        处理图片，返回图片URL
+        处理图片，返回 {"url": ..., "file_name": ...}
 
         Args:
             file_key: 图片文件key
@@ -49,7 +49,7 @@ class ImageProcessClient:
             bot_name: 机器人名称（用于多 bot 场景）
 
         Returns:
-            str: 图片URL，如果失败返回None
+            dict: {"url": str, "file_name": str}，如果失败返回None
         """
         # 优先使用传入的 bot_name，否则从上下文获取
         app_name = bot_name or get_app_name() or ""
@@ -78,8 +78,9 @@ class ImageProcessClient:
                 data = response.json()
 
                 if data.get("success") and data.get("data"):
-                    logger.info(f"图片处理成功: {file_key} -> {data['data']['url']}")
-                    return data["data"]["url"]
+                    result = data["data"]
+                    logger.info(f"图片处理成功: {file_key} -> {result['url']}")
+                    return {"url": result["url"], "file_name": result.get("file_name", "")}
                 else:
                     logger.error(f"图片处理失败: {data.get('message', '未知错误')}")
                     return None
@@ -94,6 +95,35 @@ class ImageProcessClient:
             return None
         except Exception as e:
             logger.error(f"调用图片处理接口失败: {str(e)}")
+            return None
+        finally:
+            _record_outbound("POST", status, time.monotonic() - start)
+
+    async def get_url(self, file_name: str) -> str | None:
+        """根据 TOS file_name 获取预签名 URL（不触发飞书下载）"""
+        start = time.monotonic()
+        status = "network_error"
+        try:
+            base_url = lane_router.base_url("tool-service")
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{base_url}/api/image-pipeline/get-url",
+                    json={"file_name": file_name},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {settings.inner_http_secret}",
+                        "X-Trace-Id": get_trace_id() or "",
+                        **lane_router.get_headers(),
+                    },
+                )
+                status = str(response.status_code)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("success") and data.get("data"):
+                    return data["data"]["url"]
+                return None
+        except Exception as e:
+            logger.warning(f"获取图片URL失败: {file_name} - {e}")
             return None
         finally:
             _record_outbound("POST", status, time.monotonic() - start)
@@ -239,10 +269,11 @@ class ImageProcessClient:
         """
         try:
             # 1. 获取图片URL
-            image_url = await self.process_image(file_key, message_id, bot_name)
-            if not image_url:
+            result = await self.process_image(file_key, message_id, bot_name)
+            if not result:
                 logger.warning(f"无法获取图片URL: {file_key}")
                 return None
+            image_url = result["url"]
 
             # 2. 下载图片内容
             async with httpx.AsyncClient(timeout=30.0) as client:
