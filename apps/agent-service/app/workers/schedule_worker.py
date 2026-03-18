@@ -62,6 +62,39 @@ def _get_persona_core() -> str:
         return ""
 
 
+async def _gather_world_context(target_date: date) -> str:
+    """搜索真实世界素材，为日计划提供延伸锚点
+
+    搜索当季番剧、天气、热门话题等，让日计划能基于真实世界生长，
+    而不是只在 persona 锚点里打转。
+    """
+    from app.agents.tools.search.web import search_web
+
+    month = target_date.month
+    season = _get_season(month)
+    queries = [
+        f"{target_date.year}年{month}月 新番动画 推荐",
+        f"{season} 生活 日常 有趣的事",
+    ]
+
+    snippets: list[str] = []
+    for q in queries:
+        try:
+            results = await search_web(query=q, num=3)
+            for r in results[:3]:
+                if r.get("snippet"):
+                    snippets.append(r["snippet"])
+        except Exception as e:
+            logger.warning(f"World context search failed for '{q}': {e}")
+
+    if not snippets:
+        return ""
+
+    return "以下是一些真实世界的近期信息（作为生活素材参考，自然融入而非罗列）：\n" + "\n".join(
+        f"- {s}" for s in snippets[:6]
+    )
+
+
 # ==================== ArQ cron 入口 ====================
 
 
@@ -304,7 +337,10 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
     yesterday_plan = await get_plan_for_period("daily", yesterday, yesterday)
     yesterday_text = yesterday_plan.content if yesterday_plan else "（暂无昨天的手帐）"
 
-    # 获取 Langfuse prompt（注入 persona_core）
+    # 5. 搜索真实世界素材（当季番剧、热门话题等）
+    world_context = await _gather_world_context(target_date)
+
+    # 获取 Langfuse prompt（注入 persona_core + world_context）
     prompt_template = get_prompt("schedule_daily")
     compiled = prompt_template.compile(
         persona_core=_get_persona_core(),
@@ -315,6 +351,7 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
         weekly_plan=weekly_text,
         recent_diary=diary_text,
         yesterday_plan=yesterday_text,
+        world_context=world_context,
     )
 
     # 调用 LLM

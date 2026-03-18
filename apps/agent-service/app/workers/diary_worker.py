@@ -34,12 +34,12 @@ CST = timezone(timedelta(hours=8))
 _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 
-def _get_persona_core() -> str:
-    """加载 persona_core prompt 作为人设上下文"""
+def _get_persona_lite() -> str:
+    """加载 persona_lite prompt 作为轻量人设（语气指导）"""
     try:
-        return get_prompt("persona_core").compile()
+        return get_prompt("persona_lite").compile()
     except Exception as e:
-        logger.warning(f"Failed to load persona_core prompt: {e}")
+        logger.warning(f"Failed to load persona_lite prompt: {e}")
         return ""
 
 
@@ -109,10 +109,10 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
     recent_diaries_text = _format_recent_diaries(recent)
 
     # 5. 获取 Langfuse prompt 并编译（注入 persona_core）
-    persona_core = _get_persona_core()
+    persona_lite = _get_persona_lite()
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
-        persona_core=persona_core,
+        persona_lite=persona_lite,
         date=date_str,
         weekday=weekday,
         messages=timeline,
@@ -409,7 +409,7 @@ async def generate_weekly_review_for_chat(
     # 4. 获取 Langfuse prompt 并编译（注入 persona_core）
     prompt_template = get_prompt("weekly_review_generation")
     compiled_prompt = prompt_template.compile(
-        persona_core=_get_persona_core(),
+        persona_lite=_get_persona_lite(),
         week_start=week_start,
         week_end=week_end,
         diaries=diaries_text,
