@@ -182,7 +182,7 @@ class ImageProcessClient:
             request_data = {"source_type": source_type, "data": data}
 
             base_url = lane_router.base_url("tool-service")
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
                     f"{base_url}/api/image-pipeline/to-tos",
                     json=request_data,
