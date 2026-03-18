@@ -82,7 +82,8 @@ router.get('/api/activity/overview', async (ctx) => {
   }
 
   const groups = [...groupMap.values()]
-    .sort((a, b) => b.message_count - a.message_count)
+    .filter((group) => group.bot_replies > 0)
+    .sort((a, b) => b.bot_replies - a.bot_replies || b.message_count - a.message_count)
     .map(({ dailyMap, ...rest }) => ({
       ...rest,
       daily_counts: [...dailyMap.entries()]
@@ -117,20 +118,24 @@ router.get('/api/activity/diary-status', async (ctx) => {
   // Fetch all diary entries and aggregate in JS
   const diaries = await diaryRepo
     .createQueryBuilder('de')
-    .select(['de.chat_id', 'de.diary_date'])
+    .select(['de.chat_id', 'de.diary_date', 'de.content'])
     .getMany();
 
-  const diaryMap = new Map<string, { latest_diary_date: string; diary_count_7d: number }>();
+  const diaryMap = new Map<string, { latest_diary_date: string; latest_diary_content: string; diary_count_7d: number }>();
   for (const d of diaries) {
     const existing = diaryMap.get(d.chat_id);
     const isRecent = d.diary_date >= sevenDaysAgoStr;
     if (!existing) {
       diaryMap.set(d.chat_id, {
         latest_diary_date: d.diary_date,
+        latest_diary_content: d.content,
         diary_count_7d: isRecent ? 1 : 0,
       });
     } else {
-      if (d.diary_date > existing.latest_diary_date) existing.latest_diary_date = d.diary_date;
+      if (d.diary_date > existing.latest_diary_date) {
+        existing.latest_diary_date = d.diary_date;
+        existing.latest_diary_content = d.content;
+      }
       if (isRecent) existing.diary_count_7d++;
     }
   }
@@ -138,20 +143,24 @@ router.get('/api/activity/diary-status', async (ctx) => {
   // Fetch all weekly reviews and aggregate in JS
   const weeklies = await weeklyRepo
     .createQueryBuilder('wr')
-    .select(['wr.chat_id', 'wr.week_start'])
+    .select(['wr.chat_id', 'wr.week_start', 'wr.content'])
     .getMany();
 
-  const weeklyMap = new Map<string, { latest_week_start: string; review_count_4w: number }>();
+  const weeklyMap = new Map<string, { latest_week_start: string; latest_weekly_content: string; review_count_4w: number }>();
   for (const w of weeklies) {
     const existing = weeklyMap.get(w.chat_id);
     const isRecent = w.week_start >= fourWeeksAgoStr;
     if (!existing) {
       weeklyMap.set(w.chat_id, {
         latest_week_start: w.week_start,
+        latest_weekly_content: w.content,
         review_count_4w: isRecent ? 1 : 0,
       });
     } else {
-      if (w.week_start > existing.latest_week_start) existing.latest_week_start = w.week_start;
+      if (w.week_start > existing.latest_week_start) {
+        existing.latest_week_start = w.week_start;
+        existing.latest_weekly_content = w.content;
+      }
       if (isRecent) existing.review_count_4w++;
     }
   }

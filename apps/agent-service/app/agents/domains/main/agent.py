@@ -18,7 +18,7 @@ from app.agents.core import (
 )
 from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
-from app.agents.graphs.pre import Complexity, run_pre
+from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.memory_context import build_diary_context, build_impression_context
 from app.utils.content_parser import parse_content
@@ -31,12 +31,6 @@ GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
 # 分段标记（consumer 侧检测并拆分为多条消息）
 SPLIT_MARKER = "---split---"
 
-# 复杂度行为引导
-COMPLEXITY_HINTS = {
-    Complexity.SIMPLE: "【简洁模式】倾向于直接回答或单次工具调用，快速响应用户。",
-    Complexity.COMPLEX: "【深度模式】可以多步推理，充分利用工具收集信息后再综合回答。",
-    Complexity.SUPER_COMPLEX: "【研究模式】这是一个复杂的研究任务，可以进行深入分析和多轮工具调用。",
-}
 
 
 async def stream_chat(
@@ -86,23 +80,15 @@ async def stream_chat(
                     yield GUARD_REJECT_MESSAGE
                     return
 
-                complexity_result = pre_result["complexity_result"]
-                complexity = (
-                    complexity_result.complexity
-                    if complexity_result
-                    else Complexity.SIMPLE
-                )
-                logger.info(f"复杂度路由: complexity={complexity.value}")
-
                 async for text in _build_and_stream(
-                    message_id, complexity, gray_config, request_id
+                    message_id, gray_config, request_id
                 ):
                     yield text
             else:
                 # === 并行模式：pre 在后台运行，主模型同时流式生成 ===
                 logger.info(f"并行模式启动: message_id={message_id}")
                 raw_stream = _build_and_stream(
-                    message_id, Complexity.SIMPLE, gray_config, request_id
+                    message_id, gray_config, request_id
                 )
 
                 async for text in _buffer_until_pre(raw_stream, pre_task, message_id):
@@ -223,14 +209,12 @@ async def _buffer_until_pre(
 
 async def _build_and_stream(
     message_id: str,
-    complexity: Complexity,
     gray_config: dict,
     session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
-    # 构建 prompt 变量（注入复杂度引导）
     prompt_vars = {
-        "complexity_hint": COMPLEXITY_HINTS.get(complexity, ""),
+        "complexity_hint": "",
         "user_context": "",
     }
 

@@ -55,10 +55,10 @@ AgentRegistry.register(
 )
 
 AgentRegistry.register(
-    "pre-complexity",
+    "research",
     AgentConfig(
-        prompt_id="pre_complexity_classification",
-        model_id="pre-complexity-model",
-        trace_name="pre",
+        prompt_id="research_agent",
+        model_id="research-model",
+        trace_name="research",
     ),
 )

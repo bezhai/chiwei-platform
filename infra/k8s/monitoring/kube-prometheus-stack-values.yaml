@@ -1,5 +1,8 @@
 grafana:
   # adminPassword set via --set grafana.adminPassword=... at install time
+  grafana.ini:
+    security:
+      allow_embedding: true
   service:
     type: NodePort
     nodePort: 30030
