@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 
@@ -14,6 +15,22 @@ from app.infrastructure.database import get_session_factory
 from app.orm.bot_config import BotConfig
 
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = (0.5, 1.0, 2.0)
+
+
+def _extract_error(response) -> str:
+    """Extract error details from Lark SDK response, including raw HTTP info."""
+    parts = [f"code={response.code}", f"msg={response.msg}"]
+    if response.raw:
+        parts.append(f"http_status={response.raw.status_code}")
+        try:
+            body = response.raw.content[:500].decode("utf-8", errors="replace")
+            parts.append(f"body={body}")
+        except Exception:
+            pass
+    return ", ".join(parts)
 
 # bot_name -> lark.Client
 _clients: dict[str, lark.Client] = {}
@@ -50,29 +67,49 @@ def get_client(bot_name: str) -> lark.Client:
 
 
 async def download_message_resource(bot_name: str, message_id: str, file_key: str) -> bytes:
-    """Download a resource (image/file) attached to a message."""
+    """Download a resource (image/file) attached to a message, with retry."""
     client = get_client(bot_name)
-    request = GetMessageResourceRequest.builder() \
-        .message_id(message_id) \
-        .file_key(file_key) \
-        .type("image") \
-        .build()
-    response = await client.im.v1.message_resource.aget(request)
-    if not response.success():
-        raise RuntimeError(f"Download resource failed: {response.code} {response.msg}")
-    return response.file.read()
+    last_error = None
+    for attempt in range(_MAX_RETRIES):
+        request = GetMessageResourceRequest.builder() \
+            .message_id(message_id) \
+            .file_key(file_key) \
+            .type("image") \
+            .build()
+        response = await client.im.v1.message_resource.aget(request)
+        if response.success():
+            return response.file.read()
+        error_detail = _extract_error(response)
+        last_error = error_detail
+        logger.warning(
+            "Download resource attempt %d/%d failed: %s (file_key=%s)",
+            attempt + 1, _MAX_RETRIES, error_detail, file_key,
+        )
+        if attempt < _MAX_RETRIES - 1:
+            await asyncio.sleep(_RETRY_BACKOFF[attempt])
+    raise RuntimeError(f"Download resource failed after {_MAX_RETRIES} retries: {last_error}")
 
 
 async def download_image(bot_name: str, image_key: str) -> bytes:
-    """Download an image by image_key."""
+    """Download an image by image_key, with retry."""
     client = get_client(bot_name)
-    request = GetImageRequest.builder() \
-        .image_key(image_key) \
-        .build()
-    response = await client.im.v1.image.aget(request)
-    if not response.success():
-        raise RuntimeError(f"Download image failed: {response.code} {response.msg}")
-    return response.file.read()
+    last_error = None
+    for attempt in range(_MAX_RETRIES):
+        request = GetImageRequest.builder() \
+            .image_key(image_key) \
+            .build()
+        response = await client.im.v1.image.aget(request)
+        if response.success():
+            return response.file.read()
+        error_detail = _extract_error(response)
+        last_error = error_detail
+        logger.warning(
+            "Download image attempt %d/%d failed: %s (image_key=%s)",
+            attempt + 1, _MAX_RETRIES, error_detail, image_key,
+        )
+        if attempt < _MAX_RETRIES - 1:
+            await asyncio.sleep(_RETRY_BACKOFF[attempt])
+    raise RuntimeError(f"Download image failed after {_MAX_RETRIES} retries: {last_error}")
 
 
 async def upload_image(bot_name: str, image_data: bytes) -> str:

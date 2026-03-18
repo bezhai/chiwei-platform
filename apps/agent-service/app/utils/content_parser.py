@@ -31,6 +31,9 @@ class ParsedContent:
     mentions: list[dict] = field(
         default_factory=list
     )  # @提及的用户列表 [{user_id, name}]
+    tos_files: dict[str, str] = field(
+        default_factory=dict
+    )  # image_key → TOS file_name (已处理过的图片)
 
     def render(self, image_fn: ImageRenderFn | None = None) -> str:
         """从 items 结构化渲染文本
@@ -94,12 +97,18 @@ def parse_content(raw: str) -> ParsedContent:
             image_keys = [
                 item["value"] for item in items if item.get("type") == "image"
             ]
+            tos_files = {
+                item["value"]: item["tos_file"]
+                for item in items
+                if item.get("type") == "image" and item.get("tos_file")
+            }
             mentions = data.get("mentions", [])
             return ParsedContent(
                 text=text,
                 image_keys=image_keys,
                 items=items,
                 mentions=mentions,
+                tos_files=tos_files,
             )
     except (json.JSONDecodeError, TypeError):
         pass
@@ -107,3 +116,26 @@ def parse_content(raw: str) -> ParsedContent:
     # 非 v2 格式，视为纯文本
     logger.debug("Non-v2 content format, treating as plain text")
     return ParsedContent(text=raw, image_keys=[])
+
+
+def update_tos_files(raw: str, mapping: dict[str, str]) -> str | None:
+    """将 tos_file 写入 v2 content 的 image items，返回更新后的 JSON 字符串。
+
+    如果没有需要更新的 item 或非 v2 格式，返回 None（无需更新）。
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("v") != 2:
+        return None
+
+    updated = False
+    for item in data.get("items", []):
+        if item.get("type") == "image":
+            key = item.get("value")
+            if key in mapping and item.get("tos_file") != mapping[key]:
+                item["tos_file"] = mapping[key]
+                updated = True
+
+    return json.dumps(data, ensure_ascii=False) if updated else None
