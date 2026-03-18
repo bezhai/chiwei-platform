@@ -36,7 +36,26 @@ import { MessageContentUtils } from 'core/models/message-content';
 import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
 import { Readable } from 'stream';
+import { Counter, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import type { ConsumeMessage } from 'amqplib';
+
+// Metrics (chat-response-worker is a standalone process, needs its own registry)
+const metricsRegistry = new Registry();
+collectDefaultMetrics({ register: metricsRegistry });
+
+const imageResolveDuration = new Histogram({
+    name: 'image_resolve_step_duration_seconds',
+    help: 'Duration of each image resolve step',
+    labelNames: ['step'] as const,  // redis, download_tos, upload_lark
+    registers: [metricsRegistry],
+});
+
+const imageResolveTotal = new Counter({
+    name: 'image_resolve_requests_total',
+    help: 'Total image resolve outcomes',
+    labelNames: ['status'] as const,  // success, not_found, download_failed, upload_failed
+    registers: [metricsRegistry],
+});
 
 const SEND_DELAY_MS = 2500;
 const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@(\d+\.png)\)/g;
@@ -53,7 +72,8 @@ async function resolveImageReferences(content: string, messageId: string): Promi
 
     // Load registry from Redis
     const registry = await hgetall(`image_registry:${messageId}`);
-    const tRedis = Date.now() - tStart;
+    const tRedis = (Date.now() - tStart) / 1000;
+    imageResolveDuration.labels({ step: 'redis' }).observe(tRedis);
 
     if (!registry || Object.keys(registry).length === 0) {
         console.warn(`[ChatResponseWorker] No image registry found for message_id=${messageId}`);
@@ -70,6 +90,7 @@ async function resolveImageReferences(content: string, messageId: string): Promi
         const tosUrl = registry[filename];
         if (!tosUrl) {
             console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
+            imageResolveTotal.labels({ status: 'not_found' }).inc();
             result = result.replace(fullMatch, `(图片 ${filename} 不可用)`);
             continue;
         }
@@ -80,31 +101,36 @@ async function resolveImageReferences(content: string, messageId: string): Promi
             const response = await fetch(tosUrl);
             if (!response.ok) {
                 console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
+                imageResolveTotal.labels({ status: 'download_failed' }).inc();
                 result = result.replace(fullMatch, `(图片 ${filename} 下载失败)`);
                 continue;
             }
 
             const buffer = Buffer.from(await response.arrayBuffer());
-            const tDownload = Date.now() - tDl0;
+            const tDownload = (Date.now() - tDl0) / 1000;
+            imageResolveDuration.labels({ step: 'download_tos' }).observe(tDownload);
 
             // Upload to Lark
             const tUp0 = Date.now();
             const stream = Readable.from(buffer);
             const uploadResult = await uploadImage(stream);
             const imageKey = uploadResult?.image_key || uploadResult?.data?.image_key;
-            const tUpload = Date.now() - tUp0;
+            const tUpload = (Date.now() - tUp0) / 1000;
+            imageResolveDuration.labels({ step: 'upload_lark' }).observe(tUpload);
 
             if (!imageKey) {
                 console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
+                imageResolveTotal.labels({ status: 'upload_failed' }).inc();
                 result = result.replace(fullMatch, `(图片 ${filename} 上传失败)`);
                 continue;
             }
 
             // Replace with Lark image_key
+            imageResolveTotal.labels({ status: 'success' }).inc();
             result = result.replace(fullMatch, `![${alt}](${imageKey})`);
             console.info(
                 `[ChatResponseWorker] Resolved ${filename} -> ${imageKey} ` +
-                `(size=${Math.round(buffer.length / 1024)}KB download=${tDownload}ms upload=${tUpload}ms)`,
+                `(size=${Math.round(buffer.length / 1024)}KB download=${Math.round(tDownload * 1000)}ms upload=${Math.round(tUpload * 1000)}ms)`,
             );
         } catch (e) {
             console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
@@ -115,7 +141,7 @@ async function resolveImageReferences(content: string, messageId: string): Promi
     const tTotal = Date.now() - tStart;
     console.info(
         `[ChatResponseWorker] resolveImageReferences done: ${matches.length} refs, ` +
-        `redis=${tRedis}ms total=${tTotal}ms`,
+        `redis=${Math.round(tRedis * 1000)}ms total=${tTotal}ms`,
     );
 
     return result;
