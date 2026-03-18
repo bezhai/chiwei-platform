@@ -67,8 +67,8 @@ async def trigger_schedule(
         content = await generate_weekly_plan(d)
         return {"ok": bool(content), "plan_type": "weekly", "content": content}
     elif plan_type == "daily":
-        entries = await generate_daily_plan(d)
-        return {"ok": bool(entries), "plan_type": "daily", "entries": entries}
+        content = await generate_daily_plan(d)
+        return {"ok": bool(content), "plan_type": "daily", "content": content}
     else:
         return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
 

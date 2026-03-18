@@ -241,17 +241,17 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 # ==================== 日计划生成 ====================
 
 
-async def generate_daily_plan(target_date: date | None = None) -> list[dict] | None:
-    """生成日计划
+async def generate_daily_plan(target_date: date | None = None) -> str | None:
+    """生成日计划（手帐式 markdown）
 
-    基于月计划 + 周计划 + 昨天日记，为今天生成逐时段的安排。
-    输出 JSON 数组，每个元素是一个时段。
+    基于月计划 + 周计划 + 昨天日记，为今天写一篇私人手帐。
+    每天一条记录，内容是自然的 markdown 文本。
 
     Args:
         target_date: 目标日期，默认今天
 
     Returns:
-        生成的时段列表
+        生成的手帐内容
     """
     if target_date is None:
         target_date = date.today()
@@ -261,10 +261,10 @@ async def generate_daily_plan(target_date: date | None = None) -> list[dict] | N
     is_weekend = target_date.weekday() >= 5
 
     # 检查是否已有
-    existing = await get_daily_entries_for_date(date_str)
+    existing = await get_plan_for_period("daily", date_str, date_str)
     if existing:
-        logger.info(f"Daily plan already exists for {date_str}, skip ({len(existing)} entries)")
-        return None
+        logger.info(f"Daily plan already exists for {date_str}, skip")
+        return existing.content
 
     # 上下文
     # 1. 月计划
@@ -282,25 +282,15 @@ async def generate_daily_plan(target_date: date | None = None) -> list[dict] | N
     weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat())
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
-    # 3. 昨天的日记（最近 2 篇，作为生活连续性参考）
-    recent_diaries = await get_recent_diaries(
-        # 日记是按 chat_id 存的，这里取所有群的不太合适
-        # 但日程是全局的，取任一活跃群的日记作为参考即可
-        # TODO: 后续可改为取多群日记的摘要
-        chat_id="__global__",  # 占位，实际逻辑见下方 fallback
-        before_date=date_str,
-        limit=2,
-    )
-    # fallback: 如果 __global__ 无日记，尝试从任意活跃群取
-    if not recent_diaries:
-        from app.orm.crud import get_active_diary_chat_ids
-        active_chats = await get_active_diary_chat_ids(min_replies=3, days=7)
-        for cid in active_chats[:1]:
-            recent_diaries = await get_recent_diaries(cid, date_str, limit=2)
-            if recent_diaries:
-                break
+    # 3. 最近日记（从活跃群取）
+    recent_diaries = []
+    from app.orm.crud import get_active_diary_chat_ids
+    active_chats = await get_active_diary_chat_ids(min_replies=3, days=7)
+    for cid in active_chats[:1]:
+        recent_diaries = await get_recent_diaries(cid, date_str, limit=2)
+        if recent_diaries:
+            break
 
-    diary_text = ""
     if recent_diaries:
         diary_parts = []
         for d in reversed(recent_diaries):
@@ -309,15 +299,10 @@ async def generate_daily_plan(target_date: date | None = None) -> list[dict] | N
     else:
         diary_text = "（暂无近期日记）"
 
-    # 4. 昨天的日计划（参考连续性）
+    # 4. 昨天的手帐
     yesterday = (target_date - timedelta(days=1)).isoformat()
-    yesterday_entries = await get_daily_entries_for_date(yesterday)
-    if yesterday_entries:
-        yesterday_plan = "\n".join(
-            f"{e.time_start}-{e.time_end}: {e.content}" for e in yesterday_entries
-        )
-    else:
-        yesterday_plan = "（暂无昨天的日计划）"
+    yesterday_plan = await get_plan_for_period("daily", yesterday, yesterday)
+    yesterday_text = yesterday_plan.content if yesterday_plan else "（暂无昨天的手帐）"
 
     # 获取 Langfuse prompt（注入 persona_core）
     prompt_template = get_prompt("schedule_daily")
@@ -325,45 +310,33 @@ async def generate_daily_plan(target_date: date | None = None) -> list[dict] | N
         persona_core=_get_persona_core(),
         date=date_str,
         weekday=weekday,
-        is_weekend="是" if is_weekend else "否",
+        is_weekend="周末！" if is_weekend else "",
         monthly_plan=monthly_text,
         weekly_plan=weekly_text,
         recent_diary=diary_text,
-        yesterday_plan=yesterday_plan,
+        yesterday_plan=yesterday_text,
     )
 
     # 调用 LLM
     model = await ModelBuilder.build_chat_model(_schedule_model())
     response = await model.ainvoke([{"role": "user", "content": compiled}])
-    raw = _extract_text(response.content)
+    content = _extract_text(response.content)
 
-    if not raw:
+    if not content:
         logger.warning(f"LLM returned empty daily plan for {date_str}")
         return None
 
-    # 解析 JSON 数组
-    entries = _parse_daily_entries(raw)
-    if not entries:
-        logger.warning(f"Failed to parse daily plan for {date_str}: {raw[:200]}")
-        return None
+    # 写入数据库（每天一条记录）
+    await upsert_schedule(AkaoSchedule(
+        plan_type="daily",
+        period_start=date_str,
+        period_end=date_str,
+        content=content,
+        model=_schedule_model(),
+    ))
 
-    # 写入数据库
-    for entry_data in entries:
-        await upsert_schedule(AkaoSchedule(
-            plan_type="daily",
-            period_start=date_str,
-            period_end=date_str,
-            time_start=entry_data["time_start"],
-            time_end=entry_data["time_end"],
-            content=entry_data["content"],
-            mood=entry_data.get("mood"),
-            energy_level=entry_data.get("energy_level"),
-            response_style_hint=entry_data.get("response_style_hint"),
-            model=_schedule_model(),
-        ))
-
-    logger.info(f"Daily plan generated for {date_str} ({weekday}): {len(entries)} time blocks")
-    return entries
+    logger.info(f"Daily plan generated for {date_str} ({weekday}): {len(content)} chars")
+    return content
 
 
 # ==================== 辅助函数 ====================
@@ -379,63 +352,3 @@ def _extract_text(content) -> str:
     return content or ""
 
 
-def _parse_daily_entries(raw: str) -> list[dict] | None:
-    """从 LLM 输出中解析日计划 JSON 数组
-
-    期望格式:
-    [
-        {
-            "time_start": "07:00",
-            "time_end": "08:30",
-            "content": "赖床中，闹钟响了但不想起来",
-            "mood": "困",
-            "energy_level": 2,
-            "response_style_hint": "迷迷糊糊，说话断断续续"
-        },
-        ...
-    ]
-    """
-    raw = raw.strip()
-
-    # 去掉 markdown 代码块包裹
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
-    try:
-        entries = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Daily plan JSON parse failed, attempting to extract JSON array")
-        # 尝试从文本中提取 JSON 数组
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if start >= 0 and end > start:
-            try:
-                entries = json.loads(raw[start : end + 1])
-            except json.JSONDecodeError:
-                return None
-        else:
-            return None
-
-    if not isinstance(entries, list):
-        return None
-
-    # 验证必需字段
-    valid = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if not entry.get("time_start") or not entry.get("time_end") or not entry.get("content"):
-            continue
-        valid.append({
-            "time_start": entry["time_start"],
-            "time_end": entry["time_end"],
-            "content": entry["content"],
-            "mood": entry.get("mood"),
-            "energy_level": entry.get("energy_level"),
-            "response_style_hint": entry.get("response_style_hint"),
-        })
-
-    return valid if valid else None
