@@ -50,6 +50,8 @@ async def build_chat_context(
     for msg in l1_results:
         parsed = parse_content(msg.content)
         for key in parsed.image_keys:
+            if key.startswith("@"):
+                continue  # skip @N.png references (not real image keys)
             tos_file = parsed.tos_files.get(key)
             if tos_file:
                 cached_keys.append((key, tos_file))
