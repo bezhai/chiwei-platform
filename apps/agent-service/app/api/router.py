@@ -42,6 +42,37 @@ def import_time():
 # ==================== 调试端点 ====================
 
 
+@api_router.post("/admin/trigger-schedule", tags=["Admin"])
+async def trigger_schedule(
+    plan_type: str = "daily",
+    target_date: str | None = None,
+):
+    """手动触发日程生成
+
+    Args:
+        plan_type: "monthly" | "weekly" | "daily"
+        target_date: 目标日期（如 "2026-03-18"），默认今天
+    """
+    from app.workers.schedule_worker import (
+        generate_daily_plan,
+        generate_monthly_plan,
+        generate_weekly_plan,
+    )
+
+    d = date.fromisoformat(target_date) if target_date else None
+    if plan_type == "monthly":
+        content = await generate_monthly_plan(d)
+        return {"ok": bool(content), "plan_type": "monthly", "content": content}
+    elif plan_type == "weekly":
+        content = await generate_weekly_plan(d)
+        return {"ok": bool(content), "plan_type": "weekly", "content": content}
+    elif plan_type == "daily":
+        content = await generate_daily_plan(d)
+        return {"ok": bool(content), "plan_type": "daily", "content": content}
+    else:
+        return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
+
+
 @api_router.post("/admin/trigger-weekly-review", tags=["Admin"])
 async def trigger_weekly_review(chat_id: str, week_start: str | None = None):
     """手动触发周记生成

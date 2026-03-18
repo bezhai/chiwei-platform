@@ -15,6 +15,11 @@ from inner_shared.logger import setup_logging
 from app.config.config import settings
 from app.long_tasks.executor import poll_and_execute_tasks
 from app.workers.diary_worker import cron_generate_diaries, cron_generate_weekly_reviews
+from app.workers.schedule_worker import (
+    cron_generate_daily_plan,
+    cron_generate_monthly_plan,
+    cron_generate_weekly_plan,
+)
 from app.workers.vectorize_worker import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
@@ -62,4 +67,8 @@ class UnifiedWorkerSettings:
         cron(cron_generate_diaries, hour={3}, minute={0}),
         # 4. 周记生成：每周一 CST 04:00（日记 cron 之后 1 小时）
         cron(cron_generate_weekly_reviews, weekday={0}, hour={4}, minute={0}),
+        # 5. 日程生成：日计划每天 CST 03:30（日记之后），周计划每周日，月计划每月1号
+        cron(cron_generate_daily_plan, hour={3}, minute={30}),
+        cron(cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}),
+        cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}),
     ]

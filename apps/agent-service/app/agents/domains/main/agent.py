@@ -21,6 +21,7 @@ from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.memory_context import build_diary_context, build_impression_context
+from app.services.schedule_context import build_schedule_context
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -216,6 +217,7 @@ async def _build_and_stream(
     prompt_vars = {
         "complexity_hint": "",
         "user_context": "",
+        "schedule_context": "",
     }
 
     # 创建 agent
@@ -278,6 +280,14 @@ async def _build_and_stream(
                 context_lines.append("\n---\n" + impression_text)
         except Exception as e:
             logger.error(f"Failed to build impression context: {e}")
+
+    # 注入日程上下文（赤尾现在在干什么）
+    try:
+        schedule_text = await build_schedule_context()
+        if schedule_text:
+            prompt_vars["schedule_context"] = schedule_text
+    except Exception as e:
+        logger.error(f"Failed to build schedule context: {e}")
 
     prompt_vars["user_context"] = "\n".join(context_lines)
 
