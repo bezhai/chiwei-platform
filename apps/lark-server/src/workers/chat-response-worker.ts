@@ -82,7 +82,8 @@ async function resolveImageReferences(content: string, messageId: string): Promi
 
     let result = content;
 
-    for (const match of matches) {
+    // Resolve single image: download TOS → upload Lark → return replacement
+    async function resolveSingle(match: RegExpExecArray): Promise<{ fullMatch: string; replacement: string }> {
         const fullMatch = match[0];
         const alt = match[1];
         const filename = match[2];
@@ -91,8 +92,7 @@ async function resolveImageReferences(content: string, messageId: string): Promi
         if (!tosUrl) {
             console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
             imageResolveTotal.labels({ status: 'not_found' }).inc();
-            result = result.replace(fullMatch, `(图片 ${filename} 不可用)`);
-            continue;
+            return { fullMatch, replacement: `(图片 ${filename} 不可用)` };
         }
 
         try {
@@ -102,8 +102,7 @@ async function resolveImageReferences(content: string, messageId: string): Promi
             if (!response.ok) {
                 console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
                 imageResolveTotal.labels({ status: 'download_failed' }).inc();
-                result = result.replace(fullMatch, `(图片 ${filename} 下载失败)`);
-                continue;
+                return { fullMatch, replacement: `(图片 ${filename} 下载失败)` };
             }
 
             const buffer = Buffer.from(await response.arrayBuffer());
@@ -121,20 +120,28 @@ async function resolveImageReferences(content: string, messageId: string): Promi
             if (!imageKey) {
                 console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
                 imageResolveTotal.labels({ status: 'upload_failed' }).inc();
-                result = result.replace(fullMatch, `(图片 ${filename} 上传失败)`);
-                continue;
+                return { fullMatch, replacement: `(图片 ${filename} 上传失败)` };
             }
 
-            // Replace with Lark image_key
             imageResolveTotal.labels({ status: 'success' }).inc();
-            result = result.replace(fullMatch, `![${alt}](${imageKey})`);
             console.info(
                 `[ChatResponseWorker] Resolved ${filename} -> ${imageKey} ` +
                 `(size=${Math.round(buffer.length / 1024)}KB download=${Math.round(tDownload * 1000)}ms upload=${Math.round(tUpload * 1000)}ms)`,
             );
+            return { fullMatch, replacement: `![${alt}](${imageKey})` };
         } catch (e) {
             console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
-            result = result.replace(fullMatch, `(图片 ${filename} 处理失败)`);
+            return { fullMatch, replacement: `(图片 ${filename} 处理失败)` };
+        }
+    }
+
+    // Process in batches of 5 concurrently
+    const CONCURRENCY = 5;
+    for (let i = 0; i < matches.length; i += CONCURRENCY) {
+        const batch = matches.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map(m => resolveSingle(m)));
+        for (const { fullMatch, replacement } of results) {
+            result = result.replace(fullMatch, replacement);
         }
     }
 
