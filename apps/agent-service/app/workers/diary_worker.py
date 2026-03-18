@@ -406,9 +406,10 @@ async def generate_weekly_review_for_chat(
     else:
         impressions_context = "（暂无）"
 
-    # 4. 获取 Langfuse prompt 并编译
+    # 4. 获取 Langfuse prompt 并编译（注入 persona_core）
     prompt_template = get_prompt("weekly_review_generation")
     compiled_prompt = prompt_template.compile(
+        persona_core=_get_persona_core(),
         week_start=week_start,
         week_end=week_end,
         diaries=diaries_text,
