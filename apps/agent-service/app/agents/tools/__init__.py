@@ -14,6 +14,7 @@ from app.agents.tools.image import generate_image
 from app.agents.tools.search import (
     SEARCH_TOOLS,
     search_donjin_event,
+    search_by_image,
     search_web,
 )
 
@@ -31,6 +32,7 @@ __all__ = [
     # Search tools
     "SEARCH_TOOLS",
     "search_web",
+    "search_by_image",
     "search_donjin_event",
     # History tools
     "HISTORY_TOOLS",

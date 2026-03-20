@@ -553,6 +553,7 @@ MEMORY_BASE_URL=http://localhost:8002
 
 # 搜索服务配置
 SEARCH_API_KEY=your_search_key
+SERPAPI_API_KEY=your_serpapi_key
 ```
 
 ### 配置文件

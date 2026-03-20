@@ -10,12 +10,14 @@ from app.agents.tools.history.search import search_group_history
 from app.agents.tools.image import generate_image, read_images
 from app.agents.tools.memory import load_memory
 from app.agents.tools.search.allcpp import search_donjin_event
+from app.agents.tools.search.google_lens import search_by_image
 from app.agents.tools.search.image import search_images
 from app.agents.tools.search.web import search_web
 
 # 基础工具（子 Agent 默认继承此集合）
 BASE_TOOLS = [
     search_web,
+    search_by_image,
     search_images,
     search_donjin_event,
     search_group_history,

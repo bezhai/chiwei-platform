@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     google_search_api_key: str | None = None
     google_search_cx: str | None = None
 
+    # SerpApi / Google Lens
+    serpapi_api_key: str | None = None
+    serpapi_google_lens_host: str = "https://serpapi.com/search"
+
     bangumi_access_token: str | None = None
 
     inner_http_secret: str | None = None

@@ -13,11 +13,13 @@ from app.agents.tools.search.bangumi import (
     search_persons,
     search_subjects,
 )
+from app.agents.tools.search.google_lens import search_by_image
 from app.agents.tools.search.web import search_web
 
 # 基础搜索工具集合
 SEARCH_TOOLS = [
     search_web,
+    search_by_image,
     search_donjin_event,
 ]
 
@@ -38,6 +40,7 @@ BANGUMI_TOOLS = [
 __all__ = [
     # Web 搜索
     "search_web",
+    "search_by_image",
     # 同人展搜索
     "search_donjin_event",
     # Bangumi 搜索工具
