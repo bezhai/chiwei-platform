@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_MATCHES = 5
 _MAX_KNOWLEDGE = 3
+_REQUEST_TIMEOUT_SECONDS = 120
 _TYPE_TO_SERPAPI = {
     "all": "all",
     "visual_matches": "visual_matches",
@@ -183,7 +184,7 @@ async def search_by_image(
             country=country,
         )
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
             response = await client.get(settings.serpapi_google_lens_host, params=params)
             response.raise_for_status()
             data = response.json()
