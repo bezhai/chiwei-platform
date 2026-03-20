@@ -85,13 +85,6 @@ def _build_params(
     return params
 
 
-def _build_http_client() -> httpx.AsyncClient:
-    client_kwargs: dict[str, Any] = {"timeout": 20}
-    if settings.forward_proxy_url:
-        client_kwargs["proxy"] = settings.forward_proxy_url
-    return httpx.AsyncClient(**client_kwargs)
-
-
 def _format_matches(items: list[dict[str, Any]], *, label: str) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(items[:_MAX_MATCHES], start=1):
@@ -190,7 +183,7 @@ async def search_by_image(
             country=country,
         )
 
-        async with _build_http_client() as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(settings.serpapi_google_lens_host, params=params)
             response.raise_for_status()
             data = response.json()
