@@ -19,6 +19,7 @@ sys.modules.setdefault(
 
 from app.agents.core.context import AgentContext, MediaContext, MessageContext
 from app.agents.tools.search.google_lens import (
+    _build_http_client,
     _build_params,
     _extract_response,
     _resolve_image_input,
@@ -92,6 +93,32 @@ def test_build_params_includes_serpapi_fields(monkeypatch):
         "country": "cn",
         "api_key": "test-key",
         "q": "red version",
+    }
+
+
+def test_build_http_client_uses_forward_proxy_when_configured(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_async_client(**kwargs):
+        captured.update(kwargs)
+        return DummyClient()
+
+    monkeypatch.setattr(settings, "forward_proxy_url", "http://proxy.internal:7890")
+    monkeypatch.setattr("app.agents.tools.search.google_lens.httpx.AsyncClient", fake_async_client)
+
+    client = _build_http_client()
+
+    assert isinstance(client, DummyClient)
+    assert captured == {
+        "timeout": 20,
+        "proxy": "http://proxy.internal:7890",
     }
 
 
