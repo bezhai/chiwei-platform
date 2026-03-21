@@ -145,7 +145,7 @@ export default function App() {
     />
   );
 
-    const brand = (
+  const brand = (
     <div
       className="app-logo"
       style={{
@@ -160,7 +160,7 @@ export default function App() {
       <div style={{
         width: 32,
         height: 32,
-        background: '#000',
+        background: `linear-gradient(135deg, #38bdf8, ${primaryColor})`,
         borderRadius: 8,
         display: 'flex',
         alignItems: 'center',
@@ -170,7 +170,7 @@ export default function App() {
         fontWeight: 'bold',
         fontSize: 20,
         flexShrink: 0,
-        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.2)'
+        boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.3)'
       }}>🔭</div>
       {(!collapsed || isMobile) && (
         <Text strong style={{ fontSize: 18, color: '#0f172a' }}>赤尾观测中心</Text>

@@ -44,11 +44,13 @@ a {
 }
 
 .app-shell {
-  background: #fafafa;
+  background:
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.06), transparent 28%),
+    linear-gradient(180deg, #f8fbff 0%, #fafafa 280px, #fafafa 100%);
 }
 
 .app-sider {
-  box-shadow: 1px 0 0 0 #e2e8f0;
+  box-shadow: 4px 0 16px rgba(15, 23, 42, 0.03);
 }
 
 .route-loading-shell {
@@ -129,7 +131,7 @@ a {
   right: -10%;
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, rgba(15, 23, 42, 0.03) 0%, rgba(15, 23, 42, 0) 70%);
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.12) 0%, rgba(56, 189, 248, 0) 70%);
   border-radius: 50%;
   z-index: 0;
 }
@@ -141,7 +143,7 @@ a {
   left: -5%;
   width: 500px;
   height: 500px;
-  background: radial-gradient(circle, rgba(15, 23, 42, 0.04) 0%, rgba(15, 23, 42, 0) 70%);
+  background: radial-gradient(circle, rgba(96, 165, 250, 0.08) 0%, rgba(96, 165, 250, 0) 70%);
   border-radius: 50%;
   z-index: 0;
 }
@@ -161,7 +163,7 @@ a {
 .brand-icon {
   width: 40px;
   height: 40px;
-  background: #000;
+  background: linear-gradient(135deg, #38bdf8, #2563eb);
   border-radius: 10px;
   display: flex;
   align-items: center;
@@ -169,7 +171,7 @@ a {
   color: white;
   font-weight: bold;
   font-size: 20px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.35);
 }
 
 .brand-text {
@@ -261,8 +263,8 @@ a {
 .custom-input .ant-input-affix-wrapper:hover,
 .custom-input .ant-input-affix-wrapper:focus-within {
   background-color: #ffffff;
-  border-color: #0f172a;
-  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.1);
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 /* Submit Button */
@@ -271,13 +273,13 @@ a {
   border-radius: 10px;
   font-size: 16px;
   font-weight: 600;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
   transition: all 0.2s;
 }
 
 .submit-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.25);
 }
 
 @media (max-width: 1024px) {
@@ -456,8 +458,8 @@ a {
 
 .code-input:focus {
   background: #ffffff !important;
-  border-color: #000000 !important;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1) !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
 }
 
 .documents-list {
@@ -523,8 +525,8 @@ a {
 .mongo-explorer-container .ant-select-selector:focus,
 .mongo-explorer-container .ant-select-focused .ant-select-selector {
   background-color: #ffffff !important;
-  border-color: #000000 !important;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1) !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
 }
 
 @media (max-width: 1024px) {
