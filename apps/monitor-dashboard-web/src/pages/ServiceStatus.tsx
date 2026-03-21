@@ -93,16 +93,16 @@ function PodDetail({ app, lane }: { app: string; lane: string }) {
   if (!data) return <Text type="secondary">无法获取 Pod 信息</Text>;
 
   return (
-    <div style={{ padding: '4px 0' }}>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        Desired: {data.desired} / Ready: {data.ready} / Available: {data.available}
+    <div style={{ padding: '8px 12px', background: '#f8fafc', borderRadius: 8, marginTop: 8, border: '1px solid #e2e8f0' }}>
+      <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8, fontWeight: 500 }}>
+        预期: {data.desired} / 就绪: {data.ready} / 可用: {data.available}
       </Text>
       {data.pods?.map((pod) => (
-        <div key={pod.name} style={{ fontSize: 12, marginTop: 4 }}>
-          <Tag color={pod.ready ? 'green' : 'red'} style={{ fontSize: 11 }}>{pod.status}</Tag>
-          <Text code style={{ fontSize: 11 }}>{pod.name}</Text>
-          {pod.restarts > 0 && <Text type="warning" style={{ marginLeft: 8, fontSize: 11 }}>restarts: {pod.restarts}</Text>}
-          {pod.reason && <Text type="danger" style={{ marginLeft: 8, fontSize: 11 }}>{pod.reason}</Text>}
+        <div key={pod.name} style={{ fontSize: 12, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Tag color={pod.ready ? 'green' : 'red'} style={{ margin: 0, fontSize: 11, border: 'none' }}>{pod.status}</Tag>
+          <Text code style={{ fontSize: 11, background: 'transparent', border: 'none', padding: 0 }}>{pod.name}</Text>
+          {pod.restarts > 0 && <Text type="warning" style={{ fontSize: 11 }}>重启: {pod.restarts}</Text>}
+          {pod.reason && <Text type="danger" style={{ fontSize: 11 }}>{pod.reason}</Text>}
         </div>
       ))}
     </div>
@@ -160,21 +160,22 @@ export default function ServiceStatus() {
       title: '服务名',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Text strong>{name}</Text>,
+      render: (name: string) => <Text strong style={{ color: '#0f172a' }}>{name}</Text>,
     },
     {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
       ellipsis: true,
+      render: (desc: string) => <Text type="secondary">{desc}</Text>,
     },
     {
       title: '端口',
       dataIndex: 'port',
       key: 'port',
-      width: 80,
+      width: 100,
       render: (port: number | string) =>
-        port === 0 ? <Tag>Worker</Tag> : port,
+        port === 0 ? <Tag bordered={false}>Worker</Tag> : <Text type="secondary">{port}</Text>,
     },
     {
       title: '部署泳道',
@@ -190,7 +191,7 @@ export default function ServiceStatus() {
               const cfg = statusConfig[rel.status] || statusConfig.pending;
               return (
                 <Tooltip key={rel.id} title={`${rel.status} · ${tag}`}>
-                  <Tag color={cfg.color} icon={cfg.icon} style={{ marginRight: 0 }}>
+                  <Tag bordered={false} color={cfg.color} icon={cfg.icon} style={{ marginRight: 0, fontWeight: 500 }}>
                     {rel.lane}
                   </Tag>
                 </Tooltip>
@@ -201,19 +202,19 @@ export default function ServiceStatus() {
       },
     },
     {
-      title: '版本',
+      title: '主线版本',
       key: 'version',
-      width: 100,
+      width: 120,
       render: (_: unknown, row: ServiceRow) => {
         const prodRelease = row.releases.find((r) => r.lane === 'prod');
         const tag = prodRelease ? getImageTag(prodRelease.image) : '';
-        return tag ? <Tag>{tag}</Tag> : <Text type="secondary">-</Text>;
+        return tag ? <Tag bordered={false}>{tag}</Tag> : <Text type="secondary">-</Text>;
       },
     },
     {
       title: '最后更新',
       key: 'updatedAt',
-      width: 140,
+      width: 160,
       render: (_: unknown, row: ServiceRow) => {
         const latest = row.releases
           .map((r) => r.updated_at)
@@ -232,61 +233,75 @@ export default function ServiceStatus() {
 
   return (
     <div className="page-container">
-      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div className="page-header">
         <div>
-          <Title level={4} style={{ marginBottom: 4 }}>服务状态</Title>
-          <Text type="secondary">实时监控所有服务的部署状态</Text>
+          <h1 className="page-title">服务状态</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>实时监控所有服务的部署状态与资源情况</Text>
         </div>
         <Tooltip title="每 30 秒自动刷新">
-          <ReloadOutlined
-            spin={loading}
-            style={{ fontSize: 16, cursor: 'pointer', color: '#8c8c8c' }}
+          <div 
             onClick={() => { setLoading(true); fetchData(); }}
-          />
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: 8, 
+              padding: '8px 16px', 
+              background: '#fff', 
+              borderRadius: 8, 
+              cursor: 'pointer',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+              transition: 'all 0.2s'
+            }}
+            className="hover-card"
+          >
+            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
+            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
+          </div>
         </Tooltip>
       </div>
 
       <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="总服务数"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>总服务数</Text>}
               value={apps.length}
-              prefix={<CloudServerOutlined />}
-              valueStyle={{ fontWeight: 600 }}
+              prefix={<CloudServerOutlined style={{ color: '#64748b' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="运行中"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>运行中</Text>}
               value={runningCount}
-              prefix={<CheckCircleOutlined style={{ color: '#52c41a' }} />}
-              valueStyle={{ fontWeight: 600, color: '#52c41a' }}
-              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14 }}> / {failedCount} 异常</Text> : undefined}
+              prefix={<CheckCircleOutlined style={{ color: '#10b981' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
+              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 500, marginLeft: 8 }}>/ {failedCount} 异常</Text> : undefined}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="活跃泳道"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>活跃泳道</Text>}
               value={lanes.length}
-              prefix={<DeploymentUnitOutlined />}
-              valueStyle={{ fontWeight: 600 }}
+              prefix={<DeploymentUnitOutlined style={{ color: '#8b5cf6' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
             />
           </Card>
         </Col>
       </Row>
 
       {laneBindings.length > 0 && (
-        <Card bordered={false} style={{ marginBottom: 24 }} size="small">
-          <Text strong style={{ fontSize: 13 }}>泳道绑定</Text>
-          <div style={{ marginTop: 8 }}>
+        <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <Text strong style={{ fontSize: 14, color: '#334155' }}>路由绑定</Text>
             <Space wrap size={[8, 6]}>
               {laneBindings.map((b) => (
-                <Tag key={`${b.route_type}-${b.route_key}`} color="blue">
+                <Tag key={`${b.route_type}-${b.route_key}`} bordered={false} color="blue" style={{ margin: 0, fontWeight: 500 }}>
                   {b.route_type}:{b.route_key} → {b.lane_name}
                 </Tag>
               ))}
@@ -295,7 +310,7 @@ export default function ServiceStatus() {
         </Card>
       )}
 
-      <Card bordered={false}>
+      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={dataSource}
           columns={columns}
@@ -310,16 +325,16 @@ export default function ServiceStatus() {
             expandIcon: ({ expanded, onExpand, record }) =>
               record.releases.length > 0 ? (
                 expanded
-                  ? <DownOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8 }} onClick={(e) => onExpand(record, e)} />
-                  : <RightOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8 }} onClick={(e) => onExpand(record, e)} />
+                  ? <DownOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: '#64748b' }} onClick={(e) => onExpand(record, e)} />
+                  : <RightOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: '#64748b' }} onClick={(e) => onExpand(record, e)} />
               ) : <span style={{ width: 20, display: 'inline-block' }} />,
             expandedRowRender: (record) => (
-              <div style={{ padding: '8px 0' }}>
+              <div style={{ padding: '16px 32px', background: '#fafafa', borderTop: '1px solid #f1f5f9' }}>
                 {record.releases.map((rel) => (
-                  <div key={rel.id} style={{ marginBottom: 12 }}>
-                    <Space size={8} style={{ marginBottom: 4 }}>
-                      <Tag color={statusConfig[rel.status]?.color || 'default'}>{rel.lane}</Tag>
-                      <Text code style={{ fontSize: 12 }}>{getImageTag(rel.image)}</Text>
+                  <div key={rel.id} style={{ marginBottom: 16, background: '#fff', padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}>
+                    <Space size={12} style={{ marginBottom: 8 }}>
+                      <Tag bordered={false} color={statusConfig[rel.status]?.color || 'default'} style={{ fontWeight: 500 }}>{rel.lane}</Tag>
+                      <Text code style={{ fontSize: 12, border: 'none', background: '#f1f5f9' }}>{getImageTag(rel.image)}</Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {dayjs(rel.updated_at).format('YYYY-MM-DD HH:mm:ss')}
                       </Text>

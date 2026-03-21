@@ -60,7 +60,7 @@ function renderInlineMarkdown(text: string): ReactNode[] {
       return <del key={index}>{part.slice(2, -2)}</del>;
     }
     if (part.startsWith('`') && part.endsWith('`')) {
-      return <Text key={index} code>{part.slice(1, -1)}</Text>;
+      return <Text key={index} code style={{ background: '#f1f5f9', border: 'none', color: '#0f172a' }}>{part.slice(1, -1)}</Text>;
     }
     return <span key={index}>{part}</span>;
   });
@@ -81,17 +81,17 @@ function renderMarkdownLikeContent(content: string) {
     }
 
     if (trimmed.startsWith('### ')) {
-      blocks.push(<Title key={blocks.length} level={5}>{renderInlineMarkdown(trimmed.slice(4))}</Title>);
+      blocks.push(<Title key={blocks.length} level={5} style={{ marginTop: 16, marginBottom: 8, color: '#0f172a' }}>{renderInlineMarkdown(trimmed.slice(4))}</Title>);
       index++;
       continue;
     }
     if (trimmed.startsWith('## ')) {
-      blocks.push(<Title key={blocks.length} level={4}>{renderInlineMarkdown(trimmed.slice(3))}</Title>);
+      blocks.push(<Title key={blocks.length} level={4} style={{ marginTop: 24, marginBottom: 12, color: '#0f172a' }}>{renderInlineMarkdown(trimmed.slice(3))}</Title>);
       index++;
       continue;
     }
     if (trimmed.startsWith('# ')) {
-      blocks.push(<Title key={blocks.length} level={3}>{renderInlineMarkdown(trimmed.slice(2))}</Title>);
+      blocks.push(<Title key={blocks.length} level={3} style={{ marginTop: 32, marginBottom: 16, color: '#0f172a' }}>{renderInlineMarkdown(trimmed.slice(2))}</Title>);
       index++;
       continue;
     }
@@ -103,7 +103,7 @@ function renderMarkdownLikeContent(content: string) {
         index++;
       }
       blocks.push(
-        <ul key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+        <ul key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 8, marginBottom: 16, color: '#334155' }}>
           {items.map((item, itemIndex) => (
             <li key={itemIndex} style={{ marginBottom: 6 }}>
               {renderInlineMarkdown(item)}
@@ -121,7 +121,7 @@ function renderMarkdownLikeContent(content: string) {
         index++;
       }
       blocks.push(
-        <ol key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 0, marginBottom: 16 }}>
+        <ol key={blocks.length} style={{ paddingInlineStart: 20, marginTop: 8, marginBottom: 16, color: '#334155' }}>
           {items.map((item, itemIndex) => (
             <li key={itemIndex} style={{ marginBottom: 6 }}>
               {renderInlineMarkdown(item)}
@@ -142,10 +142,12 @@ function renderMarkdownLikeContent(content: string) {
         <div
           key={blocks.length}
           style={{
-            borderInlineStart: '3px solid #d9d9d9',
-            paddingInlineStart: 12,
-            color: '#595959',
+            borderInlineStart: '3px solid #cbd5e1',
+            background: '#f8fafc',
+            padding: '12px 16px',
+            color: '#475569',
             marginBottom: 16,
+            borderRadius: '0 8px 8px 0',
             whiteSpace: 'pre-wrap',
           }}
         >
@@ -176,7 +178,7 @@ function renderMarkdownLikeContent(content: string) {
       index++;
     }
     blocks.push(
-      <Paragraph key={blocks.length} style={{ whiteSpace: 'pre-wrap' }}>
+      <Paragraph key={blocks.length} style={{ whiteSpace: 'pre-wrap', color: '#334155', marginBottom: 16, lineHeight: 1.6 }}>
         {paragraphLines.map((paragraphLine, paragraphIndex) => (
           <span key={paragraphIndex}>
             {paragraphIndex > 0 ? <br /> : null}
@@ -200,12 +202,12 @@ function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
   const values = [...byDate.values()];
   const max = Math.max(...values, 1);
   const width = values.length * 6;
-  const height = 20;
+  const height = 24;
 
   return (
-    <svg width={width} height={height} style={{ verticalAlign: 'middle' }}>
+    <svg width={width} height={height} style={{ verticalAlign: 'middle', overflow: 'visible' }}>
       {values.map((v, i) => {
-        const h = Math.max((v / max) * height, 1);
+        const h = Math.max((v / max) * height, 2);
         return (
           <rect
             key={i}
@@ -213,9 +215,9 @@ function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
             y={height - h}
             width={4}
             height={h}
-            fill="#2563eb"
-            opacity={0.7}
-            rx={1}
+            fill="#000000"
+            opacity={0.8}
+            rx={2}
           />
         );
       })}
@@ -276,7 +278,7 @@ export default function Activity() {
       render: (name: string, record: GroupStat) => (
         <Button
           type="link"
-          style={{ padding: 0 }}
+          style={{ padding: 0, fontWeight: 500, color: '#000000' }}
           onClick={() => {
             const lane = getLane();
             navigate(lane ? `/messages?chatId=${record.chat_id}&x-lane=${lane}` : `/messages?chatId=${record.chat_id}`);
@@ -289,15 +291,16 @@ export default function Activity() {
     {
       title: '7天趋势',
       key: 'sparkline',
-      width: 80,
+      width: 100,
       render: (_: unknown, record: GroupStat) => <Sparkline data={record.daily_counts} />,
     },
     {
       title: '消息数',
       dataIndex: 'message_count',
       key: 'message_count',
-      width: 90,
+      width: 100,
       sorter: (a: GroupStat, b: GroupStat) => a.message_count - b.message_count,
+      render: (val: number) => <Text strong>{val.toLocaleString()}</Text>
     },
     {
       title: '赤尾回复',
@@ -306,6 +309,7 @@ export default function Activity() {
       width: 100,
       sorter: (a: GroupStat, b: GroupStat) => a.bot_replies - b.bot_replies,
       defaultSortOrder: 'descend' as const,
+      render: (val: number) => <Tag bordered={false} color={val > 0 ? 'blue' : 'default'}>{val.toLocaleString()}</Tag>
     },
     {
       title: '最近日记',
@@ -317,18 +321,20 @@ export default function Activity() {
         const isRecent = dayjs().diff(dayjs(d.latest_diary_date), 'day') <= 1;
         const preview = normalizePreviewContent(d.latest_diary_content);
         return (
-          <Space size={8} style={{ width: '100%' }}>
-            <BookOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9', flex: 'none' }} />
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <Space size={6} wrap>
-                <Text type={isRecent ? undefined : 'secondary'}>
+          <Space size={12} style={{ width: '100%', alignItems: 'flex-start' }}>
+            <div style={{ background: isRecent ? '#ecfdf5' : '#f8fafc', padding: 8, borderRadius: 8, display: 'flex' }}>
+              <BookOutlined style={{ color: isRecent ? '#10b981' : '#94a3b8', fontSize: 16 }} />
+            </div>
+            <div style={{ minWidth: 0, flex: 1, marginTop: 2 }}>
+              <Space size={8} wrap style={{ marginBottom: 4 }}>
+                <Text strong={isRecent} type={isRecent ? undefined : 'secondary'} style={{ fontSize: 13, color: isRecent ? '#0f172a' : undefined }}>
                   {dayjs(d.latest_diary_date).format('MM-DD')}
                 </Text>
-                <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{d.diary_count_7d}/7d</Tag>
+                <Tag bordered={false} color={isRecent ? 'success' : 'default'} style={{ fontSize: 11, marginInlineEnd: 0 }}>{d.diary_count_7d}/7d</Tag>
               </Space>
               <Paragraph
                 type={preview ? undefined : 'secondary'}
-                style={{ marginBottom: 0 }}
+                style={{ marginBottom: 4, color: '#475569', fontSize: 13, lineHeight: 1.5 }}
                 ellipsis={{ rows: 2, tooltip: false }}
               >
                 {preview || '无内容'}
@@ -336,13 +342,13 @@ export default function Activity() {
               <Button
                 type="link"
                 size="small"
-                style={{ padding: 0, height: 'auto' }}
+                style={{ padding: 0, height: 'auto', fontSize: 12, color: '#3b82f6' }}
                 onClick={() => setPreviewModal({
                   title: `${record.group_name} · ${dayjs(d.latest_diary_date).format('YYYY-MM-DD')} 日记`,
                   content: d.latest_diary_content || '无内容',
                 })}
               >
-                查看全文
+                阅读全文
               </Button>
             </div>
           </Space>
@@ -359,18 +365,20 @@ export default function Activity() {
         const isRecent = dayjs().diff(dayjs(w.latest_week_start), 'day') <= 7;
         const preview = normalizePreviewContent(w.latest_weekly_content);
         return (
-          <Space size={8} style={{ width: '100%' }}>
-            <FileTextOutlined style={{ color: isRecent ? '#52c41a' : '#d9d9d9', flex: 'none' }} />
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <Space size={6} wrap>
-                <Text type={isRecent ? undefined : 'secondary'}>
+          <Space size={12} style={{ width: '100%', alignItems: 'flex-start' }}>
+            <div style={{ background: isRecent ? '#eff6ff' : '#f8fafc', padding: 8, borderRadius: 8, display: 'flex' }}>
+              <FileTextOutlined style={{ color: isRecent ? '#3b82f6' : '#94a3b8', fontSize: 16 }} />
+            </div>
+            <div style={{ minWidth: 0, flex: 1, marginTop: 2 }}>
+              <Space size={8} wrap style={{ marginBottom: 4 }}>
+                <Text strong={isRecent} type={isRecent ? undefined : 'secondary'} style={{ fontSize: 13, color: isRecent ? '#0f172a' : undefined }}>
                   {dayjs(w.latest_week_start).format('MM-DD')}
                 </Text>
-                <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{w.review_count_4w}/4w</Tag>
+                <Tag bordered={false} color={isRecent ? 'processing' : 'default'} style={{ fontSize: 11, marginInlineEnd: 0 }}>{w.review_count_4w}/4w</Tag>
               </Space>
               <Paragraph
                 type={preview ? undefined : 'secondary'}
-                style={{ marginBottom: 0 }}
+                style={{ marginBottom: 4, color: '#475569', fontSize: 13, lineHeight: 1.5 }}
                 ellipsis={{ rows: 2, tooltip: false }}
               >
                 {preview || '无内容'}
@@ -378,13 +386,13 @@ export default function Activity() {
               <Button
                 type="link"
                 size="small"
-                style={{ padding: 0, height: 'auto' }}
+                style={{ padding: 0, height: 'auto', fontSize: 12, color: '#3b82f6' }}
                 onClick={() => setPreviewModal({
                   title: `${record.group_name} · ${dayjs(w.latest_week_start).format('YYYY-MM-DD')} 周记`,
                   content: w.latest_weekly_content || '无内容',
                 })}
               >
-                查看全文
+                阅读全文
               </Button>
             </div>
           </Space>
@@ -395,54 +403,68 @@ export default function Activity() {
 
   return (
     <div className="page-container">
-      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div className="page-header">
         <div>
-          <Title level={4} style={{ marginBottom: 4 }}>赤尾动态</Title>
-          <Text type="secondary">群活跃度与日记/周记生成概览</Text>
+          <h1 className="page-title">赤尾动态</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>群活跃度与日记/周记生成概览</Text>
         </div>
         <Tooltip title="每 60 秒自动刷新">
-          <ReloadOutlined
-            spin={loading}
-            style={{ fontSize: 16, cursor: 'pointer', color: '#8c8c8c' }}
+          <div 
             onClick={() => { setLoading(true); fetchData(); }}
-          />
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: 8, 
+              padding: '8px 16px', 
+              background: '#fff', 
+              borderRadius: 8, 
+              cursor: 'pointer',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+              transition: 'all 0.2s'
+            }}
+            className="hover-card"
+          >
+            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
+            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
+          </div>
         </Tooltip>
       </div>
 
       <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="今日消息总数"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>今日消息总数</Text>}
               value={Number(summary.today_total) || 0}
-              prefix={<MessageOutlined />}
-              valueStyle={{ fontWeight: 600 }}
+              prefix={<MessageOutlined style={{ color: '#64748b' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="赤尾回复数"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>赤尾回复数</Text>}
               value={Number(summary.today_bot_replies) || 0}
-              prefix={<RobotOutlined style={{ color: '#2563eb' }} />}
-              valueStyle={{ fontWeight: 600, color: '#2563eb' }}
+              prefix={<RobotOutlined style={{ color: '#000000' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#000000', marginTop: 8 }}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
             <Statistic
-              title="今日活跃群数"
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>今日活跃群数</Text>}
               value={Number(summary.today_active_groups) || 0}
-              prefix={<TeamOutlined />}
-              valueStyle={{ fontWeight: 600 }}
+              prefix={<TeamOutlined style={{ color: '#64748b' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
             />
           </Card>
         </Col>
       </Row>
 
-      <Card bordered={false}>
+      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={groups}
           columns={columns}
@@ -456,13 +478,16 @@ export default function Activity() {
 
       <Modal
         open={!!previewModal}
-        title={previewModal?.title}
+        title={<div style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}>{previewModal?.title}</div>}
         footer={null}
         onCancel={() => setPreviewModal(null)}
         width={860}
-        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
+        styles={{ 
+          body: { maxHeight: '70vh', overflowY: 'auto', padding: '24px 0' },
+          content: { borderRadius: 16, overflow: 'hidden', padding: 24 }
+        }}
       >
-        <div style={{ fontSize: 14, lineHeight: 1.8 }}>
+        <div style={{ fontSize: 14, lineHeight: 1.8, color: '#334155' }}>
           {renderMarkdownLikeContent(previewModal?.content || '无内容')}
         </div>
       </Modal>

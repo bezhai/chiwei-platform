@@ -24,9 +24,9 @@ const callerColors: Record<string, string> = {
 };
 
 const resultColors: Record<string, string> = {
-  success: 'green',
-  error: 'red',
-  denied: 'orange',
+  success: 'success',
+  error: 'error',
+  denied: 'warning',
 };
 
 export default function AuditLogs() {
@@ -72,10 +72,10 @@ export default function AuditLogs() {
       title: '时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 180,
+      width: 160,
       render: (v: string) => (
         <Tooltip title={dayjs(v).format('YYYY-MM-DD HH:mm:ss.SSS')}>
-          <Text type="secondary" style={{ fontSize: 13 }}>
+          <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>
             {dayjs(v).format('MM-DD HH:mm:ss')}
           </Text>
         </Tooltip>
@@ -86,14 +86,14 @@ export default function AuditLogs() {
       dataIndex: 'caller',
       key: 'caller',
       width: 120,
-      render: (v: string) => <Tag color={callerColors[v] || 'default'}>{v}</Tag>,
+      render: (v: string) => <Tag bordered={false} color={callerColors[v] || 'default'} style={{ fontWeight: 500 }}>{v}</Tag>,
     },
     {
       title: '操作',
       dataIndex: 'action',
       key: 'action',
       width: 220,
-      render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
+      render: (v: string) => <Text code style={{ fontSize: 12, background: '#f8fafc', border: 'none' }}>{v}</Text>,
     },
     {
       title: '参数',
@@ -101,11 +101,11 @@ export default function AuditLogs() {
       key: 'params',
       ellipsis: true,
       render: (v: Record<string, unknown> | null) => {
-        if (!v) return '-';
+        if (!v) return <Text type="secondary">-</Text>;
         const str = JSON.stringify(v);
         return (
-          <Tooltip title={<pre style={{ maxHeight: 300, overflow: 'auto', margin: 0, fontSize: 11 }}>{JSON.stringify(v, null, 2)}</pre>}>
-            <Text type="secondary" style={{ fontSize: 12 }}>{str.length > 80 ? str.slice(0, 80) + '...' : str}</Text>
+          <Tooltip title={<pre style={{ maxHeight: 300, overflow: 'auto', margin: 0, fontSize: 11, fontFamily: 'var(--font-mono)' }}>{JSON.stringify(v, null, 2)}</pre>}>
+            <Text type="secondary" style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>{str.length > 80 ? str.slice(0, 80) + '...' : str}</Text>
           </Tooltip>
         );
       },
@@ -115,14 +115,14 @@ export default function AuditLogs() {
       dataIndex: 'result',
       key: 'result',
       width: 90,
-      render: (v: string) => <Tag color={resultColors[v] || 'default'}>{v}</Tag>,
+      render: (v: string) => <Tag bordered={false} color={resultColors[v] || 'default'} style={{ fontWeight: 500 }}>{v}</Tag>,
     },
     {
       title: '耗时',
       dataIndex: 'duration_ms',
       key: 'duration_ms',
       width: 80,
-      render: (v: number | null) => v != null ? `${v}ms` : '-',
+      render: (v: number | null) => v != null ? <Text type="secondary" style={{ fontSize: 13 }}>{v}ms</Text> : '-',
     },
     {
       title: '错误信息',
@@ -130,28 +130,42 @@ export default function AuditLogs() {
       key: 'error_message',
       width: 200,
       ellipsis: true,
-      render: (v: string | null) => v ? <Text type="danger" style={{ fontSize: 12 }}>{v}</Text> : '-',
+      render: (v: string | null) => v ? <Text type="danger" style={{ fontSize: 12 }}>{v}</Text> : <Text type="secondary">-</Text>,
     },
   ];
 
   return (
     <div className="page-container">
-      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div className="page-header">
         <div>
-          <Title level={4} style={{ marginBottom: 4 }}>审计日志</Title>
-          <Text type="secondary">所有 API 操作的完整记录</Text>
+          <h1 className="page-title">审计日志</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>所有 API 操作的完整安全审计记录</Text>
         </div>
         <Tooltip title="刷新">
-          <ReloadOutlined
-            spin={loading}
-            style={{ fontSize: 16, cursor: 'pointer', color: '#8c8c8c' }}
+          <div 
             onClick={fetchData}
-          />
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: 8, 
+              padding: '8px 16px', 
+              background: '#fff', 
+              borderRadius: 8, 
+              cursor: 'pointer',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+              transition: 'all 0.2s'
+            }}
+            className="hover-card"
+          >
+            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
+            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
+          </div>
         </Tooltip>
       </div>
 
-      <Card bordered={false} style={{ marginBottom: 16 }}>
-        <Space wrap size={[12, 12]}>
+      <div className="filter-card">
+        <Space wrap size={[16, 16]}>
           <Select
             allowClear
             placeholder="调用者"
@@ -166,8 +180,8 @@ export default function AuditLogs() {
           <Input
             allowClear
             placeholder="操作名称"
-            prefix={<SearchOutlined />}
-            style={{ width: 200 }}
+            prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
+            style={{ width: 220 }}
             value={action}
             onChange={(e) => { setAction(e.target.value || undefined); setPage(1); }}
           />
@@ -188,26 +202,27 @@ export default function AuditLogs() {
             onChange={(v) => { setDateRange(v as [Dayjs | null, Dayjs | null]); setPage(1); }}
           />
           <Button onClick={() => { setCaller(undefined); setAction(undefined); setResult(undefined); setDateRange(undefined); setPage(1); }}>
-            重置
+            重置筛选
           </Button>
         </Space>
-      </Card>
+      </div>
 
-      <Card bordered={false}>
+      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={data}
           columns={columns}
           rowKey="id"
           loading={loading}
-          size="small"
+          size="middle"
           pagination={{
             current: page,
             pageSize,
             total,
             showSizeChanger: true,
             pageSizeOptions: ['20', '50', '100'],
-            showTotal: (t) => `共 ${t} 条`,
+            showTotal: (t) => `共 ${t} 条记录`,
             onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            style: { padding: '16px 24px', margin: 0, borderTop: '1px solid #f1f5f9' }
           }}
           rowClassName={(record) => record.result === 'error' || record.result === 'denied' ? 'audit-row-error' : ''}
         />
