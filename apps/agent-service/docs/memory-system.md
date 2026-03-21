@@ -106,18 +106,43 @@ graph LR
 
 ## Langfuse Prompts
 
+### 聊天时
+
+| Prompt | 变量 | 用途 |
+|--------|------|------|
+| `main` | `schedule_context`, `user_context`, `currDate`, `currTime` | 主 system prompt，接收 Schedule 和场景上下文 |
+| `context_builder` | `reply_chain`, `other_messages` | 群聊消息格式化（回复链 + 其他消息） |
+
+### 离线生成 — 素材
+
+| Prompt | 变量 | 用途 |
+|--------|------|------|
+| `persona_core` | — | 赤尾完整人设，注入 schedule/plan 生成 |
+| `persona_lite` | — | 轻量人设（语气指导），注入 diary/journal 生成 |
+| `diary_generation` | `persona_lite`, `chat_hint`, `date`, `weekday`, `messages`, `recent_diaries` | 从消息生成 per-chat 日记 |
+| `diary_extract_impressions` | `diary`, `existing_impressions`, `user_mapping` | 从日记提取人物印象 |
+| `chat_impression_extraction` | `diary`, `existing_impression` | 从日记提取群氛围印象 |
+| `weekly_review_generation` | `persona_lite`, `week_start`, `week_end`, `diaries`, `impressions` | per-chat 周记（仍在生成，不注入聊天） |
+
+### 离线生成 — 赤尾级
+
+| Prompt | 变量 | 用途 |
+|--------|------|------|
+| `journal_generation` | `persona_lite`, `date`, `chat_diaries`, `daily_schedule`, `yesterday_journal` | 从日记合成个人日志（模糊化话题） |
+| `journal_weekly` | `persona_lite`, `week_start`, `week_end`, `daily_journals`, `previous_weekly_journal` | 从日志合成周日志 |
+| `schedule_daily` | `persona_core`, `date`, `weekday`, `is_weekend`, `weekly_plan`, `yesterday_journal`, `world_context` | 从 journal + persona + web 生成日计划 |
+| `schedule_weekly` | `persona_core`, `week`, `monthly_plan`, `previous_weekly_plan` | 生成周计划 |
+| `schedule_monthly` | `persona_core`, `month`, `season`, `previous_monthly_plan` | 生成月计划 |
+
+### 其他（非记忆系统）
+
 | Prompt | 用途 |
 |--------|------|
-| `persona_core` | 赤尾完整人设，注入 schedule/plan 生成 |
-| `persona_lite` | 轻量人设（语气指导），注入 diary/journal 生成 |
-| `diary_generation` | 从消息生成 per-chat 日记 |
-| `diary_extract_impressions` | 从日记提取人物印象 |
-| `chat_impression_extraction` | 从日记提取群氛围印象 |
-| `journal_generation` | 从日记合成个人日志（模糊化话题） |
-| `journal_weekly` | 从日志合成周日志 |
-| `schedule_daily` | 从 journal + persona + web 生成日计划 |
-| `schedule_weekly` | 生成周计划 |
-| `schedule_monthly` | 生成月计划 |
+| `pre_complexity_classification` | 消息复杂度分类（simple/complex） |
+| `guard_output_safety` | 输出安全检测 |
+| `guard_prompt_injection` | 注入攻击检测 |
+| `guard_sensitive_politics` | 敏感政治话题检测 |
+| `research_agent` | 深度调研助手 system prompt |
 
 ## 文件索引
 
