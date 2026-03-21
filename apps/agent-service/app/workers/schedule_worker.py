@@ -4,10 +4,11 @@
 三层生成器，各自独立节奏：
 - 月计划（每月1号凌晨）：本月生活方向、兴趣倾向、季节氛围
 - 周计划（每周日凌晨）：本周大致安排、松紧节奏
-- 日计划（每天凌晨，紧跟日记之后）：逐时段的活动、心情、精力
+- 日计划（每天凌晨，紧跟日志之后）：状态、活动、精力
 
-每层继承上层输出，自上而下细化。方向性指导而非刻板时间表。
-日记系统回馈日计划（昨天的日记影响今天的安排）。
+日计划的核心输入是昨天的个人日志（Journal），而非 per-chat 日记。
+Journal + 周计划 + persona_core + web_search → 日计划。
+日计划描述状态/活动，不描述具体话题（防止反馈循环）。
 """
 
 import json
@@ -21,7 +22,6 @@ from app.orm.crud import (
     get_daily_entries_for_date,
     get_latest_plan,
     get_plan_for_period,
-    get_recent_diaries,
     upsert_schedule,
 )
 from app.orm.models import AkaoSchedule
@@ -275,16 +275,21 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 
 
 async def generate_daily_plan(target_date: date | None = None) -> str | None:
-    """生成日计划（手帐式 markdown）
+    """生成日计划
 
-    基于月计划 + 周计划 + 昨天日记，为今天写一篇私人手帐。
-    每天一条记录，内容是自然的 markdown 文本。
+    核心输入:
+    - 昨天的个人日志（Journal）— 真实经历提供延续感
+    - 周计划 — 本周节奏方向
+    - persona_core — 她的内核驱动力
+    - web_search — 真实世界的新鲜素材
+
+    输出描述状态/活动，不描述具体话题（防止反馈循环）。
 
     Args:
         target_date: 目标日期，默认今天
 
     Returns:
-        生成的手帐内容
+        生成的日计划内容
     """
     if target_date is None:
         target_date = date.today()
@@ -299,15 +304,12 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
         logger.info(f"Daily plan already exists for {date_str}, skip")
         return existing.content
 
-    # 上下文
-    # 1. 月计划
-    month_start = target_date.replace(day=1).isoformat()
-    if target_date.month == 12:
-        month_end_d = date(target_date.year + 1, 1, 1) - timedelta(days=1)
-    else:
-        month_end_d = date(target_date.year, target_date.month + 1, 1) - timedelta(days=1)
-    monthly = await get_plan_for_period("monthly", month_start, month_end_d.isoformat())
-    monthly_text = monthly.content if monthly else "（暂无月计划）"
+    # 1. 昨天的个人日志（替代原来从单个群取 diary 的 hack）
+    from app.orm.crud import get_journal_for_date
+
+    yesterday = (target_date - timedelta(days=1)).isoformat()
+    yesterday_journal = await get_journal_for_date("daily", yesterday)
+    journal_text = yesterday_journal.content if yesterday_journal else "（昨天没有日志）"
 
     # 2. 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
@@ -315,42 +317,18 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
     weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat())
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
-    # 3. 最近日记（从活跃群取）
-    recent_diaries = []
-    from app.orm.crud import get_active_diary_chat_ids
-    active_chats = await get_active_diary_chat_ids(min_replies=3, days=7)
-    for cid in active_chats[:1]:
-        recent_diaries = await get_recent_diaries(cid, date_str, limit=2)
-        if recent_diaries:
-            break
-
-    if recent_diaries:
-        diary_parts = []
-        for d in reversed(recent_diaries):
-            diary_parts.append(f"--- {d.diary_date} ---\n{d.content}")
-        diary_text = "\n\n".join(diary_parts)
-    else:
-        diary_text = "（暂无近期日记）"
-
-    # 4. 昨天的手帐
-    yesterday = (target_date - timedelta(days=1)).isoformat()
-    yesterday_plan = await get_plan_for_period("daily", yesterday, yesterday)
-    yesterday_text = yesterday_plan.content if yesterday_plan else "（暂无昨天的手帐）"
-
-    # 5. 搜索真实世界素材（当季番剧、热门话题等）
+    # 3. 搜索真实世界素材（当季番剧、热门话题等）
     world_context = await _gather_world_context(target_date)
 
-    # 获取 Langfuse prompt（注入 persona_core + world_context）
+    # 获取 Langfuse prompt
     prompt_template = get_prompt("schedule_daily")
     compiled = prompt_template.compile(
         persona_core=_get_persona_core(),
         date=date_str,
         weekday=weekday,
         is_weekend="周末！" if is_weekend else "",
-        monthly_plan=monthly_text,
         weekly_plan=weekly_text,
-        recent_diary=diary_text,
-        yesterday_plan=yesterday_text,
+        yesterday_journal=journal_text,
         world_context=world_context,
     )
 

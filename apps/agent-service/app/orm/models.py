@@ -233,3 +233,61 @@ class PersonImpression(Base):
     )
 
     __table_args__ = (UniqueConstraint("chat_id", "user_id"),)
+
+
+class ChatImpression(Base):
+    """赤尾对群/聊天的氛围印象
+
+    记录她对每个群的整体感觉：氛围、节奏、她在其中的位置。
+    不记录具体话题（防止反馈循环），只记感觉和性格。
+    例如："这个群很放飞，大家喜欢互相逗"、"小群，聊天节奏慢，比较温柔"
+    """
+
+    __tablename__ = "chat_impression"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    impression_text: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AkaoJournal(Base):
+    """赤尾个人日志 — 赤尾级，不绑 chat_id
+
+    与 DiaryEntry（按群/私聊分开的素材）不同，
+    个人日志是赤尾作为一个人的统一记忆沉淀。
+
+    daily: 融合当天所有 DiaryEntry + Schedule，模糊化具体话题
+    weekly: 合成 7 篇 daily 日志的沉淀
+
+    日志不直接注入聊天上下文。它的作用是：
+    1. 喂给下一天的 Schedule 生成（经历→计划的循环）
+    2. 作为赤尾内在经历的存档
+    """
+
+    __tablename__ = "akao_journal"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # "daily" | "weekly"
+    journal_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # daily: "2026-03-17", weekly: week_start "2026-03-10"
+    journal_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    # daily: same as journal_date, weekly: week_end
+    period_end: Mapped[str] = mapped_column(String(10), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 合成时用了几个聊天的素材
+    source_chat_count: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("journal_type", "journal_date"),
+    )

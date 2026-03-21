@@ -1,23 +1,20 @@
 """记忆上下文构建服务
 
-从日记 / 周记 / 人物印象构建记忆文本，注入 system prompt。
+构建注入 system prompt 的上下文片段。
+新设计中聊天上下文只注入: persona + Schedule(today) + ChatImpression + PersonImpression
+历史日记/日志不直接注入，通过 Schedule 间接传递。
 """
 
 import logging
-from datetime import date
 
 from app.orm.crud import (
+    get_chat_impression,
     get_cross_group_impressions,
     get_impressions_for_users,
-    get_latest_weekly_review,
-    get_recent_diaries,
     get_username,
 )
 
 logger = logging.getLogger(__name__)
-
-# 日记+周记注入硬上限
-MAX_DIARY_CHARS = 2000
 
 
 MAX_IMPRESSION_USERS = 10
@@ -38,34 +35,6 @@ async def build_impression_context(chat_id: str, user_ids: list[str]) -> str:
     return "你对群友的印象：\n" + "\n".join(lines)
 
 
-async def build_diary_context(chat_id: str) -> str:
-    """构建日记+周记记忆文本，注入群聊 system prompt
-
-    - 最近 2 篇日记（鲜明记忆）
-    - 最近 1 篇周记（褪色记忆）
-    """
-    today = date.today().isoformat()
-
-    # 最近 2 篇日记
-    diaries = await get_recent_diaries(chat_id, today, limit=2)
-    if not diaries:
-        return ""
-    parts = []
-    for diary in reversed(diaries):  # DB 返回 desc，reversed 变正序（旧→新）
-        parts.append(f"--- {diary.diary_date} ---\n{diary.content}")
-
-    # 最近 1 篇周记
-    weekly = await get_latest_weekly_review(chat_id, today, limit=1)
-    if weekly:
-        w = weekly[0]
-        parts.append(f"--- 上周回顾 ({w.week_start} ~ {w.week_end}) ---\n{w.content}")
-
-    text = "\n\n".join(parts)
-    if len(text) > MAX_DIARY_CHARS:
-        text = text[:MAX_DIARY_CHARS] + "……"
-    return text
-
-
 async def build_cross_group_impression_context(
     user_id: str, trigger_username: str
 ) -> str:
@@ -81,3 +50,14 @@ async def build_cross_group_impression_context(
     for imp, group_name in rows:
         lines.append(f"【{group_name}】{imp.impression_text}")
     return f"你在群聊中对 {trigger_username} 的印象：\n" + "\n".join(lines)
+
+
+async def build_chat_impression_context(chat_id: str) -> str:
+    """构建群氛围印象文本，注入 system prompt
+
+    描述这个群/聊天场的整体感觉：氛围、节奏、她在其中的位置。
+    """
+    impression = await get_chat_impression(chat_id)
+    if not impression:
+        return ""
+    return f"你对这个群的感觉：\n{impression.impression_text}"

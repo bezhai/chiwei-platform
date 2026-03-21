@@ -179,6 +179,13 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
     except Exception as e:
         logger.error(f"Impression extraction failed for {chat_id}: {e}")
 
+    # 9. 后处理：提取/更新群氛围印象（仅群聊）
+    if not is_p2p:
+        try:
+            await post_process_chat_impression(chat_id, diary_content)
+        except Exception as e:
+            logger.error(f"Chat impression extraction failed for {chat_id}: {e}")
+
     return diary_content
 
 
@@ -366,6 +373,51 @@ async def post_process_impressions(
             count += 1
 
     logger.info(f"Impressions updated for {chat_id}: {count} people")
+
+
+# ==================== 群氛围印象提取 ====================
+
+
+async def post_process_chat_impression(
+    chat_id: str,
+    diary_content: str,
+) -> None:
+    """从日记中提取/更新群氛围印象
+
+    只记录群的性格、氛围、节奏，不记录具体话题（防止反馈循环）。
+    """
+    from app.orm.crud import get_chat_impression, upsert_chat_impression
+
+    # 1. 查已有印象
+    existing = await get_chat_impression(chat_id)
+    existing_text = existing.impression_text if existing else "（暂无）"
+
+    # 2. 获取 Langfuse prompt 并编译
+    prompt_template = get_prompt("chat_impression_extraction")
+    compiled = prompt_template.compile(
+        diary=diary_content,
+        existing_impression=existing_text,
+    )
+
+    # 3. 调用 LLM
+    model = await ModelBuilder.build_chat_model(settings.diary_model)
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled}],
+    )
+
+    raw = response.content
+    if isinstance(raw, list):
+        raw = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in raw
+        )
+
+    if not raw or not raw.strip():
+        logger.warning(f"Empty chat impression for {chat_id}")
+        return
+
+    await upsert_chat_impression(chat_id, raw.strip(), model=settings.diary_model)
+    logger.info(f"Chat impression updated for {chat_id}: {len(raw)} chars")
 
 
 # ==================== 周记生成 ====================

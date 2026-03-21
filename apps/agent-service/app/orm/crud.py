@@ -5,7 +5,9 @@ from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal
 from .models import (
+    AkaoJournal,
     AkaoSchedule,
+    ChatImpression,
     ConversationMessage,
     DiaryEntry,
     LarkBaseChatInfo,
@@ -551,3 +553,134 @@ async def delete_schedule(schedule_id: int) -> bool:
         await session.delete(entry)
         await session.commit()
         return True
+
+
+# ==================== AkaoJournal CRUD ====================
+
+
+async def upsert_journal(
+    journal_type: str,
+    journal_date: str,
+    period_end: str,
+    content: str,
+    source_chat_count: int = 0,
+    model: str | None = None,
+) -> None:
+    """插入或更新日志（upsert by journal_type + journal_date）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date == journal_date)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.content = content
+            existing.period_end = period_end
+            existing.source_chat_count = source_chat_count
+            existing.model = model
+        else:
+            session.add(
+                AkaoJournal(
+                    journal_type=journal_type,
+                    journal_date=journal_date,
+                    period_end=period_end,
+                    content=content,
+                    source_chat_count=source_chat_count,
+                    model=model,
+                )
+            )
+        await session.commit()
+
+
+async def get_recent_journals(
+    journal_type: str, before_date: str, limit: int = 2
+) -> list[AkaoJournal]:
+    """查最近 N 篇日志（before_date 之前）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date < before_date)
+            .order_by(AkaoJournal.journal_date.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def get_journal_for_date(
+    journal_type: str, journal_date: str
+) -> AkaoJournal | None:
+    """查指定日期的日志"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date == journal_date)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_journals_in_range(
+    journal_type: str, start_date: str, end_date: str
+) -> list[AkaoJournal]:
+    """查日期范围内的日志（含首尾）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date >= start_date)
+            .where(AkaoJournal.journal_date <= end_date)
+            .order_by(AkaoJournal.journal_date.asc())
+        )
+        return list(result.scalars().all())
+
+
+async def get_all_diaries_for_date(diary_date: str) -> list[DiaryEntry]:
+    """查询所有聊天在指定日期的日记（日志合成的素材）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.diary_date == diary_date)
+            .order_by(DiaryEntry.id.asc())
+        )
+        return list(result.scalars().all())
+
+
+# ==================== ChatImpression CRUD ====================
+
+
+async def upsert_chat_impression(
+    chat_id: str, impression_text: str, model: str | None = None
+) -> None:
+    """插入或更新群氛围印象"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatImpression)
+            .where(ChatImpression.chat_id == chat_id)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.impression_text = impression_text
+            existing.model = model
+        else:
+            session.add(
+                ChatImpression(
+                    chat_id=chat_id,
+                    impression_text=impression_text,
+                    model=model,
+                )
+            )
+        await session.commit()
+
+
+async def get_chat_impression(chat_id: str) -> ChatImpression | None:
+    """查指定聊天的氛围印象"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ChatImpression)
+            .where(ChatImpression.chat_id == chat_id)
+        )
+        return result.scalar_one_or_none()

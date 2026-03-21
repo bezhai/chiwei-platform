@@ -17,11 +17,22 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_tables():
+    """确保 ORM 定义的表存在（checkfirst=True，不影响已有表）"""
+    from app.orm.base import engine
+    from app.orm.models import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables ensured")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     应用生命周期管理
     """
+    await _ensure_tables()
     await init_qdrant_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 

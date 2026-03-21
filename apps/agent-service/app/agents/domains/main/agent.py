@@ -21,8 +21,8 @@ from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.memory_context import (
+    build_chat_impression_context,
     build_cross_group_impression_context,
-    build_diary_context,
     build_impression_context,
 )
 from app.services.schedule_context import build_schedule_context
@@ -254,19 +254,12 @@ async def _build_and_stream(
         return
 
     # 构建 user_context
+    # 新设计: persona + Schedule(today) + ChatImpression + PersonImpression
+    # 不注入: 历史日记、历史日志、周/月计划
     context_lines: list[str] = []
     if chat_type == "p2p":
         if trigger_username:
             context_lines.append(f"你正在和 {trigger_username} 私聊。")
-
-        # 私聊注入日记记忆
-        try:
-            diary_text = await build_diary_context(chat_id)
-            if diary_text:
-                context_lines.append("\n---\n你最近的日记：")
-                context_lines.append(diary_text)
-        except Exception as e:
-            logger.error(f"Failed to build p2p diary context: {e}")
 
         # 私聊注入跨群人物印象（群→私聊，不反向）
         try:
@@ -286,15 +279,15 @@ async def _build_and_stream(
                 f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
             )
 
-        # 群聊注入日记记忆 + 本群人物印象
+        # 群氛围印象（这个群给她什么感觉）
         try:
-            diary_text = await build_diary_context(chat_id)
-            if diary_text:
-                context_lines.append("\n---\n你最近的日记：")
-                context_lines.append(diary_text)
+            chat_imp = await build_chat_impression_context(chat_id)
+            if chat_imp:
+                context_lines.append("\n---\n" + chat_imp)
         except Exception as e:
-            logger.error(f"Failed to build diary context: {e}")
+            logger.error(f"Failed to build chat impression: {e}")
 
+        # 本群人物印象
         try:
             impression_text = await build_impression_context(
                 chat_id, chain_user_ids
@@ -304,7 +297,7 @@ async def _build_and_stream(
         except Exception as e:
             logger.error(f"Failed to build impression context: {e}")
 
-    # 注入日程上下文（赤尾现在在干什么）
+    # 注入日程上下文（赤尾今天的状态/活动，唯一的记忆来源）
     try:
         schedule_text = await build_schedule_context()
         if schedule_text:
