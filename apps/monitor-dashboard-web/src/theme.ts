@@ -2,7 +2,7 @@ import { ThemeConfig } from 'antd';
 
 export const themeConfig: ThemeConfig = {
   token: {
-    colorPrimary: '#000000', // Modern monochrome primary
+    colorPrimary: '#2563eb',
     colorSuccess: '#10b981',
     colorWarning: '#f59e0b',
     colorError: '#ef4444',
@@ -25,8 +25,8 @@ export const themeConfig: ThemeConfig = {
       bodyBg: '#fafafa',
     },
     Menu: {
-      itemSelectedBg: '#f1f5f9', // Subtler selection
-      itemSelectedColor: '#0f172a',
+      itemSelectedBg: '#eff6ff',
+      itemSelectedColor: '#2563eb',
       itemColor: '#64748b',
       itemHoverBg: '#f8fafc',
       itemBorderRadius: 8,
@@ -55,17 +55,17 @@ export const themeConfig: ThemeConfig = {
       controlHeight: 36, // Slightly taller default buttons
       paddingInline: 16,
       defaultShadow: 'none',
-      primaryShadow: '0 2px 4px rgba(0,0,0,0.1)',
+      primaryShadow: '0 2px 4px rgba(37, 99, 235, 0.2)',
     },
     Input: {
-      activeBorderColor: '#000000',
+      activeBorderColor: '#2563eb',
       hoverBorderColor: '#94a3b8',
       colorBorder: '#cbd5e1',
       paddingBlock: 6,
     },
     Select: {
-      colorPrimaryHover: '#94a3b8',
-      colorPrimary: '#000000',
+      colorPrimaryHover: '#3b82f6',
+      colorPrimary: '#2563eb',
     },
     Tag: {
       borderRadiusSM: 4,

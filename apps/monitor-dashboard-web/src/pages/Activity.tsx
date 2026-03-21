@@ -215,8 +215,8 @@ function Sparkline({ data }: { data: Array<{ date: string; count: number }> }) {
             y={height - h}
             width={4}
             height={h}
-            fill="#000000"
-            opacity={0.8}
+            fill="#2563eb"
+            opacity={0.7}
             rx={2}
           />
         );
@@ -278,7 +278,7 @@ export default function Activity() {
       render: (name: string, record: GroupStat) => (
         <Button
           type="link"
-          style={{ padding: 0, fontWeight: 500, color: '#000000' }}
+          style={{ padding: 0, fontWeight: 500, color: '#2563eb' }}
           onClick={() => {
             const lane = getLane();
             navigate(lane ? `/messages?chatId=${record.chat_id}&x-lane=${lane}` : `/messages?chatId=${record.chat_id}`);
@@ -447,8 +447,8 @@ export default function Activity() {
             <Statistic
               title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>赤尾回复数</Text>}
               value={Number(summary.today_bot_replies) || 0}
-              prefix={<RobotOutlined style={{ color: '#000000' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#000000', marginTop: 8 }}
+              prefix={<RobotOutlined style={{ color: '#2563eb' }} />}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
             />
           </Card>
         </Col>
