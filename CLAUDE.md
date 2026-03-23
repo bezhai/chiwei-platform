@@ -59,13 +59,25 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 
 **禁止直接在 main 分支上修改代码。** 每次需求变更：
 
-1. 从 main 切分支（可用 `/worktree` skill）
-2. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
-3. 部署独立泳道（如 `feat-alert-v2`），不直接用 `dev`
-4. 飞书测试必须绑定 dev bot: `make lane-bind TYPE=bot KEY=dev LANE=<lane>`
-5. 验收后解绑 + 下泳道: `make lane-unbind TYPE=bot KEY=dev` → `make undeploy APP=<app> LANE=<lane>`
-6. `ghc pr merge --squash` 合并到 main
-7. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
+1. **需求分析**：用 `superpowers:brainstorming` 探索意图、澄清需求、对比方案
+2. **出方案**：用 `superpowers:writing-plans` 生成分步实现计划（超 10 行改动必须）
+3. **切分支**：从 main 切分支（可用 `/worktree` skill）
+4. **执行方案**：用 `superpowers:executing-plans` 按计划逐步实现，写代码遵循 `superpowers:test-driven-development` 红-绿-重构循环
+5. **遇到 bug**：用 `superpowers:systematic-debugging` 结构化排查（与"3 次后必须停"互补）
+6. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
+7. 部署独立泳道（如 `feat-alert-v2`），不直接用 `dev`
+8. 飞书测试必须绑定 dev bot: `make lane-bind TYPE=bot KEY=dev LANE=<lane>`
+9. **完成前验证**：用 `superpowers:verification-before-completion` 确保有证据再宣称完成
+10. 验收后解绑 + 下泳道: `make lane-unbind TYPE=bot KEY=dev` → `make undeploy APP=<app> LANE=<lane>`
+11. `ghc pr merge --squash` 合并到 main（**必须用项目 `ship` skill，禁止用 `superpowers:finishing-a-development-branch`**）
+12. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
+
+### superpowers 禁用项
+
+以下 superpowers skill 与项目自有 skill 冲突，**禁止使用**：
+
+- `superpowers:finishing-a-development-branch` → 用项目 `/ship` 替代（遵守合码铁律）
+- `superpowers:using-git-worktrees` → 用项目 `/worktree` 替代（遵守部署约束）
 
 ## 部署命令
 
