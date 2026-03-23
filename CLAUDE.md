@@ -66,9 +66,9 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 5. **遇到 bug**：用 `superpowers:systematic-debugging` 结构化排查（与"3 次后必须停"互补）
 6. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
 7. 部署独立泳道（如 `feat-alert-v2`），不直接用 `dev`
-8. 飞书测试必须绑定 dev bot: `make lane-bind TYPE=bot KEY=dev LANE=<lane>`
+8. 飞书测试必须绑定 dev bot: `/ops bind bot dev <lane>`
 9. **完成前验证**：用 `superpowers:verification-before-completion` 确保有证据再宣称完成
-10. 验收后解绑 + 下泳道: `make lane-unbind TYPE=bot KEY=dev` → `make undeploy APP=<app> LANE=<lane>`
+10. 验收后解绑 + 下泳道: `/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`
 11. `ghc pr merge --squash` 合并到 main（**必须用项目 `ship` skill，禁止用 `superpowers:finishing-a-development-branch`**）
 12. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
 
