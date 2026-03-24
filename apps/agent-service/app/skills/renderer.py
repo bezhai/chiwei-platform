@@ -66,6 +66,8 @@ async def render_skill(skill: SkillDefinition, arguments: str) -> str:
 
     # 2. 变量替换
     content = content.replace("$ARGUMENTS", arguments)
-    content = content.replace("$SKILL_DIR", str(skill.base_path))
+    # $SKILL_DIR 映射到沙箱路径（sandbox-worker 中 skill 脚本的实际位置）
+    sandbox_skill_dir = f"/sandbox/skills/{skill.name}"
+    content = content.replace("$SKILL_DIR", sandbox_skill_dir)
 
     return content

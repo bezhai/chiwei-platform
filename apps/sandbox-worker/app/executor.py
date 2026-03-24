@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import os
+import re
 import resource
 import tempfile
 import time
@@ -18,6 +19,25 @@ logger = logging.getLogger(__name__)
 
 # 子进程中允许的最小环境变量集
 _SAFE_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TZ", "PYTHONPATH"}
+
+# 命令黑名单：匹配到任一模式则拒绝执行
+_BLOCKED_PATTERNS = [
+    r"\b(sudo|su|chroot|nsenter|mount|umount)\b",        # 权限提升
+    r"\b(curl|wget|nc|ncat|socat|ssh|scp|ftp|telnet)\b", # 网络工具
+    r"\b(apt|yum|pip|pip3)\s+install\b",                  # 包安装
+    r"\brm\s+(-[rfR]+\s+)?/",                             # rm 根目录
+    r"\bcat\s+/etc/(shadow|passwd|hosts)",                 # 敏感文件读取
+    r"\b(chmod|chown)\b",                                  # 权限修改
+    r"\bdd\b.*\bof=/",                                     # dd 写磁盘
+]
+_BLOCKED_RE = [re.compile(p) for p in _BLOCKED_PATTERNS]
+
+
+def _validate_command(command: str) -> None:
+    """校验命令是否包含受限操作。"""
+    for pattern in _BLOCKED_RE:
+        if pattern.search(command):
+            raise ValueError(f"命令包含受限操作，已拒绝执行")
 
 
 @dataclass
@@ -45,8 +65,11 @@ def _set_resource_limits() -> None:
 
 
 def _build_env(extra_envs: dict[str, str] | None = None) -> dict[str, str]:
-    """构建子进程环境变量（最小集 + 用户自定义）。"""
+    """构建子进程环境变量（最小集 + SANDBOX_ 透传 + 用户自定义）。"""
     env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+    # SANDBOX_ 前缀的环境变量透传给子进程（如 SANDBOX_DB_URL）
+    # 这些变量在 K8s 部署时配置，脚本可直接读取，LLM 看不到
+    env.update({k: v for k, v in os.environ.items() if k.startswith("SANDBOX_")})
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     env.setdefault("HOME", "/tmp")
     env.setdefault("TZ", "Asia/Shanghai")
@@ -75,6 +98,9 @@ async def execute(
         timeout: 超时秒数
         envs: 额外环境变量
     """
+    # 命令安全校验
+    _validate_command(command)
+
     start = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="sandbox_") as tmpdir:
@@ -83,14 +109,15 @@ async def execute(
         if skill_name:
             skill_dir = Path(SKILLS_DIR) / skill_name
             if skill_dir.exists():
-                # 软链接 scripts/ 子目录到 tmpdir
                 scripts_src = skill_dir / "scripts"
                 if scripts_src.exists():
                     scripts_dst = Path(tmpdir) / "scripts"
                     scripts_dst.symlink_to(scripts_src)
-                cwd = tmpdir
 
         env = _build_env(envs)
+        # 注入 SKILL_DIR 让脚本能找到自己的资源
+        if skill_name:
+            env["SKILL_DIR"] = str(Path(SKILLS_DIR) / skill_name)
 
         try:
             proc = await asyncio.create_subprocess_shell(

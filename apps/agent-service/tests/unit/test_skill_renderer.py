@@ -42,7 +42,7 @@ class TestRenderSkill:
     async def test_skill_dir_substitution(self):
         skill = _make_skill("Script at $SKILL_DIR/scripts/run.py")
         result = await render_skill(skill, "")
-        assert "/fake/skills/test_skill/scripts/run.py" in result
+        assert "/sandbox/skills/test_skill/scripts/run.py" in result
         assert "$SKILL_DIR" not in result
 
     @pytest.mark.asyncio
