@@ -114,6 +114,68 @@ class TestSecurity:
         assert result.exit_code == 0
 
 
+class TestNetworkWhitelist:
+    """网络命令白名单测试"""
+
+    @pytest.mark.asyncio
+    async def test_whitelist_allows_curl(self, monkeypatch):
+        """ALLOWED_NETWORK_COMMANDS=curl 时，curl 不被拦截"""
+        monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "curl")
+        # 重建黑名单
+        import app.executor as ex
+        ex._BLOCKED_RE = ex._build_blocked_patterns()
+        try:
+            # curl 不存在也没关系，关键是不被 _validate_command 拦截
+            result = await execute("curl --version")
+            # 只要不抛 ValueError 就算通过
+            assert result.exit_code is not None
+        finally:
+            monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "")
+            ex._BLOCKED_RE = ex._build_blocked_patterns()
+
+    @pytest.mark.asyncio
+    async def test_whitelist_still_blocks_others(self, monkeypatch):
+        """ALLOWED_NETWORK_COMMANDS=curl 时，wget 仍被拦截"""
+        monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "curl")
+        import app.executor as ex
+        ex._BLOCKED_RE = ex._build_blocked_patterns()
+        try:
+            with pytest.raises(ValueError, match="受限操作"):
+                await execute("wget http://example.com")
+        finally:
+            monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "")
+            ex._BLOCKED_RE = ex._build_blocked_patterns()
+
+    @pytest.mark.asyncio
+    async def test_wildcard_allows_all_network(self, monkeypatch):
+        """ALLOWED_NETWORK_COMMANDS=* 时，所有网络命令放行"""
+        monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "*")
+        import app.executor as ex
+        ex._BLOCKED_RE = ex._build_blocked_patterns()
+        try:
+            # curl 和 wget 都不被拦截
+            result = await execute("curl --version")
+            assert result.exit_code is not None
+            result = await execute("wget --version")
+            assert result.exit_code is not None
+        finally:
+            monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "")
+            ex._BLOCKED_RE = ex._build_blocked_patterns()
+
+    @pytest.mark.asyncio
+    async def test_whitelist_does_not_affect_non_network_blocks(self, monkeypatch):
+        """即使网络全放行，sudo 等仍被拦截"""
+        monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "*")
+        import app.executor as ex
+        ex._BLOCKED_RE = ex._build_blocked_patterns()
+        try:
+            with pytest.raises(ValueError, match="受限操作"):
+                await execute("sudo rm -rf /")
+        finally:
+            monkeypatch.setattr("app.executor.ALLOWED_NETWORK_COMMANDS", "")
+            ex._BLOCKED_RE = ex._build_blocked_patterns()
+
+
 class TestExecuteAPI:
     """测试 FastAPI 端点"""
 

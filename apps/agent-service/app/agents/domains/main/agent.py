@@ -315,7 +315,8 @@ async def _build_and_stream(
     except Exception as e:
         logger.error(f"Failed to build schedule context: {e}")
 
-    prompt_vars["user_context"] = "\n".join(context_lines)
+    if context_lines:
+        prompt_vars["user_context"] = "\n".join(context_lines)
 
     full_content = ""
     has_text_in_current_turn = False

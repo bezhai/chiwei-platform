@@ -13,24 +13,48 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.config import MAX_FSIZE_MB, MAX_MEMORY_MB, MAX_NPROC, SKILLS_DIR
+from app.config import ALLOWED_NETWORK_COMMANDS, MAX_FSIZE_MB, MAX_MEMORY_MB, MAX_NPROC, SKILLS_DIR
 
 logger = logging.getLogger(__name__)
 
 # 子进程中允许的最小环境变量集
 _SAFE_ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "TZ", "PYTHONPATH"}
 
-# 命令黑名单：匹配到任一模式则拒绝执行
-_BLOCKED_PATTERNS = [
-    r"\b(sudo|su|chroot|nsenter|mount|umount)\b",        # 权限提升
-    r"\b(curl|wget|nc|ncat|socat|ssh|scp|ftp|telnet)\b", # 网络工具
-    r"\b(apt|yum|pip|pip3)\s+install\b",                  # 包安装
-    r"\brm\s+(-[rfR]+\s+)?/",                             # rm 根目录
-    r"\bcat\s+/etc/(shadow|passwd|hosts)",                 # 敏感文件读取
-    r"\b(chmod|chown)\b",                                  # 权限修改
-    r"\bdd\b.*\bof=/",                                     # dd 写磁盘
+# 所有网络命令（可通过 ALLOWED_NETWORK_COMMANDS 配置放行）
+_ALL_NETWORK_COMMANDS = {"curl", "wget", "nc", "ncat", "socat", "ssh", "scp", "ftp", "telnet"}
+
+# 始终封锁的命令（不可配置）
+_ALWAYS_BLOCKED_PATTERNS = [
+    r"\b(sudo|su|chroot|nsenter|mount|umount)\b",  # 权限提升
+    r"\b(apt|yum|pip|pip3)\s+install\b",            # 包安装
+    r"\brm\s+(-[rfR]+\s+)?/",                       # rm 根目录
+    r"\bcat\s+/etc/(shadow|passwd|hosts)",           # 敏感文件读取
+    r"\b(chmod|chown)\b",                            # 权限修改
+    r"\bdd\b.*\bof=/",                               # dd 写磁盘
 ]
-_BLOCKED_RE = [re.compile(p) for p in _BLOCKED_PATTERNS]
+
+
+def _build_blocked_patterns() -> list[re.Pattern]:
+    """根据配置构建命令黑名单正则。"""
+    patterns = [re.compile(p) for p in _ALWAYS_BLOCKED_PATTERNS]
+
+    # 计算需要封锁的网络命令
+    if ALLOWED_NETWORK_COMMANDS.strip() == "*":
+        blocked_net = set()  # 全部放行
+    elif ALLOWED_NETWORK_COMMANDS.strip():
+        allowed = {c.strip() for c in ALLOWED_NETWORK_COMMANDS.split(",") if c.strip()}
+        blocked_net = _ALL_NETWORK_COMMANDS - allowed
+    else:
+        blocked_net = _ALL_NETWORK_COMMANDS  # 默认全部封锁
+
+    if blocked_net:
+        net_pattern = r"\b(" + "|".join(sorted(blocked_net)) + r")\b"
+        patterns.append(re.compile(net_pattern))
+
+    return patterns
+
+
+_BLOCKED_RE = _build_blocked_patterns()
 
 
 def _validate_command(command: str) -> None:

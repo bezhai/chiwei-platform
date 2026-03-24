@@ -1,4 +1,4 @@
-"""Tests for use_skill and sandbox_bash tools"""
+"""Tests for load_skill and sandbox_bash tools"""
 
 import textwrap
 from pathlib import Path
@@ -36,12 +36,12 @@ def skills_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class TestUseSkill:
+class TestLoadSkill:
     @pytest.mark.asyncio
-    async def test_use_skill_loads_and_renders(self, skills_dir):
-        from app.agents.tools.skill import use_skill
+    async def test_load_skill_loads_and_renders(self, skills_dir):
+        from app.agents.tools.skill import load_skill
 
-        result = await use_skill.ainvoke(
+        result = await load_skill.ainvoke(
             {"skill_name": "greet", "arguments": "赤尾"}
         )
 
@@ -50,10 +50,10 @@ class TestUseSkill:
         assert "$ARGUMENTS" not in result
 
     @pytest.mark.asyncio
-    async def test_use_skill_unknown_name(self, skills_dir):
-        from app.agents.tools.skill import use_skill
+    async def test_load_skill_unknown_name(self, skills_dir):
+        from app.agents.tools.skill import load_skill
 
-        result = await use_skill.ainvoke(
+        result = await load_skill.ainvoke(
             {"skill_name": "nonexistent", "arguments": ""}
         )
 
