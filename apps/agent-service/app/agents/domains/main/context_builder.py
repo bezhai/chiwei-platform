@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage
+from app.services.download_permission import check_group_allows_download
 from app.services.quick_search import QuickSearchResult, quick_search
 from app.utils.content_parser import parse_content, update_tos_files
 
@@ -74,7 +75,16 @@ async def build_chat_context(
                 uncached_keys.append((key, "", ""))
                 logger.warning(f"TOS URL 签名失败，回退完整 pipeline: {key}")
 
-    # 2b. 未缓存的图片：走完整 pipeline（飞书下载 → 压缩 → TOS）
+    # 2b. 权限检查：禁止下载的群跳过飞书图片下载
+    if uncached_keys:
+        chat_id = l1_results[0].chat_id or ""
+        if not await check_group_allows_download(chat_id, chat_type):
+            logger.info(
+                f"群 {chat_id} 不允许下载资源，跳过 {len(uncached_keys)} 张未缓存图片"
+            )
+            uncached_keys = []
+
+    # 2c. 未缓存的图片：走完整 pipeline（飞书下载 → 压缩 → TOS）
     if uncached_keys:
         process_tasks = [
             image_client.process_image(key, msg_id if role == "user" else None)
