@@ -218,10 +218,13 @@ async def _build_and_stream(
     session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
+    from app.skills.registry import SkillRegistry
+
     prompt_vars = {
         "complexity_hint": "",
         "user_context": "",
         "schedule_context": "",
+        "available_skills": SkillRegistry.list_descriptions(),
     }
 
     # 创建 agent

@@ -9,9 +9,11 @@ from app.agents.tools.history.members import list_group_members
 from app.agents.tools.history.search import search_group_history
 from app.agents.tools.image import generate_image, read_images
 from app.agents.tools.memory import load_memory
+from app.agents.tools.sandbox_bash import sandbox_bash
 from app.agents.tools.search.allcpp import search_donjin_event
 from app.agents.tools.search.image import search_images
 from app.agents.tools.search.web import search_web
+from app.agents.tools.skill import use_skill
 
 # 基础工具（子 Agent 默认继承此集合）
 BASE_TOOLS = [
@@ -25,8 +27,10 @@ BASE_TOOLS = [
     load_memory,
 ]
 
-# 主 Agent 完整工具集（基础 + 委派）
+# 主 Agent 完整工具集（基础 + 委派 + 技能）
 ALL_TOOLS = [
     *BASE_TOOLS,
     deep_research,
+    use_skill,
+    sandbox_bash,
 ]
