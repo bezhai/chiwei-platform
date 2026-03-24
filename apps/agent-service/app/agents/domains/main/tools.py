@@ -12,10 +12,9 @@ from app.agents.tools.memory import load_memory
 from app.agents.tools.sandbox_bash import sandbox_bash
 from app.agents.tools.search.image import search_images
 from app.agents.tools.search.web import search_web
-from app.agents.tools.skill import use_skill
+from app.agents.tools.skill import load_skill
 
 # 基础工具（子 Agent 默认继承此集合）
-# 注：search_donjin_event 已迁移为 skill（donjin_search）
 BASE_TOOLS = [
     search_web,
     search_images,
@@ -30,6 +29,6 @@ BASE_TOOLS = [
 ALL_TOOLS = [
     *BASE_TOOLS,
     deep_research,
-    use_skill,
+    load_skill,
     sandbox_bash,
 ]
