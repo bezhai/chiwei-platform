@@ -25,6 +25,14 @@ async def lifespan(app: FastAPI):
     await init_qdrant_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 
+    # 加载 Skill 定义
+    from pathlib import Path
+
+    from app.skills.registry import SkillRegistry
+
+    skills_dir = Path(__file__).parent / "skills" / "definitions"
+    SkillRegistry.load_all(skills_dir)
+
     # 启动 MQ consumers（仅当 RabbitMQ 配置存在时）
     consumer_tasks: list[asyncio.Task] = []
     if settings.rabbitmq_url:

@@ -1,0 +1,7 @@
+index-url = "https://mirrors.aliyun.com/pypi/simple/"
+extra-index-url = [
+    "https://mirrors.aliyun.com/pypi/simple/"
+]
+allow-insecure-host = [
+    "mirrors.aliyun.com"
+]
