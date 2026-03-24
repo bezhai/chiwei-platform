@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""同人展搜索脚本 — 调用 tool-service 内部 API
-
-通过 SANDBOX_TOOL_SERVICE_URL 和 SANDBOX_TOOL_SERVICE_TOKEN 环境变量
-访问 tool-service 的 /api/sandbox/donjin-search 端点。
+"""同人展搜索脚本 — 直接调用 AllCpp.cn API
 
 用法:
     python3 search.py [选项]
@@ -16,13 +13,31 @@
 
 import argparse
 import json
-import os
 import sys
-import urllib.request
+import time
 import urllib.error
+import urllib.request
 
-TOOL_URL = os.environ.get("SANDBOX_TOOL_SERVICE_URL", "http://tool-service:8000")
-TOOL_TOKEN = os.environ.get("SANDBOX_TOOL_SERVICE_TOKEN", "")
+_ALLCPP_URL = "https://www.allcpp.cn/allcpp/event/eventMainListV2.do"
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+_TYPE_MAP = {
+    "茶会": 1, "综合同人展": 2, "ONLY": 3, "线上活动": 6,
+    "官方活动": 7, "综合展": 8, "同好包场": 10,
+}
+_MAX_RETRIES = 3
+
+
+def _format_time(ts):
+    if not ts:
+        return ""
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(ts / 1000))
+    except Exception:
+        return ""
 
 
 def main():
@@ -50,44 +65,67 @@ def main():
 
     args = parser.parse_args()
 
-    # 构建请求体（跳过 None 值）
-    payload = {}
-    if args.query:
-        payload["query"] = args.query
-    if args.is_online:
-        payload["is_online"] = True
-    if args.recent_days is not None:
-        payload["recent_days"] = args.recent_days
-    if args.activity_status:
-        payload["activity_status"] = args.activity_status
-    if args.activity_type:
-        payload["activity_type"] = args.activity_type
-    if args.ticket_status is not None:
-        payload["ticket_status"] = args.ticket_status
+    # 构建 AllCpp API 参数
+    recent_days = args.recent_days
+    if args.activity_status == "ongoing":
+        recent_days = -1
+    elif args.activity_status == "ended":
+        recent_days = -2
 
-    # 调用 tool-service API
-    url = f"{TOOL_URL}/api/sandbox/donjin-search"
-    data = json.dumps(payload).encode()
-    headers = {
-        "Content-Type": "application/json",
+    params = {
+        "keyword": args.query or "",
+        "sort": 1,
+        "page": 1,
+        "page_size": 100,
     }
-    if TOOL_TOKEN:
-        headers["Authorization"] = f"Bearer {TOOL_TOKEN}"
+    if args.is_online:
+        params["is_online"] = "true"
+    if recent_days is not None:
+        params["day"] = recent_days
+    if args.activity_type and args.activity_type in _TYPE_MAP:
+        params["type"] = _TYPE_MAP[args.activity_type]
+    if args.ticket_status is not None:
+        params["ticketStatus"] = args.ticket_status
 
-    try:
-        req = urllib.request.Request(url, data=data, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=15)
-        result = json.loads(resp.read())
-    except urllib.error.URLError as e:
-        print(f"请求失败: {e}", file=sys.stderr)
-        sys.exit(1)
+    # 带重试调用 AllCpp API
+    qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None and v != "")
+    url = f"{_ALLCPP_URL}?{qs}"
 
-    if not result.get("success"):
-        print(f"搜索失败: {result.get('error', '未知错误')}", file=sys.stderr)
-        sys.exit(1)
+    data = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+            break
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            if attempt == _MAX_RETRIES - 1:
+                print(f"AllCpp API 请求失败: {e}", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(1)
 
-    # 输出结构化结果
-    print(json.dumps(result["data"], ensure_ascii=False, indent=2))
+    result = (data or {}).get("result", {})
+    raw_events = result.get("list", [])
+
+    # 结构化输出
+    events = []
+    for item in raw_events:
+        events.append({
+            "name": item.get("name", ""),
+            "type": item.get("type", ""),
+            "tag": item.get("tag", ""),
+            "enter_time": _format_time(item.get("enterTime")),
+            "end_time": _format_time(item.get("endTime")),
+            "wanna_go_count": item.get("wannaGoCount", 0),
+            "city_name": item.get("cityName", "") or "",
+            "enter_address": item.get("enterAddress", ""),
+            "ended": item.get("ended", False) or False,
+            "is_online": item.get("isOnline", 0) == 1,
+            "event_url": f"https://www.allcpp.cn/allcpp/event/event.do?event={item['id']}",
+        })
+
+    output = {"total": result.get("total", len(events)), "events": events}
+    print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
