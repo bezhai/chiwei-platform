@@ -8,7 +8,6 @@ import logging
 import random
 from datetime import datetime
 
-import arrow
 import httpx
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -151,6 +150,6 @@ def _format_time(ts: int | None) -> str:
     if not ts:
         return ""
     try:
-        return arrow.get(datetime.fromtimestamp(ts / 1000)).format("YYYY-MM-DD")
+        return datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
     except Exception:
         return ""
