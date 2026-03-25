@@ -16,6 +16,7 @@ LoggerFactory.createLogger({
     enableConsoleOverride: true,
 });
 
+import { createServer } from 'http';
 import AppDataSource from 'ormconfig';
 import { AgentResponse } from '@entities/agent-response';
 import {
@@ -54,6 +55,21 @@ const imageResolveTotal = new Counter({
     name: 'image_resolve_requests_total',
     help: 'Total image resolve outcomes',
     labelNames: ['status'] as const,  // success, not_found, download_failed, upload_failed
+    registers: [metricsRegistry],
+});
+
+const chatResponseDuration = new Histogram({
+    name: 'chat_response_duration_seconds',
+    help: 'Duration of each chat-response-worker stage',
+    labelNames: ['stage'] as const,  // db_query, resolve, lark_send, db_write, total
+    buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+    registers: [metricsRegistry],
+});
+
+const chatResponseQueueDelay = new Histogram({
+    name: 'chat_response_queue_delay_seconds',
+    help: 'Time spent waiting in MQ queue (chat_response)',
+    buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
     registers: [metricsRegistry],
 });
 
@@ -175,6 +191,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
+    const tStart = Date.now();
     let payload: ChatResponsePayload;
     try {
         payload = JSON.parse(msg.content.toString());
@@ -182,6 +199,12 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         console.error('[ChatResponseWorker] Malformed message, sending to DLQ:', msg.content.toString().slice(0, 200));
         rabbitmqClient.nack(msg, false);
         return;
+    }
+
+    const publishedAt = (payload as any).published_at as number | undefined;
+    const queueDelayMs = publishedAt ? tStart - publishedAt : -1;
+    if (queueDelayMs > 0) {
+        chatResponseQueueDelay.observe(queueDelayMs / 1000);
     }
 
     const {
@@ -199,13 +222,17 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     } = payload;
 
     console.info(
-        `[ChatResponseWorker] Processing: session_id=${session_id}, status=${status}, part=${part_index}, is_last=${is_last}`,
+        `[ChatResponseWorker] Processing: session_id=${session_id}, status=${status}, part=${part_index}, is_last=${is_last}, queue_delay=${queueDelayMs}ms`,
     );
 
     const repo = AppDataSource.getRepository(AgentResponse);
 
     // 查询 agent_response 获取 bot_name
+    const tDbQuery0 = Date.now();
     const agentResponse = await repo.findOneBy({ session_id });
+    const dbQueryMs = Date.now() - tDbQuery0;
+    chatResponseDuration.labels({ stage: 'db_query' }).observe(dbQueryMs / 1000);
+
     if (!agentResponse) {
         console.error(`[ChatResponseWorker] No agent_response found: session_id=${session_id}`);
         rabbitmqClient.ack(msg);
@@ -235,16 +262,19 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
         try {
             // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
+            // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
+            const tResolve0 = Date.now();
             let resolvedContent = is_p2p
                 ? content
                 : await resolveMentionsForGroup(content, chat_id);
-
-            // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
             resolvedContent = await resolveImageReferences(resolvedContent, message_id);
+            const resolveMs = Date.now() - tResolve0;
+            chatResponseDuration.labels({ stage: 'resolve' }).observe(resolveMs / 1000);
 
             const postContent = markdownToPostContent(resolvedContent);
 
             // 发送消息并捕获 AI 消息 ID
+            const tSend0 = Date.now();
             let aiMessageId: string | undefined;
             if (part_index === 0) {
                 // 第一条作为回复
@@ -254,10 +284,13 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 await sleep(SEND_DELAY_MS);
                 aiMessageId = await sendPost(chat_id, postContent);
             }
+            const sendMs = Date.now() - tSend0;
+            chatResponseDuration.labels({ stage: 'lark_send' }).observe(sendMs / 1000);
 
             const effectiveMessageId = aiMessageId || `${message_id}_part${part_index}`;
 
             // 每条消息发完后立即存 conversation_messages
+            const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
             await storeMessage({
                 user_id: getBotUnionId(),
@@ -301,8 +334,18 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                     },
                 );
             }
+            const dbWriteMs = Date.now() - tDbWrite0;
+            chatResponseDuration.labels({ stage: 'db_write' }).observe(dbWriteMs / 1000);
 
             console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}, part=${part_index}, ai_msg_id=${effectiveMessageId}`);
+
+            const totalMs = Date.now() - tStart;
+            chatResponseDuration.labels({ stage: 'total' }).observe(totalMs / 1000);
+            console.info(
+                `[ChatResponseWorker] done session_id=${session_id} part=${part_index} ` +
+                `queue=${queueDelayMs}ms db_query=${dbQueryMs}ms resolve=${resolveMs}ms ` +
+                `send=${sendMs}ms db_write=${dbWriteMs}ms total=${totalMs}ms`
+            );
         } catch (e) {
             console.error(`[ChatResponseWorker] Failed to send reply: session_id=${session_id}, part=${part_index}`, e);
             try {
@@ -340,6 +383,15 @@ async function main(): Promise<void> {
     console.info(
         `[ChatResponseWorker] Consuming queue: ${queue}, waiting for messages...`,
     );
+
+    // 5. 暴露 Prometheus metrics
+    const metricsPort = parseInt(process.env.METRICS_PORT || '9091', 10);
+    createServer(async (_req, res) => {
+        res.setHeader('Content-Type', metricsRegistry.contentType);
+        res.end(await metricsRegistry.metrics());
+    }).listen(metricsPort, () => {
+        console.info(`[ChatResponseWorker] Metrics server on :${metricsPort}`);
+    });
 }
 
 main().catch((err) => {
