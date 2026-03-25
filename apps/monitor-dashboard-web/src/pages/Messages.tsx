@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
   Button,
   Checkbox,
@@ -230,6 +230,44 @@ export default function Messages() {
   const [total, setTotal] = useState(0);
   const [visibleKeys, setVisibleKeys] = useState<string[]>(loadVisibleColumns);
 
+  // Remote search state for chat/user selects
+  const [chatOptions, setChatOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [userOptions, setUserOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const chatSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const userSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  const searchChats = useCallback((keyword: string) => {
+    clearTimeout(chatSearchTimer.current);
+    chatSearchTimer.current = setTimeout(async () => {
+      try {
+        const { data } = await api.get('/chats', { params: { keyword } });
+        setChatOptions(data.map((c: { chat_id: string; name: string }) => ({
+          value: c.chat_id,
+          label: c.name,
+        })));
+      } catch { /* ignore */ }
+    }, 300);
+  }, []);
+
+  const searchUsers = useCallback((keyword: string) => {
+    clearTimeout(userSearchTimer.current);
+    userSearchTimer.current = setTimeout(async () => {
+      try {
+        const { data } = await api.get('/users', { params: { keyword } });
+        setUserOptions(data.map((u: { user_id: string; name: string }) => ({
+          value: u.user_id,
+          label: u.name,
+        })));
+      } catch { /* ignore */ }
+    }, 300);
+  }, []);
+
+  // Pre-load options on mount
+  useEffect(() => {
+    searchChats('');
+    searchUsers('');
+  }, [searchChats, searchUsers]);
+
   // Define buildColumns inside component or use memo with handlers
   const columns = useMemo(() => {
     const visibleSet = new Set(visibleKeys);
@@ -241,6 +279,14 @@ export default function Messages() {
       // Reset page to 1 when filtering
       setPage(1);
       // Directly trigger fetch with new filters
+      fetchData(1, pageSize, newFilters);
+    };
+
+    // Handler for clicking on User Name
+    const handleUserClick = (userId: string) => {
+      const newFilters = { ...filters, userId };
+      setFilters(newFilters);
+      setPage(1);
       fetchData(1, pageSize, newFilters);
     };
 
@@ -289,7 +335,14 @@ export default function Messages() {
         ellipsis: true,
         render: (text, record) => (
           <Tooltip title={`User ID: ${record.user_id}`}>
-            <span>{text}</span>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: '#0f172a', fontWeight: 500 }}
+              onClick={() => handleUserClick(record.user_id)}
+            >
+              {text}
+            </Button>
           </Tooltip>
         ),
       },
@@ -311,20 +364,20 @@ export default function Messages() {
             system: { color: 'orange', text: '系统' },
           };
           const info = map[role] || { color: 'default', text: role };
-          return <Tag color={info.color}>{info.text}</Tag>;
+          return <Tag bordered={false} color={info.color} style={{ fontWeight: 500 }}>{info.text}</Tag>;
         },
       },
       chat_name: {
         title: '会话',
         dataIndex: 'chat_name',
-        width: 180,
+        width: 160,
         ellipsis: true,
         render: (text, record) => {
           const content = (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div><strong>会话名称:</strong> {text}</div>
               <div>
-                <strong>会话 ID:</strong> {record.chat_id}
+                <strong>会话 ID:</strong> <Text code style={{ background: '#f8fafc', border: 'none' }}>{record.chat_id}</Text>
                 <Button 
                   type="text" 
                   size="small" 
@@ -338,9 +391,9 @@ export default function Messages() {
           return (
             <Popover content={content} title="会话信息" trigger="hover">
               <Button 
-                type="text" 
+                type="link" 
                 size="small"
-                style={{ padding: '0 4px', fontSize: 'inherit', height: 'auto', lineHeight: 'inherit' }}
+                style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: '#0f172a', fontWeight: 500 }}
                 onClick={() => handleChatClick(record.chat_id)}
               >
                 {text}
@@ -354,7 +407,7 @@ export default function Messages() {
         dataIndex: 'chat_id',
         width: 180,
         ellipsis: true,
-        render: (text) => <Text copyable>{text}</Text>,
+        render: (text) => <Text copyable style={{ color: '#475569' }}>{text}</Text>,
       },
       chat_type: {
         title: '会话类型',
@@ -362,7 +415,7 @@ export default function Messages() {
         width: 100,
         render: (type: string) => {
           const label = chatTypeMap[type] || type;
-          return <Tag color={type === 'group' ? 'cyan' : 'purple'}>{label}</Tag>;
+          return <Tag bordered={false} color={type === 'group' ? 'cyan' : 'purple'} style={{ fontWeight: 500 }}>{label}</Tag>;
         },
       },
       bot_name: {
@@ -642,7 +695,10 @@ export default function Messages() {
     <div className="page-container">
       {/* Reduced margin-bottom from default 24px to 16px to decrease gap */}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h1 className="page-title" style={{ margin: 0 }}>消息记录</h1>
+        <div>
+          <h1 className="page-title" style={{ margin: 0 }}>消息记录</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>实时查看系统中的消息流动</Text>
+        </div>
         <Popover content={columnSettingsContent} title="列设置" trigger="click" placement="bottomRight">
           <Button icon={<SettingOutlined />}>列设置</Button>
         </Popover>
@@ -651,19 +707,33 @@ export default function Messages() {
       <div className="filter-card">
         <Row gutter={[12, 12]}>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Input
-              placeholder="会话 ID"
-              value={filters.chatId}
-              onChange={(e) => setFilters((prev) => ({ ...prev, chatId: e.target.value }))}
+            <Select
+              placeholder="搜索会话名称"
+              showSearch
+              filterOption={false}
+              value={filters.chatId || undefined}
+              onSearch={searchChats}
+              onChange={(value) => setFilters((prev) => ({ ...prev, chatId: value || '' }))}
+              onFocus={() => searchChats('')}
               allowClear
+              style={{ width: '100%' }}
+              options={chatOptions}
+              notFoundContent={null}
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Input
-              placeholder="用户 ID"
-              value={filters.userId}
-              onChange={(e) => setFilters((prev) => ({ ...prev, userId: e.target.value }))}
+            <Select
+              placeholder="搜索用户名称"
+              showSearch
+              filterOption={false}
+              value={filters.userId || undefined}
+              onSearch={searchUsers}
+              onChange={(value) => setFilters((prev) => ({ ...prev, userId: value || '' }))}
+              onFocus={() => searchUsers('')}
               allowClear
+              style={{ width: '100%' }}
+              options={userOptions}
+              notFoundContent={null}
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -754,7 +824,7 @@ export default function Messages() {
         </Row>
       </div>
 
-      <div className="content-card">
+      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
         <Table
           rowKey="message_id"
           columns={columns}
@@ -765,10 +835,11 @@ export default function Messages() {
             pageSize,
             total,
             showSizeChanger: true,
-            showTotal: (total) => `共 ${total} 条`,
+            showTotal: (total) => `共 ${total} 条记录`,
             onChange: (nextPage, nextPageSize) => {
               fetchData(nextPage, nextPageSize);
             },
+            style: { padding: '16px 24px', margin: 0, borderTop: '1px solid #f1f5f9' }
           }}
           scroll={{ x: 1200 }}
           size="middle"

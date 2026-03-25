@@ -160,7 +160,7 @@ export default function App() {
       <div style={{
         width: 32,
         height: 32,
-        background: `linear-gradient(135deg, ${primaryColor}, #3b82f6)`,
+        background: `linear-gradient(135deg, #38bdf8, ${primaryColor})`,
         borderRadius: 8,
         display: 'flex',
         alignItems: 'center',

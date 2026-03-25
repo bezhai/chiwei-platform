@@ -7,11 +7,14 @@ import {
   Popconfirm,
   Space,
   Table,
+  Typography,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import { api } from '../api/client';
+
+const { Text } = Typography;
 
 interface ModelMapping {
   id: string;
@@ -95,28 +98,28 @@ export default function ModelMappings() {
   };
 
   const columns: ColumnsType<ModelMapping> = [
-    { title: '别名', dataIndex: 'alias', width: 220, fixed: 'left' },
-    { title: '服务商', dataIndex: 'provider_name', width: 200 },
-    { title: '真实模型', dataIndex: 'real_model_name', width: 240 },
-    { title: '描述', dataIndex: 'description', width: 200, ellipsis: true },
+    { title: '别名', dataIndex: 'alias', width: 200, fixed: 'left', render: (text) => <Text strong style={{ color: '#0f172a' }}>{text}</Text> },
+    { title: '服务商', dataIndex: 'provider_name', width: 180, render: (text) => <Text type="secondary">{text}</Text> },
+    { title: '真实模型', dataIndex: 'real_model_name', width: 220, render: (text) => <Text code style={{ background: '#f8fafc', border: 'none' }}>{text}</Text> },
+    { title: '描述', dataIndex: 'description', width: 200, ellipsis: true, render: (text) => <Text type="secondary">{text || '-'}</Text> },
     {
       title: '配置',
       dataIndex: 'model_config',
-      width: 150,
+      width: 250,
       render: (value: Record<string, unknown>) =>
-        value ? <div className="json-preview" style={{ maxHeight: 100, overflow: 'auto', fontSize: 12 }}>{JSON.stringify(value, null, 2)}</div> : null,
+        value ? <div style={{ maxHeight: 100, overflow: 'auto', fontSize: 12, fontFamily: 'var(--font-mono)', background: '#f8fafc', padding: 8, borderRadius: 6, border: '1px solid #e2e8f0' }}>{JSON.stringify(value, null, 2)}</div> : <Text type="secondary">-</Text>,
     },
     {
       title: '操作',
-      width: 160,
+      width: 140,
       fixed: 'right',
       render: (_, record) => (
         <Space style={{ marginRight: 16 }}>
-          <Button size="small" icon={<EditOutlined />} onClick={() => openModal(record)}>
+          <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openModal(record)}>
             编辑
           </Button>
           <Popconfirm title="确认删除该配置?" onConfirm={() => handleDelete(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>
+            <Button type="text" danger size="small" icon={<DeleteOutlined />}>
               删除
             </Button>
           </Popconfirm>
@@ -127,14 +130,17 @@ export default function ModelMappings() {
 
   return (
     <div className="page-container">
-      <div className="page-header" style={{ marginBottom: 16 }}>
-        <h1 className="page-title">模型映射配置</h1>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal()}>
+      <div className="page-header" style={{ marginBottom: 24 }}>
+        <div>
+          <h1 className="page-title">模型映射配置</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>将前端抽象模型名称映射到具体服务商与底层大模型</Text>
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal()} size="large">
           新建映射
         </Button>
       </div>
 
-      <div className="content-card">
+      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
         <Table 
           rowKey="id" 
           columns={columns} 
@@ -142,51 +148,52 @@ export default function ModelMappings() {
           loading={loading}
           pagination={false}
           size="middle"
-          scroll={{ x: 1300 }}
+          scroll={{ x: 1200 }}
         />
       </div>
 
       <Modal
-        title={editing ? '编辑映射' : '新建映射'}
+        title={<div style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}>{editing ? '编辑映射' : '新建映射'}</div>}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={handleOk}
         okText={editing ? '更新' : '创建'}
         cancelText="取消"
-        width={720}
+        width={680}
+        styles={{ content: { borderRadius: 16, padding: 24 } }}
       >
-        <Form layout="vertical" form={form}>
+        <Form layout="vertical" form={form} style={{ marginTop: 24 }}>
           <Form.Item
             name="alias"
-            label="别名 (Alias)"
+            label={<Text strong>别名 (Alias)</Text>}
             rules={[{ required: true, message: '请输入别名' }]}
-            tooltip="应用中调用的模型名称"
+            tooltip="应用中调用的模型名称，如 'gpt-4o-mini'"
           >
-            <Input placeholder="例如: gpt-4o-mini" />
+            <Input placeholder="例如: gpt-4o-mini" size="large" />
           </Form.Item>
           <Form.Item
             name="provider_name"
-            label="服务商名称"
+            label={<Text strong>服务商名称</Text>}
             rules={[{ required: true, message: '请输入服务商名称' }]}
             tooltip="对应 Providers 中的 Name"
           >
-            <Input placeholder="例如: OpenAI Main" />
+            <Input placeholder="例如: OpenAI Main" size="large" />
           </Form.Item>
           <Form.Item
             name="real_model_name"
-            label="真实模型名称"
+            label={<Text strong>真实模型名称</Text>}
             rules={[{ required: true, message: '请输入真实模型名称' }]}
             tooltip="发送给服务商的实际模型参数"
           >
-            <Input placeholder="例如: gpt-4o-mini-2024-07-18" />
+            <Input placeholder="例如: gpt-4o-mini-2024-07-18" size="large" />
           </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} placeholder="备注说明" />
+          <Form.Item name="description" label={<Text strong>描述</Text>}>
+            <Input.TextArea rows={3} placeholder="备注说明" style={{ background: '#f8fafc', borderColor: '#e2e8f0' }} />
           </Form.Item>
-          <Form.Item name="model_config" label="模型配置 (JSON)">
+          <Form.Item name="model_config" label={<Text strong>模型配置 (JSON)</Text>} tooltip="覆盖模型默认参数">
             <Input.TextArea
               rows={6}
-              className="json-preview"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 13, background: '#f8fafc', borderColor: '#e2e8f0' }}
               placeholder={`{
   "temperature": 0.7,
   "max_tokens": 1000

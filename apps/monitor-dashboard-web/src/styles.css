@@ -9,7 +9,7 @@
 body {
   margin: 0;
   font-family: var(--font-sans);
-  background-color: #f1f5f9;
+  background-color: #fafafa;
   color: #0f172a;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -45,12 +45,12 @@ a {
 
 .app-shell {
   background:
-    radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 28%),
-    linear-gradient(180deg, #f8fbff 0%, #f1f5f9 280px, #eef2f7 100%);
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.06), transparent 28%),
+    linear-gradient(180deg, #f8fbff 0%, #fafafa 280px, #fafafa 100%);
 }
 
 .app-sider {
-  box-shadow: 12px 0 32px rgba(15, 23, 42, 0.04);
+  box-shadow: 4px 0 16px rgba(15, 23, 42, 0.03);
 }
 
 .route-loading-shell {
@@ -70,7 +70,7 @@ a {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid rgba(226, 232, 240, 0.9);
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
   backdrop-filter: blur(10px);
 }
 
@@ -89,10 +89,11 @@ a {
 
 .iframe-container {
   background: #fff;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
   height: calc(100vh - 140px);
+  border: 1px solid #e2e8f0;
 }
 
 .iframe-container iframe {
@@ -112,13 +113,14 @@ a {
 
 .login-left {
   flex: 1;
-  background-color: #f8fafc;
+  background-color: #fafafa;
   position: relative;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 60px;
   overflow: hidden;
+  border-right: 1px solid #e2e8f0;
 }
 
 /* Decorative background elements for left side */
@@ -129,7 +131,7 @@ a {
   right: -10%;
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, rgba(56, 189, 248, 0) 70%);
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.12) 0%, rgba(56, 189, 248, 0) 70%);
   border-radius: 50%;
   z-index: 0;
 }
@@ -141,7 +143,7 @@ a {
   left: -5%;
   width: 500px;
   height: 500px;
-  background: radial-gradient(circle, rgba(96, 165, 250, 0.1) 0%, rgba(96, 165, 250, 0) 70%);
+  background: radial-gradient(circle, rgba(96, 165, 250, 0.08) 0%, rgba(96, 165, 250, 0) 70%);
   border-radius: 50%;
   z-index: 0;
 }
@@ -161,7 +163,7 @@ a {
 .brand-icon {
   width: 40px;
   height: 40px;
-  background: linear-gradient(135deg, #38bdf8, #60a5fa);
+  background: linear-gradient(135deg, #38bdf8, #2563eb);
   border-radius: 10px;
   display: flex;
   align-items: center;
@@ -169,7 +171,7 @@ a {
   color: white;
   font-weight: bold;
   font-size: 20px;
-  box-shadow: 0 4px 6px -1px rgba(56, 189, 248, 0.4);
+  box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.35);
 }
 
 .brand-text {
@@ -205,7 +207,7 @@ a {
   backdrop-filter: blur(12px);
   padding: 24px;
   border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(226, 232, 240, 0.8);
   max-width: 420px;
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
@@ -261,8 +263,8 @@ a {
 .custom-input .ant-input-affix-wrapper:hover,
 .custom-input .ant-input-affix-wrapper:focus-within {
   background-color: #ffffff;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 /* Submit Button */
@@ -293,7 +295,7 @@ a {
 }
 
 .page-header {
-  margin-bottom: 24px;
+  margin-bottom: 32px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -311,18 +313,18 @@ a {
 .filter-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 24px;
   margin-bottom: 24px;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
 }
 
 .content-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 24px;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
 }
 
 @keyframes page-enter {
@@ -338,7 +340,7 @@ a {
 
 /* Mongo Explorer Specific Styles */
 .mongo-explorer-container {
-  padding: 32px 48px;
+  padding: 32px 0;
   max-width: 1400px;
   margin: 0 auto;
   font-family: var(--font-sans);
@@ -359,7 +361,7 @@ a {
 }
 
 .explorer-title {
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 700;
   color: #0f172a;
   letter-spacing: -0.025em;
@@ -403,10 +405,10 @@ a {
 .filter-panel {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 24px;
   margin-bottom: 32px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   animation: fadeIn 0.2s ease-out;
 }
 
@@ -451,13 +453,13 @@ a {
   border-color: #e2e8f0 !important;
   color: #334155 !important;
   font-size: 13px;
-  border-radius: 6px !important;
+  border-radius: 8px !important;
 }
 
 .code-input:focus {
   background: #ffffff !important;
-  border-color: #3b82f6 !important;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1) !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
 }
 
 .documents-list {
@@ -468,7 +470,7 @@ a {
 
 .document-card {
   background: #ffffff;
-  border-radius: 8px;
+  border-radius: 12px;
   border: 1px solid #e2e8f0;
   transition: all 0.2s ease-in-out;
   position: relative;
@@ -476,7 +478,7 @@ a {
 
 .document-card:hover {
   border-color: #cbd5e1;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.025);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
   transform: translateY(-1px);
   z-index: 10;
 }
@@ -514,7 +516,7 @@ a {
 
 .mongo-explorer-container .ant-input,
 .mongo-explorer-container .ant-select-selector {
-  border-radius: 6px !important;
+  border-radius: 8px !important;
   background-color: #f8fafc !important;
   border-color: #e2e8f0 !important;
 }
@@ -523,8 +525,8 @@ a {
 .mongo-explorer-container .ant-select-selector:focus,
 .mongo-explorer-container .ant-select-focused .ant-select-selector {
   background-color: #ffffff !important;
-  border-color: #3b82f6 !important;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1) !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
 }
 
 @media (max-width: 1024px) {
