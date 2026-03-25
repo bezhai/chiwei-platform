@@ -302,7 +302,7 @@ a {
 }
 
 .page-title {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 700;
   color: #0f172a;
   margin: 0;
@@ -576,7 +576,7 @@ a {
 
   .page-title,
   .explorer-title {
-    font-size: 24px;
+    font-size: 20px;
   }
 
   .route-loading-card {

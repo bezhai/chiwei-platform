@@ -306,7 +306,7 @@ export default function Activity() {
       title: '赤尾回复',
       dataIndex: 'bot_replies',
       key: 'bot_replies',
-      width: 100,
+      width: 120,
       sorter: (a: GroupStat, b: GroupStat) => a.bot_replies - b.bot_replies,
       defaultSortOrder: 'descend' as const,
       render: (val: number) => <Tag bordered={false} color={val > 0 ? 'blue' : 'default'}>{val.toLocaleString()}</Tag>

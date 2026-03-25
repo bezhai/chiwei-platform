@@ -1,5 +1,5 @@
 import Router from '@koa/router';
-import { AppDataSource, ConversationMessage } from '../db';
+import { AppDataSource, ConversationMessage, LarkUser, LarkGroupChatInfo } from '../db';
 
 const router = new Router();
 
@@ -116,6 +116,28 @@ router.get('/api/messages', async (ctx) => {
     page,
     pageSize,
   };
+});
+
+router.get('/api/chats', async (ctx) => {
+  const keyword = ((ctx.query.keyword as string) || '').trim();
+  const repo = AppDataSource.getRepository(LarkGroupChatInfo);
+  const qb = repo.createQueryBuilder('gc').select(['gc.chat_id AS chat_id', 'gc.name AS name']);
+  if (keyword) {
+    qb.where('gc.name ILIKE :kw', { kw: `%${keyword}%` });
+  }
+  qb.orderBy('gc.name', 'ASC').limit(30);
+  ctx.body = await qb.getRawMany();
+});
+
+router.get('/api/users', async (ctx) => {
+  const keyword = ((ctx.query.keyword as string) || '').trim();
+  const repo = AppDataSource.getRepository(LarkUser);
+  const qb = repo.createQueryBuilder('u').select(['u.union_id AS user_id', 'u.name AS name']);
+  if (keyword) {
+    qb.where('u.name ILIKE :kw', { kw: `%${keyword}%` });
+  }
+  qb.orderBy('u.name', 'ASC').limit(30);
+  ctx.body = await qb.getRawMany();
 });
 
 export default router;

@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
   Button,
   Checkbox,
@@ -230,6 +230,44 @@ export default function Messages() {
   const [total, setTotal] = useState(0);
   const [visibleKeys, setVisibleKeys] = useState<string[]>(loadVisibleColumns);
 
+  // Remote search state for chat/user selects
+  const [chatOptions, setChatOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [userOptions, setUserOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const chatSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const userSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  const searchChats = useCallback((keyword: string) => {
+    clearTimeout(chatSearchTimer.current);
+    chatSearchTimer.current = setTimeout(async () => {
+      try {
+        const { data } = await api.get('/chats', { params: { keyword } });
+        setChatOptions(data.map((c: { chat_id: string; name: string }) => ({
+          value: c.chat_id,
+          label: c.name,
+        })));
+      } catch { /* ignore */ }
+    }, 300);
+  }, []);
+
+  const searchUsers = useCallback((keyword: string) => {
+    clearTimeout(userSearchTimer.current);
+    userSearchTimer.current = setTimeout(async () => {
+      try {
+        const { data } = await api.get('/users', { params: { keyword } });
+        setUserOptions(data.map((u: { user_id: string; name: string }) => ({
+          value: u.user_id,
+          label: u.name,
+        })));
+      } catch { /* ignore */ }
+    }, 300);
+  }, []);
+
+  // Pre-load options on mount
+  useEffect(() => {
+    searchChats('');
+    searchUsers('');
+  }, [searchChats, searchUsers]);
+
   // Define buildColumns inside component or use memo with handlers
   const columns = useMemo(() => {
     const visibleSet = new Set(visibleKeys);
@@ -241,6 +279,14 @@ export default function Messages() {
       // Reset page to 1 when filtering
       setPage(1);
       // Directly trigger fetch with new filters
+      fetchData(1, pageSize, newFilters);
+    };
+
+    // Handler for clicking on User Name
+    const handleUserClick = (userId: string) => {
+      const newFilters = { ...filters, userId };
+      setFilters(newFilters);
+      setPage(1);
       fetchData(1, pageSize, newFilters);
     };
 
@@ -289,7 +335,14 @@ export default function Messages() {
         ellipsis: true,
         render: (text, record) => (
           <Tooltip title={`User ID: ${record.user_id}`}>
-            <span>{text}</span>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: '#0f172a', fontWeight: 500 }}
+              onClick={() => handleUserClick(record.user_id)}
+            >
+              {text}
+            </Button>
           </Tooltip>
         ),
       },
@@ -654,19 +707,33 @@ export default function Messages() {
       <div className="filter-card">
         <Row gutter={[12, 12]}>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Input
-              placeholder="会话 ID"
-              value={filters.chatId}
-              onChange={(e) => setFilters((prev) => ({ ...prev, chatId: e.target.value }))}
+            <Select
+              placeholder="搜索会话名称"
+              showSearch
+              filterOption={false}
+              value={filters.chatId || undefined}
+              onSearch={searchChats}
+              onChange={(value) => setFilters((prev) => ({ ...prev, chatId: value || '' }))}
+              onFocus={() => searchChats('')}
               allowClear
+              style={{ width: '100%' }}
+              options={chatOptions}
+              notFoundContent={null}
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Input
-              placeholder="用户 ID"
-              value={filters.userId}
-              onChange={(e) => setFilters((prev) => ({ ...prev, userId: e.target.value }))}
+            <Select
+              placeholder="搜索用户名称"
+              showSearch
+              filterOption={false}
+              value={filters.userId || undefined}
+              onSearch={searchUsers}
+              onChange={(value) => setFilters((prev) => ({ ...prev, userId: value || '' }))}
+              onFocus={() => searchUsers('')}
               allowClear
+              style={{ width: '100%' }}
+              options={userOptions}
+              notFoundContent={null}
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
