@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -26,6 +27,7 @@ from app.services.memory_context import (
     build_impression_context,
 )
 from app.services.schedule_context import build_schedule_context
+from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,7 @@ async def stream_chat(
 
     with langfuse.start_as_current_observation(as_type="span", name="chat-request"):
         with propagate_attributes(session_id=request_id):
+            t_entry = time.monotonic()
             # 1. 获取消息内容
             raw_content = await get_message_content(message_id)
             if not raw_content:
@@ -68,6 +71,7 @@ async def stream_chat(
 
             # 2. 获取 gray_config（需要提前获取以决定 pre 模式）
             gray_config = (await get_gray_config(message_id)) or {}
+            CHAT_PIPELINE_DURATION.labels(stage="prep").observe(time.monotonic() - t_entry)
             pre_blocking = gray_config.get("pre_blocking", "false")
 
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
@@ -113,6 +117,7 @@ async def _buffer_until_pre(
     使用 Queue + asyncio.wait 实现 race：pre 完成后立即响应，
     不再被动等待下一个 token 到达才检查。
     """
+    t_buf_start = time.monotonic()
     buffer: list[str] = []
     q: asyncio.Queue = asyncio.Queue()
 
@@ -138,6 +143,12 @@ async def _buffer_until_pre(
 
             if pre_task in done:
                 pre_result = pre_task.result()
+                pre_dur = time.monotonic() - t_buf_start
+                CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
+                logger.info(
+                    "pre_safety_done message_id=%s duration=%.0fms blocked=%s buffered=%d",
+                    message_id, pre_dur * 1000, pre_result["is_blocked"], len(buffer),
+                )
                 if pre_result["is_blocked"]:
                     logger.info(
                         f"并行模式拦截: message_id={message_id}, "
@@ -172,6 +183,8 @@ async def _buffer_until_pre(
                     for b in buffer:
                         yield b
                     return
+                pre_dur = time.monotonic() - t_buf_start
+                CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
                 if pre_result["is_blocked"]:
                     logger.info(
                         f"并行模式拦截（流结束后）: message_id={message_id}, "
@@ -218,6 +231,7 @@ async def _build_and_stream(
     session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
+    t_build_start = time.monotonic()
     from app.skills.registry import SkillRegistry
 
     prompt_vars = {
@@ -250,6 +264,7 @@ async def _build_and_stream(
         chat_name,
         chain_user_ids,
     ) = await build_chat_context(message_id)
+    CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(time.monotonic() - t_build_start)
 
     if not messages:
         logger.warning(f"No results found for message_id: {message_id}")
@@ -322,6 +337,9 @@ async def _build_and_stream(
     has_text_in_current_turn = False
 
     try:
+        t_agent_start = time.monotonic()
+        agent_token_count = 0
+        tool_call_count = 0
         async for token in agent.stream(
             messages,
             context=AgentContext(
@@ -343,6 +361,7 @@ async def _build_and_stream(
 
                 if token.text:
                     has_text_in_current_turn = True
+                    agent_token_count += 1
                     full_content += token.text
                     yield token.text
 
@@ -352,8 +371,22 @@ async def _build_and_stream(
                     has_text_in_current_turn = False
 
             elif isinstance(token, ToolMessage):
+                tool_call_count += 1
                 has_text_in_current_turn = False
 
+        agent_dur = time.monotonic() - t_agent_start
+        CHAT_PIPELINE_DURATION.labels(stage="agent_stream").observe(agent_dur)
+        CHAT_TOKENS.labels(type="text").inc(agent_token_count)
+        CHAT_TOKENS.labels(type="tool_call").inc(tool_call_count)
+        logger.info(
+            "agent_stream_done session_id=%s context=%.0fms agent=%.0fms tokens=%d tools=%d model=%s",
+            session_id,
+            (t_agent_start - t_build_start) * 1000,
+            agent_dur * 1000,
+            agent_token_count,
+            tool_call_count,
+            model_id,
+        )
         # Fire-and-forget: publish to post safety check queue
         if full_content and session_id:
             asyncio.create_task(
