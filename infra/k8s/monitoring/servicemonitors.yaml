@@ -242,3 +242,23 @@ spec:
         credentials:
           name: qdrant-metrics-token
           key: token
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chat-response-worker
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - prod
+  selector:
+    matchLabels:
+      app: chat-response-worker
+      lane: prod
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
