@@ -233,3 +233,15 @@ class PersonImpression(Base):
     )
 
     __table_args__ = (UniqueConstraint("chat_id", "user_id"),)
+
+
+class GroupCultureGestalt(Base):
+    """群文化 gestalt — 赤尾对一个群的整体感觉，一句话"""
+
+    __tablename__ = "group_culture_gestalt"
+
+    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    gestalt_text: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

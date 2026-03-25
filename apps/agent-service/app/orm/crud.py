@@ -8,6 +8,7 @@ from .models import (
     AkaoSchedule,
     ConversationMessage,
     DiaryEntry,
+    GroupCultureGestalt,
     LarkBaseChatInfo,
     LarkGroupChatInfo,
     LarkUser,
@@ -551,3 +552,26 @@ async def delete_schedule(schedule_id: int) -> bool:
         await session.delete(entry)
         await session.commit()
         return True
+
+
+# ==================== GroupCultureGestalt CRUD ====================
+
+
+async def upsert_group_culture_gestalt(chat_id: str, gestalt_text: str) -> None:
+    """写入/更新群文化 gestalt"""
+    async with AsyncSessionLocal() as session:
+        existing = await session.get(GroupCultureGestalt, chat_id)
+        if existing:
+            existing.gestalt_text = gestalt_text
+        else:
+            session.add(GroupCultureGestalt(
+                chat_id=chat_id, gestalt_text=gestalt_text
+            ))
+        await session.commit()
+
+
+async def get_group_culture_gestalt(chat_id: str) -> str:
+    """获取群文化 gestalt，无则返回空字符串"""
+    async with AsyncSessionLocal() as session:
+        result = await session.get(GroupCultureGestalt, chat_id)
+        return result.gestalt_text if result else ""
