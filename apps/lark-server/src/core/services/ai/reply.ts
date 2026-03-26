@@ -40,6 +40,7 @@ export async function makeTextReply(message: Message): Promise<void> {
             bot_name: context.getBotName(),
             is_canary: message.basicChatInfo?.permission_config?.is_canary ?? false,
             lane: lane || undefined,
+            enqueued_at: Date.now(),
         },
         undefined,
         undefined,
