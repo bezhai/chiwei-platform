@@ -47,14 +47,17 @@ const bootstrap = async () => {
     try {
       await next();
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status
+      const axiosResp = (err as { response?: { status?: number; data?: unknown } })?.response;
+      const status = axiosResp?.status
         || (err as { status?: number })?.status
         || 500;
+      // Prefer upstream error body (e.g. PaaS Engine's {"error":"..."})
+      const upstream = axiosResp?.data;
+      const message = (upstream && typeof upstream === 'object' && 'error' in upstream)
+        ? (upstream as Record<string, unknown>).error
+        : err instanceof Error ? err.message : String(err);
       ctx.status = status;
-      ctx.body = {
-        message: err instanceof Error ? err.message : String(err),
-        status,
-      };
+      ctx.body = { message, status };
     }
   });
 

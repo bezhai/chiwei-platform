@@ -64,7 +64,7 @@ def main():
 
     result = subprocess.run(
         [
-            "curl", "-sf", "-X", "POST",
+            "curl", "-sfS", "-X", "POST",
             f"{paas_api}/dashboard/api/ops/db-query",
             "-H", "Content-Type: application/json",
             "-H", f"X-API-Key: {cc_token}",
