@@ -15,6 +15,7 @@ from inner_shared.logger import setup_logging
 from app.config.config import settings
 from app.long_tasks.executor import poll_and_execute_tasks
 from app.workers.diary_worker import cron_generate_diaries, cron_generate_weekly_reviews
+from app.workers.journal_worker import cron_generate_daily_journal, cron_generate_weekly_journal
 from app.workers.schedule_worker import (
     cron_generate_daily_plan,
     cron_generate_monthly_plan,
@@ -57,18 +58,22 @@ class UnifiedWorkerSettings:
     # 所有任务函数
     functions = []
 
-    # 所有定时任务
+    # 所有定时任务（夜间管线时序，CST）
     cron_jobs = [
         # 1. 长期任务：每分钟执行一次
         cron(task_executor_job, minute=None),
         # 2. 向量化 pending 消息扫描：每 10 分钟一次
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
-        # 3. 日记生成：每天 CST 03:00
+        # 3. 日记生成：每天 CST 03:00 → DiaryEntry + PersonImpression + ChatImpression
         cron(cron_generate_diaries, hour={3}, minute={0}),
-        # 4. 周记生成：每周一 CST 04:00（日记 cron 之后 1 小时）
-        cron(cron_generate_weekly_reviews, weekday={0}, hour={4}, minute={0}),
-        # 5. 日程生成：日计划每天 CST 03:30（日记之后），周计划每周日，月计划每月1号
-        cron(cron_generate_daily_plan, hour={3}, minute={30}),
+        # 4. Journal daily：每天 CST 04:00（日记之后 1 小时）
+        cron(cron_generate_daily_journal, hour={4}, minute={0}),
+        # 5. 周记生成：每周一 CST 04:30（daily journal 之后）
+        cron(cron_generate_weekly_reviews, weekday={0}, hour={4}, minute={30}),
+        # 6. Journal weekly：每周一 CST 04:45（周记之后）
+        cron(cron_generate_weekly_journal, weekday={0}, hour={4}, minute={45}),
+        # 7. 日程生成：日计划每天 CST 05:00（journal 之后），周计划每周日，月计划每月1号
+        cron(cron_generate_daily_plan, hour={5}, minute={0}),
         cron(cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}),
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}),
     ]
