@@ -12,6 +12,7 @@
 
 import json
 import logging
+import random
 from datetime import date, datetime, timedelta, timezone
 
 from app.agents.infra.langfuse_client import get_prompt
@@ -62,37 +63,133 @@ def _get_persona_core() -> str:
         return ""
 
 
-async def _gather_world_context(target_date: date) -> str:
-    """搜索真实世界素材，为日计划提供延伸锚点
+# 生活维度池（基于宣言和 persona_core）
+_WORLD_CONTEXT_DIMENSIONS = [
+    {
+        "dim": "anime",
+        "label": "二次元",
+        "queries": [
+            "{year}年{month}月 新番动画 推荐",
+            "最近热门 动画 讨论",
+        ],
+    },
+    {
+        "dim": "music",
+        "label": "音乐",
+        "queries": [
+            "最新 日语歌 推荐 {year}",
+            "独立音乐 最近 好听的歌",
+        ],
+    },
+    {
+        "dim": "photography",
+        "label": "摄影",
+        "queries": [
+            "胶片摄影 {season} 拍摄 灵感",
+            "街头摄影 构图 技巧",
+        ],
+    },
+    {
+        "dim": "food",
+        "label": "美食",
+        "queries": [
+            "简单甜品 食谱 新手",
+            "新开的 咖啡店 甜品店 推荐",
+        ],
+    },
+    {
+        "dim": "knowledge",
+        "label": "冷知识",
+        "queries": [
+            "有趣的冷知识 最近",
+            "植物 {season} 花期",
+        ],
+    },
+    {
+        "dim": "weather",
+        "label": "天气",
+        "queries": [
+            "北京 今天 天气",
+        ],
+    },
+    {
+        "dim": "trending",
+        "label": "热点",
+        "queries": [
+            "今天 有趣的事 互联网",
+            "最近 社交媒体 热门话题",
+        ],
+    },
+    {
+        "dim": "city",
+        "label": "城市探索",
+        "queries": [
+            "周末 好去处 散步 咖啡",
+            "有趣的 文具店 杂货铺",
+        ],
+    },
+]
 
-    搜索当季番剧、天气、热门话题等，让日计划能基于真实世界生长，
-    而不是只在 persona 锚点里打转。
+
+def _select_dimensions(target_date: date) -> list[dict]:
+    """从维度池中选取 4-6 个维度
+
+    - 天气必选
+    - 其余随机选 3-5 个
+    """
+    weather = [d for d in _WORLD_CONTEXT_DIMENSIONS if d["dim"] == "weather"]
+    others = [d for d in _WORLD_CONTEXT_DIMENSIONS if d["dim"] != "weather"]
+
+    # 用日期做种子，同一天多次调用结果一致
+    rng = random.Random(target_date.isoformat())
+    count = rng.randint(3, 5)
+    selected = rng.sample(others, min(count, len(others)))
+
+    return weather + selected
+
+
+def _build_active_dimensions_text(dims: list[dict]) -> str:
+    """构建 active_dimensions 提示文本"""
+    labels = [d["label"] for d in dims if d["dim"] != "weather"]
+    return "今天可能涉及：" + "、".join(labels)
+
+
+async def _gather_world_context(target_date: date) -> tuple[str, str]:
+    """搜索真实世界素材，返回 (world_context, active_dimensions_text)
+
+    从选中的维度中各取一个 query 搜索，收集 snippets。
     """
     from app.agents.tools.search.web import search_web
 
+    dims = _select_dimensions(target_date)
+    active_dims_text = _build_active_dimensions_text(dims)
+
     month = target_date.month
+    year = target_date.year
     season = _get_season(month)
-    queries = [
-        f"{target_date.year}年{month}月 新番动画 推荐",
-        f"{season} 生活 日常 有趣的事",
-    ]
 
     snippets: list[str] = []
-    for q in queries:
+    for dim in dims:
+        # 每个维度随机选一个 query
+        rng = random.Random(f"{target_date.isoformat()}-{dim['dim']}")
+        query_template = rng.choice(dim["queries"])
+        query = query_template.format(year=year, month=month, season=season)
+
         try:
-            results = await search_web(query=q, num=3)
-            for r in results[:3]:
+            results = await search_web(query=query, num=3)
+            for r in results[:2]:
                 if r.get("snippet"):
                     snippets.append(r["snippet"])
         except Exception as e:
-            logger.warning(f"World context search failed for '{q}': {e}")
+            logger.warning(f"World context search failed for '{query}': {e}")
 
     if not snippets:
-        return ""
+        return "", active_dims_text
 
-    return "以下是一些真实世界的近期信息（作为生活素材参考，自然融入而非罗列）：\n" + "\n".join(
-        f"- {s}" for s in snippets[:6]
+    world_text = "以下是一些真实世界的近期信息（作为生活素材参考，自然融入而非罗列）：\n" + "\n".join(
+        f"- {s}" for s in snippets[:8]
     )
+    return world_text, active_dims_text
 
 
 # ==================== ArQ cron 入口 ====================
