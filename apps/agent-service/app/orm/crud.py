@@ -593,9 +593,17 @@ async def get_all_diaries_for_date(diary_date: str) -> list[DiaryEntry]:
 
 
 async def upsert_journal(
-    journal_type: str, journal_date: str, content: str, model: str | None = None
+    journal_type: str,
+    journal_date: str,
+    content: str,
+    model: str | None = None,
+    period_end: str | None = None,
+    source_chat_count: int = 0,
 ) -> None:
     """插入或更新日志（upsert by journal_type + journal_date）"""
+    if period_end is None:
+        period_end = journal_date
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoJournal)
@@ -607,11 +615,15 @@ async def upsert_journal(
         if existing:
             existing.content = content
             existing.model = model
+            existing.period_end = period_end
+            existing.source_chat_count = source_chat_count
         else:
             session.add(AkaoJournal(
                 journal_type=journal_type,
                 journal_date=journal_date,
+                period_end=period_end,
                 content=content,
+                source_chat_count=source_chat_count,
                 model=model,
             ))
         await session.commit()

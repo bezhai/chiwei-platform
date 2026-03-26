@@ -260,7 +260,9 @@ class AkaoJournal(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     journal_type: Mapped[str] = mapped_column(String(10), nullable=False)  # "daily" | "weekly"
     journal_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-26" or week monday
+    period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # daily 同 journal_date, weekly 为周日
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

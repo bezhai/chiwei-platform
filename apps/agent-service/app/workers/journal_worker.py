@@ -138,7 +138,10 @@ async def generate_daily_journal(target_date: date) -> str | None:
         return None
 
     # 写入数据库
-    await upsert_journal("daily", date_str, content, _journal_model())
+    await upsert_journal(
+        "daily", date_str, content, _journal_model(),
+        period_end=date_str, source_chat_count=len(diaries),
+    )
 
     logger.info(f"Daily journal generated for {date_str}: {len(content)} chars")
     return content
@@ -200,7 +203,10 @@ async def generate_weekly_journal(monday_date: date) -> str | None:
         return None
 
     # 写入数据库
-    await upsert_journal("weekly", week_start, content, _journal_model())
+    await upsert_journal(
+        "weekly", week_start, content, _journal_model(),
+        period_end=week_end, source_chat_count=len(daily_journals),
+    )
 
     logger.info(f"Weekly journal generated for week {week_start}: {len(content)} chars")
     return content
