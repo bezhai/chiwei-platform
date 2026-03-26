@@ -5,6 +5,7 @@ from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal
 from .models import (
+    AkaoJournal,
     AkaoSchedule,
     ConversationMessage,
     DiaryEntry,
@@ -575,3 +576,68 @@ async def get_group_culture_gestalt(chat_id: str) -> str:
     async with AsyncSessionLocal() as session:
         result = await session.get(GroupCultureGestalt, chat_id)
         return result.gestalt_text if result else ""
+
+
+# ==================== AkaoJournal CRUD ====================
+
+
+async def get_all_diaries_for_date(diary_date: str) -> list[DiaryEntry]:
+    """获取指定日期所有群/私聊的日记（Journal 生成用）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.diary_date == diary_date)
+            .order_by(DiaryEntry.chat_id.asc())
+        )
+        return list(result.scalars().all())
+
+
+async def upsert_journal(
+    journal_type: str, journal_date: str, content: str, model: str | None = None
+) -> None:
+    """插入或更新日志（upsert by journal_type + journal_date）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date == journal_date)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.content = content
+            existing.model = model
+        else:
+            session.add(AkaoJournal(
+                journal_type=journal_type,
+                journal_date=journal_date,
+                content=content,
+                model=model,
+            ))
+        await session.commit()
+
+
+async def get_journal(journal_type: str, journal_date: str) -> AkaoJournal | None:
+    """获取指定类型和日期的日志"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date == journal_date)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_recent_journals(
+    journal_type: str, before_date: str, limit: int = 7
+) -> list[AkaoJournal]:
+    """获取指定日期之前的最近 N 篇日志"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AkaoJournal)
+            .where(AkaoJournal.journal_type == journal_type)
+            .where(AkaoJournal.journal_date < before_date)
+            .order_by(AkaoJournal.journal_date.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())

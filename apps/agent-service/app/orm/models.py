@@ -245,3 +245,27 @@ class GroupCultureGestalt(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AkaoJournal(Base):
+    """赤尾个人日志 — 跨群合成的一天感受
+
+    从当天所有 DiaryEntry 模糊化合成，保留情感和氛围，隐去具体话题。
+    daily: 每天一篇
+    weekly: 每周一篇（从 7 篇 daily 合成）
+    """
+
+    __tablename__ = "akao_journal"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    journal_type: Mapped[str] = mapped_column(String(10), nullable=False)  # "daily" | "weekly"
+    journal_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-26" or week monday
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("journal_type", "journal_date"),
+    )
