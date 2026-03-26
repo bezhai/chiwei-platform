@@ -1,6 +1,7 @@
 # tests/unit/test_schedule_dimensions.py
 import pytest
 from datetime import date
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def test_select_dimensions_always_includes_weather():
@@ -41,3 +42,32 @@ def test_build_active_dimensions_text():
     assert "天气" not in text  # weather is excluded from active_dimensions text
     assert "二次元" in text
     assert "音乐" in text
+
+
+@pytest.mark.asyncio
+async def test_generate_daily_plan_uses_journal():
+    """daily plan 应使用 yesterday_journal 而非 recent_diary"""
+    with (
+        patch("app.workers.schedule_worker.get_plan_for_period", new_callable=AsyncMock, return_value=None),
+        patch("app.workers.schedule_worker.get_journal", new_callable=AsyncMock, return_value=MagicMock(content="昨天过得很充实")),
+        patch("app.workers.schedule_worker._gather_world_context", new_callable=AsyncMock, return_value=("世界素材", "今天可能涉及：音乐、美食")),
+        patch("app.workers.schedule_worker.get_prompt") as mock_prompt,
+        patch("app.workers.schedule_worker.ModelBuilder") as mock_mb,
+        patch("app.workers.schedule_worker.upsert_schedule", new_callable=AsyncMock),
+    ):
+        mock_prompt.return_value.compile.return_value = "compiled"
+        mock_model = AsyncMock()
+        mock_model.ainvoke.return_value = MagicMock(content="今日手帐内容")
+        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
+
+        from app.workers.schedule_worker import generate_daily_plan
+        result = await generate_daily_plan(date(2026, 3, 27))
+
+    # 验证 prompt compile 时传入了 yesterday_journal 和 active_dimensions
+    compile_kwargs = mock_prompt.return_value.compile.call_args[1]
+    assert "yesterday_journal" in compile_kwargs
+    assert "active_dimensions" in compile_kwargs
+    assert compile_kwargs["yesterday_journal"] == "昨天过得很充实"
+    # 验证旧变量不再存在
+    assert "recent_diary" not in compile_kwargs
+    assert "yesterday_plan" not in compile_kwargs
