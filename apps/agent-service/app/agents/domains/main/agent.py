@@ -146,8 +146,14 @@ async def _buffer_until_pre(
                 pre_dur = time.monotonic() - t_buf_start
                 CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
                 logger.info(
-                    "pre_safety_done message_id=%s duration=%.0fms blocked=%s buffered=%d",
-                    message_id, pre_dur * 1000, pre_result["is_blocked"], len(buffer),
+                    "pre_safety_done",
+                    extra={
+                        "event": "pre_safety_done",
+                        "message_id": message_id,
+                        "duration_ms": round(pre_dur * 1000),
+                        "blocked": pre_result["is_blocked"],
+                        "buffered": len(buffer),
+                    },
                 )
                 if pre_result["is_blocked"]:
                     logger.info(
@@ -379,13 +385,16 @@ async def _build_and_stream(
         CHAT_TOKENS.labels(type="text").inc(agent_token_count)
         CHAT_TOKENS.labels(type="tool_call").inc(tool_call_count)
         logger.info(
-            "agent_stream_done session_id=%s context=%.0fms agent=%.0fms tokens=%d tools=%d model=%s",
-            session_id,
-            (t_agent_start - t_build_start) * 1000,
-            agent_dur * 1000,
-            agent_token_count,
-            tool_call_count,
-            model_id,
+            "agent_stream_done",
+            extra={
+                "event": "agent_stream_done",
+                "session_id": session_id,
+                "context_ms": round((t_agent_start - t_build_start) * 1000),
+                "agent_ms": round(agent_dur * 1000),
+                "tokens": agent_token_count,
+                "tools": tool_call_count,
+                "model": model_id,
+            },
         )
         # Fire-and-forget: publish to post safety check queue
         if full_content and session_id:

@@ -181,9 +181,18 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             CHAT_PIPELINE_DURATION.labels(stage="mq_publish").observe(t_end - t_publish_start)
             CHAT_PIPELINE_DURATION.labels(stage="total").observe(t_end - t_start)
             logger.info(
-                "chat_request_done session_id=%s queue_wait=%.0fms stream=%.0fms ttft=%.0fms "
-                "publish=%.0fms total=%.0fms tokens=%d parts=%d",
-                session_id, queue_wait_ms, stream_ms, ttft_ms, publish_ms, total_ms, token_count, messages_sent + 1,
+                "chat_request_done",
+                extra={
+                    "event": "chat_request_done",
+                    "session_id": session_id,
+                    "queue_wait_ms": round(queue_wait_ms),
+                    "stream_ms": round(stream_ms),
+                    "ttft_ms": round(ttft_ms),
+                    "publish_ms": round(publish_ms),
+                    "total_ms": round(total_ms),
+                    "tokens": token_count,
+                    "parts": messages_sent + 1,
+                },
             )
 
         except Exception as e:
