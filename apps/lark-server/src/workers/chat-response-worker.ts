@@ -341,11 +341,17 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
             const totalMs = Date.now() - tStart;
             chatResponseDuration.labels({ stage: 'total' }).observe(totalMs / 1000);
-            console.info(
-                `[ChatResponseWorker] done session_id=${session_id} part=${part_index} ` +
-                `queue=${queueDelayMs}ms db_query=${dbQueryMs}ms resolve=${resolveMs}ms ` +
-                `send=${sendMs}ms db_write=${dbWriteMs}ms total=${totalMs}ms`
-            );
+            console.info(JSON.stringify({
+                event: 'chat_response_done',
+                session_id,
+                part_index,
+                queue_ms: queueDelayMs,
+                db_query_ms: dbQueryMs,
+                resolve_ms: resolveMs,
+                send_ms: sendMs,
+                db_write_ms: dbWriteMs,
+                total_ms: totalMs,
+            }));
         } catch (e) {
             console.error(`[ChatResponseWorker] Failed to send reply: session_id=${session_id}, part=${part_index}`, e);
             try {
