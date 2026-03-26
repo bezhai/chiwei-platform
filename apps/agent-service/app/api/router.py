@@ -90,6 +90,60 @@ async def trigger_weekly_review(chat_id: str, week_start: str | None = None):
     return {"ok": True, "content": content}
 
 
+@api_router.post("/admin/trigger-journal", tags=["Admin"])
+async def trigger_journal(
+    journal_type: str = "daily",
+    target_date: str | None = None,
+    backfill_start: str | None = None,
+    backfill_end: str | None = None,
+):
+    """手动触发 Journal 生成
+
+    单日模式：指定 target_date
+    批量回溯：指定 backfill_start + backfill_end
+
+    Args:
+        journal_type: "daily" | "weekly"
+        target_date: 单日模式的目标日期
+        backfill_start: 批量回溯起始日期
+        backfill_end: 批量回溯结束日期
+    """
+    from app.workers.journal_worker import generate_daily_journal, generate_weekly_journal
+
+    # 批量回溯模式
+    if backfill_start and backfill_end:
+        start = date.fromisoformat(backfill_start)
+        end = date.fromisoformat(backfill_end)
+        results = []
+        current = start
+        while current <= end:
+            try:
+                if journal_type == "daily":
+                    content = await generate_daily_journal(current)
+                else:
+                    content = await generate_weekly_journal(current)
+                results.append({
+                    "date": current.isoformat(),
+                    "ok": bool(content),
+                    "chars": len(content) if content else 0,
+                })
+            except Exception as e:
+                results.append({"date": current.isoformat(), "ok": False, "error": str(e)})
+            current += timedelta(days=1 if journal_type == "daily" else 7)
+        return {"ok": True, "journal_type": journal_type, "results": results}
+
+    # 单日模式
+    d = date.fromisoformat(target_date) if target_date else date.today() - timedelta(days=1)
+    if journal_type == "daily":
+        content = await generate_daily_journal(d)
+    elif journal_type == "weekly":
+        content = await generate_weekly_journal(d)
+    else:
+        return {"ok": False, "message": f"Unknown journal_type: {journal_type}"}
+
+    return {"ok": bool(content), "journal_type": journal_type, "date": d.isoformat(), "content": content}
+
+
 @api_router.post("/admin/trigger-diary", tags=["Admin"])
 async def trigger_diary(chat_id: str, target_date: str | None = None):
     """手动触发日记生成
