@@ -16,8 +16,8 @@ shift 2
 BODY=""
 CURL_ARGS=(-s --max-time 15)
 
-# POST/PUT/DELETE: 第一个非 header 参数是 body
-if [[ "$METHOD" != "GET" ]] && [[ $# -gt 0 ]] && [[ "$1" != *":"* ]]; then
+# POST/PUT/DELETE: 以 { 或 [ 开头的参数是 JSON body
+if [[ "$METHOD" != "GET" ]] && [[ $# -gt 0 ]] && [[ "$1" == "{"* || "$1" == "["* ]]; then
   BODY="$1"
   shift
 fi
@@ -32,28 +32,26 @@ if [[ -n "$BODY" ]]; then
   CURL_ARGS+=(-H "Content-Type: application/json" -d "$BODY")
 fi
 
+# 用进程 ID 隔离临时文件，避免并发竞态
+_TMP_BODY="/tmp/_http_body_$$.txt"
+_TMP_ERR="/tmp/_http_err_$$.txt"
+trap 'rm -f "$_TMP_BODY" "$_TMP_ERR"' EXIT
+
 # 执行请求，分离 status code 和 body
-HTTP_CODE=$(curl "${CURL_ARGS[@]}" -X "$METHOD" -o /tmp/_http_body.txt -w "%{http_code}" "$URL" 2>/tmp/_http_err.txt)
+HTTP_CODE=$(curl "${CURL_ARGS[@]}" -X "$METHOD" -o "$_TMP_BODY" -w "%{http_code}" "$URL" 2>"$_TMP_ERR")
 CURL_EXIT=$?
 
 if [[ $CURL_EXIT -ne 0 ]]; then
-  CURL_ERR=$(cat /tmp/_http_err.txt 2>/dev/null || echo "curl failed")
+  CURL_ERR=$(cat "$_TMP_ERR" 2>/dev/null || echo "curl failed")
   echo "{\"status\":0,\"error\":\"curl exit $CURL_EXIT: $CURL_ERR\"}"
   exit 0
-fi
-
-RESPONSE_BODY=$(cat /tmp/_http_body.txt 2>/dev/null || echo "")
-
-# 尝试输出为合法 JSON
-if python3 -c "import json; json.loads('''$HTTP_CODE''')" 2>/dev/null; then
-  : # status is a number, fine
 fi
 
 # 用 python 安全地组装 JSON 输出
 python3 -c "
 import json, sys
 status = int('$HTTP_CODE') if '$HTTP_CODE'.isdigit() else 0
-body_raw = open('/tmp/_http_body.txt', 'r').read()
+body_raw = open('$_TMP_BODY', 'r').read()
 try:
     body = json.loads(body_raw)
 except:
