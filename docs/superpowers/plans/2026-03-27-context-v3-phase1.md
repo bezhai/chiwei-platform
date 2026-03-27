@@ -4,7 +4,7 @@
 
 **Goal:** Optimize 赤尾's reply style, fuzzy-ify history search output, and make impression evolution natural — all through minimal code changes (mostly Langfuse prompts + two Python files).
 
-**Architecture:** Three independent changes: (D) Langfuse `main` prompt rewrite for reply brevity/refusal; (C) `search_group_history` tool description + output format change; (B) `post_process_impressions` prompt rewrite + `_build_people_gestalt` activity marker.
+**Architecture:** Three independent changes: (D) Langfuse `main` prompt rewrite for reply brevity/refusal; (C) `search_group_history` tool description rewrite + main prompt 引导少用（不改代码输出格式）; (B) `post_process_impressions` prompt rewrite + `_build_people_gestalt` activity marker.
 
 **Tech Stack:** Python 3.12, Langfuse prompt management, SQLAlchemy ORM, LangChain tools
 
@@ -81,205 +81,57 @@ Langfuse main prompt updated to:
 
 ---
 
-### Task 2: C-Phase1 — search_group_history 模糊化
+### Task 2: C-Phase1 — search_group_history 引导少用
 
 **Files:**
-- Modify: `apps/agent-service/app/agents/tools/history/search.py`
-- Test: `apps/agent-service/tests/unit/test_search_history_fuzzy.py`
+- Modify: `apps/agent-service/app/agents/tools/history/search.py` (仅 tool docstring)
+- Modify: Langfuse prompt `main` (在 Task 1 的基础上追加引导)
 
-- [ ] **Step 1: Write tests for fuzzy timestamp and truncation**
+不改输出格式、不改时间戳、不改截断长度。问题不在输出格式——返回原文本身就是问题，美化格式是自欺欺人。Phase 1 只做引导层面的降频。
 
-Create `apps/agent-service/tests/unit/test_search_history_fuzzy.py`:
+- [ ] **Step 1: 修改 tool description**
 
-```python
-"""search_group_history 模糊化输出测试"""
-
-from app.agents.tools.history.search import _format_timestamp_fuzzy, _truncate
-
-
-def test_format_timestamp_fuzzy_today():
-    """今天的消息显示'今天'"""
-    from datetime import datetime
-    now = datetime.now()
-    ts = int(now.timestamp() * 1000)
-    result = _format_timestamp_fuzzy(ts)
-    assert result == "今天"
-
-
-def test_format_timestamp_fuzzy_yesterday():
-    """昨天的消息显示'昨天'"""
-    from datetime import datetime, timedelta
-    yesterday = datetime.now() - timedelta(days=1)
-    ts = int(yesterday.timestamp() * 1000)
-    result = _format_timestamp_fuzzy(ts)
-    assert result == "昨天"
-
-
-def test_format_timestamp_fuzzy_days_ago():
-    """3天前显示'几天前'"""
-    from datetime import datetime, timedelta
-    three_days_ago = datetime.now() - timedelta(days=3)
-    ts = int(three_days_ago.timestamp() * 1000)
-    result = _format_timestamp_fuzzy(ts)
-    assert result == "几天前"
-
-
-def test_format_timestamp_fuzzy_week_ago():
-    """8天前显示'上周'"""
-    from datetime import datetime, timedelta
-    week_ago = datetime.now() - timedelta(days=8)
-    ts = int(week_ago.timestamp() * 1000)
-    result = _format_timestamp_fuzzy(ts)
-    assert result == "上周"
-
-
-def test_format_timestamp_fuzzy_long_ago():
-    """30天前显示'很久以前'"""
-    from datetime import datetime, timedelta
-    long_ago = datetime.now() - timedelta(days=30)
-    ts = int(long_ago.timestamp() * 1000)
-    result = _format_timestamp_fuzzy(ts)
-    assert result == "很久以前"
-
-
-def test_truncate_default_80():
-    """默认截断80字"""
-    long_text = "a" * 100
-    result = _truncate(long_text)
-    assert len(result) == 83  # 80 + "..."
-    assert result.endswith("...")
-
-
-def test_truncate_short_text():
-    """短文本不截断"""
-    result = _truncate("hello")
-    assert result == "hello"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-```bash
-cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system/apps/agent-service
-uv run pytest tests/unit/test_search_history_fuzzy.py -v
-```
-
-Expected: FAIL — `_format_timestamp_fuzzy` does not exist yet.
-
-- [ ] **Step 3: Implement fuzzy timestamp + update truncation + update tool description**
-
-Edit `apps/agent-service/app/agents/tools/history/search.py`:
-
-Replace `_format_timestamp` with `_format_timestamp_fuzzy`:
-
-```python
-def _format_timestamp_fuzzy(ts: int) -> str:
-    """将精确时间戳转为模糊时间描述"""
-    now = datetime.now()
-    msg_time = datetime.fromtimestamp(ts / 1000)
-    delta = now - msg_time
-    days = delta.days
-
-    if days == 0:
-        return "今天"
-    elif days == 1:
-        return "昨天"
-    elif days < 7:
-        return "几天前"
-    elif days < 14:
-        return "上周"
-    else:
-        return "很久以前"
-```
-
-Change `_truncate` default from 200 to 80:
-
-```python
-def _truncate(text: str, max_len: int = 80) -> str:
-```
-
-Update the tool docstring from precise search description to fuzzy recall:
+Edit `apps/agent-service/app/agents/tools/history/search.py`，只改 docstring（函数签名和实现不动）:
 
 ```python
 @tool
 async def search_group_history(
     query: str,
-    limit: int = 5,
+    limit: int = 10,
 ) -> str:
     """
-    模模糊糊回忆之前群里好像聊过的事
+    回想之前群里好像聊过的事
 
-    当你隐约记得群里聊过某个话题但细节模糊了，可以用这个回想一下。
-    不要用来确认事实或引用别人的原话——你的记忆本来就是模糊的。
+    只在你隐约记得群里讨论过某个话题、但细节模糊了的时候才用。
+    注意：不要用来确认事实或引用别人的原话，你的记忆本来就是模糊的。
+    大部分情况下你不需要翻历史——直接根据你的印象和日记回复就好。
 
     Args:
         query: 你隐约记得的内容（自然语言描述）
-        limit: 最多回忆几个片段（默认5个）
+        limit: 返回的锚点消息数量（默认10条，每条会附带上下文）
 
     Returns:
-        str: 模糊的回忆片段
+        str: 搜索结果
     """
 ```
 
-Update the output formatting section (line ~160-178), replace:
+- [ ] **Step 2: 在 Task 1 的 main prompt 回复风格块中确认包含以下引导**
 
-```python
-        time_str = _format_timestamp(msg.create_time)
+确保 Task 1 加入的 prompt 中包含这条（如果 Task 1 还没加，在这里补上）：
+
+```
+- 不要主动翻历史记录来回复。你对群里的了解来自你的日记和印象，不是靠搜索。
 ```
 
-with:
-
-```python
-        time_str = _format_timestamp_fuzzy(msg.create_time)
-```
-
-And change the result header:
-
-```python
-        lines = [f"隐约记得有 {len(anchor_set)} 段相关的事：\n"]
-```
-
-And remove the `→ ` marker for anchor messages (too precise), replace:
-
-```python
-            marker = "→ " if msg.message_id in anchor_set else "  "
-            lines.append(f"{marker}[{time_str}] {user.name}: {content}")
-```
-
-with:
-
-```python
-            lines.append(f"  [{time_str}] {user.name}: {content}")
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 3: Commit**
 
 ```bash
-cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system/apps/agent-service
-uv run pytest tests/unit/test_search_history_fuzzy.py -v
-```
+git add apps/agent-service/app/agents/tools/history/search.py
+git commit -m "feat(search): rewrite search_group_history tool description
 
-Expected: All 7 tests PASS.
-
-- [ ] **Step 5: Run existing tests to check for regressions**
-
-```bash
-cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system/apps/agent-service
-uv run pytest tests/ -v --timeout=30 2>&1 | tail -20
-```
-
-Expected: No new failures.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add apps/agent-service/app/agents/tools/history/search.py apps/agent-service/tests/unit/test_search_history_fuzzy.py
-git commit -m "feat(search): fuzzy-ify search_group_history output
-
-- Replace precise timestamps with fuzzy time ('今天', '几天前', '上周')
-- Reduce content truncation from 200 to 80 chars
-- Reduce default limit from 10 to 5
-- Rewrite tool description to discourage precise recall
-- Remove anchor markers from output
+Discourage LLM from using history search as primary recall mechanism.
+Guide toward impression/diary-based recall instead.
+No output format changes - the tool will be phased out in later phases.
 "
 ```
 
