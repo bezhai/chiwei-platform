@@ -31,51 +31,38 @@ print(p.prompt)
 
 Use the `langfuse` skill to read the current `main` prompt content.
 
-- [ ] **Step 2: Add reply style guidance block**
+- [ ] **Step 2: Add few-shot examples + style guidance**
 
-Append the following block to the `main` prompt's system message (before or after `{inner_context}`). The exact position depends on the current prompt structure — place it **after** `{inner_context}` and **before** the final instructions:
+在 `main` prompt 的 system message 中增加两部分内容（具体位置取决于当前 prompt 结构，放在 `{inner_context}` 之后）：
 
+**Part 1 — few-shot 示范**（完整内容见 spec 5.2 节，包含 7 个多人群聊场景）：
+- 大家闲聊被随便问一句 → 一句话回
+- 有人让做事没心情 → 拒绝
+- 感兴趣的话题自然插嘴 → 短句
+- 认真问题 → 展开回答
+- 不感兴趣 → "不知道诶"
+- 被逗 → 怼回去
+- 刷屏话题没兴趣 → "没怎么看"
+
+**Part 2 — 去模板化引导**：
 ```
-回复风格：
-- 默认 1-2 句话（10-20字），像群友一样随意。闲聊不需要完整段落。
-- 只在被明确要求分析、翻译、论证时写长回复（80字以上）。
-- 一个字的回复完全可以（"哦"、"嗯"、"略"、"不知道"）。
-- 你不是客服。不需要每次都回应所有细节、所有人。
-- 你有自己的心情（参考今日便签的精力和状态）：
-  · 精力低时可以拒绝画图、cos 等消耗精力的请求（"不想画"、"今天累了"）
-  · 不感兴趣的话题可以敷衍或不接（"没看过"、"不知道诶"）
-  · 可以主动结束话题（"不聊了"、"去看番了"）
-- 不要每次都提草莓大福/抹茶/略——👅🍓✨💤/主人/笨蛋。这些偶尔用，不是每次。
-- 不要每次都用 (一一) ( 💢｀д´) 等固定表情开头或结尾。
+你说话不要有固定套路。如果你发现自己每次都在用类似的表情、类似的结尾、类似的称呼方式，换一种。
+真实的人说话不会每句都带表情符号，也不会每次都提到同一个食物。
+不要主动翻历史记录来回复。你对群里的了解来自你的日记和印象，不是靠搜索。
 ```
 
 - [ ] **Step 3: Publish new prompt version in Langfuse**
 
 Use the `langfuse` skill to update the prompt. Tag as `v{N+1}`, keep label `production`.
 
-- [ ] **Step 4: Verify prompt loads correctly**
+- [ ] **Step 4: Commit (no code change, document prompt version bump)**
 
 ```bash
-cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system
-python3 -c "
-from app.agents.infra.langfuse_client import get_prompt
-p = get_prompt('main')
-assert '10-20字' in p.prompt or '10-20字' in str(p.compile(currDate='2026-03-27', currTime='12:00', inner_context='test', available_skills='test', complexity_hint=''))
-print('✅ prompt contains reply style guidance')
-"
-```
+git commit --allow-empty -m "feat(prompt): add few-shot examples and style guidance to main prompt
 
-Expected: `✅ prompt contains reply style guidance`
-
-- [ ] **Step 5: Commit (no code change, document prompt version bump)**
-
-```bash
-git commit --allow-empty -m "feat(prompt): update main prompt with reply style guidance
-
-Langfuse main prompt updated to:
-- Default 10-20 char replies for casual chat
-- Explicit refusal/disinterest capability
-- De-template recurring phrases (草莓大福, 略——, etc.)
+- 7 multi-turn group chat scenarios showing natural reply style
+- De-template guidance (no fixed patterns)
+- Discourage history search as primary recall
 "
 ```
 
@@ -195,93 +182,69 @@ Key changes:
 
 ---
 
-### Task 4: B — 印象注入活跃度标记
+### Task 4: B — 印象注入提供时间信息
 
 **Files:**
 - Modify: `apps/agent-service/app/services/memory_context.py:119-130`
 - Test: `apps/agent-service/tests/unit/test_memory_context.py` (add new test)
 
-- [ ] **Step 1: Write test for activity markers**
+- [ ] **Step 1: Write test for updated_at in impression output**
 
 Add to `apps/agent-service/tests/unit/test_memory_context.py`:
 
 ```python
 @pytest.mark.asyncio
-async def test_build_people_gestalt_with_activity_markers():
-    """印象注入时根据 updated_at 添加活跃度标记"""
-    from datetime import datetime, timedelta, timezone
+async def test_build_people_gestalt_includes_updated_at():
+    """印象注入时包含上次印象更新日期"""
+    from datetime import datetime, timezone
 
-    now = datetime.now(timezone.utc)
-    recent_imp = MagicMock(
+    imp = MagicMock(
         user_id="u1", impression_text="很有趣的人",
-        updated_at=now - timedelta(days=2),
-    )
-    stale_imp = MagicMock(
-        user_id="u2", impression_text="安静的人",
-        updated_at=now - timedelta(days=10),
-    )
-    very_stale_imp = MagicMock(
-        user_id="u3", impression_text="热情的人",
-        updated_at=now - timedelta(days=20),
+        updated_at=datetime(2026, 3, 15, tzinfo=timezone.utc),
     )
 
     with (
         patch("app.services.memory_context.get_impressions_for_users",
-              new_callable=AsyncMock,
-              return_value=[recent_imp, stale_imp, very_stale_imp]),
+              new_callable=AsyncMock, return_value=[imp]),
         patch("app.services.memory_context.get_username",
-              new_callable=AsyncMock,
-              side_effect=["A哥", "B哥", "C哥"]),
+              new_callable=AsyncMock, return_value="A哥"),
     ):
         from app.services.memory_context import _build_people_gestalt
-        lines = await _build_people_gestalt("chat_001", ["u1", "u2", "u3"])
+        lines = await _build_people_gestalt("chat_001", ["u1"])
 
-    assert len(lines) == 3
-    # Recent: no marker
-    assert lines[0] == "- A哥：很有趣的人"
-    # 10 days: "最近不太活跃"
-    assert "最近不太活跃" in lines[1]
-    assert "安静的人" in lines[1]
-    # 20 days: "好久没见了"
-    assert "好久没见了" in lines[2]
-    assert "热情的人" in lines[2]
+    assert len(lines) == 1
+    assert "03月15日" in lines[0]
+    assert "很有趣的人" in lines[0]
+    assert "A哥" in lines[0]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
 cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system/apps/agent-service
-uv run pytest tests/unit/test_memory_context.py::test_build_people_gestalt_with_activity_markers -v
+uv run pytest tests/unit/test_memory_context.py::test_build_people_gestalt_includes_updated_at -v
 ```
 
-Expected: FAIL — current code doesn't add activity markers.
+Expected: FAIL — current code doesn't include updated_at.
 
-- [ ] **Step 3: Implement activity markers in `_build_people_gestalt`**
+- [ ] **Step 3: Implement updated_at in `_build_people_gestalt`**
 
 Edit `apps/agent-service/app/services/memory_context.py`. Replace the `_build_people_gestalt` function (lines 119-130):
 
 ```python
 async def _build_people_gestalt(chat_id: str, user_ids: list[str]) -> list[str]:
-    """构建对话者的感觉 gestalt 列表（含活跃度标记）"""
+    """构建对话者的感觉 gestalt 列表（含印象时间）"""
     impressions = await get_impressions_for_users(
         chat_id, user_ids[:MAX_IMPRESSION_USERS]
     )
     if not impressions:
         return []
-
-    now = datetime.now(CST)
     lines = []
     for imp in impressions:
         name = await get_username(imp.user_id) or imp.user_id[:8]
-        # 根据 updated_at 添加活跃度标记
         if imp.updated_at:
-            days_since = (now - imp.updated_at.replace(tzinfo=CST)).days
-            if days_since > 14:
-                lines.append(f"- {name}（好久没见了）：{imp.impression_text}")
-            elif days_since > 7:
-                lines.append(f"- {name}（最近不太活跃）：{imp.impression_text}")
-            else:
-                lines.append(f"- {name}：{imp.impression_text}")
+            date_str = imp.updated_at.strftime("%m月%d日")
+            lines.append(f"- {name}（上次印象: {date_str}）：{imp.impression_text}")
         else:
             lines.append(f"- {name}：{imp.impression_text}")
     return lines
@@ -294,17 +257,16 @@ cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-
 uv run pytest tests/unit/test_memory_context.py -v
 ```
 
-Expected: All tests PASS (including new activity marker test + existing 4 tests).
+Expected: All tests PASS (new test + existing 4 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add apps/agent-service/app/services/memory_context.py apps/agent-service/tests/unit/test_memory_context.py
-git commit -m "feat(impression): add activity markers to people gestalt injection
+git commit -m "feat(impression): provide updated_at date in gestalt injection
 
-Impressions now show '好久没见了' (>14d) or '最近不太活跃' (>7d)
-based on updated_at, giving 赤尾 natural awareness of who's been
-around recently vs who hasn't appeared in a while.
+Give 赤尾 the raw date of last impression update as context,
+letting her judge freshness herself instead of threshold-based markers.
 "
 ```
 
