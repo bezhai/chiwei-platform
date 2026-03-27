@@ -629,6 +629,18 @@ async def upsert_journal(
         await session.commit()
 
 
+async def search_diary_by_keyword(keyword: str, limit: int = 5) -> list[DiaryEntry]:
+    """按关键词搜索日记（跨群）"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DiaryEntry)
+            .where(DiaryEntry.content.ilike(f"%{keyword}%"))
+            .order_by(DiaryEntry.diary_date.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
 async def get_journal(journal_type: str, journal_date: str) -> AkaoJournal | None:
     """获取指定类型和日期的日志"""
     async with AsyncSessionLocal() as session:
