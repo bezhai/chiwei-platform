@@ -10,61 +10,44 @@
 
 ---
 
-### Task 1: D — 回复风格 Langfuse prompt 更新
+### Task 1: D — main prompt 全面改造（identity + rules + reply-style）
 
 **Files:**
 - Modify: Langfuse prompt `main` (via Langfuse UI or API — prompt_id `main`)
 - Reference: `apps/agent-service/app/agents/core/agent.py:69-73` (prompt compilation)
 
-This task is done entirely in Langfuse. The prompt template uses `{inner_context}`, `{currDate}`, `{currTime}`, `{available_skills}` variables.
+已完成 v66→v67→v68 三轮迭代。实测结论：
 
-- [ ] **Step 1: Read current `main` prompt from Langfuse**
+- v66: 加了 few-shot 但 identity/rules 没改 → 回复还是长
+- v67: identity 重写（删万物连接/删始终认同）→ 长度下来了但性格变冷
+- v68: 加回元气底色+动态便签驱动 → 长度对了但元气还不够
 
-```bash
-cd /data00/home/yuanzhihong.chiwei/code/personal/chiwei-platform-worktrees/docs-review-context-system
-python3 -c "
-from app.agents.infra.langfuse_client import get_prompt
-p = get_prompt('main')
-print(p.prompt)
-" 2>/dev/null || echo "需要通过 langfuse skill 读取"
-```
+**根因分析（两个讨论组的结论）**：
+1. 压短时模型砍掉了语气词和标点——这些是短句里唯一的情绪载体
+2. few-shot 80% 偏冷淡，模型学到"短=冷"
+3. identity 里元气没有具体行为锚点（语气词、标点用法），毒舌有（"损完就跑"）
 
-Use the `langfuse` skill to read the current `main` prompt content.
+**下一版（v69）需要改的三件事**：
 
-- [ ] **Step 2: Add few-shot examples + style guidance**
+- [ ] **Step 1: identity 给元气具体语言锚点**
 
-在 `main` prompt 的 system message 中增加两部分内容（具体位置取决于当前 prompt 结构，放在 `{inner_context}` 之后）：
+  - 语气词菜单：嘛/啦/诶/呀/嘿嘿/～/！ 是赤尾说话的工具
+  - 毒舌重定义：是元气的变体（"笨蛋啦哈哈"），不是对立面（"鉴定完毕"）
+  - 封死冷漠路径：低能量态=慵懒撒娇（"好累别烦我嘛"），不是冷淡审判
+  - 便签驱动的是能量高低，不是温度冷热——温度永远暖
 
-**Part 1 — few-shot 示范**（完整内容见 spec 5.2 节，包含 7 个多人群聊场景）：
-- 大家闲聊被随便问一句 → 一句话回
-- 有人让做事没心情 → 拒绝
-- 感兴趣的话题自然插嘴 → 短句
-- 认真问题 → 展开回答
-- 不感兴趣 → "不知道诶"
-- 被逗 → 怼回去
-- 刷屏话题没兴趣 → "没怎么看"
+- [ ] **Step 2: few-shot 情感比例重构**
 
-**Part 2 — 去模板化引导**：
-```
-你说话不要有固定套路。如果你发现自己每次都在用类似的表情、类似的结尾、类似的称呼方式，换一种。
-真实的人说话不会每句都带表情符号，也不会每次都提到同一个食物。
-不要主动翻历史记录来回复。你对群里的了解来自你的日记和印象，不是靠搜索。
-```
+  元气/温暖 50% : 傲娇/毒舌 30% : 慵懒 20%。每条示例都有语气词。
+  保留多人群聊上下文场景，同时增加按状态分组的短示例。
 
-- [ ] **Step 3: Publish new prompt version in Langfuse**
+- [ ] **Step 3: 去模板化 + 冷漠防护**
 
-Use the `langfuse` skill to update the prompt. Tag as `v{N+1}`, keep label `production`.
+  禁止网络锐评体（"鉴定完毕""无语""告辞"）。赤尾的冷是猫猫式的"不理你了哼"。
 
-- [ ] **Step 4: Commit (no code change, document prompt version bump)**
+- [ ] **Step 4: 发布到 context-v3 泳道测试，看 trace 效果**
 
-```bash
-git commit --allow-empty -m "feat(prompt): add few-shot examples and style guidance to main prompt
-
-- 7 multi-turn group chat scenarios showing natural reply style
-- De-template guidance (no fixed patterns)
-- Discourage history search as primary recall
-"
-```
+- [ ] **Step 5: 根据效果继续迭代（这是一个持续调优的过程）**
 
 ---
 
