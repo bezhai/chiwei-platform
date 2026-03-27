@@ -1,34 +1,67 @@
-"""记忆上下文构建服务 — 三层架构
+"""赤尾聊天注入上下文 — 统一 inner_context
 
-第一层：赤尾的内心状态（始终存在，~200 tokens）
-第二层：对人和群的感觉 gestalt（按场景加载，~200 tokens）
-第三层：自然联想（对话中通过 load_memory 按需触发，不在此处注入）
+构建注入 system prompt 的所有上下文：
+- 场景提示（群名/私聊 + 回复谁）
+- 今日状态（Journal daily / Schedule daily）
+- 对人和群的感觉
+- 记忆回溯引导语
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from app.orm.crud import (
     get_cross_group_impressions,
     get_group_culture_gestalt,
     get_impressions_for_users,
+    get_journal,
+    get_plan_for_period,
     get_username,
 )
-from app.services.inner_state import build_inner_state
 
 logger = logging.getLogger(__name__)
 
+CST = timezone(timedelta(hours=8))
 MAX_IMPRESSION_USERS = 10
 MAX_CROSS_GROUP_IMPRESSIONS = 5
 
+_MEMORY_RECALL_HINT = (
+    "（你有写日记的习惯。如果聊着聊着觉得\u201c这个事我好像知道点什么但记不清了\u201d，"
+    "可以翻翻日记想一想。）"
+)
 
-async def build_memory_context(
+
+async def _build_today_state() -> str:
+    """构建今日状态：优先 Journal daily，fallback Schedule daily"""
+    now = datetime.now(CST)
+    today = now.strftime("%Y-%m-%d")
+
+    # 优先用 Journal（模糊化的个人感受）
+    journal = await get_journal("daily", today)
+    if not journal:
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        journal = await get_journal("daily", yesterday)
+
+    if journal:
+        return journal.content
+
+    # fallback: Schedule daily
+    schedule = await get_plan_for_period("daily", today, today)
+    if schedule and schedule.content:
+        return schedule.content
+
+    return ""
+
+
+async def build_inner_context(
     chat_id: str,
     chat_type: str,
     user_ids: list[str],
     trigger_user_id: str,
     trigger_username: str,
+    chat_name: str = "",
 ) -> str:
-    """构建三层记忆上下文（新入口）
+    """构建统一的聊天注入上下文
 
     Args:
         chat_id: 群/私聊 ID
@@ -36,25 +69,34 @@ async def build_memory_context(
         user_ids: 当前对话中出现的用户 ID 列表
         trigger_user_id: 触发者 user_id
         trigger_username: 触发者用户名
+        chat_name: 群名（群聊场景）
 
     Returns:
-        组装好的记忆上下文文本，注入 system prompt
+        组装好的 inner_context 文本，注入 system prompt
     """
-    sections = []
+    sections: list[str] = []
 
-    # === 第一层：赤尾的内心 ===
-    inner = await build_inner_state()
-    if inner:
-        sections.append(f"你现在的内心：\n{inner}")
+    # === 场景提示 ===
+    if chat_type == "p2p":
+        if trigger_username:
+            sections.append(f"你正在和 {trigger_username} 私聊。")
+    else:
+        if chat_name:
+            sections.append(f"你在群聊「{chat_name}」中。")
+        if trigger_username:
+            sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
-    # === 第二层：对人和群的感觉 ===
+    # === 今日状态（Journal / Schedule） ===
+    today_state = await _build_today_state()
+    if today_state:
+        sections.append(f"你今天的状态：\n{today_state}")
+
+    # === 对人和群的感觉 ===
     if chat_type == "group":
-        # 群感觉
         group_gestalt = await get_group_culture_gestalt(chat_id)
         if group_gestalt:
             sections.append(f"你对这个群的感觉：{group_gestalt}")
 
-        # 对话者的感觉
         if user_ids:
             people_lines = await _build_people_gestalt(chat_id, user_ids)
             if people_lines:
@@ -62,12 +104,14 @@ async def build_memory_context(
                     "你对当前对话中出现的人的感觉：\n" + "\n".join(people_lines)
                 )
     else:
-        # 私聊：跨群印象
         cross_lines = await _build_cross_group_gestalt(
             trigger_user_id, trigger_username
         )
         if cross_lines:
             sections.append(cross_lines)
+
+    # === 记忆回溯引导语 ===
+    sections.append(_MEMORY_RECALL_HINT)
 
     return "\n\n".join(sections)
 
@@ -99,26 +143,5 @@ async def _build_cross_group_gestalt(user_id: str, trigger_username: str) -> str
     return f"你对 {trigger_username} 的感觉：\n" + "\n".join(lines)
 
 
-# === 向后兼容别名（Task 6 更新 agent.py 后删除） ===
-
-
-async def build_diary_context(chat_id: str) -> str:  # noqa: ARG001
-    """已废弃 — 三层架构不再注入日记全文"""
-    logger.warning("build_diary_context is deprecated, use build_memory_context")
-    return ""
-
-
-async def build_impression_context(chat_id: str, user_ids: list[str]) -> str:
-    """已废弃 — 由 build_memory_context 第二层替代"""
-    logger.warning("build_impression_context is deprecated, use build_memory_context")
-    return ""
-
-
-async def build_cross_group_impression_context(
-    user_id: str, trigger_username: str
-) -> str:
-    """已废弃 — 由 build_memory_context 第二层替代"""
-    logger.warning(
-        "build_cross_group_impression_context is deprecated, use build_memory_context"
-    )
-    return ""
+# 向后兼容别名
+build_memory_context = build_inner_context

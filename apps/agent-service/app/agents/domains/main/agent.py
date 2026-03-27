@@ -21,7 +21,7 @@ from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_memory_context
+from app.services.memory_context import build_inner_context
 from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.utils.content_parser import parse_content
 
@@ -237,8 +237,7 @@ async def _build_and_stream(
 
     prompt_vars = {
         "complexity_hint": "",
-        "user_context": "",
-        "schedule_context": "",
+        "inner_context": "",
         "available_skills": SkillRegistry.list_descriptions(),
     }
 
@@ -272,40 +271,18 @@ async def _build_and_stream(
         yield "抱歉，未找到相关消息记录"
         return
 
-    # 构建 user_context（三层记忆架构）
-    context_lines: list[str] = []
-
-    # 场景提示（保留原有逻辑）
-    if chat_type == "p2p":
-        if trigger_username:
-            context_lines.append(f"你正在和 {trigger_username} 私聊。")
-    else:  # group
-        if chat_name:
-            context_lines.append(f"你在群聊「{chat_name}」中。")
-        if trigger_username:
-            context_lines.append(
-                f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
-            )
-
-    # 三层记忆上下文
+    # 构建统一 inner_context（场景 + 状态 + 印象 + 引导语）
     try:
-        memory_text = await build_memory_context(
+        prompt_vars["inner_context"] = await build_inner_context(
             chat_id=chat_id,
             chat_type=chat_type,
             user_ids=chain_user_ids,
             trigger_user_id=trigger_user_id,
             trigger_username=trigger_username,
+            chat_name=chat_name,
         )
-        if memory_text:
-            context_lines.append(memory_text)
     except Exception as e:
-        logger.error(f"Failed to build memory context: {e}")
-
-    # 日程信息已融入第一层内心状态，不再单独注入
-    prompt_vars["schedule_context"] = ""
-
-    if context_lines:
-        prompt_vars["user_context"] = "\n".join(context_lines)
+        logger.error(f"Failed to build inner context: {e}")
 
     full_content = ""
     has_text_in_current_turn = False
