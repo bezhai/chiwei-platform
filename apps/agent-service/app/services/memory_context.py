@@ -117,7 +117,7 @@ async def build_inner_context(
 
 
 async def _build_people_gestalt(chat_id: str, user_ids: list[str]) -> list[str]:
-    """构建对话者的感觉 gestalt 列表"""
+    """构建对话者的感觉 gestalt 列表（含印象时间）"""
     impressions = await get_impressions_for_users(
         chat_id, user_ids[:MAX_IMPRESSION_USERS]
     )
@@ -126,7 +126,11 @@ async def _build_people_gestalt(chat_id: str, user_ids: list[str]) -> list[str]:
     lines = []
     for imp in impressions:
         name = await get_username(imp.user_id) or imp.user_id[:8]
-        lines.append(f"- {name}：{imp.impression_text}")
+        if imp.updated_at:
+            date_str = imp.updated_at.strftime("%m月%d日")
+            lines.append(f"- {name}（上次印象: {date_str}）：{imp.impression_text}")
+        else:
+            lines.append(f"- {name}：{imp.impression_text}")
     return lines
 
 

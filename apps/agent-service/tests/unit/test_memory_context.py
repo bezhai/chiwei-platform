@@ -11,7 +11,7 @@ async def test_build_inner_context_group():
         patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="今天想出门逛逛"),
         patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value="最放飞的群"),
         patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[
-            MagicMock(user_id="u1", impression_text="群里的指挥官"),
+            MagicMock(user_id="u1", impression_text="群里的指挥官", updated_at=None),
         ]),
         patch("app.services.memory_context.get_username", new_callable=AsyncMock, return_value="A哥"),
     ):
@@ -85,3 +85,28 @@ async def test_build_inner_context_no_diary_content():
 
     assert "--- 2026-" not in result
     assert "上周回顾" not in result
+
+
+@pytest.mark.asyncio
+async def test_build_people_gestalt_includes_updated_at():
+    """印象注入时包含上次印象更新日期"""
+    from datetime import datetime, timezone
+
+    imp = MagicMock(
+        user_id="u1", impression_text="很有趣的人",
+        updated_at=datetime(2026, 3, 15, tzinfo=timezone.utc),
+    )
+
+    with (
+        patch("app.services.memory_context.get_impressions_for_users",
+              new_callable=AsyncMock, return_value=[imp]),
+        patch("app.services.memory_context.get_username",
+              new_callable=AsyncMock, return_value="A哥"),
+    ):
+        from app.services.memory_context import _build_people_gestalt
+        lines = await _build_people_gestalt("chat_001", ["u1"])
+
+    assert len(lines) == 1
+    assert "03月15日" in lines[0]
+    assert "很有趣的人" in lines[0]
+    assert "A哥" in lines[0]
