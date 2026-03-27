@@ -179,6 +179,12 @@ async def generate_diary_for_chat(chat_id: str, target_date: date) -> str | None
     except Exception as e:
         logger.error(f"Impression extraction failed for {chat_id}: {e}")
 
+    # 9. 后处理：蒸馏群文化 gestalt
+    try:
+        await post_process_group_culture(chat_id, diary_content)
+    except Exception as e:
+        logger.error(f"Group culture distill failed for {chat_id}: {e}")
+
     return diary_content
 
 
@@ -366,6 +372,45 @@ async def post_process_impressions(
             count += 1
 
     logger.info(f"Impressions updated for {chat_id}: {count} people")
+
+
+# ==================== 群文化 gestalt 蒸馏 ====================
+
+
+async def post_process_group_culture(
+    chat_id: str,
+    diary_content: str,
+) -> None:
+    """从日记中蒸馏群文化 gestalt
+
+    一句话描述赤尾对这个群的整体感觉。
+    """
+    from app.orm.crud import get_group_culture_gestalt, upsert_group_culture_gestalt
+
+    existing_gestalt = await get_group_culture_gestalt(chat_id)
+
+    prompt_template = get_prompt("group_culture_distill")
+    compiled_prompt = prompt_template.compile(
+        diary=diary_content,
+        previous_gestalt=existing_gestalt or "（这是第一次写，没有参考）",
+    )
+
+    model = await ModelBuilder.build_chat_model(settings.diary_model)
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled_prompt}],
+    )
+
+    raw = response.content
+    if isinstance(raw, list):
+        raw = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in raw
+        )
+    raw = raw.strip()
+
+    if raw:
+        await upsert_group_culture_gestalt(chat_id, raw)
+        logger.info(f"Group culture gestalt updated for {chat_id}: {raw[:50]}")
 
 
 # ==================== 周记生成 ====================
