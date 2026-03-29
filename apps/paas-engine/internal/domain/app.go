@@ -14,6 +14,7 @@ type App struct {
 	EnvFromSecrets    []string          `json:"env_from_secrets,omitempty"`
 	EnvFromConfigMaps []string          `json:"env_from_config_maps,omitempty"`
 	Envs              map[string]string `json:"envs,omitempty"`
+	ConfigBundles     []string          `json:"config_bundles,omitempty"` // 关联的 ConfigBundle 名称列表
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
 }
