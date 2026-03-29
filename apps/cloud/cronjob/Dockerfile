@@ -2,20 +2,15 @@ FROM oven/bun:1 AS builder
 
 WORKDIR /repo
 
-# 复制 workspace 结构 + lockfile
-COPY package.json bun.lock ./
+# 最小 workspace：只包含 cronjob + 它依赖的 @inner/* 包
+RUN echo '{"private":true,"workspaces":["apps/cloud/cronjob","packages/ts-shared","packages/lark-utils","packages/pixiv-client"]}' > package.json
+
 COPY apps/cloud/cronjob/package.json ./apps/cloud/cronjob/
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/lark-utils ./packages/lark-utils
 COPY packages/pixiv-client ./packages/pixiv-client
 
-# 占位其他 workspace 成员的 package.json（bun install 需要）
-COPY apps/lark-server/package.json ./apps/lark-server/
-COPY apps/lark-proxy/package.json ./apps/lark-proxy/
-COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
-COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
-
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # 复制源码
 COPY apps/cloud/cronjob/tsconfig.json ./apps/cloud/cronjob/
