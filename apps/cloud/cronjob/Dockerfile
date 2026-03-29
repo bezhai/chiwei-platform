@@ -1,32 +1,41 @@
-FROM oven/bun:1
+FROM oven/bun:1 AS builder
 
-ENV TZ=Asia/Shanghai
+WORKDIR /repo
 
-WORKDIR /app
-
-# 创建包含 cronjob 和所有依赖包的 workspace 配置
-RUN echo '{"name":"cronjob-build","private":true,"workspaces":["apps/cloud/cronjob","packages/ts-shared","packages/lark-utils","packages/pixiv-client"]}' > package.json
-
-# 复制所有依赖包
+# 复制 workspace 结构 + lockfile
+COPY package.json bun.lock ./
+COPY apps/cloud/cronjob/package.json ./apps/cloud/cronjob/
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/lark-utils ./packages/lark-utils
 COPY packages/pixiv-client ./packages/pixiv-client
 
-# 复制 cronjob 的 package.json
-COPY apps/cloud/cronjob/package.json ./apps/cloud/cronjob/
+# 占位其他 workspace 成员的 package.json（bun install 需要）
+COPY apps/lark-server/package.json ./apps/lark-server/
+COPY apps/lark-proxy/package.json ./apps/lark-proxy/
+COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
+COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
 
-# 安装依赖
-RUN bun install
+RUN bun install --frozen-lockfile
 
-# 复制 cronjob 源代码
-COPY apps/cloud/cronjob/src ./apps/cloud/cronjob/src
+# 复制源码
 COPY apps/cloud/cronjob/tsconfig.json ./apps/cloud/cronjob/
+COPY apps/cloud/cronjob/src ./apps/cloud/cronjob/src
 
-ENV NODE_ENV=production
+# 编译为独立二进制
+WORKDIR /repo/apps/cloud/cronjob
+RUN bun build src/index.ts --compile --outfile=cronjob
+
+# --- Runtime ---
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
+ENV TZ=Asia/Shanghai
 
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
 
-WORKDIR /app/apps/cloud/cronjob
+WORKDIR /app
+COPY --from=builder /repo/apps/cloud/cronjob/cronjob ./cronjob
 
-CMD ["bun", "run", "src/index.ts"]
+CMD ["./cronjob"]
