@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
 RESULT_TOP_K = 5
+MIN_RELEVANCE_SCORE = 0.1
 RERANK_MODEL = "Qwen/Qwen3-Reranker-4B"
 
 
@@ -121,16 +122,19 @@ async def rerank_chunks(
 
         ranked = []
         for item in data.get("results", []):
+            score = item.get("relevance_score", 0)
+            if score < MIN_RELEVANCE_SCORE:
+                continue
             idx = item["index"]
             c = all_chunks[idx]
             ranked.append({
                 "title": c["title"],
                 "link": c["link"],
                 "content": c["chunk"],
-                "score": item.get("relevance_score", 0),
+                "score": score,
             })
 
-        return ranked
+        return ranked or _fallback(results, top_k)
 
     except Exception:
         logger.exception("rerank_chunks failed, falling back to truncation")
