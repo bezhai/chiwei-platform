@@ -10,7 +10,6 @@
 日记系统回馈日计划（昨天的日记影响今天的安排）。
 """
 
-import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -18,7 +17,6 @@ from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
 from app.orm.crud import (
-    get_daily_entries_for_date,
     get_journal,
     get_latest_plan,
     get_plan_for_period,
