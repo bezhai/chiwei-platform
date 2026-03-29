@@ -14,11 +14,12 @@ import (
 )
 
 type ReleaseService struct {
-	appRepo       port.AppRepository
-	imageRepoRepo port.ImageRepoRepository
-	buildRepo     port.BuildRepository
-	releaseRepo   port.ReleaseRepository
-	deployer      port.Deployer
+	appRepo         port.AppRepository
+	imageRepoRepo   port.ImageRepoRepository
+	buildRepo       port.BuildRepository
+	releaseRepo     port.ReleaseRepository
+	deployer        port.Deployer
+	configBundleSvc *ConfigBundleService
 }
 
 func NewReleaseService(
@@ -27,13 +28,15 @@ func NewReleaseService(
 	buildRepo port.BuildRepository,
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
+	configBundleSvc *ConfigBundleService,
 ) *ReleaseService {
 	return &ReleaseService{
-		appRepo:       appRepo,
-		imageRepoRepo: imageRepoRepo,
-		buildRepo:     buildRepo,
-		releaseRepo:   releaseRepo,
-		deployer:      deployer,
+		appRepo:         appRepo,
+		imageRepoRepo:   imageRepoRepo,
+		buildRepo:       buildRepo,
+		releaseRepo:     releaseRepo,
+		deployer:        deployer,
+		configBundleSvc: configBundleSvc,
 	}
 }
 
@@ -123,9 +126,18 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	}
 	release.DeployName = release.ResourceName()
 
+	// Resolve bundle envs
+	var bundleEnvs map[string]string
+	if s.configBundleSvc != nil && len(app.ConfigBundles) > 0 {
+		bundleEnvs, err = s.configBundleSvc.ResolveBundleEnvs(ctx, app, lane)
+		if err != nil {
+			return nil, fmt.Errorf("resolve config bundles: %w", err)
+		}
+	}
+
 	// 下发 K8s 资源
 	if s.deployer != nil {
-		if err := s.deployer.Deploy(ctx, release, app); err != nil {
+		if err := s.deployer.Deploy(ctx, release, app, bundleEnvs); err != nil {
 			release.Status = domain.ReleaseStatusFailed
 			release.Message = err.Error()
 		} else {
@@ -225,8 +237,16 @@ func (s *ReleaseService) UpdateRelease(ctx context.Context, id string, body []by
 	release.UpdatedAt = time.Now()
 	release.DeployName = release.ResourceName()
 
+	var bundleEnvs map[string]string
+	if s.configBundleSvc != nil && len(app.ConfigBundles) > 0 {
+		bundleEnvs, err = s.configBundleSvc.ResolveBundleEnvs(ctx, app, release.Lane)
+		if err != nil {
+			return nil, fmt.Errorf("resolve config bundles: %w", err)
+		}
+	}
+
 	if s.deployer != nil {
-		if err := s.deployer.Deploy(ctx, release, app); err != nil {
+		if err := s.deployer.Deploy(ctx, release, app, bundleEnvs); err != nil {
 			release.Status = domain.ReleaseStatusFailed
 			release.Message = err.Error()
 		} else {

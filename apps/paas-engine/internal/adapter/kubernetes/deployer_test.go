@@ -209,7 +209,7 @@ func TestApplyDeploymentWorker(t *testing.T) {
 		Replicas: 1,
 	}
 
-	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
 		t.Fatalf("applyDeployment() error = %v", err)
 	}
 
@@ -269,7 +269,7 @@ func TestApplyDeploymentWebApp(t *testing.T) {
 		Replicas: 2,
 	}
 
-	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
 		t.Fatalf("applyDeployment() error = %v", err)
 	}
 
@@ -326,7 +326,7 @@ func TestDeployWorkerSkipsService(t *testing.T) {
 	// 使用 Deploy（而非 applyDeployment）来验证 Service 逻辑
 	// 注意: Deploy 会调用 waitForRollout，fake client 的 Deployment 没有 Status，
 	// 所以这里直接测试 applyDeployment + 检查 Service 不存在
-	if err := deployer.applyDeployment(context.Background(), release, app); err != nil {
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
 		t.Fatalf("applyDeployment() error = %v", err)
 	}
 
