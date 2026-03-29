@@ -1,5 +1,7 @@
 """Identity 漂移状态机测试"""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from datetime import datetime, timezone, timedelta
@@ -58,3 +60,134 @@ async def test_set_and_get_identity_state():
 
     mock_pipe.hset.assert_called_once()
     mock_pipe.expire.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_on_event_single_triggers_drift_after_debounce():
+    """单个事件 -> 等待 debounce -> 执行漂移"""
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.settings") as mock_settings,
+        patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+    ):
+        mock_redis = AsyncMock()
+        mock_redis.hget = AsyncMock(return_value=None)
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        mock_settings.identity_drift_debounce_seconds = 0.1  # 100ms for test
+        mock_settings.identity_drift_max_buffer = 20
+
+        from app.services.identity_drift import IdentityDriftManager
+
+        mgr = IdentityDriftManager()
+        await mgr.on_event("chat_001")
+
+        # Wait for debounce + small margin
+        await asyncio.sleep(0.3)
+
+        mock_drift.assert_called_once_with("chat_001")
+
+
+@pytest.mark.asyncio
+async def test_on_event_debounce_resets_timer():
+    """多个事件在 debounce 内 -> 计时器重置 -> 只触发一次漂移"""
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.settings") as mock_settings,
+        patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+    ):
+        mock_redis = AsyncMock()
+        mock_redis.hget = AsyncMock(return_value=None)
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        mock_settings.identity_drift_debounce_seconds = 0.2
+        mock_settings.identity_drift_max_buffer = 20
+
+        from app.services.identity_drift import IdentityDriftManager
+
+        mgr = IdentityDriftManager()
+
+        # 3 events, each within debounce window
+        await mgr.on_event("chat_001")
+        await asyncio.sleep(0.05)
+        await mgr.on_event("chat_001")
+        await asyncio.sleep(0.05)
+        await mgr.on_event("chat_001")
+
+        # Wait for debounce from last event
+        await asyncio.sleep(0.4)
+
+        # Only one drift should fire
+        mock_drift.assert_called_once_with("chat_001")
+
+
+@pytest.mark.asyncio
+async def test_on_event_forced_flush_at_threshold():
+    """缓冲区超过 M 条 -> 强制进入二阶段"""
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.settings") as mock_settings,
+        patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+    ):
+        mock_redis = AsyncMock()
+        mock_redis.hget = AsyncMock(return_value=None)
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        mock_settings.identity_drift_debounce_seconds = 10  # long debounce
+        mock_settings.identity_drift_max_buffer = 3  # low threshold for test
+
+        from app.services.identity_drift import IdentityDriftManager
+
+        mgr = IdentityDriftManager()
+
+        # Send M events rapidly
+        for _ in range(3):
+            await mgr.on_event("chat_001")
+
+        # Phase 2 should start immediately (no waiting for debounce)
+        await asyncio.sleep(0.2)
+        mock_drift.assert_called_once_with("chat_001")
+
+
+@pytest.mark.asyncio
+async def test_phase2_buffers_new_events():
+    """二阶段执行中新事件 -> 进入下一轮缓冲区"""
+    drift_started = asyncio.Event()
+    drift_release = asyncio.Event()
+
+    async def slow_drift(chat_id: str):
+        drift_started.set()
+        await drift_release.wait()
+
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.settings") as mock_settings,
+        patch("app.services.identity_drift._run_drift", side_effect=slow_drift) as mock_drift,
+    ):
+        mock_redis = AsyncMock()
+        mock_redis.hget = AsyncMock(return_value=None)
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        mock_settings.identity_drift_debounce_seconds = 0.05
+        mock_settings.identity_drift_max_buffer = 20
+
+        from app.services.identity_drift import IdentityDriftManager
+
+        mgr = IdentityDriftManager()
+
+        # Trigger first drift
+        await mgr.on_event("chat_001")
+        await asyncio.sleep(0.1)  # debounce fires
+
+        await drift_started.wait()
+
+        # New event during phase 2
+        await mgr.on_event("chat_001")
+        assert mgr._buffers.get("chat_001", 0) > 0  # buffered
+
+        # Release phase 2
+        drift_release.set()
+        await asyncio.sleep(0.3)  # wait for next round
+
+        # Should have been called twice (original + next round)
+        assert mock_drift.call_count == 2
