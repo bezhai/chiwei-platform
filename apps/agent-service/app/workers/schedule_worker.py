@@ -12,7 +12,6 @@
 
 import json
 import logging
-import random
 from datetime import date, datetime, timedelta, timezone
 
 from app.agents.infra.langfuse_client import get_prompt
@@ -23,6 +22,7 @@ from app.orm.crud import (
     get_journal,
     get_latest_plan,
     get_plan_for_period,
+    list_schedules,
     upsert_schedule,
 )
 from app.orm.models import AkaoSchedule
@@ -63,133 +63,113 @@ def _get_persona_core() -> str:
         return ""
 
 
-# 生活维度池（基于宣言和 persona_core）
-_WORLD_CONTEXT_DIMENSIONS = [
-    {
-        "dim": "anime",
-        "label": "二次元",
-        "queries": [
-            "{year}年{month}月 新番动画 推荐",
-            "最近热门 动画 讨论",
-        ],
-    },
-    {
-        "dim": "music",
-        "label": "音乐",
-        "queries": [
-            "最新 日语歌 推荐 {year}",
-            "独立音乐 最近 好听的歌",
-        ],
-    },
-    {
-        "dim": "photography",
-        "label": "摄影",
-        "queries": [
-            "胶片摄影 {season} 拍摄 灵感",
-            "街头摄影 构图 技巧",
-        ],
-    },
-    {
-        "dim": "food",
-        "label": "美食",
-        "queries": [
-            "简单甜品 食谱 新手",
-            "新开的 咖啡店 甜品店 推荐",
-        ],
-    },
-    {
-        "dim": "knowledge",
-        "label": "冷知识",
-        "queries": [
-            "有趣的冷知识 最近",
-            "植物 {season} 花期",
-        ],
-    },
-    {
-        "dim": "weather",
-        "label": "天气",
-        "queries": [
-            "北京 今天 天气",
-        ],
-    },
-    {
-        "dim": "trending",
-        "label": "热点",
-        "queries": [
-            "今天 有趣的事 互联网",
-            "最近 社交媒体 热门话题",
-        ],
-    },
-    {
-        "dim": "city",
-        "label": "城市探索",
-        "queries": [
-            "周末 好去处 散步 咖啡",
-            "有趣的 文具店 杂货铺",
-        ],
-    },
-]
+async def _get_recent_daily_schedules(before_date: date, count: int = 3) -> list[AkaoSchedule]:
+    """获取前 N 天的 daily schedule（供 Ideation 和 Critic 去重）"""
+    results = await list_schedules(plan_type="daily", active_only=True, limit=count + 5)
+    return [
+        s for s in results
+        if s.period_start < before_date.isoformat()
+    ][:count]
 
 
-def _select_dimensions(target_date: date) -> list[dict]:
-    """从维度池中选取 4-6 个维度
+async def _run_ideation(
+    persona_core: str,
+    yesterday_journal: str,
+    recent_schedules_text: str,
+    target_date: date,
+) -> str:
+    """运行 Ideation Agent：search_web tool-use loop 搜集生活素材"""
+    from langchain.agents import create_agent
+    from langchain.messages import HumanMessage
+    from langfuse.langchain import CallbackHandler
 
-    - 天气必选
-    - 其余随机选 3-5 个
-    """
-    weather = [d for d in _WORLD_CONTEXT_DIMENSIONS if d["dim"] == "weather"]
-    others = [d for d in _WORLD_CONTEXT_DIMENSIONS if d["dim"] != "weather"]
-
-    # 用日期做种子，同一天多次调用结果一致
-    rng = random.Random(target_date.isoformat())
-    count = rng.randint(3, 5)
-    selected = rng.sample(others, min(count, len(others)))
-
-    return weather + selected
-
-
-def _build_active_dimensions_text(dims: list[dict]) -> str:
-    """构建 active_dimensions 提示文本"""
-    labels = [d["label"] for d in dims if d["dim"] != "weather"]
-    return "今天可能涉及：" + "、".join(labels)
-
-
-async def _gather_world_context(target_date: date) -> tuple[str, str]:
-    """搜索真实世界素材，返回 (world_context, active_dimensions_text)
-
-    从选中的维度中各取一个 query 搜索，收集 snippets。
-    """
+    from app.agents.core.config import AgentRegistry
     from app.agents.tools.search.web import search_web
 
-    dims = _select_dimensions(target_date)
-    active_dims_text = _build_active_dimensions_text(dims)
+    config = AgentRegistry.get("schedule-ideation")
+    prompt_template = get_prompt(config.prompt_id)
 
-    month = target_date.month
-    year = target_date.year
-    season = _get_season(month)
+    season = _get_season(target_date.month)
+    weekday = _WEEKDAY_CN[target_date.weekday()]
 
-    snippets: list[str] = []
-    for dim in dims:
-        # 每个维度随机选一个 query
-        rng = random.Random(f"{target_date.isoformat()}-{dim['dim']}")
-        query_template = rng.choice(dim["queries"])
-        query = query_template.format(year=year, month=month, season=season)
-
-        try:
-            results = await search_web(query=query, num=3)
-            for r in results[:2]:
-                if r.get("snippet"):
-                    snippets.append(r["snippet"])
-        except Exception as e:
-            logger.warning(f"World context search failed for '{query}': {e}")
-
-    if not snippets:
-        return "", active_dims_text
-
-    world_text = "以下是一些真实世界的近期信息（作为生活素材参考，自然融入而非罗列）：\n" + "\n".join(
-        f"- {s}" for s in snippets[:8]
+    compiled = prompt_template.compile(
+        persona_core=persona_core,
+        yesterday_journal=yesterday_journal,
+        recent_schedules=recent_schedules_text,
+        date=target_date.isoformat(),
+        weekday=weekday,
+        season=season,
     )
-    return world_text, active_dims_text
+
+    model = await ModelBuilder.build_chat_model(config.model_id)
+    agent = create_agent(model, [search_web], system_prompt=compiled)
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="开始搜集今天的生活素材吧。")]},
+        config={
+            "callbacks": [CallbackHandler()],
+            "run_name": config.trace_name,
+            "recursion_limit": 42,
+        },
+    )
+
+    last_msg = result["messages"][-1]
+    return _extract_text(last_msg.content)
+
+
+async def _run_writer(
+    ideation_output: str,
+    persona_core: str,
+    weekly_plan: str,
+    yesterday_journal: str,
+    target_date: date,
+    previous_output: str = "",
+    critic_feedback: str = "",
+) -> str:
+    """运行 Writer Agent：基于素材写手帐"""
+    from app.agents.core.config import AgentRegistry
+
+    config = AgentRegistry.get("schedule-writer")
+    prompt_template = get_prompt(config.prompt_id)
+
+    weekday = _WEEKDAY_CN[target_date.weekday()]
+    is_weekend = "周末！" if target_date.weekday() >= 5 else ""
+
+    compiled = prompt_template.compile(
+        persona_core=persona_core,
+        date=target_date.isoformat(),
+        weekday=weekday,
+        is_weekend=is_weekend,
+        weekly_plan=weekly_plan,
+        yesterday_journal=yesterday_journal,
+        ideation_output=ideation_output,
+        previous_output=previous_output,
+        critic_feedback=critic_feedback,
+    )
+
+    model = await ModelBuilder.build_chat_model(config.model_id)
+    response = await model.ainvoke([{"role": "user", "content": compiled}])
+    return _extract_text(response.content)
+
+
+async def _run_critic(
+    schedule_text: str,
+    recent_schedules_text: str,
+) -> str:
+    """运行 Critic Agent：审查质量并返回 PASS 或修改建议"""
+    from app.agents.core.config import AgentRegistry
+
+    config = AgentRegistry.get("schedule-critic")
+    prompt_template = get_prompt(config.prompt_id)
+
+    compiled = prompt_template.compile(
+        today_schedule=schedule_text,
+        recent_schedules=recent_schedules_text,
+    )
+
+    model = await ModelBuilder.build_chat_model(config.model_id)
+    response = await model.ainvoke([{"role": "user", "content": compiled}])
+    return _extract_text(response.content)
 
 
 # ==================== ArQ cron 入口 ====================
@@ -374,21 +354,13 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 async def generate_daily_plan(target_date: date | None = None) -> str | None:
     """生成日计划（手帐式 markdown）
 
-    基于周计划 + 昨天 Journal，为今天写一篇私人手帐。
-    每天一条记录，内容是自然的 markdown 文本。
-
-    Args:
-        target_date: 目标日期，默认今天
-
-    Returns:
-        生成的手帐内容
+    三 Agent 管线：Ideation（搜素材）→ Writer（写手帐）→ Critic（审查质量）
+    Critic 不通过则 Writer 重写，最多 2 轮。
     """
     if target_date is None:
         target_date = date.today()
 
     date_str = target_date.isoformat()
-    weekday = _WEEKDAY_CN[target_date.weekday()]
-    is_weekend = target_date.weekday() >= 5
 
     # 检查是否已有
     existing = await get_plan_for_period("daily", date_str, date_str)
@@ -396,54 +368,82 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
         logger.info(f"Daily plan already exists for {date_str}, skip")
         return existing.content
 
-    # 上下文
-    # 1. 周计划（月计划已通过周计划间接继承，不再直接注入日计划）
+    # ---- 收集上下文 ----
+    persona_core = _get_persona_core()
+
+    # 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
     week_end = week_start + timedelta(days=6)
     weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat())
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
-    # 2. 昨天的 Journal（替代原来的 recent_diary）
+    # 昨天 Journal
     yesterday = (target_date - timedelta(days=1)).isoformat()
     yesterday_journal_entry = await get_journal("daily", yesterday)
     yesterday_journal = yesterday_journal_entry.content if yesterday_journal_entry else "（昨天没有写日志）"
 
-    # 3. 搜索多样化世界素材
-    world_context, active_dims_text = await _gather_world_context(target_date)
+    # 前 3 天 schedule（Ideation 和 Critic 共用）
+    recent = await _get_recent_daily_schedules(target_date)
+    recent_schedules_text = "\n\n---\n\n".join(
+        f"[{s.period_start}]\n{s.content}" for s in recent
+    ) if recent else "（没有前几天的日程）"
 
-    # 获取 Langfuse prompt
-    prompt_template = get_prompt("schedule_daily")
-    compiled = prompt_template.compile(
-        persona_core=_get_persona_core(),
-        date=date_str,
-        weekday=weekday,
-        is_weekend="周末！" if is_weekend else "",
-        weekly_plan=weekly_text,
-        yesterday_journal=yesterday_journal,
-        active_dimensions=active_dims_text,
-        world_context=world_context,
-    )
+    # ---- Ideation Agent ----
+    try:
+        ideation_output = await _run_ideation(
+            persona_core=persona_core,
+            yesterday_journal=yesterday_journal,
+            recent_schedules_text=recent_schedules_text,
+            target_date=target_date,
+        )
+    except Exception as e:
+        logger.warning(f"Ideation agent failed, degrading: {e}", exc_info=True)
+        ideation_output = ""
 
-    # 调用 LLM
-    model = await ModelBuilder.build_chat_model(_schedule_model())
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    # ---- Writer → Critic 循环 ----
+    feedback = ""
+    previous_output = ""
+    schedule_text = ""
 
-    if not content:
-        logger.warning(f"LLM returned empty daily plan for {date_str}")
+    for attempt in range(3):
+        schedule_text = await _run_writer(
+            ideation_output=ideation_output,
+            persona_core=persona_core,
+            weekly_plan=weekly_text,
+            yesterday_journal=yesterday_journal,
+            target_date=target_date,
+            previous_output=previous_output,
+            critic_feedback=feedback,
+        )
+
+        critic_result = await _run_critic(
+            schedule_text=schedule_text,
+            recent_schedules_text=recent_schedules_text,
+        )
+
+        if "PASS" in critic_result:
+            logger.info(f"Daily plan passed critic on attempt {attempt + 1}")
+            break
+
+        logger.info(f"Daily plan critic rejected (attempt {attempt + 1}): {critic_result[:100]}")
+        previous_output = schedule_text
+        feedback = critic_result
+
+    if not schedule_text:
+        logger.warning(f"Pipeline produced empty daily plan for {date_str}")
         return None
 
-    # 写入数据库（每天一条记录）
+    # ---- 存储 ----
     await upsert_schedule(AkaoSchedule(
         plan_type="daily",
         period_start=date_str,
         period_end=date_str,
-        content=content,
-        model=_schedule_model(),
+        content=schedule_text,
+        model="offline-model",
     ))
 
-    logger.info(f"Daily plan generated for {date_str} ({weekday}): {len(content)} chars")
-    return content
+    logger.info(f"Daily plan generated for {date_str}: {len(schedule_text)} chars")
+    return schedule_text
 
 
 # ==================== 辅助函数 ====================
