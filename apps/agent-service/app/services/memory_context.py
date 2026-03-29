@@ -18,6 +18,7 @@ from app.orm.crud import (
     get_plan_for_period,
     get_username,
 )
+from app.services.identity_drift import get_identity_state
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,18 @@ async def build_inner_context(
         if trigger_username:
             sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
-    # === 今日状态（Journal / Schedule） ===
+    # === 此刻状态（Identity 漂移） ===
+    try:
+        drift_state = await get_identity_state(chat_id)
+    except Exception:
+        drift_state = None
+    if drift_state:
+        sections.append(f"你此刻的状态：\n{drift_state}")
+
+    # === 今日基调（Journal / Schedule） ===
     today_state = await _build_today_state()
     if today_state:
-        sections.append(f"你今天的状态：\n{today_state}")
+        sections.append(f"你今天的基调：\n{today_state}")
 
     # === 对人和群的感觉 ===
     if chat_type == "group":
