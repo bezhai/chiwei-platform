@@ -134,7 +134,7 @@ async def rerank_chunks(
                 "score": score,
             })
 
-        return ranked or _fallback(results, top_k)
+        return ranked
 
     except Exception:
         logger.exception("rerank_chunks failed, falling back to truncation")
