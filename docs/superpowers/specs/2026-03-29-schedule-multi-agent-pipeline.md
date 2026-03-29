@@ -96,7 +96,23 @@ generate_daily_plan()
 
 **输出**：完整手帐式日程叙事。职责与现有 `schedule_daily` prompt 相同，但输入质量更高。
 
-**重写时**：额外接收 Critic 的修改建议，针对性修改。
+**重写机制**：一个 prompt 通过变量控制首次/重写两种模式。重写时额外注入上一版输出和 Critic 反馈：
+
+```
+（首次和重写共用的上下文：ideation 素材、persona、weekly plan...）
+
+{% if previous_output %}
+你之前写的版本：
+{previous_output}
+
+审查反馈：
+{critic_feedback}
+
+请根据反馈修改。只改有问题的部分，保留没问题的。
+{% endif %}
+```
+
+首次调用时 `previous_output` 和 `critic_feedback` 为空，prompt 中该段不渲染。
 
 ## 五、Critic Agent
 
