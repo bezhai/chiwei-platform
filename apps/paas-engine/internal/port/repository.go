@@ -40,3 +40,12 @@ type ReleaseRepository interface {
 	Update(ctx context.Context, release *domain.Release) error
 	Delete(ctx context.Context, id string) error
 }
+
+type ConfigBundleRepository interface {
+	Save(ctx context.Context, bundle *domain.ConfigBundle) error
+	FindByName(ctx context.Context, name string) (*domain.ConfigBundle, error)
+	FindAll(ctx context.Context) ([]*domain.ConfigBundle, error)
+	FindByNames(ctx context.Context, names []string) ([]*domain.ConfigBundle, error)
+	Update(ctx context.Context, bundle *domain.ConfigBundle) error
+	Delete(ctx context.Context, name string) error
+}
