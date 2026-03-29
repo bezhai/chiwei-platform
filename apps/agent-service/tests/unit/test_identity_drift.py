@@ -69,6 +69,7 @@ async def test_on_event_single_triggers_drift_after_debounce():
         patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
         patch("app.services.identity_drift.settings") as mock_settings,
         patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+        patch("app.services.identity_drift._count_messages_since_last_drift", new_callable=AsyncMock, return_value=1),
     ):
         mock_redis = AsyncMock()
         mock_redis.hget = AsyncMock(return_value=None)
@@ -95,6 +96,7 @@ async def test_on_event_debounce_resets_timer():
         patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
         patch("app.services.identity_drift.settings") as mock_settings,
         patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+        patch("app.services.identity_drift._count_messages_since_last_drift", new_callable=AsyncMock, return_value=1),
     ):
         mock_redis = AsyncMock()
         mock_redis.hget = AsyncMock(return_value=None)
@@ -128,6 +130,7 @@ async def test_on_event_forced_flush_at_threshold():
         patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
         patch("app.services.identity_drift.settings") as mock_settings,
         patch("app.services.identity_drift._run_drift", new_callable=AsyncMock) as mock_drift,
+        patch("app.services.identity_drift._count_messages_since_last_drift", new_callable=AsyncMock, return_value=1),
     ):
         mock_redis = AsyncMock()
         mock_redis.hget = AsyncMock(return_value=None)
@@ -163,6 +166,7 @@ async def test_phase2_buffers_new_events():
         patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
         patch("app.services.identity_drift.settings") as mock_settings,
         patch("app.services.identity_drift._run_drift", side_effect=slow_drift) as mock_drift,
+        patch("app.services.identity_drift._count_messages_since_last_drift", new_callable=AsyncMock, return_value=1),
     ):
         mock_redis = AsyncMock()
         mock_redis.hget = AsyncMock(return_value=None)

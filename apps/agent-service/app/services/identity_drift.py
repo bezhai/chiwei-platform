@@ -75,11 +75,17 @@ class IdentityDriftManager:
         return cls._instance
 
     async def on_event(self, chat_id: str) -> None:
-        """消息/回复事件 -> 进入两阶段锁流程"""
-        self._buffers[chat_id] = self._buffers.get(chat_id, 0) + 1
+        """消息/回复事件 -> 进入两阶段锁流程
+
+        buffer 使用从上次漂移以来的真实消息数量，
+        而不是简单 +1，这样活跃群的非@消息也计入密度。
+        """
+        msg_count = await _count_messages_since_last_drift(chat_id)
+        self._buffers[chat_id] = max(self._buffers.get(chat_id, 0) + 1, msg_count)
         logger.info(
             f"Identity drift on_event: chat_id={chat_id}, "
             f"buffer={self._buffers[chat_id]}, "
+            f"msg_since_drift={msg_count}, "
             f"phase2_running={chat_id in self._phase2_running}"
         )
 
@@ -181,6 +187,24 @@ async def _run_drift(chat_id: str) -> None:
 
     # 4. 保存新状态
     await set_identity_state(chat_id, new_state.strip())
+
+
+async def _count_messages_since_last_drift(chat_id: str) -> int:
+    """统计上次漂移以来的消息数量（含非@赤尾的消息）"""
+    updated_at_str = await get_identity_updated_at(chat_id)
+    if updated_at_str:
+        try:
+            start_dt = datetime.fromisoformat(updated_at_str)
+        except ValueError:
+            start_dt = datetime.now(CST) - timedelta(hours=1)
+    else:
+        start_dt = datetime.now(CST) - timedelta(hours=1)
+
+    start_ts = int(start_dt.timestamp() * 1000)
+    end_ts = int(datetime.now(CST).timestamp() * 1000)
+
+    messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
+    return len(messages) if messages else 0
 
 
 async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
