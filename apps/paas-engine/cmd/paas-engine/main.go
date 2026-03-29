@@ -36,6 +36,7 @@ func main() {
 	releaseRepo := repository.NewReleaseRepo(db)
 	ciConfigRepo := repository.NewCIConfigRepo(db)
 	pipelineRunRepo := repository.NewPipelineRunRepo(db)
+	configBundleRepo := repository.NewConfigBundleRepo(db)
 
 	// K8s 客户端（可选，无集群时降级运行）
 	cs, _, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
@@ -71,7 +72,7 @@ func main() {
 	lokiClient := loki.NewClient(cfg.LokiURL)
 
 	// 服务层
-	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo)
+	appSvc := service.NewAppService(appRepo, imageRepoRepo, releaseRepo, configBundleRepo)
 	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
 	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer)

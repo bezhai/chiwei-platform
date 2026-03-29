@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -9,13 +10,14 @@ import (
 )
 
 type AppService struct {
-	appRepo       port.AppRepository
-	imageRepoRepo port.ImageRepoRepository
-	releaseRepo   port.ReleaseRepository
+	appRepo          port.AppRepository
+	imageRepoRepo    port.ImageRepoRepository
+	releaseRepo      port.ReleaseRepository
+	configBundleRepo port.ConfigBundleRepository
 }
 
-func NewAppService(appRepo port.AppRepository, imageRepoRepo port.ImageRepoRepository, releaseRepo port.ReleaseRepository) *AppService {
-	return &AppService{appRepo: appRepo, imageRepoRepo: imageRepoRepo, releaseRepo: releaseRepo}
+func NewAppService(appRepo port.AppRepository, imageRepoRepo port.ImageRepoRepository, releaseRepo port.ReleaseRepository, configBundleRepo port.ConfigBundleRepository) *AppService {
+	return &AppService{appRepo: appRepo, imageRepoRepo: imageRepoRepo, releaseRepo: releaseRepo, configBundleRepo: configBundleRepo}
 }
 
 type CreateAppRequest struct {
@@ -28,6 +30,7 @@ type CreateAppRequest struct {
 	EnvFromSecrets    []string          `json:"env_from_secrets"`
 	EnvFromConfigMaps []string          `json:"env_from_config_maps"`
 	Envs              map[string]string `json:"envs"`
+	ConfigBundles     []string          `json:"config_bundles"`
 }
 
 func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*domain.App, error) {
@@ -44,6 +47,12 @@ func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*doma
 		}
 	}
 
+	if len(req.ConfigBundles) > 0 {
+		if err := s.validateConfigBundles(ctx, req.ConfigBundles); err != nil {
+			return nil, err
+		}
+	}
+
 	now := time.Now()
 	app := &domain.App{
 		Name:              req.Name,
@@ -55,6 +64,7 @@ func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*doma
 		EnvFromSecrets:    req.EnvFromSecrets,
 		EnvFromConfigMaps: req.EnvFromConfigMaps,
 		Envs:              req.Envs,
+		ConfigBundles:     req.ConfigBundles,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -105,6 +115,14 @@ func (s *AppService) UpdateApp(ctx context.Context, name string, body []byte) (*
 	if err := ApplyField(fields, "env_from_config_maps", &app.EnvFromConfigMaps); err != nil {
 		return nil, domain.ErrInvalidInput
 	}
+	if err := ApplyField(fields, "config_bundles", &app.ConfigBundles); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if _, ok := fields["config_bundles"]; ok && len(app.ConfigBundles) > 0 {
+		if err := s.validateConfigBundles(ctx, app.ConfigBundles); err != nil {
+			return nil, err
+		}
+	}
 
 	// Map 字段：按 key 合并
 	app.Envs, err = MergeEnvs(app.Envs, fields["envs"])
@@ -139,4 +157,36 @@ func (s *AppService) DeleteApp(ctx context.Context, name string) error {
 		return domain.ErrCannotDelete
 	}
 	return s.appRepo.Delete(ctx, name)
+}
+
+func (s *AppService) validateConfigBundles(ctx context.Context, bundleNames []string) error {
+	if s.configBundleRepo == nil {
+		return nil
+	}
+	bundles, err := s.configBundleRepo.FindByNames(ctx, bundleNames)
+	if err != nil {
+		return err
+	}
+	if len(bundles) != len(bundleNames) {
+		found := make(map[string]bool)
+		for _, b := range bundles {
+			found[b.Name] = true
+		}
+		for _, name := range bundleNames {
+			if !found[name] {
+				return fmt.Errorf("%w: config bundle %q not found", domain.ErrInvalidInput, name)
+			}
+		}
+	}
+	// Check key conflicts across bundles
+	seen := make(map[string]string) // key name → bundle name
+	for _, bundle := range bundles {
+		for key := range bundle.Keys {
+			if other, ok := seen[key]; ok {
+				return fmt.Errorf("%w: key %q defined in both %q and %q", domain.ErrInvalidInput, key, other, bundle.Name)
+			}
+			seen[key] = bundle.Name
+		}
+	}
+	return nil
 }
