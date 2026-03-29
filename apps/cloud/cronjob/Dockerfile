@@ -18,7 +18,7 @@ COPY apps/cloud/cronjob/src ./apps/cloud/cronjob/src
 
 # 编译为独立二进制
 WORKDIR /repo/apps/cloud/cronjob
-RUN bun build src/index.ts --compile --outfile=cronjob
+RUN bun build src/index.ts --compile --outfile=cronjob --external @aws-sdk/client-s3
 
 # --- Runtime ---
 FROM debian:bookworm-slim
