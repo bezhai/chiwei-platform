@@ -77,6 +77,11 @@ class IdentityDriftManager:
     async def on_event(self, chat_id: str) -> None:
         """消息/回复事件 -> 进入两阶段锁流程"""
         self._buffers[chat_id] = self._buffers.get(chat_id, 0) + 1
+        logger.info(
+            f"Identity drift on_event: chat_id={chat_id}, "
+            f"buffer={self._buffers[chat_id]}, "
+            f"phase2_running={chat_id in self._phase2_running}"
+        )
 
         # 二阶段运行中 -> 只缓冲，不触发
         if chat_id in self._phase2_running:
@@ -95,6 +100,10 @@ class IdentityDriftManager:
         # 启动/重置 debounce 计时器
         self._timers[chat_id] = asyncio.create_task(
             self._phase1_timer(chat_id)
+        )
+        logger.info(
+            f"Identity drift timer started: chat_id={chat_id}, "
+            f"debounce={settings.identity_drift_debounce_seconds}s"
         )
 
     async def _phase1_timer(self, chat_id: str):
