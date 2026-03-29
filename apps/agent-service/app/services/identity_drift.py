@@ -11,8 +11,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from app.agents.infra.langfuse_client import get_prompt
+from app.agents.infra.model_builder import ModelBuilder
 from app.clients.redis import AsyncRedisClient
 from app.config.config import settings
+from app.orm.crud import get_chat_messages_in_range, get_plan_for_period, get_username
+from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 
@@ -126,5 +130,95 @@ class IdentityDriftManager:
 
 
 async def _run_drift(chat_id: str) -> None:
-    """二阶段：LLM 漂移计算（占位，Task 4 实现）"""
-    pass
+    """二阶段：LLM 漂移计算
+
+    读取最近消息 + 当前 identity + Schedule 上下文 -> 调用 LLM -> 保存新状态
+    """
+    # 1. 收集上下文
+    current_state = await get_identity_state(chat_id)
+    recent_messages = await _get_recent_messages(chat_id)
+    schedule_context = await _get_schedule_context()
+
+    if not recent_messages:
+        logger.info(f"No recent messages for {chat_id}, skip drift")
+        return
+
+    # 2. 编译 prompt
+    prompt_template = get_prompt("identity_drift")
+    now = datetime.now(CST)
+    compiled = prompt_template.compile(
+        schedule_daily_current_period=schedule_context,
+        current_identity_state=current_state or "（刚醒来，还没有形成今天的状态）",
+        message_buffer=recent_messages,
+        current_time=now.strftime("%H:%M"),
+    )
+
+    # 3. 调用 LLM
+    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled}],
+    )
+
+    new_state = response.content
+    if isinstance(new_state, list):
+        new_state = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in new_state
+        )
+
+    if not new_state or not new_state.strip():
+        logger.warning(f"Drift LLM returned empty for {chat_id}")
+        return
+
+    # 4. 保存新状态
+    await set_identity_state(chat_id, new_state.strip())
+
+
+async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
+    """获取上次漂移以来的消息，格式化为时间线"""
+    # 确定起始时间：上次漂移时间 or 1小时前
+    updated_at_str = await get_identity_updated_at(chat_id)
+    if updated_at_str:
+        try:
+            start_dt = datetime.fromisoformat(updated_at_str)
+        except ValueError:
+            start_dt = datetime.now(CST) - timedelta(hours=1)
+    else:
+        start_dt = datetime.now(CST) - timedelta(hours=1)
+
+    start_ts = int(start_dt.timestamp() * 1000)
+    end_ts = int(datetime.now(CST).timestamp() * 1000)
+
+    messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
+    if not messages:
+        return ""
+
+    # 取最近 max_messages 条
+    messages = messages[-max_messages:]
+
+    # 格式化
+    lines = []
+    for msg in messages:
+        msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
+        time_str = msg_time.strftime("%H:%M")
+        if msg.role == "assistant":
+            speaker = "赤尾"
+        else:
+            name = await get_username(msg.user_id)
+            speaker = name or msg.user_id[:6]
+
+        rendered = parse_content(msg.content).render()
+        if rendered and rendered.strip():
+            lines.append(f"[{time_str}] {speaker}: {rendered[:200]}")
+
+    return "\n".join(lines)
+
+
+async def _get_schedule_context() -> str:
+    """获取当前时段的 Schedule daily"""
+    now = datetime.now(CST)
+    today = now.strftime("%Y-%m-%d")
+    schedule = await get_plan_for_period("daily", today, today)
+    if schedule and schedule.content:
+        return schedule.content
+    return "（今天还没有写日程）"

@@ -191,3 +191,49 @@ async def test_phase2_buffers_new_events():
 
         # Should have been called twice (original + next round)
         assert mock_drift.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_drift_calls_llm_and_saves_state():
+    """_run_drift 读取上下文 -> 调用 LLM -> 保存新状态"""
+    mock_response = MagicMock()
+    mock_response.content = "有点犯困但还不想睡。刚才群里闹腾了一阵，觉得好笑。"
+
+    mock_model = AsyncMock()
+    mock_model.ainvoke = AsyncMock(return_value=mock_response)
+
+    mock_redis = AsyncMock()
+    mock_redis.hget = AsyncMock(return_value="精力充沛，想找人聊天。")
+    mock_pipe = MagicMock()
+    mock_pipe.hset = MagicMock()
+    mock_pipe.expire = MagicMock()
+    mock_pipe.execute = AsyncMock()
+    mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.ModelBuilder") as mock_mb,
+        patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
+        patch("app.services.identity_drift._get_recent_messages",
+              new_callable=AsyncMock,
+              return_value="[15:30] A哥: 赤尾你觉得呢\n[15:31] 赤尾: 不觉得"),
+        patch("app.services.identity_drift._get_schedule_context",
+              new_callable=AsyncMock,
+              return_value="下午有点犯困，想窝着看番"),
+    ):
+        mock_redis_cls.get_instance.return_value = mock_redis
+        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
+
+        mock_prompt = MagicMock()
+        mock_prompt.compile.return_value = "compiled prompt"
+        mock_get_prompt.return_value = mock_prompt
+
+        from app.services.identity_drift import _run_drift
+        await _run_drift("chat_001")
+
+    # LLM was called
+    mock_model.ainvoke.assert_called_once()
+    # State was saved
+    mock_pipe.hset.assert_called_once()
+    call_args = mock_pipe.hset.call_args
+    assert "identity:chat_001" in call_args.args or call_args.args[0] == "identity:chat_001"
