@@ -71,12 +71,10 @@ async def _get_recent_daily_schedules(before_date: date, count: int = 3) -> list
 
 
 async def _run_ideation(
-    persona_core: str,
-    yesterday_journal: str,
     recent_schedules_text: str,
     target_date: date,
 ) -> str:
-    """运行 Ideation Agent：search_web tool-use loop 搜集生活素材"""
+    """运行 Ideation Agent：广撒网搜集外部世界素材（不带人设，避免搜索被兴趣带偏）"""
     from langchain.agents import create_agent
     from langchain.messages import HumanMessage
     from langfuse.langchain import CallbackHandler
@@ -91,8 +89,6 @@ async def _run_ideation(
     weekday = _WEEKDAY_CN[target_date.weekday()]
 
     compiled = prompt_template.compile(
-        persona_core=persona_core,
-        yesterday_journal=yesterday_journal,
         recent_schedules=recent_schedules_text,
         date=target_date.isoformat(),
         weekday=weekday,
@@ -389,8 +385,6 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
     # ---- Ideation Agent ----
     try:
         ideation_output = await _run_ideation(
-            persona_core=persona_core,
-            yesterday_journal=yesterday_journal,
             recent_schedules_text=recent_schedules_text,
             target_date=target_date,
         )
