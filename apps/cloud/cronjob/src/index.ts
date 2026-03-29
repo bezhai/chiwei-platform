@@ -45,7 +45,8 @@ const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<
 };
 
 // 定时任务：下载任务
-scheduleTask('0 10 * * *', 'download task', startDownload);
+const DOWNLOAD_CRON = process.env.DOWNLOAD_CRON || '0 10 * * *';
+scheduleTask(DOWNLOAD_CRON, 'download task', startDownload);
 
 // 定时任务：Bangumi Archive 数据同步 (每周三上午7点)
 scheduleTask('0 7 * * 3', 'bangumi archive sync', syncBangumiArchive);
