@@ -42,11 +42,14 @@ def _get_persona_lite() -> str:
         return ""
 
 
-async def _get_yesterday_journal(target_date: date) -> str:
-    """获取昨天的 daily journal 内容"""
-    yesterday = (target_date - timedelta(days=1)).isoformat()
-    journal = await get_journal("daily", yesterday)
-    return journal.content if journal else "（昨天没有写日志）"
+async def _get_recent_journals_text(target_date: date, limit: int = 3) -> str:
+    """获取前 N 天的 daily journal 内容，用于避免重复意象"""
+    journals = await get_recent_journals("daily", target_date.isoformat(), limit=limit)
+    if not journals:
+        return "（前几天没有日志）"
+    return "\n\n".join(
+        f"--- {j.journal_date} ---\n{j.content}" for j in journals
+    )
 
 
 def _extract_text(content) -> str:
@@ -116,7 +119,7 @@ async def generate_daily_journal(target_date: date) -> str | None:
     daily_schedule = await get_plan_for_period("daily", date_str, date_str)
     schedule_text = daily_schedule.content if daily_schedule else "（今天没有写手帐）"
 
-    yesterday_journal = await _get_yesterday_journal(target_date)
+    recent_journals = await _get_recent_journals_text(target_date)
 
     # 编译 prompt
     prompt_template = get_prompt("journal_generation")
@@ -125,7 +128,7 @@ async def generate_daily_journal(target_date: date) -> str | None:
         date=date_str,
         chat_diaries=chat_diaries,
         daily_schedule=schedule_text,
-        yesterday_journal=yesterday_journal,
+        recent_journals=recent_journals,
     )
 
     # 调用 LLM

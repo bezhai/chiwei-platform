@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     diary_chat_ids: str = ""  # 逗号分隔的 chat_id 列表
     diary_model: str = "diary-model"
 
+    # 泳道标识（worker 无 HTTP 请求上下文时用此 fallback）
+    lane: str | None = None
+
     # Identity 漂移
     identity_drift_model: str = "offline-model"
     identity_drift_debounce_seconds: int = 300  # 一阶段等待: 5 分钟

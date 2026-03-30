@@ -14,7 +14,7 @@ async def test_generate_daily_journal_basic():
         patch("app.workers.journal_worker.get_all_diaries_for_date", new_callable=AsyncMock, return_value=[diary1, diary2]),
         patch("app.workers.journal_worker.get_journal", new_callable=AsyncMock, return_value=None),
         patch("app.workers.journal_worker.get_plan_for_period", new_callable=AsyncMock, return_value=MagicMock(content="今天想出门走走")),
-        patch("app.workers.journal_worker._get_yesterday_journal", new_callable=AsyncMock, return_value="昨天过得很平静"),
+        patch("app.workers.journal_worker._get_recent_journals_text", new_callable=AsyncMock, return_value="--- 2026-03-25 ---\n昨天过得很平静"),
         patch("app.workers.journal_worker.get_prompt") as mock_prompt,
         patch("app.workers.journal_worker.ModelBuilder") as mock_mb,
         patch("app.workers.journal_worker.upsert_journal", new_callable=AsyncMock) as mock_upsert,
