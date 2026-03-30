@@ -13,6 +13,7 @@ type AppModel struct {
 	EnvFromSecrets    string // JSON 序列化的 []string
 	EnvFromConfigMaps string // JSON 序列化的 []string
 	Envs              string // JSON 序列化的 map[string]string
+	ConfigBundles     string // JSON 序列化的 []string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -126,3 +127,15 @@ type JobRunModel struct {
 }
 
 func (JobRunModel) TableName() string { return "job_runs" }
+
+// ConfigBundleModel 是 ConfigBundle 的数据库持久化模型。
+type ConfigBundleModel struct {
+	Name          string `gorm:"primaryKey"`
+	Description   string
+	Keys          string // JSON serialized map[string]string
+	LaneOverrides string // JSON serialized map[string]map[string]string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+func (ConfigBundleModel) TableName() string { return "config_bundles" }

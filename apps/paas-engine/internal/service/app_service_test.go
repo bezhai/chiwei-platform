@@ -28,7 +28,7 @@ func (s *stubReleaseRepo) FindAll(_ context.Context, _, _ string) ([]*domain.Rel
 func TestCreateApp_Success(t *testing.T) {
 	appRepo := &stubAppRepo{}
 	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{Name: "myapp"}}
-	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{}, nil)
 
 	app, err := svc.CreateApp(context.Background(), CreateAppRequest{
 		Name:          "myapp",
@@ -46,7 +46,7 @@ func TestCreateApp_Success(t *testing.T) {
 func TestCreateApp_ImageRepoNotFound(t *testing.T) {
 	appRepo := &stubAppRepo{}
 	imageRepoRepo := &stubImageRepoRepo{err: domain.ErrImageRepoNotFound}
-	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{}, nil)
 
 	_, err := svc.CreateApp(context.Background(), CreateAppRequest{
 		Name:          "myapp",
@@ -61,7 +61,7 @@ func TestCreateApp_ImageRepoNotFound(t *testing.T) {
 func TestCreateApp_InvalidName(t *testing.T) {
 	appRepo := &stubAppRepo{}
 	imageRepoRepo := &stubImageRepoRepo{}
-	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{}, nil)
 
 	_, err := svc.CreateApp(context.Background(), CreateAppRequest{
 		Name: "INVALID",
@@ -79,7 +79,7 @@ func TestUpdateApp_Success(t *testing.T) {
 		Port:          8080,
 	}}
 	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{Name: "myapp"}}
-	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{}, nil)
 
 	app, err := svc.UpdateApp(context.Background(), "myapp", []byte(`{"image_repo":"myapp","port":9090}`))
 	if err != nil {
@@ -99,7 +99,7 @@ func TestUpdateApp_PartialKeepsExisting(t *testing.T) {
 		Envs:          map[string]string{"A": "1"},
 	}}
 	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{Name: "myapp"}}
-	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, imageRepoRepo, &stubReleaseRepo{}, nil)
 
 	// 只传 port，其他字段保持不变
 	app, err := svc.UpdateApp(context.Background(), "myapp", []byte(`{"port":9090}`))
@@ -125,7 +125,7 @@ func TestUpdateApp_EnvsMerge(t *testing.T) {
 		Name: "myapp",
 		Envs: map[string]string{"A": "1", "B": "2"},
 	}}
-	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{}, nil)
 
 	app, err := svc.UpdateApp(context.Background(), "myapp", []byte(`{"envs":{"C":"3"}}`))
 	if err != nil {
@@ -141,7 +141,7 @@ func TestUpdateApp_EnvsDeleteKey(t *testing.T) {
 		Name: "myapp",
 		Envs: map[string]string{"A": "1", "B": "2"},
 	}}
-	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{})
+	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{}, nil)
 
 	app, err := svc.UpdateApp(context.Background(), "myapp", []byte(`{"envs":{"A":null}}`))
 	if err != nil {
@@ -152,5 +152,37 @@ func TestUpdateApp_EnvsDeleteKey(t *testing.T) {
 	}
 	if app.Envs["B"] != "2" {
 		t.Errorf("B = %q, want %q", app.Envs["B"], "2")
+	}
+}
+
+func TestUpdateApp_ConfigBundleConflict(t *testing.T) {
+	appRepo := &stubAppRepo{app: &domain.App{Name: "myapp"}}
+	bundleRepo := newStubConfigBundleRepo()
+	bundleRepo.bundles["pg-main"] = &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"DB_HOST": "postgres"},
+	}
+	bundleRepo.bundles["pg-external"] = &domain.ConfigBundle{
+		Name: "pg-external",
+		Keys: map[string]string{"DB_HOST": "external-pg"}, // conflict!
+	}
+	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{}, bundleRepo)
+
+	_, err := svc.UpdateApp(context.Background(), "myapp",
+		[]byte(`{"config_bundles":["pg-main","pg-external"]}`))
+	if err == nil {
+		t.Error("expected error for key conflict")
+	}
+}
+
+func TestUpdateApp_ConfigBundleNotFound(t *testing.T) {
+	appRepo := &stubAppRepo{app: &domain.App{Name: "myapp"}}
+	bundleRepo := newStubConfigBundleRepo()
+	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{}, bundleRepo)
+
+	_, err := svc.UpdateApp(context.Background(), "myapp",
+		[]byte(`{"config_bundles":["nonexistent"]}`))
+	if err == nil {
+		t.Error("expected error for missing bundle")
 	}
 }

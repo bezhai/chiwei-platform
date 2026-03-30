@@ -32,8 +32,8 @@ func NewK8sDeployer(client kubernetes.Interface, namespace string) *K8sDeployer 
 	return &K8sDeployer{client: client, namespace: namespace}
 }
 
-func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *domain.App) error {
-	if err := d.applyDeployment(ctx, release, app); err != nil {
+func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error {
+	if err := d.applyDeployment(ctx, release, app, bundleEnvs); err != nil {
 		return fmt.Errorf("apply deployment: %w", err)
 	}
 	if app.Port > 0 { // Worker 无端口，跳过 Service
@@ -180,11 +180,20 @@ func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*do
 	return status, nil
 }
 
-func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App) error {
+func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error {
 	name := release.ResourceName()
 	labels := map[string]string{
 		"app":  release.AppName,
 		"lane": release.Lane,
+	}
+
+	// Bundle envs → auto-managed K8s Secret
+	var bundleSecretName string
+	if len(bundleEnvs) > 0 {
+		bundleSecretName = name + "-config"
+		if err := d.applySecret(ctx, bundleSecretName, bundleEnvs); err != nil {
+			return fmt.Errorf("apply config secret: %w", err)
+		}
 	}
 
 	mergedEnvs := mergeEnvs(app.Envs, release.Envs)
@@ -193,12 +202,23 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	}
 	mergedEnvs["LANE"] = release.Lane
 	envVars := envsToK8s(mergedEnvs)
+
+	// EnvFrom: legacy sources first, then bundle secret (bundle overrides legacy for duplicate keys)
+	envFrom := buildEnvFrom(app.EnvFromSecrets, app.EnvFromConfigMaps)
+	if bundleSecretName != "" {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: bundleSecretName},
+			},
+		})
+	}
+
 	replicas := release.Replicas
 
 	container := corev1.Container{
 		Name:    app.Name,
 		Image:   release.Image,
-		EnvFrom: buildEnvFrom(app.EnvFromSecrets, app.EnvFromConfigMaps),
+		EnvFrom: envFrom,
 		Env:     envVars,
 	}
 	if len(app.Command) > 0 {
@@ -320,6 +340,29 @@ func (d *K8sDeployer) applyBaseService(ctx context.Context, release *domain.Rele
 	}
 	existing.Spec.Ports = svc.Spec.Ports
 	_, err = d.client.CoreV1().Services(d.namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+func (d *K8sDeployer) applySecret(ctx context.Context, name string, data map[string]string) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: d.namespace,
+			Labels:    map[string]string{"managed-by": "paas-engine"},
+		},
+		StringData: data,
+	}
+
+	existing, err := d.client.CoreV1().Secrets(d.namespace).Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		_, err = d.client.CoreV1().Secrets(d.namespace).Create(ctx, secret, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	existing.StringData = data
+	_, err = d.client.CoreV1().Secrets(d.namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	return err
 }
 

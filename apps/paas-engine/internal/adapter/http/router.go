@@ -15,6 +15,7 @@ func NewRouter(
 	imageRepoH *ImageRepoHandler,
 	opsH *OpsHandler,
 	pipelineH *PipelineHandler,
+	configBundleH *ConfigBundleHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -43,6 +44,7 @@ func NewRouter(
 				r.Put("/", appH.Update)
 				r.Delete("/", appH.Delete)
 				r.Get("/logs", logH.GetLogs)
+				r.Get("/resolved-config", configBundleH.ResolveConfig)
 
 				// Builds (under apps)
 				r.Route("/builds", func(r chi.Router) {
@@ -102,6 +104,25 @@ func NewRouter(
 				r.Delete("/", pipelineH.Unregister)
 				r.Get("/runs", pipelineH.ListRuns)
 				r.Post("/trigger", pipelineH.Trigger)
+			})
+		})
+
+		// Config Bundles
+		r.Route("/config-bundles", func(r chi.Router) {
+			r.Post("/", configBundleH.Create)
+			r.Get("/", configBundleH.List)
+			r.Route("/{bundle}", func(r chi.Router) {
+				r.Get("/", configBundleH.Get)
+				r.Put("/", configBundleH.Update)
+				r.Delete("/", configBundleH.Delete)
+				r.Put("/keys", configBundleH.SetKeys)
+				r.Delete("/keys/{key}", configBundleH.DeleteKey)
+				r.Post("/keys/{key}/generate", configBundleH.GenerateKey)
+				r.Route("/lanes/{lane}", func(r chi.Router) {
+					r.Put("/", configBundleH.SetLaneOverrides)
+					r.Delete("/", configBundleH.DeleteLaneOverrides)
+					r.Delete("/{key}", configBundleH.DeleteLaneOverrideKey)
+				})
 			})
 		})
 	})

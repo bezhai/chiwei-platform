@@ -92,6 +92,10 @@ func appToModel(a *domain.App) (*AppModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	configBundlesJSON, err := json.Marshal(a.ConfigBundles)
+	if err != nil {
+		return nil, err
+	}
 	return &AppModel{
 		Name:              a.Name,
 		Description:       a.Description,
@@ -102,6 +106,7 @@ func appToModel(a *domain.App) (*AppModel, error) {
 		EnvFromSecrets:    string(envFromSecretsJSON),
 		EnvFromConfigMaps: string(envFromConfigMapsJSON),
 		Envs:              string(envsJSON),
+		ConfigBundles:     string(configBundlesJSON),
 		CreatedAt:         a.CreatedAt,
 		UpdatedAt:         a.UpdatedAt,
 	}, nil
@@ -132,6 +137,12 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 			return nil, err
 		}
 	}
+	var configBundles []string
+	if m.ConfigBundles != "" {
+		if err := json.Unmarshal([]byte(m.ConfigBundles), &configBundles); err != nil {
+			return nil, err
+		}
+	}
 	return &domain.App{
 		Name:              m.Name,
 		Description:       m.Description,
@@ -142,6 +153,7 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 		EnvFromSecrets:    envFromSecrets,
 		EnvFromConfigMaps: envFromConfigMaps,
 		Envs:              envs,
+		ConfigBundles:     configBundles,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}, nil

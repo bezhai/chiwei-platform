@@ -8,7 +8,7 @@ import (
 
 // Deployer 负责将 Release 翻译为 K8s Deployment + Service 并下发。
 type Deployer interface {
-	Deploy(ctx context.Context, release *domain.Release, app *domain.App) error
+	Deploy(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error
 	Delete(ctx context.Context, release *domain.Release, hasOtherReleases bool) error
 	// GetDeploymentStatus 查询指定 Deployment 的运行时状态（副本数 + Pod 列表）。
 	GetDeploymentStatus(ctx context.Context, name string) (*domain.DeploymentStatus, error)

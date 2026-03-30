@@ -58,7 +58,7 @@ type stubDeployer struct {
 	status    *domain.DeploymentStatus
 }
 
-func (s *stubDeployer) Deploy(_ context.Context, _ *domain.Release, _ *domain.App) error {
+func (s *stubDeployer) Deploy(_ context.Context, _ *domain.Release, _ *domain.App, _ map[string]string) error {
 	return s.deployErr
 }
 func (s *stubDeployer) Delete(_ context.Context, _ *domain.Release, _ bool) error { return nil }
@@ -90,7 +90,7 @@ func TestCreateRelease_DeployFailure_SetsMessage(t *testing.T) {
 		deployErr: errors.New("wait for rollout: deployment myapp-prod failed: pod myapp-prod-abc is in CrashLoopBackOff: exit code 1"),
 	}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -125,7 +125,7 @@ func TestCreateRelease_DeploySuccess_ClearsMessage(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -158,7 +158,7 @@ func TestGetReleaseStatus(t *testing.T) {
 	}
 	deployer := &stubDeployer{status: expectedStatus}
 
-	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer)
+	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer, nil)
 
 	// 先存一个 release
 	rel := &domain.Release{ID: "r1", AppName: "myapp", Lane: "prod", DeployName: "myapp-prod"}
@@ -179,7 +179,7 @@ func TestGetReleaseStatus(t *testing.T) {
 func TestGetReleaseStatus_NotFound(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
-	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer)
+	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer, nil)
 
 	_, err := svc.GetReleaseStatus(context.Background(), "nonexistent")
 	if !errors.Is(err, domain.ErrReleaseNotFound) {

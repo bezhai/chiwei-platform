@@ -23,6 +23,7 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 		&PipelineRunModel{},
 		&StageRunModel{},
 		&JobRunModel{},
+		&ConfigBundleModel{},
 	); err != nil {
 		return nil, err
 	}
