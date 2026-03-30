@@ -71,6 +71,13 @@ git checkout main && git pull
 
 超时 10 分钟。
 
+**同步更新共享镜像的 worker**：如果 APP 是 `agent-service`，部署后必须同步 release 使用同一镜像的 worker：
+
+```bash
+make release APP=arq-worker LANE=prod VERSION=<新版本> GIT_REF=main
+make release APP=vectorize-worker LANE=prod VERSION=<新版本> GIT_REF=main
+```
+
 ### 6. 清理当前分支的测试泳道
 
 只清理**当前分支对应的泳道**（即按分支名生成的 LANE：`/` → `-`，截前 20 字符），不要动其他泳道。
