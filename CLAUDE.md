@@ -53,7 +53,7 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 ## 通用规范
 
 - 镜像 tag: 语义化版本号（如 `1.0.0.2`），由 PaaS Engine 服务端分配
-- 敏感配置通过环境变量和 K8s Secret 管理，不写入代码
+- **配置管理统一走 ConfigBundle API**（`/api/paas/config-bundles/`），禁止直接操作 K8s Secret/ConfigMap。查看 app 最终配置用 `GET /api/paas/apps/{app}/resolved-config?lane=prod`。
 
 ## 开发流程
 
