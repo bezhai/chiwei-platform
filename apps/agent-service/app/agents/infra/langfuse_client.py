@@ -39,7 +39,7 @@ def get_prompt(
 
     非 prod 泳道时先尝试 label=lane，找不到则 fallback production。
     """
-    lane = get_lane()
+    lane = get_lane() or settings.lane
     effective_label = label
     if not effective_label and lane and lane != "prod":
         try:

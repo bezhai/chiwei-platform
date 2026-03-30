@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     diary_chat_ids: str = ""  # 逗号分隔的 chat_id 列表
     diary_model: str = "diary-model"
 
+    # 泳道标识（worker 无 HTTP 请求上下文时用此 fallback）
+    lane: str | None = None
+
+    # Identity 漂移
+    identity_drift_model: str = "offline-model"
+    identity_drift_debounce_seconds: int = 300  # 一阶段等待: 5 分钟
+    identity_drift_max_buffer: int = 20  # 强制 flush 阈值
+    identity_drift_ttl_seconds: int = 86400  # Redis TTL: 24 小时
+
     class Config:
         env_file = ".env"
         extra = "ignore"

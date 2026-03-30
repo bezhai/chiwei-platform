@@ -62,3 +62,30 @@ AgentRegistry.register(
         trace_name="research",
     ),
 )
+
+AgentRegistry.register(
+    "schedule-ideation",
+    AgentConfig(
+        prompt_id="schedule_daily_ideation",
+        model_id="offline-model",
+        trace_name="schedule-ideation",
+    ),
+)
+
+AgentRegistry.register(
+    "schedule-writer",
+    AgentConfig(
+        prompt_id="schedule_daily_writer",
+        model_id="offline-model",
+        trace_name="schedule-writer",
+    ),
+)
+
+AgentRegistry.register(
+    "schedule-critic",
+    AgentConfig(
+        prompt_id="schedule_daily_critic",
+        model_id="offline-model",
+        trace_name="schedule-critic",
+    ),
+)

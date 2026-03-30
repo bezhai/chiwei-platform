@@ -346,6 +346,16 @@ async def _build_and_stream(
             asyncio.create_task(
                 _publish_post_check(session_id, full_content, chat_id, message_id)
             )
+        # Fire-and-forget: trigger identity drift
+        if full_content:
+            try:
+                from app.services.identity_drift import IdentityDriftManager
+
+                asyncio.create_task(
+                    IdentityDriftManager.get_instance().on_event(chat_id)
+                )
+            except Exception as e:
+                logger.warning(f"Identity drift trigger failed: {e}")
 
     except Exception as e:
         import traceback
