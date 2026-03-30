@@ -126,11 +126,11 @@ async def search_web(
     start = time.monotonic()
     status = "error"
     try:
-        # 优先 Google Custom Search，fallback You Search
-        if settings.google_search_host and settings.google_search_api_key:
-            organic_results = await _google_search(query, num)
-        elif settings.you_search_host and settings.you_search_api_key:
+        # 优先 You Search，fallback Google Custom Search
+        if settings.you_search_host and settings.you_search_api_key:
             organic_results = await _you_search(query, num, gl, hl)
+        elif settings.google_search_host and settings.google_search_api_key:
+            organic_results = await _google_search(query, num)
         else:
             logger.error("No search provider configured")
             return []
