@@ -61,23 +61,24 @@ _MEMORY_RECALL_HINT = (
 
 
 async def _build_today_state() -> str:
-    """构建今日状态：优先 Journal daily，fallback Schedule daily"""
+    """构建今日状态：今天 Schedule > 昨天 Journal
+
+    今天的 Journal 不可能存在（凌晨 04:00 回溯生成昨天的），
+    所以优先用今天的 Schedule（05:00 生成），再 fallback 昨天的 Journal。
+    """
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")
 
-    # 优先用 Journal（模糊化的个人感受）
-    journal = await get_journal("daily", today)
-    if not journal:
-        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-        journal = await get_journal("daily", yesterday)
-
-    if journal:
-        return journal.content
-
-    # fallback: Schedule daily
+    # 优先用今天的 Schedule（05:00 已生成）
     schedule = await get_plan_for_period("daily", today, today)
     if schedule and schedule.content:
         return schedule.content
+
+    # fallback: 昨天的 Journal（模糊化的个人感受）
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    journal = await get_journal("daily", yesterday)
+    if journal:
+        return journal.content
 
     return ""
 
