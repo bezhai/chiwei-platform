@@ -137,35 +137,50 @@ class TestGenerateImage:
             await client.generate_image("a cat", "1K")
 
 
-class TestParseAspectRatio:
-    """_parse_aspect_ratio 尺寸映射"""
+class TestParseSize:
+    """_parse_size 尺寸映射"""
 
     def test_1k_default(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("1K") == "1:1"
+        assert GeminiClient._parse_size("1K") == ("1:1", "1K")
 
-    def test_2k_default(self):
+    def test_2k(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("2K") == "1:1"
+        assert GeminiClient._parse_size("2K") == ("1:1", "2K")
+
+    def test_4k(self):
+        from app.agents.clients.gemini_client import GeminiClient
+
+        assert GeminiClient._parse_size("4K") == ("1:1", "4K")
 
     def test_pixel_16_9(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("1920x1080") == "16:9"
+        ratio, size = GeminiClient._parse_size("1920x1080")
+        assert ratio == "16:9"
+        assert size == "2K"
 
     def test_square_pixel(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("2048x2048") == "1:1"
+        ratio, size = GeminiClient._parse_size("2048x2048")
+        assert ratio == "1:1"
+        assert size == "2K"
+
+    def test_large_pixel_maps_to_4k(self):
+        from app.agents.clients.gemini_client import GeminiClient
+
+        ratio, size = GeminiClient._parse_size("4096x4096")
+        assert size == "4K"
 
     def test_invalid_falls_back(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("invalid") == "1:1"
+        assert GeminiClient._parse_size("invalid") == ("1:1", "1K")
 
     def test_empty_string(self):
         from app.agents.clients.gemini_client import GeminiClient
 
-        assert GeminiClient._parse_aspect_ratio("") == "1:1"
+        assert GeminiClient._parse_size("") == ("1:1", "1K")

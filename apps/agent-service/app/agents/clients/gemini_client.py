@@ -39,12 +39,14 @@ class GeminiClient(BaseAIClient[genai.Client]):
         self._client = None
 
     @staticmethod
-    def _parse_aspect_ratio(size: str) -> str:
-        """从 size 参数解析宽高比。
+    def _parse_size(size: str) -> tuple[str, str]:
+        """从 size 参数解析宽高比和分辨率。
+
+        返回: (aspect_ratio, image_size)
 
         支持:
-        - "1K" / "2K" / "4K": 默认 1:1
-        - "WxH": 像素尺寸，自动计算最简比例
+        - "1K" / "2K" / "4K": 对应分辨率，宽高比默认 1:1
+        - "WxH": 像素尺寸，自动计算最简比例和推断分辨率
         """
         size_str = size.strip().upper()
 
@@ -54,11 +56,22 @@ class GeminiClient(BaseAIClient[genai.Client]):
                 w, h = int(w_str), int(h_str)
                 if w > 0 and h > 0:
                     g = gcd(w, h)
-                    return f"{w // g}:{h // g}"
+                    aspect_ratio = f"{w // g}:{h // g}"
+                    longest = max(w, h)
+                    if longest <= 1024:
+                        image_size = "1K"
+                    elif longest <= 2048:
+                        image_size = "2K"
+                    else:
+                        image_size = "4K"
+                    return aspect_ratio, image_size
             except Exception:
                 pass
 
-        return "1:1"
+        if size_str in {"1K", "2K", "4K"}:
+            return "1:1", size_str
+
+        return "1:1", "1K"
 
     async def generate_image(
         self,
@@ -69,7 +82,7 @@ class GeminiClient(BaseAIClient[genai.Client]):
         """调用 Gemini generateContent API 生成图片。"""
 
         client = self._ensure_connected()
-        aspect_ratio = self._parse_aspect_ratio(size)
+        aspect_ratio, image_size = self._parse_size(size)
 
         # 构造 contents
         contents: list[types.Part | str] = []
@@ -84,9 +97,10 @@ class GeminiClient(BaseAIClient[genai.Client]):
             model=self.model_name,
             contents=contents,
             config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
+                response_modalities=["IMAGE", "TEXT"],
                 image_config=types.ImageConfig(
                     aspect_ratio=aspect_ratio,
+                    image_size=image_size,
                 ),
             ),
         )
