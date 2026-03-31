@@ -21,7 +21,18 @@ class GeminiClient(BaseAIClient[genai.Client]):
     """
 
     async def _create_client(self, model_info: dict) -> genai.Client:
-        return genai.Client(api_key=model_info["api_key"])
+        from app.config.config import settings
+
+        http_opts: dict = {}
+        if model_info.get("base_url"):
+            http_opts["base_url"] = model_info["base_url"]
+        if settings.forward_proxy_url:
+            http_opts["client_args"] = {"proxy": settings.forward_proxy_url}
+
+        return genai.Client(
+            api_key=model_info["api_key"],
+            http_options=types.HttpOptions(**http_opts) if http_opts else None,
+        )
 
     async def disconnect(self) -> None:
         """genai.Client 无需显式关闭。"""
