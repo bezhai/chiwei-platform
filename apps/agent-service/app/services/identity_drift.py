@@ -145,49 +145,72 @@ class IdentityDriftManager:
 
 
 async def _run_drift(chat_id: str) -> None:
-    """二阶段：LLM 漂移计算
+    """两阶段漂移管线：观察 → 生成
 
-    读取最近消息 + 当前 identity + Schedule 上下文 -> 调用 LLM -> 保存新状态
+    Agent 1（观察）：群聊事件 + 赤尾近期回复 + 基准人设 → 观察报告
+    Agent 2（生成）：观察报告 → reply_style
     """
     # 1. 收集上下文
     current_state = await get_identity_state(chat_id)
     recent_messages = await _get_recent_messages(chat_id)
     schedule_context = await _get_schedule_context()
+    recent_replies = await _get_recent_akao_replies(chat_id)
 
     if not recent_messages:
         logger.info(f"No recent messages for {chat_id}, skip drift")
         return
 
-    # 2. 编译 prompt
-    prompt_template = get_prompt("identity_drift")
     now = datetime.now(CST)
-    compiled = prompt_template.compile(
-        schedule_daily_current_period=schedule_context,
-        current_identity_state=current_state or "（刚醒来，还没有形成今天的状态）",
+    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
+
+    # 2. Agent 1: 观察
+    observer_prompt = get_prompt("drift_observer")
+    observer_compiled = observer_prompt.compile(
+        schedule_daily=schedule_context,
         current_reply_style=current_state or "（刚醒来，还没有形成今天的说话方式）",
         message_buffer=recent_messages,
+        recent_akao_replies=recent_replies or "（还没有最近的回复）",
         current_time=now.strftime("%H:%M"),
     )
 
-    # 3. 调用 LLM
-    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
-    response = await model.ainvoke(
-        [{"role": "user", "content": compiled}],
+    observer_response = await model.ainvoke(
+        [{"role": "user", "content": observer_compiled}],
     )
+    observation_report = _extract_text(observer_response.content)
 
-    new_state = response.content
-    if isinstance(new_state, list):
-        new_state = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in new_state
-        )
-
-    if not new_state or not new_state.strip():
-        logger.warning(f"Drift LLM returned empty for {chat_id}")
+    if not observation_report:
+        logger.warning(f"Observer returned empty for {chat_id}")
         return
 
-    # 4. 保存新状态
-    await set_identity_state(chat_id, new_state.strip())
+    logger.info(f"Drift observer for {chat_id}: {observation_report[:80]}...")
+
+    # 3. Agent 2: 生成
+    generator_prompt = get_prompt("drift_generator")
+    generator_compiled = generator_prompt.compile(
+        observation_report=observation_report,
+    )
+
+    generator_response = await model.ainvoke(
+        [{"role": "user", "content": generator_compiled}],
+    )
+    new_style = _extract_text(generator_response.content)
+
+    if not new_style:
+        logger.warning(f"Generator returned empty for {chat_id}")
+        return
+
+    # 4. 保存
+    await set_identity_state(chat_id, new_style)
+
+
+def _extract_text(content) -> str:
+    """从 LLM response content 提取纯文本"""
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        ).strip()
+    return (content or "").strip()
 
 
 async def _count_messages_since_last_drift(chat_id: str) -> int:
