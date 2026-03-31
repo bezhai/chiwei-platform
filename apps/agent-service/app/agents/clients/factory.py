@@ -15,7 +15,7 @@ async def create_client(model_id: str) -> BaseAIClient[Any]:
         对应的 BaseAIClient 子类实例（如 OpenAIClient、ArkClient）
     """
     from app.agents.clients.ark_client import ArkClient
-    from app.agents.clients.azure_http_client import AzureHttpClient
+    from app.agents.clients.gemini_client import GeminiClient
     from app.agents.clients.openai_client import OpenAIClient
     from app.agents.infra.model_builder import ModelBuilder
 
@@ -29,7 +29,7 @@ async def create_client(model_id: str) -> BaseAIClient[Any]:
         return OpenAIClient(model_id)
     if client_type == ClientType.ARK:
         return ArkClient(model_id)
-    if client_type == ClientType.AZURE_HTTP:
-        return AzureHttpClient(model_id)
+    if client_type == ClientType.GOOGLE:
+        return GeminiClient(model_id)
 
     raise ValueError(f"未知的 client_type: {client_type} (model_id={model_id})")

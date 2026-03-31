@@ -33,15 +33,13 @@ class ClientType:
     - "openai-responses": OpenAI Responses API（仅 OpenAI 原生端点）
     - "deepseek": DeepSeek 专用（Completions API + reasoning_content 保留）
     - "ark": 火山引擎 Ark Runtime 客户端
-    - "azure-http": 仅支持生图的 HTTP 客户端
-    - "google": Google Generative AI 客户端
+    - "google": Google Generative AI 客户端（Chat + 生图）
     """
 
     OPENAI = "openai"
     OPENAI_RESPONSES = "openai-responses"
     DEEPSEEK = "deepseek"
     ARK = "ark"
-    AZURE_HTTP = "azure-http"
     GOOGLE = "google"
 
 
