@@ -241,3 +241,34 @@ async def test_run_drift_calls_llm_and_saves_state():
     mock_pipe.hset.assert_called_once()
     call_args = mock_pipe.hset.call_args
     assert "identity:chat_001" in call_args.args or call_args.args[0] == "identity:chat_001"
+
+
+@pytest.mark.asyncio
+async def test_get_recent_akao_replies_filters_assistant_only():
+    """只返回赤尾的回复，不含其他人的消息"""
+    mock_messages = [
+        MagicMock(role="user", content='{"text":"你好"}', create_time=1000),
+        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000),
+        MagicMock(role="user", content='{"text":"在干嘛"}', create_time=3000),
+        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000),
+        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000),
+    ]
+
+    mock_render = MagicMock()
+    mock_render.render = MagicMock(side_effect=["你好呀～", "发呆", "不想动"])
+
+    with (
+        patch("app.services.identity_drift.get_chat_messages_in_range",
+              new_callable=AsyncMock, return_value=mock_messages),
+        patch("app.services.identity_drift.parse_content", return_value=mock_render),
+    ):
+        from app.services.identity_drift import _get_recent_akao_replies
+        result = await _get_recent_akao_replies("chat_001")
+
+    # 3 条赤尾回复，编号 1-3
+    assert "1. 你好呀～" in result
+    assert "2. 发呆" in result
+    assert "3. 不想动" in result
+    # 不应包含 user 消息原文
+    lines = result.strip().split("\n")
+    assert len(lines) == 3

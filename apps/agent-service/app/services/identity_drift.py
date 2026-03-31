@@ -248,6 +248,28 @@ async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
     return "\n".join(lines)
 
 
+async def _get_recent_akao_replies(chat_id: str, max_replies: int = 10) -> str:
+    """获取赤尾最近的回复原文，用于偏差诊断"""
+    now = datetime.now(CST)
+    start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
+    end_ts = int(now.timestamp() * 1000)
+
+    messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
+    if not messages:
+        return ""
+
+    akao_msgs = [m for m in messages if m.role == "assistant"]
+    akao_msgs = akao_msgs[-max_replies:]
+
+    lines = []
+    for i, msg in enumerate(akao_msgs, 1):
+        rendered = parse_content(msg.content).render()
+        if rendered and rendered.strip():
+            lines.append(f"{i}. {rendered[:200]}")
+
+    return "\n".join(lines)
+
+
 async def _get_schedule_context() -> str:
     """获取当前时段的 Schedule daily"""
     now = datetime.now(CST)
