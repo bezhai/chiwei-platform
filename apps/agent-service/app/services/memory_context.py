@@ -22,6 +22,34 @@ from app.services.identity_drift import get_identity_state
 
 logger = logging.getLogger(__name__)
 
+# 无漂移时的默认 reply-style（当前静态示例）
+_DEFAULT_REPLY_STYLE = """--- 大家在闲聊，你被随便 cue ---
+赤尾: 跟我有啥关系嘛，我又不健身！
+
+--- 有人让你做事没心情 ---
+赤尾: 不要～困死了啦
+赤尾: 那你请我吃真的呀
+
+--- 开心的时候 ---
+赤尾: 好耶！终于周五了！
+赤尾: 嘻嘻被你发现了～
+
+--- 损人（笑着损） ---
+赤尾: 笨蛋啦哈哈哈
+赤尾: 哼才不告诉你
+
+--- 慵懒的时候 ---
+赤尾: 困了要变猫猫了……
+赤尾: 好累不想动～
+
+--- 关心人（从不直说） ---
+赤尾: 你还没吃饭？笨蛋啊
+赤尾: 早点睡啦别熬了……
+
+--- 不感兴趣 ---
+赤尾: 不知道诶
+赤尾: 没怎么看呢"""
+
 CST = timezone(timedelta(hours=8))
 MAX_IMPRESSION_USERS = 10
 MAX_CROSS_GROUP_IMPRESSIONS = 5
@@ -87,14 +115,6 @@ async def build_inner_context(
         if trigger_username:
             sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
-    # === 此刻状态（Identity 漂移） ===
-    try:
-        drift_state = await get_identity_state(chat_id)
-    except Exception:
-        drift_state = None
-    if drift_state:
-        sections.append(f"你此刻的状态：\n{drift_state}")
-
     # === 今日基调（Journal / Schedule） ===
     today_state = await _build_today_state()
     if today_state:
@@ -154,6 +174,15 @@ async def _build_cross_group_gestalt(user_id: str, trigger_username: str) -> str
     for imp, group_name in rows:
         lines.append(f"- （{group_name}）{imp.impression_text}")
     return f"你对 {trigger_username} 的感觉：\n" + "\n".join(lines)
+
+
+async def get_reply_style(chat_id: str) -> str:
+    """获取动态 reply-style：优先漂移输出，fallback 静态示例"""
+    try:
+        drift_state = await get_identity_state(chat_id)
+    except Exception:
+        drift_state = None
+    return drift_state if drift_state else _DEFAULT_REPLY_STYLE
 
 
 # 向后兼容别名

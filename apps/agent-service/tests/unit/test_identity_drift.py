@@ -22,7 +22,7 @@ async def test_get_identity_state_returns_none_when_empty():
         result = await get_identity_state("chat_001")
 
     assert result is None
-    mock_redis.hget.assert_called_once_with("identity:chat_001", "state")
+    mock_redis.hget.assert_called_once_with("reply_style:chat_001", "state")
 
 
 @pytest.mark.asyncio
@@ -47,7 +47,7 @@ async def test_set_and_get_identity_state():
     mock_pipe.hset = MagicMock()
     mock_pipe.expire = MagicMock()
     mock_pipe.execute = AsyncMock(side_effect=lambda: [
-        fake_hset("identity:chat_001", {"state": "有点困", "updated_at": "2026-03-28T15:00:00"}),
+        fake_hset("reply_style:chat_001", {"state": "有点困", "updated_at": "2026-03-28T15:00:00"}),
         None,
     ])
     mock_redis.pipeline = MagicMock(return_value=mock_pipe)
@@ -198,16 +198,19 @@ async def test_phase2_buffers_new_events():
 
 
 @pytest.mark.asyncio
-async def test_run_drift_calls_llm_and_saves_state():
-    """_run_drift 读取上下文 -> 调用 LLM -> 保存新状态"""
-    mock_response = MagicMock()
-    mock_response.content = "有点犯困但还不想睡。刚才群里闹腾了一阵，觉得好笑。"
+async def test_run_drift_calls_observer_then_generator():
+    """_run_drift 先调 observer 再调 generator，保存 generator 的输出"""
+    observer_response = MagicMock()
+    observer_response.content = "## 情感状态\n精力低\n## 偏差诊断\n回复太长\n## 下一轮方向\n要短"
+
+    generator_response = MagicMock()
+    generator_response.content = "[精力低，懒]\n\n--- 被问问题 ---\n不知道诶\n懒得查"
 
     mock_model = AsyncMock()
-    mock_model.ainvoke = AsyncMock(return_value=mock_response)
+    mock_model.ainvoke = AsyncMock(side_effect=[observer_response, generator_response])
 
     mock_redis = AsyncMock()
-    mock_redis.hget = AsyncMock(return_value="精力充沛，想找人聊天。")
+    mock_redis.hget = AsyncMock(return_value="上一轮的 reply_style")
     mock_pipe = MagicMock()
     mock_pipe.hset = MagicMock()
     mock_pipe.expire = MagicMock()
@@ -219,25 +222,65 @@ async def test_run_drift_calls_llm_and_saves_state():
         patch("app.services.identity_drift.ModelBuilder") as mock_mb,
         patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
         patch("app.services.identity_drift._get_recent_messages",
-              new_callable=AsyncMock,
-              return_value="[15:30] A哥: 赤尾你觉得呢\n[15:31] 赤尾: 不觉得"),
+              new_callable=AsyncMock, return_value="[15:30] A: 你好\n[15:31] 赤尾: 嗯"),
+        patch("app.services.identity_drift._get_recent_akao_replies",
+              new_callable=AsyncMock, return_value="1. 嗯\n2. 不知道"),
         patch("app.services.identity_drift._get_schedule_context",
-              new_callable=AsyncMock,
-              return_value="下午有点犯困，想窝着看番"),
+              new_callable=AsyncMock, return_value="下午犯困"),
     ):
         mock_redis_cls.get_instance.return_value = mock_redis
         mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
 
-        mock_prompt = MagicMock()
-        mock_prompt.compile.return_value = "compiled prompt"
-        mock_get_prompt.return_value = mock_prompt
+        mock_observer_prompt = MagicMock()
+        mock_observer_prompt.compile.return_value = "observer compiled"
+        mock_generator_prompt = MagicMock()
+        mock_generator_prompt.compile.return_value = "generator compiled"
+        mock_get_prompt.side_effect = lambda name: (
+            mock_observer_prompt if name == "drift_observer" else mock_generator_prompt
+        )
 
         from app.services.identity_drift import _run_drift
         await _run_drift("chat_001")
 
-    # LLM was called
-    mock_model.ainvoke.assert_called_once()
-    # State was saved
+    # 两次 LLM 调用
+    assert mock_model.ainvoke.call_count == 2
+    # get_prompt 调了 observer 和 generator
+    mock_get_prompt.assert_any_call("drift_observer")
+    mock_get_prompt.assert_any_call("drift_generator")
+    # 保存的是 generator 的输出
     mock_pipe.hset.assert_called_once()
     call_args = mock_pipe.hset.call_args
-    assert "identity:chat_001" in call_args.args or call_args.args[0] == "identity:chat_001"
+    mapping = call_args.kwargs.get("mapping") if call_args.kwargs else call_args[1] if len(call_args.args) > 1 else None
+    assert mapping is not None
+    assert "精力低" in mapping["state"] or "懒" in mapping["state"]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_akao_replies_filters_assistant_only():
+    """只返回赤尾的回复，不含其他人的消息"""
+    mock_messages = [
+        MagicMock(role="user", content='{"text":"你好"}', create_time=1000),
+        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000),
+        MagicMock(role="user", content='{"text":"在干嘛"}', create_time=3000),
+        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000),
+        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000),
+    ]
+
+    mock_render = MagicMock()
+    mock_render.render = MagicMock(side_effect=["你好呀～", "发呆", "不想动"])
+
+    with (
+        patch("app.services.identity_drift.get_chat_messages_in_range",
+              new_callable=AsyncMock, return_value=mock_messages),
+        patch("app.services.identity_drift.parse_content", return_value=mock_render),
+    ):
+        from app.services.identity_drift import _get_recent_akao_replies
+        result = await _get_recent_akao_replies("chat_001")
+
+    # 3 条赤尾回复，编号 1-3
+    assert "1. 你好呀～" in result
+    assert "2. 发呆" in result
+    assert "3. 不想动" in result
+    # 不应包含 user 消息原文
+    lines = result.strip().split("\n")
+    assert len(lines) == 3

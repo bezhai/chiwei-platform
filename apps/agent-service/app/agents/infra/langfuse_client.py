@@ -13,7 +13,7 @@ from app.utils.middlewares.trace import get_lane
 
 _client: Langfuse | None = None
 
-_PROMPT_CACHE_TTL_SECONDS: int = 60
+_PROMPT_CACHE_TTL_SECONDS: int = 10
 
 logger = logging.getLogger(__name__)
 
