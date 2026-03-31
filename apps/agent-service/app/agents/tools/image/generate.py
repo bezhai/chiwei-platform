@@ -18,7 +18,7 @@ async def generate_image(
     query: Annotated[
         str,
         Field(
-            description="一个明确的生成图片提示词。用自然语言清晰描述画面，写明 主体 + 行为 + 环境，可补充风格、色彩、光影、构图等美学元素。"
+            description="英文生成图片提示词。按 drawing skill 指南撰写。"
         ),
     ],
     size: Annotated[
@@ -31,7 +31,7 @@ async def generate_image(
     ] = None,
 ) -> str | list[dict[str, Any]]:
     """
-    通过文本提示词生成图片，返回生成结果（含 @N.png 引用和图片内容）
+    生成图片。调用前必须先 load_skill("drawing") 加载画图指南并遵循其流程。
     """
     try:
         context = get_runtime(AgentContext).context

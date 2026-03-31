@@ -4,9 +4,9 @@
 """
 
 from app.agents.clients.ark_client import ArkClient
-from app.agents.clients.azure_http_client import AzureHttpClient
 from app.agents.clients.base import BaseAIClient, ClientType
 from app.agents.clients.factory import create_client
+from app.agents.clients.gemini_client import GeminiClient
 from app.agents.clients.openai_client import OpenAIClient
 
 __all__ = [
@@ -14,6 +14,6 @@ __all__ = [
     "ClientType",
     "OpenAIClient",
     "ArkClient",
-    "AzureHttpClient",
+    "GeminiClient",
     "create_client",
 ]

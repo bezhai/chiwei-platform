@@ -3,7 +3,7 @@
 重构后的 agents 模块架构：
 
 - core/: 核心抽象层 (ChatAgent, AgentContext, AgentConfig)
-- clients/: AI 客户端层 (BaseAIClient, OpenAIClient, ArkClient, AzureHttpClient)
+- clients/: AI 客户端层 (BaseAIClient, OpenAIClient, ArkClient, GeminiClient)
 - infra/: 基础设施层 (ModelBuilder, Langfuse, Embedding)
 - tools/: 工具层 (search, history, image)
 - graphs/: Graph 流程层 (pre)
@@ -14,9 +14,9 @@
 # 客户端
 from app.agents.clients import (
     ArkClient,
-    AzureHttpClient,
     BaseAIClient,
     ClientType,
+    GeminiClient,
     OpenAIClient,
     create_client,
 )
@@ -59,7 +59,7 @@ __all__ = [
     "ClientType",
     "OpenAIClient",
     "ArkClient",
-    "AzureHttpClient",
+    "GeminiClient",
     "create_client",
     # Infra
     "ModelBuilder",
