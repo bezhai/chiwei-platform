@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))
 
 # Redis key 前缀
-_KEY_PREFIX = "identity"
+_KEY_PREFIX = "reply_style"
 
 
 def _state_key(chat_id: str) -> str:
