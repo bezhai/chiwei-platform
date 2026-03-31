@@ -164,6 +164,7 @@ async def _run_drift(chat_id: str) -> None:
     compiled = prompt_template.compile(
         schedule_daily_current_period=schedule_context,
         current_identity_state=current_state or "（刚醒来，还没有形成今天的状态）",
+        current_reply_style=current_state or "（刚醒来，还没有形成今天的说话方式）",
         message_buffer=recent_messages,
         current_time=now.strftime("%H:%M"),
     )

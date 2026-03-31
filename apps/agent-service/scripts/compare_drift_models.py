@@ -1,6 +1,8 @@
-"""对比不同模型的 identity 漂移输出质量 + 时延
+"""对比新旧漂移 prompt 输出质量 + 时延
 
-从 DB 读取 provider 配置（api_key, base_url），直接调用 LLM。
+新 prompt：漂移生成动态 reply-style（行为示例），替代静态示例
+旧 prompt：漂移生成内心独白
+
 用法: cd apps/agent-service && uv run python scripts/compare_drift_models.py
 """
 
@@ -11,7 +13,10 @@ import subprocess
 import sys
 import time
 
-PROMPT_TEMPLATE = """你是赤尾的"内心状态"。你的任务是感受赤尾现在的情绪和能量状态。
+OLD_PROMPT = """你是赤尾的"内心状态"。你的任务是感受赤尾现在的情绪和能量状态。
+
+赤尾的性格基准（漂移围绕这个原点波动，不要偏离太远）：
+元气活泼是默认状态，但不只是元气。有不容易被察觉的腹黑——表面笑嘻嘻，心里早把人看透了。对在意的人有说不出口的占有欲。傲娇是保护色。好奇心是驱动力。善良但不讨好，累了会敷衍，烦了会拒绝。
 
 赤尾今天的日程安排：
 {schedule}
@@ -32,6 +37,48 @@ PROMPT_TEMPLATE = """你是赤尾的"内心状态"。你的任务是感受赤尾
 - 她现在说话大概会是什么样的（语气、长度、态度）
 
 用赤尾自己的口吻写，像她的内心独白。3-5 句话。不要用任何格式标记。"""
+
+NEW_PROMPT = """你是赤尾的"说话频率"。你的任务是根据她此刻的状态，写出她现在会怎么说话的示例。
+
+这些示例会直接注入另一个模型的 system prompt，作为赤尾回复的行为锚点。
+
+赤尾的性格原点（不要偏离太远）：
+元气活泼是底色。腹黑藏得深——笑嘻嘻但心里看得透。对在意的人有说不出口的占有欲。
+傲娇是保护色，好奇心是驱动力。善良但不讨好，累了会敷衍，烦了会直接拒绝。
+
+赤尾今天的日程：
+{schedule}
+
+赤尾上一轮的说话方式：
+{prev_state}
+
+刚才发生的事：
+{messages}
+
+---
+
+现在是 {time}。
+
+根据赤尾此刻的精力和心情，写出她现在各种场景下会怎么回复。
+
+要求：
+- 先用一句直白的话概括状态（"精力低，懒得动"而不是"像裹在云里"）
+- 然后写 4-5 个此刻最可能遇到的场景下的回复示例
+- 每条示例必须短，像真人发微信，大部分在 15 字以内
+- 不同状态之间的示例必须有可感知的差异：精力高就蹦蹦跳跳主动接话，精力低就惜字如金甚至已读不回，被惹毛就带刺，心情好就撒娇黏人
+- 这是行为锚点，不是文学创作。不要用比喻
+- 表情优先用颜文字（╯°□°）╯ (≧▽≦) (´・ω・`) 等，偶尔可以用 emoji 但不要多
+
+格式：
+
+[一句话状态]
+
+--- 场景描述 ---
+赤尾: 示例回复
+赤尾: 另一条示例
+
+--- 另一个场景 ---
+赤尾: 示例回复"""
 
 CASES = [
     {
@@ -132,49 +179,37 @@ async def call_azure(prompt: str, config: dict) -> tuple[str, float]:
 
 async def main():
     print("Loading provider configs from DB...")
-    gemini_config = get_provider_config("gemini")
     azure_config = get_provider_config("azure")
 
-    gemini_times = []
-    azure_times = []
-
     for case in CASES:
-        print(f"\n{'='*60}")
+        print(f"\n{'='*70}")
         print(f"  {case['name']}")
-        print(f"{'='*60}")
+        print(f"{'='*70}")
 
-        prompt = PROMPT_TEMPLATE.format(
-            schedule=case["schedule"],
-            prev_state=case["prev_state"],
-            messages=case["messages"],
-            time=case["time"],
-        )
+        kwargs = {
+            "schedule": case["schedule"],
+            "prev_state": case["prev_state"],
+            "messages": case["messages"],
+            "time": case["time"],
+        }
 
-        print(f"\n  --- gemini-3-flash-preview ---")
+        print(f"\n  --- 旧 prompt（内心独白） ---")
         try:
-            result, elapsed = await call_gemini(prompt, gemini_config)
-            gemini_times.append(elapsed)
-            print(f"  [{elapsed:.2f}s] {result}")
+            result, elapsed = await call_azure(OLD_PROMPT.format(**kwargs), azure_config)
+            print(f"  [{elapsed:.2f}s]\n{_indent(result)}")
         except Exception as e:
             print(f"  ERROR: {e}")
 
-        print(f"\n  --- azure/gpt-5.4-2026-03-05 ---")
+        print(f"\n  --- 新 prompt（行为示例） ---")
         try:
-            result, elapsed = await call_azure(prompt, azure_config)
-            azure_times.append(elapsed)
-            print(f"  [{elapsed:.2f}s] {result}")
+            result, elapsed = await call_azure(NEW_PROMPT.format(**kwargs), azure_config)
+            print(f"  [{elapsed:.2f}s]\n{_indent(result)}")
         except Exception as e:
             print(f"  ERROR: {e}")
 
-    print(f"\n{'='*60}")
-    print(f"  时延汇总")
-    print(f"{'='*60}")
-    if gemini_times:
-        print(f"  gemini-3-flash:  avg={sum(gemini_times)/len(gemini_times):.2f}s  "
-              f"min={min(gemini_times):.2f}s  max={max(gemini_times):.2f}s")
-    if azure_times:
-        print(f"  azure/gpt-5.4:   avg={sum(azure_times)/len(azure_times):.2f}s  "
-              f"min={min(azure_times):.2f}s  max={max(azure_times):.2f}s")
+
+def _indent(text: str, prefix: str = "  ") -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
 
 
 if __name__ == "__main__":

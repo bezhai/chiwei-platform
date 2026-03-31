@@ -21,7 +21,7 @@ from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_inner_context
+from app.services.memory_context import build_inner_context, get_reply_style
 from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.utils.content_parser import parse_content
 
@@ -283,6 +283,12 @@ async def _build_and_stream(
         )
     except Exception as e:
         logger.error(f"Failed to build inner context: {e}")
+
+    # 动态 reply-style（漂移生成的行为示例，fallback 静态示例）
+    try:
+        prompt_vars["reply_style"] = await get_reply_style(chat_id)
+    except Exception as e:
+        logger.error(f"Failed to get reply style: {e}")
 
     full_content = ""
     has_text_in_current_turn = False
