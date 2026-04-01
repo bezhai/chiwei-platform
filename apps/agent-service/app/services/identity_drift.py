@@ -47,6 +47,36 @@ async def set_base_reply_style(style: str) -> None:
     logger.info(f"Base reply_style updated: {style[:50]}...")
 
 
+async def generate_base_reply_style() -> str | None:
+    """基于当前 Schedule 生成全局基线 reply_style
+
+    不依赖任何群/私聊的消息，只用 schedule + 当前时段。
+    在 8:00/14:00/18:00 由 cron 调用，为没有独立漂移的会话提供基线。
+    """
+    schedule_context = await _get_schedule_context()
+    if not schedule_context or schedule_context.startswith("（"):
+        logger.info("No schedule available, skip base reply_style generation")
+        return None
+
+    now = datetime.now(CST)
+    prompt = get_prompt("drift_base_generator")
+    compiled = prompt.compile(
+        schedule_daily=schedule_context,
+        current_time=now.strftime("%H:%M"),
+    )
+
+    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
+    response = await model.ainvoke([{"role": "user", "content": compiled}])
+    style = _extract_text(response.content)
+
+    if not style:
+        logger.warning("Base reply_style generation returned empty")
+        return None
+
+    await set_base_reply_style(style)
+    return style
+
+
 async def get_identity_state(chat_id: str) -> str | None:
     """从 Redis 读取当前 identity 漂移状态"""
     redis = AsyncRedisClient.get_instance()

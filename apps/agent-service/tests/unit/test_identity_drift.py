@@ -320,3 +320,50 @@ async def test_set_base_reply_style_stores_with_ttl():
     assert call_args[0][1] == "懒洋洋的，说话短"
     # TTL: 12 小时（覆盖到下一次生成）
     assert call_args[1].get("ex") == 43200
+
+
+@pytest.mark.asyncio
+async def test_generate_base_reply_style_uses_schedule():
+    """基线生成：读 schedule + 调 LLM + 存 Redis"""
+    mock_response = MagicMock()
+    mock_response.content = "[感冒中，懒懒的]\n\n--- 被问问题 ---\n赤尾: 不知道诶……头好晕"
+
+    mock_model = AsyncMock()
+    mock_model.ainvoke = AsyncMock(return_value=mock_response)
+
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock()
+
+    with (
+        patch("app.services.identity_drift.AsyncRedisClient") as mock_redis_cls,
+        patch("app.services.identity_drift.ModelBuilder") as mock_mb,
+        patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
+        patch("app.services.identity_drift._get_schedule_context",
+              new_callable=AsyncMock, return_value="今天感冒了，想躺着"),
+    ):
+        mock_redis_cls.get_instance.return_value = mock_redis
+        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
+
+        mock_prompt = MagicMock()
+        mock_prompt.compile.return_value = "compiled prompt"
+        mock_get_prompt.return_value = mock_prompt
+
+        from app.services.identity_drift import generate_base_reply_style
+        result = await generate_base_reply_style()
+
+    assert result is not None
+    assert "感冒" in result
+    mock_get_prompt.assert_called_with("drift_base_generator")
+    mock_model.ainvoke.assert_called_once()
+    mock_redis.set.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_base_reply_style_no_schedule_skips():
+    """无 schedule 时跳过生成"""
+    with patch("app.services.identity_drift._get_schedule_context",
+               new_callable=AsyncMock, return_value="（今天还没有写日程）"):
+        from app.services.identity_drift import generate_base_reply_style
+        result = await generate_base_reply_style()
+
+    assert result is None
