@@ -6,6 +6,7 @@
     arq app.workers.unified_worker.UnifiedWorkerSettings
 """
 
+import asyncio
 import logging
 
 from arq import cron
@@ -21,6 +22,7 @@ from app.workers.schedule_worker import (
     cron_generate_monthly_plan,
     cron_generate_weekly_plan,
 )
+from app.workers.base_style_worker import cron_generate_base_reply_style
 from app.workers.vectorize_worker import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
@@ -33,9 +35,10 @@ async def task_executor_job(ctx) -> None:
 
 
 async def on_startup(ctx) -> None:
-    """Worker 启动时配置日志"""
+    """Worker 启动时配置日志 + 生成基线 reply_style"""
     setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
     logger.info("arq-worker started, file logging enabled")
+    asyncio.create_task(cron_generate_base_reply_style(None))
 
 
 class UnifiedWorkerSettings:
@@ -76,4 +79,6 @@ class UnifiedWorkerSettings:
         cron(cron_generate_daily_plan, hour={5}, minute={0}),
         cron(cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}),
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}),
+        # 8. 基线 reply_style：每天 CST 8:00/14:00/18:00（Schedule 之后）
+        cron(cron_generate_base_reply_style, hour={8, 14, 18}, minute={0}),
     ]
