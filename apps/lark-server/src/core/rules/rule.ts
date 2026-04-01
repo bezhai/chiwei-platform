@@ -67,6 +67,9 @@ export const combineRule = <T>(
     return { rule, handler };
 };
 
+/** 规则分类：utility=工具功能, persona=拟人聊天 */
+export type RuleCategory = 'utility' | 'persona';
+
 // 定义规则和对应处理逻辑的结构
 export interface RuleConfig {
     rules: Rule[];
@@ -74,6 +77,7 @@ export interface RuleConfig {
     handler: Handler;
     fallthrough?: boolean;
     comment?: string;
+    category?: RuleCategory;
 }
 
 // 工具函数：通用规则
