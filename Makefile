@@ -240,12 +240,13 @@ END       ?=
 ##       make logs APP=lark-server POD=lark-server-abc          （Pod 前缀）
 ##       make logs APP=lark-server START=2024-01-01T10:00:00Z END=2024-01-01T11:00:00Z
 logs:
-	@PARAMS="limit=$(LIMIT)&direction=$(DIRECTION)"; \
-	if [ -n "$(APP)" ]; then PARAMS="$$PARAMS&app=$(APP)"; fi; \
-	if [ -n "$(KEYWORD)" ]; then PARAMS="$$PARAMS&keyword=$(KEYWORD)"; fi; \
-	if [ -n "$(EXCLUDE)" ]; then PARAMS="$$PARAMS&exclude=$(EXCLUDE)"; fi; \
-	if [ -n "$(REGEXP)" ]; then PARAMS="$$PARAMS&regexp=$(REGEXP)"; fi; \
-	if [ -n "$(POD)" ]; then PARAMS="$$PARAMS&pod=$(POD)"; fi; \
+	@urlencode() { python3 -c "import urllib.parse; print(urllib.parse.quote('''$$1''', safe=''))"; }; \
+	PARAMS="limit=$(LIMIT)&direction=$(DIRECTION)"; \
+	if [ -n "$(APP)" ]; then PARAMS="$$PARAMS&app=$$(urlencode '$(APP)')"; fi; \
+	if [ -n "$(KEYWORD)" ]; then PARAMS="$$PARAMS&keyword=$$(urlencode '$(KEYWORD)')"; fi; \
+	if [ -n "$(EXCLUDE)" ]; then PARAMS="$$PARAMS&exclude=$$(urlencode '$(EXCLUDE)')"; fi; \
+	if [ -n "$(REGEXP)" ]; then PARAMS="$$PARAMS&regexp=$$(urlencode '$(REGEXP)')"; fi; \
+	if [ -n "$(POD)" ]; then PARAMS="$$PARAMS&pod=$$(urlencode '$(POD)')"; fi; \
 	if [ -n "$(filter-out prod,$(LANE))" ]; then PARAMS="$$PARAMS&lane=$(LANE)"; fi; \
 	if [ -n "$(START)" ]; then \
 		PARAMS="$$PARAMS&start=$(START)"; \
@@ -254,9 +255,10 @@ logs:
 		PARAMS="$$PARAMS&since=$(SINCE)"; \
 	fi; \
 	echo ">>> 查询日志: $$PARAMS"; \
-	curl -sf "$(PAAS_API)/api/paas/logs?$$PARAMS" \
-		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
-		| python3 -c "import sys,json; print(json.loads(sys.stdin.buffer.read(),strict=False).get('data',{}).get('logs','(无日志)'))"
+	RESP=$$(curl -sf "$(PAAS_API)/api/paas/logs?$$PARAMS" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE)); \
+	if [ -z "$$RESP" ]; then echo "(请求失败或无响应)"; exit 1; fi; \
+	echo "$$RESP" | python3 -c "import sys,json; print(json.loads(sys.stdin.buffer.read(),strict=False).get('data',{}).get('logs','(无日志)'))"
 
 # ---------- 泳道绑定 ----------
 

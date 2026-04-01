@@ -1,5 +1,5 @@
 import Router from '@koa/router';
-import { paasClient } from '../paas-client';
+import { paasClient, larkClient } from '../paas-client';
 
 const router = new Router();
 
@@ -66,7 +66,7 @@ router.post('/api/ops/db-query', async (ctx) => {
 
 /** GET /api/ops/lane-bindings — 列出泳道绑定 */
 router.get('/api/ops/lane-bindings', async (ctx) => {
-  const data = await paasClient.get('/api/lark/lane-bindings');
+  const data = await larkClient.get('/api/lark/lane-bindings');
   ctx.body = data;
 });
 
@@ -84,7 +84,7 @@ router.post('/api/ops/lane-bindings', async (ctx) => {
     ctx.body = { message: 'route_type, route_key, and lane_name are required' };
     return;
   }
-  const data = await paasClient.post('/api/lark/lane-bindings', {
+  const data = await larkClient.post('/api/lark/lane-bindings', {
     route_type,
     route_key,
     lane_name,
@@ -101,7 +101,7 @@ router.delete('/api/ops/lane-bindings', async (ctx) => {
     ctx.body = { message: 'type and key query params are required' };
     return;
   }
-  const data = await paasClient.del('/api/lark/lane-bindings', { type, key });
+  const data = await larkClient.del('/api/lark/lane-bindings', { type, key });
   ctx.body = data;
 });
 

@@ -48,9 +48,14 @@ git push -u origin <branch>
 # 创建 PR（已存在则跳过）
 ghc pr create --fill 2>/dev/null || true
 
-# 直接合码
-ghc pr merge --squash --delete-branch
+# 合码（不带 --delete-branch，避免 worktree 下切 main 失败）
+ghc pr merge --squash
+
+# 删除远端分支（合码成功后）
+git push origin --delete <branch>
 ```
+
+**禁止使用 `--delete-branch`**：在 worktree 中该参数会尝试本地切换到 main，导致 `致命错误：'main' 已经检出到 ...`。PR 实际已合并但命令报错，模型会误以为失败而重试。
 
 **合并冲突处理**：遇到冲突时，展示冲突文件和冲突内容，等用户指示如何解决。解决后重新 push 并重试。不要自行选择保留哪个版本。
 
