@@ -30,6 +30,23 @@ def _state_key(chat_id: str) -> str:
     return f"{_KEY_PREFIX}:{chat_id}"
 
 
+_BASE_KEY = "reply_style:__base__"
+_BASE_TTL_SECONDS = 43200  # 12 小时，覆盖到下一次定时生成
+
+
+async def get_base_reply_style() -> str | None:
+    """读取全局基线 reply_style"""
+    redis = AsyncRedisClient.get_instance()
+    return await redis.get(_BASE_KEY)
+
+
+async def set_base_reply_style(style: str) -> None:
+    """写入全局基线 reply_style"""
+    redis = AsyncRedisClient.get_instance()
+    await redis.set(_BASE_KEY, style, ex=_BASE_TTL_SECONDS)
+    logger.info(f"Base reply_style updated: {style[:50]}...")
+
+
 async def get_identity_state(chat_id: str) -> str | None:
     """从 Redis 读取当前 identity 漂移状态"""
     redis = AsyncRedisClient.get_instance()

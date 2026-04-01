@@ -284,3 +284,39 @@ async def test_get_recent_akao_replies_filters_assistant_only():
     # 不应包含 user 消息原文
     lines = result.strip().split("\n")
     assert len(lines) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_base_reply_style_returns_none_when_empty():
+    """无基线时返回 None"""
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=None)
+
+    with patch("app.services.identity_drift.AsyncRedisClient") as mock_cls:
+        mock_cls.get_instance.return_value = mock_redis
+        from app.services.identity_drift import get_base_reply_style
+
+        result = await get_base_reply_style()
+
+    assert result is None
+    mock_redis.get.assert_called_once_with("reply_style:__base__")
+
+
+@pytest.mark.asyncio
+async def test_set_base_reply_style_stores_with_ttl():
+    """写入基线并设置 TTL"""
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock()
+
+    with patch("app.services.identity_drift.AsyncRedisClient") as mock_cls:
+        mock_cls.get_instance.return_value = mock_redis
+        from app.services.identity_drift import set_base_reply_style
+
+        await set_base_reply_style("懒洋洋的，说话短")
+
+    mock_redis.set.assert_called_once()
+    call_args = mock_redis.set.call_args
+    assert call_args[0][0] == "reply_style:__base__"
+    assert call_args[0][1] == "懒洋洋的，说话短"
+    # TTL: 12 小时（覆盖到下一次生成）
+    assert call_args[1].get("ex") == 43200
