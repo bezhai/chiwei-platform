@@ -6,6 +6,7 @@
     arq app.workers.unified_worker.UnifiedWorkerSettings
 """
 
+import asyncio
 import logging
 
 from arq import cron
@@ -21,7 +22,6 @@ from app.workers.schedule_worker import (
     cron_generate_monthly_plan,
     cron_generate_weekly_plan,
 )
-from app.services.identity_drift import generate_base_reply_style
 from app.workers.base_style_worker import cron_generate_base_reply_style
 from app.workers.vectorize_worker import cron_scan_pending_messages
 
@@ -38,10 +38,7 @@ async def on_startup(ctx) -> None:
     """Worker 启动时配置日志 + 生成基线 reply_style"""
     setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
     logger.info("arq-worker started, file logging enabled")
-    try:
-        await generate_base_reply_style()
-    except Exception as e:
-        logger.warning(f"Startup base reply_style generation failed: {e}")
+    asyncio.create_task(cron_generate_base_reply_style(None))
 
 
 class UnifiedWorkerSettings:
