@@ -18,7 +18,7 @@ from app.orm.crud import (
     get_plan_for_period,
     get_username,
 )
-from app.services.identity_drift import get_identity_state
+from app.services.identity_drift import get_base_reply_style, get_identity_state
 
 logger = logging.getLogger(__name__)
 
@@ -178,12 +178,22 @@ async def _build_cross_group_gestalt(user_id: str, trigger_username: str) -> str
 
 
 async def get_reply_style(chat_id: str) -> str:
-    """获取动态 reply-style：优先漂移输出，fallback 静态示例"""
+    """获取动态 reply-style：per-chat 漂移 → 全局基线 → 静态默认"""
     try:
         drift_state = await get_identity_state(chat_id)
+        if drift_state:
+            return drift_state
     except Exception:
-        drift_state = None
-    return drift_state if drift_state else _DEFAULT_REPLY_STYLE
+        pass
+
+    try:
+        base_state = await get_base_reply_style()
+        if base_state:
+            return base_state
+    except Exception:
+        pass
+
+    return _DEFAULT_REPLY_STYLE
 
 
 # 向后兼容别名

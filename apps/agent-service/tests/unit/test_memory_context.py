@@ -154,3 +154,49 @@ async def test_build_people_gestalt_includes_updated_at():
     assert "03月15日" in lines[0]
     assert "很有趣的人" in lines[0]
     assert "A哥" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_get_reply_style_fallback_to_base():
+    """per-chat 无漂移 → fallback 到基线"""
+    with (
+        patch("app.services.memory_context.get_identity_state",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.memory_context.get_base_reply_style",
+              new_callable=AsyncMock, return_value="[感冒中] 说话短短的"),
+    ):
+        from app.services.memory_context import get_reply_style
+        result = await get_reply_style("p2p_001")
+
+    assert "感冒" in result
+
+
+@pytest.mark.asyncio
+async def test_get_reply_style_per_chat_takes_priority():
+    """per-chat 有漂移 → 用 per-chat，不读基线"""
+    with (
+        patch("app.services.memory_context.get_identity_state",
+              new_callable=AsyncMock, return_value="群里很嗨"),
+        patch("app.services.memory_context.get_base_reply_style",
+              new_callable=AsyncMock) as mock_base,
+    ):
+        from app.services.memory_context import get_reply_style
+        result = await get_reply_style("chat_001")
+
+    assert "很嗨" in result
+    mock_base.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_reply_style_fallback_to_default():
+    """per-chat 无漂移 + 基线也无 → fallback 到静态默认"""
+    with (
+        patch("app.services.memory_context.get_identity_state",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.memory_context.get_base_reply_style",
+              new_callable=AsyncMock, return_value=None),
+    ):
+        from app.services.memory_context import get_reply_style
+        result = await get_reply_style("p2p_001")
+
+    assert "好耶" in result  # 静态默认值中的内容
