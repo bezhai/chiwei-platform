@@ -226,7 +226,7 @@ async def _maybe_piggyback_scan() -> None:
     """概率触发一次主动搭话扫描（piggyback 模式）"""
     import random
     try:
-        if random.random() > 0.6:  # 约 60% 概率触发
+        if random.random() > 0.6:  # 40% 概率跳过，即 60% 概率触发
             return
         from app.workers.proactive_scanner import run_proactive_scan
         await run_proactive_scan(source="piggyback")

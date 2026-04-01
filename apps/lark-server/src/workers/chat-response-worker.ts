@@ -259,7 +259,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
         if (!content) {
             console.warn(`[ChatResponseWorker] Empty content: session_id=${session_id}, part=${part_index}`);
-            if (is_last) {
+            if (is_last && agentResponse) {
                 await repo.update({ session_id }, { status: 'completed' });
             }
             return;
