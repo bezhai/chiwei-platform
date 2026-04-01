@@ -273,6 +273,10 @@ async def _build_and_stream(
 
     # 构建统一 inner_context（场景 + 状态 + 印象 + 引导语）
     try:
+        from app.agents.domains.main.context_builder import (
+            _is_proactive_var,
+            _proactive_stimulus_var,
+        )
         prompt_vars["inner_context"] = await build_inner_context(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -280,6 +284,8 @@ async def _build_and_stream(
             trigger_user_id=trigger_user_id,
             trigger_username=trigger_username,
             chat_name=chat_name,
+            is_proactive=_is_proactive_var.get(False),
+            proactive_stimulus=_proactive_stimulus_var.get(""),
         )
     except Exception as e:
         logger.error(f"Failed to build inner context: {e}")

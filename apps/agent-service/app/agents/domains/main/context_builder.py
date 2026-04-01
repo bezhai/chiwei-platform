@@ -22,6 +22,12 @@ from app.utils.content_parser import parse_content, update_tos_files
 
 logger = logging.getLogger(__name__)
 
+PROACTIVE_USER_ID = "__proactive__"
+
+import contextvars
+_is_proactive_var: contextvars.ContextVar[bool] = contextvars.ContextVar("is_proactive", default=False)
+_proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar("proactive_stimulus", default="")
+
 
 async def build_chat_context(
     message_id: str, limit: int = 10
@@ -44,6 +50,22 @@ async def build_chat_context(
         return [], None, "", "", "p2p", "", "", []
 
     chat_type = l1_results[-1].chat_type or "p2p"  # 默认私聊
+
+    # --- Proactive 检测 ---
+    is_proactive = l1_results[-1].user_id == PROACTIVE_USER_ID
+    proactive_stimulus = ""
+    proactive_target_id = ""
+
+    if is_proactive:
+        proactive_msg = l1_results.pop()
+        proactive_stimulus = parse_content(proactive_msg.content).render()
+        proactive_target_id = proactive_msg.reply_message_id or ""
+        if not l1_results:
+            logger.warning("proactive scan: no real messages found after filtering")
+            return [], None, "", "", "group", "", "", []
+
+    _is_proactive_var.set(is_proactive)
+    _proactive_stimulus_var.set(proactive_stimulus)
 
     # 1. 从 content 里批量提取图片 keys，区分已缓存 vs 未缓存
     cached_keys: list[tuple[str, str]]  = []  # (image_key, tos_file)
@@ -115,20 +137,27 @@ async def build_chat_context(
         for key, filename in zip(keys_ordered, filenames):
             image_key_to_filename[key] = filename
 
+    # 提取触发消息的用户名和用户ID
+    if is_proactive:
+        trigger_username = ""
+        trigger_user_id = ""
+        chat_name = l1_results[-1].chat_name or "" if l1_results else ""
+        effective_trigger_id = proactive_target_id or (l1_results[-1].message_id if l1_results else message_id)
+    else:
+        trigger_username = l1_results[-1].username or ""
+        trigger_user_id = l1_results[-1].user_id or ""
+        chat_name = l1_results[-1].chat_name or ""
+        effective_trigger_id = message_id
+
     # 4. 根据 chat_type 使用不同策略组装消息列表
     if chat_type == "group":
         messages = _build_group_messages(
-            l1_results, message_id, image_key_to_url, image_key_to_filename,
+            l1_results, effective_trigger_id, image_key_to_url, image_key_to_filename,
         )
     else:
         messages = _build_p2p_messages(
             l1_results, image_key_to_url, image_key_to_filename,
         )
-
-    # 提取触发消息的用户名和用户ID
-    trigger_username = l1_results[-1].username or ""
-    trigger_user_id = l1_results[-1].user_id or ""
-    chat_name = l1_results[-1].chat_name or ""
 
     # 提取回复链中所有用户ID
     chain_user_ids = list({
