@@ -240,7 +240,9 @@ async def submit_proactive_request(
         session.add(msg)
         await session.commit()
 
-    # 发布到 chat_request 队列（lane=None 强制走 prod）
+    # 发布到 chat_request 队列（不指定 lane，跟随当前泳道）
+    from app.clients.rabbitmq import _current_lane
+    current_lane = _current_lane()
     client = RabbitMQClient.get_instance()
     await client.publish(
         CHAT_REQUEST,
@@ -253,10 +255,9 @@ async def submit_proactive_request(
             "user_id": PROACTIVE_USER_ID,
             "bot_name": "chiwei",
             "is_proactive": True,
-            "lane": None,
+            "lane": current_lane,
             "enqueued_at": now_ms,
         },
-        lane=None,
     )
 
     logger.info(
