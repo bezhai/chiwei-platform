@@ -46,6 +46,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
         user_id = body.get("user_id")
         lane = body.get("lane")
         bot_name = body.get("bot_name")
+        is_proactive = body.get("is_proactive", False)
 
         # Measure MQ queue wait time
         queue_wait_ms = 0.0
@@ -80,6 +81,8 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             "root_id": root_id,
             "user_id": user_id,
             "lane": lane,
+            "is_proactive": is_proactive,
+            "bot_name": bot_name,
         }
 
         try:
@@ -195,6 +198,11 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                 },
             )
 
+            # Piggyback: 回复完后顺手刷一眼群聊（proactive 回复不触发，避免递归）
+            if not is_proactive:
+                import asyncio as _asyncio
+                _asyncio.create_task(_maybe_piggyback_scan())
+
         except Exception as e:
             logger.error(
                 "Chat request failed: session_id=%s, error=%s\n%s",
@@ -212,6 +220,18 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                 },
                 lane=lane,
             )
+
+
+async def _maybe_piggyback_scan() -> None:
+    """概率触发一次主动搭话扫描（piggyback 模式）"""
+    import random
+    try:
+        if random.random() > 0.6:  # 约 60% 概率触发
+            return
+        from app.workers.proactive_scanner import run_proactive_scan
+        await run_proactive_scan(source="piggyback")
+    except Exception as e:
+        logger.warning(f"piggyback scan failed: {e}")
 
 
 async def start_chat_consumer() -> None:
