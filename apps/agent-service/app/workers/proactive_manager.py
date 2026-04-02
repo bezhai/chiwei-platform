@@ -8,8 +8,12 @@ import asyncio
 import logging
 import time
 
+from sqlalchemy import select, func as sa_func
+
 from app.clients.redis import AsyncRedisClient
-from app.workers.proactive_scanner import TARGET_CHAT_ID, run_proactive_scan
+from app.orm.base import AsyncSessionLocal
+from app.orm.models import ConversationMessage
+from app.workers.proactive_scanner import PROACTIVE_USER_ID, TARGET_CHAT_ID, run_proactive_scan
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +30,6 @@ class ProactiveManager:
     HOURLY_LIMIT = 6  # 每小时最多主动发言次数
     CONSECUTIVE_LIMIT = 2  # 连续无人回应次数上限
     CONSECUTIVE_COOLDOWN = 3 * 3600  # 连续无回应后冷却 3 小时
-    NO_RESPONSE_COOLDOWN = 150  # 模型说"不想说"后冷却 2.5 分钟
 
     # Redis keys
     HOURLY_COUNT_KEY = "proactive:hourly_count:{chat_id}"  # TTL 1h
@@ -50,8 +53,6 @@ class ProactiveManager:
         """每条群消息调用一次，debounce 后触发扫描"""
         if chat_id not in TARGET_CHAT_IDS:
             return
-        logger.info("proactive on_event: chat_id=%s", chat_id)
-
         redis = AsyncRedisClient.get_instance()
 
         # 冷却中则跳过
@@ -78,7 +79,7 @@ class ProactiveManager:
         finally:
             self._timers.pop(chat_id, None)
 
-        logger.info("proactive debounce fired for %s, executing scan", chat_id)
+        logger.debug("proactive debounce fired for %s", chat_id)
         await self._execute_scan(chat_id)
 
     async def _execute_scan(self, chat_id: str) -> None:
@@ -133,20 +134,14 @@ class ProactiveManager:
         return True
 
     async def _check_and_reset_consecutive(self, chat_id: str) -> None:
-        """扫描前检查：上次主动发言后是否有人回应，有则重置 consecutive 计数"""
+        """扫描前检查：上次主动发言后是否有人回应，有则重置 consecutive 计数和冷却"""
         redis = AsyncRedisClient.get_instance()
         ts_key = self.LAST_PROACTIVE_TS_KEY.format(chat_id=chat_id)
         last_ts = await redis.get(ts_key)
         if last_ts is None:
-            return  # 还没主动发过言，无需检查
+            return
 
         last_ts_ms = int(last_ts)
-
-        # 查询 last_proactive_ts 之后是否有用户消息
-        from sqlalchemy import select, func as sa_func
-        from app.orm.base import AsyncSessionLocal
-        from app.orm.models import ConversationMessage
-        from app.workers.proactive_scanner import PROACTIVE_USER_ID
 
         async with AsyncSessionLocal() as session:
             stmt = (
@@ -163,9 +158,9 @@ class ProactiveManager:
             count = result.scalar() or 0
 
         if count > 0:
-            # 有人说话了，重置连续无回应计数
-            cons_key = self.CONSECUTIVE_KEY.format(chat_id=chat_id)
-            await redis.delete(cons_key)
+            # 有人说话了，重置连续无回应计数 + 清除冷却
+            await redis.delete(self.CONSECUTIVE_KEY.format(chat_id=chat_id))
+            await redis.delete(self.COOLDOWN_KEY.format(chat_id=chat_id))
 
     async def _update_after_submit(self, chat_id: str) -> None:
         """主动发言成功后：递增每小时计数 + 递增连续计数 + 记录时间戳"""

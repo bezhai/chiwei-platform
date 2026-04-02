@@ -2,11 +2,12 @@
 
 核心流程 (run_proactive_scan):
 1. 安静时段检查（23:00~09:00 CST 不扫）
-2. Redis 冷却检查（15 分钟内不重复扫）
-3. 获取上次发言后的未读消息
-4. 收集上下文（reply_style、group_culture、今日主动记录）
-5. 小模型判断是否应该回复
-6. 合成触发消息 + 发布 chat_request
+2. 获取上次发言后的未读消息
+3. 收集上下文（reply_style、group_culture、今日主动记录）
+4. 小模型判断是否应该回复
+5. 合成触发消息 + 发布 chat_request
+
+频率控制由 ProactiveManager 负责（debounce、每小时上限、连续无回应冷却）。
 """
 
 import json
@@ -20,7 +21,6 @@ from sqlalchemy import select, func as sa_func
 from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.clients.rabbitmq import CHAT_REQUEST, RabbitMQClient
-from app.clients.redis import AsyncRedisClient
 from app.orm.base import AsyncSessionLocal
 from app.orm.crud import get_group_culture_gestalt
 from app.orm.models import ConversationMessage
@@ -31,16 +31,11 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────
 TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
-COOLDOWN_KEY = "proactive:last_scan_time"
-COOLDOWN_MS = 15 * 60 * 1000  # 15 min
 PROACTIVE_USER_ID = "__proactive__"
 QUIET_HOURS = (23, 9)  # >= 23 or < 9
 JUDGE_MODEL_ID = "proactive-judge-model"
 
 CST = timezone(timedelta(hours=8))
-
-
-# ── 冷却与时段 ────────────────────────────────────────────────────────────
 
 
 def _is_quiet_hours(now: datetime | None = None) -> bool:
@@ -49,26 +44,6 @@ def _is_quiet_hours(now: datetime | None = None) -> bool:
     hour = now.hour
     start, end = QUIET_HOURS
     return hour >= start or hour < end
-
-
-async def should_scan() -> bool:
-    """检查 Redis 冷却，15 分钟内扫过则返回 False"""
-    redis = AsyncRedisClient.get_instance()
-    last = await redis.get(COOLDOWN_KEY)
-    if last is None:
-        return True
-    try:
-        elapsed = int(time.time() * 1000) - int(last)
-        return elapsed >= COOLDOWN_MS
-    except (ValueError, TypeError):
-        return True
-
-
-async def _mark_scanned() -> None:
-    """写入当前时间戳到 Redis 冷却 key"""
-    redis = AsyncRedisClient.get_instance()
-    now_ms = int(time.time() * 1000)
-    await redis.set(COOLDOWN_KEY, str(now_ms), ex=COOLDOWN_MS // 1000 + 60)
 
 
 # ── 未读消息获取 ──────────────────────────────────────────────────────────
@@ -267,7 +242,7 @@ async def submit_proactive_request(
             "message_id": message_id,
             "chat_id": TARGET_CHAT_ID,
             "is_p2p": False,
-            "root_id": message_id,
+            "root_id": target_message_id or "",
             "user_id": PROACTIVE_USER_ID,
             "bot_name": "bytedance",
             "is_proactive": True,
@@ -298,8 +273,6 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         logger.debug("proactive_scan skipped: quiet hours")
         return {"skipped": "quiet_hours"}
 
-    # 频率控制已由 ProactiveManager 接管，scanner 不再做冷却检查
-
     # 2. 获取未读消息
     messages = await get_unseen_messages()
     if not messages:
@@ -314,13 +287,13 @@ async def run_proactive_scan(source: str = "cron") -> dict:
 
     with langfuse.start_as_current_observation(as_type="trace", name="proactive-scan"):
         with propagate_attributes(session_id=scan_session_id):
-            # 5. 收集上下文
+            # 3. 收集上下文
             messages_text = await _format_messages_for_judge(messages)
             reply_style = await get_reply_style(TARGET_CHAT_ID)
             group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID)
             recent_proactive = await _get_recent_proactive_records()
 
-            # 6. 小模型判断
+            # 4. 小模型判断
             decision = await judge_response(
                 messages_text=messages_text,
                 reply_style=reply_style,
@@ -332,7 +305,7 @@ async def run_proactive_scan(source: str = "cron") -> dict:
                 logger.info("proactive_scan decided not to respond (source=%s)", source)
                 return {"decided": "no_response"}
 
-            # 7. 投递
+            # 5. 投递
             session_id = await submit_proactive_request(
                 target_message_id=decision.get("target_message_id"),
                 stimulus=decision.get("stimulus"),

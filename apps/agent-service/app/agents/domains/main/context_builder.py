@@ -53,7 +53,7 @@ async def build_chat_context(
 
     # --- Proactive: 过滤所有合成消息 ---
     proactive_msgs = [m for m in l1_results if m.user_id == PROACTIVE_USER_ID]
-    is_proactive = l1_results[-1].user_id == PROACTIVE_USER_ID
+    is_proactive = len(proactive_msgs) > 0
     proactive_stimulus = ""
     proactive_target_id = ""
 
