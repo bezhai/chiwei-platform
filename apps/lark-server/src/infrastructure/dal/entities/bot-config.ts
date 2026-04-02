@@ -32,6 +32,9 @@ export class BotConfig {
     @Column({ type: 'boolean', default: false })
     is_dev!: boolean; // 是否为开发环境机器人
 
+    @Column({ type: 'varchar', length: 20, default: 'persona' })
+    bot_role!: 'persona' | 'utility'; // persona=拟人聊天, utility=工具功能
+
     @CreateDateColumn({ name: 'created_at' })
     createdAt!: Date;
 

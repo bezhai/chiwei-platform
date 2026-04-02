@@ -1,7 +1,8 @@
 import { ChatMessage } from 'types/chat';
-import { ConversationMessageRepository } from 'infrastructure/dal/repositories/repositories';
+import { ConversationMessage } from '@entities/conversation-message';
 import { context } from '@middleware/context';
 import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
+import AppDataSource from 'ormconfig';
 
 /**
  * 判断消息内容是否为空
@@ -14,38 +15,41 @@ function isEmptyContent(content: string | undefined | null): boolean {
 /**
  * 存储消息到 PostgreSQL 并推送向量化任务到 RabbitMQ
  *
- * 解耦设计：
- * 1. 消息直接写入 PostgreSQL，不依赖 ai-service
- * 2. 向量化任务通过 RabbitMQ 异步处理
- * 3. 即使 ai-service 不可用，消息也不会丢失
- * 4. 空消息不推送到向量化队列，直接标记为 skipped
+ * 使用 INSERT ... ON CONFLICT DO NOTHING 实现原子去重：
+ * - 多 bot 同群时，同一 message_id 只有第一个到达的 bot 能成功插入
+ * - 仅插入成功时推送向量化任务，天然防止重复向量化
  */
 export async function storeMessage(message: ChatMessage): Promise<void> {
     try {
-        // 获取当前上下文中的 bot_name（用于后续图片下载等操作），默认 bytedance
         const botName = message.bot_name || context.getBotName() || 'bytedance';
-
-        // 判断是否为空消息
         const isEmpty = isEmptyContent(message.content);
 
-        // 1. 直接写入 PostgreSQL
-        await ConversationMessageRepository.save({
-            message_id: message.message_id,
-            user_id: message.user_id,
-            content: message.content,
-            role: message.role,
-            root_message_id: message.root_message_id || message.message_id,
-            reply_message_id: message.reply_message_id,
-            chat_id: message.chat_id,
-            chat_type: message.chat_type,
-            create_time: message.create_time,
-            message_type: message.message_type || 'text',
-            vector_status: isEmpty ? 'skipped' : 'pending',
-            bot_name: botName,
-        });
+        // INSERT ... ON CONFLICT (message_id) DO NOTHING
+        const result = await AppDataSource.createQueryBuilder()
+            .insert()
+            .into(ConversationMessage)
+            .values({
+                message_id: message.message_id,
+                user_id: message.user_id,
+                content: message.content,
+                role: message.role,
+                root_message_id: message.root_message_id || message.message_id,
+                reply_message_id: message.reply_message_id,
+                chat_id: message.chat_id,
+                chat_type: message.chat_type,
+                create_time: message.create_time,
+                message_type: message.message_type || 'text',
+                vector_status: isEmpty ? 'skipped' : 'pending',
+                bot_name: botName,
+            })
+            .orIgnore()
+            .execute();
 
-        // 2. 仅非空消息推送向量化任务到 RabbitMQ
-        if (!isEmpty) {
+        // orIgnore: identifiers 为空数组表示冲突未插入
+        const inserted = result.identifiers.length > 0;
+
+        // 仅首次插入成功且非空消息时推送向量化
+        if (inserted && !isEmpty) {
             const lane = context.getLane() || undefined;
             await rabbitmqClient.publish(
                 VECTORIZE,

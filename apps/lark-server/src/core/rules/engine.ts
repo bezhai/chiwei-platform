@@ -20,6 +20,8 @@ import {
 import { sendPhoto } from '@core/services/media/photo/send-photo';
 import { makeTextReply } from 'core/services/ai/reply';
 import { sendBalance } from './admin/balance';
+import { context } from '@middleware/context';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
 // 工具函数：执行规则链
 export async function runRules(message: Message) {
@@ -29,7 +31,17 @@ export async function runRules(message: Message) {
         return;
     }
 
-    for (const { rules, handler, fallthrough, async_rules } of chatRules) {
+    // 多 bot 分工：灰度开启时，按 bot 角色过滤规则
+    const multiBotEnabled = message.basicChatInfo?.gray_config?.multi_bot === 'enabled';
+    const botRole = multiBotEnabled
+        ? multiBotManager.getBotConfig(context.getBotName() || '')?.bot_role
+        : undefined;
+
+    for (const { rules, handler, fallthrough, async_rules, category } of chatRules) {
+        // 灰度开启且规则有分类时，只执行匹配角色的规则
+        if (botRole && category && category !== botRole) {
+            continue;
+        }
         // 检查同步规则
         const syncRulesPass = rules.every((rule) => rule(message));
 
@@ -67,11 +79,13 @@ const chatRules: RuleConfig[] = [
         handler: repeatMessage,
         fallthrough: true,
         comment: '复读功能',
+        category: 'utility',
     },
     {
         rules: [EqualText('余额'), TextMessageLimit, NeedRobotMention, IsAdmin],
         handler: sendBalance,
         comment: '发送余额信息',
+        category: 'utility',
     },
     {
         rules: [EqualText('帮助'), TextMessageLimit, NeedRobotMention],
@@ -79,44 +93,53 @@ const chatRules: RuleConfig[] = [
             replyTemplate(message.messageId, 'ctp_AAYrltZoypBP', undefined);
         },
         comment: '给用户发送帮助信息',
+        category: 'utility',
     },
     {
         rules: [EqualText('撤回'), TextMessageLimit, NeedRobotMention],
         handler: deleteBotMessage,
         comment: '撤回消息',
+        category: 'utility',
     },
     {
         rules: [EqualText('水群', '水群趋势'), TextMessageLimit, NeedRobotMention],
         handler: genHistoryCard,
         comment: '生成水群历史卡片',
+        category: 'utility',
     },
     {
         rules: [EqualText('开启复读'), TextMessageLimit, NeedRobotMention, OnlyGroup],
         handler: changeRepeatStatus(true),
+        category: 'utility',
     },
     {
         rules: [EqualText('关闭复读'), TextMessageLimit, NeedRobotMention, OnlyGroup],
         handler: changeRepeatStatus(false),
+        category: 'utility',
     },
     {
         rules: [CommandRule, TextMessageLimit, NeedRobotMention],
         handler: CommandHandler,
         comment: '指令处理',
+        category: 'utility',
     },
     {
         rules: [RegexpMatch('^发图'), TextMessageLimit, NeedRobotMention],
         handler: sendPhoto,
         comment: '发送图片',
+        category: 'utility',
     },
     {
         rules: [NeedRobotMention],
         async_rules: [checkMeme],
         handler: genMeme,
         comment: 'Meme',
+        category: 'persona',
     },
     {
         rules: [NeedRobotMention],
         handler: makeTextReply,
         comment: '聊天',
+        category: 'persona',
     },
 ];
