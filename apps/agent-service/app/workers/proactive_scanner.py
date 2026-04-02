@@ -287,15 +287,9 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         logger.debug("proactive_scan skipped: quiet hours")
         return {"skipped": "quiet_hours"}
 
-    # 2. 冷却检查
-    if not await should_scan():
-        logger.debug("proactive_scan skipped: cooldown")
-        return {"skipped": "cooldown"}
+    # 频率控制已由 ProactiveManager 接管，scanner 不再做冷却检查
 
-    # 3. 标记已扫描
-    await _mark_scanned()
-
-    # 4. 获取未读消息
+    # 2. 获取未读消息
     messages = await get_unseen_messages()
     if not messages:
         logger.debug("proactive_scan: no unseen messages")
