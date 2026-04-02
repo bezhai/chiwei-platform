@@ -105,7 +105,7 @@ async def _format_messages_for_judge(messages: list[ConversationMessage]) -> str
         time_str = ts.strftime("%H:%M:%S")
         username = name_cache.get(msg.user_id, "unknown")
         text = parse_content(msg.content).render()
-        lines.append(f"[{time_str}] {username}: {text}")
+        lines.append(f"[{time_str}] ({msg.message_id}) {username}: {text}")
     return "\n".join(lines)
 
 
