@@ -111,15 +111,24 @@ async def get_unseen_messages(limit: int = 30) -> list[ConversationMessage]:
 # ── 小模型判断 ────────────────────────────────────────────────────────────
 
 
-def _format_messages_for_judge(messages: list[ConversationMessage]) -> str:
-    """将消息格式化为 [HH:MM:SS] user_id[:8]: text"""
+async def _format_messages_for_judge(messages: list[ConversationMessage]) -> str:
+    """将消息格式化为 [HH:MM:SS] 用户名: text"""
+    from app.orm.crud import get_username
+
+    # 批量查用户名，缓存避免重复查询
+    name_cache: dict[str, str] = {}
+    for msg in messages:
+        if msg.user_id and msg.user_id not in name_cache:
+            name = await get_username(msg.user_id)
+            name_cache[msg.user_id] = name or msg.user_id[:8]
+
     lines = []
     for msg in messages:
         ts = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
         time_str = ts.strftime("%H:%M:%S")
-        user_short = msg.user_id[:8] if msg.user_id else "unknown"
+        username = name_cache.get(msg.user_id, "unknown")
         text = parse_content(msg.content).render()
-        lines.append(f"[{time_str}] {user_short}: {text}")
+        lines.append(f"[{time_str}] {username}: {text}")
     return "\n".join(lines)
 
 
@@ -304,7 +313,7 @@ async def run_proactive_scan(source: str = "cron") -> dict:
     with langfuse.start_as_current_observation(as_type="trace", name="proactive-scan"):
         with propagate_attributes(session_id=scan_session_id):
             # 5. 收集上下文
-            messages_text = _format_messages_for_judge(messages)
+            messages_text = await _format_messages_for_judge(messages)
             reply_style = await get_reply_style(TARGET_CHAT_ID)
             group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID)
             recent_proactive = await _get_recent_proactive_records()
