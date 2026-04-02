@@ -50,6 +50,7 @@ class ProactiveManager:
         """每条群消息调用一次，debounce 后触发扫描"""
         if chat_id not in TARGET_CHAT_IDS:
             return
+        logger.info("proactive on_event: chat_id=%s", chat_id)
 
         redis = AsyncRedisClient.get_instance()
 

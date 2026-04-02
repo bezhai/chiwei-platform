@@ -24,6 +24,7 @@ async def handle_proactive_event(message: AbstractIncomingMessage) -> None:
     async with message.process(requeue=False):
         body = json.loads(message.body)
         chat_id = body.get("chat_id")
+        logger.info("Proactive event received: chat_id=%s, message_id=%s", chat_id, body.get("message_id"))
         if chat_id:
             manager = ProactiveManager.get_instance()
             await manager.on_event(chat_id)
