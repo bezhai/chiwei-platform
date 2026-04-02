@@ -1,5 +1,5 @@
 import { Message } from 'core/models/message';
-import { replyTemplate } from '@lark/basic/message';
+import { replyMessage, replyTemplate } from '@lark/basic/message';
 import { CommandHandler, CommandRule } from './admin/command-handler';
 import { deleteBotMessage } from './admin/delete-message';
 import { genHistoryCard } from './general/gen-history';
@@ -23,6 +23,8 @@ import { sendBalance } from './admin/balance';
 import { context } from '@middleware/context';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
+const TOOL_BOT_APPLY_URL = process.env.TOOL_BOT_APPLY_URL || '';
+
 // 工具函数：执行规则链
 export async function runRules(message: Message) {
     // 黑名单检查：被拉黑的用户直接忽略
@@ -31,17 +33,10 @@ export async function runRules(message: Message) {
         return;
     }
 
-    // 多 bot 分工：灰度开启时，按 bot 角色过滤规则
-    const multiBotEnabled = message.basicChatInfo?.gray_config?.multi_bot === 'enabled';
-    const botRole = multiBotEnabled
-        ? multiBotManager.getBotConfig(context.getBotName() || '')?.bot_role
-        : undefined;
+    // 多 bot 分工：按 bot 角色过滤规则
+    const botRole = multiBotManager.getBotConfig(context.getBotName() || '')?.bot_role;
 
     for (const { rules, handler, fallthrough, async_rules, category } of chatRules) {
-        // 灰度开启且规则有分类时，只执行匹配角色的规则
-        if (botRole && category && category !== botRole) {
-            continue;
-        }
         // 检查同步规则
         const syncRulesPass = rules.every((rule) => rule(message));
 
@@ -54,6 +49,25 @@ export async function runRules(message: Message) {
 
         // 如果所有规则（同步和异步）都通过
         if (syncRulesPass && asyncRulesPass) {
+            // 角色不匹配时的处理
+            if (botRole && category && category !== botRole) {
+                if (botRole === 'persona' && NeedRobotMention(message)) {
+                    // persona bot 被 @mention 但命中 utility 规则 → 引导用户申请工具 bot
+                    const applyHint = TOOL_BOT_APPLY_URL
+                        ? `，请点击 ${TOOL_BOT_APPLY_URL} 申请将工具人添加到群聊`
+                        : '';
+                    replyMessage(
+                        message.messageId,
+                        `工具类功能已迁移至「赤尾工具人」${applyHint}`,
+                        true,
+                    );
+                    break;
+                }
+                // 其他不匹配（utility bot 跳过 persona 规则，或非 @mention 的 utility）静默跳过
+                if (!fallthrough) break;
+                continue;
+            }
+
             try {
                 await handler(message);
             } catch (e) {
@@ -99,7 +113,6 @@ const chatRules: RuleConfig[] = [
         rules: [EqualText('撤回'), TextMessageLimit, NeedRobotMention],
         handler: deleteBotMessage,
         comment: '撤回消息',
-        category: 'utility',
     },
     {
         rules: [EqualText('水群', '水群趋势'), TextMessageLimit, NeedRobotMention],
