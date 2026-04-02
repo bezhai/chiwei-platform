@@ -296,29 +296,37 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         logger.debug("proactive_scan: no unseen messages")
         return {"skipped": "no_messages"}
 
-    # 5. 收集上下文
-    messages_text = _format_messages_for_judge(messages)
-    reply_style = await get_reply_style(TARGET_CHAT_ID)
-    group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID)
-    recent_proactive = await _get_recent_proactive_records()
+    # Langfuse trace 包裹判断 + 投递
+    from langfuse import get_client as get_langfuse, propagate_attributes
 
-    # 6. 小模型判断
-    decision = await judge_response(
-        messages_text=messages_text,
-        reply_style=reply_style,
-        group_culture=group_culture,
-        recent_proactive=recent_proactive,
-    )
+    langfuse = get_langfuse()
+    scan_session_id = str(uuid.uuid4())
 
-    if not decision.get("respond"):
-        logger.info("proactive_scan decided not to respond (source=%s)", source)
-        return {"decided": "no_response"}
+    with langfuse.start_as_current_observation(as_type="span", name="proactive-scan"):
+        with propagate_attributes(session_id=scan_session_id):
+            # 5. 收集上下文
+            messages_text = _format_messages_for_judge(messages)
+            reply_style = await get_reply_style(TARGET_CHAT_ID)
+            group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID)
+            recent_proactive = await _get_recent_proactive_records()
 
-    # 7. 投递
-    session_id = await submit_proactive_request(
-        target_message_id=decision.get("target_message_id"),
-        stimulus=decision.get("stimulus"),
-    )
+            # 6. 小模型判断
+            decision = await judge_response(
+                messages_text=messages_text,
+                reply_style=reply_style,
+                group_culture=group_culture,
+                recent_proactive=recent_proactive,
+            )
+
+            if not decision.get("respond"):
+                logger.info("proactive_scan decided not to respond (source=%s)", source)
+                return {"decided": "no_response"}
+
+            # 7. 投递
+            session_id = await submit_proactive_request(
+                target_message_id=decision.get("target_message_id"),
+                stimulus=decision.get("stimulus"),
+            )
 
     logger.info("proactive_scan submitted (source=%s, session=%s)", source, session_id)
     return {"submitted": session_id}

@@ -31,8 +31,9 @@ CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
 VECTORIZE = Route("vectorize", "task.vectorize")
+PROACTIVE_EVAL = Route("proactive_eval", "proactive.eval")
 
-ALL_ROUTES = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE]
+ALL_ROUTES = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE, PROACTIVE_EVAL]
 
 # 非 prod 队列空闲自动删除（24h）
 _NON_PROD_EXPIRES_MS = 86_400_000
