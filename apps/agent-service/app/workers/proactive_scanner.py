@@ -91,7 +91,7 @@ async def get_unseen_messages(limit: int = 30) -> list[ConversationMessage]:
             .scalar_subquery()
         )
 
-        # 主查询：之后的用户消息
+        # 主查询：之后的用户消息（取最近的 N 条，赤尾看到的是最新对话）
         stmt = (
             select(ConversationMessage)
             .where(
@@ -100,12 +100,14 @@ async def get_unseen_messages(limit: int = 30) -> list[ConversationMessage]:
                 ConversationMessage.user_id != PROACTIVE_USER_ID,
                 ConversationMessage.create_time > sa_func.coalesce(last_presence_q, 0),
             )
-            .order_by(ConversationMessage.create_time.asc())
+            .order_by(ConversationMessage.create_time.desc())
             .limit(limit)
         )
 
         result = await session.execute(stmt)
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        rows.reverse()  # 恢复时间正序
+        return rows
 
 
 # ── 小模型判断 ────────────────────────────────────────────────────────────
