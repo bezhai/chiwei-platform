@@ -240,7 +240,7 @@ async def submit_proactive_request(
             create_time=now_ms,
             message_type="proactive_trigger",
             vector_status="skipped",
-            bot_name="chiwei",
+            bot_name="bytedance",
         )
         session.add(msg)
         await session.commit()
