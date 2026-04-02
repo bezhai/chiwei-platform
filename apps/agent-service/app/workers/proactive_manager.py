@@ -73,10 +73,12 @@ class ProactiveManager:
         try:
             await asyncio.sleep(self.DEBOUNCE_SECONDS)
         except asyncio.CancelledError:
+            logger.debug("proactive debounce cancelled for %s", chat_id)
             return
         finally:
             self._timers.pop(chat_id, None)
 
+        logger.info("proactive debounce fired for %s, executing scan", chat_id)
         await self._execute_scan(chat_id)
 
     async def _execute_scan(self, chat_id: str) -> None:
