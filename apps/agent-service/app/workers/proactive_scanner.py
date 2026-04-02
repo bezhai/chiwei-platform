@@ -307,7 +307,7 @@ async def run_proactive_scan(source: str = "cron") -> dict:
     langfuse = get_langfuse()
     scan_session_id = str(uuid.uuid4())
 
-    with langfuse.start_as_current_observation(as_type="span", name="proactive-scan"):
+    with langfuse.start_as_current_observation(as_type="trace", name="proactive-scan"):
         with propagate_attributes(session_id=scan_session_id):
             # 5. 收集上下文
             messages_text = _format_messages_for_judge(messages)
