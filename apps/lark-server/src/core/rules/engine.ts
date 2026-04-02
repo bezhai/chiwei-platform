@@ -134,7 +134,7 @@ const chatRules: RuleConfig[] = [
         async_rules: [checkMeme],
         handler: genMeme,
         comment: 'Meme',
-        category: 'persona',
+        category: 'utility',
     },
     {
         rules: [NeedRobotMention],
