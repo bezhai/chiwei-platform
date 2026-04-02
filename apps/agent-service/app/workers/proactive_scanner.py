@@ -269,7 +269,7 @@ async def submit_proactive_request(
             "is_p2p": False,
             "root_id": message_id,
             "user_id": PROACTIVE_USER_ID,
-            "bot_name": "chiwei",
+            "bot_name": "bytedance",
             "is_proactive": True,
             "lane": current_lane,
             "enqueued_at": now_ms,
