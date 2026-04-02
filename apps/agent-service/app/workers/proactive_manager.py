@@ -105,9 +105,6 @@ class ProactiveManager:
 
             if "submitted" in result:
                 await self._update_after_submit(chat_id)
-            elif result.get("decided") == "no_response":
-                # 模型认为不需要说话，短冷却
-                await self._set_cooldown(chat_id, self.NO_RESPONSE_COOLDOWN)
         except Exception:
             logger.exception("proactive _execute_scan error for %s", chat_id)
         finally:
