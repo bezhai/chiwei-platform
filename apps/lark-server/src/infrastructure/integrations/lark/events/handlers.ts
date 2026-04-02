@@ -32,6 +32,7 @@ import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
+import { rabbitmqClient, PROACTIVE_EVAL } from '@integrations/rabbitmq';
 
 /**
  * Lark事件处理器类
@@ -85,6 +86,14 @@ export class LarkEventHandlers {
                 reply_message_id: message.parentMessageId,
                 message_type: message.messageType,
             });
+
+            // Publish proactive eval event for group messages
+            if (!message.isP2P()) {
+                rabbitmqClient.publish(PROACTIVE_EVAL, {
+                    chat_id: message.chatId,
+                    message_id: message.messageId,
+                }).catch(err => console.warn('[ProactiveEval] publish failed:', err));
+            }
 
             await runRules(message);
         } catch (error) {
