@@ -51,15 +51,19 @@ async def build_chat_context(
 
     chat_type = l1_results[-1].chat_type or "p2p"  # 默认私聊
 
-    # --- Proactive 检测 ---
+    # --- Proactive: 过滤所有合成消息 ---
+    proactive_msgs = [m for m in l1_results if m.user_id == PROACTIVE_USER_ID]
     is_proactive = l1_results[-1].user_id == PROACTIVE_USER_ID
     proactive_stimulus = ""
     proactive_target_id = ""
 
-    if is_proactive:
-        proactive_msg = l1_results.pop()
-        proactive_stimulus = parse_content(proactive_msg.content).render()
-        proactive_target_id = proactive_msg.reply_message_id or ""
+    if proactive_msgs:
+        # 过滤掉所有合成消息
+        l1_results = [m for m in l1_results if m.user_id != PROACTIVE_USER_ID]
+        # 取最新一条合成消息的 stimulus
+        latest_proactive = proactive_msgs[-1]
+        proactive_stimulus = parse_content(latest_proactive.content).render()
+        proactive_target_id = latest_proactive.reply_message_id or ""
         if not l1_results:
             logger.warning("proactive scan: no real messages found after filtering")
             return [], None, "", "", "group", "", "", []
