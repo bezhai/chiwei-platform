@@ -171,8 +171,13 @@ async def judge_response(
             recent_proactive=json.dumps(recent_proactive, ensure_ascii=False),
         )
 
+        from langfuse.langchain import CallbackHandler
+
         model = await ModelBuilder.build_chat_model(JUDGE_MODEL_ID)
-        response = await model.ainvoke([{"role": "user", "content": compiled}])
+        response = await model.ainvoke(
+            [{"role": "user", "content": compiled}],
+            config={"callbacks": [CallbackHandler()]},
+        )
         raw = _extract_text(response.content)
 
         return _parse_judge_response(raw)
