@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -217,13 +218,14 @@ class WeeklyReview(Base):
 
 
 class PersonImpression(Base):
-    """赤尾对群友的人物印象"""
+    """Bot 对群友的人物印象"""
 
     __tablename__ = "person_impression"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
     impression_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -232,16 +234,41 @@ class PersonImpression(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("chat_id", "user_id"),)
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", "bot_name"),)
 
 
 class GroupCultureGestalt(Base):
-    """群文化 gestalt — 赤尾对一个群的整体感觉，一句话"""
+    """Bot 对一个群的整体感觉，一句话"""
 
     __tablename__ = "group_culture_gestalt"
 
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
     gestalt_text: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("chat_id", "bot_name"),)
+
+
+class BotPersona(Base):
+    """Bot 人设配置 — 每个 persona bot 的人设数据"""
+
+    __tablename__ = "bot_persona"
+
+    bot_name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    persona_core: Mapped[str] = mapped_column(Text, nullable=False)
+    persona_lite: Mapped[str] = mapped_column(Text, nullable=False)
+    default_reply_style: Mapped[str] = mapped_column(Text, nullable=False)
+    error_messages: Mapped[dict] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
