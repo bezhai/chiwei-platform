@@ -46,10 +46,12 @@ async def load_memory(mode: str, hint: str) -> str:
     context = get_runtime(AgentContext).context
     chat_id = context.message.chat_id
 
+    bot_name = context.app_name or "fly"
+
     if mode == "recent":
         return await _recall_recent(hint)
     elif mode == "person":
-        return await _recall_person(chat_id, hint)
+        return await _recall_person(chat_id, hint, bot_name)
     elif mode == "diary":
         return await _recall_diary(chat_id, hint)
     elif mode == "topic":
@@ -80,14 +82,14 @@ async def _recall_recent(hint: str) -> str:
     return "\n\n".join(lines)
 
 
-async def _recall_person(chat_id: str, name: str) -> str:
+async def _recall_person(chat_id: str, name: str, bot_name: str) -> str:
     """回忆关于某个人的事"""
     users = await search_user_by_name(name)
     if not users:
         return "想不起来这个人..."
 
     user_ids = [u.union_id for u in users]
-    impressions = await get_impressions_for_users(chat_id, user_ids)
+    impressions = await get_impressions_for_users(chat_id, user_ids, bot_name)
     if not impressions:
         return "对这个人还没形成什么印象呢"
 

@@ -68,21 +68,27 @@ def _extract_text(content) -> str:
 
 
 async def cron_generate_daily_journal(ctx) -> None:
-    """cron 入口：生成昨天的 daily journal"""
-    try:
-        yesterday = date.today() - timedelta(days=1)
-        await generate_daily_journal(yesterday)
-    except Exception as e:
-        logger.error(f"Daily journal generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成昨天的 daily journal"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    yesterday = date.today() - timedelta(days=1)
+    for bot_name in await get_all_persona_bot_names():
+        try:
+            await generate_daily_journal(yesterday, bot_name=bot_name)
+        except Exception as e:
+            logger.error(f"[{bot_name}] Daily journal generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_weekly_journal(ctx) -> None:
-    """cron 入口：生成上周的 weekly journal（每周一）"""
-    try:
-        last_monday = date.today() - timedelta(days=7)
-        await generate_weekly_journal(last_monday)
-    except Exception as e:
-        logger.error(f"Weekly journal generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成上周的 weekly journal"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    last_monday = date.today() - timedelta(days=7)
+    for bot_name in await get_all_persona_bot_names():
+        try:
+            await generate_weekly_journal(last_monday, bot_name=bot_name)
+        except Exception as e:
+            logger.error(f"[{bot_name}] Weekly journal generation failed: {e}", exc_info=True)
 
 
 # ==================== Daily Journal 生成 ====================

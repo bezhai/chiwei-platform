@@ -172,28 +172,37 @@ async def _run_critic(
 
 
 async def cron_generate_monthly_plan(ctx) -> None:
-    """cron 入口：生成本月计划"""
-    try:
-        await generate_monthly_plan()
-    except Exception as e:
-        logger.error(f"Monthly plan generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成本月计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    for bot_name in await get_all_persona_bot_names():
+        try:
+            await generate_monthly_plan(bot_name=bot_name)
+        except Exception as e:
+            logger.error(f"[{bot_name}] Monthly plan generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_weekly_plan(ctx) -> None:
-    """cron 入口：周日 23:00 触发，生成下周计划（target_date 加 1 天进入周一）"""
-    try:
-        tomorrow = date.today() + timedelta(days=1)
-        await generate_weekly_plan(target_date=tomorrow)
-    except Exception as e:
-        logger.error(f"Weekly plan generation failed: {e}", exc_info=True)
+    """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    tomorrow = date.today() + timedelta(days=1)
+    for bot_name in await get_all_persona_bot_names():
+        try:
+            await generate_weekly_plan(target_date=tomorrow, bot_name=bot_name)
+        except Exception as e:
+            logger.error(f"[{bot_name}] Weekly plan generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_daily_plan(ctx) -> None:
-    """cron 入口：生成今天的日计划"""
-    try:
-        await generate_daily_plan()
-    except Exception as e:
-        logger.error(f"Daily plan generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成今天的日计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    for bot_name in await get_all_persona_bot_names():
+        try:
+            await generate_daily_plan(bot_name=bot_name)
+        except Exception as e:
+            logger.error(f"[{bot_name}] Daily plan generation failed: {e}", exc_info=True)
 
 
 # ==================== 月计划生成 ====================
