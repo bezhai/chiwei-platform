@@ -34,11 +34,14 @@ def _journal_model() -> str:
     return settings.diary_model
 
 
-def _get_persona_lite() -> str:
+async def _get_persona_lite_for_bot(bot_name: str) -> str:
+    """从 bot_persona 表加载 persona_lite"""
+    from app.orm.crud import get_bot_persona
     try:
-        return get_prompt("persona_lite").compile()
+        persona = await get_bot_persona(bot_name)
+        return persona.persona_lite if persona else ""
     except Exception as e:
-        logger.warning(f"Failed to load persona_lite: {e}")
+        logger.warning(f"[{bot_name}] Failed to load persona_lite: {e}")
         return ""
 
 
@@ -85,13 +88,16 @@ async def cron_generate_weekly_journal(ctx) -> None:
 # ==================== Daily Journal 生成 ====================
 
 
-async def generate_daily_journal(target_date: date) -> str | None:
+async def generate_daily_journal(
+    target_date: date, bot_name: str = "chiwei"
+) -> str | None:
     """生成赤尾的每日个人日志
 
     从当天所有群/私聊的 DiaryEntry 合成，模糊化话题只保留感受和氛围。
 
     Args:
         target_date: 日志对应的日期（通常是昨天）
+        bot_name: bot 名称，用于加载对应人设
 
     Returns:
         生成的日志内容，或 None（无日记/已存在）
@@ -124,7 +130,7 @@ async def generate_daily_journal(target_date: date) -> str | None:
     # 编译 prompt
     prompt_template = get_prompt("journal_generation")
     compiled = prompt_template.compile(
-        persona_lite=_get_persona_lite(),
+        persona_lite=await _get_persona_lite_for_bot(bot_name),
         date=date_str,
         chat_diaries=chat_diaries,
         daily_schedule=schedule_text,
@@ -153,13 +159,16 @@ async def generate_daily_journal(target_date: date) -> str | None:
 # ==================== Weekly Journal 生成 ====================
 
 
-async def generate_weekly_journal(monday_date: date) -> str | None:
+async def generate_weekly_journal(
+    monday_date: date, bot_name: str = "chiwei"
+) -> str | None:
     """生成赤尾的每周日志
 
     从 7 篇 daily journal 合成，进一步模糊化。
 
     Args:
         monday_date: 目标周的周一日期
+        bot_name: bot 名称，用于加载对应人设
 
     Returns:
         生成的周日志内容，或 None
@@ -190,7 +199,7 @@ async def generate_weekly_journal(monday_date: date) -> str | None:
     # 编译 prompt
     prompt_template = get_prompt("journal_weekly")
     compiled = prompt_template.compile(
-        persona_lite=_get_persona_lite(),
+        persona_lite=await _get_persona_lite_for_bot(bot_name),
         week_start=week_start,
         week_end=week_end,
         daily_journals=journals_text,
