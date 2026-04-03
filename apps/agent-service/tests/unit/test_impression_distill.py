@@ -37,6 +37,7 @@ async def test_gestalt_impression_is_short():
             chat_id="chat_001",
             diary_content="A哥今天又在组织角色分配，嘴硬心软的指挥官",
             user_names={"uid_001": "A哥"},
+            bot_name="chiwei",
         )
 
         mock_upsert.assert_called_once()
@@ -76,6 +77,7 @@ async def test_gestalt_skips_unknown_users():
             chat_id="chat_001",
             diary_content="A哥今天又在组织角色分配",
             user_names={"uid_001": "A哥"},
+            bot_name="chiwei",
         )
 
         # Should only upsert for uid_001, not uid_unknown
@@ -110,6 +112,7 @@ async def test_gestalt_handles_empty_llm_response():
             chat_id="chat_001",
             diary_content="今天群里很安静",
             user_names={"uid_001": "A哥"},
+            bot_name="chiwei",
         )
 
         mock_upsert.assert_not_called()
