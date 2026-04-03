@@ -1,8 +1,8 @@
-import type { Context, Next } from 'hono';
+import type { Context } from 'hono';
 import type { StatusCode } from 'hono/utils/http-status';
 
 /**
- * Options for error handler middleware
+ * Options for error handler
  */
 export interface ErrorHandlerOptions {
     /**
@@ -30,44 +30,41 @@ export class AppError extends Error {
 }
 
 /**
- * Create an error handler middleware for Hono
- * Catches downstream errors and returns unified JSON responses
+ * Create an error handler for Hono's app.onError()
+ *
+ * In Hono, errors thrown in route handlers are caught by the compose function
+ * and forwarded to app.onError(), NOT to middleware try/catch. Therefore
+ * error handling must use app.onError(handler) instead of middleware.
  */
 export function createErrorHandler(options: ErrorHandlerOptions = {}) {
     const { logger } = options;
 
-    return async (c: Context, next: Next) => {
-        try {
-            await next();
-        } catch (err: unknown) {
-            const error = err as Error;
-
-            // AppError: expected operational error
-            if (error instanceof AppError) {
-                logger?.warn('Operational error', { message: error.message });
-                return c.json(
-                    {
-                        error: error.message,
-                        code: error.statusCode,
-                    },
-                    error.statusCode as StatusCode,
-                );
-            }
-
-            // Unknown error: avoid leaking internal implementation details
-            logger?.error('Unexpected error', {
-                name: error?.name,
-                message: error?.message,
-                stack: error instanceof Error ? error.stack : undefined,
-            });
+    return (err: Error, c: Context) => {
+        // AppError: expected operational error
+        if (err instanceof AppError) {
+            logger?.warn('Operational error', { message: err.message });
             return c.json(
                 {
-                    error: 'Internal server error',
-                    code: 500,
+                    error: err.message,
+                    code: err.statusCode,
                 },
-                500,
+                err.statusCode as StatusCode,
             );
         }
+
+        // Unknown error: avoid leaking internal implementation details
+        logger?.error('Unexpected error', {
+            name: err?.name,
+            message: err?.message,
+            stack: err instanceof Error ? err.stack : undefined,
+        });
+        return c.json(
+            {
+                error: 'Internal server error',
+                code: 500,
+            },
+            500,
+        );
     };
 }
 

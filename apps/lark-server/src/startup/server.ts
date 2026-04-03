@@ -1,12 +1,10 @@
-import Koa from 'koa';
-import Router from '@koa/router';
-import koaBodyModule from 'koa-body';
-const koaBody = (koaBodyModule as any).default ?? koaBodyModule;
-import cors from '@koa/cors';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { bodyLimit } from 'hono/body-limit';
 import { errorHandler } from '@middleware/error-handler';
 import { traceMiddleware } from '@middleware/trace';
 import { botContextMiddleware } from '@middleware/bot-context';
-import { metricsMiddleware, metricsRouter } from '@middleware/metrics';
+import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
 
@@ -21,8 +19,7 @@ export interface ServerConfig {
  * HTTP 服务器管理器
  */
 export class HttpServerManager {
-    private app: Koa;
-    private router: Router;
+    private app: Hono;
     private config: ServerConfig;
 
     constructor(
@@ -31,8 +28,8 @@ export class HttpServerManager {
         },
     ) {
         this.config = config;
-        this.app = new Koa();
-        this.router = new Router();
+        this.app = new Hono();
+        this.app.onError(errorHandler); // 统一错误处理（Hono 原生 onError）
         this.setupMiddleware();
     }
 
@@ -40,16 +37,12 @@ export class HttpServerManager {
      * 设置中间件
      */
     private setupMiddleware(): void {
-        this.app.use(metricsMiddleware); // Prometheus metrics（最外层）
-        this.app.use(cors());
-        this.app.use(traceMiddleware); // 先注入 traceId（为后续日志与错误处理提供上下文）
-        this.app.use(errorHandler); // 统一错误处理（依赖 traceId 贯穿）
-        this.app.use(botContextMiddleware); // 注入 botName
-        this.app.use(koaBody({
-            formLimit: '50mb',
-            jsonLimit: '50mb',
-            textLimit: '50mb',
-            multipart: true,
+        this.app.use('*', metricsMiddleware); // Prometheus metrics（最外层）
+        this.app.use('*', cors());
+        this.app.use('*', traceMiddleware); // 先注入 traceId（为后续日志与错误处理提供上下文）
+        this.app.use('*', botContextMiddleware); // 注入 botName
+        this.app.use('*', bodyLimit({
+            maxSize: 50 * 1024 * 1024, // 50mb
         }));
     }
 
@@ -57,10 +50,10 @@ export class HttpServerManager {
      * 注册健康检查端点
      */
     private registerHealthCheck(): void {
-        this.router.get('/api/health', (ctx) => {
+        this.app.get('/api/health', (c) => {
             try {
                 const allBots = multiBotManager.getAllBotConfigs();
-                ctx.body = {
+                return c.json({
                     status: 'ok',
                     timestamp: new Date().toISOString(),
                     service: 'lark-server',
@@ -71,14 +64,12 @@ export class HttpServerManager {
                         init_type: bot.init_type,
                         is_active: bot.is_active,
                     })),
-                };
-                ctx.status = 200;
+                }, 200);
             } catch (error) {
-                ctx.body = {
+                return c.json({
                     status: 'error',
                     message: error instanceof Error ? error.message : 'Unknown error',
-                };
-                ctx.status = 500;
+                }, 500);
             }
         });
     }
@@ -88,13 +79,12 @@ export class HttpServerManager {
      */
     async start(): Promise<void> {
         // 注册 /metrics 和健康检查路由
-        this.app.use(metricsRouter.routes());
+        this.app.route('', metricsApp);
         this.registerHealthCheck();
-        this.app.use(this.router.routes());
-        this.app.use(internalLarkRoutes.routes());
+        this.app.route('', internalLarkRoutes);
 
         // 启动服务器
-        this.app.listen(this.config.port);
+        Bun.serve({ port: this.config.port, fetch: this.app.fetch });
         console.info(`HTTP server started on port ${this.config.port}`);
         this.logAvailableRoutes();
     }
@@ -109,9 +99,9 @@ export class HttpServerManager {
     }
 
     /**
-     * 获取 Koa 应用实例（用于测试）
+     * 获取 Hono 应用实例（用于测试）
      */
-    getApp(): Koa {
+    getApp(): Hono {
         return this.app;
     }
 }

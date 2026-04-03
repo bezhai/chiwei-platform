@@ -1,9 +1,8 @@
-import type { Context, Next } from 'koa';
 import logger from '@logger/index';
 import { createErrorHandler } from '@inner/shared';
 
 /**
- * 统一错误处理中间件
+ * 统一错误处理（用于 app.onError()）
  * 使用 ts-common 的 createErrorHandler 并注入 logger
  */
 export const errorHandler = createErrorHandler({

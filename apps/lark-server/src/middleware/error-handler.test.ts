@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, mock } from 'bun:test';
-import type { Context, Next } from 'koa';
+import { Hono } from 'hono';
 import { AppError } from '@inner/shared';
 
 // Mock logger to assert calls
@@ -15,13 +15,6 @@ mock.module('@logger/index', () => ({
 const { errorHandler } = await import('@middleware/error-handler');
 
 describe('middleware/error-handler', () => {
-    const getCtx = (): Context =>
-        ({
-            // minimal ctx fields used by errorHandler
-            status: 200,
-            body: undefined,
-        }) as unknown as Context;
-
     beforeEach(() => {
         mockLogger.warn.mockReset();
         mockLogger.error.mockReset();
@@ -29,15 +22,16 @@ describe('middleware/error-handler', () => {
     });
 
     test('捕获 AppError 并返回统一业务错误响应', async () => {
-        const ctx = getCtx();
-        const next: Next = (async () => {
+        const app = new Hono();
+        app.onError(errorHandler);
+        app.get('/test', () => {
             throw new AppError(400, '无效的参数');
-        }) as Next;
+        });
 
-        await errorHandler(ctx, next);
+        const res = await app.request('/test');
 
-        expect(ctx.status).toBe(400);
-        expect(ctx.body).toEqual({ error: '无效的参数', code: 400 });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: '无效的参数', code: 400 });
         expect(mockLogger.warn).toHaveBeenCalledWith('Operational error', {
             message: '无效的参数',
         });
@@ -45,15 +39,16 @@ describe('middleware/error-handler', () => {
     });
 
     test('捕获未知错误并返回 500 与通用消息', async () => {
-        const ctx = getCtx();
-        const next: Next = (async () => {
+        const app = new Hono();
+        app.onError(errorHandler);
+        app.get('/test', () => {
             throw new Error('boom');
-        }) as Next;
+        });
 
-        await errorHandler(ctx, next);
+        const res = await app.request('/test');
 
-        expect(ctx.status).toBe(500);
-        expect(ctx.body).toEqual({ error: 'Internal server error', code: 500 });
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: 'Internal server error', code: 500 });
         expect(mockLogger.error).toHaveBeenCalled();
     });
 });

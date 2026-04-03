@@ -1,6 +1,6 @@
 import { Counter, Histogram, Gauge, Registry, collectDefaultMetrics } from 'prom-client';
-import type { Context, Next } from 'koa';
-import Router from '@koa/router';
+import type { Context, Next } from 'hono';
+import { Hono } from 'hono';
 
 export const register = new Registry();
 collectDefaultMetrics({ register });
@@ -26,9 +26,9 @@ const httpRequestsInFlight = new Gauge({
 });
 
 /**
- * Koa middleware that records Prometheus HTTP metrics.
+ * Hono middleware that records Prometheus HTTP metrics.
  */
-export async function metricsMiddleware(ctx: Context, next: Next): Promise<void> {
+export async function metricsMiddleware(c: Context, next: Next): Promise<void> {
     httpRequestsInFlight.inc();
     const start = performance.now();
     try {
@@ -36,16 +36,15 @@ export async function metricsMiddleware(ctx: Context, next: Next): Promise<void>
     } finally {
         const duration = (performance.now() - start) / 1000;
         httpRequestsInFlight.dec();
-        httpRequestsTotal.inc({ method: ctx.method, path: ctx.path, status: String(ctx.status) });
-        httpRequestDuration.observe({ method: ctx.method, path: ctx.path }, duration);
+        httpRequestsTotal.inc({ method: c.req.method, path: c.req.path, status: String(c.res.status) });
+        httpRequestDuration.observe({ method: c.req.method, path: c.req.path }, duration);
     }
 }
 
 /**
- * Router with /metrics endpoint.
+ * Sub-app with /metrics endpoint.
  */
-export const metricsRouter = new Router();
-metricsRouter.get('/metrics', async (ctx) => {
-    ctx.set('Content-Type', register.contentType);
-    ctx.body = await register.metrics();
+export const metricsApp = new Hono();
+metricsApp.get('/metrics', async (c) => {
+    return c.text(await register.metrics(), 200, { 'Content-Type': register.contentType });
 });
