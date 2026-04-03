@@ -120,13 +120,26 @@ func main() {
 		}
 	}
 
+	// Ops 写连接池（用于执行审批通过的 DDL/DML）
+	writeDbs := map[string]*gorm.DB{"paas_engine": db}
+	if cfg.ChiweiDatabaseURL != "" {
+		chiweiWriteDB, err := repository.OpenWriteDB(cfg.ChiweiDatabaseURL)
+		if err != nil {
+			slog.Warn("chiwei write database unavailable for mutations", "error", err)
+		} else {
+			writeDbs["chiwei"] = chiweiWriteDB
+		}
+	}
+
+	mutationRepo := repository.NewMutationRepo(db)
+
 	// HTTP 路由
 	handler := httpadapter.NewRouter(
 		httpadapter.NewAppHandler(appSvc, buildSvc),
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLogHandler(logSvc),
 		httpadapter.NewImageRepoHandler(imageRepoSvc),
-		httpadapter.NewOpsHandler(opsDbs, nil, nil),
+		httpadapter.NewOpsHandler(opsDbs, writeDbs, mutationRepo),
 		httpadapter.NewPipelineHandler(pipelineSvc),
 		httpadapter.NewConfigBundleHandler(configBundleSvc),
 		cfg.APIToken,
