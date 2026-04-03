@@ -428,18 +428,23 @@ async def post_process_group_culture(
 
 
 async def cron_generate_weekly_reviews(ctx) -> None:
-    """cron 入口：每周一为活跃群生成上周的周记"""
-    chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
-    if not chat_ids:
-        logger.info("No active chats for weekly review, skip")
-        return
-    logger.info(f"Weekly review chats: {len(chat_ids)}")
+    """cron 入口：为活跃群的每个 persona bot 生成上周的周记"""
+    from app.orm.crud import get_all_persona_bot_names
 
-    for chat_id in chat_ids:
-        try:
-            await generate_weekly_review_for_chat(chat_id)
-        except Exception as e:
-            logger.error(f"Weekly review failed for {chat_id}: {e}")
+    chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
+    bot_names = await get_all_persona_bot_names()
+
+    if not chat_ids or not bot_names:
+        logger.info("No active chats or bots, skip weekly review generation")
+        return
+    logger.info(f"Weekly review chats: {len(chat_ids)}, bots: {len(bot_names)}")
+
+    for bot_name in bot_names:
+        for chat_id in chat_ids:
+            try:
+                await generate_weekly_review_for_chat(chat_id, bot_name=bot_name)
+            except Exception as e:
+                logger.error(f"[{bot_name}] Weekly review failed for {chat_id}: {e}")
 
 
 async def generate_weekly_review_for_chat(
