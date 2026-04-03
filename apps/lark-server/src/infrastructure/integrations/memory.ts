@@ -21,7 +21,7 @@ function isEmptyContent(content: string | undefined | null): boolean {
  */
 export async function storeMessage(message: ChatMessage): Promise<void> {
     try {
-        const botName = message.bot_name || context.getBotName() || 'bytedance';
+        const botName = message.bot_name || context.getBotName() || 'chiwei';
         const isEmpty = isEmptyContent(message.content);
 
         // INSERT ... ON CONFLICT (message_id) DO NOTHING

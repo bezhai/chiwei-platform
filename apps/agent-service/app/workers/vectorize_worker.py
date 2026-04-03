@@ -116,7 +116,7 @@ async def vectorize_message(message: ConversationMessage) -> bool:
     image_base64_list: list[str] = []
     if image_keys:
         # bot_name 默认 bytedance（兼容历史数据）
-        bot_name = message.bot_name or "bytedance"
+        bot_name = message.bot_name or "chiwei"
         tasks = [
             image_client.download_image_as_base64(key, message.message_id, bot_name)
             for key in image_keys
