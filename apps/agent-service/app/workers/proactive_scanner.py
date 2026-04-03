@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────
 TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
-TARGET_BOT_NAME = "fly"
+TARGET_BOT_NAME = "chiwei"
 PROACTIVE_USER_ID = "__proactive__"
 QUIET_HOURS = (23, 9)  # >= 23 or < 9
 JUDGE_MODEL_ID = "proactive-judge-model"

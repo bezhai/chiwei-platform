@@ -46,7 +46,7 @@ async def load_memory(mode: str, hint: str) -> str:
     context = get_runtime(AgentContext).context
     chat_id = context.message.chat_id
 
-    bot_name = context.app_name or "fly"
+    bot_name = context.app_name or "chiwei"
 
     if mode == "recent":
         return await _recall_recent(hint)
