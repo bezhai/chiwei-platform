@@ -78,6 +78,13 @@ func NewRouter(
 		// Ops
 		r.Route("/ops", func(r chi.Router) {
 			r.Post("/query", opsH.Query)
+			r.Post("/mutations", opsH.SubmitMutation)
+			r.Get("/mutations", opsH.ListMutations)
+			r.Route("/mutations/{id}", func(r chi.Router) {
+				r.Get("/", opsH.GetMutation)
+				r.Post("/approve", opsH.ApproveMutation)
+				r.Post("/reject", opsH.RejectMutation)
+			})
 		})
 
 		// Image Repos

@@ -33,29 +33,44 @@ function unwrap(data: unknown): unknown {
   return data;
 }
 
+/**
+ * 根据 x-lane header 改写 baseURL，将 http://svc:port 变为 http://svc-{lane}:port。
+ * 仅对非 prod lane 生效；无 lane 或 prod 时返回原 URL。
+ */
+function laneAwareUrl(baseURL: string, lane?: string): string {
+  if (!lane || lane === 'prod') return baseURL;
+  return baseURL.replace(
+    /^(https?:\/\/)([^/:]+)(:\d+)?/,
+    (_, proto, host, port) => `${proto}${host}-${lane}${port || ''}`,
+  );
+}
+
 function createClient(configFn: () => { baseURL: string; headers: Record<string, string> }) {
   return {
-    async get(path: string, params?: Record<string, string>) {
+    async get(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
-      const config: AxiosRequestConfig = { headers, timeout: TIMEOUT, params };
-      const res = await axios.get(`${baseURL}${path}`, config);
+      const url = laneAwareUrl(baseURL, extraHeaders?.['x-lane']);
+      const config: AxiosRequestConfig = { headers: { ...headers, ...extraHeaders }, timeout: TIMEOUT, params };
+      const res = await axios.get(`${url}${path}`, config);
       return unwrap(res.data);
     },
 
-    async post(path: string, body?: unknown) {
+    async post(path: string, body?: unknown, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
+      const url = laneAwareUrl(baseURL, extraHeaders?.['x-lane']);
       const config: AxiosRequestConfig = {
-        headers: { ...headers, 'Content-Type': 'application/json' },
+        headers: { ...headers, 'Content-Type': 'application/json', ...extraHeaders },
         timeout: TIMEOUT,
       };
-      const res = await axios.post(`${baseURL}${path}`, body, config);
+      const res = await axios.post(`${url}${path}`, body, config);
       return unwrap(res.data);
     },
 
-    async del(path: string, params?: Record<string, string>) {
+    async del(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
-      const config: AxiosRequestConfig = { headers, timeout: TIMEOUT, params };
-      const res = await axios.delete(`${baseURL}${path}`, config);
+      const url = laneAwareUrl(baseURL, extraHeaders?.['x-lane']);
+      const config: AxiosRequestConfig = { headers: { ...headers, ...extraHeaders }, timeout: TIMEOUT, params };
+      const res = await axios.delete(`${url}${path}`, config);
       return unwrap(res.data);
     },
   };

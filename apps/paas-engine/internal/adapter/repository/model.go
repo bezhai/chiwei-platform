@@ -139,3 +139,21 @@ type ConfigBundleModel struct {
 }
 
 func (ConfigBundleModel) TableName() string { return "config_bundles" }
+
+// DbMutationModel 记录一条待审批的 DDL/DML 申请。
+type DbMutationModel struct {
+	ID          uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	DB          string     `gorm:"not null" json:"db"`
+	SQL         string     `gorm:"not null;type:text" json:"sql"`
+	Reason      string     `gorm:"type:text" json:"reason"`
+	Status      string     `gorm:"not null;default:'pending'" json:"status"`
+	SubmittedBy string     `gorm:"not null" json:"submitted_by"`
+	ReviewedBy  string     `json:"reviewed_by"`
+	ReviewNote  string     `gorm:"type:text" json:"review_note"`
+	ExecutedAt  *time.Time `json:"executed_at"`
+	Error       string     `gorm:"type:text" json:"error"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func (DbMutationModel) TableName() string { return "db_mutations" }

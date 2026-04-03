@@ -13,3 +13,11 @@ func OpenReadOnlyDB(dsn string) (*gorm.DB, error) {
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 }
+
+// OpenWriteDB opens a database connection with write access (no AutoMigrate).
+// Used for executing approved DDL/DML mutations on external databases.
+func OpenWriteDB(dsn string) (*gorm.DB, error) {
+	return gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Warn),
+	})
+}
