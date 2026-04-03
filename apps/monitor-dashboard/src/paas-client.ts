@@ -35,26 +35,26 @@ function unwrap(data: unknown): unknown {
 
 function createClient(configFn: () => { baseURL: string; headers: Record<string, string> }) {
   return {
-    async get(path: string, params?: Record<string, string>) {
+    async get(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
-      const config: AxiosRequestConfig = { headers, timeout: TIMEOUT, params };
+      const config: AxiosRequestConfig = { headers: { ...headers, ...extraHeaders }, timeout: TIMEOUT, params };
       const res = await axios.get(`${baseURL}${path}`, config);
       return unwrap(res.data);
     },
 
-    async post(path: string, body?: unknown) {
+    async post(path: string, body?: unknown, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
       const config: AxiosRequestConfig = {
-        headers: { ...headers, 'Content-Type': 'application/json' },
+        headers: { ...headers, 'Content-Type': 'application/json', ...extraHeaders },
         timeout: TIMEOUT,
       };
       const res = await axios.post(`${baseURL}${path}`, body, config);
       return unwrap(res.data);
     },
 
-    async del(path: string, params?: Record<string, string>) {
+    async del(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>) {
       const { baseURL, headers } = configFn();
-      const config: AxiosRequestConfig = { headers, timeout: TIMEOUT, params };
+      const config: AxiosRequestConfig = { headers: { ...headers, ...extraHeaders }, timeout: TIMEOUT, params };
       const res = await axios.delete(`${baseURL}${path}`, config);
       return unwrap(res.data);
     },
