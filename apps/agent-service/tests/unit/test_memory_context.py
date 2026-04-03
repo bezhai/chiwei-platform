@@ -19,7 +19,7 @@ async def test_build_inner_context_group():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=["u1"],
-            trigger_user_id="u1", trigger_username="A哥", bot_name="chiwei", chat_name="KA技术群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="KA技术群",
         )
 
     assert "群聊「KA技术群」" in result
@@ -43,7 +43,7 @@ async def test_build_inner_context_p2p():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="p2p_001", chat_type="p2p", user_ids=["u1"],
-            trigger_user_id="u1", trigger_username="A哥", bot_name="chiwei",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao",
         )
 
     assert "私聊" in result
@@ -64,7 +64,7 @@ async def test_build_inner_context_no_state():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", bot_name="chiwei", chat_name="测试群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
         )
 
     assert "群聊「测试群」" in result
@@ -84,7 +84,7 @@ async def test_build_inner_context_no_diary_content():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="Test", bot_name="chiwei", chat_name="群",
+            trigger_user_id="u1", trigger_username="Test", persona_id="akao", chat_name="群",
         )
 
     assert "--- 2026-" not in result
@@ -103,7 +103,7 @@ async def test_build_inner_context_injects_drift_state():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", bot_name="chiwei", chat_name="测试群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
         )
 
     assert "有点犯困" in result
@@ -124,7 +124,7 @@ async def test_build_inner_context_no_drift_fallback():
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", bot_name="chiwei", chat_name="测试群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
         )
 
     assert "此刻的状态" not in result
@@ -166,7 +166,7 @@ async def test_get_reply_style_fallback_to_base():
               new_callable=AsyncMock, return_value="[感冒中] 说话短短的"),
     ):
         from app.services.memory_context import get_reply_style
-        result = await get_reply_style("p2p_001", "chiwei")
+        result = await get_reply_style("p2p_001", "akao")
 
     assert "感冒" in result
 
@@ -181,7 +181,7 @@ async def test_get_reply_style_per_chat_takes_priority():
               new_callable=AsyncMock) as mock_base,
     ):
         from app.services.memory_context import get_reply_style
-        result = await get_reply_style("chat_001", "chiwei")
+        result = await get_reply_style("chat_001", "akao")
 
     assert "很嗨" in result
     mock_base.assert_not_called()
@@ -197,19 +197,19 @@ async def test_get_reply_style_fallback_to_default():
               new_callable=AsyncMock, return_value=None),
     ):
         from app.services.memory_context import get_reply_style
-        result = await get_reply_style("p2p_001", "chiwei", default_style="来自persona的默认风格")
+        result = await get_reply_style("p2p_001", "akao", default_style="来自persona的默认风格")
 
     assert "来自persona的默认风格" in result
 
 
 @pytest.mark.asyncio
-async def test_get_reply_style_uses_bot_name():
-    """get_reply_style 应使用 bot_name 维度的 Redis key"""
+async def test_get_reply_style_uses_persona_id():
+    """get_reply_style 应使用 persona_id 维度的 Redis key"""
     with (
         patch("app.services.memory_context.get_identity_state", return_value="drifted") as mock_drift,
         patch("app.services.memory_context.get_base_reply_style", return_value=None),
     ):
         from app.services.memory_context import get_reply_style
-        result = await get_reply_style("chat_abc", "chiwei")
-        mock_drift.assert_called_once_with("chat_abc", "chiwei")
+        result = await get_reply_style("chat_abc", "akao")
+        mock_drift.assert_called_once_with("chat_abc", "akao")
         assert result == "drifted"

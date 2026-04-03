@@ -36,14 +36,14 @@ CST = timezone(timedelta(hours=8))
 _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 
-async def _get_persona_lite_for_bot(bot_name: str) -> str:
+async def _get_persona_lite_for_bot(persona_id: str) -> str:
     """从 bot_persona 表加载 persona_lite"""
     from app.orm.crud import get_bot_persona
     try:
-        persona = await get_bot_persona(bot_name)
+        persona = await get_bot_persona(persona_id)
         return persona.persona_lite if persona else ""
     except Exception as e:
-        logger.warning(f"[{bot_name}] Failed to load persona_lite: {e}")
+        logger.warning(f"[{persona_id}] Failed to load persona_lite: {e}")
         return ""
 
 
@@ -55,35 +55,35 @@ async def cron_generate_diaries(ctx) -> None:
     from app.orm.crud import get_all_persona_bot_names
     yesterday = date.today() - timedelta(days=1)
 
-    bot_names = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_bot_names()
     group_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
     p2p_ids = await get_active_p2p_chat_ids(min_replies=2, days=1)
     all_ids = group_ids + p2p_ids
 
-    if not all_ids or not bot_names:
+    if not all_ids or not persona_ids:
         logger.info("No active chats or bots, skip diary generation")
         return
 
-    for bot_name in bot_names:
+    for persona_id in persona_ids:
         for chat_id in all_ids:
             try:
-                await generate_diary_for_chat(chat_id, yesterday, bot_name=bot_name)
+                await generate_diary_for_chat(chat_id, yesterday, persona_id=persona_id)
             except Exception as e:
-                logger.error(f"[{bot_name}] Diary failed for {chat_id}: {e}")
+                logger.error(f"[{persona_id}] Diary failed for {chat_id}: {e}")
 
 
 # ==================== 核心原子函数 ====================
 
 
 async def generate_diary_for_chat(
-    chat_id: str, target_date: date, bot_name: str = "chiwei"
+    chat_id: str, target_date: date, persona_id: str = "akao"
 ) -> str | None:
     """为指定群或私聊生成指定日期的日记
 
     Args:
         chat_id: 群/私聊 ID
         target_date: 目标日期
-        bot_name: bot 名称，用于加载对应人设
+        persona_id: persona 标识，用于加载对应人设
 
     Returns:
         生成的日记内容，无消息时返回 None
@@ -130,11 +130,11 @@ async def generate_diary_for_chat(
         chat_hint = "这是群聊记录。记录群里发生的事、话题和你观察到的群友动态。"
 
     # 4. 查最近 3 篇日记
-    recent = await get_recent_diaries(chat_id, date_str, bot_name=bot_name, limit=3)
+    recent = await get_recent_diaries(chat_id, date_str, persona_id=persona_id, limit=3)
     recent_diaries_text = _format_recent_diaries(recent)
 
     # 5. 获取人设和 Langfuse prompt 并编译
-    persona_lite = await _get_persona_lite_for_bot(bot_name)
+    persona_lite = await _get_persona_lite_for_bot(persona_id)
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
         persona_lite=persona_lite,
@@ -168,7 +168,7 @@ async def generate_diary_for_chat(
         diary_date=date_str,
         content=diary_content,
         message_count=len(messages),
-        bot_name=bot_name,
+        persona_id=persona_id,
         model=settings.diary_model,
     )
 
@@ -179,13 +179,13 @@ async def generate_diary_for_chat(
 
     # 8. 后处理：从日记中提取/更新人物印象
     try:
-        await post_process_impressions(chat_id, diary_content, user_names, bot_name)
+        await post_process_impressions(chat_id, diary_content, user_names, persona_id)
     except Exception as e:
         logger.error(f"Impression extraction failed for {chat_id}: {e}")
 
     # 9. 后处理：蒸馏群文化 gestalt
     try:
-        await post_process_group_culture(chat_id, diary_content, bot_name)
+        await post_process_group_culture(chat_id, diary_content, persona_id)
     except Exception as e:
         logger.error(f"Group culture distill failed for {chat_id}: {e}")
 
@@ -299,7 +299,7 @@ async def post_process_impressions(
     chat_id: str,
     diary_content: str,
     user_names: dict[str, str],
-    bot_name: str,
+    persona_id: str,
 ) -> None:
     """从日记中提取人物印象并 upsert 到数据库
 
@@ -307,7 +307,7 @@ async def post_process_impressions(
         chat_id: 群 ID
         diary_content: 刚生成的日记内容
         user_names: user_id → 用户名 映射
-        bot_name: bot 名称，用于 per-bot 印象隔离
+        persona_id: persona 标识，用于 per-bot 印象隔离
     """
     # 1. 过滤出日记中提到的用户（减少噪音，提升 LLM 匹配准确率）
     relevant_users = {
@@ -318,7 +318,7 @@ async def post_process_impressions(
         return
 
     # 2. 查已有印象
-    existing = await get_all_impressions_for_chat(chat_id, bot_name)
+    existing = await get_all_impressions_for_chat(chat_id, persona_id)
     if existing:
         existing_text = "\n".join(
             f"- {user_names.get(imp.user_id, imp.user_id[:8])}(user_id={imp.user_id}): "
@@ -374,7 +374,7 @@ async def post_process_impressions(
         uid = item.get("user_id")
         text = item.get("impression_text")
         if uid and text and uid in user_names:
-            await upsert_person_impression(chat_id, uid, text, bot_name)
+            await upsert_person_impression(chat_id, uid, text, persona_id)
             count += 1
 
     logger.info(f"Impressions updated for {chat_id}: {count} people")
@@ -386,7 +386,7 @@ async def post_process_impressions(
 async def post_process_group_culture(
     chat_id: str,
     diary_content: str,
-    bot_name: str,
+    persona_id: str,
 ) -> None:
     """从日记中蒸馏群文化 gestalt
 
@@ -395,11 +395,11 @@ async def post_process_group_culture(
     Args:
         chat_id: 群 ID
         diary_content: 刚生成的日记内容
-        bot_name: bot 名称，用于 per-bot gestalt 隔离
+        persona_id: persona 标识，用于 per-bot gestalt 隔离
     """
     from app.orm.crud import get_group_culture_gestalt
 
-    existing_gestalt = await get_group_culture_gestalt(chat_id, bot_name)
+    existing_gestalt = await get_group_culture_gestalt(chat_id, persona_id)
 
     prompt_template = get_prompt("group_culture_distill")
     compiled_prompt = prompt_template.compile(
@@ -421,7 +421,7 @@ async def post_process_group_culture(
     raw = raw.strip()
 
     if raw:
-        await upsert_group_culture_gestalt(chat_id, raw, bot_name)
+        await upsert_group_culture_gestalt(chat_id, raw, persona_id)
         logger.info(f"Group culture gestalt updated for {chat_id}: {raw[:50]}")
 
 
@@ -433,30 +433,30 @@ async def cron_generate_weekly_reviews(ctx) -> None:
     from app.orm.crud import get_all_persona_bot_names
 
     chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
-    bot_names = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_bot_names()
 
-    if not chat_ids or not bot_names:
+    if not chat_ids or not persona_ids:
         logger.info("No active chats or bots, skip weekly review generation")
         return
-    logger.info(f"Weekly review chats: {len(chat_ids)}, bots: {len(bot_names)}")
+    logger.info(f"Weekly review chats: {len(chat_ids)}, personas: {len(persona_ids)}")
 
-    for bot_name in bot_names:
+    for persona_id in persona_ids:
         for chat_id in chat_ids:
             try:
-                await generate_weekly_review_for_chat(chat_id, bot_name=bot_name)
+                await generate_weekly_review_for_chat(chat_id, persona_id=persona_id)
             except Exception as e:
-                logger.error(f"[{bot_name}] Weekly review failed for {chat_id}: {e}")
+                logger.error(f"[{persona_id}] Weekly review failed for {chat_id}: {e}")
 
 
 async def generate_weekly_review_for_chat(
-    chat_id: str, target_monday: date | None = None, bot_name: str = "chiwei"
+    chat_id: str, target_monday: date | None = None, persona_id: str = "akao"
 ) -> str | None:
     """为指定群生成周记
 
     Args:
         chat_id: 群 ID
         target_monday: 目标周的周一日期，默认为上周一
-        bot_name: bot 名称，用于加载对应人设和印象
+        persona_id: persona 标识，用于加载对应人设和印象
 
     Returns:
         生成的周记内容，无日记时返回 None
@@ -470,7 +470,7 @@ async def generate_weekly_review_for_chat(
     week_end = (target_monday + timedelta(days=6)).isoformat()  # 周日
 
     # 2. 查上周的日记
-    diaries = await get_diaries_in_range(chat_id, week_start, week_end, bot_name=bot_name)
+    diaries = await get_diaries_in_range(chat_id, week_start, week_end, persona_id=persona_id)
     if not diaries:
         logger.info(f"No diaries for {chat_id} in {week_start}~{week_end}, skip")
         return None
@@ -481,7 +481,7 @@ async def generate_weekly_review_for_chat(
     )
 
     # 3. 查当前人物印象（作为参考上下文）
-    impressions = await get_all_impressions_for_chat(chat_id, bot_name)
+    impressions = await get_all_impressions_for_chat(chat_id, persona_id)
     if impressions:
         # 需要 user_id → name 映射
         impressions_text = []
@@ -495,7 +495,7 @@ async def generate_weekly_review_for_chat(
     # 4. 获取人设和 Langfuse prompt 并编译
     prompt_template = get_prompt("weekly_review_generation")
     compiled_prompt = prompt_template.compile(
-        persona_lite=await _get_persona_lite_for_bot(bot_name),
+        persona_lite=await _get_persona_lite_for_bot(persona_id),
         week_start=week_start,
         week_end=week_end,
         diaries=diaries_text,
@@ -524,7 +524,7 @@ async def generate_weekly_review_for_chat(
         week_start=week_start,
         week_end=week_end,
         content=content,
-        bot_name=bot_name,
+        persona_id=persona_id,
         model=settings.diary_model,
     )
 

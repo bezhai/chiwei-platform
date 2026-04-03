@@ -311,7 +311,7 @@ async def _build_and_stream(
             chat_name=chat_name,
             is_proactive=_is_proactive_var.get(False),
             proactive_stimulus=_proactive_stimulus_var.get(""),
-            bot_name=bot_name,
+            persona_id=bot_ctx.persona_id,
         )
     except Exception as e:
         logger.error(f"Failed to build inner context: {e}")
@@ -387,7 +387,7 @@ async def _build_and_stream(
                 from app.services.identity_drift import IdentityDriftManager
 
                 asyncio.create_task(
-                    IdentityDriftManager.get_instance().on_event(chat_id, bot_name)
+                    IdentityDriftManager.get_instance().on_event(chat_id, bot_ctx.persona_id)
                 )
             except Exception as e:
                 logger.warning(f"Identity drift trigger failed: {e}")

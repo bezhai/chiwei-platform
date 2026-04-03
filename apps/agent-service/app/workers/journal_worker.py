@@ -34,20 +34,20 @@ def _journal_model() -> str:
     return settings.diary_model
 
 
-async def _get_persona_lite_for_bot(bot_name: str) -> str:
+async def _get_persona_lite_for_bot(persona_id: str) -> str:
     """从 bot_persona 表加载 persona_lite"""
     from app.orm.crud import get_bot_persona
     try:
-        persona = await get_bot_persona(bot_name)
+        persona = await get_bot_persona(persona_id)
         return persona.persona_lite if persona else ""
     except Exception as e:
-        logger.warning(f"[{bot_name}] Failed to load persona_lite: {e}")
+        logger.warning(f"[{persona_id}] Failed to load persona_lite: {e}")
         return ""
 
 
-async def _get_recent_journals_text(target_date: date, bot_name: str = "chiwei", limit: int = 3) -> str:
+async def _get_recent_journals_text(target_date: date, persona_id: str = "akao", limit: int = 3) -> str:
     """获取前 N 天的 daily journal 内容，用于避免重复意象"""
-    journals = await get_recent_journals("daily", target_date.isoformat(), bot_name=bot_name, limit=limit)
+    journals = await get_recent_journals("daily", target_date.isoformat(), persona_id=persona_id, limit=limit)
     if not journals:
         return "（前几天没有日志）"
     return "\n\n".join(
@@ -72,11 +72,11 @@ async def cron_generate_daily_journal(ctx) -> None:
     from app.orm.crud import get_all_persona_bot_names
 
     yesterday = date.today() - timedelta(days=1)
-    for bot_name in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_bot_names():
         try:
-            await generate_daily_journal(yesterday, bot_name=bot_name)
+            await generate_daily_journal(yesterday, persona_id=persona_id)
         except Exception as e:
-            logger.error(f"[{bot_name}] Daily journal generation failed: {e}", exc_info=True)
+            logger.error(f"[{persona_id}] Daily journal generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_weekly_journal(ctx) -> None:
@@ -84,18 +84,18 @@ async def cron_generate_weekly_journal(ctx) -> None:
     from app.orm.crud import get_all_persona_bot_names
 
     last_monday = date.today() - timedelta(days=7)
-    for bot_name in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_bot_names():
         try:
-            await generate_weekly_journal(last_monday, bot_name=bot_name)
+            await generate_weekly_journal(last_monday, persona_id=persona_id)
         except Exception as e:
-            logger.error(f"[{bot_name}] Weekly journal generation failed: {e}", exc_info=True)
+            logger.error(f"[{persona_id}] Weekly journal generation failed: {e}", exc_info=True)
 
 
 # ==================== Daily Journal 生成 ====================
 
 
 async def generate_daily_journal(
-    target_date: date, bot_name: str = "chiwei"
+    target_date: date, persona_id: str = "akao"
 ) -> str | None:
     """生成赤尾的每日个人日志
 
@@ -103,7 +103,7 @@ async def generate_daily_journal(
 
     Args:
         target_date: 日志对应的日期（通常是昨天）
-        bot_name: bot 名称，用于加载对应人设
+        persona_id: persona 标识，用于加载对应人设
 
     Returns:
         生成的日志内容，或 None（无日记/已存在）
@@ -111,13 +111,13 @@ async def generate_daily_journal(
     date_str = target_date.isoformat()
 
     # 检查是否已有
-    existing = await get_journal("daily", date_str, bot_name)
+    existing = await get_journal("daily", date_str, persona_id)
     if existing:
         logger.info(f"Daily journal already exists for {date_str}, skip")
         return existing.content
 
     # 收集当天所有 DiaryEntry
-    diaries = await get_all_diaries_for_date(date_str, bot_name)
+    diaries = await get_all_diaries_for_date(date_str, persona_id)
     if not diaries:
         logger.info(f"No diaries for {date_str}, skip journal generation")
         return None
@@ -128,15 +128,15 @@ async def generate_daily_journal(
     )
 
     # 加载上下文
-    daily_schedule = await get_plan_for_period("daily", date_str, date_str, bot_name)
+    daily_schedule = await get_plan_for_period("daily", date_str, date_str, persona_id)
     schedule_text = daily_schedule.content if daily_schedule else "（今天没有写手帐）"
 
-    recent_journals = await _get_recent_journals_text(target_date, bot_name)
+    recent_journals = await _get_recent_journals_text(target_date, persona_id)
 
     # 编译 prompt
     prompt_template = get_prompt("journal_generation")
     compiled = prompt_template.compile(
-        persona_lite=await _get_persona_lite_for_bot(bot_name),
+        persona_lite=await _get_persona_lite_for_bot(persona_id),
         date=date_str,
         chat_diaries=chat_diaries,
         daily_schedule=schedule_text,
@@ -154,7 +154,7 @@ async def generate_daily_journal(
 
     # 写入数据库
     await upsert_journal(
-        "daily", date_str, content, bot_name, _journal_model(),
+        "daily", date_str, content, persona_id, _journal_model(),
         period_end=date_str, source_chat_count=len(diaries),
     )
 
@@ -166,7 +166,7 @@ async def generate_daily_journal(
 
 
 async def generate_weekly_journal(
-    monday_date: date, bot_name: str = "chiwei"
+    monday_date: date, persona_id: str = "akao"
 ) -> str | None:
     """生成赤尾的每周日志
 
@@ -174,7 +174,7 @@ async def generate_weekly_journal(
 
     Args:
         monday_date: 目标周的周一日期
-        bot_name: bot 名称，用于加载对应人设
+        persona_id: persona 标识，用于加载对应人设
 
     Returns:
         生成的周日志内容，或 None
@@ -183,7 +183,7 @@ async def generate_weekly_journal(
     week_end = (monday_date + timedelta(days=6)).isoformat()
 
     # 检查是否已有
-    existing = await get_journal("weekly", week_start, bot_name)
+    existing = await get_journal("weekly", week_start, persona_id)
     if existing:
         logger.info(f"Weekly journal already exists for week {week_start}, skip")
         return existing.content
@@ -192,7 +192,7 @@ async def generate_weekly_journal(
     daily_journals = []
     for i in range(7):
         d = monday_date + timedelta(days=i)
-        journal = await get_journal("daily", d.isoformat(), bot_name)
+        journal = await get_journal("daily", d.isoformat(), persona_id)
         if journal:
             daily_journals.append(f"--- {d.isoformat()} ---\n{journal.content}")
 
@@ -205,7 +205,7 @@ async def generate_weekly_journal(
     # 编译 prompt
     prompt_template = get_prompt("journal_weekly")
     compiled = prompt_template.compile(
-        persona_lite=await _get_persona_lite_for_bot(bot_name),
+        persona_lite=await _get_persona_lite_for_bot(persona_id),
         week_start=week_start,
         week_end=week_end,
         daily_journals=journals_text,
@@ -222,7 +222,7 @@ async def generate_weekly_journal(
 
     # 写入数据库
     await upsert_journal(
-        "weekly", week_start, content, bot_name, _journal_model(),
+        "weekly", week_start, content, persona_id, _journal_model(),
         period_end=week_end, source_chat_count=len(daily_journals),
     )
 

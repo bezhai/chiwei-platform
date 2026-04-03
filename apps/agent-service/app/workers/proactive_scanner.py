@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────
 TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
-TARGET_BOT_NAME = "chiwei"
+TARGET_PERSONA_ID = "akao"
 PROACTIVE_USER_ID = "__proactive__"
 QUIET_HOURS = (23, 9)  # >= 23 or < 9
 JUDGE_MODEL_ID = "proactive-judge-model"
@@ -290,8 +290,8 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         with propagate_attributes(session_id=scan_session_id):
             # 3. 收集上下文
             messages_text = await _format_messages_for_judge(messages)
-            reply_style = await get_reply_style(TARGET_CHAT_ID, TARGET_BOT_NAME)
-            group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID, TARGET_BOT_NAME)
+            reply_style = await get_reply_style(TARGET_CHAT_ID, TARGET_PERSONA_ID)
+            group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID, TARGET_PERSONA_ID)
             recent_proactive = await _get_recent_proactive_records()
 
             # 4. 小模型判断

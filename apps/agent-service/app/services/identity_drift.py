@@ -26,31 +26,31 @@ CST = timezone(timedelta(hours=8))
 _KEY_PREFIX = "reply_style"
 
 
-def _state_key(chat_id: str, bot_name: str) -> str:
-    return f"{_KEY_PREFIX}:{chat_id}:{bot_name}"
+def _state_key(chat_id: str, persona_id: str) -> str:
+    return f"{_KEY_PREFIX}:{chat_id}:{persona_id}"
 
 
-def _base_key(bot_name: str) -> str:
-    return f"reply_style:__base__:{bot_name}"
+def _base_key(persona_id: str) -> str:
+    return f"reply_style:__base__:{persona_id}"
 
 
 _BASE_TTL_SECONDS = 43200  # 12 小时，覆盖到下一次定时生成
 
 
-async def get_base_reply_style(bot_name: str) -> str | None:
+async def get_base_reply_style(persona_id: str = "akao") -> str | None:
     """读取指定 bot 的全局基线 reply_style"""
     redis = AsyncRedisClient.get_instance()
-    return await redis.get(_base_key(bot_name))
+    return await redis.get(_base_key(persona_id))
 
 
-async def set_base_reply_style(style: str, bot_name: str) -> None:
+async def set_base_reply_style(style: str, persona_id: str = "akao") -> None:
     """写入指定 bot 的全局基线 reply_style"""
     redis = AsyncRedisClient.get_instance()
-    await redis.set(_base_key(bot_name), style, ex=_BASE_TTL_SECONDS)
-    logger.info(f"[{bot_name}] Base reply_style updated: {style[:50]}...")
+    await redis.set(_base_key(persona_id), style, ex=_BASE_TTL_SECONDS)
+    logger.info(f"[{persona_id}] Base reply_style updated: {style[:50]}...")
 
 
-async def generate_base_reply_style(bot_name: str) -> str | None:
+async def generate_base_reply_style(persona_id: str = "akao") -> str | None:
     """基于当前 Schedule 生成指定 bot 的全局基线 reply_style
 
     不依赖任何群/私聊的消息，只用 schedule + 当前时段。
@@ -58,7 +58,7 @@ async def generate_base_reply_style(bot_name: str) -> str | None:
     """
     schedule_context = await _get_schedule_context()
     if not schedule_context or schedule_context.startswith("（"):
-        logger.info(f"[{bot_name}] No schedule available, skip base reply_style generation")
+        logger.info(f"[{persona_id}] No schedule available, skip base reply_style generation")
         return None
 
     now = datetime.now(CST)
@@ -73,40 +73,40 @@ async def generate_base_reply_style(bot_name: str) -> str | None:
     style = _extract_text(response.content)
 
     if not style:
-        logger.warning(f"[{bot_name}] Base reply_style generation returned empty")
+        logger.warning(f"[{persona_id}] Base reply_style generation returned empty")
         return None
 
-    await set_base_reply_style(style, bot_name)
+    await set_base_reply_style(style, persona_id)
     return style
 
 
-async def get_identity_state(chat_id: str, bot_name: str) -> str | None:
+async def get_identity_state(chat_id: str, persona_id: str) -> str | None:
     """读取指定 bot 在指定群的漂移状态"""
     redis = AsyncRedisClient.get_instance()
-    return await redis.hget(_state_key(chat_id, bot_name), "state")
+    return await redis.hget(_state_key(chat_id, persona_id), "state")
 
 
-async def get_identity_updated_at(chat_id: str, bot_name: str) -> str | None:
+async def get_identity_updated_at(chat_id: str, persona_id: str) -> str | None:
     """读取上次漂移更新时间（ISO 格式）"""
     redis = AsyncRedisClient.get_instance()
-    return await redis.hget(_state_key(chat_id, bot_name), "updated_at")
+    return await redis.hget(_state_key(chat_id, persona_id), "updated_at")
 
 
-async def set_identity_state(chat_id: str, bot_name: str, state: str, ttl: int = 86400) -> None:
+async def set_identity_state(chat_id: str, persona_id: str, state: str, ttl: int = 86400) -> None:
     """写入指定 bot 在指定群的漂移状态"""
     redis = AsyncRedisClient.get_instance()
     now = datetime.now(CST).isoformat()
     pipe = redis.pipeline()
-    pipe.hset(_state_key(chat_id, bot_name), mapping={"state": state, "updated_at": now})
-    pipe.expire(_state_key(chat_id, bot_name), ttl)
+    pipe.hset(_state_key(chat_id, persona_id), mapping={"state": state, "updated_at": now})
+    pipe.expire(_state_key(chat_id, persona_id), ttl)
     await pipe.execute()
-    logger.info(f"[{bot_name}] Identity state updated for {chat_id}: {state[:50]}...")
+    logger.info(f"[{persona_id}] Identity state updated for {chat_id}: {state[:50]}...")
 
 
 class IdentityDriftManager:
     """两阶段锁 identity 漂移管理器
 
-    每个 (chat_id, bot_name) 组合独立管理，不并行漂移。
+    每个 (chat_id, persona_id) 组合独立管理，不并行漂移。
     一阶段：收集消息（debounce N 秒 + 强制 flush M 条）
     二阶段：LLM 漂移计算（不可中断）
     """
@@ -114,8 +114,8 @@ class IdentityDriftManager:
     _instance: "IdentityDriftManager | None" = None
 
     def __init__(self):
-        self._buffers: dict[str, int] = {}  # "{chat_id}:{bot_name}" -> event count
-        self._timers: dict[str, asyncio.Task] = {}  # "{chat_id}:{bot_name}" -> phase1 timer
+        self._buffers: dict[str, int] = {}  # "{chat_id}:{persona_id}" -> event count
+        self._timers: dict[str, asyncio.Task] = {}  # "{chat_id}:{persona_id}" -> phase1 timer
         self._phase2_running: set[str] = set()  # keys in phase2
 
     @classmethod
@@ -124,20 +124,20 @@ class IdentityDriftManager:
             cls._instance = cls()
         return cls._instance
 
-    def _key(self, chat_id: str, bot_name: str) -> str:
-        return f"{chat_id}:{bot_name}"
+    def _key(self, chat_id: str, persona_id: str) -> str:
+        return f"{chat_id}:{persona_id}"
 
-    async def on_event(self, chat_id: str, bot_name: str) -> None:
+    async def on_event(self, chat_id: str, persona_id: str) -> None:
         """消息/回复事件 -> 进入两阶段锁流程
 
         buffer 使用从上次漂移以来的真实消息数量，
         而不是简单 +1，这样活跃群的非@消息也计入密度。
         """
-        key = self._key(chat_id, bot_name)
-        msg_count = await _count_messages_since_last_drift(chat_id, bot_name)
+        key = self._key(chat_id, persona_id)
+        msg_count = await _count_messages_since_last_drift(chat_id, persona_id)
         self._buffers[key] = max(self._buffers.get(key, 0) + 1, msg_count)
         logger.info(
-            f"Identity drift on_event: chat_id={chat_id}, bot={bot_name}, "
+            f"Identity drift on_event: chat_id={chat_id}, persona={persona_id}, "
             f"buffer={self._buffers[key]}, "
             f"msg_since_drift={msg_count}, "
             f"phase2_running={key in self._phase2_running}"
@@ -154,29 +154,29 @@ class IdentityDriftManager:
 
         # 超过阈值 -> 强制进入二阶段
         if self._buffers.get(key, 0) >= settings.identity_drift_max_buffer:
-            asyncio.create_task(self._enter_phase2(chat_id, bot_name))
+            asyncio.create_task(self._enter_phase2(chat_id, persona_id))
             return
 
         # 启动/重置 debounce 计时器
         self._timers[key] = asyncio.create_task(
-            self._phase1_timer(chat_id, bot_name)
+            self._phase1_timer(chat_id, persona_id)
         )
         logger.info(
-            f"Identity drift timer started: chat_id={chat_id}, bot={bot_name}, "
+            f"Identity drift timer started: chat_id={chat_id}, persona={persona_id}, "
             f"debounce={settings.identity_drift_debounce_seconds}s"
         )
 
-    async def _phase1_timer(self, chat_id: str, bot_name: str):
+    async def _phase1_timer(self, chat_id: str, persona_id: str):
         """一阶段计时器：N 秒无新消息后进入二阶段"""
         try:
             await asyncio.sleep(settings.identity_drift_debounce_seconds)
-            await self._enter_phase2(chat_id, bot_name)
+            await self._enter_phase2(chat_id, persona_id)
         except asyncio.CancelledError:
             pass  # timer reset by new event
 
-    async def _enter_phase2(self, chat_id: str, bot_name: str):
+    async def _enter_phase2(self, chat_id: str, persona_id: str):
         """进入二阶段：清空缓冲区，执行 LLM 漂移"""
-        key = self._key(chat_id, bot_name)
+        key = self._key(chat_id, persona_id)
         event_count = self._buffers.pop(key, 0)
         self._timers.pop(key, None)
 
@@ -186,33 +186,33 @@ class IdentityDriftManager:
         self._phase2_running.add(key)
         try:
             logger.info(
-                f"Identity drift phase2 for {chat_id} bot={bot_name}: "
+                f"Identity drift phase2 for {chat_id} persona={persona_id}: "
                 f"{event_count} events buffered"
             )
-            await _run_drift(chat_id, bot_name)
+            await _run_drift(chat_id, persona_id)
         except Exception as e:
-            logger.error(f"Identity drift failed for {chat_id} bot={bot_name}: {e}")
+            logger.error(f"Identity drift failed for {chat_id} persona={persona_id}: {e}")
         finally:
             self._phase2_running.discard(key)
             # 二阶段期间有新事件 -> 启动下一轮
             if self._buffers.get(key, 0) > 0:
-                asyncio.create_task(self.on_event(chat_id, bot_name))
+                asyncio.create_task(self.on_event(chat_id, persona_id))
 
 
-async def _run_drift(chat_id: str, bot_name: str) -> None:
+async def _run_drift(chat_id: str, persona_id: str) -> None:
     """两阶段漂移管线：观察 → 生成
 
     Agent 1（观察）：群聊事件 + 赤尾近期回复 + 基准人设 → 观察报告
     Agent 2（生成）：观察报告 → reply_style
     """
     # 1. 收集上下文
-    current_state = await get_identity_state(chat_id, bot_name)
+    current_state = await get_identity_state(chat_id, persona_id)
     recent_messages = await _get_recent_messages(chat_id)
     schedule_context = await _get_schedule_context()
-    recent_replies = await _get_recent_akao_replies(chat_id, bot_name)
+    recent_replies = await _get_recent_akao_replies(chat_id, persona_id)
 
     if not recent_messages:
-        logger.info(f"[{bot_name}] No recent messages for {chat_id}, skip drift")
+        logger.info(f"[{persona_id}] No recent messages for {chat_id}, skip drift")
         return
 
     now = datetime.now(CST)
@@ -234,10 +234,10 @@ async def _run_drift(chat_id: str, bot_name: str) -> None:
     observation_report = _extract_text(observer_response.content)
 
     if not observation_report:
-        logger.warning(f"[{bot_name}] Observer returned empty for {chat_id}")
+        logger.warning(f"[{persona_id}] Observer returned empty for {chat_id}")
         return
 
-    logger.info(f"[{bot_name}] Drift observer for {chat_id}: {observation_report[:80]}...")
+    logger.info(f"[{persona_id}] Drift observer for {chat_id}: {observation_report[:80]}...")
 
     # 3. Agent 2: 生成
     generator_prompt = get_prompt("drift_generator")
@@ -251,11 +251,11 @@ async def _run_drift(chat_id: str, bot_name: str) -> None:
     new_style = _extract_text(generator_response.content)
 
     if not new_style:
-        logger.warning(f"[{bot_name}] Generator returned empty for {chat_id}")
+        logger.warning(f"[{persona_id}] Generator returned empty for {chat_id}")
         return
 
     # 4. 保存
-    await set_identity_state(chat_id, bot_name, new_style)
+    await set_identity_state(chat_id, persona_id, new_style)
 
 
 def _extract_text(content) -> str:
@@ -268,9 +268,9 @@ def _extract_text(content) -> str:
     return (content or "").strip()
 
 
-async def _count_messages_since_last_drift(chat_id: str, bot_name: str) -> int:
+async def _count_messages_since_last_drift(chat_id: str, persona_id: str) -> int:
     """统计上次漂移以来的消息数量（含非@赤尾的消息）"""
-    updated_at_str = await get_identity_updated_at(chat_id, bot_name)
+    updated_at_str = await get_identity_updated_at(chat_id, persona_id)
     if updated_at_str:
         try:
             start_dt = datetime.fromisoformat(updated_at_str)
@@ -318,7 +318,7 @@ async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
     return "\n".join(lines)
 
 
-async def _get_recent_akao_replies(chat_id: str, bot_name: str, max_replies: int = 10) -> str:
+async def _get_recent_akao_replies(chat_id: str, persona_id: str, max_replies: int = 10) -> str:
     """获取指定 bot 最近的回复原文，用于偏差诊断"""
     now = datetime.now(CST)
     start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
@@ -328,7 +328,7 @@ async def _get_recent_akao_replies(chat_id: str, bot_name: str, max_replies: int
     if not messages:
         return ""
 
-    akao_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == bot_name]
+    akao_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == persona_id]
     akao_msgs = akao_msgs[-max_replies:]
 
     lines = []

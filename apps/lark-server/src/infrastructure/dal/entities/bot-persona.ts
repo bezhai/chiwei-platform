@@ -9,7 +9,7 @@ import {
 @Entity('bot_persona')
 export class BotPersona {
     @PrimaryColumn({ type: 'varchar', length: 50 })
-    bot_name!: string
+    persona_id!: string
 
     @Column({ type: 'varchar', length: 50 })
     display_name!: string

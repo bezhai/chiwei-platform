@@ -11,13 +11,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_persona_id(bot_name: str) -> str:
+    """从 bot_config 表查 persona_id，找不到则用 bot_name 自身"""
+    from app.orm.base import AsyncSessionLocal
+    from sqlalchemy import text
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("SELECT persona_id FROM bot_config WHERE bot_name = :bn"),
+            {"bn": bot_name},
+        )
+        row = result.scalar_one_or_none()
+        return row if row else bot_name
+
+
 class BotContext:
     def __init__(self, chat_id: str, bot_name: str, chat_type: str) -> None:
         self.chat_id = chat_id
         self.bot_name = bot_name
         self.chat_type = chat_type
+        self._persona_id: str = ""
         self._persona: "BotPersona | None" = None
         self._reply_style: str = ""
+
+    @property
+    def persona_id(self) -> str:
+        return self._persona_id
 
     async def load(self) -> None:
         """并行加载所有 per-bot 数据"""
@@ -25,13 +44,18 @@ class BotContext:
         from app.orm.crud import get_bot_persona
         from app.services.memory_context import get_reply_style
 
-        self._persona = await get_bot_persona(self.bot_name)
+        self._persona_id = await _resolve_persona_id(self.bot_name)
+
+        self._persona = await get_bot_persona(self._persona_id)
         if self._persona is None:
-            logger.warning(f"BotPersona not found for bot_name={self.bot_name}, using defaults")
+            logger.warning(
+                f"BotPersona not found for persona_id={self._persona_id} "
+                f"(bot_name={self.bot_name}), using defaults"
+            )
 
         default_style = self._persona.default_reply_style if self._persona else ""
         self._reply_style = await get_reply_style(
-            self.chat_id, self.bot_name, default_style
+            self.chat_id, self._persona_id, default_style
         )
 
     @property
