@@ -29,20 +29,16 @@ from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 
-# 统一的拒绝响应（fallback，仅在无法获取 BotContext 时使用）
-GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
-
-
 async def _get_guard_message(bot_name: str) -> str:
-    """获取 guard 拒绝消息（bot 专属，fallback 到常量）"""
+    """获取 guard 拒绝消息（bot 专属，fallback 为通用消息）"""
     try:
         from app.orm.crud import get_bot_persona
         persona = await get_bot_persona(bot_name)
         if persona and persona.error_messages:
-            return persona.error_messages.get("guard", GUARD_REJECT_MESSAGE)
+            return persona.error_messages.get("guard", "不想讨论这个话题呢~")
     except Exception as e:
         logger.warning(f"Failed to get guard message for bot={bot_name}: {e}")
-    return GUARD_REJECT_MESSAGE
+    return "不想讨论这个话题呢~"
 
 # 分段标记（consumer 侧检测并拆分为多条消息）
 SPLIT_MARKER = "---split---"
@@ -124,7 +120,7 @@ async def _buffer_until_pre(
     raw_stream: AsyncGenerator[str, None],
     pre_task: asyncio.Task,
     message_id: str,
-    guard_message: str = GUARD_REJECT_MESSAGE,
+    guard_message: str = "不想讨论这个话题呢~",
 ) -> AsyncGenerator[str, None]:
     """用 pre_task 结果守护一个原始 token 流。
 
