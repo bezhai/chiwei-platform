@@ -26,12 +26,14 @@ import {
     UserGroupBindingRepository,
 } from 'infrastructure/dal/repositories/repositories';
 import { getBotAppId } from '@core/services/bot/bot-var';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
+import { rabbitmqClient, PROACTIVE_EVAL } from '@integrations/rabbitmq';
 
 /**
  * Lark事件处理器类
@@ -85,6 +87,21 @@ export class LarkEventHandlers {
                 reply_message_id: message.parentMessageId,
                 message_type: message.messageType,
             });
+
+            // Publish proactive eval event for group messages that don't @任何 persona bot
+            // @persona bot 的消息走正常回复流程，不需要 proactive 重复触发
+            if (!message.isP2P()) {
+                const personaUnionIds = multiBotManager.getAllBotConfigs()
+                    .filter(b => b.bot_role === 'persona')
+                    .map(b => b.robot_union_id);
+                const mentionsPersona = personaUnionIds.some(id => message.hasMention(id));
+                if (!mentionsPersona) {
+                    rabbitmqClient.publish(PROACTIVE_EVAL, {
+                        chat_id: message.chatId,
+                        message_id: message.messageId,
+                    }).catch(err => console.warn('[ProactiveEval] publish failed:', err));
+                }
+            }
 
             await runRules(message);
         } catch (error) {

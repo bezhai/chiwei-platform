@@ -178,9 +178,10 @@ async def cron_generate_monthly_plan(ctx) -> None:
 
 
 async def cron_generate_weekly_plan(ctx) -> None:
-    """cron 入口：生成本周计划"""
+    """cron 入口：周日 23:00 触发，生成下周计划（target_date 加 1 天进入周一）"""
     try:
-        await generate_weekly_plan()
+        tomorrow = date.today() + timedelta(days=1)
+        await generate_weekly_plan(target_date=tomorrow)
     except Exception as e:
         logger.error(f"Weekly plan generation failed: {e}", exc_info=True)
 

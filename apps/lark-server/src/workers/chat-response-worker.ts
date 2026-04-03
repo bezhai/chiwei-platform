@@ -184,6 +184,8 @@ interface ChatResponsePayload {
     lane?: string;
     part_index?: number;
     is_last?: boolean;
+    is_proactive?: boolean;
+    bot_name?: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -213,12 +215,14 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         chat_id,
         is_p2p,
         root_id,
+        user_id,
         content,
         full_content,
         status,
         error,
         part_index = 0,
         is_last = false,
+        is_proactive = false,
     } = payload;
 
     console.info(
@@ -233,12 +237,13 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     const dbQueryMs = Date.now() - tDbQuery0;
     chatResponseDuration.labels({ stage: 'db_query' }).observe(dbQueryMs / 1000);
 
-    if (!agentResponse) {
-        console.error(`[ChatResponseWorker] No agent_response found: session_id=${session_id}`);
+    // proactive 消息没有 agent_response 记录，从 payload 获取 bot_name
+    const botName = agentResponse?.bot_name || payload.bot_name;
+    if (!botName) {
+        console.error(`[ChatResponseWorker] No bot_name found: session_id=${session_id}, is_proactive=${is_proactive}`);
         rabbitmqClient.ack(msg);
         return;
     }
-    const botName = agentResponse.bot_name;
 
     // 设置 bot context — ack 统一在 context.run 之后，callback 内部禁止 ack/nack
     const contextData = context.createContext(botName || undefined, undefined, payload.lane);
@@ -254,7 +259,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
         if (!content) {
             console.warn(`[ChatResponseWorker] Empty content: session_id=${session_id}, part=${part_index}`);
-            if (is_last) {
+            if (is_last && agentResponse) {
                 await repo.update({ session_id }, { status: 'completed' });
             }
             return;
@@ -277,10 +282,17 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const tSend0 = Date.now();
             let aiMessageId: string | undefined;
             if (part_index === 0) {
-                // 第一条作为回复
-                aiMessageId = await replyPost(message_id, postContent);
+                if (is_proactive) {
+                    // proactive: reply to real message if available, else send new
+                    if (root_id) {
+                        aiMessageId = await replyPost(root_id, postContent);
+                    } else {
+                        aiMessageId = await sendPost(chat_id, postContent);
+                    }
+                } else {
+                    aiMessageId = await replyPost(message_id, postContent);
+                }
             } else {
-                // 后续消息带延迟后发送
                 await sleep(SEND_DELAY_MS);
                 aiMessageId = await sendPost(chat_id, postContent);
             }
@@ -301,38 +313,39 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 chat_id: chat_id,
                 chat_type: is_p2p ? 'p2p' : 'group',
                 create_time: String(now),
-                root_message_id: root_id || message_id,
-                reply_message_id: message_id,
+                root_message_id: is_proactive ? (root_id || effectiveMessageId) : (root_id || message_id),
+                reply_message_id: is_proactive ? (root_id || undefined) : message_id,
             });
 
-            // 每条消息追加到 agent_responses.replies jsonb 数组（参数化）
-            const replyEntry = [
-                {
-                    message_id: effectiveMessageId,
-                    content_type: 'post',
-                    sent_at: new Date().toISOString(),
-                },
-            ];
-            await repo
-                .createQueryBuilder()
-                .update(AgentResponse)
-                .set({
-                    replies: () =>
-                        `COALESCE(replies, '[]'::jsonb) || :replyEntry::jsonb`,
-                })
-                .setParameter('replyEntry', JSON.stringify(replyEntry))
-                .where('session_id = :sid', { sid: session_id })
-                .execute();
-
-            // is_last 时更新 response_text 和状态
-            if (is_last) {
-                await repo.update(
-                    { session_id },
+            // proactive 没有 agent_response 记录，跳过 replies 追加和状态更新
+            if (agentResponse) {
+                const replyEntry = [
                     {
-                        response_text: full_content || content,
-                        status: 'completed',
+                        message_id: effectiveMessageId,
+                        content_type: 'post',
+                        sent_at: new Date().toISOString(),
                     },
-                );
+                ];
+                await repo
+                    .createQueryBuilder()
+                    .update(AgentResponse)
+                    .set({
+                        replies: () =>
+                            `COALESCE(replies, '[]'::jsonb) || :replyEntry::jsonb`,
+                    })
+                    .setParameter('replyEntry', JSON.stringify(replyEntry))
+                    .where('session_id = :sid', { sid: session_id })
+                    .execute();
+
+                if (is_last) {
+                    await repo.update(
+                        { session_id },
+                        {
+                            response_text: full_content || content,
+                            status: 'completed',
+                        },
+                    );
+                }
             }
             const dbWriteMs = Date.now() - tDbWrite0;
             chatResponseDuration.labels({ stage: 'db_write' }).observe(dbWriteMs / 1000);

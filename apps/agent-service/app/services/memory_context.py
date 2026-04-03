@@ -90,6 +90,9 @@ async def build_inner_context(
     trigger_user_id: str,
     trigger_username: str,
     chat_name: str = "",
+    *,
+    is_proactive: bool = False,
+    proactive_stimulus: str = "",
 ) -> str:
     """构建统一的聊天注入上下文
 
@@ -107,7 +110,14 @@ async def build_inner_context(
     sections: list[str] = []
 
     # === 场景提示 ===
-    if chat_type == "p2p":
+    if is_proactive:
+        scene = f"你在群聊「{chat_name}」中。" if chat_name else ""
+        scene += "\n你刚刷到了群里的对话。如果你想说点什么就说，不想说也可以不说。"
+        scene += "\n不要刻意解释为什么突然说话，像朋友在群里自然接话就好。"
+        if proactive_stimulus:
+            scene += f"\n（你注意到的：{proactive_stimulus}）"
+        sections.append(scene)
+    elif chat_type == "p2p":
         if trigger_username:
             sections.append(f"你正在和 {trigger_username} 私聊。")
     else:
