@@ -209,3 +209,86 @@ func parseMutationID(w http.ResponseWriter, r *http.Request) (uint, error) {
 	}
 	return uint(id64), nil
 }
+
+type reviewRequest struct {
+	Note string `json:"note"`
+}
+
+// ApproveMutation 审批通过：立即执行 SQL，成功→approved，失败→failed。
+func (h *OpsHandler) ApproveMutation(w http.ResponseWriter, r *http.Request) {
+	id, err := parseMutationID(w, r)
+	if err != nil {
+		return
+	}
+	m, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "mutation not found"})
+		return
+	}
+	if m.Status != "pending" {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("mutation is already %s", m.Status),
+		})
+		return
+	}
+
+	var req reviewRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	writeDB, ok := h.writeDbs[m.DB]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("write database %q not available", m.DB),
+		})
+		return
+	}
+
+	now := time.Now()
+	var execErr string
+	if result := writeDB.WithContext(r.Context()).Exec(m.SQL); result.Error != nil {
+		execErr = result.Error.Error()
+	}
+
+	newStatus := "approved"
+	if execErr != "" {
+		newStatus = "failed"
+	}
+
+	if err := h.store.UpdateStatus(r.Context(), id, newStatus, "web-admin", req.Note, &now, execErr); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	updated, _ := h.store.Get(r.Context(), id)
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// RejectMutation 拒绝申请，填写原因。
+func (h *OpsHandler) RejectMutation(w http.ResponseWriter, r *http.Request) {
+	id, err := parseMutationID(w, r)
+	if err != nil {
+		return
+	}
+	m, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "mutation not found"})
+		return
+	}
+	if m.Status != "pending" {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("mutation is already %s", m.Status),
+		})
+		return
+	}
+
+	var req reviewRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if err := h.store.UpdateStatus(r.Context(), id, "rejected", "web-admin", req.Note, nil, ""); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	updated, _ := h.store.Get(r.Context(), id)
+	writeJSON(w, http.StatusOK, updated)
+}

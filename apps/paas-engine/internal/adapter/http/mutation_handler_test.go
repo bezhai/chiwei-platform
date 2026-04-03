@@ -125,3 +125,71 @@ func TestGetMutation_NotFound(t *testing.T) {
 		t.Errorf("want 404, got %d", rec.Code)
 	}
 }
+
+func TestApproveMutation_NotFound(t *testing.T) {
+	h := NewOpsHandler(nil, nil, newFakeMutationStore())
+	r := chi.NewRouter()
+	r.Post("/mutations/{id}/approve", h.ApproveMutation)
+
+	body, _ := json.Marshal(map[string]string{"note": "ok"})
+	req := httptest.NewRequest(http.MethodPost, "/mutations/999/approve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("want 404, got %d", rec.Code)
+	}
+}
+
+func TestApproveMutation_NotPending(t *testing.T) {
+	store := newFakeMutationStore()
+	ctx := context.Background()
+	_ = store.Create(ctx, &repository.DbMutationModel{
+		DB: "chiwei", SQL: "DROP TABLE foo", Status: "rejected", SubmittedBy: "claude-code",
+	})
+
+	h := NewOpsHandler(nil, nil, store)
+	r := chi.NewRouter()
+	r.Post("/mutations/{id}/approve", h.ApproveMutation)
+
+	body, _ := json.Marshal(map[string]string{"note": "ok"})
+	req := httptest.NewRequest(http.MethodPost, "/mutations/1/approve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("want 409, got %d", rec.Code)
+	}
+}
+
+func TestRejectMutation_OK(t *testing.T) {
+	store := newFakeMutationStore()
+	ctx := context.Background()
+	_ = store.Create(ctx, &repository.DbMutationModel{
+		DB: "chiwei", SQL: "DROP TABLE foo", Status: "pending", SubmittedBy: "claude-code",
+	})
+
+	h := NewOpsHandler(nil, nil, store)
+	r := chi.NewRouter()
+	r.Post("/mutations/{id}/reject", h.RejectMutation)
+
+	body, _ := json.Marshal(map[string]string{"note": "dangerous"})
+	req := httptest.NewRequest(http.MethodPost, "/mutations/1/reject", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", rec.Code)
+	}
+
+	m, _ := store.Get(ctx, 1)
+	if m.Status != "rejected" {
+		t.Errorf("want status=rejected, got %s", m.Status)
+	}
+	if m.ReviewNote != "dangerous" {
+		t.Errorf("want note=dangerous, got %s", m.ReviewNote)
+	}
+}
