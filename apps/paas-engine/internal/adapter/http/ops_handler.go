@@ -250,16 +250,23 @@ func (h *OpsHandler) ApproveMutation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newStatus := "approved"
+	var executedAt *time.Time
 	if execErr != "" {
 		newStatus = "failed"
+	} else {
+		executedAt = &now
 	}
 
-	if err := h.store.UpdateStatus(r.Context(), id, newStatus, "web-admin", req.Note, &now, execErr); err != nil {
+	if err := h.store.UpdateStatus(r.Context(), id, newStatus, "web-admin", req.Note, executedAt, execErr); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	updated, _ := h.store.Get(r.Context(), id)
+	updated, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch updated record"})
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -289,6 +296,10 @@ func (h *OpsHandler) RejectMutation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, _ := h.store.Get(r.Context(), id)
+	updated, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch updated record"})
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
