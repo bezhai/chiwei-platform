@@ -88,6 +88,13 @@ async def get_model_and_provider_info(model_id: str):
         }
 
 
+async def get_bot_persona(bot_name: str) -> "BotPersona | None":
+    """获取 bot 人设配置"""
+    from app.orm.models import BotPersona
+    async with AsyncSessionLocal() as session:
+        return await session.get(BotPersona, bot_name)
+
+
 async def get_gray_config(message_id: str) -> dict | None:
     """
     根据 message_id 关联查询所属 chat 的灰度配置
@@ -165,9 +172,9 @@ async def get_active_p2p_chat_ids(
 
 
 async def get_cross_group_impressions(
-    user_id: str, limit: int = 5
+    user_id: str, bot_name: str, limit: int = 5
 ) -> list[tuple[PersonImpression, str]]:
-    """查询某用户在所有群聊中的印象（按更新时间倒序）
+    """查询某用户在所有群聊中的印象（per-bot，按更新时间倒序）
 
     JOIN lark_group_chat_info 自然过滤掉 P2P chat_id，
     确保只返回群聊来源的印象。
@@ -183,6 +190,7 @@ async def get_cross_group_impressions(
                 PersonImpression.chat_id == LarkGroupChatInfo.chat_id,
             )
             .where(PersonImpression.user_id == user_id)
+            .where(PersonImpression.bot_name == bot_name)
             .order_by(PersonImpression.updated_at.desc())
             .limit(limit)
         )
@@ -332,9 +340,9 @@ async def get_username(user_id: str) -> str | None:
 
 
 async def get_impressions_for_users(
-    chat_id: str, user_ids: list[str]
+    chat_id: str, user_ids: list[str], bot_name: str
 ) -> list[PersonImpression]:
-    """查询指定群中指定用户的印象"""
+    """查询指定群中指定用户的印象（per-bot）"""
     if not user_ids:
         return []
     async with AsyncSessionLocal() as session:
@@ -342,15 +350,18 @@ async def get_impressions_for_users(
             select(PersonImpression)
             .where(PersonImpression.chat_id == chat_id)
             .where(PersonImpression.user_id.in_(user_ids))
+            .where(PersonImpression.bot_name == bot_name)
         )
         return list(result.scalars().all())
 
 
-async def get_all_impressions_for_chat(chat_id: str) -> list[PersonImpression]:
-    """查询指定群的所有已有印象"""
+async def get_all_impressions_for_chat(chat_id: str, bot_name: str) -> list[PersonImpression]:
+    """查询指定群指定 bot 的所有已有印象"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PersonImpression).where(PersonImpression.chat_id == chat_id)
+            select(PersonImpression)
+            .where(PersonImpression.chat_id == chat_id)
+            .where(PersonImpression.bot_name == bot_name)
         )
         return list(result.scalars().all())
 
@@ -378,14 +389,15 @@ async def search_user_by_name(name: str) -> list[LarkUser]:
 
 
 async def upsert_person_impression(
-    chat_id: str, user_id: str, impression_text: str
+    chat_id: str, user_id: str, impression_text: str, bot_name: str
 ) -> None:
-    """插入或更新人物印象"""
+    """插入或更新人物印象（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(PersonImpression)
             .where(PersonImpression.chat_id == chat_id)
             .where(PersonImpression.user_id == user_id)
+            .where(PersonImpression.bot_name == bot_name)
         )
         existing = result.scalar_one_or_none()
 
@@ -396,6 +408,7 @@ async def upsert_person_impression(
                 PersonImpression(
                     chat_id=chat_id,
                     user_id=user_id,
+                    bot_name=bot_name,
                     impression_text=impression_text,
                 )
             )
@@ -558,24 +571,36 @@ async def delete_schedule(schedule_id: int) -> bool:
 # ==================== GroupCultureGestalt CRUD ====================
 
 
-async def upsert_group_culture_gestalt(chat_id: str, gestalt_text: str) -> None:
-    """写入/更新群文化 gestalt"""
+async def upsert_group_culture_gestalt(
+    chat_id: str, gestalt_text: str, bot_name: str
+) -> None:
+    """写入/更新群文化 gestalt（per-bot）"""
     async with AsyncSessionLocal() as session:
-        existing = await session.get(GroupCultureGestalt, chat_id)
+        result = await session.execute(
+            select(GroupCultureGestalt)
+            .where(GroupCultureGestalt.chat_id == chat_id)
+            .where(GroupCultureGestalt.bot_name == bot_name)
+        )
+        existing = result.scalar_one_or_none()
         if existing:
             existing.gestalt_text = gestalt_text
         else:
             session.add(GroupCultureGestalt(
-                chat_id=chat_id, gestalt_text=gestalt_text
+                chat_id=chat_id, bot_name=bot_name, gestalt_text=gestalt_text
             ))
         await session.commit()
 
 
-async def get_group_culture_gestalt(chat_id: str) -> str:
-    """获取群文化 gestalt，无则返回空字符串"""
+async def get_group_culture_gestalt(chat_id: str, bot_name: str) -> str:
+    """获取群文化 gestalt（per-bot），无则返回空字符串"""
     async with AsyncSessionLocal() as session:
-        result = await session.get(GroupCultureGestalt, chat_id)
-        return result.gestalt_text if result else ""
+        result = await session.execute(
+            select(GroupCultureGestalt)
+            .where(GroupCultureGestalt.chat_id == chat_id)
+            .where(GroupCultureGestalt.bot_name == bot_name)
+        )
+        row = result.scalar_one_or_none()
+        return row.gestalt_text if row else ""
 
 
 # ==================== AkaoJournal CRUD ====================
@@ -665,3 +690,11 @@ async def get_recent_journals(
             .limit(limit)
         )
         return list(result.scalars().all())
+
+
+async def get_all_persona_bot_names() -> list[str]:
+    """获取所有 persona bot 的 bot_name 列表"""
+    from app.orm.models import BotPersona
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(BotPersona.bot_name))
+        return [row[0] for row in result.all()]
