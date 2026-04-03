@@ -88,6 +88,13 @@ async def get_model_and_provider_info(model_id: str):
         }
 
 
+async def get_bot_persona(persona_id: str) -> "BotPersona | None":
+    """获取 bot 人设配置"""
+    from app.orm.models import BotPersona
+    async with AsyncSessionLocal() as session:
+        return await session.get(BotPersona, persona_id)
+
+
 async def get_gray_config(message_id: str) -> dict | None:
     """
     根据 message_id 关联查询所属 chat 的灰度配置
@@ -165,9 +172,9 @@ async def get_active_p2p_chat_ids(
 
 
 async def get_cross_group_impressions(
-    user_id: str, limit: int = 5
+    user_id: str, persona_id: str, limit: int = 5
 ) -> list[tuple[PersonImpression, str]]:
-    """查询某用户在所有群聊中的印象（按更新时间倒序）
+    """查询某用户在所有群聊中的印象（per-bot，按更新时间倒序）
 
     JOIN lark_group_chat_info 自然过滤掉 P2P chat_id，
     确保只返回群聊来源的印象。
@@ -183,6 +190,7 @@ async def get_cross_group_impressions(
                 PersonImpression.chat_id == LarkGroupChatInfo.chat_id,
             )
             .where(PersonImpression.user_id == user_id)
+            .where(PersonImpression.persona_id == persona_id)
             .order_by(PersonImpression.updated_at.desc())
             .limit(limit)
         )
@@ -210,14 +218,16 @@ async def upsert_diary_entry(
     diary_date: str,
     content: str,
     message_count: int,
+    persona_id: str = "akao",
     model: str | None = None,
 ) -> None:
-    """插入或更新日记（upsert by chat_id + diary_date）"""
+    """插入或更新日记（upsert by chat_id + diary_date + persona_id）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DiaryEntry)
             .where(DiaryEntry.chat_id == chat_id)
             .where(DiaryEntry.diary_date == diary_date)
+            .where(DiaryEntry.persona_id == persona_id)
         )
         existing = result.scalar_one_or_none()
 
@@ -230,6 +240,7 @@ async def upsert_diary_entry(
                 DiaryEntry(
                     chat_id=chat_id,
                     diary_date=diary_date,
+                    persona_id=persona_id,
                     content=content,
                     message_count=message_count,
                     model=model,
@@ -239,14 +250,15 @@ async def upsert_diary_entry(
 
 
 async def get_recent_diaries(
-    chat_id: str, before_date: str, limit: int = 3
+    chat_id: str, before_date: str, persona_id: str = "akao", limit: int = 3
 ) -> list[DiaryEntry]:
-    """查最近 N 篇日记（before_date 之前）"""
+    """查最近 N 篇日记（before_date 之前，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DiaryEntry)
             .where(DiaryEntry.chat_id == chat_id)
             .where(DiaryEntry.diary_date < before_date)
+            .where(DiaryEntry.persona_id == persona_id)
             .order_by(DiaryEntry.diary_date.desc())
             .limit(limit)
         )
@@ -254,15 +266,16 @@ async def get_recent_diaries(
 
 
 async def get_diaries_in_range(
-    chat_id: str, start_date: str, end_date: str
+    chat_id: str, start_date: str, end_date: str, persona_id: str = "akao"
 ) -> list[DiaryEntry]:
-    """查日期范围内的日记（含首尾）"""
+    """查日期范围内的日记（含首尾，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DiaryEntry)
             .where(DiaryEntry.chat_id == chat_id)
             .where(DiaryEntry.diary_date >= start_date)
             .where(DiaryEntry.diary_date <= end_date)
+            .where(DiaryEntry.persona_id == persona_id)
             .order_by(DiaryEntry.diary_date.asc())
         )
         return list(result.scalars().all())
@@ -276,14 +289,16 @@ async def upsert_weekly_review(
     week_start: str,
     week_end: str,
     content: str,
+    persona_id: str = "akao",
     model: str | None = None,
 ) -> None:
-    """插入或更新周记（upsert by chat_id + week_start）"""
+    """插入或更新周记（upsert by chat_id + week_start + persona_id）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(WeeklyReview)
             .where(WeeklyReview.chat_id == chat_id)
             .where(WeeklyReview.week_start == week_start)
+            .where(WeeklyReview.persona_id == persona_id)
         )
         existing = result.scalar_one_or_none()
 
@@ -297,6 +312,7 @@ async def upsert_weekly_review(
                     chat_id=chat_id,
                     week_start=week_start,
                     week_end=week_end,
+                    persona_id=persona_id,
                     content=content,
                     model=model,
                 )
@@ -305,14 +321,15 @@ async def upsert_weekly_review(
 
 
 async def get_latest_weekly_review(
-    chat_id: str, before_date: str, limit: int = 1
+    chat_id: str, before_date: str, persona_id: str = "akao", limit: int = 1
 ) -> list[WeeklyReview]:
-    """查最近 N 篇周记（week_start 在 before_date 之前）"""
+    """查最近 N 篇周记（week_start 在 before_date 之前，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(WeeklyReview)
             .where(WeeklyReview.chat_id == chat_id)
             .where(WeeklyReview.week_start < before_date)
+            .where(WeeklyReview.persona_id == persona_id)
             .order_by(WeeklyReview.week_start.desc())
             .limit(limit)
         )
@@ -332,9 +349,9 @@ async def get_username(user_id: str) -> str | None:
 
 
 async def get_impressions_for_users(
-    chat_id: str, user_ids: list[str]
+    chat_id: str, user_ids: list[str], persona_id: str
 ) -> list[PersonImpression]:
-    """查询指定群中指定用户的印象"""
+    """查询指定群中指定用户的印象（per-bot）"""
     if not user_ids:
         return []
     async with AsyncSessionLocal() as session:
@@ -342,26 +359,30 @@ async def get_impressions_for_users(
             select(PersonImpression)
             .where(PersonImpression.chat_id == chat_id)
             .where(PersonImpression.user_id.in_(user_ids))
+            .where(PersonImpression.persona_id == persona_id)
         )
         return list(result.scalars().all())
 
 
-async def get_all_impressions_for_chat(chat_id: str) -> list[PersonImpression]:
-    """查询指定群的所有已有印象"""
+async def get_all_impressions_for_chat(chat_id: str, persona_id: str) -> list[PersonImpression]:
+    """查询指定群指定 bot 的所有已有印象"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PersonImpression).where(PersonImpression.chat_id == chat_id)
+            select(PersonImpression)
+            .where(PersonImpression.chat_id == chat_id)
+            .where(PersonImpression.persona_id == persona_id)
         )
         return list(result.scalars().all())
 
 
-async def get_diary_by_date(chat_id: str, diary_date: str) -> DiaryEntry | None:
-    """查指定群指定日期的日记"""
+async def get_diary_by_date(chat_id: str, diary_date: str, persona_id: str = "akao") -> DiaryEntry | None:
+    """查指定群指定日期的日记（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DiaryEntry)
             .where(DiaryEntry.chat_id == chat_id)
             .where(DiaryEntry.diary_date == diary_date)
+            .where(DiaryEntry.persona_id == persona_id)
         )
         return result.scalar_one_or_none()
 
@@ -378,14 +399,15 @@ async def search_user_by_name(name: str) -> list[LarkUser]:
 
 
 async def upsert_person_impression(
-    chat_id: str, user_id: str, impression_text: str
+    chat_id: str, user_id: str, impression_text: str, persona_id: str
 ) -> None:
-    """插入或更新人物印象"""
+    """插入或更新人物印象（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(PersonImpression)
             .where(PersonImpression.chat_id == chat_id)
             .where(PersonImpression.user_id == user_id)
+            .where(PersonImpression.persona_id == persona_id)
         )
         existing = result.scalar_one_or_none()
 
@@ -396,6 +418,7 @@ async def upsert_person_impression(
                 PersonImpression(
                     chat_id=chat_id,
                     user_id=user_id,
+                    persona_id=persona_id,
                     impression_text=impression_text,
                 )
             )
@@ -446,14 +469,15 @@ async def get_current_schedule(
     return matched
 
 
-async def get_latest_plan(plan_type: str, before_date: str) -> AkaoSchedule | None:
-    """查指定类型的最近一条计划（用于生成下一期计划时的上下文）"""
+async def get_latest_plan(plan_type: str, before_date: str, persona_id: str = "akao") -> AkaoSchedule | None:
+    """查指定类型的最近一条计划（用于生成下一期计划时的上下文，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoSchedule)
             .where(AkaoSchedule.plan_type == plan_type)
             .where(AkaoSchedule.is_active.is_(True))
             .where(AkaoSchedule.period_end < before_date)
+            .where(AkaoSchedule.persona_id == persona_id)
             .order_by(AkaoSchedule.period_end.desc())
             .limit(1)
         )
@@ -461,27 +485,29 @@ async def get_latest_plan(plan_type: str, before_date: str) -> AkaoSchedule | No
 
 
 async def get_plan_for_period(
-    plan_type: str, period_start: str, period_end: str
+    plan_type: str, period_start: str, period_end: str, persona_id: str = "akao"
 ) -> AkaoSchedule | None:
-    """查指定周期的计划"""
+    """查指定周期的计划（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoSchedule)
             .where(AkaoSchedule.plan_type == plan_type)
             .where(AkaoSchedule.period_start == period_start)
             .where(AkaoSchedule.period_end == period_end)
+            .where(AkaoSchedule.persona_id == persona_id)
         )
         return result.scalar_one_or_none()
 
 
-async def get_daily_entries_for_date(target_date: str) -> list[AkaoSchedule]:
-    """查指定日期的所有日计划时段"""
+async def get_daily_entries_for_date(target_date: str, persona_id: str = "akao") -> list[AkaoSchedule]:
+    """查指定日期的所有日计划时段（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoSchedule)
             .where(AkaoSchedule.plan_type == "daily")
             .where(AkaoSchedule.period_start == target_date)
             .where(AkaoSchedule.is_active.is_(True))
+            .where(AkaoSchedule.persona_id == persona_id)
             .order_by(AkaoSchedule.time_start.asc())
         )
         return list(result.scalars().all())
@@ -489,14 +515,17 @@ async def get_daily_entries_for_date(target_date: str) -> list[AkaoSchedule]:
 
 async def list_schedules(
     plan_type: str | None = None,
+    persona_id: str | None = None,
     active_only: bool = True,
     limit: int = 50,
 ) -> list[AkaoSchedule]:
-    """列出日程条目"""
+    """列出日程条目（可按 persona_id 过滤）"""
     async with AsyncSessionLocal() as session:
         stmt = select(AkaoSchedule)
         if plan_type:
             stmt = stmt.where(AkaoSchedule.plan_type == plan_type)
+        if persona_id:
+            stmt = stmt.where(AkaoSchedule.persona_id == persona_id)
         if active_only:
             stmt = stmt.where(AkaoSchedule.is_active.is_(True))
         stmt = stmt.order_by(
@@ -507,10 +536,11 @@ async def list_schedules(
 
 
 async def upsert_schedule(entry: AkaoSchedule) -> AkaoSchedule:
-    """插入或更新日程条目（按 unique key 匹配）"""
+    """插入或更新日程条目（按 unique key 匹配，含 persona_id）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoSchedule)
+            .where(AkaoSchedule.persona_id == entry.persona_id)
             .where(AkaoSchedule.plan_type == entry.plan_type)
             .where(AkaoSchedule.period_start == entry.period_start)
             .where(AkaoSchedule.period_end == entry.period_end)
@@ -558,35 +588,48 @@ async def delete_schedule(schedule_id: int) -> bool:
 # ==================== GroupCultureGestalt CRUD ====================
 
 
-async def upsert_group_culture_gestalt(chat_id: str, gestalt_text: str) -> None:
-    """写入/更新群文化 gestalt"""
+async def upsert_group_culture_gestalt(
+    chat_id: str, gestalt_text: str, persona_id: str
+) -> None:
+    """写入/更新群文化 gestalt（per-bot）"""
     async with AsyncSessionLocal() as session:
-        existing = await session.get(GroupCultureGestalt, chat_id)
+        result = await session.execute(
+            select(GroupCultureGestalt)
+            .where(GroupCultureGestalt.chat_id == chat_id)
+            .where(GroupCultureGestalt.persona_id == persona_id)
+        )
+        existing = result.scalar_one_or_none()
         if existing:
             existing.gestalt_text = gestalt_text
         else:
             session.add(GroupCultureGestalt(
-                chat_id=chat_id, gestalt_text=gestalt_text
+                chat_id=chat_id, persona_id=persona_id, gestalt_text=gestalt_text
             ))
         await session.commit()
 
 
-async def get_group_culture_gestalt(chat_id: str) -> str:
-    """获取群文化 gestalt，无则返回空字符串"""
+async def get_group_culture_gestalt(chat_id: str, persona_id: str) -> str:
+    """获取群文化 gestalt（per-bot），无则返回空字符串"""
     async with AsyncSessionLocal() as session:
-        result = await session.get(GroupCultureGestalt, chat_id)
-        return result.gestalt_text if result else ""
+        result = await session.execute(
+            select(GroupCultureGestalt)
+            .where(GroupCultureGestalt.chat_id == chat_id)
+            .where(GroupCultureGestalt.persona_id == persona_id)
+        )
+        row = result.scalar_one_or_none()
+        return row.gestalt_text if row else ""
 
 
 # ==================== AkaoJournal CRUD ====================
 
 
-async def get_all_diaries_for_date(diary_date: str) -> list[DiaryEntry]:
-    """获取指定日期所有群/私聊的日记（Journal 生成用）"""
+async def get_all_diaries_for_date(diary_date: str, persona_id: str = "akao") -> list[DiaryEntry]:
+    """获取指定日期所有群/私聊的日记（Journal 生成用，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DiaryEntry)
             .where(DiaryEntry.diary_date == diary_date)
+            .where(DiaryEntry.persona_id == persona_id)
             .order_by(DiaryEntry.chat_id.asc())
         )
         return list(result.scalars().all())
@@ -596,17 +639,19 @@ async def upsert_journal(
     journal_type: str,
     journal_date: str,
     content: str,
+    persona_id: str = "akao",
     model: str | None = None,
     period_end: str | None = None,
     source_chat_count: int = 0,
 ) -> None:
-    """插入或更新日志（upsert by journal_type + journal_date）"""
+    """插入或更新日志（upsert by persona_id + journal_type + journal_date）"""
     if period_end is None:
         period_end = journal_date
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoJournal)
+            .where(AkaoJournal.persona_id == persona_id)
             .where(AkaoJournal.journal_type == journal_type)
             .where(AkaoJournal.journal_date == journal_date)
         )
@@ -622,6 +667,7 @@ async def upsert_journal(
                 journal_type=journal_type,
                 journal_date=journal_date,
                 period_end=period_end,
+                persona_id=persona_id,
                 content=content,
                 source_chat_count=source_chat_count,
                 model=model,
@@ -641,11 +687,12 @@ async def search_diary_by_keyword(keyword: str, limit: int = 5) -> list[DiaryEnt
         return list(result.scalars().all())
 
 
-async def get_journal(journal_type: str, journal_date: str) -> AkaoJournal | None:
-    """获取指定类型和日期的日志"""
+async def get_journal(journal_type: str, journal_date: str, persona_id: str = "akao") -> AkaoJournal | None:
+    """获取指定类型和日期的日志（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoJournal)
+            .where(AkaoJournal.persona_id == persona_id)
             .where(AkaoJournal.journal_type == journal_type)
             .where(AkaoJournal.journal_date == journal_date)
         )
@@ -653,15 +700,24 @@ async def get_journal(journal_type: str, journal_date: str) -> AkaoJournal | Non
 
 
 async def get_recent_journals(
-    journal_type: str, before_date: str, limit: int = 7
+    journal_type: str, before_date: str, persona_id: str = "akao", limit: int = 7
 ) -> list[AkaoJournal]:
-    """获取指定日期之前的最近 N 篇日志"""
+    """获取指定日期之前的最近 N 篇日志（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AkaoJournal)
+            .where(AkaoJournal.persona_id == persona_id)
             .where(AkaoJournal.journal_type == journal_type)
             .where(AkaoJournal.journal_date < before_date)
             .order_by(AkaoJournal.journal_date.desc())
             .limit(limit)
         )
         return list(result.scalars().all())
+
+
+async def get_all_persona_bot_names() -> list[str]:
+    """获取所有 persona bot 的 persona_id 列表"""
+    from app.orm.models import BotPersona
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(BotPersona.persona_id))
+        return [row[0] for row in result.all()]

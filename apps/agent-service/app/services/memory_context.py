@@ -22,34 +22,6 @@ from app.services.identity_drift import get_base_reply_style, get_identity_state
 
 logger = logging.getLogger(__name__)
 
-# 无漂移时的默认 reply-style（当前静态示例）
-_DEFAULT_REPLY_STYLE = """--- 大家在闲聊，你被随便 cue ---
-赤尾: 跟我有啥关系嘛，我又不健身！
-
---- 有人让你做事没心情 ---
-赤尾: 不要～困死了啦
-赤尾: 那你请我吃真的呀
-
---- 开心的时候 ---
-赤尾: 好耶！终于周五了！
-赤尾: 嘻嘻被你发现了～
-
---- 损人（笑着损） ---
-赤尾: 笨蛋啦哈哈哈
-赤尾: 哼才不告诉你
-
---- 慵懒的时候 ---
-赤尾: 困了要变猫猫了……
-赤尾: 好累不想动～
-
---- 关心人（从不直说） ---
-赤尾: 你还没吃饭？笨蛋啊
-赤尾: 早点睡啦别熬了……
-
---- 不感兴趣 ---
-赤尾: 不知道诶
-赤尾: 没怎么看呢"""
-
 CST = timezone(timedelta(hours=8))
 MAX_IMPRESSION_USERS = 10
 MAX_CROSS_GROUP_IMPRESSIONS = 5
@@ -60,7 +32,7 @@ _MEMORY_RECALL_HINT = (
 )
 
 
-async def _build_today_state() -> str:
+async def _build_today_state(persona_id: str) -> str:
     """构建今日状态：今天 Schedule > 昨天 Journal
 
     今天的 Journal 不可能存在（凌晨 04:00 回溯生成昨天的），
@@ -70,13 +42,13 @@ async def _build_today_state() -> str:
     today = now.strftime("%Y-%m-%d")
 
     # 优先用今天的 Schedule（05:00 已生成）
-    schedule = await get_plan_for_period("daily", today, today)
+    schedule = await get_plan_for_period("daily", today, today, persona_id)
     if schedule and schedule.content:
         return schedule.content
 
     # fallback: 昨天的 Journal（模糊化的个人感受）
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    journal = await get_journal("daily", yesterday)
+    journal = await get_journal("daily", yesterday, persona_id)
     if journal:
         return journal.content
 
@@ -89,6 +61,7 @@ async def build_inner_context(
     user_ids: list[str],
     trigger_user_id: str,
     trigger_username: str,
+    persona_id: str,
     chat_name: str = "",
     *,
     is_proactive: bool = False,
@@ -102,6 +75,7 @@ async def build_inner_context(
         user_ids: 当前对话中出现的用户 ID 列表
         trigger_user_id: 触发者 user_id
         trigger_username: 触发者用户名
+        persona_id: 人设 ID（用于多 bot 人设隔离）
         chat_name: 群名（群聊场景）
 
     Returns:
@@ -127,25 +101,25 @@ async def build_inner_context(
             sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
     # === 今日基调（Journal / Schedule） ===
-    today_state = await _build_today_state()
+    today_state = await _build_today_state(persona_id)
     if today_state:
         sections.append(f"你今天的基调：\n{today_state}")
 
     # === 对人和群的感觉 ===
     if chat_type == "group":
-        group_gestalt = await get_group_culture_gestalt(chat_id)
+        group_gestalt = await get_group_culture_gestalt(chat_id, persona_id)
         if group_gestalt:
             sections.append(f"你对这个群的感觉：{group_gestalt}")
 
         if user_ids:
-            people_lines = await _build_people_gestalt(chat_id, user_ids)
+            people_lines = await _build_people_gestalt(chat_id, user_ids, persona_id)
             if people_lines:
                 sections.append(
                     "你对当前对话中出现的人的感觉：\n" + "\n".join(people_lines)
                 )
     else:
         cross_lines = await _build_cross_group_gestalt(
-            trigger_user_id, trigger_username
+            trigger_user_id, trigger_username, persona_id
         )
         if cross_lines:
             sections.append(cross_lines)
@@ -156,10 +130,10 @@ async def build_inner_context(
     return "\n\n".join(sections)
 
 
-async def _build_people_gestalt(chat_id: str, user_ids: list[str]) -> list[str]:
+async def _build_people_gestalt(chat_id: str, user_ids: list[str], persona_id: str = "") -> list[str]:
     """构建对话者的感觉 gestalt 列表（含印象时间）"""
     impressions = await get_impressions_for_users(
-        chat_id, user_ids[:MAX_IMPRESSION_USERS]
+        chat_id, user_ids[:MAX_IMPRESSION_USERS], persona_id
     )
     if not impressions:
         return []
@@ -174,10 +148,10 @@ async def _build_people_gestalt(chat_id: str, user_ids: list[str]) -> list[str]:
     return lines
 
 
-async def _build_cross_group_gestalt(user_id: str, trigger_username: str) -> str:
+async def _build_cross_group_gestalt(user_id: str, trigger_username: str, persona_id: str = "") -> str:
     """构建跨群人物 gestalt（私聊场景）"""
     rows = await get_cross_group_impressions(
-        user_id, limit=MAX_CROSS_GROUP_IMPRESSIONS
+        user_id, persona_id, limit=MAX_CROSS_GROUP_IMPRESSIONS
     )
     if not rows:
         return ""
@@ -187,23 +161,23 @@ async def _build_cross_group_gestalt(user_id: str, trigger_username: str) -> str
     return f"你对 {trigger_username} 的感觉：\n" + "\n".join(lines)
 
 
-async def get_reply_style(chat_id: str) -> str:
-    """获取动态 reply-style：per-chat 漂移 → 全局基线 → 静态默认"""
+async def get_reply_style(chat_id: str, persona_id: str, default_style: str = "") -> str:
+    """获取动态 reply-style：per-chat 漂移 → 全局基线 → DB 默认"""
     try:
-        drift_state = await get_identity_state(chat_id)
+        drift_state = await get_identity_state(chat_id, persona_id)
         if drift_state:
             return drift_state
     except Exception:
         pass
 
     try:
-        base_state = await get_base_reply_style()
+        base_state = await get_base_reply_style(persona_id)
         if base_state:
             return base_state
     except Exception:
         pass
 
-    return _DEFAULT_REPLY_STYLE
+    return default_style  # 由调用方从 bot_persona.default_reply_style 传入
 
 
 # 向后兼容别名

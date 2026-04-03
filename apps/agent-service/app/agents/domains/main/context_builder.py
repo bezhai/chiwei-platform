@@ -30,7 +30,9 @@ _proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar("p
 
 
 async def build_chat_context(
-    message_id: str, limit: int = 10
+    message_id: str,
+    current_bot_name: str = "",
+    limit: int = 10,
 ) -> tuple[list[HumanMessage | AIMessage], ImageRegistry | None, str, str, str, str, str, list[str]]:
     """构建聊天上下文，支持私聊和群聊使用不同组装策略
 
@@ -161,6 +163,7 @@ async def build_chat_context(
     else:
         messages = _build_p2p_messages(
             l1_results, image_key_to_url, image_key_to_filename,
+            current_bot_name=current_bot_name,
         )
 
     # 提取回复链中所有用户ID
@@ -301,6 +304,7 @@ def _build_p2p_messages(
     messages: list[QuickSearchResult],
     image_key_to_url: dict[str, str],
     image_key_to_filename: dict[str, str],
+    current_bot_name: str = "",
 ) -> list[HumanMessage | AIMessage]:
     """构建私聊消息列表
 
@@ -337,7 +341,13 @@ def _build_p2p_messages(
         if not content_blocks:
             continue
 
-        if msg.role == "assistant":
+        # 当前 bot 自己的消息 → AIMessage，其余（含其他 bot）→ HumanMessage
+        is_self = (
+            msg.role == "assistant"
+            and current_bot_name
+            and getattr(msg, "bot_name", None) == current_bot_name
+        )
+        if is_self:
             result.append(AIMessage(content_blocks=content_blocks))  # type: ignore
         else:
             result.append(HumanMessage(content_blocks=content_blocks))  # type: ignore

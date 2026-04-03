@@ -8,6 +8,7 @@ export * from './user-group-binding';
 export * from './lark-user-open-id';
 
 export * from './bot-config';
+export * from './bot-persona';
 export * from './user-blacklist';
 export * from './conversation-message';
 export * from './agent-response';

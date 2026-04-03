@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -113,6 +114,7 @@ class DiaryEntry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     diary_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10"
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -121,7 +123,7 @@ class DiaryEntry(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("chat_id", "diary_date"),
+        UniqueConstraint("chat_id", "diary_date", "persona_id"),
     )
 
 
@@ -166,6 +168,8 @@ class AkaoSchedule(Base):
     target_chats: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # 生成元信息
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -177,8 +181,7 @@ class AkaoSchedule(Base):
     )
 
     __table_args__ = (
-        # 月/周计划：同类型同周期只有一条
-        UniqueConstraint("plan_type", "period_start", "period_end", "time_start"),
+        UniqueConstraint("persona_id", "plan_type", "period_start", "period_end", "time_start"),
     )
 
 
@@ -207,23 +210,25 @@ class WeeklyReview(Base):
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     week_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10" (周一)
     week_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-16" (周日)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("chat_id", "week_start"),)
+    __table_args__ = (UniqueConstraint("chat_id", "week_start", "persona_id"),)
 
 
 class PersonImpression(Base):
-    """赤尾对群友的人物印象"""
+    """Bot 对群友的人物印象"""
 
     __tablename__ = "person_impression"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
     impression_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -232,16 +237,41 @@ class PersonImpression(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("chat_id", "user_id"),)
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", "persona_id"),)
 
 
 class GroupCultureGestalt(Base):
-    """群文化 gestalt — 赤尾对一个群的整体感觉，一句话"""
+    """Bot 对一个群的整体感觉，一句话"""
 
     __tablename__ = "group_culture_gestalt"
 
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
     gestalt_text: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("chat_id", "persona_id"),)
+
+
+class BotPersona(Base):
+    """Bot 人设配置 — 每个 persona bot 的人设数据"""
+
+    __tablename__ = "bot_persona"
+
+    persona_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    persona_core: Mapped[str] = mapped_column(Text, nullable=False)
+    persona_lite: Mapped[str] = mapped_column(Text, nullable=False)
+    default_reply_style: Mapped[str] = mapped_column(Text, nullable=False)
+    error_messages: Mapped[dict] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -261,6 +291,7 @@ class AkaoJournal(Base):
     journal_type: Mapped[str] = mapped_column(String(10), nullable=False)  # "daily" | "weekly"
     journal_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-26" or week monday
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # daily 同 journal_date, weekly 为周日
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -269,5 +300,5 @@ class AkaoJournal(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("journal_type", "journal_date"),
+        UniqueConstraint("persona_id", "journal_type", "journal_date"),
     )

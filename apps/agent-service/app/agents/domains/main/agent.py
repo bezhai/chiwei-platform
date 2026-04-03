@@ -21,14 +21,24 @@ from app.agents.domains.main.context_builder import build_chat_context
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
 from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_inner_context, get_reply_style
+from app.services.memory_context import build_inner_context
+from app.services.bot_context import BotContext
 from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.utils.content_parser import parse_content
+from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 
-# 统一的拒绝响应
-GUARD_REJECT_MESSAGE = "你发了一些赤尾不想讨论的话题呢~"
+async def _get_guard_message(bot_name: str) -> str:
+    """获取 guard 拒绝消息（bot 专属，fallback 为通用消息）"""
+    try:
+        from app.orm.crud import get_bot_persona
+        persona = await get_bot_persona(bot_name)
+        if persona and persona.error_messages:
+            return persona.error_messages.get("guard", "不想讨论这个话题呢~")
+    except Exception as e:
+        logger.warning(f"Failed to get guard message for bot={bot_name}: {e}")
+    return "不想讨论这个话题呢~"
 
 # 分段标记（consumer 侧检测并拆分为多条消息）
 SPLIT_MARKER = "---split---"
@@ -69,6 +79,10 @@ async def stream_chat(
             CHAT_PIPELINE_DURATION.labels(stage="prep").observe(time.monotonic() - t_entry)
             pre_blocking = gray_config.get("pre_blocking", "false")
 
+            # 获取 bot 专属 guard 消息
+            bot_name = header_vars["app_name"].get() or ""
+            guard_message = await _get_guard_message(bot_name)
+
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
             pre_task = asyncio.create_task(run_pre(parsed.render()))
 
@@ -81,7 +95,7 @@ async def stream_chat(
                         f"消息被拦截: message_id={message_id}, "
                         f"reason={pre_result['block_reason']}"
                     )
-                    yield GUARD_REJECT_MESSAGE
+                    yield guard_message
                     return
 
                 async for text in _build_and_stream(
@@ -95,7 +109,7 @@ async def stream_chat(
                     message_id, gray_config, request_id
                 )
 
-                async for text in _buffer_until_pre(raw_stream, pre_task, message_id):
+                async for text in _buffer_until_pre(raw_stream, pre_task, message_id, guard_message):
                     yield text
 
 
@@ -106,6 +120,7 @@ async def _buffer_until_pre(
     raw_stream: AsyncGenerator[str, None],
     pre_task: asyncio.Task,
     message_id: str,
+    guard_message: str = "不想讨论这个话题呢~",
 ) -> AsyncGenerator[str, None]:
     """用 pre_task 结果守护一个原始 token 流。
 
@@ -156,7 +171,7 @@ async def _buffer_until_pre(
                         f"reason={pre_result['block_reason']}"
                     )
                     get_task.cancel()
-                    yield GUARD_REJECT_MESSAGE
+                    yield guard_message
                     return
                 # pre passed → flush buffer
                 for b in buffer:
@@ -191,7 +206,7 @@ async def _buffer_until_pre(
                         f"并行模式拦截（流结束后）: message_id={message_id}, "
                         f"reason={pre_result['block_reason']}"
                     )
-                    yield GUARD_REJECT_MESSAGE
+                    yield guard_message
                     return
                 for b in buffer:
                     yield b
@@ -206,7 +221,7 @@ async def _buffer_until_pre(
                     f"并行模式拦截: message_id={message_id}, "
                     f"reason={pre_result['block_reason']}"
                 )
-                yield GUARD_REJECT_MESSAGE
+                yield guard_message
                 return
             for b in buffer:
                 yield b
@@ -234,6 +249,9 @@ async def _build_and_stream(
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
     t_build_start = time.monotonic()
     from app.skills.registry import SkillRegistry
+
+    # 获取当前 bot_name
+    bot_name = header_vars["app_name"].get() or ""
 
     prompt_vars = {
         "complexity_hint": "",
@@ -263,13 +281,20 @@ async def _build_and_stream(
         trigger_user_id,
         chat_name,
         chain_user_ids,
-    ) = await build_chat_context(message_id)
+    ) = await build_chat_context(message_id, current_bot_name=bot_name)
     CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(time.monotonic() - t_build_start)
+
+    # 创建并加载 BotContext
+    bot_ctx = BotContext(chat_id=chat_id, bot_name=bot_name, chat_type=chat_type)
+    await bot_ctx.load()
 
     if not messages:
         logger.warning(f"No results found for message_id: {message_id}")
         yield "抱歉，未找到相关消息记录"
         return
+
+    # 注入 bot identity
+    prompt_vars["identity"] = bot_ctx.get_identity()
 
     # 构建统一 inner_context（场景 + 状态 + 印象 + 引导语）
     try:
@@ -286,15 +311,13 @@ async def _build_and_stream(
             chat_name=chat_name,
             is_proactive=_is_proactive_var.get(False),
             proactive_stimulus=_proactive_stimulus_var.get(""),
+            persona_id=bot_ctx.persona_id,
         )
     except Exception as e:
         logger.error(f"Failed to build inner context: {e}")
 
     # 动态 reply-style（漂移生成的行为示例，fallback 静态示例）
-    try:
-        prompt_vars["reply_style"] = await get_reply_style(chat_id)
-    except Exception as e:
-        logger.error(f"Failed to get reply style: {e}")
+    prompt_vars["reply_style"] = bot_ctx.reply_style
 
     full_content = ""
     has_text_in_current_turn = False
@@ -316,7 +339,7 @@ async def _build_and_stream(
                 finish_reason = token.response_metadata.get("finish_reason")
 
                 if finish_reason == "content_filter":
-                    yield "小尾有点不想讨论这个话题呢~"
+                    yield bot_ctx.get_error_message("content_filter")
                     return
                 if finish_reason == "length":
                     yield "(后续内容被截断)"
@@ -364,7 +387,7 @@ async def _build_and_stream(
                 from app.services.identity_drift import IdentityDriftManager
 
                 asyncio.create_task(
-                    IdentityDriftManager.get_instance().on_event(chat_id)
+                    IdentityDriftManager.get_instance().on_event(chat_id, bot_ctx.persona_id)
                 )
             except Exception as e:
                 logger.warning(f"Identity drift trigger failed: {e}")
@@ -373,7 +396,7 @@ async def _build_and_stream(
         import traceback
 
         logger.error(f"stream_chat error: {str(e)}\n{traceback.format_exc()}")
-        yield "赤尾好像遇到了一些问题呢QAQ"
+        yield bot_ctx.get_error_message("error")
 
 
 async def _publish_post_check(

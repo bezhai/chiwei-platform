@@ -52,18 +52,20 @@ def _schedule_model() -> str:
     return settings.diary_model
 
 
-def _get_persona_core() -> str:
-    """加载 persona_core prompt 作为人设上下文注入生成器"""
+async def _get_persona_core_for_bot(persona_id: str) -> str:
+    """从 bot_persona 表加载 persona_core"""
+    from app.orm.crud import get_bot_persona
     try:
-        return get_prompt("persona_core").compile()
+        persona = await get_bot_persona(persona_id)
+        return persona.persona_core if persona else ""
     except Exception as e:
-        logger.warning(f"Failed to load persona_core prompt: {e}")
+        logger.warning(f"[{persona_id}] Failed to load persona_core: {e}")
         return ""
 
 
-async def _get_recent_daily_schedules(before_date: date, count: int = 3) -> list[AkaoSchedule]:
+async def _get_recent_daily_schedules(before_date: date, persona_id: str = "akao", count: int = 3) -> list[AkaoSchedule]:
     """获取前 N 天的 daily schedule（供 Ideation 和 Critic 去重）"""
-    results = await list_schedules(plan_type="daily", active_only=True, limit=count + 5)
+    results = await list_schedules(plan_type="daily", persona_id=persona_id, active_only=True, limit=count + 5)
     return [
         s for s in results
         if s.period_start < before_date.isoformat()
@@ -170,34 +172,45 @@ async def _run_critic(
 
 
 async def cron_generate_monthly_plan(ctx) -> None:
-    """cron 入口：生成本月计划"""
-    try:
-        await generate_monthly_plan()
-    except Exception as e:
-        logger.error(f"Monthly plan generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成本月计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    for persona_id in await get_all_persona_bot_names():
+        try:
+            await generate_monthly_plan(persona_id=persona_id)
+        except Exception as e:
+            logger.error(f"[{persona_id}] Monthly plan generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_weekly_plan(ctx) -> None:
-    """cron 入口：周日 23:00 触发，生成下周计划（target_date 加 1 天进入周一）"""
-    try:
-        tomorrow = date.today() + timedelta(days=1)
-        await generate_weekly_plan(target_date=tomorrow)
-    except Exception as e:
-        logger.error(f"Weekly plan generation failed: {e}", exc_info=True)
+    """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    tomorrow = date.today() + timedelta(days=1)
+    for persona_id in await get_all_persona_bot_names():
+        try:
+            await generate_weekly_plan(target_date=tomorrow, persona_id=persona_id)
+        except Exception as e:
+            logger.error(f"[{persona_id}] Weekly plan generation failed: {e}", exc_info=True)
 
 
 async def cron_generate_daily_plan(ctx) -> None:
-    """cron 入口：生成今天的日计划"""
-    try:
-        await generate_daily_plan()
-    except Exception as e:
-        logger.error(f"Daily plan generation failed: {e}", exc_info=True)
+    """cron 入口：为每个 persona bot 生成今天的日计划"""
+    from app.orm.crud import get_all_persona_bot_names
+
+    for persona_id in await get_all_persona_bot_names():
+        try:
+            await generate_daily_plan(persona_id=persona_id)
+        except Exception as e:
+            logger.error(f"[{persona_id}] Daily plan generation failed: {e}", exc_info=True)
 
 
 # ==================== 月计划生成 ====================
 
 
-async def generate_monthly_plan(target_date: date | None = None) -> str | None:
+async def generate_monthly_plan(
+    target_date: date | None = None, persona_id: str = "akao"
+) -> str | None:
     """生成月度计划
 
     给出本月的生活方向和兴趣倾向，不要太具体。
@@ -205,6 +218,7 @@ async def generate_monthly_plan(target_date: date | None = None) -> str | None:
 
     Args:
         target_date: 目标月份的某一天，默认今天
+        persona_id: persona 标识，用于加载对应人设
 
     Returns:
         生成的月计划内容
@@ -223,22 +237,22 @@ async def generate_monthly_plan(target_date: date | None = None) -> str | None:
     period_end = month_end.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("monthly", period_start, period_end)
+    existing = await get_plan_for_period("monthly", period_start, period_end, persona_id)
     if existing:
         logger.info(f"Monthly plan already exists for {period_start}~{period_end}, skip")
         return existing.content
 
     # 上下文：上月计划
-    prev_plan = await get_latest_plan("monthly", period_start)
+    prev_plan = await get_latest_plan("monthly", period_start, persona_id)
     prev_plan_text = prev_plan.content if prev_plan else "（这是第一个月计划）"
 
     season = _get_season(month_start.month)
     month_cn = f"{month_start.year}年{month_start.month}月"
 
-    # 获取 Langfuse prompt（注入 persona_core）
+    # 获取人设和 Langfuse prompt 并编译
     prompt_template = get_prompt("schedule_monthly")
     compiled = prompt_template.compile(
-        persona_core=_get_persona_core(),
+        persona_core=await _get_persona_core_for_bot(persona_id),
         month=month_cn,
         season=season,
         previous_monthly_plan=prev_plan_text,
@@ -258,6 +272,7 @@ async def generate_monthly_plan(target_date: date | None = None) -> str | None:
         plan_type="monthly",
         period_start=period_start,
         period_end=period_end,
+        persona_id=persona_id,
         content=content,
         model=_schedule_model(),
     ))
@@ -269,7 +284,9 @@ async def generate_monthly_plan(target_date: date | None = None) -> str | None:
 # ==================== 周计划生成 ====================
 
 
-async def generate_weekly_plan(target_date: date | None = None) -> str | None:
+async def generate_weekly_plan(
+    target_date: date | None = None, persona_id: str = "akao"
+) -> str | None:
     """生成周计划
 
     基于月计划给出本周的大致安排。
@@ -277,6 +294,7 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 
     Args:
         target_date: 目标周的某一天，默认今天
+        persona_id: persona 标识，用于加载对应人设
 
     Returns:
         生成的周计划内容
@@ -291,7 +309,7 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
     period_end = week_end.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("weekly", period_start, period_end)
+    existing = await get_plan_for_period("weekly", period_start, period_end, persona_id)
     if existing:
         logger.info(f"Weekly plan already exists for {period_start}~{period_end}, skip")
         return existing.content
@@ -303,19 +321,19 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
         month_end_d = date(target_date.year + 1, 1, 1) - timedelta(days=1)
     else:
         month_end_d = date(target_date.year, target_date.month + 1, 1) - timedelta(days=1)
-    monthly = await get_plan_for_period("monthly", month_start, month_end_d.isoformat())
+    monthly = await get_plan_for_period("monthly", month_start, month_end_d.isoformat(), persona_id)
     monthly_text = monthly.content if monthly else "（暂无月计划）"
 
     # 2. 上周计划
-    prev_plan = await get_latest_plan("weekly", period_start)
+    prev_plan = await get_latest_plan("weekly", period_start, persona_id)
     prev_plan_text = prev_plan.content if prev_plan else "（这是第一个周计划）"
 
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
 
-    # 获取 Langfuse prompt（注入 persona_core）
+    # 获取人设和 Langfuse prompt 并编译
     prompt_template = get_prompt("schedule_weekly")
     compiled = prompt_template.compile(
-        persona_core=_get_persona_core(),
+        persona_core=await _get_persona_core_for_bot(persona_id),
         week=week_desc,
         monthly_plan=monthly_text,
         previous_weekly_plan=prev_plan_text,
@@ -335,6 +353,7 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
         plan_type="weekly",
         period_start=period_start,
         period_end=period_end,
+        persona_id=persona_id,
         content=content,
         model=_schedule_model(),
     ))
@@ -346,7 +365,9 @@ async def generate_weekly_plan(target_date: date | None = None) -> str | None:
 # ==================== 日计划生成 ====================
 
 
-async def generate_daily_plan(target_date: date | None = None) -> str | None:
+async def generate_daily_plan(
+    target_date: date | None = None, persona_id: str = "akao"
+) -> str | None:
     """生成日计划（手帐式 markdown）
 
     三 Agent 管线：Ideation（搜素材）→ Writer（写手帐）→ Critic（审查质量）
@@ -358,27 +379,27 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
     date_str = target_date.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("daily", date_str, date_str)
+    existing = await get_plan_for_period("daily", date_str, date_str, persona_id)
     if existing:
         logger.info(f"Daily plan already exists for {date_str}, skip")
         return existing.content
 
     # ---- 收集上下文 ----
-    persona_core = _get_persona_core()
+    persona_core = await _get_persona_core_for_bot(persona_id)
 
     # 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
     week_end = week_start + timedelta(days=6)
-    weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat())
+    weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat(), persona_id)
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
     # 昨天 Journal
     yesterday = (target_date - timedelta(days=1)).isoformat()
-    yesterday_journal_entry = await get_journal("daily", yesterday)
+    yesterday_journal_entry = await get_journal("daily", yesterday, persona_id)
     yesterday_journal = yesterday_journal_entry.content if yesterday_journal_entry else "（昨天没有写日志）"
 
     # 前 3 天 schedule（Ideation 和 Critic 共用）
-    recent = await _get_recent_daily_schedules(target_date)
+    recent = await _get_recent_daily_schedules(target_date, persona_id)
     recent_schedules_text = "\n\n---\n\n".join(
         f"[{s.period_start}]\n{s.content}" for s in recent
     ) if recent else "（没有前几天的日程）"
@@ -431,6 +452,7 @@ async def generate_daily_plan(target_date: date | None = None) -> str | None:
         plan_type="daily",
         period_start=date_str,
         period_end=date_str,
+        persona_id=persona_id,
         content=schedule_text,
         model="offline-model",
     ))
