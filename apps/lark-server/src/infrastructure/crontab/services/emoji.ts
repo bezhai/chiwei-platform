@@ -60,7 +60,7 @@ export class EmojiService {
      * 同步emoji数据到数据库
      * 每小时执行一次
      */
-    @Crontab('0 * * * *', { taskName: 'emoji-sync', botName: 'bytedance' })
+    @Crontab('0 * * * *', { taskName: 'emoji-sync', botName: 'chiwei' })
     async syncEmojiData(): Promise<void> {
         try {
             console.info('Starting emoji data sync...');

@@ -226,7 +226,7 @@ async def submit_proactive_request(
             create_time=now_ms,
             message_type="proactive_trigger",
             vector_status="skipped",
-            bot_name="bytedance",
+            bot_name="chiwei",
         )
         session.add(msg)
         await session.commit()
@@ -244,7 +244,7 @@ async def submit_proactive_request(
             "is_p2p": False,
             "root_id": target_message_id or "",
             "user_id": PROACTIVE_USER_ID,
-            "bot_name": "bytedance",
+            "bot_name": "chiwei",
             "is_proactive": True,
             "lane": current_lane,
             "enqueued_at": now_ms,

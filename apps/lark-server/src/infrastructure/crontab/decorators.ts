@@ -107,14 +107,14 @@ export interface CrontabOptions {
  *
  * @example
  * class MyService {
- *   @Crontab('0 18 * * *', { taskName: 'daily-task', botName: 'bytedance' })
+ *   @Crontab('0 18 * * *', { taskName: 'daily-task', botName: 'chiwei' })
  *   async runDailyTask() {
  *   }
  * }
  */
 export function Crontab(cronExpression: string, options: CrontabOptions) {
     return function (target: any, propertyKey: string, descriptor: PropertyDescriptor): PropertyDescriptor {
-        const { taskName, botName = 'bytedance' } = options;
+        const { taskName, botName = 'chiwei' } = options;
 
         // 保存类级别的元数据
         const existingMetadata = crontabMethodsMetadata.get(target) || [];
