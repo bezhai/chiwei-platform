@@ -2,7 +2,12 @@
 
 **日期**：2026-04-03  
 **分支**：feat/multi-bot-context  
-**目标**：支持多个 persona bot（如赤尾、姐姐、妹妹）同时在一个群里，各自有独立的人设、上下文记忆和对话历史视角。
+**目标**：支持多个 persona bot 同时在一个群里，各自有独立的人设、上下文记忆和对话历史视角。
+
+**三姐妹角色设定**：
+- **千凪**（ちなぎ）— 姐姐，知心大姐姐，温柔稳重
+- **赤尾**（小尾）— 傲娇高中生，现有主角
+- **绫奈**（あやな）— 妹妹，懵懂小孩，天真烂漫
 
 ---
 
@@ -37,7 +42,7 @@
 ```sql
 CREATE TABLE bot_persona (
     bot_name            VARCHAR PRIMARY KEY REFERENCES bot_config(bot_name),
-    display_name        VARCHAR NOT NULL,        -- "赤尾"、"姐姐"、"妹妹"
+    display_name        VARCHAR NOT NULL,        -- "赤尾"、"千凪"、"绫奈"
     persona_core        TEXT    NOT NULL,        -- 完整人设（~1000字），注入 main prompt {{identity}}
     persona_lite        TEXT    NOT NULL,        -- 精简人设（~200字），diary/journal worker 用
     default_reply_style TEXT    NOT NULL,        -- reply_style 最终兜底，替换 _DEFAULT_REPLY_STYLE
