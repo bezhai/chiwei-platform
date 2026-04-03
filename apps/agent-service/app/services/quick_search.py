@@ -4,7 +4,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage, LarkGroupChatInfo, LarkUser
@@ -26,6 +26,7 @@ class QuickSearchResult:
         reply_message_id: str | None = None,
         chat_id: str | None = None,
         bot_name: str | None = None,
+        persona_id: str | None = None,
     ):
         self.message_id = message_id
         self.content = content
@@ -38,6 +39,7 @@ class QuickSearchResult:
         self.reply_message_id = reply_message_id
         self.chat_id = chat_id
         self.bot_name = bot_name
+        self.persona_id = persona_id
 
 
 async def quick_search(
@@ -71,25 +73,42 @@ async def quick_search(
         if not current_msg:
             return []
 
+        # bot_config 子查询（获取 persona_id）
+        from sqlalchemy import literal_column
+        bot_config_sq = (
+            select(
+                literal_column("bot_config.bot_name").label("bc_bot_name"),
+                literal_column("bot_config.persona_id").label("bc_persona_id"),
+            )
+            .select_from(text("bot_config"))
+            .where(literal_column("bot_config.is_active") == True)
+            .subquery("bc")
+        )
+
         # 2. 获取同一root_message_id的所有消息，left join lark_user表获取用户名
         root_result = await session.execute(
             select(
                 ConversationMessage,
                 LarkUser.name.label("username"),
                 LarkGroupChatInfo.name.label("chat_name"),
+                bot_config_sq.c.bc_persona_id.label("persona_id"),
             )
             .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
             .outerjoin(
                 LarkGroupChatInfo,
                 ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
             )
+            .outerjoin(
+                bot_config_sq,
+                ConversationMessage.bot_name == bot_config_sq.c.bc_bot_name,
+            )
             .where(ConversationMessage.root_message_id == current_msg.root_message_id)
             .where(ConversationMessage.create_time <= current_msg.create_time)
             .order_by(ConversationMessage.create_time.asc())
         )
         root_rows = root_result.all()
-        root_messages: list[tuple[ConversationMessage, str | None, str | None]] = [
-            (row[0], row[1], row[2]) for row in root_rows
+        root_messages: list[tuple[ConversationMessage, str | None, str | None, str | None]] = [
+            (row[0], row[1], row[2], row[3]) for row in root_rows
         ]
 
         # 3. 如果数量不足，补充同一chat_id的其他消息
@@ -104,11 +123,16 @@ async def quick_search(
                     ConversationMessage,
                     LarkUser.name.label("username"),
                     LarkGroupChatInfo.name.label("chat_name"),
+                    bot_config_sq.c.bc_persona_id.label("persona_id"),
                 )
                 .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
                 .outerjoin(
                     LarkGroupChatInfo,
                     ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
+                )
+                .outerjoin(
+                    bot_config_sq,
+                    ConversationMessage.bot_name == bot_config_sq.c.bc_bot_name,
                 )
                 .where(
                     ConversationMessage.chat_id == current_msg.chat_id,
@@ -120,7 +144,7 @@ async def quick_search(
                 .limit(needed)
             )
             additional_rows = additional_result.all()
-            additional_messages = [(row[0], row[1], row[2]) for row in additional_rows]
+            additional_messages = [(row[0], row[1], row[2], row[3]) for row in additional_rows]
 
             # 合并并排序
             all_messages = root_messages + additional_messages
@@ -130,7 +154,7 @@ async def quick_search(
 
         # 4. 转换为搜索结果格式
         results = []
-        for msg, username, chat_name in all_messages:
+        for msg, username, chat_name, persona_id in all_messages:
             results.append(
                 QuickSearchResult(
                     message_id=str(msg.message_id),
@@ -140,6 +164,7 @@ async def quick_search(
                     role=str(msg.role),
                     username=username if msg.role == "user" else (msg.bot_name or "assistant"),
                     bot_name=msg.bot_name if msg.role == "assistant" else None,
+                    persona_id=persona_id if msg.role == "assistant" else None,
                     chat_type=str(msg.chat_type),
                     chat_name=chat_name,
                     reply_message_id=(
