@@ -102,7 +102,7 @@ func TestListMutations_FilterByStatus(t *testing.T) {
 	}
 
 	var envelope struct {
-		Data []map[string]interface{} `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("failed to unmarshal: %v, body: %s", err, rec.Body.String())
