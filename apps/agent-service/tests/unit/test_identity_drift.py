@@ -19,10 +19,10 @@ async def test_get_identity_state_returns_none_when_empty():
         mock_cls.get_instance.return_value = mock_redis
         from app.services.identity_drift import get_identity_state
 
-        result = await get_identity_state("chat_001")
+        result = await get_identity_state("chat_001", bot_name="chiwei")
 
     assert result is None
-    mock_redis.hget.assert_called_once_with("reply_style:chat_001", "state")
+    mock_redis.hget.assert_called_once_with("reply_style:chat_001:chiwei", "state")
 
 
 @pytest.mark.asyncio
@@ -47,7 +47,7 @@ async def test_set_and_get_identity_state():
     mock_pipe.hset = MagicMock()
     mock_pipe.expire = MagicMock()
     mock_pipe.execute = AsyncMock(side_effect=lambda: [
-        fake_hset("reply_style:chat_001", {"state": "有点困", "updated_at": "2026-03-28T15:00:00"}),
+        fake_hset("reply_style:chat_001:chiwei", {"state": "有点困", "updated_at": "2026-03-28T15:00:00"}),
         None,
     ])
     mock_redis.pipeline = MagicMock(return_value=mock_pipe)
@@ -56,7 +56,7 @@ async def test_set_and_get_identity_state():
         mock_cls.get_instance.return_value = mock_redis
         from app.services.identity_drift import set_identity_state, get_identity_state
 
-        await set_identity_state("chat_001", "有点困")
+        await set_identity_state("chat_001", "chiwei", "有点困")
 
     mock_pipe.hset.assert_called_once()
     mock_pipe.expire.assert_called_once()
@@ -81,12 +81,12 @@ async def test_on_event_single_triggers_drift_after_debounce():
         from app.services.identity_drift import IdentityDriftManager
 
         mgr = IdentityDriftManager()
-        await mgr.on_event("chat_001")
+        await mgr.on_event("chat_001", bot_name="chiwei")
 
         # Wait for debounce + small margin
         await asyncio.sleep(0.3)
 
-        mock_drift.assert_called_once_with("chat_001")
+        mock_drift.assert_called_once_with("chat_001", "chiwei")
 
 
 @pytest.mark.asyncio
@@ -110,17 +110,17 @@ async def test_on_event_debounce_resets_timer():
         mgr = IdentityDriftManager()
 
         # 3 events, each within debounce window
-        await mgr.on_event("chat_001")
+        await mgr.on_event("chat_001", bot_name="chiwei")
         await asyncio.sleep(0.05)
-        await mgr.on_event("chat_001")
+        await mgr.on_event("chat_001", bot_name="chiwei")
         await asyncio.sleep(0.05)
-        await mgr.on_event("chat_001")
+        await mgr.on_event("chat_001", bot_name="chiwei")
 
         # Wait for debounce from last event
         await asyncio.sleep(0.4)
 
         # Only one drift should fire
-        mock_drift.assert_called_once_with("chat_001")
+        mock_drift.assert_called_once_with("chat_001", "chiwei")
 
 
 @pytest.mark.asyncio
@@ -145,11 +145,11 @@ async def test_on_event_forced_flush_at_threshold():
 
         # Send M events rapidly
         for _ in range(3):
-            await mgr.on_event("chat_001")
+            await mgr.on_event("chat_001", bot_name="chiwei")
 
         # Phase 2 should start immediately (no waiting for debounce)
         await asyncio.sleep(0.2)
-        mock_drift.assert_called_once_with("chat_001")
+        mock_drift.assert_called_once_with("chat_001", "chiwei")
 
 
 @pytest.mark.asyncio
@@ -158,7 +158,7 @@ async def test_phase2_buffers_new_events():
     drift_started = asyncio.Event()
     drift_release = asyncio.Event()
 
-    async def slow_drift(chat_id: str):
+    async def slow_drift(chat_id: str, bot_name: str):
         drift_started.set()
         await drift_release.wait()
 
@@ -180,14 +180,14 @@ async def test_phase2_buffers_new_events():
         mgr = IdentityDriftManager()
 
         # Trigger first drift
-        await mgr.on_event("chat_001")
+        await mgr.on_event("chat_001", bot_name="chiwei")
         await asyncio.sleep(0.1)  # debounce fires
 
         await drift_started.wait()
 
         # New event during phase 2
-        await mgr.on_event("chat_001")
-        assert mgr._buffers.get("chat_001", 0) > 0  # buffered
+        await mgr.on_event("chat_001", bot_name="chiwei")
+        assert mgr._buffers.get("chat_001:chiwei", 0) > 0  # buffered
 
         # Release phase 2
         drift_release.set()
@@ -240,7 +240,7 @@ async def test_run_drift_calls_observer_then_generator():
         )
 
         from app.services.identity_drift import _run_drift
-        await _run_drift("chat_001")
+        await _run_drift("chat_001", bot_name="chiwei")
 
     # 两次 LLM 调用
     assert mock_model.ainvoke.call_count == 2
@@ -259,11 +259,11 @@ async def test_run_drift_calls_observer_then_generator():
 async def test_get_recent_akao_replies_filters_assistant_only():
     """只返回赤尾的回复，不含其他人的消息"""
     mock_messages = [
-        MagicMock(role="user", content='{"text":"你好"}', create_time=1000),
-        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000),
-        MagicMock(role="user", content='{"text":"在干嘛"}', create_time=3000),
-        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000),
-        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000),
+        MagicMock(role="user", content='{"text":"你好"}', create_time=1000, bot_name=None),
+        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000, bot_name="chiwei"),
+        MagicMock(role="user", content='{"text":"在干嘛"}', create_time=3000, bot_name=None),
+        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000, bot_name="chiwei"),
+        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000, bot_name="chiwei"),
     ]
 
     mock_render = MagicMock()
@@ -275,7 +275,7 @@ async def test_get_recent_akao_replies_filters_assistant_only():
         patch("app.services.identity_drift.parse_content", return_value=mock_render),
     ):
         from app.services.identity_drift import _get_recent_akao_replies
-        result = await _get_recent_akao_replies("chat_001")
+        result = await _get_recent_akao_replies("chat_001", bot_name="chiwei")
 
     # 3 条赤尾回复，编号 1-3
     assert "1. 你好呀～" in result
@@ -296,10 +296,10 @@ async def test_get_base_reply_style_returns_none_when_empty():
         mock_cls.get_instance.return_value = mock_redis
         from app.services.identity_drift import get_base_reply_style
 
-        result = await get_base_reply_style()
+        result = await get_base_reply_style(bot_name="chiwei")
 
     assert result is None
-    mock_redis.get.assert_called_once_with("reply_style:__base__")
+    mock_redis.get.assert_called_once_with("reply_style:__base__:chiwei")
 
 
 @pytest.mark.asyncio
@@ -312,11 +312,11 @@ async def test_set_base_reply_style_stores_with_ttl():
         mock_cls.get_instance.return_value = mock_redis
         from app.services.identity_drift import set_base_reply_style
 
-        await set_base_reply_style("懒洋洋的，说话短")
+        await set_base_reply_style("懒洋洋的，说话短", bot_name="chiwei")
 
     mock_redis.set.assert_called_once()
     call_args = mock_redis.set.call_args
-    assert call_args[0][0] == "reply_style:__base__"
+    assert call_args[0][0] == "reply_style:__base__:chiwei"
     assert call_args[0][1] == "懒洋洋的，说话短"
     # TTL: 12 小时（覆盖到下一次生成）
     assert call_args[1].get("ex") == 43200
@@ -349,7 +349,7 @@ async def test_generate_base_reply_style_uses_schedule():
         mock_get_prompt.return_value = mock_prompt
 
         from app.services.identity_drift import generate_base_reply_style
-        result = await generate_base_reply_style()
+        result = await generate_base_reply_style(bot_name="chiwei")
 
     assert result is not None
     assert "感冒" in result
@@ -364,6 +364,6 @@ async def test_generate_base_reply_style_no_schedule_skips():
     with patch("app.services.identity_drift._get_schedule_context",
                new_callable=AsyncMock, return_value="（今天还没有写日程）"):
         from app.services.identity_drift import generate_base_reply_style
-        result = await generate_base_reply_style()
+        result = await generate_base_reply_style(bot_name="chiwei")
 
     assert result is None
