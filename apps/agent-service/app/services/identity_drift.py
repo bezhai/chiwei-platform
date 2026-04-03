@@ -207,9 +207,9 @@ async def _run_drift(chat_id: str, bot_name: str) -> None:
     """
     # 1. 收集上下文
     current_state = await get_identity_state(chat_id, bot_name)
-    recent_messages = await _get_recent_messages(chat_id, bot_name)
+    recent_messages = await _get_recent_messages(chat_id)
     schedule_context = await _get_schedule_context()
-    recent_replies = await _get_recent_akao_replies(chat_id)
+    recent_replies = await _get_recent_akao_replies(chat_id, bot_name)
 
     if not recent_messages:
         logger.info(f"[{bot_name}] No recent messages for {chat_id}, skip drift")
@@ -286,17 +286,9 @@ async def _count_messages_since_last_drift(chat_id: str, bot_name: str) -> int:
     return len(messages) if messages else 0
 
 
-async def _get_recent_messages(chat_id: str, bot_name: str, max_messages: int = 50) -> str:
-    """获取上次漂移以来的消息，格式化为时间线"""
-    # 确定起始时间：上次漂移时间 or 1小时前
-    updated_at_str = await get_identity_updated_at(chat_id, bot_name)
-    if updated_at_str:
-        try:
-            start_dt = datetime.fromisoformat(updated_at_str)
-        except ValueError:
-            start_dt = datetime.now(CST) - timedelta(hours=1)
-    else:
-        start_dt = datetime.now(CST) - timedelta(hours=1)
+async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
+    """获取最近 1 小时内的消息，格式化为时间线（不分 bot，用于群聊上下文感知）"""
+    start_dt = datetime.now(CST) - timedelta(hours=1)
 
     start_ts = int(start_dt.timestamp() * 1000)
     end_ts = int(datetime.now(CST).timestamp() * 1000)
@@ -326,8 +318,8 @@ async def _get_recent_messages(chat_id: str, bot_name: str, max_messages: int = 
     return "\n".join(lines)
 
 
-async def _get_recent_akao_replies(chat_id: str, max_replies: int = 10) -> str:
-    """获取赤尾最近的回复原文，用于偏差诊断"""
+async def _get_recent_akao_replies(chat_id: str, bot_name: str, max_replies: int = 10) -> str:
+    """获取指定 bot 最近的回复原文，用于偏差诊断"""
     now = datetime.now(CST)
     start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
@@ -336,7 +328,7 @@ async def _get_recent_akao_replies(chat_id: str, max_replies: int = 10) -> str:
     if not messages:
         return ""
 
-    akao_msgs = [m for m in messages if m.role == "assistant"]
+    akao_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == bot_name]
     akao_msgs = akao_msgs[-max_replies:]
 
     lines = []
