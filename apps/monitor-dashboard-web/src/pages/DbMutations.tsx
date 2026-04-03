@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Card, Table, Tag, Typography, Tabs, Modal, Input, Button, Space, Tooltip, message } from 'antd';
-import { ReloadOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
 
@@ -36,8 +36,7 @@ export default function DbMutations() {
   const [data, setData] = useState<MutationItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('pending');
-  const [approveModal, setApproveModal] = useState<MutationItem | null>(null);
-  const [rejectModal, setRejectModal] = useState<MutationItem | null>(null);
+  const [reviewModal, setReviewModal] = useState<MutationItem | null>(null);
   const [note, setNote] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -57,32 +56,17 @@ export default function DbMutations() {
     fetchData();
   }, [fetchData]);
 
-  const handleApprove = async () => {
-    if (!approveModal) return;
-    setActionLoading(true);
-    try {
-      await api.post(`/ops/db-mutations/${approveModal.id}/approve`, { note });
-      message.success('已审批通过并执行');
-      setApproveModal(null);
-      setNote('');
-      fetchData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.message || '操作失败');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReject = async () => {
-    if (!rejectModal || !note.trim()) {
+  const handleAction = async (action: 'approve' | 'reject') => {
+    if (!reviewModal) return;
+    if (action === 'reject' && !note.trim()) {
       message.warning('请填写拒绝原因');
       return;
     }
     setActionLoading(true);
     try {
-      await api.post(`/ops/db-mutations/${rejectModal.id}/reject`, { note });
-      message.success('已拒绝');
-      setRejectModal(null);
+      await api.post(`/ops/db-mutations/${reviewModal.id}/${action}`, { note });
+      message.success(action === 'approve' ? '已审批通过并执行' : '已拒绝');
+      setReviewModal(null);
       setNote('');
       fetchData();
     } catch (e: any) {
@@ -161,26 +145,15 @@ export default function DbMutations() {
           {
             title: '操作',
             key: 'actions',
-            width: 160,
+            width: 80,
             render: (_: unknown, record: MutationItem) => (
-              <Space size={8}>
-                <Button
-                  type="primary"
-                  size="small"
-                  icon={<CheckOutlined />}
-                  onClick={() => { setApproveModal(record); setNote(''); }}
-                >
-                  通过
-                </Button>
-                <Button
-                  danger
-                  size="small"
-                  icon={<CloseOutlined />}
-                  onClick={() => { setRejectModal(record); setNote(''); }}
-                >
-                  拒绝
-                </Button>
-              </Space>
+              <Button
+                type="primary"
+                size="small"
+                onClick={() => { setReviewModal(record); setNote(''); }}
+              >
+                处理
+              </Button>
             ),
           },
         ]
@@ -192,7 +165,11 @@ export default function DbMutations() {
               key: 'error',
               width: 200,
               ellipsis: true,
-              render: (v: string) => v ? <Text type="danger" style={{ fontSize: 12 }}>{v}</Text> : '-',
+              render: (v: string) => v ? (
+                <Tooltip title={<pre style={{ maxHeight: 400, overflow: 'auto', margin: 0, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{v}</pre>}>
+                  <Text type="danger" style={{ fontSize: 12 }}>{v}</Text>
+                </Tooltip>
+              ) : '-',
             },
           ]
         : []),
@@ -257,24 +234,30 @@ export default function DbMutations() {
         />
       </Card>
 
-      {/* Approve Modal */}
+      {/* Review Modal */}
       <Modal
-        title="确认执行以下 SQL？"
-        open={!!approveModal}
-        onOk={handleApprove}
-        onCancel={() => { setApproveModal(null); setNote(''); }}
-        confirmLoading={actionLoading}
-        okText="确认执行"
-        okButtonProps={{ danger: true }}
-        cancelText="取消"
-        width={640}
+        title="处理变更申请"
+        open={!!reviewModal}
+        onCancel={() => { setReviewModal(null); setNote(''); }}
+        width={720}
+        footer={
+          <Space>
+            <Button onClick={() => { setReviewModal(null); setNote(''); }}>取消</Button>
+            <Button danger loading={actionLoading} onClick={() => handleAction('reject')}>
+              拒绝
+            </Button>
+            <Button type="primary" loading={actionLoading} onClick={() => handleAction('approve')}>
+              通过并执行
+            </Button>
+          </Space>
+        }
       >
-        {approveModal && (
+        {reviewModal && (
           <>
             <div style={{ marginBottom: 12 }}>
-              <Tag bordered={false}>{approveModal.db}</Tag>
-              <Tag bordered={false} color={submitterColors[approveModal.submitted_by] || 'default'}>
-                {approveModal.submitted_by}
+              <Tag bordered={false}>{reviewModal.db}</Tag>
+              <Tag bordered={false} color={submitterColors[reviewModal.submitted_by] || 'default'}>
+                {reviewModal.submitted_by}
               </Tag>
             </div>
             <pre style={{
@@ -284,64 +267,25 @@ export default function DbMutations() {
               padding: 16,
               fontSize: 13,
               fontFamily: 'var(--font-mono)',
-              maxHeight: 300,
+              maxHeight: 400,
               overflow: 'auto',
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
             }}>
-              {approveModal.sql}
+              {reviewModal.sql}
             </pre>
-            {approveModal.reason && (
+            {reviewModal.reason && (
               <div style={{ marginTop: 12 }}>
                 <Text type="secondary">原因：</Text>
-                <Text>{approveModal.reason}</Text>
+                <Text>{reviewModal.reason}</Text>
               </div>
             )}
             <Input.TextArea
-              placeholder="备注（可选）"
+              placeholder="备注（拒绝时必填）"
               value={note}
               onChange={(e) => setNote(e.target.value)}
               rows={2}
               style={{ marginTop: 12 }}
-            />
-          </>
-        )}
-      </Modal>
-
-      {/* Reject Modal */}
-      <Modal
-        title="拒绝变更申请"
-        open={!!rejectModal}
-        onOk={handleReject}
-        onCancel={() => { setRejectModal(null); setNote(''); }}
-        confirmLoading={actionLoading}
-        okText="确认拒绝"
-        okButtonProps={{ danger: true }}
-        cancelText="取消"
-      >
-        {rejectModal && (
-          <>
-            <pre style={{
-              background: '#f8fafc',
-              border: '1px solid #e2e8f0',
-              borderRadius: 8,
-              padding: 12,
-              fontSize: 12,
-              fontFamily: 'var(--font-mono)',
-              maxHeight: 200,
-              overflow: 'auto',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              marginBottom: 12,
-            }}>
-              {rejectModal.sql}
-            </pre>
-            <Input.TextArea
-              placeholder="拒绝原因（必填）"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              rows={3}
-              status={!note.trim() ? 'warning' : undefined}
             />
           </>
         )}
