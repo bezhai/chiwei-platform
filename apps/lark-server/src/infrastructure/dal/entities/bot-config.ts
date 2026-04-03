@@ -35,6 +35,9 @@ export class BotConfig {
     @Column({ type: 'varchar', length: 20, default: 'persona' })
     bot_role!: 'persona' | 'utility'; // persona=拟人聊天, utility=工具功能
 
+    @Column({ type: 'varchar', length: 50, nullable: true })
+    persona_id?: string; // 关联 bot_persona.persona_id
+
     @CreateDateColumn({ name: 'created_at' })
     createdAt!: Date;
 

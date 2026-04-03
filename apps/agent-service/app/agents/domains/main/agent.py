@@ -29,15 +29,15 @@ from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 
-async def _get_guard_message(bot_name: str) -> str:
-    """获取 guard 拒绝消息（bot 专属，fallback 为通用消息）"""
+async def _get_guard_message(persona_or_bot: str) -> str:
+    """获取 guard 拒绝消息（persona/bot 专属，fallback 为通用消息）"""
     try:
         from app.orm.crud import get_bot_persona
-        persona = await get_bot_persona(bot_name)
+        persona = await get_bot_persona(persona_or_bot)
         if persona and persona.error_messages:
             return persona.error_messages.get("guard", "不想讨论这个话题呢~")
     except Exception as e:
-        logger.warning(f"Failed to get guard message for bot={bot_name}: {e}")
+        logger.warning(f"Failed to get guard message for {persona_or_bot}: {e}")
     return "不想讨论这个话题呢~"
 
 # 分段标记（consumer 侧检测并拆分为多条消息）
@@ -46,7 +46,7 @@ SPLIT_MARKER = "---split---"
 
 
 async def stream_chat(
-    message_id: str, session_id: str | None = None
+    message_id: str, session_id: str | None = None, persona_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """主聊天流式响应入口
 
@@ -79,9 +79,9 @@ async def stream_chat(
             CHAT_PIPELINE_DURATION.labels(stage="prep").observe(time.monotonic() - t_entry)
             pre_blocking = gray_config.get("pre_blocking", "false")
 
-            # 获取 bot 专属 guard 消息
-            bot_name = header_vars["app_name"].get() or ""
-            guard_message = await _get_guard_message(bot_name)
+            # 获取 guard 消息：优先用 persona_id，fallback header_vars
+            effective_persona = persona_id or header_vars["app_name"].get() or ""
+            guard_message = await _get_guard_message(effective_persona)
 
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
             pre_task = asyncio.create_task(run_pre(parsed.render()))
@@ -99,14 +99,14 @@ async def stream_chat(
                     return
 
                 async for text in _build_and_stream(
-                    message_id, gray_config, request_id
+                    message_id, gray_config, request_id, persona_id=persona_id
                 ):
                     yield text
             else:
                 # === 并行模式：pre 在后台运行，主模型同时流式生成 ===
                 logger.info(f"并行模式启动: message_id={message_id}")
                 raw_stream = _build_and_stream(
-                    message_id, gray_config, request_id
+                    message_id, gray_config, request_id, persona_id=persona_id
                 )
 
                 async for text in _buffer_until_pre(raw_stream, pre_task, message_id, guard_message):
@@ -245,6 +245,7 @@ async def _build_and_stream(
     message_id: str,
     gray_config: dict,
     session_id: str | None = None,
+    persona_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """构建 agent + 上下文，执行流式生成（两种模式共用）"""
     t_build_start = time.monotonic()
@@ -281,12 +282,18 @@ async def _build_and_stream(
         trigger_user_id,
         chat_name,
         chain_user_ids,
-    ) = await build_chat_context(message_id, current_bot_name=bot_name)
+    ) = await build_chat_context(message_id, current_persona_id=persona_id or "")
     CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(time.monotonic() - t_build_start)
 
     # 创建并加载 BotContext
-    bot_ctx = BotContext(chat_id=chat_id, bot_name=bot_name, chat_type=chat_type)
-    await bot_ctx.load()
+    if persona_id:
+        bot_ctx = await BotContext.from_persona_id(
+            chat_id=chat_id, persona_id=persona_id, chat_type=chat_type
+        )
+    else:
+        # 兼容：没有 persona_id 时走老路径
+        bot_ctx = BotContext(chat_id=chat_id, bot_name=bot_name, chat_type=chat_type)
+        await bot_ctx.load()
 
     if not messages:
         logger.warning(f"No results found for message_id: {message_id}")

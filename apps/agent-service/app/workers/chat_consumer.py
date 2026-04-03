@@ -1,13 +1,15 @@
 """Chat request MQ consumer
 
-消费 chat_request queue，流式执行 agent 聊天，
-检测 ---split--- 分隔符实时切分发送到 chat_response queue。
+消费 chat_request queue，路由到对应 persona，
+流式执行 agent 聊天，检测 ---split--- 分隔符实时切分发送到 chat_response queue。
 """
 
+import asyncio
 import json
 import logging
 import time
 import traceback
+from uuid import uuid4
 
 from aio_pika.abc import AbstractIncomingMessage
 
@@ -34,9 +36,8 @@ MAX_MESSAGES = 4
 
 
 async def handle_chat_request(message: AbstractIncomingMessage) -> None:
-    """消费 chat_request queue 中的消息，流式切分发送"""
+    """消费 chat_request queue 中的消息，路由到对应 persona 并行处理"""
     async with message.process(requeue=False):
-        t_start = time.monotonic()
         body = json.loads(message.body)
         session_id = body.get("session_id")
         message_id = body.get("message_id")
@@ -47,14 +48,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
         lane = body.get("lane")
         bot_name = body.get("bot_name")
         is_proactive = body.get("is_proactive", False)
-
-        # Measure MQ queue wait time
-        queue_wait_ms = 0.0
-        enqueued_at = body.get("enqueued_at")
-        if enqueued_at:
-            queue_wait_s = (time.time() * 1000 - enqueued_at) / 1000
-            queue_wait_ms = queue_wait_s * 1000
-            CHAT_QUEUE_WAIT.observe(queue_wait_s)
+        mentions = body.get("mentions", [])
 
         # MQ consumer 不走 HTTP 中间件，手动注入 contextvars
         if bot_name:
@@ -63,17 +57,31 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             header_vars["lane"].set(lane)
 
         logger.info(
-            "Chat request received: session_id=%s, message_id=%s, lane=%s, bot_name=%s",
+            "Chat request received: session_id=%s, message_id=%s, lane=%s, bot_name=%s, mentions=%s",
             session_id,
             message_id,
             lane,
             bot_name,
+            mentions,
         )
 
-        client = RabbitMQClient.get_instance()
+        # 路由：决定哪些 persona 回复
+        from app.services.message_router import MessageRouter
 
-        # 构建 response 基础字段
-        base_response = {
+        router = MessageRouter()
+        persona_ids = await router.route(
+            chat_id=chat_id or "",
+            mentions=mentions,
+            bot_name=bot_name or "",
+            is_p2p=is_p2p,
+        )
+
+        if not persona_ids:
+            logger.info("No persona to reply: message_id=%s", message_id)
+            return
+
+        # 构建公共 payload
+        base_payload = {
             "session_id": session_id,
             "message_id": message_id,
             "chat_id": chat_id,
@@ -83,142 +91,204 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             "lane": lane,
             "is_proactive": is_proactive,
             "bot_name": bot_name,
+            "enqueued_at": body.get("enqueued_at"),
         }
 
-        try:
-            sent_length = 0  # 已发送内容的长度
-            messages_sent = 0  # 已发送消息条数
-            full_content = ""  # 累积的完整内容
-            t_first_token: float | None = None
-            token_count = 0
+        if len(persona_ids) == 1:
+            # 单 persona：复用原始 session_id（向后兼容）
+            await _process_for_persona(base_payload, persona_ids[0])
+        else:
+            # 多 persona：并行处理，第一个复用原始 session_id，后续生成新的
+            tasks = []
+            for i, pid in enumerate(persona_ids):
+                payload = {**base_payload}
+                if i > 0:
+                    payload["session_id"] = str(uuid4())
+                tasks.append(_process_for_persona(payload, pid))
+            await asyncio.gather(*tasks)
 
-            async for text in stream_chat(message_id, session_id=session_id):
-                if not text:
-                    continue
-                if t_first_token is None:
-                    t_first_token = time.monotonic()
-                token_count += 1
-                full_content += text
 
-                # 检测分隔符，逐段发送
+async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
+    """为单个 persona 执行完整的 stream_chat + 发布 response 流程"""
+    t_start = time.monotonic()
+    session_id = base_payload["session_id"]
+    message_id = base_payload["message_id"]
+    lane = base_payload.get("lane")
+    is_proactive = base_payload.get("is_proactive", False)
+
+    # 从 persona_id 反查 bot_name（用于 chat.response，确保 worker 端用正确的 Lark 凭据）
+    from app.services.bot_context import _resolve_bot_name_for_persona
+
+    response_bot_name = await _resolve_bot_name_for_persona(persona_id)
+
+    client = RabbitMQClient.get_instance()
+
+    base_response = {
+        "session_id": session_id,
+        "message_id": message_id,
+        "chat_id": base_payload.get("chat_id"),
+        "is_p2p": base_payload.get("is_p2p"),
+        "root_id": base_payload.get("root_id"),
+        "user_id": base_payload.get("user_id"),
+        "lane": lane,
+        "is_proactive": is_proactive,
+        "bot_name": response_bot_name,
+    }
+
+    # Measure MQ queue wait time
+    queue_wait_ms = 0.0
+    enqueued_at = base_payload.get("enqueued_at")
+    if enqueued_at:
+        queue_wait_s = (time.time() * 1000 - enqueued_at) / 1000
+        queue_wait_ms = queue_wait_s * 1000
+        CHAT_QUEUE_WAIT.observe(queue_wait_s)
+
+    try:
+        sent_length = 0
+        messages_sent = 0
+        full_content = ""
+        t_first_token: float | None = None
+        token_count = 0
+
+        async for text in stream_chat(
+            message_id, session_id=session_id, persona_id=persona_id
+        ):
+            if not text:
+                continue
+            if t_first_token is None:
+                t_first_token = time.monotonic()
+            token_count += 1
+            full_content += text
+
+            # 检测分隔符，逐段发送
+            pending = full_content[sent_length:]
+            while SPLIT_MARKER in pending and messages_sent < MAX_MESSAGES - 1:
+                idx = pending.index(SPLIT_MARKER)
+                part = pending[:idx].strip()
+                if part:
+                    base_response["published_at"] = int(time.time() * 1000)
+                    await client.publish(
+                        CHAT_RESPONSE,
+                        {
+                            **base_response,
+                            "content": part,
+                            "status": "success",
+                            "part_index": messages_sent,
+                        },
+                        lane=lane,
+                    )
+                    messages_sent += 1
+                    logger.info(
+                        "Chat response part %d published: session_id=%s, persona=%s",
+                        messages_sent - 1,
+                        session_id,
+                        persona_id,
+                    )
+                sent_length += idx + len(SPLIT_MARKER)
                 pending = full_content[sent_length:]
-                while SPLIT_MARKER in pending and messages_sent < MAX_MESSAGES - 1:
-                    idx = pending.index(SPLIT_MARKER)
-                    part = pending[:idx].strip()
-                    if part:
-                        base_response["published_at"] = int(time.time() * 1000)
-                        await client.publish(
-                            CHAT_RESPONSE,
-                            {
-                                **base_response,
-                                "content": part,
-                                "status": "success",
-                                "part_index": messages_sent,
-                            },
-                            lane=lane,
-                        )
-                        messages_sent += 1
-                        logger.info(
-                            "Chat response part %d published: session_id=%s",
-                            messages_sent - 1,
-                            session_id,
-                        )
-                    sent_length += idx + len(SPLIT_MARKER)
-                    pending = full_content[sent_length:]
 
-            # 记录流结束时间，观测 TTFT 和 agent_stream 阶段耗时
-            t_stream_end = time.monotonic()
-            stream_ms = (t_stream_end - t_start) * 1000
-            if t_first_token is not None:
-                CHAT_FIRST_TOKEN.observe(t_first_token - t_start)
-            CHAT_PIPELINE_DURATION.labels(stage="agent_stream").observe(t_stream_end - t_start)
-            CHAT_TOKENS.labels(type="text").inc(token_count)
+        # 记录流结束时间，观测 TTFT 和 agent_stream 阶段耗时
+        t_stream_end = time.monotonic()
+        stream_ms = (t_stream_end - t_start) * 1000
+        if t_first_token is not None:
+            CHAT_FIRST_TOKEN.observe(t_first_token - t_start)
+        CHAT_PIPELINE_DURATION.labels(stage="agent_stream").observe(
+            t_stream_end - t_start
+        )
+        CHAT_TOKENS.labels(type="text").inc(token_count)
 
-            # 流结束，发送剩余内容（去掉残留的 split marker）
-            remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
-            # 全量文本（去掉所有 split marker），用于数据库存储
-            clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
+        # 流结束，发送剩余内容（去掉残留的 split marker）
+        remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
+        # 全量文本（去掉所有 split marker），用于数据库存储
+        clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
 
-            t_publish_start = time.monotonic()
-            if remaining or messages_sent == 0:
-                base_response["published_at"] = int(time.time() * 1000)
-                await client.publish(
-                    CHAT_RESPONSE,
-                    {
-                        **base_response,
-                        "content": remaining or full_content,
-                        "full_content": clean_full,
-                        "status": "success",
-                        "part_index": messages_sent,
-                        "is_last": True,
-                    },
-                    lane=lane,
-                )
-            else:
-                # split marker 后没有内容，仍需通知 worker 结束
-                base_response["published_at"] = int(time.time() * 1000)
-                await client.publish(
-                    CHAT_RESPONSE,
-                    {
-                        **base_response,
-                        "content": "",
-                        "full_content": clean_full,
-                        "status": "success",
-                        "part_index": messages_sent,
-                        "is_last": True,
-                    },
-                    lane=lane,
-                )
-
-            logger.info(
-                "Chat response final part %d published: session_id=%s",
-                messages_sent,
-                session_id,
-            )
-
-            # 记录 MQ publish 耗时和全链路总时长
-            t_end = time.monotonic()
-            publish_ms = (t_end - t_publish_start) * 1000
-            total_ms = (t_end - t_start) * 1000
-            ttft_ms = (t_first_token - t_start) * 1000 if t_first_token is not None else 0.0
-            CHAT_PIPELINE_DURATION.labels(stage="mq_publish").observe(t_end - t_publish_start)
-            CHAT_PIPELINE_DURATION.labels(stage="total").observe(t_end - t_start)
-            logger.info(
-                "chat_request_done",
-                extra={
-                    "event": "chat_request_done",
-                    "session_id": session_id,
-                    "queue_wait_ms": round(queue_wait_ms),
-                    "stream_ms": round(stream_ms),
-                    "ttft_ms": round(ttft_ms),
-                    "publish_ms": round(publish_ms),
-                    "total_ms": round(total_ms),
-                    "tokens": token_count,
-                    "parts": messages_sent + 1,
+        t_publish_start = time.monotonic()
+        if remaining or messages_sent == 0:
+            base_response["published_at"] = int(time.time() * 1000)
+            await client.publish(
+                CHAT_RESPONSE,
+                {
+                    **base_response,
+                    "content": remaining or full_content,
+                    "full_content": clean_full,
+                    "status": "success",
+                    "part_index": messages_sent,
+                    "is_last": True,
                 },
+                lane=lane,
             )
-
-            # Piggyback: 回复完后顺手刷一眼群聊（proactive 回复不触发，避免递归）[DISABLED]
-            # if not is_proactive:
-            #     await _maybe_piggyback_scan()
-
-        except Exception as e:
-            logger.error(
-                "Chat request failed: session_id=%s, error=%s\n%s",
-                session_id,
-                str(e),
-                traceback.format_exc(),
-            )
+        else:
+            # split marker 后没有内容，仍需通知 worker 结束
+            base_response["published_at"] = int(time.time() * 1000)
             await client.publish(
                 CHAT_RESPONSE,
                 {
                     **base_response,
                     "content": "",
-                    "status": "failed",
-                    "error": str(e),
+                    "full_content": clean_full,
+                    "status": "success",
+                    "part_index": messages_sent,
+                    "is_last": True,
                 },
                 lane=lane,
             )
+
+        logger.info(
+            "Chat response final part %d published: session_id=%s, persona=%s",
+            messages_sent,
+            session_id,
+            persona_id,
+        )
+
+        # 记录 MQ publish 耗时和全链路总时长
+        t_end = time.monotonic()
+        publish_ms = (t_end - t_publish_start) * 1000
+        total_ms = (t_end - t_start) * 1000
+        ttft_ms = (
+            (t_first_token - t_start) * 1000 if t_first_token is not None else 0.0
+        )
+        CHAT_PIPELINE_DURATION.labels(stage="mq_publish").observe(
+            t_end - t_publish_start
+        )
+        CHAT_PIPELINE_DURATION.labels(stage="total").observe(t_end - t_start)
+        logger.info(
+            "chat_request_done",
+            extra={
+                "event": "chat_request_done",
+                "session_id": session_id,
+                "persona_id": persona_id,
+                "queue_wait_ms": round(queue_wait_ms),
+                "stream_ms": round(stream_ms),
+                "ttft_ms": round(ttft_ms),
+                "publish_ms": round(publish_ms),
+                "total_ms": round(total_ms),
+                "tokens": token_count,
+                "parts": messages_sent + 1,
+            },
+        )
+
+        # Piggyback: 回复完后顺手刷一眼群聊（proactive 回复不触发，避免递归）[DISABLED]
+        # if not is_proactive:
+        #     await _maybe_piggyback_scan()
+
+    except Exception as e:
+        logger.error(
+            "Chat request failed: session_id=%s, persona=%s, error=%s\n%s",
+            session_id,
+            persona_id,
+            str(e),
+            traceback.format_exc(),
+        )
+        await client.publish(
+            CHAT_RESPONSE,
+            {
+                **base_response,
+                "content": "",
+                "status": "failed",
+                "error": str(e),
+            },
+            lane=lane,
+        )
 
 
 async def _maybe_piggyback_scan() -> None:
