@@ -4,6 +4,15 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from app.orm.crud import get_bot_persona
+
+
+async def get_reply_style(chat_id: str, persona_id: str, default_style: str) -> str:
+    """转发到 memory_context.get_reply_style（lazy import 避免循环）"""
+    from app.services.memory_context import get_reply_style as _impl
+    return await _impl(chat_id, persona_id, default_style)
+
+
 if TYPE_CHECKING:
     from app.orm.models import BotPersona
     from app.services.quick_search import QuickSearchResult
@@ -25,6 +34,24 @@ async def _resolve_persona_id(bot_name: str) -> str:
         return row if row else bot_name
 
 
+async def _resolve_bot_name_for_persona(persona_id: str, chat_id: str = "") -> str:
+    """从 persona_id 反查 bot_name（同群约束下唯一）"""
+    from app.orm.base import AsyncSessionLocal
+    from sqlalchemy import text
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                "SELECT bot_name FROM bot_config "
+                "WHERE persona_id = :pid AND is_active = true "
+                "LIMIT 1"
+            ),
+            {"pid": persona_id},
+        )
+        row = result.scalar_one_or_none()
+        return row if row else persona_id
+
+
 class BotContext:
     def __init__(self, chat_id: str, bot_name: str, chat_type: str) -> None:
         self.chat_id = chat_id
@@ -38,14 +65,24 @@ class BotContext:
     def persona_id(self) -> str:
         return self._persona_id
 
+    @classmethod
+    async def from_persona_id(
+        cls, chat_id: str, persona_id: str, chat_type: str
+    ) -> "BotContext":
+        """从 persona_id 创建 BotContext（多 bot 路由场景）"""
+        bot_name = await _resolve_bot_name_for_persona(persona_id, chat_id)
+        ctx = cls(chat_id=chat_id, bot_name=bot_name, chat_type=chat_type)
+        ctx._persona_id = persona_id
+        await ctx._load_persona()
+        return ctx
+
     async def load(self) -> None:
-        """并行加载所有 per-bot 数据"""
-        import asyncio
-        from app.orm.crud import get_bot_persona
-        from app.services.memory_context import get_reply_style
-
+        """并行加载所有 per-bot 数据（从 bot_name 入口）"""
         self._persona_id = await _resolve_persona_id(self.bot_name)
+        await self._load_persona()
 
+    async def _load_persona(self) -> None:
+        """加载 persona 数据和 reply_style"""
         self._persona = await get_bot_persona(self._persona_id)
         if self._persona is None:
             logger.warning(
@@ -82,8 +119,12 @@ class BotContext:
         """构建 LLM 对话历史：当前 bot → AIMessage，其余 → HumanMessage（带名字前缀）"""
         result: list[AIMessage | HumanMessage] = []
         for msg in messages:
-            # 判断是否为当前 bot 的发言
-            is_self = (msg.role == "assistant" and getattr(msg, "bot_name", None) == self.bot_name)
+            # 优先用 persona_id 判断，fallback 到 bot_name（兼容旧数据）
+            msg_persona_id = getattr(msg, "persona_id", None)
+            if msg_persona_id:
+                is_self = msg.role == "assistant" and msg_persona_id == self._persona_id
+            else:
+                is_self = msg.role == "assistant" and getattr(msg, "bot_name", None) == self.bot_name
             if is_self:
                 result.append(AIMessage(content=msg.content))
             else:

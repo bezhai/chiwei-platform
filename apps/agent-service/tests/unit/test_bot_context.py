@@ -58,3 +58,51 @@ def test_get_error_message_uses_persona():
     ctx._persona.error_messages = {"guard": "赤尾不想讨论这个~"}
     assert ctx.get_error_message("guard") == "赤尾不想讨论这个~"
     assert "赤尾" in ctx.get_error_message("unknown_key")
+
+
+@pytest.mark.asyncio
+async def test_from_persona_id_factory():
+    """from_persona_id 工厂方法应直接用 persona_id 创建 BotContext"""
+    with patch(
+        "app.services.bot_context._resolve_bot_name_for_persona",
+        new_callable=AsyncMock,
+        return_value="fly",
+    ), patch(
+        "app.services.bot_context.get_bot_persona",
+        new_callable=AsyncMock,
+        return_value=MagicMock(
+            persona_lite="我是赤尾",
+            display_name="赤尾",
+            default_reply_style="test style",
+            error_messages={},
+        ),
+    ), patch(
+        "app.services.bot_context.get_reply_style",
+        new_callable=AsyncMock,
+        return_value="test style",
+    ):
+        ctx = await BotContext.from_persona_id(chat_id="c1", persona_id="akao", chat_type="group")
+
+    assert ctx.persona_id == "akao"
+    assert ctx.bot_name == "fly"
+    assert ctx.get_identity() == "我是赤尾"
+
+
+def test_build_chat_history_uses_persona_id():
+    """build_chat_history 按 persona_id 而非 bot_name 判断自己的消息"""
+    ctx = BotContext(chat_id="c1", bot_name="fly", chat_type="group")
+    ctx._persona_id = "akao"
+    msgs = [
+        _make_msg("assistant", "你好", "fly", "赤尾"),
+        _make_msg("assistant", "我是千凪", "chinagi", "千凪"),
+        _make_msg("user", "嗨", None, "张三"),
+    ]
+    # 给消息加上 persona_id 属性
+    msgs[0].persona_id = "akao"
+    msgs[1].persona_id = "chinagi"
+    msgs[2].persona_id = None
+
+    result = ctx.build_chat_history(msgs)
+    assert isinstance(result[0], AIMessage)    # akao → AI
+    assert isinstance(result[1], HumanMessage) # chinagi → Human
+    assert isinstance(result[2], HumanMessage) # user → Human
