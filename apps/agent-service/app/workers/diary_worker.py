@@ -130,7 +130,7 @@ async def generate_diary_for_chat(
         chat_hint = "这是群聊记录。记录群里发生的事、话题和你观察到的群友动态。"
 
     # 4. 查最近 3 篇日记
-    recent = await get_recent_diaries(chat_id, date_str, limit=3)
+    recent = await get_recent_diaries(chat_id, date_str, bot_name=bot_name, limit=3)
     recent_diaries_text = _format_recent_diaries(recent)
 
     # 5. 获取人设和 Langfuse prompt 并编译
@@ -168,6 +168,7 @@ async def generate_diary_for_chat(
         diary_date=date_str,
         content=diary_content,
         message_count=len(messages),
+        bot_name=bot_name,
         model=settings.diary_model,
     )
 
@@ -469,7 +470,7 @@ async def generate_weekly_review_for_chat(
     week_end = (target_monday + timedelta(days=6)).isoformat()  # 周日
 
     # 2. 查上周的日记
-    diaries = await get_diaries_in_range(chat_id, week_start, week_end)
+    diaries = await get_diaries_in_range(chat_id, week_start, week_end, bot_name=bot_name)
     if not diaries:
         logger.info(f"No diaries for {chat_id} in {week_start}~{week_end}, skip")
         return None
@@ -523,6 +524,7 @@ async def generate_weekly_review_for_chat(
         week_start=week_start,
         week_end=week_end,
         content=content,
+        bot_name=bot_name,
         model=settings.diary_model,
     )
 

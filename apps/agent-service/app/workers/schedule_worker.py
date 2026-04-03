@@ -63,9 +63,9 @@ async def _get_persona_core_for_bot(bot_name: str) -> str:
         return ""
 
 
-async def _get_recent_daily_schedules(before_date: date, count: int = 3) -> list[AkaoSchedule]:
+async def _get_recent_daily_schedules(before_date: date, bot_name: str = "chiwei", count: int = 3) -> list[AkaoSchedule]:
     """获取前 N 天的 daily schedule（供 Ideation 和 Critic 去重）"""
-    results = await list_schedules(plan_type="daily", active_only=True, limit=count + 5)
+    results = await list_schedules(plan_type="daily", bot_name=bot_name, active_only=True, limit=count + 5)
     return [
         s for s in results
         if s.period_start < before_date.isoformat()
@@ -237,13 +237,13 @@ async def generate_monthly_plan(
     period_end = month_end.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("monthly", period_start, period_end)
+    existing = await get_plan_for_period("monthly", period_start, period_end, bot_name)
     if existing:
         logger.info(f"Monthly plan already exists for {period_start}~{period_end}, skip")
         return existing.content
 
     # 上下文：上月计划
-    prev_plan = await get_latest_plan("monthly", period_start)
+    prev_plan = await get_latest_plan("monthly", period_start, bot_name)
     prev_plan_text = prev_plan.content if prev_plan else "（这是第一个月计划）"
 
     season = _get_season(month_start.month)
@@ -272,6 +272,7 @@ async def generate_monthly_plan(
         plan_type="monthly",
         period_start=period_start,
         period_end=period_end,
+        bot_name=bot_name,
         content=content,
         model=_schedule_model(),
     ))
@@ -308,7 +309,7 @@ async def generate_weekly_plan(
     period_end = week_end.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("weekly", period_start, period_end)
+    existing = await get_plan_for_period("weekly", period_start, period_end, bot_name)
     if existing:
         logger.info(f"Weekly plan already exists for {period_start}~{period_end}, skip")
         return existing.content
@@ -320,11 +321,11 @@ async def generate_weekly_plan(
         month_end_d = date(target_date.year + 1, 1, 1) - timedelta(days=1)
     else:
         month_end_d = date(target_date.year, target_date.month + 1, 1) - timedelta(days=1)
-    monthly = await get_plan_for_period("monthly", month_start, month_end_d.isoformat())
+    monthly = await get_plan_for_period("monthly", month_start, month_end_d.isoformat(), bot_name)
     monthly_text = monthly.content if monthly else "（暂无月计划）"
 
     # 2. 上周计划
-    prev_plan = await get_latest_plan("weekly", period_start)
+    prev_plan = await get_latest_plan("weekly", period_start, bot_name)
     prev_plan_text = prev_plan.content if prev_plan else "（这是第一个周计划）"
 
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
@@ -352,6 +353,7 @@ async def generate_weekly_plan(
         plan_type="weekly",
         period_start=period_start,
         period_end=period_end,
+        bot_name=bot_name,
         content=content,
         model=_schedule_model(),
     ))
@@ -377,7 +379,7 @@ async def generate_daily_plan(
     date_str = target_date.isoformat()
 
     # 检查是否已有
-    existing = await get_plan_for_period("daily", date_str, date_str)
+    existing = await get_plan_for_period("daily", date_str, date_str, bot_name)
     if existing:
         logger.info(f"Daily plan already exists for {date_str}, skip")
         return existing.content
@@ -388,16 +390,16 @@ async def generate_daily_plan(
     # 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
     week_end = week_start + timedelta(days=6)
-    weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat())
+    weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat(), bot_name)
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
     # 昨天 Journal
     yesterday = (target_date - timedelta(days=1)).isoformat()
-    yesterday_journal_entry = await get_journal("daily", yesterday)
+    yesterday_journal_entry = await get_journal("daily", yesterday, bot_name)
     yesterday_journal = yesterday_journal_entry.content if yesterday_journal_entry else "（昨天没有写日志）"
 
     # 前 3 天 schedule（Ideation 和 Critic 共用）
-    recent = await _get_recent_daily_schedules(target_date)
+    recent = await _get_recent_daily_schedules(target_date, bot_name)
     recent_schedules_text = "\n\n---\n\n".join(
         f"[{s.period_start}]\n{s.content}" for s in recent
     ) if recent else "（没有前几天的日程）"
@@ -450,6 +452,7 @@ async def generate_daily_plan(
         plan_type="daily",
         period_start=date_str,
         period_end=date_str,
+        bot_name=bot_name,
         content=schedule_text,
         model="offline-model",
     ))

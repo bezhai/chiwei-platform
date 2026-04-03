@@ -32,7 +32,7 @@ _MEMORY_RECALL_HINT = (
 )
 
 
-async def _build_today_state() -> str:
+async def _build_today_state(bot_name: str) -> str:
     """构建今日状态：今天 Schedule > 昨天 Journal
 
     今天的 Journal 不可能存在（凌晨 04:00 回溯生成昨天的），
@@ -42,13 +42,13 @@ async def _build_today_state() -> str:
     today = now.strftime("%Y-%m-%d")
 
     # 优先用今天的 Schedule（05:00 已生成）
-    schedule = await get_plan_for_period("daily", today, today)
+    schedule = await get_plan_for_period("daily", today, today, bot_name)
     if schedule and schedule.content:
         return schedule.content
 
     # fallback: 昨天的 Journal（模糊化的个人感受）
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    journal = await get_journal("daily", yesterday)
+    journal = await get_journal("daily", yesterday, bot_name)
     if journal:
         return journal.content
 
@@ -101,7 +101,7 @@ async def build_inner_context(
             sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
     # === 今日基调（Journal / Schedule） ===
-    today_state = await _build_today_state()
+    today_state = await _build_today_state(bot_name)
     if today_state:
         sections.append(f"你今天的基调：\n{today_state}")
 

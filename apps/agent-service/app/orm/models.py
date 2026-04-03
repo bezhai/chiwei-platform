@@ -114,6 +114,7 @@ class DiaryEntry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     diary_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10"
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -122,7 +123,7 @@ class DiaryEntry(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("chat_id", "diary_date"),
+        UniqueConstraint("chat_id", "diary_date", "bot_name"),
     )
 
 
@@ -167,6 +168,8 @@ class AkaoSchedule(Base):
     target_chats: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # 生成元信息
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
+
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -178,8 +181,7 @@ class AkaoSchedule(Base):
     )
 
     __table_args__ = (
-        # 月/周计划：同类型同周期只有一条
-        UniqueConstraint("plan_type", "period_start", "period_end", "time_start"),
+        UniqueConstraint("bot_name", "plan_type", "period_start", "period_end", "time_start"),
     )
 
 
@@ -208,13 +210,14 @@ class WeeklyReview(Base):
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     week_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10" (周一)
     week_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-16" (周日)
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("chat_id", "week_start"),)
+    __table_args__ = (UniqueConstraint("chat_id", "week_start", "bot_name"),)
 
 
 class PersonImpression(Base):
@@ -288,6 +291,7 @@ class AkaoJournal(Base):
     journal_type: Mapped[str] = mapped_column(String(10), nullable=False)  # "daily" | "weekly"
     journal_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-26" or week monday
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # daily 同 journal_date, weekly 为周日
+    bot_name: Mapped[str] = mapped_column(String(50), nullable=False, default="chiwei")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -296,5 +300,5 @@ class AkaoJournal(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("journal_type", "journal_date"),
+        UniqueConstraint("bot_name", "journal_type", "journal_date"),
     )

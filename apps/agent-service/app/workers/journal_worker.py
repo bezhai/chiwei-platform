@@ -45,9 +45,9 @@ async def _get_persona_lite_for_bot(bot_name: str) -> str:
         return ""
 
 
-async def _get_recent_journals_text(target_date: date, limit: int = 3) -> str:
+async def _get_recent_journals_text(target_date: date, bot_name: str = "chiwei", limit: int = 3) -> str:
     """获取前 N 天的 daily journal 内容，用于避免重复意象"""
-    journals = await get_recent_journals("daily", target_date.isoformat(), limit=limit)
+    journals = await get_recent_journals("daily", target_date.isoformat(), bot_name=bot_name, limit=limit)
     if not journals:
         return "（前几天没有日志）"
     return "\n\n".join(
@@ -111,13 +111,13 @@ async def generate_daily_journal(
     date_str = target_date.isoformat()
 
     # 检查是否已有
-    existing = await get_journal("daily", date_str)
+    existing = await get_journal("daily", date_str, bot_name)
     if existing:
         logger.info(f"Daily journal already exists for {date_str}, skip")
         return existing.content
 
     # 收集当天所有 DiaryEntry
-    diaries = await get_all_diaries_for_date(date_str)
+    diaries = await get_all_diaries_for_date(date_str, bot_name)
     if not diaries:
         logger.info(f"No diaries for {date_str}, skip journal generation")
         return None
@@ -128,10 +128,10 @@ async def generate_daily_journal(
     )
 
     # 加载上下文
-    daily_schedule = await get_plan_for_period("daily", date_str, date_str)
+    daily_schedule = await get_plan_for_period("daily", date_str, date_str, bot_name)
     schedule_text = daily_schedule.content if daily_schedule else "（今天没有写手帐）"
 
-    recent_journals = await _get_recent_journals_text(target_date)
+    recent_journals = await _get_recent_journals_text(target_date, bot_name)
 
     # 编译 prompt
     prompt_template = get_prompt("journal_generation")
@@ -154,7 +154,7 @@ async def generate_daily_journal(
 
     # 写入数据库
     await upsert_journal(
-        "daily", date_str, content, _journal_model(),
+        "daily", date_str, content, bot_name, _journal_model(),
         period_end=date_str, source_chat_count=len(diaries),
     )
 
@@ -183,7 +183,7 @@ async def generate_weekly_journal(
     week_end = (monday_date + timedelta(days=6)).isoformat()
 
     # 检查是否已有
-    existing = await get_journal("weekly", week_start)
+    existing = await get_journal("weekly", week_start, bot_name)
     if existing:
         logger.info(f"Weekly journal already exists for week {week_start}, skip")
         return existing.content
@@ -192,7 +192,7 @@ async def generate_weekly_journal(
     daily_journals = []
     for i in range(7):
         d = monday_date + timedelta(days=i)
-        journal = await get_journal("daily", d.isoformat())
+        journal = await get_journal("daily", d.isoformat(), bot_name)
         if journal:
             daily_journals.append(f"--- {d.isoformat()} ---\n{journal.content}")
 
@@ -222,7 +222,7 @@ async def generate_weekly_journal(
 
     # 写入数据库
     await upsert_journal(
-        "weekly", week_start, content, _journal_model(),
+        "weekly", week_start, content, bot_name, _journal_model(),
         period_end=week_end, source_chat_count=len(daily_journals),
     )
 
