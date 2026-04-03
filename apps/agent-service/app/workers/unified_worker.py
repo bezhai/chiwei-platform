@@ -90,6 +90,6 @@ class UnifiedWorkerSettings:
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}),
         # 8. 基线 reply_style：每天 CST 8:00/14:00/18:00（Schedule 之后）
         cron(cron_generate_base_reply_style, hour={8, 14, 18}, minute={0}),
-        # 9. 主动搭话扫描（cron 兜底）：每 30 分钟，30% 概率执行
-        cron(proactive_scan_job, minute={0, 30}),
+        # 9. 主动搭话扫描（cron 兜底）：每 30 分钟，30% 概率执行 [DISABLED]
+        # cron(proactive_scan_job, minute={0, 30}),
     ]

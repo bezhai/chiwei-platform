@@ -198,9 +198,9 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                 },
             )
 
-            # Piggyback: 回复完后顺手刷一眼群聊（proactive 回复不触发，避免递归）
-            if not is_proactive:
-                await _maybe_piggyback_scan()
+            # Piggyback: 回复完后顺手刷一眼群聊（proactive 回复不触发，避免递归）[DISABLED]
+            # if not is_proactive:
+            #     await _maybe_piggyback_scan()
 
         except Exception as e:
             logger.error(
