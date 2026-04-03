@@ -25,7 +25,7 @@ import {
     GroupChatInfoRepository,
     UserGroupBindingRepository,
 } from 'infrastructure/dal/repositories/repositories';
-import { getBotAppId } from '@core/services/bot/bot-var';
+import { getBotAppId, getBotUnionId } from '@core/services/bot/bot-var';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
@@ -87,8 +87,9 @@ export class LarkEventHandlers {
                 message_type: message.messageType,
             });
 
-            // Publish proactive eval event for group messages
-            if (!message.isP2P()) {
+            // Publish proactive eval event for group messages that don't @赤尾
+            // @赤尾 的消息走正常回复流程，不需要 proactive 重复触发
+            if (!message.isP2P() && !message.hasMention(getBotUnionId())) {
                 rabbitmqClient.publish(PROACTIVE_EVAL, {
                     chat_id: message.chatId,
                     message_id: message.messageId,
