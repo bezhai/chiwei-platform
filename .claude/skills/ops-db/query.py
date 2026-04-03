@@ -119,16 +119,14 @@ def cmd_submit(args):
 
     raw = " ".join(args).strip()
 
-    # 从注释中提取 reason
+    # 提取 reason：支持 "-- reason: xxx" 出现在任意位置
     reason = ""
-    sql_lines = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("-- reason:"):
-            reason = stripped[len("-- reason:"):].strip()
-        else:
-            sql_lines.append(line)
-    sql = "\n".join(sql_lines).strip()
+    reason_match = re.search(r"--\s*reason:\s*(.+)$", raw, re.IGNORECASE)
+    if reason_match:
+        reason = reason_match.group(1).strip()
+        sql = raw[:reason_match.start()].strip()
+    else:
+        sql = raw
 
     if not sql:
         print("ERROR: SQL 为空", file=sys.stderr)
@@ -168,15 +166,18 @@ def main():
         print("命令: [@db] <SQL|schema>  |  submit @<db> <SQL>  |  status <id>", file=sys.stderr)
         sys.exit(1)
 
-    args = sys.argv[1:]
-    first = args[0].lower()
+    # skill 预处理以 "$ARGUMENTS" 传入，所有参数合为单个字符串。
+    # 先拼回完整文本，再按首词分派。
+    raw = " ".join(sys.argv[1:]).strip()
+    words = raw.split()
+    first_word = words[0].lower() if words else ""
 
-    if first == "submit":
-        cmd_submit(args[1:])
-    elif first == "status":
-        cmd_status(args[1:])
+    if first_word == "submit":
+        cmd_submit(words[1:])
+    elif first_word == "status":
+        cmd_status(words[1:])
     else:
-        cmd_query(args)
+        cmd_query(words)
 
 
 if __name__ == "__main__":
