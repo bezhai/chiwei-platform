@@ -1,4 +1,4 @@
-import type { Context, Next } from 'koa';
+import type { Context, Next } from 'hono';
 import { asyncLocalStorage, BaseRequestContext } from './context';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -19,11 +19,11 @@ export interface TraceMiddlewareOptions {
     /**
      * Additional context fields to set
      */
-    additionalContext?: (ctx: Context) => Partial<BaseRequestContext>;
+    additionalContext?: (c: Context) => Partial<BaseRequestContext>;
 }
 
 /**
- * Create a trace middleware for Koa
+ * Create a trace middleware for Hono
  * Extracts or generates trace ID and runs the middleware chain within AsyncLocalStorage context
  */
 export function createTraceMiddleware(options: TraceMiddlewareOptions = {}) {
@@ -33,16 +33,16 @@ export function createTraceMiddleware(options: TraceMiddlewareOptions = {}) {
         additionalContext,
     } = options;
 
-    return async (ctx: Context, next: Next) => {
-        const traceId = (ctx.request.headers[headerName] as string) || uuidv4();
+    return async (c: Context, next: Next) => {
+        const traceId = c.req.header(headerName) || uuidv4();
 
         const contextData: BaseRequestContext = {
             traceId,
-            ...(additionalContext ? additionalContext(ctx) : {}),
+            ...(additionalContext ? additionalContext(c) : {}),
         };
 
         await asyncLocalStorage.run(contextData, async () => {
-            ctx.set(responseHeaderName, traceId);
+            c.header(responseHeaderName, traceId);
             await next();
         });
     };

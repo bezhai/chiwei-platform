@@ -1,4 +1,5 @@
-import type { Context, Next } from 'koa';
+import type { Context, Next } from 'hono';
+import type { StatusCode } from 'hono/utils/http-status';
 
 /**
  * Options for error handler middleware
@@ -29,13 +30,13 @@ export class AppError extends Error {
 }
 
 /**
- * Create an error handler middleware for Koa
+ * Create an error handler middleware for Hono
  * Catches downstream errors and returns unified JSON responses
  */
 export function createErrorHandler(options: ErrorHandlerOptions = {}) {
     const { logger } = options;
 
-    return async (ctx: Context, next: Next): Promise<void> => {
+    return async (c: Context, next: Next) => {
         try {
             await next();
         } catch (err: unknown) {
@@ -43,26 +44,29 @@ export function createErrorHandler(options: ErrorHandlerOptions = {}) {
 
             // AppError: expected operational error
             if (error instanceof AppError) {
-                ctx.status = error.statusCode;
-                ctx.body = {
-                    error: error.message,
-                    code: error.statusCode,
-                };
                 logger?.warn('Operational error', { message: error.message });
-                return;
+                return c.json(
+                    {
+                        error: error.message,
+                        code: error.statusCode,
+                    },
+                    error.statusCode as StatusCode,
+                );
             }
 
             // Unknown error: avoid leaking internal implementation details
-            ctx.status = 500;
-            ctx.body = {
-                error: 'Internal server error',
-                code: 500,
-            };
             logger?.error('Unexpected error', {
                 name: error?.name,
                 message: error?.message,
                 stack: error instanceof Error ? error.stack : undefined,
             });
+            return c.json(
+                {
+                    error: 'Internal server error',
+                    code: 500,
+                },
+                500,
+            );
         }
     };
 }
