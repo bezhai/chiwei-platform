@@ -126,7 +126,7 @@ func main() {
 		httpadapter.NewReleaseHandler(releaseSvc),
 		httpadapter.NewLogHandler(logSvc),
 		httpadapter.NewImageRepoHandler(imageRepoSvc),
-		httpadapter.NewOpsHandler(opsDbs),
+		httpadapter.NewOpsHandler(opsDbs, nil, nil),
 		httpadapter.NewPipelineHandler(pipelineSvc),
 		httpadapter.NewConfigBundleHandler(configBundleSvc),
 		cfg.APIToken,
