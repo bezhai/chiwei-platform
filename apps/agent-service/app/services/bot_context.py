@@ -12,17 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 async def _resolve_persona_id(bot_name: str) -> str:
-    """从 bot_config 表查 persona_id，找不到则用 bot_name 自身"""
+    """从 bot_config 表查 persona_id，找不到或列不存在则 fallback bot_name"""
     from app.orm.base import AsyncSessionLocal
     from sqlalchemy import text
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            text("SELECT persona_id FROM bot_config WHERE bot_name = :bn"),
-            {"bn": bot_name},
-        )
-        row = result.scalar_one_or_none()
-        return row if row else bot_name
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("SELECT persona_id FROM bot_config WHERE bot_name = :bn"),
+                {"bn": bot_name},
+            )
+            row = result.scalar_one_or_none()
+            return row if row else bot_name
+    except Exception:
+        logger.debug("resolve_persona_id fallback: bot_config.persona_id not available")
+        return bot_name
 
 
 class BotContext:
