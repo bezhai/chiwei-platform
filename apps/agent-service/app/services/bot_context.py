@@ -40,7 +40,7 @@ class BotContext:
 
     def get_identity(self) -> str:
         """返回注入 {{identity}} 的人设文本"""
-        return self._persona.persona_core if self._persona else ""
+        return self._persona.persona_lite if self._persona else ""
 
     def get_display_name(self) -> str:
         return self._persona.display_name if self._persona else self.bot_name
