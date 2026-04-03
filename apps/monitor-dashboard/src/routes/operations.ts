@@ -70,6 +70,40 @@ router.get('/api/ops/lane-bindings', async (ctx) => {
   ctx.body = data;
 });
 
+// ---------- DDL/DML 变更审批 ----------
+
+/** POST /api/ops/db-mutations — 提交 DDL/DML 变更申请 */
+router.post('/api/ops/db-mutations', async (ctx) => {
+  const data = await paasClient.post('/api/paas/ops/mutations', ctx.request.body);
+  ctx.body = data;
+});
+
+/** GET /api/ops/db-mutations — 列出变更申请（可选 ?status=pending） */
+router.get('/api/ops/db-mutations', async (ctx) => {
+  const params: Record<string, string> = {};
+  if (ctx.query.status) params.status = ctx.query.status as string;
+  const data = await paasClient.get('/api/paas/ops/mutations', params);
+  ctx.body = data;
+});
+
+/** GET /api/ops/db-mutations/:id — 查看单条变更详情 */
+router.get('/api/ops/db-mutations/:id', async (ctx) => {
+  const data = await paasClient.get(`/api/paas/ops/mutations/${ctx.params.id}`);
+  ctx.body = data;
+});
+
+/** POST /api/ops/db-mutations/:id/approve — 审批通过并执行 */
+router.post('/api/ops/db-mutations/:id/approve', async (ctx) => {
+  const data = await paasClient.post(`/api/paas/ops/mutations/${ctx.params.id}/approve`, ctx.request.body);
+  ctx.body = data;
+});
+
+/** POST /api/ops/db-mutations/:id/reject — 拒绝变更 */
+router.post('/api/ops/db-mutations/:id/reject', async (ctx) => {
+  const data = await paasClient.post(`/api/paas/ops/mutations/${ctx.params.id}/reject`, ctx.request.body);
+  ctx.body = data;
+});
+
 // ---------- 写操作 ----------
 
 /** POST /api/ops/lane-bindings — 绑定泳道 */
