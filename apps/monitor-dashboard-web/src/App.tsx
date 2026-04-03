@@ -16,6 +16,7 @@ import {
   MenuUnfoldOutlined,
   ThunderboltOutlined,
   AuditOutlined,
+  EditOutlined,
 } from '@ant-design/icons';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useEffect, useState, lazy, Suspense } from 'react';
@@ -33,6 +34,7 @@ const Providers = lazy(() => import('./pages/Providers'));
 const ModelMappings = lazy(() => import('./pages/ModelMappings'));
 const MongoExplorer = lazy(() => import('./pages/MongoExplorer'));
 const AuditLogs = lazy(() => import('./pages/AuditLogs'));
+const DbMutations = lazy(() => import('./pages/DbMutations'));
 import { themeConfig } from './theme';
 import { clearToken, getLane } from './api/client';
 
@@ -53,6 +55,7 @@ const menuItems: MenuItem[] = [
   { key: '/activity', icon: <ThunderboltOutlined />, label: '赤尾动态' },
   { key: '/messages', icon: <MessageOutlined />, label: '消息记录' },
   { key: '/audit-logs', icon: <AuditOutlined />, label: '审计日志' },
+  { key: '/db-mutations', icon: <EditOutlined />, label: 'DB 变更' },
   { type: 'divider' },
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
@@ -273,6 +276,7 @@ export default function App() {
                   <Route path="/" element={<ServiceStatus />} />
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/audit-logs" element={<AuditLogs />} />
+                  <Route path="/db-mutations" element={<DbMutations />} />
                   <Route path="/kibana" element={<Kibana />} />
                   <Route path="/langfuse" element={<Langfuse />} />
                   <Route path="/messages" element={<Messages />} />
