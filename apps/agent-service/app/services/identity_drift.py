@@ -34,6 +34,15 @@ def _base_key(persona_id: str) -> str:
     return f"reply_style:__base__:{persona_id}"
 
 
+async def _get_persona_context(persona_id: str) -> tuple[str, str]:
+    """Returns (display_name, persona_lite) for prompt compilation"""
+    from app.orm.crud import get_bot_persona
+    persona = await get_bot_persona(persona_id)
+    if persona:
+        return persona.display_name, persona.persona_lite
+    return persona_id, ""
+
+
 _BASE_TTL_SECONDS = 43200  # 12 小时，覆盖到下一次定时生成
 
 
@@ -56,14 +65,17 @@ async def generate_base_reply_style(persona_id: str = "akao") -> str | None:
     不依赖任何群/私聊的消息，只用 schedule + 当前时段。
     在 8:00/14:00/18:00 由 cron 调用，为没有独立漂移的会话提供基线。
     """
-    schedule_context = await _get_schedule_context()
+    schedule_context = await _get_schedule_context(persona_id)
     if not schedule_context or schedule_context.startswith("（"):
         logger.info(f"[{persona_id}] No schedule available, skip base reply_style generation")
         return None
 
     now = datetime.now(CST)
+    persona_name, persona_lite = await _get_persona_context(persona_id)
     prompt = get_prompt("drift_base_generator")
     compiled = prompt.compile(
+        persona_name=persona_name,
+        persona_lite=persona_lite,
         schedule_daily=schedule_context,
         current_time=now.strftime("%H:%M"),
     )
@@ -202,14 +214,15 @@ class IdentityDriftManager:
 async def _run_drift(chat_id: str, persona_id: str) -> None:
     """两阶段漂移管线：观察 → 生成
 
-    Agent 1（观察）：群聊事件 + 赤尾近期回复 + 基准人设 → 观察报告
+    Agent 1（观察）：群聊事件 + persona 近期回复 + 基准人设 → 观察报告
     Agent 2（生成）：观察报告 → reply_style
     """
     # 1. 收集上下文
+    persona_name, persona_lite = await _get_persona_context(persona_id)
     current_state = await get_identity_state(chat_id, persona_id)
-    recent_messages = await _get_recent_messages(chat_id)
-    schedule_context = await _get_schedule_context()
-    recent_replies = await _get_recent_akao_replies(chat_id, persona_id)
+    recent_messages = await _get_recent_messages(chat_id, persona_name=persona_name)
+    schedule_context = await _get_schedule_context(persona_id)
+    recent_replies = await _get_recent_persona_replies(chat_id, persona_id)
 
     if not recent_messages:
         logger.info(f"[{persona_id}] No recent messages for {chat_id}, skip drift")
@@ -221,6 +234,8 @@ async def _run_drift(chat_id: str, persona_id: str) -> None:
     # 2. Agent 1: 观察
     observer_prompt = get_prompt("drift_observer")
     observer_compiled = observer_prompt.compile(
+        persona_name=persona_name,
+        persona_lite=persona_lite,
         schedule_daily=schedule_context,
         current_reply_style=current_state or "（刚醒来，还没有形成今天的说话方式）",
         message_buffer=recent_messages,
@@ -242,6 +257,7 @@ async def _run_drift(chat_id: str, persona_id: str) -> None:
     # 3. Agent 2: 生成
     generator_prompt = get_prompt("drift_generator")
     generator_compiled = generator_prompt.compile(
+        persona_name=persona_name,
         observation_report=observation_report,
     )
 
@@ -286,7 +302,7 @@ async def _count_messages_since_last_drift(chat_id: str, persona_id: str) -> int
     return len(messages) if messages else 0
 
 
-async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
+async def _get_recent_messages(chat_id: str, persona_name: str = "bot", max_messages: int = 50) -> str:
     """获取最近 1 小时内的消息，格式化为时间线（不分 bot，用于群聊上下文感知）"""
     start_dt = datetime.now(CST) - timedelta(hours=1)
 
@@ -306,7 +322,7 @@ async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
         msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
         time_str = msg_time.strftime("%H:%M")
         if msg.role == "assistant":
-            speaker = "赤尾"
+            speaker = persona_name
         else:
             name = await get_username(msg.user_id)
             speaker = name or msg.user_id[:6]
@@ -318,8 +334,14 @@ async def _get_recent_messages(chat_id: str, max_messages: int = 50) -> str:
     return "\n".join(lines)
 
 
-async def _get_recent_akao_replies(chat_id: str, persona_id: str, max_replies: int = 10) -> str:
-    """获取指定 bot 最近的回复原文，用于偏差诊断"""
+async def _get_recent_persona_replies(chat_id: str, persona_id: str, max_replies: int = 10) -> str:
+    """获取指定 bot 最近的回复原文，用于偏差诊断
+
+    通过 bot_name 过滤（conversation_messages 没有 persona_id 列，
+    persona_id 在 agent_responses 表上，这里用 bot_name 做近似匹配）。
+    """
+    from app.services.bot_context import _resolve_bot_name_for_persona
+
     now = datetime.now(CST)
     start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
@@ -328,11 +350,12 @@ async def _get_recent_akao_replies(chat_id: str, persona_id: str, max_replies: i
     if not messages:
         return ""
 
-    akao_msgs = [m for m in messages if m.role == "assistant" and m.persona_id == persona_id]
-    akao_msgs = akao_msgs[-max_replies:]
+    bot_name = await _resolve_bot_name_for_persona(persona_id)
+    persona_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == bot_name]
+    persona_msgs = persona_msgs[-max_replies:]
 
     lines = []
-    for i, msg in enumerate(akao_msgs, 1):
+    for i, msg in enumerate(persona_msgs, 1):
         rendered = parse_content(msg.content).render()
         if rendered and rendered.strip():
             lines.append(f"{i}. {rendered[:200]}")
@@ -340,11 +363,11 @@ async def _get_recent_akao_replies(chat_id: str, persona_id: str, max_replies: i
     return "\n".join(lines)
 
 
-async def _get_schedule_context() -> str:
+async def _get_schedule_context(persona_id: str = "akao") -> str:
     """获取当前时段的 Schedule daily"""
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")
-    schedule = await get_plan_for_period("daily", today, today)
+    schedule = await get_plan_for_period("daily", today, today, persona_id)
     if schedule and schedule.content:
         return schedule.content
     return "（今天还没有写日程）"

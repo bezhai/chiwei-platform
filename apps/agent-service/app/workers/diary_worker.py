@@ -110,7 +110,10 @@ async def generate_diary_for_chat(
         user_names[uid] = name or uid[:8]
 
     # 3. 格式化消息时间线
-    timeline = _format_messages_timeline(messages, user_names)
+    from app.orm.crud import get_bot_persona
+    persona_obj = await get_bot_persona(persona_id)
+    persona_display_name = persona_obj.display_name if persona_obj else persona_id
+    timeline = _format_messages_timeline(messages, user_names, persona_name=persona_display_name)
 
     if not timeline:
         logger.info(f"No messages for {chat_id} on {date_str}, skip")
@@ -134,7 +137,7 @@ async def generate_diary_for_chat(
     recent_diaries_text = _format_recent_diaries(recent)
 
     # 5. 获取人设和 Langfuse prompt 并编译
-    persona_lite = await _get_persona_lite_for_bot(persona_id)
+    persona_lite = persona_obj.persona_lite if persona_obj else ""
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
         persona_lite=persona_lite,
@@ -195,7 +198,7 @@ async def generate_diary_for_chat(
 # ==================== 辅助函数 ====================
 
 
-def _format_messages_timeline(messages: list, user_names: dict[str, str]) -> str:
+def _format_messages_timeline(messages: list, user_names: dict[str, str], persona_name: str = "bot") -> str:
     """将消息列表格式化为树状时间线
 
     利用 reply_message_id 构建回复链，用 tree 风格连接符展示层级关系：
@@ -219,7 +222,7 @@ def _format_messages_timeline(messages: list, user_names: dict[str, str]) -> str
         msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
         time_str = msg_time.strftime("%H:%M")
         speaker = (
-            "赤尾"
+            persona_name
             if msg.role == "assistant"
             else user_names.get(msg.user_id, msg.user_id[:8])
         )

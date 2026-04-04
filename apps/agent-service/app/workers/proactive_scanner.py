@@ -1,4 +1,4 @@
-"""赤尾主动发言扫描器 — 群聊潜水观察 + 小模型判断 + 合成消息投递
+"""主动发言扫描器 — 群聊潜水观察 + 小模型判断 + 合成消息投递
 
 核心流程 (run_proactive_scan):
 1. 安静时段检查（23:00~09:00 CST 不扫）
@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────
 TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
-TARGET_PERSONA_ID = "akao"
 PROACTIVE_USER_ID = "__proactive__"
 QUIET_HOURS = (23, 9)  # >= 23 or < 9
 JUDGE_MODEL_ID = "proactive-judge-model"
@@ -50,28 +49,31 @@ def _is_quiet_hours(now: datetime | None = None) -> bool:
 # ── 未读消息获取 ──────────────────────────────────────────────────────────
 
 
-async def get_unseen_messages(limit: int = 30) -> list[ConversationMessage]:
-    """获取赤尾上次发言之后的用户消息
+async def get_unseen_messages(chat_id: str, persona_id: str, limit: int = 30) -> list[ConversationMessage]:
+    """获取上次 assistant 发言之后的用户消息
 
-    1. 找 target chat 中 role='assistant' 的最大 create_time（最后一次出现）
+    1. 找 target chat 中 role='assistant' 的最大 create_time（任何 persona 的最后发言）
     2. 取 create_time 更晚的 role='user' 且 user_id != PROACTIVE_USER_ID 的消息
+
+    Note: persona_id 保留作为签名参数供将来精细化过滤，
+    当前使用任意 assistant 的 last_presence 作为窗口起点。
     """
     async with AsyncSessionLocal() as session:
-        # 子查询：最后一次 assistant 发言时间
+        # 子查询：最后一次 assistant 发言时间（不区分 persona）
         last_presence_q = (
             select(sa_func.max(ConversationMessage.create_time))
             .where(
-                ConversationMessage.chat_id == TARGET_CHAT_ID,
+                ConversationMessage.chat_id == chat_id,
                 ConversationMessage.role == "assistant",
             )
             .scalar_subquery()
         )
 
-        # 主查询：之后的用户消息（取最近的 N 条，赤尾看到的是最新对话）
+        # 主查询：之后的用户消息（取最近的 N 条，persona 看到的是最新对话）
         stmt = (
             select(ConversationMessage)
             .where(
-                ConversationMessage.chat_id == TARGET_CHAT_ID,
+                ConversationMessage.chat_id == chat_id,
                 ConversationMessage.role == "user",
                 ConversationMessage.user_id != PROACTIVE_USER_ID,
                 ConversationMessage.create_time > sa_func.coalesce(last_presence_q, 0),
@@ -110,7 +112,7 @@ async def _format_messages_for_judge(messages: list[ConversationMessage]) -> str
     return "\n".join(lines)
 
 
-async def _get_recent_proactive_records() -> list[dict]:
+async def _get_recent_proactive_records(chat_id: str) -> list[dict]:
     """查询今日的主动触发记录（user_id=PROACTIVE_USER_ID）"""
     today_start = datetime.now(CST).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_ms = int(today_start.timestamp() * 1000)
@@ -119,7 +121,7 @@ async def _get_recent_proactive_records() -> list[dict]:
         stmt = (
             select(ConversationMessage)
             .where(
-                ConversationMessage.chat_id == TARGET_CHAT_ID,
+                ConversationMessage.chat_id == chat_id,
                 ConversationMessage.user_id == PROACTIVE_USER_ID,
                 ConversationMessage.create_time >= today_start_ms,
             )
@@ -143,6 +145,8 @@ async def judge_response(
     reply_style: str,
     group_culture: str,
     recent_proactive: list[dict],
+    persona_name: str = "",
+    persona_lite: str = "",
 ) -> dict:
     """调用小模型判断是否主动回复
 
@@ -152,6 +156,8 @@ async def judge_response(
     try:
         prompt_template = get_prompt("proactive_judge")
         compiled = prompt_template.compile(
+            persona_name=persona_name,
+            persona_lite=persona_lite,
             messages=messages_text,
             reply_style=reply_style,
             group_culture=group_culture,
@@ -195,6 +201,8 @@ def _parse_judge_response(raw: str) -> dict:
 
 
 async def submit_proactive_request(
+    chat_id: str,
+    persona_id: str,
     target_message_id: str | None,
     stimulus: str | None,
 ) -> str:
@@ -203,6 +211,9 @@ async def submit_proactive_request(
     Returns:
         生成的 session_id
     """
+    from app.services.bot_context import _resolve_bot_name_for_persona
+    bot_name = await _resolve_bot_name_for_persona(persona_id)
+
     session_id = str(uuid.uuid4())
     message_id = f"proactive_{int(time.time() * 1000)}"
     now_ms = int(time.time() * 1000)
@@ -222,12 +233,12 @@ async def submit_proactive_request(
             role="user",
             root_message_id=message_id,
             reply_message_id=target_message_id,
-            chat_id=TARGET_CHAT_ID,
+            chat_id=chat_id,
             chat_type="group",
             create_time=now_ms,
             message_type="proactive_trigger",
             vector_status="skipped",
-            bot_name="chiwei",
+            bot_name=bot_name,
         )
         session.add(msg)
         await session.commit()
@@ -241,11 +252,11 @@ async def submit_proactive_request(
         {
             "session_id": session_id,
             "message_id": message_id,
-            "chat_id": TARGET_CHAT_ID,
+            "chat_id": chat_id,
             "is_p2p": False,
             "root_id": target_message_id or "",
             "user_id": PROACTIVE_USER_ID,
-            "bot_name": "chiwei",
+            "bot_name": bot_name,
             "is_proactive": True,
             "lane": current_lane,
             "enqueued_at": now_ms,
@@ -263,7 +274,7 @@ async def submit_proactive_request(
 # ── 主编排 ────────────────────────────────────────────────────────────────
 
 
-async def run_proactive_scan(source: str = "cron") -> dict:
+async def run_proactive_scan(chat_id: str, persona_id: str, source: str = "cron") -> dict:
     """主动扫描编排
 
     Returns:
@@ -275,7 +286,7 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         return {"skipped": "quiet_hours"}
 
     # 2. 获取未读消息
-    messages = await get_unseen_messages()
+    messages = await get_unseen_messages(chat_id, persona_id)
     if not messages:
         logger.debug("proactive_scan: no unseen messages")
         return {"skipped": "no_messages"}
@@ -290,9 +301,15 @@ async def run_proactive_scan(source: str = "cron") -> dict:
         with propagate_attributes(session_id=scan_session_id):
             # 3. 收集上下文
             messages_text = await _format_messages_for_judge(messages)
-            reply_style = await get_reply_style(TARGET_CHAT_ID, TARGET_PERSONA_ID)
-            group_culture = await get_group_culture_gestalt(TARGET_CHAT_ID, TARGET_PERSONA_ID)
-            recent_proactive = await _get_recent_proactive_records()
+            reply_style = await get_reply_style(chat_id, persona_id)
+            group_culture = await get_group_culture_gestalt(chat_id, persona_id)
+            recent_proactive = await _get_recent_proactive_records(chat_id)
+
+            # 加载 persona context
+            from app.orm.crud import get_bot_persona
+            persona = await get_bot_persona(persona_id)
+            p_name = persona.display_name if persona else persona_id
+            p_lite = persona.persona_lite if persona else ""
 
             # 4. 小模型判断
             decision = await judge_response(
@@ -300,6 +317,8 @@ async def run_proactive_scan(source: str = "cron") -> dict:
                 reply_style=reply_style,
                 group_culture=group_culture,
                 recent_proactive=recent_proactive,
+                persona_name=p_name,
+                persona_lite=p_lite,
             )
 
             if not decision.get("respond"):
@@ -308,6 +327,8 @@ async def run_proactive_scan(source: str = "cron") -> dict:
 
             # 5. 投递
             session_id = await submit_proactive_request(
+                chat_id=chat_id,
+                persona_id=persona_id,
                 target_message_id=decision.get("target_message_id"),
                 stimulus=decision.get("stimulus"),
             )

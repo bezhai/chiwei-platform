@@ -151,6 +151,7 @@ async def _run_writer(
 async def _run_critic(
     schedule_text: str,
     recent_schedules_text: str,
+    persona_name: str = "",
 ) -> str:
     """运行 Critic Agent：审查质量并返回 PASS 或修改建议"""
     from app.agents.core.config import AgentRegistry
@@ -159,6 +160,7 @@ async def _run_critic(
     prompt_template = get_prompt(config.prompt_id)
 
     compiled = prompt_template.compile(
+        persona_name=persona_name,
         today_schedule=schedule_text,
         recent_schedules=recent_schedules_text,
     )
@@ -385,7 +387,10 @@ async def generate_daily_plan(
         return existing.content
 
     # ---- 收集上下文 ----
-    persona_core = await _get_persona_core_for_bot(persona_id)
+    from app.orm.crud import get_bot_persona
+    persona_obj = await get_bot_persona(persona_id)
+    persona_core = persona_obj.persona_core if persona_obj else ""
+    persona_display_name = persona_obj.display_name if persona_obj else persona_id
 
     # 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
@@ -433,6 +438,7 @@ async def generate_daily_plan(
         critic_result = await _run_critic(
             schedule_text=schedule_text,
             recent_schedules_text=recent_schedules_text,
+            persona_name=persona_display_name,
         )
 
         if "PASS" in critic_result:

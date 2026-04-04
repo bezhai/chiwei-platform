@@ -15,54 +15,6 @@ CST = timezone(timedelta(hours=8))
 MODULE = "app.workers.proactive_scanner"
 
 
-# ── should_scan ───────────────────────────────────────────────────────────
-
-
-async def test_should_scan_no_previous_scan():
-    """首次扫描（Redis 无 key）→ 返回 True"""
-    mock_redis = AsyncMock()
-    mock_redis.get.return_value = None
-
-    with patch(f"{MODULE}.AsyncRedisClient") as mock_cls:
-        mock_cls.get_instance.return_value = mock_redis
-        from app.workers.proactive_scanner import should_scan
-
-        result = await should_scan()
-
-    assert result is True
-    mock_redis.get.assert_awaited_once()
-
-
-async def test_should_scan_within_cooldown():
-    """冷却期内（5 分钟前扫过）→ 返回 False"""
-    five_min_ago_ms = str(int(time.time() * 1000) - 5 * 60 * 1000)
-    mock_redis = AsyncMock()
-    mock_redis.get.return_value = five_min_ago_ms
-
-    with patch(f"{MODULE}.AsyncRedisClient") as mock_cls:
-        mock_cls.get_instance.return_value = mock_redis
-        from app.workers.proactive_scanner import should_scan
-
-        result = await should_scan()
-
-    assert result is False
-
-
-async def test_should_scan_cooldown_expired():
-    """冷却已过（20 分钟前扫过）→ 返回 True"""
-    twenty_min_ago_ms = str(int(time.time() * 1000) - 20 * 60 * 1000)
-    mock_redis = AsyncMock()
-    mock_redis.get.return_value = twenty_min_ago_ms
-
-    with patch(f"{MODULE}.AsyncRedisClient") as mock_cls:
-        mock_cls.get_instance.return_value = mock_redis
-        from app.workers.proactive_scanner import should_scan
-
-        result = await should_scan()
-
-    assert result is True
-
-
 # ── get_unseen_messages ───────────────────────────────────────────────────
 
 
@@ -91,7 +43,7 @@ async def test_get_unseen_messages_has_messages():
     with patch(f"{MODULE}.AsyncSessionLocal", return_value=mock_session_ctx):
         from app.workers.proactive_scanner import get_unseen_messages
 
-        result = await get_unseen_messages()
+        result = await get_unseen_messages("test_chat", "akao")
 
     assert len(result) == 1
     assert result[0].message_id == "msg_1"
@@ -114,7 +66,7 @@ async def test_get_unseen_messages_empty():
     with patch(f"{MODULE}.AsyncSessionLocal", return_value=mock_session_ctx):
         from app.workers.proactive_scanner import get_unseen_messages
 
-        result = await get_unseen_messages()
+        result = await get_unseen_messages("test_chat", "akao")
 
     assert result == []
 

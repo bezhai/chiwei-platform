@@ -18,7 +18,7 @@ FAKE_IDEATION = "素材：4月新番列表、樱花季展览"
 FAKE_SCHEDULE = "今日手帐内容"
 
 
-async def _mock_get_plan(plan_type, start, end):
+async def _mock_get_plan(plan_type, start, end, persona_id="akao"):
     """按 plan_type 区分：daily 返回 None（不存在），weekly 返回周计划"""
     if plan_type == "weekly":
         return MagicMock(content=FAKE_WEEKLY)
@@ -28,13 +28,18 @@ async def _mock_get_plan(plan_type, start, end):
 @pytest.fixture
 def common_patches():
     """公共 mock 上下文"""
+    fake_persona_obj = MagicMock(
+        persona_core=FAKE_PERSONA,
+        display_name="赤尾",
+        persona_lite="元气活泼傲娇少女",
+    )
     with (
         patch("app.workers.schedule_worker.get_plan_for_period",
               new_callable=AsyncMock, side_effect=_mock_get_plan),
         patch("app.workers.schedule_worker.get_journal",
               new_callable=AsyncMock, return_value=MagicMock(content=FAKE_JOURNAL)),
-        patch("app.workers.schedule_worker._get_persona_core_for_bot",
-              new_callable=AsyncMock, return_value=FAKE_PERSONA),
+        patch("app.orm.crud.get_bot_persona",
+              new_callable=AsyncMock, return_value=fake_persona_obj),
         patch("app.workers.schedule_worker._get_recent_daily_schedules",
               new_callable=AsyncMock, return_value=FAKE_RECENT),
         patch("app.workers.schedule_worker.upsert_schedule",
