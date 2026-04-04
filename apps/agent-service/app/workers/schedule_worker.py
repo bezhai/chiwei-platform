@@ -252,9 +252,12 @@ async def generate_monthly_plan(
     month_cn = f"{month_start.year}年{month_start.month}月"
 
     # 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("schedule_monthly")
     compiled = prompt_template.compile(
-        persona_core=await _get_persona_core_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_core=_persona.persona_core if _persona else "",
         month=month_cn,
         season=season,
         previous_monthly_plan=prev_plan_text,
@@ -333,9 +336,12 @@ async def generate_weekly_plan(
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
 
     # 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("schedule_weekly")
     compiled = prompt_template.compile(
-        persona_core=await _get_persona_core_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_core=_persona.persona_core if _persona else "",
         week=week_desc,
         monthly_plan=monthly_text,
         previous_weekly_plan=prev_plan_text,

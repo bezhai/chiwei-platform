@@ -140,6 +140,7 @@ async def generate_diary_for_chat(
     persona_lite = persona_obj.persona_lite if persona_obj else ""
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
+        persona_name=persona_display_name,
         persona_lite=persona_lite,
         chat_hint=chat_hint,
         date=date_str,
@@ -337,8 +338,11 @@ async def post_process_impressions(
     )
 
     # 4. 获取 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona
+    _persona = await get_bot_persona(persona_id)
     prompt_template = get_prompt("diary_extract_impressions")
     compiled_prompt = prompt_template.compile(
+        persona_name=_persona.display_name if _persona else persona_id,
         diary=diary_content,
         existing_impressions=existing_text,
         user_mapping=user_mapping_text,
@@ -404,8 +408,11 @@ async def post_process_group_culture(
 
     existing_gestalt = await get_group_culture_gestalt(chat_id, persona_id)
 
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("group_culture_distill")
     compiled_prompt = prompt_template.compile(
+        persona_name=_persona.display_name if _persona else persona_id,
         diary=diary_content,
         previous_gestalt=existing_gestalt or "（这是第一次写，没有参考）",
     )
@@ -496,9 +503,12 @@ async def generate_weekly_review_for_chat(
         impressions_context = "（暂无）"
 
     # 4. 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("weekly_review_generation")
     compiled_prompt = prompt_template.compile(
-        persona_lite=await _get_persona_lite_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_lite=_persona.persona_lite if _persona else "",
         week_start=week_start,
         week_end=week_end,
         diaries=diaries_text,
