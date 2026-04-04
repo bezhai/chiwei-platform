@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
 import jwt from 'jsonwebtoken';
+import type { AppEnv } from '../types';
 
 const PUBLIC_PATHS = new Set([
   '/dashboard/api/auth/login',
@@ -7,7 +8,7 @@ const PUBLIC_PATHS = new Set([
   '/dashboard/api/health',
 ]);
 
-export const jwtAuth: MiddlewareHandler = async (c, next) => {
+export const jwtAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (PUBLIC_PATHS.has(c.req.path)) {
     c.set('caller', 'public');
     return next();

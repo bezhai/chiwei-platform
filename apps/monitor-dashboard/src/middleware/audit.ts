@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from 'hono';
+import type { AppEnv } from '../types';
 import { AppDataSource } from '../db';
 import { AuditLog } from '../entities/audit-log';
 
@@ -38,7 +39,7 @@ const SKIP_PATHS = new Set([
   '/dashboard/api/health',
 ]);
 
-export const auditMiddleware: MiddlewareHandler = async (c, next) => {
+export const auditMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (SKIP_PATHS.has(c.req.path)) {
     return next();
   }
@@ -46,6 +47,14 @@ export const auditMiddleware: MiddlewareHandler = async (c, next) => {
   const start = Date.now();
   let result: 'success' | 'error' | 'denied' = 'success';
   let errorMessage: string | null = null;
+
+  // Pre-read body for audit logging (Hono caches parsed JSON)
+  let requestBody: Record<string, unknown> | null = null;
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
+    try {
+      requestBody = await c.req.json();
+    } catch { /* no body or not JSON */ }
+  }
 
   try {
     await next();
@@ -74,24 +83,15 @@ export const auditMiddleware: MiddlewareHandler = async (c, next) => {
     const params: Record<string, unknown> = {};
 
     // Query params
-    const url = new URL(c.req.url);
-    const queryObj: Record<string, string> = {};
-    url.searchParams.forEach((v, k) => { queryObj[k] = v; });
+    const queryObj = c.req.queries();
     if (Object.keys(queryObj).length) params.query = queryObj;
 
-    // Request body (only for methods that typically have a body)
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
-      try {
-        const reqBody = await c.req.json() as Record<string, unknown>;
-        if (reqBody && typeof reqBody === 'object' && Object.keys(reqBody).length) {
-          const body = { ...reqBody };
-          delete body.password;
-          delete body.api_key;
-          params.body = body;
-        }
-      } catch {
-        // No JSON body or already consumed — skip
-      }
+    // Request body (pre-read before next())
+    if (requestBody && typeof requestBody === 'object' && Object.keys(requestBody).length) {
+      const body = { ...requestBody };
+      delete body.password;
+      delete body.api_key;
+      params.body = body;
     }
 
     // Fire-and-forget audit write
