@@ -97,14 +97,11 @@ def clear_model_info_cache() -> None:
     _model_info_cache.clear()
 
 
-def _make_proxy_async_client() -> "httpx.AsyncClient | None":
-    """如果全局正向代理已配置，返回带 proxy 的 httpx.AsyncClient，否则返回 None。"""
+def _get_proxy_url() -> str | None:
+    """返回全局正向代理 URL（如果已配置），否则返回 None。"""
     from app.config.config import settings
 
-    if not settings.forward_proxy_url:
-        return None
-    import httpx
-    return httpx.AsyncClient(proxy=settings.forward_proxy_url)
+    return settings.forward_proxy_url or None
 
 
 class ModelBuilder:
@@ -285,9 +282,9 @@ class ModelBuilder:
                     **kwargs,
                 }
                 if model_info.get("use_proxy"):
-                    http_async_client = _make_proxy_async_client()
-                    if http_async_client:
-                        chat_params["http_async_client"] = http_async_client
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Responses API）"
                 )
@@ -302,9 +299,9 @@ class ModelBuilder:
                     **kwargs,
                 }
                 if model_info.get("use_proxy"):
-                    http_async_client = _make_proxy_async_client()
-                    if http_async_client:
-                        chat_params["http_async_client"] = http_async_client
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建DeepSeek ChatOpenAI（Completions API）"
                 )
@@ -320,9 +317,9 @@ class ModelBuilder:
                     **kwargs,
                 }
                 if model_info.get("use_proxy"):
-                    http_async_client = _make_proxy_async_client()
-                    if http_async_client:
-                        chat_params["http_async_client"] = http_async_client
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Completions API）"
                 )

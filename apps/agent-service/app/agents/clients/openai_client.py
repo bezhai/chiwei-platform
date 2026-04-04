@@ -19,11 +19,11 @@ class OpenAIClient(BaseAIClient[AsyncOpenAI]):
             "max_retries": 3,
         }
         if model_info.get("use_proxy"):
-            from app.agents.infra.model_builder import _make_proxy_async_client
+            from app.config.config import settings
 
-            http_client = _make_proxy_async_client()
-            if http_client:
-                kwargs["http_client"] = http_client
+            if settings.forward_proxy_url:
+                import httpx
+                kwargs["http_client"] = httpx.AsyncClient(proxy=settings.forward_proxy_url)
         return AsyncOpenAI(**kwargs)
 
     async def embed(

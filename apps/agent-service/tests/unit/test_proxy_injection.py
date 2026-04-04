@@ -1,9 +1,9 @@
 """test_proxy_injection.py — use_proxy 标志位的 proxy 注入测试
 
 覆盖场景：
-- use_proxy=True + forward_proxy_url 存在 → 注入 proxy
-- use_proxy=False → 不注入 proxy
-- use_proxy=True + forward_proxy_url 为 None → 不注入 proxy
+- use_proxy=True + forward_proxy_url 存在 → 注入 openai_proxy
+- use_proxy=False → 不注入
+- use_proxy=True + forward_proxy_url 为 None → 不注入
 """
 
 from unittest.mock import AsyncMock, patch
@@ -43,8 +43,7 @@ class TestOpenAIProxyInjection:
             mock_settings.forward_proxy_url = "http://proxy:7890"
             model = await ModelBuilder.build_chat_model("test")
 
-        assert model.http_async_client is not None
-        await model.http_async_client.aclose()
+        assert model.openai_proxy == "http://proxy:7890"
 
     @pytest.mark.parametrize("client_type", ["openai", "openai-responses", "deepseek"])
     async def test_no_proxy_when_use_proxy_false(self, client_type):
@@ -60,7 +59,7 @@ class TestOpenAIProxyInjection:
             mock_settings.forward_proxy_url = "http://proxy:7890"
             model = await ModelBuilder.build_chat_model("test")
 
-        assert model.http_async_client is None
+        assert model.openai_proxy is None
 
     @pytest.mark.parametrize("client_type", ["openai", "openai-responses", "deepseek"])
     async def test_no_proxy_when_proxy_url_none(self, client_type):
@@ -76,7 +75,7 @@ class TestOpenAIProxyInjection:
             mock_settings.forward_proxy_url = None
             model = await ModelBuilder.build_chat_model("test")
 
-        assert model.http_async_client is None
+        assert model.openai_proxy is None
 
 
 class TestGoogleProxyInjection:
