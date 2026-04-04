@@ -269,6 +269,9 @@ class BotPersona(Base):
     error_messages: Mapped[dict] = mapped_column(
         JSON, nullable=False, default=dict
     )
+    appearance_detail: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

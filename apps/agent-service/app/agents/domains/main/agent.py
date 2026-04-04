@@ -300,8 +300,9 @@ async def _build_and_stream(
         yield "抱歉，未找到相关消息记录"
         return
 
-    # 注入 bot identity
+    # 注入 bot identity + 外貌
     prompt_vars["identity"] = bot_ctx.get_identity()
+    prompt_vars["appearance"] = bot_ctx.get_appearance_detail()
 
     # 构建统一 inner_context（场景 + 状态 + 印象 + 引导语）
     try:

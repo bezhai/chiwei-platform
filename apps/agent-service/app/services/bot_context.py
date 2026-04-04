@@ -103,6 +103,10 @@ class BotContext:
         """返回注入 {{identity}} 的人设文本"""
         return self._persona.persona_lite if self._persona else ""
 
+    def get_appearance_detail(self) -> str:
+        """返回画图专用外貌描述"""
+        return self._persona.appearance_detail if self._persona and self._persona.appearance_detail else ""
+
     def get_display_name(self) -> str:
         return self._persona.display_name if self._persona else self.bot_name
 
