@@ -29,7 +29,7 @@ class MessageRouter:
 
         Args:
             chat_id: 会话 ID
-            mentions: 消息中 @mention 的 union_id 列表
+            mentions: 消息中 @mention 的 bot app_id 列表
             bot_name: 发送 MQ 消息的 bot（抢到锁的那个）
             is_p2p: 是否私聊
 
@@ -55,9 +55,9 @@ class MessageRouter:
     async def _resolve_mentioned_personas(
         self, mentions: list[str]
     ) -> list[str]:
-        """将 mention 的 union_id 列表映射到 persona_id 列表
+        """将 mention 的 app_id 列表映射到 persona_id 列表
 
-        查询 bot_config 表：mention 的 union_id 匹配 robot_union_id 列。
+        查询 bot_config 表：mention 的 app_id 匹配 app_id 列。
         """
         from app.orm.base import AsyncSessionLocal
         from sqlalchemy import text
@@ -66,7 +66,7 @@ class MessageRouter:
             result = await session.execute(
                 text(
                     "SELECT DISTINCT persona_id FROM bot_config "
-                    "WHERE robot_union_id = ANY(:mentions) "
+                    "WHERE app_id = ANY(:mentions) "
                     "AND is_active = true "
                     "AND persona_id IS NOT NULL"
                 ),

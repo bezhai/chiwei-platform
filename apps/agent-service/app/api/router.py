@@ -44,6 +44,7 @@ def import_time():
 
 @api_router.post("/admin/trigger-schedule", tags=["Admin"])
 async def trigger_schedule(
+    persona_id: str,
     plan_type: str = "daily",
     target_date: str | None = None,
 ):
@@ -61,20 +62,20 @@ async def trigger_schedule(
 
     d = date.fromisoformat(target_date) if target_date else None
     if plan_type == "monthly":
-        content = await generate_monthly_plan(d)
+        content = await generate_monthly_plan(persona_id=persona_id, target_date=d)
         return {"ok": bool(content), "plan_type": "monthly", "content": content}
     elif plan_type == "weekly":
-        content = await generate_weekly_plan(d)
+        content = await generate_weekly_plan(persona_id=persona_id, target_date=d)
         return {"ok": bool(content), "plan_type": "weekly", "content": content}
     elif plan_type == "daily":
-        content = await generate_daily_plan(d)
+        content = await generate_daily_plan(persona_id=persona_id, target_date=d)
         return {"ok": bool(content), "plan_type": "daily", "content": content}
     else:
         return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
 
 
 @api_router.post("/admin/trigger-weekly-review", tags=["Admin"])
-async def trigger_weekly_review(chat_id: str, week_start: str | None = None):
+async def trigger_weekly_review(chat_id: str, persona_id: str, week_start: str | None = None):
     """手动触发周记生成
 
     Args:
@@ -84,7 +85,7 @@ async def trigger_weekly_review(chat_id: str, week_start: str | None = None):
     from app.workers.diary_worker import generate_weekly_review_for_chat
 
     target_monday = date.fromisoformat(week_start) if week_start else None
-    content = await generate_weekly_review_for_chat(chat_id, target_monday)
+    content = await generate_weekly_review_for_chat(chat_id, persona_id=persona_id, target_monday=target_monday)
     if content is None:
         return {"ok": False, "message": "该周无日记，跳过"}
     return {"ok": True, "content": content}

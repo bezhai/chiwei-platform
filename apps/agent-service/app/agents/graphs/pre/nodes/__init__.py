@@ -1,5 +1,6 @@
 """Pre Graph 节点"""
 
+from app.agents.graphs.pre.nodes.nsfw_safety import check_nsfw_content
 from app.agents.graphs.pre.nodes.safety import (
     aggregate_results,
     check_banned_word_node,
@@ -11,5 +12,6 @@ __all__ = [
     "check_banned_word_node",
     "check_prompt_injection",
     "check_sensitive_politics",
+    "check_nsfw_content",
     "aggregate_results",
 ]

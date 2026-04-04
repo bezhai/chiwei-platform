@@ -223,10 +223,12 @@ async def test_run_drift_calls_observer_then_generator():
         patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
         patch("app.services.identity_drift._get_recent_messages",
               new_callable=AsyncMock, return_value="[15:30] A: 你好\n[15:31] 赤尾: 嗯"),
-        patch("app.services.identity_drift._get_recent_akao_replies",
+        patch("app.services.identity_drift._get_recent_persona_replies",
               new_callable=AsyncMock, return_value="1. 嗯\n2. 不知道"),
         patch("app.services.identity_drift._get_schedule_context",
               new_callable=AsyncMock, return_value="下午犯困"),
+        patch("app.services.identity_drift._get_persona_context",
+              new_callable=AsyncMock, return_value=("赤尾", "元气活泼傲娇少女")),
     ):
         mock_redis_cls.get_instance.return_value = mock_redis
         mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
@@ -256,14 +258,14 @@ async def test_run_drift_calls_observer_then_generator():
 
 
 @pytest.mark.asyncio
-async def test_get_recent_akao_replies_filters_assistant_only():
-    """只返回赤尾的回复，不含其他人的消息"""
+async def test_get_recent_persona_replies_filters_assistant_only():
+    """只返回指定 persona 的回复，不含其他人的消息"""
     mock_messages = [
         MagicMock(role="user", content='{"text":"你好"}', create_time=1000, bot_name=None),
-        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000, bot_name="akao"),
+        MagicMock(role="assistant", content='{"text":"你好呀～"}', create_time=2000, bot_name="chiwei"),
         MagicMock(role="user", content='{"text":"在干嘛"}', create_time=3000, bot_name=None),
-        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000, bot_name="akao"),
-        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000, bot_name="akao"),
+        MagicMock(role="assistant", content='{"text":"发呆"}', create_time=4000, bot_name="chiwei"),
+        MagicMock(role="assistant", content='{"text":"不想动"}', create_time=5000, bot_name="chiwei"),
     ]
 
     mock_render = MagicMock()
@@ -273,11 +275,13 @@ async def test_get_recent_akao_replies_filters_assistant_only():
         patch("app.services.identity_drift.get_chat_messages_in_range",
               new_callable=AsyncMock, return_value=mock_messages),
         patch("app.services.identity_drift.parse_content", return_value=mock_render),
+        patch("app.services.bot_context._resolve_bot_name_for_persona",
+              new_callable=AsyncMock, return_value="chiwei"),
     ):
-        from app.services.identity_drift import _get_recent_akao_replies
-        result = await _get_recent_akao_replies("chat_001", persona_id="akao")
+        from app.services.identity_drift import _get_recent_persona_replies
+        result = await _get_recent_persona_replies("chat_001", persona_id="akao")
 
-    # 3 条赤尾回复，编号 1-3
+    # 3 条 persona 回复，编号 1-3
     assert "1. 你好呀～" in result
     assert "2. 发呆" in result
     assert "3. 不想动" in result
@@ -340,6 +344,8 @@ async def test_generate_base_reply_style_uses_schedule():
         patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
         patch("app.services.identity_drift._get_schedule_context",
               new_callable=AsyncMock, return_value="今天感冒了，想躺着"),
+        patch("app.services.identity_drift._get_persona_context",
+              new_callable=AsyncMock, return_value=("赤尾", "元气活泼傲娇少女")),
     ):
         mock_redis_cls.get_instance.return_value = mock_redis
         mock_mb.build_chat_model = AsyncMock(return_value=mock_model)

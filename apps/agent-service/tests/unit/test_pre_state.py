@@ -70,3 +70,21 @@ class TestMergeSafetyResults:
         merged = merge_safety_results(results_a, results_b)
         blocked = [r for r in merged if r.blocked]
         assert len(blocked) == 2
+
+
+class TestNsfwBlockReason:
+    """NSFW_CONTENT 枚举值存在"""
+
+    def test_nsfw_content_enum_exists(self):
+        assert BlockReason.NSFW_CONTENT == "nsfw_content"
+
+    def test_pre_state_has_persona_id(self):
+        """PreState 包含 persona_id 字段"""
+        state: PreState = {
+            "message_content": "test",
+            "persona_id": "akao",
+            "safety_results": [],
+            "is_blocked": False,
+            "block_reason": None,
+        }
+        assert state["persona_id"] == "akao"

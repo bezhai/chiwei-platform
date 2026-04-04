@@ -63,7 +63,7 @@ async def _get_persona_core_for_bot(persona_id: str) -> str:
         return ""
 
 
-async def _get_recent_daily_schedules(before_date: date, persona_id: str = "akao", count: int = 3) -> list[AkaoSchedule]:
+async def _get_recent_daily_schedules(before_date: date, persona_id: str, count: int = 3) -> list[AkaoSchedule]:
     """获取前 N 天的 daily schedule（供 Ideation 和 Critic 去重）"""
     results = await list_schedules(plan_type="daily", persona_id=persona_id, active_only=True, limit=count + 5)
     return [
@@ -151,6 +151,7 @@ async def _run_writer(
 async def _run_critic(
     schedule_text: str,
     recent_schedules_text: str,
+    persona_name: str = "",
 ) -> str:
     """运行 Critic Agent：审查质量并返回 PASS 或修改建议"""
     from app.agents.core.config import AgentRegistry
@@ -159,6 +160,7 @@ async def _run_critic(
     prompt_template = get_prompt(config.prompt_id)
 
     compiled = prompt_template.compile(
+        persona_name=persona_name,
         today_schedule=schedule_text,
         recent_schedules=recent_schedules_text,
     )
@@ -173,9 +175,9 @@ async def _run_critic(
 
 async def cron_generate_monthly_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成本月计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_monthly_plan(persona_id=persona_id)
         except Exception as e:
@@ -184,10 +186,10 @@ async def cron_generate_monthly_plan(ctx) -> None:
 
 async def cron_generate_weekly_plan(ctx) -> None:
     """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     tomorrow = date.today() + timedelta(days=1)
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_weekly_plan(target_date=tomorrow, persona_id=persona_id)
         except Exception as e:
@@ -196,9 +198,9 @@ async def cron_generate_weekly_plan(ctx) -> None:
 
 async def cron_generate_daily_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成今天的日计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_daily_plan(persona_id=persona_id)
         except Exception as e:
@@ -209,7 +211,7 @@ async def cron_generate_daily_plan(ctx) -> None:
 
 
 async def generate_monthly_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成月度计划
 
@@ -250,9 +252,12 @@ async def generate_monthly_plan(
     month_cn = f"{month_start.year}年{month_start.month}月"
 
     # 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("schedule_monthly")
     compiled = prompt_template.compile(
-        persona_core=await _get_persona_core_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_core=_persona.persona_core if _persona else "",
         month=month_cn,
         season=season,
         previous_monthly_plan=prev_plan_text,
@@ -285,7 +290,7 @@ async def generate_monthly_plan(
 
 
 async def generate_weekly_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成周计划
 
@@ -331,9 +336,12 @@ async def generate_weekly_plan(
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
 
     # 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("schedule_weekly")
     compiled = prompt_template.compile(
-        persona_core=await _get_persona_core_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_core=_persona.persona_core if _persona else "",
         week=week_desc,
         monthly_plan=monthly_text,
         previous_weekly_plan=prev_plan_text,
@@ -366,7 +374,7 @@ async def generate_weekly_plan(
 
 
 async def generate_daily_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成日计划（手帐式 markdown）
 
@@ -385,7 +393,10 @@ async def generate_daily_plan(
         return existing.content
 
     # ---- 收集上下文 ----
-    persona_core = await _get_persona_core_for_bot(persona_id)
+    from app.orm.crud import get_bot_persona
+    persona_obj = await get_bot_persona(persona_id)
+    persona_core = persona_obj.persona_core if persona_obj else ""
+    persona_display_name = persona_obj.display_name if persona_obj else persona_id
 
     # 周计划
     week_start = target_date - timedelta(days=target_date.weekday())
@@ -433,6 +444,7 @@ async def generate_daily_plan(
         critic_result = await _run_critic(
             schedule_text=schedule_text,
             recent_schedules_text=recent_schedules_text,
+            persona_name=persona_display_name,
         )
 
         if "PASS" in critic_result:

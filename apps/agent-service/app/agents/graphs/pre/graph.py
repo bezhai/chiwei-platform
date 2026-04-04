@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.graphs.pre.nodes import (
     aggregate_results,
     check_banned_word_node,
+    check_nsfw_content,
     check_prompt_injection,
     check_sensitive_politics,
 )
@@ -33,11 +34,11 @@ def _create_pre_graph() -> StateGraph:
                     │     START       │
                     └────────┬────────┘
                              │
-            ┌────────────────┼────────────────┐
-            ▼                ▼                ▼
-      banned_word       injection         politics
-            │                │                │
-            └────────────────┼────────────────┘
+        ┌──────────┬─────────┼─────────┬──────────┐
+        ▼          ▼         ▼         ▼          ▼
+   banned_word  injection  politics  nsfw_content
+        │          │         │         │
+        └──────────┴─────────┼─────────┴──────────┘
                              ▼
                         aggregate
                              │
@@ -54,6 +55,7 @@ def _create_pre_graph() -> StateGraph:
     builder.add_node("check_banned_word", check_banned_word_node)
     builder.add_node("check_prompt_injection", check_prompt_injection)
     builder.add_node("check_sensitive_politics", check_sensitive_politics)
+    builder.add_node("check_nsfw_content", check_nsfw_content)
 
     # 聚合节点
     builder.add_node("aggregate", aggregate_results)
@@ -62,11 +64,13 @@ def _create_pre_graph() -> StateGraph:
     builder.add_edge(START, "check_banned_word")
     builder.add_edge(START, "check_prompt_injection")
     builder.add_edge(START, "check_sensitive_politics")
+    builder.add_edge(START, "check_nsfw_content")
 
     # 汇聚到 aggregate
     builder.add_edge("check_banned_word", "aggregate")
     builder.add_edge("check_prompt_injection", "aggregate")
     builder.add_edge("check_sensitive_politics", "aggregate")
+    builder.add_edge("check_nsfw_content", "aggregate")
 
     # 条件路由
     builder.add_conditional_edges(
@@ -84,11 +88,12 @@ def get_pre_graph():
     return _create_pre_graph().compile()
 
 
-async def run_pre(message_content: str) -> PreState:
+async def run_pre(message_content: str, persona_id: str = "") -> PreState:
     """运行 Pre 处理图
 
     Args:
         message_content: 待处理的消息内容
+        persona_id: 当前处理的 persona（用于 NSFW persona-aware 判断）
 
     Returns:
         PreState: 包含安全检测结果
@@ -102,6 +107,7 @@ async def run_pre(message_content: str) -> PreState:
 
     initial_state: PreState = {
         "message_content": message_content,
+        "persona_id": persona_id,
         "safety_results": [],
         "is_blocked": False,
         "block_reason": None,

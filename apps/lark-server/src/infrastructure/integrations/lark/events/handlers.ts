@@ -34,6 +34,7 @@ import AppDataSource from 'ormconfig';
 import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
 import { rabbitmqClient, PROACTIVE_EVAL } from '@integrations/rabbitmq';
+import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
 
 /**
  * Lark事件处理器类
@@ -88,20 +89,17 @@ export class LarkEventHandlers {
                 message_type: message.messageType,
             });
 
-            // [DISABLED] Publish proactive eval event for group messages that don't @任何 persona bot
-            // @persona bot 的消息走正常回复流程，不需要 proactive 重复触发
-            // if (!message.isP2P()) {
-            //     const personaUnionIds = multiBotManager.getAllBotConfigs()
-            //         .filter(b => b.bot_role === 'persona')
-            //         .map(b => b.robot_union_id);
-            //     const mentionsPersona = personaUnionIds.some(id => message.hasMention(id));
-            //     if (!mentionsPersona) {
-            //         rabbitmqClient.publish(PROACTIVE_EVAL, {
-            //             chat_id: message.chatId,
-            //             message_id: message.messageId,
-            //         }).catch(err => console.warn('[ProactiveEval] publish failed:', err));
-            //     }
-            // }
+            // 增量写入 bot_chat_presence（记录当前 bot 在此 chat 中活跃）
+            const currentBotName = context.getBotName();
+            if (currentBotName && message.chatId) {
+                AppDataSource.getRepository(BotChatPresence)
+                    .upsert(
+                        { chat_id: message.chatId, bot_name: currentBotName, is_active: true, updated_at: new Date() },
+                        ['chat_id', 'bot_name'],
+                    )
+                    .catch(err => console.warn('[BotChatPresence] upsert failed:', err));
+            }
+
 
             await runRules(message);
         } catch (error) {
@@ -238,6 +236,16 @@ export class LarkEventHandlers {
             UserRepository.save(users),
             LarkUserOpenIdRepository.save(openIdUsers),
         ]);
+
+        // bot 入群 → 记录 bot_chat_presence
+        const botName = context.getBotName();
+        if (botName && data.chat_id) {
+            await AppDataSource.getRepository(BotChatPresence)
+                .upsert(
+                    { chat_id: data.chat_id, bot_name: botName, is_active: true, updated_at: new Date() },
+                    ['chat_id', 'bot_name'],
+                );
+        }
     }
 
     /**
@@ -248,6 +256,16 @@ export class LarkEventHandlers {
         await GroupChatInfoRepository.update(data.chat_id!, {
             is_leave: true,
         });
+
+        // bot 退群 → 标记 is_active=false
+        const botName = context.getBotName();
+        if (botName && data.chat_id) {
+            await AppDataSource.getRepository(BotChatPresence)
+                .update(
+                    { chat_id: data.chat_id, bot_name: botName },
+                    { is_active: false, updated_at: new Date() },
+                );
+        }
     }
 
     /**

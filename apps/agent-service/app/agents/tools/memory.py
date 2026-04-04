@@ -47,7 +47,8 @@ async def load_memory(mode: str, hint: str) -> str:
     chat_id = context.message.chat_id
 
     from app.services.bot_context import _resolve_persona_id
-    bot_name = context.app_name or "chiwei"
+    from app.utils.middlewares.trace import header_vars
+    bot_name = header_vars["app_name"].get() or "chiwei"
     persona_id = await _resolve_persona_id(bot_name)
 
     if mode == "recent":

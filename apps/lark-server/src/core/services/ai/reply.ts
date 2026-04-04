@@ -49,7 +49,7 @@ export async function makeTextReply(message: Message): Promise<void> {
             is_canary: message.basicChatInfo?.permission_config?.is_canary ?? false,
             lane: lane || undefined,
             enqueued_at: Date.now(),
-            mentions: message.getMentionedUsers(),
+            mentions: message.getBotAppIds(),
         },
         undefined,
         undefined,

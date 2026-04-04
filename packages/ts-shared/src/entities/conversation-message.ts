@@ -37,4 +37,7 @@ export class ConversationMessage {
 
     @Column({ length: 50, nullable: true })
     bot_name?: string;
+
+    @Column({ length: 100, nullable: true })
+    response_id?: string;
 }

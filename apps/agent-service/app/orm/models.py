@@ -76,8 +76,10 @@ class ConversationMessage(Base):
     )
     # 向量化状态: pending(待处理) | completed(已完成) | failed(失败)
     vector_status: Mapped[str] = mapped_column(String(20), default="pending")
-    # 机器人名称（用于多 bot 场景下载图片等）
+    # 机器人名称（历史遗留，不再用于身份判断）
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 关联 agent_responses.session_id（assistant 消息）
+    response_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class LarkGroupChatInfo(Base):
@@ -114,7 +116,7 @@ class DiaryEntry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     diary_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10"
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -168,7 +170,7 @@ class AkaoSchedule(Base):
     target_chats: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # 生成元信息
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
 
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -210,7 +212,7 @@ class WeeklyReview(Base):
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     week_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-10" (周一)
     week_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-16" (周日)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -228,7 +230,7 @@ class PersonImpression(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     user_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     impression_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -247,7 +249,7 @@ class GroupCultureGestalt(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     gestalt_text: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -268,6 +270,9 @@ class BotPersona(Base):
     default_reply_style: Mapped[str] = mapped_column(Text, nullable=False)
     error_messages: Mapped[dict] = mapped_column(
         JSON, nullable=False, default=dict
+    )
+    appearance_detail: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -291,7 +296,7 @@ class AkaoJournal(Base):
     journal_type: Mapped[str] = mapped_column(String(10), nullable=False)  # "daily" | "weekly"
     journal_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-26" or week monday
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # daily 同 journal_date, weekly 为周日
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, default="akao")
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)

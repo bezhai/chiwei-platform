@@ -119,7 +119,25 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
     # 从 persona_id 反查 bot_name（用于 chat.response，确保 worker 端用正确的 Lark 凭据）
     from app.services.bot_context import _resolve_bot_name_for_persona
 
-    response_bot_name = await _resolve_bot_name_for_persona(persona_id)
+    chat_id = base_payload.get("chat_id", "")
+    response_bot_name = await _resolve_bot_name_for_persona(persona_id, chat_id)
+
+    # 写入 persona_id + 修正 bot_name（makeTextReply 创建时用的是 SETNX 锁赢家的 bot_name）
+    try:
+        from app.orm.base import AsyncSessionLocal
+        from sqlalchemy import text as sql_text
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sql_text(
+                    "UPDATE agent_responses SET bot_name = :bn, persona_id = :pid "
+                    "WHERE session_id = :sid"
+                ),
+                {"bn": response_bot_name, "pid": persona_id, "sid": session_id},
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning("Failed to update agent_response: %s", e)
 
     client = RabbitMQClient.get_instance()
 

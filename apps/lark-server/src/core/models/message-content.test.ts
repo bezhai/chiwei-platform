@@ -2,7 +2,7 @@ import { describe, it, expect, mock } from 'bun:test';
 
 // Mock the bot-var module to avoid pulling in real dependencies
 mock.module('@core/services/bot/bot-var', () => ({
-    getBotUnionId: mock(() => 'bot_union_id'),
+    getBotAppId: mock(() => 'bot_app_id'),
 }));
 
 import { ContentType, MessageContentUtils, MessageContent } from './message-content';

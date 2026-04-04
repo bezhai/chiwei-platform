@@ -52,10 +52,10 @@ async def _get_persona_lite_for_bot(persona_id: str) -> str:
 
 async def cron_generate_diaries(ctx) -> None:
     """cron 入口：为活跃群和私聊的每个 persona bot 生成昨天的日记"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
     yesterday = date.today() - timedelta(days=1)
 
-    persona_ids = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_ids()
     group_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
     p2p_ids = await get_active_p2p_chat_ids(min_replies=2, days=1)
     all_ids = group_ids + p2p_ids
@@ -76,7 +76,7 @@ async def cron_generate_diaries(ctx) -> None:
 
 
 async def generate_diary_for_chat(
-    chat_id: str, target_date: date, persona_id: str = "akao"
+    chat_id: str, target_date: date, persona_id: str
 ) -> str | None:
     """为指定群或私聊生成指定日期的日记
 
@@ -110,7 +110,10 @@ async def generate_diary_for_chat(
         user_names[uid] = name or uid[:8]
 
     # 3. 格式化消息时间线
-    timeline = _format_messages_timeline(messages, user_names)
+    from app.orm.crud import get_bot_persona
+    persona_obj = await get_bot_persona(persona_id)
+    persona_display_name = persona_obj.display_name if persona_obj else persona_id
+    timeline = _format_messages_timeline(messages, user_names, persona_name=persona_display_name)
 
     if not timeline:
         logger.info(f"No messages for {chat_id} on {date_str}, skip")
@@ -134,9 +137,10 @@ async def generate_diary_for_chat(
     recent_diaries_text = _format_recent_diaries(recent)
 
     # 5. 获取人设和 Langfuse prompt 并编译
-    persona_lite = await _get_persona_lite_for_bot(persona_id)
+    persona_lite = persona_obj.persona_lite if persona_obj else ""
     prompt_template = get_prompt("diary_generation")
     compiled_prompt = prompt_template.compile(
+        persona_name=persona_display_name,
         persona_lite=persona_lite,
         chat_hint=chat_hint,
         date=date_str,
@@ -195,7 +199,7 @@ async def generate_diary_for_chat(
 # ==================== 辅助函数 ====================
 
 
-def _format_messages_timeline(messages: list, user_names: dict[str, str]) -> str:
+def _format_messages_timeline(messages: list, user_names: dict[str, str], persona_name: str = "bot") -> str:
     """将消息列表格式化为树状时间线
 
     利用 reply_message_id 构建回复链，用 tree 风格连接符展示层级关系：
@@ -219,7 +223,7 @@ def _format_messages_timeline(messages: list, user_names: dict[str, str]) -> str
         msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
         time_str = msg_time.strftime("%H:%M")
         speaker = (
-            "赤尾"
+            persona_name
             if msg.role == "assistant"
             else user_names.get(msg.user_id, msg.user_id[:8])
         )
@@ -334,8 +338,11 @@ async def post_process_impressions(
     )
 
     # 4. 获取 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona
+    _persona = await get_bot_persona(persona_id)
     prompt_template = get_prompt("diary_extract_impressions")
     compiled_prompt = prompt_template.compile(
+        persona_name=_persona.display_name if _persona else persona_id,
         diary=diary_content,
         existing_impressions=existing_text,
         user_mapping=user_mapping_text,
@@ -401,8 +408,11 @@ async def post_process_group_culture(
 
     existing_gestalt = await get_group_culture_gestalt(chat_id, persona_id)
 
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("group_culture_distill")
     compiled_prompt = prompt_template.compile(
+        persona_name=_persona.display_name if _persona else persona_id,
         diary=diary_content,
         previous_gestalt=existing_gestalt or "（这是第一次写，没有参考）",
     )
@@ -430,10 +440,10 @@ async def post_process_group_culture(
 
 async def cron_generate_weekly_reviews(ctx) -> None:
     """cron 入口：为活跃群的每个 persona bot 生成上周的周记"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
-    persona_ids = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_ids()
 
     if not chat_ids or not persona_ids:
         logger.info("No active chats or bots, skip weekly review generation")
@@ -449,7 +459,7 @@ async def cron_generate_weekly_reviews(ctx) -> None:
 
 
 async def generate_weekly_review_for_chat(
-    chat_id: str, target_monday: date | None = None, persona_id: str = "akao"
+    chat_id: str, persona_id: str, target_monday: date | None = None
 ) -> str | None:
     """为指定群生成周记
 
@@ -493,9 +503,12 @@ async def generate_weekly_review_for_chat(
         impressions_context = "（暂无）"
 
     # 4. 获取人设和 Langfuse prompt 并编译
+    from app.orm.crud import get_bot_persona as _get_persona
+    _persona = await _get_persona(persona_id)
     prompt_template = get_prompt("weekly_review_generation")
     compiled_prompt = prompt_template.compile(
-        persona_lite=await _get_persona_lite_for_bot(persona_id),
+        persona_name=_persona.display_name if _persona else persona_id,
+        persona_lite=_persona.persona_lite if _persona else "",
         week_start=week_start,
         week_end=week_end,
         diaries=diaries_text,

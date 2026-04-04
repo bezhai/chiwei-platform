@@ -41,6 +41,7 @@ export async function storeMessage(message: ChatMessage): Promise<void> {
                 message_type: message.message_type || 'text',
                 vector_status: isEmpty ? 'skipped' : 'pending',
                 bot_name: botName,
+                response_id: message.response_id,
             })
             .orIgnore()
             .execute();

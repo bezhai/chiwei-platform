@@ -60,9 +60,12 @@ class ProactiveManager:
             if not await self._check_hourly_limit(chat_id):
                 logger.info("proactive: hourly limit reached for %s", chat_id)
                 return
-            result = await run_proactive_scan(source="message_event")
-            if "submitted" in result:
-                await self._incr_hourly(chat_id)
+            from app.orm.crud import get_all_persona_ids
+            for persona_id in await get_all_persona_ids():
+                result = await run_proactive_scan(chat_id, persona_id, source="message_event")
+                if "submitted" in result:
+                    await self._incr_hourly(chat_id)
+                    break  # 一个 debounce 周期最多一个 persona 主动发言
         except Exception:
             logger.exception("proactive _execute_scan error for %s", chat_id)
         finally:

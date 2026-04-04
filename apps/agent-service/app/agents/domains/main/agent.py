@@ -84,7 +84,7 @@ async def stream_chat(
             guard_message = await _get_guard_message(effective_persona)
 
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
-            pre_task = asyncio.create_task(run_pre(parsed.render()))
+            pre_task = asyncio.create_task(run_pre(parsed.render(), persona_id=effective_persona))
 
             if pre_blocking != "false":
                 # === 保守模式：等 pre 完成再继续 ===
@@ -300,8 +300,9 @@ async def _build_and_stream(
         yield "抱歉，未找到相关消息记录"
         return
 
-    # 注入 bot identity
+    # 注入 bot identity + 外貌
     prompt_vars["identity"] = bot_ctx.get_identity()
+    prompt_vars["appearance"] = bot_ctx.get_appearance_detail()
 
     # 构建统一 inner_context（场景 + 状态 + 印象 + 引导语）
     try:

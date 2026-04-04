@@ -262,6 +262,7 @@ export class MessageTransferer {
             items,
             mentions: MentionUtils.addMentions(event.message.mentions),
             mentionMap: MentionUtils.addMentionMap(event.message.mentions),
+            botAppIds: MentionUtils.extractBotAppIds(event.message.mentions),
         });
     }
 }

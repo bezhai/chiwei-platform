@@ -61,6 +61,11 @@ export interface ChatMessage {
      * 机器人名称（用于多 bot 场景）
      */
     bot_name?: string;
+
+    /**
+     * 关联 agent_responses.session_id
+     */
+    response_id?: string;
 }
 
 /**

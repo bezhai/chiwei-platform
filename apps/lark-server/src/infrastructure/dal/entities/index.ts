@@ -12,3 +12,4 @@ export * from './bot-persona';
 export * from './user-blacklist';
 export * from './conversation-message';
 export * from './agent-response';
+export * from './bot-chat-presence';

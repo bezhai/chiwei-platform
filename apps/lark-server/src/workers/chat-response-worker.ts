@@ -32,7 +32,6 @@ import { storeMessage } from '@integrations/memory';
 import { replyPost, sendPost } from '@lark/basic/message';
 import { markdownToPostContent } from 'core/services/message/post-content-processor';
 import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
-import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
 import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
@@ -237,8 +236,8 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     const dbQueryMs = Date.now() - tDbQuery0;
     chatResponseDuration.labels({ stage: 'db_query' }).observe(dbQueryMs / 1000);
 
-    // proactive 消息没有 agent_response 记录，从 payload 获取 bot_name
-    const botName = agentResponse?.bot_name || payload.bot_name;
+    // payload.bot_name 由 agent-service 按 persona_id 反查，优先使用
+    const botName = payload.bot_name || agentResponse?.bot_name;
     if (!botName) {
         console.error(`[ChatResponseWorker] No bot_name found: session_id=${session_id}, is_proactive=${is_proactive}`);
         rabbitmqClient.ack(msg);
@@ -305,7 +304,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
             await storeMessage({
-                user_id: getBotUnionId(),
+                user_id: botName || context.getBotName() || '',
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
                 message_id: effectiveMessageId,
@@ -315,6 +314,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 create_time: String(now),
                 root_message_id: is_proactive ? (root_id || effectiveMessageId) : (root_id || message_id),
                 reply_message_id: is_proactive ? (root_id || undefined) : message_id,
+                response_id: session_id,
             });
 
             // proactive 没有 agent_response 记录，跳过 replies 追加和状态更新

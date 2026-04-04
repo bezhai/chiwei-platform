@@ -32,6 +32,9 @@ export class AgentResponse {
     @Column({ type: 'varchar', length: 50, nullable: true })
     bot_name?: string;
 
+    @Column({ type: 'varchar', length: 50, nullable: true })
+    persona_id?: string;
+
     @Column({ type: 'varchar', length: 30, default: 'reply' })
     response_type!: string;
 

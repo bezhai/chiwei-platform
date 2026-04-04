@@ -30,11 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 async def proactive_scan_job(ctx) -> None:
-    """主动搭话扫描（cron 兜底，主触发走消息事件）— 每 30 分钟执行，30% 概率真正扫描"""
+    """主动搭话扫描（cron 兜底，主触发走消息事件）"""
     import random
     if random.random() > 0.3:
         return
-    await run_proactive_scan(source="cron")
+    from app.orm.crud import get_all_persona_ids
+    from app.workers.proactive_manager import TARGET_CHAT_IDS
+    for chat_id in TARGET_CHAT_IDS:
+        for persona_id in await get_all_persona_ids():
+            await run_proactive_scan(chat_id, persona_id, source="cron")
 
 
 # ==================== 长期任务相关 ====================
