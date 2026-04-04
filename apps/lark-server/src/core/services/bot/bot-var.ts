@@ -14,10 +14,6 @@ function getBotConfigInternal() {
     throw new Error(`Bot configuration not found for bot: ${botName}`);
 }
 
-export function getBotUnionId(): string {
-    return getBotConfigInternal().robot_union_id;
-}
-
 export function getBotAppId(): string {
     return getBotConfigInternal().app_id;
 }

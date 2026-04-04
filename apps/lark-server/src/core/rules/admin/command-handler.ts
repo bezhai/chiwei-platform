@@ -1,6 +1,5 @@
 import { UserGroupBindingRepository, GroupMemberRepository, BaseChatInfoRepository, UserBlacklistRepository, ConversationMessageRepository, AgentResponseRepository } from '@infrastructure/dal/repositories/repositories';
 import { Message } from '@core/models/message';
-import { getBotUnionId } from '@core/services/bot/bot-var';
 import { replyMessage } from '@lark/basic/message';
 import { combineRule, RegexpMatch } from '@core/rules/rule';
 import { getUserInfo } from '@lark-client';
@@ -25,9 +24,7 @@ const commandRules = [
     {
         key: 'bind',
         handler: async (message: Message) => {
-            const mentionUser = message
-                .getMentionedUsers()
-                .find((user) => user !== getBotUnionId());
+            const mentionUser = message.getFirstMentionedHuman();
 
             if (!mentionUser) {
                 replyMessage(message.messageId, '请@具体用户进行绑定', true);
@@ -75,9 +72,7 @@ const commandRules = [
     {
         key: 'unbind',
         handler: async (message: Message) => {
-            const mentionUser = message
-                .getMentionedUsers()
-                .find((user) => user !== getBotUnionId());
+            const mentionUser = message.getFirstMentionedHuman();
 
             if (!mentionUser) {
                 replyMessage(message.messageId, '请@具体用户进行解绑', true);
@@ -149,9 +144,7 @@ const commandRules = [
                 return;
             }
 
-            const mentionUser = message
-                .getMentionedUsers()
-                .find((user) => user !== getBotUnionId());
+            const mentionUser = message.getFirstMentionedHuman();
 
             if (!mentionUser) {
                 replyMessage(message.messageId, '请@具体用户进行拉黑', true);
@@ -186,9 +179,7 @@ const commandRules = [
                 return;
             }
 
-            const mentionUser = message
-                .getMentionedUsers()
-                .find((user) => user !== getBotUnionId());
+            const mentionUser = message.getFirstMentionedHuman();
 
             if (!mentionUser) {
                 replyMessage(message.messageId, '请@具体用户进行解除拉黑', true);
@@ -276,9 +267,7 @@ const commandRules = [
     {
         key: 'union_id',
         handler: async (message: Message) => {
-            const mentionUser = message
-                .getMentionedUsers()
-                .find((user) => user !== getBotUnionId());
+            const mentionUser = message.getFirstMentionedHuman();
 
             if (!mentionUser) {
                 replyMessage(message.messageId, '请@具体用户进行获取union_id', true);

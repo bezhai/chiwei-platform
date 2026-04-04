@@ -32,7 +32,6 @@ import { storeMessage } from '@integrations/memory';
 import { replyPost, sendPost } from '@lark/basic/message';
 import { markdownToPostContent } from 'core/services/message/post-content-processor';
 import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
-import { getBotUnionId } from '@core/services/bot/bot-var';
 import { MessageContentUtils } from 'core/models/message-content';
 import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
@@ -305,7 +304,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
             await storeMessage({
-                user_id: getBotUnionId(),
+                user_id: botName || context.getBotName() || '',
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
                 message_id: effectiveMessageId,

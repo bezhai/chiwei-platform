@@ -17,9 +17,6 @@ export class BotConfig {
     @Column({ type: 'varchar', length: 100 })
     verification_token!: string; // 验证令牌
 
-    @Column({ type: 'varchar', length: 100 })
-    robot_union_id!: string; // 机器人Union ID
-
     @Column({ type: 'varchar', length: 20, default: 'http' })
     init_type!: 'http' | 'websocket'; // 初始化类型：http或websocket
 
