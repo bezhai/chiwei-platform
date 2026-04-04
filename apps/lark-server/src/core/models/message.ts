@@ -144,6 +144,10 @@ export class Message {
         return this.content.mentions;
     }
 
+    getBotAppIds(): string[] {
+        return this.content.botAppIds || [];
+    }
+
     // For debugging
     toJSON() {
         return {

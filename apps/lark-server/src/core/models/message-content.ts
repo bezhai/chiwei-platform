@@ -27,6 +27,7 @@ export interface MessageContent {
             openId: string;
         }
     >;
+    botAppIds?: string[]; // @mention 的 bot 的 app_id（用于 agent-service 路由）
 }
 
 export class MessageContentUtils {
