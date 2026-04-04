@@ -85,6 +85,7 @@ async def get_model_and_provider_info(model_id: str):
             "base_url": provider.base_url,
             "is_active": provider.is_active,
             "client_type": provider.client_type or "openai",
+            "use_proxy": provider.use_proxy,
         }
 
 
