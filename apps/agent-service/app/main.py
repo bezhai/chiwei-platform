@@ -19,10 +19,13 @@ logger = logging.getLogger(__name__)
 
 async def _maybe_migrate_bot_chat_presence():
     """bot_chat_presence 为空时，调飞书 API 填充存量数据（一次性）"""
-    try:
-        from app.orm.base import AsyncSessionLocal
-        from sqlalchemy import text
+    import httpx
+    from app.orm.base import AsyncSessionLocal
+    from sqlalchemy import text
 
+    FEISHU_BASE = "https://open.feishu.cn/open-apis"
+
+    try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("SELECT COUNT(*) FROM bot_chat_presence"))
             count = result.scalar()
@@ -31,8 +34,70 @@ async def _maybe_migrate_bot_chat_presence():
                 return
 
         logger.info("bot_chat_presence is empty, starting migration...")
-        from scripts.migrate_bot_chat_presence import main as run_migration
-        await run_migration()
+
+        # 读取所有 active bot 凭据
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("SELECT bot_name, app_id, app_secret FROM bot_config WHERE is_active = true")
+            )
+            bots = [{"bot_name": r[0], "app_id": r[1], "app_secret": r[2]} for r in result.fetchall()]
+
+        total = 0
+        for bot in bots:
+            bot_name = bot["bot_name"]
+            try:
+                # 获取 tenant_access_token
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
+                        json={"app_id": bot["app_id"], "app_secret": bot["app_secret"]},
+                    )
+                    token = resp.json().get("tenant_access_token")
+                    if not token:
+                        logger.warning("[migrate] Failed to get token for %s", bot_name)
+                        continue
+
+                # 分页拉取 bot 所在的群
+                chats = []
+                page_token = ""
+                async with httpx.AsyncClient() as client:
+                    while True:
+                        params = {"page_size": 100}
+                        if page_token:
+                            params["page_token"] = page_token
+                        resp = await client.get(
+                            f"{FEISHU_BASE}/im/v1/chats",
+                            headers={"Authorization": f"Bearer {token}"},
+                            params=params,
+                        )
+                        data = resp.json()
+                        for item in data.get("data", {}).get("items", []):
+                            if item.get("chat_status") == "normal" and item.get("chat_mode") != "p2p":
+                                chats.append(item["chat_id"])
+                        if not data.get("data", {}).get("has_more"):
+                            break
+                        page_token = data["data"]["page_token"]
+
+                # 写入
+                if chats:
+                    async with AsyncSessionLocal() as session:
+                        for chat_id in chats:
+                            await session.execute(
+                                text(
+                                    "INSERT INTO bot_chat_presence (chat_id, bot_name) "
+                                    "VALUES (:cid, :bn) "
+                                    "ON CONFLICT (chat_id, bot_name) DO UPDATE "
+                                    "SET is_active = true, updated_at = now()"
+                                ),
+                                {"cid": chat_id, "bn": bot_name},
+                            )
+                        await session.commit()
+                    total += len(chats)
+                logger.info("[migrate] %s: %d group chats", bot_name, len(chats))
+            except Exception as e:
+                logger.error("[migrate] %s failed: %s", bot_name, e)
+
+        logger.info("bot_chat_presence migration done: %d total records", total)
     except Exception as e:
         logger.error("bot_chat_presence migration failed: %s", e, exc_info=True)
 
