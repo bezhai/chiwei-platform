@@ -19,6 +19,10 @@ export interface LarkMention {
     };
     name: string;
     tenant_key?: string;
+    mentioned_type?: string; // "bot" for bot mentions, undefined for user mentions
+    bot_info?: {
+        app_id?: string;
+    };
 }
 
 // 消息的结构
