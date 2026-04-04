@@ -1,4 +1,4 @@
-import type { Middleware } from 'koa';
+import type { MiddlewareHandler } from 'hono';
 import { AppDataSource } from '../db';
 import { AuditLog } from '../entities/audit-log';
 
@@ -38,8 +38,8 @@ const SKIP_PATHS = new Set([
   '/dashboard/api/health',
 ]);
 
-export const auditMiddleware: Middleware = async (ctx, next) => {
-  if (!ctx.path.startsWith('/dashboard/api') || SKIP_PATHS.has(ctx.path)) {
+export const auditMiddleware: MiddlewareHandler = async (c, next) => {
+  if (SKIP_PATHS.has(c.req.path)) {
     return next();
   }
 
@@ -49,12 +49,17 @@ export const auditMiddleware: Middleware = async (ctx, next) => {
 
   try {
     await next();
-    if (ctx.status === 401 || ctx.status === 403) {
+    const status = c.res.status;
+    if (status === 401 || status === 403) {
       result = 'denied';
-    } else if (ctx.status >= 400) {
+    } else if (status >= 400) {
       result = 'error';
-      const body = ctx.body as Record<string, unknown> | undefined;
-      errorMessage = (body?.message as string) || `HTTP ${ctx.status}`;
+      try {
+        const resBody = await c.res.clone().json() as Record<string, unknown>;
+        errorMessage = (resBody?.message as string) || `HTTP ${status}`;
+      } catch {
+        errorMessage = `HTTP ${status}`;
+      }
     }
   } catch (err) {
     result = 'error';
@@ -62,19 +67,32 @@ export const auditMiddleware: Middleware = async (ctx, next) => {
     throw err;
   } finally {
     const duration = Date.now() - start;
-    const caller = ctx.state.caller || 'unknown';
-    const action = deriveAction(ctx.method, ctx.path);
+    const caller = c.get('caller') || 'unknown';
+    const action = deriveAction(c.req.method, c.req.path);
 
     // Build params — omit sensitive fields
     const params: Record<string, unknown> = {};
-    if (ctx.query && Object.keys(ctx.query).length) params.query = ctx.query;
-    if (ctx.request.body && typeof ctx.request.body === 'object' && Object.keys(ctx.request.body as object).length) {
-      const body = { ...(ctx.request.body as Record<string, unknown>) };
-      delete body.password;
-      delete body.api_key;
-      params.body = body;
+
+    // Query params
+    const url = new URL(c.req.url);
+    const queryObj: Record<string, string> = {};
+    url.searchParams.forEach((v, k) => { queryObj[k] = v; });
+    if (Object.keys(queryObj).length) params.query = queryObj;
+
+    // Request body (only for methods that typically have a body)
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
+      try {
+        const reqBody = await c.req.json() as Record<string, unknown>;
+        if (reqBody && typeof reqBody === 'object' && Object.keys(reqBody).length) {
+          const body = { ...reqBody };
+          delete body.password;
+          delete body.api_key;
+          params.body = body;
+        }
+      } catch {
+        // No JSON body or already consumed — skip
+      }
     }
-    if (ctx.params && Object.keys(ctx.params).length) params.params = ctx.params;
 
     // Fire-and-forget audit write
     try {

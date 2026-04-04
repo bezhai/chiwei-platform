@@ -1,4 +1,4 @@
-import type { Middleware } from 'koa';
+import type { MiddlewareHandler } from 'hono';
 import jwt from 'jsonwebtoken';
 
 const PUBLIC_PATHS = new Set([
@@ -7,42 +7,35 @@ const PUBLIC_PATHS = new Set([
   '/dashboard/api/health',
 ]);
 
-export const jwtAuth: Middleware = async (ctx, next) => {
-  if (!ctx.path.startsWith('/dashboard/api')) {
-    return next();
-  }
-  if (PUBLIC_PATHS.has(ctx.path)) {
-    ctx.state.caller = 'public';
+export const jwtAuth: MiddlewareHandler = async (c, next) => {
+  if (PUBLIC_PATHS.has(c.req.path)) {
+    c.set('caller', 'public');
     return next();
   }
 
   // --- API Key auth (Claude Code) ---
-  const apiKey = ctx.get('x-api-key');
+  const apiKey = c.req.header('x-api-key');
   const ccToken = process.env.DASHBOARD_CC_TOKEN;
   if (apiKey && ccToken && apiKey === ccToken) {
-    ctx.state.caller = 'claude-code';
+    c.set('caller', 'claude-code');
     return next();
   }
 
   // --- JWT Bearer auth (Web Admin) ---
-  const authHeader = ctx.get('authorization') || ctx.get('Authorization');
+  const authHeader = c.req.header('authorization') || c.req.header('Authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 
   if (!token) {
-    ctx.status = 401;
-    ctx.body = { message: 'Unauthorized' };
-    return;
+    return c.json({ message: 'Unauthorized' }, 401);
   }
 
   try {
     const secret = process.env.DASHBOARD_JWT_SECRET!;
     const payload = jwt.verify(token, secret);
-    ctx.state.user = payload;
-    ctx.state.caller = 'web-admin';
+    c.set('user', payload);
+    c.set('caller', 'web-admin');
   } catch {
-    ctx.status = 401;
-    ctx.body = { message: 'Unauthorized' };
-    return;
+    return c.json({ message: 'Unauthorized' }, 401);
   }
 
   await next();
