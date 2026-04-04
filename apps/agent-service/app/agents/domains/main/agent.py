@@ -84,7 +84,7 @@ async def stream_chat(
             guard_message = await _get_guard_message(effective_persona)
 
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
-            pre_task = asyncio.create_task(run_pre(parsed.render()))
+            pre_task = asyncio.create_task(run_pre(parsed.render(), persona_id=effective_persona))
 
             if pre_blocking != "false":
                 # === 保守模式：等 pre 完成再继续 ===
