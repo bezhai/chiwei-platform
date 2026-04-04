@@ -237,8 +237,8 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
     const dbQueryMs = Date.now() - tDbQuery0;
     chatResponseDuration.labels({ stage: 'db_query' }).observe(dbQueryMs / 1000);
 
-    // proactive 消息没有 agent_response 记录，从 payload 获取 bot_name
-    const botName = agentResponse?.bot_name || payload.bot_name;
+    // payload.bot_name 由 agent-service 按 persona_id 反查，优先使用
+    const botName = payload.bot_name || agentResponse?.bot_name;
     if (!botName) {
         console.error(`[ChatResponseWorker] No bot_name found: session_id=${session_id}, is_proactive=${is_proactive}`);
         rabbitmqClient.ack(msg);
