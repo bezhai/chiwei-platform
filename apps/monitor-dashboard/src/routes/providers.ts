@@ -1,8 +1,8 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource, ModelProvider } from '../db';
 import { randomUUID } from 'crypto';
 
-const router = new Router();
+const app = new Hono();
 
 const maskApiKey = (apiKey: string) => {
   if (!apiKey) {
@@ -14,31 +14,29 @@ const maskApiKey = (apiKey: string) => {
 
 const allowedClientTypes = new Set(['openai', 'openai-responses', 'deepseek', 'ark', 'azure-http', 'google']);
 
-router.get('/api/providers', async (ctx) => {
+app.get('/api/providers', async (c) => {
   const repo = AppDataSource.getRepository(ModelProvider);
   const providers = await repo.find({ order: { created_at: 'DESC' } });
-  ctx.body = providers.map((provider) => ({
+  return c.json(providers.map((provider) => ({
     ...provider,
     api_key: maskApiKey(provider.api_key),
-  }));
+  })));
 });
 
-router.get('/api/providers/:id', async (ctx) => {
+app.get('/api/providers/:id', async (c) => {
   const repo = AppDataSource.getRepository(ModelProvider);
-  const provider = await repo.findOne({ where: { provider_id: ctx.params.id } });
+  const provider = await repo.findOne({ where: { provider_id: c.req.param('id') } });
   if (!provider) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
-  ctx.body = {
+  return c.json({
     ...provider,
     api_key: maskApiKey(provider.api_key),
-  };
+  });
 });
 
-router.post('/api/providers', async (ctx) => {
-  const { name, api_key, base_url, client_type, is_active } = ctx.request.body as {
+app.post('/api/providers', async (c) => {
+  const { name, api_key, base_url, client_type, is_active } = (await c.req.json()) as {
     name?: string;
     api_key?: string;
     base_url?: string;
@@ -47,16 +45,12 @@ router.post('/api/providers', async (ctx) => {
   };
 
   if (!name || !base_url || !api_key) {
-    ctx.status = 400;
-    ctx.body = { message: 'name, base_url, api_key are required' };
-    return;
+    return c.json({ message: 'name, base_url, api_key are required' }, 400);
   }
 
   const resolvedClientType = (client_type || 'openai').toLowerCase();
   if (!allowedClientTypes.has(resolvedClientType)) {
-    ctx.status = 400;
-    ctx.body = { message: 'Invalid client_type' };
-    return;
+    return c.json({ message: 'Invalid client_type' }, 400);
   }
 
   const repo = AppDataSource.getRepository(ModelProvider);
@@ -71,14 +65,14 @@ router.post('/api/providers', async (ctx) => {
 
   await repo.save(provider);
 
-  ctx.body = {
+  return c.json({
     ...provider,
     api_key: maskApiKey(provider.api_key),
-  };
+  });
 });
 
-router.put('/api/providers/:id', async (ctx) => {
-  const { name, api_key, base_url, client_type, is_active } = ctx.request.body as {
+app.put('/api/providers/:id', async (c) => {
+  const { name, api_key, base_url, client_type, is_active } = (await c.req.json()) as {
     name?: string;
     api_key?: string;
     base_url?: string;
@@ -87,11 +81,9 @@ router.put('/api/providers/:id', async (ctx) => {
   };
 
   const repo = AppDataSource.getRepository(ModelProvider);
-  const provider = await repo.findOne({ where: { provider_id: ctx.params.id } });
+  const provider = await repo.findOne({ where: { provider_id: c.req.param('id') } });
   if (!provider) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
 
   if (name !== undefined) {
@@ -106,9 +98,7 @@ router.put('/api/providers/:id', async (ctx) => {
   if (client_type !== undefined) {
     const resolvedClientType = client_type.toLowerCase();
     if (!allowedClientTypes.has(resolvedClientType)) {
-      ctx.status = 400;
-      ctx.body = { message: 'Invalid client_type' };
-      return;
+      return c.json({ message: 'Invalid client_type' }, 400);
     }
     provider.client_type = resolvedClientType;
   }
@@ -118,23 +108,21 @@ router.put('/api/providers/:id', async (ctx) => {
 
   await repo.save(provider);
 
-  ctx.body = {
+  return c.json({
     ...provider,
     api_key: maskApiKey(provider.api_key),
-  };
+  });
 });
 
-router.delete('/api/providers/:id', async (ctx) => {
+app.delete('/api/providers/:id', async (c) => {
   const repo = AppDataSource.getRepository(ModelProvider);
-  const provider = await repo.findOne({ where: { provider_id: ctx.params.id } });
+  const provider = await repo.findOne({ where: { provider_id: c.req.param('id') } });
   if (!provider) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
 
   await repo.remove(provider);
-  ctx.body = { success: true };
+  return c.json({ success: true });
 });
 
-export default router;
+export default app;

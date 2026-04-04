@@ -1,7 +1,7 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { queryLarkEvents } from '../mongo';
 
-const router = new Router();
+const app = new Hono();
 
 const parseNumber = (value: unknown, fallback: number) => {
   if (typeof value === 'number') {
@@ -14,8 +14,8 @@ const parseNumber = (value: unknown, fallback: number) => {
   return fallback;
 };
 
-router.post('/api/mongo/query', async (ctx) => {
-  const body = (ctx.request.body || {}) as {
+app.post('/api/mongo/query', async (c) => {
+  const body = ((await c.req.json()) || {}) as {
     filter?: Record<string, unknown>;
     projection?: Record<string, unknown>;
     sort?: Record<string, unknown>;
@@ -35,16 +35,15 @@ router.post('/api/mongo/query', async (ctx) => {
       limit: pageSize,
     });
 
-    ctx.body = {
+    return c.json({
       data,
       total,
       page,
       pageSize,
-    };
+    });
   } catch (error) {
-    ctx.status = 400;
-    ctx.body = { message: (error as Error).message };
+    return c.json({ message: (error as Error).message }, 400);
   }
 });
 
-export default router;
+export default app;

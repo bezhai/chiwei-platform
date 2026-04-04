@@ -1,20 +1,18 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource } from '../db';
 import { AuditLog } from '../entities/audit-log';
 
-const router = new Router();
+const app = new Hono();
 
 /** GET /api/audit-logs — 查询审计日志，支持过滤和分页 */
-router.get('/api/audit-logs', async (ctx) => {
-  const {
-    caller,
-    action,
-    result,
-    from,
-    to,
-    page = '1',
-    pageSize = '50',
-  } = ctx.query as Record<string, string | undefined>;
+app.get('/api/audit-logs', async (c) => {
+  const caller = c.req.query('caller');
+  const action = c.req.query('action');
+  const result = c.req.query('result');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const page = c.req.query('page') || '1';
+  const pageSize = c.req.query('pageSize') || '50';
 
   const repo = AppDataSource.getRepository(AuditLog);
   const qb = repo.createQueryBuilder('log');
@@ -32,12 +30,12 @@ router.get('/api/audit-logs', async (ctx) => {
 
   const [items, total] = await qb.getManyAndCount();
 
-  ctx.body = {
+  return c.json({
     items,
     total,
     page: Number(page) || 1,
     pageSize: limit,
-  };
+  });
 });
 
-export default router;
+export default app;

@@ -1,21 +1,19 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import jwt from 'jsonwebtoken';
 
-const router = new Router();
+const app = new Hono();
 
-router.post('/api/auth/login', async (ctx) => {
-  const { password } = ctx.request.body as { password?: string };
+app.post('/api/auth/login', async (c) => {
+  const { password } = (await c.req.json()) as { password?: string };
 
   if (!password || password !== process.env.DASHBOARD_ADMIN_PASSWORD) {
-    ctx.status = 401;
-    ctx.body = { message: 'Invalid password' };
-    return;
+    return c.json({ message: 'Invalid password' }, 401);
   }
 
   const secret = process.env.DASHBOARD_JWT_SECRET!;
   const token = jwt.sign({ role: 'admin' }, secret, { expiresIn: '7d' });
 
-  ctx.body = { token };
+  return c.json({ token });
 });
 
-export default router;
+export default app;
