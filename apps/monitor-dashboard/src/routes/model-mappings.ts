@@ -1,28 +1,26 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource, ModelMapping } from '../db';
 
-const router = new Router();
+const app = new Hono();
 
-router.get('/api/model-mappings', async (ctx) => {
+app.get('/api/model-mappings', async (c) => {
   const repo = AppDataSource.getRepository(ModelMapping);
   const mappings = await repo.find({ order: { created_at: 'DESC' } });
-  ctx.body = mappings;
+  return c.json(mappings);
 });
 
-router.get('/api/model-mappings/:id', async (ctx) => {
+app.get('/api/model-mappings/:id', async (c) => {
   const repo = AppDataSource.getRepository(ModelMapping);
-  const mapping = await repo.findOne({ where: { id: ctx.params.id } });
+  const mapping = await repo.findOne({ where: { id: c.req.param('id') } });
   if (!mapping) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
-  ctx.body = mapping;
+  return c.json(mapping);
 });
 
-router.post('/api/model-mappings', async (ctx) => {
+app.post('/api/model-mappings', async (c) => {
   const { alias, provider_name, real_model_name, description, model_config } =
-    ctx.request.body as {
+    (await c.req.json()) as {
       alias?: string;
       provider_name?: string;
       real_model_name?: string;
@@ -31,17 +29,13 @@ router.post('/api/model-mappings', async (ctx) => {
     };
 
   if (!alias || !provider_name || !real_model_name) {
-    ctx.status = 400;
-    ctx.body = { message: 'alias, provider_name, real_model_name are required' };
-    return;
+    return c.json({ message: 'alias, provider_name, real_model_name are required' }, 400);
   }
 
   const repo = AppDataSource.getRepository(ModelMapping);
   const existing = await repo.findOne({ where: { alias } });
   if (existing) {
-    ctx.status = 400;
-    ctx.body = { message: 'alias already exists' };
-    return;
+    return c.json({ message: 'alias already exists' }, 400);
   }
 
   const mapping = repo.create({
@@ -53,12 +47,12 @@ router.post('/api/model-mappings', async (ctx) => {
   });
 
   await repo.save(mapping);
-  ctx.body = mapping;
+  return c.json(mapping);
 });
 
-router.put('/api/model-mappings/:id', async (ctx) => {
+app.put('/api/model-mappings/:id', async (c) => {
   const { alias, provider_name, real_model_name, description, model_config } =
-    ctx.request.body as {
+    (await c.req.json()) as {
       alias?: string;
       provider_name?: string;
       real_model_name?: string;
@@ -67,19 +61,15 @@ router.put('/api/model-mappings/:id', async (ctx) => {
     };
 
   const repo = AppDataSource.getRepository(ModelMapping);
-  const mapping = await repo.findOne({ where: { id: ctx.params.id } });
+  const mapping = await repo.findOne({ where: { id: c.req.param('id') } });
   if (!mapping) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
 
   if (alias !== undefined && alias !== mapping.alias) {
     const existing = await repo.findOne({ where: { alias } });
     if (existing) {
-      ctx.status = 400;
-      ctx.body = { message: 'alias already exists' };
-      return;
+      return c.json({ message: 'alias already exists' }, 400);
     }
     mapping.alias = alias;
   }
@@ -97,20 +87,18 @@ router.put('/api/model-mappings/:id', async (ctx) => {
   }
 
   await repo.save(mapping);
-  ctx.body = mapping;
+  return c.json(mapping);
 });
 
-router.delete('/api/model-mappings/:id', async (ctx) => {
+app.delete('/api/model-mappings/:id', async (c) => {
   const repo = AppDataSource.getRepository(ModelMapping);
-  const mapping = await repo.findOne({ where: { id: ctx.params.id } });
+  const mapping = await repo.findOne({ where: { id: c.req.param('id') } });
   if (!mapping) {
-    ctx.status = 404;
-    ctx.body = { message: 'Not found' };
-    return;
+    return c.json({ message: 'Not found' }, 404);
   }
 
   await repo.remove(mapping);
-  ctx.body = { success: true };
+  return c.json({ success: true });
 });
 
-export default router;
+export default app;

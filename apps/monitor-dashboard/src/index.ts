@@ -1,8 +1,7 @@
 import 'reflect-metadata';
-import Koa from 'koa';
-import Router from '@koa/router';
-import cors from '@koa/cors';
-import bodyParser from 'koa-bodyparser';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve } from '@hono/node-server';
 
 import { AppDataSource } from './db';
 import { initMongo } from './mongo';
@@ -33,54 +32,45 @@ const bootstrap = async () => {
   await AppDataSource.initialize();
   await initMongo();
 
-  const app = new Koa();
-  const router = new Router({ prefix: '/dashboard' });
+  const app = new Hono();
 
   if (process.env.NODE_ENV !== 'production') {
     app.use(cors());
   }
 
-  app.use(bodyParser({ jsonLimit: '2mb' }));
-
   // Global error handler — return JSON instead of crashing
-  app.use(async (ctx, next) => {
-    try {
-      await next();
-    } catch (err: unknown) {
-      const axiosResp = (err as { response?: { status?: number; data?: unknown } })?.response;
-      const status = axiosResp?.status
-        || (err as { status?: number })?.status
-        || 500;
-      // Prefer upstream error body (e.g. PaaS Engine's {data:{error:"..."}})
-      const raw = axiosResp?.data as Record<string, unknown> | undefined;
-      const upstream = (raw && typeof raw === 'object' && 'data' in raw) ? raw.data as Record<string, unknown> : raw;
-      const message = (upstream && typeof upstream === 'object' && 'error' in upstream)
-        ? upstream.error
-        : err instanceof Error ? err.message : String(err);
-      ctx.status = status;
-      ctx.body = { message, status };
-    }
+  app.onError((err, c) => {
+    const axiosResp = (err as any)?.response;
+    const status = axiosResp?.status || (err as any)?.status || 500;
+    const raw = axiosResp?.data;
+    const upstream = (raw && typeof raw === 'object' && 'data' in raw) ? raw.data : raw;
+    const message = (upstream && typeof upstream === 'object' && 'error' in upstream)
+      ? upstream.error
+      : err.message;
+    return c.json({ message, status }, status);
   });
 
-  app.use(jwtAuth);
-  app.use(auditMiddleware);
+  // Auth & audit middleware on API routes
+  app.use('/dashboard/api/*', jwtAuth);
+  app.use('/dashboard/api/*', auditMiddleware);
 
-  router.use(authRoutes.routes());
-  router.use(configRoutes.routes());
-  router.use(messagesRoutes.routes());
-  router.use(providersRoutes.routes());
-  router.use(modelMappingsRoutes.routes());
-  router.use(mongoRoutes.routes());
-  router.use(migrationsRoutes.routes());
-  router.use(serviceStatusRoutes.routes());
-  router.use(operationsRoutes.routes());
-  router.use(auditLogsRoutes.routes());
-  router.use(activityRoutes.routes());
+  // Mount route sub-apps under /dashboard
+  const dashboard = new Hono();
+  dashboard.route('/', authRoutes);
+  dashboard.route('/', configRoutes);
+  dashboard.route('/', messagesRoutes);
+  dashboard.route('/', providersRoutes);
+  dashboard.route('/', modelMappingsRoutes);
+  dashboard.route('/', mongoRoutes);
+  dashboard.route('/', migrationsRoutes);
+  dashboard.route('/', serviceStatusRoutes);
+  dashboard.route('/', operationsRoutes);
+  dashboard.route('/', auditLogsRoutes);
+  dashboard.route('/', activityRoutes);
 
-  app.use(router.routes());
-  app.use(router.allowedMethods());
+  app.route('/dashboard', dashboard);
 
-  app.listen(PORT, () => {
+  serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`Monitor dashboard server running on ${PORT}`);
   });
 };

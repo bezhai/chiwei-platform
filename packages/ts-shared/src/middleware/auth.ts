@@ -1,4 +1,4 @@
-import type { Context, Next } from 'koa';
+import type { Context, Next } from 'hono';
 
 /**
  * Options for bearer auth middleware
@@ -19,7 +19,7 @@ export interface BearerAuthOptions {
 }
 
 /**
- * Create a bearer authentication middleware for Koa
+ * Create a bearer authentication middleware for Hono
  * Validates Authorization: Bearer <token> header
  */
 export function createBearerAuthMiddleware(options: BearerAuthOptions = {}) {
@@ -37,22 +37,18 @@ export function createBearerAuthMiddleware(options: BearerAuthOptions = {}) {
         },
     } = options;
 
-    return async (ctx: Context, next: Next) => {
-        const authHeader = ctx.request.headers.authorization;
+    return async (c: Context, next: Next) => {
+        const authHeader = c.req.header('authorization');
 
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            ctx.status = 401;
-            ctx.body = errorResponse.missingAuth;
-            return;
+            return c.json(errorResponse.missingAuth, 401);
         }
 
         const token = authHeader.substring(7); // Remove 'Bearer ' prefix
         const expectedToken = getExpectedToken();
 
         if (token !== expectedToken) {
-            ctx.status = 401;
-            ctx.body = errorResponse.invalidToken;
-            return;
+            return c.json(errorResponse.invalidToken, 401);
         }
 
         await next();

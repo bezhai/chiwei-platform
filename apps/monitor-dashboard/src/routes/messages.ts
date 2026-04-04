@@ -1,7 +1,7 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource, ConversationMessage, LarkUser, LarkGroupChatInfo } from '../db';
 
-const router = new Router();
+const app = new Hono();
 
 const parseNumber = (value: string | undefined, defaultValue: number) => {
   if (!value) {
@@ -11,18 +11,18 @@ const parseNumber = (value: string | undefined, defaultValue: number) => {
   return Number.isNaN(parsed) ? defaultValue : parsed;
 };
 
-router.get('/api/messages', async (ctx) => {
-  const page = Math.max(1, parseNumber(ctx.query.page as string | undefined, 1));
-  const pageSize = Math.min(100, Math.max(1, parseNumber(ctx.query.pageSize as string | undefined, 20)));
-  const chatId = (ctx.query.chatId as string | undefined) || '';
-  const userId = (ctx.query.userId as string | undefined) || '';
-  const role = (ctx.query.role as string | undefined) || '';
-  const botName = (ctx.query.botName as string | undefined) || '';
-  const startTime = (ctx.query.startTime as string | undefined) || '';
-  const endTime = (ctx.query.endTime as string | undefined) || '';
-  const rootMessageId = (ctx.query.rootMessageId as string | undefined) || '';
-  const replyMessageId = (ctx.query.replyMessageId as string | undefined) || '';
-  const messageType = (ctx.query.messageType as string | undefined) || '';
+app.get('/api/messages', async (c) => {
+  const page = Math.max(1, parseNumber(c.req.query('page'), 1));
+  const pageSize = Math.min(100, Math.max(1, parseNumber(c.req.query('pageSize'), 20)));
+  const chatId = c.req.query('chatId') || '';
+  const userId = c.req.query('userId') || '';
+  const role = c.req.query('role') || '';
+  const botName = c.req.query('botName') || '';
+  const startTime = c.req.query('startTime') || '';
+  const endTime = c.req.query('endTime') || '';
+  const rootMessageId = c.req.query('rootMessageId') || '';
+  const replyMessageId = c.req.query('replyMessageId') || '';
+  const messageType = c.req.query('messageType') || '';
 
   const repo = AppDataSource.getRepository(ConversationMessage);
   const qb = repo
@@ -110,34 +110,34 @@ router.get('/api/messages', async (ctx) => {
     return { ...rest, chat_name };
   });
 
-  ctx.body = {
+  return c.json({
     data,
     total,
     page,
     pageSize,
-  };
+  });
 });
 
-router.get('/api/chats', async (ctx) => {
-  const keyword = ((ctx.query.keyword as string) || '').trim();
+app.get('/api/chats', async (c) => {
+  const keyword = (c.req.query('keyword') || '').trim();
   const repo = AppDataSource.getRepository(LarkGroupChatInfo);
   const qb = repo.createQueryBuilder('gc').select(['gc.chat_id AS chat_id', 'gc.name AS name']);
   if (keyword) {
     qb.where('gc.name ILIKE :kw', { kw: `%${keyword}%` });
   }
   qb.orderBy('gc.name', 'ASC').limit(30);
-  ctx.body = await qb.getRawMany();
+  return c.json(await qb.getRawMany());
 });
 
-router.get('/api/users', async (ctx) => {
-  const keyword = ((ctx.query.keyword as string) || '').trim();
+app.get('/api/users', async (c) => {
+  const keyword = (c.req.query('keyword') || '').trim();
   const repo = AppDataSource.getRepository(LarkUser);
   const qb = repo.createQueryBuilder('u').select(['u.union_id AS user_id', 'u.name AS name']);
   if (keyword) {
     qb.where('u.name ILIKE :kw', { kw: `%${keyword}%` });
   }
   qb.orderBy('u.name', 'ASC').limit(30);
-  ctx.body = await qb.getRawMany();
+  return c.json(await qb.getRawMany());
 });
 
-export default router;
+export default app;

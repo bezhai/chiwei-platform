@@ -1,26 +1,26 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 
-const router = new Router();
+const app = new Hono();
 
-router.get('/api/config', async (ctx) => {
+app.get('/api/config', async (c) => {
   const grafanaHost = process.env.DASHBOARD_GRAFANA_HOST || '';
   const langfuseHost = process.env.DASHBOARD_LANGFUSE_HOST || '';
   const langfuseProjectId = process.env.DASHBOARD_LANGFUSE_PROJECT_ID || '';
 
-  ctx.body = {
+  return c.json({
     grafanaUrl: grafanaHost,
     kibanaUrl: grafanaHost,
     langfuseUrl: `${langfuseHost}/project/${langfuseProjectId}`,
-  };
+  });
 });
 
-router.get('/api/health', async (ctx) => {
-  ctx.body = {
+app.get('/api/health', async (c) => {
+  return c.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'monitor-dashboard',
     version: process.env.VERSION || process.env.GIT_SHA || 'unknown',
-  };
+  });
 });
 
-export default router;
+export default app;

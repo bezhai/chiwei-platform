@@ -1,16 +1,16 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource, SchemaMigration } from '../db';
 
-const router = new Router();
+const app = new Hono();
 
-router.get('/api/migrations', async (ctx) => {
+app.get('/api/migrations', async (c) => {
   const repo = AppDataSource.getRepository(SchemaMigration);
   const migrations = await repo.find({ order: { id: 'DESC' } });
-  ctx.body = migrations;
+  return c.json(migrations);
 });
 
-router.post('/api/migrations/run', async (ctx) => {
-  const { version, name, sql, applied_by } = ctx.request.body as {
+app.post('/api/migrations/run', async (c) => {
+  const { version, name, sql, applied_by } = (await c.req.json()) as {
     version?: string;
     name?: string;
     sql?: string;
@@ -18,18 +18,14 @@ router.post('/api/migrations/run', async (ctx) => {
   };
 
   if (!version || !name || !sql) {
-    ctx.status = 400;
-    ctx.body = { message: 'version, name, sql are required' };
-    return;
+    return c.json({ message: 'version, name, sql are required' }, 400);
   }
 
   const repo = AppDataSource.getRepository(SchemaMigration);
 
   const existing = await repo.findOne({ where: { version } });
   if (existing) {
-    ctx.status = 409;
-    ctx.body = { message: `Migration ${version} already applied` };
-    return;
+    return c.json({ message: `Migration ${version} already applied` }, 409);
   }
 
   const startTime = Date.now();
@@ -60,12 +56,10 @@ router.post('/api/migrations/run', async (ctx) => {
   await repo.save(record);
 
   if (status === 'failed') {
-    ctx.status = 500;
-    ctx.body = { message: errorMessage, record };
-    return;
+    return c.json({ message: errorMessage, record }, 500);
   }
 
-  ctx.body = record;
+  return c.json(record);
 });
 
-export default router;
+export default app;

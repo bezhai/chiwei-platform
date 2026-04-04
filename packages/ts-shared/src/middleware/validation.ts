@@ -1,4 +1,4 @@
-import type { Context, Next } from 'koa';
+import type { Context, Next } from 'hono';
 
 /**
  * Validation error class
@@ -104,21 +104,22 @@ function validateFields(data: Record<string, unknown>, rules: ValidationRules): 
  * Create request body validation middleware
  */
 export function validateBody(rules: ValidationRules) {
-    return async (ctx: Context, next: Next) => {
+    return async (c: Context, next: Next) => {
         try {
-            const body = (ctx.request as { body?: Record<string, unknown> }).body || {};
+            const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
             validateFields(body, rules);
             await next();
         } catch (error) {
             if (error instanceof ValidationError) {
-                ctx.status = 400;
-                ctx.body = {
-                    success: false,
-                    message: `Validation failed: ${error.message}`,
-                    field: error.field,
-                    error_code: 'VALIDATION_ERROR',
-                };
-                return;
+                return c.json(
+                    {
+                        success: false,
+                        message: `Validation failed: ${error.message}`,
+                        field: error.field,
+                        error_code: 'VALIDATION_ERROR',
+                    },
+                    400,
+                );
             }
             throw error;
         }
@@ -129,21 +130,22 @@ export function validateBody(rules: ValidationRules) {
  * Create query parameter validation middleware
  */
 export function validateQuery(rules: ValidationRules) {
-    return async (ctx: Context, next: Next) => {
+    return async (c: Context, next: Next) => {
         try {
-            const query = (ctx.request.query || {}) as Record<string, unknown>;
+            const query = c.req.query() as Record<string, unknown>;
             validateFields(query, rules);
             await next();
         } catch (error) {
             if (error instanceof ValidationError) {
-                ctx.status = 400;
-                ctx.body = {
-                    success: false,
-                    message: `Query validation failed: ${error.message}`,
-                    field: error.field,
-                    error_code: 'VALIDATION_ERROR',
-                };
-                return;
+                return c.json(
+                    {
+                        success: false,
+                        message: `Query validation failed: ${error.message}`,
+                        field: error.field,
+                        error_code: 'VALIDATION_ERROR',
+                    },
+                    400,
+                );
             }
             throw error;
         }

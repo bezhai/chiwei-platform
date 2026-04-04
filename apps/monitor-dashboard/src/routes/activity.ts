@@ -1,7 +1,7 @@
-import Router from '@koa/router';
+import { Hono } from 'hono';
 import { AppDataSource, ConversationMessage, LarkGroupChatInfo, DiaryEntry, WeeklyReview } from '../db';
 
-const router = new Router();
+const app = new Hono();
 
 function msAgo(days: number): string {
   return String(Date.now() - days * 86400000);
@@ -18,8 +18,8 @@ function msToDateStr(ms: string | number): string {
 }
 
 /** GET /api/activity/overview — 群活跃度概览 */
-router.get('/api/activity/overview', async (ctx) => {
-  const days = Number(ctx.query.days) || 7;
+app.get('/api/activity/overview', async (c) => {
+  const days = Number(c.req.query('days')) || 7;
   const since = msAgo(days);
   const todayMs = todayStartMs();
 
@@ -91,7 +91,7 @@ router.get('/api/activity/overview', async (ctx) => {
         .map(([date, count]) => ({ date, count })),
     }));
 
-  ctx.body = {
+  return c.json({
     summary: {
       period_total: rows.length,
       today_total: todayTotal,
@@ -99,11 +99,11 @@ router.get('/api/activity/overview', async (ctx) => {
       today_active_groups: todayChats.size,
     },
     groups,
-  };
+  });
 });
 
 /** GET /api/activity/diary-status — 日记/周记生成状态 */
-router.get('/api/activity/diary-status', async (ctx) => {
+app.get('/api/activity/diary-status', async (c) => {
   const diaryRepo = AppDataSource.getRepository(DiaryEntry);
   const weeklyRepo = AppDataSource.getRepository(WeeklyReview);
 
@@ -165,10 +165,10 @@ router.get('/api/activity/diary-status', async (ctx) => {
     }
   }
 
-  ctx.body = {
+  return c.json({
     diary: [...diaryMap.entries()].map(([chat_id, v]) => ({ chat_id, ...v })),
     weekly: [...weeklyMap.entries()].map(([chat_id, v]) => ({ chat_id, ...v })),
-  };
+  });
 });
 
-export default router;
+export default app;
