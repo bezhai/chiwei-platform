@@ -65,17 +65,19 @@ def curl_get(url, token):
 
 
 def cmd_query(args):
-    """默认模式：只读 SQL 查询。"""
-    dbname = DEFAULT_DB
-    if args[0].startswith("@"):
-        alias = args.pop(0)[1:]
-        if alias not in DB_ALIASES:
-            print(f"ERROR: 未知数据库 '{alias}'，可用: {', '.join(sorted(set(DB_ALIASES.values())))}", file=sys.stderr)
-            sys.exit(1)
-        dbname = DB_ALIASES[alias]
-        if not args:
-            print("ERROR: 缺少 SQL 查询", file=sys.stderr)
-            sys.exit(1)
+    """只读 SQL 查询，必须指定 @数据库。"""
+    if not args or not args[0].startswith("@"):
+        avail = ", ".join(sorted(set(DB_ALIASES.values())))
+        print(f"ERROR: 必须指定数据库，如 @chiwei 或 @paas_engine（可用: {avail}）", file=sys.stderr)
+        sys.exit(1)
+    alias = args.pop(0)[1:]
+    if alias not in DB_ALIASES:
+        print(f"ERROR: 未知数据库 '{alias}'，可用: {', '.join(sorted(set(DB_ALIASES.values())))}", file=sys.stderr)
+        sys.exit(1)
+    dbname = DB_ALIASES[alias]
+    if not args:
+        print("ERROR: 缺少 SQL 查询", file=sys.stderr)
+        sys.exit(1)
 
     sql = " ".join(args).strip()
     if sql.lower() == "schema":

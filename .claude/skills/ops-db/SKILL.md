@@ -12,12 +12,13 @@ user_invocable: true
 ### 只读查询
 
 ```
-/ops-db <SQL>                    # 查询 paas_engine（默认）
-/ops-db @chiwei <SQL>            # 查询 chiwei
-/ops-db @paas-engine <SQL>       # 查询 paas_engine（显式指定）
-/ops-db schema                   # 查看 paas_engine 的表结构
+/ops-db @chiwei <SQL>            # 查询 chiwei（业务数据）
+/ops-db @paas_engine <SQL>       # 查询 paas_engine（PaaS 元数据）
 /ops-db @chiwei schema           # 查看 chiwei 的表结构
+/ops-db @paas_engine schema      # 查看 paas_engine 的表结构
 ```
+
+**`@数据库` 必填，不传会报错。**
 
 ### 提交变更申请
 
