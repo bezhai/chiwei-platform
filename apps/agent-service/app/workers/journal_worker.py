@@ -69,10 +69,10 @@ def _extract_text(content) -> str:
 
 async def cron_generate_daily_journal(ctx) -> None:
     """cron 入口：为每个 persona bot 生成昨天的 daily journal"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     yesterday = date.today() - timedelta(days=1)
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_daily_journal(yesterday, persona_id=persona_id)
         except Exception as e:
@@ -81,10 +81,10 @@ async def cron_generate_daily_journal(ctx) -> None:
 
 async def cron_generate_weekly_journal(ctx) -> None:
     """cron 入口：为每个 persona bot 生成上周的 weekly journal"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     last_monday = date.today() - timedelta(days=7)
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_weekly_journal(last_monday, persona_id=persona_id)
         except Exception as e:

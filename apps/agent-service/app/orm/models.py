@@ -76,8 +76,10 @@ class ConversationMessage(Base):
     )
     # 向量化状态: pending(待处理) | completed(已完成) | failed(失败)
     vector_status: Mapped[str] = mapped_column(String(20), default="pending")
-    # 机器人名称（用于多 bot 场景下载图片等）
+    # 机器人名称（历史遗留，不再用于身份判断）
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 关联 agent_responses.session_id（assistant 消息）
+    response_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class LarkGroupChatInfo(Base):

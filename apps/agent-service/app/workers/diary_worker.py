@@ -52,10 +52,10 @@ async def _get_persona_lite_for_bot(persona_id: str) -> str:
 
 async def cron_generate_diaries(ctx) -> None:
     """cron 入口：为活跃群和私聊的每个 persona bot 生成昨天的日记"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
     yesterday = date.today() - timedelta(days=1)
 
-    persona_ids = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_ids()
     group_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
     p2p_ids = await get_active_p2p_chat_ids(min_replies=2, days=1)
     all_ids = group_ids + p2p_ids
@@ -430,10 +430,10 @@ async def post_process_group_culture(
 
 async def cron_generate_weekly_reviews(ctx) -> None:
     """cron 入口：为活跃群的每个 persona bot 生成上周的周记"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     chat_ids = await get_active_diary_chat_ids(min_replies=5, days=7)
-    persona_ids = await get_all_persona_bot_names()
+    persona_ids = await get_all_persona_ids()
 
     if not chat_ids or not persona_ids:
         logger.info("No active chats or bots, skip weekly review generation")

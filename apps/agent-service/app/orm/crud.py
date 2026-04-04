@@ -715,8 +715,8 @@ async def get_recent_journals(
         return list(result.scalars().all())
 
 
-async def get_all_persona_bot_names() -> list[str]:
-    """获取所有 persona bot 的 persona_id 列表"""
+async def get_all_persona_ids() -> list[str]:
+    """获取所有 persona 的 persona_id 列表"""
     from app.orm.models import BotPersona
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(BotPersona.persona_id))

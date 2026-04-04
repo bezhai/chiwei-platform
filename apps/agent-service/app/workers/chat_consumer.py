@@ -121,7 +121,7 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
 
     response_bot_name = await _resolve_bot_name_for_persona(persona_id)
 
-    # 修正 agent_response.bot_name（makeTextReply 创建时用的是 SETNX 锁赢家的 bot_name）
+    # 写入 persona_id + 修正 bot_name（makeTextReply 创建时用的是 SETNX 锁赢家的 bot_name）
     try:
         from app.orm.base import AsyncSessionLocal
         from sqlalchemy import text as sql_text
@@ -129,13 +129,14 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
         async with AsyncSessionLocal() as session:
             await session.execute(
                 sql_text(
-                    "UPDATE agent_responses SET bot_name = :bn WHERE session_id = :sid"
+                    "UPDATE agent_responses SET bot_name = :bn, persona_id = :pid "
+                    "WHERE session_id = :sid"
                 ),
-                {"bn": response_bot_name, "sid": session_id},
+                {"bn": response_bot_name, "pid": persona_id, "sid": session_id},
             )
             await session.commit()
     except Exception as e:
-        logger.warning("Failed to update agent_response bot_name: %s", e)
+        logger.warning("Failed to update agent_response: %s", e)
 
     client = RabbitMQClient.get_instance()
 

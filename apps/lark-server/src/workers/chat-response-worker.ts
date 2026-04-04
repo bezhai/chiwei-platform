@@ -315,6 +315,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 create_time: String(now),
                 root_message_id: is_proactive ? (root_id || effectiveMessageId) : (root_id || message_id),
                 reply_message_id: is_proactive ? (root_id || undefined) : message_id,
+                response_id: session_id,
             });
 
             // proactive 没有 agent_response 记录，跳过 replies 追加和状态更新

@@ -45,9 +45,10 @@ export class ConversationMessage {
     @Column({ length: 20, default: 'pending' })
     vector_status!: string;
 
-    /**
-     * 机器人名称（用于多 bot 场景下载图片等）
-     */
     @Column({ length: 50, nullable: true })
     bot_name?: string;
+
+    /** 关联 agent_responses.session_id（assistant 消息） */
+    @Column({ length: 100, nullable: true })
+    response_id?: string;
 }

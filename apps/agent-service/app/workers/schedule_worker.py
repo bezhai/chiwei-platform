@@ -173,9 +173,9 @@ async def _run_critic(
 
 async def cron_generate_monthly_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成本月计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_monthly_plan(persona_id=persona_id)
         except Exception as e:
@@ -184,10 +184,10 @@ async def cron_generate_monthly_plan(ctx) -> None:
 
 async def cron_generate_weekly_plan(ctx) -> None:
     """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
     tomorrow = date.today() + timedelta(days=1)
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_weekly_plan(target_date=tomorrow, persona_id=persona_id)
         except Exception as e:
@@ -196,9 +196,9 @@ async def cron_generate_weekly_plan(ctx) -> None:
 
 async def cron_generate_daily_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成今天的日计划"""
-    from app.orm.crud import get_all_persona_bot_names
+    from app.orm.crud import get_all_persona_ids
 
-    for persona_id in await get_all_persona_bot_names():
+    for persona_id in await get_all_persona_ids():
         try:
             await generate_daily_plan(persona_id=persona_id)
         except Exception as e:

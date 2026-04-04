@@ -112,13 +112,11 @@ async def vectorize_message(message: ConversationMessage) -> bool:
             )
             image_keys = []
 
-    # 4. 批量下载图片转Base64
+    # 4. 批量获取图片（优先从 TOS 缓存，fallback 到飞书下载）
     image_base64_list: list[str] = []
     if image_keys:
-        # bot_name 默认 bytedance（兼容历史数据）
-        bot_name = message.bot_name or "chiwei"
         tasks = [
-            image_client.download_image_as_base64(key, message.message_id, bot_name)
+            image_client.download_image_as_base64(key, message.message_id, "chiwei")
             for key in image_keys
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -328,7 +328,7 @@ async def _get_recent_akao_replies(chat_id: str, persona_id: str, max_replies: i
     if not messages:
         return ""
 
-    akao_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == persona_id]
+    akao_msgs = [m for m in messages if m.role == "assistant" and m.persona_id == persona_id]
     akao_msgs = akao_msgs[-max_replies:]
 
     lines = []

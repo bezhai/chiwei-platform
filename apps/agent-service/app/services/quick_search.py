@@ -73,25 +73,24 @@ async def quick_search(
         if not current_msg:
             return []
 
-        # bot_config 子查询（获取 persona_id）
+        # agent_responses 子查询（获取 persona_id）
         from sqlalchemy import literal_column
-        bot_config_sq = (
+        agent_resp_sq = (
             select(
-                literal_column("bot_config.bot_name").label("bc_bot_name"),
-                literal_column("bot_config.persona_id").label("bc_persona_id"),
+                literal_column("agent_responses.session_id").label("ar_session_id"),
+                literal_column("agent_responses.persona_id").label("ar_persona_id"),
             )
-            .select_from(text("bot_config"))
-            .where(literal_column("bot_config.is_active") == True)
-            .subquery("bc")
+            .select_from(text("agent_responses"))
+            .subquery("ar")
         )
 
-        # 2. 获取同一root_message_id的所有消息，left join lark_user表获取用户名
+        # 2. 获取同一root_message_id的所有消息，left join agent_responses 获取 persona_id
         root_result = await session.execute(
             select(
                 ConversationMessage,
                 LarkUser.name.label("username"),
                 LarkGroupChatInfo.name.label("chat_name"),
-                bot_config_sq.c.bc_persona_id.label("persona_id"),
+                agent_resp_sq.c.ar_persona_id.label("persona_id"),
             )
             .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
             .outerjoin(
@@ -99,8 +98,8 @@ async def quick_search(
                 ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
             )
             .outerjoin(
-                bot_config_sq,
-                ConversationMessage.bot_name == bot_config_sq.c.bc_bot_name,
+                agent_resp_sq,
+                ConversationMessage.response_id == agent_resp_sq.c.ar_session_id,
             )
             .where(ConversationMessage.root_message_id == current_msg.root_message_id)
             .where(ConversationMessage.create_time <= current_msg.create_time)
@@ -123,7 +122,7 @@ async def quick_search(
                     ConversationMessage,
                     LarkUser.name.label("username"),
                     LarkGroupChatInfo.name.label("chat_name"),
-                    bot_config_sq.c.bc_persona_id.label("persona_id"),
+                    agent_resp_sq.c.ar_persona_id.label("persona_id"),
                 )
                 .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
                 .outerjoin(
@@ -131,8 +130,8 @@ async def quick_search(
                     ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
                 )
                 .outerjoin(
-                    bot_config_sq,
-                    ConversationMessage.bot_name == bot_config_sq.c.bc_bot_name,
+                    agent_resp_sq,
+                    ConversationMessage.response_id == agent_resp_sq.c.ar_session_id,
                 )
                 .where(
                     ConversationMessage.chat_id == current_msg.chat_id,
