@@ -1,5 +1,5 @@
 import { TextUtils } from '@inner/shared';
-import { getBotUnionId } from '@core/services/bot/bot-var';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
 export enum ContentType {
     Text = 'text',
@@ -25,6 +25,7 @@ export interface MessageContent {
         {
             name: string;
             openId: string;
+            appId?: string;
         }
     >;
     botAppIds?: string[]; // @mention 的 bot 的 app_id（用于 agent-service 路由）
@@ -71,8 +72,10 @@ export class MessageContentUtils {
         content.mentions.forEach((mention, index) => {
             const mentionInfo = content.mentionMap?.[mention];
             if (mentionInfo) {
-                const botUnionId = getBotUnionId();
-                const displayName = mention === botUnionId ? '赤尾' : mentionInfo.name;
+                // bot mention: 用预加载的 persona display_name; 用户 mention: 用飞书名
+                const displayName = mentionInfo.appId
+                    ? (multiBotManager.getDisplayNameByAppId(mentionInfo.appId) || mentionInfo.name)
+                    : mentionInfo.name;
                 result = result.replace(`@_user_${index + 1}`, `@${displayName}`);
             }
         });

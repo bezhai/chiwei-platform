@@ -1,9 +1,12 @@
 import { BotConfig } from '@entities/bot-config';
+import { BotPersona } from '@entities/bot-persona';
 import { botConfigRepository } from '@repositories/bot-config-repository';
+import { AppDataSource } from 'ormconfig';
 
 export class MultiBotManager {
     private static instance: MultiBotManager;
     private botConfigs: Map<string, BotConfig> = new Map();
+    private appIdToDisplayName: Map<string, string> = new Map();
     private initialized = false;
 
     private constructor() {}
@@ -26,6 +29,9 @@ export class MultiBotManager {
         for (const bot of allBots) {
             this.botConfigs.set(bot.bot_name, bot);
         }
+
+        // 预加载 app_id → persona display_name 映射
+        await this.loadDisplayNames(allBots);
 
         this.initialized = true;
         console.info(`Loaded ${allBots.length} bot configurations`);
@@ -59,6 +65,33 @@ export class MultiBotManager {
             if (!onlyCurrentEnv) return true;
             return bot.is_dev === isDevEnv;
         });
+    }
+
+    // 根据 app_id 获取 persona display_name
+    getDisplayNameByAppId(appId: string): string | null {
+        return this.appIdToDisplayName.get(appId) || null;
+    }
+
+    private async loadDisplayNames(bots: BotConfig[]): Promise<void> {
+        this.appIdToDisplayName.clear();
+        const personaIds = bots
+            .filter((b) => b.persona_id)
+            .map((b) => b.persona_id!);
+
+        if (personaIds.length === 0) return;
+
+        const personaRepo = AppDataSource.getRepository(BotPersona);
+        const personas = await personaRepo.findBy(
+            personaIds.map((id) => ({ persona_id: id })),
+        );
+
+        const personaMap = new Map(personas.map((p) => [p.persona_id, p.display_name]));
+
+        for (const bot of bots) {
+            if (bot.persona_id && personaMap.has(bot.persona_id)) {
+                this.appIdToDisplayName.set(bot.app_id, personaMap.get(bot.persona_id)!);
+            }
+        }
     }
 
     // 重新加载配置

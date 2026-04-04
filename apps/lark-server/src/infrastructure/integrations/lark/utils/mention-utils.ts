@@ -21,6 +21,7 @@ export class MentionUtils {
         {
             name: string;
             openId: string;
+            appId?: string;
         }
     > {
         return mentions
@@ -29,6 +30,7 @@ export class MentionUtils {
                       acc[m.id.union_id!] = {
                           name: m.name,
                           openId: m.id.open_id!,
+                          appId: m.mentioned_type === 'bot' ? m.bot_info?.app_id : undefined,
                       };
                       return acc;
                   },
@@ -37,6 +39,7 @@ export class MentionUtils {
                       {
                           name: string;
                           openId: string;
+                          appId?: string;
                       }
                   >,
               )

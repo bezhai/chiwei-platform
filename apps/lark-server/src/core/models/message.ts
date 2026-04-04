@@ -148,6 +148,10 @@ export class Message {
         return this.content.botAppIds || [];
     }
 
+    hasBotMention(appId: string): boolean {
+        return this.getBotAppIds().includes(appId);
+    }
+
     // For debugging
     toJSON() {
         return {
