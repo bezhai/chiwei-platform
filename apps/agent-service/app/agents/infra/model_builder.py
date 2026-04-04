@@ -97,6 +97,13 @@ def clear_model_info_cache() -> None:
     _model_info_cache.clear()
 
 
+def _get_proxy_url() -> str | None:
+    """返回全局正向代理 URL（如果已配置），否则返回 None。"""
+    from app.config.config import settings
+
+    return settings.forward_proxy_url or None
+
+
 class ModelBuilder:
     """
     模型构建器
@@ -175,6 +182,7 @@ class ModelBuilder:
             "base_url": model_info["base_url"],
             "model": model_info["model_name"],
             "client_type": model_info["client_type"],
+            "use_proxy": model_info.get("use_proxy", False),
         }
 
     @staticmethod
@@ -253,7 +261,7 @@ class ModelBuilder:
                     "max_retries": max_retries,
                     **kwargs,
                 }
-                if settings.forward_proxy_url:
+                if model_info.get("use_proxy") and settings.forward_proxy_url:
                     chat_params["client_args"] = {
                         "proxy": settings.forward_proxy_url
                     }
@@ -273,6 +281,10 @@ class ModelBuilder:
                     "use_responses_api": True,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Responses API）"
                 )
@@ -286,6 +298,10 @@ class ModelBuilder:
                     "use_responses_api": False,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建DeepSeek ChatOpenAI（Completions API）"
                 )
@@ -300,6 +316,10 @@ class ModelBuilder:
                     "use_responses_api": False,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    proxy_url = _get_proxy_url()
+                    if proxy_url:
+                        chat_params["openai_proxy"] = proxy_url
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Completions API）"
                 )

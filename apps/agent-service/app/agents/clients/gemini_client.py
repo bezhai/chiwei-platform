@@ -26,7 +26,7 @@ class GeminiClient(BaseAIClient[genai.Client]):
         http_opts: dict = {}
         if model_info.get("base_url"):
             http_opts["base_url"] = model_info["base_url"]
-        if settings.forward_proxy_url:
+        if model_info.get("use_proxy") and settings.forward_proxy_url:
             http_opts["client_args"] = {"proxy": settings.forward_proxy_url}
 
         return genai.Client(

@@ -40,6 +40,7 @@ class ModelProvider(Base):
     # 用于区分底层客户端类型，例如 "openai"、"ark" 等
     client_type: Mapped[str] = mapped_column(String(50), default="openai")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_proxy: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 

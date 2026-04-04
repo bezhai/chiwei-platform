@@ -65,6 +65,7 @@ def model_info_factory():
         base_url: str = "https://api.test.com/v1",
         client_type: str = "openai-http",
         is_active: bool = True,
+        use_proxy: bool = False,
         **overrides: Any,
     ) -> dict[str, Any]:
         info = {
@@ -74,6 +75,7 @@ def model_info_factory():
             "base_url": base_url,
             "client_type": client_type,
             "is_active": is_active,
+            "use_proxy": use_proxy,
         }
         info.update(overrides)
         return info

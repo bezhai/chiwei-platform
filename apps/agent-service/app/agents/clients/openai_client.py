@@ -12,12 +12,19 @@ class OpenAIClient(BaseAIClient[AsyncOpenAI]):
 
     async def _create_client(self, model_info: dict) -> AsyncOpenAI:
         """创建 AsyncOpenAI 客户端实例。"""
-        return AsyncOpenAI(
-            api_key=model_info["api_key"],
-            base_url=model_info["base_url"],
-            timeout=60.0,
-            max_retries=3,
-        )
+        kwargs: dict = {
+            "api_key": model_info["api_key"],
+            "base_url": model_info["base_url"],
+            "timeout": 60.0,
+            "max_retries": 3,
+        }
+        if model_info.get("use_proxy"):
+            from app.config.config import settings
+
+            if settings.forward_proxy_url:
+                import httpx
+                kwargs["http_client"] = httpx.AsyncClient(proxy=settings.forward_proxy_url)
+        return AsyncOpenAI(**kwargs)
 
     async def embed(
         self,
