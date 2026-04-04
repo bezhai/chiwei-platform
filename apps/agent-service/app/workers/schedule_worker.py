@@ -63,7 +63,7 @@ async def _get_persona_core_for_bot(persona_id: str) -> str:
         return ""
 
 
-async def _get_recent_daily_schedules(before_date: date, persona_id: str = "akao", count: int = 3) -> list[AkaoSchedule]:
+async def _get_recent_daily_schedules(before_date: date, persona_id: str, count: int = 3) -> list[AkaoSchedule]:
     """获取前 N 天的 daily schedule（供 Ideation 和 Critic 去重）"""
     results = await list_schedules(plan_type="daily", persona_id=persona_id, active_only=True, limit=count + 5)
     return [
@@ -211,7 +211,7 @@ async def cron_generate_daily_plan(ctx) -> None:
 
 
 async def generate_monthly_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成月度计划
 
@@ -287,7 +287,7 @@ async def generate_monthly_plan(
 
 
 async def generate_weekly_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成周计划
 
@@ -368,7 +368,7 @@ async def generate_weekly_plan(
 
 
 async def generate_daily_plan(
-    target_date: date | None = None, persona_id: str = "akao"
+    persona_id: str, target_date: date | None = None
 ) -> str | None:
     """生成日计划（手帐式 markdown）
 

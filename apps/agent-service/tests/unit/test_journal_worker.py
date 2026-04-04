@@ -25,7 +25,7 @@ async def test_generate_daily_journal_basic():
         mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
 
         from app.workers.journal_worker import generate_daily_journal
-        result = await generate_daily_journal(date(2026, 3, 26))
+        result = await generate_daily_journal(date(2026, 3, 26), persona_id="akao")
 
     assert result == "今天是个不错的一天"
     mock_upsert.assert_awaited_once()
@@ -40,7 +40,7 @@ async def test_generate_daily_journal_skip_existing():
     existing = MagicMock(content="已有内容")
     with patch("app.workers.journal_worker.get_journal", new_callable=AsyncMock, return_value=existing):
         from app.workers.journal_worker import generate_daily_journal
-        result = await generate_daily_journal(date(2026, 3, 26))
+        result = await generate_daily_journal(date(2026, 3, 26), persona_id="akao")
 
     assert result == "已有内容"
 
@@ -53,6 +53,6 @@ async def test_generate_daily_journal_no_diaries():
         patch("app.workers.journal_worker.get_all_diaries_for_date", new_callable=AsyncMock, return_value=[]),
     ):
         from app.workers.journal_worker import generate_daily_journal
-        result = await generate_daily_journal(date(2026, 3, 26))
+        result = await generate_daily_journal(date(2026, 3, 26), persona_id="akao")
 
     assert result is None

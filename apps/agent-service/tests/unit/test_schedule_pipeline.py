@@ -74,7 +74,7 @@ async def test_pipeline_calls_ideation_writer_critic(common_patches):
               new_callable=AsyncMock, side_effect=fake_critic),
     ):
         from app.workers.schedule_worker import generate_daily_plan
-        result = await generate_daily_plan(FAKE_DATE)
+        result = await generate_daily_plan(persona_id="akao", target_date=FAKE_DATE)
 
     assert call_order == ["ideation", "writer", "critic"]
     assert result == FAKE_SCHEDULE
@@ -104,7 +104,7 @@ async def test_critic_reject_triggers_rewrite(common_patches):
               new_callable=AsyncMock, side_effect=fake_critic),
     ):
         from app.workers.schedule_worker import generate_daily_plan
-        result = await generate_daily_plan(FAKE_DATE)
+        result = await generate_daily_plan(persona_id="akao", target_date=FAKE_DATE)
 
     assert writer_call_count == 2
     assert result == "手帐v2"
@@ -132,7 +132,7 @@ async def test_max_rewrite_attempts(common_patches):
               new_callable=AsyncMock, side_effect=fake_critic),
     ):
         from app.workers.schedule_worker import generate_daily_plan
-        result = await generate_daily_plan(FAKE_DATE)
+        result = await generate_daily_plan(persona_id="akao", target_date=FAKE_DATE)
 
     assert writer_call_count == 3
     assert result == "手帐v3"
@@ -163,7 +163,7 @@ async def test_ideation_failure_degrades_gracefully(common_patches):
               new_callable=AsyncMock, side_effect=fake_critic),
     ):
         from app.workers.schedule_worker import generate_daily_plan
-        result = await generate_daily_plan(FAKE_DATE)
+        result = await generate_daily_plan(persona_id="akao", target_date=FAKE_DATE)
 
     assert result == FAKE_SCHEDULE
     assert writer_received_ideation == ""  # 降级为空字符串

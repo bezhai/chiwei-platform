@@ -34,6 +34,6 @@ async def test_get_journal_returns_none_when_missing():
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
         from app.orm.crud import get_journal
-        result = await get_journal("daily", "2026-03-26")
+        result = await get_journal("daily", "2026-03-26", persona_id="akao")
 
     assert result is None

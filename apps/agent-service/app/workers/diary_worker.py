@@ -76,7 +76,7 @@ async def cron_generate_diaries(ctx) -> None:
 
 
 async def generate_diary_for_chat(
-    chat_id: str, target_date: date, persona_id: str = "akao"
+    chat_id: str, target_date: date, persona_id: str
 ) -> str | None:
     """为指定群或私聊生成指定日期的日记
 
@@ -452,7 +452,7 @@ async def cron_generate_weekly_reviews(ctx) -> None:
 
 
 async def generate_weekly_review_for_chat(
-    chat_id: str, target_monday: date | None = None, persona_id: str = "akao"
+    chat_id: str, persona_id: str, target_monday: date | None = None
 ) -> str | None:
     """为指定群生成周记
 

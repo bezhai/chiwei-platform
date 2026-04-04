@@ -45,7 +45,7 @@ async def _get_persona_lite_for_bot(persona_id: str) -> str:
         return ""
 
 
-async def _get_recent_journals_text(target_date: date, persona_id: str = "akao", limit: int = 3) -> str:
+async def _get_recent_journals_text(target_date: date, persona_id: str, limit: int = 3) -> str:
     """获取前 N 天的 daily journal 内容，用于避免重复意象"""
     journals = await get_recent_journals("daily", target_date.isoformat(), persona_id=persona_id, limit=limit)
     if not journals:
@@ -95,7 +95,7 @@ async def cron_generate_weekly_journal(ctx) -> None:
 
 
 async def generate_daily_journal(
-    target_date: date, persona_id: str = "akao"
+    target_date: date, persona_id: str
 ) -> str | None:
     """生成赤尾的每日个人日志
 
@@ -166,7 +166,7 @@ async def generate_daily_journal(
 
 
 async def generate_weekly_journal(
-    monday_date: date, persona_id: str = "akao"
+    monday_date: date, persona_id: str
 ) -> str | None:
     """生成赤尾的每周日志
 

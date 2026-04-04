@@ -163,7 +163,7 @@ async def quick_search(
                     role=str(msg.role),
                     username=username if msg.role == "user" else (msg.bot_name or "assistant"),
                     bot_name=msg.bot_name if msg.role == "assistant" else None,
-                    persona_id=(persona_id or "akao") if msg.role == "assistant" else None,
+                    persona_id=persona_id if msg.role == "assistant" else None,
                     chat_type=str(msg.chat_type),
                     chat_name=chat_name,
                     reply_message_id=(

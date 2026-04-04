@@ -46,20 +46,20 @@ async def _get_persona_context(persona_id: str) -> tuple[str, str]:
 _BASE_TTL_SECONDS = 43200  # 12 小时，覆盖到下一次定时生成
 
 
-async def get_base_reply_style(persona_id: str = "akao") -> str | None:
+async def get_base_reply_style(persona_id: str) -> str | None:
     """读取指定 bot 的全局基线 reply_style"""
     redis = AsyncRedisClient.get_instance()
     return await redis.get(_base_key(persona_id))
 
 
-async def set_base_reply_style(style: str, persona_id: str = "akao") -> None:
+async def set_base_reply_style(style: str, persona_id: str) -> None:
     """写入指定 bot 的全局基线 reply_style"""
     redis = AsyncRedisClient.get_instance()
     await redis.set(_base_key(persona_id), style, ex=_BASE_TTL_SECONDS)
     logger.info(f"[{persona_id}] Base reply_style updated: {style[:50]}...")
 
 
-async def generate_base_reply_style(persona_id: str = "akao") -> str | None:
+async def generate_base_reply_style(persona_id: str) -> str | None:
     """基于当前 Schedule 生成指定 bot 的全局基线 reply_style
 
     不依赖任何群/私聊的消息，只用 schedule + 当前时段。
@@ -363,7 +363,7 @@ async def _get_recent_persona_replies(chat_id: str, persona_id: str, max_replies
     return "\n".join(lines)
 
 
-async def _get_schedule_context(persona_id: str = "akao") -> str:
+async def _get_schedule_context(persona_id: str) -> str:
     """获取当前时段的 Schedule daily"""
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")
