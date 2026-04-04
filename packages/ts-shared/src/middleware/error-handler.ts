@@ -1,5 +1,5 @@
 import type { Context } from 'hono';
-import type { StatusCode } from 'hono/utils/http-status';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 
 /**
  * Options for error handler
@@ -48,7 +48,7 @@ export function createErrorHandler(options: ErrorHandlerOptions = {}) {
                     error: err.message,
                     code: err.statusCode,
                 },
-                err.statusCode as StatusCode,
+                err.statusCode as ContentfulStatusCode,
             );
         }
 
