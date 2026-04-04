@@ -212,7 +212,7 @@ async def submit_proactive_request(
         生成的 session_id
     """
     from app.services.bot_context import _resolve_bot_name_for_persona
-    bot_name = await _resolve_bot_name_for_persona(persona_id)
+    bot_name = await _resolve_bot_name_for_persona(persona_id, chat_id)
 
     session_id = str(uuid.uuid4())
     message_id = f"proactive_{int(time.time() * 1000)}"

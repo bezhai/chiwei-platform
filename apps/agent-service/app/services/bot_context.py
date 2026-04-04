@@ -35,21 +35,43 @@ async def _resolve_persona_id(bot_name: str) -> str:
 
 
 async def _resolve_bot_name_for_persona(persona_id: str, chat_id: str = "") -> str:
-    """从 persona_id 反查 bot_name（同群约束下唯一）"""
+    """从 persona_id + chat_id 精确查找应该用哪个 bot 发消息
+
+    查 bot_chat_presence JOIN bot_config，精确匹配群内的 bot。
+    查不到则打告警日志并返回 persona_id（让调用方自行处理）。
+    """
     from app.orm.base import AsyncSessionLocal
     from sqlalchemy import text
+
+    if not chat_id:
+        logger.warning(
+            "[resolve_bot] chat_id 为空，无法精确匹配 bot: persona_id=%s",
+            persona_id,
+        )
+        return persona_id
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text(
-                "SELECT bot_name FROM bot_config "
-                "WHERE persona_id = :pid AND is_active = true "
+                "SELECT bc.bot_name FROM bot_config bc "
+                "JOIN bot_chat_presence bp ON bc.bot_name = bp.bot_name "
+                "WHERE bp.chat_id = :cid AND bp.is_active = true "
+                "AND bc.persona_id = :pid AND bc.is_active = true "
                 "LIMIT 1"
             ),
-            {"pid": persona_id},
+            {"cid": chat_id, "pid": persona_id},
         )
         row = result.scalar_one_or_none()
-        return row if row else persona_id
+        if row:
+            return row
+
+    logger.error(
+        "[resolve_bot] bot_chat_presence 未命中: persona_id=%s, chat_id=%s — "
+        "请检查 bot_chat_presence 表是否有数据，或该 bot 是否在群里",
+        persona_id,
+        chat_id,
+    )
+    return persona_id
 
 
 class BotContext:

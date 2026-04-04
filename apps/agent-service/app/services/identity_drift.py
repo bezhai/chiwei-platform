@@ -350,7 +350,7 @@ async def _get_recent_persona_replies(chat_id: str, persona_id: str, max_replies
     if not messages:
         return ""
 
-    bot_name = await _resolve_bot_name_for_persona(persona_id)
+    bot_name = await _resolve_bot_name_for_persona(persona_id, chat_id)
     persona_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == bot_name]
     persona_msgs = persona_msgs[-max_replies:]
 
