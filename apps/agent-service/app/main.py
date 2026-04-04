@@ -17,6 +17,26 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+async def _maybe_migrate_bot_chat_presence():
+    """bot_chat_presence 为空时，调飞书 API 填充存量数据（一次性）"""
+    try:
+        from app.orm.base import AsyncSessionLocal
+        from sqlalchemy import text
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text("SELECT COUNT(*) FROM bot_chat_presence"))
+            count = result.scalar()
+            if count and count > 0:
+                logger.info("bot_chat_presence already has %d rows, skip migration", count)
+                return
+
+        logger.info("bot_chat_presence is empty, starting migration...")
+        from scripts.migrate_bot_chat_presence import main as run_migration
+        await run_migration()
+    except Exception as e:
+        logger.error("bot_chat_presence migration failed: %s", e, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -32,6 +52,9 @@ async def lifespan(app: FastAPI):
 
     skills_dir = Path(__file__).parent / "skills" / "definitions"
     SkillRegistry.load_all(skills_dir)
+
+    # 一次性迁移：bot_chat_presence 为空时自动填充
+    asyncio.create_task(_maybe_migrate_bot_chat_presence())
 
     # 启动 MQ consumers（仅当 RabbitMQ 配置存在时）
     consumer_tasks: list[asyncio.Task] = []
