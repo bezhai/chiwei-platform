@@ -97,6 +97,16 @@ def clear_model_info_cache() -> None:
     _model_info_cache.clear()
 
 
+def _make_proxy_async_client() -> "httpx.AsyncClient | None":
+    """如果全局正向代理已配置，返回带 proxy 的 httpx.AsyncClient，否则返回 None。"""
+    from app.config.config import settings
+
+    if not settings.forward_proxy_url:
+        return None
+    import httpx
+    return httpx.AsyncClient(proxy=settings.forward_proxy_url)
+
+
 class ModelBuilder:
     """
     模型构建器
@@ -175,6 +185,7 @@ class ModelBuilder:
             "base_url": model_info["base_url"],
             "model": model_info["model_name"],
             "client_type": model_info["client_type"],
+            "use_proxy": model_info.get("use_proxy", False),
         }
 
     @staticmethod
@@ -253,7 +264,7 @@ class ModelBuilder:
                     "max_retries": max_retries,
                     **kwargs,
                 }
-                if settings.forward_proxy_url:
+                if model_info.get("use_proxy") and settings.forward_proxy_url:
                     chat_params["client_args"] = {
                         "proxy": settings.forward_proxy_url
                     }
@@ -273,6 +284,10 @@ class ModelBuilder:
                     "use_responses_api": True,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    http_async_client = _make_proxy_async_client()
+                    if http_async_client:
+                        chat_params["http_async_client"] = http_async_client
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Responses API）"
                 )
@@ -286,6 +301,10 @@ class ModelBuilder:
                     "use_responses_api": False,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    http_async_client = _make_proxy_async_client()
+                    if http_async_client:
+                        chat_params["http_async_client"] = http_async_client
                 logger.info(
                     f"为模型 {model_id} 构建DeepSeek ChatOpenAI（Completions API）"
                 )
@@ -300,6 +319,10 @@ class ModelBuilder:
                     "use_responses_api": False,
                     **kwargs,
                 }
+                if model_info.get("use_proxy"):
+                    http_async_client = _make_proxy_async_client()
+                    if http_async_client:
+                        chat_params["http_async_client"] = http_async_client
                 logger.info(
                     f"为模型 {model_id} 构建ChatOpenAI（Completions API）"
                 )
