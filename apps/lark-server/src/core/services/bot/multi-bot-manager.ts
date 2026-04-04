@@ -2,7 +2,7 @@ import { In } from 'typeorm';
 import { BotConfig } from '@entities/bot-config';
 import { BotPersona } from '@entities/bot-persona';
 import { botConfigRepository } from '@repositories/bot-config-repository';
-import { AppDataSource } from 'ormconfig';
+import AppDataSource from 'ormconfig';
 
 export class MultiBotManager {
     private static instance: MultiBotManager;
