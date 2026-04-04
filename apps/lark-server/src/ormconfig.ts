@@ -12,6 +12,7 @@ import {
     UserBlacklist,
     ConversationMessage,
     AgentResponse,
+    BotChatPresence,
 } from './infrastructure/dal/entities';
 
 const AppDataSource = new DataSource({
@@ -36,6 +37,7 @@ const AppDataSource = new DataSource({
         UserBlacklist,
         ConversationMessage,
         AgentResponse,
+        BotChatPresence,
     ],
 });
 
