@@ -13,6 +13,7 @@ class BlockReason(str, Enum):
     BANNED_WORD = "banned_word"
     PROMPT_INJECTION = "prompt_injection"
     SENSITIVE_POLITICS = "sensitive_politics"
+    NSFW_CONTENT = "nsfw_content"
 
 
 @dataclass
@@ -36,6 +37,7 @@ class PreState(TypedDict):
 
     # 输入
     message_content: str
+    persona_id: str
 
     # 安全检测结果（并行合并）
     safety_results: Annotated[list[SafetyResult], merge_safety_results]
