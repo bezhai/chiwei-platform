@@ -1,3 +1,4 @@
+import { In } from 'typeorm';
 import { BotConfig } from '@entities/bot-config';
 import { BotPersona } from '@entities/bot-persona';
 import { botConfigRepository } from '@repositories/bot-config-repository';
@@ -81,9 +82,9 @@ export class MultiBotManager {
         if (personaIds.length === 0) return;
 
         const personaRepo = AppDataSource.getRepository(BotPersona);
-        const personas = await personaRepo.findBy(
-            personaIds.map((id) => ({ persona_id: id })),
-        );
+        const personas = await personaRepo.findBy({
+            persona_id: In(personaIds),
+        });
 
         const personaMap = new Map(personas.map((p) => [p.persona_id, p.display_name]));
 
