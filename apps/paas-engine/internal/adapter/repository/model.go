@@ -14,6 +14,7 @@ type AppModel struct {
 	EnvFromConfigMaps string // JSON 序列化的 []string
 	Envs              string // JSON 序列化的 map[string]string
 	ConfigBundles     string // JSON 序列化的 []string
+	SidecarEnabled    bool
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

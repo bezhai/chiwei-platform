@@ -107,6 +107,7 @@ func appToModel(a *domain.App) (*AppModel, error) {
 		EnvFromConfigMaps: string(envFromConfigMapsJSON),
 		Envs:              string(envsJSON),
 		ConfigBundles:     string(configBundlesJSON),
+		SidecarEnabled:    a.SidecarEnabled,
 		CreatedAt:         a.CreatedAt,
 		UpdatedAt:         a.UpdatedAt,
 	}, nil
@@ -154,6 +155,7 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 		EnvFromConfigMaps: envFromConfigMaps,
 		Envs:              envs,
 		ConfigBundles:     configBundles,
+		SidecarEnabled:    m.SidecarEnabled,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}, nil

@@ -230,6 +230,53 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 		}
 	}
 
+	var initContainers []corev1.Container
+	var sidecarContainers []corev1.Container
+
+	if app.SidecarEnabled {
+		sidecarImage := "harbor.local:30002/chiwei/lane-sidecar:latest"
+		proxyUID := int64(1337)
+		rootUID := int64(0)
+
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "lane-sidecar-init",
+			Image:   sidecarImage,
+			Command: []string{"lane-sidecar", "--init"},
+			SecurityContext: &corev1.SecurityContext{
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{"NET_ADMIN"},
+				},
+				RunAsUser: &rootUID,
+			},
+		})
+
+		sidecarContainers = append(sidecarContainers, corev1.Container{
+			Name:  "lane-sidecar",
+			Image: sidecarImage,
+			Env: []corev1.EnvVar{
+				{Name: "REGISTRY_URL", Value: "http://lite-registry:8080"},
+				{Name: "LANE", Value: release.Lane},
+			},
+			Ports: []corev1.ContainerPort{
+				{Name: "sidecar", ContainerPort: 15001},
+				{Name: "sidecar-health", ContainerPort: 15021},
+			},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/healthz",
+						Port: intstr.FromInt(15021),
+					},
+				},
+				InitialDelaySeconds: 2,
+				PeriodSeconds:       10,
+			},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser: &proxyUID,
+			},
+		})
+	}
+
 	revisionHistoryLimit := int32(2)
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -246,7 +293,8 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 				Spec: corev1.PodSpec{
 					ServiceAccountName: app.ServiceAccount,
 					NodeSelector:       map[string]string{"node-role": "app"},
-					Containers:         []corev1.Container{container},
+					InitContainers:     initContainers,
+					Containers:         append([]corev1.Container{container}, sidecarContainers...),
 				},
 			},
 		},
