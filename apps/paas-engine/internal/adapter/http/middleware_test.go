@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -41,5 +42,41 @@ func TestAuthMiddleware(t *testing.T) {
 				t.Errorf("got status %d, want %d", rec.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestContextPropagationMiddleware(t *testing.T) {
+	handler := contextPropagationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := GetContextHeaders(r.Context())
+		if headers["x-ctx-lane"] != "dev" {
+			t.Errorf("expected x-ctx-lane=dev, got %q", headers["x-ctx-lane"])
+		}
+		if headers["x-ctx-trace-id"] != "abc" {
+			t.Errorf("expected x-ctx-trace-id=abc, got %q", headers["x-ctx-trace-id"])
+		}
+		if _, ok := headers["x-unrelated"]; ok {
+			t.Error("unexpected non-ctx header in context")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("x-ctx-lane", "dev")
+	req.Header.Set("x-ctx-trace-id", "abc")
+	req.Header.Set("x-unrelated", "ignored")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetContextHeaders_NoContext(t *testing.T) {
+	ctx := context.Background()
+	headers := GetContextHeaders(ctx)
+	if len(headers) != 0 {
+		t.Errorf("expected empty headers, got %v", headers)
 	}
 }

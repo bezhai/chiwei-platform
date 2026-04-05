@@ -23,6 +23,7 @@ func NewRouter(
 	r.Use(middleware.Recoverer)
 	r.Use(metricsMiddleware)
 	r.Use(loggingMiddleware)
+	r.Use(contextPropagationMiddleware)
 	r.Use(bodySizeLimitMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
