@@ -17,7 +17,6 @@ from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
 from app.orm.crud import (
-    get_journal,
     get_latest_plan,
     get_plan_for_period,
     list_schedules,
@@ -404,10 +403,10 @@ async def generate_daily_plan(
     weekly = await get_plan_for_period("weekly", week_start.isoformat(), week_end.isoformat(), persona_id)
     weekly_text = weekly.content if weekly else "（暂无周计划）"
 
-    # 昨天 Journal
-    yesterday = (target_date - timedelta(days=1)).isoformat()
-    yesterday_journal_entry = await get_journal("daily", yesterday, persona_id)
-    yesterday_journal = yesterday_journal_entry.content if yesterday_journal_entry else "（昨天没有写日志）"
+    # 昨天的记忆（v3: 从 daily 碎片取，替代旧 Journal）
+    from app.orm.memory_crud import get_recent_fragments_by_grain
+    recent_dailies = await get_recent_fragments_by_grain(persona_id, "daily", limit=1)
+    yesterday_journal = recent_dailies[0].content if recent_dailies else "（昨天没有写日志）"
 
     # 前 3 天 schedule（Ideation 和 Critic 共用）
     recent = await _get_recent_daily_schedules(target_date, persona_id)

@@ -36,8 +36,8 @@ def common_patches():
     with (
         patch("app.workers.schedule_worker.get_plan_for_period",
               new_callable=AsyncMock, side_effect=_mock_get_plan),
-        patch("app.workers.schedule_worker.get_journal",
-              new_callable=AsyncMock, return_value=MagicMock(content=FAKE_JOURNAL)),
+        patch("app.orm.memory_crud.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=[MagicMock(content=FAKE_JOURNAL)]),
         patch("app.orm.crud.get_bot_persona",
               new_callable=AsyncMock, return_value=fake_persona_obj),
         patch("app.workers.schedule_worker._get_recent_daily_schedules",
