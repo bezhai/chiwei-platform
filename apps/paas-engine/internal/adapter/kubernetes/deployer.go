@@ -234,7 +234,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	var sidecarContainers []corev1.Container
 
 	if app.SidecarEnabled {
-		sidecarImage := "harbor.local:30002/inner-bot/lane-sidecar:1.0.0.4"
+		sidecarImage := "harbor.local:30002/inner-bot/lane-sidecar:1.0.0.5"
 		proxyUID := int64(1337)
 		rootUID := int64(0)
 
