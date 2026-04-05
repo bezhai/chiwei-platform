@@ -2,6 +2,8 @@
 API路由汇总
 """
 
+import asyncio
+import logging
 import os
 from datetime import date, timedelta
 
@@ -93,6 +95,7 @@ async def trigger_weekly_review(chat_id: str, persona_id: str, week_start: str |
 
 @api_router.post("/admin/trigger-journal", tags=["Admin"])
 async def trigger_journal(
+    persona_id: str,
     journal_type: str = "daily",
     target_date: str | None = None,
     backfill_start: str | None = None,
@@ -104,6 +107,7 @@ async def trigger_journal(
     批量回溯：指定 backfill_start + backfill_end
 
     Args:
+        persona_id: persona 标识
         journal_type: "daily" | "weekly"
         target_date: 单日模式的目标日期
         backfill_start: 批量回溯起始日期
@@ -120,9 +124,9 @@ async def trigger_journal(
         while current <= end:
             try:
                 if journal_type == "daily":
-                    content = await generate_daily_journal(current)
+                    content = await generate_daily_journal(current, persona_id=persona_id)
                 else:
-                    content = await generate_weekly_journal(current)
+                    content = await generate_weekly_journal(current, persona_id=persona_id)
                 results.append({
                     "date": current.isoformat(),
                     "ok": bool(content),
@@ -136,9 +140,9 @@ async def trigger_journal(
     # 单日模式
     d = date.fromisoformat(target_date) if target_date else date.today() - timedelta(days=1)
     if journal_type == "daily":
-        content = await generate_daily_journal(d)
+        content = await generate_daily_journal(d, persona_id=persona_id)
     elif journal_type == "weekly":
-        content = await generate_weekly_journal(d)
+        content = await generate_weekly_journal(d, persona_id=persona_id)
     else:
         return {"ok": False, "message": f"Unknown journal_type: {journal_type}"}
 
@@ -146,17 +150,68 @@ async def trigger_journal(
 
 
 @api_router.post("/admin/trigger-diary", tags=["Admin"])
-async def trigger_diary(chat_id: str, target_date: str | None = None):
+async def trigger_diary(chat_id: str, persona_id: str, target_date: str | None = None):
     """手动触发日记生成
 
     Args:
         chat_id: 群 ID
+        persona_id: persona 标识
         target_date: 目标日期（如 "2026-03-12"），默认昨天
     """
     from app.workers.diary_worker import generate_diary_for_chat
 
     d = date.fromisoformat(target_date) if target_date else date.today() - timedelta(days=1)
-    content = await generate_diary_for_chat(chat_id, d)
+    content = await generate_diary_for_chat(chat_id, d, persona_id=persona_id)
     if content is None:
         return {"ok": False, "message": "该日无消息，跳过"}
     return {"ok": True, "date": d.isoformat(), "content": content}
+
+
+@api_router.post("/admin/trigger-nightly", tags=["Admin"])
+async def trigger_nightly(target_date: str | None = None):
+    """手动触发完整夜间管线（后台运行）: diary → journal → schedule
+
+    Args:
+        target_date: diary/journal 源日期（默认昨天），schedule 自动 +1 天
+    """
+    from app.orm.crud import get_all_persona_ids
+
+    logger = logging.getLogger(__name__)
+    diary_date = date.fromisoformat(target_date) if target_date else date.today() - timedelta(days=1)
+    schedule_date = diary_date + timedelta(days=1)
+    persona_ids = await get_all_persona_ids()
+
+    async def _pipeline():
+        from app.orm.crud import get_active_diary_chat_ids, get_active_p2p_chat_ids
+        from app.workers.diary_worker import generate_diary_for_chat
+        from app.workers.journal_worker import generate_daily_journal
+        from app.workers.schedule_worker import generate_daily_plan
+
+        all_chat_ids = (
+            await get_active_diary_chat_ids(min_replies=5, days=7)
+            + await get_active_p2p_chat_ids(min_replies=2, days=1)
+        )
+        for persona_id in persona_ids:
+            for chat_id in all_chat_ids:
+                try:
+                    await generate_diary_for_chat(chat_id, diary_date, persona_id=persona_id)
+                except Exception as e:
+                    logger.error(f"[nightly][{persona_id}] Diary failed for {chat_id}: {e}")
+        for persona_id in persona_ids:
+            try:
+                await generate_daily_journal(diary_date, persona_id=persona_id)
+            except Exception as e:
+                logger.error(f"[nightly][{persona_id}] Journal failed: {e}")
+        for persona_id in persona_ids:
+            try:
+                await generate_daily_plan(persona_id=persona_id, target_date=schedule_date)
+            except Exception as e:
+                logger.error(f"[nightly][{persona_id}] Schedule failed: {e}")
+        logger.info(f"[nightly] Pipeline done: diary/journal={diary_date}, schedule={schedule_date}")
+
+    asyncio.create_task(_pipeline())
+    return {
+        "ok": True,
+        "message": f"Pipeline started: diary/journal={diary_date}, schedule={schedule_date}",
+        "personas": persona_ids,
+    }
