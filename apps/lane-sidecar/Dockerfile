@@ -2,8 +2,7 @@
 FROM harbor.local:30002/library/golang:1.25-alpine AS builder
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,direct
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod ./
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/lane-sidecar ./cmd/lane-sidecar
 
