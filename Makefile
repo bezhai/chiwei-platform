@@ -255,10 +255,13 @@ logs:
 		PARAMS="$$PARAMS&since=$(SINCE)"; \
 	fi; \
 	echo ">>> 查询日志: $$PARAMS"; \
-	RESP=$$(curl -sf "$(PAAS_API)/api/paas/logs?$$PARAMS" \
-		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE)); \
-	if [ -z "$$RESP" ]; then echo "(请求失败或无响应)"; exit 1; fi; \
-	echo "$$RESP" | python3 -c "import sys,json; print(json.loads(sys.stdin.buffer.read(),strict=False).get('data',{}).get('logs','(无日志)'))"
+	curl -sf "$(PAAS_API)/api/paas/logs?$$PARAMS" \
+		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) | \
+	python3 -c "\
+import sys,json; \
+raw=sys.stdin.buffer.read(); \
+exit(print('(请求失败或无响应)') or 1) if not raw else None; \
+print(json.loads(raw,strict=False).get('data',{}).get('logs','(无日志)'))"
 
 # ---------- 泳道绑定 ----------
 
