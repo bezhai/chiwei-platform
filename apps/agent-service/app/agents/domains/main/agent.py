@@ -399,6 +399,16 @@ async def _build_and_stream(
                 )
             except Exception as e:
                 logger.warning(f"Identity drift trigger failed: {e}")
+        # Fire-and-forget: trigger afterthought (conversation fragment)
+        if full_content:
+            try:
+                from app.services.afterthought import AfterthoughtManager
+
+                asyncio.create_task(
+                    AfterthoughtManager.get_instance().on_event(chat_id, bot_ctx.persona_id)
+                )
+            except Exception as e:
+                logger.warning(f"Afterthought trigger failed: {e}")
 
     except Exception as e:
         import traceback
