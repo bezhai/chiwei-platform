@@ -212,9 +212,9 @@ async def test_build_entity_context_basic():
             ["uid_1"], "chat_abc", "group"
         )
 
-    assert name_map == {"uid_1": "阿儒(#3)"}
+    assert name_map == {"uid_1": "阿儒(#3)", "chat_abc": "番剧群(#7)"}
+    assert mentioned_ids[0] == 7  # chat entity first
     assert 3 in mentioned_ids
-    assert 7 in mentioned_ids
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_build_entity_context_no_users():
         from app.services.entity_resolver import build_entity_context
         name_map, mentioned_ids = await build_entity_context([], "chat_abc", "group")
 
-    assert name_map == {}
+    assert name_map == {"chat_abc": "番剧群(#7)"}
     assert mentioned_ids == [7]
 
 

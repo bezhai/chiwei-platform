@@ -89,7 +89,7 @@ async def get_fragments_in_date_range(
     end_date: date,
     grains: list[str] | None = None,
 ) -> list[ExperienceFragment]:
-    """查指定日期范围内的碎片（以 CST 00:00 为边界，created_at DESC）"""
+    """查指定日期范围内的碎片（以 CST 00:00 为边界，按时间正序）"""
     start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=_CST)
     # end_date 含当天，取次日 00:00
     end_dt = datetime(end_date.year, end_date.month, end_date.day, tzinfo=_CST) + timedelta(days=1)
@@ -102,7 +102,7 @@ async def get_fragments_in_date_range(
         )
         if grains:
             stmt = stmt.where(ExperienceFragment.grain.in_(grains))
-        stmt = stmt.order_by(ExperienceFragment.created_at.desc())
+        stmt = stmt.order_by(ExperienceFragment.created_at.asc())
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
