@@ -17,3 +17,6 @@ export { createBearerAuthMiddleware, bearerAuthMiddleware } from './auth';
 // validation
 export type { ValidationRule, ValidationRules } from './validation';
 export { ValidationError, validateBody, validateQuery } from './validation';
+
+// context-propagation
+export { createContextPropagationMiddleware, getContextHeaders } from './context-propagation';
