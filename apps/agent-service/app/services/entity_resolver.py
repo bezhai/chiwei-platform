@@ -93,8 +93,9 @@ async def build_entity_context(
     name_map: dict[str, str] = {
         uid: format_entity_ref(entity) for uid, entity in user_entities.items()
     }
+    name_map[chat_id] = format_entity_ref(chat_entity)
 
-    mentioned_ids: list[int] = [entity.id for entity in user_entities.values()]
-    mentioned_ids.append(chat_entity.id)
+    mentioned_ids: list[int] = [chat_entity.id]
+    mentioned_ids.extend(entity.id for entity in user_entities.values())
 
     return name_map, mentioned_ids
