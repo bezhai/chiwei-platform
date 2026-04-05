@@ -95,6 +95,21 @@ func TestHandler_FallbackWhenNoLane(t *testing.T) {
 	}
 }
 
+func TestIsHTTPByte(t *testing.T) {
+	httpBytes := []byte{'G', 'P', 'D', 'H', 'O', 'C', 'T'}
+	for _, b := range httpBytes {
+		if !isHTTPByte(b) {
+			t.Errorf("expected %c to be HTTP", b)
+		}
+	}
+	nonHTTPBytes := []byte{0x16, 0x00, 'A', 'X', '\n'}
+	for _, b := range nonHTTPBytes {
+		if isHTTPByte(b) {
+			t.Errorf("did not expect %c (0x%02x) to be HTTP", b, b)
+		}
+	}
+}
+
 func TestHandler_ExternalTrafficPassthrough(t *testing.T) {
 	externalBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("external-response"))

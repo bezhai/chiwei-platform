@@ -1,15 +1,19 @@
-// Package proxy provides a transparent HTTP reverse proxy that intercepts
-// outbound traffic (via iptables REDIRECT) and routes requests to lane-specific
-// service instances based on the x-ctx-lane header.
+// Package proxy provides a transparent reverse proxy that intercepts outbound
+// traffic (via iptables REDIRECT) and routes HTTP requests to lane-specific
+// service instances based on the x-ctx-lane header. Non-HTTP traffic is
+// passed through to the original destination via TCP tunneling.
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/chiwei-platform/lane-sidecar/internal/registry"
@@ -20,8 +24,7 @@ import (
 // tests it redirects to httptest servers.
 type HostMapper func(host string) string
 
-// DefaultHostMapper returns the host unchanged — used in production where
-// DNS resolution handles the mapping.
+// DefaultHostMapper returns the host unchanged.
 func DefaultHostMapper(host string) string { return host }
 
 // Handler is an http.Handler that reverse-proxies every incoming request
@@ -55,8 +58,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
-			// Preserve the original Host header so upstream services
-			// see the logical service name, not the resolved address.
 			req.Host = r.Host
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -67,20 +68,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// Server wraps a Handler in an http.Server with production-ready timeouts.
+// Server accepts TCP connections, detects the protocol, and routes:
+//   - HTTP traffic → lane-aware reverse proxy
+//   - Non-HTTP traffic → TCP passthrough to original destination
 type Server struct {
 	handler    *Handler
 	listenAddr string
+	listener   net.Listener
 	httpServer *http.Server
+	httpLn     *chanListener
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// NewServer creates a Server that listens on listenAddr (e.g. ":15001")
-// and routes traffic through the given resolver.
+// NewServer creates a Server that listens on listenAddr (e.g. ":15001").
 func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	handler := NewHandler(resolver, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	httpLn := &chanListener{ch: make(chan net.Conn), done: make(chan struct{})}
+
 	s := &Server{
 		handler:    handler,
 		listenAddr: listenAddr,
+		httpLn:     httpLn,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 	s.httpServer = &http.Server{
 		Handler:      handler,
@@ -90,18 +104,160 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	return s
 }
 
-// ListenAndServe starts the proxy server. It blocks until the server is
-// shut down or encounters a fatal error.
+// ListenAndServe starts the proxy server.
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
 		return err
 	}
+	s.listener = ln
 	log.Printf("[proxy] listening on %s", s.listenAddr)
-	return s.httpServer.Serve(ln)
+
+	// Start HTTP server on the channel-based listener
+	go s.httpServer.Serve(s.httpLn)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-s.ctx.Done():
+				return http.ErrServerClosed
+			default:
+				log.Printf("[proxy] accept error: %v", err)
+				continue
+			}
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConn(conn)
+		}()
+	}
 }
 
-// Shutdown gracefully shuts down the proxy server.
+// Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	s.cancel()
+	if s.listener != nil {
+		s.listener.Close()
+	}
+	close(s.httpLn.done)
+	s.httpServer.Shutdown(ctx)
+	s.wg.Wait()
+	return nil
+}
+
+func (s *Server) handleConn(conn net.Conn) {
+	defer conn.Close()
+
+	// Peek at first byte to detect protocol
+	br := bufio.NewReader(conn)
+	first, err := br.Peek(1)
+	if err != nil {
+		return
+	}
+
+	peekConn := &bufferedConn{Conn: conn, reader: br, done: make(chan struct{})}
+
+	if isHTTPByte(first[0]) {
+		// HTTP → hand off to http.Server via channel listener
+		s.httpLn.ch <- peekConn
+		// Wait for http.Server to finish with this connection
+		<-peekConn.done
+	} else {
+		// Non-HTTP → TCP passthrough to original destination
+		s.tcpPassthrough(peekConn)
+	}
+}
+
+// tcpPassthrough tunnels the connection to the original destination.
+func (s *Server) tcpPassthrough(conn net.Conn) {
+	tcpConn, ok := conn.(*bufferedConn)
+	if !ok {
+		log.Printf("[proxy] non-TCP connection, closing")
+		return
+	}
+
+	origConn, ok := tcpConn.Conn.(*net.TCPConn)
+	if !ok {
+		log.Printf("[proxy] cannot get original dst: not a TCPConn")
+		return
+	}
+
+	origDst, err := GetOriginalDst(origConn)
+	if err != nil {
+		log.Printf("[proxy] get original dst: %v", err)
+		return
+	}
+
+	upstream, err := net.DialTimeout("tcp", origDst.String(), 5*time.Second)
+	if err != nil {
+		log.Printf("[proxy] dial original dst %s: %v", origDst, err)
+		return
+	}
+	defer upstream.Close()
+
+	// Bidirectional copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(upstream, conn)
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(conn, upstream)
+	}()
+	wg.Wait()
+}
+
+// isHTTPByte checks if the byte looks like the start of an HTTP method.
+// HTTP/1.x methods start with: G(ET), P(OST/UT/ATCH), D(ELETE), H(EAD), O(PTIONS), C(ONNECT), T(RACE)
+func isHTTPByte(b byte) bool {
+	switch b {
+	case 'G', 'P', 'D', 'H', 'O', 'C', 'T':
+		return true
+	default:
+		return false
+	}
+}
+
+// bufferedConn wraps a net.Conn with a bufio.Reader for peeked data.
+type bufferedConn struct {
+	net.Conn
+	reader   *bufio.Reader
+	done     chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
+}
+
+func (c *bufferedConn) Close() error {
+	c.closeOnce.Do(func() { close(c.done) })
+	return c.Conn.Close()
+}
+
+// chanListener feeds connections from a channel to http.Server.
+type chanListener struct {
+	ch   chan net.Conn
+	done chan struct{}
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.ch:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *chanListener) Close() error {
+	return nil
+}
+
+func (l *chanListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 15001}
 }
