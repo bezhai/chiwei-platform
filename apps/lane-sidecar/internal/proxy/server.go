@@ -172,19 +172,16 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	wg.Wait()
 }
 
-// unwrapTCPConn tries to get the underlying *net.TCPConn from a possibly
-// wrapped connection (cmux wraps connections with its own type).
+// unwrapTCPConn extracts the underlying *net.TCPConn from a possibly
+// wrapped connection. cmux.MuxConn embeds net.Conn, so we access it
+// via the embedded field.
 func unwrapTCPConn(conn net.Conn) *net.TCPConn {
-	// Try direct cast
 	if tc, ok := conn.(*net.TCPConn); ok {
 		return tc
 	}
-	// cmux wraps connections — try to access the underlying conn
-	type unwrapper interface {
-		Conn() net.Conn
-	}
-	if uw, ok := conn.(unwrapper); ok {
-		return unwrapTCPConn(uw.Conn())
+	// cmux.MuxConn embeds net.Conn
+	if mc, ok := conn.(*cmux.MuxConn); ok {
+		return unwrapTCPConn(mc.Conn)
 	}
 	return nil
 }
