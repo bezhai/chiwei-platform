@@ -95,17 +95,29 @@ func TestHandler_FallbackWhenNoLane(t *testing.T) {
 	}
 }
 
-func TestIsHTTPByte(t *testing.T) {
-	httpBytes := []byte{'G', 'P', 'D', 'H', 'O', 'C', 'T'}
-	for _, b := range httpBytes {
-		if !isHTTPByte(b) {
-			t.Errorf("expected %c to be HTTP", b)
+func TestIsHTTPRequest(t *testing.T) {
+	httpStarts := []string{
+		"GET /api", "POST /da", "PUT /foo", "DELETE /",
+		"HEAD /he", "PATCH /p", "OPTIONS ", "CONNECT ", "TRACE /t",
+	}
+	for _, s := range httpStarts {
+		if !isHTTPRequest([]byte(s)) {
+			t.Errorf("expected %q to be HTTP", s)
 		}
 	}
-	nonHTTPBytes := []byte{0x16, 0x00, 'A', 'X', '\n'}
-	for _, b := range nonHTTPBytes {
-		if isHTTPByte(b) {
-			t.Errorf("did not expect %c (0x%02x) to be HTTP", b, b)
+
+	nonHTTPStarts := []string{
+		"\x16\x03\x01\x00",     // TLS ClientHello
+		"\x00\x00\x00\x45",     // MongoDB wire protocol (length)
+		"\x44\x00\x00\x00",     // Could look like 'D' but not "DELETE "
+		"AMQP\x00\x00",         // RabbitMQ AMQP
+		"\x00\x00\x00\x34",     // PostgreSQL startup
+		"*3\r\n$3\r",           // Redis RESP
+		"HELO srv",             // Not HTTP (HELO != HEAD)
+	}
+	for _, s := range nonHTTPStarts {
+		if isHTTPRequest([]byte(s)) {
+			t.Errorf("did not expect %q to be HTTP", s)
 		}
 	}
 }
