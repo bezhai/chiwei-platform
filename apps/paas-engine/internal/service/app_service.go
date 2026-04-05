@@ -118,6 +118,9 @@ func (s *AppService) UpdateApp(ctx context.Context, name string, body []byte) (*
 	if err := ApplyField(fields, "config_bundles", &app.ConfigBundles); err != nil {
 		return nil, domain.ErrInvalidInput
 	}
+	if err := ApplyField(fields, "sidecar_enabled", &app.SidecarEnabled); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
 	if _, ok := fields["config_bundles"]; ok && len(app.ConfigBundles) > 0 {
 		if err := s.validateConfigBundles(ctx, app.ConfigBundles); err != nil {
 			return nil, err
