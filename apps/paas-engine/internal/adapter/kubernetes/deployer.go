@@ -20,16 +20,22 @@ var _ port.Deployer = (*K8sDeployer)(nil)
 
 const defaultNamespace = "default"
 
+const defaultSidecarImage = "harbor.local:30002/inner-bot/lane-sidecar:latest"
+
 type K8sDeployer struct {
-	client    kubernetes.Interface
-	namespace string
+	client       kubernetes.Interface
+	namespace    string
+	sidecarImage string
 }
 
-func NewK8sDeployer(client kubernetes.Interface, namespace string) *K8sDeployer {
+func NewK8sDeployer(client kubernetes.Interface, namespace, sidecarImage string) *K8sDeployer {
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-	return &K8sDeployer{client: client, namespace: namespace}
+	if sidecarImage == "" {
+		sidecarImage = defaultSidecarImage
+	}
+	return &K8sDeployer{client: client, namespace: namespace, sidecarImage: sidecarImage}
 }
 
 func (d *K8sDeployer) Deploy(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error {
@@ -234,7 +240,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	var sidecarContainers []corev1.Container
 
 	if app.SidecarEnabled {
-		sidecarImage := "harbor.local:30002/inner-bot/lane-sidecar:1.0.0.6"
+		sidecarImage := d.sidecarImage
 		proxyUID := int64(1337)
 		rootUID := int64(0)
 
@@ -251,8 +257,9 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 		})
 
 		sidecarContainers = append(sidecarContainers, corev1.Container{
-			Name:  "lane-sidecar",
-			Image: sidecarImage,
+			Name:            "lane-sidecar",
+			Image:           sidecarImage,
+			ImagePullPolicy: corev1.PullAlways,
 			Env: []corev1.EnvVar{
 				{Name: "REGISTRY_URL", Value: "http://lite-registry:8080"},
 				{Name: "LANE", Value: release.Lane},

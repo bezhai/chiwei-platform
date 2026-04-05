@@ -50,7 +50,7 @@ func main() {
 	var testExecutor port.TestExecutor
 
 	if cs != nil {
-		deployer = kubernetes.NewK8sDeployer(cs, cfg.DeployNamespace)
+		deployer = kubernetes.NewK8sDeployer(cs, cfg.DeployNamespace, cfg.SidecarImage)
 		buildExecutor = kubernetes.NewKanikoBuildExecutor(cs, kubernetes.KanikoBuildConfig{
 			Namespace:          cfg.KanikoNamespace,
 			KanikoImage:        cfg.KanikoImage,

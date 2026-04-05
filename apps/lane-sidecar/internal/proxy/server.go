@@ -5,7 +5,6 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"log"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chiwei-platform/lane-sidecar/internal/registry"
+	"github.com/soheilhy/cmux"
 )
 
 // HostMapper translates a logical host (e.g. "agent-service-dev:8000") to an
@@ -68,33 +68,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// Server accepts TCP connections, detects the protocol, and routes:
-//   - HTTP traffic → lane-aware reverse proxy
-//   - Non-HTTP traffic → TCP passthrough to original destination
+// Server uses cmux to multiplex a single TCP listener into HTTP and non-HTTP
+// streams. HTTP traffic gets lane-aware routing; everything else gets TCP
+// passthrough to the original destination (via SO_ORIGINAL_DST).
 type Server struct {
 	handler    *Handler
 	listenAddr string
-	listener   net.Listener
 	httpServer *http.Server
-	httpLn     *chanListener
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mux        cmux.CMux
+	listener   net.Listener
 }
 
 // NewServer creates a Server that listens on listenAddr (e.g. ":15001").
 func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	handler := NewHandler(resolver, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	httpLn := &chanListener{ch: make(chan net.Conn), done: make(chan struct{})}
-
 	s := &Server{
 		handler:    handler,
 		listenAddr: listenAddr,
-		httpLn:     httpLn,
-		ctx:        ctx,
-		cancel:     cancel,
 	}
 	s.httpServer = &http.Server{
 		Handler:      handler,
@@ -104,7 +94,7 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	return s
 }
 
-// ListenAndServe starts the proxy server.
+// ListenAndServe starts the proxy server with protocol multiplexing.
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
@@ -113,82 +103,50 @@ func (s *Server) ListenAndServe() error {
 	s.listener = ln
 	log.Printf("[proxy] listening on %s", s.listenAddr)
 
-	// Start HTTP server on the channel-based listener
-	go s.httpServer.Serve(s.httpLn)
+	s.mux = cmux.New(ln)
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-s.ctx.Done():
-				return http.ErrServerClosed
-			default:
-				log.Printf("[proxy] accept error: %v", err)
-				continue
-			}
-		}
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.handleConn(conn)
-		}()
-	}
+	// HTTP matcher: match requests starting with an HTTP method
+	httpLn := s.mux.Match(httpMethodMatcher())
+	// Everything else: TCP passthrough
+	tcpLn := s.mux.Match(cmux.Any())
+
+	go s.httpServer.Serve(httpLn)
+	go s.serveTCPPassthrough(tcpLn)
+
+	return s.mux.Serve()
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.cancel()
-	if s.listener != nil {
-		s.listener.Close()
+	if s.mux != nil {
+		s.mux.Close()
 	}
-	close(s.httpLn.done)
-	s.httpServer.Shutdown(ctx)
-	s.wg.Wait()
-	return nil
+	return s.httpServer.Shutdown(ctx)
 }
 
-func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
-
-	// Peek at first bytes to detect protocol (need enough for "OPTIONS ")
-	br := bufio.NewReader(conn)
-	peeked, err := br.Peek(8)
-	if err != nil {
-		// Short read — try with what we have (minimum 4 bytes for "GET ")
-		peeked, err = br.Peek(4)
+// serveTCPPassthrough accepts non-HTTP connections and tunnels them to
+// their original destination using SO_ORIGINAL_DST.
+func (s *Server) serveTCPPassthrough(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-	}
-
-	peekConn := &bufferedConn{Conn: conn, reader: br, done: make(chan struct{})}
-
-	if isHTTPRequest(peeked) {
-		// HTTP → hand off to http.Server via channel listener
-		s.httpLn.ch <- peekConn
-		// Wait for http.Server to finish with this connection
-		<-peekConn.done
-	} else {
-		// Non-HTTP → TCP passthrough to original destination
-		s.tcpPassthrough(peekConn)
+		go s.handleTCPConn(conn)
 	}
 }
 
-// tcpPassthrough tunnels the connection to the original destination.
-func (s *Server) tcpPassthrough(conn net.Conn) {
-	tcpConn, ok := conn.(*bufferedConn)
-	if !ok {
-		log.Printf("[proxy] non-TCP connection, closing")
+func (s *Server) handleTCPConn(conn net.Conn) {
+	defer conn.Close()
+
+	// Unwrap to get the raw TCP connection for SO_ORIGINAL_DST
+	rawConn := unwrapTCPConn(conn)
+	if rawConn == nil {
+		log.Printf("[proxy] tcp passthrough: cannot unwrap to TCPConn")
 		return
 	}
 
-	origConn, ok := tcpConn.Conn.(*net.TCPConn)
-	if !ok {
-		log.Printf("[proxy] cannot get original dst: not a TCPConn")
-		return
-	}
-
-	origDst, err := GetOriginalDst(origConn)
+	origDst, err := GetOriginalDst(rawConn)
 	if err != nil {
 		log.Printf("[proxy] get original dst: %v", err)
 		return
@@ -201,7 +159,6 @@ func (s *Server) tcpPassthrough(conn net.Conn) {
 	}
 	defer upstream.Close()
 
-	// Bidirectional copy
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -215,69 +172,51 @@ func (s *Server) tcpPassthrough(conn net.Conn) {
 	wg.Wait()
 }
 
-// httpMethods lists all HTTP/1.x methods followed by a space.
-// We check the full method + space to avoid false positives from binary
-// protocols whose first bytes happen to match a single HTTP letter.
-var httpMethods = []string{
-	"GET ", "PUT ", "POST ", "HEAD ",
-	"DELETE ", "PATCH ", "OPTIONS ", "CONNECT ", "TRACE ",
-}
-
-// isHTTPRequest checks if peeked bytes look like the start of an HTTP request.
-func isHTTPRequest(peeked []byte) bool {
-	for _, method := range httpMethods {
-		if len(peeked) >= len(method) {
-			match := true
-			for i := 0; i < len(method); i++ {
-				if peeked[i] != method[i] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-		}
+// unwrapTCPConn tries to get the underlying *net.TCPConn from a possibly
+// wrapped connection (cmux wraps connections with its own type).
+func unwrapTCPConn(conn net.Conn) *net.TCPConn {
+	// Try direct cast
+	if tc, ok := conn.(*net.TCPConn); ok {
+		return tc
 	}
-	return false
-}
-
-// bufferedConn wraps a net.Conn with a bufio.Reader for peeked data.
-type bufferedConn struct {
-	net.Conn
-	reader   *bufio.Reader
-	done     chan struct{}
-	closeOnce sync.Once
-}
-
-func (c *bufferedConn) Read(b []byte) (int, error) {
-	return c.reader.Read(b)
-}
-
-func (c *bufferedConn) Close() error {
-	c.closeOnce.Do(func() { close(c.done) })
-	return c.Conn.Close()
-}
-
-// chanListener feeds connections from a channel to http.Server.
-type chanListener struct {
-	ch   chan net.Conn
-	done chan struct{}
-}
-
-func (l *chanListener) Accept() (net.Conn, error) {
-	select {
-	case conn := <-l.ch:
-		return conn, nil
-	case <-l.done:
-		return nil, net.ErrClosed
+	// cmux wraps connections — try to access the underlying conn
+	type unwrapper interface {
+		Conn() net.Conn
 	}
-}
-
-func (l *chanListener) Close() error {
+	if uw, ok := conn.(unwrapper); ok {
+		return unwrapTCPConn(uw.Conn())
+	}
 	return nil
 }
 
-func (l *chanListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.IPv4zero, Port: 15001}
+// httpMethodMatcher returns a cmux matcher that matches HTTP/1.x requests
+// by checking for a full HTTP method followed by a space.
+func httpMethodMatcher() cmux.Matcher {
+	methods := []string{
+		"GET ", "PUT ", "POST ", "HEAD ",
+		"DELETE ", "PATCH ", "OPTIONS ", "CONNECT ", "TRACE ",
+	}
+	return func(r io.Reader) bool {
+		buf := make([]byte, 8)
+		n, err := io.ReadAtLeast(r, buf, 4)
+		if err != nil {
+			return false
+		}
+		data := buf[:n]
+		for _, method := range methods {
+			if len(data) >= len(method) {
+				match := true
+				for i := 0; i < len(method); i++ {
+					if data[i] != method[i] {
+						match = false
+						break
+					}
+				}
+				if match {
+					return true
+				}
+			}
+		}
+		return false
+	}
 }

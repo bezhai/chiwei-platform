@@ -102,7 +102,7 @@ func TestDetectPodFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fakeclient.NewSimpleClientset(tt.objects...)
-			deployer := NewK8sDeployer(client, "default")
+			deployer := NewK8sDeployer(client, "default", "")
 
 			deploy := &appsv1.Deployment{
 				Spec: appsv1.DeploymentSpec{
@@ -191,7 +191,7 @@ func contains(s, substr string) bool {
 // - EnvFrom 同时包含 Secret 和 ConfigMap
 func TestApplyDeploymentWorker(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
-	deployer := NewK8sDeployer(client, "default")
+	deployer := NewK8sDeployer(client, "default", "")
 
 	app := &domain.App{
 		Name:              "arq-worker",
@@ -253,7 +253,7 @@ func TestApplyDeploymentWorker(t *testing.T) {
 // TestApplyDeploymentWebApp 验证常规 Web App（Port>0）仍正常创建端口和无 Command。
 func TestApplyDeploymentWebApp(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
-	deployer := NewK8sDeployer(client, "default")
+	deployer := NewK8sDeployer(client, "default", "")
 
 	app := &domain.App{
 		Name:           "web-service",
@@ -307,7 +307,7 @@ func TestApplyDeploymentWebApp(t *testing.T) {
 // TestDeployWorkerSkipsService 验证 Worker（Port=0）部署时不创建 Service。
 func TestDeployWorkerSkipsService(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
-	deployer := NewK8sDeployer(client, "default")
+	deployer := NewK8sDeployer(client, "default", "")
 
 	app := &domain.App{
 		Name:    "recall-worker",
@@ -433,7 +433,7 @@ func TestGetDeploymentStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fakeclient.NewSimpleClientset(tt.objects...)
-			deployer := NewK8sDeployer(client, "default")
+			deployer := NewK8sDeployer(client, "default", "")
 
 			status, err := deployer.GetDeploymentStatus(context.Background(), "myapp-prod")
 			if err != nil {
@@ -471,7 +471,7 @@ func TestGetDeploymentStatus(t *testing.T) {
 
 func TestGetDeploymentStatusNotFound(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
-	deployer := NewK8sDeployer(client, "default")
+	deployer := NewK8sDeployer(client, "default", "")
 
 	_, err := deployer.GetDeploymentStatus(context.Background(), "nonexistent")
 	if err == nil {

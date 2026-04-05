@@ -23,6 +23,7 @@ type Config struct {
 	APIToken          string
 	LokiURL           string
 	ChiweiDatabaseURL string
+	SidecarImage      string
 
 	// CI Pipeline
 	CINamespace     string        // K8s namespace for CI test jobs
@@ -49,6 +50,7 @@ func Load() *Config {
 		APIToken:          os.Getenv("API_TOKEN"),
 		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
 		ChiweiDatabaseURL: os.Getenv("CHIWEI_DATABASE_URL"),
+		SidecarImage:      os.Getenv("SIDECAR_IMAGE"),
 
 		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),
 		CIGitRepo:       os.Getenv("CI_GIT_REPO"),
