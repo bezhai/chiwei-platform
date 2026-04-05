@@ -150,16 +150,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	// Peek at first byte to detect protocol
+	// Peek at first bytes to detect protocol (need enough for "OPTIONS ")
 	br := bufio.NewReader(conn)
-	first, err := br.Peek(1)
+	peeked, err := br.Peek(8)
 	if err != nil {
-		return
+		// Short read — try with what we have (minimum 4 bytes for "GET ")
+		peeked, err = br.Peek(4)
+		if err != nil {
+			return
+		}
 	}
 
 	peekConn := &bufferedConn{Conn: conn, reader: br, done: make(chan struct{})}
 
-	if isHTTPByte(first[0]) {
+	if isHTTPRequest(peeked) {
 		// HTTP → hand off to http.Server via channel listener
 		s.httpLn.ch <- peekConn
 		// Wait for http.Server to finish with this connection
@@ -211,15 +215,31 @@ func (s *Server) tcpPassthrough(conn net.Conn) {
 	wg.Wait()
 }
 
-// isHTTPByte checks if the byte looks like the start of an HTTP method.
-// HTTP/1.x methods start with: G(ET), P(OST/UT/ATCH), D(ELETE), H(EAD), O(PTIONS), C(ONNECT), T(RACE)
-func isHTTPByte(b byte) bool {
-	switch b {
-	case 'G', 'P', 'D', 'H', 'O', 'C', 'T':
-		return true
-	default:
-		return false
+// httpMethods lists all HTTP/1.x methods followed by a space.
+// We check the full method + space to avoid false positives from binary
+// protocols whose first bytes happen to match a single HTTP letter.
+var httpMethods = []string{
+	"GET ", "PUT ", "POST ", "HEAD ",
+	"DELETE ", "PATCH ", "OPTIONS ", "CONNECT ", "TRACE ",
+}
+
+// isHTTPRequest checks if peeked bytes look like the start of an HTTP request.
+func isHTTPRequest(peeked []byte) bool {
+	for _, method := range httpMethods {
+		if len(peeked) >= len(method) {
+			match := true
+			for i := 0; i < len(method); i++ {
+				if peeked[i] != method[i] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
 	}
+	return false
 }
 
 // bufferedConn wraps a net.Conn with a bufio.Reader for peeked data.
