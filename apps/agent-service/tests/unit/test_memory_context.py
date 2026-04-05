@@ -1,44 +1,70 @@
-"""测试统一聊天注入上下文"""
+"""测试统一聊天注入上下文 v3（experience_fragment 版）"""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+def _make_fragment(content: str, grain: str = "conversation", source_chat_id: str = "chat_001"):
+    """创建模拟碎片"""
+    return MagicMock(content=content, grain=grain, source_chat_id=source_chat_id)
+
+
+# ── build_inner_context tests ──
+
+
 @pytest.mark.asyncio
-async def test_build_inner_context_group():
-    """群聊：场景 + 状态 + 群感觉 + 人物 + 引导语"""
+async def test_build_inner_context_group_with_fragments():
+    """群聊：场景 + schedule + 当前群碎片 + daily + 引导语"""
+    today_frags = [
+        _make_fragment("和A哥聊了动画", source_chat_id="chat_001"),
+        _make_fragment("有人分享了新番", grain="glimpse", source_chat_id="chat_001"),
+        _make_fragment("私聊里B说了秘密", source_chat_id="p2p_999"),  # 应被过滤
+    ]
+    daily_frags = [
+        _make_fragment("昨天去了咖啡店", grain="daily", source_chat_id=""),
+    ]
+
     with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="今天想出门逛逛"),
-        patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value="最放飞的群"),
-        patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[
-            MagicMock(user_id="u1", impression_text="群里的指挥官", updated_at=None),
-        ]),
-        patch("app.services.memory_context.get_username", new_callable=AsyncMock, return_value="A哥"),
+        patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value="今天想出门逛逛"),
+        patch("app.services.memory_context.get_today_fragments",
+              new_callable=AsyncMock, return_value=today_frags),
+        patch("app.services.memory_context.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=daily_frags),
     ):
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=["u1"],
-            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="KA技术群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao",
+            chat_name="KA技术群",
         )
 
     assert "群聊「KA技术群」" in result
     assert "回复 A哥" in result
     assert "想出门逛逛" in result
-    assert "放飞" in result
-    assert "指挥官" in result
-    assert "翻翻日记" in result
+    assert "聊了动画" in result
+    assert "新番" in result
+    assert "秘密" not in result  # p2p 碎片被过滤
+    assert "咖啡店" in result  # daily 碎片
+    assert "recall" in result
 
 
 @pytest.mark.asyncio
-async def test_build_inner_context_p2p():
-    """私聊：场景 + 状态 + 跨群印象 + 引导语"""
+async def test_build_inner_context_p2p_sees_all():
+    """私聊：可以看到所有碎片（包括其他群和 p2p）"""
+    today_frags = [
+        _make_fragment("群里的讨论", source_chat_id="chat_001"),
+        _make_fragment("另一个群的八卦", source_chat_id="chat_002"),
+        _make_fragment("私聊说的心事", source_chat_id="p2p_001"),
+    ]
+
     with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="心情不错"),
-        patch("app.services.memory_context.get_cross_group_impressions", new_callable=AsyncMock, return_value=[
-            (MagicMock(impression_text="聊动画很带劲"), "KA群"),
-        ]),
+        patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value="心情不错"),
+        patch("app.services.memory_context.get_today_fragments",
+              new_callable=AsyncMock, return_value=today_frags),
+        patch("app.services.memory_context.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=[]),
     ):
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
@@ -47,113 +73,91 @@ async def test_build_inner_context_p2p():
         )
 
     assert "私聊" in result
-    assert "心情不错" in result
-    assert "动画" in result
-    assert "翻翻日记" in result
+    assert "群里的讨论" in result
+    assert "八卦" in result
+    assert "心事" in result
 
 
 @pytest.mark.asyncio
-async def test_build_inner_context_no_state():
-    """无状态时仍包含场景和引导语"""
+async def test_build_inner_context_group_filters_private():
+    """群聊：过滤掉 p2p 和其他群的碎片"""
+    today_frags = [
+        _make_fragment("当前群的话题", source_chat_id="chat_001"),
+        _make_fragment("私聊的秘密", source_chat_id="p2p_001"),
+        _make_fragment("其他群的讨论", source_chat_id="chat_999"),
+    ]
+
     with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value=""),
-        patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value=""),
-        patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[]),
+        patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context.get_today_fragments",
+              new_callable=AsyncMock, return_value=today_frags),
+        patch("app.services.memory_context.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=[]),
+    ):
+        from app.services.memory_context import build_inner_context
+        result = await build_inner_context(
+            chat_id="chat_001", chat_type="group", user_ids=["u1"],
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao",
+            chat_name="测试群",
+        )
+
+    assert "当前群的话题" in result
+    assert "秘密" not in result
+    assert "其他群" not in result
+
+
+@pytest.mark.asyncio
+async def test_build_inner_context_no_fragments():
+    """无碎片时：场景 + 引导语，不出现空段"""
+    with (
+        patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context.get_today_fragments",
+              new_callable=AsyncMock, return_value=[]),
+        patch("app.services.memory_context.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=[]),
     ):
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao",
+            chat_name="测试群",
         )
 
     assert "群聊「测试群」" in result
     assert "今天的基调" not in result
-    assert "翻翻日记" in result
+    assert "脑子里的东西" not in result
+    assert "更远的记忆" not in result
+    assert "recall" in result
 
 
 @pytest.mark.asyncio
-async def test_build_inner_context_no_diary_content():
-    """不含日记全文（回归测试）"""
+async def test_build_inner_context_proactive():
+    """主动发言：含 stimulus，无回复提示"""
     with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="今天下午"),
-        patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value="活跃"),
-        patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[]),
+        patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context.get_today_fragments",
+              new_callable=AsyncMock, return_value=[]),
+        patch("app.services.memory_context.get_recent_fragments_by_grain",
+              new_callable=AsyncMock, return_value=[]),
     ):
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
-            chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="Test", persona_id="akao", chat_name="群",
+            chat_id="chat_001", chat_type="group", user_ids=["u1"],
+            trigger_user_id="u1", trigger_username="A哥", persona_id="akao",
+            chat_name="摸鱼群", is_proactive=True,
+            proactive_stimulus="有人在讨论猫猫",
         )
 
-    assert "--- 2026-" not in result
-    assert "上周回顾" not in result
+    assert "摸鱼群" in result
+    assert "刷到了群里的对话" in result
+    assert "猫猫" in result
+    assert "回复" not in result
 
 
-@pytest.mark.asyncio
-async def test_build_inner_context_injects_drift_state():
-    """有漂移状态时，注入到 inner_context 且在今日基调之前"""
-    with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value="有点犯困但还不想睡，说话偏短偏懒"),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="今天想出门逛逛"),
-        patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[]),
-    ):
-        from app.services.memory_context import build_inner_context
-        result = await build_inner_context(
-            chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
-        )
-
-    assert "有点犯困" in result
-    assert "此刻的状态" in result
-    # 漂移状态在今日基调之前
-    assert result.index("此刻的状态") < result.index("今天的基调")
-
-
-@pytest.mark.asyncio
-async def test_build_inner_context_no_drift_fallback():
-    """无漂移状态时正常 fallback"""
-    with (
-        patch("app.services.memory_context.get_identity_state", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context._build_today_state", new_callable=AsyncMock, return_value="精力充沛"),
-        patch("app.services.memory_context.get_group_culture_gestalt", new_callable=AsyncMock, return_value=None),
-        patch("app.services.memory_context.get_impressions_for_users", new_callable=AsyncMock, return_value=[]),
-    ):
-        from app.services.memory_context import build_inner_context
-        result = await build_inner_context(
-            chat_id="chat_001", chat_type="group", user_ids=[],
-            trigger_user_id="u1", trigger_username="A哥", persona_id="akao", chat_name="测试群",
-        )
-
-    assert "此刻的状态" not in result
-    assert "精力充沛" in result
-
-
-@pytest.mark.asyncio
-async def test_build_people_gestalt_includes_updated_at():
-    """印象注入时包含上次印象更新日期"""
-    from datetime import datetime, timezone
-
-    imp = MagicMock(
-        user_id="u1", impression_text="很有趣的人",
-        updated_at=datetime(2026, 3, 15, tzinfo=timezone.utc),
-    )
-
-    with (
-        patch("app.services.memory_context.get_impressions_for_users",
-              new_callable=AsyncMock, return_value=[imp]),
-        patch("app.services.memory_context.get_username",
-              new_callable=AsyncMock, return_value="A哥"),
-    ):
-        from app.services.memory_context import _build_people_gestalt
-        lines = await _build_people_gestalt("chat_001", ["u1"])
-
-    assert len(lines) == 1
-    assert "03月15日" in lines[0]
-    assert "很有趣的人" in lines[0]
-    assert "A哥" in lines[0]
+# ── get_reply_style tests (unchanged) ──
 
 
 @pytest.mark.asyncio
