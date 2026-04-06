@@ -21,12 +21,12 @@ flowchart TD
         GROUP(("群里在聊天"))
     end
 
-    LIFE["Life Engine 🔲\n此刻的状态：在刷手机 / 睡着了 / 出门了\n每分钟 tick，LLM 决定下一步"]
+    LIFE["Life Engine\n此刻的状态：在刷手机 / 睡着了 / 出门了\n每分钟 tick，LLM 决定下一步"]
 
     subgraph TRIGGER["记忆怎么产生"]
         direction LR
         T1["参与\n赤尾回复了"]
-        T2["窥屏 🔲\nLife Engine 刷手机时\n翻了某个群"]
+        T2["窥屏\nLife Engine 刷手机时\n翻了某个群"]
         T3["没看\n赤尾不在看\n无记忆产生"]
     end
 
@@ -39,7 +39,7 @@ flowchart TD
     subgraph FRAG["经历碎片 experience_fragment"]
         direction TB
         CONV["conversation\n对话后的回味"]
-        GLIM["glimpse 🔲\n刷手机时的印象"]
+        GLIM["glimpse\n刷手机时的印象"]
         DAILY["daily\n做梦：一天的回顾"]
         WKLY["weekly\n深度做梦：一周的回顾"]
     end
@@ -52,7 +52,7 @@ flowchart TD
     subgraph CTX["赤尾回复时看到的"]
         direction TB
         WHO["我是谁 · 人格内核"]
-        NOW["我现在什么状态 🔲 · Life Engine"]
+        NOW["我现在什么状态 · Life Engine"]
         TODAY["我今天的安排 · Schedule"]
         BRAIN["脑子里的东西 · 今天的碎片"]
         FAR["更远的记忆 · 日记/周记"]
@@ -69,13 +69,13 @@ flowchart TD
 
     T3 -.->|"需要时"| HIST
 
-    style LIFE stroke-dasharray: 5 5
-    style T2 stroke-dasharray: 5 5
-    style GLIM stroke-dasharray: 5 5
-    style NOW stroke-dasharray: 5 5
+    style LIFE fill:#e8f5e9
+    style T2 fill:#e8f5e9
+    style GLIM fill:#e8f5e9
+    style NOW fill:#e8f5e9
 ```
 
-> 虚线框 = Plan 2（Life Engine），实线 = 已实现
+> 绿底 = Plan 2（Life Engine），白底 = Plan 1（记忆管线）
 
 ---
 
@@ -96,9 +96,9 @@ LLM 的输入是**带场景的对话时间线**：告诉她这是在哪个群、
       感觉他最近看番的口味变了，以前不怎么看这类的。
 ```
 
-### glimpse 碎片（Plan 2，依赖 Life Engine）
+### glimpse 碎片（已实现）
 
-Life Engine 进入"刷手机"状态 → 选一个白名单群翻消息 → 有意思就记一条，没意思就放下。
+Life Engine 进入"刷手机"状态 → 选一个白名单群翻消息 → LLM 判断有没有意思 → 有意思就记一条 glimpse 碎片，没意思就放下。想搭话时触发主动发言。
 
 ### daily 碎片（已实现）
 
@@ -161,6 +161,47 @@ CREATE TABLE experience_fragment (
 
 ---
 
+## Life Engine 运行机制
+
+### 状态模型
+
+Redis key: `life_engine:{persona_id}`，JSON 格式：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| current_state | string | "在沙发上刷手机" — 自然语言描述 |
+| activity_type | enum | browsing / sleeping / out / busy / idle |
+| response_mood | string | "心情不错" — 注入 context 影响回复风格 |
+| skip_until | string? | ISO8601，skip 期间不 tick |
+| updated_at | string | ISO8601，最后更新时间 |
+
+### Tick 时序
+
+arq-worker 每分钟执行一次 tick（所有 persona）：
+
+1. 从 Redis 加载当前状态
+2. 如果 `skip_until` 在未来 → 跳过（不调 LLM）
+3. 加载今日 Schedule + 最近经历碎片
+4. 调用 LLM（offline-model）决定下一步状态
+5. 保存新状态到 Redis
+6. 如果进入 browsing → 触发 Glimpse 管线
+
+### Glimpse 触发
+
+browsing 状态 → 选白名单群 → 读未读消息 → LLM 观察：
+- 没意思 → 不产生碎片
+- 有意思 → 写 glimpse 碎片
+- 想说话 → 触发主动搭话（复用 `submit_proactive_request`）
+
+### 被@时的硬中断
+
+不管赤尾当前什么状态，被@都会响应。`build_inner_context()` 读 Redis 状态注入"此刻的状态"，LLM 自然调整回复风格：
+- 睡着了被@ → "嗯...干嘛...几点了都..."
+- 在外面被@ → "在外面呢 晚点说"
+- 正好在刷手机 → 正常回复
+
+---
+
 ## 实现进度
 
 | 组件 | 状态 | 说明 |
@@ -170,9 +211,9 @@ CREATE TABLE experience_fragment (
 | DreamWorker | ✅ | daily/weekly 做梦 |
 | Context Assembly v3 | ✅ | 碎片注入 + 隐私过滤 |
 | recall / check_chat_history | ✅ | 新工具 |
-| Life Engine | 🔲 | 生活状态机 |
-| Glimpse 管线 | 🔲 | 依赖 Life Engine |
-| 被@时状态感知 | 🔲 | "睡着了被@→嗯...干嘛..." |
+| Life Engine | ✅ | 生活状态机，arq 每分钟 tick，LLM 决定状态 |
+| Glimpse 管线 | ✅ | browsing 状态触发窥屏，白名单群 |
+| 被@时状态感知 | ✅ | context 注入 Life Engine 状态 |
 
 ---
 
