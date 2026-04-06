@@ -17,7 +17,6 @@ from app.config.config import settings
 from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
-from app.services.entity_resolver import build_entity_context, format_entity_ref
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -130,47 +129,44 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
     """生成 conversation 粒度的经历碎片
 
     1. 获取最近 2 小时的消息
-    2. 解析实体（人名/群名 → entity ref）
-    3. 格式化消息时间线
-    4. 调用 LLM 生成碎片内容
-    5. 写入 ExperienceFragment
+    2. 直接通过 get_username 获取用户名（不走 entity_resolver）
+    3. 构建场景描述（群名/私聊对象）
+    4. 格式化消息时间线
+    5. 调用 LLM 生成碎片内容
+    6. 写入 ExperienceFragment
     """
     now = datetime.now(CST)
     start_dt = now - timedelta(hours=LOOKBACK_HOURS)
     start_ts = int(start_dt.timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
 
-    # 1. 获取消息
     messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
     if not messages:
-        logger.info(f"[{persona_id}] No messages in last {LOOKBACK_HOURS}h for {chat_id}, skip afterthought")
+        logger.info(f"[{persona_id}] No messages in last {LOOKBACK_HOURS}h for {chat_id}, skip")
         return
 
-    # 获取 chat_type（从消息中推断）
     chat_type = messages[0].chat_type if messages else "group"
 
-    # 收集参与的 user_id（去重）
-    user_ids = list({m.user_id for m in messages if m.role == "user" and m.user_id})
-
-    # 2. 解析实体
-    name_map, mentioned_ids = await build_entity_context(user_ids, chat_id, chat_type)
-
-    # 获取 persona 信息
+    # Get persona info
     persona = await get_bot_persona(persona_id)
     persona_name = persona.display_name if persona else persona_id
+    persona_lite = persona.persona_lite if persona else ""
 
-    # 3. 格式化时间线（用 entity ref 替代原始 user_id）
-    timeline = await _format_timeline(messages, name_map, persona_name)
+    # Build scene description
+    scene = await _build_scene(chat_id, chat_type, messages)
+
+    # Format timeline with plain names
+    timeline = await _format_timeline(messages, persona_name)
     if not timeline:
-        logger.info(f"[{persona_id}] Empty timeline for {chat_id}, skip afterthought")
+        logger.info(f"[{persona_id}] Empty timeline for {chat_id}, skip")
         return
 
-    # 4. 调用 LLM
-    persona_lite = persona.persona_lite if persona else ""
+    # Call LLM
     prompt = get_prompt("afterthought_conversation")
     compiled = prompt.compile(
         persona_name=persona_name,
         persona_lite=persona_lite,
+        scene=scene,
         messages=timeline,
     )
 
@@ -182,7 +178,6 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         logger.warning(f"[{persona_id}] Afterthought LLM returned empty for {chat_id}")
         return
 
-    # 5. 写入碎片
     fragment = ExperienceFragment(
         persona_id=persona_id,
         grain="conversation",
@@ -191,24 +186,53 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         time_start=start_ts,
         time_end=end_ts,
         content=content,
-        mentioned_entity_ids=mentioned_ids,
+        mentioned_entity_ids=[],  # not used for now
         model=settings.diary_model,
     )
     await create_fragment(fragment)
     logger.info(f"[{persona_id}] Conversation fragment created for {chat_id}: {content[:60]}...")
 
 
+async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
+    """Build scene description for the prompt"""
+    if chat_type == "p2p":
+        # Find the non-assistant user's name
+        for msg in messages:
+            if msg.role == "user" and msg.user_id:
+                name = await get_username(msg.user_id)
+                if name:
+                    return f"和{name}的私聊"
+        return "一段私聊"
+    else:
+        # Query group name
+        try:
+            from app.orm.base import AsyncSessionLocal
+            from app.orm.models import LarkGroupChatInfo
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(LarkGroupChatInfo.name).where(
+                        LarkGroupChatInfo.chat_id == chat_id
+                    )
+                )
+                group_name = result.scalar_one_or_none()
+                if group_name:
+                    return f"在「{group_name}」群里"
+        except Exception:
+            pass
+        return "在群里"
+
+
 async def _format_timeline(
     messages: list,
-    name_map: dict[str, str],
     persona_name: str,
     max_messages: int = 50,
 ) -> str:
-    """格式化消息列表为时间线文本，使用 entity ref 标注说话人
+    """格式化消息列表为时间线文本，使用纯名字标注说话人
 
-    格式: [HH:MM] 名字(#id): 消息内容
+    格式: [HH:MM] 名字: 消息内容
     """
-    # 取最近 max_messages 条
     messages = messages[-max_messages:]
 
     lines: list[str] = []
@@ -219,11 +243,8 @@ async def _format_timeline(
         if msg.role == "assistant":
             speaker = persona_name
         else:
-            # 优先使用 entity ref，fallback 到用户名或 ID 片段
-            speaker = name_map.get(msg.user_id)
-            if not speaker:
-                name = await get_username(msg.user_id)
-                speaker = name or msg.user_id[:6]
+            name = await get_username(msg.user_id)
+            speaker = name or msg.user_id[:6]
 
         rendered = parse_content(msg.content).render()
         if rendered and rendered.strip():

@@ -1,6 +1,6 @@
 """记忆系统 v3 CRUD 操作
 
-提供 ExperienceFragment 和 MemoryEntity 的增删改查。
+提供 ExperienceFragment 的增删改查。
 """
 
 from datetime import date, datetime, timedelta, timezone
@@ -9,7 +9,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal
-from .memory_models import ExperienceFragment, MemoryEntity
+from .memory_models import ExperienceFragment
 
 # CST 时区
 _CST = timezone(timedelta(hours=8))
@@ -129,48 +129,3 @@ async def search_fragments_fts(
         return list(result.scalars().all())
 
 
-async def get_or_create_entity(
-    entity_type: str,
-    external_id: str,
-    display_name: str | None = None,
-) -> MemoryEntity:
-    """查找或创建 MemoryEntity；若已存在且 display_name 有变化则更新"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(MemoryEntity)
-            .where(MemoryEntity.entity_type == entity_type)
-            .where(MemoryEntity.external_id == external_id)
-        )
-        existing = result.scalar_one_or_none()
-
-        if existing:
-            if display_name is not None and existing.display_name != display_name:
-                existing.display_name = display_name
-                await session.commit()
-                await session.refresh(existing)
-            return existing
-
-        entity = MemoryEntity(
-            entity_type=entity_type,
-            external_id=external_id,
-            display_name=display_name,
-        )
-        session.add(entity)
-        await session.commit()
-        await session.refresh(entity)
-        return entity
-
-
-async def batch_get_or_create_entities(
-    items: list[tuple[str, str, str | None]],
-) -> dict[str, MemoryEntity]:
-    """批量 upsert MemoryEntity，返回 {external_id: MemoryEntity}
-
-    Args:
-        items: [(entity_type, external_id, display_name), ...]
-    """
-    result: dict[str, MemoryEntity] = {}
-    for entity_type, external_id, display_name in items:
-        entity = await get_or_create_entity(entity_type, external_id, display_name)
-        result[external_id] = entity
-    return result
