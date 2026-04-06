@@ -46,18 +46,19 @@ class ExperienceFragment(Base):
 
 
 class LifeEngineState(Base):
-    """Life Engine 状态 — 每个 persona 一行，tick 时 UPSERT"""
+    """Life Engine 状态 — 每次 tick INSERT 一行，保留完整历史"""
 
     __tablename__ = "life_engine_state"
 
-    persona_id: Mapped[str] = mapped_column(String(50), primary_key=True)
-    current_state: Mapped[str] = mapped_column(Text, nullable=False)           # "在沙发上刷手机"
-    activity_type: Mapped[str] = mapped_column(String(20), nullable=False)     # browsing/sleeping/out/busy/idle
-    response_mood: Mapped[str] = mapped_column(Text, nullable=False)           # "心情不错"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    current_state: Mapped[str] = mapped_column(Text, nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    response_mood: Mapped[str] = mapped_column(Text, nullable=False)
     skip_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    updated_at: Mapped[datetime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 

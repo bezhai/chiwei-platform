@@ -9,7 +9,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.orm.base import AsyncSessionLocal
 from app.orm.memory_models import LifeEngineState
@@ -20,12 +19,13 @@ CST = timezone(timedelta(hours=8))
 
 
 async def _load_state(persona_id: str) -> LifeEngineState | None:
-    """从 DB 加载状态，不存在返回 None"""
+    """查最新一行状态，不存在返回 None"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(LifeEngineState).where(
-                LifeEngineState.persona_id == persona_id
-            )
+            select(LifeEngineState)
+            .where(LifeEngineState.persona_id == persona_id)
+            .order_by(LifeEngineState.created_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
@@ -37,27 +37,16 @@ async def _save_state(
     response_mood: str,
     skip_until: datetime | None,
 ) -> None:
-    """UPSERT 状态到 DB"""
-    now = datetime.now(CST)
+    """INSERT 一行新状态"""
     async with AsyncSessionLocal() as session:
-        stmt = pg_insert(LifeEngineState).values(
+        row = LifeEngineState(
             persona_id=persona_id,
             current_state=current_state,
             activity_type=activity_type,
             response_mood=response_mood,
             skip_until=skip_until,
-            updated_at=now,
-        ).on_conflict_do_update(
-            index_elements=["persona_id"],
-            set_={
-                "current_state": current_state,
-                "activity_type": activity_type,
-                "response_mood": response_mood,
-                "skip_until": skip_until,
-                "updated_at": now,
-            },
         )
-        await session.execute(stmt)
+        session.add(row)
         await session.commit()
 
 
