@@ -12,86 +12,129 @@ v2 按群/私聊分桶（DiaryEntry per chat → PersonImpression per chat → J
 
 v3 一张表存所有记忆（`experience_fragment`），赤尾只有一个脑子。隐私通过 context assembly 时过滤实现，不在存储层隔离。
 
-### 数据流
+### 全局架构
 
-核心是三次变换：**客观对话 → 主观经历 → 模糊记忆 → 注入意识**
+赤尾不是一个等消息的机器人，是一个有生活节律的人。v3 设计的是她的**整个认知模型**。
 
 ```mermaid
 flowchart TD
-    subgraph RAW["客观世界（原始对话）"]
-        GA["番剧群的对话"]
-        GB["技术群的对话"]
-        PC["和主人的私聊"]
+    subgraph IDENTITY["自己是谁（永久）"]
+        PERSONA["人格内核 bot_persona"]
     end
 
-    subgraph AFTERTHOUGHT["第一次变换：回味（实时，对话结束后5分钟）"]
+    subgraph LIFE["生活引擎 Life Engine（后台常驻）"]
         direction TB
-        AT_DESC["赤尾刚聊完天，脑子里回味刚才的事\nLLM 以第一人称写内心独白\n客观聊天记录 → 主观经历感受"]
+        STATE["此刻的状态\n在阳台发呆 / 在刷手机 / 睡着了"]
+        SCHEDULE["今天的安排 AkaoSchedule"]
+        SCHEDULE -->|"参考"| STATE
+        STATE -->|"每分钟 tick"| STATE
     end
 
-    GA -->|"回复后触发"| FA["碎片：在番剧群和阿儒\n聊了新番，他推荐的\n那部看起来还不错"]
-    GB -->|"回复后触发"| FB["碎片：技术群里有人问\n了个部署的问题，\n我帮着答了一下"]
-    PC -->|"回复后触发"| FC["碎片：主人今天心情\n好像不太好，说了\n一些让我在意的话"]
+    subgraph WORLD["外部世界"]
+        MSG_AT["有人@赤尾"]
+        MSG_GROUP["群里在聊天（没@）"]
+        MSG_P2P["私聊消息"]
+    end
 
-    FA & FB & FC -->|"凌晨 03:00\n所有碎片混在一起"| DREAM
+    subgraph TRIGGERS["三层记忆触发"]
+        T1["参与：赤尾回复了\n→ conversation 碎片"]
+        T2["窥屏：Life Engine 刷手机状态\n翻白名单群 → glimpse 碎片"]
+        T3["没看：赤尾不在看这个群\n→ 无记忆（需要时翻聊天记录）"]
+    end
 
-    subgraph DREAM["第二次变换：做梦（凌晨，一天一次）"]
+    MSG_AT -->|"硬中断，必须响应\n响应风格由当前状态决定"| T1
+    MSG_P2P --> T1
+    MSG_GROUP -->|"Life Engine 在刷手机"| T2
+    MSG_GROUP -->|"Life Engine 没在看"| T3
+
+    subgraph MEMORY["记忆（experience_fragment 一张表）"]
         direction TB
-        DR_DESC["赤尾睡前回想今天一整天\n十几条碎片压缩成一篇日记\n遗忘自然发生：有感触的留下，没感觉的消失"]
+        CONV["conversation 碎片\n回味：刚才聊的那些事...\n带场景：在番剧群 / 和主人私聊"]
+        GLIMPSE["glimpse 碎片\n窥屏：群里在聊XX，挺有意思"]
+        DAILY["daily 碎片（做梦产物）\n今天过得挺充实...\n十几条碎片 → 一篇日记\n遗忘在此自然发生"]
+        WEEKLY["weekly 碎片（深度做梦）\n这周最开心的是..."]
+
+        CONV & GLIMPSE -->|"凌晨做梦\n压缩+遗忘"| DAILY
+        DAILY -->|"每周压缩"| WEEKLY
     end
 
-    DREAM --> DAILY["日记碎片：今天过得挺充实，\n在番剧群发现了个好番，\n主人好像有心事但没细说..."]
+    T1 -->|"对话结束5分钟后"| CONV
+    T2 --> GLIMPSE
 
-    DAILY -->|"每周一\n7篇日记压缩"| WEEKLY["周记碎片：这周最开心的\n是发现了那部新番..."]
-
-    subgraph INJECT["第三次变换：注入意识（对话时）"]
+    subgraph CONSCIOUSNESS["赤尾回复时的意识"]
         direction TB
-        INJ_DESC["赤尾收到消息要回复时\n从碎片中选出该看到的记忆\n注入 system prompt"]
+        C_WHO["我是谁（人格内核）"]
+        C_NOW["我现在的状态（Life Engine）"]
+        C_TODAY["我今天的安排（Schedule）"]
+        C_RECENT["脑子里的东西（今天的碎片）"]
+        C_FAR["更远的记忆（日记/周记）"]
+        C_STYLE["说话风格（IdentityDrift）"]
+        C_HINT["想不起来可以翻日记/聊天记录"]
     end
 
-    FA & DAILY & WEEKLY -->|"在番剧群时"| INJECT
-    FA & FB & FC & DAILY & WEEKLY -->|"私聊时"| INJECT
+    PERSONA --> C_WHO
+    STATE --> C_NOW
+    SCHEDULE --> C_TODAY
+    CONV & GLIMPSE -->|"隐私过滤"| C_RECENT
+    DAILY & WEEKLY --> C_FAR
+
+    subgraph TOOLS["主动回忆工具"]
+        RECALL["recall：想一想\n全文搜索碎片"]
+        HISTORY["check_chat_history：翻记录\n读原始消息"]
+    end
+
+    T3 -.->|"需要时"| HISTORY
 ```
 
-**每次变换都是信息压缩**：原始消息（千条）→ 回味碎片（十几条）→ 日记（一条）→ 周记（一条）。越压缩越模糊，越像人的长期记忆。
+### 隐私过滤
 
-### 隐私规则
-
-注入意识时的唯一硬规则——**群里不暴露私聊和其他群的细节**：
+注入"脑子里的东西"时的唯一硬规则——**群里不暴露其他群和私聊的细节**：
 
 ```mermaid
 flowchart LR
-    subgraph TODAY["今天的碎片"]
+    subgraph TODAY["赤尾今天的碎片"]
         FA["番剧群碎片"]
         FB["技术群碎片"]
         FC["私聊碎片"]
+        FG["glimpse 碎片"]
     end
 
     subgraph DISTANT["更远的记忆"]
-        D["日记/周记\n（已自然模糊化）"]
+        D["日记/周记\n已自然模糊化"]
     end
 
-    subgraph IN_GROUP["在番剧群回复时能看到"]
-        FA2["✅ 番剧群碎片"]
-        D2["✅ 日记/周记"]
+    subgraph IN_GROUP["在番剧群回复时"]
+        G1["✅ 番剧群碎片"]
+        G4["✅ 日记/周记"]
     end
 
-    FA --> FA2
-    FB -.->|"❌ 过滤"| IN_GROUP
-    FC -.->|"❌ 过滤"| IN_GROUP
-    D --> D2
-
-    subgraph IN_P2P["私聊时能看到"]
-        ALL["✅ 所有碎片 + 日记/周记\n（私聊是赤尾的私密空间）"]
+    subgraph IN_P2P["私聊时"]
+        P1["✅ 全部碎片 + 日记/周记\n私聊是赤尾的私密空间"]
     end
 
-    FA --> ALL
-    FB --> ALL
-    FC --> ALL
-    D --> ALL
+    FA --> G1
+    FB -.->|"❌"| IN_GROUP
+    FC -.->|"❌"| IN_GROUP
+    FG -.->|"❌"| IN_GROUP
+    D --> G4
+
+    FA & FB & FC & FG & D --> P1
 ```
 
-日记/周记碎片永远可见——因为做梦时已经自然模糊化了（"主人好像有心事"而不是"主人说了XXX"）。
+日记/周记永远可见——做梦时已经自然模糊化（"主人好像有心事"而不是具体说了什么）。
+
+### 实现进度
+
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| experience_fragment 表 | ✅ 已部署 | 唯一记忆存储 |
+| AfterthoughtManager | ✅ 已部署 | conversation 碎片生成（prompt 待调优） |
+| DreamWorker | ✅ 已部署 | daily/weekly 做梦 |
+| Context Assembly v3 | ✅ 已部署 | 碎片注入 + 隐私过滤 |
+| recall / check_chat_history | ✅ 已部署 | 新工具 |
+| Life Engine | 🔲 Plan 2 | 生活状态机、tick 循环 |
+| Glimpse 管线 | 🔲 Plan 2 | 依赖 Life Engine 的刷手机状态 |
+| 被@时状态感知 | 🔲 Plan 2 | "睡着了被@→嗯...干嘛..." |
 
 ### 隐私过滤（唯一的硬规则）
 
