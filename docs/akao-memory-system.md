@@ -1,6 +1,161 @@
 # 赤尾记忆与上下文系统
 
-> 最后更新: 2026-03-31 | 对应版本: agent-service v1.0.0.90
+> 最后更新: 2026-04-06 | 对应版本: agent-service v1.0.0.165 (mem-v3 泳道验证中)
+
+---
+
+## v3 记忆管线（当前实现）
+
+### 核心变化
+
+v2 按群/私聊分桶（DiaryEntry per chat → PersonImpression per chat → Journal 聚合），赤尾在不同群是不同的人。
+
+v3 一张表存所有记忆（`experience_fragment`），赤尾只有一个脑子。隐私通过 context assembly 时过滤实现，不在存储层隔离。
+
+### 数据流
+
+```
+赤尾回复了一条消息
+    │
+    ▼ fire-and-forget (agent.py)
+┌─────────────────────────────────────────────┐
+│  AfterthoughtManager（两阶段锁）             │
+│                                             │
+│  Phase1: debounce 5 分钟 / 15 条强制 flush  │
+│  Phase2:                                    │
+│    ① conversation_messages 取最近 2h 消息    │
+│    ② lark_user 取人名，lark_group_chat_info │
+│       取群名                                │
+│    ③ 格式化时间线：                          │
+│       [09:43] 原智鸿: 你好                   │
+│    ④ LLM (afterthought_conversation prompt) │
+│       输入：persona + 场景 + 时间线           │
+│       场景 = "和原智鸿的私聊"                 │
+│            / "在「番剧群」群里"               │
+│    ⑤ 输出：赤尾第一人称内心独白               │
+└──────────────────┬──────────────────────────┘
+                   ▼
+    ┌──────────────────────────────┐
+    │  experience_fragment 表       │
+    │                              │
+    │  grain = "conversation"      │
+    │  source_chat_id = oc_xxx     │  ← 元数据，系统用来做隐私过滤
+    │  source_type = "group"/"p2p" │
+    │  content = "在番剧群和阿儒    │  ← 自然语言，群名/人名自然出现
+    │    聊了新番，他推荐的那部      │
+    │    看起来还不错..."           │
+    └──────────────┬───────────────┘
+                   │
+    ═══════════════╪══════════ 03:00 CST ════════
+                   ▼
+    ┌──────────────────────────────┐
+    │  DreamWorker (daily)         │
+    │                              │
+    │  输入：当天所有 conversation  │  ← 所有群+私聊的碎片，不分群
+    │       + glimpse 碎片         │
+    │       + 最近 3 天 daily 碎片  │
+    │                              │
+    │  LLM (dream_daily prompt)    │
+    │  "睡前回想今天的一天"         │
+    │                              │
+    │  输出：grain="daily" 碎片    │  ← 无 source_chat_id（跨群聚合）
+    │  自然遗忘在此发生：            │
+    │  十几条碎片 → 一篇回顾        │
+    └──────────────┬───────────────┘
+                   │
+    ═══════════════╪══════════ 周一 04:00 CST ═══
+                   ▼
+    ┌──────────────────────────────┐
+    │  DreamWorker (weekly)        │
+    │                              │
+    │  输入：最近 7 条 daily 碎片   │
+    │  输出：grain="weekly" 碎片   │
+    └──────────────┬───────────────┘
+                   │
+    ═══════════════╪══════════ 对话时 ═══════════
+                   ▼
+    ┌──────────────────────────────────────────┐
+    │  build_inner_context()                    │
+    │                                          │
+    │  ┌─ 场景提示（群名/私聊对象）             │
+    │  ├─ 今日基调（Schedule daily）            │
+    │  ├─ 脑子里的东西（今天的碎片）  ◄──────┐  │
+    │  │    群聊：只看当前群的碎片     隐私   │  │
+    │  │    私聊：看所有碎片          过滤   │  │
+    │  │    依据：source_chat_id ────────┘  │
+    │  ├─ 更远的记忆（recent daily/weekly）  │
+    │  └─ 记忆回溯引导                       │
+    └──────────────────────────────────────────┘
+```
+
+### 隐私过滤（唯一的硬规则）
+
+| 场景 | 可见碎片 | 过滤依据 |
+|------|---------|---------|
+| 群聊 | 当前群的 conversation/glimpse | `source_chat_id = 当前 chat_id` |
+| 群聊 | 所有 daily/weekly | `grain in (daily, weekly)`，无 source_chat_id |
+| 私聊 | 所有碎片 | 不过滤 |
+
+daily/weekly 碎片没有 `source_chat_id`（跨群聚合产物），所以任何场景都可见。这是设计意图：做梦已经自然模糊化了。
+
+### 碎片内容里的群名/人名
+
+碎片是自然语言文本。LLM 在生成时知道场景（prompt 里传了群名/私聊对象），自然会在内容里提到。例如：
+
+- `"在番剧群和阿儒聊了新番"` — 群名来自 `lark_group_chat_info.name`
+- `"和主人私聊了一些心事"` — 人名来自 `lark_user.name`
+
+群改名后：旧碎片保持旧名（已写死在 content 中），新碎片用新名。跟人的记忆一样。
+
+### 工具
+
+| 工具 | 用途 | 实现 |
+|------|------|------|
+| `recall` | "想一想" — 模糊联想 | PostgreSQL 全文搜索 experience_fragment |
+| `check_chat_history` | "翻聊天记录" — 精确查阅 | 读 conversation_messages 原始消息 |
+
+### experience_fragment 表结构
+
+```sql
+CREATE TABLE experience_fragment (
+    id              SERIAL PRIMARY KEY,
+    persona_id      VARCHAR(50) NOT NULL,
+    grain           VARCHAR(20) NOT NULL,       -- conversation/glimpse/daily/weekly
+    source_chat_id  VARCHAR(100),               -- 来源群/私聊（daily/weekly 为 NULL）
+    source_type     VARCHAR(10),                -- p2p/group（daily/weekly 为 NULL）
+    time_start      BIGINT,
+    time_end        BIGINT,
+    content         TEXT NOT NULL,               -- 赤尾第一人称叙事
+    mentioned_entity_ids JSONB DEFAULT '[]',     -- 预留，暂未使用
+    model           VARCHAR(100),
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### 替代关系
+
+| v3 组件 | 替代的 v2 组件 |
+|---------|--------------|
+| AfterthoughtManager | — (v2 无实时记忆) |
+| DreamWorker (daily) | diary_worker + journal_worker (daily) |
+| DreamWorker (weekly) | weekly_review + journal_worker (weekly) |
+| 碎片中的自然语言描述 | PersonImpression + GroupCultureGestalt |
+| recall 工具 | load_memory 工具 |
+| check_chat_history | — (新增) |
+
+### 保留不动的组件
+
+- `conversation_messages` — 原始消息
+- `AkaoSchedule` + `schedule_worker` — 手帐生成（输入源从 Journal 改为 daily 碎片）
+- `IdentityDrift` + `IdentityDriftManager` — 说话风格漂移
+- `vectorize_worker` + Qdrant — recall 的语义检索（待接入）
+- `bot_persona` — 人格内核
+
+---
+
+## v2 记忆管线（旧系统，保留只读）
+
+> 以下为 v2 架构文档，旧表保留只读，不再写入。
 
 ## 系统概览
 
