@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
 
-_VALID_ACTIVITY_TYPES = {"browsing", "sleeping", "out", "busy", "idle"}
-
 
 async def _load_state(persona_id: str) -> LifeEngineState | None:
     """从 DB 加载状态，不存在返回 None"""
@@ -40,6 +38,7 @@ async def _save_state(
     skip_until: datetime | None,
 ) -> None:
     """UPSERT 状态到 DB"""
+    now = datetime.now(CST)
     async with AsyncSessionLocal() as session:
         stmt = pg_insert(LifeEngineState).values(
             persona_id=persona_id,
@@ -47,7 +46,7 @@ async def _save_state(
             activity_type=activity_type,
             response_mood=response_mood,
             skip_until=skip_until,
-            updated_at=datetime.now(CST),
+            updated_at=now,
         ).on_conflict_do_update(
             index_elements=["persona_id"],
             set_={
@@ -55,7 +54,7 @@ async def _save_state(
                 "activity_type": activity_type,
                 "response_mood": response_mood,
                 "skip_until": skip_until,
-                "updated_at": datetime.now(CST),
+                "updated_at": now,
             },
         )
         await session.execute(stmt)
@@ -66,19 +65,16 @@ class LifeEngine:
     """赤尾生活状态机"""
 
     async def tick(self, persona_id: str) -> None:
-        """一次心跳：检查 skip → 加载上下文 → LLM 决策 → 保存 → 副作用"""
+        """一次心跳：检查 skip → LLM 决策 → 保存 → 副作用"""
         row = await _load_state(persona_id)
         now = datetime.now(CST)
 
-        # 当前状态
         if row:
             current_state = row.current_state
-            activity_type = row.activity_type
             response_mood = row.response_mood
             skip_until = row.skip_until
         else:
             current_state = "刚醒来，还有点迷糊"
-            activity_type = "idle"
             response_mood = "迷迷糊糊的"
             skip_until = None
 
@@ -86,12 +82,8 @@ class LifeEngine:
         if skip_until and now < skip_until:
             return
 
-        old_activity = activity_type
-
         # LLM 决策
-        new = await self._think(
-            current_state, activity_type, response_mood, now, persona_id
-        )
+        new = await self._think(current_state, response_mood, now, persona_id)
 
         await _save_state(
             persona_id=persona_id,
@@ -107,19 +99,23 @@ class LifeEngine:
             f"skip_until={new['skip_until']}"
         )
 
-        # 状态变化时触发副作用
-        if new["activity_type"] != old_activity:
-            await self._on_state_change(persona_id, old_activity, new)
+        # browsing → 触发 glimpse
+        if new["activity_type"] == "browsing":
+            from app.services.glimpse import run_glimpse
+
+            try:
+                await run_glimpse(persona_id)
+            except Exception as e:
+                logger.error(f"[{persona_id}] Glimpse failed: {e}")
 
     async def _think(
         self,
         current_state: str,
-        activity_type: str,
         response_mood: str,
         now: datetime,
         persona_id: str,
     ) -> dict:
-        """调用 LLM 决定下一步状态，返回 dict"""
+        """调用 LLM 决定下一步状态"""
         from app.agents.infra.langfuse_client import get_prompt
         from app.agents.infra.model_builder import ModelBuilder
         from app.config.config import settings
@@ -149,7 +145,6 @@ class LifeEngine:
             persona_lite=persona_lite,
             current_time=now.strftime("%H:%M"),
             current_state=current_state,
-            activity_type=activity_type,
             response_mood=response_mood,
             schedule=schedule_text,
             recent_experiences=frag_text,
@@ -174,18 +169,13 @@ class LifeEngine:
             end = raw.rfind("}") + 1
             if start >= 0 and end > start:
                 data = json.loads(raw[start:end])
-                skip_minutes = data.get("skip_minutes", 0)
-                skip_until = None
-                if skip_minutes and int(skip_minutes) > 0:
-                    skip_until = now + timedelta(minutes=int(skip_minutes))
 
-                activity = data.get("activity_type", "idle")
-                if activity not in _VALID_ACTIVITY_TYPES:
-                    activity = "idle"
+                # wake_me_at → skip_until
+                skip_until = _parse_wake_me_at(data.get("wake_me_at"), now)
 
                 return {
                     "current_state": data.get("current_state", fallback_state),
-                    "activity_type": activity,
+                    "activity_type": data.get("activity_type", ""),
                     "response_mood": data.get("response_mood", fallback_mood),
                     "skip_until": skip_until,
                 }
@@ -194,26 +184,27 @@ class LifeEngine:
 
         return {
             "current_state": fallback_state,
-            "activity_type": "idle",
+            "activity_type": "",
             "response_mood": fallback_mood,
             "skip_until": None,
         }
 
-    async def _on_state_change(
-        self, persona_id: str, old_activity: str, new: dict
-    ) -> None:
-        """状态变化时的副作用"""
-        logger.info(
-            f"[{persona_id}] State change: {old_activity} → {new['activity_type']} "
-            f"({new['current_state'][:40]})"
-        )
-        if new["activity_type"] == "browsing":
-            from app.services.glimpse import run_glimpse
 
-            try:
-                await run_glimpse(persona_id)
-            except Exception as e:
-                logger.error(f"[{persona_id}] Glimpse failed: {e}")
+def _parse_wake_me_at(value: str | None, now: datetime) -> datetime | None:
+    """解析 wake_me_at HH:MM 为 datetime，null 返回 None"""
+    if not value or value == "null":
+        return None
+    try:
+        parts = value.strip().split(":")
+        hour, minute = int(parts[0]), int(parts[1])
+        wake = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # 如果时间已过（比如现在 23:00，wake_me_at 07:00）→ 明天
+        if wake <= now:
+            wake += timedelta(days=1)
+        return wake
+    except (ValueError, IndexError):
+        logger.warning(f"Invalid wake_me_at: {value}")
+        return None
 
 
 def _extract_text(content) -> str:
