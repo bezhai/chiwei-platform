@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -88,3 +89,93 @@ async def test_load_existing_state():
         state = await engine._load_state("akao-001")
         assert state.activity_type == "sleeping"
         assert state.current_state == "在睡觉"
+
+
+@pytest.mark.asyncio
+async def test_tick_skips_when_skip_until_future():
+    """skip_until 在未来 → 不调用 LLM"""
+    engine = LifeEngine()
+    future = (datetime.now(tz=timezone(timedelta(hours=8))) + timedelta(hours=1)).isoformat()
+    state = LifeState(
+        current_state="在看番",
+        activity_type="busy",
+        response_mood="沉浸中",
+        skip_until=future,
+        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
+    )
+    existing_json = json.dumps(state.to_dict(), ensure_ascii=False)
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=existing_json)
+
+    with (
+        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock) as mock_think,
+    ):
+        await engine.tick("akao-001")
+        mock_think.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tick_calls_think_when_no_skip():
+    """无 skip → 调用 LLM think"""
+    engine = LifeEngine()
+    state = LifeState(
+        current_state="发呆",
+        activity_type="idle",
+        response_mood="无聊",
+        skip_until=None,
+        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
+    )
+    new_state = LifeState(
+        current_state="去刷手机了",
+        activity_type="browsing",
+        response_mood="好奇",
+        skip_until=None,
+        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
+    )
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=json.dumps(state.to_dict(), ensure_ascii=False))
+
+    with (
+        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
+        patch("app.services.life_engine.LifeEngine._on_state_change", new_callable=AsyncMock) as mock_change,
+    ):
+        await engine.tick("akao-001")
+        mock_redis.set.assert_called_once()
+        # activity changed from idle → browsing → should trigger _on_state_change
+        mock_change.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_expired_skip_triggers_think():
+    """skip_until 已过期 → 调用 LLM think"""
+    engine = LifeEngine()
+    past = (datetime.now(tz=timezone(timedelta(hours=8))) - timedelta(minutes=5)).isoformat()
+    state = LifeState(
+        current_state="刚看完番",
+        activity_type="busy",
+        response_mood="意犹未尽",
+        skip_until=past,
+        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
+    )
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=json.dumps(state.to_dict(), ensure_ascii=False))
+    new_state = LifeState(
+        current_state="无聊了",
+        activity_type="idle",
+        response_mood="有点空虚",
+        skip_until=None,
+        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
+    )
+
+    with (
+        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
+        patch("app.services.life_engine.LifeEngine._on_state_change", new_callable=AsyncMock),
+    ):
+        await engine.tick("akao-001")
+        mock_redis.set.assert_called_once()
