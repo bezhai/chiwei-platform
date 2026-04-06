@@ -24,6 +24,7 @@ from app.workers.schedule_worker import (
 from app.workers.base_style_worker import cron_generate_base_reply_style
 from app.workers.proactive_scanner import run_proactive_scan
 from app.workers.vectorize_worker import cron_scan_pending_messages
+from app.workers.life_engine_worker import cron_life_engine_tick
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,8 @@ class UnifiedWorkerSettings:
     cron_jobs = [
         # 1. 长期任务：每分钟执行一次
         cron(task_executor_job, minute=None),
+        # 1b. Life Engine tick：每分钟
+        cron(cron_life_engine_tick, minute=None, timeout=120),
         # 2. 向量化 pending 消息扫描：每 10 分钟一次
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
         # 3. v3 做梦（daily）：每天 CST 03:00
