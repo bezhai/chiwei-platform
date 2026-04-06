@@ -64,6 +64,8 @@ class UnifiedWorkerSettings:
 
     on_startup = on_startup
 
+    queue_name = f"arq:queue:{settings.lane}" if settings.lane else "arq:queue"
+
     redis_settings = RedisSettings(
         host=settings.redis_host or "localhost",
         port=6379,
