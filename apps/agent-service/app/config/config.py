@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # 泳道标识（worker 无 HTTP 请求上下文时用此 fallback）
     lane: str | None = None
 
+    # Life Engine
+    life_engine_model: str = "offline-model"
+
     # Identity 漂移
     identity_drift_model: str = "offline-model"
     identity_drift_debounce_seconds: int = 120  # 一阶段等待: 2 分钟

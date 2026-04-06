@@ -38,7 +38,6 @@ async def lifespan(app: FastAPI):
     if settings.rabbitmq_url:
         from app.workers.chat_consumer import start_chat_consumer
         from app.workers.post_consumer import start_post_consumer
-        from app.workers.proactive_consumer import start_proactive_consumer
 
         consumer_tasks.append(asyncio.create_task(start_post_consumer()))
         logger.info("Post safety consumer started")
@@ -46,8 +45,10 @@ async def lifespan(app: FastAPI):
         consumer_tasks.append(asyncio.create_task(start_chat_consumer()))
         logger.info("Chat request consumer started")
 
-        consumer_tasks.append(asyncio.create_task(start_proactive_consumer()))
-        logger.info("Proactive eval consumer started")
+        # Life Engine browsing 替代 ProactiveManager，不再消费 proactive_eval 队列
+        # from app.workers.proactive_consumer import start_proactive_consumer
+        # consumer_tasks.append(asyncio.create_task(start_proactive_consumer()))
+        # logger.info("Proactive eval consumer started")
 
     yield
 

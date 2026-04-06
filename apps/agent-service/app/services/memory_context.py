@@ -1,58 +1,76 @@
-"""赤尾聊天注入上下文 — 统一 inner_context
+"""赤尾聊天注入上下文 v3
 
-构建注入 system prompt 的所有上下文：
-- 场景提示（群名/私聊 + 回复谁）
-- 今日状态（Journal daily / Schedule daily）
-- 对人和群的感觉
-- 记忆回溯引导语
+基于 experience_fragment 构建 system prompt 注入的所有上下文。
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.orm.crud import (
-    get_cross_group_impressions,
-    get_group_culture_gestalt,
-    get_impressions_for_users,
-    get_journal,
-    get_plan_for_period,
-    get_username,
-)
+from app.orm.crud import get_plan_for_period
+from app.orm.memory_crud import get_recent_fragments_by_grain, get_today_fragments
 from app.services.identity_drift import get_base_reply_style, get_identity_state
 
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
-MAX_IMPRESSION_USERS = 10
-MAX_CROSS_GROUP_IMPRESSIONS = 5
+
+MAX_FRAGMENT_SECTION_CHARS = 3000  # ~2000 tokens
+MAX_DISTANT_SECTION_CHARS = 800   # ~500 tokens
 
 _MEMORY_RECALL_HINT = (
-    "（你有写日记的习惯。如果聊着聊着觉得\u201c这个事我好像知道点什么但记不清了\u201d，"
-    "可以翻翻日记想一想。）"
+    "（你有写日记的习惯。如果隐约觉得知道点什么但想不起来，可以用 recall 想一想。"
+    "如果想确认某件事具体怎么说的，可以翻翻聊天记录。）"
 )
 
 
 async def _build_today_state(persona_id: str) -> str:
-    """构建今日状态：今天 Schedule > 昨天 Journal
-
-    今天的 Journal 不可能存在（凌晨 04:00 回溯生成昨天的），
-    所以优先用今天的 Schedule（05:00 生成），再 fallback 昨天的 Journal。
-    """
+    """今天 Schedule（Life Engine 接入前的替代方案）"""
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")
-
-    # 优先用今天的 Schedule（05:00 已生成）
     schedule = await get_plan_for_period("daily", today, today, persona_id)
     if schedule and schedule.content:
         return schedule.content
-
-    # fallback: 昨天的 Journal（模糊化的个人感受）
-    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    journal = await get_journal("daily", yesterday, persona_id)
-    if journal:
-        return journal.content
-
     return ""
+
+
+async def _build_life_state(persona_id: str) -> str:
+    """从 DB 读取 Life Engine 状态，返回注入文本"""
+    try:
+        from app.services.life_engine import _load_state
+
+        row = await _load_state(persona_id)
+        if not row:
+            return ""
+        current = row.current_state
+        mood = row.response_mood
+        if current:
+            return f"你此刻的状态：{current}\n你的心情：{mood}" if mood else f"你此刻的状态：{current}"
+    except Exception as e:
+        logger.warning(f"[{persona_id}] Failed to read life state: {e}")
+    return ""
+
+
+def _filter_fragments_for_group(fragments: list, current_chat_id: str) -> list:
+    """群聊场景：只保留当前群的 conversation/glimpse 碎片"""
+    return [f for f in fragments if f.source_chat_id == current_chat_id]
+
+
+def _format_fragment_section(fragments: list, max_chars: int) -> str:
+    """格式化碎片列表为文本，超出截断"""
+    if not fragments:
+        return ""
+    lines = []
+    total = 0
+    for f in fragments:
+        text = f.content.strip()
+        if total + len(text) > max_chars:
+            remaining = max_chars - total
+            if remaining > 50:
+                lines.append(text[:remaining] + "...")
+            break
+        lines.append(text)
+        total += len(text)
+    return "\n\n".join(lines)
 
 
 async def build_inner_context(
@@ -67,23 +85,9 @@ async def build_inner_context(
     is_proactive: bool = False,
     proactive_stimulus: str = "",
 ) -> str:
-    """构建统一的聊天注入上下文
-
-    Args:
-        chat_id: 群/私聊 ID
-        chat_type: "group" 或 "p2p"
-        user_ids: 当前对话中出现的用户 ID 列表
-        trigger_user_id: 触发者 user_id
-        trigger_username: 触发者用户名
-        persona_id: 人设 ID（用于多 bot 人设隔离）
-        chat_name: 群名（群聊场景）
-
-    Returns:
-        组装好的 inner_context 文本，注入 system prompt
-    """
     sections: list[str] = []
 
-    # === 场景提示 ===
+    # === 场景提示 === (KEEP SAME)
     if is_proactive:
         scene = f"你在群聊「{chat_name}」中。" if chat_name else ""
         scene += "\n你刚刷到了群里的对话。如果你想说点什么就说，不想说也可以不说。"
@@ -100,65 +104,40 @@ async def build_inner_context(
         if trigger_username:
             sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
-    # === 今日基调（Journal / Schedule） ===
+    # === 今日基调 ===
     today_state = await _build_today_state(persona_id)
     if today_state:
         sections.append(f"你今天的基调：\n{today_state}")
 
-    # === 对人和群的感觉 ===
+    # === 此刻的状态（Life Engine）===
+    life_state = await _build_life_state(persona_id)
+    if life_state:
+        sections.append(life_state)
+
+    # === 脑子里的东西（今天的经历碎片）===
+    today_frags = await get_today_fragments(persona_id, grains=["conversation", "glimpse"])
+
     if chat_type == "group":
-        group_gestalt = await get_group_culture_gestalt(chat_id, persona_id)
-        if group_gestalt:
-            sections.append(f"你对这个群的感觉：{group_gestalt}")
-
-        if user_ids:
-            people_lines = await _build_people_gestalt(chat_id, user_ids, persona_id)
-            if people_lines:
-                sections.append(
-                    "你对当前对话中出现的人的感觉：\n" + "\n".join(people_lines)
-                )
+        visible_frags = _filter_fragments_for_group(today_frags, chat_id)
     else:
-        cross_lines = await _build_cross_group_gestalt(
-            trigger_user_id, trigger_username, persona_id
-        )
-        if cross_lines:
-            sections.append(cross_lines)
+        visible_frags = today_frags
 
-    # === 记忆回溯引导语 ===
+    if visible_frags:
+        frag_text = _format_fragment_section(visible_frags, MAX_FRAGMENT_SECTION_CHARS)
+        if frag_text:
+            sections.append(f"脑子里的东西（今天的经历）：\n{frag_text}")
+
+    # === 更远的记忆 ===
+    distant_frags = await get_recent_fragments_by_grain(persona_id, "daily", limit=3)
+    if distant_frags:
+        distant_text = _format_fragment_section(distant_frags, MAX_DISTANT_SECTION_CHARS)
+        if distant_text:
+            sections.append(f"更远的记忆：\n{distant_text}")
+
+    # === 记忆回溯引导 ===
     sections.append(_MEMORY_RECALL_HINT)
 
     return "\n\n".join(sections)
-
-
-async def _build_people_gestalt(chat_id: str, user_ids: list[str], persona_id: str = "") -> list[str]:
-    """构建对话者的感觉 gestalt 列表（含印象时间）"""
-    impressions = await get_impressions_for_users(
-        chat_id, user_ids[:MAX_IMPRESSION_USERS], persona_id
-    )
-    if not impressions:
-        return []
-    lines = []
-    for imp in impressions:
-        name = await get_username(imp.user_id) or imp.user_id[:8]
-        if imp.updated_at:
-            date_str = imp.updated_at.strftime("%m月%d日")
-            lines.append(f"- {name}（上次印象: {date_str}）：{imp.impression_text}")
-        else:
-            lines.append(f"- {name}：{imp.impression_text}")
-    return lines
-
-
-async def _build_cross_group_gestalt(user_id: str, trigger_username: str, persona_id: str = "") -> str:
-    """构建跨群人物 gestalt（私聊场景）"""
-    rows = await get_cross_group_impressions(
-        user_id, persona_id, limit=MAX_CROSS_GROUP_IMPRESSIONS
-    )
-    if not rows:
-        return ""
-    lines = []
-    for imp, group_name in rows:
-        lines.append(f"- （{group_name}）{imp.impression_text}")
-    return f"你对 {trigger_username} 的感觉：\n" + "\n".join(lines)
 
 
 async def get_reply_style(chat_id: str, persona_id: str, default_style: str = "") -> str:
@@ -169,15 +148,13 @@ async def get_reply_style(chat_id: str, persona_id: str, default_style: str = ""
             return drift_state
     except Exception:
         pass
-
     try:
         base_state = await get_base_reply_style(persona_id)
         if base_state:
             return base_state
     except Exception:
         pass
-
-    return default_style  # 由调用方从 bot_persona.default_reply_style 传入
+    return default_style
 
 
 # 向后兼容别名
