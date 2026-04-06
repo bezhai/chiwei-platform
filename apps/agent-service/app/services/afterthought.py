@@ -166,11 +166,12 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         return
 
     # 4. 调用 LLM
+    persona_lite = persona.persona_lite if persona else ""
     prompt = get_prompt("afterthought_conversation")
     compiled = prompt.compile(
         persona_name=persona_name,
-        timeline=timeline,
-        chat_name=name_map.get(chat_id, chat_id),
+        persona_lite=persona_lite,
+        messages=timeline,
     )
 
     model = await ModelBuilder.build_chat_model(settings.diary_model)
