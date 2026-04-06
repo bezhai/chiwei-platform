@@ -1,5 +1,6 @@
 """测试统一聊天注入上下文 v3（experience_fragment 版）"""
 
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,8 @@ async def test_build_inner_context_group_with_fragments():
     with (
         patch("app.services.memory_context._build_today_state",
               new_callable=AsyncMock, return_value="今天想出门逛逛"),
+        patch("app.services.memory_context._build_life_state",
+              new_callable=AsyncMock, return_value=""),
         patch("app.services.memory_context.get_today_fragments",
               new_callable=AsyncMock, return_value=today_frags),
         patch("app.services.memory_context.get_recent_fragments_by_grain",
@@ -61,6 +64,8 @@ async def test_build_inner_context_p2p_sees_all():
     with (
         patch("app.services.memory_context._build_today_state",
               new_callable=AsyncMock, return_value="心情不错"),
+        patch("app.services.memory_context._build_life_state",
+              new_callable=AsyncMock, return_value=""),
         patch("app.services.memory_context.get_today_fragments",
               new_callable=AsyncMock, return_value=today_frags),
         patch("app.services.memory_context.get_recent_fragments_by_grain",
@@ -90,6 +95,8 @@ async def test_build_inner_context_group_filters_private():
     with (
         patch("app.services.memory_context._build_today_state",
               new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context._build_life_state",
+              new_callable=AsyncMock, return_value=""),
         patch("app.services.memory_context.get_today_fragments",
               new_callable=AsyncMock, return_value=today_frags),
         patch("app.services.memory_context.get_recent_fragments_by_grain",
@@ -112,6 +119,8 @@ async def test_build_inner_context_no_fragments():
     """无碎片时：场景 + 引导语，不出现空段"""
     with (
         patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context._build_life_state",
               new_callable=AsyncMock, return_value=""),
         patch("app.services.memory_context.get_today_fragments",
               new_callable=AsyncMock, return_value=[]),
@@ -137,6 +146,8 @@ async def test_build_inner_context_proactive():
     """主动发言：含 stimulus，无回复提示"""
     with (
         patch("app.services.memory_context._build_today_state",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.memory_context._build_life_state",
               new_callable=AsyncMock, return_value=""),
         patch("app.services.memory_context.get_today_fragments",
               new_callable=AsyncMock, return_value=[]),
@@ -217,3 +228,96 @@ async def test_get_reply_style_uses_persona_id():
         result = await get_reply_style("chat_abc", "akao")
         mock_drift.assert_called_once_with("chat_abc", "akao")
         assert result == "drifted"
+
+
+# ── Life Engine state injection tests ──
+
+
+@pytest.mark.asyncio
+async def test_inner_context_includes_life_engine_state():
+    """build_inner_context 注入 Life Engine 状态"""
+    state_json = json.dumps(
+        {
+            "current_state": "窝在被窝里刷手机",
+            "activity_type": "browsing",
+            "response_mood": "暖洋洋的，很放松",
+            "skip_until": None,
+            "updated_at": "2026-04-06T22:00:00+08:00",
+        },
+        ensure_ascii=False,
+    )
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=state_json)
+
+    with (
+        patch("app.services.memory_context.AsyncRedisClient") as mock_redis_cls,
+        patch(
+            "app.services.memory_context.get_plan_for_period",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.services.memory_context.get_today_fragments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.services.memory_context.get_recent_fragments_by_grain",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        from app.services.memory_context import build_inner_context
+        result = await build_inner_context(
+            chat_id="oc_test",
+            chat_type="group",
+            user_ids=[],
+            trigger_user_id="u1",
+            trigger_username="测试",
+            persona_id="akao-001",
+            chat_name="测试群",
+        )
+        assert "窝在被窝里刷手机" in result
+        assert "暖洋洋" in result
+
+
+@pytest.mark.asyncio
+async def test_inner_context_no_life_state_graceful():
+    """Redis 无 Life Engine 状态 → 不崩溃，不注入"""
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.memory_context.AsyncRedisClient") as mock_redis_cls,
+        patch(
+            "app.services.memory_context.get_plan_for_period",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.services.memory_context.get_today_fragments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.services.memory_context.get_recent_fragments_by_grain",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        mock_redis_cls.get_instance.return_value = mock_redis
+
+        from app.services.memory_context import build_inner_context
+        result = await build_inner_context(
+            chat_id="oc_test",
+            chat_type="p2p",
+            user_ids=[],
+            trigger_user_id="u1",
+            trigger_username="测试",
+            persona_id="akao-001",
+        )
+        assert isinstance(result, str)
+        assert "窝在被窝里" not in result  # no life state injected
