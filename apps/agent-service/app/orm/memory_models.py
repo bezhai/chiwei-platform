@@ -45,6 +45,23 @@ class ExperienceFragment(Base):
     )
 
 
+class LifeEngineState(Base):
+    """Life Engine 状态 — 每个 persona 一行，tick 时 UPSERT"""
+
+    __tablename__ = "life_engine_state"
+
+    persona_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    current_state: Mapped[str] = mapped_column(Text, nullable=False)           # "在沙发上刷手机"
+    activity_type: Mapped[str] = mapped_column(String(20), nullable=False)     # browsing/sleeping/out/busy/idle
+    response_mood: Mapped[str] = mapped_column(Text, nullable=False)           # "心情不错"
+    skip_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class MemoryEntity(Base):
     """ID 映射 — 飞书长 ID → 短自增 ID，用于碎片内容中消歧
 

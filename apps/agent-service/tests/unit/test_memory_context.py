@@ -236,22 +236,16 @@ async def test_get_reply_style_uses_persona_id():
 @pytest.mark.asyncio
 async def test_inner_context_includes_life_engine_state():
     """build_inner_context 注入 Life Engine 状态"""
-    state_json = json.dumps(
-        {
-            "current_state": "窝在被窝里刷手机",
-            "activity_type": "browsing",
-            "response_mood": "暖洋洋的，很放松",
-            "skip_until": None,
-            "updated_at": "2026-04-06T22:00:00+08:00",
-        },
-        ensure_ascii=False,
-    )
-
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=state_json)
+    mock_row = MagicMock()
+    mock_row.current_state = "窝在被窝里刷手机"
+    mock_row.response_mood = "暖洋洋的，很放松"
 
     with (
-        patch("app.services.memory_context.AsyncRedisClient") as mock_redis_cls,
+        patch(
+            "app.services.memory_context._build_life_state",
+            new_callable=AsyncMock,
+            return_value="你此刻的状态：窝在被窝里刷手机\n你的心情：暖洋洋的，很放松",
+        ),
         patch(
             "app.services.memory_context.get_plan_for_period",
             new_callable=AsyncMock,
@@ -268,8 +262,6 @@ async def test_inner_context_includes_life_engine_state():
             return_value=[],
         ),
     ):
-        mock_redis_cls.get_instance.return_value = mock_redis
-
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="oc_test",
@@ -286,12 +278,13 @@ async def test_inner_context_includes_life_engine_state():
 
 @pytest.mark.asyncio
 async def test_inner_context_no_life_state_graceful():
-    """Redis 无 Life Engine 状态 → 不崩溃，不注入"""
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=None)
-
+    """DB 无 Life Engine 状态 → 不崩溃，不注入"""
     with (
-        patch("app.services.memory_context.AsyncRedisClient") as mock_redis_cls,
+        patch(
+            "app.services.memory_context._build_life_state",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
         patch(
             "app.services.memory_context.get_plan_for_period",
             new_callable=AsyncMock,
@@ -308,8 +301,6 @@ async def test_inner_context_no_life_state_graceful():
             return_value=[],
         ),
     ):
-        mock_redis_cls.get_instance.return_value = mock_redis
-
         from app.services.memory_context import build_inner_context
         result = await build_inner_context(
             chat_id="oc_test",
@@ -320,4 +311,4 @@ async def test_inner_context_no_life_state_graceful():
             persona_id="akao-001",
         )
         assert isinstance(result, str)
-        assert "窝在被窝里" not in result  # no life state injected
+        assert "窝在被窝里" not in result

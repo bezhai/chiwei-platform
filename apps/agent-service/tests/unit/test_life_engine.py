@@ -1,115 +1,78 @@
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.life_engine import LifeState, LifeEngine
+from app.services.life_engine import LifeEngine, _extract_text
 
-REDIS_KEY = "life_engine:akao-001"
-
-
-def test_life_state_to_json_roundtrip():
-    """LifeState → JSON → LifeState 无损往返"""
-    state = LifeState(
-        current_state="在沙发上刷手机",
-        activity_type="browsing",
-        response_mood="心情不错",
-        skip_until=None,
-        updated_at="2026-04-06T10:00:00+08:00",
-    )
-    data = state.to_dict()
-    restored = LifeState.from_dict(data)
-    assert restored.current_state == state.current_state
-    assert restored.activity_type == state.activity_type
-    assert restored.response_mood == state.response_mood
-    assert restored.skip_until is None
-    assert restored.updated_at == state.updated_at
+CST = timezone(timedelta(hours=8))
 
 
-def test_life_state_with_skip_until():
-    """skip_until 正确序列化"""
-    state = LifeState(
-        current_state="在看番",
-        activity_type="busy",
-        response_mood="沉浸中",
-        skip_until="2026-04-06T10:30:00+08:00",
-        updated_at="2026-04-06T10:00:00+08:00",
-    )
-    data = state.to_dict()
-    restored = LifeState.from_dict(data)
-    assert restored.skip_until == "2026-04-06T10:30:00+08:00"
+def _make_row(**kwargs):
+    """创建模拟 LifeEngineState row"""
+    row = MagicMock()
+    row.current_state = kwargs.get("current_state", "发呆")
+    row.activity_type = kwargs.get("activity_type", "idle")
+    row.response_mood = kwargs.get("response_mood", "无聊")
+    row.skip_until = kwargs.get("skip_until", None)
+    row.updated_at = kwargs.get("updated_at", datetime.now(CST))
+    return row
 
 
-def test_life_state_default():
-    """默认状态创建"""
-    state = LifeState.default()
-    assert state.activity_type == "idle"
-    assert state.current_state  # non-empty
-    assert state.response_mood  # non-empty
+def test_extract_text_string():
+    assert _extract_text("hello") == "hello"
 
 
-@pytest.mark.asyncio
-async def test_save_and_load_state():
-    """Redis 存取往返"""
+def test_extract_text_list():
+    content = [{"text": "hello "}, {"text": "world"}]
+    assert _extract_text(content) == "hello world"
+
+
+def test_extract_text_none():
+    assert _extract_text(None) == ""
+
+
+def test_parse_tick_response_valid():
     engine = LifeEngine()
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=None)
-
-    with patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis):
-        # load when empty → default
-        state = await engine._load_state("akao-001")
-        assert state.activity_type == "idle"
-
-        # save
-        state.activity_type = "browsing"
-        await engine._save_state("akao-001", state)
-        mock_redis.set.assert_called_once()
-        call_args = mock_redis.set.call_args
-        assert call_args[0][0] == REDIS_KEY
-        saved = json.loads(call_args[0][1])
-        assert saved["activity_type"] == "browsing"
-
-
-@pytest.mark.asyncio
-async def test_load_existing_state():
-    """从 Redis 加载已有状态"""
-    engine = LifeEngine()
-    existing = json.dumps({
-        "current_state": "在睡觉",
-        "activity_type": "sleeping",
-        "response_mood": "zzz",
-        "skip_until": "2026-04-06T07:00:00+08:00",
-        "updated_at": "2026-04-06T02:00:00+08:00",
+    now = datetime(2026, 4, 7, 10, 0, tzinfo=CST)
+    raw = json.dumps({
+        "current_state": "在刷手机",
+        "activity_type": "browsing",
+        "response_mood": "好奇",
+        "skip_minutes": 15,
     })
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=existing)
+    result = engine._parse_tick_response(raw, "发呆", "无聊", now)
+    assert result["activity_type"] == "browsing"
+    assert result["current_state"] == "在刷手机"
+    assert result["skip_until"] == now + timedelta(minutes=15)
 
-    with patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis):
-        state = await engine._load_state("akao-001")
-        assert state.activity_type == "sleeping"
-        assert state.current_state == "在睡觉"
+
+def test_parse_tick_response_invalid_activity():
+    engine = LifeEngine()
+    now = datetime(2026, 4, 7, 10, 0, tzinfo=CST)
+    raw = json.dumps({"current_state": "x", "activity_type": "flying", "response_mood": "y"})
+    result = engine._parse_tick_response(raw, "发呆", "无聊", now)
+    assert result["activity_type"] == "idle"
+
+
+def test_parse_tick_response_malformed():
+    engine = LifeEngine()
+    now = datetime(2026, 4, 7, 10, 0, tzinfo=CST)
+    result = engine._parse_tick_response("not json", "发呆", "无聊", now)
+    assert result["activity_type"] == "idle"
+    assert result["current_state"] == "发呆"
 
 
 @pytest.mark.asyncio
 async def test_tick_skips_when_skip_until_future():
     """skip_until 在未来 → 不调用 LLM"""
     engine = LifeEngine()
-    future = (datetime.now(tz=timezone(timedelta(hours=8))) + timedelta(hours=1)).isoformat()
-    state = LifeState(
-        current_state="在看番",
-        activity_type="busy",
-        response_mood="沉浸中",
-        skip_until=future,
-        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
-    )
-    existing_json = json.dumps(state.to_dict(), ensure_ascii=False)
-
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=existing_json)
+    future = datetime.now(CST) + timedelta(hours=1)
+    row = _make_row(skip_until=future)
 
     with (
-        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine._load_state", new_callable=AsyncMock, return_value=row),
         patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock) as mock_think,
     ):
         await engine.tick("akao-001")
@@ -120,32 +83,23 @@ async def test_tick_skips_when_skip_until_future():
 async def test_tick_calls_think_when_no_skip():
     """无 skip → 调用 LLM think"""
     engine = LifeEngine()
-    state = LifeState(
-        current_state="发呆",
-        activity_type="idle",
-        response_mood="无聊",
-        skip_until=None,
-        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
-    )
-    new_state = LifeState(
-        current_state="去刷手机了",
-        activity_type="browsing",
-        response_mood="好奇",
-        skip_until=None,
-        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
-    )
+    row = _make_row(activity_type="idle", skip_until=None)
 
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=json.dumps(state.to_dict(), ensure_ascii=False))
+    new_state = {
+        "current_state": "去刷手机了",
+        "activity_type": "browsing",
+        "response_mood": "好奇",
+        "skip_until": None,
+    }
 
     with (
-        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine._load_state", new_callable=AsyncMock, return_value=row),
+        patch("app.services.life_engine._save_state", new_callable=AsyncMock) as mock_save,
         patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
         patch("app.services.life_engine.LifeEngine._on_state_change", new_callable=AsyncMock) as mock_change,
     ):
         await engine.tick("akao-001")
-        mock_redis.set.assert_called_once()
-        # activity changed from idle → browsing → should trigger _on_state_change
+        mock_save.assert_called_once()
         mock_change.assert_called_once()
 
 
@@ -153,29 +107,43 @@ async def test_tick_calls_think_when_no_skip():
 async def test_tick_expired_skip_triggers_think():
     """skip_until 已过期 → 调用 LLM think"""
     engine = LifeEngine()
-    past = (datetime.now(tz=timezone(timedelta(hours=8))) - timedelta(minutes=5)).isoformat()
-    state = LifeState(
-        current_state="刚看完番",
-        activity_type="busy",
-        response_mood="意犹未尽",
-        skip_until=past,
-        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
-    )
+    past = datetime.now(CST) - timedelta(minutes=5)
+    row = _make_row(activity_type="busy", skip_until=past)
 
-    mock_redis = AsyncMock()
-    mock_redis.get = AsyncMock(return_value=json.dumps(state.to_dict(), ensure_ascii=False))
-    new_state = LifeState(
-        current_state="无聊了",
-        activity_type="idle",
-        response_mood="有点空虚",
-        skip_until=None,
-        updated_at=datetime.now(tz=timezone(timedelta(hours=8))).isoformat(),
-    )
+    new_state = {
+        "current_state": "无聊了",
+        "activity_type": "idle",
+        "response_mood": "有点空虚",
+        "skip_until": None,
+    }
 
     with (
-        patch("app.services.life_engine.AsyncRedisClient.get_instance", return_value=mock_redis),
+        patch("app.services.life_engine._load_state", new_callable=AsyncMock, return_value=row),
+        patch("app.services.life_engine._save_state", new_callable=AsyncMock) as mock_save,
         patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
         patch("app.services.life_engine.LifeEngine._on_state_change", new_callable=AsyncMock),
     ):
         await engine.tick("akao-001")
-        mock_redis.set.assert_called_once()
+        mock_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_no_row_uses_default():
+    """DB 无记录 → 使用默认状态"""
+    engine = LifeEngine()
+
+    new_state = {
+        "current_state": "睡着了",
+        "activity_type": "sleeping",
+        "response_mood": "zzz",
+        "skip_until": None,
+    }
+
+    with (
+        patch("app.services.life_engine._load_state", new_callable=AsyncMock, return_value=None),
+        patch("app.services.life_engine._save_state", new_callable=AsyncMock) as mock_save,
+        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
+        patch("app.services.life_engine.LifeEngine._on_state_change", new_callable=AsyncMock),
+    ):
+        await engine.tick("akao-001")
+        mock_save.assert_called_once()
