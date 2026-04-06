@@ -1,453 +1,197 @@
-# 赤尾记忆与上下文系统
+# 赤尾记忆与认知系统
 
 > 最后更新: 2026-04-06 | 对应版本: agent-service v1.0.0.165 (mem-v3 泳道验证中)
 
+## 设计原则
+
+- **LLM 就是赤尾的大脑**，工程只负责在对的时间把对的素材喂给她
+- **赤尾只有一个脑子**，不按群隔离记忆
+- **遗忘是 LLM 重新叙述时的自然副产品**，不需要 TTL 或删除机制
+- **赤尾是一个有生活节律的人**，不是等消息的机器人
+
 ---
 
-## v3 记忆管线（当前实现）
-
-### 核心变化
-
-v2 按群/私聊分桶（DiaryEntry per chat → PersonImpression per chat → Journal 聚合），赤尾在不同群是不同的人。
-
-v3 一张表存所有记忆（`experience_fragment`），赤尾只有一个脑子。隐私通过 context assembly 时过滤实现，不在存储层隔离。
-
-### 全局架构
-
-赤尾不是一个等消息的机器人，是一个有生活节律的人。v3 设计的是她的**整个认知模型**。
+## 全局架构
 
 ```mermaid
 flowchart TD
-    subgraph IDENTITY["自己是谁（永久）"]
-        PERSONA["人格内核 bot_persona"]
-    end
-
-    subgraph LIFE["生活引擎 Life Engine（后台常驻）"]
-        direction TB
-        STATE["此刻的状态\n在阳台发呆 / 在刷手机 / 睡着了"]
-        SCHEDULE["今天的安排 AkaoSchedule"]
-        SCHEDULE -->|"参考"| STATE
-        STATE -->|"每分钟 tick"| STATE
-    end
-
     subgraph WORLD["外部世界"]
-        MSG_AT["有人@赤尾"]
-        MSG_GROUP["群里在聊天（没@）"]
-        MSG_P2P["私聊消息"]
+        AT(("有人@赤尾"))
+        P2P(("私聊消息"))
+        GROUP(("群里在聊天"))
     end
 
-    subgraph TRIGGERS["三层记忆触发"]
-        T1["参与：赤尾回复了\n→ conversation 碎片"]
-        T2["窥屏：Life Engine 刷手机状态\n翻白名单群 → glimpse 碎片"]
-        T3["没看：赤尾不在看这个群\n→ 无记忆（需要时翻聊天记录）"]
+    LIFE["Life Engine 🔲\n此刻的状态：在刷手机 / 睡着了 / 出门了\n每分钟 tick，LLM 决定下一步"]
+
+    subgraph TRIGGER["记忆怎么产生"]
+        direction LR
+        T1["参与\n赤尾回复了"]
+        T2["窥屏 🔲\nLife Engine 刷手机时\n翻了某个群"]
+        T3["没看\n赤尾不在看\n无记忆产生"]
     end
 
-    MSG_AT -->|"硬中断，必须响应\n响应风格由当前状态决定"| T1
-    MSG_P2P --> T1
-    MSG_GROUP -->|"Life Engine 在刷手机"| T2
-    MSG_GROUP -->|"Life Engine 没在看"| T3
+    AT -->|"硬中断\n不管在干嘛都响应"| T1
+    P2P --> T1
+    GROUP --> LIFE
+    LIFE -->|"在刷手机"| T2
+    LIFE -->|"没在看"| T3
 
-    subgraph MEMORY["记忆（experience_fragment 一张表）"]
+    subgraph FRAG["经历碎片 experience_fragment"]
         direction TB
-        CONV["conversation 碎片\n回味：刚才聊的那些事...\n带场景：在番剧群 / 和主人私聊"]
-        GLIMPSE["glimpse 碎片\n窥屏：群里在聊XX，挺有意思"]
-        DAILY["daily 碎片（做梦产物）\n今天过得挺充实...\n十几条碎片 → 一篇日记\n遗忘在此自然发生"]
-        WEEKLY["weekly 碎片（深度做梦）\n这周最开心的是..."]
-
-        CONV & GLIMPSE -->|"凌晨做梦\n压缩+遗忘"| DAILY
-        DAILY -->|"每周压缩"| WEEKLY
+        CONV["conversation\n对话后的回味"]
+        GLIM["glimpse 🔲\n刷手机时的印象"]
+        DAILY["daily\n做梦：一天的回顾"]
+        WKLY["weekly\n深度做梦：一周的回顾"]
     end
 
-    T1 -->|"对话结束5分钟后"| CONV
-    T2 --> GLIMPSE
+    T1 -->|"5分钟后回味"| CONV
+    T2 -->|"有意思才记"| GLIM
+    CONV & GLIM -->|"凌晨 03:00\n压缩 + 自然遗忘"| DAILY
+    DAILY -->|"每周一 04:00"| WKLY
 
-    subgraph CONSCIOUSNESS["赤尾回复时的意识"]
+    subgraph CTX["赤尾回复时看到的"]
         direction TB
-        C_WHO["我是谁（人格内核）"]
-        C_NOW["我现在的状态（Life Engine）"]
-        C_TODAY["我今天的安排（Schedule）"]
-        C_RECENT["脑子里的东西（今天的碎片）"]
-        C_FAR["更远的记忆（日记/周记）"]
-        C_STYLE["说话风格（IdentityDrift）"]
-        C_HINT["想不起来可以翻日记/聊天记录"]
+        WHO["我是谁 · 人格内核"]
+        NOW["我现在什么状态 🔲 · Life Engine"]
+        TODAY["我今天的安排 · Schedule"]
+        BRAIN["脑子里的东西 · 今天的碎片"]
+        FAR["更远的记忆 · 日记/周记"]
+        STYLE["说话风格 · IdentityDrift"]
     end
 
-    PERSONA --> C_WHO
-    STATE --> C_NOW
-    SCHEDULE --> C_TODAY
-    CONV & GLIMPSE -->|"隐私过滤"| C_RECENT
-    DAILY & WEEKLY --> C_FAR
+    CONV & GLIM -->|"隐私过滤"| BRAIN
+    DAILY & WKLY --> FAR
 
-    subgraph TOOLS["主动回忆工具"]
-        RECALL["recall：想一想\n全文搜索碎片"]
-        HISTORY["check_chat_history：翻记录\n读原始消息"]
+    subgraph TOOL["想不起来时"]
+        RECALL["recall\n想一想 → 搜碎片"]
+        HIST["check_chat_history\n翻记录 → 读原始消息"]
     end
 
-    T3 -.->|"需要时"| HISTORY
+    T3 -.->|"需要时"| HIST
+
+    style LIFE stroke-dasharray: 5 5
+    style T2 stroke-dasharray: 5 5
+    style GLIM stroke-dasharray: 5 5
+    style NOW stroke-dasharray: 5 5
 ```
+
+> 虚线框 = Plan 2（Life Engine），实线 = 已实现
+
+---
+
+## 碎片怎么产生
+
+### conversation 碎片（已实现）
+
+赤尾回复了一条消息 → 5 分钟内没有新消息（或累计 15 条）→ AfterthoughtManager 触发 → LLM 以赤尾第一人称写一段内心独白。
+
+LLM 的输入是**带场景的对话时间线**：告诉她这是在哪个群、和谁聊的，她自然会在内容里提到群名和人名。
+
+```
+输入：你刚才在「番剧群」参与了一段对话
+      [09:43] 原智鸿: 最近有什么好看的新番吗
+      [09:44] 赤尾: 有啊！这季有一部...
+
+输出：在番剧群和原智鸿聊了新番，他问我推荐，我说了那部...
+      感觉他最近看番的口味变了，以前不怎么看这类的。
+```
+
+### glimpse 碎片（Plan 2，依赖 Life Engine）
+
+Life Engine 进入"刷手机"状态 → 选一个白名单群翻消息 → 有意思就记一条，没意思就放下。
+
+### daily 碎片（已实现）
+
+凌晨 03:00，赤尾"做梦"：把当天所有 conversation + glimpse 碎片喂给 LLM，写一篇睡前日记。**遗忘在此自然发生**——十几条碎片压缩成一篇，有感触的留下，没感觉的消失。
+
+### weekly 碎片（已实现）
+
+每周一 04:00，7 篇日记压缩成一篇周记。更多遗忘。
+
+---
+
+## 碎片怎么注入意识
+
+赤尾收到消息要回复时，`build_inner_context()` 从碎片中选出她该看到的：
+
+| 区块 | 来源 | 说明 |
+|------|------|------|
+| 场景提示 | 当前对话 | "你在番剧群" / "你在和原智鸿私聊" |
+| 今日基调 | Schedule daily | 手帐生成的今天安排 |
+| 脑子里的东西 | 今天的碎片 | **有隐私过滤**，见下 |
+| 更远的记忆 | 最近的 daily/weekly | 已自然模糊化，无需过滤 |
+| 记忆引导 | 固定文案 | 想不起来可以用 recall / 翻聊天记录 |
 
 ### 隐私过滤
 
-注入"脑子里的东西"时的唯一硬规则——**群里不暴露其他群和私聊的细节**：
+唯一的硬规则：**群聊时不暴露其他群和私聊的细节**。
 
-```mermaid
-flowchart LR
-    subgraph TODAY["赤尾今天的碎片"]
-        FA["番剧群碎片"]
-        FB["技术群碎片"]
-        FC["私聊碎片"]
-        FG["glimpse 碎片"]
-    end
+| 碎片 | 在番剧群时 | 私聊时 |
+|------|-----------|--------|
+| 番剧群的 conversation | ✅ 可见 | ✅ 可见 |
+| 技术群的 conversation | ❌ 过滤 | ✅ 可见 |
+| 私聊的 conversation | ❌ 过滤 | ✅ 可见 |
+| daily / weekly | ✅ 可见 | ✅ 可见 |
 
-    subgraph DISTANT["更远的记忆"]
-        D["日记/周记\n已自然模糊化"]
-    end
+过滤依据是碎片元数据 `source_chat_id`（哪个群产生的），不是内容里的文字。
 
-    subgraph IN_GROUP["在番剧群回复时"]
-        G1["✅ 番剧群碎片"]
-        G4["✅ 日记/周记"]
-    end
+daily/weekly 永远可见——做梦时 LLM 已经自然模糊化了（"和朋友聊了心事"而不是具体说了什么）。
 
-    subgraph IN_P2P["私聊时"]
-        P1["✅ 全部碎片 + 日记/周记\n私聊是赤尾的私密空间"]
-    end
+私聊是赤尾的私密空间，所有碎片都可见。
 
-    FA --> G1
-    FB -.->|"❌"| IN_GROUP
-    FC -.->|"❌"| IN_GROUP
-    FG -.->|"❌"| IN_GROUP
-    D --> G4
+---
 
-    FA & FB & FC & FG & D --> P1
-```
-
-日记/周记永远可见——做梦时已经自然模糊化（"主人好像有心事"而不是具体说了什么）。
-
-### 实现进度
-
-| 组件 | 状态 | 说明 |
-|------|------|------|
-| experience_fragment 表 | ✅ 已部署 | 唯一记忆存储 |
-| AfterthoughtManager | ✅ 已部署 | conversation 碎片生成（prompt 待调优） |
-| DreamWorker | ✅ 已部署 | daily/weekly 做梦 |
-| Context Assembly v3 | ✅ 已部署 | 碎片注入 + 隐私过滤 |
-| recall / check_chat_history | ✅ 已部署 | 新工具 |
-| Life Engine | 🔲 Plan 2 | 生活状态机、tick 循环 |
-| Glimpse 管线 | 🔲 Plan 2 | 依赖 Life Engine 的刷手机状态 |
-| 被@时状态感知 | 🔲 Plan 2 | "睡着了被@→嗯...干嘛..." |
-
-### 隐私过滤（唯一的硬规则）
-
-| 场景 | 可见碎片 | 过滤依据 |
-|------|---------|---------|
-| 群聊 | 当前群的 conversation/glimpse | `source_chat_id = 当前 chat_id` |
-| 群聊 | 所有 daily/weekly | `grain in (daily, weekly)`，无 source_chat_id |
-| 私聊 | 所有碎片 | 不过滤 |
-
-daily/weekly 碎片没有 `source_chat_id`（跨群聚合产物），所以任何场景都可见。这是设计意图：做梦已经自然模糊化了。
-
-### 碎片内容里的群名/人名
-
-碎片是自然语言文本。LLM 在生成时知道场景（prompt 里传了群名/私聊对象），自然会在内容里提到。例如：
-
-- `"在番剧群和阿儒聊了新番"` — 群名来自 `lark_group_chat_info.name`
-- `"和主人私聊了一些心事"` — 人名来自 `lark_user.name`
-
-群改名后：旧碎片保持旧名（已写死在 content 中），新碎片用新名。跟人的记忆一样。
-
-### 工具
-
-| 工具 | 用途 | 实现 |
-|------|------|------|
-| `recall` | "想一想" — 模糊联想 | PostgreSQL 全文搜索 experience_fragment |
-| `check_chat_history` | "翻聊天记录" — 精确查阅 | 读 conversation_messages 原始消息 |
-
-### experience_fragment 表结构
+## experience_fragment 表
 
 ```sql
 CREATE TABLE experience_fragment (
     id              SERIAL PRIMARY KEY,
     persona_id      VARCHAR(50) NOT NULL,
-    grain           VARCHAR(20) NOT NULL,       -- conversation/glimpse/daily/weekly
-    source_chat_id  VARCHAR(100),               -- 来源群/私聊（daily/weekly 为 NULL）
-    source_type     VARCHAR(10),                -- p2p/group（daily/weekly 为 NULL）
+    grain           VARCHAR(20) NOT NULL,       -- conversation / glimpse / daily / weekly
+    source_chat_id  VARCHAR(100),               -- 来源（daily/weekly 为 NULL）
+    source_type     VARCHAR(10),                -- p2p / group（daily/weekly 为 NULL）
     time_start      BIGINT,
     time_end        BIGINT,
     content         TEXT NOT NULL,               -- 赤尾第一人称叙事
-    mentioned_entity_ids JSONB DEFAULT '[]',     -- 预留，暂未使用
+    mentioned_entity_ids JSONB DEFAULT '[]',     -- 预留
     model           VARCHAR(100),
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 ```
 
-### 替代关系
+---
 
-| v3 组件 | 替代的 v2 组件 |
-|---------|--------------|
-| AfterthoughtManager | — (v2 无实时记忆) |
-| DreamWorker (daily) | diary_worker + journal_worker (daily) |
-| DreamWorker (weekly) | weekly_review + journal_worker (weekly) |
-| 碎片中的自然语言描述 | PersonImpression + GroupCultureGestalt |
-| recall 工具 | load_memory 工具 |
-| check_chat_history | — (新增) |
+## 实现进度
 
-### 保留不动的组件
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| experience_fragment 表 | ✅ | 唯一记忆存储 |
+| AfterthoughtManager | ✅ | conversation 碎片（prompt 待调优） |
+| DreamWorker | ✅ | daily/weekly 做梦 |
+| Context Assembly v3 | ✅ | 碎片注入 + 隐私过滤 |
+| recall / check_chat_history | ✅ | 新工具 |
+| Life Engine | 🔲 | 生活状态机 |
+| Glimpse 管线 | 🔲 | 依赖 Life Engine |
+| 被@时状态感知 | 🔲 | "睡着了被@→嗯...干嘛..." |
 
-- `conversation_messages` — 原始消息
-- `AkaoSchedule` + `schedule_worker` — 手帐生成（输入源从 Journal 改为 daily 碎片）
+---
+
+## 与 v2 的关系
+
+| v2 | v3 | 变化 |
+|----|-----|------|
+| DiaryEntry (per chat) | conversation 碎片 | 实时生成 vs 凌晨批处理；不再按群隔离 |
+| PersonImpression | 碎片内容中的自然描述 | 不再是独立的表和字段 |
+| GroupCultureGestalt | 碎片内容中的自然描述 | 同上 |
+| AkaoJournal daily | daily 碎片 | 输入从 DiaryEntry 改为 conversation 碎片 |
+| AkaoJournal weekly | weekly 碎片 | 输入从 daily journal 改为 daily 碎片 |
+| load_memory 工具 | recall + check_chat_history | 自然语言搜索 vs mode/hint 结构化参数 |
+
+v2 旧表保留只读，不再写入，不做数据迁移。
+
+## 保留不动的组件
+
+- `AkaoSchedule` + `schedule_worker` — 手帐（输入源改为 daily 碎片）
 - `IdentityDrift` + `IdentityDriftManager` — 说话风格漂移
-- `vectorize_worker` + Qdrant — recall 的语义检索（待接入）
+- `conversation_messages` — 原始消息
 - `bot_persona` — 人格内核
-
----
-
-## v2 记忆管线（旧系统，保留只读）
-
-> 以下为 v2 架构文档，旧表保留只读，不再写入。
-
-## 系统概览
-
-赤尾的记忆系统是一个多层抽象引擎，将原始聊天消息逐层提炼为结构化认知，最终在对话时注入 system prompt：
-
-```
-原始消息 (Chat Messages)
-    ↓  03:00 diary_worker
-日记 (DiaryEntry)          — 每个群/私聊的当天叙事
-    ↓  03:00 post-processing
-印象 (PersonImpression)    — 对每个人的感觉
-群氛围 (GroupCultureGestalt) — 对每个群的一句话感觉
-    ↓  04:00 journal_worker
-日志 (AkaoJournal daily)   — 跨群合成的模糊化感受
-    ↓  04:45 journal_worker
-周志 (AkaoJournal weekly)  — 一周情感趋势
-    ↓  05:00 schedule_worker
-手帐 (AkaoSchedule daily)  — 明天的生活计划（多 Agent 管线）
-    ↓  实时
-漂移 (IdentityDrift)       — 当前情绪/精力状态（两阶段锁）
-    ↓
-内心上下文 (InnerContext)   — 注入 system prompt
-```
-
-## 夜间管线时序（CST）
-
-| 时间 | Worker | 输出 |
-|------|--------|------|
-| 03:00 | diary_worker | DiaryEntry + PersonImpression + GroupCultureGestalt |
-| 04:00 | journal_worker | AkaoJournal (daily) |
-| 04:30 | diary_worker | WeeklyReview |
-| 04:45 | journal_worker | AkaoJournal (weekly) |
-| 05:00 | schedule_worker | AkaoSchedule (daily)，三 Agent 管线 |
-| 周日 23:00 | schedule_worker | AkaoSchedule (weekly) |
-| 每月 1 日 02:00 | schedule_worker | AkaoSchedule (monthly) |
-
-每一层依赖上一层的输出，时序不可打乱。
-
----
-
-## 一、日记生成（DiaryEntry）
-
-**文件**: `diary_worker.py`
-
-为每个活跃群/私聊生成当天的第一人称叙事。
-
-### 流程
-
-1. **消息收集**: 按 CST 日期范围拉取全部消息
-2. **树状时间线**: 按回复关系格式化（最深 3 层）
-   ```
-   [14:30] 群友A: 今天吃什么
-   ├─ [14:33] 群友B: 火锅吧
-   │  └─ [14:35] 群友C: 好主意
-   └─ [14:36] 群友D: 我也想吃
-   ```
-3. **LLM 生成**: `diary_generation` prompt + persona_lite + 前 3 天日记
-4. **后处理**（自动）:
-   - **印象提取**: LLM 输出 `{user_id, impression_text}` JSON，upsert 到 PersonImpression
-   - **群氛围蒸馏**: LLM 输出一句话，upsert 到 GroupCultureGestalt
-
-### 激活条件
-
-- 群聊: 近 7 天 bot 回复 ≥ 5 次
-- 私聊: 近 1 天 bot 回复 ≥ 2 次
-
----
-
-## 二、日志生成（AkaoJournal）
-
-**文件**: `journal_worker.py`
-
-### Daily Journal
-
-将当天所有群/私聊的 DiaryEntry 合成为一篇模糊化的个人日志。
-
-- **输入**: 所有 DiaryEntry + 当天 Schedule + 前 3 天 Journal
-- **模糊化**: "和朋友聊了个很上头的新番" 而非具体作品名
-- **情感锚点**: 保留 2-3 个当天独有的情绪触发点
-- **风格**: 碎碎念，不是散文
-- **去重**: 对照前 3 天 Journal 避免重复意象/比喻
-
-### Weekly Journal
-
-7 篇 daily journal → 一篇周级情感趋势总结。
-
----
-
-## 三、手帐生成（AkaoSchedule）— 三 Agent 管线
-
-**文件**: `schedule_worker.py`
-
-三层计划层级: monthly → weekly → daily。核心是 daily 的三 Agent 管线：
-
-### Ideation Agent
-
-- 不给 persona_core（防止搜索被兴趣带偏）
-- 只给日期、季节、前 3 天 schedule
-- 调用 `search_web` 广撒网搜索真实世界信息
-- 输出: 未经筛选的素材
-
-### Writer Agent
-
-- 输入: Ideation 素材 + 周计划 + 昨天 Journal + persona_core
-- 输出: 手帐式日程（分时段，含 mood/energy）
-
-### Critic Agent
-
-- 输入: Writer 输出 + 前 3 天 schedule
-- 检查: 雷同/ins 风/抽象感受 vs 具体细节
-- 不通过 → Writer 带反馈重写（最多 3 轮）
-
-### 核心认知
-
-- search_web 的目的是**事实校准**，不是决定赤尾今天干嘛
-- 人设是**筛选器**不是**搜索词**: Ideation 广撒网，Writer 用人设筛选
-- 三个 Agent 均用 `offline-model`（gpt-5.4），通过 AgentRegistry 管理
-
----
-
-## 四、Identity 漂移状态机
-
-**文件**: `identity_drift.py`
-
-实时追踪赤尾在对话中的情绪和精力变化。
-
-### 两阶段锁模型
-
-```
-[空闲]
-  ↓ 赤尾回复后触发
-一阶段（可中断）: 消息收集 + debounce
-  · 新消息到达 → 重置 5 分钟计时器
-  · 超过 20 条 → 强制进入二阶段
-  ↓
-二阶段（不可中断）: LLM 漂移计算
-  · 输入: 最近消息 + 当前状态 + Schedule + 性格基准
-  · 输出: 自然语言内心独白（3-5 句）
-  · 存入 Redis（24 小时 TTL）
-  ↓
-[空闲]（如有新消息则立刻重启一阶段）
-```
-
-### 性格基准（漂移锚点）
-
-漂移不是无限制的。`identity_drift` prompt 包含性格基准:
-
-> 元气活泼是默认状态，但不只是元气。有不容易被察觉的腹黑——表面笑嘻嘻，心里早把人看透了。对在意的人有说不出口的占有欲。傲娇是保护色。好奇心是驱动力。善良但不讨好，累了会敷衍，烦了会拒绝。
-
-漂移围绕这个原点波动，不会偏离太远。
-
-### 存储
-
-- Redis hash `identity:{chat_id}` → `state` / `updated_at`
-- 24 小时 TTL，跨天自动过期
-
----
-
-## 五、对话时注入（InnerContext）
-
-**文件**: `memory_context.py` → `build_inner_context()`
-
-每次赤尾收到消息时，从各层记忆组装 inner_context 注入 system prompt：
-
-```
-场景提示     — "你在群聊「xxx」中，需要回复 yyy 的消息"
-此刻状态     — Identity 漂移状态（Redis）
-今日基调     — Journal daily 或 Schedule daily
-群氛围       — GroupCultureGestalt（群聊时）
-对人的感觉   — PersonImpression（最多 10 人，带时间戳）
-记忆引导     — "你有写日记的习惯，记不清可以翻翻日记"
-```
-
-优先级: 此刻状态 > 今日基调。漂移是实时叠加层，基调是底色。
-
----
-
-## 六、Main Prompt 架构
-
-Langfuse `main` prompt（v73）的结构:
-
-```
-<identity>      — 瘦身后: 名字/外貌/语气/关系，无性格描述
-<inner-context> — build_inner_context() 动态注入
-<rules>         — 互动准则 + 输出规范 + 约束
-<reply-style>   — few-shot 回复示例（控制长度和温度）
-<tools>         — 工具描述
-```
-
-性格描述从静态 identity 移到了 identity_drift prompt（作为漂移基准），由漂移状态机动态驱动。
-
----
-
-## 七、数据模型
-
-| 模型 | 表 | 关键字段 | 唯一约束 |
-|------|-----|---------|---------|
-| DiaryEntry | diary_entry | chat_id, diary_date, content | (chat_id, diary_date) |
-| AkaoJournal | akao_journal | journal_type, journal_date, content | (journal_type, journal_date) |
-| AkaoSchedule | akao_schedule | plan_type, period_start, content, mood, energy_level | (plan_type, period_start, period_end, time_start) |
-| PersonImpression | person_impression | chat_id, user_id, impression_text | (chat_id, user_id) |
-| GroupCultureGestalt | group_culture_gestalt | chat_id, gestalt_text | (chat_id) |
-| WeeklyReview | weekly_review | chat_id, week_start, content | (chat_id, week_start) |
-
----
-
-## 八、Langfuse Prompts
-
-| Prompt | 版本 | 用途 |
-|--------|------|------|
-| `main` | v73 | 主对话 prompt（瘦身后） |
-| `identity_drift` | v4 | 漂移状态计算（含性格基准） |
-| `persona_core` | — | 完整人设（Schedule Writer 用） |
-| `persona_lite` | — | 轻量人设（Diary/Journal 用） |
-| `diary_generation` | — | 日记生成 |
-| `diary_extract_impressions` | — | 印象提取 |
-| `group_culture_distill` | — | 群氛围蒸馏 |
-| `journal_generation` | v3 | 日志合成（碎碎念风格 + 前 3 天去重） |
-| `schedule_daily_ideation` | v3 | Ideation Agent（不带人设） |
-| `schedule_daily_writer` | v1 | Writer Agent |
-| `schedule_daily_critic` | v1 | Critic Agent |
-
----
-
-## 九、配置参数
-
-| 参数 | 默认值 | 含义 |
-|------|--------|------|
-| `diary_model` | diary-model | 日记/日志生成模型 |
-| `identity_drift_model` | offline-model | 漂移计算模型（gpt-5.4） |
-| `identity_drift_debounce_seconds` | 300 | 一阶段等待时间（5 分钟） |
-| `identity_drift_max_buffer` | 20 | 强制 flush 消息数 |
-| `identity_drift_ttl_seconds` | 86400 | Redis 状态 TTL（24 小时） |
-
----
-
-## 十、降级策略
-
-| 故障 | 降级行为 |
-|------|---------|
-| 日记生成失败 | 跳过该群日记，不影响其他群 |
-| 日志生成失败 | 聊天时用 Schedule daily 作为今日基调 |
-| Schedule Ideation 失败 | Writer 用空素材继续写 |
-| Critic 不通过且用完重试 | 用最后一版 Writer 输出 |
-| 漂移计算失败 | 下次触发时重试；聊天时无"此刻状态"区块 |
-| Redis 状态过期 | fallback 到 Schedule daily |
-| 印象提取失败 | 日记正常存储，跳过印象更新 |
