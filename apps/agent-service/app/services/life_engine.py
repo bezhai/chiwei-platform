@@ -62,17 +62,19 @@ class LifeEngine:
             current_state = row.current_state
             response_mood = row.response_mood
             skip_until = row.skip_until
+            activity_type = row.activity_type or ""
         else:
             current_state = "刚醒来，还有点迷糊"
             response_mood = "迷迷糊糊的"
             skip_until = None
+            activity_type = ""
 
         # skip_until 检查
         if skip_until and now < skip_until:
             return
 
         # LLM 决策
-        new = await self._think(current_state, response_mood, now, persona_id)
+        new = await self._think(current_state, response_mood, now, persona_id, activity_type)
 
         await _save_state(
             persona_id=persona_id,
@@ -103,6 +105,7 @@ class LifeEngine:
         response_mood: str,
         now: datetime,
         persona_id: str,
+        activity_type: str = "",
     ) -> dict:
         """调用 LLM 决定下一步状态"""
         from app.agents.infra.langfuse_client import get_prompt
@@ -120,7 +123,7 @@ class LifeEngine:
         schedule_text = schedule.content if schedule else "（今天还没有安排）"
 
         today_frags = await get_today_fragments(
-            persona_id, grains=["conversation", "glimpse"]
+            persona_id, grains=["conversation"]
         )
         frag_text = (
             "\n".join(f.content[:100] for f in today_frags[-5:])
@@ -134,6 +137,7 @@ class LifeEngine:
             persona_lite=persona_lite,
             current_time=now.strftime("%H:%M"),
             current_state=current_state,
+            activity_type=activity_type,
             response_mood=response_mood,
             schedule=schedule_text,
             recent_experiences=frag_text,
