@@ -101,8 +101,11 @@ async def _save_state(
 class LifeEngine:
     """赤尾生活状态机"""
 
-    async def tick(self, persona_id: str) -> None:
-        """一次心跳：检查 skip → LLM 决策 → 保存 → 副作用"""
+    async def tick(self, persona_id: str, dry_run: bool = False) -> dict | None:
+        """一次心跳：检查 skip → LLM 决策 → 保存 → 副作用
+
+        dry_run=True 时只调 LLM 返回结果，不写 DB、不触发副作用。
+        """
         row = await _load_state(persona_id)
         now = datetime.now(CST)
 
@@ -112,17 +115,20 @@ class LifeEngine:
             skip_until = row.skip_until
             activity_type = row.activity_type or ""
         else:
-            current_state = "刚醒来，还有点迷糊"
-            response_mood = "迷迷糊糊的"
+            current_state = "（新的一天）"
+            response_mood = ""
             skip_until = None
             activity_type = ""
 
-        # skip_until 检查
-        if skip_until and now < skip_until:
-            return
+        # skip_until 检查（dry_run 忽略 skip）
+        if not dry_run and skip_until and now < skip_until:
+            return None
 
         # LLM 决策
         new = await self._think(current_state, response_mood, now, persona_id, activity_type)
+
+        if dry_run:
+            return new
 
         await _save_state(
             persona_id=persona_id,
@@ -146,6 +152,8 @@ class LifeEngine:
                 await run_glimpse(persona_id)
             except Exception as e:
                 logger.error(f"[{persona_id}] Glimpse failed: {e}")
+
+        return new
 
     async def _think(
         self,
