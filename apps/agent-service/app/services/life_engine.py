@@ -52,13 +52,17 @@ async def _build_activity_context(
     # 持续时长
     cur = segments[-1]
     minutes = int((now - cur["start"]).total_seconds() / 60)
+    start_cst = cur["start"].astimezone(CST)
     duration_text = (
-        f"{cur['type']}（从 {cur['start'].strftime('%H:%M')} 开始，"
+        f"{cur['type']}（从 {start_cst.strftime('%H:%M')} 开始，"
         f"{minutes} 分钟了）"
     )
 
     # 时间线
-    lines = [f"{s['start'].strftime('%H:%M')} {s['desc']}" for s in segments]
+    lines = [
+        f"{s['start'].astimezone(CST).strftime('%H:%M')} {s['desc']}"
+        for s in segments
+    ]
     return duration_text, "\n".join(lines)
 
 
