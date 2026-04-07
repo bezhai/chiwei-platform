@@ -42,6 +42,24 @@ def import_time():
 # ==================== 调试端点 ====================
 
 
+@api_router.post("/admin/trigger-life-engine-tick", tags=["Admin"])
+async def trigger_life_engine_tick(
+    persona_id: str,
+    dry_run: bool = True,
+):
+    """手动触发一次 Life Engine tick
+
+    Args:
+        persona_id: 角色 ID
+        dry_run: True 则不写 DB，只返回 LLM 决策结果
+    """
+    from app.services.life_engine import LifeEngine
+
+    engine = LifeEngine()
+    result = await engine.tick(persona_id, dry_run=dry_run)
+    return {"ok": True, "persona_id": persona_id, "dry_run": dry_run, "result": result}
+
+
 @api_router.post("/admin/trigger-schedule", tags=["Admin"])
 async def trigger_schedule(
     persona_id: str,
