@@ -22,7 +22,6 @@ from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.clients.rabbitmq import CHAT_REQUEST, RabbitMQClient
 from app.orm.base import AsyncSessionLocal
-from app.orm.crud import get_group_culture_gestalt
 from app.orm.models import ConversationMessage
 from app.services.memory_context import get_reply_style
 from app.utils.content_parser import parse_content
@@ -302,7 +301,7 @@ async def run_proactive_scan(chat_id: str, persona_id: str, source: str = "cron"
             # 3. 收集上下文
             messages_text = await _format_messages_for_judge(messages)
             reply_style = await get_reply_style(chat_id, persona_id)
-            group_culture = await get_group_culture_gestalt(chat_id, persona_id)
+            group_culture = ""
             recent_proactive = await _get_recent_proactive_records(chat_id)
 
             # 加载 persona context
