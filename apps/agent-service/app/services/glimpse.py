@@ -96,6 +96,8 @@ async def _call_glimpse_llm(
     messages_text: str,
 ) -> str:
     """调用 LLM 进行窥屏观察"""
+    from langfuse.langchain import CallbackHandler
+
     from app.agents.infra.langfuse_client import get_prompt
     from app.agents.infra.model_builder import ModelBuilder
 
@@ -107,7 +109,10 @@ async def _call_glimpse_llm(
         messages=messages_text,
     )
     model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
+    response = await model.ainvoke(
+        [{"role": "user", "content": compiled}],
+        config={"callbacks": [CallbackHandler()], "run_name": "glimpse-observe"},
+    )
 
     if isinstance(response.content, list):
         return "".join(
