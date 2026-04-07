@@ -63,6 +63,21 @@ class LifeEngineState(Base):
     )
 
 
+class GlimpseState(Base):
+    """Glimpse 观察状态 — append-only，每次观察 INSERT 一行"""
+
+    __tablename__ = "glimpse_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_seen_msg_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    observation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class MemoryEntity(Base):
     """ID 映射 — 飞书长 ID → 短自增 ID，用于碎片内容中消歧
 
