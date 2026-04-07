@@ -1,6 +1,6 @@
-"""Glimpse 管线 — Life Engine "刷手机" 状态时的窥屏观察
+"""Glimpse 管线 — 赤尾"刷手机"时的窥屏观察（v2: 独立调度 + 增量去重 + 递进观察）
 
-流程：选群 → 读未读消息 → LLM 观察 → 有趣写碎片 → 想说话触发搭话
+流程：读状态 → 拉增量消息 → LLM 观察（传入上次感想）→ 写碎片 + 状态
 """
 
 import json
@@ -8,9 +8,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
-from app.orm.memory_crud import create_fragment
+from app.orm.memory_crud import (
+    create_fragment,
+    get_last_bot_reply_time,
+    get_latest_glimpse_state,
+    insert_glimpse_state,
+)
 from app.orm.memory_models import ExperienceFragment
-from app.workers.proactive_scanner import get_unseen_messages, submit_proactive_request
+from app.workers.proactive_scanner import get_unseen_messages
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ def _is_quiet(now: datetime) -> bool:
 
 
 async def _pick_group(persona_id: str) -> str | None:
-    """选一个群去翻。v1: 固定白名单轮询。"""
+    """选一个群去翻。v1: 固定白名单。"""
     if _WHITELIST_GROUPS:
         return _WHITELIST_GROUPS[0]
     return None
@@ -94,6 +99,7 @@ async def _call_glimpse_llm(
     persona_lite: str,
     group_name: str,
     messages_text: str,
+    last_observation: str = "",
 ) -> str:
     """调用 LLM 进行窥屏观察"""
     from langfuse.langchain import CallbackHandler
@@ -102,12 +108,26 @@ async def _call_glimpse_llm(
     from app.agents.infra.model_builder import ModelBuilder
 
     prompt = get_prompt("glimpse_observe")
-    compiled = prompt.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        group_name=group_name,
-        messages=messages_text,
-    )
+    compile_args = {
+        "persona_name": persona_name,
+        "persona_lite": persona_lite,
+        "group_name": group_name,
+        "messages": messages_text,
+    }
+    # 递进观察：传入上次感想（prompt 模板需支持 last_observation 变量，不支持时忽略）
+    if last_observation:
+        compile_args["last_observation"] = last_observation
+    try:
+        compiled = prompt.compile(**compile_args)
+    except KeyError:
+        # prompt 模板尚未添加 last_observation 变量，先不传
+        compiled = prompt.compile(
+            persona_name=persona_name,
+            persona_lite=persona_lite,
+            group_name=group_name,
+            messages=messages_text,
+        )
+
     model = await ModelBuilder.build_chat_model(settings.life_engine_model)
     response = await model.ainvoke(
         [{"role": "user", "content": compiled}],
@@ -142,29 +162,38 @@ def _parse_glimpse_response(raw: str) -> dict:
 
 
 async def run_glimpse(persona_id: str) -> str:
-    """执行一次窥屏观察
+    """执行一次窥屏观察（v2: 增量 + 递进）
 
-    Returns: 状态字符串（用于日志/测试）
+    Returns: 状态字符串（用于日志/测试/admin 接口）
     """
     now = _now_cst()
 
-    # 安静时段不窥屏
+    # 1. 安静时段不窥屏
     if _is_quiet(now):
         logger.debug(f"[{persona_id}] Glimpse skipped: quiet hours")
         return "skipped:quiet_hours"
 
-    # 选群
+    # 2. 选群
     chat_id = await _pick_group(persona_id)
     if not chat_id:
         return "skipped:no_group"
 
-    # 读未读消息
-    messages = await get_unseen_messages(chat_id, persona_id)
+    # 3. 读状态
+    state = await get_latest_glimpse_state(persona_id, chat_id)
+    last_seen = state.last_seen_msg_time if state else 0
+    last_observation = state.observation if state else ""
+
+    # 4. 跳过已参与的对话
+    bot_reply_time = await get_last_bot_reply_time(chat_id)
+    effective_after = max(last_seen, bot_reply_time)
+
+    # 5. 拉增量消息
+    messages = await get_unseen_messages(chat_id, after=effective_after)
     if not messages:
-        logger.debug(f"[{persona_id}] Glimpse: no unseen messages in {chat_id}")
+        logger.debug(f"[{persona_id}] Glimpse: no new messages in {chat_id}")
         return "skipped:no_messages"
 
-    # 准备上下文
+    # 6. 准备上下文
     persona_name, persona_lite = await _get_persona_info(persona_id)
     group_name = await _get_group_name(chat_id)
     messages_text = await _format_messages(messages, persona_name)
@@ -172,15 +201,31 @@ async def run_glimpse(persona_id: str) -> str:
     if not messages_text.strip():
         return "skipped:empty_timeline"
 
-    # LLM 观察
-    raw = await _call_glimpse_llm(persona_name, persona_lite, group_name, messages_text)
+    # 7. LLM 观察（传入上次感想）
+    raw = await _call_glimpse_llm(
+        persona_name=persona_name,
+        persona_lite=persona_lite,
+        group_name=group_name,
+        messages_text=messages_text,
+        last_observation=last_observation,
+    )
     decision = _parse_glimpse_response(raw)
+
+    # 记录本次看到的最新消息时间戳
+    new_last_seen = messages[-1].create_time
 
     if not decision.get("interesting"):
         logger.info(f"[{persona_id}] Glimpse: nothing interesting in {group_name}")
+        # 不有趣也要记录看到了哪里，避免重复拉
+        await insert_glimpse_state(
+            persona_id=persona_id,
+            chat_id=chat_id,
+            last_seen_msg_time=new_last_seen,
+            observation="",
+        )
         return "skipped:not_interesting"
 
-    # 创建 glimpse 碎片
+    # 8. 创建碎片
     observation = decision.get("observation", "")
     if observation:
         first_ts = messages[0].create_time
@@ -199,18 +244,20 @@ async def run_glimpse(persona_id: str) -> str:
         await create_fragment(fragment)
         logger.info(f"[{persona_id}] Glimpse fragment: {observation[:60]}...")
 
-    # 想说话 → 触发主动搭话
+    # 9. 搭话 dry-run
+    state_observation = observation
     if decision.get("want_to_speak"):
-        try:
-            await submit_proactive_request(
-                chat_id=chat_id,
-                persona_id=persona_id,
-                target_message_id=decision.get("target_message_id"),
-                stimulus=decision.get("stimulus"),
-            )
-            logger.info(f"[{persona_id}] Glimpse → proactive in {group_name}")
-            return "fragment_created+proactive"
-        except Exception as e:
-            logger.error(f"[{persona_id}] Glimpse proactive failed: {e}")
+        stimulus = decision.get("stimulus", "")
+        target = decision.get("target_message_id", "")
+        state_observation = f"{observation}\n[want_to_speak] stimulus={stimulus}, target={target}"
+        logger.info(f"[{persona_id}] Glimpse want_to_speak (dry-run): {stimulus}")
+
+    # 10. 写状态
+    await insert_glimpse_state(
+        persona_id=persona_id,
+        chat_id=chat_id,
+        last_seen_msg_time=new_last_seen,
+        observation=state_observation,
+    )
 
     return "fragment_created"
