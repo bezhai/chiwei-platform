@@ -115,7 +115,7 @@ async def build_inner_context(
         sections.append(life_state)
 
     # === 脑子里的东西（今天的经历碎片）===
-    today_frags = await get_today_fragments(persona_id, grains=["conversation", "glimpse"])
+    today_frags = await get_today_fragments(persona_id, grains=["conversation"])
 
     if chat_type == "group":
         visible_frags = _filter_fragments_for_group(today_frags, chat_id)
