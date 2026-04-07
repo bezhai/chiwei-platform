@@ -18,6 +18,50 @@ logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))
 
 
+async def _build_activity_context(
+    persona_id: str, now: datetime
+) -> tuple[str, str]:
+    """聚合今天的活动轨迹，返回 (duration_text, timeline_text)"""
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(LifeEngineState)
+                .where(LifeEngineState.persona_id == persona_id)
+                .where(LifeEngineState.created_at >= today_start)
+                .order_by(LifeEngineState.created_at.asc())
+            )
+        ).scalars().all()
+
+    if not rows:
+        return "", "（今天刚开始）"
+
+    # 聚合连续相同 activity_type
+    segments: list[dict] = []
+    for row in rows:
+        if segments and segments[-1]["type"] == row.activity_type:
+            segments[-1]["end"] = row.created_at
+        else:
+            segments.append({
+                "type": row.activity_type,
+                "start": row.created_at,
+                "end": row.created_at,
+                "desc": row.current_state[:30],
+            })
+
+    # 持续时长
+    cur = segments[-1]
+    minutes = int((now - cur["start"]).total_seconds() / 60)
+    duration_text = (
+        f"{cur['type']}（从 {cur['start'].strftime('%H:%M')} 开始，"
+        f"{minutes} 分钟了）"
+    )
+
+    # 时间线
+    lines = [f"{s['start'].strftime('%H:%M')} {s['desc']}" for s in segments]
+    return duration_text, "\n".join(lines)
+
+
 async def _load_state(persona_id: str) -> LifeEngineState | None:
     """查最新一行状态，不存在返回 None"""
     async with AsyncSessionLocal() as session:
@@ -108,6 +152,8 @@ class LifeEngine:
         activity_type: str = "",
     ) -> dict:
         """调用 LLM 决定下一步状态"""
+        from langfuse.langchain import CallbackHandler
+
         from app.agents.infra.langfuse_client import get_prompt
         from app.agents.infra.model_builder import ModelBuilder
         from app.config.config import settings
@@ -122,13 +168,19 @@ class LifeEngine:
         schedule = await get_plan_for_period("daily", today, today, persona_id)
         schedule_text = schedule.content if schedule else "（今天还没有安排）"
 
+        # 活动时间线 + 持续时长
+        duration_text, timeline_text = await _build_activity_context(
+            persona_id, now
+        )
+
+        # 今日对话碎片
         today_frags = await get_today_fragments(
             persona_id, grains=["conversation"]
         )
         frag_text = (
             "\n".join(f.content[:100] for f in today_frags[-5:])
             if today_frags
-            else "（今天还没什么经历）"
+            else "（还没跟人聊过）"
         )
 
         prompt = get_prompt("life_engine_tick")
@@ -137,14 +189,18 @@ class LifeEngine:
             persona_lite=persona_lite,
             current_time=now.strftime("%H:%M"),
             current_state=current_state,
-            activity_type=activity_type,
+            activity_duration=duration_text,
             response_mood=response_mood,
             schedule=schedule_text,
+            activity_timeline=timeline_text,
             recent_experiences=frag_text,
         )
 
         model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-        response = await model.ainvoke([{"role": "user", "content": compiled}])
+        response = await model.ainvoke(
+            [{"role": "user", "content": compiled}],
+            config={"callbacks": [CallbackHandler()], "run_name": "life-engine-tick"},
+        )
         raw = _extract_text(response.content)
 
         return self._parse_tick_response(raw, current_state, response_mood, now)
