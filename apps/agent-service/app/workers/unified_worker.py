@@ -48,9 +48,16 @@ async def task_executor_job(ctx) -> None:
 
 
 async def on_startup(ctx) -> None:
-    """Worker 启动时配置日志 + 生成基线 reply_style"""
+    """Worker 启动时配置日志 + 初始化 MQ + 生成基线 reply_style"""
     setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
     logger.info("arq-worker started, file logging enabled")
+
+    # Life Engine browsing → glimpse → 搭话 需要通过 MQ publish
+    from app.clients.rabbitmq import RabbitMQClient
+    client = RabbitMQClient.get_instance()
+    await client.connect()
+    await client.declare_topology()
+
     asyncio.create_task(cron_generate_base_reply_style(None))
 
 
