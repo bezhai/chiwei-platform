@@ -93,3 +93,18 @@ class MemoryEntity(Base):
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (UniqueConstraint("entity_type", "external_id"),)
+
+
+class ReplyStyleLog(Base):
+    """Reply Style 审计日志 — 每次漂移 INSERT 一行，append-only"""
+
+    __tablename__ = "reply_style_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    style_text: Mapped[str] = mapped_column(Text, nullable=False)
+    observation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)  # 'base' / 'drift' / 'manual'
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
