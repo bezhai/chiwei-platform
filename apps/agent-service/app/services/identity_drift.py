@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 
 from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
-from app.clients.redis import AsyncRedisClient
 from app.config.config import settings
 from app.orm.crud import get_chat_messages_in_range, get_plan_for_period, get_username
 from app.utils.content_parser import parse_content
@@ -21,17 +20,6 @@ from app.utils.content_parser import parse_content
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
-
-# Redis key 前缀
-_KEY_PREFIX = "reply_style"
-
-
-def _state_key(chat_id: str, persona_id: str) -> str:
-    return f"{_KEY_PREFIX}:{chat_id}:{persona_id}"
-
-
-def _base_key(persona_id: str) -> str:
-    return f"reply_style:__base__:{persona_id}"
 
 
 async def _get_persona_context(persona_id: str) -> tuple[str, str]:
@@ -43,19 +31,10 @@ async def _get_persona_context(persona_id: str) -> tuple[str, str]:
     return persona_id, ""
 
 
-_BASE_TTL_SECONDS = 43200  # 12 小时，覆盖到下一次定时生成
-
-
-async def get_base_reply_style(persona_id: str) -> str | None:
-    """读取指定 bot 的全局基线 reply_style"""
-    redis = AsyncRedisClient.get_instance()
-    return await redis.get(_base_key(persona_id))
-
-
 async def set_base_reply_style(style: str, persona_id: str) -> None:
     """写入指定 bot 的全局基线 reply_style"""
-    redis = AsyncRedisClient.get_instance()
-    await redis.set(_base_key(persona_id), style, ex=_BASE_TTL_SECONDS)
+    from app.orm.memory_crud import save_reply_style
+    await save_reply_style(persona_id, style, source="base")
     logger.info(f"[{persona_id}] Base reply_style updated: {style[:50]}...")
 
 
@@ -92,27 +71,11 @@ async def generate_base_reply_style(persona_id: str) -> str | None:
     return style
 
 
-async def get_identity_state(chat_id: str, persona_id: str) -> str | None:
-    """读取指定 bot 在指定群的漂移状态"""
-    redis = AsyncRedisClient.get_instance()
-    return await redis.hget(_state_key(chat_id, persona_id), "state")
-
-
-async def get_identity_updated_at(chat_id: str, persona_id: str) -> str | None:
-    """读取上次漂移更新时间（ISO 格式）"""
-    redis = AsyncRedisClient.get_instance()
-    return await redis.hget(_state_key(chat_id, persona_id), "updated_at")
-
-
-async def set_identity_state(chat_id: str, persona_id: str, state: str, ttl: int = 86400) -> None:
-    """写入指定 bot 在指定群的漂移状态"""
-    redis = AsyncRedisClient.get_instance()
-    now = datetime.now(CST).isoformat()
-    pipe = redis.pipeline()
-    pipe.hset(_state_key(chat_id, persona_id), mapping={"state": state, "updated_at": now})
-    pipe.expire(_state_key(chat_id, persona_id), ttl)
-    await pipe.execute()
-    logger.info(f"[{persona_id}] Identity state updated for {chat_id}: {state[:50]}...")
+async def set_identity_state(persona_id: str, state: str, observation: str | None = None) -> None:
+    """写入漂移后的 reply_style"""
+    from app.orm.memory_crud import save_reply_style
+    await save_reply_style(persona_id, state, source="drift", observation=observation)
+    logger.info(f"[{persona_id}] Identity state updated: {state[:50]}...")
 
 
 class IdentityDriftManager:
@@ -140,18 +103,12 @@ class IdentityDriftManager:
         return f"{chat_id}:{persona_id}"
 
     async def on_event(self, chat_id: str, persona_id: str) -> None:
-        """消息/回复事件 -> 进入两阶段锁流程
-
-        buffer 使用从上次漂移以来的真实消息数量，
-        而不是简单 +1，这样活跃群的非@消息也计入密度。
-        """
+        """消息/回复事件 -> 进入两阶段锁流程"""
         key = self._key(chat_id, persona_id)
-        msg_count = await _count_messages_since_last_drift(chat_id, persona_id)
-        self._buffers[key] = max(self._buffers.get(key, 0) + 1, msg_count)
+        self._buffers[key] = self._buffers.get(key, 0) + 1
         logger.info(
             f"Identity drift on_event: chat_id={chat_id}, persona={persona_id}, "
             f"buffer={self._buffers[key]}, "
-            f"msg_since_drift={msg_count}, "
             f"phase2_running={key in self._phase2_running}"
         )
 
@@ -219,7 +176,8 @@ async def _run_drift(chat_id: str, persona_id: str) -> None:
     """
     # 1. 收集上下文
     persona_name, persona_lite = await _get_persona_context(persona_id)
-    current_state = await get_identity_state(chat_id, persona_id)
+    from app.orm.memory_crud import get_latest_reply_style
+    current_state = await get_latest_reply_style(persona_id)
     recent_messages = await _get_recent_messages(chat_id, persona_name=persona_name)
     schedule_context = await _get_schedule_context(persona_id)
     recent_replies = await _get_recent_persona_replies(chat_id, persona_id)
@@ -271,7 +229,7 @@ async def _run_drift(chat_id: str, persona_id: str) -> None:
         return
 
     # 4. 保存
-    await set_identity_state(chat_id, persona_id, new_style)
+    await set_identity_state(persona_id, new_style, observation=observation_report)
 
 
 def _extract_text(content) -> str:
@@ -282,24 +240,6 @@ def _extract_text(content) -> str:
             for part in content
         ).strip()
     return (content or "").strip()
-
-
-async def _count_messages_since_last_drift(chat_id: str, persona_id: str) -> int:
-    """统计上次漂移以来的消息数量（含非@赤尾的消息）"""
-    updated_at_str = await get_identity_updated_at(chat_id, persona_id)
-    if updated_at_str:
-        try:
-            start_dt = datetime.fromisoformat(updated_at_str)
-        except ValueError:
-            start_dt = datetime.now(CST) - timedelta(hours=1)
-    else:
-        start_dt = datetime.now(CST) - timedelta(hours=1)
-
-    start_ts = int(start_dt.timestamp() * 1000)
-    end_ts = int(datetime.now(CST).timestamp() * 1000)
-
-    messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts)
-    return len(messages) if messages else 0
 
 
 async def _get_recent_messages(chat_id: str, persona_name: str = "bot", max_messages: int = 50) -> str:

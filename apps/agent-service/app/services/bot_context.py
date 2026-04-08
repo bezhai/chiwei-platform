@@ -7,10 +7,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.orm.crud import get_bot_persona
 
 
-async def get_reply_style(chat_id: str, persona_id: str, default_style: str) -> str:
+async def get_reply_style(persona_id: str, default_style: str) -> str:
     """转发到 memory_context.get_reply_style（lazy import 避免循环）"""
     from app.services.memory_context import get_reply_style as _impl
-    return await _impl(chat_id, persona_id, default_style)
+    return await _impl(persona_id, default_style)
 
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ class BotContext:
 
         default_style = self._persona.default_reply_style if self._persona else ""
         self._reply_style = await get_reply_style(
-            self.chat_id, self._persona_id, default_style
+            self._persona_id, default_style
         )
 
     @property
