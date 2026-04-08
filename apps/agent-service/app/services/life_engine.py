@@ -144,15 +144,6 @@ class LifeEngine:
             f"skip_until={new['skip_until']}"
         )
 
-        # browsing → 触发 glimpse
-        if new["activity_type"] == "browsing":
-            from app.services.glimpse import run_glimpse
-
-            try:
-                await run_glimpse(persona_id)
-            except Exception as e:
-                logger.error(f"[{persona_id}] Glimpse failed: {e}")
-
         return new
 
     async def _think(

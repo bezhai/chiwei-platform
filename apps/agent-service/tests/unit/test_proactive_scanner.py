@@ -43,7 +43,7 @@ async def test_get_unseen_messages_has_messages():
     with patch(f"{MODULE}.AsyncSessionLocal", return_value=mock_session_ctx):
         from app.workers.proactive_scanner import get_unseen_messages
 
-        result = await get_unseen_messages("test_chat", "akao")
+        result = await get_unseen_messages("test_chat", after=0)
 
     assert len(result) == 1
     assert result[0].message_id == "msg_1"
@@ -66,7 +66,7 @@ async def test_get_unseen_messages_empty():
     with patch(f"{MODULE}.AsyncSessionLocal", return_value=mock_session_ctx):
         from app.workers.proactive_scanner import get_unseen_messages
 
-        result = await get_unseen_messages("test_chat", "akao")
+        result = await get_unseen_messages("test_chat", after=0)
 
     assert result == []
 

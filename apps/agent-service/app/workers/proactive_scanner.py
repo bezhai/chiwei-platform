@@ -48,34 +48,22 @@ def _is_quiet_hours(now: datetime | None = None) -> bool:
 # ── 未读消息获取 ──────────────────────────────────────────────────────────
 
 
-async def get_unseen_messages(chat_id: str, persona_id: str, limit: int = 30) -> list[ConversationMessage]:
-    """获取上次 assistant 发言之后的用户消息
+async def get_unseen_messages(chat_id: str, after: int = 0, limit: int = 30) -> list[ConversationMessage]:
+    """获取指定时间戳之后的用户消息
 
-    1. 找 target chat 中 role='assistant' 的最大 create_time（任何 persona 的最后发言）
-    2. 取 create_time 更晚的 role='user' 且 user_id != PROACTIVE_USER_ID 的消息
-
-    Note: persona_id 保留作为签名参数供将来精细化过滤，
-    当前使用任意 assistant 的 last_presence 作为窗口起点。
+    Args:
+        chat_id: 群 ID
+        after: 只返回 create_time > after 的消息（毫秒时间戳），0 表示不限
+        limit: 最多返回 N 条（取最新的）
     """
     async with AsyncSessionLocal() as session:
-        # 子查询：最后一次 assistant 发言时间（不区分 persona）
-        last_presence_q = (
-            select(sa_func.max(ConversationMessage.create_time))
-            .where(
-                ConversationMessage.chat_id == chat_id,
-                ConversationMessage.role == "assistant",
-            )
-            .scalar_subquery()
-        )
-
-        # 主查询：之后的用户消息（取最近的 N 条，persona 看到的是最新对话）
         stmt = (
             select(ConversationMessage)
             .where(
                 ConversationMessage.chat_id == chat_id,
                 ConversationMessage.role == "user",
                 ConversationMessage.user_id != PROACTIVE_USER_ID,
-                ConversationMessage.create_time > sa_func.coalesce(last_presence_q, 0),
+                ConversationMessage.create_time > after,
             )
             .order_by(ConversationMessage.create_time.desc())
             .limit(limit)
@@ -285,7 +273,7 @@ async def run_proactive_scan(chat_id: str, persona_id: str, source: str = "cron"
         return {"skipped": "quiet_hours"}
 
     # 2. 获取未读消息
-    messages = await get_unseen_messages(chat_id, persona_id)
+    messages = await get_unseen_messages(chat_id)
     if not messages:
         logger.debug("proactive_scan: no unseen messages")
         return {"skipped": "no_messages"}

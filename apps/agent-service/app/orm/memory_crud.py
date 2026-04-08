@@ -9,7 +9,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal
-from .memory_models import ExperienceFragment
+from .memory_models import ExperienceFragment, GlimpseState
 
 # CST 时区
 _CST = timezone(timedelta(hours=8))
@@ -129,3 +129,51 @@ async def search_fragments_fts(
         return list(result.scalars().all())
 
 
+async def get_latest_glimpse_state(
+    persona_id: str, chat_id: str
+) -> GlimpseState | None:
+    """查最新一行 glimpse 状态，不存在返回 None"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(GlimpseState)
+            .where(GlimpseState.persona_id == persona_id)
+            .where(GlimpseState.chat_id == chat_id)
+            .order_by(GlimpseState.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def insert_glimpse_state(
+    persona_id: str,
+    chat_id: str,
+    last_seen_msg_time: int,
+    observation: str,
+) -> None:
+    """INSERT 一行新 glimpse 状态"""
+    async with AsyncSessionLocal() as session:
+        session.add(
+            GlimpseState(
+                persona_id=persona_id,
+                chat_id=chat_id,
+                last_seen_msg_time=last_seen_msg_time,
+                observation=observation,
+            )
+        )
+        await session.commit()
+
+
+async def get_last_bot_reply_time(chat_id: str) -> int:
+    """查指定群最近一次 assistant 回复的 create_time（毫秒），无则返回 0"""
+    from sqlalchemy import func as sa_func
+
+    from app.orm.models import ConversationMessage
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(sa_func.max(ConversationMessage.create_time)).where(
+                ConversationMessage.chat_id == chat_id,
+                ConversationMessage.role == "assistant",
+            )
+        )
+        return result.scalar_one_or_none() or 0

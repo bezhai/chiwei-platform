@@ -60,6 +60,52 @@ async def trigger_life_engine_tick(
     return {"ok": True, "persona_id": persona_id, "dry_run": dry_run, "result": result}
 
 
+@api_router.post("/admin/trigger-glimpse", tags=["Admin"])
+async def trigger_glimpse(persona_id: str):
+    """手动触发一次 Glimpse 窥屏观察
+
+    不检查 browsing 状态和泳道限制，强制执行。
+    """
+    from app.services.glimpse import run_glimpse
+
+    result = await run_glimpse(persona_id)
+    return {"ok": True, "persona_id": persona_id, "result": result}
+
+
+@api_router.post("/admin/debug-glimpse", tags=["Admin"])
+async def debug_glimpse(persona_id: str):
+    """Glimpse 管线调试端点 — 返回每一步的详细数据，不执行 LLM/写入"""
+    from app.orm.memory_crud import get_last_bot_reply_time, get_latest_glimpse_state
+    from app.services.glimpse import (
+        TARGET_CHAT_ID,
+        _is_quiet,
+        _now_cst,
+        get_unseen_messages,
+    )
+
+    now = _now_cst()
+    chat_id = TARGET_CHAT_ID
+    state = await get_latest_glimpse_state(persona_id, chat_id)
+    last_seen = state.last_seen_msg_time if state else 0
+    last_obs = (state.observation if state else "")[:100]
+    bot_reply_time = await get_last_bot_reply_time(chat_id)
+    effective_after = max(last_seen, bot_reply_time)
+    messages = await get_unseen_messages(chat_id, after=effective_after)
+
+    return {
+        "now_cst": now.isoformat(),
+        "is_quiet": _is_quiet(now),
+        "chat_id": chat_id,
+        "last_seen_msg_time": last_seen,
+        "last_observation": last_obs,
+        "bot_reply_time": bot_reply_time,
+        "effective_after": effective_after,
+        "unseen_message_count": len(messages),
+        "first_msg_time": messages[0].create_time if messages else None,
+        "last_msg_time": messages[-1].create_time if messages else None,
+    }
+
+
 @api_router.post("/admin/trigger-schedule", tags=["Admin"])
 async def trigger_schedule(
     persona_id: str,

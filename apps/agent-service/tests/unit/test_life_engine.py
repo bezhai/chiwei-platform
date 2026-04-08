@@ -119,7 +119,7 @@ async def test_tick_skips_when_skip_until_future():
 
 @pytest.mark.asyncio
 async def test_tick_calls_think_when_no_skip():
-    """无 skip → 调用 LLM think，browsing 触发 glimpse"""
+    """无 skip → 调用 LLM think，保存状态（glimpse 已移至独立 cron，tick 不再触发）"""
     engine = LifeEngine()
     row = _make_row(skip_until=None)
 
@@ -132,12 +132,13 @@ async def test_tick_calls_think_when_no_skip():
 
     with (
         patch("app.services.life_engine._load_state", new_callable=AsyncMock, return_value=row),
-        patch("app.services.life_engine._save_state", new_callable=AsyncMock),
-        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state),
-        patch("app.services.glimpse.run_glimpse", new_callable=AsyncMock) as mock_glimpse,
+        patch("app.services.life_engine._save_state", new_callable=AsyncMock) as mock_save,
+        patch("app.services.life_engine.LifeEngine._think", new_callable=AsyncMock, return_value=new_state) as mock_think,
     ):
-        await engine.tick("akao-001")
-        mock_glimpse.assert_called_once_with("akao-001")
+        result = await engine.tick("akao-001")
+        mock_think.assert_called_once()
+        mock_save.assert_called_once()
+        assert result["activity_type"] == "browsing"
 
 
 @pytest.mark.asyncio
