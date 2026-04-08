@@ -171,6 +171,7 @@ def _parse_glimpse_response(raw: str) -> dict:
                 "interesting": bool(data.get("interesting", False)),
                 "observation": data.get("observation", ""),
                 "want_to_speak": bool(data.get("want_to_speak", False)),
+                "speak_reason": data.get("speak_reason", ""),
                 "stimulus": data.get("stimulus"),
                 "target_message_id": data.get("target_message_id"),
             }
@@ -267,6 +268,7 @@ async def run_glimpse(persona_id: str) -> str:
         logger.info(f"[{persona_id}] Glimpse fragment: {observation[:60]}...")
 
     # 9. 搭话
+    speak_reason = decision.get("speak_reason", "")
     state_observation = observation
     if decision.get("want_to_speak"):
         stimulus = decision.get("stimulus", "")
@@ -276,11 +278,11 @@ async def run_glimpse(persona_id: str) -> str:
         hour_cutoff = one_hour_ago.strftime("%H:%M")
         recent_hour_count = sum(1 for r in recent_proactive if r["time"] >= hour_cutoff)
         if recent_hour_count >= HOURLY_PROACTIVE_LIMIT:
-            state_observation = f"{observation}\n[want_to_speak:throttled] stimulus={stimulus}, count={recent_hour_count}/{HOURLY_PROACTIVE_LIMIT}"
+            state_observation = f"{observation}\n[want_to_speak:throttled] reason={speak_reason}, stimulus={stimulus}, count={recent_hour_count}/{HOURLY_PROACTIVE_LIMIT}"
             logger.info(f"[{persona_id}] Glimpse want_to_speak throttled: {recent_hour_count}>={HOURLY_PROACTIVE_LIMIT}")
         else:
-            state_observation = f"{observation}\n[want_to_speak] stimulus={stimulus}, target={target}"
-            logger.info(f"[{persona_id}] Glimpse want_to_speak: {stimulus}")
+            state_observation = f"{observation}\n[want_to_speak] reason={speak_reason}, stimulus={stimulus}, target={target}"
+            logger.info(f"[{persona_id}] Glimpse want_to_speak: {speak_reason} | {stimulus}")
             try:
                 from app.workers.proactive_scanner import submit_proactive_request
 
@@ -292,6 +294,9 @@ async def run_glimpse(persona_id: str) -> str:
                 )
             except Exception as e:
                 logger.error(f"[{persona_id}] Glimpse proactive submit failed: {e}")
+    elif speak_reason:
+        # want_to_speak=false 但有理由时也记录
+        state_observation = f"{observation}\n[no_speak] reason={speak_reason}"
 
     # 10. 写状态
     await insert_glimpse_state(
