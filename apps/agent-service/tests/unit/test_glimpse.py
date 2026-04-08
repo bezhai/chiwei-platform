@@ -145,8 +145,8 @@ async def test_glimpse_passes_last_observation_to_llm():
 
 
 @pytest.mark.asyncio
-async def test_glimpse_want_to_speak_dry_run():
-    """想搭话 → dry-run 只记录，不调 submit_proactive_request"""
+async def test_glimpse_want_to_speak_submits_proactive():
+    """想搭话 → 记录状态 + 调 submit_proactive_request"""
     from app.services.glimpse import run_glimpse
 
     normal_time = datetime(2026, 4, 7, 14, 0, tzinfo=CST)
@@ -172,6 +172,7 @@ async def test_glimpse_want_to_speak_dry_run():
         patch(f"{MODULE}.insert_glimpse_state", new_callable=AsyncMock) as mock_state,
         patch(f"{MODULE}._get_persona_info", new_callable=AsyncMock, return_value=("赤尾", "")),
         patch(f"{MODULE}._get_group_name", new_callable=AsyncMock, return_value="番剧群"),
+        patch("app.workers.proactive_scanner.submit_proactive_request", new_callable=AsyncMock) as mock_proactive,
     ):
         result = await run_glimpse("akao-001")
 
@@ -180,6 +181,13 @@ async def test_glimpse_want_to_speak_dry_run():
         call_kwargs = mock_state.call_args[1]
         assert "[want_to_speak]" in call_kwargs["observation"]
         assert "好想聊聊" in call_kwargs["observation"]
+        # 应调用 submit_proactive_request
+        mock_proactive.assert_called_once_with(
+            chat_id="oc_test",
+            persona_id="akao-001",
+            target_message_id="m1",
+            stimulus="好想聊聊",
+        )
 
 
 @pytest.mark.asyncio

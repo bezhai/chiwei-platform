@@ -246,13 +246,24 @@ async def run_glimpse(persona_id: str) -> str:
         await create_fragment(fragment)
         logger.info(f"[{persona_id}] Glimpse fragment: {observation[:60]}...")
 
-    # 9. 搭话 dry-run
+    # 9. 搭话
     state_observation = observation
     if decision.get("want_to_speak"):
         stimulus = decision.get("stimulus", "")
-        target = decision.get("target_message_id", "")
+        target = decision.get("target_message_id") or None
         state_observation = f"{observation}\n[want_to_speak] stimulus={stimulus}, target={target}"
-        logger.info(f"[{persona_id}] Glimpse want_to_speak (dry-run): {stimulus}")
+        logger.info(f"[{persona_id}] Glimpse want_to_speak: {stimulus}")
+        try:
+            from app.workers.proactive_scanner import submit_proactive_request
+
+            await submit_proactive_request(
+                chat_id=chat_id,
+                persona_id=persona_id,
+                target_message_id=target,
+                stimulus=stimulus,
+            )
+        except Exception as e:
+            logger.error(f"[{persona_id}] Glimpse proactive submit failed: {e}")
 
     # 10. 写状态
     await insert_glimpse_state(
