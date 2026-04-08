@@ -71,6 +71,16 @@ async def build_inner_context(
     if life_state:
         sections.append(life_state)
 
+    # === 关系记忆（对当前对话者的印象）===
+    if trigger_user_id and trigger_user_id != "__proactive__":
+        from app.orm.memory_crud import get_latest_relationship_memory
+        from app.orm.crud import get_username
+
+        rel_memory = await get_latest_relationship_memory(persona_id, trigger_user_id)
+        if rel_memory:
+            name = trigger_username or await get_username(trigger_user_id) or trigger_user_id[:6]
+            sections.append(f"关于 {name}：\n{rel_memory}")
+
     # === 最近的经历（精简版：最近 2 条碎片，短期记忆）===
     today_frags = await get_today_fragments(persona_id, grains=["conversation"])
     if chat_type == "group":
