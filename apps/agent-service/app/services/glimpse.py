@@ -113,10 +113,12 @@ async def _call_glimpse_llm(
         "persona_lite": persona_lite,
         "group_name": group_name,
         "messages": messages_text,
+        "last_observation": (
+            f"你上次翻这个群的时候，心里想的是：「{last_observation}」\n"
+            if last_observation
+            else ""
+        ),
     }
-    # 递进观察：传入上次感想（prompt 模板需支持 last_observation 变量，不支持时忽略）
-    if last_observation:
-        compile_args["last_observation"] = last_observation
     try:
         compiled = prompt.compile(**compile_args)
     except KeyError:
