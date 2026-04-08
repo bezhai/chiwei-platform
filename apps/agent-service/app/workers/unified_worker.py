@@ -25,6 +25,7 @@ from app.workers.base_style_worker import cron_generate_base_reply_style
 from app.workers.vectorize_worker import cron_scan_pending_messages
 from app.workers.life_engine_worker import cron_life_engine_tick
 from app.workers.glimpse_worker import cron_glimpse
+from app.workers.monologue_worker import cron_generate_inner_monologue
 
 logger = logging.getLogger(__name__)
 
@@ -94,4 +95,6 @@ class UnifiedWorkerSettings:
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}, timeout=1800),
         # 6. 基线 reply_style：每天 CST 8:00/14:00/18:00（Schedule 之后）
         cron(cron_generate_base_reply_style, hour={8, 14, 18}, minute={0}, timeout=1800),
+        # 7. 内心独白：每小时的半点（与 base_reply_style 错开）
+        cron(cron_generate_inner_monologue, hour=set(range(8, 24)), minute={30}, timeout=1800),
     ]

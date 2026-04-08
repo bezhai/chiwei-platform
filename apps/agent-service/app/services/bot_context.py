@@ -82,6 +82,7 @@ class BotContext:
         self._persona_id: str = ""
         self._persona: "BotPersona | None" = None
         self._reply_style: str = ""
+        self._inner_monologue: str = ""
 
     @property
     def persona_id(self) -> str:
@@ -117,9 +118,17 @@ class BotContext:
             self._persona_id, default_style
         )
 
+        # 加载内心独白（替代 reply_style 的示例锚点）
+        from app.orm.memory_crud import get_latest_inner_monologue
+        self._inner_monologue = await get_latest_inner_monologue(self._persona_id) or ""
+
     @property
     def reply_style(self) -> str:
         return self._reply_style
+
+    @property
+    def inner_monologue(self) -> str:
+        return self._inner_monologue
 
     def get_identity(self) -> str:
         """返回注入 {{identity}} 的人设文本"""

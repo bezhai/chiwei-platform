@@ -6,7 +6,7 @@ memory_entity: 飞书长 ID → 短自增 ID 映射，用于碎片内容消歧
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -105,6 +105,40 @@ class ReplyStyleLog(Base):
     style_text: Mapped[str] = mapped_column(Text, nullable=False)
     observation: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(20), nullable=False)  # 'base' / 'drift' / 'manual'
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class RelationshipMemory(Base):
+    """关系记忆 — per-user 的自然语言关系描述，append-only"""
+
+    __tablename__ = "relationship_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
+    memory_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_rel_mem_persona_user_created", "persona_id", "user_id", created_at.desc()),
+    )
+
+
+class InnerMonologueLog(Base):
+    """内心独白日志 — 替代 reply_style 的示例锚点，append-only"""
+
+    __tablename__ = "inner_monologue_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    monologue: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

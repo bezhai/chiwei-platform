@@ -326,6 +326,8 @@ async def _build_and_stream(
 
     # 动态 reply-style（漂移生成的行为示例，fallback 静态示例）
     prompt_vars["reply_style"] = bot_ctx.reply_style
+    # 内心独白（替代示例锚点，过渡期并存）
+    prompt_vars["inner_monologue"] = bot_ctx.inner_monologue
 
     full_content = ""
     has_text_in_current_turn = False

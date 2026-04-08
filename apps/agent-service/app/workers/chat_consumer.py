@@ -105,7 +105,13 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
                 if i > 0:
                     payload["session_id"] = str(uuid4())
                 tasks.append(_process_for_persona(payload, pid))
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Persona %s failed in gather: %s\n%s",
+                        persona_ids[i], result, "".join(traceback.format_exception(type(result), result, result.__traceback__)),
+                    )
 
 
 async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
@@ -208,6 +214,10 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
         # 记录流结束时间，观测 TTFT 和 agent_stream 阶段耗时
         t_stream_end = time.monotonic()
         stream_ms = (t_stream_end - t_start) * 1000
+        logger.info(
+            "Stream ended: session_id=%s, persona=%s, full_content_len=%d, token_count=%d, sent_length=%d, messages_sent=%d",
+            session_id, persona_id, len(full_content), token_count, sent_length, messages_sent,
+        )
         if t_first_token is not None:
             CHAT_FIRST_TOKEN.observe(t_first_token - t_start)
         CHAT_PIPELINE_DURATION.labels(stage="agent_stream").observe(
@@ -220,6 +230,10 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
         # 全量文本（去掉所有 split marker），用于数据库存储
         clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
 
+        logger.info(
+            "Publishing final: session_id=%s, persona=%s, remaining_len=%d, clean_full_len=%d",
+            session_id, persona_id, len(remaining), len(clean_full),
+        )
         t_publish_start = time.monotonic()
         if remaining or messages_sent == 0:
             base_response["published_at"] = int(time.time() * 1000)
@@ -285,6 +299,12 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
             },
         )
 
+    except asyncio.CancelledError:
+        logger.error(
+            "Chat request CANCELLED: session_id=%s, persona=%s, full_content_len=%d",
+            session_id, persona_id, len(full_content),
+        )
+        raise  # CancelledError 应该继续传播
     except Exception as e:
         logger.error(
             "Chat request failed: session_id=%s, persona=%s, error=%s\n%s",
