@@ -1,6 +1,6 @@
 """Glimpse 管线 — 赤尾"刷手机"时的窥屏观察（v2: 独立调度 + 增量去重 + 递进观察）
 
-流程：读状态 → 拉增量消息 → LLM 观察（传入上次感想）→ 写碎片 + 状态
+流程：读状态 → 拉增量消息 → LLM 观察（传入上次感想 + 今日搭话记录）→ 写碎片 + 状态
 """
 
 import json
@@ -15,7 +15,11 @@ from app.orm.memory_crud import (
     insert_glimpse_state,
 )
 from app.orm.memory_models import ExperienceFragment
-from app.workers.proactive_scanner import get_unseen_messages
+from app.workers.proactive_scanner import (
+    TARGET_CHAT_ID,
+    get_unseen_messages,
+    _get_recent_proactive_records,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +28,8 @@ CST = timezone(timedelta(hours=8))
 # 安静时段：23:00~09:00 CST 不窥屏
 QUIET_HOURS = (23, 9)
 
-# 初期白名单群（与 ProactiveManager 同群）
-from app.workers.proactive_scanner import TARGET_CHAT_ID
+# 每小时主动搭话上限（工程兜底，LLM 自律为主）
+HOURLY_PROACTIVE_LIMIT = 2
 
 _WHITELIST_GROUPS = [TARGET_CHAT_ID]
 
@@ -100,6 +104,7 @@ async def _call_glimpse_llm(
     group_name: str,
     messages_text: str,
     last_observation: str = "",
+    recent_proactive: list[dict] | None = None,
 ) -> str:
     """调用 LLM 进行窥屏观察"""
     from langfuse.langchain import CallbackHandler
@@ -107,20 +112,33 @@ async def _call_glimpse_llm(
     from app.agents.infra.langfuse_client import get_prompt
     from app.agents.infra.model_builder import ModelBuilder
 
+    # 格式化今日搭话记录
+    proactive_hint = ""
+    if recent_proactive:
+        n = len(recent_proactive)
+        times = "、".join(r["time"] for r in recent_proactive[:5])
+        proactive_hint = (
+            f"\n- 你今天已经在这个群主动说了 {n} 次话了（{times}），"
+            "再多就烦人了，除非有真的让你忍不住的话题"
+        )
+
     prompt = get_prompt("glimpse_observe")
     compile_args = {
         "persona_name": persona_name,
         "persona_lite": persona_lite,
         "group_name": group_name,
         "messages": messages_text,
+        "last_observation": (
+            f"你上次翻这个群的时候，心里想的是：「{last_observation}」\n"
+            if last_observation
+            else ""
+        ),
+        "recent_proactive": proactive_hint,
     }
-    # 递进观察：传入上次感想（prompt 模板需支持 last_observation 变量，不支持时忽略）
-    if last_observation:
-        compile_args["last_observation"] = last_observation
     try:
         compiled = prompt.compile(**compile_args)
     except KeyError:
-        # prompt 模板尚未添加 last_observation 变量，先不传
+        # prompt 模板尚未添加新变量，fallback
         compiled = prompt.compile(
             persona_name=persona_name,
             persona_lite=persona_lite,
@@ -153,6 +171,7 @@ def _parse_glimpse_response(raw: str) -> dict:
                 "interesting": bool(data.get("interesting", False)),
                 "observation": data.get("observation", ""),
                 "want_to_speak": bool(data.get("want_to_speak", False)),
+                "speak_reason": data.get("speak_reason", ""),
                 "stimulus": data.get("stimulus"),
                 "target_message_id": data.get("target_message_id"),
             }
@@ -201,13 +220,17 @@ async def run_glimpse(persona_id: str) -> str:
     if not messages_text.strip():
         return "skipped:empty_timeline"
 
-    # 7. LLM 观察（传入上次感想）
+    # 6b. 获取今日搭话记录（供 LLM 自律 + 工程兜底）
+    recent_proactive = await _get_recent_proactive_records(chat_id)
+
+    # 7. LLM 观察（传入上次感想 + 今日搭话记录）
     raw = await _call_glimpse_llm(
         persona_name=persona_name,
         persona_lite=persona_lite,
         group_name=group_name,
         messages_text=messages_text,
         last_observation=last_observation,
+        recent_proactive=recent_proactive,
     )
     decision = _parse_glimpse_response(raw)
 
@@ -244,13 +267,36 @@ async def run_glimpse(persona_id: str) -> str:
         await create_fragment(fragment)
         logger.info(f"[{persona_id}] Glimpse fragment: {observation[:60]}...")
 
-    # 9. 搭话 dry-run
+    # 9. 搭话
+    speak_reason = decision.get("speak_reason", "")
     state_observation = observation
     if decision.get("want_to_speak"):
         stimulus = decision.get("stimulus", "")
-        target = decision.get("target_message_id", "")
-        state_observation = f"{observation}\n[want_to_speak] stimulus={stimulus}, target={target}"
-        logger.info(f"[{persona_id}] Glimpse want_to_speak (dry-run): {stimulus}")
+        target = decision.get("target_message_id") or None
+        # 工程兜底：统计最近 1 小时内的搭话次数
+        one_hour_ago = now - timedelta(hours=1)
+        hour_cutoff = one_hour_ago.strftime("%H:%M")
+        recent_hour_count = sum(1 for r in recent_proactive if r["time"] >= hour_cutoff)
+        if recent_hour_count >= HOURLY_PROACTIVE_LIMIT:
+            state_observation = f"{observation}\n[want_to_speak:throttled] reason={speak_reason}, stimulus={stimulus}, count={recent_hour_count}/{HOURLY_PROACTIVE_LIMIT}"
+            logger.info(f"[{persona_id}] Glimpse want_to_speak throttled: {recent_hour_count}>={HOURLY_PROACTIVE_LIMIT}")
+        else:
+            state_observation = f"{observation}\n[want_to_speak] reason={speak_reason}, stimulus={stimulus}, target={target}"
+            logger.info(f"[{persona_id}] Glimpse want_to_speak: {speak_reason} | {stimulus}")
+            try:
+                from app.workers.proactive_scanner import submit_proactive_request
+
+                await submit_proactive_request(
+                    chat_id=chat_id,
+                    persona_id=persona_id,
+                    target_message_id=target,
+                    stimulus=stimulus,
+                )
+            except Exception as e:
+                logger.error(f"[{persona_id}] Glimpse proactive submit failed: {e}")
+    elif speak_reason:
+        # want_to_speak=false 但有理由时也记录
+        state_observation = f"{observation}\n[no_speak] reason={speak_reason}"
 
     # 10. 写状态
     await insert_glimpse_state(

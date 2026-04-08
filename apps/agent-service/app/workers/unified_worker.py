@@ -22,24 +22,11 @@ from app.workers.schedule_worker import (
     cron_generate_weekly_plan,
 )
 from app.workers.base_style_worker import cron_generate_base_reply_style
-from app.workers.proactive_scanner import run_proactive_scan
 from app.workers.vectorize_worker import cron_scan_pending_messages
 from app.workers.life_engine_worker import cron_life_engine_tick
 from app.workers.glimpse_worker import cron_glimpse
 
 logger = logging.getLogger(__name__)
-
-
-async def proactive_scan_job(ctx) -> None:
-    """主动搭话扫描（cron 兜底，主触发走消息事件）"""
-    import random
-    if random.random() > 0.3:
-        return
-    from app.orm.crud import get_all_persona_ids
-    from app.workers.proactive_manager import TARGET_CHAT_IDS
-    for chat_id in TARGET_CHAT_IDS:
-        for persona_id in await get_all_persona_ids():
-            await run_proactive_scan(chat_id, persona_id, source="cron")
 
 
 # ==================== 长期任务相关 ====================
@@ -107,6 +94,4 @@ class UnifiedWorkerSettings:
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}, timeout=1800),
         # 6. 基线 reply_style：每天 CST 8:00/14:00/18:00（Schedule 之后）
         cron(cron_generate_base_reply_style, hour={8, 14, 18}, minute={0}, timeout=1800),
-        # 7. 主动搭话扫描（cron 兜底）：每 30 分钟，30% 概率执行 [DISABLED]
-        # cron(proactive_scan_job, minute={0, 30}),
     ]
