@@ -163,6 +163,40 @@ async def insert_glimpse_state(
         await session.commit()
 
 
+async def save_reply_style(
+    persona_id: str,
+    style_text: str,
+    source: str,
+    observation: str | None = None,
+) -> None:
+    """写入 reply_style 审计日志（append-only）"""
+    from app.orm.memory_models import ReplyStyleLog
+
+    async with AsyncSessionLocal() as session:
+        session.add(ReplyStyleLog(
+            persona_id=persona_id,
+            style_text=style_text,
+            source=source,
+            observation=observation,
+        ))
+        await session.commit()
+
+
+async def get_latest_reply_style(persona_id: str) -> str | None:
+    """获取最新的 reply_style"""
+    from app.orm.memory_models import ReplyStyleLog
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ReplyStyleLog.style_text)
+            .where(ReplyStyleLog.persona_id == persona_id)
+            .order_by(ReplyStyleLog.created_at.desc())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        return row
+
+
 async def get_last_bot_reply_time(chat_id: str) -> int:
     """查指定群最近一次 assistant 回复的 create_time（毫秒），无则返回 0"""
     from sqlalchemy import func as sa_func

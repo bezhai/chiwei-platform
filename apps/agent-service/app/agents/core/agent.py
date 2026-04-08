@@ -38,6 +38,9 @@ _DEFAULT_MAX_RETRIES = 2
 _BACKOFF_BASE = 2  # 秒
 _BACKOFF_MAX = 8  # 秒
 
+# 工具调用次数限制（每次工具调用占 2 步：call + response，故 12 步 ≈ 6 次工具调用）
+_DEFAULT_RECURSION_LIMIT = 12
+
 
 class ChatAgent:
     """核心聊天代理
@@ -88,6 +91,8 @@ class ChatAgent:
             config = {"callbacks": [CallbackHandler(update_trace=True)]}
             if self.trace_name:
                 config["run_name"] = self.trace_name
+        # 限制工具调用轮次，防止失控循环（每次工具调用占 2 步）
+        config.setdefault("recursion_limit", _DEFAULT_RECURSION_LIMIT)
         return config
 
     async def stream(
