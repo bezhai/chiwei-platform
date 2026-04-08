@@ -192,6 +192,26 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
     await create_fragment(fragment)
     logger.info(f"[{persona_id}] Conversation fragment created for {chat_id}: {content[:60]}...")
 
+    # 关系记忆提取（fire-and-forget，不阻塞主流程）
+    try:
+        from app.services.relationship_memory import extract_relationship_updates
+
+        # 从消息中提取涉及的用户 ID（排除 bot 自身）
+        unique_user_ids = list({
+            m.user_id for m in messages
+            if m.role == "user" and m.user_id
+        })
+
+        if unique_user_ids:
+            await extract_relationship_updates(
+                persona_id=persona_id,
+                chat_id=chat_id,
+                user_ids=unique_user_ids,
+                messages_timeline=timeline,
+            )
+    except Exception as e:
+        logger.warning(f"[{persona_id}] Relationship extract failed (non-fatal): {e}")
+
 
 async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
     """Build scene description for the prompt"""
