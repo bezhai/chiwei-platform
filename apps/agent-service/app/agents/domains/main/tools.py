@@ -6,6 +6,7 @@ BASE_TOOLS 是子 Agent 可复用的基础工具集（不含委派工具）。
 
 from app.agents.tools.delegation.research import deep_research
 from app.agents.tools.image import generate_image, read_images
+from app.agents.tools.recall import recall
 from app.agents.tools.sandbox_bash import sandbox_bash
 from app.agents.tools.search.image import search_images
 from app.agents.tools.search.web import search_web
@@ -17,6 +18,7 @@ BASE_TOOLS = [
     search_images,
     generate_image,
     read_images,
+    recall,
 ]
 
 # 主 Agent 完整工具集（基础 + 委派 + 技能）
