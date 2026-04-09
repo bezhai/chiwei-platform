@@ -74,7 +74,10 @@ async def extract_relationship_updates(
         logger.info(f"[{persona_id}] No relationship updates for chat {chat_id}")
         return
 
-    # 解析 JSON 输出
+    # 解析 JSON 输出（strip markdown code fence）
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
         updates = json.loads(content)
     except json.JSONDecodeError:
@@ -120,14 +123,23 @@ async def rebuild_relationship_memory_for_user(
         batch_size: 每批消息数量
 
     Returns:
-        {"batches": int, "core_facts": str, "impression": str}
+        {"batches": int, "final_version": int, "core_facts": str, "impression": str}
     """
     from datetime import datetime, timezone
 
     user_name = await get_username(user_id) or user_id[:6]
     current_core_facts = ""
     current_impression = ""
+    prev_core_facts = ""
+    prev_impression = ""
     batch_count = 0
+    final_version = 0
+
+    # 预加载所有出现的 user_id → name 映射，避免 N+1 查询
+    unique_uids = {m.user_id for m in messages if m.role == "user" and m.user_id}
+    name_cache: dict[str, str] = {}
+    for uid in unique_uids:
+        name_cache[uid] = await get_username(uid) or uid[:6]
 
     for i in range(0, len(messages), batch_size):
         batch = messages[i : i + batch_size]
@@ -141,8 +153,7 @@ async def rebuild_relationship_memory_for_user(
             if msg.role == "assistant":
                 speaker = persona_name
             else:
-                name = await get_username(msg.user_id) or msg.user_id[:6]
-                speaker = name
+                speaker = name_cache.get(msg.user_id, msg.user_id[:6])
             content = msg.content or ""
             if content.strip():
                 lines.append(f"[{time_str}] {speaker}: {content[:200]}")
@@ -178,6 +189,11 @@ async def rebuild_relationship_memory_for_user(
         if not content_text or content_text.strip() == "[]":
             continue
 
+        # strip markdown code fence
+        content_text = content_text.strip()
+        if content_text.startswith("```"):
+            content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
         try:
             updates = json.loads(content_text)
         except json.JSONDecodeError:
@@ -192,7 +208,9 @@ async def rebuild_relationship_memory_for_user(
                 current_impression = item.get("impression", current_impression)
                 break
 
-        if current_core_facts or current_impression:
+        # 仅在内容变化时写入，避免重复 version
+        if (current_core_facts or current_impression) and \
+           (current_core_facts, current_impression) != (prev_core_facts, prev_impression):
             await save_relationship_memory(
                 persona_id=persona_id,
                 user_id=user_id,
@@ -201,9 +219,12 @@ async def rebuild_relationship_memory_for_user(
                 impression=current_impression,
                 source="rebuild",
             )
+            prev_core_facts, prev_impression = current_core_facts, current_impression
+            final_version += 1
 
     return {
         "batches": batch_count,
+        "final_version": final_version,
         "core_facts": current_core_facts,
         "impression": current_impression,
     }
