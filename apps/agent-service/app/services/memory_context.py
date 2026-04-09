@@ -78,8 +78,14 @@ async def build_inner_context(
 
         rel_memory = await get_latest_relationship_memory(persona_id, trigger_user_id)
         if rel_memory:
+            core_facts, impression = rel_memory
             name = trigger_username or await get_username(trigger_user_id) or trigger_user_id[:6]
-            sections.append(f"关于 {name}：\n{rel_memory}")
+            parts = [f"关于 {name}："]
+            if core_facts:
+                parts.append(f"[事实] {core_facts}")
+            if impression:
+                parts.append(f"[印象] {impression}")
+            sections.append("\n".join(parts))
 
     # === 最近的经历（精简版：最近 2 条碎片，短期记忆）===
     today_frags = await get_today_fragments(persona_id, grains=["conversation"])
