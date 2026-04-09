@@ -126,12 +126,19 @@ async def rebuild_relationship_memory_for_user(
         {"batches": int, "final_version": int, "core_facts": str, "impression": str}
     """
     from datetime import datetime, timezone
+    from app.orm.memory_crud import get_latest_relationship_memory
 
     user_name = await get_username(user_id) or user_id[:6]
-    current_core_facts = ""
-    current_impression = ""
-    prev_core_facts = ""
-    prev_impression = ""
+
+    # 从 DB 加载已有记忆作为起点，而不是从零开始
+    existing = await get_latest_relationship_memory(persona_id, user_id)
+    if existing:
+        current_core_facts, current_impression = existing
+    else:
+        current_core_facts = ""
+        current_impression = ""
+    prev_core_facts = current_core_facts
+    prev_impression = current_impression
     batch_count = 0
     final_version = 0
 
