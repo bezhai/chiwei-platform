@@ -1,6 +1,6 @@
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import { Message } from 'core/models/message';
-import { getBotAppId } from '@core/services/bot/bot-var';
+import { getBotAppId, getBotUnionId } from '@core/services/bot/bot-var';
 import { UserBlacklistRepository } from '@infrastructure/dal/repositories/repositories';
 
 // 定义规则函数类型
@@ -82,7 +82,7 @@ export interface RuleConfig {
 
 // 工具函数：通用规则
 export const NeedRobotMention: Rule = (message) =>
-    message.hasBotMention(getBotAppId()) || message.isP2P();
+    message.hasMention(getBotUnionId()) || message.isP2P();
 
 export const NeedNotRobotMention: Rule = (message) => !NeedRobotMention(message);
 

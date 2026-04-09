@@ -17,3 +17,7 @@ function getBotConfigInternal() {
 export function getBotAppId(): string {
     return getBotConfigInternal().app_id;
 }
+
+export function getBotUnionId(): string {
+    return getBotConfigInternal().robot_union_id;
+}
