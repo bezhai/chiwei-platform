@@ -46,34 +46,31 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           SUMMARY: ${{ steps.summary.outputs.content }}
         run: |
-          # Build JSON payload safely with jq
-          PAYLOAD=$(jq -n \
-            --arg title "[PR #${PR_NUMBER}] ${PR_TITLE}" \
-            --arg summary "$SUMMARY" \
-            --arg url "$PR_URL" \
-            '{
-              msg_type: "interactive",
-              card: {
-                header: {
-                  title: { tag: "plain_text", content: $title },
-                  template: "green"
-                },
-                elements: [
-                  { tag: "markdown", content: $summary },
-                  {
-                    tag: "action",
-                    actions: [
+          # Build JSON payload safely with python3 (guaranteed on ubuntu runner)
+          PAYLOAD=$(python3 -c "
+          import json, os
+          print(json.dumps({
+              'msg_type': 'interactive',
+              'card': {
+                  'header': {
+                      'title': {'tag': 'plain_text', 'content': f'[PR #{os.environ[\"PR_NUMBER\"]}] {os.environ[\"PR_TITLE\"]}'},
+                      'template': 'green'
+                  },
+                  'elements': [
+                      {'tag': 'markdown', 'content': os.environ['SUMMARY']},
                       {
-                        tag: "button",
-                        text: { tag: "plain_text", content: "查看 PR" },
-                        url: $url,
-                        type: "primary"
+                          'tag': 'action',
+                          'actions': [{
+                              'tag': 'button',
+                              'text': {'tag': 'plain_text', 'content': '查看 PR'},
+                              'url': os.environ['PR_URL'],
+                              'type': 'primary'
+                          }]
                       }
-                    ]
-                  }
-                ]
+                  ]
               }
-            }')
+          }))
+          ")
 
           curl -s -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
