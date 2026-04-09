@@ -120,7 +120,10 @@ class RelationshipMemory(Base):
     persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     user_id: Mapped[str] = mapped_column(String(100), nullable=False)
     user_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
-    memory_text: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_text: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    core_facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    impression: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
