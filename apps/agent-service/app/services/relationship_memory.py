@@ -134,9 +134,14 @@ async def rebuild_relationship_memory_for_user(
     existing = await get_latest_relationship_memory(persona_id, user_id)
     if existing:
         current_core_facts, current_impression = existing
+        logger.info(
+            f"[rebuild] {persona_id}/{user_name}: loaded existing memory "
+            f"(facts={current_core_facts[:50]}...)"
+        )
     else:
         current_core_facts = ""
         current_impression = ""
+        logger.info(f"[rebuild] {persona_id}/{user_name}: no existing memory, starting fresh")
     prev_core_facts = current_core_facts
     prev_impression = current_impression
     batch_count = 0

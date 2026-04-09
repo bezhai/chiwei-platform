@@ -157,63 +157,97 @@ class RebuildRelationshipMemoryRequest(BaseModel):
 
 @api_router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
 async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
-    """批量回溯重建关系记忆
+    """批量回溯重建关系记忆（异步，按天拆分）
 
-    从 conversation_messages 按 user_id 分组，渐进式提取 core_facts + impression。
-    耗时较长，建议单次限制 persona/chat 范围。
+    接收时间段，内部按天拆分处理。立即返回，后台逐天执行。
+    每天处理完打日志，通过 make logs KEYWORD=rebuild 追踪进度。
     """
-    from datetime import datetime
-    from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
-    from app.services.relationship_memory import rebuild_relationship_memory_for_user
+    import asyncio
+    import logging
 
-    start_dt = datetime.fromisoformat(req.start_time)
-    end_dt = datetime.fromisoformat(req.end_time)
-    start_ts = int(start_dt.timestamp() * 1000)
-    end_ts = int(end_dt.timestamp() * 1000)
+    logger = logging.getLogger(__name__)
 
-    results = []
+    async def _run():
+        from datetime import datetime, timedelta
+        from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
+        from app.services.relationship_memory import rebuild_relationship_memory_for_user
 
-    for chat_id in req.chat_ids:
-        messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts, limit=10000)
-        if not messages:
-            continue
+        start_dt = datetime.fromisoformat(req.start_time)
+        end_dt = datetime.fromisoformat(req.end_time)
 
-        user_ids = list({
-            m.user_id for m in messages
-            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-        })
-
+        # 预加载 persona 信息
+        personas = {}
         for persona_id in req.persona_ids:
             persona = await get_bot_persona(persona_id)
-            if not persona:
-                continue
-            persona_name = persona.display_name
-            persona_lite = persona.persona_lite or ""
+            if persona:
+                personas[persona_id] = (persona.display_name, persona.persona_lite or "")
 
-            for user_id in user_ids:
-                user_messages = [
-                    m for m in messages
-                    if m.user_id == user_id or m.role == "assistant"
-                ]
-                user_messages.sort(key=lambda m: m.create_time)
+        total_days = (end_dt.date() - start_dt.date()).days
+        logger.info(
+            f"[rebuild] Starting: {len(personas)} personas, {len(req.chat_ids)} chats, "
+            f"{total_days} days ({start_dt.date()} ~ {end_dt.date()})"
+        )
 
-                result = await rebuild_relationship_memory_for_user(
-                    persona_id=persona_id,
-                    user_id=user_id,
-                    messages=user_messages,
-                    persona_name=persona_name,
-                    persona_lite=persona_lite,
-                    batch_size=req.batch_size,
+        # 按天拆分
+        day = start_dt
+        day_count = 0
+        while day < end_dt:
+            next_day = day + timedelta(days=1)
+            if next_day > end_dt:
+                next_day = end_dt
+            day_start_ts = int(day.timestamp() * 1000)
+            day_end_ts = int(next_day.timestamp() * 1000)
+            day_count += 1
+            day_str = day.strftime("%m/%d")
+
+            for chat_id in req.chat_ids:
+                messages = await get_chat_messages_in_range(
+                    chat_id, day_start_ts, day_end_ts, limit=5000
                 )
-                user_name = await get_username(user_id) or user_id[:6]
+                if not messages:
+                    continue
 
-                results.append({
-                    "persona_id": persona_id,
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "user_name": user_name,
-                    **result,
+                user_ids = list({
+                    m.user_id for m in messages
+                    if m.role == "user" and m.user_id and m.user_id != "__proactive__"
                 })
 
-    return {"results": results}
+                for persona_id, (persona_name, persona_lite) in personas.items():
+                    for user_id in user_ids:
+                        user_messages = [
+                            m for m in messages
+                            if m.user_id == user_id or m.role == "assistant"
+                        ]
+                        user_messages.sort(key=lambda m: m.create_time)
+
+                        try:
+                            result = await rebuild_relationship_memory_for_user(
+                                persona_id=persona_id,
+                                user_id=user_id,
+                                messages=user_messages,
+                                persona_name=persona_name,
+                                persona_lite=persona_lite,
+                                batch_size=req.batch_size,
+                            )
+                            if result["final_version"] > 0:
+                                user_name = await get_username(user_id) or user_id[:6]
+                                logger.info(
+                                    f"[rebuild] {day_str} {persona_id}/{user_name}: "
+                                    f"v={result['final_version']}"
+                                )
+                        except Exception as e:
+                            logger.error(f"[rebuild] {day_str} {persona_id}/{user_id} failed: {e}")
+
+            logger.info(f"[rebuild] Day {day_count}/{total_days} ({day_str}) done.")
+            day = next_day
+
+        logger.info("[rebuild] All done.")
+
+    asyncio.create_task(_run())
+    return {
+        "status": "started",
+        "message": f"Rebuild started in background. "
+        f"{len(req.persona_ids)} personas, {len(req.chat_ids)} chats, "
+        f"check logs with: make logs KEYWORD=rebuild LANE=rel-mem",
+    }
 
