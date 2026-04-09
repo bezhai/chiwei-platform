@@ -270,33 +270,3 @@ async def get_relationship_memories_for_users(
         )
         return {row.user_id: row.memory_text for row in result.all()}
 
-
-async def save_inner_monologue(
-    persona_id: str,
-    monologue: str,
-    source: str,
-) -> None:
-    """写入内心独白日志（append-only）"""
-    from app.orm.memory_models import InnerMonologueLog
-
-    async with AsyncSessionLocal() as session:
-        session.add(InnerMonologueLog(
-            persona_id=persona_id,
-            monologue=monologue,
-            source=source,
-        ))
-        await session.commit()
-
-
-async def get_latest_inner_monologue(persona_id: str) -> str | None:
-    """获取最新的内心独白，不存在返回 None"""
-    from app.orm.memory_models import InnerMonologueLog
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(InnerMonologueLog.monologue)
-            .where(InnerMonologueLog.persona_id == persona_id)
-            .order_by(InnerMonologueLog.created_at.desc())
-            .limit(1)
-        )
-        return result.scalar_one_or_none()

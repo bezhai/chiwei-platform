@@ -107,15 +107,5 @@ async def build_inner_context(
     return "\n\n".join(sections)
 
 
-async def get_reply_style(persona_id: str, default_style: str = "") -> str:
-    """获取 reply_style：DB 最新记录 → DB 默认值"""
-    from app.orm.memory_crud import get_latest_reply_style
-
-    latest = await get_latest_reply_style(persona_id)
-    if latest:
-        return latest
-    return default_style
-
-
 # 向后兼容别名
 build_memory_context = build_inner_context
