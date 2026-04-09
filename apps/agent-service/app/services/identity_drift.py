@@ -11,10 +11,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
-from app.orm.crud import get_chat_messages_in_range, get_plan_for_period, get_username
+from app.orm.crud import get_chat_messages_in_range, get_username
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -30,52 +28,6 @@ async def _get_persona_context(persona_id: str) -> tuple[str, str]:
         return persona.display_name, persona.persona_lite
     return persona_id, ""
 
-
-async def set_base_reply_style(style: str, persona_id: str) -> None:
-    """写入指定 bot 的全局基线 reply_style"""
-    from app.orm.memory_crud import save_reply_style
-    await save_reply_style(persona_id, style, source="base")
-    logger.info(f"[{persona_id}] Base reply_style updated: {style[:50]}...")
-
-
-async def generate_base_reply_style(persona_id: str) -> str | None:
-    """基于当前 Schedule 生成指定 bot 的全局基线 reply_style
-
-    不依赖任何群/私聊的消息，只用 schedule + 当前时段。
-    在 8:00/14:00/18:00 由 cron 调用，为没有独立漂移的会话提供基线。
-    """
-    schedule_context = await _get_schedule_context(persona_id)
-    if not schedule_context or schedule_context.startswith("（"):
-        logger.info(f"[{persona_id}] No schedule available, skip base reply_style generation")
-        return None
-
-    now = datetime.now(CST)
-    persona_name, persona_lite = await _get_persona_context(persona_id)
-    prompt = get_prompt("drift_base_generator")
-    compiled = prompt.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        schedule_daily=schedule_context,
-        current_time=now.strftime("%H:%M"),
-    )
-
-    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    style = _extract_text(response.content)
-
-    if not style:
-        logger.warning(f"[{persona_id}] Base reply_style generation returned empty")
-        return None
-
-    await set_base_reply_style(style, persona_id)
-    return style
-
-
-async def set_identity_state(persona_id: str, state: str, observation: str | None = None) -> None:
-    """写入漂移后的 reply_style"""
-    from app.orm.memory_crud import save_reply_style
-    await save_reply_style(persona_id, state, source="drift", observation=observation)
-    logger.info(f"[{persona_id}] Identity state updated: {state[:50]}...")
 
 
 class IdentityDriftManager:
@@ -169,77 +121,25 @@ class IdentityDriftManager:
 
 
 async def _run_drift(chat_id: str, persona_id: str) -> None:
-    """两阶段漂移管线：观察 → 生成
-
-    Agent 1（观察）：群聊事件 + persona 近期回复 + 基准人设 → 观察报告
-    Agent 2（生成）：观察报告 → reply_style
-    """
-    # 1. 收集上下文
-    persona_name, persona_lite = await _get_persona_context(persona_id)
-    from app.orm.memory_crud import get_latest_reply_style
-    current_state = await get_latest_reply_style(persona_id)
+    """事件驱动漂移 — 调用统一 voice 生成，传入近期消息上下文"""
+    persona_name, _ = await _get_persona_context(persona_id)
     recent_messages = await _get_recent_messages(chat_id, persona_name=persona_name)
-    schedule_context = await _get_schedule_context(persona_id)
     recent_replies = await _get_recent_persona_replies(chat_id, persona_id)
 
     if not recent_messages:
         logger.info(f"[{persona_id}] No recent messages for {chat_id}, skip drift")
         return
 
-    now = datetime.now(CST)
-    model = await ModelBuilder.build_chat_model(settings.identity_drift_model)
+    # 拼装 recent_context 供统一生成函数使用
+    parts = []
+    if recent_messages:
+        parts.append(f"群里刚才发生的事：\n{recent_messages}")
+    if recent_replies:
+        parts.append(f"你最近的回复：\n{recent_replies}")
+    recent_context = "\n\n".join(parts)
 
-    # 2. Agent 1: 观察
-    observer_prompt = get_prompt("drift_observer")
-    observer_compiled = observer_prompt.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        schedule_daily=schedule_context,
-        current_reply_style=current_state or "（刚醒来，还没有形成今天的说话方式）",
-        message_buffer=recent_messages,
-        recent_akao_replies=recent_replies or "（还没有最近的回复）",
-        current_time=now.strftime("%H:%M"),
-    )
-
-    observer_response = await model.ainvoke(
-        [{"role": "user", "content": observer_compiled}],
-    )
-    observation_report = _extract_text(observer_response.content)
-
-    if not observation_report:
-        logger.warning(f"[{persona_id}] Observer returned empty for {chat_id}")
-        return
-
-    logger.info(f"[{persona_id}] Drift observer for {chat_id}: {observation_report[:80]}...")
-
-    # 3. Agent 2: 生成
-    generator_prompt = get_prompt("drift_generator")
-    generator_compiled = generator_prompt.compile(
-        persona_name=persona_name,
-        observation_report=observation_report,
-    )
-
-    generator_response = await model.ainvoke(
-        [{"role": "user", "content": generator_compiled}],
-    )
-    new_style = _extract_text(generator_response.content)
-
-    if not new_style:
-        logger.warning(f"[{persona_id}] Generator returned empty for {chat_id}")
-        return
-
-    # 4. 保存
-    await set_identity_state(persona_id, new_style, observation=observation_report)
-
-
-def _extract_text(content) -> str:
-    """从 LLM response content 提取纯文本"""
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    return (content or "").strip()
+    from app.services.voice_generator import generate_voice
+    await generate_voice(persona_id, recent_context=recent_context, source="drift")
 
 
 async def _get_recent_messages(chat_id: str, persona_name: str = "bot", max_messages: int = 50) -> str:
@@ -303,11 +203,3 @@ async def _get_recent_persona_replies(chat_id: str, persona_id: str, max_replies
     return "\n".join(lines)
 
 
-async def _get_schedule_context(persona_id: str) -> str:
-    """获取当前时段的 Schedule daily"""
-    now = datetime.now(CST)
-    today = now.strftime("%Y-%m-%d")
-    schedule = await get_plan_for_period("daily", today, today, persona_id)
-    if schedule and schedule.content:
-        return schedule.content
-    return "（今天还没有写日程）"

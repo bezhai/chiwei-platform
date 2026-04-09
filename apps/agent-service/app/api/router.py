@@ -106,6 +106,14 @@ async def debug_glimpse(persona_id: str):
     }
 
 
+@api_router.post("/admin/trigger-voice", tags=["Admin"])
+async def trigger_voice(persona_id: str):
+    """手动触发一次统一 voice 生成（内心独白 + 风格示例）"""
+    from app.services.voice_generator import generate_voice
+    result = await generate_voice(persona_id, source="manual")
+    return {"ok": True, "persona_id": persona_id, "result": result[:200] if result else None}
+
+
 @api_router.post("/admin/trigger-schedule", tags=["Admin"])
 async def trigger_schedule(
     persona_id: str,

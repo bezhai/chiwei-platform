@@ -21,11 +21,10 @@ from app.workers.schedule_worker import (
     cron_generate_monthly_plan,
     cron_generate_weekly_plan,
 )
-from app.workers.base_style_worker import cron_generate_base_reply_style
 from app.workers.vectorize_worker import cron_scan_pending_messages
 from app.workers.life_engine_worker import cron_life_engine_tick
 from app.workers.glimpse_worker import cron_glimpse
-from app.workers.monologue_worker import cron_generate_inner_monologue
+from app.workers.voice_worker import cron_generate_voice
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ async def on_startup(ctx) -> None:
     await client.connect()
     await client.declare_topology()
 
-    asyncio.create_task(cron_generate_base_reply_style(None))
+    asyncio.create_task(cron_generate_voice(None))
 
 
 class UnifiedWorkerSettings:
@@ -93,8 +92,6 @@ class UnifiedWorkerSettings:
         cron(cron_generate_daily_plan, hour={5}, minute={0}, timeout=3600),
         cron(cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}, timeout=1800),
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}, timeout=1800),
-        # 6. 基线 reply_style：每天 CST 8:00/14:00/18:00（Schedule 之后）
-        cron(cron_generate_base_reply_style, hour={8, 14, 18}, minute={0}, timeout=1800),
-        # 7. 内心独白：每小时的半点（与 base_reply_style 错开）
-        cron(cron_generate_inner_monologue, hour=set(range(8, 24)), minute={30}, timeout=1800),
+        # 6. 统一 voice（内心独白 + 风格示例）：CST 8:00-23:00 每小时一次
+        cron(cron_generate_voice, hour=set(range(8, 24)), minute={0}, timeout=1800),
     ]
