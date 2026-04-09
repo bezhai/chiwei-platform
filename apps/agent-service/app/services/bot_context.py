@@ -7,12 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.orm.crud import get_bot_persona
 
 
-async def get_reply_style(persona_id: str, default_style: str) -> str:
-    """转发到 memory_context.get_reply_style（lazy import 避免循环）"""
-    from app.services.memory_context import get_reply_style as _impl
-    return await _impl(persona_id, default_style)
-
-
 if TYPE_CHECKING:
     from app.orm.models import BotPersona
     from app.services.quick_search import QuickSearchResult
@@ -81,8 +75,7 @@ class BotContext:
         self.chat_type = chat_type
         self._persona_id: str = ""
         self._persona: "BotPersona | None" = None
-        self._reply_style: str = ""
-        self._inner_monologue: str = ""
+        self._voice_content: str = ""
 
     @property
     def persona_id(self) -> str:
@@ -105,7 +98,7 @@ class BotContext:
         await self._load_persona()
 
     async def _load_persona(self) -> None:
-        """加载 persona 数据和 reply_style"""
+        """加载 persona 数据和 voice"""
         self._persona = await get_bot_persona(self._persona_id)
         if self._persona is None:
             logger.warning(
@@ -113,22 +106,13 @@ class BotContext:
                 f"(bot_name={self.bot_name}), using defaults"
             )
 
-        default_style = self._persona.default_reply_style if self._persona else ""
-        self._reply_style = await get_reply_style(
-            self._persona_id, default_style
-        )
-
-        # 加载内心独白（替代 reply_style 的示例锚点）
-        from app.orm.memory_crud import get_latest_inner_monologue
-        self._inner_monologue = await get_latest_inner_monologue(self._persona_id) or ""
+        # 加载统一 voice（reply_style_log 中最新一条，包含 monologue + examples）
+        from app.orm.memory_crud import get_latest_reply_style
+        self._voice_content = await get_latest_reply_style(self._persona_id) or ""
 
     @property
-    def reply_style(self) -> str:
-        return self._reply_style
-
-    @property
-    def inner_monologue(self) -> str:
-        return self._inner_monologue
+    def voice_content(self) -> str:
+        return self._voice_content
 
     def get_identity(self) -> str:
         """返回注入 {{identity}} 的人设文本"""

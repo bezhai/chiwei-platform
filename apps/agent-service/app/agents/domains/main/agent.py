@@ -324,10 +324,8 @@ async def _build_and_stream(
     except Exception as e:
         logger.error(f"Failed to build inner context: {e}")
 
-    # 动态 reply-style（漂移生成的行为示例，fallback 静态示例）
-    prompt_vars["reply_style"] = bot_ctx.reply_style
-    # 内心独白（替代示例锚点，过渡期并存）
-    prompt_vars["inner_monologue"] = bot_ctx.inner_monologue
+    # 统一 voice（内心独白 + 风格示例，一次生成确保一致）
+    prompt_vars["voice_content"] = bot_ctx.voice_content
 
     full_content = ""
     has_text_in_current_turn = False
