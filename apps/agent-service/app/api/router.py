@@ -6,6 +6,7 @@ import os
 from datetime import date
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 # 创建主路由
 api_router = APIRouter()
@@ -145,4 +146,74 @@ async def trigger_schedule(
     else:
         return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
 
+
+class RebuildRelationshipMemoryRequest(BaseModel):
+    persona_ids: list[str]
+    chat_ids: list[str]
+    start_time: str  # ISO 8601
+    end_time: str  # ISO 8601
+    batch_size: int = 50
+
+
+@api_router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
+async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
+    """批量回溯重建关系记忆
+
+    从 conversation_messages 按 user_id 分组，渐进式提取 core_facts + impression。
+    耗时较长，建议单次限制 persona/chat 范围。
+    """
+    from datetime import datetime
+    from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
+    from app.services.relationship_memory import rebuild_relationship_memory_for_user
+
+    start_dt = datetime.fromisoformat(req.start_time)
+    end_dt = datetime.fromisoformat(req.end_time)
+    start_ts = int(start_dt.timestamp() * 1000)
+    end_ts = int(end_dt.timestamp() * 1000)
+
+    results = []
+
+    for chat_id in req.chat_ids:
+        messages = await get_chat_messages_in_range(chat_id, start_ts, end_ts, limit=10000)
+        if not messages:
+            continue
+
+        user_ids = list({
+            m.user_id for m in messages
+            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+        })
+
+        for persona_id in req.persona_ids:
+            persona = await get_bot_persona(persona_id)
+            if not persona:
+                continue
+            persona_name = persona.display_name
+            persona_lite = persona.persona_lite or ""
+
+            for user_id in user_ids:
+                user_messages = [
+                    m for m in messages
+                    if m.user_id == user_id or m.role == "assistant"
+                ]
+                user_messages.sort(key=lambda m: m.create_time)
+
+                result = await rebuild_relationship_memory_for_user(
+                    persona_id=persona_id,
+                    user_id=user_id,
+                    messages=user_messages,
+                    persona_name=persona_name,
+                    persona_lite=persona_lite,
+                    batch_size=req.batch_size,
+                )
+                user_name = await get_username(user_id) or user_id[:6]
+
+                results.append({
+                    "persona_id": persona_id,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    **result,
+                })
+
+    return {"results": results}
 
