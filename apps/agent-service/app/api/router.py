@@ -6,6 +6,7 @@ import os
 from datetime import date
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 # 创建主路由
 api_router = APIRouter()
@@ -145,4 +146,108 @@ async def trigger_schedule(
     else:
         return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
 
+
+class RebuildRelationshipMemoryRequest(BaseModel):
+    persona_ids: list[str]
+    chat_ids: list[str]
+    start_time: str  # ISO 8601
+    end_time: str  # ISO 8601
+    batch_size: int = 50
+
+
+@api_router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
+async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
+    """批量回溯重建关系记忆（异步，按天拆分）
+
+    接收时间段，内部按天拆分处理。立即返回，后台逐天执行。
+    每天处理完打日志，通过 make logs KEYWORD=rebuild 追踪进度。
+    """
+    import asyncio
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    async def _run():
+        from datetime import datetime, timedelta
+        from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
+        from app.services.relationship_memory import rebuild_relationship_memory_for_user
+
+        start_dt = datetime.fromisoformat(req.start_time)
+        end_dt = datetime.fromisoformat(req.end_time)
+
+        # 预加载 persona 信息
+        personas = {}
+        for persona_id in req.persona_ids:
+            persona = await get_bot_persona(persona_id)
+            if persona:
+                personas[persona_id] = (persona.display_name, persona.persona_lite or "")
+
+        total_days = (end_dt.date() - start_dt.date()).days
+        logger.info(
+            f"[rebuild] Starting: {len(personas)} personas, {len(req.chat_ids)} chats, "
+            f"{total_days} days ({start_dt.date()} ~ {end_dt.date()})"
+        )
+
+        # 按天拆分
+        day = start_dt
+        day_count = 0
+        while day < end_dt:
+            next_day = day + timedelta(days=1)
+            if next_day > end_dt:
+                next_day = end_dt
+            day_start_ts = int(day.timestamp() * 1000)
+            day_end_ts = int(next_day.timestamp() * 1000)
+            day_count += 1
+            day_str = day.strftime("%m/%d")
+
+            for chat_id in req.chat_ids:
+                messages = await get_chat_messages_in_range(
+                    chat_id, day_start_ts, day_end_ts, limit=5000
+                )
+                if not messages:
+                    continue
+
+                user_ids = list({
+                    m.user_id for m in messages
+                    if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+                })
+
+                for persona_id, (persona_name, persona_lite) in personas.items():
+                    for user_id in user_ids:
+                        user_messages = [
+                            m for m in messages
+                            if m.user_id == user_id or m.role == "assistant"
+                        ]
+                        user_messages.sort(key=lambda m: m.create_time)
+
+                        try:
+                            result = await rebuild_relationship_memory_for_user(
+                                persona_id=persona_id,
+                                user_id=user_id,
+                                messages=user_messages,
+                                persona_name=persona_name,
+                                persona_lite=persona_lite,
+                                batch_size=req.batch_size,
+                            )
+                            if result["final_version"] > 0:
+                                user_name = await get_username(user_id) or user_id[:6]
+                                logger.info(
+                                    f"[rebuild] {day_str} {persona_id}/{user_name}: "
+                                    f"v={result['final_version']}"
+                                )
+                        except Exception as e:
+                            logger.error(f"[rebuild] {day_str} {persona_id}/{user_id} failed: {e}")
+
+            logger.info(f"[rebuild] Day {day_count}/{total_days} ({day_str}) done.")
+            day = next_day
+
+        logger.info("[rebuild] All done.")
+
+    asyncio.create_task(_run())
+    return {
+        "status": "started",
+        "message": f"Rebuild started in background. "
+        f"{len(req.persona_ids)} personas, {len(req.chat_ids)} chats, "
+        f"check logs with: make logs KEYWORD=rebuild LANE=rel-mem",
+    }
 

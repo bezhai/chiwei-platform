@@ -201,3 +201,68 @@ async def test_inner_context_no_life_state_graceful():
         )
         assert isinstance(result, str)
         assert "窝在被窝里" not in result
+
+
+@pytest.mark.asyncio
+async def test_relationship_memory_injection_core_facts_and_impression():
+    """关系记忆应以 [事实] + [印象] 格式注入"""
+    with patch(
+        "app.services.memory_context._build_life_state",
+        new_callable=AsyncMock,
+        return_value="",
+    ), patch(
+        "app.orm.memory_crud.get_latest_relationship_memory",
+        new_callable=AsyncMock,
+        return_value=("群昵称 crgg，经常被泼洗脚水", "脑回路清奇但偶尔挺好笑"),
+    ), patch(
+        "app.services.memory_context.get_today_fragments",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        from app.services.memory_context import build_inner_context
+
+        result = await build_inner_context(
+            chat_id="chat_001",
+            chat_type="group",
+            user_ids=["u1"],
+            trigger_user_id="u1",
+            trigger_username="crgg",
+            persona_id="chiwei",
+            chat_name="KA群",
+        )
+
+    assert "关于 crgg" in result
+    assert "[事实] 群昵称 crgg" in result
+    assert "[印象] 脑回路清奇" in result
+
+
+@pytest.mark.asyncio
+async def test_relationship_memory_injection_no_memory():
+    """无关系记忆时不注入"""
+    with patch(
+        "app.services.memory_context._build_life_state",
+        new_callable=AsyncMock,
+        return_value="",
+    ), patch(
+        "app.orm.memory_crud.get_latest_relationship_memory",
+        new_callable=AsyncMock,
+        return_value=None,
+    ), patch(
+        "app.services.memory_context.get_today_fragments",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        from app.services.memory_context import build_inner_context
+
+        result = await build_inner_context(
+            chat_id="chat_001",
+            chat_type="group",
+            user_ids=["u1"],
+            trigger_user_id="u1",
+            trigger_username="crgg",
+            persona_id="chiwei",
+            chat_name="KA群",
+        )
+
+    assert "[事实]" not in result
+    assert "[印象]" not in result
