@@ -53,6 +53,16 @@ export class MultiBotManager {
         return null;
     }
 
+    // 根据union_id获取机器人配置
+    getBotConfigByUnionId(unionId: string): BotConfig | null {
+        for (const bot of this.botConfigs.values()) {
+            if (bot.robot_union_id === unionId) {
+                return bot;
+            }
+        }
+        return null;
+    }
+
     // 获取所有机器人配置
     getAllBotConfigs(): BotConfig[] {
         return Array.from(this.botConfigs.values());
