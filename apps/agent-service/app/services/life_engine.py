@@ -84,6 +84,7 @@ async def _save_state(
     activity_type: str,
     response_mood: str,
     skip_until: datetime | None,
+    reasoning: str | None = None,
 ) -> None:
     """INSERT 一行新状态"""
     async with AsyncSessionLocal() as session:
@@ -92,6 +93,7 @@ async def _save_state(
             current_state=current_state,
             activity_type=activity_type,
             response_mood=response_mood,
+            reasoning=reasoning,
             skip_until=skip_until,
         )
         session.add(row)
@@ -136,6 +138,7 @@ class LifeEngine:
             activity_type=new["activity_type"],
             response_mood=new["response_mood"],
             skip_until=new["skip_until"],
+            reasoning=new.get("reasoning"),
         )
 
         logger.info(
@@ -229,6 +232,7 @@ class LifeEngine:
                     "current_state": data.get("current_state", fallback_state),
                     "activity_type": data.get("activity_type", ""),
                     "response_mood": data.get("response_mood", fallback_mood),
+                    "reasoning": data.get("reasoning"),
                     "skip_until": skip_until,
                 }
         except (json.JSONDecodeError, ValueError, TypeError) as e:
@@ -238,6 +242,7 @@ class LifeEngine:
             "current_state": fallback_state,
             "activity_type": "",
             "response_mood": fallback_mood,
+            "reasoning": None,
             "skip_until": None,
         }
 

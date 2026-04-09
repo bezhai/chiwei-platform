@@ -55,6 +55,7 @@ class LifeEngineState(Base):
     current_state: Mapped[str] = mapped_column(Text, nullable=False)
     activity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     response_mood: Mapped[str] = mapped_column(Text, nullable=False)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     skip_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -130,15 +131,3 @@ class RelationshipMemory(Base):
     )
 
 
-class InnerMonologueLog(Base):
-    """内心独白日志 — 替代 reply_style 的示例锚点，append-only"""
-
-    __tablename__ = "inner_monologue_log"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    monologue: Mapped[str] = mapped_column(Text, nullable=False)
-    source: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
