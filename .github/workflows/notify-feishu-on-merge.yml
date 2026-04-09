@@ -1,0 +1,77 @@
+name: Notify Feishu on PR Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  notify:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract summary from PR body
+        id: summary
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Extract text between ## Summary and next ## (or EOF)
+          SUMMARY=$(echo "$PR_BODY" | sed -n '/^## Summary/,/^## /{/^## Summary/d;/^## /d;p}')
+
+          # Fallback: if no Summary section, take first 5 lines
+          if [ -z "$(echo "$SUMMARY" | tr -d '[:space:]')" ]; then
+            SUMMARY=$(echo "$PR_BODY" | head -5)
+          fi
+
+          # Fallback: if body is empty
+          if [ -z "$(echo "$SUMMARY" | tr -d '[:space:]')" ]; then
+            SUMMARY="（无描述）"
+          fi
+
+          # Trim leading/trailing blank lines
+          SUMMARY=$(echo "$SUMMARY" | sed '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba}')
+
+          # Write to output (handle multiline)
+          {
+            echo "content<<SUMMARY_EOF"
+            echo "$SUMMARY"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send Feishu notification
+        env:
+          WEBHOOK_URL: ${{ secrets.FEISHU_MERGE_WEBHOOK_URL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          SUMMARY: ${{ steps.summary.outputs.content }}
+        run: |
+          # Build JSON payload safely with python3 (guaranteed on ubuntu runner)
+          PAYLOAD=$(python3 -c "
+          import json, os
+          print(json.dumps({
+              'msg_type': 'interactive',
+              'card': {
+                  'header': {
+                      'title': {'tag': 'plain_text', 'content': f'[PR #{os.environ[\"PR_NUMBER\"]}] {os.environ[\"PR_TITLE\"]}'},
+                      'template': 'green'
+                  },
+                  'elements': [
+                      {'tag': 'markdown', 'content': os.environ['SUMMARY']},
+                      {
+                          'tag': 'action',
+                          'actions': [{
+                              'tag': 'button',
+                              'text': {'tag': 'plain_text', 'content': '查看 PR'},
+                              'url': os.environ['PR_URL'],
+                              'type': 'primary'
+                          }]
+                      }
+                  ]
+              }
+          }))
+          ")
+
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
