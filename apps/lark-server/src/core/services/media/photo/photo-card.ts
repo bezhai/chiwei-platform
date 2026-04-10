@@ -162,5 +162,6 @@ export async function searchAndBuildDailyPhotoCard(
         ),
     );
 
-    return card;
+    // 需要支持延迟更新卡片，返回 V1 版本
+    return card.toV1();
 }

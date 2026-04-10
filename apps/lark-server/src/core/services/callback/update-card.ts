@@ -21,7 +21,7 @@ async function handleUpdateCard(
         );
 
         const delayCard = {
-            open_ids: [data.operator.open_id], // 非共享卡片需要更新卡片的open_ids
+            open_ids: [data.operator.open_id],
             elements: updatedCard.getElements(),
         };
 
