@@ -147,25 +147,30 @@ async def extract_relationship_updates(
     persona_name = persona.display_name if persona else persona_id
     persona_lite = persona.persona_lite if persona else ""
 
-    # --- Stage 1: 筛选 ---
-    relevant_ids = await _filter_relevant_messages(
-        messages, persona_name, persona_lite,
-    )
-    if not relevant_ids:
-        logger.info(f"[{persona_id}] No relevant messages for chat {chat_id}, skip extract")
-        return
+    # 私聊全是赤尾和对方的对话，不需要筛选；群聊需要话题切分
+    chat_type = messages[0].chat_type if messages else "group"
 
-    # 按 id 过滤消息，重新提取涉及的 user_ids
-    id_set = set(relevant_ids)
-    filtered_messages = [m for m in messages if m.id in id_set]
-    filtered_user_ids = list({
-        m.user_id for m in filtered_messages
-        if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-    })
-    if not filtered_user_ids:
-        return
+    if chat_type == "p2p":
+        filtered_messages = messages
+        filtered_user_ids = user_ids
+    else:
+        relevant_ids = await _filter_relevant_messages(
+            messages, persona_name, persona_lite,
+        )
+        if not relevant_ids:
+            logger.info(f"[{persona_id}] No relevant messages for chat {chat_id}, skip extract")
+            return
 
-    # --- Stage 2: 提取 ---
+        id_set = set(relevant_ids)
+        filtered_messages = [m for m in messages if m.id in id_set]
+        filtered_user_ids = list({
+            m.user_id for m in filtered_messages
+            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+        })
+        if not filtered_user_ids:
+            return
+
+    # --- 提取 ---
     filtered_timeline = await format_timeline(filtered_messages, persona_name)
 
     current_memories = await get_relationship_memories_for_users_v2(persona_id, filtered_user_ids)
