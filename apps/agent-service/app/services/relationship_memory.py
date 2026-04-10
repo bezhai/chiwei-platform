@@ -60,7 +60,7 @@ async def extract_relationship_updates(
         current_impression="\n".join(impression_lines),
     )
 
-    model = await ModelBuilder.build_chat_model(settings.diary_model)
+    model = await ModelBuilder.build_chat_model(settings.relationship_model)
     response = await model.ainvoke([{"role": "user", "content": compiled}])
 
     content = response.content
@@ -188,7 +188,7 @@ async def rebuild_relationship_memory_for_user(
             current_impression=im_line,
         )
 
-        model = await ModelBuilder.build_chat_model(settings.diary_model)
+        model = await ModelBuilder.build_chat_model(settings.relationship_model)
         response = await model.ainvoke([{"role": "user", "content": compiled}])
 
         content_text = response.content
