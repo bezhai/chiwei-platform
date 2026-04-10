@@ -11,8 +11,9 @@ from langchain_core.messages import HumanMessage
 
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_plan_for_period
+from app.orm.crud import get_plan_for_period
 from app.orm.memory_crud import get_today_fragments, save_reply_style
+from app.services.persona_loader import load_persona
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,9 @@ async def generate_voice(
     source: str = "cron",
 ) -> str | None:
     """生成完整 voice 内容（内心独白 + 风格示例）"""
-    persona = await get_bot_persona(persona_id)
-    if not persona:
+    pc = await load_persona(persona_id)
+    # fallback persona_id == display_name means persona not found
+    if pc.display_name == persona_id and not pc.persona_lite:
         return None
 
     from app.services.life_engine import _load_state
@@ -53,8 +55,8 @@ async def generate_voice(
     result = await LLMService.run(
         prompt_id="voice_generator",
         prompt_vars={
-            "persona_name": persona.display_name,
-            "persona_lite": persona.persona_lite,
+            "persona_name": pc.display_name,
+            "persona_lite": pc.persona_lite,
             "current_state": current_state,
             "response_mood": response_mood,
             "schedule_segment": schedule_text,

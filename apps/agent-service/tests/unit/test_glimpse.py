@@ -6,8 +6,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.services.persona_loader import PersonaContext
+
 CST = timezone(timedelta(hours=8))
 MODULE = "app.services.glimpse"
+
+_MOCK_PERSONA = PersonaContext(
+    persona_id="akao-001",
+    display_name="赤尾",
+    persona_lite="",
+)
 
 
 def _make_msg(user_id="u1", create_time=None, content="hello", msg_id="m1"):
@@ -97,7 +105,7 @@ async def test_glimpse_creates_fragment_and_state():
         patch(f"{MODULE}._call_glimpse_llm", new_callable=AsyncMock, return_value=llm_response),
         patch(f"{MODULE}.create_fragment", new_callable=AsyncMock) as mock_frag,
         patch(f"{MODULE}.insert_glimpse_state", new_callable=AsyncMock) as mock_state,
-        patch(f"{MODULE}._get_persona_info", new_callable=AsyncMock, return_value=("赤尾", "")),
+        patch(f"{MODULE}.load_persona", new_callable=AsyncMock, return_value=_MOCK_PERSONA),
         patch(f"{MODULE}._get_group_name", new_callable=AsyncMock, return_value="番剧群"),
     ):
         result = await run_glimpse("akao-001")
@@ -136,7 +144,7 @@ async def test_glimpse_passes_last_observation_to_llm():
         patch(f"{MODULE}._format_messages", new_callable=AsyncMock, return_value="[14:00] someone: hello"),
         patch(f"{MODULE}._get_recent_proactive_records", new_callable=AsyncMock, return_value=[]),
         patch(f"{MODULE}._call_glimpse_llm", new_callable=AsyncMock, return_value=llm_response) as mock_llm,
-        patch(f"{MODULE}._get_persona_info", new_callable=AsyncMock, return_value=("赤尾", "")),
+        patch(f"{MODULE}.load_persona", new_callable=AsyncMock, return_value=_MOCK_PERSONA),
         patch(f"{MODULE}._get_group_name", new_callable=AsyncMock, return_value="番剧群"),
         patch(f"{MODULE}.insert_glimpse_state", new_callable=AsyncMock),
     ):
@@ -173,7 +181,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
         patch(f"{MODULE}._call_glimpse_llm", new_callable=AsyncMock, return_value=llm_response),
         patch(f"{MODULE}.create_fragment", new_callable=AsyncMock),
         patch(f"{MODULE}.insert_glimpse_state", new_callable=AsyncMock) as mock_state,
-        patch(f"{MODULE}._get_persona_info", new_callable=AsyncMock, return_value=("赤尾", "")),
+        patch(f"{MODULE}.load_persona", new_callable=AsyncMock, return_value=_MOCK_PERSONA),
         patch(f"{MODULE}._get_group_name", new_callable=AsyncMock, return_value="番剧群"),
         patch("app.workers.proactive_scanner.submit_proactive_request", new_callable=AsyncMock) as mock_proactive,
     ):
@@ -218,7 +226,7 @@ async def test_glimpse_not_interesting_still_writes_state():
         patch(f"{MODULE}._call_glimpse_llm", new_callable=AsyncMock, return_value=llm_response),
         patch(f"{MODULE}.create_fragment", new_callable=AsyncMock) as mock_frag,
         patch(f"{MODULE}.insert_glimpse_state", new_callable=AsyncMock) as mock_state,
-        patch(f"{MODULE}._get_persona_info", new_callable=AsyncMock, return_value=("赤尾", "")),
+        patch(f"{MODULE}.load_persona", new_callable=AsyncMock, return_value=_MOCK_PERSONA),
         patch(f"{MODULE}._get_group_name", new_callable=AsyncMock, return_value="番剧群"),
     ):
         result = await run_glimpse("akao-001")

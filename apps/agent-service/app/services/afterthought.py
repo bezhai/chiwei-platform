@@ -15,9 +15,10 @@ from langchain_core.messages import HumanMessage
 
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_chat_messages_in_range
+from app.orm.crud import get_chat_messages_in_range, get_username
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
+from app.services.persona_loader import load_persona
 from app.services.relationship_memory import format_timeline
 
 logger = logging.getLogger(__name__)
@@ -149,9 +150,9 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
     chat_type = messages[0].chat_type if messages else "group"
 
     # Get persona info
-    persona = await get_bot_persona(persona_id)
-    persona_name = persona.display_name if persona else persona_id
-    persona_lite = persona.persona_lite if persona else ""
+    pc = await load_persona(persona_id)
+    persona_name = pc.display_name
+    persona_lite = pc.persona_lite
 
     # Build scene description
     scene = await _build_scene(chat_id, chat_type, messages)

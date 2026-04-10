@@ -15,6 +15,7 @@ from app.orm.memory_crud import (
     insert_glimpse_state,
 )
 from app.orm.memory_models import ExperienceFragment
+from app.services.persona_loader import load_persona
 from app.workers.proactive_scanner import (
     TARGET_CHAT_ID,
     get_unseen_messages,
@@ -49,15 +50,6 @@ async def _pick_group(persona_id: str) -> str | None:
     if _WHITELIST_GROUPS:
         return _WHITELIST_GROUPS[0]
     return None
-
-
-async def _get_persona_info(persona_id: str) -> tuple[str, str]:
-    from app.orm.crud import get_bot_persona
-
-    persona = await get_bot_persona(persona_id)
-    if persona:
-        return persona.display_name, persona.persona_lite or ""
-    return persona_id, ""
 
 
 async def _get_group_name(chat_id: str) -> str:
@@ -203,7 +195,8 @@ async def run_glimpse(persona_id: str) -> str:
         return "skipped:no_messages"
 
     # 6. 准备上下文
-    persona_name, persona_lite = await _get_persona_info(persona_id)
+    pc = await load_persona(persona_id)
+    persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
     messages_text = await _format_messages(messages, persona_name)
 

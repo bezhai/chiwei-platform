@@ -12,7 +12,8 @@ from langchain_core.messages import HumanMessage
 
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_username
+from app.orm.crud import get_username
+from app.services.persona_loader import load_persona
 from app.orm.memory_crud import (
     get_relationship_memories_for_users_v2,
     save_relationship_memory_v2,
@@ -140,9 +141,9 @@ async def extract_relationship_updates(
     if not user_ids or not messages:
         return
 
-    persona = await get_bot_persona(persona_id)
-    persona_name = persona.display_name if persona else persona_id
-    persona_lite = persona.persona_lite if persona else ""
+    pc = await load_persona(persona_id)
+    persona_name = pc.display_name
+    persona_lite = pc.persona_lite
 
     # 私聊全是赤尾和对方的对话，不需要筛选；群聊需要话题切分
     chat_type = messages[0].chat_type if messages else "group"

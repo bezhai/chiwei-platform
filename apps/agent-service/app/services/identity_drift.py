@@ -13,21 +13,12 @@ from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
 from app.orm.crud import get_chat_messages_in_range, get_username
+from app.services.persona_loader import load_persona
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
-
-
-async def _get_persona_context(persona_id: str) -> tuple[str, str]:
-    """Returns (display_name, persona_lite) for prompt compilation"""
-    from app.orm.crud import get_bot_persona
-    persona = await get_bot_persona(persona_id)
-    if persona:
-        return persona.display_name, persona.persona_lite
-    return persona_id, ""
-
 
 
 class IdentityDriftManager:
@@ -122,8 +113,8 @@ class IdentityDriftManager:
 
 async def _run_drift(chat_id: str, persona_id: str) -> None:
     """事件驱动漂移 — 调用统一 voice 生成，传入近期消息上下文"""
-    persona_name, _ = await _get_persona_context(persona_id)
-    recent_messages = await _get_recent_messages(chat_id, persona_name=persona_name)
+    pc = await load_persona(persona_id)
+    recent_messages = await _get_recent_messages(chat_id, persona_name=pc.display_name)
     recent_replies = await _get_recent_persona_replies(chat_id, persona_id)
 
     if not recent_messages:
