@@ -10,6 +10,7 @@ async function handleUpdateCard(
     cardBuilder: CardBuilder,
     builderParams: any,
 ) {
+    console.info('[handleUpdateCard] received data keys:', Object.keys(data), 'token:', data.token?.substring(0, 10), 'operator:', data.operator?.open_id, 'context:', data.context);
     try {
         const basicChatInfo = await BaseChatInfoRepository.findOne({
             where: { chat_id: data.context.open_chat_id },
