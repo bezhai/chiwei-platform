@@ -19,7 +19,7 @@ from app.orm.crud import get_chat_messages_in_range, get_username
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
 from app.services.persona_loader import load_persona
-from app.services.relationship_memory import format_timeline
+from app.services.timeline_formatter import format_timeline
 
 logger = logging.getLogger(__name__)
 

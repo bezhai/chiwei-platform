@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
+from app.services.timeline_formatter import format_timeline
 from app.orm.memory_crud import (
     create_fragment,
     get_last_bot_reply_time,
@@ -68,26 +69,6 @@ async def _get_group_name(chat_id: str) -> str:
             return name or chat_id[:10]
     except Exception:
         return chat_id[:10]
-
-
-async def _format_messages(messages: list, persona_name: str = "") -> str:
-    """格式化消息为时间线文本"""
-    from app.orm.crud import get_username
-    from app.utils.content_parser import parse_content
-
-    lines = []
-    for msg in messages[-30:]:
-        ts = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
-        time_str = ts.strftime("%H:%M")
-        if msg.role == "assistant":
-            speaker = persona_name or "bot"
-        else:
-            name = await get_username(msg.user_id)
-            speaker = name or msg.user_id[:6]
-        text = parse_content(msg.content).render()
-        if text and text.strip():
-            lines.append(f"[{time_str}] {speaker}: {text[:200]}")
-    return "\n".join(lines)
 
 
 async def _call_glimpse_llm(
@@ -198,7 +179,7 @@ async def run_glimpse(persona_id: str) -> str:
     pc = await load_persona(persona_id)
     persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
-    messages_text = await _format_messages(messages, persona_name)
+    messages_text = await format_timeline(messages, persona_name, tz=CST, max_messages=30)
 
     if not messages_text.strip():
         return "skipped:empty_timeline"

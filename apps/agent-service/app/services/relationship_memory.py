@@ -6,7 +6,6 @@ rebuild 复用 extract_relationship_updates，不维护两套提取逻辑。
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage
 
@@ -14,48 +13,13 @@ from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_username
 from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 from app.orm.memory_crud import (
     get_relationship_memories_for_users_v2,
     save_relationship_memory_v2,
 )
-from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
-
-
-async def format_timeline(
-    messages: list,
-    persona_name: str,
-    *,
-    tz: timezone = timezone.utc,
-    max_messages: int = 2000,
-    with_ids: bool = False,
-) -> str:
-    """格式化消息列表为时间线文本
-
-    格式: [HH:MM] 名字: 消息内容
-    with_ids=True 时: #id [HH:MM] 名字: 消息内容（供 LLM 引用消息）
-    afterthought 和 rebuild 共用此函数。
-    """
-    messages = messages[-max_messages:]
-
-    lines: list[str] = []
-    for msg in messages:
-        msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=tz)
-        time_str = msg_time.strftime("%H:%M")
-
-        if msg.role == "assistant":
-            speaker = persona_name
-        else:
-            name = await get_username(msg.user_id)
-            speaker = name or msg.user_id[:6]
-
-        rendered = parse_content(msg.content).render()
-        if rendered and rendered.strip():
-            prefix = f"#{msg.id} " if with_ids and msg.id else ""
-            lines.append(f"{prefix}[{time_str}] {speaker}: {rendered[:200]}")
-
-    return "\n".join(lines)
 
 
 def _parse_llm_json(content) -> list | None:

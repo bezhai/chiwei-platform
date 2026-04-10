@@ -12,8 +12,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
-from app.orm.crud import get_chat_messages_in_range, get_username
+from app.orm.crud import get_chat_messages_in_range
 from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 from app.utils.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
@@ -144,25 +145,7 @@ async def _get_recent_messages(chat_id: str, persona_name: str = "bot", max_mess
     if not messages:
         return ""
 
-    # 取最近 max_messages 条
-    messages = messages[-max_messages:]
-
-    # 格式化
-    lines = []
-    for msg in messages:
-        msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
-        time_str = msg_time.strftime("%H:%M")
-        if msg.role == "assistant":
-            speaker = persona_name
-        else:
-            name = await get_username(msg.user_id)
-            speaker = name or msg.user_id[:6]
-
-        rendered = parse_content(msg.content).render()
-        if rendered and rendered.strip():
-            lines.append(f"[{time_str}] {speaker}: {rendered[:200]}")
-
-    return "\n".join(lines)
+    return await format_timeline(messages, persona_name, tz=CST, max_messages=max_messages)
 
 
 async def _get_recent_persona_replies(chat_id: str, persona_id: str, max_replies: int = 10) -> str:
