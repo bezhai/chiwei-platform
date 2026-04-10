@@ -91,6 +91,15 @@ AgentRegistry.register(
 )
 
 AgentRegistry.register(
+    "relationship-filter",
+    AgentConfig(
+        prompt_id="relationship_filter",
+        model_id="relationship-model",
+        trace_name="relationship-filter",
+    ),
+)
+
+AgentRegistry.register(
     "relationship-extract",
     AgentConfig(
         prompt_id="relationship_extract",

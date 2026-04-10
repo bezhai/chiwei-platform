@@ -222,7 +222,7 @@ async def save_relationship_memory(
     impression: str,
     source: str,
 ) -> None:
-    """写入关系记忆（append-only，version 自增）"""
+    """写入关系记忆（append-only，version 自增）— 旧表，线上在用"""
     from app.orm.memory_models import RelationshipMemory
 
     async with AsyncSessionLocal() as session:
@@ -244,6 +244,63 @@ async def save_relationship_memory(
             source=source,
         ))
         await session.commit()
+
+
+async def save_relationship_memory_v2(
+    persona_id: str,
+    user_id: str,
+    core_facts: str,
+    impression: str,
+    source: str,
+) -> None:
+    """写入关系记忆 v2（append-only，version 自增）"""
+    from app.orm.memory_models import RelationshipMemoryV2
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.max(RelationshipMemoryV2.version))
+            .where(RelationshipMemoryV2.persona_id == persona_id)
+            .where(RelationshipMemoryV2.user_id == user_id)
+        )
+        max_version = result.scalar_one_or_none() or 0
+
+        session.add(RelationshipMemoryV2(
+            persona_id=persona_id,
+            user_id=user_id,
+            version=max_version + 1,
+            core_facts=core_facts,
+            impression=impression,
+            source=source,
+        ))
+        await session.commit()
+
+
+async def get_relationship_memories_for_users_v2(
+    persona_id: str,
+    user_ids: list[str],
+) -> dict[str, tuple[str, str]]:
+    """批量获取 v2 表多个用户的最新关系记忆"""
+    from app.orm.memory_models import RelationshipMemoryV2
+
+    if not user_ids:
+        return {}
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(
+                RelationshipMemoryV2.user_id,
+                RelationshipMemoryV2.core_facts,
+                RelationshipMemoryV2.impression,
+            )
+            .where(RelationshipMemoryV2.persona_id == persona_id)
+            .where(RelationshipMemoryV2.user_id.in_(user_ids))
+            .distinct(RelationshipMemoryV2.user_id)
+            .order_by(RelationshipMemoryV2.user_id, RelationshipMemoryV2.created_at.desc())
+        )
+        return {
+            row.user_id: (row.core_facts, row.impression)
+            for row in result.all()
+        }
 
 
 async def get_latest_relationship_memory(

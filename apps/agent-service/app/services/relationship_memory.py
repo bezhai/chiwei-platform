@@ -14,8 +14,8 @@ from app.agents.core import ChatAgent
 from app.config.config import settings
 from app.orm.crud import get_bot_persona, get_username
 from app.orm.memory_crud import (
-    get_relationship_memories_for_users,
-    save_relationship_memory,
+    get_relationship_memories_for_users_v2,
+    save_relationship_memory_v2,
 )
 from app.utils.content_parser import parse_content
 
@@ -28,10 +28,12 @@ async def format_timeline(
     *,
     tz: timezone = timezone.utc,
     max_messages: int = 2000,
+    with_ids: bool = False,
 ) -> str:
     """格式化消息列表为时间线文本
 
     格式: [HH:MM] 名字: 消息内容
+    with_ids=True 时: #id [HH:MM] 名字: 消息内容（供 LLM 引用消息）
     afterthought 和 rebuild 共用此函数。
     """
     messages = messages[-max_messages:]
@@ -49,34 +51,128 @@ async def format_timeline(
 
         rendered = parse_content(msg.content).render()
         if rendered and rendered.strip():
-            lines.append(f"[{time_str}] {speaker}: {rendered[:200]}")
+            prefix = f"#{msg.id} " if with_ids and msg.id else ""
+            lines.append(f"{prefix}[{time_str}] {speaker}: {rendered[:200]}")
 
     return "\n".join(lines)
+
+
+def _parse_llm_json(content) -> list | None:
+    """从 LLM 响应中解析 JSON 数组"""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        ).strip()
+    else:
+        content = (content or "").strip()
+
+    if not content or content == "[]":
+        return None
+
+    if content.startswith("```"):
+        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+async def _filter_relevant_messages(
+    messages: list,
+    persona_name: str,
+    persona_lite: str,
+) -> list:
+    """Stage 1: 话题切分 + 赤尾相关性筛选
+
+    把全部消息（带 #id）丢给 LLM，让它切分话题并标记赤尾参与的话题，
+    返回赤尾参与话题中的消息 id 列表。
+    """
+    timeline = await format_timeline(messages, persona_name, with_ids=True)
+    if not timeline:
+        return []
+
+    agent = ChatAgent(
+        prompt_id="relationship_filter",
+        tools=[],
+        model_id=settings.relationship_model,
+        trace_name="relationship-filter",
+    )
+    result = await agent.run(
+        messages=[HumanMessage(content="分析对话，找出我参与的话题")],
+        prompt_vars={
+            "persona_name": persona_name,
+            "persona_lite": persona_lite,
+            "messages": timeline,
+        },
+    )
+
+    topics = _parse_llm_json(result.content)
+    if not topics:
+        logger.info(f"[{persona_name}] Stage 1: no relevant topics found")
+        return []
+
+    # 收集所有相关消息 id
+    relevant_ids: set[int] = set()
+    for topic in topics:
+        if isinstance(topic, dict):
+            for mid in topic.get("message_ids", []):
+                if isinstance(mid, int):
+                    relevant_ids.add(mid)
+
+    logger.info(
+        f"[{persona_name}] Stage 1: {len(topics)} topics, "
+        f"{len(relevant_ids)} relevant messages out of {len(messages)}"
+    )
+    return list(relevant_ids)
 
 
 async def extract_relationship_updates(
     persona_id: str,
     chat_id: str,
     user_ids: list[str],
-    messages_timeline: str,
+    messages: list,
 ) -> None:
-    """从一段对话中提取关系记忆更新
+    """两阶段关系记忆提取
 
-    在 afterthought 生成 conversation 碎片后调用，rebuild 也复用此函数。
-    通过 ChatAgent 调用 LLM，自动 Langfuse trace。
+    Stage 1: 话题切分 + 筛选赤尾参与的对话片段
+    Stage 2: 基于筛选后的消息提取关系记忆更新
+
+    afterthought 和 rebuild 共用此函数。
     """
-    if not user_ids:
+    if not user_ids or not messages:
         return
 
     persona = await get_bot_persona(persona_id)
     persona_name = persona.display_name if persona else persona_id
     persona_lite = persona.persona_lite if persona else ""
 
-    current_memories = await get_relationship_memories_for_users(persona_id, user_ids)
+    # --- Stage 1: 筛选 ---
+    relevant_ids = await _filter_relevant_messages(
+        messages, persona_name, persona_lite,
+    )
+    if not relevant_ids:
+        logger.info(f"[{persona_id}] No relevant messages for chat {chat_id}, skip extract")
+        return
+
+    # 按 id 过滤消息，重新提取涉及的 user_ids
+    id_set = set(relevant_ids)
+    filtered_messages = [m for m in messages if m.id in id_set]
+    filtered_user_ids = list({
+        m.user_id for m in filtered_messages
+        if m.role == "user" and m.user_id
+    })
+    if not filtered_user_ids:
+        return
+
+    # --- Stage 2: 提取 ---
+    filtered_timeline = await format_timeline(filtered_messages, persona_name)
+
+    current_memories = await get_relationship_memories_for_users_v2(persona_id, filtered_user_ids)
 
     core_facts_lines = []
     impression_lines = []
-    for uid in user_ids:
+    for uid in filtered_user_ids:
         name = await get_username(uid) or uid[:6]
         mem = current_memories.get(uid)
         if mem:
@@ -98,30 +194,15 @@ async def extract_relationship_updates(
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
-            "messages": messages_timeline,
+            "messages": filtered_timeline,
             "current_core_facts": "\n".join(core_facts_lines),
             "current_impression": "\n".join(impression_lines),
         },
     )
 
-    content = result.content or ""
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-
-    if not content or content.strip() == "[]":
+    updates = _parse_llm_json(result.content)
+    if not updates:
         logger.info(f"[{persona_id}] No relationship updates for chat {chat_id}")
-        return
-
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    try:
-        updates = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning(f"[{persona_id}] Failed to parse relationship extract: {content[:200]}")
         return
 
     for item in updates:
@@ -132,10 +213,9 @@ async def extract_relationship_updates(
         core_facts = item.get("core_facts", "")
         impression = item.get("impression", "")
         if uid and (core_facts or impression):
-            await save_relationship_memory(
+            await save_relationship_memory_v2(
                 persona_id=persona_id,
                 user_id=uid,
-                user_name=name,
                 core_facts=core_facts,
                 impression=impression,
                 source="afterthought",

@@ -213,7 +213,7 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
                 persona_id=persona_id,
                 chat_id=chat_id,
                 user_ids=unique_user_ids,
-                messages_timeline=timeline,
+                messages=messages,
             )
     except Exception as e:
         logger.warning(f"[{persona_id}] Relationship extract failed (non-fatal): {e}")

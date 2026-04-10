@@ -112,7 +112,7 @@ class ReplyStyleLog(Base):
 
 
 class RelationshipMemory(Base):
-    """关系记忆 — per-user 的自然语言关系描述，append-only"""
+    """关系记忆 — per-user 的自然语言关系描述，append-only（旧表，线上在用）"""
 
     __tablename__ = "relationship_memory"
 
@@ -131,6 +131,27 @@ class RelationshipMemory(Base):
 
     __table_args__ = (
         Index("idx_rel_mem_persona_user_created", "persona_id", "user_id", created_at.desc()),
+    )
+
+
+class RelationshipMemoryV2(Base):
+    """关系记忆 v2 — 两阶段管线产出，去掉冗余 user_name/memory_text"""
+
+    __tablename__ = "relationship_memory_v2"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    core_facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    impression: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_rel_mem_v2_persona_user_created", "persona_id", "user_id", created_at.desc()),
     )
 
 
