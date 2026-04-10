@@ -214,38 +214,6 @@ async def get_last_bot_reply_time(chat_id: str) -> int:
         return result.scalar_one_or_none() or 0
 
 
-async def save_relationship_memory(
-    persona_id: str,
-    user_id: str,
-    user_name: str,
-    core_facts: str,
-    impression: str,
-    source: str,
-) -> None:
-    """写入关系记忆（append-only，version 自增）— 旧表，线上在用"""
-    from app.orm.memory_models import RelationshipMemory
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(func.max(RelationshipMemory.version))
-            .where(RelationshipMemory.persona_id == persona_id)
-            .where(RelationshipMemory.user_id == user_id)
-        )
-        max_version = result.scalar_one_or_none() or 0
-
-        session.add(RelationshipMemory(
-            persona_id=persona_id,
-            user_id=user_id,
-            user_name=user_name,
-            memory_text="",
-            version=max_version + 1,
-            core_facts=core_facts,
-            impression=impression,
-            source=source,
-        ))
-        await session.commit()
-
-
 async def save_relationship_memory_v2(
     persona_id: str,
     user_id: str,
@@ -326,61 +294,4 @@ async def get_relationship_memories_for_users_v2(
         }
 
 
-async def get_latest_relationship_memory(
-    persona_id: str, user_id: str
-) -> tuple[str, str] | None:
-    """获取指定用户的最新关系记忆，返回 (core_facts, impression) 或 None"""
-    from app.orm.memory_models import RelationshipMemory
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(
-                RelationshipMemory.core_facts,
-                RelationshipMemory.impression,
-                RelationshipMemory.memory_text,
-            )
-            .where(RelationshipMemory.persona_id == persona_id)
-            .where(RelationshipMemory.user_id == user_id)
-            .order_by(RelationshipMemory.created_at.desc())
-            .limit(1)
-        )
-        row = result.one_or_none()
-        if row is None:
-            return None
-        if row.core_facts or row.impression:
-            return (row.core_facts, row.impression)
-        return (row.memory_text, "")
-
-
-async def get_relationship_memories_for_users(
-    persona_id: str,
-    user_ids: list[str],
-) -> dict[str, tuple[str, str]]:
-    """批量获取多个用户的最新关系记忆，返回 {user_id: (core_facts, impression)}"""
-    from app.orm.memory_models import RelationshipMemory
-
-    if not user_ids:
-        return {}
-
-    async with AsyncSessionLocal() as session:
-        # 用 PostgreSQL DISTINCT ON 一次查出每个 user 的最新一行
-        result = await session.execute(
-            select(
-                RelationshipMemory.user_id,
-                RelationshipMemory.core_facts,
-                RelationshipMemory.impression,
-                RelationshipMemory.memory_text,
-            )
-            .where(RelationshipMemory.persona_id == persona_id)
-            .where(RelationshipMemory.user_id.in_(user_ids))
-            .distinct(RelationshipMemory.user_id)
-            .order_by(RelationshipMemory.user_id, RelationshipMemory.created_at.desc())
-        )
-        out: dict[str, tuple[str, str]] = {}
-        for row in result.all():
-            if row.core_facts or row.impression:
-                out[row.user_id] = (row.core_facts, row.impression)
-            else:
-                out[row.user_id] = (row.memory_text, "")
-        return out
 
