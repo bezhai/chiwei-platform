@@ -205,7 +205,7 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         # 从消息中提取涉及的用户 ID（排除 bot 自身）
         unique_user_ids = list({
             m.user_id for m in messages
-            if m.role == "user" and m.user_id
+            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
         })
 
         if unique_user_ids:

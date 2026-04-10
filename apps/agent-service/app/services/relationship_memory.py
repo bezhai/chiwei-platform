@@ -160,7 +160,7 @@ async def extract_relationship_updates(
     filtered_messages = [m for m in messages if m.id in id_set]
     filtered_user_ids = list({
         m.user_id for m in filtered_messages
-        if m.role == "user" and m.user_id
+        if m.role == "user" and m.user_id and m.user_id != "__proactive__"
     })
     if not filtered_user_ids:
         return
