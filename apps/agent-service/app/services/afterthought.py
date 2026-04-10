@@ -205,7 +205,7 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         # 从消息中提取涉及的用户 ID（排除 bot 自身）
         unique_user_ids = list({
             m.user_id for m in messages
-            if m.role == "user" and m.user_id
+            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
         })
 
         if unique_user_ids:
@@ -213,7 +213,7 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
                 persona_id=persona_id,
                 chat_id=chat_id,
                 user_ids=unique_user_ids,
-                messages_timeline=timeline,
+                messages=messages,
             )
     except Exception as e:
         logger.warning(f"[{persona_id}] Relationship extract failed (non-fatal): {e}")

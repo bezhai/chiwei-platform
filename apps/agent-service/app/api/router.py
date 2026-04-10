@@ -169,10 +169,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
     async def _run():
         from datetime import datetime, timedelta
         from app.orm.crud import get_bot_persona, get_chat_messages_in_range
-        from app.services.relationship_memory import (
-            extract_relationship_updates,
-            format_timeline,
-        )
+        from app.services.relationship_memory import extract_relationship_updates
 
         start_dt = datetime.fromisoformat(req.start_time)
         end_dt = datetime.fromisoformat(req.end_time)
@@ -218,14 +215,11 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
                 for persona_id, persona_name in personas.items():
                     try:
-                        timeline = await format_timeline(messages, persona_name)
-                        if not timeline:
-                            continue
                         await extract_relationship_updates(
                             persona_id=persona_id,
                             chat_id=chat_id,
                             user_ids=user_ids,
-                            messages_timeline=timeline,
+                            messages=messages,
                         )
                         logger.info(
                             f"[rebuild] {day_str} {persona_id}: "

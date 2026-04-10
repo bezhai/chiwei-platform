@@ -24,6 +24,7 @@ class Base(DeclarativeBase):
 class LarkUser(Base):
     __tablename__ = "lark_user"
 
+    id: Mapped[int] = mapped_column(BigInteger, autoincrement=True, unique=True)
     union_id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
     avatar_origin: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -63,6 +64,7 @@ class ModelMapping(Base):
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
+    id: Mapped[int] = mapped_column(BigInteger, autoincrement=True, unique=True)
     message_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(100))
     content: Mapped[str] = mapped_column(Text)
