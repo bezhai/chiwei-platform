@@ -11,13 +11,14 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from langchain.messages import HumanMessage
+
+from app.agents.core import ChatAgent
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
+from app.orm.crud import get_bot_persona, get_chat_messages_in_range
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
-from app.utils.content_parser import parse_content
+from app.services.relationship_memory import format_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -156,23 +157,28 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
     scene = await _build_scene(chat_id, chat_type, messages)
 
     # Format timeline with plain names
-    timeline = await _format_timeline(messages, persona_name)
+    timeline = await format_timeline(messages, persona_name, tz=CST)
     if not timeline:
         logger.info(f"[{persona_id}] Empty timeline for {chat_id}, skip")
         return
 
-    # Call LLM
-    prompt = get_prompt("afterthought_conversation")
-    compiled = prompt.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        scene=scene,
-        messages=timeline,
+    # Call LLM via ChatAgent
+    agent = ChatAgent(
+        prompt_id="afterthought_conversation",
+        tools=[],
+        model_id=settings.diary_model,
+        trace_name="afterthought",
     )
-
-    model = await ModelBuilder.build_chat_model(settings.diary_model)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    result = await agent.run(
+        messages=[HumanMessage(content="生成经历碎片")],
+        prompt_vars={
+            "persona_name": persona_name,
+            "persona_lite": persona_lite,
+            "scene": scene,
+            "messages": timeline,
+        },
+    )
+    content = _extract_text(result.content)
 
     if not content:
         logger.warning(f"[{persona_id}] Afterthought LLM returned empty for {chat_id}")
@@ -244,30 +250,3 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
         return "在群里"
 
 
-async def _format_timeline(
-    messages: list,
-    persona_name: str,
-    max_messages: int = 50,
-) -> str:
-    """格式化消息列表为时间线文本，使用纯名字标注说话人
-
-    格式: [HH:MM] 名字: 消息内容
-    """
-    messages = messages[-max_messages:]
-
-    lines: list[str] = []
-    for msg in messages:
-        msg_time = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
-        time_str = msg_time.strftime("%H:%M")
-
-        if msg.role == "assistant":
-            speaker = persona_name
-        else:
-            name = await get_username(msg.user_id)
-            speaker = name or msg.user_id[:6]
-
-        rendered = parse_content(msg.content).render()
-        if rendered and rendered.strip():
-            lines.append(f"[{time_str}] {speaker}: {rendered[:200]}")
-
-    return "\n".join(lines)

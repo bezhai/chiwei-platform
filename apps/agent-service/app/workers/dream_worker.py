@@ -10,8 +10,9 @@ weekly dream: 最近 7 个 daily 碎片 → 一周回顾
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from langchain.messages import HumanMessage
+
+from app.agents.core import ChatAgent
 from app.config.config import settings
 from app.orm.crud import get_all_persona_ids, get_bot_persona
 from app.orm.memory_crud import create_fragment, get_fragments_in_date_range, get_recent_fragments_by_grain
@@ -44,36 +45,23 @@ async def cron_generate_weekly_dreams(ctx) -> None:
 
 
 async def generate_daily_dream(persona_id: str, target_date: date | None = None) -> ExperienceFragment | None:
-    """生成 daily 碎片
-
-    Args:
-        persona_id: persona 标识
-        target_date: 目标日期，默认为昨天
-
-    Returns:
-        写入的 ExperienceFragment，无碎片时返回 None
-    """
+    """生成 daily 碎片"""
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
     day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=CST)
     day_end = day_start + timedelta(days=1)
 
-    # 1. 取当天 conversation + glimpse 碎片
     today_frags = await get_fragments_in_date_range(
         persona_id, target_date, target_date, grains=["conversation", "glimpse"]
     )
-
     if not today_frags:
         logger.info(f"[{persona_id}] No fragments for {target_date}, skip daily dream")
         return None
 
     persona_obj = await get_bot_persona(persona_id)
-
-    # 2. 最近 daily 碎片（连续性上下文）
     recent_dailies = await get_recent_fragments_by_grain(persona_id, "daily", limit=3)
 
-    # 3. 格式化
     persona_name = persona_obj.display_name if persona_obj else persona_id
     persona_lite = persona_obj.persona_lite if persona_obj else ""
     today_text = "\n\n---\n\n".join(f.content for f in today_frags)
@@ -83,24 +71,28 @@ async def generate_daily_dream(persona_id: str, target_date: date | None = None)
         else "（前几天没有做梦）"
     )
 
-    # 4. LLM 生成
-    prompt_template = get_prompt("dream_daily")
-    compiled = prompt_template.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        date=target_date.isoformat(),
-        today_fragments=today_text,
-        recent_dreams=recent_text,
+    agent = ChatAgent(
+        prompt_id="dream_daily",
+        tools=[],
+        model_id=settings.diary_model,
+        trace_name="dream-daily",
     )
-    model = await ModelBuilder.build_chat_model(settings.diary_model)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    result = await agent.run(
+        messages=[HumanMessage(content="回忆今天发生的事")],
+        prompt_vars={
+            "persona_name": persona_name,
+            "persona_lite": persona_lite,
+            "date": target_date.isoformat(),
+            "today_fragments": today_text,
+            "recent_dreams": recent_text,
+        },
+    )
+    content = _extract_text(result.content)
 
     if not content:
         logger.warning(f"[{persona_id}] Daily dream LLM returned empty for {target_date}")
         return None
 
-    # 5. 写入碎片
     fragment = ExperienceFragment(
         persona_id=persona_id,
         grain="daily",
@@ -115,15 +107,7 @@ async def generate_daily_dream(persona_id: str, target_date: date | None = None)
 
 
 async def generate_weekly_dream(persona_id: str, target_date: date | None = None) -> ExperienceFragment | None:
-    """生成 weekly 碎片 from 最近 7 个 daily 碎片
-
-    Args:
-        persona_id: persona 标识
-        target_date: 基准日期（本周一），默认为今天
-
-    Returns:
-        写入的 ExperienceFragment，无 daily 碎片时返回 None
-    """
+    """生成 weekly 碎片 from 最近 7 个 daily 碎片"""
     if target_date is None:
         target_date = date.today()
 
@@ -137,15 +121,21 @@ async def generate_weekly_dream(persona_id: str, target_date: date | None = None
     persona_lite = persona_obj.persona_lite if persona_obj else ""
     dailies_text = "\n\n---\n\n".join(f.content for f in reversed(dailies))
 
-    prompt_template = get_prompt("dream_weekly")
-    compiled = prompt_template.compile(
-        persona_name=persona_name,
-        persona_lite=persona_lite,
-        dailies=dailies_text,
+    agent = ChatAgent(
+        prompt_id="dream_weekly",
+        tools=[],
+        model_id=settings.diary_model,
+        trace_name="dream-weekly",
     )
-    model = await ModelBuilder.build_chat_model(settings.diary_model)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    result = await agent.run(
+        messages=[HumanMessage(content="回顾这一周")],
+        prompt_vars={
+            "persona_name": persona_name,
+            "persona_lite": persona_lite,
+            "dailies": dailies_text,
+        },
+    )
+    content = _extract_text(result.content)
 
     if not content:
         logger.warning(f"[{persona_id}] Weekly dream LLM returned empty")

@@ -13,6 +13,9 @@
 import logging
 from datetime import date, datetime, timedelta, timezone
 
+from langchain.messages import HumanMessage
+
+from app.agents.core import ChatAgent
 from app.agents.infra.langfuse_client import get_prompt
 from app.agents.infra.model_builder import ModelBuilder
 from app.config.config import settings
@@ -125,26 +128,30 @@ async def _run_writer(
     from app.agents.core.config import AgentRegistry
 
     config = AgentRegistry.get("schedule-writer")
-    prompt_template = get_prompt(config.prompt_id)
-
     weekday = _WEEKDAY_CN[target_date.weekday()]
     is_weekend = "周末！" if target_date.weekday() >= 5 else ""
 
-    compiled = prompt_template.compile(
-        persona_core=persona_core,
-        date=target_date.isoformat(),
-        weekday=weekday,
-        is_weekend=is_weekend,
-        weekly_plan=weekly_plan,
-        yesterday_journal=yesterday_journal,
-        ideation_output=ideation_output,
-        previous_output=previous_output,
-        critic_feedback=critic_feedback,
+    agent = ChatAgent(
+        prompt_id=config.prompt_id,
+        tools=[],
+        model_id=config.model_id,
+        trace_name=config.trace_name,
     )
-
-    model = await ModelBuilder.build_chat_model(config.model_id)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    return _extract_text(response.content)
+    result = await agent.run(
+        messages=[HumanMessage(content="写今天的手帐")],
+        prompt_vars={
+            "persona_core": persona_core,
+            "date": target_date.isoformat(),
+            "weekday": weekday,
+            "is_weekend": is_weekend,
+            "weekly_plan": weekly_plan,
+            "yesterday_journal": yesterday_journal,
+            "ideation_output": ideation_output,
+            "previous_output": previous_output,
+            "critic_feedback": critic_feedback,
+        },
+    )
+    return _extract_text(result.content)
 
 
 async def _run_critic(
@@ -156,17 +163,22 @@ async def _run_critic(
     from app.agents.core.config import AgentRegistry
 
     config = AgentRegistry.get("schedule-critic")
-    prompt_template = get_prompt(config.prompt_id)
 
-    compiled = prompt_template.compile(
-        persona_name=persona_name,
-        today_schedule=schedule_text,
-        recent_schedules=recent_schedules_text,
+    agent = ChatAgent(
+        prompt_id=config.prompt_id,
+        tools=[],
+        model_id=config.model_id,
+        trace_name=config.trace_name,
     )
-
-    model = await ModelBuilder.build_chat_model(config.model_id)
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    return _extract_text(response.content)
+    result = await agent.run(
+        messages=[HumanMessage(content="审查今天的手帐质量")],
+        prompt_vars={
+            "persona_name": persona_name,
+            "today_schedule": schedule_text,
+            "recent_schedules": recent_schedules_text,
+        },
+    )
+    return _extract_text(result.content)
 
 
 # ==================== ArQ cron 入口 ====================
@@ -250,22 +262,26 @@ async def generate_monthly_plan(
     season = _get_season(month_start.month)
     month_cn = f"{month_start.year}年{month_start.month}月"
 
-    # 获取人设和 Langfuse prompt 并编译
     from app.orm.crud import get_bot_persona as _get_persona
     _persona = await _get_persona(persona_id)
-    prompt_template = get_prompt("schedule_monthly")
-    compiled = prompt_template.compile(
-        persona_name=_persona.display_name if _persona else persona_id,
-        persona_core=_persona.persona_core if _persona else "",
-        month=month_cn,
-        season=season,
-        previous_monthly_plan=prev_plan_text,
-    )
 
-    # 调用 LLM
-    model = await ModelBuilder.build_chat_model(_schedule_model())
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    agent = ChatAgent(
+        prompt_id="schedule_monthly",
+        tools=[],
+        model_id=_schedule_model(),
+        trace_name="schedule-monthly",
+    )
+    result = await agent.run(
+        messages=[HumanMessage(content="制定本月计划")],
+        prompt_vars={
+            "persona_name": _persona.display_name if _persona else persona_id,
+            "persona_core": _persona.persona_core if _persona else "",
+            "month": month_cn,
+            "season": season,
+            "previous_monthly_plan": prev_plan_text,
+        },
+    )
+    content = _extract_text(result.content)
 
     if not content:
         logger.warning(f"LLM returned empty monthly plan for {month_cn}")
@@ -334,22 +350,26 @@ async def generate_weekly_plan(
 
     week_desc = f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
 
-    # 获取人设和 Langfuse prompt 并编译
     from app.orm.crud import get_bot_persona as _get_persona
     _persona = await _get_persona(persona_id)
-    prompt_template = get_prompt("schedule_weekly")
-    compiled = prompt_template.compile(
-        persona_name=_persona.display_name if _persona else persona_id,
-        persona_core=_persona.persona_core if _persona else "",
-        week=week_desc,
-        monthly_plan=monthly_text,
-        previous_weekly_plan=prev_plan_text,
-    )
 
-    # 调用 LLM
-    model = await ModelBuilder.build_chat_model(_schedule_model())
-    response = await model.ainvoke([{"role": "user", "content": compiled}])
-    content = _extract_text(response.content)
+    agent = ChatAgent(
+        prompt_id="schedule_weekly",
+        tools=[],
+        model_id=_schedule_model(),
+        trace_name="schedule-weekly",
+    )
+    result = await agent.run(
+        messages=[HumanMessage(content="制定本周计划")],
+        prompt_vars={
+            "persona_name": _persona.display_name if _persona else persona_id,
+            "persona_core": _persona.persona_core if _persona else "",
+            "week": week_desc,
+            "monthly_plan": monthly_text,
+            "previous_weekly_plan": prev_plan_text,
+        },
+    )
+    content = _extract_text(result.content)
 
     if not content:
         logger.warning(f"LLM returned empty weekly plan for {week_desc}")
