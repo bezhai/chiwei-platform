@@ -152,7 +152,6 @@ class RebuildRelationshipMemoryRequest(BaseModel):
     chat_ids: list[str]
     start_time: str  # ISO 8601
     end_time: str  # ISO 8601
-    batch_size: int = 50
 
 
 @api_router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
@@ -210,36 +209,30 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
                 messages.sort(key=lambda m: m.create_time)
 
-                for persona_id, persona_name in personas.items():
-                    # 按 batch_size 分批，每批完整时间线 + 所有用户
-                    for i in range(0, len(messages), req.batch_size):
-                        batch = messages[i : i + req.batch_size]
-                        batch_user_ids = list({
-                            m.user_id for m in batch
-                            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-                        })
-                        if not batch_user_ids:
-                            continue
+                user_ids = list({
+                    m.user_id for m in messages
+                    if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+                })
+                if not user_ids:
+                    continue
 
-                        try:
-                            timeline = await format_timeline(batch, persona_name)
-                            if not timeline:
-                                continue
-                            await extract_relationship_updates(
-                                persona_id=persona_id,
-                                chat_id=chat_id,
-                                user_ids=batch_user_ids,
-                                messages_timeline=timeline,
-                            )
-                            logger.info(
-                                f"[rebuild] {day_str} {persona_id} batch {i // req.batch_size + 1}: "
-                                f"{len(batch_user_ids)} users"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"[rebuild] {day_str} {persona_id} batch {i // req.batch_size + 1} "
-                                f"failed: {e}"
-                            )
+                for persona_id, persona_name in personas.items():
+                    try:
+                        timeline = await format_timeline(messages, persona_name)
+                        if not timeline:
+                            continue
+                        await extract_relationship_updates(
+                            persona_id=persona_id,
+                            chat_id=chat_id,
+                            user_ids=user_ids,
+                            messages_timeline=timeline,
+                        )
+                        logger.info(
+                            f"[rebuild] {day_str} {persona_id}: "
+                            f"{len(user_ids)} users, {len(messages)} msgs"
+                        )
+                    except Exception as e:
+                        logger.error(f"[rebuild] {day_str} {persona_id} failed: {e}")
 
             logger.info(f"[rebuild] Day {day_count}/{total_days} ({day_str}) done.")
             day = next_day

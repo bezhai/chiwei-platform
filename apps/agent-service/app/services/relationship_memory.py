@@ -27,7 +27,7 @@ async def format_timeline(
     persona_name: str,
     *,
     tz: timezone = timezone.utc,
-    max_messages: int = 50,
+    max_messages: int = 2000,
 ) -> str:
     """格式化消息列表为时间线文本
 
