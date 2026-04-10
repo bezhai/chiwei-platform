@@ -1,6 +1,6 @@
 import type { LarkCallbackInfo } from 'types/lark';
 import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/repositories';
-import { patchMessage } from '@lark-client';
+import { sendReq } from '@lark-client';
 import { searchAndBuildPhotoCard, searchAndBuildDailyPhotoCard } from '@core/services/media/photo/photo-card';
 
 type CardBuilder = (params: any, allow_send_limit_photo?: boolean) => Promise<any>;
@@ -20,7 +20,19 @@ async function handleUpdateCard(
             basicChatInfo?.permission_config?.allow_send_limit_photo,
         );
 
-        await patchMessage(data.context.open_message_id, updatedCard);
+        const delayCard = {
+            open_ids: [data.operator.open_id],
+            elements: updatedCard.getElements(),
+        };
+
+        await sendReq(
+            '/open-apis/interactive/v1/card/update',
+            {
+                token: data.token,
+                card: delayCard,
+            },
+            'POST',
+        );
     } catch (e) {
         console.error('update card error:', {
             message: e instanceof Error ? e.message : 'Unknown error',

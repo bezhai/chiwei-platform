@@ -27,7 +27,7 @@ export async function searchAndBuildPhotoCard(tags: string[], allow_send_limit_p
 
     const { chunks, weights } = calcBestChunks(images);
 
-    const card = new LarkCard().withConfig({ update_multi: true }).addElement(
+    const card = new LarkCard().addElement(
         new ColumnSet()
             .setHorizontalSpacing('small')
             .addColumns(
@@ -127,7 +127,7 @@ export async function searchAndBuildDailyPhotoCard(
 
     const { chunks, weights } = calcBestChunks(images);
 
-    const card = new LarkCard().withConfig({ update_multi: true }).withHeader(new CardHeader('今日新图').color('green')).addElement(
+    const card = new LarkCard().withHeader(new CardHeader('今日新图').color('green')).addElement(
         new ColumnSet()
             .setHorizontalSpacing('small')
             .addColumns(
@@ -162,5 +162,6 @@ export async function searchAndBuildDailyPhotoCard(
         ),
     );
 
-    return card;
+    // 需要支持延迟更新卡片，返回 V1 版本
+    return card.toV1();
 }
