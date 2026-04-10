@@ -91,6 +91,15 @@ SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 11. `ghc pr merge --squash` 合并到 main（**必须用项目 `ship` skill，禁止用 `superpowers:finishing-a-development-branch`**）
 12. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
 
+### 上线前必须完成的检查（TODO）
+
+代码改完、泳道验证通过后，**合码前**逐条过：
+
+- [ ] **调用方全覆盖**：`grep` 被修改函数的所有调用方，列出每个调用场景（群聊/私聊/rebuild/afterthought/...），确认每个场景下的行为是否正确。不是看一眼，是每个场景都要有运行验证的证据。
+- [ ] **数据读写一致**：如果改了写入的目标表，确认所有读取方也已切换。如果新建了表，确认旧表的读取方不会读到空数据。
+- [ ] **副作用清单**：列出这次改动的所有副作用（新表、新 prompt、新 agent 注册、DB schema 变更），确认每个都已就绪。
+- [ ] **部署影响**：如果有后台异步任务正在运行（rebuild、afterthought），部署会杀掉它们。部署前确认没有正在跑的任务，或者明确告知用户"部署会中断 X"。
+
 ### superpowers 禁用项
 
 以下 superpowers skill 与项目自有 skill 冲突，**禁止使用**：
@@ -110,6 +119,13 @@ make undeploy APP=<app> LANE=dev                                   # 删除 Rele
 make status [APP=xxx]                                              # 查看状态
 make latest-build APP=<app>                                        # 最近成功构建
 ```
+
+### 部署铁律
+
+1. **禁止未经泳道验证直接部署到 prod。** 任何代码改动，无论多小（"就改了一行"不是理由），必须先部署到泳道、用真实流量或 rebuild 验证通过，再走 `/ship` 上线。唯一例外：用户明确说"直接上"。
+2. **部署 = 杀 Pod = 中断所有异步任务。** 部署前必须确认没有正在跑的后台任务（rebuild、afterthought 等）。如果有，要么等它跑完，要么告知用户会中断。
+3. **rebuild 等批量操作的参数（persona、chat_id、时间范围）必须由用户指定。** 不要自己填默认值，不要"顺便"扩大范围。
+4. **一镜像多服务同步。** 部署 agent-service 后必须同步 release arq-worker 和 vectorize-worker；部署 lark-server 后必须同步 recall-worker 和 chat-response-worker。
 
 ## AI 行为约束
 
