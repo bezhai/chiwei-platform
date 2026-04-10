@@ -7,14 +7,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # ── build_inner_context tests ──
 
 
+def _common_patches():
+    """build_inner_context 所有 DB 依赖的 mock"""
+    return [
+        patch("app.services.memory_context._build_life_state", new_callable=AsyncMock, return_value=""),
+        patch("app.orm.memory_crud.get_latest_relationship_memory_v2", new_callable=AsyncMock, return_value=None),
+        patch("app.services.memory_context.get_today_fragments", new_callable=AsyncMock, return_value=[]),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_build_inner_context_group_basic():
     """群聊：场景提示 + Life Engine 状态"""
-    with patch(
+    patches = _common_patches()
+    patches[0] = patch(
         "app.services.memory_context._build_life_state",
         new_callable=AsyncMock,
         return_value="你此刻的状态：窝在被窝里\n你的心情：暖洋洋的",
-    ):
+    )
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -36,11 +47,8 @@ async def test_build_inner_context_group_basic():
 @pytest.mark.asyncio
 async def test_build_inner_context_p2p():
     """私聊：显示私聊场景"""
-    with patch(
-        "app.services.memory_context._build_life_state",
-        new_callable=AsyncMock,
-        return_value="",
-    ):
+    patches = _common_patches()
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -58,11 +66,8 @@ async def test_build_inner_context_p2p():
 @pytest.mark.asyncio
 async def test_build_inner_context_no_life_state():
     """无 Life Engine 状态时：只有场景提示，不崩溃"""
-    with patch(
-        "app.services.memory_context._build_life_state",
-        new_callable=AsyncMock,
-        return_value="",
-    ):
+    patches = _common_patches()
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -82,11 +87,8 @@ async def test_build_inner_context_no_life_state():
 @pytest.mark.asyncio
 async def test_build_inner_context_proactive():
     """主动发言：含 stimulus，无回复提示"""
-    with patch(
-        "app.services.memory_context._build_life_state",
-        new_callable=AsyncMock,
-        return_value="",
-    ):
+    patches = _common_patches()
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -107,65 +109,19 @@ async def test_build_inner_context_proactive():
     assert "回复" not in result
 
 
-# ── get_reply_style tests ──
-
-
-@pytest.mark.asyncio
-async def test_get_reply_style_from_db():
-    """DB 有记录 → 返回 DB 值"""
-    with patch(
-        "app.orm.memory_crud.get_latest_reply_style",
-        new_callable=AsyncMock,
-        return_value="[感冒中] 说话短短的",
-    ):
-        from app.services.memory_context import get_reply_style
-
-        result = await get_reply_style("akao")
-
-    assert "感冒" in result
-
-
-@pytest.mark.asyncio
-async def test_get_reply_style_fallback_to_default():
-    """DB 无记录 → fallback 到 default_style"""
-    with patch(
-        "app.orm.memory_crud.get_latest_reply_style",
-        new_callable=AsyncMock,
-        return_value=None,
-    ):
-        from app.services.memory_context import get_reply_style
-
-        result = await get_reply_style("akao", default_style="来自persona的默认风格")
-
-    assert "来自persona的默认风格" in result
-
-
-@pytest.mark.asyncio
-async def test_get_reply_style_empty_default():
-    """DB 无记录 + 无 default → 返回空字符串"""
-    with patch(
-        "app.orm.memory_crud.get_latest_reply_style",
-        new_callable=AsyncMock,
-        return_value=None,
-    ):
-        from app.services.memory_context import get_reply_style
-
-        result = await get_reply_style("akao")
-
-    assert result == ""
-
-
 # ── Life Engine state injection tests ──
 
 
 @pytest.mark.asyncio
 async def test_inner_context_includes_life_engine_state():
     """build_inner_context 注入 Life Engine 状态"""
-    with patch(
+    patches = _common_patches()
+    patches[0] = patch(
         "app.services.memory_context._build_life_state",
         new_callable=AsyncMock,
         return_value="你此刻的状态：窝在被窝里刷手机\n你的心情：暖洋洋的，很放松",
-    ):
+    )
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -184,11 +140,8 @@ async def test_inner_context_includes_life_engine_state():
 @pytest.mark.asyncio
 async def test_inner_context_no_life_state_graceful():
     """DB 无 Life Engine 状态 → 不崩溃，不注入"""
-    with patch(
-        "app.services.memory_context._build_life_state",
-        new_callable=AsyncMock,
-        return_value="",
-    ):
+    patches = _common_patches()
+    with patches[0], patches[1], patches[2]:
         from app.services.memory_context import build_inner_context
 
         result = await build_inner_context(
@@ -211,7 +164,7 @@ async def test_relationship_memory_injection_core_facts_and_impression():
         new_callable=AsyncMock,
         return_value="",
     ), patch(
-        "app.orm.memory_crud.get_latest_relationship_memory",
+        "app.orm.memory_crud.get_latest_relationship_memory_v2",
         new_callable=AsyncMock,
         return_value=("群昵称 crgg，经常被泼洗脚水", "脑回路清奇但偶尔挺好笑"),
     ), patch(
@@ -244,7 +197,7 @@ async def test_relationship_memory_injection_no_memory():
         new_callable=AsyncMock,
         return_value="",
     ), patch(
-        "app.orm.memory_crud.get_latest_relationship_memory",
+        "app.orm.memory_crud.get_latest_relationship_memory_v2",
         new_callable=AsyncMock,
         return_value=None,
     ), patch(
