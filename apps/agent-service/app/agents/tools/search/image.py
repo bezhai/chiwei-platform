@@ -79,36 +79,44 @@ async def search_images(
         images = images[:_MAX_RESULTS]
 
         # 2. Upload each to TOS and register
-        from app.clients.image_client import image_client
+        from app.agents.tools.image.processor import ImageProcessor
 
         context = get_runtime(AgentContext).context
         registry = context.media.registry
 
         t0 = time.monotonic()
-        # Upload concurrently (API returns image_url field)
+        # Upload + register concurrently
         upload_tasks = [
-            image_client.upload_to_tos("url", img.get("image_url") or img.get("url", ""))
+            ImageProcessor.upload_and_register(
+                source_type="url",
+                data=img.get("image_url") or img.get("url", ""),
+                registry=registry,
+            )
             for img in images
             if img.get("image_url") or img.get("url")
         ]
-        tos_urls = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        results = await asyncio.gather(*upload_tasks, return_exceptions=True)
         t_upload = time.monotonic() - t0
 
         content_blocks: list[dict[str, Any]] = []
         result_lines: list[str] = []
         failed = 0
 
-        for i, tos_url in enumerate(tos_urls):
-            if isinstance(tos_url, Exception) or not tos_url:
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
                 failed += 1
-                logger.warning(f"图片 {i} 上传 TOS 失败: {tos_url if isinstance(tos_url, Exception) else 'empty'}")
+                logger.warning(f"图片 {i} 上传 TOS 失败: {result}")
                 continue
 
-            if registry:
-                filename = await registry.register(tos_url)
-                result_lines.append(f"@{filename}")
-                content_blocks.append({"type": "text", "text": f"@{filename}:"})
-                content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
+            tos_url, filename = result
+            if not filename:
+                failed += 1
+                logger.warning(f"图片 {i} 上传 TOS 失败: no filename")
+                continue
+
+            result_lines.append(f"@{filename}")
+            content_blocks.append({"type": "text", "text": f"@{filename}:"})
+            content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
 
         t_total = time.monotonic() - t_start
         IMAGE_SEARCH_DURATION.labels(step="upload_pipeline").observe(t_upload)

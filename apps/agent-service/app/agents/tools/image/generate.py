@@ -65,23 +65,25 @@ async def generate_image(
             )
 
             # Upload to TOS and register
-            from app.clients.image_client import image_client
+            from app.agents.tools.image.processor import ImageProcessor
 
             content_blocks: list[dict[str, Any]] = []
             filenames: list[str] = []
 
             for b64 in base64_images:
-                tos_url = await image_client.upload_to_tos("base64", b64)
-                if not tos_url:
+                tos_url, filename = await ImageProcessor.upload_and_register(
+                    source_type="base64",
+                    data=b64,
+                    registry=registry,
+                )
+                if not filename:
                     logger.error("图片上传 TOS 失败")
                     continue
 
-                if registry:
-                    filename = await registry.register(tos_url)
-                    filenames.append(filename)
-                    content_blocks.append({"type": "text", "text": f"生成了图片: @{filename}"})
-                    content_blocks.append({"type": "text", "text": f"@{filename}:"})
-                    content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
+                filenames.append(filename)
+                content_blocks.append({"type": "text", "text": f"生成了图片: @{filename}"})
+                content_blocks.append({"type": "text", "text": f"@{filename}:"})
+                content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
 
             if not content_blocks:
                 return "图片生成失败，请稍后重试"
