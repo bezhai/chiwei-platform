@@ -1,6 +1,6 @@
 import type { LarkCallbackInfo } from 'types/lark';
 import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/repositories';
-import { sendReq } from '@lark-client';
+import { patchMessage } from '@lark-client';
 import { searchAndBuildPhotoCard, searchAndBuildDailyPhotoCard } from '@core/services/media/photo/photo-card';
 
 type CardBuilder = (params: any, allow_send_limit_photo?: boolean) => Promise<any>;
@@ -10,7 +10,6 @@ async function handleUpdateCard(
     cardBuilder: CardBuilder,
     builderParams: any,
 ) {
-    console.info('[handleUpdateCard] received data keys:', Object.keys(data), 'token:', data.token?.substring(0, 10), 'operator:', data.operator?.open_id, 'context:', data.context);
     try {
         const basicChatInfo = await BaseChatInfoRepository.findOne({
             where: { chat_id: data.context.open_chat_id },
@@ -21,19 +20,7 @@ async function handleUpdateCard(
             basicChatInfo?.permission_config?.allow_send_limit_photo,
         );
 
-        const delayCard = {
-            open_ids: [data.operator.open_id], // 非共享卡片需要更新卡片的open_ids
-            elements: updatedCard.getElements(),
-        };
-
-        await sendReq(
-            '/open-apis/interactive/v1/card/update',
-            {
-                token: data.token,
-                card: delayCard,
-            },
-            'POST',
-        );
+        await patchMessage(data.context.open_message_id, updatedCard);
     } catch (e) {
         console.error('update card error:', {
             message: e instanceof Error ? e.message : 'Unknown error',

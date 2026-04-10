@@ -200,6 +200,19 @@ export async function sendReq<T>(url: string, data: any, method: string) {
     );
 }
 
+export async function patchMessage(messageId: string, content: any) {
+    const client = larkClientManager.getCurrentClient();
+    return handleResponse(
+        client.im.message.patch({
+            path: { message_id: messageId },
+            data: {
+                content: JSON.stringify(content),
+            },
+        }),
+        'patch_message',
+    );
+}
+
 export async function getChatList(page_token?: string) {
     const client = larkClientManager.getCurrentClient();
     return handleResponse(
