@@ -275,6 +275,29 @@ async def save_relationship_memory_v2(
         await session.commit()
 
 
+async def get_latest_relationship_memory_v2(
+    persona_id: str, user_id: str
+) -> tuple[str, str] | None:
+    """获取 v2 表指定用户的最新关系记忆，返回 (core_facts, impression) 或 None"""
+    from app.orm.memory_models import RelationshipMemoryV2
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(
+                RelationshipMemoryV2.core_facts,
+                RelationshipMemoryV2.impression,
+            )
+            .where(RelationshipMemoryV2.persona_id == persona_id)
+            .where(RelationshipMemoryV2.user_id == user_id)
+            .order_by(RelationshipMemoryV2.created_at.desc())
+            .limit(1)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return (row.core_facts, row.impression)
+
+
 async def get_relationship_memories_for_users_v2(
     persona_id: str,
     user_ids: list[str],

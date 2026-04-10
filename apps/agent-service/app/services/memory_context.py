@@ -73,10 +73,10 @@ async def build_inner_context(
 
     # === 关系记忆（对当前对话者的印象）===
     if trigger_user_id and trigger_user_id != "__proactive__":
-        from app.orm.memory_crud import get_latest_relationship_memory
+        from app.orm.memory_crud import get_latest_relationship_memory_v2
         from app.orm.crud import get_username
 
-        rel_memory = await get_latest_relationship_memory(persona_id, trigger_user_id)
+        rel_memory = await get_latest_relationship_memory_v2(persona_id, trigger_user_id)
         if rel_memory:
             core_facts, impression = rel_memory
             name = trigger_username or await get_username(trigger_user_id) or trigger_user_id[:6]
