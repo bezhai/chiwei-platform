@@ -89,3 +89,66 @@ AgentRegistry.register(
         trace_name="schedule-critic",
     ),
 )
+
+AgentRegistry.register(
+    "relationship-extract",
+    AgentConfig(
+        prompt_id="relationship_extract",
+        model_id="relationship-model",
+        trace_name="relationship-extract",
+    ),
+)
+
+AgentRegistry.register(
+    "afterthought",
+    AgentConfig(
+        prompt_id="afterthought_conversation",
+        model_id="diary-model",
+        trace_name="afterthought",
+    ),
+)
+
+AgentRegistry.register(
+    "voice-generator",
+    AgentConfig(
+        prompt_id="voice_generator",
+        model_id="offline-model",
+        trace_name="voice-generator",
+    ),
+)
+
+AgentRegistry.register(
+    "dream-daily",
+    AgentConfig(
+        prompt_id="dream_daily",
+        model_id="diary-model",
+        trace_name="dream-daily",
+    ),
+)
+
+AgentRegistry.register(
+    "dream-weekly",
+    AgentConfig(
+        prompt_id="dream_weekly",
+        model_id="diary-model",
+        trace_name="dream-weekly",
+    ),
+)
+
+AgentRegistry.register(
+    "schedule-monthly",
+    AgentConfig(
+        prompt_id="schedule_monthly",
+        model_id="offline-model",
+        trace_name="schedule-monthly",
+    ),
+)
+
+AgentRegistry.register(
+    "schedule-weekly",
+    AgentConfig(
+        prompt_id="schedule_weekly",
+        model_id="offline-model",
+        trace_name="schedule-weekly",
+    ),
+)

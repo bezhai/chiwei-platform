@@ -152,7 +152,6 @@ class RebuildRelationshipMemoryRequest(BaseModel):
     chat_ids: list[str]
     start_time: str  # ISO 8601
     end_time: str  # ISO 8601
-    batch_size: int = 50
 
 
 @api_router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
@@ -169,18 +168,20 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
     async def _run():
         from datetime import datetime, timedelta
-        from app.orm.crud import get_bot_persona, get_chat_messages_in_range, get_username
-        from app.services.relationship_memory import rebuild_relationship_memory_for_user
+        from app.orm.crud import get_bot_persona, get_chat_messages_in_range
+        from app.services.relationship_memory import (
+            extract_relationship_updates,
+            format_timeline,
+        )
 
         start_dt = datetime.fromisoformat(req.start_time)
         end_dt = datetime.fromisoformat(req.end_time)
 
-        # 预加载 persona 信息
         personas = {}
         for persona_id in req.persona_ids:
             persona = await get_bot_persona(persona_id)
             if persona:
-                personas[persona_id] = (persona.display_name, persona.persona_lite or "")
+                personas[persona_id] = persona.display_name or persona_id
 
         total_days = (end_dt.date() - start_dt.date()).days
         logger.info(
@@ -188,7 +189,6 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
             f"{total_days} days ({start_dt.date()} ~ {end_dt.date()})"
         )
 
-        # 按天拆分
         day = start_dt
         day_count = 0
         while day < end_dt:
@@ -207,36 +207,32 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                 if not messages:
                     continue
 
+                messages.sort(key=lambda m: m.create_time)
+
                 user_ids = list({
                     m.user_id for m in messages
                     if m.role == "user" and m.user_id and m.user_id != "__proactive__"
                 })
+                if not user_ids:
+                    continue
 
-                for persona_id, (persona_name, persona_lite) in personas.items():
-                    for user_id in user_ids:
-                        user_messages = [
-                            m for m in messages
-                            if m.user_id == user_id or m.role == "assistant"
-                        ]
-                        user_messages.sort(key=lambda m: m.create_time)
-
-                        try:
-                            result = await rebuild_relationship_memory_for_user(
-                                persona_id=persona_id,
-                                user_id=user_id,
-                                messages=user_messages,
-                                persona_name=persona_name,
-                                persona_lite=persona_lite,
-                                batch_size=req.batch_size,
-                            )
-                            if result["final_version"] > 0:
-                                user_name = await get_username(user_id) or user_id[:6]
-                                logger.info(
-                                    f"[rebuild] {day_str} {persona_id}/{user_name}: "
-                                    f"v={result['final_version']}"
-                                )
-                        except Exception as e:
-                            logger.error(f"[rebuild] {day_str} {persona_id}/{user_id} failed: {e}")
+                for persona_id, persona_name in personas.items():
+                    try:
+                        timeline = await format_timeline(messages, persona_name)
+                        if not timeline:
+                            continue
+                        await extract_relationship_updates(
+                            persona_id=persona_id,
+                            chat_id=chat_id,
+                            user_ids=user_ids,
+                            messages_timeline=timeline,
+                        )
+                        logger.info(
+                            f"[rebuild] {day_str} {persona_id}: "
+                            f"{len(user_ids)} users, {len(messages)} msgs"
+                        )
+                    except Exception as e:
+                        logger.error(f"[rebuild] {day_str} {persona_id} failed: {e}")
 
             logger.info(f"[rebuild] Day {day_count}/{total_days} ({day_str}) done.")
             day = next_day
