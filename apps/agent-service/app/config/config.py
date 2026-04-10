@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Life Engine
     life_engine_model: str = "offline-model"
 
+    # 关系记忆提取
+    relationship_model: str = "relationship-model"
+
     # Identity 漂移
     identity_drift_model: str = "offline-model"
     identity_drift_debounce_seconds: int = 120  # 一阶段等待: 2 分钟
