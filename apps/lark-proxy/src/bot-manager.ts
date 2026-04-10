@@ -27,6 +27,7 @@ const REGISTERED_EVENT_TYPES = [
     'im.message.reaction.deleted_v1',
     'im.chat.access_event.bot_p2p_chat_entered_v1',
     'im.chat.updated_v1',
+    'card.action.trigger',
 ];
 
 export class BotManager {
