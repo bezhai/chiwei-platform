@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.graphs.pre.state import BlockReason, PreState, SafetyResult
 from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from app.agents.infra.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,14 @@ async def check_nsfw_content(state: PreState, config) -> dict:
         langfuse_prompt = get_prompt("guard_nsfw_content")
         messages = langfuse_prompt.compile(message=message)
 
-        model = await ModelBuilder.build_chat_model(
-            "guard-model", reasoning_effort="low"
-        )
-        structured_model = model.with_structured_output(NsfwCheckResult)
-
-        result: NsfwCheckResult = await structured_model.ainvoke(
-            messages, config=config
+        result: NsfwCheckResult = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=messages,
+            schema=NsfwCheckResult,
+            model_id="guard-model",
+            trace_name="pre-nsfw-check",
+            model_kwargs={"reasoning_effort": "low"},
         )
 
         if result.is_nsfw and result.confidence >= 0.75:

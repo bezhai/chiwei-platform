@@ -107,10 +107,9 @@ async def _call_glimpse_llm(
     recent_proactive: list[dict] | None = None,
 ) -> str:
     """调用 LLM 进行窥屏观察"""
-    from langfuse.langchain import CallbackHandler
+    from langchain_core.messages import HumanMessage
 
-    from app.agents.infra.langfuse_client import get_prompt
-    from app.agents.infra.model_builder import ModelBuilder
+    from app.agents.infra.llm_service import LLMService
 
     # 格式化今日搭话记录
     proactive_hint = ""
@@ -122,8 +121,7 @@ async def _call_glimpse_llm(
             "再多就烦人了，除非有真的让你忍不住的话题"
         )
 
-    prompt = get_prompt("glimpse_observe")
-    compile_args = {
+    prompt_vars = {
         "persona_name": persona_name,
         "persona_lite": persona_lite,
         "group_name": group_name,
@@ -135,21 +133,13 @@ async def _call_glimpse_llm(
         ),
         "recent_proactive": proactive_hint,
     }
-    try:
-        compiled = prompt.compile(**compile_args)
-    except KeyError:
-        # prompt 模板尚未添加新变量，fallback
-        compiled = prompt.compile(
-            persona_name=persona_name,
-            persona_lite=persona_lite,
-            group_name=group_name,
-            messages=messages_text,
-        )
 
-    model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-    response = await model.ainvoke(
-        [{"role": "user", "content": compiled}],
-        config={"callbacks": [CallbackHandler()], "run_name": "glimpse-observe"},
+    response = await LLMService.run(
+        prompt_id="glimpse_observe",
+        prompt_vars=prompt_vars,
+        messages=[HumanMessage(content="观察群消息")],
+        model_id=settings.life_engine_model,
+        trace_name="glimpse-observe",
     )
 
     if isinstance(response.content, list):

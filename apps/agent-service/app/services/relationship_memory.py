@@ -8,9 +8,9 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_bot_persona, get_username
 from app.orm.memory_crud import (
@@ -92,19 +92,16 @@ async def _filter_relevant_messages(
     if not timeline:
         return []
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="relationship_filter",
-        tools=[],
-        model_id=settings.relationship_model,
-        trace_name="relationship-filter",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="分析对话，找出我参与的话题")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
             "messages": timeline,
         },
+        messages=[HumanMessage(content="分析对话，找出我参与的话题")],
+        model_id=settings.relationship_model,
+        trace_name="relationship-filter",
     )
 
     topics = _parse_llm_json(result.content)
@@ -188,14 +185,8 @@ async def extract_relationship_updates(
             core_facts_lines.append(f"- {name}({uid}): （第一次互动）")
             impression_lines.append(f"- {name}({uid}): （第一次互动）")
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="relationship_extract",
-        tools=[],
-        model_id=settings.relationship_model,
-        trace_name="relationship-extract",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="根据对话更新关系记忆")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
@@ -203,6 +194,9 @@ async def extract_relationship_updates(
             "current_core_facts": "\n".join(core_facts_lines),
             "current_impression": "\n".join(impression_lines),
         },
+        messages=[HumanMessage(content="根据对话更新关系记忆")],
+        model_id=settings.relationship_model,
+        trace_name="relationship-extract",
     )
 
     updates = _parse_llm_json(result.content)

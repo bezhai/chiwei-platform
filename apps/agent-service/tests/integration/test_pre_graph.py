@@ -13,26 +13,21 @@ import pytest
 
 from app.agents.graphs.pre.state import (
     BlockReason,
-    Complexity,
 )
 
 pytestmark = pytest.mark.integration
 
 
-def _make_smart_model(result_map: dict):
-    """创建一个根据 with_structured_output 参数返回不同结果的 mock model.
+def _make_extract_side_effect(result_map: dict):
+    """创建 LLMService.extract 的 side_effect，根据 schema 参数返回不同结果。
 
     result_map: {StructuredOutputClass: return_value_instance}
     """
 
-    def _with_structured_output(cls):
-        mock_structured = MagicMock()
-        mock_structured.ainvoke = AsyncMock(return_value=result_map[cls])
-        return mock_structured
+    async def _side_effect(prompt_id, prompt_vars, messages, schema, **kwargs):
+        return result_map[schema]
 
-    mock_model = MagicMock()
-    mock_model.with_structured_output.side_effect = _with_structured_output
-    return mock_model
+    return _side_effect
 
 
 @pytest.fixture(autouse=True)
@@ -50,9 +45,7 @@ class TestPreGraphNormalMessage:
 
     async def test_normal_message_passes(self):
         """正常消息应通过所有安全检查"""
-        from app.agents.graphs.pre.nodes.complexity import (
-            ComplexityClassification,
-        )
+        from app.agents.graphs.pre.nodes.nsfw_safety import NsfwCheckResult
         from app.agents.graphs.pre.nodes.safety import (
             PoliticsCheckResult,
             PromptInjectionResult,
@@ -65,11 +58,10 @@ class TestPreGraphNormalMessage:
             PoliticsCheckResult: PoliticsCheckResult(
                 is_sensitive=False, confidence=0.1
             ),
-            ComplexityClassification: ComplexityClassification(
-                complexity="simple", confidence=0.9
+            NsfwCheckResult: NsfwCheckResult(
+                is_nsfw=False, confidence=0.1
             ),
         }
-        smart_model = _make_smart_model(result_map)
 
         with (
             patch(
@@ -78,14 +70,14 @@ class TestPreGraphNormalMessage:
                 return_value=None,
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.safety.get_prompt",
@@ -94,7 +86,7 @@ class TestPreGraphNormalMessage:
                 ),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.get_prompt",
+                "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
                 return_value=MagicMock(
                     compile=MagicMock(return_value="mocked_messages")
                 ),
@@ -110,8 +102,6 @@ class TestPreGraphNormalMessage:
 
         assert result["is_blocked"] is False
         assert result["block_reason"] is None
-        assert result["complexity_result"] is not None
-        assert result["complexity_result"].complexity == Complexity.SIMPLE
 
 
 class TestPreGraphBannedWord:
@@ -119,9 +109,7 @@ class TestPreGraphBannedWord:
 
     async def test_banned_word_blocks_message(self):
         """包含封禁词的消息应被拦截"""
-        from app.agents.graphs.pre.nodes.complexity import (
-            ComplexityClassification,
-        )
+        from app.agents.graphs.pre.nodes.nsfw_safety import NsfwCheckResult
         from app.agents.graphs.pre.nodes.safety import (
             PoliticsCheckResult,
             PromptInjectionResult,
@@ -134,11 +122,10 @@ class TestPreGraphBannedWord:
             PoliticsCheckResult: PoliticsCheckResult(
                 is_sensitive=False, confidence=0.1
             ),
-            ComplexityClassification: ComplexityClassification(
-                complexity="simple", confidence=0.9
+            NsfwCheckResult: NsfwCheckResult(
+                is_nsfw=False, confidence=0.1
             ),
         }
-        smart_model = _make_smart_model(result_map)
 
         with (
             patch(
@@ -147,14 +134,14 @@ class TestPreGraphBannedWord:
                 return_value="bad_word",
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.safety.get_prompt",
@@ -163,7 +150,7 @@ class TestPreGraphBannedWord:
                 ),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.get_prompt",
+                "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
                 return_value=MagicMock(
                     compile=MagicMock(return_value="mocked_messages")
                 ),
@@ -186,9 +173,7 @@ class TestPreGraphPromptInjection:
 
     async def test_prompt_injection_blocks_message(self):
         """LLM 检测到注入时应拦截"""
-        from app.agents.graphs.pre.nodes.complexity import (
-            ComplexityClassification,
-        )
+        from app.agents.graphs.pre.nodes.nsfw_safety import NsfwCheckResult
         from app.agents.graphs.pre.nodes.safety import (
             PoliticsCheckResult,
             PromptInjectionResult,
@@ -201,11 +186,10 @@ class TestPreGraphPromptInjection:
             PoliticsCheckResult: PoliticsCheckResult(
                 is_sensitive=False, confidence=0.1
             ),
-            ComplexityClassification: ComplexityClassification(
-                complexity="simple", confidence=0.9
+            NsfwCheckResult: NsfwCheckResult(
+                is_nsfw=False, confidence=0.1
             ),
         }
-        smart_model = _make_smart_model(result_map)
 
         with (
             patch(
@@ -214,14 +198,14 @@ class TestPreGraphPromptInjection:
                 return_value=None,
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.safety.get_prompt",
@@ -230,7 +214,7 @@ class TestPreGraphPromptInjection:
                 ),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.get_prompt",
+                "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
                 return_value=MagicMock(
                     compile=MagicMock(return_value="mocked_messages")
                 ),
@@ -260,12 +244,12 @@ class TestPreGraphLLMFailureGraceful:
                 return_value=None,
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("LLM unavailable"),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("LLM unavailable"),
             ),
@@ -276,7 +260,7 @@ class TestPreGraphLLMFailureGraceful:
                 ),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.complexity.get_prompt",
+                "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
                 return_value=MagicMock(
                     compile=MagicMock(return_value="mocked_messages")
                 ),
@@ -292,5 +276,3 @@ class TestPreGraphLLMFailureGraceful:
 
         # LLM 异常时降级放行
         assert result["is_blocked"] is False
-        assert result["complexity_result"] is not None
-        assert result["complexity_result"].complexity == Complexity.SIMPLE

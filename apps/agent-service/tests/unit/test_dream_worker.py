@@ -27,25 +27,17 @@ async def test_generate_daily_dream_produces_fragment():
         patch("app.workers.dream_worker.get_fragments_in_date_range", new_callable=AsyncMock, return_value=[frag1, frag2]),
         patch("app.workers.dream_worker.get_bot_persona", new_callable=AsyncMock, return_value=persona_obj),
         patch("app.workers.dream_worker.get_recent_fragments_by_grain", new_callable=AsyncMock, return_value=[]),
-        patch("app.workers.dream_worker.get_prompt") as mock_get_prompt,
-        patch("app.workers.dream_worker.ModelBuilder") as mock_mb,
+        patch("app.workers.dream_worker.LLMService.run", new_callable=AsyncMock, return_value=MagicMock(content="今天做了个温柔的梦")) as mock_llm_run,
         patch("app.workers.dream_worker.create_fragment", new_callable=AsyncMock, return_value=saved_fragment),
         patch("app.workers.dream_worker.settings") as mock_settings,
     ):
         mock_settings.diary_model = "test-model"
-        mock_get_prompt.return_value.compile.return_value = "compiled daily prompt"
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = MagicMock(content="今天做了个温柔的梦")
-        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
 
         from app.workers.dream_worker import generate_daily_dream
         result = await generate_daily_dream("akao", date(2026, 4, 5))
 
     assert result is saved_fragment
-    # create_fragment 被调用，且碎片 grain=daily
-    from app.workers.dream_worker import create_fragment as cf_fn
-    # verify via the mock
-    mock_model.ainvoke.assert_awaited_once()
+    mock_llm_run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -54,8 +46,7 @@ async def test_generate_daily_dream_skips_if_no_fragments():
     with (
         patch("app.workers.dream_worker.get_fragments_in_date_range", new_callable=AsyncMock, return_value=[]),
         patch("app.workers.dream_worker.get_bot_persona", new_callable=AsyncMock),
-        patch("app.workers.dream_worker.get_prompt") as mock_get_prompt,
-        patch("app.workers.dream_worker.ModelBuilder") as mock_mb,
+        patch("app.workers.dream_worker.LLMService.run", new_callable=AsyncMock) as mock_llm_run,
         patch("app.workers.dream_worker.create_fragment", new_callable=AsyncMock) as mock_create,
     ):
         from app.workers.dream_worker import generate_daily_dream
@@ -63,7 +54,7 @@ async def test_generate_daily_dream_skips_if_no_fragments():
 
     assert result is None
     mock_create.assert_not_awaited()
-    mock_get_prompt.assert_not_called()
+    mock_llm_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -79,16 +70,11 @@ async def test_generate_weekly_dream_from_dailies():
     with (
         patch("app.workers.dream_worker.get_recent_fragments_by_grain", new_callable=AsyncMock, return_value=daily_frags),
         patch("app.workers.dream_worker.get_bot_persona", new_callable=AsyncMock, return_value=persona_obj),
-        patch("app.workers.dream_worker.get_prompt") as mock_get_prompt,
-        patch("app.workers.dream_worker.ModelBuilder") as mock_mb,
+        patch("app.workers.dream_worker.LLMService.run", new_callable=AsyncMock, return_value=MagicMock(content="这一周过得很充实")) as mock_llm_run,
         patch("app.workers.dream_worker.create_fragment", new_callable=AsyncMock, return_value=saved_fragment) as mock_create,
         patch("app.workers.dream_worker.settings") as mock_settings,
     ):
         mock_settings.diary_model = "test-model"
-        mock_get_prompt.return_value.compile.return_value = "compiled weekly prompt"
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = MagicMock(content="这一周过得很充实")
-        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
 
         from app.workers.dream_worker import generate_weekly_dream
         result = await generate_weekly_dream("akao", date(2026, 4, 7))

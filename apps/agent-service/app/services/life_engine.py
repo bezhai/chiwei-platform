@@ -158,10 +158,9 @@ class LifeEngine:
         activity_type: str = "",
     ) -> dict:
         """调用 LLM 决定下一步状态"""
-        from langfuse.langchain import CallbackHandler
+        from langchain_core.messages import HumanMessage
 
-        from app.agents.infra.langfuse_client import get_prompt
-        from app.agents.infra.model_builder import ModelBuilder
+        from app.agents.infra.llm_service import LLMService
         from app.config.config import settings
         from app.orm.crud import get_bot_persona, get_plan_for_period
         from app.orm.memory_crud import get_today_fragments
@@ -189,23 +188,22 @@ class LifeEngine:
             else "（还没跟人聊过）"
         )
 
-        prompt = get_prompt("life_engine_tick")
-        compiled = prompt.compile(
-            persona_name=persona_name,
-            persona_lite=persona_lite,
-            current_time=now.strftime("%H:%M"),
-            current_state=current_state,
-            activity_duration=duration_text,
-            response_mood=response_mood,
-            schedule=schedule_text,
-            activity_timeline=timeline_text,
-            recent_experiences=frag_text,
-        )
-
-        model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-        response = await model.ainvoke(
-            [{"role": "user", "content": compiled}],
-            config={"callbacks": [CallbackHandler()], "run_name": "life-engine-tick"},
+        response = await LLMService.run(
+            prompt_id="life_engine_tick",
+            prompt_vars={
+                "persona_name": persona_name,
+                "persona_lite": persona_lite,
+                "current_time": now.strftime("%H:%M"),
+                "current_state": current_state,
+                "activity_duration": duration_text,
+                "response_mood": response_mood,
+                "schedule": schedule_text,
+                "activity_timeline": timeline_text,
+                "recent_experiences": frag_text,
+            },
+            messages=[HumanMessage(content="更新生活状态")],
+            model_id=settings.life_engine_model,
+            trace_name="life-engine-tick",
         )
         raw = _extract_text(response.content)
 

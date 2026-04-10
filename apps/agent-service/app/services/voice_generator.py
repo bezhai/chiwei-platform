@@ -7,9 +7,9 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_bot_persona, get_plan_for_period
 from app.orm.memory_crud import get_today_fragments, save_reply_style
@@ -50,14 +50,8 @@ async def generate_voice(
     if recent_context:
         recent_ctx_block = f"最近的对话和你的回复：\n{recent_context}"
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="voice_generator",
-        tools=[],
-        model_id=settings.identity_drift_model,
-        trace_name="voice-generator",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="生成当前状态的内心独白和语气示例")],
         prompt_vars={
             "persona_name": persona.display_name,
             "persona_lite": persona.persona_lite,
@@ -68,6 +62,9 @@ async def generate_voice(
             "recent_context": recent_ctx_block,
             "current_time": now.strftime("%H:%M"),
         },
+        messages=[HumanMessage(content="生成当前状态的内心独白和语气示例")],
+        model_id=settings.identity_drift_model,
+        trace_name="voice-generator",
     )
 
     content = result.content or ""

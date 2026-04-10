@@ -40,9 +40,14 @@ _BACKOFF_MAX = 8  # 秒
 
 
 def _build_messages(
-    system_prompt: str, messages: list[dict | BaseMessage]
+    system_prompt: str | None, messages: list[dict | BaseMessage]
 ) -> list[BaseMessage | dict]:
-    """将 system_prompt 作为 SystemMessage 拼到 messages 前面"""
+    """将 system_prompt 作为 SystemMessage 拼到 messages 前面
+
+    当 system_prompt 为 None 时（prompt_id 未提供），直接返回 messages。
+    """
+    if system_prompt is None:
+        return list(messages)
     return [SystemMessage(content=system_prompt)] + list(messages)
 
 
@@ -109,7 +114,7 @@ class LLMService:
 
     @staticmethod
     async def run(
-        prompt_id: str,
+        prompt_id: str | None,
         prompt_vars: dict[str, Any],
         messages: list[dict | BaseMessage],
         *,
@@ -123,7 +128,7 @@ class LLMService:
         """同步调用 LLM，返回 AIMessage
 
         Args:
-            prompt_id: Langfuse prompt ID
+            prompt_id: Langfuse prompt ID（None 时跳过 prompt，直接用 messages）
             prompt_vars: prompt 模板变量
             messages: 用户消息列表
             model_id: 模型 ID（对应 ModelBuilder）
@@ -139,8 +144,10 @@ class LLMService:
         model = await ModelBuilder.build_chat_model(
             model_id, **(model_kwargs or {})
         )
-        prompt = get_prompt(prompt_id)
-        system_prompt = prompt.compile(**prompt_vars)
+        system_prompt: str | None = None
+        if prompt_id is not None:
+            prompt = get_prompt(prompt_id)
+            system_prompt = prompt.compile(**prompt_vars)
         full_messages = _build_messages(system_prompt, messages)
         config = _build_config(trace_name, parent_run_id, metadata)
 
@@ -155,7 +162,7 @@ class LLMService:
 
     @staticmethod
     async def stream(
-        prompt_id: str,
+        prompt_id: str | None,
         prompt_vars: dict[str, Any],
         messages: list[dict | BaseMessage],
         *,
@@ -168,7 +175,7 @@ class LLMService:
         """流式调用 LLM，yield AIMessageChunk
 
         Args:
-            prompt_id: Langfuse prompt ID
+            prompt_id: Langfuse prompt ID（None 时跳过 prompt，直接用 messages）
             prompt_vars: prompt 模板变量
             messages: 用户消息列表
             model_id: 模型 ID
@@ -183,8 +190,10 @@ class LLMService:
         model = await ModelBuilder.build_chat_model(
             model_id, **(model_kwargs or {})
         )
-        prompt = get_prompt(prompt_id)
-        system_prompt = prompt.compile(**prompt_vars)
+        system_prompt: str | None = None
+        if prompt_id is not None:
+            prompt = get_prompt(prompt_id)
+            system_prompt = prompt.compile(**prompt_vars)
         full_messages = _build_messages(system_prompt, messages)
         config = _build_config(trace_name, parent_run_id, metadata)
 
@@ -193,7 +202,7 @@ class LLMService:
 
     @staticmethod
     async def extract(
-        prompt_id: str,
+        prompt_id: str | None,
         prompt_vars: dict[str, Any],
         messages: list[dict | BaseMessage],
         schema: type[BaseModel],
@@ -208,7 +217,7 @@ class LLMService:
         """结构化提取，返回 Pydantic model 实例
 
         Args:
-            prompt_id: Langfuse prompt ID
+            prompt_id: Langfuse prompt ID（None 时跳过 prompt，直接用 messages）
             prompt_vars: prompt 模板变量
             messages: 用户消息列表
             schema: Pydantic BaseModel 类（用于 structured output）
@@ -227,8 +236,10 @@ class LLMService:
         )
         structured_model = model.with_structured_output(schema)
 
-        prompt = get_prompt(prompt_id)
-        system_prompt = prompt.compile(**prompt_vars)
+        system_prompt: str | None = None
+        if prompt_id is not None:
+            prompt = get_prompt(prompt_id)
+            system_prompt = prompt.compile(**prompt_vars)
         full_messages = _build_messages(system_prompt, messages)
         config = _build_config(trace_name, parent_run_id, metadata)
 

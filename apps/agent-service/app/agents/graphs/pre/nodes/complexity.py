@@ -16,7 +16,7 @@ from app.agents.graphs.pre.state import (
     PreState,
 )
 from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from app.agents.infra.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,14 @@ async def classify_complexity(state: PreState, config) -> dict:
         langfuse_prompt = get_prompt("pre_complexity_classification")
         messages = langfuse_prompt.compile(message=message)
 
-        model = await ModelBuilder.build_chat_model(
-            "pre-complexity-model", reasoning_effort="low"
-        )
-        structured_model = model.with_structured_output(ComplexityClassification)
-
-        result: ComplexityClassification = await structured_model.ainvoke(
-            messages, config=config
+        result: ComplexityClassification = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=messages,
+            schema=ComplexityClassification,
+            model_id="pre-complexity-model",
+            trace_name="pre-complexity-classify",
+            model_kwargs={"reasoning_effort": "low"},
         )
 
         # 映射到枚举，处理无效值

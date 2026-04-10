@@ -9,7 +9,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from openai import APITimeoutError
 from pydantic import BaseModel
 
@@ -181,6 +181,25 @@ class TestRun:
 
         assert mock_deps["model"].ainvoke.call_count == 1
 
+    async def test_run_with_none_prompt_id_skips_prompt_compile(self, mock_deps):
+        """prompt_id=None 时不调用 get_prompt，messages 直接透传"""
+        mock_deps["model"].ainvoke = AsyncMock(
+            return_value=AIMessage(content="mocked response")
+        )
+
+        result = await LLMService.run(
+            prompt_id=None,
+            prompt_vars={},
+            messages=[SystemMessage(content="sys"), HumanMessage(content="hi")],
+            model_id="test-model",
+        )
+        assert result.content == "mocked response"
+        mock_deps["get_prompt"].assert_not_called()
+        # messages should be passed as-is (no SystemMessage prepended)
+        call_args = mock_deps["model"].ainvoke.call_args
+        messages = call_args[0][0]
+        assert len(messages) == 2  # only the 2 we passed, no extra SystemMessage
+
 
 # ---------------------------------------------------------------------------
 # extract() tests
@@ -268,6 +287,26 @@ class TestExtract:
 
         assert result.value == "ok"
         assert structured_model.ainvoke.call_count == 2
+
+    async def test_extract_with_none_prompt_id_skips_prompt_compile(self, mock_deps):
+        """extract prompt_id=None 时不调用 get_prompt"""
+
+        class Result(BaseModel):
+            safe: bool
+
+        structured_model = AsyncMock()
+        structured_model.ainvoke = AsyncMock(return_value=Result(safe=True))
+        mock_deps["model"].with_structured_output.return_value = structured_model
+
+        result = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=[HumanMessage(content="test")],
+            schema=Result,
+            model_id="test-model",
+        )
+        assert result.safe is True
+        mock_deps["get_prompt"].assert_not_called()
 
 
 # ---------------------------------------------------------------------------

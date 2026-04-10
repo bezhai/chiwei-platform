@@ -19,13 +19,6 @@ class TestCheckNsfwContent:
             check_nsfw_content,
         )
 
-        mock_model = MagicMock()
-        mock_structured = MagicMock()
-        mock_structured.ainvoke = AsyncMock(
-            return_value=NsfwCheckResult(is_nsfw=True, confidence=0.9)
-        )
-        mock_model.with_structured_output.return_value = mock_structured
-
         state = {
             "message_content": "一些 NSFW 内容",
             "persona_id": "ayana",
@@ -34,9 +27,9 @@ class TestCheckNsfwContent:
 
         with (
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_model,
+                return_value=NsfwCheckResult(is_nsfw=True, confidence=0.9),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
@@ -58,13 +51,6 @@ class TestCheckNsfwContent:
             check_nsfw_content,
         )
 
-        mock_model = MagicMock()
-        mock_structured = MagicMock()
-        mock_structured.ainvoke = AsyncMock(
-            return_value=NsfwCheckResult(is_nsfw=True, confidence=0.9)
-        )
-        mock_model.with_structured_output.return_value = mock_structured
-
         state = {
             "message_content": "一些 NSFW 内容",
             "persona_id": "akao",
@@ -73,9 +59,9 @@ class TestCheckNsfwContent:
 
         with (
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_model,
+                return_value=NsfwCheckResult(is_nsfw=True, confidence=0.9),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
@@ -97,13 +83,6 @@ class TestCheckNsfwContent:
             check_nsfw_content,
         )
 
-        mock_model = MagicMock()
-        mock_structured = MagicMock()
-        mock_structured.ainvoke = AsyncMock(
-            return_value=NsfwCheckResult(is_nsfw=False, confidence=0.1)
-        )
-        mock_model.with_structured_output.return_value = mock_structured
-
         state = {
             "message_content": "正常聊天内容",
             "persona_id": "ayana",
@@ -112,9 +91,9 @@ class TestCheckNsfwContent:
 
         with (
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_model,
+                return_value=NsfwCheckResult(is_nsfw=False, confidence=0.1),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.nsfw_safety.get_prompt",
@@ -140,7 +119,7 @@ class TestCheckNsfwContent:
 
         with (
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("LLM down"),
             ),

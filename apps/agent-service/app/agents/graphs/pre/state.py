@@ -32,6 +32,22 @@ def merge_safety_results(
     return existing + new
 
 
+class Complexity(str, Enum):
+    """任务复杂度等级"""
+
+    SIMPLE = "simple"
+    COMPLEX = "complex"
+    SUPER_COMPLEX = "super_complex"
+
+
+@dataclass
+class ComplexityResult:
+    """复杂度分类结果"""
+
+    complexity: Complexity = Complexity.SIMPLE
+    confidence: float = 0.5
+
+
 class PreState(TypedDict):
     """Pre Graph 状态"""
 
@@ -41,6 +57,9 @@ class PreState(TypedDict):
 
     # 安全检测结果（并行合并）
     safety_results: Annotated[list[SafetyResult], merge_safety_results]
+
+    # 复杂度分类
+    complexity_result: ComplexityResult | None
 
     # 最终输出
     is_blocked: bool

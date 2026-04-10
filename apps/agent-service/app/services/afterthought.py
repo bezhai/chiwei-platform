@@ -11,9 +11,9 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_bot_persona, get_chat_messages_in_range
 from app.orm.memory_crud import create_fragment
@@ -162,21 +162,18 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         logger.info(f"[{persona_id}] Empty timeline for {chat_id}, skip")
         return
 
-    # Call LLM via ChatAgent
-    agent = ChatAgent(
+    # Call LLM via LLMService
+    result = await LLMService.run(
         prompt_id="afterthought_conversation",
-        tools=[],
-        model_id=settings.diary_model,
-        trace_name="afterthought",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="生成经历碎片")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
             "scene": scene,
             "messages": timeline,
         },
+        messages=[HumanMessage(content="生成经历碎片")],
+        model_id=settings.diary_model,
+        trace_name="afterthought",
     )
     content = _extract_text(result.content)
 
