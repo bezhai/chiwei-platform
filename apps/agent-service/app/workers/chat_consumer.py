@@ -174,6 +174,7 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
         t_first_token: float | None = None
         token_count = 0
 
+        t_last_token = t_start
         async for text in stream_chat(
             message_id, session_id=session_id, persona_id=persona_id
         ):
@@ -181,6 +182,7 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
                 continue
             if t_first_token is None:
                 t_first_token = time.monotonic()
+            t_last_token = time.monotonic()
             token_count += 1
             full_content += text
 
@@ -210,6 +212,15 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
                     )
                 sent_length += idx + len(SPLIT_MARKER)
                 pending = full_content[sent_length:]
+
+        # 观测 last_token → stream_end 之间的延迟（正常应 <100ms，卡住时会很大）
+        t_generator_exit = time.monotonic()
+        generator_drain_ms = (t_generator_exit - t_last_token) * 1000
+        if generator_drain_ms > 5000:
+            logger.warning(
+                "stream_chat generator drain slow: session_id=%s, drain_ms=%d, tokens=%d",
+                session_id, round(generator_drain_ms), token_count,
+            )
 
         # 记录流结束时间，观测 TTFT 和 agent_stream 阶段耗时
         t_stream_end = time.monotonic()

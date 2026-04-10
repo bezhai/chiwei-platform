@@ -135,10 +135,19 @@ async def _buffer_until_pre(
         try:
             async for text in raw_stream:
                 await q.put(text)
+        except asyncio.CancelledError:
+            logger.warning(f"_drain_stream cancelled: message_id={message_id}")
+            raise
         except Exception as e:
+            logger.error(f"_drain_stream error: message_id={message_id}, error={e}")
             await q.put(e)
         finally:
-            await q.put(_STREAM_END)
+            try:
+                await q.put(_STREAM_END)
+            except asyncio.CancelledError:
+                # 即使被取消也要确保 STREAM_END 入队（用非 async 方式）
+                q.put_nowait(_STREAM_END)
+                logger.warning(f"_drain_stream STREAM_END forced via put_nowait: message_id={message_id}")
 
     drain_task = asyncio.create_task(_drain_stream())
 
@@ -228,16 +237,27 @@ async def _buffer_until_pre(
             buffer.clear()
 
         # Phase 2: Pre passed, stream directly from queue
+        _PHASE2_TIMEOUT = 120  # 2 分钟超时防御
+        logger.debug(f"_buffer_until_pre phase2 start: message_id={message_id}")
         while True:
-            item = await q.get()
+            try:
+                item = await asyncio.wait_for(q.get(), timeout=_PHASE2_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"_buffer_until_pre phase2 TIMEOUT ({_PHASE2_TIMEOUT}s): "
+                    f"message_id={message_id}, drain_task.done={drain_task.done()}"
+                )
+                return
             if isinstance(item, Exception):
                 raise item
             if item is _STREAM_END:
+                logger.debug(f"_buffer_until_pre phase2 STREAM_END: message_id={message_id}")
                 return
             yield item
 
     finally:
         if not drain_task.done():
+            logger.warning(f"_buffer_until_pre finally: cancelling drain_task, message_id={message_id}")
             drain_task.cancel()
 
 
