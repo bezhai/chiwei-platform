@@ -78,7 +78,7 @@ async def test_multiple_events_reset_debounce_timer():
 async def test_buffer_exceeding_max_forces_phase2():
     """buffer 达到 MAX_BUFFER 时应跳过 timer 直接触发 phase2"""
     mgr = _make_manager()
-    mgr.MAX_BUFFER = 3  # 降低阈值方便测试
+    mgr._max_buffer = 3  # 降低阈值方便测试
     key = "chat_1:akao"
 
     phase2_called = asyncio.Event()
