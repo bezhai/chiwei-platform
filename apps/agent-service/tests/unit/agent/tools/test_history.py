@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.agent.context import AgentContext
+
 # ---------------------------------------------------------------------------
 # _parse_time_hint
 # ---------------------------------------------------------------------------
@@ -85,7 +87,7 @@ class TestCheckChatHistory:
         from app.agent.tools.history import check_chat_history
 
         mock_context = MagicMock()
-        mock_context.context.message.chat_id = "test_chat"
+        mock_context.context = AgentContext(chat_id="test_chat")
 
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
@@ -111,7 +113,7 @@ class TestCheckChatHistory:
         from app.agent.tools.history import check_chat_history
 
         mock_context = MagicMock()
-        mock_context.context.message.chat_id = "test_chat"
+        mock_context.context = AgentContext(chat_id="test_chat")
 
         msg1 = MagicMock(
             create_time=1712000000000,
@@ -170,7 +172,7 @@ class TestListGroupMembers:
         from app.agent.tools.history import list_group_members
 
         mock_context = MagicMock()
-        mock_context.context.message.chat_id = "test_chat"
+        mock_context.context = AgentContext(chat_id="test_chat")
 
         mock_result = MagicMock()
         mock_result.all.return_value = []
@@ -194,7 +196,7 @@ class TestListGroupMembers:
         from app.agent.tools.history import list_group_members
 
         mock_context = MagicMock()
-        mock_context.context.message.chat_id = "test_chat"
+        mock_context.context = AgentContext(chat_id="test_chat")
 
         member1 = MagicMock(is_owner=True, is_manager=False)
         user1 = MagicMock(name="Owner")

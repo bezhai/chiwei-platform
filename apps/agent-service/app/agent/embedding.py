@@ -21,6 +21,9 @@ from app.agent.models import resolve_model_info
 
 logger = logging.getLogger(__name__)
 
+# Embedding only supports Ark, which always needs base_url
+_EMBEDDING_REQUIRED_FIELDS = ("api_key", "base_url", "model_name")
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -166,7 +169,9 @@ async def embed_dense(
     if not text and not image_base64_list:
         raise ValueError("embed_dense requires at least text or one image")
 
-    info = await resolve_model_info(model_id)
+    info = await resolve_model_info(
+        model_id, required_fields=_EMBEDDING_REQUIRED_FIELDS
+    )
     client = _create_ark_client(info)
 
     try:
@@ -210,7 +215,9 @@ async def embed_hybrid(
     if not text and not image_base64_list:
         raise ValueError("embed_hybrid requires at least text or one image")
 
-    info = await resolve_model_info(model_id)
+    info = await resolve_model_info(
+        model_id, required_fields=_EMBEDDING_REQUIRED_FIELDS
+    )
     client = _create_ark_client(info)
     model_name = info["model_name"]
 

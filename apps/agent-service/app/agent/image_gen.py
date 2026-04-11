@@ -11,7 +11,6 @@ import logging
 from math import gcd
 from typing import Any
 
-from app.agent.embedding import _create_ark_client
 from app.agent.models import resolve_model_info
 
 logger = logging.getLogger(__name__)
@@ -56,6 +55,18 @@ async def generate_image(
 # ---------------------------------------------------------------------------
 # Backend implementations
 # ---------------------------------------------------------------------------
+
+
+def _create_ark_client(info: dict[str, Any]) -> Any:
+    """Create an AsyncArk client for image generation."""
+    from volcenginesdkarkruntime import AsyncArk
+
+    return AsyncArk(
+        api_key=info["api_key"],
+        base_url=info["base_url"],
+        timeout=60.0,
+        max_retries=3,
+    )
 
 
 async def _generate_image_ark(
@@ -189,29 +200,32 @@ async def _generate_image_gemini(
             contents.append(types.Part.from_uri(file_uri=url, mime_type="image/*"))
     contents.append(prompt)
 
-    response = await client.aio.models.generate_content(
-        model=info["model_name"],
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE", "TEXT"],
-            image_config=types.ImageConfig(
-                aspect_ratio=aspect_ratio,
-                image_size=image_size,
+    try:
+        response = await client.aio.models.generate_content(
+            model=info["model_name"],
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                    image_size=image_size,
+                ),
             ),
-        ),
-    )
+        )
 
-    if not response.candidates:
-        raise RuntimeError("Gemini image generation returned no candidates")
+        if not response.candidates:
+            raise RuntimeError("Gemini image generation returned no candidates")
 
-    images: list[str] = []
-    for part in response.candidates[0].content.parts:
-        if part.inline_data and part.inline_data.data:
-            mime = part.inline_data.mime_type or "image/png"
-            b64 = base64.b64encode(part.inline_data.data).decode()
-            images.append(f"data:{mime};base64,{b64}")
+        images: list[str] = []
+        for part in response.candidates[0].content.parts:
+            if part.inline_data and part.inline_data.data:
+                mime = part.inline_data.mime_type or "image/png"
+                b64 = base64.b64encode(part.inline_data.data).decode()
+                images.append(f"data:{mime};base64,{b64}")
 
-    if not images:
-        raise RuntimeError("Gemini response contained no image data")
+        if not images:
+            raise RuntimeError("Gemini response contained no image data")
 
-    return images
+        return images
+    finally:
+        await client.aio.close()

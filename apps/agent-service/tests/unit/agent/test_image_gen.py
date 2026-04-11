@@ -276,17 +276,18 @@ class TestGenerateImageGemini:
 
         mock_aio = MagicMock()
         mock_aio.models = mock_aio_models
+        mock_aio.close = AsyncMock()
 
         mock_client = MagicMock()
         mock_client.aio = mock_aio
 
         mock_genai = MagicMock()
         mock_genai.Client.return_value = mock_client
-        return mock_genai
+        return mock_genai, mock_aio
 
     async def test_empty_response_raises(self):
         mock_response = SimpleNamespace(candidates=[])
-        mock_genai = self._make_gemini_mocks(mock_response)
+        mock_genai, mock_aio = self._make_gemini_mocks(mock_response)
         mock_types = MagicMock()
 
         mock_settings = MagicMock()
@@ -307,13 +308,16 @@ class TestGenerateImageGemini:
                     None,
                 )
 
+        # aio.close() must be called even on error
+        mock_aio.close.assert_called_once()
+
     async def test_no_image_parts_raises(self):
         mock_part = SimpleNamespace(inline_data=None)
         mock_candidate = SimpleNamespace(
             content=SimpleNamespace(parts=[mock_part])
         )
         mock_response = SimpleNamespace(candidates=[mock_candidate])
-        mock_genai = self._make_gemini_mocks(mock_response)
+        mock_genai, mock_aio = self._make_gemini_mocks(mock_response)
         mock_types = MagicMock()
 
         mock_settings = MagicMock()
@@ -333,3 +337,5 @@ class TestGenerateImageGemini:
                     "1024x1024",
                     None,
                 )
+
+        mock_aio.close.assert_called_once()
