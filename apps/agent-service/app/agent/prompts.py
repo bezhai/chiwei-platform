@@ -2,7 +2,6 @@
 
 Thin wrapper around the Langfuse SDK providing:
   - ``get_prompt``   — fetch a cached Langfuse prompt object (with lane routing)
-  - ``compile_prompt`` — fetch + compile with template variables
 """
 
 from __future__ import annotations
@@ -62,12 +61,3 @@ def get_prompt(
     return _get_client().get_prompt(
         prompt_id, label=effective_label, cache_ttl_seconds=cache_ttl_seconds
     )
-
-
-def compile_prompt(prompt_id: str, **variables: Any) -> str:
-    """Fetch a Langfuse prompt and compile it with *variables*.
-
-    Convenience shortcut for ``get_prompt(id).compile(**vars)``.
-    """
-    prompt = get_prompt(prompt_id)
-    return prompt.compile(**variables)

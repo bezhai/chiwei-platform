@@ -6,7 +6,6 @@ Public surface:
 
     build_chat_model   — resolve model_id to a LangChain BaseChatModel
     get_prompt         — fetch a Langfuse prompt (with lane routing)
-    compile_prompt     — fetch + compile a prompt
 """
 
 from app.agent.core import Agent, AgentConfig
@@ -20,7 +19,7 @@ from app.agent.embedding import (
 )
 from app.agent.image_gen import generate_image
 from app.agent.models import build_chat_model
-from app.agent.prompts import compile_prompt, get_prompt
+from app.agent.prompts import get_prompt
 from app.agent.tools import ALL_TOOLS, BASE_TOOLS
 
 __all__ = [
@@ -33,7 +32,6 @@ __all__ = [
     "Modality",
     "SparseVector",
     "build_chat_model",
-    "compile_prompt",
     "embed_dense",
     "embed_hybrid",
     "generate_image",
