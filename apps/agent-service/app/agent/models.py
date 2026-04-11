@@ -207,8 +207,6 @@ async def build_chat_model(
     Raises:
         ModelBuildError: when model info is missing / inactive / incomplete.
     """
-    max_retries = kwargs.pop("max_retries", max_retries)
-
     info = await _get_model_and_provider_info(model_id)
     if info is None:
         raise ModelBuildError(model_id, "model info not found")

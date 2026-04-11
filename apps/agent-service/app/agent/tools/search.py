@@ -19,6 +19,7 @@ from prometheus_client import Counter, Histogram
 from pydantic import Field
 
 from app.agent.context import AgentContext
+from app.agent.tools._common import tool_error, upload_and_register
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
@@ -322,60 +323,13 @@ async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers — image upload
-# ---------------------------------------------------------------------------
-
-
-async def _upload_and_register(
-    source_type: str,
-    data: str,
-    registry: Any,
-) -> tuple[str, str | None]:
-    """Upload an image to TOS and optionally register in ImageRegistry.
-
-    Returns ``(tos_url, filename)`` on success, ``(data, None)`` on failure.
-    """
-    from app.infra.image import image_client
-
-    try:
-        tos_url = await image_client.upload_to_tos(source_type, data)
-        if not tos_url:
-            return data, None
-        filename: str | None = None
-        if registry:
-            filename = await registry.register(tos_url)
-        return tos_url, filename
-    except Exception:
-        logger.warning("upload_and_register failed", exc_info=True)
-        return data, None
-
-
 # =========================================================================
 # Public tools
 # =========================================================================
 
 
-def _tool_error(error_message: str):
-    """Decorator: catch exceptions, log, and return a friendly error string."""
-    import functools
-
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
-
-        return wrapper
-
-    return decorator
-
-
 @tool
-@_tool_error("网页搜索失败")
+@tool_error("网页搜索失败")
 async def search_web(
     query: str,
     gl: str = "CN",
@@ -447,7 +401,7 @@ async def search_web(
 
 
 @tool
-@_tool_error("图片搜索失败")
+@tool_error("图片搜索失败")
 async def search_images(
     query: Annotated[
         str,
@@ -492,7 +446,7 @@ async def search_images(
 
         t0 = time.monotonic()
         upload_tasks = [
-            _upload_and_register(
+            upload_and_register(
                 source_type="url",
                 data=img.get("image_url") or img.get("url", ""),
                 registry=registry,

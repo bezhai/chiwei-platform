@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -82,27 +83,13 @@ _DEFAULT_RECURSION_LIMIT = 12
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
 class AgentConfig:
     """Immutable configuration for a named agent."""
 
-    __slots__ = ("prompt_id", "model_id", "trace_name")
-
-    def __init__(
-        self,
-        prompt_id: str,
-        model_id: str,
-        trace_name: str | None = None,
-    ) -> None:
-        self.prompt_id = prompt_id
-        self.model_id = model_id
-        self.trace_name = trace_name
-
-    def __repr__(self) -> str:
-        return (
-            f"AgentConfig(prompt_id={self.prompt_id!r}, "
-            f"model_id={self.model_id!r}, "
-            f"trace_name={self.trace_name!r})"
-        )
+    prompt_id: str
+    model_id: str
+    trace_name: str | None = None
 
 
 AGENTS: dict[str, AgentConfig] = {
@@ -403,30 +390,19 @@ class Agent:
         agent = await self._build_langgraph_agent(prompt_vars)
         run_config = self._build_agentic_config(config)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = await agent.ainvoke(
-                    {"messages": messages},
-                    context=context,
-                    config=run_config,
-                )
-                return result["messages"][-1]
-            except RETRYABLE_EXCEPTIONS as e:
-                if attempt < max_retries:
-                    delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
-                    logger.warning(
-                        "Agent(%s).run() attempt %d/%d failed: %s, retrying in %ds",
-                        self._cfg.trace_name,
-                        attempt,
-                        max_retries,
-                        e,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    raise
+        async def _invoke(msgs: Any, *, config: Any) -> AIMessage:
+            result = await agent.ainvoke(
+                {"messages": msgs}, context=context, config=config
+            )
+            return result["messages"][-1]
 
-        raise RuntimeError("Unreachable: all retry attempts exhausted")
+        return await _retry(
+            _invoke,
+            messages,
+            run_config,
+            max_retries=max_retries,
+            label=f"Agent({self._cfg.trace_name}).run",
+        )
 
     async def _stream_agentic(
         self,

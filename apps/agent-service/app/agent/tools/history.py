@@ -6,7 +6,6 @@ history/members.py into a single module.
 
 from __future__ import annotations
 
-import functools
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -16,7 +15,7 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 from sqlalchemy import or_, select
 
 from app.agent.context import AgentContext
-from app.chat.content_parser import parse_content
+from app.agent.tools._common import tool_error
 from app.data.models import ConversationMessage, LarkGroupMember, LarkUser
 from app.data.session import get_session
 
@@ -31,28 +30,6 @@ LOOKBACK_HOURS = 24
 # search_group_history constants
 CONTEXT_WINDOW_MS = 5 * 60 * 1000  # 5 minutes
 TIME_GAP_THRESHOLD_MS = 10 * 60 * 1000  # 10 minutes
-
-
-# ---------------------------------------------------------------------------
-# Shared error handler
-# ---------------------------------------------------------------------------
-
-
-def _tool_error(error_message: str):
-    """Decorator: catch exceptions, return friendly error string."""
-
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
-
-        return wrapper
-
-    return decorator
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +52,7 @@ def _parse_time_hint(hint: str) -> int:
 
 
 def _format_timestamp(ts: int) -> str:
-    return datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M")
+    return datetime.fromtimestamp(ts / 1000, tz=CST).strftime("%Y-%m-%d %H:%M")
 
 
 def _truncate(text: str, max_len: int = 200) -> str:
@@ -89,7 +66,7 @@ def _truncate(text: str, max_len: int = 200) -> str:
 
 
 @tool
-@_tool_error("翻不到了...")
+@tool_error("翻不到了...")
 async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
     """翻翻聊天记录看看。
     你没印象但想确认一下的时候，可以翻翻聊天记录。
@@ -106,6 +83,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
     start_ts = int((now - timedelta(hours=hours)).timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
 
+    from app.chat.content_parser import parse_content
     from app.data.queries import find_messages_in_range, find_username
 
     async with get_session() as session:
@@ -140,7 +118,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
 
 
 @tool
-@_tool_error("搜索群聊历史失败")
+@tool_error("搜索群聊历史失败")
 async def search_group_history(query: str, limit: int = 10) -> str:
     """回想之前群里好像聊过的事
 
@@ -167,7 +145,9 @@ async def search_group_history(query: str, limit: int = 10) -> str:
 
     from app.agent.embedding import embed_hybrid
 
-    hybrid_embedding = await embed_hybrid(query, instructions=instructions)
+    hybrid_embedding = await embed_hybrid(
+        "embedding-model", text=query, instructions=instructions
+    )
 
     # 2. Qdrant hybrid search filtered by chat_id
     from app.infra.qdrant import qdrant
@@ -239,6 +219,8 @@ async def search_group_history(query: str, limit: int = 10) -> str:
         return "未找到相关消息"
 
     # 5. Format with time-gap separators
+    from app.chat.content_parser import parse_content
+
     anchor_set = set(anchor_message_ids)
     lines = [f"找到 {len(anchor_set)} 条相关消息及其上下文：\n"]
     prev_ts = None
@@ -255,7 +237,7 @@ async def search_group_history(query: str, limit: int = 10) -> str:
 
 
 @tool
-@_tool_error("查询群成员失败")
+@tool_error("查询群成员失败")
 async def list_group_members(role: str | None = None) -> str:
     """列出群成员列表
 

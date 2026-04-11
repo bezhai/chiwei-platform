@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import functools
 import logging
 from typing import TYPE_CHECKING
 
 from langchain.tools import tool
+
+from app.agent.tools._common import tool_error
 
 if TYPE_CHECKING:
     from app.skills.sandbox_client import SandboxClient
@@ -26,23 +27,8 @@ def _get_sandbox_client() -> SandboxClient:
     return _sandbox_client
 
 
-def _tool_error(error_message: str):
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
-
-        return wrapper
-
-    return decorator
-
-
 @tool
-@_tool_error("沙箱执行失败")
+@tool_error("沙箱执行失败")
 async def sandbox_bash(command: str) -> str:
     """在安全沙箱中执行 bash 命令，获取精确的计算或处理结果。
 

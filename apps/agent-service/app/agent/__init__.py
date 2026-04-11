@@ -8,7 +8,6 @@ Public surface:
     build_chat_model   — resolve model_id to a LangChain BaseChatModel
     get_prompt         — fetch a Langfuse prompt (with lane routing)
     compile_prompt     — fetch + compile a prompt
-    make_config        — build a LangChain config dict with Langfuse tracing
 """
 
 from app.agent.core import AGENTS, Agent, AgentConfig
@@ -24,7 +23,6 @@ from app.agent.embedding import (
 from app.agent.models import build_chat_model
 from app.agent.prompts import compile_prompt, get_prompt
 from app.agent.tools import ALL_TOOLS, BASE_TOOLS
-from app.agent.tracing import make_config
 
 __all__ = [
     "AGENTS",
@@ -42,5 +40,4 @@ __all__ = [
     "embed_hybrid",
     "generate_image",
     "get_prompt",
-    "make_config",
 ]

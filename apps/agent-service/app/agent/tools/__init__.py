@@ -3,10 +3,15 @@
 Exports two tool lists:
 
 - ``BASE_TOOLS`` — available to all agents including sub-agents.
-- ``ALL_TOOLS`` — only for the main agent (adds delegation, skill, sandbox).
+- ``ALL_TOOLS`` — only for the main agent (adds delegation, skill, sandbox, history).
 """
 
 from app.agent.tools.delegation import deep_research
+from app.agent.tools.history import (
+    check_chat_history,
+    list_group_members,
+    search_group_history,
+)
 from app.agent.tools.image import generate_image, read_images
 from app.agent.tools.recall import recall
 from app.agent.tools.sandbox import sandbox_bash
@@ -25,6 +30,9 @@ BASE_TOOLS = [
 # All tools: only for the main agent
 ALL_TOOLS = [
     *BASE_TOOLS,
+    check_chat_history,
+    search_group_history,
+    list_group_members,
     deep_research,
     load_skill,
     sandbox_bash,
@@ -39,6 +47,9 @@ __all__ = [
     "generate_image",
     "read_images",
     "recall",
+    "check_chat_history",
+    "search_group_history",
+    "list_group_members",
     "deep_research",
     "load_skill",
     "sandbox_bash",

@@ -5,10 +5,11 @@ Runs PG full-text search on ``experience_fragment``.
 
 from __future__ import annotations
 
-import functools
 import logging
 
 from langchain.tools import tool
+
+from app.agent.tools._common import tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -57,33 +58,13 @@ async def _recall_impl(what: str) -> str:
     return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Error handler
-# ---------------------------------------------------------------------------
-
-
-def _tool_error(error_message: str):
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
-
-        return wrapper
-
-    return decorator
-
-
 # =========================================================================
 # Public tool
 # =========================================================================
 
 
 @tool
-@_tool_error("想不起来了...")
+@tool_error("想不起来了...")
 async def recall(what: str) -> str:
     """想一想过去的事。
     当你隐约记得什么但细节模糊了，把你模糊记得的写下来，想一想。

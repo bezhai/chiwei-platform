@@ -6,31 +6,17 @@ domain-specific guides (drawing, donjin_search, etc.).
 
 from __future__ import annotations
 
-import functools
 import logging
 
 from langchain.tools import tool
 
+from app.agent.tools._common import tool_error
+
 logger = logging.getLogger(__name__)
 
 
-def _tool_error(error_message: str):
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
-
-        return wrapper
-
-    return decorator
-
-
 @tool
-@_tool_error("技能加载失败")
+@tool_error("技能加载失败")
 async def load_skill(skill_name: str, arguments: str = "") -> str:
     """加载指定技能的上下文和指令。
 

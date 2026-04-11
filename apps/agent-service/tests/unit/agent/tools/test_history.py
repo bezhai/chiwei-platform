@@ -145,7 +145,7 @@ class TestCheckChatHistory:
                 return_value="阿儒",
             ),
             patch(
-                "app.agent.tools.history.parse_content",
+                "app.chat.content_parser.parse_content",
                 side_effect=[mock_parsed1, mock_parsed2],
             ),
         ):

@@ -472,7 +472,7 @@ async def _generate_image_gemini(
             contents.append(types.Part.from_uri(file_uri=url, mime_type="image/*"))
     contents.append(prompt)
 
-    response = client.models.generate_content(
+    response = await client.aio.models.generate_content(
         model=info["model_name"],
         contents=contents,
         config=types.GenerateContentConfig(
