@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Annotated
 
 import httpx
 from bs4 import BeautifulSoup
 from langchain.tools import tool
+from pydantic import Field
 
 from app.agent.tools._common import (
     get_or_create_counter,
@@ -263,7 +265,7 @@ async def _google_search(query: str, num: int) -> list[dict]:
 
 
 async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
-    """You Search API (fallback provider)."""
+    """You Search API (primary search provider)."""
     params: dict[str, str | int] = {
         "query": query,
         "count": num,
@@ -300,7 +302,7 @@ async def search_web(
     query: str,
     gl: str = "CN",
     hl: str = "ZH-HANS",
-    num: int = 5,
+    num: Annotated[int, Field(ge=1, le=10, description="返回结果条数")] = 5,
 ) -> str:
     """网页搜索，返回搜索结果及其网页内容。
 

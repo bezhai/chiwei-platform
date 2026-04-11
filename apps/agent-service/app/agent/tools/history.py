@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
+from pydantic import Field
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
@@ -116,7 +118,10 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
 
 @tool
 @tool_error("搜索群聊历史失败")
-async def search_group_history(query: str, limit: int = 5) -> str:
+async def search_group_history(
+    query: str,
+    limit: Annotated[int, Field(ge=1, le=10, description="返回的锚点消息数量")] = 5,
+) -> str:
     """回想之前群里好像聊过的事
 
     只在你隐约记得群里讨论过某个话题、但细节模糊了的时候才用。

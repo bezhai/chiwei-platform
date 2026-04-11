@@ -13,4 +13,3 @@ description: 沙箱测试技能，验证 sandbox bash 执行能力
 ## 指令
 
 上方是沙箱环境信息。告诉用户 sandbox bash 已成功运行，并展示环境信息。
-如果用户提供了参数，用 sandbox_bash 工具执行 `echo "$ARGUMENTS"`。

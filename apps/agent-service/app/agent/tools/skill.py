@@ -30,7 +30,7 @@ async def load_skill(skill_name: str) -> str:
     from app.skills.renderer import render_skill
 
     skill = SkillRegistry.get(skill_name)
-    rendered = await render_skill(skill, "")
+    rendered = await render_skill(skill)
 
     logger.info("Skill %s loaded, rendered length: %d", skill_name, len(rendered))
     return rendered
