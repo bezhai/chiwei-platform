@@ -52,9 +52,9 @@ from openai import (
 )
 from pydantic import BaseModel
 
+from app.agent.context import AgentContext
 from app.agent.models import build_chat_model
 from app.agent.prompts import get_prompt
-from app.agents.core.context import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +137,7 @@ AGENTS: dict[str, AgentConfig] = {
     "schedule-weekly": AgentConfig(
         "schedule_weekly", "offline-model", "schedule-weekly"
     ),
-    "life-tick": AgentConfig(
-        "life_engine_tick", "offline-model", "life-tick"
-    ),
+    "life-tick": AgentConfig("life_engine_tick", "offline-model", "life-tick"),
     "glimpse-observe": AgentConfig(
         "glimpse_observe", "offline-model", "glimpse-observe"
     ),

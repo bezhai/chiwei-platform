@@ -51,7 +51,9 @@ async def generate_daily_dream(
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
-    day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_CST)
+    day_start = datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=_CST
+    )
     day_end = day_start + timedelta(days=1)
 
     async with get_session() as s:
@@ -59,12 +61,16 @@ async def generate_daily_dream(
             s, persona_id, target_date, target_date, grains=["conversation", "glimpse"]
         )
     if not today_frags:
-        logger.info("[%s] No fragments for %s, skip daily dream", persona_id, target_date)
+        logger.info(
+            "[%s] No fragments for %s, skip daily dream", persona_id, target_date
+        )
         return None
 
     async with get_session() as s:
         persona_obj = await find_persona(s, persona_id)
-        recent_dailies = await find_recent_fragments_by_grain(s, persona_id, "daily", limit=3)
+        recent_dailies = await find_recent_fragments_by_grain(
+            s, persona_id, "daily", limit=3
+        )
 
     persona_name = persona_obj.display_name if persona_obj else persona_id
     persona_lite = persona_obj.persona_lite if persona_obj else ""
@@ -88,7 +94,9 @@ async def generate_daily_dream(
     content = _text(result.content)
 
     if not content:
-        logger.warning("[%s] Daily dream LLM returned empty for %s", persona_id, target_date)
+        logger.warning(
+            "[%s] Daily dream LLM returned empty for %s", persona_id, target_date
+        )
         return None
 
     fragment = ExperienceFragment(
@@ -149,7 +157,9 @@ async def generate_weekly_dream(
         logger.warning("[%s] Weekly dream LLM returned empty", persona_id)
         return None
 
-    week_end = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_CST)
+    week_end = datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=_CST
+    )
     week_start = week_end - timedelta(days=7)
 
     fragment = ExperienceFragment(
@@ -161,7 +171,9 @@ async def generate_weekly_dream(
     )
     async with get_session() as s:
         saved = await insert_fragment(s, fragment)
-    logger.info("[%s] Weekly dream created: id=%s, len=%d", persona_id, saved.id, len(content))
+    logger.info(
+        "[%s] Weekly dream created: id=%s, len=%d", persona_id, saved.id, len(content)
+    )
     return saved
 
 

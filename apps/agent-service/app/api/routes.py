@@ -211,11 +211,15 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                     continue
 
                 messages.sort(key=lambda m: m.create_time)
-                user_ids = list({
-                    m.user_id
-                    for m in messages
-                    if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-                })
+                user_ids = list(
+                    {
+                        m.user_id
+                        for m in messages
+                        if m.role == "user"
+                        and m.user_id
+                        and m.user_id != "__proactive__"
+                    }
+                )
                 if not user_ids:
                     continue
 
@@ -235,9 +239,13 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                             len(messages),
                         )
                     except Exception as e:
-                        logger.error("[rebuild] %s %s failed: %s", day_str, persona_id, e)
+                        logger.error(
+                            "[rebuild] %s %s failed: %s", day_str, persona_id, e
+                        )
 
-            logger.info("[rebuild] Day %d/%d (%s) done.", day_count, total_days, day_str)
+            logger.info(
+                "[rebuild] Day %d/%d (%s) done.", day_count, total_days, day_str
+            )
             day = next_day
 
         logger.info("[rebuild] All done.")

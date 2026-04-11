@@ -45,9 +45,7 @@ async def get_group_name(chat_id: str) -> str | None:
     """从 lark_group_chat_info 表获取群名"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(LarkGroupChatInfo.name).where(
-                LarkGroupChatInfo.chat_id == chat_id
-            )
+            select(LarkGroupChatInfo.name).where(LarkGroupChatInfo.chat_id == chat_id)
         )
         return result.scalar_one_or_none()
 

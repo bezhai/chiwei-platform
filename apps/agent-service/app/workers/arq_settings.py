@@ -105,11 +105,15 @@ class WorkerSettings:
         # 3. Daily dream: CST 03:00
         cron(cron_generate_dreams, hour={3}, minute={0}, timeout=3600),
         # 4. Weekly dream: Monday CST 04:00
-        cron(cron_generate_weekly_dreams, weekday={0}, hour={4}, minute={0}, timeout=1800),
+        cron(
+            cron_generate_weekly_dreams, weekday={0}, hour={4}, minute={0}, timeout=1800
+        ),
         # 5. Daily plan: CST 05:00 (after dreams)
         cron(cron_generate_daily_plan, hour={5}, minute={0}, timeout=3600),
         # 5b. Weekly plan: Sunday CST 23:00
-        cron(cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}, timeout=1800),
+        cron(
+            cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}, timeout=1800
+        ),
         # 5c. Monthly plan: 1st of month CST 02:00
         cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}, timeout=1800),
         # 6. Voice: CST 08:00-23:00 every hour

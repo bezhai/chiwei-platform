@@ -134,18 +134,26 @@ async def extract_relationship_updates(
         filtered_messages = messages
         filtered_user_ids = user_ids
     else:
-        relevant_ids = await _filter_relevant_messages(messages, persona_name, persona_lite)
+        relevant_ids = await _filter_relevant_messages(
+            messages, persona_name, persona_lite
+        )
         if not relevant_ids:
-            logger.info("[%s] No relevant messages for chat %s, skip extract", persona_id, chat_id)
+            logger.info(
+                "[%s] No relevant messages for chat %s, skip extract",
+                persona_id,
+                chat_id,
+            )
             return
 
         id_set = set(relevant_ids)
         filtered_messages = [m for m in messages if m.id in id_set]
-        filtered_user_ids = list({
-            m.user_id
-            for m in filtered_messages
-            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-        })
+        filtered_user_ids = list(
+            {
+                m.user_id
+                for m in filtered_messages
+                if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+            }
+        )
         if not filtered_user_ids:
             return
 
@@ -153,7 +161,9 @@ async def extract_relationship_updates(
     filtered_timeline = await format_timeline(filtered_messages, persona_name)
 
     async with get_session() as s:
-        current_memories = await find_relationship_memories_batch(s, persona_id, filtered_user_ids)
+        current_memories = await find_relationship_memories_batch(
+            s, persona_id, filtered_user_ids
+        )
 
     core_facts_lines: list[str] = []
     impression_lines: list[str] = []

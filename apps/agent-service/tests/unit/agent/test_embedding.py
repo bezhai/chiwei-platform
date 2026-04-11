@@ -108,8 +108,7 @@ class TestInstructionBuilder:
 
     def test_detect_text_and_image(self):
         assert (
-            InstructionBuilder.detect_input_modality("hi", ["img"])
-            == "text and image"
+            InstructionBuilder.detect_input_modality("hi", ["img"]) == "text and image"
         )
 
     def test_detect_empty_text_fallback(self):
@@ -217,9 +216,7 @@ class TestParseGeminiSize:
 
 class TestEmbedDense:
     async def test_text_only(self):
-        fake_resp = SimpleNamespace(
-            data=SimpleNamespace(embedding=[0.1, 0.2, 0.3])
-        )
+        fake_resp = SimpleNamespace(data=SimpleNamespace(embedding=[0.1, 0.2, 0.3]))
         mock_client = AsyncMock()
         mock_client.multimodal_embeddings.create = AsyncMock(return_value=fake_resp)
         mock_client.close = AsyncMock()
@@ -229,7 +226,10 @@ class TestEmbedDense:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
         ):
             result = await embed_dense(
@@ -245,9 +245,7 @@ class TestEmbedDense:
         mock_client.close.assert_called_once()
 
     async def test_multimodal(self):
-        fake_resp = SimpleNamespace(
-            data=SimpleNamespace(embedding=[0.4, 0.5])
-        )
+        fake_resp = SimpleNamespace(data=SimpleNamespace(embedding=[0.4, 0.5]))
         mock_client = AsyncMock()
         mock_client.multimodal_embeddings.create = AsyncMock(return_value=fake_resp)
         mock_client.close = AsyncMock()
@@ -257,7 +255,10 @@ class TestEmbedDense:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
         ):
             result = await embed_dense(
@@ -287,7 +288,10 @@ class TestEmbedDense:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
             pytest.raises(RuntimeError, match="API error"),
         ):
@@ -320,7 +324,10 @@ class TestEmbedHybrid:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
         ):
             result = await embed_hybrid("embedding-model", text="hello")
@@ -334,9 +341,7 @@ class TestEmbedHybrid:
 
     async def test_multimodal_two_requests(self):
         """With images: two requests — dense (multimodal) + sparse (text)."""
-        dense_resp = SimpleNamespace(
-            data=SimpleNamespace(embedding=[0.3, 0.4])
-        )
+        dense_resp = SimpleNamespace(data=SimpleNamespace(embedding=[0.3, 0.4]))
         sparse_items = _make_sparse_items([(5, 0.7)])
         sparse_resp = SimpleNamespace(
             data=SimpleNamespace(
@@ -355,7 +360,10 @@ class TestEmbedHybrid:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
         ):
             result = await embed_hybrid(
@@ -371,9 +379,7 @@ class TestEmbedHybrid:
 
     async def test_image_only_empty_sparse(self):
         """Image-only: dense from image, sparse is empty (no text for sparse)."""
-        dense_resp = SimpleNamespace(
-            data=SimpleNamespace(embedding=[0.6, 0.7])
-        )
+        dense_resp = SimpleNamespace(data=SimpleNamespace(embedding=[0.6, 0.7]))
         mock_client = AsyncMock()
         mock_client.multimodal_embeddings.create = AsyncMock(return_value=dense_resp)
         mock_client.close = AsyncMock()
@@ -383,7 +389,10 @@ class TestEmbedHybrid:
                 mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
             ),
             patch.object(
-                mod, "_create_ark_client", new_callable=AsyncMock, return_value=mock_client
+                mod,
+                "_create_ark_client",
+                new_callable=AsyncMock,
+                return_value=mock_client,
             ),
         ):
             result = await embed_hybrid(
@@ -423,9 +432,7 @@ class TestGenerateImage:
                 return_value=["data:image/jpeg;base64,abc"],
             ) as mock_ark,
         ):
-            result = await generate_image(
-                "img-model", prompt="a cat", size="1024x1024"
-            )
+            result = await generate_image("img-model", prompt="a cat", size="1024x1024")
 
         assert result == ["data:image/jpeg;base64,abc"]
         mock_ark.assert_called_once()
@@ -445,9 +452,7 @@ class TestGenerateImage:
                 return_value=["data:image/jpeg;base64,def"],
             ) as mock_openai,
         ):
-            result = await generate_image(
-                "img-model", prompt="a dog", size="2K"
-            )
+            result = await generate_image("img-model", prompt="a dog", size="2K")
 
         assert result == ["data:image/jpeg;base64,def"]
         mock_openai.assert_called_once()
@@ -467,9 +472,7 @@ class TestGenerateImage:
                 return_value=["data:image/png;base64,ghi"],
             ) as mock_gemini,
         ):
-            result = await generate_image(
-                "img-model", prompt="a bird", size="4K"
-            )
+            result = await generate_image("img-model", prompt="a bird", size="4K")
 
         assert result == ["data:image/png;base64,ghi"]
         mock_gemini.assert_called_once()

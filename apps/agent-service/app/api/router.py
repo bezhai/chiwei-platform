@@ -54,10 +54,9 @@ async def trigger_life_engine_tick(
         persona_id: 角色 ID
         dry_run: True 则不写 DB，只返回 LLM 决策结果
     """
-    from app.services.life_engine import LifeEngine
+    from app.life.engine import tick
 
-    engine = LifeEngine()
-    result = await engine.tick(persona_id, dry_run=dry_run)
+    result = await tick(persona_id, dry_run=dry_run)
     return {"ok": True, "persona_id": persona_id, "dry_run": dry_run, "result": result}
 
 
@@ -67,7 +66,7 @@ async def trigger_glimpse(persona_id: str):
 
     不检查 browsing 状态和泳道限制，强制执行。
     """
-    from app.services.glimpse import run_glimpse
+    from app.life.glimpse import run_glimpse
 
     result = await run_glimpse(persona_id)
     return {"ok": True, "persona_id": persona_id, "result": result}
@@ -76,20 +75,23 @@ async def trigger_glimpse(persona_id: str):
 @api_router.post("/admin/debug-glimpse", tags=["Admin"])
 async def debug_glimpse(persona_id: str):
     """Glimpse 管线调试端点 — 返回每一步的详细数据，不执行 LLM/写入"""
-    from app.orm.memory_crud import get_last_bot_reply_time, get_latest_glimpse_state
-    from app.services.glimpse import (
+    from app.data import queries as Q
+    from app.data.session import get_session
+    from app.life.glimpse import (
         TARGET_CHAT_ID,
         _is_quiet,
         _now_cst,
-        get_unseen_messages,
     )
+    from app.life.proactive import get_unseen_messages
 
     now = _now_cst()
     chat_id = TARGET_CHAT_ID
-    state = await get_latest_glimpse_state(persona_id, chat_id)
+    async with get_session() as s:
+        state = await Q.find_latest_glimpse_state(s, persona_id, chat_id)
     last_seen = state.last_seen_msg_time if state else 0
     last_obs = (state.observation if state else "")[:100]
-    bot_reply_time = await get_last_bot_reply_time(chat_id)
+    async with get_session() as s:
+        bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
     effective_after = max(last_seen, bot_reply_time)
     messages = await get_unseen_messages(chat_id, after=effective_after)
 
@@ -110,9 +112,14 @@ async def debug_glimpse(persona_id: str):
 @api_router.post("/admin/trigger-voice", tags=["Admin"])
 async def trigger_voice(persona_id: str):
     """手动触发一次统一 voice 生成（内心独白 + 风格示例）"""
-    from app.services.voice_generator import generate_voice
+    from app.memory.voice import generate_voice
+
     result = await generate_voice(persona_id, source="manual")
-    return {"ok": True, "persona_id": persona_id, "result": result[:200] if result else None}
+    return {
+        "ok": True,
+        "persona_id": persona_id,
+        "result": result[:200] if result else None,
+    }
 
 
 @api_router.post("/admin/trigger-schedule", tags=["Admin"])
@@ -127,7 +134,7 @@ async def trigger_schedule(
         plan_type: "monthly" | "weekly" | "daily"
         target_date: 目标日期（如 "2026-03-18"），默认今天
     """
-    from app.workers.schedule_worker import (
+    from app.life.schedule import (
         generate_daily_plan,
         generate_monthly_plan,
         generate_weekly_plan,
@@ -169,15 +176,17 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
     async def _run():
         from datetime import datetime, timedelta
 
-        from app.orm.crud import get_bot_persona, get_chat_messages_in_range
-        from app.services.relationship_memory import extract_relationship_updates
+        from app.data import queries as Q
+        from app.data.session import get_session
+        from app.memory.relationships import extract_relationship_updates
 
         start_dt = datetime.fromisoformat(req.start_time)
         end_dt = datetime.fromisoformat(req.end_time)
 
         personas = {}
         for persona_id in req.persona_ids:
-            persona = await get_bot_persona(persona_id)
+            async with get_session() as s:
+                persona = await Q.find_persona(s, persona_id)
             if persona:
                 personas[persona_id] = persona.display_name or persona_id
 
@@ -199,18 +208,24 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
             day_str = day.strftime("%m/%d")
 
             for chat_id in req.chat_ids:
-                messages = await get_chat_messages_in_range(
-                    chat_id, day_start_ts, day_end_ts, limit=5000
-                )
+                async with get_session() as s:
+                    messages = await Q.find_messages_in_range(
+                        s, chat_id, day_start_ts, day_end_ts, limit=5000
+                    )
                 if not messages:
                     continue
 
                 messages.sort(key=lambda m: m.create_time)
 
-                user_ids = list({
-                    m.user_id for m in messages
-                    if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-                })
+                user_ids = list(
+                    {
+                        m.user_id
+                        for m in messages
+                        if m.role == "user"
+                        and m.user_id
+                        and m.user_id != "__proactive__"
+                    }
+                )
                 if not user_ids:
                     continue
 
@@ -241,4 +256,3 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
         f"{len(req.persona_ids)} personas, {len(req.chat_ids)} chats, "
         f"check logs with: make logs KEYWORD=rebuild LANE=rel-mem",
     }
-

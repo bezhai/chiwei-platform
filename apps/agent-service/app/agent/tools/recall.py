@@ -22,11 +22,13 @@ SUMMARY_LIMIT = 300
 
 async def _get_persona_id() -> str:
     """Resolve the current persona_id from request context."""
-    from app.services.bot_context import _resolve_persona_id
+    from app.data.queries import resolve_persona_id
+    from app.data.session import get_session
     from app.utils.middlewares.trace import header_vars
 
     bot_name = header_vars["app_name"].get() or "chiwei"
-    return await _resolve_persona_id(bot_name)
+    async with get_session() as s:
+        return await resolve_persona_id(s, bot_name)
 
 
 async def _recall_impl(what: str) -> str:
@@ -69,7 +71,9 @@ def _tool_error(error_message: str):
             except Exception as exc:
                 logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
                 return f"{error_message}: {exc}"
+
         return wrapper
+
     return decorator
 
 

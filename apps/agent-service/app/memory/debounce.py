@@ -63,9 +63,7 @@ class DebouncedPipeline(ABC):
             return
 
         # Start / reset debounce timer
-        self._timers[key] = asyncio.create_task(
-            self._phase1_timer(chat_id, persona_id)
-        )
+        self._timers[key] = asyncio.create_task(self._phase1_timer(chat_id, persona_id))
 
     async def _phase1_timer(self, chat_id: str, persona_id: str) -> None:
         """Phase 1 timer: enter phase 2 after N seconds of silence."""

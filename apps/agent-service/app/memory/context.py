@@ -39,7 +39,11 @@ async def _build_life_state(persona_id: str) -> str:
         current = row.current_state
         mood = row.response_mood
         if current:
-            return f"你此刻的状态：{current}\n你的心情：{mood}" if mood else f"你此刻的状态：{current}"
+            return (
+                f"你此刻的状态：{current}\n你的心情：{mood}"
+                if mood
+                else f"你此刻的状态：{current}"
+            )
     except Exception as e:
         logger.warning("[%s] Failed to read life state: %s", persona_id, e)
     return ""
@@ -85,12 +89,16 @@ async def build_inner_context(
     # === Relationship memory ===
     if trigger_user_id and trigger_user_id != "__proactive__":
         async with get_session() as s:
-            rel_memory = await find_latest_relationship_memory(s, persona_id, trigger_user_id)
+            rel_memory = await find_latest_relationship_memory(
+                s, persona_id, trigger_user_id
+            )
         if rel_memory:
             core_facts, impression = rel_memory
             if not trigger_username:
                 async with get_session() as s:
-                    trigger_username = await find_username(s, trigger_user_id) or trigger_user_id[:6]
+                    trigger_username = (
+                        await find_username(s, trigger_user_id) or trigger_user_id[:6]
+                    )
             parts = [f"关于 {trigger_username}："]
             if core_facts:
                 parts.append(f"[事实] {core_facts}")

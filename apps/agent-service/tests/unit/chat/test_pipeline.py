@@ -39,9 +39,7 @@ def _make_ai_chunk(
     chunk = MagicMock(spec=AIMessageChunk)
     chunk.__class__ = AIMessageChunk
     chunk.text = text
-    chunk.response_metadata = (
-        {"finish_reason": finish_reason} if finish_reason else {}
-    )
+    chunk.response_metadata = {"finish_reason": finish_reason} if finish_reason else {}
     chunk.tool_call_chunks = tool_call_chunks or []
     return chunk
 
@@ -197,7 +195,9 @@ async def test_pre_blocks_yield_guard():
     pre_task = _make_pre_task(is_blocked=True, block_reason="nsfw", delay=0.05)
 
     result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-2", guard_message="blocked!"):
+    async for text in _buffer_until_pre(
+        stream, pre_task, "msg-2", guard_message="blocked!"
+    ):
         result.append(text)
 
     assert result == ["blocked!"]
@@ -233,7 +233,9 @@ async def test_stream_ends_before_pre_blocks():
     pre_task = _make_pre_task(is_blocked=True, block_reason="harmful", delay=0.1)
 
     result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-5", guard_message="nope"):
+    async for text in _buffer_until_pre(
+        stream, pre_task, "msg-5", guard_message="nope"
+    ):
         result.append(text)
 
     assert result == ["nope"]

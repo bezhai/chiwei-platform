@@ -33,7 +33,14 @@ RECALL = Route("recall", "action.recall")
 VECTORIZE = Route("vectorize", "task.vectorize")
 PROACTIVE_EVAL = Route("proactive_eval", "proactive.eval")
 
-ALL_ROUTES = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE, PROACTIVE_EVAL]
+ALL_ROUTES = [
+    CHAT_REQUEST,
+    CHAT_RESPONSE,
+    SAFETY_CHECK,
+    RECALL,
+    VECTORIZE,
+    PROACTIVE_EVAL,
+]
 
 # 非 prod 队列空闲自动删除（24h）
 _NON_PROD_EXPIRES_MS = 86_400_000
@@ -63,6 +70,7 @@ def _lane_queue(base: str, lane: str | None) -> str:
 def _lane_rk(base: str, lane: str | None) -> str:
     """返回泳道 routing key：base 或 base.{lane}"""
     return f"{base}.{lane}" if lane else base
+
 
 def _build_queue_args(prod_rk: str, lane: str | None) -> dict[str, Any]:
     """构建队列参数：prod 队列用 DLX → DLQ；lane 队列用 TTL → 主 exchange fallback 到 prod"""
@@ -138,9 +146,7 @@ class RabbitMQClient:
                 durable=True,
                 arguments=_build_queue_args(route.rk, lane),
             )
-            await q.bind(
-                self._exchange, routing_key=_lane_rk(route.rk, lane)
-            )
+            await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 

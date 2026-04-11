@@ -165,8 +165,10 @@ async def get_recent_proactive_records(chat_id: str) -> list[dict]:
     records = []
     for msg in rows:
         ts = datetime.fromtimestamp(msg.create_time / 1000, tz=_CST)
-        records.append({
-            "time": ts.strftime("%H:%M"),
-            "summary": parse_content(msg.content).render()[:80],
-        })
+        records.append(
+            {
+                "time": ts.strftime("%H:%M"),
+                "summary": parse_content(msg.content).render()[:80],
+            }
+        )
     return records

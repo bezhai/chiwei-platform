@@ -26,9 +26,7 @@ CST = timezone(timedelta(hours=8))
 # ---------------------------------------------------------------------------
 
 
-async def _build_activity_context(
-    persona_id: str, now: datetime
-) -> tuple[str, str]:
+async def _build_activity_context(persona_id: str, now: datetime) -> tuple[str, str]:
     """Aggregate today's activity timeline, return (duration_text, timeline_text)."""
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -44,19 +42,20 @@ async def _build_activity_context(
         if segments and segments[-1]["type"] == row.activity_type:
             segments[-1]["end"] = row.created_at
         else:
-            segments.append({
-                "type": row.activity_type,
-                "start": row.created_at,
-                "end": row.created_at,
-                "desc": row.current_state[:30],
-            })
+            segments.append(
+                {
+                    "type": row.activity_type,
+                    "start": row.created_at,
+                    "end": row.created_at,
+                    "desc": row.current_state[:30],
+                }
+            )
 
     cur = segments[-1]
     minutes = int((now - cur["start"]).total_seconds() / 60)
     start_cst = cur["start"].astimezone(CST)
     duration_text = (
-        f"{cur['type']}（从 {start_cst.strftime('%H:%M')} 开始，"
-        f"{minutes} 分钟了）"
+        f"{cur['type']}（从 {start_cst.strftime('%H:%M')} 开始，{minutes} 分钟了）"
     )
 
     lines = [
@@ -123,15 +122,11 @@ def parse_tick_response(
         if start >= 0 and end > start:
             data = json.loads(raw[start:end])
             return {
-                "current_state": data.get(
-                    "current_state", prev_state["current_state"]
-                ),
+                "current_state": data.get("current_state", prev_state["current_state"]),
                 "activity_type": data.get(
                     "activity_type", prev_state.get("activity_type", "")
                 ),
-                "response_mood": data.get(
-                    "response_mood", prev_state["response_mood"]
-                ),
+                "response_mood": data.get("response_mood", prev_state["response_mood"]),
                 "reasoning": data.get("reasoning"),
                 "skip_until": parse_wake_me_at(data.get("wake_me_at"), now),
             }

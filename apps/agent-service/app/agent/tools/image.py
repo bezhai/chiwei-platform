@@ -13,7 +13,7 @@ from langchain.tools import tool
 from langgraph.runtime import get_runtime
 from pydantic import Field
 
-from app.agents.core.context import AgentContext
+from app.agent.context import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 def _tool_error(error_message: str):
     """Decorator: catch exceptions, return friendly error string."""
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -33,7 +34,9 @@ def _tool_error(error_message: str):
             except Exception as exc:
                 logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
                 return f"{error_message}: {exc}"
+
         return wrapper
+
     return decorator
 
 
@@ -155,34 +158,34 @@ async def generate_image(
         model_name = context.features.get("image_model")
         logger.info("Feature flag overrides image model to: %s", model_name)
 
-    from app.agents.clients import create_client
+    from app.agent.embedding import generate_image as _gen_image
 
-    async with await create_client(model_name) as client:
-        base64_images = await client.generate_image(
-            prompt=query,
-            size=size,
-            reference_images=reference_urls if reference_urls else None,
+    base64_images = await _gen_image(
+        model_name,
+        prompt=query,
+        size=size,
+        reference_images=reference_urls if reference_urls else None,
+    )
+
+    content_blocks: list[dict[str, Any]] = []
+    filenames: list[str] = []
+
+    for b64 in base64_images:
+        tos_url, filename = await _upload_and_register(
+            source_type="base64",
+            data=b64,
+            registry=registry,
         )
+        if not filename:
+            logger.error("Image upload to TOS failed")
+            continue
 
-        content_blocks: list[dict[str, Any]] = []
-        filenames: list[str] = []
+        filenames.append(filename)
+        content_blocks.append({"type": "text", "text": f"生成了图片: @{filename}"})
+        content_blocks.append({"type": "text", "text": f"@{filename}:"})
+        content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
 
-        for b64 in base64_images:
-            tos_url, filename = await _upload_and_register(
-                source_type="base64",
-                data=b64,
-                registry=registry,
-            )
-            if not filename:
-                logger.error("Image upload to TOS failed")
-                continue
+    if not content_blocks:
+        return "图片生成失败，请稍后重试"
 
-            filenames.append(filename)
-            content_blocks.append({"type": "text", "text": f"生成了图片: @{filename}"})
-            content_blocks.append({"type": "text", "text": f"@{filename}:"})
-            content_blocks.append({"type": "image_url", "image_url": {"url": tos_url}})
-
-        if not content_blocks:
-            return "图片生成失败，请稍后重试"
-
-        return content_blocks
+    return content_blocks

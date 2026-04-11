@@ -126,7 +126,9 @@ async def _check_injection(message: str) -> PreCheckResult:
             "guard-injection", model_kwargs={"reasoning_effort": "low"}
         ).extract(_InjectionResult, messages=messages)
         if result.is_injection and result.confidence >= 0.85:
-            logger.warning("Prompt injection detected: confidence=%.2f", result.confidence)
+            logger.warning(
+                "Prompt injection detected: confidence=%.2f", result.confidence
+            )
             return PreCheckResult(
                 is_blocked=True,
                 block_reason=BlockReason.PROMPT_INJECTION,
@@ -145,7 +147,9 @@ async def _check_politics(message: str) -> PreCheckResult:
             "guard-politics", model_kwargs={"reasoning_effort": "low"}
         ).extract(_PoliticsResult, messages=messages)
         if result.is_sensitive and result.confidence >= 0.85:
-            logger.warning("Sensitive politics detected: confidence=%.2f", result.confidence)
+            logger.warning(
+                "Sensitive politics detected: confidence=%.2f", result.confidence
+            )
             return PreCheckResult(
                 is_blocked=True,
                 block_reason=BlockReason.SENSITIVE_POLITICS,
@@ -247,7 +251,9 @@ async def run_post_check(response_text: str) -> PostCheckResult:
         banned = await _check_banned_word(response_text)
         if banned:
             logger.warning("Output banned word hit: %s", banned)
-            return PostCheckResult(blocked=True, reason="output_banned_word", detail=banned)
+            return PostCheckResult(
+                blocked=True, reason="output_banned_word", detail=banned
+            )
     except Exception as e:
         logger.error("Output banned word check failed: %s", e)
 

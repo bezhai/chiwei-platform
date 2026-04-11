@@ -35,7 +35,9 @@ def _tool_error(error_message: str):
             except Exception as exc:
                 logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
                 return f"{error_message}: {exc}"
+
         return wrapper
+
     return decorator
 
 

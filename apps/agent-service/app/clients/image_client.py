@@ -84,7 +84,10 @@ class ImageProcessClient:
                 if data.get("success") and data.get("data"):
                     result = data["data"]
                     logger.info(f"图片处理成功: {file_key} -> {result['url']}")
-                    return {"url": result["url"], "file_name": result.get("file_name", "")}
+                    return {
+                        "url": result["url"],
+                        "file_name": result.get("file_name", ""),
+                    }
                 else:
                     logger.error(f"图片处理失败: {data.get('message', '未知错误')}")
                     return None
@@ -197,9 +200,7 @@ class ImageProcessClient:
         finally:
             _record_outbound("POST", status, time.monotonic() - start)
 
-    async def upload_to_tos(
-        self, source_type: str, data: str
-    ) -> str | None:
+    async def upload_to_tos(self, source_type: str, data: str) -> str | None:
         """
         Upload image to TOS (compress + store), return pre-signed URL.
 
@@ -234,7 +235,9 @@ class ImageProcessClient:
 
                 if resp.get("success") and resp.get("data"):
                     url = resp["data"]["url"]
-                    logger.info(f"Image uploaded to TOS: {source_type} -> {url[:80]}...")
+                    logger.info(
+                        f"Image uploaded to TOS: {source_type} -> {url[:80]}..."
+                    )
                     return url
                 else:
                     logger.error(

@@ -78,11 +78,9 @@ async def _get_recent_daily_schedules(
             active_only=True,
             limit=count + 5,
         )
-    return [
-        sched
-        for sched in results
-        if sched.period_start < before_date.isoformat()
-    ][:count]
+    return [sched for sched in results if sched.period_start < before_date.isoformat()][
+        :count
+    ]
 
 
 async def _run_ideation(
@@ -185,9 +183,7 @@ async def generate_monthly_plan(
     if month_start.month == 12:
         month_end = date(month_start.year + 1, 1, 1) - timedelta(days=1)
     else:
-        month_end = date(month_start.year, month_start.month + 1, 1) - timedelta(
-            days=1
-        )
+        month_end = date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
 
     period_start = month_start.isoformat()
     period_end = month_end.isoformat()
@@ -197,7 +193,9 @@ async def generate_monthly_plan(
             s, "monthly", period_start, period_end, persona_id
         )
     if existing:
-        logger.info("Monthly plan already exists for %s~%s, skip", period_start, period_end)
+        logger.info(
+            "Monthly plan already exists for %s~%s, skip", period_start, period_end
+        )
         return existing.content
 
     async with get_session() as s:
@@ -265,7 +263,9 @@ async def generate_weekly_plan(
             s, "weekly", period_start, period_end, persona_id
         )
     if existing:
-        logger.info("Weekly plan already exists for %s~%s, skip", period_start, period_end)
+        logger.info(
+            "Weekly plan already exists for %s~%s, skip", period_start, period_end
+        )
         return existing.content
 
     # Context: monthly plan
@@ -347,7 +347,9 @@ async def generate_daily_plan(
     date_str = target_date.isoformat()
 
     async with get_session() as s:
-        existing = await Q.find_plan_for_period(s, "daily", date_str, date_str, persona_id)
+        existing = await Q.find_plan_for_period(
+            s, "daily", date_str, date_str, persona_id
+        )
     if existing:
         logger.info("Daily plan already exists for %s, skip", date_str)
         return existing.content
@@ -379,7 +381,9 @@ async def generate_daily_plan(
     # Recent 3 days' schedules (shared by Ideation and Critic)
     recent = await _get_recent_daily_schedules(target_date, persona_id)
     recent_schedules_text = (
-        "\n\n---\n\n".join(f"[{sched.period_start}]\n{sched.content}" for sched in recent)
+        "\n\n---\n\n".join(
+            f"[{sched.period_start}]\n{sched.content}" for sched in recent
+        )
         if recent
         else "（没有前几天的日程）"
     )
@@ -467,9 +471,7 @@ async def build_schedule_context(persona_id: str | None = None) -> str:
     today = now.strftime("%Y-%m-%d")
 
     async with get_session() as s:
-        daily = await Q.find_plan_for_period(
-            s, "daily", today, today, persona_id or ""
-        )
+        daily = await Q.find_plan_for_period(s, "daily", today, today, persona_id or "")
 
     if not daily:
         return ""

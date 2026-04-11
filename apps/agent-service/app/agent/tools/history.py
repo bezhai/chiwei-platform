@@ -15,7 +15,7 @@ from langgraph.runtime import get_runtime
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 from sqlalchemy import or_, select
 
-from app.agents.core.context import AgentContext
+from app.agent.context import AgentContext
 from app.data.models import ConversationMessage, LarkGroupMember, LarkUser
 from app.data.session import get_session
 from app.services.content_parser import parse_content
@@ -40,6 +40,7 @@ TIME_GAP_THRESHOLD_MS = 10 * 60 * 1000  # 10 minutes
 
 def _tool_error(error_message: str):
     """Decorator: catch exceptions, return friendly error string."""
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -48,7 +49,9 @@ def _tool_error(error_message: str):
             except Exception as exc:
                 logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
                 return f"{error_message}: {exc}"
+
         return wrapper
+
     return decorator
 
 
@@ -287,9 +290,7 @@ async def list_group_members(role: str | None = None) -> str:
     lines = [f"群成员列表（共{len(rows)}人）：\n"]
     for member, user in rows:
         role_tag = (
-            " [群主]" if member.is_owner
-            else " [管理员]" if member.is_manager
-            else ""
+            " [群主]" if member.is_owner else " [管理员]" if member.is_manager else ""
         )
         lines.append(f"• {user.name}{role_tag}")
 

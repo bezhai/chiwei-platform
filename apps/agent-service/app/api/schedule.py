@@ -3,14 +3,10 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.orm.crud import (
-    delete_schedule,
-    get_daily_entries_for_date,
-    list_schedules,
-    upsert_schedule,
-)
-from app.orm.models import AkaoSchedule
-from app.services.schedule_context import build_schedule_context
+from app.data import queries as Q
+from app.data.models import AkaoSchedule
+from app.data.session import get_session
+from app.life.schedule import build_schedule_context
 
 router = APIRouter(prefix="/api/schedule", tags=["Schedule"])
 
@@ -60,7 +56,10 @@ async def api_list_schedules(
     active_only: bool = True,
     limit: int = 50,
 ):
-    entries = await list_schedules(plan_type=plan_type, active_only=active_only, limit=limit)
+    async with get_session() as s:
+        entries = await Q.list_schedules(
+            s, plan_type=plan_type, active_only=active_only, limit=limit
+        )
     return [_to_out(e) for e in entries]
 
 
@@ -74,7 +73,8 @@ async def api_current_schedule():
 @router.get("/daily/{target_date}")
 async def api_daily_entries(target_date: str):
     """查指定日期的所有日计划时段"""
-    entries = await get_daily_entries_for_date(target_date)
+    async with get_session() as s:
+        entries = await Q.find_daily_entries(s, target_date, persona_id="")
     return [_to_out(e) for e in entries]
 
 
@@ -100,13 +100,15 @@ async def api_create_schedule(body: ScheduleCreate):
         model=body.model,
         is_active=body.is_active,
     )
-    saved = await upsert_schedule(entry)
+    async with get_session() as s:
+        saved = await Q.upsert_schedule(s, entry)
     return _to_out(saved)
 
 
 @router.delete("/{schedule_id}")
 async def api_delete_schedule(schedule_id: int):
-    ok = await delete_schedule(schedule_id)
+    async with get_session() as s:
+        ok = await Q.delete_schedule(s, schedule_id)
     if not ok:
         raise HTTPException(404, "Schedule entry not found")
     return {"ok": True}

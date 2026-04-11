@@ -35,7 +35,9 @@ class ExperienceFragment(Base):
 
     # 来源（conversation/glimpse 有值，daily/weekly 为 NULL）
     source_chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    source_type: Mapped[str | None] = mapped_column(String(10), nullable=True)  # p2p / group
+    source_type: Mapped[str | None] = mapped_column(
+        String(10), nullable=True
+    )  # p2p / group
 
     # 原始消息的时间范围（毫秒时间戳）
     time_start: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -98,7 +100,9 @@ class MemoryEntity(Base):
     __tablename__ = "memory_entity"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # user / group / p2p
+    entity_type: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )  # user / group / p2p
     external_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
@@ -114,7 +118,9 @@ class ReplyStyleLog(Base):
     persona_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     style_text: Mapped[str] = mapped_column(Text, nullable=False)
     observation: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(String(20), nullable=False)  # 'base' / 'drift' / 'manual'
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )  # 'base' / 'drift' / 'manual'
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -137,7 +143,10 @@ class RelationshipMemoryV2(Base):
     )
 
     __table_args__ = (
-        Index("idx_rel_mem_v2_persona_user_created", "persona_id", "user_id", created_at.desc()),
+        Index(
+            "idx_rel_mem_v2_persona_user_created",
+            "persona_id",
+            "user_id",
+            created_at.desc(),
+        ),
     )
-
-

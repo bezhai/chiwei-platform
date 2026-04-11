@@ -1,9 +1,10 @@
-"""Post-processing MQ consumer
+"""Post-processing MQ consumer — safety check on AI responses.
 
-消费 safety_check queue，执行输出安全检测，
-不安全时发布 recall 消息到 main-server worker，
-通过时更新 agent_responses.safety_status = 'passed'。
+Consumes ``safety_check`` queue, runs ``run_post_check``,
+publishes recall on block, updates safety_status on pass.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -11,38 +12,39 @@ from datetime import UTC, datetime
 
 from aio_pika.abc import AbstractIncomingMessage
 
-from app.agents.graphs.post import run_post_safety
-from app.clients.rabbitmq import (
+from app.chat.safety import run_post_check
+from app.data.queries import set_safety_status
+from app.data.session import get_session
+from app.infra.rabbitmq import (
     RECALL,
     SAFETY_CHECK,
-    RabbitMQClient,
     _current_lane,
     _lane_queue,
+    mq,
 )
-from app.orm.crud.message import update_safety_status
-from app.workers.error_handling import mq_error_handler
+from app.utils.middlewares.trace import header_vars
+from app.workers.common import mq_error_handler
 
 logger = logging.getLogger(__name__)
 
 
 @mq_error_handler()
 async def handle_safety_check(message: AbstractIncomingMessage) -> None:
-    """消费 safety_check queue 中的消息"""
+    """Consume safety_check queue: audit response, recall if blocked."""
     async with message.process(requeue=False):
         body = json.loads(message.body)
         session_id = body.get("session_id")
         response_text = body.get("response_text", "")
         chat_id = body.get("chat_id")
         trigger_message_id = body.get("trigger_message_id")
-        lane = body.get("lane")  # 从消息 payload 中读取泳道
-        if lane:
-            from app.utils.middlewares.trace import header_vars
+        lane = body.get("lane")
 
+        if lane:
             header_vars["lane"].set(lane)
 
         logger.info("Post safety check: session_id=%s, lane=%s", session_id, lane)
 
-        result = await run_post_safety(response_text)
+        result = await run_post_check(response_text)
         checked_at = datetime.now(UTC).isoformat()
 
         if result.blocked:
@@ -51,8 +53,7 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
                 session_id,
                 result.reason,
             )
-            client = RabbitMQClient.get_instance()
-            await client.publish(
+            await mq.publish(
                 RECALL,
                 {
                     "session_id": session_id,
@@ -66,19 +67,20 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
             )
         else:
             logger.info("Post safety passed: session_id=%s", session_id)
-            await update_safety_status(
-                session_id,
-                "passed",
-                {"checked_at": checked_at},
-            )
+            async with get_session() as s:
+                await set_safety_status(
+                    s,
+                    session_id,
+                    "passed",
+                    {"checked_at": checked_at},
+                )
 
 
 async def start_post_consumer() -> None:
-    """启动 post processing consumer"""
-    client = RabbitMQClient.get_instance()
-    await client.connect()
-    await client.declare_topology()
+    """Connect MQ and start consuming the safety_check queue."""
+    await mq.connect()
+    await mq.declare_topology()
     lane = _current_lane()
     queue = _lane_queue(SAFETY_CHECK.queue, lane)
-    await client.consume(queue, handle_safety_check)
+    await mq.consume(queue, handle_safety_check)
     logger.info("Post safety consumer started (queue=%s)", queue)

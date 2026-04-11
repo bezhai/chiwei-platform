@@ -81,7 +81,9 @@ async def _recent_timeline(
     if not messages:
         return ""
 
-    return await format_timeline(messages, persona_name, tz=_CST, max_messages=max_messages)
+    return await format_timeline(
+        messages, persona_name, tz=_CST, max_messages=max_messages
+    )
 
 
 async def _recent_persona_replies(
@@ -98,7 +100,9 @@ async def _recent_persona_replies(
             return ""
         bot_name = await resolve_bot_name_for_persona(s, persona_id, chat_id)
 
-    persona_msgs = [m for m in messages if m.role == "assistant" and m.bot_name == bot_name]
+    persona_msgs = [
+        m for m in messages if m.role == "assistant" and m.bot_name == bot_name
+    ]
     persona_msgs = persona_msgs[-max_replies:]
 
     lines: list[str] = []

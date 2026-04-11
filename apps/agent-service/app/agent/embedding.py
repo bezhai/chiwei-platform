@@ -363,9 +363,7 @@ async def _generate_image_ark(
             watermark=False,
             sequential_image_generation="disabled",
         )
-        return [
-            f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []
-        ]
+        return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
     finally:
         await client.close()
 
@@ -410,9 +408,7 @@ async def _generate_image_openai(
             n=1,
             extra_body=extra_body,
         )
-        return [
-            f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []
-        ]
+        return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
     finally:
         await client.close()
 

@@ -1,6 +1,7 @@
-"""Agent 执行上下文
+"""Agent execution context — dataclasses for message, media, and feature flags.
 
-使用组合模式设计上下文，将必需字段和可选字段分离。
+Uses composition to separate required fields (MessageContext) from optional
+capabilities (MediaContext, FeatureFlags).
 """
 
 from __future__ import annotations
@@ -9,12 +10,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from app.clients.image_registry import ImageRegistry
+    from app.infra.image import ImageRegistry
 
 
 @dataclass(frozen=True)
 class MessageContext:
-    """消息级上下文（必需字段）"""
+    """Message-level context (required fields)."""
 
     message_id: str
     chat_id: str
@@ -22,14 +23,14 @@ class MessageContext:
 
 @dataclass
 class MediaContext:
-    """媒体上下文（可选）"""
+    """Media context (optional)."""
 
     registry: ImageRegistry | None = None
 
 
 @dataclass
 class FeatureFlags:
-    """特性标志（灰度配置）"""
+    """Feature flags (gray release configuration)."""
 
     flags: dict[str, Any] = field(default_factory=dict)
 
@@ -39,10 +40,10 @@ class FeatureFlags:
 
 @dataclass
 class AgentContext:
-    """Agent 执行上下文（组合模式）
+    """Agent execution context (composition pattern).
 
-    使用组合模式将不同类型的上下文组合在一起，
-    既保持了类型安全，又提供了灵活性。
+    Combines different context types together, maintaining type safety
+    and flexibility.
     """
 
     message: MessageContext

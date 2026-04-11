@@ -8,7 +8,7 @@ import logging
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 
-from app.agents.core.context import AgentContext
+from app.agent.context import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,9 @@ def _tool_error(error_message: str):
             except Exception as exc:
                 logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
                 return f"{error_message}: {exc}"
+
         return wrapper
+
     return decorator
 
 
@@ -45,10 +47,18 @@ async def deep_research(task: str) -> str:
         task: 调研任务的详细描述，应包含用户的具体问题和需要关注的方面
     """
     # Lazy import to avoid circular dependency
-    from app.agents.domains.research import research_agent
+    from langchain_core.messages import HumanMessage
+
+    from app.agent.core import Agent
+    from app.agent.tools.search import search_web
 
     context = get_runtime(AgentContext).context
-    result = await research_agent.run(task=task, context=context)
+    agent = Agent("research", tools=[search_web])
+    result = await agent.run(
+        [HumanMessage(content=task)],
+        context=context,
+    )
 
-    logger.info("Research agent completed, result length: %d", len(result))
-    return result
+    text = result.content if hasattr(result, "content") else str(result)
+    logger.info("Research agent completed, result length: %d", len(text))
+    return text

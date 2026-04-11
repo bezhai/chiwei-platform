@@ -39,7 +39,9 @@ class PrometheusMiddleware:
         # Serve /metrics endpoint directly
         if request.url.path == "/metrics":
             body = generate_latest()
-            response = Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
+            response = Response(
+                body, media_type="text/plain; version=0.0.4; charset=utf-8"
+            )
             await response(scope, receive, send)
             return
 
@@ -61,5 +63,7 @@ class PrometheusMiddleware:
         finally:
             duration = time.monotonic() - start
             REQUEST_IN_FLIGHT.dec()
-            REQUEST_COUNT.labels(method=method, path=path, status=str(status_code)).inc()
+            REQUEST_COUNT.labels(
+                method=method, path=path, status=str(status_code)
+            ).inc()
             REQUEST_DURATION.labels(method=method, path=path).observe(duration)

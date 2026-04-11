@@ -6,8 +6,13 @@ from app.orm.base import AsyncSessionLocal
 from app.orm.models import AkaoSchedule
 
 _WEEKDAY_MAP = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
 }
 
 
@@ -46,7 +51,9 @@ async def get_current_schedule(
     return matched
 
 
-async def get_latest_plan(plan_type: str, before_date: str, persona_id: str) -> AkaoSchedule | None:
+async def get_latest_plan(
+    plan_type: str, before_date: str, persona_id: str
+) -> AkaoSchedule | None:
     """查指定类型的最近一条计划（用于生成下一期计划时的上下文，per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -76,7 +83,9 @@ async def get_plan_for_period(
         return result.scalar_one_or_none()
 
 
-async def get_daily_entries_for_date(target_date: str, persona_id: str) -> list[AkaoSchedule]:
+async def get_daily_entries_for_date(
+    target_date: str, persona_id: str
+) -> list[AkaoSchedule]:
     """查指定日期的所有日计划时段（per-bot）"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(

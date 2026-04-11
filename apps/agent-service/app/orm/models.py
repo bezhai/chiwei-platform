@@ -111,7 +111,6 @@ class LarkBaseChatInfo(Base):
     gray_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
-
 class AkaoSchedule(Base):
     """赤尾日程条目
 
@@ -133,7 +132,9 @@ class AkaoSchedule(Base):
     plan_type: Mapped[str] = mapped_column(String(20), nullable=False)
 
     # 时间周期
-    period_start: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-01"
+    period_start: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )  # "2026-03-01"
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)  # "2026-03-31"
 
     # 日计划专用：当天内的时间段
@@ -166,7 +167,9 @@ class AkaoSchedule(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("persona_id", "plan_type", "period_start", "period_end", "time_start"),
+        UniqueConstraint(
+            "persona_id", "plan_type", "period_start", "period_end", "time_start"
+        ),
     )
 
 
@@ -186,7 +189,6 @@ class LarkGroupMember(Base):
     )
 
 
-
 class BotPersona(Base):
     """Bot 人设配置 — 每个 persona bot 的人设数据"""
 
@@ -197,9 +199,7 @@ class BotPersona(Base):
     persona_core: Mapped[str] = mapped_column(Text, nullable=False)
     persona_lite: Mapped[str] = mapped_column(Text, nullable=False)
     default_reply_style: Mapped[str] = mapped_column(Text, nullable=False)
-    error_messages: Mapped[dict] = mapped_column(
-        JSON, nullable=False, default=dict
-    )
+    error_messages: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     appearance_detail: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=""
     )
@@ -209,5 +209,3 @@ class BotPersona(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
-
-

@@ -82,7 +82,12 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         messages = await find_messages_in_range(s, chat_id, start_ts, end_ts)
 
     if not messages:
-        logger.info("[%s] No messages in last %dh for %s, skip", persona_id, LOOKBACK_HOURS, chat_id)
+        logger.info(
+            "[%s] No messages in last %dh for %s, skip",
+            persona_id,
+            LOOKBACK_HOURS,
+            chat_id,
+        )
         return
 
     chat_type = messages[0].chat_type if messages else "group"
@@ -106,7 +111,9 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
     content = _text(result.content)
 
     if not content:
-        logger.warning("[%s] Afterthought LLM returned empty for %s", persona_id, chat_id)
+        logger.warning(
+            "[%s] Afterthought LLM returned empty for %s", persona_id, chat_id
+        )
         return
 
     fragment = ExperienceFragment(
@@ -121,17 +128,24 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
     )
     async with get_session() as s:
         await insert_fragment(s, fragment)
-    logger.info("[%s] Conversation fragment created for %s: %s...", persona_id, chat_id, content[:60])
+    logger.info(
+        "[%s] Conversation fragment created for %s: %s...",
+        persona_id,
+        chat_id,
+        content[:60],
+    )
 
     # Relationship extraction (fire-and-forget)
     try:
         from app.memory.relationships import extract_relationship_updates
 
-        unique_user_ids = list({
-            m.user_id
-            for m in messages
-            if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-        })
+        unique_user_ids = list(
+            {
+                m.user_id
+                for m in messages
+                if m.role == "user" and m.user_id and m.user_id != "__proactive__"
+            }
+        )
         if unique_user_ids:
             await extract_relationship_updates(
                 persona_id=persona_id,
@@ -140,7 +154,9 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
                 messages=messages,
             )
     except Exception as e:
-        logger.warning("[%s] Relationship extract failed (non-fatal): %s", persona_id, e)
+        logger.warning(
+            "[%s] Relationship extract failed (non-fatal): %s", persona_id, e
+        )
 
 
 async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:

@@ -97,7 +97,9 @@ class TestCheckChatHistory:
             ),
         ):
             mock_session = AsyncMock()
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
             mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
             result = await check_chat_history.coroutine("test")
@@ -112,12 +114,16 @@ class TestCheckChatHistory:
         mock_context.context.message.chat_id = "test_chat"
 
         msg1 = MagicMock(
-            create_time=1712000000000, role="user",
-            user_id="u1", content='{"text":"聊了新番的事"}',
+            create_time=1712000000000,
+            role="user",
+            user_id="u1",
+            content='{"text":"聊了新番的事"}',
         )
         msg2 = MagicMock(
-            create_time=1712000060000, role="user",
-            user_id="u1", content='{"text":"吃了什么"}',
+            create_time=1712000060000,
+            role="user",
+            user_id="u1",
+            content='{"text":"吃了什么"}',
         )
 
         mock_parsed1 = MagicMock()
@@ -144,7 +150,9 @@ class TestCheckChatHistory:
             ),
         ):
             mock_session = AsyncMock()
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
             mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
             result = await check_chat_history.coroutine("新番")
@@ -173,7 +181,9 @@ class TestListGroupMembers:
         ):
             mock_session = AsyncMock()
             mock_session.execute = AsyncMock(return_value=mock_result)
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
             mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
             result = await list_group_members.coroutine()
@@ -194,7 +204,11 @@ class TestListGroupMembers:
         user3 = MagicMock(name="Normal")
 
         mock_result = MagicMock()
-        mock_result.all.return_value = [(member1, user1), (member2, user2), (member3, user3)]
+        mock_result.all.return_value = [
+            (member1, user1),
+            (member2, user2),
+            (member3, user3),
+        ]
 
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
@@ -202,7 +216,9 @@ class TestListGroupMembers:
         ):
             mock_session = AsyncMock()
             mock_session.execute = AsyncMock(return_value=mock_result)
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
             mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
             result = await list_group_members.coroutine()

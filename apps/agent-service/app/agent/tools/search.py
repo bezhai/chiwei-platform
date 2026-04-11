@@ -18,7 +18,7 @@ from langgraph.runtime import get_runtime
 from prometheus_client import Counter, Histogram
 from pydantic import Field
 
-from app.agents.core.context import AgentContext
+from app.agent.context import AgentContext
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
@@ -53,9 +53,7 @@ WEB_SEARCH_REQUESTS = _counter(
 WEB_SEARCH_DURATION = _histogram(
     "web_search_duration_seconds", "Web search request duration"
 )
-RERANK_DURATION = _histogram(
-    "search_rerank_duration_seconds", "Rerank duration"
-)
+RERANK_DURATION = _histogram("search_rerank_duration_seconds", "Rerank duration")
 IMAGE_SEARCH_DURATION = _histogram(
     "image_search_step_duration_seconds", "Image search step duration", ["step"]
 )
@@ -188,11 +186,13 @@ def _rerank_fallback(results: list[dict], top_k: int) -> list[dict]:
     out = []
     for r in results[:top_k]:
         content = r.get("content", "") or r.get("snippet", "")
-        out.append({
-            "title": r.get("title", ""),
-            "link": r.get("link", ""),
-            "content": content[:CHUNK_SIZE],
-        })
+        out.append(
+            {
+                "title": r.get("title", ""),
+                "link": r.get("link", ""),
+                "content": content[:CHUNK_SIZE],
+            }
+        )
     return out
 
 
@@ -211,12 +211,14 @@ async def _rerank_chunks(
         if not content:
             continue
         for idx, chunk in enumerate(_chunk_text(content)):
-            all_chunks.append({
-                "title": r.get("title", ""),
-                "link": r.get("link", ""),
-                "chunk": chunk,
-                "chunk_idx": idx,
-            })
+            all_chunks.append(
+                {
+                    "title": r.get("title", ""),
+                    "link": r.get("link", ""),
+                    "chunk": chunk,
+                    "chunk_idx": idx,
+                }
+            )
 
     if not all_chunks:
         return _rerank_fallback(results, top_k)
@@ -247,12 +249,14 @@ async def _rerank_chunks(
                 continue
             idx = item["index"]
             c = all_chunks[idx]
-            ranked.append({
-                "title": c["title"],
-                "link": c["link"],
-                "content": c["chunk"],
-                "score": score,
-            })
+            ranked.append(
+                {
+                    "title": c["title"],
+                    "link": c["link"],
+                    "content": c["chunk"],
+                    "score": score,
+                }
+            )
         return ranked
 
     except Exception:
@@ -524,8 +528,13 @@ async def search_images(
         logger.info(
             "search_images done: query=%r search=%.2fs upload=%.2fs total=%.2fs "
             "results=%d/%d failed=%d",
-            query, t_search, t_upload, t_total,
-            len(result_lines), len(upload_tasks), failed,
+            query,
+            t_search,
+            t_upload,
+            t_total,
+            len(result_lines),
+            len(upload_tasks),
+            failed,
         )
 
         if not content_blocks:

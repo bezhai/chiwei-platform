@@ -142,13 +142,15 @@ async def build_chat_context(
         )
     else:
         messages = _build_p2p_messages(
-            l1_results, image_key_to_url, image_key_to_filename,
+            l1_results,
+            image_key_to_url,
+            image_key_to_filename,
             current_persona_id=current_persona_id,
         )
 
-    chain_user_ids = list({
-        r.user_id for r in l1_results if r.role != "assistant" and r.user_id
-    })
+    chain_user_ids = list(
+        {r.user_id for r in l1_results if r.role != "assistant" and r.user_id}
+    )
 
     return ChatContext(
         messages=messages,
@@ -182,7 +184,9 @@ async def _allows_download(chat_id: str, chat_type: str) -> bool:
             setting = await find_group_download_permission(s, chat_id)
         allows = setting != "not_anyone"
     except Exception:
-        logger.warning("Download permission check failed for %s, defaulting to allow", chat_id)
+        logger.warning(
+            "Download permission check failed for %s, defaulting to allow", chat_id
+        )
         allows = True
 
     _download_cache[chat_id] = (allows, now + _CACHE_TTL)
@@ -197,8 +201,8 @@ async def _collect_images(
 
     Returns (image_key -> url, image_key -> tos_file_name).
     """
-    cached_keys: list[tuple[str, str]] = []       # (image_key, tos_file)
-    uncached_keys: list[tuple[str, str, str]] = [] # (image_key, message_id, role)
+    cached_keys: list[tuple[str, str]] = []  # (image_key, tos_file)
+    uncached_keys: list[tuple[str, str, str]] = []  # (image_key, message_id, role)
 
     for msg in results:
         parsed = parse_content(msg.content)
@@ -231,7 +235,11 @@ async def _collect_images(
     if uncached_keys:
         chat_id = results[0].chat_id or ""
         if not await _allows_download(chat_id, chat_type):
-            logger.info("Group %s disallows download, skipping %d images", chat_id, len(uncached_keys))
+            logger.info(
+                "Group %s disallows download, skipping %d images",
+                chat_id,
+                len(uncached_keys),
+            )
             uncached_keys = []
 
     # Uncached: full pipeline (Lark download -> compress -> TOS)
@@ -405,7 +413,9 @@ def _build_p2p_messages(
                 content_blocks.append({"type": "text", "text": f"@{fn}:"})
                 content_blocks.append({"type": "image", "url": url})
             elif not fn:
-                logger.warning("Image not registered: key=%s, msg=%s", key, msg.message_id)
+                logger.warning(
+                    "Image not registered: key=%s, msg=%s", key, msg.message_id
+                )
 
         if not content_blocks:
             continue

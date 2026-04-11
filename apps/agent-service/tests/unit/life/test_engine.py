@@ -79,12 +79,14 @@ def test_parse_wake_me_at_invalid():
 def test_parse_tick_response_valid():
     now = datetime(2026, 4, 7, 1, 0, tzinfo=CST)
     prev = {"current_state": "发呆", "activity_type": "idle", "response_mood": "无聊"}
-    raw = json.dumps({
-        "current_state": "钻被窝了",
-        "activity_type": "sleeping",
-        "response_mood": "困死了",
-        "wake_me_at": "07:30",
-    })
+    raw = json.dumps(
+        {
+            "current_state": "钻被窝了",
+            "activity_type": "sleeping",
+            "response_mood": "困死了",
+            "wake_me_at": "07:30",
+        }
+    )
     result = parse_tick_response(raw, prev, now)
     assert result["current_state"] == "钻被窝了"
     assert result["activity_type"] == "sleeping"
@@ -94,12 +96,14 @@ def test_parse_tick_response_valid():
 def test_parse_tick_response_browsing():
     now = datetime(2026, 4, 7, 15, 0, tzinfo=CST)
     prev = {"current_state": "发呆", "activity_type": "idle", "response_mood": "无聊"}
-    raw = json.dumps({
-        "current_state": "刷手机翻群消息",
-        "activity_type": "browsing",
-        "response_mood": "无聊",
-        "wake_me_at": None,
-    })
+    raw = json.dumps(
+        {
+            "current_state": "刷手机翻群消息",
+            "activity_type": "browsing",
+            "response_mood": "无聊",
+            "wake_me_at": None,
+        }
+    )
     result = parse_tick_response(raw, prev, now)
     assert result["activity_type"] == "browsing"
     assert result["skip_until"] is None
@@ -113,7 +117,11 @@ def test_parse_tick_response_browsing():
 def test_parse_tick_response_malformed_preserves_prev_state():
     """On parse failure, return previous full state without losing fields."""
     now = datetime(2026, 4, 7, 10, 0, tzinfo=CST)
-    prev = {"current_state": "看书", "activity_type": "studying", "response_mood": "专注"}
+    prev = {
+        "current_state": "看书",
+        "activity_type": "studying",
+        "response_mood": "专注",
+    }
     result = parse_tick_response("not json at all", prev, now)
     assert result["current_state"] == "看书"
     assert result["activity_type"] == "studying"
@@ -125,7 +133,11 @@ def test_parse_tick_response_malformed_preserves_prev_state():
 def test_parse_tick_response_empty_json():
     """Empty JSON object uses previous state for missing fields."""
     now = datetime(2026, 4, 7, 10, 0, tzinfo=CST)
-    prev = {"current_state": "看书", "activity_type": "studying", "response_mood": "专注"}
+    prev = {
+        "current_state": "看书",
+        "activity_type": "studying",
+        "response_mood": "专注",
+    }
     result = parse_tick_response("{}", prev, now)
     assert result["current_state"] == "看书"
     assert result["activity_type"] == "studying"
@@ -148,7 +160,11 @@ async def test_tick_skips_when_skip_until_future():
         mock_gs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch(f"{MODULE}.Q.find_latest_life_state", new_callable=AsyncMock, return_value=row):
+        with patch(
+            f"{MODULE}.Q.find_latest_life_state",
+            new_callable=AsyncMock,
+            return_value=row,
+        ):
             with patch(f"{MODULE}._think", new_callable=AsyncMock) as mock_think:
                 result = await tick("akao-001")
                 mock_think.assert_not_called()
@@ -178,7 +194,11 @@ async def test_tick_calls_think_when_no_skip():
         mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch(f"{MODULE}.Q.find_latest_life_state", new_callable=AsyncMock, return_value=row),
+            patch(
+                f"{MODULE}.Q.find_latest_life_state",
+                new_callable=AsyncMock,
+                return_value=row,
+            ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
             patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
         ):
@@ -208,7 +228,11 @@ async def test_tick_no_row_uses_default():
         mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch(f"{MODULE}.Q.find_latest_life_state", new_callable=AsyncMock, return_value=None),
+            patch(
+                f"{MODULE}.Q.find_latest_life_state",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
             patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
         ):
@@ -239,7 +263,11 @@ async def test_tick_dry_run_does_not_save():
         mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch(f"{MODULE}.Q.find_latest_life_state", new_callable=AsyncMock, return_value=row),
+            patch(
+                f"{MODULE}.Q.find_latest_life_state",
+                new_callable=AsyncMock,
+                return_value=row,
+            ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
             patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
         ):

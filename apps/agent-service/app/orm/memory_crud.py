@@ -93,7 +93,9 @@ async def get_fragments_in_date_range(
     """查指定日期范围内的碎片（以 CST 00:00 为边界，按时间正序）"""
     start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=_CST)
     # end_date 含当天，取次日 00:00
-    end_dt = datetime(end_date.year, end_date.month, end_date.day, tzinfo=_CST) + timedelta(days=1)
+    end_dt = datetime(
+        end_date.year, end_date.month, end_date.day, tzinfo=_CST
+    ) + timedelta(days=1)
     async with AsyncSessionLocal() as session:
         stmt = (
             select(ExperienceFragment)
@@ -174,12 +176,14 @@ async def save_reply_style(
     from app.orm.memory_models import ReplyStyleLog
 
     async with AsyncSessionLocal() as session:
-        session.add(ReplyStyleLog(
-            persona_id=persona_id,
-            style_text=style_text,
-            source=source,
-            observation=observation,
-        ))
+        session.add(
+            ReplyStyleLog(
+                persona_id=persona_id,
+                style_text=style_text,
+                source=source,
+                observation=observation,
+            )
+        )
         await session.commit()
 
 
@@ -232,14 +236,16 @@ async def save_relationship_memory_v2(
         )
         max_version = result.scalar_one_or_none() or 0
 
-        session.add(RelationshipMemoryV2(
-            persona_id=persona_id,
-            user_id=user_id,
-            version=max_version + 1,
-            core_facts=core_facts,
-            impression=impression,
-            source=source,
-        ))
+        session.add(
+            RelationshipMemoryV2(
+                persona_id=persona_id,
+                user_id=user_id,
+                version=max_version + 1,
+                core_facts=core_facts,
+                impression=impression,
+                source=source,
+            )
+        )
         await session.commit()
 
 
@@ -286,12 +292,8 @@ async def get_relationship_memories_for_users_v2(
             .where(RelationshipMemoryV2.persona_id == persona_id)
             .where(RelationshipMemoryV2.user_id.in_(user_ids))
             .distinct(RelationshipMemoryV2.user_id)
-            .order_by(RelationshipMemoryV2.user_id, RelationshipMemoryV2.created_at.desc())
+            .order_by(
+                RelationshipMemoryV2.user_id, RelationshipMemoryV2.created_at.desc()
+            )
         )
-        return {
-            row.user_id: (row.core_facts, row.impression)
-            for row in result.all()
-        }
-
-
-
+        return {row.user_id: (row.core_facts, row.impression) for row in result.all()}

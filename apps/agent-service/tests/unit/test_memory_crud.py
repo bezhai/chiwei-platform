@@ -1,5 +1,6 @@
 # tests/unit/test_memory_crud.py
 """测试 memory CRUD 函数的参数传递、SQL 构建和返回值"""
+
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_session():
     """构造带 context manager 支持的 mock session"""
@@ -47,6 +49,7 @@ async def test_create_fragment_adds_and_commits():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import create_fragment
+
         result = await create_fragment(fragment)
 
     mock_session.add.assert_called_once_with(fragment)
@@ -71,6 +74,7 @@ async def test_get_fragments_for_chat_no_grain_filter():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_fragments_for_chat
+
         result = await get_fragments_for_chat("akao", "chat_abc")
 
     mock_session.execute.assert_awaited_once()
@@ -85,7 +89,10 @@ async def test_get_fragments_for_chat_with_grain_filter():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_fragments_for_chat
-        result = await get_fragments_for_chat("akao", "chat_abc", grains=["conversation"])
+
+        result = await get_fragments_for_chat(
+            "akao", "chat_abc", grains=["conversation"]
+        )
 
     assert result == []
 
@@ -102,6 +109,7 @@ async def test_get_recent_fragments_by_grain_returns_list():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_recent_fragments_by_grain
+
         result = await get_recent_fragments_by_grain("akao", "daily", limit=5)
 
     assert result == []
@@ -120,6 +128,7 @@ async def test_get_today_fragments_no_filters():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_today_fragments
+
         result = await get_today_fragments("akao")
 
     assert result == []
@@ -132,6 +141,7 @@ async def test_get_today_fragments_with_chat_id():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_today_fragments
+
         result = await get_today_fragments("akao", source_chat_id="chat_xyz")
 
     assert result == []
@@ -149,6 +159,7 @@ async def test_get_fragments_in_date_range():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import get_fragments_in_date_range
+
         result = await get_fragments_in_date_range(
             "akao",
             date(2026, 4, 1),
@@ -171,9 +182,8 @@ async def test_search_fragments_fts_returns_list():
 
     with patch("app.orm.memory_crud.AsyncSessionLocal", return_value=mock_session):
         from app.orm.memory_crud import search_fragments_fts
+
         result = await search_fragments_fts("akao", "新番")
 
     assert result == []
     mock_session.execute.assert_awaited_once()
-
-

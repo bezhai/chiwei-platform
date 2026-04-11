@@ -28,8 +28,11 @@ class TestForEachPersona:
             called.append(pid)
 
         fake_session = AsyncMock()
-        with patch("app.workers.common.get_session") as mock_gs, patch(
-            "app.workers.common.list_all_persona_ids", return_value=["a", "b", "c"]
+        with (
+            patch("app.workers.common.get_session") as mock_gs,
+            patch(
+                "app.workers.common.list_all_persona_ids", return_value=["a", "b", "c"]
+            ),
         ):
             mock_gs.return_value.__aenter__ = AsyncMock(return_value=fake_session)
             mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -71,8 +74,9 @@ class TestForEachPersona:
             called.append(pid)
 
         fake_session = AsyncMock()
-        with patch("app.workers.common.get_session") as mock_gs, patch(
-            "app.workers.common.list_all_persona_ids", return_value=[]
+        with (
+            patch("app.workers.common.get_session") as mock_gs,
+            patch("app.workers.common.list_all_persona_ids", return_value=[]),
         ):
             mock_gs.return_value.__aenter__ = AsyncMock(return_value=fake_session)
             mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)

@@ -33,8 +33,8 @@ async def lifespan(app: FastAPI):
     # Start MQ consumers (only when RabbitMQ is configured)
     consumer_tasks: list[asyncio.Task] = []
     if settings.rabbitmq_url:
-        from app.workers.chat_consumer_v2 import start_chat_consumer
-        from app.workers.post_consumer_v2 import start_post_consumer
+        from app.workers.chat_consumer import start_chat_consumer
+        from app.workers.post_consumer import start_post_consumer
 
         consumer_tasks.append(asyncio.create_task(start_post_consumer()))
         logger.info("Post safety consumer started")

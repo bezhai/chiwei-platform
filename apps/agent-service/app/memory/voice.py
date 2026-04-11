@@ -87,6 +87,8 @@ async def generate_voice(
         return None
 
     async with get_session() as s:
-        await insert_reply_style(s, persona_id=persona_id, style_text=content, source=source)
+        await insert_reply_style(
+            s, persona_id=persona_id, style_text=content, source=source
+        )
     logger.info("[%s] Voice generated (%s): %s...", persona_id, source, content[:60])
     return content

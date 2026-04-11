@@ -130,8 +130,7 @@ def extract_text(content: object) -> str:
     """Extract plain text from LLM response content."""
     if isinstance(content, list):
         return "".join(
-            p.get("text", "") if isinstance(p, dict) else str(p)
-            for p in content
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
         ).strip()
     return (content or "").strip()
 
@@ -268,9 +267,7 @@ async def run_glimpse(persona_id: str) -> GlimpseResult:
         # Engineering cap: count proactive messages in the past hour
         one_hour_ago = now - timedelta(hours=1)
         hour_cutoff = one_hour_ago.strftime("%H:%M")
-        recent_hour_count = sum(
-            1 for r in recent_proactive if r["time"] >= hour_cutoff
-        )
+        recent_hour_count = sum(1 for r in recent_proactive if r["time"] >= hour_cutoff)
         if recent_hour_count >= HOURLY_PROACTIVE_LIMIT:
             state_observation = (
                 f"{observation}\n[want_to_speak:throttled] "

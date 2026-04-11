@@ -68,7 +68,9 @@ class TestRerankFallback:
     def test_respects_top_k(self):
         from app.agent.tools.search import _rerank_fallback
 
-        results = [{"title": f"T{i}", "link": f"L{i}", "content": "c"} for i in range(10)]
+        results = [
+            {"title": f"T{i}", "link": f"L{i}", "content": "c"} for i in range(10)
+        ]
         out = _rerank_fallback(results, top_k=3)
         assert len(out) == 3
 
@@ -106,7 +108,11 @@ class TestRerankChunks:
 
         with (
             patch("app.agent.tools.search.settings") as mock_settings,
-            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response),
+            patch(
+                "httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
         ):
             mock_settings.siliconflow_api_key = "test-key"
             mock_settings.siliconflow_base_url = "http://test"
@@ -131,7 +137,11 @@ class TestRerankChunks:
 
         with (
             patch("app.agent.tools.search.settings") as mock_settings,
-            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response),
+            patch(
+                "httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
         ):
             mock_settings.siliconflow_api_key = "test-key"
             mock_settings.siliconflow_base_url = "http://test"
@@ -169,7 +179,11 @@ class TestReadWebpage:
 
         with (
             patch("app.agent.tools.search.settings") as mock_settings,
-            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response),
+            patch(
+                "httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
         ):
             mock_settings.you_search_host = "http://you"
             mock_settings.you_search_api_key = "key"
@@ -188,7 +202,11 @@ class TestReadWebpage:
 
         with (
             patch("app.agent.tools.search.settings") as mock_settings,
-            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response),
+            patch(
+                "httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
         ):
             mock_settings.you_search_host = "http://you"
             mock_settings.you_search_api_key = "key"

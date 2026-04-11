@@ -75,6 +75,7 @@ async def quick_search(
 
         # agent_responses 子查询（获取 persona_id）
         from sqlalchemy import literal_column
+
         agent_resp_sq = (
             select(
                 literal_column("agent_responses.session_id").label("ar_session_id"),
@@ -106,9 +107,9 @@ async def quick_search(
             .order_by(ConversationMessage.create_time.asc())
         )
         root_rows = root_result.all()
-        root_messages: list[tuple[ConversationMessage, str | None, str | None, str | None]] = [
-            (row[0], row[1], row[2], row[3]) for row in root_rows
-        ]
+        root_messages: list[
+            tuple[ConversationMessage, str | None, str | None, str | None]
+        ] = [(row[0], row[1], row[2], row[3]) for row in root_rows]
 
         # 3. 如果数量不足，补充同一chat_id的其他消息
         if len(root_messages) < limit:
@@ -143,7 +144,9 @@ async def quick_search(
                 .limit(needed)
             )
             additional_rows = additional_result.all()
-            additional_messages = [(row[0], row[1], row[2], row[3]) for row in additional_rows]
+            additional_messages = [
+                (row[0], row[1], row[2], row[3]) for row in additional_rows
+            ]
 
             # 合并并排序
             all_messages = root_messages + additional_messages
@@ -161,7 +164,9 @@ async def quick_search(
                     user_id=str(msg.user_id),
                     create_time=datetime.fromtimestamp(msg.create_time / 1000),
                     role=str(msg.role),
-                    username=username if msg.role == "user" else (msg.bot_name or "assistant"),
+                    username=username
+                    if msg.role == "user"
+                    else (msg.bot_name or "assistant"),
                     bot_name=msg.bot_name if msg.role == "assistant" else None,
                     persona_id=persona_id if msg.role == "assistant" else None,
                     chat_type=str(msg.chat_type),

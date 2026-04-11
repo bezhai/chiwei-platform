@@ -20,14 +20,14 @@ from collections.abc import AsyncGenerator
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
 
-from app.agent.core import Agent
-from app.agent.tools import ALL_TOOLS
-from app.agents.core.context import (
+from app.agent.context import (
     AgentContext,
     FeatureFlags,
     MediaContext,
     MessageContext,
 )
+from app.agent.core import Agent
+from app.agent.tools import ALL_TOOLS
 from app.chat.context import (
     build_chat_context,
     is_proactive_var,
@@ -92,7 +92,9 @@ async def stream_chat(
             # 2. Gray config
             async with get_session() as s:
                 gray_config = (await find_gray_config(s, message_id)) or {}
-            CHAT_PIPELINE_DURATION.labels(stage="prep").observe(time.monotonic() - t_entry)
+            CHAT_PIPELINE_DURATION.labels(stage="prep").observe(
+                time.monotonic() - t_entry
+            )
             pre_blocking = gray_config.get("pre_blocking", "false")
 
             # Resolve guard message
@@ -165,7 +167,9 @@ async def _build_and_stream(
 
     # Build context
     ctx = await build_chat_context(message_id, current_persona_id=persona_id or "")
-    CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(time.monotonic() - t_build_start)
+    CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(
+        time.monotonic() - t_build_start
+    )
 
     if not ctx.messages:
         logger.warning("No results found for message_id: %s", message_id)
@@ -291,7 +295,9 @@ class _BotCtx:
         """Return persona-specific error message."""
         persona = self._persona
         if persona and hasattr(persona, "error_messages") and persona.error_messages:
-            return persona.error_messages.get(kind, f"{self._display_name()}遇到了问题QAQ")
+            return persona.error_messages.get(
+                kind, f"{self._display_name()}遇到了问题QAQ"
+            )
         return f"{self._display_name()}遇到了问题QAQ"
 
     def _display_name(self) -> str:
@@ -318,7 +324,9 @@ async def _load_bot_context(
         voice_content = await find_latest_reply_style(s, pid) or ""
 
     identity = persona.persona_lite if persona else ""
-    appearance = (persona.appearance_detail if persona and persona.appearance_detail else "")
+    appearance = (
+        persona.appearance_detail if persona and persona.appearance_detail else ""
+    )
 
     return _BotCtx(
         persona_id=pid,
