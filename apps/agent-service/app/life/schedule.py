@@ -12,13 +12,9 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
-from langfuse.langchain import CallbackHandler
 
 from app.agent.core import Agent, AgentConfig
-from app.agent.models import build_chat_model
-from app.agent.prompts import get_prompt
 from app.agent.tools.search import search_web
 from app.data import queries as Q
 from app.data.models import AkaoSchedule
@@ -26,7 +22,8 @@ from app.data.session import get_session
 from app.infra.config import settings
 
 _IDEATION_CFG = AgentConfig(
-    "schedule_daily_ideation", "offline-model", "schedule-ideation"
+    "schedule_daily_ideation", "offline-model", "schedule-ideation",
+    recursion_limit=42,  # multi-step web search needs more steps
 )
 _WRITER_CFG = AgentConfig("schedule_daily_writer", "offline-model", "schedule-writer")
 _CRITIC_CFG = AgentConfig("schedule_daily_critic", "offline-model", "schedule-critic")
@@ -99,34 +96,19 @@ async def _run_ideation(
 
     Uses web search tool. Runs without persona core to avoid interest bias.
     """
-    prompt_template = get_prompt(_IDEATION_CFG.prompt_id)
-
     season = _get_season(target_date.month)
     weekday = _WEEKDAY_CN[target_date.weekday()]
 
-    compiled = prompt_template.compile(
-        recent_schedules=recent_schedules_text,
-        date=target_date.isoformat(),
-        weekday=weekday,
-        season=season,
-    )
-
-    # Ideation needs high recursion_limit (42) for multi-step web search,
-    # so we build the LangGraph agent directly instead of going through Agent.
-    model = await build_chat_model(_IDEATION_CFG.model_id)
-    agent = create_agent(model, [search_web], system_prompt=compiled)
-
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content="开始搜集今天的生活素材吧。")]},
-        config={
-            "callbacks": [CallbackHandler()],
-            "run_name": _IDEATION_CFG.trace_name,
-            "recursion_limit": 42,
+    result = await Agent(_IDEATION_CFG, tools=[search_web]).run(
+        messages=[HumanMessage(content="开始搜集今天的生活素材吧。")],
+        prompt_vars={
+            "recent_schedules": recent_schedules_text,
+            "date": target_date.isoformat(),
+            "weekday": weekday,
+            "season": season,
         },
     )
-
-    last_msg = result["messages"][-1]
-    return _extract_text(last_msg.content)
+    return _extract_text(result.content)
 
 
 async def _run_writer(

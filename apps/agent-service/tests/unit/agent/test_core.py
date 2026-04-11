@@ -240,6 +240,82 @@ class TestStream:
 
         assert call_count == 1  # no retry after yield
 
+    async def test_retries_before_first_token(self, mock_deps):
+        """Failure before any token is yielded should trigger retry."""
+        call_count = 0
+
+        async def failing_then_ok(inp, *, context=None, stream_mode=None, config=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise APITimeoutError(request=MagicMock())
+            yield AIMessageChunk(content="ok"), None
+
+        mock_deps["agent"].astream = failing_then_ok
+
+        collected = []
+        async for token in Agent(_CFG).stream(
+            messages=[HumanMessage(content="hi")],
+            max_retries=3,
+        ):
+            collected.append(token)
+
+        assert call_count == 2  # first attempt failed, second succeeded
+        assert len(collected) == 1
+        assert collected[0].content == "ok"
+
+
+# ---------------------------------------------------------------------------
+# empty prompt_id guard
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyPromptGuard:
+    async def test_run_rejects_empty_prompt_id(self, mock_deps):
+        with pytest.raises(ValueError, match="non-empty prompt_id"):
+            await Agent(_NO_PROMPT_CFG).run(messages=[HumanMessage(content="hi")])
+
+    async def test_stream_rejects_empty_prompt_id(self, mock_deps):
+        with pytest.raises(ValueError, match="non-empty prompt_id"):
+            async for _ in Agent(_NO_PROMPT_CFG).stream(
+                messages=[HumanMessage(content="hi")]
+            ):
+                pass
+
+    async def test_extract_allows_empty_prompt_id(self, mock_deps):
+        """Guard agents have empty prompt_id and only use extract()."""
+
+        class Out(BaseModel):
+            v: str
+
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=Out(v="ok"))
+        mock_deps["model"].with_structured_output.return_value = structured
+
+        result = await Agent(_NO_PROMPT_CFG).extract(
+            Out, messages=[HumanMessage(content="test")]
+        )
+        assert result.v == "ok"
+        mock_deps["get_prompt"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# recursion_limit
+# ---------------------------------------------------------------------------
+
+
+class TestRecursionLimit:
+    async def test_default_recursion_limit(self, mock_deps):
+        await Agent(_CFG).run(messages=[HumanMessage(content="hi")])
+        config = mock_deps["agent"].ainvoke.call_args.kwargs["config"]
+        assert config["recursion_limit"] == 12
+
+    async def test_custom_recursion_limit(self, mock_deps):
+        cfg = AgentConfig("p", "m", "t", recursion_limit=42)
+        await Agent(cfg).run(messages=[HumanMessage(content="hi")])
+        config = mock_deps["agent"].ainvoke.call_args.kwargs["config"]
+        assert config["recursion_limit"] == 42
+
 
 # ---------------------------------------------------------------------------
 # extract()

@@ -87,6 +87,7 @@ class AgentConfig:
     prompt_id: str
     model_id: str
     trace_name: str | None = None
+    recursion_limit: int = _DEFAULT_RECURSION_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +122,11 @@ class Agent:
 
     async def _build_agent(self, prompt_vars: dict[str, Any]) -> Any:
         """Create a LangGraph agent with the configured prompt and tools."""
+        if not self._cfg.prompt_id:
+            raise ValueError(
+                f"Agent({self._cfg.trace_name}).run/stream requires a non-empty "
+                f"prompt_id. Guard agents (empty prompt_id) should use extract()."
+            )
         langfuse_prompt = get_prompt(self._cfg.prompt_id)
         model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
         prompt = langfuse_prompt.get_langchain_prompt(
@@ -139,7 +145,7 @@ class Agent:
         """Build LangChain config with Langfuse tracing."""
         config: dict[str, Any] = {
             "callbacks": [CallbackHandler(update_trace=True)],
-            "recursion_limit": _DEFAULT_RECURSION_LIMIT,
+            "recursion_limit": self._cfg.recursion_limit,
         }
         if self._cfg.trace_name:
             config["run_name"] = self._cfg.trace_name
