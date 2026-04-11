@@ -14,23 +14,15 @@ from app.agents.graphs.pre.state import BlockReason
 pytestmark = pytest.mark.integration
 
 
-def _make_smart_model(result_map: dict):
-    """根据 with_structured_output 参数返回对应 mock 结果"""
+def _make_extract_side_effect(result_map: dict):
+    """创建 LLMService.extract 的 side_effect，根据 schema 参数返回不同结果。"""
 
-    def _with_structured_output(cls):
-        mock_structured = MagicMock()
-        if cls in result_map:
-            mock_structured.ainvoke = AsyncMock(return_value=result_map[cls])
-        else:
-            # 未知类型，返回安全默认值
-            mock_structured.ainvoke = AsyncMock(
-                side_effect=RuntimeError(f"No mock for {cls}")
-            )
-        return mock_structured
+    async def _side_effect(prompt_id, prompt_vars, messages, schema, **kwargs):
+        if schema in result_map:
+            return result_map[schema]
+        raise RuntimeError(f"No mock for {schema}")
 
-    mock_model = MagicMock()
-    mock_model.with_structured_output.side_effect = _with_structured_output
-    return mock_model
+    return _side_effect
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +54,6 @@ class TestPreGraphNsfwMinorBlocked:
             ),
             NsfwCheckResult: NsfwCheckResult(is_nsfw=True, confidence=0.9),
         }
-        smart_model = _make_smart_model(result_map)
 
         with (
             patch(
@@ -71,14 +62,14 @@ class TestPreGraphNsfwMinorBlocked:
                 return_value=None,
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.safety.get_prompt",
@@ -124,7 +115,6 @@ class TestPreGraphNsfwAdultPasses:
             ),
             NsfwCheckResult: NsfwCheckResult(is_nsfw=True, confidence=0.9),
         }
-        smart_model = _make_smart_model(result_map)
 
         with (
             patch(
@@ -133,14 +123,14 @@ class TestPreGraphNsfwAdultPasses:
                 return_value=None,
             ),
             patch(
-                "app.agents.graphs.pre.nodes.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
-                "app.agents.graphs.pre.nodes.nsfw_safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.pre.nodes.nsfw_safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=smart_model,
+                side_effect=_make_extract_side_effect(result_map),
             ),
             patch(
                 "app.agents.graphs.pre.nodes.safety.get_prompt",

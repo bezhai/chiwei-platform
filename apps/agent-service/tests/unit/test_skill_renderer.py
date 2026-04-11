@@ -1,6 +1,5 @@
 """Tests for skill renderer (preprocessing + variable substitution)"""
 
-import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 

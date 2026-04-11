@@ -25,7 +25,7 @@ async def test_cron_glimpse_skips_non_browsing():
     with (
         patch(f"{MODULE}.settings") as mock_settings,
         patch(f"{MODULE}.get_all_persona_ids", new_callable=AsyncMock, return_value=["akao-001"]),
-        patch(f"{MODULE}._load_life_engine_state", new_callable=AsyncMock, return_value=mock_state),
+        patch(f"{MODULE}.load_latest_state", new_callable=AsyncMock, return_value=mock_state),
         patch(f"{MODULE}.run_glimpse", new_callable=AsyncMock) as mock_glimpse,
     ):
         mock_settings.lane = "prod"
@@ -43,7 +43,7 @@ async def test_cron_glimpse_runs_when_browsing():
     with (
         patch(f"{MODULE}.settings") as mock_settings,
         patch(f"{MODULE}.get_all_persona_ids", new_callable=AsyncMock, return_value=["akao-001"]),
-        patch(f"{MODULE}._load_life_engine_state", new_callable=AsyncMock, return_value=mock_state),
+        patch(f"{MODULE}.load_latest_state", new_callable=AsyncMock, return_value=mock_state),
         patch(f"{MODULE}.run_glimpse", new_callable=AsyncMock) as mock_glimpse,
     ):
         mock_settings.lane = "prod"
@@ -59,7 +59,7 @@ async def test_cron_glimpse_no_state_skips():
     with (
         patch(f"{MODULE}.settings") as mock_settings,
         patch(f"{MODULE}.get_all_persona_ids", new_callable=AsyncMock, return_value=["akao-001"]),
-        patch(f"{MODULE}._load_life_engine_state", new_callable=AsyncMock, return_value=None),
+        patch(f"{MODULE}.load_latest_state", new_callable=AsyncMock, return_value=None),
         patch(f"{MODULE}.run_glimpse", new_callable=AsyncMock) as mock_glimpse,
     ):
         mock_settings.lane = "prod"

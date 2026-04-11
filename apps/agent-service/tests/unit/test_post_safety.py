@@ -35,19 +35,13 @@ class TestPostSafety:
     async def test_no_banned_word_proceeds_to_llm(self, mock_check):
         mock_check.return_value = None
 
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = OutputSafetyResult(
-            is_unsafe=False, confidence=0.1
-        )
-
-        mock_structured = MagicMock()
-        mock_structured.with_structured_output.return_value = mock_model
-
         with (
             patch(
-                "app.agents.graphs.post.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.post.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_structured,
+                return_value=OutputSafetyResult(
+                    is_unsafe=False, confidence=0.1
+                ),
             ),
             patch(
                 "app.agents.graphs.post.safety.get_prompt",
@@ -61,19 +55,13 @@ class TestPostSafety:
     async def test_llm_detects_unsafe_content(self, mock_check):
         mock_check.return_value = None
 
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = OutputSafetyResult(
-            is_unsafe=True, confidence=0.9
-        )
-
-        mock_structured = MagicMock()
-        mock_structured.with_structured_output.return_value = mock_model
-
         with (
             patch(
-                "app.agents.graphs.post.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.post.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_structured,
+                return_value=OutputSafetyResult(
+                    is_unsafe=True, confidence=0.9
+                ),
             ),
             patch(
                 "app.agents.graphs.post.safety.get_prompt",
@@ -88,19 +76,13 @@ class TestPostSafety:
     async def test_llm_low_confidence_passes(self, mock_check):
         mock_check.return_value = None
 
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = OutputSafetyResult(
-            is_unsafe=True, confidence=0.5
-        )
-
-        mock_structured = MagicMock()
-        mock_structured.with_structured_output.return_value = mock_model
-
         with (
             patch(
-                "app.agents.graphs.post.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.post.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_structured,
+                return_value=OutputSafetyResult(
+                    is_unsafe=True, confidence=0.5
+                ),
             ),
             patch(
                 "app.agents.graphs.post.safety.get_prompt",
@@ -116,7 +98,7 @@ class TestPostSafety:
 
         with (
             patch(
-                "app.agents.graphs.post.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.post.safety.LLMService.extract",
                 new_callable=AsyncMock,
                 side_effect=Exception("LLM error"),
             ),
@@ -132,19 +114,13 @@ class TestPostSafety:
     async def test_banned_word_exception_fails_open(self, mock_check):
         mock_check.side_effect = Exception("Redis error")
 
-        mock_model = AsyncMock()
-        mock_model.ainvoke.return_value = OutputSafetyResult(
-            is_unsafe=False, confidence=0.1
-        )
-
-        mock_structured = MagicMock()
-        mock_structured.with_structured_output.return_value = mock_model
-
         with (
             patch(
-                "app.agents.graphs.post.safety.ModelBuilder.build_chat_model",
+                "app.agents.graphs.post.safety.LLMService.extract",
                 new_callable=AsyncMock,
-                return_value=mock_structured,
+                return_value=OutputSafetyResult(
+                    is_unsafe=False, confidence=0.1
+                ),
             ),
             patch(
                 "app.agents.graphs.post.safety.get_prompt",

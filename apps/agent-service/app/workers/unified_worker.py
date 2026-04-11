@@ -16,14 +16,14 @@ from inner_shared.logger import setup_logging
 from app.config.config import settings
 from app.long_tasks.executor import poll_and_execute_tasks
 from app.workers.dream_worker import cron_generate_dreams, cron_generate_weekly_dreams
+from app.workers.glimpse_worker import cron_glimpse
+from app.workers.life_engine_worker import cron_life_engine_tick
 from app.workers.schedule_worker import (
     cron_generate_daily_plan,
     cron_generate_monthly_plan,
     cron_generate_weekly_plan,
 )
 from app.workers.vectorize_worker import cron_scan_pending_messages
-from app.workers.life_engine_worker import cron_life_engine_tick
-from app.workers.glimpse_worker import cron_glimpse
 from app.workers.voice_worker import cron_generate_voice
 
 logger = logging.getLogger(__name__)

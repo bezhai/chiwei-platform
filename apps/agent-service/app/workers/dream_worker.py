@@ -10,18 +10,24 @@ weekly dream: 最近 7 个 daily 碎片 → 一周回顾
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_all_persona_ids, get_bot_persona
-from app.orm.memory_crud import create_fragment, get_fragments_in_date_range, get_recent_fragments_by_grain
+from app.orm.memory_crud import (
+    create_fragment,
+    get_fragments_in_date_range,
+    get_recent_fragments_by_grain,
+)
 from app.orm.memory_models import ExperienceFragment
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))
 
 
+@cron_error_handler()
 async def cron_generate_dreams(ctx) -> None:
     """cron 入口：为每个 persona 生成昨天的 daily dream"""
     yesterday = date.today() - timedelta(days=1)
@@ -33,6 +39,7 @@ async def cron_generate_dreams(ctx) -> None:
             logger.error(f"[{persona_id}] Daily dream failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_weekly_dreams(ctx) -> None:
     """cron 入口：每周一为每个 persona 生成 weekly dream"""
     today = date.today()
@@ -71,14 +78,8 @@ async def generate_daily_dream(persona_id: str, target_date: date | None = None)
         else "（前几天没有做梦）"
     )
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="dream_daily",
-        tools=[],
-        model_id=settings.diary_model,
-        trace_name="dream-daily",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="回忆今天发生的事")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
@@ -86,6 +87,9 @@ async def generate_daily_dream(persona_id: str, target_date: date | None = None)
             "today_fragments": today_text,
             "recent_dreams": recent_text,
         },
+        messages=[HumanMessage(content="回忆今天发生的事")],
+        model_id=settings.diary_model,
+        trace_name="dream-daily",
     )
     content = _extract_text(result.content)
 
@@ -121,19 +125,16 @@ async def generate_weekly_dream(persona_id: str, target_date: date | None = None
     persona_lite = persona_obj.persona_lite if persona_obj else ""
     dailies_text = "\n\n---\n\n".join(f.content for f in reversed(dailies))
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="dream_weekly",
-        tools=[],
-        model_id=settings.diary_model,
-        trace_name="dream-weekly",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="回顾这一周")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
             "dailies": dailies_text,
         },
+        messages=[HumanMessage(content="回顾这一周")],
+        model_id=settings.diary_model,
+        trace_name="dream-weekly",
     )
     content = _extract_text(result.content)
 

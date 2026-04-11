@@ -28,6 +28,7 @@ from app.middleware.chat_metrics import (
     CHAT_TOKENS,
 )
 from app.utils.middlewares.trace import header_vars
+from app.workers.error_handling import mq_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ SPLIT_MARKER = "---split---"
 MAX_MESSAGES = 4
 
 
+@mq_error_handler()
 async def handle_chat_request(message: AbstractIncomingMessage) -> None:
     """消费 chat_request queue 中的消息，路由到对应 persona 并行处理"""
     async with message.process(requeue=False):
@@ -130,18 +132,9 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
 
     # 写入 persona_id + 修正 bot_name（makeTextReply 创建时用的是 SETNX 锁赢家的 bot_name）
     try:
-        from app.orm.base import AsyncSessionLocal
-        from sqlalchemy import text as sql_text
+        from app.orm.crud.message import update_agent_response_bot
 
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                sql_text(
-                    "UPDATE agent_responses SET bot_name = :bn, persona_id = :pid "
-                    "WHERE session_id = :sid"
-                ),
-                {"bn": response_bot_name, "pid": persona_id, "sid": session_id},
-            )
-            await session.commit()
+        await update_agent_response_bot(session_id, response_bot_name, persona_id)
     except Exception as e:
         logger.warning("Failed to update agent_response: %s", e)
 

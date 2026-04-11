@@ -109,6 +109,7 @@ async def run_pre(message_content: str, persona_id: str = "") -> PreState:
         "message_content": message_content,
         "persona_id": persona_id,
         "safety_results": [],
+        "complexity_result": None,
         "is_blocked": False,
         "block_reason": None,
     }

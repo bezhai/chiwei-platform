@@ -7,12 +7,13 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_plan_for_period
+from app.orm.crud import get_plan_for_period
 from app.orm.memory_crud import get_today_fragments, save_reply_style
+from app.services.persona_loader import load_persona
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,9 @@ async def generate_voice(
     source: str = "cron",
 ) -> str | None:
     """生成完整 voice 内容（内心独白 + 风格示例）"""
-    persona = await get_bot_persona(persona_id)
-    if not persona:
+    pc = await load_persona(persona_id)
+    # fallback persona_id == display_name means persona not found
+    if pc.display_name == persona_id and not pc.persona_lite:
         return None
 
     from app.services.life_engine import _load_state
@@ -50,17 +52,11 @@ async def generate_voice(
     if recent_context:
         recent_ctx_block = f"最近的对话和你的回复：\n{recent_context}"
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="voice_generator",
-        tools=[],
-        model_id=settings.identity_drift_model,
-        trace_name="voice-generator",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="生成当前状态的内心独白和语气示例")],
         prompt_vars={
-            "persona_name": persona.display_name,
-            "persona_lite": persona.persona_lite,
+            "persona_name": pc.display_name,
+            "persona_lite": pc.persona_lite,
             "current_state": current_state,
             "response_mood": response_mood,
             "schedule_segment": schedule_text,
@@ -68,6 +64,9 @@ async def generate_voice(
             "recent_context": recent_ctx_block,
             "current_time": now.strftime("%H:%M"),
         },
+        messages=[HumanMessage(content="生成当前状态的内心独白和语气示例")],
+        model_id=settings.identity_drift_model,
+        trace_name="voice-generator",
     )
 
     content = result.content or ""

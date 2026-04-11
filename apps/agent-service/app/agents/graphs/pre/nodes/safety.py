@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.graphs.pre.state import BlockReason, PreState, SafetyResult
 from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from app.agents.infra.llm_service import LLMService
 from app.services.banned_word import check_banned_word
 
 logger = logging.getLogger(__name__)
@@ -66,13 +66,14 @@ async def check_prompt_injection(state: PreState, config) -> dict:
         langfuse_prompt = get_prompt("guard_prompt_injection")
         messages = langfuse_prompt.compile(message=message)
 
-        model = await ModelBuilder.build_chat_model(
-            "guard-model", reasoning_effort="low"
-        )
-        structured_model = model.with_structured_output(PromptInjectionResult)
-
-        result: PromptInjectionResult = await structured_model.ainvoke(
-            messages, config=config
+        result: PromptInjectionResult = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=messages,
+            schema=PromptInjectionResult,
+            model_id="guard-model",
+            trace_name="pre-injection-check",
+            model_kwargs={"reasoning_effort": "low"},
         )
 
         if result.is_injection and result.confidence >= 0.85:
@@ -102,13 +103,14 @@ async def check_sensitive_politics(state: PreState, config) -> dict:
         langfuse_prompt = get_prompt("guard_sensitive_politics")
         messages = langfuse_prompt.compile(message=message)
 
-        model = await ModelBuilder.build_chat_model(
-            "guard-model", reasoning_effort="low"
-        )
-        structured_model = model.with_structured_output(PoliticsCheckResult)
-
-        result: PoliticsCheckResult = await structured_model.ainvoke(
-            messages, config=config
+        result: PoliticsCheckResult = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=messages,
+            schema=PoliticsCheckResult,
+            model_id="guard-model",
+            trace_name="pre-politics-check",
+            model_kwargs={"reasoning_effort": "low"},
         )
 
         if result.is_sensitive and result.confidence >= 0.85:

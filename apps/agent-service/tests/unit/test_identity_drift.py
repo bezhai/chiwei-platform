@@ -1,34 +1,60 @@
 """Identity 漂移状态机测试"""
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime, timezone, timedelta
 
-CST = timezone(timedelta(hours=8))
+from app.services.persona_loader import PersonaContext
 
-
-@pytest.mark.asyncio
-async def test_set_base_reply_style_saves_to_db():
-    """写入基线 reply_style 到 DB"""
-    with patch("app.orm.memory_crud.save_reply_style", new_callable=AsyncMock) as mock_save:
-        from app.services.identity_drift import set_base_reply_style
-
-        await set_base_reply_style("懒洋洋的，说话短", persona_id="akao")
-
-    mock_save.assert_called_once_with("akao", "懒洋洋的，说话短", source="base")
+_MOCK_PERSONA = PersonaContext(
+    persona_id="akao",
+    display_name="赤尾",
+    persona_lite="元气活泼傲娇少女",
+)
 
 
 @pytest.mark.asyncio
-async def test_set_identity_state_saves_to_db():
-    """写入漂移 reply_style 到 DB"""
-    with patch("app.orm.memory_crud.save_reply_style", new_callable=AsyncMock) as mock_save:
-        from app.services.identity_drift import set_identity_state
+async def test_run_drift_delegates_to_generate_voice():
+    """_run_drift 拼装 recent_context 后调用 generate_voice"""
+    with (
+        patch("app.services.identity_drift.load_persona",
+              new_callable=AsyncMock, return_value=_MOCK_PERSONA),
+        patch("app.services.identity_drift._get_recent_messages",
+              new_callable=AsyncMock, return_value="[15:30] A: 你好\n[15:31] 赤尾: 嗯"),
+        patch("app.services.identity_drift._get_recent_persona_replies",
+              new_callable=AsyncMock, return_value="1. 嗯\n2. 不知道"),
+        patch("app.services.voice_generator.generate_voice",
+              new_callable=AsyncMock) as mock_gen_voice,
+    ):
+        from app.services.identity_drift import _run_drift
+        await _run_drift("chat_001", persona_id="akao")
 
-        await set_identity_state("akao", "有点困", observation="群里很安静")
+    mock_gen_voice.assert_called_once()
+    call_kwargs = mock_gen_voice.call_args
+    assert call_kwargs[0][0] == "akao"  # persona_id
+    assert call_kwargs[1]["source"] == "drift"
+    assert "群里刚才发生的事" in call_kwargs[1]["recent_context"]
+    assert "你最近的回复" in call_kwargs[1]["recent_context"]
 
-    mock_save.assert_called_once_with("akao", "有点困", source="drift", observation="群里很安静")
+
+@pytest.mark.asyncio
+async def test_run_drift_skips_when_no_recent_messages():
+    """近期无消息时 _run_drift 直接跳过，不调 generate_voice"""
+    with (
+        patch("app.services.identity_drift.load_persona",
+              new_callable=AsyncMock, return_value=_MOCK_PERSONA),
+        patch("app.services.identity_drift._get_recent_messages",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.identity_drift._get_recent_persona_replies",
+              new_callable=AsyncMock, return_value=""),
+        patch("app.services.voice_generator.generate_voice",
+              new_callable=AsyncMock) as mock_gen_voice,
+    ):
+        from app.services.identity_drift import _run_drift
+        await _run_drift("chat_001", persona_id="akao")
+
+    mock_gen_voice.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -143,61 +169,6 @@ async def test_phase2_buffers_new_events():
 
 
 @pytest.mark.asyncio
-async def test_run_drift_calls_observer_then_generator():
-    """_run_drift 先调 observer 再调 generator，保存到 DB"""
-    observer_response = MagicMock()
-    observer_response.content = "## 情感状态\n精力低\n## 偏差诊断\n回复太长\n## 下一轮方向\n要短"
-
-    generator_response = MagicMock()
-    generator_response.content = "[精力低，懒]\n\n--- 被问问题 ---\n不知道诶\n懒得查"
-
-    mock_model = AsyncMock()
-    mock_model.ainvoke = AsyncMock(side_effect=[observer_response, generator_response])
-
-    with (
-        patch("app.orm.memory_crud.get_latest_reply_style",
-              new_callable=AsyncMock, return_value="上一轮的 reply_style"),
-        patch("app.orm.memory_crud.save_reply_style",
-              new_callable=AsyncMock) as mock_save,
-        patch("app.services.identity_drift.ModelBuilder") as mock_mb,
-        patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
-        patch("app.services.identity_drift._get_recent_messages",
-              new_callable=AsyncMock, return_value="[15:30] A: 你好\n[15:31] 赤尾: 嗯"),
-        patch("app.services.identity_drift._get_recent_persona_replies",
-              new_callable=AsyncMock, return_value="1. 嗯\n2. 不知道"),
-        patch("app.services.identity_drift._get_schedule_context",
-              new_callable=AsyncMock, return_value="下午犯困"),
-        patch("app.services.identity_drift._get_persona_context",
-              new_callable=AsyncMock, return_value=("赤尾", "元气活泼傲娇少女")),
-    ):
-        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
-
-        mock_observer_prompt = MagicMock()
-        mock_observer_prompt.compile.return_value = "observer compiled"
-        mock_generator_prompt = MagicMock()
-        mock_generator_prompt.compile.return_value = "generator compiled"
-        mock_get_prompt.side_effect = lambda name: (
-            mock_observer_prompt if name == "drift_observer" else mock_generator_prompt
-        )
-
-        from app.services.identity_drift import _run_drift
-        await _run_drift("chat_001", persona_id="akao")
-
-    # 两次 LLM 调用
-    assert mock_model.ainvoke.call_count == 2
-    # get_prompt 调了 observer 和 generator
-    mock_get_prompt.assert_any_call("drift_observer")
-    mock_get_prompt.assert_any_call("drift_generator")
-    # 保存到 DB（source=drift，含 observation）
-    mock_save.assert_called_once()
-    call_args = mock_save.call_args
-    assert call_args[0][0] == "akao"  # persona_id
-    assert "精力低" in call_args[0][1] or "懒" in call_args[0][1]  # style_text
-    assert call_args[1]["source"] == "drift"
-    assert call_args[1]["observation"] is not None
-
-
-@pytest.mark.asyncio
 async def test_get_recent_persona_replies_filters_assistant_only():
     """只返回指定 persona 的回复，不含其他人的消息"""
     mock_messages = [
@@ -230,47 +201,3 @@ async def test_get_recent_persona_replies_filters_assistant_only():
     assert len(lines) == 3
 
 
-@pytest.mark.asyncio
-async def test_generate_base_reply_style_uses_schedule():
-    """基线生成：读 schedule + 调 LLM + 存 DB"""
-    mock_response = MagicMock()
-    mock_response.content = "[感冒中，懒懒的]\n\n--- 被问问题 ---\n赤尾: 不知道诶……头好晕"
-
-    mock_model = AsyncMock()
-    mock_model.ainvoke = AsyncMock(return_value=mock_response)
-
-    with (
-        patch("app.orm.memory_crud.save_reply_style",
-              new_callable=AsyncMock) as mock_save,
-        patch("app.services.identity_drift.ModelBuilder") as mock_mb,
-        patch("app.services.identity_drift.get_prompt") as mock_get_prompt,
-        patch("app.services.identity_drift._get_schedule_context",
-              new_callable=AsyncMock, return_value="今天感冒了，想躺着"),
-        patch("app.services.identity_drift._get_persona_context",
-              new_callable=AsyncMock, return_value=("赤尾", "元气活泼傲娇少女")),
-    ):
-        mock_mb.build_chat_model = AsyncMock(return_value=mock_model)
-
-        mock_prompt = MagicMock()
-        mock_prompt.compile.return_value = "compiled prompt"
-        mock_get_prompt.return_value = mock_prompt
-
-        from app.services.identity_drift import generate_base_reply_style
-        result = await generate_base_reply_style(persona_id="akao")
-
-    assert result is not None
-    assert "感冒" in result
-    mock_get_prompt.assert_called_with("drift_base_generator")
-    mock_model.ainvoke.assert_called_once()
-    mock_save.assert_called_once_with("akao", result, source="base")
-
-
-@pytest.mark.asyncio
-async def test_generate_base_reply_style_no_schedule_skips():
-    """无 schedule 时跳过生成"""
-    with patch("app.services.identity_drift._get_schedule_context",
-               new_callable=AsyncMock, return_value="（今天还没有写日程）"):
-        from app.services.identity_drift import generate_base_reply_style
-        result = await generate_base_reply_style(persona_id="akao")
-
-    assert result is None

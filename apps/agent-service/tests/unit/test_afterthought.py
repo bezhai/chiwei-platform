@@ -1,10 +1,9 @@
 # tests/unit/test_afterthought.py
 """测试 AfterthoughtManager 两阶段锁行为"""
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,11 +77,10 @@ async def test_multiple_events_reset_debounce_timer():
 async def test_buffer_exceeding_max_forces_phase2():
     """buffer 达到 MAX_BUFFER 时应跳过 timer 直接触发 phase2"""
     mgr = _make_manager()
-    mgr.MAX_BUFFER = 3  # 降低阈值方便测试
+    mgr._max_buffer = 3  # 降低阈值方便测试
     key = "chat_1:akao"
 
     phase2_called = asyncio.Event()
-    original_enter_phase2 = mgr._enter_phase2
 
     async def mock_enter_phase2(chat_id, persona_id):
         phase2_called.set()
@@ -157,7 +155,6 @@ async def test_phase2_triggers_next_cycle_if_buffer_has_events():
     mgr._buffers[key] = 3  # 触发 phase2 的事件
 
     on_event_called = asyncio.Event()
-    original_on_event = mgr.on_event
 
     async def track_on_event(chat_id, persona_id):
         on_event_called.set()
@@ -175,7 +172,7 @@ async def test_phase2_triggers_next_cycle_if_buffer_has_events():
             new_callable=AsyncMock,
             side_effect=inject_events_during_phase2,
         ):
-            with patch.object(mgr, "on_event", side_effect=track_on_event) as mock_on:
+            with patch.object(mgr, "on_event", side_effect=track_on_event):
                 await mgr._enter_phase2("chat_1", "akao")
                 # 让 create_task 有机会执行
                 await asyncio.sleep(0.01)

@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.services.message_router import MessageRouter
 
@@ -26,9 +27,8 @@ async def test_p2p_routes_to_bot_persona(router):
 @pytest.mark.asyncio
 async def test_group_with_mention_routes_to_mentioned_personas(router):
     """群聊 @ 了已注册 bot → 返回对应 persona_id 列表"""
-    with patch.object(
-        router,
-        "_resolve_mentioned_personas",
+    with patch(
+        "app.services.message_router.resolve_mentioned_personas",
         new_callable=AsyncMock,
         return_value=["akao", "chinagi"],
     ):
@@ -44,9 +44,8 @@ async def test_group_with_mention_routes_to_mentioned_personas(router):
 @pytest.mark.asyncio
 async def test_group_with_mention_no_match_returns_empty(router):
     """群聊 @ 了非 bot 用户 → 返回空列表"""
-    with patch.object(
-        router,
-        "_resolve_mentioned_personas",
+    with patch(
+        "app.services.message_router.resolve_mentioned_personas",
         new_callable=AsyncMock,
         return_value=[],
     ):

@@ -11,13 +11,12 @@
 """
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
 from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import (
     get_latest_plan,
@@ -26,6 +25,7 @@ from app.orm.crud import (
     upsert_schedule,
 )
 from app.orm.models import AkaoSchedule
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +80,11 @@ async def _run_ideation(
 ) -> str:
     """运行 Ideation Agent：广撒网搜集外部世界素材（不带人设，避免搜索被兴趣带偏）"""
     from langchain.agents import create_agent
-    from langchain.messages import HumanMessage
+    from langchain_core.messages import HumanMessage
     from langfuse.langchain import CallbackHandler
 
     from app.agents.core.config import AgentRegistry
+    from app.agents.infra.model_builder import ModelBuilder
     from app.agents.tools.search.web import search_web
 
     config = AgentRegistry.get("schedule-ideation")
@@ -131,14 +132,8 @@ async def _run_writer(
     weekday = _WEEKDAY_CN[target_date.weekday()]
     is_weekend = "周末！" if target_date.weekday() >= 5 else ""
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id=config.prompt_id,
-        tools=[],
-        model_id=config.model_id,
-        trace_name=config.trace_name,
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="写今天的手帐")],
         prompt_vars={
             "persona_core": persona_core,
             "date": target_date.isoformat(),
@@ -150,6 +145,9 @@ async def _run_writer(
             "previous_output": previous_output,
             "critic_feedback": critic_feedback,
         },
+        messages=[HumanMessage(content="写今天的手帐")],
+        model_id=config.model_id,
+        trace_name=config.trace_name,
     )
     return _extract_text(result.content)
 
@@ -164,19 +162,16 @@ async def _run_critic(
 
     config = AgentRegistry.get("schedule-critic")
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id=config.prompt_id,
-        tools=[],
-        model_id=config.model_id,
-        trace_name=config.trace_name,
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="审查今天的手帐质量")],
         prompt_vars={
             "persona_name": persona_name,
             "today_schedule": schedule_text,
             "recent_schedules": recent_schedules_text,
         },
+        messages=[HumanMessage(content="审查今天的手帐质量")],
+        model_id=config.model_id,
+        trace_name=config.trace_name,
     )
     return _extract_text(result.content)
 
@@ -184,6 +179,7 @@ async def _run_critic(
 # ==================== ArQ cron 入口 ====================
 
 
+@cron_error_handler()
 async def cron_generate_monthly_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成本月计划"""
     from app.orm.crud import get_all_persona_ids
@@ -195,6 +191,7 @@ async def cron_generate_monthly_plan(ctx) -> None:
             logger.error(f"[{persona_id}] Monthly plan generation failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_weekly_plan(ctx) -> None:
     """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
     from app.orm.crud import get_all_persona_ids
@@ -207,6 +204,7 @@ async def cron_generate_weekly_plan(ctx) -> None:
             logger.error(f"[{persona_id}] Weekly plan generation failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_daily_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成今天的日计划"""
     from app.orm.crud import get_all_persona_ids
@@ -265,14 +263,8 @@ async def generate_monthly_plan(
     from app.orm.crud import get_bot_persona as _get_persona
     _persona = await _get_persona(persona_id)
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="schedule_monthly",
-        tools=[],
-        model_id=_schedule_model(),
-        trace_name="schedule-monthly",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="制定本月计划")],
         prompt_vars={
             "persona_name": _persona.display_name if _persona else persona_id,
             "persona_core": _persona.persona_core if _persona else "",
@@ -280,6 +272,9 @@ async def generate_monthly_plan(
             "season": season,
             "previous_monthly_plan": prev_plan_text,
         },
+        messages=[HumanMessage(content="制定本月计划")],
+        model_id=_schedule_model(),
+        trace_name="schedule-monthly",
     )
     content = _extract_text(result.content)
 
@@ -353,14 +348,8 @@ async def generate_weekly_plan(
     from app.orm.crud import get_bot_persona as _get_persona
     _persona = await _get_persona(persona_id)
 
-    agent = ChatAgent(
+    result = await LLMService.run(
         prompt_id="schedule_weekly",
-        tools=[],
-        model_id=_schedule_model(),
-        trace_name="schedule-weekly",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="制定本周计划")],
         prompt_vars={
             "persona_name": _persona.display_name if _persona else persona_id,
             "persona_core": _persona.persona_core if _persona else "",
@@ -368,6 +357,9 @@ async def generate_weekly_plan(
             "monthly_plan": monthly_text,
             "previous_weekly_plan": prev_plan_text,
         },
+        messages=[HumanMessage(content="制定本周计划")],
+        model_id=_schedule_model(),
+        trace_name="schedule-weekly",
     )
     content = _extract_text(result.content)
 

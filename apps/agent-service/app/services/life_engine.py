@@ -8,10 +8,11 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
-
-from app.orm.base import AsyncSessionLocal
-from app.orm.memory_models import LifeEngineState
+from app.orm.crud.life_engine import (
+    get_today_activity_states,
+    load_latest_state,
+    save_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +24,7 @@ async def _build_activity_context(
 ) -> tuple[str, str]:
     """聚合今天的活动轨迹，返回 (duration_text, timeline_text)"""
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    async with AsyncSessionLocal() as session:
-        rows = (
-            await session.execute(
-                select(LifeEngineState)
-                .where(LifeEngineState.persona_id == persona_id)
-                .where(LifeEngineState.created_at >= today_start)
-                .order_by(LifeEngineState.created_at.asc())
-            )
-        ).scalars().all()
+    rows = await get_today_activity_states(persona_id, today_start)
 
     if not rows:
         return "", "（今天刚开始）"
@@ -66,16 +59,9 @@ async def _build_activity_context(
     return duration_text, "\n".join(lines)
 
 
-async def _load_state(persona_id: str) -> LifeEngineState | None:
+async def _load_state(persona_id: str):
     """查最新一行状态，不存在返回 None"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(LifeEngineState)
-            .where(LifeEngineState.persona_id == persona_id)
-            .order_by(LifeEngineState.created_at.desc())
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
+    return await load_latest_state(persona_id)
 
 
 async def _save_state(
@@ -87,17 +73,14 @@ async def _save_state(
     reasoning: str | None = None,
 ) -> None:
     """INSERT 一行新状态"""
-    async with AsyncSessionLocal() as session:
-        row = LifeEngineState(
-            persona_id=persona_id,
-            current_state=current_state,
-            activity_type=activity_type,
-            response_mood=response_mood,
-            reasoning=reasoning,
-            skip_until=skip_until,
-        )
-        session.add(row)
-        await session.commit()
+    await save_state(
+        persona_id=persona_id,
+        current_state=current_state,
+        activity_type=activity_type,
+        response_mood=response_mood,
+        skip_until=skip_until,
+        reasoning=reasoning,
+    )
 
 
 class LifeEngine:
@@ -158,10 +141,9 @@ class LifeEngine:
         activity_type: str = "",
     ) -> dict:
         """调用 LLM 决定下一步状态"""
-        from langfuse.langchain import CallbackHandler
+        from langchain_core.messages import HumanMessage
 
-        from app.agents.infra.langfuse_client import get_prompt
-        from app.agents.infra.model_builder import ModelBuilder
+        from app.agents.infra.llm_service import LLMService
         from app.config.config import settings
         from app.orm.crud import get_bot_persona, get_plan_for_period
         from app.orm.memory_crud import get_today_fragments
@@ -189,23 +171,22 @@ class LifeEngine:
             else "（还没跟人聊过）"
         )
 
-        prompt = get_prompt("life_engine_tick")
-        compiled = prompt.compile(
-            persona_name=persona_name,
-            persona_lite=persona_lite,
-            current_time=now.strftime("%H:%M"),
-            current_state=current_state,
-            activity_duration=duration_text,
-            response_mood=response_mood,
-            schedule=schedule_text,
-            activity_timeline=timeline_text,
-            recent_experiences=frag_text,
-        )
-
-        model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-        response = await model.ainvoke(
-            [{"role": "user", "content": compiled}],
-            config={"callbacks": [CallbackHandler()], "run_name": "life-engine-tick"},
+        response = await LLMService.run(
+            prompt_id="life_engine_tick",
+            prompt_vars={
+                "persona_name": persona_name,
+                "persona_lite": persona_lite,
+                "current_time": now.strftime("%H:%M"),
+                "current_state": current_state,
+                "activity_duration": duration_text,
+                "response_mood": response_mood,
+                "schedule": schedule_text,
+                "activity_timeline": timeline_text,
+                "recent_experiences": frag_text,
+            },
+            messages=[HumanMessage(content="更新生活状态")],
+            model_id=settings.life_engine_model,
+            trace_name="life-engine-tick",
         )
         raw = _extract_text(response.content)
 

@@ -9,6 +9,7 @@ from inner_shared import hello as shared_hello
 from app.api.router import api_router
 from app.api.schedule import router as schedule_router
 from app.config import settings
+from app.middleware.metrics import PrometheusMiddleware
 from app.services.qdrant import init_qdrant_collections
 from app.utils.middlewares import HeaderContextMiddleware
 
@@ -71,8 +72,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # 添加 Prometheus metrics 中间件（最外层，记录所有请求）
-from app.middleware.metrics import PrometheusMiddleware
-
 app.add_middleware(PrometheusMiddleware)
 
 # 添加TraceId中间件

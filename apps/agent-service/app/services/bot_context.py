@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.orm.crud import get_bot_persona
-
+from app.orm.crud.persona import resolve_bot_name_for_persona as _crud_resolve_bot
+from app.orm.crud.persona import resolve_persona_id as _crud_resolve_pid
 
 if TYPE_CHECKING:
     from app.orm.models import BotPersona
@@ -16,16 +17,7 @@ logger = logging.getLogger(__name__)
 
 async def _resolve_persona_id(bot_name: str) -> str:
     """从 bot_config 表查 persona_id，找不到则用 bot_name 自身"""
-    from app.orm.base import AsyncSessionLocal
-    from sqlalchemy import text
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            text("SELECT persona_id FROM bot_config WHERE bot_name = :bn"),
-            {"bn": bot_name},
-        )
-        row = result.scalar_one_or_none()
-        return row if row else bot_name
+    return await _crud_resolve_pid(bot_name)
 
 
 async def _resolve_bot_name_for_persona(persona_id: str, chat_id: str = "") -> str:
@@ -34,9 +26,6 @@ async def _resolve_bot_name_for_persona(persona_id: str, chat_id: str = "") -> s
     查 bot_chat_presence JOIN bot_config，精确匹配群内的 bot。
     查不到则打告警日志并返回 persona_id（让调用方自行处理）。
     """
-    from app.orm.base import AsyncSessionLocal
-    from sqlalchemy import text
-
     if not chat_id:
         logger.warning(
             "[resolve_bot] chat_id 为空，无法精确匹配 bot: persona_id=%s",
@@ -44,20 +33,9 @@ async def _resolve_bot_name_for_persona(persona_id: str, chat_id: str = "") -> s
         )
         return persona_id
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            text(
-                "SELECT bc.bot_name FROM bot_config bc "
-                "JOIN bot_chat_presence bp ON bc.bot_name = bp.bot_name "
-                "WHERE bp.chat_id = :cid AND bp.is_active = true "
-                "AND bc.persona_id = :pid AND bc.is_active = true "
-                "LIMIT 1"
-            ),
-            {"cid": chat_id, "pid": persona_id},
-        )
-        row = result.scalar_one_or_none()
-        if row:
-            return row
+    row = await _crud_resolve_bot(persona_id, chat_id)
+    if row:
+        return row
 
     logger.error(
         "[resolve_bot] bot_chat_presence 未命中: persona_id=%s, chat_id=%s — "
@@ -74,7 +52,7 @@ class BotContext:
         self.bot_name = bot_name
         self.chat_type = chat_type
         self._persona_id: str = ""
-        self._persona: "BotPersona | None" = None
+        self._persona: BotPersona | None = None
         self._voice_content: str = ""
 
     @property

@@ -10,6 +10,7 @@ import httpx
 from langchain.tools import tool
 from pydantic import BaseModel
 
+from app.agents.tools.decorators import tool_error_handler
 from app.agents.tools.search.models import (
     Career,
     Character,
@@ -111,6 +112,7 @@ def append_element(array, element):
 
 
 @tool
+@tool_error_handler(error_message="搜索条目失败")
 @auto_serialize_tool
 async def search_subjects(
     types: list[str] | None = None,
@@ -205,6 +207,7 @@ async def search_subjects(
 
 
 @tool
+@tool_error_handler(error_message="搜索角色失败")
 @auto_serialize_tool
 async def search_characters(
     keyword: str,
@@ -246,6 +249,7 @@ async def search_characters(
 
 
 @tool
+@tool_error_handler(error_message="搜索人物失败")
 @auto_serialize_tool
 async def search_persons(
     keyword: str,
@@ -307,6 +311,7 @@ async def search_persons(
 
 
 @tool
+@tool_error_handler(error_message="获取条目角色失败")
 @auto_serialize_tool
 async def get_subject_characters(
     subject_id: int,
@@ -330,6 +335,7 @@ async def get_subject_characters(
 
 
 @tool
+@tool_error_handler(error_message="获取条目关联失败")
 @auto_serialize_tool
 async def get_subject_relations(
     subject_id: int,
@@ -347,6 +353,7 @@ async def get_subject_relations(
 
 
 @tool
+@tool_error_handler(error_message="获取条目人物失败")
 @auto_serialize_tool
 async def get_subject_persons(
     subject_id: int,
@@ -370,6 +377,7 @@ async def get_subject_persons(
 
 
 @tool
+@tool_error_handler(error_message="获取角色条目失败")
 @auto_serialize_tool
 async def get_character_subjects(
     character_id: int,
@@ -393,6 +401,7 @@ async def get_character_subjects(
 
 
 @tool
+@tool_error_handler(error_message="获取角色人物失败")
 @auto_serialize_tool
 async def get_character_persons(
     character_id: int,
@@ -416,6 +425,7 @@ async def get_character_persons(
 
 
 @tool
+@tool_error_handler(error_message="获取人物角色失败")
 @auto_serialize_tool
 async def get_person_characters(
     person_id: int,
@@ -439,6 +449,7 @@ async def get_person_characters(
 
 
 @tool
+@tool_error_handler(error_message="获取人物条目失败")
 @auto_serialize_tool
 async def get_person_subjects(
     person_id: int,

@@ -4,12 +4,14 @@ import logging
 
 from app.config.config import settings
 from app.services.life_engine import LifeEngine
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 
 _engine = LifeEngine()
 
 
+@cron_error_handler()
 async def cron_life_engine_tick(ctx) -> None:
     """arq cron: 每分钟为每个 persona 执行一次 tick
 

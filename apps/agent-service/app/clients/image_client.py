@@ -13,7 +13,11 @@ from app.config.config import settings  # for inner_http_secret, main_server_tim
 from app.utils.middlewares.trace import get_app_name, get_trace_id
 
 try:
-    from inner_shared.lane_router import OUTBOUND_REQUESTS_TOTAL, OUTBOUND_REQUEST_DURATION, _HAS_METRICS
+    from inner_shared.lane_router import (
+        _HAS_METRICS,
+        OUTBOUND_REQUEST_DURATION,
+        OUTBOUND_REQUESTS_TOTAL,
+    )
 except ImportError:
     _HAS_METRICS = False
 

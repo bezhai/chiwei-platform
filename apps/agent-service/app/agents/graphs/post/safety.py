@@ -6,11 +6,10 @@
 import logging
 from dataclasses import dataclass
 
-from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
 from app.agents.infra.langfuse_client import get_prompt
-from app.agents.infra.model_builder import ModelBuilder
+from app.agents.infra.llm_service import LLMService
 from app.services.banned_word import check_banned_word
 
 logger = logging.getLogger(__name__)
@@ -58,16 +57,14 @@ async def run_post_safety(response_text: str) -> PostSafetyResult:
         langfuse_prompt = get_prompt("guard_output_safety")
         messages = langfuse_prompt.compile(response=response_text)
 
-        model = await ModelBuilder.build_chat_model(
-            "guard-model", reasoning_effort="low"
-        )
-        structured_model = model.with_structured_output(OutputSafetyResult)
-        langfuse_config = {
-            "callbacks": [CallbackHandler()],
-            "run_name": "post-safety-check",
-        }
-        result: OutputSafetyResult = await structured_model.ainvoke(
-            messages, config=langfuse_config
+        result: OutputSafetyResult = await LLMService.extract(
+            prompt_id=None,
+            prompt_vars={},
+            messages=messages,
+            schema=OutputSafetyResult,
+            model_id="guard-model",
+            trace_name="post-safety-check",
+            model_kwargs={"reasoning_effort": "low"},
         )
 
         if result.is_unsafe and result.confidence >= 0.7:

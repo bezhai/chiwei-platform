@@ -13,8 +13,6 @@ import uuid
 
 from aio_pika.abc import AbstractIncomingMessage
 from inner_shared.logger import setup_logging
-from sqlalchemy import update
-from sqlalchemy.future import select
 
 from app.agents import InstructionBuilder, create_client
 from app.clients.image_client import image_client
@@ -25,11 +23,18 @@ from app.clients.rabbitmq import (
     _lane_queue,
 )
 from app.clients.redis import AsyncRedisClient
-from app.orm.base import AsyncSessionLocal
+from app.orm.crud.message import (
+    get_message_by_id,
+    update_vector_status,
+)
+from app.orm.crud.message import (
+    scan_pending_messages as _crud_scan_pending,
+)
 from app.orm.models import ConversationMessage
+from app.services.content_parser import parse_content
 from app.services.download_permission import check_group_allows_download
 from app.services.qdrant import qdrant_service
-from app.utils.content_parser import parse_content
+from app.workers.error_handling import cron_error_handler, mq_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -56,28 +61,6 @@ def _handle_signal(signum, frame):
     global _running
     logger.info(f"收到信号 {signum}，准备优雅退出...")
     _running = False
-
-
-async def get_message_by_id(message_id: str) -> ConversationMessage | None:
-    """从数据库获取消息"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ConversationMessage).where(
-                ConversationMessage.message_id == message_id
-            )
-        )
-        return result.scalar_one_or_none()
-
-
-async def update_vector_status(message_id: str, status: str) -> None:
-    """更新消息的向量化状态"""
-    async with AsyncSessionLocal() as session:
-        await session.execute(
-            update(ConversationMessage)
-            .where(ConversationMessage.message_id == message_id)
-            .values(vector_status=status)
-        )
-        await session.commit()
 
 
 async def vectorize_message(message: ConversationMessage) -> bool:
@@ -224,6 +207,7 @@ async def process_message(message_id: str) -> None:
             await update_vector_status(message_id, "failed")
 
 
+@mq_error_handler()
 async def handle_vectorize(message: AbstractIncomingMessage) -> None:
     """RabbitMQ 消费回调"""
     async with message.process(requeue=False):
@@ -274,17 +258,7 @@ async def scan_pending_messages() -> int:
     offset = 0
 
     while total_pushed < PENDING_SCAN_MAX_TOTAL:
-        # 查询 pending 状态的消息
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(ConversationMessage.message_id)
-                .where(ConversationMessage.vector_status == "pending")
-                .where(ConversationMessage.create_time >= cutoff_ts)
-                .order_by(ConversationMessage.create_time.desc())
-                .offset(offset)
-                .limit(PENDING_SCAN_BATCH_SIZE)
-            )
-            message_ids = [row[0] for row in result.fetchall()]
+        message_ids = await _crud_scan_pending(cutoff_ts, offset, PENDING_SCAN_BATCH_SIZE)
 
         if not message_ids:
             break
@@ -305,6 +279,7 @@ async def scan_pending_messages() -> int:
     return total_pushed
 
 
+@cron_error_handler()
 async def cron_scan_pending_messages(ctx) -> None:
     """
     定时任务：扫描 pending 状态的消息并推送到向量化队列

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.workers.vectorize_worker import (
+from app.services.download_permission import (
     _PERMISSION_CACHE_TTL,
     _download_permission_cache,
     check_group_allows_download,
@@ -42,7 +42,7 @@ class TestCheckGroupAllowsDownload:
     async def test_p2p_always_allows(self):
         """P2P 聊天直接放行，不查 DB"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal"
+            "app.services.download_permission.AsyncSessionLocal"
         ) as mock_session_local:
             result = await check_group_allows_download("chat_123", "p2p")
             assert result is True
@@ -51,7 +51,7 @@ class TestCheckGroupAllowsDownload:
     async def test_group_not_anyone_blocks(self):
         """download_has_permission_setting = 'not_anyone' → 禁止下载"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session("not_anyone"),
         ):
             result = await check_group_allows_download("chat_group_1", "group")
@@ -60,7 +60,7 @@ class TestCheckGroupAllowsDownload:
     async def test_group_all_members_allows(self):
         """download_has_permission_setting = 'all_members' → 允许下载"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session("all_members"),
         ):
             result = await check_group_allows_download("chat_group_2", "group")
@@ -69,7 +69,7 @@ class TestCheckGroupAllowsDownload:
     async def test_group_no_record_defaults_allow(self):
         """群聊无记录（scalar 返回 None）→ 默认允许"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session(None),
         ):
             result = await check_group_allows_download("chat_unknown", "group")
@@ -82,7 +82,7 @@ class TestCheckGroupAllowsDownload:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=mock_ctx,
         ):
             result = await check_group_allows_download("chat_broken", "group")
@@ -91,7 +91,7 @@ class TestCheckGroupAllowsDownload:
     async def test_cache_hit(self):
         """缓存命中时不查 DB"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session("not_anyone"),
         ) as mock_session_local:
             # 第一次调用 → 查 DB
@@ -107,7 +107,7 @@ class TestCheckGroupAllowsDownload:
     async def test_cache_expiry(self):
         """缓存过期后重新查 DB"""
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session("not_anyone"),
         ):
             await check_group_allows_download("chat_expire", "group")
@@ -117,7 +117,7 @@ class TestCheckGroupAllowsDownload:
 
         # 下次调用应重新查 DB（这次返回 all_members）
         with patch(
-            "app.workers.vectorize_worker.AsyncSessionLocal",
+            "app.services.download_permission.AsyncSessionLocal",
             return_value=_mock_session("all_members"),
         ):
             result = await check_group_allows_download("chat_expire", "group")

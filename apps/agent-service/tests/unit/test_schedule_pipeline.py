@@ -1,8 +1,9 @@
 # tests/unit/test_schedule_pipeline.py
 """Schedule multi-agent pipeline tests"""
-import pytest
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # 公共常量
 FAKE_DATE = date(2026, 4, 1)

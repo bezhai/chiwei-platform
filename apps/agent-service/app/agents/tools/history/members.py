@@ -7,6 +7,7 @@ from langgraph.runtime import get_runtime
 from sqlalchemy import select
 
 from app.agents.core.context import AgentContext
+from app.agents.tools.decorators import tool_error_handler
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import LarkGroupMember, LarkUser
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
+@tool_error_handler(error_message="查询群成员失败")
 async def list_group_members(role: str | None = None) -> str:
     """
     列出群成员列表

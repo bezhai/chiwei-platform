@@ -10,7 +10,6 @@ import logging
 from datetime import UTC, datetime
 
 from aio_pika.abc import AbstractIncomingMessage
-from sqlalchemy import text
 
 from app.agents.graphs.post import run_post_safety
 from app.clients.rabbitmq import (
@@ -20,36 +19,13 @@ from app.clients.rabbitmq import (
     _current_lane,
     _lane_queue,
 )
-from app.orm.base import AsyncSessionLocal
+from app.orm.crud.message import update_safety_status
+from app.workers.error_handling import mq_error_handler
 
 logger = logging.getLogger(__name__)
 
 
-async def _update_safety_status(
-    session_id: str, status: str, result_json: dict | None = None
-) -> None:
-    """更新 agent_responses 表的 safety_status"""
-    try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                text(
-                    "UPDATE agent_responses "
-                    "SET safety_status = :status, "
-                    "    safety_result = CAST(:result AS jsonb), "
-                    "    updated_at = NOW() "
-                    "WHERE session_id = :session_id"
-                ),
-                {
-                    "status": status,
-                    "result": json.dumps(result_json) if result_json else None,
-                    "session_id": session_id,
-                },
-            )
-            await session.commit()
-    except Exception as e:
-        logger.error("Failed to update safety_status: session_id=%s, %s", session_id, e)
-
-
+@mq_error_handler()
 async def handle_safety_check(message: AbstractIncomingMessage) -> None:
     """消费 safety_check queue 中的消息"""
     async with message.process(requeue=False):
@@ -90,7 +66,7 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
             )
         else:
             logger.info("Post safety passed: session_id=%s", session_id)
-            await _update_safety_status(
+            await update_safety_status(
                 session_id,
                 "passed",
                 {"checked_at": checked_at},

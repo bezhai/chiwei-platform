@@ -5,26 +5,25 @@
 """
 
 import asyncio
+import contextvars
 import logging
 
 from langchain.messages import AIMessage, HumanMessage
+from sqlalchemy import select
 
 from app.agents.infra.langfuse_client import get_prompt
 from app.clients.image_client import image_client
 from app.clients.image_registry import ImageRegistry
-from sqlalchemy import select
-
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage
+from app.services.content_parser import parse_content, update_tos_files
 from app.services.download_permission import check_group_allows_download
 from app.services.quick_search import QuickSearchResult, quick_search
-from app.utils.content_parser import parse_content, update_tos_files
 
 logger = logging.getLogger(__name__)
 
 PROACTIVE_USER_ID = "__proactive__"
 
-import contextvars
 _is_proactive_var: contextvars.ContextVar[bool] = contextvars.ContextVar("is_proactive", default=False)
 _proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar("proactive_stimulus", default="")
 
@@ -140,7 +139,7 @@ async def build_chat_context(
         keys_ordered = list(image_key_to_url.keys())
         urls_ordered = [image_key_to_url[k] for k in keys_ordered]
         filenames = await registry.register_batch(urls_ordered)
-        for key, filename in zip(keys_ordered, filenames):
+        for key, filename in zip(keys_ordered, filenames, strict=False):
             image_key_to_filename[key] = filename
 
     # 提取触发消息的用户名和用户ID

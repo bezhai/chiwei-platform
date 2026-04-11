@@ -66,7 +66,7 @@ class TestGetPrompt:
     @patch("app.agents.infra.langfuse_client.get_lane", return_value=None)
     @patch("app.agents.infra.langfuse_client.Langfuse")
     def test_default_cache_ttl(self, mock_langfuse_cls, _mock_lane):
-        """默认 cache_ttl_seconds=60"""
+        """默认 cache_ttl_seconds=10"""
         mock_instance = MagicMock()
         mock_langfuse_cls.return_value = mock_instance
 
@@ -75,7 +75,7 @@ class TestGetPrompt:
         mock_instance.get_prompt.assert_called_once_with(
             "test-prompt",
             label=None,
-            cache_ttl_seconds=60,
+            cache_ttl_seconds=10,
         )
 
     @patch("app.agents.infra.langfuse_client.get_lane", return_value=None)
@@ -105,7 +105,7 @@ class TestGetPrompt:
         mock_instance.get_prompt.assert_called_once_with(
             "test-prompt",
             label="production",
-            cache_ttl_seconds=60,
+            cache_ttl_seconds=10,
         )
 
 
@@ -124,7 +124,7 @@ class TestLaneRouting:
         mock_instance.get_prompt.assert_called_once_with(
             "test-prompt",
             label="feat-v1",
-            cache_ttl_seconds=60,
+            cache_ttl_seconds=10,
         )
 
     @patch("app.agents.infra.langfuse_client.get_lane", return_value="feat-v1")
@@ -141,9 +141,9 @@ class TestLaneRouting:
         assert mock_instance.get_prompt.call_count == 2
         calls = mock_instance.get_prompt.call_args_list
         assert calls[0].args == ("test-prompt",)
-        assert calls[0].kwargs == {"label": "feat-v1", "cache_ttl_seconds": 60}
+        assert calls[0].kwargs == {"label": "feat-v1", "cache_ttl_seconds": 10}
         assert calls[1].args == ("test-prompt",)
-        assert calls[1].kwargs == {"label": None, "cache_ttl_seconds": 60}
+        assert calls[1].kwargs == {"label": None, "cache_ttl_seconds": 10}
 
     @patch("app.agents.infra.langfuse_client.get_lane", return_value="prod")
     @patch("app.agents.infra.langfuse_client.Langfuse")
@@ -157,7 +157,7 @@ class TestLaneRouting:
         mock_instance.get_prompt.assert_called_once_with(
             "test-prompt",
             label=None,
-            cache_ttl_seconds=60,
+            cache_ttl_seconds=10,
         )
 
     @patch("app.agents.infra.langfuse_client.get_lane", return_value="feat-v1")
@@ -172,5 +172,5 @@ class TestLaneRouting:
         mock_instance.get_prompt.assert_called_once_with(
             "test-prompt",
             label="staging",
-            cache_ttl_seconds=60,
+            cache_ttl_seconds=10,
         )

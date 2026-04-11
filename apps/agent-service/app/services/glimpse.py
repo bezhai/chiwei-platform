@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
+from app.orm.crud import get_group_name as _crud_get_group_name
 from app.orm.memory_crud import (
     create_fragment,
     get_last_bot_reply_time,
@@ -15,10 +16,12 @@ from app.orm.memory_crud import (
     insert_glimpse_state,
 )
 from app.orm.memory_models import ExperienceFragment
+from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 from app.workers.proactive_scanner import (
     TARGET_CHAT_ID,
-    get_unseen_messages,
     _get_recent_proactive_records,
+    get_unseen_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,51 +54,12 @@ async def _pick_group(persona_id: str) -> str | None:
     return None
 
 
-async def _get_persona_info(persona_id: str) -> tuple[str, str]:
-    from app.orm.crud import get_bot_persona
-
-    persona = await get_bot_persona(persona_id)
-    if persona:
-        return persona.display_name, persona.persona_lite or ""
-    return persona_id, ""
-
-
 async def _get_group_name(chat_id: str) -> str:
     try:
-        from app.orm.base import AsyncSessionLocal
-        from app.orm.models import LarkGroupChatInfo
-        from sqlalchemy import select
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(LarkGroupChatInfo.name).where(
-                    LarkGroupChatInfo.chat_id == chat_id
-                )
-            )
-            name = result.scalar_one_or_none()
-            return name or chat_id[:10]
+        name = await _crud_get_group_name(chat_id)
+        return name or chat_id[:10]
     except Exception:
         return chat_id[:10]
-
-
-async def _format_messages(messages: list, persona_name: str = "") -> str:
-    """格式化消息为时间线文本"""
-    from app.orm.crud import get_username
-    from app.utils.content_parser import parse_content
-
-    lines = []
-    for msg in messages[-30:]:
-        ts = datetime.fromtimestamp(msg.create_time / 1000, tz=CST)
-        time_str = ts.strftime("%H:%M")
-        if msg.role == "assistant":
-            speaker = persona_name or "bot"
-        else:
-            name = await get_username(msg.user_id)
-            speaker = name or msg.user_id[:6]
-        text = parse_content(msg.content).render()
-        if text and text.strip():
-            lines.append(f"[{time_str}] {speaker}: {text[:200]}")
-    return "\n".join(lines)
 
 
 async def _call_glimpse_llm(
@@ -107,10 +71,9 @@ async def _call_glimpse_llm(
     recent_proactive: list[dict] | None = None,
 ) -> str:
     """调用 LLM 进行窥屏观察"""
-    from langfuse.langchain import CallbackHandler
+    from langchain_core.messages import HumanMessage
 
-    from app.agents.infra.langfuse_client import get_prompt
-    from app.agents.infra.model_builder import ModelBuilder
+    from app.agents.infra.llm_service import LLMService
 
     # 格式化今日搭话记录
     proactive_hint = ""
@@ -122,8 +85,7 @@ async def _call_glimpse_llm(
             "再多就烦人了，除非有真的让你忍不住的话题"
         )
 
-    prompt = get_prompt("glimpse_observe")
-    compile_args = {
+    prompt_vars = {
         "persona_name": persona_name,
         "persona_lite": persona_lite,
         "group_name": group_name,
@@ -135,21 +97,13 @@ async def _call_glimpse_llm(
         ),
         "recent_proactive": proactive_hint,
     }
-    try:
-        compiled = prompt.compile(**compile_args)
-    except KeyError:
-        # prompt 模板尚未添加新变量，fallback
-        compiled = prompt.compile(
-            persona_name=persona_name,
-            persona_lite=persona_lite,
-            group_name=group_name,
-            messages=messages_text,
-        )
 
-    model = await ModelBuilder.build_chat_model(settings.life_engine_model)
-    response = await model.ainvoke(
-        [{"role": "user", "content": compiled}],
-        config={"callbacks": [CallbackHandler()], "run_name": "glimpse-observe"},
+    response = await LLMService.run(
+        prompt_id="glimpse_observe",
+        prompt_vars=prompt_vars,
+        messages=[HumanMessage(content="观察群消息")],
+        model_id=settings.life_engine_model,
+        trace_name="glimpse-observe",
     )
 
     if isinstance(response.content, list):
@@ -213,9 +167,10 @@ async def run_glimpse(persona_id: str) -> str:
         return "skipped:no_messages"
 
     # 6. 准备上下文
-    persona_name, persona_lite = await _get_persona_info(persona_id)
+    pc = await load_persona(persona_id)
+    persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
-    messages_text = await _format_messages(messages, persona_name)
+    messages_text = await format_timeline(messages, persona_name, tz=CST, max_messages=30)
 
     if not messages_text.strip():
         return "skipped:empty_timeline"

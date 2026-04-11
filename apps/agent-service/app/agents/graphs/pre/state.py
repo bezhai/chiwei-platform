@@ -1,13 +1,13 @@
 """Pre Graph 状态定义"""
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated
 
 from typing_extensions import TypedDict
 
 
-class BlockReason(str, Enum):
+class BlockReason(StrEnum):
     """拦截原因"""
 
     BANNED_WORD = "banned_word"
@@ -32,6 +32,22 @@ def merge_safety_results(
     return existing + new
 
 
+class Complexity(StrEnum):
+    """任务复杂度等级"""
+
+    SIMPLE = "simple"
+    COMPLEX = "complex"
+    SUPER_COMPLEX = "super_complex"
+
+
+@dataclass
+class ComplexityResult:
+    """复杂度分类结果"""
+
+    complexity: Complexity = Complexity.SIMPLE
+    confidence: float = 0.5
+
+
 class PreState(TypedDict):
     """Pre Graph 状态"""
 
@@ -41,6 +57,9 @@ class PreState(TypedDict):
 
     # 安全检测结果（并行合并）
     safety_results: Annotated[list[SafetyResult], merge_safety_results]
+
+    # 复杂度分类
+    complexity_result: ComplexityResult | None
 
     # 最终输出
     is_blocked: bool

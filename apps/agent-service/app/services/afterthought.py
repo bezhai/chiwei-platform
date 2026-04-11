@@ -1,24 +1,25 @@
 """Afterthought — 对话经历碎片生成器
 
-两阶段锁模型（与 IdentityDriftManager 相同模式）：
+继承 DebouncedPipeline 两阶段锁模型：
   一阶段（可中断）：收集消息，debounce 300 秒，超过 15 条强制 flush
   二阶段（不可中断）：LLM 生成 conversation 粒度的 ExperienceFragment
 
 每个 (chat_id, persona_id) 组合独立管理。
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain.messages import HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agents.core import ChatAgent
+from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_bot_persona, get_chat_messages_in_range
+from app.orm.crud import get_chat_messages_in_range, get_group_name, get_username
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
-from app.services.relationship_memory import format_timeline
+from app.services.debounced_pipeline import DebouncedPipeline
+from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ CST = timezone(timedelta(hours=8))
 
 # 默认常量
 DEBOUNCE_SECONDS = 300  # 5 分钟
+MAX_BUFFER = 15
 LOOKBACK_HOURS = 2
 
 
@@ -39,7 +41,7 @@ def _extract_text(content) -> str:
     return (content or "").strip()
 
 
-class AfterthoughtManager:
+class AfterthoughtManager(DebouncedPipeline):
     """两阶段锁对话碎片管理器
 
     每个 (chat_id, persona_id) 组合独立管理，不并行生成。
@@ -48,12 +50,9 @@ class AfterthoughtManager:
     """
 
     _instance: "AfterthoughtManager | None" = None
-    MAX_BUFFER = 15
 
     def __init__(self):
-        self._buffers: dict[str, int] = {}  # "{chat_id}:{persona_id}" -> event count
-        self._timers: dict[str, asyncio.Task] = {}  # "{chat_id}:{persona_id}" -> phase1 timer
-        self._phase2_running: set[str] = set()  # keys in phase2
+        super().__init__(debounce_seconds=DEBOUNCE_SECONDS, max_buffer=MAX_BUFFER)
 
     @classmethod
     def get_instance(cls) -> "AfterthoughtManager":
@@ -61,69 +60,9 @@ class AfterthoughtManager:
             cls._instance = cls()
         return cls._instance
 
-    def _key(self, chat_id: str, persona_id: str) -> str:
-        return f"{chat_id}:{persona_id}"
-
-    async def on_event(self, chat_id: str, persona_id: str) -> None:
-        """消息/回复事件 -> 进入两阶段锁流程"""
-        key = self._key(chat_id, persona_id)
-        self._buffers[key] = self._buffers.get(key, 0) + 1
-        logger.info(
-            f"Afterthought on_event: chat_id={chat_id}, persona={persona_id}, "
-            f"buffer={self._buffers[key]}, "
-            f"phase2_running={key in self._phase2_running}"
-        )
-
-        # 二阶段运行中 -> 只缓冲，不触发
-        if key in self._phase2_running:
-            return
-
-        # 取消已有计时器（重置 debounce）
-        if key in self._timers:
-            self._timers[key].cancel()
-            del self._timers[key]
-
-        # 超过阈值 -> 强制进入二阶段
-        if self._buffers.get(key, 0) >= self.MAX_BUFFER:
-            asyncio.create_task(self._enter_phase2(chat_id, persona_id))
-            return
-
-        # 启动/重置 debounce 计时器
-        self._timers[key] = asyncio.create_task(
-            self._phase1_timer(chat_id, persona_id)
-        )
-
-    async def _phase1_timer(self, chat_id: str, persona_id: str) -> None:
-        """一阶段计时器：N 秒无新消息后进入二阶段"""
-        try:
-            await asyncio.sleep(DEBOUNCE_SECONDS)
-            await self._enter_phase2(chat_id, persona_id)
-        except asyncio.CancelledError:
-            pass  # timer reset by new event
-
-    async def _enter_phase2(self, chat_id: str, persona_id: str) -> None:
-        """进入二阶段：清空缓冲区，执行 LLM 碎片生成"""
-        key = self._key(chat_id, persona_id)
-        event_count = self._buffers.pop(key, 0)
-        self._timers.pop(key, None)
-
-        if event_count == 0:
-            return
-
-        self._phase2_running.add(key)
-        try:
-            logger.info(
-                f"Afterthought phase2 for {chat_id} persona={persona_id}: "
-                f"{event_count} events buffered"
-            )
-            await _generate_conversation_fragment(chat_id, persona_id)
-        except Exception as e:
-            logger.error(f"Afterthought failed for {chat_id} persona={persona_id}: {e}")
-        finally:
-            self._phase2_running.discard(key)
-            # 二阶段期间有新事件 -> 启动下一轮
-            if self._buffers.get(key, 0) > 0:
-                asyncio.create_task(self.on_event(chat_id, persona_id))
+    async def process(self, chat_id: str, persona_id: str, event_count: int) -> None:
+        """二阶段：生成 conversation ExperienceFragment"""
+        await _generate_conversation_fragment(chat_id, persona_id)
 
 
 async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None:
@@ -149,9 +88,9 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
     chat_type = messages[0].chat_type if messages else "group"
 
     # Get persona info
-    persona = await get_bot_persona(persona_id)
-    persona_name = persona.display_name if persona else persona_id
-    persona_lite = persona.persona_lite if persona else ""
+    pc = await load_persona(persona_id)
+    persona_name = pc.display_name
+    persona_lite = pc.persona_lite
 
     # Build scene description
     scene = await _build_scene(chat_id, chat_type, messages)
@@ -162,21 +101,18 @@ async def _generate_conversation_fragment(chat_id: str, persona_id: str) -> None
         logger.info(f"[{persona_id}] Empty timeline for {chat_id}, skip")
         return
 
-    # Call LLM via ChatAgent
-    agent = ChatAgent(
+    # Call LLM via LLMService
+    result = await LLMService.run(
         prompt_id="afterthought_conversation",
-        tools=[],
-        model_id=settings.diary_model,
-        trace_name="afterthought",
-    )
-    result = await agent.run(
-        messages=[HumanMessage(content="生成经历碎片")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
             "scene": scene,
             "messages": timeline,
         },
+        messages=[HumanMessage(content="生成经历碎片")],
+        model_id=settings.diary_model,
+        trace_name="afterthought",
     )
     content = _extract_text(result.content)
 
@@ -230,21 +166,10 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
                     return f"和{name}的私聊"
         return "一段私聊"
     else:
-        # Query group name
         try:
-            from app.orm.base import AsyncSessionLocal
-            from app.orm.models import LarkGroupChatInfo
-            from sqlalchemy import select
-
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(LarkGroupChatInfo.name).where(
-                        LarkGroupChatInfo.chat_id == chat_id
-                    )
-                )
-                group_name = result.scalar_one_or_none()
-                if group_name:
-                    return f"在「{group_name}」群里"
+            group_name = await get_group_name(chat_id)
+            if group_name:
+                return f"在「{group_name}」群里"
         except Exception:
             pass
         return "在群里"

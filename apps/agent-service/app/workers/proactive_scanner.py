@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.clients.rabbitmq import CHAT_REQUEST, RabbitMQClient
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 
