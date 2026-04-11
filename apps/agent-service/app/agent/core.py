@@ -137,6 +137,12 @@ AGENTS: dict[str, AgentConfig] = {
     "schedule-weekly": AgentConfig(
         "schedule_weekly", "offline-model", "schedule-weekly"
     ),
+    "life-tick": AgentConfig(
+        "life_engine_tick", "offline-model", "life-tick"
+    ),
+    "glimpse-observe": AgentConfig(
+        "glimpse_observe", "offline-model", "glimpse-observe"
+    ),
 }
 
 
