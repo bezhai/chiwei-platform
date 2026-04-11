@@ -6,24 +6,23 @@ is decided by a single parameter: ``tools``.
 
 Usage examples::
 
-    # Non-agentic (replaces LLMService.run)
-    result = await Agent("afterthought").run(
-        prompt_vars={...}, messages=[...]
-    )
+    from app.agent.core import Agent, AgentConfig
 
-    # Agentic with tools (replaces ChatAgent.stream)
-    async for chunk in Agent("main", tools=ALL_TOOLS).stream(
-        prompt_vars={...}, messages=[...]
-    ):
+    CFG = AgentConfig("afterthought_conversation", "diary-model", "afterthought")
+
+    # Non-agentic
+    result = await Agent(CFG).run(prompt_vars={...}, messages=[...])
+
+    # Agentic with tools
+    async for chunk in Agent(MAIN_CFG, tools=ALL_TOOLS).stream(...):
         ...
 
-    # Structured output (replaces LLMService.extract)
-    data = await Agent("relationship-filter").extract(
-        FilterResult, prompt_vars={...}, messages=[...]
-    )
+    # Structured output
+    data = await Agent(CFG).extract(FilterResult, messages=[...])
 
     # Override model_id for a single call
-    result = await Agent("main", model_id="gpt-4o").run(...)
+    from dataclasses import replace
+    result = await Agent(replace(CFG, model_id="gpt-4o")).run(...)
 """
 
 from __future__ import annotations
@@ -79,79 +78,21 @@ _DEFAULT_RECURSION_LIMIT = 12
 
 
 # ---------------------------------------------------------------------------
-# Agent configuration registry
+# Agent configuration
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
-    """Immutable configuration for a named agent."""
+    """Immutable configuration for an agent.
+
+    Each domain module defines its own config constants.
+    Use ``dataclasses.replace(cfg, model_id="...")`` for per-call overrides.
+    """
 
     prompt_id: str
     model_id: str
     trace_name: str | None = None
-
-
-AGENTS: dict[str, AgentConfig] = {
-    "main": AgentConfig("main", "main-chat-model", "main"),
-    "research": AgentConfig("research_agent", "research-model", "research"),
-    "schedule-ideation": AgentConfig(
-        "schedule_daily_ideation", "offline-model", "schedule-ideation"
-    ),
-    "schedule-writer": AgentConfig(
-        "schedule_daily_writer", "offline-model", "schedule-writer"
-    ),
-    "schedule-critic": AgentConfig(
-        "schedule_daily_critic", "offline-model", "schedule-critic"
-    ),
-    "relationship-filter": AgentConfig(
-        "relationship_filter", "relationship-model", "relationship-filter"
-    ),
-    "relationship-extract": AgentConfig(
-        "relationship_extract", "relationship-model", "relationship-extract"
-    ),
-    "afterthought": AgentConfig(
-        "afterthought_conversation", "diary-model", "afterthought"
-    ),
-    "voice-generator": AgentConfig(
-        "voice_generator", "offline-model", "voice-generator"
-    ),
-    "dream-daily": AgentConfig("dream_daily", "diary-model", "dream-daily"),
-    "dream-weekly": AgentConfig("dream_weekly", "diary-model", "dream-weekly"),
-    "schedule-monthly": AgentConfig(
-        "schedule_monthly", "offline-model", "schedule-monthly"
-    ),
-    "schedule-weekly": AgentConfig(
-        "schedule_weekly", "offline-model", "schedule-weekly"
-    ),
-    "life-tick": AgentConfig("life_engine_tick", "offline-model", "life-tick"),
-    "glimpse-observe": AgentConfig(
-        "glimpse_observe", "offline-model", "glimpse-observe"
-    ),
-    # Guard agents — prompt compiled externally, passed as messages
-    "guard-injection": AgentConfig("", "guard-model", "pre-injection-check"),
-    "guard-politics": AgentConfig("", "guard-model", "pre-politics-check"),
-    "guard-nsfw": AgentConfig("", "guard-model", "pre-nsfw-check"),
-    "guard-output": AgentConfig("", "guard-model", "post-safety-check"),
-}
-
-
-def _resolve_config(
-    name: str,
-    *,
-    model_id: str | None = None,
-    prompt_id: str | None = None,
-    trace_name: str | None = None,
-) -> AgentConfig:
-    """Look up a registered config, allowing per-call overrides."""
-    base = AGENTS.get(name)
-    if base is None:
-        raise KeyError(f"Unknown agent: {name!r}. Registered: {sorted(AGENTS)}")
-    return AgentConfig(
-        prompt_id=prompt_id or base.prompt_id,
-        model_id=model_id or base.model_id,
-        trace_name=trace_name or base.trace_name,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +120,13 @@ class Agent:
 
     Parameters
     ----------
-    name:
-        Registered agent name (key in ``AGENTS``).
+    config:
+        An ``AgentConfig`` specifying prompt_id, model_id, and trace_name.
+        Each domain module defines its own config constants.
     tools:
         If provided, the agent uses LangGraph ``create_agent`` for multi-step
         reasoning (the agentic path).  If ``None``, uses ``model.ainvoke``
         directly (the plain LLM path).
-    model_id:
-        Override the default model for this agent.
-    prompt_id:
-        Override the default Langfuse prompt for this agent.
-    trace_name:
-        Override the default trace name.
     model_kwargs:
         Extra keyword arguments forwarded to ``build_chat_model``
         (e.g. ``reasoning_effort``, ``temperature``).
@@ -198,20 +134,12 @@ class Agent:
 
     def __init__(
         self,
-        name: str,
+        config: AgentConfig,
         *,
         tools: list[Any] | None = None,
-        model_id: str | None = None,
-        prompt_id: str | None = None,
-        trace_name: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        self._cfg = _resolve_config(
-            name,
-            model_id=model_id,
-            prompt_id=prompt_id,
-            trace_name=trace_name,
-        )
+        self._cfg = config
         self._tools = tools
         self._model_kwargs = model_kwargs or {}
 

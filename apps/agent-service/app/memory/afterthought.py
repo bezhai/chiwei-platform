@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data.models import ExperienceFragment
 from app.data.queries import (
     find_group_name,
@@ -26,6 +26,10 @@ from app.data.session import get_session
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.memory.debounce import DebouncedPipeline
+
+_AFTERTHOUGHT_CFG = AgentConfig(
+    "afterthought_conversation", "diary-model", "afterthought"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +103,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         logger.info("[%s] Empty timeline for %s, skip", persona_id, chat_id)
         return
 
-    result = await Agent("afterthought").run(
+    result = await Agent(_AFTERTHOUGHT_CFG).run(
         prompt_vars={
             "persona_name": pc.display_name,
             "persona_lite": pc.persona_lite,

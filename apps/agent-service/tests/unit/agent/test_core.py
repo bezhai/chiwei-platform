@@ -6,7 +6,7 @@ Covers:
   - Agent.extract(): structured output with Pydantic model
   - Agent.run() agentic path: delegates to LangGraph agent
   - Agent.stream() agentic path: yields tokens, no retry after yield
-  - AGENTS registry lookups and overrides
+  - AgentConfig as frozen dataclass
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,9 +21,16 @@ from langchain_core.messages import (
 from openai import APITimeoutError
 from pydantic import BaseModel
 
-from app.agent.core import AGENTS, Agent, AgentConfig, _resolve_config
+from app.agent.core import Agent, AgentConfig
 
 pytestmark = pytest.mark.unit
+
+# Reusable test configs — each domain module defines its own in production
+_PLAIN_CFG = AgentConfig("afterthought_conversation", "diary-model", "afterthought")
+_AGENTIC_CFG = AgentConfig("main", "main-chat-model", "main")
+_EXTRACT_CFG = AgentConfig(
+    "relationship_filter", "relationship-model", "relationship-filter"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,36 +82,32 @@ def mock_deps(mock_model, mock_prompt):
 
 
 # ---------------------------------------------------------------------------
-# Registry tests
+# AgentConfig tests
 # ---------------------------------------------------------------------------
 
 
-class TestRegistry:
-    """AGENTS registry and _resolve_config."""
+class TestAgentConfig:
+    """AgentConfig as a frozen dataclass."""
 
-    def test_all_agents_registered(self):
-        assert len(AGENTS) == 19
+    def test_frozen(self):
+        cfg = AgentConfig("p", "m", "t")
+        with pytest.raises(AttributeError):
+            cfg.prompt_id = "x"  # type: ignore[misc]
 
-    def test_resolve_known_agent(self):
-        cfg = _resolve_config("main")
-        assert cfg.prompt_id == "main"
-        assert cfg.model_id == "main-chat-model"
-        assert cfg.trace_name == "main"
+    def test_defaults(self):
+        cfg = AgentConfig("p", "m")
+        assert cfg.trace_name is None
 
-    def test_resolve_unknown_agent_raises(self):
-        with pytest.raises(KeyError, match="no-such-agent"):
-            _resolve_config("no-such-agent")
+    def test_replace(self):
+        from dataclasses import replace
 
-    def test_override_model_id(self):
-        cfg = _resolve_config("main", model_id="gpt-4o")
-        assert cfg.model_id == "gpt-4o"
-        assert cfg.prompt_id == "main"  # unchanged
+        cfg = AgentConfig("p", "m", "t")
+        new = replace(cfg, model_id="new-model")
+        assert new.model_id == "new-model"
+        assert new.prompt_id == "p"
+        assert cfg.model_id == "m"  # original unchanged
 
-    def test_override_prompt_id(self):
-        cfg = _resolve_config("main", prompt_id="custom-prompt")
-        assert cfg.prompt_id == "custom-prompt"
-
-    def test_agent_config_repr(self):
+    def test_repr(self):
         cfg = AgentConfig("p", "m", "t")
         assert "p" in repr(cfg)
 
@@ -118,7 +121,7 @@ class TestRunPlain:
     """Agent.run() without tools (plain LLM path)."""
 
     async def test_returns_ai_message(self, mock_deps):
-        result = await Agent("afterthought").run(
+        result = await Agent(_PLAIN_CFG).run(
             messages=[{"role": "user", "content": "hi"}],
             prompt_vars={"name": "test"},
         )
@@ -126,7 +129,7 @@ class TestRunPlain:
         assert result.content == "hello"
 
     async def test_compiles_prompt_into_system_message(self, mock_deps):
-        await Agent("afterthought").run(
+        await Agent(_PLAIN_CFG).run(
             messages=[{"role": "user", "content": "hi"}],
             prompt_vars={"key": "val"},
         )
@@ -144,7 +147,7 @@ class TestRunPlain:
                 AIMessage(content="retry ok"),
             ]
         )
-        result = await Agent("afterthought").run(
+        result = await Agent(_PLAIN_CFG).run(
             messages=[HumanMessage(content="hi")],
             max_retries=2,
         )
@@ -156,14 +159,14 @@ class TestRunPlain:
             side_effect=APITimeoutError(request=MagicMock())
         )
         with pytest.raises(APITimeoutError):
-            await Agent("afterthought").run(
+            await Agent(_PLAIN_CFG).run(
                 messages=[HumanMessage(content="hi")],
                 max_retries=2,
             )
         assert mock_deps["model"].ainvoke.call_count == 2
 
     async def test_passes_config_with_callbacks(self, mock_deps):
-        await Agent("afterthought").run(
+        await Agent(_PLAIN_CFG).run(
             messages=[HumanMessage(content="hi")],
         )
         call_args = mock_deps["model"].ainvoke.call_args
@@ -190,7 +193,7 @@ class TestStreamPlain:
         mock_deps["model"].astream = fake_astream
 
         collected = []
-        async for chunk in Agent("afterthought").stream(
+        async for chunk in Agent(_PLAIN_CFG).stream(
             messages=[HumanMessage(content="hi")],
         ):
             collected.append(chunk)
@@ -218,7 +221,7 @@ class TestExtract:
         structured_model.ainvoke = AsyncMock(return_value=expected)
         mock_deps["model"].with_structured_output.return_value = structured_model
 
-        result = await Agent("relationship-filter").extract(
+        result = await Agent(_EXTRACT_CFG).extract(
             Score,
             messages=[HumanMessage(content="rate this")],
             prompt_vars={"key": "val"},
@@ -241,7 +244,7 @@ class TestExtract:
         )
         mock_deps["model"].with_structured_output.return_value = structured_model
 
-        result = await Agent("relationship-filter").extract(
+        result = await Agent(_EXTRACT_CFG).extract(
             Result,
             messages=[HumanMessage(content="test")],
             max_retries=2,
@@ -258,7 +261,7 @@ class TestExtract:
         mock_deps["model"].with_structured_output.return_value = structured_model
 
         await Agent(
-            "relationship-filter", model_kwargs={"reasoning_effort": "low"}
+            _EXTRACT_CFG, model_kwargs={"reasoning_effort": "low"}
         ).extract(
             Out,
             messages=[],
@@ -288,7 +291,7 @@ class TestRunAgentic:
         mock_deps["get_prompt"].return_value = mock_prompt_obj
 
         with patch("app.agent.core.create_agent", return_value=fake_agent):
-            result = await Agent("main", tools=["tool1"]).run(
+            result = await Agent(_AGENTIC_CFG, tools=["tool1"]).run(
                 messages=[HumanMessage(content="do something")],
                 prompt_vars={"persona": "test"},
             )
@@ -310,7 +313,7 @@ class TestRunAgentic:
         mock_deps["get_prompt"].return_value = mock_prompt_obj
 
         with patch("app.agent.core.create_agent", return_value=fake_agent):
-            result = await Agent("main", tools=["t"]).run(
+            result = await Agent(_AGENTIC_CFG, tools=["t"]).run(
                 messages=[HumanMessage(content="hi")],
                 max_retries=2,
             )
@@ -347,7 +350,7 @@ class TestStreamAgentic:
 
         with patch("app.agent.core.create_agent", return_value=fake_agent):
             collected = []
-            async for token in Agent("main", tools=["t"]).stream(
+            async for token in Agent(_AGENTIC_CFG, tools=["t"]).stream(
                 messages=[HumanMessage(content="hi")],
             ):
                 collected.append(token)
@@ -375,7 +378,7 @@ class TestStreamAgentic:
 
         with patch("app.agent.core.create_agent", return_value=fake_agent):
             with pytest.raises(APITimeoutError):
-                async for _ in Agent("main", tools=["t"]).stream(
+                async for _ in Agent(_AGENTIC_CFG, tools=["t"]).stream(
                     messages=[HumanMessage(content="hi")],
                     max_retries=3,
                 ):

@@ -34,11 +34,12 @@ async def deep_research(task: str) -> str:
     # Lazy import to avoid circular dependency
     from langchain_core.messages import HumanMessage
 
-    from app.agent.core import Agent
+    from app.agent.core import Agent, AgentConfig
     from app.agent.tools.search import search_web
 
+    _RESEARCH_CFG = AgentConfig("research_agent", "research-model", "research")
     context = get_runtime(AgentContext).context
-    agent = Agent("research", tools=[search_web])
+    agent = Agent(_RESEARCH_CFG, tools=[search_web])
     result = await agent.run(
         [HumanMessage(content=task)],
         context=context,

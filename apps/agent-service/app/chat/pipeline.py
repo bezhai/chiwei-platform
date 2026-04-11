@@ -26,7 +26,7 @@ from app.agent.context import (
     MediaContext,
     MessageContext,
 )
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.agent.tools import ALL_TOOLS
 from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS, header_vars
 from app.chat.content_parser import parse_content
@@ -52,6 +52,8 @@ from app.data.queries import (
 )
 from app.data.session import get_session
 from app.memory.context import build_inner_context
+
+_MAIN_CFG = AgentConfig("main", "main-chat-model", "main")
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +209,10 @@ async def _build_and_stream(
     prompt_vars["voice_content"] = bot_ctx.voice_content
 
     # Create agent and stream
-    agent = Agent("main", tools=ALL_TOOLS, model_id=model_id)
+    from dataclasses import replace as _replace
+
+    cfg = _MAIN_CFG if not model_id else _replace(_MAIN_CFG, model_id=model_id)
+    agent = Agent(cfg, tools=ALL_TOOLS)
     state = StreamState()
 
     try:

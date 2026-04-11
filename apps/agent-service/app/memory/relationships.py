@@ -14,7 +14,7 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data.queries import (
     find_relationship_memories_batch,
     find_username,
@@ -23,6 +23,13 @@ from app.data.queries import (
 from app.data.session import get_session
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
+
+_FILTER_CFG = AgentConfig(
+    "relationship_filter", "relationship-model", "relationship-filter"
+)
+_EXTRACT_CFG = AgentConfig(
+    "relationship_extract", "relationship-model", "relationship-extract"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +79,7 @@ async def _filter_relevant_messages(
     if not timeline:
         return []
 
-    result = await Agent("relationship-filter").run(
+    result = await Agent(_FILTER_CFG).run(
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
@@ -179,7 +186,7 @@ async def extract_relationship_updates(
             core_facts_lines.append(f"- {name}({uid}): （第一次互动）")
             impression_lines.append(f"- {name}({uid}): （第一次互动）")
 
-    result = await Agent("relationship-extract").run(
+    result = await Agent(_EXTRACT_CFG).run(
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,

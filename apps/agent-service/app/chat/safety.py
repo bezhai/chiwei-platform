@@ -22,9 +22,14 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.agent.prompts import get_prompt
 from app.infra.redis import get_redis
+
+_GUARD_INJECTION = AgentConfig("", "guard-model", "pre-injection-check")
+_GUARD_POLITICS = AgentConfig("", "guard-model", "pre-politics-check")
+_GUARD_NSFW = AgentConfig("", "guard-model", "pre-nsfw-check")
+_GUARD_OUTPUT = AgentConfig("", "guard-model", "post-safety-check")
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +128,7 @@ async def _check_injection(message: str) -> PreCheckResult:
         prompt = get_prompt("guard_prompt_injection")
         messages = prompt.compile(message=message)
         result: _InjectionResult = await Agent(
-            "guard-injection", model_kwargs={"reasoning_effort": "low"}
+            _GUARD_INJECTION, model_kwargs={"reasoning_effort": "low"}
         ).extract(_InjectionResult, messages=messages)
         if result.is_injection and result.confidence >= 0.85:
             logger.warning(
@@ -144,7 +149,7 @@ async def _check_politics(message: str) -> PreCheckResult:
         prompt = get_prompt("guard_sensitive_politics")
         messages = prompt.compile(message=message)
         result: _PoliticsResult = await Agent(
-            "guard-politics", model_kwargs={"reasoning_effort": "low"}
+            _GUARD_POLITICS, model_kwargs={"reasoning_effort": "low"}
         ).extract(_PoliticsResult, messages=messages)
         if result.is_sensitive and result.confidence >= 0.85:
             logger.warning(
@@ -165,7 +170,7 @@ async def _check_nsfw(message: str, persona_id: str) -> PreCheckResult:
         prompt = get_prompt("guard_nsfw_content")
         messages = prompt.compile(message=message)
         result: _NsfwResult = await Agent(
-            "guard-nsfw", model_kwargs={"reasoning_effort": "low"}
+            _GUARD_NSFW, model_kwargs={"reasoning_effort": "low"}
         ).extract(_NsfwResult, messages=messages)
         if result.is_nsfw and result.confidence >= 0.75:
             if persona_id in _NSFW_BLOCKED_PERSONAS:
@@ -262,7 +267,7 @@ async def run_post_check(response_text: str) -> PostCheckResult:
         prompt = get_prompt("guard_output_safety")
         messages = prompt.compile(response=response_text)
         result: _OutputSafetyResult = await Agent(
-            "guard-output", model_kwargs={"reasoning_effort": "low"}
+            _GUARD_OUTPUT, model_kwargs={"reasoning_effort": "low"}
         ).extract(_OutputSafetyResult, messages=messages)
         if result.is_unsafe and result.confidence >= 0.7:
             logger.warning("Output unsafe: confidence=%.2f", result.confidence)

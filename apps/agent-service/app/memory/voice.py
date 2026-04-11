@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data.queries import (
     find_latest_life_state,
     find_plan_for_period,
@@ -20,6 +20,8 @@ from app.data.queries import (
 )
 from app.data.session import get_session
 from app.memory._persona import load_persona
+
+_VOICE_CFG = AgentConfig("voice_generator", "offline-model", "voice-generator")
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,7 @@ async def generate_voice(
     if recent_context:
         recent_ctx_block = f"最近的对话和你的回复：\n{recent_context}"
 
-    result = await Agent("voice-generator").run(
+    result = await Agent(_VOICE_CFG).run(
         prompt_vars={
             "persona_name": pc.display_name,
             "persona_lite": pc.persona_lite,

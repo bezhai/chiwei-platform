@@ -3,14 +3,13 @@
 Public surface:
     Agent       — the unified Agent class (run / stream / extract)
     AgentConfig — per-agent configuration (prompt_id, model_id, trace_name)
-    AGENTS      — registry of all pre-configured agents
 
     build_chat_model   — resolve model_id to a LangChain BaseChatModel
     get_prompt         — fetch a Langfuse prompt (with lane routing)
     compile_prompt     — fetch + compile a prompt
 """
 
-from app.agent.core import AGENTS, Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig
 from app.agent.embedding import (
     HybridEmbedding,
     InstructionBuilder,
@@ -25,7 +24,6 @@ from app.agent.prompts import compile_prompt, get_prompt
 from app.agent.tools import ALL_TOOLS, BASE_TOOLS
 
 __all__ = [
-    "AGENTS",
     "Agent",
     "AgentConfig",
     "ALL_TOOLS",

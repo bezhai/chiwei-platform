@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data.models import ExperienceFragment
 from app.data.queries import (
     find_fragments_in_date_range,
@@ -23,6 +23,9 @@ from app.data.queries import (
     list_all_persona_ids,
 )
 from app.data.session import get_session
+
+_DREAM_DAILY_CFG = AgentConfig("dream_daily", "diary-model", "dream-daily")
+_DREAM_WEEKLY_CFG = AgentConfig("dream_weekly", "diary-model", "dream-weekly")
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,7 @@ async def generate_daily_dream(
         else "（前几天没有做梦）"
     )
 
-    result = await Agent("dream-daily").run(
+    result = await Agent(_DREAM_DAILY_CFG).run(
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
@@ -143,7 +146,7 @@ async def generate_weekly_dream(
     persona_lite = persona_obj.persona_lite if persona_obj else ""
     dailies_text = "\n\n---\n\n".join(f.content for f in reversed(dailies))
 
-    result = await Agent("dream-weekly").run(
+    result = await Agent(_DREAM_WEEKLY_CFG).run(
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,

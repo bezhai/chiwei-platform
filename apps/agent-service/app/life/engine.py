@@ -12,9 +12,11 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data import queries as Q
 from app.data.session import get_session
+
+_LIFE_TICK_CFG = AgentConfig("life_engine_tick", "offline-model", "life-tick")
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +228,7 @@ async def _think(
         else "（还没跟人聊过）"
     )
 
-    result = await Agent("life-tick").run(
+    result = await Agent(_LIFE_TICK_CFG).run(
         messages=[HumanMessage(content="更新生活状态")],
         prompt_vars={
             "persona_name": persona_name,

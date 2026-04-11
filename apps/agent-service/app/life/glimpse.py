@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent
+from app.agent.core import Agent, AgentConfig
 from app.data import queries as Q
 from app.data.models import ExperienceFragment
 from app.data.session import get_session
@@ -26,6 +26,8 @@ from app.life.proactive import (
 )
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
+
+_GLIMPSE_CFG = AgentConfig("glimpse_observe", "offline-model", "glimpse-observe")
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,7 @@ async def _call_glimpse_llm(
             "再多就烦人了，除非有真的让你忍不住的话题"
         )
 
-    result = await Agent("glimpse-observe").run(
+    result = await Agent(_GLIMPSE_CFG).run(
         messages=[HumanMessage(content="观察群消息")],
         prompt_vars={
             "persona_name": persona_name,
