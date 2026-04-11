@@ -18,7 +18,7 @@ from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage
 from app.services.download_permission import check_group_allows_download
 from app.services.quick_search import QuickSearchResult, quick_search
-from app.utils.content_parser import parse_content, update_tos_files
+from app.services.content_parser import parse_content, update_tos_files
 
 logger = logging.getLogger(__name__)
 

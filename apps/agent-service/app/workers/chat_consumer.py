@@ -28,6 +28,7 @@ from app.middleware.chat_metrics import (
     CHAT_TOKENS,
 )
 from app.utils.middlewares.trace import header_vars
+from app.workers.error_handling import mq_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ SPLIT_MARKER = "---split---"
 MAX_MESSAGES = 4
 
 
+@mq_error_handler()
 async def handle_chat_request(message: AbstractIncomingMessage) -> None:
     """消费 chat_request queue 中的消息，路由到对应 persona 并行处理"""
     async with message.process(requeue=False):

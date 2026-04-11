@@ -31,7 +31,8 @@ from app.orm.crud.message import (
 from app.orm.models import ConversationMessage
 from app.services.download_permission import check_group_allows_download
 from app.services.qdrant import qdrant_service
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
+from app.workers.error_handling import cron_error_handler, mq_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ async def process_message(message_id: str) -> None:
             await update_vector_status(message_id, "failed")
 
 
+@mq_error_handler()
 async def handle_vectorize(message: AbstractIncomingMessage) -> None:
     """RabbitMQ 消费回调"""
     async with message.process(requeue=False):
@@ -275,6 +277,7 @@ async def scan_pending_messages() -> int:
     return total_pushed
 
 
+@cron_error_handler()
 async def cron_scan_pending_messages(ctx) -> None:
     """
     定时任务：扫描 pending 状态的消息并推送到向量化队列

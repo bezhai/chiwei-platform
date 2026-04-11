@@ -12,7 +12,7 @@ from langgraph.runtime import get_runtime
 from app.agents.core.context import AgentContext
 from app.agents.tools.decorators import tool_error_handler
 from app.orm.crud import get_chat_messages_in_range, get_username
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))

@@ -25,6 +25,7 @@ from app.orm.crud import (
     upsert_schedule,
 )
 from app.orm.models import AkaoSchedule
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ async def _run_critic(
 # ==================== ArQ cron 入口 ====================
 
 
+@cron_error_handler()
 async def cron_generate_monthly_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成本月计划"""
     from app.orm.crud import get_all_persona_ids
@@ -189,6 +191,7 @@ async def cron_generate_monthly_plan(ctx) -> None:
             logger.error(f"[{persona_id}] Monthly plan generation failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_weekly_plan(ctx) -> None:
     """cron 入口：周日 23:00 触发，为每个 persona bot 生成下周计划"""
     from app.orm.crud import get_all_persona_ids
@@ -201,6 +204,7 @@ async def cron_generate_weekly_plan(ctx) -> None:
             logger.error(f"[{persona_id}] Weekly plan generation failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_daily_plan(ctx) -> None:
     """cron 入口：为每个 persona bot 生成今天的日计划"""
     from app.orm.crud import get_all_persona_ids

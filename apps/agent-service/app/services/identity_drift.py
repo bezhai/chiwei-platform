@@ -15,7 +15,7 @@ from app.orm.crud import get_chat_messages_in_range
 from app.services.debounced_pipeline import DebouncedPipeline
 from app.services.persona_loader import load_persona
 from app.services.timeline_formatter import format_timeline
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 

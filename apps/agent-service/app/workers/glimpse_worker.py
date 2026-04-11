@@ -6,10 +6,12 @@ from app.config.config import settings
 from app.orm.crud import get_all_persona_ids
 from app.orm.crud.life_engine import load_latest_state
 from app.services.glimpse import run_glimpse
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 
 
+@cron_error_handler()
 async def cron_glimpse(ctx) -> None:
     """arq cron: 每 5 分钟为 browsing 状态的 persona 执行 glimpse
 

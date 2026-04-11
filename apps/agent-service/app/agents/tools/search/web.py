@@ -8,6 +8,7 @@ import httpx
 from langchain.tools import tool
 from prometheus_client import Counter, Histogram
 
+from app.agents.tools.decorators import tool_error_handler
 from app.agents.tools.search.reader import read_webpage
 from app.agents.tools.search.reranker import rerank_chunks
 from app.config import settings
@@ -104,6 +105,7 @@ async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
 
 
 @tool
+@tool_error_handler(error_message="网页搜索失败")
 @log_io
 @dict_serialize
 async def search_web(

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from app.orm.crud import get_username
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 
 async def format_timeline(

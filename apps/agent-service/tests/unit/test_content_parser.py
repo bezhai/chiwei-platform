@@ -2,7 +2,7 @@
 
 import json
 
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 
 class TestParseContentV2:

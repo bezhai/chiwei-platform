@@ -20,10 +20,12 @@ from app.clients.rabbitmq import (
     _lane_queue,
 )
 from app.orm.crud.message import update_safety_status
+from app.workers.error_handling import mq_error_handler
 
 logger = logging.getLogger(__name__)
 
 
+@mq_error_handler()
 async def handle_safety_check(message: AbstractIncomingMessage) -> None:
     """消费 safety_check queue 中的消息"""
     async with message.process(requeue=False):

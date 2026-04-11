@@ -11,10 +11,11 @@ from sqlalchemy import select
 from app.agents.clients import create_client
 from app.agents.core.context import AgentContext
 from app.agents.infra.embedding import InstructionBuilder, Modality
+from app.agents.tools.decorators import tool_error_handler
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage, LarkUser
 from app.services.qdrant import qdrant_service
-from app.utils.content_parser import parse_content
+from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ def _truncate(text: str, max_len: int = 200) -> str:
 
 
 @tool
+@tool_error_handler(error_message="搜索群聊历史失败")
 async def search_group_history(
     query: str,
     limit: int = 10,

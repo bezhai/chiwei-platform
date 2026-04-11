@@ -12,6 +12,7 @@ from prometheus_client import Counter, Histogram
 from pydantic import Field
 
 from app.agents.core.context import AgentContext
+from app.agents.tools.decorators import tool_error_handler
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ IMAGE_SEARCH_UPLOAD_RESULTS = Counter(
 
 
 @tool
+@tool_error_handler(error_message="图片搜索失败")
 async def search_images(
     query: Annotated[
         str,

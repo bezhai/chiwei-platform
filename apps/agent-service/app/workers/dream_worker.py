@@ -17,11 +17,13 @@ from app.config.config import settings
 from app.orm.crud import get_all_persona_ids, get_bot_persona
 from app.orm.memory_crud import create_fragment, get_fragments_in_date_range, get_recent_fragments_by_grain
 from app.orm.memory_models import ExperienceFragment
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 CST = timezone(timedelta(hours=8))
 
 
+@cron_error_handler()
 async def cron_generate_dreams(ctx) -> None:
     """cron 入口：为每个 persona 生成昨天的 daily dream"""
     yesterday = date.today() - timedelta(days=1)
@@ -33,6 +35,7 @@ async def cron_generate_dreams(ctx) -> None:
             logger.error(f"[{persona_id}] Daily dream failed: {e}", exc_info=True)
 
 
+@cron_error_handler()
 async def cron_generate_weekly_dreams(ctx) -> None:
     """cron 入口：每周一为每个 persona 生成 weekly dream"""
     today = date.today()

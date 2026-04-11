@@ -5,10 +5,12 @@ import logging
 from app.config.config import settings
 from app.orm.crud import get_all_persona_ids
 from app.services.voice_generator import generate_voice
+from app.workers.error_handling import cron_error_handler
 
 logger = logging.getLogger(__name__)
 
 
+@cron_error_handler()
 async def cron_generate_voice(ctx) -> None:
     """定时生成所有 persona 的统一 voice"""
     if settings.lane and settings.lane != "prod":

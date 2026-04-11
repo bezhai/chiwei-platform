@@ -8,11 +8,13 @@ from langgraph.runtime import get_runtime
 from pydantic import Field
 
 from app.agents.core.context import AgentContext
+from app.agents.tools.decorators import tool_error_handler
 
 logger = logging.getLogger(__name__)
 
 
 @tool
+@tool_error_handler(error_message="查看图片失败")
 async def read_images(
     filenames: Annotated[
         list[str],

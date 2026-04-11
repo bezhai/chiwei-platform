@@ -9,11 +9,13 @@ from pydantic import Field
 
 from app.agents.clients import create_client
 from app.agents.core.context import AgentContext
+from app.agents.tools.decorators import tool_error_handler
 
 logger = logging.getLogger(__name__)
 
 
 @tool
+@tool_error_handler(error_message="图片生成失败")
 async def generate_image(
     query: Annotated[
         str,
