@@ -1,4 +1,4 @@
-"""Shared helpers for agent tools — error handling + image upload."""
+"""Shared helpers for agent tools — error handling, image upload, metrics."""
 
 from __future__ import annotations
 
@@ -6,7 +6,40 @@ import functools
 import logging
 from typing import Any
 
+from prometheus_client import Counter, Histogram
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus helpers
+# ---------------------------------------------------------------------------
+
+# prometheus_client has no public API to retrieve an already-registered
+# collector by name. _names_to_collectors is the only option; tracked in
+# https://github.com/prometheus/client_python/issues/546
+
+
+def get_or_create_counter(name: str, doc: str, labels: list[str]) -> Counter:
+    """Get an existing Counter or create a new one (safe for re-import)."""
+    try:
+        return Counter(name, doc, labels)
+    except ValueError:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY._names_to_collectors[name.removesuffix("_total")]  # type: ignore[return-value]
+
+
+def get_or_create_histogram(
+    name: str, doc: str, labels: list[str] | None = None
+) -> Histogram:
+    """Get an existing Histogram or create a new one (safe for re-import)."""
+    try:
+        return Histogram(name, doc, labels or [])
+    except ValueError:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY._names_to_collectors[name]  # type: ignore[return-value]
 
 
 def tool_error(error_message: str):

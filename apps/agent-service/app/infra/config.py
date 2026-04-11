@@ -53,7 +53,7 @@ class Settings:
         default_factory=lambda: _env_or_none("QDRANT_SERVICE_API_KEY")
     )
 
-    # -- Search (You Search deprecated, kept for compat) --
+    # -- Search (You Search is the primary provider) --
     you_search_host: str | None = field(
         default_factory=lambda: _env_or_none("YOU_SEARCH_HOST")
     )

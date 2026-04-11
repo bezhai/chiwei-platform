@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
-from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
@@ -117,7 +116,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
 
 @tool
 @tool_error("搜索群聊历史失败")
-async def search_group_history(query: str, limit: int = 10) -> str:
+async def search_group_history(query: str, limit: int = 5) -> str:
     """回想之前群里好像聊过的事
 
     只在你隐约记得群里讨论过某个话题、但细节模糊了的时候才用。
@@ -129,6 +128,7 @@ async def search_group_history(query: str, limit: int = 10) -> str:
         limit: 返回的锚点消息数量（默认10条，每条会附带上下文）
     """
     context = get_runtime(AgentContext).context
+    limit = max(1, min(limit, 10))
 
     # 1. Generate hybrid embedding for query
     from app.agent.embedding import InstructionBuilder, Modality
@@ -148,6 +148,8 @@ async def search_group_history(query: str, limit: int = 10) -> str:
     )
 
     # 2. Qdrant hybrid search filtered by chat_id
+    from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+
     from app.infra.qdrant import qdrant
 
     query_filter = Filter(

@@ -9,48 +9,29 @@ import time
 import httpx
 from bs4 import BeautifulSoup
 from langchain.tools import tool
-from prometheus_client import Counter, Histogram
 
-from app.agent.tools._common import tool_error
+from app.agent.tools._common import (
+    get_or_create_counter,
+    get_or_create_histogram,
+    tool_error,
+)
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prometheus metrics (reuse existing collectors to avoid double-registration)
+# Prometheus metrics
 # ---------------------------------------------------------------------------
 
-# prometheus_client has no public API to retrieve an already-registered collector
-# by name. _names_to_collectors is the only option; tracked in
-# https://github.com/prometheus/client_python/issues/546
-
-
-def _counter(name: str, doc: str, labels: list[str]) -> Counter:
-    try:
-        return Counter(name, doc, labels)
-    except ValueError:
-        # Already registered — grab the existing one from the default registry
-        from prometheus_client import REGISTRY
-
-        return REGISTRY._names_to_collectors[name.removesuffix("_total")]  # type: ignore[return-value]
-
-
-def _histogram(name: str, doc: str, labels: list[str] | None = None) -> Histogram:
-    try:
-        return Histogram(name, doc, labels or [])
-    except ValueError:
-        from prometheus_client import REGISTRY
-
-        return REGISTRY._names_to_collectors[name]  # type: ignore[return-value]
-
-
-WEB_SEARCH_REQUESTS = _counter(
+WEB_SEARCH_REQUESTS = get_or_create_counter(
     "web_search_requests_total", "Web search API requests", ["status"]
 )
-WEB_SEARCH_DURATION = _histogram(
+WEB_SEARCH_DURATION = get_or_create_histogram(
     "web_search_duration_seconds", "Web search request duration"
 )
-RERANK_DURATION = _histogram("search_rerank_duration_seconds", "Rerank duration")
+RERANK_DURATION = get_or_create_histogram(
+    "search_rerank_duration_seconds", "Rerank duration"
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -332,6 +313,7 @@ async def search_web(
     Returns:
         搜索结果的文本摘要。
     """
+    num = max(1, min(num, 10))
     start = time.monotonic()
     status = "error"
     try:

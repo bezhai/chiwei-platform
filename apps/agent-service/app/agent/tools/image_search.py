@@ -10,50 +10,30 @@ from typing import Annotated, Any
 import httpx
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
-from prometheus_client import Counter, Histogram
 from pydantic import Field
 
 from app.agent.context import AgentContext
-from app.agent.tools._common import tool_error, upload_and_register
+from app.agent.tools._common import (
+    get_or_create_counter,
+    get_or_create_histogram,
+    tool_error,
+    upload_and_register,
+)
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prometheus metrics (reuse existing collectors to avoid double-registration)
+# Prometheus metrics
 # ---------------------------------------------------------------------------
 
-# prometheus_client has no public API to retrieve an already-registered collector
-# by name. _names_to_collectors is the only option; tracked in
-# https://github.com/prometheus/client_python/issues/546
-
-
-def _counter(name: str, doc: str, labels: list[str]) -> Counter:
-    try:
-        return Counter(name, doc, labels)
-    except ValueError:
-        # Already registered — grab the existing one from the default registry
-        from prometheus_client import REGISTRY
-
-        return REGISTRY._names_to_collectors[name.removesuffix("_total")]  # type: ignore[return-value]
-
-
-def _histogram(name: str, doc: str, labels: list[str] | None = None) -> Histogram:
-    try:
-        return Histogram(name, doc, labels or [])
-    except ValueError:
-        from prometheus_client import REGISTRY
-
-        return REGISTRY._names_to_collectors[name]  # type: ignore[return-value]
-
-
-IMAGE_SEARCH_DURATION = _histogram(
+IMAGE_SEARCH_DURATION = get_or_create_histogram(
     "image_search_step_duration_seconds", "Image search step duration", ["step"]
 )
-IMAGE_SEARCH_TOTAL = _counter(
+IMAGE_SEARCH_TOTAL = get_or_create_counter(
     "image_search_requests_total", "Image search requests", ["status"]
 )
-IMAGE_SEARCH_UPLOADS = _counter(
+IMAGE_SEARCH_UPLOADS = get_or_create_counter(
     "image_search_upload_results_total", "Image upload outcomes", ["status"]
 )
 
