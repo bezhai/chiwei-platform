@@ -1,3 +1,1 @@
-"""
-API模块，包含所有API路由定义。
-"""
+"""API layer — routes, middleware, application factory."""
