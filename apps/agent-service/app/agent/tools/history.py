@@ -76,7 +76,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
         time_hint: 大概什么时候的（如"今天上午"、"昨天"），不确定可以不填
     """
     context = get_runtime(AgentContext).context
-    chat_id = context.message.chat_id
+    chat_id = context.chat_id
 
     now = datetime.now(CST)
     hours = _parse_time_hint(time_hint)
@@ -156,7 +156,7 @@ async def search_group_history(query: str, limit: int = 10) -> str:
         must=[
             FieldCondition(
                 key="chat_id",
-                match=MatchValue(value=context.message.chat_id or ""),
+                match=MatchValue(value=context.chat_id or ""),
             )
         ]
     )
@@ -207,7 +207,7 @@ async def search_group_history(query: str, limit: int = 10) -> str:
             select(ConversationMessage, LarkUser)
             .join(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
             .where(
-                ConversationMessage.chat_id == context.message.chat_id,
+                ConversationMessage.chat_id == context.chat_id,
                 or_(*or_conditions),
             )
             .order_by(ConversationMessage.create_time.asc())
@@ -254,7 +254,7 @@ async def list_group_members(role: str | None = None) -> str:
             select(LarkGroupMember, LarkUser)
             .join(LarkUser, LarkGroupMember.union_id == LarkUser.union_id)
             .where(
-                LarkGroupMember.chat_id == context.message.chat_id,
+                LarkGroupMember.chat_id == context.chat_id,
                 ~LarkGroupMember.is_leave,
             )
         )

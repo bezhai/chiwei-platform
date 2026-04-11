@@ -1,7 +1,7 @@
-"""Agent execution context — dataclasses for message, media, and feature flags.
+"""Agent execution context — flat, frozen dataclass.
 
-Uses composition to separate required fields (MessageContext) from optional
-capabilities (MediaContext, FeatureFlags).
+Carried through LangGraph runtime, accessible to tools via
+``get_runtime(AgentContext).context``.
 """
 
 from __future__ import annotations
@@ -13,39 +13,19 @@ if TYPE_CHECKING:
     from app.infra.image import ImageRegistry
 
 
-@dataclass(frozen=True)
-class MessageContext:
-    """Message-level context (required fields)."""
-
-    message_id: str
-    chat_id: str
-
-
-@dataclass
-class MediaContext:
-    """Media context (optional)."""
-
-    registry: ImageRegistry | None = None
-
-
-@dataclass
-class FeatureFlags:
-    """Feature flags (gray release configuration)."""
-
-    flags: dict[str, Any] = field(default_factory=dict)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.flags.get(key, default)
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AgentContext:
-    """Agent execution context (composition pattern).
+    """Immutable execution context for an agent run.
 
-    Combines different context types together, maintaining type safety
-    and flexibility.
+    Constructed once in ``chat/pipeline.py`` and passed to tools
+    via LangGraph runtime.  Frozen to prevent accidental mutation
+    across tool calls and sub-agent delegation.
     """
 
-    message: MessageContext
-    media: MediaContext = field(default_factory=MediaContext)
-    features: FeatureFlags = field(default_factory=FeatureFlags)
+    message_id: str = ""
+    chat_id: str = ""
+    image_registry: ImageRegistry | None = None
+    features: dict[str, Any] = field(default_factory=dict)
+
+    def get_feature(self, key: str, default: Any = None) -> Any:
+        return self.features.get(key, default)

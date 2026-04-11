@@ -20,12 +20,7 @@ from collections.abc import AsyncGenerator
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
 
-from app.agent.context import (
-    AgentContext,
-    FeatureFlags,
-    MediaContext,
-    MessageContext,
-)
+from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.tools import ALL_TOOLS
 from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS, header_vars
@@ -220,9 +215,10 @@ async def _build_and_stream(
         async for token in agent.stream(
             ctx.messages,
             context=AgentContext(
-                message=MessageContext(message_id=message_id, chat_id=ctx.chat_id),
-                media=MediaContext(registry=ctx.image_registry),
-                features=FeatureFlags(flags=gray_config or {}),
+                message_id=message_id,
+                chat_id=ctx.chat_id,
+                image_registry=ctx.image_registry,
+                features=dict(gray_config or {}),
             ),
             prompt_vars=prompt_vars,
         ):

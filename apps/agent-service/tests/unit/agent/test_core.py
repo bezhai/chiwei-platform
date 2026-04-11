@@ -179,12 +179,9 @@ class TestRun:
         assert call_kwargs["config"]["run_name"] == "test-agent"
 
     async def test_passes_context(self, mock_deps):
-        from app.agent.context import AgentContext, MediaContext, MessageContext
+        from app.agent.context import AgentContext
 
-        ctx = AgentContext(
-            message=MessageContext(message_id="m1", chat_id="c1"),
-            media=MediaContext(registry=None),
-        )
+        ctx = AgentContext(message_id="m1", chat_id="c1")
         await Agent(_CFG).run(
             messages=[HumanMessage(content="hi")],
             context=ctx,

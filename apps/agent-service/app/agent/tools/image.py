@@ -37,7 +37,7 @@ async def read_images(
         filenames: 图片文件名列表（如 ["3.png", "5.png"]）
     """
     context = get_runtime(AgentContext).context
-    registry = context.media.registry
+    registry = context.image_registry
 
     if not registry:
         return "当前对话没有可用的图片"
@@ -85,7 +85,7 @@ async def generate_image(
 ) -> str | list[dict[str, Any]]:
     """生成图片。调用前必须先 load_skill("drawing") 加载画图指南并遵循其流程。"""
     context = get_runtime(AgentContext).context
-    registry = context.media.registry
+    registry = context.image_registry
 
     # Resolve reference images from registry
     reference_urls: list[str] = []
@@ -103,8 +103,8 @@ async def generate_image(
     logger.info("Image generation request: %s", query)
 
     model_name = "default-generate-image-model"
-    if context.features.get("image_model"):
-        model_name = context.features.get("image_model")
+    if context.get_feature("image_model"):
+        model_name = context.get_feature("image_model")
         logger.info("Feature flag overrides image model to: %s", model_name)
 
     from app.agent.embedding import generate_image as _gen_image

@@ -442,7 +442,7 @@ async def search_images(
 
         # Upload each to TOS and register
         context = get_runtime(AgentContext).context
-        registry = context.media.registry
+        registry = context.image_registry
 
         t0 = time.monotonic()
         upload_tasks = [
