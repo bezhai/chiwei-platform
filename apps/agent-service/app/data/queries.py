@@ -17,7 +17,7 @@ from __future__ import annotations
 import json as json_mod
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func, text, update
+from sqlalchemy import func, or_, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -29,6 +29,7 @@ from app.data.models import (
     GlimpseState,
     LarkBaseChatInfo,
     LarkGroupChatInfo,
+    LarkGroupMember,
     LarkUser,
     LifeEngineState,
     ModelMapping,
@@ -757,3 +758,73 @@ async def find_relationship_memories_batch(
         )
     )
     return {row.user_id: (row.core_facts, row.impression) for row in result.all()}
+
+
+# --- Chat history — context messages and group members ---
+
+
+async def find_context_messages_for_anchors(
+    session: AsyncSession,
+    chat_id: str,
+    anchor_message_ids: list[str],
+    anchor_timestamps: list[int],
+    anchor_root_ids: set[str],
+    context_window_ms: int = 300_000,
+) -> list[tuple]:
+    """Find messages surrounding anchor points (for search_group_history).
+
+    Returns list of (ConversationMessage, LarkUser) tuples.
+    """
+    time_conditions = [
+        ConversationMessage.create_time.between(
+            ts - context_window_ms, ts + context_window_ms
+        )
+        for ts in anchor_timestamps
+        if ts
+    ]
+    or_conditions = [
+        *time_conditions,
+        ConversationMessage.message_id.in_(anchor_message_ids),
+    ]
+    if anchor_root_ids:
+        or_conditions.append(
+            ConversationMessage.root_message_id.in_(anchor_root_ids)
+        )
+
+    stmt = (
+        select(ConversationMessage, LarkUser)
+        .join(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
+        .where(
+            ConversationMessage.chat_id == chat_id,
+            or_(*or_conditions),
+        )
+        .order_by(ConversationMessage.create_time.asc())
+    )
+    result = await session.execute(stmt)
+    return list(result.all())
+
+
+async def find_group_members(
+    session: AsyncSession,
+    chat_id: str,
+    role: str | None = None,
+) -> list[tuple]:
+    """Find group members with user info.
+
+    Returns list of (LarkGroupMember, LarkUser) tuples.
+    """
+    stmt = (
+        select(LarkGroupMember, LarkUser)
+        .join(LarkUser, LarkGroupMember.union_id == LarkUser.union_id)
+        .where(
+            LarkGroupMember.chat_id == chat_id,
+            ~LarkGroupMember.is_leave,
+        )
+    )
+    if role == "owner":
+        stmt = stmt.where(LarkGroupMember.is_owner)
+    elif role == "manager":
+        stmt = stmt.where(LarkGroupMember.is_manager)
+
+    result = await session.execute(stmt)
+    return list(result.all())

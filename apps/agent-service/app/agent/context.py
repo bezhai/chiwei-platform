@@ -24,6 +24,7 @@ class AgentContext:
 
     message_id: str = ""
     chat_id: str = ""
+    persona_id: str = ""
     image_registry: ImageRegistry | None = None
     features: dict[str, Any] = field(default_factory=dict)
 

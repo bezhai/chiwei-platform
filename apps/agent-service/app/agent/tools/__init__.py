@@ -13,9 +13,10 @@ from app.agent.tools.history import (
     search_group_history,
 )
 from app.agent.tools.image import generate_image, read_images
+from app.agent.tools.image_search import search_images
 from app.agent.tools.recall import recall
 from app.agent.tools.sandbox import sandbox_bash
-from app.agent.tools.search import search_images, search_web
+from app.agent.tools.search import search_web
 from app.agent.tools.skill import load_skill
 
 # Base tools: available to all agents (including sub-agents like research)

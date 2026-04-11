@@ -181,7 +181,7 @@ class TestRun:
     async def test_passes_context(self, mock_deps):
         from app.agent.context import AgentContext
 
-        ctx = AgentContext(message_id="m1", chat_id="c1")
+        ctx = AgentContext(message_id="m1", chat_id="c1", persona_id="p1")
         await Agent(_CFG).run(
             messages=[HumanMessage(content="hi")],
             context=ctx,

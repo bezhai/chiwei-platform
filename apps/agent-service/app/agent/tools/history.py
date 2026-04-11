@@ -12,11 +12,9 @@ from datetime import datetime, timedelta, timezone
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue
-from sqlalchemy import or_, select
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
-from app.data.models import ConversationMessage, LarkGroupMember, LarkUser
 from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -186,34 +184,17 @@ async def search_group_history(query: str, limit: int = 10) -> str:
             anchor_root_ids.add(payload.get("root_message_id"))
 
     # 4. Query context messages from DB
-    async with get_session() as session:
-        time_conditions = [
-            ConversationMessage.create_time.between(
-                ts - CONTEXT_WINDOW_MS, ts + CONTEXT_WINDOW_MS
-            )
-            for ts in anchor_timestamps
-            if ts
-        ]
-        or_conditions = [
-            *time_conditions,
-            ConversationMessage.message_id.in_(anchor_message_ids),
-        ]
-        if anchor_root_ids:
-            or_conditions.append(
-                ConversationMessage.root_message_id.in_(anchor_root_ids)
-            )
+    from app.data.queries import find_context_messages_for_anchors
 
-        stmt = (
-            select(ConversationMessage, LarkUser)
-            .join(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
-            .where(
-                ConversationMessage.chat_id == context.chat_id,
-                or_(*or_conditions),
-            )
-            .order_by(ConversationMessage.create_time.asc())
+    async with get_session() as session:
+        rows = await find_context_messages_for_anchors(
+            session,
+            chat_id=context.chat_id,
+            anchor_message_ids=anchor_message_ids,
+            anchor_timestamps=anchor_timestamps,
+            anchor_root_ids=anchor_root_ids,
+            context_window_ms=CONTEXT_WINDOW_MS,
         )
-        result = await session.execute(stmt)
-        rows = result.all()
 
     if not rows:
         return "未找到相关消息"
@@ -249,22 +230,10 @@ async def list_group_members(role: str | None = None) -> str:
     """
     context = get_runtime(AgentContext).context
 
-    async with get_session() as session:
-        stmt = (
-            select(LarkGroupMember, LarkUser)
-            .join(LarkUser, LarkGroupMember.union_id == LarkUser.union_id)
-            .where(
-                LarkGroupMember.chat_id == context.chat_id,
-                ~LarkGroupMember.is_leave,
-            )
-        )
-        if role == "owner":
-            stmt = stmt.where(LarkGroupMember.is_owner)
-        elif role == "manager":
-            stmt = stmt.where(LarkGroupMember.is_manager)
+    from app.data.queries import find_group_members
 
-        result = await session.execute(stmt)
-        rows = result.all()
+    async with get_session() as session:
+        rows = await find_group_members(session, context.chat_id, role)
 
     if not rows:
         return "群内无成员" if not role else f"未找到 {role} 角色的成员"

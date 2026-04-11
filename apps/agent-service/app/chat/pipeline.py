@@ -217,6 +217,7 @@ async def _build_and_stream(
             context=AgentContext(
                 message_id=message_id,
                 chat_id=ctx.chat_id,
+                persona_id=bot_ctx.persona_id,
                 image_registry=ctx.image_registry,
                 features=dict(gray_config or {}),
             ),
