@@ -1,4 +1,8 @@
-"""主聊天 Agent"""
+"""主聊天 Agent — 编排器
+
+薄编排层：按顺序调用 safety_race / stream_handler / post_actions，
+自身不包含业务逻辑。
+"""
 
 import asyncio
 import logging
@@ -6,7 +10,6 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-from langchain.messages import AIMessageChunk, ToolMessage
 from langfuse import get_client as get_langfuse
 from langfuse import propagate_attributes
 
@@ -18,31 +21,27 @@ from app.agents.core import (
     MessageContext,
 )
 from app.agents.domains.main.context_builder import build_chat_context
+from app.agents.domains.main.post_actions import (
+    get_guard_message,
+    schedule_post_actions,
+)
+from app.agents.domains.main.safety_race import buffer_until_pre
+from app.agents.domains.main.stream_handler import (
+    StreamState,
+    handle_token,
+    is_content_filter,
+    is_length_truncated,
+)
 from app.agents.domains.main.tools import ALL_TOOLS
 from app.agents.graphs.pre import run_pre
-from app.orm.crud import get_gray_config, get_message_content
-from app.services.memory_context import build_inner_context
-from app.services.bot_context import BotContext
 from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
+from app.orm.crud import get_gray_config, get_message_content
+from app.services.bot_context import BotContext
+from app.services.memory_context import build_inner_context
 from app.utils.content_parser import parse_content
 from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
-
-async def _get_guard_message(persona_or_bot: str) -> str:
-    """获取 guard 拒绝消息（persona/bot 专属，fallback 为通用消息）"""
-    try:
-        from app.orm.crud import get_bot_persona
-        persona = await get_bot_persona(persona_or_bot)
-        if persona and persona.error_messages:
-            return persona.error_messages.get("guard", "不想讨论这个话题呢~")
-    except Exception as e:
-        logger.warning(f"Failed to get guard message for {persona_or_bot}: {e}")
-    return "不想讨论这个话题呢~"
-
-# 分段标记（consumer 侧检测并拆分为多条消息）
-SPLIT_MARKER = "---split---"
-
 
 
 async def stream_chat(
@@ -81,7 +80,7 @@ async def stream_chat(
 
             # 获取 guard 消息：优先用 persona_id，fallback header_vars
             effective_persona = persona_id or header_vars["app_name"].get() or ""
-            guard_message = await _get_guard_message(effective_persona)
+            guard_message = await get_guard_message(effective_persona)
 
             # 3. 启动 pre task（create_task 复制当前 context，继承父 trace）
             pre_task = asyncio.create_task(run_pre(parsed.render(), persona_id=effective_persona))
@@ -109,156 +108,8 @@ async def stream_chat(
                     message_id, gray_config, request_id, persona_id=persona_id
                 )
 
-                async for text in _buffer_until_pre(raw_stream, pre_task, message_id, guard_message):
+                async for text in buffer_until_pre(raw_stream, pre_task, message_id, guard_message):
                     yield text
-
-
-_STREAM_END = object()
-
-
-async def _buffer_until_pre(
-    raw_stream: AsyncGenerator[str, None],
-    pre_task: asyncio.Task,
-    message_id: str,
-    guard_message: str = "不想讨论这个话题呢~",
-) -> AsyncGenerator[str, None]:
-    """用 pre_task 结果守护一个原始 token 流。
-
-    使用 Queue + asyncio.wait 实现 race：pre 完成后立即响应，
-    不再被动等待下一个 token 到达才检查。
-    """
-    t_buf_start = time.monotonic()
-    buffer: list[str] = []
-    q: asyncio.Queue = asyncio.Queue()
-
-    async def _drain_stream():
-        try:
-            async for text in raw_stream:
-                await q.put(text)
-        except asyncio.CancelledError:
-            logger.warning(f"_drain_stream cancelled: message_id={message_id}")
-            raise
-        except Exception as e:
-            logger.error(f"_drain_stream error: message_id={message_id}, error={e}")
-            await q.put(e)
-        finally:
-            try:
-                await q.put(_STREAM_END)
-            except asyncio.CancelledError:
-                # 即使被取消也要确保 STREAM_END 入队（用非 async 方式）
-                q.put_nowait(_STREAM_END)
-                logger.warning(f"_drain_stream STREAM_END forced via put_nowait: message_id={message_id}")
-
-    drain_task = asyncio.create_task(_drain_stream())
-
-    try:
-        # Phase 1: Race pre vs stream tokens
-        while not pre_task.done():
-            get_task = asyncio.ensure_future(q.get())
-            done, _ = await asyncio.wait(
-                {get_task, pre_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if pre_task in done:
-                pre_result = pre_task.result()
-                pre_dur = time.monotonic() - t_buf_start
-                CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
-                logger.info(
-                    "pre_safety_done",
-                    extra={
-                        "event": "pre_safety_done",
-                        "message_id": message_id,
-                        "duration_ms": round(pre_dur * 1000),
-                        "blocked": pre_result["is_blocked"],
-                        "buffered": len(buffer),
-                    },
-                )
-                if pre_result["is_blocked"]:
-                    logger.info(
-                        f"并行模式拦截: message_id={message_id}, "
-                        f"reason={pre_result['block_reason']}"
-                    )
-                    get_task.cancel()
-                    yield guard_message
-                    return
-                # pre passed → flush buffer
-                for b in buffer:
-                    yield b
-                buffer.clear()
-                # Await pending get
-                item = await get_task
-                if isinstance(item, Exception):
-                    raise item
-                if item is _STREAM_END:
-                    return
-                yield item
-                break  # → Phase 2
-
-            # Token arrived, pre still running
-            item = await get_task
-            if isinstance(item, Exception):
-                raise item
-            if item is _STREAM_END:
-                # Stream ended before pre → await pre
-                try:
-                    pre_result = await pre_task
-                except Exception as e:
-                    logger.error(f"pre_task 异常: {e}")
-                    for b in buffer:
-                        yield b
-                    return
-                pre_dur = time.monotonic() - t_buf_start
-                CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
-                if pre_result["is_blocked"]:
-                    logger.info(
-                        f"并行模式拦截（流结束后）: message_id={message_id}, "
-                        f"reason={pre_result['block_reason']}"
-                    )
-                    yield guard_message
-                    return
-                for b in buffer:
-                    yield b
-                return
-            buffer.append(item)
-
-        # Edge: pre done between loop iterations
-        if buffer:
-            pre_result = pre_task.result()
-            if pre_result["is_blocked"]:
-                logger.info(
-                    f"并行模式拦截: message_id={message_id}, "
-                    f"reason={pre_result['block_reason']}"
-                )
-                yield guard_message
-                return
-            for b in buffer:
-                yield b
-            buffer.clear()
-
-        # Phase 2: Pre passed, stream directly from queue
-        _PHASE2_TIMEOUT = 120  # 2 分钟超时防御
-        logger.debug(f"_buffer_until_pre phase2 start: message_id={message_id}")
-        while True:
-            try:
-                item = await asyncio.wait_for(q.get(), timeout=_PHASE2_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"_buffer_until_pre phase2 TIMEOUT ({_PHASE2_TIMEOUT}s): "
-                    f"message_id={message_id}, drain_task.done={drain_task.done()}"
-                )
-                return
-            if isinstance(item, Exception):
-                raise item
-            if item is _STREAM_END:
-                logger.debug(f"_buffer_until_pre phase2 STREAM_END: message_id={message_id}")
-                return
-            yield item
-
-    finally:
-        if not drain_task.done():
-            logger.warning(f"_buffer_until_pre finally: cancelling drain_task, message_id={message_id}")
-            drain_task.cancel()
 
 
 async def _build_and_stream(
@@ -347,13 +198,10 @@ async def _build_and_stream(
     # 统一 voice（内心独白 + 风格示例，一次生成确保一致）
     prompt_vars["voice_content"] = bot_ctx.voice_content
 
-    full_content = ""
-    has_text_in_current_turn = False
+    state = StreamState()
 
     try:
         t_agent_start = time.monotonic()
-        agent_token_count = 0
-        tool_call_count = 0
         async for token in agent.stream(
             messages,
             context=AgentContext(
@@ -363,35 +211,23 @@ async def _build_and_stream(
             ),
             prompt_vars=prompt_vars,
         ):
-            if isinstance(token, AIMessageChunk):
-                finish_reason = token.response_metadata.get("finish_reason")
+            result = handle_token(token, state)
 
-                if finish_reason == "content_filter":
-                    yield bot_ctx.get_error_message("content_filter")
-                    return
-                if finish_reason == "length":
-                    yield "(后续内容被截断)"
-                    return
+            if is_content_filter(result):
+                yield bot_ctx.get_error_message("content_filter")
+                return
+            if is_length_truncated(result):
+                yield "(后续内容被截断)"
+                return
 
-                if token.text:
-                    has_text_in_current_turn = True
-                    agent_token_count += 1
-                    full_content += token.text
-                    yield token.text
-
-                # text → tool call 边界，注入分隔符
-                if token.tool_call_chunks and has_text_in_current_turn:
-                    yield SPLIT_MARKER
-                    has_text_in_current_turn = False
-
-            elif isinstance(token, ToolMessage):
-                tool_call_count += 1
-                has_text_in_current_turn = False
+            for text in result:
+                if text is not None:
+                    yield text
 
         agent_dur = time.monotonic() - t_agent_start
         CHAT_PIPELINE_DURATION.labels(stage="agent_stream").observe(agent_dur)
-        CHAT_TOKENS.labels(type="text").inc(agent_token_count)
-        CHAT_TOKENS.labels(type="tool_call").inc(tool_call_count)
+        CHAT_TOKENS.labels(type="text").inc(state.agent_token_count)
+        CHAT_TOKENS.labels(type="tool_call").inc(state.tool_call_count)
         logger.info(
             "agent_stream_done",
             extra={
@@ -399,66 +235,22 @@ async def _build_and_stream(
                 "session_id": session_id,
                 "context_ms": round((t_agent_start - t_build_start) * 1000),
                 "agent_ms": round(agent_dur * 1000),
-                "tokens": agent_token_count,
-                "tools": tool_call_count,
+                "tokens": state.agent_token_count,
+                "tools": state.tool_call_count,
                 "model": model_id,
             },
         )
-        # Fire-and-forget: publish to post safety check queue
-        if full_content and session_id:
-            asyncio.create_task(
-                _publish_post_check(session_id, full_content, chat_id, message_id)
-            )
-        # Fire-and-forget: trigger identity drift
-        if full_content:
-            try:
-                from app.services.identity_drift import IdentityDriftManager
 
-                asyncio.create_task(
-                    IdentityDriftManager.get_instance().on_event(chat_id, bot_ctx.persona_id)
-                )
-            except Exception as e:
-                logger.warning(f"Identity drift trigger failed: {e}")
-        # Fire-and-forget: trigger afterthought (conversation fragment)
-        if full_content:
-            try:
-                from app.services.afterthought import AfterthoughtManager
-
-                asyncio.create_task(
-                    AfterthoughtManager.get_instance().on_event(chat_id, bot_ctx.persona_id)
-                )
-            except Exception as e:
-                logger.warning(f"Afterthought trigger failed: {e}")
+        schedule_post_actions(
+            full_content=state.full_content,
+            session_id=session_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            persona_id=bot_ctx.persona_id,
+        )
 
     except Exception as e:
         import traceback
 
         logger.error(f"stream_chat error: {str(e)}\n{traceback.format_exc()}")
         yield bot_ctx.get_error_message("error")
-
-
-async def _publish_post_check(
-    session_id: str,
-    response_text: str,
-    chat_id: str,
-    trigger_message_id: str,
-) -> None:
-    """发布 post safety check 消息到 RabbitMQ"""
-    try:
-        from app.clients.rabbitmq import SAFETY_CHECK, RabbitMQClient
-        from app.utils.middlewares.trace import get_lane
-
-        client = RabbitMQClient.get_instance()
-        await client.publish(
-            SAFETY_CHECK,
-            {
-                "session_id": session_id,
-                "response_text": response_text,
-                "chat_id": chat_id,
-                "trigger_message_id": trigger_message_id,
-                "lane": get_lane(),
-            },
-        )
-        logger.info(f"Published post safety check: session_id={session_id}")
-    except Exception as e:
-        logger.error(f"Failed to publish post safety check: {e}")
