@@ -16,9 +16,9 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 from sqlalchemy import or_, select
 
 from app.agent.context import AgentContext
+from app.chat.content_parser import parse_content
 from app.data.models import ConversationMessage, LarkGroupMember, LarkUser
 from app.data.session import get_session
-from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 

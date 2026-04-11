@@ -12,8 +12,8 @@ from typing import Any
 
 from langfuse import Langfuse
 
+from app.api.middleware import get_lane
 from app.infra.config import settings
-from app.utils.middlewares.trace import get_lane
 
 logger = logging.getLogger(__name__)
 

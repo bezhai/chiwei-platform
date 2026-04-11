@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from aio_pika.abc import AbstractIncomingMessage
 
 from app.agent.embedding import InstructionBuilder, embed_hybrid
+from app.chat.content_parser import parse_content
 from app.data.models import ConversationMessage
 from app.data.queries import (
     find_group_download_permission,
@@ -31,7 +32,6 @@ from app.infra.image import image_client
 from app.infra.qdrant import qdrant
 from app.infra.rabbitmq import VECTORIZE, _current_lane, _lane_queue, mq
 from app.infra.redis import get_redis
-from app.services.content_parser import parse_content
 from app.workers.common import cron_error_handler, mq_error_handler
 
 logger = logging.getLogger(__name__)

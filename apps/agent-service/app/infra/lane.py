@@ -6,7 +6,7 @@ import os
 
 from inner_shared.lane_router import LaneRouter
 
-from app.utils.middlewares.trace import get_lane
+from app.api.middleware import get_lane
 
 lane_router = LaneRouter(
     registry_url=os.getenv("REGISTRY_URL", "http://lite-registry:8080"),

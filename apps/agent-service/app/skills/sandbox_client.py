@@ -7,9 +7,9 @@ import logging
 
 import httpx
 
-from app.clients.lane_router_instance import lane_router
-from app.config.config import settings
-from app.utils.middlewares.trace import get_trace_id
+from app.api.middleware import get_trace_id
+from app.infra.config import settings
+from app.infra.lane import lane_router
 
 logger = logging.getLogger(__name__)
 

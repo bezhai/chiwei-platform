@@ -16,6 +16,13 @@ from uuid import uuid4
 
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.api.middleware import (
+    CHAT_FIRST_TOKEN,
+    CHAT_PIPELINE_DURATION,
+    CHAT_QUEUE_WAIT,
+    CHAT_TOKENS,
+    header_vars,
+)
 from app.chat.pipeline import stream_chat
 from app.chat.router import MessageRouter
 from app.data.queries import resolve_bot_name_for_persona, set_agent_response_bot
@@ -27,13 +34,6 @@ from app.infra.rabbitmq import (
     _lane_queue,
     mq,
 )
-from app.middleware.chat_metrics import (
-    CHAT_FIRST_TOKEN,
-    CHAT_PIPELINE_DURATION,
-    CHAT_QUEUE_WAIT,
-    CHAT_TOKENS,
-)
-from app.utils.middlewares.trace import header_vars
 from app.workers.common import mq_error_handler
 
 logger = logging.getLogger(__name__)

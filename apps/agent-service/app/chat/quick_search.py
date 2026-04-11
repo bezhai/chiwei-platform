@@ -6,8 +6,8 @@ from datetime import datetime
 
 from sqlalchemy import select, text
 
-from app.orm.base import AsyncSessionLocal
-from app.orm.models import ConversationMessage, LarkGroupChatInfo, LarkUser
+from app.data.models import ConversationMessage, LarkGroupChatInfo, LarkUser
+from app.data.session import async_session
 
 
 class QuickSearchResult:
@@ -62,7 +62,7 @@ async def quick_search(
         List[QuickSearchResult]: 搜索结果列表，按时间排序
     """
 
-    async with AsyncSessionLocal() as session:
+    async with async_session() as session:
         # 1. 获取当前消息信息
         current_msg = await session.scalar(
             select(ConversationMessage).where(

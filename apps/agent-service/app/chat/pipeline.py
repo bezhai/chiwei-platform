@@ -28,6 +28,8 @@ from app.agent.context import (
 )
 from app.agent.core import Agent
 from app.agent.tools import ALL_TOOLS
+from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS, header_vars
+from app.chat.content_parser import parse_content
 from app.chat.context import (
     build_chat_context,
     is_proactive_var,
@@ -50,9 +52,6 @@ from app.data.queries import (
 )
 from app.data.session import get_session
 from app.memory.context import build_inner_context
-from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
-from app.services.content_parser import parse_content
-from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)
 

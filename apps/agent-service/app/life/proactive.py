@@ -144,7 +144,7 @@ async def get_recent_proactive_records(chat_id: str) -> list[dict]:
 
     Returns list of ``{"time": "HH:MM", "summary": "..."}`` dicts.
     """
-    from app.services.content_parser import parse_content
+    from app.chat.content_parser import parse_content
 
     today_start = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_ms = int(today_start.timestamp() * 1000)

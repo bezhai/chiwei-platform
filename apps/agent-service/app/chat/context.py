@@ -24,13 +24,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import select
 
 from app.agent.prompts import get_prompt
+from app.chat.content_parser import parse_content, update_tos_files
+from app.chat.quick_search import QuickSearchResult, quick_search
 from app.data.models import ConversationMessage
 from app.data.queries import find_group_download_permission
 from app.data.session import async_session, get_session
 from app.infra.image import ImageRegistry, image_client
 from app.infra.redis import get_redis
-from app.services.content_parser import parse_content, update_tos_files
-from app.services.quick_search import QuickSearchResult, quick_search
 
 logger = logging.getLogger(__name__)
 

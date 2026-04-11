@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime, timezone
 
+from app.chat.content_parser import parse_content
 from app.data.queries import find_username
 from app.data.session import get_session
-from app.services.content_parser import parse_content
 
 
 async def _default_resolve_name(user_id: str) -> str | None:

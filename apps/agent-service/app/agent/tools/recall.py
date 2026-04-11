@@ -22,9 +22,9 @@ SUMMARY_LIMIT = 300
 
 async def _get_persona_id() -> str:
     """Resolve the current persona_id from request context."""
+    from app.api.middleware import header_vars
     from app.data.queries import resolve_persona_id
     from app.data.session import get_session
-    from app.utils.middlewares.trace import header_vars
 
     bot_name = header_vars["app_name"].get() or "chiwei"
     async with get_session() as s:

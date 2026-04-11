@@ -12,13 +12,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from app.chat.content_parser import parse_content
 from app.data.queries import find_messages_in_range, resolve_bot_name_for_persona
 from app.data.session import get_session
 from app.infra.config import settings
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.memory.debounce import DebouncedPipeline
-from app.services.content_parser import parse_content
 
 logger = logging.getLogger(__name__)
 

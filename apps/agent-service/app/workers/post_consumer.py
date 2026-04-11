@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.api.middleware import header_vars
 from app.chat.safety import run_post_check
 from app.data.queries import set_safety_status
 from app.data.session import get_session
@@ -22,7 +23,6 @@ from app.infra.rabbitmq import (
     _lane_queue,
     mq,
 )
-from app.utils.middlewares.trace import header_vars
 from app.workers.common import mq_error_handler
 
 logger = logging.getLogger(__name__)

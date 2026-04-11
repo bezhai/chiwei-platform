@@ -108,7 +108,7 @@ class TestCurrentLane:
                 ):
                     # Mock get_lane to return None (no trace context)
                     with patch(
-                        "app.utils.middlewares.trace.get_lane",
+                        "app.api.middleware.get_lane",
                         return_value=None,
                     ):
                         result = _current_lane()
@@ -116,7 +116,7 @@ class TestCurrentLane:
 
     def test_env_lane_dev(self):
         with patch(
-            "app.utils.middlewares.trace.get_lane",
+            "app.api.middleware.get_lane",
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": "dev"}):
@@ -126,7 +126,7 @@ class TestCurrentLane:
     def test_env_lane_prod_returns_none(self):
         """'prod' is equivalent to no lane."""
         with patch(
-            "app.utils.middlewares.trace.get_lane",
+            "app.api.middleware.get_lane",
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": "prod"}):
@@ -135,7 +135,7 @@ class TestCurrentLane:
 
     def test_trace_context_takes_precedence(self):
         with patch(
-            "app.utils.middlewares.trace.get_lane",
+            "app.api.middleware.get_lane",
             return_value="feat-v2",
         ):
             with patch.dict("os.environ", {"LANE": "dev"}):
@@ -150,7 +150,7 @@ class TestCurrentLane:
         ):
             # Simulate import failure by making get_lane raise
             with patch(
-                "app.utils.middlewares.trace.get_lane",
+                "app.api.middleware.get_lane",
                 side_effect=ImportError("no trace"),
             ):
                 with patch.dict("os.environ", {"LANE": "staging"}):
@@ -159,7 +159,7 @@ class TestCurrentLane:
 
     def test_empty_lane_env_returns_none(self):
         with patch(
-            "app.utils.middlewares.trace.get_lane",
+            "app.api.middleware.get_lane",
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": ""}):

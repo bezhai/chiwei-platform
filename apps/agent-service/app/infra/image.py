@@ -14,8 +14,8 @@ from typing import Any
 import httpx
 from redis.asyncio import Redis
 
+from app.api.middleware import get_app_name, get_trace_id
 from app.infra.config import settings
-from app.utils.middlewares.trace import get_app_name, get_trace_id
 
 try:
     from inner_shared.lane_router import (

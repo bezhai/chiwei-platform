@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.api.middleware import get_lane
 from app.data.queries import find_persona
 from app.data.session import get_session
 from app.infra.rabbitmq import SAFETY_CHECK, mq
-from app.utils.middlewares.trace import get_lane
 
 logger = logging.getLogger(__name__)
 

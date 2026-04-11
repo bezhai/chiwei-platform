@@ -66,7 +66,7 @@ MessageHandler = Callable[[AbstractIncomingMessage], Coroutine[Any, Any, None]]
 def _current_lane() -> str | None:
     """Return current lane (None means prod)."""
     try:
-        from app.utils.middlewares.trace import get_lane
+        from app.api.middleware import get_lane
 
         lane = get_lane()
     except Exception:
