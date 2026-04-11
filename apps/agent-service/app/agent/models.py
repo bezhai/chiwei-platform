@@ -192,6 +192,27 @@ class ModelBuildError(Exception):
 # ---------------------------------------------------------------------------
 
 
+async def resolve_model_info(
+    model_id: str,
+    *,
+    required_fields: tuple[str, ...] = ("api_key", "model_name"),
+) -> dict[str, Any]:
+    """Resolve model_id to validated provider info.
+
+    Shared by build_chat_model and embedding/image_gen modules.
+    Raises ModelBuildError on missing / inactive / incomplete config.
+    """
+    info = await _get_model_and_provider_info(model_id)
+    if info is None:
+        raise ModelBuildError(model_id, "model info not found")
+    if not info.get("is_active", True):
+        raise ModelBuildError(model_id, "model is disabled")
+    missing = [f for f in required_fields if not info.get(f)]
+    if missing:
+        raise ModelBuildError(model_id, f"missing fields: {', '.join(missing)}")
+    return info
+
+
 async def build_chat_model(
     model_id: str, *, max_retries: int = 3, **kwargs: Any
 ) -> BaseChatModel:
@@ -207,17 +228,9 @@ async def build_chat_model(
     Raises:
         ModelBuildError: when model info is missing / inactive / incomplete.
     """
-    info = await _get_model_and_provider_info(model_id)
-    if info is None:
-        raise ModelBuildError(model_id, "model info not found")
-    if not info.get("is_active", True):
-        raise ModelBuildError(model_id, "model is disabled")
-
-    required = ("api_key", "base_url", "model_name")
-    missing = [f for f in required if not info.get(f)]
-    if missing:
-        raise ModelBuildError(model_id, f"missing fields: {', '.join(missing)}")
-
+    info = await resolve_model_info(
+        model_id, required_fields=("api_key", "base_url", "model_name")
+    )
     client_type = info.get("client_type", "")
 
     if client_type == "azure-http":

@@ -17,8 +17,8 @@ from app.agent.embedding import (
     SparseVector,
     embed_dense,
     embed_hybrid,
-    generate_image,
 )
+from app.agent.image_gen import generate_image
 from app.agent.models import build_chat_model
 from app.agent.prompts import compile_prompt, get_prompt
 from app.agent.tools import ALL_TOOLS, BASE_TOOLS

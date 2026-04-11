@@ -107,7 +107,7 @@ async def generate_image(
         model_name = context.get_feature("image_model")
         logger.info("Feature flag overrides image model to: %s", model_name)
 
-    from app.agent.embedding import generate_image as _gen_image
+    from app.agent.image_gen import generate_image as _gen_image
 
     base64_images = await _gen_image(
         model_name,

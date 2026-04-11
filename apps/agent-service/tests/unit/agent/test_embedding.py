@@ -1,14 +1,11 @@
-"""test_embedding.py -- Embedding and image generation tests.
+"""test_embedding.py -- Embedding tests.
 
 Covers:
   - SparseVector / HybridEmbedding data types
   - Modality constants
   - InstructionBuilder: detect_input_modality, combine, corpus/query/cluster
-  - _resolve_model: happy path, missing, inactive, incomplete
-  - _parse_gemini_size: pixel sizes, shorthand, fallback
   - embed_dense: text-only, multimodal, empty input
   - embed_hybrid: text-only (single request), multimodal (two requests), image-only
-  - generate_image dispatch: ark, openai, google
 """
 
 from __future__ import annotations
@@ -24,10 +21,8 @@ from app.agent.embedding import (
     InstructionBuilder,
     Modality,
     SparseVector,
-    _parse_gemini_size,
     embed_dense,
     embed_hybrid,
-    generate_image,
 )
 
 pytestmark = pytest.mark.unit
@@ -80,6 +75,13 @@ class TestHybridEmbedding:
         )
         assert he.dense == [0.1, 0.2]
         assert he.sparse.indices == [0]
+
+    def test_frozen(self):
+        he = HybridEmbedding(
+            dense=[0.1], sparse=SparseVector(indices=[], values=[])
+        )
+        with pytest.raises(AttributeError):
+            he.dense = [0.9]  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -136,77 +138,9 @@ class TestInstructionBuilder:
         assert "Target_modality: text" in result
         assert result.endswith("Query:")
 
-
-# ---------------------------------------------------------------------------
-# _resolve_model
-# ---------------------------------------------------------------------------
-
-
-class TestResolveModel:
-    async def test_happy_path(self):
-        info = _fake_info()
-        with patch.object(
-            mod,
-            "_resolve_model",
-            new_callable=AsyncMock,
-            return_value=info,
-        ):
-            result = await mod._resolve_model("embedding-model")
-            assert result["model_name"] == "doubao-embedding-vision"
-
-    async def test_missing_model(self):
-        with patch(
-            "app.agent.models._get_model_and_provider_info",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            with pytest.raises(ValueError, match="not found"):
-                await mod._resolve_model("nonexistent")
-
-    async def test_inactive_model(self):
-        with patch(
-            "app.agent.models._get_model_and_provider_info",
-            new_callable=AsyncMock,
-            return_value=_fake_info(is_active=False),
-        ):
-            with pytest.raises(ValueError, match="disabled"):
-                await mod._resolve_model("disabled-model")
-
-    async def test_missing_api_key(self):
-        with patch(
-            "app.agent.models._get_model_and_provider_info",
-            new_callable=AsyncMock,
-            return_value=_fake_info(api_key=""),
-        ):
-            with pytest.raises(ValueError, match="missing config"):
-                await mod._resolve_model("bad-model")
-
-
-# ---------------------------------------------------------------------------
-# _parse_gemini_size
-# ---------------------------------------------------------------------------
-
-
-class TestParseGeminiSize:
-    def test_pixel_size_1k(self):
-        assert _parse_gemini_size("512x512") == ("1:1", "1K")
-
-    def test_pixel_size_2k(self):
-        assert _parse_gemini_size("2048x1024") == ("2:1", "2K")
-
-    def test_pixel_size_4k(self):
-        assert _parse_gemini_size("4096x2048") == ("2:1", "4K")
-
-    def test_shorthand_2k(self):
-        assert _parse_gemini_size("2K") == ("1:1", "2K")
-
-    def test_unknown_fallback(self):
-        assert _parse_gemini_size("foo") == ("1:1", "1K")
-
-    def test_non_square(self):
-        ar, sz = _parse_gemini_size("1920x1080")
-        assert ar == "16:9"
-        assert sz == "2K"
+    def test_for_cluster_is_for_query(self):
+        """for_cluster should produce the same output as for_query."""
+        assert InstructionBuilder.for_cluster("text", "X") == InstructionBuilder.for_query("text", "X")
 
 
 # ---------------------------------------------------------------------------
@@ -222,13 +156,14 @@ class TestEmbedDense:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
         ):
@@ -251,13 +186,14 @@ class TestEmbedDense:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
         ):
@@ -284,13 +220,14 @@ class TestEmbedDense:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
             pytest.raises(RuntimeError, match="API error"),
@@ -320,13 +257,14 @@ class TestEmbedHybrid:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
         ):
@@ -356,13 +294,14 @@ class TestEmbedHybrid:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
         ):
@@ -385,13 +324,14 @@ class TestEmbedHybrid:
         mock_client.close = AsyncMock()
 
         with (
-            patch.object(
-                mod, "_resolve_model", new_callable=AsyncMock, return_value=_fake_info()
+            patch(
+                "app.agent.embedding.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(),
             ),
             patch.object(
                 mod,
                 "_create_ark_client",
-                new_callable=AsyncMock,
                 return_value=mock_client,
             ),
         ):
@@ -409,90 +349,3 @@ class TestEmbedHybrid:
     async def test_empty_input_raises(self):
         with pytest.raises(ValueError, match="at least"):
             await embed_hybrid("embedding-model")
-
-
-# ---------------------------------------------------------------------------
-# generate_image dispatch
-# ---------------------------------------------------------------------------
-
-
-class TestGenerateImage:
-    async def test_dispatch_ark(self):
-        with (
-            patch.object(
-                mod,
-                "_resolve_model",
-                new_callable=AsyncMock,
-                return_value=_fake_info(client_type="ark"),
-            ),
-            patch.object(
-                mod,
-                "_generate_image_ark",
-                new_callable=AsyncMock,
-                return_value=["data:image/jpeg;base64,abc"],
-            ) as mock_ark,
-        ):
-            result = await generate_image("img-model", prompt="a cat", size="1024x1024")
-
-        assert result == ["data:image/jpeg;base64,abc"]
-        mock_ark.assert_called_once()
-
-    async def test_dispatch_openai(self):
-        with (
-            patch.object(
-                mod,
-                "_resolve_model",
-                new_callable=AsyncMock,
-                return_value=_fake_info(client_type="openai"),
-            ),
-            patch.object(
-                mod,
-                "_generate_image_openai",
-                new_callable=AsyncMock,
-                return_value=["data:image/jpeg;base64,def"],
-            ) as mock_openai,
-        ):
-            result = await generate_image("img-model", prompt="a dog", size="2K")
-
-        assert result == ["data:image/jpeg;base64,def"]
-        mock_openai.assert_called_once()
-
-    async def test_dispatch_google(self):
-        with (
-            patch.object(
-                mod,
-                "_resolve_model",
-                new_callable=AsyncMock,
-                return_value=_fake_info(client_type="google"),
-            ),
-            patch.object(
-                mod,
-                "_generate_image_gemini",
-                new_callable=AsyncMock,
-                return_value=["data:image/png;base64,ghi"],
-            ) as mock_gemini,
-        ):
-            result = await generate_image("img-model", prompt="a bird", size="4K")
-
-        assert result == ["data:image/png;base64,ghi"]
-        mock_gemini.assert_called_once()
-
-    async def test_default_dispatches_to_openai(self):
-        """Unknown client_type falls back to OpenAI-compatible."""
-        with (
-            patch.object(
-                mod,
-                "_resolve_model",
-                new_callable=AsyncMock,
-                return_value=_fake_info(client_type="some-other"),
-            ),
-            patch.object(
-                mod,
-                "_generate_image_openai",
-                new_callable=AsyncMock,
-                return_value=[],
-            ) as mock_openai,
-        ):
-            await generate_image("img-model", prompt="test", size="1K")
-
-        mock_openai.assert_called_once()
