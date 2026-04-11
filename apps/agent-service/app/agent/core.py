@@ -143,6 +143,11 @@ AGENTS: dict[str, AgentConfig] = {
     "glimpse-observe": AgentConfig(
         "glimpse_observe", "offline-model", "glimpse-observe"
     ),
+    # Guard agents — prompt compiled externally, passed as messages
+    "guard-injection": AgentConfig("", "guard-model", "pre-injection-check"),
+    "guard-politics": AgentConfig("", "guard-model", "pre-politics-check"),
+    "guard-nsfw": AgentConfig("", "guard-model", "pre-nsfw-check"),
+    "guard-output": AgentConfig("", "guard-model", "post-safety-check"),
 }
 
 

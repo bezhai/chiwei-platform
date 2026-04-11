@@ -189,6 +189,18 @@ async def find_group_name(session: AsyncSession, chat_id: str) -> str | None:
     return result.scalar_one_or_none()
 
 
+async def find_group_download_permission(
+    session: AsyncSession, chat_id: str
+) -> str | None:
+    """Fetch download_has_permission_setting for a group chat, or None."""
+    result = await session.execute(
+        select(LarkGroupChatInfo.download_has_permission_setting).where(
+            LarkGroupChatInfo.chat_id == chat_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def find_message_by_id(
     session: AsyncSession, message_id: str
 ) -> ConversationMessage | None:

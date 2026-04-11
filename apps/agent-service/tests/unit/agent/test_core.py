@@ -82,8 +82,8 @@ def mock_deps(mock_model, mock_prompt):
 class TestRegistry:
     """AGENTS registry and _resolve_config."""
 
-    def test_all_15_agents_registered(self):
-        assert len(AGENTS) == 15
+    def test_all_agents_registered(self):
+        assert len(AGENTS) == 19
 
     def test_resolve_known_agent(self):
         cfg = _resolve_config("main")
