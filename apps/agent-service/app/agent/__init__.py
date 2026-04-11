@@ -12,16 +12,35 @@ Public surface:
 """
 
 from app.agent.core import AGENTS, Agent, AgentConfig
+from app.agent.embedding import (
+    HybridEmbedding,
+    InstructionBuilder,
+    Modality,
+    SparseVector,
+    embed_dense,
+    embed_hybrid,
+    generate_image,
+)
 from app.agent.models import build_chat_model
 from app.agent.prompts import compile_prompt, get_prompt
+from app.agent.tools import ALL_TOOLS, BASE_TOOLS
 from app.agent.tracing import make_config
 
 __all__ = [
     "AGENTS",
     "Agent",
     "AgentConfig",
+    "ALL_TOOLS",
+    "BASE_TOOLS",
+    "HybridEmbedding",
+    "InstructionBuilder",
+    "Modality",
+    "SparseVector",
     "build_chat_model",
     "compile_prompt",
+    "embed_dense",
+    "embed_hybrid",
+    "generate_image",
     "get_prompt",
     "make_config",
 ]
