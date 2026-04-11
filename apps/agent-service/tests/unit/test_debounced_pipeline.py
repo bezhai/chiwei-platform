@@ -9,7 +9,6 @@ import pytest
 
 from app.services.debounced_pipeline import DebouncedPipeline
 
-
 # ---------------------------------------------------------------------------
 # Concrete test implementation
 # ---------------------------------------------------------------------------

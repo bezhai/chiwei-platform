@@ -1,9 +1,10 @@
 """Identity 漂移状态机测试"""
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+
 from app.services.persona_loader import PersonaContext
 
 _MOCK_PERSONA = PersonaContext(

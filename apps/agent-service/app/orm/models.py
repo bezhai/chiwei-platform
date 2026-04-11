@@ -2,12 +2,12 @@ from datetime import datetime
 from uuid import UUID as PyUUID
 
 from sqlalchemy import (
+    JSON,
     UUID,
     BigInteger,
     Boolean,
     DateTime,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,

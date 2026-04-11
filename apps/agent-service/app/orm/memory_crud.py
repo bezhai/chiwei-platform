@@ -5,8 +5,8 @@
 
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import text as sql_text
 from sqlalchemy import func
+from sqlalchemy import text as sql_text
 from sqlalchemy.future import select
 
 from .base import AsyncSessionLocal

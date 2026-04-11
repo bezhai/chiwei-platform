@@ -57,7 +57,7 @@ class TestSubAgentRun:
                 "research",
                 AgentConfig(
                     prompt_id="research_agent",
-                    model_id="main-chat-model",
+                    model_id="research-model",
                     trace_name="research",
                 ),
             )
@@ -82,7 +82,7 @@ class TestSubAgentRun:
         MockChatAgent.assert_called_once_with(
             prompt_id="research_agent",
             tools=agent._resolve_tools(),
-            model_id="main-chat-model",
+            model_id="research-model",
             trace_name="research",
         )
         mock_chat_agent.run.assert_called_once()

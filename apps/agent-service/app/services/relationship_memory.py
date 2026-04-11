@@ -12,12 +12,12 @@ from langchain_core.messages import HumanMessage
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_username
-from app.services.persona_loader import load_persona
-from app.services.timeline_formatter import format_timeline
 from app.orm.memory_crud import (
     get_relationship_memories_for_users_v2,
     save_relationship_memory_v2,
 )
+from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 
 logger = logging.getLogger(__name__)
 

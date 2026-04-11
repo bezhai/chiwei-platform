@@ -28,7 +28,6 @@ class _ReasoningChatOpenAI(ChatOpenAI):
 
     def _create_chat_result(self, response, generation_info=None):
         """从原始响应中提取 reasoning_content 存入 additional_kwargs。"""
-        import openai
 
         result = super()._create_chat_result(response, generation_info)
 
@@ -36,7 +35,7 @@ class _ReasoningChatOpenAI(ChatOpenAI):
             response if isinstance(response, dict) else response.model_dump()
         )
         choices = response_dict.get("choices") or []
-        for choice, gen in zip(choices, result.generations):
+        for choice, gen in zip(choices, result.generations, strict=False):
             rc = choice.get("message", {}).get("reasoning_content")
             if rc is not None and isinstance(gen.message, AIMessage):
                 gen.message.additional_kwargs["reasoning_content"] = rc
@@ -67,7 +66,7 @@ class _ReasoningChatOpenAI(ChatOpenAI):
             return payload
 
         # 1) assistant 消息：注入 reasoning_content
-        for lc_msg, api_msg in zip(messages, payload["messages"]):
+        for lc_msg, api_msg in zip(messages, payload["messages"], strict=False):
             if (
                 isinstance(lc_msg, AIMessage)
                 and api_msg.get("role") == "assistant"

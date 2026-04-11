@@ -6,7 +6,7 @@ from sqlalchemy.future import select
 from app.orm.base import AsyncSessionLocal
 
 
-async def get_bot_persona(persona_id: str) -> "BotPersona | None":
+async def get_bot_persona(persona_id: str) -> "BotPersona | None":  # noqa: F821
     """获取 bot 人设配置"""
     from app.orm.models import BotPersona
 

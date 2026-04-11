@@ -10,6 +10,7 @@ import httpx
 from langchain.tools import tool
 from pydantic import BaseModel
 
+from app.agents.tools.decorators import tool_error_handler
 from app.agents.tools.search.models import (
     Career,
     Character,
@@ -39,7 +40,6 @@ from app.agents.tools.search.models import (
     SubjectRelation,
     SubjectSearchResult,
 )
-from app.agents.tools.decorators import tool_error_handler
 from app.config import settings
 from app.utils.decorators import redis_cache
 

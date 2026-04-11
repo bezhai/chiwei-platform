@@ -5,9 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app.skills.loader import PreprocessDirective, SkillDefinition, parse_skill_file
+from app.skills.loader import SkillDefinition, parse_skill_file
 from app.skills.registry import SkillRegistry
-
 
 # ─── Fixtures ───────────────────────────────────────────────
 

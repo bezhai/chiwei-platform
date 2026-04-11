@@ -168,6 +168,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
     async def _run():
         from datetime import datetime, timedelta
+
         from app.orm.crud import get_bot_persona, get_chat_messages_in_range
         from app.services.relationship_memory import extract_relationship_updates
 
@@ -213,7 +214,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                 if not user_ids:
                     continue
 
-                for persona_id, persona_name in personas.items():
+                for persona_id, _persona_name in personas.items():
                     try:
                         await extract_relationship_updates(
                             persona_id=persona_id,

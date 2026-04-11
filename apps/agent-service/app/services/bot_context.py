@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.orm.crud import get_bot_persona
-from app.orm.crud.persona import resolve_bot_name_for_persona as _crud_resolve_bot, resolve_persona_id as _crud_resolve_pid
-
+from app.orm.crud.persona import resolve_bot_name_for_persona as _crud_resolve_bot
+from app.orm.crud.persona import resolve_persona_id as _crud_resolve_pid
 
 if TYPE_CHECKING:
     from app.orm.models import BotPersona
@@ -52,7 +52,7 @@ class BotContext:
         self.bot_name = bot_name
         self.chat_type = chat_type
         self._persona_id: str = ""
-        self._persona: "BotPersona | None" = None
+        self._persona: BotPersona | None = None
         self._voice_content: str = ""
 
     @property

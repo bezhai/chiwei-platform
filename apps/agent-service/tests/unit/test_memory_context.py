@@ -1,8 +1,8 @@
 """测试统一聊天注入上下文 v4（Life Engine 版）"""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import pytest
 
 # ── build_inner_context tests ──
 

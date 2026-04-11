@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.agents.graphs.pre.state import BlockReason, SafetyResult
+from app.agents.graphs.pre.state import BlockReason
 
 pytestmark = pytest.mark.unit
 

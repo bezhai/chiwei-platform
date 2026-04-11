@@ -25,13 +25,15 @@ from app.clients.rabbitmq import (
 from app.clients.redis import AsyncRedisClient
 from app.orm.crud.message import (
     get_message_by_id,
-    scan_pending_messages as _crud_scan_pending,
     update_vector_status,
 )
+from app.orm.crud.message import (
+    scan_pending_messages as _crud_scan_pending,
+)
 from app.orm.models import ConversationMessage
+from app.services.content_parser import parse_content
 from app.services.download_permission import check_group_allows_download
 from app.services.qdrant import qdrant_service
-from app.services.content_parser import parse_content
 from app.workers.error_handling import cron_error_handler, mq_error_handler
 
 logger = logging.getLogger(__name__)

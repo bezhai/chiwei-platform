@@ -60,7 +60,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
 
     keywords = [w for w in what_to_look_for.split() if len(w) >= 2]
     if keywords:
-        filtered = [l for l in lines if any(k in l for k in keywords)]
+        filtered = [line for line in lines if any(k in line for k in keywords)]
         if filtered:
             return "找到了一些相关的记录：\n" + "\n".join(filtered[-20:])
 

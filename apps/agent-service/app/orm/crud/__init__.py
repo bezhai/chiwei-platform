@@ -9,19 +9,11 @@ continues to work everywhere.
 """
 
 # ── persona ──
-from app.orm.crud.persona import (  # noqa: F401
-    get_all_persona_ids,
-    get_bot_persona,
-    get_gray_config,
-    resolve_bot_name_for_persona,
-    resolve_mentioned_personas,
-    resolve_persona_id,
-)
-
-# ── model_provider ──
-from app.orm.crud.model_provider import (  # noqa: F401
-    get_model_and_provider_info,
-    parse_model_id,
+# ── life_engine ──
+from app.orm.crud.life_engine import (  # noqa: F401
+    get_today_activity_states,
+    load_latest_state,
+    save_state,
 )
 
 # ── message ──
@@ -37,6 +29,20 @@ from app.orm.crud.message import (  # noqa: F401
     update_vector_status,
 )
 
+# ── model_provider ──
+from app.orm.crud.model_provider import (  # noqa: F401
+    get_model_and_provider_info,
+    parse_model_id,
+)
+from app.orm.crud.persona import (  # noqa: F401
+    get_all_persona_ids,
+    get_bot_persona,
+    get_gray_config,
+    resolve_bot_name_for_persona,
+    resolve_mentioned_personas,
+    resolve_persona_id,
+)
+
 # ── schedule ──
 from app.orm.crud.schedule import (  # noqa: F401
     delete_schedule,
@@ -46,11 +52,4 @@ from app.orm.crud.schedule import (  # noqa: F401
     get_plan_for_period,
     list_schedules,
     upsert_schedule,
-)
-
-# ── life_engine ──
-from app.orm.crud.life_engine import (  # noqa: F401
-    get_today_activity_states,
-    load_latest_state,
-    save_state,
 )

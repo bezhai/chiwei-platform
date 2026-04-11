@@ -14,8 +14,8 @@ from app.agents.infra.embedding import InstructionBuilder, Modality
 from app.agents.tools.decorators import tool_error_handler
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import ConversationMessage, LarkUser
-from app.services.qdrant import qdrant_service
 from app.services.content_parser import parse_content
+from app.services.qdrant import qdrant_service
 
 logger = logging.getLogger(__name__)
 

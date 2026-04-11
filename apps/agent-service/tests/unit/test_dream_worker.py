@@ -8,9 +8,10 @@
 4. cron_generate_dreams 遍历所有 persona
 """
 
-import pytest
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 @pytest.mark.asyncio
@@ -70,7 +71,7 @@ async def test_generate_weekly_dream_from_dailies():
     with (
         patch("app.workers.dream_worker.get_recent_fragments_by_grain", new_callable=AsyncMock, return_value=daily_frags),
         patch("app.workers.dream_worker.get_bot_persona", new_callable=AsyncMock, return_value=persona_obj),
-        patch("app.workers.dream_worker.LLMService.run", new_callable=AsyncMock, return_value=MagicMock(content="这一周过得很充实")) as mock_llm_run,
+        patch("app.workers.dream_worker.LLMService.run", new_callable=AsyncMock, return_value=MagicMock(content="这一周过得很充实")),
         patch("app.workers.dream_worker.create_fragment", new_callable=AsyncMock, return_value=saved_fragment) as mock_create,
         patch("app.workers.dream_worker.settings") as mock_settings,
     ):

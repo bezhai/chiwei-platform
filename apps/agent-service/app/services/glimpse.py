@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
 from app.orm.crud import get_group_name as _crud_get_group_name
-from app.services.timeline_formatter import format_timeline
 from app.orm.memory_crud import (
     create_fragment,
     get_last_bot_reply_time,
@@ -18,10 +17,11 @@ from app.orm.memory_crud import (
 )
 from app.orm.memory_models import ExperienceFragment
 from app.services.persona_loader import load_persona
+from app.services.timeline_formatter import format_timeline
 from app.workers.proactive_scanner import (
     TARGET_CHAT_ID,
-    get_unseen_messages,
     _get_recent_proactive_records,
+    get_unseen_messages,
 )
 
 logger = logging.getLogger(__name__)

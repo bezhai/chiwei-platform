@@ -1,13 +1,13 @@
 """Pre Graph 状态定义"""
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated
 
 from typing_extensions import TypedDict
 
 
-class BlockReason(str, Enum):
+class BlockReason(StrEnum):
     """拦截原因"""
 
     BANNED_WORD = "banned_word"
@@ -32,7 +32,7 @@ def merge_safety_results(
     return existing + new
 
 
-class Complexity(str, Enum):
+class Complexity(StrEnum):
     """任务复杂度等级"""
 
     SIMPLE = "simple"

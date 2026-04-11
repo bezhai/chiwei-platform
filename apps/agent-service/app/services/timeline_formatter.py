@@ -5,7 +5,7 @@
 """
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from app.orm.crud import get_username
 from app.services.content_parser import parse_content
@@ -34,7 +34,7 @@ async def format_timeline(
         username_resolver: 自定义用户名解析函数，签名 async (user_id) -> str | None
     """
     if tz is None:
-        tz = timezone.utc
+        tz = UTC
 
     if max_messages is not None:
         messages = messages[-max_messages:]

@@ -37,8 +37,8 @@ from app.agents.graphs.pre import run_pre
 from app.middleware.chat_metrics import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.orm.crud import get_gray_config, get_message_content
 from app.services.bot_context import BotContext
-from app.services.memory_context import build_inner_context
 from app.services.content_parser import parse_content
+from app.services.memory_context import build_inner_context
 from app.utils.middlewares.trace import header_vars
 
 logger = logging.getLogger(__name__)

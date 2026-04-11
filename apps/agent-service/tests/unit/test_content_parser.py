@@ -168,7 +168,7 @@ class TestRender:
             }
         )
         result = parse_content(raw)
-        assert result.render() == "before  after"
+        assert result.render() == "before [图片] after"
 
     def test_render_with_image_fn(self):
         raw = json.dumps(
@@ -304,8 +304,8 @@ class TestRender:
             }
         )
         result = parse_content(raw)
-        # 默认跳过图片
-        assert result.render() == "hello  [视频: v.mp4] [文件: f.pdf]"
+        # 默认图片渲染为 [图片]
+        assert result.render() == "hello [图片] [视频: v.mp4] [文件: f.pdf]"
         # 带图片标记
         assert (
             result.render(image_fn=lambda i, k: f"[IMG:{k}]")

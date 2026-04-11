@@ -1,15 +1,17 @@
 # apps/agent-service/tests/unit/test_bot_context.py
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.services.bot_context import BotContext
 
 
 def _make_msg(role: str, content: str, bot_name: str | None, username: str):
-    from app.services.quick_search import QuickSearchResult
-    from datetime import datetime
     import inspect
+    from datetime import datetime
+
+    from app.services.quick_search import QuickSearchResult
     sig = inspect.signature(QuickSearchResult.__init__)
     if 'bot_name' in sig.parameters:
         m = QuickSearchResult(

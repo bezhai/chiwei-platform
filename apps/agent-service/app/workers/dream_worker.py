@@ -15,7 +15,11 @@ from langchain_core.messages import HumanMessage
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
 from app.orm.crud import get_all_persona_ids, get_bot_persona
-from app.orm.memory_crud import create_fragment, get_fragments_in_date_range, get_recent_fragments_by_grain
+from app.orm.memory_crud import (
+    create_fragment,
+    get_fragments_in_date_range,
+    get_recent_fragments_by_grain,
+)
 from app.orm.memory_models import ExperienceFragment
 from app.workers.error_handling import cron_error_handler
 

@@ -144,7 +144,7 @@ async def buffer_until_pre(
         while True:
             try:
                 item = await asyncio.wait_for(q.get(), timeout=_PHASE2_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     f"_buffer_until_pre phase2 TIMEOUT ({_PHASE2_TIMEOUT}s): "
                     f"message_id={message_id}, drain_task.done={drain_task.done()}"

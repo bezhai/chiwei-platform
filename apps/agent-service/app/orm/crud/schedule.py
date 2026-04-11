@@ -5,7 +5,6 @@ from sqlalchemy.future import select
 from app.orm.base import AsyncSessionLocal
 from app.orm.models import AkaoSchedule
 
-
 _WEEKDAY_MAP = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,

@@ -11,7 +11,12 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    SystemMessage,
+)
 from langfuse.langchain import CallbackHandler
 from openai import (
     APIConnectionError,

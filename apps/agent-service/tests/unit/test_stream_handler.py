@@ -9,8 +9,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from app.agents.domains.main.stream_handler import (
     SPLIT_MARKER,
     StreamState,

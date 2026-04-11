@@ -3,12 +3,12 @@
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class MessageType(str, Enum):
+class MessageType(StrEnum):
     """消息类型枚举"""
 
     QUESTION = "question"

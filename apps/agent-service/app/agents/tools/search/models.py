@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
 from pydantic import BaseModel
@@ -219,7 +219,7 @@ class CharacterForAIResult(BaseModel):
     data: list[SimpleCharacter]
 
 
-class Career(str, Enum):
+class Career(StrEnum):
     """职业"""
 
     PRODUCER = "producer"
