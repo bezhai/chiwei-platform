@@ -1,28 +1,23 @@
 """Unified Agent — single entry point for all LLM interactions.
 
-``Agent`` merges the old ChatAgent (with tools / LangGraph) and LLMService
-(without tools) into **one** class.  Whether the call is agentic or plain
-is decided by a single parameter: ``tools``.
+Every ``run()`` / ``stream()`` goes through LangGraph ``create_agent``.
+Having tools or not is just a parameter — no separate code paths.
 
-Usage examples::
+The only exception is ``extract()`` which needs ``model.with_structured_output()``
+(a model-level feature that LangGraph agents don't expose).
+
+Usage::
 
     from app.agent.core import Agent, AgentConfig
 
     CFG = AgentConfig("afterthought_conversation", "diary-model", "afterthought")
 
-    # Non-agentic
-    result = await Agent(CFG).run(prompt_vars={...}, messages=[...])
+    result = await Agent(CFG).run(messages=[...], prompt_vars={...})
 
-    # Agentic with tools
-    async for chunk in Agent(MAIN_CFG, tools=ALL_TOOLS).stream(...):
+    async for chunk in Agent(CFG, tools=ALL_TOOLS).stream(messages=[...]):
         ...
 
-    # Structured output
-    data = await Agent(CFG).extract(FilterResult, messages=[...])
-
-    # Override model_id for a single call
-    from dataclasses import replace
-    result = await Agent(replace(CFG, model_id="gpt-4o")).run(...)
+    data = await Agent(CFG).extract(Model, messages=[...])
 """
 
 from __future__ import annotations
@@ -42,7 +37,6 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.runnables import RunnableConfig
 from langfuse.langchain import CallbackHandler
 from openai import (
     APIConnectionError,
@@ -96,21 +90,6 @@ class AgentConfig:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _prepend_system(
-    system_prompt: str | None,
-    messages: list[dict[str, Any] | BaseMessage],
-) -> list[dict[str, Any] | BaseMessage]:
-    """Prepend a SystemMessage when *system_prompt* is not None."""
-    if system_prompt is None:
-        return list(messages)
-    return [SystemMessage(content=system_prompt), *messages]
-
-
-# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -118,18 +97,11 @@ def _prepend_system(
 class Agent:
     """Unified thinking entry point.
 
-    Parameters
-    ----------
-    config:
-        An ``AgentConfig`` specifying prompt_id, model_id, and trace_name.
-        Each domain module defines its own config constants.
-    tools:
-        If provided, the agent uses LangGraph ``create_agent`` for multi-step
-        reasoning (the agentic path).  If ``None``, uses ``model.ainvoke``
-        directly (the plain LLM path).
-    model_kwargs:
-        Extra keyword arguments forwarded to ``build_chat_model``
-        (e.g. ``reasoning_effort``, ``temperature``).
+    ``run`` / ``stream`` always go through LangGraph ``create_agent``.
+    Having tools or not is just a parameter difference, not a code path difference.
+
+    ``extract`` is the sole exception — it needs ``model.with_structured_output()``,
+    which is a model-level API that LangGraph doesn't expose.
     """
 
     def __init__(
@@ -140,158 +112,15 @@ class Agent:
         model_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self._cfg = config
-        self._tools = tools
+        self._tools = tools or []
         self._model_kwargs = model_kwargs or {}
 
     # ------------------------------------------------------------------
-    # config builders
+    # internal
     # ------------------------------------------------------------------
 
-    def _build_agentic_config(
-        self, parent_config: RunnableConfig | None = None
-    ) -> dict[str, Any]:
-        """Build LangChain config for the agentic (LangGraph) path."""
-        if parent_config:
-            config: dict[str, Any] = dict(parent_config)
-            if self._cfg.trace_name:
-                config["run_name"] = self._cfg.trace_name
-        else:
-            config = {"callbacks": [CallbackHandler(update_trace=True)]}
-            if self._cfg.trace_name:
-                config["run_name"] = self._cfg.trace_name
-        config.setdefault("recursion_limit", _DEFAULT_RECURSION_LIMIT)
-        return config
-
-    def _build_plain_config(
-        self,
-        parent_run_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build LangChain config for the plain (non-agentic) path."""
-        cb_kwargs: dict[str, Any] = {}
-        if parent_run_id:
-            cb_kwargs["trace_id"] = parent_run_id
-        if metadata:
-            cb_kwargs["metadata"] = metadata
-
-        config: dict[str, Any] = {"callbacks": [CallbackHandler(**cb_kwargs)]}
-        if self._cfg.trace_name:
-            config["run_name"] = self._cfg.trace_name
-        return config
-
-    # ------------------------------------------------------------------
-    # public API
-    # ------------------------------------------------------------------
-
-    async def run(
-        self,
-        messages: list[dict[str, Any] | BaseMessage],
-        *,
-        prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
-        config: RunnableConfig | None = None,
-        parent_run_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-    ) -> AIMessage:
-        """Execute and return the final ``AIMessage``.
-
-        - Agentic path (tools present): delegates to LangGraph agent's
-          ``ainvoke``, returns the last message.
-        - Plain path (no tools): calls ``model.ainvoke`` directly.
-        """
-        if self._tools is not None:
-            return await self._run_agentic(
-                messages,
-                prompt_vars=prompt_vars or {},
-                context=context,
-                config=config,
-                max_retries=max_retries,
-            )
-
-        return await self._run_plain(
-            messages,
-            prompt_vars=prompt_vars or {},
-            parent_run_id=parent_run_id,
-            metadata=metadata,
-            max_retries=max_retries,
-        )
-
-    async def stream(
-        self,
-        messages: list[dict[str, Any] | BaseMessage],
-        *,
-        prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
-        config: RunnableConfig | None = None,
-        parent_run_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-    ) -> AsyncGenerator[AIMessageChunk | ToolMessage, None]:
-        """Stream tokens.
-
-        - Agentic path: yields ``AIMessageChunk`` and ``ToolMessage`` via
-          LangGraph ``astream``.
-        - Plain path: yields ``AIMessageChunk`` via ``model.astream``.
-
-        Retry caveat: once tokens have been yielded, retrying would cause
-        duplicate content — so the error is re-raised instead.
-        """
-        if self._tools is not None:
-            async for chunk in self._stream_agentic(
-                messages,
-                prompt_vars=prompt_vars or {},
-                context=context,
-                config=config,
-                max_retries=max_retries,
-            ):
-                yield chunk
-            return
-
-        async for chunk in self._stream_plain(
-            messages,
-            prompt_vars=prompt_vars or {},
-            parent_run_id=parent_run_id,
-            metadata=metadata,
-        ):
-            yield chunk
-
-    async def extract(
-        self,
-        response_model: type[BaseModel],
-        messages: list[dict[str, Any] | BaseMessage],
-        *,
-        prompt_vars: dict[str, Any] | None = None,
-        parent_run_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-    ) -> BaseModel:
-        """Structured output — return a Pydantic model instance.
-
-        Always uses the plain (non-agentic) path, calling
-        ``model.with_structured_output(response_model).ainvoke(...)``.
-        """
-        model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
-        structured_model = model.with_structured_output(response_model)
-
-        system_prompt = self._compile_prompt(prompt_vars or {})
-        full_messages = _prepend_system(system_prompt, messages)
-        run_config = self._build_plain_config(parent_run_id, metadata)
-
-        return await _retry(
-            structured_model.ainvoke,
-            full_messages,
-            run_config,
-            max_retries=max_retries,
-            label=f"Agent({self._cfg.trace_name}).extract",
-        )
-
-    # ------------------------------------------------------------------
-    # agentic path (with tools / LangGraph)
-    # ------------------------------------------------------------------
-
-    async def _build_langgraph_agent(self, prompt_vars: dict[str, Any]) -> Any:
-        """Create a LangGraph agent with the configured tools and prompt."""
+    async def _build_agent(self, prompt_vars: dict[str, Any]) -> Any:
+        """Create a LangGraph agent with the configured prompt and tools."""
         langfuse_prompt = get_prompt(self._cfg.prompt_id)
         model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
         prompt = langfuse_prompt.get_langchain_prompt(
@@ -306,17 +135,31 @@ class Agent:
             context_schema=AgentContext,
         )
 
-    async def _run_agentic(
+    def _build_config(self) -> dict[str, Any]:
+        """Build LangChain config with Langfuse tracing."""
+        config: dict[str, Any] = {
+            "callbacks": [CallbackHandler(update_trace=True)],
+            "recursion_limit": _DEFAULT_RECURSION_LIMIT,
+        }
+        if self._cfg.trace_name:
+            config["run_name"] = self._cfg.trace_name
+        return config
+
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
+
+    async def run(
         self,
         messages: list[dict[str, Any] | BaseMessage],
         *,
-        prompt_vars: dict[str, Any],
-        context: AgentContext | None,
-        config: RunnableConfig | None,
-        max_retries: int,
+        prompt_vars: dict[str, Any] | None = None,
+        context: AgentContext | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AIMessage:
-        agent = await self._build_langgraph_agent(prompt_vars)
-        run_config = self._build_agentic_config(config)
+        """Execute and return the final ``AIMessage``."""
+        agent = await self._build_agent(prompt_vars or {})
+        config = self._build_config()
 
         async def _invoke(msgs: Any, *, config: Any) -> AIMessage:
             result = await agent.ainvoke(
@@ -327,22 +170,26 @@ class Agent:
         return await _retry(
             _invoke,
             messages,
-            run_config,
+            config,
             max_retries=max_retries,
             label=f"Agent({self._cfg.trace_name}).run",
         )
 
-    async def _stream_agentic(
+    async def stream(
         self,
         messages: list[dict[str, Any] | BaseMessage],
         *,
-        prompt_vars: dict[str, Any],
-        context: AgentContext | None,
-        config: RunnableConfig | None,
-        max_retries: int,
+        prompt_vars: dict[str, Any] | None = None,
+        context: AgentContext | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[AIMessageChunk | ToolMessage, None]:
-        agent = await self._build_langgraph_agent(prompt_vars)
-        run_config = self._build_agentic_config(config)
+        """Stream tokens.
+
+        Retry caveat: once tokens have been yielded, retrying would cause
+        duplicate content — so the error is re-raised instead.
+        """
+        agent = await self._build_agent(prompt_vars or {})
+        config = self._build_config()
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
@@ -351,14 +198,14 @@ class Agent:
                     {"messages": messages},
                     context=context,
                     stream_mode="messages",
-                    config=run_config,
+                    config=config,
                 ):
                     tokens_yielded = True
                     yield token
-                return  # success
+                return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded:
-                    raise  # already yielded tokens -> no safe retry
+                    raise
                 if attempt < max_retries:
                     delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
                     logger.warning(
@@ -373,55 +220,35 @@ class Agent:
                 else:
                     raise
 
-    # ------------------------------------------------------------------
-    # plain path (no tools)
-    # ------------------------------------------------------------------
+    async def extract(
+        self,
+        response_model: type[BaseModel],
+        messages: list[dict[str, Any] | BaseMessage],
+        *,
+        prompt_vars: dict[str, Any] | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+    ) -> BaseModel:
+        """Structured output — return a Pydantic model instance.
 
-    def _compile_prompt(self, prompt_vars: dict[str, Any]) -> str | None:
-        """Compile the Langfuse prompt, or return None if prompt_id is None."""
+        The sole path that bypasses LangGraph: needs
+        ``model.with_structured_output()`` which is a model-level API.
+        """
+        model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
+        structured = model.with_structured_output(response_model)
+
         prompt_id = self._cfg.prompt_id
-        if not prompt_id:
-            return None
-        langfuse_prompt = get_prompt(prompt_id)
-        return langfuse_prompt.compile(**prompt_vars)
+        if prompt_id:
+            system = get_prompt(prompt_id).compile(**(prompt_vars or {}))
+            messages = [SystemMessage(content=system), *messages]
 
-    async def _run_plain(
-        self,
-        messages: list[dict[str, Any] | BaseMessage],
-        *,
-        prompt_vars: dict[str, Any],
-        parent_run_id: str | None,
-        metadata: dict[str, Any] | None,
-        max_retries: int,
-    ) -> AIMessage:
-        model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
-        system_prompt = self._compile_prompt(prompt_vars)
-        full_messages = _prepend_system(system_prompt, messages)
-        run_config = self._build_plain_config(parent_run_id, metadata)
-
+        config = self._build_config()
         return await _retry(
-            model.ainvoke,
-            full_messages,
-            run_config,
+            structured.ainvoke,
+            messages,
+            config,
             max_retries=max_retries,
-            label=f"Agent({self._cfg.trace_name}).run",
+            label=f"Agent({self._cfg.trace_name}).extract",
         )
-
-    async def _stream_plain(
-        self,
-        messages: list[dict[str, Any] | BaseMessage],
-        *,
-        prompt_vars: dict[str, Any],
-        parent_run_id: str | None,
-        metadata: dict[str, Any] | None,
-    ) -> AsyncGenerator[AIMessageChunk, None]:
-        model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
-        system_prompt = self._compile_prompt(prompt_vars)
-        full_messages = _prepend_system(system_prompt, messages)
-        run_config = self._build_plain_config(parent_run_id, metadata)
-
-        async for chunk in model.astream(full_messages, config=run_config):
-            yield chunk  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

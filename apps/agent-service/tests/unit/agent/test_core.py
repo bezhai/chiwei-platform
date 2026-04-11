@@ -1,23 +1,16 @@
 """test_core.py -- Agent unified interface tests.
 
 Covers:
-  - Agent.run() plain path: returns AIMessage, retry, system prompt injection
-  - Agent.stream() plain path: yields chunks
+  - Agent.run(): returns AIMessage, retry on transient errors
+  - Agent.stream(): yields chunks, no retry after yield
   - Agent.extract(): structured output with Pydantic model
-  - Agent.run() agentic path: delegates to LangGraph agent
-  - Agent.stream() agentic path: yields tokens, no retry after yield
   - AgentConfig as frozen dataclass
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import (
-    AIMessage,
-    AIMessageChunk,
-    HumanMessage,
-    SystemMessage,
-)
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from openai import APITimeoutError
 from pydantic import BaseModel
 
@@ -25,12 +18,12 @@ from app.agent.core import Agent, AgentConfig
 
 pytestmark = pytest.mark.unit
 
-# Reusable test configs — each domain module defines its own in production
-_PLAIN_CFG = AgentConfig("afterthought_conversation", "diary-model", "afterthought")
-_AGENTIC_CFG = AgentConfig("main", "main-chat-model", "main")
+# Reusable test configs
+_CFG = AgentConfig("test_prompt", "test-model", "test-agent")
 _EXTRACT_CFG = AgentConfig(
     "relationship_filter", "relationship-model", "relationship-filter"
 )
+_NO_PROMPT_CFG = AgentConfig("", "guard-model", "guard")
 
 
 # ---------------------------------------------------------------------------
@@ -39,25 +32,30 @@ _EXTRACT_CFG = AgentConfig(
 
 
 @pytest.fixture()
-def mock_model():
-    """Mock BaseChatModel."""
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=AIMessage(content="hello"))
-    model.with_structured_output = MagicMock()
-    return model
+def fake_agent():
+    """Mock LangGraph agent returned by create_agent."""
+    agent = AsyncMock()
+    agent.ainvoke = AsyncMock(
+        return_value={"messages": [AIMessage(content="hello")]}
+    )
+    return agent
 
 
 @pytest.fixture()
 def mock_prompt():
-    """Mock Langfuse prompt that returns a compiled string."""
+    """Mock Langfuse prompt."""
     prompt = MagicMock()
-    prompt.compile.return_value = "You are a helpful assistant."
+    prompt.get_langchain_prompt.return_value = "You are a helpful assistant."
+    prompt.compile.return_value = "compiled prompt"
     return prompt
 
 
 @pytest.fixture()
-def mock_deps(mock_model, mock_prompt):
-    """Patch build_chat_model, get_prompt, and CallbackHandler."""
+def mock_deps(fake_agent, mock_prompt):
+    """Patch build_chat_model, get_prompt, create_agent, and CallbackHandler."""
+    mock_model = AsyncMock()
+    mock_model.with_structured_output = MagicMock()
+
     with (
         patch(
             "app.agent.core.build_chat_model",
@@ -69,6 +67,10 @@ def mock_deps(mock_model, mock_prompt):
             return_value=mock_prompt,
         ) as mock_get_prompt,
         patch(
+            "app.agent.core.create_agent",
+            return_value=fake_agent,
+        ) as mock_create,
+        patch(
             "app.agent.core.CallbackHandler",
             return_value=MagicMock(),
         ),
@@ -76,150 +78,184 @@ def mock_deps(mock_model, mock_prompt):
         yield {
             "build_chat_model": mock_build,
             "get_prompt": mock_get_prompt,
+            "create_agent": mock_create,
+            "agent": fake_agent,
             "model": mock_model,
             "prompt": mock_prompt,
         }
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig tests
+# AgentConfig
 # ---------------------------------------------------------------------------
 
 
 class TestAgentConfig:
-    """AgentConfig as a frozen dataclass."""
-
     def test_frozen(self):
         cfg = AgentConfig("p", "m", "t")
         with pytest.raises(AttributeError):
             cfg.prompt_id = "x"  # type: ignore[misc]
 
     def test_defaults(self):
-        cfg = AgentConfig("p", "m")
-        assert cfg.trace_name is None
+        assert AgentConfig("p", "m").trace_name is None
 
     def test_replace(self):
         from dataclasses import replace
 
         cfg = AgentConfig("p", "m", "t")
-        new = replace(cfg, model_id="new-model")
-        assert new.model_id == "new-model"
-        assert new.prompt_id == "p"
-        assert cfg.model_id == "m"  # original unchanged
-
-    def test_repr(self):
-        cfg = AgentConfig("p", "m", "t")
-        assert "p" in repr(cfg)
+        new = replace(cfg, model_id="new")
+        assert new.model_id == "new"
+        assert cfg.model_id == "m"
 
 
 # ---------------------------------------------------------------------------
-# Plain path: run()
+# run()
 # ---------------------------------------------------------------------------
 
 
-class TestRunPlain:
-    """Agent.run() without tools (plain LLM path)."""
-
+class TestRun:
     async def test_returns_ai_message(self, mock_deps):
-        result = await Agent(_PLAIN_CFG).run(
-            messages=[{"role": "user", "content": "hi"}],
+        result = await Agent(_CFG).run(
+            messages=[HumanMessage(content="hi")],
             prompt_vars={"name": "test"},
         )
         assert isinstance(result, AIMessage)
         assert result.content == "hello"
 
-    async def test_compiles_prompt_into_system_message(self, mock_deps):
-        await Agent(_PLAIN_CFG).run(
-            messages=[{"role": "user", "content": "hi"}],
+    async def test_creates_agent_with_tools(self, mock_deps):
+        tools = ["tool_a", "tool_b"]
+        await Agent(_CFG, tools=tools).run(messages=[HumanMessage(content="hi")])
+
+        mock_deps["create_agent"].assert_called_once()
+        call_kwargs = mock_deps["create_agent"].call_args
+        assert call_kwargs[0][1] == tools  # second positional arg = tools
+
+    async def test_creates_agent_without_tools(self, mock_deps):
+        await Agent(_CFG).run(messages=[HumanMessage(content="hi")])
+
+        mock_deps["create_agent"].assert_called_once()
+        call_kwargs = mock_deps["create_agent"].call_args
+        assert call_kwargs[0][1] == []  # empty tools
+
+    async def test_compiles_prompt_via_langfuse(self, mock_deps):
+        await Agent(_CFG).run(
+            messages=[HumanMessage(content="hi")],
             prompt_vars={"key": "val"},
         )
-        mock_deps["prompt"].compile.assert_called_once_with(key="val")
-
-        call_args = mock_deps["model"].ainvoke.call_args
-        sent = call_args[0][0]
-        assert isinstance(sent[0], SystemMessage)
-        assert sent[0].content == "You are a helpful assistant."
+        mock_deps["prompt"].get_langchain_prompt.assert_called_once()
+        call_kwargs = mock_deps["prompt"].get_langchain_prompt.call_args.kwargs
+        assert call_kwargs["key"] == "val"
+        assert "currDate" in call_kwargs
 
     async def test_retries_on_transient_error(self, mock_deps):
-        mock_deps["model"].ainvoke = AsyncMock(
+        mock_deps["agent"].ainvoke = AsyncMock(
             side_effect=[
                 APITimeoutError(request=MagicMock()),
-                AIMessage(content="retry ok"),
+                {"messages": [AIMessage(content="retry ok")]},
             ]
         )
-        result = await Agent(_PLAIN_CFG).run(
+        result = await Agent(_CFG).run(
             messages=[HumanMessage(content="hi")],
             max_retries=2,
         )
         assert result.content == "retry ok"
-        assert mock_deps["model"].ainvoke.call_count == 2
+        assert mock_deps["agent"].ainvoke.call_count == 2
 
     async def test_raises_after_max_retries(self, mock_deps):
-        mock_deps["model"].ainvoke = AsyncMock(
+        mock_deps["agent"].ainvoke = AsyncMock(
             side_effect=APITimeoutError(request=MagicMock())
         )
         with pytest.raises(APITimeoutError):
-            await Agent(_PLAIN_CFG).run(
+            await Agent(_CFG).run(
                 messages=[HumanMessage(content="hi")],
                 max_retries=2,
             )
-        assert mock_deps["model"].ainvoke.call_count == 2
+        assert mock_deps["agent"].ainvoke.call_count == 2
 
-    async def test_passes_config_with_callbacks(self, mock_deps):
-        await Agent(_PLAIN_CFG).run(
-            messages=[HumanMessage(content="hi")],
+    async def test_config_has_trace_name(self, mock_deps):
+        await Agent(_CFG).run(messages=[HumanMessage(content="hi")])
+
+        call_kwargs = mock_deps["agent"].ainvoke.call_args.kwargs
+        assert call_kwargs["config"]["run_name"] == "test-agent"
+
+    async def test_passes_context(self, mock_deps):
+        from app.agent.context import AgentContext, MediaContext, MessageContext
+
+        ctx = AgentContext(
+            message=MessageContext(message_id="m1", chat_id="c1"),
+            media=MediaContext(registry=None),
         )
-        call_args = mock_deps["model"].ainvoke.call_args
-        config = call_args.kwargs.get("config") or call_args[1].get("config")
-        assert "callbacks" in config
-        assert config["run_name"] == "afterthought"
+        await Agent(_CFG).run(
+            messages=[HumanMessage(content="hi")],
+            context=ctx,
+        )
+        call_kwargs = mock_deps["agent"].ainvoke.call_args.kwargs
+        assert call_kwargs["context"] is ctx
 
 
 # ---------------------------------------------------------------------------
-# Plain path: stream()
+# stream()
 # ---------------------------------------------------------------------------
 
 
-class TestStreamPlain:
-    """Agent.stream() without tools."""
-
+class TestStream:
     async def test_yields_chunks(self, mock_deps):
-        chunks = [AIMessageChunk(content="hel"), AIMessageChunk(content="lo")]
+        chunks = [
+            (AIMessageChunk(content="he"), None),
+            (AIMessageChunk(content="llo"), None),
+        ]
 
-        async def fake_astream(messages, *, config=None):
+        async def fake_astream(inp, *, context=None, stream_mode=None, config=None):
             for c in chunks:
                 yield c
 
-        mock_deps["model"].astream = fake_astream
+        mock_deps["agent"].astream = fake_astream
 
         collected = []
-        async for chunk in Agent(_PLAIN_CFG).stream(
+        async for token in Agent(_CFG).stream(
             messages=[HumanMessage(content="hi")],
         ):
-            collected.append(chunk)
+            collected.append(token)
 
         assert len(collected) == 2
-        assert collected[0].content == "hel"
-        assert collected[1].content == "lo"
+        assert collected[0].content == "he"
+
+    async def test_no_retry_after_tokens_yielded(self, mock_deps):
+        call_count = 0
+
+        async def failing_astream(inp, *, context=None, stream_mode=None, config=None):
+            nonlocal call_count
+            call_count += 1
+            yield AIMessageChunk(content="partial"), None
+            raise APITimeoutError(request=MagicMock())
+
+        mock_deps["agent"].astream = failing_astream
+
+        with pytest.raises(APITimeoutError):
+            async for _ in Agent(_CFG).stream(
+                messages=[HumanMessage(content="hi")],
+                max_retries=3,
+            ):
+                pass
+
+        assert call_count == 1  # no retry after yield
 
 
 # ---------------------------------------------------------------------------
-# Plain path: extract()
+# extract()
 # ---------------------------------------------------------------------------
 
 
 class TestExtract:
-    """Agent.extract() structured output."""
-
     async def test_returns_pydantic_model(self, mock_deps):
         class Score(BaseModel):
             name: str
             value: float
 
         expected = Score(name="test", value=0.9)
-        structured_model = AsyncMock()
-        structured_model.ainvoke = AsyncMock(return_value=expected)
-        mock_deps["model"].with_structured_output.return_value = structured_model
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=expected)
+        mock_deps["model"].with_structured_output.return_value = structured
 
         result = await Agent(_EXTRACT_CFG).extract(
             Score,
@@ -231,18 +267,18 @@ class TestExtract:
         assert result.name == "test"
         mock_deps["model"].with_structured_output.assert_called_once_with(Score)
 
-    async def test_extract_retries_on_transient_error(self, mock_deps):
+    async def test_extract_retries(self, mock_deps):
         class Result(BaseModel):
             ok: bool
 
-        structured_model = AsyncMock()
-        structured_model.ainvoke = AsyncMock(
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(
             side_effect=[
                 APITimeoutError(request=MagicMock()),
                 Result(ok=True),
             ]
         )
-        mock_deps["model"].with_structured_output.return_value = structured_model
+        mock_deps["model"].with_structured_output.return_value = structured
 
         result = await Agent(_EXTRACT_CFG).extract(
             Result,
@@ -250,139 +286,37 @@ class TestExtract:
             max_retries=2,
         )
         assert result.ok is True
-        assert structured_model.ainvoke.call_count == 2
+        assert structured.ainvoke.call_count == 2
+
+    async def test_extract_skips_prompt_when_empty(self, mock_deps):
+        """Guard agents have empty prompt_id — extract should not call get_prompt."""
+
+        class Out(BaseModel):
+            v: str
+
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=Out(v="ok"))
+        mock_deps["model"].with_structured_output.return_value = structured
+
+        await Agent(_NO_PROMPT_CFG).extract(
+            Out,
+            messages=[HumanMessage(content="test")],
+        )
+
+        mock_deps["get_prompt"].assert_not_called()
 
     async def test_extract_passes_model_kwargs(self, mock_deps):
         class Out(BaseModel):
             v: str
 
-        structured_model = AsyncMock()
-        structured_model.ainvoke = AsyncMock(return_value=Out(v="ok"))
-        mock_deps["model"].with_structured_output.return_value = structured_model
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=Out(v="ok"))
+        mock_deps["model"].with_structured_output.return_value = structured
 
         await Agent(
             _EXTRACT_CFG, model_kwargs={"reasoning_effort": "low"}
-        ).extract(
-            Out,
-            messages=[],
-        )
+        ).extract(Out, messages=[])
 
         mock_deps["build_chat_model"].assert_called_once_with(
             "relationship-model", reasoning_effort="low"
         )
-
-
-# ---------------------------------------------------------------------------
-# Agentic path: run() with tools
-# ---------------------------------------------------------------------------
-
-
-class TestRunAgentic:
-    """Agent.run() with tools (LangGraph agent path)."""
-
-    async def test_delegates_to_langgraph_agent(self, mock_deps):
-        fake_agent = AsyncMock()
-        fake_agent.ainvoke = AsyncMock(
-            return_value={"messages": [AIMessage(content="tool result")]}
-        )
-
-        mock_prompt_obj = MagicMock()
-        mock_prompt_obj.get_langchain_prompt.return_value = "sys prompt"
-        mock_deps["get_prompt"].return_value = mock_prompt_obj
-
-        with patch("app.agent.core.create_agent", return_value=fake_agent):
-            result = await Agent(_AGENTIC_CFG, tools=["tool1"]).run(
-                messages=[HumanMessage(content="do something")],
-                prompt_vars={"persona": "test"},
-            )
-
-        assert result.content == "tool result"
-        fake_agent.ainvoke.assert_called_once()
-
-    async def test_agentic_retries_on_transient_error(self, mock_deps):
-        fake_agent = AsyncMock()
-        fake_agent.ainvoke = AsyncMock(
-            side_effect=[
-                APITimeoutError(request=MagicMock()),
-                {"messages": [AIMessage(content="ok")]},
-            ]
-        )
-
-        mock_prompt_obj = MagicMock()
-        mock_prompt_obj.get_langchain_prompt.return_value = "sys"
-        mock_deps["get_prompt"].return_value = mock_prompt_obj
-
-        with patch("app.agent.core.create_agent", return_value=fake_agent):
-            result = await Agent(_AGENTIC_CFG, tools=["t"]).run(
-                messages=[HumanMessage(content="hi")],
-                max_retries=2,
-            )
-
-        assert result.content == "ok"
-        assert fake_agent.ainvoke.call_count == 2
-
-
-# ---------------------------------------------------------------------------
-# Agentic path: stream() with tools
-# ---------------------------------------------------------------------------
-
-
-class TestStreamAgentic:
-    """Agent.stream() with tools."""
-
-    async def test_yields_tokens(self, mock_deps):
-        chunks = [
-            (AIMessageChunk(content="he"), None),
-            (AIMessageChunk(content="llo"), None),
-        ]
-
-        fake_agent = AsyncMock()
-
-        async def fake_astream(inp, *, context=None, stream_mode=None, config=None):
-            for c in chunks:
-                yield c
-
-        fake_agent.astream = fake_astream
-
-        mock_prompt_obj = MagicMock()
-        mock_prompt_obj.get_langchain_prompt.return_value = "sys"
-        mock_deps["get_prompt"].return_value = mock_prompt_obj
-
-        with patch("app.agent.core.create_agent", return_value=fake_agent):
-            collected = []
-            async for token in Agent(_AGENTIC_CFG, tools=["t"]).stream(
-                messages=[HumanMessage(content="hi")],
-            ):
-                collected.append(token)
-
-        assert len(collected) == 2
-        assert collected[0].content == "he"
-
-    async def test_no_retry_after_tokens_yielded(self, mock_deps):
-        """Once tokens have been yielded, retry would cause duplicates."""
-
-        fake_agent = AsyncMock()
-        call_count = 0
-
-        async def failing_astream(inp, *, context=None, stream_mode=None, config=None):
-            nonlocal call_count
-            call_count += 1
-            yield AIMessageChunk(content="partial"), None
-            raise APITimeoutError(request=MagicMock())
-
-        fake_agent.astream = failing_astream
-
-        mock_prompt_obj = MagicMock()
-        mock_prompt_obj.get_langchain_prompt.return_value = "sys"
-        mock_deps["get_prompt"].return_value = mock_prompt_obj
-
-        with patch("app.agent.core.create_agent", return_value=fake_agent):
-            with pytest.raises(APITimeoutError):
-                async for _ in Agent(_AGENTIC_CFG, tools=["t"]).stream(
-                    messages=[HumanMessage(content="hi")],
-                    max_retries=3,
-                ):
-                    pass
-
-        # Should NOT retry — only 1 attempt because tokens were already yielded
-        assert call_count == 1
