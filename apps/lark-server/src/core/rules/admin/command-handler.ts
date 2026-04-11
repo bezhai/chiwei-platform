@@ -102,12 +102,53 @@ const commandRules = [
                 return;
             }
 
-            // 解析命令: /config [xxx] set [yyy]
             const text = message.clearText();
+
+            // /config list — 查看当前配置
+            if (/^\/config\s+list$/.test(text)) {
+                const chatInfo = await BaseChatInfoRepository.findOne({
+                    where: { chat_id: message.chatId },
+                });
+                const cfg = chatInfo?.gray_config;
+                if (!cfg || Object.keys(cfg).length === 0) {
+                    replyMessage(message.messageId, '当前无灰度配置', true);
+                } else {
+                    const lines = Object.entries(cfg).map(([k, v]) => `  ${k} = ${v}`);
+                    replyMessage(message.messageId, `灰度配置:\n${lines.join('\n')}`, true);
+                }
+                return;
+            }
+
+            // /config [key] unset — 删除单个 key
+            const unsetMatch = text.match(/^\/config\s+(\S+)\s+unset$/);
+            if (unsetMatch) {
+                const [, key] = unsetMatch;
+                const chatInfo = await BaseChatInfoRepository.findOne({
+                    where: { chat_id: message.chatId },
+                });
+                if (!chatInfo) {
+                    replyMessage(message.messageId, '未找到群聊信息', true);
+                    return;
+                }
+                const grayConfig = chatInfo.gray_config || {};
+                if (!(key in grayConfig)) {
+                    replyMessage(message.messageId, `配置项 ${key} 不存在`, true);
+                    return;
+                }
+                delete grayConfig[key];
+                await BaseChatInfoRepository.update(
+                    { chat_id: message.chatId },
+                    { gray_config: Object.keys(grayConfig).length > 0 ? grayConfig : null },
+                );
+                replyMessage(message.messageId, `灰度配置已删除: ${key}`, true);
+                return;
+            }
+
+            // /config [key] set [value] — 设置
             const configMatch = text.match(/^\/config\s+(\S+)\s+set\s+(\S+)$/);
 
             if (!configMatch) {
-                replyMessage(message.messageId, `命令格式错误，正确格式: /config [key] set [value]（key和value不能包含空格）\n收到的命令: ${text}`, true);
+                replyMessage(message.messageId, '命令格式:\n  /config list — 查看配置\n  /config [key] set [value] — 设置\n  /config [key] unset — 删除', true);
                 return;
             }
 
