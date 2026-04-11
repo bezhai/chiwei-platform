@@ -130,18 +130,9 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
 
     # 写入 persona_id + 修正 bot_name（makeTextReply 创建时用的是 SETNX 锁赢家的 bot_name）
     try:
-        from app.orm.base import AsyncSessionLocal
-        from sqlalchemy import text as sql_text
+        from app.orm.crud.message import update_agent_response_bot
 
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                sql_text(
-                    "UPDATE agent_responses SET bot_name = :bn, persona_id = :pid "
-                    "WHERE session_id = :sid"
-                ),
-                {"bn": response_bot_name, "pid": persona_id, "sid": session_id},
-            )
-            await session.commit()
+        await update_agent_response_bot(session_id, response_bot_name, persona_id)
     except Exception as e:
         logger.warning("Failed to update agent_response: %s", e)
 

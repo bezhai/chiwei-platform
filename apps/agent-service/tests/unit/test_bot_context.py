@@ -77,7 +77,7 @@ async def test_from_persona_id_factory():
             error_messages={},
         ),
     ), patch(
-        "app.services.bot_context.get_reply_style",
+        "app.orm.memory_crud.get_latest_reply_style",
         new_callable=AsyncMock,
         return_value="test style",
     ):

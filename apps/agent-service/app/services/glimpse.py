@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.config.config import settings
+from app.orm.crud import get_group_name as _crud_get_group_name
 from app.services.timeline_formatter import format_timeline
 from app.orm.memory_crud import (
     create_fragment,
@@ -55,18 +56,8 @@ async def _pick_group(persona_id: str) -> str | None:
 
 async def _get_group_name(chat_id: str) -> str:
     try:
-        from app.orm.base import AsyncSessionLocal
-        from app.orm.models import LarkGroupChatInfo
-        from sqlalchemy import select
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(LarkGroupChatInfo.name).where(
-                    LarkGroupChatInfo.chat_id == chat_id
-                )
-            )
-            name = result.scalar_one_or_none()
-            return name or chat_id[:10]
+        name = await _crud_get_group_name(chat_id)
+        return name or chat_id[:10]
     except Exception:
         return chat_id[:10]
 

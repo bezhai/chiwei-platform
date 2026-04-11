@@ -14,7 +14,7 @@ from langchain_core.messages import HumanMessage
 
 from app.agents.infra.llm_service import LLMService
 from app.config.config import settings
-from app.orm.crud import get_chat_messages_in_range, get_username
+from app.orm.crud import get_chat_messages_in_range, get_group_name, get_username
 from app.orm.memory_crud import create_fragment
 from app.orm.memory_models import ExperienceFragment
 from app.services.debounced_pipeline import DebouncedPipeline
@@ -166,21 +166,10 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
                     return f"和{name}的私聊"
         return "一段私聊"
     else:
-        # Query group name
         try:
-            from app.orm.base import AsyncSessionLocal
-            from app.orm.models import LarkGroupChatInfo
-            from sqlalchemy import select
-
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(LarkGroupChatInfo.name).where(
-                        LarkGroupChatInfo.chat_id == chat_id
-                    )
-                )
-                group_name = result.scalar_one_or_none()
-                if group_name:
-                    return f"在「{group_name}」群里"
+            group_name = await get_group_name(chat_id)
+            if group_name:
+                return f"在「{group_name}」群里"
         except Exception:
             pass
         return "在群里"
