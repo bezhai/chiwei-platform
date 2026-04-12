@@ -31,7 +31,7 @@ resources:
 
 workers:
   - name: arq-worker
-    entry: app.workers.unified_worker.UnifiedWorkerSettings
+    entry: app.workers.arq_settings.WorkerSettings
     runner: arq          # uv run --no-sync arq <entry>
     resources:
       requests:
@@ -41,7 +41,7 @@ workers:
         cpu: "1"
         memory: 1Gi
   - name: vectorize-worker
-    entry: app.workers.vectorize_worker
+    entry: app.workers.vectorize
     runner: python-m     # uv run --no-sync python -m <entry>
     resources:
       requests:

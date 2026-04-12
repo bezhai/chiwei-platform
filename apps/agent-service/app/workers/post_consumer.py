@@ -53,6 +53,13 @@ async def handle_safety_check(message: AbstractIncomingMessage) -> None:
                 session_id,
                 result.reason,
             )
+            async with get_session() as s:
+                await set_safety_status(
+                    s,
+                    session_id,
+                    "blocked",
+                    {"checked_at": checked_at, "reason": result.reason},
+                )
             await mq.publish(
                 RECALL,
                 {

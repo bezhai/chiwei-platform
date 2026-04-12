@@ -160,8 +160,9 @@ async def vectorize_message(message: ConversationMessage) -> bool:
         ),
     )
     if not all(results):
-        logger.error("Qdrant upsert partially failed for %s: %s", message.message_id, results)
-        return False
+        raise RuntimeError(
+            f"Qdrant upsert partially failed for {message.message_id}: {results}"
+        )
     return True
 
 
@@ -280,3 +281,11 @@ async def cron_scan_pending_messages(ctx) -> None:
         logger.info("Pending vectorize scan done, enqueued %d messages", count)
     finally:
         await redis.delete(lock_key)
+
+
+# ---------------------------------------------------------------------------
+# python -m entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    asyncio.run(start_vectorize_consumer())
