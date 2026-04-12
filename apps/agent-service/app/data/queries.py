@@ -14,7 +14,7 @@ Sections:
 
 from __future__ import annotations
 
-import json as json_mod
+import json
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, text, update
@@ -274,7 +274,7 @@ async def set_safety_status(
         ),
         {
             "status": status,
-            "result": (json_mod.dumps(result_json) if result_json else None),
+            "result": (json.dumps(result_json) if result_json else None),
             "session_id": session_id,
         },
     )
@@ -500,27 +500,6 @@ async def insert_fragment(
     return fragment
 
 
-async def find_fragments_for_chat(
-    session: AsyncSession,
-    persona_id: str,
-    source_chat_id: str,
-    *,
-    grains: list[str] | None = None,
-    limit: int = 20,
-) -> list[ExperienceFragment]:
-    """Fetch recent fragments for a specific chat (descending)."""
-    stmt = (
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(ExperienceFragment.source_chat_id == source_chat_id)
-    )
-    if grains:
-        stmt = stmt.where(ExperienceFragment.grain.in_(grains))
-    stmt = stmt.order_by(ExperienceFragment.created_at.desc()).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
-
-
 async def find_recent_fragments_by_grain(
     session: AsyncSession,
     persona_id: str,
@@ -725,7 +704,7 @@ async def find_latest_relationship_memory(
         )
         .where(RelationshipMemoryV2.persona_id == persona_id)
         .where(RelationshipMemoryV2.user_id == user_id)
-        .order_by(RelationshipMemoryV2.created_at.desc())
+        .order_by(RelationshipMemoryV2.version.desc())
         .limit(1)
     )
     row = result.one_or_none()
@@ -754,7 +733,7 @@ async def find_relationship_memories_batch(
         .distinct(RelationshipMemoryV2.user_id)
         .order_by(
             RelationshipMemoryV2.user_id,
-            RelationshipMemoryV2.created_at.desc(),
+            RelationshipMemoryV2.version.desc(),
         )
     )
     return {row.user_id: (row.core_facts, row.impression) for row in result.all()}
@@ -770,7 +749,7 @@ async def find_context_messages_for_anchors(
     anchor_timestamps: list[int],
     anchor_root_ids: set[str],
     context_window_ms: int = 300_000,
-) -> list[tuple]:
+) -> list[tuple[ConversationMessage, LarkUser]]:
     """Find messages surrounding anchor points (for search_group_history).
 
     Returns list of (ConversationMessage, LarkUser) tuples.
@@ -808,7 +787,7 @@ async def find_group_members(
     session: AsyncSession,
     chat_id: str,
     role: str | None = None,
-) -> list[tuple]:
+) -> list[tuple[LarkGroupMember, LarkUser]]:
     """Find group members with user info.
 
     Returns list of (LarkGroupMember, LarkUser) tuples.

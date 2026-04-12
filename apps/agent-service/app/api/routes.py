@@ -189,7 +189,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
             end_dt.date(),
         )
 
-        from app.data.queries import find_chat_messages_in_range
+        from app.data.queries import find_messages_in_range
 
         day = start_dt
         day_count = 0
@@ -204,7 +204,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
             for chat_id in req.chat_ids:
                 async with get_session() as s:
-                    messages = await find_chat_messages_in_range(
+                    messages = await find_messages_in_range(
                         s, chat_id, day_start_ts, day_end_ts, limit=5000
                     )
                 if not messages:
@@ -267,6 +267,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
 
 class ScheduleCreate(BaseModel):
+    persona_id: str
     plan_type: str  # "monthly" | "weekly" | "daily"
     period_start: str
     period_end: str
@@ -284,6 +285,7 @@ class ScheduleCreate(BaseModel):
 
 class ScheduleOut(BaseModel):
     id: int
+    persona_id: str
     plan_type: str
     period_start: str
     period_end: str
@@ -326,12 +328,12 @@ async def api_current_schedule():
 
 
 @router.get("/api/schedule/daily/{target_date}", tags=["Schedule"])
-async def api_daily_entries(target_date: str):
-    """Return all daily plan entries for a given date."""
-    from app.data.queries import find_daily_entries_for_date
+async def api_daily_entries(target_date: str, persona_id: str):
+    """Return all daily plan entries for a given date and persona."""
+    from app.data.queries import find_daily_entries
 
     async with get_session() as s:
-        entries = await find_daily_entries_for_date(s, target_date)
+        entries = await find_daily_entries(s, target_date, persona_id)
     return [_to_out(e) for e in entries]
 
 
@@ -343,6 +345,7 @@ async def api_create_schedule(body: ScheduleCreate):
         raise HTTPException(400, "daily entries require time_start and time_end")
 
     entry = AkaoSchedule(
+        persona_id=body.persona_id,
         plan_type=body.plan_type,
         period_start=body.period_start,
         period_end=body.period_end,

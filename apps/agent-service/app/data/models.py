@@ -1,4 +1,7 @@
-"""All SQLAlchemy ORM models — single source of truth for table definitions.
+"""Core SQLAlchemy ORM models.
+
+Note: bot_config, bot_chat_presence, agent_responses 等表由 lark-server 管理，
+此处未定义 ORM model，queries.py 中通过 raw SQL 访问。
 
 Tables:
   - lark_user, lark_group_chat_info, lark_base_chat_info, lark_group_member
