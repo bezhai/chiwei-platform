@@ -131,7 +131,3 @@ async def build_inner_context(
     sections.append("（如果隐约觉得知道点什么但想不起来，可以用 recall 想一想。）")
 
     return "\n\n".join(sections)
-
-
-# Backward-compatible alias
-build_memory_context = build_inner_context

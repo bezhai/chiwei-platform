@@ -14,7 +14,7 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.data.queries import (
     find_relationship_memories_batch,
     find_username,
@@ -41,13 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _parse_json(content) -> list | None:
     """Parse a JSON array from LLM response content."""
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    else:
-        content = (content or "").strip()
+    content = extract_text(content)
 
     if not content or content == "[]":
         return None

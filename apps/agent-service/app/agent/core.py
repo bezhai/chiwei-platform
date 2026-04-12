@@ -290,3 +290,22 @@ async def _retry(
                 raise
 
     raise RuntimeError("Unreachable: all retry attempts exhausted")
+
+
+# ---------------------------------------------------------------------------
+# Response content helpers
+# ---------------------------------------------------------------------------
+
+
+def extract_text(content: Any) -> str:
+    """Extract plain text from LLM response content.
+
+    Handles both ``str`` and ``list[str | dict]`` formats that LangChain
+    may return depending on the model / provider.
+    """
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        ).strip()
+    return (content or "").strip()

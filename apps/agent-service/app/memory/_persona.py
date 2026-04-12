@@ -14,8 +14,6 @@ from app.data.session import get_session
 
 _CACHE_TTL = 300  # seconds
 
-_persona_cache: dict[str, tuple[PersonaContext, float]] = {}
-
 
 @dataclass(frozen=True)
 class PersonaContext:
@@ -23,6 +21,9 @@ class PersonaContext:
     display_name: str
     persona_lite: str
     bot_name: str | None = None
+
+
+_persona_cache: dict[str, tuple[PersonaContext, float]] = {}
 
 
 async def load_persona(persona_id: str) -> PersonaContext:

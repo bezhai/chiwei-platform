@@ -13,16 +13,16 @@ from datetime import date, datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.data.models import ExperienceFragment
 from app.data.queries import (
     find_fragments_in_date_range,
-    find_persona,
     find_recent_fragments_by_grain,
     insert_fragment,
     list_all_persona_ids,
 )
 from app.data.session import get_session
+from app.memory._persona import load_persona
 
 _DREAM_DAILY_CFG = AgentConfig("dream_daily", "diary-model", "dream-daily")
 _DREAM_WEEKLY_CFG = AgentConfig("dream_weekly", "diary-model", "dream-weekly")
@@ -30,16 +30,6 @@ _DREAM_WEEKLY_CFG = AgentConfig("dream_weekly", "diary-model", "dream-weekly")
 logger = logging.getLogger(__name__)
 
 _CST = timezone(timedelta(hours=8))
-
-
-def _text(content) -> str:
-    """Extract plain text from LLM response content."""
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    return (content or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +59,12 @@ async def generate_daily_dream(
         )
         return None
 
+    pc = await load_persona(persona_id)
     async with get_session() as s:
-        persona_obj = await find_persona(s, persona_id)
         recent_dailies = await find_recent_fragments_by_grain(
             s, persona_id, "daily", limit=3
         )
 
-    persona_name = persona_obj.display_name if persona_obj else persona_id
-    persona_lite = persona_obj.persona_lite if persona_obj else ""
     today_text = "\n\n---\n\n".join(f.content for f in today_frags)
     recent_text = (
         "\n\n---\n\n".join(f.content for f in reversed(recent_dailies))
@@ -86,15 +74,15 @@ async def generate_daily_dream(
 
     result = await Agent(_DREAM_DAILY_CFG).run(
         prompt_vars={
-            "persona_name": persona_name,
-            "persona_lite": persona_lite,
+            "persona_name": pc.display_name,
+            "persona_lite": pc.persona_lite,
             "date": target_date.isoformat(),
             "today_fragments": today_text,
             "recent_dreams": recent_text,
         },
         messages=[HumanMessage(content="回忆今天发生的事")],
     )
-    content = _text(result.content)
+    content = extract_text(result.content)
 
     if not content:
         logger.warning(
@@ -139,22 +127,18 @@ async def generate_weekly_dream(
         logger.info("[%s] No daily fragments for weekly dream, skip", persona_id)
         return None
 
-    async with get_session() as s:
-        persona_obj = await find_persona(s, persona_id)
-
-    persona_name = persona_obj.display_name if persona_obj else persona_id
-    persona_lite = persona_obj.persona_lite if persona_obj else ""
+    pc = await load_persona(persona_id)
     dailies_text = "\n\n---\n\n".join(f.content for f in reversed(dailies))
 
     result = await Agent(_DREAM_WEEKLY_CFG).run(
         prompt_vars={
-            "persona_name": persona_name,
-            "persona_lite": persona_lite,
+            "persona_name": pc.display_name,
+            "persona_lite": pc.persona_lite,
             "dailies": dailies_text,
         },
         messages=[HumanMessage(content="回顾这一周")],
     )
-    content = _text(result.content)
+    content = extract_text(result.content)
 
     if not content:
         logger.warning("[%s] Weekly dream LLM returned empty", persona_id)

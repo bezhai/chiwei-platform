@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.data.models import ExperienceFragment
 from app.data.queries import (
     find_group_name,
@@ -38,16 +38,6 @@ _CST = timezone(timedelta(hours=8))
 DEBOUNCE_SECONDS = 300  # 5 minutes
 MAX_BUFFER = 15
 LOOKBACK_HOURS = 2
-
-
-def _text(content) -> str:
-    """Extract plain text from an LLM response content value."""
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    return (content or "").strip()
 
 
 class _Afterthought(DebouncedPipeline):
@@ -112,7 +102,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         },
         messages=[HumanMessage(content="生成经历碎片")],
     )
-    content = _text(result.content)
+    content = extract_text(result.content)
 
     if not content:
         logger.warning(
