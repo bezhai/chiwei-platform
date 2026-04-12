@@ -251,7 +251,7 @@ class LifeEngineState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
     current_state: Mapped[str] = mapped_column(Text, nullable=False)
-    activity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     response_mood: Mapped[str] = mapped_column(Text, nullable=False)
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     skip_until: Mapped[datetime | None] = mapped_column(
