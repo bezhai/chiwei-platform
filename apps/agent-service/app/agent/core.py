@@ -245,8 +245,11 @@ class Agent:
 
         prompt_id = self._cfg.prompt_id
         if prompt_id:
-            system = get_prompt(prompt_id).compile(**(prompt_vars or {}))
-            messages = [SystemMessage(content=system), *messages]
+            langfuse_prompt = get_prompt(prompt_id)
+            prompt_messages = compile_to_messages(
+                langfuse_prompt, **(prompt_vars or {})
+            )
+            messages = [*prompt_messages, *messages]
 
         config = self._build_config()
         return await _retry(

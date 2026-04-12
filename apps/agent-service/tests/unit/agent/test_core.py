@@ -418,3 +418,25 @@ class TestExtract:
         mock_deps["build_chat_model"].assert_called_once_with(
             "relationship-model", reasoning_effort="low"
         )
+
+    async def test_extract_with_chat_prompt_messages(self, mock_deps):
+        """Chat prompt should produce multiple messages prepended to input."""
+
+        class Out(BaseModel):
+            v: str
+
+        mock_deps["compile_to_messages"].return_value = [
+            SystemMessage(content="You are a guard."),
+            HumanMessage(content="Check: test input"),
+        ]
+
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=Out(v="ok"))
+        mock_deps["model"].with_structured_output.return_value = structured
+
+        await Agent(_EXTRACT_CFG).extract(Out, messages=[])
+
+        invoke_args = structured.ainvoke.call_args[0][0]
+        assert len(invoke_args) == 2
+        assert isinstance(invoke_args[0], SystemMessage)
+        assert isinstance(invoke_args[1], HumanMessage)
