@@ -7,7 +7,7 @@ Provides ``load_persona()`` — a cached lookup that returns a frozen
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.data.queries import find_persona
 from app.data.session import get_session
@@ -21,6 +21,8 @@ class PersonaContext:
     display_name: str
     persona_lite: str
     persona_core: str = ""
+    appearance_detail: str = ""
+    error_messages: dict = field(default_factory=dict)
     bot_name: str | None = None
 
 
@@ -46,6 +48,8 @@ async def load_persona(persona_id: str) -> PersonaContext:
             display_name=persona.display_name,
             persona_lite=persona.persona_lite or "",
             persona_core=persona.persona_core or "",
+            appearance_detail=persona.appearance_detail or "",
+            error_messages=persona.error_messages or {},
         )
     else:
         ctx = PersonaContext(

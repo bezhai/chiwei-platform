@@ -12,9 +12,8 @@ import asyncio
 import logging
 
 from app.api.middleware import get_lane
-from app.data.queries import find_persona
-from app.data.session import get_session
 from app.infra.rabbitmq import SAFETY_CHECK, mq
+from app.memory._persona import load_persona
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +21,9 @@ logger = logging.getLogger(__name__)
 async def fetch_guard_message(persona_or_bot: str) -> str:
     """Fetch persona-specific guard rejection message, with fallback."""
     try:
-        async with get_session() as s:
-            persona = await find_persona(s, persona_or_bot)
-        if persona and persona.error_messages:
-            return persona.error_messages.get("guard", "不想讨论这个话题呢~")
+        pc = await load_persona(persona_or_bot)
+        if pc.error_messages:
+            return pc.error_messages.get("guard", "不想讨论这个话题呢~")
     except Exception as e:
         logger.warning("Failed to get guard message for %s: %s", persona_or_bot, e)
     return "不想讨论这个话题呢~"

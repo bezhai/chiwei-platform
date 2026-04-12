@@ -42,10 +42,10 @@ from app.data.queries import (
     find_gray_config,
     find_latest_reply_style,
     find_message_content,
-    find_persona,
     resolve_persona_id,
 )
 from app.data.session import get_session
+from app.memory._persona import load_persona
 from app.memory.context import build_inner_context
 
 _MAIN_CFG = AgentConfig("main", "main-chat-model", "main")
@@ -206,7 +206,7 @@ async def _build_and_stream(
     # Create agent and stream
     from dataclasses import replace as _replace
 
-    cfg = _MAIN_CFG if not model_id else _replace(_MAIN_CFG, model_id=model_id)
+    cfg = _replace(_MAIN_CFG, model_id=model_id)
     agent = Agent(cfg, tools=ALL_TOOLS)
     state = StreamState()
 
@@ -294,18 +294,11 @@ class _BotCtx:
 
     def error_message(self, kind: str) -> str:
         """Return persona-specific error message."""
-        persona = self._persona
-        if persona and hasattr(persona, "error_messages") and persona.error_messages:
-            return persona.error_messages.get(
-                kind, f"{self._display_name()}遇到了问题QAQ"
+        if self._persona and self._persona.error_messages:
+            return self._persona.error_messages.get(
+                kind, f"{self._persona.display_name}遇到了问题QAQ"
             )
-        return f"{self._display_name()}遇到了问题QAQ"
-
-    def _display_name(self) -> str:
-        persona = self._persona
-        if persona and hasattr(persona, "display_name") and persona.display_name:
-            return persona.display_name
-        return self.persona_id
+        return f"{self.persona_id}遇到了问题QAQ"
 
 
 async def _load_bot_context(
@@ -315,26 +308,23 @@ async def _load_bot_context(
     chat_type: str,
 ) -> _BotCtx:
     """Load persona data and voice content, return a lightweight context."""
-    async with get_session() as s:
-        if persona_id:
-            pid = persona_id
-        else:
+    if persona_id:
+        pid = persona_id
+    else:
+        async with get_session() as s:
             pid = await resolve_persona_id(s, bot_name)
 
-        persona = await find_persona(s, pid)
-        voice_content = await find_latest_reply_style(s, pid) or ""
+    pc = await load_persona(pid)
 
-    identity = persona.persona_lite if persona else ""
-    appearance = (
-        persona.appearance_detail if persona and persona.appearance_detail else ""
-    )
+    async with get_session() as s:
+        voice_content = await find_latest_reply_style(s, pid) or ""
 
     return _BotCtx(
         persona_id=pid,
-        identity=identity,
-        appearance=appearance,
+        identity=pc.persona_lite,
+        appearance=pc.appearance_detail,
         voice_content=voice_content,
-        persona=persona,
+        persona=pc,
     )
 
 
