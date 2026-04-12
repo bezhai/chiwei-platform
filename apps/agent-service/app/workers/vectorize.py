@@ -288,4 +288,9 @@ async def cron_scan_pending_messages(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    asyncio.run(start_vectorize_consumer())
+
+    async def _main():
+        await start_vectorize_consumer()
+        await asyncio.Future()  # keep alive
+
+    asyncio.run(_main())
