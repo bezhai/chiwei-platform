@@ -36,9 +36,13 @@ logger = logging.getLogger(__name__)
 
 async def task_executor_job(ctx) -> None:
     """arq cron: poll and execute long-running tasks."""
+    from app.infra.config import settings as _s
     from app.long_tasks.executor import poll_and_execute_tasks
 
-    await poll_and_execute_tasks(batch_size=5, lock_timeout_seconds=1800)
+    await poll_and_execute_tasks(
+        batch_size=_s.long_task_batch_size,
+        lock_timeout_seconds=_s.long_task_lock_timeout,
+    )
 
 
 # ---------------------------------------------------------------------------
