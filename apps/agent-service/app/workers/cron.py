@@ -7,7 +7,7 @@ Business logic lives in ``app.memory.*``, ``app.life.*``.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.workers.common import cron_error_handler, for_each_persona, prod_only
 
@@ -66,7 +66,8 @@ async def cron_generate_monthly_plan(ctx) -> None:
 async def cron_generate_weekly_plan(ctx) -> None:
     from app.life.schedule import generate_weekly_plan
 
-    tomorrow = date.today() + timedelta(days=1)
+    _CST = timezone(timedelta(hours=8))
+    tomorrow = datetime.now(_CST).date() + timedelta(days=1)
 
     async def _gen(persona_id: str) -> None:
         await generate_weekly_plan(persona_id, target_date=tomorrow)
@@ -103,6 +104,7 @@ async def cron_life_engine_tick(ctx) -> None:
 @cron_error_handler()
 @prod_only
 async def cron_glimpse(ctx) -> None:
+    from app.data import queries as Q
     from app.data.queries import list_all_persona_ids
     from app.data.session import get_session
     from app.life.glimpse import run_glimpse
@@ -112,8 +114,6 @@ async def cron_glimpse(ctx) -> None:
 
     for persona_id in persona_ids:
         try:
-            from app.data import queries as Q
-
             async with get_session() as s:
                 state = await Q.find_latest_life_state(s, persona_id)
             if not state or state.activity_type != "browsing":

@@ -245,32 +245,19 @@ async def _process_for_persona(base_payload: dict, persona_id: str) -> None:
         t_publish_start = time.monotonic()
         base_response["published_at"] = int(time.time() * 1000)
 
-        if remaining or messages_sent == 0:
-            await mq.publish(
-                CHAT_RESPONSE,
-                {
-                    **base_response,
-                    "content": remaining or full_content,
-                    "full_content": clean_full,
-                    "status": "success",
-                    "part_index": messages_sent,
-                    "is_last": True,
-                },
-                lane=lane,
-            )
-        else:
-            await mq.publish(
-                CHAT_RESPONSE,
-                {
-                    **base_response,
-                    "content": "",
-                    "full_content": clean_full,
-                    "status": "success",
-                    "part_index": messages_sent,
-                    "is_last": True,
-                },
-                lane=lane,
-            )
+        final_content = (remaining or full_content) if (remaining or messages_sent == 0) else ""
+        await mq.publish(
+            CHAT_RESPONSE,
+            {
+                **base_response,
+                "content": final_content,
+                "full_content": clean_full,
+                "status": "success",
+                "part_index": messages_sent,
+                "is_last": True,
+            },
+            lane=lane,
+        )
 
         # Full pipeline timing
         t_end = time.monotonic()
