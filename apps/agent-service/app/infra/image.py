@@ -66,10 +66,11 @@ class _ImageClient:
         router = _lane_router()
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.inner_http_secret}",
             "X-Trace-Id": get_trace_id() or "",
             **router.get_headers(),
         }
+        if settings.inner_http_secret:
+            headers["Authorization"] = f"Bearer {settings.inner_http_secret}"
         if app_name:
             headers["X-App-Name"] = app_name
         return headers

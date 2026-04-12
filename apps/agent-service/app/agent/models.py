@@ -168,7 +168,7 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
             }
 
         _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)
-        return result
+        return dict(result)
     except Exception as e:
         logger.error("DB lookup failed for model %s: %s", model_id, e)
         raise
@@ -216,10 +216,11 @@ async def resolve_model_info(
     return info
 
 
-_PROTECTED_KWARGS = frozenset({
-    "api_key", "base_url", "model", "deployment_name",
-    "use_responses_api", "openai_api_key", "openai_api_type",
-    "openai_api_version", "azure_endpoint",
+_ALLOWED_KWARGS = frozenset({
+    "temperature", "top_p", "max_tokens", "reasoning_effort",
+    "stop", "seed", "n", "frequency_penalty", "presence_penalty",
+    "logit_bias", "response_format", "stream_options",
+    "metadata", "tags",
 })
 
 
@@ -243,8 +244,8 @@ async def build_chat_model(
     )
     client_type = info.get("client_type", "")
 
-    # Filter out protected fields to prevent kwargs overriding DB-resolved config
-    safe_kwargs = {k: v for k, v in kwargs.items() if k not in _PROTECTED_KWARGS}
+    # Only pass through known-safe model behavior kwargs
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in _ALLOWED_KWARGS}
 
     if client_type == "azure-http":
         return AzureChatOpenAI(

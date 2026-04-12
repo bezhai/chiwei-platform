@@ -143,7 +143,7 @@ async def vectorize_message(message: ConversationMessage) -> bool:
     }
 
     # 9. Upsert into both collections
-    await asyncio.gather(
+    results = await asyncio.gather(
         qdrant.upsert_hybrid_vectors(
             collection_name="messages_recall",
             point_id=vector_id,
@@ -159,6 +159,9 @@ async def vectorize_message(message: ConversationMessage) -> bool:
             payloads=[cluster_payload],
         ),
     )
+    if not all(results):
+        logger.error("Qdrant upsert partially failed for %s: %s", message.message_id, results)
+        return False
     return True
 
 

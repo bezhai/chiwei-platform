@@ -130,7 +130,7 @@ async def search_group_history(
 
     Args:
         query: 你隐约记得的内容（自然语言描述）
-        limit: 返回的锚点消息数量（默认10条，每条会附带上下文）
+        limit: 返回的锚点消息数量（默认5条，每条会附带上下文）
     """
     context = get_runtime(AgentContext).context
     limit = max(1, min(limit, 10))

@@ -160,7 +160,7 @@ class _RabbitMQ:
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 
-    async def _ensurelane_queue(self, route: Route, lane: str) -> None:
+    async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
         """Lazily declare a lane queue on first publish."""
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
@@ -194,11 +194,11 @@ class _RabbitMQ:
             lane = None
 
         if lane:
-            await self._ensurelane_queue(route, lane)
+            await self._ensure_lane_queue(route, lane)
 
         actual_rk = _lane_rk(route.rk, lane)
 
-        msg_headers: dict[str, Any] = headers or {}
+        msg_headers: dict[str, Any] = dict(headers) if headers else {}
         if delay_ms is not None:
             msg_headers["x-delay"] = delay_ms
 

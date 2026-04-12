@@ -4,35 +4,6 @@ Date: 2026-04-12
 
 Scope: reviewed findings that are still worth tracking. Fixed items, retracted items, and step-by-step review notes are intentionally omitted.
 
-## P1
-
-### `app/infra/rabbitmq.py`: current rename/removal breaks existing imports and infra tests
-
-File:
-
-- `apps/agent-service/app/infra/rabbitmq.py`
-
-The current worktree removes `PROACTIVE_EVAL` from the module and renames `_current_lane` / `_lane_queue` to `current_lane` / `lane_queue`. Existing call sites still import the old names:
-
-- `apps/agent-service/app/life/proactive.py`
-- `apps/agent-service/app/workers/vectorize.py`
-- `apps/agent-service/app/workers/post_consumer.py`
-- `apps/agent-service/app/workers/chat_consumer.py`
-- `apps/agent-service/tests/unit/infra/test_rabbitmq.py`
-
-`uv run pytest tests/unit/infra` now fails during collection:
-
-```text
-ImportError: cannot import name 'PROACTIVE_EVAL' from 'app.infra.rabbitmq'
-```
-
-There is also a likely typo in the new method name `_ensurelane_queue`, which lost the underscore between `ensure` and `lane`.
-
-Suggested fix:
-
-- Either keep backward-compatible aliases/exports for `_current_lane`, `_lane_queue`, and `PROACTIVE_EVAL`, or update every importer and test in the same change.
-- Rename `_ensurelane_queue` back to `_ensure_lane_queue` or to a consistent public `ensure_lane_queue` name.
-
 ## P2
 
 ### `app/data`: `akao_schedule` upsert is not concurrency-safe for non-daily plans
@@ -207,3 +178,15 @@ Suggested fix:
 ```python
 msg_headers: dict[str, Any] = dict(headers) if headers else {}
 ```
+
+### `app/infra/rabbitmq.py`: lane queue helper name looks like a typo
+
+File:
+
+- `apps/agent-service/app/infra/rabbitmq.py`
+
+The helper is currently named `_ensurelane_queue()`, while surrounding names use readable snake_case such as `lane_queue()`, `_lane_rk()`, and `_declared_lane_queues`. This does not break runtime because the only call site uses the same name, but it makes the private API look accidental.
+
+Suggested fix:
+
+- Rename `_ensurelane_queue()` to `_ensure_lane_queue()`.

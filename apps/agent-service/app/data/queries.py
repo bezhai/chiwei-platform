@@ -274,7 +274,7 @@ async def set_safety_status(
         ),
         {
             "status": status,
-            "result": (json.dumps(result_json) if result_json else None),
+            "result": (json.dumps(result_json) if result_json is not None else None),
             "session_id": session_id,
         },
     )
@@ -704,7 +704,7 @@ async def find_latest_relationship_memory(
         )
         .where(RelationshipMemoryV2.persona_id == persona_id)
         .where(RelationshipMemoryV2.user_id == user_id)
-        .order_by(RelationshipMemoryV2.version.desc())
+        .order_by(RelationshipMemoryV2.version.desc(), RelationshipMemoryV2.id.desc())
         .limit(1)
     )
     row = result.one_or_none()
@@ -734,6 +734,7 @@ async def find_relationship_memories_batch(
         .order_by(
             RelationshipMemoryV2.user_id,
             RelationshipMemoryV2.version.desc(),
+            RelationshipMemoryV2.id.desc(),
         )
     )
     return {row.user_id: (row.core_facts, row.impression) for row in result.all()}

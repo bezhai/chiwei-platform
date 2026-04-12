@@ -253,7 +253,7 @@ class TestBuildChatModel:
             with pytest.raises(ModelBuildError, match="lookup failed"):
                 await build_chat_model("any-model")
 
-    async def test_kwargs_cannot_override_protected_fields(self):
+    async def test_kwargs_allowlist_filters_dangerous_fields(self):
         info = _make_model_info()
         with patch.object(
             mod,
@@ -263,10 +263,10 @@ class TestBuildChatModel:
         ):
             model = await build_chat_model(
                 "test-model",
-                api_key="attacker-key",
-                base_url="https://evil.com",
-                model="evil-model",
-                reasoning_effort="low",  # non-protected, should pass through
+                api_key="attacker-key",       # not in allowlist → filtered
+                base_url="https://evil.com",  # not in allowlist → filtered
+                model="evil-model",           # not in allowlist → filtered
+                reasoning_effort="low",       # in allowlist → passes through
             )
             assert model.model_name == "gpt-4o-mini"
 
