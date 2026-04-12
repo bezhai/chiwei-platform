@@ -133,6 +133,15 @@ async def _call_glimpse_llm(
 # ---------------------------------------------------------------------------
 
 
+def _strict_bool(value: object) -> bool:
+    """Parse bool strictly — string "false"/"False" → False, not True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return bool(value)
+
+
 def parse_glimpse_response(raw: str) -> dict:
     """Parse glimpse LLM JSON response."""
     try:
@@ -141,9 +150,9 @@ def parse_glimpse_response(raw: str) -> dict:
         if start >= 0 and end > start:
             data = json.loads(raw[start:end])
             return {
-                "interesting": bool(data.get("interesting", False)),
+                "interesting": _strict_bool(data.get("interesting", False)),
                 "observation": data.get("observation", ""),
-                "want_to_speak": bool(data.get("want_to_speak", False)),
+                "want_to_speak": _strict_bool(data.get("want_to_speak", False)),
                 "speak_reason": data.get("speak_reason", ""),
                 "stimulus": data.get("stimulus"),
                 "target_message_id": data.get("target_message_id"),

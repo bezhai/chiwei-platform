@@ -322,9 +322,9 @@ async def api_list_schedules(
 
 
 @router.get("/api/schedule/current", tags=["Schedule"])
-async def api_current_schedule():
+async def api_current_schedule(persona_id: str):
     """Return the current schedule context (same as injected into prompt)."""
-    context = await build_schedule_context()
+    context = await build_schedule_context(persona_id)
     return {"context": context}
 
 

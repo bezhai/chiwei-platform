@@ -64,9 +64,9 @@ async def api_list_schedules(
 
 
 @router.get("/current")
-async def api_current_schedule():
+async def api_current_schedule(persona_id: str):
     """返回当前时刻的日程上下文（和注入 prompt 的内容一致）"""
-    context = await build_schedule_context()
+    context = await build_schedule_context(persona_id)
     return {"context": context}
 
 

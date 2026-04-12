@@ -399,7 +399,7 @@ async def generate_daily_plan(
             persona_name=persona_display_name,
         )
 
-        if "PASS" in critic_result:
+        if critic_result.strip().upper().startswith("PASS"):
             logger.info("Daily plan passed critic on attempt %d", attempt + 1)
             break
 
@@ -438,7 +438,7 @@ async def generate_daily_plan(
 # ---------------------------------------------------------------------------
 
 
-async def build_schedule_context(persona_id: str | None = None) -> str:
+async def build_schedule_context(persona_id: str) -> str:
     """Build the current daily schedule context for system prompt injection.
 
     Only injects today's journal content. Monthly/weekly plans are not
@@ -450,7 +450,7 @@ async def build_schedule_context(persona_id: str | None = None) -> str:
     today = now.strftime("%Y-%m-%d")
 
     async with get_session() as s:
-        daily = await Q.find_plan_for_period(s, "daily", today, today, persona_id or "")
+        daily = await Q.find_plan_for_period(s, "daily", today, today, persona_id)
 
     if not daily:
         return ""
