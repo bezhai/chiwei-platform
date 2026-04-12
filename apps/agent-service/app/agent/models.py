@@ -130,7 +130,7 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
     if cached is not _SENTINEL:
         value, expire_at = cached  # type: ignore[misc]
         if now < expire_at:
-            return value  # type: ignore[return-value]
+            return dict(value) if value is not None else None
 
     try:
         from app.data.queries import (
@@ -166,12 +166,12 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
                 "client_type": provider.client_type or "openai",
                 "use_proxy": provider.use_proxy,
             }
+
+        _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)
+        return result
     except Exception as e:
         logger.error("DB lookup failed for model %s: %s", model_id, e)
-        return None
-
-    _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)
-    return result
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +202,10 @@ async def resolve_model_info(
     Shared by build_chat_model and embedding/image_gen modules.
     Raises ModelBuildError on missing / inactive / incomplete config.
     """
-    info = await _get_model_and_provider_info(model_id)
+    try:
+        info = await _get_model_and_provider_info(model_id)
+    except Exception as exc:
+        raise ModelBuildError(model_id, "model info lookup failed") from exc
     if info is None:
         raise ModelBuildError(model_id, "model info not found")
     if not info.get("is_active", True):
@@ -211,6 +214,13 @@ async def resolve_model_info(
     if missing:
         raise ModelBuildError(model_id, f"missing fields: {', '.join(missing)}")
     return info
+
+
+_PROTECTED_KWARGS = frozenset({
+    "api_key", "base_url", "model", "deployment_name",
+    "use_responses_api", "openai_api_key", "openai_api_type",
+    "openai_api_version", "azure_endpoint",
+})
 
 
 async def build_chat_model(
@@ -233,6 +243,9 @@ async def build_chat_model(
     )
     client_type = info.get("client_type", "")
 
+    # Filter out protected fields to prevent kwargs overriding DB-resolved config
+    safe_kwargs = {k: v for k, v in kwargs.items() if k not in _PROTECTED_KWARGS}
+
     if client_type == "azure-http":
         return AzureChatOpenAI(
             openai_api_type="azure",
@@ -241,7 +254,7 @@ async def build_chat_model(
             openai_api_key=info["api_key"],
             deployment_name=info["model_name"],
             max_retries=max_retries,
-            **kwargs,
+            **safe_kwargs,
         )
 
     if client_type == "google":
@@ -254,50 +267,25 @@ async def build_chat_model(
             "base_url": info["base_url"],
             "model": info["model_name"],
             "max_retries": max_retries,
-            **kwargs,
+            **safe_kwargs,
         }
         if info.get("use_proxy") and settings.forward_proxy_url:
             params["client_args"] = {"proxy": settings.forward_proxy_url}
         return ChatGoogleGenerativeAI(**params)
 
-    if client_type == "openai-responses":
-        params = {
-            "api_key": info["api_key"],
-            "base_url": info["base_url"],
-            "model": info["model_name"],
-            "max_retries": max_retries,
-            "use_responses_api": True,
-            **kwargs,
-        }
-        if info.get("use_proxy"):
-            _inject_proxy(params)
-        return ChatOpenAI(**params)
-
-    if client_type == "deepseek":
-        params = {
-            "api_key": info["api_key"],
-            "base_url": info["base_url"],
-            "model": info["model_name"],
-            "max_retries": max_retries,
-            "use_responses_api": False,
-            **kwargs,
-        }
-        if info.get("use_proxy"):
-            _inject_proxy(params)
-        return _ReasoningChatOpenAI(**params)
-
-    # default: openai completions
+    # OpenAI-compatible: openai-responses / deepseek / default completions
+    cls = _ReasoningChatOpenAI if client_type == "deepseek" else ChatOpenAI
     params = {
         "api_key": info["api_key"],
         "base_url": info["base_url"],
         "model": info["model_name"],
         "max_retries": max_retries,
-        "use_responses_api": False,
-        **kwargs,
+        "use_responses_api": client_type == "openai-responses",
+        **safe_kwargs,
     }
     if info.get("use_proxy"):
         _inject_proxy(params)
-    return ChatOpenAI(**params)
+    return cls(**params)
 
 
 def _inject_proxy(params: dict[str, Any]) -> None:

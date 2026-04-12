@@ -108,10 +108,25 @@ class TestCacheExpiry:
         # Insert expired entry
         mod._model_info_cache["expired-model"] = (info, time.monotonic() - 1)
 
-        # The expired entry should trigger a DB lookup, which will fail
-        # (no mock) and return None. This proves the cache was bypassed.
-        result = await _get_model_and_provider_info("expired-model")
-        assert result is None  # DB lookup failed because nothing is mocked
+        # Expired entry triggers fresh DB lookup → mock DB to confirm bypass
+        with patch(
+            "app.data.session.get_session",
+            side_effect=RuntimeError("no DB"),
+        ):
+            with pytest.raises(RuntimeError, match="no DB"):
+                await _get_model_and_provider_info("expired-model")
+
+
+class TestCacheIsolation:
+    async def test_cache_returns_copy(self):
+        info = _make_model_info()
+        mod._model_info_cache["copy-test"] = (info, time.monotonic() + 999)
+
+        result1 = await _get_model_and_provider_info("copy-test")
+        result1["model_name"] = "mutated"
+
+        result2 = await _get_model_and_provider_info("copy-test")
+        assert result2["model_name"] == "gpt-4o-mini"  # original, not mutated
 
 
 class TestCacheClear:
@@ -227,6 +242,33 @@ class TestBuildChatModel:
         ):
             model = await build_chat_model("proxy-model")
             assert model.openai_proxy == "http://proxy:8080"
+
+    async def test_raises_on_db_error(self):
+        with patch.object(
+            mod,
+            "_get_model_and_provider_info",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("connection refused"),
+        ):
+            with pytest.raises(ModelBuildError, match="lookup failed"):
+                await build_chat_model("any-model")
+
+    async def test_kwargs_cannot_override_protected_fields(self):
+        info = _make_model_info()
+        with patch.object(
+            mod,
+            "_get_model_and_provider_info",
+            new_callable=AsyncMock,
+            return_value=info,
+        ):
+            model = await build_chat_model(
+                "test-model",
+                api_key="attacker-key",
+                base_url="https://evil.com",
+                model="evil-model",
+                reasoning_effort="low",  # non-protected, should pass through
+            )
+            assert model.model_name == "gpt-4o-mini"
 
     async def test_google_dispatch(self):
         info = _make_model_info(client_type="google")
