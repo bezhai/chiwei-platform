@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from inner_shared import hello as shared_hello
+from inner_shared.logger import setup_logging
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
@@ -12,6 +13,7 @@ from app.infra.config import settings
 from app.infra.qdrant import init_collections
 
 load_dotenv()
+setup_logging(log_dir="/logs/agent-service", log_file="app.log")
 
 logger = logging.getLogger(__name__)
 
