@@ -91,43 +91,23 @@ async def stream_chat(
             CHAT_PIPELINE_DURATION.labels(stage="prep").observe(
                 time.monotonic() - t_entry
             )
-            pre_blocking = gray_config.get("pre_blocking", "false")
 
             # Resolve guard message
             effective_persona = persona_id or header_vars["app_name"].get() or ""
             guard_message = await fetch_guard_message(effective_persona)
 
-            # 3. Pre-safety check
+            # 3. Pre-safety check (parallel with streaming)
             pre_task = asyncio.create_task(
                 run_pre_check(parsed.render(), persona_id=effective_persona)
             )
 
-            if pre_blocking != "false":
-                # === Blocking mode: wait for pre before streaming ===
-                pre_result = await pre_task
-                if pre_result.is_blocked:
-                    logger.info(
-                        "Message blocked: message_id=%s, reason=%s",
-                        message_id,
-                        pre_result.block_reason,
-                    )
-                    yield guard_message
-                    return
-
-                async for text in _build_and_stream(
-                    message_id, gray_config, request_id, persona_id=persona_id
-                ):
-                    yield text
-            else:
-                # === Parallel mode: pre runs in background ===
-                logger.info("Parallel mode: message_id=%s", message_id)
-                raw_stream = _build_and_stream(
-                    message_id, gray_config, request_id, persona_id=persona_id
-                )
-                async for text in _buffer_until_pre(
-                    raw_stream, pre_task, message_id, guard_message
-                ):
-                    yield text
+            raw_stream = _build_and_stream(
+                message_id, gray_config, request_id, persona_id=persona_id
+            )
+            async for text in _buffer_until_pre(
+                raw_stream, pre_task, message_id, guard_message
+            ):
+                yield text
 
 
 # ---------------------------------------------------------------------------
