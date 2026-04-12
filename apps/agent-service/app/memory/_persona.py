@@ -20,6 +20,7 @@ class PersonaContext:
     persona_id: str
     display_name: str
     persona_lite: str
+    persona_core: str = ""
     bot_name: str | None = None
 
 
@@ -44,6 +45,7 @@ async def load_persona(persona_id: str) -> PersonaContext:
             persona_id=persona_id,
             display_name=persona.display_name,
             persona_lite=persona.persona_lite or "",
+            persona_core=persona.persona_core or "",
         )
     else:
         ctx = PersonaContext(

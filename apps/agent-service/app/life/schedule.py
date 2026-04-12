@@ -14,12 +14,13 @@ from datetime import date, datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.agent.tools.search import search_web
 from app.data import queries as Q
 from app.data.models import AkaoSchedule
 from app.data.session import get_session
 from app.infra.config import settings
+from app.memory._persona import load_persona
 
 _IDEATION_CFG = AgentConfig(
     "schedule_daily_ideation", "offline-model", "schedule-ideation",
@@ -54,16 +55,6 @@ def _get_season(month: int) -> str:
 def _schedule_model() -> str:
     """Model used for schedule generation (shares diary_model config)."""
     return settings.diary_model
-
-
-def _extract_text(content: object) -> str:
-    """Extract plain text from LLM response content."""
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return content or ""
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +99,7 @@ async def _run_ideation(
             "season": season,
         },
     )
-    return _extract_text(result.content)
+    return extract_text(result.content)
 
 
 async def _run_writer(
@@ -138,7 +129,7 @@ async def _run_writer(
             "critic_feedback": critic_feedback,
         },
     )
-    return _extract_text(result.content)
+    return extract_text(result.content)
 
 
 async def _run_critic(
@@ -155,7 +146,7 @@ async def _run_critic(
             "recent_schedules": recent_schedules_text,
         },
     )
-    return _extract_text(result.content)
+    return extract_text(result.content)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +159,7 @@ async def generate_monthly_plan(
 ) -> str | None:
     """Generate a monthly plan -- broad life direction and mood for the month."""
     if target_date is None:
-        target_date = date.today()
+        target_date = datetime.now(CST).date()
 
     month_start = target_date.replace(day=1)
     if month_start.month == 12:
@@ -196,20 +187,19 @@ async def generate_monthly_plan(
     season = _get_season(month_start.month)
     month_cn = f"{month_start.year}年{month_start.month}月"
 
-    async with get_session() as s:
-        persona = await Q.find_persona(s, persona_id)
+    pc = await load_persona(persona_id)
 
     result = await Agent(_MONTHLY_CFG).run(
         messages=[HumanMessage(content="制定本月计划")],
         prompt_vars={
-            "persona_name": persona.display_name if persona else persona_id,
-            "persona_core": persona.persona_core if persona else "",
+            "persona_name": pc.display_name,
+            "persona_core": pc.persona_core,
             "month": month_cn,
             "season": season,
             "previous_monthly_plan": prev_plan_text,
         },
     )
-    content = _extract_text(result.content)
+    content = extract_text(result.content)
 
     if not content:
         logger.warning("LLM returned empty monthly plan for %s", month_cn)
@@ -242,7 +232,7 @@ async def generate_weekly_plan(
 ) -> str | None:
     """Generate a weekly plan -- based on the monthly plan."""
     if target_date is None:
-        target_date = date.today()
+        target_date = datetime.now(CST).date()
 
     week_start = target_date - timedelta(days=target_date.weekday())
     week_end = week_start + timedelta(days=6)
@@ -283,20 +273,19 @@ async def generate_weekly_plan(
         f"~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
     )
 
-    async with get_session() as s:
-        persona = await Q.find_persona(s, persona_id)
+    pc = await load_persona(persona_id)
 
     result = await Agent(_WEEKLY_CFG).run(
         messages=[HumanMessage(content="制定本周计划")],
         prompt_vars={
-            "persona_name": persona.display_name if persona else persona_id,
-            "persona_core": persona.persona_core if persona else "",
+            "persona_name": pc.display_name,
+            "persona_core": pc.persona_core,
             "week": week_desc,
             "monthly_plan": monthly_text,
             "previous_weekly_plan": prev_plan_text,
         },
     )
-    content = _extract_text(result.content)
+    content = extract_text(result.content)
 
     if not content:
         logger.warning("LLM returned empty weekly plan for %s", week_desc)
@@ -333,7 +322,7 @@ async def generate_daily_plan(
     Writer rewrites up to 2 times if Critic rejects.
     """
     if target_date is None:
-        target_date = date.today()
+        target_date = datetime.now(CST).date()
 
     date_str = target_date.isoformat()
 
@@ -346,10 +335,9 @@ async def generate_daily_plan(
         return existing.content
 
     # ---- Collect context ----
-    async with get_session() as s:
-        persona = await Q.find_persona(s, persona_id)
-    persona_core = persona.persona_core if persona else ""
-    persona_display_name = persona.display_name if persona else persona_id
+    pc = await load_persona(persona_id)
+    persona_core = pc.persona_core
+    persona_display_name = pc.display_name
 
     # Weekly plan
     week_start = target_date - timedelta(days=target_date.weekday())
@@ -437,7 +425,7 @@ async def generate_daily_plan(
                 period_end=date_str,
                 persona_id=persona_id,
                 content=schedule_text,
-                model="offline-model",
+                model=_schedule_model(),
             ),
         )
 

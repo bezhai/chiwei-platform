@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.data import queries as Q
 from app.data.session import get_session
 
@@ -86,21 +86,6 @@ def parse_wake_me_at(value: str | None, now: datetime) -> datetime | None:
     except (ValueError, IndexError):
         logger.warning("Invalid wake_me_at: %s", value)
         return None
-
-
-# ---------------------------------------------------------------------------
-# Response text extractor
-# ---------------------------------------------------------------------------
-
-
-def extract_text(content: object) -> str:
-    """Extract plain text from an LLM response content (str or list[dict])."""
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        ).strip()
-    return (content or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +190,11 @@ async def _think(
     persona_id: str,
 ) -> dict:
     """Call LLM to decide the next life state."""
-    async with get_session() as s:
-        persona = await Q.find_persona(s, persona_id)
+    from app.memory._persona import load_persona
 
-    persona_name = persona.display_name if persona else persona_id
-    persona_lite = persona.persona_lite if persona else ""
+    pc = await load_persona(persona_id)
+    persona_name = pc.display_name
+    persona_lite = pc.persona_lite
 
     today = now.strftime("%Y-%m-%d")
     async with get_session() as s:

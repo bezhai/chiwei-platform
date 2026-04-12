@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.core import Agent, AgentConfig, extract_text
 from app.data import queries as Q
 from app.data.models import ExperienceFragment
 from app.data.session import get_session
@@ -126,15 +126,6 @@ async def _call_glimpse_llm(
         },
     )
     return extract_text(result.content)
-
-
-def extract_text(content: object) -> str:
-    """Extract plain text from LLM response content."""
-    if isinstance(content, list):
-        return "".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
-        ).strip()
-    return (content or "").strip()
 
 
 # ---------------------------------------------------------------------------
