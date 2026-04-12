@@ -25,8 +25,13 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 _TYPE_MAP = {
-    "茶会": 1, "综合同人展": 2, "ONLY": 3, "线上活动": 6,
-    "官方活动": 7, "综合展": 8, "同好包场": 10,
+    "茶会": 1,
+    "综合同人展": 2,
+    "ONLY": 3,
+    "线上活动": 6,
+    "官方活动": 7,
+    "综合展": 8,
+    "同好包场": 10,
 }
 _MAX_RETRIES = 3
 
@@ -57,11 +62,17 @@ def main():
 """,
     )
     parser.add_argument("--query", "-q", help="搜索关键词")
-    parser.add_argument("--is-online", action="store_true", default=None, help="仅线上活动")
+    parser.add_argument(
+        "--is-online", action="store_true", default=None, help="仅线上活动"
+    )
     parser.add_argument("--recent-days", type=int, help="最近 N 天内的活动")
-    parser.add_argument("--activity-status", choices=["ongoing", "ended"], help="活动状态")
+    parser.add_argument(
+        "--activity-status", choices=["ongoing", "ended"], help="活动状态"
+    )
     parser.add_argument("--activity-type", help="活动类型")
-    parser.add_argument("--ticket-status", type=int, choices=[1, 2, 3, 4, 5], help="售票状态")
+    parser.add_argument(
+        "--ticket-status", type=int, choices=[1, 2, 3, 4, 5], help="售票状态"
+    )
 
     args = parser.parse_args()
 
@@ -110,19 +121,21 @@ def main():
     # 结构化输出
     events = []
     for item in raw_events:
-        events.append({
-            "name": item.get("name", ""),
-            "type": item.get("type", ""),
-            "tag": item.get("tag", ""),
-            "enter_time": _format_time(item.get("enterTime")),
-            "end_time": _format_time(item.get("endTime")),
-            "wanna_go_count": item.get("wannaGoCount", 0),
-            "city_name": item.get("cityName", "") or "",
-            "enter_address": item.get("enterAddress", ""),
-            "ended": item.get("ended", False) or False,
-            "is_online": item.get("isOnline", 0) == 1,
-            "event_url": f"https://www.allcpp.cn/allcpp/event/event.do?event={item['id']}",
-        })
+        events.append(
+            {
+                "name": item.get("name", ""),
+                "type": item.get("type", ""),
+                "tag": item.get("tag", ""),
+                "enter_time": _format_time(item.get("enterTime")),
+                "end_time": _format_time(item.get("endTime")),
+                "wanna_go_count": item.get("wannaGoCount", 0),
+                "city_name": item.get("cityName", "") or "",
+                "enter_address": item.get("enterAddress", ""),
+                "ended": item.get("ended", False) or False,
+                "is_online": item.get("isOnline", 0) == 1,
+                "event_url": f"https://www.allcpp.cn/allcpp/event/event.do?event={item['id']}",
+            }
+        )
 
     output = {"total": result.get("total", len(events)), "events": events}
     print(json.dumps(output, ensure_ascii=False, indent=2))

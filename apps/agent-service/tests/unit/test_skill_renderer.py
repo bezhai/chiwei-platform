@@ -27,20 +27,13 @@ class TestRenderSkill:
     @pytest.mark.asyncio
     async def test_no_preprocessing_no_variables(self):
         skill = _make_skill("Just some instructions.")
-        result = await render_skill(skill, "")
+        result = await render_skill(skill)
         assert result == "Just some instructions."
-
-    @pytest.mark.asyncio
-    async def test_arguments_substitution(self):
-        skill = _make_skill("Query: $ARGUMENTS\nDo it.")
-        result = await render_skill(skill, "SELECT * FROM users")
-        assert "SELECT * FROM users" in result
-        assert "$ARGUMENTS" not in result
 
     @pytest.mark.asyncio
     async def test_skill_dir_substitution(self):
         skill = _make_skill("Script at $SKILL_DIR/scripts/run.py")
-        result = await render_skill(skill, "")
+        result = await render_skill(skill)
         assert "/sandbox/skills/test_skill/scripts/run.py" in result
         assert "$SKILL_DIR" not in result
 
@@ -50,35 +43,15 @@ class TestRenderSkill:
         mock_sandbox.execute = AsyncMock(return_value="Linux 5.15 x86_64")
 
         skill = _make_skill(
-            raw_body='## Info\n\n```\n!`uname -a`\n```\n\n## Instructions\n\nShow info.',
+            raw_body="## Info\n\n```\n!`uname -a`\n```\n\n## Instructions\n\nShow info.",
             preprocessing=(PreprocessDirective(command="uname -a", label="Info"),),
         )
 
-        result = await render_skill(skill, "")
+        result = await render_skill(skill)
 
         mock_sandbox.execute.assert_called_once_with("uname -a", "test_skill")
         assert "Linux 5.15 x86_64" in result
         assert "!`uname -a`" not in result
-
-    @pytest.mark.asyncio
-    @patch("app.skills.renderer.sandbox_client")
-    async def test_preprocessing_with_arguments(self, mock_sandbox):
-        mock_sandbox.execute = AsyncMock(return_value="hello world")
-
-        skill = _make_skill(
-            raw_body='```\n!`echo "$ARGUMENTS"`\n```\n\nDone.',
-            preprocessing=(
-                PreprocessDirective(command='echo "$ARGUMENTS"', label=""),
-            ),
-        )
-
-        result = await render_skill(skill, "hello world")
-
-        # 预处理命令中的 $ARGUMENTS 应被替换
-        mock_sandbox.execute.assert_called_once_with(
-            'echo "hello world"', "test_skill"
-        )
-        assert "hello world" in result
 
     @pytest.mark.asyncio
     @patch("app.skills.renderer.sandbox_client")
@@ -90,7 +63,7 @@ class TestRenderSkill:
             preprocessing=(PreprocessDirective(command="broken_cmd", label=""),),
         )
 
-        result = await render_skill(skill, "")
+        result = await render_skill(skill)
 
         assert "预处理失败" in result
         assert "sandbox down" in result
@@ -99,19 +72,17 @@ class TestRenderSkill:
     @pytest.mark.asyncio
     @patch("app.skills.renderer.sandbox_client")
     async def test_multiple_preprocessing(self, mock_sandbox):
-        mock_sandbox.execute = AsyncMock(
-            side_effect=["table_schema", "query_result"]
-        )
+        mock_sandbox.execute = AsyncMock(side_effect=["table_schema", "query_result"])
 
         skill = _make_skill(
-            raw_body='```\n!`get_schema`\n```\n\n```\n!`run_query`\n```\n\nAnalyze.',
+            raw_body="```\n!`get_schema`\n```\n\n```\n!`run_query`\n```\n\nAnalyze.",
             preprocessing=(
                 PreprocessDirective(command="get_schema", label="Schema"),
                 PreprocessDirective(command="run_query", label="Query"),
             ),
         )
 
-        result = await render_skill(skill, "")
+        result = await render_skill(skill)
 
         assert mock_sandbox.execute.call_count == 2
         assert "table_schema" in result

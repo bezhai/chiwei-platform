@@ -32,7 +32,7 @@ for mod_name in ("_sqlite3", "sqlite3", "sqlite3.dbapi2"):
 @pytest.fixture(autouse=True)
 def _clear_model_cache():
     """每个测试前后清空 ModelBuilder 的 model_info 缓存"""
-    from app.agents.infra.model_builder import clear_model_info_cache
+    from app.agent.models import clear_model_info_cache
 
     clear_model_info_cache()
     yield
@@ -46,7 +46,7 @@ def _clear_model_cache():
 def mock_langfuse_client():
     """Mock Langfuse client，阻止真实 HTTP 调用"""
     mock_client = MagicMock()
-    with patch("app.agents.infra.langfuse_client._client", mock_client):
+    with patch("app.agent.prompts._client", mock_client):
         yield mock_client
 
 

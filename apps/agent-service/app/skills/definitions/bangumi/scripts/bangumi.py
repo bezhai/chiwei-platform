@@ -31,14 +31,24 @@ TOKEN = os.environ.get("SANDBOX_BANGUMI_TOKEN", "")
 SUBJECT_TYPE_MAP = {"书籍": 1, "动画": 2, "音乐": 3, "游戏": 4, "三次元": 6}
 SUBJECT_TYPE_REVERSE = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 6: "三次元"}
 CAREER_MAP = {
-    "制作人员": "producer", "漫画家": "mangaka", "音乐人": "artist",
-    "声优": "seiyu", "作家": "writer", "绘师": "illustrator", "演员": "actor",
+    "制作人员": "producer",
+    "漫画家": "mangaka",
+    "音乐人": "artist",
+    "声优": "seiyu",
+    "作家": "writer",
+    "绘师": "illustrator",
+    "演员": "actor",
 }
 CHARACTER_TYPE_REVERSE = {1: "角色", 2: "机体", 3: "舰船", 4: "组织"}
 PERSON_TYPE_REVERSE = {1: "个人", 2: "公司", 3: "组合"}
 CAREER_REVERSE = {
-    "producer": "制作人员", "mangaka": "漫画家", "artist": "音乐人",
-    "seiyu": "声优", "writer": "作家", "illustrator": "绘师", "actor": "演员",
+    "producer": "制作人员",
+    "mangaka": "漫画家",
+    "artist": "音乐人",
+    "seiyu": "声优",
+    "writer": "作家",
+    "illustrator": "绘师",
+    "actor": "演员",
 }
 
 
@@ -73,6 +83,7 @@ def _request(path, method="GET", params=None, data=None):
 
 
 # === 数据简化函数 ===
+
 
 def _simplify_subject(s):
     rating = s.get("rating") or {}
@@ -112,11 +123,14 @@ def _simplify_person(p):
 
 # === 子命令实现 ===
 
+
 def cmd_search_subjects(args):
     body = {"keyword": args.keyword, "sort": args.sort}
     filt = {}
     if args.types:
-        filt["type"] = [SUBJECT_TYPE_MAP[t] for t in args.types if t in SUBJECT_TYPE_MAP]
+        filt["type"] = [
+            SUBJECT_TYPE_MAP[t] for t in args.types if t in SUBJECT_TYPE_MAP
+        ]
     if args.tags:
         filt["tag"] = args.tags
     if args.start_date:
@@ -196,29 +210,35 @@ def cmd_get_person(args):
 def cmd_get_related(args):
     """获取关联数据: subject→characters/persons/relations, character→subjects/persons, person→characters/subjects"""
     entity = args.entity  # subject/character/person
-    rel = args.relation   # characters/persons/relations/subjects
+    rel = args.relation  # characters/persons/relations/subjects
     resp = _request(f"/v0/{entity}s/{args.id}/{rel}")
 
     # 根据关联类型简化
     simplifiers = {
         "characters": lambda item: {
-            "id": item["id"], "name": item.get("name"),
+            "id": item["id"],
+            "name": item.get("name"),
             "type": CHARACTER_TYPE_REVERSE.get(item.get("type"), ""),
             "relation": item.get("relation", ""),
         },
         "persons": lambda item: {
-            "id": item["id"], "name": item.get("name"),
+            "id": item["id"],
+            "name": item.get("name"),
             "type": PERSON_TYPE_REVERSE.get(item.get("type"), ""),
             "relation": item.get("relation", ""),
             "career": [CAREER_REVERSE.get(c, c) for c in (item.get("career") or [])],
         },
         "relations": lambda item: {
-            "id": item["id"], "name": item.get("name"), "name_cn": item.get("name_cn"),
+            "id": item["id"],
+            "name": item.get("name"),
+            "name_cn": item.get("name_cn"),
             "type": SUBJECT_TYPE_REVERSE.get(item.get("type"), ""),
             "relation": item.get("relation", ""),
         },
         "subjects": lambda item: {
-            "id": item["id"], "name": item.get("name"), "name_cn": item.get("name_cn"),
+            "id": item["id"],
+            "name": item.get("name"),
+            "name_cn": item.get("name_cn"),
             "type": SUBJECT_TYPE_REVERSE.get(item.get("type"), ""),
             "staff": item.get("staff", ""),
         },
@@ -238,8 +258,15 @@ def main():
     # search-subjects
     p = sub.add_parser("search-subjects", help="搜索条目（动画、书籍、游戏等）")
     p.add_argument("--keyword", "-k", help="搜索关键词")
-    p.add_argument("--types", nargs="+", choices=["书籍", "动画", "音乐", "游戏", "三次元"], help="条目类型")
-    p.add_argument("--sort", default="match", choices=["match", "heat", "score"], help="排序方式")
+    p.add_argument(
+        "--types",
+        nargs="+",
+        choices=["书籍", "动画", "音乐", "游戏", "三次元"],
+        help="条目类型",
+    )
+    p.add_argument(
+        "--sort", default="match", choices=["match", "heat", "score"], help="排序方式"
+    )
     p.add_argument("--tags", nargs="+", help="标签筛选（多个为且关系）")
     p.add_argument("--start-date", help="开始日期 YYYY-MM-DD（包含）")
     p.add_argument("--end-date", help="结束日期 YYYY-MM-DD（不包含）")
@@ -257,7 +284,12 @@ def main():
     # search-persons
     p = sub.add_parser("search-persons", help="搜索现实人物（声优、漫画家等）")
     p.add_argument("--keyword", "-k", required=True, help="搜索关键词")
-    p.add_argument("--careers", nargs="+", choices=["制作人员", "漫画家", "音乐人", "声优", "作家", "绘师", "演员"], help="职业筛选")
+    p.add_argument(
+        "--careers",
+        nargs="+",
+        choices=["制作人员", "漫画家", "音乐人", "声优", "作家", "绘师", "演员"],
+        help="职业筛选",
+    )
     p.add_argument("--limit", type=int, default=10, help="返回数量")
     p.add_argument("--offset", type=int, default=0, help="分页偏移")
 
@@ -275,9 +307,19 @@ def main():
 
     # get-related
     p = sub.add_parser("get-related", help="获取关联数据")
-    p.add_argument("--entity", required=True, choices=["subject", "character", "person"], help="实体类型")
+    p.add_argument(
+        "--entity",
+        required=True,
+        choices=["subject", "character", "person"],
+        help="实体类型",
+    )
     p.add_argument("--id", type=int, required=True, help="实体 ID")
-    p.add_argument("--relation", required=True, choices=["characters", "persons", "relations", "subjects"], help="关联类型")
+    p.add_argument(
+        "--relation",
+        required=True,
+        choices=["characters", "persons", "relations", "subjects"],
+        help="关联类型",
+    )
 
     args = parser.parse_args()
     if not args.command:

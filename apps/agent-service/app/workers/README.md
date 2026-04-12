@@ -14,10 +14,10 @@
 
 ```bash
 # 使用 arq 命令行工具启动
-arq app.workers.unified_worker.UnifiedWorkerSettings
+arq app.workers.arq_settings.WorkerSettings
 
 # 或使用 Python 模块方式
-python -m arq app.workers.unified_worker.UnifiedWorkerSettings
+python -m arq app.workers.arq_settings.WorkerSettings
 ```
 
 ## 包含的功能
@@ -125,11 +125,11 @@ make k8s-logs SVC=arq-worker
 ### 添加新任务
 
 1. 在相应的模块中定义任务函数
-2. 在 `unified_worker.py` 中导入
+2. 在 `arq_settings.py` 中导入
 3. 添加到 `functions` 列表或 `cron_jobs` 列表
 
 ```python
-# unified_worker.py
+# arq_settings.py
 
 from app.your_module import your_new_task
 

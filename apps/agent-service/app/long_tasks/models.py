@@ -5,7 +5,7 @@ from sqlalchemy import Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.orm.models import Base
+from app.data.models import Base
 
 
 class LongTask(Base):

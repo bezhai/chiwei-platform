@@ -4,7 +4,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.future import select
 
-from app.orm.base import AsyncSessionLocal
+from app.data.session import async_session as AsyncSessionLocal
 
 from .enums import TaskStatus
 from .models import LongTask

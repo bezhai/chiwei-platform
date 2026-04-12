@@ -5,8 +5,11 @@ import socket
 import traceback
 
 from .crud import lock_tasks, update_task_failure, update_task_success
+from .enums import TaskStatus
 from .models import LongTask
 from .registry import get_task_class
+
+_VALID_SUCCESS_STATUSES = frozenset({TaskStatus.COMMIT, TaskStatus.DONE})
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,14 @@ async def execute_single_task(task: LongTask) -> None:
         # 3. 执行任务
         new_result, new_status = await task_instance.execute()
 
-        # 4. 更新成功状态
+        # 4. 校验返回状态
+        if new_status not in _VALID_SUCCESS_STATUSES:
+            raise ValueError(
+                f"execute() returned invalid status '{new_status}', "
+                f"expected one of {sorted(_VALID_SUCCESS_STATUSES)}"
+            )
+
+        # 5. 更新成功状态
         await update_task_success(
             task_id=task.id, new_result=new_result, new_status=new_status
         )
