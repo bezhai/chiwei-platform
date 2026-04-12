@@ -77,6 +77,10 @@ async def build_chat_context(
 
     Returns a ``ChatContext`` dataclass with all fields the pipeline needs.
     """
+    # Reset ContextVars before any early return to prevent stale values
+    is_proactive_var.set(False)
+    proactive_stimulus_var.set("")
+
     l1_results = await quick_search(message_id=message_id, limit=limit)
 
     if not l1_results:

@@ -356,7 +356,15 @@ async def _buffer_until_pre(
             )
 
             if pre_task in done:
-                pre_result = pre_task.result()
+                try:
+                    pre_result = pre_task.result()
+                except Exception as e:
+                    logger.error("pre_task exception (fail-open): %s", e)
+                    get_task.cancel()
+                    for b in buffer:
+                        yield b
+                    buffer.clear()
+                    break  # -> Phase 2 passthrough
                 pre_dur = time.monotonic() - t_buf_start
                 CHAT_PIPELINE_DURATION.labels(stage="pre_safety").observe(pre_dur)
                 logger.info(
@@ -420,8 +428,16 @@ async def _buffer_until_pre(
 
         # Edge: pre done between loop iterations
         if buffer:
-            pre_result = pre_task.result()
-            if pre_result.is_blocked:
+            try:
+                pre_result = pre_task.result()
+            except Exception as e:
+                logger.error("pre_task exception (fail-open, edge): %s", e)
+                for b in buffer:
+                    yield b
+                buffer.clear()
+                # fall through to Phase 2
+                pre_result = None
+            if pre_result and pre_result.is_blocked:
                 logger.info(
                     "Parallel blocked: message_id=%s, reason=%s",
                     message_id,

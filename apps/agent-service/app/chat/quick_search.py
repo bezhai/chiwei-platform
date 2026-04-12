@@ -111,6 +111,10 @@ async def quick_search(
             tuple[ConversationMessage, str | None, str | None, str | None]
         ] = [(row[0], row[1], row[2], row[3]) for row in root_rows]
 
+        # Truncate root chain to limit (keep most recent, trigger message last)
+        if len(root_messages) > limit:
+            root_messages = root_messages[-limit:]
+
         # 3. 如果数量不足，补充同一chat_id的其他消息
         if len(root_messages) < limit:
             needed = limit - len(root_messages)
