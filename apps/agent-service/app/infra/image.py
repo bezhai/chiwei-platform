@@ -77,6 +77,53 @@ class _ImageClient:
     def _base_url(self) -> str:
         return _lane_router().base_url("tool-service")
 
+    # -- internal transport --
+
+    async def _post(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        timeout: int | None = None,
+        app_name: str = "",
+    ) -> dict | None:
+        """POST to tool-service, unwrap ``{success, data, message}`` envelope.
+
+        Returns ``data`` dict on success, ``None`` on any failure.
+        """
+        actual_timeout = timeout or self._timeout
+        start = time.monotonic()
+        status = "network_error"
+        try:
+            async with httpx.AsyncClient(timeout=actual_timeout) as client:
+                resp = await client.post(
+                    f"{self._base_url()}{path}",
+                    json=payload,
+                    headers=self._auth_headers(app_name=app_name),
+                )
+                status = str(resp.status_code)
+                resp.raise_for_status()
+                body = resp.json()
+                if body.get("success") and body.get("data"):
+                    return body["data"]
+                logger.error(
+                    "tool-service %s failed: %s", path, body.get("message", "unknown")
+                )
+                return None
+        except httpx.TimeoutException:
+            logger.warning("tool-service %s timeout: %ds", path, actual_timeout)
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "tool-service %s HTTP %d: %s", path, e.response.status_code, e.response.text
+            )
+            return None
+        except Exception as e:
+            logger.error("tool-service %s failed: %s", path, e)
+            return None
+        finally:
+            _record_outbound("POST", status, time.monotonic() - start)
+
     # -- process (download from Lark -> TOS -> return URL) --
 
     async def process_image(
@@ -87,69 +134,23 @@ class _ImageClient:
     ) -> dict[str, str] | None:
         """Process an image, returns ``{"url": ..., "file_name": ...}``."""
         app_name = bot_name or get_app_name() or ""
-        start = time.monotonic()
-        status = "network_error"
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url()}/api/image-pipeline/process",
-                    json={"message_id": message_id, "file_key": file_key},
-                    headers=self._auth_headers(app_name=app_name),
-                )
-                status = str(resp.status_code)
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("success") and data.get("data"):
-                    result = data["data"]
-                    return {
-                        "url": result["url"],
-                        "file_name": result.get("file_name", ""),
-                    }
-                logger.error(
-                    "Image process failed: %s",
-                    data.get("message", "unknown"),
-                )
-                return None
-        except httpx.TimeoutException:
-            logger.warning("Image process timeout: %ds", self._timeout)
-            return None
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Image process HTTP %d: %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except Exception as e:
-            logger.error("Image process call failed: %s", e)
-            return None
-        finally:
-            _record_outbound("POST", status, time.monotonic() - start)
+        data = await self._post(
+            "/api/image-pipeline/process",
+            {"message_id": message_id, "file_key": file_key},
+            app_name=app_name,
+        )
+        if data:
+            return {"url": data["url"], "file_name": data.get("file_name", "")}
+        return None
 
     # -- get_url (TOS pre-signed URL) --
 
     async def get_url(self, file_name: str) -> str | None:
         """Get a pre-signed URL for a TOS file_name."""
-        start = time.monotonic()
-        status = "network_error"
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url()}/api/image-pipeline/get-url",
-                    json={"file_name": file_name},
-                    headers=self._auth_headers(),
-                )
-                status = str(resp.status_code)
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("success") and data.get("data"):
-                    return data["data"]["url"]
-                return None
-        except Exception as e:
-            logger.warning("Get image URL failed: %s - %s", file_name, e)
-            return None
-        finally:
-            _record_outbound("POST", status, time.monotonic() - start)
+        data = await self._post(
+            "/api/image-pipeline/get-url", {"file_name": file_name}
+        )
+        return data["url"] if data else None
 
     # -- upload base64 to Lark --
 
@@ -158,79 +159,23 @@ class _ImageClient:
     ) -> str | None:
         """Upload a base64 image to Lark, return image_key."""
         app_name = bot_name or get_app_name() or ""
-        start = time.monotonic()
-        status = "network_error"
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url()}/api/image-pipeline/upload-base64",
-                    json={"base64_data": base64_data},
-                    headers=self._auth_headers(app_name=app_name),
-                )
-                status = str(resp.status_code)
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("success") and data.get("data"):
-                    return data["data"]["image_key"]
-                logger.error(
-                    "Base64 upload failed: %s",
-                    data.get("message", "unknown"),
-                )
-                return None
-        except httpx.TimeoutException:
-            logger.warning("Base64 upload timeout: %ds", self._timeout)
-            return None
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Base64 upload HTTP %d: %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except Exception as e:
-            logger.error("Base64 upload failed: %s", e)
-            return None
-        finally:
-            _record_outbound("POST", status, time.monotonic() - start)
+        data = await self._post(
+            "/api/image-pipeline/upload-base64",
+            {"base64_data": base64_data},
+            app_name=app_name,
+        )
+        return data["image_key"] if data else None
 
     # -- upload to TOS --
 
     async def upload_to_tos(self, source_type: str, data: str) -> str | None:
         """Upload image to TOS (compress + store), return pre-signed URL."""
-        start = time.monotonic()
-        status = "network_error"
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    f"{self._base_url()}/api/image-pipeline/to-tos",
-                    json={"source_type": source_type, "data": data},
-                    headers=self._auth_headers(),
-                )
-                status = str(resp.status_code)
-                resp.raise_for_status()
-                body = resp.json()
-                if body.get("success") and body.get("data"):
-                    return body["data"]["url"]
-                logger.error(
-                    "Upload to TOS failed: %s",
-                    body.get("message", "unknown"),
-                )
-                return None
-        except httpx.TimeoutException:
-            logger.warning("Upload to TOS timeout")
-            return None
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Upload to TOS HTTP %d: %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except Exception as e:
-            logger.error("Upload to TOS failed: %s", e)
-            return None
-        finally:
-            _record_outbound("POST", status, time.monotonic() - start)
+        result = await self._post(
+            "/api/image-pipeline/to-tos",
+            {"source_type": source_type, "data": data},
+            timeout=60,
+        )
+        return result["url"] if result else None
 
     # -- download as base64 --
 

@@ -6,11 +6,9 @@ Supports both pure-dense and hybrid (dense + sparse, RRF fusion) collections.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
-import numpy as np
-from qdrant_client import QdrantClient
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import (
     Distance,
@@ -30,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 class _Qdrant:
-    """Thin wrapper around QdrantClient with domain-specific helpers."""
+    """Thin async wrapper around AsyncQdrantClient."""
 
     def __init__(self) -> None:
-        self.client = QdrantClient(
+        self.client = AsyncQdrantClient(
             host=settings.qdrant_service_host,
             port=settings.qdrant_service_port,
             api_key=settings.qdrant_service_api_key,
@@ -47,7 +45,7 @@ class _Qdrant:
 
     async def create_collection(self, collection_name: str, vector_size: int) -> bool:
         try:
-            self.client.create_collection(
+            await self.client.create_collection(
                 collection_name=collection_name,
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
             )
@@ -61,7 +59,7 @@ class _Qdrant:
     ) -> bool:
         """Create a collection with dense + sparse vector support."""
         try:
-            self.client.create_collection(
+            await self.client.create_collection(
                 collection_name=collection_name,
                 vectors_config={
                     "dense": VectorParams(size=dense_size, distance=Distance.COSINE),
@@ -77,14 +75,6 @@ class _Qdrant:
             logger.warning("Failed to create hybrid collection: %s", e)
             return False
 
-    async def delete_collection(self, collection_name: str) -> bool:
-        try:
-            self.client.delete_collection(collection_name=collection_name)
-            return True
-        except Exception as e:
-            logger.error("Failed to delete collection: %s", e)
-            return False
-
     # ------------------------------------------------------------------
     # Upsert
     # ------------------------------------------------------------------
@@ -97,7 +87,7 @@ class _Qdrant:
         payloads: list[dict[str, Any]] | None = None,
     ) -> bool:
         try:
-            self.client.upsert(
+            await self.client.upsert(
                 collection_name=collection,
                 points=models.Batch(
                     ids=ids,
@@ -131,7 +121,7 @@ class _Qdrant:
                 },
                 payload=payload,
             )
-            self.client.upsert(collection_name=collection_name, points=[point])
+            await self.client.upsert(collection_name=collection_name, points=[point])
             return True
         except Exception as e:
             logger.error("Failed to upsert hybrid vectors: %s", e)
@@ -140,86 +130,6 @@ class _Qdrant:
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
-
-    async def search_vectors(
-        self,
-        collection_name: str,
-        query_vector: list[float],
-        limit: int = 10,
-    ) -> list[dict[str, Any]]:
-        try:
-            results = self.client.search(
-                collection_name=collection_name,
-                query_vector=query_vector,
-                limit=limit,
-            )
-            return [
-                {"id": hit.id, "score": hit.score, "payload": hit.payload}
-                for hit in results
-            ]
-        except Exception as e:
-            logger.error("Vector search failed: %s", e)
-            return []
-
-    async def search_vectors_with_score_boost(
-        self,
-        collection_name: str,
-        query_vector: list[float],
-        query_filter: Filter | None = None,
-        limit: int = 10,
-        score_threshold: float = 0.8,
-        time_boost_factor: float = 0.1,
-    ) -> list[dict[str, Any]]:
-        """Search with time-decay score boosting for recency weighting."""
-        try:
-            results = self.client.search(
-                collection_name=collection_name,
-                query_vector=query_vector,
-                query_filter=query_filter,
-                limit=limit * 2,
-            )
-            if not results:
-                return []
-
-            now_ts = datetime.now().timestamp()
-            weighted: list[dict[str, Any]] = []
-
-            for hit in results:
-                if hit.score < score_threshold:
-                    continue
-
-                # Extract timestamp from payload
-                payload = getattr(hit, "payload", None)
-                if payload is not None and hasattr(payload, "get"):
-                    msg_ts = payload.get("timestamp", now_ts)
-                else:
-                    msg_ts = now_ts
-                if isinstance(msg_ts, str):
-                    try:
-                        msg_ts = float(msg_ts)
-                    except (ValueError, TypeError):
-                        msg_ts = now_ts
-
-                hours_ago = (now_ts - msg_ts) / 3600
-                time_weight = float(np.exp(-hours_ago * time_boost_factor))
-                sort_score = hit.score + time_weight * time_boost_factor
-
-                weighted.append(
-                    {
-                        "id": hit.id,
-                        "score": hit.score,
-                        "payload": hit.payload,
-                        "sort_score": sort_score,
-                        "time_weight": time_weight,
-                    }
-                )
-
-            weighted.sort(key=lambda x: (x["score"], x["time_weight"]), reverse=True)
-            return weighted[:limit]
-
-        except Exception as e:
-            logger.error("Score-boosted search failed: %s", e)
-            return []
 
     async def hybrid_search(
         self,
@@ -234,7 +144,7 @@ class _Qdrant:
         """Hybrid dense + sparse search with RRF fusion."""
         try:
             prefetch_count = prefetch_limit or limit * 5
-            results = self.client.query_points(
+            results = await self.client.query_points(
                 collection_name=collection_name,
                 prefetch=[
                     Prefetch(
