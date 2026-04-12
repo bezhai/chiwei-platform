@@ -107,9 +107,9 @@ async def submit_proactive_chat(
         session.add(msg)
 
     # Publish to chat_request queue
-    from app.infra.rabbitmq import _current_lane
+    from app.infra.rabbitmq import current_lane
 
-    lane = _current_lane()
+    lane = current_lane()
     await mq.publish(
         CHAT_REQUEST,
         {

@@ -30,8 +30,8 @@ from app.data.session import get_session
 from app.infra.rabbitmq import (
     CHAT_REQUEST,
     CHAT_RESPONSE,
-    _current_lane,
-    _lane_queue,
+    current_lane,
+    lane_queue,
     mq,
 )
 from app.workers.common import mq_error_handler
@@ -335,7 +335,7 @@ async def start_chat_consumer() -> None:
     """Connect MQ and start consuming the chat_request queue."""
     await mq.connect()
     await mq.declare_topology()
-    lane = _current_lane()
-    queue = _lane_queue(CHAT_REQUEST.queue, lane)
+    lane = current_lane()
+    queue = lane_queue(CHAT_REQUEST.queue, lane)
     await mq.consume(queue, handle_chat_request)
     logger.info("Chat request consumer started (queue=%s)", queue)

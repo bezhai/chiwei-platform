@@ -19,8 +19,8 @@ from app.data.session import get_session
 from app.infra.rabbitmq import (
     RECALL,
     SAFETY_CHECK,
-    _current_lane,
-    _lane_queue,
+    current_lane,
+    lane_queue,
     mq,
 )
 from app.workers.common import mq_error_handler
@@ -80,7 +80,7 @@ async def start_post_consumer() -> None:
     """Connect MQ and start consuming the safety_check queue."""
     await mq.connect()
     await mq.declare_topology()
-    lane = _current_lane()
-    queue = _lane_queue(SAFETY_CHECK.queue, lane)
+    lane = current_lane()
+    queue = lane_queue(SAFETY_CHECK.queue, lane)
     await mq.consume(queue, handle_safety_check)
     logger.info("Post safety consumer started (queue=%s)", queue)

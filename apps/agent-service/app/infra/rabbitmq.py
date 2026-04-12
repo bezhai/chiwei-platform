@@ -46,15 +46,12 @@ CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
 VECTORIZE = Route("vectorize", "task.vectorize")
-PROACTIVE_EVAL = Route("proactive_eval", "proactive.eval")
-
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
     VECTORIZE,
-    PROACTIVE_EVAL,
 ]
 
 # ---------------------------------------------------------------------------
@@ -63,7 +60,7 @@ ALL_ROUTES = [
 MessageHandler = Callable[[AbstractIncomingMessage], Coroutine[Any, Any, None]]
 
 
-def _current_lane() -> str | None:
+def current_lane() -> str | None:
     """Return current lane (None means prod)."""
     try:
         from app.api.middleware import get_lane
@@ -78,7 +75,7 @@ def _current_lane() -> str | None:
     return lane
 
 
-def _lane_queue(base: str, lane: str | None) -> str:
+def lane_queue(base: str, lane: str | None) -> str:
     return f"{base}_{lane}" if lane else base
 
 
@@ -133,9 +130,10 @@ class _RabbitMQ:
 
     async def declare_topology(self) -> None:
         """Declare exchange, queues, bindings, DLX (lane-isolated)."""
-        assert self._channel is not None, "must call connect() first"
+        if self._channel is None:
+            raise RuntimeError("must call connect() first")
 
-        lane = _current_lane()
+        lane = current_lane()
 
         # DLX + DLQ
         dlx = await self._channel.declare_exchange(
@@ -154,7 +152,7 @@ class _RabbitMQ:
 
         for route in ALL_ROUTES:
             q = await self._channel.declare_queue(
-                _lane_queue(route.queue, lane),
+                lane_queue(route.queue, lane),
                 durable=True,
                 arguments=_build_queue_args(route.rk, lane),
             )
@@ -162,14 +160,15 @@ class _RabbitMQ:
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 
-    async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
+    async def _ensurelane_queue(self, route: Route, lane: str) -> None:
         """Lazily declare a lane queue on first publish."""
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
             return
-        assert self._channel is not None, "must call connect() first"
+        if self._channel is None:
+            raise RuntimeError("must call connect() first")
         q = await self._channel.declare_queue(
-            _lane_queue(route.queue, lane),
+            lane_queue(route.queue, lane),
             durable=True,
             arguments=_build_queue_args(route.rk, lane),
         )
@@ -186,15 +185,16 @@ class _RabbitMQ:
         lane: str | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Publish a message. *lane* defaults to current lane; pass None for prod."""
-        assert self._exchange is not None, "must call declare_topology() first"
+        if self._exchange is None:
+            raise RuntimeError("must call declare_topology() first")
 
         if lane is ...:
-            lane = _current_lane()
+            lane = current_lane()
         if lane == "prod":
             lane = None
 
         if lane:
-            await self._ensure_lane_queue(route, lane)
+            await self._ensurelane_queue(route, lane)
 
         actual_rk = _lane_rk(route.rk, lane)
 
@@ -212,7 +212,8 @@ class _RabbitMQ:
 
     async def consume(self, queue_name: str, callback: MessageHandler) -> None:
         """Start consuming from a queue."""
-        assert self._channel is not None, "must call connect() first"
+        if self._channel is None:
+            raise RuntimeError("must call connect() first")
         queue = await self._channel.get_queue(queue_name)
         await queue.consume(callback)
         logger.info("Consuming queue: %s", queue_name)

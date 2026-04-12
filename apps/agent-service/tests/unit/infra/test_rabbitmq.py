@@ -10,15 +10,14 @@ from app.infra.rabbitmq import (
     CHAT_RESPONSE,
     DLX_NAME,
     EXCHANGE_NAME,
-    PROACTIVE_EVAL,
     RECALL,
     SAFETY_CHECK,
     VECTORIZE,
     Route,
     _build_queue_args,
-    _current_lane,
-    _lane_queue,
     _lane_rk,
+    current_lane,
+    lane_queue,
 )
 
 
@@ -26,16 +25,16 @@ from app.infra.rabbitmq import (
 # _lane_queue / _lane_rk
 # ---------------------------------------------------------------------------
 class TestLaneQueue:
-    """_lane_queue appends lane suffix when lane is non-None."""
+    """lane_queue appends lane suffix when lane is non-None."""
 
     def test_prod_returns_base(self):
-        assert _lane_queue("chat_request", None) == "chat_request"
+        assert lane_queue("chat_request", None) == "chat_request"
 
     def test_lane_appends_suffix(self):
-        assert _lane_queue("chat_request", "dev") == "chat_request_dev"
+        assert lane_queue("chat_request", "dev") == "chat_request_dev"
 
     def test_lane_with_hyphen(self):
-        assert _lane_queue("recall", "feat-v2") == "recall_feat-v2"
+        assert lane_queue("recall", "feat-v2") == "recall_feat-v2"
 
 
 class TestLaneRk:
@@ -93,25 +92,25 @@ class TestBuildQueueArgs:
 
 
 # ---------------------------------------------------------------------------
-# _current_lane
+# current_lane
 # ---------------------------------------------------------------------------
 class TestCurrentLane:
-    """_current_lane reads from trace context or LANE env var."""
+    """current_lane reads from HTTP context or LANE env var."""
 
     def test_no_env_returns_none(self):
         with patch.dict("os.environ", {}, clear=False):
             os_env = {"LANE": ""}
             with patch.dict("os.environ", os_env):
                 with patch(
-                    "app.infra.rabbitmq._current_lane",
-                    wraps=_current_lane,
+                    "app.infra.rabbitmq.current_lane",
+                    wraps=current_lane,
                 ):
                     # Mock get_lane to return None (no trace context)
                     with patch(
                         "app.api.middleware.get_lane",
                         return_value=None,
                     ):
-                        result = _current_lane()
+                        result = current_lane()
                         assert result is None
 
     def test_env_lane_dev(self):
@@ -120,7 +119,7 @@ class TestCurrentLane:
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": "dev"}):
-                result = _current_lane()
+                result = current_lane()
                 assert result == "dev"
 
     def test_env_lane_prod_returns_none(self):
@@ -130,7 +129,7 @@ class TestCurrentLane:
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": "prod"}):
-                result = _current_lane()
+                result = current_lane()
                 assert result is None
 
     def test_trace_context_takes_precedence(self):
@@ -139,13 +138,13 @@ class TestCurrentLane:
             return_value="feat-v2",
         ):
             with patch.dict("os.environ", {"LANE": "dev"}):
-                result = _current_lane()
+                result = current_lane()
                 assert result == "feat-v2"
 
     def test_trace_import_failure_falls_back_to_env(self):
         """If trace module raises, falls back to LANE env var."""
         with patch(
-            "app.infra.rabbitmq._current_lane",
+            "app.infra.rabbitmq.current_lane",
             side_effect=None,
         ):
             # Simulate import failure by making get_lane raise
@@ -154,7 +153,7 @@ class TestCurrentLane:
                 side_effect=ImportError("no trace"),
             ):
                 with patch.dict("os.environ", {"LANE": "staging"}):
-                    result = _current_lane()
+                    result = current_lane()
                     assert result == "staging"
 
     def test_empty_lane_env_returns_none(self):
@@ -163,7 +162,7 @@ class TestCurrentLane:
             return_value=None,
         ):
             with patch.dict("os.environ", {"LANE": ""}):
-                result = _current_lane()
+                result = current_lane()
                 assert result is None
 
 
@@ -185,12 +184,11 @@ class TestRouteConstants:
             SAFETY_CHECK,
             RECALL,
             VECTORIZE,
-            PROACTIVE_EVAL,
         }
         assert set(ALL_ROUTES) == expected
 
-    def test_all_routes_have_six_entries(self):
-        assert len(ALL_ROUTES) == 6
+    def test_all_routes_have_five_entries(self):
+        assert len(ALL_ROUTES) == 5
 
     def test_each_route_has_queue_and_rk(self):
         for route in ALL_ROUTES:

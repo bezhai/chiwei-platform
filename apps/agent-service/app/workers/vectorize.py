@@ -30,7 +30,7 @@ from app.data.queries import (
 from app.data.session import get_session
 from app.infra.image import image_client
 from app.infra.qdrant import qdrant
-from app.infra.rabbitmq import VECTORIZE, _current_lane, _lane_queue, mq
+from app.infra.rabbitmq import VECTORIZE, current_lane, lane_queue, mq
 from app.infra.redis import get_redis
 from app.workers.common import cron_error_handler, mq_error_handler
 
@@ -215,8 +215,8 @@ async def start_vectorize_consumer() -> None:
     """Connect MQ and start consuming the vectorize queue."""
     await mq.connect()
     await mq.declare_topology()
-    lane = _current_lane()
-    queue = _lane_queue(VECTORIZE.queue, lane)
+    lane = current_lane()
+    queue = lane_queue(VECTORIZE.queue, lane)
     await mq.consume(queue, handle_vectorize)
     logger.info("Vectorize consumer started (queue=%s)", queue)
 
