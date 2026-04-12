@@ -48,7 +48,7 @@ from pydantic import BaseModel
 
 from app.agent.context import AgentContext
 from app.agent.models import build_chat_model
-from app.agent.prompts import get_prompt
+from app.agent.prompts import compile_to_messages, get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +120,10 @@ class Agent:
     # internal
     # ------------------------------------------------------------------
 
-    async def _build_agent(self, prompt_vars: dict[str, Any]) -> Any:
-        """Create a LangGraph agent with the configured prompt and tools."""
+    async def _build_agent(
+        self, prompt_vars: dict[str, Any]
+    ) -> tuple[Any, list[BaseMessage]]:
+        """Create a LangGraph agent and compile prompt messages."""
         if not self._cfg.prompt_id:
             raise ValueError(
                 f"Agent({self._cfg.trace_name}).run/stream requires a non-empty "
@@ -129,17 +131,18 @@ class Agent:
             )
         langfuse_prompt = get_prompt(self._cfg.prompt_id)
         model = await build_chat_model(self._cfg.model_id, **self._model_kwargs)
-        prompt = langfuse_prompt.get_langchain_prompt(
+        prompt_messages = compile_to_messages(
+            langfuse_prompt,
             currDate=datetime.now().strftime("%Y-%m-%d"),
             currTime=datetime.now().strftime("%H:%M:%S"),
             **prompt_vars,
         )
-        return create_agent(
+        agent = create_agent(
             model,
             self._tools,
-            system_prompt=prompt,
             context_schema=AgentContext,
         )
+        return agent, prompt_messages
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
@@ -164,7 +167,8 @@ class Agent:
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AIMessage:
         """Execute and return the final ``AIMessage``."""
-        agent = await self._build_agent(prompt_vars or {})
+        agent, prompt_messages = await self._build_agent(prompt_vars or {})
+        full_messages = [*prompt_messages, *messages]
         config = self._build_config()
 
         async def _invoke(msgs: Any, *, config: Any) -> AIMessage:
@@ -175,7 +179,7 @@ class Agent:
 
         return await _retry(
             _invoke,
-            messages,
+            full_messages,
             config,
             max_retries=max_retries,
             label=f"Agent({self._cfg.trace_name}).run",
@@ -189,19 +193,16 @@ class Agent:
         context: AgentContext | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[AIMessageChunk | ToolMessage, None]:
-        """Stream tokens.
-
-        Retry caveat: once tokens have been yielded, retrying would cause
-        duplicate content — so the error is re-raised instead.
-        """
-        agent = await self._build_agent(prompt_vars or {})
+        """Stream tokens."""
+        agent, prompt_messages = await self._build_agent(prompt_vars or {})
+        full_messages = [*prompt_messages, *messages]
         config = self._build_config()
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
             try:
                 async for token, _ in agent.astream(
-                    {"messages": messages},
+                    {"messages": full_messages},
                     context=context,
                     stream_mode="messages",
                     config=config,
@@ -244,8 +245,11 @@ class Agent:
 
         prompt_id = self._cfg.prompt_id
         if prompt_id:
-            system = get_prompt(prompt_id).compile(**(prompt_vars or {}))
-            messages = [SystemMessage(content=system), *messages]
+            langfuse_prompt = get_prompt(prompt_id)
+            prompt_messages = compile_to_messages(
+                langfuse_prompt, **(prompt_vars or {})
+            )
+            messages = [*prompt_messages, *messages]
 
         config = self._build_config()
         return await _retry(

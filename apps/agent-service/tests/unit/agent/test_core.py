@@ -10,7 +10,7 @@ Covers:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from openai import APITimeoutError
 from pydantic import BaseModel
 
@@ -45,14 +45,14 @@ def fake_agent():
 def mock_prompt():
     """Mock Langfuse prompt."""
     prompt = MagicMock()
-    prompt.get_langchain_prompt.return_value = "You are a helpful assistant."
-    prompt.compile.return_value = "compiled prompt"
+    prompt.type = "text"
+    prompt.compile.return_value = "You are a helpful assistant."
     return prompt
 
 
 @pytest.fixture()
 def mock_deps(fake_agent, mock_prompt):
-    """Patch build_chat_model, get_prompt, create_agent, and CallbackHandler."""
+    """Patch build_chat_model, get_prompt, create_agent, compile_to_messages, and CallbackHandler."""
     mock_model = AsyncMock()
     mock_model.with_structured_output = MagicMock()
 
@@ -71,6 +71,10 @@ def mock_deps(fake_agent, mock_prompt):
             return_value=fake_agent,
         ) as mock_create,
         patch(
+            "app.agent.core.compile_to_messages",
+            return_value=[SystemMessage(content="You are a helpful assistant.")],
+        ) as mock_compile,
+        patch(
             "app.agent.core.CallbackHandler",
             return_value=MagicMock(),
         ),
@@ -79,6 +83,7 @@ def mock_deps(fake_agent, mock_prompt):
             "build_chat_model": mock_build,
             "get_prompt": mock_get_prompt,
             "create_agent": mock_create,
+            "compile_to_messages": mock_compile,
             "agent": fake_agent,
             "model": mock_model,
             "prompt": mock_prompt,
@@ -142,10 +147,30 @@ class TestRun:
             messages=[HumanMessage(content="hi")],
             prompt_vars={"key": "val"},
         )
-        mock_deps["prompt"].get_langchain_prompt.assert_called_once()
-        call_kwargs = mock_deps["prompt"].get_langchain_prompt.call_args.kwargs
+        mock_deps["compile_to_messages"].assert_called_once()
+        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
         assert call_kwargs["key"] == "val"
         assert "currDate" in call_kwargs
+        assert "currTime" in call_kwargs
+
+    async def test_create_agent_called_without_system_prompt(self, mock_deps):
+        await Agent(_CFG).run(messages=[HumanMessage(content="hi")])
+
+        call_kwargs = mock_deps["create_agent"].call_args.kwargs
+        assert "system_prompt" not in call_kwargs or call_kwargs.get("system_prompt") is None
+
+    async def test_prompt_messages_prepended(self, mock_deps):
+        mock_deps["compile_to_messages"].return_value = [
+            SystemMessage(content="sys prompt"),
+        ]
+        user_msg = HumanMessage(content="hi")
+        await Agent(_CFG).run(messages=[user_msg])
+
+        invoke_args = mock_deps["agent"].ainvoke.call_args[0][0]
+        msgs = invoke_args["messages"]
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[0].content == "sys prompt"
+        assert msgs[-1] is user_msg
 
     async def test_retries_on_transient_error(self, mock_deps):
         mock_deps["agent"].ainvoke = AsyncMock(
@@ -393,3 +418,25 @@ class TestExtract:
         mock_deps["build_chat_model"].assert_called_once_with(
             "relationship-model", reasoning_effort="low"
         )
+
+    async def test_extract_with_chat_prompt_messages(self, mock_deps):
+        """Chat prompt should produce multiple messages prepended to input."""
+
+        class Out(BaseModel):
+            v: str
+
+        mock_deps["compile_to_messages"].return_value = [
+            SystemMessage(content="You are a guard."),
+            HumanMessage(content="Check: test input"),
+        ]
+
+        structured = AsyncMock()
+        structured.ainvoke = AsyncMock(return_value=Out(v="ok"))
+        mock_deps["model"].with_structured_output.return_value = structured
+
+        await Agent(_EXTRACT_CFG).extract(Out, messages=[])
+
+        invoke_args = structured.ainvoke.call_args[0][0]
+        assert len(invoke_args) == 2
+        assert isinstance(invoke_args[0], SystemMessage)
+        assert isinstance(invoke_args[1], HumanMessage)
