@@ -97,9 +97,11 @@ class PrometheusMiddleware:
             await response(scope, receive, send)
             return
 
-        path = request.url.path
         method = request.method
         status_code = 500
+        # Prefer route template path to avoid high-cardinality labels
+        route = scope.get("route")
+        path = route.path if route and hasattr(route, "path") else request.url.path
 
         async def send_wrapper(message: dict) -> None:
             nonlocal status_code

@@ -165,91 +165,100 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
     Returns immediately; track progress via ``make logs KEYWORD=rebuild``.
     """
-
-    async def _run():
-        from app.memory.relationships import extract_relationship_updates
-
+    # Validate before dispatching background task
+    try:
         start_dt = datetime.fromisoformat(req.start_time)
         end_dt = datetime.fromisoformat(req.end_time)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid datetime format: {e}") from e
+    if end_dt <= start_dt:
+        raise HTTPException(400, "end_time must be after start_time")
+    if not req.persona_ids or not req.chat_ids:
+        raise HTTPException(400, "persona_ids and chat_ids must not be empty")
 
-        personas: dict[str, str] = {}
-        for persona_id in req.persona_ids:
-            async with get_session() as s:
-                persona = await find_persona(s, persona_id)
-            if persona:
-                personas[persona_id] = persona.display_name or persona_id
+    async def _run():
+        try:
+            from app.data.queries import find_messages_in_range
+            from app.memory.relationships import extract_relationship_updates
 
-        total_days = (end_dt.date() - start_dt.date()).days
-        logger.info(
-            "[rebuild] Starting: %d personas, %d chats, %d days (%s ~ %s)",
-            len(personas),
-            len(req.chat_ids),
-            total_days,
-            start_dt.date(),
-            end_dt.date(),
-        )
-
-        from app.data.queries import find_messages_in_range
-
-        day = start_dt
-        day_count = 0
-        while day < end_dt:
-            next_day = day + timedelta(days=1)
-            if next_day > end_dt:
-                next_day = end_dt
-            day_start_ts = int(day.timestamp() * 1000)
-            day_end_ts = int(next_day.timestamp() * 1000)
-            day_count += 1
-            day_str = day.strftime("%m/%d")
-
-            for chat_id in req.chat_ids:
+            personas: dict[str, str] = {}
+            for persona_id in req.persona_ids:
                 async with get_session() as s:
-                    messages = await find_messages_in_range(
-                        s, chat_id, day_start_ts, day_end_ts, limit=5000
-                    )
-                if not messages:
-                    continue
+                    persona = await find_persona(s, persona_id)
+                if persona:
+                    personas[persona_id] = persona.display_name or persona_id
 
-                messages.sort(key=lambda m: m.create_time)
-                user_ids = list(
-                    {
-                        m.user_id
-                        for m in messages
-                        if m.role == "user"
-                        and m.user_id
-                        and m.user_id != "__proactive__"
-                    }
-                )
-                if not user_ids:
-                    continue
-
-                for persona_id in personas:
-                    try:
-                        await extract_relationship_updates(
-                            persona_id=persona_id,
-                            chat_id=chat_id,
-                            user_ids=user_ids,
-                            messages=messages,
-                            source="rebuild",
-                        )
-                        logger.info(
-                            "[rebuild] %s %s: %d users, %d msgs",
-                            day_str,
-                            persona_id,
-                            len(user_ids),
-                            len(messages),
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "[rebuild] %s %s failed: %s", day_str, persona_id, e
-                        )
-
+            total_days = (end_dt.date() - start_dt.date()).days
             logger.info(
-                "[rebuild] Day %d/%d (%s) done.", day_count, total_days, day_str
+                "[rebuild] Starting: %d personas, %d chats, %d days (%s ~ %s)",
+                len(personas),
+                len(req.chat_ids),
+                total_days,
+                start_dt.date(),
+                end_dt.date(),
             )
-            day = next_day
 
-        logger.info("[rebuild] All done.")
+            day = start_dt
+            day_count = 0
+            while day < end_dt:
+                next_day = day + timedelta(days=1)
+                if next_day > end_dt:
+                    next_day = end_dt
+                day_start_ts = int(day.timestamp() * 1000)
+                day_end_ts = int(next_day.timestamp() * 1000)
+                day_count += 1
+                day_str = day.strftime("%m/%d")
+
+                for chat_id in req.chat_ids:
+                    async with get_session() as s:
+                        messages = await find_messages_in_range(
+                            s, chat_id, day_start_ts, day_end_ts, limit=5000
+                        )
+                    if not messages:
+                        continue
+
+                    messages.sort(key=lambda m: m.create_time)
+                    user_ids = list(
+                        {
+                            m.user_id
+                            for m in messages
+                            if m.role == "user"
+                            and m.user_id
+                            and m.user_id != "__proactive__"
+                        }
+                    )
+                    if not user_ids:
+                        continue
+
+                    for persona_id in personas:
+                        try:
+                            await extract_relationship_updates(
+                                persona_id=persona_id,
+                                chat_id=chat_id,
+                                user_ids=user_ids,
+                                messages=messages,
+                                source="rebuild",
+                            )
+                            logger.info(
+                                "[rebuild] %s %s: %d users, %d msgs",
+                                day_str,
+                                persona_id,
+                                len(user_ids),
+                                len(messages),
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "[rebuild] %s %s failed: %s", day_str, persona_id, e
+                            )
+
+                logger.info(
+                    "[rebuild] Day %d/%d (%s) done.", day_count, total_days, day_str
+                )
+                day = next_day
+
+            logger.info("[rebuild] All done.")
+        except Exception:
+            logger.exception("[rebuild] Background task failed")
 
     asyncio.create_task(_run())
     return {
@@ -311,12 +320,13 @@ def _to_out(entry: AkaoSchedule) -> dict:
 @router.get("/api/schedule", tags=["Schedule"])
 async def api_list_schedules(
     plan_type: str | None = None,
+    persona_id: str | None = None,
     active_only: bool = True,
     limit: int = 50,
 ):
     async with get_session() as s:
         entries = await list_schedules(
-            s, plan_type=plan_type, active_only=active_only, limit=limit
+            s, plan_type=plan_type, persona_id=persona_id, active_only=active_only, limit=limit
         )
     return [_to_out(e) for e in entries]
 
