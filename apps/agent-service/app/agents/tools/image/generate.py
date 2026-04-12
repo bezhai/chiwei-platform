@@ -90,6 +90,13 @@ async def generate_image(
             if not content_blocks:
                 return "图片生成失败，请稍后重试"
 
+            # Remind model to include image markdown — this is the last text
+            # before the model generates its response, so it gets full attention.
+            refs = " ".join(f"![描述]({f})" for f in filenames)
+            content_blocks.append(
+                {"type": "text", "text": f"⚠️ 用户看不到上面的图片。你的回复里必须包含 {refs} 才能展示给用户。"}
+            )
+
             return content_blocks
 
     except Exception as e:
