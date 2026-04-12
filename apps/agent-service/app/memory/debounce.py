@@ -101,9 +101,15 @@ class DebouncedPipeline(ABC):
             )
         finally:
             self._phase2_running.discard(key)
-            # New events during phase 2 -> start next cycle
-            if self._buffers.get(key, 0) > 0:
-                asyncio.create_task(self.on_event(chat_id, persona_id))
+            # New events during phase 2 -> start next cycle (without phantom +1)
+            remaining = self._buffers.get(key, 0)
+            if remaining > 0:
+                if remaining >= self._max_buffer:
+                    asyncio.create_task(self._enter_phase2(chat_id, persona_id))
+                else:
+                    self._timers[key] = asyncio.create_task(
+                        self._phase1_timer(chat_id, persona_id)
+                    )
 
     @abstractmethod
     async def process(self, chat_id: str, persona_id: str, event_count: int) -> None:

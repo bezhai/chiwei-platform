@@ -42,7 +42,7 @@ async def generate_daily_dream(
 ) -> ExperienceFragment | None:
     """Generate a daily dream fragment from today's conversation + glimpse fragments."""
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = datetime.now(_CST).date() - timedelta(days=1)
 
     day_start = datetime(
         target_date.year, target_date.month, target_date.day, tzinfo=_CST
@@ -119,7 +119,7 @@ async def generate_weekly_dream(
 ) -> ExperienceFragment | None:
     """Generate a weekly dream fragment from the last 7 daily fragments."""
     if target_date is None:
-        target_date = date.today()
+        target_date = datetime.now(_CST).date()
 
     async with get_session() as s:
         dailies = await find_recent_fragments_by_grain(s, persona_id, "daily", limit=7)
@@ -171,7 +171,7 @@ async def generate_weekly_dream(
 
 async def run_daily_dreams() -> None:
     """Generate yesterday's daily dream for every persona."""
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = datetime.now(_CST).date() - timedelta(days=1)
     async with get_session() as s:
         persona_ids = await list_all_persona_ids(s)
     for pid in persona_ids:
@@ -183,7 +183,7 @@ async def run_daily_dreams() -> None:
 
 async def run_weekly_dreams() -> None:
     """Generate weekly dream (Monday) for every persona."""
-    today = date.today()
+    today = datetime.now(_CST).date()
     async with get_session() as s:
         persona_ids = await list_all_persona_ids(s)
     for pid in persona_ids:

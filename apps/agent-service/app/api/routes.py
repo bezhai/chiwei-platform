@@ -230,6 +230,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                             chat_id=chat_id,
                             user_ids=user_ids,
                             messages=messages,
+                            source="rebuild",
                         )
                         logger.info(
                             "[rebuild] %s %s: %d users, %d msgs",

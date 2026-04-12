@@ -82,6 +82,53 @@ Suggested fix:
 - Let unexpected Qdrant write failures raise, or make `vectorize_message()` require both gather results to be `True`.
 - Keep "collection already exists" handling explicit in collection creation, but do not use the same `False` path for real connectivity/configuration errors.
 
+### `app/memory/afterthought.py`: conversation fragments are generated from a rolling 2-hour window without a high-water mark
+
+Files:
+
+- `apps/agent-service/app/memory/afterthought.py`
+- `apps/agent-service/app/chat/post_actions.py`
+
+`schedule_post_actions()` triggers afterthought after each completed chat response. `_generate_fragment()` then always fetches messages from `now - LOOKBACK_HOURS` to `now` and persists the fragment with that same rolling window.
+
+If the same chat keeps having replies within the 2-hour lookback, each afterthought run can summarize many of the same messages again. That also causes relationship extraction to reprocess overlapping conversations and append repeated relationship memory versions.
+
+Suggested fix:
+
+- Track a per `(persona_id, chat_id)` high-water mark, for example the latest fragment `time_end`, and only summarize messages after that point.
+- If a lookback is needed for context, separate context messages from source messages and persist `time_start/time_end` for the source slice only.
+
+### `app/memory/relationships.py`: relationship updates trust LLM-returned `user_id` without allowlisting
+
+File:
+
+- `apps/agent-service/app/memory/relationships.py`
+
+Stage 2 builds context for `filtered_user_ids`, but the insert loop accepts any `item["user_id"]` returned by the LLM as long as it is non-empty. A hallucinated or malformed user id can therefore create a relationship memory row for someone who was not in the filtered conversation.
+
+Suggested fix:
+
+- Build `allowed_user_ids = set(filtered_user_ids)` and skip/log any update whose `user_id` is not in that set.
+- Keep the fallback name lookup after this allowlist check.
+
+### `app/memory/dreams.py`: daily dream date selection uses fragment `created_at`, not fragment event time
+
+Files:
+
+- `apps/agent-service/app/memory/dreams.py`
+- `apps/agent-service/app/data/queries.py`
+- `apps/agent-service/app/memory/afterthought.py`
+- `apps/agent-service/app/life/glimpse.py`
+
+Daily dreams call `find_fragments_in_date_range()` for the target date. That query filters `ExperienceFragment.created_at`, while conversation/glimpse fragments already carry `time_start/time_end` for the message window they summarize.
+
+Fragments generated after midnight for just-before-midnight conversations can have `created_at` on the next day but `time_start/time_end` in the previous day. Those fragments are then excluded from the previous day's daily dream.
+
+Suggested fix:
+
+- For conversation/glimpse dream inputs, select by business time overlap with `[day_start, day_end)` using `time_start/time_end`, with a fallback to `created_at` only for fragments that do not have business timestamps.
+- Add a unit test for a fragment created after midnight whose `time_start` belongs to the target date.
+
 ## P3
 
 ### `app/agent/models.py`: first DB lookup still returns the cached mutable dict
@@ -190,3 +237,32 @@ The helper is currently named `_ensurelane_queue()`, while surrounding names use
 Suggested fix:
 
 - Rename `_ensurelane_queue()` to `_ensure_lane_queue()`.
+
+### `app/memory/debounce.py`: next-cycle scheduling adds a synthetic event count
+
+File:
+
+- `apps/agent-service/app/memory/debounce.py`
+
+When phase 2 finishes and `_buffers[key] > 0`, the base class schedules `on_event(chat_id, persona_id)`. `on_event()` increments the buffer before scheduling the next debounce. That means events that arrived during phase 2 are counted one extra time; the existing unit test currently expects `2` buffered events to become `3`.
+
+Current afterthought/drift implementations ignore `event_count`, so this is not breaking their output directly, but it violates the base class contract and can trigger earlier-than-intended flushes if a subclass starts using the count.
+
+Suggested fix:
+
+- Add a private method that schedules the next debounce without incrementing the buffer, or call `_enter_phase2()` directly depending on the desired semantics.
+- Update the test to assert the second cycle count is the actual buffered count.
+
+### `app/memory/context.py`: recent fragments are concatenated without a separator
+
+File:
+
+- `apps/agent-service/app/memory/context.py`
+
+`build_inner_context()` appends recent fragments with `''.join(lines)`. Multiple fragments are concatenated directly, so the prompt can merge the tail of one memory with the start of the next.
+
+Suggested fix:
+
+```python
+sections.append(f"最近的经历：\n{'\n'.join(lines)}")
+```

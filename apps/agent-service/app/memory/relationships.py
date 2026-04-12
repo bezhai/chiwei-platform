@@ -114,6 +114,7 @@ async def extract_relationship_updates(
     chat_id: str,
     user_ids: list[str],
     messages: list,
+    source: str = "afterthought",
 ) -> None:
     """Two-stage relationship memory extraction.
 
@@ -196,13 +197,18 @@ async def extract_relationship_updates(
         logger.info("[%s] No relationship updates for chat %s", persona_id, chat_id)
         return
 
+    allowed_uids = set(filtered_user_ids)
     for item in updates:
         if not isinstance(item, dict):
             continue
         uid = item.get("user_id", "")
+        if uid not in allowed_uids:
+            if uid:
+                logger.warning("[%s] LLM returned unexpected user_id %s, skip", persona_id, uid)
+            continue
         core_facts = item.get("core_facts", "")
         impression = item.get("impression", "")
-        if uid and (core_facts or impression):
+        if core_facts or impression:
             async with get_session() as s:
                 fallback_name = await find_username(s, uid) or uid[:6]
             name = item.get("user_name", "") or fallback_name
@@ -213,7 +219,7 @@ async def extract_relationship_updates(
                     user_id=uid,
                     core_facts=core_facts,
                     impression=impression,
-                    source="afterthought",
+                    source=source,
                 )
             logger.info(
                 "[%s] Relationship updated for %s: facts=%s... impression=%s...",

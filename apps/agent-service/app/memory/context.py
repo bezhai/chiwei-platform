@@ -125,7 +125,7 @@ async def build_inner_context(
             lines.append(text)
             total += len(text)
         if lines:
-            sections.append(f"最近的经历：\n{''.join(lines)}")
+            sections.append("最近的经历：\n" + "\n".join(lines))
 
     # === Recall hint ===
     sections.append("（如果隐约觉得知道点什么但想不起来，可以用 recall 想一想。）")

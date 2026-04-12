@@ -98,7 +98,7 @@ async def test_events_during_phase2_buffered():
 
     assert len(pipe.process_calls) == 2
     assert pipe.process_calls[0][2] == 1
-    assert pipe.process_calls[1][2] == 3
+    assert pipe.process_calls[1][2] == 2  # exact buffered count, no phantom +1
 
 
 # ---------------------------------------------------------------------------

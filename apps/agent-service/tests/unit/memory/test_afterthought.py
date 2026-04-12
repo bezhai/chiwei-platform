@@ -139,11 +139,6 @@ async def test_phase2_triggers_next_cycle_if_buffer_has_events():
     key = "chat_1:akao"
     mgr._buffers[key] = 3
 
-    on_event_called = asyncio.Event()
-
-    async def track_on_event(chat_id, persona_id):
-        on_event_called.set()
-
     async def inject_events_during_phase2(chat_id, persona_id):
         mgr._buffers[key] = 2
 
@@ -152,11 +147,13 @@ async def test_phase2_triggers_next_cycle_if_buffer_has_events():
         new_callable=AsyncMock,
         side_effect=inject_events_during_phase2,
     ):
-        with patch.object(mgr, "on_event", side_effect=track_on_event):
-            await mgr._enter_phase2("chat_1", "akao")
-            await asyncio.sleep(0.01)
+        await mgr._enter_phase2("chat_1", "akao")
+        await asyncio.sleep(0.01)
 
-    assert on_event_called.is_set()
+    # After phase2, remaining buffer should start a new debounce timer
+    assert key in mgr._timers
+    # Buffer count should be preserved (not inflated by phantom +1)
+    assert mgr._buffers.get(key, 0) == 2
 
 
 # ---------------------------------------------------------------------------

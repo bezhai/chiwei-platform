@@ -236,6 +236,7 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
                             chat_id=chat_id,
                             user_ids=user_ids,
                             messages=messages,
+                            source="rebuild",
                         )
                         logger.info(
                             f"[rebuild] {day_str} {persona_id}: "
