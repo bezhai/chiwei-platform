@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langfuse import Langfuse
+from langfuse.model import TextPromptClient
 
 from app.api.middleware import get_lane
 from app.infra.config import settings
@@ -77,7 +78,7 @@ def compile_to_messages(prompt: Any, **variables: Any) -> list[BaseMessage]:
     Text prompts become a single SystemMessage.
     Chat prompts become a list of typed messages matching each role.
     """
-    if prompt.type == "text":
+    if isinstance(prompt, TextPromptClient):
         return [SystemMessage(content=prompt.compile(**variables))]
     return [
         _ROLE_TO_MESSAGE.get(m.get("role", ""), SystemMessage)(
