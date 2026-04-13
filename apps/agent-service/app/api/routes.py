@@ -272,6 +272,37 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
 
 # ---------------------------------------------------------------------------
+# Search (experiment helper — wraps the existing search_web tool)
+# ---------------------------------------------------------------------------
+
+
+class SearchRequest(BaseModel):
+    queries: list[str]
+    num: int = 5
+
+
+@router.post("/admin/search", tags=["Admin"])
+async def admin_search(req: SearchRequest):
+    """Batch web search — runs multiple queries, returns raw results."""
+    from app.agent.tools.search import _you_search
+
+    from app.infra.config import settings
+
+    if not settings.you_search_host:
+        raise HTTPException(503, "You Search API not configured")
+
+    results = {}
+    for query in req.queries:
+        try:
+            hits = await _you_search(query, req.num, "CN", "ZH-HANS")
+            results[query] = hits
+        except Exception as e:
+            results[query] = {"error": str(e)}
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Schedule CRUD
 # ---------------------------------------------------------------------------
 
