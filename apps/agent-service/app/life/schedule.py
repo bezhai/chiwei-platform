@@ -13,8 +13,6 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta
 
-from langchain_core.messages import HumanMessage
-
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.agent.tools.search import search_web
 from app.data import queries as Q
@@ -107,7 +105,7 @@ async def _run_shared_pipeline(target_date: date) -> tuple[str, str, str]:
 async def _run_curator(persona_lite: str, all_materials: str) -> str:
     """Curator Agent: filter materials through persona's perspective."""
     result = await Agent(_CURATOR_CFG).run(
-        messages=[HumanMessage(content="从素材池里筛选今天会在意的东西。")],
+        messages=[],
         prompt_vars={"persona_lite": persona_lite, "all_materials": all_materials},
     )
     return extract_text(result.content)
@@ -124,7 +122,7 @@ async def _run_writer(
 ) -> str:
     """Writer Agent: compose the daily journal/schedule."""
     result = await Agent(_WRITER_CFG).run(
-        messages=[HumanMessage(content="写今天的手帐")],
+        messages=[],
         prompt_vars={
             "persona_core": persona_core,
             "date": target_date.isoformat(),
@@ -147,7 +145,7 @@ async def _run_critic(
 ) -> str:
     """Critic Agent: review quality, return PASS or revision notes."""
     result = await Agent(_CRITIC_CFG).run(
-        messages=[HumanMessage(content="审查今天的手帐质量")],
+        messages=[],
         prompt_vars={
             "persona_name": persona_name,
             "today_schedule": schedule_text,

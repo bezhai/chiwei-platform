@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from langchain_core.messages import HumanMessage
-
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.life._date_utils import WEEKDAY_CN, get_season
 
@@ -30,7 +28,7 @@ async def run_sister_theater(
     picks the events she cares about from her own perspective.
     """
     result = await Agent(_THEATER_CFG).run(
-        messages=[HumanMessage(content="生成今天的家庭琐事。")],
+        messages=[],
         prompt_vars={
             "date": target_date.isoformat(),
             "weekday": WEEKDAY_CN[target_date.weekday()],

@@ -10,8 +10,6 @@ import asyncio
 import logging
 from datetime import date
 
-from langchain_core.messages import HumanMessage
-
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.life._date_utils import WEEKDAY_CN, get_season
 
@@ -27,7 +25,7 @@ _LABELS = ["互联网漫游", "城市观察", "兔子洞", "情绪天气"]
 
 async def _run_one(cfg: AgentConfig, prompt_vars: dict) -> str:
     result = await Agent(cfg).run(
-        messages=[HumanMessage(content="开始。")],
+        messages=[],
         prompt_vars=prompt_vars,
     )
     return extract_text(result.content)
