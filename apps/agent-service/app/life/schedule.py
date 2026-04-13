@@ -1,18 +1,17 @@
-"""Schedule -- three-tier plan generation (monthly -> weekly -> daily).
+"""Schedule — Agent Team daily plan generation.
 
-Daily uses an Ideation -> Writer -> Critic Agent pipeline.
-Monthly and weekly are single-Agent generation.
+Pipeline: Wild Agents (parallel) + Search Anchors + Sister Theater
+        → Curator (persona filter) → Writer → Critic
 
-All plans are stored via ``upsert_schedule`` in the ``akao_schedule`` table.
-Each layer inherits context from the layer above.
+Monthly and weekly plans have been removed. Daily plans are generated
+directly from diverse external stimuli instead of narrowing funnels.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import date, datetime, timedelta, timezone
-
-from langchain_core.messages import HumanMessage
+from datetime import date, datetime, timedelta
 
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.agent.tools.search import search_web
@@ -20,36 +19,20 @@ from app.data import queries as Q
 from app.data.models import AkaoSchedule
 from app.data.session import get_session
 from app.infra.config import settings
+from app.life._date_utils import CST, WEEKDAY_CN, get_season
+from app.life.sister_theater import run_sister_theater
+from app.life.wild_agents import run_wild_agents
 from app.memory._persona import load_persona
-
-_IDEATION_CFG = AgentConfig(
-    "schedule_daily_ideation", "offline-model", "schedule-ideation",
-    recursion_limit=42,  # multi-step web search needs more steps
-)
-_WRITER_CFG = AgentConfig("schedule_daily_writer", "offline-model", "schedule-writer")
-_CRITIC_CFG = AgentConfig("schedule_daily_critic", "offline-model", "schedule-critic")
-_MONTHLY_CFG = AgentConfig("schedule_monthly", "offline-model", "schedule-monthly")
-_WEEKLY_CFG = AgentConfig("schedule_weekly", "offline-model", "schedule-weekly")
 
 logger = logging.getLogger(__name__)
 
-CST = timezone(timedelta(hours=8))
+# ---------------------------------------------------------------------------
+# Agent configs
+# ---------------------------------------------------------------------------
 
-_WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-
-_SEASON_MAP = {
-    (3, 4, 5): "春天",
-    (6, 7, 8): "夏天",
-    (9, 10, 11): "秋天",
-    (12, 1, 2): "冬天",
-}
-
-
-def _get_season(month: int) -> str:
-    for months, name in _SEASON_MAP.items():
-        if month in months:
-            return name
-    return "未知"
+_CURATOR_CFG = AgentConfig("daily_curator", "offline-model", "daily-curator")
+_WRITER_CFG = AgentConfig("schedule_daily_writer", "offline-model", "schedule-writer")
+_CRITIC_CFG = AgentConfig("schedule_daily_critic", "offline-model", "schedule-critic")
 
 
 def _schedule_model() -> str:
@@ -58,73 +41,96 @@ def _schedule_model() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Daily pipeline helpers
+# Search anchors (factual reality anchoring)
 # ---------------------------------------------------------------------------
 
 
-async def _get_recent_daily_schedules(
-    before_date: date, persona_id: str, count: int = 3
-) -> list[AkaoSchedule]:
-    """Fetch recent daily schedules before a date (for Ideation and Critic)."""
-    async with get_session() as s:
-        results = await Q.list_schedules(
-            s,
-            plan_type="daily",
-            persona_id=persona_id,
-            active_only=True,
-            limit=count + 5,
-        )
-    return [sched for sched in results if sched.period_start < before_date.isoformat()][
-        :count
+async def _fetch_search_anchors(target_date: date) -> str:
+    """Fetch 3-5 factual search results to anchor the schedule in reality.
+
+    Queries are system-constructed (not LLM-generated).
+    """
+    date_str = target_date.isoformat()
+    month = target_date.month
+    queries = [
+        f"杭州 {date_str} 天气",
+        f"{target_date.year}年{month}月新番 本周更新",
+        "杭州 老城区 最近 新开 关门 展览",
     ]
 
+    results = []
+    for q in queries:
+        try:
+            text = await search_web.ainvoke({"query": q, "num": 2})
+            if text and text != "未搜索到相关结果":
+                results.append(f"[{q}]\n{text[:500]}")
+        except Exception as e:
+            logger.warning("Search anchor '%s' failed: %s", q, e)
 
-async def _run_ideation(
-    recent_schedules_text: str,
-    target_date: date,
-) -> str:
-    """Ideation Agent: brainstorm materials from the outside world.
+    return "\n\n".join(results) if results else "（搜索锚点获取失败）"
 
-    Uses web search tool. Runs without persona core to avoid interest bias.
+
+# ---------------------------------------------------------------------------
+# Shared pipeline (persona-independent, run once per day)
+# ---------------------------------------------------------------------------
+
+
+async def _run_shared_pipeline(target_date: date) -> tuple[str, str, str]:
+    """Run shared steps in parallel: wild agents + search anchors + sister theater.
+
+    Returns (wild_materials, search_anchors, theater_text).
     """
-    season = _get_season(target_date.month)
-    weekday = _WEEKDAY_CN[target_date.weekday()]
+    wild_task = run_wild_agents(target_date)
+    search_task = _fetch_search_anchors(target_date)
+    theater_task = run_sister_theater(target_date)
 
-    result = await Agent(_IDEATION_CFG, tools=[search_web]).run(
-        messages=[HumanMessage(content="开始搜集今天的生活素材吧。")],
-        prompt_vars={
-            "recent_schedules": recent_schedules_text,
-            "date": target_date.isoformat(),
-            "weekday": weekday,
-            "season": season,
-        },
+    results = await asyncio.gather(wild_task, search_task, theater_task, return_exceptions=True)
+
+    wild = results[0] if not isinstance(results[0], Exception) else ""
+    anchors = results[1] if not isinstance(results[1], Exception) else ""
+    theater = results[2] if not isinstance(results[2], Exception) else ""
+
+    for i, label in enumerate(["Wild agents", "Search anchors", "Sister theater"]):
+        if isinstance(results[i], Exception):
+            logger.warning("%s failed: %s", label, results[i])
+
+    return wild, anchors, theater
+
+
+# ---------------------------------------------------------------------------
+# Per-persona agent helpers
+# ---------------------------------------------------------------------------
+
+
+async def _run_curator(persona_lite: str, all_materials: str) -> str:
+    """Curator Agent: filter materials through persona's perspective."""
+    result = await Agent(_CURATOR_CFG).run(
+        messages=[],
+        prompt_vars={"persona_lite": persona_lite, "all_materials": all_materials},
     )
     return extract_text(result.content)
 
 
 async def _run_writer(
-    ideation_output: str,
     persona_core: str,
-    weekly_plan: str,
+    curated_materials: str,
+    theater: str,
     yesterday_journal: str,
     target_date: date,
     previous_output: str = "",
     critic_feedback: str = "",
 ) -> str:
     """Writer Agent: compose the daily journal/schedule."""
-    weekday = _WEEKDAY_CN[target_date.weekday()]
-    is_weekend = "周末！" if target_date.weekday() >= 5 else ""
-
     result = await Agent(_WRITER_CFG).run(
-        messages=[HumanMessage(content="写今天的手帐")],
+        messages=[],
         prompt_vars={
             "persona_core": persona_core,
             "date": target_date.isoformat(),
-            "weekday": weekday,
-            "is_weekend": is_weekend,
-            "weekly_plan": weekly_plan,
+            "weekday": WEEKDAY_CN[target_date.weekday()],
+            "is_weekend": "周末！" if target_date.weekday() >= 5 else "",
             "yesterday_journal": yesterday_journal,
-            "ideation_output": ideation_output,
+            "curated_materials": curated_materials,
+            "theater": theater,
             "previous_output": previous_output,
             "critic_feedback": critic_feedback,
         },
@@ -139,7 +145,7 @@ async def _run_critic(
 ) -> str:
     """Critic Agent: review quality, return PASS or revision notes."""
     result = await Agent(_CRITIC_CFG).run(
-        messages=[HumanMessage(content="审查今天的手帐质量")],
+        messages=[],
         prompt_vars={
             "persona_name": persona_name,
             "today_schedule": schedule_text,
@@ -150,243 +156,90 @@ async def _run_critic(
 
 
 # ---------------------------------------------------------------------------
-# Monthly plan
+# Recent schedules helper
 # ---------------------------------------------------------------------------
 
 
-async def generate_monthly_plan(
-    persona_id: str, target_date: date | None = None
-) -> str | None:
-    """Generate a monthly plan -- broad life direction and mood for the month."""
-    if target_date is None:
-        target_date = datetime.now(CST).date()
-
-    month_start = target_date.replace(day=1)
-    if month_start.month == 12:
-        month_end = date(month_start.year + 1, 1, 1) - timedelta(days=1)
-    else:
-        month_end = date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
-
-    period_start = month_start.isoformat()
-    period_end = month_end.isoformat()
-
+async def _get_recent_daily_schedules(
+    before_date: date, persona_id: str, count: int = 3
+) -> list[AkaoSchedule]:
+    """Fetch recent daily schedules before a date (for Critic context)."""
     async with get_session() as s:
-        existing = await Q.find_plan_for_period(
-            s, "monthly", period_start, period_end, persona_id
+        results = await Q.list_schedules(
+            s, plan_type="daily", persona_id=persona_id,
+            active_only=True, limit=count + 5,
         )
-    if existing:
-        logger.info(
-            "Monthly plan already exists for %s~%s, skip", period_start, period_end
-        )
-        return existing.content
-
-    async with get_session() as s:
-        prev_plan = await Q.find_latest_plan(s, "monthly", period_start, persona_id)
-    prev_plan_text = prev_plan.content if prev_plan else "（这是第一个月计划）"
-
-    season = _get_season(month_start.month)
-    month_cn = f"{month_start.year}年{month_start.month}月"
-
-    pc = await load_persona(persona_id)
-
-    result = await Agent(_MONTHLY_CFG).run(
-        messages=[HumanMessage(content="制定本月计划")],
-        prompt_vars={
-            "persona_name": pc.display_name,
-            "persona_core": pc.persona_core,
-            "month": month_cn,
-            "season": season,
-            "previous_monthly_plan": prev_plan_text,
-        },
-    )
-    content = extract_text(result.content)
-
-    if not content:
-        logger.warning("LLM returned empty monthly plan for %s", month_cn)
-        return None
-
-    async with get_session() as s:
-        await Q.upsert_schedule(
-            s,
-            AkaoSchedule(
-                plan_type="monthly",
-                period_start=period_start,
-                period_end=period_end,
-                persona_id=persona_id,
-                content=content,
-                model=_schedule_model(),
-            ),
-        )
-
-    logger.info("Monthly plan generated: %s, %d chars", month_cn, len(content))
-    return content
+    return [sched for sched in results if sched.period_start < before_date.isoformat()][:count]
 
 
-# ---------------------------------------------------------------------------
-# Weekly plan
-# ---------------------------------------------------------------------------
-
-
-async def generate_weekly_plan(
-    persona_id: str, target_date: date | None = None
-) -> str | None:
-    """Generate a weekly plan -- based on the monthly plan."""
-    if target_date is None:
-        target_date = datetime.now(CST).date()
-
-    week_start = target_date - timedelta(days=target_date.weekday())
-    week_end = week_start + timedelta(days=6)
-    period_start = week_start.isoformat()
-    period_end = week_end.isoformat()
-
-    async with get_session() as s:
-        existing = await Q.find_plan_for_period(
-            s, "weekly", period_start, period_end, persona_id
-        )
-    if existing:
-        logger.info(
-            "Weekly plan already exists for %s~%s, skip", period_start, period_end
-        )
-        return existing.content
-
-    # Context: monthly plan
-    month_start = target_date.replace(day=1).isoformat()
-    if target_date.month == 12:
-        month_end_d = date(target_date.year + 1, 1, 1) - timedelta(days=1)
-    else:
-        month_end_d = date(target_date.year, target_date.month + 1, 1) - timedelta(
-            days=1
-        )
-
-    async with get_session() as s:
-        monthly = await Q.find_plan_for_period(
-            s, "monthly", month_start, month_end_d.isoformat(), persona_id
-        )
-    monthly_text = monthly.content if monthly else "（暂无月计划）"
-
-    async with get_session() as s:
-        prev_plan = await Q.find_latest_plan(s, "weekly", period_start, persona_id)
-    prev_plan_text = prev_plan.content if prev_plan else "（这是第一个周计划）"
-
-    week_desc = (
-        f"{period_start}（{_WEEKDAY_CN[week_start.weekday()]}）"
-        f"~ {period_end}（{_WEEKDAY_CN[week_end.weekday()]}）"
+def _format_recent_schedules(schedules: list[AkaoSchedule]) -> str:
+    if not schedules:
+        return "（没有前几天的日程）"
+    return "\n\n---\n\n".join(
+        f"[{sched.period_start}]\n{sched.content}" for sched in schedules
     )
 
-    pc = await load_persona(persona_id)
-
-    result = await Agent(_WEEKLY_CFG).run(
-        messages=[HumanMessage(content="制定本周计划")],
-        prompt_vars={
-            "persona_name": pc.display_name,
-            "persona_core": pc.persona_core,
-            "week": week_desc,
-            "monthly_plan": monthly_text,
-            "previous_weekly_plan": prev_plan_text,
-        },
-    )
-    content = extract_text(result.content)
-
-    if not content:
-        logger.warning("LLM returned empty weekly plan for %s", week_desc)
-        return None
-
-    async with get_session() as s:
-        await Q.upsert_schedule(
-            s,
-            AkaoSchedule(
-                plan_type="weekly",
-                period_start=period_start,
-                period_end=period_end,
-                persona_id=persona_id,
-                content=content,
-                model=_schedule_model(),
-            ),
-        )
-
-    logger.info("Weekly plan generated: %s, %d chars", week_desc, len(content))
-    return content
-
 
 # ---------------------------------------------------------------------------
-# Daily plan (Ideation -> Writer -> Critic pipeline)
+# Per-persona pipeline
 # ---------------------------------------------------------------------------
 
 
-async def generate_daily_plan(
-    persona_id: str, target_date: date | None = None
+async def _run_persona_pipeline(
+    persona_id: str,
+    target_date: date,
+    wild_materials: str,
+    search_anchors: str,
+    theater: str,
 ) -> str | None:
-    """Generate a daily plan via the three-Agent pipeline.
+    """Per-persona pipeline: curator → writer → critic loop.
 
-    Ideation brainstorms materials -> Writer composes -> Critic reviews.
-    Writer rewrites up to 2 times if Critic rejects.
+    Returns the final schedule text, or None on failure.
     """
-    if target_date is None:
-        target_date = datetime.now(CST).date()
-
     date_str = target_date.isoformat()
 
+    # Skip if already generated
     async with get_session() as s:
-        existing = await Q.find_plan_for_period(
-            s, "daily", date_str, date_str, persona_id
-        )
+        existing = await Q.find_plan_for_period(s, "daily", date_str, date_str, persona_id)
     if existing:
-        logger.info("Daily plan already exists for %s, skip", date_str)
+        logger.info("[%s] Daily plan already exists for %s, skip", persona_id, date_str)
         return existing.content
 
-    # ---- Collect context ----
     pc = await load_persona(persona_id)
-    persona_core = pc.persona_core
-    persona_display_name = pc.display_name
 
-    # Weekly plan
-    week_start = target_date - timedelta(days=target_date.weekday())
-    week_end = week_start + timedelta(days=6)
-    async with get_session() as s:
-        weekly = await Q.find_plan_for_period(
-            s, "weekly", week_start.isoformat(), week_end.isoformat(), persona_id
-        )
-    weekly_text = weekly.content if weekly else "（暂无周计划）"
+    # Combine materials for curator input
+    all_materials = wild_materials
+    if search_anchors:
+        all_materials += f"\n\n--- 真实搜索锚点 ---\n{search_anchors}"
 
-    # Yesterday's journal (from daily fragments)
+    # Yesterday's journal
     async with get_session() as s:
         recent_dailies = await Q.find_recent_fragments_by_grain(
             s, persona_id, "daily", limit=1
         )
-    yesterday_journal = (
-        recent_dailies[0].content if recent_dailies else "（昨天没有写日志）"
-    )
+    yesterday_journal = recent_dailies[0].content if recent_dailies else "（昨天没有写日志）"
 
-    # Recent 3 days' schedules (shared by Ideation and Critic)
+    # Recent schedules for critic
     recent = await _get_recent_daily_schedules(target_date, persona_id)
-    recent_schedules_text = (
-        "\n\n---\n\n".join(
-            f"[{sched.period_start}]\n{sched.content}" for sched in recent
-        )
-        if recent
-        else "（没有前几天的日程）"
-    )
+    recent_schedules_text = _format_recent_schedules(recent)
 
-    # ---- Ideation Agent ----
+    # Curator: filter materials through persona lens
     try:
-        ideation_output = await _run_ideation(
-            recent_schedules_text=recent_schedules_text,
-            target_date=target_date,
-        )
-    except Exception as exc:
-        logger.warning("Ideation agent failed, degrading: %s", exc, exc_info=True)
-        ideation_output = ""
+        curated = await _run_curator(pc.persona_lite, all_materials)
+    except Exception as e:
+        logger.warning("[%s] Curator failed, using raw materials: %s", persona_id, e)
+        curated = all_materials[:2000]
 
-    # ---- Writer -> Critic loop ----
+    # Writer → Critic loop (max 3 attempts)
     feedback = ""
     previous_output = ""
     schedule_text = ""
 
     for attempt in range(3):
         schedule_text = await _run_writer(
-            ideation_output=ideation_output,
-            persona_core=persona_core,
-            weekly_plan=weekly_text,
+            persona_core=pc.persona_core,
+            curated_materials=curated,
+            theater=theater,
             yesterday_journal=yesterday_journal,
             target_date=target_date,
             previous_output=previous_output,
@@ -396,26 +249,25 @@ async def generate_daily_plan(
         critic_result = await _run_critic(
             schedule_text=schedule_text,
             recent_schedules_text=recent_schedules_text,
-            persona_name=persona_display_name,
+            persona_name=pc.display_name,
         )
 
         if critic_result.strip().upper().startswith("PASS"):
-            logger.info("Daily plan passed critic on attempt %d", attempt + 1)
+            logger.info("[%s] Daily plan passed critic on attempt %d", persona_id, attempt + 1)
             break
 
         logger.info(
-            "Daily plan critic rejected (attempt %d): %s",
-            attempt + 1,
-            critic_result[:100],
+            "[%s] Critic rejected (attempt %d): %s",
+            persona_id, attempt + 1, critic_result[:100],
         )
         previous_output = schedule_text
         feedback = critic_result
 
     if not schedule_text:
-        logger.warning("Pipeline produced empty daily plan for %s", date_str)
+        logger.warning("[%s] Pipeline produced empty daily plan for %s", persona_id, date_str)
         return None
 
-    # ---- Persist ----
+    # Persist
     async with get_session() as s:
         await Q.upsert_schedule(
             s,
@@ -429,8 +281,50 @@ async def generate_daily_plan(
             ),
         )
 
-    logger.info("Daily plan generated for %s: %d chars", date_str, len(schedule_text))
+    logger.info("[%s] Daily plan generated for %s: %d chars", persona_id, date_str, len(schedule_text))
     return schedule_text
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+async def generate_daily_plan(
+    persona_id: str, target_date: date | None = None
+) -> str | None:
+    """Generate a daily plan for a single persona (admin trigger).
+
+    Runs the full pipeline including shared steps.
+    """
+    if target_date is None:
+        target_date = datetime.now(CST).date()
+
+    wild, anchors, theater = await _run_shared_pipeline(target_date)
+    return await _run_persona_pipeline(persona_id, target_date, wild, anchors, theater)
+
+
+async def generate_all_daily_plans(target_date: date | None = None) -> None:
+    """Generate daily plans for all personas (cron job).
+
+    Shared steps (wild agents + search + theater) run once.
+    Per-persona steps (curator + writer + critic) run for each persona.
+    """
+    if target_date is None:
+        target_date = datetime.now(CST).date()
+
+    logger.info("Generating daily plans for all personas: %s", target_date.isoformat())
+
+    wild, anchors, theater = await _run_shared_pipeline(target_date)
+
+    async with get_session() as s:
+        persona_ids = await Q.list_all_persona_ids(s)
+
+    for persona_id in persona_ids:
+        try:
+            await _run_persona_pipeline(persona_id, target_date, wild, anchors, theater)
+        except Exception:
+            logger.exception("[%s] daily plan generation failed", persona_id)
 
 
 # ---------------------------------------------------------------------------
@@ -441,10 +335,7 @@ async def generate_daily_plan(
 async def build_schedule_context(persona_id: str) -> str:
     """Build the current daily schedule context for system prompt injection.
 
-    Only injects today's journal content. Monthly/weekly plans are not
-    injected into chat; they guide daily plan generation instead.
-
-    Returns empty string if no daily plan exists.
+    Returns empty string if no daily plan exists for today.
     """
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")

@@ -17,10 +17,8 @@ from app.infra.config import settings
 from app.workers.cron import (
     cron_generate_daily_plan,
     cron_generate_dreams,
-    cron_generate_monthly_plan,
     cron_generate_voice,
     cron_generate_weekly_dreams,
-    cron_generate_weekly_plan,
     cron_glimpse,
     cron_life_engine_tick,
 )
@@ -112,14 +110,8 @@ class WorkerSettings:
         cron(
             cron_generate_weekly_dreams, weekday={0}, hour={4}, minute={0}, timeout=1800
         ),
-        # 5. Daily plan: CST 05:00 (after dreams)
+        # 5. Daily plan (Agent Team pipeline): CST 05:00 (after dreams)
         cron(cron_generate_daily_plan, hour={5}, minute={0}, timeout=3600),
-        # 5b. Weekly plan: Sunday CST 23:00
-        cron(
-            cron_generate_weekly_plan, weekday={6}, hour={23}, minute={0}, timeout=1800
-        ),
-        # 5c. Monthly plan: 1st of month CST 02:00
-        cron(cron_generate_monthly_plan, day={1}, hour={2}, minute={0}, timeout=1800),
         # 6. Voice: CST 08:00-23:00 every hour
         cron(cron_generate_voice, hour=set(range(8, 24)), minute={0}, timeout=1800),
     ]
