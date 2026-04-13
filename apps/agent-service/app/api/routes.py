@@ -125,25 +125,14 @@ async def trigger_schedule(
     plan_type: str = "daily",
     target_date: str | None = None,
 ):
-    """Manual schedule generation (monthly / weekly / daily)."""
-    from app.life.schedule import (
-        generate_daily_plan,
-        generate_monthly_plan,
-        generate_weekly_plan,
-    )
+    """Manual schedule generation (daily only — monthly/weekly removed)."""
+    if plan_type != "daily":
+        return {"ok": False, "message": f"Only 'daily' plan_type is supported. Got: {plan_type}"}
+
+    from app.life.schedule import generate_daily_plan
 
     d = date.fromisoformat(target_date) if target_date else None
-
-    generators = {
-        "monthly": generate_monthly_plan,
-        "weekly": generate_weekly_plan,
-        "daily": generate_daily_plan,
-    }
-    gen = generators.get(plan_type)
-    if not gen:
-        return {"ok": False, "message": f"Unknown plan_type: {plan_type}"}
-
-    content = await gen(persona_id=persona_id, target_date=d)
+    content = await generate_daily_plan(persona_id=persona_id, target_date=d)
     return {"ok": bool(content), "plan_type": plan_type, "content": content}
 
 

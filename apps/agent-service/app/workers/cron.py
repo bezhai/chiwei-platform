@@ -7,8 +7,6 @@ Business logic lives in ``app.memory.*``, ``app.life.*``.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-
 from app.workers.common import cron_error_handler, for_each_persona, prod_only
 
 logger = logging.getLogger(__name__)
@@ -49,38 +47,16 @@ async def cron_generate_weekly_dreams(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Schedules (monthly / weekly / daily plans)
+# Schedules (daily plan via Agent Team pipeline)
 # ---------------------------------------------------------------------------
 
 
 @cron_error_handler()
 @prod_only
-async def cron_generate_monthly_plan(ctx) -> None:
-    from app.life.schedule import generate_monthly_plan
-
-    await for_each_persona(generate_monthly_plan, label="monthly-plan")
-
-
-@cron_error_handler()
-@prod_only
-async def cron_generate_weekly_plan(ctx) -> None:
-    from app.life.schedule import generate_weekly_plan
-
-    _CST = timezone(timedelta(hours=8))
-    tomorrow = datetime.now(_CST).date() + timedelta(days=1)
-
-    async def _gen(persona_id: str) -> None:
-        await generate_weekly_plan(persona_id, target_date=tomorrow)
-
-    await for_each_persona(_gen, label="weekly-plan")
-
-
-@cron_error_handler()
-@prod_only
 async def cron_generate_daily_plan(ctx) -> None:
-    from app.life.schedule import generate_daily_plan
+    from app.life.schedule import generate_all_daily_plans
 
-    await for_each_persona(generate_daily_plan, label="daily-plan")
+    await generate_all_daily_plans()
 
 
 # ---------------------------------------------------------------------------
