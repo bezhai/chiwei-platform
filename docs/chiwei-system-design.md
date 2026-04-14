@@ -251,15 +251,3 @@ erDiagram
     }
 ```
 
----
-
-## 未来里程碑
-
-| 里程碑 | 目标 | 方向 |
-|--------|------|------|
-| **M1** Life Engine 精度 | 活动切换贴合日程 | 强化 tick prompt 时间比对、调整 wake_me_at 间隔 |
-| **M2** 三姐妹差异化 | 日程和互动风格有明显差异 | 验证 persona_core 区分度、per-persona critic |
-| **M3** 主动社交 | 赤尾有自己想说的话 | Glimpse 调优、"想分享"触发机制 |
-| **M4** 记忆质量 | 记得该记的，忘得自然 | afterthought prompt 调优、dream 压缩质量 |
-| **M5** 安全合规 | 覆盖率和精度 | 频率限流、PII 检测 |
-| **M6** 可观测性 | 成本追踪和质量分析 | token 成本拆分、Langfuse evaluation 闭环 |
