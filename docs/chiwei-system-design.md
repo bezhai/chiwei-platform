@@ -8,46 +8,112 @@
 
 ---
 
-## 全局架构
+## 全局数据流
+
+赤尾的 agent 系统由三个循环驱动：**活着**（Life Engine 每分钟 tick）、**回复**（被@时响应）、**沉淀**（记忆的产生与压缩）。
+
+```mermaid
+flowchart TB
+    subgraph living["🫀 活着 · Life Engine 每分钟 tick"]
+        direction LR
+        SCHED["📅 日程手帐\n每天 05:00 生成"]
+        TICK["⏱️ tick\n加载日程 + 时间线"]
+        STATE["📍 当前状态\nactivity · mood"]
+        TICK --> STATE
+        SCHED --> TICK
+        STATE -->|"browsing"| GLIMPSE["👀 窥屏\n翻群消息"]
+    end
+
+    subgraph responding["💬 回复 · 被@或私聊时"]
+        direction LR
+        MSG["📩 消息到达"]
+        SAFE["🛡️ 安全检测"]
+        CTX["🧠 组装意识\n人格 · 状态 · 日程\n碎片 · 关系 · 风格"]
+        AGENT["🤖 Agent\n推理 + 工具"]
+        REPLY["📤 回复"]
+        MSG --> SAFE --> CTX --> AGENT --> REPLY
+    end
+
+    subgraph settling["🌙 沉淀 · 记忆的产生与压缩"]
+        direction LR
+        CONV["💬 conversation\n对话后 5min 回味"]
+        GLIM["👀 glimpse\n窥屏时的印象"]
+        DAILY["🌙 daily\n03:00 做梦压缩"]
+        WKLY["📖 weekly\n周一 04:00 再压缩"]
+        CONV & GLIM --> DAILY --> WKLY
+    end
+
+    %% 循环之间的数据流
+    STATE -->|"注入此刻状态"| CTX
+    SCHED -->|"注入今日安排"| CTX
+    REPLY -->|"触发回味"| CONV
+    GLIMPSE -->|"有意思才记"| GLIM
+    DAILY & WKLY -->|"注入远期记忆"| CTX
+    CONV & GLIM -->|"注入今日碎片"| CTX
+    REPLY -.->|"漂移触发"| DRIFT["🎙️ 声音漂移"]
+    DRIFT -.->|"注入说话风格"| CTX
+    REPLY -.->|"关系提取"| REL["🤝 关系记忆"]
+    REL -.->|"注入对人的了解"| CTX
+
+    style living fill:#f0f7ff,stroke:#4a9eff
+    style responding fill:#fff8e1,stroke:#ff9800
+    style settling fill:#f3e5f5,stroke:#9c27b0
+```
+
+---
+
+## 日程生成 · Agent Team
+
+每天 05:00 为三姐妹各生成一份日程手帐，作为 Life Engine 一天的行动纲领。
 
 ```mermaid
 flowchart LR
-    subgraph ext["飞书"]
-        MSG((消息))
+    subgraph shared["共享层 · 跑一次"]
+        W["🌐 Wild Agents x4\n互联网 · 城市\n兴趣 · 情绪"]
+        S["🔍 Search Anchors\n天气 · 新番 · 展览"]
+        T["🏠 Sister Theater\n5-6 件家庭事件"]
     end
 
-    subgraph gateway["入口层"]
-        LP["lark-proxy\nwebhook"]
-        LS["lark-server\n消息处理"]
+    subgraph persona["per-persona · x3"]
+        C["Curator\n按人格筛选素材"]
+        WR["Writer\n写日程手帐"]
+        CR{"Critic\n审核质量"}
     end
 
-    subgraph brain["agent-service"]
-        direction TB
-        CHAT["💬 Chat Pipeline"]
-        SAFE["🛡️ Safety Guards"]
-        MEM["🧠 Memory"]
-        LIFE["🫀 Life Engine"]
-        SCHED["📅 Schedule"]
-        GLIMPSE["👀 Glimpse"]
-        VOICE["🎙️ Identity & Voice"]
-        REL["🤝 Relationships"]
-    end
+    W & S & T --> C --> WR --> CR
+    CR -->|"不通过 · 最多 3 轮"| WR
+    CR -->|"PASS"| OUT["📅 日程入库\nakao_schedule"]
 
-    subgraph store["存储层"]
-        PG[("PostgreSQL")]
-        QD[("Qdrant")]
-        RD[("Redis")]
-        MQ["RabbitMQ"]
-        LF["Langfuse"]
-    end
-
-    MSG --> LP --> LS --> CHAT
-    CHAT --> MQ --> LS --> MSG
-
-    CHAT -.- MEM & LIFE & VOICE & REL
-    LIFE -.- SCHED & GLIMPSE
-    brain --- PG & QD & RD & LF
+    style shared fill:#f0f7ff,stroke:#4a9eff
+    style persona fill:#fff8e1,stroke:#ff9800
+    style OUT fill:#e8f5e9
 ```
+
+日程格式：日记体手帐，6-8 个场景，每场景自然带出小时级时间锚点，覆盖起床到睡觉。
+
+---
+
+## Life Engine · Tick
+
+```mermaid
+flowchart TD
+    TICK["⏱️ 每分钟 tick"] --> LOAD["加载最新状态\nlife_engine_state"]
+    LOAD --> SKIP{"skip_until\n在未来?"}
+    SKIP -->|"是"| DONE["💤 跳过"]
+    SKIP -->|"否"| CTX["加载日程 + 活动时间线\n+ 最近对话碎片"]
+    CTX --> LLM["🤖 LLM 决定\nactivity · mood · wake_me_at"]
+    LLM --> SAVE["💾 append-only 持久化"]
+    SAVE --> BRW{"activity_type\n== browsing?"}
+    BRW -->|"是"| GLIMPSE["👀 Glimpse\n翻群消息 · 记印象 · 可能搭话"]
+    BRW -->|"否"| DONE
+
+    AT(("被 @ 了")) -->|"硬中断"| CHAT["💬 进入回复流程\n状态注入上下文"]
+
+    style LLM fill:#4a9eff,color:#fff
+    style AT fill:#ff9800,color:#fff
+```
+
+被@时 LLM 自然调整语气：睡着了 → *"嗯...干嘛..."*；在外面 → *"在外面呢 晚点说"*。
 
 ---
 
@@ -55,41 +121,37 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A["📩 消息到达"] --> B["解析"]
-    B --> C{"前置安全\n封禁词 · 注入\n政治 · NSFW"}
-    C -->|拦截| X["🚫 安全回复"]
-    C -->|通过| D["构建上下文"]
-    D --> E["🤖 Agent\n流式推理 + 工具"]
-    E --> F["📤 发送回复"]
-    F -.-> G["后置动作\n安全审核 · 记忆提取 · 漂移"]
+    A["📩 消息"] --> B{"前置安全\n封禁词 · 注入\n政治 · NSFW"}
+    B -->|"拦截"| X["🚫 安全回复"]
+    B -->|"通过"| D["🧠 组装意识"]
+    D --> E["🤖 Agent 推理\n可调用工具"]
+    E --> F["📤 回复"]
+    F -.-> G["后置动作"]
+
+    subgraph post["后置动作 · 异步"]
+        G1["安全审核"]
+        G2["记忆提取\nafterthougt"]
+        G3["声音漂移"]
+        G4["关系提取"]
+    end
+    G -.-> G1 & G2 & G3 & G4
 
     style X fill:#f66,color:#fff
     style E fill:#4a9eff,color:#fff
+    style post fill:#f5f5f5,stroke:#999
 ```
 
-### 上下文注入
+### 意识组装
 
-Agent 回复时，以下信息被组装为"赤尾的意识"：
-
-```mermaid
-flowchart LR
-    subgraph ctx["赤尾的意识"]
-        direction TB
-        WHO["👤 人格内核"]
-        NOW["📍 此刻状态"]
-        TODAY["📅 今日安排"]
-        BRAIN["💭 今天的碎片"]
-        FAR["📖 日记 · 周记"]
-        PERSON["🤝 对人的了解"]
-        STYLE["🎙️ 说话风格"]
-    end
-
-    BRAIN --> FILTER{"群聊?"}
-    FILTER -->|"是"| RULE["只看本群碎片\ndaily/weekly 可见"]
-    FILTER -->|"私聊"| ALL["所有碎片可见"]
-
-    style ctx fill:#f0f7ff,stroke:#4a9eff
-```
+| 区块 | 来源 | 说明 |
+|------|------|------|
+| 人格内核 | `bot_persona` | 我是谁 |
+| 此刻状态 | `life_engine_state` | 我在做什么、什么心情 |
+| 今日安排 | `akao_schedule` | 今天的日程手帐 |
+| 今日碎片 | `experience_fragment` | 今天的回味和印象（**群聊隐私过滤**） |
+| 远期记忆 | daily / weekly 碎片 | 做梦时已自然模糊化 |
+| 对人的了解 | `relationship_memory_v2` | core_facts + impressions |
+| 说话风格 | Identity Drift | 最新语气特征 |
 
 ### 可用工具
 
@@ -97,7 +159,7 @@ flowchart LR
 |------|------|
 | `search_web` | 联网搜索 |
 | `generate_image` | DALL-E 3 画图 |
-| `recall` | 向量 + BM25 混合搜索经历碎片 |
+| `recall` | 向量 + BM25 搜索经历碎片 |
 | `check_chat_history` | 翻原始聊天记录 |
 | `delegate_research` | 委派子 agent 深度研究 |
 | `run_skill` / `sandbox` | 技能执行 / 沙箱代码 |
@@ -108,127 +170,46 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    subgraph trigger["记忆怎么产生"]
-        REPLY(("赤尾\n回复了"))
-        BROWSE(("赤尾\n刷手机"))
+    subgraph realtime["实时 · 事件驱动"]
+        R1(("赤尾回复了")) -->|"5min 沉默\n或 15 条累计"| CONV["💬 conversation\n内心独白"]
+        R2(("刷手机")) -->|"有意思才记"| GLIM["👀 glimpse\n窥屏印象"]
     end
 
-    REPLY -->|"5min 沉默\n或 15 条累计"| CONV["💬 conversation\n对话后的内心独白"]
-    BROWSE -->|"有意思才记"| GLIM["👀 glimpse\n窥屏印象"]
-
-    CONV & GLIM -->|"03:00 做梦\n压缩 + 自然遗忘"| DAILY["🌙 daily\n睡前日记"]
-    DAILY -->|"周一 04:00\n更多遗忘"| WKLY["📖 weekly\n周记"]
-
-    subgraph recall_box["想不起来时"]
-        RECALL["🔍 recall\n向量+BM25"]
-        HIST["📜 check_chat_history\n读原始消息"]
+    subgraph compress["压缩 · cron"]
+        CONV & GLIM -->|"03:00"| DAILY["🌙 daily · 做梦\n压缩 + 自然遗忘"]
+        DAILY -->|"周一 04:00"| WKLY["📖 weekly\n更多遗忘"]
     end
 
-    style CONV fill:#e8f5e9
-    style GLIM fill:#e8f5e9
-    style DAILY fill:#fff3e0
-    style WKLY fill:#fce4ec
+    subgraph use["使用"]
+        direction LR
+        CTX["注入意识\n回复时自动带入"]
+        RECALL["recall 工具\n向量+BM25 搜索"]
+        HIST["check_chat_history\n读原始消息"]
+    end
+
+    CONV & GLIM -->|"今日碎片"| CTX
+    DAILY & WKLY -->|"远期记忆"| CTX
+
+    style realtime fill:#e8f5e9,stroke:#4caf50
+    style compress fill:#f3e5f5,stroke:#9c27b0
+    style use fill:#fff8e1,stroke:#ff9800
 ```
 
-> LLM 就是赤尾的大脑，工程只负责在对的时间把对的素材喂给她。遗忘是 LLM 重新叙述时的自然副产品，不需要 TTL 或删除。
+> LLM 就是赤尾的大脑，工程只负责在对的时间把对的素材喂给她。遗忘是 LLM 重新叙述时的自然副产品。
+
+### 隐私过滤
+
+唯一硬规则：**群聊时不暴露其他群和私聊的细节。** 过滤依据是碎片 `source_chat_id`，不是文字内容。daily/weekly 永远可见（做梦时已模糊化）。私聊中所有碎片可见。
 
 ---
 
-## Life Engine
+## Identity · Voice · Relationships
 
-赤尾不是等消息的机器人，她有自己的生活节律。
-
-```mermaid
-flowchart TD
-    TICK["⏱️ 每分钟 tick"] --> LOAD["加载最新状态"]
-    LOAD --> SKIP{"skip_until\n在未来?"}
-    SKIP -->|"是"| DONE["💤 跳过"]
-    SKIP -->|"否"| CTX["加载日程 + 时间线\n+ 最近对话"]
-    CTX --> LLM["🤖 LLM 决定\nactivity · mood · wake_me_at"]
-    LLM --> SAVE["💾 持久化\nappend-only"]
-    SAVE --> BRW{"browsing?"}
-    BRW -->|"是"| GLIMPSE["👀 触发 Glimpse"]
-    BRW -->|"否"| DONE
-
-    AT(("被 @ 了")) -->|"硬中断\n不管在干嘛"| CHAT["💬 Chat Pipeline\n状态注入上下文"]
-
-    style LLM fill:#4a9eff,color:#fff
-    style AT fill:#ff9800,color:#fff
-```
-
-被@时 LLM 自然调整语气：睡着了 → *"嗯...干嘛..."*；在外面 → *"在外面呢 晚点说"*。
-
----
-
-## Schedule Generation
-
-每天 05:00 生成三姐妹日程。
-
-```mermaid
-flowchart LR
-    subgraph shared["共享层 · 跑一次"]
-        W["🌐 Wild Agents x4\n互联网 · 城市 · 兴趣 · 情绪"]
-        S["🔍 Search Anchors\n天气 · 新番 · 展览"]
-        T["🏠 Sister Theater\n5-6 件家庭事件"]
-    end
-
-    subgraph persona["per-persona · x3"]
-        C["Curator\n按人格筛选"]
-        WR["Writer\n写日程手帐"]
-        CR{"Critic\n审核质量"}
-    end
-
-    W & S & T --> C --> WR --> CR
-    CR -->|"不通过\n最多 3 轮"| WR
-    CR -->|"PASS"| OUT["📅 日程入库"]
-
-    style shared fill:#f0f7ff,stroke:#4a9eff
-    style persona fill:#fff8e1,stroke:#ff9800
-    style OUT fill:#e8f5e9
-```
-
-日程格式：日记体手帐，6-8 个场景，每场景带小时级时间锚点，覆盖起床到睡觉。
-
----
-
-## Glimpse · Identity · Relationships
-
-```mermaid
-flowchart LR
-    subgraph glimpse["👀 Glimpse"]
-        direction TB
-        G1["browsing 状态触发"]
-        G2["选白名单群 · 读增量消息"]
-        G3["LLM 观察"]
-        G4["有意思 → glimpse 碎片\n想搭话 → 主动发言"]
-        G1 --> G2 --> G3 --> G4
-    end
-
-    subgraph voice["🎙️ Identity Drift"]
-        direction TB
-        V1["聊天事件"]
-        V2["300s debounce"]
-        V3["LLM 生成新语气"]
-        V4["内心独白风格\n+ 回复说话风格"]
-        V1 --> V2 --> V3 --> V4
-    end
-
-    subgraph rel["🤝 Relationships"]
-        direction TB
-        R1["话题过滤"]
-        R2["提取 core_facts\n+ impression_deltas"]
-        R3["注入聊天上下文"]
-        R1 --> R2 --> R3
-    end
-
-    style glimpse fill:#f0f7ff,stroke:#4a9eff
-    style voice fill:#fff8e1,stroke:#ff9800
-    style rel fill:#fce4ec,stroke:#e91e63
-```
-
-- **Glimpse**：23:00-09:00 安静时段不触发，主动发言每小时上限 2 条
-- **Identity Drift**：赤尾的说话方式会被身边的人自然影响
-- **Relationships**：让赤尾记得每个人的事实和印象
+| 子系统 | 触发 | 产出 | 注入位置 |
+|--------|------|------|---------|
+| **Identity Drift** | 聊天事件 · 300s debounce | 新语气特征（独白风格 + 回复风格） | 意识组装 · 说话风格 |
+| **Relationship Memory** | 聊天事件 · 话题过滤后提取 | core_facts + impression_deltas | 意识组装 · 对人的了解 |
+| **Glimpse** | Life Engine browsing · 安静时段外 | glimpse 碎片 · 可能主动搭话 | 记忆系统 |
 
 ---
 
