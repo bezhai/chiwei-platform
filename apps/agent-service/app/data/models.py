@@ -22,6 +22,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Identity,
     Index,
     Integer,
     String,
@@ -132,7 +133,7 @@ class ModelMapping(Base):
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
-    id: Mapped[int] = mapped_column(BigInteger, autoincrement=True, unique=True)
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
     message_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(100))
     content: Mapped[str] = mapped_column(Text)

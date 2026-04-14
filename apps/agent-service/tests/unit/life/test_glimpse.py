@@ -74,24 +74,8 @@ def test_parse_glimpse_response_with_speak():
 
 
 def test_glimpse_result_enum_values():
-    assert GlimpseResult.SKIPPED_QUIET_HOURS == "skipped:quiet_hours"
     assert GlimpseResult.FRAGMENT_CREATED == "fragment_created"
-    assert isinstance(GlimpseResult.SKIPPED_NO_GROUP, str)
-
-
-# ---------------------------------------------------------------------------
-# run_glimpse — quiet hours
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_glimpse_skips_quiet_hours():
-    from app.life.glimpse import run_glimpse
-
-    quiet_time = datetime(2026, 4, 7, 2, 0, tzinfo=CST)
-    with patch(f"{MODULE}._now_cst", return_value=quiet_time):
-        result = await run_glimpse("akao-001")
-        assert result == GlimpseResult.SKIPPED_QUIET_HOURS
+    assert isinstance(GlimpseResult.SKIPPED_NO_MESSAGES, str)
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +97,6 @@ async def test_glimpse_skips_no_new_messages():
         with (
             patch(f"{MODULE}._now_cst", return_value=normal_time),
             patch(
-                f"{MODULE}._pick_group", new_callable=AsyncMock, return_value="oc_test"
-            ),
-            patch(
                 f"{MODULE}.Q.find_latest_glimpse_state",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -129,7 +110,7 @@ async def test_glimpse_skips_no_new_messages():
                 f"{MODULE}.get_unseen_messages", new_callable=AsyncMock, return_value=[]
             ),
         ):
-            result = await run_glimpse("akao-001")
+            result = await run_glimpse("akao-001", "oc_test")
             assert result == GlimpseResult.SKIPPED_NO_MESSAGES
 
 
@@ -160,9 +141,6 @@ async def test_glimpse_creates_fragment_and_state():
 
         with (
             patch(f"{MODULE}._now_cst", return_value=normal_time),
-            patch(
-                f"{MODULE}._pick_group", new_callable=AsyncMock, return_value="oc_test"
-            ),
             patch(
                 f"{MODULE}.Q.find_latest_glimpse_state",
                 new_callable=AsyncMock,
@@ -208,7 +186,7 @@ async def test_glimpse_creates_fragment_and_state():
                 return_value="番剧群",
             ),
         ):
-            result = await run_glimpse("akao-001")
+            result = await run_glimpse("akao-001", "oc_test")
 
             assert result == GlimpseResult.FRAGMENT_CREATED
             mock_frag.assert_called_once()
@@ -245,9 +223,6 @@ async def test_glimpse_not_interesting_still_writes_state():
         with (
             patch(f"{MODULE}._now_cst", return_value=normal_time),
             patch(
-                f"{MODULE}._pick_group", new_callable=AsyncMock, return_value="oc_test"
-            ),
-            patch(
                 f"{MODULE}.Q.find_latest_glimpse_state",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -292,7 +267,7 @@ async def test_glimpse_not_interesting_still_writes_state():
                 return_value="番剧群",
             ),
         ):
-            result = await run_glimpse("akao-001")
+            result = await run_glimpse("akao-001", "oc_test")
 
             assert result == GlimpseResult.SKIPPED_NOT_INTERESTING
             mock_frag.assert_not_called()
@@ -328,9 +303,6 @@ async def test_glimpse_want_to_speak_submits_proactive():
 
         with (
             patch(f"{MODULE}._now_cst", return_value=normal_time),
-            patch(
-                f"{MODULE}._pick_group", new_callable=AsyncMock, return_value="oc_test"
-            ),
             patch(
                 f"{MODULE}.Q.find_latest_glimpse_state",
                 new_callable=AsyncMock,
@@ -379,7 +351,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
                 f"{MODULE}.submit_proactive_chat", new_callable=AsyncMock
             ) as mock_proactive,
         ):
-            result = await run_glimpse("akao-001")
+            result = await run_glimpse("akao-001", "oc_test")
 
             assert result == GlimpseResult.FRAGMENT_CREATED
             # State observation should contain want_to_speak info

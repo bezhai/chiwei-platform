@@ -1,8 +1,7 @@
-"""Glimpse -- browsing observation when Chiwei is in 'browsing' state.
+"""Glimpse -- browsing observation for group chats.
 
-Flow: check quiet hours -> pick group -> load incremental messages ->
-LLM observes (with last observation + proactive history) ->
-optionally create fragment + submit proactive chat.
+Flow: load incremental messages -> LLM observes (with last observation +
+proactive history) -> optionally create fragment + submit proactive chat.
 """
 
 from __future__ import annotations
@@ -33,13 +32,13 @@ logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
 
-# Quiet hours: 23:00~09:00 CST -- no browsing
-QUIET_HOURS = (23, 9)
-
 # Engineering cap on proactive messages per hour (LLM self-regulation is primary)
 HOURLY_PROACTIVE_LIMIT = 2
 
-TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
+TARGET_CHAT_IDS = [
+    "oc_a44255e98af05f1359aeb29eeb503536",
+    "oc_54713c53ff0b46cb9579d3695e16cbf8",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +49,6 @@ TARGET_CHAT_ID = "oc_a44255e98af05f1359aeb29eeb503536"
 class GlimpseResult(StrEnum):
     """Possible outcomes of a glimpse run."""
 
-    SKIPPED_QUIET_HOURS = "skipped:quiet_hours"
     SKIPPED_NO_GROUP = "skipped:no_group"
     SKIPPED_NO_MESSAGES = "skipped:no_messages"
     SKIPPED_EMPTY_TIMELINE = "skipped:empty_timeline"
@@ -67,15 +65,9 @@ def _now_cst() -> datetime:
     return datetime.now(CST)
 
 
-def _is_quiet(now: datetime) -> bool:
-    h = now.hour
-    start, end = QUIET_HOURS
-    return h >= start or h < end
-
-
-async def _pick_group(persona_id: str) -> str | None:  # noqa: ARG001
-    """Choose a group to browse. v1: fixed whitelist."""
-    return TARGET_CHAT_ID
+def list_target_groups() -> list[str]:
+    """Return all groups to monitor."""
+    return TARGET_CHAT_IDS
 
 
 async def _get_group_name(chat_id: str) -> str:
@@ -167,41 +159,31 @@ def parse_glimpse_response(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def run_glimpse(persona_id: str) -> GlimpseResult:
-    """Execute one browsing observation cycle (incremental + progressive).
+async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
+    """Execute one browsing observation cycle for a specific group.
 
     Returns a ``GlimpseResult`` enum value.
     """
     now = _now_cst()
 
-    # 1. Quiet hours
-    if _is_quiet(now):
-        logger.debug("[%s] Glimpse skipped: quiet hours", persona_id)
-        return GlimpseResult.SKIPPED_QUIET_HOURS
-
-    # 2. Pick group
-    chat_id = await _pick_group(persona_id)
-    if not chat_id:
-        return GlimpseResult.SKIPPED_NO_GROUP
-
-    # 3. Load glimpse state
+    # 1. Load glimpse state (incremental since last seen)
     async with get_session() as s:
         state = await Q.find_latest_glimpse_state(s, persona_id, chat_id)
     last_seen = state.last_seen_msg_time if state else 0
     last_observation = state.observation if state else ""
 
-    # 4. Skip conversations bot already participated in
+    # 2. Skip conversations bot already participated in
     async with get_session() as s:
         bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
     effective_after = max(last_seen, bot_reply_time)
 
-    # 5. Fetch incremental messages
+    # 3. Fetch incremental messages
     messages = await get_unseen_messages(chat_id, after=effective_after)
     if not messages:
         logger.debug("[%s] Glimpse: no new messages in %s", persona_id, chat_id)
         return GlimpseResult.SKIPPED_NO_MESSAGES
 
-    # 6. Prepare context
+    # 4. Prepare context
     pc = await load_persona(persona_id)
     persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
@@ -212,10 +194,10 @@ async def run_glimpse(persona_id: str) -> GlimpseResult:
     if not messages_text.strip():
         return GlimpseResult.SKIPPED_EMPTY_TIMELINE
 
-    # 6b. Today's proactive history (for LLM self-regulation + engineering cap)
+    # 4b. Today's proactive history (for LLM self-regulation + engineering cap)
     recent_proactive = await get_recent_proactive_records(chat_id)
 
-    # 7. LLM observation
+    # 5. LLM observation
     raw = await _call_glimpse_llm(
         persona_name=persona_name,
         persona_lite=persona_lite,
@@ -240,7 +222,7 @@ async def run_glimpse(persona_id: str) -> GlimpseResult:
             )
         return GlimpseResult.SKIPPED_NOT_INTERESTING
 
-    # 8. Create fragment
+    # 6. Create fragment
     observation = decision.get("observation", "")
     if observation:
         first_ts = messages[0].create_time
@@ -260,7 +242,7 @@ async def run_glimpse(persona_id: str) -> GlimpseResult:
             await Q.insert_fragment(s, fragment)
         logger.info("[%s] Glimpse fragment: %s...", persona_id, observation[:60])
 
-    # 9. Proactive chat
+    # 7. Proactive chat
     speak_reason = decision.get("speak_reason", "")
     state_observation = observation
     if decision.get("want_to_speak"):
@@ -307,7 +289,7 @@ async def run_glimpse(persona_id: str) -> GlimpseResult:
     elif speak_reason:
         state_observation = f"{observation}\n[no_speak] reason={speak_reason}"
 
-    # 10. Persist glimpse state
+    # 8. Persist glimpse state
     async with get_session() as s:
         await Q.insert_glimpse_state(
             s,

@@ -80,20 +80,36 @@ async def cron_life_engine_tick(ctx) -> None:
 @cron_error_handler()
 @prod_only
 async def cron_glimpse(ctx) -> None:
+    import random
+
     from app.data import queries as Q
     from app.data.queries import list_all_persona_ids
     from app.data.session import get_session
-    from app.life.glimpse import run_glimpse
+    from app.life.glimpse import list_target_groups, run_glimpse
+
+    # Probability of triggering glimpse when persona is NOT browsing
+    # (simulates "pulling out phone for a quick glance")
+    GLANCE_PROBABILITY = 0.15
 
     async with get_session() as s:
         persona_ids = await list_all_persona_ids(s)
+
+    groups = list_target_groups()
 
     for persona_id in persona_ids:
         try:
             async with get_session() as s:
                 state = await Q.find_latest_life_state(s, persona_id)
-            if not state or state.activity_type != "browsing":
+
+            activity = state.activity_type if state else ""
+
+            if activity == "sleeping":
                 continue
-            await run_glimpse(persona_id)
+
+            if activity != "browsing" and random.random() >= GLANCE_PROBABILITY:
+                continue
+
+            for chat_id in groups:
+                await run_glimpse(persona_id, chat_id)
         except Exception:
             logger.exception("[%s] Glimpse cron failed", persona_id)
