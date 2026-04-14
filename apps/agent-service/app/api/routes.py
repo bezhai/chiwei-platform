@@ -49,6 +49,20 @@ async def health_check():
     }
 
 
+# TODO: 临时诊断端点，验证 DynamicConfig SDK，验完删除
+@router.get("/debug/dynamic-config", tags=["Debug"])
+async def debug_dynamic_config():
+    from app.api.middleware import get_lane
+    from inner_shared.dynamic_config import DynamicConfig
+
+    config = DynamicConfig(lane_provider=get_lane)
+    return {
+        "lane": get_lane() or "prod",
+        "default_model": config.get("default_model", default="NOT_SET"),
+        "proactive_threshold": config.get_float("proactive_threshold", default=-1),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Admin triggers
 # ---------------------------------------------------------------------------
