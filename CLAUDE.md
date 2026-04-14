@@ -79,7 +79,7 @@ SDK (agent-service/lark-server) → paas-engine (读取 API, /internal/dynamic-c
 
 - 基础设施连接（DB/Redis）走 ConfigBundle（部署时环境变量）
 - 业务行为参数（模型/阈值/flag）走 Dynamic Config（运行时 SDK 读取，10s 缓存）
-- SDK 用法：`dynamic_config.get("key", default="value")`，lane 从 context 自动获取
+- 接入指南和 API 详见 `docs/dynamic-config.md`
 
 ## 通用规范
 
