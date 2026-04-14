@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { errorHandler } from '@middleware/error-handler';
 import { traceMiddleware } from '@middleware/trace';
 import { botContextMiddleware } from '@middleware/bot-context';
+import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
@@ -40,6 +41,7 @@ export class HttpServerManager {
         this.app.use('*', metricsMiddleware); // Prometheus metrics（最外层）
         this.app.use('*', cors());
         this.app.use('*', traceMiddleware); // 先注入 traceId（为后续日志与错误处理提供上下文）
+        this.app.use('*', createContextPropagationMiddleware()); // x-ctx-* header 透传
         this.app.use('*', botContextMiddleware); // 注入 botName
         this.app.use('*', bodyLimit({
             maxSize: 50 * 1024 * 1024, // 50mb
