@@ -17,6 +17,7 @@ import {
   ThunderboltOutlined,
   AuditOutlined,
   EditOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useEffect, useState, lazy, Suspense } from 'react';
@@ -35,6 +36,7 @@ const ModelMappings = lazy(() => import('./pages/ModelMappings'));
 const MongoExplorer = lazy(() => import('./pages/MongoExplorer'));
 const AuditLogs = lazy(() => import('./pages/AuditLogs'));
 const DbMutations = lazy(() => import('./pages/DbMutations'));
+const DynamicConfig = lazy(() => import('./pages/DynamicConfig'));
 import { themeConfig } from './theme';
 import { clearToken, getLane } from './api/client';
 
@@ -59,6 +61,7 @@ const menuItems: MenuItem[] = [
   { type: 'divider' },
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
+  { key: '/dynamic-config', icon: <SettingOutlined />, label: '动态配置' },
   { type: 'divider' },
   { key: '/kibana', icon: <FileSearchOutlined />, label: 'Grafana' },
   { key: '/langfuse', icon: <MonitorOutlined />, label: 'Langfuse 链路' },
@@ -282,6 +285,7 @@ export default function App() {
                   <Route path="/messages" element={<Messages />} />
                   <Route path="/providers" element={<Providers />} />
                   <Route path="/model-mappings" element={<ModelMappings />} />
+                  <Route path="/dynamic-config" element={<DynamicConfig />} />
                   <Route path="/mongo" element={<MongoExplorer />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

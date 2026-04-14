@@ -73,6 +73,17 @@ function createClient(configFn: () => { baseURL: string; headers: Record<string,
       const res = await axios.delete(`${url}${path}`, config);
       return unwrap(res.data);
     },
+
+    async put(path: string, body?: unknown, extraHeaders?: Record<string, string>) {
+      const { baseURL, headers } = configFn();
+      const url = laneAwareUrl(baseURL, extraHeaders?.['x-lane']);
+      const config: AxiosRequestConfig = {
+        headers: { ...headers, 'Content-Type': 'application/json', ...extraHeaders },
+        timeout: TIMEOUT,
+      };
+      const res = await axios.put(`${url}${path}`, body, config);
+      return unwrap(res.data);
+    },
   };
 }
 

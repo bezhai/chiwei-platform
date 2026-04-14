@@ -19,6 +19,7 @@ import serviceStatusRoutes from './routes/service-status';
 import operationsRoutes from './routes/operations';
 import auditLogsRoutes from './routes/audit-logs';
 import activityRoutes from './routes/activity';
+import dynamicConfigRoutes from './routes/dynamic-config';
 
 const PORT = Number(process.env.DASHBOARD_PORT || 3002);
 
@@ -67,6 +68,7 @@ const bootstrap = async () => {
   dashboard.route('/', operationsRoutes);
   dashboard.route('/', auditLogsRoutes);
   dashboard.route('/', activityRoutes);
+  dashboard.route('/', dynamicConfigRoutes);
 
   app.route('/dashboard', dashboard);
 
