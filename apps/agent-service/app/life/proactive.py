@@ -146,8 +146,8 @@ async def submit_proactive_chat(
 # ---------------------------------------------------------------------------
 
 
-async def get_recent_proactive_records(chat_id: str) -> list[dict]:
-    """Query today's proactive trigger records for a chat.
+async def get_recent_proactive_records(chat_id: str, bot_name: str) -> list[dict]:
+    """Query today's proactive trigger records for a specific persona in a chat.
 
     Returns list of ``{"time": "HH:MM", "summary": "..."}`` dicts.
     """
@@ -162,6 +162,7 @@ async def get_recent_proactive_records(chat_id: str) -> list[dict]:
             .where(
                 ConversationMessage.chat_id == chat_id,
                 ConversationMessage.user_id == PROACTIVE_USER_ID,
+                ConversationMessage.bot_name == bot_name,
                 ConversationMessage.create_time >= today_start_ms,
             )
             .order_by(ConversationMessage.create_time.desc())

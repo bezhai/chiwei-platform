@@ -196,7 +196,9 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
         return GlimpseResult.SKIPPED_EMPTY_TIMELINE
 
     # 4b. Today's proactive history (for LLM self-regulation + engineering cap)
-    recent_proactive = await get_recent_proactive_records(chat_id)
+    async with get_session() as s:
+        bot_name = await Q.resolve_bot_name_for_persona(s, persona_id, chat_id)
+    recent_proactive = await get_recent_proactive_records(chat_id, bot_name)
 
     # 5. LLM observation
     raw = await _call_glimpse_llm(
