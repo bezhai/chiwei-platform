@@ -51,10 +51,17 @@ export default function DynamicConfig() {
 
   const fetchLanes = useCallback(async () => {
     try {
-      const { data } = await api.get('/dynamic-config');
-      const raw: RawConfig[] = Array.isArray(data) ? data : (data?.data || []);
+      const [configRes, statusRes] = await Promise.all([
+        api.get('/dynamic-config').catch(() => ({ data: [] })),
+        api.get('/service-status').catch(() => ({ data: { releases: [] } })),
+      ]);
       const laneSet = new Set<string>(['prod']);
+      // 从已有配置中提取 lane
+      const raw: RawConfig[] = Array.isArray(configRes.data) ? configRes.data : (configRes.data?.data || []);
       raw.forEach((c: RawConfig) => laneSet.add(c.lane));
+      // 从已部署 release 中提取 lane
+      const releases: { lane?: string }[] = statusRes.data?.releases || [];
+      releases.forEach((r) => { if (r.lane) laneSet.add(r.lane); });
       setLanes(Array.from(laneSet).sort());
     } catch {
       // ignore
