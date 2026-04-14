@@ -176,10 +176,11 @@ async def _review_tick(
 # ---------------------------------------------------------------------------
 
 
-async def tick(persona_id: str, *, dry_run: bool = False) -> dict | None:
+async def tick(persona_id: str, *, dry_run: bool = False, force: bool = False) -> dict | None:
     """One heartbeat: check skip -> LLM decision -> reviewer -> persist.
 
     ``dry_run=True`` calls the LLM but does not write to DB.
+    ``force=True`` ignores skip_until and persists.
     """
     async with get_session() as s:
         row = await Q.find_latest_life_state(s, persona_id)
@@ -201,8 +202,8 @@ async def tick(persona_id: str, *, dry_run: bool = False) -> dict | None:
         }
         skip_until = None
 
-    # Skip check (dry_run ignores skip)
-    if not dry_run and skip_until and now < skip_until:
+    # Skip check (dry_run and force ignore skip)
+    if not dry_run and not force and skip_until and now < skip_until:
         return None
 
     new, schedule_text, duration_minutes = await _think(prev_state, now, persona_id)

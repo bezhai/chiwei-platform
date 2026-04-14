@@ -55,12 +55,12 @@ async def health_check():
 
 
 @router.post("/admin/trigger-life-engine-tick", tags=["Admin"])
-async def trigger_life_engine_tick(persona_id: str, dry_run: bool = True):
-    """Manual Life Engine tick."""
+async def trigger_life_engine_tick(persona_id: str, dry_run: bool = True, force: bool = False):
+    """Manual Life Engine tick. force=True ignores skip_until and persists."""
     from app.life.engine import tick
 
-    result = await tick(persona_id, dry_run=dry_run)
-    return {"ok": True, "persona_id": persona_id, "dry_run": dry_run, "result": result}
+    result = await tick(persona_id, dry_run=dry_run, force=force)
+    return {"ok": True, "persona_id": persona_id, "dry_run": dry_run, "force": force, "result": result}
 
 
 @router.post("/admin/trigger-glimpse", tags=["Admin"])
