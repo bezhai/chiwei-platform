@@ -55,7 +55,10 @@ async def debug_dynamic_config():
     from app.api.middleware import get_lane
     from inner_shared.dynamic_config import DynamicConfig
 
-    config = DynamicConfig(lane_provider=get_lane)
+    config = DynamicConfig(
+        paas_engine_url="http://paas-engine-feat-dynamic-config-by-lane:8080",
+        lane_provider=get_lane,
+    )
     return {
         "lane": get_lane() or "prod",
         "default_model": config.get("default_model", default="NOT_SET"),
