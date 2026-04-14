@@ -38,6 +38,9 @@ from .utils import (
 # LaneRouter
 from .lane_router import LaneRouter
 
+# DynamicConfig
+from .dynamic_config import DynamicConfig
+
 __all__ = [
     # Decorators
     "log_io",
@@ -66,6 +69,8 @@ __all__ = [
     "split_time",
     # LaneRouter
     "LaneRouter",
+    # DynamicConfig
+    "DynamicConfig",
     # Misc
     "hello",
 ]
