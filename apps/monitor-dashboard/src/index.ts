@@ -7,6 +7,7 @@ import { AppDataSource } from './db';
 import { initMongo } from './mongo';
 import { jwtAuth } from './middleware/jwt-auth';
 import { auditMiddleware } from './middleware/audit';
+import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 
 import authRoutes from './routes/auth';
 import configRoutes from './routes/config';
@@ -50,6 +51,9 @@ const bootstrap = async () => {
       : err.message;
     return c.json({ message, status }, status);
   });
+
+  // Context propagation (x-ctx-* headers) — must be before route handlers
+  app.use('*', createContextPropagationMiddleware());
 
   // Auth & audit middleware on API routes
   app.use('/dashboard/api/*', jwtAuth);

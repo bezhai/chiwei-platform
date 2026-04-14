@@ -70,5 +70,9 @@ app.add_middleware(PrometheusMiddleware)
 # Header context middleware (trace_id, app_name, lane)
 app.add_middleware(HeaderContextMiddleware)
 
+# x-ctx-* context propagation (for sidecar lane routing)
+from inner_shared.middlewares.context_propagation import create_context_propagation_middleware
+app.add_middleware(create_context_propagation_middleware())
+
 # Register routes
 app.include_router(api_router)
