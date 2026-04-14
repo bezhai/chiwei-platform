@@ -188,7 +188,7 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
     persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
     messages_text = await format_timeline(
-        messages, persona_name, tz=CST, max_messages=30
+        messages, persona_name, tz=CST, max_messages=30, with_ids=True
     )
 
     if not messages_text.strip():
