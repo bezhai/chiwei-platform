@@ -66,43 +66,48 @@ async def trigger_life_engine_tick(persona_id: str, dry_run: bool = True):
 @router.post("/admin/trigger-glimpse", tags=["Admin"])
 async def trigger_glimpse(persona_id: str):
     """Manual Glimpse (ignores browsing state + lane restriction)."""
-    from app.life.glimpse import run_glimpse
+    from app.life.glimpse import list_target_groups, run_glimpse
 
-    result = await run_glimpse(persona_id)
-    return {"ok": True, "persona_id": persona_id, "result": result}
+    results = {}
+    for chat_id in list_target_groups():
+        results[chat_id] = await run_glimpse(persona_id, chat_id)
+    return {"ok": True, "persona_id": persona_id, "results": results}
 
 
 @router.post("/admin/debug-glimpse", tags=["Admin"])
 async def debug_glimpse(persona_id: str):
     """Glimpse debug — return pipeline state without executing LLM."""
     from app.data import queries as Q
-    from app.life.glimpse import TARGET_CHAT_ID, _is_quiet, _now_cst
+    from app.life.glimpse import _now_cst, list_target_groups
     from app.life.proactive import get_unseen_messages
 
     now = _now_cst()
-    chat_id = TARGET_CHAT_ID
+    groups_info = []
+    for chat_id in list_target_groups():
+        async with get_session() as s:
+            state = await Q.find_latest_glimpse_state(s, persona_id, chat_id)
+        last_seen = state.last_seen_msg_time if state else 0
+        last_obs = (state.observation if state else "")[:100]
 
-    async with get_session() as s:
-        state = await Q.find_latest_glimpse_state(s, persona_id, chat_id)
-    last_seen = state.last_seen_msg_time if state else 0
-    last_obs = (state.observation if state else "")[:100]
+        async with get_session() as s:
+            bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
+        effective_after = max(last_seen, bot_reply_time)
+        messages = await get_unseen_messages(chat_id, after=effective_after)
 
-    async with get_session() as s:
-        bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
-    effective_after = max(last_seen, bot_reply_time)
-    messages = await get_unseen_messages(chat_id, after=effective_after)
+        groups_info.append({
+            "chat_id": chat_id,
+            "last_seen_msg_time": last_seen,
+            "last_observation": last_obs,
+            "bot_reply_time": bot_reply_time,
+            "effective_after": effective_after,
+            "unseen_message_count": len(messages),
+            "first_msg_time": messages[0].create_time if messages else None,
+            "last_msg_time": messages[-1].create_time if messages else None,
+        })
 
     return {
         "now_cst": now.isoformat(),
-        "is_quiet": _is_quiet(now),
-        "chat_id": chat_id,
-        "last_seen_msg_time": last_seen,
-        "last_observation": last_obs,
-        "bot_reply_time": bot_reply_time,
-        "effective_after": effective_after,
-        "unseen_message_count": len(messages),
-        "first_msg_time": messages[0].create_time if messages else None,
-        "last_msg_time": messages[-1].create_time if messages else None,
+        "groups": groups_info,
     }
 
 
