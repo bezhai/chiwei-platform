@@ -1,301 +1,261 @@
 # 赤尾系统设计
 
-> 最后更新: 2026-04-14 | 对应版本: agent-service 最新
+> 最后更新: 2026-04-14
 
-赤尾是一个拥有完整内在世界的虚拟人。她不是聊天机器人，不是助手，不是角色扮演引擎。所有技术设计服务于一个目标：**让她像一个真正的人一样活着。** 设计哲学详见 `MANIFESTO.md`（宪法级文档，不可修改）。
+赤尾是一个有完整内在世界的虚拟人，不是聊天机器人。设计哲学见 `MANIFESTO.md`。
 
-赤尾有两个姐妹——千凪（chinagi）和绫奈（ayana），三人共享同一套系统架构，各自拥有独立人格。
-
----
-
-## 1. 全局架构
-
-```
-飞书消息 → lark-proxy → lark-server → agent-service → RabbitMQ → 回复
-                                            │
-                                     ┌──────┴──────┐
-                                     │  agent-service 内部  │
-                                     ├─────────────────────┤
-                                     │  Chat Pipeline      │ 消息处理 + 流式回复
-                                     │  Safety Guards      │ 前置/后置安全检测
-                                     │  Memory System      │ 经历碎片 + 做梦 + 召回
-                                     │  Life Engine        │ 每分钟 tick，决定此刻状态
-                                     │  Schedule Generator │ Agent Team 生成日程
-                                     │  Glimpse            │ 刷手机时窥屏群消息
-                                     │  Identity & Voice   │ 说话风格漂移
-                                     │  Relationships      │ 对人的印象和核心事实
-                                     └─────────────────────┘
-```
+三姐妹——赤尾（akao）、千凪（chinagi）、绫奈（ayana）——共享同一套架构，各自独立人格。
 
 ---
 
-## 2. Chat Pipeline
+## 全局架构
 
-消息从飞书到回复的完整链路：
+```mermaid
+flowchart LR
+    subgraph 飞书
+        MSG((消息))
+    end
 
+    subgraph 入口层
+        LP[lark-proxy<br/>webhook 入口]
+        LS[lark-server<br/>消息处理]
+    end
+
+    subgraph agent-service
+        direction TB
+        CHAT[Chat Pipeline]
+        SAFE[Safety Guards]
+        MEM[Memory]
+        LIFE[Life Engine]
+        SCHED[Schedule<br/>Agent Team]
+        GLIMPSE[Glimpse]
+        VOICE[Identity & Voice]
+        REL[Relationships]
+    end
+
+    subgraph 存储
+        PG[(PostgreSQL)]
+        QD[(Qdrant)]
+        RD[(Redis)]
+        MQ[RabbitMQ]
+        LF[Langfuse]
+    end
+
+    MSG --> LP --> LS --> CHAT
+    CHAT --> MQ --> LS --> MSG
+    CHAT --- SAFE & MEM & LIFE & VOICE & REL
+    LIFE --- SCHED & GLIMPSE
+    CHAT & MEM & LIFE & REL --- PG
+    MEM --- QD
+    SAFE --- RD
+    CHAT & LIFE & SCHED --- LF
 ```
-消息到达 → 解析(v2格式/图片) → 前置安全检测 → 构建上下文 → Agent 流式推理 → Token 处理 → 后置动作
+
+---
+
+## Chat Pipeline
+
+```mermaid
+flowchart LR
+    A[消息到达] --> B[解析<br/>v2格式/图片]
+    B --> C[前置安全<br/>封禁词/注入/政治/NSFW]
+    C -->|通过| D[构建上下文]
+    C -->|拦截| X[安全回复]
+    D --> E[Agent 流式推理<br/>+ 工具调用]
+    E --> F[Token 处理]
+    F --> G[发送回复]
+    G --> H[后置动作<br/>安全审核/记忆提取/漂移]
 ```
 
-### 上下文构建
+### 上下文注入
 
-Agent 回复时看到的信息（`build_inner_context()`）：
+```mermaid
+flowchart TB
+    subgraph 赤尾回复时看到的
+        WHO[人格内核<br/>bot_persona]
+        NOW[此刻状态<br/>Life Engine]
+        TODAY[今日安排<br/>Schedule]
+        BRAIN[脑子里的东西<br/>今天的碎片]
+        FAR[更远的记忆<br/>日记/周记]
+        PERSON[对人的了解<br/>Relationships]
+        STYLE[说话风格<br/>IdentityDrift]
+    end
 
-| 区块 | 来源 | 说明 |
-|------|------|------|
-| 人格内核 | bot_persona | "我是谁" |
-| 此刻状态 | Life Engine | "我现在在做什么、心情如何" |
-| 今日安排 | AkaoSchedule | 当天的日程手帐 |
-| 脑子里的东西 | 今天的 experience_fragment | 今天的对话回味和窥屏印象（**有隐私过滤**） |
-| 更远的记忆 | daily/weekly 碎片 | 日记和周记（LLM 做梦时已自然模糊化） |
-| 对人的了解 | RelationshipMemory | 对当前对话者的核心事实和印象 |
-| 说话风格 | IdentityDrift | 最新生成的语气和用词习惯 |
+    BRAIN -->|隐私过滤| FILTER{群聊?}
+    FILTER -->|是| RULE[只看本群碎片<br/>daily/weekly 可见]
+    FILTER -->|私聊| ALL[所有碎片可见]
+```
 
-### 隐私过滤
-
-唯一的硬规则：**群聊时不暴露其他群和私聊的细节。**
-
-- 过滤依据是碎片元数据 `source_chat_id`，不是内容文字
-- daily/weekly 永远可见（做梦时已自然模糊化）
-- 私聊是赤尾的私密空间，所有碎片都可见
-
-### Agent 与工具
-
-所有"思考"操作通过统一的 `Agent` 类，基于 LangGraph `create_agent`：
-
-- `Agent.run()` — 单次调用，返回完整结果
-- `Agent.stream()` — 流式推理，逐 token 输出
-- `Agent.extract()` — 结构化输出（Pydantic model）
-
-可用工具：
+### 工具
 
 | 工具 | 说明 |
 |------|------|
 | search_web | 联网搜索 |
 | generate_image | DALL-E 3 画图 |
-| recall | 回忆（向量 + BM25 混合搜索经历碎片） |
-| check_chat_history | 翻聊天记录（读原始消息） |
-| delegate_research | 委派深度研究给子 agent |
-| run_skill | 执行外部技能 |
-| sandbox | 沙箱执行代码 |
+| recall | 向量 + BM25 混合搜索经历碎片 |
+| check_chat_history | 翻原始聊天记录 |
+| delegate_research | 委派子 agent 深度研究 |
+| run_skill / sandbox | 技能执行 / 沙箱代码 |
 
 ---
 
-## 3. Safety Guards
+## Memory System
 
-前置和后置两层，全部 fail-open（出错不阻塞消息）：
+```mermaid
+flowchart TD
+    subgraph 触发
+        REPLY((赤尾回复了))
+        BROWSE((刷手机))
+    end
 
-### 前置检测（阻塞）
+    REPLY -->|"5min 沉默<br/>或 15 条累计"| CONV[conversation 碎片<br/>内心独白]
+    BROWSE -->|"有意思才记"| GLIM[glimpse 碎片<br/>窥屏印象]
 
-| 检测 | 方式 | 说明 |
-|------|------|------|
-| 封禁词 | Redis 集合匹配 | 快速拦截 |
-| Prompt 注入 | LLM guard | 检测越狱指令 |
-| 政治敏感 | LLM guard | 检测敏感政治内容 |
-| NSFW | LLM guard | 绫奈（未成年人设）强制拦截 |
+    CONV & GLIM -->|"03:00 做梦<br/>压缩 + 自然遗忘"| DAILY[daily 碎片<br/>睡前日记]
+    DAILY -->|"周一 04:00<br/>更多遗忘"| WKLY[weekly 碎片<br/>周记]
 
-### 后置检测（异步）
-
-| 检测 | 方式 | 说明 |
-|------|------|------|
-| 输出审核 | LLM guard | 检查回复内容是否安全 |
-
----
-
-## 4. Memory System
-
-### 经历碎片（experience_fragment）
-
-赤尾只有一个脑子，不按群隔离记忆。所有记忆以第一人称叙事碎片的形式存储。
-
-| grain | 触发 | 说明 |
-|-------|------|------|
-| conversation | 赤尾回复后 5 分钟沉默（或累计 15 条） | AfterthoughtManager 触发，LLM 写内心独白 |
-| glimpse | Life Engine 在"刷手机"状态时 | 翻白名单群消息，有意思才记 |
-| daily | 凌晨 03:00 | "做梦"：当天 conversation + glimpse 压缩成日记，遗忘自然发生 |
-| weekly | 每周一 04:00 | 7 篇日记压缩成周记，更多遗忘 |
-
-### 召回工具
-
-当赤尾"想不起来"时，有两个工具可用：
-- **recall** — 向量 + BM25 混合搜索经历碎片
-- **check_chat_history** — 读原始消息记录
-
----
-
-## 5. Life Engine
-
-赤尾不是等消息的机器人。她有自己的生活节律。
-
-### Tick 机制
-
-arq-worker 每分钟执行 `tick(persona_id)`：
-
-1. 从 DB 加载最新状态（append-only 表 `life_engine_state`）
-2. 如果 `skip_until` 在未来 → 跳过（不调 LLM）
-3. 加载今日日程 + 活动时间线 + 最近对话碎片
-4. 调用 LLM（offline-model）决定下一步
-5. 持久化新状态行
-6. 如果进入 browsing → 触发 Glimpse 管线
-
-### LLM 输出
-
-```json
-{
-  "reasoning": "现在几点，日程说该做什么",
-  "current_state": "此刻的状态描述",
-  "activity_type": "studying / browsing / sleeping / ...",
-  "response_mood": "被人找会什么反应",
-  "wake_me_at": "HH:MM，下次检查时间"
-}
+    subgraph 想不起来时
+        RECALL[recall<br/>向量+BM25 搜碎片]
+        HIST[check_chat_history<br/>读原始消息]
+    end
 ```
 
-### 被@时的硬中断
-
-不管赤尾当前什么状态，被@都会响应。Life Engine 状态注入上下文，LLM 自然调整语气：
-- 睡着了被@ → "嗯...干嘛...几点了都..."
-- 在外面被@ → "在外面呢 晚点说"
+设计原则：LLM 就是赤尾的大脑，工程只负责在对的时间把对的素材喂给她。遗忘是 LLM 重新叙述时的自然副产品，不需要 TTL 或删除。
 
 ---
 
-## 6. Schedule Generation（Agent Team）
+## Life Engine
 
-每天凌晨 05:00 生成三姐妹的日程手帐。管线分两层：
+赤尾不是等消息的机器人，她有自己的生活节律。
 
-### 共享层（跑一次）
+```mermaid
+flowchart TD
+    TICK[每分钟 tick] --> LOAD[加载最新状态<br/>life_engine_state]
+    LOAD --> SKIP{skip_until<br/>在未来?}
+    SKIP -->|是| DONE[跳过]
+    SKIP -->|否| CTX[加载日程 + 活动时间线<br/>+ 最近对话碎片]
+    CTX --> LLM[LLM 决定下一步<br/>activity_type + mood + wake_me_at]
+    LLM --> SAVE[持久化新状态行<br/>append-only]
+    SAVE --> BRW{browsing?}
+    BRW -->|是| GLIMPSE[触发 Glimpse]
+    BRW -->|否| DONE
 
-三个并行任务：
-- **Wild Agents** — 4 个 persona-blind agent 从不同角度生成素材（互联网/城市观察/兴趣深挖/情绪天气）
-- **Search Anchors** — 3 条真实搜索（天气/新番/展览），锚定现实世界
-- **Sister Theater** — 5-6 件家庭日常事件，三姐妹共享
-
-### Per-Persona 层（每个角色跑一次）
-
-```
-共享素材 → Curator（按人格筛选） → Writer（写日程手帐） → Critic（审核质量）
-                                         ↑                        │
-                                         └── 不通过则重写（最多 3 轮）──┘
+    AT(("被@了")) -->|硬中断<br/>不管在干嘛都响应| CHAT[Chat Pipeline<br/>状态注入上下文]
 ```
 
-日程格式：日记体手帐，6-8 个场景，每个场景带小时级时间锚点，覆盖起床到睡觉。
+被@时 LLM 自然调整语气：睡着了 → "嗯...干嘛..."；在外面 → "在外面呢 晚点说"。
 
 ---
 
-## 7. Glimpse（窥屏）
+## Schedule Generation
 
-Life Engine 进入 browsing 状态时触发：
+每天 05:00 生成三姐妹日程，分共享层和 per-persona 层：
 
-1. 检查安静时段（23:00-09:00 不触发）
-2. 选一个白名单群
-3. 读增量消息
-4. LLM 观察：没意思 → 放下；有意思 → 写 glimpse 碎片
-5. 想搭话 → 触发主动发言（每小时上限 2 条）
+```mermaid
+flowchart LR
+    subgraph 共享层（跑一次）
+        W[Wild Agents ×4<br/>互联网/城市/兴趣/情绪]
+        S[Search Anchors<br/>天气/新番/展览]
+        T[Sister Theater<br/>5-6件家庭事件]
+    end
 
----
+    subgraph "per-persona（×3）"
+        C[Curator<br/>按人格筛选]
+        WR[Writer<br/>写日程手帐]
+        CR[Critic<br/>审核质量]
+    end
 
-## 8. Identity & Voice
+    W & S & T --> C --> WR --> CR
+    CR -->|不通过| WR
+    CR -->|PASS| OUT[日程入库]
+```
 
-### Identity Drift
-
-赤尾的说话风格会被身边的人自然影响。
-
-触发：聊天事件 → 300 秒 debounce（或累计 15 条）→ 取最近 1 小时的消息和回复 → LLM 生成新的语气特征 → 持久化
-
-### Voice Generation
-
-统一的声音生成，产出包含：
-- 内心独白风格（用于 afterthought）
-- 回复说话风格（用于聊天）
-
----
-
-## 9. Relationship Memory
-
-两阶段关系记忆提取：
-
-1. **话题过滤**（仅群聊）— 判断对话是否涉及值得记忆的内容
-2. **提取** — 每个对话者提取 core_facts（稳定事实）+ impression_deltas（印象变化）
-
-存储在 `relationship_memory_v2` 表，注入聊天上下文。
+日程格式：日记体手帐，6-8 个场景，每场景带小时级时间锚点，覆盖起床到睡觉。
 
 ---
 
-## 10. 数据模型（核心表）
+## Glimpse & 主动社交
 
-| 表 | 说明 |
-|----|------|
-| bot_persona | 人格内核（display_name, persona_lite, persona_core, appearance） |
-| life_engine_state | 生活状态（append-only，每次 tick 一行） |
-| akao_schedule | 日程手帐（plan_type=daily） |
-| experience_fragment | 经历碎片（grain=conversation/glimpse/daily/weekly） |
-| relationship_memory_v2 | 对人的核心事实和印象 |
-| conversation_messages | 原始飞书消息 |
-| glimpse_state | 窥屏位置（per group 的 cursor） |
+browsing 状态时触发窥屏：选白名单群 → 读增量消息 → LLM 观察 → 有意思则记 glimpse 碎片，想搭话则触发主动发言（每小时上限 2 条）。23:00-09:00 安静时段不触发。
 
----
+## Identity & Voice
 
-## 11. 基础设施
+聊天事件 → 300s debounce → 取最近 1h 消息和回复 → LLM 生成新语气特征（内心独白风格 + 回复说话风格）→ 持久化。赤尾的说话方式会被身边的人自然影响。
 
-| 组件 | 用途 |
-|------|------|
-| PostgreSQL | 主数据库 |
-| Redis | 封禁词集合、缓存 |
-| RabbitMQ | 消息队列（安全检测、向量化、召回、回复） |
-| Qdrant | 向量数据库（消息 embedding、碎片 embedding） |
-| Langfuse | Prompt 管理 + LLM 调用 tracing |
-| ARQ | 异步任务调度（cron + 一次性任务） |
-| Harbor | 镜像仓库 |
+## Relationship Memory
+
+两阶段提取：话题过滤（群聊中判断是否值得记）→ 提取 core_facts（稳定事实）+ impression_deltas（印象变化）。注入聊天上下文，让赤尾记得每个人。
 
 ---
 
-## 12. 未来里程碑
+## 核心数据模型
 
-### M1: Life Engine 精度提升
+```mermaid
+erDiagram
+    bot_persona ||--o{ life_engine_state : persona_id
+    bot_persona ||--o{ akao_schedule : persona_id
+    bot_persona ||--o{ experience_fragment : persona_id
+    bot_persona ||--o{ relationship_memory_v2 : persona_id
+    bot_persona ||--o{ glimpse_state : persona_id
 
-**目标**：活动切换更贴合日程时间线
+    bot_persona {
+        string persona_id PK
+        string display_name
+        text persona_lite
+        text persona_core
+    }
+    life_engine_state {
+        string persona_id FK
+        string current_state
+        string activity_type
+        string response_mood
+        datetime skip_until
+        datetime created_at
+    }
+    akao_schedule {
+        string persona_id FK
+        string plan_type
+        string period_start
+        text content
+    }
+    experience_fragment {
+        string persona_id FK
+        string grain "conversation/glimpse/daily/weekly"
+        string source_chat_id
+        text content
+    }
+    relationship_memory_v2 {
+        string persona_id FK
+        string target_user_id
+        jsonb core_facts
+        jsonb impressions
+    }
+```
 
-当前状态：日程已有小时级锚点（2026-04-14 上线），tick 引擎能切换活动但偏慢 1-2 小时。
+---
 
-- [ ] 分析 tick prompt 中 reasoning 步骤是否需要强化时间比对
-- [ ] 评估 wake_me_at 间隔对切换速度的影响（当前 30 分钟）
-- [ ] 考虑在 `_build_activity_context` 中增加"日程此刻说你该做什么"的提示
+## 未来里程碑
+
+### M1: Life Engine 精度
+
+活动切换偏慢 1-2 小时。方向：强化 tick prompt 中的时间比对、调整 wake_me_at 间隔、在 context 中增加"日程此刻该做什么"提示。
 
 ### M2: 三姐妹差异化
 
-**目标**：三个角色在日程、生活节奏、互动风格上有明显差异
-
-- [ ] 验证当前 persona_core 是否足够区分三人的日程生成
-- [ ] 评估 Sister Theater 对差异化的贡献
-- [ ] 考虑 per-persona 的 critic 检查标准
+验证 persona_core 对日程生成的区分度，评估 Sister Theater 的贡献，考虑 per-persona 的 critic 标准。
 
 ### M3: 主动社交
 
-**目标**：赤尾不只是被动回复，有自己想说的话
-
-- [ ] Glimpse 主动发言的质量和频率调优
-- [ ] 探索"想分享"的触发机制（看到好东西 → 想起某个朋友 → 主动找人聊）
-- [ ] 主动发言的自然度评估（不能像推送通知）
+Glimpse 主动发言的质量和频率调优。探索"想分享"触发机制：看到好东西 → 想起朋友 → 主动找人聊。
 
 ### M4: 记忆质量
 
-**目标**：记得该记的，忘得自然
-
-- [ ] afterthought prompt 调优（当前碎片质量参差不齐）
-- [ ] daily dream 的压缩质量评估（是否真的在"遗忘"还是在"总结"）
-- [ ] recall 工具的召回精度优化
+afterthought prompt 调优、daily dream 压缩质量（是"遗忘"还是"总结"）、recall 召回精度。
 
 ### M5: 安全与合规
 
-**目标**：安全检测的覆盖率和精度
+频率限流、PII 检测、输出安全检测误报率。
 
-- [ ] 频率限流（防单用户高频调用）
-- [ ] PII 检测（身份证、手机号等个人信息）
-- [ ] 输出安全检测的误报率分析
+### M6: 可观测性
 
-### M6: 可观测性精细化
-
-**目标**：成本追踪和质量分析
-
-- [ ] per-agent/tool/model 的 token 成本拆分
-- [ ] 工具调用的成功率、延迟、失败原因分布
-- [ ] Langfuse evaluation 闭环（用户反馈 → 自动评分）
+per-agent/tool/model token 成本拆分、工具调用指标、Langfuse evaluation 闭环。
