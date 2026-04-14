@@ -157,3 +157,13 @@ type DbMutationModel struct {
 }
 
 func (DbMutationModel) TableName() string { return "db_mutations" }
+
+// DynamicConfigModel 是 DynamicConfig 的数据库持久化模型。
+type DynamicConfigModel struct {
+	Key       string    `gorm:"primaryKey"`
+	Lane      string    `gorm:"primaryKey;default:prod"`
+	Value     string    `gorm:"not null"`
+	UpdatedAt time.Time
+}
+
+func (DynamicConfigModel) TableName() string { return "dynamic_configs" }

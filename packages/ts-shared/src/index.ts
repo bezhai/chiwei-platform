@@ -68,3 +68,7 @@ export { MongoService, getMongoService, resetMongoService, createMongoService, M
 // LaneRouter exports
 export type { ServiceInfo, LaneRouterOptions } from './lane-router';
 export { LaneRouter } from './lane-router';
+
+// DynamicConfig exports
+export type { DynamicConfigOptions } from './dynamic-config';
+export { DynamicConfig } from './dynamic-config';

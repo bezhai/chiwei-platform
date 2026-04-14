@@ -16,6 +16,7 @@ func NewRouter(
 	opsH *OpsHandler,
 	pipelineH *PipelineHandler,
 	configBundleH *ConfigBundleHandler,
+	dynamicConfigH *DynamicConfigHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -28,6 +29,9 @@ func NewRouter(
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Handle("/metrics", promhttp.Handler())
+
+	// Dynamic Config — internal read endpoint (no auth, for SDK)
+	r.Get("/internal/dynamic-config/resolved", dynamicConfigH.Resolve)
 
 	r.Route("/api/paas", func(r chi.Router) {
 		r.Use(authMiddleware(apiToken))
@@ -131,6 +135,14 @@ func NewRouter(
 					r.Delete("/{key}", configBundleH.DeleteLaneOverrideKey)
 				})
 			})
+		})
+
+		// Dynamic Config (management)
+		r.Route("/dynamic-config", func(r chi.Router) {
+			r.Get("/", dynamicConfigH.List)
+			r.Get("/resolved", dynamicConfigH.Resolve)
+			r.Put("/{key}", dynamicConfigH.Set)
+			r.Delete("/{key}", dynamicConfigH.Delete)
 		})
 	})
 

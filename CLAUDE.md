@@ -69,6 +69,18 @@ PaaS Engine API
 
 SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
 
+### 动态配置
+
+```
+Dashboard → monitor-dashboard → paas-engine (管理 API, /api/paas/dynamic-config/)
+                                            ↕ dynamic_configs 表
+SDK (agent-service/lark-server) → paas-engine (读取 API, /internal/dynamic-config/resolved)
+```
+
+- 基础设施连接（DB/Redis）走 ConfigBundle（部署时环境变量）
+- 业务行为参数（模型/阈值/flag）走 Dynamic Config（运行时 SDK 读取，10s 缓存）
+- 接入指南和 API 详见 `docs/dynamic-config.md`
+
 ## 通用规范
 
 - 镜像 tag: 语义化版本号（如 `1.0.0.2`），由 PaaS Engine 服务端分配

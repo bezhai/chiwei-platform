@@ -49,3 +49,12 @@ type ConfigBundleRepository interface {
 	Update(ctx context.Context, bundle *domain.ConfigBundle) error
 	Delete(ctx context.Context, name string) error
 }
+
+type DynamicConfigRepository interface {
+	Upsert(ctx context.Context, config *domain.DynamicConfig) error
+	FindByKeyAndLane(ctx context.Context, key, lane string) (*domain.DynamicConfig, error)
+	FindByLane(ctx context.Context, lane string) ([]*domain.DynamicConfig, error)
+	FindAll(ctx context.Context) ([]*domain.DynamicConfig, error)
+	DeleteByKeyAndLane(ctx context.Context, key, lane string) error
+	DeleteByKey(ctx context.Context, key string) error
+}
