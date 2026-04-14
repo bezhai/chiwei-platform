@@ -200,7 +200,8 @@ async def test_tick_calls_think_when_no_skip():
                 return_value=row,
             ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
-            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
+            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=(new_state, "", 0)),
+            patch(f"{MODULE}._review_tick", new_callable=AsyncMock, return_value=None),
         ):
             result = await tick("akao-001")
             mock_save.assert_called_once()
@@ -234,7 +235,8 @@ async def test_tick_no_row_uses_default():
                 return_value=None,
             ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
-            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
+            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=(new_state, "", 0)),
+            patch(f"{MODULE}._review_tick", new_callable=AsyncMock, return_value=None),
         ):
             result = await tick("akao-001")
             mock_save.assert_called_once()
@@ -269,7 +271,8 @@ async def test_tick_dry_run_does_not_save():
                 return_value=row,
             ),
             patch(f"{MODULE}.Q.insert_life_state", new_callable=AsyncMock) as mock_save,
-            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=new_state),
+            patch(f"{MODULE}._think", new_callable=AsyncMock, return_value=(new_state, "", 0)),
+            patch(f"{MODULE}._review_tick", new_callable=AsyncMock, return_value=None),
         ):
             result = await tick("akao-001", dry_run=True)
             mock_save.assert_not_called()
