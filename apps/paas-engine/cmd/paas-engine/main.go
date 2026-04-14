@@ -37,6 +37,7 @@ func main() {
 	ciConfigRepo := repository.NewCIConfigRepo(db)
 	pipelineRunRepo := repository.NewPipelineRunRepo(db)
 	configBundleRepo := repository.NewConfigBundleRepo(db)
+	dynamicConfigRepo := repository.NewDynamicConfigRepo(db)
 
 	// K8s 客户端（可选，无集群时降级运行）
 	cs, _, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
@@ -76,6 +77,7 @@ func main() {
 	imageRepoSvc := service.NewImageRepoService(imageRepoRepo, appRepo)
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
 	configBundleSvc := service.NewConfigBundleService(configBundleRepo, appRepo, releaseRepo)
+	dynamicConfigSvc := service.NewDynamicConfigService(dynamicConfigRepo)
 	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer, configBundleSvc)
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 	pipelineSvc := service.NewPipelineService(ciConfigRepo, pipelineRunRepo, testExecutor, buildSvc, releaseSvc, appRepo, imageRepoRepo, lokiClient, cfg.CINamespace)
@@ -142,6 +144,7 @@ func main() {
 		httpadapter.NewOpsHandler(opsDbs, writeDbs, mutationRepo),
 		httpadapter.NewPipelineHandler(pipelineSvc),
 		httpadapter.NewConfigBundleHandler(configBundleSvc),
+		httpadapter.NewDynamicConfigHandler(dynamicConfigSvc),
 		cfg.APIToken,
 	)
 
