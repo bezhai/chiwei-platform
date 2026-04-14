@@ -83,6 +83,7 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             mentions=mentions,
             bot_name=bot_name or "",
             is_p2p=is_p2p,
+            is_proactive=is_proactive,
         )
 
         if not persona_ids:

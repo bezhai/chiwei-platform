@@ -212,6 +212,20 @@ async def find_message_by_id(
     return result.scalar_one_or_none()
 
 
+async def resolve_message_id_by_row_id(
+    session: AsyncSession, row_id: str | int
+) -> str | None:
+    """Resolve int row id to lark message_id (om_xxx). Returns None if not found."""
+    try:
+        rid = int(row_id)
+    except (ValueError, TypeError):
+        return None
+    result = await session.execute(
+        select(ConversationMessage.message_id).where(ConversationMessage.id == rid)
+    )
+    return result.scalar_one_or_none()
+
+
 async def set_vector_status(
     session: AsyncSession, message_id: str, status: str
 ) -> None:

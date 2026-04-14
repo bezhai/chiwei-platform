@@ -73,6 +73,13 @@ async def submit_proactive_chat(
     """
     from app.data import queries as Q
 
+    # Resolve int row id from glimpse LLM to real lark message_id
+    if target_message_id:
+        async with get_session() as s:
+            target_message_id = await Q.resolve_message_id_by_row_id(
+                s, target_message_id
+            )
+
     async with get_session() as s:
         bot_name = await Q.resolve_bot_name_for_persona(s, persona_id, chat_id)
 

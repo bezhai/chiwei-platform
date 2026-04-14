@@ -38,6 +38,7 @@ HOURLY_PROACTIVE_LIMIT = 2
 TARGET_CHAT_IDS = [
     "oc_a44255e98af05f1359aeb29eeb503536",
     "oc_54713c53ff0b46cb9579d3695e16cbf8",
+    "oc_ab610a017d40e1413c6803ca6c6a11e0",
 ]
 
 
@@ -188,7 +189,7 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
     persona_name, persona_lite = pc.display_name, pc.persona_lite
     group_name = await _get_group_name(chat_id)
     messages_text = await format_timeline(
-        messages, persona_name, tz=CST, max_messages=30
+        messages, persona_name, tz=CST, max_messages=30, with_ids=True
     )
 
     if not messages_text.strip():
