@@ -359,7 +359,7 @@ func (d *K8sDeployer) applyService(ctx context.Context, release *domain.Release,
 }
 
 // applyBaseService 创建或更新 base Service（name=appName，无 lane 后缀）。
-// selector 指向 prod lane，作为默认路由；LaneRouter SDK 根据 x-lane header 路由到对应 lane Service。
+// selector 指向 prod lane，作为默认路由；sidecar 根据 x-ctx-lane header 透明路由到对应 lane Service。
 func (d *K8sDeployer) applyBaseService(ctx context.Context, release *domain.Release, app *domain.App) error {
 	name := release.AppName
 	svc := &corev1.Service{

@@ -127,43 +127,30 @@ class LaneRouter:
             return self._lane_provider()
         return None
 
-    def resolve_url(self, service: str, path: str = "", lane: str | None = None) -> str:
+    def resolve_url(self, service: str, path: str = "") -> str:
         """
         解析服务的完整 URL。
 
-        Args:
-            service: 服务名（如 'lark-server'）
-            path: 请求路径（如 '/api/image/process'）
-            lane: 可选泳道覆盖，不传则通过 lane_provider 自动获取
+        sidecar 模式下不再拼接泳道后缀，始终返回 http://service:port/path。
+        泳道路由由 sidecar 根据 x-ctx-lane header 透明处理。
         """
-        effective_lane = lane if lane is not None else self._get_lane()
         info = self._services.get(service)
         port = info.get("port", 0) if info else 0
 
-        if (
-            effective_lane
-            and effective_lane != "prod"
-            and info
-            and effective_lane in info.get("lanes", [])
-        ):
-            host = f"{service}-{effective_lane}"
-        else:
-            host = service
-
         if port and port != 80:
-            return f"http://{host}:{port}{path}"
-        return f"http://{host}{path}"
+            return f"http://{service}:{port}{path}"
+        return f"http://{service}{path}"
 
-    def base_url(self, service: str, lane: str | None = None) -> str:
+    def base_url(self, service: str) -> str:
         """返回 http://host:port（不含 path）。"""
-        return self.resolve_url(service, "", lane)
+        return self.resolve_url(service, "")
 
     def get_headers(self) -> dict[str, str]:
-        """返回需注入的 headers（x-lane）。"""
+        """返回需注入的 headers（x-ctx-lane）。"""
         headers: dict[str, str] = {}
         lane = self._get_lane()
         if lane:
-            headers["x-lane"] = lane
+            headers["x-ctx-lane"] = lane
         return headers
 
     def create_client(

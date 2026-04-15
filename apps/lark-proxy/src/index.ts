@@ -4,7 +4,6 @@ import { LaneResolver } from './lane-resolver';
 import { EventForwarder } from './forwarder';
 import { BotManager } from './bot-manager';
 import healthApp from './health';
-import { laneRouter } from './lane-router-instance';
 import { metricsMiddleware, metricsApp } from './metrics';
 import { createAdminApp } from './admin';
 
@@ -22,7 +21,7 @@ await pool.query('SELECT 1');
 console.info('PostgreSQL connected');
 
 const laneResolver = new LaneResolver(pool);
-const forwarder = new EventForwarder(laneResolver, laneRouter);
+const forwarder = new EventForwarder(laneResolver);
 const botManager = new BotManager(pool, forwarder);
 
 const app = new Hono();

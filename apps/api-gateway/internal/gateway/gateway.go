@@ -94,7 +94,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Director: func(req *http.Request) {
 			req.URL = target
 			req.Host = target.Host
-			// Preserve original headers including x-lane
+			// Bridge external x-lane to internal x-ctx-lane for context propagation
+			if lane != "" {
+				req.Header.Set("X-Ctx-Lane", lane)
+			}
 			if _, ok := req.Header["User-Agent"]; !ok {
 				req.Header.Set("User-Agent", "")
 			}

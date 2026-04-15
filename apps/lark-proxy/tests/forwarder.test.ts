@@ -14,6 +14,7 @@ describe('EventForwarder', () => {
 
     beforeEach(() => {
         process.env.INNER_HTTP_SECRET = 'test-secret';
+        process.env.LARK_SERVER_URL = 'http://lark-server:3000';
         mockResolver = {
             resolve: mock(() => Promise.resolve(null)),
             clearCache: mock(() => {}),
@@ -27,15 +28,16 @@ describe('EventForwarder', () => {
 
     afterEach(() => {
         delete process.env.INNER_HTTP_SECRET;
+        delete process.env.LARK_SERVER_URL;
     });
 
-    it('should forward to prod namespace when no lane binding', async () => {
+    it('should forward to lark-server prod when no lane binding', async () => {
         mockResolver.resolve.mockImplementation(() => Promise.resolve(null));
 
         await (forwarder as any).doForward('im.message.receive_v1', 'my-bot', { test: 1 });
 
         expect(mockFetch).toHaveBeenCalledWith(
-            'http://lark-server-prod.prod.svc.cluster.local:3000/api/internal/lark-event',
+            'http://lark-server:3000/api/internal/lark-event',
             expect.objectContaining({
                 method: 'POST',
                 headers: expect.objectContaining({
@@ -45,18 +47,37 @@ describe('EventForwarder', () => {
             }),
         );
 
+        // x-ctx-lane should NOT be present when no lane
+        const headers = mockFetch.mock.calls[0][1].headers;
+        expect(headers['x-ctx-lane']).toBeUndefined();
+
         const body = JSON.parse(mockFetch.mock.calls[0][1].body);
         expect(body.event_type).toBe('im.message.receive_v1');
         expect(body.params).toEqual({ test: 1 });
     });
 
-    it('should forward to lane namespace when binding exists', async () => {
+    it('should forward to lane-specific instance with x-ctx-lane', async () => {
         mockResolver.resolve.mockImplementation(() => Promise.resolve('feat-xxx'));
 
         await (forwarder as any).doForward('im.message.receive_v1', 'dev-bot', {});
 
         expect(mockFetch).toHaveBeenCalledWith(
-            'http://lark-server-prod.lane-feat-xxx.svc.cluster.local:3000/api/internal/lark-event',
+            'http://lark-server-feat-xxx:3000/api/internal/lark-event',
+            expect.objectContaining({
+                headers: expect.objectContaining({
+                    'x-ctx-lane': 'feat-xxx',
+                }),
+            }),
+        );
+    });
+
+    it('should forward to prod when lane is prod', async () => {
+        mockResolver.resolve.mockImplementation(() => Promise.resolve('prod'));
+
+        await (forwarder as any).doForward('im.message.receive_v1', 'dev-bot', {});
+
+        expect(mockFetch).toHaveBeenCalledWith(
+            'http://lark-server:3000/api/internal/lark-event',
             expect.anything(),
         );
     });
@@ -93,5 +114,22 @@ describe('EventForwarder', () => {
             expect.stringContaining('lark-server responded 500'),
         );
         consoleSpy.mockRestore();
+    });
+
+    it('should extract chat_id from message events', async () => {
+        mockResolver.resolve.mockImplementation((_type: string, key: string) =>
+            key === 'oc_test_chat' ? Promise.resolve('feat-chat') : Promise.resolve(null),
+        );
+
+        await (forwarder as any).doForward('im.message.receive_v1', 'my-bot', {
+            message: { chat_id: 'oc_test_chat' },
+        });
+
+        // Should have resolved with the chat_id first
+        expect(mockResolver.resolve).toHaveBeenCalledWith('chat', 'oc_test_chat');
+        expect(mockFetch).toHaveBeenCalledWith(
+            'http://lark-server-feat-chat:3000/api/internal/lark-event',
+            expect.anything(),
+        );
     });
 });

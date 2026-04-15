@@ -66,10 +66,10 @@ app.get('/api/ops/lane-bindings', async (c) => {
 
 // ---------- DDL/DML 变更审批 ----------
 
-/** 从请求中提取需要转发的 x-lane header */
+/** 从请求中提取需要转发的泳道 header */
 function laneHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
-  const lane = c.req.header('x-lane');
-  return lane ? { 'x-lane': lane } : undefined;
+  const lane = c.req.header('x-ctx-lane') || c.req.header('x-lane');
+  return lane ? { 'x-ctx-lane': lane } : undefined;
 }
 
 /** POST /api/ops/db-mutations — 提交 DDL/DML 变更申请 */

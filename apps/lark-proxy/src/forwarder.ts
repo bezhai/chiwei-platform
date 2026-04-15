@@ -1,18 +1,16 @@
 import { randomUUID } from 'crypto';
-import { LaneRouter } from '@inner/shared/lane-router';
 import { LaneResolver } from './lane-resolver';
+
+const LARK_SERVER_BASE = process.env.LARK_SERVER_URL || 'http://lark-server:3000';
 
 /**
  * 事件转发器
- * 将 Lark SDK 解析后的事件 POST 到目标 namespace 的 lark-server 统一接口
+ * 将 Lark SDK 解析后的事件 POST 到目标 lark-server 实例
  */
 export class EventForwarder {
     private secret: string;
 
-    constructor(
-        private laneResolver: LaneResolver,
-        private laneRouter: LaneRouter,
-    ) {
+    constructor(private laneResolver: LaneResolver) {
         this.secret = process.env.INNER_HTTP_SECRET || '';
         if (!this.secret) {
             console.warn('INNER_HTTP_SECRET not set, forwarding will fail auth');
@@ -33,7 +31,8 @@ export class EventForwarder {
         const lane =
             (chatId ? await this.laneResolver.resolve('chat', chatId) : null) ??
             (await this.laneResolver.resolve('bot', botName));
-        const url = this.laneRouter.resolveUrl('lark-server', '/api/internal/lark-event', lane || 'prod');
+
+        const url = this.buildUrl(lane);
         const traceId = randomUUID();
 
         console.info(
@@ -47,7 +46,7 @@ export class EventForwarder {
             Authorization: `Bearer ${this.secret}`,
         };
         if (lane) {
-            headers['x-lane'] = lane;
+            headers['x-ctx-lane'] = lane;
         }
 
         const resp = await fetch(url, {
@@ -62,6 +61,21 @@ export class EventForwarder {
                 `[forwarder] lark-server responded ${resp.status} for ${eventType}: ${body}`,
             );
         }
+    }
+
+    /**
+     * 构造 lark-server URL（lark-proxy 无 sidecar，需自主路由）
+     */
+    private buildUrl(lane: string | null): string {
+        const base = new URL(LARK_SERVER_BASE);
+        const service = base.hostname;
+        const port = base.port;
+
+        const host = lane && lane !== 'prod'
+            ? `${service}-${lane}`
+            : service;
+
+        return `http://${host}${port ? ':' + port : ''}/api/internal/lark-event`;
     }
 
     /**

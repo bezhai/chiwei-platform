@@ -3,10 +3,10 @@ import { paasClient } from '../paas-client';
 
 const app = new Hono();
 
-/** 从请求中提取 x-lane header，透传给 paasClient 以路由到对应泳道的 paas-engine */
+/** 从请求中提取泳道 header，透传给 paasClient 以路由到对应泳道的 paas-engine */
 function getLaneHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
-  const lane = c.req.header('x-lane');
-  return lane ? { 'x-lane': lane } : undefined;
+  const lane = c.req.header('x-ctx-lane') || c.req.header('x-lane');
+  return lane ? { 'x-ctx-lane': lane } : undefined;
 }
 
 /** GET /api/dynamic-config — 列出所有配置 */
