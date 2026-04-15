@@ -32,7 +32,7 @@ export class EventForwarder {
             (chatId ? await this.laneResolver.resolve('chat', chatId) : null) ??
             (await this.laneResolver.resolve('bot', botName));
 
-        const url = this.buildUrl(lane);
+        const url = this.buildUrl();
         const traceId = randomUUID();
 
         console.info(
@@ -45,7 +45,7 @@ export class EventForwarder {
             'x-trace-id': traceId,
             Authorization: `Bearer ${this.secret}`,
         };
-        if (lane) {
+        if (lane && lane !== 'prod') {
             headers['x-ctx-lane'] = lane;
         }
 
@@ -64,18 +64,10 @@ export class EventForwarder {
     }
 
     /**
-     * 构造 lark-server URL（lark-proxy 无 sidecar，需自主路由）
+     * 构造 lark-server URL（sidecar 根据 x-ctx-lane header 自动路由到泳道实例）
      */
-    private buildUrl(lane: string | null): string {
-        const base = new URL(LARK_SERVER_BASE);
-        const service = base.hostname;
-        const port = base.port;
-
-        const host = lane && lane !== 'prod'
-            ? `${service}-${lane}`
-            : service;
-
-        return `http://${host}${port ? ':' + port : ''}/api/internal/lark-event`;
+    private buildUrl(): string {
+        return `${LARK_SERVER_BASE}/api/internal/lark-event`;
     }
 
     /**
