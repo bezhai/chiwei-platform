@@ -146,19 +146,7 @@ class Agent:
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
-        import os
-        lf_host = os.environ.get("LANGFUSE_HOST", "<unset>")
-        lf_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "<unset>")
-        lf_sk_present = "set" if os.environ.get("LANGFUSE_SECRET_KEY") else "<unset>"
         handler = CallbackHandler(update_trace=True)
-        logger.info(
-            "CallbackHandler init: trace_name=%s, env_host=%s, env_pk=%s, env_sk=%s, has_langfuse=%s",
-            self._cfg.trace_name,
-            lf_host,
-            lf_pk[:10] + "..." if len(lf_pk) > 10 else lf_pk,
-            lf_sk_present,
-            hasattr(handler, 'langfuse'),
-        )
         config: dict[str, Any] = {
             "callbacks": [handler],
             "recursion_limit": self._cfg.recursion_limit,
@@ -210,7 +198,6 @@ class Agent:
         agent, prompt_messages = await self._build_agent(prompt_vars or {})
         full_messages = [*prompt_messages, *messages]
         config = self._build_config()
-        handler = config["callbacks"][0]
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
@@ -223,18 +210,6 @@ class Agent:
                 ):
                     tokens_yielded = True
                     yield token
-                # Stream done — check handler state
-                logger.info(
-                    "Agent(%s).stream() done: trace_id=%s, runs=%s",
-                    self._cfg.trace_name,
-                    getattr(handler, 'trace_id', getattr(handler, '_trace_id', '?')),
-                    getattr(handler, 'runs', getattr(handler, '_runs', '?')),
-                )
-                try:
-                    handler.flush()
-                    logger.info("Agent(%s) handler.flush() succeeded", self._cfg.trace_name)
-                except Exception as flush_err:
-                    logger.error("Agent(%s) handler.flush() failed: %s", self._cfg.trace_name, flush_err)
                 return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded:
