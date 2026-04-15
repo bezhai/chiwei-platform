@@ -248,6 +248,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 			Name:    "lane-sidecar-init",
 			Image:   sidecarImage,
 			Command: []string{"lane-sidecar", "--init"},
+			EnvFrom: envFrom, // 共享 config bundle（读 HTTPS_PROXY 自动排除 proxy IP）
 			SecurityContext: &corev1.SecurityContext{
 				Capabilities: &corev1.Capabilities{
 					Add: []corev1.Capability{"NET_ADMIN"},

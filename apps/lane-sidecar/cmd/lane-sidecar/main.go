@@ -5,9 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,8 +28,12 @@ func main() {
 	flag.Parse()
 
 	if *initMode {
+		excludes := collectExcludeCIDRs()
 		log.Println("[init] setting up iptables rules")
-		if err := iptables.Setup(*proxyPort, iptables.ProxyUID); err != nil {
+		if len(excludes) > 0 {
+			log.Printf("[init] excluding CIDRs: %v", excludes)
+		}
+		if err := iptables.Setup(*proxyPort, iptables.ProxyUID, excludes); err != nil {
 			log.Fatalf("[init] iptables setup failed: %v", err)
 		}
 		log.Println("[init] iptables rules applied successfully")
@@ -62,6 +69,61 @@ func main() {
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[proxy] server error: %v", err)
 	}
+}
+
+// collectExcludeCIDRs gathers IPs/CIDRs that should bypass sidecar interception.
+// Sources: HTTPS_PROXY/HTTP_PROXY env vars (auto-detect proxy host) + SIDECAR_EXCLUDE_CIDRS (explicit).
+func collectExcludeCIDRs() []string {
+	var cidrs []string
+
+	// 1. 从 HTTPS_PROXY / HTTP_PROXY 自动提取 proxy host IP
+	for _, envKey := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if proxyURL := os.Getenv(envKey); proxyURL != "" {
+			if ips := resolveProxyHost(proxyURL); len(ips) > 0 {
+				cidrs = append(cidrs, ips...)
+				log.Printf("[init] auto-excluded proxy IPs from %s=%s: %v", envKey, proxyURL, ips)
+				break // 只取第一个有值的
+			}
+		}
+	}
+
+	// 2. 显式排除列表
+	if explicit := os.Getenv("SIDECAR_EXCLUDE_CIDRS"); explicit != "" {
+		for _, cidr := range strings.Split(explicit, ",") {
+			if c := strings.TrimSpace(cidr); c != "" {
+				cidrs = append(cidrs, c)
+			}
+		}
+	}
+
+	return cidrs
+}
+
+// resolveProxyHost parses a proxy URL and resolves the hostname to IPs.
+func resolveProxyHost(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		log.Printf("[init] failed to parse proxy URL %q: %v", rawURL, err)
+		return nil
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+
+	// 已经是 IP 的直接返回
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{ip.String()}
+	}
+
+	// DNS 解析
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		log.Printf("[init] failed to resolve proxy host %q: %v", host, err)
+		return nil
+	}
+	return ips
 }
 
 func envOrDefault(key, fallback string) string {
