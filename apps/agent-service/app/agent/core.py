@@ -146,13 +146,18 @@ class Agent:
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
+        import os
+        lf_host = os.environ.get("LANGFUSE_HOST", "<unset>")
+        lf_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "<unset>")
+        lf_sk_present = "set" if os.environ.get("LANGFUSE_SECRET_KEY") else "<unset>"
         handler = CallbackHandler(update_trace=True)
         logger.info(
-            "CallbackHandler init: trace_name=%s, host=%s, enabled=%s, trace_id=%s",
+            "CallbackHandler init: trace_name=%s, env_host=%s, env_pk=%s, env_sk=%s, has_langfuse=%s",
             self._cfg.trace_name,
-            getattr(handler, 'host', getattr(handler, '_langfuse_host', '?')),
-            getattr(handler, 'enabled', getattr(handler, '_enabled', '?')),
-            getattr(handler, 'trace_id', getattr(handler, '_trace_id', '?')),
+            lf_host,
+            lf_pk[:10] + "..." if len(lf_pk) > 10 else lf_pk,
+            lf_sk_present,
+            hasattr(handler, 'langfuse'),
         )
         config: dict[str, Any] = {
             "callbacks": [handler],
