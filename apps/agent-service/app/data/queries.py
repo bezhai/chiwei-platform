@@ -144,6 +144,59 @@ async def resolve_mentioned_personas(
     return [row[0] for row in result.fetchall()]
 
 
+async def find_bot_names_for_persona(
+    session: AsyncSession, persona_id: str
+) -> list[str]:
+    """Return all active bot_names mapped to a persona_id."""
+    result = await session.execute(
+        text(
+            "SELECT bot_name FROM bot_config "
+            "WHERE persona_id = :pid AND is_active = true"
+        ),
+        {"pid": persona_id},
+    )
+    return list(result.scalars().all())
+
+
+async def find_cross_chat_messages(
+    session: AsyncSession,
+    user_id: str,
+    bot_names: list[str],
+    exclude_chat_id: str,
+    allowed_group_ids: list[str],
+    since_ms: int,
+) -> list[ConversationMessage]:
+    """Fetch recent cross-chat interactions between a user and a persona.
+
+    Returns user messages + bot replies from allowed group chats and p2p chats.
+    Excludes the current chat.
+    """
+    stmt = (
+        select(ConversationMessage)
+        .where(ConversationMessage.chat_id != exclude_chat_id)
+        .where(ConversationMessage.create_time >= since_ms)
+        .where(ConversationMessage.bot_name.in_(bot_names))
+        .where(
+            or_(
+                ConversationMessage.chat_id.in_(allowed_group_ids),
+                ConversationMessage.chat_type == "p2p",
+            )
+        )
+        .where(
+            or_(
+                # User's messages
+                (ConversationMessage.role == "user")
+                & (ConversationMessage.user_id == user_id),
+                # Bot's assistant replies
+                ConversationMessage.role == "assistant",
+            )
+        )
+        .order_by(ConversationMessage.create_time.asc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 # --- Chat messages ---
 
 
