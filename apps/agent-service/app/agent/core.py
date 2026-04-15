@@ -146,8 +146,16 @@ class Agent:
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
+        handler = CallbackHandler(update_trace=True)
+        logger.info(
+            "CallbackHandler init: trace_name=%s, host=%s, enabled=%s, trace_id=%s",
+            self._cfg.trace_name,
+            getattr(handler, 'host', getattr(handler, '_langfuse_host', '?')),
+            getattr(handler, 'enabled', getattr(handler, '_enabled', '?')),
+            getattr(handler, 'trace_id', getattr(handler, '_trace_id', '?')),
+        )
         config: dict[str, Any] = {
-            "callbacks": [CallbackHandler(update_trace=True)],
+            "callbacks": [handler],
             "recursion_limit": self._cfg.recursion_limit,
         }
         if self._cfg.trace_name:
@@ -197,6 +205,7 @@ class Agent:
         agent, prompt_messages = await self._build_agent(prompt_vars or {})
         full_messages = [*prompt_messages, *messages]
         config = self._build_config()
+        handler = config["callbacks"][0]
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
@@ -209,6 +218,18 @@ class Agent:
                 ):
                     tokens_yielded = True
                     yield token
+                # Stream done — check handler state
+                logger.info(
+                    "Agent(%s).stream() done: trace_id=%s, runs=%s",
+                    self._cfg.trace_name,
+                    getattr(handler, 'trace_id', getattr(handler, '_trace_id', '?')),
+                    getattr(handler, 'runs', getattr(handler, '_runs', '?')),
+                )
+                try:
+                    handler.flush()
+                    logger.info("Agent(%s) handler.flush() succeeded", self._cfg.trace_name)
+                except Exception as flush_err:
+                    logger.error("Agent(%s) handler.flush() failed: %s", self._cfg.trace_name, flush_err)
                 return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded:
