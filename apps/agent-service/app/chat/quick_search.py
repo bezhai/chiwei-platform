@@ -143,6 +143,7 @@ async def quick_search(
                     ConversationMessage.root_message_id != current_msg.root_message_id,
                     ConversationMessage.create_time >= time_threshold,
                     ConversationMessage.create_time < current_msg.create_time,
+                    ConversationMessage.user_id != "__proactive__",
                 )
                 .order_by(ConversationMessage.create_time.desc())
                 .limit(needed)
