@@ -16,7 +16,7 @@ const http = createHttpClient({
         }
         const lane = context.getLane();
         if (lane) {
-            headers['x-lane'] = lane;
+            headers['x-ctx-lane'] = lane;
         }
         return headers;
     },

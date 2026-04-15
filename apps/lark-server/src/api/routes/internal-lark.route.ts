@@ -39,7 +39,7 @@ app.post('/api/internal/lark-event', async (c) => {
     // 2. 从 header 提取上下文
     const botName = c.req.header('X-App-Name');
     const traceId = c.req.header('x-trace-id');
-    const lane = c.req.header('x-lane') || undefined;
+    const lane = c.req.header('x-ctx-lane') || c.req.header('x-lane') || undefined;
 
     // 3. 从 body 提取事件数据
     const { event_type, params } = await c.req.json() as {

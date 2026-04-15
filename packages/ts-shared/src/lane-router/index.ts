@@ -100,33 +100,25 @@ export class LaneRouter {
 
     /**
      * 解析服务的完整 URL
-     * @param service 服务名（如 'agent-service'）
-     * @param path 请求路径（如 '/chat/sse'）
-     * @param lane 可选泳道覆盖，不传则从 AsyncLocalStorage context 自动读取
+     *
+     * sidecar 模式下不再拼接泳道后缀，始终返回 http://service:port/path。
+     * 泳道路由由 sidecar 根据 x-ctx-lane header 透明处理。
      */
-    resolveUrl(service: string, path = '', lane?: string): string {
-        const effectiveLane = lane ?? context.get<string>('lane');
+    resolveUrl(service: string, path = ''): string {
         const info = this.services[service];
         const port = info?.port ?? 0;
 
-        let host: string;
-        if (effectiveLane && effectiveLane !== 'prod' && info?.lanes?.includes(effectiveLane)) {
-            host = `${service}-${effectiveLane}`;
-        } else {
-            host = service;
-        }
-
         if (port && port !== 80) {
-            return `http://${host}:${port}${path}`;
+            return `http://${service}:${port}${path}`;
         }
-        return `http://${host}${path}`;
+        return `http://${service}${path}`;
     }
 
     /**
      * 返回 http://host:port（不含 path）
      */
-    baseUrl(service: string, lane?: string): string {
-        return this.resolveUrl(service, '', lane);
+    baseUrl(service: string): string {
+        return this.resolveUrl(service, '');
     }
 
     /**
@@ -135,7 +127,7 @@ export class LaneRouter {
     private getContextHeaders(): Record<string, string> {
         const headers: Record<string, string> = {};
         const lane = context.get<string>('lane');
-        if (lane) headers['x-lane'] = lane;
+        if (lane) headers['x-ctx-lane'] = lane;
         const traceId = context.getTraceId();
         if (traceId) headers['X-Trace-Id'] = traceId;
         const appName = context.get<string>('botName');
@@ -144,19 +136,15 @@ export class LaneRouter {
     }
 
     /**
-     * lane-aware fetch 封装
-     * 自动解析 URL + 注入 x-lane/trace headers
+     * fetch 封装 — 自动解析 URL + 注入 x-ctx-lane/trace headers
      */
     async fetch(
         service: string,
         path: string,
         init?: RequestInit,
-        lane?: string,
     ): Promise<Response> {
-        const url = this.resolveUrl(service, path, lane);
-        const contextHeaders = lane
-            ? { 'x-lane': lane } // 手动传 lane 时只注入 x-lane
-            : this.getContextHeaders();
+        const url = this.resolveUrl(service, path);
+        const contextHeaders = this.getContextHeaders();
 
         const mergedHeaders = {
             ...contextHeaders,

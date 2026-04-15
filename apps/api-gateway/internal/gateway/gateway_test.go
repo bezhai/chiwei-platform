@@ -1,10 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -123,6 +126,66 @@ func TestGatewayLanePriority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGatewayInjectsCtxLane(t *testing.T) {
+	// Upstream captures headers it receives
+	var gotCtxLane string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCtxLane = r.Header.Get("X-Ctx-Lane")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	// Custom transport that redirects all requests to our test upstream
+	upstreamURL, _ := url.Parse(upstream.URL)
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Redirect all connections to the upstream server
+			return net.Dial(network, upstreamURL.Host)
+		},
+	}
+
+	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"services": map[string]interface{}{}})
+	}))
+	defer regSrv.Close()
+
+	reg := registry.NewClient(regSrv.URL, 1*time.Hour)
+	time.Sleep(50 * time.Millisecond)
+
+	routes := []route.Route{
+		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080},
+	}
+	matcher := route.NewMatcher(routes)
+	gw := New(matcher, reg, 5*time.Second)
+	gw.transport = transport
+
+	t.Run("injects x-ctx-lane when lane present", func(t *testing.T) {
+		gotCtxLane = ""
+		req := httptest.NewRequest("GET", "/api/paas/apps/", nil)
+		req.Header.Set("x-lane", "dev")
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if gotCtxLane != "dev" {
+			t.Errorf("expected X-Ctx-Lane=dev, got %q", gotCtxLane)
+		}
+	})
+
+	t.Run("no x-ctx-lane when no lane", func(t *testing.T) {
+		gotCtxLane = ""
+		req := httptest.NewRequest("GET", "/api/paas/apps/", nil)
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, req)
+
+		if gotCtxLane != "" {
+			t.Errorf("expected no X-Ctx-Lane, got %q", gotCtxLane)
+		}
+	})
 }
 
 func TestGatewayRedirectTrailingSlash(t *testing.T) {
