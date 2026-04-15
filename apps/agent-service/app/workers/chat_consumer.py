@@ -25,7 +25,11 @@ from app.api.middleware import (
 )
 from app.chat.pipeline import stream_chat
 from app.chat.router import MessageRouter
-from app.data.queries import resolve_bot_name_for_persona, set_agent_response_bot
+from app.data.queries import (
+    is_chat_request_completed,
+    resolve_bot_name_for_persona,
+    set_agent_response_bot,
+)
 from app.data.session import get_session
 from app.infra.rabbitmq import (
     CHAT_REQUEST,
@@ -75,6 +79,21 @@ async def handle_chat_request(message: AbstractIncomingMessage) -> None:
             lane,
             bot_name,
         )
+
+        async with get_session() as s:
+            already_completed = await is_chat_request_completed(
+                s,
+                session_id,
+                is_proactive=is_proactive,
+            )
+        if already_completed:
+            logger.warning(
+                "Skipping redelivered completed chat_request: session_id=%s, message_id=%s, is_proactive=%s",
+                session_id,
+                message_id,
+                is_proactive,
+            )
+            return
 
         # Route: decide which persona(s) reply
         router = MessageRouter()

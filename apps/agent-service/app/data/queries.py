@@ -324,6 +324,33 @@ async def set_agent_response_bot(
     )
 
 
+async def is_chat_request_completed(
+    session: AsyncSession,
+    session_id: str | None,
+    *,
+    is_proactive: bool = False,
+) -> bool:
+    """Return whether a chat_request redelivery should be treated as done."""
+    if not session_id:
+        return False
+
+    if is_proactive:
+        result = await session.execute(
+            select(func.count())
+            .select_from(ConversationMessage)
+            .where(ConversationMessage.response_id == session_id)
+            .where(ConversationMessage.role == "assistant")
+        )
+        return (result.scalar_one() or 0) > 0
+
+    result = await session.execute(
+        text("SELECT status FROM agent_responses WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+    status = result.scalar_one_or_none()
+    return status in ("completed", "recalled")
+
+
 async def set_safety_status(
     session: AsyncSession,
     session_id: str,
