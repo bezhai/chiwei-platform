@@ -191,7 +191,8 @@ func unwrapTCPConn(conn net.Conn) *net.TCPConn {
 func httpMethodMatcher() cmux.Matcher {
 	methods := []string{
 		"GET ", "PUT ", "POST ", "HEAD ",
-		"DELETE ", "PATCH ", "OPTIONS ", "CONNECT ", "TRACE ",
+		"DELETE ", "PATCH ", "OPTIONS ", "TRACE ",
+		// CONNECT 不匹配——代理隧道请求走 TCP passthrough（SO_ORIGINAL_DST 转发到原始代理）
 	}
 	return func(r io.Reader) bool {
 		buf := make([]byte, 8)

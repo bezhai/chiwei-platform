@@ -107,7 +107,6 @@ func TestHttpMethodMatcher(t *testing.T) {
 		"HEAD /health HTTP/1.1",
 		"PATCH /patch HTTP/1.1",
 		"OPTIONS /opt HTTP/1.1",
-		"CONNECT host:443 HTTP/1.1",
 		"TRACE /trace HTTP/1.1",
 	}
 	for _, s := range httpStarts {
@@ -118,6 +117,7 @@ func TestHttpMethodMatcher(t *testing.T) {
 	}
 
 	nonHTTPStarts := []string{
+		"CONNECT host:443 HTTP/1.1",          // proxy tunnel → TCP passthrough
 		"\x16\x03\x01\x00\x01\x00\x00\x00", // TLS ClientHello
 		"\x00\x00\x00\x45\x00\x00\x00\x00", // MongoDB wire protocol
 		"\x44\x00\x00\x00\x00\x00\x00\x00", // Looks like 'D' but not "DELETE "
