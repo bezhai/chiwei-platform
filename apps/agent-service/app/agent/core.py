@@ -146,8 +146,9 @@ class Agent:
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
+        handler = CallbackHandler(update_trace=True)
         config: dict[str, Any] = {
-            "callbacks": [CallbackHandler(update_trace=True)],
+            "callbacks": [handler],
             "recursion_limit": self._cfg.recursion_limit,
         }
         if self._cfg.trace_name:

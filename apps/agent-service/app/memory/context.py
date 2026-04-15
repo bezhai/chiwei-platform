@@ -106,6 +106,19 @@ async def build_inner_context(
                 parts.append(f"[印象] {impression}")
             sections.append("\n".join(parts))
 
+    # === Cross-chat interactions ===
+    if trigger_user_id and trigger_user_id != "__proactive__":
+        from app.memory.cross_chat import build_cross_chat_context
+
+        cross_chat_text = await build_cross_chat_context(
+            persona_id=persona_id,
+            trigger_user_id=trigger_user_id,
+            trigger_username=trigger_username,
+            current_chat_id=chat_id,
+        )
+        if cross_chat_text:
+            sections.append(cross_chat_text)
+
     # === Recent fragments ===
     async with get_session() as s:
         today_frags = await find_today_fragments(s, persona_id, grains=["conversation"])
