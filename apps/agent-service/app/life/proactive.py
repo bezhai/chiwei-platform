@@ -61,6 +61,37 @@ async def get_unseen_messages(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_target_message(
+    target_message_id: str | None,
+    chat_id: str,
+) -> ConversationMessage | None:
+    """Resolve a glimpse target to the real conversation message, if possible."""
+    if not target_message_id:
+        return None
+
+    from app.data import queries as Q
+
+    async with get_session() as s:
+        if target_message_id.isdigit():
+            message_id = await Q.resolve_message_id_by_row_id(s, target_message_id)
+            if not message_id:
+                return None
+            msg = await Q.find_message_by_id(s, message_id)
+        else:
+            msg = await Q.find_message_by_id(s, target_message_id)
+
+    if msg and msg.chat_id == chat_id:
+        return msg
+    if msg:
+        logger.warning(
+            "Proactive target ignored: target_chat=%s current_chat=%s message_id=%s",
+            msg.chat_id,
+            chat_id,
+            msg.message_id,
+        )
+    return None
+
+
 async def submit_proactive_chat(
     chat_id: str,
     persona_id: str,
@@ -73,12 +104,9 @@ async def submit_proactive_chat(
     """
     from app.data import queries as Q
 
-    # Resolve int row id from glimpse LLM to real lark message_id
-    if target_message_id:
-        async with get_session() as s:
-            target_message_id = await Q.resolve_message_id_by_row_id(
-                s, target_message_id
-            )
+    target_msg = await _resolve_target_message(target_message_id, chat_id)
+    target_lark_id = target_msg.message_id if target_msg else None
+    root_message_id = target_msg.root_message_id if target_msg else None
 
     async with get_session() as s:
         bot_name = await Q.resolve_bot_name_for_persona(s, persona_id, chat_id)
@@ -102,8 +130,8 @@ async def submit_proactive_chat(
             user_id=PROACTIVE_USER_ID,
             content=content,
             role="user",
-            root_message_id=message_id,
-            reply_message_id=target_message_id,
+            root_message_id=root_message_id or message_id,
+            reply_message_id=target_lark_id,
             chat_id=chat_id,
             chat_type="group",
             create_time=now_ms,
@@ -124,7 +152,7 @@ async def submit_proactive_chat(
             "message_id": message_id,
             "chat_id": chat_id,
             "is_p2p": False,
-            "root_id": target_message_id or "",
+            "root_id": target_lark_id or "",
             "user_id": PROACTIVE_USER_ID,
             "bot_name": bot_name,
             "is_proactive": True,
@@ -136,7 +164,7 @@ async def submit_proactive_chat(
     logger.info(
         "Proactive request submitted: session_id=%s, target=%s",
         session_id,
-        target_message_id,
+        target_lark_id,
     )
     return session_id
 
