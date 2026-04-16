@@ -479,6 +479,164 @@ func TestGetDeploymentStatusNotFound(t *testing.T) {
 	}
 }
 
+// TestApplyDeploymentWithVolumes 验证 App 有一个 VolumeMount 时正确生成 PVC Volume 和容器 VolumeMount。
+func TestApplyDeploymentWithVolumes(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{
+		Name: "data-worker",
+		Port: 0,
+		Volumes: []domain.VolumeMount{
+			{PVCName: "shared-data", MountPath: "/data", ReadOnly: false},
+		},
+	}
+
+	release := &domain.Release{
+		ID:       "r10",
+		AppName:  "data-worker",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/data-worker:v1",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "data-worker-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	// 验证 PodSpec.Volumes 有 1 个 PVC Volume
+	if len(deploy.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(deploy.Spec.Template.Spec.Volumes))
+	}
+	vol := deploy.Spec.Template.Spec.Volumes[0]
+	if vol.Name != "shared-data" {
+		t.Errorf("volume name = %q, want %q", vol.Name, "shared-data")
+	}
+	if vol.PersistentVolumeClaim == nil || vol.PersistentVolumeClaim.ClaimName != "shared-data" {
+		t.Errorf("volume PVC ClaimName = %+v, want shared-data", vol.PersistentVolumeClaim)
+	}
+
+	// 验证主容器有 1 个 VolumeMount
+	container := deploy.Spec.Template.Spec.Containers[0]
+	if len(container.VolumeMounts) != 1 {
+		t.Fatalf("expected 1 volume mount, got %d", len(container.VolumeMounts))
+	}
+	mount := container.VolumeMounts[0]
+	if mount.Name != "shared-data" {
+		t.Errorf("mount name = %q, want %q", mount.Name, "shared-data")
+	}
+	if mount.MountPath != "/data" {
+		t.Errorf("mount path = %q, want %q", mount.MountPath, "/data")
+	}
+	if mount.ReadOnly != false {
+		t.Errorf("mount ReadOnly = %v, want false", mount.ReadOnly)
+	}
+}
+
+// TestApplyDeploymentWithVolumesDedup 验证同一 PVC 两个挂载路径时只生成 1 个 Volume，但 2 个 VolumeMount，SubPath 也正确设置。
+func TestApplyDeploymentWithVolumesDedup(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{
+		Name: "multi-mount-app",
+		Port: 8080,
+		Volumes: []domain.VolumeMount{
+			{PVCName: "shared-pvc", MountPath: "/data/input", SubPath: "input"},
+			{PVCName: "shared-pvc", MountPath: "/data/output", SubPath: "output"},
+		},
+	}
+
+	release := &domain.Release{
+		ID:       "r11",
+		AppName:  "multi-mount-app",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/multi-mount-app:v1",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "multi-mount-app-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	// 同一 PVC 只生成 1 个 Volume（去重）
+	if len(deploy.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected 1 volume (dedup), got %d", len(deploy.Spec.Template.Spec.Volumes))
+	}
+	if deploy.Spec.Template.Spec.Volumes[0].Name != "shared-pvc" {
+		t.Errorf("volume name = %q, want %q", deploy.Spec.Template.Spec.Volumes[0].Name, "shared-pvc")
+	}
+
+	// 但有 2 个 VolumeMount
+	container := deploy.Spec.Template.Spec.Containers[0]
+	if len(container.VolumeMounts) != 2 {
+		t.Fatalf("expected 2 volume mounts, got %d", len(container.VolumeMounts))
+	}
+
+	// 验证 SubPath
+	if container.VolumeMounts[0].SubPath != "input" {
+		t.Errorf("mount[0].SubPath = %q, want %q", container.VolumeMounts[0].SubPath, "input")
+	}
+	if container.VolumeMounts[0].MountPath != "/data/input" {
+		t.Errorf("mount[0].MountPath = %q, want %q", container.VolumeMounts[0].MountPath, "/data/input")
+	}
+	if container.VolumeMounts[1].SubPath != "output" {
+		t.Errorf("mount[1].SubPath = %q, want %q", container.VolumeMounts[1].SubPath, "output")
+	}
+	if container.VolumeMounts[1].MountPath != "/data/output" {
+		t.Errorf("mount[1].MountPath = %q, want %q", container.VolumeMounts[1].MountPath, "/data/output")
+	}
+}
+
+// TestApplyDeploymentNoVolumes 验证 App 没有 Volumes 时 Deployment 上没有 volumes/mounts（向后兼容）。
+func TestApplyDeploymentNoVolumes(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{
+		Name: "simple-app",
+		Port: 3000,
+	}
+
+	release := &domain.Release{
+		ID:       "r12",
+		AppName:  "simple-app",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/simple-app:v1",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "simple-app-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	// 无 Volumes
+	if len(deploy.Spec.Template.Spec.Volumes) != 0 {
+		t.Errorf("expected no volumes, got %d", len(deploy.Spec.Template.Spec.Volumes))
+	}
+
+	// 主容器无 VolumeMounts
+	container := deploy.Spec.Template.Spec.Containers[0]
+	if len(container.VolumeMounts) != 0 {
+		t.Errorf("expected no volume mounts, got %d", len(container.VolumeMounts))
+	}
+}
+
 func TestBuildEnvFrom(t *testing.T) {
 	tests := []struct {
 		name       string
