@@ -25,12 +25,16 @@ async def lifespan(app: FastAPI):
     logger.info("shared pkg loaded: %s", shared_hello())
 
     # Load skill definitions
+    import os
     from pathlib import Path
 
-    from app.skills.registry import SkillRegistry
+    from app.skills.registry import SkillRegistry, skill_reload_loop
 
-    skills_dir = Path(__file__).parent / "skills" / "definitions"
+    skills_dir = Path(os.environ.get("SKILLS_DIR", str(Path(__file__).parent / "skills" / "definitions")))
     SkillRegistry.load_all(skills_dir)
+
+    # Start hot-reload loop
+    reload_task = asyncio.create_task(skill_reload_loop(skills_dir))
 
     # Start MQ consumers (only when RabbitMQ is configured)
     consumer_tasks: list[asyncio.Task] = []
@@ -54,6 +58,13 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception) as e:
             if not isinstance(e, asyncio.CancelledError):
                 logger.warning("Consumer task ended with error: %s", e)
+
+    # Cancel skill reload task
+    reload_task.cancel()
+    try:
+        await reload_task
+    except asyncio.CancelledError:
+        pass
 
     # Close RabbitMQ connection
     if settings.rabbitmq_url:

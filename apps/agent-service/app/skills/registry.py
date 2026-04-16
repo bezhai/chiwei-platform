@@ -4,6 +4,7 @@
 提供查询和描述列表生成功能。
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import ClassVar
@@ -76,3 +77,35 @@ class SkillRegistry:
     def list_all(cls) -> list[SkillDefinition]:
         """返回所有已注册的 Skill 列表。"""
         return list(cls._skills.values())
+
+    @classmethod
+    def take_snapshot(cls, skills_dir: Path) -> dict[str, float]:
+        """收集所有 SKILL.md 及 scripts 的 mtime，用于变更检测。"""
+        snapshot: dict[str, float] = {}
+        if not skills_dir.exists():
+            return snapshot
+        for child in skills_dir.iterdir():
+            skill_file = child / "SKILL.md"
+            if child.is_dir() and skill_file.exists():
+                snapshot[str(skill_file)] = skill_file.stat().st_mtime
+                scripts_dir = child / "scripts"
+                if scripts_dir.exists():
+                    for script in scripts_dir.iterdir():
+                        if script.is_file():
+                            snapshot[str(script)] = script.stat().st_mtime
+        return snapshot
+
+
+async def skill_reload_loop(skills_dir: Path, interval: int = 30) -> None:
+    """后台协程：定期检查 skill 文件变更，有变化则重新加载。"""
+    last_snapshot = SkillRegistry.take_snapshot(skills_dir)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            current = SkillRegistry.take_snapshot(skills_dir)
+            if current != last_snapshot:
+                logger.info("Skill files changed, reloading...")
+                SkillRegistry.load_all(skills_dir)
+                last_snapshot = current
+        except Exception as e:
+            logger.error("Skill reload check failed: %s", e)
