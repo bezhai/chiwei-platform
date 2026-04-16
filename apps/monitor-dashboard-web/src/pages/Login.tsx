@@ -29,50 +29,34 @@ export default function Login() {
       <div className="login-left">
         <div className="brand-section">
           <div className="brand-logo">
-            <div className="brand-mark login-brand-mark">
-              <span className="brand-mark-core" />
+            <div className="brand-icon">
+              <span style={{ fontSize: 24 }}>🔭</span>
             </div>
-            <div>
-              <span className="brand-text">赤尾观测中心</span>
-              <div className="brand-caption">Monitor Dashboard</div>
-            </div>
+            <span className="brand-text">赤尾观测中心</span>
           </div>
 
           <div className="hero-text-container">
-            <div className="hero-kicker">Operations Control Room</div>
             <div className="hero-title">
-              看见系统脉搏
-              <br />
-              也看见异常前奏
+              全域观测<br />
+              尽在掌握
             </div>
             <div className="hero-subtitle">
-              为 `dashboard-monitor` 设计的运维控制台，集中展示服务状态、活动轨迹、审计记录与配置变更。
+              针对 Inner Bot 基础设施的综合监控、实时分析与高级控制中心。
             </div>
-          </div>
-        </div>
-
-        <div className="hero-signal-grid">
-          <div className="hero-signal-card">
-            <div className="hero-signal-label">今日状态</div>
-            <div className="hero-signal-value">All Green</div>
-          </div>
-          <div className="hero-signal-card">
-            <div className="hero-signal-label">值班节奏</div>
-            <div className="hero-signal-value">实时同步</div>
           </div>
         </div>
 
         <div className="testimonial">
           <Space align="start" size={16}>
-            <CheckCircleFilled style={{ color: '#0f766e', fontSize: 24, marginTop: 4 }} />
+            <CheckCircleFilled style={{ color: '#10b981', fontSize: 24, marginTop: 4 }} />
             <div>
-              <div style={{ fontWeight: 700, color: '#172033', marginBottom: 4, fontSize: 15 }}>
-                控制室已就绪
+              <div style={{ fontWeight: 600, color: '#0f172a', marginBottom: 4, fontSize: 15 }}>
+                系统运转正常
               </div>
-              <div style={{ color: '#5f6573', fontSize: 13, lineHeight: 1.6 }}>
-                服务健康、链路追踪、消息检索与配置管理
+              <div style={{ color: '#64748b', fontSize: 13, lineHeight: 1.5 }}>
+                所有服务节点状态良好
                 <br />
-                在同一入口完成闭环操作
+                最近检查: 刚刚
               </div>
             </div>
           </Space>
@@ -80,49 +64,47 @@ export default function Login() {
       </div>
 
       <div className="login-right">
-        <div className="login-panel">
-          <div className="login-form-wrapper">
-            <div className="form-header">
-              <div className="form-title">欢迎回来</div>
-              <div className="form-subtitle">请输入管理员密码，进入监控控制室。</div>
-            </div>
+        <div className="login-form-wrapper">
+          <div className="form-header">
+            <div className="form-title">欢迎回来</div>
+            <div className="form-subtitle">请输入管理员密码以继续访问控制台。</div>
+          </div>
 
-            <Form
-              layout="vertical"
-              onFinish={onFinish}
-              requiredMark={false}
-              size="large"
+          <Form
+            layout="vertical"
+            onFinish={onFinish}
+            requiredMark={false}
+            size="large"
+          >
+            <Form.Item
+              name="password"
+              label={<span style={{ fontWeight: 600, fontSize: 13, color: '#334155' }}>管理密码</span>}
+              rules={[{ required: true, message: '请输入密码' }]}
             >
-              <Form.Item
-                name="password"
-                label={<span style={{ fontWeight: 600, fontSize: 13, color: '#334155' }}>管理密码</span>}
-                rules={[{ required: true, message: '请输入密码' }]}
+              <Input.Password
+                prefix={<LockOutlined style={{ color: '#94a3b8', fontSize: 16 }} />}
+                placeholder="请输入密码"
+                className="custom-input"
+              />
+            </Form.Item>
+
+            <Form.Item style={{ marginTop: 32 }}>
+              <Button
+                type="primary"
+                htmlType="submit"
+                loading={loading}
+                block
+                className="submit-btn"
               >
-                <Input.Password
-                  prefix={<LockOutlined style={{ color: '#94a3b8', fontSize: 16 }} />}
-                  placeholder="请输入密码"
-                  className="custom-input"
-                />
-              </Form.Item>
+                登录 <ArrowRightOutlined />
+              </Button>
+            </Form.Item>
+          </Form>
 
-              <Form.Item style={{ marginTop: 32 }}>
-                <Button
-                  type="primary"
-                  htmlType="submit"
-                  loading={loading}
-                  block
-                  className="submit-btn"
-                >
-                  登录 <ArrowRightOutlined />
-                </Button>
-              </Form.Item>
-            </Form>
-
-            <div style={{ marginTop: 40, textAlign: 'center' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                &copy; {new Date().getFullYear()} Chiwei Observation Center
-              </Text>
-            </div>
+          <div style={{ marginTop: 40, textAlign: 'center' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              &copy; {new Date().getFullYear()} Chiwei Observation Center. All rights reserved.
+            </Text>
           </div>
         </div>
       </div>

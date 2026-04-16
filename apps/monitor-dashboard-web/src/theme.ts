@@ -2,80 +2,74 @@ import { ThemeConfig } from 'antd';
 
 export const themeConfig: ThemeConfig = {
   token: {
-    colorPrimary: '#0f766e',
+    colorPrimary: '#2563eb',
     colorSuccess: '#10b981',
-    colorWarning: '#d97706',
+    colorWarning: '#f59e0b',
     colorError: '#ef4444',
-    colorInfo: '#2563eb',
-    borderRadius: 12,
-    borderRadiusLG: 24,
-    fontFamily: "'Avenir Next', 'Segoe UI Variable Display', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+    colorInfo: '#3b82f6',
+    borderRadius: 6, // Slightly sharper for modern feel, but components can be larger
+    borderRadiusLG: 12,
+    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
     fontSize: 14,
-    colorBgLayout: '#f6f0e4',
-    colorBgContainer: '#fffdf8',
-    colorTextBase: '#172033',
-    colorBorder: '#e7dcc7',
-    colorBorderSecondary: '#f0e7d8',
+    colorBgLayout: '#fafafa', // Lighter background for a cleaner canvas
+    colorTextBase: '#0f172a',
+    colorBorder: '#e2e8f0', // Lighter borders
+    colorBorderSecondary: '#f1f5f9',
     wireframe: false,
-    boxShadow: '0 20px 50px rgba(23, 32, 51, 0.08)',
+    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
   },
   components: {
     Layout: {
-      siderBg: 'rgba(255, 251, 243, 0.88)',
-      headerBg: 'rgba(255, 250, 242, 0.88)',
-      bodyBg: 'transparent',
+      siderBg: '#ffffff',
+      headerBg: 'rgba(255, 255, 255, 0.8)',
+      bodyBg: '#fafafa',
     },
     Menu: {
-      itemSelectedBg: 'rgba(15, 118, 110, 0.12)',
-      itemSelectedColor: '#0f172a',
-      itemColor: '#5f6573',
-      itemHoverBg: 'rgba(23, 32, 51, 0.04)',
-      itemBorderRadius: 14,
-      itemMarginInline: 12,
-      itemHeight: 44,
-      activeBarWidth: 0,
+      itemSelectedBg: '#eff6ff',
+      itemSelectedColor: '#2563eb',
+      itemColor: '#64748b',
+      itemHoverBg: '#f8fafc',
+      itemBorderRadius: 8,
+      itemMarginInline: 12, // Give menu items some breathing room from the edges
     },
     Card: {
-      boxShadowTertiary: '0 18px 35px rgba(23, 32, 51, 0.06)',
+      boxShadowTertiary: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
       paddingLG: 24,
-      borderRadiusLG: 24,
-      colorBorderSecondary: '#ede2d0',
+      borderRadiusLG: 16, // Softer cards
+      colorBorderSecondary: '#e2e8f0', // Define card border specifically
     },
     Typography: {
       titleMarginBottom: 0,
       titleMarginTop: 0,
     },
     Table: {
-      headerBg: '#f5efe2',
-      headerColor: '#6b5f4f',
-      headerBorderRadius: 18,
-      borderColor: '#f0e7d8',
-      rowHoverBg: '#fffcf4',
-      cellPaddingBlock: 18,
+      headerBg: '#f8fafc',
+      headerColor: '#475569',
+      headerBorderRadius: 8,
+      borderColor: '#f1f5f9',
+      rowHoverBg: '#f8fafc',
+      cellPaddingBlock: 16, // More breathing room in rows
     },
     Button: {
-      borderRadius: 999,
-      controlHeight: 40,
-      paddingInline: 18,
+      borderRadius: 6,
+      controlHeight: 36, // Slightly taller default buttons
+      paddingInline: 16,
       defaultShadow: 'none',
-      primaryShadow: '0 12px 24px rgba(15, 118, 110, 0.18)',
+      primaryShadow: '0 2px 4px rgba(37, 99, 235, 0.2)',
     },
     Input: {
-      activeBorderColor: '#0f766e',
-      hoverBorderColor: '#9da4b0',
-      colorBorder: '#d7cbb9',
+      activeBorderColor: '#2563eb',
+      hoverBorderColor: '#94a3b8',
+      colorBorder: '#cbd5e1',
       paddingBlock: 6,
     },
     Select: {
-      colorPrimaryHover: '#0f766e',
-      colorPrimary: '#0f766e',
+      colorPrimaryHover: '#3b82f6',
+      colorPrimary: '#2563eb',
     },
     Tag: {
-      borderRadiusSM: 999,
+      borderRadiusSM: 4,
       lineHeight: 2,
-    },
-    Drawer: {
-      colorBgElevated: 'rgba(255, 251, 243, 0.96)',
-    },
-  },
+    }
+  }
 };
