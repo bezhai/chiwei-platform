@@ -96,6 +96,10 @@ func appToModel(a *domain.App) (*AppModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	volumesJSON, err := json.Marshal(a.Volumes)
+	if err != nil {
+		return nil, err
+	}
 	return &AppModel{
 		Name:              a.Name,
 		Description:       a.Description,
@@ -108,6 +112,7 @@ func appToModel(a *domain.App) (*AppModel, error) {
 		Envs:              string(envsJSON),
 		ConfigBundles:     string(configBundlesJSON),
 		SidecarEnabled:    a.SidecarEnabled,
+		Volumes:           string(volumesJSON),
 		CreatedAt:         a.CreatedAt,
 		UpdatedAt:         a.UpdatedAt,
 	}, nil
@@ -144,6 +149,12 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 			return nil, err
 		}
 	}
+	var volumes []domain.VolumeMount
+	if m.Volumes != "" {
+		if err := json.Unmarshal([]byte(m.Volumes), &volumes); err != nil {
+			return nil, err
+		}
+	}
 	return &domain.App{
 		Name:              m.Name,
 		Description:       m.Description,
@@ -156,6 +167,7 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 		Envs:              envs,
 		ConfigBundles:     configBundles,
 		SidecarEnabled:    m.SidecarEnabled,
+		Volumes:           volumes,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}, nil

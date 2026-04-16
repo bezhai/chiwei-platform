@@ -15,6 +15,7 @@ type AppModel struct {
 	Envs              string // JSON 序列化的 map[string]string
 	ConfigBundles     string // JSON 序列化的 []string
 	SidecarEnabled    bool
+	Volumes           string // JSON 序列化的 []VolumeMount
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

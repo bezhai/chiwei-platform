@@ -199,3 +199,49 @@ class TestSkillRegistry:
     def test_load_nonexistent_dir(self, tmp_path: Path):
         SkillRegistry.load_all(tmp_path / "nonexistent")
         assert len(SkillRegistry._skills) == 0
+
+
+class TestSkillReloadLoop:
+    def test_take_snapshot_returns_mtime_dict(self, tmp_path):
+        from app.skills.registry import SkillRegistry
+
+        skill_dir = tmp_path / "test_skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("---\ndescription: test\n---\n\n# Test\n")
+
+        snapshot = SkillRegistry.take_snapshot(tmp_path)
+        assert len(snapshot) == 1
+        assert str(skill_file) in snapshot
+
+    def test_take_snapshot_detects_change(self, tmp_path):
+        import time
+        from app.skills.registry import SkillRegistry
+
+        skill_dir = tmp_path / "test_skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("---\ndescription: v1\n---\n\n# V1\n")
+
+        snap1 = SkillRegistry.take_snapshot(tmp_path)
+
+        time.sleep(0.05)
+        skill_file.write_text("---\ndescription: v2\n---\n\n# V2\n")
+
+        snap2 = SkillRegistry.take_snapshot(tmp_path)
+        assert snap1 != snap2
+
+    def test_take_snapshot_includes_scripts(self, tmp_path):
+        from app.skills.registry import SkillRegistry
+
+        skill_dir = tmp_path / "my_skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\ndescription: test\n---\n\n# Test\n")
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir()
+        script_file = scripts_dir / "run.py"
+        script_file.write_text("print('hello')")
+
+        snapshot = SkillRegistry.take_snapshot(tmp_path)
+        assert len(snapshot) == 2
+        assert str(script_file) in snapshot

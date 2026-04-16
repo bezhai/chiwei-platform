@@ -18,8 +18,8 @@ RUN pip install uv
 COPY apps/sandbox-worker/pyproject.toml apps/sandbox-worker/uv.toml ./apps/sandbox-worker/
 RUN cd apps/sandbox-worker && uv sync --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://mirrors.aliyun.com/pypi/simple/ --allow-insecure-host mirrors.aliyun.com
 
-# 复制 skill 定义（sandbox 需要访问脚本文件）
-COPY apps/agent-service/app/skills/definitions /sandbox/skills/
+# skill 定义通过 PVC 挂载到 /sandbox/skills/，不再构建时复制
+RUN mkdir -p /sandbox/skills
 
 ARG GIT_SHA=unknown
 

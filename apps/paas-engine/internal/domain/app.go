@@ -2,6 +2,14 @@ package domain
 
 import "time"
 
+// VolumeMount 描述一个 PVC 到容器路径的挂载。
+type VolumeMount struct {
+	PVCName   string `json:"pvc_name"`
+	MountPath string `json:"mount_path"`
+	ReadOnly  bool   `json:"read_only"`
+	SubPath   string `json:"sub_path,omitempty"`
+}
+
 // App 代表一个应用定义，是 PaaS 引擎的核心管理单元。
 // App 本身不映射到任何 K8s 资源，仅作为逻辑锚点。
 type App struct {
@@ -16,6 +24,7 @@ type App struct {
 	Envs              map[string]string `json:"envs,omitempty"`
 	ConfigBundles     []string          `json:"config_bundles,omitempty"` // 关联的 ConfigBundle 名称列表
 	SidecarEnabled    bool              `json:"sidecar_enabled,omitempty"`
+	Volumes           []VolumeMount     `json:"volumes,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
 }

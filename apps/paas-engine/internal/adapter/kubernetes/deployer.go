@@ -236,6 +236,10 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 		}
 	}
 
+	// Volume mounts from App.Volumes
+	pvcVolumes, pvcMounts := buildPVCVolumes(app.Volumes)
+	container.VolumeMounts = pvcMounts
+
 	var initContainers []corev1.Container
 	var sidecarContainers []corev1.Container
 
@@ -302,6 +306,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 					NodeSelector:       map[string]string{"node-role": "app"},
 					InitContainers:     initContainers,
 					Containers:         append([]corev1.Container{container}, sidecarContainers...),
+					Volumes:            pvcVolumes,
 				},
 			},
 		},
@@ -453,6 +458,42 @@ func buildEnvFrom(secrets, configMaps []string) []corev1.EnvFromSource {
 		return nil
 	}
 	return sources
+}
+
+// buildPVCVolumes 从 App.Volumes 构建 K8s Volume 列表和主容器 VolumeMount 列表。
+// 同一 PVC 只生成一个 Volume（去重），但允许多个 VolumeMount。
+func buildPVCVolumes(appVolumes []domain.VolumeMount) ([]corev1.Volume, []corev1.VolumeMount) {
+	if len(appVolumes) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]bool)
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+
+	for _, v := range appVolumes {
+		if !seen[v.PVCName] {
+			seen[v.PVCName] = true
+			volumes = append(volumes, corev1.Volume{
+				Name: v.PVCName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: v.PVCName,
+						ReadOnly:  v.ReadOnly,
+					},
+				},
+			})
+		}
+
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      v.PVCName,
+			MountPath: v.MountPath,
+			ReadOnly:  v.ReadOnly,
+			SubPath:   v.SubPath,
+		})
+	}
+
+	return volumes, mounts
 }
 
 func envsToK8s(envs map[string]string) []corev1.EnvVar {

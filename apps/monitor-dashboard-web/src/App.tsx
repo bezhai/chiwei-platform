@@ -5,6 +5,7 @@ import 'dayjs/locale/zh-cn';
 import {
   ApiOutlined,
   CloudServerOutlined,
+  CodeOutlined,
   DashboardOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
@@ -37,6 +38,7 @@ const MongoExplorer = lazy(() => import('./pages/MongoExplorer'));
 const AuditLogs = lazy(() => import('./pages/AuditLogs'));
 const DbMutations = lazy(() => import('./pages/DbMutations'));
 const DynamicConfig = lazy(() => import('./pages/DynamicConfig'));
+const Skills = lazy(() => import('./pages/Skills'));
 import { themeConfig } from './theme';
 import { clearToken, getLane } from './api/client';
 
@@ -62,6 +64,7 @@ const menuItems: MenuItem[] = [
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
   { key: '/dynamic-config', icon: <SettingOutlined />, label: '动态配置' },
+  { key: '/skills', icon: <CodeOutlined />, label: '技能管理' },
   { type: 'divider' },
   { key: '/kibana', icon: <FileSearchOutlined />, label: 'Grafana' },
   { key: '/langfuse', icon: <MonitorOutlined />, label: 'Langfuse 链路' },
@@ -286,6 +289,7 @@ export default function App() {
                   <Route path="/providers" element={<Providers />} />
                   <Route path="/model-mappings" element={<ModelMappings />} />
                   <Route path="/dynamic-config" element={<DynamicConfig />} />
+                  <Route path="/skills" element={<Skills />} />
                   <Route path="/mongo" element={<MongoExplorer />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
