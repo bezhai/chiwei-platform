@@ -49,7 +49,8 @@ function fileIcon(filename: string) {
 }
 
 /** 将扁平文件路径列表构建成 Ant Design Tree 数据 */
-function buildTreeData(files: string[]): TreeDataNode[] {
+function buildTreeData(files: string[] | undefined): TreeDataNode[] {
+  if (!files?.length) return [];
   const root: TreeDataNode[] = [];
   const dirMap = new Map<string, TreeDataNode>();
 
