@@ -30,7 +30,8 @@ type CreateAppRequest struct {
 	EnvFromSecrets    []string          `json:"env_from_secrets"`
 	EnvFromConfigMaps []string          `json:"env_from_config_maps"`
 	Envs              map[string]string `json:"envs"`
-	ConfigBundles     []string          `json:"config_bundles"`
+	ConfigBundles     []string             `json:"config_bundles"`
+	Volumes           []domain.VolumeMount `json:"volumes"`
 }
 
 func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*domain.App, error) {
@@ -65,6 +66,7 @@ func (s *AppService) CreateApp(ctx context.Context, req CreateAppRequest) (*doma
 		EnvFromConfigMaps: req.EnvFromConfigMaps,
 		Envs:              req.Envs,
 		ConfigBundles:     req.ConfigBundles,
+		Volumes:           req.Volumes,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -119,6 +121,9 @@ func (s *AppService) UpdateApp(ctx context.Context, name string, body []byte) (*
 		return nil, domain.ErrInvalidInput
 	}
 	if err := ApplyField(fields, "sidecar_enabled", &app.SidecarEnabled); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+	if err := ApplyField(fields, "volumes", &app.Volumes); err != nil {
 		return nil, domain.ErrInvalidInput
 	}
 	if _, ok := fields["config_bundles"]; ok && len(app.ConfigBundles) > 0 {
