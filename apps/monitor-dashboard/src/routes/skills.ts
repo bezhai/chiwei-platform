@@ -72,7 +72,8 @@ app.get('/api/skills', async (c) => {
         } catch {
           // No SKILL.md or unreadable — leave description empty
         }
-        return { name: e.name, description };
+        const files = await listFilesRecursive(path.join(SKILLS_DIR, e.name), '');
+        return { name: e.name, description, files };
       })
   );
 
