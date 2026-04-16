@@ -43,6 +43,14 @@ function safeResolve(...parts: string[]): string | null {
   return resolved;
 }
 
+/** Extract file path from URL: /api/skills/:name/files/(...rest) → rest */
+function extractFilePath(url: string, name: string): string {
+  const marker = `/skills/${name}/files/`;
+  const idx = url.indexOf(marker);
+  if (idx === -1) return '';
+  return decodeURIComponent(url.slice(idx + marker.length));
+}
+
 /** GET /api/skills — List all skills */
 app.get('/api/skills', async (c) => {
   let entries: import('node:fs').Dirent[];
@@ -160,7 +168,7 @@ app.delete('/api/skills/:name', async (c) => {
 /** GET /api/skills/:name/files/* — Read a specific file within a skill */
 app.get('/api/skills/:name/files/*', async (c) => {
   const name = c.req.param('name');
-  const filePath = c.req.param('*');
+  const filePath = extractFilePath(c.req.path, name);
   if (!filePath) return c.json({ message: 'File path is required' }, 400);
 
   const resolved = safeResolve(name, filePath);
@@ -177,7 +185,7 @@ app.get('/api/skills/:name/files/*', async (c) => {
 /** PUT /api/skills/:name/files/* — Write a specific file within a skill */
 app.put('/api/skills/:name/files/*', async (c) => {
   const name = c.req.param('name');
-  const filePath = c.req.param('*');
+  const filePath = extractFilePath(c.req.path, name);
   if (!filePath) return c.json({ message: 'File path is required' }, 400);
 
   const resolved = safeResolve(name, filePath);
@@ -194,7 +202,7 @@ app.put('/api/skills/:name/files/*', async (c) => {
 /** DELETE /api/skills/:name/files/* — Delete a specific file within a skill */
 app.delete('/api/skills/:name/files/*', async (c) => {
   const name = c.req.param('name');
-  const filePath = c.req.param('*');
+  const filePath = extractFilePath(c.req.path, name);
   if (!filePath) return c.json({ message: 'File path is required' }, 400);
 
   const resolved = safeResolve(name, filePath);
