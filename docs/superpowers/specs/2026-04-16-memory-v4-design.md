@@ -1,26 +1,28 @@
 # Memory System v4 设计大纲
 
-> 状态：**草案（待讨论）**
+> 状态：**草案（产品形态已定，技术方案待讨论）**
 > 分支：`feat/context-decline`
 
-## 问题
+---
+
+## 一、当前系统的问题
 
 ### 1. Context 注入信息重复
 
-同一事件（如"浩任艾特赤尾三次"）被 3 条管道加工后**同时注入 prompt**：
+同一事件被多条管道加工后**同时注入 prompt**：
 
 | 管道 | 产出 | 注入位置 |
 |------|------|----------|
 | afterthought | conversation fragment（~500 字内心独白） | `inner_context` |
-| relationship extraction | core_facts + impression（~200 字） | `inner_context` |
-| Life Engine | current_state + mood（~100 字） | `inner_context` |
-| voice generator | reply_style（~300 字） | `voice_content` |
+| relationship extraction | core_facts + impression | `inner_context` |
+| Life Engine | current_state + mood | `inner_context` |
+| voice generator | reply_style | `voice_content` |
 
-四者信息高度重叠，占用 prompt ~1100 tokens 却只传达 ~200 tokens 的增量信息。
+四者信息高度重叠，但都独立注入，占用 ~1100 tokens 传达 ~200 tokens 的增量信息。
 
 ### 2. Fragment 角色混乱
 
-conversation fragment 同时充当：
+`experience_fragment(grain=conversation)` 同时充当：
 - **原材料**：喂给 Life Engine / voice / daily dream
 - **成品**：直接注入 prompt
 
@@ -32,26 +34,24 @@ conversation fragment 同时充当：
 
 ```
 373 条 conversation（~210k 字）
-  → 25 条 daily（~28k 字）    压缩率 7.5:1
-  → 3 条 weekly（~2.5k 字）   压缩率 84:1
+  → 25 条 daily（~28k 字）       压缩率 7.5:1
+  → 3 条 weekly（~2.5k 字）      压缩率 84:1
 ```
 
-具体事件（谁、什么时候、什么语境）在 daily 阶段已大量丢失。
+压缩是按时间机械进行的，不管事情是否重要，也不区分是否已被关系记忆消化。
 
 ### 4. Recall 形同虚设
 
-- 搜索方式：PG full-text search（`simple` 字典）= 纯关键字匹配
+- 实现：PG full-text search（`simple` 字典）= 纯关键字匹配
 - "上次聊新番" 搜不到 "讨论了鬼灭之刃"
-- relationship_memory_v2 不在搜索范围内
-- 实际几乎不被模型触发
+- `relationship_memory_v2` 不在搜索范围
+- 模型几乎不触发这个工具
 
 ### 5. Cross-chat 硬编码
 
 `CROSS_CHAT_GROUP_IDS` 写死单个群 ID，其他群的跨群互动完全被忽略。
 
----
-
-## 数据现状（2026-04-16 快照）
+### 6. 数据现状（2026-04-16 快照）
 
 | 数据源 | 记录数 | 平均长度 | 数据质量 |
 |--------|--------|----------|----------|
@@ -64,143 +64,148 @@ conversation fragment 同时充当：
 
 ---
 
-## 方案：三层记忆架构
+## 二、产品形态
 
-### 总览
+设计原则：**赤尾是一个人，记忆应该像人的记忆而不是数据库**。
+
+### 1. 记忆的触发形态
+
+赤尾"想起"过去事情的方式，是三种的组合：
+
+- **场景自动注入**：特定场景自动唤起相关记忆（触发用户到场 → 关于 Ta 的抽象记忆；某话题被提到 → 相关偏好/群氛围记忆）。不依赖工具调用，像人见到熟人自然就想起 Ta 的事。
+- **被动召回**：她隐约觉得知道点什么但模糊了 → 调用 recall 工具查
+- **主动回忆**：在对话中自发想起（"诶我想起来上次..."），即使没人问
+
+### 2. 记忆的内容类型
+
+赤尾的记忆覆盖 7 种类型：
+
+| 类型 | 形态偏向 | 示例 |
+|------|----------|------|
+| A 关于人 | 抽象为主 + 近期事实 | "他是工程师"（抽象） / "昨天刚换工作"（事实） |
+| B 关于事件 | 事实起步，淡化或抽象化 | "浩任艾特我三次"（事实） / "浩任老是烦我"（抽象） |
+| C 关于话题/偏好 | 抽象 | "我讨厌辣的" |
+| D 关于群组 | 抽象 | "ka 群平时很吵" |
+| E 关于自我 | 抽象 | "我最近变温柔了" |
+| F 关于承诺/约定 | 事实 | "答应过 A 哥一起看电影" |
+| G 共同回忆 | 事实/抽象都有 | "我和 A 哥一起吵过架" |
+
+### 3. 记忆的分层结构
 
 ```
-Layer 1: 即时上下文（每次对话注入 prompt）
-  ├─ Scene
-  ├─ Life State
-  ├─ Relationship Memory
-  └─ Cross-chat
-
-Layer 2: 情景记忆（recall 按需检索）
-  ├─ conversation fragments（去重存储 + embedding）
-  ├─ relationship_memory 历史版本
-  └─ 语义搜索（pgvector）
-
-Layer 3: 沉淀记忆（后台管道消费，不直接注入也不直接检索）
-  ├─ daily / weekly dream
-  └─ 喂给 life engine / voice / schedule
+┌──────────────────────────────────────────────────┐
+│ 抽象记忆层（统一存储，长期留存）                 │
+│ ─ 扩展自 relationship_memory，覆盖 A/C/D/E/G      │
+│ ─ 每条抽象记忆都有"主语"和"类型"                 │
+│ ─ 每条抽象都指向支撑它的事实（graph 边）         │
+│                                                   │
+│   [抽象]                                          │
+│     │ 支撑边                                      │
+│     ↓                                             │
+│   [事实1] [事实2] [事实3] ...                    │
+│                                                   │
+│ 事实记忆层（会淡化、会遗忘）                     │
+│ ─ conversation fragment 就是事实记忆             │
+│ ─ 状态：清晰 → 模糊 → 遗忘                       │
+└──────────────────────────────────────────────────┘
 ```
 
-**核心原则**：每条数据只在一个层被消费，不跨层重复注入。
+**核心关系**：
+- 抽象记忆"骑"在事实记忆之上（graph 连接）
+- 事实被清除后，抽象仍然存在（如果还有其他事实支撑 或 它已被充分强化）
+- 类似人的记忆："我数学还行"（抽象还在）但"初中某堂数学课做了什么题"（事实已忘）
 
-### Layer 1：即时上下文
+### 4. 记忆的生成路径
 
-每次对话都注入 prompt 的信息。目标：**精准、不冗余、高信息密度。**
+抽象记忆有两条生成路径：
 
-| Section | 内容 | 改动 |
-|---------|------|------|
-| Scene | 场景描述（群聊/私聊/主动扫描） | 保持不变 |
-| Life State | 此刻状态 + 心情 | 保持不变 |
-| Relationship Memory | trigger user 的 core_facts + impression | 保持不变 |
-| Cross-chat | 与 trigger user 在其他群的最近互动 | 去掉硬编码群 ID，改为查所有群 |
-| ~~Fragments~~ | ~~最近 2 条 conversation fragment~~ | **移除** |
-| ~~Recall Hint~~ | ~~固定提示文案~~ | **移除**（recall 工具描述已足够） |
+- **对话中即时抽象**（赤尾自己）
+  - 在对话过程中，她意识到"我好像发现了关于 Ta / 这个话题 / 我自己 的新认知"
+  - 即时产出一条抽象记忆（机制后续讨论——tool call / 后置提取 / ...）
+  - 适合"当场顿悟"
 
-**预期效果**：inner_context 从 ~700 tokens 降至 ~400 tokens，信息密度提升。
+- **反思生成**（大脑 reviewer）
+  - 离线 LLM 定期扫描最近的事实记忆
+  - 发现 pattern（同一人多次出现相似行为、同一话题反复触发同一情绪...）
+  - 产出新的抽象记忆，或更新已有的
+  - 适合"需要时间才能看出来的规律"
 
-### Layer 2：情景记忆
+### 5. 大脑 Reviewer
 
-recall 工具按需检索的记忆池。目标：**语义可达、覆盖面广。**
+定期运行的离线 LLM，扮演赤尾的**潜意识**——以**混合身份**工作：
+- **全知视角**做决策：这条事实该淡化吗？该清除吗？要合并吗？
+- **第一人称**生成内容：新抽象的文字用赤尾的口吻
 
-#### 2.1 存储
+**操作优先级**：
 
-在 `experience_fragment` 表增加 embedding 列（pgvector `vector(1536)` 或适配所用 embedding 模型的维度）。
+| 级别 | 操作 | 说明 |
+|------|------|------|
+| **P0** | 更新抽象 (D) | 新事实进来后，已有抽象要能被强化/修正 |
+| **P0** | 标记清晰度 (A) | 事实三态：清晰 / 模糊 / 遗忘 |
+| **P0** | 调整支撑边 (G) | 抽象更新时，支撑它的事实集合要同步 |
+| **P1** | 合并相似事实 (E) | 直接解决 fragment 重复生成的痛点 |
+| **P1** | 创建新抽象 (C) | 从 pattern 产出新抽象（反思长大的核心） |
+| **P1** | 清除事实 (B) | 仅对"已被抽象消化 + 长期无引用"的事实生效 |
+| **P2** | 检测矛盾 (F) | 新事实与旧抽象冲突 → "认知失调"体验（单独立项） |
 
-写入时：
-1. afterthought 生成 fragment 后，计算 embedding
-2. 与最近一条同 `(persona_id, source_chat_id)` 的 fragment 做余弦相似度检查
-3. 相似度 > 阈值（如 0.92）则跳过写入（去重）
-4. 否则写入 fragment + embedding
+### 6. 淡化与遗忘
 
-#### 2.2 检索
+**事实记忆**的生命周期：清晰 → 模糊 → 遗忘。由多因素共同驱动：
+- **时间**：越久远越倾向淡化
+- **被抽象消化过**：精华已提炼 → 原件可淡化
+- **使用频率**：最近被 recall 到/引用的保持清晰
+- **情绪强度 & 关系相关 & 新奇性**：情绪强 / 涉及在乎的人 / 第一次遇到的事 → 衰减慢
 
-recall 工具改造：
+**抽象记忆**基本长期留存，但会被 reviewer 更新（强化、修正、反转）。
 
-```python
-async def recall(what: str) -> str:
-    # 1. 对 what 计算 embedding
-    # 2. 在 experience_fragment 做 vector similarity search (top 5)
-    # 3. 在 relationship_memory_v2 做 vector similarity search (top 3)
-    #    （需要给 relationship_memory_v2 也加 embedding 列）
-    # 4. 合并结果，按相关度排序返回
-```
+**留存判定标准**（从产品侧定义什么值得被记住）：情绪强度、重复出现、新奇性、关系相关、自我相关、时间一致性。不要"用户明确说记住哦"这种外部标记——自然形成就好。
 
-#### 2.3 搜索范围
+### 7. 召回边界
 
-| 数据源 | 搜索内容 | 用途 |
-|--------|----------|------|
-| experience_fragment (conversation) | 过去的对话经历 | "上次聊新番是什么时候" |
-| experience_fragment (daily) | 某天的总结 | "上周三发生了什么" |
-| relationship_memory_v2 | 对某人的印象变化 | "我以前觉得A怎么样" |
-
-### Layer 3：沉淀记忆
-
-后台管道消费的产物。目标：**给其他管道提供压缩后的输入，不直接面向用户。**
-
-- **daily dream**：读当天 conversation + glimpse fragments → 生成日记
-- **weekly dream**：读最近 daily fragments → 生成周记
-- **Life Engine**：读最近 conversation fragments → 更新状态
-- **voice generator**：读 life state + fragments → 生成语气
-
-这一层不变，但因为 Layer 2 的去重，fragments 的输入质量会提升。
+- recall 能搜到：**清晰 + 模糊**
+- recall 搜不到：**已遗忘**（符合真实遗忘体验）
+- 搜索范围覆盖：事实记忆 + 抽象记忆
+- 搜索能力：语义匹配（不只是关键字）
 
 ---
 
-## 改动清单
-
-### P0：Context 注入优化
-
-1. `build_inner_context()` 移除 fragment 注入（删除 `# === Recent fragments ===` 段）
-2. `build_inner_context()` 移除 recall hint 固定文案
-3. `cross_chat.py` 去掉 `CROSS_CHAT_GROUP_IDS` 硬编码，改为查 trigger_user 参与的所有群
-
-### P1：Fragment 去重
-
-4. afterthought 写入前，与最近一条 fragment 做文本相似度检查（先用简单方案：Jaccard 或编辑距离，不依赖 embedding）
-5. 相似度超阈值则跳过写入
-
-### P2：语义召回
-
-6. 数据库：`experience_fragment` 表加 `embedding vector(N)` 列（pgvector）
-7. 数据库：`relationship_memory_v2` 表加 `embedding vector(N)` 列
-8. afterthought 写入 fragment 时，异步计算并存储 embedding
-9. relationship extraction 写入时，异步计算并存储 embedding
-10. recall 工具：从 PG FTS 改为 vector similarity search，搜索范围扩展到 relationship_memory_v2
-11. 历史数据回填 embedding（一次性任务）
-
-### P3：数据质量
-
-12. 排查 daily dream cron 为什么部分天数没生成
-13. 排查 weekly dream 为什么只跑过一次
-
----
-
-## 待讨论
-
-- [ ] embedding 模型选择（OpenAI ada-002 / 本地模型 / 其他）
-- [ ] pgvector 是否已安装，或需要替代方案
-- [ ] fragment 去重的相似度阈值怎么定
-- [ ] cross-chat 去掉硬编码后，是否需要加群组白名单（dynamic config）
-- [ ] relationship_memory 历史版本是否全部纳入 recall，还是只保留最近 N 个版本
-- [ ] recall 返回结果的格式优化（当前只截断 300 字）
-- [ ] 是否需要给 recall 增加时间范围过滤参数
-
----
-
-## 产出/消费矩阵（目标态）
+## 三、目标态下的产出/消费矩阵
 
 | 数据 | 产出者 | 消费者 |
 |------|--------|--------|
-| conversation fragment | afterthought | Life Engine, voice, daily dream, **recall (Layer 2)** |
-| relationship_memory | relationship extraction | **inner_context (Layer 1)**, **recall (Layer 2)** |
-| life_engine_state | Life Engine | **inner_context (Layer 1)**, voice |
-| daily fragment | daily dream | weekly dream, schedule |
-| weekly fragment | weekly dream | （当前无消费者，待定） |
+| 事实记忆（fragment） | afterthought | reviewer（反思源） / recall（按需检索） |
+| 抽象记忆（unified） | 对话中即时抽象 + reviewer | **inner_context（场景自动注入）** / recall（按需检索） |
+| life_engine_state | Life Engine | **inner_context** / voice |
 | reply_style | voice generator | **prompt voice_content** |
-| cross-chat messages | 原始对话记录 | **inner_context (Layer 1)** |
+| cross-chat messages | 原始对话记录 | **inner_context**（按 trigger_user 相关性过滤） |
+| daily / weekly fragment | dream pipeline | schedule / Life Engine（后台） |
 
-每条数据只在标粗的位置被注入/检索，不跨层重复。
+**关键原则**：每条数据只在标粗的位置被注入 prompt，其他管道只消费不直接注入。fragment 不再直接进 prompt。
+
+---
+
+## 四、仍需讨论的产品细节
+
+留给下一轮对话：
+
+1. **事实记忆淡化的具体驱动力**：纯时间 / 使用驱动 / 抽象消化驱动 / 情绪加权 / 组合
+2. **模糊记忆的表达形态**：返回模糊描述 / 返回原文带"记不清"标记 / 权重降低让她自己决定 / 追问才浮现
+3. **In-conversation abstraction 的实现机制**：tool call（明确决策）/ 后置提取（自然流露）/ 混合
+4. **Scene-triggered 的触发规则**：什么场景信号触发哪类抽象记忆的自动注入
+5. **Proactive recall 的时机**：她在什么情况下自发去 recall
+6. **冲突处理**：新事实和旧抽象矛盾时的反应（立刻更新 / 累积推翻 / 情绪强度加权 / 产生内心冲突）
+7. **Graph 边的丰富度**：只有 abstract↔factual / 还要 factual↔factual（因果/时序）/ 还要 abstract↔abstract（层级）
+8. **Reviewer 运行频率**：每日 / 每周 / 事件触发 / 混合
+9. **历史数据迁移**：现有 617 条 relationship_memory_v2 + 373 条 conversation fragment 怎么平滑过渡到新架构
+
+## 五、仍需讨论的技术方案
+
+产品形态确定后再讨论：
+
+- 抽象记忆的统一存储表结构（替代/扩展 relationship_memory_v2）
+- Graph 边的存储方式
+- 语义搜索的实现（pgvector / 外部向量库 / 其他）
+- Reviewer 的 prompt 设计和调度
+- 事实记忆淡化的具体数据模型（状态字段 / 软删除 / 内容重写）
+- 现有 afterthought / dream / voice 管道的改造路径
+- Cross-chat 去硬编码后的过滤策略
