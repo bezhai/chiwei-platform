@@ -110,9 +110,11 @@ def test_group_and_trim_respects_limit():
         msgs.append(
             _make_msg("assistant", "bot", "chat_a", i * 2000 + 1000, f'{{"v":2,"text":"reply{i}","items":[]}}')
         )
-    grouped = _group_and_trim(msgs, max_pairs_per_chat=10)
-    # Should keep last 10 pairs = 20 messages
-    assert len(grouped["chat_a"]) == 20
+    grouped = _group_and_trim(msgs, max_pairs_per_chat=5)
+    # Should keep last 5 pairs = 10 messages
+    assert len(grouped["chat_a"]) == 10
+    assert grouped["chat_a"][0].content == '{"v":2,"text":"msg25","items":[]}'
+    assert grouped["chat_a"][-1].content == '{"v":2,"text":"reply29","items":[]}'
 
 
 def test_filter_direct_interactions_excludes_unrelated_assistant_messages():
@@ -158,7 +160,7 @@ def test_filter_direct_interactions_excludes_unrelated_assistant_messages():
 def test_format_interactions_output():
     from app.memory.cross_chat import _format_interactions
 
-    msgs_chat_a = [
+    msgs = [
         _make_msg(
             "user", "u1", "chat_a", 1713160000000,
             '{"v":2,"text":"笋干烧肉好吃吗","items":[{"type":"text","value":"笋干烧肉好吃吗"}]}',
@@ -167,32 +169,31 @@ def test_format_interactions_output():
             "assistant", "bot", "chat_a", 1713160060000,
             '{"v":2,"text":"超好吃！","items":[{"type":"text","value":"超好吃！"}]}',
         ),
-    ]
-    msgs_chat_b = [
         _make_msg(
-            "user", "u1", "chat_b", 1713160120000,
+            "user", "u1", "chat_a", 1713160120000,
             '{"v":2,"text":"刚才那个梗太好笑了","items":[{"type":"text","value":"刚才那个梗太好笑了"}]}',
         ),
         _make_msg(
-            "assistant", "bot", "chat_b", 1713160180000,
+            "assistant", "bot", "chat_a", 1713160180000,
             '{"v":2,"text":"我也笑到了","items":[{"type":"text","value":"我也笑到了"}]}',
         ),
     ]
-    grouped = {"chat_a": msgs_chat_a, "chat_b": msgs_chat_b}
-    chat_names = {"chat_a": "粉丝群", "chat_b": "测试私聊"}
+    grouped = {"chat_a": msgs}
+    chat_names = {"chat_a": "粉丝群"}
 
     result = _format_interactions(grouped, "测试用户A", chat_names)
 
     assert "粉丝群" in result
-    assert "测试私聊" in result
     assert "测试用户A" in result
     assert "笋干烧肉好吃吗" in result
     assert "超好吃" in result
+    assert "刚才那个梗太好笑了" in result
+    assert "我也笑到了" in result
     assert "你" in result
     assert "最近在其他地方的互动" in result
-    assert result.index("测试私聊") < result.index("粉丝群")
-    assert result.index("我也笑到了") < result.index("刚才那个梗太好笑了")
-    assert result.index("超好吃") < result.index("笋干烧肉好吃吗")
+    assert result.index("笋干烧肉好吃吗") < result.index("超好吃")
+    assert result.index("超好吃") < result.index("刚才那个梗太好笑了")
+    assert result.index("刚才那个梗太好笑了") < result.index("我也笑到了")
 
 
 def test_format_interactions_empty():

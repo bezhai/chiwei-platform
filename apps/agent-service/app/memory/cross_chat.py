@@ -27,7 +27,7 @@ _CST = timezone(timedelta(hours=8))
 CROSS_CHAT_GROUP_IDS = ["oc_54713c53ff0b46cb9579d3695e16cbf8"]
 
 _24H_MS = 24 * 60 * 60 * 1000
-_MAX_PAIRS_PER_CHAT = 10
+_MAX_PAIRS_PER_CHAT = 5
 
 
 def _filter_direct_interactions(
@@ -109,23 +109,17 @@ def _format_interactions(
 
     parts: list[str] = []
 
-    sorted_chats = sorted(
-        grouped.items(),
-        key=lambda item: item[1][-1].create_time if item[1] else 0,
-        reverse=True,
-    )
-
-    for chat_id, msgs in sorted_chats:
+    for chat_id, msgs in grouped.items():
         if not msgs:
             continue
 
         chat_name = chat_names.get(
             chat_id, "私聊" if msgs[0].chat_type == "p2p" else chat_id[:8]
         )
-        latest_ts = msgs[-1].create_time
+        first_ts = msgs[0].create_time
 
-        lines: list[str] = [f"{chat_name} · {_relative_time(latest_ts)}:"]
-        for msg in reversed(msgs):
+        lines: list[str] = [f"{chat_name} · {_relative_time(first_ts)}:"]
+        for msg in msgs:
             text = _render_text(msg.content)
             if not text:
                 continue
