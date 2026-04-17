@@ -30,6 +30,25 @@ _24H_MS = 24 * 60 * 60 * 1000
 _MAX_PAIRS_PER_CHAT = 10
 
 
+def _filter_direct_interactions(
+    messages: list[ConversationMessage],
+    user_id: str,
+) -> list[ConversationMessage]:
+    """Keep only trigger user's messages and assistant replies to those messages."""
+    user_message_ids = {
+        msg.message_id
+        for msg in messages
+        if msg.role == "user" and msg.user_id == user_id
+    }
+
+    return [
+        msg
+        for msg in messages
+        if (msg.role == "user" and msg.user_id == user_id)
+        or (msg.role == "assistant" and msg.reply_message_id in user_message_ids)
+    ]
+
+
 def _group_and_trim(
     messages: list[ConversationMessage],
     max_pairs_per_chat: int = _MAX_PAIRS_PER_CHAT,
@@ -146,6 +165,10 @@ async def build_cross_chat_context(
                 allowed_group_ids=CROSS_CHAT_GROUP_IDS,
                 since_ms=since_ms,
             )
+        if not messages:
+            return ""
+
+        messages = _filter_direct_interactions(messages, trigger_user_id)
         if not messages:
             return ""
 
