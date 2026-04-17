@@ -330,6 +330,72 @@ a {
   overflow: hidden;
 }
 
+/* Shared Metrics Strip */
+.metrics-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+
+.metrics-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  border-right: 1px solid #e2e8f0;
+}
+
+.metrics-item:last-child {
+  border-right: none;
+}
+
+.metrics-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.metrics-value {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  color: #0f172a;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-family: var(--font-mono);
+}
+
+.metrics-sub {
+  color: #ef4444;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+
+@media (max-width: 1024px) {
+  .metrics-strip {
+    grid-template-columns: 1fr;
+  }
+  .metrics-item {
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .metrics-item:last-child {
+    border-bottom: none;
+  }
+}
+
 /* Dynamic Config */
 .dynamic-config-page {
   display: flex;

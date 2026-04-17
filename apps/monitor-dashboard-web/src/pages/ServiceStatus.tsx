@@ -261,39 +261,36 @@ export default function ServiceStatus() {
         </Tooltip>
       </div>
 
-      <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>总服务数</Text>}
-              value={apps.length}
-              prefix={<CloudServerOutlined style={{ color: '#64748b' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>运行中</Text>}
-              value={runningCount}
-              prefix={<CheckCircleOutlined style={{ color: '#10b981' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
-              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 600, marginLeft: 12 }}>/ {failedCount} 异常</Text> : undefined}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>活跃泳道</Text>}
-              value={lanes.length}
-              prefix={<DeploymentUnitOutlined style={{ color: '#8b5cf6' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="metrics-strip">
+        <div className="metrics-item">
+          <div className="metrics-label">
+            <CloudServerOutlined style={{ color: '#64748b' }} />
+            <span>总服务数</span>
+          </div>
+          <div className="metrics-value">
+            {apps.length}
+          </div>
+        </div>
+        <div className="metrics-item">
+          <div className="metrics-label">
+            <CheckCircleOutlined style={{ color: '#10b981' }} />
+            <span>运行中</span>
+          </div>
+          <div className="metrics-value">
+            {runningCount}
+            {failedCount > 0 && <span className="metrics-sub">/ {failedCount} 异常</span>}
+          </div>
+        </div>
+        <div className="metrics-item">
+          <div className="metrics-label">
+            <DeploymentUnitOutlined style={{ color: '#8b5cf6' }} />
+            <span>活跃泳道</span>
+          </div>
+          <div className="metrics-value">
+            {lanes.length}
+          </div>
+        </div>
+      </div>
 
       {laneBindings.length > 0 && (
         <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
