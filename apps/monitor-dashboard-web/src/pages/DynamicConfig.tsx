@@ -37,6 +37,35 @@ interface RawConfig {
   updated_at: string;
 }
 
+function StatMark({ variant }: { variant: 'total' | 'override' | 'inherit' }) {
+  if (variant === 'override') {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden="true" className="dynamic-config-stat-mark">
+        <path d="M3 11.5h10" />
+        <path d="M5.5 8.5 8 6l2.5 2.5" />
+        <path d="M8 6v6" />
+      </svg>
+    );
+  }
+
+  if (variant === 'inherit') {
+    return (
+      <svg viewBox="0 0 16 16" aria-hidden="true" className="dynamic-config-stat-mark">
+        <path d="M3 4.5h10" />
+        <path d="M5.5 7.5 8 10l2.5-2.5" />
+        <path d="M8 10V4" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="dynamic-config-stat-mark">
+      <rect x="3" y="4" width="6" height="6" rx="1.5" />
+      <rect x="7" y="7" width="6" height="6" rx="1.5" />
+    </svg>
+  );
+}
+
 export default function DynamicConfig() {
   const [lanes, setLanes] = useState<string[]>(['prod']);
   const [selectedLane, setSelectedLane] = useState('prod');
@@ -243,17 +272,26 @@ export default function DynamicConfig() {
 
       <div className="dynamic-config-summary-strip">
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">统一生效总数</div>
+          <div className="dynamic-config-summary-label">
+            <StatMark variant="total" />
+            <span>统一生效总数</span>
+          </div>
           <div className="dynamic-config-summary-value">{dataSource.length}</div>
         </div>
         <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">当前泳道特异覆盖</div>
+          <div className="dynamic-config-summary-label">
+            <StatMark variant="override" />
+            <span>当前泳道特异覆盖</span>
+          </div>
           <div className="dynamic-config-summary-value">{overrideCount}</div>
         </div>
         <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">继承自基础 PROD</div>
+          <div className="dynamic-config-summary-label">
+            <StatMark variant="inherit" />
+            <span>继承自基础 PROD</span>
+          </div>
           <div className="dynamic-config-summary-value">{inheritedCount}</div>
         </div>
       </div>
