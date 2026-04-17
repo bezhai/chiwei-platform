@@ -27,7 +27,26 @@ _CST = timezone(timedelta(hours=8))
 CROSS_CHAT_GROUP_IDS = ["oc_54713c53ff0b46cb9579d3695e16cbf8"]
 
 _24H_MS = 24 * 60 * 60 * 1000
-_MAX_PAIRS_PER_CHAT = 10
+_MAX_PAIRS_PER_CHAT = 5
+
+
+def _filter_direct_interactions(
+    messages: list[ConversationMessage],
+    user_id: str,
+) -> list[ConversationMessage]:
+    """Keep only trigger user's messages and assistant replies to those messages."""
+    user_message_ids = {
+        msg.message_id
+        for msg in messages
+        if msg.role == "user" and msg.user_id == user_id
+    }
+
+    return [
+        msg
+        for msg in messages
+        if (msg.role == "user" and msg.user_id == user_id)
+        or (msg.role == "assistant" and msg.reply_message_id in user_message_ids)
+    ]
 
 
 def _group_and_trim(
@@ -146,6 +165,10 @@ async def build_cross_chat_context(
                 allowed_group_ids=CROSS_CHAT_GROUP_IDS,
                 since_ms=since_ms,
             )
+        if not messages:
+            return ""
+
+        messages = _filter_direct_interactions(messages, trigger_user_id)
         if not messages:
             return ""
 
