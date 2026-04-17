@@ -1511,3 +1511,44 @@ a {
     min-height: 520px;
   }
 }
+
+/* Flat Filters styling for modern minimal look (Linear/Vercel style) */
+.flat-filters .ant-select-selector,
+.flat-filters .ant-input,
+.flat-filters .ant-picker {
+  border-radius: 8px !important;
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: none !important;
+  transition: all 0.2s;
+}
+
+.flat-filters .ant-select-selector:hover,
+.flat-filters .ant-input:hover,
+.flat-filters .ant-picker:hover {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+}
+
+.flat-filters .ant-select-focused .ant-select-selector,
+.flat-filters .ant-input:focus,
+.flat-filters .ant-picker-focused {
+  background-color: #ffffff !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
+}
+
+.flat-filters .ant-btn {
+  border-radius: 8px;
+  box-shadow: none !important;
+}
+
+.flat-filters .ant-btn-primary {
+  background-color: #0f172a;
+  border-color: #0f172a;
+}
+
+.flat-filters .ant-btn-primary:hover {
+  background-color: #334155 !important;
+  border-color: #334155 !important;
+}

@@ -704,7 +704,7 @@ export default function Messages() {
         </Popover>
       </div>
 
-      <div style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
+      <div className="flat-filters" style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
         <Row gutter={[12, 12]}>
           <Col xs={12} sm={8} md={6} lg={4}>
             <Select
@@ -813,10 +813,10 @@ export default function Messages() {
           {/* Buttons aligned to the right, filling the remaining space */}
           <Col xs={24} sm={24} md={6} lg={14} style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <Space>
-              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)} style={{ boxShadow: 'none', borderRadius: 8 }}>
+              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)}>
                 查询
               </Button>
-              <Button icon={<ReloadOutlined />} onClick={handleReset} style={{ borderRadius: 8 }}>
+              <Button icon={<ReloadOutlined />} onClick={handleReset}>
                 重置
               </Button>
             </Space>
