@@ -215,32 +215,67 @@ Tick 从"只生成 state"升级为"同时生成 state 和细日程填充"：
   - E 类自我认知
   - previous Life State
 
-输出:
-  - 当前 Life State（started_at / expected_duration / mood / activity / reasoning）
-  - 未来 1-2h 的细日程填充或更新
+输出（通过 `commit_life_state` tool call 产出，见 §9.5）:
+  - 当前 Life State（state_end_at / skip_until / current_state / mood / activity / reasoning）
+  - 未来 1-2h 的细日程填充或更新（另一个 tool 或独立返回结构）
 ```
 
 #### 9.4 Schedule change → state sync（关键）
 
-**任何 schedule 写入（tool call / 重生成 / afterthought 补漏）后，立即触发一次轻量一致性检查**：
+**任何细日程写入（tool call / 重生成 / afterthought 补漏）后，强制触发一次轻量 state review**：
 
 - 读当前 state + 新细日程
-- 如果**当前时间应该做的事**和 **running state** 不一致 → 立即触发 Life Engine 的 **state-only refresh**（不重算细日程，只重算 state）
-- 如果一致 → 不动
+- 调用 Life Engine 的 **state-only refresh**（不重算细日程，只重算 state）
+- LLM 看新细日程，决定：
+  - 当前 state 仍然合理 → 通过 `commit_life_state` 输出"段内刷新"（activity_type 不变，只更新 current_state 文案/mood，`state_end_at` 保持）
+  - 当前 state 已经过时 → 如果 `now >= prev.state_end_at`，允许切新状态；如果 `now < prev.state_end_at`，只能做段内刷新（承诺只能改文案不能瞬间切 activity_type，避免 schedule 写入引起状态机失控）
 
-避免"下次 tick 还有 50min，冰淇淋已送到但 state 没反应"的割裂感。
+避免"下次 tick 还有 50min，冰淇淋已送到但 state 没反应"的割裂感——state 能在 schedule 变化后立即得到 LLM 的重新评估。
 
-#### 9.5 `skip_until` 语义修正
+#### 9.5 State 字段语义修正（借鉴 proactive-messaging 分支）
 
-当前混淆了"调度"和"内容"两个概念。v4 明确分开：
+**问题**：当前 `skip_until` 语义很烂——它只是"下次 tick 时间"，LLM 根本没在定义"这个状态什么时候结束"。需要一个**真正的结束时间**，过了必须强制切状态。
 
-| 字段 | 语义 | 作用 |
-|------|------|------|
-| `next_tick_at` | 下次触发 tick 的时间 | 调度（什么时候醒过来看一眼） |
-| `state.started_at` | 当前 state 开始时间 | 内容（持续多久了） |
-| `state.expected_duration` | 预期持续时长（LLM 提示性估计） | 内容（她觉得大概多长时间） |
+v4 的字段语义：
 
-`next_tick_at` 默认 = `started_at + expected_duration`，但可以被外部事件调整（承诺、冲突、对话事件都会重算）。"状态结束了吗"由 LLM 每次 tick 时判断，不是 `next_tick_at` 到了就自动结束。
+| 字段 | 语义 | 硬约束 |
+|------|------|--------|
+| `state_end_at` | 这个状态的**完整结束时间** | 过了必须切状态（不是建议，是强制） |
+| `state_start_at` | 状态开始时间 | = row created_at |
+| `skip_until` | **段内刷新**时间点（只刷新 current_state 文案/mood，不切状态） | 可空；非空时必须满足 `now < skip_until < state_end_at` |
+
+**切状态判断**：
+
+- `now < skip_until` → 完全不动
+- `skip_until <= now < state_end_at` → 只允许段内刷新（改 current_state / mood），**不**允许换 activity_type、**不**允许改 state_end_at
+- `now >= state_end_at` → **必须**切新状态（换 activity_type + 新 state_end_at），不能继续赖
+
+**Tool 化**：Life Engine 的 state 产出改为 `commit_life_state` tool call，tool 层做硬校验，非法字段直接拒绝（避免自由 JSON parse 事后兜底）：
+
+```python
+commit_life_state(
+    activity_type: str,
+    current_state: str,
+    response_mood: str,
+    state_end_at: datetime,
+    skip_until: datetime | None = None,
+    reasoning: str | None = None,
+)
+```
+
+Tool 层校验：
+
+1. 基本字段非空
+2. `state_end_at > now`
+3. `skip_until` 为空，或 `now < skip_until < state_end_at`
+4. 与旧状态的关系：
+   - 若 `now >= prev.state_end_at` → 允许切 activity_type，必须给新 `state_end_at`
+   - 若 `now < prev.state_end_at` → **只允许段内刷新**：activity_type 必须等于 prev.activity_type；`state_end_at` 必须等于 `prev.state_end_at`
+5. `state_end_at` 不能是"下次想想再说"的临时时间——必须代表 LLM 对这段活动完整时长的承诺
+
+Tool 返回结构给 tick() 消费，标记 `is_refresh`（段内刷新）vs 新状态段，避免 tick() 自己再猜。
+
+**与 proactive-messaging 分支的关系**：那个分支依赖 `state_end_at` 来确定 proactive_job 的合法窗口；v4 依赖 `state_end_at` 来驱动 state 切换的硬约束、以及 schedule change 后的强制 review 的语义一致性。同一基础设施，两边共享。
 
 #### 9.6 细日程重生成机制
 
@@ -295,7 +330,7 @@ reviewer 晚上 review 当天时额外产出：
 | 管道/数据 | v3（现状） | v4 调整 |
 |-----------|-----------|---------|
 | conversation_messages | 直接注入 | 保持不变 |
-| Life Engine state | 直接注入 | 保持注入；输入扩展（见 §9.3）；历史写入记忆流（§9.8） |
+| Life Engine state | 直接注入；`skip_until` = 下次 tick 时间 | 保持注入；state 通过 `commit_life_state` tool call 产出（§9.5）；新增 `state_end_at` 硬约束；`skip_until` 退化为段内刷新点；输入扩展（§9.3）；细日程写入后强制 state-only review（§9.4）；历史写入记忆流（§9.8） |
 | conversation fragment | 直接注入 + 喂下游多个管道 | **只产出、不直接注入**；按 §8 规则短期注入；reviewer 整理后进长期层；源头产出长度控制到 200-300 字 |
 | glimpse fragment | 只喂 Life Engine / daily dream | **并入事实碎片层**（打 tag 区分来源：观察 vs 对话） |
 | daily fragment | 每日 cron 产出 | **废弃** |
