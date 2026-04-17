@@ -1515,12 +1515,26 @@ a {
 /* Flat Filters styling for modern minimal look (Linear/Vercel style) */
 .flat-filters .ant-select-selector,
 .flat-filters .ant-input,
+.flat-filters .ant-picker,
+.flat-filters .ant-btn {
+  height: 38px !important;
+}
+
+.flat-filters .ant-select-selector,
+.flat-filters .ant-input,
 .flat-filters .ant-picker {
   border-radius: 8px !important;
   background-color: #ffffff !important;
   border-color: #cbd5e1 !important;
   box-shadow: none !important;
   transition: all 0.2s;
+  display: flex;
+  align-items: center;
+}
+
+.flat-filters .ant-select-selection-item,
+.flat-filters .ant-select-selection-placeholder {
+  line-height: 36px !important; /* height - 2px for borders */
 }
 
 .flat-filters .ant-select-selector:hover,
