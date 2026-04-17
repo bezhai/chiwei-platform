@@ -140,6 +140,7 @@ export default function DynamicConfig() {
 
   const overrideCount = dataSource.filter((item) => item.lane === selectedLane && selectedLane !== 'prod').length;
   const inheritedCount = dataSource.length - overrideCount;
+  const createActionLabel = selectedLane === 'prod' ? '新增配置项' : '添加局部覆盖';
 
   const columns: ColumnsType<{ key: string; value: string; lane: string }> = [
     {
@@ -168,7 +169,7 @@ export default function DynamicConfig() {
       width: 120,
       render: (lane: string) => (
         <Tag className={`dynamic-config-source-tag${lane === selectedLane && lane !== 'prod' ? ' is-lane' : ''}`} bordered={false}>
-          {lane === selectedLane && lane !== 'prod' ? '本泳道' : 'prod'}
+          {lane === selectedLane && lane !== 'prod' ? '当前泳道' : '基础 PROD'}
         </Tag>
       ),
     },
@@ -222,26 +223,37 @@ export default function DynamicConfig() {
   return (
     <div className="page-container dynamic-config-page">
       <div className="dynamic-config-header">
-        <span className="dynamic-config-eyebrow">Dynamic Config</span>
-        <h1 className="dynamic-config-title">按泳道管理运行时配置</h1>
+        <div className="dynamic-config-header-top">
+          <span className="dynamic-config-eyebrow">动态配置</span>
+          <div className="dynamic-config-inline-field">
+            <span className="dynamic-config-inline-label">泳道</span>
+            <Select
+              value={selectedLane}
+              onChange={setSelectedLane}
+              className="dynamic-config-select"
+              options={lanes.map((l) => ({ label: l, value: l }))}
+            />
+          </div>
+        </div>
+        <h1 className="dynamic-config-title">泳道配置管理</h1>
         <Text className="dynamic-config-subtitle">
-          当前视图展示 {selectedLane} 的最终生效配置。非 prod 泳道只覆盖必要项，其余键自动回落到 prod。
+          当前视图展示 {selectedLane} 泳道的最终生效配置。非 prod 泳道仅需配置差异项，其余自动回落到 prod。
         </Text>
       </div>
 
       <div className="dynamic-config-summary-strip">
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">生效键数</div>
+          <div className="dynamic-config-summary-label">统一生效总数</div>
           <div className="dynamic-config-summary-value">{dataSource.length}</div>
         </div>
         <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">本泳道覆盖</div>
+          <div className="dynamic-config-summary-label">当前泳道特异覆盖</div>
           <div className="dynamic-config-summary-value">{overrideCount}</div>
         </div>
         <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
-          <div className="dynamic-config-summary-label">继承 prod</div>
+          <div className="dynamic-config-summary-label">继承自基础 PROD</div>
           <div className="dynamic-config-summary-value">{inheritedCount}</div>
         </div>
       </div>
@@ -249,31 +261,22 @@ export default function DynamicConfig() {
       <div className="dynamic-config-workbench">
         <div className="dynamic-config-toolbar">
           <div className="dynamic-config-toolbar-context">
-            <div className="dynamic-config-toolbar-title">Resolved Config</div>
+            <div className="dynamic-config-toolbar-title">配置明细</div>
             <div className="dynamic-config-toolbar-meta">
-              {selectedLane === 'prod' ? '生产基线配置' : `${selectedLane} 泳道解析结果`}
+              {selectedLane === 'prod' ? '当前展示生产基线配置' : `当前展示 ${selectedLane} 泳道覆盖后的最终结果`}
             </div>
           </div>
           <div className="dynamic-config-toolbar-actions">
-            <div className="dynamic-config-inline-field">
-              <span className="dynamic-config-inline-label">泳道</span>
-              <Select
-                value={selectedLane}
-                onChange={setSelectedLane}
-                className="dynamic-config-select"
-                options={lanes.map((l) => ({ label: l, value: l }))}
-              />
-            </div>
             <Input
               allowClear
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               prefix={<SearchOutlined />}
-              placeholder="搜索 key 或 value"
+              placeholder="搜索 Key 或 Value"
               className="dynamic-config-search"
             />
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              新增配置
+              {createActionLabel}
             </Button>
           </div>
         </div>

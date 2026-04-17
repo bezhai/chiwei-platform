@@ -338,6 +338,13 @@ a {
   padding: 10px 4px 2px;
 }
 
+.dynamic-config-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .dynamic-config-eyebrow {
   display: inline-flex;
   align-items: center;
@@ -397,10 +404,11 @@ a {
 
 .dynamic-config-summary-item {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 14px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 14px;
 }
 
 .dynamic-config-summary-divider {
@@ -413,7 +421,6 @@ a {
   color: #6b7280;
   font-size: 12px;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .dynamic-config-summary-value {
@@ -450,12 +457,14 @@ a {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .dynamic-config-inline-field {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .dynamic-config-inline-label {
@@ -535,6 +544,7 @@ a {
   border-radius: 999px;
   background: #eef1f6;
   color: #64748b;
+  font-weight: 500;
 }
 
 .dynamic-config-source-tag.is-lane {
@@ -834,6 +844,7 @@ a {
     gap: 12px;
   }
 
+  .dynamic-config-header-top,
   .dynamic-config-toolbar {
     flex-direction: column;
     align-items: stretch;
@@ -841,6 +852,7 @@ a {
 
   .dynamic-config-toolbar-actions {
     width: 100%;
+    justify-content: stretch;
   }
 
   .dynamic-config-search {
@@ -918,7 +930,7 @@ a {
 
   .dynamic-config-select {
     min-width: 0;
-    width: 160px;
+    width: 180px;
   }
 
   .page-title,
