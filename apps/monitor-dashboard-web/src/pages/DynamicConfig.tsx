@@ -278,7 +278,6 @@ export default function DynamicConfig() {
           </div>
           <div className="dynamic-config-summary-value">{dataSource.length}</div>
         </div>
-        <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
           <div className="dynamic-config-summary-label">
             <StatMark variant="override" />
@@ -286,7 +285,6 @@ export default function DynamicConfig() {
           </div>
           <div className="dynamic-config-summary-value">{overrideCount}</div>
         </div>
-        <div className="dynamic-config-summary-divider" />
         <div className="dynamic-config-summary-item">
           <div className="dynamic-config-summary-label">
             <StatMark variant="inherit" />
@@ -339,7 +337,7 @@ export default function DynamicConfig() {
         okText="保存"
         cancelText="取消"
         width={640}
-        styles={{ content: { borderRadius: 18, padding: 24 } }}
+        styles={{ content: { borderRadius: 8, padding: 24 } }}
       >
         <Form form={form} layout="vertical" className="dynamic-config-form">
           <Form.Item
