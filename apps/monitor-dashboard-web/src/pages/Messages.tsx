@@ -705,7 +705,7 @@ export default function Messages() {
       </div>
 
       <div className="flat-filters" style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
-        <Row gutter={[12, 12]}>
+        <Row gutter={[12, 12]} align="bottom">
           <Col xs={12} sm={8} md={6} lg={4}>
             <Select
               placeholder="搜索会话名称"
@@ -813,10 +813,10 @@ export default function Messages() {
           {/* Buttons aligned to the right, filling the remaining space */}
           <Col xs={24} sm={24} md={6} lg={14} style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <Space>
-              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)}>
+              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)} style={{ boxShadow: 'none', borderRadius: 8, height: 38 }}>
                 查询
               </Button>
-              <Button icon={<ReloadOutlined />} onClick={handleReset}>
+              <Button icon={<ReloadOutlined />} onClick={handleReset} style={{ boxShadow: 'none', borderRadius: 8, height: 38 }}>
                 重置
               </Button>
             </Space>
