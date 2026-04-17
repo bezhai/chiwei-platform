@@ -215,13 +215,20 @@ async def run_pre_check(message_content: str, persona_id: str = "") -> PreCheckR
     except Exception as e:
         logger.error("Banned word check failed: %s", e)
 
-    # LLM checks in parallel
-    results = await asyncio.gather(
-        _check_injection(message_content),
-        _check_politics(message_content),
-        _check_nsfw(message_content, persona_id),
-        return_exceptions=True,
-    )
+    # LLM checks in parallel, with a 20s ceiling (fail-open on timeout).
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                _check_injection(message_content),
+                _check_politics(message_content),
+                _check_nsfw(message_content, persona_id),
+                return_exceptions=True,
+            ),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Pre-check exceeded 20s, passing through")
+        return PreCheckResult()
 
     for r in results:
         if isinstance(r, PreCheckResult) and r.is_blocked:
