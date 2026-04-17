@@ -188,39 +188,62 @@ export default function Skills() {
 
   const isDirty = fileContent !== originalContent;
   const treeData = selectedSkill ? buildTreeData(selectedSkill.files) : [];
+  const skillCount = skills.length;
+  const fileCount = selectedSkill?.files.length || 0;
 
   return (
-    <div className="page-container">
-      <div className="page-header" style={{ marginBottom: 24 }}>
-        <div>
+    <div className="page-container skills-page">
+      <div className="page-header skills-header">
+        <div className="skills-header-copy">
           <h1 className="page-title">技能管理</h1>
-          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
-            管理 Agent 技能定义文件（SKILL.md + 脚本）
+          <Text type="secondary" className="skills-header-subtitle">
+            在一个工作台里维护 Skill 定义、脚本文件和说明文档。
           </Text>
+          <div className="skills-header-meta">
+            <div className="skills-meta-pill">
+              <span className="skills-meta-label">Skills</span>
+              <span className="skills-meta-value">{skillCount}</span>
+            </div>
+            <div className="skills-meta-pill">
+              <span className="skills-meta-label">当前技能</span>
+              <span className="skills-meta-value">{selectedSkill?.name || '未选择'}</span>
+            </div>
+            <div className="skills-meta-pill">
+              <span className="skills-meta-label">文件数</span>
+              <span className="skills-meta-value">{fileCount}</span>
+            </div>
+          </div>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)} size="large">
+        <Button
+          className="skills-create-button"
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={() => setCreateOpen(true)}
+          size="large"
+        >
           新建技能
         </Button>
       </div>
 
-      <div style={{ display: 'flex', gap: 12, height: 'calc(100vh - 180px)', overflow: 'hidden' }}>
-        {/* Left: skill list */}
+      <div className="skills-workspace">
         <Card
-          style={{ width: 240, flexShrink: 0, overflow: 'auto', height: '100%' }}
+          className="skills-panel skills-skill-list"
           bodyStyle={{ padding: 0 }}
-          title={<Text strong>技能列表</Text>}
+          title={
+            <div className="skills-panel-heading">
+              <Text strong>技能列表</Text>
+              <Text type="secondary">{skillCount} 个项目</Text>
+            </div>
+          }
         >
           <List
+            className="skills-list"
             loading={loadingList}
             dataSource={skills}
+            locale={{ emptyText: '还没有技能，先新建一个。' }}
             renderItem={(skill) => (
               <List.Item
-                style={{
-                  padding: '10px 16px',
-                  cursor: 'pointer',
-                  background: selectedSkill?.name === skill.name ? '#f0f7ff' : undefined,
-                  borderLeft: selectedSkill?.name === skill.name ? '3px solid #2563eb' : '3px solid transparent',
-                }}
+                className={`skills-list-item${selectedSkill?.name === skill.name ? ' is-active' : ''}`}
                 onClick={() => selectSkill(skill)}
                 actions={[
                   <Popconfirm
@@ -238,9 +261,14 @@ export default function Skills() {
                 ]}
               >
                 <List.Item.Meta
-                  title={<Text strong style={{ fontSize: 13 }}>{skill.name}</Text>}
+                  title={
+                    <div className="skills-item-title">
+                      <Text strong>{skill.name}</Text>
+                      <Tag bordered={false}>{skill.files.length} 文件</Tag>
+                    </div>
+                  }
                   description={
-                    <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+                    <Text type="secondary" className="skills-item-description" ellipsis={{ tooltip: skill.description || '暂无描述' }}>
                       {skill.description || '暂无描述'}
                     </Text>
                   }
@@ -250,14 +278,19 @@ export default function Skills() {
           />
         </Card>
 
-        {/* Middle: file tree */}
-        {selectedSkill && (
-          <Card
-            style={{ width: 200, flexShrink: 0, overflow: 'auto', height: '100%' }}
-            bodyStyle={{ padding: '8px 4px' }}
-            title={<Text strong style={{ fontSize: 13 }}>{selectedSkill.name}</Text>}
-          >
+        <Card
+          className="skills-panel skills-file-tree"
+          bodyStyle={{ padding: '8px 4px' }}
+          title={
+            <div className="skills-panel-heading">
+              <Text strong>{selectedSkill?.name || '文件目录'}</Text>
+              <Text type="secondary">{selectedSkill ? `${fileCount} 个文件` : '选择技能后显示'}</Text>
+            </div>
+          }
+        >
+          {selectedSkill ? (
             <Tree
+              className="skills-tree"
               showIcon
               defaultExpandAll
               treeData={treeData}
@@ -270,17 +303,20 @@ export default function Skills() {
               }}
               style={{ fontSize: 13 }}
             />
-          </Card>
-        )}
+          ) : (
+            <div className="skills-empty-panel">
+              <Text type="secondary">左侧选择一个技能，目录树会出现在这里。</Text>
+            </div>
+          )}
+        </Card>
 
-        {/* Right: editor */}
         <Card
-          style={{ flex: 1, overflow: 'hidden', height: '100%', display: 'flex', flexDirection: 'column' }}
+          className="skills-panel skills-editor-shell"
           bodyStyle={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}
           title={
             selectedFile ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Text code style={{ fontSize: 13 }}>{selectedFile}</Text>
+              <div className="skills-editor-title">
+                <Text code className="skills-file-badge">{selectedFile}</Text>
                 {isDirty && <Tag color="orange">未保存</Tag>}
               </div>
             ) : (
@@ -302,9 +338,9 @@ export default function Skills() {
           }
         >
           {selectedSkill && selectedFile ? (
-            <div style={{ flex: 1, overflow: 'hidden', height: '100%' }}>
+            <div className="skills-editor-body">
               {loadingFile ? (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                <div className="skills-empty-editor">
                   <Text type="secondary">加载中...</Text>
                 </div>
               ) : (
@@ -325,8 +361,11 @@ export default function Skills() {
               )}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <Text type="secondary">请在左侧选择技能，然后点击文件编辑</Text>
+            <div className="skills-empty-editor">
+              <div className="skills-empty-editor-card">
+                <Text strong className="skills-empty-editor-title">选择文件开始编辑</Text>
+                <Text type="secondary">先在左侧选技能，再从目录树中点一个文件。</Text>
+              </div>
             </div>
           )}
         </Card>
