@@ -638,18 +638,439 @@ update_schedule(content: str, reason: str)
 
 ---
 
-## 七、待讨论的技术方案
+## 七、技术方案落地设计
 
-产品形态已定，以下留给 Plan 阶段讨论：
+### 7.1 数据模型（已落定，首版；做完后可微调）
 
-- **抽象记忆存储**：替代 relationship_memory_v2；字段 `(id, subject, content, last_touched_at, clarity, ...)`
-- **事实碎片存储**：`(id, content, source, created_at, clarity, ...)`；淡化表示（档位字段 vs 内容重写 vs 单一当前版本）
-- **Graph edges 表**：`(from_id, to_id, edge_type, created_by, reason)`；节点类型识别（id 前缀 / node_type 字段）
-- **Notes 表**：`(id, content, when, created_at, resolved_at, resolution)`
-- **Recall 实现**：graph 遍历 + embedding 语义检索；技术选型（pgvector vs 外部向量库）；轻量 LLM query 理解是否需要
-- **Tool 体系**：`commit_abstract_memory` / `write_note` / `resolve_note` / `update_schedule` / `commit_life_state` 的实现和校验
-- **Reviewer**：轻档（每 1h 定时） + 重档（每日凌晨）的 prompt 设计、调度方式、模型选型（轻档用 haiku，重档用更强）
-- **State sync**：schedule 更新后触发 state-only refresh 的技术实现（事件总线 / 直接调用 Life Engine）
-- **Cross-chat 去硬编码**：trigger_user 过滤策略（user-centric vs persona-centric 分工，已在 §2.8 定方向）
-- **管道改造路径**：afterthought（fragment 长度控制）/ voice（保留评估）/ Life Engine tick（tool 化重构）/ daily dream → 重档 reviewer 的迁移
-- **历史数据迁移脚本**：relationship_memory_v2 → graph，7 天内 fragment → 事实层；旧表保留一周后删
+**四张表**：`fragment` / `abstract_memory` / `memory_edge` / `notes`
+
+```sql
+-- 所有记忆类表都带 persona_id（例外：未来做全局 event 才会有无 persona_id 的）
+
+-- 事实碎片
+CREATE TABLE fragment (
+    id              TEXT PRIMARY KEY,           -- "f_xxxxxx"
+    persona_id      TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    source          TEXT NOT NULL,              -- 'afterthought' | 'glimpse' | 'life_state' | 'manual' | 'migration'
+    chat_id         TEXT,                       -- 产生时的会话（life_state 源可空）
+    clarity         TEXT NOT NULL DEFAULT 'clear', -- 'clear' | 'vague' | 'forgotten'
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_touched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- 向量存在 Qdrant collection `memory_fragment`，point_id = fragment.id；payload 带 persona_id
+);
+CREATE INDEX ON fragment (persona_id, created_at DESC);
+CREATE INDEX ON fragment (persona_id, clarity);
+
+-- 抽象记忆
+CREATE TABLE abstract_memory (
+    id              TEXT PRIMARY KEY,           -- "a_xxxxxx"
+    persona_id      TEXT NOT NULL,
+    subject         TEXT NOT NULL,              -- "浩南" / "self" / "user:oxxx" / "学习"
+    content         TEXT NOT NULL,
+    created_by      TEXT NOT NULL,              -- 'chiwei' | 'reviewer' | 'migration'
+    clarity         TEXT NOT NULL DEFAULT 'clear',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_touched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- 向量存在 Qdrant collection `memory_abstract`，point_id = abstract_memory.id；payload 带 persona_id
+);
+CREATE INDEX ON abstract_memory (persona_id, subject);
+CREATE INDEX ON abstract_memory (persona_id, clarity);
+
+-- 统一 edges 表
+CREATE TABLE memory_edge (
+    id          TEXT PRIMARY KEY,
+    persona_id  TEXT NOT NULL,                  -- 冗余但方便查询过滤（跨节点冗余）
+    from_id     TEXT NOT NULL,
+    from_type   TEXT NOT NULL,                  -- 'fact' | 'abstract'
+    to_id       TEXT NOT NULL,
+    to_type     TEXT NOT NULL,
+    edge_type   TEXT NOT NULL,                  -- 'supports' | 'parent_of' | 'related_to' | 'conflicts_with'
+    created_by  TEXT NOT NULL,
+    reason      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON memory_edge (persona_id, from_id);
+CREATE INDEX ON memory_edge (persona_id, to_id);
+
+-- 主动清单
+CREATE TABLE notes (
+    id          TEXT PRIMARY KEY,               -- "n_xxxxxx"
+    persona_id  TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    when_at     TIMESTAMPTZ,                    -- 时间锚点（可空）
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,                    -- NULL = active
+    resolution  TEXT
+);
+CREATE INDEX ON notes (persona_id, resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX ON notes (persona_id, when_at);
+
+-- today_schedule 历史版本（append-only）
+CREATE TABLE schedule_revision (
+    id          TEXT PRIMARY KEY,
+    persona_id  TEXT NOT NULL,
+    content     TEXT NOT NULL,                  -- 当时的完整 today_schedule 文本
+    reason      TEXT NOT NULL,                  -- 本次更新的原因（LLM 写）
+    created_by  TEXT NOT NULL,                  -- 'cron_morning' | 'life_tick' | 'chiwei' | 'afterthought'
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON schedule_revision (persona_id, created_at DESC);
+-- 当前 schedule = WHERE persona_id=? ORDER BY created_at DESC LIMIT 1
+```
+
+**向量存储（Qdrant）**：
+- Collection `memory_fragment`：dense vector（1024 维，COSINE 距离），point_id = `fragment.id`，payload 带 `clarity`, `source`, `chat_id`, `created_at` 方便过滤
+- Collection `memory_abstract`：同上，point_id = `abstract_memory.id`，payload 带 `subject`, `clarity`, `created_by`, `last_touched_at`
+- 检索走 Qdrant，结构化字段走 PG；id 在两边对齐
+
+**关键决策**：
+- `clarity` 枚举 + `last_touched_at` 时间戳**两者都保留**：枚举由 reviewer 维护快速筛选用，时间戳给 reviewer 兜底判断
+- `memory_edge` **只存一条记录**，对称边（`related_to` / `conflicts_with`）应用层查询用 OR 处理
+- 节点类型**双保险**：id 前缀（`f_` / `a_`）+ `from_type`/`to_type` 字段
+- `fragment` 和 `abstract_memory` **分表**：生命周期差别大，schema 差别也大（`chat_id`/`source` 对 abstract 无意义，`subject` 对 fragment 无意义）
+- `subject` **不规范化**：直接字符串存；user 对应 subject 约定用 `"user:<user_id>"` 前缀；reviewer 重档做 subject 归一（发现同一人的不同叫法时合并）
+- **所有记忆类表带 `persona_id`**：每个 persona 有自己的记忆池，不共享；Qdrant payload 里也冗余 `persona_id` 方便向量过滤。唯一例外是未来做全局 event 类数据时再单独处理。
+
+### 7.2 Recall 底座实现（已落定）
+
+**主路径**：Qdrant 语义检索（沿用项目 `app.infra.qdrant`）
+- 对每个 query 做 embedding → 分别查 `memory_abstract` 和 `memory_fragment` 两个 collection
+- Qdrant filter 过滤 `clarity != 'forgotten'` 的节点（payload filter）
+- 拿到 point_id 列表 → PG 按 id 拿结构化字段 + edges
+
+**二次展开**：graph 遍历（走 PG 的 `memory_edge`）
+- 抽象结果命中后，通过 `memory_edge` 拉 `supports` 连接的 fact Top-K
+- 以及 `parent_of` / `related_to` 连接的其他 abstract（可选，扩充上下文）
+
+**关键原则**：**向量数据不进 PG 表**，改造成本高。PG 只存结构化字段和关系。
+
+**FTS 废弃**（§1.4 已确认效果差）。
+
+**Embedding**：沿用项目现有 `app.agent.embedding.embed_dense`（Volcengine Ark doubao-embedding）
+- 维度 1024（和 Qdrant collection 一致）
+- Dynamic config 读 model_id，方便后续切换
+- 多模态能力暂不用（记忆是文本）
+- Hybrid（dense+sparse）留作未来优化，初期只用 dense
+
+**Embedding 写入（异步）**：
+- 新 fragment / abstract 产出后，通过 RabbitMQ 任务进 `vectorize` 队列
+- 复用现有 `vectorize-worker`，消费者调 Ark 拿 embedding 并写 Qdrant
+- Tool 返回不等 embedding 写入，立刻返回；短时间内 recall 命中不到刚产出的新节点是可接受的代价
+
+**Query 理解**：**初期不做** LLM 改写，裸 embedding 起步；跑一段数据看命中率再决定
+
+**Tool 签名**：
+```python
+recall(
+    queries: list[str],          # 批量
+    type_filter: str | None = None,  # 'abstract' | 'fact' | None
+    k_abs: int = 5,              # 每 query 的抽象 Top-K
+    k_facts_per_abs: int = 3,    # 每个抽象的支撑事实 Top-K
+) -> dict  # 结构化 JSON（抽象列表 + 每个抽象的支撑事实 + 横向关联）
+```
+
+**返回形态**：结构化 JSON，带 id、subject、content、clarity、关系类型。Tool return 给 LLM，LLM 自己决定如何在回复里自然表达。
+
+**副作用**：recall 命中的 node 的 `last_touched_at` 更新（"被引用 = 记忆强化"）。
+
+**参数初值（跑起来后再调）**：
+- `k_abs` = 5 per query
+- `k_facts_per_abs` = 3
+- 总返回节点数上限 = 20（抽象 5 + 事实 15）
+- HNSW 参数用 pgvector 默认（m=16, ef_construction=64），如果召回不准再调
+
+### 7.3 Tool 体系（已落定）
+
+**新增 4 个 tool**（加上 §9.5 已定的 `commit_life_state`）：
+
+#### `commit_abstract_memory`
+```python
+commit_abstract_memory(
+    subject: str,
+    content: str,
+    supported_by_fact_ids: list[str] | None = None,
+    reasoning: str | None = None,
+) -> dict  # {id, conflict_hint?}
+```
+- 冲突检测：先 recall 同 subject 的已有抽象，相似度 > threshold 时返回 `conflict_hint`（不阻塞，赤尾自己决定）
+- 写入 PG abstract_memory + supports edges → 推 `vectorize` 队列异步补 embedding
+- 验证 fact_ids 存在
+
+#### `write_note` / `resolve_note`
+```python
+write_note(content: str, when_at: datetime | None = None) -> dict
+resolve_note(note_id: str, resolution: str) -> dict
+```
+- `write_note`：insert；返回时附当前 active notes 简要（方便赤尾看全局）
+- `resolve_note`：更新 resolved_at / resolution，不删除（供 reviewer 回顾）
+
+#### `update_schedule`
+```python
+update_schedule(content: str, reason: str) -> dict  # {schedule, new_state}
+```
+- Append 一条 `schedule_revision`（revision 表折中方案）
+- 触发 §9.4 state sync（调用 Life Engine state-only refresh）
+- 返回新 schedule 和 sync 后的 state
+
+#### 通用规范
+- **Langfuse trace**：每个 tool call 接入 trace（项目硬要求）
+- **Tool 层校验**：参数和业务校验失败时返回错误 dict，不破坏 agent 链路
+- **返回结构化 dict**：便于 LLM 理解和后续引用
+
+#### Tool 在不同 agent 中的可用性
+
+| Tool | Chat Agent | Life Engine tick | Reviewer | Afterthought |
+|------|-----------|---------|---------|---------|
+| `commit_abstract_memory` | ✅ | ❌ | ✅ | ❌ |
+| `write_note` | ✅ | ❌ | ❌ | ❌ |
+| `resolve_note` | ✅ | ❌ | ❌ | ❌ |
+| `update_schedule` | ✅ | ✅ | ❌ | ✅ |
+| `recall` | ✅ | ✅ | ✅ | ❌ |
+| `commit_life_state` | ❌ | ✅ | ❌ | ❌ |
+
+**注**：Life Engine tick 可**只读** notes（作为 tick 输入的一部分，不需要 tool，直接读 DB），但**不能**写或 resolve —— notes 是赤尾自主清单，系统不替她操作。
+
+### 7.4 Reviewer 实现（已落定）
+
+#### 调度频率（更新，覆盖 §五.③ 的笼统说法）
+
+| 档位 | 频率 | 时段 |
+|------|------|------|
+| 轻档（白天） | 每 **30min** | 8:00-22:00 |
+| 轻档（夜间） | 每 **1h** | 22:00-8:00 |
+| 重档 | 每日凌晨一次 | ~3:00 |
+| 超低频 P2（矛盾检测） | 每周 or 事件驱动 | - |
+
+白天新鲜事实密集，压到 30min 更及时；夜间节省。
+
+#### Worker 部署
+
+- 轻档：复用 arq-worker 的 cron 能力添加定时任务
+- 重档：替换现有 daily dream cron 的实现（prompt + 逻辑换成 reviewer P1），cron 配置和 worker 不变
+- 不新增 Deployment
+
+#### 轻档输入
+
+窗口 = 上次轻档运行到现在（严格，不重叠；tool 层幂等处理）：
+- 窗口内新增的 fragment / abstract
+- 活跃 notes
+- 最近 1-2 天的 life_engine_state（判断带时间记忆的时间点是否已过）
+
+#### 重档输入
+
+- 当天所有 fragment 和 abstract
+- 昨日 life_engine_state 历史（提炼自我抽象）
+- 最近 N 天的 schedule_revision（"计划 vs 实际"分析）
+- 现有 abstract_memory 池（合并决策）
+
+#### Reviewer tool（新增）
+
+Reviewer 自己是 agent，通过 tool 做操作：
+
+```python
+update_abstract_content(id: str, content: str, reason: str)  # 改写抽象
+fade_node(id: str, to_clarity: str, reason: str)             # clear/vague/forgotten
+touch_node(id: str)                                          # 强化（last_touched_at 更新）
+delete_fragment(id: str, reason: str)                        # 彻底清除琐事
+connect(from_id, to_id, edge_type, reason)                   # 建边
+disconnect(edge_id: str, reason: str)                        # 断边
+```
+
+外加复用：`commit_abstract_memory`（产抽象）、`recall`（查历史做判断）。
+
+所有 tool 带 `reason` 字段，Langfuse trace 记录。
+
+#### 模型选型
+
+- **轻档**：haiku 级 / offline-model（通过 dynamic config 读 model_id）
+- **重档**：更强模型（gemini-2.5-pro 级，dynamic config 切换）
+
+#### Prompt 身份
+
+混合身份：**全知视角做决策 + 第一人称生成内容**
+- "你是赤尾的潜意识，替她整理记忆..."
+- content 写作用第一人称（"他最近压力大" 不是 "赤尾觉得浩南压力大"）
+
+#### Langfuse
+
+- 每次 reviewer 运行一个 Langfuse trace（parent span），每个 tool call 一个 child span
+- Prompt 通过 Langfuse 管理，命名：`memory_reviewer_light` / `memory_reviewer_heavy`
+- Dynamic config 读 prompt name
+
+#### 废弃
+
+- 现有 25 条 daily_fragment 废弃（§五.⑧ 已定）
+- 现有 daily dream prompt/logic 废弃，cron 保留
+
+### 7.5 State sync 技术实现（已落定）
+
+**异步触发**：`update_schedule` 立刻返回，state_sync 在后台跑。
+
+**核心逻辑**：赤尾在当前对话里调 `update_schedule` 时，她本轮回复已经基于"要更新计划"的认知产出了。新 state 的目的是给**下次 LLM（下次 tick / 下次对话 / afterthought）**读到，不需要阻塞当前 tool 返回。
+
+#### 实现流程
+
+```python
+async def update_schedule(content: str, reason: str) -> dict:
+    revision_id = await insert_schedule_revision(content, reason, created_by)
+    # enqueue 异步任务，不等
+    await arq.enqueue_job("sync_life_state_after_schedule", revision_id=revision_id)
+    return {"schedule": content, "revision_id": revision_id}
+
+# arq worker 消费
+async def sync_life_state_after_schedule(ctx, revision_id: str):
+    revision = await get_schedule_revision(revision_id)
+    current_state = await get_current_life_state()
+    new_state = await life_engine.state_only_refresh(
+        previous_state=current_state,
+        new_schedule=revision.content,
+    )
+    # 只有当 LLM 判断需要切 state / 段内刷新时才写入
+    if new_state:
+        await save_life_state(new_state)
+```
+
+#### 调度基础设施
+
+复用 arq（项目已有 arq-worker Deployment），新增任务 `sync_life_state_after_schedule`。不引入新队列/新 worker。
+
+#### `state_only_refresh` 的实现
+
+- 和 Life Engine tick 的 prompt 共享，但输入精简：只给 current_state / new_schedule / 当前时间
+- 输出走 `commit_life_state` tool（§9.5 的硬校验保证合法性）
+- 若 LLM 判断"当前 state 仍合理，无需刷新" → 返回 None，不写入
+
+#### 并发与幂等
+
+- **不去重**：多次 update_schedule 串行消费（arq 任务队列），最后一次获胜
+- **幂等**：`commit_life_state` tool 本身有 tool 层校验，重复消费生成等价 state 无副作用
+- **失败处理**：任务失败由 arq 重试；state 仍是旧值；下次 tick 会自然重新评估（不会永久卡住）
+
+#### 失败可观测
+
+- 每个 `sync_life_state_after_schedule` 是一个 Langfuse trace
+- schedule_revision 表记录 `created_by`，出问题时可以追出哪个调用方引发的 refresh
+
+#### 小改不特判
+
+- LLM 自己判断改动大小。schedule 有变化就跑 refresh；LLM 读了觉得不值得刷就返回 None，成本可控
+- 不搞 "内容 diff 阈值" 之类工程化判断
+
+### 7.6 Cross-chat 去硬编码（已落定）
+
+**现状**：`cross_chat.py` 里 `CROSS_CHAT_GROUP_IDS = ["oc_54713c..."]` 硬编码，导致只有 ka 群的 cross-chat 可见；proactive 无 trigger_user 时完全失效。
+
+**改造方案**：
+
+1. **去掉硬编码白名单**：删除 `CROSS_CHAT_GROUP_IDS`，默认所有群都可见
+2. **改为 dynamic config 黑名单**：key = `memory.cross_chat.excluded_chat_ids`（默认空数组）；需要屏蔽某群时加进去
+3. **时间窗口**：保持 24h（改过头容易丢信息）
+4. **总量限制**：新增 `max_total_messages` dynamic config，默认 15 条（跨所有 chat）；按 chat_id 分布后每 chat 最多 `_MAX_PAIRS_PER_CHAT=10`
+5. **Proactive 适配**：`build_cross_chat_context` 的 `trigger_user_id` 参数改为可空；空时直接返回 `""`；有 `proactive_target` 时调用方传入作为 trigger_user_id（§五.⑨ 已定）
+6. **相关性过滤不做**：cross-chat 是原始消息，过滤容易丢信息；交给 LLM 看上下文自己判断相关性（prompt 里注入"以下是 24h 内你和该用户在其他地方的互动，相关的自然采纳"）
+
+**fragment 短期注入分工**（§2.8）：
+- 新增模块 `memory/short_term_injection.py`（或在 `context.py` 里加 section），按 §2.8 规则拉最近 fragment
+- 和 cross-chat 并存，视角不同：
+  - cross-chat = user-centric 原始消息
+  - fragment = persona-centric 赤尾反思摘要
+
+**废弃 CROSS_CHAT_GROUP_IDS 常量** + grep 验证零残留。
+
+### 7.7 现有管道改造路径（已落定）
+
+**上线策略：一次性切换**。不分 phase、不搞兼容、不做平滑过渡。选周末低流量窗口一次推上，有问题现场修。
+
+#### 改造清单（合并到一个 PR 上）
+
+| 管道 | 动作 |
+|------|------|
+| **afterthought** | fragment 长度控制到 200-300 字；产出写 `fragment` 表 + 发 vectorize 任务；不直接产抽象 |
+| **glimpse** | 产出改写 `fragment` 表（`source='glimpse'`），不再孤立 |
+| **voice / reply_style** | 保持不动；v4 上线后观察，失效了再废弃（不预设时间点） |
+| **Life Engine tick** | 改 `commit_life_state` tool 化输出（§9.5）；`state_end_at` 语义；输入加 notes / 抽象；必要时调 `update_schedule` |
+| **Daily dream** | cron 保留；prompt 替换为 `memory_reviewer_heavy`；产出改为 tool call 系列 |
+| **Weekly dream** | 删 cron、删表、grep 清残留 |
+| **Recall tool** | 彻底重写走 Qdrant（§7.2）；废弃 FTS 实现和 `simple` 字典索引 |
+| **build_inner_context** | 重构：always-on = 当前 trigger_user abstract + self abstract + active notes + voice；短期层走 §2.8；加 recall 索引辅助；废弃 relationship_memory_v2 注入 |
+| **cross-chat** | 去硬编码，改 dynamic config 黑名单（§7.6） |
+
+#### 执行顺序（上线当天）
+
+1. **准备期（周中完成）**：
+   - 所有新代码写完（feat/context-decline 分支上）
+   - DB 迁移脚本写完 + 本地 dry-run 验证
+   - 泳道部署一次，dev bot 绑定验证端到端
+
+2. **上线当天（周末低流量）**：
+   - 建 PG 新表（fragment / abstract_memory / memory_edge / notes / schedule_revision）
+   - 建 Qdrant collections（memory_fragment / memory_abstract）
+   - 跑迁移脚本：relationship_memory_v2 → abstract + supports edges；最近 7 天 conversation_fragment → fragment 表（embedding 异步跟上）
+   - 一键部署所有改动服务（agent-service、arq-worker、vectorize-worker、chat-response-worker 等按需）
+   - 观察 Langfuse + 飞书消息
+
+3. **旧表和旧 cron 处置**：
+   - 旧表（conversation_fragment、glimpse_fragment、daily_fragment、weekly_fragment、relationship_memory_v2）保留只读 1 周后删
+   - weekly dream cron 当天删
+
+#### 关于兼容
+
+**不做任何兼容层**。旧 import 直接删，旧函数直接改签名，旧表读取方直接改指向新表。挂了就修，按重构规范（`refactoring-rules.md`）执行。
+
+#### 迁移脚本要求
+
+- **幂等**：可以反复跑，不产生重复数据
+- **支持 dry-run**：`--dry-run` flag 打印将要写入的内容但不真写
+- **分步**：每张表一个脚本，每批结束输出数据校验（计数、sample 内容）
+- **回滚能力**：脚本记录 `migration_run_id`，需要的时候可以基于 id 删除批次
+
+### 7.8 历史数据迁移脚本（已落定）
+
+**两个脚本**：
+
+#### `migrate_relationship_to_abstract.py`
+处理 617 条 `relationship_memory_v2`：
+1. 每行拆成：`facts` 字段拆为多条 `fragment` 节点 + `impression` 作为 `abstract_memory` 节点
+2. 两者通过 `supports` edges 连接（v4 启动就有 graph 结构）
+3. **LLM 改写**：impression 和 facts 走 haiku 改写成更流畅的抽象 content，prompt `memory_migrate_relationship`，每条一个 Langfuse trace
+4. `persona_id` 从原表继承；`subject = "user:<user_id>"`；`source='migration'` / `created_by='migration'`
+5. **改写失败处理**：跳过该条 + log 报错，继续；不降级保留原文（防止垃圾 content 进库）
+
+#### `migrate_fragment_to_fragment.py`
+处理最近 7 天 `conversation_fragment`：
+1. 直接迁入 `fragment` 表，保留原 `created_at`（让 `last_touched_at` 反映真实年龄）
+2. `source='afterthought'`，`persona_id` 从原表继承
+3. **不做 LLM 改写**：老数据过长由 reviewer 重档第二天自然处理合并
+4. id 格式：`f_mig_<原 id>`，便于追溯
+
+#### 通用要求
+- **幂等**：可反复跑；重跑时先 `DELETE WHERE created_by='migration'` 清掉已迁入的再重建
+- **支持 dry-run**：`--dry-run` 打印写入内容，不真写
+- **分批校验**：每批（比如每 50 条）结束后打印计数 + sample
+- **migration_run_id**：每次运行一个 uuid，写入日志方便事后对账/回滚
+
+#### 执行流程（上线当天）
+
+```bash
+# 1. dry-run 验证
+python migrate_relationship_to_abstract.py --dry-run
+python migrate_fragment_to_fragment.py --dry-run
+
+# 2. 真跑
+python migrate_relationship_to_abstract.py
+python migrate_fragment_to_fragment.py
+
+# 3. 等 vectorize-worker 消化完
+# 监控 Qdrant memory_fragment / memory_abstract 的 point count
+# 直到 PG 计数 == Qdrant 计数
+
+# 4. 部署新代码
+```
+
+#### Embedding 补全窗口
+
+**B 方案**：先部署代码，接受头 30 分钟召回不全。
+- vectorize-worker 异步补 embedding，初期召回率 0 → 逐步爬升
+- 头 30min 用户感知：recall 返回少 / 空，赤尾自然"想不起来"（和系统初启用时"新 persona"体验类似）
+- 可接受，周末低流量期不会造成严重问题
