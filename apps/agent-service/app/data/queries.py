@@ -34,10 +34,13 @@ from app.data.models import (
     LarkGroupMember,
     LarkUser,
     LifeEngineState,
+    MemoryEdge,
     ModelMapping,
     ModelProvider,
+    Note,
     RelationshipMemoryV2,
     ReplyStyleLog,
+    ScheduleRevision,
 )
 
 # CST timezone for date boundary calculations
@@ -586,7 +589,7 @@ async def find_today_activity_states(
 # --- Memory — fragments ---
 
 
-async def insert_fragment(
+async def insert_experience_fragment(
     session: AsyncSession, fragment: ExperienceFragment
 ) -> ExperienceFragment:
     """Insert an experience fragment, return it with populated id."""
@@ -923,5 +926,173 @@ async def get_abstract_by_id(
     """Fetch a v4 AbstractMemory by primary key."""
     result = await session.execute(
         select(AbstractMemory).where(AbstractMemory.id == abstract_id)
+    )
+    return result.scalar_one_or_none()
+
+
+# --- Memory v4 — CRUD ---
+
+
+async def insert_fragment(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    source: str,
+    chat_id: str | None = None,
+    clarity: str = "clear",
+    created_at: datetime | None = None,
+) -> None:
+    f = Fragment(
+        id=id,
+        persona_id=persona_id,
+        content=content,
+        source=source,
+        chat_id=chat_id,
+        clarity=clarity,
+    )
+    if created_at is not None:
+        f.created_at = created_at
+        f.last_touched_at = created_at
+    session.add(f)
+
+
+async def touch_fragment(session: AsyncSession, fragment_id: str) -> None:
+    await session.execute(
+        update(Fragment)
+        .where(Fragment.id == fragment_id)
+        .values(last_touched_at=func.now())
+    )
+
+
+async def insert_abstract_memory(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    subject: str,
+    content: str,
+    created_by: str,
+    clarity: str = "clear",
+) -> None:
+    a = AbstractMemory(
+        id=id,
+        persona_id=persona_id,
+        subject=subject,
+        content=content,
+        created_by=created_by,
+        clarity=clarity,
+    )
+    session.add(a)
+
+
+async def touch_abstract(session: AsyncSession, abstract_id: str) -> None:
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id == abstract_id)
+        .values(last_touched_at=func.now())
+    )
+
+
+async def count_abstracts_by_persona(
+    session: AsyncSession, persona_id: str
+) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+    )
+    return int(result.scalar_one())
+
+
+async def insert_memory_edge(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    from_id: str,
+    from_type: str,
+    to_id: str,
+    to_type: str,
+    edge_type: str,
+    created_by: str,
+    reason: str | None = None,
+) -> None:
+    e = MemoryEdge(
+        id=id,
+        persona_id=persona_id,
+        from_id=from_id,
+        from_type=from_type,
+        to_id=to_id,
+        to_type=to_type,
+        edge_type=edge_type,
+        created_by=created_by,
+        reason=reason,
+    )
+    session.add(e)
+
+
+async def insert_note(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    when_at: datetime | None = None,
+) -> None:
+    n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
+    session.add(n)
+
+
+async def get_active_notes(
+    session: AsyncSession, persona_id: str
+) -> list[Note]:
+    result = await session.execute(
+        select(Note)
+        .where(Note.persona_id == persona_id)
+        .where(Note.resolved_at.is_(None))
+        .order_by(Note.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def resolve_note(
+    session: AsyncSession, *, note_id: str, resolution: str
+) -> None:
+    await session.execute(
+        update(Note)
+        .where(Note.id == note_id)
+        .values(resolved_at=func.now(), resolution=resolution)
+    )
+
+
+async def insert_schedule_revision(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    reason: str,
+    created_by: str,
+) -> None:
+    sr = ScheduleRevision(
+        id=id,
+        persona_id=persona_id,
+        content=content,
+        reason=reason,
+        created_by=created_by,
+    )
+    session.add(sr)
+
+
+async def get_current_schedule(
+    session: AsyncSession, persona_id: str
+) -> ScheduleRevision | None:
+    result = await session.execute(
+        select(ScheduleRevision)
+        .where(ScheduleRevision.persona_id == persona_id)
+        .order_by(ScheduleRevision.created_at.desc())
+        .limit(1)
     )
     return result.scalar_one_or_none()

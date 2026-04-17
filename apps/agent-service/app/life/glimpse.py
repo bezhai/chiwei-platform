@@ -242,7 +242,7 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
             model=settings.life_engine_model,
         )
         async with get_session() as s:
-            await Q.insert_fragment(s, fragment)
+            await Q.insert_experience_fragment(s, fragment)
         logger.info("[%s] Glimpse fragment: %s...", persona_id, observation[:60])
 
     # 7. Proactive chat

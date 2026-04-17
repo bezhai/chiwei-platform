@@ -18,7 +18,7 @@ from app.data.models import ExperienceFragment
 from app.data.queries import (
     find_fragments_in_date_range,
     find_recent_fragments_by_grain,
-    insert_fragment,
+    insert_experience_fragment,
     list_all_persona_ids,
 )
 from app.data.session import get_session
@@ -98,7 +98,7 @@ async def generate_daily_dream(
         time_end=int(day_end.timestamp() * 1000),
     )
     async with get_session() as s:
-        saved = await insert_fragment(s, fragment)
+        saved = await insert_experience_fragment(s, fragment)
     logger.info(
         "[%s] Daily dream created: id=%s, date=%s, len=%d",
         persona_id,
@@ -157,7 +157,7 @@ async def generate_weekly_dream(
         time_end=int(week_end.timestamp() * 1000),
     )
     async with get_session() as s:
-        saved = await insert_fragment(s, fragment)
+        saved = await insert_experience_fragment(s, fragment)
     logger.info(
         "[%s] Weekly dream created: id=%s, len=%d", persona_id, saved.id, len(content)
     )

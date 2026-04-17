@@ -171,7 +171,7 @@ async def test_glimpse_creates_fragment_and_state():
                 new_callable=AsyncMock,
                 return_value=llm_response,
             ),
-            patch(f"{MODULE}.Q.insert_fragment", new_callable=AsyncMock) as mock_frag,
+            patch(f"{MODULE}.Q.insert_experience_fragment", new_callable=AsyncMock) as mock_frag,
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
@@ -252,7 +252,7 @@ async def test_glimpse_not_interesting_still_writes_state():
                 new_callable=AsyncMock,
                 return_value=llm_response,
             ),
-            patch(f"{MODULE}.Q.insert_fragment", new_callable=AsyncMock) as mock_frag,
+            patch(f"{MODULE}.Q.insert_experience_fragment", new_callable=AsyncMock) as mock_frag,
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
@@ -333,7 +333,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
                 new_callable=AsyncMock,
                 return_value=llm_response,
             ),
-            patch(f"{MODULE}.Q.insert_fragment", new_callable=AsyncMock),
+            patch(f"{MODULE}.Q.insert_experience_fragment", new_callable=AsyncMock),
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,

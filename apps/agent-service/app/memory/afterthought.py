@@ -20,7 +20,7 @@ from app.data.queries import (
     find_group_name,
     find_messages_in_range,
     find_username,
-    insert_fragment,
+    insert_experience_fragment,
 )
 from app.data.session import get_session
 from app.memory._persona import load_persona
@@ -121,7 +121,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         mentioned_entity_ids=[],
     )
     async with get_session() as s:
-        await insert_fragment(s, fragment)
+        await insert_experience_fragment(s, fragment)
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,
