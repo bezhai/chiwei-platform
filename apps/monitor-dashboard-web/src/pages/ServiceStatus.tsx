@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Card, Col, Row, Statistic, Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
+import { Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -93,14 +93,14 @@ function PodDetail({ app, lane }: { app: string; lane: string }) {
   if (!data) return <Text type="secondary">无法获取 Pod 信息</Text>;
 
   return (
-    <div style={{ padding: '8px 12px', background: '#f8fafc', borderRadius: 8, marginTop: 8, border: '1px solid #e2e8f0' }}>
+    <div style={{ padding: '4px 0', marginTop: 8 }}>
       <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8, fontWeight: 500 }}>
         预期: {data.desired} / 就绪: {data.ready} / 可用: {data.available}
       </Text>
       {data.pods?.map((pod) => (
         <div key={pod.name} style={{ fontSize: 12, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
           <Tag color={pod.ready ? 'green' : 'red'} style={{ margin: 0, fontSize: 11, border: 'none' }}>{pod.status}</Tag>
-          <Text code style={{ fontSize: 11, background: 'transparent', border: 'none', padding: 0 }}>{pod.name}</Text>
+          <Text code style={{ fontSize: 11, background: 'transparent', border: 'none', padding: 0, color: '#475569' }}>{pod.name}</Text>
           {pod.restarts > 0 && <Text type="warning" style={{ fontSize: 11 }}>重启: {pod.restarts}</Text>}
           {pod.reason && <Text type="danger" style={{ fontSize: 11 }}>{pod.reason}</Text>}
         </div>
@@ -293,23 +293,21 @@ export default function ServiceStatus() {
       </div>
 
       {laneBindings.length > 0 && (
-        <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <Text strong style={{ fontSize: 14, color: '#334155' }}>路由绑定</Text>
-            <Space wrap size={[8, 8]}>
-              {laneBindings.map((b) => (
-                <Tag key={`${b.route_type}-${b.route_key}`} bordered={false} className="custom-route-tag">
-                  <span className="route-key">{b.route_type}:{b.route_key}</span>
-                  <span className="route-arrow">→</span>
-                  <span className="route-lane">{b.lane_name}</span>
-                </Tag>
-              ))}
-            </Space>
-          </div>
-        </Card>
+        <div style={{ marginBottom: 32, display: 'flex', alignItems: 'center', gap: 16, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
+          <Text strong style={{ fontSize: 14, color: '#334155' }}>路由绑定</Text>
+          <Space wrap size={[8, 8]}>
+            {laneBindings.map((b) => (
+              <div key={`${b.route_type}-${b.route_key}`} className="custom-route-tag">
+                <span className="route-key">{b.route_type}:{b.route_key}</span>
+                <span className="route-arrow">→</span>
+                <span className="route-lane">{b.lane_name}</span>
+              </div>
+            ))}
+          </Space>
+        </div>
       )}
 
-      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={dataSource}
           columns={columns}
@@ -329,12 +327,13 @@ export default function ServiceStatus() {
                   : <RightOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: '#64748b' }} onClick={(e) => onExpand(record, e)} />
               ) : <span style={{ width: 20, display: 'inline-block' }} />,
             expandedRowRender: (record) => (
-              <div style={{ padding: '16px 32px', background: '#fafafa', borderTop: '1px solid #f1f5f9' }}>
+              <div style={{ padding: '24px 32px', background: '#fafafa', borderTop: '1px solid #f1f5f9' }}>
+                <Text strong style={{ fontSize: 13, color: '#64748b', display: 'block', marginBottom: 16 }}>部署详情</Text>
                 {record.releases.map((rel) => (
-                  <div key={rel.id} style={{ marginBottom: 16, background: '#fff', padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}>
-                    <Space size={12} style={{ marginBottom: 8 }}>
-                      <Tag bordered={false} color={statusConfig[rel.status]?.color || 'default'} style={{ fontWeight: 500 }}>{rel.lane}</Tag>
-                      <Text code style={{ fontSize: 12, border: 'none', background: '#f1f5f9' }}>{getImageTag(rel.image)}</Text>
+                  <div key={rel.id} style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
+                    <Space size={12} style={{ marginBottom: 12 }}>
+                      <Tag bordered={false} color={statusConfig[rel.status]?.color || 'default'} style={{ fontWeight: 500, margin: 0 }}>{rel.lane}</Tag>
+                      <Text code style={{ fontSize: 12, border: 'none', background: '#f1f5f9', color: '#475569' }}>{getImageTag(rel.image)}</Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {dayjs(rel.updated_at).format('YYYY-MM-DD HH:mm:ss')}
                       </Text>
@@ -346,7 +345,7 @@ export default function ServiceStatus() {
             ),
           }}
         />
-      </Card>
+      </div>
     </div>
   );
 }
