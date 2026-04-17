@@ -38,6 +38,7 @@ async def vectorize_fragment(fragment_id: str) -> bool:
         "source": fragment.source,
         "chat_id": fragment.chat_id,
         "clarity": fragment.clarity,
+        "last_touched_at": fragment.last_touched_at.isoformat() if fragment.last_touched_at else None,
     }
     ok = await qdrant.upsert_vectors(
         collection=COLLECTION_FRAGMENT,
@@ -46,8 +47,8 @@ async def vectorize_fragment(fragment_id: str) -> bool:
         payloads=[payload],
     )
     if not ok:
-        logger.error("Qdrant upsert failed for fragment %s", fragment_id)
-    return ok
+        raise RuntimeError(f"Qdrant upsert failed for fragment {fragment_id}")
+    return True
 
 
 async def vectorize_abstract(abstract_id: str) -> bool:
@@ -70,6 +71,7 @@ async def vectorize_abstract(abstract_id: str) -> bool:
         "subject": a.subject,
         "created_by": a.created_by,
         "clarity": a.clarity,
+        "last_touched_at": a.last_touched_at.isoformat() if a.last_touched_at else None,
     }
     ok = await qdrant.upsert_vectors(
         collection=COLLECTION_ABSTRACT,
@@ -78,5 +80,5 @@ async def vectorize_abstract(abstract_id: str) -> bool:
         payloads=[payload],
     )
     if not ok:
-        logger.error("Qdrant upsert failed for abstract %s", abstract_id)
-    return ok
+        raise RuntimeError(f"Qdrant upsert failed for abstract {abstract_id}")
+    return True
