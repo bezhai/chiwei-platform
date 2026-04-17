@@ -1,12 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   Button,
-  Card,
   Form,
   Input,
   Modal,
   Popconfirm,
-  Tag,
   Tree,
   Typography,
   message,
@@ -20,6 +18,7 @@ import {
   FileOutlined,
   FolderOutlined,
   FolderOpenOutlined,
+  CloseOutlined,
 } from '@ant-design/icons';
 import type { TreeDataNode } from 'antd';
 import Editor from '@monaco-editor/react';
@@ -33,12 +32,20 @@ interface Skill {
   files: string[];
 }
 
+interface OpenTab {
+  key: string;
+  skillName: string;
+  filePath: string;
+}
+
 function languageForFile(filename: string): string {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.md')) return 'markdown';
   if (lower.endsWith('.py')) return 'python';
   if (lower.endsWith('.sh')) return 'shell';
   if (lower.endsWith('.json')) return 'json';
+  if (lower.endsWith('.ts')) return 'typescript';
+  if (lower.endsWith('.tsx')) return 'typescript';
   return 'plaintext';
 }
 
@@ -48,14 +55,28 @@ function fileIcon(filename: string) {
   return <FileOutlined />;
 }
 
-/** 将扁平文件路径列表构建成 Ant Design Tree 数据 */
-function buildTreeData(files: string[] | undefined): TreeDataNode[] {
+function fileBasename(filePath: string): string {
+  const parts = filePath.split('/');
+  return parts[parts.length - 1] || filePath;
+}
+
+function fileTabKey(skillName: string, filePath: string): string {
+  return `file::${skillName}::${filePath}`;
+}
+
+function parseFileNodeKey(nodeKey: string): { skillName: string; filePath: string } | null {
+  const match = nodeKey.match(/^file::([^:]+)::(.+)$/);
+  if (!match) return null;
+  return { skillName: match[1], filePath: match[2] };
+}
+
+function buildFileTree(skillName: string, files: string[] | undefined): TreeDataNode[] {
   if (!files?.length) return [];
+
   const root: TreeDataNode[] = [];
   const dirMap = new Map<string, TreeDataNode>();
 
   const sorted = [...files].sort((a, b) => {
-    // 文件夹排前面，同级按字母序
     const aDepth = a.split('/').length;
     const bDepth = b.split('/').length;
     if (aDepth !== bDepth) return aDepth - bDepth;
@@ -66,12 +87,11 @@ function buildTreeData(files: string[] | undefined): TreeDataNode[] {
     const parts = filePath.split('/');
     let parentChildren = root;
 
-    // 逐层创建目录节点
     for (let i = 0; i < parts.length - 1; i++) {
       const dirKey = parts.slice(0, i + 1).join('/');
       if (!dirMap.has(dirKey)) {
         const dirNode: TreeDataNode = {
-          key: dirKey,
+          key: `dir::${skillName}::${dirKey}`,
           title: parts[i],
           icon: <FolderOutlined />,
           children: [],
@@ -83,10 +103,9 @@ function buildTreeData(files: string[] | undefined): TreeDataNode[] {
       parentChildren = dirMap.get(dirKey)!.children as TreeDataNode[];
     }
 
-    // 叶子节点（文件）
     const fileName = parts[parts.length - 1];
     parentChildren.push({
-      key: filePath,
+      key: fileTabKey(skillName, filePath),
       title: fileName,
       icon: fileIcon(fileName),
       isLeaf: true,
@@ -96,23 +115,45 @@ function buildTreeData(files: string[] | undefined): TreeDataNode[] {
   return root;
 }
 
+function buildExplorerTree(skills: Skill[], selectedSkillName?: string | null): TreeDataNode[] {
+  return [...skills]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((skill) => ({
+      key: `skill::${skill.name}`,
+      title: skill.name,
+      icon: selectedSkillName === skill.name ? <FolderOpenOutlined /> : <FolderOutlined />,
+      children: buildFileTree(skill.name, skill.files),
+    }));
+}
+
 export default function Skills() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string>('');
-  const [fileContent, setFileContent] = useState<string>('');
-  const [originalContent, setOriginalContent] = useState<string>('');
+  const [selectedFile, setSelectedFile] = useState('');
+  const [fileContent, setFileContent] = useState('');
+  const [originalContent, setOriginalContent] = useState('');
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [form] = Form.useForm();
 
   const fetchSkills = useCallback(async () => {
     setLoadingList(true);
     try {
       const { data } = await api.get('/skills');
-      setSkills(data || []);
+      const nextSkills = data || [];
+      setSkills(nextSkills);
+      setExpandedKeys(
+        nextSkills.flatMap((skill: Skill) => [
+          `skill::${skill.name}`,
+          ...skill.files
+            .filter((file) => file.includes('/'))
+            .map((file) => `dir::${skill.name}::${file.split('/').slice(0, -1).join('/')}`),
+        ]),
+      );
     } finally {
       setLoadingList(false);
     }
@@ -122,29 +163,28 @@ export default function Skills() {
     fetchSkills();
   }, [fetchSkills]);
 
-  const loadFile = useCallback(async (skillName: string, filename: string) => {
+  const openFile = useCallback(async (skillName: string, filePath: string) => {
     setLoadingFile(true);
     try {
-      const { data } = await api.get(`/skills/${skillName}/files/${filename}`);
+      const { data } = await api.get(`/skills/${skillName}/files/${filePath}`);
       const content = data?.content ?? '';
+      const skill = skills.find((item) => item.name === skillName) || null;
+      setSelectedSkill(skill);
+      setSelectedFile(filePath);
       setFileContent(content);
       setOriginalContent(content);
-      setSelectedFile(filename);
+      setOpenTabs((current) => {
+        const key = fileTabKey(skillName, filePath);
+        if (current.some((tab) => tab.key === key)) return current;
+        return [...current, { key, skillName, filePath }];
+      });
     } catch {
       setFileContent('');
       setOriginalContent('');
     } finally {
       setLoadingFile(false);
     }
-  }, []);
-
-  const selectSkill = useCallback(async (skill: Skill) => {
-    setSelectedSkill(skill);
-    const firstFile = skill.files?.find(f => f === 'SKILL.md') || skill.files?.[0] || '';
-    if (firstFile) {
-      await loadFile(skill.name, firstFile);
-    }
-  }, [loadFile]);
+  }, [skills]);
 
   const handleSave = async () => {
     if (!selectedSkill || !selectedFile) return;
@@ -177,181 +217,264 @@ export default function Skills() {
   const handleDelete = async (name: string) => {
     await api.delete(`/skills/${name}`);
     message.success('已删除');
+
     if (selectedSkill?.name === name) {
       setSelectedSkill(null);
       setSelectedFile('');
       setFileContent('');
       setOriginalContent('');
     }
+
+    setOpenTabs((current) => current.filter((tab) => tab.skillName !== name));
     await fetchSkills();
   };
 
+  const handleExplorerSelect = (keys: React.Key[]) => {
+    const key = String(keys[0] || '');
+    if (!key) return;
+
+    if (key.startsWith('skill::')) {
+      const skillName = key.slice('skill::'.length);
+      const skill = skills.find((item) => item.name === skillName) || null;
+      setSelectedSkill(skill);
+      return;
+    }
+
+    if (key.startsWith('file::')) {
+      const node = parseFileNodeKey(key);
+      if (node) openFile(node.skillName, node.filePath);
+    }
+  };
+
+  const handleTabSelect = async (tab: OpenTab) => {
+    await openFile(tab.skillName, tab.filePath);
+  };
+
+  const closeTab = async (tabKey: string) => {
+    const nextTabs = openTabs.filter((tab) => tab.key !== tabKey);
+    setOpenTabs(nextTabs);
+
+    if (tabKey !== fileTabKey(selectedSkill?.name || '', selectedFile)) {
+      return;
+    }
+
+    const fallback = nextTabs[nextTabs.length - 1];
+    if (fallback) {
+      await openFile(fallback.skillName, fallback.filePath);
+      return;
+    }
+
+    setSelectedFile('');
+    setFileContent('');
+    setOriginalContent('');
+  };
+
+  const activeTabKey = selectedSkill && selectedFile ? fileTabKey(selectedSkill.name, selectedFile) : '';
+  const explorerTree = buildExplorerTree(skills, selectedSkill?.name);
   const isDirty = fileContent !== originalContent;
-  const treeData = selectedSkill ? buildTreeData(selectedSkill.files) : [];
-  const skillCount = skills.length;
-  const fileCount = selectedSkill?.files.length || 0;
-  const skillTreeData: TreeDataNode[] = [...skills]
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((skill) => ({
-      key: skill.name,
-      icon: selectedSkill?.name === skill.name ? <FolderOpenOutlined /> : <FolderOutlined />,
-      isLeaf: true,
-      title: (
-        <div className="skills-explorer-item">
-          <div className="skills-explorer-item-main">
-            <span className="skills-explorer-item-name">{skill.name}</span>
-            <span className="skills-explorer-item-meta">{skill.files.length}</span>
-          </div>
-          <Popconfirm
-            title={`确认删除 "${skill.name}"?`}
-            onConfirm={(e) => {
-              e?.stopPropagation();
-              handleDelete(skill.name);
-            }}
-            onCancel={(e) => e?.stopPropagation()}
-          >
-            <button
-              type="button"
-              className="skills-explorer-delete"
-              onClick={(e) => e.stopPropagation()}
-              aria-label={`删除 ${skill.name}`}
-            >
-              <DeleteOutlined />
-            </button>
-          </Popconfirm>
-        </div>
-      ),
-    }));
 
   return (
-    <div className="page-container skills-page">
-      <div className="page-header skills-header">
-        <div className="skills-header-copy">
-          <h1 className="page-title">技能管理</h1>
-          <Text type="secondary" className="skills-header-subtitle">
-            用更接近编辑器的方式维护 Skill 目录、脚本和说明文档。
-          </Text>
-          <Text className="skills-header-status">
-            {skillCount} 个 skill · {selectedSkill ? `${selectedSkill.name} / ${fileCount} files` : '未选择技能'}
-          </Text>
+    <div className="page-container skills-page skills-editor-page">
+      <div className="skills-ide-shell">
+        <div className="skills-activity-bar">
+          <div className="skills-activity-logo">S</div>
+          <div className="skills-activity-item is-active">
+            <FolderOutlined />
+          </div>
         </div>
-        <Button
-          className="skills-create-button"
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setCreateOpen(true)}
-          size="large"
-        >
-          新建技能
-        </Button>
-      </div>
 
-      <div className="skills-workspace">
-        <Card
-          className="skills-panel skills-skill-list"
-          bodyStyle={{ padding: '8px 6px' }}
-          title={
-            <div className="skills-panel-heading">
-              <Text strong>资源管理器</Text>
-              <Text type="secondary">Skills</Text>
+        <aside className="skills-sidebar">
+          <div className="skills-sidebar-header">
+            <div>
+              <div className="skills-sidebar-title">EXPLORER</div>
+              <div className="skills-sidebar-subtitle">skills</div>
             </div>
-          }
-        >
-          {loadingList ? (
-            <div className="skills-empty-panel">
-              <Text type="secondary">技能列表加载中...</Text>
-            </div>
-          ) : (
-            <Tree
-              className="skills-explorer-tree"
-              showIcon
-              blockNode
-              treeData={skillTreeData}
-              selectedKeys={selectedSkill ? [selectedSkill.name] : []}
-              onSelect={(keys) => {
-                const key = keys[0] as string;
-                const skill = skills.find((item) => item.name === key);
-                if (skill) {
-                  selectSkill(skill);
-                }
-              }}
+            <Button
+              type="text"
+              icon={<PlusOutlined />}
+              onClick={() => setCreateOpen(true)}
+              size="small"
             />
-          )}
-        </Card>
+          </div>
 
-        <Card
-          className="skills-panel skills-file-tree"
-          bodyStyle={{ padding: '8px 4px' }}
-          title={
-            <div className="skills-panel-heading">
-              <Text strong>{selectedSkill?.name || '文件目录'}</Text>
-              <Text type="secondary">{selectedSkill ? 'Files' : '等待选择'}</Text>
+          <div className="skills-sidebar-section">
+            <div className="skills-sidebar-section-title">
+              <span>OPEN EDITORS</span>
+              <Text type="secondary">{openTabs.length}</Text>
             </div>
-          }
-        >
-          {selectedSkill ? (
-            <Tree
-              className="skills-tree"
-              showIcon
-              defaultExpandAll
-              treeData={treeData}
-              selectedKeys={selectedFile ? [selectedFile] : []}
-              onSelect={(keys) => {
-                const key = keys[0] as string;
-                if (key && selectedSkill) {
-                  loadFile(selectedSkill.name, key);
-                }
-              }}
-              style={{ fontSize: 13 }}
-            />
-          ) : (
-            <div className="skills-empty-panel">
-              <Text type="secondary">左侧选择一个技能，目录树会出现在这里。</Text>
-            </div>
-          )}
-        </Card>
 
-        <Card
-          className="skills-panel skills-editor-shell"
-          bodyStyle={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}
-          title={
-            selectedFile ? (
-              <div className="skills-editor-title">
-                <Text code className="skills-file-badge">{selectedFile}</Text>
-                {isDirty && <Tag color="orange">未保存</Tag>}
+            {openTabs.length > 0 ? (
+              <div className="skills-open-editors">
+                {openTabs.map((tab) => {
+                  const isActive = tab.key === activeTabKey;
+                  const isActiveDirty = isActive && isDirty;
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      className={`skills-open-editor${isActive ? ' is-active' : ''}`}
+                      onClick={() => handleTabSelect(tab)}
+                    >
+                      <span className="skills-open-editor-icon">{fileIcon(tab.filePath)}</span>
+                      <span className="skills-open-editor-label">{fileBasename(tab.filePath)}</span>
+                      <span className="skills-open-editor-skill">{tab.skillName}</span>
+                      <span
+                        className={`skills-open-editor-close${isActiveDirty ? ' is-dirty' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void closeTab(tab.key);
+                        }}
+                      >
+                        {isActiveDirty ? '●' : <CloseOutlined />}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             ) : (
-              <Text type="secondary">选择文件开始编辑</Text>
-            )
-          }
-          extra={
-            selectedSkill && selectedFile ? (
-              <div className="skills-editor-actions">
-                <Text type="secondary" className="skills-language-indicator">
-                  {languageForFile(selectedFile)}
-                </Text>
-                <Button
-                  type="primary"
-                  icon={<SaveOutlined />}
-                  onClick={handleSave}
-                  loading={saving}
-                  disabled={!isDirty}
-                >
-                  保存
-                </Button>
+              <div className="skills-open-editors-empty">No open editors</div>
+            )}
+          </div>
+
+          <div className="skills-sidebar-section">
+            <div className="skills-sidebar-section-title">
+              <span>SKILLS</span>
+              <Text type="secondary">{skills.length}</Text>
+            </div>
+
+            {loadingList ? (
+              <div className="skills-empty-panel">
+                <Text type="secondary">技能列表加载中...</Text>
               </div>
-            ) : null
-          }
-        >
-          {selectedSkill && selectedFile ? (
-            <div className="skills-editor-body">
-              {loadingFile ? (
+            ) : (
+              <Tree
+                className="skills-explorer-tree"
+                showIcon
+                blockNode
+                expandedKeys={expandedKeys}
+                onExpand={(keys) => setExpandedKeys(keys.map(String))}
+                treeData={explorerTree}
+                selectedKeys={
+                  activeTabKey
+                    ? [activeTabKey]
+                    : selectedSkill
+                      ? [`skill::${selectedSkill.name}`]
+                      : []
+                }
+                onSelect={handleExplorerSelect}
+                titleRender={(node) => {
+                  const nodeKey = String(node.key);
+                  if (!nodeKey.startsWith('skill::')) return node.title;
+
+                  const skillName = nodeKey.slice('skill::'.length);
+                  const skill = skills.find((item) => item.name === skillName);
+                  if (!skill) return node.title;
+
+                  return (
+                    <div className="skills-explorer-item">
+                      <span className="skills-explorer-item-name">{skill.name}</span>
+                      <div className="skills-explorer-item-tail">
+                        <span className="skills-explorer-item-meta">{skill.files.length}</span>
+                        <Popconfirm
+                          title={`确认删除 "${skill.name}"?`}
+                          onConfirm={(e) => {
+                            e?.stopPropagation();
+                            handleDelete(skill.name);
+                          }}
+                          onCancel={(e) => e?.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="skills-explorer-delete"
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label={`删除 ${skill.name}`}
+                          >
+                            <DeleteOutlined />
+                          </button>
+                        </Popconfirm>
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+            )}
+          </div>
+        </aside>
+
+        <section className="skills-editor-panel">
+          <div className="skills-editor-topbar">
+            <div className="skills-editor-breadcrumb">
+              <span>WORKSPACE</span>
+              {selectedSkill ? (
+                <>
+                  <span>/</span>
+                  <span>{selectedSkill.name}</span>
+                </>
+              ) : null}
+              {selectedFile ? (
+                <>
+                  <span>/</span>
+                  <span>{selectedFile}</span>
+                </>
+              ) : null}
+            </div>
+            <div className="skills-editor-toolbar">
+              <Text type="secondary" className="skills-language-indicator">
+                {selectedFile ? languageForFile(selectedFile) : 'workspace'}
+              </Text>
+              <Button
+                type="text"
+                size="small"
+                icon={<SaveOutlined />}
+                onClick={handleSave}
+                loading={saving}
+                disabled={!selectedFile || !isDirty}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+
+          <div className="skills-tabs-bar">
+            {openTabs.length > 0 ? (
+              openTabs.map((tab) => {
+                const isActive = tab.key === activeTabKey;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={`skills-tab${isActive ? ' is-active' : ''}`}
+                    onClick={() => handleTabSelect(tab)}
+                  >
+                    <span className="skills-tab-icon">{fileIcon(tab.filePath)}</span>
+                    <span className="skills-tab-label">{fileBasename(tab.filePath)}</span>
+                    <span
+                      className="skills-tab-close"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void closeTab(tab.key);
+                      }}
+                    >
+                      <CloseOutlined />
+                    </span>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="skills-tab-placeholder">打开一个 skill 文件开始编辑</div>
+            )}
+          </div>
+
+          <div className="skills-editor-content">
+            {selectedSkill && selectedFile ? (
+              loadingFile ? (
                 <div className="skills-empty-editor">
                   <Text type="secondary">加载中...</Text>
                 </div>
               ) : (
                 <Editor
                   height="100%"
+                  theme="vs-dark"
                   language={languageForFile(selectedFile)}
                   value={fileContent}
                   onChange={(val) => setFileContent(val ?? '')}
@@ -359,25 +482,31 @@ export default function Skills() {
                     minimap: { enabled: false },
                     wordWrap: 'on',
                     fontSize: 14,
+                    fontFamily: 'JetBrains Mono, Menlo, Monaco, Courier New, monospace',
                     lineNumbers: 'on',
+                    lineNumbersMinChars: 3,
                     scrollBeyondLastLine: false,
                     automaticLayout: true,
+                    padding: { top: 16 },
                   }}
                 />
-              )}
-            </div>
-          ) : (
-            <div className="skills-empty-editor">
-              <div className="skills-empty-editor-card">
-                <Text strong className="skills-empty-editor-title">选择文件开始编辑</Text>
-                <Text type="secondary">先在左侧选技能，再从目录树中点一个文件。</Text>
+              )
+            ) : (
+              <div className="skills-empty-editor">
+                <Text type="secondary">Select a file from the explorer to start editing.</Text>
               </div>
-            </div>
-          )}
-        </Card>
+            )}
+          </div>
+
+          <div className="skills-status-bar">
+            <span>{selectedSkill ? `skill ${selectedSkill.name}` : 'workspace'}</span>
+            <span>{selectedFile ? fileBasename(selectedFile) : 'no file'}</span>
+            <span>{selectedFile ? languageForFile(selectedFile) : 'plaintext'}</span>
+            <span>{isDirty ? 'unsaved' : 'saved'}</span>
+          </div>
+        </section>
       </div>
 
-      {/* Create modal */}
       <Modal
         title="新建技能"
         open={createOpen}
