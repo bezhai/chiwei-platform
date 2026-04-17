@@ -700,11 +700,11 @@ export default function Messages() {
           <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>实时查看系统中的消息流动</Text>
         </div>
         <Popover content={columnSettingsContent} title="列设置" trigger="click" placement="bottomRight">
-          <Button icon={<SettingOutlined />}>列设置</Button>
+          <Button icon={<SettingOutlined />} style={{ borderRadius: 8, boxShadow: 'none' }}>列设置</Button>
         </Popover>
       </div>
 
-      <div className="filter-card">
+      <div style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid #e2e8f0' }}>
         <Row gutter={[12, 12]}>
           <Col xs={12} sm={8} md={6} lg={4}>
             <Select
@@ -813,10 +813,10 @@ export default function Messages() {
           {/* Buttons aligned to the right, filling the remaining space */}
           <Col xs={24} sm={24} md={6} lg={14} style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <Space>
-              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)}>
+              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)} style={{ boxShadow: 'none', borderRadius: 8 }}>
                 查询
               </Button>
-              <Button icon={<ReloadOutlined />} onClick={handleReset}>
+              <Button icon={<ReloadOutlined />} onClick={handleReset} style={{ borderRadius: 8 }}>
                 重置
               </Button>
             </Space>
@@ -824,7 +824,7 @@ export default function Messages() {
         </Row>
       </div>
 
-      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ padding: 0, overflow: 'hidden' }}>
         <Table
           rowKey="message_id"
           columns={columns}
@@ -839,10 +839,11 @@ export default function Messages() {
             onChange: (nextPage, nextPageSize) => {
               fetchData(nextPage, nextPageSize);
             },
-            style: { padding: '16px 24px', margin: 0, borderTop: '1px solid #f1f5f9' }
+            style: { padding: '16px 0', margin: 0, borderTop: '1px solid #f1f5f9' }
           }}
           scroll={{ x: 1200 }}
           size="middle"
+          className="custom-table"
         />
       </div>
     </div>
