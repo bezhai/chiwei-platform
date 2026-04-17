@@ -82,3 +82,13 @@ async def vectorize_abstract(abstract_id: str) -> bool:
     if not ok:
         raise RuntimeError(f"Qdrant upsert failed for abstract {abstract_id}")
     return True
+
+
+async def enqueue_fragment_vectorize(fragment_id: str) -> None:
+    from app.infra.rabbitmq import MEMORY_VECTORIZE, mq
+    await mq.publish(MEMORY_VECTORIZE, {"kind": "fragment", "id": fragment_id})
+
+
+async def enqueue_abstract_vectorize(abstract_id: str) -> None:
+    from app.infra.rabbitmq import MEMORY_VECTORIZE, mq
+    await mq.publish(MEMORY_VECTORIZE, {"kind": "abstract", "id": abstract_id})
