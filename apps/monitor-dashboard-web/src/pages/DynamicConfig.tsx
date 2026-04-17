@@ -324,7 +324,7 @@ export default function DynamicConfig() {
           pagination={false}
           size="middle"
           rowKey="key"
-          className="dynamic-config-table"
+          className="custom-table"
           scroll={{ x: 980 }}
         />
       </div>

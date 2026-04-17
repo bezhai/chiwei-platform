@@ -291,18 +291,20 @@ a {
 /* General Page Layout & Components */
 .page-container {
   width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
   animation: page-enter 0.24s ease-out;
 }
 
 .page-header {
-  margin-bottom: 32px;
+  margin-bottom: 24px;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-end;
 }
 
 .page-title {
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 700;
   color: #0f172a;
   margin: 0;
@@ -313,7 +315,7 @@ a {
 .filter-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 16px;
+  border-radius: 12px;
   padding: 24px;
   margin-bottom: 24px;
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
@@ -322,9 +324,10 @@ a {
 .content-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 16px;
+  border-radius: 12px;
   padding: 24px;
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  overflow: hidden;
 }
 
 /* Dynamic Config */
@@ -530,17 +533,27 @@ a {
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
 }
 
-.dynamic-config-table .ant-table {
+.hover-card {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.hover-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04) !important;
+  border-color: #cbd5e1 !important;
+}
+
+/* Custom Table styling (Shared) */
+.custom-table .ant-table {
   background: transparent;
 }
 
-.dynamic-config-table .ant-table-container::before,
-.dynamic-config-table .ant-table-container::after,
-.dynamic-config-table .ant-table-cell::before {
+.custom-table .ant-table-container::before,
+.custom-table .ant-table-container::after,
+.custom-table .ant-table-cell::before {
   display: none !important;
 }
 
-.dynamic-config-table .ant-table-thead > tr > th {
+.custom-table .ant-table-thead > tr > th {
   color: #64748b;
   font-size: 12px;
   font-weight: 600;
@@ -549,14 +562,44 @@ a {
   padding: 12px 24px;
 }
 
-.dynamic-config-table .ant-table-tbody > tr > td {
+.custom-table .ant-table-tbody > tr > td {
   padding: 16px 24px;
   vertical-align: top;
   border-bottom: 1px solid #f1f5f9;
 }
 
-.dynamic-config-table .ant-table-tbody > tr:hover > td {
+.custom-table .ant-table-tbody > tr:hover > td {
   background: #f8fafc !important;
+}
+
+/* Route Tag Styling */
+.custom-route-tag {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  padding: 4px 10px;
+  background: #f1f5f9;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
+  color: #334155;
+  font-family: var(--font-mono);
+}
+
+.custom-route-tag .route-key {
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.custom-route-tag .route-arrow {
+  margin: 0 8px;
+  color: #94a3b8;
+  font-family: var(--font-sans);
+}
+
+.custom-route-tag .route-lane {
+  color: #2563eb;
+  font-weight: 600;
 }
 
 .dynamic-config-source-tag {

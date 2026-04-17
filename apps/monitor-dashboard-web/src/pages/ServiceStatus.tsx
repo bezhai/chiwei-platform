@@ -236,7 +236,7 @@ export default function ServiceStatus() {
       <div className="page-header">
         <div>
           <h1 className="page-title">服务状态</h1>
-          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>实时监控所有服务的部署状态与资源情况</Text>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block', fontSize: 14 }}>实时监控所有服务的部署状态与资源情况</Text>
         </div>
         <Tooltip title="每 30 秒自动刷新">
           <div 
@@ -263,33 +263,33 @@ export default function ServiceStatus() {
 
       <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
             <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>总服务数</Text>}
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>总服务数</Text>}
               value={apps.length}
               prefix={<CloudServerOutlined style={{ color: '#64748b' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
             <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>运行中</Text>}
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>运行中</Text>}
               value={runningCount}
               prefix={<CheckCircleOutlined style={{ color: '#10b981' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
-              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 500, marginLeft: 8 }}>/ {failedCount} 异常</Text> : undefined}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
+              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 600, marginLeft: 12 }}>/ {failedCount} 异常</Text> : undefined}
             />
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
+          <Card bordered={false} className="content-card" bodyStyle={{ padding: '24px' }}>
             <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>活跃泳道</Text>}
+              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 600 }}>活跃泳道</Text>}
               value={lanes.length}
               prefix={<DeploymentUnitOutlined style={{ color: '#8b5cf6' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
+              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 12, fontFamily: 'var(--font-mono)' }}
             />
           </Card>
         </Col>
@@ -299,10 +299,12 @@ export default function ServiceStatus() {
         <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
             <Text strong style={{ fontSize: 14, color: '#334155' }}>路由绑定</Text>
-            <Space wrap size={[8, 6]}>
+            <Space wrap size={[8, 8]}>
               {laneBindings.map((b) => (
-                <Tag key={`${b.route_type}-${b.route_key}`} bordered={false} color="blue" style={{ margin: 0, fontWeight: 500 }}>
-                  {b.route_type}:{b.route_key} → {b.lane_name}
+                <Tag key={`${b.route_type}-${b.route_key}`} bordered={false} className="custom-route-tag">
+                  <span className="route-key">{b.route_type}:{b.route_key}</span>
+                  <span className="route-arrow">→</span>
+                  <span className="route-lane">{b.lane_name}</span>
                 </Tag>
               ))}
             </Space>
@@ -317,6 +319,7 @@ export default function ServiceStatus() {
           loading={loading}
           pagination={false}
           size="middle"
+          className="custom-table"
           expandable={{
             expandedRowKeys: expandedRows,
             onExpand: (expanded, record) => {
