@@ -1517,8 +1517,8 @@ a {
 .flat-filters .ant-input,
 .flat-filters .ant-picker {
   border-radius: 8px !important;
-  background-color: #f8fafc !important;
-  border-color: #e2e8f0 !important;
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
   box-shadow: none !important;
   transition: all 0.2s;
 }
@@ -1526,8 +1526,7 @@ a {
 .flat-filters .ant-select-selector:hover,
 .flat-filters .ant-input:hover,
 .flat-filters .ant-picker:hover {
-  background-color: #ffffff !important;
-  border-color: #cbd5e1 !important;
+  border-color: #94a3b8 !important;
 }
 
 .flat-filters .ant-select-focused .ant-select-selector,
