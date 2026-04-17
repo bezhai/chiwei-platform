@@ -4,7 +4,6 @@ import {
   Card,
   Form,
   Input,
-  List,
   Modal,
   Popconfirm,
   Tag,
@@ -20,6 +19,7 @@ import {
   PythonOutlined,
   FileOutlined,
   FolderOutlined,
+  FolderOpenOutlined,
 } from '@ant-design/icons';
 import type { TreeDataNode } from 'antd';
 import Editor from '@monaco-editor/react';
@@ -190,6 +190,38 @@ export default function Skills() {
   const treeData = selectedSkill ? buildTreeData(selectedSkill.files) : [];
   const skillCount = skills.length;
   const fileCount = selectedSkill?.files.length || 0;
+  const skillTreeData: TreeDataNode[] = [...skills]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((skill) => ({
+      key: skill.name,
+      icon: selectedSkill?.name === skill.name ? <FolderOpenOutlined /> : <FolderOutlined />,
+      isLeaf: true,
+      title: (
+        <div className="skills-explorer-item">
+          <div className="skills-explorer-item-main">
+            <span className="skills-explorer-item-name">{skill.name}</span>
+            <span className="skills-explorer-item-meta">{skill.files.length}</span>
+          </div>
+          <Popconfirm
+            title={`确认删除 "${skill.name}"?`}
+            onConfirm={(e) => {
+              e?.stopPropagation();
+              handleDelete(skill.name);
+            }}
+            onCancel={(e) => e?.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="skills-explorer-delete"
+              onClick={(e) => e.stopPropagation()}
+              aria-label={`删除 ${skill.name}`}
+            >
+              <DeleteOutlined />
+            </button>
+          </Popconfirm>
+        </div>
+      ),
+    }));
 
   return (
     <div className="page-container skills-page">
@@ -197,22 +229,11 @@ export default function Skills() {
         <div className="skills-header-copy">
           <h1 className="page-title">技能管理</h1>
           <Text type="secondary" className="skills-header-subtitle">
-            在一个工作台里维护 Skill 定义、脚本文件和说明文档。
+            用更接近编辑器的方式维护 Skill 目录、脚本和说明文档。
           </Text>
-          <div className="skills-header-meta">
-            <div className="skills-meta-pill">
-              <span className="skills-meta-label">Skills</span>
-              <span className="skills-meta-value">{skillCount}</span>
-            </div>
-            <div className="skills-meta-pill">
-              <span className="skills-meta-label">当前技能</span>
-              <span className="skills-meta-value">{selectedSkill?.name || '未选择'}</span>
-            </div>
-            <div className="skills-meta-pill">
-              <span className="skills-meta-label">文件数</span>
-              <span className="skills-meta-value">{fileCount}</span>
-            </div>
-          </div>
+          <Text className="skills-header-status">
+            {skillCount} 个 skill · {selectedSkill ? `${selectedSkill.name} / ${fileCount} files` : '未选择技能'}
+          </Text>
         </div>
         <Button
           className="skills-create-button"
@@ -228,54 +249,34 @@ export default function Skills() {
       <div className="skills-workspace">
         <Card
           className="skills-panel skills-skill-list"
-          bodyStyle={{ padding: 0 }}
+          bodyStyle={{ padding: '8px 6px' }}
           title={
             <div className="skills-panel-heading">
-              <Text strong>技能列表</Text>
-              <Text type="secondary">{skillCount} 个项目</Text>
+              <Text strong>资源管理器</Text>
+              <Text type="secondary">Skills</Text>
             </div>
           }
         >
-          <List
-            className="skills-list"
-            loading={loadingList}
-            dataSource={skills}
-            locale={{ emptyText: '还没有技能，先新建一个。' }}
-            renderItem={(skill) => (
-              <List.Item
-                className={`skills-list-item${selectedSkill?.name === skill.name ? ' is-active' : ''}`}
-                onClick={() => selectSkill(skill)}
-                actions={[
-                  <Popconfirm
-                    key="delete"
-                    title={`确认删除 "${skill.name}"?`}
-                    onConfirm={(e) => { e?.stopPropagation(); handleDelete(skill.name); }}
-                    onCancel={(e) => e?.stopPropagation()}
-                  >
-                    <Button
-                      type="text" danger size="small"
-                      icon={<DeleteOutlined />}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </Popconfirm>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <div className="skills-item-title">
-                      <Text strong>{skill.name}</Text>
-                      <Tag bordered={false}>{skill.files.length} 文件</Tag>
-                    </div>
-                  }
-                  description={
-                    <Text type="secondary" className="skills-item-description" ellipsis={{ tooltip: skill.description || '暂无描述' }}>
-                      {skill.description || '暂无描述'}
-                    </Text>
-                  }
-                />
-              </List.Item>
-            )}
-          />
+          {loadingList ? (
+            <div className="skills-empty-panel">
+              <Text type="secondary">技能列表加载中...</Text>
+            </div>
+          ) : (
+            <Tree
+              className="skills-explorer-tree"
+              showIcon
+              blockNode
+              treeData={skillTreeData}
+              selectedKeys={selectedSkill ? [selectedSkill.name] : []}
+              onSelect={(keys) => {
+                const key = keys[0] as string;
+                const skill = skills.find((item) => item.name === key);
+                if (skill) {
+                  selectSkill(skill);
+                }
+              }}
+            />
+          )}
         </Card>
 
         <Card
@@ -284,7 +285,7 @@ export default function Skills() {
           title={
             <div className="skills-panel-heading">
               <Text strong>{selectedSkill?.name || '文件目录'}</Text>
-              <Text type="secondary">{selectedSkill ? `${fileCount} 个文件` : '选择技能后显示'}</Text>
+              <Text type="secondary">{selectedSkill ? 'Files' : '等待选择'}</Text>
             </div>
           }
         >
@@ -325,15 +326,20 @@ export default function Skills() {
           }
           extra={
             selectedSkill && selectedFile ? (
-              <Button
-                type="primary"
-                icon={<SaveOutlined />}
-                onClick={handleSave}
-                loading={saving}
-                disabled={!isDirty}
-              >
-                保存
-              </Button>
+              <div className="skills-editor-actions">
+                <Text type="secondary" className="skills-language-indicator">
+                  {languageForFile(selectedFile)}
+                </Text>
+                <Button
+                  type="primary"
+                  icon={<SaveOutlined />}
+                  onClick={handleSave}
+                  loading={saving}
+                  disabled={!isDirty}
+                >
+                  保存
+                </Button>
+              </div>
             ) : null
           }
         >
