@@ -9,6 +9,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -19,8 +20,6 @@ import {
   DeleteOutlined,
   UndoOutlined,
   SearchOutlined,
-  BranchesOutlined,
-  ControlOutlined,
 } from '@ant-design/icons';
 import { api } from '../api/client';
 
@@ -168,35 +167,51 @@ export default function DynamicConfig() {
       dataIndex: 'lane',
       width: 120,
       render: (lane: string) => (
-        <Tag color={lane === selectedLane && lane !== 'prod' ? 'blue' : 'default'}>
+        <Tag className={`dynamic-config-source-tag${lane === selectedLane && lane !== 'prod' ? ' is-lane' : ''}`} bordered={false}>
           {lane === selectedLane && lane !== 'prod' ? '本泳道' : 'prod'}
         </Tag>
       ),
     },
     {
       title: '操作',
-      width: 160,
+      width: 110,
       render: (_: unknown, record: { key: string; value: string; lane: string }) => (
         <Space size={4}>
-          <Button
-            type="text"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => openEdit(record.key, record.value)}
-          >
-            编辑
-          </Button>
+          <Tooltip title="编辑">
+            <Button
+              type="text"
+              size="small"
+              shape="circle"
+              className="dynamic-config-icon-button"
+              icon={<EditOutlined />}
+              onClick={() => openEdit(record.key, record.value)}
+            />
+          </Tooltip>
           {selectedLane !== 'prod' && record.lane === selectedLane ? (
             <Popconfirm title="恢复到 prod 值？" onConfirm={() => handleDelete(record.key)}>
-              <Button type="text" size="small" icon={<UndoOutlined />} danger>
-                恢复
-              </Button>
+              <Tooltip title="恢复到 prod">
+                <Button
+                  type="text"
+                  size="small"
+                  shape="circle"
+                  className="dynamic-config-icon-button"
+                  icon={<UndoOutlined />}
+                  danger
+                />
+              </Tooltip>
             </Popconfirm>
           ) : selectedLane === 'prod' ? (
             <Popconfirm title="删除此配置？" onConfirm={() => handleDelete(record.key)}>
-              <Button type="text" size="small" icon={<DeleteOutlined />} danger>
-                删除
-              </Button>
+              <Tooltip title="删除">
+                <Button
+                  type="text"
+                  size="small"
+                  shape="circle"
+                  className="dynamic-config-icon-button"
+                  icon={<DeleteOutlined />}
+                  danger
+                />
+              </Tooltip>
             </Popconfirm>
           ) : null}
         </Space>
@@ -206,76 +221,61 @@ export default function DynamicConfig() {
 
   return (
     <div className="page-container dynamic-config-page">
-      <div className="dynamic-config-hero">
-        <div className="dynamic-config-hero-copy">
-          <div className="dynamic-config-eyebrow">DYNAMIC CONFIG</div>
-          <h1 className="dynamic-config-title">按泳道管理运行时配置</h1>
-          <Text className="dynamic-config-subtitle">
-            当前视图展示的是 {selectedLane} 的最终生效配置。非 prod 泳道只覆盖必要项，其余键自动回落到 prod。
-          </Text>
+      <div className="dynamic-config-header">
+        <span className="dynamic-config-eyebrow">Dynamic Config</span>
+        <h1 className="dynamic-config-title">按泳道管理运行时配置</h1>
+        <Text className="dynamic-config-subtitle">
+          当前视图展示 {selectedLane} 的最终生效配置。非 prod 泳道只覆盖必要项，其余键自动回落到 prod。
+        </Text>
+      </div>
+
+      <div className="dynamic-config-summary-strip">
+        <div className="dynamic-config-summary-item">
+          <div className="dynamic-config-summary-label">生效键数</div>
+          <div className="dynamic-config-summary-value">{dataSource.length}</div>
         </div>
-        <div className="dynamic-config-hero-actions">
-          <div className="dynamic-config-lane-picker">
-            <span className="dynamic-config-lane-label">泳道</span>
-            <Select
-              value={selectedLane}
-              onChange={setSelectedLane}
-              className="dynamic-config-select"
-              options={lanes.map((l) => ({ label: l, value: l }))}
-            />
-          </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} size="large">
-            新增配置
-          </Button>
+        <div className="dynamic-config-summary-divider" />
+        <div className="dynamic-config-summary-item">
+          <div className="dynamic-config-summary-label">本泳道覆盖</div>
+          <div className="dynamic-config-summary-value">{overrideCount}</div>
+        </div>
+        <div className="dynamic-config-summary-divider" />
+        <div className="dynamic-config-summary-item">
+          <div className="dynamic-config-summary-label">继承 prod</div>
+          <div className="dynamic-config-summary-value">{inheritedCount}</div>
         </div>
       </div>
 
-      <div className="dynamic-config-summary">
-        <div className="dynamic-config-stat">
-          <div className="dynamic-config-stat-icon">
-            <ControlOutlined />
-          </div>
-          <div>
-            <div className="dynamic-config-stat-label">生效键数</div>
-            <div className="dynamic-config-stat-value">{dataSource.length}</div>
-          </div>
-        </div>
-        <div className="dynamic-config-stat">
-          <div className="dynamic-config-stat-icon">
-            <BranchesOutlined />
-          </div>
-          <div>
-            <div className="dynamic-config-stat-label">本泳道覆盖</div>
-            <div className="dynamic-config-stat-value">{overrideCount}</div>
-          </div>
-        </div>
-        <div className="dynamic-config-stat">
-          <div className="dynamic-config-stat-icon">
-            <UndoOutlined />
-          </div>
-          <div>
-            <div className="dynamic-config-stat-label">继承 prod</div>
-            <div className="dynamic-config-stat-value">{inheritedCount}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="dynamic-config-table-shell">
-        <div className="dynamic-config-table-toolbar">
-          <div className="dynamic-config-table-heading">
-            <div className="dynamic-config-table-title">Resolved Config</div>
-            <div className="dynamic-config-table-meta">
+      <div className="dynamic-config-workbench">
+        <div className="dynamic-config-toolbar">
+          <div className="dynamic-config-toolbar-context">
+            <div className="dynamic-config-toolbar-title">Resolved Config</div>
+            <div className="dynamic-config-toolbar-meta">
               {selectedLane === 'prod' ? '生产基线配置' : `${selectedLane} 泳道解析结果`}
             </div>
           </div>
-          <Input
-            allowClear
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            prefix={<SearchOutlined />}
-            placeholder="搜索 key 或 value"
-            className="dynamic-config-search"
-          />
+          <div className="dynamic-config-toolbar-actions">
+            <div className="dynamic-config-inline-field">
+              <span className="dynamic-config-inline-label">泳道</span>
+              <Select
+                value={selectedLane}
+                onChange={setSelectedLane}
+                className="dynamic-config-select"
+                options={lanes.map((l) => ({ label: l, value: l }))}
+              />
+            </div>
+            <Input
+              allowClear
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              prefix={<SearchOutlined />}
+              placeholder="搜索 key 或 value"
+              className="dynamic-config-search"
+            />
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新增配置
+            </Button>
+          </div>
         </div>
 
         <Table

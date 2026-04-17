@@ -143,6 +143,7 @@ export default function App() {
 
   const navigationMenu = (
     <Menu
+      className="app-nav-menu"
       mode="inline"
       selectedKeys={[currentPath]}
       // @ts-ignore
