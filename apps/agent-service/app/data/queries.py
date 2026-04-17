@@ -22,10 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import (
+    AbstractMemory,
     AkaoSchedule,
     BotPersona,
     ConversationMessage,
     ExperienceFragment,
+    Fragment,
     GlimpseState,
     LarkBaseChatInfo,
     LarkGroupChatInfo,
@@ -902,3 +904,24 @@ async def find_group_members(
 
     result = await session.execute(stmt)
     return list(result.all())
+
+
+# --- Memory v4 — fragment / abstract_memory lookup ---
+
+
+async def get_fragment_by_id(
+    session: AsyncSession, fragment_id: str
+) -> Fragment | None:
+    """Fetch a v4 Fragment by primary key."""
+    result = await session.execute(select(Fragment).where(Fragment.id == fragment_id))
+    return result.scalar_one_or_none()
+
+
+async def get_abstract_by_id(
+    session: AsyncSession, abstract_id: str
+) -> AbstractMemory | None:
+    """Fetch a v4 AbstractMemory by primary key."""
+    result = await session.execute(
+        select(AbstractMemory).where(AbstractMemory.id == abstract_id)
+    )
+    return result.scalar_one_or_none()
