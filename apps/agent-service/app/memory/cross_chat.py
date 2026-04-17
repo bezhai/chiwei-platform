@@ -109,17 +109,23 @@ def _format_interactions(
 
     parts: list[str] = []
 
-    for chat_id, msgs in grouped.items():
+    sorted_chats = sorted(
+        grouped.items(),
+        key=lambda item: item[1][-1].create_time if item[1] else 0,
+        reverse=True,
+    )
+
+    for chat_id, msgs in sorted_chats:
         if not msgs:
             continue
 
         chat_name = chat_names.get(
             chat_id, "私聊" if msgs[0].chat_type == "p2p" else chat_id[:8]
         )
-        first_ts = msgs[0].create_time
+        latest_ts = msgs[-1].create_time
 
-        lines: list[str] = [f"{chat_name} · {_relative_time(first_ts)}:"]
-        for msg in msgs:
+        lines: list[str] = [f"{chat_name} · {_relative_time(latest_ts)}:"]
+        for msg in reversed(msgs):
             text = _render_text(msg.content)
             if not text:
                 continue
