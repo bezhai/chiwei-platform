@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 
@@ -18,8 +16,6 @@ from app.data.queries import (
 from app.data.session import get_session
 from app.memory.conflict import detect_conflict
 from app.memory.vectorize_memory import enqueue_abstract_vectorize
-
-logger = logging.getLogger(__name__)
 
 
 async def _commit_abstract_impl(

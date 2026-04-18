@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 
 from langchain.tools import tool
@@ -14,8 +13,6 @@ from app.data.ids import new_id
 from app.data.queries import get_active_notes, insert_note
 from app.data.queries import resolve_note as resolve_note_query
 from app.data.session import get_session
-
-logger = logging.getLogger(__name__)
 
 
 async def _write_note_impl(
