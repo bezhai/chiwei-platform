@@ -666,29 +666,6 @@ async def find_fragments_in_date_range(
     return list(result.scalars().all())
 
 
-async def search_fragments_fts(
-    session: AsyncSession,
-    persona_id: str,
-    query: str,
-    *,
-    limit: int = 5,
-) -> list[ExperienceFragment]:
-    """Full-text search fragments using PostgreSQL simple dictionary."""
-    result = await session.execute(
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(
-            text(
-                "to_tsvector('simple', experience_fragment.content) "
-                "@@ plainto_tsquery('simple', :query)"
-            ).params(query=query)
-        )
-        .order_by(ExperienceFragment.created_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
 # --- Memory — glimpse ---
 
 

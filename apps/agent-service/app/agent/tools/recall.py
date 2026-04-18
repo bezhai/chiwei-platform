@@ -1,6 +1,7 @@
-"""Memory recall tool — natural language search over experience fragments.
+"""Memory recall tool — v4 Qdrant semantic + graph traversal.
 
-Runs PG full-text search on ``experience_fragment``.
+FTS path is deprecated and removed. See ``app/memory/recall_engine.py`` for the
+pure function; this file only wires it into the agent tool system.
 """
 
 from __future__ import annotations
@@ -12,42 +13,49 @@ from langgraph.runtime import get_runtime
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
+from app.memory.recall_engine import run_recall
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_LIMIT = 300
+DEFAULT_K_ABS = 5
+DEFAULT_K_FACTS_PER_ABS = 3
+
+
+async def _recall_impl(
+    *,
+    persona_id: str,
+    queries: list[str],
+    k_abs: int,
+    k_facts_per_abs: int,
+) -> dict:
+    result = await run_recall(
+        persona_id=persona_id,
+        queries=queries,
+        k_abs=k_abs,
+        k_facts_per_abs=k_facts_per_abs,
+    )
+    return {"abstracts": result.abstracts, "facts": result.facts}
 
 
 @tool
 @tool_error("想不起来了...")
-async def recall(what: str) -> str:
-    """想一想过去的事。
-    当你隐约记得什么但细节模糊了，把你模糊记得的写下来，想一想。
-    比如："上次聊新番是什么时候"、"A哥最近怎么了"、"那个好吃的店叫什么"
+async def recall(queries: list[str]) -> dict:
+    """回忆过去。传一个或多个关键词/描述，按语义在记忆里搜。
+
+    每个 query 都是一次独立搜索；批量传可以一次查多条线索。
+    返回你记得的抽象认识 + 每条认识下具体的事实支撑。
+
+    例子：
+      recall(queries=["浩南最近怎么了"])
+      recall(queries=["学习 Rust", "他答应过我什么"])
 
     Args:
-        what: 你想回忆的事（自然语言）
+        queries: 自然语言查询列表（批量）
     """
     context = get_runtime(AgentContext).context
-    persona_id = context.persona_id
-
-    from app.data.queries import search_fragments_fts
-    from app.data.session import get_session
-
-    async with get_session() as session:
-        fragments = await search_fragments_fts(session, persona_id, what, limit=5)
-
-    if not fragments:
-        return f"想不起来关于「{what}」的事了..."
-
-    lines: list[str] = []
-    for f in fragments:
-        date_str = f.created_at.strftime("%m月%d日") if f.created_at else "某天"
-        summary = f.content[:SUMMARY_LIMIT]
-        if len(f.content) > SUMMARY_LIMIT:
-            summary += "..."
-        grain_label = {"daily": "日记", "weekly": "回顾"}.get(f.grain, "")
-        prefix = f"({grain_label}) " if grain_label else ""
-        lines.append(f"--- {date_str} ---\n{prefix}{summary}")
-
-    return "\n\n".join(lines)
+    return await _recall_impl(
+        persona_id=context.persona_id,
+        queries=queries,
+        k_abs=DEFAULT_K_ABS,
+        k_facts_per_abs=DEFAULT_K_FACTS_PER_ABS,
+    )
