@@ -46,3 +46,43 @@ async def test_update_schedule_returns_success_even_if_enqueue_fails():
             )
     assert "revision_id" in out
     assert "error" not in out
+
+
+@pytest.mark.asyncio
+async def test_enqueue_state_sync_closes_pool_on_error():
+    """pool.close must run even if enqueue_job raises, to prevent connection leaks."""
+    from app.agent.tools import update_schedule as mod
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(side_effect=RuntimeError("redis down"))
+    fake_pool.close = AsyncMock()
+
+    with patch.object(mod, "enqueue_state_sync", wraps=mod.enqueue_state_sync):
+        with patch("arq.create_pool", new=AsyncMock(return_value=fake_pool)):
+            with patch("app.workers.arq_settings.WorkerSettings"):
+                with pytest.raises(RuntimeError):
+                    await mod.enqueue_state_sync(revision_id="sr_xxx")
+
+    fake_pool.close.assert_awaited_once_with(close_connection_pool=True)
+    fake_pool.enqueue_job.assert_awaited_once_with(
+        "sync_life_state_after_schedule", revision_id="sr_xxx"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_state_sync_closes_pool_on_success():
+    """pool.close must run after a successful enqueue."""
+    from app.agent.tools import update_schedule as mod
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock()
+    fake_pool.close = AsyncMock()
+
+    with patch("arq.create_pool", new=AsyncMock(return_value=fake_pool)):
+        with patch("app.workers.arq_settings.WorkerSettings"):
+            await mod.enqueue_state_sync(revision_id="sr_yyy")
+
+    fake_pool.enqueue_job.assert_awaited_once_with(
+        "sync_life_state_after_schedule", revision_id="sr_yyy"
+    )
+    fake_pool.close.assert_awaited_once_with(close_connection_pool=True)

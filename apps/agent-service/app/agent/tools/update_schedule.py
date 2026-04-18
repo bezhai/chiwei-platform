@@ -22,13 +22,24 @@ logger = logging.getLogger(__name__)
 
 
 async def enqueue_state_sync(*, revision_id: str) -> None:
-    """Enqueue arq job ``sync_life_state_after_schedule`` (consumer in Plan D)."""
+    """Enqueue arq job ``sync_life_state_after_schedule`` (consumer in Plan D).
+
+    Lazy-imports `arq` and `WorkerSettings` to avoid pulling the worker module's
+    cron-import chain into tool-load time. TODO(Plan D): when multiple tools
+    need to enqueue arq jobs, migrate to a shared pool in ``app/infra/arq_pool.py``
+    instead of creating/closing per call.
+    """
     from arq import create_pool
 
     from app.workers.arq_settings import WorkerSettings
 
     pool = await create_pool(WorkerSettings.redis_settings)
-    await pool.enqueue_job("sync_life_state_after_schedule", revision_id=revision_id)
+    try:
+        await pool.enqueue_job(
+            "sync_life_state_after_schedule", revision_id=revision_id
+        )
+    finally:
+        await pool.close(close_connection_pool=True)
 
 
 async def _update_schedule_impl(
@@ -49,8 +60,9 @@ async def _update_schedule_impl(
     try:
         await enqueue_state_sync(revision_id=rid)
     except Exception as e:
-        # Don't roll back the revision — it's already committed. State sync
-        # will be re-kicked on the next tick.
+        # Don't roll back the revision — it's already committed. The Plan D
+        # consumer will pick up unsynced revisions when it lands; until then
+        # the next update_schedule call will re-enqueue.
         logger.warning("enqueue_state_sync failed for %s: %s", rid, e)
 
     return {"revision_id": rid, "schedule": content}
