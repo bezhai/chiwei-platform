@@ -37,9 +37,8 @@ async def _write_note_impl(
             content=content,
             when_at=when_at,
         )
-
-    async with get_session() as s:
-        active = await get_active_notes(s, persona_id=persona_id)
+        await s.flush()
+        rows = await get_active_notes(s, persona_id=persona_id)
 
     return {
         "id": nid,
@@ -49,7 +48,7 @@ async def _write_note_impl(
                 "content": n.content,
                 "when_at": n.when_at.isoformat() if n.when_at else None,
             }
-            for n in active
+            for n in rows
         ],
     }
 
