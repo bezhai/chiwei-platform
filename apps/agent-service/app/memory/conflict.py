@@ -24,6 +24,7 @@ from app.memory.vectorize_memory import EMBEDDING_MODEL_ID
 logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
+MAX_ABSTRACTS_TO_COMPARE = 10
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -65,13 +66,18 @@ async def detect_conflict(
     """
     async with get_session() as s:
         existing = await get_abstracts_by_subject(
-            s, persona_id=persona_id, subject=subject, limit=10
+            s, persona_id=persona_id, subject=subject, limit=MAX_ABSTRACTS_TO_COMPARE
         )
     if not existing:
         return None
 
+    # NOTE: subject prefix matches vectorize_memory.vectorize_abstract's stored-vector
+    # format — keeps the embedding space consistent if conflict detection later reads
+    # cached vectors from Qdrant instead of re-embedding.
     try:
-        new_vec = await embed_dense(EMBEDDING_MODEL_ID, text=content)
+        new_vec = await embed_dense(
+            EMBEDDING_MODEL_ID, text=f"[{subject}] {content}"
+        )
     except Exception as e:
         logger.warning(
             "detect_conflict: embed new content failed persona=%s subject=%s err=%s",
@@ -81,11 +87,13 @@ async def detect_conflict(
         )
         return None
 
-    best_score = -1.0
+    best_score = 0.0
     best_abstract = None
     for a in existing:
         try:
-            old_vec = await embed_dense(EMBEDDING_MODEL_ID, text=a.content)
+            old_vec = await embed_dense(
+                EMBEDDING_MODEL_ID, text=f"[{a.subject}] {a.content}"
+            )
         except Exception as e:
             logger.warning(
                 "detect_conflict: embed existing abstract failed id=%s err=%s",

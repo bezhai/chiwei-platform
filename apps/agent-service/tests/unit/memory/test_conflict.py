@@ -43,3 +43,37 @@ async def test_detect_conflict_empty_subject_returns_none():
             content="first fact", similarity_threshold=0.7,
         )
     assert hint is None
+
+
+@pytest.mark.asyncio
+async def test_detect_conflict_returns_none_when_new_content_embed_fails():
+    existing = MagicMock(id="a_old", content="existing content", clarity="clear")
+    with patch("app.memory.conflict.get_abstracts_by_subject", new=AsyncMock(return_value=[existing])):
+        with patch("app.memory.conflict.embed_dense", new=AsyncMock(side_effect=RuntimeError("embed down"))):
+            hint = await detect_conflict(
+                persona_id="chiwei", subject="浩南",
+                content="new content", similarity_threshold=0.7,
+            )
+    assert hint is None
+
+
+@pytest.mark.asyncio
+async def test_detect_conflict_skips_existing_that_fail_embed():
+    bad = MagicMock(id="a_bad", content="will fail", clarity="clear")
+    good = MagicMock(id="a_good", content="will succeed", clarity="clear")
+    with patch("app.memory.conflict.get_abstracts_by_subject", new=AsyncMock(return_value=[bad, good])):
+        # call 1: new content → ok; call 2: bad abstract → raise; call 3: good abstract → ok with high sim
+        with patch(
+            "app.memory.conflict.embed_dense",
+            new=AsyncMock(side_effect=[
+                [1.0] + [0.0] * 1023,
+                RuntimeError("embed down for this one"),
+                [0.99] + [0.01] * 1023,
+            ]),
+        ):
+            hint = await detect_conflict(
+                persona_id="chiwei", subject="浩南",
+                content="new content", similarity_threshold=0.7,
+            )
+    assert hint is not None
+    assert hint["conflicting_abstract_id"] == "a_good"
