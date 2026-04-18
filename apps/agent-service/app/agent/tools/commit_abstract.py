@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import uuid
 
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
+from app.data.ids import new_id
 from app.data.queries import (
     get_fragment_by_id,
     insert_abstract_memory,
@@ -20,10 +20,6 @@ from app.memory.conflict import detect_conflict
 from app.memory.vectorize_memory import enqueue_abstract_vectorize
 
 logger = logging.getLogger(__name__)
-
-
-def _uid(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
 async def _commit_abstract_impl(
@@ -51,7 +47,7 @@ async def _commit_abstract_impl(
         persona_id=persona_id, subject=subject, content=content,
     )
 
-    aid = _uid("a")
+    aid = new_id("a")
     async with get_session() as s:
         await insert_abstract_memory(
             s, id=aid, persona_id=persona_id,
@@ -60,7 +56,7 @@ async def _commit_abstract_impl(
         )
         for fid in supported_by_fact_ids or []:
             await insert_memory_edge(
-                s, id=_uid("e"), persona_id=persona_id,
+                s, id=new_id("e"), persona_id=persona_id,
                 from_id=fid, from_type="fact",
                 to_id=aid, to_type="abstract",
                 edge_type="supports", created_by="chiwei",
