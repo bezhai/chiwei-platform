@@ -966,6 +966,29 @@ async def touch_fragment(session: AsyncSession, fragment_id: str) -> None:
     )
 
 
+async def get_fragments_by_ids(
+    session: AsyncSession, ids: list[str]
+) -> list[Fragment]:
+    """Batch fetch fragments by id list. Preserves input order is NOT guaranteed."""
+    if not ids:
+        return []
+    result = await session.execute(
+        select(Fragment).where(Fragment.id.in_(ids))
+    )
+    return list(result.scalars().all())
+
+
+async def touch_fragments_bulk(session: AsyncSession, ids: list[str]) -> None:
+    """Update last_touched_at=NOW() for many fragments at once."""
+    if not ids:
+        return
+    await session.execute(
+        update(Fragment)
+        .where(Fragment.id.in_(ids))
+        .values(last_touched_at=func.now())
+    )
+
+
 async def insert_abstract_memory(
     session: AsyncSession,
     *,
@@ -991,6 +1014,17 @@ async def touch_abstract(session: AsyncSession, abstract_id: str) -> None:
     await session.execute(
         update(AbstractMemory)
         .where(AbstractMemory.id == abstract_id)
+        .values(last_touched_at=func.now())
+    )
+
+
+async def touch_abstracts_bulk(session: AsyncSession, ids: list[str]) -> None:
+    """Update last_touched_at=NOW() for many abstracts at once."""
+    if not ids:
+        return
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id.in_(ids))
         .values(last_touched_at=func.now())
     )
 

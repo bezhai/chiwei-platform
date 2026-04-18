@@ -16,18 +16,20 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 from app.agent.embedding import embed_dense
 from app.data.queries import (
     get_abstract_by_id,
-    get_fragment_by_id,
+    get_fragments_by_ids,
     list_edges_to,
-    touch_abstract,
-    touch_fragment,
+    touch_abstracts_bulk,
+    touch_fragments_bulk,
 )
 from app.data.session import get_session
 from app.infra.qdrant import qdrant
-from app.memory.vectorize_memory import COLLECTION_ABSTRACT, COLLECTION_FRAGMENT
+from app.memory.vectorize_memory import (
+    COLLECTION_ABSTRACT,
+    COLLECTION_FRAGMENT,
+    EMBEDDING_MODEL_ID,
+)
 
 logger = logging.getLogger(__name__)
-
-EMBEDDING_MODEL_ID = "embedding-model"
 
 
 @dataclass
@@ -63,23 +65,11 @@ def _persona_filter(persona_id: str) -> Filter:
     )
 
 
-async def _search_abstracts(
-    *, persona_id: str, query_vec: list[float], k: int
+async def _vector_search(
+    *, collection: str, persona_id: str, query_vec: list[float], k: int
 ) -> list[str]:
     res = await qdrant.client.query_points(
-        collection_name=COLLECTION_ABSTRACT,
-        query=query_vec,
-        query_filter=_persona_filter(persona_id),
-        limit=k,
-    )
-    return [str(p.id) for p in res.points]
-
-
-async def _search_fragments(
-    *, persona_id: str, query_vec: list[float], k: int
-) -> list[str]:
-    res = await qdrant.client.query_points(
-        collection_name=COLLECTION_FRAGMENT,
+        collection_name=collection,
         query=query_vec,
         query_filter=_persona_filter(persona_id),
         limit=k,
@@ -113,87 +103,90 @@ async def run_recall(
     seen_abstract_ids: set[str] = set()
     seen_fragment_ids: set[str] = set()
 
-    for raw_query in queries:
-        query = raw_query.strip() if isinstance(raw_query, str) else ""
+    for query in queries:
+        query = query.strip()
         if not query:
             continue
 
         query_vec = await embed_dense(EMBEDDING_MODEL_ID, text=query)
 
-        abstract_ids = await _search_abstracts(
-            persona_id=persona_id, query_vec=query_vec, k=k_abs
+        abstract_ids = await _vector_search(
+            collection=COLLECTION_ABSTRACT,
+            persona_id=persona_id,
+            query_vec=query_vec,
+            k=k_abs,
         )
 
-        for aid in abstract_ids:
-            if aid in seen_abstract_ids:
-                continue
+        async with get_session() as s:
+            for aid in abstract_ids:
+                if aid in seen_abstract_ids:
+                    continue
 
-            async with get_session() as s:
                 abstract = await get_abstract_by_id(s, aid)
-            if abstract is None or getattr(abstract, "clarity", None) == "forgotten":
-                continue
+                if abstract is None or abstract.clarity == "forgotten":
+                    continue
 
-            async with get_session() as s:
+                seen_abstract_ids.add(aid)
+
                 edges = await list_edges_to(
                     s,
                     persona_id=persona_id,
                     to_id=aid,
                     edge_type="supports",
                 )
+                fact_ids = [str(e.from_id) for e in edges[:k_facts_per_abs]]
+                fragments = await get_fragments_by_ids(s, fact_ids)
 
-            supporting_facts: list[dict[str, Any]] = []
-            for edge in edges[:k_facts_per_abs]:
-                fid = str(edge.from_id)
-                async with get_session() as s:
-                    fragment = await get_fragment_by_id(s, fid)
-                if fragment is None or getattr(fragment, "clarity", None) == "forgotten":
-                    continue
-                supporting_facts.append(
+                supporting_facts: list[dict[str, Any]] = []
+                for fragment in fragments:
+                    if fragment.clarity == "forgotten":
+                        continue
+                    supporting_facts.append(
+                        {
+                            "id": fragment.id,
+                            "content": fragment.content,
+                            "clarity": fragment.clarity,
+                        }
+                    )
+                    seen_fragment_ids.add(str(fragment.id))
+
+                result.abstracts.append(
                     {
-                        "id": fragment.id,
-                        "content": fragment.content,
-                        "clarity": fragment.clarity,
+                        "id": abstract.id,
+                        "subject": abstract.subject,
+                        "content": abstract.content,
+                        "clarity": abstract.clarity,
+                        "supporting_facts": supporting_facts,
                     }
                 )
-                seen_fragment_ids.add(fid)
 
-            seen_abstract_ids.add(aid)
-            result.abstracts.append(
-                {
-                    "id": abstract.id,
-                    "subject": abstract.subject,
-                    "content": abstract.content,
-                    "clarity": abstract.clarity,
-                    "supporting_facts": supporting_facts,
-                }
-            )
-
-        if also_search_facts:
-            fragment_ids = await _search_fragments(
-                persona_id=persona_id, query_vec=query_vec, k=fact_k_per_query
-            )
-            for fid in fragment_ids:
-                if fid in seen_fragment_ids:
-                    continue
-                async with get_session() as s:
-                    fragment = await get_fragment_by_id(s, fid)
-                if fragment is None or getattr(fragment, "clarity", None) == "forgotten":
-                    continue
-                seen_fragment_ids.add(fid)
-                result.facts.append(
-                    {
-                        "id": fragment.id,
-                        "content": fragment.content,
-                        "clarity": fragment.clarity,
-                    }
+            if also_search_facts:
+                fragment_ids = await _vector_search(
+                    collection=COLLECTION_FRAGMENT,
+                    persona_id=persona_id,
+                    query_vec=query_vec,
+                    k=fact_k_per_query,
                 )
+                new_ids = [
+                    fid for fid in fragment_ids if fid not in seen_fragment_ids
+                ]
+                fragments = await get_fragments_by_ids(s, new_ids)
+                for fragment in fragments:
+                    if fragment.clarity == "forgotten":
+                        continue
+                    seen_fragment_ids.add(str(fragment.id))
+                    result.facts.append(
+                        {
+                            "id": fragment.id,
+                            "content": fragment.content,
+                            "clarity": fragment.clarity,
+                        }
+                    )
 
     # Touch every surfaced node so recall counts as usage.
     if seen_abstract_ids or seen_fragment_ids:
         async with get_session() as s:
-            for aid in seen_abstract_ids:
-                await touch_abstract(s, aid)
-            for fid in seen_fragment_ids:
-                await touch_fragment(s, fid)
+            await touch_abstracts_bulk(s, list(seen_abstract_ids))
+            await touch_fragments_bulk(s, list(seen_fragment_ids))
 
     return result
