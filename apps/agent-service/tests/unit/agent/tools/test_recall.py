@@ -30,8 +30,6 @@ async def test_recall_returns_structured_json():
         out = await _recall_impl(
             persona_id="chiwei",
             queries=["浩南最近怎么了"],
-            k_abs=5,
-            k_facts_per_abs=3,
         )
     assert out["abstracts"][0]["id"] == "a_1"
     assert out["abstracts"][0]["supporting_facts"][0]["id"] == "f_1"
@@ -46,11 +44,9 @@ async def test_recall_accepts_batch_queries():
         await _recall_impl(
             persona_id="chiwei",
             queries=["浩南", "学习"],
-            k_abs=5,
-            k_facts_per_abs=3,
         )
     call = rr.await_args
-    assert call.kwargs["queries"] == ["浩南", "学习"]
+    assert call.kwargs == {"persona_id": "chiwei", "queries": ["浩南", "学习"]}
 
 
 @pytest.mark.asyncio
@@ -60,7 +56,7 @@ async def test_recall_empty_returns_structured_empty():
         new=AsyncMock(return_value=RecallResult()),
     ):
         out = await _recall_impl(
-            persona_id="chiwei", queries=["x"],
-            k_abs=5, k_facts_per_abs=3,
+            persona_id="chiwei",
+            queries=["x"],
         )
     assert out == {"abstracts": [], "facts": []}
