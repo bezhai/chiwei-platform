@@ -1096,3 +1096,63 @@ async def get_current_schedule(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+# --- Memory v4 — graph traversal ---
+
+
+async def list_edges_to(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    to_id: str,
+    edge_type: str | None = None,
+) -> list[MemoryEdge]:
+    """List edges whose ``to_id`` matches, optionally filtered by edge_type."""
+    stmt = (
+        select(MemoryEdge)
+        .where(MemoryEdge.persona_id == persona_id)
+        .where(MemoryEdge.to_id == to_id)
+    )
+    if edge_type:
+        stmt = stmt.where(MemoryEdge.edge_type == edge_type)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_edges_from(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    from_id: str,
+    edge_type: str | None = None,
+) -> list[MemoryEdge]:
+    """List edges whose ``from_id`` matches, optionally filtered by edge_type."""
+    stmt = (
+        select(MemoryEdge)
+        .where(MemoryEdge.persona_id == persona_id)
+        .where(MemoryEdge.from_id == from_id)
+    )
+    if edge_type:
+        stmt = stmt.where(MemoryEdge.edge_type == edge_type)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_abstracts_by_subject(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    subject: str,
+    limit: int = 20,
+) -> list[AbstractMemory]:
+    """Fetch non-forgotten abstracts for a subject, newest-touched first."""
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject == subject)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.last_touched_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
