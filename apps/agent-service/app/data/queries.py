@@ -168,25 +168,19 @@ async def find_cross_chat_messages(
     user_id: str,
     bot_names: list[str],
     exclude_chat_id: str,
-    allowed_group_ids: list[str],
     since_ms: int,
+    excluded_chat_ids: list[str] | None = None,
 ) -> list[ConversationMessage]:
     """Fetch recent cross-chat interactions between a user and a persona.
 
-    Returns user messages + bot replies from allowed group chats and p2p chats.
-    Excludes the current chat.
+    Returns user messages + bot replies across all chat types (group + p2p).
+    Excludes the current chat and any blacklisted chat IDs.
     """
     stmt = (
         select(ConversationMessage)
         .where(ConversationMessage.chat_id != exclude_chat_id)
         .where(ConversationMessage.create_time >= since_ms)
         .where(ConversationMessage.bot_name.in_(bot_names))
-        .where(
-            or_(
-                ConversationMessage.chat_id.in_(allowed_group_ids),
-                ConversationMessage.chat_type == "p2p",
-            )
-        )
         .where(
             or_(
                 # User's messages
@@ -198,6 +192,8 @@ async def find_cross_chat_messages(
         )
         .order_by(ConversationMessage.create_time.asc())
     )
+    if excluded_chat_ids:
+        stmt = stmt.where(~ConversationMessage.chat_id.in_(excluded_chat_ids))
     result = await session.execute(stmt)
     return list(result.scalars().all())
 

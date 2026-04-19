@@ -10,6 +10,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from inner_shared.dynamic_config import dynamic_config
+
 from app.chat.content_parser import parse_content
 from app.data.models import ConversationMessage
 from app.data.queries import (
@@ -23,11 +25,27 @@ logger = logging.getLogger(__name__)
 
 _CST = timezone(timedelta(hours=8))
 
-# ka群 — 硬编码，后续可迁入 dynamic config
-CROSS_CHAT_GROUP_IDS = ["oc_54713c53ff0b46cb9579d3695e16cbf8"]
-
 _24H_MS = 24 * 60 * 60 * 1000
 _MAX_PAIRS_PER_CHAT = 10
+DEFAULT_MAX_TOTAL_MESSAGES = 15
+
+
+def _excluded_chats() -> list[str]:
+    try:
+        raw = dynamic_config.get("memory.cross_chat.excluded_chat_ids", default="")
+    except Exception:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _max_total_messages() -> int:
+    try:
+        return dynamic_config.get_int(
+            "memory.cross_chat.max_total_messages",
+            default=DEFAULT_MAX_TOTAL_MESSAGES,
+        )
+    except Exception:
+        return DEFAULT_MAX_TOTAL_MESSAGES
 
 
 def _group_and_trim(
@@ -120,14 +138,18 @@ def _format_interactions(
 
 async def build_cross_chat_context(
     persona_id: str,
-    trigger_user_id: str,
+    trigger_user_id: str | None,
     trigger_username: str,
     current_chat_id: str,
 ) -> str:
     """Build the cross-chat interaction section for inner_context.
 
-    Returns empty string if no cross-chat interactions found.
+    Returns empty string if no cross-chat interactions found,
+    or if trigger_user_id is None or "__proactive__".
     """
+    if not trigger_user_id or trigger_user_id == "__proactive__":
+        return ""
+
     try:
         async with get_session() as s:
             bot_names = await find_bot_names_for_persona(s, persona_id)
@@ -143,9 +165,14 @@ async def build_cross_chat_context(
                 user_id=trigger_user_id,
                 bot_names=bot_names,
                 exclude_chat_id=current_chat_id,
-                allowed_group_ids=CROSS_CHAT_GROUP_IDS,
                 since_ms=since_ms,
+                excluded_chat_ids=_excluded_chats(),
             )
+
+        max_total = _max_total_messages()
+        if max_total > 0:
+            messages = messages[:max_total]
+
         if not messages:
             return ""
 

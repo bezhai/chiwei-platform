@@ -38,7 +38,7 @@ async def test_find_bot_names_for_persona_empty():
 
 @pytest.mark.asyncio
 async def test_find_cross_chat_messages_calls_db():
-    """Should call execute with correct filters."""
+    """Should call execute with correct filters (blacklist semantics)."""
     mock_session = AsyncMock()
     mock_result = MagicMock()
     mock_result.scalars.return_value.all.return_value = []
@@ -49,12 +49,68 @@ async def test_find_cross_chat_messages_calls_db():
         user_id="user_1",
         bot_names=["chiwei"],
         exclude_chat_id="chat_current",
-        allowed_group_ids=["chat_ka"],
         since_ms=1000,
+        excluded_chat_ids=["oc_to_skip"],
     )
 
     assert result == []
     mock_session.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_build_cross_chat_empty_trigger_user_id():
+    """trigger_user_id=None should return '' without calling DB."""
+    from app.memory.cross_chat import build_cross_chat_context
+
+    result = await build_cross_chat_context(
+        persona_id="akao",
+        trigger_user_id=None,
+        trigger_username="测试用户A",
+        current_chat_id="chat_current",
+    )
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_build_cross_chat_uses_dynamic_config_excluded():
+    """build_cross_chat_context should pass excluded_chat_ids from dynamic config."""
+    from app.memory.cross_chat import build_cross_chat_context
+
+    mock_messages = []
+
+    with (
+        patch(
+            "app.memory.cross_chat.dynamic_config.get",
+            return_value="oc_a,oc_b",
+        ),
+        patch(
+            "app.memory.cross_chat.dynamic_config.get_int",
+            return_value=10,
+        ),
+        patch(
+            "app.memory.cross_chat.find_bot_names_for_persona",
+            new=AsyncMock(return_value=["chiwei"]),
+        ),
+        patch(
+            "app.memory.cross_chat.find_cross_chat_messages",
+            new=AsyncMock(return_value=mock_messages),
+        ) as mock_find,
+        patch("app.memory.cross_chat.get_session") as mock_gs,
+    ):
+        mock_gs.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await build_cross_chat_context(
+            persona_id="akao",
+            trigger_user_id="user_1",
+            trigger_username="测试用户A",
+            current_chat_id="chat_current",
+        )
+
+    mock_find.assert_called_once()
+    call_kwargs = mock_find.call_args.kwargs
+    assert call_kwargs.get("excluded_chat_ids") == ["oc_a", "oc_b"]
 
 
 # --- cross_chat.py tests ---

@@ -39,7 +39,7 @@ from .utils import (
 from .lane_router import LaneRouter
 
 # DynamicConfig
-from .dynamic_config import DynamicConfig
+from .dynamic_config import DynamicConfig, dynamic_config
 
 __all__ = [
     # Decorators
@@ -71,6 +71,7 @@ __all__ = [
     "LaneRouter",
     # DynamicConfig
     "DynamicConfig",
+    "dynamic_config",
     # Misc
     "hello",
 ]
