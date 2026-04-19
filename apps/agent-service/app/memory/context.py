@@ -1,11 +1,15 @@
-"""Memory context builder — assembles the inner context injected into chat prompts.
+"""Memory context builder v4 — assemble always-on + conditional sections.
 
-Sections:
-  - Scene prompt (group/p2p/proactive)
-  - Life Engine state (current activity + mood)
-  - Relationship memory (core_facts + impression for trigger user)
-  - Recent experience fragments (last 2 conversation fragments)
-  - Recall hint
+Sections (order matters for prompt flow):
+  1. Scene (p2p/group/proactive)
+  2. Life state (current activity + mood)
+  3. Today schedule
+  4. Self abstracts (subject='self')
+  5. User abstracts (subject='user:<id>' / 和 X 的关系)  — skipped if no trigger_user
+  6. Active notes
+  7. Cross-chat (user-centric raw msgs)  — skipped if no trigger_user
+  8. Short-term fragments (§2.8)
+  9. Recall index (counts + recent titles)
 """
 
 from __future__ import annotations
@@ -13,24 +17,21 @@ from __future__ import annotations
 import logging
 from datetime import timedelta, timezone
 
-from app.data.queries import (
-    find_latest_life_state,
-    find_latest_relationship_memory,
-    find_today_fragments,
-    find_username,
-)
+from app.data.queries import find_latest_life_state
 from app.data.session import get_session
+from app.memory.sections.active_notes import build_active_notes_section
+from app.memory.sections.recall_index import build_recall_index_section
+from app.memory.sections.schedule import build_schedule_section
+from app.memory.sections.self_abstracts import build_self_abstracts_section
+from app.memory.sections.short_term_fragments import build_short_term_fragments_section
+from app.memory.sections.user_abstracts import build_user_abstracts_section
 
 logger = logging.getLogger(__name__)
 
 _CST = timezone(timedelta(hours=8))
 
-_MAX_RECENT_FRAGMENTS = 2
-_MAX_FRAGMENT_CHARS = 800
-
 
 async def _build_life_state(persona_id: str) -> str:
-    """Read Life Engine state from DB, return injection text."""
     try:
         async with get_session() as s:
             row = await find_latest_life_state(s, persona_id)
@@ -41,106 +42,111 @@ async def _build_life_state(persona_id: str) -> str:
         if current:
             return (
                 f"你此刻的状态：{current}\n你的心情：{mood}"
-                if mood
-                else f"你此刻的状态：{current}"
+                if mood else f"你此刻的状态：{current}"
             )
     except Exception as e:
         logger.warning("[%s] Failed to read life state: %s", persona_id, e)
     return ""
 
 
-async def build_inner_context(
-    chat_id: str,
+def _scene_section(
     chat_type: str,
-    user_ids: list[str],
-    trigger_user_id: str,
-    trigger_username: str,
-    persona_id: str,
-    chat_name: str = "",
-    *,
-    is_proactive: bool = False,
-    proactive_stimulus: str = "",
+    chat_name: str,
+    trigger_username: str | None,
+    is_proactive: bool,
+    proactive_stimulus: str,
 ) -> str:
-    """Assemble the full inner context string for chat injection."""
-    sections: list[str] = []
-
-    # === Scene ===
     if is_proactive:
         scene = f"你在群聊「{chat_name}」中。" if chat_name else ""
         scene += "\n你刚刷到了群里的对话。如果你想说点什么就说，不想说也可以不说。"
         scene += "\n不要刻意解释为什么突然说话，像朋友在群里自然接话就好。"
         if proactive_stimulus:
             scene += f"\n（你注意到的：{proactive_stimulus}）"
+        return scene
+    if chat_type == "p2p":
+        return f"你正在和 {trigger_username} 私聊。" if trigger_username else ""
+    parts = []
+    if chat_name:
+        parts.append(f"你在群聊「{chat_name}」中。")
+    if trigger_username:
+        parts.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
+    return "\n".join(parts)
+
+
+async def build_inner_context(
+    chat_id: str,
+    chat_type: str,
+    user_ids: list[str],
+    trigger_user_id: str | None,
+    trigger_username: str | None,
+    persona_id: str,
+    chat_name: str = "",
+    *,
+    is_proactive: bool = False,
+    proactive_stimulus: str = "",
+) -> str:
+    """Assemble the full inner context string for chat injection (v4)."""
+
+    effective_user_id = (
+        None if (trigger_user_id in (None, "__proactive__")) else trigger_user_id
+    )
+
+    sections: list[str] = []
+
+    scene = _scene_section(
+        chat_type, chat_name, trigger_username, is_proactive, proactive_stimulus
+    )
+    if scene:
         sections.append(scene)
-    elif chat_type == "p2p":
-        if trigger_username:
-            sections.append(f"你正在和 {trigger_username} 私聊。")
-    else:
-        if chat_name:
-            sections.append(f"你在群聊「{chat_name}」中。")
-        if trigger_username:
-            sections.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
 
-    # === Life Engine state ===
-    life_state = await _build_life_state(persona_id)
-    if life_state:
-        sections.append(life_state)
+    life = await _build_life_state(persona_id)
+    if life:
+        sections.append(life)
 
-    # === Relationship memory ===
-    if trigger_user_id and trigger_user_id != "__proactive__":
-        async with get_session() as s:
-            rel_memory = await find_latest_relationship_memory(
-                s, persona_id, trigger_user_id
-            )
-        if rel_memory:
-            core_facts, impression = rel_memory
-            if not trigger_username:
-                async with get_session() as s:
-                    trigger_username = (
-                        await find_username(s, trigger_user_id) or trigger_user_id[:6]
-                    )
-            parts = [f"关于 {trigger_username}："]
-            if core_facts:
-                parts.append(f"[事实] {core_facts}")
-            if impression:
-                parts.append(f"[印象] {impression}")
-            sections.append("\n".join(parts))
+    sched = await build_schedule_section(persona_id=persona_id)
+    if sched:
+        sections.append(sched)
 
-    # === Cross-chat interactions ===
-    if trigger_user_id and trigger_user_id != "__proactive__":
-        from app.memory.cross_chat import build_cross_chat_context
+    self_abs = await build_self_abstracts_section(persona_id=persona_id)
+    if self_abs:
+        sections.append(self_abs)
 
-        cross_chat_text = await build_cross_chat_context(
+    user_abs = await build_user_abstracts_section(
+        persona_id=persona_id,
+        trigger_user_id=effective_user_id,
+        trigger_username=trigger_username,
+    )
+    if user_abs:
+        sections.append(user_abs)
+
+    notes = await build_active_notes_section(persona_id=persona_id)
+    if notes:
+        sections.append(notes)
+
+    if effective_user_id:
+        from app.memory.cross_chat import (
+            build_cross_chat_context,  # lazy: avoids circular import
+        )
+
+        cross = await build_cross_chat_context(
             persona_id=persona_id,
-            trigger_user_id=trigger_user_id,
-            trigger_username=trigger_username,
+            trigger_user_id=effective_user_id,
+            trigger_username=trigger_username or "",
             current_chat_id=chat_id,
         )
-        if cross_chat_text:
-            sections.append(cross_chat_text)
+        if cross:
+            sections.append(cross)
 
-    # === Recent fragments ===
-    async with get_session() as s:
-        today_frags = await find_today_fragments(s, persona_id, grains=["conversation"])
-    if chat_type == "group":
-        today_frags = [f for f in today_frags if f.source_chat_id == chat_id]
-    if today_frags:
-        recent = today_frags[-_MAX_RECENT_FRAGMENTS:]
-        total = 0
-        lines: list[str] = []
-        for f in recent:
-            text = f.content.strip()
-            if total + len(text) > _MAX_FRAGMENT_CHARS:
-                remaining = _MAX_FRAGMENT_CHARS - total
-                if remaining > 50:
-                    lines.append(text[:remaining] + "...")
-                break
-            lines.append(text)
-            total += len(text)
-        if lines:
-            sections.append("最近的经历：\n" + "\n".join(lines))
+    frag = await build_short_term_fragments_section(
+        persona_id=persona_id,
+        chat_id=chat_id,
+        trigger_user_id=effective_user_id,
+    )
+    if frag:
+        sections.append(frag)
 
-    # === Recall hint ===
-    sections.append("（如果隐约觉得知道点什么但想不起来，可以用 recall 想一想。）")
+    recall_idx = await build_recall_index_section(persona_id=persona_id)
+    if recall_idx:
+        sections.append(recall_idx)
 
     return "\n\n".join(sections)
