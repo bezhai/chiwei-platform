@@ -166,10 +166,12 @@ async def test_connect_uses_from_node_persona():
 
     fake_node = MagicMock()
     fake_node.persona_id = "chiwei"
+    fake_to_node = MagicMock()
 
     with (
         patch(f"{MODULE}.get_session", return_value=_noop_session()),
         patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=fake_node)),
+        patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=fake_to_node)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
     ):
         result = await connect.ainvoke(
@@ -226,6 +228,35 @@ async def test_connect_returns_error_when_from_node_missing():
                 "from_id": "f_missing",
                 "from_type": "fact",
                 "to_id": "a_1",
+                "to_type": "abstract",
+                "edge_type": "supports",
+                "reason": "test",
+            }
+        )
+
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+    ins.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_returns_error_when_to_node_missing():
+    from app.memory.reviewer.tools import connect
+
+    fake_from_node = MagicMock()
+    fake_from_node.persona_id = "chiwei"
+
+    with (
+        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=fake_from_node)),
+        patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=None)),
+        patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
+    ):
+        result = await connect.ainvoke(
+            {
+                "from_id": "f_1",
+                "from_type": "fact",
+                "to_id": "a_missing",
                 "to_type": "abstract",
                 "edge_type": "supports",
                 "reason": "test",

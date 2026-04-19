@@ -1145,8 +1145,9 @@ async def delete_fragment_query(
 ) -> None:
     # cascade delete edges touching this fragment first
     await session.execute(
-        text("DELETE FROM memory_edge WHERE from_id = :id OR to_id = :id"),
-        {"id": fragment_id},
+        MemoryEdge.__table__.delete().where(
+            or_(MemoryEdge.from_id == fragment_id, MemoryEdge.to_id == fragment_id)
+        )
     )
     await session.execute(
         Fragment.__table__.delete().where(Fragment.id == fragment_id)

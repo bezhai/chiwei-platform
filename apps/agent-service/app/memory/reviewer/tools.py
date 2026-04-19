@@ -9,6 +9,7 @@ import logging
 
 from langchain.tools import tool
 
+from app.agent.tools._common import tool_error
 from app.data.ids import new_id
 from app.data.queries import (
     delete_edge,
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
+@tool_error("update_abstract_content 失败")
 async def update_abstract_content(abstract_id: str, new_content: str, reason: str) -> dict:
     """Rewrite the content of an existing abstract (演化 / 合并)."""
     async with get_session() as s:
@@ -36,8 +38,26 @@ async def update_abstract_content(abstract_id: str, new_content: str, reason: st
 
 
 @tool
+@tool_error("fade_node 失败")
 async def fade_node(node_id: str, node_type: str, clarity: str, reason: str) -> dict:
-    """Set clarity: 'clear' / 'vague' / 'forgotten'. node_type: 'abstract' | 'fact'."""
+    """把某个记忆节点的清晰度调整到新档位（让它"变模糊"或"想起来"）。
+
+    clarity 三档的语义：
+      - clear：仍然清晰，日常可回忆
+      - vague：淡化但还在。context 里依然可能被召回，但已不重要
+      - forgotten：视为遗忘（软删），不再参与召回，但记录保留用于回溯
+
+    什么时候用 fade_node 而不是 delete_fragment：
+      - fade_node 适用于"还有情绪价值但不再重要"的东西（特别是抽象）
+      - delete_fragment 适用于确认琐碎无意义的原始事实（比如偶尔的寒暄）
+      - 抽象永远不 delete，只 fade 到 forgotten
+
+    Args:
+      node_id: 节点 id（f_xxx 或 a_xxx）
+      node_type: "abstract" 或 "fact"
+      clarity: "clear" / "vague" / "forgotten"
+      reason: 第一人称写的原因（"我对这件事已经没什么感觉了"）
+    """
     if clarity not in ("clear", "vague", "forgotten"):
         return {"ok": False, "error": f"invalid clarity {clarity}"}
     async with get_session() as s:
@@ -47,6 +67,7 @@ async def fade_node(node_id: str, node_type: str, clarity: str, reason: str) -> 
 
 
 @tool
+@tool_error("touch_node 失败")
 async def touch_node(node_id: str, node_type: str) -> dict:
     """Strengthen a node (update last_touched_at)."""
     async with get_session() as s:
@@ -60,6 +81,7 @@ async def touch_node(node_id: str, node_type: str) -> dict:
 
 
 @tool
+@tool_error("delete_fragment 失败")
 async def delete_fragment(fragment_id: str, reason: str) -> dict:
     """Permanently remove a fragment (trivial-only; for abstract use fade_node→forgotten)."""
     async with get_session() as s:
@@ -69,6 +91,7 @@ async def delete_fragment(fragment_id: str, reason: str) -> dict:
 
 
 @tool
+@tool_error("connect 失败")
 async def connect(
     from_id: str, from_type: str, to_id: str, to_type: str,
     edge_type: str, reason: str,
@@ -84,6 +107,15 @@ async def connect(
         if n is None:
             return {"ok": False, "error": f"from node {from_id} not found"}
         persona_id = n.persona_id
+
+        # verify to_node exists
+        if to_type == "abstract":
+            to_n = await get_abstract_by_id(s, to_id)
+        else:
+            to_n = await get_fragment_by_id(s, to_id)
+        if to_n is None:
+            return {"ok": False, "error": f"to node {to_id} not found"}
+
         await insert_memory_edge(
             s, id=new_id("e"), persona_id=persona_id,
             from_id=from_id, from_type=from_type,
@@ -94,6 +126,7 @@ async def connect(
 
 
 @tool
+@tool_error("disconnect 失败")
 async def disconnect(edge_id: str, reason: str) -> dict:
     """Remove an edge."""
     async with get_session() as s:
