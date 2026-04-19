@@ -1108,6 +1108,85 @@ async def get_current_schedule(
     return result.scalar_one_or_none()
 
 
+# --- Memory v4 — reviewer mutations ---
+
+
+async def update_abstract_content_query(
+    session: AsyncSession, *, abstract_id: str, new_content: str
+) -> None:
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id == abstract_id)
+        .values(content=new_content, last_touched_at=func.now())
+    )
+
+
+async def set_clarity(
+    session: AsyncSession, *, node_id: str, node_type: str, clarity: str
+) -> None:
+    if node_type == "abstract":
+        await session.execute(
+            update(AbstractMemory)
+            .where(AbstractMemory.id == node_id)
+            .values(clarity=clarity, last_touched_at=func.now())
+        )
+    elif node_type == "fact":
+        await session.execute(
+            update(Fragment)
+            .where(Fragment.id == node_id)
+            .values(clarity=clarity, last_touched_at=func.now())
+        )
+    else:
+        raise ValueError(f"unknown node_type {node_type}")
+
+
+async def delete_fragment_query(
+    session: AsyncSession, *, fragment_id: str
+) -> None:
+    # cascade delete edges touching this fragment first
+    await session.execute(
+        text("DELETE FROM memory_edge WHERE from_id = :id OR to_id = :id"),
+        {"id": fragment_id},
+    )
+    await session.execute(
+        Fragment.__table__.delete().where(Fragment.id == fragment_id)
+    )
+
+
+async def delete_edge(
+    session: AsyncSession, *, edge_id: str
+) -> None:
+    await session.execute(
+        MemoryEdge.__table__.delete().where(MemoryEdge.id == edge_id)
+    )
+
+
+async def list_fragments_window(
+    session: AsyncSession, *, persona_id: str, since: datetime,
+) -> list[Fragment]:
+    result = await session.execute(
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.created_at >= since)
+        .where(Fragment.clarity != "forgotten")
+        .order_by(Fragment.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def list_abstracts_window(
+    session: AsyncSession, *, persona_id: str, since: datetime,
+) -> list[AbstractMemory]:
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.created_at >= since)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.created_at)
+    )
+    return list(result.scalars().all())
+
+
 # --- Memory v4 — graph traversal ---
 
 
