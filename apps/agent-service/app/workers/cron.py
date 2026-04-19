@@ -26,24 +26,16 @@ async def cron_generate_voice(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dreams (daily + weekly compression)
+# Heavy reviewer (daily consolidation, replaces dream compression)
 # ---------------------------------------------------------------------------
 
 
 @cron_error_handler()
 @prod_only
 async def cron_generate_dreams(ctx) -> None:
-    from app.memory.dreams import run_daily_dreams
+    from app.memory.reviewer.heavy import run_heavy_review
 
-    await run_daily_dreams()
-
-
-@cron_error_handler()
-@prod_only
-async def cron_generate_weekly_dreams(ctx) -> None:
-    from app.memory.dreams import run_weekly_dreams
-
-    await run_weekly_dreams()
+    await run_heavy_review()
 
 
 # ---------------------------------------------------------------------------

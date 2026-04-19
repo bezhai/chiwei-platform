@@ -1368,3 +1368,27 @@ async def get_schedule_revision_by_id(
         select(ScheduleRevision).where(ScheduleRevision.id == revision_id)
     )
     return result.scalar_one_or_none()
+
+
+async def list_recent_life_states(
+    session: AsyncSession, *, persona_id: str, since: datetime
+) -> list[LifeEngineState]:
+    result = await session.execute(
+        select(LifeEngineState)
+        .where(LifeEngineState.persona_id == persona_id)
+        .where(LifeEngineState.created_at >= since)
+        .order_by(LifeEngineState.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def list_recent_schedule_revisions(
+    session: AsyncSession, *, persona_id: str, since: datetime
+) -> list[ScheduleRevision]:
+    result = await session.execute(
+        select(ScheduleRevision)
+        .where(ScheduleRevision.persona_id == persona_id)
+        .where(ScheduleRevision.created_at >= since)
+        .order_by(ScheduleRevision.created_at)
+    )
+    return list(result.scalars().all())
