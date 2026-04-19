@@ -1,11 +1,8 @@
-"""Unit tests for context-injection query helpers (Plan C Task 1).
-
-Mock pattern mirrors test_v4_queries.py: _ScalarResult / _IterResult fakes.
-"""
+"""Unit tests for context-injection query helpers (Plan C Task 1)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,33 +14,12 @@ from app.data.queries import (
     get_recent_abstract_titles,
     get_recent_fragments_for_injection,
 )
-
+from tests.unit.data._helpers import IterResult as _IterResult
+from tests.unit.data._helpers import ScalarResult as _ScalarResult
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class _ScalarResult:
-    def __init__(self, value):
-        self.value = value
-
-    def scalar_one(self):
-        return self.value
-
-    def scalar_one_or_none(self):
-        return self.value
-
-
-class _IterResult:
-    def __init__(self, values):
-        self._values = values
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self._values
 
 
 def _make_abstract(
@@ -60,7 +36,7 @@ def _make_abstract(
         created_by="test",
         clarity=clarity,
     )
-    a.last_touched_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    a.last_touched_at = datetime(2025, 1, 1, tzinfo=UTC)
     return a
 
 
@@ -78,7 +54,7 @@ def _make_fragment(
         chat_id=chat_id,
         clarity=clarity,
     )
-    f.created_at = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+    f.created_at = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
     return f
 
 
@@ -230,7 +206,7 @@ async def test_get_recent_fragments_same_and_other_chat_grouping():
         session,
         persona_id="chiwei",
         chat_id="chat-A",
-        trigger_user_id=None,
+        _trigger_user_id=None,
         max_same_chat=1,
         max_other_chat=2,
         hours=4,
@@ -256,7 +232,7 @@ async def test_get_recent_fragments_no_chat_id():
         session,
         persona_id="chiwei",
         chat_id=None,
-        trigger_user_id=None,
+        _trigger_user_id=None,
         max_same_chat=1,
         max_other_chat=2,
         hours=4,
@@ -277,7 +253,7 @@ async def test_get_recent_fragments_deduplicates_other_chats():
         session,
         persona_id="chiwei",
         chat_id="different-chat",
-        trigger_user_id=None,
+        _trigger_user_id=None,
         max_same_chat=1,
         max_other_chat=5,
         hours=4,
@@ -296,6 +272,6 @@ async def test_get_recent_fragments_empty_db():
         session,
         persona_id="chiwei",
         chat_id="chat-A",
-        trigger_user_id=None,
+        _trigger_user_id=None,
     )
     assert result == []

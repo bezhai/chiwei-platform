@@ -20,28 +20,8 @@ from app.data.queries import (
     touch_abstract,
     touch_fragment,
 )
-
-
-class _ScalarResult:
-    def __init__(self, value):
-        self.value = value
-
-    def scalar_one(self):
-        return self.value
-
-    def scalar_one_or_none(self):
-        return self.value
-
-
-class _IterResult:
-    def __init__(self, values):
-        self._values = values
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self._values
+from tests.unit.data._helpers import IterResult as _IterResult
+from tests.unit.data._helpers import ScalarResult as _ScalarResult
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ Sections:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1242,24 +1242,25 @@ async def get_recent_fragments_for_injection(
     *,
     persona_id: str,
     chat_id: str | None,
-    trigger_user_id: str | None,
+    _trigger_user_id: str | None,
     max_same_chat: int = 1,
     max_other_chat: int = 2,
     hours: int = 4,
 ) -> list[Fragment]:
     """短期注入规则：
     - 当前 chat 最近 N 小时内的最新 1 条 fragment
-    - 其他 chat 最近 1-2 小时内、含 trigger_user 的 fragment（最多 2 条，每 chat 只取最新）
-    注意：当前实现简化 — 如果没有"fragment 里 trigger_user 标识"，先按 chat_id 过滤。
-    待 reviewer/afterthought 完善后可再加 trigger_user filter。
+    - 其他 chat 最近 N 小时内的 fragment（最多 max_other_chat 条，每 chat 只取最新）
+
+    ``_trigger_user_id``: reserved for future user-scoped filtering; currently ignored.
     """
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = datetime.now(UTC) - timedelta(hours=hours)
     stmt = (
         select(Fragment)
         .where(Fragment.persona_id == persona_id)
         .where(Fragment.clarity != "forgotten")
         .where(Fragment.created_at >= since)
         .order_by(Fragment.created_at.desc())
+        .limit(max_same_chat + max_other_chat * 20)
     )
     result = await session.execute(stmt)
     all_recent = list(result.scalars().all())
