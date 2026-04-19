@@ -719,6 +719,7 @@ export default function Messages() {
               style={{ width: '100%' }}
               options={chatOptions}
               notFoundContent={null}
+              size="large"
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -734,6 +735,7 @@ export default function Messages() {
               style={{ width: '100%' }}
               options={userOptions}
               notFoundContent={null}
+              size="large"
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -749,6 +751,7 @@ export default function Messages() {
                 { value: 'assistant', label: '助手' },
                 { value: 'system', label: '系统' },
               ]}
+              size="large"
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -757,6 +760,7 @@ export default function Messages() {
               value={filters.botName}
               onChange={(e) => setFilters((prev) => ({ ...prev, botName: e.target.value }))}
               allowClear
+              size="large"
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -765,6 +769,7 @@ export default function Messages() {
               value={filters.rootMessageId}
               onChange={(e) => setFilters((prev) => ({ ...prev, rootMessageId: e.target.value }))}
               allowClear
+              size="large"
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
@@ -773,6 +778,7 @@ export default function Messages() {
               value={filters.replyMessageId}
               onChange={(e) => setFilters((prev) => ({ ...prev, replyMessageId: e.target.value }))}
               allowClear
+              size="large"
             />
           </Col>
           
@@ -786,6 +792,7 @@ export default function Messages() {
               style={{ width: '100%' }}
               suffixIcon={<CaretDownOutlined style={{ pointerEvents: 'none', fontSize: 12, color: '#aaa' }} />}
               options={messageTypeFilterOptions}
+              size="large"
             />
           </Col>
           <Col xs={24} sm={16} md={12} lg={6}>
@@ -807,16 +814,17 @@ export default function Messages() {
                   ? [dayjs(Number(filters.range[0])), dayjs(Number(filters.range[1]))]
                   : null
               }
+              size="large"
             />
           </Col>
           
           {/* Buttons aligned to the right, filling the remaining space */}
-          <Col xs={24} sm={24} md={6} lg={14} style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Col xs={24} sm={24} md={6} lg={14} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
             <Space>
-              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)} style={{ boxShadow: 'none', borderRadius: 8, height: 38 }}>
+              <Button type="primary" icon={<SearchOutlined />} onClick={() => fetchData(1, pageSize)} style={{ boxShadow: 'none', borderRadius: 8 }} size="large">
                 查询
               </Button>
-              <Button icon={<ReloadOutlined />} onClick={handleReset} style={{ boxShadow: 'none', borderRadius: 8, height: 38 }}>
+              <Button icon={<ReloadOutlined />} onClick={handleReset} style={{ boxShadow: 'none', borderRadius: 8 }} size="large">
                 重置
               </Button>
             </Space>
