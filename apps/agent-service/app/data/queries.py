@@ -553,18 +553,21 @@ async def insert_life_state(
     response_mood: str,
     skip_until: datetime | None,
     reasoning: str | None = None,
-) -> None:
-    """INSERT a new life engine state row (append-only)."""
-    session.add(
-        LifeEngineState(
-            persona_id=persona_id,
-            current_state=current_state,
-            activity_type=activity_type,
-            response_mood=response_mood,
-            reasoning=reasoning,
-            skip_until=skip_until,
-        )
+    state_end_at: datetime | None = None,
+) -> int:
+    """INSERT a new life engine state row (append-only). Returns the new row id."""
+    row = LifeEngineState(
+        persona_id=persona_id,
+        current_state=current_state,
+        activity_type=activity_type,
+        response_mood=response_mood,
+        reasoning=reasoning,
+        skip_until=skip_until,
+        state_end_at=state_end_at,
     )
+    session.add(row)
+    await session.flush()
+    return row.id
 
 
 async def find_today_activity_states(
