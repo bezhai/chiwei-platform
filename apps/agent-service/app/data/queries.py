@@ -768,26 +768,6 @@ async def insert_relationship_memory(
     )
 
 
-async def find_latest_relationship_memory(
-    session: AsyncSession, persona_id: str, user_id: str
-) -> tuple[str, str] | None:
-    """Fetch the latest (core_facts, impression) for a user, or None."""
-    result = await session.execute(
-        select(
-            RelationshipMemoryV2.core_facts,
-            RelationshipMemoryV2.impression,
-        )
-        .where(RelationshipMemoryV2.persona_id == persona_id)
-        .where(RelationshipMemoryV2.user_id == user_id)
-        .order_by(RelationshipMemoryV2.version.desc(), RelationshipMemoryV2.id.desc())
-        .limit(1)
-    )
-    row = result.one_or_none()
-    if row is None:
-        return None
-    return (row.core_facts, row.impression)
-
-
 async def find_relationship_memories_batch(
     session: AsyncSession,
     persona_id: str,

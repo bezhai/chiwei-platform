@@ -316,6 +316,9 @@ class ReplyStyleLog(Base):
     )
 
 
+# DEPRECATED (memory-v4): read-only for migration; the table will be dropped
+# after the one-time relationship_memory_v2 → abstract_memory migration runs
+# during Plan E cutover. Do NOT write through this model.
 class RelationshipMemoryV2(Base):
     """关系记忆 v2 — 两阶段管线产出, append-only"""
 
