@@ -20,6 +20,8 @@ from app.workers.cron import (
     cron_generate_voice,
     cron_glimpse,
     cron_life_engine_tick,
+    cron_memory_reviewer_light_day,
+    cron_memory_reviewer_light_night,
 )
 from app.workers.state_sync_worker import sync_life_state_after_schedule
 from app.workers.vectorize import cron_scan_pending_messages
@@ -101,6 +103,20 @@ class WorkerSettings:
             cron_glimpse,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             timeout=120,
+        ),
+        # 1d. Memory reviewer — light (daytime, every 30min, 08:00-21:00 CST)
+        cron(
+            cron_memory_reviewer_light_day,
+            hour=set(range(8, 22)),  # 8..21
+            minute={0, 30},
+            timeout=600,
+        ),
+        # 1e. Memory reviewer — light (nighttime, hourly, skips 03:00 = heavy slot)
+        cron(
+            cron_memory_reviewer_light_night,
+            hour={22, 23, 0, 1, 2, 4, 5, 6, 7},
+            minute={0},
+            timeout=600,
         ),
         # 2. Vectorize pending scan: every 10 minutes
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),

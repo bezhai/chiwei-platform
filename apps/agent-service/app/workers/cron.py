@@ -105,3 +105,30 @@ async def cron_glimpse(ctx) -> None:
                 await run_glimpse(persona_id, chat_id)
         except Exception:
             logger.exception("[%s] Glimpse cron failed", persona_id)
+
+
+# ---------------------------------------------------------------------------
+# Memory Reviewer — light (P0 window scan)
+# ---------------------------------------------------------------------------
+
+
+@cron_error_handler()
+@prod_only
+async def cron_memory_reviewer_light_day(ctx) -> None:
+    from app.memory.reviewer.light import run_light_review
+
+    async def _run(pid: str) -> None:
+        await run_light_review(persona_id=pid, window_minutes=30)
+
+    await for_each_persona(_run, label="memory_reviewer_light_day")
+
+
+@cron_error_handler()
+@prod_only
+async def cron_memory_reviewer_light_night(ctx) -> None:
+    from app.memory.reviewer.light import run_light_review
+
+    async def _run(pid: str) -> None:
+        await run_light_review(persona_id=pid, window_minutes=60)
+
+    await for_each_persona(_run, label="memory_reviewer_light_night")
