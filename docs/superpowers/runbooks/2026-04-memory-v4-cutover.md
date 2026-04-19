@@ -171,19 +171,37 @@ python3 ~/.claude/skills/langfuse/scripts/langfuse_api.py update-labels life_eng
 
 ---
 
+## Cutover 前硬性 Followup（必须先改，否则 cutover 后静默失效）
+
+**F-0a. voice.py 和 engine.py 的"今日碎片"读路径仍指向旧表**
+
+`app/memory/voice.py:55` 和 `app/life/engine.py:153–154` 都调用 `find_today_fragments(s, persona_id, grains=["conversation"])`，这个查询命中的是旧 `experience_fragment` 表。cutover 后新 afterthought 写 v4 `fragment`，voice 和 tick 的 context 会永远看不到新碎片，直到手动切换读路径。
+
+**必须在 cutover 前**：新增一个等价查询（例如 `list_recent_fragments_for_voice`）读 v4 `fragment` 表（过滤 `source IN ('afterthought','glimpse')`），替换 voice.py 和 engine.py 的调用。一个 PR 搞定。
+
+**F-0b. `cron_generate_dreams` 名字误导**
+
+函数体已切成 `run_heavy_review()`，但函数名仍是 `dreams`。arq 用函数名做 job dedupe key——重命名不慎可能导致两个 job 同时跑。建议重命名为 `cron_heavy_review`，同步改 `arq_settings.py`。不阻塞 cutover，但第一个 followup PR 里做。
+
+**F-0c. `insert_relationship_memory` 未标 DEPRECATED**
+
+`app/data/queries.py:742` 的函数还在被 `app/memory/relationships.py` 调用（写 `relationship_memory_v2`）。函数本身未加注释说明这是临时保留。在同一个 relationships.py 改造 PR 里一起处理即可。
+
 ## Followups（cutover 后 1–2 个 PR 内清理）
 
-1. **重构 `app/memory/relationships.py`**：停止写 `relationship_memory_v2`，改为让 afterthought 之后的 reviewer 轻档直接从对话 fragment 里抽象。或者删 relationships.py 整个管道。
+1. **重构 `app/memory/relationships.py`**：停止写 `relationship_memory_v2`，改为让 afterthought 之后的 reviewer 轻档直接从对话 fragment 里抽象。或者删 relationships.py 整个管道。同时清理 `insert_relationship_memory` 和 F-0c。
 2. **删悬挂 code**：
-   - `_make_commit_tool` 在 `app/life/engine.py` + `app/life/state_sync.py` 重复 ~35 LOC，抽公共
+   - `_make_commit_tool` 在 `app/life/engine.py` + `app/life/state_sync.py` 重复 ~77 LOC，抽公共
    - `tick()` 的 `dry_run` 参数在 tool-based 重写后变 no-op，删掉或实装
    - `short_term_fragments` section 用 `chat_id[:6]` 当标签没语义，换成 group name / "p2p"
    - `update_schedule` 每次 create/close arq pool；接 `app/infra/arq_pool.py` 共享 pool
-3. **删旧 ORM**：
+   - 把 `heavy.py` 的局部 `fmt_life` / `fmt_sched` 提升为模块级函数（与 `light.py` 的 `_fmt_fragment` 等保持一致，避免测试重写逻辑）
+3. **删旧 ORM + 相关 CRUD**：
    - `ExperienceFragment` — 1 周后旧表 drop 时同步删 class（grep 确认无 caller）
    - `RelationshipMemoryV2` — 同上
-   - `find_today_fragments` + `insert_experience_fragment` — 旧 experience_fragment 表相关 CRUD
+   - `find_today_fragments` + `insert_experience_fragment` — 旧 experience_fragment 表相关 CRUD（前提：F-0a 已完成）
 4. **Qdrant 旧 collection**：如果有 `relationship_memory_v2` 的 Qdrant collection 和 `experience_fragment` 的，1 周后 drop collection
+5. **CST 集中化**：`light.py` / `heavy.py` 各自定义 `CST = timezone(timedelta(hours=8))`，`app/life/_date_utils.py` 已有公共 `CST`，统一引用
 
 ---
 

@@ -7,6 +7,7 @@ Business logic lives in ``app.memory.*``, ``app.life.*``.
 from __future__ import annotations
 
 import logging
+
 from app.workers.common import cron_error_handler, for_each_persona, prod_only
 
 logger = logging.getLogger(__name__)
