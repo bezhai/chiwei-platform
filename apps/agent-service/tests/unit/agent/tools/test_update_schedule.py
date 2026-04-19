@@ -57,31 +57,39 @@ async def test_enqueue_state_sync_closes_pool_on_error():
     fake_pool.enqueue_job = AsyncMock(side_effect=RuntimeError("redis down"))
     fake_pool.close = AsyncMock()
 
+    fake_settings = type("S", (), {"redis_settings": None, "queue_name": "arq:queue:test-lane"})
+
     with patch("arq.create_pool", new=AsyncMock(return_value=fake_pool)):
-        with patch("app.workers.arq_settings.WorkerSettings"):
+        with patch("app.workers.arq_settings.WorkerSettings", fake_settings):
             with pytest.raises(RuntimeError):
                 await enqueue_state_sync(revision_id="sr_xxx")
 
     fake_pool.close.assert_awaited_once_with(close_connection_pool=True)
     fake_pool.enqueue_job.assert_awaited_once_with(
-        "sync_life_state_after_schedule", revision_id="sr_xxx"
+        "sync_life_state_after_schedule",
+        revision_id="sr_xxx",
+        _queue_name="arq:queue:test-lane",
     )
 
 
 @pytest.mark.asyncio
 async def test_enqueue_state_sync_closes_pool_on_success():
-    """pool.close must run after a successful enqueue."""
+    """pool.close must run after a successful enqueue and routes to the lane queue."""
     from app.agent.tools.update_schedule import enqueue_state_sync
 
     fake_pool = AsyncMock()
     fake_pool.enqueue_job = AsyncMock()
     fake_pool.close = AsyncMock()
 
+    fake_settings = type("S", (), {"redis_settings": None, "queue_name": "arq:queue:test-lane"})
+
     with patch("arq.create_pool", new=AsyncMock(return_value=fake_pool)):
-        with patch("app.workers.arq_settings.WorkerSettings"):
+        with patch("app.workers.arq_settings.WorkerSettings", fake_settings):
             await enqueue_state_sync(revision_id="sr_yyy")
 
     fake_pool.enqueue_job.assert_awaited_once_with(
-        "sync_life_state_after_schedule", revision_id="sr_yyy"
+        "sync_life_state_after_schedule",
+        revision_id="sr_yyy",
+        _queue_name="arq:queue:test-lane",
     )
     fake_pool.close.assert_awaited_once_with(close_connection_pool=True)

@@ -36,7 +36,9 @@ async def enqueue_state_sync(*, revision_id: str) -> None:
     pool = await create_pool(WorkerSettings.redis_settings)
     try:
         await pool.enqueue_job(
-            "sync_life_state_after_schedule", revision_id=revision_id
+            "sync_life_state_after_schedule",
+            revision_id=revision_id,
+            _queue_name=WorkerSettings.queue_name,
         )
     finally:
         await pool.close(close_connection_pool=True)
