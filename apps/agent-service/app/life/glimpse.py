@@ -15,9 +15,8 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.data import queries as Q
-from app.data.models import ExperienceFragment
+from app.data.ids import new_id
 from app.data.session import get_session
-from app.infra.config import settings
 from app.life.proactive import (
     get_recent_proactive_records,
     get_unseen_messages,
@@ -25,6 +24,7 @@ from app.life.proactive import (
 )
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
+from app.memory.vectorize_memory import enqueue_fragment_vectorize
 
 _GLIMPSE_CFG = AgentConfig("glimpse_observe", "offline-model", "glimpse-observe")
 
@@ -228,22 +228,18 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
     # 6. Create fragment
     observation = decision.get("observation", "")
     if observation:
-        first_ts = messages[0].create_time
-        last_ts = messages[-1].create_time
-        fragment = ExperienceFragment(
-            persona_id=persona_id,
-            grain="glimpse",
-            source_chat_id=chat_id,
-            source_type="group",
-            time_start=first_ts,
-            time_end=last_ts,
-            content=observation,
-            mentioned_entity_ids=[],
-            model=settings.life_engine_model,
-        )
+        fid = new_id("f")
         async with get_session() as s:
-            await Q.insert_experience_fragment(s, fragment)
-        logger.info("[%s] Glimpse fragment: %s...", persona_id, observation[:60])
+            await Q.insert_fragment(
+                s,
+                id=fid,
+                persona_id=persona_id,
+                content=observation,
+                source="glimpse",
+                chat_id=chat_id,
+            )
+        await enqueue_fragment_vectorize(fid)
+        logger.info("[%s] Glimpse fragment %s: %s...", persona_id, fid, observation[:60])
 
     # 7. Proactive chat
     speak_reason = decision.get("speak_reason", "")
