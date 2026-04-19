@@ -1167,3 +1167,111 @@ async def get_abstracts_by_subject(
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+# --- Context injection helpers (Plan C) ---
+
+
+async def get_abstracts_by_subjects(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    subjects: list[str],
+    limit_per_subject: int = 5,
+) -> list[AbstractMemory]:
+    """Get abstracts whose subject is in given list (for always-on injection)."""
+    if not subjects:
+        return []
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject.in_(subjects))
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(
+            AbstractMemory.subject,
+            AbstractMemory.last_touched_at.desc(),
+        )
+    )
+    rows = list(result.scalars().all())
+    # Keep at most `limit_per_subject` per subject
+    by_subject: dict[str, list[AbstractMemory]] = {}
+    for r in rows:
+        by_subject.setdefault(r.subject, []).append(r)
+    out: list[AbstractMemory] = []
+    for subj in subjects:
+        out.extend(by_subject.get(subj, [])[:limit_per_subject])
+    return out
+
+
+async def get_recent_abstract_titles(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    limit: int = 10,
+) -> list[AbstractMemory]:
+    """Recently touched abstracts — for recall-index hint."""
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.last_touched_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def count_abstracts_per_subject_prefix(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    prefix: str,
+) -> int:
+    """Count non-forgotten abstracts whose subject starts with prefix."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject.like(f"{prefix}%"))
+        .where(AbstractMemory.clarity != "forgotten")
+    )
+    return int(result.scalar_one())
+
+
+async def get_recent_fragments_for_injection(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    chat_id: str | None,
+    trigger_user_id: str | None,
+    max_same_chat: int = 1,
+    max_other_chat: int = 2,
+    hours: int = 4,
+) -> list[Fragment]:
+    """短期注入规则：
+    - 当前 chat 最近 N 小时内的最新 1 条 fragment
+    - 其他 chat 最近 1-2 小时内、含 trigger_user 的 fragment（最多 2 条，每 chat 只取最新）
+    注意：当前实现简化 — 如果没有"fragment 里 trigger_user 标识"，先按 chat_id 过滤。
+    待 reviewer/afterthought 完善后可再加 trigger_user filter。
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    stmt = (
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.clarity != "forgotten")
+        .where(Fragment.created_at >= since)
+        .order_by(Fragment.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    all_recent = list(result.scalars().all())
+
+    same_chat: list[Fragment] = []
+    other_chats: dict[str, Fragment] = {}
+    for f in all_recent:
+        if chat_id and f.chat_id == chat_id:
+            if len(same_chat) < max_same_chat:
+                same_chat.append(f)
+        elif f.chat_id and f.chat_id not in other_chats:
+            other_chats[f.chat_id] = f
+
+    other_list = list(other_chats.values())[:max_other_chat]
+    return same_chat + other_list
