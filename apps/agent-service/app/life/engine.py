@@ -1,25 +1,24 @@
-"""Life Engine -- every-minute tick that decides what Chiwei is doing.
+"""Life Engine — every-minute tick that decides what Chiwei is doing.
 
-Each tick: load latest state -> check skip_until -> LLM decides next activity
-+ mood -> reviewer checks plausibility -> persist new state row (append-only).
+Each tick: load prev state → LLM decides via commit_life_state tool
+(with §9.5 hard validations). Append-only.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
+from langchain.tools import tool
 from langchain_core.messages import HumanMessage
 
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
 from app.data import queries as Q
 from app.data.session import get_session
+from app.life.tool import CommitResult, commit_life_state_impl
 
 _LIFE_TICK_CFG = AgentConfig("life_engine_tick", "offline-model", "life-tick")
-_TICK_REVIEWER_CFG = AgentConfig(
-    "life_tick_reviewer", "offline-model", "life-tick-reviewer"
-)
 
 logger = logging.getLogger(__name__)
 
@@ -28,27 +27,15 @@ CST = timezone(timedelta(hours=8))
 MAX_TICK_ATTEMPTS = 2
 
 
-# ---------------------------------------------------------------------------
-# Context builders
-# ---------------------------------------------------------------------------
-
-
+# --- Activity context builder (unchanged from prev version) ---
 async def _build_activity_context(persona_id: str, now: datetime) -> tuple[str, str]:
-    """Aggregate today's activity timeline, return (duration_text, timeline_text).
-
-    Every state entry is shown with full content — no truncation.
-    Consecutive same-type segments are merged but show time range and duration.
-    """
+    """Aggregate today's activity timeline. Return (duration_text, timeline_text)."""
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
     async with get_session() as s:
         rows = await Q.find_today_activity_states(s, persona_id, today_start)
-
     if not rows:
         return "", "(today just started)"
 
-    # Merge consecutive segments with the same activity_type
-    # Keep: start/end time, and the LAST state (most recent, full content)
     segments: list[dict] = []
     for row in rows:
         if segments and segments[-1]["type"] == row.activity_type:
@@ -73,205 +60,76 @@ async def _build_activity_context(persona_id: str, now: datetime) -> tuple[str, 
 
     lines = []
     for seg in segments:
-        s = seg["start"].astimezone(CST).strftime("%H:%M")
-        e = seg["end"].astimezone(CST).strftime("%H:%M")
+        s_str = seg["start"].astimezone(CST).strftime("%H:%M")
+        e_str = seg["end"].astimezone(CST).strftime("%H:%M")
         dur = int((seg["end"] - seg["start"]).total_seconds() / 60)
         if dur > 0:
-            lines.append(f"{s}~{e} {seg['type']}（{dur}分钟）：{seg['desc']}")
+            lines.append(f"{s_str}~{e_str} {seg['type']}（{dur}分钟）：{seg['desc']}")
         else:
-            lines.append(f"{s} {seg['type']}：{seg['desc']}")
+            lines.append(f"{s_str} {seg['type']}：{seg['desc']}")
     return duration_text, "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Wake-me-at parser
-# ---------------------------------------------------------------------------
+# --- Tool factory ---
+def _make_commit_tool(
+    persona_id: str, now: datetime, prev_state: Any | None, captured: dict
+):
+    """Build a langchain @tool that the LLM calls to commit its decision.
 
-
-def parse_wake_me_at(value: str | None, now: datetime) -> datetime | None:
-    """Parse ``wake_me_at`` ``HH:MM`` into an aware datetime. None if absent."""
-    if not value or value == "null":
-        return None
-    try:
-        parts = value.strip().split(":")
-        hour, minute = int(parts[0]), int(parts[1])
-        wake = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if wake <= now:
-            wake += timedelta(days=1)
-        return wake
-    except (ValueError, IndexError):
-        logger.warning("Invalid wake_me_at: %s", value)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Tick response parser -- returns previous state on failure (bug-fix)
-# ---------------------------------------------------------------------------
-
-
-def parse_tick_response(
-    raw: str,
-    prev_state: dict,
-    now: datetime,
-) -> dict:
-    """Parse the JSON from LLM tick response.
-
-    On failure, return *prev_state* verbatim so no fields are lost
-    (the old code would drop ``activity_type`` on fallback).
+    `captured` is a mutable dict owned by the caller; the tool writes the result
+    under the "result" key. We don't use a module-level singleton because tick
+    may run concurrently for different personas.
     """
-    try:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            data = json.loads(raw[start:end])
-            return {
-                "current_state": data.get("current_state", prev_state["current_state"]),
-                "activity_type": data.get(
-                    "activity_type", prev_state.get("activity_type", "")
-                ),
-                "response_mood": data.get("response_mood", prev_state["response_mood"]),
-                "reasoning": data.get("reasoning"),
-                "skip_until": parse_wake_me_at(data.get("wake_me_at"), now),
-            }
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        logger.warning("Failed to parse tick response: %s, raw=%s", exc, raw[:200])
 
-    # Bug-fix: return the previous full state instead of a lossy fallback
-    return {**prev_state, "reasoning": None, "skip_until": None}
-
-
-# ---------------------------------------------------------------------------
-# Reviewer
-# ---------------------------------------------------------------------------
-
-
-async def _review_tick(
-    tick_output: dict,
-    prev_activity: str,
-    duration_minutes: int,
-    schedule_text: str,
-    current_time: str,
-) -> str | None:
-    """Review tick output for plausibility. Returns feedback string if rejected, None if OK."""
-    result = await Agent(_TICK_REVIEWER_CFG).run(
-        messages=[HumanMessage(content="审核状态更新")],
-        prompt_vars={
-            "current_time": current_time,
-            "prev_activity": prev_activity,
-            "duration_minutes": str(duration_minutes),
-            "new_activity": tick_output["activity_type"],
-            "new_state": tick_output["current_state"],
-            "schedule": schedule_text,
-        },
-    )
-    raw = extract_text(result.content).strip()
-
-    if raw.upper().startswith("PASS"):
-        return None
-    return raw
-
-
-# ---------------------------------------------------------------------------
-# Life Engine
-# ---------------------------------------------------------------------------
-
-
-async def tick(persona_id: str, *, dry_run: bool = False, force: bool = False) -> dict | None:
-    """One heartbeat: check skip -> LLM decision -> reviewer -> persist.
-
-    ``dry_run=True`` calls the LLM but does not write to DB.
-    ``force=True`` ignores skip_until and persists.
-    """
-    async with get_session() as s:
-        row = await Q.find_latest_life_state(s, persona_id)
-
-    now = datetime.now(CST)
-
-    if row:
-        prev_state = {
-            "current_state": row.current_state,
-            "activity_type": row.activity_type or "",
-            "response_mood": row.response_mood,
-        }
-        skip_until = row.skip_until
-    else:
-        prev_state = {
-            "current_state": "（新的一天）",
-            "activity_type": "",
-            "response_mood": "",
-        }
-        skip_until = None
-
-    # Skip check (dry_run and force ignore skip)
-    if not dry_run and not force and skip_until and now < skip_until:
-        return None
-
-    new, schedule_text, duration_minutes = await _think(prev_state, now, persona_id)
-
-    # Reviewer loop
-    for attempt in range(MAX_TICK_ATTEMPTS):
-        feedback = await _review_tick(
-            tick_output=new,
-            prev_activity=prev_state.get("activity_type", ""),
-            duration_minutes=duration_minutes,
-            schedule_text=schedule_text,
-            current_time=now.strftime("%H:%M"),
-        )
-        if feedback is None:
-            break
-
-        logger.info(
-            "[%s] tick reviewer rejected (attempt %d): %s",
-            persona_id,
-            attempt + 1,
-            feedback[:100],
-        )
-        # Retry with feedback
-        new, _, _ = await _think(
-            prev_state, now, persona_id,
-            reviewer_feedback=feedback,
-        )
-
-    if dry_run:
-        return new
-
-    async with get_session() as s:
-        await Q.insert_life_state(
-            s,
+    @tool
+    async def commit_life_state(
+        activity_type: str,
+        current_state: str,
+        response_mood: str,
+        state_end_at: str,
+        skip_until: str | None = None,
+        reasoning: str | None = None,
+    ) -> str:
+        """Commit your current life state to memory."""
+        try:
+            end = datetime.fromisoformat(state_end_at)
+            skip = datetime.fromisoformat(skip_until) if skip_until else None
+        except (TypeError, ValueError) as e:
+            return f"时间格式错误：{e}"
+        result = await commit_life_state_impl(
             persona_id=persona_id,
-            current_state=new["current_state"],
-            activity_type=new["activity_type"],
-            response_mood=new["response_mood"],
-            skip_until=new["skip_until"],
-            reasoning=new.get("reasoning"),
+            activity_type=activity_type,
+            current_state=current_state,
+            response_mood=response_mood,
+            state_end_at=end,
+            skip_until=skip,
+            reasoning=reasoning,
+            now=now,
+            prev_state=prev_state,
         )
+        captured["result"] = result
+        if not result.ok:
+            return f"校验失败：{result.error}"
+        return f"状态已提交。id={result.life_state_id} is_refresh={result.is_refresh}"
 
-    logger.info(
-        "[%s] tick: %s (%s) skip_until=%s",
-        persona_id,
-        new["activity_type"],
-        new["current_state"][:50],
-        new["skip_until"],
-    )
-    return new
+    return commit_life_state
 
 
+# --- Think (tool-based) ---
 async def _think(
-    prev_state: dict,
+    prev_state_row: Any | None,
     now: datetime,
     persona_id: str,
     *,
-    reviewer_feedback: str = "",
-) -> tuple[dict, str, int]:
-    """Call LLM to decide the next life state.
+    tool_miss_feedback: str = "",
+) -> CommitResult | None:
+    """Call the LLM with the commit_life_state tool bound. Returns CommitResult.
 
-    Returns (parsed_state, schedule_text, duration_minutes).
+    Returns None if the LLM didn't call the tool.
     """
     from app.memory._persona import load_persona
 
     pc = await load_persona(persona_id)
-    persona_name = pc.display_name
-    persona_lite = pc.persona_lite
 
     today = now.strftime("%Y-%m-%d")
     async with get_session() as s:
@@ -280,15 +138,16 @@ async def _think(
 
     duration_text, timeline_text = await _build_activity_context(persona_id, now)
 
-    # Calculate current activity duration for reviewer
-    duration_minutes = 0
-    if "分钟了" in duration_text:
-        try:
-            duration_minutes = int(
-                duration_text.split("，")[1].replace("分钟了）", "")
-            )
-        except (IndexError, ValueError):
-            pass
+    prev_current_state = prev_state_row.current_state if prev_state_row else "（新的一天）"
+    prev_activity_type = (
+        prev_state_row.activity_type if prev_state_row and prev_state_row.activity_type else ""
+    )
+    prev_response_mood = prev_state_row.response_mood if prev_state_row else ""
+    prev_state_end_at = (
+        prev_state_row.state_end_at.isoformat()
+        if prev_state_row and prev_state_row.state_end_at
+        else ""
+    )
 
     async with get_session() as s:
         today_frags = await Q.find_today_fragments(
@@ -301,24 +160,75 @@ async def _think(
     )
 
     prompt_vars = {
-        "persona_name": persona_name,
-        "persona_lite": persona_lite,
+        "persona_name": pc.display_name,
+        "persona_lite": pc.persona_lite,
         "current_time": now.strftime("%H:%M"),
-        "current_state": prev_state["current_state"],
+        "current_state": prev_current_state,
+        "activity_type": prev_activity_type,
         "activity_duration": duration_text,
-        "response_mood": prev_state["response_mood"],
+        "response_mood": prev_response_mood,
         "schedule": schedule_text,
         "activity_timeline": timeline_text,
         "recent_experiences": frag_text,
+        "prev_state_end_at": prev_state_end_at,
     }
 
     content = "更新生活状态"
-    if reviewer_feedback:
-        content = f"更新生活状态\n\n上一次的输出被审核打回了，原因：{reviewer_feedback}\n请重新生成。"
+    if tool_miss_feedback:
+        content = f"更新生活状态\n\n{tool_miss_feedback}"
 
-    result = await Agent(_LIFE_TICK_CFG).run(
+    captured: dict = {}
+    tool_instance = _make_commit_tool(persona_id, now, prev_state_row, captured)
+
+    await Agent(_LIFE_TICK_CFG, tools=[tool_instance]).run(
         messages=[HumanMessage(content=content)],
         prompt_vars=prompt_vars,
     )
-    raw = extract_text(result.content)
-    return parse_tick_response(raw, prev_state, now), schedule_text, duration_minutes
+    return captured.get("result")
+
+
+# --- Public tick entry ---
+async def tick(
+    persona_id: str,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+) -> CommitResult | None:
+    """One heartbeat. Returns CommitResult on success, None on tool-miss / skip.
+
+    `dry_run` is currently a no-op at the engine layer — the tool persists on
+    its own. Callers can still pass it for compatibility; it's accepted but not
+    honoured (historical behavior was dry=don't-write, but tool-based flow has
+    no separate persist step).
+    `force=True` ignores skip_until.
+    """
+    async with get_session() as s:
+        row = await Q.find_latest_life_state(s, persona_id)
+
+    now = datetime.now(CST)
+
+    if not force and row and row.skip_until and now < row.skip_until:
+        return None
+
+    for attempt in range(MAX_TICK_ATTEMPTS):
+        feedback = "" if attempt == 0 else "上一次你没有调用 commit_life_state tool，请务必通过它提交结果。"
+        result = await _think(row, now, persona_id, tool_miss_feedback=feedback)
+        if result is not None:
+            break
+        logger.info(
+            "[%s] tick: LLM did not call tool (attempt %d)", persona_id, attempt + 1
+        )
+    else:
+        return None
+
+    if not result.ok:
+        logger.warning(
+            "[%s] tick: commit failed validation: %s", persona_id, result.error
+        )
+        return result
+
+    logger.info(
+        "[%s] tick committed: id=%s is_refresh=%s",
+        persona_id, result.life_state_id, result.is_refresh,
+    )
+    return result
