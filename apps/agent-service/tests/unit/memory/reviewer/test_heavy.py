@@ -137,18 +137,16 @@ async def test_run_heavy_review_iterates_personas():
 
 def test_life_state_formatter_output():
     """Verify the formatter string contains key fields."""
-    from app.memory.reviewer.heavy import run_heavy_review_for_persona as _fn
-
     state = MagicMock()
     state.created_at = datetime(2026, 4, 19, 14, 30, tzinfo=CST)
     state.activity_type = "relaxing"
     state.current_state = "x" * 200  # 200 chars → truncated at 80
     state.response_mood = "happy"
 
-    def fmt_life(l):
+    def fmt_life(ls):
         return (
-            f"- {l.created_at.isoformat()} [{l.activity_type}] "
-            f"{l.current_state[:80]} mood={l.response_mood}"
+            f"- {ls.created_at.isoformat()} [{ls.activity_type}] "
+            f"{ls.current_state[:80]} mood={ls.response_mood}"
         )
 
     result = fmt_life(state)

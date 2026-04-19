@@ -72,10 +72,10 @@ async def run_heavy_review_for_persona(persona_id: str) -> None:
     def fmt_abs(a):
         return f"- [{a.id} subject={a.subject}] {a.content[:200]}"
 
-    def fmt_life(l):
+    def fmt_life(ls):
         return (
-            f"- {l.created_at.isoformat()} [{l.activity_type}] "
-            f"{l.current_state[:80]} mood={l.response_mood}"
+            f"- {ls.created_at.isoformat()} [{ls.activity_type}] "
+            f"{ls.current_state[:80]} mood={ls.response_mood}"
         )
 
     def fmt_sched(sr):
@@ -97,7 +97,7 @@ async def run_heavy_review_for_persona(persona_id: str) -> None:
         now=now,
         fragments_text="\n".join(fmt_frag(f) for f in fragments),
         abstracts_text="\n".join(fmt_abs(a) for a in abstracts),
-        life_states_text="\n".join(fmt_life(l) for l in life_states),
+        life_states_text="\n".join(fmt_life(ls) for ls in life_states),
         schedule_text="\n".join(fmt_sched(sr) for sr in schedules),
     )
 
