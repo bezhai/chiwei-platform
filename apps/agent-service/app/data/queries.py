@@ -1275,3 +1275,16 @@ async def get_recent_fragments_for_injection(
 
     other_list = list(other_chats.values())[:max_other_chat]
     return same_chat + other_list
+
+
+# --- Schedule ---
+
+
+async def get_schedule_revision_by_id(
+    session: AsyncSession, revision_id: str
+) -> ScheduleRevision | None:
+    """Fetch a schedule_revision by id."""
+    result = await session.execute(
+        select(ScheduleRevision).where(ScheduleRevision.id == revision_id)
+    )
+    return result.scalar_one_or_none()

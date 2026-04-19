@@ -22,6 +22,7 @@ from app.workers.cron import (
     cron_glimpse,
     cron_life_engine_tick,
 )
+from app.workers.state_sync_worker import sync_life_state_after_schedule
 from app.workers.vectorize import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class WorkerSettings:
         database=0,
     )
 
-    functions: list = []
+    functions: list = [sync_life_state_after_schedule]
 
     # Cron schedule (CST timezone, night pipeline sequence)
     # NOTE: ArQ default job_timeout=300s is too short for multi-persona LLM
