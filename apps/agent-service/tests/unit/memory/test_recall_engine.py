@@ -92,7 +92,9 @@ def recall_mocks(monkeypatch):
                 if idx < len(state.fragment_ids_per_query)
                 else []
             )
-        return MagicMock(points=[MagicMock(id=x) for x in ids])
+        return MagicMock(
+            points=[MagicMock(id=f"uuid-{x}", payload={"db_id": x}) for x in ids]
+        )
 
     qdrant_mock.client.query_points = AsyncMock(side_effect=fake_query_points)
     state.qdrant = qdrant_mock

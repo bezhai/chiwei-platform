@@ -73,8 +73,10 @@ async def _vector_search(
         query=query_vec,
         query_filter=_persona_filter(persona_id),
         limit=k,
+        with_payload=["db_id"],
     )
-    return [str(p.id) for p in res.points]
+    # Qdrant ids are UUID5-derived; the prefixed DB id lives in payload.db_id
+    return [str(p.payload["db_id"]) for p in res.points if p.payload and p.payload.get("db_id")]
 
 
 async def run_recall(

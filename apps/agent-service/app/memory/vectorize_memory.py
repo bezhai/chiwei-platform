@@ -1,11 +1,16 @@
 """Memory v4 vectorization — embed and upsert fragments/abstracts to Qdrant.
 
 Called by vectorize-worker when consuming memory_vectorize tasks.
+
+Qdrant point ids must be uint or UUID, so we use a deterministic ``uuid5``
+derived from the prefixed DB id (``f_xxx`` / ``a_xxx``) and stash the original
+id in the payload under ``db_id`` for recall-side lookup.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from app.agent.embedding import embed_dense
@@ -18,6 +23,14 @@ logger = logging.getLogger(__name__)
 COLLECTION_FRAGMENT = "memory_fragment"
 COLLECTION_ABSTRACT = "memory_abstract"
 EMBEDDING_MODEL_ID = "embedding-model"
+
+_QDRANT_ID_NS = uuid.UUID("d4e7f9a1-1234-5678-9abc-abcdef012345")
+
+
+def _qdrant_id(db_id: str) -> str:
+    """Map a prefixed DB id (``f_xxx`` / ``a_xxx``) to a deterministic UUID
+    that satisfies Qdrant's point-id format requirement."""
+    return str(uuid.uuid5(_QDRANT_ID_NS, db_id))
 
 
 async def vectorize_fragment(fragment_id: str) -> bool:
@@ -34,6 +47,7 @@ async def vectorize_fragment(fragment_id: str) -> bool:
     vector = await embed_dense(EMBEDDING_MODEL_ID, text=fragment.content)
 
     payload: dict[str, Any] = {
+        "db_id": fragment.id,
         "persona_id": fragment.persona_id,
         "source": fragment.source,
         "chat_id": fragment.chat_id,
@@ -43,7 +57,7 @@ async def vectorize_fragment(fragment_id: str) -> bool:
     ok = await qdrant.upsert_vectors(
         collection=COLLECTION_FRAGMENT,
         vectors=[vector],
-        ids=[fragment.id],
+        ids=[_qdrant_id(fragment.id)],
         payloads=[payload],
     )
     if not ok:
@@ -67,6 +81,7 @@ async def vectorize_abstract(abstract_id: str) -> bool:
     vector = await embed_dense(EMBEDDING_MODEL_ID, text=text)
 
     payload: dict[str, Any] = {
+        "db_id": a.id,
         "persona_id": a.persona_id,
         "subject": a.subject,
         "created_by": a.created_by,
@@ -76,7 +91,7 @@ async def vectorize_abstract(abstract_id: str) -> bool:
     ok = await qdrant.upsert_vectors(
         collection=COLLECTION_ABSTRACT,
         vectors=[vector],
-        ids=[a.id],
+        ids=[_qdrant_id(a.id)],
         payloads=[payload],
     )
     if not ok:
