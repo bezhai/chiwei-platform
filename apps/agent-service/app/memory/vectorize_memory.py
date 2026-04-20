@@ -62,6 +62,7 @@ async def vectorize_fragment(fragment_id: str) -> bool:
     )
     if not ok:
         raise RuntimeError(f"Qdrant upsert failed for fragment {fragment_id}")
+    logger.info("vectorize_fragment ok: %s (source=%s)", fragment.id, fragment.source)
     return True
 
 
@@ -96,6 +97,7 @@ async def vectorize_abstract(abstract_id: str) -> bool:
     )
     if not ok:
         raise RuntimeError(f"Qdrant upsert failed for abstract {abstract_id}")
+    logger.info("vectorize_abstract ok: %s (subject=%s)", a.id, a.subject)
     return True
 
 
