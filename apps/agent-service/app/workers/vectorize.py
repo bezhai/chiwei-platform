@@ -320,6 +320,10 @@ async def cron_scan_pending_messages(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from inner_shared.logger import setup_logging
+
+    setup_logging(log_dir="/logs/agent-service", log_file="vectorize-worker.log")
+    logger.info("vectorize-worker started, file logging enabled")
 
     async def _main():
         await start_vectorize_consumer()
