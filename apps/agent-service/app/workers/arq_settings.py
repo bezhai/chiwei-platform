@@ -50,6 +50,35 @@ async def task_executor_job(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _run_memory_v4_migration_once() -> None:
+    """One-shot memory v4 migrations, gated by redis flag so each kind runs once.
+
+    After cutover the first arq-worker startup in prod triggers the relationship
+    and fragment migrations. Set ``memory_v4:migration:done:<kind>`` in redis
+    manually to re-run a specific kind.
+    """
+    from app.infra.redis import get_redis
+
+    redis = await get_redis()
+    for kind in ("relationship", "fragment"):
+        key = f"memory_v4:migration:done:{kind}"
+        if await redis.get(key):
+            logger.info("memory v4 migration (%s): already done, skip", kind)
+            continue
+        try:
+            logger.info("memory v4 migration (%s): starting", kind)
+            if kind == "relationship":
+                from scripts.migrate_relationship_to_abstract import main
+                await main(dry_run=False, limit=None)
+            else:
+                from scripts.migrate_fragment_to_fragment import main
+                await main(dry_run=False, limit=None, days=7)
+            await redis.set(key, "1")
+            logger.info("memory v4 migration (%s): done", kind)
+        except Exception:
+            logger.exception("memory v4 migration (%s): failed", kind)
+
+
 async def on_startup(ctx) -> None:
     """Worker startup: configure logging, connect MQ, seed voice."""
     setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
@@ -63,6 +92,9 @@ async def on_startup(ctx) -> None:
 
     # Generate voice on startup for all personas
     asyncio.create_task(cron_generate_voice(None))
+
+    # One-shot memory v4 migrations (runs once per redis flag; cutover path)
+    asyncio.create_task(_run_memory_v4_migration_once())
 
 
 # ---------------------------------------------------------------------------
