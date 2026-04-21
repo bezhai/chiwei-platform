@@ -89,17 +89,21 @@ async def build_chat_context(
 
     chat_type = l1_results[-1].chat_type or "p2p"
 
-    # --- Proactive: filter synthetic messages ---
-    proactive_msgs = [m for m in l1_results if m.user_id == PROACTIVE_USER_ID]
-    is_proactive = len(proactive_msgs) > 0
+    current_msg = next((m for m in l1_results if m.message_id == message_id), None)
+    is_proactive = bool(current_msg and current_msg.user_id == PROACTIVE_USER_ID)
     proactive_stimulus = ""
     proactive_target_id = ""
 
-    if proactive_msgs:
-        l1_results = [m for m in l1_results if m.user_id != PROACTIVE_USER_ID]
-        latest = proactive_msgs[-1]
-        proactive_stimulus = parse_content(latest.content).render()
-        proactive_target_id = latest.reply_message_id or ""
+    # Synthetic proactive triggers are internal bookkeeping and should never
+    # appear in the visible chat history, regardless of the current trigger type.
+    l1_results = [m for m in l1_results if m.user_id != PROACTIVE_USER_ID]
+
+    if is_proactive:
+        if not current_msg:
+            logger.warning("proactive trigger missing from quick_search: %s", message_id)
+            return ChatContext([], None, "", "", "group", "", "", [])
+        proactive_stimulus = parse_content(current_msg.content).render()
+        proactive_target_id = current_msg.reply_message_id or ""
         if not l1_results:
             logger.warning("proactive scan: no real messages after filtering")
             return ChatContext([], None, "", "", "group", "", "", [])
