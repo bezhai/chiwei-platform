@@ -15,8 +15,8 @@ from app.agent.core import Agent, AgentConfig, extract_text
 from app.data.queries import (
     find_latest_life_state,
     find_plan_for_period,
-    find_today_fragments,
     insert_reply_style,
+    list_today_fragments,
 )
 from app.data.session import get_session
 from app.memory._persona import load_persona
@@ -52,7 +52,9 @@ async def generate_voice(
     schedule_text = schedule.content if schedule else "（今天没有安排）"
 
     async with get_session() as s:
-        frags = await find_today_fragments(s, persona_id, grains=["conversation"])
+        frags = await list_today_fragments(
+            s, persona_id, sources=["afterthought"]
+        )
     frag_text = (
         "\n".join(f.content[:100] for f in frags[-3:])
         if frags

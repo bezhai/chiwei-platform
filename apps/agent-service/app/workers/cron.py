@@ -7,6 +7,7 @@ Business logic lives in ``app.memory.*``, ``app.life.*``.
 from __future__ import annotations
 
 import logging
+
 from app.workers.common import cron_error_handler, for_each_persona, prod_only
 
 logger = logging.getLogger(__name__)
@@ -26,24 +27,16 @@ async def cron_generate_voice(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dreams (daily + weekly compression)
+# Heavy reviewer (daily consolidation, replaces dream compression)
 # ---------------------------------------------------------------------------
 
 
 @cron_error_handler()
 @prod_only
 async def cron_generate_dreams(ctx) -> None:
-    from app.memory.dreams import run_daily_dreams
+    from app.memory.reviewer.heavy import run_heavy_review
 
-    await run_daily_dreams()
-
-
-@cron_error_handler()
-@prod_only
-async def cron_generate_weekly_dreams(ctx) -> None:
-    from app.memory.dreams import run_weekly_dreams
-
-    await run_weekly_dreams()
+    await run_heavy_review()
 
 
 # ---------------------------------------------------------------------------
@@ -113,3 +106,30 @@ async def cron_glimpse(ctx) -> None:
                 await run_glimpse(persona_id, chat_id)
         except Exception:
             logger.exception("[%s] Glimpse cron failed", persona_id)
+
+
+# ---------------------------------------------------------------------------
+# Memory Reviewer — light (P0 window scan)
+# ---------------------------------------------------------------------------
+
+
+@cron_error_handler()
+@prod_only
+async def cron_memory_reviewer_light_day(ctx) -> None:
+    from app.memory.reviewer.light import run_light_review
+
+    async def _run(pid: str) -> None:
+        await run_light_review(persona_id=pid, window_minutes=30)
+
+    await for_each_persona(_run, label="memory_reviewer_light_day")
+
+
+@cron_error_handler()
+@prod_only
+async def cron_memory_reviewer_light_night(ctx) -> None:
+    from app.memory.reviewer.light import run_light_review
+
+    async def _run(pid: str) -> None:
+        await run_light_review(persona_id=pid, window_minutes=60)
+
+    await for_each_persona(_run, label="memory_reviewer_light_night")

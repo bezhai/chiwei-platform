@@ -2,7 +2,7 @@
 
 Inherits ``DebouncedPipeline``:
   Phase 1: collect messages, debounce 300 s, force flush at 15.
-  Phase 2: LLM generates a *conversation*-grain ``ExperienceFragment``.
+  Phase 2: LLM generates a *conversation*-grain Fragment (v4 table).
 
 Each ``(chat_id, persona_id)`` pair is managed independently.
 """
@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from langchain_core.messages import HumanMessage
 
 from app.agent.core import Agent, AgentConfig, extract_text
-from app.data.models import ExperienceFragment
+from app.data.ids import new_id
 from app.data.queries import (
     find_group_name,
     find_messages_in_range,
@@ -26,6 +26,7 @@ from app.data.session import get_session
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.memory.debounce import DebouncedPipeline
+from app.memory.vectorize_memory import enqueue_fragment_vectorize
 
 _AFTERTHOUGHT_CFG = AgentConfig(
     "afterthought_conversation", "diary-model", "afterthought"
@@ -65,7 +66,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
     2. Build scene description (group name / p2p partner)
     3. Format timeline
     4. Call LLM to generate fragment content
-    5. Persist ExperienceFragment
+    5. Persist v4 Fragment and enqueue vectorize
     6. Fire relationship extraction (non-blocking)
     """
     now = datetime.now(_CST)
@@ -110,18 +111,17 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         )
         return
 
-    fragment = ExperienceFragment(
-        persona_id=persona_id,
-        grain="conversation",
-        source_chat_id=chat_id,
-        source_type=chat_type,
-        time_start=start_ts,
-        time_end=end_ts,
-        content=content,
-        mentioned_entity_ids=[],
-    )
+    fid = new_id("f")
     async with get_session() as s:
-        await insert_fragment(s, fragment)
+        await insert_fragment(
+            s,
+            id=fid,
+            persona_id=persona_id,
+            content=content,
+            source="afterthought",
+            chat_id=chat_id,
+        )
+    await enqueue_fragment_vectorize(fid)
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,

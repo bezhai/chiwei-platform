@@ -185,14 +185,21 @@ async def test_glimpse_creates_fragment_and_state():
                 new_callable=AsyncMock,
                 return_value="番剧群",
             ),
+            patch(
+                f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             result = await run_glimpse("akao-001", "oc_test")
 
             assert result == GlimpseResult.FRAGMENT_CREATED
             mock_frag.assert_called_once()
-            # fragment grain should be "glimpse"
-            frag_arg = mock_frag.call_args[0][1]
-            assert frag_arg.grain == "glimpse"
+            kwargs = mock_frag.call_args.kwargs
+            assert kwargs["source"] == "glimpse"
+            assert kwargs["persona_id"] == "akao-001"
+            assert kwargs["chat_id"] == "oc_test"
+            assert kwargs["content"] == "群里在聊新番"
+            assert kwargs["id"].startswith("f_")
+            mock_enqueue.assert_awaited_once()
 
             mock_state.assert_called_once()
 
@@ -266,6 +273,7 @@ async def test_glimpse_not_interesting_still_writes_state():
                 new_callable=AsyncMock,
                 return_value="番剧群",
             ),
+            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
         ):
             result = await run_glimpse("akao-001", "oc_test")
 
@@ -337,6 +345,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
+            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
             patch(
                 f"{MODULE}.load_persona",
                 new_callable=AsyncMock,

@@ -30,8 +30,9 @@ from app.data.queries import (
 from app.data.session import get_session
 from app.infra.image import image_client
 from app.infra.qdrant import qdrant
-from app.infra.rabbitmq import VECTORIZE, current_lane, lane_queue, mq
+from app.infra.rabbitmq import MEMORY_VECTORIZE, VECTORIZE, current_lane, lane_queue, mq
 from app.infra.redis import get_redis
+from app.memory.vectorize_memory import vectorize_abstract, vectorize_fragment
 from app.workers.common import cron_error_handler, mq_error_handler
 
 logger = logging.getLogger(__name__)
@@ -215,14 +216,45 @@ async def handle_vectorize(message: AbstractIncomingMessage) -> None:
         await process_message(message_id)
 
 
+# ---------------------------------------------------------------------------
+# v4 memory vectorization consumer
+# ---------------------------------------------------------------------------
+
+
+@mq_error_handler()
+async def handle_memory_vectorize(message: AbstractIncomingMessage) -> None:
+    """Consume memory_vectorize queue.
+
+    Payload: {"kind": "fragment"|"abstract", "id": "<pk>"}
+    """
+    async with message.process(requeue=False):
+        data = json.loads(message.body.decode())
+        kind = data.get("kind")
+        node_id = data.get("id")
+        if not node_id:
+            logger.warning("memory_vectorize missing id: %s", data)
+            return
+        if kind == "fragment":
+            await vectorize_fragment(node_id)
+        elif kind == "abstract":
+            await vectorize_abstract(node_id)
+        else:
+            logger.warning("memory_vectorize unknown kind %s", kind)
+
+
 async def start_vectorize_consumer() -> None:
-    """Connect MQ and start consuming the vectorize queue."""
+    """Connect MQ and start consuming vectorize + memory_vectorize queues."""
     await mq.connect()
     await mq.declare_topology()
     lane = current_lane()
-    queue = lane_queue(VECTORIZE.queue, lane)
-    await mq.consume(queue, handle_vectorize)
-    logger.info("Vectorize consumer started (queue=%s)", queue)
+
+    v_queue = lane_queue(VECTORIZE.queue, lane)
+    await mq.consume(v_queue, handle_vectorize)
+    logger.info("Vectorize consumer started (queue=%s)", v_queue)
+
+    mv_queue = lane_queue(MEMORY_VECTORIZE.queue, lane)
+    await mq.consume(mv_queue, handle_memory_vectorize)
+    logger.info("Memory-vectorize consumer started (queue=%s)", mv_queue)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +320,10 @@ async def cron_scan_pending_messages(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from inner_shared.logger import setup_logging
+
+    setup_logging(log_dir="/logs/agent-service", log_file="vectorize-worker.log")
+    logger.info("vectorize-worker started, file logging enabled")
 
     async def _main():
         await start_vectorize_consumer()

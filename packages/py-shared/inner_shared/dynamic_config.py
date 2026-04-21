@@ -12,6 +12,7 @@ DynamicConfig — 运行时动态配置 SDK (Python)
 """
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -116,3 +117,11 @@ class DynamicConfig:
         if raw == "":
             return default
         return raw.lower() in ("true", "1", "yes")
+
+
+# Module-level singleton — lane_provider defaults to None (resolves to "prod").
+# Apps that need lane-aware config should call dynamic_config.set_lane_provider()
+# after setting up their context middleware.
+dynamic_config = DynamicConfig(
+    paas_engine_url=os.getenv("PAAS_ENGINE_URL", "http://paas-engine:8080"),
+)

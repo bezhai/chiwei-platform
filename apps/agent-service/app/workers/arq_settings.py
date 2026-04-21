@@ -18,10 +18,12 @@ from app.workers.cron import (
     cron_generate_daily_plan,
     cron_generate_dreams,
     cron_generate_voice,
-    cron_generate_weekly_dreams,
     cron_glimpse,
     cron_life_engine_tick,
+    cron_memory_reviewer_light_day,
+    cron_memory_reviewer_light_night,
 )
+from app.workers.state_sync_worker import sync_life_state_after_schedule
 from app.workers.vectorize import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
@@ -86,7 +88,7 @@ class WorkerSettings:
         database=0,
     )
 
-    functions: list = []
+    functions: list = [sync_life_state_after_schedule]
 
     # Cron schedule (CST timezone, night pipeline sequence)
     # NOTE: ArQ default job_timeout=300s is too short for multi-persona LLM
@@ -102,15 +104,25 @@ class WorkerSettings:
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             timeout=120,
         ),
+        # 1d. Memory reviewer — light (daytime, every 30min, 08:00-21:00 CST)
+        cron(
+            cron_memory_reviewer_light_day,
+            hour=set(range(8, 22)),  # 8..21
+            minute={0, 30},
+            timeout=600,
+        ),
+        # 1e. Memory reviewer — light (nighttime, hourly, skips 03:00 = heavy slot)
+        cron(
+            cron_memory_reviewer_light_night,
+            hour={22, 23, 0, 1, 2, 4, 5, 6, 7},
+            minute={0},
+            timeout=600,
+        ),
         # 2. Vectorize pending scan: every 10 minutes
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
-        # 3. Daily dream: CST 03:00
+        # 3. Heavy reviewer (daily consolidation): CST 03:00
         cron(cron_generate_dreams, hour={3}, minute={0}, timeout=3600),
-        # 4. Weekly dream: Monday CST 04:00
-        cron(
-            cron_generate_weekly_dreams, weekday={0}, hour={4}, minute={0}, timeout=1800
-        ),
-        # 5. Daily plan (Agent Team pipeline): CST 05:00 (after dreams)
+        # 4. Daily plan (Agent Team pipeline): CST 05:00 (after heavy review)
         cron(cron_generate_daily_plan, hour={5}, minute={0}, timeout=3600),
         # 6. Voice: CST 08:00-23:00 every hour
         cron(cron_generate_voice, hour=set(range(8, 24)), minute={0}, timeout=1800),

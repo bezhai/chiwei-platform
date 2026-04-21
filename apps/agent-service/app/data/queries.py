@@ -15,27 +15,32 @@ Sections:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import (
+    AbstractMemory,
     AkaoSchedule,
     BotPersona,
     ConversationMessage,
     ExperienceFragment,
+    Fragment,
     GlimpseState,
     LarkBaseChatInfo,
     LarkGroupChatInfo,
     LarkGroupMember,
     LarkUser,
     LifeEngineState,
+    MemoryEdge,
     ModelMapping,
     ModelProvider,
+    Note,
     RelationshipMemoryV2,
     ReplyStyleLog,
+    ScheduleRevision,
 )
 
 # CST timezone for date boundary calculations
@@ -163,25 +168,19 @@ async def find_cross_chat_messages(
     user_id: str,
     bot_names: list[str],
     exclude_chat_id: str,
-    allowed_group_ids: list[str],
     since_ms: int,
+    excluded_chat_ids: list[str] | None = None,
 ) -> list[ConversationMessage]:
     """Fetch recent cross-chat interactions between a user and a persona.
 
-    Returns user messages + bot replies from allowed group chats and p2p chats.
-    Excludes the current chat.
+    Returns user messages + bot replies across all chat types (group + p2p).
+    Excludes the current chat and any blacklisted chat IDs.
     """
     stmt = (
         select(ConversationMessage)
         .where(ConversationMessage.chat_id != exclude_chat_id)
         .where(ConversationMessage.create_time >= since_ms)
         .where(ConversationMessage.bot_name.in_(bot_names))
-        .where(
-            or_(
-                ConversationMessage.chat_id.in_(allowed_group_ids),
-                ConversationMessage.chat_type == "p2p",
-            )
-        )
         .where(
             or_(
                 # User's messages
@@ -193,6 +192,8 @@ async def find_cross_chat_messages(
         )
         .order_by(ConversationMessage.create_time.asc())
     )
+    if excluded_chat_ids:
+        stmt = stmt.where(~ConversationMessage.chat_id.in_(excluded_chat_ids))
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
@@ -552,18 +553,21 @@ async def insert_life_state(
     response_mood: str,
     skip_until: datetime | None,
     reasoning: str | None = None,
-) -> None:
-    """INSERT a new life engine state row (append-only)."""
-    session.add(
-        LifeEngineState(
-            persona_id=persona_id,
-            current_state=current_state,
-            activity_type=activity_type,
-            response_mood=response_mood,
-            reasoning=reasoning,
-            skip_until=skip_until,
-        )
+    state_end_at: datetime | None = None,
+) -> int:
+    """INSERT a new life engine state row (append-only). Returns the new row id."""
+    row = LifeEngineState(
+        persona_id=persona_id,
+        current_state=current_state,
+        activity_type=activity_type,
+        response_mood=response_mood,
+        reasoning=reasoning,
+        skip_until=skip_until,
+        state_end_at=state_end_at,
     )
+    session.add(row)
+    await session.flush()
+    return row.id
 
 
 async def find_today_activity_states(
@@ -584,7 +588,7 @@ async def find_today_activity_states(
 # --- Memory — fragments ---
 
 
-async def insert_fragment(
+async def insert_experience_fragment(
     session: AsyncSession, fragment: ExperienceFragment
 ) -> ExperienceFragment:
     """Insert an experience fragment, return it with populated id."""
@@ -635,6 +639,31 @@ async def find_today_fragments(
     return list(result.scalars().all())
 
 
+async def list_today_fragments(
+    session: AsyncSession,
+    persona_id: str,
+    *,
+    sources: list[str] | None = None,
+) -> list[Fragment]:
+    """Fetch v4 Fragments created today (CST 00:00+, ascending).
+
+    Replaces ``find_today_fragments`` for v4 readers (voice, engine tick).
+    Skips forgotten rows.
+    """
+    today_cst = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = (
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.created_at >= today_cst)
+        .where(Fragment.clarity != "forgotten")
+    )
+    if sources:
+        stmt = stmt.where(Fragment.source.in_(sources))
+    stmt = stmt.order_by(Fragment.created_at.asc())
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def find_fragments_in_date_range(
     session: AsyncSession,
     persona_id: str,
@@ -658,29 +687,6 @@ async def find_fragments_in_date_range(
         stmt = stmt.where(ExperienceFragment.grain.in_(grains))
     stmt = stmt.order_by(ExperienceFragment.created_at.asc())
     result = await session.execute(stmt)
-    return list(result.scalars().all())
-
-
-async def search_fragments_fts(
-    session: AsyncSession,
-    persona_id: str,
-    query: str,
-    *,
-    limit: int = 5,
-) -> list[ExperienceFragment]:
-    """Full-text search fragments using PostgreSQL simple dictionary."""
-    result = await session.execute(
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(
-            text(
-                "to_tsvector('simple', experience_fragment.content) "
-                "@@ plainto_tsquery('simple', :query)"
-            ).params(query=query)
-        )
-        .order_by(ExperienceFragment.created_at.desc())
-        .limit(limit)
-    )
     return list(result.scalars().all())
 
 
@@ -787,26 +793,6 @@ async def insert_relationship_memory(
     )
 
 
-async def find_latest_relationship_memory(
-    session: AsyncSession, persona_id: str, user_id: str
-) -> tuple[str, str] | None:
-    """Fetch the latest (core_facts, impression) for a user, or None."""
-    result = await session.execute(
-        select(
-            RelationshipMemoryV2.core_facts,
-            RelationshipMemoryV2.impression,
-        )
-        .where(RelationshipMemoryV2.persona_id == persona_id)
-        .where(RelationshipMemoryV2.user_id == user_id)
-        .order_by(RelationshipMemoryV2.version.desc(), RelationshipMemoryV2.id.desc())
-        .limit(1)
-    )
-    row = result.one_or_none()
-    if row is None:
-        return None
-    return (row.core_facts, row.impression)
-
-
 async def find_relationship_memories_batch(
     session: AsyncSession,
     persona_id: str,
@@ -902,3 +888,512 @@ async def find_group_members(
 
     result = await session.execute(stmt)
     return list(result.all())
+
+
+# --- Memory v4 — fragment / abstract_memory lookup ---
+
+
+async def get_fragment_by_id(
+    session: AsyncSession, fragment_id: str
+) -> Fragment | None:
+    """Fetch a v4 Fragment by primary key."""
+    result = await session.execute(select(Fragment).where(Fragment.id == fragment_id))
+    return result.scalar_one_or_none()
+
+
+async def get_abstract_by_id(
+    session: AsyncSession, abstract_id: str
+) -> AbstractMemory | None:
+    """Fetch a v4 AbstractMemory by primary key."""
+    result = await session.execute(
+        select(AbstractMemory).where(AbstractMemory.id == abstract_id)
+    )
+    return result.scalar_one_or_none()
+
+
+# --- Memory v4 — CRUD ---
+
+
+async def insert_fragment(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    source: str,
+    chat_id: str | None = None,
+    clarity: str = "clear",
+    created_at: datetime | None = None,
+) -> None:
+    f = Fragment(
+        id=id,
+        persona_id=persona_id,
+        content=content,
+        source=source,
+        chat_id=chat_id,
+        clarity=clarity,
+    )
+    if created_at is not None:
+        f.created_at = created_at
+        f.last_touched_at = created_at
+    session.add(f)
+
+
+async def touch_fragment(session: AsyncSession, fragment_id: str) -> None:
+    await session.execute(
+        update(Fragment)
+        .where(Fragment.id == fragment_id)
+        .values(last_touched_at=func.now())
+    )
+
+
+async def get_fragments_by_ids(
+    session: AsyncSession, ids: list[str]
+) -> list[Fragment]:
+    """Batch fetch fragments by id list. Preserves input order is NOT guaranteed."""
+    if not ids:
+        return []
+    result = await session.execute(
+        select(Fragment).where(Fragment.id.in_(ids))
+    )
+    return list(result.scalars().all())
+
+
+async def touch_fragments_bulk(session: AsyncSession, ids: list[str]) -> None:
+    """Update last_touched_at=NOW() for many fragments at once."""
+    if not ids:
+        return
+    await session.execute(
+        update(Fragment)
+        .where(Fragment.id.in_(ids))
+        .values(last_touched_at=func.now())
+    )
+
+
+async def insert_abstract_memory(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    subject: str,
+    content: str,
+    created_by: str,
+    clarity: str = "clear",
+) -> None:
+    a = AbstractMemory(
+        id=id,
+        persona_id=persona_id,
+        subject=subject,
+        content=content,
+        created_by=created_by,
+        clarity=clarity,
+    )
+    session.add(a)
+
+
+async def touch_abstract(session: AsyncSession, abstract_id: str) -> None:
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id == abstract_id)
+        .values(last_touched_at=func.now())
+    )
+
+
+async def touch_abstracts_bulk(session: AsyncSession, ids: list[str]) -> None:
+    """Update last_touched_at=NOW() for many abstracts at once."""
+    if not ids:
+        return
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id.in_(ids))
+        .values(last_touched_at=func.now())
+    )
+
+
+async def count_abstracts_by_persona(
+    session: AsyncSession, persona_id: str
+) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+    )
+    return int(result.scalar_one())
+
+
+async def insert_memory_edge(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    from_id: str,
+    from_type: str,
+    to_id: str,
+    to_type: str,
+    edge_type: str,
+    created_by: str,
+    reason: str | None = None,
+) -> None:
+    e = MemoryEdge(
+        id=id,
+        persona_id=persona_id,
+        from_id=from_id,
+        from_type=from_type,
+        to_id=to_id,
+        to_type=to_type,
+        edge_type=edge_type,
+        created_by=created_by,
+        reason=reason,
+    )
+    session.add(e)
+
+
+async def insert_note(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    when_at: datetime | None = None,
+) -> None:
+    n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
+    session.add(n)
+
+
+async def get_active_notes(
+    session: AsyncSession, persona_id: str
+) -> list[Note]:
+    result = await session.execute(
+        select(Note)
+        .where(Note.persona_id == persona_id)
+        .where(Note.resolved_at.is_(None))
+        .order_by(Note.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def resolve_note(
+    session: AsyncSession, *, note_id: str, resolution: str
+) -> None:
+    await session.execute(
+        update(Note)
+        .where(Note.id == note_id)
+        .values(resolved_at=func.now(), resolution=resolution)
+    )
+
+
+async def insert_schedule_revision(
+    session: AsyncSession,
+    *,
+    id: str,
+    persona_id: str,
+    content: str,
+    reason: str,
+    created_by: str,
+) -> None:
+    sr = ScheduleRevision(
+        id=id,
+        persona_id=persona_id,
+        content=content,
+        reason=reason,
+        created_by=created_by,
+    )
+    session.add(sr)
+
+
+async def get_current_schedule(
+    session: AsyncSession, persona_id: str
+) -> ScheduleRevision | None:
+    result = await session.execute(
+        select(ScheduleRevision)
+        .where(ScheduleRevision.persona_id == persona_id)
+        .order_by(ScheduleRevision.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# --- Memory v4 — reviewer mutations ---
+
+
+async def update_abstract_content_query(
+    session: AsyncSession, *, abstract_id: str, new_content: str
+) -> None:
+    await session.execute(
+        update(AbstractMemory)
+        .where(AbstractMemory.id == abstract_id)
+        .values(content=new_content, last_touched_at=func.now())
+    )
+
+
+async def set_clarity(
+    session: AsyncSession, *, node_id: str, node_type: str, clarity: str
+) -> None:
+    if node_type == "abstract":
+        await session.execute(
+            update(AbstractMemory)
+            .where(AbstractMemory.id == node_id)
+            .values(clarity=clarity, last_touched_at=func.now())
+        )
+    elif node_type == "fact":
+        await session.execute(
+            update(Fragment)
+            .where(Fragment.id == node_id)
+            .values(clarity=clarity, last_touched_at=func.now())
+        )
+    else:
+        raise ValueError(f"unknown node_type {node_type}")
+
+
+async def delete_fragment_query(
+    session: AsyncSession, *, fragment_id: str
+) -> None:
+    # cascade delete edges touching this fragment first
+    await session.execute(
+        MemoryEdge.__table__.delete().where(
+            or_(MemoryEdge.from_id == fragment_id, MemoryEdge.to_id == fragment_id)
+        )
+    )
+    await session.execute(
+        Fragment.__table__.delete().where(Fragment.id == fragment_id)
+    )
+
+
+async def delete_edge(
+    session: AsyncSession, *, edge_id: str
+) -> None:
+    await session.execute(
+        MemoryEdge.__table__.delete().where(MemoryEdge.id == edge_id)
+    )
+
+
+async def list_fragments_window(
+    session: AsyncSession, *, persona_id: str, since: datetime,
+) -> list[Fragment]:
+    result = await session.execute(
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.created_at >= since)
+        .where(Fragment.clarity != "forgotten")
+        .order_by(Fragment.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def list_abstracts_window(
+    session: AsyncSession, *, persona_id: str, since: datetime,
+) -> list[AbstractMemory]:
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.created_at >= since)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.created_at)
+    )
+    return list(result.scalars().all())
+
+
+# --- Memory v4 — graph traversal ---
+
+
+async def list_edges_to(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    to_id: str,
+    edge_type: str | None = None,
+) -> list[MemoryEdge]:
+    """List edges whose ``to_id`` matches, optionally filtered by edge_type."""
+    stmt = (
+        select(MemoryEdge)
+        .where(MemoryEdge.persona_id == persona_id)
+        .where(MemoryEdge.to_id == to_id)
+    )
+    if edge_type:
+        stmt = stmt.where(MemoryEdge.edge_type == edge_type)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_edges_from(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    from_id: str,
+    edge_type: str | None = None,
+) -> list[MemoryEdge]:
+    """List edges whose ``from_id`` matches, optionally filtered by edge_type."""
+    stmt = (
+        select(MemoryEdge)
+        .where(MemoryEdge.persona_id == persona_id)
+        .where(MemoryEdge.from_id == from_id)
+    )
+    if edge_type:
+        stmt = stmt.where(MemoryEdge.edge_type == edge_type)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_abstracts_by_subject(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    subject: str,
+    limit: int = 20,
+) -> list[AbstractMemory]:
+    """Fetch non-forgotten abstracts for a subject, newest-touched first."""
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject == subject)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.last_touched_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+# --- Context injection helpers (Plan C) ---
+
+
+async def get_abstracts_by_subjects(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    subjects: list[str],
+    limit_per_subject: int = 5,
+) -> list[AbstractMemory]:
+    """Get abstracts whose subject is in given list (for always-on injection)."""
+    if not subjects:
+        return []
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject.in_(subjects))
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(
+            AbstractMemory.subject,
+            AbstractMemory.last_touched_at.desc(),
+        )
+    )
+    rows = list(result.scalars().all())
+    # Keep at most `limit_per_subject` per subject
+    by_subject: dict[str, list[AbstractMemory]] = {}
+    for r in rows:
+        by_subject.setdefault(r.subject, []).append(r)
+    out: list[AbstractMemory] = []
+    for subj in subjects:
+        out.extend(by_subject.get(subj, [])[:limit_per_subject])
+    return out
+
+
+async def get_recent_abstract_titles(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    limit: int = 10,
+) -> list[AbstractMemory]:
+    """Recently touched abstracts — for recall-index hint."""
+    result = await session.execute(
+        select(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.clarity != "forgotten")
+        .order_by(AbstractMemory.last_touched_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def count_abstracts_per_subject_prefix(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    prefix: str,
+) -> int:
+    """Count non-forgotten abstracts whose subject starts with prefix."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(AbstractMemory)
+        .where(AbstractMemory.persona_id == persona_id)
+        .where(AbstractMemory.subject.like(f"{prefix}%"))
+        .where(AbstractMemory.clarity != "forgotten")
+    )
+    return int(result.scalar_one())
+
+
+async def get_recent_fragments_for_injection(
+    session: AsyncSession,
+    *,
+    persona_id: str,
+    chat_id: str | None,
+    _trigger_user_id: str | None,
+    max_same_chat: int = 1,
+    max_other_chat: int = 2,
+    hours: int = 4,
+) -> list[Fragment]:
+    """短期注入规则：
+    - 当前 chat 最近 N 小时内的最新 1 条 fragment
+    - 其他 chat 最近 N 小时内的 fragment（最多 max_other_chat 条，每 chat 只取最新）
+
+    ``_trigger_user_id``: reserved for future user-scoped filtering; currently ignored.
+    """
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    stmt = (
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.clarity != "forgotten")
+        .where(Fragment.created_at >= since)
+        .order_by(Fragment.created_at.desc())
+        .limit(max_same_chat + max_other_chat * 20)
+    )
+    result = await session.execute(stmt)
+    all_recent = list(result.scalars().all())
+
+    same_chat: list[Fragment] = []
+    other_chats: dict[str, Fragment] = {}
+    for f in all_recent:
+        if chat_id and f.chat_id == chat_id:
+            if len(same_chat) < max_same_chat:
+                same_chat.append(f)
+        elif f.chat_id and f.chat_id not in other_chats:
+            other_chats[f.chat_id] = f
+
+    other_list = list(other_chats.values())[:max_other_chat]
+    return same_chat + other_list
+
+
+# --- Schedule ---
+
+
+async def get_schedule_revision_by_id(
+    session: AsyncSession, revision_id: str
+) -> ScheduleRevision | None:
+    """Fetch a schedule_revision by id."""
+    result = await session.execute(
+        select(ScheduleRevision).where(ScheduleRevision.id == revision_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_recent_life_states(
+    session: AsyncSession, *, persona_id: str, since: datetime
+) -> list[LifeEngineState]:
+    result = await session.execute(
+        select(LifeEngineState)
+        .where(LifeEngineState.persona_id == persona_id)
+        .where(LifeEngineState.created_at >= since)
+        .order_by(LifeEngineState.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def list_recent_schedule_revisions(
+    session: AsyncSession, *, persona_id: str, since: datetime
+) -> list[ScheduleRevision]:
+    result = await session.execute(
+        select(ScheduleRevision)
+        .where(ScheduleRevision.persona_id == persona_id)
+        .where(ScheduleRevision.created_at >= since)
+        .order_by(ScheduleRevision.created_at)
+    )
+    return list(result.scalars().all())

@@ -46,12 +46,14 @@ CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
 VECTORIZE = Route("vectorize", "task.vectorize")
+MEMORY_VECTORIZE = Route("memory_vectorize", "task.memory_vectorize")
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
     VECTORIZE,
+    MEMORY_VECTORIZE,
 ]
 
 # ---------------------------------------------------------------------------

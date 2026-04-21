@@ -38,7 +38,7 @@ async def test_find_bot_names_for_persona_empty():
 
 @pytest.mark.asyncio
 async def test_find_cross_chat_messages_calls_db():
-    """Should call execute with correct filters."""
+    """Should call execute with correct filters (blacklist semantics)."""
     mock_session = AsyncMock()
     mock_result = MagicMock()
     mock_result.scalars.return_value.all.return_value = []
@@ -49,12 +49,68 @@ async def test_find_cross_chat_messages_calls_db():
         user_id="user_1",
         bot_names=["chiwei"],
         exclude_chat_id="chat_current",
-        allowed_group_ids=["chat_ka"],
         since_ms=1000,
+        excluded_chat_ids=["oc_to_skip"],
     )
 
     assert result == []
     mock_session.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_build_cross_chat_empty_trigger_user_id():
+    """trigger_user_id=None should return '' without calling DB."""
+    from app.memory.cross_chat import build_cross_chat_context
+
+    result = await build_cross_chat_context(
+        persona_id="akao",
+        trigger_user_id=None,
+        trigger_username="测试用户A",
+        current_chat_id="chat_current",
+    )
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_build_cross_chat_uses_dynamic_config_excluded():
+    """build_cross_chat_context should pass excluded_chat_ids from dynamic config."""
+    from app.memory.cross_chat import build_cross_chat_context
+
+    mock_messages = []
+
+    with (
+        patch(
+            "app.memory.cross_chat.dynamic_config.get",
+            return_value="oc_a,oc_b",
+        ),
+        patch(
+            "app.memory.cross_chat.dynamic_config.get_int",
+            return_value=10,
+        ),
+        patch(
+            "app.memory.cross_chat.find_bot_names_for_persona",
+            new=AsyncMock(return_value=["chiwei"]),
+        ),
+        patch(
+            "app.memory.cross_chat.find_cross_chat_messages",
+            new=AsyncMock(return_value=mock_messages),
+        ) as mock_find,
+        patch("app.memory.cross_chat.get_session") as mock_gs,
+    ):
+        mock_gs.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await build_cross_chat_context(
+            persona_id="akao",
+            trigger_user_id="user_1",
+            trigger_username="测试用户A",
+            current_chat_id="chat_current",
+        )
+
+    mock_find.assert_called_once()
+    call_kwargs = mock_find.call_args.kwargs
+    assert call_kwargs.get("excluded_chat_ids") == ["oc_a", "oc_b"]
 
 
 # --- cross_chat.py tests ---
@@ -201,48 +257,6 @@ def test_format_interactions_empty():
 
     result = _format_interactions({}, "测试用户A", {})
     assert result == ""
-
-
-# --- build_inner_context integration ---
-
-
-@pytest.mark.asyncio
-async def test_build_inner_context_includes_cross_chat():
-    """build_inner_context should include cross-chat section when data exists."""
-    mock_cross = "[你和 测试用户A 最近在其他地方的互动]\n\n粉丝群 · 2小时前:\n  测试用户A: 笋干好吃\n  你: 超好吃"
-
-    with (
-        patch("app.memory.context._build_life_state", return_value=""),
-        patch("app.memory.context.find_latest_relationship_memory", return_value=None),
-        patch("app.memory.context.find_today_fragments", return_value=[]),
-        patch(
-            "app.memory.cross_chat.build_cross_chat_context",
-            return_value=mock_cross,
-        ) as mock_build,
-        patch("app.memory.context.get_session") as mock_gs,
-    ):
-        mock_gs.return_value.__aenter__ = AsyncMock()
-        mock_gs.return_value.__aexit__ = AsyncMock()
-
-        from app.memory.context import build_inner_context
-
-        result = await build_inner_context(
-            chat_id="chat_current",
-            chat_type="p2p",
-            user_ids=["user_1"],
-            trigger_user_id="user_1",
-            trigger_username="测试用户A",
-            persona_id="akao",
-        )
-
-        assert "最近在其他地方的互动" in result
-        assert "笋干好吃" in result
-        mock_build.assert_called_once_with(
-            persona_id="akao",
-            trigger_user_id="user_1",
-            trigger_username="测试用户A",
-            current_chat_id="chat_current",
-        )
 
 
 @pytest.mark.asyncio

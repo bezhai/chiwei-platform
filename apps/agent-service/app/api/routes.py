@@ -266,6 +266,60 @@ async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
 
 
 # ---------------------------------------------------------------------------
+# Memory v4 one-time migration (fire-and-forget background task)
+# ---------------------------------------------------------------------------
+
+
+class MemoryV4MigrationRequest(BaseModel):
+    kind: str  # "relationship" | "fragment"
+    dry_run: bool = True
+    limit: int | None = None
+    days: int = 7  # only used when kind == "fragment"
+
+
+@router.post("/admin/memory-v4-migration", tags=["Admin"])
+async def memory_v4_migration(req: MemoryV4MigrationRequest):
+    """Trigger a Memory v4 migration script in the background.
+
+    kind=relationship → relationship_memory_v2 → abstract_memory + fragment + supports edges
+    kind=fragment     → experience_fragment (recent `days` days, conversation grain) → fragment
+
+    Both scripts are idempotent (they first delete rows with the migration
+    marker before re-running). Observe progress via
+    ``make logs APP=agent-service KEYWORD=migrate``.
+    """
+    if req.kind not in ("relationship", "fragment"):
+        raise HTTPException(400, f"unknown kind: {req.kind}")
+
+    async def _run():
+        try:
+            if req.kind == "relationship":
+                from scripts.migrate_relationship_to_abstract import main as migrate_main
+                await migrate_main(dry_run=req.dry_run, limit=req.limit)
+            else:
+                from scripts.migrate_fragment_to_fragment import main as migrate_main
+                await migrate_main(
+                    dry_run=req.dry_run, limit=req.limit, days=req.days
+                )
+            logger.info("[migrate] %s done", req.kind)
+        except Exception:
+            logger.exception("[migrate] %s failed", req.kind)
+
+    asyncio.create_task(_run())
+
+    return {
+        "ok": True,
+        "kind": req.kind,
+        "dry_run": req.dry_run,
+        "message": (
+            f"Migration {req.kind} started in background "
+            f"(dry_run={req.dry_run}). Check logs with: "
+            f"make logs APP=agent-service KEYWORD=migrate"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Search (experiment helper — wraps the existing search_web tool)
 # ---------------------------------------------------------------------------
 

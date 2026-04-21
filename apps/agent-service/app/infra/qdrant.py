@@ -200,5 +200,15 @@ async def init_collections() -> None:
             logger.info("Qdrant cluster collection created")
         else:
             logger.warning("Qdrant cluster collection may already exist")
+
+        # v4 memory collections — dense only, 1024d COSINE
+        for name in ("memory_fragment", "memory_abstract"):
+            ok = await qdrant.create_collection(
+                collection_name=name, vector_size=1024
+            )
+            if ok:
+                logger.info("Qdrant v4 collection %s created", name)
+            else:
+                logger.warning("Qdrant v4 collection %s may already exist", name)
     except Exception as e:
         logger.error("Failed to init Qdrant collections: %s", e)
