@@ -229,11 +229,7 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
                                         mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
                                         mock_ctx.__aexit__ = AsyncMock(return_value=False)
                                         mock_session.return_value = mock_ctx
-                                        with patch(
-                                            "app.memory.relationships.extract_relationship_updates",
-                                            new=AsyncMock(),
-                                        ):
-                                            await _generate_fragment("chat_1", "ayana")
+                                        await _generate_fragment("chat_1", "ayana")
 
     mock_ins.assert_awaited_once()
     kwargs = mock_ins.call_args.kwargs

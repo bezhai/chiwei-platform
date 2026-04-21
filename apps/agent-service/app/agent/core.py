@@ -10,7 +10,7 @@ Usage::
 
     from app.agent.core import Agent, AgentConfig
 
-    CFG = AgentConfig("afterthought_conversation", "diary-model", "afterthought")
+    CFG = AgentConfig("afterthought_conversation", "offline-model", "afterthought")
 
     result = await Agent(CFG).run(messages=[...], prompt_vars={...})
 

@@ -29,7 +29,7 @@ from app.memory.debounce import DebouncedPipeline
 from app.memory.vectorize_memory import enqueue_fragment_vectorize
 
 _AFTERTHOUGHT_CFG = AgentConfig(
-    "afterthought_conversation", "diary-model", "afterthought"
+    "afterthought_conversation", "offline-model", "afterthought"
 )
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,6 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
     3. Format timeline
     4. Call LLM to generate fragment content
     5. Persist v4 Fragment and enqueue vectorize
-    6. Fire relationship extraction (non-blocking)
     """
     now = datetime.now(_CST)
     start_ts = int((now - timedelta(hours=LOOKBACK_HOURS)).timestamp() * 1000)
@@ -128,29 +127,6 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         chat_id,
         content[:60],
     )
-
-    # Relationship extraction (fire-and-forget)
-    try:
-        from app.memory.relationships import extract_relationship_updates
-
-        unique_user_ids = list(
-            {
-                m.user_id
-                for m in messages
-                if m.role == "user" and m.user_id and m.user_id != "__proactive__"
-            }
-        )
-        if unique_user_ids:
-            await extract_relationship_updates(
-                persona_id=persona_id,
-                chat_id=chat_id,
-                user_ids=unique_user_ids,
-                messages=messages,
-            )
-    except Exception as e:
-        logger.warning(
-            "[%s] Relationship extract failed (non-fatal): %s", persona_id, e
-        )
 
 
 async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:

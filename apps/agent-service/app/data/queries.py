@@ -9,13 +9,13 @@ Sections:
   - Chat messages
   - Schedule
   - Life Engine
-  - Memory — fragments, glimpse, reply style, relationship
+  - Memory v4 — fragments, abstracts, edges, notes, glimpse, reply style
 """
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +26,6 @@ from app.data.models import (
     AkaoSchedule,
     BotPersona,
     ConversationMessage,
-    ExperienceFragment,
     Fragment,
     GlimpseState,
     LarkBaseChatInfo,
@@ -38,7 +37,6 @@ from app.data.models import (
     ModelMapping,
     ModelProvider,
     Note,
-    RelationshipMemoryV2,
     ReplyStyleLog,
     ScheduleRevision,
 )
@@ -588,68 +586,13 @@ async def find_today_activity_states(
 # --- Memory — fragments ---
 
 
-async def insert_experience_fragment(
-    session: AsyncSession, fragment: ExperienceFragment
-) -> ExperienceFragment:
-    """Insert an experience fragment, return it with populated id."""
-    session.add(fragment)
-    await session.flush()
-    await session.refresh(fragment)
-    return fragment
-
-
-async def find_recent_fragments_by_grain(
-    session: AsyncSession,
-    persona_id: str,
-    grain: str,
-    *,
-    limit: int = 7,
-) -> list[ExperienceFragment]:
-    """Fetch recent fragments of a specific grain type (descending)."""
-    result = await session.execute(
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(ExperienceFragment.grain == grain)
-        .order_by(ExperienceFragment.created_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
-async def find_today_fragments(
-    session: AsyncSession,
-    persona_id: str,
-    *,
-    grains: list[str] | None = None,
-    source_chat_id: str | None = None,
-) -> list[ExperienceFragment]:
-    """Fetch fragments created today (CST 00:00+, ascending)."""
-    today_cst = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = (
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(ExperienceFragment.created_at >= today_cst)
-    )
-    if grains:
-        stmt = stmt.where(ExperienceFragment.grain.in_(grains))
-    if source_chat_id is not None:
-        stmt = stmt.where(ExperienceFragment.source_chat_id == source_chat_id)
-    stmt = stmt.order_by(ExperienceFragment.created_at.asc())
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
-
-
 async def list_today_fragments(
     session: AsyncSession,
     persona_id: str,
     *,
     sources: list[str] | None = None,
 ) -> list[Fragment]:
-    """Fetch v4 Fragments created today (CST 00:00+, ascending).
-
-    Replaces ``find_today_fragments`` for v4 readers (voice, engine tick).
-    Skips forgotten rows.
-    """
+    """Fetch v4 Fragments created today (CST 00:00+, ascending). Skips forgotten rows."""
     today_cst = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
     stmt = (
         select(Fragment)
@@ -664,29 +607,42 @@ async def list_today_fragments(
     return list(result.scalars().all())
 
 
-async def find_fragments_in_date_range(
+async def find_fragments_since(
     session: AsyncSession,
     persona_id: str,
-    start_date: date,
-    end_date: date,
+    since_dt: datetime,
     *,
-    grains: list[str] | None = None,
-) -> list[ExperienceFragment]:
-    """Fetch fragments within a CST date range (inclusive, ascending)."""
-    start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=_CST)
-    end_dt = datetime(
-        end_date.year, end_date.month, end_date.day, tzinfo=_CST
-    ) + timedelta(days=1)
+    sources: list[str] | None = None,
+    limit: int = 50,
+) -> list[Fragment]:
+    """Fetch v4 Fragments created since a given datetime (descending). Skips forgotten rows."""
     stmt = (
-        select(ExperienceFragment)
-        .where(ExperienceFragment.persona_id == persona_id)
-        .where(ExperienceFragment.created_at >= start_dt)
-        .where(ExperienceFragment.created_at < end_dt)
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.created_at >= since_dt)
+        .where(Fragment.clarity != "forgotten")
     )
-    if grains:
-        stmt = stmt.where(ExperienceFragment.grain.in_(grains))
-    stmt = stmt.order_by(ExperienceFragment.created_at.asc())
+    if sources:
+        stmt = stmt.where(Fragment.source.in_(sources))
+    stmt = stmt.order_by(Fragment.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def find_life_states_in_range(
+    session: AsyncSession,
+    persona_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[LifeEngineState]:
+    """Fetch life_engine_state rows within a datetime range (ascending)."""
+    result = await session.execute(
+        select(LifeEngineState)
+        .where(LifeEngineState.persona_id == persona_id)
+        .where(LifeEngineState.created_at >= start_dt)
+        .where(LifeEngineState.created_at < end_dt)
+        .order_by(LifeEngineState.created_at.asc())
+    )
     return list(result.scalars().all())
 
 
@@ -759,65 +715,6 @@ async def find_latest_reply_style(session: AsyncSession, persona_id: str) -> str
         .limit(1)
     )
     return result.scalar_one_or_none()
-
-
-# --- Memory — relationship ---
-
-
-async def insert_relationship_memory(
-    session: AsyncSession,
-    *,
-    persona_id: str,
-    user_id: str,
-    core_facts: str,
-    impression: str,
-    source: str,
-) -> None:
-    """Append a v2 relationship memory (auto-incrementing version)."""
-    result = await session.execute(
-        select(func.max(RelationshipMemoryV2.version))
-        .where(RelationshipMemoryV2.persona_id == persona_id)
-        .where(RelationshipMemoryV2.user_id == user_id)
-    )
-    max_version = result.scalar_one_or_none() or 0
-
-    session.add(
-        RelationshipMemoryV2(
-            persona_id=persona_id,
-            user_id=user_id,
-            version=max_version + 1,
-            core_facts=core_facts,
-            impression=impression,
-            source=source,
-        )
-    )
-
-
-async def find_relationship_memories_batch(
-    session: AsyncSession,
-    persona_id: str,
-    user_ids: list[str],
-) -> dict[str, tuple[str, str]]:
-    """Batch-fetch latest relationship memories for multiple users."""
-    if not user_ids:
-        return {}
-
-    result = await session.execute(
-        select(
-            RelationshipMemoryV2.user_id,
-            RelationshipMemoryV2.core_facts,
-            RelationshipMemoryV2.impression,
-        )
-        .where(RelationshipMemoryV2.persona_id == persona_id)
-        .where(RelationshipMemoryV2.user_id.in_(user_ids))
-        .distinct(RelationshipMemoryV2.user_id)
-        .order_by(
-            RelationshipMemoryV2.user_id,
-            RelationshipMemoryV2.version.desc(),
-            RelationshipMemoryV2.id.desc(),
-        )
-    )
-    return {row.user_id: (row.core_facts, row.impression) for row in result.all()}
 
 
 # --- Chat history — context messages and group members ---

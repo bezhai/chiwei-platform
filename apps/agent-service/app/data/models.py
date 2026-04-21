@@ -9,8 +9,8 @@ Tables:
   - conversation_messages
   - bot_persona
   - akao_schedule
-  - experience_fragment, life_engine_state, glimpse_state
-  - memory_entity, reply_style_log, relationship_memory_v2
+  - life_engine_state, glimpse_state
+  - memory_entity, reply_style_log
   # Memory v4
   - fragment, abstract_memory, memory_edge, notes, schedule_revision
 """
@@ -25,7 +25,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Identity,
-    Index,
     Integer,
     String,
     Text,
@@ -226,26 +225,6 @@ class AkaoSchedule(Base):
 # ---------------------------------------------------------------------------
 
 
-class ExperienceFragment(Base):
-    """经历碎片 — 赤尾记忆的唯一存储单元"""
-
-    __tablename__ = "experience_fragment"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    grain: Mapped[str] = mapped_column(String(20), nullable=False)
-    source_chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    source_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    time_start: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    time_end: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    mentioned_entity_ids: Mapped[list] = mapped_column(JSONB, default=list)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
 class LifeEngineState(Base):
     """Life Engine 状态 — append-only"""
 
@@ -313,35 +292,6 @@ class ReplyStyleLog(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
-    )
-
-
-# DEPRECATED (memory-v4): read-only for migration; the table will be dropped
-# after the one-time relationship_memory_v2 → abstract_memory migration runs
-# during Plan E cutover. Do NOT write through this model.
-class RelationshipMemoryV2(Base):
-    """关系记忆 v2 — 两阶段管线产出, append-only"""
-
-    __tablename__ = "relationship_memory_v2"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    core_facts: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    impression: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    source: Mapped[str] = mapped_column(String(20), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    __table_args__ = (
-        Index(
-            "idx_rel_mem_v2_persona_user_created",
-            "persona_id",
-            "user_id",
-            created_at.desc(),
-        ),
     )
 
 

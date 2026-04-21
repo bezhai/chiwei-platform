@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -17,7 +17,6 @@ from pydantic import BaseModel
 from app.data.models import AkaoSchedule
 from app.data.queries import (
     delete_schedule,
-    find_persona,
     list_schedules,
     upsert_schedule,
 )
@@ -130,137 +129,21 @@ async def trigger_schedule(
     plan_type: str = "daily",
     target_date: str | None = None,
 ):
-    """Manual schedule generation (daily only — monthly/weekly removed)."""
+    """Manual schedule generation (daily only). Fire-and-forget; check logs/trace."""
     if plan_type != "daily":
         return {"ok": False, "message": f"Only 'daily' plan_type is supported. Got: {plan_type}"}
 
     from app.life.schedule import generate_daily_plan
 
     d = date.fromisoformat(target_date) if target_date else None
-    content = await generate_daily_plan(persona_id=persona_id, target_date=d)
-    return {"ok": bool(content), "plan_type": plan_type, "content": content}
-
-
-# ---------------------------------------------------------------------------
-# Rebuild relationship memory (async background task)
-# ---------------------------------------------------------------------------
-
-
-class RebuildRelationshipMemoryRequest(BaseModel):
-    persona_ids: list[str]
-    chat_ids: list[str]
-    start_time: str  # ISO 8601
-    end_time: str  # ISO 8601
-
-
-@router.post("/admin/rebuild-relationship-memory", tags=["Admin"])
-async def rebuild_relationship_memory(req: RebuildRelationshipMemoryRequest):
-    """Batch rebuild relationship memory (async, day-by-day).
-
-    Returns immediately; track progress via ``make logs KEYWORD=rebuild``.
-    """
-    # Validate before dispatching background task
-    try:
-        start_dt = datetime.fromisoformat(req.start_time)
-        end_dt = datetime.fromisoformat(req.end_time)
-    except ValueError as e:
-        raise HTTPException(400, f"Invalid datetime format: {e}") from e
-    if end_dt <= start_dt:
-        raise HTTPException(400, "end_time must be after start_time")
-    if not req.persona_ids or not req.chat_ids:
-        raise HTTPException(400, "persona_ids and chat_ids must not be empty")
-
-    async def _run():
-        try:
-            from app.data.queries import find_messages_in_range
-            from app.memory.relationships import extract_relationship_updates
-
-            personas: dict[str, str] = {}
-            for persona_id in req.persona_ids:
-                async with get_session() as s:
-                    persona = await find_persona(s, persona_id)
-                if persona:
-                    personas[persona_id] = persona.display_name or persona_id
-
-            total_days = (end_dt.date() - start_dt.date()).days
-            logger.info(
-                "[rebuild] Starting: %d personas, %d chats, %d days (%s ~ %s)",
-                len(personas),
-                len(req.chat_ids),
-                total_days,
-                start_dt.date(),
-                end_dt.date(),
-            )
-
-            day = start_dt
-            day_count = 0
-            while day < end_dt:
-                next_day = day + timedelta(days=1)
-                if next_day > end_dt:
-                    next_day = end_dt
-                day_start_ts = int(day.timestamp() * 1000)
-                day_end_ts = int(next_day.timestamp() * 1000)
-                day_count += 1
-                day_str = day.strftime("%m/%d")
-
-                for chat_id in req.chat_ids:
-                    async with get_session() as s:
-                        messages = await find_messages_in_range(
-                            s, chat_id, day_start_ts, day_end_ts, limit=5000
-                        )
-                    if not messages:
-                        continue
-
-                    messages.sort(key=lambda m: m.create_time)
-                    user_ids = list(
-                        {
-                            m.user_id
-                            for m in messages
-                            if m.role == "user"
-                            and m.user_id
-                            and m.user_id != "__proactive__"
-                        }
-                    )
-                    if not user_ids:
-                        continue
-
-                    for persona_id in personas:
-                        try:
-                            await extract_relationship_updates(
-                                persona_id=persona_id,
-                                chat_id=chat_id,
-                                user_ids=user_ids,
-                                messages=messages,
-                                source="rebuild",
-                            )
-                            logger.info(
-                                "[rebuild] %s %s: %d users, %d msgs",
-                                day_str,
-                                persona_id,
-                                len(user_ids),
-                                len(messages),
-                            )
-                        except Exception as e:
-                            logger.error(
-                                "[rebuild] %s %s failed: %s", day_str, persona_id, e
-                            )
-
-                logger.info(
-                    "[rebuild] Day %d/%d (%s) done.", day_count, total_days, day_str
-                )
-                day = next_day
-
-            logger.info("[rebuild] All done.")
-        except Exception:
-            logger.exception("[rebuild] Background task failed")
-
-    asyncio.create_task(_run())
+    asyncio.create_task(generate_daily_plan(persona_id=persona_id, target_date=d))
     return {
-        "status": "started",
+        "ok": True,
+        "plan_type": plan_type,
         "message": (
-            f"Rebuild started in background. "
-            f"{len(req.persona_ids)} personas, {len(req.chat_ids)} chats, "
-            f"check logs with: make logs KEYWORD=rebuild"
+            f"Schedule generation started for {persona_id} "
+            f"(target={d.isoformat() if d else 'today'}). "
+            f"Check `make logs APP=agent-service KEYWORD=daily plan` or Langfuse trace."
         ),
     }
 
@@ -279,7 +162,6 @@ class SearchRequest(BaseModel):
 async def admin_search(req: SearchRequest):
     """Batch web search — runs multiple queries, returns raw results."""
     from app.agent.tools.search import _you_search
-
     from app.infra.config import settings
 
     if not settings.you_search_host:

@@ -27,13 +27,13 @@ async def cron_generate_voice(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Heavy reviewer (daily consolidation, replaces dream compression)
+# Heavy reviewer (daily consolidation, runs at 03:00 CST per persona)
 # ---------------------------------------------------------------------------
 
 
 @cron_error_handler()
 @prod_only
-async def cron_generate_dreams(ctx) -> None:
+async def cron_heavy_review(ctx) -> None:
     from app.memory.reviewer.heavy import run_heavy_review
 
     await run_heavy_review()

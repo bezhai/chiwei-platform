@@ -58,10 +58,7 @@ class TestSettingsDefaults:
 
             s = Settings()
             assert s.siliconflow_base_url == "https://api.siliconflow.cn/v1"
-            assert s.diary_chat_ids == ""
-            assert s.diary_model == "diary-model"
             assert s.life_engine_model == "offline-model"
-            assert s.relationship_model == "relationship-model"
             assert s.identity_drift_model == "offline-model"
 
 

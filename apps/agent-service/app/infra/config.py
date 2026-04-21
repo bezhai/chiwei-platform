@@ -122,21 +122,12 @@ class Settings:
         default_factory=lambda: _env_int("LONG_TASK_LOCK_TIMEOUT", 1800)
     )
 
-    # -- Diary --
-    diary_chat_ids: str = field(default_factory=lambda: _env("DIARY_CHAT_IDS", ""))
-    diary_model: str = field(default_factory=lambda: _env("DIARY_MODEL", "diary-model"))
-
     # -- Lane (fallback for workers without HTTP context) --
     lane: str | None = field(default_factory=lambda: _env_or_none("LANE"))
 
     # -- Life Engine --
     life_engine_model: str = field(
         default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
-    )
-
-    # -- Relationship memory --
-    relationship_model: str = field(
-        default_factory=lambda: _env("RELATIONSHIP_MODEL", "relationship-model")
     )
 
     # -- Identity drift --

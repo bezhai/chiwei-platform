@@ -16,9 +16,9 @@ from inner_shared.logger import setup_logging
 from app.infra.config import settings
 from app.workers.cron import (
     cron_generate_daily_plan,
-    cron_generate_dreams,
     cron_generate_voice,
     cron_glimpse,
+    cron_heavy_review,
     cron_life_engine_tick,
     cron_memory_reviewer_light_day,
     cron_memory_reviewer_light_night,
@@ -121,7 +121,7 @@ class WorkerSettings:
         # 2. Vectorize pending scan: every 10 minutes
         cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
         # 3. Heavy reviewer (daily consolidation): CST 03:00
-        cron(cron_generate_dreams, hour={3}, minute={0}, timeout=3600),
+        cron(cron_heavy_review, hour={3}, minute={0}, timeout=3600),
         # 4. Daily plan (Agent Team pipeline): CST 05:00 (after heavy review)
         cron(cron_generate_daily_plan, hour={5}, minute={0}, timeout=3600),
         # 6. Voice: CST 08:00-23:00 every hour

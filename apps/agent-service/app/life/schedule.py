@@ -18,8 +18,7 @@ from app.agent.tools.search import search_web
 from app.data import queries as Q
 from app.data.models import AkaoSchedule
 from app.data.session import get_session
-from app.infra.config import settings
-from app.life._date_utils import CST, WEEKDAY_CN, get_season
+from app.life._date_utils import CST, WEEKDAY_CN
 from app.life.sister_theater import run_sister_theater
 from app.life.wild_agents import run_wild_agents
 from app.memory._persona import load_persona
@@ -33,11 +32,6 @@ logger = logging.getLogger(__name__)
 _CURATOR_CFG = AgentConfig("daily_curator", "offline-model", "daily-curator")
 _WRITER_CFG = AgentConfig("schedule_daily_writer", "offline-model", "schedule-writer")
 _CRITIC_CFG = AgentConfig("schedule_daily_critic", "offline-model", "schedule-critic")
-
-
-def _schedule_model() -> str:
-    """Model used for schedule generation (shares diary_model config)."""
-    return settings.diary_model
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +109,9 @@ async def _run_writer(
     persona_core: str,
     curated_materials: str,
     theater: str,
-    yesterday_journal: str,
+    self_abstracts: str,
+    recent_fragments: str,
+    yesterday_life_states: str,
     target_date: date,
     previous_output: str = "",
     critic_feedback: str = "",
@@ -128,7 +124,9 @@ async def _run_writer(
             "date": target_date.isoformat(),
             "weekday": WEEKDAY_CN[target_date.weekday()],
             "is_weekend": "周末！" if target_date.weekday() >= 5 else "",
-            "yesterday_journal": yesterday_journal,
+            "self_abstracts": self_abstracts,
+            "recent_fragments": recent_fragments,
+            "yesterday_life_states": yesterday_life_states,
             "curated_materials": curated_materials,
             "theater": theater,
             "previous_output": previous_output,
@@ -212,12 +210,40 @@ async def _run_persona_pipeline(
     if search_anchors:
         all_materials += f"\n\n--- 真实搜索锚点 ---\n{search_anchors}"
 
-    # Yesterday's journal
+    # v4 Writer inputs: self-related abstracts + recent fragments + yesterday life states
+    yesterday_start = datetime.combine(
+        target_date - timedelta(days=1), datetime.min.time(), tzinfo=CST
+    )
+    today_start = datetime.combine(target_date, datetime.min.time(), tzinfo=CST)
+
     async with get_session() as s:
-        recent_dailies = await Q.find_recent_fragments_by_grain(
-            s, persona_id, "daily", limit=1
+        self_abs_rows = await Q.get_abstracts_by_subjects(
+            s, persona_id=persona_id,
+            subjects=["self", "我自己"], limit_per_subject=10,
         )
-    yesterday_journal = recent_dailies[0].content if recent_dailies else "（昨天没有写日志）"
+        recent_frag_rows = await Q.find_fragments_since(
+            s, persona_id, since_dt=yesterday_start,
+            sources=["afterthought"], limit=30,
+        )
+        yesterday_state_rows = await Q.find_life_states_in_range(
+            s, persona_id, start_dt=yesterday_start, end_dt=today_start,
+        )
+
+    self_abstracts_text = (
+        "\n".join(f"- {r.content}" for r in self_abs_rows)
+        if self_abs_rows else "（暂无自我抽象）"
+    )
+    recent_fragments_text = (
+        "\n\n---\n\n".join(r.content for r in recent_frag_rows)
+        if recent_frag_rows else "（暂无最近碎片）"
+    )
+    yesterday_life_states_text = (
+        "\n".join(
+            f"[{r.created_at.astimezone(CST).strftime('%H:%M')}] "
+            f"{r.activity_type}｜{r.current_state}"
+            for r in yesterday_state_rows
+        ) if yesterday_state_rows else "（昨日无 state 记录）"
+    )
 
     # Recent schedules for critic
     recent = await _get_recent_daily_schedules(target_date, persona_id)
@@ -240,7 +266,9 @@ async def _run_persona_pipeline(
             persona_core=pc.persona_core,
             curated_materials=curated,
             theater=theater,
-            yesterday_journal=yesterday_journal,
+            self_abstracts=self_abstracts_text,
+            recent_fragments=recent_fragments_text,
+            yesterday_life_states=yesterday_life_states_text,
             target_date=target_date,
             previous_output=previous_output,
             critic_feedback=feedback,
@@ -277,7 +305,7 @@ async def _run_persona_pipeline(
                 period_end=date_str,
                 persona_id=persona_id,
                 content=schedule_text,
-                model=_schedule_model(),
+                model="offline-model",
             ),
         )
 
