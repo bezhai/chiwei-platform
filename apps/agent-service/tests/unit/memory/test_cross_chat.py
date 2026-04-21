@@ -124,6 +124,7 @@ def _make_msg(
     content: str,
     chat_type: str = "group",
     bot_name: str = "chiwei",
+    reply_message_id: str | None = None,
 ):
     """Create a mock ConversationMessage."""
     msg = MagicMock()
@@ -135,6 +136,7 @@ def _make_msg(
     msg.chat_type = chat_type
     msg.bot_name = bot_name
     msg.message_id = f"msg_{create_time}"
+    msg.reply_message_id = reply_message_id
     return msg
 
 
@@ -164,9 +166,51 @@ def test_group_and_trim_respects_limit():
         msgs.append(
             _make_msg("assistant", "bot", "chat_a", i * 2000 + 1000, f'{{"v":2,"text":"reply{i}","items":[]}}')
         )
-    grouped = _group_and_trim(msgs, max_pairs_per_chat=10)
-    # Should keep last 10 pairs = 20 messages
-    assert len(grouped["chat_a"]) == 20
+    grouped = _group_and_trim(msgs, max_pairs_per_chat=5)
+    # Should keep last 5 pairs = 10 messages
+    assert len(grouped["chat_a"]) == 10
+    assert grouped["chat_a"][0].content == '{"v":2,"text":"msg25","items":[]}'
+    assert grouped["chat_a"][-1].content == '{"v":2,"text":"reply29","items":[]}'
+
+
+def test_filter_direct_interactions_excludes_unrelated_assistant_messages():
+    from app.memory.cross_chat import _filter_direct_interactions
+
+    target_user_msg = _make_msg(
+        "user",
+        "user_1",
+        "chat_p2p_user_1",
+        1000,
+        '{"v":2,"text":"这是我的私聊","items":[]}',
+        chat_type="p2p",
+    )
+    target_user_msg.message_id = "target_user_msg"
+
+    target_reply = _make_msg(
+        "assistant",
+        "chiwei",
+        "chat_p2p_user_1",
+        2000,
+        '{"v":2,"text":"只回复你","items":[]}',
+        chat_type="p2p",
+        reply_message_id="target_user_msg",
+    )
+
+    leaked_reply = _make_msg(
+        "assistant",
+        "chiwei",
+        "chat_p2p_other",
+        3000,
+        '{"v":2,"text":"别人的私聊内容","items":[]}',
+        chat_type="p2p",
+        reply_message_id="other_user_msg",
+    )
+
+    result = _filter_direct_interactions(
+        [target_user_msg, target_reply, leaked_reply], "user_1"
+    )
+
+    assert result == [target_user_msg, target_reply]
 
 
 def test_format_interactions_output():
@@ -181,6 +225,14 @@ def test_format_interactions_output():
             "assistant", "bot", "chat_a", 1713160060000,
             '{"v":2,"text":"超好吃！","items":[{"type":"text","value":"超好吃！"}]}',
         ),
+        _make_msg(
+            "user", "u1", "chat_a", 1713160120000,
+            '{"v":2,"text":"刚才那个梗太好笑了","items":[{"type":"text","value":"刚才那个梗太好笑了"}]}',
+        ),
+        _make_msg(
+            "assistant", "bot", "chat_a", 1713160180000,
+            '{"v":2,"text":"我也笑到了","items":[{"type":"text","value":"我也笑到了"}]}',
+        ),
     ]
     grouped = {"chat_a": msgs}
     chat_names = {"chat_a": "粉丝群"}
@@ -191,8 +243,13 @@ def test_format_interactions_output():
     assert "测试用户A" in result
     assert "笋干烧肉好吃吗" in result
     assert "超好吃" in result
+    assert "刚才那个梗太好笑了" in result
+    assert "我也笑到了" in result
     assert "你" in result
     assert "最近在其他地方的互动" in result
+    assert result.index("笋干烧肉好吃吗") < result.index("超好吃")
+    assert result.index("超好吃") < result.index("刚才那个梗太好笑了")
+    assert result.index("刚才那个梗太好笑了") < result.index("我也笑到了")
 
 
 def test_format_interactions_empty():
@@ -200,3 +257,63 @@ def test_format_interactions_empty():
 
     result = _format_interactions({}, "测试用户A", {})
     assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_build_cross_chat_context_excludes_other_users_private_content():
+    from app.memory.cross_chat import build_cross_chat_context
+
+    target_user_msg = _make_msg(
+        "user",
+        "user_1",
+        "chat_p2p_user_1",
+        1000,
+        '{"v":2,"text":"这是我的私聊","items":[]}',
+        chat_type="p2p",
+    )
+    target_user_msg.message_id = "target_user_msg"
+
+    target_reply = _make_msg(
+        "assistant",
+        "chiwei",
+        "chat_p2p_user_1",
+        2000,
+        '{"v":2,"text":"只回复你","items":[]}',
+        chat_type="p2p",
+        reply_message_id="target_user_msg",
+    )
+
+    leaked_reply = _make_msg(
+        "assistant",
+        "chiwei",
+        "chat_p2p_other",
+        3000,
+        '{"v":2,"text":"别人的私聊内容","items":[]}',
+        chat_type="p2p",
+        reply_message_id="other_user_msg",
+    )
+
+    with (
+        patch(
+            "app.memory.cross_chat.find_bot_names_for_persona",
+            AsyncMock(return_value=["chiwei"]),
+        ),
+        patch(
+            "app.memory.cross_chat.find_cross_chat_messages",
+            AsyncMock(return_value=[target_user_msg, target_reply, leaked_reply]),
+        ),
+        patch("app.memory.cross_chat.get_session") as mock_gs,
+    ):
+        mock_gs.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_gs.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        result = await build_cross_chat_context(
+            persona_id="akao",
+            trigger_user_id="user_1",
+            trigger_username="测试用户A",
+            current_chat_id="chat_current",
+        )
+
+    assert "这是我的私聊" in result
+    assert "只回复你" in result
+    assert "别人的私聊内容" not in result
