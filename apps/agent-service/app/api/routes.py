@@ -6,6 +6,7 @@ All routes use new module imports (``app.data.*``, ``app.life.*``, ``app.memory.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import date, datetime
@@ -128,15 +129,23 @@ async def trigger_schedule(
     plan_type: str = "daily",
     target_date: str | None = None,
 ):
-    """Manual schedule generation (daily only — monthly/weekly removed)."""
+    """Manual schedule generation (daily only). Fire-and-forget; check logs/trace."""
     if plan_type != "daily":
         return {"ok": False, "message": f"Only 'daily' plan_type is supported. Got: {plan_type}"}
 
     from app.life.schedule import generate_daily_plan
 
     d = date.fromisoformat(target_date) if target_date else None
-    content = await generate_daily_plan(persona_id=persona_id, target_date=d)
-    return {"ok": bool(content), "plan_type": plan_type, "content": content}
+    asyncio.create_task(generate_daily_plan(persona_id=persona_id, target_date=d))
+    return {
+        "ok": True,
+        "plan_type": plan_type,
+        "message": (
+            f"Schedule generation started for {persona_id} "
+            f"(target={d.isoformat() if d else 'today'}). "
+            f"Check `make logs APP=agent-service KEYWORD=daily plan` or Langfuse trace."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
