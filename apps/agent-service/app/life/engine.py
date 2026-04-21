@@ -150,8 +150,8 @@ async def _think(
     )
 
     async with get_session() as s:
-        today_frags = await Q.find_today_fragments(
-            s, persona_id, grains=["conversation"]
+        today_frags = await Q.list_today_fragments(
+            s, persona_id, sources=["afterthought"]
         )
     frag_text = (
         "\n".join(f.content for f in today_frags[-5:])

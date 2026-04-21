@@ -639,6 +639,31 @@ async def find_today_fragments(
     return list(result.scalars().all())
 
 
+async def list_today_fragments(
+    session: AsyncSession,
+    persona_id: str,
+    *,
+    sources: list[str] | None = None,
+) -> list[Fragment]:
+    """Fetch v4 Fragments created today (CST 00:00+, ascending).
+
+    Replaces ``find_today_fragments`` for v4 readers (voice, engine tick).
+    Skips forgotten rows.
+    """
+    today_cst = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = (
+        select(Fragment)
+        .where(Fragment.persona_id == persona_id)
+        .where(Fragment.created_at >= today_cst)
+        .where(Fragment.clarity != "forgotten")
+    )
+    if sources:
+        stmt = stmt.where(Fragment.source.in_(sources))
+    stmt = stmt.order_by(Fragment.created_at.asc())
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def find_fragments_in_date_range(
     session: AsyncSession,
     persona_id: str,
