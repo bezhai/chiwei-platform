@@ -129,7 +129,9 @@ async def _check_banned_word(text: str) -> str | None:
 async def _check_injection(message: str) -> PreCheckResult:
     try:
         result: _InjectionResult = await Agent(
-            _GUARD_INJECTION, model_kwargs={"reasoning_effort": "low"}
+            _GUARD_INJECTION,
+            model_kwargs={"reasoning_effort": "low"},
+            update_trace=False,
         ).extract(_InjectionResult, messages=[], prompt_vars={"message": message})
         if result.is_injection and result.confidence >= 0.85:
             logger.warning(
@@ -148,7 +150,9 @@ async def _check_injection(message: str) -> PreCheckResult:
 async def _check_politics(message: str) -> PreCheckResult:
     try:
         result: _PoliticsResult = await Agent(
-            _GUARD_POLITICS, model_kwargs={"reasoning_effort": "low"}
+            _GUARD_POLITICS,
+            model_kwargs={"reasoning_effort": "low"},
+            update_trace=False,
         ).extract(_PoliticsResult, messages=[], prompt_vars={"message": message})
         if result.is_sensitive and result.confidence >= 0.85:
             logger.warning(
@@ -167,7 +171,9 @@ async def _check_politics(message: str) -> PreCheckResult:
 async def _check_nsfw(message: str, persona_id: str) -> PreCheckResult:
     try:
         result: _NsfwResult = await Agent(
-            _GUARD_NSFW, model_kwargs={"reasoning_effort": "low"}
+            _GUARD_NSFW,
+            model_kwargs={"reasoning_effort": "low"},
+            update_trace=False,
         ).extract(_NsfwResult, messages=[], prompt_vars={"message": message})
         if result.is_nsfw and result.confidence >= 0.75:
             if persona_id in _NSFW_BLOCKED_PERSONAS:
@@ -269,7 +275,9 @@ async def run_post_check(response_text: str) -> PostCheckResult:
     # Step 2: LLM audit
     try:
         result: _OutputSafetyResult = await Agent(
-            _GUARD_OUTPUT, model_kwargs={"reasoning_effort": "low"}
+            _GUARD_OUTPUT,
+            model_kwargs={"reasoning_effort": "low"},
+            update_trace=False,
         ).extract(
             _OutputSafetyResult, messages=[], prompt_vars={"response": response_text}
         )
