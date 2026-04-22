@@ -43,80 +43,63 @@ agent-service = (Data × Node) 二分图
 
 ### 层 1 · Data
 
-系统里流转的每样东西都有明确类型。Pydantic / dataclass，照常。**但每个 Data 类必须显式声明两件事：payload schema 和 identity（key）函数**。
+系统里流转的每样东西都有明确类型。Data 是 Pydantic v2 model 的子类，**字段上用 `Annotated[T, Marker]` 标注 identity / dedup / version**——这是 Pydantic v2 官方推荐的扩展方式（和 `AfterValidator`、`Field` 一个 pattern），不是自定义类变量。
 
 ```python
+from typing import Annotated
+from app.runtime.data import Data, Key, DedupKey, Version
+
 class Message(Data):
+    message_id: Annotated[str, Key, DedupKey]   # identity 也参与 dedup
+    generation: Annotated[int, DedupKey] = 0    # 扩展 dedup，但不影响 identity
     chat_id: str
     persona_id: str
-    message_id: str
     text: str
-    images: list[str]
-    ...
-    # identity：用于幂等 / as_latest upsert / debounce 分桶
-    key = ("message_id",)
+    images: list[str] = []
 
 class LifeState(Data):
-    persona_id: str
+    persona_id: Annotated[str, Key]             # 每 persona 只一份最新
+    version:    Annotated[int, Version]         # as_latest 并发控制
     mood: str
     activity: str
-    ...
-    key = ("persona_id",)   # 同一 persona 只保留一份最新
 
 class SafetyVerdict(Data):
-    message_id: str
+    message_id: Annotated[str, Key]
     blocked: bool
-    ...
-    key = ("message_id",)
+    reason: str | None = None
 
 class DriftTrigger(Data):
-    chat_id: str
-    persona_id: str
-    ...
-    key = ("chat_id", "persona_id")   # debounce 按这个 key 聚合
+    chat_id:    Annotated[str, Key, DedupKey]
+    persona_id: Annotated[str, Key, DedupKey]
+    fired_at: datetime
 
 class ChatResponseChunk(Data):
     """流式一等公民：单条 stream 的一个片段"""
-    stream_id: str           # 归属的流
-    seq: int                 # 流内顺序
+    stream_id: Annotated[str, Key]
+    seq:       Annotated[int, Key]
     text: str
     is_final: bool
-    key = ("stream_id", "seq")
 ```
+
+**Marker 语义**：
+- `Key` — identity。唯一标识一条 Data 实例；也是 `.as_latest()` upsert 的主键、默认的 dedup key
+- `DedupKey` — 扩展 dedup / debounce 分桶 key（叠加在 `Key` 之上）。不标 `DedupKey` 时默认等于 identity
+- `Version` — `.as_latest()` 的并发版本字段，runtime 用它做 `UPSERT ON CONFLICT DO UPDATE WHERE new.version > old.version`
+
+Runtime 侧通过 `model.model_fields[name].metadata` 反射拿出 marker，不用额外声明。
 
 **Data 不是**「pg 一张表」也不是「mq 一个 queue」，它就是「一种数据」。持久化和传输是 runtime 根据 wire 属性决定的事。
 
 **Identity/key 的意义**：这是业务必须知道的最小语义层（不是 infra knob）。
-- `.as_latest()` 按 key upsert（`LifeState.key=persona_id` 意味着每个 persona 只保留最新）
-- `.durable()` 按 key 做幂等（同一 `Message.message_id` 重复消费只处理一次）
-- `.debounce()` 按 key 分桶（`DriftTrigger.key=(chat_id, persona_id)` 每对独立去抖）
+- `.as_latest()` 按 `Key` 字段 upsert（`LifeState.persona_id` 作为 Key 意味着每 persona 一份最新）
+- `.durable()` 按 dedup key 做幂等（同 `Message.message_id` 重复消费只处理一次；dedup key = `Key` + `DedupKey` 字段）
+- `.debounce()` 按 dedup key 分桶（`DriftTrigger` 的 `(chat_id, persona_id)` 每对独立去抖）
 
-**同一 Data 可以有多个 producer**，只要它们产出的实例共享同一 key 语义。例子：`LifeState` 既来自 `life_engine_tick`（cron 触发），也来自 `state_only_refresh`（schedule 变更触发），两者都按 `persona_id` upsert，消费者始终看到一致的"最新状态"。
+**同一 Data 可以有多个 producer**，只要它们产出的实例共享同一 identity 语义。例子：`LifeState` 既来自 `life_engine_tick`（cron 触发），也来自 `state_only_refresh`（schedule 变更触发），两者都按 `persona_id` upsert，消费者始终看到一致的"最新状态"。
 
-**重入/重试场景的 key 处理**（rebuild / afterthought 重跑 / manual retrigger）：
+**重入/重试场景**（rebuild / afterthought 重跑 / manual retrigger）：给字段加 `DedupKey` marker 就能显式区分"第 N 次重入"。上面 `Message.generation` 标了 `DedupKey`——identity 仍然是 `message_id`（全系统仍把同 message_id 认作同一条消息），但 rebuild 时 `generation=1` 被视为新事件，不会被 debounce 当成 duplicate 丢掉。
 
-Data 有两种 key——「自然 key」唯一标识业务实例（如 `message_id`），「去抖/幂等 key」决定 `.durable()` / `.debounce()` 的分桶。两者**不必相同**。重入场景下为避免被当成 duplicate 误判：
-
-```python
-class Message(Data):
-    message_id: str
-    generation: int = 0   # 0 = 初次；1,2,... = rebuild / manual retrigger
-    ...
-    key = ("message_id",)                              # 自然 key
-    dedup_key = ("message_id", "generation")           # 幂等 / 去抖的 key
-```
-
-或者在 wire 上显式覆盖：
-
-```python
-# afterthought 按 message_id + generation 去抖，rebuild 不会被误吞
-wire(Message).to(afterthought).debounce(
-    key_fn=lambda m: (m.message_id, m.generation),
-    seconds=10,
-)
-```
-
-默认 `dedup_key = key`，不声明 generation 的普通场景行为不变。
+如果某条 wire 想临时覆盖 dedup 规则，也可以写 `.debounce(key_fn=...)`，但优先鼓励在 Data 定义里用 marker 表达（字段和角色在一起）。
 
 #### Stream[T] — 流式作为一等公民
 
@@ -372,7 +355,7 @@ runtime.run(nodes_bound_to(app_name))
    - **Trace context 穿越 durable 边**：runtime 在 `.durable()` 序列化 Data 时，把当前 contextvar（`trace_id` / `session_id` / `request_id` / lane / langfuse `observation_id`）打入 mq payload 的 header 字段；消费端反序列化时恢复 contextvar。业务代码无感知，一条完整 trace 可以跨 http-service → mq → arq-worker 拼出来
    - Lane routing 自动注入（`x-lane` 从 source 延续到 sink，durable 边也不丢）
    - 错误处理、重试、死信
-   - `.durable()` 边自带幂等性（基于 Data 的 `dedup_key`，默认等于 `key`）
+   - `.durable()` 边自带幂等性（基于 Data 的 dedup key = `Key` 字段 + `DedupKey` 字段的集合）
 3. **可观测性**
    - 每条 wire 是 metric 的天然维度：`wire_latency_seconds{data=Message,consumer=vectorize}`
    - 物理拓扑可以 dump 成 mermaid 供运维看
@@ -492,7 +475,7 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 本次重构会改变**两条行为语义**，必须在迁移 PR 的 description 里明确告知运维：
 
 - **部署中断 → 部署不中断**：当前 CLAUDE.md 明文"部署 = 杀 Pod = 中断所有异步任务"，用户已熟悉"部署时正在跑的 afterthought/rebuild 会丢、需要手工重跑"。新框架下 `.durable()` 边的任务会在 Pod 重启后自动从 mq 恢复，不再中断。这改变了用户对"部署副作用"的心理模型——从 Phase 3 开始生效（drift/afterthought 迁移完毕）。
-- **rebuild 语义**：当前 rebuild 用户需手动重跑；新框架下可以通过 `Message.generation` 字段显式声明"这是第 N 次重入"，runtime 按 `dedup_key = (message_id, generation)` 区分而非去重。两种行为不冲突，但使用方式变化。
+- **rebuild 语义**：当前 rebuild 用户需手动重跑；新框架下 `Message.generation` 字段（标 `DedupKey`）显式声明"这是第 N 次重入"，runtime 按 `(message_id, generation)` 分桶区分而非去重。两种行为不冲突，但使用方式变化。
 
 ## 开放问题（writing-plans 阶段需要细化）
 
@@ -509,7 +492,7 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
    - `grep -rE "(rabbitmq|arq\.|redis\.Redis|qdrant_client|AsyncSessionLocal|scan_pending_|asyncio\.create_task\(.*_pipeline|find_latest_life_state)"` 为空
 2. 对任意一种 Data，能在 `app/wiring/*.py` 里一行列出所有消费者
 3. 对任意一个 Node，能从签名读出它消费什么 Data、产出什么 Data
-4. 每个 Data 类必须声明 `key = (...)` tuple（静态校验）
+4. 每个 Data 类必须至少有一个 `Annotated[..., Key]` 字段（启动时校验，无 Key 的 Data 拒绝注册）
 5. `compile_graph().to_mermaid()` 的输出等价于 agent-service 的架构图
 6. 用 fake capability 可以整图 dry-run，断言事件传播正确
 
@@ -519,7 +502,7 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 
 #### CI 可自动化（每次 PR 运行）
 
-7. **`.durable()` 幂等**：同一 Data（按 `dedup_key` 判定）重复送达，消费者副作用只发生一次
+7. **`.durable()` 幂等**：同一 Data（按 dedup key 判定）重复送达，消费者副作用只发生一次
 8. **`.with_latest(X)` 可见性 SLO**：runtime 声明并测量——从 X 写入到下游 `with_latest(X)` 读到，P99 延迟 < 500ms（可配）
 9. **`.debounce()` 正常路径正确**：同一 key 短时间多次事件在延迟后只触发一次聚合，跨 key 互不影响
 10. **Stream 顺序 + 终结**：Chunk 按 `seq` 递增送达；`is_final=True` 的 Chunk 之后没有后续 chunk；当前端 EOF 后 runtime 发出终结事件
