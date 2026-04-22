@@ -3,7 +3,7 @@
 Exports two tool lists:
 
 - ``BASE_TOOLS`` — available to all agents including sub-agents.
-- ``ALL_TOOLS`` — only for the main agent.
+- ``ALL_TOOLS`` — only for the main agent (adds delegation, skill, sandbox, history).
 """
 
 from app.agent.tools.commit_abstract import commit_abstract_memory
@@ -35,11 +35,11 @@ BASE_TOOLS = [
     update_schedule,
 ]
 
-# All tools: only for the main agent.
-# History search tools are intentionally excluded: current-chat and cross-chat
-# context should be injected up front rather than searched ad hoc at reply time.
+# All tools: only for the main agent
 ALL_TOOLS = [
     *BASE_TOOLS,
+    check_chat_history,
+    search_group_history,
     list_group_members,
     deep_research,
     load_skill,
