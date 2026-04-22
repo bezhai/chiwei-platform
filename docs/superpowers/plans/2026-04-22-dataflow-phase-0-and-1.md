@@ -207,11 +207,14 @@ DATA_REGISTRY: set[type["Data"]] = set()
 class Data(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        # Skip intermediate mixins (AdminOnly, etc.) that don't add fields.
-        if not hasattr(cls, "model_fields") or not cls.model_fields:
-            return
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs):
+        # Pydantic v2 fires this AFTER model_fields is built.
+        # NOTE: DO NOT use __init_subclass__ — that fires before model_fields
+        # is populated, so reflection (key_fields / DATA_REGISTRY add) will
+        # silently be a no-op on every subclass.
+        if not cls.model_fields:
+            return  # skip Data itself and pure mixin intermediates
         if not key_fields(cls):
             raise TypeError(f"{cls.__name__} must declare at least one Key field")
         DATA_REGISTRY.add(cls)
