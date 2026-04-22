@@ -58,3 +58,11 @@ def test_missing_annotation_rejected():
 
         @node
         async def bad3(msg, other: Msg) -> Frag: ...
+
+
+def test_returns_none_allowed():
+    @node
+    async def sink_node(msg: Msg) -> None: ...
+
+    assert sink_node in NODE_REGISTRY
+    assert output_of(sink_node) is type(None)
