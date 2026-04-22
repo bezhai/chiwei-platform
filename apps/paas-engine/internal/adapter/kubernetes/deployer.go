@@ -207,6 +207,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 		mergedEnvs["VERSION"] = release.Version
 	}
 	mergedEnvs["LANE"] = release.Lane
+	mergedEnvs["APP_NAME"] = release.AppName
 	envVars := envsToK8s(mergedEnvs)
 
 	// EnvFrom: legacy sources first, then bundle secret (bundle overrides legacy for duplicate keys)
