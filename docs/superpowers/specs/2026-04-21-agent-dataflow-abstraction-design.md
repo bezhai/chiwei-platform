@@ -18,7 +18,7 @@
 
 业务代码只回答三个问题：
 1. 我流转的是什么类型的数据？
-2. 我有哪些处理节点？每个节点的输入输出是什么？
+2. 我有哪些 Node？每个 Node 的输入输出是什么？
 3. 哪种数据被哪些节点消费，消费时有什么语义（持久化、延迟、只要最新……）？
 
 Runtime 负责回答：这张图在物理上怎么跑——什么时候用 mq、什么时候用 pg、什么时候用进程内调用、什么时候 cron 兜底。
@@ -28,13 +28,13 @@ Runtime 负责回答：这张图在物理上怎么跑——什么时候用 mq、
 ```
 agent-service = (Data × Node) 二分图
 
-  Data Node ───edge (produces/consumes)──> Process Node
-                                              │
-                                              └── produces ──> Data Node
+      Data ───edge (produces/consumes)──> Node
+                                            │
+                                            └── produces ──> Data
 ```
 
-- **Data Node**：一种类型化的数据（`Message` / `LifeState` / `SafetyVerdict` / `Fragment` / `DriftTrigger` / `ChatResponse` …）
-- **Process Node**：一个业务函数，声明它消费哪些 Data、产出哪些 Data
+- **Data**：一种类型化的数据（`Message` / `LifeState` / `SafetyVerdict` / `Fragment` / `DriftTrigger` / `ChatResponseChunk` …）
+- **Node**：一个 `async def` 业务函数，声明它消费哪些 Data、产出哪些 Data
 - **Edge**：由 `wire(...)` 声明，带属性（默认 / durable / as_latest / debounce / broadcast …）
 
 这张图可以 `.to_mermaid()` 画出来。它就是 agent-service 的架构图——不是文档里画一张、代码里跑另一套。
@@ -517,6 +517,10 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 2. **错误边**：Node raise 时是不是变成 Data？`wire(NodeError).to(error_handler)` 作为一等公民？
 3. **DynamicConfig 怎么接**：目前 `dynamic_configs` 是 global side-state。是作为 capability（`config.get(...)`）还是作为 `.with_config(X)` 注入？
 4. **Agent 内部 tool call 是否未来需要暴露给 wire**（本轮不做，见非目标）。
+5. **`.as_latest()` 遇到 append-only 旧表怎么处理**：`life_engine_state` 当前是 `INSERT + ORDER BY created_at DESC LIMIT 1` 读最新（`apps/agent-service/app/data/queries.py:545`），没有 `persona_id` 唯一约束和 `version` 列。plan 阶段必须选一条路：
+   - **A**：让 runtime 的 `.as_latest()` 支持两种落地方式——`upsert` 和 `append+read_latest`，旧表走后者（无需 schema 变更）；新表默认 upsert
+   - **B**：Phase 4（Life Engine 迁移）时给旧表加唯一约束 + `version` 列，统一走 upsert（有数据迁移成本）
+   - 倾向 A，保留 append-only 作为合法的 `.as_latest()` 实现，但由 Data 类显式声明（比如 `Annotated[..., AppendOnly]` marker 或 wire 属性 `.as_latest(mode="append")`）
 
 ## 验收标准
 
