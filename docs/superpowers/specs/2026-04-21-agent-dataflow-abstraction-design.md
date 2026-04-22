@@ -82,20 +82,21 @@ class ChatResponseChunk(Data):
 ```
 
 **Marker 语义**：
-- `Key` — identity。唯一标识一条 Data 实例；也是 `.as_latest()` upsert 的主键、默认的 dedup key
-- `DedupKey` — 扩展 dedup / debounce 分桶 key（叠加在 `Key` 之上）。不标 `DedupKey` 时默认等于 identity
-- `Version` — `.as_latest()` 的并发版本字段，runtime 用它做 `UPSERT ON CONFLICT DO UPDATE WHERE new.version > old.version`
+- `Key` — 自然 key。标识一条 Data 的"逻辑身份"（如 persona_id、message_id）；`.as_latest()` 按 Key 分组取最新版本；默认的 dedup key
+- `DedupKey` — 扩展 dedup / debounce 分桶 key（叠加在 `Key` 之上）。不标 `DedupKey` 时默认等于 Key
+- `Version` — append 模型的版本号字段；runtime 在 `INSERT` 时自动赋值（`max(version)+1`，按 Key 分组）。`.as_latest()` 读取时用 `DISTINCT ON (key) ORDER BY version DESC`
+- `AdminOnly`（类级 mixin，非字段 marker） — 标记本 Data 对业务代码只读
 
-Runtime 侧通过 `model.model_fields[name].metadata` 反射拿出 marker，不用额外声明。
+Runtime 侧通过 `model.model_fields[name].metadata` 反射拿出字段 marker；通过 `issubclass(cls, AdminOnly)` 检测类级 marker。
 
 **Data 不是**「pg 一张表」也不是「mq 一个 queue」，它就是「一种数据」。持久化和传输是 runtime 根据 wire 属性决定的事。
 
 **Identity/key 的意义**：这是业务必须知道的最小语义层（不是 infra knob）。
-- `.as_latest()` 按 `Key` 字段 upsert（`LifeState.persona_id` 作为 Key 意味着每 persona 一份最新）
-- `.durable()` 按 dedup key 做幂等（同 `Message.message_id` 重复消费只处理一次；dedup key = `Key` + `DedupKey` 字段）
+- `.as_latest()` 按 `Key` 字段分组取最新版本（`LifeState.persona_id` 作为 Key 意味着每 persona 取最大 version 的行）
+- `.durable()` 按 dedup key 做幂等（同 `Message.message_id` 重复消费只处理一次；dedup key = `Key` + `DedupKey` 字段；落地 `ON CONFLICT DO NOTHING` 跳过）
 - `.debounce()` 按 dedup key 分桶（`DriftTrigger` 的 `(chat_id, persona_id)` 每对独立去抖）
 
-**同一 Data 可以有多个 producer**，只要它们产出的实例共享同一 identity 语义。例子：`LifeState` 既来自 `life_engine_tick`（cron 触发），也来自 `state_only_refresh`（schedule 变更触发），两者都按 `persona_id` upsert，消费者始终看到一致的"最新状态"。
+**同一 Data 可以有多个 producer**，只要它们产出的实例共享同一 identity 语义。例子：`LifeState` 既来自 `life_engine_tick`（cron 触发），也来自 `state_only_refresh`（schedule 变更触发），两者都 append 自己的版本到 `persona_id` 下，`.as_latest()` 总是取版本最大的一条——不需要协调、也不覆盖历史。
 
 **重入/重试场景**（rebuild / afterthought 重跑 / manual retrigger）：给字段加 `DedupKey` marker 就能显式区分"第 N 次重入"。上面 `Message.generation` 标了 `DedupKey`——identity 仍然是 `message_id`（全系统仍把同 message_id 认作同一条消息），但 rebuild 时 `generation=1` 被视为新事件，不会被 debounce 当成 duplicate 丢掉。
 
@@ -215,7 +216,7 @@ wire(Message).to(chat_stream).with_latest(LifeState)
 
 看一眼对应域的 wiring 文件（或者 compile 后的 `GLOBAL_GRAPH`）就能回答：
 
-- **`LifeState` 谁产出？** → grep 所有返回 `LifeState` 的 Node（可能不止一个，但按同一 key upsert）
+- **`LifeState` 谁产出？** → grep 所有返回 `LifeState` 的 Node（可能不止一个，各自 append 版本，读时取最新）
 - **`Message` 谁消费？** → 一行 `wire(Message).to(...)` 列完
 - **某条边是异步吗？持久化吗？** → 看 wire 属性
 
@@ -227,7 +228,7 @@ wire(Message).to(chat_stream).with_latest(LifeState)
 |---|---|---|
 | 默认 | 产出后立即在同进程内传递给消费者 | 直接 `await` |
 | `.durable()` | 跨 Pod / 持久化 / 可重试；消费失败不丢 | mq (arq/rabbitmq) + pg outbox + 消费者订阅 |
-| `.as_latest()` | 本条 Data 是「状态」而非「事件」：只保留最新一份，历史覆盖 | pg state table (one row per key)；写时 upsert，读时取最新 |
+| `.as_latest()` | 本条 Data 是「状态」而非「事件」：每次写 append 一个新版本，读时取最新 | 默认 append + version + `DISTINCT ON (key) ORDER BY version DESC` 读（审计 append-only） |
 | `.debounce(seconds, max_buffer)` | 同一 key 短时间多次产出时合并 | redis 计时器 + 延迟触发（arq delayed 或 redis zset） |
 | `.broadcast()` | 通知外部业务，不在乎谁接 | mq topic, fire-and-forget |
 | `.with_latest(X)` | 消费者函数需要「最新一份 X」作为额外入参；runtime 调用时注入 | 从 X 的 state table 读最新值注入；要求 X 自身已用 `.as_latest()` 声明 |
@@ -274,35 +275,66 @@ Capability 是业务层第二种语言（除 Data/Node/Wire 之外）。**节点
 
 **核心规则**：**Data 定义 = schema；wire 属性 = CRUD。业务代码里不写 migration，不写 Store 类。**
 
+### 审计约束：默认 append-only
+
+本项目审计要求**业务代码不得覆盖历史行**（禁止 `UPDATE data_*` / `ON CONFLICT DO UPDATE`）。所有业务 Data 表默认走 append-only 模型：
+
+- **写**：每次产出 Data → `INSERT` 新行，`version` 字段自动递增（runtime 维护）
+- **读最新**：`SELECT DISTINCT ON (key_columns) * FROM data_<T> ORDER BY key_columns, version DESC`
+- **历史可追溯**：所有旧版本在表里保留，`query(T).all_versions().where(key=...)` 可查全史
+- **并发一致性天然保证**：两个 producer 各自 append 不同 version，读总是最大 version，无 lost update、无需 CAS
+- **幂等**（给 `.durable()` 用）：`INSERT ... ON CONFLICT (dedup_hash) DO NOTHING` —— `DO NOTHING` 不覆盖历史，审计允许；`DO UPDATE` 禁止
+
+这与 `life_engine_state` 现状（append + `ORDER BY created_at DESC LIMIT 1`）一致，迁移零负担。persona 定义、life_state、schedule、notes、messages、fragments 全部走这条路径。
+
+### 例外：Admin-only 只读表
+
+极少数表（如 `bot_config`）是**业务代码完全只读**的——只能通过管理端/运维通道修改。Data 类用 marker 标注：
+
+```python
+from app.runtime.data import Data, Key, AdminOnly
+
+class BotConfig(Data, AdminOnly):
+    bot_id: Annotated[str, Key]
+    config: dict
+    # 业务代码 produce BotConfig 会在 Node 注册时被 runtime 拒绝；只能 consume
+```
+
+runtime 在启动时校验：`AdminOnly` Data 不能出现在任何 `@node` 的返回类型里（包括 tool call 产出）。
+
 ### 自动建表 / 迁移
 
 Runtime 启动时扫所有注册的 Data 类：
 
 1. 读 Pydantic 字段（名字、类型、nullable、默认值）
-2. 读 marker（`Key` 字段作主键；`Version` 字段作并发控制列；`DedupKey` 字段参与 dedup 唯一约束）
-3. 生成/对比 pg schema：
-   - 首次：`CREATE TABLE data_<snake_case_of_class>`
+2. 读 marker（`Key` 字段参与 natural key；`Version` 字段是 append 的版本号；`DedupKey` 字段参与 dedup；`AdminOnly` 类级 mixin 标 read-only）
+3. 生成 / 对比 pg schema：
+   - 首次：`CREATE TABLE data_<snake_case_of_class>`（**无 PRIMARY KEY (key) UNIQUE**——append 不去重）
    - 字段增加：`ALTER TABLE ... ADD COLUMN`（nullable 或带默认值）
    - 字段删除 / 类型 breaking change：**拒绝启动**，要求写显式迁移脚本（保留人类 escape hatch）
-4. 根据 wire 属性自动建索引：
-   - `.as_latest()` → `PRIMARY KEY (Key 字段)` + `updated_at DESC` 索引
-   - `.durable()` → `UNIQUE (dedup_key 字段)` 用于幂等
-   - 查询维度索引（`query(T).where(field=...)` 常用字段）→ 可通过 `Annotated[str, Indexed]` 显式声明
+4. 自动建索引：
+   - 所有 append 表：`(key_columns, version DESC)` 索引 — 给 `DISTINCT ON` 读最新用
+   - `.durable()` 边：`UNIQUE (dedup_hash)` — 幂等靠这个（配 `ON CONFLICT DO NOTHING`）
+   - 查询维度：通过 `Annotated[str, Indexed]` 显式声明
+
+**旧表对接**：通过 `existing_table="life_engine_state"` 映射，直接接管 append-only 旧表，不改表名、不迁数据，零风险。
 
 ### 读写映射
 
 | 操作 | 业务代码 | Runtime 落地 |
 |---|---|---|
 | 写 | `return Message(...)` + `wire(Message).durable()` | `INSERT INTO data_message ... ON CONFLICT (dedup_hash) DO NOTHING` |
-| 读单条（最新） | `@node def f(..., life: LifeState)` + `wire(LifeState).as_latest()` | `SELECT * FROM data_life_state WHERE persona_id=$1 ORDER BY version DESC LIMIT 1` |
-| 按 key 读 | runtime 内部，业务看不到 | `SELECT * FROM data_X WHERE <key fields>=$...` |
-| 动态查询 | `query(Message).where(chat_id=x).limit(20)` | 翻译成 SQL（过滤 + 排序 + 分页） |
+| 读最新 | `@node def f(..., life: LifeState)` + `wire(LifeState).as_latest()` | `SELECT DISTINCT ON (persona_id) * FROM data_life_state ORDER BY persona_id, version DESC` |
+| 按 key 读历史 | `query(T).all_versions().where(key=...)` | `SELECT * FROM data_X WHERE ... ORDER BY version` |
+| 动态查询 | `query(Message).where(chat_id=x).limit(20)` | 翻译成 SQL（过滤 + 排序 + 分页；默认只返回最新版本） |
+| 改 admin 表 | ❌ 业务代码不允许 | 启动时拒绝；管理端走独立 API |
 
 ### 不做的事
 
 - **不做跨 Data 的 JOIN**：想要聚合，定义**派生 Data**（未来可能）或在 Node 里先 `query` 再合并；不允许 `query(Message).join(User).on(...)`
 - **不做 lazy relationships / eager loading**：Data 是扁平值
 - **不做事务嵌套**：每次 Node 执行的所有写在一个事务里；跨 Node 靠 `.durable()` 的 at-least-once + 幂等，不是分布式事务
+- **不做 `UPDATE` / `DELETE` 业务表**：append-only 约束禁止。想要"软删"就新 append 一个 `deleted=true` 版本；物理清理是 DBA 运维的事，不是业务代码
 
 ### Node 内部的受控并发
 
@@ -386,7 +418,7 @@ runtime.run(nodes_bound_to(app_name))
    - **Trace context 穿越 durable 边**：runtime 在 `.durable()` 序列化 Data 时，把当前 contextvar（`trace_id` / `session_id` / `request_id` / lane / langfuse `observation_id`）打入 mq payload 的 header 字段；消费端反序列化时恢复 contextvar。业务代码无感知，一条完整 trace 可以跨 http-service → mq → arq-worker 拼出来
    - Lane routing 自动注入（`x-lane` 从 source 延续到 sink，durable 边也不丢）
    - 错误处理、重试、死信
-   - `.durable()` 边自带幂等性（基于 Data 的 dedup key = `Key` 字段 + `DedupKey` 字段的集合）
+   - `.durable()` 边自带幂等性（`INSERT ... ON CONFLICT (dedup_hash) DO NOTHING`，dedup key = `Key` + `DedupKey` 字段集合；**不覆盖历史**）
 3. **可观测性**
    - 每条 wire 是 metric 的天然维度：`wire_latency_seconds{data=Message,consumer=vectorize}`
    - 物理拓扑可以 dump 成 mermaid 供运维看
@@ -517,10 +549,7 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 2. **错误边**：Node raise 时是不是变成 Data？`wire(NodeError).to(error_handler)` 作为一等公民？
 3. **DynamicConfig 怎么接**：目前 `dynamic_configs` 是 global side-state。是作为 capability（`config.get(...)`）还是作为 `.with_config(X)` 注入？
 4. **Agent 内部 tool call 是否未来需要暴露给 wire**（本轮不做，见非目标）。
-5. **`.as_latest()` 遇到 append-only 旧表怎么处理**：`life_engine_state` 当前是 `INSERT + ORDER BY created_at DESC LIMIT 1` 读最新（`apps/agent-service/app/data/queries.py:545`），没有 `persona_id` 唯一约束和 `version` 列。plan 阶段必须选一条路：
-   - **A**：让 runtime 的 `.as_latest()` 支持两种落地方式——`upsert` 和 `append+read_latest`，旧表走后者（无需 schema 变更）；新表默认 upsert
-   - **B**：Phase 4（Life Engine 迁移）时给旧表加唯一约束 + `version` 列，统一走 upsert（有数据迁移成本）
-   - 倾向 A，保留 append-only 作为合法的 `.as_latest()` 实现，但由 Data 类显式声明（比如 `Annotated[..., AppendOnly]` marker 或 wire 属性 `.as_latest(mode="append")`）
+5. **`AdminOnly` 清单**：哪些 Data 类需要标 `AdminOnly`？至少 `BotConfig`、`DynamicConfig`（待确认）；plan 阶段对全量旧表盘一遍。
 
 ## 验收标准
 
@@ -532,8 +561,10 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 3. 对任意一个 Node，能从签名读出它消费什么 Data、产出什么 Data
 4. 每个 Data 类必须至少有一个 `Annotated[..., Key]` 字段（启动时校验，无 Key 的 Data 拒绝注册）
 5. 业务代码库（排除 runtime / capabilities / wiring / deployment）中，`grep -rE "CREATE TABLE|ALTER TABLE|Alembic|alembic"` 为空——所有 schema 由 Data 定义 + migrator 自动生成
-5. `compile_graph().to_mermaid()` 的输出等价于 agent-service 的架构图
-6. 用 fake capability 可以整图 dry-run，断言事件传播正确
+6. 业务代码 + runtime 全局 `grep -rE "ON CONFLICT .* DO UPDATE|UPDATE data_[a-z_]+ SET"` 为空——append-only 审计约束
+7. `AdminOnly` Data 不能出现在任何 `@node` 的返回类型中（启动时枚举校验）
+8. `compile_graph().to_mermaid()` 的输出等价于 agent-service 的架构图
+9. 用 fake capability 可以整图 dry-run，断言事件传播正确
 
 ### 行为不变量
 
@@ -541,23 +572,25 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 
 #### CI 可自动化（每次 PR 运行）
 
-7. **`.durable()` 幂等**：同一 Data（按 dedup key 判定）重复送达，消费者副作用只发生一次
-8. **`.with_latest(X)` 可见性 SLO**：runtime 声明并测量——从 X 写入到下游 `with_latest(X)` 读到，P99 延迟 < 500ms（可配）
-9. **`.debounce()` 正常路径正确**：同一 key 短时间多次事件在延迟后只触发一次聚合，跨 key 互不影响
-10. **Stream 顺序 + 终结**：Chunk 按 `seq` 递增送达；`is_final=True` 的 Chunk 之后没有后续 chunk；当前端 EOF 后 runtime 发出终结事件
-11. **`.broadcast()` fire-and-forget**：broadcast 失败不阻塞 producer，不影响其他消费者
-12. **Deployment 隔离**：`bind(...).to_app("X")` 声明的 Node 只在 App `X` 的 Pod 里跑，绝对不在其他 App 里执行（启动时枚举可验证）
+10. **`.durable()` 幂等**：同一 Data（按 dedup key 判定）重复送达，consumer 侧副作用只发生一次；落地靠 `INSERT ON CONFLICT (dedup_hash) DO NOTHING` + consumer 代码依赖自身幂等
+11. **`.with_latest(X)` 可见性 SLO**：runtime 声明并测量——从 X 写入到下游 `with_latest(X)` 读到，P99 延迟 < 500ms（可配）
+12. **`.debounce()` 正常路径正确**：同一 key 短时间多次事件在延迟后只触发一次聚合，跨 key 互不影响
+13. **Stream 顺序 + 终结**：Chunk 按 `seq` 递增送达；`is_final=True` 的 Chunk 之后没有后续 chunk；当前端 EOF 后 runtime 发出终结事件
+14. **`.broadcast()` fire-and-forget**：broadcast 失败不阻塞 producer，不影响其他消费者
+15. **Deployment 隔离**：`bind(...).to_app("X")` 声明的 Node 只在 App `X` 的 Pod 里跑（启动时枚举可验证）
+16. **append-only 历史完整**：同一 Key 的多次写入，所有版本都在 pg 里（`SELECT COUNT(*) FROM data_<T> WHERE key=$1` 等于写入次数），没有被覆盖
 
 #### 需演练脚本（跨 phase 必须通过一次，不跑在 PR CI）
 
 位置：`tests/integration/chaos/` + `scripts/chaos/` 下的 shell/python 脚本，手动或预定期触发。
 
-13. **`.durable()` 跨 Pod 重启不丢**：producer 在 A Pod 产出 100 条 durable Data，在 consumer 处理过程中 `kill -9` consumer Pod，重启后全部 100 条必须被消费且只被消费一次（结合不变量 7 的幂等）
-14. **`.debounce()` 跨重启不丢**：进入 debounce buffer 的事件在进程重启后仍能按预期延迟触发——需要 redis/pg 持久化 debounce 状态，而不是内存 dict
-15. **`.as_latest()` 多 replica 并发写入一致性**：
-   - 2 个 replica 对同一 `persona_id` 并发各写 100 次 LifeState
-   - 最终读到的 LifeState 必须是**按 serial version 或 `updated_at` 最晚的一次**
-   - **实现要求**：`.as_latest()` 落地用 `UPSERT ON CONFLICT (key) DO UPDATE SET ... WHERE new.version > old.version`（或用 `updated_at >` 的同类模式），保证并发写入不出现 lost update；**不允许**用"先 SELECT 再 INSERT"两步。
+17. **`.durable()` 跨 Pod 重启不丢**：producer 在 A Pod 产出 100 条 durable Data，在 consumer 处理过程中 `kill -9` consumer Pod，重启后全部 100 条必须被消费且只被消费一次
+18. **`.debounce()` 跨重启不丢**：进入 debounce buffer 的事件在进程重启后仍能按预期延迟触发——需要 redis/pg 持久化 debounce 状态，而不是内存 dict
+19. **`.as_latest()` 多 replica 并发写入一致性**：
+   - 2 个 replica 对同一 `persona_id` 并发各 `INSERT` 100 次 LifeState
+   - pg 里应出现 200 行（全部保留），`SELECT DISTINCT ON (persona_id) * ORDER BY persona_id, version DESC` 读到的是 version 最大的那行
+   - **实现要求**：`.as_latest()` 落地用 `INSERT` + `version` 在事务里用 `COALESCE(MAX(version), 0) + 1` 计算；通过 Key 列的行级锁（`SELECT MAX(version) ... FOR UPDATE`）或 advisory lock 保证 version 单调，**不允许** `ON CONFLICT DO UPDATE`，不允许"先 SELECT 再 INSERT"两步无锁
+   - 两个 replica 并发不会出现两个相同 version（通过锁保证）；也不会出现 lost update（通过 append 保证）
 16. **Stream 消费者 crash 不重发**：消费者处理到第 50 个 chunk 时 crash，重启后从 seq=51 继续，不重复发送前 50 个（runtime 层维护 consumer offset）
 17. **Trace 穿越 durable 边连续**：http-service 发起一条 request，trace 里能看到 mq 传递后 arq-worker 里的 node 执行是**同一个 trace**（langfuse session_id 一致）
 
@@ -567,6 +600,7 @@ vectorize / safety_post / drift / afterthought 这些下游 Node 都消费 `Mess
 - **反驳 reviewer**：pre-check 和 stream 竞速不升级到 wire（放 Node 内部，见"受控并发"一节）
 - **保留为开放**：Agent 内部 tool call 是否产出 Data（本轮不做）
 - **设计演进**（相对 reviewer 建议的简化）：持久层从"per-entity Store"改为"Data 定义 + wire 属性 + runtime 自动 migration"——业务代码里不再出现 Store 类，schema 从 Data 定义推导，通用动态查询统一走 `query(T)` 泛型
+- **审计约束**（后加，比 reviewer 提的更严）：所有业务表**默认 append-only**，严禁 `ON CONFLICT DO UPDATE` 和 `UPDATE data_*`；只有 `AdminOnly` 表（如 `BotConfig`）是业务代码只读（管理端写）。`.as_latest()` 走 append + version + `DISTINCT ON` 模型；`.durable()` 幂等靠 `ON CONFLICT DO NOTHING`（不覆盖）
 
 ## 相关文档
 
