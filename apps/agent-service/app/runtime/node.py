@@ -49,7 +49,7 @@ def node(fn: Callable) -> Callable:
                 f"{fn.__name__}.{name} must be a Data subclass or Stream[Data]"
             )
         inputs[name] = t
-    if ret is not None:
+    if ret is not None and ret is not type(None):
         tgt = element_type(ret) if is_stream(ret) else ret
         if not (isinstance(tgt, type) and issubclass(tgt, Data)):
             raise TypeError(
