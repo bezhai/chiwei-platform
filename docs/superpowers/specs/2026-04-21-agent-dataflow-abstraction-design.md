@@ -253,46 +253,41 @@ Capability 是业务层第二种语言（除 Data/Node/Wire 之外）。**节点
 
 ## Deployment / Placement 层
 
-**业务代码不碰 infra，但运维需要决定 Node 跑在哪里**——哪些 Node 独立 Pod、资源配额多少、并发度多少、故障隔离域是什么。这一层是**运维属性**，和业务分离，放在独立文件：
+**业务代码不碰 infra。Node 跑在哪个 Pod 是一个「归属」关系——绑定到 PaaS 里已存在的 App。**
+
+PaaS Engine 的模型是：**App 是独立的部署实体**（`port=0` 时就是 worker）。`agent-service` / `arq-worker` / `vectorize-worker` 是 PaaS 里**已存在的三个 App 记录**（同一镜像、不同 entry command）。资源、副本、镜像、namespace 全部由 PaaS API 管。业务代码只做一件事：**把 Node 绑到哪个 App**。
 
 ```
-app/deployment.py    # placement + resource + concurrency 声明
+app/deployment.py    # Node → PaaS App 的归属声明
 ```
 
 示例：
 
 ```python
-# 业务默认：跟 http service 同 Pod
-deploy(safety_check).in_service("agent-service")
+# 引用的 app name 必须在 PaaS 里已经存在
+# 不声明 = 跑在主 App（agent-service，HTTP 服务所在 Pod）
 
-# 向量化吞吐大、阻塞 LLM、失败可重试，独立 worker
-deploy(vectorize).as_worker(
-    name="vectorize-worker",
-    replicas=2,
-    resources=Resources(cpu="100m/1", memory="256Mi/1Gi"),
-    concurrency=8,
-)
+bind(vectorize).to_app("vectorize-worker")
+bind(save_fragment).to_app("vectorize-worker")
+bind(afterthought).to_app("arq-worker")
+bind(drift_observer).to_app("arq-worker")
+bind(life_engine_tick).to_app("arq-worker")
+# chat_stream / safety_check / recall_* 不声明，默认跑在 agent-service
+```
 
-# Afterthought 长 LLM 调用、占内存，独立 worker 隔离
-deploy(afterthought).as_worker(
-    name="arq-worker",
-    replicas=1,
-    resources=Resources(cpu="100m/1", memory="256Mi/1Gi"),
-)
+Runtime 启动时根据当前 App name 筛选要跑的 Node：
 
-# Life engine tick 是 cron 驱动，单实例避免重复
-deploy(life_engine_tick).as_worker(
-    name="life-worker",
-    replicas=1,
-    singleton=True,
-)
+```python
+# app/main.py 等入口统一读：
+app_name = os.environ["APP_NAME"]      # PaaS 注入
+runtime.run(nodes_bound_to(app_name))
 ```
 
 关键性质：
-- **业务代码里看不到这些**。Node 作者不知道自己会不会被放到独立 worker 跑。
-- **Runtime 把 deployment 声明翻译成 k8s Deployment**——`as_worker(name=...)` 对应 `app.yaml` 的 worker 块。Phase 0 就要打通这条翻译，不然 reviewer 说的"vectorize_worker 消失"会变成 placement 丢失。
-- **`.durable()` 与 deployment 正交**：`.durable()` 说"这条边不能丢"（→ mq + pg outbox），deployment 说"Node 跑在哪个 Pod"。两者可以任意组合。
-- 故障域、吞吐 SLO、资源隔离都通过 deployment 声明，不通过 wire 属性——不污染业务代码。
+- **Node 作者不知道也不关心自己跑在哪个 Pod**。同一份代码跑在 agent-service Pod 和 arq-worker Pod，只是筛出的 Node 集合不同。
+- **资源 / 副本 / 镜像 / 环境变量**全部由 PaaS 管，业务代码里没有这些字段——不像我最初草案那样 `as_worker(replicas=..., resources=...)`，那是在业务代码里重新定义 PaaS 已有的东西。
+- **加新 worker 的唯一流程**：先通过 PaaS API 建新 App → 然后在 `deployment.py` 里 `bind(...).to_app(new_app_name)`。顺序反过来报错（绑到不存在的 App）。
+- **`.durable()` 与 deployment 正交**：`.durable()` 说"边不能丢"，deployment 说"Node 跑在哪个 App"。两者可以任意组合。
 
 ## Runtime 职责
 
@@ -399,8 +394,9 @@ async def safety_pre_check(msg: Message) -> SafetyVerdict:
 1. **Phase 0 — Runtime 骨架 + Capability 层**：无业务迁移，只搭框架（Data/Node/Wire 三个基类 + 最小 runtime + Queue/Store/LLM/Agent/Embedder/VectorStore 的 capability adapter）。
 2. **Phase 1 — Vectorize 管线**：最独立、最好验证。验收：
    - `apps/agent-service/app/workers/vectorize_worker.py` 的业务逻辑全部迁移到 Node；原 `handle_vectorize` / `cron_scan_pending_messages` 不再由业务代码实现
-   - **但 `vectorize-worker` 这个独立 K8s Deployment 仍存在**——通过 `deploy(vectorize).as_worker(name="vectorize-worker", ...)` 声明，runtime 翻译成 `app.yaml` 的 worker 条目；placement/资源隔离/故障域不丢失
-   - 即：消失的是业务代码文件，不是部署单元
+   - **PaaS 侧的 `vectorize-worker` App 不变**——新 Node 通过 `bind(vectorize).to_app("vectorize-worker")` 绑定到已有 App；资源、副本、镜像由 PaaS 管，业务代码不碰
+   - 该 App 的 entry command 从旧的 `python -m app.workers.vectorize` 换成 runtime 统一入口（runtime 根据 APP_NAME 筛 Node）——这是 PaaS 侧 App 配置的一次修改，不是业务代码的事
+   - 即：消失的是业务代码文件，不是 PaaS App
 3. **Phase 2 — Safety 管线**：把 safety pre/post 抽成独立 Node，通过 wire 被 chat 调用；此阶段 chat pipeline 本身不迁（仍通过临时适配层调 safety Node）。验收：safety Node 签名清晰 `(Message) -> SafetyVerdict`，`mq.publish(SAFETY_CHECK_QUEUE, ...)` 从 safety 模块消失。
 4. **Phase 3 — Drift / Afterthought**：消灭内存 debouncer。验收：进程重启不丢待触发事件。
 5. **Phase 4 — Life Engine / Schedule / Glimpse**：消灭 cron + 现读 pg 模式。
