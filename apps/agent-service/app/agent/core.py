@@ -111,10 +111,12 @@ class Agent:
         *,
         tools: list[Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        update_trace: bool = True,
     ) -> None:
         self._cfg = config
         self._tools = tools or []
         self._model_kwargs = model_kwargs or {}
+        self._update_trace = update_trace
 
     # ------------------------------------------------------------------
     # internal
@@ -146,7 +148,7 @@ class Agent:
 
     def _build_config(self) -> dict[str, Any]:
         """Build LangChain config with Langfuse tracing."""
-        handler = CallbackHandler(update_trace=True)
+        handler = CallbackHandler(update_trace=self._update_trace)
         config: dict[str, Any] = {
             "callbacks": [handler],
             "recursion_limit": self._cfg.recursion_limit,

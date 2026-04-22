@@ -190,7 +190,7 @@ async def build_cross_chat_context(
 
         max_total = _max_total_messages()
         if max_total > 0:
-            messages = messages[:max_total]
+            messages = messages[-max_total:]
 
         if not messages:
             return ""
