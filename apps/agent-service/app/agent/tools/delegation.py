@@ -39,7 +39,7 @@ async def deep_research(task: str) -> str:
 
     _RESEARCH_CFG = AgentConfig("research_agent", "research-model", "research")
     context = get_runtime(AgentContext).context
-    agent = Agent(_RESEARCH_CFG, tools=[search_web])
+    agent = Agent(_RESEARCH_CFG, tools=[search_web], update_trace=False)
     result = await agent.run(
         [HumanMessage(content=task)],
         context=context,
