@@ -77,13 +77,14 @@ def mock_deps(fake_agent, mock_prompt):
         patch(
             "app.agent.core.CallbackHandler",
             return_value=MagicMock(),
-        ),
+        ) as mock_callback,
     ):
         yield {
             "build_chat_model": mock_build,
             "get_prompt": mock_get_prompt,
             "create_agent": mock_create,
             "compile_to_messages": mock_compile,
+            "callback_handler": mock_callback,
             "agent": fake_agent,
             "model": mock_model,
             "prompt": mock_prompt,
@@ -202,6 +203,16 @@ class TestRun:
 
         call_kwargs = mock_deps["agent"].ainvoke.call_args.kwargs
         assert call_kwargs["config"]["run_name"] == "test-agent"
+
+    async def test_updates_trace_by_default(self, mock_deps):
+        await Agent(_CFG).run(messages=[HumanMessage(content="hi")])
+
+        mock_deps["callback_handler"].assert_called_once_with(update_trace=True)
+
+    async def test_can_disable_trace_updates(self, mock_deps):
+        await Agent(_CFG, update_trace=False).run(messages=[HumanMessage(content="hi")])
+
+        mock_deps["callback_handler"].assert_called_once_with(update_trace=False)
 
     async def test_passes_context(self, mock_deps):
         from app.agent.context import AgentContext
