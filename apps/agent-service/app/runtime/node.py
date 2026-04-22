@@ -10,6 +10,7 @@ Reflects on the function's type hints to:
 
 from __future__ import annotations
 
+import inspect
 from typing import Callable, get_type_hints
 
 from app.runtime.data import Data, is_admin_only
@@ -22,6 +23,19 @@ _NODE_META: dict[Callable, dict] = {}
 def node(fn: Callable) -> Callable:
     hints = get_type_hints(fn)
     ret = hints.pop("return", None)
+    sig = inspect.signature(fn)
+    expected_annotated = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY, p.POSITIONAL_ONLY)
+        and name != "self"
+    }
+    missing = expected_annotated - hints.keys()
+    if missing:
+        raise TypeError(
+            f"{fn.__name__} missing type annotations for parameter(s): {sorted(missing)}"
+        )
     inputs: dict[str, type] = {}
     for name, t in hints.items():
         if is_stream(t):

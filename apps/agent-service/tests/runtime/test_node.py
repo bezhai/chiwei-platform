@@ -51,3 +51,10 @@ def test_non_data_input_rejected():
 
         @node
         async def bad2(x: int) -> Frag: ...
+
+
+def test_missing_annotation_rejected():
+    with pytest.raises(TypeError, match="missing type annotations"):
+
+        @node
+        async def bad3(msg, other: Msg) -> Frag: ...
