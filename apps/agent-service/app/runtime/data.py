@@ -55,6 +55,29 @@ class Data(BaseModel):
             raise TypeError(
                 f"{cls.__name__} must declare at least one Key field"
             )
+        # Meta.dedup_column adopts an external unique constraint — the
+        # runtime's own dedup_hash / Version machinery is bypassed. Silent
+        # bypass leaves the declared intent ambiguous, so reject any
+        # class that tries to declare both.
+        meta = getattr(cls, "Meta", None)
+        dedup_column = getattr(meta, "dedup_column", None) if meta else None
+        if dedup_column:
+            keys = set(key_fields(cls))
+            for name, field in cls.model_fields.items():
+                if DedupKey in field.metadata and name not in keys:
+                    raise TypeError(
+                        f"{cls.__name__}: Meta.dedup_column="
+                        f"{dedup_column!r} adopts an external unique "
+                        f"constraint — remove the DedupKey marker on "
+                        f"field {name!r} (or remove Meta.dedup_column)."
+                    )
+                if Version in field.metadata:
+                    raise TypeError(
+                        f"{cls.__name__}: Meta.dedup_column="
+                        f"{dedup_column!r} adopts an external table; "
+                        f"runtime-managed Version on field {name!r} is "
+                        f"incompatible. Remove one of them."
+                    )
         DATA_REGISTRY.add(cls)
 
 

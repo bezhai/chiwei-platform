@@ -5,9 +5,13 @@ Four operations, deliberately minimal:
   - :func:`insert_append` — durable write with runtime-maintained ``Version``
     auto-increment. Concurrency-safe via ``pg_advisory_xact_lock`` keyed on
     the natural-key tuple.
-  - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (dedup_hash) DO
-    NOTHING``. Returns the number of rows actually inserted (0 when the
-    dedup_hash collided, 1 otherwise).
+  - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (<target>) DO
+    NOTHING RETURNING 1``. Conflict target is ``Meta.dedup_column`` when
+    the Data class specifies one (adoption mode for pre-existing tables
+    whose own PK / unique index enforces dedup), else the runtime-managed
+    ``dedup_hash`` column. Returns the number of rows actually inserted
+    (0 on collision, 1 otherwise); see function docstring for the full
+    contract.
   - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
   - :func:`select_all_versions` — full history for a key, ordered by version
     (or ``created_at`` when the Data class declares no ``Version``).
