@@ -62,6 +62,11 @@ async def insert_append(obj: Data) -> int:
     not cryptographic here — only a stable bucket. Collisions between
     unrelated keys are benign (they serialize more than strictly necessary,
     never miss a lock).
+
+    Always returns ``1`` on success. A ``UniqueViolation`` on
+    ``dedup_hash`` is raised (not swallowed): because the version column
+    is folded into the hash, a collision means two writers slipped past
+    the advisory lock — an upstream bug worth surfacing loudly.
     """
     cls = type(obj)
     table = _table_name(cls)
