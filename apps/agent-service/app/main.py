@@ -48,6 +48,10 @@ async def lifespan(app: FastAPI):
         consumer_tasks.append(asyncio.create_task(start_chat_consumer()))
         logger.info("Chat request consumer started")
 
+    from app.runtime.http_source import register_http_sources
+    register_http_sources(app)
+    logger.info("dataflow http sources registered")
+
     yield
 
     # Shutdown consumers
