@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
+import pytest
+
 from app.runtime.data import Data, Key
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.engine import Runtime
@@ -90,16 +92,16 @@ async def test_runtime_fires_interval_consumer() -> None:
     """Runtime with an ``interval`` source drives the wired consumer
     repeatedly while it's running.
 
-    We pick 100ms period and watch for ~3 ticks inside 500ms. Asserting
-    ``>= 2`` keeps the test robust to GC pauses without losing signal.
+    100ms period over a 1.0s window — expect ~10 ticks; assert ``>= 3``
+    for headroom against CI scheduler jitter and GC pauses.
     """
     wire(Tick).to(count_ticks).from_(Source.interval(seconds=0.1))
 
     rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
-    await _run_for(rt, seconds=0.5)
+    await _run_for(rt, seconds=1.0)
 
-    assert len(agent_counter) >= 2, (
-        f"expected >=2 ticks in 500ms at 100ms interval; got {len(agent_counter)}"
+    assert len(agent_counter) >= 3, (
+        f"expected >=3 ticks in 1s at 100ms interval; got {len(agent_counter)}"
     )
 
 
@@ -126,40 +128,13 @@ async def test_runtime_skips_other_app_source_loops() -> None:
 
 async def test_runtime_rejects_payload_without_ts_field() -> None:
     """A cron/interval source wired to a Data class without a ``ts``
-    field must raise at first tick — silent drops would hide misconfig.
+    field must bubble a RuntimeError out of ``Runtime.run()`` — silent
+    drops or warning-only exits would leave the pod "healthy" with a
+    dead source loop.
     """
     wire(BadTick).to(bad_consumer).from_(Source.interval(seconds=0.05))
 
     rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
 
-    task = asyncio.create_task(rt.run())
-    # Give the source loop time to fire once; it should blow up.
-    try:
-        # The source loop runs in a child task and raises there, not at
-        # run() level. Wait for the task to reflect the failure.
-        await asyncio.sleep(0.25)
-        # Find the source task and verify it errored.
-        assert rt._source_tasks, "runtime should have created a source task"
-        src_task = rt._source_tasks[0]
-        # Wait for it to complete (it will have errored).
-        for _ in range(20):
-            if src_task.done():
-                break
-            await asyncio.sleep(0.05)
-        assert src_task.done(), "source task should have exited on RuntimeError"
-        exc = src_task.exception()
-        assert isinstance(exc, RuntimeError), (
-            f"expected RuntimeError from source loop, got {exc!r}"
-        )
-        assert "requires a 'ts: str' field" in str(exc)
-    finally:
-        if rt._stop_event is not None:
-            rt._stop_event.set()
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except TimeoutError:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+    with pytest.raises(RuntimeError, match="requires a 'ts: str' field"):
+        await asyncio.wait_for(rt.run(), timeout=2.0)

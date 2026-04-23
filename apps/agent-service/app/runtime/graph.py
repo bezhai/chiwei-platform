@@ -72,19 +72,20 @@ def compile_graph() -> CompiledGraph:
     # the graph instead of silently dropping messages at runtime.
     # Only enforce when placement is actually in use — tests that never
     # call ``bind()`` must remain unaffected.
-    from app.runtime.placement import _BINDINGS
+    from app.runtime.placement import iter_bindings
 
-    if _BINDINGS:
+    bindings = dict(iter_bindings())
+    if bindings:
         for w in wires:
-            apps = {_BINDINGS.get(c) for c in w.consumers}
+            apps = {bindings.get(c) for c in w.consumers}
             if len(apps) > 1:
                 labels = sorted(
-                    f"{c.__name__}->{_BINDINGS.get(c, '<unbound>')}"
+                    f"{c.__name__}->{bindings.get(c, '<unbound>')}"
                     for c in w.consumers
                 )
                 raise GraphError(
-                    f"wire({w.data_type.__name__}): consumers span multiple "
-                    f"apps ({', '.join(labels)}); split the wire or rebind "
+                    f"wire({w.data_type.__name__}): consumers span mixed apps "
+                    f"({', '.join(labels)}); split the wire or rebind "
                     f"consumers so they share one app"
                 )
 

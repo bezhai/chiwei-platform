@@ -14,7 +14,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from app.runtime.node import NODE_REGISTRY
 
@@ -24,6 +24,15 @@ _BINDINGS: dict[Callable, str] = {}
 
 def clear_bindings() -> None:
     _BINDINGS.clear()
+
+
+def iter_bindings() -> Iterable[tuple[Callable, str]]:
+    """Yield ``(node, app_name)`` pairs for every explicitly bound ``@node``.
+
+    Public accessor for the binding map. Consumers (e.g. ``compile_graph``)
+    should read through this instead of touching ``_BINDINGS`` directly.
+    """
+    return iter(_BINDINGS.items())
 
 
 class _Binder:

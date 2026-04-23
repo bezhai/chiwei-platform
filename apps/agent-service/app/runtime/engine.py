@@ -32,6 +32,7 @@ from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
 from app.runtime.migrator import plan_migration
 from app.runtime.placement import DEFAULT_APP, nodes_for_app
+from app.runtime.source import SourceSpec
 from app.runtime.wire import WireSpec
 
 logger = logging.getLogger(__name__)
@@ -62,16 +63,28 @@ class Runtime:
         self._migrate_schema_on_run = migrate_schema_on_run
         self._source_tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
+        # First fatal error a source loop hit (so ``run()`` can re-raise
+        # after cleanup). Any extra errors are logged but not saved —
+        # reporting the first one is enough to fail the pod fast.
+        self._source_error: BaseException | None = None
 
     async def migrate_schema(self) -> None:
         """Read live schema from PostgreSQL, diff against ``DATA_REGISTRY``,
         apply additive DDL.
 
-        Runs outside transactions (per-statement auto-commit via the
-        SQLAlchemy session's implicit transaction) so partial progress
-        survives if a later statement trips a MigrationError. Breaking
-        changes are refused by ``plan_migration`` itself — we never see
-        a destructive statement here.
+        The entire migration plan is applied atomically inside a single
+        transaction (the ``get_session()`` context manager commits on
+        clean exit, rolls back on exception). If any statement in the
+        plan raises, the whole migration rolls back — the DB stays in
+        its pre-migration state and the process must be retried.
+
+        ``plan_migration`` already refuses destructive statements, so we
+        only ever issue additive, ordered DDL here — atomic apply is the
+        safe choice for that shape.
+
+        Known limitation: this targets the ``public`` PostgreSQL schema
+        only. Services that share a database but want isolated schemas
+        would need a separate migration entrypoint.
         """
         from sqlalchemy import text
 
@@ -119,9 +132,12 @@ class Runtime:
     async def run(self) -> None:
         """Boot the runtime and block until cancelled.
 
-        On ``asyncio.CancelledError`` (or any exception from a source
-        loop surfaced via ``gather``), stop sources + durable consumers
-        cleanly before re-raising.
+        On ``asyncio.CancelledError`` (or any fatal exception surfaced
+        by a source loop via ``self._source_error``), stop sources +
+        durable consumers cleanly before re-raising so the pod exits
+        non-zero and PaaS restarts it. A silent ``run()`` return on a
+        dead source is not acceptable — PaaS would see the pod healthy
+        while the source does nothing.
         """
         if self._migrate_schema_on_run:
             await self.migrate_schema()
@@ -146,14 +162,14 @@ class Runtime:
                     if src.kind == "cron":
                         self._source_tasks.append(
                             loop.create_task(
-                                self._source_loop_cron(w, src.params["expr"]),
+                                self._source_loop_cron(w, src),
                                 name=f"cron[{w.data_type.__name__}]",
                             )
                         )
                     elif src.kind == "interval":
                         self._source_tasks.append(
                             loop.create_task(
-                                self._source_loop_interval(w, src.params["seconds"]),
+                                self._source_loop_interval(w, src),
                                 name=f"interval[{w.data_type.__name__}]",
                             )
                         )
@@ -167,7 +183,8 @@ class Runtime:
                 len(self._source_tasks),
             )
 
-            # Block forever unless cancelled externally.
+            # Block forever unless cancelled externally, or until a
+            # source loop sets ``_source_error`` and wakes us up.
             await self._stop_event.wait()
         finally:
             for t in self._source_tasks:
@@ -185,6 +202,12 @@ class Runtime:
                         )
             self._source_tasks.clear()
             await stop_consumers()
+
+        # After cleanup: if a source loop surfaced a fatal error, raise
+        # it so the worker process exits non-zero. This runs *after* the
+        # finally block by design — we want consumers stopped first.
+        if self._source_error is not None:
+            raise self._source_error
 
     # ------------------------------------------------------------------
     # source loops
@@ -206,49 +229,77 @@ class Runtime:
                 f"a 'ts: str' field"
             ) from e
 
-    async def _source_loop_cron(self, w: WireSpec, expr: str) -> None:
-        """Fire emit() for ``w`` each time the cron expression ticks.
+    def _record_source_error(self, name: str, e: BaseException) -> None:
+        """Record the first fatal source-loop error and wake ``run()``.
+
+        Subsequent errors are logged only — the first one is what we
+        re-raise after cleanup.
+        """
+        logger.exception("runtime: source loop %s raised %r", name, e)
+        if self._source_error is None:
+            self._source_error = e
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+    async def _source_loop_cron(self, w: WireSpec, src: SourceSpec) -> None:
+        """Fire ``emit()`` for ``w`` each time the cron expression ticks.
 
         Uses ``croniter`` (5-field standard cron, 1-minute minimum).
+        ``croniter.get_next`` is absolute-time based, so drift is
+        naturally bounded to one tick. Fatal errors (bad payload shape,
+        emit failure) surface via ``_source_error`` + ``_stop_event`` so
+        ``run()`` can re-raise and the pod exits non-zero.
         """
         from croniter import croniter
 
         from app.runtime.emit import emit
 
+        expr = src.params["expr"]
+        name = f"cron[{w.data_type.__name__}]"
         base = datetime.now(tz=UTC)
         itr = croniter(expr, base)
-        while True:
-            next_ts = itr.get_next(datetime)
-            delay = (next_ts - datetime.now(tz=UTC)).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            payload = self._build_payload(w, next_ts)
-            try:
+        try:
+            while True:
+                next_ts = itr.get_next(datetime)
+                delay = (next_ts - datetime.now(tz=UTC)).total_seconds()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                payload = self._build_payload(w, next_ts)
                 await emit(payload)
-            except Exception as e:
-                logger.exception(
-                    "runtime: cron emit for %s raised %r",
-                    w.data_type.__name__,
-                    e,
-                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._record_source_error(name, e)
+            return
 
-    async def _source_loop_interval(self, w: WireSpec, seconds: float) -> None:
-        """Fire emit() for ``w`` every ``seconds`` seconds.
+    async def _source_loop_interval(self, w: WireSpec, src: SourceSpec) -> None:
+        """Fire ``emit()`` for ``w`` every ``seconds`` seconds.
 
-        Uses a simple ``asyncio.sleep(seconds)`` cadence — drift is
-        acceptable for sub-minute periodic sources (they're advisory
-        ticks, not billing events).
+        Uses the event loop's monotonic clock to schedule fires against
+        a rolling ``next_fire`` deadline. This prevents drift when
+        ``emit()`` itself takes non-trivial time — otherwise
+        ``asyncio.sleep(seconds)`` after a slow emit would permanently
+        skew the cadence.
+
+        Fatal errors surface via ``_source_error`` + ``_stop_event`` so
+        ``run()`` re-raises and the pod exits non-zero.
         """
         from app.runtime.emit import emit
 
-        while True:
-            await asyncio.sleep(seconds)
-            payload = self._build_payload(w, datetime.now(tz=UTC))
-            try:
+        seconds = src.params["seconds"]
+        name = f"interval[{w.data_type.__name__}]"
+        loop = asyncio.get_event_loop()
+        next_fire = loop.time() + seconds
+        try:
+            while True:
+                sleep_for = max(0.0, next_fire - loop.time())
+                await asyncio.sleep(sleep_for)
+                ts = datetime.now(tz=UTC)
+                next_fire += seconds
+                payload = self._build_payload(w, ts)
                 await emit(payload)
-            except Exception as e:
-                logger.exception(
-                    "runtime: interval emit for %s raised %r",
-                    w.data_type.__name__,
-                    e,
-                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._record_source_error(name, e)
+            return

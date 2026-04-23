@@ -7,6 +7,7 @@ import pytest
 from app.runtime.data import AdminOnly, Data, Key
 from app.runtime.graph import GraphError, compile_graph
 from app.runtime.node import node
+from app.runtime.placement import bind, clear_bindings
 from app.runtime.wire import clear_wiring, wire
 
 
@@ -24,8 +25,13 @@ class S(Data):
     v: int
 
 
+class X(Data):
+    xid: Annotated[str, Key]
+
+
 def setup_function():
     clear_wiring()
+    clear_bindings()
 
 
 def test_compile_success():
@@ -96,4 +102,22 @@ def test_consumer_missing_with_latest_param_rejected():
     wire(S).to(s_producer).as_latest()
     wire(M).to(takes_only_m).with_latest(S)
     with pytest.raises(GraphError, match="does not accept"):
+        compile_graph()
+
+
+def test_layer4_rejects_wire_with_consumers_in_different_apps():
+    # Two consumers on the same wire, each bound to a different app ->
+    # compile_graph() must refuse. Otherwise ``start_consumers(app_name)``
+    # would silently drop one side at runtime.
+    @node
+    async def worker_consumer(x: X) -> None: ...
+
+    @node
+    async def main_consumer(x: X) -> None: ...
+
+    wire(X).to(worker_consumer, main_consumer)
+    bind(worker_consumer).to_app("vectorize-worker")
+    bind(main_consumer).to_app("agent-service")
+
+    with pytest.raises(GraphError, match="mixed apps"):
         compile_graph()
