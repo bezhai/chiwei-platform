@@ -17,24 +17,15 @@ import asyncio
 from typing import Annotated
 
 import pytest
-from sqlalchemy import text
 
 from app.runtime.data import Data, DedupKey, Key, Version
-from app.runtime.migrator import plan_migration
 from app.runtime.persist import (
     insert_append,
     insert_idempotent,
     select_all_versions,
     select_latest,
 )
-
-
-async def _migrate(cls: type[Data], test_db: object) -> None:
-    """在当前测试 engine 上为 ``cls`` 建表。"""
-    plan = plan_migration([cls], existing_schema={})
-    async with test_db.begin() as conn:
-        for s in plan.stmts:
-            await conn.execute(text(s.sql))
+from tests.runtime.conftest import migrate
 
 
 class SAppend(Data):
@@ -45,7 +36,7 @@ class SAppend(Data):
 
 @pytest.mark.integration
 async def test_insert_append_auto_versions(test_db):
-    await _migrate(SAppend, test_db)
+    await migrate(SAppend, test_db)
 
     await insert_append(SAppend(pid="p1", mood="happy"))
     await insert_append(SAppend(pid="p1", mood="sad"))
@@ -67,7 +58,7 @@ class SConcurrent(Data):
 @pytest.mark.integration
 async def test_multi_replica_concurrency(test_db):
     """20 个并发 insert 不能撞 version。"""
-    await _migrate(SConcurrent, test_db)
+    await migrate(SConcurrent, test_db)
 
     await asyncio.gather(
         *[insert_append(SConcurrent(pid="p1", mood=f"m{i}")) for i in range(20)]
@@ -88,7 +79,7 @@ class MIdempotent(Data):
 
 @pytest.mark.integration
 async def test_insert_idempotent_on_conflict_do_nothing(test_db):
-    await _migrate(MIdempotent, test_db)
+    await migrate(MIdempotent, test_db)
 
     n1 = await insert_idempotent(MIdempotent(mid="m1", text="first"))
     n2 = await insert_idempotent(MIdempotent(mid="m1", text="second"))

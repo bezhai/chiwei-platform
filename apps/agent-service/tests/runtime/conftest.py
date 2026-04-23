@@ -18,6 +18,24 @@ from collections.abc import AsyncGenerator
 
 import pytest
 
+from app.runtime.data import Data
+
+
+async def migrate(cls: type[Data], test_db: object) -> None:
+    """在当前测试 engine 上为 ``cls`` 建表。
+
+    由 ``plan_migration(existing_schema={})`` 生成完整 DDL，逐条 execute。
+    多个测试文件共享此 helper，避免重复定义。
+    """
+    from sqlalchemy import text
+
+    from app.runtime.migrator import plan_migration
+
+    plan = plan_migration([cls], existing_schema={})
+    async with test_db.begin() as conn:
+        for s in plan.stmts:
+            await conn.execute(text(s.sql))
+
 
 @pytest.fixture(scope="session")
 def test_db_dsn() -> object:
