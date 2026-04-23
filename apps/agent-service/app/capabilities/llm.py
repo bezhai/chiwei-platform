@@ -25,9 +25,20 @@ class LLMClient:
     async def complete(self, prompt: str, **kwargs: Any) -> str:
         model = await self._get_model()
         r = await model.ainvoke(prompt, **kwargs)
-        return r.content
+        content = r.content
+        if not isinstance(content, str):
+            raise TypeError(
+                f"LLMClient.complete expected str content, got {type(content).__name__}; "
+                f"multimodal responses are not supported in the MVP adapter"
+            )
+        return content
 
     async def stream(self, prompt: str, **kwargs: Any) -> AsyncIterator[str]:
         model = await self._get_model()
         async for chunk in model.astream(prompt, **kwargs):
-            yield chunk.content
+            content = chunk.content
+            if not isinstance(content, str):
+                raise TypeError(
+                    f"LLMClient.stream expected str content per chunk, got {type(content).__name__}"
+                )
+            yield content

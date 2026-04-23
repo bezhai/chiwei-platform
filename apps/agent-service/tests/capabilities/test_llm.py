@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,7 +12,7 @@ async def test_complete_delegates_to_langchain():
         "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
     ) as m:
         fake = AsyncMock()
-        fake.ainvoke = AsyncMock(return_value=type("R", (), {"content": "ok"})())
+        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
         m.return_value = fake
         client = LLMClient(model_id="deepseek-chat")
         out = await client.complete("hi")
@@ -23,12 +24,39 @@ async def test_complete_delegates_to_langchain():
 async def test_stream_yields_chunks():
     async def fake_stream(*args, **kwargs):
         for s in ["a", "b", "c"]:
-            yield type("C", (), {"content": s})()
+            yield SimpleNamespace(content=s)
 
     with patch(
         "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
     ) as m:
-        m.return_value = type("F", (), {"astream": fake_stream})()
+        m.return_value = SimpleNamespace(astream=fake_stream)
         client = LLMClient(model_id="x")
         out = [c async for c in client.stream("hi")]
     assert out == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_complete_passes_kwargs_through():
+    with patch(
+        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
+    ) as m:
+        fake = AsyncMock()
+        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+        m.return_value = fake
+        client = LLMClient(model_id="x")
+        await client.complete("hi", temperature=0.7, max_tokens=100)
+    fake.ainvoke.assert_awaited_once_with("hi", temperature=0.7, max_tokens=100)
+
+
+@pytest.mark.asyncio
+async def test_model_is_built_once_across_calls():
+    with patch(
+        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
+    ) as m:
+        fake = AsyncMock()
+        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+        m.return_value = fake
+        client = LLMClient(model_id="x")
+        await client.complete("a")
+        await client.complete("b")
+    assert m.await_count == 1  # built_chat_model called once, model reused
