@@ -111,24 +111,36 @@ async def insert_append(obj: Data) -> int:
 
 
 async def insert_idempotent(obj: Data) -> int:
-    """Insert ``obj`` if its dedup_hash has not been seen; return rows inserted.
+    """Insert ``obj`` if its dedup key has not been seen; return rows inserted.
 
-    Uses ``ON CONFLICT (dedup_hash) DO NOTHING RETURNING id`` so we can
-    count the actually-inserted rows regardless of driver-reported
-    ``rowcount`` semantics (which asyncpg does not reliably populate for
-    ``DO NOTHING``).
+    Uses ``ON CONFLICT (<dedup_target>) DO NOTHING RETURNING 1``. The dedup
+    target is either:
+
+      * ``Meta.dedup_column`` when the Data class specifies one (used when
+        adopting a pre-existing table whose PK / unique index already
+        enforces dedup — that table typically has no ``dedup_hash``
+        column, so we also omit it from the INSERT column list), or
+      * ``dedup_hash`` (the runtime-managed hash column) otherwise.
+
+    We count ``len(fetchall())`` because asyncpg does not reliably populate
+    ``rowcount`` for ``DO NOTHING``.
     """
     cls = type(obj)
     table = _table_name(cls)
 
+    meta = getattr(cls, "Meta", None)
+    dedup_col = getattr(meta, "dedup_column", None) if meta else None
+
     cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
-    cols_map["dedup_hash"] = _dedup_hash(obj)
+    if not dedup_col:
+        cols_map["dedup_hash"] = _dedup_hash(obj)
 
     cols = list(cols_map.keys())
     placeholders = ", ".join(f":{c}" for c in cols)
+    conflict_target = dedup_col or "dedup_hash"
     sql = (
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1"
+        f"ON CONFLICT ({conflict_target}) DO NOTHING RETURNING 1"
     )
     async with get_session() as s:
         r = await s.execute(text(sql), cols_map)

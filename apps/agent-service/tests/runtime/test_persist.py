@@ -9,6 +9,9 @@
   2. 并发 20 次写入时 advisory lock 保证 version 不冲突且仍然单调递增
   3. ``insert_idempotent`` 在相同 dedup_hash 上 ON CONFLICT DO NOTHING
      —— 第二次写入必须返回 0，并且历史行不被覆盖
+  4. ``insert_idempotent`` + ``Meta.dedup_column`` —— 采用模式下，
+     ON CONFLICT 落在 Data class 指定的列（通常是 PK），INSERT 不再写
+     ``dedup_hash``
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import asyncio
 from typing import Annotated
 
 import pytest
+from sqlalchemy import text
 
 from app.runtime.data import Data, DedupKey, Key, Version
 from app.runtime.persist import (
@@ -90,3 +94,86 @@ async def test_insert_idempotent_on_conflict_do_nothing(test_db):
     rows = await select_all_versions(MIdempotent, {"mid": "m1"})
     assert len(rows) == 1
     assert rows[0].text == "first"
+
+
+# ---------------------------------------------------------------------------
+# Meta.dedup_column 分支 —— 采用模式：ON CONFLICT 落在 Data class 指定的列
+# ---------------------------------------------------------------------------
+
+
+class MDedupColumn(Data):
+    """Data class declaring ``Meta.dedup_column`` — ON CONFLICT uses that col."""
+
+    mid: Annotated[str, Key]
+    payload: str
+
+    class Meta:
+        existing_table = "tmp_dedup_column"
+        dedup_column = "mid"
+
+
+@pytest.mark.integration
+async def test_insert_idempotent_with_dedup_column(test_db):
+    """``Meta.dedup_column`` 覆盖默认 ``dedup_hash``：
+
+    - INSERT 不包含 ``dedup_hash`` 列（表里根本没有这列）
+    - ``ON CONFLICT (<dedup_column>)`` 命中后第二次返回 0
+    """
+    async with test_db.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE tmp_dedup_column "
+                "(mid TEXT PRIMARY KEY, payload TEXT)"
+            )
+        )
+
+    n1 = await insert_idempotent(MDedupColumn(mid="k1", payload="first"))
+    n2 = await insert_idempotent(MDedupColumn(mid="k1", payload="second"))
+
+    assert n1 == 1
+    assert n2 == 0
+
+    # 原行未被覆盖
+    async with test_db.connect() as conn:
+        r = await conn.execute(
+            text("SELECT payload FROM tmp_dedup_column WHERE mid = :m"),
+            {"m": "k1"},
+        )
+        assert r.scalar() == "first"
+
+
+class MAdoptedTable(Data):
+    """Adoption mode Data class — legacy table has no ``dedup_hash`` column."""
+
+    id: Annotated[str, Key]
+    val: str
+
+    class Meta:
+        existing_table = "tmp_adopt"
+        dedup_column = "id"
+
+
+@pytest.mark.integration
+async def test_insert_idempotent_adoption_mode_real_pk(test_db):
+    """采用模式：手动建一张没有 ``dedup_hash`` 列的表，通过 PK 去重。
+
+    验证 persist 层不会往 INSERT 列表里塞 ``dedup_hash``——否则 pg 会
+    报 ``column "dedup_hash" of relation "tmp_adopt" does not exist``。
+    """
+    async with test_db.begin() as conn:
+        await conn.execute(
+            text("CREATE TABLE tmp_adopt (id TEXT PRIMARY KEY, val TEXT)")
+        )
+
+    n1 = await insert_idempotent(MAdoptedTable(id="x1", val="v1"))
+    n2 = await insert_idempotent(MAdoptedTable(id="x1", val="v2"))
+
+    assert n1 == 1
+    assert n2 == 0
+
+    async with test_db.connect() as conn:
+        r = await conn.execute(
+            text("SELECT val FROM tmp_adopt WHERE id = :k"),
+            {"k": "x1"},
+        )
+        assert r.scalar() == "v1"
