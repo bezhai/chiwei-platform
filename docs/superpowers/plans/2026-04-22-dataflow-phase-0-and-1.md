@@ -1320,6 +1320,12 @@ git commit -m "feat(runtime): emit() + in-process default edge + when() predicat
 - Create: `apps/agent-service/app/runtime/durable.py`
 - Test: `apps/agent-service/tests/runtime/test_durable.py`
 
+> **TODO follow-up（2026-04-23 vectorize paper-read 发现）：** 现 durable consumer 靠 RabbitMQ
+> `prefetch_count=10` 限背压；旧 vectorize worker 另外用 `asyncio.Semaphore(10)` 限并发
+> `process_message()`。Phase 1 真接入时若发现 Ark embedding / Qdrant 资源不够，可能需要在
+> `_consume_loop` 内部加一层 per-node Semaphore，或在 `@node(concurrency=...)` 上给出装饰参数。
+> 先不在 T0.11 加，等 Phase 1 有真实资源压力证据再决定怎么加。
+
 - [ ] **Step 1: 写失败测试**
 
 ```python
@@ -1739,6 +1745,12 @@ git commit -m "feat(runtime): bind() / nodes_for_app() placement layer"
 - Create: `apps/agent-service/app/runtime/engine.py`
 - Create: `apps/agent-service/app/workers/runtime_entry.py`
 - Test: `apps/agent-service/tests/runtime/test_engine.py`
+
+> **集成注意（2026-04-23 vectorize paper-read 发现）：** 旧 `cron_scan_pending_messages()` 用
+> Redis `SET NX EX` 做分布式锁，防止多 vectorize-worker 实例重复扫。CronSource 要么内置
+> `lock_key: str | None` 参数自动走 Redis 锁，要么让 @node 内部自己加锁（后者会在每个 cron node
+> 里重复加锁代码）。倾向前者 —— 在 `Source(kind="cron", ..., lock_key="vectorize_scan")` 处
+> 加一层 lock capability。真实现时确认一下是否有其他 cron 也需要锁，一次性抽出来。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2236,6 +2248,21 @@ git commit -m "feat(domain): Fragment (transient, not persisted)"
 - Create: `apps/agent-service/app/nodes/__init__.py`
 - Create: `apps/agent-service/app/nodes/vectorize.py`
 - Test: `apps/agent-service/tests/nodes/test_vectorize.py`
+
+> **集成注意（2026-04-23 paper-read 发现）：** 迁移 `vectorize_message()` 到新框架时注意：
+>
+> 1. **Dual-collection upsert 不是 blocker**：旧代码把同一条消息 upsert 到 `messages_recall` +
+>    `messages_cluster` 两个 Qdrant collection。Qdrant 本身不支持跨 collection 事务，旧代码
+>    靠 `asyncio.gather` 并发发出 —— 迁移时**单个 @node 内部用 `asyncio.gather` 两个
+>    `VectorStore.upsert` 完全等价**，不要拆成两个 @node（拆了之后 durable retry 只会重试失
+>    败那一侧，语义反而变复杂）。
+> 2. **Image partial-success**：旧代码 `asyncio.gather(..., return_exceptions=True)` 静默过滤
+>    下载失败的图片。@node 内部要保留这个行为 —— 一张图失败不能让整条消息 nack 重试。
+> 3. **vector_status 写回**：旧代码用 pending/completed/skipped/failed 状态机。最简单的做法
+>    是在主 vectorize @node 末尾直接 `UPDATE conversation_messages SET vector_status=...`，
+>    不拆成独立 `mark_vectorized` 节点 —— 省一跳、语义紧凑。
+> 4. **UUID 派生**：`uuid.uuid5(NAMESPACE_DNS, message_id)` 逻辑在 `vectorize_message` 和
+>    `vectorize_fragment` 都重复了，迁移时抽到 `app/nodes/_ids.py` 或类似位置。
 
 - [ ] **Step 1: 读旧 vectorize 逻辑**
 
