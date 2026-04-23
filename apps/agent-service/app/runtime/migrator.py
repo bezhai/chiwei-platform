@@ -31,6 +31,7 @@ from app.runtime.data import (
     key_fields,
     version_field,
 )
+from app.runtime.naming import to_snake
 
 
 class MigrationError(Exception):
@@ -63,25 +64,12 @@ _PY_TO_PG: dict[type, str] = {
 }
 
 
-def _camel_to_snake(name: str) -> str:
-    if not name:
-        return name
-    chars = [name[0].lower()]
-    for c in name[1:]:
-        if c.isupper():
-            chars.append("_")
-            chars.append(c.lower())
-        else:
-            chars.append(c)
-    return "".join(chars)
-
-
 def _table_name(cls: type[Data]) -> str:
     meta = getattr(cls, "Meta", None)
     existing = getattr(meta, "existing_table", None) if meta else None
     if existing:
         return existing
-    return f"data_{_camel_to_snake(cls.__name__)}"
+    return f"data_{to_snake(cls.__name__)}"
 
 
 def _pg_type_for_pytype(t: object) -> str:

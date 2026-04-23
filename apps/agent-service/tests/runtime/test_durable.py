@@ -122,3 +122,16 @@ async def test_durable_idempotent(durable_env):
     assert len(received) == 1, (
         f"expected exactly 1 consumer invocation after dedup, got {len(received)}"
     )
+
+
+@pytest.mark.integration
+async def test_start_consumers_is_not_reentrant(durable_env):
+    """Second ``start_consumers()`` call without an intervening
+    ``stop_consumers()`` must raise instead of registering duplicate
+    consumers on the same queue.
+
+    ``durable_env`` already invoked ``start_consumers()`` once during
+    setup, so the second call here is the re-entry under test.
+    """
+    with pytest.raises(RuntimeError, match="already started"):
+        await start_consumers()

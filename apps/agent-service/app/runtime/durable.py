@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from collections.abc import Callable
 from typing import Any
 
@@ -36,6 +35,7 @@ from aio_pika.abc import AbstractIncomingMessage
 from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, mq
 from app.runtime.data import Data
+from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
 from app.runtime.persist import insert_idempotent
 from app.runtime.wire import WireSpec
@@ -43,19 +43,9 @@ from app.runtime.wire import WireSpec
 logger = logging.getLogger(__name__)
 
 
-_CAMEL_TO_SNAKE_1 = re.compile(r"(.)([A-Z][a-z]+)")
-_CAMEL_TO_SNAKE_2 = re.compile(r"([a-z0-9])([A-Z])")
-
-
-def _snake(name: str) -> str:
-    """Convert ``CamelCase`` to ``camel_case``."""
-    s = _CAMEL_TO_SNAKE_1.sub(r"\1_\2", name)
-    return _CAMEL_TO_SNAKE_2.sub(r"\1_\2", s).lower()
-
-
 def _route_for(w: WireSpec, consumer: Callable) -> Route:
     """Build the ``(queue, routing_key)`` for a durable wire + consumer."""
-    data_snake = _snake(w.data_type.__name__)
+    data_snake = to_snake(w.data_type.__name__)
     cname = consumer.__name__
     return Route(
         queue=f"durable_{data_snake}_{cname}",
@@ -109,8 +99,19 @@ def _build_handler(w: WireSpec, consumer: Callable):
         # forever. Infra-level retries are the DLX's job, not ours.
         async with message.process(requeue=False):
             headers = message.headers or {}
-            trace_id = headers.get("trace_id") or None
-            lane = headers.get("lane") or None
+            # Defensive coercion: contextvars are typed as Optional[str]
+            # downstream, and a misbehaving publisher could send a list /
+            # bytes / int under these header keys. Treat any non-string
+            # (or empty string) value as "not set" rather than letting a
+            # cryptic ``str()`` crash happen deep inside a trace helper.
+            raw_trace = headers.get("trace_id")
+            trace_id = (
+                raw_trace if isinstance(raw_trace, str) and raw_trace else None
+            )
+            raw_lane = headers.get("lane")
+            lane = (
+                raw_lane if isinstance(raw_lane, str) and raw_lane else None
+            )
 
             t_tok = trace_id_var.set(trace_id)
             l_tok = lane_var.set(lane)
@@ -134,7 +135,19 @@ def _build_handler(w: WireSpec, consumer: Callable):
 
 
 async def start_consumers() -> None:
-    """Declare and start consumers for every ``.durable()`` wire in the graph."""
+    """Declare and start consumers for every ``.durable()`` wire in the graph.
+
+    Not re-entrant: a second call without an intervening
+    :func:`stop_consumers` would register duplicate RabbitMQ consumers on
+    the same queue (double-processing) and then fail noisily at shutdown.
+    We raise instead of silently returning so the caller bug surfaces
+    immediately rather than masquerading as "it didn't take".
+    """
+    if _consumer_tags:
+        raise RuntimeError(
+            "consumers already started; call stop_consumers() first"
+        )
+
     # Late import: compile_graph must see the final WIRING_REGISTRY, and
     # emit/durable live in a cycle-prone zone during startup.
     from app.runtime.graph import compile_graph
