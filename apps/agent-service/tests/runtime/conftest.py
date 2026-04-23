@@ -38,6 +38,98 @@ async def migrate(cls: type[Data], test_db: object) -> None:
 
 
 @pytest.fixture(scope="session")
+def rabbitmq_url() -> object:
+    """Session-scoped: 启动 127.0.0.1-only RabbitMQ 容器，返回 amqp:// URL。
+
+    We only own the container lifecycle at session scope — the actual
+    ``mq.connect()`` / ``declare_topology()`` is per-test in the ``rabbitmq``
+    function fixture, because aio-pika robust connections bind to the loop
+    they were created on and pytest-asyncio gives each test its own loop.
+    """
+    pytest.importorskip("testcontainers.rabbitmq")
+
+    try:
+        import docker as _docker
+
+        _docker.from_env().ping()
+    except Exception:
+        pytest.skip("docker unavailable; skipping rabbitmq integration tests")
+
+    from testcontainers.rabbitmq import RabbitMqContainer
+
+    rmq = RabbitMqContainer("rabbitmq:3-management-alpine")
+    # CRITICAL: bind to loopback only, never 0.0.0.0.
+    rmq.ports = {5672: ("127.0.0.1", None)}
+
+    rmq.start()
+    try:
+        container = rmq.get_wrapped_container()
+        container.reload()
+        ports_attr = container.attrs["NetworkSettings"]["Ports"]["5672/tcp"]
+        bind_ip = ports_attr[0]["HostIp"]
+        assert bind_ip == "127.0.0.1", (
+            f"rabbitmq container must bind to 127.0.0.1, got {bind_ip!r}; "
+            f"container attrs: {ports_attr}"
+        )
+
+        host = rmq.get_container_host_ip()
+        port = rmq.get_exposed_port(rmq.port)
+        url = f"amqp://{rmq.username}:{rmq.password}@{host}:{port}/"
+
+        yield url
+    finally:
+        rmq.stop()
+
+
+@pytest.fixture
+async def rabbitmq(
+    rabbitmq_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncGenerator[str, None]:
+    """Function-scoped: connect the module ``mq`` singleton to the test container.
+
+    Re-connects on every test so the ``aio_pika`` robust connection is bound
+    to the current pytest-asyncio event loop. Also repoints
+    ``settings.rabbitmq_url`` at the container for the duration of the test.
+    """
+    import dataclasses
+
+    from app.infra import config as config_mod
+    from app.infra import rabbitmq as rabbitmq_mod
+    from app.infra.rabbitmq import mq
+
+    # Vanilla rabbitmq images don't ship with the delayed-message plugin.
+    # Tests don't exercise publish delays anyway; fall back to topic.
+    monkeypatch.setenv("RABBITMQ_DISABLE_DELAYED", "1")
+
+    new_settings = dataclasses.replace(
+        config_mod.settings, rabbitmq_url=rabbitmq_url
+    )
+    # Patch both the module and the ``settings`` name that rabbitmq.py
+    # imported into its own namespace.
+    monkeypatch.setattr(config_mod, "settings", new_settings)
+    monkeypatch.setattr(rabbitmq_mod, "settings", new_settings)
+    # Force reconnect: previous test's connection is on a now-closed loop.
+    await mq.close()
+    # Reset the private connection/channel refs so connect() actually reconnects.
+    mq._connection = None  # type: ignore[attr-defined]
+    mq._channel = None  # type: ignore[attr-defined]
+    mq._exchange = None  # type: ignore[attr-defined]
+    mq._declared_lane_queues = set()  # type: ignore[attr-defined]
+
+    await mq.connect()
+    await mq.declare_topology()
+
+    try:
+        yield rabbitmq_url
+    finally:
+        await mq.close()
+        mq._connection = None  # type: ignore[attr-defined]
+        mq._channel = None  # type: ignore[attr-defined]
+        mq._exchange = None  # type: ignore[attr-defined]
+
+
+@pytest.fixture(scope="session")
 def test_db_dsn() -> object:
     """Session-scoped: 启动一个绑定到 127.0.0.1 的 Postgres 容器，返回 async DSN。"""
     pytest.importorskip("testcontainers.postgres")

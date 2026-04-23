@@ -150,6 +150,11 @@ for _header_name, _cfg in HEADER_CONFIG.items():
     _var_name = _cfg["var_name"]
     header_vars[_var_name] = contextvars.ContextVar(_var_name, default=None)
 
+# Module-level aliases for the contextvars that other modules need to read
+# directly (e.g. ``app.runtime.durable`` propagates these across RabbitMQ).
+trace_id_var = header_vars["trace_id"]
+lane_var = header_vars["lane"]
+
 
 class HeaderContextMiddleware(BaseHTTPMiddleware):
     """Read trace/lane headers into contextvars, echo them back in response."""
