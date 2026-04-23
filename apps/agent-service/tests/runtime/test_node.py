@@ -66,3 +66,20 @@ def test_returns_none_allowed():
 
     assert sink_node in NODE_REGISTRY
     assert output_of(sink_node) is type(None)
+
+
+def test_returns_optional_data_allowed():
+    @node
+    async def maybe_emit(msg: Msg) -> Frag | None:
+        return None
+
+    assert maybe_emit in NODE_REGISTRY
+    # Optional is unwrapped to the inner Data type for downstream wiring.
+    assert output_of(maybe_emit) is Frag
+
+
+def test_returns_optional_admin_only_rejected():
+    with pytest.raises(TypeError, match="AdminOnly"):
+
+        @node
+        async def bad_optional(msg: Msg) -> Cfg | None: ...

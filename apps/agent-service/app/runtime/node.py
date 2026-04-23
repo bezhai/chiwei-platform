@@ -2,7 +2,7 @@
 
 Reflects on the function's type hints to:
   * validate all inputs are ``Data`` subclasses or ``Stream[Data]``;
-  * validate the return is ``Data | Stream[Data] | None``;
+  * validate the return is ``Data``, ``Data | None``, ``Stream[Data]`` or ``None``;
   * reject any ``AdminOnly`` Data in the return position;
   * store reflection metadata accessible via ``inputs_of`` / ``output_of``;
   * register the function in ``NODE_REGISTRY``.
@@ -11,13 +11,29 @@ Reflects on the function's type hints to:
 from __future__ import annotations
 
 import inspect
-from typing import Callable, get_type_hints
+from types import UnionType
+from typing import Callable, Union, get_args, get_origin, get_type_hints
 
 from app.runtime.data import Data, is_admin_only
 from app.runtime.stream import element_type, is_stream
 
 NODE_REGISTRY: set[Callable] = set()
 _NODE_META: dict[Callable, dict] = {}
+
+
+def _unwrap_optional(annotation):
+    """If ``annotation`` is ``T | None`` / ``Optional[T]``, return ``T``.
+
+    Returns the annotation unchanged when it isn't a two-arm union that
+    contains ``None``. Used so ``@node`` can accept ``Data | None`` return
+    types: the node emits ``None`` to skip, runtime drops it before edges.
+    """
+    origin = get_origin(annotation)
+    if origin is Union or origin is UnionType:
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        if len(args) == 1 and len(get_args(annotation)) == 2:
+            return args[0]
+    return annotation
 
 
 def node(fn: Callable) -> Callable:
@@ -50,7 +66,10 @@ def node(fn: Callable) -> Callable:
             )
         inputs[name] = t
     if ret is not None and ret is not type(None):
-        tgt = element_type(ret) if is_stream(ret) else ret
+        # ``Data | None`` returns are allowed — the @node may emit None to
+        # skip emission. Validation + metadata use the inner type.
+        unwrapped = _unwrap_optional(ret)
+        tgt = element_type(unwrapped) if is_stream(unwrapped) else unwrapped
         if not (isinstance(tgt, type) and issubclass(tgt, Data)):
             raise TypeError(
                 f"{fn.__name__} return must be Data | Stream[Data] | None"
@@ -59,6 +78,7 @@ def node(fn: Callable) -> Callable:
             raise TypeError(
                 f"{fn.__name__} returns AdminOnly Data {tgt.__name__}: forbidden"
             )
+        ret = unwrapped
     _NODE_META[fn] = {"inputs": inputs, "output": ret}
     NODE_REGISTRY.add(fn)
     return fn
