@@ -19,11 +19,6 @@ class M(Data):
 calls: list = []
 
 
-@node
-async def recorder(m: M) -> None:
-    calls.append(m)
-
-
 def setup_function():
     clear_wiring()
     calls.clear()
@@ -32,6 +27,10 @@ def setup_function():
 
 @pytest.mark.asyncio
 async def test_emit_default_edge_awaits_consumer():
+    @node
+    async def recorder(m: M) -> None:
+        calls.append(m)
+
     wire(M).to(recorder)  # default (in-process)
     compile_graph()
     await emit(M(mid="m1", text="hi"))
@@ -50,3 +49,28 @@ async def test_emit_when_predicate_filters():
     await emit(M(mid="y", text="skip"))
     await emit(M(mid="x", text="keep"))
     assert [c.text for c in calls] == ["keep"]
+
+
+@pytest.mark.asyncio
+async def test_emit_multiple_consumers_fan_out():
+    @node
+    async def a(m: M) -> None:
+        calls.append(("a", m.text))
+
+    @node
+    async def b(m: M) -> None:
+        calls.append(("b", m.text))
+
+    wire(M).to(a)
+    wire(M).to(b)
+    compile_graph()
+    await emit(M(mid="m1", text="x"))
+    assert sorted(calls) == [("a", "x"), ("b", "x")]
+
+
+@pytest.mark.asyncio
+async def test_emit_no_matching_wire_is_noop():
+    # No wire for M; emit should silently no-op (no exception).
+    compile_graph()
+    await emit(M(mid="m1", text="x"))
+    assert calls == []

@@ -6,6 +6,11 @@ to the consumers. In-process edges call the consumer directly (awaiting
 completion); ``durable()`` edges hand off to the durable queue layer
 (filled in by Task 0.11).
 
+In-process dispatch is strict: if any consumer raises, the remaining
+fan-out (sibling consumers and later-matching wires) is aborted and the
+exception propagates to ``emit``'s caller. Use ``.durable()`` when
+independent isolation between consumers is required.
+
 ``with_latest(X)`` inputs are resolved by fetching the latest ``X`` row
 whose first Key field matches the same-named attribute on the emitted
 data. Phase 0 MVP: a single-column key join by name; richer resolution
@@ -26,6 +31,8 @@ def reset_emit_runtime() -> None:
 
 
 def _get_graph() -> CompiledGraph:
+    # T0.14: filter wires by the current deployment's nodes_for_app()
+    # once Deployment.bind() lands. Today every process sees every wire.
     global _graph
     if _graph is None:
         _graph = compile_graph()
