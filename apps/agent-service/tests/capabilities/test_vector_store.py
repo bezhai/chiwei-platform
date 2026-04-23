@@ -34,6 +34,25 @@ async def test_upsert_unpacks_embedding_into_qdrant_call():
 
 
 @pytest.mark.asyncio
+async def test_upsert_dense_delegates_to_qdrant_upsert_vectors():
+    """Cluster-style collections store a single dense vector per point."""
+    payload = {"message_id": "m1", "chat_id": "c1"}
+    dense = [0.1] * 1024
+    with patch("app.capabilities.vector_store.qdrant") as mq:
+        mq.upsert_vectors = AsyncMock(return_value=True)
+        store = VectorStore(collection="messages_cluster")
+        ok = await store.upsert_dense("point-1", dense, payload)
+
+    assert ok is True
+    mq.upsert_vectors.assert_awaited_once_with(
+        "messages_cluster",
+        [dense],
+        ["point-1"],
+        [payload],
+    )
+
+
+@pytest.mark.asyncio
 async def test_search_unpacks_embedding_and_forwards_filter():
     emb = _sample_embedding()
     hits = [{"id": "p1", "score": 0.9, "payload": {}}]

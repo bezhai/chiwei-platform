@@ -34,6 +34,25 @@ class VectorStore:
             payload,
         )
 
+    async def upsert_dense(
+        self,
+        point_id: str,
+        dense: list[float],
+        payload: dict[str, Any],
+    ) -> bool:
+        """Upsert a single dense-only vector into this collection.
+
+        Used by cluster-style collections (``messages_cluster``) that store
+        one dense vector per point with no sparse component. ``upsert`` is
+        the hybrid sibling for recall-style collections.
+        """
+        return await qdrant.upsert_vectors(
+            self._collection,
+            [dense],
+            [point_id],
+            [payload],
+        )
+
     async def search(
         self,
         embedding: HybridEmbedding,
