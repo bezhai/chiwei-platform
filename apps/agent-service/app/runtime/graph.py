@@ -40,7 +40,8 @@ def compile_graph() -> CompiledGraph:
         for c in w.consumers:
             if c not in NODE_REGISTRY:
                 raise GraphError(
-                    f"wire(to={c.__name__}): not registered as @node"
+                    f"wire({w.data_type.__name__}).to({c.__name__}): consumer "
+                    f"not registered as @node"
                 )
 
     # 2) .with_latest(X) requires some wire(X).as_latest() to exist

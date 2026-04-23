@@ -73,3 +73,27 @@ def test_with_latest_requires_as_latest_declared():
     # S has no wire(S).as_latest() declaration anywhere
     with pytest.raises(GraphError, match="with_latest.*requires.*as_latest"):
         compile_graph()
+
+
+def test_consumer_missing_data_type_param_rejected():
+    # Consumer only accepts Cfg, but wire routes M to it -> signature mismatch.
+    @node
+    async def wrong(c: Cfg) -> None: ...
+
+    wire(M).to(wrong)
+    with pytest.raises(GraphError, match="does not accept"):
+        compile_graph()
+
+
+def test_consumer_missing_with_latest_param_rejected():
+    # Consumer accepts M but not S; wire asks for with_latest(S) -> signature mismatch.
+    @node
+    async def takes_only_m(m: M) -> None: ...
+
+    @node
+    async def s_producer(s: S) -> None: ...
+
+    wire(S).to(s_producer).as_latest()
+    wire(M).to(takes_only_m).with_latest(S)
+    with pytest.raises(GraphError, match="does not accept"):
+        compile_graph()
