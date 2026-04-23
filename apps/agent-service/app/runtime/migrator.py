@@ -13,6 +13,10 @@ platform admin tooling, not business code.
 Data classes with ``Meta.existing_table`` are in *adoption mode*: the
 migrator does not own their schema and emits no DDL (no CREATE, no ALTER,
 no drop-check) regardless of what the existing schema looks like.
+
+Data classes with ``Meta.transient = True`` are never persisted to pg
+(they flow in-process to a non-durable Sink, e.g. a VectorStore). The
+migrator skips them entirely: no CREATE, no ALTER, no drop-check.
 """
 
 from __future__ import annotations
@@ -181,11 +185,19 @@ def plan_migration(
         if is_admin_only(cls):
             continue
 
+        meta = getattr(cls, "Meta", None)
+
+        # Transient Data never reaches pg — it flows in-process to a
+        # non-durable Sink (e.g. VectorStore). No CREATE, no ALTER, no
+        # drop-check; the class is invisible to the migrator.
+        if meta and getattr(meta, "transient", False):
+            continue
+
         # Adoption mode: the Data class declares it is backed by a
         # pre-existing legacy table. The migrator does not own the
         # schema of that table — emit no DDL at all, regardless of what
         # columns ``existing_schema`` reports.
-        if getattr(getattr(cls, "Meta", None), "existing_table", None):
+        if meta and getattr(meta, "existing_table", None):
             continue
 
         table = _table_name(cls)

@@ -135,3 +135,23 @@ def test_plan_rejects_type_change():
     existing = {"data_msg": {"mid": "text", "gen": "text", "text": "text"}}
     with pytest.raises(MigrationError, match="type mismatch"):
         plan_migration([Msg], existing_schema=existing)
+
+
+def test_plan_migration_skips_transient():
+    """Data classes with Meta.transient=True must produce zero DDL.
+
+    Transient Data (e.g. vectorize output ``Fragment``) never reaches pg;
+    it flows through an in-process edge to a VectorStore Sink. The
+    migrator must emit no CREATE, no ALTER, no INDEX for it.
+    """
+    class TransientTmp(Data):
+        tid: Annotated[str, Key]
+
+        class Meta:
+            transient = True
+
+    plan = plan_migration([TransientTmp], existing_schema={})
+    sql_joined = "\n".join(s.sql for s in plan.stmts)
+    # The auto-derived table name would be "data_transient_tmp" if not skipped.
+    assert "data_transient_tmp" not in sql_joined
+    assert plan.stmts == []
