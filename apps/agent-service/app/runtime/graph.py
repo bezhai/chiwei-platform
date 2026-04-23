@@ -66,6 +66,28 @@ def compile_graph() -> CompiledGraph:
                     f"signature {ins} does not accept {needed}"
                 )
 
+    # 4) placement consistency: a wire's consumers must all be bound to
+    # the same app (or all unbound). Mixed-app wires break
+    # ``start_consumers(app_name)``'s all-or-nothing filter, so refuse
+    # the graph instead of silently dropping messages at runtime.
+    # Only enforce when placement is actually in use — tests that never
+    # call ``bind()`` must remain unaffected.
+    from app.runtime.placement import _BINDINGS
+
+    if _BINDINGS:
+        for w in wires:
+            apps = {_BINDINGS.get(c) for c in w.consumers}
+            if len(apps) > 1:
+                labels = sorted(
+                    f"{c.__name__}->{_BINDINGS.get(c, '<unbound>')}"
+                    for c in w.consumers
+                )
+                raise GraphError(
+                    f"wire({w.data_type.__name__}): consumers span multiple "
+                    f"apps ({', '.join(labels)}); split the wire or rebind "
+                    f"consumers so they share one app"
+                )
+
     data_types: set[type[Data]] = {w.data_type for w in wires} | {
         t for w in wires for t in w.with_latest
     }

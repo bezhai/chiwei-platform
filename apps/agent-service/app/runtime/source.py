@@ -27,6 +27,18 @@ class Source:
         return SourceSpec("cron", {"expr": expr})
 
     @staticmethod
+    def interval(seconds: float) -> SourceSpec:
+        """Simple periodic source: emit every ``seconds`` seconds.
+
+        Cron expressions have a 1-minute minimum resolution (standard
+        5-field format); ``interval`` fills the sub-minute niche and also
+        gives tests a fast-firing source without mocking croniter.
+        """
+        if seconds <= 0:
+            raise ValueError(f"Source.interval(seconds={seconds!r}) must be positive")
+        return SourceSpec("interval", {"seconds": float(seconds)})
+
+    @staticmethod
     def mq(queue: str) -> SourceSpec:
         return SourceSpec("mq", {"queue": queue})
 

@@ -45,6 +45,7 @@ dependencies = [
     "inner-shared",
     "beautifulsoup4>=4.14.3",
     "prometheus-client>=0.21.0",
+    "croniter>=6.2.2",
 ]
 
 [project.optional-dependencies]

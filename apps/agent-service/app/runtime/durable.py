@@ -58,9 +58,7 @@ def _route_for(w: WireSpec, consumer: Callable) -> Route:
 _consumer_tags: list[tuple[Any, str]] = []
 
 
-async def publish_durable(
-    w: WireSpec, consumer: Callable, data: Data
-) -> None:
+async def publish_durable(w: WireSpec, consumer: Callable, data: Data) -> None:
     """Publish ``data`` to the durable queue targeting ``consumer``.
 
     Always publishes — dedup is done on the consumer side via
@@ -105,13 +103,9 @@ def _build_handler(w: WireSpec, consumer: Callable):
             # (or empty string) value as "not set" rather than letting a
             # cryptic ``str()`` crash happen deep inside a trace helper.
             raw_trace = headers.get("trace_id")
-            trace_id = (
-                raw_trace if isinstance(raw_trace, str) and raw_trace else None
-            )
+            trace_id = raw_trace if isinstance(raw_trace, str) and raw_trace else None
             raw_lane = headers.get("lane")
-            lane = (
-                raw_lane if isinstance(raw_lane, str) and raw_lane else None
-            )
+            lane = raw_lane if isinstance(raw_lane, str) and raw_lane else None
 
             t_tok = trace_id_var.set(trace_id)
             l_tok = lane_var.set(lane)
@@ -134,8 +128,17 @@ def _build_handler(w: WireSpec, consumer: Callable):
     return handler
 
 
-async def start_consumers() -> None:
-    """Declare and start consumers for every ``.durable()`` wire in the graph.
+async def start_consumers(app_name: str | None = None) -> None:
+    """Declare and start consumers for durable wires.
+
+    Args:
+        app_name: when ``None``, iterate every ``.durable()`` wire in the
+            graph (legacy behavior — preserves the existing smoke test
+            and durable tests). When set, filter to wires whose consumers
+            are all bound to ``app_name`` via ``app.runtime.placement.bind``.
+            Wires whose consumers span multiple apps are rejected at
+            ``compile_graph`` time (layer-4 validation), so the "all
+            consumers bound to this app" check here is strict-by-design.
 
     Not re-entrant: a second call without an intervening
     :func:`stop_consumers` would register duplicate RabbitMQ consumers on
@@ -144,17 +147,26 @@ async def start_consumers() -> None:
     immediately rather than masquerading as "it didn't take".
     """
     if _consumer_tags:
-        raise RuntimeError(
-            "consumers already started; call stop_consumers() first"
-        )
+        raise RuntimeError("consumers already started; call stop_consumers() first")
 
     # Late import: compile_graph must see the final WIRING_REGISTRY, and
     # emit/durable live in a cycle-prone zone during startup.
     from app.runtime.graph import compile_graph
 
     graph = compile_graph()
+
+    allowed: set | None = None
+    if app_name is not None:
+        from app.runtime.placement import nodes_for_app
+
+        allowed = nodes_for_app(app_name)
+
     for w in graph.wires:
         if not w.durable:
+            continue
+        if allowed is not None and not all(c in allowed for c in w.consumers):
+            # Wire belongs to a different app. compile_graph layer-4 has
+            # already ruled out mixed-app wires, so this is a clean skip.
             continue
         for consumer in w.consumers:
             route = _route_for(w, consumer)
