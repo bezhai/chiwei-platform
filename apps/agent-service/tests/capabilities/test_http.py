@@ -1,5 +1,7 @@
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.api.middleware import trace_id_var
@@ -55,6 +57,26 @@ async def test_trace_id_header_from_contextvar():
 
     headers = fake_post.await_args.kwargs["headers"]
     assert headers.get("X-Trace-Id") == "trace-abc"
+
+
+@pytest.mark.asyncio
+async def test_framework_headers_win_over_caller_extra():
+    # Even when caller passes X-Trace-Id in headers kwarg, the contextvar value wins.
+    tok = trace_id_var.set("framework-tid")
+    try:
+        c = HTTPClient()
+        sent: dict[str, Any] = {}
+
+        async def fake_get(url, **kw):
+            sent.update(kw)
+            return httpx.Response(200)
+
+        with patch.object(c._client, "get", new=fake_get):
+            await c.get("https://example.com/", headers={"X-Trace-Id": "caller-attempt"})
+        assert sent["headers"]["X-Trace-Id"] == "framework-tid"
+    finally:
+        trace_id_var.reset(tok)
+        await c.close()
 
 
 @pytest.mark.asyncio

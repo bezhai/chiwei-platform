@@ -13,7 +13,9 @@ async def test_dense_delegates():
     ) as m:
         m.return_value = [0.1, 0.2, 0.3]
         client = EmbedderClient(model_id="embedding-model")
-        out = await client.dense(text="hello", images=["img-b64"], instructions="instr")
+        out = await client.dense(
+            text="hello", image_base64_list=["img-b64"], instructions="instr"
+        )
 
     assert out == [0.1, 0.2, 0.3]
     m.assert_awaited_once_with(

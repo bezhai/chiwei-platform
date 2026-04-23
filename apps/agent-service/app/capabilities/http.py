@@ -24,12 +24,10 @@ class HTTPClient:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        h: dict[str, str] = dict(lane_router.get_headers())
-        tid = trace_id_var.get()
-        if tid:
+        h: dict[str, str] = dict(extra) if extra else {}
+        h.update(lane_router.get_headers())
+        if tid := trace_id_var.get():
             h["X-Trace-Id"] = tid
-        if extra:
-            h.update(extra)
         return h
 
     def _url(self, path: str) -> str:

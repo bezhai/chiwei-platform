@@ -19,13 +19,13 @@ class EmbedderClient:
         self,
         *,
         text: str | None = None,
-        images: list[str] | None = None,
+        image_base64_list: list[str] | None = None,
         instructions: str = "",
     ) -> list[float]:
         return await embed_dense(
             self._model_id,
             text=text,
-            image_base64_list=images,
+            image_base64_list=image_base64_list,
             instructions=instructions,
         )
 
@@ -33,12 +33,12 @@ class EmbedderClient:
         self,
         *,
         text: str | None = None,
-        images: list[str] | None = None,
+        image_base64_list: list[str] | None = None,
         instructions: str = "",
     ) -> HybridEmbedding:
         return await embed_hybrid(
             self._model_id,
             text=text,
-            image_base64_list=images,
+            image_base64_list=image_base64_list,
             instructions=instructions,
         )
