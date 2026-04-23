@@ -77,4 +77,5 @@ dev = [
     "pytest-mock>=3.14.1",
     "pytest-xdist>=3.8.0",
     "ruff>=0.12.5",
+    "testcontainers[postgres]>=4.0",
 ]
