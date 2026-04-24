@@ -207,8 +207,11 @@ async def tick(
 
     now = datetime.now(CST)
 
-    if not force and row and row.skip_until and now < row.skip_until:
-        return None
+    if not force and row:
+        if row.skip_until and now < row.skip_until:
+            return None
+        if row.state_end_at and now < row.state_end_at:
+            return None
 
     for attempt in range(MAX_TICK_ATTEMPTS):
         feedback = "" if attempt == 0 else "上一次你没有调用 commit_life_state tool，请务必通过它提交结果。"
