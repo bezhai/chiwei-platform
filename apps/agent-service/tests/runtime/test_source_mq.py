@@ -188,7 +188,7 @@ async def test_mq_source_ignores_decode_failures(rabbitmq, caplog):
 @pytest.mark.integration
 async def test_mq_source_lane_aware_queue_name(rabbitmq, monkeypatch):
     """When a lane is active, the engine consumes from the lane-scoped
-    queue (``<base>_<lane>``), matching ``handle_vectorize``'s contract."""
+    queue (``<base>_<lane>``), matching the lane-aware MQ consumer contract."""
     from app.infra.rabbitmq import Route, mq
 
     # Simulate non-prod lane for this process.

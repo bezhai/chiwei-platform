@@ -35,7 +35,6 @@ def test_message_instance_matches_real_schema():
         chat_type="p2p",
         create_time=1234567890,
         message_type="text",
-        vector_status="pending",
         bot_name=None,
         response_id=None,
     )

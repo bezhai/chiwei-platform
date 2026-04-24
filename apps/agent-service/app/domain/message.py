@@ -26,7 +26,6 @@ class Message(Data):
     chat_type: str
     create_time: int
     message_type: str | None = "text"
-    vector_status: str = "pending"
     bot_name: str | None = None
     response_id: str | None = None
 
@@ -50,7 +49,6 @@ class Message(Data):
             chat_type=cm.chat_type,
             create_time=cm.create_time,
             message_type=cm.message_type,
-            vector_status=cm.vector_status,
             bot_name=cm.bot_name,
             response_id=cm.response_id,
         )

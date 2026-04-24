@@ -321,9 +321,8 @@ class Runtime:
           this shape, so we can safely take the first (only) entry of
           ``inputs_of(target)`` as the decode class;
         * the queue is ``lane_queue(src.params["queue"], current_lane())``
-          (parallel to ``workers/vectorize.py::start_vectorize_consumer``)
-          so lane isolation + TTL fallback behave exactly like legacy
-          consumers;
+          so lane isolation + TTL fallback behave the same as every
+          other MQ consumer in the process;
         * declare is idempotent (``durable=True, auto_delete=False,
           passive=False``) — if lark-server or ``declare_topology``
           already created the queue, re-declare is a no-op;

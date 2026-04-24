@@ -45,7 +45,6 @@ def _msg(content: str = '{"v":2,"text":"hello","items":[]}', chat_id: str = "c1"
         chat_type="group",
         create_time=1700_000_000,
         message_type="text",
-        vector_status="pending",
         bot_name=None,
         response_id=None,
     )

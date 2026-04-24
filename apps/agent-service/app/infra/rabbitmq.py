@@ -45,14 +45,18 @@ CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
-VECTORIZE = Route("vectorize", "task.vectorize")
+# The ``vectorize`` queue is still published to by lark-server and
+# consumed by the dataflow runtime via ``Source.mq("vectorize")``; it is
+# no longer owned by a Route constant because agent-service never
+# publishes to it itself. Topology binding for that queue is owned by
+# lark-server (the publisher) / the durable-queue state already in
+# RabbitMQ.
 MEMORY_VECTORIZE = Route("memory_vectorize", "task.memory_vectorize")
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
-    VECTORIZE,
     MEMORY_VECTORIZE,
 ]
 

@@ -24,7 +24,6 @@ from app.workers.cron import (
     cron_memory_reviewer_light_night,
 )
 from app.workers.state_sync_worker import sync_life_state_after_schedule
-from app.workers.vectorize import cron_scan_pending_messages
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +117,6 @@ class WorkerSettings:
             minute={0},
             timeout=600,
         ),
-        # 2. Vectorize pending scan: every 10 minutes
-        cron(cron_scan_pending_messages, minute={0, 10, 20, 30, 40, 50}),
         # 3. Heavy reviewer (daily consolidation): CST 03:00
         cron(cron_heavy_review, hour={3}, minute={0}, timeout=3600),
         # 4. Daily plan (Agent Team pipeline): CST 05:00 (after heavy review)

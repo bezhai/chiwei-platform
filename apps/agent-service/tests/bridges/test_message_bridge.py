@@ -20,7 +20,6 @@ async def test_emit_legacy_message_lifts_every_field_and_emits():
         chat_type="p2p",
         create_time=1234567890,
         message_type="text",
-        vector_status="pending",
         bot_name=None,
         response_id=None,
     )
@@ -43,6 +42,5 @@ async def test_emit_legacy_message_lifts_every_field_and_emits():
     assert msg.chat_type == "p2p"
     assert msg.create_time == 1234567890
     assert msg.message_type == "text"
-    assert msg.vector_status == "pending"
     assert msg.bot_name is None
     assert msg.response_id is None

@@ -147,7 +147,6 @@ class ConversationMessage(Base):
     message_type: Mapped[str | None] = mapped_column(
         String(30), nullable=True, default="text"
     )
-    vector_status: Mapped[str] = mapped_column(String(20), default="pending")
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     response_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 

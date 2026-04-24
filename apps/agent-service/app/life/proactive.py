@@ -136,7 +136,6 @@ async def submit_proactive_chat(
             chat_type="group",
             create_time=now_ms,
             message_type="proactive_trigger",
-            vector_status="skipped",
             bot_name=bot_name,
         )
         session.add(msg)

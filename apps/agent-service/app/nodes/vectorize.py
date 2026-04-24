@@ -1,22 +1,19 @@
 """vectorize @node: lift a ``Message`` into a ``Fragment`` (or ``None``).
 
-Replaces the embed half of ``app.workers.vectorize.vectorize_message``:
-parse content, permission-check images, download base64s, run hybrid +
+Parse content, permission-check images, download base64s, run hybrid +
 dense-cluster embeddings in parallel, and pack the dual payloads that
 ``save_fragment`` will hand to the two qdrant collections.
 
-Returns ``None`` in two skip scenarios, identical to the legacy worker:
+Returns ``None`` in two skip scenarios:
   1. ``text_content`` and ``image_keys`` both empty before download;
   2. ``text_content`` empty and every image download failed/skipped.
 
 The runtime drops ``None`` results before the durable edge, so the
 downstream ``save_fragment`` @node never sees them.
 
-Status write-back to ``conversation_messages.vector_status`` is *not*
-performed here. The legacy ``process_message`` wrapper continues to own
-status tracking until T1.10 retires ``app/workers/vectorize.py`` and the
-runtime's persist layer takes over. This @node stays pure: Message in,
-Fragment | None out.
+Idempotency: Fragment.fragment_id is ``vector_id_for(message_id)`` — a
+deterministic UUID5 — so durable-edge retries + qdrant upsert converge
+without any per-message status flag.
 """
 from __future__ import annotations
 
