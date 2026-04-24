@@ -2,18 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 agent-service dataflow 抽象的 runtime 骨架（Phase 0）并把 vectorize 管线迁到新框架（Phase 1）。旧 chat pipeline 保持原状，只在写 `conversation_messages` 之后加一行 `await emit(Message(...))` 作为 Legacy Bridge 入口；Phase 5 chat 迁完后这一行和 Bridge 一起删除。
+**Goal:** 实现 agent-service dataflow 抽象的 runtime 骨架（Phase 0）并把 vectorize 管线迁到新框架（Phase 1）。旧 chat pipeline 保持原状，只在写 `conversation_messages` 之后加一行 `await emit_legacy_message(cm)`（Message Bridge 入口）；Phase 5 chat 迁完后这一行和 Bridge 一起删除。
 
 **Architecture:**
-- `app/runtime/`：框架代码（Data base、Marker、@node、wire DSL、graph、migrator、query、engine、placement、legacy_bridge）
+- `app/runtime/`：框架代码（Data base、Marker、@node、wire DSL、graph、migrator、query、engine、placement、emit）—— **不含任何业务 import**，保持 business-agnostic
 - `app/capabilities/`：六个 capability 薄 adapter（LLMClient / AgentRunner / EmbedderClient / VectorStore / HTTPClient / query）
 - `app/domain/`：业务 Data 类（`Message`、`Fragment` 等，逐步接管旧 `app/data/models.py` 的表）
 - `app/nodes/`：`@node async def ...` 业务函数
+- `app/bridges/`：业务胶水层 —— 把老 ORM 对象升格为 Domain Data 并 `emit()`。Phase 5 后整体删除。
 - `app/wiring/`：按域拆分的 `wire(...)` 声明文件
 - `app/deployment.py`：`bind(Node).to_app("...")` 归属声明
 - `apps/paas-engine/internal/adapter/kubernetes/deployer.go`：deployer 改动，注入 `APP_NAME` 环境变量
 
-Phase 0 交付：runtime 能跑一个 toy Node；所有 capability adapter 通过；Schema Migrator 能接管旧表；Legacy Bridge 的 `emit()` 可用。Phase 1 交付：vectorize 跑在新框架的 `vectorize-worker` App 里，旧 cron/queue/publish 全部删除，一次性回扫脚本处理存量。
+Phase 0 交付：runtime 能跑一个 toy Node；所有 capability adapter 通过；Schema Migrator 能接管旧表。Phase 1 交付：vectorize 跑在新框架的 `vectorize-worker` App 里，Message Bridge 接入老写入点，旧 cron/queue/publish 全部删除，一次性回扫脚本处理存量。
 
 **Tech Stack:** Python 3.12 / Pydantic v2 / SQLAlchemy 2 async / aio-pika (RabbitMQ) / asyncpg / redis / qdrant-client / volcengine ark / langchain + langgraph / pytest-asyncio ; PaaS Engine (Go) / K8s / Harbor
 
@@ -37,8 +38,7 @@ runtime/
     query.py            # query(T) 泛型查询
     engine.py           # runtime.run()
     placement.py        # bind() + nodes_for_app()
-    emit.py             # runtime.emit(data) — Legacy Bridge 和原生 producer 共用入口
-    legacy_bridge.py    # Phase 0 临时 adapter；Phase 5 后删除
+    emit.py             # runtime.emit(data) — Bridge 和原生 producer 共用入口
 
 capabilities/
     __init__.py
@@ -52,6 +52,11 @@ domain/
     __init__.py         # 导出所有 Data 类
     message.py          # Message
     fragment.py         # Fragment
+
+bridges/
+    __init__.py
+    message_bridge.py   # emit_legacy_message(cm: ConversationMessage) -> emit(Message(...))
+                        # Phase 5 整体删除
 
 nodes/
     __init__.py
@@ -69,8 +74,9 @@ workers/runtime_entry.py  # 统一 worker 入口：python -m app.workers.runtime
 
 **修改：**
 - `apps/paas-engine/internal/adapter/kubernetes/deployer.go` — 在 mergedEnvs 注入 `APP_NAME`
-- `apps/agent-service/app/life/proactive.py:142` — session.add 之后加一行 `await emit(Message(...))`（Phase 1 最后一步）
-- `apps/agent-service/app/main.py` — 启动时调 `runtime.migrate_schema()` 和（HTTP Pod）`runtime.serve(app_name)`
+- 所有写 `conversation_messages` 的点（`app/life/proactive.py`、chat pipeline、read、afterthought 等，T1.7 Step 1 的 grep 清单为准） — session.add+commit 之后加 `await emit_legacy_message(cm)`（Phase 1 步骤）
+- `apps/agent-service/app/main.py` — lifespan 里调 `register_http_sources(app)`（T0.16 已完成）
+- `apps/agent-service/app/workers/runtime_entry.py` — 追加 `import app.wiring; import app.deployment`（T1.5 激活步骤）
 
 **删除（Phase 1 结束时）：**
 - `apps/agent-service/app/workers/vectorize.py` 全部（旧 consumer + cron）
@@ -82,7 +88,37 @@ workers/runtime_entry.py  # 统一 worker 入口：python -m app.workers.runtime
 
 ---
 
+## Phase 划分原则（重要）
+
+按**依赖方向**（import 指向）划分 Phase，不按概念相似。6 层从底到上：
+
+| 层 | 内容 | 允许 import 的上游 |
+|---|---|---|
+| **F** framework | `app/runtime/*`, `app/capabilities/*` | stdlib / 三方库 |
+| **D** domain | `app/domain/*`（业务 Data 类） | F |
+| **L** logic | `app/nodes/*`（@node 函数） | F + D |
+| **B** bridge | `app/bridges/*`（老对象 → Domain Data → emit） | F + D |
+| **W** wiring | `app/wiring/*`, `app/deployment.py`, `workers/runtime_entry.py` 里的 wiring import | F + D + L |
+| **I** integration | 老代码 call-site / PaaS config / 泳道部署 | 任意 |
+
+**Phase 0 只允许 F 层**。任何 Phase 0 task 的 task-level import 如果出现 `app.domain.*` / `app.nodes.*` / `app.bridges.*` / `app.wiring.*`，就是错归类，必须挪到 Phase 1。
+
+快速验证命令：
+
+```bash
+# Phase 0 task 的 Step 代码块里不应出现这些 import
+grep -nE "from app\.(domain|nodes|bridges|wiring)" <phase0-task-code-blocks>
+```
+
+---
+
 ## Phase 0 — Runtime 骨架
+
+> **状态（2026-04-23）**：本 Phase 全部 task（T0.1–T0.16 + T0.7.5）已完成。下方伪代码是**历史设计快照**，与真实实现有若干签名偏差（例如 T0.11 最终是 consumer-side dedup、没有 `mq.publish_raw`；T0.13 capabilities 实际签名见 `/tmp/dataflow-exec-state.md`）。
+>
+> **如果要看"实际做了什么"**：以 git log 和源码为准，辅助参考 `/tmp/dataflow-exec-state.md` 的"Recent plan deviations"章节。Plan 文字**不修**，因为 Phase 0 task 都 completed，修改只会模糊历史。
+>
+> **如果你是 Phase 1 的执行者**：直接跳到 `## Phase 1 — Vectorize 管线迁移`。Phase 0 代码块不是 Phase 1 的接口契约。
 
 ### Task 0.1: PaaS Engine 注入 APP_NAME
 
@@ -1989,22 +2025,300 @@ git commit -m "feat(runtime): HTTP Source -> FastAPI endpoint registration"
 
 ---
 
-### Task 0.17: Legacy Bridge（emit wrapper）
+*Phase 0 到此结束。原 T0.17 Legacy Bridge 已按"依赖方向"原则挪到 Phase 1 —— 它依赖 `app.domain.message.Message`，属于 B 层（bridge）不是 F 层（framework）。新编号为 **Task 1.2.5: Message Bridge**，位于 `app/bridges/`。*
+
+---
+
+## Phase 1 — Vectorize 管线迁移
+
+### Task 1.1: Message Data（接管 conversation_messages 表）
+
+> **⚠️ 字段决策（2026-04-23，对照真实 ORM 修订）**：Message Data 的字段**严格**对齐真实 `conversation_messages` 列（见 `apps/agent-service/app/data/models.py::ConversationMessage`），不画饼加新字段。原 plan 的 `text/images/persona_id/generation` 全部去除：
+> - `text` → 改名 `content`（和真实列一致）
+> - `images` → 去掉（vectorize @node 里 `parse_content(content).image_keys` 拿）
+> - `persona_id` → 去掉（vectorize 里从 `bot_name` 推导或不使用）
+> - `generation` → 去掉（conversation_messages 语义上 PK 唯一，不需要多版本）
+>
+> 加上真实表所有非自增字段：`user_id / role / root_message_id / reply_message_id / chat_id / chat_type / create_time / message_type / vector_status / bot_name / response_id`。
+>
+> **migrator 行为**：`Meta.existing_table` 让 migrator 进入 adoption-mode，**完全跳过** Message 的 DDL（`migrator.py` 文件头 docstring 明写）。所以**不需要扩 migrator**，migration plan 对 Message 返回零 DDL。
+>
+> **persist 行为**：`insert_idempotent` 当前硬绑 `dedup_hash` 列。Message 的真实表没这列，必须扩 F 层支持 `Meta.dedup_column="message_id"` —— 让 INSERT 跳过 `dedup_hash` 列写入，且 `ON CONFLICT` 目标改成 `message_id`。
 
 **Files:**
-- Create: `apps/agent-service/app/runtime/legacy_bridge.py`
-- Test: `apps/agent-service/tests/runtime/test_legacy_bridge.py`
+- Create: `apps/agent-service/app/domain/__init__.py`
+- Create: `apps/agent-service/app/domain/message.py`
+- Modify: `apps/agent-service/app/runtime/persist.py`（F 扩展:支持 `Meta.dedup_column`)
+- Test: `apps/agent-service/tests/domain/test_message.py`
+- Test: `apps/agent-service/tests/runtime/test_persist.py`（新增 dedup_column 用例）
 
-Legacy Bridge 只是一个极薄的函数：老代码在写完 `conversation_messages` 后调用它，从行对象构造 `Message(Data)` 并 `await emit(msg)`。Phase 5 整体删除。
+- [ ] **Step 1: 写 Message Data 失败测试**
+
+```python
+# tests/domain/test_message.py
+from app.domain.message import Message
+from app.runtime.data import key_fields, dedup_fields
+
+
+def test_message_key_is_message_id():
+    assert key_fields(Message) == ("message_id",)
+
+
+def test_message_dedup_column_is_message_id():
+    # Meta.dedup_column="message_id" → insert_idempotent ON CONFLICT (message_id)
+    assert Message.Meta.dedup_column == "message_id"
+
+
+def test_message_existing_table():
+    assert Message.Meta.existing_table == "conversation_messages"
+
+
+def test_message_instance_matches_real_schema():
+    m = Message(
+        message_id="m1",
+        user_id="u1",
+        content="hi",
+        role="user",
+        root_message_id="r1",
+        reply_message_id=None,
+        chat_id="c1",
+        chat_type="p2p",
+        create_time=1234567890,
+        message_type="text",
+        vector_status="pending",
+        bot_name=None,
+        response_id=None,
+    )
+    assert m.message_id == "m1"
+    assert m.content == "hi"
+```
+
+- [ ] **Step 2: 实现 message.py（字段对齐真实 `conversation_messages`)**
+
+```python
+# app/domain/message.py
+"""Message Data — takes over the legacy conversation_messages table.
+
+Fields mirror ``app.data.models.ConversationMessage`` 1:1 (minus the auto-
+increment ``id`` column, which the migrator's adoption-mode ignores). The
+table is owned by pre-existing migrations; this Data class is the new typed
+interface for reading/writing through runtime.persist / runtime.query.
+"""
+from __future__ import annotations
+
+from typing import Annotated
+
+from app.runtime.data import Data, Key
+
+
+class Message(Data):
+    message_id: Annotated[str, Key]
+    user_id: str
+    content: str
+    role: str
+    root_message_id: str
+    reply_message_id: str | None = None
+    chat_id: str
+    chat_type: str
+    create_time: int
+    message_type: str | None = "text"
+    vector_status: str = "pending"
+    bot_name: str | None = None
+    response_id: str | None = None
+
+    class Meta:
+        existing_table = "conversation_messages"
+        # Real PK is ``message_id``; there is no ``dedup_hash`` column, so
+        # the persist layer must ON CONFLICT on message_id instead.
+        dedup_column = "message_id"
+```
+
+- [ ] **Step 3: 更新 `app/domain/__init__.py`**
+
+```python
+# app/domain/__init__.py
+"""Business Data classes — pydantic models carried through the runtime graph."""
+from app.domain.message import Message
+
+__all__ = ["Message"]
+```
+
+- [ ] **Step 4: F 扩展 — `persist.insert_idempotent` 支持 `Meta.dedup_column`**
+
+当 Data 类 `Meta.dedup_column` 指定时：
+- `INSERT` 的列列表**不包含** `dedup_hash`（真实表没这列）
+- `ON CONFLICT` 目标改成 `Meta.dedup_column` 指定的列
+
+```python
+# app/runtime/persist.py::insert_idempotent (修改)
+cls = type(obj)
+table = _table_name(cls)
+
+meta = getattr(cls, "Meta", None)
+dedup_col = getattr(meta, "dedup_column", None) if meta else None
+
+cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
+if not dedup_col:
+    cols_map["dedup_hash"] = _dedup_hash(obj)
+
+cols = list(cols_map.keys())
+placeholders = ", ".join(f":{c}" for c in cols)
+conflict_target = dedup_col or "dedup_hash"
+sql = (
+    f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
+    f"ON CONFLICT ({conflict_target}) DO NOTHING RETURNING 1"
+)
+# rest unchanged
+```
+
+> **分层提示**：这步改 F 层（`app/runtime/persist.py`），F 层对外接口不变（`insert_idempotent(obj)`），只是内部按 `Meta.dedup_column` 分叉。测试放 `tests/runtime/test_persist.py`（**不是** `tests/domain/`）。
+
+- [ ] **Step 5: 写 F 扩展测试**
+
+```python
+# tests/runtime/test_persist.py (新增)
+# 用一个临时 Data 类绑到已有 pg 表（或通过 migrate() helper 创建）
+# 验证 insert_idempotent：
+#   1. 不带 dedup_column：INSERT 包含 dedup_hash，ON CONFLICT (dedup_hash)
+#   2. 带 Meta.dedup_column="xxx"：INSERT 不含 dedup_hash，ON CONFLICT (xxx)
+#   3. 重复插入同一条返回 0 行，去重生效
+# 测试细节以现有 test_persist.py 风格为准（用 test_db fixture + migrate()）。
+```
+
+- [ ] **Step 6: 验证 Message 加入后 migration plan 对它返回零 DDL**
+
+```bash
+cd apps/agent-service && uv run python -c "
+from app.runtime.migrator import plan_migration
+from app.runtime.data import DATA_REGISTRY
+import app.domain  # register Message
+# Pretend conversation_messages exists with any columns — adoption mode ignores them
+existing = {'conversation_messages': {'dummy': 'text'}}
+plan = plan_migration(list(DATA_REGISTRY), existing)
+msg_stmts = [s.sql for s in plan.stmts if 'conversation_messages' in s.sql]
+print('Message DDL statements:', len(msg_stmts))
+assert len(msg_stmts) == 0, f'Expected 0 DDL for conversation_messages (adoption mode), got: {msg_stmts}'
+print('OK: Message is in adoption mode')
+"
+```
+
+- [ ] **Step 7: 测试通过**
+
+```bash
+cd apps/agent-service && uv run pytest tests/domain/test_message.py tests/runtime/test_persist.py -v
+```
+
+- [ ] **Step 8: Commit**
+
+```bash
+git commit -m "feat(domain+runtime): Message Data (adopts conversation_messages) + persist supports Meta.dedup_column"
+```
+
+---
+
+### Task 1.2: Fragment Data
+
+**Files:**
+- Create: `apps/agent-service/app/domain/fragment.py`
+- Test: `apps/agent-service/tests/domain/test_fragment.py`
+
+Fragment 是 vectorize 的产出——一个已算好向量的段落。**不需要 pg 表**（业务代码从不查），但需要是 Data 类以便流经 wire。Fragment 走 `.broadcast()` 发给 VectorStore Sink；不落 pg。
+
+> **字段说明（2026-04-23 paper-read 修订）**：recall 和 cluster 两个 collection 的 payload 不同（见 T1.3 warning #6），Fragment 要拆成 `recall_payload` + `cluster_payload` 两个字段，不能合并。`fragment_id` 存 UUID5 字符串（见 T1.3 warning #5），由 vectorize @node 从 `message_id` 派生。
 
 - [ ] **Step 1: 写失败测试**
 
 ```python
-# tests/runtime/test_legacy_bridge.py
+# tests/domain/test_fragment.py
+from app.domain.fragment import Fragment
+from app.runtime.data import key_fields
+
+def test_fragment_key():
+    assert key_fields(Fragment) == ("fragment_id",)
+
+def test_fragment_transient():
+    assert getattr(Fragment.Meta, "transient", False) is True
+
+def test_fragment_instance():
+    f = Fragment(
+        fragment_id="c9d05a5e-...",  # UUID5 from message_id
+        message_id="m1",
+        chat_id="c1",
+        dense=[0.0]*1024,
+        sparse={"indices": [1], "values": [0.5]},
+        dense_cluster=[0.0]*1024,
+        recall_payload={"message_id": "m1", "user_id": "u1", "chat_id": "c1",
+                        "timestamp": 1, "root_message_id": "r1", "original_text": "hi"},
+        cluster_payload={"message_id": "m1", "user_id": "u1", "chat_id": "c1",
+                         "timestamp": 1},
+    )
+    assert f.message_id == "m1"
+    assert "original_text" in f.recall_payload
+    assert "original_text" not in f.cluster_payload
+```
+
+- [ ] **Step 2: 实现 fragment.py**
+
+```python
+# app/domain/fragment.py
+from typing import Annotated
+
+from app.runtime.data import Data, Key
+
+
+class Fragment(Data):
+    fragment_id: Annotated[str, Key]  # UUID5(NAMESPACE_DNS, message_id), str form
+    message_id: str
+    chat_id: str
+    dense: list[float]
+    sparse: dict  # {"indices": [...], "values": [...]}
+    dense_cluster: list[float]
+    recall_payload: dict   # full payload for messages_recall collection
+    cluster_payload: dict  # reduced payload for messages_cluster collection
+
+    class Meta:
+        transient = True  # not persisted to pg; goes straight to VectorStore
+```
+
+- [ ] **Step 3: migrator.py 跳过 `Meta.transient=True` 的类（F 扩展）**
+
+> **分层提示**：这步改动的是 F 层（`app/runtime/migrator.py`），为 F 层**添加**"支持 transient Data 变体"的能力。它本身不 import 任何业务代码，不违反 Phase 0 原则；只是时序上放在 T1.2 里是因为 Fragment 是第一个 transient 需求方。测试应新增到 `tests/runtime/test_migrator.py`（**不是** `tests/domain/`）：用一个临时 `class Tmp(Data): class Meta: transient = True` 验证 `plan_migration` 跳过它。
+
+```python
+# migrator.py, plan_migration:
+if getattr(getattr(cls, "Meta", None), "transient", False):
+    continue
+```
+
+- [ ] **Step 4: 测试通过**（`tests/domain/test_fragment.py` + `tests/runtime/test_migrator.py` 新增的 transient 用例）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git commit -m "feat(domain+runtime): Fragment (transient) + migrator skips transient Data"
+```
+
+---
+
+### Task 1.2.5: Message Bridge（`emit_legacy_message`）
+
+> **挪位说明**：这个 task 原为 Phase 0 的 T0.17，按"依赖方向"原则重归类到 Phase 1 Tier B。它依赖 T1.1 的 `Message` Data 类，所以必须在 T1.1 之后。文件从原计划的 `app/runtime/legacy_bridge.py` 改为 `app/bridges/message_bridge.py`，让 `app/runtime/` 保持 business-agnostic。
+
+**Files:**
+- Create: `apps/agent-service/app/bridges/__init__.py`
+- Create: `apps/agent-service/app/bridges/message_bridge.py`
+- Test: `apps/agent-service/tests/bridges/test_message_bridge.py`
+
+Message Bridge 只是一个极薄的函数：老代码在写完 `conversation_messages` 后调用它，从行对象构造 `Message(Data)` 并 `await emit(msg)`。Phase 5 整体删除这个文件。
+
+- [ ] **Step 1: 写失败测试**
+
+```python
+# tests/bridges/test_message_bridge.py
 import pytest
 from unittest.mock import AsyncMock, patch
 from app.data.models import ConversationMessage
-from app.runtime.legacy_bridge import emit_legacy_message
+from app.bridges.message_bridge import emit_legacy_message
 
 @pytest.mark.asyncio
 async def test_emit_legacy_message_lifts_and_emits():
@@ -2012,7 +2326,7 @@ async def test_emit_legacy_message_lifts_and_emits():
         message_id="m1", chat_id="c1", content="hi", role="user",
         create_time=1234567890, vector_status="pending",
     )
-    with patch("app.runtime.legacy_bridge.emit", new_callable=AsyncMock) as m:
+    with patch("app.bridges.message_bridge.emit", new_callable=AsyncMock) as m:
         await emit_legacy_message(cm)
     m.assert_awaited_once()
     msg = m.call_args.args[0]
@@ -2022,19 +2336,31 @@ async def test_emit_legacy_message_lifts_and_emits():
     assert msg.chat_id == "c1"
 ```
 
-- [ ] **Step 2: 实现 legacy_bridge.py（Message 类在 Task 1.1 建；先用 forward ref）**
+- [ ] **Step 2: 实现 `app/bridges/__init__.py`**
 
 ```python
-# app/runtime/legacy_bridge.py
-"""Legacy Bridge: lift legacy ConversationMessage rows into new Message Data.
+# app/bridges/__init__.py
+"""Business glue: lift legacy ORM rows into Domain Data and emit().
 
-This module exists ONLY during Phases 0-4. After Phase 5 (chat pipeline
-migration), the call sites are deleted and so is this file.
+Bridges are Phase-bound — they exist only while a legacy pipeline is being
+migrated. After Phase 5 (full chat migration), this entire package is deleted.
 """
+```
+
+- [ ] **Step 3: 实现 `app/bridges/message_bridge.py`**
+
+```python
+# app/bridges/message_bridge.py
+"""Message Bridge: lift legacy ConversationMessage rows into new Message Data.
+
+Exists during Phases 1-4. After Phase 5 the call sites are deleted, and so is
+this file.
+"""
+from app.domain.message import Message
 from app.runtime.emit import emit
 
+
 async def emit_legacy_message(cm) -> None:  # cm: ConversationMessage
-    from app.domain.message import Message  # forward import to avoid cycles
     msg = Message(
         message_id=cm.message_id,
         generation=0,
@@ -2048,196 +2374,18 @@ async def emit_legacy_message(cm) -> None:  # cm: ConversationMessage
     await emit(msg)
 ```
 
-- [ ] **Step 3: 测试通过（需要 Task 1.1 的 Message 先就位；两个任务顺序连在一起或用 xfail 临时跳过）**
-
-- [ ] **Step 4: Commit**
-
-```bash
-git commit -m "feat(runtime): legacy_bridge — emit_legacy_message(ConversationMessage) -> Message(Data)"
-```
-
----
-
-## Phase 1 — Vectorize 管线迁移
-
-### Task 1.1: Message Data（接管 conversation_messages 表）
-
-**Files:**
-- Create: `apps/agent-service/app/domain/__init__.py`
-- Create: `apps/agent-service/app/domain/message.py`
-- Test: `apps/agent-service/tests/domain/test_message.py`
-
-- [ ] **Step 1: 写失败测试**
-
-```python
-# tests/domain/test_message.py
-from typing import Annotated
-from app.domain.message import Message
-from app.runtime.data import key_fields, dedup_fields
-
-def test_message_key_is_message_id():
-    assert key_fields(Message) == ("message_id",)
-
-def test_message_dedup_includes_generation():
-    assert dedup_fields(Message) == ("message_id", "generation")
-
-def test_message_existing_table():
-    assert Message.Meta.existing_table == "conversation_messages"
-
-def test_message_instance():
-    m = Message(message_id="m1", generation=0, chat_id="c1", persona_id="p1",
-                role="user", text="hi", images=[], create_time=123)
-    assert m.message_id == "m1"
-```
-
-- [ ] **Step 2: 实现 message.py**
-
-```python
-# app/domain/message.py
-from typing import Annotated
-from app.runtime.data import Data, Key, DedupKey
-
-class Message(Data):
-    message_id: Annotated[str, Key, DedupKey]
-    generation: Annotated[int, DedupKey] = 0
-    chat_id: str
-    persona_id: str = ""
-    role: str
-    text: str
-    images: list[str] = []
-    create_time: int
-
-    class Meta:
-        existing_table = "conversation_messages"
-```
-
-- [ ] **Step 3: 更新 `app/domain/__init__.py`**
-
-```python
-from app.domain.message import Message
-__all__ = ["Message"]
-```
-
-- [ ] **Step 4: 跑 runtime migrator，确认不碰 conversation_messages 的现有列（新增列允许）**
-
-```bash
-uv run python -c "from app.runtime.migrator import plan_migration; from app.runtime.data import DATA_REGISTRY; import app.domain; \
-existing = {'conversation_messages': {'message_id':'text','chat_id':'text','content':'text','role':'text','create_time':'bigint','vector_status':'text'}}; \
-plan = plan_migration(list(DATA_REGISTRY), existing); \
-[print(s.sql) for s in plan.stmts]"
-```
-
-预期：输出只包含 `ALTER TABLE conversation_messages ADD COLUMN ...` 对 persona_id / images / generation / dedup_hash 的新增；不包含 CREATE TABLE。
-
-**重要：新增 `dedup_hash` 列需要 backfill 和 UNIQUE index**。此处由于旧表不是 append-only 且 `message_id` 已经 PK，单独处理：
-
-```python
-# app/domain/message.py
-class Message(Data):
-    ...
-    class Meta:
-        existing_table = "conversation_messages"
-        # override: use message_id as implicit dedup (no separate hash column needed)
-        dedup_column = "message_id"
-```
-
-在 migrator 里扩展：若 `Meta.dedup_column` 指定，则跳过 `dedup_hash` 列的自动生成，改用指定列。改 `_table_name` 附近逻辑。
-
-- [ ] **Step 5: 更新 migrator.py 支持 `Meta.dedup_column`**
-
-```python
-# in migrator.py, where dedup_hash is added:
-meta = getattr(cls, "Meta", None)
-dedup_col = getattr(meta, "dedup_column", None) if meta else None
-if not dedup_col:
-    desired_cols["dedup_hash"] = "TEXT"
-```
-
-相应 `insert_idempotent` / `_dedup_hash` 也要支持这个模式：
-
-```python
-# persist.py insert_idempotent: if Meta.dedup_column specified, ON CONFLICT (<that column>)
-conflict_col = getattr(getattr(cls, "Meta", None), "dedup_column", None) or "dedup_hash"
-```
-
-相应调整测试。
-
-- [ ] **Step 6: 测试通过**
-
-- [ ] **Step 7: Commit**
-
-```bash
-git commit -m "feat(domain): Message Data (maps to conversation_messages, dedup by message_id)"
-```
-
----
-
-### Task 1.2: Fragment Data
-
-**Files:**
-- Create: `apps/agent-service/app/domain/fragment.py`
-- Test: `apps/agent-service/tests/domain/test_fragment.py`
-
-Fragment 是 vectorize 的产出——一个已算好向量的段落。**不需要 pg 表**（业务代码从不查），但需要是 Data 类以便流经 wire。Fragment 走 `.broadcast()` 发给 VectorStore Sink；不落 pg。
-
-- [ ] **Step 1: 写失败测试**
-
-```python
-# tests/domain/test_fragment.py
-from typing import Annotated
-from app.domain.fragment import Fragment
-from app.runtime.data import key_fields
-
-def test_fragment_key():
-    assert key_fields(Fragment) == ("fragment_id",)
-
-def test_fragment_transient():
-    assert getattr(Fragment.Meta, "transient", False) is True
-
-def test_fragment_instance():
-    f = Fragment(
-        fragment_id="m1:0", message_id="m1", chat_id="c1",
-        dense=[0.0]*1024, sparse={"indices": [1], "values": [0.5]},
-        dense_cluster=[0.0]*1024,
-        payload={"text": "hi"},
-    )
-    assert f.fragment_id == "m1:0"
-```
-
-- [ ] **Step 2: 实现 fragment.py**
-
-```python
-# app/domain/fragment.py
-from typing import Annotated
-from app.runtime.data import Data, Key
-
-class Fragment(Data):
-    fragment_id: Annotated[str, Key]
-    message_id: str
-    chat_id: str
-    dense: list[float]
-    sparse: dict  # {"indices": [...], "values": [...]}
-    dense_cluster: list[float]
-    payload: dict
-
-    class Meta:
-        transient = True  # not persisted to pg; goes straight to Sink
-```
-
-- [ ] **Step 3: migrator.py 跳过 `Meta.transient=True` 的类**
-
-```python
-# migrator.py, plan_migration:
-if getattr(getattr(cls, "Meta", None), "transient", False):
-    continue
-```
+**注意**：`Message` 已在 T1.1 就位，这里直接 top-level import（不再需要 forward-ref 绕圈）。不需要 xfail。
 
 - [ ] **Step 4: 测试通过**
+
+```bash
+cd apps/agent-service && uv run pytest tests/bridges/test_message_bridge.py -v
+```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -m "feat(domain): Fragment (transient, not persisted)"
+git commit -m "feat(bridges): message_bridge — emit_legacy_message(ConversationMessage) -> Message(Data)"
 ```
 
 ---
@@ -2249,237 +2397,719 @@ git commit -m "feat(domain): Fragment (transient, not persisted)"
 - Create: `apps/agent-service/app/nodes/vectorize.py`
 - Test: `apps/agent-service/tests/nodes/test_vectorize.py`
 
-> **集成注意（2026-04-23 paper-read 发现）：** 迁移 `vectorize_message()` 到新框架时注意：
+> **⚠️ 重要（2026-04-23 第二轮 paper-read）：plan 代码块是指示性，不 authoritative。**
+> 以 `apps/agent-service/app/workers/vectorize.py::vectorize_message` 的真实实现为准。以下
+> 是 plan 伪代码和真实代码的 10 处偏差，全部要以真实代码为准：
 >
-> 1. **Dual-collection upsert 不是 blocker**：旧代码把同一条消息 upsert 到 `messages_recall` +
->    `messages_cluster` 两个 Qdrant collection。Qdrant 本身不支持跨 collection 事务，旧代码
->    靠 `asyncio.gather` 并发发出 —— 迁移时**单个 @node 内部用 `asyncio.gather` 两个
->    `VectorStore.upsert` 完全等价**，不要拆成两个 @node（拆了之后 durable retry 只会重试失
->    败那一侧，语义反而变复杂）。
-> 2. **Image partial-success**：旧代码 `asyncio.gather(..., return_exceptions=True)` 静默过滤
->    下载失败的图片。@node 内部要保留这个行为 —— 一张图失败不能让整条消息 nack 重试。
-> 3. **vector_status 写回**：旧代码用 pending/completed/skipped/failed 状态机。最简单的做法
->    是在主 vectorize @node 末尾直接 `UPDATE conversation_messages SET vector_status=...`，
->    不拆成独立 `mark_vectorized` 节点 —— 省一跳、语义紧凑。
-> 4. **UUID 派生**：`uuid.uuid5(NAMESPACE_DNS, message_id)` 逻辑在 `vectorize_message` 和
->    `vectorize_fragment` 都重复了，迁移时抽到 `app/nodes/_ids.py` 或类似位置。
+> **业务语义（不能省）：**
+> 1. **输入是 `ConversationMessage` 不是 Message**：plan 里 Message 字段 `text` / `images`
+>    对应真实字段 `content` / `image_keys`（经 `parse_content(content)` 返回
+>    `ParsedContent.image_keys` 和 `.render()`）。T1.1 Message Data 的字段命名要向
+>    真实列看齐，或者在 @node 里做字段 rename（推荐前者，避免 @node 里还要映射）。
+> 2. **Empty content 两处 early-return**：
+>    - 入口处：`text_content` 和 `image_keys` 都空 → 跳过（返回 False / 不产 Fragment）。
+>    - 下载后：`text_content` 空且 `image_base64_list` 全失败 → 跳过。
+>    @node 的返回用 `Optional[Fragment]` + runtime drop None；若 runtime 尚未实现 drop-None
+>    语义，则在 @node 里不 emit（直接 return 但状态写回 `skipped`）。
+> 3. **图片下载前 permission check**：`find_group_download_permission(session, chat_id)`
+>    查 `"only_owner"`，是就把 `image_keys` 清空。这个 pg 查询必须保留；省了会违规下载。
+> 4. **两份 instruction**：`InstructionBuilder.for_corpus(modality)` 给 hybrid 用，
+>    `InstructionBuilder.for_cluster(...)` 给 dense 用。**不是同一份**。
+> 5. **vector_id 是 UUID5**：`uuid.uuid5(uuid.NAMESPACE_DNS, message_id)`。Fragment 的
+>    `fragment_id` 字段类型应保留 str，但值用 UUID5 stringify。抽到 `app/nodes/_ids.py`
+>    共享给其他 @node 用（spec 里规划了 memory 流也要 vectorize）。
+> 6. **payload 字段**：recall 和 cluster **payload 不同**。recall 要 `message_id / user_id /
+>    chat_id / timestamp / root_message_id / original_text`；cluster 不要 `root_message_id`
+>    和 `original_text`。Fragment Data 要容纳这两套数据（加 `recall_payload` + `cluster_payload`
+>    两个 dict 字段，或用一个 dict 字段让 save_fragment @node 筛选）。
+>
+> **依赖/接口（按实际代码签名）：**
+> 7. **Image 下载返回 base64 字符串**：`image_client.download_image_as_base64(key, msg_id,
+>    persona_id) -> str`。plan 里的 `download_image(url) -> bytes` 不存在；image key 不是 URL。
+>    迁 @node 时 `asyncio.gather(*tasks, return_exceptions=True)` 然后 `[r for r in results
+>    if isinstance(r, str) and r]` 过滤失败。
+> 8. **EmbedderClient 签名**：`embedder.hybrid(*, text, image_base64_list, instructions) ->
+>    HybridEmbedding` 和 `.dense(*, text, image_base64_list, instructions) -> list[float]`。
+>    **没有 `encode(mode=...)` 方法**。model_id 固定 `"embedding-model"`。
+> 9. **HybridEmbedding 对象不是 dict**：字段 `.dense: list[float]` / `.sparse.indices:
+>    list[int]` / `.sparse.values: list[float]`。
+> 10. **cluster collection 需要 dense-only upsert**：旧代码用 `qdrant.upsert_vectors`（不是
+>     `upsert_hybrid_vectors`）。**当前 T0.13 的 `VectorStore.upsert` 只支持
+>     `HybridEmbedding`**，cluster 写入需要在 T1.4 顺手给 VectorStore 加
+>     `upsert_dense(point_id, dense, payload)` 方法（F 扩展，测试放 `tests/capabilities/`）。
+>
+> **运行时/架构建议：**
+> - **Dual-collection upsert** 放 T1.4 的 `save_fragment` @node 里，用 `asyncio.gather`
+>   并发。不要拆两个 @node（拆了之后 durable retry 只会重试失败那一侧，语义反而变复杂）。
+> - **vector_status 写回** 在 vectorize @node 末尾直接
+>   `UPDATE conversation_messages SET vector_status=...`，不拆独立节点。状态机保持
+>   `pending / completed / skipped / failed` 四态。
 
-- [ ] **Step 1: 读旧 vectorize 逻辑**
+- [ ] **Step 1: 读旧 vectorize 实现（真实行为来源）**
 
 ```bash
-sed -n '57,167p' apps/agent-service/app/workers/vectorize.py
+sed -n '1,170p' apps/agent-service/app/workers/vectorize.py
 ```
 
-理解：parse content → 下载图片 → 构造 instruction → 并行 hybrid+dense → 返回
+通读完再动。**以真实代码为准，上方 warning 列的 10 项偏差全部按真实代码处理。**
 
-- [ ] **Step 2: 写失败测试（mock EmbedderClient）**
+- [ ] **Step 2: 提取 UUID 派生 helper**
+
+```python
+# app/nodes/_ids.py
+"""Shared ID helpers for @node functions."""
+import uuid
+
+def vector_id_for(message_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, message_id))
+```
+
+（测试放 `tests/nodes/test_ids.py`，非常轻。）
+
+- [ ] **Step 3: 写失败测试（mock EmbedderClient 的 dense/hybrid + image_client.download_image_as_base64 + permission check）**
+
+骨架如下，**具体字段按 T1.1 Message 实际定义 + 上方 warning #1 字段映射对齐**：
 
 ```python
 # tests/nodes/test_vectorize.py
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
+from app.agent.embedding import HybridEmbedding, SparseEmbedding
 from app.domain.message import Message
 from app.nodes.vectorize import vectorize
 
-@pytest.mark.asyncio
-async def test_vectorize_produces_fragment():
-    m = Message(message_id="m1", generation=0, chat_id="c1", persona_id="p1",
-                role="user", text="hello world", images=[], create_time=1)
-    with patch("app.nodes.vectorize.embedder.encode", new_callable=AsyncMock) as enc:
-        enc.side_effect = [
-            {"dense": [0.1]*1024, "sparse": {"indices": [1], "values": [0.5]}},
-            {"dense": [0.2]*1024},
-        ]
-        frag = await vectorize(m)
-    assert frag.fragment_id.startswith("m1")
-    assert len(frag.dense) == 1024
-    assert frag.payload["text"] == "hello world"
+def _hybrid(dense_val: float = 0.1) -> HybridEmbedding:
+    return HybridEmbedding(
+        dense=[dense_val] * 1024,
+        sparse=SparseEmbedding(indices=[1], values=[0.5]),
+    )
 
 @pytest.mark.asyncio
-async def test_vectorize_with_image():
-    m = Message(message_id="m2", generation=0, chat_id="c1", persona_id="p1",
-                role="user", text="see this", images=["https://x/a.jpg"], create_time=1)
-    with patch("app.nodes.vectorize.embedder.encode", new_callable=AsyncMock) as enc, \
-         patch("app.nodes.vectorize.download_image", new_callable=AsyncMock) as dl:
-        dl.return_value = b"imagebytes"
-        enc.side_effect = [{"dense":[0.1]*1024,"sparse":{"indices":[],"values":[]}},{"dense":[0.2]*1024}]
+async def test_vectorize_produces_fragment_text_only():
+    m = Message(...)  # T1.1 实际字段；text/images 若被 T1.1 重命名为 content/image_keys 则按那个
+    with patch("app.nodes.vectorize.embedder.hybrid", new_callable=AsyncMock, return_value=_hybrid()), \
+         patch("app.nodes.vectorize.embedder.dense", new_callable=AsyncMock, return_value=[0.2]*1024):
         frag = await vectorize(m)
-    dl.assert_awaited_once()
+    assert frag is not None
+    assert len(frag.dense) == 1024
+    assert "user_id" in frag.recall_payload   # warning #6
+
+@pytest.mark.asyncio
+async def test_vectorize_empty_content_returns_none():
+    m = Message(...)  # text 空 + images 空
+    with patch("app.nodes.vectorize.embedder.hybrid", new_callable=AsyncMock) as h:
+        frag = await vectorize(m)
+    assert frag is None
+    h.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_vectorize_with_image_permission_blocked():
+    m = Message(...)  # images 非空 + chat only_owner 场景
+    with patch("app.nodes.vectorize.find_group_download_permission",
+               new_callable=AsyncMock, return_value="only_owner"), \
+         patch("app.nodes.vectorize.image_client.download_image_as_base64",
+               new_callable=AsyncMock) as dl, \
+         patch("app.nodes.vectorize.embedder.hybrid", new_callable=AsyncMock, return_value=_hybrid()), \
+         patch("app.nodes.vectorize.embedder.dense", new_callable=AsyncMock, return_value=[0.2]*1024):
+        frag = await vectorize(m)
+    dl.assert_not_awaited()
+    assert frag is not None  # 有 text 的话继续，没 text 的话 None
 ```
 
-- [ ] **Step 3: 实现 vectorize.py（保留旧核心逻辑，只把依赖换成 capability）**
+- [ ] **Step 4: 实现 vectorize.py（遵循真实代码 + 上方 warning）**
 
 ```python
 # app/nodes/vectorize.py
 import asyncio
-from app.runtime.node import node
+import logging
+
+from app.agent.embedding import HybridEmbedding
 from app.capabilities.embed import EmbedderClient
-from app.domain.message import Message
 from app.domain.fragment import Fragment
+from app.domain.message import Message
+from app.nodes._ids import vector_id_for
+from app.runtime.node import node
 
-embedder = EmbedderClient()
+logger = logging.getLogger(__name__)
 
-# TODO: import real download_image / parse_content from existing modules
-from app.workers.vectorize import parse_content, download_image, build_embedding_instruction  # type: ignore
+embedder = EmbedderClient(model_id="embedding-model")
+
+# parse_content / InstructionBuilder / find_group_download_permission / image_client
+# 暂时从旧位置 import。Phase 1 尾部 T1.10 把 helpers 挪到 app/nodes/_helpers.py。
+from app.agent.content_parser import parse_content  # type: ignore
+from app.agent.instructions import InstructionBuilder  # type: ignore
+from app.data.session import get_session  # type: ignore
+from app.db.group_permissions import find_group_download_permission  # type: ignore
+from app.infra.image_client import image_client  # type: ignore
+
 
 @node
-async def vectorize(msg: Message) -> Fragment:
-    parsed = parse_content(msg.text)
-    images_bytes: list[bytes] = []
-    for url in msg.images:
-        try:
-            data = await download_image(url)
-            images_bytes.append(data)
-        except PermissionError:
-            return None  # gracefully skip; runtime drops None
-    instruction = build_embedding_instruction(msg.role, parsed)
-    hybrid_task = embedder.encode(parsed, images_bytes, mode="hybrid", instruction=instruction)
-    dense_task = embedder.encode(parsed, images_bytes, mode="dense", instruction=instruction)
-    hybrid, dense_cluster = await asyncio.gather(hybrid_task, dense_task)
+async def vectorize(msg: Message) -> Fragment | None:
+    """Lift ConversationMessage → Fragment. Returns None when skip applies.
+
+    Preserves 10 behavioral invariants from legacy vectorize_message — see plan
+    T1.3 warning. Summary: parse content, permission-check images, download
+    base64, run hybrid + cluster embeddings in parallel, pack dual payloads.
+    """
+    # TODO: 真实字段名以 T1.1 Message 为准（content vs text / image_keys vs images）
+    parsed = parse_content(msg.content)
+    text_content = parsed.render()
+    image_keys = parsed.image_keys
+
+    if not text_content and not image_keys:
+        logger.info("vectorize: message=%s empty, skip", msg.message_id)
+        return None
+
+    if image_keys:
+        async with get_session() as s:
+            perm = await find_group_download_permission(s, msg.chat_id)
+        if perm == "only_owner":
+            image_keys = []
+
+    image_base64_list: list[str] = []
+    if image_keys:
+        tasks = [
+            image_client.download_image_as_base64(key, msg.message_id, "chiwei")
+            for key in image_keys
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        image_base64_list = [r for r in results if isinstance(r, str) and r]
+
+    if not text_content and not image_base64_list:
+        logger.info("vectorize: message=%s text+images all empty/failed, skip", msg.message_id)
+        return None
+
+    modality = InstructionBuilder.detect_input_modality(text_content, image_base64_list)
+    corpus_instructions = InstructionBuilder.for_corpus(modality)
+    cluster_instructions = InstructionBuilder.for_cluster(
+        target_modality=modality,
+        instruction="Retrieve semantically similar content",
+    )
+
+    hybrid_emb, cluster_dense = await asyncio.gather(
+        embedder.hybrid(
+            text=text_content or None,
+            image_base64_list=image_base64_list or None,
+            instructions=corpus_instructions,
+        ),
+        embedder.dense(
+            text=text_content or None,
+            image_base64_list=image_base64_list or None,
+            instructions=cluster_instructions,
+        ),
+    )
+
+    vector_id = vector_id_for(msg.message_id)
     return Fragment(
-        fragment_id=f"{msg.message_id}:0",
+        fragment_id=vector_id,
         message_id=msg.message_id,
         chat_id=msg.chat_id,
-        dense=hybrid["dense"],
-        sparse=hybrid["sparse"],
-        dense_cluster=dense_cluster["dense"],
-        payload={
-            "text": parsed, "role": msg.role, "persona_id": msg.persona_id,
-            "create_time": msg.create_time,
+        dense=hybrid_emb.dense,
+        sparse={"indices": hybrid_emb.sparse.indices, "values": hybrid_emb.sparse.values},
+        dense_cluster=cluster_dense,
+        recall_payload={
+            "message_id": msg.message_id,
+            "user_id": getattr(msg, "user_id", ""),
+            "chat_id": msg.chat_id,
+            "timestamp": msg.create_time,
+            "root_message_id": getattr(msg, "root_message_id", ""),
+            "original_text": text_content,
+        },
+        cluster_payload={
+            "message_id": msg.message_id,
+            "user_id": getattr(msg, "user_id", ""),
+            "chat_id": msg.chat_id,
+            "timestamp": msg.create_time,
         },
     )
 ```
 
-**注意**：`parse_content` / `download_image` / `build_embedding_instruction` 暂时从旧 `workers/vectorize.py` 直接 import（Phase 1 尾部把这些函数挪到 `app/nodes/_vectorize_helpers.py`，把旧文件清空）。
+**注意**：
+- `Fragment` 的字段 `recall_payload` / `cluster_payload` 要在 T1.2 Fragment 里加上（T1.2 pending，本 task 合入或先在 T1.2 补齐）。原 plan T1.2 只有一个 `payload: dict`，按 warning #6 要拆。
+- `vector_status` 写回在**下一个 @node**（一次 emit 一次 UPDATE）还是**本 @node 末尾**？建议本 @node 末尾，原因见 warning 尾部"运行时/架构建议"。如果本 task 不加写回，单独在 T1.4 结束时做。
 
-- [ ] **Step 4: 测试通过**
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 测试通过**
 
 ```bash
-git commit -m "feat(nodes): vectorize Node (Message -> Fragment via EmbedderClient)"
+cd apps/agent-service && uv run pytest tests/nodes/test_vectorize.py tests/nodes/test_ids.py -v
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git commit -m "feat(nodes): vectorize @node (Message -> Fragment via EmbedderClient, dual-payload)"
 ```
 
 ---
 
-### Task 1.4: save_fragment Node（写 qdrant）
+### Task 1.4: save_fragment Node（写 qdrant）+ VectorStore dense-only F 扩展
+
+> **⚠️ API gap（2026-04-23 paper-read 发现）**：
+> 1. `VectorStore.upsert` 当前签名是 `upsert(point_id, embedding: HybridEmbedding, payload)`，**只支持 hybrid**。cluster collection 需要纯 dense upsert（旧代码用 `qdrant.upsert_vectors`，不是 `upsert_hybrid_vectors`）。
+> 2. 本 task 顺手给 `VectorStore` 加 `upsert_dense(point_id, dense: list[float], payload)` 方法（F 扩展，测试放 `tests/capabilities/test_vector_store.py`）。
+> 3. hybrid 调用侧要把 Fragment 的 `dense` + `sparse dict` 重新包成 `HybridEmbedding` 对象（`VectorStore.upsert` 只收对象不收 dict）。
 
 **Files:**
+- Modify: `apps/agent-service/app/capabilities/vector_store.py`（加 `upsert_dense`）
+- Modify: `apps/agent-service/tests/capabilities/test_vector_store.py`（新增 dense-only 用例）
 - Create: `apps/agent-service/app/nodes/save_fragment.py`
 - Test: `apps/agent-service/tests/nodes/test_save_fragment.py`
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 给 `VectorStore` 加 `upsert_dense`（F 扩展）**
+
+```python
+# app/capabilities/vector_store.py  (append)
+async def upsert_dense(
+    self,
+    point_id: str,
+    dense: list[float],
+    payload: dict[str, Any],
+) -> bool:
+    return await qdrant.upsert_vectors(
+        collection=self._collection,
+        vectors=[dense],
+        ids=[point_id],
+        payloads=[payload],
+    )
+```
+
+测试：mock `qdrant.upsert_vectors` 验证它被 `await` 一次、参数正确。
+
+- [ ] **Step 2: 写 save_fragment 失败测试**
 
 ```python
 # tests/nodes/test_save_fragment.py
 import pytest
 from unittest.mock import AsyncMock, patch
+
 from app.domain.fragment import Fragment
 from app.nodes.save_fragment import save_fragment
 
+
 @pytest.mark.asyncio
-async def test_save_fragment_upserts_to_both_collections():
-    f = Fragment(fragment_id="m1:0", message_id="m1", chat_id="c1",
-                 dense=[0.1]*1024, sparse={"indices": [1], "values": [0.5]},
-                 dense_cluster=[0.2]*1024, payload={"text": "hi"})
+async def test_save_fragment_upserts_both_collections_with_correct_payloads():
+    f = Fragment(
+        fragment_id="c9d05a5e-...",  # UUID5 str
+        message_id="m1",
+        chat_id="c1",
+        dense=[0.1] * 1024,
+        sparse={"indices": [1], "values": [0.5]},
+        dense_cluster=[0.2] * 1024,
+        recall_payload={
+            "message_id": "m1", "user_id": "u1", "chat_id": "c1",
+            "timestamp": 1, "root_message_id": "r1", "original_text": "hi",
+        },
+        cluster_payload={
+            "message_id": "m1", "user_id": "u1", "chat_id": "c1", "timestamp": 1,
+        },
+    )
     with patch("app.nodes.save_fragment.recall_store.upsert", new_callable=AsyncMock) as r, \
-         patch("app.nodes.save_fragment.cluster_store.upsert", new_callable=AsyncMock) as c:
+         patch("app.nodes.save_fragment.cluster_store.upsert_dense", new_callable=AsyncMock) as c:
         await save_fragment(f)
+
     r.assert_awaited_once()
-    c.assert_awaited_once()
+    # recall 用 hybrid upsert，第二参是 HybridEmbedding 对象
+    _, hyb, payload_r = r.await_args.args
+    assert hyb.dense == f.dense
+    assert hyb.sparse.indices == [1]
+    assert "original_text" in payload_r
+
+    c.assert_awaited_once_with(f.fragment_id, f.dense_cluster, f.cluster_payload)
 ```
 
-- [ ] **Step 2: 实现 save_fragment.py**
+- [ ] **Step 3: 实现 save_fragment.py**
 
 ```python
 # app/nodes/save_fragment.py
-from app.runtime.node import node
+"""Persist a Fragment into qdrant: hybrid -> messages_recall, dense -> messages_cluster.
+
+Both upserts run concurrently. Partial failure raises (nack + retry at durable
+boundary) so we never have half-populated fragments across collections — the
+failed side will be retried, the other side simply re-upserts (qdrant upsert
+is idempotent per point_id).
+"""
+from __future__ import annotations
+
+import asyncio
+
+from app.agent.embedding import HybridEmbedding, SparseEmbedding
 from app.capabilities.vector_store import VectorStore
 from app.domain.fragment import Fragment
+from app.runtime.node import node
 
 recall_store = VectorStore("messages_recall")
 cluster_store = VectorStore("messages_cluster")
 
+
 @node
 async def save_fragment(frag: Fragment) -> None:
-    await recall_store.upsert(
-        frag.fragment_id,
-        {"dense": frag.dense, "sparse": frag.sparse},
-        frag.payload,
+    hybrid = HybridEmbedding(
+        dense=frag.dense,
+        sparse=SparseEmbedding(
+            indices=frag.sparse["indices"],
+            values=frag.sparse["values"],
+        ),
     )
-    await cluster_store.upsert(
-        frag.fragment_id,
-        {"dense": frag.dense_cluster},
-        frag.payload,
+    await asyncio.gather(
+        recall_store.upsert(frag.fragment_id, hybrid, frag.recall_payload),
+        cluster_store.upsert_dense(frag.fragment_id, frag.dense_cluster, frag.cluster_payload),
     )
 ```
 
-- [ ] **Step 3: 测试通过**
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: 测试通过**
 
 ```bash
-git commit -m "feat(nodes): save_fragment Node (Fragment -> qdrant recall + cluster)"
+cd apps/agent-service && uv run pytest \
+    tests/capabilities/test_vector_store.py \
+    tests/nodes/test_save_fragment.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git commit -m "feat(nodes+capabilities): save_fragment @node + VectorStore.upsert_dense"
 ```
 
 ---
 
-### Task 1.5: wiring/memory.py + deployment.py
+### Task 1.4.5: engine.py MQSource `_source_loop_mq`（F 层扩展，2026-04-24 加）
+
+> **背景（为何 post-hoc 加这个任务）**：T1.7 paper-read 后发现 agent-service 内只有 `proactive.py:128` 一处写 `conversation_messages`，飞书 chat 主链路的 CM 写入在 **lark-server (TypeScript)**，Python Bridge 够不到。要做 Phase 1 的闭环（T1.10 删老 worker），必须让 agent-service 从老 `vectorize` 队列**消费**，而不是指望外部写入点全部迁移到 Bridge。
+>
+> `Source.mq(queue)` DSL 早在 T0 就有（`app/runtime/source.py`），但 `engine.py` 只实现了 cron/interval，MQ 是缺的。本任务补齐。
 
 **Files:**
+- Modify: `apps/agent-service/app/runtime/engine.py` — 加 `_source_loop_mq`
+- Test: `apps/agent-service/tests/runtime/test_source_mq.py`
+
+**协议约定（与老 lark-server publisher 对齐）**：
+
+- 队列 body 是 JSON：`{"message_id": "<id>"}`（老 `handle_vectorize` 消费契约，见 `app/workers/vectorize.py::handle_vectorize`）
+- MQSource 的 wire target **必须是一个 @node**，signature 为 `(req: XxxRequest) -> Xxx`，其中 `XxxRequest` 是 1 字段 Data 类（后面 T1.5 会定 `MessageRequest(message_id: str)`）
+- engine 把 decoded JSON 直接传给 `XxxRequest(**body)` 构造，失败（ValidationError）→ nack + DLQ 日志
+
+**行为约束：**
+
+1. 订阅时 `prefetch_count = 10`（旧 worker 的 semaphore(10) 迁移到 broker 层背压，不在 @node 层加）
+2. **被动获取队列**：`channel.get_queue(name)` —— 队列 topology 由 publisher（lark-server）或 `app/infra/rabbitmq.py::declare_topology` 持有。**不要**自己 `declare_queue(durable=True)`：lane/prod 队列带 DLX + TTL + x-expires 等 args（见 `_build_queue_args`），用不一致的 args 重新声明会 `PRECONDITION_FAILED`。和 `mq.consume()` 内部的做法一致
+3. 每条消息 `process(requeue=False)`（与 `app/runtime/durable.py` 和老 `handle_vectorize` 一致；失败消息走 DLX 由 infra 层的 delayed-retry / DLX 机制处理，避免 poison loop）
+4. Graceful shutdown：engine stop 时取消消费,等待正在处理的 callbacks 完成再断开 connection
+5. Trace/lane context：读 aio-pika headers 里的 `x-trace-id` / `x-lane` 注入 context（复用 T0.11 durable 边的 header 协议）
+6. 没有 lane 概念时走 `current_lane()` 默认值
+
+- [ ] **Step 1: 读 T0.11 durable 边 consumer 实现作为模板**
+
+```bash
+grep -n "async def\|lane_queue\|prefetch_count\|process(requeue" apps/agent-service/app/runtime/durable.py
+sed -n '1,50p' apps/agent-service/app/runtime/durable.py
+```
+
+T0.11 durable consumer 已经实现了 "RabbitMQ 消费 + trace/lane context + ack/nack" 的模式，MQSource 直接参照，但两点不同：
+- durable consumer 消费的是 wire 自动声明的 `data_<cls>_v<N>` 队列；MQSource 消费**外部指定**队列（`queue` 参数，如 `"vectorize"`）
+- durable consumer decode 成 Data class；MQSource decode 成 `req_cls(**json)`（`req_cls` 由 wire target @node 签名反射得到）
+
+- [ ] **Step 2: 写失败测试（testcontainers rabbitmq）**
+
+```python
+# tests/runtime/test_source_mq.py
+import asyncio
+import json
+import pytest
+from app.runtime.data import Data, Key
+from app.runtime.node import node
+from app.runtime.wire import wire, clear_wiring
+from app.runtime.source import Source
+from app.runtime.engine import Runtime
+from typing import Annotated
+
+
+class _Req(Data):
+    message_id: Annotated[str, Key]
+    class Meta:
+        transient = True
+
+
+@pytest.mark.asyncio
+async def test_mq_source_consumes_and_invokes_node(rabbitmq, _queue_pub):
+    received = []
+
+    @node
+    async def ingest(req: _Req) -> None:
+        received.append(req.message_id)
+
+    clear_wiring()
+    wire(_Req).to(ingest).from_(Source.mq("test_q"))
+    # (from_source is the wiring DSL for binding a Source to a wire target.
+    # If T0.15 didn't add it, this task may need to extend wire.py too — verify first.)
+
+    rt = Runtime()
+    task = asyncio.create_task(rt.run())
+    try:
+        await _queue_pub("test_q", json.dumps({"message_id": "m1"}))
+        await _queue_pub("test_q", json.dumps({"message_id": "m2"}))
+        # give engine a beat to dispatch
+        for _ in range(50):
+            if len(received) >= 2:
+                break
+            await asyncio.sleep(0.1)
+        assert sorted(received) == ["m1", "m2"]
+    finally:
+        rt.stop()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_mq_source_decode_failure_does_not_crash_loop(rabbitmq, _queue_pub, caplog):
+    @node
+    async def ingest(req: _Req) -> None: ...
+
+    clear_wiring()
+    wire(_Req).to(ingest).from_(Source.mq("test_q_bad"))
+
+    rt = Runtime()
+    task = asyncio.create_task(rt.run())
+    try:
+        await _queue_pub("test_q_bad", "not json")
+        await _queue_pub("test_q_bad", json.dumps({"message_id": "m_ok"}))
+        await asyncio.sleep(1.0)
+        # bad message nack'd; good message processed
+    finally:
+        rt.stop()
+        await task
+```
+
+（`_queue_pub` 是需要加的 fixture：给定 rabbitmq url + queue name + body，publish 一条。放 `tests/runtime/conftest.py`。）
+
+> **先验证：T0.15 wire DSL 有没有 `.from_()`？** 没有的话这步要先扩 wire.py。找旧代码里 Source 怎么绑定的 —— T0.15/T0.16 的 HTTP source 注册机制是 `register_http_sources(app)` 用 `WIRING_REGISTRY` 查出带 HTTP source 的 wire，说明 wire 里应该已经能登记 source。如果只支持 http/cron/interval 不支持 mq，先把 `from_source` 或等价方法扩到支持 mq kind。
+
+- [ ] **Step 3: 实现 `_source_loop_mq`**
+
+核心骨架（伪代码，真 API 以 aio-pika + 已有 durable.py 为准）：
+
+```python
+async def _source_loop_mq(self, w: WireSpec, src: SourceSpec) -> None:
+    from app.infra.rabbitmq import mq, current_lane, lane_queue
+    from app.runtime.node import inputs_of
+
+    target = w.consumers[0]  # MQ source 对应的 wire 必须只有 1 consumer（反射期校验）
+    ins = inputs_of(target)
+    assert len(ins) == 1, f"MQ source target {target.__name__} must take exactly 1 Data arg"
+    (_, req_cls), = ins.items()
+
+    queue_name = src.params["queue"]
+    # 与老 handle_vectorize 行为对齐：lane_queue 适配（每个 lane 独立队列）
+    actual_queue = lane_queue(queue_name)
+
+    await mq.connect()
+    channel = await mq.channel()
+    await channel.set_qos(prefetch_count=10)
+    queue = await channel.declare_queue(actual_queue, durable=True)
+
+    async with queue.iterator() as qit:
+        async for incoming in qit:
+            async with incoming.process(requeue=False):
+                # inject trace/lane context (见 durable.py)
+                try:
+                    body = json.loads(incoming.body.decode())
+                    req = req_cls(**body)
+                except (json.JSONDecodeError, ValidationError) as e:
+                    logger.warning("MQSource %s decode failed: %s body=%r", queue_name, e, incoming.body[:200])
+                    # 不 raise；`process(requeue=False)` 把这条 ack 掉（不会 requeue）
+                    continue
+                await target(req)
+```
+
+**细节**：
+- `process(requeue=False)`：decode 失败**不 raise**(log + continue,消息被 ack 丢弃,避免死循环);业务失败(target 抛异常)走 DLX,由 `app/infra/rabbitmq.py` 的 delayed-retry + DLX 机制处理重试。和 `durable.py` 行为完全对齐。
+- prefetch_count=10 对应老 semaphore。
+- 如果 queue 不存在，`declare_queue(durable=True)` 会自动创建；这跟 lark-server 的 publish 端声明一致不会冲突。
+- 注意现有 `lane_queue` 的语义：如果 `current_lane()` 是 prod 返回 `queue_name`，其他 lane 返回 `queue_name_<lane>`。和 durable 边的队列命名保持一致。
+
+- [ ] **Step 4: 在 `Runtime.run()` dispatcher 里加 `kind == "mq"` 分支**
+
+```bash
+grep -n "src.kind ==" apps/agent-service/app/runtime/engine.py
+```
+
+当前 dispatcher 在 `cron` / `interval` 之间 if/elif。加 `elif src.kind == "mq": task = asyncio.create_task(self._source_loop_mq(w, src))`。
+
+- [ ] **Step 5: 测试通过**
+
+```bash
+cd apps/agent-service && uv run pytest tests/runtime/test_source_mq.py -v
+```
+
+- [ ] **Step 6: 跑全量回归**
+
+```bash
+cd apps/agent-service && uv run pytest
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git commit -m "feat(runtime): MQSource engine loop — consume RabbitMQ queues into @node"
+```
+
+---
+
+### Task 1.5: wiring/memory.py + deployment.py + runtime_entry 激活
+
+> **改动说明（2026-04-24 闭环改造）**：
+> 1. 原 plan 用 `from app.runtime.placement import _BINDINGS` 读私有成员。T0.15 code-review 修复已加 `iter_bindings()` 公开 API，测试改用公开接口。
+> 2. 补一步关键步骤：更新 `app/workers/runtime_entry.py` 追加 `import app.wiring; import app.deployment`，否则 T1.6 改完 PaaS command 部署，Runtime 启动不会加载任何 wire/binding。T0.15 完成时 runtime_entry 是 stub，此处才真正"激活"。
+> 3. **闭环入口扩充（2026-04-24）**：原 plan 只 wire `Message -> vectorize.durable()`，默认假设所有 CM 写入点都能调 Bridge。T1.7 发现 chat 主链路 CM 写入在 lark-server (TS)，够不到 Python Bridge。引入**两条入口**：
+>    - `proactive.py` 走 Bridge（T1.2.5 已实现）→ emit Message → durable 边 → vectorize
+>    - lark-server 继续 publish 老 `vectorize` 队列 → MQSource 消费 → `hydrate_message` @node → Message → durable 边 → vectorize
+>    两路在 Message durable 边汇合，然后走同一个 vectorize @node。lark-server 一行 TS 都不用改。
+
+**Files:**
+- Create: `apps/agent-service/app/domain/message_request.py` — `MessageRequest` Data（MQ 入口的 1 字段请求类型）
+- Create: `apps/agent-service/app/nodes/hydrate_message.py` — `hydrate_message(req: MessageRequest) -> Message | None`
 - Create: `apps/agent-service/app/wiring/__init__.py`
 - Create: `apps/agent-service/app/wiring/memory.py`
 - Create: `apps/agent-service/app/deployment.py`
+- Modify: `apps/agent-service/app/workers/runtime_entry.py`（追加 wiring + deployment import）
+- Modify: `apps/agent-service/app/domain/__init__.py`（export MessageRequest）
+- Modify: `apps/agent-service/app/nodes/__init__.py`（export hydrate_message）
+- Test: `apps/agent-service/tests/domain/test_message_request.py`
+- Test: `apps/agent-service/tests/nodes/test_hydrate_message.py`
 - Test: `apps/agent-service/tests/wiring/test_memory.py`
 
-- [ ] **Step 1: 写失败测试（验证 wiring 注册 + 图可 compile）**
+**图拓扑（最终形态）**：
 
-```python
-# tests/wiring/test_memory.py
-import importlib
-from app.runtime.wire import WIRING_REGISTRY, clear_wiring
-from app.runtime.placement import _BINDINGS, clear_bindings
-from app.runtime.graph import compile_graph
-
-def test_wiring_memory_registers_expected_edges():
-    clear_wiring(); clear_bindings()
-    import app.wiring.memory  # noqa
-    import app.deployment  # noqa
-    from app.domain.message import Message
-    from app.domain.fragment import Fragment
-    msg_wires = [w for w in WIRING_REGISTRY if w.data_type is Message]
-    frag_wires = [w for w in WIRING_REGISTRY if w.data_type is Fragment]
-    assert any(w.durable and any(c.__name__ == "vectorize" for c in w.consumers) for w in msg_wires)
-    assert any(any(c.__name__ == "save_fragment" for c in w.consumers) for w in frag_wires)
-
-def test_bindings_set():
-    from app.nodes.vectorize import vectorize
-    from app.nodes.save_fragment import save_fragment
-    assert _BINDINGS[vectorize] == "vectorize-worker"
-    assert _BINDINGS[save_fragment] == "vectorize-worker"
-
-def test_compile_succeeds():
-    compile_graph()
+```
+    Source.mq("vectorize")         (lark-server publish path)
+              │ {"message_id": X}
+              ▼
+     hydrate_message(req)          fetch CM from pg, construct Message
+              │                    returns None if not found → drop
+              ▼
+          Message ───────┐
+                         │   （也可以从 Bridge 进入：proactive.py → emit_legacy_message）
+                         │
+                   durable 边（RabbitMQ "message" 队列）
+                         │
+                         ▼
+                      vectorize(msg)
+                         │
+                      Fragment | None
+                         │
+                         ▼
+                   save_fragment(frag)   (transient; in-process)
+                         │
+                         ▼
+                   qdrant upsert
 ```
 
-- [ ] **Step 2: 实现 wiring/memory.py**
+- [ ] **Step 1: `MessageRequest` Data 类**
+
+```python
+# app/domain/message_request.py
+"""MessageRequest: MQ 入口的请求体 Data。
+
+`Source.mq("vectorize")` 消费老队列 body `{"message_id": X}`，engine
+层 decode 成 `MessageRequest(message_id=X)` 交给 `hydrate_message` @node。
+"""
+from __future__ import annotations
+from typing import Annotated
+from app.runtime.data import Data, Key
+
+
+class MessageRequest(Data):
+    message_id: Annotated[str, Key]
+
+    class Meta:
+        transient = True  # 不落 pg
+```
+
+测试（`tests/domain/test_message_request.py`）：确认 transient + Key 元数据生效即可，~5 行。
+
+- [ ] **Step 2: `hydrate_message` @node**
+
+```python
+# app/nodes/hydrate_message.py
+"""Fetch a ConversationMessage by id, lift to Message Data.
+
+MQ 入口 @node：消费 MessageRequest（从 Source.mq 来），查 pg，
+构造 Message 交给下游 vectorize。行为和 T1.2.5 `emit_legacy_message`
+一致（字段 1:1 pass-through），只是触发源不同。
+"""
+from __future__ import annotations
+import logging
+from app.data.queries import find_message_by_id
+from app.data.session import get_session
+from app.domain.message import Message
+from app.domain.message_request import MessageRequest
+from app.runtime.node import node
+
+logger = logging.getLogger(__name__)
+
+
+@node
+async def hydrate_message(req: MessageRequest) -> Message | None:
+    async with get_session() as s:
+        cm = await find_message_by_id(s, req.message_id)
+    if cm is None:
+        logger.warning("hydrate_message: message_id=%s not found, drop", req.message_id)
+        return None
+    return Message(
+        message_id=cm.message_id,
+        user_id=cm.user_id,
+        content=cm.content,
+        role=cm.role,
+        root_message_id=cm.root_message_id,
+        reply_message_id=cm.reply_message_id,
+        chat_id=cm.chat_id,
+        chat_type=cm.chat_type,
+        create_time=cm.create_time,
+        message_type=cm.message_type,
+        vector_status=cm.vector_status,
+        bot_name=cm.bot_name,
+        response_id=cm.response_id,
+    )
+```
+
+> **提醒**：字段映射和 `app/bridges/message_bridge.py::emit_legacy_message` 完全一样。DRY 考虑可以抽一个 `Message.from_cm(cm)` 类方法（放 `app/domain/message.py`），本 @node 和 bridge 都复用。取决于 implementer 判断是否现在做抽象。
+
+测试（`tests/nodes/test_hydrate_message.py`）：
+- `test_hydrates_existing_message`：mock `find_message_by_id` 返回假 CM → 断言 Message 字段
+- `test_missing_message_returns_none`：mock 返回 None → 断言 None
+
+- [ ] **Step 3: `wiring/memory.py`**
 
 ```python
 # app/wiring/memory.py
+"""Message-pipeline wiring: MQ entry → hydrate → vectorize → save.
+
+Two entry points, one pipeline:
+- Source.mq("vectorize") feeds hydrate_message (lark-server publisher path)
+- emit_legacy_message() inside proactive.py feeds the Message durable edge directly (Bridge path)
+
+Both converge on the Message durable wire, then vectorize → Fragment → save_fragment.
+"""
 from app.runtime.wire import wire
+from app.runtime.source import Source
 from app.domain.message import Message
+from app.domain.message_request import MessageRequest
 from app.domain.fragment import Fragment
+from app.nodes.hydrate_message import hydrate_message
 from app.nodes.vectorize import vectorize
 from app.nodes.save_fragment import save_fragment
 
-# Message durable -> vectorize (Phase 1 cutover target)
+# MQ entry: lark-server publishes {"message_id": X} to "vectorize" queue
+wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
+
+# Message durable -> vectorize (both entry paths converge here)
 wire(Message).to(vectorize).durable()
 
 # Fragment -> save_fragment (in-process within vectorize-worker)
 wire(Fragment).to(save_fragment)
 ```
 
-- [ ] **Step 3: 实现 wiring/__init__.py**
+> **前置依赖**：`wire(...).from_(...)` 的 DSL —— T0.15/T0.16 已为 HTTP/cron/interval source 加过；T1.4.5 会补齐 mq kind 的 engine 支持，`from_source` 本身 DSL 应该统一（如果没统一，T1.4.5 需要先补齐）。
+
+- [ ] **Step 4: `wiring/__init__.py`**
 
 ```python
 # app/wiring/__init__.py
@@ -2487,7 +3117,7 @@ wire(Fragment).to(save_fragment)
 from app.wiring import memory  # noqa: F401
 ```
 
-- [ ] **Step 4: 实现 deployment.py**
+- [ ] **Step 5: `deployment.py`**
 
 ```python
 # app/deployment.py
@@ -2497,19 +3127,129 @@ Every Node not bound here defaults to the "agent-service" (main HTTP) app.
 App names must already exist in PaaS (create via /api/paas/apps/ before binding).
 """
 from app.runtime.placement import bind
+from app.nodes.hydrate_message import hydrate_message
 from app.nodes.vectorize import vectorize
 from app.nodes.save_fragment import save_fragment
 
+bind(hydrate_message).to_app("vectorize-worker")
 bind(vectorize).to_app("vectorize-worker")
 bind(save_fragment).to_app("vectorize-worker")
 ```
 
-- [ ] **Step 5: 测试通过**
+- [ ] **Step 6: `tests/wiring/test_memory.py`**
 
-- [ ] **Step 6: Commit**
+```python
+import pytest
+from app.runtime.wire import WIRING_REGISTRY, clear_wiring
+from app.runtime.placement import iter_bindings, clear_bindings
+from app.runtime.graph import compile_graph
+
+
+def _fresh_import():
+    clear_wiring(); clear_bindings()
+    import importlib, app.wiring.memory as m, app.deployment as d
+    importlib.reload(m); importlib.reload(d)
+
+
+def test_mq_entry_wired_to_hydrate():
+    _fresh_import()
+    from app.domain.message_request import MessageRequest
+    from app.nodes.hydrate_message import hydrate_message
+    wires = [w for w in WIRING_REGISTRY if w.data_type is MessageRequest]
+    assert any(hydrate_message in w.consumers and any(s.kind == "mq" for s in w.sources) for w in wires)
+
+
+def test_message_durable_to_vectorize():
+    _fresh_import()
+    from app.domain.message import Message
+    from app.nodes.vectorize import vectorize
+    wires = [w for w in WIRING_REGISTRY if w.data_type is Message]
+    assert any(w.durable and vectorize in w.consumers for w in wires)
+
+
+def test_fragment_to_save_fragment():
+    _fresh_import()
+    from app.domain.fragment import Fragment
+    from app.nodes.save_fragment import save_fragment
+    wires = [w for w in WIRING_REGISTRY if w.data_type is Fragment]
+    assert any(save_fragment in w.consumers for w in wires)
+
+
+def test_bindings_set():
+    _fresh_import()
+    from app.nodes.hydrate_message import hydrate_message
+    from app.nodes.vectorize import vectorize
+    from app.nodes.save_fragment import save_fragment
+    b = dict(iter_bindings())
+    assert b[hydrate_message] == "vectorize-worker"
+    assert b[vectorize] == "vectorize-worker"
+    assert b[save_fragment] == "vectorize-worker"
+
+
+def test_compile_succeeds():
+    _fresh_import()
+    compile_graph()
+```
+
+- [ ] **Step 7: 激活 runtime_entry.py（本 task 的关键步骤）**
+
+修改 `app/workers/runtime_entry.py`，在 `main()` 调 `Runtime().run()` 之前确保 wiring 和 deployment 都被 import：
+
+```python
+# app/workers/runtime_entry.py
+"""Unified worker entry. All runtime-managed apps boot through here.
+
+The `import app.wiring` and `import app.deployment` lines are side-effect
+imports — they trigger `wire(...)` calls and `bind(...)` calls that register
+the graph before Runtime reads it. Without these imports, Runtime starts with
+an empty graph.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import app.wiring  # noqa: F401 — side-effect: register wires
+import app.deployment  # noqa: F401 — side-effect: register bindings
+
+from app.runtime.engine import Runtime
+
+
+async def _main() -> None:
+    await Runtime().run()
+
+
+def main() -> None:
+    asyncio.run(_main())
+
+
+if __name__ == "__main__":
+    main()
+```
+
+（如果 T0.15 完成时 `runtime_entry.py` 已有 `main()`，保留原结构，只追加两行 side-effect import。）
+
+- [ ] **Step 8: 测试通过**
 
 ```bash
-git commit -m "feat(wiring): memory.py + deployment.py for vectorize pipeline"
+cd apps/agent-service && uv run pytest tests/domain/test_message_request.py tests/nodes/test_hydrate_message.py tests/wiring/test_memory.py -v
+```
+
+额外 smoke check：直接 import runtime_entry 不报错：
+
+```bash
+cd apps/agent-service && uv run python -c "import app.workers.runtime_entry; print('runtime_entry imports clean')"
+```
+
+再跑一遍全量：
+
+```bash
+cd apps/agent-service && uv run pytest
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git commit -m "feat(wiring): MQ entry + durable Message + save_fragment pipeline (vectorize-worker)"
 ```
 
 ---
@@ -2547,29 +3287,45 @@ curl -s -H "Authorization: Bearer $PAAS_TOKEN" "$PAAS_API/api/paas/apps/vectoriz
 
 确认 `command` 已更新。
 
-- [ ] **Step 4: 不部署。先让下一个 Task 把 Legacy Bridge 接完、存量脚本写完，再一次性部署泳道验证。**
+- [ ] **Step 4: 不部署。先让下一个 Task 把 Message Bridge 接完、存量脚本写完，再一次性部署泳道验证。**
 
 ---
 
-### Task 1.7: 接入 LegacyMessageBridge（老代码写入点加 emit）
+### Task 1.7: 接入 Message Bridge（老代码写入点加 emit）
 
 **Files:**
-- Modify: `apps/agent-service/app/life/proactive.py:142`
-- （如有其他写入点也一并改——grep 验证）
+- Modify: `apps/agent-service/app/life/proactive.py:142`（起点；完整清单以 Step 1 grep 为准）
+- Modify: 所有其他 `ConversationMessage` 写入点
 - Test: integration test in 泳道（无单元测试，老代码链太重）
 
-- [ ] **Step 1: grep 所有写 `conversation_messages` 的点**
+- [ ] **Step 1: 穷举所有写 `conversation_messages` 的点**
+
+用下面三条 grep **并集**（单一模式会漏），把每个命中（排除 tests/）列入临时清单：
 
 ```bash
-grep -rn "session.add.*ConversationMessage\|ConversationMessage(.*)" apps/agent-service/app/ --include="*.py" | grep -v "_test\|tests/"
+# 1) ORM 构造（可能立刻 session.add，也可能赋给变量稍后 add）
+grep -rnE "ConversationMessage\s*\(" apps/agent-service/app/ --include="*.py" \
+  | grep -v "tests/\|_test\.py"
+
+# 2) session.add(...) 收口（用于确认 add() 调用点；对照 1) 的结果）
+grep -rnE "session\.add\(|\.add\(.*\bconv" apps/agent-service/app/ --include="*.py" \
+  | grep -v "tests/\|_test\.py"
+
+# 3) bulk / merge / upsert 路径（防止 session.add 以外的写法遗漏）
+grep -rnE "session\.(add_all|merge)\(|INSERT INTO conversation_messages|ON CONFLICT.*conversation_messages" \
+  apps/agent-service/app/ --include="*.py" | grep -v "tests/\|_test\.py"
 ```
 
-把每个 hit 列进一张临时清单。预期包括：
-- `app/life/proactive.py:142`
-- chat pipeline 主写入点（读 `app/chat/` 下代码确认具体行号）
-- 其他 producer（read/afterthought 等如有）
+**必须把三条 grep 的结果交叉比对**，对每个 `ConversationMessage(...)` 构造点追到它的 commit 路径（add + commit、或 add_all + commit、或裸 SQL）。清单至少应覆盖：
 
-- [ ] **Step 2: 在每个写入点下面加一行 emit_legacy_message**
+- `app/life/proactive.py`
+- chat pipeline 主写入点（在 `app/chat/` 下）
+- read 路径（`app/read/` 或类似；paper-read 阶段遗漏的点）
+- afterthought / rebuild 路径（如有）
+
+把清单写入 `/tmp/cm_write_sites.md` 供下一步逐个修改。
+
+- [ ] **Step 2: 在每个写入点的"commit 后"加 emit**
 
 每处改动的 pattern：
 
@@ -2581,15 +3337,26 @@ await session.commit()
 # After
 session.add(conv_msg)
 await session.commit()
-from app.runtime.legacy_bridge import emit_legacy_message  # local import to avoid boot-time cycles
+from app.bridges.message_bridge import emit_legacy_message  # local import to avoid boot-time cycles
 await emit_legacy_message(conv_msg)
 ```
 
+**关键细节**：
+- `emit` 必须在 `commit()` **之后**，否则 Message 发出后 Node 去查 pg 可能查不到（读到未提交的行为 pg 默认 READ COMMITTED 隔离下不会发生，但 emit→durable→消费端可能跨事务）。
+- `add_all([m1, m2, ...])` 场景：对列表里**每条** Message 都调一次 `emit_legacy_message`，不能合并。
+- 裸 SQL 写路径（如果有）：先把裸 SQL 改成 ORM，再加 emit；ORM 化比 emit 优先。
+
 - [ ] **Step 3: 跑 unit tests 确保没回归**
 
-`cd apps/agent-service && uv run pytest`
+```bash
+cd apps/agent-service && uv run pytest
+```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: grep 验证清单全覆盖**
+
+重跑 Step 1 的三条 grep，对每个 `ConversationMessage(...)` 构造点确认紧随的 commit 路径后都有 `emit_legacy_message`。如果遗漏，补上。
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git commit -m "feat(bridge): emit_legacy_message() at every ConversationMessage write site"
@@ -2597,14 +3364,18 @@ git commit -m "feat(bridge): emit_legacy_message() at every ConversationMessage 
 
 ---
 
-### Task 1.8: 存量回扫脚本
+### ~~Task 1.8: 存量回扫脚本~~ **SKIPPED (2026-04-24)**
+
+> **跳过原因**：bezhai 2026-04-24 明确"不需要关注历史消息,直接用 MQ"。lark-server 的新消息会继续 publish 到 `vectorize` 队列,Phase 1 上线后由新 MQSource 消费;历史 `vector_status=pending` 的行被**视作过期数据不再处理**(也不再扫)。
+>
+> `vector_status` 字段在新架构下没有写回维护者(T1.3 决定不在 @node 里写),本任务原本用它做扫描谓词,现在这个谓词本身没意义。T1.10 会把 `vector_status` 字段一并退役。
+>
+> 以下内容保留作为历史参考,不执行。
 
 **Files:**
-- Create (tmp, do NOT commit to repo): `/tmp/backfill_vectorize.py`
+- ~~Create (tmp, do NOT commit to repo): `/tmp/backfill_vectorize.py`~~
 
-注：CLAUDE.md 禁止 `scripts/` 下放一次性脚本。放 `/tmp/` 运行一次即弃。
-
-- [ ] **Step 1: 写脚本**
+- [ ] ~~**Step 1: 写脚本**~~
 
 ```python
 # /tmp/backfill_vectorize.py
@@ -2617,7 +3388,7 @@ import asyncio
 from sqlalchemy import select
 from app.data.session import get_session
 from app.data.models import ConversationMessage
-from app.runtime.legacy_bridge import emit_legacy_message
+from app.bridges.message_bridge import emit_legacy_message
 import app.wiring  # noqa: side-effect register
 import app.deployment  # noqa
 
@@ -2699,12 +3470,24 @@ make undeploy APP=vectorize-worker LANE=df-v0
 
 ---
 
-### Task 1.10: 删除旧 vectorize 代码
+### Task 1.10: 删除旧 vectorize 代码 + `vector_status` 字段退役
+
+> **范围明确（2026-04-24）**：本 task 删的是**消息向量化**老代码(`vectorize_message`、`process_message`、`handle_vectorize`、`cron_scan_pending_messages`、`start_vectorize_consumer` 及相关 semaphore/redis lock)，**以及 `conversation_messages.vector_status` 字段**。`memory_vectorize` 队列 + `handle_memory_vectorize` 是另一条链(fragment/abstract 向量化)，**不在本 PR 范围**，保留原样。
 
 **Files:**
-- Modify: `apps/agent-service/app/workers/vectorize.py` — 清空业务逻辑，只留 `parse_content / download_image / build_embedding_instruction` helpers（或迁到 `app/nodes/_helpers.py`）
-- Modify: `apps/agent-service/app/workers/arq_settings.py` — 删除 `cron_scan_pending_messages` cron 条目
-- Modify: `apps/agent-service/app/infra/rabbitmq.py` — 删除 `VECTORIZE` / `MEMORY_VECTORIZE` Route 常量
+- Modify: `apps/agent-service/app/workers/vectorize.py` — **只删**消息向量化相关(`vectorize_message / process_message / handle_vectorize / start_vectorize_consumer / cron_scan_pending_messages / _semaphore / _get_semaphore`)；保留 `handle_memory_vectorize` 及其启动逻辑(直到下个 PR 迁 memory_vectorize)。文件可能要重命名为 `memory_vectorize_worker.py` 或保持 `vectorize.py` 但内容大幅缩小 — 以 grep 结果为准
+- Modify: `apps/agent-service/app/workers/arq_settings.py` — 删 `cron_scan_pending_messages` 条目
+- Modify: `apps/agent-service/app/infra/rabbitmq.py` — 删 `VECTORIZE` Route 常量;**保留** `MEMORY_VECTORIZE`(仍被 `handle_memory_vectorize` 使用)
+- Modify: `apps/agent-service/app/domain/message.py` — 删 `vector_status` 字段(字段退役)
+- Modify: `apps/agent-service/app/data/models.py::ConversationMessage` — 删 `vector_status` 列
+- Modify: 所有读 `vector_status` 的地方(grep 找) — 清掉
+- DB 改动: `/ops-db submit @chiwei "ALTER TABLE conversation_messages DROP COLUMN vector_status;"` — 走审计通道,**ship 后执行,不在 PR 本身**
+
+**vector_status 退役说明**：
+- 老架构里 `vector_status` 是"处理状态字段"(pending/completed/skipped/failed),老 worker 读它 + 写它
+- 新架构里没人读写它,没人依赖它做业务决策
+- 保留会误导(看数据库以为 pending 的都没处理,实际可能已经完成)
+- 直接 DROP COLUMN 最干净。migrator 是 additive-only,不会做 DROP,此改动走 DDL submit 通道
 
 - [ ] **Step 1: 把 helpers 迁到 `app/nodes/_helpers.py`**
 
@@ -2844,5 +3627,5 @@ cd apps/agent-service && uv run python -c "from app.runtime.graph import compile
 - Phase 2: Safety 管线抽 Node（wire(Message).to(safety_pre_check)）
 - Phase 3: Drift / Afterthought 消灭内存 debouncer（依赖 `.debounce()` runtime 实现；本 plan 只定义 DSL，未实现 redis 计时器——Phase 3 开始落地）
 - Phase 4: Life Engine / Schedule / Glimpse
-- Phase 5: Chat 主 pipeline；Legacy Bridge 整体删除；Stream[T] 运行时行为（现在只有 type marker）
+- Phase 5: Chat 主 pipeline；`app/bridges/` 整包删除（Message Bridge 及同期新增的 bridge 全部清理）；Stream[T] 运行时行为（现在只有 type marker）
 - Phase 6: 清扫
