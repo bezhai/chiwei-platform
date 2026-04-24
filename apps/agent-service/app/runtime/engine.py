@@ -439,6 +439,21 @@ class Runtime:
                         async with incoming.process(requeue=False):
                             try:
                                 body = _json.loads(incoming.body.decode())
+                                # MQSource adapts external producers whose
+                                # payloads may carry fields meant for other
+                                # consumers (e.g. lark-server adds 'lane' to
+                                # {"message_id"} — we read lane from
+                                # headers). Data's extra='forbid' is a
+                                # deliberate policy on our internal
+                                # contracts; filter to the Data class's
+                                # declared fields before handing off so the
+                                # strict policy stays, and external slack is
+                                # absorbed here.
+                                body = {
+                                    k: v
+                                    for k, v in body.items()
+                                    if k in req_cls.model_fields
+                                }
                                 req = req_cls(**body)
                             except (
                                 _json.JSONDecodeError,
