@@ -1,14 +1,17 @@
 """Unified worker entry. Reads ``APP_NAME`` from env, boots :class:`Runtime`.
 
-Phase 1 will add ``import app.wiring`` + ``import app.deployment`` here to
-trigger ``@node`` / ``wire()`` / ``bind()`` registrations before
-``Runtime().run()``. Until those modules exist, this entry script boots
-an empty runtime — useful only for smoke tests.
+The ``import app.wiring`` and ``import app.deployment`` lines are side-
+effect imports — they trigger ``wire(...)`` calls and ``bind(...)``
+calls that register the graph before Runtime reads it. Without these
+imports, Runtime starts with an empty graph.
 """
 
 from __future__ import annotations
 
 import asyncio
+
+import app.deployment  # noqa: F401 — side-effect: register node -> app bindings
+import app.wiring  # noqa: F401 — side-effect: register wires
 
 from app.runtime.engine import Runtime
 

@@ -7,9 +7,12 @@ interface for reading/writing through runtime.persist / runtime.query.
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from app.runtime.data import Data, Key
+
+if TYPE_CHECKING:
+    from app.data.models import ConversationMessage
 
 
 class Message(Data):
@@ -32,3 +35,22 @@ class Message(Data):
         # Real PK is ``message_id``; there is no ``dedup_hash`` column,
         # so the persist layer must ON CONFLICT on message_id instead.
         dedup_column = "message_id"
+
+    @classmethod
+    def from_cm(cls, cm: "ConversationMessage") -> "Message":
+        """Lift a legacy ``ConversationMessage`` ORM row into a ``Message`` Data."""
+        return cls(
+            message_id=cm.message_id,
+            user_id=cm.user_id,
+            content=cm.content,
+            role=cm.role,
+            root_message_id=cm.root_message_id,
+            reply_message_id=cm.reply_message_id,
+            chat_id=cm.chat_id,
+            chat_type=cm.chat_type,
+            create_time=cm.create_time,
+            message_type=cm.message_type,
+            vector_status=cm.vector_status,
+            bot_name=cm.bot_name,
+            response_id=cm.response_id,
+        )
