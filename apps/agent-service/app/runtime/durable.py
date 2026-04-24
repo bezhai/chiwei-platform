@@ -33,7 +33,7 @@ from typing import Any
 from aio_pika.abc import AbstractIncomingMessage
 
 from app.api.middleware import lane_var, trace_id_var
-from app.infra.rabbitmq import Route, mq
+from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
@@ -184,11 +184,15 @@ async def start_consumers(app_name: str | None = None) -> None:
             route = _route_for(w, consumer)
             await mq.declare_route(route)
             handler = _build_handler(w, consumer)
-            queue, tag = await mq.consume(route.queue, handler)
+            # declare_route declares the *lane-scoped* queue name; consume
+            # must target that same name, otherwise non-prod lanes hit
+            # NOT_FOUND when get_queue runs passive.
+            actual_queue = lane_queue(route.queue, current_lane())
+            queue, tag = await mq.consume(actual_queue, handler)
             _consumer_tags.append((queue, tag))
             logger.info(
                 "durable consumer started: %s -> %s",
-                route.queue,
+                actual_queue,
                 consumer.__name__,
             )
 
