@@ -66,6 +66,32 @@ def compile_graph() -> CompiledGraph:
                     f"signature {ins} does not accept {needed}"
                 )
 
+    # 3a) Source.mq wires must target exactly one single-input consumer.
+    # The engine's MQ source loop reflects on the target @node to decide
+    # how to decode a raw JSON body into a Data instance. Fan-out (2+
+    # consumers) leaves the decode target ambiguous; multi-input targets
+    # can't be populated from a single MQ frame. Reject both at compile
+    # time so mis-wired graphs never reach start-up.
+    for w in wires:
+        mq_sources = [s for s in w.sources if s.kind == "mq"]
+        if not mq_sources:
+            continue
+        if len(w.consumers) != 1:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).from_(Source.mq(...)): MQ "
+                f"source requires exactly one consumer; got "
+                f"{len(w.consumers)} "
+                f"({[c.__name__ for c in w.consumers]})"
+            )
+        (c,) = w.consumers
+        ins = inputs_of(c)
+        if len(ins) != 1:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).from_(Source.mq(...)).to("
+                f"{c.__name__}): MQ source target must take exactly one "
+                f"Data arg; got signature {ins}"
+            )
+
     # 4) placement consistency: a wire's consumers must all be bound to
     # the same app (or all unbound). Mixed-app wires break
     # ``start_consumers(app_name)``'s all-or-nothing filter, so refuse

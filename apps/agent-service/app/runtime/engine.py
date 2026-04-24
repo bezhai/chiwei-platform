@@ -173,9 +173,16 @@ class Runtime:
                                 name=f"interval[{w.data_type.__name__}]",
                             )
                         )
-                    # Other source kinds (http / mq / feishu_webhook / manual)
+                    elif src.kind == "mq":
+                        self._source_tasks.append(
+                            loop.create_task(
+                                self._source_loop_mq(w, src),
+                                name=f"mq[{w.data_type.__name__}]",
+                            )
+                        )
+                    # Other source kinds (http / feishu_webhook / manual)
                     # are wired elsewhere (FastAPI routes, legacy bridges):
-                    # Runtime only owns the time-triggered ones.
+                    # Runtime only owns the time-triggered + MQ-triggered ones.
 
             logger.info(
                 "runtime: app=%s started (%d source task(s))",
@@ -303,3 +310,188 @@ class Runtime:
         except Exception as e:
             self._record_source_error(name, e)
             return
+
+    async def _source_loop_mq(self, w: WireSpec, src: SourceSpec) -> None:
+        """Consume JSON frames from a RabbitMQ queue into ``w``'s target @node.
+
+        Contract (see T1.4.5 in the Phase 0+1 plan):
+
+        * the target is a single @node whose signature is
+          ``(req: XxxData) -> ...``; ``compile_graph`` already enforces
+          this shape, so we can safely take the first (only) entry of
+          ``inputs_of(target)`` as the decode class;
+        * the queue is ``lane_queue(src.params["queue"], current_lane())``
+          (parallel to ``workers/vectorize.py::start_vectorize_consumer``)
+          so lane isolation + TTL fallback behave exactly like legacy
+          consumers;
+        * declare is idempotent (``durable=True, auto_delete=False,
+          passive=False``) — if lark-server or ``declare_topology``
+          already created the queue, re-declare is a no-op;
+        * ``prefetch_count=10`` moves the old ``semaphore(10)`` back-
+          pressure to the broker; handlers can stay single-task;
+        * per-message context: mirror ``durable.py::_build_handler`` —
+          read ``trace_id`` / ``lane`` headers with defensive coercion,
+          set both contextvars for the duration of the node call, reset
+          in ``finally``;
+        * ack semantics: ``message.process(requeue=False)``. Decode
+          failures (``JSONDecodeError`` / ``ValidationError``) are
+          logged + continue (message gets acked on context exit — poison
+          frames don't loop). Business exceptions from the node bubble
+          out of ``process`` so aio-pika nacks and the DLX catches them;
+        * shutdown: the outer ``asyncio.Task`` is cancelled by
+          ``run()``'s ``finally``. ``CancelledError`` unwinds both the
+          ``async for`` and the ``queue.iterator()`` context cleanly;
+          no extra consumer-tag tracking needed.
+        """
+        import json as _json
+
+        from pydantic import ValidationError as _ValidationError
+
+        from app.api.middleware import lane_var, trace_id_var
+        from app.infra.rabbitmq import current_lane, lane_queue, mq
+        from app.runtime.node import inputs_of
+
+        if len(w.consumers) != 1:
+            # compile_graph should have caught this; guard anyway so a
+            # skipped-validation path can't silently drop frames.
+            raise RuntimeError(
+                f"MQSource for {w.data_type.__name__}: expected 1 consumer, "
+                f"got {len(w.consumers)}"
+            )
+        (target,) = w.consumers
+        ins = inputs_of(target)
+        if len(ins) != 1:
+            raise RuntimeError(
+                f"MQSource target {target.__name__} must take exactly 1 "
+                f"Data arg; got signature {ins}"
+            )
+        param_name, req_cls = next(iter(ins.items()))
+
+        queue_base = src.params["queue"]
+        name = f"mq[{w.data_type.__name__}/{queue_base}]"
+
+        await mq.connect()
+        # ``mq.connect`` already sets a channel-level prefetch_count=10,
+        # but we open a *fresh* channel here so consumer back-pressure is
+        # isolated from the shared publisher channel (otherwise slow MQ
+        # handlers would starve unrelated publishers on the same pod).
+        assert mq._connection is not None  # type: ignore[attr-defined]
+        channel = await mq._connection.channel()  # type: ignore[attr-defined]
+        await channel.set_qos(prefetch_count=10)
+
+        actual_queue = lane_queue(queue_base, current_lane())
+        try:
+            # Passive fetch: the queue is owned by whoever publishes to
+            # it (lark-server for ``vectorize``, ``declare_topology`` for
+            # the static ALL_ROUTES set). Trying to re-declare with our
+            # own args would clash on DLX / TTL settings — see
+            # ``_build_queue_args`` in ``app/infra/rabbitmq.py``. Mirror
+            # ``mq.consume``'s ``get_queue`` for exactly that reason.
+            queue = await channel.get_queue(actual_queue)
+        except Exception as e:
+            # Queue missing at consume time is a deployment-level bug
+            # (topology / publisher ordering). Fail fast so PaaS restarts
+            # us and the operator sees the real cause.
+            self._record_source_error(name, e)
+            try:
+                await channel.close()
+            except Exception:  # pragma: no cover
+                pass
+            return
+
+        logger.info(
+            "runtime: mq source started queue=%s target=%s",
+            actual_queue,
+            target.__name__,
+        )
+
+        try:
+            async with queue.iterator() as qit:
+                async for incoming in qit:
+                    # Restore trace/lane contextvars from headers, with
+                    # the same defensive coercion as durable.py (header
+                    # values can legally be bytes / list / int when a
+                    # publisher misbehaves — we want "not set" rather
+                    # than a cryptic ``str()`` crash downstream).
+                    headers = incoming.headers or {}
+                    raw_trace = headers.get("trace_id")
+                    trace_id = (
+                        raw_trace
+                        if isinstance(raw_trace, str) and raw_trace
+                        else None
+                    )
+                    raw_lane = headers.get("lane")
+                    lane = (
+                        raw_lane
+                        if isinstance(raw_lane, str) and raw_lane
+                        else None
+                    )
+                    t_tok = trace_id_var.set(trace_id)
+                    l_tok = lane_var.set(lane)
+                    try:
+                        # ``process(requeue=False)`` context-manager:
+                        # clean exit -> ack; raised exception -> nack
+                        # without requeue -> aio-pika dead-letters via
+                        # DLX. We let the raise escape *process* but
+                        # catch it right after so one bad @node call
+                        # never terminates the outer loop (equivalent to
+                        # ``@mq_error_handler`` in legacy workers).
+                        async with incoming.process(requeue=False):
+                            try:
+                                body = _json.loads(incoming.body.decode())
+                                req = req_cls(**body)
+                            except (
+                                _json.JSONDecodeError,
+                                UnicodeDecodeError,
+                                _ValidationError,
+                                TypeError,
+                            ) as e:
+                                # Bad frame: log + ack (continue out of
+                                # process() which ack-s on clean exit).
+                                # requeue=False already rules out poison
+                                # loops; this keeps the loop alive for
+                                # the next message.
+                                logger.warning(
+                                    "mq source %s decode failed: %s body=%r",
+                                    actual_queue,
+                                    e,
+                                    incoming.body[:200],
+                                )
+                                continue
+                            await target(**{param_name: req})
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # Business-layer failure surfaced through
+                        # ``process(requeue=False)`` -> DLX. The loop
+                        # must stay alive to drain subsequent messages,
+                        # so we log and move on instead of tripping
+                        # _record_source_error (which would kill the
+                        # pod for a single bad message).
+                        logger.exception(
+                            "mq source %s: target %s raised %r on one "
+                            "message; DLX'd, continuing",
+                            actual_queue,
+                            target.__name__,
+                            e,
+                        )
+                    finally:
+                        trace_id_var.reset(t_tok)
+                        lane_var.reset(l_tok)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Only infrastructure errors (channel/connection death,
+            # consume-iterator setup failure) reach here — those *are*
+            # fatal and should restart the pod.
+            self._record_source_error(name, e)
+            return
+        finally:
+            # ``queue.iterator()`` teardown already cancels the implicit
+            # consumer tag; closing the channel releases the underlying
+            # RabbitMQ resources so we don't leak channels across
+            # Runtime.stop/start cycles in tests.
+            try:
+                await channel.close()
+            except Exception:  # pragma: no cover — best-effort
+                pass
