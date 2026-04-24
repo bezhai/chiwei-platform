@@ -45,6 +45,7 @@ embedder = EmbedderClient(model_id="embedding-model")
 
 @node
 async def vectorize(msg: Message) -> Fragment | None:
+    logger.info("vectorize: start message_id=%s chat_id=%s", msg.message_id, msg.chat_id)
     # 1. Parse content
     parsed = parse_content(msg.content)
     text_content = parsed.render()
@@ -126,6 +127,14 @@ async def vectorize(msg: Message) -> Fragment | None:
         "timestamp": msg.create_time,
     }
 
+    logger.info(
+        "vectorize: done message_id=%s fragment_id=%s text_len=%d images=%d modality=%s",
+        msg.message_id,
+        vector_id,
+        len(text_content),
+        len(image_base64_list),
+        modality,
+    )
     return Fragment(
         fragment_id=vector_id,
         message_id=msg.message_id,

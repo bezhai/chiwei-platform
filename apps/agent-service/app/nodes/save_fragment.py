@@ -16,11 +16,14 @@ anyway).
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.agent.embedding import HybridEmbedding, SparseVector
 from app.capabilities.vector_store import VectorStore
 from app.domain.fragment import Fragment
 from app.runtime.node import node
+
+logger = logging.getLogger(__name__)
 
 recall_store = VectorStore("messages_recall")
 cluster_store = VectorStore("messages_cluster")
@@ -28,6 +31,11 @@ cluster_store = VectorStore("messages_cluster")
 
 @node
 async def save_fragment(frag: Fragment) -> None:
+    logger.info(
+        "save_fragment: start message_id=%s fragment_id=%s",
+        frag.message_id,
+        frag.fragment_id,
+    )
     hybrid = HybridEmbedding(
         dense=frag.dense,
         sparse=SparseVector(
@@ -40,4 +48,9 @@ async def save_fragment(frag: Fragment) -> None:
         cluster_store.upsert_dense(
             frag.fragment_id, frag.dense_cluster, frag.cluster_payload
         ),
+    )
+    logger.info(
+        "save_fragment: done message_id=%s fragment_id=%s",
+        frag.message_id,
+        frag.fragment_id,
     )

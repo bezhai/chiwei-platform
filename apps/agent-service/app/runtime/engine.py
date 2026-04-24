@@ -436,6 +436,11 @@ class Runtime:
                         # catch it right after so one bad @node call
                         # never terminates the outer loop (equivalent to
                         # ``@mq_error_handler`` in legacy workers).
+                        logger.info(
+                            "mq source %s: received frame (%d bytes)",
+                            actual_queue,
+                            len(incoming.body),
+                        )
                         async with incoming.process(requeue=False):
                             try:
                                 body = _json.loads(incoming.body.decode())

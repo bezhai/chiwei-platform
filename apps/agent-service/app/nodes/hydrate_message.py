@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 @node
 async def hydrate_message(req: MessageRequest) -> Message | None:
+    logger.info("hydrate_message: start message_id=%s", req.message_id)
     async with get_session() as s:
         cm = await find_message_by_id(s, req.message_id)
     if cm is None:
@@ -31,4 +32,10 @@ async def hydrate_message(req: MessageRequest) -> Message | None:
             "hydrate_message: message_id=%s not found, drop", req.message_id
         )
         return None
+    logger.info(
+        "hydrate_message: done message_id=%s chat_id=%s bot_name=%s",
+        cm.message_id,
+        cm.chat_id,
+        cm.bot_name,
+    )
     return Message.from_cm(cm)
