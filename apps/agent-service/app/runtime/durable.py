@@ -112,14 +112,30 @@ def _build_handler(w: WireSpec, consumer: Callable):
             try:
                 payload = json.loads(message.body)
                 obj = data_cls(**payload)
-                n = await insert_idempotent(obj)
-                if n == 0:
-                    logger.debug(
-                        "durable consumer %s: duplicate %s, skipped",
-                        consumer.__name__,
-                        data_cls.__name__,
-                    )
-                    return
+                # Adoption-mode Data (``Meta.existing_table`` set) lives in
+                # a table the runtime doesn't own — the row is guaranteed to
+                # exist before we ever emit (it's written by the legacy
+                # writer that the Bridge lifts from). Running
+                # insert_idempotent here would ON CONFLICT DO NOTHING on
+                # every frame and falsely report a duplicate, skipping the
+                # consumer. Downstream idempotency must come from the
+                # consumer side (qdrant upsert by deterministic id).
+                meta = getattr(data_cls, "Meta", None)
+                is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
+                if not is_adoption:
+                    n = await insert_idempotent(obj)
+                    if n == 0:
+                        logger.debug(
+                            "durable consumer %s: duplicate %s, skipped",
+                            consumer.__name__,
+                            data_cls.__name__,
+                        )
+                        return
+                logger.info(
+                    "durable consumer %s: processing %s",
+                    consumer.__name__,
+                    data_cls.__name__,
+                )
                 await consumer(**{param_name: obj})
             finally:
                 trace_id_var.reset(t_tok)
