@@ -161,6 +161,18 @@ async def start_consumers(app_name: str | None = None) -> None:
 
         allowed = nodes_for_app(app_name)
 
+    # Only touch RabbitMQ if this app actually has durable consumers to
+    # start — otherwise tests / apps without durable wires would be
+    # forced to configure RABBITMQ_URL just to boot.
+    has_durable = any(
+        w.durable
+        and (allowed is None or all(c in allowed for c in w.consumers))
+        for w in graph.wires
+    )
+    if has_durable:
+        await mq.connect()
+        await mq.declare_topology()
+
     for w in graph.wires:
         if not w.durable:
             continue
