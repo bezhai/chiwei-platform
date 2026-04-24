@@ -35,9 +35,25 @@ async def test_tick_returns_none_when_skip_until_future():
 
 
 @pytest.mark.asyncio
+async def test_tick_returns_none_when_state_end_at_future():
+    future = datetime.now(CST) + timedelta(minutes=30)
+    row = _make_row(state_end_at=future)
+    with (
+        patch(f"{MODULE}.Q.find_latest_life_state", new=AsyncMock(return_value=row)),
+        patch(f"{MODULE}._think", new=AsyncMock()) as think_mock,
+    ):
+        result = await tick("chiwei")
+    assert result is None
+    think_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_tick_force_bypasses_skip_until():
     future = datetime.now(CST) + timedelta(minutes=10)
-    row = _make_row(skip_until=future)
+    row = _make_row(
+        skip_until=future,
+        state_end_at=datetime.now(CST) + timedelta(minutes=30),
+    )
     expected = CommitResult(ok=True, is_refresh=False, life_state_id=1)
     with (
         patch(f"{MODULE}.Q.find_latest_life_state", new=AsyncMock(return_value=row)),
