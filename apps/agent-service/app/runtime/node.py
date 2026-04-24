@@ -6,10 +6,17 @@ Reflects on the function's type hints to:
   * reject any ``AdminOnly`` Data in the return position;
   * store reflection metadata accessible via ``inputs_of`` / ``output_of``;
   * register the function in ``NODE_REGISTRY``.
+
+Behavior: the decorator wraps ``fn`` so that a returned ``Data`` is
+automatically emitted into the graph via ``runtime.emit.emit`` — spec
+forbids business code from calling ``emit`` / ``mq.publish`` to the next
+hop manually. ``None`` returns are skipped. The wrapper still returns
+the value to its caller so unit tests can assert on it directly.
 """
 
 from __future__ import annotations
 
+import functools
 import inspect
 from types import UnionType
 from typing import Callable, Union, get_args, get_origin, get_type_hints
@@ -79,9 +86,18 @@ def node(fn: Callable) -> Callable:
                 f"{fn.__name__} returns AdminOnly Data {tgt.__name__}: forbidden"
             )
         ret = unwrapped
-    _NODE_META[fn] = {"inputs": inputs, "output": ret}
-    NODE_REGISTRY.add(fn)
-    return fn
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        result = await fn(*args, **kwargs)
+        if isinstance(result, Data):
+            from app.runtime.emit import emit as _emit
+
+            await _emit(result)
+        return result
+
+    _NODE_META[wrapper] = {"inputs": inputs, "output": ret}
+    NODE_REGISTRY.add(wrapper)
+    return wrapper
 
 
 def inputs_of(fn: Callable) -> dict[str, type]:
