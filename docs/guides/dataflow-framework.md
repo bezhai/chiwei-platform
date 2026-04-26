@@ -39,13 +39,13 @@ Source (外部触发)
 
 ### 2.1 Data —— 不可变数据载体
 
-所有业务数据定义都继承 `app.runtime.data.Data`(基于 Pydantic v2,`frozen=True, extra="forbid"`)。
+所有业务数据定义都继承 `app.runtime.Data`(基于 Pydantic v2,`frozen=True, extra="forbid"`)。`app.runtime` 包是框架的公开入口 —— 业务侧的 import 都走它,不进 `app.runtime.*` 子模块。
 
 ```python
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime.data import Data, Key
+from app.runtime import Data, Key
 
 
 class SummaryFragment(Data):
@@ -99,7 +99,7 @@ class Fragment(Data):
 **AdminOnly(类级 mixin)** —— 极少用。标记这个 Data 只能由系统/人工产生,任何 `@node` 返回它都会在装饰器时报错:
 
 ```python
-from app.runtime.data import Data, AdminOnly, Key
+from app.runtime import Data, AdminOnly, Key
 class ManualApproval(Data, AdminOnly):
     approval_id: Annotated[str, Key]
     ...
@@ -115,7 +115,7 @@ import time
 from app.capabilities.llm import LLMClient
 from app.domain.message import Message
 from app.domain.summary import SummaryFragment
-from app.runtime.node import node
+from app.runtime import node
 
 llm = LLMClient(model_id="gpt-5.4")  # 模块级实例,不要每次调用都 new
 
@@ -160,8 +160,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 from app.domain.message import Message
 from app.domain.summary import SummaryFragment
 from app.nodes.summarize import summarize
-from app.runtime.source import Source
-from app.runtime.wire import wire
+from app.runtime import Source, wire
 
 # 从 MQ 入口 hydrate_message,已在文件其他地方声明
 # ...
@@ -199,7 +198,7 @@ durable(跨进程): emit Data ──RabbitMQ 发到 consumer 所在 App──▶
 ### 2.4 `Source` —— 图的入口
 
 ```python
-from app.runtime.source import Source
+from app.runtime import Source
 
 Source.mq("vectorize")               # 消费外部 publisher 的 MQ queue
 Source.cron("*/5 * * * *")           # crontab 表达式(分钟级)
@@ -246,7 +245,7 @@ async def emit_legacy_message(cm: ConversationMessage) -> None:
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime.data import Data, Key
+from app.runtime import Data, Key
 
 
 class SummaryFragment(Data):
@@ -269,7 +268,7 @@ import time
 from app.capabilities.llm import LLMClient
 from app.domain.message import Message
 from app.domain.summary import SummaryFragment
-from app.runtime.node import node
+from app.runtime import node
 
 logger = logging.getLogger(__name__)
 llm = LLMClient(model_id="gpt-5.4")
@@ -513,7 +512,7 @@ class SummaryFragment(BaseModel):        # 不会注册,不会参与 wire,migrat
     ...
 
 # ✅
-from app.runtime.data import Data
+from app.runtime import Data
 class SummaryFragment(Data):
     ...
 ```
@@ -528,9 +527,10 @@ await session.execute("UPDATE data_userprofile SET name='x' WHERE user_id='u1'")
 
 # ✅
 await emit(UserProfile(user_id="u1", name="x"))  # runtime 追加新行,version +1
-# 读取最新版本:
-from app.runtime.persist import select_latest
-row = await select_latest(UserProfile, {"user_id": "u1"})
+# 读取最新版本(Versioned Data 用 query() 默认就是 latest-per-key):
+from app.runtime import query
+rows = await query(UserProfile).where(user_id="u1").all()
+row = rows[0] if rows else None
 ```
 
 想要"总是只保留最新"的语义,在 wire 声明时 `.as_latest()`。
@@ -557,6 +557,8 @@ class Message(Data):
 同时:adoption mode 下**禁止**给字段标 `DedupKey`、`Version`(__pydantic_init_subclass__ 会直接 `TypeError`)。
 
 ### #6 runtime_entry 的 import 顺序
+
+> 仅 `runtime_entry.py` 启动器需要,业务节点不会用 `Runtime`。`Runtime` 不在 `app.runtime` 公开入口,故走子模块 `app.runtime.engine`。
 
 `app/workers/runtime_entry.py` 的前两行 side-effect import **必须**在 `from app.runtime.engine import Runtime` 之前:
 

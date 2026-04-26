@@ -17,7 +17,7 @@ from app.data.queries import find_message_by_id
 from app.data.session import get_session
 from app.domain.message import Message
 from app.domain.message_request import MessageRequest
-from app.runtime.node import node
+from app.runtime import node
 
 logger = logging.getLogger(__name__)
 

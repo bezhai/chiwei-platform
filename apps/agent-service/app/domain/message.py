@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated
 
-from app.runtime.data import Data, Key
+from app.runtime import Data, Key
 
 if TYPE_CHECKING:
     from app.data.models import ConversationMessage

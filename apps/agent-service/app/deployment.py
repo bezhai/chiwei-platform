@@ -12,7 +12,7 @@ RabbitMQ hop between vectorize and save_fragment.
 from app.nodes.hydrate_message import hydrate_message
 from app.nodes.save_fragment import save_fragment
 from app.nodes.vectorize import vectorize
-from app.runtime.placement import bind
+from app.runtime import bind
 
 bind(hydrate_message).to_app("vectorize-worker")
 bind(vectorize).to_app("vectorize-worker")

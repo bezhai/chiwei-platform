@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from app.data.models import ConversationMessage
 from app.domain.message import Message
-from app.runtime.emit import emit
+from app.runtime import emit
 
 
 async def emit_legacy_message(cm: ConversationMessage) -> None:

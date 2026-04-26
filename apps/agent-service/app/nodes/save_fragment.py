@@ -21,7 +21,7 @@ import logging
 from app.agent.embedding import HybridEmbedding, SparseVector
 from app.capabilities.vector_store import VectorStore
 from app.domain.fragment import Fragment
-from app.runtime.node import node
+from app.runtime import node
 
 logger = logging.getLogger(__name__)
 

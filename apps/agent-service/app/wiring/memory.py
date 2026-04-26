@@ -20,8 +20,7 @@ from app.domain.message_request import MessageRequest
 from app.nodes.hydrate_message import hydrate_message
 from app.nodes.save_fragment import save_fragment
 from app.nodes.vectorize import vectorize
-from app.runtime.source import Source
-from app.runtime.wire import wire
+from app.runtime import Source, wire
 
 # MQ entry: lark-server publishes {"message_id": X} to the "vectorize" queue.
 wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))

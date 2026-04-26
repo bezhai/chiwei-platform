@@ -28,7 +28,7 @@ from app.domain.fragment import Fragment
 from app.domain.message import Message
 from app.infra.image import image_client
 from app.nodes._ids import vector_id_for
-from app.runtime.node import node
+from app.runtime import node
 
 # Late import to avoid pulling the heavy embedding client at module load
 # when only the InstructionBuilder constants are needed.
