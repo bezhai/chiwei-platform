@@ -1,6 +1,0 @@
-build:
-  method: uv
-  entry: app.main:app
-  framework: uvicorn
-serve:
-  port: 8000

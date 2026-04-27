@@ -24,6 +24,20 @@ async def lifespan(app: FastAPI):
     await init_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 
+    # Wire up the dataflow graph before anything in this process emit()s.
+    # proactive.py's Bridge calls emit_legacy_message() which dispatches
+    # via WIRING_REGISTRY — without this load step the registry would be
+    # empty here and the call would silently no-op. The FastAPI main
+    # process is a *producer* (proactive Message -> vectorize-worker), so
+    # it must also pre-declare the durable routes; otherwise messages
+    # publish before the consumer pod has had a chance to declare its
+    # queue, and the broker drops them.
+    from app.runtime.bootstrap import declare_durable_topology, load_dataflow_graph
+
+    load_dataflow_graph()
+    if settings.rabbitmq_url:
+        await declare_durable_topology()
+
     # Load skill definitions
     import os
     from pathlib import Path
