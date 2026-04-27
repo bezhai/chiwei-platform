@@ -1,6 +1,7 @@
 ---
 name: api-test
 description: 标准化 HTTP API 调用工具。禁止直接写 curl 命令，所有 HTTP 请求必须通过此 skill 的 scripts/http.sh 脚本执行。当需要调用、测试、调试、验证任何 HTTP API 端点时使用。
+user_invocable: true
 ---
 
 # /api-test

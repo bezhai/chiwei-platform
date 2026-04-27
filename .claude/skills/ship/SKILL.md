@@ -1,4 +1,5 @@
 ---
+name: ship
 description: 合并当前分支到 main 并部署到生产环境
 user_invocable: true
 ---

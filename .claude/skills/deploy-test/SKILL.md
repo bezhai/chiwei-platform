@@ -1,4 +1,5 @@
 ---
+name: deploy-test
 description: 将当前分支部署到测试泳道，验证改动
 user_invocable: true
 ---

@@ -1,4 +1,5 @@
 ---
+name: ops-db
 description: 安全查询 PaaS Engine PostgreSQL 数据库，以及提交 DDL/DML 变更申请
 user_invocable: true
 ---
