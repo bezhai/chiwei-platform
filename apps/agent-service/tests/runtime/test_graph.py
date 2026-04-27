@@ -30,6 +30,15 @@ class X(Data):
     xid: Annotated[str, Key]
 
 
+class TMsg(Data):
+    """Transient Data: no pg table. Used by the durable+transient mutual-exclusion test."""
+
+    tid: Annotated[str, Key]
+
+    class Meta:
+        transient = True
+
+
 def setup_function():
     clear_wiring()
     clear_bindings()
@@ -88,7 +97,7 @@ def test_consumer_missing_data_type_param_rejected():
     async def wrong(c: Cfg) -> None: ...
 
     wire(M).to(wrong)
-    with pytest.raises(GraphError, match="does not accept"):
+    with pytest.raises(GraphError, match="does not match the wire inputs"):
         compile_graph()
 
 
@@ -102,7 +111,64 @@ def test_consumer_missing_with_latest_param_rejected():
 
     wire(S).to(s_producer).as_latest()
     wire(M).to(takes_only_m).with_latest(S)
-    with pytest.raises(GraphError, match="does not accept"):
+    with pytest.raises(GraphError, match="does not match the wire inputs"):
+        compile_graph()
+
+
+def test_consumer_extra_data_param_rejected():
+    # Consumer takes M and X; wire only declares M (no with_latest(X)).
+    # Subset matching used to pass this — emit() then crashes with a
+    # missing-kwarg at first traffic. compile_graph must reject it at boot.
+    @node
+    async def takes_extra(m: M, x: X) -> None: ...
+
+    wire(M).to(takes_extra)
+    with pytest.raises(GraphError, match="extra .*X"):
+        compile_graph()
+
+
+def test_consumer_in_two_wires_rejected():
+    # Strict equality enforces 1-consumer-1-wire. A function reused
+    # across wires has more params than any single wire's needed set,
+    # so both wires fail signature equality.
+    @node
+    async def shared(m: M, x: X) -> None: ...
+
+    wire(M).to(shared)
+    wire(X).to(shared)
+    with pytest.raises(GraphError, match="appear on exactly one wire|does not match the wire inputs"):
+        compile_graph()
+
+
+def test_default_bound_and_unbound_on_same_wire_ok():
+    # Two consumers on the same wire: one explicitly bound to
+    # DEFAULT_APP, one unbound. nodes_for_app(DEFAULT_APP) treats
+    # unbound as default — so this is *not* a mixed-app wire at
+    # runtime. compile_graph must reflect that semantic and accept it.
+    from app.runtime.placement import DEFAULT_APP
+
+    @node
+    async def explicit_default(m: M) -> None: ...
+
+    @node
+    async def implicit_default(m: M) -> None: ...
+
+    bind(explicit_default).to_app(DEFAULT_APP)
+    wire(M).to(explicit_default, implicit_default)
+    compile_graph()  # no raise
+
+
+def test_durable_transient_data_rejected():
+    # Meta.transient = True means no pg table; durable consumers call
+    # insert_idempotent which writes to that table — so the combo only
+    # works as far as the queue, then the consumer crashes on first
+    # message. Reject at compile time so the failure isn't deferred to
+    # the first inflight delivery.
+    @node
+    async def consumer(t: TMsg) -> None: ...
+
+    wire(TMsg).to(consumer).durable()
+    with pytest.raises(GraphError, match="transient.*durable|durable.*transient"):
         compile_graph()
 
 
@@ -161,7 +227,7 @@ def test_http_source_consumer_must_be_in_default_app():
     bind(worker_only).to_app("vectorize-worker")
     wire(M).to(worker_only).from_(Source.http("/api/trigger"))
 
-    with pytest.raises(GraphError, match="HTTP sources must run"):
+    with pytest.raises(GraphError, match="HTTP sources are mounted only"):
         compile_graph()
 
 

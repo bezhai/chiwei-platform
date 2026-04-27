@@ -178,7 +178,7 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 |---|---|---|
 | `.to(*targets)` | 消费者(@node 或 SinkSpec) | 必填,可多个(fan-out) |
 | `.from_(*sources)` | 入口 Source | 外部触发才需要(MQ / cron / HTTP) |
-| `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup | 跨 Deployment 或要重启续跑时 |
+| `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup;handler 异常 → DLQ(无自动 retry,人工 replay) | 跨 Deployment、要重启续跑、失败需可回放时 |
 | `.as_latest()` | `emit()` 持久化新版本(append + version),下游 `with_latest` / `query()` 读最新 | Data 是"状态快照",需要被后续节点引用 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
 | `.debounce(seconds=, max_buffer=)` | 防抖合流 | ⚠️ **未实现**：声明会让 `compile_graph()` 启动报错。引擎尚未支持，节点签名侧的 `Batched[T]` 配套也未设计 |
@@ -198,7 +198,9 @@ durable(跨进程): emit Data ──RabbitMQ 发到 consumer 所在 App──▶
 经验规则:
 - 同一个 Deployment 内部的节点之间 → 默认边(省一次 MQ 跳转)。
 - 跨 Deployment(比如 vectorize-worker → chat-response-worker) → `.durable()`。
-- 做状态机、事件源、要回放、要重试 → `.durable()`。
+- 做状态机、事件源、要回放、失败需进 DLQ 由运维 replay → `.durable()`。
+
+> **关于"重试":durable 边不做自动 retry。** consumer 抛异常时 runtime 调 `message.process(requeue=False)`,broker 路由到 DLX/DLQ 就停下了 —— 没有指数退避、没有自动重发。叠加 consumer 侧 `insert_idempotent`,语义是 **at-least-once via dedup**:运维从 DLQ 手动 replay 一条已经处理过的消息,在 consumer 侧是 no-op。如果你想要的是"多试几次再放弃",请在 @node 内部自己做(LLM 调用层面的重试),不要指望边语义。
 
 ### 2.4 `Source` —— 图的入口
 
@@ -327,7 +329,7 @@ wire(Message).to(summarize).durable()  # 和 vectorize 共享 Message durable,fa
 # SummaryFragment 不声明下游 = 只走持久化(runtime 自动 persist 到 data_summaryfragment)
 ```
 
-**注意**:`Message` 已经有一条 `wire(Message).to(vectorize).durable()`。再加 `.to(summarize)` 就是 fan-out —— 两个消费者各自独立 dedup + 重试,互不影响。
+**注意**:`Message` 已经有一条 `wire(Message).to(vectorize).durable()`。再加 `.to(summarize)` 就是 fan-out —— 两个消费者各自独立队列 + 各自 dedup + 各自 ack,互不影响。任一边 handler 失败只影响自己的 DLQ。
 
 ### Step 4 — 绑定 Deployment
 

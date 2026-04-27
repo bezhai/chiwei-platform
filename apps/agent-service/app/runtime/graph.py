@@ -55,16 +55,39 @@ def compile_graph() -> CompiledGraph:
                     f"requires wire({t.__name__}).as_latest() declared somewhere"
                 )
 
-    # 3) consumer signature compatibility
+    # 3) consumer signature must equal the wire's declared inputs
+    # exactly. Subset-only matching ("consumer accepts at least these")
+    # lets a consumer declare an extra Data param that no wire ever
+    # populates — startup looks fine, then emit() raises a missing-kwarg
+    # at first traffic. Strict equality also encodes the framework's
+    # 1-consumer-1-wire design: if a function needs to react to two
+    # different data types, write two @nodes (or one with ``Union[A, B]``
+    # once that's modeled), don't reuse the same callable across wires.
     for w in wires:
         for c in w.consumers:
             ins = inputs_of(c)
             param_types = set(ins.values())
             needed = {w.data_type, *w.with_latest}
-            if not needed.issubset(param_types):
+            if param_types != needed:
+                extra = param_types - needed
+                missing = needed - param_types
+                hint = []
+                if missing:
+                    hint.append(
+                        f"missing {sorted(t.__name__ for t in missing)}"
+                    )
+                if extra:
+                    hint.append(
+                        f"extra {sorted(t.__name__ for t in extra)} "
+                        f"(declare on the wire via .with_latest(...) or "
+                        f"split into a separate @node — a consumer must "
+                        f"appear on exactly one wire)"
+                    )
                 raise GraphError(
-                    f"wire({w.data_type.__name__}).to({c.__name__}): consumer "
-                    f"signature {ins} does not accept {needed}"
+                    f"wire({w.data_type.__name__}).to({c.__name__}): "
+                    f"consumer signature {ins} does not match the wire "
+                    f"inputs {sorted(t.__name__ for t in needed)} "
+                    f"({'; '.join(hint)})"
                 )
 
     # 3a) Source.mq wires must target exactly one single-input consumer.
@@ -93,21 +116,23 @@ def compile_graph() -> CompiledGraph:
                 f"Data arg; got signature {ins}"
             )
 
-    # 4) placement consistency: a wire's consumers must all be bound to
-    # the same app (or all unbound). Mixed-app wires break
-    # ``start_consumers(app_name)``'s all-or-nothing filter, so refuse
-    # the graph instead of silently dropping messages at runtime.
-    # Only enforce when placement is actually in use — tests that never
-    # call ``bind()`` must remain unaffected.
+    # 4) placement consistency: a wire's consumers must all resolve to
+    # the same app. Unbound consumers run in DEFAULT_APP at runtime
+    # (``nodes_for_app`` treats ``NODE_REGISTRY - bound`` as belonging
+    # to DEFAULT_APP), so the compile-time check has to mirror that —
+    # otherwise "explicitly bound to agent-service + unbound" looks
+    # mixed here while runtime sees them as the same app, and a wire
+    # that's actually fine gets rejected at boot. Use the same default
+    # so the validation matches dispatch semantics exactly.
     from app.runtime.placement import iter_bindings
 
     bindings = dict(iter_bindings())
     if bindings:
         for w in wires:
-            apps = {bindings.get(c) for c in w.consumers}
+            apps = {bindings.get(c, DEFAULT_APP) for c in w.consumers}
             if len(apps) > 1:
                 labels = sorted(
-                    f"{c.__name__}->{bindings.get(c, '<unbound>')}"
+                    f"{c.__name__}->{bindings.get(c, DEFAULT_APP)}"
                     for c in w.consumers
                 )
                 raise GraphError(
@@ -115,6 +140,30 @@ def compile_graph() -> CompiledGraph:
                     f"({', '.join(labels)}); split the wire or rebind "
                     f"consumers so they share one app"
                 )
+
+    # 4b) ``Meta.transient = True`` means "no pg table, in-process only"
+    # (the migrator skips DDL for transient Data, see ``migrator.py``).
+    # ``.durable()`` requires the data type to round-trip through a
+    # RabbitMQ queue *and* the consumer-side ``insert_idempotent`` for
+    # at-least-once dedup — both demand a real pg table. The runtime
+    # already exempts adoption-mode Data from idempotent (the row exists
+    # by construction); transient is the opposite — there is no row and
+    # there never will be — so the only honest answer is to refuse the
+    # combination at boot rather than crash on first message with a
+    # ``relation does not exist``.
+    for w in wires:
+        if not w.durable:
+            continue
+        meta = getattr(w.data_type, "Meta", None)
+        if meta is not None and getattr(meta, "transient", False):
+            raise GraphError(
+                f"wire({w.data_type.__name__}).durable(): {w.data_type.__name__} "
+                f"declares ``Meta.transient = True`` (no pg table), but "
+                f"durable edges require a persisted table for "
+                f"consumer-side ``insert_idempotent`` dedup. Either "
+                f"remove ``transient`` so the runtime owns the table, "
+                f"or drop ``.durable()`` and keep this edge in-process."
+            )
 
     # 5) reject edge modifiers whose engine implementation hasn't landed
     # yet. Surface exists for design / typing (so tutorials and signatures
@@ -160,9 +209,10 @@ def compile_graph() -> CompiledGraph:
             raise GraphError(
                 f"wire({w.data_type.__name__}).from_(Source.http(...)) "
                 f"consumer(s) {sorted(misplaced)} are bound to non-default "
-                f"app(s); HTTP sources must run in {DEFAULT_APP!r} (the "
-                f"FastAPI main process), or be promoted to .durable() "
-                f"so the request is queued for a worker"
+                f"app(s); HTTP sources are mounted only in "
+                f"{DEFAULT_APP!r} (the FastAPI main process). Bind the "
+                f"consumer to {DEFAULT_APP!r}, or expose a separate "
+                f"main-service endpoint that publishes to MQ explicitly."
             )
 
     data_types: set[type[Data]] = {w.data_type for w in wires} | {
