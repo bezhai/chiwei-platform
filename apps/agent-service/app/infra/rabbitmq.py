@@ -45,12 +45,17 @@ CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
-# The ``vectorize`` queue is still published to by lark-server and
-# consumed by the dataflow runtime via ``Source.mq("vectorize")``; it is
-# no longer owned by a Route constant because agent-service never
-# publishes to it itself. Topology binding for that queue is owned by
-# lark-server (the publisher) / the durable-queue state already in
-# RabbitMQ.
+# ``vectorize`` is published by lark-server (TS, identical
+# ``buildQueueArgs``/``DLX_NAME``/``EXCHANGE_NAME`` constants) and
+# consumed by the dataflow runtime via ``Source.mq("vectorize")``. We
+# co-declare it from agent-service's ``ALL_ROUTES`` so a lane that
+# only deploys agent-service + vectorize-worker (no lark-server in the
+# lane) can still create the lane queue ``vectorize_<lane>`` —
+# otherwise vectorize-worker's MQ source loop hits NOT_FOUND on
+# passive ``get_queue`` and the runtime crashes. Re-declare on the
+# prod-side queue is a no-op because both publishers compute identical
+# queue args.
+VECTORIZE = Route("vectorize", "task.vectorize")
 
 # Memory v4 vectorize: split into per-row queues so each one maps 1:1
 # onto a typed Data on the dataflow side (Source.mq today only decodes
@@ -68,6 +73,7 @@ ALL_ROUTES = [
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
+    VECTORIZE,
     MEMORY_FRAGMENT_VECTORIZE,
     MEMORY_ABSTRACT_VECTORIZE,
 ]
