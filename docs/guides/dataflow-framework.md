@@ -22,7 +22,7 @@ Source (外部触发)
 
 - 一个 `@node` **不知道自己的下游是谁**。它只声明"我拿 `Message` 进来,吐一个 `Fragment | None` 出去"。
 - 下游由 `wire(Fragment).to(save_fragment)` 声明,写在 `app/wiring/*.py` 里,和业务代码分离。
-- Runtime 是**调度器**,不是 orchestrator:它读 `WIRING_REGISTRY` 决定把谁发给谁,然后按边的类型(进程内 / durable / stream)分派。
+- Runtime 是**调度器**,不是 orchestrator:它读 `WIRING_REGISTRY` 决定把谁发给谁,然后按边的类型(进程内 / durable)分派。Stream 边(`Stream[T]`)是 planned surface,当前 `@node` 装饰器在导入期就会拒绝带 `Stream[X]` 的签名,等 async-iteration dispatch 落地再放开。
 - 图可以**跨进程**:同一张 wire 图,多个 Deployment 共享 —— `app/deployment.py` 的 `bind(node).to_app("xxx")` 决定 node 在哪个 pod 跑,`.durable()` 的边自动变成 RabbitMQ 消息。
 
 **关键特性:**
@@ -182,7 +182,7 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 | `.as_latest()` | `emit()` 持久化新版本(append + version),下游 `with_latest` / `query()` 读最新 | Data 是"状态快照",需要被后续节点引用 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
 | `.debounce(seconds=, max_buffer=)` | 防抖合流 | ⚠️ **未实现**：声明会让 `compile_graph()` 启动报错。引擎尚未支持，节点签名侧的 `Batched[T]` 配套也未设计 |
-| `.with_latest(*types)` | 自动 join 最新的 `T`(按同名 Key) | consumer 需要同一上下文的另一种 Data |
+| `.with_latest(*types)` | 自动 join 最新的 `T`(按同名 Key) | consumer 需要同一上下文的另一种 Data。⚠️ **只在 in-process 边支持**:`.durable().with_latest(...)` 会被 `compile_graph()` 拒绝(durable handler 是单参分派,不会注入 latest 参数) |
 
 > **fan-out 默认是 broadcast 语义**：`wire(T).to(a, b).durable()` 让每个 consumer 在 RabbitMQ 上各自一个独立队列(`durable_<data>_<consumer>`)，各自 dedup、各自 ack，互不影响。无须显式声明。
 
