@@ -1,4 +1,5 @@
 ---
+name: ops
 description: 统一运维查询和操作。替代 make status/pods/lane-bind 等命令，所有操作自动审计。
 user_invocable: true
 ---

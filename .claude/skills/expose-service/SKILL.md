@@ -1,6 +1,7 @@
 ---
 name: expose-service
 description: 让服务的 API 能从集群外部通过 $PAAS_API 访问。当需要添加新的外部可达路由、排查"从外面访问不到 API"问题、或有人试图使用 Ingress/LoadBalancer/NodePort/port-forward 时触发此 skill。本项目没有 Ingress Controller，外部访问的唯一通路是 api-gateway 反向代理。
+user_invocable: true
 ---
 
 # Expose Service
