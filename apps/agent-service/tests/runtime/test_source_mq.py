@@ -4,11 +4,13 @@ Covers ``Runtime._source_loop_mq``: consume JSON bodies off a
 ``lane_queue(queue)`` RabbitMQ queue, decode into the @node's 1-arg Data
 type via reflection, invoke the node under restored trace/lane context.
 
-Decode failures (bad JSON / ValidationError) are logged and acked, not
-requeued — a poison body must never stall the loop. Business errors in
-the @node bubble out of ``message.process(requeue=False)`` so aio-pika
-dead-letters the message via the DLX; the loop keeps running on the next
-delivery.
+Decode failures (bad JSON / ValidationError) are logged *and dead-
+lettered* — the loop re-raises out of ``process(requeue=False)`` so
+aio-pika nacks the frame and the broker routes it to the DLX, the same
+path business errors take. ``requeue=False`` rules out a poison loop:
+a bad body is delivered exactly once. The outer ``except Exception``
+keeps the loop alive after the DLX'd nack so subsequent good frames
+still flow.
 """
 
 from __future__ import annotations
@@ -133,9 +135,9 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
 
 
 @pytest.mark.integration
-async def test_mq_source_ignores_decode_failures(rabbitmq, caplog):
-    """Bad-JSON body is acked (no poison loop) and the next valid body is
-    still processed. Runtime stays healthy."""
+async def test_mq_source_dlqs_decode_failures(rabbitmq, caplog):
+    """Bad-JSON body is dead-lettered (no poison loop, no silent ack) and
+    the next valid body is still processed. Runtime stays healthy."""
     from app.infra.rabbitmq import Route, mq
 
     @node

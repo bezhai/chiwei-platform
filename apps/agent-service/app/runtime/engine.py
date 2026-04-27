@@ -477,31 +477,38 @@ class Runtime:
                                 _ValidationError,
                                 TypeError,
                             ) as e:
-                                # Bad frame: log + ack (continue out of
-                                # process() which ack-s on clean exit).
-                                # requeue=False already rules out poison
-                                # loops; this keeps the loop alive for
-                                # the next message.
+                                # Bad frame: log + dead-letter. We log
+                                # warning here so the body preview lands
+                                # in the standard log stream (the DLQ
+                                # itself only carries the raw body), then
+                                # raise so ``process(requeue=False)``
+                                # nacks the message and the broker routes
+                                # it to the DLX. requeue=False rules out
+                                # any poison loop; the outer ``except
+                                # Exception`` below catches the re-raise
+                                # so the source loop keeps draining.
                                 logger.warning(
                                     "mq source %s decode failed: %s body=%r",
                                     actual_queue,
                                     e,
                                     incoming.body[:200],
                                 )
-                                continue
+                                raise
                             await target(**{param_name: req})
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        # Business-layer failure surfaced through
+                        # One bad message: either decode failed (re-raised
+                        # from the inner block above) or the @node target
+                        # itself raised. Both surface through
                         # ``process(requeue=False)`` -> DLX. The loop
                         # must stay alive to drain subsequent messages,
                         # so we log and move on instead of tripping
                         # _record_source_error (which would kill the
                         # pod for a single bad message).
                         logger.exception(
-                            "mq source %s: target %s raised %r on one "
-                            "message; DLX'd, continuing",
+                            "mq source %s: target %s message DLX'd "
+                            "(%r); continuing",
                             actual_queue,
                             target.__name__,
                             e,
