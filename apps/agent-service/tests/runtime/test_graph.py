@@ -145,3 +145,32 @@ def test_sink_rejected_until_engine_dispatches():
     wire(M).to(f, Sink.mq("test_queue"))
     with pytest.raises(GraphError, match="Sink.*not dispatched|sinks are not"):
         compile_graph()
+
+
+def test_http_source_consumer_must_be_in_default_app():
+    # register_http_sources() mounts FastAPI routes only on the main
+    # (agent-service) process. A consumer bound to a worker app would
+    # see the request return 202 to the caller while emit() filters it
+    # out by APP_NAME — silent drop. compile_graph must reject this at
+    # boot.
+    from app.runtime.source import Source
+
+    @node
+    async def worker_only(m: M) -> None: ...
+
+    bind(worker_only).to_app("vectorize-worker")
+    wire(M).to(worker_only).from_(Source.http("/api/trigger"))
+
+    with pytest.raises(GraphError, match="HTTP sources must run"):
+        compile_graph()
+
+
+def test_http_source_consumer_in_default_app_ok():
+    # Default-app (unbound) consumer is fine.
+    from app.runtime.source import Source
+
+    @node
+    async def main_handler(m: M) -> None: ...
+
+    wire(M).to(main_handler).from_(Source.http("/api/trigger"))
+    compile_graph()  # no raise

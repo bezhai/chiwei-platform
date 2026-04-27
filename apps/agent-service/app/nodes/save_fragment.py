@@ -6,12 +6,12 @@ concurrently via ``asyncio.gather`` — they target different collections
 and have no ordering dependency, so sequential awaits would just double
 the tail latency.
 
-Failure semantics: if either upsert raises, the exception propagates.
-The runtime's durable-edge layer nacks + retries the upstream message.
-qdrant upsert is idempotent per point_id, so a retry simply re-upserts
-the side that already succeeded — no half-populated fragments, no
-cross-collection transaction needed (qdrant doesn't support them
-anyway).
+Failure semantics: if either upsert raises, the exception propagates
+to the durable handler, which routes the message to DLQ (the runtime
+doesn't auto-retry in place). Per-point_id idempotence still makes a
+manual operator replay safe — re-upserting the side that already
+succeeded is a no-op, no half-populated fragments, no cross-collection
+transaction needed (qdrant doesn't support them anyway).
 """
 from __future__ import annotations
 

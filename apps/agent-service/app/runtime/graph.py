@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from app.runtime.data import Data
 from app.runtime.node import NODE_REGISTRY, inputs_of
+from app.runtime.placement import DEFAULT_APP, nodes_for_app
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 
 
@@ -140,6 +141,29 @@ def compile_graph() -> CompiledGraph:
         raise GraphError(
             "unimplemented wire features:\n  - " + "\n  - ".join(unimplemented)
         )
+
+    # 6) HTTP source placement: ``register_http_sources`` only mounts on
+    # the FastAPI main app (which is the agent-service deployment). A
+    # wire whose source includes ``Source.http(...)`` must therefore have
+    # its consumer running in DEFAULT_APP — otherwise the route returns
+    # 202 to the client but emit() filters the consumer out by APP_NAME
+    # and nothing happens. This refuses the cross-app HTTP wire at compile
+    # time so the failure surfaces at boot, not as a silent 202.
+    own_default = nodes_for_app(DEFAULT_APP)
+    for w in wires:
+        if not any(s.kind == "http" for s in w.sources):
+            continue
+        misplaced = [
+            c.__name__ for c in w.consumers if c not in own_default
+        ]
+        if misplaced:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).from_(Source.http(...)) "
+                f"consumer(s) {sorted(misplaced)} are bound to non-default "
+                f"app(s); HTTP sources must run in {DEFAULT_APP!r} (the "
+                f"FastAPI main process), or be promoted to .durable() "
+                f"so the request is queued for a worker"
+            )
 
     data_types: set[type[Data]] = {w.data_type for w in wires} | {
         t for w in wires for t in w.with_latest

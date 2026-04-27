@@ -1,18 +1,24 @@
 """Durable edges — RabbitMQ adapter for ``wire(T).to(c).durable()``.
 
-Semantics:
+Delivery semantics (intentionally limited):
 
   * ``publish_durable(w, c, data)`` always publishes to RabbitMQ. No
-    publisher-side dedup (a pre-insert + skip-publish would desync the DB
-    from the queue if RabbitMQ drops the message mid-flight).
-  * The consumer side is where dedup lives: each handler calls
-    ``insert_idempotent(obj)`` first. If it returns 0, the message is a
-    duplicate of one already processed and the consumer is *not* invoked
-    (handler acks and moves on). If it returns 1, the consumer runs.
-    At-least-once delivery + a DB unique index gives effectively
-    exactly-once effect.
-  * Messages carry ``trace_id`` and ``lane`` in headers; the handler sets
-    both contextvars for the duration of the consumer call.
+    publisher-side dedup (a pre-insert + skip-publish would desync the
+    DB from the queue if RabbitMQ drops the message mid-flight).
+  * Consumer-side dedup: each handler calls ``insert_idempotent(obj)``
+    first. If it returns 0 the message is a duplicate of one already
+    processed and the consumer is *not* invoked (handler acks and moves
+    on). If it returns 1, the consumer runs.
+  * **Failure handling is fail-to-DLQ, not in-place retry.** A handler
+    exception triggers ``message.process(requeue=False)`` — aio-pika
+    nacks without requeue, the broker routes the message to the
+    configured dead-letter exchange / queue, and that's where it stops.
+    There is no automatic delay-retry chain; replaying a failed message
+    is an operator action against the DLQ. Combined with insert_idempotent,
+    delivery is **at-least-once via dedup** (a manual replay of an
+    already-processed message is a no-op on the consumer side).
+  * Messages carry ``trace_id`` and ``lane`` in headers; the handler
+    sets both contextvars for the duration of the consumer call.
 
 Queue topology reuses the existing exchange from :mod:`app.infra.rabbitmq`
 (``post_processing``, x-delayed-message, lane TTL fallback, DLX). Each
@@ -85,8 +91,9 @@ def _build_handler(w: WireSpec, consumer: Callable):
          ack and no-op; returns 1 => proceed).
       4. Invokes ``consumer`` with the single input parameter bound to the
          decoded object (phase-0 MVP: durable consumers are single-input).
-      5. ``message.process()`` ack-s on success / nacks-with-requeue on
-         exception — aio-pika handles both; we only need to raise.
+      5. ``message.process()`` ack-s on success; on consumer exception
+         it nacks with ``requeue=False`` so the broker routes the message
+         to the DLX/DLQ (no in-place retry).
     """
     data_cls = w.data_type
     param_name = next(iter(inputs_of(consumer)))

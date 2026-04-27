@@ -179,7 +179,7 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 | `.to(*targets)` | 消费者(@node 或 SinkSpec) | 必填,可多个(fan-out) |
 | `.from_(*sources)` | 入口 Source | 外部触发才需要(MQ / cron / HTTP) |
 | `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup | 跨 Deployment 或要重启续跑时 |
-| `.as_latest()` | 写入时只保留最新版本(原子替换) | Data 是"状态快照"而非事件流 |
+| `.as_latest()` | `emit()` 持久化新版本(append + version),下游 `with_latest` / `query()` 读最新 | Data 是"状态快照",需要被后续节点引用 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
 | `.debounce(seconds=, max_buffer=)` | 防抖合流 | ⚠️ **未实现**：声明会让 `compile_graph()` 启动报错。引擎尚未支持，节点签名侧的 `Batched[T]` 配套也未设计 |
 | `.with_latest(*types)` | 自动 join 最新的 `T`(按同名 Key) | consumer 需要同一上下文的另一种 Data |
@@ -560,7 +560,7 @@ rows = await query(UserProfile).where(user_id="u1").all()
 row = rows[0] if rows else None
 ```
 
-想要"总是只保留最新"的语义,在 wire 声明时 `.as_latest()`。
+想要 `emit()` 自动持久化、下游能 `with_latest()` 读最新版本,在 wire 声明 `.as_latest()`。
 
 ### #5 Adoption mode 漏写 `dedup_column`
 

@@ -4,8 +4,16 @@ T = TypeVar("T")
 
 
 class Stream(Generic[T]):
-    """Type-only marker for 'stream of T'. Never instantiated directly;
-    runtime sees a @node returning Stream[X] and wires it as async iterable of X."""
+    """Internal type marker for 'stream of T'. Never instantiated.
+
+    Not part of the public ``app.runtime`` surface today: the ``@node``
+    decorator rejects any ``Stream[X]`` parameter or return at decorate
+    time because the runtime wrapper has no async-iteration dispatch
+    (it only auto-emits a single ``Data`` instance). The marker stays
+    here so the decorator's check has something to match on; when
+    async-iteration support lands, both this module and the public API
+    will be re-promoted together.
+    """
 
 
 def is_stream(annotation) -> bool:

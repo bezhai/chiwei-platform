@@ -3,18 +3,25 @@
 Looks up every wire whose ``data_type`` matches the emitted instance and,
 for each wire, applies the optional ``when()`` predicate and dispatches
 to the consumers. In-process edges call the consumer directly (awaiting
-completion); ``durable()`` edges hand off to the durable queue layer
-(filled in by Task 0.11).
+completion); ``durable()`` edges hand off to the durable queue layer.
 
 In-process dispatch is strict: if any consumer raises, the remaining
 fan-out (sibling consumers and later-matching wires) is aborted and the
 exception propagates to ``emit``'s caller. Use ``.durable()`` when
 independent isolation between consumers is required.
 
+Persistence: a wire declared ``.as_latest()`` makes ``emit`` append a
+new versioned row to the Data class's table before dispatching. This is
+what lets a downstream ``with_latest(X)`` consumer (or any out-of-graph
+``query()`` reader) actually find the row. The append happens once per
+``emit`` even when the same Data class has multiple wires — what gets
+persisted is the Data instance, not a per-wire copy.
+
 ``with_latest(X)`` inputs are resolved by fetching the latest ``X`` row
 whose first Key field matches the same-named attribute on the emitted
-data. Phase 0 MVP: a single-column key join by name; richer resolution
-will come if/when real wiring needs it.
+data. ``select_latest`` returning ``None`` is treated as a wiring bug
+and raised — a consumer that declared ``with_latest(X)`` cannot run
+without an ``X`` to join against.
 """
 
 from __future__ import annotations
@@ -48,6 +55,16 @@ async def emit(data: Data) -> None:
     graph = _get_graph()
     own_nodes = nodes_for_app(_current_app())
     cls = type(data)
+
+    # Persist before dispatch: any wire(cls).as_latest() declaration
+    # means the Data must land in pg first, so downstream with_latest()
+    # readers see it. Same instance, one append per emit — multiple
+    # as_latest wires on the same class don't multiply the row count.
+    if any(w.data_type is cls and w.as_latest for w in graph.wires):
+        from app.runtime.persist import insert_append
+
+        await insert_append(data)
+
     for w in graph.wires:
         if w.data_type is not cls:
             continue
@@ -89,5 +106,13 @@ async def _resolve_inputs(consumer, data: Data, wire_spec) -> dict:
                     f"with_latest({t.__name__}) needs {key} on "
                     f"{type(data).__name__}"
                 )
-            kwargs[name] = await select_latest(t, {key: val})
+            latest = await select_latest(t, {key: val})
+            if latest is None:
+                raise RuntimeError(
+                    f"with_latest({t.__name__}) found no row for "
+                    f"{key}={val!r}; an upstream "
+                    f"wire({t.__name__}).as_latest() must have written at "
+                    f"least one version before {consumer.__name__} fires"
+                )
+            kwargs[name] = latest
     return kwargs
