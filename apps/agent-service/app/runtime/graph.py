@@ -115,6 +115,32 @@ def compile_graph() -> CompiledGraph:
                     f"consumers so they share one app"
                 )
 
+    # 5) reject edge modifiers whose engine implementation hasn't landed
+    # yet. Surface exists for design / typing (so tutorials and signatures
+    # can speak the full DSL) but using one without runtime support would
+    # silently no-op and look like the graph "ran" — much worse than a
+    # startup failure. Update or remove these branches once the engine
+    # learns to dispatch them.
+    unimplemented: list[str] = []
+    for w in wires:
+        if w.debounce is not None:
+            unimplemented.append(
+                f"wire({w.data_type.__name__}).debounce(...) — not yet "
+                f"wired up; the engine has no debounce dispatch and the "
+                f"node-signature side (Batched[T]) hasn't been designed"
+            )
+        if w.sinks:
+            kinds = sorted({s.kind for s in w.sinks})
+            unimplemented.append(
+                f"wire({w.data_type.__name__}).to(Sink.{kinds[0]}(...)) — "
+                f"sinks are not dispatched by the engine yet; this surface "
+                f"only describes the intended out-of-graph publish"
+            )
+    if unimplemented:
+        raise GraphError(
+            "unimplemented wire features:\n  - " + "\n  - ".join(unimplemented)
+        )
+
     data_types: set[type[Data]] = {w.data_type for w in wires} | {
         t for w in wires for t in w.with_latest
     }

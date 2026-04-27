@@ -8,6 +8,7 @@ from app.runtime.data import AdminOnly, Data, Key
 from app.runtime.graph import GraphError, compile_graph
 from app.runtime.node import node
 from app.runtime.placement import bind, clear_bindings
+from app.runtime.sink import Sink
 from app.runtime.wire import clear_wiring, wire
 
 
@@ -120,4 +121,27 @@ def test_layer4_rejects_wire_with_consumers_in_different_apps():
     bind(main_consumer).to_app("agent-service")
 
     with pytest.raises(GraphError, match="mixed apps"):
+        compile_graph()
+
+
+def test_debounce_rejected_until_engine_supports_it():
+    # Surface exists for the DSL/typing story but the engine doesn't
+    # dispatch debounce yet; using it must fail loudly at startup.
+    @node
+    async def f(m: M) -> None: ...
+
+    wire(M).to(f).debounce(seconds=10, max_buffer=5)
+    with pytest.raises(GraphError, match="debounce.*not yet"):
+        compile_graph()
+
+
+def test_sink_rejected_until_engine_dispatches():
+    # Sink.mq is exposed so wire-level docs/tests can talk about it,
+    # but the engine has no sink dispatch yet — wiring it up must
+    # raise rather than silently no-op the publish.
+    @node
+    async def f(m: M) -> None: ...
+
+    wire(M).to(f, Sink.mq("test_queue"))
+    with pytest.raises(GraphError, match="Sink.*not dispatched|sinks are not"):
         compile_graph()
