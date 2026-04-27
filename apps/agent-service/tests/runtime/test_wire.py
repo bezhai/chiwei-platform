@@ -69,6 +69,3 @@ def test_wire_debounce():
     assert w.debounce == {"seconds": 10, "max_buffer": 5}
 
 
-def test_wire_broadcast():
-    wire(Msg).to(f).broadcast()
-    assert WIRING_REGISTRY[0].broadcast is True

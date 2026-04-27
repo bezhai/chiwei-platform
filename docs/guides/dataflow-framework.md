@@ -178,10 +178,11 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 | `.from_(*sources)` | 入口 Source | 外部触发才需要(MQ / cron / HTTP) |
 | `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup | 跨 Deployment 或要重启续跑时 |
 | `.as_latest()` | 写入时只保留最新版本(原子替换) | Data 是"状态快照"而非事件流 |
-| `.broadcast()` | fan-out 到每个 consumer 独立处理 | 多个消费者互不依赖 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
-| `.debounce(seconds=, max_buffer=)` | 防抖合流 | 高频小改动合并(Phase 3 才真正落地) |
+| `.debounce(seconds=, max_buffer=)` | 防抖合流(Phase 3 才真正落地) | 高频小改动合并 |
 | `.with_latest(*types)` | 自动 join 最新的 `T`(按同名 Key) | consumer 需要同一上下文的另一种 Data |
+
+> **fan-out 默认是 broadcast 语义**：`wire(T).to(a, b).durable()` 让每个 consumer 在 RabbitMQ 上各自一个独立队列(`durable_<data>_<consumer>`)，各自 dedup、各自 ack，互不影响。无须显式声明。
 
 **默认边 vs durable 边**:
 
@@ -204,9 +205,9 @@ Source.mq("vectorize")               # 消费外部 publisher 的 MQ queue
 Source.cron("*/5 * * * *")           # crontab 表达式(分钟级)
 Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
-Source.feishu_webhook()              # 飞书 webhook(lark-proxy 那一侧)
-Source.manual("/ops/rebuild")        # 手工触发(运维用)
 ```
+
+> **不在这里**：飞书 webhook 在 lark-proxy(TS) 收，转给 lark-server publish 到 MQ；agent-service 这一侧的入口永远是 `Source.mq("vectorize" / "safety_check" / "chat_request")`，不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 
 用法:
 
@@ -219,7 +220,26 @@ wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
 - runtime 读 MQ body 时会**过滤掉**不在 `req_cls.model_fields` 里的字段(适配老 publisher 带额外字段),所以 Data 保持严格 `extra="forbid"` 不会误伤。
 - Queue 名按 lane 自动加后缀:`"vectorize"` 在 df-v0 lane 变成 `"vectorize_df-v0"`。
 
-### 2.5 `Bridge` —— 过渡层
+### 2.5 `Sink` —— 图的出口
+
+```python
+from app.runtime import Sink
+
+Sink.mq("chat_response")             # 把 Data publish 到指定 MQ 队列(图外部消费者读)
+```
+
+用法:
+
+```python
+wire(Reply).to(Sink.mq("chat_response"))
+# Reply 出图 → RabbitMQ chat_response 队列 → chat-response-worker(TS) 消费 → 飞书 API
+```
+
+**为什么只有 `Sink.mq`**:runtime 只懂协议(写 MQ 队列),不懂业务(发飞书 / 调外部 webhook)。"图的 Data 出口"本质上就是写一个队列,具体业务由队列的消费者(独立服务)实现 —— `chat-response-worker` 是 TS 服务,在图外消费 `chat_response` 队列调飞书 send_message API。要新增"出口业务",新建一个消费者服务,不动 runtime。
+
+> Lane 后缀:`"chat_response"` 在 df-v0 lane 变成 `"chat_response_df-v0"`,跟 `Source.mq` 同规则。
+
+### 2.6 `Bridge` —— 过渡层
 
 老代码写 `ConversationMessage` ORM 行是事实,把它"lift" 成 Data 推进图,就是 Bridge 的唯一职责:
 

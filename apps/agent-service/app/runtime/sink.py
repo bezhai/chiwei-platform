@@ -1,9 +1,16 @@
 """Sink specs: declarative descriptors for outbound edges of a wire.
 
-A ``SinkSpec`` names an external consumer (feishu send, HTTP callback,
-Langfuse trace, ...) that receives Data from the graph. Factories on
-``Sink`` construct specs; the engine interprets ``kind`` to wire up the
-actual adapter at runtime.
+A ``SinkSpec`` names an out-of-graph destination that receives Data
+from a wire. The runtime stays at the protocol layer — it only knows
+how to write a RabbitMQ queue. Business-specific destinations (feishu
+``im/v1/messages`` API, external webhooks, …) live in dedicated
+consumer services that read from those queues; the graph publishes,
+they consume.
+
+Example:
+    ``wire(Reply).to(Sink.mq("chat_response"))`` — agent-service emits
+    Reply onto the ``chat_response`` queue; ``chat-response-worker``
+    (a separate TS deployment) consumes it and calls Lark.
 """
 
 from __future__ import annotations
@@ -19,13 +26,11 @@ class SinkSpec:
 
 class Sink:
     @staticmethod
-    def feishu_send() -> SinkSpec:
-        return SinkSpec("feishu_send")
+    def mq(queue: str) -> SinkSpec:
+        """Publish each Data to ``queue`` on the shared RabbitMQ exchange.
 
-    @staticmethod
-    def http_callback(url: str) -> SinkSpec:
-        return SinkSpec("http_callback", {"url": url})
-
-    @staticmethod
-    def langfuse_trace() -> SinkSpec:
-        return SinkSpec("langfuse_trace")
+        Body is the Data's JSON serialization. Lane suffixing follows
+        the same convention as ``Source.mq`` (``"chat_response"`` becomes
+        ``"chat_response_{lane}"`` outside prod).
+        """
+        return SinkSpec("mq", {"queue": queue})

@@ -24,7 +24,6 @@ class WireSpec:
     sources: list[SourceSpec] = field(default_factory=list)
     durable: bool = False
     as_latest: bool = False
-    broadcast: bool = False
     predicate: Callable | None = None
     debounce: dict | None = None
     with_latest: tuple[type[Data], ...] = ()
@@ -60,10 +59,6 @@ class WireBuilder:
 
     def as_latest(self) -> "WireBuilder":
         self._spec.as_latest = True
-        return self
-
-    def broadcast(self) -> "WireBuilder":
-        self._spec.broadcast = True
         return self
 
     def when(self, pred: Callable) -> "WireBuilder":

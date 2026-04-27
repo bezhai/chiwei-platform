@@ -1,9 +1,14 @@
 """Source specs: declarative descriptors for inbound edges of a wire.
 
-A ``SourceSpec`` names an external producer (HTTP endpoint, cron trigger,
-MQ queue, ...) that feeds Data into the graph. Factories on ``Source``
-construct specs; the engine interprets ``kind`` to wire up the actual
-adapter at runtime.
+A ``SourceSpec`` names an external producer that feeds Data into the
+graph. Factories on ``Source`` construct specs; the engine interprets
+``kind`` to wire up the actual adapter at runtime.
+
+Surface kept intentionally minimal — every kind here has a real
+adapter wired up in the engine. Business-specific entry points
+(feishu webhooks, ops-manual triggers, ...) live in their own services
+(lark-proxy, /ops endpoints) and feed the graph through ``Source.mq``
+or a plain ``Source.http`` route.
 """
 
 from __future__ import annotations
@@ -41,11 +46,3 @@ class Source:
     @staticmethod
     def mq(queue: str) -> SourceSpec:
         return SourceSpec("mq", {"queue": queue})
-
-    @staticmethod
-    def feishu_webhook() -> SourceSpec:
-        return SourceSpec("feishu_webhook")
-
-    @staticmethod
-    def manual(path: str) -> SourceSpec:
-        return SourceSpec("manual", {"path": path})
