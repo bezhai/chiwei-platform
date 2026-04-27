@@ -158,6 +158,24 @@ def test_default_bound_and_unbound_on_same_wire_ok():
     compile_graph()  # no raise
 
 
+def test_durable_with_latest_rejected_until_handler_supports_it():
+    # Durable consumer dispatch is single-input: publish_durable only
+    # carries the primary Data on the queue, and _build_handler calls
+    # the consumer with one kwarg. with_latest is resolved only on the
+    # in-process emit path. Combining them used to compile fine and
+    # then explode on first delivery — refuse at boot.
+    @node
+    async def takes_m_with_s(m: M, s: S) -> None: ...
+
+    @node
+    async def s_producer(s: S) -> None: ...
+
+    wire(S).to(s_producer).as_latest()
+    wire(M).to(takes_m_with_s).with_latest(S).durable()
+    with pytest.raises(GraphError, match="durable.*with_latest|with_latest.*durable"):
+        compile_graph()
+
+
 def test_durable_transient_data_rejected():
     # Meta.transient = True means no pg table; durable consumers call
     # insert_idempotent which writes to that table — so the combo only

@@ -141,6 +141,32 @@ def compile_graph() -> CompiledGraph:
                     f"consumers so they share one app"
                 )
 
+    # 4a) ``with_latest`` is implemented only on the in-process emit
+    # path (``emit._resolve_inputs`` runs ``select_latest`` for each
+    # ``with_latest`` type before invoking the consumer). The durable
+    # handler in ``durable.py`` is a single-input dispatch:
+    # ``publish_durable`` puts only the primary Data on the queue, and
+    # ``_build_handler`` calls ``consumer(**{param_name: obj})`` with
+    # one slot. Combining ``.durable()`` with ``.with_latest(...)``
+    # therefore passes startup, then the first message reaches the
+    # consumer with a missing kwarg and raises ``TypeError``. Refuse
+    # the combination at boot until durable resolution learns to fan
+    # the latest types in too.
+    for w in wires:
+        if w.durable and w.with_latest:
+            latest = sorted(t.__name__ for t in w.with_latest)
+            raise GraphError(
+                f"wire({w.data_type.__name__}).with_latest({', '.join(latest)})"
+                f".durable(): durable handlers do not yet inject "
+                f"with_latest parameters — the queue carries only the "
+                f"primary Data and the consumer would be invoked with "
+                f"missing kwargs. Drop ``.durable()`` (keep the edge "
+                f"in-process), or split into two edges: a durable "
+                f"single-input consumer that re-emits an enriched Data, "
+                f"with the with_latest join happening on the in-process "
+                f"hop."
+            )
+
     # 4b) ``Meta.transient = True`` means "no pg table, in-process only"
     # (the migrator skips DDL for transient Data, see ``migrator.py``).
     # ``.durable()`` requires the data type to round-trip through a
