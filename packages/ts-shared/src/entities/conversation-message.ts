@@ -32,9 +32,6 @@ export class ConversationMessage {
     @Column({ length: 30, nullable: true, default: 'text' })
     message_type?: string;
 
-    @Column({ length: 20, default: 'pending' })
-    vector_status!: string;
-
     @Column({ length: 50, nullable: true })
     bot_name?: string;
 

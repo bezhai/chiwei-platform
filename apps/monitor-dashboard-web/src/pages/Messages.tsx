@@ -43,7 +43,6 @@ interface MessageRow {
   root_message_id: string;
   reply_message_id?: string | null;
   create_time: string;
-  vector_status: string;
 }
 
 // --- Enum maps ---
@@ -51,13 +50,6 @@ interface MessageRow {
 const chatTypeMap: Record<string, string> = {
   p2p: '私聊',
   group: '群聊',
-};
-
-const vectorStatusMap: Record<string, { label: string; color: string }> = {
-  pending: { label: '待处理', color: 'default' },
-  completed: { label: '已完成', color: 'green' },
-  failed: { label: '失败', color: 'red' },
-  skipped: { label: '已跳过', color: 'orange' },
 };
 
 const messageTypeMap: Record<string, string> = {
@@ -118,7 +110,6 @@ const ALL_COLUMNS: ColumnDef[] = [
   { key: 'root_message_id', title: '根消息 ID', defaultVisible: false },
   { key: 'reply_message_id', title: '父消息 ID', defaultVisible: false },
   { key: 'create_time', title: '创建时间', defaultVisible: true },
-  { key: 'vector_status', title: '向量状态', defaultVisible: true },
 ];
 
 const DEFAULT_VISIBLE_KEYS = ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key);
@@ -559,15 +550,6 @@ export default function Messages() {
         dataIndex: 'create_time',
         width: 180,
         render: (text) => (text ? dayjs(Number(text)).format('YYYY-MM-DD HH:mm:ss') : '-'),
-      },
-      vector_status: {
-        title: '向量状态',
-        dataIndex: 'vector_status',
-        width: 100,
-        render: (status: string) => {
-          const info = vectorStatusMap[status] || { label: status, color: 'default' };
-          return <Tag color={info.color}>{info.label}</Tag>;
-        },
       },
     };
 

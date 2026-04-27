@@ -4,10 +4,6 @@ import { context } from '@middleware/context';
 import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
 import AppDataSource from 'ormconfig';
 
-/**
- * 判断消息内容是否为空
- * 空消息定义：content 为空或仅包含空白字符
- */
 function isEmptyContent(content: string | undefined | null): boolean {
     return !content || content.trim() === '';
 }
@@ -24,7 +20,6 @@ export async function storeMessage(message: ChatMessage): Promise<void> {
         const botName = message.bot_name || context.getBotName() || 'chiwei';
         const isEmpty = isEmptyContent(message.content);
 
-        // INSERT ... ON CONFLICT (message_id) DO NOTHING
         const result = await AppDataSource.createQueryBuilder()
             .insert()
             .into(ConversationMessage)
@@ -39,17 +34,14 @@ export async function storeMessage(message: ChatMessage): Promise<void> {
                 chat_type: message.chat_type,
                 create_time: message.create_time,
                 message_type: message.message_type || 'text',
-                vector_status: isEmpty ? 'skipped' : 'pending',
                 bot_name: botName,
                 response_id: message.response_id,
             })
             .orIgnore()
             .execute();
 
-        // orIgnore: identifiers 为空数组表示冲突未插入
         const inserted = result.identifiers.length > 0;
 
-        // 仅首次插入成功且非空消息时推送向量化
         if (inserted && !isEmpty) {
             const lane = context.getLane() || undefined;
             await rabbitmqClient.publish(

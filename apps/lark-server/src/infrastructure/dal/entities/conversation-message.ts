@@ -36,15 +36,6 @@ export class ConversationMessage {
     @Column({ length: 30, nullable: true, default: 'text' })
     message_type?: string;
 
-    /**
-     * 向量化状态
-     * - pending: 待处理
-     * - completed: 已完成
-     * - failed: 失败
-     */
-    @Column({ length: 20, default: 'pending' })
-    vector_status!: string;
-
     @Column({ length: 50, nullable: true })
     bot_name?: string;
 
