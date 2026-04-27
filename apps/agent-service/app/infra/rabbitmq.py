@@ -51,13 +51,25 @@ RECALL = Route("recall", "action.recall")
 # publishes to it itself. Topology binding for that queue is owned by
 # lark-server (the publisher) / the durable-queue state already in
 # RabbitMQ.
-MEMORY_VECTORIZE = Route("memory_vectorize", "task.memory_vectorize")
+
+# Memory v4 vectorize: split into per-row queues so each one maps 1:1
+# onto a typed Data on the dataflow side (Source.mq today only decodes
+# a single Data type per queue). Bodies:
+#   memory_fragment_vectorize <- {"fragment_id": "f_xxx"}
+#   memory_abstract_vectorize <- {"abstract_id": "a_xxx"}
+MEMORY_FRAGMENT_VECTORIZE = Route(
+    "memory_fragment_vectorize", "task.memory_fragment_vectorize"
+)
+MEMORY_ABSTRACT_VECTORIZE = Route(
+    "memory_abstract_vectorize", "task.memory_abstract_vectorize"
+)
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
-    MEMORY_VECTORIZE,
+    MEMORY_FRAGMENT_VECTORIZE,
+    MEMORY_ABSTRACT_VECTORIZE,
 ]
 
 # ---------------------------------------------------------------------------
