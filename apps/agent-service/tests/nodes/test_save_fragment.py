@@ -70,12 +70,13 @@ async def test_save_fragment_upserts_both_collections():
 
 
 @pytest.mark.asyncio
-async def test_save_fragment_propagates_failure():
-    """Partial-failure: if one upsert raises, save_fragment raises.
+async def test_save_fragment_propagates_recall_failure():
+    """If the recall upsert raises, save_fragment raises.
 
     Runtime's durable-edge layer nacks + retries the message. qdrant upsert
     is idempotent per point_id, so retrying doesn't corrupt the collection
-    that already succeeded.
+    that already succeeded. Critical for the vectorize promise — a silent
+    bool-False return would have the durable consumer ack the message.
     """
     from app.nodes.save_fragment import save_fragment
 
@@ -88,7 +89,27 @@ async def test_save_fragment_propagates_failure():
     ), patch(
         "app.nodes.save_fragment.cluster_store.upsert_dense",
         new_callable=AsyncMock,
-        return_value=True,
+        return_value=None,
     ):
         with pytest.raises(RuntimeError, match="qdrant down"):
+            await save_fragment(frag)
+
+
+@pytest.mark.asyncio
+async def test_save_fragment_propagates_cluster_failure():
+    """Cluster upsert is the other half; failure there must also propagate."""
+    from app.nodes.save_fragment import save_fragment
+
+    frag = _sample_fragment()
+
+    with patch(
+        "app.nodes.save_fragment.recall_store.upsert",
+        new_callable=AsyncMock,
+        return_value=None,
+    ), patch(
+        "app.nodes.save_fragment.cluster_store.upsert_dense",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("cluster collection unavailable"),
+    ):
+        with pytest.raises(RuntimeError, match="cluster collection unavailable"):
             await save_fragment(frag)

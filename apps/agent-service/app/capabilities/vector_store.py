@@ -24,8 +24,8 @@ class VectorStore:
         point_id: str,
         embedding: HybridEmbedding,
         payload: dict[str, Any],
-    ) -> bool:
-        return await qdrant.upsert_hybrid_vectors(
+    ) -> None:
+        await qdrant.upsert_hybrid_vectors(
             self._collection,
             point_id,
             embedding.dense,
@@ -39,14 +39,14 @@ class VectorStore:
         point_id: str,
         dense: list[float],
         payload: dict[str, Any],
-    ) -> bool:
+    ) -> None:
         """Upsert a single dense-only vector into this collection.
 
         Used by cluster-style collections (``messages_cluster``) that store
         one dense vector per point with no sparse component. ``upsert`` is
         the hybrid sibling for recall-style collections.
         """
-        return await qdrant.upsert_vectors(
+        await qdrant.upsert_vectors(
             self._collection,
             [dense],
             [point_id],

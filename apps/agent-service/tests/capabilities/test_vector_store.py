@@ -18,11 +18,10 @@ async def test_upsert_unpacks_embedding_into_qdrant_call():
     emb = _sample_embedding()
     payload = {"chat_id": "c1", "content": "hello"}
     with patch("app.capabilities.vector_store.qdrant") as mq:
-        mq.upsert_hybrid_vectors = AsyncMock(return_value=True)
+        mq.upsert_hybrid_vectors = AsyncMock(return_value=None)
         store = VectorStore(collection="messages_recall")
-        ok = await store.upsert("point-42", emb, payload)
+        await store.upsert("point-42", emb, payload)
 
-    assert ok is True
     mq.upsert_hybrid_vectors.assert_awaited_once_with(
         "messages_recall",
         "point-42",
@@ -34,16 +33,28 @@ async def test_upsert_unpacks_embedding_into_qdrant_call():
 
 
 @pytest.mark.asyncio
+async def test_upsert_propagates_qdrant_failure():
+    """Qdrant exceptions must surface — no swallow / bool-False return."""
+    emb = _sample_embedding()
+    with patch("app.capabilities.vector_store.qdrant") as mq:
+        mq.upsert_hybrid_vectors = AsyncMock(
+            side_effect=RuntimeError("qdrant offline")
+        )
+        store = VectorStore(collection="messages_recall")
+        with pytest.raises(RuntimeError, match="qdrant offline"):
+            await store.upsert("point-42", emb, {})
+
+
+@pytest.mark.asyncio
 async def test_upsert_dense_delegates_to_qdrant_upsert_vectors():
     """Cluster-style collections store a single dense vector per point."""
     payload = {"message_id": "m1", "chat_id": "c1"}
     dense = [0.1] * 1024
     with patch("app.capabilities.vector_store.qdrant") as mq:
-        mq.upsert_vectors = AsyncMock(return_value=True)
+        mq.upsert_vectors = AsyncMock(return_value=None)
         store = VectorStore(collection="messages_cluster")
-        ok = await store.upsert_dense("point-1", dense, payload)
+        await store.upsert_dense("point-1", dense, payload)
 
-    assert ok is True
     mq.upsert_vectors.assert_awaited_once_with(
         "messages_cluster",
         [dense],

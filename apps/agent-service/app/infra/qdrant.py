@@ -85,20 +85,15 @@ class _Qdrant:
         vectors: list[list[float]],
         ids: list[ExtendedPointId],
         payloads: list[dict[str, Any]] | None = None,
-    ) -> bool:
-        try:
-            await self.client.upsert(
-                collection_name=collection,
-                points=models.Batch(
-                    ids=ids,
-                    vectors=vectors,
-                    payloads=payloads or [{}] * len(vectors),
-                ),
-            )
-            return True
-        except Exception as e:
-            logger.error("Failed to upsert vectors: %s", e)
-            return False
+    ) -> None:
+        await self.client.upsert(
+            collection_name=collection,
+            points=models.Batch(
+                ids=ids,
+                vectors=vectors,
+                payloads=payloads or [{}] * len(vectors),
+            ),
+        )
 
     async def upsert_hybrid_vectors(
         self,
@@ -108,24 +103,19 @@ class _Qdrant:
         sparse_indices: list[int],
         sparse_values: list[float],
         payload: dict[str, Any],
-    ) -> bool:
+    ) -> None:
         """Upsert a single point with both dense and sparse vectors."""
-        try:
-            point = PointStruct(
-                id=point_id,
-                vector={
-                    "dense": dense_vector,
-                    "sparse": SparseVector(
-                        indices=sparse_indices, values=sparse_values
-                    ),
-                },
-                payload=payload,
-            )
-            await self.client.upsert(collection_name=collection_name, points=[point])
-            return True
-        except Exception as e:
-            logger.error("Failed to upsert hybrid vectors: %s", e)
-            return False
+        point = PointStruct(
+            id=point_id,
+            vector={
+                "dense": dense_vector,
+                "sparse": SparseVector(
+                    indices=sparse_indices, values=sparse_values
+                ),
+            },
+            payload=payload,
+        )
+        await self.client.upsert(collection_name=collection_name, points=[point])
 
     # ------------------------------------------------------------------
     # Search

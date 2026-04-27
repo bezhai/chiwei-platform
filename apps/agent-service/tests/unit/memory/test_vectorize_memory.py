@@ -24,7 +24,7 @@ async def test_vectorize_fragment_upserts_to_qdrant():
     with patch("app.memory.vectorize_memory.get_fragment_by_id", new=AsyncMock(return_value=mock_fragment)):
         with patch("app.memory.vectorize_memory.embed_dense", new=AsyncMock(return_value=[0.1] * 1024)) as emb:
             with patch("app.memory.vectorize_memory.qdrant") as q:
-                q.upsert_vectors = AsyncMock(return_value=True)
+                q.upsert_vectors = AsyncMock(return_value=None)
                 ok = await vectorize_fragment("f_1")
     assert ok is True
     emb.assert_awaited_once()
@@ -54,7 +54,9 @@ async def test_vectorize_fragment_empty_content_returns_false():
 
 
 @pytest.mark.asyncio
-async def test_vectorize_fragment_qdrant_failure_raises():
+async def test_vectorize_fragment_qdrant_failure_propagates():
+    # Qdrant exceptions must propagate up so the durable consumer nacks
+    # and retries — silent False-returning swallowing was the prior bug.
     mock_fragment = MagicMock()
     mock_fragment.id = "f_1"
     mock_fragment.persona_id = "chiwei"
@@ -67,8 +69,8 @@ async def test_vectorize_fragment_qdrant_failure_raises():
     with patch("app.memory.vectorize_memory.get_fragment_by_id", new=AsyncMock(return_value=mock_fragment)):
         with patch("app.memory.vectorize_memory.embed_dense", new=AsyncMock(return_value=[0.1] * 1024)):
             with patch("app.memory.vectorize_memory.qdrant") as q:
-                q.upsert_vectors = AsyncMock(return_value=False)
-                with pytest.raises(RuntimeError, match="Qdrant upsert failed"):
+                q.upsert_vectors = AsyncMock(side_effect=RuntimeError("qdrant offline"))
+                with pytest.raises(RuntimeError, match="qdrant offline"):
                     await vectorize_fragment("f_1")
 
 
@@ -86,7 +88,7 @@ async def test_vectorize_abstract_upserts_to_qdrant():
     with patch("app.memory.vectorize_memory.get_abstract_by_id", new=AsyncMock(return_value=mock_a)):
         with patch("app.memory.vectorize_memory.embed_dense", new=AsyncMock(return_value=[0.2] * 1024)):
             with patch("app.memory.vectorize_memory.qdrant") as q:
-                q.upsert_vectors = AsyncMock(return_value=True)
+                q.upsert_vectors = AsyncMock(return_value=None)
                 ok = await vectorize_abstract("a_1")
     assert ok is True
     payloads = q.upsert_vectors.call_args.kwargs.get("payloads") or q.upsert_vectors.call_args.args[3]
