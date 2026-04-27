@@ -226,7 +226,7 @@ async def run_pre_check(message_content: str, persona_id: str = "") -> PreCheckR
             ),
             timeout=20.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Pre-check exceeded 20s, passing through")
         return PreCheckResult()
 

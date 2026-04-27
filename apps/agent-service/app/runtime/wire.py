@@ -8,8 +8,8 @@ durable, engine) consume the registry.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from app.runtime.data import Data
 from app.runtime.sink import SinkSpec
@@ -41,7 +41,7 @@ class WireBuilder:
         self._spec = WireSpec(data_type=data_type)
         WIRING_REGISTRY.append(self._spec)
 
-    def to(self, *targets) -> "WireBuilder":
+    def to(self, *targets) -> WireBuilder:
         for t in targets:
             if isinstance(t, SinkSpec):
                 self._spec.sinks.append(t)
@@ -49,27 +49,27 @@ class WireBuilder:
                 self._spec.consumers.append(t)
         return self
 
-    def from_(self, *sources: SourceSpec) -> "WireBuilder":
+    def from_(self, *sources: SourceSpec) -> WireBuilder:
         self._spec.sources.extend(sources)
         return self
 
-    def durable(self) -> "WireBuilder":
+    def durable(self) -> WireBuilder:
         self._spec.durable = True
         return self
 
-    def as_latest(self) -> "WireBuilder":
+    def as_latest(self) -> WireBuilder:
         self._spec.as_latest = True
         return self
 
-    def when(self, pred: Callable) -> "WireBuilder":
+    def when(self, pred: Callable) -> WireBuilder:
         self._spec.predicate = pred
         return self
 
-    def debounce(self, *, seconds: int, max_buffer: int) -> "WireBuilder":
+    def debounce(self, *, seconds: int, max_buffer: int) -> WireBuilder:
         self._spec.debounce = {"seconds": seconds, "max_buffer": max_buffer}
         return self
 
-    def with_latest(self, *types: type[Data]) -> "WireBuilder":
+    def with_latest(self, *types: type[Data]) -> WireBuilder:
         self._spec.with_latest = types
         return self
 

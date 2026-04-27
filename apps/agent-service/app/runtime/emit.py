@@ -19,8 +19,11 @@ will come if/when real wiring needs it.
 
 from __future__ import annotations
 
+import os
+
 from app.runtime.data import Data
 from app.runtime.graph import CompiledGraph, compile_graph
+from app.runtime.placement import DEFAULT_APP, nodes_for_app
 
 _graph: CompiledGraph | None = None
 
@@ -31,16 +34,19 @@ def reset_emit_runtime() -> None:
 
 
 def _get_graph() -> CompiledGraph:
-    # T0.14: filter wires by the current deployment's nodes_for_app()
-    # once Deployment.bind() lands. Today every process sees every wire.
     global _graph
     if _graph is None:
         _graph = compile_graph()
     return _graph
 
 
+def _current_app() -> str:
+    return os.getenv("APP_NAME") or DEFAULT_APP
+
+
 async def emit(data: Data) -> None:
     graph = _get_graph()
+    own_nodes = nodes_for_app(_current_app())
     cls = type(data)
     for w in graph.wires:
         if w.data_type is not cls:
@@ -49,11 +55,18 @@ async def emit(data: Data) -> None:
             continue
         for c in w.consumers:
             if w.durable:
-                # handled by Task 0.11 — durable queue
+                # durable: publish to the consumer's queue; the bound
+                # worker will consume and run it. No app-side filter.
                 from app.runtime.durable import publish_durable
 
                 await publish_durable(w, c, data)
             else:
+                # in-process: only run if the consumer is bound to (or
+                # falls through to) THIS process's app. Otherwise we'd
+                # silently execute a worker-bound @node in the wrong
+                # process — bind(...).to_app() would lose its meaning.
+                if c not in own_nodes:
+                    continue
                 kwargs = await _resolve_inputs(c, data, w)
                 await c(**kwargs)
 

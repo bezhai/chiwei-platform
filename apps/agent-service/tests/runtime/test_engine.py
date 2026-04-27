@@ -138,3 +138,20 @@ async def test_runtime_rejects_payload_without_ts_field() -> None:
 
     with pytest.raises(RuntimeError, match="requires a 'ts: str' field"):
         await asyncio.wait_for(rt.run(), timeout=2.0)
+
+
+async def test_runtime_rejects_unknown_app_name() -> None:
+    """An APP_NAME the placement layer doesn't know about must fail-fast.
+    Otherwise ``nodes_for_app`` returns the empty set and the runtime
+    boots with 0 sources / 0 consumers — looking healthy while doing
+    nothing.
+    """
+    wire(Tick).to(count_ticks).from_(Source.interval(seconds=0.05))
+    bind(count_other_ticks).to_app("vectorize-worker")
+    # known_apps() now = {"agent-service", "vectorize-worker"}.
+    # "totally-not-a-real-app" is not in there.
+
+    rt = Runtime(app_name="totally-not-a-real-app", migrate_schema_on_run=False)
+
+    with pytest.raises(RuntimeError, match="totally-not-a-real-app.*known"):
+        await rt.run()

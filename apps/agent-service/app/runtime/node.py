@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import functools
 import inspect
+from collections.abc import Callable
 from types import UnionType
-from typing import Callable, Union, get_args, get_origin, get_type_hints
+from typing import Union, get_args, get_origin, get_type_hints
 
 from app.runtime.data import Data, is_admin_only
 from app.runtime.stream import element_type, is_stream

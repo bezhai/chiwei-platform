@@ -36,7 +36,7 @@ class Message(Data):
         dedup_column = "message_id"
 
     @classmethod
-    def from_cm(cls, cm: "ConversationMessage") -> "Message":
+    def from_cm(cls, cm: ConversationMessage) -> Message:
         """Lift a legacy ``ConversationMessage`` ORM row into a ``Message`` Data."""
         return cls(
             message_id=cm.message_id,

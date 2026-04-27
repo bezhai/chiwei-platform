@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from inner_shared import hello as shared_hello
 from inner_shared.logger import setup_logging
+from inner_shared.middlewares.context_propagation import (
+    create_context_propagation_middleware,
+)
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
@@ -100,7 +103,6 @@ app.add_middleware(PrometheusMiddleware)
 app.add_middleware(HeaderContextMiddleware)
 
 # x-ctx-* context propagation (for sidecar lane routing)
-from inner_shared.middlewares.context_propagation import create_context_propagation_middleware
 app.add_middleware(create_context_propagation_middleware())
 
 # Register routes

@@ -74,3 +74,34 @@ async def test_emit_no_matching_wire_is_noop():
     compile_graph()
     await emit(M(mid="m1", text="x"))
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_emit_skips_in_process_consumer_bound_to_other_app(monkeypatch):
+    """In-process consumers bound to a worker app must NOT run in the
+    main process. bind(...).to_app() is the placement contract — emit
+    has to honour it the same way the durable consumer / source loop
+    already do, otherwise a main-process emit would silently run a
+    worker-only @node here.
+    """
+    from app.runtime.placement import bind
+
+    @node
+    async def worker_only(m: M) -> None:
+        calls.append(m)
+
+    bind(worker_only).to_app("vectorize-worker")
+    wire(M).to(worker_only)  # in-process
+    compile_graph()
+
+    # Main process: APP_NAME unset / DEFAULT_APP. worker_only bound to
+    # vectorize-worker -> emit must skip it.
+    monkeypatch.delenv("APP_NAME", raising=False)
+    await emit(M(mid="m1", text="hi"))
+    assert calls == []
+
+    # Same emit from inside the bound worker process: should run.
+    monkeypatch.setenv("APP_NAME", "vectorize-worker")
+    await emit(M(mid="m1", text="hi"))
+    assert len(calls) == 1
+    assert calls[0].text == "hi"

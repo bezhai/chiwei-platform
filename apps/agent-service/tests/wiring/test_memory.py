@@ -38,7 +38,6 @@ def _fresh_import():
     """
     import app.deployment as d
     import app.wiring.memory as m
-
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 

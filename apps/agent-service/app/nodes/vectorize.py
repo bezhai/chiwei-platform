@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+# Late import to avoid pulling the heavy embedding client at module load
+# when only the InstructionBuilder constants are needed.
+from app.agent.embedding import InstructionBuilder
 from app.capabilities.embed import EmbedderClient
 from app.chat.content_parser import parse_content
 from app.data.queries import find_group_download_permission
@@ -29,10 +32,6 @@ from app.domain.message import Message
 from app.infra.image import image_client
 from app.nodes._ids import vector_id_for
 from app.runtime import node
-
-# Late import to avoid pulling the heavy embedding client at module load
-# when only the InstructionBuilder constants are needed.
-from app.agent.embedding import InstructionBuilder
 
 logger = logging.getLogger(__name__)
 

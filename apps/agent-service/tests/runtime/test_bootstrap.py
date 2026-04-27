@@ -30,7 +30,6 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
 
     import app.deployment as d
     import app.wiring.memory as m
-
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 

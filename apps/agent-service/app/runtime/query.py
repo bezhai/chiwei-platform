@@ -59,17 +59,17 @@ class Query:
                 f"known: {sorted(self.cls.model_fields)}"
             )
 
-    def where(self, **kv: object) -> "Query":
+    def where(self, **kv: object) -> Query:
         for k in kv:
             self._check_column(k)
         self._where.update(kv)
         return self
 
-    def limit(self, n: int) -> "Query":
+    def limit(self, n: int) -> Query:
         self._limit = n
         return self
 
-    def order_by_desc(self, col: str) -> "Query":
+    def order_by_desc(self, col: str) -> Query:
         if self._order is not None:
             raise ValueError(
                 "order already set; query supports only one ORDER BY column"
@@ -78,7 +78,7 @@ class Query:
         self._order = (col, True)
         return self
 
-    def order_by_asc(self, col: str) -> "Query":
+    def order_by_asc(self, col: str) -> Query:
         if self._order is not None:
             raise ValueError(
                 "order already set; query supports only one ORDER BY column"
@@ -87,7 +87,7 @@ class Query:
         self._order = (col, False)
         return self
 
-    def all_versions(self) -> "Query":
+    def all_versions(self) -> Query:
         self._all_versions = True
         return self
 

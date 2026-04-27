@@ -221,6 +221,7 @@ wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
 - 目标 @node 必须**单参数**(第一个 Data 就是 decode 目标)。
 - runtime 读 MQ body 时会**过滤掉**不在 `req_cls.model_fields` 里的字段(适配老 publisher 带额外字段),所以 Data 保持严格 `extra="forbid"` 不会误伤。
 - Queue 名按 lane 自动加后缀:`"vectorize"` 在 df-v0 lane 变成 `"vectorize_df-v0"`。
+- **队列由 publisher 拥有**:`Source.mq("name")` 在 consumer 侧是 *passive* 拿队列(`channel.get_queue`),自己不 declare,也不在 `ALL_ROUTES` 里。语义是 "我跟 publisher 约定了这个队列名,publisher 负责建"。**部署约束**:新 lane 必须先起 publisher(比如 lark-server) 让它 declare 队列,再起 consumer(比如 vectorize-worker);顺序错了 consumer 会 `get_queue` 失败 → CrashLoopBackoff。这是隐式跨语言约定,确保新增 `Source.mq(...)` 用例时同步去 publisher 那一侧加 declare。
 
 ### 2.5 `Sink` —— 图的出口
 

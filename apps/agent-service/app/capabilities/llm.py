@@ -5,7 +5,8 @@ Node decorators (instantiated at module import time). First call amortises the
 async model build.
 """
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 

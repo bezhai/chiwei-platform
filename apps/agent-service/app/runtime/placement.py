@@ -57,3 +57,14 @@ def nodes_for_app(app_name: str) -> set[Callable]:
         unbound = NODE_REGISTRY - set(_BINDINGS.keys())
         return explicit | unbound
     return explicit
+
+
+def known_apps() -> set[str]:
+    """All app names a process can legitimately boot as: DEFAULT_APP plus
+    every app some @node has been ``bind()``-ed to.
+
+    Used by ``Runtime`` at startup to fail-fast on a typo'd / unset
+    ``APP_NAME`` env — otherwise the worker would silently come up with
+    zero sources + zero consumers and look healthy while doing nothing.
+    """
+    return {DEFAULT_APP} | set(_BINDINGS.values())

@@ -31,7 +31,7 @@ from app.runtime.data import DATA_REGISTRY
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
 from app.runtime.migrator import plan_migration
-from app.runtime.placement import DEFAULT_APP, nodes_for_app
+from app.runtime.placement import DEFAULT_APP, known_apps, nodes_for_app
 from app.runtime.source import SourceSpec
 from app.runtime.wire import WireSpec
 
@@ -139,6 +139,18 @@ class Runtime:
         dead source is not acceptable — PaaS would see the pod healthy
         while the source does nothing.
         """
+        # Reject obviously-broken APP_NAME up-front. nodes_for_app() returns
+        # an empty set for any unknown non-default app, which would otherwise
+        # boot the runtime with 0 sources / 0 consumers and look healthy
+        # while doing nothing — exactly the failure mode PaaS misconfiguration
+        # would produce.
+        valid = known_apps()
+        if self.app_name not in valid:
+            raise RuntimeError(
+                f"Runtime started for app={self.app_name!r} but no @node "
+                f"is bound there; check APP_NAME (known: {sorted(valid)})"
+            )
+
         if self._migrate_schema_on_run:
             await self.migrate_schema()
 
