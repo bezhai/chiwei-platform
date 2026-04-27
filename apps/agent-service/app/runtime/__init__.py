@@ -18,7 +18,6 @@ from app.runtime.placement import bind
 from app.runtime.query import query
 from app.runtime.sink import Sink
 from app.runtime.source import Source
-from app.runtime.stream import Stream
 from app.runtime.wire import wire
 
 __all__ = [
@@ -29,7 +28,6 @@ __all__ = [
     "Version",
     "Sink",
     "Source",
-    "Stream",
     "bind",
     "emit",
     "node",

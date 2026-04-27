@@ -30,7 +30,7 @@ Source (外部触发)
 | 对象 | 不可变 | 自动注册 | 运行时校验 |
 |---|---|---|---|
 | Data 实例 | ✅ `frozen=True, extra="forbid"` | 子类 → `DATA_REGISTRY` | 必须至少一个 `Key` 字段 |
-| `@node` 函数 | — | → `NODE_REGISTRY` | 参数 + 返回必须是 Data/Stream[Data]/None |
+| `@node` 函数 | — | → `NODE_REGISTRY` | `async def`,参数+返回必须是 `Data`/`Data \| None` |
 | `wire(T).to(c)` | — | → `WIRING_REGISTRY` | `compile_graph()` 启动时检查一致性 |
 
 ---
@@ -135,19 +135,21 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 
 **装饰器做什么(`app/runtime/node.py`)**:
 
-1. 读类型注解,校验所有参数 + 返回都是 `Data` 子类、`Data | None`、`Stream[Data]` 或 `None`;否则 import 时 `TypeError`。
-2. 校验返回的 Data **不是** `AdminOnly`。
-3. 把函数包装成 wrapper:`return result` 时若 `isinstance(result, Data)`,自动 `await emit(result)` 把 Data 推进图;`None` 跳过。wrapper 仍会把 result 原样返回给调用者,方便单元测试直接 assert。
-4. 注册到 `NODE_REGISTRY` + `_NODE_META`(供 `inputs_of(fn)` / `output_of(fn)` 反射使用)。
+1. 校验 `fn` 是 `async def`(`inspect.iscoroutinefunction`)否则 import 时 `TypeError`。
+2. 读类型注解,校验所有参数 + 返回都是 `Data` 子类或 `Data | None`;否则 import 时 `TypeError`。
+3. 校验返回的 Data **不是** `AdminOnly`。
+4. 把函数包装成 wrapper:`return result` 时若 `isinstance(result, Data)`,自动 `await emit(result)` 把 Data 推进图;`None` 跳过。wrapper 仍会把 result 原样返回给调用者,方便单元测试直接 assert。
+5. 注册到 `NODE_REGISTRY` + `_NODE_META`(供 `inputs_of(fn)` / `output_of(fn)` 反射使用)。
 
 **签名约束**:
 
 | 允许 | 不允许 |
 |---|---|
-| `async def f(x: Message) -> Fragment` | `def f(x: Message)` —— 必须 async |
+| `async def f(x: Message) -> Fragment` | `def f(x: Message)` —— 必须 async,装饰时直接 `TypeError` |
 | `async def f(x: Message) -> Fragment \| None` | `def f(x) -> Fragment` —— 参数/返回必须带注解 |
-| `async def f(x: Stream[Chunk]) -> None` | `async def f(x: str)` —— 非 Data 参数 |
-| `async def f(x: M, y: User) -> F` —— 多输入 | `async def f(x: Message) -> (Fragment, Log)` —— 不能返回 tuple |
+| `async def f(x: M, y: User) -> F` —— 多输入 | `async def f(x: str)` —— 非 Data 参数 |
+|  | `async def f(x: Message) -> (Fragment, Log)` —— 不能返回 tuple |
+|  | `async def f(x: Stream[Chunk])` —— Stream 暂未支持(runtime 没有 async-iteration dispatch),装饰时 `TypeError` |
 
 **注意**:装饰器只装最顶层。在 @node 里**不要**手写 `await emit(...)` 或 `await mq.publish(...)`。见「常见坑 #1」。
 
@@ -741,7 +743,7 @@ async def vectorize(msg: Message) -> Fragment | None:
 
 1. 每个 `Data` 子类至少一个 `Key` 字段(`__pydantic_init_subclass__`)。
 2. Adoption mode 的 Data **不能**带 `DedupKey` / `Version`(`__pydantic_init_subclass__`)。
-3. `@node` 参数 + 返回必须是 `Data / Data | None / Stream[Data] / None`(`node()` 装饰时)。
+3. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。`Stream[X]` 当前未支持,使用就 `TypeError`。
 4. `@node` 不能返回 `AdminOnly` Data(`node()` 装饰时)。
 5. 一个 @node 只能绑一个 App(`placement.bind` 重复绑定 raises)。
 6. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。

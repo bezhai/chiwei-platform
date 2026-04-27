@@ -47,7 +47,7 @@ def test_admin_only_output_rejected():
 
 
 def test_non_data_input_rejected():
-    with pytest.raises(TypeError, match="must be a Data subclass or Stream"):
+    with pytest.raises(TypeError, match="must be a Data subclass"):
 
         @node
         async def bad2(x: int) -> Frag: ...
@@ -83,3 +83,37 @@ def test_returns_optional_admin_only_rejected():
 
         @node
         async def bad_optional(msg: Msg) -> Cfg | None: ...
+
+
+def test_sync_function_rejected_at_decorate_time():
+    """A plain ``def`` (not ``async def``) must fail at @node decoration,
+    not later inside ``await fn(...)``. Surface the error where the source
+    code is.
+    """
+    with pytest.raises(TypeError, match="async def"):
+
+        @node
+        def sync_node(msg: Msg) -> Frag:  # type: ignore[misc]
+            return Frag(fid="f1", vec=[0.0])
+
+
+def test_stream_input_rejected():
+    """Stream[X] is a type marker but the runtime has no async-iteration
+    dispatch, so a @node accepting Stream[X] would never run. Reject it
+    at decorate time.
+    """
+    from app.runtime.stream import Stream
+
+    with pytest.raises(TypeError, match="Stream"):
+
+        @node
+        async def bad_stream(chunks: Stream[Msg]) -> None: ...
+
+
+def test_stream_return_rejected():
+    from app.runtime.stream import Stream
+
+    with pytest.raises(TypeError, match="Stream"):
+
+        @node
+        async def bad_stream_ret(msg: Msg) -> Stream[Frag]: ...  # type: ignore[misc]
