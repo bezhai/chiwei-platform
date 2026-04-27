@@ -50,7 +50,7 @@ async def run_wild_agents(target_date: date, weather: str = "") -> str:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     sections = []
-    for label, result in zip(_LABELS, results):
+    for label, result in zip(_LABELS, results, strict=True):
         if isinstance(result, Exception):
             logger.warning("Wild agent '%s' failed: %s", label, result)
             continue

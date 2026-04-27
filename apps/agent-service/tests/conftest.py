@@ -40,6 +40,32 @@ def _clear_model_cache():
 
 
 # ---------------------------------------------------------------------------
+# Runtime 注册表清理 (autouse)
+# ---------------------------------------------------------------------------
+# WIRING_REGISTRY (list) / placement bindings (dict) / emit graph cache 都是
+# module-level mutables。前一个测试声明的 wire（比如 .debounce() 这种未实现边
+# 的 regression 检查）会污染后续测试 —— 下一个 emit() 触发的 compile_graph
+# 看到残留的 .debounce() 直接 GraphError。autouse 把每个测试都重置回干净状态。
+#
+# tests/wiring/ 里的测试需要真实生产 wiring，它们在自己的 setup 里调
+# importlib.reload(app.wiring.memory) 重新执行 module body，把 wire/bind 调用
+# 重新跑一遍 —— 跟 autouse 的清理顺序兼容。
+@pytest.fixture(autouse=True)
+def _reset_runtime_registries():
+    from app.runtime.emit import reset_emit_runtime
+    from app.runtime.placement import clear_bindings
+    from app.runtime.wire import clear_wiring
+
+    clear_wiring()
+    clear_bindings()
+    reset_emit_runtime()
+    yield
+    clear_wiring()
+    clear_bindings()
+    reset_emit_runtime()
+
+
+# ---------------------------------------------------------------------------
 # Langfuse mock — 阻止真实 HTTP 请求
 # ---------------------------------------------------------------------------
 @pytest.fixture()

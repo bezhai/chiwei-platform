@@ -346,6 +346,46 @@ func TestDeployWorkerSkipsService(t *testing.T) {
 	}
 }
 
+// TestApplyDeploymentInjectsAppName 验证 Deployment 的主容器 env 注入了 APP_NAME，
+// 供 agent-service dataflow framework 在 Pod 启动时按 App 过滤 Node 使用。
+func TestApplyDeploymentInjectsAppName(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{
+		Name: "vectorize-worker",
+		Port: 0,
+	}
+
+	release := &domain.Release{
+		ID:       "r-app-name",
+		AppName:  "vectorize-worker",
+		Lane:     "prod",
+		Version:  "1.0.0.1",
+		Image:    "harbor.local/inner-bot/agent-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "vectorize-worker-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+	envs := map[string]string{}
+	for _, e := range container.Env {
+		envs[e.Name] = e.Value
+	}
+
+	if envs["APP_NAME"] != "vectorize-worker" {
+		t.Errorf("expected APP_NAME=vectorize-worker, got %q (envs=%v)", envs["APP_NAME"], envs)
+	}
+}
+
 // TestBuildEnvFrom 验证 buildEnvFrom 函数的各种组合。
 func TestGetDeploymentStatus(t *testing.T) {
 	labels := map[string]string{"app": "myapp", "lane": "prod"}

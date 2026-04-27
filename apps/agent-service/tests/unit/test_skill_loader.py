@@ -216,6 +216,7 @@ class TestSkillReloadLoop:
 
     def test_take_snapshot_detects_change(self, tmp_path):
         import time
+
         from app.skills.registry import SkillRegistry
 
         skill_dir = tmp_path / "test_skill"

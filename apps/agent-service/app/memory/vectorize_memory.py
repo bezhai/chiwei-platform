@@ -1,6 +1,10 @@
 """Memory v4 vectorization — embed and upsert fragments/abstracts to Qdrant.
 
-Called by vectorize-worker when consuming memory_vectorize tasks.
+The dataflow ``vectorize_memory_fragment`` / ``vectorize_memory_abstract``
+@nodes call ``vectorize_fragment`` / ``vectorize_abstract`` here once
+the runtime decodes an incoming MQ frame; ``enqueue_*_vectorize`` are
+the publisher-side helpers that ship those frames to the
+``memory_fragment_vectorize`` / ``memory_abstract_vectorize`` queues.
 
 Qdrant point ids must be uint or UUID, so we use a deterministic ``uuid5``
 derived from the prefixed DB id (``f_xxx`` / ``a_xxx``) and stash the original
@@ -54,14 +58,12 @@ async def vectorize_fragment(fragment_id: str) -> bool:
         "clarity": fragment.clarity,
         "last_touched_at": fragment.last_touched_at.isoformat() if fragment.last_touched_at else None,
     }
-    ok = await qdrant.upsert_vectors(
+    await qdrant.upsert_vectors(
         collection=COLLECTION_FRAGMENT,
         vectors=[vector],
         ids=[_qdrant_id(fragment.id)],
         payloads=[payload],
     )
-    if not ok:
-        raise RuntimeError(f"Qdrant upsert failed for fragment {fragment_id}")
     logger.info("vectorize_fragment ok: %s (source=%s)", fragment.id, fragment.source)
     return True
 
@@ -89,23 +91,33 @@ async def vectorize_abstract(abstract_id: str) -> bool:
         "clarity": a.clarity,
         "last_touched_at": a.last_touched_at.isoformat() if a.last_touched_at else None,
     }
-    ok = await qdrant.upsert_vectors(
+    await qdrant.upsert_vectors(
         collection=COLLECTION_ABSTRACT,
         vectors=[vector],
         ids=[_qdrant_id(a.id)],
         payloads=[payload],
     )
-    if not ok:
-        raise RuntimeError(f"Qdrant upsert failed for abstract {abstract_id}")
     logger.info("vectorize_abstract ok: %s (subject=%s)", a.id, a.subject)
     return True
 
 
 async def enqueue_fragment_vectorize(fragment_id: str) -> None:
-    from app.infra.rabbitmq import MEMORY_VECTORIZE, mq
-    await mq.publish(MEMORY_VECTORIZE, {"kind": "fragment", "id": fragment_id})
+    """Publish to ``memory_fragment_vectorize`` queue.
+
+    Body shape ``{"fragment_id": ...}`` is what the dataflow
+    ``MemoryFragmentRequest`` Data class decodes from on the consumer
+    side (``app.wiring.memory_vectorize`` + ``Source.mq``).
+    """
+    from app.infra.rabbitmq import MEMORY_FRAGMENT_VECTORIZE, mq
+    await mq.publish(MEMORY_FRAGMENT_VECTORIZE, {"fragment_id": fragment_id})
 
 
 async def enqueue_abstract_vectorize(abstract_id: str) -> None:
-    from app.infra.rabbitmq import MEMORY_VECTORIZE, mq
-    await mq.publish(MEMORY_VECTORIZE, {"kind": "abstract", "id": abstract_id})
+    """Publish to ``memory_abstract_vectorize`` queue.
+
+    Body shape ``{"abstract_id": ...}`` is what the dataflow
+    ``MemoryAbstractRequest`` Data class decodes from on the consumer
+    side (``app.wiring.memory_vectorize`` + ``Source.mq``).
+    """
+    from app.infra.rabbitmq import MEMORY_ABSTRACT_VECTORIZE, mq
+    await mq.publish(MEMORY_ABSTRACT_VECTORIZE, {"abstract_id": abstract_id})

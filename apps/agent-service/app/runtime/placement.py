@@ -1,0 +1,70 @@
+"""Placement layer: bind @node functions to specific deployment apps.
+
+Model:
+  * the default app is ``agent-service``;
+  * unbound ``@node`` functions fall to the default app;
+  * each node can be bound to at most one app — rebinding raises ``RuntimeError``.
+
+Usage::
+
+    bind(worker_node).to_app("vectorize-worker")
+    nodes_for_app("vectorize-worker")  # -> {worker_node}
+    nodes_for_app("agent-service")     # -> every unbound @node + any bound to "agent-service"
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+
+from app.runtime.node import NODE_REGISTRY
+
+DEFAULT_APP = "agent-service"
+_BINDINGS: dict[Callable, str] = {}
+
+
+def clear_bindings() -> None:
+    _BINDINGS.clear()
+
+
+def iter_bindings() -> Iterable[tuple[Callable, str]]:
+    """Yield ``(node, app_name)`` pairs for every explicitly bound ``@node``.
+
+    Public accessor for the binding map. Consumers (e.g. ``compile_graph``)
+    should read through this instead of touching ``_BINDINGS`` directly.
+    """
+    return iter(_BINDINGS.items())
+
+
+class _Binder:
+    def __init__(self, fn: Callable) -> None:
+        self._fn = fn
+
+    def to_app(self, app_name: str) -> None:
+        if self._fn in _BINDINGS:
+            raise RuntimeError(
+                f"{self._fn.__name__} already bound to {_BINDINGS[self._fn]}"
+            )
+        _BINDINGS[self._fn] = app_name
+
+
+def bind(fn: Callable) -> _Binder:
+    return _Binder(fn)
+
+
+def nodes_for_app(app_name: str) -> set[Callable]:
+    explicit = {n for n, a in _BINDINGS.items() if a == app_name}
+    if app_name == DEFAULT_APP:
+        unbound = NODE_REGISTRY - set(_BINDINGS.keys())
+        return explicit | unbound
+    return explicit
+
+
+def known_apps() -> set[str]:
+    """All app names a process can legitimately boot as: DEFAULT_APP plus
+    every app some @node has been ``bind()``-ed to.
+
+    Used by ``Runtime`` at startup to fail-fast on a typo'd / unset
+    ``APP_NAME`` env — otherwise the worker would silently come up with
+    zero sources + zero consumers and look healthy while doing nothing.
+    """
+    return {DEFAULT_APP} | set(_BINDINGS.values())

@@ -45,15 +45,37 @@ CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
+# ``vectorize`` is published by lark-server (TS, identical
+# ``buildQueueArgs``/``DLX_NAME``/``EXCHANGE_NAME`` constants) and
+# consumed by the dataflow runtime via ``Source.mq("vectorize")``. We
+# co-declare it from agent-service's ``ALL_ROUTES`` so a lane that
+# only deploys agent-service + vectorize-worker (no lark-server in the
+# lane) can still create the lane queue ``vectorize_<lane>`` —
+# otherwise vectorize-worker's MQ source loop hits NOT_FOUND on
+# passive ``get_queue`` and the runtime crashes. Re-declare on the
+# prod-side queue is a no-op because both publishers compute identical
+# queue args.
 VECTORIZE = Route("vectorize", "task.vectorize")
-MEMORY_VECTORIZE = Route("memory_vectorize", "task.memory_vectorize")
+
+# Memory v4 vectorize: split into per-row queues so each one maps 1:1
+# onto a typed Data on the dataflow side (Source.mq today only decodes
+# a single Data type per queue). Bodies:
+#   memory_fragment_vectorize <- {"fragment_id": "f_xxx"}
+#   memory_abstract_vectorize <- {"abstract_id": "a_xxx"}
+MEMORY_FRAGMENT_VECTORIZE = Route(
+    "memory_fragment_vectorize", "task.memory_fragment_vectorize"
+)
+MEMORY_ABSTRACT_VECTORIZE = Route(
+    "memory_abstract_vectorize", "task.memory_abstract_vectorize"
+)
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     SAFETY_CHECK,
     RECALL,
     VECTORIZE,
-    MEMORY_VECTORIZE,
+    MEMORY_FRAGMENT_VECTORIZE,
+    MEMORY_ABSTRACT_VECTORIZE,
 ]
 
 # ---------------------------------------------------------------------------
@@ -131,7 +153,15 @@ class _RabbitMQ:
         logger.info("RabbitMQ connected: %s", url.split("@")[-1])
 
     async def declare_topology(self) -> None:
-        """Declare exchange, queues, bindings, DLX (lane-isolated)."""
+        """Declare exchange, queues, bindings, DLX (lane-isolated).
+
+        Prod uses the ``x-delayed-message`` plugin on the main exchange so
+        publishers can schedule delayed delivery. Test environments that
+        run vanilla RabbitMQ images (no plugin) can set
+        ``RABBITMQ_DISABLE_DELAYED=1`` to declare a plain topic exchange
+        instead. Consumers don't care which mode is active — the delay is
+        only used by producers that pass ``delay_ms=``.
+        """
         if self._channel is None:
             raise RuntimeError("must call connect() first")
 
@@ -144,13 +174,20 @@ class _RabbitMQ:
         dlq = await self._channel.declare_queue(DLQ_NAME, durable=True)
         await dlq.bind(dlx)
 
-        # Main exchange (delayed-message plugin)
-        self._exchange = await self._channel.declare_exchange(
-            EXCHANGE_NAME,
-            type="x-delayed-message",
-            durable=True,
-            arguments={"x-delayed-type": "topic"},
-        )
+        # Main exchange (delayed-message plugin, topic in test envs)
+        if os.getenv("RABBITMQ_DISABLE_DELAYED") == "1":
+            self._exchange = await self._channel.declare_exchange(
+                EXCHANGE_NAME,
+                ExchangeType.TOPIC,
+                durable=True,
+            )
+        else:
+            self._exchange = await self._channel.declare_exchange(
+                EXCHANGE_NAME,
+                type="x-delayed-message",
+                durable=True,
+                arguments={"x-delayed-type": "topic"},
+            )
 
         for route in ALL_ROUTES:
             q = await self._channel.declare_queue(
@@ -161,6 +198,25 @@ class _RabbitMQ:
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
+
+    async def declare_route(self, route: Route) -> None:
+        """Declare a single route's queue + binding on the main exchange.
+
+        Used by the dataflow runtime to register durable wires dynamically on
+        top of the existing lane-aware topology (DLX, lane-TTL fallback, lazy
+        lane-queue declare all continue to work). ``declare_topology()`` still
+        owns the static ``ALL_ROUTES`` list; this method is its per-route
+        sibling so new routes can plug in without amending that list.
+        """
+        if self._channel is None or self._exchange is None:
+            raise RuntimeError("must call connect() + declare_topology() first")
+        lane = current_lane()
+        q = await self._channel.declare_queue(
+            lane_queue(route.queue, lane),
+            durable=True,
+            arguments=_build_queue_args(route.rk, lane),
+        )
+        await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
         """Lazily declare a lane queue on first publish."""
@@ -212,13 +268,20 @@ class _RabbitMQ:
         )
         await self._exchange.publish(message, routing_key=actual_rk)
 
-    async def consume(self, queue_name: str, callback: MessageHandler) -> None:
-        """Start consuming from a queue."""
+    async def consume(
+        self, queue_name: str, callback: MessageHandler
+    ) -> tuple[Any, str]:
+        """Start consuming from a queue.
+
+        Returns ``(queue, consumer_tag)`` so callers can cancel via
+        ``queue.cancel(consumer_tag)``. Legacy callers may ignore the return.
+        """
         if self._channel is None:
             raise RuntimeError("must call connect() first")
         queue = await self._channel.get_queue(queue_name)
-        await queue.consume(callback)
+        tag = await queue.consume(callback)
         logger.info("Consuming queue: %s", queue_name)
+        return queue, tag
 
     async def close(self) -> None:
         """Close the connection."""

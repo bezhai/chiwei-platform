@@ -278,35 +278,6 @@ async def resolve_message_id_by_row_id(
     return result.scalar_one_or_none()
 
 
-async def set_vector_status(
-    session: AsyncSession, message_id: str, status: str
-) -> None:
-    """Update vectorization status for a message."""
-    await session.execute(
-        update(ConversationMessage)
-        .where(ConversationMessage.message_id == message_id)
-        .values(vector_status=status)
-    )
-
-
-async def scan_pending_messages(
-    session: AsyncSession,
-    cutoff_ts: int,
-    offset: int,
-    limit: int,
-) -> list[str]:
-    """Scan message IDs with pending vector status since cutoff timestamp."""
-    result = await session.execute(
-        select(ConversationMessage.message_id)
-        .where(ConversationMessage.vector_status == "pending")
-        .where(ConversationMessage.create_time >= cutoff_ts)
-        .order_by(ConversationMessage.create_time.desc())
-        .offset(offset)
-        .limit(limit)
-    )
-    return [row[0] for row in result.fetchall()]
-
-
 async def set_agent_response_bot(
     session: AsyncSession,
     session_id: str,
