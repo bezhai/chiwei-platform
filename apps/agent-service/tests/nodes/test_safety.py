@@ -196,7 +196,6 @@ async def test_run_pre_safety_returns_block_verdict_with_reason():
     assert verdict.detail == "confidence=0.9"
 
 
-@pytest.mark.skip(reason="awaits Task 8 (app.chat.pre_safety_gate)")
 @pytest.mark.asyncio
 async def test_resolve_pre_safety_waiter_calls_gate_resolve():
     """节点 body 把 verdict 塞回本进程 pre_safety_gate.resolve."""
