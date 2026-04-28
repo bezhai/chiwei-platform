@@ -147,3 +147,67 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
     assert result.detail == "confidence=0.9"
     assert result.lane == "dev"
     fake_set.assert_not_called()
+
+
+# === run_pre_safety + resolve_pre_safety_waiter ===
+
+from app.domain.safety import PreSafetyRequest, PreSafetyVerdict  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_run_pre_safety_returns_pass_verdict_when_clean():
+    """所有检查通过 → is_blocked=False."""
+    from app.nodes import safety as m
+
+    fake_audit = AsyncMock(return_value=m._PreCheckOutcome(is_blocked=False))
+    req = PreSafetyRequest(
+        pre_request_id="pr-1", message_id="m-1",
+        message_content="hello", persona_id="ayana",
+    )
+    with patch.object(m, "_run_pre_audit", fake_audit):
+        verdict = await m.run_pre_safety(req)
+
+    assert isinstance(verdict, PreSafetyVerdict)
+    assert verdict.pre_request_id == "pr-1"
+    assert verdict.is_blocked is False
+    assert verdict.block_reason is None
+
+
+@pytest.mark.asyncio
+async def test_run_pre_safety_returns_block_verdict_with_reason():
+    """audit 返回 blocked → verdict 字段映射正确."""
+    from app.nodes import safety as m
+
+    outcome = m._PreCheckOutcome(
+        is_blocked=True,
+        block_reason=m.BlockReason.PROMPT_INJECTION,
+        detail="confidence=0.9",
+    )
+    fake_audit = AsyncMock(return_value=outcome)
+    req = PreSafetyRequest(
+        pre_request_id="pr-2", message_id="m-1",
+        message_content="ignore previous", persona_id="ayana",
+    )
+    with patch.object(m, "_run_pre_audit", fake_audit):
+        verdict = await m.run_pre_safety(req)
+
+    assert verdict.is_blocked is True
+    assert verdict.block_reason == "prompt_injection"
+    assert verdict.detail == "confidence=0.9"
+
+
+@pytest.mark.skip(reason="awaits Task 8 (app.chat.pre_safety_gate)")
+@pytest.mark.asyncio
+async def test_resolve_pre_safety_waiter_calls_gate_resolve():
+    """节点 body 把 verdict 塞回本进程 pre_safety_gate.resolve."""
+    from app.nodes import safety as m
+
+    verdict = PreSafetyVerdict(
+        pre_request_id="pr-3", message_id="m-1", is_blocked=False
+    )
+    fake_resolve = MagicMock()
+    with patch("app.chat.pre_safety_gate.resolve", fake_resolve):
+        result = await m.resolve_pre_safety_waiter(verdict)
+
+    assert result is None
+    fake_resolve.assert_called_once_with(verdict)

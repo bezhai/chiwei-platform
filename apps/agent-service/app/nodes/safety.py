@@ -354,3 +354,29 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
             s, req.session_id, "passed", {"checked_at": checked_at}
         )
     return None
+
+
+@node
+async def run_pre_safety(req: PreSafetyRequest) -> PreSafetyVerdict:
+    """跑 4 个并行 pre-check，返回 verdict.
+
+    内部调 ``_run_pre_audit`` 复用 banned word + 3 个 LLM 检查；
+    fail-open 已在 audit 内部处理（超时 / 异常 → 通过 verdict）。
+    """
+    outcome = await _run_pre_audit(req.message_content, req.persona_id)
+    return PreSafetyVerdict(
+        pre_request_id=req.pre_request_id,
+        message_id=req.message_id,
+        is_blocked=outcome.is_blocked,
+        block_reason=str(outcome.block_reason) if outcome.block_reason else None,
+        detail=outcome.detail,
+    )
+
+
+@node
+async def resolve_pre_safety_waiter(verdict: PreSafetyVerdict) -> None:
+    """收尾节点：把 verdict 塞回本进程的 Future registry."""
+    # 延迟 import 避免循环依赖（pre_safety_gate import nodes.safety 反过来）
+    from app.chat import pre_safety_gate
+    pre_safety_gate.resolve(verdict)
+    return None
