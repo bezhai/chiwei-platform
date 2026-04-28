@@ -56,13 +56,12 @@ async def lifespan(app: FastAPI):
     # Start MQ consumers (only when RabbitMQ is configured)
     consumer_tasks: list[asyncio.Task] = []
     if settings.rabbitmq_url:
-        from app.workers.chat_consumer import start_chat_consumer
-
         # Phase 2: post-safety 改走 runtime durable consumer。旧
         # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
         from app.runtime.durable import start_consumers
+        from app.workers.chat_consumer import start_chat_consumer
         await start_consumers(app_name="agent-service")
         logger.info("Runtime durable consumers started for agent-service")
 

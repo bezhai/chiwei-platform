@@ -1,6 +1,18 @@
 """Tests for nodes/safety.py (Phase 2)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime  # noqa: F401  # parity with module
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.domain.safety import (
+    PostSafetyRequest,
+    PreSafetyRequest,
+    PreSafetyVerdict,
+    Recall,
+)
+
 
 def test_module_imports():
     """烟囱测试：模块能加载，含必要 helper / 常量。"""
@@ -21,12 +33,6 @@ def test_module_imports():
 
 
 # === run_post_safety ===
-
-import pytest
-from datetime import UTC, datetime  # noqa: F401  # parity with module
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from app.domain.safety import PostSafetyRequest, Recall
 
 
 def _make_req(session_id="sess-1") -> PostSafetyRequest:
@@ -150,8 +156,6 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
 
 
 # === run_pre_safety + resolve_pre_safety_waiter ===
-
-from app.domain.safety import PreSafetyRequest, PreSafetyVerdict  # noqa: E402
 
 
 @pytest.mark.asyncio

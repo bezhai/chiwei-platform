@@ -11,7 +11,6 @@ from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.placement import bind, clear_bindings
 from app.runtime.wire import clear_wiring
 
-
 # Module-level Data classes so @node's get_type_hints() can resolve annotations.
 
 

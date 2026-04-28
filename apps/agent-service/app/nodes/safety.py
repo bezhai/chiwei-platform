@@ -13,12 +13,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 from app.agent.core import Agent, AgentConfig
+from app.api.middleware import get_lane
+from app.data.queries import get_safety_status, set_safety_status
+from app.data.session import get_session
+from app.domain.safety import (
+    PostSafetyRequest,
+    PreSafetyRequest,
+    PreSafetyVerdict,
+    Recall,
+)
 from app.infra.redis import get_redis
+from app.runtime import node
 
 logger = logging.getLogger(__name__)
 
@@ -294,19 +305,6 @@ async def _run_audit(response_text: str) -> _PostAuditOutcome:
 # ---------------------------------------------------------------------------
 # Public @node entries
 # ---------------------------------------------------------------------------
-
-from datetime import UTC, datetime
-
-from app.api.middleware import get_lane
-from app.data.queries import get_safety_status, set_safety_status
-from app.data.session import get_session
-from app.domain.safety import (
-    PostSafetyRequest,
-    PreSafetyRequest,
-    PreSafetyVerdict,
-    Recall,
-)
-from app.runtime import node
 
 
 @node

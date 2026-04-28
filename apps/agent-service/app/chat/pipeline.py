@@ -24,6 +24,7 @@ from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.tools import ALL_TOOLS
 from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS, header_vars
+from app.chat import pre_safety_gate
 from app.chat.content_parser import parse_content
 from app.chat.context import (
     build_chat_context,
@@ -31,7 +32,6 @@ from app.chat.context import (
     proactive_stimulus_var,
 )
 from app.chat.post_actions import fetch_guard_message, schedule_post_actions
-from app.chat import pre_safety_gate
 from app.chat.stream import (
     StreamState,
     handle_token,

@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.chat.pipeline import _buffer_until_pre
-from app.domain.safety import PreSafetyVerdict
 from app.chat.stream import (
     SPLIT_MARKER,
     StreamState,
@@ -22,6 +21,7 @@ from app.chat.stream import (
     is_content_filter,
     is_length_truncated,
 )
+from app.domain.safety import PreSafetyVerdict
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.data.queries import is_chat_request_completed
+from app.data.queries import get_safety_status, is_chat_request_completed
 
 
 class _ScalarResult:
@@ -66,8 +66,6 @@ async def test_proactive_request_completed_by_existing_assistant_reply(
 
 
 # === get_safety_status ===
-
-from app.data.queries import get_safety_status
 
 
 @pytest.mark.asyncio

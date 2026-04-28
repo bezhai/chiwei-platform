@@ -72,7 +72,11 @@ def test_recall_sink_wire():
 def test_agent_service_bindings():
     _fresh_import()
 
-    from app.nodes.safety import resolve_pre_safety_waiter, run_post_safety, run_pre_safety
+    from app.nodes.safety import (
+        resolve_pre_safety_waiter,
+        run_post_safety,
+        run_pre_safety,
+    )
     from app.runtime.placement import iter_bindings
 
     b = dict(iter_bindings())
