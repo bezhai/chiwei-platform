@@ -70,10 +70,28 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
             rabbitmqClient.ack(msg);
             return;
         }
-        // 达到最大重试次数，nack → DLQ
+        // 达到最大重试次数：在进 DLQ 之前写 recall_failed 终态，
+        // 避免新链路下 status 永远停在 pending（Phase 2 §4.4）
         console.error(
-            `[RecallWorker] Max retries reached for session_id=${session_id}, sending to DLQ`,
+            `[RecallWorker] Max retries reached for session_id=${session_id}, marking recall_failed and sending to DLQ`,
         );
+        try {
+            await repo.update(
+                { session_id },
+                {
+                    safety_status: 'recall_failed',
+                    safety_result: {
+                        reason,
+                        detail,
+                        recalled: 0,
+                        failed: 0,
+                        checked_at: new Date().toISOString(),
+                    },
+                },
+            );
+        } catch (e) {
+            console.error(`[RecallWorker] Failed to write recall_failed status:`, e);
+        }
         rabbitmqClient.nack(msg, false);
         return;
     }
