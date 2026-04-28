@@ -192,11 +192,9 @@ def compile_graph() -> CompiledGraph:
             )
 
     # 5) reject edge modifiers whose engine implementation hasn't landed
-    # yet. Surface exists for design / typing (so tutorials and signatures
-    # can speak the full DSL) but using one without runtime support would
-    # silently no-op and look like the graph "ran" — much worse than a
-    # startup failure. Update or remove these branches once the engine
-    # learns to dispatch them.
+    # yet. (debounce: still TODO; sinks: now dispatched in Phase 2 — see 5b
+    # for the ALL_ROUTES validation that catches typos at boot rather than
+    # at first emit.)
     unimplemented: list[str] = []
     for w in wires:
         if w.debounce is not None:
@@ -205,16 +203,33 @@ def compile_graph() -> CompiledGraph:
                 f"wired up; the engine has no debounce dispatch and the "
                 f"node-signature side (Batched[T]) hasn't been designed"
             )
-        if w.sinks:
-            kinds = sorted({s.kind for s in w.sinks})
-            unimplemented.append(
-                f"wire({w.data_type.__name__}).to(Sink.{kinds[0]}(...)) — "
-                f"sinks are not dispatched by the engine yet; this surface "
-                f"only describes the intended out-of-graph publish"
-            )
     if unimplemented:
         raise GraphError(
             "unimplemented wire features:\n  - " + "\n  - ".join(unimplemented)
+        )
+
+    # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
+    # reference a queue declared in ALL_ROUTES, otherwise the engine
+    # wouldn't know which routing key to use when publishing (lane
+    # fan-out + queue->rk binding live there). Catching this at compile
+    # time means a typo surfaces at boot, not at the first emit.
+    from app.infra.rabbitmq import ALL_ROUTES
+    known_queues = {r.queue for r in ALL_ROUTES}
+    sink_errors: list[str] = []
+    for w in wires:
+        for s in w.sinks:
+            if s.kind == "mq":
+                q = s.params["queue"]
+                if q not in known_queues:
+                    sink_errors.append(
+                        f"wire({w.data_type.__name__}).to(Sink.mq({q!r})): "
+                        f"queue not in ALL_ROUTES; sink dispatch needs a "
+                        f"registered route to know the routing key. "
+                        f"Add Route({q!r}, ...) to ALL_ROUTES first."
+                    )
+    if sink_errors:
+        raise GraphError(
+            "sink dispatch validation failed:\n  - " + "\n  - ".join(sink_errors)
         )
 
     # 6) HTTP source placement: ``register_http_sources`` only mounts on
