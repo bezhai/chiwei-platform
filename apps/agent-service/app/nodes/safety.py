@@ -289,3 +289,68 @@ async def _run_audit(response_text: str) -> _PostAuditOutcome:
 
     # Step 2: LLM audit
     return await _check_output(response_text)
+
+
+# ---------------------------------------------------------------------------
+# Public @node entries
+# ---------------------------------------------------------------------------
+
+from datetime import UTC, datetime
+
+from app.api.middleware import get_lane
+from app.data.queries import get_safety_status, set_safety_status
+from app.data.session import get_session
+from app.domain.safety import (
+    PostSafetyRequest,
+    PreSafetyRequest,
+    PreSafetyVerdict,
+    Recall,
+)
+from app.runtime import node
+
+
+@node
+async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
+    """Audit + 决定是否撤回，单节点完成（Phase 2 §3.2）。
+
+    幂等用 ``safety_status`` 短路：
+      - row 不存在 → raise → DLQ（lark-server INSERT 链路问题）
+      - 已 ``TERMINAL_STATUSES``（passed/blocked/recalled/recall_failed） → return None
+      - pending → 跑 audit；blocked 路径 return Recall（@node 自动 emit -> sink），
+        passed 路径写 status="passed"
+    blocked 路径**不写 status**——recall-worker 会写最终 recalled / recall_failed，
+    避免 race（spec §3.2）。
+    """
+    async with get_session() as s:
+        current = await get_safety_status(s, req.session_id)
+    if current is None:
+        raise RuntimeError(
+            f"agent_responses row missing for session_id={req.session_id}; "
+            f"lark-server must INSERT before agent-service emits "
+            f"PostSafetyRequest"
+        )
+    if current in TERMINAL_STATUSES:
+        logger.info(
+            "post safety short-circuit: session_id=%s already %s",
+            req.session_id, current,
+        )
+        return None
+
+    decision = await _run_audit(req.response_text)
+    checked_at = datetime.now(UTC).isoformat()
+
+    if decision.is_blocked:
+        return Recall(
+            session_id=req.session_id,
+            chat_id=req.chat_id,
+            trigger_message_id=req.trigger_message_id,
+            reason=decision.reason or "unknown",
+            detail=decision.detail,
+            lane=get_lane(),
+        )
+
+    async with get_session() as s:
+        await set_safety_status(
+            s, req.session_id, "passed", {"checked_at": checked_at}
+        )
+    return None
