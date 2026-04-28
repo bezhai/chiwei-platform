@@ -31,7 +31,7 @@ from app.chat.context import (
     proactive_stimulus_var,
 )
 from app.chat.post_actions import fetch_guard_message, schedule_post_actions
-from app.chat.safety import run_pre_check
+from app.chat import pre_safety_gate
 from app.chat.stream import (
     StreamState,
     handle_token,
@@ -96,9 +96,17 @@ async def stream_chat(
             effective_persona = persona_id or header_vars["app_name"].get() or ""
             guard_message = await fetch_guard_message(effective_persona)
 
-            # 3. Pre-safety check (parallel with streaming)
+            # 3. Pre-safety check (parallel with streaming) — Phase 2:
+            # 走 graph：emit(PreSafetyRequest) → run_pre_safety → 装饰器 emit
+            # PreSafetyVerdict → resolve_pre_safety_waiter 把 verdict 塞回
+            # 本进程 Future。run_pre_safety_via_graph 内部 fail-open 集中
+            # 处理 timeout / emit 异常 / 外层 cancel。
             pre_task = asyncio.create_task(
-                run_pre_check(parsed.render(), persona_id=effective_persona)
+                pre_safety_gate.run_pre_safety_via_graph(
+                    message_id=message_id,
+                    content=parsed.render(),
+                    persona_id=effective_persona,
+                )
             )
 
             raw_stream = _build_and_stream(
