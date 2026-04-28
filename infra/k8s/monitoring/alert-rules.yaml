@@ -236,13 +236,23 @@ spec:
 
         # RabbitMQ - 已知业务队列 consumer 断开
         - alert: RabbitmqConsumerDown
-          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize|chat_response).*"} == 0
+          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize|chat_response|durable_.*|memory_fragment_vectorize|memory_abstract_vectorize).*"} == 0
           for: 1m
           labels:
             severity: critical
           annotations:
             summary: "RabbitMQ 业务队列 {{ $labels.queue }} consumer 断开"
             description: "关键业务队列 {{ $labels.queue }} 的 consumer 已断开超过 1 分钟。"
+
+        # RabbitMQ - DLQ 进消息（fail-to-DLQ 设计，进 DLQ 即需 operator 介入）
+        - alert: DeadLettersBacklog
+          expr: rabbitmq_queue_messages_ready{namespace="prod", queue="dead_letters"} > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "dead_letters 队列有消息待处理"
+            description: "{{ $value }} 条消息已进入 DLQ，需根据 docs/superpowers/runbooks/2026-04-dlq-replay.md 排查并决定 replay 或丢弃。"
 
         # chat_response 队列积压超过 20s（10s 是泳道 fallback TTL，20s 说明 prod consumer 也没在消费）
         - alert: ChatResponseQueueBacklog
