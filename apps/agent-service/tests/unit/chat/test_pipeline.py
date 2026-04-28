@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.chat.pipeline import _buffer_until_pre
-from app.chat.safety import PreCheckResult
 from app.chat.stream import (
     SPLIT_MARKER,
     StreamState,
@@ -22,6 +21,7 @@ from app.chat.stream import (
     is_content_filter,
     is_length_truncated,
 )
+from app.domain.safety import PreSafetyVerdict
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,7 +71,12 @@ def _make_pre_task(
     async def _pre():
         if delay:
             await asyncio.sleep(delay)
-        return PreCheckResult(is_blocked=is_blocked, block_reason=block_reason)
+        return PreSafetyVerdict(
+            pre_request_id="test-pr",
+            message_id="test-msg",
+            is_blocked=is_blocked,
+            block_reason=block_reason or None,
+        )
 
     return asyncio.create_task(_pre())
 

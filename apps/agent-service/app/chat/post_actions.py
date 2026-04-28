@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.api.middleware import get_lane
-from app.infra.rabbitmq import SAFETY_CHECK, mq
+from app.domain.safety import PostSafetyRequest
 from app.memory._persona import load_persona
+from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
 
@@ -35,21 +35,23 @@ async def _publish_post_check(
     chat_id: str,
     trigger_message_id: str,
 ) -> None:
-    """Publish post safety check payload to RabbitMQ."""
+    """Emit PostSafetyRequest into the dataflow graph (Phase 2).
+
+    Replaces ``mq.publish(SAFETY_CHECK, ...)``: the wire
+    ``wire(PostSafetyRequest).to(run_post_safety).durable()`` in
+    ``app/wiring/safety.py`` queues the request and the durable consumer
+    bound on agent-service runs the audit.
+    """
     try:
-        await mq.publish(
-            SAFETY_CHECK,
-            {
-                "session_id": session_id,
-                "response_text": response_text,
-                "chat_id": chat_id,
-                "trigger_message_id": trigger_message_id,
-                "lane": get_lane(),
-            },
-        )
-        logger.info("Published post safety check: session_id=%s", session_id)
+        await emit(PostSafetyRequest(
+            session_id=session_id,
+            trigger_message_id=trigger_message_id,
+            chat_id=chat_id,
+            response_text=response_text,
+        ))
+        logger.info("Emitted PostSafetyRequest: session_id=%s", session_id)
     except Exception as e:
-        logger.error("Failed to publish post safety check: %s", e)
+        logger.error("Failed to emit PostSafetyRequest: %s", e)
 
 
 def schedule_post_actions(

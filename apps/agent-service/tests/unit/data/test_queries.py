@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.data.queries import is_chat_request_completed
+from app.data.queries import get_safety_status, is_chat_request_completed
 
 
 class _ScalarResult:
@@ -63,3 +63,44 @@ async def test_proactive_request_completed_by_existing_assistant_reply(
         )
         is expected
     )
+
+
+# === get_safety_status ===
+
+
+@pytest.mark.asyncio
+async def test_get_safety_status_returns_existing_value():
+    """row 存在 + status 字段有值 → 返回 status 字符串。"""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_ScalarResult("pending"))
+
+    result = await get_safety_status(session, "sess-1")
+    assert result == "pending"
+
+
+@pytest.mark.asyncio
+async def test_get_safety_status_returns_none_when_row_missing():
+    """row 不存在 → 返回 None（不抛）。"""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_ScalarResult(None))
+
+    result = await get_safety_status(session, "sess-does-not-exist")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_safety_status_uses_correct_query_and_param():
+    """SELECT safety_status FROM agent_responses WHERE session_id = :sid，参数 sid。"""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_ScalarResult("passed"))
+
+    await get_safety_status(session, "sess-xyz")
+
+    session.execute.assert_awaited_once()
+    args = session.execute.await_args.args
+    sql_obj = args[0]
+    sql_text = str(sql_obj)
+    assert "SELECT safety_status" in sql_text
+    assert "agent_responses" in sql_text
+    assert "WHERE session_id = :sid" in sql_text
+    assert args[1] == {"sid": "sess-xyz"}

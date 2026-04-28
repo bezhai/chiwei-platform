@@ -321,6 +321,22 @@ async def is_chat_request_completed(
     return status in ("completed", "recalled")
 
 
+async def get_safety_status(
+    session: AsyncSession, session_id: str
+) -> str | None:
+    """Read ``safety_status`` from ``agent_responses``; None if row missing.
+
+    Phase 2 ``run_post_safety`` 节点入口判 None 时 raise（让 durable
+    handler 进 DLQ）—— None 不再被当成 fail-open 的 pending 处理，
+    见 spec §3.8 / §4.4。
+    """
+    result = await session.execute(
+        text("SELECT safety_status FROM agent_responses WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+    return result.scalar_one_or_none()
+
+
 async def set_safety_status(
     session: AsyncSession,
     session_id: str,

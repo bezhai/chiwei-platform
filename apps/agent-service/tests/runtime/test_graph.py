@@ -219,16 +219,28 @@ def test_debounce_rejected_until_engine_supports_it():
         compile_graph()
 
 
-def test_sink_rejected_until_engine_dispatches():
-    # Sink.mq is exposed so wire-level docs/tests can talk about it,
-    # but the engine has no sink dispatch yet — wiring it up must
-    # raise rather than silently no-op the publish.
+def test_compile_graph_accepts_wire_with_sink_mq_in_all_routes():
+    """Sink.mq("recall") is in ALL_ROUTES → compile_graph accepts it."""
     @node
     async def f(m: M) -> None: ...
 
-    wire(M).to(f, Sink.mq("test_queue"))
-    with pytest.raises(GraphError, match="Sink.*not dispatched|sinks are not"):
+    wire(M).to(f, Sink.mq("recall"))  # recall is in ALL_ROUTES
+
+    g = compile_graph()
+    assert any(s.kind == "mq" for w in g.wires for s in w.sinks)
+
+
+def test_compile_graph_rejects_sink_mq_with_unknown_queue():
+    """Sink.mq("not_in_routes") raises at compile time."""
+    @node
+    async def f(m: M) -> None: ...
+
+    wire(M).to(f, Sink.mq("not_in_routes"))
+
+    with pytest.raises(GraphError) as excinfo:
         compile_graph()
+    assert "not_in_routes" in str(excinfo.value)
+    assert "ALL_ROUTES" in str(excinfo.value)
 
 
 def test_http_source_consumer_must_be_in_default_app():

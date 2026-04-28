@@ -51,6 +51,20 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
     const repo = AppDataSource.getRepository(AgentResponse);
     const agentResponse = await repo.findOneBy({ session_id });
 
+    // Phase 2: 终态短路，防止重复 Recall 把 recalled 覆盖成 recall_failed。
+    // run_post_safety 的 TERMINAL_STATUSES short-circuit 假设 recall-worker
+    // 不会改写终态；这里对称做一次入口检查。
+    if (
+        agentResponse?.safety_status === 'recalled' ||
+        agentResponse?.safety_status === 'recall_failed'
+    ) {
+        console.info(
+            `[RecallWorker] short-circuit: session_id=${session_id} already ${agentResponse.safety_status}`,
+        );
+        rabbitmqClient.ack(msg);
+        return;
+    }
+
     if (!agentResponse || agentResponse.replies.length === 0) {
         // replies 还未保存（race condition），延时重投
         const retryCount = (msg.properties.headers?.['x-retry-count'] as number) || 0;
@@ -70,10 +84,28 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
             rabbitmqClient.ack(msg);
             return;
         }
-        // 达到最大重试次数，nack → DLQ
+        // 达到最大重试次数：在进 DLQ 之前写 recall_failed 终态，
+        // 避免新链路下 status 永远停在 pending（Phase 2 §4.4）
         console.error(
-            `[RecallWorker] Max retries reached for session_id=${session_id}, sending to DLQ`,
+            `[RecallWorker] Max retries reached for session_id=${session_id}, marking recall_failed and sending to DLQ`,
         );
+        try {
+            await repo.update(
+                { session_id },
+                {
+                    safety_status: 'recall_failed',
+                    safety_result: {
+                        reason,
+                        detail,
+                        recalled: 0,
+                        failed: 0,
+                        checked_at: new Date().toISOString(),
+                    },
+                },
+            );
+        } catch (e) {
+            console.error(`[RecallWorker] Failed to write recall_failed status:`, e);
+        }
         rabbitmqClient.nack(msg, false);
         return;
     }

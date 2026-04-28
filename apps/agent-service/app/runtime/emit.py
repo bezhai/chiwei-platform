@@ -86,6 +86,13 @@ async def emit(data: Data) -> None:
                     continue
                 kwargs = await _resolve_inputs(c, data, w)
                 await c(**kwargs)
+        # Phase 2: sink dispatch — out-of-graph publish (RabbitMQ).
+        # compile_graph 已校验 Sink.mq(name) ∈ ALL_ROUTES，这里直接调。
+        for s in w.sinks:
+            if s.kind == "mq":
+                from app.runtime.sink_dispatch import _dispatch_mq_sink
+
+                await _dispatch_mq_sink(s, data)
 
 
 async def _resolve_inputs(consumer, data: Data, wire_spec) -> dict:
