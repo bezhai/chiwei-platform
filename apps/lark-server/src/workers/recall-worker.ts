@@ -51,6 +51,20 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
     const repo = AppDataSource.getRepository(AgentResponse);
     const agentResponse = await repo.findOneBy({ session_id });
 
+    // Phase 2: 终态短路，防止重复 Recall 把 recalled 覆盖成 recall_failed。
+    // run_post_safety 的 TERMINAL_STATUSES short-circuit 假设 recall-worker
+    // 不会改写终态；这里对称做一次入口检查。
+    if (
+        agentResponse?.safety_status === 'recalled' ||
+        agentResponse?.safety_status === 'recall_failed'
+    ) {
+        console.info(
+            `[RecallWorker] short-circuit: session_id=${session_id} already ${agentResponse.safety_status}`,
+        );
+        rabbitmqClient.ack(msg);
+        return;
+    }
+
     if (!agentResponse || agentResponse.replies.length === 0) {
         // replies 还未保存（race condition），延时重投
         const retryCount = (msg.properties.headers?.['x-retry-count'] as number) || 0;
