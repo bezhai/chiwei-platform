@@ -1,8 +1,15 @@
 # Dataflow Phase 3 — Drift / Afterthought 进 Graph
 
-**状态**: Draft v4 (2026-04-29，吸收 reviewer 第 3 轮 5 条意见)
+**状态**: Draft v5 (2026-04-29，吸收 reviewer 第 4 轮 5 条意见)
 **前置**: PR #203 (Phase 2 safety) + PR #204 (followup) shipped to prod
 **后续**: Phase 4 Life Engine / Schedule / Glimpse
+
+**v5 关键变化（vs v4）**：
+- 业务节点锁冲突时改调 `runtime.debounce.reschedule(trigger)` 而非 `emit(trigger)`：reschedule 内部仅 SET latest + publish delay，**不 INCR count**。修 round-4 M1：v4 用普通 emit 让 self-emit 占 1 个 buffer，max_buffer=1 时会 0-delay 自旋，max_buffer>1 时让真实事件少 1 条就提前 fire；作为 runtime primitive 不应让 synthetic reschedule 污染业务 count（承认 v3 我反驳"加 reschedule API"是错的，atomic claim 修不了 self-emit 自身 INCR 这一类问题）
+- spec 明确 DLQ replay 边界：atomic claim 在 consumer 前清 count = 0，所以 consumer 抛异常进 DLQ 后 replay **只恢复 fire 信号，不恢复累计 count**（drift / afterthought 不依赖 count，可接受）。修 round-4 M2
+- §5.1 / §8.4 加 `infra/rabbitmq.py` 单测条目：`_build_queue_args(prod_rk, lane, lane_fallback=False)` 必须不含 `x-message-ttl` + `x-dead-letter-*`（修 round-4 M3）
+- §4.3 表述修正：旧锁过期场景说"compare-and-delete token mismatch → 不删新锁"，不是模糊的"DEL 是 no-op"（修 round-4 L4）
+- §8.2 校验清单注释统一成"全部 9 项"（修 round-4 L5）
 
 **v4 关键变化（vs v3）**：
 - 全文 `redis = get_redis()` → `redis = await get_redis()`（修 round-3 H1：`get_redis` 是 `async def`，不 await 拿到 coroutine 第一次调用就炸）
@@ -140,19 +147,21 @@ return 0
 
 @node
 async def drift_check(trigger: DriftTrigger) -> None:
-    """Single-flight per (chat, persona). 锁冲突 → self-emit 让 timer 链恢复。"""
+    """Single-flight per (chat, persona). 锁冲突 → reschedule 让 timer 链恢复。"""
     lock_key = f"phase2:drift:{trigger.chat_id}:{trigger.persona_id}"
     token = uuid.uuid4().hex
     redis = await get_redis()
     if not await redis.set(lock_key, token, nx=True, ex=600):
-        # phase2 在跑 → self-emit 一个 trigger 让 timer 链自己恢复，
+        # phase2 在跑 → reschedule 一个 trigger 让 timer 链自己恢复
         # 避免 phase2 期间被 fire 的事件因为锁冲突而真丢
+        # 用 runtime.debounce.reschedule 而非 emit：仅 SET latest + publish delay，
+        # 不 INCR count，避免 synthetic reschedule 占用业务 buffer 名额
         logger.info(
             "drift_check: phase2 in flight for chat_id=%s persona=%s, requeue",
             trigger.chat_id, trigger.persona_id,
         )
-        from app.runtime.emit import emit
-        await emit(DriftTrigger(
+        from app.runtime.debounce import reschedule
+        await reschedule(DriftTrigger(
             chat_id=trigger.chat_id, persona_id=trigger.persona_id,
         ))
         return
@@ -174,8 +183,8 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
             "afterthought_check: phase2 in flight for chat_id=%s persona=%s, requeue",
             trigger.chat_id, trigger.persona_id,
         )
-        from app.runtime.emit import emit
-        await emit(AfterthoughtTrigger(
+        from app.runtime.debounce import reschedule
+        await reschedule(AfterthoughtTrigger(
             chat_id=trigger.chat_id, persona_id=trigger.persona_id,
         ))
         return
@@ -185,13 +194,13 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
         await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
 ```
 
-**业务幂等机制（single-flight + 锁冲突 self-emit + token 化释放）**：
+**业务幂等机制（single-flight + 锁冲突 reschedule + token 化释放）**：
 
 - redis `SET lock_key token NX EX <ttl>`，TTL = 600s (drift) / 900s (afterthought)，兜底防泄漏（异常 finally 释放 + TTL 自动过期）
 - **token 化释放**（reviewer round-2 H2 修法）：每次拿锁生成 uuid token；finally 调 Lua compare-and-delete，仅当 redis 上仍是自己 token 时才 DEL。LLM 卡超过 TTL 时锁已失效 + 新 fire 已 SETNX 拿到新 token，旧 finally 不会误删新锁
-- **锁冲突 → self-emit 同类型 trigger**：让 publish 路径写新 latest + 重置 count + 起新一轮 timer。等 phase2 跑完 + 新一轮 timer 到期 → handler 拿到，比对 latest match，跑 consumer，拿到锁正常处理。这是修 round-1 H1 (phase2 期间事件丢) 的关键：不让 fire 信号"消化掉就消失"
-- self-emit 不会无限循环：handler 端是 conditional DEL（仅删自己 trigger_id；见 §3.4.3 Lua），phase2 释放锁后下一轮 fire 拿到的 trigger_id 跟 latest 一致，正常处理
-- self-emit 链最坏情况：phase2 跑超 N 秒（drift LLM ~10s vs `settings.identity_drift_debounce_seconds` 通常 60s+，afterthought LLM ~30s vs 300s，安全余量充足）。极端 case 下 self-emit 链按 N 秒拍数延迟，最终 phase2 完成时正常处理，无丢失
+- **锁冲突 → 调 `runtime.debounce.reschedule(SameTrigger)`**：runtime 内部仅 `SET latest + publish delay`（**不 INCR count**），让 timer 链恢复但不污染业务 buffer。等 phase2 跑完 + 新一轮 timer 到期 → handler 拿到，比对 latest match，跑 consumer，拿到锁正常处理。这是修 round-1 H1 (phase2 期间事件丢) + round-4 M1 (synthetic reschedule 不应占 buffer) 的关键：不让 fire 信号"消化掉就消失"，也不让 reschedule 触发假 max_buffer fire
+- reschedule 链不会无限循环：handler 端是 conditional DEL（仅删自己 trigger_id；见 §3.4.3 Lua），phase2 释放锁后下一轮 fire 拿到的 trigger_id 跟 latest 一致，正常处理
+- reschedule 链最坏情况：phase2 跑超 N 秒（drift LLM ~10s vs `settings.identity_drift_debounce_seconds` 通常 60s+，afterthought LLM ~30s vs 300s，安全余量充足）。极端 case 下 reschedule 链按 N 秒拍数延迟，最终 phase2 完成时正常处理，无丢失。**reschedule 不 INCR count**，所以即使链多次循环也不会触发假 max_buffer fire
 - TTL 选 600/900 是给 LLM 卡死余量（drift 约 10s LLM、afterthought 约 30s LLM；TTL 是异常 timeout 层级，不是预期路径）
 
 ### 3.3 Wiring（`apps/agent-service/app/wiring/memory.py`）
@@ -368,9 +377,10 @@ return {n, fire_now}
 """
 
 # Lua (handler atomic claim): stale check + clear count 一气呵成。
-# 关键作用：handler 进 consumer 之前先把 count 归零，这样 consumer 锁冲突
-# self-emit 走 publish_debounce 时 INCR count 从 0 重新攒，不会跟"原始
-# 业务事件累积"混在一起污染 max_buffer 触发（reviewer round-3 H2）。
+# 关键作用：handler 进 consumer 之前先把 count 归零，避免业务真新事件
+# 在 phase2 期间 INCR count 跟"原始业务事件累积"混在一起污染 max_buffer
+# 触发（reviewer round-3 H2）。consumer 锁冲突路径走 reschedule（不 INCR count，
+# 见 §3.4.3 reschedule 函数）。
 # stale check 与 count clear 必须 atomic：只有"我成功 claim 了这一轮 fire"
 # 才允许动 count；如果 latest 已经被新事件覆盖，本次消息直接 drop。
 _CLAIM_LUA = """
@@ -382,7 +392,7 @@ return 1
 """
 
 # Lua (handler conditional DEL): 仅当 latest == trigger_id 时 DEL latest+count。
-# 关键作用：consumer 完成后 cleanup 不会误删 self-emit 写入的新 latest，
+# 关键作用：consumer 完成后 cleanup 不会误删 reschedule 写入的新 latest，
 # 也保证 consumer 抛异常时 latest 保留供 DLQ replay (reviewer round-1 H1 + H2)
 _CONDITIONAL_DEL_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -428,6 +438,69 @@ async def publish_debounce(w: WireSpec, consumer, data: Data) -> None:
     await mq.publish(_route_for(w, consumer), body, headers=headers, delay_ms=delay_ms)
 
 
+# Lua (reschedule): 仅 SET latest + EXPIRE，不 INCR count。
+# 用于业务节点锁冲突时"重排 timer"语义 —— 跟 publish_debounce 区别在于
+# reschedule 不算业务事件，不影响 max_buffer 计数（reviewer round-4 M1）
+_RESCHEDULE_LUA = """
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1
+"""
+
+
+async def reschedule(data: Data) -> None:
+    """业务节点锁冲突时的"重排 timer" API。
+
+    跟 publish_debounce 的区别：
+      - 不 INCR count（synthetic reschedule 不应占用业务 buffer 名额）
+      - 不会触发 max_buffer immediate fire
+      - 仅 SET latest + publish delay 消息
+      - 适合 single-flight 业务节点 phase2 跑期间收到的"二次 fire 信号"
+
+    实现上：从 WIRING_REGISTRY 找匹配的 .debounce() wire（compile_graph 已
+    保证每个 DataType 至多一条 .debounce() wire + exactly 1 consumer），
+    取它的 seconds/key_by/consumer，写 redis latest + publish delay 消息。
+    """
+    from app.runtime.wire import WIRING_REGISTRY
+    matches = [
+        w for w in WIRING_REGISTRY
+        if w.data_type is type(data) and w.debounce is not None
+    ]
+    if not matches:
+        raise RuntimeError(
+            f"reschedule({type(data).__name__}): no .debounce() wire registered"
+        )
+    if len(matches) > 1:
+        # compile_graph 已经保证不会发生
+        raise RuntimeError(
+            f"reschedule({type(data).__name__}): "
+            f"multiple .debounce() wires (compile_graph bug)"
+        )
+    w = matches[0]
+    consumer = w.consumers[0]
+    key = w.debounce_key_by(data)
+    seconds = w.debounce["seconds"]
+    trigger_id = uuid.uuid4().hex
+    redis = await get_redis()
+    redis_latest = f"debounce:latest:{w.data_type.__name__}:{key}"
+    ttl_seconds = max(seconds * 2, _DEFAULT_TTL_SECONDS)
+
+    await redis.eval(_RESCHEDULE_LUA, 1, redis_latest, trigger_id, ttl_seconds)
+
+    body = {
+        "trigger_id": trigger_id,
+        "data": data.model_dump(mode="json"),
+        "key": key,
+        "fire_now": False,  # reschedule 永远走 delay path
+    }
+    headers = {
+        "trace_id": trace_id_var.get() or "",
+        "lane": lane_var.get() or "",
+        "data_type": type(data).__name__,
+    }
+    await mq.publish(_route_for(w, consumer), body, headers=headers,
+                     delay_ms=seconds * 1000)
+
+
 def _build_handler(w: WireSpec, consumer):
     data_cls = w.data_type
     param_name = next(iter(inputs_of(consumer)))
@@ -461,10 +534,10 @@ def _build_handler(w: WireSpec, consumer):
                 redis_count = f"debounce:count:{data_cls.__name__}:{key}"
 
                 # Atomic claim: stale check (latest == trigger_id?) + clear count = 0。
-                # 修 reviewer round-3 H2：consumer 锁冲突 self-emit 时 publish_debounce
-                # 会 INCR count，如果不在 handler 进 consumer 前清零，self-emit 链
-                # 会让 count 在旧业务积累上继续涨，长 phase2 下可能错误触发 max_buffer。
-                # 这里 atomic claim 保证：只有真"认领这一轮 fire"才动 count，stale
+                # 修 round-3 H2：consumer 进入前先清 count，避免业务事件累积进入
+                # consumer 时 phase2 期间又来真新事件 INCR count 会一路涨。
+                # round-4 M1 进一步把 reschedule 拆成不 INCR count 的内部 API；
+                # 这里 atomic claim 仍保证只有真"认领这一轮 fire"才动 count，stale
                 # 消息直接 drop。
                 # NOTE: redis client 配 decode_responses=True，不需要 latest.decode()。
                 ttl_seconds = max(w.debounce["seconds"] * 2, _DEFAULT_TTL_SECONDS)
@@ -486,14 +559,15 @@ def _build_handler(w: WireSpec, consumer):
                     data_cls.__name__, key, trigger_id,
                 )
 
-                # Consumer 在 try 内调用：成功 / 锁冲突 self-emit 都正常返回；
+                # Consumer 在 try 内调用：成功 / 锁冲突 reschedule 都正常返回；
                 # 抛异常 → 跳过 conditional DEL，进 DLQ → DLQ replay 时
-                # latest 还在，可以重新跑（reviewer H2 修法）
+                # latest 还在，可以重新跑 fire 信号（reviewer round-1 H2 + round-4 M2：
+                # count 已被 atomic claim 清成 0，replay 不恢复积累计数）
                 await consumer(**{param_name: obj})
 
                 # 完成后 conditional DEL：只删自己 trigger_id 对应的状态。
-                # 如果 consumer 自己 self-emit 覆盖了 latest（锁冲突路径），
-                # 这里 DEL 不动，新 latest+count 保留供下一轮 fire。
+                # 如果 consumer 自己调 reschedule 覆盖了 latest（锁冲突路径），
+                # 这里 DEL 不动，新 latest 保留供下一轮 fire。
                 await redis.eval(
                     _CONDITIONAL_DEL_LUA, 2,
                     redis_latest, redis_count,
@@ -626,9 +700,10 @@ def _build_queue_args(prod_rk: str, lane: str | None,
 - **不用 redis ZSET**：仅一对 SET (latest) + INCR (count)，状态紧凑
 - **stale check 由 trigger_id 比对决定**：拿到 delay 消息时比对 redis latest，不匹配就 drop（消息正常 ack）—— publish-then-drop 模式，QPS 不高场景可接受（用户已确认）。**fire_now 消息也走 stale check**（避免 backlog 中旧 fire_now 重复触发，reviewer H3）
 - **max_buffer atomic 重置 count**：Lua 在 `count >= max_buffer` 时原子 `SET count = 0`，保证每轮只一条 immediate fire 消息携带正确的 trigger_id；下一条 publish 从 1 重新攒
-- **Atomic claim before consumer**（reviewer round-3 H2）：handler 在调 consumer 前用 Lua 一气呵成做"stale check + clear count = 0"。进 consumer 前清零保证：consumer 锁冲突时 self-emit 走 `publish_debounce`，INCR count 从 0 重新攒；否则旧业务积累的 count + self-emit 链每次 INCR 会让 count 一路涨到 max_buffer 错误触发 immediate fire
+- **Atomic claim before consumer**（reviewer round-3 H2 + round-4 M2）：handler 在调 consumer 前用 Lua 一气呵成做"stale check + clear count = 0"。进 consumer 前清零是修 round-3 H2 的关键。注意副作用：consumer 抛异常进 DLQ 后 replay 只恢复 fire 信号本身，不恢复"那一轮的 count"（drift / afterthought 不依赖 count，可接受）
+- **Reschedule (not emit) on lock contention**（reviewer round-4 M1）：业务节点锁冲突时调 `runtime.debounce.reschedule(SameTrigger)` —— 仅 SET latest + publish delay，不 INCR count。如果走普通 `emit` 会让 reschedule 占 1 个 max_buffer 名额，max_buffer=1 时形成 0-delay 自旋，max_buffer>1 时让真实事件少 1 条就触发 fire
 - **Conditional DEL on consumer success**：handler 调 consumer 完成后才 DEL，**且仅 DEL 自己 trigger_id 对应的状态**（Lua compare-and-delete）。这同时解决：
-  - reviewer H1：consumer 锁冲突 self-emit 覆盖了 latest → conditional DEL 不动，新 latest+count 保留供下一轮 fire
+  - reviewer H1：consumer 锁冲突 reschedule 覆盖了 latest → conditional DEL 不动，新 latest 保留供下一轮 fire
   - reviewer H2：consumer 抛异常 → 跳过 DEL，DLQ replay 时 latest 还在
 - **TTL = max(seconds * 2, 86400s = 24h)**：覆盖典型停机/恢复窗口（reviewer H4）；redis 内存占用低（活跃 chat × persona 量级，每 key 两个标量）
 - **不写 `insert_idempotent`**：transient data type，没有 pg 表（runtime/migrator.py 跳过 transient）
@@ -739,6 +814,8 @@ grep -rn "from app.memory.debounce\|from app.memory.drift\|from app.memory.after
 
 **跟现状对比**：旧 in-memory debouncer 重启后 `_buffers` / `_timers` 全丢，连同所有"已 publish 成功的 trigger"一起丢；新架构 24h 内不丢已成功 publish 的 trigger。
 
+**DLQ replay 的边界（reviewer round-4 M2）**：consumer 抛异常时 handler 跳过 conditional DEL → latest 保留供 DLQ replay。但 atomic claim 在 consumer 之前已经把 count 清成 0（见 §3.4.3 handler），所以 **DLQ replay 只恢复 fire 信号本身（trigger_id + 那条原始 Data），不恢复"积累期 count"**。drift / afterthought 不依赖 count（fire 是幂等检查信号，下游从 db 拉时间窗口），可接受；如果将来某个新业务依赖"那一轮攒了多少事件"信息，需要重新设计 atomic claim 时机。
+
 ### 4.2 迁移期 in-flight 状态
 
 切换瞬间（部署 = 杀 Pod，CLAUDE.md "部署铁律"）：
@@ -747,27 +824,27 @@ grep -rn "from app.memory.debounce\|from app.memory.drift\|from app.memory.after
 
 **不需要兜底**：drift / afterthought 是"持续触发"管线，下次新消息来时自然触发新一轮。Migration 期间最多丢一两个未触发的 cycle，业务无感（drift 的偏差是几个分钟一档；afterthought 没生成的 fragment 等下次 chat 又会重启 timer）。
 
-### 4.3 Single-flight 锁泄漏 + self-emit 链行为
+### 4.3 Single-flight 锁泄漏 + reschedule 链行为
 
 redis SETNX 锁 TTL = 600s/900s 是兜底防泄漏。正常路径 `finally` 释放；异常路径靠 TTL 自动过期。
 
 **已知边界 case**：
-- 节点 LLM 卡住超过 TTL → 锁自然过期，新一轮 fire 拿到锁开始处理 → **可能重复 LLM 调用**（旧 phase2 跑完 finally 释放，但锁此时已过期失效，DEL 是 no-op，无害）
+- 节点 LLM 卡住超过 TTL → 锁自然过期，新一轮 fire SETNX 拿到新锁（持有新 token）开始处理 → **可能重复 LLM 调用**。旧 phase2 跑完 finally 调 Lua compare-and-delete，redis 上的 token 已经不是自己 → 不动新锁；新 phase2 finally 删自己的 token 释放新锁。**关键**：必须用 token 化 compare-and-delete（见 §3.2 `_LOCK_RELEASE_LUA`），裸 `redis.delete(lock_key)` 在这里会**误删新锁**让第三个 fire 也能拿到锁、跟新 phase2 同时跑（reviewer round-2 H2）
 - 进程崩溃 → 锁靠 TTL 释放
 - TTL 选 600/900 是给 LLM "异常 timeout" 余量；正常路径都在 30s 内
 
-**self-emit 链行为**（reviewer H1 修法的 runtime 视角）：
+**Reschedule 链行为**（reviewer round-1 H1 + round-4 M1 修法的 runtime 视角）：
 
-锁冲突时 drift_check / afterthought_check 调 `await emit(SameTrigger)`：
-- 走 publish_debounce → 写新 latest（覆盖旧 trigger_id）+ INCR count + publish 新 delay 消息
-- handler 当前 trigger_id 完成（`return`），调 conditional DEL → latest != 当前 trigger_id（已被 self-emit 覆盖）→ 不 DEL → 新 latest+count 保留
-- 新 delay 消息 N 秒后到期 → handler 拿到 → 比对 latest match → 调 consumer → 拿到锁正常处理
+锁冲突时 drift_check / afterthought_check 调 `await runtime.debounce.reschedule(SameTrigger)`：
+- 走 reschedule（**不**走 publish_debounce）→ 仅 SET latest（覆盖旧 trigger_id）+ publish delay 消息；**不 INCR count**
+- handler 当前 trigger_id 完成（`return`），调 conditional DEL → latest != 当前 trigger_id（已被 reschedule 覆盖）→ 不 DEL → 新 latest 保留（count 仍是 atomic claim 时清成的 0，没人动）
+- 新 delay 消息 N 秒后到期 → handler 拿到 → atomic claim 比对 latest match → 调 consumer → 拿到锁正常处理
 
-self-emit 链最坏情况（phase2 跑超 N）：每轮 N 秒 publish 一次直到 phase2 完成。LLM 卡到 TTL 极限（600s/900s）也只是 N=60s/300s 的几次循环 publish，开销可忽略。
+reschedule 链最坏情况（phase2 跑超 N）：每轮 N 秒 publish 一次直到 phase2 完成。LLM 卡到 TTL 极限（600s/900s）也只是 N=60s/300s 的几次循环 publish，开销可忽略。
 
-**self-emit 链不会**：
-- 触发新 fire_now（self-emit 时 publish 端 INCR count，但 count 重新从 1 开始，不会立即达 max_buffer）
-- 死循环（每次 self-emit 都走 N 秒 delay；phase2 释放后下一轮 fire 必然能拿锁）
+**reschedule 链不会**：
+- 触发假 max_buffer fire（reschedule 不 INCR count，链上每一拍 count 维持 atomic claim 时的 0；只有真新业务事件能 INCR count；reviewer round-4 M1）
+- 死循环（每次 reschedule 都走 N 秒 delay；phase2 释放后下一轮 fire 必然能拿锁）
 
 ### 4.4 LLM 调用 / langfuse trace
 
@@ -803,7 +880,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 ### 4.8 灰度
 
 - 泳道部署 `phase3-debounce`，单镜像（agent-service，三个 Deployment 同步发布）
-- bind dev bot，跑 §5.5 四类
+- bind dev bot，跑 §5.6 四类
 - 重启验证：触发后通过 `/ops` skill 重启泳道 Pod → 看 mq 上 delay 消息存活 + 重启后 consumer 接管 → drift_check 仍触发（**禁止 `kubectl rollout restart`**，遵守 CLAUDE.md 基础设施约束）
 
 ## 5. 测试
@@ -816,15 +893,20 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
   - **max_buffer 之后下一条**：count 从 1 重新攒，不再 fire_now=True；只有这第一条 immediate fire 携带"那一轮"trigger_id
   - 多事件覆盖：第二次 publish 后 redis latest 是新 trigger_id，旧 trigger_id 的 delay 消息后续消费时会 drop
 - `_build_handler`（fake redis + fake mq + mock consumer）：
-  - latest 匹配 → 调下游 → conditional DEL 仅删自己 trigger_id
-  - latest 不匹配 → ack drop + 不调下游
-  - latest 为 None（TTL 过期）→ ack drop + 不调下游
-  - **`fire_now=True` 但 trigger_id 已被 backlog 旧 fire_now 错位**：handler 仍 stale check → drop（reviewer H3）
-  - **consumer 完成后 self-emit 覆盖 latest**：handler conditional DEL 跳过（latest != 自己），新 latest+count 保留
-  - **consumer 抛异常**：跳过 conditional DEL（latest 保留供 DLQ replay）+ mq nack 进 DLQ（reviewer H2）
-  - **consumer 锁冲突 self-emit 后正常返回**：handler 视为成功 → conditional DEL → latest 已被 self-emit 覆盖 → DEL 跳过
+  - latest 匹配 → atomic claim 成功（count 被清 0）→ 调下游 → conditional DEL 仅删自己 trigger_id
+  - latest 不匹配 → atomic claim 返回 0 → ack drop + 不调下游 + count 不动
+  - latest 为 None（TTL 过期）→ atomic claim 返回 0 → ack drop + 不调下游
+  - **`fire_now=True` 但 trigger_id 已被 backlog 旧 fire_now 错位**：handler 仍 atomic claim → 失败 drop（reviewer round-1 H3）
+  - **consumer 完成后 reschedule 覆盖 latest**：handler conditional DEL 跳过（latest != 自己），新 latest 保留供下一轮 fire
+  - **consumer 抛异常**：跳过 conditional DEL（latest 保留供 DLQ replay；count 已经被 atomic claim 清成 0，replay 仅恢复 fire 信号；reviewer round-2 H2 + round-4 M2）+ mq nack 进 DLQ
+  - **consumer 锁冲突调 reschedule 后正常返回**：handler 视为成功 → conditional DEL → latest 已被 reschedule 覆盖 → DEL 跳过
+- `reschedule`（fake redis + fake mq + setup wire）：
+  - 调用后 redis latest 被 SET 成新 trigger_id；**count 不变**（验证不 INCR）
+  - mq publish 一条 delay 消息；fire_now=False
+  - WIRING_REGISTRY 没匹配 wire → raise RuntimeError
+  - 跟 publish_debounce 共存 wire 时不互相干扰
 
-### 5.2 compile_graph 校验测试
+### 5.2 compile_graph 校验测试（**必须覆盖 9 项 reject + 1 项 accept**）
 
 - `wire(T).debounce(...)` (单 consumer + transient T + key_by) 通过校验
 - `wire(T).debounce().durable()` raise GraphError
@@ -837,25 +919,33 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - 非 transient data type 上 `.debounce()` raise GraphError
 - 缺 `key_by` raise GraphError
 
-### 5.3 节点单元测试
+### 5.3 Infra `_build_queue_args` lane_fallback 测试（reviewer round-4 M3）
 
-- `drift_check`（mock redis + mock `_run_drift` + mock emit）：
+- `_build_queue_args(prod_rk, lane=None, lane_fallback=True)` 返回 `{x-dead-letter-exchange: DLX_NAME}`（prod queue 不受 lane_fallback 影响）
+- `_build_queue_args(prod_rk, lane="dev", lane_fallback=True)` 返回的 args 包含 `x-message-ttl=10000` + `x-dead-letter-exchange=EXCHANGE_NAME` + `x-dead-letter-routing-key=prod_rk` + `x-expires`（lane queue 默认走 fallback）
+- `_build_queue_args(prod_rk, lane="dev", lane_fallback=False)` 返回的 args **不含** `x-message-ttl` / `x-dead-letter-exchange` / `x-dead-letter-routing-key`，仅含 `x-expires`（debounce 用，长延迟消息留在 lane 不 fallback 到 prod）
+- `Route("q", "rk")` 默认 `lane_fallback=True`；`Route("q", "rk", lane_fallback=False)` 字段正确传递
+
+### 5.4 节点单元测试
+
+- `drift_check`（mock redis + mock `_run_drift` + mock `runtime.debounce.reschedule`）：
   - 拿到锁 → 调 `_run_drift` → 释放锁（compare-and-delete 用自己的 token）
-  - **没拿到锁 → 调 `emit(DriftTrigger(...))` self-emit → 不调 `_run_drift`**（reviewer round-1 H1）
+  - **没拿到锁 → 调 `reschedule(DriftTrigger(...))`（不是 emit！）→ 不调 `_run_drift`**（reviewer round-1 H1 + round-4 M1）
   - `_run_drift` 抛异常 → finally 释放锁
   - **lock token 化**（reviewer round-2 H2）：mock `_run_drift` 跑超 TTL → 锁过期 → 模拟新 fire 占用 lock_key 写入新 token → 旧 finally 调 Lua → redis 上 token 已不是自己 → 不 DEL → 新锁保留
-- `afterthought_check`：同上模式（self-emit AfterthoughtTrigger）
+- `afterthought_check`：同上模式（reschedule AfterthoughtTrigger）
 - `_run_drift` / `_generate_fragment` / `_recent_timeline` / `_build_scene`：原 `tests/memory/` 单测搬到 `tests/nodes/test_memory_pipelines.py`，断言不变
 
-### 5.4 端到端集成（in-memory mq + redis fake）
+### 5.5 端到端集成（in-memory mq + redis fake）
 
 - emit DriftTrigger → wait debounce timer → 确认 drift_check 被调
 - 多次 emit 在 debounce window 内 → 仅触发一次 drift_check
 - max_buffer 触发：emit max_buffer 次 → 立即触发一次 drift_check（不是多次）
-- **phase2 抢占场景（reviewer H1 端到端）**：mock _run_drift sleep 远超 debounce → emit 一次拿锁开始跑 → emit 第二次锁冲突 self-emit → 等 timer + phase2 → 第二次 fire 拿到锁正常处理；最终 _run_drift 共调用 2 次（不是 1 次也不是 dead loop）
+- **phase2 抢占场景**：mock `_run_drift` sleep 远超 debounce → emit 一次拿锁开始跑 → emit 第二次锁冲突 reschedule → 等 timer + phase2 → 第二次 fire 拿到锁正常处理；最终 `_run_drift` 共调用 2 次（不是 1 次也不是 dead loop）（reviewer round-1 H1 + round-4 M1）
+- **reschedule 不污染 max_buffer（reviewer round-4 M1）**：mock `_run_drift` 长时间卡住 → 多次 reschedule 调用 → redis count 始终保持 atomic claim 后的状态（不被 reschedule INCR）→ 业务真新事件来了之后 max_buffer 触发还是按真实事件数算，不被 reschedule 提前触发
 - 跨 (chat_id, persona_id) 的并发：互不干扰
 
-### 5.5 泳道集成测试
+### 5.6 泳道集成测试
 
 部署到 `phase3-debounce` 泳道，bind dev bot 跑下面四类：
 1. 群里发 1 条消息后等 N 秒 → drift 触发（`make logs APP=agent-service KEYWORD="debounce fire"` + `KEYWORD="drift_check"` 各一条）
@@ -880,7 +970,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 
 切换步骤：
 
-1. 泳道部署 `phase3-debounce` + bind dev bot，跑 §5.5 五类全过
+1. 泳道部署 `phase3-debounce` + bind dev bot，跑 §5.6 五类全过
 2. 检查泳道 mq 上 `debounce_drift_trigger_drift_check_phase3-debounce` + `debounce_afterthought_trigger_afterthought_check_phase3-debounce` 队列正常 declare 且消费正常
 3. ship：release `agent-service` / `arq-worker` / `vectorize-worker` 到 prod
 4. 部署后 5min 观察：
@@ -927,12 +1017,13 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - [ ] runtime 内所有 `get_redis()` 调用都 `await`（`async def get_redis`）
 - [ ] `runtime/emit.py` 的 wire dispatch 循环顶部包含 `if w.debounce is not None` 分支并 `continue`
 - [ ] `compile_graph` 接受合法 `.debounce()` wire
-- [ ] `compile_graph` 拒绝（**全部 8 项**）：缺 `key_by` / 非 transient data type / `.debounce().durable()` / `.debounce().as_latest()` / `.debounce().with_latest(...)` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
+- [ ] `compile_graph` 拒绝（**全部 9 项**）：缺 `key_by` / 非 transient data type / `.debounce().durable()` / `.debounce().as_latest()` / `.debounce().with_latest(...)` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
+- [ ] `runtime/debounce.py` 提供 `reschedule(data: Data)` 函数：仅 `SET latest + publish delay`，**不 INCR count**；从 WIRING_REGISTRY 找匹配 wire（compile_graph 已保证唯一）
 
 ### 8.3 业务节点（`app/nodes/memory_pipelines.py`）
 
 - [ ] `drift_check` / `afterthought_check` SETNX lock 时存 uuid token，finally 走 Lua compare-and-delete 释放，**不能用裸 `redis.delete(lock_key)`**
-- [ ] 锁冲突时 self-emit 同类型 trigger（不直接 return）
+- [ ] 锁冲突时调 `runtime.debounce.reschedule(SameTrigger)`（**不能用 `emit`**，否则 reschedule 会被记成业务事件占 max_buffer 名额）
 - [ ] 节点内所有 `get_redis()` 调用都 `await`
 
 ### 8.4 Infra（`app/infra/rabbitmq.py`、`app/main.py`）
@@ -940,13 +1031,14 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - [ ] `Route` NamedTuple 末尾加 `lane_fallback: bool = True` 默认字段
 - [ ] `_build_queue_args` 加 `lane_fallback` 参数；`declare_route` / `_ensure_lane_queue` 都从 `route.lane_fallback` 读，**不加额外 kwarg**
 - [ ] debounce route 在 `_route_for` 里显式 `Route(..., lane_fallback=False)`
+- [ ] `_build_queue_args` 单测覆盖 `lane_fallback=True/False` 在 prod / lane queue 下的 args 差异（见 §5.3；reviewer round-4 M3）
 - [ ] `app/main.py` lifespan 同时启动 `start_consumers` (durable) 和 `start_debounce_consumers` (debounce)
 - [ ] `RabbitmqConsumerDown` 告警 regex 扩展包含 `debounce_*`（通过 `/ops` 或运维流程下发，**不直接 `kubectl apply`**）
 
 ### 8.5 测试 / 部署验证
 
-- [ ] 单元测试覆盖 §5.1 + §5.2 + §5.3 + §5.4 全部场景
-- [ ] §5.5 五类泳道场景全过（含 atomic claim + lock token 化 + 重启不丢）
+- [ ] 单元测试覆盖 §5.1 + §5.2 + §5.3 + §5.4 + §5.5 全部场景
+- [ ] §5.6 五类泳道场景全过（含 atomic claim + lock token 化 + 重启不丢）
 - [ ] 泳道 `make logs APP=agent-service KEYWORD="debounce consumer started"` 出现 `debounce_drift_trigger_drift_check_<lane> -> drift_check` + `debounce_afterthought_trigger_afterthought_check_<lane> -> afterthought_check`
 - [ ] redis 上 `debounce:latest:DriftTrigger:*` / `debounce:count:DriftTrigger:*` key 在事件期间出现 + fire 后消失 + 异常路径靠 TTL 清
 - [ ] mq DLQ 在测试期间无 debounce 消息进入
