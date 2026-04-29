@@ -1,10 +1,14 @@
+import json
+from contextlib import asynccontextmanager
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.runtime.debounce import (
     DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS, publish_debounce,
-    _do_reschedule,
+    _do_reschedule, _build_handler,
 )
+from app.runtime.node import node
 from app.runtime.wire import WireSpec
 from app.domain.memory_triggers import DriftTrigger
 
@@ -161,3 +165,189 @@ async def test_do_reschedule_cas_swap_failure_noop(monkeypatch):
 
     fake_redis.eval.assert_awaited_once()
     fake_publish.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _build_handler tests (Task 9)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMessage:
+    """Minimal aio_pika message stub."""
+
+    def __init__(self, body: bytes, headers: dict):
+        self.body = body
+        self.headers = headers
+        self.processed_with_requeue = None
+        self.exception_raised = None
+
+    @asynccontextmanager
+    async def process(self, *, requeue: bool):
+        self.processed_with_requeue = requeue
+        try:
+            yield
+        except Exception as e:
+            self.exception_raised = e
+            raise
+
+
+def _make_message(trigger_id, data, key, fire_now=False, headers=None):
+    body = {
+        "trigger_id": trigger_id,
+        "data": data,
+        "key": key,
+        "fire_now": fire_now,
+    }
+    return _FakeMessage(
+        body=json.dumps(body).encode("utf-8"),
+        headers=headers or {"trace_id": "tr-1", "lane": "", "data_type": "DriftTrigger"},
+    )
+
+
+def _make_handler_wire(consumer):
+    return WireSpec(
+        data_type=DriftTrigger,
+        consumers=[consumer],
+        debounce={"seconds": 60, "max_buffer": 3},
+        debounce_key_by=lambda e: f"k:{e.chat_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_atomic_claim_success_runs_consumer_then_conditional_del(monkeypatch):
+    fake_redis = AsyncMock()
+    # _CLAIM_LUA = 1 (claimed); _CONDITIONAL_DEL_LUA = 1 (deleted)
+    fake_redis.eval = AsyncMock(side_effect=[1, 1])
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    consumer_called: list = []
+
+    @node
+    async def consumer(trigger: DriftTrigger) -> None:
+        consumer_called.append(trigger)
+
+    w = _make_handler_wire(consumer)
+    handler = _build_handler(w, consumer)
+    msg = _make_message("trig-1",
+                        {"chat_id": "c1", "persona_id": "p1"},
+                        "k:c1")
+    await handler(msg)
+
+    assert len(consumer_called) == 1
+    assert consumer_called[0].chat_id == "c1"
+    # 两次 redis.eval：claim + conditional DEL
+    assert fake_redis.eval.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_handler_stale_trigger_id_drops(monkeypatch):
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=0)  # _CLAIM_LUA = 0 (stale)
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    consumer_called: list = []
+
+    @node
+    async def consumer(trigger: DriftTrigger) -> None:
+        consumer_called.append(trigger)
+
+    w = _make_handler_wire(consumer)
+    handler = _build_handler(w, consumer)
+    msg = _make_message("trig-stale",
+                        {"chat_id": "c1", "persona_id": "p1"},
+                        "k:c1")
+    await handler(msg)
+
+    assert len(consumer_called) == 0
+    # claim 失败后不会再做 conditional DEL
+    assert fake_redis.eval.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_fire_now_still_runs_atomic_claim(monkeypatch):
+    """fire_now=True 仍走 atomic claim（防 backlog 旧 fire_now 重复触发，round-1 H3）。"""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(side_effect=[1, 1])
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    consumer_called: list = []
+
+    @node
+    async def consumer(trigger: DriftTrigger) -> None:
+        consumer_called.append(trigger)
+
+    w = _make_handler_wire(consumer)
+    handler = _build_handler(w, consumer)
+    msg = _make_message("trig-now",
+                        {"chat_id": "c1", "persona_id": "p1"},
+                        "k:c1", fire_now=True)
+    await handler(msg)
+
+    # claim 仍然执行（fire_now 不绕过 stale check）
+    assert fake_redis.eval.await_count == 2
+    assert len(consumer_called) == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_consumer_raises_skips_conditional_del(monkeypatch):
+    """Consumer 抛非 DebounceReschedule 异常 → 跳过 conditional DEL → DLQ 路径。"""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=1)  # claim succeeded
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    @node
+    async def consumer(trigger: DriftTrigger) -> None:
+        raise RuntimeError("boom")
+
+    w = _make_handler_wire(consumer)
+    handler = _build_handler(w, consumer)
+    msg = _make_message("trig-err",
+                        {"chat_id": "c1", "persona_id": "p1"},
+                        "k:c1")
+    with pytest.raises(RuntimeError):
+        await handler(msg)
+
+    # 只 claim 一次，没跑 conditional DEL（latest 保留供 DLQ replay）
+    assert fake_redis.eval.await_count == 1
+    assert msg.processed_with_requeue is False  # nack to DLX
+
+
+@pytest.mark.asyncio
+async def test_handler_consumer_raises_debounce_reschedule_runs_do_reschedule(monkeypatch):
+    """业务节点 raise DebounceReschedule → handler catch + _do_reschedule。"""
+    fake_redis = AsyncMock()
+    # claim succeeded (1), 然后 _do_reschedule 内部 CAS swap = 1
+    fake_redis.eval = AsyncMock(side_effect=[1, 1])
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    fake_publish = AsyncMock()
+    monkeypatch.setattr("app.runtime.debounce.mq",
+                        MagicMock(publish=fake_publish))
+    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
+                        MagicMock(get=lambda: ""))
+    monkeypatch.setattr("app.runtime.debounce.lane_var",
+                        MagicMock(get=lambda: ""))
+
+    new_data = DriftTrigger(chat_id="c1", persona_id="p1")
+
+    @node
+    async def consumer(trigger: DriftTrigger) -> None:
+        raise DebounceReschedule(new_data)
+
+    w = _make_handler_wire(consumer)
+    handler = _build_handler(w, consumer)
+    msg = _make_message("trig-resched",
+                        {"chat_id": "c1", "persona_id": "p1"},
+                        "k:c1")
+    await handler(msg)
+
+    # claim + CAS swap，没跑 conditional DEL
+    assert fake_redis.eval.await_count == 2
+    fake_publish.assert_awaited_once()
+    # mq.process 正常 ack（DebounceReschedule 不冒泡进 DLQ）
+    assert msg.exception_raised is None

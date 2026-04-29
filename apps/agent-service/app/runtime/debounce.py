@@ -28,23 +28,24 @@ say) is unrepresentable.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Callable
 from typing import Any
+
+from aio_pika.abc import AbstractIncomingMessage
 
 from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, mq
 from app.infra.redis import get_redis
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
+from app.runtime.node import inputs_of
 from app.runtime.wire import WireSpec
 
-# Tasks 8-10 will add: asyncio, json, AbstractIncomingMessage,
-# current_lane, lane_queue, inputs_of, nodes_for_app. Re-add when each
-# is referenced (the imports are listed up-front in the plan as the
-# full set this module ends up needing — kept here as intent doc only
-# via this comment).
+# Tasks 10 will add: asyncio, current_lane, lane_queue, nodes_for_app
+# (consumer-startup wiring). Re-add when each is referenced.
 
 logger = logging.getLogger(__name__)
 
@@ -263,3 +264,103 @@ async def _do_reschedule(
         "debounce reschedule: %s key=%s new_trigger_id=%s",
         type(data).__name__, key, new_trigger_id,
     )
+
+
+def _build_handler(w: WireSpec, consumer: Callable):
+    """Build the aio-pika message handler for one ``(wire, consumer)`` pair.
+
+    Flow per message:
+      1. Restore trace_id / lane contextvars from headers.
+      2. Decode body, extract trigger_id / data / key.
+      3. Atomic claim Lua: stale check + clear count = 0.
+         claim returns 0 → drop (stale, message ack-ed by message.process).
+      4. Decode Data, call consumer:
+         (a) returns normally → conditional DEL latest+count if still ours.
+         (b) raises ``DebounceReschedule(new_data)`` → run ``_do_reschedule``
+             with our trigger_id; skip conditional DEL (CAS already wrote
+             the new latest, or CAS no-op'd because a real new event took
+             over — either way we don't want to clobber).
+         (c) raises any other exception → propagate out of
+             ``message.process``, which nacks (requeue=False) to DLX.
+             Skip conditional DEL so latest survives for a manual DLQ
+             replay (count is gone — see §4.1; replay restores fire signal
+             only, not count).
+
+    DebounceReschedule MUST be caught inside the ``async with`` block so
+    aio_pika ack-s the original message; bubbling it out would route the
+    payload to the DLX. Other exceptions intentionally propagate so the
+    DLQ keeps owning the failure surface.
+    """
+    data_cls = w.data_type
+    param_name = next(iter(inputs_of(consumer)))
+
+    async def handler(message: AbstractIncomingMessage) -> None:
+        async with message.process(requeue=False):
+            headers = message.headers or {}
+            # Defensive coercion (mirrors durable.py): non-string / empty
+            # header values are treated as "not set" rather than crashing
+            # downstream trace helpers.
+            raw_trace = headers.get("trace_id")
+            trace_id = raw_trace if isinstance(raw_trace, str) and raw_trace else None
+            raw_lane = headers.get("lane")
+            lane = raw_lane if isinstance(raw_lane, str) and raw_lane else None
+            t_tok = trace_id_var.set(trace_id)
+            l_tok = lane_var.set(lane)
+            try:
+                payload = json.loads(message.body)
+                trigger_id = payload["trigger_id"]
+                data_dict = payload["data"]
+                key = payload["key"]
+
+                redis = await get_redis()
+                redis_latest = f"debounce:latest:{data_cls.__name__}:{key}"
+                redis_count = f"debounce:count:{data_cls.__name__}:{key}"
+                ttl_seconds = max(w.debounce["seconds"] * 2, _DEFAULT_TTL_SECONDS)
+
+                # Atomic claim: stale check + clear count = 0. Even
+                # fire_now=True messages run the claim — backlog of older
+                # fire_now-flagged delays must not double-fire after the
+                # count was reset by a newer publish (round-1 H3).
+                claimed = await redis.eval(
+                    _CLAIM_LUA, 2,
+                    redis_latest, redis_count,
+                    trigger_id, ttl_seconds,
+                )
+                if not int(claimed):
+                    logger.debug(
+                        "debounce drop stale: %s key=%s trigger_id=%s",
+                        data_cls.__name__, key, trigger_id,
+                    )
+                    return
+
+                obj = data_cls(**data_dict)
+                logger.info(
+                    "debounce fire: %s key=%s trigger_id=%s",
+                    data_cls.__name__, key, trigger_id,
+                )
+
+                try:
+                    await consumer(**{param_name: obj})
+                except DebounceReschedule as resched:
+                    logger.info(
+                        "debounce reschedule: %s key=%s old_trigger_id=%s",
+                        data_cls.__name__, key, trigger_id,
+                    )
+                    # trigger_id passed in as a plain parameter so it never
+                    # escapes through a contextvar (round-7 M1).
+                    await _do_reschedule(w, consumer, resched.data, trigger_id)
+                    return  # 不走 conditional DEL：CAS 已处理 latest
+
+                # Consumer 正常 return → conditional DEL：仅当 latest 还
+                # 指向自己 trigger_id 时才删（reschedule / 真新事件覆盖
+                # 时 no-op，避免清掉别人的 fire 信号）。
+                await redis.eval(
+                    _CONDITIONAL_DEL_LUA, 2,
+                    redis_latest, redis_count,
+                    trigger_id,
+                )
+            finally:
+                trace_id_var.reset(t_tok)
+                lane_var.reset(l_tok)
+
+    return handler
