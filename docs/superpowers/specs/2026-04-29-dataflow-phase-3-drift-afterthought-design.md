@@ -1,18 +1,25 @@
 # Dataflow Phase 3 — Drift / Afterthought 进 Graph
 
-**状态**: Draft v2 (2026-04-29，吸收 reviewer 第 1 轮 8 条意见)
+**状态**: Draft v3 (2026-04-29，吸收 reviewer 第 2 轮 7 条意见)
 **前置**: PR #203 (Phase 2 safety) + PR #204 (followup) shipped to prod
 **后续**: Phase 4 Life Engine / Schedule / Glimpse
 
+**v3 关键变化（vs v2）**：
+- handler 不再 `latest.decode()`：项目 redis client `decode_responses=True`，`get()` 返回 str；改成 `latest != trigger_id` 直接比（修 round-2 H1）
+- 业务节点 single-flight 锁改 token 化：`SET lock_key token NX EX` + Lua compare-and-delete 释放，避免 LLM 卡到 TTL 之外时旧 finally 误删新锁（修 round-2 H2）
+- spec 明说 `publish_debounce` 是 best-effort：mq publish 失败时这一轮丢，下次新事件自然恢复（修 round-2 H3）
+- compile_graph `.debounce()` 合法形态收紧：exactly one @node consumer + 无 sinks / sources / durable / as_latest / with_latest（修 round-2 M4 + M5 + M6）
+- `Route` 末尾加 `lane_fallback: bool = True` 默认字段（NamedTuple，向后兼容；不改成 dataclass）（修 round-2 L7）
+
 **v2 关键变化（vs v1）**：
-- handler 改成"consumer 完成后 conditional DEL"，DEL 仅作用于自己的 trigger_id（修 H1 phase2 期间事件丢 + H2 DLQ 不可重放）
-- 业务节点锁冲突时 `await emit(SameTrigger)` 重发，让 timer 链恢复（修 H1）
-- max_buffer 阈值触发用 atomic reset count = 0，每轮只一条 immediate fire（修 H3）
-- TTL 改 `max(seconds * 2, 86400)` 覆盖 24h 停机窗口（修 H4）
-- debounce route 跳过 lane TTL fallback，infra/rabbitmq.py 加 `lane_fallback=False` 选项（修 M5）
-- post_actions 封装 `_emit_memory_trigger` helper 包 try/except，避免 fire-and-forget 异常黑洞（修 M6）
-- wiring 删错误的 `bind(...)` 调用（drift_check / afterthought_check 走 DEFAULT_APP，不需要 bind）（修 L7）
-- 部署验证步骤改用 `/ops` skill，去掉 `kubectl rollout restart` / `kubectl apply`（修 L8）
+- handler 改成"consumer 完成后 conditional DEL"，DEL 仅作用于自己的 trigger_id（修 round-1 H1 phase2 期间事件丢 + H2 DLQ 不可重放）
+- 业务节点锁冲突时 `await emit(SameTrigger)` 重发，让 timer 链恢复（修 round-1 H1）
+- max_buffer 阈值触发用 atomic reset count = 0，每轮只一条 immediate fire（修 round-1 H3）
+- TTL 改 `max(seconds * 2, 86400)` 覆盖 24h 停机窗口（修 round-1 H4）
+- debounce route 跳过 lane TTL fallback，infra/rabbitmq.py 加 `lane_fallback=False` 选项（修 round-1 M5）
+- post_actions 封装 `_emit_memory_trigger` helper 包 try/except，避免 fire-and-forget 异常黑洞（修 round-1 M6）
+- wiring 删错误的 `bind(...)` 调用（drift_check / afterthought_check 走 DEFAULT_APP，不需要 bind）（修 round-1 L7）
+- 部署验证步骤改用 `/ops` skill，去掉 `kubectl rollout restart` / `kubectl apply`（修 round-1 L8）
 
 ## 1. 背景
 
@@ -115,12 +122,22 @@ class AfterthoughtTrigger(Data):
 - 节点 `drift_check` / `afterthought_check`
 
 ```python
+# app/nodes/memory_pipelines.py 内 module-level 共享 Lua（compare-and-delete lock）
+_LOCK_RELEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('DEL', KEYS[1])
+    return 1
+end
+return 0
+"""
+
 @node
 async def drift_check(trigger: DriftTrigger) -> None:
     """Single-flight per (chat, persona). 锁冲突 → self-emit 让 timer 链恢复。"""
     lock_key = f"phase2:drift:{trigger.chat_id}:{trigger.persona_id}"
+    token = uuid.uuid4().hex
     redis = get_redis()
-    if not await redis.set(lock_key, "1", nx=True, ex=600):
+    if not await redis.set(lock_key, token, nx=True, ex=600):
         # phase2 在跑 → self-emit 一个 trigger 让 timer 链自己恢复，
         # 避免 phase2 期间被 fire 的事件因为锁冲突而真丢
         logger.info(
@@ -135,14 +152,17 @@ async def drift_check(trigger: DriftTrigger) -> None:
     try:
         await _run_drift(trigger.chat_id, trigger.persona_id)
     finally:
-        await redis.delete(lock_key)
+        # compare-and-delete: 仅删自己持有的 token 对应的锁，避免 LLM
+        # 卡到 TTL 之外时旧 finally 误删 *新* fire 拿到的同 key 锁
+        await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
 
 
 @node
 async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
     lock_key = f"phase2:afterthought:{trigger.chat_id}:{trigger.persona_id}"
+    token = uuid.uuid4().hex
     redis = get_redis()
-    if not await redis.set(lock_key, "1", nx=True, ex=900):
+    if not await redis.set(lock_key, token, nx=True, ex=900):
         logger.info(
             "afterthought_check: phase2 in flight for chat_id=%s persona=%s, requeue",
             trigger.chat_id, trigger.persona_id,
@@ -155,13 +175,14 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
     try:
         await _generate_fragment(trigger.chat_id, trigger.persona_id)
     finally:
-        await redis.delete(lock_key)
+        await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
 ```
 
-**业务幂等机制（single-flight + 锁冲突 self-emit）**：
+**业务幂等机制（single-flight + 锁冲突 self-emit + token 化释放）**：
 
-- redis SETNX 锁，TTL = 600s (drift) / 900s (afterthought)，兜底防泄漏（异常 finally 释放 + TTL 自动过期）
-- **锁冲突 → self-emit 同类型 trigger**：让 publish 路径写新 latest + 重置 count + 起新一轮 timer。等 phase2 跑完 + 新一轮 timer 到期 → handler 拿到，比对 latest match，跑 consumer，拿到锁正常处理。这是修 reviewer H1 (phase2 期间事件丢) 的关键：不让 fire 信号"消化掉就消失"
+- redis `SET lock_key token NX EX <ttl>`，TTL = 600s (drift) / 900s (afterthought)，兜底防泄漏（异常 finally 释放 + TTL 自动过期）
+- **token 化释放**（reviewer round-2 H2 修法）：每次拿锁生成 uuid token；finally 调 Lua compare-and-delete，仅当 redis 上仍是自己 token 时才 DEL。LLM 卡超过 TTL 时锁已失效 + 新 fire 已 SETNX 拿到新 token，旧 finally 不会误删新锁
+- **锁冲突 → self-emit 同类型 trigger**：让 publish 路径写新 latest + 重置 count + 起新一轮 timer。等 phase2 跑完 + 新一轮 timer 到期 → handler 拿到，比对 latest match，跑 consumer，拿到锁正常处理。这是修 round-1 H1 (phase2 期间事件丢) 的关键：不让 fire 信号"消化掉就消失"
 - self-emit 不会无限循环：handler 端是 conditional DEL（仅删自己 trigger_id；见 §3.4.3 Lua），phase2 释放锁后下一轮 fire 拿到的 trigger_id 跟 latest 一致，正常处理
 - self-emit 链最坏情况：phase2 跑超 N 秒（drift LLM ~10s vs `settings.identity_drift_debounce_seconds` 通常 60s+，afterthought LLM ~30s vs 300s，安全余量充足）。极端 case 下 self-emit 链按 N 秒拍数延迟，最终 phase2 完成时正常处理，无丢失
 - TTL 选 600/900 是给 LLM 卡死余量（drift 约 10s LLM、afterthought 约 30s LLM；TTL 是异常 timeout 层级，不是预期路径）
@@ -220,13 +241,17 @@ class WireBuilder:
 
 **删除** `graph.py:198-209` 的 unimplemented raise。
 
-**新增** 校验段：
+**新增** 校验段（reviewer round-2 M4 + M5 + M6 一起处理 —— `.debounce()` 必须收紧到一个明确的合法形态：1 consumer + 无 sinks/sources + transient + 互斥所有 wire 修饰符）：
 
 ```python
-# .debounce() 必须搭配 key_by（DSL 层面已经强制，这里 defensive）
-# .debounce() 跟 .durable() 互斥：debounce 自己实现 mq 跨进程
-# .debounce() 跟 .with_latest() 互斥：handler 单 input，跟 durable 同样限制
-# .debounce() 数据类型必须 transient：fire 信号语义
+# .debounce() 合法形态：
+#   exactly one @node consumer
+#   data type Meta.transient = True
+#   key_by 必填
+#   不跟 .durable() / .as_latest() / .with_latest() / sinks / sources / fan-out 组合
+#   每个 (DataType) 在所有 .debounce() wire 中至多出现一次
+#     （否则两条 wire 会共享 redis debounce:latest:{DataType}:{key} 状态污染）
+seen_debounce_types: set[type[Data]] = set()
 for w in wires:
     if w.debounce is None:
         continue
@@ -240,11 +265,46 @@ for w in wires:
             f"debounce already implements its own mq transport; "
             f"combining with .durable() is not supported"
         )
+    if w.as_latest:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce().as_latest(): "
+            f"as_latest persists data via insert_latest, but debounce "
+            f"data types must be Meta.transient = True (no pg table). "
+            f"These two are mutually exclusive."
+        )
     if w.with_latest:
         raise GraphError(
             f"wire({w.data_type.__name__}).debounce().with_latest(...): "
             f"debounce handlers are single-input; .with_latest() not supported"
         )
+    if w.sinks:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce().to(Sink.*): "
+            f"debounce wires must target exactly one @node consumer; "
+            f"sinks not supported (the fire signal needs business logic, "
+            f"not a passthrough mq publish)"
+        )
+    if w.sources:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce().from_(Source.*): "
+            f"debounce wires are emit-driven; declarative sources not supported"
+        )
+    if len(w.consumers) != 1:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce(): must have exactly one "
+            f"consumer; got {len(w.consumers)} "
+            f"({[c.__name__ for c in w.consumers]}). debounce state "
+            f"(redis latest+count keyed by DataType+key) cannot be split "
+            f"across consumers"
+        )
+    if w.data_type in seen_debounce_types:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce(): {w.data_type.__name__} "
+            f"already declared on another debounce wire; redis state "
+            f"(debounce:latest:{{DataType}}:{{key}}) would collide. Each "
+            f"DataType can have at most one debounce wire."
+        )
+    seen_debounce_types.add(w.data_type)
     meta = getattr(w.data_type, "Meta", None)
     if meta is None or not getattr(meta, "transient", False):
         raise GraphError(
@@ -375,11 +435,14 @@ def _build_handler(w: WireSpec, consumer):
                 redis_count = f"debounce:count:{data_cls.__name__}:{key}"
 
                 # Stale check: latest != trigger_id → 被新事件作废，drop
+                # NOTE: 项目 redis client 配 decode_responses=True
+                # (infra/redis.py:30)，redis.get() 返回 str (None 表示 key 不存在)，
+                # 不需要 .decode()。直接 != trigger_id 比即可（reviewer round-2 H1）。
                 latest = await redis.get(redis_latest)
-                if latest is None or latest.decode() != trigger_id:
+                if latest != trigger_id:
                     logger.debug(
-                        "debounce drop stale: %s key=%s trigger_id=%s",
-                        data_cls.__name__, key, trigger_id,
+                        "debounce drop stale: %s key=%s trigger_id=%s latest=%s",
+                        data_cls.__name__, key, trigger_id, latest,
                     )
                     return
 
@@ -508,7 +571,18 @@ class _RabbitMQ:
         ...同样传透...
 ```
 
-`runtime/debounce.start_debounce_consumers` 调 `mq.declare_route(route, lane_fallback=False)`；publish 路径需要 producer 端 lazy declare 也走 `lane_fallback=False`，方案要么 publish 时显式调 `_ensure_lane_queue`（破坏现有封装），要么把"非 fallback"信息存在 `Route` 上，由 `mq.publish` 自己感知。**简化：` Route` dataclass 加 `lane_fallback: bool = True` 字段**，`_ensure_lane_queue` 读 `route.lane_fallback` 决定参数。debounce route 创建时就设 `Route(queue=..., rk=..., lane_fallback=False)`。
+`runtime/debounce.start_debounce_consumers` 调 `mq.declare_route(route, lane_fallback=False)`；publish 路径需要 producer 端 lazy declare 也走 `lane_fallback=False`，方案要么 publish 时显式调 `_ensure_lane_queue`（破坏现有封装），要么把"非 fallback"信息存在 `Route` 上，由 `mq.publish` 自己感知。
+
+**实现注意**（reviewer round-2 L7）：当前 `Route` 是 `NamedTuple`（`infra/rabbitmq.py:39`），不是 dataclass。NamedTuple 末尾可加带默认值的字段且向后兼容（现有 `Route("queue", "rk")` 调用不变）：
+
+```python
+class Route(NamedTuple):
+    queue: str
+    rk: str
+    lane_fallback: bool = True   # 新增；默认 True 不破坏现有 Route 实例
+```
+
+`_ensure_lane_queue` 读 `route.lane_fallback` 决定参数。debounce route 创建时显式设 `Route(queue=..., rk=..., lane_fallback=False)`。
 
 #### 3.4.5 关键决策记录
 
@@ -521,7 +595,12 @@ class _RabbitMQ:
   - reviewer H2：consumer 抛异常 → 跳过 DEL，DLQ replay 时 latest 还在
 - **TTL = max(seconds * 2, 86400s = 24h)**：覆盖典型停机/恢复窗口（reviewer H4）；redis 内存占用低（活跃 chat × persona 量级，每 key 两个标量）
 - **不写 `insert_idempotent`**：transient data type，没有 pg 表（runtime/migrator.py 跳过 transient）
-- **debounce route 跳过 lane TTL fallback**：见 §3.4.4，调 `mq.declare_route(route, lane_fallback=False)` 让 lane queue 不带 `x-message-ttl=10000`，避免 300s 延迟消息被 lane fallback 截到 prod（reviewer M5）
+- **debounce route 跳过 lane TTL fallback**：见 §3.4.4，调 `mq.declare_route(route, lane_fallback=False)` 让 lane queue 不带 `x-message-ttl=10000`，避免 300s 延迟消息被 lane fallback 截到 prod（reviewer round-1 M5）
+- **publish 是 best-effort，不引 outbox**（reviewer round-2 H3）：`publish_debounce` 先 redis SET latest+count，后 mq publish。publish 失败时 redis latest 指向永不到达的 trigger_id：
+  - 如果之后还有新事件来 → 新 emit 走 publish 路径覆盖 latest+count + 发新 delay 消息 → 自然恢复
+  - 如果之后无新事件 → 这一轮 fire 真丢（drift / afterthought 业务上等价于"chat 完成后系统抖了一下"，最近 1-2 小时窗口内有任何新消息都会触发新一轮恢复）
+  - 不引 outbox / Lua 回滚机制：drift / afterthought 是低关键 best-effort 业务，引 outbox 复杂度跟收益不匹配；Lua 回滚需要"上一个 trigger_id"快照，逻辑复杂且无法保证回滚跟 publish 失败原子（mq publish 抛异常时 redis 已经 INCR 了，回滚还得 DECR/restore）
+- **lock token 化释放**：业务节点 SETNX 时存 uuid token，finally 用 Lua compare-and-delete（见 §3.2）；标准分布式锁模式，避免 LLM 卡到 TTL 之外时旧 finally 误删新锁（reviewer round-2 H2）
 
 ### 3.5 Main lifespan 改造（`app/main.py`）
 
@@ -658,7 +737,7 @@ dataflow 重构不改 LLM 调用本身，只换调度层。Trace context 通过 
 
 **冲突**：debounce 队列里有 ≥ 300s 延迟消息，泳道下/重启时 consumer 暂停 10s 就被 fallback 截到 prod 队列；prod handler 从 message header 恢复 lane → 跑 prod 的 drift_check / afterthought_check 时还以为自己是泳道 lane → 跨泳道副作用。
 
-**修法**（见 §3.4.4）：debounce route 在 `Route` dataclass 上声明 `lane_fallback=False`，`_build_queue_args` / `_ensure_lane_queue` / `declare_route` 全链路尊重这个 flag，跳过 `x-message-ttl` + `x-dead-letter-*`。lane queue 仍设 `x-expires=24h` 防泳道残留。
+**修法**（见 §3.4.4）：debounce route 在 `Route` NamedTuple 末尾的新字段 `lane_fallback=False` 上声明，`_build_queue_args` / `_ensure_lane_queue` / `declare_route` 全链路尊重这个 flag，跳过 `x-message-ttl` + `x-dead-letter-*`。lane queue 仍设 `x-expires=24h` 防泳道残留。
 
 ### 4.6 Mq 消息堆积观察
 
@@ -701,18 +780,24 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 
 ### 5.2 compile_graph 校验测试
 
-- `wire(T).debounce(...)` 通过校验
+- `wire(T).debounce(...)` (单 consumer + transient T + key_by) 通过校验
 - `wire(T).debounce().durable()` raise GraphError
+- `wire(T).debounce().as_latest()` raise GraphError（reviewer round-2 M4）
 - `wire(T).debounce().with_latest(X)` raise GraphError
+- `wire(T).debounce().to(Sink.mq("..."))` raise GraphError（reviewer round-2 M6）
+- `wire(T).debounce().from_(Source.mq("..."))` raise GraphError
+- `wire(T).debounce().to(c1, c2)` (fan-out) raise GraphError（reviewer round-2 M5）
+- 同 DataType 两条 `.debounce()` wire 共存 raise GraphError（state 污染防护）
 - 非 transient data type 上 `.debounce()` raise GraphError
 - 缺 `key_by` raise GraphError
 
 ### 5.3 节点单元测试
 
 - `drift_check`（mock redis + mock `_run_drift` + mock emit）：
-  - 拿到锁 → 调 `_run_drift` → 释放锁
-  - **没拿到锁 → 调 `emit(DriftTrigger(...))` self-emit → 不调 `_run_drift`**（reviewer H1）
+  - 拿到锁 → 调 `_run_drift` → 释放锁（compare-and-delete 用自己的 token）
+  - **没拿到锁 → 调 `emit(DriftTrigger(...))` self-emit → 不调 `_run_drift`**（reviewer round-1 H1）
   - `_run_drift` 抛异常 → finally 释放锁
+  - **lock token 化**（reviewer round-2 H2）：mock `_run_drift` 跑超 TTL → 锁过期 → 模拟新 fire 占用 lock_key 写入新 token → 旧 finally 调 Lua → redis 上 token 已不是自己 → 不 DEL → 新锁保留
 - `afterthought_check`：同上模式（self-emit AfterthoughtTrigger）
 - `_run_drift` / `_generate_fragment` / `_recent_timeline` / `_build_scene`：原 `tests/memory/` 单测搬到 `tests/nodes/test_memory_pipelines.py`，断言不变
 
@@ -797,3 +882,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - [ ] `app/runtime/debounce.py` 的 publish Lua 在 `count >= max_buffer` 时原子 reset count = 0 并返回 fire_now=1
 - [ ] `app/runtime/debounce.py` 的 handler 调 consumer 完成后才走 conditional DEL（仅删 `latest == trigger_id`），consumer 抛异常时跳过 DEL
 - [ ] `drift_check` / `afterthought_check` 锁冲突时 self-emit 同类型 trigger（不直接 return）
+- [ ] 业务节点 `finally` 走 Lua compare-and-delete 释放锁（仅当 redis 上仍是自己 token 时 DEL），**不能用裸 `redis.delete(lock_key)`**
+- [ ] handler 里 stale check 用 `latest != trigger_id`，**不能调 `latest.decode()`**（项目 redis client `decode_responses=True`）
+- [ ] `compile_graph` 拒绝：`.debounce().as_latest()` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
+- [ ] `Route` 末尾加 `lane_fallback: bool = True` 默认字段（NamedTuple 兼容；非 dataclass 改造）
