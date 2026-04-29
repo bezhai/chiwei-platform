@@ -212,6 +212,11 @@ class _RabbitMQ:
         lane-queue declare all continue to work). ``declare_topology()`` still
         owns the static ``ALL_ROUTES`` list; this method is its per-route
         sibling so new routes can plug in without amending that list.
+
+        Reads ``route.lane_fallback`` (default True for prod compatibility) to
+        decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
+        debounce routes set ``lane_fallback=False`` so 300s delays don't get
+        short-circuited to prod (spec §3.4.4 / reviewer round-5 H1).
         """
         if self._channel is None or self._exchange is None:
             raise RuntimeError("must call connect() + declare_topology() first")
@@ -219,12 +224,12 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane),
+            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
-        """Lazily declare a lane queue on first publish."""
+        """Lazily declare a lane queue on first publish (reads route.lane_fallback)."""
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
             return
@@ -233,7 +238,7 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane),
+            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
         self._declared_lane_queues.add(cache_key)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.infra.rabbitmq import (
     ALL_ROUTES,
@@ -249,3 +251,34 @@ def test_route_default_lane_fallback_true():
 def test_route_explicit_lane_fallback_false():
     r = Route("q", "rk", lane_fallback=False)
     assert r.lane_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# declare_route / _ensure_lane_queue read route.lane_fallback — Phase 3 Task 2
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_declare_route_passes_lane_fallback_through(monkeypatch):
+    """declare_route 应该把 route.lane_fallback 透传给 _build_queue_args。"""
+    from app.infra.rabbitmq import _RabbitMQ
+
+    mq = _RabbitMQ()
+    mq._channel = MagicMock()
+    mq._exchange = MagicMock()
+    declared_args: dict[str, dict] = {}
+
+    async def fake_declare_queue(name, durable, arguments):
+        declared_args[name] = arguments
+        q = MagicMock()
+        q.bind = AsyncMock()
+        return q
+
+    mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
+
+    monkeypatch.setattr("app.infra.rabbitmq.current_lane", lambda: "dev")
+    route = Route("q", "rk", lane_fallback=False)
+    await mq.declare_route(route)
+
+    args = declared_args["q_dev"]
+    assert "x-message-ttl" not in args
+    assert "x-dead-letter-routing-key" not in args
+    assert args["x-dead-letter-exchange"] == DLX_NAME
