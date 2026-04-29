@@ -282,3 +282,38 @@ async def test_declare_route_passes_lane_fallback_through(monkeypatch):
     assert "x-message-ttl" not in args
     assert "x-dead-letter-routing-key" not in args
     assert args["x-dead-letter-exchange"] == DLX_NAME
+
+
+@pytest.mark.asyncio
+async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
+    """_ensure_lane_queue (lazy declare 路径，debounce publish 实际走这里)
+    应该把 route.lane_fallback 透传给 _build_queue_args，且二次调用走 cache。"""
+    from app.infra.rabbitmq import _RabbitMQ
+
+    mq = _RabbitMQ()
+    mq._channel = MagicMock()
+    mq._exchange = MagicMock()
+    declared_args: dict[str, dict] = {}
+
+    async def fake_declare_queue(name, durable, arguments):
+        declared_args[name] = arguments
+        q = MagicMock()
+        q.bind = AsyncMock()
+        return q
+
+    mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
+
+    route = Route("q", "rk", lane_fallback=False)
+    await mq._ensure_lane_queue(route, lane="dev")
+
+    args = declared_args["q_dev"]
+    assert "x-message-ttl" not in args
+    assert "x-dead-letter-routing-key" not in args
+    assert args["x-dead-letter-exchange"] == DLX_NAME
+
+    # cache_key 已记录
+    assert "q_dev" in mq._declared_lane_queues
+
+    # 二次调用短路：declare_queue 调用次数仍为 1
+    await mq._ensure_lane_queue(route, lane="dev")
+    assert mq._channel.declare_queue.await_count == 1
