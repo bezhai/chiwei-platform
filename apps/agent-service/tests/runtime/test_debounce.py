@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.runtime.debounce import (
     DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS, publish_debounce,
+    _do_reschedule,
 )
 from app.runtime.wire import WireSpec
 from app.domain.memory_triggers import DriftTrigger
@@ -113,3 +114,50 @@ async def test_publish_debounce_max_buffer_triggers_fire_now(monkeypatch):
     body = pub_args.args[1]
     assert body["fire_now"] is True
     assert pub_args.kwargs["delay_ms"] == 0
+
+
+@pytest.mark.asyncio
+async def test_do_reschedule_cas_swap_success(monkeypatch):
+    """latest == trigger_id_orig → swap to new + publish delay."""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=1)  # CAS swap 成功
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    fake_publish = AsyncMock()
+    monkeypatch.setattr("app.runtime.debounce.mq",
+                        MagicMock(publish=fake_publish))
+    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
+                        MagicMock(get=lambda: ""))
+    monkeypatch.setattr("app.runtime.debounce.lane_var",
+                        MagicMock(get=lambda: ""))
+
+    w = _make_wire()
+    data = DriftTrigger(chat_id="c1", persona_id="p1")
+    await _do_reschedule(w, _drift_check_stub, data, trigger_id_orig="orig-123")
+
+    fake_redis.eval.assert_awaited_once()
+    fake_publish.assert_awaited_once()
+    pub_args = fake_publish.call_args
+    assert pub_args.args[1]["fire_now"] is False
+    assert pub_args.kwargs["delay_ms"] == 60_000
+
+
+@pytest.mark.asyncio
+async def test_do_reschedule_cas_swap_failure_noop(monkeypatch):
+    """latest 已被新事件覆盖（!= trigger_id_orig）→ no-op，不 publish。"""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=0)  # CAS swap 失败
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    fake_publish = AsyncMock()
+    monkeypatch.setattr("app.runtime.debounce.mq",
+                        MagicMock(publish=fake_publish))
+
+    w = _make_wire()
+    data = DriftTrigger(chat_id="c1", persona_id="p1")
+    await _do_reschedule(w, _drift_check_stub, data, trigger_id_orig="orig-123")
+
+    fake_redis.eval.assert_awaited_once()
+    fake_publish.assert_not_awaited()

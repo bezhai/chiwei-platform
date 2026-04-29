@@ -212,3 +212,54 @@ async def publish_debounce(w: WireSpec, consumer: Callable, data: Data) -> None:
         "debounce publish: %s key=%s count=%d fire_now=%s",
         w.data_type.__name__, key, new_count, body["fire_now"],
     )
+
+
+async def _do_reschedule(
+    w: WireSpec, consumer: Callable, data: Data, trigger_id_orig: str,
+) -> None:
+    """Handler-internal reschedule: CAS swap latest + publish delay.
+
+    Called by ``_build_handler`` when the consumer raises
+    ``DebounceReschedule``. ``trigger_id_orig`` is the handler's local
+    trigger_id (the one whose atomic-claim succeeded), passed in as a
+    plain parameter so it never escapes through a contextvar.
+
+    The Lua CAS swap only writes the new trigger_id when latest is still
+    trigger_id_orig (no real new event has taken over). On collision,
+    this no-ops and lets the new event's timer drive the next fire.
+    """
+    key = w.debounce_key_by(data)
+    seconds = w.debounce["seconds"]
+    new_trigger_id = uuid.uuid4().hex
+    redis = await get_redis()
+    redis_latest = f"debounce:latest:{w.data_type.__name__}:{key}"
+    ttl_seconds = max(seconds * 2, _DEFAULT_TTL_SECONDS)
+
+    swapped = await redis.eval(
+        _RESCHEDULE_CAS_LUA, 1,
+        redis_latest, trigger_id_orig, new_trigger_id, ttl_seconds,
+    )
+    if not int(swapped):
+        logger.debug(
+            "_do_reschedule no-op: latest already replaced for %s key=%s",
+            type(data).__name__, key,
+        )
+        return
+
+    body = {
+        "trigger_id": new_trigger_id,
+        "data": data.model_dump(mode="json"),
+        "key": key,
+        "fire_now": False,
+    }
+    headers = {
+        "trace_id": trace_id_var.get() or "",
+        "lane": lane_var.get() or "",
+        "data_type": type(data).__name__,
+    }
+    await mq.publish(_route_for(w, consumer), body, headers=headers,
+                     delay_ms=seconds * 1000)
+    logger.info(
+        "debounce reschedule: %s key=%s new_trigger_id=%s",
+        type(data).__name__, key, new_trigger_id,
+    )
