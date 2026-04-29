@@ -1,8 +1,14 @@
 # Dataflow Phase 3 — Drift / Afterthought 进 Graph
 
-**状态**: Draft v6 (2026-04-29，吸收 reviewer 第 5 轮 3 条意见)
+**状态**: Draft v7 (2026-04-29，吸收 reviewer 第 6 轮 3 条意见)
 **前置**: PR #203 (Phase 2 safety) + PR #204 (followup) shipped to prod
 **后续**: Phase 4 Life Engine / Schedule / Glimpse
+
+**v7 关键变化（vs v6）**：
+- `reschedule` 改成 CAS swap：handler 在调 consumer 前用 contextvar 暴露当前 trigger_id (`_debounce_trigger_var`)；reschedule 内部 Lua compare-and-set，仅当 redis latest 仍 == handler 当时的 trigger_id 才 swap 成 new_trigger_id 并 publish；如果中间已被真实新事件覆盖 → no-op 让新事件 timer 接管。修 round-6 M1：v6 的 reschedule 无条件 SET latest 会覆盖更新真实事件写入的 latest，破坏 §3 Fire 信号语义中"最后一条没被作废的 publish 携带的 Data"承诺
+- 顺带收紧 round-5 H2：reschedule swap 失败时 latest 不动 → DLQ replay 仍可 work；只剩"swap 成功 + publish 失败"这一窄边界保留在 §4.1 best-effort 表
+- §6 部署影响表里 arq-worker / vectorize-worker 的"bind 已限制"措辞改成"DEFAULT_APP + app_name 过滤限制"（修 round-6 L2）
+- v5 历史变更行加修正注："v6 修正：保留 `x-dead-letter-exchange`"（修 round-6 L3）
 
 **v6 关键变化（vs v5）**：
 - `_build_queue_args(..., lane_fallback=False)` **保留 `x-dead-letter-exchange: DLX_NAME`**，只移除 `x-message-ttl` + `x-dead-letter-routing-key`。修 round-5 H1：v5 写法把 lane queue 上的 DLX 也一起去掉了，consumer `message.process(requeue=False)` 失败的 message 会被丢弃而不是进 DLQ，跟 `§3.4.3` "异常进 DLQ 由人工 replay" 的设计承诺冲突
@@ -12,7 +18,7 @@
 **v5 关键变化（vs v4）**：
 - 业务节点锁冲突时改调 `runtime.debounce.reschedule(trigger)` 而非 `emit(trigger)`：reschedule 内部仅 SET latest + publish delay，**不 INCR count**。修 round-4 M1：v4 用普通 emit 让 self-emit 占 1 个 buffer，max_buffer=1 时会 0-delay 自旋，max_buffer>1 时让真实事件少 1 条就提前 fire；作为 runtime primitive 不应让 synthetic reschedule 污染业务 count（承认 v3 我反驳"加 reschedule API"是错的，atomic claim 修不了 self-emit 自身 INCR 这一类问题）
 - spec 明确 DLQ replay 边界：atomic claim 在 consumer 前清 count = 0，所以 consumer 抛异常进 DLQ 后 replay **只恢复 fire 信号，不恢复累计 count**（drift / afterthought 不依赖 count，可接受）。修 round-4 M2
-- §5.1 / §8.4 加 `infra/rabbitmq.py` 单测条目：`_build_queue_args(prod_rk, lane, lane_fallback=False)` 必须不含 `x-message-ttl` + `x-dead-letter-*`（修 round-4 M3）
+- §5.1 / §8.4 加 `infra/rabbitmq.py` 单测条目：`_build_queue_args(prod_rk, lane, lane_fallback=False)` 必须不含 `x-message-ttl` + `x-dead-letter-*`（修 round-4 M3）。**v6 修正：保留 `x-dead-letter-exchange=DLX_NAME`**，仅去掉 `x-message-ttl` + `x-dead-letter-routing-key`（v5 写法误把 DLQ 也禁了，reviewer round-5 H1 指出）
 - §4.3 表述修正：旧锁过期场景说"compare-and-delete token mismatch → 不删新锁"，不是模糊的"DEL 是 no-op"（修 round-4 L4）
 - §8.2 校验清单注释统一成"全部 9 项"（修 round-4 L5）
 
@@ -159,8 +165,9 @@ async def drift_check(trigger: DriftTrigger) -> None:
     if not await redis.set(lock_key, token, nx=True, ex=600):
         # phase2 在跑 → reschedule 一个 trigger 让 timer 链自己恢复
         # 避免 phase2 期间被 fire 的事件因为锁冲突而真丢
-        # 用 runtime.debounce.reschedule 而非 emit：仅 SET latest + publish delay，
-        # 不 INCR count，避免 synthetic reschedule 占用业务 buffer 名额
+        # 用 runtime.debounce.reschedule 而非 emit：CAS swap latest + publish delay，
+        # 不 INCR count，避免 synthetic reschedule 占用业务 buffer 名额；
+        # CAS swap 失败（latest 已被新事件覆盖）时 no-op 让新事件接管
         logger.info(
             "drift_check: phase2 in flight for chat_id=%s persona=%s, requeue",
             trigger.chat_id, trigger.persona_id,
@@ -450,13 +457,24 @@ async def publish_debounce(w: WireSpec, consumer, data: Data) -> None:
     await mq.publish(_route_for(w, consumer), body, headers=headers, delay_ms=delay_ms)
 
 
-# Lua (reschedule): 仅 SET latest + EXPIRE，不 INCR count。
-# 用于业务节点锁冲突时"重排 timer"语义 —— 跟 publish_debounce 区别在于
-# reschedule 不算业务事件，不影响 max_buffer 计数（reviewer round-4 M1）
-_RESCHEDULE_LUA = """
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+# Lua (reschedule CAS): 只有 latest 仍是 handler 当时进入的 trigger_id 才 swap 成
+# 新 trigger_id；如果 latest 已被真实新事件覆盖，no-op 让新事件 timer 自己接管。
+# 这保证 reschedule 不会无条件覆盖更新的真实事件写入的 latest，
+# 维持 §3 "fire 收到最后一条没被作废的 publish 携带的 Data" 承诺（reviewer round-6 M1）
+_RESCHEDULE_CAS_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
 return 1
 """
+
+# Handler 在调 consumer 前 set 这个 contextvar，让 reschedule 拿到当前 trigger_id
+# 做 CAS swap 比对。consumer 退出后 reset。
+# 命名跟 trace_id_var / lane_var 同 module-level 风格。
+_debounce_trigger_var: ContextVar[str | None] = ContextVar(
+    "_debounce_trigger_var", default=None
+)
 
 
 async def reschedule(data: Data) -> None:
@@ -465,13 +483,24 @@ async def reschedule(data: Data) -> None:
     跟 publish_debounce 的区别：
       - 不 INCR count（synthetic reschedule 不应占用业务 buffer 名额）
       - 不会触发 max_buffer immediate fire
-      - 仅 SET latest + publish delay 消息
+      - **CAS swap latest**：仅当 latest 仍是 handler 当前 trigger_id 才覆盖；
+        如果中间已被真实新事件覆盖 → no-op，让新事件 timer 接管
       - 适合 single-flight 业务节点 phase2 跑期间收到的"二次 fire 信号"
 
-    实现上：从 WIRING_REGISTRY 找匹配的 .debounce() wire（compile_graph 已
-    保证每个 DataType 至多一条 .debounce() wire + exactly 1 consumer），
-    取它的 seconds/key_by/consumer，写 redis latest + publish delay 消息。
+    实现上：
+      1. 从 contextvar 读 handler 当前 trigger_id（必须从 debounce handler 内部调）
+      2. 从 WIRING_REGISTRY 找匹配的 .debounce() wire（compile_graph 已
+         保证每个 DataType 至多一条 .debounce() wire + exactly 1 consumer）
+      3. Lua CAS swap latest（trigger_id_orig → new_trigger_id），失败 no-op
+      4. swap 成功才 publish delay 消息
     """
+    trigger_id_orig = _debounce_trigger_var.get()
+    if trigger_id_orig is None:
+        raise RuntimeError(
+            "reschedule() must be called from inside a debounce handler "
+            "(no _debounce_trigger_var set)"
+        )
+
     from app.runtime.wire import WIRING_REGISTRY
     matches = [
         w for w in WIRING_REGISTRY
@@ -491,15 +520,26 @@ async def reschedule(data: Data) -> None:
     consumer = w.consumers[0]
     key = w.debounce_key_by(data)
     seconds = w.debounce["seconds"]
-    trigger_id = uuid.uuid4().hex
+    new_trigger_id = uuid.uuid4().hex
     redis = await get_redis()
     redis_latest = f"debounce:latest:{w.data_type.__name__}:{key}"
     ttl_seconds = max(seconds * 2, _DEFAULT_TTL_SECONDS)
 
-    await redis.eval(_RESCHEDULE_LUA, 1, redis_latest, trigger_id, ttl_seconds)
+    swapped = await redis.eval(
+        _RESCHEDULE_CAS_LUA, 1,
+        redis_latest, trigger_id_orig, new_trigger_id, ttl_seconds,
+    )
+    if not int(swapped):
+        # latest 已被真实新事件覆盖（业务真新事件 publish_debounce 在 atomic claim
+        # 跟 reschedule 之间写了新 latest），让那个新事件 timer 接管，本次 no-op
+        logger.debug(
+            "reschedule no-op: latest already replaced for %s key=%s",
+            type(data).__name__, key,
+        )
+        return
 
     body = {
-        "trigger_id": trigger_id,
+        "trigger_id": new_trigger_id,
         "data": data.model_dump(mode="json"),
         "key": key,
         "fire_now": False,  # reschedule 永远走 delay path
@@ -571,15 +611,25 @@ def _build_handler(w: WireSpec, consumer):
                     data_cls.__name__, key, trigger_id,
                 )
 
-                # Consumer 在 try 内调用：成功 / 锁冲突 reschedule 都正常返回；
-                # 抛异常 → 跳过 conditional DEL，进 DLQ → DLQ replay 时
-                # latest 还在，可以重新跑 fire 信号（reviewer round-1 H2 + round-4 M2：
-                # count 已被 atomic claim 清成 0，replay 不恢复积累计数）
-                await consumer(**{param_name: obj})
+                # 暴露当前 trigger_id 给 consumer 内调用的 reschedule()，
+                # 让 reschedule 做 CAS swap 时知道自己 swap from 哪个 trigger_id
+                # （reviewer round-6 M1）。
+                d_tok = _debounce_trigger_var.set(trigger_id)
+                try:
+                    # Consumer 在 try 内调用：成功 / 锁冲突 reschedule 都正常返回；
+                    # 抛异常 → 跳过 conditional DEL，进 DLQ → DLQ replay 时
+                    # latest 还在，可以重新跑 fire 信号（reviewer round-1 H2 +
+                    # round-4 M2：count 已被 atomic claim 清成 0，replay 不恢复
+                    # 积累计数）
+                    await consumer(**{param_name: obj})
+                finally:
+                    _debounce_trigger_var.reset(d_tok)
 
                 # 完成后 conditional DEL：只删自己 trigger_id 对应的状态。
-                # 如果 consumer 自己调 reschedule 覆盖了 latest（锁冲突路径），
-                # 这里 DEL 不动，新 latest 保留供下一轮 fire。
+                # 如果 consumer 自己调 reschedule CAS-swap 成功覆盖了 latest
+                # （锁冲突路径），这里 DEL 不动，新 latest 保留供下一轮 fire。
+                # 如果 reschedule CAS 失败（latest 已被新事件覆盖），同样 DEL
+                # 不动，新事件 latest+count 保留。
                 await redis.eval(
                     _CONDITIONAL_DEL_LUA, 2,
                     redis_latest, redis_count,
@@ -716,7 +766,7 @@ def _build_queue_args(prod_rk: str, lane: str | None,
 - **stale check 由 trigger_id 比对决定**：拿到 delay 消息时比对 redis latest，不匹配就 drop（消息正常 ack）—— publish-then-drop 模式，QPS 不高场景可接受（用户已确认）。**fire_now 消息也走 stale check**（避免 backlog 中旧 fire_now 重复触发，reviewer H3）
 - **max_buffer atomic 重置 count**：Lua 在 `count >= max_buffer` 时原子 `SET count = 0`，保证每轮只一条 immediate fire 消息携带正确的 trigger_id；下一条 publish 从 1 重新攒
 - **Atomic claim before consumer**（reviewer round-3 H2 + round-4 M2）：handler 在调 consumer 前用 Lua 一气呵成做"stale check + clear count = 0"。进 consumer 前清零是修 round-3 H2 的关键。注意副作用：consumer 抛异常进 DLQ 后 replay 只恢复 fire 信号本身，不恢复"那一轮的 count"（drift / afterthought 不依赖 count，可接受）
-- **Reschedule (not emit) on lock contention**（reviewer round-4 M1）：业务节点锁冲突时调 `runtime.debounce.reschedule(SameTrigger)` —— 仅 SET latest + publish delay，不 INCR count。如果走普通 `emit` 会让 reschedule 占 1 个 max_buffer 名额，max_buffer=1 时形成 0-delay 自旋，max_buffer>1 时让真实事件少 1 条就触发 fire
+- **Reschedule (not emit) on lock contention**（reviewer round-4 M1 + round-6 M1）：业务节点锁冲突时调 `runtime.debounce.reschedule(SameTrigger)` —— **Lua CAS swap latest**（仅当 latest 仍 == handler 当前 trigger_id 才 swap）+ publish delay，不 INCR count。如果走普通 `emit` 会让 reschedule 占 1 个 max_buffer 名额；如果直接无条件 SET latest 会覆盖真实新事件写入的 latest 破坏 fire 信号语义。CAS 由 handler 经 `_debounce_trigger_var` contextvar 暴露当前 trigger_id 配合实现
 - **Conditional DEL on consumer success**：handler 调 consumer 完成后才 DEL，**且仅 DEL 自己 trigger_id 对应的状态**（Lua compare-and-delete）。这同时解决：
   - reviewer H1：consumer 锁冲突 reschedule 覆盖了 latest → conditional DEL 不动，新 latest 保留供下一轮 fire
   - reviewer H2：consumer 抛异常 → 跳过 DEL，DLQ replay 时 latest 还在
@@ -819,7 +869,7 @@ grep -rn "from app.memory.debounce\|from app.memory.drift\|from app.memory.after
 | 场景 | 行为 | 业务影响 |
 |---|---|---|
 | `publish_debounce` 写完 redis latest 后 mq publish 失败 | redis latest 指向永不到达的 trigger_id；后续如有新事件覆盖 latest 就恢复，没有则丢这一轮 | drift/afterthought 接受丢一轮，下次新事件自然恢复 |
-| `reschedule` 写完 redis latest 后 mq publish 失败（reviewer round-5 H2） | drift_check / afterthought_check 内部抛异常 → handler nack 进 DLQ；redis latest 已被 reschedule 写成新 trigger_id，**DLQ 里那条原 message 携带的 trigger_id 跟新 latest 不 match → 即使运维 replay 也会 stale-drop**。如果之后没有新业务事件，该轮 fire 真丢 | drift/afterthought 接受丢一轮（fire 是幂等检查信号，下次 chat 自然触发新一轮）。**不引 rollback 修法**（需要给 reschedule 多传 trigger_id 参数 + 双向 Lua swap，跟低关键业务定位不匹配） |
+| `reschedule` CAS swap 成功但 mq publish 失败（reviewer round-5 H2 + v7 收紧）| drift_check / afterthought_check 内部抛异常 → handler nack 进 DLQ；redis latest 已被 reschedule 写成新 trigger_id，DLQ 里那条原 message 携带的 trigger_id 跟新 latest 不 match → 运维 replay stale-drop。**v7 把 reschedule 改成 CAS swap 后，这个 case 仅在"latest 还是原 trigger_id 时 mq publish 失败"窄窗口下发生**；如果中间已被真实新事件覆盖，reschedule 直接 no-op，原 DLQ message replay 仍可 work | drift/afterthought 接受这窄边界丢一轮（fire 是幂等检查信号，下次 chat 自然触发新一轮）。不引 rollback 修法（双向 Lua swap 跟低关键业务定位不匹配） |
 | agent-service + redis + mq 全挂超过 24h | redis latest 过期；handler 拿到 mq delay 消息时 latest=None → drop | 业务上等价于"chat 沉默了一整天"，丢这一轮无影响 |
 | `_emit_memory_trigger` 整个 emit 异常 | 由 helper 自己 try/except 吞掉 + log error；本次 trigger 整个不存在 | 下次新事件自然恢复 |
 
@@ -916,12 +966,13 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
   - **consumer 完成后 reschedule 覆盖 latest**：handler conditional DEL 跳过（latest != 自己），新 latest 保留供下一轮 fire
   - **consumer 抛异常**：跳过 conditional DEL（latest 保留供 DLQ replay；count 已经被 atomic claim 清成 0，replay 仅恢复 fire 信号；reviewer round-2 H2 + round-4 M2）+ mq nack 进 DLQ
   - **consumer 锁冲突调 reschedule 后正常返回**：handler 视为成功 → conditional DEL → latest 已被 reschedule 覆盖 → DEL 跳过
-- `reschedule`（fake redis + fake mq + setup wire）：
-  - 调用后 redis latest 被 SET 成新 trigger_id；**count 不变**（验证不 INCR）
-  - mq publish 一条 delay 消息；fire_now=False
+- `reschedule`（fake redis + fake mq + setup wire + 设置 `_debounce_trigger_var`）：
+  - **没在 handler 内调用**（contextvar=None）→ raise RuntimeError
+  - **CAS swap 成功**：contextvar=trigger_id_orig，redis latest=trigger_id_orig → 调用后 latest 被 swap 成 new_trigger_id；count 不变（不 INCR）；publish delay 消息携带 new_trigger_id + fire_now=False
+  - **CAS swap 失败**（reviewer round-6 M1）：contextvar=trigger_id_orig，但 redis latest 已被新事件覆盖（!= trigger_id_orig）→ Lua 返回 0 → reschedule no-op（不写 latest，不 publish），让真实新事件 timer 接管
   - WIRING_REGISTRY 没匹配 wire → raise RuntimeError
   - 跟 publish_debounce 共存 wire 时不互相干扰
-  - **mq publish 失败**（reviewer round-5 H2）：reschedule 抛异常向上传播 → 调用方 (drift_check) 进入异常路径 → handler nack 进 DLQ。redis latest 仍是新 trigger_id（不 rollback；接受 best-effort 边界，见 §4.1）
+  - **CAS swap 成功后 mq publish 失败**（reviewer round-5 H2）：reschedule 抛异常向上传播 → 调用方 (drift_check) 进入异常路径 → handler nack 进 DLQ。redis latest 已是 new_trigger_id（不 rollback；接受 best-effort 边界，见 §4.1）
 
 ### 5.2 compile_graph 校验测试（**必须覆盖 10 项 reject + 1 项 accept**）
 
@@ -981,7 +1032,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 | Deployment | Phase 3 改动影响 |
 |---|---|
 | `agent-service` | 启动 `start_debounce_consumers` + 业务节点接收 emit |
-| `arq-worker` | 同镜像（`bind` 已限制只在 agent-service 启 consumer），但镜像层代码走查需确认无 regress |
+| `arq-worker` | 同镜像，但 `start_debounce_consumers(app_name="agent-service")` 用 `nodes_for_app` 过滤，arq-worker 启动时传自己的 app_name 不会启 debounce consumer。镜像层代码走查需确认无 regress |
 | `vectorize-worker` | 同上 |
 
 **Phase 3 不动 lark-server**。
@@ -1036,7 +1087,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - [ ] `runtime/emit.py` 的 wire dispatch 循环顶部包含 `if w.debounce is not None` 分支并 `continue`
 - [ ] `compile_graph` 接受合法 `.debounce()` wire
 - [ ] `compile_graph` 拒绝（**全部 10 项**）：缺 `key_by` / 非 transient data type / `.debounce().durable()` / `.debounce().as_latest()` / `.debounce().with_latest(...)` / `.debounce().when(...)` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
-- [ ] `runtime/debounce.py` 提供 `reschedule(data: Data)` 函数：仅 `SET latest + publish delay`，**不 INCR count**；从 WIRING_REGISTRY 找匹配 wire（compile_graph 已保证唯一）
+- [ ] `runtime/debounce.py` 提供 `reschedule(data: Data)` 函数：**Lua CAS swap latest**（仅当 latest == handler 当前 trigger_id 才 swap），swap 失败 no-op；不 INCR count；handler 在调 consumer 前用 `_debounce_trigger_var` contextvar 暴露 trigger_id 给 reschedule
 
 ### 8.3 业务节点（`app/nodes/memory_pipelines.py`）
 
