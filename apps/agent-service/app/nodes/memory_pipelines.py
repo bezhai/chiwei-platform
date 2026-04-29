@@ -11,6 +11,7 @@ the dispatch layer, not the business logic.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
@@ -26,9 +27,13 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
 )
 from app.data.session import get_session
+from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
+from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.memory.vectorize_memory import enqueue_fragment_vectorize
+from app.runtime.debounce import DebounceReschedule
+from app.runtime.node import node
 
 logger = logging.getLogger(__name__)
 
@@ -218,3 +223,57 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
     except Exception:
         pass
     return "在群里"
+
+
+# ---------------------------------------------------------------------------
+# @node consumers
+# ---------------------------------------------------------------------------
+
+
+@node
+async def drift_check(trigger: DriftTrigger) -> None:
+    """Single-flight drift detection per (chat, persona).
+
+    Lock contention raises DebounceReschedule(SameTrigger) — the debounce
+    handler catches and runs _do_reschedule with its own trigger_id, so a
+    fresh delayed fire takes phase2's place after the lock releases.
+
+    Lock release uses compare-and-delete (Lua) keyed on a uuid token, so
+    if LLM stalls past TTL and a new fire grabs the lock, the old finally
+    sees a different token and leaves the new lock alone (reviewer round-2 H2).
+    """
+    lock_key = f"phase2:drift:{trigger.chat_id}:{trigger.persona_id}"
+    token = uuid.uuid4().hex
+    redis = await get_redis()
+    if not await redis.set(lock_key, token, nx=True, ex=600):
+        logger.info(
+            "drift_check: phase2 in flight for chat_id=%s persona=%s, raise DebounceReschedule",
+            trigger.chat_id, trigger.persona_id,
+        )
+        raise DebounceReschedule(DriftTrigger(
+            chat_id=trigger.chat_id, persona_id=trigger.persona_id,
+        ))
+    try:
+        await _run_drift(trigger.chat_id, trigger.persona_id)
+    finally:
+        await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
+
+
+@node
+async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
+    """Single-flight conversation fragment generation per (chat, persona)."""
+    lock_key = f"phase2:afterthought:{trigger.chat_id}:{trigger.persona_id}"
+    token = uuid.uuid4().hex
+    redis = await get_redis()
+    if not await redis.set(lock_key, token, nx=True, ex=900):
+        logger.info(
+            "afterthought_check: phase2 in flight for chat_id=%s persona=%s, raise DebounceReschedule",
+            trigger.chat_id, trigger.persona_id,
+        )
+        raise DebounceReschedule(AfterthoughtTrigger(
+            chat_id=trigger.chat_id, persona_id=trigger.persona_id,
+        ))
+    try:
+        await _generate_fragment(trigger.chat_id, trigger.persona_id)
+    finally:
+        await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
