@@ -175,6 +175,13 @@ def compile_graph() -> CompiledGraph:
                 f"constructed directly without going through "
                 f"``WireBuilder.debounce``)"
             )
+        meta = getattr(w.data_type, "Meta", None)
+        if meta is None or not getattr(meta, "transient", False):
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce(): data type "
+                f"must declare ``Meta.transient = True`` (debounce fire "
+                f"signals are not persisted to pg)."
+            )
         if w.durable:
             raise GraphError(
                 f"wire({w.data_type.__name__}).debounce().durable(): "
@@ -239,13 +246,6 @@ def compile_graph() -> CompiledGraph:
                 f"wire."
             )
         seen_debounce_types.add(w.data_type)
-        meta = getattr(w.data_type, "Meta", None)
-        if meta is None or not getattr(meta, "transient", False):
-            raise GraphError(
-                f"wire({w.data_type.__name__}).debounce(): data type "
-                f"must declare ``Meta.transient = True`` (debounce fire "
-                f"signals are not persisted to pg)."
-            )
 
     # 4a) ``with_latest`` is implemented only on the in-process emit
     # path (``emit._resolve_inputs`` runs ``select_latest`` for each
