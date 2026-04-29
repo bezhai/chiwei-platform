@@ -26,7 +26,7 @@ class WireSpec:
     as_latest: bool = False
     predicate: Callable | None = None
     debounce: dict | None = None
-    debounce_key_by: Callable | None = None  # debounce wire 的 partition key 提取函数
+    debounce_key_by: Callable[[Data], str] | None = None
     with_latest: tuple[type[Data], ...] = ()
 
 

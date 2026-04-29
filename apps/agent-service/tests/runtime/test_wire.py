@@ -91,7 +91,7 @@ def test_debounce_stores_key_by():
 
 def test_debounce_requires_key_by_keyword():
     # key_by 必填且 keyword-only
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="key_by"):
         wire(Msg).to(f).debounce(seconds=60, max_buffer=5)  # type: ignore[call-arg]
 
 
