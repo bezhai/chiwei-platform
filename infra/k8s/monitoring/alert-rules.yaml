@@ -236,7 +236,7 @@ spec:
 
         # RabbitMQ - 已知业务队列 consumer 断开
         - alert: RabbitmqConsumerDown
-          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|safety_check|vectorize|chat_response|durable_.*|memory_fragment_vectorize|memory_abstract_vectorize).*"} == 0
+          expr: rabbitmq_queue_consumers{namespace="prod", queue=~"(recall|vectorize|chat_response|durable_.*|memory_fragment_vectorize|memory_abstract_vectorize).*"} == 0
           for: 1m
           labels:
             severity: critical

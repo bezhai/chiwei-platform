@@ -13,7 +13,6 @@ from app.infra.rabbitmq import (
     MEMORY_ABSTRACT_VECTORIZE,
     MEMORY_FRAGMENT_VECTORIZE,
     RECALL,
-    SAFETY_CHECK,
     VECTORIZE,
     Route,
     _build_queue_args,
@@ -183,7 +182,6 @@ class TestRouteConstants:
         expected = {
             CHAT_REQUEST,
             CHAT_RESPONSE,
-            SAFETY_CHECK,
             RECALL,
             VECTORIZE,
             MEMORY_FRAGMENT_VECTORIZE,
@@ -191,8 +189,8 @@ class TestRouteConstants:
         }
         assert set(ALL_ROUTES) == expected
 
-    def test_all_routes_have_seven_entries(self):
-        assert len(ALL_ROUTES) == 7
+    def test_all_routes_have_six_entries(self):
+        assert len(ALL_ROUTES) == 6
 
     def test_each_route_has_queue_and_rk(self):
         for route in ALL_ROUTES:

@@ -1,4 +1,4 @@
-"""Tests for chat/post_actions.py — Phase 2 emit(PostSafetyRequest)."""
+"""Tests for chat/post_actions.py."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -10,7 +10,7 @@ from app.domain.safety import PostSafetyRequest
 
 @pytest.mark.asyncio
 async def test_publish_post_check_emits_post_safety_request():
-    """旧 mq.publish(SAFETY_CHECK,...) 替换为 emit(PostSafetyRequest(...))."""
+    """_publish_post_check emits PostSafetyRequest into the dataflow graph."""
     from app.chat.post_actions import _publish_post_check
 
     captured: list[PostSafetyRequest] = []

@@ -12,12 +12,11 @@ export interface Route {
 
 export const CHAT_REQUEST: Route = { queue: 'chat_request', rk: 'chat.request' };
 export const CHAT_RESPONSE: Route = { queue: 'chat_response', rk: 'chat.response' };
-export const SAFETY_CHECK: Route = { queue: 'safety_check', rk: 'post.safety.check' };
 export const RECALL: Route = { queue: 'recall', rk: 'action.recall' };
 export const VECTORIZE: Route = { queue: 'vectorize', rk: 'task.vectorize' };
 export const PROACTIVE_EVAL: Route = { queue: 'proactive_eval', rk: 'proactive.eval' };
 
-const ALL_ROUTES: Route[] = [CHAT_REQUEST, CHAT_RESPONSE, SAFETY_CHECK, RECALL, VECTORIZE, PROACTIVE_EVAL];
+const ALL_ROUTES: Route[] = [CHAT_REQUEST, CHAT_RESPONSE, RECALL, VECTORIZE, PROACTIVE_EVAL];
 
 const NON_PROD_EXPIRES_MS = 86_400_000;
 const LANE_FALLBACK_TTL_MS = 10_000;
