@@ -8,9 +8,23 @@ from app.runtime.debounce import (
     DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS, publish_debounce,
     _do_reschedule, _build_handler,
 )
-from app.runtime.node import node
+from app.runtime.node import NODE_REGISTRY, _NODE_META, node
 from app.runtime.wire import WireSpec
 from app.domain.memory_triggers import DriftTrigger
+
+
+@pytest.fixture(autouse=True)
+def _node_registry_isolation():
+    """每个测试前后 snapshot/restore NODE_REGISTRY + _NODE_META，
+    防止 @node 装饰过的内联 consumer 跨测试累积污染（Task 10 按
+    app_name 过滤启动 consumer 时会受影响）。"""
+    nodes_snapshot = set(NODE_REGISTRY)
+    meta_snapshot = dict(_NODE_META)
+    yield
+    NODE_REGISTRY.clear()
+    NODE_REGISTRY.update(nodes_snapshot)
+    _NODE_META.clear()
+    _NODE_META.update(meta_snapshot)
 
 
 async def _drift_check_stub(t: DriftTrigger) -> None:
