@@ -208,17 +208,6 @@ def test_layer4_rejects_wire_with_consumers_in_different_apps():
         compile_graph()
 
 
-def test_debounce_rejected_until_engine_supports_it():
-    # Surface exists for the DSL/typing story but the engine doesn't
-    # dispatch debounce yet; using it must fail loudly at startup.
-    @node
-    async def f(m: M) -> None: ...
-
-    wire(M).to(f).debounce(seconds=10, max_buffer=5, key_by=lambda m: m.mid)
-    with pytest.raises(GraphError, match="debounce.*not yet"):
-        compile_graph()
-
-
 def test_compile_graph_accepts_wire_with_sink_mq_in_all_routes():
     """Sink.mq("recall") is in ALL_ROUTES → compile_graph accepts it."""
     @node

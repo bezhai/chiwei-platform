@@ -141,6 +141,112 @@ def compile_graph() -> CompiledGraph:
                     f"consumers so they share one app"
                 )
 
+    # 4c) .debounce() canonical shape:
+    #   * exactly one @node consumer (debounce state is keyed by
+    #     DataType+key — fan-out would split the redis state across
+    #     consumers in ways the engine can't reason about);
+    #   * data type Meta.transient = True (fire signals are not
+    #     persisted to pg);
+    #   * key_by must be set (DSL enforces it; we re-check for
+    #     defensive callers that build WireSpec directly);
+    #   * cannot combine with ``.durable()`` (debounce ships its own
+    #     mq transport via DELAYED_QUEUE), ``.as_latest()``
+    #     (transient-only collides with insert_latest), ``.with_latest()``
+    #     (debounce handlers are single-input), ``.when()`` (the
+    #     ``DebounceReschedule`` reschedule path bypasses predicate
+    #     evaluation), declarative ``Source.*`` (debounce wires are
+    #     emit-driven), or ``Sink.*`` (the fire signal needs a
+    #     business consumer, not a passthrough mq publish);
+    #   * each (DataType) appears in at most one ``.debounce()`` wire
+    #     (otherwise the redis ``debounce:latest:{DataType}:{key}``
+    #     state would collide).
+    # Runs ahead of the durable / transient blocks below so that
+    # ``wire(...).debounce().durable()`` surfaces as the explicit
+    # debounce-vs-durable error rather than the generic
+    # durable-on-transient one.
+    seen_debounce_types: set[type[Data]] = set()
+    for w in wires:
+        if w.debounce is None:
+            continue
+        if w.debounce_key_by is None:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce(...) requires "
+                f"``key_by=`` (DSL enforces it; this WireSpec was likely "
+                f"constructed directly without going through "
+                f"``WireBuilder.debounce``)"
+            )
+        if w.durable:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce().durable(): "
+                f"debounce already ships its own mq transport (delayed "
+                f"queue + reschedule); combining with ``.durable()`` is "
+                f"not supported. Drop ``.durable()``."
+            )
+        if w.as_latest:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce().as_latest(): "
+                f"as_latest persists data via insert_latest, but debounce "
+                f"data types must be ``Meta.transient = True`` (no pg "
+                f"table) — these two are mutually exclusive. Drop one."
+            )
+        if w.with_latest:
+            latest = sorted(t.__name__ for t in w.with_latest)
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce()"
+                f".with_latest({', '.join(latest)}): debounce handlers "
+                f"are single-input (the fire signal carries one Data); "
+                f"``.with_latest(...)`` is not supported. Resolve the "
+                f"latest types upstream of emit and pass them through "
+                f"the trigger Data instead."
+            )
+        if w.predicate is not None:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce().when(...): "
+                f"emit() respects ``.when()`` predicates but the "
+                f"DebounceReschedule path bypasses them — the two paths "
+                f"would behave inconsistently. Filter upstream of emit, "
+                f"or drop ``.when()`` / ``.debounce()`` — pick one."
+            )
+        if w.sinks:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce().to(Sink.*): "
+                f"debounce wires must target exactly one @node consumer; "
+                f"``Sink.*`` is not supported (the fire signal needs "
+                f"business logic, not a passthrough mq publish)."
+            )
+        if w.sources:
+            kinds = sorted({s.kind for s in w.sources})
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce()"
+                f".from_(Source.{','.join(kinds)}): debounce wires are "
+                f"emit-driven; declarative ``Source.*`` is not supported."
+            )
+        if len(w.consumers) != 1:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce(): must have "
+                f"exactly one consumer; got {len(w.consumers)} "
+                f"({[c.__name__ for c in w.consumers]}). Debounce state "
+                f"(redis latest+count keyed by DataType+key) cannot be "
+                f"split across consumers."
+            )
+        if w.data_type in seen_debounce_types:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce(): "
+                f"{w.data_type.__name__} already declared on another "
+                f"debounce wire; redis state "
+                f"(debounce:latest:{w.data_type.__name__}:{{key}}) would "
+                f"collide. Each DataType can have at most one debounce "
+                f"wire."
+            )
+        seen_debounce_types.add(w.data_type)
+        meta = getattr(w.data_type, "Meta", None)
+        if meta is None or not getattr(meta, "transient", False):
+            raise GraphError(
+                f"wire({w.data_type.__name__}).debounce(): data type "
+                f"must declare ``Meta.transient = True`` (debounce fire "
+                f"signals are not persisted to pg)."
+            )
+
     # 4a) ``with_latest`` is implemented only on the in-process emit
     # path (``emit._resolve_inputs`` runs ``select_latest`` for each
     # ``with_latest`` type before invoking the consumer). The durable
@@ -190,23 +296,6 @@ def compile_graph() -> CompiledGraph:
                 f"remove ``transient`` so the runtime owns the table, "
                 f"or drop ``.durable()`` and keep this edge in-process."
             )
-
-    # 5) reject edge modifiers whose engine implementation hasn't landed
-    # yet. (debounce: still TODO; sinks: now dispatched in Phase 2 — see 5b
-    # for the ALL_ROUTES validation that catches typos at boot rather than
-    # at first emit.)
-    unimplemented: list[str] = []
-    for w in wires:
-        if w.debounce is not None:
-            unimplemented.append(
-                f"wire({w.data_type.__name__}).debounce(...) — not yet "
-                f"wired up; the engine has no debounce dispatch and the "
-                f"node-signature side (Batched[T]) hasn't been designed"
-            )
-    if unimplemented:
-        raise GraphError(
-            "unimplemented wire features:\n  - " + "\n  - ".join(unimplemented)
-        )
 
     # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
     # reference a queue declared in ALL_ROUTES, otherwise the engine
