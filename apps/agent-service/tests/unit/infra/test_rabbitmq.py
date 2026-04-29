@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.infra.rabbitmq import (
     ALL_ROUTES,
@@ -15,6 +17,8 @@ from app.infra.rabbitmq import (
     RECALL,
     VECTORIZE,
     Route,
+    _LANE_FALLBACK_TTL_MS,
+    _NON_PROD_EXPIRES_MS,
     _build_queue_args,
     _lane_rk,
     current_lane,
@@ -207,3 +211,109 @@ class TestRouteConstants:
     def test_no_duplicate_routing_keys(self):
         rks = [r.rk for r in ALL_ROUTES]
         assert len(rks) == len(set(rks))
+
+
+# ---------------------------------------------------------------------------
+# Route.lane_fallback + _build_queue_args(lane_fallback=...) — Phase 3 Task 1
+# ---------------------------------------------------------------------------
+def test_build_queue_args_prod_ignores_lane_fallback():
+    args = _build_queue_args("rk", lane=None, lane_fallback=True)
+    assert args == {"x-dead-letter-exchange": DLX_NAME}
+    args2 = _build_queue_args("rk", lane=None, lane_fallback=False)
+    assert args2 == {"x-dead-letter-exchange": DLX_NAME}
+
+
+def test_build_queue_args_lane_with_fallback_default():
+    args = _build_queue_args("rk", lane="dev", lane_fallback=True)
+    assert args == {
+        "x-message-ttl": _LANE_FALLBACK_TTL_MS,
+        "x-dead-letter-exchange": EXCHANGE_NAME,
+        "x-dead-letter-routing-key": "rk",
+        "x-expires": _NON_PROD_EXPIRES_MS,
+    }
+
+
+def test_build_queue_args_lane_fallback_off_keeps_dlx():
+    args = _build_queue_args("rk", lane="dev", lane_fallback=False)
+    assert args == {
+        "x-dead-letter-exchange": DLX_NAME,
+        "x-expires": _NON_PROD_EXPIRES_MS,
+    }
+    assert "x-message-ttl" not in args
+    assert "x-dead-letter-routing-key" not in args
+
+
+def test_route_default_lane_fallback_true():
+    r = Route("q", "rk")
+    assert r.lane_fallback is True
+
+
+def test_route_explicit_lane_fallback_false():
+    r = Route("q", "rk", lane_fallback=False)
+    assert r.lane_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# declare_route / _ensure_lane_queue read route.lane_fallback — Phase 3 Task 2
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_declare_route_passes_lane_fallback_through(monkeypatch):
+    """declare_route 应该把 route.lane_fallback 透传给 _build_queue_args。"""
+    from app.infra.rabbitmq import _RabbitMQ
+
+    mq = _RabbitMQ()
+    mq._channel = MagicMock()
+    mq._exchange = MagicMock()
+    declared_args: dict[str, dict] = {}
+
+    async def fake_declare_queue(name, durable, arguments):
+        declared_args[name] = arguments
+        q = MagicMock()
+        q.bind = AsyncMock()
+        return q
+
+    mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
+
+    monkeypatch.setattr("app.infra.rabbitmq.current_lane", lambda: "dev")
+    route = Route("q", "rk", lane_fallback=False)
+    await mq.declare_route(route)
+
+    args = declared_args["q_dev"]
+    assert "x-message-ttl" not in args
+    assert "x-dead-letter-routing-key" not in args
+    assert args["x-dead-letter-exchange"] == DLX_NAME
+
+
+@pytest.mark.asyncio
+async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
+    """_ensure_lane_queue (lazy declare 路径，debounce publish 实际走这里)
+    应该把 route.lane_fallback 透传给 _build_queue_args，且二次调用走 cache。"""
+    from app.infra.rabbitmq import _RabbitMQ
+
+    mq = _RabbitMQ()
+    mq._channel = MagicMock()
+    mq._exchange = MagicMock()
+    declared_args: dict[str, dict] = {}
+
+    async def fake_declare_queue(name, durable, arguments):
+        declared_args[name] = arguments
+        q = MagicMock()
+        q.bind = AsyncMock()
+        return q
+
+    mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
+
+    route = Route("q", "rk", lane_fallback=False)
+    await mq._ensure_lane_queue(route, lane="dev")
+
+    args = declared_args["q_dev"]
+    assert "x-message-ttl" not in args
+    assert "x-dead-letter-routing-key" not in args
+    assert args["x-dead-letter-exchange"] == DLX_NAME
+
+    # cache_key 已记录
+    assert "q_dev" in mq._declared_lane_queues
+
+    # 二次调用短路：declare_queue 调用次数仍为 1
+    await mq._ensure_lane_queue(route, lane="dev")
+    assert mq._channel.declare_queue.await_count == 1

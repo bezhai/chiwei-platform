@@ -39,6 +39,7 @@ _LANE_FALLBACK_TTL_MS = 10_000
 class Route(NamedTuple):
     queue: str
     rk: str
+    lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
 
 
 CHAT_REQUEST = Route("chat_request", "chat.request")
@@ -105,17 +106,23 @@ def _lane_rk(base: str, lane: str | None) -> str:
     return f"{base}.{lane}" if lane else base
 
 
-def _build_queue_args(prod_rk: str, lane: str | None) -> dict[str, Any]:
+def _build_queue_args(prod_rk: str, lane: str | None,
+                     lane_fallback: bool = True) -> dict[str, Any]:
     """Build queue arguments.
 
     - prod queues: dead-letter to DLX
-    - lane queues: TTL -> main exchange with prod routing-key (fallback),
-      plus auto-expire after 24 h idle
+    - lane queues with lane_fallback=True: TTL -> main exchange with prod
+      routing-key (fallback), plus auto-expire after 24 h idle
+    - lane queues with lane_fallback=False: keep DLX (异常 nack 仍要进
+      dead_letters), but no ttl-back-to-prod (long-delay messages 留在
+      自己 lane 上等到期；reviewer round-1 M5 + round-5 H1)
     """
     extra: dict[str, Any] = {}
     if lane:
         extra["x-expires"] = _NON_PROD_EXPIRES_MS
     if not lane:
+        return {"x-dead-letter-exchange": DLX_NAME, **extra}
+    if not lane_fallback:
         return {"x-dead-letter-exchange": DLX_NAME, **extra}
     return {
         "x-message-ttl": _LANE_FALLBACK_TTL_MS,
@@ -205,6 +212,11 @@ class _RabbitMQ:
         lane-queue declare all continue to work). ``declare_topology()`` still
         owns the static ``ALL_ROUTES`` list; this method is its per-route
         sibling so new routes can plug in without amending that list.
+
+        Reads ``route.lane_fallback`` (default True for prod compatibility) to
+        decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
+        debounce routes set ``lane_fallback=False`` so 300s delays don't get
+        short-circuited to prod (spec §3.4.4 / reviewer round-5 H1).
         """
         if self._channel is None or self._exchange is None:
             raise RuntimeError("must call connect() + declare_topology() first")
@@ -212,12 +224,12 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane),
+            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
-        """Lazily declare a lane queue on first publish."""
+        """Lazily declare a lane queue on first publish (reads route.lane_fallback)."""
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
             return
@@ -226,7 +238,7 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane),
+            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
         self._declared_lane_queues.add(cache_key)

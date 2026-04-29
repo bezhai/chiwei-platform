@@ -26,6 +26,7 @@ class WireSpec:
     as_latest: bool = False
     predicate: Callable | None = None
     debounce: dict | None = None
+    debounce_key_by: Callable[[Data], str] | None = None
     with_latest: tuple[type[Data], ...] = ()
 
 
@@ -65,8 +66,22 @@ class WireBuilder:
         self._spec.predicate = pred
         return self
 
-    def debounce(self, *, seconds: int, max_buffer: int) -> WireBuilder:
+    def debounce(
+        self,
+        *,
+        seconds: int,
+        max_buffer: int,
+        key_by: Callable[[Data], str],
+    ) -> WireBuilder:
+        """Declare debounce semantics on this wire.
+
+        ``key_by`` extracts a partition key from each Data instance —
+        debounce state (latest trigger_id, count) is per-key. Required
+        (no default) so every debounce wire explicitly names its
+        partition.
+        """
         self._spec.debounce = {"seconds": seconds, "max_buffer": max_buffer}
+        self._spec.debounce_key_by = key_by
         return self
 
     def with_latest(self, *types: type[Data]) -> WireBuilder:

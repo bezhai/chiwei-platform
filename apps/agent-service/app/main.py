@@ -60,10 +60,13 @@ async def lifespan(app: FastAPI):
         # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
+        from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
         from app.workers.chat_consumer import start_chat_consumer
         await start_consumers(app_name="agent-service")
         logger.info("Runtime durable consumers started for agent-service")
+        await start_debounce_consumers(app_name="agent-service")
+        logger.info("Runtime debounce consumers started for agent-service")
 
         consumer_tasks.append(asyncio.create_task(start_chat_consumer()))
         logger.info("Chat request consumer started")
@@ -77,7 +80,9 @@ async def lifespan(app: FastAPI):
     # Phase 2: stop runtime durable consumers cleanly before tearing
     # down RabbitMQ connection (otherwise late deliveries race with close).
     if settings.rabbitmq_url:
+        from app.runtime.debounce import stop_debounce_consumers
         from app.runtime.durable import stop_consumers
+        await stop_debounce_consumers()
         await stop_consumers()
 
     # Shutdown legacy consumers (chat consumer)
