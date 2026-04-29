@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.domain.safety import PostSafetyRequest
 from app.memory._persona import load_persona
+from app.runtime.data import Data
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,21 @@ async def _publish_post_check(
         logger.error("Failed to emit PostSafetyRequest: %s", e)
 
 
+async def _emit_memory_trigger(trigger: Data) -> None:
+    """Fire-and-forget memory trigger emit. Failures are logged, not raised
+    (post_actions 调用方语义就是 fire-and-forget；emit 内部任何异常都不该
+    污染聊天主链路；reviewer round-1 M6)."""
+    try:
+        await emit(trigger)
+    except Exception:
+        logger.exception(
+            "failed to emit memory trigger %s: chat_id=%s persona_id=%s",
+            type(trigger).__name__,
+            getattr(trigger, "chat_id", None),
+            getattr(trigger, "persona_id", None),
+        )
+
+
 def schedule_post_actions(
     full_content: str,
     session_id: str | None,
@@ -73,18 +90,12 @@ def schedule_post_actions(
             _publish_post_check(session_id, full_content, chat_id, message_id)
         )
 
-    # 2. Identity drift (debounced voice regeneration)
-    try:
-        from app.memory.drift import drift
+    # 2. Identity drift (debounced voice regeneration via dataflow)
+    asyncio.create_task(_emit_memory_trigger(
+        DriftTrigger(chat_id=chat_id, persona_id=persona_id)
+    ))
 
-        asyncio.create_task(drift.on_event(chat_id, persona_id))
-    except Exception as e:
-        logger.warning("Identity drift trigger failed: %s", e)
-
-    # 3. Afterthought (conversation fragment generation)
-    try:
-        from app.memory.afterthought import afterthought
-
-        asyncio.create_task(afterthought.on_event(chat_id, persona_id))
-    except Exception as e:
-        logger.warning("Afterthought trigger failed: %s", e)
+    # 3. Afterthought (conversation fragment generation via dataflow)
+    asyncio.create_task(_emit_memory_trigger(
+        AfterthoughtTrigger(chat_id=chat_id, persona_id=persona_id)
+    ))
