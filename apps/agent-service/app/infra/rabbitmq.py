@@ -39,6 +39,7 @@ _LANE_FALLBACK_TTL_MS = 10_000
 class Route(NamedTuple):
     queue: str
     rk: str
+    lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
 
 
 CHAT_REQUEST = Route("chat_request", "chat.request")
@@ -105,17 +106,23 @@ def _lane_rk(base: str, lane: str | None) -> str:
     return f"{base}.{lane}" if lane else base
 
 
-def _build_queue_args(prod_rk: str, lane: str | None) -> dict[str, Any]:
+def _build_queue_args(prod_rk: str, lane: str | None,
+                     lane_fallback: bool = True) -> dict[str, Any]:
     """Build queue arguments.
 
     - prod queues: dead-letter to DLX
-    - lane queues: TTL -> main exchange with prod routing-key (fallback),
-      plus auto-expire after 24 h idle
+    - lane queues with lane_fallback=True: TTL -> main exchange with prod
+      routing-key (fallback), plus auto-expire after 24 h idle
+    - lane queues with lane_fallback=False: keep DLX (异常 nack 仍要进
+      dead_letters), but no ttl-back-to-prod (long-delay messages 留在
+      自己 lane 上等到期；reviewer round-1 M5 + round-5 H1)
     """
     extra: dict[str, Any] = {}
     if lane:
         extra["x-expires"] = _NON_PROD_EXPIRES_MS
     if not lane:
+        return {"x-dead-letter-exchange": DLX_NAME, **extra}
+    if not lane_fallback:
         return {"x-dead-letter-exchange": DLX_NAME, **extra}
     return {
         "x-message-ttl": _LANE_FALLBACK_TTL_MS,
