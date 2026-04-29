@@ -70,6 +70,17 @@ async def emit(data: Data) -> None:
             continue
         if w.predicate and not w.predicate(data):
             continue
+        if w.debounce is not None:
+            # debounce wire 走独立的 mq publish 路径（publish_debounce），
+            # 不参与 in-process / sink / durable dispatch；compile_graph
+            # 已保证 .debounce() 不能跟 .durable() / .as_latest() /
+            # .when() / sink 等组合，这里直接 fan-out 到每个 consumer 后
+            # continue。
+            from app.runtime.debounce import publish_debounce
+
+            for c in w.consumers:
+                await publish_debounce(w, c, data)
+            continue
         for c in w.consumers:
             if w.durable:
                 # durable: publish to the consumer's queue; the bound
