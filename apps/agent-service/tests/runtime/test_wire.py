@@ -1,5 +1,7 @@
 from typing import Annotated
 
+import pytest
+
 from app.runtime.data import Data, Key
 from app.runtime.node import node
 from app.runtime.source import Source
@@ -64,8 +66,32 @@ def test_wire_when_predicate():
 
 
 def test_wire_debounce():
-    wire(Msg).to(f).debounce(seconds=10, max_buffer=5)
+    wire(Msg).to(f).debounce(
+        seconds=10,
+        max_buffer=5,
+        key_by=lambda m: m.mid,
+    )
     w = WIRING_REGISTRY[0]
     assert w.debounce == {"seconds": 10, "max_buffer": 5}
+    assert w.debounce_key_by is not None
+    assert w.debounce_key_by(Msg(mid="abc")) == "abc"
+
+
+def test_debounce_stores_key_by():
+    wire(Msg).to(f).debounce(
+        seconds=60,
+        max_buffer=5,
+        key_by=lambda m: f"k:{m.mid}",
+    )
+    spec = WIRING_REGISTRY[-1]
+    assert spec.debounce == {"seconds": 60, "max_buffer": 5}
+    assert spec.debounce_key_by is not None
+    assert spec.debounce_key_by(Msg(mid="abc")) == "k:abc"
+
+
+def test_debounce_requires_key_by_keyword():
+    # key_by 必填且 keyword-only
+    with pytest.raises(TypeError):
+        wire(Msg).to(f).debounce(seconds=60, max_buffer=5)  # type: ignore[call-arg]
 
 

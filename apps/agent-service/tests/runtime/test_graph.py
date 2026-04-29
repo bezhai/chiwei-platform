@@ -214,7 +214,7 @@ def test_debounce_rejected_until_engine_supports_it():
     @node
     async def f(m: M) -> None: ...
 
-    wire(M).to(f).debounce(seconds=10, max_buffer=5)
+    wire(M).to(f).debounce(seconds=10, max_buffer=5, key_by=lambda m: m.mid)
     with pytest.raises(GraphError, match="debounce.*not yet"):
         compile_graph()
 
