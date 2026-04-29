@@ -1,5 +1,8 @@
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
 from app.runtime.debounce import (
-    DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS,
+    DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS, publish_debounce,
 )
 from app.runtime.wire import WireSpec
 from app.domain.memory_triggers import DriftTrigger
@@ -39,3 +42,74 @@ def test_no_module_level_reschedule_function():
     避免 contextvar 泄漏到 background task (reviewer round-7 M1)."""
     import app.runtime.debounce as mod
     assert not hasattr(mod, "reschedule")
+
+
+def _make_wire():
+    return WireSpec(
+        data_type=DriftTrigger,
+        consumers=[_drift_check_stub],
+        debounce={"seconds": 60, "max_buffer": 3},
+        debounce_key_by=lambda e: f"drift:{e.chat_id}:{e.persona_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_debounce_single_event(monkeypatch):
+    """单事件：写 latest + INCR count=1 + publish delay=60s 消息。"""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=[1, 0])
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    fake_publish = AsyncMock()
+    monkeypatch.setattr("app.runtime.debounce.mq",
+                        MagicMock(publish=fake_publish))
+    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
+                        MagicMock(get=lambda: "tr-1"))
+    monkeypatch.setattr("app.runtime.debounce.lane_var",
+                        MagicMock(get=lambda: ""))
+
+    w = _make_wire()
+    await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
+
+    fake_redis.eval.assert_awaited_once()
+    args = fake_redis.eval.call_args
+    assert args.args[1] == 2  # numkeys
+    assert "debounce:latest:DriftTrigger:drift:c1:p1" in args.args
+    assert "debounce:count:DriftTrigger:drift:c1:p1" in args.args
+    assert 86400 in args.args
+    assert 3 in args.args
+
+    fake_publish.assert_awaited_once()
+    pub_args = fake_publish.call_args
+    body = pub_args.args[1]
+    assert body["fire_now"] is False
+    assert body["data"] == {"chat_id": "c1", "persona_id": "p1"}
+    assert body["key"] == "drift:c1:p1"
+    assert pub_args.kwargs["delay_ms"] == 60_000
+
+
+@pytest.mark.asyncio
+async def test_publish_debounce_max_buffer_triggers_fire_now(monkeypatch):
+    """count 达 max_buffer 时 publish_debounce 拿到 fire_now=1，
+    publish delay=0 + body.fire_now=True。"""
+    fake_redis = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=[3, 1])
+    monkeypatch.setattr("app.runtime.debounce.get_redis",
+                        AsyncMock(return_value=fake_redis))
+
+    fake_publish = AsyncMock()
+    monkeypatch.setattr("app.runtime.debounce.mq",
+                        MagicMock(publish=fake_publish))
+    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
+                        MagicMock(get=lambda: ""))
+    monkeypatch.setattr("app.runtime.debounce.lane_var",
+                        MagicMock(get=lambda: ""))
+
+    w = _make_wire()
+    await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
+
+    pub_args = fake_publish.call_args
+    body = pub_args.args[1]
+    assert body["fire_now"] is True
+    assert pub_args.kwargs["delay_ms"] == 0

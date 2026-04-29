@@ -29,19 +29,22 @@ say) is unrepresentable.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from typing import Any
 
-from app.infra.rabbitmq import Route
+from app.api.middleware import lane_var, trace_id_var
+from app.infra.rabbitmq import Route, mq
+from app.infra.redis import get_redis
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.wire import WireSpec
 
-# Tasks 7-10 will add: asyncio, json, uuid, AbstractIncomingMessage,
-# lane_var, trace_id_var, current_lane, lane_queue, mq, get_redis,
-# inputs_of, nodes_for_app. Re-add when each is referenced (the imports
-# are listed up-front in the plan as the full set this module ends up
-# needing — kept here as intent doc only via this comment).
+# Tasks 8-10 will add: asyncio, json, AbstractIncomingMessage,
+# current_lane, lane_queue, inputs_of, nodes_for_app. Re-add when each
+# is referenced (the imports are listed up-front in the plan as the
+# full set this module ends up needing — kept here as intent doc only
+# via this comment).
 
 logger = logging.getLogger(__name__)
 
@@ -161,4 +164,51 @@ def _route_for(w: WireSpec, consumer: Callable) -> Route:
         queue=f"debounce_{data_snake}_{consumer.__name__}",
         rk=f"debounce.{data_snake}.{consumer.__name__}",
         lane_fallback=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Upstream emit path
+# ---------------------------------------------------------------------------
+
+
+async def publish_debounce(w: WireSpec, consumer: Callable, data: Data) -> None:
+    """Upstream emit path for a debounced wire.
+
+    Atomically SETs latest = trigger_id (overwriting any older one) and
+    INCRs count. If count crosses max_buffer, the Lua resets count to 0
+    and flags this publish as fire_now=1 (delay=0 immediate fire).
+    """
+    key = w.debounce_key_by(data)
+    seconds = w.debounce["seconds"]
+    max_buffer = w.debounce["max_buffer"]
+    trigger_id = uuid.uuid4().hex
+    redis = await get_redis()
+    redis_latest = f"debounce:latest:{w.data_type.__name__}:{key}"
+    redis_count = f"debounce:count:{w.data_type.__name__}:{key}"
+    ttl_seconds = max(seconds * 2, _DEFAULT_TTL_SECONDS)
+
+    result = await redis.eval(
+        _PUBLISH_LUA, 2,
+        redis_latest, redis_count,
+        trigger_id, ttl_seconds, max_buffer,
+    )
+    new_count, fire_now_flag = int(result[0]), int(result[1])
+
+    body = {
+        "trigger_id": trigger_id,
+        "data": data.model_dump(mode="json"),
+        "key": key,
+        "fire_now": bool(fire_now_flag),
+    }
+    headers = {
+        "trace_id": trace_id_var.get() or "",
+        "lane": lane_var.get() or "",
+        "data_type": type(data).__name__,
+    }
+    delay_ms = 0 if body["fire_now"] else seconds * 1000
+    await mq.publish(_route_for(w, consumer), body, headers=headers, delay_ms=delay_ms)
+    logger.debug(
+        "debounce publish: %s key=%s count=%d fire_now=%s",
+        w.data_type.__name__, key, new_count, body["fire_now"],
     )
