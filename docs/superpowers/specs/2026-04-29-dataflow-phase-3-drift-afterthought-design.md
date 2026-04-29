@@ -1,8 +1,13 @@
 # Dataflow Phase 3 — Drift / Afterthought 进 Graph
 
-**状态**: Draft v5 (2026-04-29，吸收 reviewer 第 4 轮 5 条意见)
+**状态**: Draft v6 (2026-04-29，吸收 reviewer 第 5 轮 3 条意见)
 **前置**: PR #203 (Phase 2 safety) + PR #204 (followup) shipped to prod
 **后续**: Phase 4 Life Engine / Schedule / Glimpse
+
+**v6 关键变化（vs v5）**：
+- `_build_queue_args(..., lane_fallback=False)` **保留 `x-dead-letter-exchange: DLX_NAME`**，只移除 `x-message-ttl` + `x-dead-letter-routing-key`。修 round-5 H1：v5 写法把 lane queue 上的 DLX 也一起去掉了，consumer `message.process(requeue=False)` 失败的 message 会被丢弃而不是进 DLQ，跟 `§3.4.3` "异常进 DLQ 由人工 replay" 的设计承诺冲突
+- `§4.1` 失败表加一项：**reschedule mq.publish 失败 + 之后无新事件 → DLQ 里那条原 message replay 也会 stale-drop**（reschedule 已经把 latest 改成新 trigger_id，而新 trigger_id 的 publish 没成功）。drift / afterthought 业务上接受这个边界，不引 rollback 复杂度（修 round-5 H2 的最小修法 —— reviewer 提的"rollback latest on publish failure"修法需要给 reschedule 多传 trigger_id 参数 + 双向 Lua swap，跟"DLQ replay 仅恢复 fire 信号"的低关键业务定位不匹配）
+- `compile_graph` 拒绝 `.debounce().when(...)`：emit 路径会处理 predicate，reschedule 路径直接 publish 不查 w.predicate，组合起来语义不一致；compile 期 reject 把决定权显式留给将来（修 round-5 M3）
 
 **v5 关键变化（vs v4）**：
 - 业务节点锁冲突时改调 `runtime.debounce.reschedule(trigger)` 而非 `emit(trigger)`：reschedule 内部仅 SET latest + publish delay，**不 INCR count**。修 round-4 M1：v4 用普通 emit 让 self-emit 占 1 个 buffer，max_buffer=1 时会 0-delay 自旋，max_buffer>1 时让真实事件少 1 条就提前 fire；作为 runtime primitive 不应让 synthetic reschedule 污染业务 count（承认 v3 我反驳"加 reschedule API"是错的，atomic claim 修不了 self-emit 自身 INCR 这一类问题）
@@ -292,6 +297,13 @@ for w in wires:
         raise GraphError(
             f"wire({w.data_type.__name__}).debounce().with_latest(...): "
             f"debounce handlers are single-input; .with_latest() not supported"
+        )
+    if w.predicate is not None:
+        raise GraphError(
+            f"wire({w.data_type.__name__}).debounce().when(...): "
+            f"emit() respects predicate but reschedule() bypasses it; "
+            f"the two paths would behave inconsistently. Filter upstream of "
+            f"emit instead, or drop .when() / .debounce() — pick one."
         )
     if w.sinks:
         raise GraphError(
@@ -658,8 +670,11 @@ def _build_queue_args(prod_rk: str, lane: str | None,
     if not lane:
         return {"x-dead-letter-exchange": DLX_NAME, **extra}
     if not lane_fallback:
-        # debounce 队列: 不要 ttl-back-to-prod，长延迟消息要在自己 lane 上等
-        return extra
+        # debounce 队列: 不要 ttl-back-to-prod (长延迟消息要在自己 lane 上等)，
+        # 但 DLQ 还是要 —— consumer 抛异常 message.process(requeue=False) 的
+        # 失败 message 仍然要进 DLX_NAME，否则会被直接丢弃，跟 §3.4.3
+        # "DLQ replay 仅恢复 fire 信号" 的设计承诺冲突 (reviewer round-5 H1)
+        return {"x-dead-letter-exchange": DLX_NAME, **extra}
     return {
         "x-message-ttl": _LANE_FALLBACK_TTL_MS,
         "x-dead-letter-exchange": EXCHANGE_NAME,
@@ -804,6 +819,7 @@ grep -rn "from app.memory.debounce\|from app.memory.drift\|from app.memory.after
 | 场景 | 行为 | 业务影响 |
 |---|---|---|
 | `publish_debounce` 写完 redis latest 后 mq publish 失败 | redis latest 指向永不到达的 trigger_id；后续如有新事件覆盖 latest 就恢复，没有则丢这一轮 | drift/afterthought 接受丢一轮，下次新事件自然恢复 |
+| `reschedule` 写完 redis latest 后 mq publish 失败（reviewer round-5 H2） | drift_check / afterthought_check 内部抛异常 → handler nack 进 DLQ；redis latest 已被 reschedule 写成新 trigger_id，**DLQ 里那条原 message 携带的 trigger_id 跟新 latest 不 match → 即使运维 replay 也会 stale-drop**。如果之后没有新业务事件，该轮 fire 真丢 | drift/afterthought 接受丢一轮（fire 是幂等检查信号，下次 chat 自然触发新一轮）。**不引 rollback 修法**（需要给 reschedule 多传 trigger_id 参数 + 双向 Lua swap，跟低关键业务定位不匹配） |
 | agent-service + redis + mq 全挂超过 24h | redis latest 过期；handler 拿到 mq delay 消息时 latest=None → drop | 业务上等价于"chat 沉默了一整天"，丢这一轮无影响 |
 | `_emit_memory_trigger` 整个 emit 异常 | 由 helper 自己 try/except 吞掉 + log error；本次 trigger 整个不存在 | 下次新事件自然恢复 |
 
@@ -860,7 +876,7 @@ dataflow 重构不改 LLM 调用本身，只换调度层。Trace context 通过 
 
 **冲突**：debounce 队列里有 ≥ 300s 延迟消息，泳道下/重启时 consumer 暂停 10s 就被 fallback 截到 prod 队列；prod handler 从 message header 恢复 lane → 跑 prod 的 drift_check / afterthought_check 时还以为自己是泳道 lane → 跨泳道副作用。
 
-**修法**（见 §3.4.4）：debounce route 在 `Route` NamedTuple 末尾的新字段 `lane_fallback=False` 上声明，`_build_queue_args` / `_ensure_lane_queue` / `declare_route` 全链路尊重这个 flag，跳过 `x-message-ttl` + `x-dead-letter-*`。lane queue 仍设 `x-expires=24h` 防泳道残留。
+**修法**（见 §3.4.4）：debounce route 在 `Route` NamedTuple 末尾的新字段 `lane_fallback=False` 上声明，`_build_queue_args` / `_ensure_lane_queue` / `declare_route` 全链路尊重这个 flag。`lane_fallback=False` 时跳过 `x-message-ttl` + `x-dead-letter-routing-key`（不再 fallback 到 prod 队列），但**保留 `x-dead-letter-exchange=DLX_NAME`**（reviewer round-5 H1：consumer 异常 nack 的 message 仍然要进 dead_letters，否则被 broker 丢弃）。lane queue 仍设 `x-expires=24h` 防泳道残留。
 
 ### 4.6 Mq 消息堆积观察
 
@@ -905,13 +921,15 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
   - mq publish 一条 delay 消息；fire_now=False
   - WIRING_REGISTRY 没匹配 wire → raise RuntimeError
   - 跟 publish_debounce 共存 wire 时不互相干扰
+  - **mq publish 失败**（reviewer round-5 H2）：reschedule 抛异常向上传播 → 调用方 (drift_check) 进入异常路径 → handler nack 进 DLQ。redis latest 仍是新 trigger_id（不 rollback；接受 best-effort 边界，见 §4.1）
 
-### 5.2 compile_graph 校验测试（**必须覆盖 9 项 reject + 1 项 accept**）
+### 5.2 compile_graph 校验测试（**必须覆盖 10 项 reject + 1 项 accept**）
 
 - `wire(T).debounce(...)` (单 consumer + transient T + key_by) 通过校验
 - `wire(T).debounce().durable()` raise GraphError
 - `wire(T).debounce().as_latest()` raise GraphError（reviewer round-2 M4）
 - `wire(T).debounce().with_latest(X)` raise GraphError
+- `wire(T).debounce().when(pred)` raise GraphError（reviewer round-5 M3）
 - `wire(T).debounce().to(Sink.mq("..."))` raise GraphError（reviewer round-2 M6）
 - `wire(T).debounce().from_(Source.mq("..."))` raise GraphError
 - `wire(T).debounce().to(c1, c2)` (fan-out) raise GraphError（reviewer round-2 M5）
@@ -922,8 +940,8 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 ### 5.3 Infra `_build_queue_args` lane_fallback 测试（reviewer round-4 M3）
 
 - `_build_queue_args(prod_rk, lane=None, lane_fallback=True)` 返回 `{x-dead-letter-exchange: DLX_NAME}`（prod queue 不受 lane_fallback 影响）
-- `_build_queue_args(prod_rk, lane="dev", lane_fallback=True)` 返回的 args 包含 `x-message-ttl=10000` + `x-dead-letter-exchange=EXCHANGE_NAME` + `x-dead-letter-routing-key=prod_rk` + `x-expires`（lane queue 默认走 fallback）
-- `_build_queue_args(prod_rk, lane="dev", lane_fallback=False)` 返回的 args **不含** `x-message-ttl` / `x-dead-letter-exchange` / `x-dead-letter-routing-key`，仅含 `x-expires`（debounce 用，长延迟消息留在 lane 不 fallback 到 prod）
+- `_build_queue_args(prod_rk, lane="dev", lane_fallback=True)` 返回的 args 包含 `x-message-ttl=10000` + `x-dead-letter-exchange=EXCHANGE_NAME` + `x-dead-letter-routing-key=prod_rk` + `x-expires`（lane queue 默认走 fallback 到 prod）
+- `_build_queue_args(prod_rk, lane="dev", lane_fallback=False)` 返回的 args **不含** `x-message-ttl` / `x-dead-letter-routing-key`（不再 fallback 到 prod），但 **必须含 `x-dead-letter-exchange=DLX_NAME` + `x-expires`**（DLQ 仍然有，consumer 异常 nack 的 message 仍然进 dead_letters；reviewer round-5 H1）
 - `Route("q", "rk")` 默认 `lane_fallback=True`；`Route("q", "rk", lane_fallback=False)` 字段正确传递
 
 ### 5.4 节点单元测试
@@ -1017,7 +1035,7 @@ Publish-then-drop 模式下，drift 高频时 mq 上会有"被作废的延迟消
 - [ ] runtime 内所有 `get_redis()` 调用都 `await`（`async def get_redis`）
 - [ ] `runtime/emit.py` 的 wire dispatch 循环顶部包含 `if w.debounce is not None` 分支并 `continue`
 - [ ] `compile_graph` 接受合法 `.debounce()` wire
-- [ ] `compile_graph` 拒绝（**全部 9 项**）：缺 `key_by` / 非 transient data type / `.debounce().durable()` / `.debounce().as_latest()` / `.debounce().with_latest(...)` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
+- [ ] `compile_graph` 拒绝（**全部 10 项**）：缺 `key_by` / 非 transient data type / `.debounce().durable()` / `.debounce().as_latest()` / `.debounce().with_latest(...)` / `.debounce().when(...)` / `.debounce().to(Sink.*)` / `.debounce().from_(Source.*)` / `.debounce()` 多 consumer / 同 DataType 多条 `.debounce()` wire
 - [ ] `runtime/debounce.py` 提供 `reschedule(data: Data)` 函数：仅 `SET latest + publish delay`，**不 INCR count**；从 WIRING_REGISTRY 找匹配 wire（compile_graph 已保证唯一）
 
 ### 8.3 业务节点（`app/nodes/memory_pipelines.py`）
