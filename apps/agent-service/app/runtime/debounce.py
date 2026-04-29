@@ -28,6 +28,7 @@ say) is unrepresentable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -37,15 +38,13 @@ from typing import Any
 from aio_pika.abc import AbstractIncomingMessage
 
 from app.api.middleware import lane_var, trace_id_var
-from app.infra.rabbitmq import Route, mq
+from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.infra.redis import get_redis
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
+from app.runtime.placement import nodes_for_app
 from app.runtime.wire import WireSpec
-
-# Tasks 10 will add: asyncio, current_lane, lane_queue, nodes_for_app
-# (consumer-startup wiring). Re-add when each is referenced.
 
 logger = logging.getLogger(__name__)
 
@@ -364,3 +363,88 @@ def _build_handler(w: WireSpec, consumer: Callable):
                 lane_var.reset(l_tok)
 
     return handler
+
+
+# ---------------------------------------------------------------------------
+# Consumer lifecycle
+# ---------------------------------------------------------------------------
+
+
+async def start_debounce_consumers(app_name: str | None = None) -> None:
+    """Declare and start consumers for every ``.debounce()`` wire.
+
+    Filters by ``app_name`` via ``nodes_for_app`` (wires whose consumers
+    aren't bound to this app are skipped). compile_graph layer-4 already
+    rejects mixed-app wires, so the "all consumers in allowed" check is
+    strict-by-design.
+
+    Not re-entrant: a second call without an intervening
+    :func:`stop_debounce_consumers` would register duplicate RabbitMQ
+    consumers on the same queue (double-fire) and fail noisily at
+    shutdown — raise instead so the caller bug surfaces immediately.
+    """
+    if _consumer_tags:
+        raise RuntimeError(
+            "debounce consumers already started; call stop_debounce_consumers() first"
+        )
+
+    # Late import: compile_graph must observe the final WIRING_REGISTRY.
+    from app.runtime.graph import compile_graph
+
+    graph = compile_graph()
+
+    allowed: set | None = None
+    if app_name is not None:
+        allowed = nodes_for_app(app_name)
+
+    # Only touch RabbitMQ if this app actually has debounce consumers to
+    # start — apps/tests without debounce wires shouldn't be forced to
+    # configure RABBITMQ_URL just to boot.
+    has_debounce = any(
+        w.debounce is not None
+        and (allowed is None or all(c in allowed for c in w.consumers))
+        for w in graph.wires
+    )
+    if has_debounce:
+        await mq.connect()
+        await mq.declare_topology()
+
+    for w in graph.wires:
+        if w.debounce is None:
+            continue
+        if allowed is not None and not all(c in allowed for c in w.consumers):
+            # Wire belongs to a different app. compile_graph layer-4 has
+            # already ruled out mixed-app wires, so this is a clean skip.
+            continue
+        for consumer in w.consumers:
+            route = _route_for(w, consumer)
+            await mq.declare_route(route)
+            handler = _build_handler(w, consumer)
+            # declare_route declares the *lane-scoped* queue; consume must
+            # target that same name, otherwise non-prod lanes hit NOT_FOUND
+            # when get_queue runs passive.
+            actual_queue = lane_queue(route.queue, current_lane())
+            queue, tag = await mq.consume(actual_queue, handler)
+            _consumer_tags.append((queue, tag))
+            logger.info(
+                "debounce consumer started: %s -> %s",
+                actual_queue, consumer.__name__,
+            )
+
+
+async def stop_debounce_consumers() -> None:
+    """Cancel every debounce consumer started by :func:`start_debounce_consumers`.
+
+    Cancelling via ``queue.cancel(tag)`` tells RabbitMQ to stop delivering
+    to this channel and lets any in-flight handler finish its
+    ``message.process()`` context. After this returns, the connection can
+    be closed without racing late deliveries.
+    """
+    for queue, tag in _consumer_tags:
+        try:
+            await queue.cancel(tag)
+        except Exception as e:  # pragma: no cover — best effort on teardown
+            logger.warning("failed to cancel debounce consumer %s: %s", tag, e)
+    _consumer_tags.clear()
+    # Yield so any handler mid-``message.process()`` can complete.
+    await asyncio.sleep(0)

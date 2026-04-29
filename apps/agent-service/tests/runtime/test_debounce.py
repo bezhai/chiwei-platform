@@ -365,3 +365,63 @@ async def test_handler_consumer_raises_debounce_reschedule_runs_do_reschedule(mo
     fake_publish.assert_awaited_once()
     # mq.process 正常 ack（DebounceReschedule 不冒泡进 DLQ）
     assert msg.exception_raised is None
+
+
+# ---------------------------------------------------------------------------
+# start_debounce_consumers / stop_debounce_consumers (Task 10)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_debounce_consumers_filters_by_app_name(monkeypatch):
+    """start_debounce_consumers(app_name) 用 nodes_for_app 过滤；
+    其他 app 的 wire 不启动 consumer。"""
+    from app.runtime.wire import clear_wiring, wire
+    from app.runtime.placement import clear_bindings
+    from app.runtime.debounce import (
+        start_debounce_consumers, stop_debounce_consumers,
+    )
+
+    clear_wiring()
+    clear_bindings()
+
+    @node
+    async def my_drift_check(t: DriftTrigger) -> None:
+        return None
+
+    wire(DriftTrigger).debounce(
+        seconds=60, max_buffer=5,
+        key_by=lambda e: f"k:{e.chat_id}",
+    ).to(my_drift_check)
+
+    fake_mq = MagicMock()
+    fake_mq.connect = AsyncMock()
+    fake_mq.declare_topology = AsyncMock()
+    fake_mq.declare_route = AsyncMock()
+    fake_queue = MagicMock()
+    fake_queue.cancel = AsyncMock()
+    fake_mq.consume = AsyncMock(return_value=(fake_queue, "tag-1"))
+    monkeypatch.setattr("app.runtime.debounce.mq", fake_mq)
+    monkeypatch.setattr("app.runtime.debounce.current_lane", lambda: "")
+
+    await start_debounce_consumers(app_name="agent-service")
+
+    fake_mq.connect.assert_awaited_once()
+    fake_mq.declare_route.assert_awaited_once()
+    fake_mq.consume.assert_awaited_once()
+
+    await stop_debounce_consumers()
+
+    # 启动到不同 app（vectorize-worker）→ wire 被过滤掉
+    fake_mq.connect.reset_mock()
+    fake_mq.consume.reset_mock()
+    fake_mq.declare_route.reset_mock()
+
+    await start_debounce_consumers(app_name="vectorize-worker")
+
+    fake_mq.connect.assert_not_awaited()
+    fake_mq.consume.assert_not_awaited()
+
+    await stop_debounce_consumers()
+    clear_wiring()
+    clear_bindings()
