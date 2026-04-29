@@ -43,7 +43,6 @@ class Route(NamedTuple):
 
 CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
-SAFETY_CHECK = Route("safety_check", "post.safety.check")
 RECALL = Route("recall", "action.recall")
 # ``vectorize`` is published by lark-server (TS, identical
 # ``buildQueueArgs``/``DLX_NAME``/``EXCHANGE_NAME`` constants) and
@@ -71,7 +70,6 @@ MEMORY_ABSTRACT_VECTORIZE = Route(
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
-    SAFETY_CHECK,
     RECALL,
     VECTORIZE,
     MEMORY_FRAGMENT_VECTORIZE,

@@ -35,10 +35,9 @@ async def _publish_post_check(
     chat_id: str,
     trigger_message_id: str,
 ) -> None:
-    """Emit PostSafetyRequest into the dataflow graph (Phase 2).
+    """Emit PostSafetyRequest into the dataflow graph.
 
-    Replaces ``mq.publish(SAFETY_CHECK, ...)``: the wire
-    ``wire(PostSafetyRequest).to(run_post_safety).durable()`` in
+    The wire ``wire(PostSafetyRequest).to(run_post_safety).durable()`` in
     ``app/wiring/safety.py`` queues the request and the durable consumer
     bound on agent-service runs the audit.
     """
