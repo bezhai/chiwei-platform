@@ -1,11 +1,14 @@
 """Memory pipeline @node consumers (drift / afterthought).
 
-Helpers (_run_drift, _recent_timeline, _recent_persona_replies,
-_generate_fragment, _build_scene) are migrated verbatim from the old
-app/memory/drift.py / app/memory/afterthought.py — Phase 3 only changes
-the dispatch layer, not the business logic.
+Single-flight per (chat, persona) via redis SETNX uuid token + Lua
+compare-and-delete release: if LLM stalls past TTL and a new fire grabs
+the lock, the old finally sees a different token and leaves the new
+lock alone (reviewer round-2 H2).
 
-@node consumers (drift_check / afterthought_check) come in Task 13.
+Lock contention raises ``DebounceReschedule(SameTrigger)`` — the runtime
+debounce handler catches it and runs ``_do_reschedule`` with its own
+trigger_id, so a fresh delayed fire takes phase2's place after the lock
+releases.
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ return 0
 
 
 # ---------------------------------------------------------------------------
-# Drift helpers (migrated from app/memory/drift.py)
+# Drift helpers
 # ---------------------------------------------------------------------------
 
 
@@ -130,7 +133,7 @@ async def _recent_persona_replies(
 
 
 # ---------------------------------------------------------------------------
-# Afterthought helpers (migrated from app/memory/afterthought.py)
+# Afterthought helpers
 # ---------------------------------------------------------------------------
 
 
