@@ -263,24 +263,31 @@ class Runtime:
     async def _source_loop_cron(self, w: WireSpec, src: SourceSpec) -> None:
         """Fire ``emit()`` for ``w`` each time the cron expression ticks.
 
-        Uses ``croniter`` (5-field standard cron, 1-minute minimum).
+        Uses ``croniter`` (5-field standard cron, 1-minute minimum) with
+        the declared timezone (``src.params["tz"]``) so cron expressions
+        are interpreted at the right wall clock.
+
         ``croniter.get_next`` is absolute-time based, so drift is
         naturally bounded to one tick. Fatal errors (bad payload shape,
         emit failure) surface via ``_source_error`` + ``_stop_event`` so
         ``run()`` can re-raise and the pod exits non-zero.
         """
+        from zoneinfo import ZoneInfo
+
         from croniter import croniter
 
         from app.runtime.emit import emit
 
         expr = src.params["expr"]
+        tz_name = src.params.get("tz", "UTC")
+        zone = ZoneInfo(tz_name) if tz_name != "UTC" else UTC
         name = f"cron[{w.data_type.__name__}]"
-        base = datetime.now(tz=UTC)
+        base = datetime.now(tz=zone)
         itr = croniter(expr, base)
         try:
             while True:
                 next_ts = itr.get_next(datetime)
-                delay = (next_ts - datetime.now(tz=UTC)).total_seconds()
+                delay = (next_ts - datetime.now(tz=zone)).total_seconds()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 payload = self._build_payload(w, next_ts)
