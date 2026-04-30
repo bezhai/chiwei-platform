@@ -1,11 +1,17 @@
 # Dataflow Phase 4 — Life Engine / Schedule / Glimpse 进 Graph
 
-**状态**: Draft v4 (2026-04-30，吸收 reviewer 第 2 轮 5 条意见)
+**状态**: Draft v5 (2026-04-30，吸收 reviewer 第 3 轮 4 条意见)
 **前置**: PR #205 (Phase 3 drift/afterthought) shipped to prod 1.0.0.320
 **后续**: Phase 5 chat 主 pipeline + Stream[T] runtime
 
+**v5 关键变化（vs v4）**：
+- §3.5 `run_glimpse_node` 去掉 try/except，让异常冒泡 —— durable handler 在 `message.process(requeue=False)` 上下文里 ack-on-success / nack-on-exception；v4 的 try/except 把异常吞了让 ack 永远成功，DLQ 永远收不到 message，PR #202 的 DLQ 监控失效。参照 `run_post_safety` 同等范式（row 不存在直接 raise）。同步给 light_review_node / heavy_review_node / daily_plan_node / voice_node / life_tick_node 的处理：这些是 in-process node 不进 DLQ，try/except + log 是正确的；只有 durable node 必须 raise。修 round-3 P1 #1
+- §3.0 main.py lifespan 在 `start_consumers` / `start_source_loops` 之前调一次 `await runtime.migrate_schema()` —— v4 写 `migrate_schema_on_run=False` 后没人给 GlimpseRequest 建 `data_glimpse_request` 表，agent-service durable consumer 一旦收到 message 写表会 `relation does not exist`。修 round-3 P1 #2
+- §3.0 watchdog `stop_source_loops()` 必须 `cancel + await` watchdog task，**不通过 set `_stop_event` 关闭它**（避免依赖 "_source_error is None 时 os._exit 不会触发" 的隐式逻辑；显式 cancel 更稳）。补一个 unit test "normal stop_source_loops does not exit"。修 round-3 P2 #4
+- §3.3 / §6 全文修正表名 `glimpse_requests` → `data_glimpse_request`（migrator.py:76 命名规则 `data_{to_snake(ClassName)}`）。修 round-3 P2 #3
+
 **v4 关键变化（vs v3）**：
-- §3.3 GlimpseRequest 去掉 `Meta.transient = True`，新增 `request_id: Annotated[str, Key]` —— durable 边强制要求 Data 类有持久化表做 `insert_idempotent` dedup（runtime graph.py:286 在 compile 期 raise；v3 同时声明 transient 与 .durable() 会被拒绝）。runtime 自动建 `glimpse_requests` 表，副产品是 glimpse 触发的天然审计。其他 Data 仍 transient（修 round-2 P0 #1）
+- §3.3 GlimpseRequest 去掉 `Meta.transient = True`，新增 `request_id: Annotated[str, Key]` —— durable 边强制要求 Data 类有持久化表做 `insert_idempotent` dedup（runtime graph.py:286 在 compile 期 raise；v3 同时声明 transient 与 .durable() 会被拒绝）。runtime 自动建 `data_glimpse_request` 表，副产品是 glimpse 触发的天然审计。其他 Data 仍 transient（修 round-2 P0 #1）
 - §3.0 / §3.7 新增 source watchdog：`Runtime.start_source_loops()` 内部启一个 background watcher task，监 `_source_error` / `_stop_event`，任何 source loop fatal error 触发后让进程退出（lifespan 内 raise / `os._exit(1)`），让 PaaS 拉起新 pod —— 否则 main.py lifespan 调 start_source_loops 返回后 cron task 死亡而 web 还健康（修 round-2 P0 #2）
 - §3.5 所有 fan-out 节点把 `_list_persona_ids()` + 整段循环放在 try/except 内，DB 异常仅 log 不冒泡到 source loop（修 round-2 P1 #3，v3 写法 db 调用在 try 外会触发 `_record_source_error` 让进程退出）
 - §4 删除项加 `arq_settings.py::on_startup` 里的 `asyncio.create_task(cron_generate_voice(None))` 那行 + 顶部对 `cron_*` 的 import；`cron.py` 删除后这些 import 会让 arq-worker 起不来（修 round-2 P1 #4）
@@ -142,12 +148,22 @@ async def generate_all_daily_plans(target_date=None):
 **方案**: 抽 `Runtime.start_source_loops(app_name)` 出来作为独立 API（不含 migrate / durable consumer / blocking），让 main.py lifespan 调一次。
 
 ```python
-# main.py lifespan 内（在 register_http_sources 之后）
+# main.py lifespan 内
 from app.runtime.engine import Runtime
 runtime_for_sources = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+# (1) Migrate schema BEFORE starting durable consumers — GlimpseRequest 是
+#     persisted Data，consumer 端 insert_idempotent 需要 data_glimpse_request 表存在。
+await runtime_for_sources.migrate_schema()
+# (2) 现有 start_consumers / start_debounce_consumers / start_chat_consumer
+#     等保持原位
+# (3) 在 register_http_sources 之后启 cron source loops
 await runtime_for_sources.start_source_loops()
-# 把 stop hook 挂在 lifespan teardown
+# (4) lifespan teardown 调 stop_source_loops()
 ```
+
+**为什么 main.py 也要 migrate**: runtime_entry.py（vectorize-worker 等 deployment 入口）在 startup 跑 migrate；但 agent-service 主进程是 GlimpseRequest 的 durable consumer 宿主，自己 boot 时不能依赖 worker pod 先建表 —— 部署顺序不可控（K8s 各 deployment 并行 rollout）。让每个会消费 durable wire 的 deployment 自己 migrate 才是无序约束的设计。
+
+**migrate_schema 的多 caller race**: 已有现实（worker / arq-worker 各自 boot 都会跑），plan_migration 走加列/建表的 additive DDL，多 pod 同时跑最坏一个失败被 raise，PaaS 重启后第二次跑发现已就绪，no-op 退出。本期不引入新 race。
 
 **为什么不新建 deployment**:
 - 一镜像多服务的复杂性（新建 ImageRepo 映射 + chart values + 部署铁律 §4 同步 release）不为本期带来收益
@@ -175,7 +191,8 @@ class Runtime:
         ...
 
     async def _watch_source_error(self) -> None:
-        """Wait for `_stop_event`; on fire, escalate to process exit.
+        """Wait for `_stop_event`; on fire (with `_source_error` set),
+        escalate to process exit.
 
         Concrete escalation: log fatal error + call `os._exit(1)`.
         sys.exit(1) is not enough because lifespan + uvicorn 不一定能在
@@ -183,6 +200,12 @@ class Runtime:
         os._exit(1) 立即终止进程，PaaS healthcheck 检测后重启 pod —— 跟
         Runtime.run() 走完 finally + raise 的语义一致，差别只是
         unwind path（lifespan 内不能依赖 Runtime.run() 的 finally）。
+
+        **Normal shutdown 不走这条**：stop_source_loops() 直接 cancel 这个
+        task（asyncio.CancelledError），watcher 永远到不了 `_source_error`
+        分支。不要在 stop_source_loops 里 set `_stop_event` 来关 watcher
+        ——隐式依赖"_source_error is None 时 os._exit 不会触发"会让回归
+        测试一念之间漏掉。
         """
         await self._stop_event.wait()
         if self._source_error is not None:
@@ -193,15 +216,27 @@ class Runtime:
             os._exit(1)
 
     async def stop_source_loops(self) -> None:
-        """Cancel + await every source task + watchdog."""
-        ...
+        """Cancel + await every source task + watchdog (explicit cancel)."""
+        for t in self._source_tasks:
+            t.cancel()
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+        for t in [*self._source_tasks, self._watchdog_task]:
+            if t is None: continue
+            try: await t
+            except asyncio.CancelledError: pass
+        self._source_tasks.clear()
+        self._watchdog_task = None
 ```
 
 **为什么用 os._exit 而不是 sys.exit / raise**: lifespan 已经 yield 给 FastAPI 主循环，watchdog task 抛异常不会传到 lifespan 调用栈；让 watchdog 主动终止进程是最确定的故障传导路径。代价：跳过 Python 层 cleanup —— 但 source loop fatal 已是异常状态，PaaS 重启 pod 比尝试干净 unwind 更重要。
 
 **测试**:
-- 已有 `tests/runtime/test_engine.py` 覆盖 `Runtime.run()`；本期补 `test_start_source_loops_starts_only_sources` + `test_watchdog_exits_on_source_error` 两个单测（后者把 `os._exit` monkeypatch 成可观察的 marker）
-- main.py lifespan 单测：mock `Runtime`，断言 `start_source_loops()` 被调用
+- 已有 `tests/runtime/test_engine.py` 覆盖 `Runtime.run()`；本期补三个单测：
+  - `test_start_source_loops_starts_only_sources` —— start_source_loops 后 cron source task 真在跑
+  - `test_watchdog_exits_on_source_error` —— 注入 source error → 断言 `os._exit(1)` 被调用（monkeypatch）
+  - `test_normal_stop_does_not_exit` —— start + stop 正常路径，断言 `os._exit` 未被调用 + watchdog task 已 cancel
+- main.py lifespan 单测：mock `Runtime`，断言 `migrate_schema()` 在 `start_consumers` 之前调用 + `start_source_loops()` 在 `register_http_sources` 之后调用
 
 ### 3.1 Source.cron 加 timezone 参数（runtime 小 extension）
 
@@ -361,12 +396,13 @@ class LifeStateChanged(Data):
     class Meta: transient = True
 
 class GlimpseRequest(Data):
-    """走 .durable() 跨进程，runtime 自动建 glimpse_requests 表做 dedup。
+    """走 .durable() 跨进程，runtime 自动建 data_glimpse_request 表做 dedup。
 
     request_id 是 emit 端生成的 uuid —— 同一条 mq message 在 redelivery
     时复用 emit 端 payload（含 request_id），insert_idempotent 拒绝
     第二次插入 → run_glimpse 不会被同一 request 跑两次。同时这张表
-    顺便给 glimpse 触发提供历史审计。
+    顺便给 glimpse 触发提供历史审计。表名命名规则见 migrator.py:76
+    （`data_{to_snake(ClassName)}`）。
     """
     request_id: Annotated[str, Key]   # uuid4
     persona_id: str
@@ -639,10 +675,15 @@ async def glimpse_event_node(c: LifeStateChanged) -> None:
 
 @node
 async def run_glimpse_node(r: GlimpseRequest) -> None:
-    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里。"""
+    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里。
+
+    **不 try/except**: durable handler 在 `message.process(requeue=False)`
+    上下文里依靠 consumer 抛异常来 nack → DLX → DLQ。捕获异常会让
+    handler 看到正常返回 → ack → message 永远不会进 DLQ。PR #202 的
+    DLQ 监控失效。参照 `run_post_safety` 范式（row 不存在直接 raise）。
+    """
     from app.life.glimpse import run_glimpse
-    try: await run_glimpse(r.persona_id, r.chat_id)
-    except Exception: logger.exception("[%s][%s] run_glimpse failed", r.persona_id, r.chat_id)
+    await run_glimpse(r.persona_id, r.chat_id)
 ```
 
 **为什么所有 node 都套薄壳调原函数而不是把业务搬进来**：本期是调度层迁移，不是业务重写。`tick / generate_voice / run_light_review / run_heavy_review_for_persona / _run_persona_pipeline / run_glimpse` 函数语义不动。后续 Phase 5/6 在重写 chat / 清扫 bridges 时再回头看这些 node 该不该继续薄壳。
@@ -752,15 +793,18 @@ except Exception:
   - 单测 LifeStateChanged 触发：切到 browsing emit 一次；切到 working / sleeping 不 emit；段内 refresh（activity 与 prev 同）不 emit
   - 线上：5min 周期触发可观测（`make logs APP=agent-service KEYWORD=glimpse_tick_node SINCE=15m` 至少 3 次记录）
   - 线上：dev bot 触发一次切到 browsing 后，5min 内必有一次额外的 `glimpse_event_node` log（不需要等 5min cron 刻度）
-- [ ] `glimpse_requests` 表自动建出（runtime migrator 跑过）；durable consumer redelivery 测试：手动 nack + redeliver 同一条 message，确认 run_glimpse_node 仅执行一次（insert_idempotent dedup 命中）
-- [ ] watchdog 行为：单测注入 source loop fatal error → 断言 `os._exit(1)` 被调用（monkeypatch）
-- [ ] arq-worker 启动正常：去掉 `cron.py` 后 arq-worker pod 不 import fail（`/ops pods APP=arq-worker` 状态 Running）
+- [ ] `data_glimpse_request` 表自动建出（main.py lifespan 调 `migrate_schema()`，runtime migrator 跑过）；durable consumer redelivery 测试：手动 nack + redeliver 同一条 message，确认 run_glimpse_node 仅执行一次（insert_idempotent dedup 命中）
+- [ ] `run_glimpse_node` 异常路径：注入 `run_glimpse` 抛异常 → message nack → DLQ 收到一条
+- [ ] watchdog 行为：
+  - 单测注入 source loop fatal error → 断言 `os._exit(1)` 被调用（monkeypatch）
+  - 单测正常 stop_source_loops → 断言 `os._exit` 未被调用 + watchdog task 已 cancel
+- [ ] arq-worker 启动正常：去掉 `cron.py` + arq_settings 顶部 cron_* import 后 arq-worker pod 不 import fail（`/ops pods APP=arq-worker` 状态 Running）
 
 ## 7. 不在本期范围
 
 - `task_executor_job`（long_tasks 子系统）—— 保留 ARQ cron
 - 任何 fan-out 节点加 `.durable()` —— 这些任务都"丢一拍可接受"，不值上 mq；只有 GlimpseRequest 因为下游有 LLM 重活才 durable
-- `glimpse_requests` 表的 retention/cleanup 策略 —— durable Data 的副产品。目前先让表自然增长（每天约 N persona × ~100 tick × M chat 量级），观察一段时间后再决定 TTL / 老化清理；可由本 Phase 引入的 dataflow cron 机制自身实现（讽刺循环）
+- `data_glimpse_request` 表的 retention/cleanup 策略 —— durable Data 的副产品。目前先让表自然增长（每天约 N persona × ~100 tick × M chat 量级），观察一段时间后再决定 TTL / 老化清理；可由本 Phase 引入的 dataflow cron 机制自身实现（讽刺循环）
 - glimpse 改纯事件驱动（消灭 5min 周期）—— v2 草案错误尝试过，丢失"持续期反复刷"语义。本期保留 5min cron + 加事件路径补一拍；后续若把 LifeState 迁到 dataflow Data + 引入"in-state timer"原语，再考虑彻底取消 cron 周期
 - `with_latest(LifeState)` 接入 —— 后续若发现 glimpse_tick_node 需要 prev state 的更多字段，再补
 - chat 主 pipeline / Stream[T] / bridges 整包删 —— Phase 5 / 6
