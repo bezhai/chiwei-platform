@@ -1,8 +1,15 @@
 # Dataflow Phase 4 — Life Engine / Schedule / Glimpse 进 Graph
 
-**状态**: Draft v3 (2026-04-30，修正 v2 的 glimpse 语义错误)
+**状态**: Draft v4 (2026-04-30，吸收 reviewer 第 2 轮 5 条意见)
 **前置**: PR #205 (Phase 3 drift/afterthought) shipped to prod 1.0.0.320
 **后续**: Phase 5 chat 主 pipeline + Stream[T] runtime
+
+**v4 关键变化（vs v3）**：
+- §3.3 GlimpseRequest 去掉 `Meta.transient = True`，新增 `request_id: Annotated[str, Key]` —— durable 边强制要求 Data 类有持久化表做 `insert_idempotent` dedup（runtime graph.py:286 在 compile 期 raise；v3 同时声明 transient 与 .durable() 会被拒绝）。runtime 自动建 `glimpse_requests` 表，副产品是 glimpse 触发的天然审计。其他 Data 仍 transient（修 round-2 P0 #1）
+- §3.0 / §3.7 新增 source watchdog：`Runtime.start_source_loops()` 内部启一个 background watcher task，监 `_source_error` / `_stop_event`，任何 source loop fatal error 触发后让进程退出（lifespan 内 raise / `os._exit(1)`），让 PaaS 拉起新 pod —— 否则 main.py lifespan 调 start_source_loops 返回后 cron task 死亡而 web 还健康（修 round-2 P0 #2）
+- §3.5 所有 fan-out 节点把 `_list_persona_ids()` + 整段循环放在 try/except 内，DB 异常仅 log 不冒泡到 source loop（修 round-2 P1 #3，v3 写法 db 调用在 try 外会触发 `_record_source_error` 让进程退出）
+- §4 删除项加 `arq_settings.py::on_startup` 里的 `asyncio.create_task(cron_generate_voice(None))` 那行 + 顶部对 `cron_*` 的 import；`cron.py` 删除后这些 import 会让 arq-worker 起不来（修 round-2 P1 #4）
+- §6 glimpse 验收改成行为驱动（mock activity 单测覆盖语义）+ 线上仅看节奏 / browsing 切换补发，删除"前后 1h 计数 ±5%"（修 round-2 P2 #5；保留 5min 周期 + 即时事件 + 15% 抽样后小窗口计数自然偏差大，频次对齐不可作 SLO）
 
 **v3 关键变化（vs v2）**：
 - glimpse 不改纯事件驱动 —— 保留 5min cron 周期触发 + 加 LifeStateChanged "切到 browsing 时" 补一拍即时事件。v2 把 glimpse 改成纯事件驱动是语义错：旧逻辑的本质是"在状态期间反复有概率刷手机"（持续行为），事件驱动只触发切换瞬间一次会丢掉持续期。新方案：5min cron 保持持续刷的人感；切到 browsing 的事件路径仅消除"刚切就要等 5min"的间隙
@@ -155,19 +162,46 @@ await runtime_for_sources.start_source_loops()
 class Runtime:
     async def start_source_loops(self) -> None:
         """Start cron / interval / mq source loops for nodes bound to this app.
-        
-        Idempotent? No — second call without stop_source_loops raises.
-        Migrate / durable consumer / block 不在本方法范围。
+
+        Also starts a watchdog task that monitors `_source_error`. If any
+        source loop hits a fatal error, watchdog re-raises in its own task
+        context; main.py lifespan picks this up via task done callback +
+        triggers process exit (uvicorn shutdown). Idempotent? No — second
+        call without stop_source_loops raises. Migrate / durable consumer
+        / block 不在本方法范围。
         """
-        # 已有 run() 的 §163-194 段抽出来
+        # 已有 run() 的 §163-194 段抽出来；末尾追加：
+        # self._watchdog_task = asyncio.create_task(self._watch_source_error())
         ...
 
+    async def _watch_source_error(self) -> None:
+        """Wait for `_stop_event`; on fire, escalate to process exit.
+
+        Concrete escalation: log fatal error + call `os._exit(1)`.
+        sys.exit(1) is not enough because lifespan + uvicorn 不一定能在
+        FastAPI worker 内合作干净退出（worker 持有的连接 / 任务）；
+        os._exit(1) 立即终止进程，PaaS healthcheck 检测后重启 pod —— 跟
+        Runtime.run() 走完 finally + raise 的语义一致，差别只是
+        unwind path（lifespan 内不能依赖 Runtime.run() 的 finally）。
+        """
+        await self._stop_event.wait()
+        if self._source_error is not None:
+            logger.fatal(
+                "runtime: source loop fatal error %r, exiting",
+                self._source_error,
+            )
+            os._exit(1)
+
     async def stop_source_loops(self) -> None:
-        """Cancel + await every source task."""
+        """Cancel + await every source task + watchdog."""
         ...
 ```
 
-**测试**: 已有 `tests/runtime/test_engine.py` 覆盖 `Runtime.run()`；本期补一个 `test_start_source_loops` 单测，断言 main.py 那段调用确实让 cron / interval source 起来了。
+**为什么用 os._exit 而不是 sys.exit / raise**: lifespan 已经 yield 给 FastAPI 主循环，watchdog task 抛异常不会传到 lifespan 调用栈；让 watchdog 主动终止进程是最确定的故障传导路径。代价：跳过 Python 层 cleanup —— 但 source loop fatal 已是异常状态，PaaS 重启 pod 比尝试干净 unwind 更重要。
+
+**测试**:
+- 已有 `tests/runtime/test_engine.py` 覆盖 `Runtime.run()`；本期补 `test_start_source_loops_starts_only_sources` + `test_watchdog_exits_on_source_error` 两个单测（后者把 `os._exit` monkeypatch 成可观察的 marker）
+- main.py lifespan 单测：mock `Runtime`，断言 `start_source_loops()` 被调用
 
 ### 3.1 Source.cron 加 timezone 参数（runtime 小 extension）
 
@@ -327,10 +361,19 @@ class LifeStateChanged(Data):
     class Meta: transient = True
 
 class GlimpseRequest(Data):
-    persona_id: Annotated[str, Key]
+    """走 .durable() 跨进程，runtime 自动建 glimpse_requests 表做 dedup。
+
+    request_id 是 emit 端生成的 uuid —— 同一条 mq message 在 redelivery
+    时复用 emit 端 payload（含 request_id），insert_idempotent 拒绝
+    第二次插入 → run_glimpse 不会被同一 request 跑两次。同时这张表
+    顺便给 glimpse 触发提供历史审计。
+    """
+    request_id: Annotated[str, Key]   # uuid4
+    persona_id: str
     chat_id: str
     ts: str
-    class Meta: transient = True
+    trigger_kind: str                  # "tick" | "event"，便于审计区分两路触发
+    # 没有 Meta.transient —— 这是 durable 边的硬约束（runtime graph.py:286）
 ```
 
 `prev_activity_type` 为空字符串表示首次提交 life_state；非空表示前一段的 activity。`glimpse_node` 用 `c.activity_type != c.prev_activity_type` 内部判断（也可放 wire 层 `.when()`，但 node 内部更显式）。
@@ -406,12 +449,27 @@ async def _list_persona_ids() -> list[str]:
         return await list_all_persona_ids(s)
 
 
+async def _fan_out_per_persona(label: str, build_request) -> None:
+    """通用 fan-out：包住 list_persona_ids + emit 循环，所有异常 log 不冒泡。
+
+    DB 抖动 / emit 失败一律不扔回 source loop —— 否则 `_record_source_error`
+    会让进程退出。fan-out 失败的代价是这一拍丢，下一拍自然恢复。
+    """
+    try:
+        pids = await _list_persona_ids()
+    except Exception:
+        logger.exception("%s: list_persona_ids failed", label)
+        return
+    for pid in pids:
+        try: await emit(build_request(pid))
+        except Exception: logger.exception("[%s] %s fan-out failed", pid, label)
+
 @node
 async def fan_out_life_tick(t: MinuteTick) -> None:
     if not _is_prod(): return
-    for pid in await _list_persona_ids():
-        try: await emit(LifeTickRequest(persona_id=pid, ts=t.ts))
-        except Exception: logger.exception("[%s] life_tick fan-out failed", pid)
+    await _fan_out_per_persona(
+        "life_tick", lambda pid: LifeTickRequest(persona_id=pid, ts=t.ts)
+    )
 
 @node
 async def fan_out_voice(t: MinuteTick) -> None:
@@ -419,30 +477,32 @@ async def fan_out_voice(t: MinuteTick) -> None:
     cst_ts = datetime.fromisoformat(t.ts).astimezone(CST)
     if cst_ts.hour not in range(8, 24): return
     if cst_ts.minute != 0: return  # voice 整点触发
-    for pid in await _list_persona_ids():
-        try: await emit(VoiceRequest(persona_id=pid, ts=t.ts))
-        except Exception: logger.exception("[%s] voice fan-out failed", pid)
+    await _fan_out_per_persona(
+        "voice", lambda pid: VoiceRequest(persona_id=pid, ts=t.ts)
+    )
 
 @node
 async def fan_out_light_day(t: LightDayTick) -> None:
     if not _is_prod(): return
-    for pid in await _list_persona_ids():
-        try: await emit(LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=30))
-        except Exception: logger.exception("[%s] light_day fan-out failed", pid)
+    await _fan_out_per_persona(
+        "light_day",
+        lambda pid: LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=30),
+    )
 
 @node
 async def fan_out_light_night(t: LightNightTick) -> None:
     if not _is_prod(): return
-    for pid in await _list_persona_ids():
-        try: await emit(LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=60))
-        except Exception: logger.exception("[%s] light_night fan-out failed", pid)
+    await _fan_out_per_persona(
+        "light_night",
+        lambda pid: LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=60),
+    )
 
 @node
 async def fan_out_heavy(t: HeavyReviewTick) -> None:
     if not _is_prod(): return
-    for pid in await _list_persona_ids():
-        try: await emit(HeavyReviewRequest(persona_id=pid, ts=t.ts))
-        except Exception: logger.exception("[%s] heavy fan-out failed", pid)
+    await _fan_out_per_persona(
+        "heavy", lambda pid: HeavyReviewRequest(persona_id=pid, ts=t.ts)
+    )
 
 # Daily plan: shared 节点先跑一次 → SharedDailyContext → fan-out per-persona
 
@@ -461,17 +521,16 @@ async def run_shared_daily_pipeline_node(t: DailyPlanTick) -> SharedDailyContext
 
 @node
 async def fan_out_daily_plan(c: SharedDailyContext) -> None:
-    for pid in await _list_persona_ids():
-        try:
-            await emit(DailyPlanRequest(
-                persona_id=pid,
-                target_date=c.target_date,
-                wild_materials=c.wild_materials,
-                search_anchors=c.search_anchors,
-                theater=c.theater,
-            ))
-        except Exception:
-            logger.exception("[%s] daily_plan fan-out failed", pid)
+    await _fan_out_per_persona(
+        "daily_plan",
+        lambda pid: DailyPlanRequest(
+            persona_id=pid,
+            target_date=c.target_date,
+            wild_materials=c.wild_materials,
+            search_anchors=c.search_anchors,
+            theater=c.theater,
+        ),
+    )
 
 
 # Per-persona business node — 都是薄壳调原函数
@@ -518,30 +577,49 @@ async def daily_plan_node(r: DailyPlanRequest) -> None:
 
 # Glimpse 双路径：5min 周期 fan-out + 即时事件，都汇入 GlimpseRequest
 
+import uuid
+
+def _new_glimpse_request(persona_id: str, chat_id: str, ts: str, kind: str) -> GlimpseRequest:
+    """统一构造 GlimpseRequest —— request_id 是 emit 端生成的 uuid4，
+    durable consumer redelivery 时复用同一 id 让 insert_idempotent 拒重。"""
+    return GlimpseRequest(
+        request_id=str(uuid.uuid4()),
+        persona_id=persona_id,
+        chat_id=chat_id,
+        ts=ts,
+        trigger_kind=kind,
+    )
+
 @node
 async def fan_out_glimpse(t: GlimpseTick) -> None:
     """5min cron → 对每个 persona emit GlimpseTickRequest。"""
     if not _is_prod(): return
-    for pid in await _list_persona_ids():
-        try: await emit(GlimpseTickRequest(persona_id=pid, ts=t.ts))
-        except Exception: logger.exception("[%s] glimpse fan-out failed", pid)
+    await _fan_out_per_persona(
+        "glimpse_tick", lambda pid: GlimpseTickRequest(persona_id=pid, ts=t.ts)
+    )
 
 @node
 async def glimpse_tick_node(r: GlimpseTickRequest) -> None:
     """5min 周期路径：读 life_state 判 activity，决定要不要 emit GlimpseRequest。
 
     业务语义跟现状 cron_glimpse 完全一致：sleeping 跳过；browsing 必发；
-    其他活动 15% 概率发。"""
+    其他活动 15% 概率发。读 pg 失败按"这拍跳过"处理，下一拍恢复。"""
     from app.data.queries import find_latest_life_state
     from app.life.glimpse import list_target_groups
-    async with get_session() as s:
-        state = await find_latest_life_state(s, r.persona_id)
+    try:
+        async with get_session() as s:
+            state = await find_latest_life_state(s, r.persona_id)
+    except Exception:
+        logger.exception("[%s] glimpse_tick read life_state failed", r.persona_id)
+        return
     activity = state.activity_type if state else ""
     if activity == "sleeping": return
     if activity != "browsing" and random.random() >= 0.15: return
     for chat_id in list_target_groups():
-        try: await emit(GlimpseRequest(persona_id=r.persona_id, chat_id=chat_id, ts=r.ts))
-        except Exception: logger.exception("[%s][%s] glimpse_tick emit failed", r.persona_id, chat_id)
+        try:
+            await emit(_new_glimpse_request(r.persona_id, chat_id, r.ts, "tick"))
+        except Exception:
+            logger.exception("[%s][%s] glimpse_tick emit failed", r.persona_id, chat_id)
 
 @node
 async def glimpse_event_node(c: LifeStateChanged) -> None:
@@ -554,8 +632,10 @@ async def glimpse_event_node(c: LifeStateChanged) -> None:
     if c.activity_type == c.prev_activity_type: return  # 段内 refresh 不响应
     from app.life.glimpse import list_target_groups
     for chat_id in list_target_groups():
-        try: await emit(GlimpseRequest(persona_id=c.persona_id, chat_id=chat_id, ts=c.ts))
-        except Exception: logger.exception("[%s][%s] glimpse_event emit failed", c.persona_id, chat_id)
+        try:
+            await emit(_new_glimpse_request(c.persona_id, chat_id, c.ts, "event"))
+        except Exception:
+            logger.exception("[%s][%s] glimpse_event emit failed", c.persona_id, chat_id)
 
 @node
 async def run_glimpse_node(r: GlimpseRequest) -> None:
@@ -609,7 +689,10 @@ except Exception:
 
 - `apps/agent-service/app/workers/cron.py`（整文件）
 - `apps/agent-service/app/workers/common.py`：`for_each_persona` / `prod_only` / `cron_error_handler` 三个 helper（保留 `mq_error_handler`）
-- `apps/agent-service/app/workers/arq_settings.py`：`cron_jobs = [cron(task_executor_job, minute=None)]`（保留 task_executor + functions=[sync_life_state_after_schedule]）
+- `apps/agent-service/app/workers/arq_settings.py`：
+  - `cron_jobs = [cron(task_executor_job, minute=None)]`（保留 task_executor + functions=[sync_life_state_after_schedule]）
+  - **删除顶部对 `cron_*` 的 import**（`cron_generate_voice` / `cron_glimpse` / `cron_heavy_review` / `cron_life_engine_tick` / `cron_memory_reviewer_light_*` / `cron_generate_daily_plan`）—— `cron.py` 删除后这些 import 让 arq-worker 起不来
+  - **删除 `on_startup` 里 `asyncio.create_task(cron_generate_voice(None))`**：seed voice 由 graph 接管。若需要保留"启动时 seed 一次 voice"行为，由 main.py lifespan 在 `start_source_loops()` 之后追加一次性触发（对所有 persona emit `VoiceRequest`）；本期默认不 seed，等下个整点
 - `apps/agent-service/app/life/schedule.py::generate_all_daily_plans`（被 graph fan-out 替代）
 - `apps/agent-service/app/memory/reviewer/heavy.py::run_heavy_review`（无参循环 persona 形态被 graph fan-out 替代；`run_heavy_review_for_persona` 保留）
 
@@ -664,15 +747,20 @@ except Exception:
 - [ ] compile_graph 通过；agent-service 启动日志显示 6 个 cron sources（命名 `cron[MinuteTick]` / `cron[LightDayTick]` / `cron[LightNightTick]` / `cron[HeavyReviewTick]` / `cron[DailyPlanTick]` / `cron[GlimpseTick]`）
 - [ ] 泳道部署 30 分钟观察：life_state 写入节奏与现状一致；voice 整点触发命中（用 `make logs APP=agent-service KEYWORD=voice_node SINCE=15m`）；light reviewer 节奏命中；glimpse 5min 周期触发命中（`KEYWORD=glimpse_tick_node`）
 - [ ] 泳道用 dev bot 触发一次 life_state 切到 browsing → 观察 LifeStateChanged → glimpse_event_node → GlimpseRequest 进 mq → run_glimpse_node 在 durable consumer 跑
-- [ ] glimpse 行为验收：
-  - 5min 周期路径：sleeping 跳过；browsing 必发；其他 15% 抽样 —— 与现状 cron_glimpse 计数对齐（前后 1h 计数 ±5%）
-  - 即时路径：切到 browsing 立即多发一次（在下个 5min 刻度之前可观测到 GlimpseRequest）
-  - 即时路径不响应非 browsing 切换 / 段内 refresh
+- [ ] glimpse 行为验收（语义由单测保证；线上仅看节奏 / 切换）:
+  - 单测 mock activity：sleeping 跳过 / browsing 100% emit / 其他活动按 random seed 命中或不命中（注入可控 random）
+  - 单测 LifeStateChanged 触发：切到 browsing emit 一次；切到 working / sleeping 不 emit；段内 refresh（activity 与 prev 同）不 emit
+  - 线上：5min 周期触发可观测（`make logs APP=agent-service KEYWORD=glimpse_tick_node SINCE=15m` 至少 3 次记录）
+  - 线上：dev bot 触发一次切到 browsing 后，5min 内必有一次额外的 `glimpse_event_node` log（不需要等 5min cron 刻度）
+- [ ] `glimpse_requests` 表自动建出（runtime migrator 跑过）；durable consumer redelivery 测试：手动 nack + redeliver 同一条 message，确认 run_glimpse_node 仅执行一次（insert_idempotent dedup 命中）
+- [ ] watchdog 行为：单测注入 source loop fatal error → 断言 `os._exit(1)` 被调用（monkeypatch）
+- [ ] arq-worker 启动正常：去掉 `cron.py` 后 arq-worker pod 不 import fail（`/ops pods APP=arq-worker` 状态 Running）
 
 ## 7. 不在本期范围
 
 - `task_executor_job`（long_tasks 子系统）—— 保留 ARQ cron
 - 任何 fan-out 节点加 `.durable()` —— 这些任务都"丢一拍可接受"，不值上 mq；只有 GlimpseRequest 因为下游有 LLM 重活才 durable
+- `glimpse_requests` 表的 retention/cleanup 策略 —— durable Data 的副产品。目前先让表自然增长（每天约 N persona × ~100 tick × M chat 量级），观察一段时间后再决定 TTL / 老化清理；可由本 Phase 引入的 dataflow cron 机制自身实现（讽刺循环）
 - glimpse 改纯事件驱动（消灭 5min 周期）—— v2 草案错误尝试过，丢失"持续期反复刷"语义。本期保留 5min cron + 加事件路径补一拍；后续若把 LifeState 迁到 dataflow Data + 引入"in-state timer"原语，再考虑彻底取消 cron 周期
 - `with_latest(LifeState)` 接入 —— 后续若发现 glimpse_tick_node 需要 prev state 的更多字段，再补
 - chat 主 pipeline / Stream[T] / bridges 整包删 —— Phase 5 / 6
