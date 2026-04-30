@@ -1,8 +1,17 @@
 # Dataflow Phase 4 — Life Engine / Schedule / Glimpse 进 Graph
 
-**状态**: Draft v2 (2026-04-30，吸收 reviewer 第 1 轮 7 条意见)
+**状态**: Draft v3 (2026-04-30，修正 v2 的 glimpse 语义错误)
 **前置**: PR #205 (Phase 3 drift/afterthought) shipped to prod 1.0.0.320
 **后续**: Phase 5 chat 主 pipeline + Stream[T] runtime
+
+**v3 关键变化（vs v2）**：
+- glimpse 不改纯事件驱动 —— 保留 5min cron 周期触发 + 加 LifeStateChanged "切到 browsing 时" 补一拍即时事件。v2 把 glimpse 改成纯事件驱动是语义错：旧逻辑的本质是"在状态期间反复有概率刷手机"（持续行为），事件驱动只触发切换瞬间一次会丢掉持续期。新方案：5min cron 保持持续刷的人感；切到 browsing 的事件路径仅消除"刚切就要等 5min"的间隙
+- §1 业务收益从"glimpse 改事件驱动"改成"切到 browsing 立即响应（消除 5min 调度延迟）"
+- §3.2 graph 新增 `GlimpseTick (5min cron) → fan_out_glimpse → GlimpseTickRequest → glimpse_tick_node`（5min 周期路径）+ `LifeStateChanged → glimpse_event_node`（即时路径），两条都汇入 `GlimpseRequest .durable() → run_glimpse_node`
+- §3.3 新增 `GlimpseTick` / `GlimpseTickRequest` 两个 Data
+- §3.5 `glimpse_node` 拆成两个：`glimpse_tick_node`（5min 周期，内部 `find_latest_life_state` 判 activity；与现状语义一致）+ `glimpse_event_node`（事件路径，仅在切到 browsing 时 emit GlimpseRequest）。"现读 pg" 在 glimpse_tick_node 内部保留 —— 业务上人是否在 sleeping 必须查
+- §6 验收：保留 5min 节奏行为对齐 + 加切到 browsing 即时响应一项
+- §1 验收点同步修正
 
 **v2 关键变化（vs v1）**：
 - §3.0 新增 cron source 宿主设计：main.py lifespan 启 sources-only Runtime（修 round-1 P0 #1，v1 删 ARQ cron 后 cron source 无人启动）
@@ -17,7 +26,7 @@
 
 Phase 0+1 落地 runtime 框架 + vectorize；Phase 2 把 safety 收进 graph；Phase 3 落地 `.debounce()` runtime 并把 drift / afterthought 改造成节点。`arq_settings.cron_jobs` 是 dataflow 没接管的最后一片：7 条 cron + `for_each_persona` 轮询 + 一处"现读 pg 判活动状态"的轮询模式（glimpse）。
 
-**业务收益（唯一一条）**: glimpse 改事件驱动。当前每 5 分钟扫所有 persona、读 `life_state` 判 `activity_type` —— 赤尾刚切到 `browsing` 要等下一个 5 分钟刻度才会瞥手机，粒度反人类。改完后 `life_state` 一变就触发 glimpse 节点，符合"赤尾是人不是工程系统"。
+**业务收益（唯一一条）**: glimpse 切到 browsing 立即响应，消除"刚切到 browsing 还要等下一个 5min 刻度"的最高 5 分钟调度延迟，符合"赤尾是人不是工程系统"。持续期"反复有概率刷手机"的语义保留 5min cron 不变。
 
 **工程收益**: cron 入口 / 扇出 / 业务 node 在 graph 上各自显式，per-persona × per-task 路径独立 —— 跟 Phase 2/3 的取向一致。`for_each_persona` / `prod_only` / `cron_error_handler` 这一套 worker 装饰器消失，统一走 runtime 边语义。
 
@@ -25,7 +34,7 @@ Phase 0+1 落地 runtime 框架 + vectorize；Phase 2 把 safety 收进 graph；
 - `apps/agent-service/app/workers/cron.py` 整文件删除
 - `arq_settings.cron_jobs` 仅保留 task_executor_job 一条
 - `app/workers/common.py` 的 `for_each_persona` / `prod_only` / `cron_error_handler` 全部删除
-- glimpse 不再读 `find_latest_life_state` 判活动；触发源是 `LifeStateChanged` 事件（in-process）→ `GlimpseRequest`（durable）→ `run_glimpse`
+- glimpse 5min 周期触发节奏不变；切到 browsing 多一条 LifeStateChanged 即时路径
 - `compile_graph()` 通过；agent-service 启动后 cron 节奏与现状一致
 - runtime cron source loop 跑在 agent-service 主进程 lifespan（不新增 deployment）
 
@@ -37,7 +46,7 @@ Phase 0+1 落地 runtime 框架 + vectorize；Phase 2 把 safety 收进 graph；
 |---|---|---|---|---|---|---|
 | 1 | task_executor | `* * * * *` | `task_executor_job` | ❌（轮询表） | ❌ | **不迁** |
 | 2 | life_engine_tick | `* * * * *` | `cron_life_engine_tick` → `life.engine.tick` | ✅ | ✅ | 迁 |
-| 3 | glimpse | `*/5 * * * *` | `cron_glimpse`（含现读 pg） | ✅（内部） | ✅ | **改事件驱动** |
+| 3 | glimpse | `*/5 * * * *` | `cron_glimpse`（含现读 pg 判 activity） | ✅（内部） | ✅ | 迁（保留 5min 周期 + 加 LifeStateChanged 即时路径） |
 | 4 | light_day | `0,30 8-21 * * *` | `cron_memory_reviewer_light_day` | ✅ window=30 | ✅ | 迁 |
 | 5 | light_night | `0 22,23,0,1,2,4,5,6,7 * * *` | `cron_memory_reviewer_light_night` | ✅ window=60 | ✅ | 迁 |
 | 6 | heavy_review | `0 3 * * *` | `cron_heavy_review` → `run_heavy_review` | ✅（内部） | ✅ | 迁 |
@@ -79,7 +88,9 @@ async def cron_glimpse(ctx):
             await run_glimpse(pid, chat_id)
 ```
 
-每 5 分钟全量扫 + 全量读 `life_state` 判活动 —— 是本期"消灭现读 pg"的唯一目标。
+每 5 分钟全量扫所有 persona + 读 `life_state` 判活动。本期保留 5min 周期触发的业务语义（"持续期反复有概率刷"是 glimpse 的本质行为模型，事件驱动无法替代），但把入口从 ARQ cron + `for_each_persona` 内嵌改成 dataflow `Source.cron` + graph fan-out node；`find_latest_life_state` 仍由 glimpse_tick_node 内部调用。
+
+**额外的事件路径**（v3 新增）：当 `commit_life_state_impl` 写入 `life_state` 切到 `browsing` 时，emit 一条 `LifeStateChanged` 事件，glimpse_event_node 即时 emit `GlimpseRequest` —— 这条仅消除"刚切到 browsing 但还要等下个 5min 刻度"的最高 5 分钟延迟。其他状态切换不在事件路径触发，由下个 5min 周期处理。
 
 ### 2.4 life_state 写入点（apps/agent-service/app/life/tool.py:84-94）
 
@@ -206,9 +217,14 @@ itr = croniter(expr, base)  # croniter 按 base 的 tz 解释 expr
 [cron 0 5 CST]    → DailyPlanTick        → run_shared_daily_pipeline_node → SharedDailyContext
                                                                               → fan_out_daily_plan → DailyPlanRequest → daily_plan_node
 
-[life.tool.commit_life_state_impl 写入成功]
-                  → LifeStateChanged (in-process) → glimpse_node (轻量过滤 + per-target-group fan-out)
-                                                  → GlimpseRequest .durable() → run_glimpse_node
+# Glimpse 双路径：5min 周期 (主) + 切 browsing 即时事件 (补一拍)
+[cron */5 CST]    → GlimpseTick          → fan_out_glimpse → GlimpseTickRequest → glimpse_tick_node ──┐
+                                                                       (内部读 life_state 判 activity) │
+[life.tool.commit_life_state_impl 写入成功]                                                            │
+                  → LifeStateChanged (in-process) → glimpse_event_node ─────────────────────────────┤
+                              (仅切到 browsing 时触发)                                                  │
+                                                                                                       ▼
+                                                                           GlimpseRequest .durable() → run_glimpse_node
 ```
 
 **为什么不复用一个统一的 `PersonaTick(task=...)`**: dataflow 优先用 Data 类型分发（参考 Phase 2 `PreSafetyRequest` / `PostSafetyRequest`、Phase 3 `DriftTrigger` / `AfterthoughtTrigger`）。每条业务链一个类型让 graph 可读、edge 行为独立可调（哪天 voice 要加 `.durable()`、daily_plan 要加 `.debounce()`，类型分发不会牵连别的链）。重复的只是 fan-out 模板，几行。
@@ -217,7 +233,11 @@ itr = croniter(expr, base)  # croniter 按 base 的 tz 解释 expr
 
 **MinuteTick 例外**: voice 和 life_tick 都是 1 分钟节奏，复用同一个 MinuteTick + 各自 fan-out 节点用 if/return 过滤即可。
 
-**GlimpseRequest 必须 `.durable()`**: 为避免 commit_life_state_impl 同步阻塞在 run_glimpse 的 LLM 调用上，重活走 mq durable consumer。LifeStateChanged → glimpse_node 这段保持 in-process（仅做 sleeping 过滤 + 概率判断 + per-chat fan-out，全部内存操作），fan-out 出的 GlimpseRequest 走 mq 后由 agent-service 主进程的 durable consumer pick 起来在后台跑（跟 Phase 2 PostSafetyRequest 范式一致）。
+**GlimpseRequest 必须 `.durable()`**: 两条上游路径（5min cron 周期 / LifeStateChanged 即时事件）汇入同一条 GlimpseRequest 边。run_glimpse_node 内部走 LLM 调用，必须在 mq durable consumer 异步跑：
+- 5min cron 路径：fan_out_glimpse 是 graph 上独立路径，本身可 in-process emit GlimpseTickRequest 给 glimpse_tick_node；glimpse_tick_node 判完 activity 后 emit GlimpseRequest 走 mq
+- LifeStateChanged 路径：在 commit_life_state_impl 调用栈里，重活同步跑会阻塞 langchain tool；GlimpseRequest 走 mq 解耦
+
+跟 Phase 2 PostSafetyRequest 范式一致。
 
 ### 3.3 Data 类（新建 `app/domain/life_dataflow.py`）
 
@@ -247,6 +267,10 @@ class DailyPlanTick(Data):
     ts: Annotated[str, Key]
     class Meta: transient = True
 
+class GlimpseTick(Data):
+    ts: Annotated[str, Key]
+    class Meta: transient = True
+
 # Per-persona business request
 
 class LifeTickRequest(Data):
@@ -266,6 +290,12 @@ class LightReviewRequest(Data):
     class Meta: transient = True
 
 class HeavyReviewRequest(Data):
+    persona_id: Annotated[str, Key]
+    ts: str
+    class Meta: transient = True
+
+class GlimpseTickRequest(Data):
+    """5min 周期 fan-out 出的 per-persona 触发；下游 glimpse_tick_node 内部判 activity。"""
     persona_id: Annotated[str, Key]
     ts: str
     class Meta: transient = True
@@ -312,8 +342,8 @@ class GlimpseRequest(Data):
 ```python
 from app.runtime import Source, wire
 from app.domain.life_dataflow import (
-    MinuteTick, LightDayTick, LightNightTick, HeavyReviewTick, DailyPlanTick,
-    LifeTickRequest, VoiceRequest, LightReviewRequest, HeavyReviewRequest,
+    MinuteTick, LightDayTick, LightNightTick, HeavyReviewTick, DailyPlanTick, GlimpseTick,
+    LifeTickRequest, VoiceRequest, LightReviewRequest, HeavyReviewRequest, GlimpseTickRequest,
     SharedDailyContext, DailyPlanRequest,
     LifeStateChanged, GlimpseRequest,
 )
@@ -322,9 +352,10 @@ from app.nodes.life_dataflow import (
     fan_out_light_day, fan_out_light_night,
     fan_out_heavy,
     run_shared_daily_pipeline_node, fan_out_daily_plan,
+    fan_out_glimpse,
     life_tick_node, voice_node,
     light_review_node, heavy_review_node, daily_plan_node,
-    glimpse_node, run_glimpse_node,
+    glimpse_tick_node, glimpse_event_node, run_glimpse_node,
 )
 
 # Cron tick 入口
@@ -334,6 +365,7 @@ wire(LightDayTick).from_(Source.cron("0,30 8-21 * * *", tz=TZ)).to(fan_out_light
 wire(LightNightTick).from_(Source.cron("0 22,23,0,1,2,4,5,6,7 * * *", tz=TZ)).to(fan_out_light_night)
 wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
 wire(DailyPlanTick).from_(Source.cron("0 5 * * *", tz=TZ)).to(run_shared_daily_pipeline_node)
+wire(GlimpseTick).from_(Source.cron("*/5 * * * *", tz=TZ)).to(fan_out_glimpse)
 
 # Daily plan 内部链
 wire(SharedDailyContext).to(fan_out_daily_plan)
@@ -345,9 +377,10 @@ wire(VoiceRequest).to(voice_node)
 wire(LightReviewRequest).to(light_review_node)
 wire(HeavyReviewRequest).to(heavy_review_node)
 
-# Event-driven glimpse
-wire(LifeStateChanged).to(glimpse_node)
-wire(GlimpseRequest).to(run_glimpse_node).durable()
+# Glimpse 双路径汇入 GlimpseRequest
+wire(GlimpseTickRequest).to(glimpse_tick_node)         # 5min 周期路径，内部判 activity
+wire(LifeStateChanged).to(glimpse_event_node)          # 即时路径，仅切到 browsing 触发
+wire(GlimpseRequest).to(run_glimpse_node).durable()    # 重活走 mq
 ```
 
 **注**: `wire(MinuteTick).to(fan_out_life_tick, fan_out_voice)` 让两条 fan-out 共享同一个 cron source（同 WireSpec 多 consumer，fan-out 节点内部用 if/return 过滤自己关心的时段）。
@@ -483,23 +516,50 @@ async def daily_plan_node(r: DailyPlanRequest) -> None:
         logger.exception("[%s] daily_plan failed", r.persona_id)
 
 
-# Event-driven glimpse：in-process 轻量过滤 → fan-out per-target-group → durable
+# Glimpse 双路径：5min 周期 fan-out + 即时事件，都汇入 GlimpseRequest
 
 @node
-async def glimpse_node(c: LifeStateChanged) -> None:
-    """LifeStateChanged → 过滤 + per-chat fan-out。in-process。"""
+async def fan_out_glimpse(t: GlimpseTick) -> None:
+    """5min cron → 对每个 persona emit GlimpseTickRequest。"""
     if not _is_prod(): return
+    for pid in await _list_persona_ids():
+        try: await emit(GlimpseTickRequest(persona_id=pid, ts=t.ts))
+        except Exception: logger.exception("[%s] glimpse fan-out failed", pid)
+
+@node
+async def glimpse_tick_node(r: GlimpseTickRequest) -> None:
+    """5min 周期路径：读 life_state 判 activity，决定要不要 emit GlimpseRequest。
+
+    业务语义跟现状 cron_glimpse 完全一致：sleeping 跳过；browsing 必发；
+    其他活动 15% 概率发。"""
+    from app.data.queries import find_latest_life_state
+    from app.life.glimpse import list_target_groups
+    async with get_session() as s:
+        state = await find_latest_life_state(s, r.persona_id)
+    activity = state.activity_type if state else ""
+    if activity == "sleeping": return
+    if activity != "browsing" and random.random() >= 0.15: return
+    for chat_id in list_target_groups():
+        try: await emit(GlimpseRequest(persona_id=r.persona_id, chat_id=chat_id, ts=r.ts))
+        except Exception: logger.exception("[%s][%s] glimpse_tick emit failed", r.persona_id, chat_id)
+
+@node
+async def glimpse_event_node(c: LifeStateChanged) -> None:
+    """即时路径：仅在切到 browsing 瞬间补一拍 GlimpseRequest。
+
+    其他状态切换（如切到 working / sleeping）不在事件路径触发 ——
+    "持续期反复刷"由 5min cron 路径承担。"""
+    if not _is_prod(): return
+    if c.activity_type != "browsing": return
     if c.activity_type == c.prev_activity_type: return  # 段内 refresh 不响应
-    if c.activity_type == "sleeping": return
-    if c.activity_type != "browsing" and random.random() >= 0.15: return
     from app.life.glimpse import list_target_groups
     for chat_id in list_target_groups():
         try: await emit(GlimpseRequest(persona_id=c.persona_id, chat_id=chat_id, ts=c.ts))
-        except Exception: logger.exception("[%s][%s] glimpse fan-out failed", c.persona_id, chat_id)
+        except Exception: logger.exception("[%s][%s] glimpse_event emit failed", c.persona_id, chat_id)
 
 @node
 async def run_glimpse_node(r: GlimpseRequest) -> None:
-    """LLM 重活，走 .durable() consumer。"""
+    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里。"""
     from app.life.glimpse import run_glimpse
     try: await run_glimpse(r.persona_id, r.chat_id)
     except Exception: logger.exception("[%s][%s] run_glimpse failed", r.persona_id, r.chat_id)
@@ -533,7 +593,7 @@ except Exception:
     logger.exception("[%s] LifeStateChanged emit failed; commit succeeded", persona_id)
 ```
 
-**emit 失败处理**: `emit` 的 in-process 段（glimpse_node）抛异常会冒泡。`commit_life_state_impl` 在 langchain tool 调用栈里 —— 抛异常会让 tool 报错触发 life engine 重试可能双 insert。`try/except` 包住 emit 让"事件丢失但状态成功"是 best-effort 语义，跟 glimpse 业务关键性匹配。glimpse_node 的轻量决策一般不会抛；run_glimpse 的 LLM 重活在 durable consumer 里跑，根本不在 emit 这层调用栈，连同步路径都没。
+**emit 失败处理**: `emit` 的 in-process 段（glimpse_event_node）抛异常会冒泡。`commit_life_state_impl` 在 langchain tool 调用栈里 —— 抛异常会让 tool 报错触发 life engine 重试可能双 insert。`try/except` 包住 emit 让"事件丢失但状态成功"是 best-effort 语义；即使事件路径丢一拍，5min cron 路径也会很快补上一次（最多延迟 5min），跟 glimpse 业务关键性匹配。glimpse_event_node 仅做轻量过滤 + per-chat emit，不会抛重异常；run_glimpse 的 LLM 重活在 durable consumer 里跑，根本不在 emit 这层调用栈。
 
 ### 3.7 prod_only 处理
 
@@ -559,7 +619,7 @@ except Exception:
 
 - **agent-service 重启**: cron source loop 在 lifespan startup 阶段挂起。部署 = 杀 Pod = cron 当前分钟那一拍可能丢（同 ARQ cron 现状）。daily_plan / heavy_review 这种小时级以上节奏天然容忍。
 - **arq-worker 角色变小**: 本期后 arq-worker 仅承担 task_executor（每分钟轮询 long_tasks 表）+ sync_life_state_after_schedule 事件 worker。重启 arq-worker 不再影响 life/glimpse/voice/review/daily-plan。
-- **glimpse 切事件驱动的语义变化**: 旧逻辑每 5 分钟对所有非 sleeping persona 做"15% 抽样 + browsing 必发"；新逻辑只在 `life_state` activity_type 切换瞬间触发一次（browsing 必发；非 browsing 切换走 15% 抽样）。**频次必然显著下降** —— browsing 反应更快但其他状态间的"glimpse 频度"远低于现状。这是预期收益（消灭"现读 pg 全量轮询"），不是 regression。
+- **glimpse 业务语义变化**: 5min 周期触发 + 内部判 activity 的逻辑完全保留（与现状 `cron_glimpse` 等价）；额外加一条 LifeStateChanged 即时路径仅在切到 browsing 时触发一次（消除"刚切到 browsing 就要等下个 5min"的最高 5min 调度延迟）。频次相比现状仅在 browsing 切入瞬间增加一次额外触发，其他时刻不变。
 
 ### 5.2 可观测性
 
@@ -593,26 +653,27 @@ except Exception:
 - [ ] `app/workers/cron.py` 不存在
 - [ ] `app/workers/common.py` 没有 `for_each_persona` / `prod_only` / `cron_error_handler` 三个名字
 - [ ] `arq_settings.WorkerSettings.cron_jobs == [cron(task_executor_job, minute=None)]`（grep 验证）
-- [ ] `app/wiring/life_dataflow.py` 存在；wire 数量为 13（5 cron tick + 1 SharedDailyContext + 1 DailyPlanRequest + 4 PersonaXxxRequest [LifeTick/Voice/LightReview/HeavyReview] + 1 LifeStateChanged + 1 GlimpseRequest）
-- [ ] `app/nodes/life_dataflow.py` 存在；@node 数量为 14（5 fan-out [life_tick/voice/light_day/light_night/heavy] + run_shared_daily_pipeline_node + fan_out_daily_plan + 5 business [life_tick/voice/light_review/heavy_review/daily_plan] + glimpse_node + run_glimpse_node = 5+1+1+5+2）
+- [ ] `app/wiring/life_dataflow.py` 存在；wire 数量为 15（6 cron tick [Minute/LightDay/LightNight/HeavyReview/DailyPlan/Glimpse] + SharedDailyContext + DailyPlanRequest + 4 PersonaXxxRequest [LifeTick/Voice/LightReview/HeavyReview] + GlimpseTickRequest + LifeStateChanged + GlimpseRequest = 6+1+1+4+1+1+1）
+- [ ] `app/nodes/life_dataflow.py` 存在；@node 数量为 16（6 fan-out [life_tick/voice/light_day/light_night/heavy/glimpse] + run_shared_daily_pipeline_node + fan_out_daily_plan + 5 business [life_tick/voice/light_review/heavy_review/daily_plan] + glimpse_tick_node + glimpse_event_node + run_glimpse_node = 6+1+1+5+3）
 - [ ] `app/life/tool.py::commit_life_state_impl` 末尾 emit `LifeStateChanged`，try/except 包
 - [ ] `app/life/schedule.py::generate_all_daily_plans` 不存在；`_run_shared_pipeline` / `_run_persona_pipeline` 保留（被 graph node 调用）
 - [ ] `app/memory/reviewer/heavy.py::run_heavy_review` 不存在；`run_heavy_review_for_persona` 保留
-- [ ] `app/life/glimpse.py::find_latest_life_state` 调用点 = 0（旧 cron_glimpse 调用点删除；run_glimpse 内部不读）—— grep 全仓 `find_latest_life_state`，仅在 `app/life/state_sync.py` + `app/life/engine.py` 内部出现，没有 cron 入口
+- [ ] `find_latest_life_state` 调用点：现状 `cron_glimpse` 那处删除；新点出现在 `glimpse_tick_node` —— 业务上等价转移，不是真的"消灭"。grep 数量增减 ±1 在预期内
 - [ ] `app/main.py` lifespan 调 `Runtime.start_source_loops()`；`Runtime.stop_source_loops()` 在 teardown 调
 - [ ] `app/runtime/source.py::Source.cron(expr, *, tz="UTC")` 签名落地；engine.py cron loop 用 ZoneInfo
-- [ ] compile_graph 通过；agent-service 启动日志显示 5 个 cron sources（命名 `cron[MinuteTick]` / `cron[LightDayTick]` 等）
-- [ ] 泳道部署 30 分钟观察：life_state 写入节奏与现状一致；voice 整点触发命中（用 `make logs APP=agent-service KEYWORD=voice_node SINCE=15m`）；light reviewer 节奏命中
-- [ ] 泳道用 dev bot 触发 commit_life_state 一次 → 观察 LifeStateChanged → glimpse_node → GlimpseRequest 进 mq → run_glimpse_node 在 durable consumer 跑
-- [ ] glimpse 行为验收（不要求频次对齐旧 cron）:
-  - browsing 切入立即触发 1 次 glimpse
-  - sleeping 切入不触发
-  - 其他活动切换：抽样命中 15% 概率（多次状态切换后统计）
+- [ ] compile_graph 通过；agent-service 启动日志显示 6 个 cron sources（命名 `cron[MinuteTick]` / `cron[LightDayTick]` / `cron[LightNightTick]` / `cron[HeavyReviewTick]` / `cron[DailyPlanTick]` / `cron[GlimpseTick]`）
+- [ ] 泳道部署 30 分钟观察：life_state 写入节奏与现状一致；voice 整点触发命中（用 `make logs APP=agent-service KEYWORD=voice_node SINCE=15m`）；light reviewer 节奏命中；glimpse 5min 周期触发命中（`KEYWORD=glimpse_tick_node`）
+- [ ] 泳道用 dev bot 触发一次 life_state 切到 browsing → 观察 LifeStateChanged → glimpse_event_node → GlimpseRequest 进 mq → run_glimpse_node 在 durable consumer 跑
+- [ ] glimpse 行为验收：
+  - 5min 周期路径：sleeping 跳过；browsing 必发；其他 15% 抽样 —— 与现状 cron_glimpse 计数对齐（前后 1h 计数 ±5%）
+  - 即时路径：切到 browsing 立即多发一次（在下个 5min 刻度之前可观测到 GlimpseRequest）
+  - 即时路径不响应非 browsing 切换 / 段内 refresh
 
 ## 7. 不在本期范围
 
 - `task_executor_job`（long_tasks 子系统）—— 保留 ARQ cron
 - 任何 fan-out 节点加 `.durable()` —— 这些任务都"丢一拍可接受"，不值上 mq；只有 GlimpseRequest 因为下游有 LLM 重活才 durable
-- `with_latest(LifeState)` 接入 —— 后续若发现 glimpse_node 需要 prev state 的更多字段，再补
+- glimpse 改纯事件驱动（消灭 5min 周期）—— v2 草案错误尝试过，丢失"持续期反复刷"语义。本期保留 5min cron + 加事件路径补一拍；后续若把 LifeState 迁到 dataflow Data + 引入"in-state timer"原语，再考虑彻底取消 cron 周期
+- `with_latest(LifeState)` 接入 —— 后续若发现 glimpse_tick_node 需要 prev state 的更多字段，再补
 - chat 主 pipeline / Stream[T] / bridges 整包删 —— Phase 5 / 6
 - 新建 scheduler deployment —— 一镜像多服务暂不引入；cron source 跑在 agent-service 主进程
