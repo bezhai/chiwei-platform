@@ -38,6 +38,17 @@ async def lifespan(app: FastAPI):
     from app.runtime.bootstrap import declare_durable_topology, load_dataflow_graph
 
     load_dataflow_graph()
+
+    # Phase 4: migrate schema BEFORE start_consumers — durable consumer
+    # for GlimpseRequest needs data_glimpse_request table to exist.
+    from app.runtime.engine import Runtime
+
+    runtime_for_sources = Runtime(
+        app_name="agent-service",
+        migrate_schema_on_run=False,  # we drive migrate explicitly below
+    )
+    await runtime_for_sources.migrate_schema()
+
     if settings.rabbitmq_url:
         await declare_durable_topology()
 
@@ -75,7 +86,17 @@ async def lifespan(app: FastAPI):
     register_http_sources(app)
     logger.info("dataflow http sources registered")
 
+    # Phase 4: start cron / interval / mq source loops + watchdog.
+    # Must run AFTER register_http_sources so HTTP routes are in place.
+    await runtime_for_sources.start_source_loops()
+    logger.info("dataflow source loops started")
+
     yield
+
+    # Phase 4: stop source loops first; in-progress sources can still
+    # emit() to durable consumers cleanly because consumers are still alive.
+    logger.info("dataflow source loops stopping")
+    await runtime_for_sources.stop_source_loops()
 
     # Phase 2: stop runtime durable consumers cleanly before tearing
     # down RabbitMQ connection (otherwise late deliveries race with close).
