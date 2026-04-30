@@ -1,7 +1,6 @@
 """main.py lifespan invokes migrate + start_source_loops in the right order."""
 from __future__ import annotations
 
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,32 +25,31 @@ async def test_lifespan_migrates_then_starts_sources():
     async def _stop_source_loops(self):
         call_order.append("stop_source_loops")
 
-    # app.main calls setup_logging at module level; patch it before import
-    # so the test doesn't try to create /logs directory.
-    with patch("inner_shared.logger.setup_logging", MagicMock()):
-        # Force re-import of app.main so the patched setup_logging takes effect.
-        sys.modules.pop("app.main", None)
+    # Patch setup_logging in case app.main hasn't been imported yet
+    # (writing to /logs requires perms not present in the test env).
+    # Do NOT pop app.main from sys.modules — re-importing it leaks state
+    # into other modules' caches and breaks downstream tests.
+    with patch("inner_shared.logger.setup_logging", MagicMock()), \
+         patch("app.runtime.engine.Runtime.migrate_schema", _migrate), \
+         patch("app.runtime.durable.start_consumers", AsyncMock(side_effect=_start_consumers)), \
+         patch("app.runtime.engine.Runtime.start_source_loops", _start_source_loops), \
+         patch("app.runtime.engine.Runtime.stop_source_loops", _stop_source_loops), \
+         patch("app.infra.qdrant.init_collections", AsyncMock()), \
+         patch("app.runtime.bootstrap.declare_durable_topology", AsyncMock()), \
+         patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
+         patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \
+         patch("app.runtime.durable.stop_consumers", AsyncMock()), \
+         patch("app.workers.chat_consumer.start_chat_consumer", AsyncMock()), \
+         patch("app.skills.registry.SkillRegistry.load_all"), \
+         patch("app.skills.registry.skill_reload_loop", AsyncMock()), \
+         patch("app.runtime.http_source.register_http_sources"), \
+         patch("app.main.settings", MagicMock(rabbitmq_url="amqp://test")):
+        from app.main import lifespan
+        from fastapi import FastAPI
 
-        with patch("app.runtime.engine.Runtime.migrate_schema", _migrate), \
-             patch("app.runtime.durable.start_consumers", AsyncMock(side_effect=_start_consumers)), \
-             patch("app.runtime.engine.Runtime.start_source_loops", _start_source_loops), \
-             patch("app.runtime.engine.Runtime.stop_source_loops", _stop_source_loops), \
-             patch("app.infra.qdrant.init_collections", AsyncMock()), \
-             patch("app.runtime.bootstrap.declare_durable_topology", AsyncMock()), \
-             patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
-             patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \
-             patch("app.runtime.durable.stop_consumers", AsyncMock()), \
-             patch("app.workers.chat_consumer.start_chat_consumer", AsyncMock()), \
-             patch("app.skills.registry.SkillRegistry.load_all"), \
-             patch("app.skills.registry.skill_reload_loop", AsyncMock()), \
-             patch("app.runtime.http_source.register_http_sources"), \
-             patch("app.main.settings", MagicMock(rabbitmq_url="amqp://test")):
-            from app.main import lifespan
-            from fastapi import FastAPI
-
-            app = FastAPI()
-            async with lifespan(app):
-                pass
+        app = FastAPI()
+        async with lifespan(app):
+            pass
 
     assert call_order.index("migrate_schema") < call_order.index("start_consumers")
     assert call_order.index("start_source_loops") > call_order.index("start_consumers")
