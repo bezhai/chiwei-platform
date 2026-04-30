@@ -15,6 +15,13 @@ interface BotConfig {
     is_dev: boolean;
 }
 
+type WebSocketClient = {
+    start(params: { eventDispatcher: Lark.EventDispatcher }): Promise<void>;
+    close(params?: { force?: boolean }): void;
+};
+
+type WebSocketClientFactory = (bot: BotConfig) => WebSocketClient;
+
 const REGISTERED_EVENT_TYPES = [
     'im.message.receive_v1',
     'im.message.recalled_v1',
@@ -31,25 +38,38 @@ const REGISTERED_EVENT_TYPES = [
 ];
 
 export class BotManager {
+    private wsClients: WebSocketClient[] = [];
+
     constructor(
         private pool: Pool,
         private forwarder: EventForwarder,
+        private createWebSocketClient: WebSocketClientFactory = (bot) =>
+            new Lark.WSClient({
+                appId: bot.app_id,
+                appSecret: bot.app_secret,
+                loggerLevel: Lark.LoggerLevel.info,
+            }),
     ) {}
 
     async registerBots(app: Hono): Promise<void> {
         const bots = await this.loadBotConfigs();
 
         const httpBots = bots.filter((b) => b.init_type === 'http');
-        if (httpBots.length === 0) {
+        const websocketBots = bots.filter((b) => b.init_type === 'websocket');
+
+        if (httpBots.length > 0) {
+            for (const bot of httpBots) {
+                this.registerHttpBot(app, bot);
+            }
+            console.info(`Registered ${httpBots.length} HTTP bot(s)`);
+        } else {
             console.warn('No HTTP bots found to register');
-            return;
         }
 
-        for (const bot of httpBots) {
-            this.registerBot(app, bot);
+        if (websocketBots.length > 0) {
+            await Promise.all(websocketBots.map((bot) => this.startWebSocketBot(bot)));
+            console.info(`Started ${websocketBots.length} WebSocket bot(s)`);
         }
-
-        console.info(`Registered ${httpBots.length} HTTP bot(s)`);
     }
 
     private async loadBotConfigs(): Promise<BotConfig[]> {
@@ -64,17 +84,28 @@ export class BotManager {
         });
     }
 
-    private registerBot(app: Hono, bot: BotConfig): void {
+    closeWebSocketClients(): void {
+        for (const client of this.wsClients) {
+            client.close({ force: true });
+        }
+        this.wsClients = [];
+    }
+
+    private createEventDispatcher(bot: BotConfig): Lark.EventDispatcher {
         const handler = this.forwarder.createHandler(bot.bot_name);
         const eventHandlers: Record<string, (params: unknown) => Record<string, never>> = {};
         for (const eventType of REGISTERED_EVENT_TYPES) {
             eventHandlers[eventType] = handler;
         }
 
-        const eventDispatcher = new Lark.EventDispatcher({
+        return new Lark.EventDispatcher({
             verificationToken: bot.verification_token,
             encryptKey: bot.encrypt_key,
         }).register(eventHandlers);
+    }
+
+    private registerHttpBot(app: Hono, bot: BotConfig): void {
+        const eventDispatcher = this.createEventDispatcher(bot);
 
         const cardHandler = this.forwarder.createCardHandler(bot.bot_name);
         const cardActionHandler = new Lark.CardActionHandler(
@@ -94,5 +125,16 @@ export class BotManager {
         console.info(
             `Registered bot: ${bot.bot_name} (${bot.app_id}) → ${eventPath}, ${cardPath}`,
         );
+    }
+
+    private async startWebSocketBot(bot: BotConfig): Promise<void> {
+        try {
+            const wsClient = this.createWebSocketClient(bot);
+            await wsClient.start({ eventDispatcher: this.createEventDispatcher(bot) });
+            this.wsClients.push(wsClient);
+            console.info(`Started WebSocket bot: ${bot.bot_name} (${bot.app_id})`);
+        } catch (error) {
+            console.error(`Failed to start WebSocket bot: ${bot.bot_name} (${bot.app_id})`, error);
+        }
     }
 }
