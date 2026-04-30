@@ -273,7 +273,7 @@ class Runtime:
         assert self._stop_event is not None
         await self._stop_event.wait()
         if self._source_error is not None:
-            logger.fatal(
+            logger.critical(
                 "runtime: source loop fatal error %r, exiting process",
                 self._source_error,
             )
