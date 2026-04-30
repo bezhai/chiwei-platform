@@ -42,4 +42,13 @@ await botManager.registerBots(app);
 
 console.info(`lark-proxy listening on port ${PORT}`);
 
+const shutdown = async () => {
+    botManager.closeWebSocketClients();
+    await pool.end();
+    process.exit(0);
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
 export default { port: PORT, fetch: app.fetch };
