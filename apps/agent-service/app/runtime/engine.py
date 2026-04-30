@@ -67,6 +67,7 @@ class Runtime:
         # after cleanup). Any extra errors are logged but not saved —
         # reporting the first one is enough to fail the pod fast.
         self._source_error: BaseException | None = None
+        self._watchdog_task: asyncio.Task | None = None
 
     async def migrate_schema(self) -> None:
         """Read live schema from PostgreSQL, diff against ``DATA_REGISTRY``,
@@ -130,101 +131,18 @@ class Runtime:
         )
 
     async def run(self) -> None:
-        """Boot the runtime and block until cancelled.
-
-        On ``asyncio.CancelledError`` (or any fatal exception surfaced
-        by a source loop via ``self._source_error``), stop sources +
-        durable consumers cleanly before re-raising so the pod exits
-        non-zero and PaaS restarts it. A silent ``run()`` return on a
-        dead source is not acceptable — PaaS would see the pod healthy
-        while the source does nothing.
-        """
-        # Reject obviously-broken APP_NAME up-front. nodes_for_app() returns
-        # an empty set for any unknown non-default app, which would otherwise
-        # boot the runtime with 0 sources / 0 consumers and look healthy
-        # while doing nothing — exactly the failure mode PaaS misconfiguration
-        # would produce.
-        valid = known_apps()
-        if self.app_name not in valid:
-            raise RuntimeError(
-                f"Runtime started for app={self.app_name!r} but no @node "
-                f"is bound there; check APP_NAME (known: {sorted(valid)})"
-            )
-
+        """Boot the runtime and block until cancelled."""
         if self._migrate_schema_on_run:
             await self.migrate_schema()
-
         await start_consumers(app_name=self.app_name)
-
-        graph = compile_graph()
-        allowed_nodes = nodes_for_app(self.app_name)
-        loop = asyncio.get_running_loop()
-        self._stop_event = asyncio.Event()
-
+        await self.start_source_loops()
         try:
-            for w in graph.wires:
-                # Only run source loops for wires whose consumers all belong
-                # to this app — otherwise we'd fire nodes that aren't running
-                # here (or double-fire if another app also runs the source).
-                if not w.consumers:
-                    continue
-                if not all(c in allowed_nodes for c in w.consumers):
-                    continue
-                for src in w.sources:
-                    if src.kind == "cron":
-                        self._source_tasks.append(
-                            loop.create_task(
-                                self._source_loop_cron(w, src),
-                                name=f"cron[{w.data_type.__name__}]",
-                            )
-                        )
-                    elif src.kind == "interval":
-                        self._source_tasks.append(
-                            loop.create_task(
-                                self._source_loop_interval(w, src),
-                                name=f"interval[{w.data_type.__name__}]",
-                            )
-                        )
-                    elif src.kind == "mq":
-                        self._source_tasks.append(
-                            loop.create_task(
-                                self._source_loop_mq(w, src),
-                                name=f"mq[{w.data_type.__name__}]",
-                            )
-                        )
-                    # Other source kinds (http / feishu_webhook / manual)
-                    # are wired elsewhere (FastAPI routes, legacy bridges):
-                    # Runtime only owns the time-triggered + MQ-triggered ones.
-
-            logger.info(
-                "runtime: app=%s started (%d source task(s))",
-                self.app_name,
-                len(self._source_tasks),
-            )
-
-            # Block forever unless cancelled externally, or until a
-            # source loop sets ``_source_error`` and wakes us up.
+            assert self._stop_event is not None
             await self._stop_event.wait()
         finally:
-            for t in self._source_tasks:
-                t.cancel()
-            # Let each task observe its cancellation exactly once.
-            for t in self._source_tasks:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception) as e:
-                    if not isinstance(e, asyncio.CancelledError):
-                        logger.warning(
-                            "runtime: source task %s exited with %r",
-                            t.get_name(),
-                            e,
-                        )
-            self._source_tasks.clear()
+            await self.stop_source_loops()
             await stop_consumers()
 
-        # After cleanup: if a source loop surfaced a fatal error, raise
-        # it so the worker process exits non-zero. This runs *after* the
-        # finally block by design — we want consumers stopped first.
         if self._source_error is not None:
             raise self._source_error
 
@@ -259,6 +177,107 @@ class Runtime:
             self._source_error = e
         if self._stop_event is not None:
             self._stop_event.set()
+
+    async def start_source_loops(self) -> None:
+        """Start cron / interval / mq source loops for nodes bound to this app.
+
+        Also starts a watchdog task that monitors `_stop_event`. If a
+        source loop hits a fatal error, watchdog calls ``os._exit(1)``
+        so PaaS restarts the pod.
+
+        Migrate / durable consumer / blocking 不在本方法范围 —— 调用方
+        （main.py lifespan 或 Runtime.run()）自己负责。
+        """
+        if self._source_tasks or self._watchdog_task is not None:
+            raise RuntimeError(
+                "start_source_loops already called; call stop_source_loops() first"
+            )
+
+        valid = known_apps()
+        if self.app_name not in valid:
+            raise RuntimeError(
+                f"start_source_loops for app={self.app_name!r}: "
+                f"no @node bound there (known: {sorted(valid)})"
+            )
+
+        graph = compile_graph()
+        allowed_nodes = nodes_for_app(self.app_name)
+        loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+
+        for w in graph.wires:
+            if not w.consumers:
+                continue
+            if not all(c in allowed_nodes for c in w.consumers):
+                continue
+            for src in w.sources:
+                if src.kind == "cron":
+                    self._source_tasks.append(
+                        loop.create_task(
+                            self._source_loop_cron(w, src),
+                            name=f"cron[{w.data_type.__name__}]",
+                        )
+                    )
+                elif src.kind == "interval":
+                    self._source_tasks.append(
+                        loop.create_task(
+                            self._source_loop_interval(w, src),
+                            name=f"interval[{w.data_type.__name__}]",
+                        )
+                    )
+                elif src.kind == "mq":
+                    self._source_tasks.append(
+                        loop.create_task(
+                            self._source_loop_mq(w, src),
+                            name=f"mq[{w.data_type.__name__}]",
+                        )
+                    )
+
+        self._watchdog_task = loop.create_task(
+            self._watch_source_error(),
+            name=f"runtime-watchdog[{self.app_name}]",
+        )
+
+        logger.info(
+            "runtime: app=%s start_source_loops (%d source task(s))",
+            self.app_name,
+            len(self._source_tasks),
+        )
+
+    async def stop_source_loops(self) -> None:
+        """Cancel + await every source task + watchdog (explicit cancel)."""
+        for t in self._source_tasks:
+            t.cancel()
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+        for t in [*self._source_tasks, self._watchdog_task]:
+            if t is None:
+                continue
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("runtime: task %s exited with %r", t.get_name(), e)
+        self._source_tasks.clear()
+        self._watchdog_task = None
+        self._stop_event = None
+
+    async def _watch_source_error(self) -> None:
+        """Wait for `_stop_event`; on fire (with `_source_error` set),
+        log fatal + ``os._exit(1)``.
+
+        Normal shutdown 不走这条 —— stop_source_loops cancels this task
+        directly so it never reads `_source_error`.
+        """
+        assert self._stop_event is not None
+        await self._stop_event.wait()
+        if self._source_error is not None:
+            logger.fatal(
+                "runtime: source loop fatal error %r, exiting process",
+                self._source_error,
+            )
+            os._exit(1)
 
     async def _source_loop_cron(self, w: WireSpec, src: SourceSpec) -> None:
         """Fire ``emit()`` for ``w`` each time the cron expression ticks.
