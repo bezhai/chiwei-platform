@@ -20,8 +20,6 @@ from app.data.queries import (
 )
 from app.data.session import get_session
 from app.memory.reviewer.tools import make_reviewer_tools
-from app.workers.common import for_each_persona
-
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
@@ -101,7 +99,3 @@ async def run_heavy_review_for_persona(persona_id: str) -> None:
         schedule_text="\n".join(fmt_sched(sr) for sr in schedules),
     )
 
-
-async def run_heavy_review() -> None:
-    """Cron entry: run heavy review for all personas."""
-    await for_each_persona(run_heavy_review_for_persona, label="memory_reviewer_heavy")

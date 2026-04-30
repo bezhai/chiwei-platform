@@ -332,29 +332,6 @@ async def generate_daily_plan(
     return await _run_persona_pipeline(persona_id, target_date, wild, anchors, theater)
 
 
-async def generate_all_daily_plans(target_date: date | None = None) -> None:
-    """Generate daily plans for all personas (cron job).
-
-    Shared steps (wild agents + search + theater) run once.
-    Per-persona steps (curator + writer + critic) run for each persona.
-    """
-    if target_date is None:
-        target_date = datetime.now(CST).date()
-
-    logger.info("Generating daily plans for all personas: %s", target_date.isoformat())
-
-    wild, anchors, theater = await _run_shared_pipeline(target_date)
-
-    async with get_session() as s:
-        persona_ids = await Q.list_all_persona_ids(s)
-
-    for persona_id in persona_ids:
-        try:
-            await _run_persona_pipeline(persona_id, target_date, wild, anchors, theater)
-        except Exception:
-            logger.exception("[%s] daily plan generation failed", persona_id)
-
-
 # ---------------------------------------------------------------------------
 # Schedule context builder (for injecting into chat system prompt)
 # ---------------------------------------------------------------------------
