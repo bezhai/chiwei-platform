@@ -10,6 +10,8 @@ glimpse 相关节点（Task 6）在本文件之外，单独处理。
 from __future__ import annotations
 
 import logging
+import random
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -18,8 +20,12 @@ from app.data.session import get_session
 from app.domain.life_dataflow import (
     DailyPlanRequest,
     DailyPlanTick,
+    GlimpseRequest,
+    GlimpseTick,
+    GlimpseTickRequest,
     HeavyReviewRequest,
     HeavyReviewTick,
+    LifeStateChanged,
     LifeTickRequest,
     LightDayTick,
     LightNightTick,
@@ -215,3 +221,91 @@ async def daily_plan_node(r: DailyPlanRequest) -> None:
         )
     except Exception:
         logger.exception("[%s] daily_plan failed", r.persona_id)
+
+
+# ---------------------------------------------------------------------------
+# Glimpse 双路径：5min 周期 + 切到 browsing 即时事件，汇入 GlimpseRequest
+# ---------------------------------------------------------------------------
+
+
+def _new_glimpse_request(persona_id: str, chat_id: str, ts: str, kind: str) -> GlimpseRequest:
+    """统一构造 GlimpseRequest —— request_id 是 emit 端生成的 uuid4，
+    durable consumer 在 redelivery 时复用同一 id 让 ``insert_idempotent`` 拒重."""
+    return GlimpseRequest(
+        request_id=str(uuid.uuid4()),
+        persona_id=persona_id,
+        chat_id=chat_id,
+        ts=ts,
+        trigger_kind=kind,
+    )
+
+
+@node
+async def fan_out_glimpse(t: GlimpseTick) -> None:
+    """5min cron → 对每个 persona emit GlimpseTickRequest."""
+    if not _is_prod():
+        return
+    await _fan_out_per_persona(
+        "glimpse_tick", lambda pid: GlimpseTickRequest(persona_id=pid, ts=t.ts)
+    )
+
+
+@node
+async def glimpse_tick_node(r: GlimpseTickRequest) -> None:
+    """5min 周期路径：读 life_state 判 activity，决定要不要 emit GlimpseRequest.
+
+    业务语义跟现状 cron_glimpse 完全一致：sleeping 跳过；browsing 必发；
+    其他活动 15% 概率发。读 pg 失败按"这拍跳过"处理，下一拍恢复。
+    """
+    from app.data.queries import find_latest_life_state
+    from app.life.glimpse import list_target_groups
+    try:
+        async with get_session() as s:
+            state = await find_latest_life_state(s, r.persona_id)
+    except Exception:
+        logger.exception("[%s] glimpse_tick read life_state failed", r.persona_id)
+        return
+    activity = state.activity_type if state else ""
+    if activity == "sleeping":
+        return
+    if activity != "browsing" and random.random() >= 0.15:
+        return
+    for chat_id in list_target_groups():
+        try:
+            await emit(_new_glimpse_request(r.persona_id, chat_id, r.ts, "tick"))
+        except Exception:
+            logger.exception("[%s][%s] glimpse_tick emit failed", r.persona_id, chat_id)
+
+
+@node
+async def glimpse_event_node(c: LifeStateChanged) -> None:
+    """即时路径：仅在切到 browsing 瞬间补一拍 GlimpseRequest.
+
+    其他状态切换（如切到 working / sleeping）不在事件路径触发 ——
+    "持续期反复刷"由 5min cron 路径承担。
+    """
+    if not _is_prod():
+        return
+    if c.activity_type != "browsing":
+        return
+    if c.activity_type == c.prev_activity_type:
+        return  # 段内 refresh 不响应
+    from app.life.glimpse import list_target_groups
+    for chat_id in list_target_groups():
+        try:
+            await emit(_new_glimpse_request(c.persona_id, chat_id, c.ts, "event"))
+        except Exception:
+            logger.exception("[%s][%s] glimpse_event emit failed", c.persona_id, chat_id)
+
+
+@node
+async def run_glimpse_node(r: GlimpseRequest) -> None:
+    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里.
+
+    **不 try/except**: durable handler 在 ``message.process(requeue=False)``
+    上下文里依靠 consumer 抛异常来 nack → DLX → DLQ。捕获异常会让
+    handler 看到正常返回 → ack → message 永远不会进 DLQ，PR #202 的
+    DLQ 监控失效。参照 ``run_post_safety`` 范式（row 不存在直接 raise）。
+    """
+    from app.life.glimpse import run_glimpse
+    await run_glimpse(r.persona_id, r.chat_id)
