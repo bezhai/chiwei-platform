@@ -107,3 +107,25 @@ def model_info_factory():
         return info
 
     return _factory
+
+
+# ---------------------------------------------------------------------------
+# capture_emit — Phase 5a node-level test helper
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def capture_emit(monkeypatch):
+    """Capture every emit() call into a list. Returns the list.
+
+    Phase 5a helper: most node-level tests want a uniform way to assert
+    "what segments / requests this @node emitted." This fixture patches
+    the runtime emit symbol and returns a list that grows as tests run.
+    """
+    seen: list = []
+
+    async def _fake_emit(data):
+        seen.append(data)
+
+    import app.runtime.emit as emit_mod
+
+    monkeypatch.setattr(emit_mod, "emit", _fake_emit)
+    return seen

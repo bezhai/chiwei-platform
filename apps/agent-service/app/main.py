@@ -65,22 +65,19 @@ async def lifespan(app: FastAPI):
     reload_task = asyncio.create_task(skill_reload_loop(skills_dir))
 
     # Start MQ consumers (only when RabbitMQ is configured)
-    consumer_tasks: list[asyncio.Task] = []
     if settings.rabbitmq_url:
         # Phase 2: post-safety 改走 runtime durable consumer。旧
         # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
+        # Phase 5a: chat_request 也改走 runtime durable consumer（chat_node），
+        # 旧 chat_consumer / pipeline.stream_chat 已删。
         from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
-        from app.workers.chat_consumer import start_chat_consumer
         await start_consumers(app_name="agent-service")
         logger.info("Runtime durable consumers started for agent-service")
         await start_debounce_consumers(app_name="agent-service")
         logger.info("Runtime debounce consumers started for agent-service")
-
-        consumer_tasks.append(asyncio.create_task(start_chat_consumer()))
-        logger.info("Chat request consumer started")
 
     from app.runtime.http_source import register_http_sources
     register_http_sources(app)
@@ -105,15 +102,6 @@ async def lifespan(app: FastAPI):
         from app.runtime.durable import stop_consumers
         await stop_debounce_consumers()
         await stop_consumers()
-
-    # Shutdown legacy consumers (chat consumer)
-    for task in consumer_tasks:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception) as e:
-            if not isinstance(e, asyncio.CancelledError):
-                logger.warning("Consumer task ended with error: %s", e)
 
     # Cancel skill reload task
     reload_task.cancel()

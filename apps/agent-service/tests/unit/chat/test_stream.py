@@ -1,19 +1,16 @@
-"""Tests for app.chat.pipeline — stream_chat, _buffer_until_pre, stream handling.
+"""Tests for app.chat.stream — StreamState + handle_token.
 
 Covers:
   - Stream state tracking (token counting, content accumulation)
   - Content filter and length truncation signals
   - Tool call boundary split marker injection
-  - Buffer-until-pre race logic (pass, block, exception, stream-ends-first)
+
+Originally in test_pipeline.py; relocated when pipeline.py was deleted
+in Phase 5a Task 12.
 """
 
-import asyncio
-from collections.abc import AsyncGenerator
 from unittest.mock import MagicMock
 
-import pytest
-
-from app.chat.pipeline import _buffer_until_pre
 from app.chat.stream import (
     SPLIT_MARKER,
     StreamState,
@@ -21,7 +18,7 @@ from app.chat.stream import (
     is_content_filter,
     is_length_truncated,
 )
-from app.domain.safety import PreSafetyVerdict
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,35 +47,6 @@ def _make_tool_message():
     msg = MagicMock(spec=ToolMessage)
     msg.__class__ = ToolMessage
     return msg
-
-
-async def _fake_stream(*tokens: str) -> AsyncGenerator[str, None]:
-    for t in tokens:
-        yield t
-
-
-async def _delayed_stream(
-    *tokens: str, delay: float = 0.05
-) -> AsyncGenerator[str, None]:
-    for t in tokens:
-        await asyncio.sleep(delay)
-        yield t
-
-
-def _make_pre_task(
-    is_blocked: bool, block_reason: str = "", delay: float = 0
-) -> asyncio.Task:
-    async def _pre():
-        if delay:
-            await asyncio.sleep(delay)
-        return PreSafetyVerdict(
-            pre_request_id="test-pr",
-            message_id="test-msg",
-            is_blocked=is_blocked,
-            block_reason=block_reason or None,
-        )
-
-    return asyncio.create_task(_pre())
 
 
 # ---------------------------------------------------------------------------
@@ -175,102 +143,3 @@ class TestStreamState:
         assert state.agent_token_count == 0
         assert state.tool_call_count == 0
         assert state._has_text_in_current_turn is False
-
-
-# ---------------------------------------------------------------------------
-# _buffer_until_pre race tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_pre_passes_flush_buffer():
-    stream = _delayed_stream("a", "b", "c", delay=0.02)
-    pre_task = _make_pre_task(is_blocked=False, delay=0.05)
-
-    result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-1"):
-        result.append(text)
-
-    assert result == ["a", "b", "c"]
-
-
-@pytest.mark.asyncio
-async def test_pre_blocks_yield_guard():
-    stream = _delayed_stream("a", "b", "c", delay=0.02)
-    pre_task = _make_pre_task(is_blocked=True, block_reason="nsfw", delay=0.05)
-
-    result = []
-    async for text in _buffer_until_pre(
-        stream, pre_task, "msg-2", guard_message="blocked!"
-    ):
-        result.append(text)
-
-    assert result == ["blocked!"]
-
-
-@pytest.mark.asyncio
-async def test_pre_passes_immediately():
-    stream = _delayed_stream("x", "y", delay=0.05)
-    pre_task = _make_pre_task(is_blocked=False, delay=0)
-
-    result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-3"):
-        result.append(text)
-
-    assert result == ["x", "y"]
-
-
-@pytest.mark.asyncio
-async def test_stream_ends_before_pre_passes():
-    stream = _fake_stream("hello")
-    pre_task = _make_pre_task(is_blocked=False, delay=0.1)
-
-    result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-4"):
-        result.append(text)
-
-    assert result == ["hello"]
-
-
-@pytest.mark.asyncio
-async def test_stream_ends_before_pre_blocks():
-    stream = _fake_stream("hello")
-    pre_task = _make_pre_task(is_blocked=True, block_reason="harmful", delay=0.1)
-
-    result = []
-    async for text in _buffer_until_pre(
-        stream, pre_task, "msg-5", guard_message="nope"
-    ):
-        result.append(text)
-
-    assert result == ["nope"]
-
-
-@pytest.mark.asyncio
-async def test_empty_stream_pre_passes():
-    stream = _fake_stream()
-    pre_task = _make_pre_task(is_blocked=False, delay=0.01)
-
-    result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-6"):
-        result.append(text)
-
-    assert result == []
-
-
-@pytest.mark.asyncio
-async def test_pre_exception_flush_buffer():
-    """Pre task exception -> flush buffer (don't crash)."""
-    stream = _fake_stream("a", "b")
-
-    async def _failing_pre():
-        await asyncio.sleep(0.1)
-        raise ValueError("pre failed")
-
-    pre_task = asyncio.create_task(_failing_pre())
-
-    result = []
-    async for text in _buffer_until_pre(stream, pre_task, "msg-7"):
-        result.append(text)
-
-    assert result == ["a", "b"]
