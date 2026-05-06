@@ -80,3 +80,105 @@ async def test_route_chat_node_runs_router_when_not_completed(monkeypatch):
 
     t = ChatTrigger(message_id="m1", session_id="s1")
     await chat_node_mod.route_chat_node(t)  # 不抛异常即可
+
+
+@pytest.mark.asyncio
+async def test_route_chat_node_single_persona_passes_session_id(monkeypatch):
+    from app.domain.chat_dataflow import ChatRequest
+    from app.nodes import chat_node as chat_node_mod
+
+    async def fake_completed(*a, **k):
+        return False
+
+    class _Router:
+        async def route(self, **kw):
+            return ["p1"]
+
+    emitted: list[ChatRequest] = []
+
+    async def fake_emit(data):
+        emitted.append(data)
+
+    monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
+    monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
+    monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
+    monkeypatch.setattr(chat_node_mod, "get_session", _fake_get_session_factory())
+
+    t = ChatTrigger(
+        message_id="m1",
+        session_id="s1",
+        chat_id="c1",
+        bot_name="bot-x",
+        lane="dev",
+        is_p2p=True,
+    )
+    await chat_node_mod.route_chat_node(t)
+
+    assert len(emitted) == 1
+    r = emitted[0]
+    assert r.message_id == "m1"
+    assert r.persona_id == "p1"
+    assert r.session_id == "s1"  # 第 1 个 persona 透传
+    assert r.chat_id == "c1"
+    assert r.lane == "dev"
+    assert r.bot_name == "bot-x"
+    assert r.is_p2p is True
+
+
+@pytest.mark.asyncio
+async def test_route_chat_node_multi_persona_regenerates_session_id(monkeypatch):
+    from app.domain.chat_dataflow import ChatRequest
+    from app.nodes import chat_node as chat_node_mod
+
+    async def fake_completed(*a, **k):
+        return False
+
+    class _Router:
+        async def route(self, **kw):
+            return ["p1", "p2", "p3"]
+
+    emitted: list[ChatRequest] = []
+
+    async def fake_emit(data):
+        emitted.append(data)
+
+    monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
+    monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
+    monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
+    monkeypatch.setattr(chat_node_mod, "get_session", _fake_get_session_factory())
+
+    t = ChatTrigger(message_id="m1", session_id="s1")
+    await chat_node_mod.route_chat_node(t)
+
+    assert len(emitted) == 3
+    assert emitted[0].session_id == "s1"
+    # 第 2/3 个 persona 重生成 uuid，且互不相等
+    assert emitted[1].session_id != "s1"
+    assert emitted[2].session_id != "s1"
+    assert emitted[1].session_id != emitted[2].session_id
+
+
+@pytest.mark.asyncio
+async def test_route_chat_node_empty_persona_list_no_emit(monkeypatch):
+    from app.nodes import chat_node as chat_node_mod
+
+    async def fake_completed(*a, **k):
+        return False
+
+    class _Router:
+        async def route(self, **kw):
+            return []
+
+    emitted = []
+
+    async def fake_emit(d):
+        emitted.append(d)
+
+    monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
+    monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
+    monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
+    monkeypatch.setattr(chat_node_mod, "get_session", _fake_get_session_factory())
+
+    t = ChatTrigger(message_id="m1", session_id="s1")
+    await chat_node_mod.route_chat_node(t)
+    assert emitted == []
