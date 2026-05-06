@@ -137,3 +137,44 @@ async def test_chat_node_emits_not_found_when_no_message(monkeypatch, base_reque
     assert seg.message_id == "m1"
     assert seg.persona_id == "p1"
     assert seg.lane == "dev"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_resolves_bot_name_and_updates_agent_response(monkeypatch, base_request):
+    from app.nodes import chat_node as cn
+
+    async def fake_find_message(s, mid): return "hi"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(persona): return "guard"
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+    async def fake_build_and_stream(*a, **k):
+        if False:
+            yield ""
+
+    resolved_calls = []
+    set_calls = []
+    async def fake_resolve(s, persona_id, chat_id):
+        resolved_calls.append((persona_id, chat_id))
+        return "resolved-bot-x"
+    async def fake_set(s, session_id, bot_name, persona_id):
+        set_calls.append((session_id, bot_name, persona_id))
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_message)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_build_and_stream, raising=False)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    assert resolved_calls == [("p1", "c1")]
+    assert set_calls == [("s1", "resolved-bot-x", "p1")]

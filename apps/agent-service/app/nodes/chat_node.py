@@ -25,6 +25,8 @@ from app.data.queries import (
     find_gray_config,
     find_message_content,
     is_chat_request_completed,
+    resolve_bot_name_for_persona,
+    set_agent_response_bot,
 )
 from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
@@ -141,5 +143,35 @@ async def chat_node(req: ChatRequest) -> None:
         pre_task.cancel()
         return
 
-    # 后续 task 加 bot resolve / 主循环 / final
-    _ = (parsed, gray_config, guard_message)
+    # 3. resolve response_bot_name + 更新 agent_responses 行
+    async with get_session() as s:
+        response_bot_name = await resolve_bot_name_for_persona(
+            s, req.persona_id, req.chat_id or "",
+        )
+    if not response_bot_name:
+        response_bot_name = req.bot_name or ""
+    if req.session_id:
+        try:
+            async with get_session() as s:
+                await set_agent_response_bot(
+                    s, req.session_id, response_bot_name, req.persona_id,
+                )
+        except Exception as e:
+            logger.warning("Failed to update agent_response: %s", e)
+
+    # 4. base_payload (segments 共用字段)
+    base_payload = dict(
+        message_id=req.message_id,
+        persona_id=req.persona_id,
+        session_id=req.session_id,
+        chat_id=req.chat_id,
+        is_p2p=req.is_p2p,
+        root_id=req.root_id,
+        user_id=req.user_id,
+        is_proactive=req.is_proactive,
+        bot_name=response_bot_name,
+        lane=req.lane,  # CRITICAL: sink 不会自动注入 header lane
+    )
+
+    # 后续 task 加 主循环 / final
+    _ = (parsed, gray_config, guard_message, base_payload)
