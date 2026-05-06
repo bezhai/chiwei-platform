@@ -1,8 +1,15 @@
 # Dataflow Phase 5 — Chat 主 Pipeline 进 Graph
 
-**状态**: Draft v3 (2026-05-06，吸收 reviewer 第 2 轮 5 条意见)
+**状态**: Draft v4 (2026-05-06，吸收 reviewer 第 3 轮 4 条意见)
 **前置**: PR #207 (Phase 4 life-engine / glimpse) shipped to prod 1.0.0.322
 **后续**: Phase 6 清扫（旧 worker 入口、旧 ORM god object、bridge 残留 grep = 0）
+
+**v4 关键变化（vs v3）**：
+- §3.2 ChatTrigger 加 `message_id: Annotated[str | None, Key] = None`：`runtime/data.py:54-56` 强制每个 Data 子类至少一个 Key 字段，否则 import 时 raise；v3 ChatTrigger 缺 Key 直接编译炸。route_chat_node 入口校验 `t.message_id is None` 时 raise（让 lark-server 漏发 message_id 这种异常上 DLQ 而不是静默 fan-out 出空 ChatRequest）。修 reviewer P0 #1
+- §3.2 ChatResponseSegment 加 `lane: str | None = None` 字段：`sink_dispatch.py:27` `Sink.mq` 只 `data.model_dump()` + `mq.publish(route, body)`，**不会自动把 header `lane` 塞进 body**；chat-response-worker 现行从 `payload.lane` 读取，body 漏 lane 会让 chat-response-worker 收到 None / lane-suffix 路由错。chat_node 构造 base_payload 时显式从 `lane_var.get()` 或 `req` 上下文读取 lane 写入。修 reviewer P0 #2
+- 全文 "DLQ 可重放" 措辞精确化为 "DLQ 可观测、可人工排查；直接 replay 默认可能 no-op（durable consumer 先 `insert_idempotent` 后跑 handler，replay 时 dedup 行已存在 → handler 不再被调用）。若要重放需要配套清理对应 `data_chat_request` dedup 行，或另行设计失败状态/重放机制"。这部分**不在本期范围**，但写清楚避免运维误判。修 reviewer P1 #3
+- §3.3 redelivered 自查显式带 `is_proactive` 参数：helper 实际签名 `is_chat_request_completed(session, session_id, *, is_proactive=False)`（`queries.py:297-302`）；proactive 场景查的是 `conversation_messages` 表，非 proactive 查 `agent_responses`。v3 调用样例漏了 `is_proactive` 关键字参数，proactive 触发的 chat 重投会走错分支。修 reviewer P2 #4
+- §5.1 测试描述里 "已发出 N 段后 BLOCK" 删除：v3 设计下每段边界都 `await pre_task`，verdict 到达前一段都不会发出，所以 "已发出 N 段后 BLOCK" 不可能发生。改为只保留 "verdict 在第一个段边界到达时为 BLOCK → 只 emit 一段 guard"（与 §4.2 不变量第 3 条对齐）。修 reviewer P2 #4 测试部分
 
 **v3 关键变化（vs v2）**：
 - §3.1 / §3.2 / §3.4 ChatTrigger 自身不参与 dedup：runtime mq source loop（`engine.py:481-499`）直接 `req_cls(**body)` 调 target node，**没有 insert_idempotent 调用**；idempotent 只在 durable consumer handler（`durable.py:120`）里。所以 v2 写的"data_chat_trigger 表 dedup trigger 重投"是空话——表会被建但没人写。修法：ChatTrigger 改 `transient=True`、wire 不带 `.durable()`；mq 重投改善的描述精确到"ChatRequest 这一层（route → chat 是 in-graph durable 投递走 round-trip mq + insert_idempotent）"。trigger 重投会让 route_chat_node 跑两次（重复 DB 查询 + 重复 emit ChatRequest），下游 ChatRequest dedup 拦下，用户视角无差异。修 reviewer P0 #1
@@ -152,7 +159,7 @@ lark-server
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `message_id` | `str \| None = None` | 消息 id |
+| `message_id` | `Annotated[str \| None, Key] = None` | 消息 id；**runtime 要求至少一个 Key 字段**（`data.py:54-56`），ChatTrigger transient=True 仍受此约束。route_chat_node 入口校验 None 时 raise，避免静默 fan-out 出空 ChatRequest |
 | `session_id` | `str \| None = None` | lark-server 发起时的 session id |
 | `chat_id` | `str \| None = None` | 会话 id |
 | `is_p2p` | `bool = False` | 私聊 / 群聊（chat_consumer 默认 False） |
@@ -167,7 +174,7 @@ lark-server
 `Meta.transient = True`：runtime mq source loop（`engine.py:481-499`）直接 `req_cls(**body)` 调 target node，**没有 insert_idempotent 调用** —— 给 ChatTrigger 建表也没人写，因此干脆不建。dedup 在下游 ChatRequest 那一层（route → chat 是 in-graph durable 投递）。
 
 **source 入口的"重投不重处理"由两层兜底**:
-1. **应用层 redelivered 自查（route_chat_node 第一步）**：调用 `is_chat_request_completed(session, session_id)` helper（`data/queries.py:316`），检查 `agent_responses` 表 status ∈ ("completed", "recalled") 时直接 return。这是 chat_consumer.py:79-95 的现行行为，搬到 route_chat_node。
+1. **应用层 redelivered 自查（route_chat_node 第一步）**：调用 `is_chat_request_completed(session, session_id, is_proactive=...)` helper（`data/queries.py:297-302`，根据 is_proactive 走不同分支：proactive 查 `conversation_messages` 表 assistant 行，非 proactive 查 `agent_responses.status` ∈ ("completed", "recalled")）。是则直接 return。这是 chat_consumer.py:79-95 的现行行为，搬到 route_chat_node。
 2. **下游 ChatRequest dedup**：route_chat_node fan-out 出来的 ChatRequest 走 in-graph durable 投递，`(message_id, persona_id)` 联合 Key 在 `data_chat_request` 表上 idempotent insert 拦下重投。
 
 trigger 重投的代价：route_chat_node 跑两次，重复一次 DB 查询 + MessageRouter.route + fan-out emit。下游 chat_node 不会被重复触发（被 ChatRequest dedup 拦下）。性能浪费但用户视角无差异。
@@ -187,6 +194,7 @@ trigger 重投的代价：route_chat_node 跑两次，重复一次 DB 查询 + M
 | `user_id` | `str \| None = None` | 透传 |
 | `is_proactive` | `bool = False` | 透传 |
 | `bot_name` | `str \| None = None` | trigger 上的 bot_name；chat_node 内部还会再 resolve 出 response_bot_name 用于回复 |
+| `lane` | `str \| None = None` | 从 ChatTrigger 透传；chat_node 构造 ChatResponseSegment 时写回 segment 的 lane 字段 |
 | `enqueued_at` | `int \| None = None` | 透传，用于 chat_node 内部计算 queue wait 指标 |
 
 `Meta.transient = False`（**v1 的关键修正**）：runtime 在 compile 时验证 `.durable()` 边要求 Data 有持久化表（`graph.py:276`）；boot 时 migrator 自动 `CREATE TABLE data_chat_request (message_id, persona_id, ...)`；durable consumer handler `insert_idempotent(obj)`（`durable.py:120`）拦下 `(message_id, persona_id)` 重投——**这天然解决 mq 重投会重跑 LLM 的隐患**（v1 列入 Followup 的问题在 v2/v3 里 free 拿到了改善）。这里的 dedup 是真实的，因为 ChatRequest 走的是 in-graph durable 投递，会经过 durable consumer handler。
@@ -205,6 +213,7 @@ trigger 重投的代价：route_chat_node 跑两次，重复一次 DB 查询 + M
 | `is_p2p` | `bool = False` | 透传 |
 | `root_id` | `str \| None = None` | 透传 |
 | `user_id` | `str \| None = None` | 透传 |
+| `lane` | `str \| None = None` | 显式带在 body —— `Sink.mq` 不会自动注入 header lane（`sink_dispatch.py:27` 只 `model_dump`），chat-response-worker 现行读 `payload.lane`。chat_node 构造段时从 `lane_var.get()` 或 ChatRequest 上下文读取写入 |
 | `is_proactive` | `bool = False` | 透传 |
 | `bot_name` | `str \| None = None` | resolve 后的 response_bot_name（chat_node 内部 resolve 失败时 fallback 到 trigger.bot_name，可能 None） |
 | `content` | `str = ""` | 段文本（中间段是 split 出的一段，final 段是剩余尾巴或拼接结果） |
@@ -230,7 +239,8 @@ async def route_chat_node(t: ChatTrigger) -> None:
 
 **职责**（照搬 `chat_consumer.py:78-148`）:
 
-1. **redelivered 短路**：调用项目已有 helper `is_chat_request_completed(session, session_id)`（`apps/agent-service/app/data/queries.py:316`）—— 该 helper 检查 `agent_responses.status` ∈ `("completed", "recalled")` 时返回 True；True 时 route_chat_node 直接 return，不再 fan-out。**spec 不要硬编码 status 字符串**，即使现行集合改了也只跟着 helper 走。这是源 chat_consumer.py:79-95 行为的精确搬运
+0. **入口校验**（v4 加）：`if t.message_id is None: raise ValueError("ChatTrigger.message_id missing")`—— ChatTrigger.message_id 是可选字段（lark-server 偶尔字段缺失时也能反序列化进来）但 fan-out 必须有 message_id，缺失时上 DLQ 比静默 fan-out 出空 ChatRequest 安全。等价于 `chat_consumer.handle_chat_request` 当前 message_id 为空时早返回的语义
+1. **redelivered 短路**：调用项目已有 helper `is_chat_request_completed(session, t.session_id, is_proactive=t.is_proactive)`（`apps/agent-service/app/data/queries.py:297-302`）—— 该 helper 内部根据 is_proactive 走不同分支：proactive 查 `conversation_messages` 表里 assistant 角色行；非 proactive 查 `agent_responses.status` ∈ `("completed", "recalled")`。True 时 route_chat_node 直接 return，不再 fan-out。**spec 不要硬编码 status 字符串**，跟着 helper 走
 2. **MessageRouter.route**：决定回应的 persona id 列表
 3. **fan-out emit ChatRequest**：
    ```python
@@ -244,7 +254,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
            session_id=session_id_for_persona,
            chat_id=t.chat_id, is_p2p=t.is_p2p, root_id=t.root_id,
            user_id=t.user_id, is_proactive=t.is_proactive,
-           bot_name=t.bot_name, enqueued_at=t.enqueued_at,
+           bot_name=t.bot_name, lane=t.lane, enqueued_at=t.enqueued_at,
        ))
    ```
 4. **错误处理**：函数体不包 try/except；router 失败 raise 进 DLQ。fan-out 内 emit 失败 raise（不模仿 Phase 4 fan-out 内的 try-log，因为这里失败 = 用户没回复，必须可观察）
@@ -269,7 +279,7 @@ async def chat_node(req: ChatRequest) -> None:
    - 解析 effective_persona + `guard_message = await fetch_guard_message(effective_persona)`
    - 启动 pre-safety task：`pre_task = asyncio.create_task(pre_safety_gate.run_pre_safety_via_graph(message_id=..., content=parsed.render(), persona_id=...))`
 2. **resolve response_bot_name + 更新 agent_responses 行**（照搬 `chat_consumer.py:155-174`）
-3. **构造 base segment payload**（照搬 `chat_consumer.py:176-186`）—— content / status / part_index / is_last 之外的字段
+3. **构造 base segment payload**（照搬 `chat_consumer.py:176-186`）—— content / status / part_index / is_last / full_content / published_at 之外的字段。**必须显式包含 `lane=req.lane`**（v4：`Sink.mq` 不会自动注入 header lane，body 漏 lane 会让 chat-response-worker 路由错）
 4. **跑 agent stream + 切段 emit**（**v3 在 v2 上加 blocked 路径**）：
    ```python
    sent_length = 0
@@ -328,7 +338,7 @@ async def chat_node(req: ChatRequest) -> None:
    - verdict=BLOCK：返回 `(blocked=True, content=guard_message)`，由调用方决定如何 emit（中段 / final 段都走 blocked 终止路径）
    - verdict=ALLOW：返回 `(blocked=False, content=part)`
    - 是命名 tuple 或小 dataclass，和 v2 把 guard 替换吞进去的 `_maybe_replace_with_guard` 不同——blocked 状态需要返回出来让调用方走终止路径
-6. **错误兜底**：函数体不包 try/except——失败 raise 由 durable consumer requeue=False → DLQ。对比现状（chat_consumer.py 用 `gather(return_exceptions=True)` 把单 persona 异常吞掉只 log），新方案下进 DLQ 是**可观察性改善**：DLQ 消息可重放、可监控告警。
+6. **错误兜底**：函数体不包 try/except——失败 raise 由 durable consumer requeue=False → DLQ。对比现状（chat_consumer.py 用 `gather(return_exceptions=True)` 把单 persona 异常吞掉只 log），新方案下进 DLQ 是**可观察性改善**：DLQ 消息可观测、可人工排查、可监控告警。**注意 replay 限制**：durable consumer 是先 `insert_idempotent` 后跑 handler，直接 replay 同一条 DLQ 消息会被 dedup 拦下成 no-op。要重放需要先清理对应 `data_chat_request` dedup 行，或另行设计失败状态机/重放工具——本期不做，但运维需要知道这个事实。
 
 **关键点解读**:
 - `_build_and_stream` 已经在内部消费 `agent.stream()` + 调用 `handle_token()`，对外 yield str。chat_node 不再 import / 调用 `handle_token` —— 它消费的是已经过 `handle_token` 处理后的纯文本流（与现 `chat_consumer.py:204-240` 完全一致）
@@ -426,14 +436,15 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 | `chat_node` 内部 raise | durable consumer requeue=False → DLQ。该 persona 的回复丢失，**其他 persona 的 chat_node 不受影响**（每个 persona 独立 ChatRequest 实例 / 独立 durable handler 跑） |
 | mq 重投 ChatTrigger（source.mq 入口） | source loop 无 insert_idempotent → route_chat_node 跑两次。下游 ChatRequest（in-graph durable）的 idempotent 拦下 chat_node 的二次触发。**用户视角无重复段**，但 route_chat_node 浪费一次 DB 查询 + router 调用 |
 | mq 重投 ChatRequest（in-graph durable） | durable consumer handler 调 `insert_idempotent`（`durable.py:120`）；第二次 insert 返 0 → chat_node 不被调用。**重投不重跑 LLM、不重发段**——这是 v3 真正的改善层 |
-| 应用层 redelivered（agent_responses status ∈ ("completed", "recalled")） | route_chat_node 调 `is_chat_request_completed()` helper 判断，True 时直接 return，连 ChatRequest 都不 emit。这是 chat_consumer.py:79-95 现行行为的搬运 |
+| 应用层 redelivered（is_chat_request_completed helper 返 True） | route_chat_node 第 1 步用 `is_chat_request_completed(s, t.session_id, is_proactive=t.is_proactive)` 判断（proactive / 非 proactive 走不同分支），True 时直接 return，连 ChatRequest 都不 emit。这是 chat_consumer.py:79-95 现行行为的搬运 |
 | `Sink.mq("chat_response")` publish 失败 | 直接抛（runtime 不 retry）→ chat_node raise → DLQ |
 | pre-safety timeout / emit 异常 / 外层 cancel | 沿用 `pre_safety_gate.run_pre_safety_via_graph` 已有的 fail-open（Phase 2 已 ship） |
 | LLM 调用失败 | `_build_and_stream` 内现有兜底，不动 |
 
 **5a 相对现状的差异**（值得显式说明）:
 
-- **改善**：现 chat_consumer.py 的 multi-persona 路径 `gather(return_exceptions=True)`（line 142-147）把单 persona 的 exception 吞掉只 log；agent_responses 行可能停在 `processing` 状态，mq message 仍 ack。新方案下 chat_node raise → DLQ，**消息不丢失但人能看见**：DLQ 监控告警 + 可重放
+- **改善**：现 chat_consumer.py 的 multi-persona 路径 `gather(return_exceptions=True)`（line 142-147）把单 persona 的 exception 吞掉只 log；agent_responses 行可能停在 `processing` 状态，mq message 仍 ack。新方案下 chat_node raise → DLQ，**消息不丢失但人能看见**：DLQ 监控告警 + 可人工排查
+  - 关于"重放"：durable consumer 是先 `insert_idempotent` 后跑 handler，DLQ replay 同一条 ChatRequest 会被 dedup 拦下成 no-op。要重放需要先清理对应 `data_chat_request` dedup 行，或另行设计失败状态/重放机制。本期不做，写明白避免运维误判
 - **改善**：mq 重投不再重跑 LLM —— ChatRequest（in-graph durable）层的 `insert_idempotent` 拦下重投。trigger 重投会让 route_chat_node 跑两次但下游 chat_node 不会重复触发。v1 列入 Followup 的问题在 v2/v3 里 free 拿到了
 - **持平**：单次 LLM 失败 → 用户感知"赤尾没回我"，与现状一致
 - **可能退化**：现状 `gather(return_exceptions=True)` 让 message ack 了，新方案 raise → DLQ；如果 DLQ 没人监控，长期堆积可能成"看不见的失败"。**plan 阶段必须确认 DLQ 监控告警已就位**（Phase 3/4 已经在做 DLQ 告警，Phase 5 沿用即可）
@@ -455,10 +466,12 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 
 - 单 persona：fake MessageRouter 返 1 个 persona → emit 1 个 ChatRequest（session_id 透传）
 - 多 persona：fake MessageRouter 返 3 个 persona → emit 3 个 ChatRequest，第 1 个 session_id 透传，第 2/3 个 session_id 是 uuid（不等于 trigger.session_id）
-- redelivered 短路：fake `is_chat_request_completed()` helper 返 True → 直接 return，不 emit。**用 helper monkeypatch，不硬编码 status 字符串**（v3 修 reviewer P2 #5）
+- redelivered 短路：fake `is_chat_request_completed()` helper 返 True → 直接 return，不 emit。**断言 helper 被调时带了 `is_proactive=t.is_proactive` 关键字参数**（v4 修 reviewer P2 #4）
+- proactive 场景的 redelivered：构造 `is_proactive=True` 的 ChatTrigger，verify helper 走 conversation_messages 分支
 - 空 persona：fake MessageRouter 返 [] → 直接 return，不 emit
 - router 异常 raise → 不被 try/except 吞（让 durable consumer 进 DLQ）
 - ChatTrigger 字段宽松：trigger 不带 `is_proactive` / `user_id` / `bot_name` 时（chat_consumer.py:59 的 `.get(default)` 场景）route_chat_node 仍能正常工作，使用默认值（v3 修 reviewer P0 #2）
+- **message_id 缺失（v4 加）**：trigger.message_id is None → route_chat_node raise（不要静默 fan-out 出空 ChatRequest），让 durable consumer 进 DLQ
 
 **位置**: `apps/agent-service/tests/nodes/test_chat_node.py`（新建）
 
@@ -468,12 +481,11 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
   - fake `find_gray_config` 返 None → 当成空 dict 不报错
   - fake `fetch_guard_message` 返某 guard 字符串 → 后续 blocked 测试断言用此字符串
 - 普通分段：3 段 str + 2 个 SPLIT_MARKER → 3 个 `ChatResponseSegment`，part_index=0/1/2，最后 `is_last=True` + `full_content=拼接结果`
-- **pre-safety 拦截（v3 加强，修 reviewer P1 #4）**：fake pre_task 返回 BLOCK：
-  - 在 stream 中段（已发出 N 段非 final）触发 BLOCK：emit **1 段** guard + is_last=True + full_content=guard，**不再消费剩余 stream，不再 emit 后续段**
-  - 在 stream 开始前 BLOCK：第一段 segment.content=guard，is_last=True
-  - 在 final 段触发 BLOCK：emit 1 段 guard + is_last=True
-  - **断言**：每个 BLOCK 场景下最后一段 content 必须等于 guard_message，且没有后续 emit
-- 段字段完整性：断言每段都带 `session_id` / `message_id` / `chat_id` / `persona_id` / `bot_name` / `is_p2p` / `root_id` / `user_id` / `is_proactive` / `published_at` / `status="success"`
+- **pre-safety 拦截（v4 修正，修 reviewer 测试不一致）**：每段边界 `await pre_task` 决定本段是否 emit；verdict 在 verdict 到达前没有任何段被 emit（与 §4.2 不变量第 3 条对齐）。fake pre_task 返回 BLOCK：
+  - verdict 在第一个段边界到达时为 BLOCK：emit **1 段** guard + is_last=True + full_content=guard，**不再消费剩余 stream**，**没有任何"已发出的正文段"**
+  - verdict 在 final 段到达时为 BLOCK（stream 已结束但 verdict 才返回）：emit 1 段 guard + is_last=True
+  - **断言**：每个 BLOCK 场景下飞书侧仅看到 1 段消息，content=guard_message
+- 段字段完整性：断言每段都带 `session_id` / `message_id` / `chat_id` / `persona_id` / `bot_name` / `is_p2p` / `root_id` / `user_id` / `is_proactive` / `published_at` / `status="success"` / **`lane`（v4 加，verify Sink.mq 不会在 publish 前丢失）**
 - chat_node 内部 raise（fake `_build_and_stream` 抛异常）→ chat_node raise（不被 try/except 吞）
 - agent_responses 行更新：fake DB session 断言 `update_agent_response` 被调用一次，参数包含 resolved bot_name + persona_id
 
