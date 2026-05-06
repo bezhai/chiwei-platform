@@ -45,7 +45,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
             s, t.session_id, is_proactive=t.is_proactive
         )
     if already_done:
-        logger.info(
+        logger.warning(
             "skip redelivered chat_request: session_id=%s, message_id=%s",
             t.session_id,
             t.message_id,
