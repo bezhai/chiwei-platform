@@ -157,7 +157,9 @@ async def build_chat_context(
         )
 
     chain_user_ids = list(
-        {r.user_id for r in l1_results if r.role != "assistant" and r.user_id}
+        dict.fromkeys(
+            r.user_id for r in l1_results if r.role != "assistant" and r.user_id
+        )
     )
 
     return ChatContext(
