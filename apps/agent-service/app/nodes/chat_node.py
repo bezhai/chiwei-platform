@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
@@ -26,7 +27,7 @@ from app.data.queries import (
     is_chat_request_completed,
 )
 from app.data.session import get_session
-from app.domain.chat_dataflow import ChatRequest, ChatTrigger
+from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.runtime import node
 from app.runtime.emit import emit
 
@@ -117,5 +118,28 @@ async def chat_node(req: ChatRequest) -> None:
         )
     )
 
-    # 后续 task 加 fetch-empty 早返回 / bot resolve / 主循环 / final
-    _ = (parsed, gray_config, guard_message, pre_task)
+    # 2. fetch 为空 -> emit 1 段 "未找到" + return
+    if not raw_content:
+        await emit(ChatResponseSegment(
+            message_id=req.message_id,
+            persona_id=req.persona_id,
+            part_index=0,
+            session_id=req.session_id,
+            chat_id=req.chat_id,
+            is_p2p=req.is_p2p,
+            root_id=req.root_id,
+            user_id=req.user_id,
+            is_proactive=req.is_proactive,
+            bot_name=req.bot_name,
+            lane=req.lane,
+            content="抱歉，未找到相关消息记录",
+            status="success",
+            is_last=True,
+            full_content=None,
+            published_at=int(time.time() * 1000),
+        ))
+        pre_task.cancel()
+        return
+
+    # 后续 task 加 bot resolve / 主循环 / final
+    _ = (parsed, gray_config, guard_message)

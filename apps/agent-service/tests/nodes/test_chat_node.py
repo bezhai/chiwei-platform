@@ -104,3 +104,36 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
     assert "run_pre_safety_via_graph" in names
     assert names.index("find_message_content") < names.index("parse_content")
     assert names.index("parse_content") < names.index("run_pre_safety_via_graph")
+
+
+@pytest.mark.asyncio
+async def test_chat_node_emits_not_found_when_no_message(monkeypatch, base_request):
+    from app.domain.chat_dataflow import ChatResponseSegment
+    from app.nodes import chat_node as cn
+
+    async def fake_find_message(s, mid): return None
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(persona): return "guard"
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_message)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted: list[ChatResponseSegment] = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    assert len(emitted) == 1
+    seg = emitted[0]
+    assert "未找到相关消息记录" in seg.content
+    assert seg.is_last is True
+    assert seg.message_id == "m1"
+    assert seg.persona_id == "p1"
+    assert seg.lane == "dev"
