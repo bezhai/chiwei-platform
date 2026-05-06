@@ -2,7 +2,8 @@
 
 Phase 2 §3.4：chat pipeline 通过这个 module 把 pre-check 控制面接进 graph。
 ``run_pre_safety_via_graph`` 是给 chat pipeline 调的统一入口；返回 verdict
-是 ``PreSafetyVerdict``，跟 ``_buffer_until_pre`` 的 race 模型对齐。
+是 ``PreSafetyVerdict``，跟 chat_node 段边界 ``_resolve_pre_safety_for_part``
+的 fail-open 模型对齐。
 
 实现要点：
 1. ``emit()`` in-process 是同步 await 整链路（节点 -> 装饰器自动 emit verdict

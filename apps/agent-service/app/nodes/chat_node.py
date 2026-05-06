@@ -1,12 +1,10 @@
-"""Phase 5a chat 主 pipeline 节点（占位骨架）。
+"""Phase 5a chat 主 pipeline 节点。
 
   route_chat_node:  ChatTrigger -> N × emit(ChatRequest)
   chat_node:        ChatRequest -> N × emit(ChatResponseSegment)
 
-骨架阶段两个 @node 的 body 都是 ``raise NotImplementedError``；
-真正的逻辑（消息校验 / fan-out / prep / 主流 / pre-safety 短路 / final）
-由 Phase 5a Task 4-11 逐步填入。占位的目的是让 wiring/chat.py + compile_graph
-先建立可验证的拓扑骨架。
+替代了原 ``app.workers.chat_consumer`` + ``app.chat.pipeline.stream_chat``
+路径，由 dataflow runtime 直接驱动 chat_request 队列。
 """
 from __future__ import annotations
 
@@ -18,8 +16,9 @@ from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
 # 用 monkeypatch.setattr(chat_node_mod, ...) 替换，节点内直接复用同名引用。
+from app.api.middleware import CHAT_FIRST_TOKEN, CHAT_PIPELINE_DURATION
+from app.chat.agent_stream import _build_and_stream
 from app.chat.content_parser import parse_content
-from app.chat.pipeline import _build_and_stream  # 临时桥接, Task 12 搬入本文件
 from app.chat.post_actions import fetch_guard_message
 from app.chat.pre_safety_gate import run_pre_safety_via_graph
 from app.chat.router import MessageRouter
@@ -52,8 +51,8 @@ async def _resolve_pre_safety_for_part(
 ) -> _PreSafetyResult:
     """段边界等 verdict（已 done 即立刻返回，未 done 则带 timeout 等）。
 
-    fail-open（pre_task 抛 / timeout）-> ALLOW（与 _buffer_until_pre 现行
-    fail-open 行为一致）。
+    fail-open（pre_task 抛 / timeout）-> ALLOW（保持与 Phase 2 pre-safety
+    设计一致的 fail-open 语义）。
     """
     if not pre_task.done():
         try:
@@ -219,6 +218,13 @@ async def chat_node(req: ChatRequest) -> None:
     part_index = 0
     full_content = ""
 
+    # Observability — port of legacy chat_consumer:200-307 happy-path
+    # signals. Metrics fire only on the happy-path branch (final emit).
+    # BLOCK / fetch-empty paths skip metrics — no tokens to measure.
+    t_start = time.monotonic()
+    t_first_token: float | None = None
+    token_count = 0
+
     async def _emit_block_guard():
         await emit(ChatResponseSegment(
             **base_payload,
@@ -238,6 +244,9 @@ async def chat_node(req: ChatRequest) -> None:
     ):
         if not text:
             continue
+        if t_first_token is None:
+            t_first_token = time.monotonic()
+        token_count += 1
         full_content += text
         pending = full_content[sent_length:]
         while SPLIT_MARKER in pending and part_index < MAX_MESSAGES - 1:
@@ -263,6 +272,10 @@ async def chat_node(req: ChatRequest) -> None:
             sent_length += idx + len(SPLIT_MARKER)
             pending = full_content[sent_length:]
 
+    t_stream_end = time.monotonic()
+    if t_first_token is not None:
+        CHAT_FIRST_TOKEN.observe(t_first_token - t_start)
+
     # 6. final 段
     remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
     clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
@@ -284,3 +297,21 @@ async def chat_node(req: ChatRequest) -> None:
         full_content=clean_full,
         published_at=int(time.time() * 1000),
     ))
+
+    t_end = time.monotonic()
+    CHAT_PIPELINE_DURATION.labels(stage="total").observe(t_end - t_start)
+    logger.info(
+        "chat_request_done",
+        extra={
+            "event": "chat_request_done",
+            "session_id": req.session_id,
+            "persona_id": req.persona_id,
+            "stream_ms": round((t_stream_end - t_start) * 1000),
+            "ttft_ms": round((t_first_token - t_start) * 1000)
+            if t_first_token is not None
+            else 0,
+            "total_ms": round((t_end - t_start) * 1000),
+            "tokens": token_count,
+            "parts": part_index + 1,
+        },
+    )

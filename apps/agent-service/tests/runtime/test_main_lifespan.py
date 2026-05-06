@@ -39,7 +39,6 @@ async def test_lifespan_migrates_then_starts_sources():
          patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
          patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \
          patch("app.runtime.durable.stop_consumers", AsyncMock()), \
-         patch("app.workers.chat_consumer.start_chat_consumer", AsyncMock()), \
          patch("app.skills.registry.SkillRegistry.load_all"), \
          patch("app.skills.registry.skill_reload_loop", AsyncMock()), \
          patch("app.runtime.http_source.register_http_sources"), \
