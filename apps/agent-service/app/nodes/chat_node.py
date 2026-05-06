@@ -20,8 +20,19 @@ logger = logging.getLogger(__name__)
 
 @node
 async def route_chat_node(t: ChatTrigger) -> None:
-    """ChatTrigger -> ChatRequest fan-out (占位)。"""
-    raise NotImplementedError("route_chat_node body added in later tasks")
+    """ChatTrigger -> ChatRequest fan-out。
+
+    步骤：
+      0. 入口校验 message_id 非空（本 task）
+      1. redelivered 短路（Task 5）
+      2. MessageRouter.route 决定 persona 列表（Task 6）
+      3. fan-out emit ChatRequest（Task 6）
+    """
+    if t.message_id is None:
+        raise ValueError(
+            "ChatTrigger.message_id is None; cannot fan out ChatRequest"
+        )
+    # Task 5: redelivered short-circuit; Task 6: router + fan-out
 
 
 @node
