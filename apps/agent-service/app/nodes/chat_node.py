@@ -10,14 +10,21 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from uuid import uuid4
 
-# MessageRouter / emit imported at module level so route_chat_node 测试可
-# 用 monkeypatch.setattr(chat_node_mod, ...) 替换，router fan-out 直接复用
-# 同名引用。
+# MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
+# 用 monkeypatch.setattr(chat_node_mod, ...) 替换，节点内直接复用同名引用。
+from app.chat.content_parser import parse_content
+from app.chat.post_actions import fetch_guard_message
+from app.chat.pre_safety_gate import run_pre_safety_via_graph
 from app.chat.router import MessageRouter
-from app.data.queries import is_chat_request_completed
+from app.data.queries import (
+    find_gray_config,
+    find_message_content,
+    is_chat_request_completed,
+)
 from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatTrigger
 from app.runtime import node
@@ -84,5 +91,31 @@ async def route_chat_node(t: ChatTrigger) -> None:
 
 @node
 async def chat_node(req: ChatRequest) -> None:
-    """ChatRequest -> ChatResponseSegment generation (占位)。"""
-    raise NotImplementedError("chat_node body added in later tasks")
+    """ChatRequest -> N × ChatResponseSegment (per persona).
+
+    Phases (内部分块，不拆 node):
+      1. prep: fetch + parse + gray + guard + pre_task 启动 (this task)
+      2. fetch 为空 -> emit 1 段 "未找到" + return  (Task 8)
+      3. resolve response_bot_name + agent_responses 行更新  (Task 9)
+      4. base_payload 构造（含 lane）  (Task 9)
+      5. 主循环 + 中段 emit  (Task 10)
+      6. final 段 + pre-safety blocked 路径  (Task 11)
+    """
+    # 1. prep
+    async with get_session() as s:
+        raw_content = await find_message_content(s, req.message_id)
+    parsed = parse_content(raw_content) if raw_content else None
+    async with get_session() as s:
+        gray_config = (await find_gray_config(s, req.message_id)) or {}
+    effective_persona = req.persona_id or req.bot_name or ""
+    guard_message = await fetch_guard_message(effective_persona)
+    pre_task = asyncio.create_task(
+        run_pre_safety_via_graph(
+            message_id=req.message_id,
+            content=parsed.render() if parsed else "",
+            persona_id=effective_persona,
+        )
+    )
+
+    # 后续 task 加 fetch-empty 早返回 / bot resolve / 主循环 / final
+    _ = (parsed, gray_config, guard_message, pre_task)

@@ -1,0 +1,106 @@
+"""chat_node 单元测试（Task 7-11 累积）。"""
+import asyncio
+
+import pytest
+
+from app.domain.chat_dataflow import ChatRequest
+from tests.nodes.test_route_chat_node import _fake_get_session_factory
+
+
+@pytest.fixture
+def base_request():
+    return ChatRequest(
+        message_id="m1", persona_id="p1", session_id="s1",
+        chat_id="c1", is_p2p=True, user_id="u1", lane="dev",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request):
+    """prep 块按顺序调用 find_message_content / parse_content / find_gray_config /
+    fetch_guard_message / run_pre_safety_via_graph。
+
+    pre_task 调度细节：``asyncio.create_task(run_pre_safety_via_graph(...))``
+    评估表达式时立刻拿到 coroutine，但 fake_pre_safety body 真正执行需要 event
+    loop yield。chat_node 当前 prep 完后直接 return，因此测试在 await chat_node
+    后再 ``await asyncio.sleep(0)`` 让调度的 task 跑一次，记录调用，再清理 pending
+    task 抑制 ``Task was destroyed`` warning。
+    """
+    from app.nodes import chat_node as cn
+
+    calls = []
+
+    async def fake_find_message(s, mid):
+        calls.append(("find_message_content", mid))
+        return "hello world"
+
+    async def fake_find_gray(s, mid):
+        calls.append(("find_gray_config", mid))
+        return {"gray": "x"}
+
+    async def fake_guard(persona):
+        calls.append(("fetch_guard_message", persona))
+        return "guard say no"
+
+    async def fake_pre_safety(message_id, content, persona_id):
+        calls.append(("run_pre_safety_via_graph", message_id, persona_id))
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(
+            pre_request_id="x", message_id=message_id, is_blocked=False,
+        )
+
+    async def fake_build_and_stream(*a, **k):
+        if False:
+            yield ""
+
+    async def fake_resolve_bot(s, pid, cid):
+        return "resolved-bot"
+
+    async def fake_set_bot(s, sid, bn, pid):
+        pass
+
+    async def fake_emit(d):
+        pass
+
+    def parse_content_fn(s):
+        calls.append(("parse_content", s))
+
+        class _P:
+            def render(self):
+                return s
+
+        return _P()
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_message)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre_safety)
+    monkeypatch.setattr(cn, "parse_content", parse_content_fn)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+    # 下面 4 个 monkeypatch 是 forward-looking，Task 9-10 才会真实存在；
+    # raising=False 让 Task 7 阶段也能复用同一个测试 helper 集。
+    monkeypatch.setattr(
+        cn, "_build_and_stream", fake_build_and_stream, raising=False
+    )
+    monkeypatch.setattr(
+        cn, "resolve_bot_name_for_persona", fake_resolve_bot, raising=False
+    )
+    monkeypatch.setattr(
+        cn, "set_agent_response_bot", fake_set_bot, raising=False
+    )
+    monkeypatch.setattr(cn, "emit", fake_emit, raising=False)
+
+    await cn.chat_node(base_request)
+    # 让 pre_task (asyncio.create_task) 被调度运行一次，记录 fake_pre_safety
+    # 的同步调用记录；同时清理 pending task 抑制 “Task was destroyed” 警告。
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    names = [c[0] for c in calls]
+    assert "find_message_content" in names
+    assert "parse_content" in names
+    assert "find_gray_config" in names
+    assert "fetch_guard_message" in names
+    assert "run_pre_safety_via_graph" in names
+    assert names.index("find_message_content") < names.index("parse_content")
+    assert names.index("parse_content") < names.index("run_pre_safety_via_graph")
