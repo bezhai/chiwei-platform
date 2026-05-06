@@ -12,8 +12,15 @@ from __future__ import annotations
 
 import logging
 
+# MessageRouter / emit imported at module level so route_chat_node 测试可
+# 用 monkeypatch.setattr(chat_node_mod, ...) 替换，且 Task 6 落地后 router
+# fan-out 直接复用同名引用。
+from app.chat.router import MessageRouter  # noqa: F401
+from app.data.queries import is_chat_request_completed
+from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatTrigger
 from app.runtime import node
+from app.runtime.emit import emit  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +30,8 @@ async def route_chat_node(t: ChatTrigger) -> None:
     """ChatTrigger -> ChatRequest fan-out。
 
     步骤：
-      0. 入口校验 message_id 非空（本 task）
-      1. redelivered 短路（Task 5）
+      0. 入口校验 message_id 非空
+      1. redelivered 短路（is_chat_request_completed helper）
       2. MessageRouter.route 决定 persona 列表（Task 6）
       3. fan-out emit ChatRequest（Task 6）
     """
@@ -32,7 +39,20 @@ async def route_chat_node(t: ChatTrigger) -> None:
         raise ValueError(
             "ChatTrigger.message_id is None; cannot fan out ChatRequest"
         )
-    # Task 5: redelivered short-circuit; Task 6: router + fan-out
+
+    async with get_session() as s:
+        already_done = await is_chat_request_completed(
+            s, t.session_id, is_proactive=t.is_proactive
+        )
+    if already_done:
+        logger.info(
+            "skip redelivered chat_request: session_id=%s, message_id=%s",
+            t.session_id,
+            t.message_id,
+        )
+        return
+
+    # Task 6: router + fan-out
 
 
 @node
