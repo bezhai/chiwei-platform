@@ -178,3 +178,57 @@ async def test_chat_node_resolves_bot_name_and_updates_agent_response(monkeypatc
 
     assert resolved_calls == [("p1", "c1")]
     assert set_calls == [("s1", "resolved-bot-x", "p1")]
+
+
+SPLIT = "---split---"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_split_two_segments_then_final(monkeypatch, base_request):
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    async def fake_stream(*a, **k):
+        for piece in ["hello ", SPLIT, " world", SPLIT, " foo"]:
+            yield piece
+
+    async def fake_resolve(s, p, c): return "bot-x"
+    async def fake_set(s, sid, bn, pid): pass
+    async def fake_find_msg(s, mid): return "input"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(p): return "guard"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    # 三段：part_index 0, 1, 2; 最后一段 is_last=True
+    assert len(emitted) == 3
+    assert emitted[0].part_index == 0
+    assert emitted[0].content == "hello"
+    assert emitted[0].is_last is False
+    assert emitted[1].part_index == 1
+    assert emitted[1].content == "world"
+    assert emitted[1].is_last is False
+    assert emitted[2].part_index == 2
+    assert emitted[2].is_last is True
+    assert "foo" in emitted[2].content
+    assert emitted[2].full_content is not None
+    assert SPLIT not in emitted[2].full_content
+    for s in emitted:
+        assert s.lane == "dev"
+        assert s.bot_name == "bot-x"

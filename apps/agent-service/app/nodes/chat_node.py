@@ -18,6 +18,7 @@ from uuid import uuid4
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
 # 用 monkeypatch.setattr(chat_node_mod, ...) 替换，节点内直接复用同名引用。
 from app.chat.content_parser import parse_content
+from app.chat.pipeline import _build_and_stream  # 临时桥接, Task 12 搬入本文件
 from app.chat.post_actions import fetch_guard_message
 from app.chat.pre_safety_gate import run_pre_safety_via_graph
 from app.chat.router import MessageRouter
@@ -173,5 +174,63 @@ async def chat_node(req: ChatRequest) -> None:
         lane=req.lane,  # CRITICAL: sink 不会自动注入 header lane
     )
 
-    # 后续 task 加 主循环 / final
-    _ = (parsed, gray_config, guard_message, base_payload)
+    # 5. 主循环 + 中段 emit
+    SPLIT_MARKER = "---split---"
+    MAX_MESSAGES = 4
+
+    sent_length = 0
+    part_index = 0
+    full_content = ""
+
+    async for text in _build_and_stream(
+        req.message_id,
+        gray_config,
+        session_id=req.session_id,
+        persona_id=req.persona_id,
+    ):
+        if not text:
+            continue
+        full_content += text
+        pending = full_content[sent_length:]
+        while SPLIT_MARKER in pending and part_index < MAX_MESSAGES - 1:
+            idx = pending.index(SPLIT_MARKER)
+            part = pending[:idx].strip()
+            if part:
+                # Task 11: pre-safety BLOCK 在段边界检查；本 task 暂时直接 emit
+                await emit(ChatResponseSegment(
+                    **base_payload,
+                    part_index=part_index,
+                    content=part,
+                    status="success",
+                    is_last=False,
+                    full_content=None,
+                    published_at=int(time.time() * 1000),
+                ))
+                part_index += 1
+            sent_length += idx + len(SPLIT_MARKER)
+            pending = full_content[sent_length:]
+
+    # 6. final 段 (Task 11: 加 BLOCK 路径)
+    remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
+    clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
+    final_content = (
+        (remaining or full_content) if (remaining or part_index == 0) else ""
+    )
+    await emit(ChatResponseSegment(
+        **base_payload,
+        part_index=part_index,
+        content=final_content,
+        status="success",
+        is_last=True,
+        full_content=clean_full,
+        published_at=int(time.time() * 1000),
+    ))
+
+    # pre_task 还可能 pending，让它自然完成或 cancel（Task 11 重写）
+    if not pre_task.done():
+        try:
+            await asyncio.wait_for(pre_task, timeout=0.1)
+        except (TimeoutError, Exception):
+            pre_task.cancel()
+
+    _ = (parsed, guard_message)  # Task 11 用 (BLOCK 路径)
