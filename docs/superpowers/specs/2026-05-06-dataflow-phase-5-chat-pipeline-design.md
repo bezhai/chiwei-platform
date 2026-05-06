@@ -19,7 +19,7 @@
 - §3.3 redelivered 自查用项目现有 helper `is_chat_request_completed()`（`data/queries.py:316`），不硬编码 status 字符串。该 helper 实际查的是 status ∈ ("completed", "recalled")，v2 spec 写 'success' 不一致；coder 照写会让应用层 redelivered guard 失效。修 reviewer P2 #5
 
 **v2 关键变化（vs v1）**：
-- §3.2 Data 类 `transient` 设置全面纠正：`ChatTrigger` 和 `ChatRequest` 都必须 `transient=False`（`graph.py:276` 对所有 `.durable()` wire 强制要求持久化；runtime 自动建 `data_chat_trigger` / `data_chat_request` 表做 message_id 与 (message_id, persona_id) idempotent insert，**这天然解决 mq 重投会重跑 LLM 的隐患**）；`ChatResponseSegment` 保留 `transient=True` 但去掉 wire 上的 `.durable()`，sink 本身就是 `mq.publish` 不是 durable consumer。修 reviewer P0 #1
+- ~~§3.2 Data 类 `transient` 设置全面纠正：`ChatTrigger` 和 `ChatRequest` 都必须 `transient=False`（`graph.py:276` 对所有 `.durable()` wire 强制要求持久化；runtime 自动建 `data_chat_trigger` / `data_chat_request` 表做 message_id 与 (message_id, persona_id) idempotent insert，**这天然解决 mq 重投会重跑 LLM 的隐患**）；`ChatResponseSegment` 保留 `transient=True` 但去掉 wire 上的 `.durable()`，sink 本身就是 `mq.publish` 不是 durable consumer。修 reviewer P0 #1~~ **⚠️ 已被 v3 关键变化第 1 条推翻**：source.mq 入口不调 insert_idempotent，ChatTrigger 改 transient=True 不带 .durable()，dedup 只在 ChatRequest 那一层。data_chat_trigger 表不再存在
 - §3.3 chat_node 伪代码彻底重写：`_build_and_stream` 内部已经调过 `handle_token`，对外 yield 的是 str（chat_consumer.py:204-240 现状）；chat_node 直接消费 str 流 + 按 `SPLIT_MARKER` 字符串切段，不再二次调 `handle_token`。修 reviewer P0 #2
 - §3.2 / §3.3 / §3.4 加入 `MessageRouter` 的 fan-out 语义：新增 `ChatTrigger` Data（mq chat_request 入口的原始 body）+ `route_chat_node`（per-trigger fan-out 多 persona、第二个起重生成 session_id），`chat_node` 改为 per-persona 输入 `ChatRequest`。dedup 联合 key = `(message_id, persona_id, part_index)`。同时把 chat_consumer.py:148-186 现行的 resolve `response_bot_name` + 写 `agent_responses` 行为搬入 chat_node 前置。修 reviewer P1 #3
 - §4.1 错误处理语义纠正：runtime durable 是 `requeue=False` 直接 DLQ，**没有自动重投**（durable.py:12 / engine.py:469）；`Sink.mq` 是直 publish 无 retry（sink_dispatch.py:27）。同时点出 5a 的可观察性改善——现 chat_consumer.py 用 `gather(return_exceptions=True)` 把单 persona 异常吞掉只 log 不进 DLQ；新方案下 chat_node raise 进 DLQ，可重放可监控。修 reviewer P1 #4
@@ -432,8 +432,8 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 
 | 场景 | 行为 |
 |---|---|
-| `route_chat_node` 内部 raise | durable consumer requeue=False → DLQ。下游 ChatRequest 不会被产出 → 飞书无回复 |
-| `chat_node` 内部 raise | durable consumer requeue=False → DLQ。该 persona 的回复丢失，**其他 persona 的 chat_node 不受影响**（每个 persona 独立 ChatRequest 实例 / 独立 durable handler 跑） |
+| `route_chat_node` 内部 raise | source loop 的 `incoming.process(requeue=False)`（`engine.py:469`）→ DLQ。下游 ChatRequest 不会被产出 → 飞书无回复 |
+| `chat_node` 内部 raise | durable consumer handler `incoming.process(requeue=False)`（`durable.py:`）→ DLQ。该 persona 的回复丢失，**其他 persona 的 chat_node 不受影响**（每个 persona 独立 ChatRequest 实例 / 独立 durable handler 跑） |
 | mq 重投 ChatTrigger（source.mq 入口） | source loop 无 insert_idempotent → route_chat_node 跑两次。下游 ChatRequest（in-graph durable）的 idempotent 拦下 chat_node 的二次触发。**用户视角无重复段**，但 route_chat_node 浪费一次 DB 查询 + router 调用 |
 | mq 重投 ChatRequest（in-graph durable） | durable consumer handler 调 `insert_idempotent`（`durable.py:120`）；第二次 insert 返 0 → chat_node 不被调用。**重投不重跑 LLM、不重发段**——这是 v3 真正的改善层 |
 | 应用层 redelivered（is_chat_request_completed helper 返 True） | route_chat_node 第 1 步用 `is_chat_request_completed(s, t.session_id, is_proactive=t.is_proactive)` 判断（proactive / 非 proactive 走不同分支），True 时直接 return，连 ChatRequest 都不 emit。这是 chat_consumer.py:79-95 现行行为的搬运 |
@@ -547,7 +547,7 @@ agent-service 镜像产 3 个 deployment（`agent-service` / `arq-worker` / `vec
 
 ### 6.3 回滚
 
-- **5a 回滚**: revert PR + 重新 release。**关键风险**：5a 跑过的对话已经在 `data_chat_trigger` / `data_chat_request` 表里有 idempotent 行；回滚到 v1 chat_consumer 后，这些表对老代码不可见——意味着回滚后这一时段的 chat_request 重投会被 5a 表的 dedup 残留**不知不觉地阻挡**？不会，因为 v1 chat_consumer.py 不查这两个表。但反过来要确认：v1 chat_consumer.py 只查 `agent_responses` 表做应用层 dedup（line 78-95），跟 runtime 表无关，所以回滚后行为完全等价 v1 现状
+- **5a 回滚**: revert PR + 重新 release。**关键风险**：5a 跑过的对话已经在 `data_chat_request` 表里有 idempotent 行（v3 后 ChatTrigger 不再建表）；回滚到 v1 chat_consumer 后，该表对老代码不可见——意味着回滚后这一时段的 chat_request 重投会被 5a 表的 dedup 残留**不知不觉地阻挡**？不会，因为 v1 chat_consumer.py 不查 `data_chat_request`。但反过来要确认：v1 chat_consumer.py 只查 `agent_responses` 表做应用层 dedup（line 78-95），跟 runtime 表无关，所以回滚后行为完全等价 v1 现状
 - 第二个回滚硬约束：`ChatTrigger` / `ChatRequest` / `ChatResponseSegment` 的 mq body schema 与现 chat_consumer 完全等价，老代码可消费 5a 时代留在 mq queue 上的消息
 - **5b 回滚**: revert PR；`proactive.py` 那一行 emit Message 改回 `emit_legacy_message`，bridges 文件 git revert 恢复
 
@@ -568,7 +568,7 @@ agent-service 镜像产 3 个 deployment（`agent-service` / `arq-worker` / `vec
 
 ## 7. Followups（不在 Phase 5 范围）
 
-- ~~mq 重投导致段重复发飞书~~ — v2 已解决（runtime idempotent insert 拦下 ChatTrigger / ChatRequest 重投）
+- ~~mq 重投导致段重复发飞书~~ — v3+ 已解决：ChatRequest 这一层 in-graph durable 边的 `insert_idempotent` 拦下重投；ChatTrigger 自身（source.mq 入口）不参与 dedup 但 trigger 重投经 route_chat_node 重跑后产出同样的 ChatRequest，被下游 dedup 间接拦下
 - agent tool 副作用进 wire（commit_abstract_memory → emit AbstractMemorySaved）→ Phase 6 工作（源 spec 明确"本轮维持开放"）
 - "chat 部分段后中断、新 Pod 不续传剩余段" 改进 → 长期。需要把 stream 进度持久化（每段 emit 后写一行 `data_chat_response_segment`），重投时根据 part_index 续跑。本期不做
 - chat_node 内部更细的拆分（如出于可测试性需要）→ 长期
