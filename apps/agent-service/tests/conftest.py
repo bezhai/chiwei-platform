@@ -125,7 +125,7 @@ def capture_emit(monkeypatch):
     async def _fake_emit(data):
         seen.append(data)
 
-    import app.runtime.emit as emit_mod
-
-    monkeypatch.setattr(emit_mod, "emit", _fake_emit)
+    # Patch both module-level imports and the re-export in app.runtime
+    import app.runtime
+    monkeypatch.setattr(app.runtime, "emit", _fake_emit)
     return seen
