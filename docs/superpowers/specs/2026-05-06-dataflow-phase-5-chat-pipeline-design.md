@@ -1,8 +1,15 @@
 # Dataflow Phase 5 — Chat 主 Pipeline 进 Graph
 
-**状态**: Draft v2 (2026-05-06，吸收 reviewer 第 1 轮 5 条意见)
+**状态**: Draft v3 (2026-05-06，吸收 reviewer 第 2 轮 5 条意见)
 **前置**: PR #207 (Phase 4 life-engine / glimpse) shipped to prod 1.0.0.322
 **后续**: Phase 6 清扫（旧 worker 入口、旧 ORM god object、bridge 残留 grep = 0）
+
+**v3 关键变化（vs v2）**：
+- §3.1 / §3.2 / §3.4 ChatTrigger 自身不参与 dedup：runtime mq source loop（`engine.py:481-499`）直接 `req_cls(**body)` 调 target node，**没有 insert_idempotent 调用**；idempotent 只在 durable consumer handler（`durable.py:120`）里。所以 v2 写的"data_chat_trigger 表 dedup trigger 重投"是空话——表会被建但没人写。修法：ChatTrigger 改 `transient=True`、wire 不带 `.durable()`；mq 重投改善的描述精确到"ChatRequest 这一层（route → chat 是 in-graph durable 投递走 round-trip mq + insert_idempotent）"。trigger 重投会让 route_chat_node 跑两次（重复 DB 查询 + 重复 emit ChatRequest），下游 ChatRequest dedup 拦下，用户视角无差异。修 reviewer P0 #1
+- §3.2 ChatTrigger / ChatRequest / ChatResponseSegment 字段全部加 `| None` 默认值或 `Optional` 标记，与 `chat_consumer.py:59-67` 现行 `.get(..., default)` 行为一字对齐。lark-server 实际不一定带 `is_proactive` / `root_id` / `user_id` / `lane` / `bot_name`，spec 写非可选会让正常消息 `req_cls(**body)` ValidationError → DLQ。修 reviewer P0 #2
+- §3.3a chat_node 内部第 1 步显式列出 prep 块（fetch message 内容 + parse + gray config + persona 解析 + guard_message resolve + pre-safety task 启动），照搬 `pipeline.py:78-110`。v2 漏掉这一段是因为 v2 把 prep 当成"`_build_and_stream` 自带"，实际 prep 在 `stream_chat` 而不在 `_build_and_stream` 里。修 reviewer P1 #3
+- §3.3a pre-safety blocked 路径明确：verdict=BLOCK 时立即 emit 1 段 `ChatResponseSegment(content=guard_message, is_last=True, full_content=guard_message)` 然后 `return`，不再消费 stream 也不再 emit 后续段。v2 伪代码 split 分支总是 emit `is_last=False` 没区分 blocked，与 §4.2 不变量第 3 条"pre-safety 命中飞书只收到一条"矛盾。修 reviewer P1 #4
+- §3.3 redelivered 自查用项目现有 helper `is_chat_request_completed()`（`data/queries.py:316`），不硬编码 status 字符串。该 helper 实际查的是 status ∈ ("completed", "recalled")，v2 spec 写 'success' 不一致；coder 照写会让应用层 redelivered guard 失效。修 reviewer P2 #5
 
 **v2 关键变化（vs v1）**：
 - §3.2 Data 类 `transient` 设置全面纠正：`ChatTrigger` 和 `ChatRequest` 都必须 `transient=False`（`graph.py:276` 对所有 `.durable()` wire 强制要求持久化；runtime 自动建 `data_chat_trigger` / `data_chat_request` 表做 message_id 与 (message_id, persona_id) idempotent insert，**这天然解决 mq 重投会重跑 LLM 的隐患**）；`ChatResponseSegment` 保留 `transient=True` 但去掉 wire 上的 `.durable()`，sink 本身就是 `mq.publish` 不是 durable consumer。修 reviewer P0 #1
@@ -91,24 +98,33 @@ Phase 0+1 落地 runtime 框架 + vectorize；Phase 2 把 safety 收进 graph；
 lark-server
   ─[mq publish chat.request]─→  mq queue: chat_request
                                           │
-                       [wire ChatTrigger, .durable()]   # ChatTrigger transient=True 不做 dedup
+                       [wire ChatTrigger, NO .durable()]   # source.mq 入口；
+                                                          # ChatTrigger transient=True
+                                                          # source loop 不调 insert_idempotent
+                                                          # → trigger 重投会让 route_chat_node 跑两次
                                           │
                                           ↓
                        route_chat_node @ agent-service
+                          应用层 redelivered 自查（is_chat_request_completed helper）
                           MessageRouter.route → fan-out per persona
                           (第 2 个及以后 persona 重生成 session_id)
                                           │
                                           ↓ N × emit(ChatRequest)
-                       [wire ChatRequest, .durable()]   # ChatRequest transient=False
-                                                       # → runtime 自动建 data_chat_request
+                       [wire ChatRequest, .durable()]   # in-graph durable 投递
+                                                       # ChatRequest transient=False
+                                                       # → runtime 建 data_chat_request
                                                        # → (message_id, persona_id) Key
-                                                       # → insert_idempotent 天然吃掉 mq 重投
+                                                       # → insert_idempotent 在这里生效，
+                                                       #   trigger 重投经过这里被拦下
                                           │
                                           ↓
                        chat_node @ agent-service (per persona)
-                         前置：resolve response_bot_name + 更新 agent_responses 行
-                         主体：跑 _build_and_stream (str stream) + SPLIT_MARKER 切段
+                         prep：fetch message + parse + gray config + persona resolve
+                              + guard_message resolve + pre-safety task 启动
+                         main：resolve response_bot_name + update agent_responses
+                              + 跑 _build_and_stream (str stream) + SPLIT_MARKER 切段
                               + 段边界等 pre_safety verdict
+                              （pre-safety BLOCK 时只 emit 一段 guard + is_last=True 后 return）
                                           │
                                           ↓ N × emit(ChatResponseSegment)
                        [wire ChatResponseSegment, NO .durable()]
@@ -132,44 +148,48 @@ lark-server
 
 #### `ChatTrigger`（mq chat_request 入口的原始 body）
 
-字段（与 `chat_consumer.py:55-95` `handle_chat_request` 解析一字对齐）：
+字段（默认值与 `chat_consumer.py:55-67` `handle_chat_request` 现行 `.get(..., default)` 行为一字对齐——lark-server 实际不一定带 is_proactive / root_id / user_id / lane / bot_name / mentions / enqueued_at；非可选会让正常消息 ValidationError → DLQ）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `session_id` | `str` | lark-server 发起时的 session id |
-| `message_id` | `str` | 消息 id（dedup 单位，但 ChatTrigger 自己不 dedup，见下） |
-| `chat_id` | `str` | 会话 id |
-| `is_p2p` | `bool` | 私聊 / 群聊 |
-| `root_id` | `str \| None` | 回复链 root |
-| `user_id` | `str` | 发送方用户 id |
-| `lane` | `str \| None` | 泳道（runtime 自带，建议留出方便 trace） |
-| `is_proactive` | `bool` | 是否赤尾主动消息 |
-| `bot_name` | `str \| None` | 触发的 bot |
-| `mentions` | `list[str]` | @ 列表 |
-| `enqueued_at` | `int \| None` | 入队 ms 时间戳 |
+| `message_id` | `str \| None = None` | 消息 id |
+| `session_id` | `str \| None = None` | lark-server 发起时的 session id |
+| `chat_id` | `str \| None = None` | 会话 id |
+| `is_p2p` | `bool = False` | 私聊 / 群聊（chat_consumer 默认 False） |
+| `root_id` | `str \| None = None` | 回复链 root |
+| `user_id` | `str \| None = None` | 发送方用户 id |
+| `lane` | `str \| None = None` | 泳道（chat_consumer 走 .get(); runtime mq Source 也读 header） |
+| `is_proactive` | `bool = False` | 是否赤尾主动消息（chat_consumer 默认 False） |
+| `bot_name` | `str \| None = None` | 触发的 bot |
+| `mentions` | `list[str] = []` | @ 列表（chat_consumer 默认 []） |
+| `enqueued_at` | `int \| None = None` | 入队 ms 时间戳 |
 
-`message_id: Annotated[str, Key]`，`Meta.transient = False`：`graph.py:276` 对所有 `.durable()` wire 强制要求持久化（runtime 入口走 idempotent insert）。runtime 自动建 `data_chat_trigger` 表，trigger 重投按 `message_id` dedup 自动拦下。下游 ChatRequest 的 `(message_id, persona_id)` 联合 dedup 是第二层保险。
+`Meta.transient = True`：runtime mq source loop（`engine.py:481-499`）直接 `req_cls(**body)` 调 target node，**没有 insert_idempotent 调用** —— 给 ChatTrigger 建表也没人写，因此干脆不建。dedup 在下游 ChatRequest 那一层（route → chat 是 in-graph durable 投递）。
 
-**应用层 redelivered 自查（chat_consumer.py:78-95 现行）保留并搬到 route_chat_node**：检查 `agent_responses` 表 message_id 对应是否已 `status='success'`，避免"redelivered 但 ChatTrigger 表尚未来得及 insert"的窗口期。runtime dedup 是基础保险，应用层自查是业务保险，两者不冲突。
+**source 入口的"重投不重处理"由两层兜底**:
+1. **应用层 redelivered 自查（route_chat_node 第一步）**：调用 `is_chat_request_completed(session, session_id)` helper（`data/queries.py:316`），检查 `agent_responses` 表 status ∈ ("completed", "recalled") 时直接 return。这是 chat_consumer.py:79-95 的现行行为，搬到 route_chat_node。
+2. **下游 ChatRequest dedup**：route_chat_node fan-out 出来的 ChatRequest 走 in-graph durable 投递，`(message_id, persona_id)` 联合 Key 在 `data_chat_request` 表上 idempotent insert 拦下重投。
+
+trigger 重投的代价：route_chat_node 跑两次，重复一次 DB 查询 + MessageRouter.route + fan-out emit。下游 chat_node 不会被重复触发（被 ChatRequest dedup 拦下）。性能浪费但用户视角无差异。
 
 #### `ChatRequest`（每个 persona 一个）
 
-字段：
+字段（route_chat_node 内部 emit，可选标记尽量宽松配合 `ChatTrigger` 的可选；联合 Key `(message_id, persona_id)` 必填）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `message_id` | `Annotated[str, Key]` | 与 ChatTrigger 对齐 |
-| `persona_id` | `Annotated[str, Key]` | router 决定的 persona（`(message_id, persona_id)` 联合 Key 是 dedup 单元） |
-| `session_id` | `str` | 第 1 个 persona 沿用，第 2 个及以后由 router 重生 `str(uuid4())`（与 `chat_consumer.py:131` 现行行为一致） |
-| `chat_id` | `str` | 透传 |
-| `is_p2p` | `bool` | 透传 |
-| `root_id` | `str \| None` | 透传 |
-| `user_id` | `str` | 透传 |
-| `is_proactive` | `bool` | 透传 |
-| `bot_name` | `str \| None` | trigger 上的 bot_name；chat_node 内部还会再 resolve 出 response_bot_name 用于回复 |
-| `enqueued_at` | `int \| None` | 透传，用于 chat_node 内部计算 queue wait 指标 |
+| `message_id` | `Annotated[str, Key]` | 必填，与 ChatTrigger 对齐；route_chat_node emit 时若 trigger.message_id 为 None 应直接 raise（业务前置） |
+| `persona_id` | `Annotated[str, Key]` | 必填，router 决定的 persona（`(message_id, persona_id)` 联合 Key 是 dedup 单元） |
+| `session_id` | `str \| None = None` | 第 1 个 persona 沿用 trigger.session_id（可能 None），第 2 个及以后 `str(uuid4())`（与 `chat_consumer.py:131` 一致） |
+| `chat_id` | `str \| None = None` | 透传 |
+| `is_p2p` | `bool = False` | 透传 |
+| `root_id` | `str \| None = None` | 透传 |
+| `user_id` | `str \| None = None` | 透传 |
+| `is_proactive` | `bool = False` | 透传 |
+| `bot_name` | `str \| None = None` | trigger 上的 bot_name；chat_node 内部还会再 resolve 出 response_bot_name 用于回复 |
+| `enqueued_at` | `int \| None = None` | 透传，用于 chat_node 内部计算 queue wait 指标 |
 
-`Meta.transient = False`（**这是 v1 的关键修正**）：runtime 在 compile 时验证 `.durable()` 边要求 Data 有持久化表（`graph.py:276`）；boot 时 migrator 自动 `CREATE TABLE data_chat_request (message_id, persona_id, ...)`；durable consumer 入口 `insert_idempotent(obj)` 拦下 `(message_id, persona_id)` 重投——**这恰好天然解决 mq 重投会重跑 LLM 的隐患**（v1 里被列为"现状同等问题，不解决"的，v2 里 free 拿到了改善）。
+`Meta.transient = False`（**v1 的关键修正**）：runtime 在 compile 时验证 `.durable()` 边要求 Data 有持久化表（`graph.py:276`）；boot 时 migrator 自动 `CREATE TABLE data_chat_request (message_id, persona_id, ...)`；durable consumer handler `insert_idempotent(obj)`（`durable.py:120`）拦下 `(message_id, persona_id)` 重投——**这天然解决 mq 重投会重跑 LLM 的隐患**（v1 列入 Followup 的问题在 v2/v3 里 free 拿到了改善）。这里的 dedup 是真实的，因为 ChatRequest 走的是 in-graph durable 投递，会经过 durable consumer handler。
 
 #### `ChatResponseSegment`
 
@@ -177,21 +197,21 @@ lark-server
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `session_id` | `str` | 标识对话 |
-| `message_id` | `Annotated[str, Key]` | dedup 联合 Key 之一 |
-| `persona_id` | `Annotated[str, Key]` | dedup 联合 Key 之一 |
-| `part_index` | `Annotated[int, Key]` | dedup 联合 Key 之一 |
-| `chat_id` | `str` | 飞书会话 id |
-| `is_p2p` | `bool` | |
-| `root_id` | `str \| None` | |
-| `user_id` | `str` | |
-| `is_proactive` | `bool` | |
-| `bot_name` | `str` | resolve 后的 response_bot_name |
-| `content` | `str` | 段文本（中间段是 split 出的一段，final 段是剩余尾巴或 `full_content`） |
-| `status` | `str` | `"success"` / `"failed"` |
-| `is_last` | `bool` | True 表示这条对话最后一段（v1 字段名 `is_final`，**改回与 lark-server worker 一致**） |
-| `full_content` | `str \| None` | 仅 final 段非空：`full_content.replace(SPLIT_MARKER, "\n\n").strip()`（与 `chat_consumer.py:263` 现行 `clean_full` 一致） |
-| `published_at` | `int` | publish 时的 ms 时间戳 |
+| `message_id` | `Annotated[str, Key]` | dedup 联合 Key（chat_node 这一层 message_id 必有，是从 ChatRequest 透传） |
+| `persona_id` | `Annotated[str, Key]` | dedup 联合 Key |
+| `part_index` | `Annotated[int, Key]` | dedup 联合 Key |
+| `session_id` | `str \| None = None` | 透传 |
+| `chat_id` | `str \| None = None` | 透传 |
+| `is_p2p` | `bool = False` | 透传 |
+| `root_id` | `str \| None = None` | 透传 |
+| `user_id` | `str \| None = None` | 透传 |
+| `is_proactive` | `bool = False` | 透传 |
+| `bot_name` | `str \| None = None` | resolve 后的 response_bot_name（chat_node 内部 resolve 失败时 fallback 到 trigger.bot_name，可能 None） |
+| `content` | `str = ""` | 段文本（中间段是 split 出的一段，final 段是剩余尾巴或拼接结果） |
+| `status` | `str = "success"` | `"success"` / `"failed"` |
+| `is_last` | `bool = False` | True 表示这条对话最后一段 |
+| `full_content` | `str \| None = None` | 仅 final 段非空：`full_content.replace(SPLIT_MARKER, "\n\n").strip()`（与 `chat_consumer.py:263` 现行 `clean_full` 一致） |
+| `published_at` | `int \| None = None` | publish 时的 ms 时间戳 |
 
 `Meta.transient = True` + 不带 `.durable()`：sink 是直 publish 不需要 dedup 表（runtime 不会建表 / 也不会 round-trip mq → consumer）。`(message_id, persona_id, part_index)` 联合 Key 仍然存在用于做语义识别（lark-server 那侧已有自己的 dedup 逻辑，不依赖 runtime 这边）。
 
@@ -210,7 +230,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
 
 **职责**（照搬 `chat_consumer.py:78-148`）:
 
-1. **redelivered 短路**：检查 message_id 对应 agent_response 是否已 `success` 完成；是则直接 return（与 `chat_consumer.py:78-95` 一致）。这一段保留是因为 ChatTrigger transient=True 不做 dedup，需要应用层自查
+1. **redelivered 短路**：调用项目已有 helper `is_chat_request_completed(session, session_id)`（`apps/agent-service/app/data/queries.py:316`）—— 该 helper 检查 `agent_responses.status` ∈ `("completed", "recalled")` 时返回 True；True 时 route_chat_node 直接 return，不再 fan-out。**spec 不要硬编码 status 字符串**，即使现行集合改了也只跟着 helper 走。这是源 chat_consumer.py:79-95 行为的精确搬运
 2. **MessageRouter.route**：决定回应的 persona id 列表
 3. **fan-out emit ChatRequest**：
    ```python
@@ -240,16 +260,33 @@ async def chat_node(req: ChatRequest) -> None:
     ...
 ```
 
-**内部分五块（不拆 node，函数体内分块）**:
+**内部分七块（不拆 node，函数体内分块）**:
 
-1. **resolve response_bot_name + 更新 agent_responses 行**（照搬 `chat_consumer.py:155-174`）
-2. **构造 base segment payload**（照搬 `chat_consumer.py:176-186`）—— content / status / part_index / is_last 之外的字段
-3. **触发 pre-safety**（照搬 `pipeline.py:104-110`，Phase 2 已 ship 不动）：`pre_task = asyncio.create_task(pre_safety_gate.run_pre_safety_via_graph(...))`
-4. **跑 agent stream + 切段 emit**（**v2 重写：直接消费 `_build_and_stream` 的 str 流**）：
+1. **prep（v3 新增，照搬 `pipeline.py:78-110` 现 stream_chat 头部）**：
+   - fetch message content：`async with get_session(): raw_content = await find_message_content(s, req.message_id)`；为空时 emit 一段 ChatResponseSegment(content="抱歉，未找到相关消息记录", is_last=True, ...) 后 return
+   - `parsed = parse_content(raw_content)`
+   - fetch gray config：`async with get_session(): gray_config = await find_gray_config(s, req.message_id) or {}`
+   - 解析 effective_persona + `guard_message = await fetch_guard_message(effective_persona)`
+   - 启动 pre-safety task：`pre_task = asyncio.create_task(pre_safety_gate.run_pre_safety_via_graph(message_id=..., content=parsed.render(), persona_id=...))`
+2. **resolve response_bot_name + 更新 agent_responses 行**（照搬 `chat_consumer.py:155-174`）
+3. **构造 base segment payload**（照搬 `chat_consumer.py:176-186`）—— content / status / part_index / is_last 之外的字段
+4. **跑 agent stream + 切段 emit**（**v3 在 v2 上加 blocked 路径**）：
    ```python
    sent_length = 0
    part_index = 0
    full_content = ""
+
+   async def _emit_segment(content: str, is_last: bool, full: str | None) -> None:
+       await emit(ChatResponseSegment(
+           **base_payload,
+           content=content,
+           status="success",
+           part_index=part_index,
+           is_last=is_last,
+           full_content=full,
+           published_at=int(time.time() * 1000),
+       ))
+
    async for text in _build_and_stream(req.message_id, gray_config, req.session_id, persona_id=req.persona_id):
        if not text:
            continue
@@ -259,16 +296,16 @@ async def chat_node(req: ChatRequest) -> None:
            idx = pending.index(SPLIT_MARKER)
            part = pending[:idx].strip()
            if part:
-               part = await _maybe_replace_with_guard(part, pre_task, ...)
-               await emit(ChatResponseSegment(
-                   **base_payload,
-                   content=part,
-                   status="success",
-                   part_index=part_index,
-                   is_last=False,
-                   full_content=None,
-                   published_at=int(time.time() * 1000),
-               ))
+               result = await _resolve_pre_safety_for_part(part, pre_task, guard_message)
+               if result.blocked:
+                   # v3: pre-safety BLOCK 即终止 — 只 emit 一段 guard，is_last=True
+                   await _emit_segment(
+                       content=guard_message,
+                       is_last=True,
+                       full=guard_message,
+                   )
+                   return  # 不再消费 stream，不再 emit 后续段
+               await _emit_segment(content=result.content, is_last=False, full=None)
                part_index += 1
            sent_length += idx + len(SPLIT_MARKER)
            pending = full_content[sent_length:]
@@ -276,18 +313,22 @@ async def chat_node(req: ChatRequest) -> None:
    remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
    clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
    final_content = (remaining or full_content) if (remaining or part_index == 0) else ""
-   final_content = await _maybe_replace_with_guard(final_content, pre_task, ...)
-   await emit(ChatResponseSegment(
-       **base_payload,
-       content=final_content,
-       status="success",
-       part_index=part_index,
-       is_last=True,
-       full_content=clean_full,
-       published_at=int(time.time() * 1000),
-   ))
+   result = await _resolve_pre_safety_for_part(final_content, pre_task, guard_message)
+   if result.blocked:
+       await _emit_segment(
+           content=guard_message,
+           is_last=True,
+           full=guard_message,
+       )
+       return
+   await _emit_segment(content=result.content, is_last=True, full=clean_full)
    ```
-5. **错误兜底**：函数体不包 try/except——失败 raise 由 durable consumer requeue=False → DLQ。对比现状（chat_consumer.py 用 `gather(return_exceptions=True)` 把单 persona 异常吞掉只 log），新方案下进 DLQ 是**可观察性改善**：DLQ 消息可重放、可监控告警。
+5. **`_resolve_pre_safety_for_part` helper 语义**（替代 v2 的 `_maybe_replace_with_guard`）：
+   - 段边界等 verdict：未到 verdict 则 await（带原 timeout）；fail-open 时返回 `(blocked=False, content=part)`
+   - verdict=BLOCK：返回 `(blocked=True, content=guard_message)`，由调用方决定如何 emit（中段 / final 段都走 blocked 终止路径）
+   - verdict=ALLOW：返回 `(blocked=False, content=part)`
+   - 是命名 tuple 或小 dataclass，和 v2 把 guard 替换吞进去的 `_maybe_replace_with_guard` 不同——blocked 状态需要返回出来让调用方走终止路径
+6. **错误兜底**：函数体不包 try/except——失败 raise 由 durable consumer requeue=False → DLQ。对比现状（chat_consumer.py 用 `gather(return_exceptions=True)` 把单 persona 异常吞掉只 log），新方案下进 DLQ 是**可观察性改善**：DLQ 消息可重放、可监控告警。
 
 **关键点解读**:
 - `_build_and_stream` 已经在内部消费 `agent.stream()` + 调用 `handle_token()`，对外 yield str。chat_node 不再 import / 调用 `handle_token` —— 它消费的是已经过 `handle_token` 处理后的纯文本流（与现 `chat_consumer.py:204-240` 完全一致）
@@ -319,7 +360,7 @@ async def chat_node(req: ChatRequest) -> None:
 """Chat 主 pipeline.
 
   mq(chat_request)
-       ─[wire ChatTrigger, .durable()]→  route_chat_node
+       ─[wire ChatTrigger, NO .durable()]→  route_chat_node
                                               │
                                               ↓ N × emit(ChatRequest)  (per persona)
        ─[wire ChatRequest, .durable()]→  chat_node
@@ -333,16 +374,16 @@ from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigg
 from app.nodes.chat_node import chat_node, route_chat_node
 from app.runtime import Sink, Source, wire
 
-wire(ChatTrigger).from_(Source.mq("chat_request")).to(route_chat_node).durable()
+wire(ChatTrigger).from_(Source.mq("chat_request")).to(route_chat_node)
 wire(ChatRequest).to(chat_node).durable()
 wire(ChatResponseSegment).to(Sink.mq("chat_response"))
 ```
 
-**关键点**:
-- `ChatTrigger` 必须 `transient=False`：`graph.py:276` 对**所有** `.durable()` wire 强制要求 data type 持久化（`if not w.durable: continue` + `if transient: raise`）。runtime 自动建 `data_chat_trigger` 表，按 `message_id` 做 dedup，trigger 重投自动吃掉。这是 v1 规划"transient=True"被 reviewer 1 顶回来后的精确解
-- `ChatRequest` 同样 `transient=False`，按 `(message_id, persona_id)` 联合 Key dedup（同一 message_id 一个 persona 只跑一次）
-- `wire(ChatRequest).to(chat_node).durable()` 不带 `from_()`：来源是 route_chat_node 的 emit（in-graph 投递）；durable 边走 RabbitMQ + idempotent insert
-- `wire(ChatResponseSegment).to(Sink.mq("chat_response"))` 不带 `.durable()`：sink 是直接 mq.publish，不是 durable consumer，因此 ChatResponseSegment 可以 `transient=True`
+**关键点（v3 修正）**:
+- `wire(ChatTrigger).from_(Source.mq("chat_request")).to(route_chat_node)` **不带 .durable()**：source.mq 入口已经是 mq consumer，runtime source loop（`engine.py:481-499`）`incoming.process(requeue=False)` 直接调 target node，**没有 insert_idempotent 调用**——给 ChatTrigger 加 `.durable()` 没有 dedup 效果；ChatTrigger 同步 `transient=True`（不建表，因为没人会写）
+- `wire(ChatRequest).to(chat_node).durable()` 不带 `from_()`：来源是 route_chat_node 的 emit（in-graph 投递）；durable 边走 RabbitMQ round-trip + durable consumer handler（`durable.py:120` 调 `insert_idempotent`）。**这才是真正的 dedup 层**：trigger 重投经 route_chat_node 重跑产出同样 (message_id, persona_id) 的 ChatRequest，被 idempotent 拦下不重新触发 chat_node
+- ChatRequest `transient=False`：`graph.py:276` 对所有 `.durable()` wire 强制要求持久化；runtime 自动建 `data_chat_request (message_id, persona_id, ...)` 表
+- `wire(ChatResponseSegment).to(Sink.mq("chat_response"))` 不带 `.durable()`：sink 是直接 mq.publish（`sink_dispatch.py:27`），不是 durable consumer；因此 ChatResponseSegment `transient=True` 即可
 - `Source.mq("chat_request")` / `Sink.mq("chat_response")` 已现成（Phase 2 safety / Phase 1 vectorize 在用）
 
 ### 3.5 `Stream[T]` 处置（搭车 5a）
@@ -383,7 +424,9 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 |---|---|
 | `route_chat_node` 内部 raise | durable consumer requeue=False → DLQ。下游 ChatRequest 不会被产出 → 飞书无回复 |
 | `chat_node` 内部 raise | durable consumer requeue=False → DLQ。该 persona 的回复丢失，**其他 persona 的 chat_node 不受影响**（每个 persona 独立 ChatRequest 实例 / 独立 durable handler 跑） |
-| mq 重投 ChatTrigger / ChatRequest | runtime `insert_idempotent` 拦下（v2 新机制）：重投不重跑 LLM、不重发段。**这是 v2 相对 v1 / 现状的改善**（v1 spec 写"现状同等问题不解决"——v2 拿到了 free dedup） |
+| mq 重投 ChatTrigger（source.mq 入口） | source loop 无 insert_idempotent → route_chat_node 跑两次。下游 ChatRequest（in-graph durable）的 idempotent 拦下 chat_node 的二次触发。**用户视角无重复段**，但 route_chat_node 浪费一次 DB 查询 + router 调用 |
+| mq 重投 ChatRequest（in-graph durable） | durable consumer handler 调 `insert_idempotent`（`durable.py:120`）；第二次 insert 返 0 → chat_node 不被调用。**重投不重跑 LLM、不重发段**——这是 v3 真正的改善层 |
+| 应用层 redelivered（agent_responses status ∈ ("completed", "recalled")） | route_chat_node 调 `is_chat_request_completed()` helper 判断，True 时直接 return，连 ChatRequest 都不 emit。这是 chat_consumer.py:79-95 现行行为的搬运 |
 | `Sink.mq("chat_response")` publish 失败 | 直接抛（runtime 不 retry）→ chat_node raise → DLQ |
 | pre-safety timeout / emit 异常 / 外层 cancel | 沿用 `pre_safety_gate.run_pre_safety_via_graph` 已有的 fail-open（Phase 2 已 ship） |
 | LLM 调用失败 | `_build_and_stream` 内现有兜底，不动 |
@@ -391,7 +434,7 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 **5a 相对现状的差异**（值得显式说明）:
 
 - **改善**：现 chat_consumer.py 的 multi-persona 路径 `gather(return_exceptions=True)`（line 142-147）把单 persona 的 exception 吞掉只 log；agent_responses 行可能停在 `processing` 状态，mq message 仍 ack。新方案下 chat_node raise → DLQ，**消息不丢失但人能看见**：DLQ 监控告警 + 可重放
-- **改善**：mq 重投不再重跑 LLM（runtime idempotent insert 拦下）—— v1 spec 列入 Followup 的问题在 v2 里 free 拿到了
+- **改善**：mq 重投不再重跑 LLM —— ChatRequest（in-graph durable）层的 `insert_idempotent` 拦下重投。trigger 重投会让 route_chat_node 跑两次但下游 chat_node 不会重复触发。v1 列入 Followup 的问题在 v2/v3 里 free 拿到了
 - **持平**：单次 LLM 失败 → 用户感知"赤尾没回我"，与现状一致
 - **可能退化**：现状 `gather(return_exceptions=True)` 让 message ack 了，新方案 raise → DLQ；如果 DLQ 没人监控，长期堆积可能成"看不见的失败"。**plan 阶段必须确认 DLQ 监控告警已就位**（Phase 3/4 已经在做 DLQ 告警，Phase 5 沿用即可）
 
@@ -412,15 +455,24 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 
 - 单 persona：fake MessageRouter 返 1 个 persona → emit 1 个 ChatRequest（session_id 透传）
 - 多 persona：fake MessageRouter 返 3 个 persona → emit 3 个 ChatRequest，第 1 个 session_id 透传，第 2/3 个 session_id 是 uuid（不等于 trigger.session_id）
-- redelivered 短路：fake `agent_responses` 已 success → 直接 return，不 emit
+- redelivered 短路：fake `is_chat_request_completed()` helper 返 True → 直接 return，不 emit。**用 helper monkeypatch，不硬编码 status 字符串**（v3 修 reviewer P2 #5）
 - 空 persona：fake MessageRouter 返 [] → 直接 return，不 emit
 - router 异常 raise → 不被 try/except 吞（让 durable consumer 进 DLQ）
+- ChatTrigger 字段宽松：trigger 不带 `is_proactive` / `user_id` / `bot_name` 时（chat_consumer.py:59 的 `.get(default)` 场景）route_chat_node 仍能正常工作，使用默认值（v3 修 reviewer P0 #2）
 
 **位置**: `apps/agent-service/tests/nodes/test_chat_node.py`（新建）
 
 用 fake `_build_and_stream`（注入预编排 **str** 序列）+ `capture_emit` 断言 emit 出的 ChatResponseSegment 序列：
+- **prep 块测试（v3 新增，修 reviewer P1 #3）**：
+  - fake `find_message_content` 返 None → emit 1 段 ChatResponseSegment(content="抱歉，未找到相关消息记录", is_last=True) 后 return；不再调 `_build_and_stream`
+  - fake `find_gray_config` 返 None → 当成空 dict 不报错
+  - fake `fetch_guard_message` 返某 guard 字符串 → 后续 blocked 测试断言用此字符串
 - 普通分段：3 段 str + 2 个 SPLIT_MARKER → 3 个 `ChatResponseSegment`，part_index=0/1/2，最后 `is_last=True` + `full_content=拼接结果`
-- pre-safety 拦截：fake pre_task 返回 BLOCK → 第一段 segment.content 是 guard message，is_last=True，无后续段
+- **pre-safety 拦截（v3 加强，修 reviewer P1 #4）**：fake pre_task 返回 BLOCK：
+  - 在 stream 中段（已发出 N 段非 final）触发 BLOCK：emit **1 段** guard + is_last=True + full_content=guard，**不再消费剩余 stream，不再 emit 后续段**
+  - 在 stream 开始前 BLOCK：第一段 segment.content=guard，is_last=True
+  - 在 final 段触发 BLOCK：emit 1 段 guard + is_last=True
+  - **断言**：每个 BLOCK 场景下最后一段 content 必须等于 guard_message，且没有后续 emit
 - 段字段完整性：断言每段都带 `session_id` / `message_id` / `chat_id` / `persona_id` / `bot_name` / `is_p2p` / `root_id` / `user_id` / `is_proactive` / `published_at` / `status="success"`
 - chat_node 内部 raise（fake `_build_and_stream` 抛异常）→ chat_node raise（不被 try/except 吞）
 - agent_responses 行更新：fake DB session 断言 `update_agent_response` 被调用一次，参数包含 resolved bot_name + persona_id
@@ -428,11 +480,13 @@ runtime durable consumer 的语义（`durable.py:12-18`, `engine.py:469`）：**
 **位置**: `apps/agent-service/tests/wiring/test_chat_wiring.py`（新建）
 - `compile_graph()` 不报错（包含 ChatTrigger / ChatRequest / ChatResponseSegment 三条 wire）
 - wire 数量 + 类型正确
-- 验证 `data_chat_trigger` / `data_chat_request` 表会被 migrator 建（可通过 `migrate_schema` 在 in-memory pg 上跑一次断言表存在）
+- 验证 `data_chat_request` 表会被 migrator 建（v3 修：删除 `data_chat_trigger` 验证项，因为 ChatTrigger transient=True 不建表）；可通过 `migrate_schema` 在 in-memory pg 上跑一次断言表存在
+- **断言 ChatTrigger 不在 migrator 建表列表里**（防止有人误把 transient 改回 False）
 
-**位置**: `apps/agent-service/tests/dataflow/test_chat_node_durable.py`（新建）
-- mq 重投同一 ChatRequest → idempotent insert 第二次返 0 → chat_node **不被调用第二次**（与 v1 spec "被调两次" 相反，是 v2 拿到的改善）
-- 重投同一 ChatTrigger → 同样被 idempotent 拦下
+**位置**: `apps/agent-service/tests/dataflow/test_chat_dedup.py`（新建）
+- 同一 ChatRequest emit 两次 → 第二次 `insert_idempotent` 返 0 → chat_node 不被调用第二次
+- 模拟 trigger 重投：手动调 route_chat_node 两次（同一 ChatTrigger）→ emit 出的 ChatRequest 经 durable wire 投递，第二次被 idempotent 拦下；chat_node 仅被调用一次
+- **断言 ChatTrigger 自身不被 idempotent 拦**（v3 精确：mq source loop 无 dedup，重投会让 route_chat_node 跑两次）
 
 ### 5.2 e2e（5a，部署泳道前必须）
 
@@ -474,8 +528,9 @@ agent-service 镜像产 3 个 deployment（`agent-service` / `arq-worker` / `vec
 ### 6.2 部署中断的副作用
 
 - chat_node 跑到一半被杀 → 该 ChatRequest 的 mq message 没 ack（durable consumer 上下文管理器异常退出 → broker 视为未消费）→ 重投到新 Pod
-- 这里有个微妙点：runtime `insert_idempotent(ChatRequest)` 在 chat_node 入口已经成功（要不然 handler 不会被调）；新 Pod 重投同一 ChatRequest 会被 idempotent 拦下不重跑 LLM —— **但用户也不会收到剩余的段**。这个场景的 mq message 实际去向：被拦下后 ack（runtime 视为 dup 忽略）。**结果是用户看到部分段后停止**
+- 这里有个微妙点：runtime `insert_idempotent(ChatRequest)` 在 chat_node 入口已经成功（否则 handler 不会被调）；新 Pod 重投同一 ChatRequest，durable consumer 入口 `insert_idempotent` 返 0 → chat_node 不再被调用。**但用户也不会收到剩余的段**。结果是用户看到部分段后停止。
 - 现状同等场景：chat_consumer.py 用 `gather(return_exceptions=True)` 吞掉异常 + ack message，结果同样是部分段后停止。5a 不更糟
+- 关于 chat_request mq 重投（被 lark-server 端 / 部署 chat_response_worker 没 ack 的情形）：source.mq 入口无 dedup，route_chat_node 跑两次，但下游 ChatRequest dedup 拦下重复触发 chat_node。仍然是部分段后停止
 - 部署前按项目铁律 2 确认无活跃 chat（飞书安静窗口部署）
 
 ### 6.3 回滚
@@ -511,7 +566,7 @@ agent-service 镜像产 3 个 deployment（`agent-service` / `arq-worker` / `vec
 
 **5a**:
 - [ ] `compile_graph()` 通过（含 ChatTrigger / ChatRequest / ChatResponseSegment 三条 wire）
-- [ ] runtime migrator 自动建出 `data_chat_trigger` 和 `data_chat_request` 表（boot 时 + integration test 双重验证）
+- [ ] runtime migrator 自动建出 `data_chat_request` 表（boot 时 + integration test 双重验证）；ChatTrigger 不建表（v3 修正：transient=True）
 - [ ] §5.1 单元测试全绿（route_chat_node + chat_node + wiring + durable dedup）
 - [ ] §5.4 grep 自检全部为 0
 - [ ] §5.2 e2e 飞书 dev bot 4 个场景通过（含群聊多 persona 和单聊单 persona）
