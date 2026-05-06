@@ -312,3 +312,131 @@ async def test_chat_node_pre_safety_block_at_final(monkeypatch, base_request):
     assert len(emitted) == 1
     assert emitted[0].content == "GUARD_TEXT"
     assert emitted[0].is_last is True
+
+
+@pytest.mark.asyncio
+async def test_chat_node_caps_mid_segments_at_max_messages_minus_one(monkeypatch, base_request):
+    """Stream with 5+ SPLITs should produce at most MAX_MESSAGES-1=3 mid + 1 final."""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    async def fake_stream(*a, **k):
+        # 5 parts → expect 3 mid + 1 final = 4 emits total
+        for p in ["p0", SPLIT, " p1", SPLIT, " p2", SPLIT, " p3", SPLIT, " p4"]:
+            yield p
+
+    async def fake_resolve(s, p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(s, mid): return "input"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(p): return "guard"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    assert len(emitted) == 4  # 3 mid + 1 final
+    assert emitted[0].is_last is False
+    assert emitted[1].is_last is False
+    assert emitted[2].is_last is False
+    assert emitted[3].is_last is True
+    # Last segment carries everything past the 3rd SPLIT in its full_content
+    assert "p3" in emitted[3].full_content
+    assert "p4" in emitted[3].full_content
+
+
+@pytest.mark.asyncio
+async def test_chat_node_no_split_emits_single_final_segment(monkeypatch, base_request):
+    """Stream with no SPLIT_MARKER → 1 final segment, content = full_content."""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    async def fake_stream(*a, **k):
+        for p in ["only ", "one ", "piece"]:
+            yield p
+
+    async def fake_resolve(s, p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(s, mid): return "input"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(p): return "guard"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    assert len(emitted) == 1
+    assert emitted[0].part_index == 0
+    assert emitted[0].is_last is True
+    assert "only one piece" in emitted[0].content
+    assert emitted[0].full_content == "only one piece"
+
+
+@pytest.mark.asyncio
+async def test_resolve_pre_safety_for_part_fail_open_on_timeout():
+    """Helper should return ALLOW with original content when pre_task times out."""
+    from app.nodes.chat_node import _resolve_pre_safety_for_part
+
+    async def slow_pre():
+        await asyncio.sleep(10)  # would never complete within helper's timeout
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=True)
+
+    pre_task = asyncio.create_task(slow_pre())
+    try:
+        # Use a very short timeout to force the wait_for to TimeoutError
+        result = await _resolve_pre_safety_for_part(
+            "hello", pre_task, "GUARD", timeout=0.01,
+        )
+        assert result.blocked is False
+        assert result.content == "hello"  # original part returned (fail-open)
+    finally:
+        pre_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_resolve_pre_safety_for_part_fail_open_on_exception():
+    """Helper should return ALLOW with original content when pre_task raises."""
+    from app.nodes.chat_node import _resolve_pre_safety_for_part
+
+    async def failing_pre():
+        raise ValueError("simulated failure")
+
+    pre_task = asyncio.create_task(failing_pre())
+    # Wait for the task to fail before passing to helper
+    try:
+        await pre_task
+    except ValueError:
+        pass
+
+    result = await _resolve_pre_safety_for_part("hello", pre_task, "GUARD")
+    assert result.blocked is False
+    assert result.content == "hello"

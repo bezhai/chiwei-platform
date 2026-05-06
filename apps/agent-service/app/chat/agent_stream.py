@@ -23,7 +23,7 @@ from collections.abc import AsyncGenerator
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.tools import ALL_TOOLS
-from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS, header_vars
+from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS
 from app.chat.context import (
     build_chat_context,
     is_proactive_var,
@@ -62,8 +62,6 @@ async def _build_and_stream(
 
     from app.skills.registry import SkillRegistry
 
-    bot_name = header_vars["app_name"].get() or ""
-
     prompt_vars: dict[str, str] = {
         "complexity_hint": "",
         "inner_context": "",
@@ -86,10 +84,12 @@ async def _build_and_stream(
         yield "抱歉，未找到相关消息记录"
         return
 
-    # Load persona
+    # Load persona. ``chat_node`` always supplies a non-empty ``persona_id``
+    # (ChatRequest's joint Key requires it), so ``_load_bot_context`` always
+    # takes the persona_id branch and ``bot_name`` is unused here.
     bot_ctx = await _load_bot_context(
         persona_id=persona_id,
-        bot_name=bot_name,
+        bot_name="",
         chat_id=ctx.chat_id,
         chat_type=ctx.chat_type,
     )
