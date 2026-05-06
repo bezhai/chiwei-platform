@@ -232,3 +232,83 @@ async def test_chat_node_split_two_segments_then_final(monkeypatch, base_request
     for s in emitted:
         assert s.lane == "dev"
         assert s.bot_name == "bot-x"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_pre_safety_block_at_first_boundary(monkeypatch, base_request):
+    """verdict=BLOCK 在第一个段边界返回 -> emit 1 段 guard + is_last=True，无后续。"""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=True)
+
+    async def fake_stream(*a, **k):
+        for p in ["hello", SPLIT, " world", SPLIT, " final"]:
+            yield p
+
+    async def fake_resolve(s, p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(s, mid): return "input"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(p): return "GUARD_TEXT"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    # 飞书侧只看到一段 guard + is_last=True
+    assert len(emitted) == 1
+    assert emitted[0].content == "GUARD_TEXT"
+    assert emitted[0].is_last is True
+    assert emitted[0].full_content == "GUARD_TEXT"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_pre_safety_block_at_final(monkeypatch, base_request):
+    """stream 已结束（无 SPLIT），verdict 在 final 段到达时为 BLOCK。"""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.chat.pre_safety_gate import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=True)
+
+    async def fake_stream(*a, **k):
+        for p in ["just one piece"]:
+            yield p
+
+    async def fake_resolve(s, p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(s, mid): return "input"
+    async def fake_find_gray(s, mid): return {}
+    async def fake_guard(p): return "GUARD_TEXT"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_via_graph", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "get_session", _fake_get_session_factory())
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    assert len(emitted) == 1
+    assert emitted[0].content == "GUARD_TEXT"
+    assert emitted[0].is_last is True

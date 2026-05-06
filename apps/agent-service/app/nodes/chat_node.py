@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
@@ -35,6 +36,42 @@ from app.runtime import node
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PreSafetyResult:
+    blocked: bool
+    content: str  # ALLOW: 原 part；BLOCK: 不用，由调用方 emit guard
+
+
+async def _resolve_pre_safety_for_part(
+    part: str,
+    pre_task: asyncio.Task,
+    guard_message: str,
+    timeout: float = 5.0,
+) -> _PreSafetyResult:
+    """段边界等 verdict（已 done 即立刻返回，未 done 则带 timeout 等）。
+
+    fail-open（pre_task 抛 / timeout）-> ALLOW（与 _buffer_until_pre 现行
+    fail-open 行为一致）。
+    """
+    if not pre_task.done():
+        try:
+            await asyncio.wait_for(pre_task, timeout=timeout)
+        except TimeoutError:
+            logger.warning("pre_safety timeout (%.1fs), fail-open", timeout)
+            return _PreSafetyResult(blocked=False, content=part)
+        except Exception as e:
+            logger.error("pre_safety exception (fail-open): %s", e)
+            return _PreSafetyResult(blocked=False, content=part)
+    try:
+        verdict = pre_task.result()
+    except Exception as e:
+        logger.error("pre_safety result raise (fail-open): %s", e)
+        return _PreSafetyResult(blocked=False, content=part)
+    if verdict.is_blocked:
+        return _PreSafetyResult(blocked=True, content=guard_message)
+    return _PreSafetyResult(blocked=False, content=part)
 
 
 @node
@@ -174,13 +211,24 @@ async def chat_node(req: ChatRequest) -> None:
         lane=req.lane,  # CRITICAL: sink 不会自动注入 header lane
     )
 
-    # 5. 主循环 + 中段 emit
+    # 5. 主循环 + 中段 emit (with pre-safety BLOCK termination)
     SPLIT_MARKER = "---split---"
     MAX_MESSAGES = 4
 
     sent_length = 0
     part_index = 0
     full_content = ""
+
+    async def _emit_block_guard():
+        await emit(ChatResponseSegment(
+            **base_payload,
+            part_index=part_index,
+            content=guard_message,
+            status="success",
+            is_last=True,
+            full_content=guard_message,
+            published_at=int(time.time() * 1000),
+        ))
 
     async for text in _build_and_stream(
         req.message_id,
@@ -196,11 +244,16 @@ async def chat_node(req: ChatRequest) -> None:
             idx = pending.index(SPLIT_MARKER)
             part = pending[:idx].strip()
             if part:
-                # Task 11: pre-safety BLOCK 在段边界检查；本 task 暂时直接 emit
+                result = await _resolve_pre_safety_for_part(
+                    part, pre_task, guard_message,
+                )
+                if result.blocked:
+                    await _emit_block_guard()
+                    return
                 await emit(ChatResponseSegment(
                     **base_payload,
                     part_index=part_index,
-                    content=part,
+                    content=result.content,
                     status="success",
                     is_last=False,
                     full_content=None,
@@ -210,27 +263,24 @@ async def chat_node(req: ChatRequest) -> None:
             sent_length += idx + len(SPLIT_MARKER)
             pending = full_content[sent_length:]
 
-    # 6. final 段 (Task 11: 加 BLOCK 路径)
+    # 6. final 段
     remaining = full_content[sent_length:].replace(SPLIT_MARKER, "").strip()
     clean_full = full_content.replace(SPLIT_MARKER, "\n\n").strip()
     final_content = (
         (remaining or full_content) if (remaining or part_index == 0) else ""
     )
+    result = await _resolve_pre_safety_for_part(
+        final_content, pre_task, guard_message,
+    )
+    if result.blocked:
+        await _emit_block_guard()
+        return
     await emit(ChatResponseSegment(
         **base_payload,
         part_index=part_index,
-        content=final_content,
+        content=result.content,
         status="success",
         is_last=True,
         full_content=clean_full,
         published_at=int(time.time() * 1000),
     ))
-
-    # pre_task 还可能 pending，让它自然完成或 cancel（Task 11 重写）
-    if not pre_task.done():
-        try:
-            await asyncio.wait_for(pre_task, timeout=0.1)
-        except (TimeoutError, Exception):
-            pre_task.cancel()
-
-    _ = (parsed, guard_message)  # Task 11 用 (BLOCK 路径)
