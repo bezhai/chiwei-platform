@@ -129,6 +129,12 @@ wire(ChatResponseChunk).to(drift_observer).when(lambda c: c.is_final)
 
 这意味着 chat pipeline 的迁移不再依赖"后补 stream 建模"——本设计从 Phase 0 起就把 `Stream[T]` 作为 runtime 一等公民实现。
 
+> **Errata（Phase 5a，2026-05-06）**: `Stream[T]` 经 Phase 1-4 实践证伪。
+> "一调用产多值"场景由 `@node` 内部多次 `await emit(...)` 表达即可
+> （`nodes/life_dataflow._fan_out_per_persona` 自 Phase 4 起大规模在用；
+> chat 的段输出在 Phase 5a 同样走这个模式）。Phase 5a 落地时删除
+> `runtime/stream.py` 与 `node.py` 的 `Stream` 校验。
+
 ### 层 2 · Node
 
 业务函数，只写输入输出：

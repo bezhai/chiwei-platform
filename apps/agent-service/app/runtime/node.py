@@ -11,16 +11,13 @@ Reflects on the function's type hints to:
   * register the function in ``NODE_REGISTRY``.
 
 Behavior: the decorator wraps ``fn`` so that a returned ``Data`` is
-automatically emitted into the graph via ``runtime.emit.emit`` — spec
-forbids business code from calling ``emit`` / ``mq.publish`` to the next
-hop manually. ``None`` returns are skipped. The wrapper still returns
-the value to its caller so unit tests can assert on it directly.
-
-``Stream[T]`` parameters / returns are intentionally rejected: the
-runtime wrapper only auto-emits a single ``Data`` instance and has no
-async-iteration dispatch. The type marker exists in ``app.runtime.stream``
-for future use but is not part of the public API today; using it in a
-``@node`` signature raises ``TypeError`` at decorate time.
+automatically emitted into the graph via ``runtime.emit.emit``. ``None``
+returns are skipped. Multi-output cases (fan-out, streaming segment
+emission per chunk) are expressed by calling ``await emit(...)``
+directly inside the @node body — this is in active use since Phase 4
+(see ``nodes/life_dataflow._fan_out_per_persona``) and is the canonical
+way to handle "one call produces multiple values". The wrapper still
+returns the value to its caller so unit tests can assert on it.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
 from app.runtime.data import Data, is_admin_only
-from app.runtime.stream import is_stream
 
 NODE_REGISTRY: set[Callable] = set()
 _NODE_META: dict[Callable, dict] = {}
@@ -76,11 +72,6 @@ def node(fn: Callable) -> Callable:
         )
     inputs: dict[str, type] = {}
     for name, t in hints.items():
-        if is_stream(t):
-            raise TypeError(
-                f"{fn.__name__}.{name}: Stream[X] is not supported; the "
-                f"runtime has no async-iteration dispatch yet"
-            )
         if not (isinstance(t, type) and issubclass(t, Data)):
             raise TypeError(
                 f"{fn.__name__}.{name} must be a Data subclass"
@@ -90,11 +81,6 @@ def node(fn: Callable) -> Callable:
         # ``Data | None`` returns are allowed — the @node may emit None to
         # skip emission. Validation + metadata use the inner type.
         unwrapped = _unwrap_optional(ret)
-        if is_stream(unwrapped):
-            raise TypeError(
-                f"{fn.__name__} returns Stream[X] which is not supported; "
-                f"the runtime wrapper only auto-emits a single Data instance"
-            )
         if not (isinstance(unwrapped, type) and issubclass(unwrapped, Data)):
             raise TypeError(
                 f"{fn.__name__} return must be Data or Data | None"

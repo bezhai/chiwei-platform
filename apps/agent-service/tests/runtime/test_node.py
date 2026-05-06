@@ -95,25 +95,3 @@ def test_sync_function_rejected_at_decorate_time():
         @node
         def sync_node(msg: Msg) -> Frag:  # type: ignore[misc]
             return Frag(fid="f1", vec=[0.0])
-
-
-def test_stream_input_rejected():
-    """Stream[X] is a type marker but the runtime has no async-iteration
-    dispatch, so a @node accepting Stream[X] would never run. Reject it
-    at decorate time.
-    """
-    from app.runtime.stream import Stream
-
-    with pytest.raises(TypeError, match="Stream"):
-
-        @node
-        async def bad_stream(chunks: Stream[Msg]) -> None: ...
-
-
-def test_stream_return_rejected():
-    from app.runtime.stream import Stream
-
-    with pytest.raises(TypeError, match="Stream"):
-
-        @node
-        async def bad_stream_ret(msg: Msg) -> Stream[Frag]: ...  # type: ignore[misc]
