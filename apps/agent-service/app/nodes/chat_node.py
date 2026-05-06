@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
@@ -33,44 +32,12 @@ from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.runtime import node
 from app.runtime.emit import emit
+from app.nodes._chat_pre_safety import (
+    _PreSafetyResult,
+    _resolve_pre_safety_for_part,
+)
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _PreSafetyResult:
-    blocked: bool
-    content: str  # ALLOW: 原 part；BLOCK: 不用，由调用方 emit guard
-
-
-async def _resolve_pre_safety_for_part(
-    part: str,
-    pre_task: asyncio.Task,
-    guard_message: str,
-    timeout: float = 5.0,
-) -> _PreSafetyResult:
-    """段边界等 verdict（已 done 即立刻返回，未 done 则带 timeout 等）。
-
-    fail-open（pre_task 抛 / timeout）-> ALLOW（保持与 Phase 2 pre-safety
-    设计一致的 fail-open 语义）。
-    """
-    if not pre_task.done():
-        try:
-            await asyncio.wait_for(pre_task, timeout=timeout)
-        except TimeoutError:
-            logger.warning("pre_safety timeout (%.1fs), fail-open", timeout)
-            return _PreSafetyResult(blocked=False, content=part)
-        except Exception as e:
-            logger.error("pre_safety exception (fail-open): %s", e)
-            return _PreSafetyResult(blocked=False, content=part)
-    try:
-        verdict = pre_task.result()
-    except Exception as e:
-        logger.error("pre_safety result raise (fail-open): %s", e)
-        return _PreSafetyResult(blocked=False, content=part)
-    if verdict.is_blocked:
-        return _PreSafetyResult(blocked=True, content=guard_message)
-    return _PreSafetyResult(blocked=False, content=part)
 
 
 @node
