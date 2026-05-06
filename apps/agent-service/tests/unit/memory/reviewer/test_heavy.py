@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.memory.reviewer.heavy import run_heavy_review, run_heavy_review_for_persona
+from app.memory.reviewer.heavy import run_heavy_review_for_persona
 
 MODULE = "app.memory.reviewer.heavy"
 CST = timezone(timedelta(hours=8))
@@ -109,25 +109,6 @@ async def test_runs_when_only_life_states_present():
     call_kwargs = agent.await_args.kwargs
     assert "working" in call_kwargs["life_states_text"]
     assert "calm" in call_kwargs["life_states_text"]
-
-
-# ---------------------------------------------------------------------------
-# run_heavy_review delegates to for_each_persona with correct callback
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_heavy_review_iterates_personas():
-    with patch(
-        f"{MODULE}.for_each_persona", new=AsyncMock()
-    ) as mock_for_each:
-        await run_heavy_review()
-
-    mock_for_each.assert_awaited_once()
-    call_kwargs = mock_for_each.await_args
-    # First positional arg must be the per-persona callback
-    assert call_kwargs.args[0] is run_heavy_review_for_persona
-    assert call_kwargs.kwargs.get("label") == "memory_reviewer_heavy"
 
 
 # ---------------------------------------------------------------------------

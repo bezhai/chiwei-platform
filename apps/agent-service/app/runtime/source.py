@@ -28,8 +28,12 @@ class Source:
         return SourceSpec("http", {"path": path})
 
     @staticmethod
-    def cron(expr: str) -> SourceSpec:
-        return SourceSpec("cron", {"expr": expr})
+    def cron(expr: str, *, tz: str = "UTC") -> SourceSpec:
+        """5-field cron expression. ``tz``: IANA zone name
+        (e.g. 'Asia/Shanghai'); the loop fires at the right wall-clock
+        time in that zone. ``croniter.get_next`` is absolute-time based.
+        """
+        return SourceSpec("cron", {"expr": expr, "tz": tz})
 
     @staticmethod
     def interval(seconds: float) -> SourceSpec:
