@@ -5,9 +5,9 @@ Two entry points, one pipeline:
     (lark-server today) keep posting ``{"message_id": X}`` frames to the
     old queue; the engine decodes them into ``MessageRequest`` and invokes
     ``hydrate_message`` which pulls the real row and emits a ``Message``.
-  * ``emit_legacy_message(cm)`` (inside proactive.py and other Python-side
-    ConversationMessage writers) lifts the row directly into a ``Message``
-    via the in-process emit, bypassing the queue.
+  * ``proactive.py`` and other Python-side ConversationMessage writers lift
+    the row directly into a ``Message`` via the in-process emit
+    (using ``Message.from_cm()``), bypassing the queue.
 
 Both paths converge on the durable ``Message`` wire, so ``vectorize``
 receives messages from either source indistinguishably. ``Fragment`` is

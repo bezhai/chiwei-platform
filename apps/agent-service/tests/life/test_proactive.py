@@ -1,8 +1,8 @@
-"""Phase 5b — proactive 写完 ConversationMessage 后直接 emit Message（不经 Bridge）。
+"""Proactive emits Message directly via runtime emit.
 
-invariant 测试：5b 之前 proactive 经 ``emit_legacy_message(msg)``，
-5b 之后直连 ``await emit(Message.from_cm(msg))``，对 capture_emit
-fixture 的可观察行为相同——一条 ``Message`` 被 emit。
+Invariant: After writing a ConversationMessage, proactive directly
+``await emit(Message.from_cm(msg))``. This test pins the observable
+behavior: one ``Message`` object is emitted via the capture_emit fixture.
 """
 from __future__ import annotations
 

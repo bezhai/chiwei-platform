@@ -2,7 +2,7 @@
 
 Two branches to cover:
   * row present in pg -> returns ``Message`` with every field pass-through
-    via ``Message.from_cm`` (same mapping as ``emit_legacy_message``);
+    via ``Message.from_cm``;
   * row missing -> returns ``None`` (runtime drops None before the
     durable edge, so the next node never sees a stale request).
 
