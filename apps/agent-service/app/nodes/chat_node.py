@@ -98,12 +98,12 @@ async def chat_node(req: ChatRequest) -> None:
     """ChatRequest -> N × ChatResponseSegment (per persona).
 
     Phases (内部分块，不拆 node):
-      1. prep: fetch + parse + gray + guard + pre_task 启动 (this task)
-      2. fetch 为空 -> emit 1 段 "未找到" + return  (Task 8)
-      3. resolve response_bot_name + agent_responses 行更新  (Task 9)
-      4. base_payload 构造（含 lane）  (Task 9)
-      5. 主循环 + 中段 emit  (Task 10)
-      6. final 段 + pre-safety blocked 路径  (Task 11)
+      1. prep: fetch + parse + gray + guard + pre_task 启动
+      2. fetch-empty short-circuit: emit 1 段 "未找到" + return
+      3. resolve response_bot_name + agent_responses 行更新
+      4. base_payload 构造（含 lane）
+      5. 主循环 + 段边界 pre-safety + 中段 emit
+      6. final 段 + pre-safety blocked 路径
     """
     # 1. prep
     async with get_session() as s:
