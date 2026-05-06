@@ -12,12 +12,11 @@ Reflects on the function's type hints to:
 
 Behavior: the decorator wraps ``fn`` so that a returned ``Data`` is
 automatically emitted into the graph via ``runtime.emit.emit``. ``None``
-returns are skipped. Multi-output cases (fan-out, streaming segment
-emission per chunk) are expressed by calling ``await emit(...)``
-directly inside the @node body — this is in active use since Phase 4
-(see ``nodes/life_dataflow._fan_out_per_persona``) and is the canonical
-way to handle "one call produces multiple values". The wrapper still
-returns the value to its caller so unit tests can assert on it.
+returns are skipped. The single-emit case must use this wrapper return
+path; manual ``await emit(...)`` is reserved for genuine multi-output
+cases (fan-out, per-chunk segment emission) — in active use since
+Phase 4 (see ``nodes/life_dataflow._fan_out_per_persona``). The wrapper
+still returns the value to its caller so unit tests can assert on it.
 """
 
 from __future__ import annotations

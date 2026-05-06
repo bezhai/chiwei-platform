@@ -22,7 +22,7 @@ Source (外部触发)
 
 - 一个 `@node` **不知道自己的下游是谁**。它只声明"我拿 `Message` 进来,吐一个 `Fragment | None` 出去"。
 - 下游由 `wire(Fragment).to(save_fragment)` 声明,写在 `app/wiring/*.py` 里,和业务代码分离。
-- Runtime 是**调度器**,不是 orchestrator:它读 `WIRING_REGISTRY` 决定把谁发给谁,然后按边的类型(进程内 / durable)分派。Stream 边(`Stream[T]`)是 planned surface,当前 `@node` 装饰器在导入期就会拒绝带 `Stream[X]` 的签名,等 async-iteration dispatch 落地再放开。
+- Runtime 是**调度器**,不是 orchestrator:它读 `WIRING_REGISTRY` 决定把谁发给谁,然后按边的类型(进程内 / durable)分派。"一调用产多值"(LLM token、fan-out)直接在 @node body 里多次 `await emit(...)`,见「常见坑 #1」。
 - 图可以**跨进程**:同一张 wire 图,多个 Deployment 共享 —— `app/deployment.py` 的 `bind(node).to_app("xxx")` 决定 node 在哪个 pod 跑,`.durable()` 的边自动变成 RabbitMQ 消息。
 
 **关键特性:**
@@ -149,7 +149,6 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 | `async def f(x: Message) -> Fragment \| None` | `def f(x) -> Fragment` —— 参数/返回必须带注解 |
 | `async def f(x: M, y: User) -> F` —— 多输入 | `async def f(x: str)` —— 非 Data 参数 |
 |  | `async def f(x: Message) -> (Fragment, Log)` —— 不能返回 tuple |
-|  | `async def f(x: Stream[Chunk])` —— Stream 暂未支持(runtime 没有 async-iteration dispatch),装饰时 `TypeError` |
 
 **注意**:装饰器只装最顶层。在 @node 里**不要**手写 `await emit(...)` 或 `await mq.publish(...)`。见「常见坑 #1」。
 
@@ -745,7 +744,7 @@ async def vectorize(msg: Message) -> Fragment | None:
 
 1. 每个 `Data` 子类至少一个 `Key` 字段(`__pydantic_init_subclass__`)。
 2. Adoption mode 的 Data **不能**带 `DedupKey` / `Version`(`__pydantic_init_subclass__`)。
-3. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。`Stream[X]` 当前未支持,使用就 `TypeError`。
+3. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。
 4. `@node` 不能返回 `AdminOnly` Data(`node()` 装饰时)。
 5. 一个 @node 只能绑一个 App(`placement.bind` 重复绑定 raises)。
 6. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
