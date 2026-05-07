@@ -167,7 +167,7 @@ async def _build_and_stream(
             },
         )
 
-        schedule_post_actions(
+        await schedule_post_actions(
             full_content=state.full_content,
             session_id=session_id,
             chat_id=ctx.chat_id,

@@ -21,16 +21,16 @@ import time
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlalchemy import select
 
 from app.agent.prompts import get_prompt
-from app.chat.content_parser import parse_content, update_tos_files
+from app.chat.content_parser import parse_content
 from app.chat.quick_search import QuickSearchResult, quick_search
-from app.data.models import ConversationMessage
 from app.data.queries import find_group_download_permission
-from app.data.session import async_session, get_session
+from app.data.session import get_session
+from app.domain.chat_events import ConversationMessageContentSynced
 from app.infra.image import ImageRegistry, image_client
 from app.infra.redis import get_redis
+from app.runtime import emit
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +114,16 @@ async def build_chat_context(
     # --- Image processing ---
     image_key_to_url, image_key_to_file = await _collect_images(l1_results, chat_type)
 
-    # Persist new TOS files in background
+    # Persist new TOS files in background via dataflow (Phase 6 v4 Gap 5).
     if image_key_to_file:
-        asyncio.create_task(_persist_tos_files(l1_results, image_key_to_file))
+        await emit(ConversationMessageContentSynced(
+            message_id=message_id,
+            messages_json=[
+                {"message_id": m.message_id, "content": m.content}
+                for m in l1_results
+            ],
+            image_key_to_file=dict(image_key_to_file),
+        ))
 
     # Register all images
     redis = await get_redis()
@@ -269,47 +276,6 @@ async def _collect_images(
                 logger.warning("Image processing failed: key=%s, msg=%s", key, msg_id)
 
     return image_key_to_url, image_key_to_file
-
-
-# ---------------------------------------------------------------------------
-# TOS file persistence (background)
-# ---------------------------------------------------------------------------
-
-
-async def _persist_tos_files(
-    messages: list[QuickSearchResult],
-    image_key_to_file: dict[str, str],
-) -> None:
-    """Write tos_file back into message content items (background task)."""
-    try:
-        msg_updates: dict[str, dict[str, str]] = {}
-        for msg in messages:
-            parsed = parse_content(msg.content)
-            new_mappings = {}
-            for key in parsed.image_keys:
-                if key in image_key_to_file and key not in parsed.tos_files:
-                    new_mappings[key] = image_key_to_file[key]
-            if new_mappings:
-                msg_updates[msg.message_id] = new_mappings
-
-        if not msg_updates:
-            return
-
-        async with async_session() as session:
-            for mid, mapping in msg_updates.items():
-                row = await session.scalar(
-                    select(ConversationMessage).where(
-                        ConversationMessage.message_id == mid
-                    )
-                )
-                if row:
-                    updated = update_tos_files(row.content, mapping)
-                    if updated:
-                        row.content = updated
-            await session.commit()
-            logger.info("tos_file persisted for %d messages", len(msg_updates))
-    except Exception:
-        logger.warning("tos_file persistence failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

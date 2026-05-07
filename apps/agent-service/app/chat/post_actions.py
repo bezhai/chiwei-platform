@@ -8,7 +8,6 @@ Triggers:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
@@ -70,32 +69,34 @@ async def _emit_memory_trigger(trigger: Data) -> None:
         )
 
 
-def schedule_post_actions(
+async def schedule_post_actions(
     full_content: str,
     session_id: str | None,
     chat_id: str,
     message_id: str,
     persona_id: str,
 ) -> None:
-    """Schedule all fire-and-forget post-processing tasks.
+    """Run all fire-and-forget post-processing tasks via dataflow emit.
 
-    Called after the main stream completes. All tasks are non-blocking.
+    Called after the main stream completes; the chat stream chunks have
+    already been yielded by this point, so the few-ms cost of awaiting
+    the emits sequentially is invisible to the user. Each helper still
+    swallows its own exceptions to preserve fire-and-forget semantics
+    (Phase 6 v4 Gap 5: replaced asyncio.create_task with await emit).
     """
     if not full_content:
         return
 
-    # 1. Post safety check (RabbitMQ)
+    # 1. Post safety check (durable wire -> run_post_safety)
     if session_id:
-        asyncio.create_task(
-            _publish_post_check(session_id, full_content, chat_id, message_id)
-        )
+        await _publish_post_check(session_id, full_content, chat_id, message_id)
 
     # 2. Identity drift (debounced voice regeneration via dataflow)
-    asyncio.create_task(_emit_memory_trigger(
+    await _emit_memory_trigger(
         DriftTrigger(chat_id=chat_id, persona_id=persona_id)
-    ))
+    )
 
     # 3. Afterthought (conversation fragment generation via dataflow)
-    asyncio.create_task(_emit_memory_trigger(
+    await _emit_memory_trigger(
         AfterthoughtTrigger(chat_id=chat_id, persona_id=persona_id)
-    ))
+    )

@@ -1,0 +1,63 @@
+"""persist_tos_files_node — write tos_file mappings back into message.content.
+
+Phase 6 v4 Gap 5: extracted from ``app/chat/context.py:_persist_tos_files``,
+re-emitted as a durable wire so the DB write happens out-of-band of the
+chat stream while keeping the same effective placement (agent-service
+main process). Replaces the old ``asyncio.create_task`` fire-and-forget
+that bypassed the graph.
+"""
+from __future__ import annotations
+
+import logging
+
+from sqlalchemy import select
+
+from app.chat.content_parser import parse_content, update_tos_files
+from app.data.models import ConversationMessage
+from app.data.session import async_session
+from app.domain.chat_events import ConversationMessageContentSynced
+from app.runtime import node
+
+logger = logging.getLogger(__name__)
+
+
+@node
+async def persist_tos_files_node(e: ConversationMessageContentSynced) -> None:
+    """Persist tos_file mappings into ConversationMessage.content rows.
+
+    Internal failures are logged and swallowed — this is fire-and-forget
+    background sync, the data is still recoverable on the next chat turn
+    because ``_collect_images`` will fall through to the full pipeline.
+    """
+    try:
+        msg_updates: dict[str, dict[str, str]] = {}
+        for msg in e.messages_json:
+            content = msg.get("content")
+            if content is None:
+                continue
+            parsed = parse_content(content)
+            new_mappings: dict[str, str] = {}
+            for key in parsed.image_keys:
+                if key in e.image_key_to_file and key not in parsed.tos_files:
+                    new_mappings[key] = e.image_key_to_file[key]
+            if new_mappings:
+                msg_updates[msg["message_id"]] = new_mappings
+
+        if not msg_updates:
+            return
+
+        async with async_session() as session:
+            for mid, mapping in msg_updates.items():
+                row = await session.scalar(
+                    select(ConversationMessage).where(
+                        ConversationMessage.message_id == mid
+                    )
+                )
+                if row:
+                    updated = update_tos_files(row.content, mapping)
+                    if updated:
+                        row.content = updated
+            await session.commit()
+            logger.info("tos_file persisted for %d messages", len(msg_updates))
+    except Exception:
+        logger.warning("tos_file persistence failed", exc_info=True)
