@@ -16,7 +16,6 @@ from sqlalchemy.future import select as sa_select
 
 from app.data.models import ConversationMessage
 from app.data.session import get_session
-from app.infra.rabbitmq import CHAT_REQUEST, mq
 
 logger = logging.getLogger(__name__)
 
@@ -141,29 +140,26 @@ async def submit_proactive_chat(
         session.add(msg)
     # get_session() commits on block exit; emit AFTER commit so downstream
     # consumers querying pg will see the row.
+    from app.domain.chat_dataflow import ChatTrigger
     from app.domain.message import Message
+    from app.infra.rabbitmq import current_lane
     from app.runtime import emit  # local import to avoid boot cycles
 
     await emit(Message.from_cm(msg))
 
-    # Publish to chat_request queue
-    from app.infra.rabbitmq import current_lane
-
-    lane = current_lane()
-    await mq.publish(
-        CHAT_REQUEST,
-        {
-            "session_id": session_id,
-            "message_id": message_id,
-            "chat_id": chat_id,
-            "is_p2p": False,
-            "root_id": target_lark_id or "",
-            "user_id": PROACTIVE_USER_ID,
-            "bot_name": bot_name,
-            "is_proactive": True,
-            "lane": lane,
-            "enqueued_at": now_ms,
-        },
+    await emit(
+        ChatTrigger(
+            message_id=message_id,
+            session_id=session_id,
+            chat_id=chat_id,
+            is_p2p=False,
+            root_id=target_lark_id or None,
+            user_id=PROACTIVE_USER_ID,
+            bot_name=bot_name,
+            is_proactive=True,
+            lane=current_lane(),
+            enqueued_at=now_ms,
+        )
     )
 
     logger.info(
