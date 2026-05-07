@@ -1,311 +1,375 @@
-# Dataflow Phase 6 — 清扫（修订版）
-
-**状态**: Draft v3 (2026-05-07，吸收 reviewer blocking)
-**v3 关键变化（vs v2）**：
-- §2.3 推翻 v2 "整段删 try/except"，改为**保留 catch 但升级监控**。reviewer blocking 命中要害：`glimpse.py:228-242` 在 submit 之前已经 insert_fragment + enqueue_fragment_vectorize，submit 之后 insert_glimpse_state（line 291-299）；`wiring/life_dataflow.py:77` 是 `GlimpseRequest.durable()`，`durable.py:137-145` 先 insert_idempotent 后跑 consumer，DLQ 重放会被 dedup 跳过 → glimpse fail 后 last_seen 不推进 → 下次 cron tick 同样 messages 走一遍 → fragment_id `new_id("f")` 每次新 → **重复 fragment + 重复 vectorize**。删 try 引入数据脏化代价远大于"主动消息观测性升级"的收益。修法：保留 try/except，`logger.error` → `logger.exception` 拿 traceback；`state_observation` 拼接 `[chat_submit_failed]` 标记（与现有 `[want_to_speak:throttled]` 同款）。失败可 Loki 关键字告警，glimpse_state 仍落盘。修 reviewer v2 blocking
-- §4 新增测试断言：`app.data.queries.__all__` 是 7 个 domain `__all__` 的并集 + 与硬编码已知函数清单（spec §3.3 全部 67 函数）比对完全相等 + 无重复名字（reviewer #5）。`from X import *` 重名是后者覆盖不报错，仅靠 ruff/mypy 不可靠 —— v2 §3.4 那句删除/订正
-- §2.5 风险描述同步：v2 写"glimpse 删 try 后失败可观测性提升"已不成立，整条删除。新增：保留 catch 后旧的"边界异常被吞"行为不变，但 `logger.exception` + state_observation 标记让 Loki 关键字告警可建。
-
-**v2 关键变化（vs v1）**：
-- §2.3 / §2.4 第一刀同时**收窄 glimpse.py:277-287 的 try/except**：旧路径下 `submit_proactive_chat()` 走 fire-and-forget mq.publish + glimpse 业务层 catch 吞错；新路径下 emit 走 in-process，route_chat_node 任何异常会上抛到 submit 调用点。如果保留 glimpse 的 catch，错会被业务层吞掉，**比旧路径 mq source 进 DLQ 的可观测性退化**。第一刀必须同时改 glimpse 让异常正常传播。修 reviewer #1
-- §4 新增 placement 硬验收：`route_chat_node in nodes_for_app("agent-service")` + `chat_node in nodes_for_app("agent-service")`。`emit.py:96` 按 APP_NAME 过滤 in-process consumer，当前 `deployment.py` 没显式 bind chat node 所以 fall through 到 default app（agent-service）；未来一加 bind 会静默跳过 fan-out，必须有测试兜底。修 reviewer #2
-- §3.3 函数归类调整：新增 `agent_response.py`（4 函数：set_agent_response_bot / is_chat_request_completed / get_safety_status / set_safety_status，主表都是 `agent_responses`，原 v1 错放 messages.py）；`find_gray_config` 从 persona.py 移到 messages.py（主表 LarkBaseChatInfo 是 chat 维度，与 message 共享 chat_id 主键，不是 BotPersona 表）。Domain 数 6 → 7。修 reviewer #3
-- §4 验收清单测试路径修正：`tests/wiring/test_chat_pipeline*.py` → 实际 `tests/wiring/test_chat_wiring.py` + `tests/nodes/test_route_chat_node.py` + `tests/nodes/test_chat_node.py`；`tests/unit/life/test_proactive.py` 第一刀后断言改成"先 emit Message 再 emit ChatTrigger"，不再 patch `mq.publish`。修 reviewer #4
-**前置**: PR #209 (Phase 5b chat pipeline + bridges 清扫) shipped to prod 1.0.0.328
-**后续**: 无（dataflow 重构主线收尾）
+# Dataflow Phase 6 — 终结清扫（capability gap surface）
 
-## 0. 修订说明：4 刀 → 2 刀
+**状态**: Draft v4 (2026-05-07，重定 scope 到原 dataflow design line 543 "终结清扫")
+**前置**: PR #209 (Phase 5b) shipped to prod 1.0.0.328；本期分支 `refactor/flow-parse-6` 已落 v3 4 commits（PR #210）作为 v4 baseline
+**后续**: v5/v6 继续闭合 capability gap，Gap 1-12 的全 surface 见 §1
 
-`memory/project_dataflow_phase6_scope.md` 原计划 4 刀清扫。Phase 6 启动时核对实现细节，发现 4 刀里有两刀**前提不成立**，本期降级为 2 刀（**第一刀 + 第三刀**）。
+## 0. v4 vs v3 的关系
 
-| 原刀 | 原计划 | 实际状态 | 结论 |
-|---|---|---|---|
-| 第一刀 | `proactive.py` mq.publish → emit ChatTrigger | publisher / consumer 同进程，emit in-process 命中 | ✅ 本期做 |
-| 第二刀 | `vectorize_memory.py` mq.publish → emit Data | publisher（agent-service）和 consumer（vectorize-worker）跨进程；`runtime/emit.py:54` 不会反查 wire 的 `Source.mq(...)` 自动 publish 到 mq queue —— emit 当前**不支持跨进程**，硬改会让消息丢失 | ❌ 推迟到 Phase 6.5（runtime emit 跨进程能力升级） |
-| 第三刀 | `data/queries.py` 1283 行拆 6 domain | 纯机械拆，无业务变化 | ✅ 本期做 |
-| 第四刀 | `workers/state_sync_worker.py` 死代码删除 | `update_schedule.py:38-42` 通过 arq enqueue `"sync_life_state_after_schedule"` 字符串名，`arq_settings.py:88` 注册它为 worker function —— 两个文件都活的，**没有死代码** | ❌ 取消 |
+v3（2 刀：proactive emit ChatTrigger + queries.py 拆 9 domain）已落 PR #210，4 commits：
+- `d312a48` glimpse 升级监控（保留 catch + `[chat_submit_failed]` 标记）
+- `aece91d` chat placement 硬验收
+- `53961db` proactive emit ChatTrigger
+- `b3920c3` queries.py 拆 9 domain
 
-## 1. 背景与动机
+v4 **重定 Phase 6 的 scope** 到原 dataflow design `2026-04-21-agent-dataflow-abstraction-design.md` line 543：
 
-Phase 0–5b 全部 ship 后，按 `2026-04-21-agent-dataflow-abstraction-design.md` 的目标对齐扫了一遍 `apps/agent-service`，剩两处仍偏离设计目标：
+> 7. **Phase 6 — 清扫**：删除旧代码、旧 worker 入口、旧 orm crud god object、bridge 残留。
 
-1. **`life/proactive.py:153`** —— Glimpse 决定主动开口时，proactive submit 走的是裸 `mq.publish(CHAT_REQUEST, ...)`，没收敛到 Phase 5a 的 `ChatTrigger` Data 入口。chat 主入口（lark-server publish）和 proactive 入口（agent-service 内部 submit）应统一走同一个 Data，否则 `route_chat_node` 不是单一入口，dataflow 抽象漏了一个口子。
+v3 把 Phase 6 砍成 2 刀（"emit 跨进程不存在"+"workers 没死代码"两个事实约束让原 4 刀降级），剩下扔给虚构的"Phase 7+"。但**原 dataflow design 没规划 Phase 7+**，扔出去的事变成无主之地、长期债务。
 
-2. **`data/queries.py` 1283 行** —— 跨 6 个 domain（Model Provider / Persona / Messages / Schedule / Life / Memory v4）的 god module，违反 CLAUDE.md "单文件 <300 行 + 单一职责"。每次改 memory v4 查询都要在巨长文件里翻，新人理解成本高。
+v4 的工作：
+1. **把 Phase 6 拉回原设计 scope**（业务代码绕开 framework 的痕迹一次清完）
+2. **从 framework capability gap 视角组织 spec**（不是从代码改动量视角），后续 v5/v6/... 沿 capability 维度迭代
+3. **不留隐患**：v4 实施的 gap 必须做透（无 deprecated wrapper / shim / fallback / TODO）；v4 不实施的 gap **业务代码不允许 workaround**（只能用 framework 当前提供的 primitive 或 fail-fast）。
 
-**业务收益**: 无。纯架构清扫。
-**工程收益**:
-- chat 入口收敛到单一 `ChatTrigger` Data（route_chat_node 唯一入口）
-- `data/queries.py` 拆 6 个 domain 文件，单文件可读、单 domain 单一职责
-- `grep "mq.publish" apps/agent-service/app/` 减少一处（proactive）
+v3 已实施部分（proactive emit / queries 拆）属于 v4 衍生清扫的子集，**保留 PR #210 那 4 commit 不动**，v4 在它们之上继续。
 
-## 2. 第一刀 — proactive emit ChatTrigger
-
-### 2.1 现状
-
-`apps/agent-service/app/life/proactive.py:95-174` `submit_proactive_chat()`：
-
-```python
-async def submit_proactive_chat(chat_id, persona_id, target_message_id, stimulus) -> str:
-    # ... 1. resolve target、bot_name、构造 synthetic ConversationMessage
-    async with get_session() as session:
-        msg = ConversationMessage(...)
-        session.add(msg)
-    # 2. emit Message（已在 graph 里）
-    from app.domain.message import Message
-    from app.runtime import emit
-    await emit(Message.from_cm(msg))
-
-    # 3. publish 到 chat_request mq queue ← 本刀目标
-    from app.infra.rabbitmq import current_lane
-    lane = current_lane()
-    await mq.publish(CHAT_REQUEST, {
-        "session_id": session_id, "message_id": message_id, "chat_id": chat_id,
-        "is_p2p": False, "root_id": target_lark_id or "", "user_id": PROACTIVE_USER_ID,
-        "bot_name": bot_name, "is_proactive": True, "lane": lane, "enqueued_at": now_ms,
-    })
-    return session_id
-```
+## 1. Framework Capability Gap Surface（共 12 个）
 
-### 2.2 改造
+每条格式：**framework 现状 / 业务绕痕 / 缺什么 / 目标版本 / 不留隐患约束**。
 
-第 3 步替换为：
+### v4 范围（6 个 gap，本期必须闭合）
 
-```python
-from app.domain.chat_dataflow import ChatTrigger
-from app.infra.rabbitmq import current_lane
+#### Gap 1 — HTTP Source 不完整
 
-await emit(ChatTrigger(
-    message_id=message_id,
-    session_id=session_id,
-    chat_id=chat_id,
-    is_p2p=False,
-    root_id=target_lark_id or None,  # ChatTrigger.root_id 是 Optional，传 None 而非空字串
-    user_id=PROACTIVE_USER_ID,
-    bot_name=bot_name,
-    is_proactive=True,
-    lane=current_lane(),
-    enqueued_at=now_ms,
-))
-```
+**Framework 现状**: `runtime/http_source.py` 36 行；只支持 `Source.http(path)` POST + JSON body + 202 fire-and-forget。
 
-文件顶部 `from app.infra.rabbitmq import CHAT_REQUEST, mq` 删除（如 `mq` 没有其它使用）。
+**业务绕痕**: `api/routes.py` 292 行 / 13 个手写 `@router.get/post/delete`，覆盖 health / 4 admin trigger / 4 GET 查询 / 1 POST 写返回 / 1 DELETE / 1 root 死代码 / 1 search / 1 debug。
 
-### 2.3 同时修：升级 glimpse 的异常监控（保留 catch）
+**缺什么**:
+- HTTP method（GET / DELETE / PUT，不只是 POST）
+- path 参数（`/api/schedule/{id}` 这类）
+- query 参数（`?persona_id=xxx` 这类）
+- sync response body（业务想拿写后返回值 / 查询结果，不只是 fire-and-forget 202）
+- 健康检查 builtin 入口（不需要业务声明 wire）
 
-**reviewer #1 + reviewer v2 blocking 共同触发的改动，必须随第一刀同步落地**。
+**v4 目标**: `runtime/http_source.py` 扩到完整 capability，所有 13 个 endpoint 全走 wiring；`routes.py` 删除（或仅留 < 30 行的 `register_http_sources(app)` 调用，且 main.py 已经 import wiring）。
 
-`apps/agent-service/app/life/glimpse.py:277-287` 现状：
-
-```python
-try:
-    await submit_proactive_chat(chat_id=..., persona_id=..., target_message_id=..., stimulus=...)
-except Exception as exc:
-    logger.error("[%s] Glimpse proactive submit failed: %s", persona_id, exc)
-```
-
-#### 旧路径（mq.publish fire-and-forget）
-
-submit 内部 publish chat_request 队列，本进程几乎不会抛错。route_chat_node 实际失败发生在远端 mq source loop（agent-service 主进程 chat_request 消费），失败 → DLQ。glimpse 这一帧不感知，catch 只兜底极少数 mq broker 不可达 / DB insert 失败。
-
-#### 新路径（emit ChatTrigger）
+**不留隐患约束**: v4 完成后，`grep -rn "@router\.\|@app\." apps/agent-service/app/` = 0（除 framework 自身的 `app.post(...)` 注册逻辑）。**业务代码 0 个手写 FastAPI route**。
 
-emit 走 in-process 直接调 `route_chat_node`（`emit.py:8-11`：in-process dispatch 是 strict，consumer raise 会上抛）。route_chat_node 任何异常 → 上抛到 submit_proactive_chat → 上抛到 glimpse 的 catch（如果保留）。
-
-#### 为什么不能直接删 catch（reviewer v2 blocking）
-
-`glimpse.py` 的副作用顺序（line 228-242, 277-287, 291-299）：
-
-```
-  6. 写 fragment + enqueue_fragment_vectorize  ← 已有副作用
-  7. submit_proactive_chat  ← 本刀目标
-  8. insert_glimpse_state（推进 last_seen）  ← 在 submit 之后
-```
-
-`wiring/life_dataflow.py:77` `wire(GlimpseRequest).to(run_glimpse_node).durable()`；`durable.py:137-145` 先 `insert_idempotent` 后跑 consumer，**DLQ 重放会被 dedup 跳过**。
-
-如果删 catch、让 emit 异常一路上抛：
-- route_chat_node 抛错 → glimpse_node 抛错 → DLQ 进 GlimpseRequest 的 durable DLQ
-- DLQ 重放该消息时 idempotent 行已存在 → 跳过 consumer，无效
-- **last_seen 没推进**：下次 cron tick 因 last_seen 仍旧，重新查 unseen messages → 再走 step 6 insert 新 fragment（`new_id("f")` 每次新）+ 再 enqueue vectorize → **fragment 行数随失败次数线性膨胀，vectorize 队列对应膨胀**。
-- 数据脏化的代价 >> proactive 主动消息可观测性升级的收益。
+---
 
-#### 修法：保留 catch + 升级监控
+#### Gap 2 — emit 跨进程
 
-```python
-try:
-    await submit_proactive_chat(...)
-except Exception as exc:
-    logger.exception(  # 改成 exception 拿到 traceback
-        "[%s] Glimpse proactive submit failed: %s", persona_id, exc
-    )
-    state_observation = (
-        f"{state_observation}\n[chat_submit_failed] reason={type(exc).__name__}"
-    )
-```
-
-要点：
-- `logger.error` → `logger.exception`：自动带 traceback，便于 Loki 排查
-- `state_observation` 拼接 `[chat_submit_failed]` 标记：与现有 `[want_to_speak:throttled]`、`[no_speak]` 同款风格，glimpse_state 历史里可追溯哪一帧 submit 失败
-- 不引入 metrics 基础设施（项目目前无统一 metrics 框架；Loki 关键字 `chat_submit_failed` 可建告警）
-- step 8 `insert_glimpse_state` 仍执行：last_seen 推进、fragment 不重复
+**Framework 现状**: `runtime/emit.py:54` `emit()` 只在本进程 dispatch；不会反查 wire 的 `Source.mq(...)` 自动 publish 到 mq queue。同进程发同进程消费 in-process 直接调 consumer；publisher 在 A 进程 / consumer 在 B 进程时 `if c not in own_nodes: continue` 静默跳过 → 消息丢失。
 
-**这与旧路径 mq.publish 的 fire-and-forget 语义不严格等价**（旧路径远端 DLQ 仍兜底 route_chat_node 失败；新路径 route_chat_node 失败被本进程 catch 吞）—— **本期显式接受这一可观测性差异**：换得"chat 入口收敛到单一 ChatTrigger Data"的架构收益，且新增 `[chat_submit_failed]` 标记 + traceback 让失败仍然可见可追溯，工程上可接受。
-
-### 2.4 行为不变量
-
-- proactive trigger 仍能让 `route_chat_node` fan-out per-persona ChatRequest → chat_node
-- emit 走 in-process 路径（proactive 调用方 = glimpse_node 在 agent-service 主进程；route_chat_node 也在主进程）；与 lark-server 跨进程 publish chat_request 走 mq 路径殊途同归（runtime mq source loop 解码 body → ChatTrigger 后调用同一个 `route_chat_node`）。
-- `ChatTrigger.message_id` 是 `Annotated[str | None, Key]`，proactive 生成的 `f"proactive_{ts}"` 满足约束。
-- `ChatTrigger.root_id` 当前是 `str | None`；原 mq.publish 用空字串 `""`，emit 改成 `None` 与字段类型一致。下游 `route_chat_node` 对 root_id 的处理需要在 plan 阶段验证 None 与 "" 行为等价（grep `root_id` 在 chat_dataflow / nodes / chat 路径的所有用法）。
-- chat submit 失败 → glimpse `catch` → `logger.exception` + state_observation 标 `[chat_submit_failed]` → glimpse_state 仍落盘、last_seen 推进、fragment 不重复。Loki 关键字告警可建。
-
-### 2.5 风险
-
-- `ChatRequest` 走的是 `.durable()` wire（Phase 5a），所以 emit ChatTrigger → in-process route_chat_node → emit ChatRequest（durable）这条链路里，第二跳是异步 publish 到 mq，glimpse 进程不会等 chat_node 跑完才返回，与原 mq.publish 异步语义一致。
-- 保留 catch 后，旧路径下"远端 mq source loop DLQ 兜底 route_chat_node 失败"的可观测性丢失（新路径下被 glimpse 吞掉，仅 logger.exception + state_observation 标记）。这是**显式接受的折衷**：换"chat 入口收敛到单一 ChatTrigger Data"的架构收益。如果未来要恢复 DLQ 语义，需要重排 glimpse 副作用顺序（先 submit 后 insert_fragment）+ 加补偿，超出 Phase 6 清扫范畴。
-
-## 3. 第三刀 — queries.py 拆 6 个 domain
-
-### 3.1 现状
-
-`apps/agent-service/app/data/queries.py` 1283 行 / 50+ async def，跨 6 个 domain 的查询。调用方约 44 个文件 import 它（`grep -rln "from app.data.queries\|from app.data import queries" apps/agent-service/`）。
-
-### 3.2 目标结构
-
-```
-apps/agent-service/app/data/
-  queries/
-    __init__.py        # 重导出全部 public 函数（保持调用方零改动）
-    model_provider.py  # 3 函数
-    persona.py         # 6 函数
-    messages.py        # 11 函数
-    agent_response.py  # 4 函数（agent_responses 表的全部 read/write）
-    schedule.py        # 11 函数
-    life.py            # 8 函数
-    memory.py          # 30+ 函数
-```
-
-`queries.py` 文件本身**删除**（不留任何 re-export shim）。`__init__.py` 是 package 标准用法（不算兼容层）。
-
-### 3.3 函数归类（按操作的表归 domain，不按调用方）
-
-| domain | 函数 |
-|---|---|
-| **model_provider** | `parse_model_id` / `find_model_mapping` / `find_provider_by_name` |
-| **persona** | `find_persona` / `list_all_persona_ids` / `resolve_persona_id` / `resolve_bot_name_for_persona` / `resolve_mentioned_personas` / `find_bot_names_for_persona` |
-| **messages** | `find_cross_chat_messages` / `find_message_content` / `find_messages_in_range` / `find_username` / `find_group_name` / `find_group_download_permission` / `find_message_by_id` / `resolve_message_id_by_row_id` / `find_last_bot_reply_time` / `find_context_messages_for_anchors` / `find_group_members` / `find_gray_config` |
-| **agent_response** | `set_agent_response_bot` / `is_chat_request_completed` / `get_safety_status` / `set_safety_status` |
-| **schedule** | `find_active_schedules_for_date` / `find_latest_plan` / `find_plan_for_period` / `find_daily_entries` / `list_schedules` / `upsert_schedule` / `delete_schedule` / `insert_schedule_revision` / `get_current_schedule` / `get_schedule_revision_by_id` / `list_recent_schedule_revisions` |
-| **life** | `find_latest_life_state` / `insert_life_state` / `find_today_activity_states` / `find_life_states_in_range` / `find_latest_glimpse_state` / `insert_glimpse_state` / `insert_reply_style` / `find_latest_reply_style` / `list_recent_life_states` |
-| **memory** | `list_today_fragments` / `find_fragments_since` / `get_fragment_by_id` / `get_abstract_by_id` / `insert_fragment` / `touch_fragment` / `get_fragments_by_ids` / `touch_fragments_bulk` / `insert_abstract_memory` / `touch_abstract` / `touch_abstracts_bulk` / `count_abstracts_by_persona` / `insert_memory_edge` / `insert_note` / `get_active_notes` / `resolve_note` / `update_abstract_content_query` / `set_clarity` / `delete_fragment_query` / `delete_edge` / `list_fragments_window` / `list_abstracts_window` / `list_edges_to` / `list_edges_from` / `get_abstracts_by_subject` / `get_abstracts_by_subjects` / `get_recent_abstract_titles` / `count_abstracts_per_subject_prefix` / `get_recent_fragments_for_injection` |
-
-**归类原则**：函数操作哪张/哪组表，就归到对应 domain。例：
-- `list_today_fragments` 在 life 模块被使用，但操作 `fragments` 表 → 归 memory.py。
-- `find_gray_config` 通过 message_id JOIN 到 `LarkBaseChatInfo` 取 chat 灰度配置；主表是 chat info 不是 BotPersona → 归 messages.py（chat 维度，与 message 共享 chat_id 主键，不开新 chat_config domain 因为只有 1 个函数）。
-- `set_agent_response_bot` / `is_chat_request_completed` / `get_safety_status` / `set_safety_status` 主表都是 `agent_responses`（即使 `is_chat_request_completed` 在 proactive 分支也查 ConversationMessage，主体语义仍是"chat request 完成判定"属 agent_response 域）→ 独立 `agent_response.py`，不混进 messages.py。
-- `find_group_download_permission` 查 group 配置（共享 ConversationMessage 上下文）→ 归 messages.py（不开新 group domain）。
-
-### 3.4 `__init__.py` 写法
-
-```python
-"""Data queries — split per domain. 调用方 import 不变 (`from app.data.queries import X`)."""
-from app.data.queries.agent_response import *  # noqa: F401,F403
-from app.data.queries.life import *  # noqa: F401,F403
-from app.data.queries.memory import *  # noqa: F401,F403
-from app.data.queries.messages import *  # noqa: F401,F403
-from app.data.queries.model_provider import *  # noqa: F401,F403
-from app.data.queries.persona import *  # noqa: F401,F403
-from app.data.queries.schedule import *  # noqa: F401,F403
-```
-
-每个 domain 文件用 `__all__` 显式列 export，`__init__.py` 用 `from X import *` 收口。注意 `from X import *` 重名时**后者覆盖、不报错**，所以重名检测靠测试断言，不靠 ruff/mypy（见 §4 验收里"`__all__` 完整 + 无重名"测试）。
-
-### 3.5 行为不变量
-
-- 调用方 0 改动：`from app.data.queries import find_message_content` 等 44 个 import site 全部仍 work。
-- 函数签名 / 行为 / SQL 0 变化（纯文件搬运）。
-- 测试 0 改动：`tests/unit/data/test_queries*.py` 等 import path 不变。
-
-### 3.6 行数预估 + 拆超的应对
-
-按 def 行号粗算：
-
-- model_provider: ~32 行
-- persona: ~70 行（移走 `find_gray_config` 后）
-- messages: ~210 行（移走 4 agent_response 函数 + 移入 `find_gray_config` 后）
-- agent_response: ~80 行（4 函数从 messages 抽出）
-- schedule: ~200 行
-- life: ~140 行
-- memory: ~440 行 ⚠️ **超 300 行**
-
-memory.py 超 300 行时，再拆为：
-- `memory.py`（fragment / abstract 主表 CRUD + read，约 250 行）
-- `memory_edges.py`（edges + notes 子表，约 100 行）
-- `memory_search.py`（list_*_window / get_abstracts_by_* / count_* / get_recent_* 这些查询助手，约 150 行）
-
-具体拆点在执行 plan 阶段量行决定，spec 不强行钉死边界。`__init__.py` 跟着加 `from .memory_edges import *` / `from .memory_search import *` 即可。
-
-## 4. 验收标准
-
-### 第一刀
-- `grep -n "mq.publish" apps/agent-service/app/life/proactive.py` 无命中
-- `grep -n "try:" apps/agent-service/app/life/glimpse.py` 不再包含 submit_proactive_chat 周边的 try/except（§2.3 收窄）
-- `grep -rn "mq.publish" apps/agent-service/app/` 命中数 = main 命中数 - 1
-- 飞书 dev bot 群聊 + 单聊 e2e 通过；glimpse 触发 proactive → 主动消息正常发出
-- **placement 硬验收**（reviewer #2）：新加测试断言 `route_chat_node in nodes_for_app("agent-service")` 且 `chat_node in nodes_for_app("agent-service")`，加在 `tests/wiring/test_chat_wiring.py`
-- `tests/unit/life/test_proactive.py` 改造：删除 `patch("app.infra.rabbitmq.mq.publish", ...)`，改成断言 `submit_proactive_chat` 内 emit 顺序为 `Message → ChatTrigger`（顺序正确性是 §2.2 的契约）
-- `tests/unit/life/test_proactive.py` + `tests/unit/life/test_glimpse.py` + `tests/wiring/test_chat_wiring.py` + `tests/nodes/test_route_chat_node.py` + `tests/nodes/test_chat_node.py` green
-
-### 第三刀
-- `apps/agent-service/app/data/queries.py` 文件不存在
-- `apps/agent-service/app/data/queries/` package 存在，每个文件 < 300 行（memory 若超就细拆，最终所有文件 < 300）
-- `from app.data.queries import X` 在 44 个 import site 全部仍 import success（`pytest --collect-only` 通过）
-- `find apps/agent-service/app/data/queries -type f -name "*.py" -exec wc -l {} +` 总行数 ≈ 1283 ± 5%（允许 import / module docstring 重复带来的小幅膨胀）
-- 调用方文件无任何改动（`git diff --stat HEAD~1 -- apps/agent-service/app/` 中调用方 0 命中）
-- **`__all__` 完整 + 无重名硬验收**（reviewer v2 #5）：新加测试 `tests/unit/data/test_queries_split.py`，断言两条不变量：
-  1. `app.data.queries.__all__` 与硬编码已知函数清单（spec §3.3 列的 67 函数）集合**完全相等**（无遗漏、无多余）。
-  2. 7 个 domain 文件的 `__all__` 两两交集为空（无重名）—— `from X import *` 重名后者覆盖不报错，测试是唯一保险。
-  实现示意：
-  ```python
-  EXPECTED_FUNCTIONS = {  # 硬编码 spec §3.3 全 67 项
-      "parse_model_id", "find_model_mapping", ...
-  }
-  def test_queries_all_complete():
-      from app.data import queries
-      assert set(queries.__all__) == EXPECTED_FUNCTIONS
-  def test_queries_no_duplicate_names():
-      from app.data.queries import (agent_response, life, memory, messages,
-                                     model_provider, persona, schedule)
-      modules = [agent_response, life, memory, messages, model_provider, persona, schedule]
-      seen: dict[str, str] = {}
-      for m in modules:
-          for name in m.__all__:
-              assert name not in seen, f"{name} in both {seen[name]} and {m.__name__}"
-              seen[name] = m.__name__
-  ```
-
-### 整体
-- `compile_graph()` 通过
-- 全量 `pytest apps/agent-service/` green
-- `ruff check apps/agent-service/` 与 main 一致 0 新增
-- 飞书 dev 泳道 e2e 通过
-
-## 5. 实施切法
-
-两刀打**同一个 PR**，分两个 commit（按时间顺序、各自可独立 verify）：
-
-1. **commit 1**: 第一刀 proactive emit ChatTrigger（小，先合并）
-2. **commit 2**: 第三刀 queries.py 拆 package（大但纯机械）
-
-PR title: `Phase 6 — proactive ChatTrigger emit + queries.py domain split`
-
-部署铁律：**先 dev 泳道验证再上 prod**。
-
-## 6. Out of Scope
-
-- **第二刀（vectorize emit）**：runtime emit 跨进程能力（emit Data → 反查 wire 的 `Source.mq(...)` → 当 consumer 不在本进程时自动 publish 到 mq queue）—— 单独立项 Phase 6.5
-- **第四刀（workers/ 死代码）**：state_sync_worker / arq_settings 都是活的（被 update_schedule tool 使用），无清扫空间
-- agent tool 副作用进 wire（commit_abstract → emit AbstractMemorySaved 等）—— Phase 7+
-- chat 部分段后中断、新 Pod 不续传 —— 长期 epic
-- ka 群 P0/P1 体验问题 —— 与 dataflow 无关，独立线
+**业务绕痕**:
+- `memory/vectorize_memory.py:112,123` `enqueue_fragment_vectorize` / `enqueue_abstract_vectorize` 仍 `mq.publish` 直发（v3 §0 第二刀推迟的根因）
+- `domain/safety.py:62` 注释提"原 mq.publish RECALL"
+
+**缺什么**: emit Data 时，runtime 应当：
+1. 收集所有匹配 wire（已实现）
+2. 对每个 wire：若 consumer in-process（`c in own_nodes`）→ 直接调（已实现）；**若不在本进程 + wire source 是 mq → 自动 publish 到该 mq queue**（缺）
+3. 同一 Data 既有 in-process consumer 也有跨进程 consumer 时 → 两条路径都要走
+
+**v4 目标**: emit 透明支持跨进程；`memory/vectorize_memory.py` 的 `enqueue_*` helpers 删除，调用方改 `await emit(MemoryFragmentRequest(...))` / `await emit(MemoryAbstractRequest(...))`。
+
+**不留隐患约束**: v4 完成后，`grep -rn "mq.publish" apps/agent-service/app/` 仅在 `runtime/` + `infra/rabbitmq.py` 命中。**业务代码 0 个直接 mq.publish**。
+
+---
+
+#### Gap 3 — agent tool 副作用进 wire
+
+**Framework 现状**: agent tool 调用产生的 DB 副作用（写 abstract / 写 schedule_revision / 写 note / 写 fragment 等）没有 framework 约束去 emit Data；下游消费者只能"再去 query DB"或"通过别的旁路通信"。
+
+**业务绕痕**:
+- `agent/tools/commit_abstract.py:48-62` 写 `abstract_memory` + `memory_edge` 后，**单独调 `enqueue_abstract_vectorize`**（即 mq.publish）通知 vectorize-worker
+- `agent/tools/update_schedule.py:38` 写 `schedule_revision` 后 **arq enqueue `sync_life_state_after_schedule`**（绕 graph）
+- `agent/tools/notes.py:30` 写 `note` 后**没有 emit**，下游 reviewer 只能 query DB
+
+**缺什么**: tool 写 DB → emit Data 是一种"事件溯源"模式：
+- `commit_abstract` → emit `AbstractMemoryCommitted` → wire 到 vectorize / dirty-cache invalidation / reviewer notification
+- `update_schedule` → emit `ScheduleRevisionCreated` → wire 到 sync_life_state node（替代 arq）
+- `commit_note` → emit `NoteCreated` → wire 到 reviewer
+
+**v4 目标**: 每个 mutation tool 写 DB 后 emit Data；旁路通信（mq.publish + arq enqueue）全部转换为 wire（同进程 in-process 或跨进程 durable）。
+
+**不留隐患约束**: v4 完成后，`grep -rn "mq.publish\|enqueue_job\|create_pool" apps/agent-service/app/agent/` = 0。**tool 不允许任何旁路通信**。
+
+---
+
+#### Gap 4 — 事件驱动 worker 没进 graph
+
+**Framework 现状**: dataflow 有 `Source.mq` / `Source.cron` / `Source.http` / 默认 in-process / `.durable()` 等 worker primitive；但事件驱动 worker（业务事件 `Y` 触发 → 跑 worker function `f`）的标准模式是：业务 emit Y → wire(Y).to(f) → in-process 或 durable，**不是再开一套 arq 入口**。
+
+**业务绕痕**:
+- `workers/arq_settings.py` 93 行 + `workers/state_sync_worker.py` 44 行 是 arq runtime
+- `update_schedule.py` 通过 arq pool `enqueue_job(sync_life_state_after_schedule)` 触发
+- 双 worker 入口（`workers/runtime_entry.py` dataflow + `workers/arq_settings.py` arq）共存
+
+**缺什么**:
+- 事件驱动 node：直接用 `wire(ScheduleRevisionCreated).to(sync_life_state_node).durable()`，跑在 dataflow runtime 内（agent-service 主进程或 vectorize-worker，按 placement 决定）
+- arq 整套删除
+
+**v4 目标**:
+- `sync_life_state_after_schedule` 改 dataflow node（接收 `ScheduleRevisionCreated`）
+- `update_schedule.py` 删 arq 调用，改 emit `ScheduleRevisionCreated`
+- `workers/arq_settings.py` + `workers/state_sync_worker.py` 删除
+- arq 依赖从 `pyproject.toml` 移除（如果只是 worker 用）
+
+**不留隐患约束**: v4 完成后，`grep -rn "arq\|enqueue_job\|create_pool" apps/agent-service/app/` 在业务代码 0 命中（仅 README 说明可保留）；`workers/` 仅剩 `runtime_entry.py` + `common.py` + `__init__.py`。
+
+---
+
+#### Gap 5 — 散落 fire-and-forget background task
+
+**Framework 现状**: 没有"后台触发流水"的统一入口；业务用 `asyncio.create_task(coro)` 直接 spawn。
+
+**业务绕痕**:
+- `chat/context.py:119` `asyncio.create_task(_persist_tos_files(...))`：写 ConversationMessage.content TOS 文件后台 sync
+- `chat/post_actions.py:89,94,99` 三处 `asyncio.create_task(_emit_memory_trigger(...))`：drift / afterthought 触发
+- `api/routes.py:139` `asyncio.create_task(generate_daily_plan(...))`：admin trigger schedule（属 Gap 1）
+- `chat/pre_safety_gate.py:63` + `nodes/chat_node.py:132` `pre_task = asyncio.create_task(...)`：pre-safety 边界 await pattern（与 Phase 5a 设计一致，**这两处合理保留**）
+
+**缺什么**: fire-and-forget 后台任务应当 emit Data → wire 到对应 node（in-process 或 durable）：
+- `_persist_tos_files` → emit `ConversationMessageContentSynced`（durable wire）
+- `_emit_memory_trigger`（drift / afterthought）→ 已经有 `MemoryDriftTrigger` / `MemoryAfterthoughtTrigger` Data，post_actions.py 该直接 emit，不需要 wrapper
+- `generate_daily_plan` → emit `DailyPlanRequest`（已 cron 触发，admin trigger 共享同 Data）
+
+**v4 目标**: 业务代码 `asyncio.create_task` 仅保留 chat_node pre-safety 边界 await 这种**单次 task 句柄**用法；任何"触发后台任务跑 X 函数"必须 emit Data + wire。
+
+**不留隐患约束**: v4 完成后，`grep -rn "asyncio.create_task\|asyncio.ensure_future" apps/agent-service/app/` 在 `chat/post_actions.py` / `chat/context.py` / `api/routes.py` 0 命中。仅允许 `chat_node` / `pre_safety_gate` / `runtime/` 内部出现（且每处必须有 docstring 说明为何不能用 emit）。
+
+---
+
+#### Gap 6 — 双 worker 入口（Gap 4 副产物）
+
+**Framework 现状**: `workers/runtime_entry.py`（dataflow）+ `workers/arq_settings.py`（arq）并存。同一 ImageRepo `agent-service` 跑出 3 个 K8s Deployment：
+- `agent-service`（HTTP server，runtime_entry.py 启动 + uvicorn）
+- `arq-worker`（arq runtime 入口）
+- `vectorize-worker`（runtime_entry.py 启动 + APP_NAME 过滤）
+
+**业务绕痕**: arq-worker 是单独的 worker entry，跟 vectorize-worker / agent-service 用的 dataflow runtime 是双轨。
+
+**缺什么**: Gap 4 关闭后，arq-worker 这个 Deployment 失去存在理由（worker functions 全是 dataflow node + bind 到 specific app）。
+
+**v4 目标**:
+- 删 `workers/arq_settings.py` + `workers/state_sync_worker.py`
+- arq-worker Deployment 下线（PaaS API 删 app，或保留作 dataflow 通用 worker entry）
+- 重新命名 / 评估：原 arq-worker Deployment 是不是该改用 runtime_entry + APP_NAME=`event-worker`（专跑事件驱动 durable wire 的 dataflow worker pod）
+
+**不留隐患约束**: v4 完成后，`workers/` 目录仅 `runtime_entry.py` + `common.py` + `__init__.py`。K8s Deployment list 不再有 `arq-worker` 名字（或改名为 `event-worker` 跑 dataflow runtime）。
+
+---
+
+### v5 候选（基础能力补强，下版本闭合）
+
+#### Gap 7 — durable wire retry 不可配置
+
+**Framework 现状**: `runtime/durable.py:99` 固定 `requeue=False` fail-to-DLQ；无 retry 机制。
+
+**v4 内业务约束**: 业务**不允许自己实现 retry 循环**（不许 try/except + sleep 重试）。transient error 只能 fail-to-DLQ，运维重放（DLQ replay 受 Gap 12 影响默认 no-op，知道）。
+
+**v5 目标**: `wire(...).retry(n=3, backoff=exponential)` 配置。
+
+#### Gap 8 — emit 跨事务边界（outbox）
+
+**Framework 现状**: 业务靠注释"emit AFTER commit"自觉（`life/proactive.py:141`）。DB 回滚 / emit 已发出会引入数据脏化。
+
+**v4 内业务约束**: 业务必须在 `get_session()` 上下文 **之外** emit（即写 DB commit 后再 emit）；这条约束写进 `runtime/emit.py` docstring 强调，不再依赖业务自觉散落注释。
+
+**v5 目标**: outbox 模式（事务内 insert outbox 表 + commit + 后台 publisher 跑 emit）。
+
+#### Gap 9 — delayed / scheduled emit
+
+**Framework 现状**: 无 `emit_delayed(data, delay=10s)` / `emit_at(data, ts)` API。debounce wire 走 redis SETNX 自实现的延迟（`runtime/debounce.py`），不是 framework primitive。
+
+**v4 内业务约束**: 业务代码**不允许 `await asyncio.sleep(N) + emit`** 这种自实现延迟。需要延迟触发只能用现有 debounce wire 或 cron。
+
+**v5 目标**: x-delayed-message exchange 之类的延迟原语。
+
+#### Gap 10 — streaming response 没原生抽象
+
+**Framework 现状**: v3 spec line 132 注明 `Stream[T]` 已被 Phase 1-4 实践证伪、删除；现状是 fan-out emit 多段 `ChatResponseSegment` + `part_index` / `is_last` 自定义协议。
+
+**v4 内业务约束**: chat 段输出维持 Phase 5a 的 ChatResponseSegment 模式不变；任何**新业务**需要 streaming 输出 → 复用 ChatResponseSegment 协议（part_index / is_last），不允许自定义新协议。
+
+**v5/v6 目标**: 评估是否需要重启 Stream 抽象，或彻底标准化"段输出"模式（共享 part_index 字段约定）。
+
+#### Gap 11 — trace / lane context propagation 散落
+
+**Framework 现状**: contextvars 在 in-process emit 自动传；跨进程 mq publish/consume `runtime/debounce.py:205,256,302` + `runtime/durable.py` 各自手动塞 header / restore。每加一种 Source 类型都要重写一遍。
+
+**v4 内业务约束**: 不新增 Source 类型；现有 Source.mq / Source.http / Source.cron 维持既有 propagation 实现。
+
+**v5 目标**: mq publish/consume 层统一 trace context propagation hook，新 Source 类型自动继承。
+
+#### Gap 12 — DLQ replay 语义不闭合
+
+**Framework 现状**: DLQ 重放被 consumer-side `insert_idempotent` dedup 跳过 → replay 默认 no-op（v3 §2.3 + Phase 5 spec acknowledged）。
+
+**v4 内业务约束**: 业务接受"DLQ 重放 default no-op"现状；运维需要重放时手工清对应 idempotent 行 + 重投 DLQ 消息。这条约束写进 `runtime/durable.py` docstring。
+
+**v5/v6 目标**: DLQ replay 模式（CLI 工具：可选清 idempotent + 重跑）。
+
+## 2. v4 衍生业务清扫（Gap 1-6 关闭后自然要做）
+
+按 capability gap 关闭顺序，业务代码同步收敛：
+
+### 2.1 Gap 1 关闭 → routes.py 收敛
+
+`api/routes.py` 292 行 → < 30 行（仅 `register_http_sources(app)` 调用 + 必要 import）。
+
+需要为每个 endpoint 找/建对应 Data + wire：
+- `GET /` 死代码 → 删（用户没人调）
+- `GET /health` → builtin Source.http_health（runtime 自带，不需要业务声明）
+- `POST /admin/trigger-life-engine-tick` → emit `LifeEngineTickRequest`（或复用 `MinuteTick`，看语义）
+- `POST /admin/trigger-glimpse` → emit `GlimpseRequest`（已 wire）
+- `POST /admin/debug-glimpse` → 复杂，含读 DB 逻辑；改 GET + Source.http GET，节点 query 后返回 dict
+- `POST /admin/trigger-voice` → emit `VoiceRequest`（cron 已触发，复用同 Data）
+- `POST /admin/trigger-schedule` → emit `DailyPlanRequest`（cron 已触发，复用）
+- `POST /admin/search` → emit `AdminSearchRequest` 节点返回 results（RPC 模式）
+- `GET /api/schedule` → Source.http GET + 节点返回 list
+- `GET /api/schedule/current` → 同上
+- `GET /api/schedule/daily/{target_date}` → Source.http GET + path_params
+- `POST /api/schedule` → Source.http POST + 节点写 DB + 返回 saved（emit `ScheduleCreated`）
+- `DELETE /api/schedule/{id}` → Source.http DELETE + path_params
+
+### 2.2 Gap 2 关闭 → vectorize_memory.py + 调用方收敛
+
+`memory/vectorize_memory.py`：
+- 删 `enqueue_fragment_vectorize` / `enqueue_abstract_vectorize`（共 ~20 行）
+- 调用方（`agent/tools/commit_abstract.py` / `life/glimpse.py` / `nodes/memory_pipelines.py`）改 `await emit(MemoryFragmentRequest(fragment_id=fid))` / `await emit(MemoryAbstractRequest(abstract_id=aid))`
+
+### 2.3 Gap 3 关闭 → agent tools 全部 emit
+
+每个 mutation tool 写 DB 后 emit：
+- `commit_abstract.py` → emit `AbstractMemoryCommitted`（含 abstract_id / persona_id / chat_id），wire 到 vectorize node + reviewer 通知 node（如有）
+- `commit_life_state.py`（如存在）→ emit `LifeStateCommitted`
+- `update_schedule.py` → emit `ScheduleRevisionCreated`（替代 arq enqueue）
+- `notes.py` → emit `NoteCreated`
+- 所有 emit 必须在 `get_session()` commit 之后
+
+### 2.4 Gap 4 关闭 → workers/ 收敛 + arq 退场
+
+- `workers/state_sync_worker.py` → 改 dataflow node `sync_life_state_node`，签名 `(ScheduleRevisionCreated) -> None`
+- `workers/arq_settings.py` 删除
+- `workers/runtime_entry.py` 维持，可能改名为 `worker_entry.py` 简化
+- `workers/common.py` 评估是否还有用，无用则删
+- `pyproject.toml` 删 arq 依赖（如仅 worker 用）
+- K8s Deployment `arq-worker` 退场（或重命名 `event-worker`）
+
+### 2.5 Gap 5 关闭 → chat/ 后台触发 emit
+
+- `chat/post_actions.py` 三处 `asyncio.create_task(_emit_memory_trigger(...))` → 直接 emit Data（drift / afterthought 各自 Data 已存在）；`_emit_memory_trigger` wrapper 删除
+- `chat/context.py:119` `_persist_tos_files` → 改 emit `ConversationMessageContentSynced`（新增 Data） + wire 到 durable node
+- `chat_node.py:132` + `pre_safety_gate.py:63` 保留（合法 single-task 句柄用法）
+
+### 2.6 Gap 6 关闭 → workers entry 单一化
+
+Gap 4 副产物，无独立改动。
+
+## 3. 业务实现层冗余（独立维度，跟 framework gap 解耦）
+
+这些不是 capability gap 引起的，是业务模块过去 6 个 phase 没顺手清的冗余。**v4 范围内一并做**：
+
+### 3.1 chat/
+
+- `chat/router.py` (58 行) — audit 跟 `nodes/chat_node.route_chat_node` 是否职责重叠：route_chat_node 是 fan-out persona，router.py 是消息路由决定，可能合并到 route_chat_node 或独立保留（grep 证据后决定）
+- `chat/agent_stream.py` (244) + `chat/stream.py` (81) — 两个 stream 模块；评估合并
+- `chat/context.py` (445 行) — 单文件超 300，违反 CLAUDE.md；按职责拆分（context / l1_results / persist 等）
+- `chat/quick_search.py` (186) — context.py 调它；audit dataflow 改造后链路是否还活、能否简化
+
+### 3.2 life/
+
+- `life/sister_theater.py` (39) + `life/wild_agents.py` (60) — 都被 `life/schedule.py` import；audit 是不是合并到 schedule.py 或保留独立模块（39 行单文件可疑）
+- `life/state_sync.py` (118) — Gap 4 关闭后该模块被 `nodes/sync_life_state_node` 替代，业务实现层可能也要随之收敛 / 删除
+- `life/engine.py` (237) vs `life/state_sync.py` — full eval 和 lite refresh 的关系是不是该统一抽象
+
+### 3.3 memory/
+
+- `memory/cross_chat.py` (218) + `memory/context.py` (152) — 都是 context builder，audit 合并可能性
+- `memory/vectorize_memory.py` (123) — Gap 2 关闭后 enqueue helpers 删，剩 vectorize / vectorize_abstract 实现；评估是不是该并到 `nodes/memory_vectorize.py`
+
+### 3.4 agent/tools/
+
+- 每个 tool 加 emit Data（Gap 3）后，evaluate 是否还有重复的 query helper 可以走 `app.data.queries`
+
+## 4. v4 验收（衡量"终结清扫"是否真到位）
+
+每条都是硬验收，必须 0 命中 / 全过：
+
+### Framework gap 关闭
+
+- `grep -rn "@router\.\|@app\." apps/agent-service/app/` = 0（除 framework 自身 register 逻辑）
+- `grep -rn "mq.publish" apps/agent-service/app/` 仅 `runtime/` + `infra/rabbitmq.py` 命中
+- `grep -rn "enqueue_job\|create_pool\|from arq" apps/agent-service/app/` 业务代码 0 命中
+- `grep -rn "asyncio.create_task" apps/agent-service/app/{chat,life,memory,api}/` 0 命中（仅 `chat_node.py` + `pre_safety_gate.py` 内部允许，且每处带 docstring）
+- `find apps/agent-service/app/workers/` 仅 `runtime_entry.py` + `common.py`（如有用）+ `__init__.py`
+
+### 业务代码体量
+
+- `wc -l apps/agent-service/app/api/routes.py` < 50 行
+- `wc -l apps/agent-service/app/memory/vectorize_memory.py` < 100 行（删了 2 个 enqueue helpers）
+- `wc -l apps/agent-service/app/agent/tools/update_schedule.py` < 60 行（删 arq enqueue 块）
+- `wc -l apps/agent-service/app/chat/context.py` < 300 行（拆分）
+- 其它业务实现层冗余文件按 §3 评估结论（合并 / 删除 / 保留）
+
+### 行为不变量
+
+- 飞书 dev bot 群聊 + p2p 正常对话
+- glimpse 触发 proactive 主动消息
+- update_schedule tool 调用 → state sync 节点跑（Gap 4 替代 arq）
+- vectorize-worker / event-worker（arq-worker 改名）正常消费
+- HTTP admin 接口（GET / POST / DELETE）功能等价
+- 全量 pytest green
+- ruff queries 包 + 新增 framework 改动 0 新增错
+
+### 业务代码 v4 内不允许的 workaround
+
+- 任何 Gap 7-12 的自实现：retry 循环 / outbox 自手写 / `asyncio.sleep + emit` / 自定义 streaming 协议 / 手动塞 trace header / DLQ 自动重放
+
+## 5. PR 策略
+
+**接进 PR #210**（不新开 PR）。原因：
+- PR #210 主题就是 "Phase 6 cleanup"
+- v3 4 commits + v4 改动一起 ship，单次 dev 泳道验证、单次 prod ship
+- PR diff 会更大（预估 +1000 业务代码净减少，但同时 framework 扩 ~300，新加测试 ~500）
+
+commit 策略：v4 改动按 capability gap 切（每 gap 一个 commit 或一组 commits），diff 在 PR 里 review 时按 gap 维度可读：
+1. `feat(runtime): http_source 扩展支持 GET/DELETE/method/path_params/RPC` (Gap 1 framework)
+2. `refactor(api): routes.py 收敛到 framework wiring` (Gap 1 业务)
+3. `feat(runtime): emit 跨进程 dispatch via wire source.mq` (Gap 2 framework)
+4. `refactor(memory): vectorize_memory 删 enqueue helpers，调用方改 emit` (Gap 2 业务)
+5. `feat(domain): 新增 ScheduleRevisionCreated / AbstractMemoryCommitted / NoteCreated Data` (Gap 3 framework)
+6. `refactor(agent): tool 写 DB 后 emit Data` (Gap 3 业务)
+7. `feat(nodes): sync_life_state_node 替代 arq state_sync_worker` (Gap 4)
+8. `refactor(workers): 删 arq_settings + state_sync_worker，arq-worker 退场` (Gap 4 + 6 业务)
+9. `refactor(chat): post_actions / context 删 asyncio.create_task` (Gap 5 业务)
+10. `refactor(chat): context.py 拆分（445 → 多文件，每个 < 300）` (§3.1)
+11. `refactor(life): sister_theater + wild_agents + state_sync 收敛` (§3.2)
+12. `refactor(memory): cross_chat + context 评估` (§3.3)
+
+每 commit 自包含 + 测试 green + ruff 通过。
+
+## 6. Out of Scope（v4 明确不做）
+
+- Gap 7-12 的实施（v5+ 接续）
+- 业务功能变化（任何用户感知层面）
+- 新业务功能添加
+- agent tool 内部业务逻辑变化（仅"加 emit"，不动 tool 语义）
+- 数据库 schema 变更（除非新增 Data 表，但每个新 Data 由 runtime migrator 自动建表，不影响 schema migration）
+
+## 7. 风险与回滚
+
+### 风险
+
+- **Gap 4 arq 退场**：`arq-worker` Deployment 下线后，未消费的 arq 队列消息会丢失（arq 用 redis 队列，不像 mq 持久化）。预案：实施前观察 arq 队列空，再下线
+- **Gap 3 tool 改 emit**：tool 调用是 LLM 触发的同步操作，加 emit 后下游异步执行；若 emit 抛错传回 tool 会让 LLM 看到 tool error。需要约定 emit 失败 = tool 业务 success（emit 错误 log 不上抛）or 进 outbox 等 v5
+- **Gap 1 routes.py 全删**：admin 工具脚本（如 rebuild）依赖现有 endpoint 形态，HTTP 入口 path / 参数 / response 必须严格保留；framework 注册的 endpoint 跟手写等价
+
+### 回滚
+
+- 每 commit 独立可 revert
+- `arq-worker` Deployment 下线前先 `make undeploy` 测试 lane 验证；prod 切换分两步：先 release `event-worker` 替代 deployment，再 undeploy `arq-worker`
+
+## 8. v5+ 路线（仅记录，不实施）
+
+| Version | Gap | 主题 |
+|---|---|---|
+| v5 | 7, 8 | retry 配置 + outbox 事务边界 |
+| v6 | 9, 11 | delayed emit + trace propagation 统一 |
+| v7 | 10, 12 | streaming 抽象重启评估 + DLQ replay 模式 |
+
+每版独立 spec / plan / PR，不再合并。
