@@ -72,13 +72,17 @@ async def publish_durable(w: WireSpec, consumer: Callable, data: Data) -> None:
     message headers so the consumer can restore them.
     """
     route = _route_for(w, consumer)
+    body = data.model_dump(mode="json")
+    data_lane = body.get("lane")
+    effective_lane = lane_var.get() or (
+        data_lane if isinstance(data_lane, str) and data_lane else ""
+    )
     headers: dict[str, Any] = {
         "trace_id": trace_id_var.get() or "",
-        "lane": lane_var.get() or "",
+        "lane": effective_lane,
         "data_type": type(data).__name__,
     }
-    body = data.model_dump(mode="json")
-    await mq.publish(route, body, headers=headers)
+    await mq.publish(route, body, headers=headers, lane=effective_lane or None)
 
 
 def _build_handler(w: WireSpec, consumer: Callable):

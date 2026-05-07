@@ -6,6 +6,7 @@
     "apps/lark-proxy",
     "apps/monitor-dashboard",
     "apps/monitor-dashboard-web",
+    "apps/cloud/cronjob",
     "packages/ts-shared",
     "packages/pixiv-client",
     "packages/lark-utils"

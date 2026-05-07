@@ -3,7 +3,7 @@
 MQ-entry adapter: consumes ``MessageRequest`` frames that the engine
 decoded from ``Source.mq("vectorize")`` bodies, looks up the real
 ``ConversationMessage`` row by id, and lifts it into a ``Message`` Data
-via ``Message.from_cm`` (same mapping as ``emit_legacy_message``).
+via ``Message.from_cm``.
 
 Returns ``None`` when the row is missing — a publisher racing a pg
 deletion should ack-and-skip, never poison the queue. The runtime's

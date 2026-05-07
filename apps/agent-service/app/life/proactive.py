@@ -141,11 +141,10 @@ async def submit_proactive_chat(
         session.add(msg)
     # get_session() commits on block exit; emit AFTER commit so downstream
     # consumers querying pg will see the row.
-    from app.bridges.message_bridge import (
-        emit_legacy_message,  # local import to avoid boot cycles
-    )
+    from app.domain.message import Message
+    from app.runtime import emit  # local import to avoid boot cycles
 
-    await emit_legacy_message(msg)
+    await emit(Message.from_cm(msg))
 
     # Publish to chat_request queue
     from app.infra.rabbitmq import current_lane

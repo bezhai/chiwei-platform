@@ -57,6 +57,6 @@ export async function makeTextReply(message: Message): Promise<void> {
     );
 
     console.info(
-        `[makeTextReply] Published chat.request: session_id=${sessionId}, message_id=${message.messageId}`,
+        `[makeTextReply] Published chat.request: session_id=${sessionId}, message_id=${message.messageId}, lane=${lane || 'prod'}`,
     );
 }

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
@@ -31,46 +30,11 @@ from app.data.queries import (
 )
 from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
+from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _PreSafetyResult:
-    blocked: bool
-    content: str  # ALLOW: 原 part；BLOCK: 不用，由调用方 emit guard
-
-
-async def _resolve_pre_safety_for_part(
-    part: str,
-    pre_task: asyncio.Task,
-    guard_message: str,
-    timeout: float = 5.0,
-) -> _PreSafetyResult:
-    """段边界等 verdict（已 done 即立刻返回，未 done 则带 timeout 等）。
-
-    fail-open（pre_task 抛 / timeout）-> ALLOW（保持与 Phase 2 pre-safety
-    设计一致的 fail-open 语义）。
-    """
-    if not pre_task.done():
-        try:
-            await asyncio.wait_for(pre_task, timeout=timeout)
-        except TimeoutError:
-            logger.warning("pre_safety timeout (%.1fs), fail-open", timeout)
-            return _PreSafetyResult(blocked=False, content=part)
-        except Exception as e:
-            logger.error("pre_safety exception (fail-open): %s", e)
-            return _PreSafetyResult(blocked=False, content=part)
-    try:
-        verdict = pre_task.result()
-    except Exception as e:
-        logger.error("pre_safety result raise (fail-open): %s", e)
-        return _PreSafetyResult(blocked=False, content=part)
-    if verdict.is_blocked:
-        return _PreSafetyResult(blocked=True, content=guard_message)
-    return _PreSafetyResult(blocked=False, content=part)
 
 
 @node
@@ -87,6 +51,14 @@ async def route_chat_node(t: ChatTrigger) -> None:
         raise ValueError(
             "ChatTrigger.message_id is None; cannot fan out ChatRequest"
         )
+
+    logger.info(
+        "route_chat_node received: session_id=%s, message_id=%s, lane=%s, bot_name=%s",
+        t.session_id,
+        t.message_id,
+        t.lane,
+        t.bot_name,
+    )
 
     async with get_session() as s:
         already_done = await is_chat_request_completed(
@@ -112,6 +84,14 @@ async def route_chat_node(t: ChatTrigger) -> None:
         logger.info("no persona to reply: message_id=%s", t.message_id)
         return
 
+    logger.info(
+        "route_chat_node fanout: session_id=%s, message_id=%s, lane=%s, personas=%s",
+        t.session_id,
+        t.message_id,
+        t.lane,
+        persona_ids,
+    )
+
     for i, pid in enumerate(persona_ids):
         session_for_persona = t.session_id if i == 0 else str(uuid4())
         await emit(ChatRequest(
@@ -134,12 +114,12 @@ async def chat_node(req: ChatRequest) -> None:
     """ChatRequest -> N × ChatResponseSegment (per persona).
 
     Phases (内部分块，不拆 node):
-      1. prep: fetch + parse + gray + guard + pre_task 启动 (this task)
-      2. fetch 为空 -> emit 1 段 "未找到" + return  (Task 8)
-      3. resolve response_bot_name + agent_responses 行更新  (Task 9)
-      4. base_payload 构造（含 lane）  (Task 9)
-      5. 主循环 + 中段 emit  (Task 10)
-      6. final 段 + pre-safety blocked 路径  (Task 11)
+      1. prep: fetch + parse + gray + guard + pre_task 启动
+      2. fetch-empty short-circuit: emit 1 段 "未找到" + return
+      3. resolve response_bot_name + agent_responses 行更新
+      4. base_payload 构造（含 lane）
+      5. 主循环 + 段边界 pre-safety + 中段 emit
+      6. final 段 + pre-safety blocked 路径
     """
     # 1. prep
     async with get_session() as s:

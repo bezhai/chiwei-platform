@@ -118,14 +118,25 @@ def capture_emit(monkeypatch):
 
     Phase 5a helper: most node-level tests want a uniform way to assert
     "what segments / requests this @node emitted." This fixture patches
-    the runtime emit symbol and returns a list that grows as tests run.
+    BOTH `emit` attribute surfaces so callers using either import style
+    get the fake:
+      * ``from app.runtime import emit`` (reexport on the package object)
+      * ``import app.runtime.emit as X; X.emit(...)`` (module attribute lookup)
+
+    Callers using ``from app.runtime.emit import emit`` bind the function
+    locally at import time and cannot be intercepted by this fixture —
+    those tests must monkeypatch the caller module's own ``emit`` symbol.
     """
     seen: list = []
 
     async def _fake_emit(data):
         seen.append(data)
 
-    import app.runtime.emit as emit_mod
+    import sys
 
+    import app.runtime
+
+    emit_mod = sys.modules["app.runtime.emit"]
     monkeypatch.setattr(emit_mod, "emit", _fake_emit)
+    monkeypatch.setattr(app.runtime, "emit", _fake_emit)
     return seen

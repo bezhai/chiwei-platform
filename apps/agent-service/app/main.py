@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     logger.info("shared pkg loaded: %s", shared_hello())
 
     # Wire up the dataflow graph before anything in this process emit()s.
-    # proactive.py's Bridge calls emit_legacy_message() which dispatches
+    # proactive.py emits Message directly via runtime emit, which dispatches
     # via WIRING_REGISTRY — without this load step the registry would be
     # empty here and the call would silently no-op. The FastAPI main
     # process is a *producer* (proactive Message -> vectorize-worker), so
