@@ -88,15 +88,22 @@ async def emit(data: Data) -> None:
                 from app.runtime.durable import publish_durable
 
                 await publish_durable(w, c, data)
-            else:
-                # in-process: only run if the consumer is bound to (or
-                # falls through to) THIS process's app. Otherwise we'd
-                # silently execute a worker-bound @node in the wrong
-                # process — bind(...).to_app() would lose its meaning.
-                if c not in own_nodes:
-                    continue
+                continue
+
+            if c in own_nodes:
+                # in-process: consumer is bound to (or falls through to)
+                # THIS process's app — call directly.
                 kwargs = await _resolve_inputs(c, data, w)
                 await c(**kwargs)
+                continue
+
+            # Consumer is in another process. If the wire has Source.mq,
+            # publish to that queue so the worker pod consumes it. Otherwise
+            # silently skip — preserves prior behavior for wires that have
+            # no MQ bridge declared.
+            mq_src = next((s for s in w.sources if s.kind == "mq"), None)
+            if mq_src is not None:
+                await _mq_publish_for_source(mq_src, data)
         # Phase 2: sink dispatch — out-of-graph publish (RabbitMQ).
         # compile_graph 已校验 Sink.mq(name) ∈ ALL_ROUTES，这里直接调。
         for s in w.sinks:
@@ -134,3 +141,26 @@ async def _resolve_inputs(consumer, data: Data, wire_spec) -> dict:
                 )
             kwargs[name] = latest
     return kwargs
+
+
+async def _mq_publish_for_source(src, data: Data) -> None:
+    """Publish ``data`` to the mq queue declared by ``src``.
+
+    Looks up the Route in ALL_ROUTES by queue name (queue must be a known
+    route — compile_graph rejects unknown queues at startup). Body is
+    ``data.model_dump(mode='json')`` to mirror Source.mq consumer-side
+    decoding. Lane resolution happens inside ``mq.publish``.
+    """
+    from app.infra.rabbitmq import mq
+    from app.runtime.sink_dispatch import _route_by_queue
+
+    queue_name = src.params["queue"]
+    route = _route_by_queue(queue_name)
+    if route is None:
+        raise RuntimeError(
+            f"emit() cannot publish {type(data).__name__} to "
+            f"Source.mq({queue_name!r}): queue is not in ALL_ROUTES. "
+            f"Add it to app/infra/rabbitmq.py."
+        )
+    body = data.model_dump(mode="json")
+    await mq.publish(route, body)
