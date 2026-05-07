@@ -4,6 +4,6 @@ Public surface:
     MessageRouter — decides which personas respond to a message
 """
 
-from app.chat.router import MessageRouter
+from app.chat.persona_filter import MessageRouter
 
 __all__ = ["MessageRouter"]

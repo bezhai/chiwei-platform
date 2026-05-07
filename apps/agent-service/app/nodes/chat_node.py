@@ -18,9 +18,9 @@ from uuid import uuid4
 from app.api.middleware import CHAT_FIRST_TOKEN, CHAT_PIPELINE_DURATION
 from app.chat.agent_stream import _build_and_stream
 from app.chat.content_parser import parse_content
+from app.chat.persona_filter import MessageRouter
 from app.chat.post_actions import fetch_guard_message
 from app.chat.pre_safety_gate import run_pre_safety_via_graph
-from app.chat.router import MessageRouter
 from app.data.queries import (
     find_gray_config,
     find_message_content,
