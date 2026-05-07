@@ -17,6 +17,7 @@ from app.agent.core import Agent, AgentConfig, extract_text
 from app.data import queries as Q
 from app.data.ids import new_id
 from app.data.session import get_session
+from app.domain.memory_request import MemoryFragmentRequest
 from app.life.proactive import (
     get_recent_proactive_records,
     get_unseen_messages,
@@ -24,7 +25,7 @@ from app.life.proactive import (
 )
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.memory.vectorize_memory import enqueue_fragment_vectorize
+from app.runtime import emit
 
 _GLIMPSE_CFG = AgentConfig("glimpse_observe", "offline-model", "glimpse-observe")
 
@@ -238,7 +239,7 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
                 source="glimpse",
                 chat_id=chat_id,
             )
-        await enqueue_fragment_vectorize(fid)
+        await emit(MemoryFragmentRequest(fragment_id=fid))
         logger.info("[%s] Glimpse fragment %s: %s...", persona_id, fid, observation[:60])
 
     # 7. Proactive chat
@@ -282,8 +283,12 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
                     stimulus=stimulus,
                 )
             except Exception as exc:
-                logger.error(
+                logger.exception(
                     "[%s] Glimpse proactive submit failed: %s", persona_id, exc
+                )
+                state_observation = (
+                    f"{state_observation}\n[chat_submit_failed] "
+                    f"reason={type(exc).__name__}"
                 )
     elif speak_reason:
         state_observation = f"{observation}\n[no_speak] reason={speak_reason}"

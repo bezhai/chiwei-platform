@@ -1,5 +1,10 @@
 """Message routing — decide which personas should reply to a message.
 
+Renamed from ``chat/router.py`` in Phase 6 v4 to disambiguate from
+``nodes/chat_node:route_chat_node`` (graph fan-out). This module's
+``MessageRouter.route()`` filters which persona_ids should reply based
+on @mentions; the fan-out node decides how to dispatch downstream.
+
 Phase 2: @mention routing only.
 Phase 3 extension point: no-@ generic judge, proactive scanning.
 """

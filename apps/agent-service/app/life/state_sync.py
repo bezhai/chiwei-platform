@@ -1,6 +1,11 @@
 """State-only refresh — lighter Life Engine replay triggered by schedule changes.
 
-Called by the state_sync arq job after an update_schedule event.
+Called by ``app.nodes.sync_life_state.sync_life_state_node`` (a dataflow
+node consuming durable ``ScheduleRevisionCreated`` events) after an
+``update_schedule`` tool emit. Phase 6 v4 replaced the prior arq job
+``sync_life_state_after_schedule`` with this dataflow wire — the function
+itself stayed because state-only refresh is meaningfully smaller in scope
+than ``engine.tick``.
 """
 
 from __future__ import annotations

@@ -29,14 +29,14 @@ def test_life_dataflow_wiring_compiles():
     assert graph is not None
 
 
-def test_life_dataflow_wire_count_is_15():
+def test_life_dataflow_wire_count_is_16():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
     # 5 cron Tick + GlimpseTick + SharedDailyContext + DailyPlanRequest +
-    # 4 PersonaXxxRequest + GlimpseTickRequest + LifeStateChanged + GlimpseRequest
-    # = 6 + 1 + 1 + 4 + 1 + 1 + 1 = 15
+    # 4 PersonaXxxRequest + GlimpseTickRequest + LifeStateChanged + GlimpseRequest +
+    # ScheduleRevisionCreated (Phase 6 v4 Gap 4) = 6 + 1 + 1 + 4 + 1 + 1 + 1 + 1 = 16
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
         "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
@@ -45,9 +45,10 @@ def test_life_dataflow_wire_count_is_15():
         "LifeTickRequest", "VoiceRequest", "LightReviewRequest",
         "HeavyReviewRequest", "GlimpseTickRequest",
         "LifeStateChanged", "GlimpseRequest",
+        "ScheduleRevisionCreated",
     }
     assert types == expected
-    assert len(WIRING_REGISTRY) == 15
+    assert len(WIRING_REGISTRY) == 16
 
 
 def test_glimpse_request_wire_is_durable():

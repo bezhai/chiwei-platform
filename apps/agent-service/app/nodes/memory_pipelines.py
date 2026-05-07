@@ -30,11 +30,13 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
 )
 from app.data.session import get_session
+from app.domain.agent_tool_events import AbstractMemoryCommitted
+from app.domain.memory_request import MemoryAbstractRequest, MemoryFragmentRequest
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.memory.vectorize_memory import enqueue_fragment_vectorize
+from app.runtime import emit
 from app.runtime.debounce import DebounceReschedule
 from app.runtime.node import node
 
@@ -198,7 +200,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
             source="afterthought",
             chat_id=chat_id,
         )
-    await enqueue_fragment_vectorize(fid)
+    await emit(MemoryFragmentRequest(fragment_id=fid))
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,
@@ -280,3 +282,16 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
         await _generate_fragment(trigger.chat_id, trigger.persona_id)
     finally:
         await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
+
+
+@node
+async def on_abstract_committed(e: AbstractMemoryCommitted) -> None:
+    """Translate a tool-event into a vectorize request.
+
+    commit_abstract emits AbstractMemoryCommitted after DB commit; this
+    in-process node re-emits MemoryAbstractRequest so vectorize-worker
+    picks it up via Source.mq. Future subscribers (reviewer notification,
+    dirty cache invalidation, etc.) attach via wire(AbstractMemoryCommitted)
+    instead of patching the tool body.
+    """
+    await emit(MemoryAbstractRequest(abstract_id=e.abstract_id))

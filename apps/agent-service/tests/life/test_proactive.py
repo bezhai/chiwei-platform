@@ -1,21 +1,22 @@
-"""Proactive emits Message directly via runtime emit.
+"""Proactive emits Message + ChatTrigger via runtime emit.
 
-Invariant: After writing a ConversationMessage, proactive directly
-``await emit(Message.from_cm(msg))``. This test pins the observable
-behavior: one ``Message`` object is emitted via the capture_emit fixture.
+Invariant: After writing a ConversationMessage, proactive emits two
+Data instances in order: ``Message.from_cm(msg)`` first (so memory v4
+sees the row), then ``ChatTrigger(...)`` (so route_chat_node fan-outs
+into ChatRequest). chat_request mq.publish is gone — emit() is the
+single entry.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 
+from app.domain.chat_dataflow import ChatTrigger
 from app.domain.message import Message
 
 
 @pytest.mark.asyncio
-async def test_proactive_submit_emits_message_directly(capture_emit, monkeypatch):
-    """submit_proactive_chat → DB write → emit(Message)."""
+async def test_proactive_submit_emits_message_then_chat_trigger(capture_emit, monkeypatch):
+    """submit_proactive_chat → DB write → emit(Message) → emit(ChatTrigger)."""
     from app.life import proactive as pro
 
     # Stub DB session — 我们关心 emit 调用，不关心 DB 落盘。
@@ -40,11 +41,7 @@ async def test_proactive_submit_emits_message_directly(capture_emit, monkeypatch
 
     monkeypatch.setattr(Q, "resolve_bot_name_for_persona", fake_resolve_bot_name)
 
-    # Stub mq.publish — 不关心 RabbitMQ 实际发布。
-    fake_publish = AsyncMock()
-    monkeypatch.setattr(pro.mq, "publish", fake_publish)
-
-    # Stub current_lane for chat_request publish (imported locally inside function)
+    # Stub current_lane for ChatTrigger.lane (imported locally inside function)
     import app.infra.rabbitmq
     monkeypatch.setattr(app.infra.rabbitmq, "current_lane", lambda: "prod")
 
@@ -55,12 +52,22 @@ async def test_proactive_submit_emits_message_directly(capture_emit, monkeypatch
         stimulus="hi",
     )
 
-    # Proactive should have called emit once with a Message instance.
-    assert len(capture_emit) == 1
-    emitted = capture_emit[0]
-    assert isinstance(emitted, Message)
-    assert emitted.chat_id == "c1"
-    assert emitted.bot_name == "赤尾"
-    assert emitted.message_type == "proactive_trigger"
-    assert emitted.role == "user"
+    assert len(capture_emit) == 2, f"expect 2 emits (Message, ChatTrigger), got {capture_emit}"
+
+    msg_emitted = capture_emit[0]
+    assert isinstance(msg_emitted, Message)
+    assert msg_emitted.chat_id == "c1"
+    assert msg_emitted.bot_name == "赤尾"
+    assert msg_emitted.message_type == "proactive_trigger"
+    assert msg_emitted.role == "user"
+
+    trigger = capture_emit[1]
+    assert isinstance(trigger, ChatTrigger)
+    assert trigger.chat_id == "c1"
+    assert trigger.bot_name == "赤尾"
+    assert trigger.is_proactive is True
+    assert trigger.user_id == "__proactive__"
+    assert trigger.lane == "prod"
+    assert trigger.session_id == session_id
+
     assert session_id is not None

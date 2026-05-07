@@ -20,7 +20,9 @@ from app.nodes.memory_vectorize import (
     vectorize_memory_abstract,
     vectorize_memory_fragment,
 )
+from app.nodes.persist_tos_files import persist_tos_files_node
 from app.nodes.save_fragment import save_fragment
+from app.nodes.sync_life_state import sync_life_state_node
 from app.nodes.vectorize import vectorize
 from app.runtime import bind
 
@@ -29,3 +31,12 @@ bind(vectorize).to_app("vectorize-worker")
 bind(save_fragment).to_app("vectorize-worker")
 bind(vectorize_memory_fragment).to_app("vectorize-worker")
 bind(vectorize_memory_abstract).to_app("vectorize-worker")
+
+# Phase 6 v4 Gap 4: durable consumer for ScheduleRevisionCreated runs in
+# agent-service main process. Replaces arq state_sync_worker (Task 8).
+bind(sync_life_state_node).to_app("agent-service")
+
+# Phase 6 v4 Gap 5: durable consumer for ConversationMessageContentSynced runs
+# in the agent-service main process — matches the old asyncio.create_task
+# placement (chat handler co-located DB write).
+bind(persist_tos_files_node).to_app("agent-service")

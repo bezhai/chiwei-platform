@@ -82,10 +82,10 @@ async def test_build_chat_context_ignores_historical_proactive_for_normal_trigge
 
     with (
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
-        patch("app.chat.context._collect_images", new=AsyncMock(return_value=({}, {}))),
+        patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.get_redis", new=AsyncMock(return_value=MagicMock())),
         patch("app.chat.context.ImageRegistry", new=MagicMock(return_value="registry")),
-        patch("app.chat.context._build_group_messages", new=build_group_mock),
+        patch("app.chat.context.build_group_messages", new=build_group_mock),
     ):
         ctx = await build_chat_context("m_current")
 
@@ -141,10 +141,10 @@ async def test_build_chat_context_uses_current_proactive_trigger_only():
 
     with (
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
-        patch("app.chat.context._collect_images", new=AsyncMock(return_value=({}, {}))),
+        patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.get_redis", new=AsyncMock(return_value=MagicMock())),
         patch("app.chat.context.ImageRegistry", new=MagicMock(return_value="registry")),
-        patch("app.chat.context._build_group_messages", new=build_group_mock),
+        patch("app.chat.context.build_group_messages", new=build_group_mock),
     ):
         ctx = await build_chat_context("pro_now")
 

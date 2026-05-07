@@ -113,3 +113,39 @@ def test_chat_request_table_in_migrator():
     assert "data_chat_request" in sql_blob
     assert "data_chat_trigger" not in sql_blob
     assert "data_chat_response_segment" not in sql_blob
+
+
+def test_chat_nodes_placement_under_agent_service():
+    """route_chat_node + chat_node 必须落在 agent-service 默认 app。
+
+    emit() 用 nodes_for_app(APP_NAME) 过滤 in-process consumer：proactive
+    在 agent-service 进程 emit ChatTrigger 后 route_chat_node 必须在
+    agent-service 这一组 nodes 里，否则 fan-out 会被静默跳过。chat_node
+    同理。
+
+    deployment.py 没显式 bind 这两个节点 → fall through 到 default app
+    "agent-service"。如果未来一改 bind（误绑到 vectorize-worker），这条
+    测试会立刻挂掉。
+    """
+    _fresh_import()
+
+    # 让 deployment.py 的 bind 注册重新生效。需要先 import（首次 import 会
+    # 触发 body 注册 bindings）+ clear_bindings + reload（重新执行 body）。
+    # 直接 reload 而不 pre-clear 会因 _BINDINGS 残留触发 "already bound"
+    # raise（_Binder.to_app 检测重复绑定）。
+    import app.deployment as d  # noqa: F401
+    from app.runtime.placement import clear_bindings, nodes_for_app
+
+    clear_bindings()
+    importlib.reload(d)
+
+    from app.nodes.chat_node import chat_node, route_chat_node
+
+    agent_service_nodes = nodes_for_app("agent-service")
+    assert route_chat_node in agent_service_nodes, (
+        "route_chat_node must be in agent-service app; emit(ChatTrigger) "
+        "from same process won't reach it otherwise"
+    )
+    assert chat_node in agent_service_nodes, (
+        "chat_node must be in agent-service app"
+    )

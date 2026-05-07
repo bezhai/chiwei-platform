@@ -1,10 +1,12 @@
-"""ARQ Worker configuration — long_task executor cron + event-driven workers.
+"""ARQ Worker configuration — long_tasks subsystem (state_sync moved to dataflow).
 
 Phase 4 cutover: life-engine / glimpse / voice / review / daily-plan cron
-迁到 dataflow Source.cron + graph fan-out node（在 agent-service 主进程
-lifespan 里跑）。arq-worker 现在只剩：
+迁到 dataflow Source.cron + graph fan-out。
+Phase 6 v4 cutover: sync_life_state_after_schedule 改 dataflow durable wire +
+sync_life_state_node（app/nodes/sync_life_state.py）。
+
+arq-worker 现在只剩：
   - task_executor cron（每分钟轮询 long_tasks 表 —— long_tasks 子系统独立）
-  - sync_life_state_after_schedule（事件触发 worker function）
 
 Start command:
     arq app.workers.arq_settings.WorkerSettings
@@ -19,7 +21,6 @@ from arq.connections import RedisSettings
 from inner_shared.logger import setup_logging
 
 from app.infra.config import settings
-from app.workers.state_sync_worker import sync_life_state_after_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +49,11 @@ async def task_executor_job(ctx) -> None:
 async def on_startup(ctx) -> None:
     """Worker startup: configure logging, connect MQ.
 
-    Phase 4: removed seed voice (cron_generate_voice). voice 由 dataflow
-    主进程 graph cron 接管；arq-worker 不再承担 voice / life-engine /
-    glimpse / review / daily-plan 调度。
+    MQ connect is kept in case long_tasks executor needs to publish.
     """
     setup_logging(log_dir="/logs/agent-service", log_file="arq-worker.log")
     logger.info("arq-worker started, file logging enabled")
 
-    # MQ connect — sync_life_state_after_schedule 可能 emit 触发下游
     from app.infra.rabbitmq import mq
 
     await mq.connect()
@@ -85,7 +83,7 @@ class WorkerSettings:
         database=0,
     )
 
-    functions: list = [sync_life_state_after_schedule]
+    functions: list = []
 
     cron_jobs = [
         # task_executor: long_tasks 子系统独立保留，不在 Phase 4 范围

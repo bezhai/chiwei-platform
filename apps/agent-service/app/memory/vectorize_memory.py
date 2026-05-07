@@ -1,10 +1,15 @@
 """Memory v4 vectorization — embed and upsert fragments/abstracts to Qdrant.
 
 The dataflow ``vectorize_memory_fragment`` / ``vectorize_memory_abstract``
-@nodes call ``vectorize_fragment`` / ``vectorize_abstract`` here once
-the runtime decodes an incoming MQ frame; ``enqueue_*_vectorize`` are
-the publisher-side helpers that ship those frames to the
-``memory_fragment_vectorize`` / ``memory_abstract_vectorize`` queues.
+@nodes call ``vectorize_fragment`` / ``vectorize_abstract`` here once the
+runtime decodes an incoming MQ frame from
+``Source.mq("memory_fragment_vectorize")`` / ``Source.mq("memory_abstract_vectorize")``.
+
+Publisher-side enqueue is now uniform: callers do
+``await emit(MemoryFragmentRequest(fragment_id=fid))`` /
+``await emit(MemoryAbstractRequest(abstract_id=aid))`` — runtime emit()
+auto-publishes to the right queue when the consumer is in another process
+(see app/runtime/emit.py:_mq_publish_for_source).
 
 Qdrant point ids must be uint or UUID, so we use a deterministic ``uuid5``
 derived from the prefixed DB id (``f_xxx`` / ``a_xxx``) and stash the original
@@ -99,25 +104,3 @@ async def vectorize_abstract(abstract_id: str) -> bool:
     )
     logger.info("vectorize_abstract ok: %s (subject=%s)", a.id, a.subject)
     return True
-
-
-async def enqueue_fragment_vectorize(fragment_id: str) -> None:
-    """Publish to ``memory_fragment_vectorize`` queue.
-
-    Body shape ``{"fragment_id": ...}`` is what the dataflow
-    ``MemoryFragmentRequest`` Data class decodes from on the consumer
-    side (``app.wiring.memory_vectorize`` + ``Source.mq``).
-    """
-    from app.infra.rabbitmq import MEMORY_FRAGMENT_VECTORIZE, mq
-    await mq.publish(MEMORY_FRAGMENT_VECTORIZE, {"fragment_id": fragment_id})
-
-
-async def enqueue_abstract_vectorize(abstract_id: str) -> None:
-    """Publish to ``memory_abstract_vectorize`` queue.
-
-    Body shape ``{"abstract_id": ...}`` is what the dataflow
-    ``MemoryAbstractRequest`` Data class decodes from on the consumer
-    side (``app.wiring.memory_vectorize`` + ``Source.mq``).
-    """
-    from app.infra.rabbitmq import MEMORY_ABSTRACT_VECTORIZE, mq
-    await mq.publish(MEMORY_ABSTRACT_VECTORIZE, {"abstract_id": abstract_id})

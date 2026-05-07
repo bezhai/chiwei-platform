@@ -1,8 +1,8 @@
-"""update_schedule tool — append schedule_revision + enqueue state_sync.
+"""update_schedule tool — append schedule_revision + emit ScheduleRevisionCreated.
 
-The new revision is persisted to schedule_revision (append-only history). A
-``sync_life_state_after_schedule`` arq job is enqueued so the life-engine state
-gets re-evaluated; the consumer itself lives in Plan D.
+Phase 6 v4 Gap 4: tool emits ScheduleRevisionCreated after DB commit; the
+durable wire (app/wiring/life_dataflow.py) routes to sync_life_state_node
+in agent-service main process. arq state_sync_worker retired.
 """
 
 from __future__ import annotations
@@ -17,31 +17,10 @@ from app.agent.tools._common import tool_error
 from app.data.ids import new_id
 from app.data.queries import insert_schedule_revision
 from app.data.session import get_session
+from app.domain.agent_tool_events import ScheduleRevisionCreated
+from app.runtime import emit
 
 logger = logging.getLogger(__name__)
-
-
-async def enqueue_state_sync(*, revision_id: str) -> None:
-    """Enqueue arq job ``sync_life_state_after_schedule`` (consumer in Plan D).
-
-    Lazy-imports `arq` and `WorkerSettings` to avoid pulling the worker module's
-    cron-import chain into tool-load time. TODO(Plan D): when multiple tools
-    need to enqueue arq jobs, migrate to a shared pool in ``app/infra/arq_pool.py``
-    instead of creating/closing per call.
-    """
-    from arq import create_pool
-
-    from app.workers.arq_settings import WorkerSettings
-
-    pool = await create_pool(WorkerSettings.redis_settings)
-    try:
-        await pool.enqueue_job(
-            "sync_life_state_after_schedule",
-            revision_id=revision_id,
-            _queue_name=WorkerSettings.queue_name,
-        )
-    finally:
-        await pool.close(close_connection_pool=True)
 
 
 async def _update_schedule_impl(
@@ -59,13 +38,17 @@ async def _update_schedule_impl(
             content=content, reason=reason, created_by=created_by,
         )
 
+    # emit AFTER commit (Gap 8 spec convention) — durable wire routes to
+    # sync_life_state_node in main process. emit failure must not lose the
+    # already-committed revision; downstream state-sync is replayed via
+    # mq redelivery / DLQ.
     try:
-        await enqueue_state_sync(revision_id=rid)
+        await emit(ScheduleRevisionCreated(revision_id=rid, persona_id=persona_id))
     except Exception as e:
-        # Don't roll back the revision — it's already committed. The Plan D
-        # consumer will pick up unsynced revisions when it lands; until then
-        # the next update_schedule call will re-enqueue.
-        logger.warning("enqueue_state_sync failed for %s: %s", rid, e)
+        logger.warning(
+            "emit ScheduleRevisionCreated failed for %s: %s — revision is committed; "
+            "state-sync may be delayed", rid, e,
+        )
 
     return {"revision_id": rid, "schedule": content}
 

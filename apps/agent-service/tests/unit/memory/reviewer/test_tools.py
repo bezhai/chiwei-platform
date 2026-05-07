@@ -300,7 +300,7 @@ def test_make_reviewer_tools_returns_all_eight():
         patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock()),
         patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()),
         patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()),
-        patch("app.agent.tools.commit_abstract.enqueue_abstract_vectorize", new=AsyncMock()),
+        patch("app.agent.tools.commit_abstract.emit", new_callable=AsyncMock),
     ):
         from app.memory.reviewer.tools import make_reviewer_tools
 

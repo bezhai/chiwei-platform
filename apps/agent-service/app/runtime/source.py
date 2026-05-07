@@ -24,8 +24,27 @@ class SourceSpec:
 
 class Source:
     @staticmethod
-    def http(path: str) -> SourceSpec:
-        return SourceSpec("http", {"path": path})
+    def http(
+        path: str,
+        *,
+        method: str = "POST",
+        response: bool = False,
+    ) -> SourceSpec:
+        """HTTP source.
+
+        method: "GET" | "POST" | "PUT" | "DELETE". path 中 ``{name}`` 占位的
+        部分自动绑定为 path param，按字段名注入到 Data 实例。
+        GET / DELETE 把 query string 反序列化进 Data。
+        POST / PUT 默认 body JSON 反序列化进 Data。
+
+        response=True 表示节点返回值会作为 HTTP response body 同步返回；
+        runtime 会在 emit 后等节点完成（in-process consumer 必须在本进程，
+        跨进程的 RPC 模式 v4 不支持，会在编译期 raise）。
+        """
+        method = method.upper()
+        if method not in {"GET", "POST", "PUT", "DELETE"}:
+            raise ValueError(f"unsupported HTTP method {method!r}")
+        return SourceSpec("http", {"path": path, "method": method, "response": response})
 
     @staticmethod
     def cron(expr: str, *, tz: str = "UTC") -> SourceSpec:
