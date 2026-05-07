@@ -30,7 +30,8 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
 )
 from app.data.session import get_session
-from app.domain.memory_request import MemoryFragmentRequest
+from app.domain.agent_tool_events import AbstractMemoryCommitted
+from app.domain.memory_request import MemoryAbstractRequest, MemoryFragmentRequest
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
@@ -281,3 +282,16 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
         await _generate_fragment(trigger.chat_id, trigger.persona_id)
     finally:
         await redis.eval(_LOCK_RELEASE_LUA, 1, lock_key, token)
+
+
+@node
+async def on_abstract_committed(e: AbstractMemoryCommitted) -> None:
+    """Translate a tool-event into a vectorize request.
+
+    commit_abstract emits AbstractMemoryCommitted after DB commit; this
+    in-process node re-emits MemoryAbstractRequest so vectorize-worker
+    picks it up via Source.mq. Future subscribers (reviewer notification,
+    dirty cache invalidation, etc.) attach via wire(AbstractMemoryCommitted)
+    instead of patching the tool body.
+    """
+    await emit(MemoryAbstractRequest(abstract_id=e.abstract_id))
