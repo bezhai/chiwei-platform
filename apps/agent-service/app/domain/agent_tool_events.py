@@ -5,8 +5,12 @@ then emits one of these Data classes; downstream nodes react via wire
 (vectorize / state-sync / reviewer / etc.). Tools no longer call
 ad-hoc bypass helpers (mq.publish / arq enqueue / direct pool access).
 
-All transient — these are events, not durable rows; the underlying DB
-row (AbstractMemory / ScheduleRevision / Note) is the source of truth.
+AbstractMemoryCommitted / NoteCreated stay transient — their downstream
+edges are in-process re-emits, the underlying DB row (AbstractMemory /
+Note) is the source of truth. ScheduleRevisionCreated is persisted
+because its wire is .durable() (cross-process tool -> sync_life_state
+consumer), and durable edges require a real pg table for
+``insert_idempotent`` mq-redelivery dedup.
 """
 from __future__ import annotations
 
@@ -26,12 +30,15 @@ class AbstractMemoryCommitted(Data):
 
 
 class ScheduleRevisionCreated(Data):
-    """update_schedule tool wrote a schedule_revision row."""
+    """update_schedule tool wrote a schedule_revision row.
+
+    Persisted (NOT transient) — wire(...).durable() requires a real pg
+    table so the consumer-side ``insert_idempotent`` can dedup mq
+    redeliveries. The revision_id key is unique per real DB row in
+    schedule_revisions, so this Data row is also the durable event log.
+    """
     revision_id: Annotated[str, Key]
     persona_id: str
-
-    class Meta:
-        transient = True
 
 
 class NoteCreated(Data):

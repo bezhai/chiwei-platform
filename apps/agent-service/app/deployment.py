@@ -21,6 +21,7 @@ from app.nodes.memory_vectorize import (
     vectorize_memory_fragment,
 )
 from app.nodes.save_fragment import save_fragment
+from app.nodes.sync_life_state import sync_life_state_node
 from app.nodes.vectorize import vectorize
 from app.runtime import bind
 
@@ -29,3 +30,7 @@ bind(vectorize).to_app("vectorize-worker")
 bind(save_fragment).to_app("vectorize-worker")
 bind(vectorize_memory_fragment).to_app("vectorize-worker")
 bind(vectorize_memory_abstract).to_app("vectorize-worker")
+
+# Phase 6 v4 Gap 4: durable consumer for ScheduleRevisionCreated runs in
+# agent-service main process. Replaces arq state_sync_worker (Task 8).
+bind(sync_life_state_node).to_app("agent-service")

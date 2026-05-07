@@ -11,9 +11,11 @@ Graph topology (see docs/superpowers/specs/2026-04-30-dataflow-phase-4-...):
   cron */5 -> GlimpseTick -> fan_out_glimpse -> GlimpseTickRequest -> glimpse_tick_node
   LifeStateChanged -> glimpse_event_node
   GlimpseRequest .durable() -> run_glimpse_node
+  ScheduleRevisionCreated .durable() -> sync_life_state_node
 """
 from __future__ import annotations
 
+from app.domain.agent_tool_events import ScheduleRevisionCreated
 from app.domain.life_dataflow import (
     DailyPlanRequest,
     DailyPlanTick,
@@ -49,6 +51,7 @@ from app.nodes.life_dataflow import (
     run_shared_daily_pipeline_node,
     voice_node,
 )
+from app.nodes.sync_life_state import sync_life_state_node
 from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
@@ -75,3 +78,6 @@ wire(HeavyReviewRequest).to(heavy_review_node)
 wire(GlimpseTickRequest).to(glimpse_tick_node)         # 5min periodic path
 wire(LifeStateChanged).to(glimpse_event_node)          # immediate event path
 wire(GlimpseRequest).to(run_glimpse_node).durable()    # durable multi-process
+
+# Schedule revision triggers life-state refresh (durable: cross-process tool->consumer).
+wire(ScheduleRevisionCreated).to(sync_life_state_node).durable()
