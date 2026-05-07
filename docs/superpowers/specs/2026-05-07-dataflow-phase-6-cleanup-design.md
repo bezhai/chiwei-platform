@@ -1,6 +1,11 @@
 # Dataflow Phase 6 — 清扫（修订版）
 
-**状态**: Draft v1 (2026-05-07)
+**状态**: Draft v2 (2026-05-07，吸收 reviewer 4 条反馈)
+**v2 关键变化（vs v1）**：
+- §2.3 / §2.4 第一刀同时**收窄 glimpse.py:277-287 的 try/except**：旧路径下 `submit_proactive_chat()` 走 fire-and-forget mq.publish + glimpse 业务层 catch 吞错；新路径下 emit 走 in-process，route_chat_node 任何异常会上抛到 submit 调用点。如果保留 glimpse 的 catch，错会被业务层吞掉，**比旧路径 mq source 进 DLQ 的可观测性退化**。第一刀必须同时改 glimpse 让异常正常传播。修 reviewer #1
+- §4 新增 placement 硬验收：`route_chat_node in nodes_for_app("agent-service")` + `chat_node in nodes_for_app("agent-service")`。`emit.py:96` 按 APP_NAME 过滤 in-process consumer，当前 `deployment.py` 没显式 bind chat node 所以 fall through 到 default app（agent-service）；未来一加 bind 会静默跳过 fan-out，必须有测试兜底。修 reviewer #2
+- §3.3 函数归类调整：新增 `agent_response.py`（4 函数：set_agent_response_bot / is_chat_request_completed / get_safety_status / set_safety_status，主表都是 `agent_responses`，原 v1 错放 messages.py）；`find_gray_config` 从 persona.py 移到 messages.py（主表 LarkBaseChatInfo 是 chat 维度，与 message 共享 chat_id 主键，不是 BotPersona 表）。Domain 数 6 → 7。修 reviewer #3
+- §4 验收清单测试路径修正：`tests/wiring/test_chat_pipeline*.py` → 实际 `tests/wiring/test_chat_wiring.py` + `tests/nodes/test_route_chat_node.py` + `tests/nodes/test_chat_node.py`；`tests/unit/life/test_proactive.py` 第一刀后断言改成"先 emit Message 再 emit ChatTrigger"，不再 patch `mq.publish`。修 reviewer #4
 **前置**: PR #209 (Phase 5b chat pipeline + bridges 清扫) shipped to prod 1.0.0.328
 **后续**: 无（dataflow 重构主线收尾）
 
@@ -81,18 +86,42 @@ await emit(ChatTrigger(
 
 文件顶部 `from app.infra.rabbitmq import CHAT_REQUEST, mq` 删除（如 `mq` 没有其它使用）。
 
-### 2.3 行为不变量
+### 2.3 同时修：收窄 glimpse 的 try/except
+
+**reviewer #1 触发的改动，必须随第一刀同步落地**。
+
+`apps/agent-service/app/life/glimpse.py:277-287` 现状：
+
+```python
+try:
+    await submit_proactive_chat(chat_id=..., persona_id=..., target_message_id=..., stimulus=...)
+except Exception as exc:
+    logger.error("[%s] Glimpse proactive submit failed: %s", persona_id, exc)
+```
+
+旧路径下 `submit_proactive_chat` 内部走 `mq.publish` fire-and-forget，几乎不会抛错（除非 DB insert 或 mq broker 不可达），catch 是兜底防御 —— 即使吞错，route_chat_node 的失败由 mq source loop 进 DLQ 兜底。
+
+第一刀改 `mq.publish` → `emit(ChatTrigger)` 后，emit 走 in-process 直接调 `route_chat_node`（`emit.py:8-11`：in-process dispatch 是 strict，consumer raise 会上抛）。如果**保留**这个 catch：
+
+- route_chat_node 任何异常 → 上抛 submit_proactive_chat → glimpse catch → log → **错丢失，无 DLQ、无重投、无监控触发**。
+- 这比旧路径 mq DLQ 路径**可靠性退化**。
+
+修法：把 try/except 范围**收窄到只 catch DB insert / target_message resolve 等业务校验异常**，emit 调用本身让异常正常传播；或者**整段 try 删除**让 submit_proactive_chat 异常上抛到 glimpse_node。
+
+推荐**整段 try 删除**：proactive submit 失败本来就是异常事件（DB 不可达 / route_chat_node 业务异常 / runtime 编译错误等），让它正常向上传播到 glimpse_node。glimpse_node 自身的 wire（`Source.cron(...)` + bind 到 agent-service）失败会进 cron job 失败路径，由 runtime 统一处理（log + 下次 cron tick 自然 retry），可观测性不丢。
+
+### 2.4 行为不变量
 
 - proactive trigger 仍能让 `route_chat_node` fan-out per-persona ChatRequest → chat_node
 - emit 走 in-process 路径（proactive 调用方 = glimpse_node 在 agent-service 主进程；route_chat_node 也在主进程）；与 lark-server 跨进程 publish chat_request 走 mq 路径殊途同归（runtime mq source loop 解码 body → ChatTrigger 后调用同一个 `route_chat_node`）。
 - `ChatTrigger.message_id` 是 `Annotated[str | None, Key]`，proactive 生成的 `f"proactive_{ts}"` 满足约束。
 - `ChatTrigger.root_id` 当前是 `str | None`；原 mq.publish 用空字串 `""`，emit 改成 `None` 与字段类型一致。下游 `route_chat_node` 对 root_id 的处理需要在 plan 阶段验证 None 与 "" 行为等价（grep `root_id` 在 chat_dataflow / nodes / chat 路径的所有用法）。
+- chat submit 失败 → glimpse_node 失败 → cron 失败路径（log + 下次 tick retry），不再被业务层吞掉。
 
-### 2.4 风险
-
-- 主进程 emit 走 in-process，任何下游 raise 会传播回 `submit_proactive_chat` 调用点（glimpse_node）。`emit.py:8-11` 注释明确"in-process dispatch 是 strict：consumer 抛错会上抛"。当前 mq.publish 是 fire-and-forget，下游报错也不会影响 proactive。改 emit 后 route_chat_node 任何异常会让 glimpse 这一帧失败 —— **可接受**：route_chat_node 失败本来就该上报，fire-and-forget 吞错才是 bug。
+### 2.5 风险
 
 - `ChatRequest` 走的是 `.durable()` wire（Phase 5a），所以 emit ChatTrigger → in-process route_chat_node → emit ChatRequest（durable）这条链路里，第二跳是异步 publish 到 mq，glimpse 进程不会等 chat_node 跑完才返回，与原 mq.publish 异步语义一致。
+- glimpse 删 try/except 后，旧路径下被吞掉的边界异常（极少数 DB insert / target resolve 失败）现在会让 glimpse_node 这一帧失败。这是**可接受的可观测性提升**：glimpse 是按 cron 周期触发，单次失败不会让 chiwei 长时间不主动开口；且失败可见利于排查。
 
 ## 3. 第三刀 — queries.py 拆 6 个 domain
 
@@ -107,8 +136,9 @@ apps/agent-service/app/data/
   queries/
     __init__.py        # 重导出全部 public 函数（保持调用方零改动）
     model_provider.py  # 3 函数
-    persona.py         # 7 函数
-    messages.py        # 14 函数
+    persona.py         # 6 函数
+    messages.py        # 11 函数
+    agent_response.py  # 4 函数（agent_responses 表的全部 read/write）
     schedule.py        # 11 函数
     life.py            # 8 函数
     memory.py          # 30+ 函数
@@ -121,18 +151,24 @@ apps/agent-service/app/data/
 | domain | 函数 |
 |---|---|
 | **model_provider** | `parse_model_id` / `find_model_mapping` / `find_provider_by_name` |
-| **persona** | `find_persona` / `list_all_persona_ids` / `find_gray_config` / `resolve_persona_id` / `resolve_bot_name_for_persona` / `resolve_mentioned_personas` / `find_bot_names_for_persona` |
-| **messages** | `find_cross_chat_messages` / `find_message_content` / `find_messages_in_range` / `find_username` / `find_group_name` / `find_group_download_permission` / `find_message_by_id` / `resolve_message_id_by_row_id` / `set_agent_response_bot` / `is_chat_request_completed` / `get_safety_status` / `set_safety_status` / `find_last_bot_reply_time` / `find_context_messages_for_anchors` / `find_group_members` |
+| **persona** | `find_persona` / `list_all_persona_ids` / `resolve_persona_id` / `resolve_bot_name_for_persona` / `resolve_mentioned_personas` / `find_bot_names_for_persona` |
+| **messages** | `find_cross_chat_messages` / `find_message_content` / `find_messages_in_range` / `find_username` / `find_group_name` / `find_group_download_permission` / `find_message_by_id` / `resolve_message_id_by_row_id` / `find_last_bot_reply_time` / `find_context_messages_for_anchors` / `find_group_members` / `find_gray_config` |
+| **agent_response** | `set_agent_response_bot` / `is_chat_request_completed` / `get_safety_status` / `set_safety_status` |
 | **schedule** | `find_active_schedules_for_date` / `find_latest_plan` / `find_plan_for_period` / `find_daily_entries` / `list_schedules` / `upsert_schedule` / `delete_schedule` / `insert_schedule_revision` / `get_current_schedule` / `get_schedule_revision_by_id` / `list_recent_schedule_revisions` |
 | **life** | `find_latest_life_state` / `insert_life_state` / `find_today_activity_states` / `find_life_states_in_range` / `find_latest_glimpse_state` / `insert_glimpse_state` / `insert_reply_style` / `find_latest_reply_style` / `list_recent_life_states` |
 | **memory** | `list_today_fragments` / `find_fragments_since` / `get_fragment_by_id` / `get_abstract_by_id` / `insert_fragment` / `touch_fragment` / `get_fragments_by_ids` / `touch_fragments_bulk` / `insert_abstract_memory` / `touch_abstract` / `touch_abstracts_bulk` / `count_abstracts_by_persona` / `insert_memory_edge` / `insert_note` / `get_active_notes` / `resolve_note` / `update_abstract_content_query` / `set_clarity` / `delete_fragment_query` / `delete_edge` / `list_fragments_window` / `list_abstracts_window` / `list_edges_to` / `list_edges_from` / `get_abstracts_by_subject` / `get_abstracts_by_subjects` / `get_recent_abstract_titles` / `count_abstracts_per_subject_prefix` / `get_recent_fragments_for_injection` |
 
-**归类原则**：函数操作哪张/哪组表，就归到对应 domain。例：`list_today_fragments` 在 life 模块被使用，但操作 `fragments` 表 → 归 memory.py。`find_group_download_permission` 查 group 配置表 → 归 messages.py（group 是 message 上下文一部分，不开新 group domain）。
+**归类原则**：函数操作哪张/哪组表，就归到对应 domain。例：
+- `list_today_fragments` 在 life 模块被使用，但操作 `fragments` 表 → 归 memory.py。
+- `find_gray_config` 通过 message_id JOIN 到 `LarkBaseChatInfo` 取 chat 灰度配置；主表是 chat info 不是 BotPersona → 归 messages.py（chat 维度，与 message 共享 chat_id 主键，不开新 chat_config domain 因为只有 1 个函数）。
+- `set_agent_response_bot` / `is_chat_request_completed` / `get_safety_status` / `set_safety_status` 主表都是 `agent_responses`（即使 `is_chat_request_completed` 在 proactive 分支也查 ConversationMessage，主体语义仍是"chat request 完成判定"属 agent_response 域）→ 独立 `agent_response.py`，不混进 messages.py。
+- `find_group_download_permission` 查 group 配置（共享 ConversationMessage 上下文）→ 归 messages.py（不开新 group domain）。
 
 ### 3.4 `__init__.py` 写法
 
 ```python
 """Data queries — split per domain. 调用方 import 不变 (`from app.data.queries import X`)."""
+from app.data.queries.agent_response import *  # noqa: F401,F403
 from app.data.queries.life import *  # noqa: F401,F403
 from app.data.queries.memory import *  # noqa: F401,F403
 from app.data.queries.messages import *  # noqa: F401,F403
@@ -154,8 +190,9 @@ from app.data.queries.schedule import *  # noqa: F401,F403
 按 def 行号粗算：
 
 - model_provider: ~32 行
-- persona: ~81 行
-- messages: ~290 行（接近 300，可接受）
+- persona: ~70 行（移走 `find_gray_config` 后）
+- messages: ~210 行（移走 4 agent_response 函数 + 移入 `find_gray_config` 后）
+- agent_response: ~80 行（4 函数从 messages 抽出）
 - schedule: ~200 行
 - life: ~140 行
 - memory: ~440 行 ⚠️ **超 300 行**
@@ -171,9 +208,12 @@ memory.py 超 300 行时，再拆为：
 
 ### 第一刀
 - `grep -n "mq.publish" apps/agent-service/app/life/proactive.py` 无命中
+- `grep -n "try:" apps/agent-service/app/life/glimpse.py` 不再包含 submit_proactive_chat 周边的 try/except（§2.3 收窄）
 - `grep -rn "mq.publish" apps/agent-service/app/` 命中数 = main 命中数 - 1
 - 飞书 dev bot 群聊 + 单聊 e2e 通过；glimpse 触发 proactive → 主动消息正常发出
-- `tests/unit/life/test_proactive*.py` + `tests/wiring/test_chat_pipeline*.py` green
+- **placement 硬验收**（reviewer #2）：新加测试断言 `route_chat_node in nodes_for_app("agent-service")` 且 `chat_node in nodes_for_app("agent-service")`，加在 `tests/wiring/test_chat_wiring.py`
+- `tests/unit/life/test_proactive.py` 改造：删除 `patch("app.infra.rabbitmq.mq.publish", ...)`，改成断言 `submit_proactive_chat` 内 emit 顺序为 `Message → ChatTrigger`（顺序正确性是 §2.2 的契约）
+- `tests/unit/life/test_proactive.py` + `tests/unit/life/test_glimpse.py` + `tests/wiring/test_chat_wiring.py` + `tests/nodes/test_route_chat_node.py` + `tests/nodes/test_chat_node.py` green
 
 ### 第三刀
 - `apps/agent-service/app/data/queries.py` 文件不存在
