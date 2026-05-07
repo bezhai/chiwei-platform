@@ -28,6 +28,11 @@ class Ping(Data):
     text: str
 
 
+class LanePing(Data):
+    pid: Annotated[str, Key]
+    lane: str | None = None
+
+
 received: list = []
 seen_ctx: list = []
 
@@ -36,6 +41,11 @@ seen_ctx: list = []
 async def ping_consumer(p: Ping) -> None:
     received.append(p)
     seen_ctx.append((trace_id_var.get(), lane_var.get()))
+
+
+@node
+async def lane_ping_consumer(p: LanePing) -> None:
+    received.append(p)
 
 
 def setup_function():
@@ -97,6 +107,46 @@ async def test_durable_roundtrip(durable_env):
     assert trace_id == "trace-abc"
     # Lane wasn't set at publish time, so consumer sees None after restore.
     assert lane is None
+
+
+@pytest.mark.asyncio
+async def test_publish_durable_uses_data_lane_when_context_missing(monkeypatch):
+    """Source.mq payloads carry lane in the body, not necessarily in
+    contextvars. Durable publish must route by the Data.lane field so
+    chat_request_<lane> can fan out to durable_chat_request_*_<lane>.
+    """
+    wire(LanePing).to(lane_ping_consumer).durable()
+    w = next(ws for ws in WIRING_REGISTRY if ws.data_type is LanePing)
+
+    captured = {}
+
+    async def fake_publish(route, body, delay_ms=None, headers=None, lane=None):
+        captured.update(
+            route=route,
+            body=body,
+            headers=headers,
+            lane=lane,
+            delay_ms=delay_ms,
+        )
+
+    monkeypatch.setattr("app.runtime.durable.mq.publish", fake_publish)
+
+    tok_t = trace_id_var.set("trace-xyz")
+    tok_l = lane_var.set(None)
+    try:
+        await publish_durable(
+            w,
+            lane_ping_consumer,
+            LanePing(pid="p-lane", lane="feat-flow-parse-5b"),
+        )
+    finally:
+        lane_var.reset(tok_l)
+        trace_id_var.reset(tok_t)
+
+    assert captured["body"]["lane"] == "feat-flow-parse-5b"
+    assert captured["headers"]["lane"] == "feat-flow-parse-5b"
+    assert captured["headers"]["trace_id"] == "trace-xyz"
+    assert captured["lane"] == "feat-flow-parse-5b"
 
 
 @pytest.mark.integration

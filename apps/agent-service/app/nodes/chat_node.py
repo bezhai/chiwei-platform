@@ -52,6 +52,14 @@ async def route_chat_node(t: ChatTrigger) -> None:
             "ChatTrigger.message_id is None; cannot fan out ChatRequest"
         )
 
+    logger.info(
+        "route_chat_node received: session_id=%s, message_id=%s, lane=%s, bot_name=%s",
+        t.session_id,
+        t.message_id,
+        t.lane,
+        t.bot_name,
+    )
+
     async with get_session() as s:
         already_done = await is_chat_request_completed(
             s, t.session_id, is_proactive=t.is_proactive
@@ -75,6 +83,14 @@ async def route_chat_node(t: ChatTrigger) -> None:
     if not persona_ids:
         logger.info("no persona to reply: message_id=%s", t.message_id)
         return
+
+    logger.info(
+        "route_chat_node fanout: session_id=%s, message_id=%s, lane=%s, personas=%s",
+        t.session_id,
+        t.message_id,
+        t.lane,
+        persona_ids,
+    )
 
     for i, pid in enumerate(persona_ids):
         session_for_persona = t.session_id if i == 0 else str(uuid4())
