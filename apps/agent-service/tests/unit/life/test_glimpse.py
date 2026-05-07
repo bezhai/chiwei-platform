@@ -375,3 +375,97 @@ async def test_glimpse_want_to_speak_submits_proactive():
                 target_message_id="m1",
                 stimulus="好想聊聊",
             )
+
+
+@pytest.mark.asyncio
+async def test_glimpse_chat_submit_failure_marks_state_and_persists():
+    """submit_proactive_chat raise 时:
+      - state_observation 拼接 [chat_submit_failed] reason=<exc_type>
+      - insert_glimpse_state 仍执行（last_seen 推进，不重复处理）
+    """
+    from app.life.glimpse import run_glimpse
+
+    normal_time = datetime(2026, 4, 7, 14, 0, tzinfo=CST)
+    mock_msg = _make_msg()
+
+    llm_response = json.dumps(
+        {
+            "interesting": True,
+            "observation": "他们在讨论我喜欢的东西",
+            "want_to_speak": True,
+            "stimulus": "好想聊聊",
+            "target_message_id": "m1",
+        }
+    )
+
+    with patch(f"{MODULE}.get_session") as mock_gs:
+        mock_session = AsyncMock()
+        mock_gs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch(f"{MODULE}._now_cst", return_value=normal_time),
+            patch(
+                f"{MODULE}.Q.find_latest_glimpse_state",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                f"{MODULE}.Q.find_last_bot_reply_time",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                f"{MODULE}.get_unseen_messages",
+                new_callable=AsyncMock,
+                return_value=[mock_msg],
+            ),
+            patch(
+                f"{MODULE}.format_timeline",
+                new_callable=AsyncMock,
+                return_value="[14:00] someone: 话题",
+            ),
+            patch(
+                f"{MODULE}.get_recent_proactive_records",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                f"{MODULE}._call_glimpse_llm",
+                new_callable=AsyncMock,
+                return_value=llm_response,
+            ),
+            patch(f"{MODULE}.Q.insert_fragment", new_callable=AsyncMock),
+            patch(
+                f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
+            ) as mock_state,
+            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
+            patch(
+                f"{MODULE}.load_persona",
+                new_callable=AsyncMock,
+                return_value=MagicMock(display_name="赤尾", persona_lite=""),
+            ),
+            patch(
+                f"{MODULE}._get_group_name",
+                new_callable=AsyncMock,
+                return_value="番剧群",
+            ),
+            patch(
+                f"{MODULE}.submit_proactive_chat",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            result = await run_glimpse("akao-001", "oc_test")
+
+            # Glimpse 这一帧仍算成功（fragment 已写、state 已落盘）
+            assert result == GlimpseResult.FRAGMENT_CREATED
+            # insert_glimpse_state 仍被调用，last_seen 推进
+            mock_state.assert_called_once()
+            obs = mock_state.call_args[1]["observation"]
+            assert "[chat_submit_failed]" in obs, (
+                f"missing [chat_submit_failed] tag in observation: {obs!r}"
+            )
+            assert "RuntimeError" in obs, (
+                f"missing exception type in observation: {obs!r}"
+            )

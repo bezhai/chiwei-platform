@@ -282,8 +282,12 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
                     stimulus=stimulus,
                 )
             except Exception as exc:
-                logger.error(
+                logger.exception(
                     "[%s] Glimpse proactive submit failed: %s", persona_id, exc
+                )
+                state_observation = (
+                    f"{state_observation}\n[chat_submit_failed] "
+                    f"reason={type(exc).__name__}"
                 )
     elif speak_reason:
         state_observation = f"{observation}\n[no_speak] reason={speak_reason}"
