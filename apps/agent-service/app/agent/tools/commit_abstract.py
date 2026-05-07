@@ -14,8 +14,9 @@ from app.data.queries import (
     insert_memory_edge,
 )
 from app.data.session import get_session
+from app.domain.memory_request import MemoryAbstractRequest
 from app.memory.conflict import detect_conflict
-from app.memory.vectorize_memory import enqueue_abstract_vectorize
+from app.runtime import emit
 
 
 async def _commit_abstract_impl(
@@ -59,7 +60,7 @@ async def _commit_abstract_impl(
                 reason=reasoning,
             )
 
-    await enqueue_abstract_vectorize(aid)
+    await emit(MemoryAbstractRequest(abstract_id=aid))
 
     return {"id": aid, "conflict_hint": hint}
 

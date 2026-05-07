@@ -30,11 +30,12 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
 )
 from app.data.session import get_session
+from app.domain.memory_request import MemoryFragmentRequest
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.memory.vectorize_memory import enqueue_fragment_vectorize
+from app.runtime import emit
 from app.runtime.debounce import DebounceReschedule
 from app.runtime.node import node
 
@@ -198,7 +199,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
             source="afterthought",
             chat_id=chat_id,
         )
-    await enqueue_fragment_vectorize(fid)
+    await emit(MemoryFragmentRequest(fragment_id=fid))
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,

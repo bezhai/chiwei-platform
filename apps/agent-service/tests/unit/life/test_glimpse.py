@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.domain.memory_request import MemoryFragmentRequest
 from app.life.glimpse import GlimpseResult, parse_glimpse_response
 
 CST = timezone(timedelta(hours=8))
@@ -186,7 +187,7 @@ async def test_glimpse_creates_fragment_and_state():
                 return_value="番剧群",
             ),
             patch(
-                f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock
+                f"{MODULE}.emit", new_callable=AsyncMock
             ) as mock_enqueue,
         ):
             result = await run_glimpse("akao-001", "oc_test")
@@ -200,6 +201,9 @@ async def test_glimpse_creates_fragment_and_state():
             assert kwargs["content"] == "群里在聊新番"
             assert kwargs["id"].startswith("f_")
             mock_enqueue.assert_awaited_once()
+            emitted = mock_enqueue.await_args.args[0]
+            assert isinstance(emitted, MemoryFragmentRequest)
+            assert emitted.fragment_id == kwargs["id"]
 
             mock_state.assert_called_once()
 
@@ -273,7 +277,7 @@ async def test_glimpse_not_interesting_still_writes_state():
                 new_callable=AsyncMock,
                 return_value="番剧群",
             ),
-            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
+            patch(f"{MODULE}.emit", new_callable=AsyncMock),
         ):
             result = await run_glimpse("akao-001", "oc_test")
 
@@ -345,7 +349,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
-            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
+            patch(f"{MODULE}.emit", new_callable=AsyncMock),
             patch(
                 f"{MODULE}.load_persona",
                 new_callable=AsyncMock,
@@ -439,7 +443,7 @@ async def test_glimpse_chat_submit_failure_marks_state_and_persists():
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
-            patch(f"{MODULE}.enqueue_fragment_vectorize", new_callable=AsyncMock),
+            patch(f"{MODULE}.emit", new_callable=AsyncMock),
             patch(
                 f"{MODULE}.load_persona",
                 new_callable=AsyncMock,

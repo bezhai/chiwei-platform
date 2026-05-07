@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.domain.memory_request import MemoryFragmentRequest
 
 # ---------------------------------------------------------------------------
 # _generate_fragment — v4 write path
@@ -51,7 +52,7 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
                                 new=AsyncMock(),
                             ) as mock_ins:
                                 with patch(
-                                    "app.nodes.memory_pipelines.enqueue_fragment_vectorize",
+                                    "app.nodes.memory_pipelines.emit",
                                     new=AsyncMock(),
                                 ) as mock_enq:
                                     with patch(
@@ -71,6 +72,9 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
     assert kwargs["content"] == "this is the generated content"
     assert kwargs["id"].startswith("f_")
     mock_enq.assert_awaited_once()
+    emitted = mock_enq.await_args.args[0]
+    assert isinstance(emitted, MemoryFragmentRequest)
+    assert emitted.fragment_id == kwargs["id"]
 
 
 @pytest.mark.asyncio
@@ -93,7 +97,7 @@ async def test_generate_fragment_skip_when_no_messages():
                 "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
             ) as mock_ins:
                 with patch(
-                    "app.nodes.memory_pipelines.enqueue_fragment_vectorize", new=AsyncMock()
+                    "app.nodes.memory_pipelines.emit", new=AsyncMock()
                 ) as mock_enq:
                     await _generate_fragment("chat_1", "ayana")
 
@@ -135,7 +139,7 @@ async def test_generate_fragment_skip_when_empty_content():
                                 "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
                             ) as mock_ins:
                                 with patch(
-                                    "app.nodes.memory_pipelines.enqueue_fragment_vectorize",
+                                    "app.nodes.memory_pipelines.emit",
                                     new=AsyncMock(),
                                 ) as mock_enq:
                                     with patch(
