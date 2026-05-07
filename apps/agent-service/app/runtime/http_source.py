@@ -47,15 +47,17 @@ def _bind_one(app: FastAPI, w, src) -> None:
 
     async def endpoint(req: Request, **path_kwargs: Any) -> Any:
         kwargs: dict[str, Any] = dict(path_kwargs)
+        # Always merge query string — works for POST/PUT/GET/DELETE.
+        kwargs.update(dict(req.query_params))
         if method in {"POST", "PUT"}:
             try:
                 body = await req.json()
             except Exception:
                 body = {}
             if isinstance(body, dict):
+                # Body wins on conflict: explicit body fields take precedence
+                # over implicit query string for endpoints that take both.
                 kwargs.update(body)
-        else:  # GET / DELETE
-            kwargs.update(dict(req.query_params))
 
         try:
             data_obj = data_cls(**kwargs)

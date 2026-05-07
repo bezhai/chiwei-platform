@@ -31,6 +31,7 @@ from app.domain.admin import (
     ScheduleDailyRequest,
     ScheduleDeleteRequest,
     ScheduleListRequest,
+    ScheduleOut,
 )
 from app.runtime import node
 
@@ -209,21 +210,5 @@ async def delete_schedule_node(r: ScheduleDeleteRequest):
 
 
 def _to_out(entry: AkaoSchedule) -> dict:
-    """Mirror old routes.py ScheduleOut serialization (model_validate.model_dump)."""
-    return {
-        "id": entry.id,
-        "persona_id": entry.persona_id,
-        "plan_type": entry.plan_type,
-        "period_start": entry.period_start,
-        "period_end": entry.period_end,
-        "time_start": entry.time_start,
-        "time_end": entry.time_end,
-        "content": entry.content,
-        "mood": entry.mood,
-        "energy_level": entry.energy_level,
-        "response_style_hint": entry.response_style_hint,
-        "proactive_action": entry.proactive_action,
-        "target_chats": entry.target_chats,
-        "model": entry.model,
-        "is_active": entry.is_active,
-    }
+    """Serialize via ScheduleOut so response shape auto-syncs with AkaoSchedule."""
+    return ScheduleOut.model_validate(entry).model_dump()

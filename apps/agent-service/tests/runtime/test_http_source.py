@@ -130,3 +130,42 @@ def test_http_source_skips_non_http_sources():
 
     r = client.post("/anything", json={"name": "x"})
     assert r.status_code == 404
+
+
+def test_http_source_post_with_query_string():
+    """POST endpoints should accept query-string params (FastAPI legacy contract)."""
+    captured: list = []
+
+    @node
+    async def handler(p: _Ping) -> None:
+        captured.append(p)
+
+    wire(_Ping).from_(Source.http("/post-q", method="POST")).to(handler)
+
+    app = FastAPI()
+    register_http_sources(app)
+    client = TestClient(app)
+
+    # POST with no body, only query
+    r = client.post("/post-q?name=zoe")
+    assert r.status_code == 202
+    assert captured[-1].name == "zoe"
+
+
+def test_http_source_post_body_overrides_query():
+    """When both body and query supply the same field, body wins."""
+    captured: list = []
+
+    @node
+    async def handler(p: _Ping) -> None:
+        captured.append(p)
+
+    wire(_Ping).from_(Source.http("/post-bq", method="POST")).to(handler)
+
+    app = FastAPI()
+    register_http_sources(app)
+    client = TestClient(app)
+
+    r = client.post("/post-bq?name=fromquery", json={"name": "frombody"})
+    assert r.status_code == 202
+    assert captured[-1].name == "frombody"

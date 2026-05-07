@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from pydantic import BaseModel
+
 from app.runtime import Data, Key
 
 
@@ -110,3 +112,25 @@ class ScheduleDeleteRequest(Data):
 
     class Meta:
         transient = True
+
+
+class ScheduleOut(BaseModel):
+    """Response shape for schedule endpoints — auto-syncs to AkaoSchedule fields."""
+
+    id: int
+    persona_id: str
+    plan_type: str
+    period_start: str
+    period_end: str
+    time_start: str | None
+    time_end: str | None
+    content: str
+    mood: str | None
+    energy_level: int | None
+    response_style_hint: str | None
+    proactive_action: dict | None
+    target_chats: list | None
+    model: str | None
+    is_active: bool
+
+    model_config = {"from_attributes": True}
