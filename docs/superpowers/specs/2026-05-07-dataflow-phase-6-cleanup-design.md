@@ -1,6 +1,11 @@
 # Dataflow Phase 6 — 清扫（修订版）
 
-**状态**: Draft v2 (2026-05-07，吸收 reviewer 4 条反馈)
+**状态**: Draft v3 (2026-05-07，吸收 reviewer blocking)
+**v3 关键变化（vs v2）**：
+- §2.3 推翻 v2 "整段删 try/except"，改为**保留 catch 但升级监控**。reviewer blocking 命中要害：`glimpse.py:228-242` 在 submit 之前已经 insert_fragment + enqueue_fragment_vectorize，submit 之后 insert_glimpse_state（line 291-299）；`wiring/life_dataflow.py:77` 是 `GlimpseRequest.durable()`，`durable.py:137-145` 先 insert_idempotent 后跑 consumer，DLQ 重放会被 dedup 跳过 → glimpse fail 后 last_seen 不推进 → 下次 cron tick 同样 messages 走一遍 → fragment_id `new_id("f")` 每次新 → **重复 fragment + 重复 vectorize**。删 try 引入数据脏化代价远大于"主动消息观测性升级"的收益。修法：保留 try/except，`logger.error` → `logger.exception` 拿 traceback；`state_observation` 拼接 `[chat_submit_failed]` 标记（与现有 `[want_to_speak:throttled]` 同款）。失败可 Loki 关键字告警，glimpse_state 仍落盘。修 reviewer v2 blocking
+- §4 新增测试断言：`app.data.queries.__all__` 是 7 个 domain `__all__` 的并集 + 与硬编码已知函数清单（spec §3.3 全部 67 函数）比对完全相等 + 无重复名字（reviewer #5）。`from X import *` 重名是后者覆盖不报错，仅靠 ruff/mypy 不可靠 —— v2 §3.4 那句删除/订正
+- §2.5 风险描述同步：v2 写"glimpse 删 try 后失败可观测性提升"已不成立，整条删除。新增：保留 catch 后旧的"边界异常被吞"行为不变，但 `logger.exception` + state_observation 标记让 Loki 关键字告警可建。
+
 **v2 关键变化（vs v1）**：
 - §2.3 / §2.4 第一刀同时**收窄 glimpse.py:277-287 的 try/except**：旧路径下 `submit_proactive_chat()` 走 fire-and-forget mq.publish + glimpse 业务层 catch 吞错；新路径下 emit 走 in-process，route_chat_node 任何异常会上抛到 submit 调用点。如果保留 glimpse 的 catch，错会被业务层吞掉，**比旧路径 mq source 进 DLQ 的可观测性退化**。第一刀必须同时改 glimpse 让异常正常传播。修 reviewer #1
 - §4 新增 placement 硬验收：`route_chat_node in nodes_for_app("agent-service")` + `chat_node in nodes_for_app("agent-service")`。`emit.py:96` 按 APP_NAME 过滤 in-process consumer，当前 `deployment.py` 没显式 bind chat node 所以 fall through 到 default app（agent-service）；未来一加 bind 会静默跳过 fan-out，必须有测试兜底。修 reviewer #2
@@ -86,9 +91,9 @@ await emit(ChatTrigger(
 
 文件顶部 `from app.infra.rabbitmq import CHAT_REQUEST, mq` 删除（如 `mq` 没有其它使用）。
 
-### 2.3 同时修：收窄 glimpse 的 try/except
+### 2.3 同时修：升级 glimpse 的异常监控（保留 catch）
 
-**reviewer #1 触发的改动，必须随第一刀同步落地**。
+**reviewer #1 + reviewer v2 blocking 共同触发的改动，必须随第一刀同步落地**。
 
 `apps/agent-service/app/life/glimpse.py:277-287` 现状：
 
@@ -99,16 +104,53 @@ except Exception as exc:
     logger.error("[%s] Glimpse proactive submit failed: %s", persona_id, exc)
 ```
 
-旧路径下 `submit_proactive_chat` 内部走 `mq.publish` fire-and-forget，几乎不会抛错（除非 DB insert 或 mq broker 不可达），catch 是兜底防御 —— 即使吞错，route_chat_node 的失败由 mq source loop 进 DLQ 兜底。
+#### 旧路径（mq.publish fire-and-forget）
 
-第一刀改 `mq.publish` → `emit(ChatTrigger)` 后，emit 走 in-process 直接调 `route_chat_node`（`emit.py:8-11`：in-process dispatch 是 strict，consumer raise 会上抛）。如果**保留**这个 catch：
+submit 内部 publish chat_request 队列，本进程几乎不会抛错。route_chat_node 实际失败发生在远端 mq source loop（agent-service 主进程 chat_request 消费），失败 → DLQ。glimpse 这一帧不感知，catch 只兜底极少数 mq broker 不可达 / DB insert 失败。
 
-- route_chat_node 任何异常 → 上抛 submit_proactive_chat → glimpse catch → log → **错丢失，无 DLQ、无重投、无监控触发**。
-- 这比旧路径 mq DLQ 路径**可靠性退化**。
+#### 新路径（emit ChatTrigger）
 
-修法：把 try/except 范围**收窄到只 catch DB insert / target_message resolve 等业务校验异常**，emit 调用本身让异常正常传播；或者**整段 try 删除**让 submit_proactive_chat 异常上抛到 glimpse_node。
+emit 走 in-process 直接调 `route_chat_node`（`emit.py:8-11`：in-process dispatch 是 strict，consumer raise 会上抛）。route_chat_node 任何异常 → 上抛到 submit_proactive_chat → 上抛到 glimpse 的 catch（如果保留）。
 
-推荐**整段 try 删除**：proactive submit 失败本来就是异常事件（DB 不可达 / route_chat_node 业务异常 / runtime 编译错误等），让它正常向上传播到 glimpse_node。glimpse_node 自身的 wire（`Source.cron(...)` + bind 到 agent-service）失败会进 cron job 失败路径，由 runtime 统一处理（log + 下次 cron tick 自然 retry），可观测性不丢。
+#### 为什么不能直接删 catch（reviewer v2 blocking）
+
+`glimpse.py` 的副作用顺序（line 228-242, 277-287, 291-299）：
+
+```
+  6. 写 fragment + enqueue_fragment_vectorize  ← 已有副作用
+  7. submit_proactive_chat  ← 本刀目标
+  8. insert_glimpse_state（推进 last_seen）  ← 在 submit 之后
+```
+
+`wiring/life_dataflow.py:77` `wire(GlimpseRequest).to(run_glimpse_node).durable()`；`durable.py:137-145` 先 `insert_idempotent` 后跑 consumer，**DLQ 重放会被 dedup 跳过**。
+
+如果删 catch、让 emit 异常一路上抛：
+- route_chat_node 抛错 → glimpse_node 抛错 → DLQ 进 GlimpseRequest 的 durable DLQ
+- DLQ 重放该消息时 idempotent 行已存在 → 跳过 consumer，无效
+- **last_seen 没推进**：下次 cron tick 因 last_seen 仍旧，重新查 unseen messages → 再走 step 6 insert 新 fragment（`new_id("f")` 每次新）+ 再 enqueue vectorize → **fragment 行数随失败次数线性膨胀，vectorize 队列对应膨胀**。
+- 数据脏化的代价 >> proactive 主动消息可观测性升级的收益。
+
+#### 修法：保留 catch + 升级监控
+
+```python
+try:
+    await submit_proactive_chat(...)
+except Exception as exc:
+    logger.exception(  # 改成 exception 拿到 traceback
+        "[%s] Glimpse proactive submit failed: %s", persona_id, exc
+    )
+    state_observation = (
+        f"{state_observation}\n[chat_submit_failed] reason={type(exc).__name__}"
+    )
+```
+
+要点：
+- `logger.error` → `logger.exception`：自动带 traceback，便于 Loki 排查
+- `state_observation` 拼接 `[chat_submit_failed]` 标记：与现有 `[want_to_speak:throttled]`、`[no_speak]` 同款风格，glimpse_state 历史里可追溯哪一帧 submit 失败
+- 不引入 metrics 基础设施（项目目前无统一 metrics 框架；Loki 关键字 `chat_submit_failed` 可建告警）
+- step 8 `insert_glimpse_state` 仍执行：last_seen 推进、fragment 不重复
+
+**这与旧路径 mq.publish 的 fire-and-forget 语义不严格等价**（旧路径远端 DLQ 仍兜底 route_chat_node 失败；新路径 route_chat_node 失败被本进程 catch 吞）—— **本期显式接受这一可观测性差异**：换得"chat 入口收敛到单一 ChatTrigger Data"的架构收益，且新增 `[chat_submit_failed]` 标记 + traceback 让失败仍然可见可追溯，工程上可接受。
 
 ### 2.4 行为不变量
 
@@ -116,12 +158,12 @@ except Exception as exc:
 - emit 走 in-process 路径（proactive 调用方 = glimpse_node 在 agent-service 主进程；route_chat_node 也在主进程）；与 lark-server 跨进程 publish chat_request 走 mq 路径殊途同归（runtime mq source loop 解码 body → ChatTrigger 后调用同一个 `route_chat_node`）。
 - `ChatTrigger.message_id` 是 `Annotated[str | None, Key]`，proactive 生成的 `f"proactive_{ts}"` 满足约束。
 - `ChatTrigger.root_id` 当前是 `str | None`；原 mq.publish 用空字串 `""`，emit 改成 `None` 与字段类型一致。下游 `route_chat_node` 对 root_id 的处理需要在 plan 阶段验证 None 与 "" 行为等价（grep `root_id` 在 chat_dataflow / nodes / chat 路径的所有用法）。
-- chat submit 失败 → glimpse_node 失败 → cron 失败路径（log + 下次 tick retry），不再被业务层吞掉。
+- chat submit 失败 → glimpse `catch` → `logger.exception` + state_observation 标 `[chat_submit_failed]` → glimpse_state 仍落盘、last_seen 推进、fragment 不重复。Loki 关键字告警可建。
 
 ### 2.5 风险
 
 - `ChatRequest` 走的是 `.durable()` wire（Phase 5a），所以 emit ChatTrigger → in-process route_chat_node → emit ChatRequest（durable）这条链路里，第二跳是异步 publish 到 mq，glimpse 进程不会等 chat_node 跑完才返回，与原 mq.publish 异步语义一致。
-- glimpse 删 try/except 后，旧路径下被吞掉的边界异常（极少数 DB insert / target resolve 失败）现在会让 glimpse_node 这一帧失败。这是**可接受的可观测性提升**：glimpse 是按 cron 周期触发，单次失败不会让 chiwei 长时间不主动开口；且失败可见利于排查。
+- 保留 catch 后，旧路径下"远端 mq source loop DLQ 兜底 route_chat_node 失败"的可观测性丢失（新路径下被 glimpse 吞掉，仅 logger.exception + state_observation 标记）。这是**显式接受的折衷**：换"chat 入口收敛到单一 ChatTrigger Data"的架构收益。如果未来要恢复 DLQ 语义，需要重排 glimpse 副作用顺序（先 submit 后 insert_fragment）+ 加补偿，超出 Phase 6 清扫范畴。
 
 ## 3. 第三刀 — queries.py 拆 6 个 domain
 
@@ -177,7 +219,7 @@ from app.data.queries.persona import *  # noqa: F401,F403
 from app.data.queries.schedule import *  # noqa: F401,F403
 ```
 
-每个 domain 文件用 `__all__` 显式列 export，`__init__.py` 用 `from X import *` 收口。重复符号在 `__all__` 阶段就能被 ruff/mypy 报出来。
+每个 domain 文件用 `__all__` 显式列 export，`__init__.py` 用 `from X import *` 收口。注意 `from X import *` 重名时**后者覆盖、不报错**，所以重名检测靠测试断言，不靠 ruff/mypy（见 §4 验收里"`__all__` 完整 + 无重名"测试）。
 
 ### 3.5 行为不变量
 
@@ -221,6 +263,27 @@ memory.py 超 300 行时，再拆为：
 - `from app.data.queries import X` 在 44 个 import site 全部仍 import success（`pytest --collect-only` 通过）
 - `find apps/agent-service/app/data/queries -type f -name "*.py" -exec wc -l {} +` 总行数 ≈ 1283 ± 5%（允许 import / module docstring 重复带来的小幅膨胀）
 - 调用方文件无任何改动（`git diff --stat HEAD~1 -- apps/agent-service/app/` 中调用方 0 命中）
+- **`__all__` 完整 + 无重名硬验收**（reviewer v2 #5）：新加测试 `tests/unit/data/test_queries_split.py`，断言两条不变量：
+  1. `app.data.queries.__all__` 与硬编码已知函数清单（spec §3.3 列的 67 函数）集合**完全相等**（无遗漏、无多余）。
+  2. 7 个 domain 文件的 `__all__` 两两交集为空（无重名）—— `from X import *` 重名后者覆盖不报错，测试是唯一保险。
+  实现示意：
+  ```python
+  EXPECTED_FUNCTIONS = {  # 硬编码 spec §3.3 全 67 项
+      "parse_model_id", "find_model_mapping", ...
+  }
+  def test_queries_all_complete():
+      from app.data import queries
+      assert set(queries.__all__) == EXPECTED_FUNCTIONS
+  def test_queries_no_duplicate_names():
+      from app.data.queries import (agent_response, life, memory, messages,
+                                     model_provider, persona, schedule)
+      modules = [agent_response, life, memory, messages, model_provider, persona, schedule]
+      seen: dict[str, str] = {}
+      for m in modules:
+          for name in m.__all__:
+              assert name not in seen, f"{name} in both {seen[name]} and {m.__name__}"
+              seen[name] = m.__name__
+  ```
 
 ### 整体
 - `compile_graph()` 通过
