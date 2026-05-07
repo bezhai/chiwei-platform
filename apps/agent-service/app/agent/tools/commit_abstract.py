@@ -14,7 +14,7 @@ from app.data.queries import (
     insert_memory_edge,
 )
 from app.data.session import get_session
-from app.domain.memory_request import MemoryAbstractRequest
+from app.domain.agent_tool_events import AbstractMemoryCommitted
 from app.memory.conflict import detect_conflict
 from app.runtime import emit
 
@@ -22,6 +22,7 @@ from app.runtime import emit
 async def _commit_abstract_impl(
     *,
     persona_id: str,
+    chat_id: str | None,
     subject: str,
     content: str,
     supported_by_fact_ids: list[str] | None,
@@ -60,7 +61,11 @@ async def _commit_abstract_impl(
                 reason=reasoning,
             )
 
-    await emit(MemoryAbstractRequest(abstract_id=aid))
+    await emit(AbstractMemoryCommitted(
+        abstract_id=aid,
+        persona_id=persona_id,
+        chat_id=chat_id,
+    ))
 
     return {"id": aid, "conflict_hint": hint}
 
@@ -91,6 +96,7 @@ async def commit_abstract_memory(
     context = get_runtime(AgentContext).context
     return await _commit_abstract_impl(
         persona_id=context.persona_id,
+        chat_id=context.chat_id or None,
         subject=subject,
         content=content,
         supported_by_fact_ids=supported_by_fact_ids,
