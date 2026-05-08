@@ -436,12 +436,13 @@ class Runtime:
           no extra consumer-tag tracking needed.
         """
         import json as _json
+        import uuid as _uuid
 
         from pydantic import ValidationError as _ValidationError
 
         from app.infra.rabbitmq import current_lane, lane_queue, mq
         from app.runtime.node import inputs_of
-        from app.runtime.propagation import bind_context, extract_context
+        from app.runtime.propagation import Context, bind_context, extract_context
 
         if len(w.consumers) != 1:
             # compile_graph should have caught this; guard anyway so a
@@ -482,6 +483,7 @@ class Runtime:
         # queues outside ALL_ROUTES (legacy adoption tests), skip and
         # fall through to passive get_queue as before.
         from app.infra.rabbitmq import ALL_ROUTES
+
         for r in ALL_ROUTES:
             if r.queue == queue_base:
                 lane = current_lane()
@@ -518,6 +520,19 @@ class Runtime:
             async with queue.iterator() as qit:
                 async for incoming in qit:
                     ctx = extract_context(incoming.headers)
+                    # Gap 11 mq-source fallback: external producers
+                    # (e.g. lark-server publishing CHAT_REQUEST) may not
+                    # inject trace_id into the message header. Without a
+                    # fallback the entire downstream chain runs with
+                    # trace_id=None — runtime_inflight rows, langfuse
+                    # spans, and durable retries all lose continuity.
+                    # Mirror cron / interval source's auto-generation
+                    # (Task 3) at this external boundary.
+                    if ctx.trace_id is None:
+                        ctx = Context(
+                            trace_id=f"mq:{queue_base}:{_uuid.uuid4().hex[:8]}",
+                            lane=ctx.lane,
+                        )
                     try:
                         # ``process(requeue=False)`` context-manager:
                         # clean exit -> ack; raised exception -> nack
@@ -587,8 +602,7 @@ class Runtime:
                         # _record_source_error (which would kill the
                         # pod for a single bad message).
                         logger.exception(
-                            "mq source %s: target %s message DLX'd "
-                            "(%r); continuing",
+                            "mq source %s: target %s message DLX'd (%r); continuing",
                             actual_queue,
                             target.__name__,
                             e,

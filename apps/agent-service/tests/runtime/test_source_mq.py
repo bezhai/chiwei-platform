@@ -135,6 +135,45 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
 
 
 @pytest.mark.integration
+async def test_mq_source_generates_fallback_trace_id_when_header_missing(
+    rabbitmq,
+):
+    """Gap 11 mq-source fallback: external producers (e.g. lark-server)
+    may publish without a trace_id header. The engine must auto-generate
+    ``mq:<queue_base>:<uuid8>`` so downstream nodes / runtime_inflight
+    rows / langfuse spans don't lose trace continuity at the boundary."""
+    import re
+
+    from app.infra.rabbitmq import Route, mq
+
+    @node
+    async def ingest(req: _Req) -> None:
+        received.append(req)
+        seen_ctx.append((trace_id_var.get(), lane_var.get()))
+
+    wire(_Req).to(ingest).from_(Source.mq("mqsrc_no_trace"))
+
+    route = Route("mqsrc_no_trace", "mqsrc_no_trace.rk")
+    await mq.declare_route(route)
+
+    rt, task = await _run_runtime()
+    try:
+        # NO headers — mirror lark-server's current publish shape.
+        await mq.publish(route, {"message_id": "x1"})
+
+        ok = await _wait_until(lambda: len(received) >= 1, timeout=5.0)
+        assert ok, "expected 1 message processed"
+
+        trace, _lane = seen_ctx[0]
+        assert trace is not None, "trace_id must be auto-generated; node saw None"
+        assert re.fullmatch(r"mq:mqsrc_no_trace:[0-9a-f]{8}", trace), (
+            f"expected mq:<queue>:<uuid8> shape, got {trace!r}"
+        )
+    finally:
+        await _stop_runtime(rt, task)
+
+
+@pytest.mark.integration
 async def test_mq_source_dlqs_decode_failures(rabbitmq, caplog):
     """Bad-JSON body is dead-lettered (no poison loop, no silent ack) and
     the next valid body is still processed. Runtime stays healthy."""
