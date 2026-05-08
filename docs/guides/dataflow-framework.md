@@ -8,6 +8,19 @@
 
 ---
 
+## 0. 终态原则
+
+**终态不是"业务代码从 `mq.publish` 换成 `wire(...)`"。终态是：无论写 chat、tool、memory、schedule、long task，业务作者都不需要理解底层 transport / worker / retry / outbox / lane / trace / DLQ。**
+
+判断一个改动是否还在正确方向上：
+
+- 业务代码只表达 Data、业务处理和业务能力调用；不表达 RabbitMQ、Redis、ARQ、FastAPI route、trace/lane header、DLQ replay、事务后补 emit。
+- 如果需要一种底层能力，先扩 `app/runtime/*` 或 `app/capabilities/*`，再让业务使用新的公开 API；不要在业务里临时手写绕过。
+- 如果业务作者必须读 `app/runtime/*` 才知道怎么正确使用某个能力，说明文档或框架 surface 还不够，应该补框架/补手册。
+- 当前仍存在的终态 gap 见 `docs/superpowers/specs/2026-05-07-dataflow-phase-7-gap-analysis.md`。
+
+---
+
 ## 1. 心智模型
 
 **Data 流驱动,不是函数调用链。**
@@ -150,7 +163,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 | `async def f(x: M, y: User) -> F` —— 多输入 | `async def f(x: str)` —— 非 Data 参数 |
 |  | `async def f(x: Message) -> (Fragment, Log)` —— 不能返回 tuple |
 
-**注意**:装饰器只装最顶层。在 @node 里**不要**手写 `await emit(...)` 或 `await mq.publish(...)`。见「常见坑 #1」。
+**注意**:单输出 `@node` 直接 `return Data`，wrapper 会自动 emit。fan-out / streaming segment / 循环产出多个 Data 这种多输出场景允许在 node 内 `await emit(...)`，但不要再 `return` 同一个 Data 造成重复 emit。任何场景都不要手写 `mq.publish(...)`。见「常见坑 #1」。
 
 ### 2.3 `wire()` —— 声明边
 
@@ -180,12 +193,12 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 | `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup;handler 异常 → DLQ(无自动 retry,人工 replay) | 跨 Deployment、要重启续跑、失败需可回放时 |
 | `.as_latest()` | `emit()` 持久化新版本(append + version),下游 `with_latest` / `query()` 读最新 | Data 是"状态快照",需要被后续节点引用 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
-| `.debounce(seconds=, max_buffer=)` | 防抖合流 | ⚠️ **未实现**：声明会让 `compile_graph()` 启动报错。引擎尚未支持，节点签名侧的 `Batched[T]` 配套也未设计 |
+| `.debounce(seconds=, max_buffer=, key_by=...)` | 防抖合流 | 已实现；适合 drift / afterthought 这类"同一 key 短时间多次触发只跑最后一次" |
 | `.with_latest(*types)` | 自动 join 最新的 `T`(按同名 Key) | consumer 需要同一上下文的另一种 Data。⚠️ **只在 in-process 边支持**:`.durable().with_latest(...)` 会被 `compile_graph()` 拒绝(durable handler 是单参分派,不会注入 latest 参数) |
 
 > **fan-out 默认是 broadcast 语义**：`wire(T).to(a, b).durable()` 让每个 consumer 在 RabbitMQ 上各自一个独立队列(`durable_<data>_<consumer>`)，各自 dedup、各自 ack，互不影响。无须显式声明。
 
-> **未实现的边语义会启动报错**：runtime 故意把"surface 暴露但引擎未接入"的修饰符做成"用了就 `GraphError`"，避免静默 noop。当前覆盖的是 `.debounce(...)` 和 `.to(Sink.xxx)`。等引擎接入后会同步放开。
+> **不支持的组合会启动报错**：runtime 故意把"surface 暴露但引擎未接入/未定义"的组合做成 `GraphError`，避免静默 noop。典型例子：`.durable().with_latest(...)`、`.debounce().durable()`、`.debounce().to(Sink.xxx)`。
 
 **默认边 vs durable 边**:
 
@@ -199,7 +212,7 @@ durable(跨进程): emit Data ──RabbitMQ 发到 consumer 所在 App──▶
 - 跨 Deployment(比如 vectorize-worker → chat-response-worker) → `.durable()`。
 - 做状态机、事件源、要回放、失败需进 DLQ 由运维 replay → `.durable()`。
 
-> **关于"重试":durable 边不做自动 retry。** consumer 抛异常时 runtime 调 `message.process(requeue=False)`,broker 路由到 DLX/DLQ 就停下了 —— 没有指数退避、没有自动重发。叠加 consumer 侧 `insert_idempotent`,语义是 **at-least-once via dedup**:运维从 DLQ 手动 replay 一条已经处理过的消息,在 consumer 侧是 no-op。如果你想要的是"多试几次再放弃",请在 @node 内部自己做(LLM 调用层面的重试),不要指望边语义。
+> **关于"重试":durable 边当前不做自动 retry。** consumer 抛异常时 runtime 调 `message.process(requeue=False)`,broker 路由到 DLX/DLQ 就停下了 —— 没有指数退避、没有自动重发。叠加 consumer 侧 `insert_idempotent`,语义是 **at-least-once via dedup**:运维从 DLQ 手动 replay 一条已经处理过的消息,在 consumer 侧是 no-op。业务 node 不允许用 `try/except + sleep` 自实现边级 retry；只有 capability 内部的 provider retry（如 LLM/HTTP client）是例外。需要边级 retry 等 Phase 7 的 `wire.retry(...)`。
 
 ### 2.4 `Source` —— 图的入口
 
@@ -224,7 +237,8 @@ wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
 - 目标 @node 必须**单参数**(第一个 Data 就是 decode 目标)。
 - runtime 读 MQ body 时会**过滤掉**不在 `req_cls.model_fields` 里的字段(适配老 publisher 带额外字段),所以 Data 保持严格 `extra="forbid"` 不会误伤。
 - Queue 名按 lane 自动加后缀:`"vectorize"` 在 df-v0 lane 变成 `"vectorize_df-v0"`。
-- **队列由 publisher 拥有**:`Source.mq("name")` 在 consumer 侧是 *passive* 拿队列(`channel.get_queue`),自己不 declare,也不在 `ALL_ROUTES` 里。语义是 "我跟 publisher 约定了这个队列名,publisher 负责建"。**部署约束**:新 lane 必须先起 publisher(比如 lark-server) 让它 declare 队列,再起 consumer(比如 vectorize-worker);顺序错了 consumer 会 `get_queue` 失败 → CrashLoopBackoff。这是隐式跨语言约定,确保新增 `Source.mq(...)` 用例时同步去 publisher 那一侧加 declare。
+- **队列由 publisher 拥有**:`Source.mq("name")` 在 consumer 侧是 *passive* 拿队列(`channel.get_queue`),自己不 declare。语义是 "我跟 publisher 约定了这个队列名,publisher 负责建"。**部署约束**:新 lane 必须先起 publisher(比如 lark-server) 让它 declare 队列,再起 consumer(比如 vectorize-worker);顺序错了 consumer 会 `get_queue` 失败 → CrashLoopBackoff。
+- 如果这个 `Source.mq` 还被 `emit()` 当作跨进程 publish bridge（producer 在 dataflow 图内，consumer 在另一个 app），queue 必须能在 `ALL_ROUTES` 中找到 `Route`，否则 runtime 不知道 routing key。纯外部 publisher source 和 dataflow 内部 bridge 要分开判断。
 
 ### 2.5 `Sink` —— 图的出口
 
@@ -245,7 +259,7 @@ wire(Reply).to(Sink.mq("chat_response"))
 
 > Lane 后缀:`"chat_response"` 在 df-v0 lane 变成 `"chat_response_df-v0"`,跟 `Source.mq` 同规则。
 
-> ⚠️ **当前未实现**:`Sink.mq` 的 surface 已经定下来,但引擎尚未实现 sink dispatch —— 在 wire 上声明任何 `Sink.xxx` 会让 `compile_graph()` 启动 `GraphError`。这是**故意的**:防止"声明了静默 noop"。等引擎接入第一个 sink 用例时同步开通。
+> `Sink.mq` 已接入 sink dispatch。`compile_graph()` 会校验 queue 是否在 `ALL_ROUTES` 中；未知 queue 启动即失败。
 
 ### 2.6 `Bridge` —— 过渡层
 
@@ -330,7 +344,7 @@ wire(Message).to(summarize).durable()  # 和 vectorize 共享 Message durable,fa
 
 **注意**:`Message` 已经有一条 `wire(Message).to(vectorize).durable()`。再加 `.to(summarize)` 就是 fan-out —— 两个消费者各自独立队列 + 各自 dedup + 各自 ack,互不影响。任一边 handler 失败只影响自己的 DLQ。
 
-### Step 4 — 绑定 Deployment
+### Step 4 — Deployment placement（仅框架维护者）
 
 ```python
 # app/deployment.py 追加:
@@ -339,7 +353,7 @@ from app.nodes.summarize import summarize
 bind(summarize).to_app("vectorize-worker")  # 和 vectorize/save_fragment 同 pod
 ```
 
-不绑定 = 默认 `agent-service`(HTTP 主服务)。绑到 `vectorize-worker` 意味着在 worker pod 里跑,主 HTTP pod 不启动此 node。
+普通业务作者只定义 Data / node / wire；placement 由 graph/framework owner 按既有域策略维护。不绑定 = 默认 `agent-service`(HTTP 主服务)。绑到 `vectorize-worker` 意味着在 worker pod 里跑,主 HTTP pod 不启动此 node。只有新增跨 Deployment 执行域或调整 worker 拓扑时才改 `app/deployment.py`。
 
 ### Step 5 — 单元测试
 
@@ -497,22 +511,30 @@ structured = await runner.extract(MyPydanticModel, messages=[...])
 
 ## 5. 常见坑(AI 最容易错的地方)
 
-### #1 手写 emit / 手写 mq.publish
+### #1 重复 emit / 手写 mq.publish
 
-@node 已经被 wrapper 包了,返回 Data 就自动 emit。**不要再手写**。
+单输出 @node 已经被 wrapper 包了,返回 Data 就自动 emit。**不要再手写同一个 Data**。多输出场景可以 `await emit(...)` 多次，但函数应 `return None` 或只返回测试需要的非重复结果。
 
 ```python
 # ❌
 @node
 async def summarize(msg: Message) -> None:
     frag = SummaryFragment(...)
-    await emit(frag)             # 重复 emit,下游会收到两次
+    await emit(frag)
+    return frag                  # 重复 emit,下游会收到两次
     await mq.publish(VECTORIZE, ...)   # 直接捅 infra,绕过图
 
 # ✅
 @node
 async def summarize(msg: Message) -> SummaryFragment:
     return SummaryFragment(...)  # wrapper 自动 emit
+
+# ✅ 多输出/fan-out
+@node
+async def fan_out(req: BatchRequest) -> None:
+    for item in req.items:
+        await emit(ItemRequest(item_id=item.id))
+    return None
 ```
 
 ### #2 直接 import infra
