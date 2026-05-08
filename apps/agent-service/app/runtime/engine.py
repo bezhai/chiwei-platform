@@ -255,7 +255,14 @@ class Runtime:
         )
 
     async def stop_source_loops(self) -> None:
-        """Cancel + await every source task + watchdog (explicit cancel)."""
+        """Cancel + await every source task + watchdog (explicit cancel).
+
+        Also drains the in-process scheduled task pool (Gap 9.2
+        best_effort emit_delayed): pending best_effort tasks would
+        otherwise leak into the next process instance.
+        """
+        from app.runtime.scheduled import cancel_all_scheduled
+
         for t in self._source_tasks:
             t.cancel()
         if self._watchdog_task is not None:
@@ -272,6 +279,7 @@ class Runtime:
         self._source_tasks.clear()
         self._watchdog_task = None
         self._stop_event = None
+        cancel_all_scheduled()
 
     async def _watch_source_error(self) -> None:
         """Wait for `_stop_event`; on fire (with `_source_error` set),
