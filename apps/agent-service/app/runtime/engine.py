@@ -290,12 +290,20 @@ class Runtime:
         naturally bounded to one tick. Fatal errors (bad payload shape,
         emit failure) surface via ``_source_error`` + ``_stop_event`` so
         ``run()`` can re-raise and the pod exits non-zero.
+
+        Each tick auto-generates ``trace_id = f"cron:<expr>:<uuid8>"`` and
+        binds it to the contextvar for the duration of ``emit()``. Without
+        this, cron-triggered links broke trace continuity in Langfuse
+        (cron source has no inbound trace_id). Lane is ``None`` (cron
+        triggers don't carry a lane).
         """
+        import uuid
         from zoneinfo import ZoneInfo
 
         from croniter import croniter
 
         from app.runtime.emit import emit
+        from app.runtime.propagation import Context, bind_context
 
         expr = src.params["expr"]
         tz_name = src.params.get("tz", "UTC")
@@ -303,6 +311,7 @@ class Runtime:
         name = f"cron[{w.data_type.__name__}]"
         base = datetime.now(tz=zone)
         itr = croniter(expr, base)
+        expr_slug = expr.replace(" ", "_")
         try:
             while True:
                 next_ts = itr.get_next(datetime)
@@ -310,7 +319,9 @@ class Runtime:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 payload = self._build_payload(w, next_ts)
-                await emit(payload)
+                trace_id = f"cron:{expr_slug}:{uuid.uuid4().hex[:8]}"
+                async with bind_context(Context(trace_id=trace_id, lane=None)):
+                    await emit(payload)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -328,8 +339,15 @@ class Runtime:
 
         Fatal errors surface via ``_source_error`` + ``_stop_event`` so
         ``run()`` re-raises and the pod exits non-zero.
+
+        Each tick auto-generates ``trace_id = f"interval:<seconds>s:<uuid8>"``
+        bound for the duration of ``emit()``. See ``_source_loop_cron`` for
+        rationale (Gap 11 — Langfuse trace continuity).
         """
+        import uuid
+
         from app.runtime.emit import emit
+        from app.runtime.propagation import Context, bind_context
 
         seconds = src.params["seconds"]
         name = f"interval[{w.data_type.__name__}]"
@@ -342,7 +360,9 @@ class Runtime:
                 ts = datetime.now(tz=UTC)
                 next_fire += seconds
                 payload = self._build_payload(w, ts)
-                await emit(payload)
+                trace_id = f"interval:{seconds}s:{uuid.uuid4().hex[:8]}"
+                async with bind_context(Context(trace_id=trace_id, lane=None)):
+                    await emit(payload)
         except asyncio.CancelledError:
             raise
         except Exception as e:
