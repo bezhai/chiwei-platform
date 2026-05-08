@@ -2,7 +2,11 @@
 
 **状态**: Draft v4 (2026-05-07，重定 scope 到原 dataflow design line 543 "终结清扫")
 **前置**: PR #209 (Phase 5b) shipped to prod 1.0.0.328；本期分支 `refactor/flow-parse-6` 已落 v3 4 commits（PR #210）作为 v4 baseline
-**后续**: v5/v6 继续闭合 capability gap，Gap 1-12 的全 surface 见 §1
+**后续**: 本文是 Phase 6 历史 spec。Phase 6 v4 已 ship；后续统一进入 `docs/superpowers/specs/2026-05-07-dataflow-phase-7-gap-analysis.md`。本文中的 "v5/v6/v7" 说法已废弃，Gap 7+ 由 Phase 7 明确承接。
+
+> **2026-05-08 事实校正**: Phase 6 只关闭了 state_sync 的 arq 绕路；`long_tasks/task_executor` 仍由 `arq-worker` 承载，作为 Phase 7 Gap 15 / partial close 跟踪。不得按本文早期验收描述直接删除 `app/workers/arq_settings.py`、arq 依赖或 `arq-worker` Deployment。
+>
+> `api/routes.py` 当前只保留 `/health` 手写 route，作为 app lifecycle/infra 例外；`Source.http_health` builtin 尚未实现，归 Phase 7 Gap 17 决定。
 
 ## 0. v4 vs v3 的关系
 
