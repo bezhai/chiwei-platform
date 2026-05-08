@@ -1,7 +1,6 @@
 """Import all wiring submodules so their ``wire(...)`` calls run on package import."""
 
 from app.wiring import (  # noqa: F401
-    _drill_phase7a,
     admin,
     agent_tool_events,
     chat,
