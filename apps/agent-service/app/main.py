@@ -49,6 +49,17 @@ async def lifespan(app: FastAPI):
     )
     await runtime_for_sources.migrate_schema()
 
+    # Register the runtime-internal delayed-trigger wire BEFORE
+    # start_consumers (which calls compile_graph and freezes the
+    # WIRING_REGISTRY snapshot). Runtime.run() does the same; this
+    # branch covers the FastAPI lifespan path that drives migrate /
+    # consumers / source loops directly without going through run().
+    from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
+    from app.runtime.delayed_trigger import register_runtime_trigger_wire
+
+    if "agent-service" in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+        register_runtime_trigger_wire("agent-service")
+
     if settings.rabbitmq_url:
         await declare_durable_topology()
 
@@ -58,7 +69,11 @@ async def lifespan(app: FastAPI):
 
     from app.skills.registry import SkillRegistry, skill_reload_loop
 
-    skills_dir = Path(os.environ.get("SKILLS_DIR", str(Path(__file__).parent / "skills" / "definitions")))
+    skills_dir = Path(
+        os.environ.get(
+            "SKILLS_DIR", str(Path(__file__).parent / "skills" / "definitions")
+        )
+    )
     SkillRegistry.load_all(skills_dir)
 
     # Start hot-reload loop
@@ -74,12 +89,14 @@ async def lifespan(app: FastAPI):
         # 旧 chat_consumer / pipeline.stream_chat 已删。
         from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
+
         await start_consumers(app_name="agent-service")
         logger.info("Runtime durable consumers started for agent-service")
         await start_debounce_consumers(app_name="agent-service")
         logger.info("Runtime debounce consumers started for agent-service")
 
     from app.runtime.http_source import register_http_sources
+
     register_http_sources(app)
     logger.info("dataflow http sources registered")
 
@@ -100,6 +117,7 @@ async def lifespan(app: FastAPI):
     if settings.rabbitmq_url:
         from app.runtime.debounce import stop_debounce_consumers
         from app.runtime.durable import stop_consumers
+
         await stop_debounce_consumers()
         await stop_consumers()
 
