@@ -27,6 +27,7 @@ without an ``X`` to join against.
 from __future__ import annotations
 
 import os
+from datetime import UTC
 
 from app.runtime.data import Data
 from app.runtime.graph import CompiledGraph, compile_graph
@@ -164,3 +165,133 @@ async def _mq_publish_for_source(src, data: Data) -> None:
         )
     body = data.model_dump(mode="json")
     await mq.publish(route, body)
+
+
+# ---------------------------------------------------------------------------
+# emit_delayed / emit_at — Phase 7a Gap 9
+# ---------------------------------------------------------------------------
+
+# RabbitMQ x-delayed-message exchange uses int32 ms (~24 days). Reject
+# anything beyond so the ValueError surfaces at the call site rather than
+# silently saturating to broker behavior.
+_X_DELAY_MAX_MS = 2_147_483_647
+
+
+async def emit_delayed(
+    data: Data,
+    *,
+    delay_ms: int,
+    durability: str = "durable",
+) -> None:
+    """Schedule emit(data) to run after ``delay_ms`` milliseconds.
+
+    Semantics: the contract is "delay → emit(data)" — the runtime preserves
+    full fan-out at firing time. emit_delayed itself does NOT inspect the
+    Data's wire topology; it just defers the standard emit() call.
+
+    durability="durable" (default): publish-with-confirm a
+    DelayedTriggerEnvelope to the runtime's per-app trigger queue
+    (runtime_delayed_trigger_{APP_NAME} + lane). The runtime's internal
+    consumer rebuilds the Data and calls emit(data) when the delay
+    expires — survives pod restart / deploy as long as the origin
+    app+lane comes back up.
+
+    durability="best_effort": schedule an asyncio task in this process.
+    Lost on runtime stop / pod restart / deploy. trace/lane do NOT
+    propagate across the scheduled boundary (downstream chain is an
+    independent trace, same as cron triggers). Caller MUST opt in
+    explicitly.
+
+    Negative delay clamps to 0 (immediate await emit). delay_ms above
+    _X_DELAY_MAX_MS raises ValueError (broker x-delay header is int32).
+    """
+    if durability not in ("durable", "best_effort"):
+        raise ValueError(
+            f"durability must be 'durable' or 'best_effort', "
+            f"got {durability!r}"
+        )
+    if delay_ms < 0:
+        delay_ms = 0
+    if delay_ms > _X_DELAY_MAX_MS:
+        raise ValueError(
+            f"delay_ms={delay_ms} exceeds RabbitMQ x-delay int32 max "
+            f"({_X_DELAY_MAX_MS} ms ≈ 24 days)"
+        )
+
+    if delay_ms == 0:
+        await emit(data)
+        return
+
+    if durability == "best_effort":
+        from app.runtime.scheduled import schedule_after
+
+        async def _fire() -> None:
+            await emit(data)
+
+        await schedule_after(delay_ms / 1000.0, _fire)
+        return
+
+    # durable path: trigger queue + envelope
+    from app.api.middleware import lane_var, trace_id_var
+    from app.infra.rabbitmq import (
+        KNOWN_APPS_FOR_DELAYED_TRIGGER,
+        mq,
+        trigger_route_for,
+    )
+    from app.runtime.delayed_trigger import DelayedTriggerEnvelope
+    from app.runtime.propagation import inject_context
+
+    app = _current_app()
+    if app not in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+        raise RuntimeError(
+            f"emit_delayed(durability='durable') unavailable for "
+            f"APP_NAME={app!r}: app is not in "
+            f"KNOWN_APPS_FOR_DELAYED_TRIGGER. Either pass "
+            f"durability='best_effort' (lost on restart) or register "
+            f"the trigger route in app/infra/rabbitmq.py."
+        )
+    lane = lane_var.get()
+    cls = type(data)
+    envelope = DelayedTriggerEnvelope(
+        origin_app=app,
+        origin_lane=lane,
+        data_type=f"{cls.__module__}.{cls.__qualname__}",
+        payload=data.model_dump(mode="json"),
+        trace_id=trace_id_var.get(),
+    )
+    body = envelope.model_dump(mode="json")
+    route = trigger_route_for(app)
+    headers = inject_context({"data_type": "DelayedTriggerEnvelope"})
+    confirmed = await mq.publish_with_confirm(
+        route, body,
+        headers=headers,
+        delay_ms=delay_ms,
+        lane=lane,
+    )
+    if not confirmed:
+        raise RuntimeError(
+            f"EmitDelayedDispatchFailed: publish-confirm failed for "
+            f"{cls.__name__} (origin_app={app}, lane={lane})"
+        )
+
+
+async def emit_at(
+    data: Data,
+    *,
+    when,  # datetime.datetime
+    durability: str = "durable",
+) -> None:
+    """Emit ``data`` at absolute time ``when`` (UTC if naive).
+
+    Past ``when`` becomes delay_ms=0 (immediate). Otherwise
+    ``delay_ms = (when - now).total_seconds() * 1000``, clamped to the
+    same x-delay limit as ``emit_delayed``.
+    """
+    from datetime import datetime
+
+    now = datetime.now(UTC)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    delta = (when - now).total_seconds()
+    delay_ms = max(0, int(delta * 1000))
+    await emit_delayed(data, delay_ms=delay_ms, durability=durability)

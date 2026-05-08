@@ -12,7 +12,7 @@ needed to write a node and may change without notice.
 """
 
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
-from app.runtime.emit import emit
+from app.runtime.emit import emit, emit_at, emit_delayed
 from app.runtime.node import node
 from app.runtime.placement import bind
 from app.runtime.query import query
@@ -30,6 +30,8 @@ __all__ = [
     "Source",
     "bind",
     "emit",
+    "emit_at",
+    "emit_delayed",
     "node",
     "query",
     "wire",
