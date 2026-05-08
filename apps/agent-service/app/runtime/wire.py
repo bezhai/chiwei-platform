@@ -16,6 +16,33 @@ from app.runtime.sink import SinkSpec
 from app.runtime.source import SourceSpec
 
 
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Retry configuration for a durable wire (Gap 7.3).
+
+    ``n`` = maximum total attempts (first delivery + retries combined).
+    ``backoff`` = "exponential" (base * 2^(attempt-1)) or "linear" (base * attempt).
+    ``base_delay_ms`` / ``max_delay_ms`` clamp the per-attempt delay.
+    ``lease_ms`` = how long the inflight ``processing`` row is reserved
+    for this worker; another consumer may take over after expiry (lease
+    semantics live in runtime/inflight.py — Task 4).
+    """
+
+    n: int
+    backoff: str
+    base_delay_ms: int
+    max_delay_ms: int
+    lease_ms: int
+
+    def delay_for_attempt(self, attempt: int) -> int:
+        """Calculate delay for the Nth attempt (1-indexed)."""
+        if self.backoff == "linear":
+            d = self.base_delay_ms * attempt
+        else:  # exponential
+            d = self.base_delay_ms * (2 ** (attempt - 1))
+        return min(d, self.max_delay_ms)
+
+
 @dataclass
 class WireSpec:
     data_type: type[Data]
@@ -28,6 +55,7 @@ class WireSpec:
     debounce: dict | None = None
     debounce_key_by: Callable[[Data], str] | None = None
     with_latest: tuple[type[Data], ...] = ()
+    retry: RetryPolicy | None = None
 
 
 WIRING_REGISTRY: list[WireSpec] = []
@@ -86,6 +114,45 @@ class WireBuilder:
 
     def with_latest(self, *types: type[Data]) -> WireBuilder:
         self._spec.with_latest = types
+        return self
+
+    def retry(
+        self,
+        *,
+        n: int,
+        backoff: str = "exponential",
+        base_delay_ms: int = 500,
+        max_delay_ms: int = 30_000,
+        lease_ms: int = 300_000,
+    ) -> WireBuilder:
+        """Configure retry policy for a durable wire (Gap 7.3).
+
+        Must be called after ``.durable()``. Without retry the wire
+        keeps the legacy fail-to-DLQ semantic (handler exception nacks
+        with requeue=False); with retry the handler republishes a
+        delayed copy until ``n`` attempts are exhausted, then DLQs.
+
+        ``lease_ms`` reserves the inflight ``processing`` row for this
+        worker; another consumer may take over after expiry. See
+        runtime/inflight.py for the state-machine semantics.
+        """
+        if not self._spec.durable:
+            raise ValueError("retry() must come after .durable()")
+        if n < 1:
+            raise ValueError("retry n must be >= 1")
+        if backoff not in ("exponential", "linear"):
+            raise ValueError(
+                f"backoff must be 'exponential' or 'linear', got {backoff!r}"
+            )
+        if lease_ms < 1:
+            raise ValueError("lease_ms must be >= 1")
+        self._spec.retry = RetryPolicy(
+            n=n,
+            backoff=backoff,
+            base_delay_ms=base_delay_ms,
+            max_delay_ms=max_delay_ms,
+            lease_ms=lease_ms,
+        )
         return self
 
 

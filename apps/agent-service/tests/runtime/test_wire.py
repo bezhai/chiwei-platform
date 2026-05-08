@@ -95,3 +95,78 @@ def test_debounce_requires_key_by_keyword():
         wire(Msg).to(f).debounce(seconds=60, max_buffer=5)  # type: ignore[call-arg]
 
 
+
+
+# ---------------------------------------------------------------------------
+# RetryPolicy DSL (Phase 7a Task 6, Gap 7.3)
+# ---------------------------------------------------------------------------
+
+
+def test_default_no_retry_policy():
+    wire(Msg).to(f).durable()
+    w = WIRING_REGISTRY[0]
+    assert w.retry is None
+
+
+def test_retry_with_n_only_uses_defaults():
+    wire(Msg).to(f).durable().retry(n=3)
+    w = WIRING_REGISTRY[0]
+    assert w.retry is not None
+    assert w.retry.n == 3
+    assert w.retry.backoff == "exponential"
+    assert w.retry.base_delay_ms == 500
+    assert w.retry.max_delay_ms == 30_000
+    assert w.retry.lease_ms == 300_000
+
+
+def test_retry_full_config():
+    wire(Msg).to(f).durable().retry(
+        n=5, backoff="linear", base_delay_ms=1000,
+        max_delay_ms=60_000, lease_ms=600_000,
+    )
+    w = WIRING_REGISTRY[0]
+    assert w.retry.n == 5
+    assert w.retry.backoff == "linear"
+    assert w.retry.base_delay_ms == 1000
+    assert w.retry.max_delay_ms == 60_000
+    assert w.retry.lease_ms == 600_000
+
+
+def test_retry_without_durable_raises():
+    with pytest.raises(ValueError, match="durable"):
+        wire(Msg).to(f).retry(n=3)
+
+
+def test_retry_invalid_backoff_raises():
+    with pytest.raises(ValueError, match="backoff"):
+        wire(Msg).to(f).durable().retry(n=3, backoff="quadratic")
+
+
+def test_retry_n_must_be_positive():
+    with pytest.raises(ValueError, match=r"\bn\b"):
+        wire(Msg).to(f).durable().retry(n=0)
+
+
+def test_retry_lease_must_be_positive():
+    with pytest.raises(ValueError, match="lease"):
+        wire(Msg).to(f).durable().retry(n=3, lease_ms=0)
+
+
+def test_retry_policy_delay_for_attempt_exponential():
+    from app.runtime.wire import RetryPolicy
+    p = RetryPolicy(n=5, backoff="exponential",
+                    base_delay_ms=500, max_delay_ms=30_000, lease_ms=300_000)
+    assert p.delay_for_attempt(1) == 500
+    assert p.delay_for_attempt(2) == 1000
+    assert p.delay_for_attempt(3) == 2000
+    assert p.delay_for_attempt(10) == 30_000  # clamped to max
+
+
+def test_retry_policy_delay_for_attempt_linear():
+    from app.runtime.wire import RetryPolicy
+    p = RetryPolicy(n=5, backoff="linear",
+                    base_delay_ms=500, max_delay_ms=30_000, lease_ms=300_000)
+    assert p.delay_for_attempt(1) == 500
+    assert p.delay_for_attempt(2) == 1000
+    assert p.delay_for_attempt(3) == 1500
+    assert p.delay_for_attempt(100) == 30_000  # clamped
