@@ -60,6 +60,7 @@ from app.runtime.propagation import (
     extract_context,
     inject_context,
 )
+from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry
 from app.runtime.wire import WireSpec
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
@@ -214,15 +215,51 @@ def _build_handler(w: WireSpec, consumer: Callable):
                 try:
                     await consumer(**{param_name: obj})
                 except Exception as e:
-                    # Retry transport (Task 5) replaces this branch with
-                    # a publish-with-confirm + ack-after-confirm path.
-                    # For now: record failed + propagate so process(...)
-                    # nacks → DLQ.
                     await mark_failed(
                         edge_id=edge_id,
                         idempotent_key=idem_key,
                         last_error=f"{type(e).__name__}: {e!s}",
                     )
+                    # Retry transport (Gap 7.2): if wire has retry policy
+                    # and budget remains, publish-with-confirm a delayed
+                    # copy carrying x-delivery-count++. On confirm: ack
+                    # the original (broker now owns the retry copy). On
+                    # confirm failure: re-raise → process(requeue=False)
+                    # nacks → DLQ as fallback (operator can replay).
+                    decision = decide_retry(
+                        headers=message.headers, policy=w.retry,
+                    )
+                    if decision.action == "retry":
+                        new_headers = dict(message.headers or {})
+                        new_headers[DELIVERY_COUNT_HEADER] = decision.attempt
+                        body_dict = json.loads(message.body)
+                        retry_lane = new_headers.get("lane") or None
+                        if isinstance(retry_lane, str) and not retry_lane:
+                            retry_lane = None
+                        route = _route_for(w, consumer)
+                        confirmed = await mq.publish_with_confirm(
+                            route, body_dict,
+                            headers=new_headers,
+                            lane=retry_lane,
+                            delay_ms=decision.delay_ms,
+                        )
+                        if confirmed:
+                            logger.info(
+                                "durable consumer %s: retry queued "
+                                "attempt=%d delay_ms=%d key=%s",
+                                consumer.__name__,
+                                decision.attempt,
+                                decision.delay_ms,
+                                idem_key,
+                            )
+                            await message.ack()
+                            return
+                        logger.warning(
+                            "durable consumer %s: retry publish-confirm "
+                            "failed, falling through to DLQ key=%s",
+                            consumer.__name__,
+                            idem_key,
+                        )
                     raise
                 await mark_succeeded(
                     edge_id=edge_id, idempotent_key=idem_key,

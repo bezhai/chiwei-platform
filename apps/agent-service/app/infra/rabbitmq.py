@@ -278,6 +278,74 @@ class _RabbitMQ:
         )
         await self._exchange.publish(message, routing_key=actual_rk)
 
+    async def publish_with_confirm(
+        self,
+        route: Route,
+        body: dict,
+        *,
+        delay_ms: int | None = None,
+        headers: dict | None = None,
+        lane: str | None = ...,  # type: ignore[assignment]
+        timeout_s: float = 5.0,
+    ) -> bool:
+        """Publish with broker publish-confirm; return True iff broker ack-ed.
+
+        Used by the durable retry transport (Gap 7.2) and emit_delayed
+        durable path (Gap 9). Caller decides on False — DLQ-fallback for
+        retry, or raise for emit_delayed.
+
+        aio-pika channels default to ``publisher_confirms=True`` so the
+        underlying ``exchange.publish`` already awaits broker confirm. We
+        wrap with a hard timeout + broad exception catch so a transient
+        network blip never raises out into the durable handler (which
+        already owns ack/nack semantics via ``message.process``).
+        """
+        import asyncio
+
+        if self._exchange is None:
+            raise RuntimeError("must call declare_topology() first")
+
+        if lane is ...:
+            lane = current_lane()
+        if lane == "prod":
+            lane = None
+
+        if lane:
+            await self._ensure_lane_queue(route, lane)
+
+        actual_rk = _lane_rk(route.rk, lane)
+
+        msg_headers: dict[str, Any] = dict(headers) if headers else {}
+        if delay_ms is not None:
+            msg_headers["x-delay"] = delay_ms
+
+        message = Message(
+            body=json.dumps(body).encode(),
+            delivery_mode=DeliveryMode.PERSISTENT,
+            content_type="application/json",
+            headers=msg_headers if msg_headers else None,
+        )
+        try:
+            await asyncio.wait_for(
+                self._exchange.publish(message, routing_key=actual_rk),
+                timeout=timeout_s,
+            )
+            return True
+        except TimeoutError:
+            logger.exception(
+                "publish_with_confirm timed out: queue=%s rk=%s",
+                route.queue,
+                actual_rk,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "publish_with_confirm failed: queue=%s rk=%s",
+                route.queue,
+                actual_rk,
+            )
+            return False
+
     async def consume(
         self, queue_name: str, callback: MessageHandler
     ) -> tuple[Any, str]:
