@@ -169,6 +169,23 @@ def test_db_dsn() -> object:
 
 
 @pytest.fixture
+async def inflight_db(test_db: object) -> AsyncGenerator[object, None]:
+    """Create the runtime_inflight schema on the test DB and yield the engine.
+
+    Each test gets a fresh table (test_db drops public schema between
+    tests, so the CREATE TABLE IF NOT EXISTS reapplies cleanly).
+    """
+    from sqlalchemy import text
+
+    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+
+    async with test_db.begin() as conn:
+        for ddl in RUNTIME_INFLIGHT_DDL:
+            await conn.execute(text(ddl))
+    yield test_db
+
+
+@pytest.fixture
 async def test_db(
     test_db_dsn: str,
     monkeypatch: pytest.MonkeyPatch,

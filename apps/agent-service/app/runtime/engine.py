@@ -107,7 +107,14 @@ class Runtime:
 
         plan = plan_migration(list(DATA_REGISTRY), existing)
 
-        if not plan.stmts:
+        # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
+        # regardless of whether the Data plan is empty — these tables are
+        # framework state, not Data, and aren't tracked by plan_migration.
+        from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+
+        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL)
+
+        if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")
             return
 
@@ -125,9 +132,12 @@ class Runtime:
                         f"sql={stmt.sql!r} params={stmt.params!r}"
                     )
                 await s.execute(text(stmt.sql))
+            for sql in runtime_internal_stmts:
+                await s.execute(text(sql))
         logger.info(
-            "runtime: applied %d schema migration statement(s)",
+            "runtime: applied %d Data + %d runtime-internal migration statement(s)",
             len(plan.stmts),
+            len(runtime_internal_stmts),
         )
 
     async def run(self) -> None:

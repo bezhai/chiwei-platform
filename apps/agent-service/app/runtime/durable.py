@@ -33,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket
 from collections.abc import Callable
 from typing import Any
 
@@ -41,9 +43,17 @@ from aio_pika.abc import AbstractIncomingMessage
 from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.runtime.data import Data
+from app.runtime.inflight import (
+    claim_inflight,
+    edge_id_for,
+    mark_failed,
+    mark_history_backfill,
+    mark_succeeded,
+)
+from app.runtime.migrator import _table_name
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
-from app.runtime.persist import insert_idempotent
+from app.runtime.persist import _dedup_hash, insert_idempotent
 from app.runtime.propagation import (
     Context,
     bind_context,
@@ -51,6 +61,9 @@ from app.runtime.propagation import (
     inject_context,
 )
 from app.runtime.wire import WireSpec
+
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+_DEFAULT_LEASE_MS = 300_000  # 5 min — only used when wire has no .retry()
 
 logger = logging.getLogger(__name__)
 
@@ -93,22 +106,52 @@ async def publish_durable(w: WireSpec, consumer: Callable, data: Data) -> None:
     await mq.publish(route, body, headers=headers, lane=effective_lane or None)
 
 
+def _idempotent_key_for(obj: Data) -> str:
+    """Compute the inflight idempotent_key for ``obj``.
+
+    Uses ``Meta.dedup_column`` value when declared (adoption mode),
+    otherwise the runtime-managed ``dedup_hash``. Mirrors
+    ``insert_idempotent``'s conflict-target rule.
+    """
+    cls = type(obj)
+    meta = getattr(cls, "Meta", None)
+    dedup_col = getattr(meta, "dedup_column", None) if meta else None
+    if dedup_col:
+        return str(getattr(obj, dedup_col))
+    return _dedup_hash(obj)
+
+
 def _build_handler(w: WireSpec, consumer: Callable):
     """Build an aio-pika message handler for ``(wire, consumer)``.
 
     The handler:
-      1. Restores ``trace_id`` / ``lane`` contextvars from message headers.
-      2. Decodes the body into ``w.data_type(**payload)``.
-      3. Calls ``insert_idempotent`` for dedup (returns 0 => duplicate,
-         ack and no-op; returns 1 => proceed).
-      4. Invokes ``consumer`` with the single input parameter bound to the
-         decoded object (phase-0 MVP: durable consumers are single-input).
-      5. ``message.process()`` ack-s on success; on consumer exception
-         it nacks with ``requeue=False`` so the broker routes the message
-         to the DLX/DLQ (no in-place retry).
+      1. Restore trace_id / lane contextvars from message headers.
+      2. Decode body into ``w.data_type(**payload)``.
+      3. Claim inflight state via the runtime_inflight state machine
+         (Gap 7.1):
+         - row missing → INSERT processing(attempts=1, lease) — fresh=True
+         - succeeded → ack + return  (dedup terminal)
+         - processing-with-live-lease → ack + return  (peer worker)
+         - processing-expired / failed → take over, attempts++ — fresh=False
+      4. On fresh claim (non-adoption Data only), call insert_idempotent:
+         - n == 0 → Data row pre-existed (pre-7a or concurrent writer).
+           Mark inflight succeeded + ack without invoking the consumer
+           (history compatibility, Gap 7.1.1).
+         - n == 1 → Data row newly written; continue to consumer.
+         Adoption-mode Data skips this step (its consumer-side dedup
+         carries the original guarantee).
+      5. Invoke consumer; mark succeeded on success, mark failed on
+         exception. Retry transport (republish with x-delay) is
+         introduced in Task 5; this commit retains the legacy
+         fail-to-DLQ via ``message.process(requeue=False)``.
     """
     data_cls = w.data_type
     param_name = next(iter(inputs_of(consumer)))
+    edge_id = edge_id_for(data_cls.__qualname__, consumer.__qualname__)
+    lease_ms = w.retry.lease_ms if w.retry is not None else _DEFAULT_LEASE_MS
+    data_table = _table_name(data_cls)
+    meta = getattr(data_cls, "Meta", None)
+    is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
 
     async def handler(message: AbstractIncomingMessage) -> None:
         # requeue=False: a bad payload (can't parse / duplicated) never
@@ -119,31 +162,71 @@ def _build_handler(w: WireSpec, consumer: Callable):
             async with bind_context(ctx):
                 payload = json.loads(message.body)
                 obj = data_cls(**payload)
-                # Adoption-mode Data (``Meta.existing_table`` set) lives in
-                # a table the runtime doesn't own — the row is guaranteed to
-                # exist before we ever emit (it's written by the legacy
-                # writer that the Bridge lifts from). Running
-                # insert_idempotent here would ON CONFLICT DO NOTHING on
-                # every frame and falsely report a duplicate, skipping the
-                # consumer. Downstream idempotency must come from the
-                # consumer side (qdrant upsert by deterministic id).
-                meta = getattr(data_cls, "Meta", None)
-                is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
-                if not is_adoption:
+                idem_key = _idempotent_key_for(obj)
+
+                outcome = await claim_inflight(
+                    edge_id=edge_id,
+                    idempotent_key=idem_key,
+                    data_table=data_table,
+                    worker_id=WORKER_ID,
+                    lease_ms=lease_ms,
+                    trace_id=ctx.trace_id,
+                )
+                if outcome.action == "skip":
+                    logger.debug(
+                        "durable consumer %s: dedup-skip %s key=%s",
+                        consumer.__name__,
+                        data_cls.__name__,
+                        idem_key,
+                    )
+                    return
+
+                # Fresh claim → write the Data row (event persistence) +
+                # history backfill detection. Adoption-mode Data skips
+                # this step (its existing_table is owned by another
+                # writer; consumer-side dedup carries idempotency).
+                if outcome.fresh and not is_adoption:
                     n = await insert_idempotent(obj)
                     if n == 0:
-                        logger.debug(
-                            "durable consumer %s: duplicate %s, skipped",
+                        # Data row pre-existed → history backfill. Mark
+                        # inflight succeeded and ack without invoking the
+                        # consumer.
+                        logger.info(
+                            "durable consumer %s: history-backfill %s key=%s",
                             consumer.__name__,
                             data_cls.__name__,
+                            idem_key,
+                        )
+                        await mark_history_backfill(
+                            edge_id=edge_id,
+                            idempotent_key=idem_key,
+                            data_table=data_table,
                         )
                         return
+
                 logger.info(
-                    "durable consumer %s: processing %s",
+                    "durable consumer %s: processing %s key=%s attempts=%d",
                     consumer.__name__,
                     data_cls.__name__,
+                    idem_key,
+                    outcome.attempts,
                 )
-                await consumer(**{param_name: obj})
+                try:
+                    await consumer(**{param_name: obj})
+                except Exception as e:
+                    # Retry transport (Task 5) replaces this branch with
+                    # a publish-with-confirm + ack-after-confirm path.
+                    # For now: record failed + propagate so process(...)
+                    # nacks → DLQ.
+                    await mark_failed(
+                        edge_id=edge_id,
+                        idempotent_key=idem_key,
+                        last_error=f"{type(e).__name__}: {e!s}",
+                    )
+                    raise
+                await mark_succeeded(
+                    edge_id=edge_id, idempotent_key=idem_key,
+                )
 
     return handler
 

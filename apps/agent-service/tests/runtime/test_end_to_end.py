@@ -50,8 +50,8 @@ def setup_function():
 
 
 @pytest.fixture
-async def smoke_env(rabbitmq, test_db):
-    await migrate(SmokeMsg, test_db)
+async def smoke_env(rabbitmq, inflight_db):
+    await migrate(SmokeMsg, inflight_db)
     wire(SmokeMsg).to(smoke_consumer).durable()
     compile_graph()
     await start_consumers()

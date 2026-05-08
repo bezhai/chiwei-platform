@@ -56,9 +56,9 @@ def setup_function():
 
 
 @pytest.fixture
-async def durable_env(rabbitmq, test_db):
-    """Shared setup: migrate Ping table + wire + start durable consumers."""
-    await migrate(Ping, test_db)
+async def durable_env(rabbitmq, inflight_db):
+    """Shared setup: migrate Ping + runtime_inflight table + wire + start consumers."""
+    await migrate(Ping, inflight_db)
 
     wire(Ping).to(ping_consumer).durable()
     compile_graph()
