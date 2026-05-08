@@ -227,7 +227,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     # confirm failure: re-raise → process(requeue=False)
                     # nacks → DLQ as fallback (operator can replay).
                     decision = decide_retry(
-                        headers=message.headers, policy=w.retry,
+                        headers=message.headers,
+                        policy=w.retry,
                     )
                     if decision.action == "retry":
                         new_headers = dict(message.headers or {})
@@ -238,7 +239,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
                             retry_lane = None
                         route = _route_for(w, consumer)
                         confirmed = await mq.publish_with_confirm(
-                            route, body_dict,
+                            route,
+                            body_dict,
                             headers=new_headers,
                             lane=retry_lane,
                             delay_ms=decision.delay_ms,
@@ -252,7 +254,13 @@ def _build_handler(w: WireSpec, consumer: Callable):
                                 decision.delay_ms,
                                 idem_key,
                             )
-                            await message.ack()
+                            # Return WITHOUT message.ack(): the enclosing
+                            # ``async with message.process(requeue=False)``
+                            # context manager will ack on clean exit.
+                            # An explicit ack here would be a double-ack
+                            # (process __aexit__ raises MessageProcessError
+                            # = "Message already processed"), which we
+                            # observed in dev-phase7a drill 2.
                             return
                         logger.warning(
                             "durable consumer %s: retry publish-confirm "
@@ -262,7 +270,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
                         )
                     raise
                 await mark_succeeded(
-                    edge_id=edge_id, idempotent_key=idem_key,
+                    edge_id=edge_id,
+                    idempotent_key=idem_key,
                 )
 
     return handler
@@ -305,8 +314,7 @@ async def start_consumers(app_name: str | None = None) -> None:
     # start — otherwise tests / apps without durable wires would be
     # forced to configure RABBITMQ_URL just to boot.
     has_durable = any(
-        w.durable
-        and (allowed is None or all(c in allowed for c in w.consumers))
+        w.durable and (allowed is None or all(c in allowed for c in w.consumers))
         for w in graph.wires
     )
     if has_durable:
