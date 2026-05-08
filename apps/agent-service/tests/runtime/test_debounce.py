@@ -1,16 +1,20 @@
 import json
 from contextlib import asynccontextmanager
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.runtime.debounce import (
-    DebounceReschedule, _route_for, _DEFAULT_TTL_SECONDS, publish_debounce,
-    _do_reschedule, _build_handler,
-)
-from app.runtime.node import NODE_REGISTRY, _NODE_META, node
-from app.runtime.wire import WireSpec
+import pytest
+
 from app.domain.memory_triggers import DriftTrigger
+from app.runtime.debounce import (
+    _DEFAULT_TTL_SECONDS,
+    DebounceReschedule,
+    _build_handler,
+    _do_reschedule,
+    _route_for,
+    publish_debounce,
+)
+from app.runtime.node import _NODE_META, NODE_REGISTRY, node
+from app.runtime.wire import WireSpec
 
 
 @pytest.fixture(autouse=True)
@@ -83,10 +87,6 @@ async def test_publish_debounce_single_event(monkeypatch):
     fake_publish = AsyncMock()
     monkeypatch.setattr("app.runtime.debounce.mq",
                         MagicMock(publish=fake_publish))
-    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
-                        MagicMock(get=lambda: "tr-1"))
-    monkeypatch.setattr("app.runtime.debounce.lane_var",
-                        MagicMock(get=lambda: ""))
 
     w = _make_wire()
     await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
@@ -120,10 +120,6 @@ async def test_publish_debounce_max_buffer_triggers_fire_now(monkeypatch):
     fake_publish = AsyncMock()
     monkeypatch.setattr("app.runtime.debounce.mq",
                         MagicMock(publish=fake_publish))
-    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
-                        MagicMock(get=lambda: ""))
-    monkeypatch.setattr("app.runtime.debounce.lane_var",
-                        MagicMock(get=lambda: ""))
 
     w = _make_wire()
     await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
@@ -145,10 +141,6 @@ async def test_do_reschedule_cas_swap_success(monkeypatch):
     fake_publish = AsyncMock()
     monkeypatch.setattr("app.runtime.debounce.mq",
                         MagicMock(publish=fake_publish))
-    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
-                        MagicMock(get=lambda: ""))
-    monkeypatch.setattr("app.runtime.debounce.lane_var",
-                        MagicMock(get=lambda: ""))
 
     w = _make_wire()
     data = DriftTrigger(chat_id="c1", persona_id="p1")
@@ -342,10 +334,6 @@ async def test_handler_consumer_raises_debounce_reschedule_runs_do_reschedule(mo
     fake_publish = AsyncMock()
     monkeypatch.setattr("app.runtime.debounce.mq",
                         MagicMock(publish=fake_publish))
-    monkeypatch.setattr("app.runtime.debounce.trace_id_var",
-                        MagicMock(get=lambda: ""))
-    monkeypatch.setattr("app.runtime.debounce.lane_var",
-                        MagicMock(get=lambda: ""))
 
     new_data = DriftTrigger(chat_id="c1", persona_id="p1")
 
@@ -376,11 +364,12 @@ async def test_handler_consumer_raises_debounce_reschedule_runs_do_reschedule(mo
 async def test_start_debounce_consumers_filters_by_app_name(monkeypatch):
     """start_debounce_consumers(app_name) 用 nodes_for_app 过滤；
     其他 app 的 wire 不启动 consumer。"""
-    from app.runtime.wire import clear_wiring, wire
-    from app.runtime.placement import clear_bindings
     from app.runtime.debounce import (
-        start_debounce_consumers, stop_debounce_consumers,
+        start_debounce_consumers,
+        stop_debounce_consumers,
     )
+    from app.runtime.placement import clear_bindings
+    from app.runtime.wire import clear_wiring, wire
 
     clear_wiring()
     clear_bindings()

@@ -44,6 +44,12 @@ from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
 from app.runtime.persist import insert_idempotent
+from app.runtime.propagation import (
+    Context,
+    bind_context,
+    extract_context,
+    inject_context,
+)
 from app.runtime.wire import WireSpec
 
 logger = logging.getLogger(__name__)
@@ -73,15 +79,17 @@ async def publish_durable(w: WireSpec, consumer: Callable, data: Data) -> None:
     """
     route = _route_for(w, consumer)
     body = data.model_dump(mode="json")
+    # data.lane fallback is publish_durable-specific (Data instance carries its
+    # own lane field for some pipelines); not part of the generic propagation
+    # primitive. Compose Context manually to honor the fallback.
     data_lane = body.get("lane")
     effective_lane = lane_var.get() or (
-        data_lane if isinstance(data_lane, str) and data_lane else ""
+        data_lane if isinstance(data_lane, str) and data_lane else None
     )
-    headers: dict[str, Any] = {
-        "trace_id": trace_id_var.get() or "",
-        "lane": effective_lane,
-        "data_type": type(data).__name__,
-    }
+    headers = inject_context(
+        {"data_type": type(data).__name__},
+        Context(trace_id=trace_id_var.get(), lane=effective_lane),
+    )
     await mq.publish(route, body, headers=headers, lane=effective_lane or None)
 
 
@@ -107,20 +115,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
         # becomes a poison-loop; requeue=True would have aio-pika re-deliver
         # forever. Infra-level retries are the DLX's job, not ours.
         async with message.process(requeue=False):
-            headers = message.headers or {}
-            # Defensive coercion: contextvars are typed as Optional[str]
-            # downstream, and a misbehaving publisher could send a list /
-            # bytes / int under these header keys. Treat any non-string
-            # (or empty string) value as "not set" rather than letting a
-            # cryptic ``str()`` crash happen deep inside a trace helper.
-            raw_trace = headers.get("trace_id")
-            trace_id = raw_trace if isinstance(raw_trace, str) and raw_trace else None
-            raw_lane = headers.get("lane")
-            lane = raw_lane if isinstance(raw_lane, str) and raw_lane else None
-
-            t_tok = trace_id_var.set(trace_id)
-            l_tok = lane_var.set(lane)
-            try:
+            ctx = extract_context(message.headers)
+            async with bind_context(ctx):
                 payload = json.loads(message.body)
                 obj = data_cls(**payload)
                 # Adoption-mode Data (``Meta.existing_table`` set) lives in
@@ -148,9 +144,6 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     data_cls.__name__,
                 )
                 await consumer(**{param_name: obj})
-            finally:
-                trace_id_var.reset(t_tok)
-                lane_var.reset(l_tok)
 
     return handler
 

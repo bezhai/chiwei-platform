@@ -384,9 +384,9 @@ class Runtime:
 
         from pydantic import ValidationError as _ValidationError
 
-        from app.api.middleware import lane_var, trace_id_var
         from app.infra.rabbitmq import current_lane, lane_queue, mq
         from app.runtime.node import inputs_of
+        from app.runtime.propagation import bind_context, extract_context
 
         if len(w.consumers) != 1:
             # compile_graph should have caught this; guard anyway so a
@@ -445,26 +445,7 @@ class Runtime:
         try:
             async with queue.iterator() as qit:
                 async for incoming in qit:
-                    # Restore trace/lane contextvars from headers, with
-                    # the same defensive coercion as durable.py (header
-                    # values can legally be bytes / list / int when a
-                    # publisher misbehaves — we want "not set" rather
-                    # than a cryptic ``str()`` crash downstream).
-                    headers = incoming.headers or {}
-                    raw_trace = headers.get("trace_id")
-                    trace_id = (
-                        raw_trace
-                        if isinstance(raw_trace, str) and raw_trace
-                        else None
-                    )
-                    raw_lane = headers.get("lane")
-                    lane = (
-                        raw_lane
-                        if isinstance(raw_lane, str) and raw_lane
-                        else None
-                    )
-                    t_tok = trace_id_var.set(trace_id)
-                    l_tok = lane_var.set(lane)
+                    ctx = extract_context(incoming.headers)
                     try:
                         # ``process(requeue=False)`` context-manager:
                         # clean exit -> ack; raised exception -> nack
@@ -479,48 +460,49 @@ class Runtime:
                             len(incoming.body),
                         )
                         async with incoming.process(requeue=False):
-                            try:
-                                body = _json.loads(incoming.body.decode())
-                                # MQSource adapts external producers whose
-                                # payloads may carry fields meant for other
-                                # consumers (e.g. lark-server adds 'lane' to
-                                # {"message_id"} — we read lane from
-                                # headers). Data's extra='forbid' is a
-                                # deliberate policy on our internal
-                                # contracts; filter to the Data class's
-                                # declared fields before handing off so the
-                                # strict policy stays, and external slack is
-                                # absorbed here.
-                                body = {
-                                    k: v
-                                    for k, v in body.items()
-                                    if k in req_cls.model_fields
-                                }
-                                req = req_cls(**body)
-                            except (
-                                _json.JSONDecodeError,
-                                UnicodeDecodeError,
-                                _ValidationError,
-                                TypeError,
-                            ) as e:
-                                # Bad frame: log + dead-letter. We log
-                                # warning here so the body preview lands
-                                # in the standard log stream (the DLQ
-                                # itself only carries the raw body), then
-                                # raise so ``process(requeue=False)``
-                                # nacks the message and the broker routes
-                                # it to the DLX. requeue=False rules out
-                                # any poison loop; the outer ``except
-                                # Exception`` below catches the re-raise
-                                # so the source loop keeps draining.
-                                logger.warning(
-                                    "mq source %s decode failed: %s body=%r",
-                                    actual_queue,
-                                    e,
-                                    incoming.body[:200],
-                                )
-                                raise
-                            await target(**{param_name: req})
+                            async with bind_context(ctx):
+                                try:
+                                    body = _json.loads(incoming.body.decode())
+                                    # MQSource adapts external producers whose
+                                    # payloads may carry fields meant for other
+                                    # consumers (e.g. lark-server adds 'lane' to
+                                    # {"message_id"} — we read lane from
+                                    # headers). Data's extra='forbid' is a
+                                    # deliberate policy on our internal
+                                    # contracts; filter to the Data class's
+                                    # declared fields before handing off so the
+                                    # strict policy stays, and external slack is
+                                    # absorbed here.
+                                    body = {
+                                        k: v
+                                        for k, v in body.items()
+                                        if k in req_cls.model_fields
+                                    }
+                                    req = req_cls(**body)
+                                except (
+                                    _json.JSONDecodeError,
+                                    UnicodeDecodeError,
+                                    _ValidationError,
+                                    TypeError,
+                                ) as e:
+                                    # Bad frame: log + dead-letter. We log
+                                    # warning here so the body preview lands
+                                    # in the standard log stream (the DLQ
+                                    # itself only carries the raw body), then
+                                    # raise so ``process(requeue=False)``
+                                    # nacks the message and the broker routes
+                                    # it to the DLX. requeue=False rules out
+                                    # any poison loop; the outer ``except
+                                    # Exception`` below catches the re-raise
+                                    # so the source loop keeps draining.
+                                    logger.warning(
+                                        "mq source %s decode failed: %s body=%r",
+                                        actual_queue,
+                                        e,
+                                        incoming.body[:200],
+                                    )
+                                    raise
+                                await target(**{param_name: req})
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
@@ -539,9 +521,6 @@ class Runtime:
                             target.__name__,
                             e,
                         )
-                    finally:
-                        trace_id_var.reset(t_tok)
-                        lane_var.reset(l_tok)
         except asyncio.CancelledError:
             raise
         except Exception as e:
