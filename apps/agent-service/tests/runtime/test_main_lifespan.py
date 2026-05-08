@@ -43,8 +43,9 @@ async def test_lifespan_migrates_then_starts_sources():
          patch("app.skills.registry.skill_reload_loop", AsyncMock()), \
          patch("app.runtime.http_source.register_http_sources"), \
          patch("app.main.settings", MagicMock(rabbitmq_url="amqp://test")):
-        from app.main import lifespan
         from fastapi import FastAPI
+
+        from app.main import lifespan
 
         app = FastAPI()
         async with lifespan(app):

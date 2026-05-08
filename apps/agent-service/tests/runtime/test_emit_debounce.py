@@ -14,7 +14,7 @@ import pytest
 
 from app.domain.memory_triggers import DriftTrigger
 from app.runtime.emit import emit, reset_emit_runtime
-from app.runtime.node import NODE_REGISTRY, _NODE_META, node
+from app.runtime.node import _NODE_META, NODE_REGISTRY, node
 from app.runtime.placement import clear_bindings
 from app.runtime.wire import clear_wiring, wire
 

@@ -107,7 +107,14 @@ class Runtime:
 
         plan = plan_migration(list(DATA_REGISTRY), existing)
 
-        if not plan.stmts:
+        # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
+        # regardless of whether the Data plan is empty — these tables are
+        # framework state, not Data, and aren't tracked by plan_migration.
+        from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+
+        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL)
+
+        if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")
             return
 
@@ -125,15 +132,35 @@ class Runtime:
                         f"sql={stmt.sql!r} params={stmt.params!r}"
                     )
                 await s.execute(text(stmt.sql))
+            for sql in runtime_internal_stmts:
+                await s.execute(text(sql))
         logger.info(
-            "runtime: applied %d schema migration statement(s)",
+            "runtime: applied %d Data + %d runtime-internal migration statement(s)",
             len(plan.stmts),
+            len(runtime_internal_stmts),
         )
 
     async def run(self) -> None:
         """Boot the runtime and block until cancelled."""
         if self._migrate_schema_on_run:
             await self.migrate_schema()
+        # Register the runtime-internal delayed-trigger wire BEFORE
+        # start_consumers (which calls compile_graph and freezes the
+        # WIRING_REGISTRY snapshot). Skip silently when the configured
+        # APP_NAME doesn't have a trigger route — emit_delayed durable
+        # publishes will then fail-fast with a clear error rather than
+        # crashing runtime startup.
+        from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
+        from app.runtime.delayed_trigger import register_runtime_trigger_wire
+
+        if self.app_name in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+            register_runtime_trigger_wire(self.app_name)
+        else:
+            logger.info(
+                "runtime: app=%s has no delayed trigger route; "
+                "emit_delayed(durability='durable') will be unavailable",
+                self.app_name,
+            )
         await start_consumers(app_name=self.app_name)
         await self.start_source_loops()
         try:
@@ -245,7 +272,14 @@ class Runtime:
         )
 
     async def stop_source_loops(self) -> None:
-        """Cancel + await every source task + watchdog (explicit cancel)."""
+        """Cancel + await every source task + watchdog (explicit cancel).
+
+        Also drains the in-process scheduled task pool (Gap 9.2
+        best_effort emit_delayed): pending best_effort tasks would
+        otherwise leak into the next process instance.
+        """
+        from app.runtime.scheduled import cancel_all_scheduled
+
         for t in self._source_tasks:
             t.cancel()
         if self._watchdog_task is not None:
@@ -262,6 +296,7 @@ class Runtime:
         self._source_tasks.clear()
         self._watchdog_task = None
         self._stop_event = None
+        cancel_all_scheduled()
 
     async def _watch_source_error(self) -> None:
         """Wait for `_stop_event`; on fire (with `_source_error` set),
@@ -290,12 +325,20 @@ class Runtime:
         naturally bounded to one tick. Fatal errors (bad payload shape,
         emit failure) surface via ``_source_error`` + ``_stop_event`` so
         ``run()`` can re-raise and the pod exits non-zero.
+
+        Each tick auto-generates ``trace_id = f"cron:<expr>:<uuid8>"`` and
+        binds it to the contextvar for the duration of ``emit()``. Without
+        this, cron-triggered links broke trace continuity in Langfuse
+        (cron source has no inbound trace_id). Lane is ``None`` (cron
+        triggers don't carry a lane).
         """
+        import uuid
         from zoneinfo import ZoneInfo
 
         from croniter import croniter
 
         from app.runtime.emit import emit
+        from app.runtime.propagation import Context, bind_context
 
         expr = src.params["expr"]
         tz_name = src.params.get("tz", "UTC")
@@ -303,6 +346,7 @@ class Runtime:
         name = f"cron[{w.data_type.__name__}]"
         base = datetime.now(tz=zone)
         itr = croniter(expr, base)
+        expr_slug = expr.replace(" ", "_")
         try:
             while True:
                 next_ts = itr.get_next(datetime)
@@ -310,7 +354,9 @@ class Runtime:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 payload = self._build_payload(w, next_ts)
-                await emit(payload)
+                trace_id = f"cron:{expr_slug}:{uuid.uuid4().hex[:8]}"
+                async with bind_context(Context(trace_id=trace_id, lane=None)):
+                    await emit(payload)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -328,8 +374,15 @@ class Runtime:
 
         Fatal errors surface via ``_source_error`` + ``_stop_event`` so
         ``run()`` re-raises and the pod exits non-zero.
+
+        Each tick auto-generates ``trace_id = f"interval:<seconds>s:<uuid8>"``
+        bound for the duration of ``emit()``. See ``_source_loop_cron`` for
+        rationale (Gap 11 — Langfuse trace continuity).
         """
+        import uuid
+
         from app.runtime.emit import emit
+        from app.runtime.propagation import Context, bind_context
 
         seconds = src.params["seconds"]
         name = f"interval[{w.data_type.__name__}]"
@@ -342,7 +395,9 @@ class Runtime:
                 ts = datetime.now(tz=UTC)
                 next_fire += seconds
                 payload = self._build_payload(w, ts)
-                await emit(payload)
+                trace_id = f"interval:{seconds}s:{uuid.uuid4().hex[:8]}"
+                async with bind_context(Context(trace_id=trace_id, lane=None)):
+                    await emit(payload)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -381,12 +436,13 @@ class Runtime:
           no extra consumer-tag tracking needed.
         """
         import json as _json
+        import uuid as _uuid
 
         from pydantic import ValidationError as _ValidationError
 
-        from app.api.middleware import lane_var, trace_id_var
         from app.infra.rabbitmq import current_lane, lane_queue, mq
         from app.runtime.node import inputs_of
+        from app.runtime.propagation import Context, bind_context, extract_context
 
         if len(w.consumers) != 1:
             # compile_graph should have caught this; guard anyway so a
@@ -417,6 +473,24 @@ class Runtime:
         await channel.set_qos(prefetch_count=10)
 
         actual_queue = lane_queue(queue_base, current_lane())
+
+        # Lazy lane-queue declare: declare_topology runs at fixture/boot
+        # time using the lane that was current then. If LANE was set
+        # later (test code, late lifespan hook), the lane queue may not
+        # exist yet — passive get_queue would NOT_FOUND crash. Look up
+        # the route in ALL_ROUTES and ask mq to ensure the lane queue
+        # is declared with the route's exact args (idempotent). For
+        # queues outside ALL_ROUTES (legacy adoption tests), skip and
+        # fall through to passive get_queue as before.
+        from app.infra.rabbitmq import ALL_ROUTES
+
+        for r in ALL_ROUTES:
+            if r.queue == queue_base:
+                lane = current_lane()
+                if lane:
+                    await mq._ensure_lane_queue(r, lane)  # type: ignore[attr-defined]
+                break
+
         try:
             # Passive fetch: the queue is owned by whoever publishes to
             # it (lark-server for ``vectorize``, ``declare_topology`` for
@@ -445,26 +519,20 @@ class Runtime:
         try:
             async with queue.iterator() as qit:
                 async for incoming in qit:
-                    # Restore trace/lane contextvars from headers, with
-                    # the same defensive coercion as durable.py (header
-                    # values can legally be bytes / list / int when a
-                    # publisher misbehaves — we want "not set" rather
-                    # than a cryptic ``str()`` crash downstream).
-                    headers = incoming.headers or {}
-                    raw_trace = headers.get("trace_id")
-                    trace_id = (
-                        raw_trace
-                        if isinstance(raw_trace, str) and raw_trace
-                        else None
-                    )
-                    raw_lane = headers.get("lane")
-                    lane = (
-                        raw_lane
-                        if isinstance(raw_lane, str) and raw_lane
-                        else None
-                    )
-                    t_tok = trace_id_var.set(trace_id)
-                    l_tok = lane_var.set(lane)
+                    ctx = extract_context(incoming.headers)
+                    # Gap 11 mq-source fallback: external producers
+                    # (e.g. lark-server publishing CHAT_REQUEST) may not
+                    # inject trace_id into the message header. Without a
+                    # fallback the entire downstream chain runs with
+                    # trace_id=None — runtime_inflight rows, langfuse
+                    # spans, and durable retries all lose continuity.
+                    # Mirror cron / interval source's auto-generation
+                    # (Task 3) at this external boundary.
+                    if ctx.trace_id is None:
+                        ctx = Context(
+                            trace_id=f"mq:{queue_base}:{_uuid.uuid4().hex[:8]}",
+                            lane=ctx.lane,
+                        )
                     try:
                         # ``process(requeue=False)`` context-manager:
                         # clean exit -> ack; raised exception -> nack
@@ -479,48 +547,49 @@ class Runtime:
                             len(incoming.body),
                         )
                         async with incoming.process(requeue=False):
-                            try:
-                                body = _json.loads(incoming.body.decode())
-                                # MQSource adapts external producers whose
-                                # payloads may carry fields meant for other
-                                # consumers (e.g. lark-server adds 'lane' to
-                                # {"message_id"} — we read lane from
-                                # headers). Data's extra='forbid' is a
-                                # deliberate policy on our internal
-                                # contracts; filter to the Data class's
-                                # declared fields before handing off so the
-                                # strict policy stays, and external slack is
-                                # absorbed here.
-                                body = {
-                                    k: v
-                                    for k, v in body.items()
-                                    if k in req_cls.model_fields
-                                }
-                                req = req_cls(**body)
-                            except (
-                                _json.JSONDecodeError,
-                                UnicodeDecodeError,
-                                _ValidationError,
-                                TypeError,
-                            ) as e:
-                                # Bad frame: log + dead-letter. We log
-                                # warning here so the body preview lands
-                                # in the standard log stream (the DLQ
-                                # itself only carries the raw body), then
-                                # raise so ``process(requeue=False)``
-                                # nacks the message and the broker routes
-                                # it to the DLX. requeue=False rules out
-                                # any poison loop; the outer ``except
-                                # Exception`` below catches the re-raise
-                                # so the source loop keeps draining.
-                                logger.warning(
-                                    "mq source %s decode failed: %s body=%r",
-                                    actual_queue,
-                                    e,
-                                    incoming.body[:200],
-                                )
-                                raise
-                            await target(**{param_name: req})
+                            async with bind_context(ctx):
+                                try:
+                                    body = _json.loads(incoming.body.decode())
+                                    # MQSource adapts external producers whose
+                                    # payloads may carry fields meant for other
+                                    # consumers (e.g. lark-server adds 'lane' to
+                                    # {"message_id"} — we read lane from
+                                    # headers). Data's extra='forbid' is a
+                                    # deliberate policy on our internal
+                                    # contracts; filter to the Data class's
+                                    # declared fields before handing off so the
+                                    # strict policy stays, and external slack is
+                                    # absorbed here.
+                                    body = {
+                                        k: v
+                                        for k, v in body.items()
+                                        if k in req_cls.model_fields
+                                    }
+                                    req = req_cls(**body)
+                                except (
+                                    _json.JSONDecodeError,
+                                    UnicodeDecodeError,
+                                    _ValidationError,
+                                    TypeError,
+                                ) as e:
+                                    # Bad frame: log + dead-letter. We log
+                                    # warning here so the body preview lands
+                                    # in the standard log stream (the DLQ
+                                    # itself only carries the raw body), then
+                                    # raise so ``process(requeue=False)``
+                                    # nacks the message and the broker routes
+                                    # it to the DLX. requeue=False rules out
+                                    # any poison loop; the outer ``except
+                                    # Exception`` below catches the re-raise
+                                    # so the source loop keeps draining.
+                                    logger.warning(
+                                        "mq source %s decode failed: %s body=%r",
+                                        actual_queue,
+                                        e,
+                                        incoming.body[:200],
+                                    )
+                                    raise
+                                await target(**{param_name: req})
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
@@ -533,15 +602,11 @@ class Runtime:
                         # _record_source_error (which would kill the
                         # pod for a single bad message).
                         logger.exception(
-                            "mq source %s: target %s message DLX'd "
-                            "(%r); continuing",
+                            "mq source %s: target %s message DLX'd (%r); continuing",
                             actual_queue,
                             target.__name__,
                             e,
                         )
-                    finally:
-                        trace_id_var.reset(t_tok)
-                        lane_var.reset(l_tok)
         except asyncio.CancelledError:
             raise
         except Exception as e:

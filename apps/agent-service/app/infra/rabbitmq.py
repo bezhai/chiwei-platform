@@ -68,6 +68,41 @@ MEMORY_FRAGMENT_VECTORIZE = Route(
 MEMORY_ABSTRACT_VECTORIZE = Route(
     "memory_abstract_vectorize", "task.memory_abstract_vectorize"
 )
+
+# runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
+# APP_NAME so an envelope published from agent-service is consumed only
+# by an agent-service runtime (preserving emit()'s in-process / cross-
+# process fan-out decisions which depend on APP_NAME). Lane queues use
+# lane_fallback=False so a feat-x lane envelope never spills into prod.
+KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service", "vectorize-worker"]
+DELAYED_TRIGGER_ROUTES = [
+    Route(
+        queue=f"runtime_delayed_trigger_{app}",
+        rk=f"runtime.delayed_trigger.{app}",
+        lane_fallback=False,
+    )
+    for app in KNOWN_APPS_FOR_DELAYED_TRIGGER
+]
+
+
+def trigger_route_for(app: str) -> Route:
+    """Return the runtime_delayed_trigger Route for ``app``.
+
+    Caller MUST pass an app from KNOWN_APPS_FOR_DELAYED_TRIGGER; an
+    unknown app would publish to a queue that no consumer subscribes
+    to and the envelope would never fire.
+    """
+    if app not in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+        raise ValueError(
+            f"app={app!r} not in KNOWN_APPS_FOR_DELAYED_TRIGGER "
+            f"({KNOWN_APPS_FOR_DELAYED_TRIGGER}); update the list in "
+            f"app/infra/rabbitmq.py to register a new origin app."
+        )
+    for r in DELAYED_TRIGGER_ROUTES:
+        if r.queue == f"runtime_delayed_trigger_{app}":
+            return r
+    raise RuntimeError(f"trigger route for {app!r} not registered")  # unreachable
+
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
@@ -75,6 +110,7 @@ ALL_ROUTES = [
     VECTORIZE,
     MEMORY_FRAGMENT_VECTORIZE,
     MEMORY_ABSTRACT_VECTORIZE,
+    *DELAYED_TRIGGER_ROUTES,
 ]
 
 # ---------------------------------------------------------------------------
@@ -198,7 +234,7 @@ class _RabbitMQ:
             q = await self._channel.declare_queue(
                 lane_queue(route.queue, lane),
                 durable=True,
-                arguments=_build_queue_args(route.rk, lane),
+                arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
             )
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
@@ -277,6 +313,74 @@ class _RabbitMQ:
             headers=msg_headers if msg_headers else None,
         )
         await self._exchange.publish(message, routing_key=actual_rk)
+
+    async def publish_with_confirm(
+        self,
+        route: Route,
+        body: dict,
+        *,
+        delay_ms: int | None = None,
+        headers: dict | None = None,
+        lane: str | None = ...,  # type: ignore[assignment]
+        timeout_s: float = 5.0,
+    ) -> bool:
+        """Publish with broker publish-confirm; return True iff broker ack-ed.
+
+        Used by the durable retry transport (Gap 7.2) and emit_delayed
+        durable path (Gap 9). Caller decides on False — DLQ-fallback for
+        retry, or raise for emit_delayed.
+
+        aio-pika channels default to ``publisher_confirms=True`` so the
+        underlying ``exchange.publish`` already awaits broker confirm. We
+        wrap with a hard timeout + broad exception catch so a transient
+        network blip never raises out into the durable handler (which
+        already owns ack/nack semantics via ``message.process``).
+        """
+        import asyncio
+
+        if self._exchange is None:
+            raise RuntimeError("must call declare_topology() first")
+
+        if lane is ...:
+            lane = current_lane()
+        if lane == "prod":
+            lane = None
+
+        if lane:
+            await self._ensure_lane_queue(route, lane)
+
+        actual_rk = _lane_rk(route.rk, lane)
+
+        msg_headers: dict[str, Any] = dict(headers) if headers else {}
+        if delay_ms is not None:
+            msg_headers["x-delay"] = delay_ms
+
+        message = Message(
+            body=json.dumps(body).encode(),
+            delivery_mode=DeliveryMode.PERSISTENT,
+            content_type="application/json",
+            headers=msg_headers if msg_headers else None,
+        )
+        try:
+            await asyncio.wait_for(
+                self._exchange.publish(message, routing_key=actual_rk),
+                timeout=timeout_s,
+            )
+            return True
+        except TimeoutError:
+            logger.exception(
+                "publish_with_confirm timed out: queue=%s rk=%s",
+                route.queue,
+                actual_rk,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "publish_with_confirm failed: queue=%s rk=%s",
+                route.queue,
+                actual_rk,
+            )
+            return False
 
     async def consume(
         self, queue_name: str, callback: MessageHandler

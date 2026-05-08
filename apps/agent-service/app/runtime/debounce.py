@@ -37,13 +37,13 @@ from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
 
-from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.infra.redis import get_redis
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
 from app.runtime.placement import nodes_for_app
+from app.runtime.propagation import bind_context, extract_context, inject_context
 from app.runtime.wire import WireSpec
 
 logger = logging.getLogger(__name__)
@@ -201,11 +201,7 @@ async def publish_debounce(w: WireSpec, consumer: Callable, data: Data) -> None:
         "key": key,
         "fire_now": bool(fire_now_flag),
     }
-    headers = {
-        "trace_id": trace_id_var.get() or "",
-        "lane": lane_var.get() or "",
-        "data_type": type(data).__name__,
-    }
+    headers = inject_context({"data_type": type(data).__name__})
     delay_ms = 0 if body["fire_now"] else seconds * 1000
     await mq.publish(_route_for(w, consumer), body, headers=headers, delay_ms=delay_ms)
     logger.debug(
@@ -252,11 +248,7 @@ async def _do_reschedule(
         "key": key,
         "fire_now": False,
     }
-    headers = {
-        "trace_id": trace_id_var.get() or "",
-        "lane": lane_var.get() or "",
-        "data_type": type(data).__name__,
-    }
+    headers = inject_context({"data_type": type(data).__name__})
     await mq.publish(_route_for(w, consumer), body, headers=headers,
                      delay_ms=seconds * 1000)
     logger.info(
@@ -295,17 +287,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
 
     async def handler(message: AbstractIncomingMessage) -> None:
         async with message.process(requeue=False):
-            headers = message.headers or {}
-            # Defensive coercion (mirrors durable.py): non-string / empty
-            # header values are treated as "not set" rather than crashing
-            # downstream trace helpers.
-            raw_trace = headers.get("trace_id")
-            trace_id = raw_trace if isinstance(raw_trace, str) and raw_trace else None
-            raw_lane = headers.get("lane")
-            lane = raw_lane if isinstance(raw_lane, str) and raw_lane else None
-            t_tok = trace_id_var.set(trace_id)
-            l_tok = lane_var.set(lane)
-            try:
+            ctx = extract_context(message.headers)
+            async with bind_context(ctx):
                 payload = json.loads(message.body)
                 trigger_id = payload["trigger_id"]
                 data_dict = payload["data"]
@@ -358,9 +341,6 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     redis_latest, redis_count,
                     trigger_id,
                 )
-            finally:
-                trace_id_var.reset(t_tok)
-                lane_var.reset(l_tok)
 
     return handler
 

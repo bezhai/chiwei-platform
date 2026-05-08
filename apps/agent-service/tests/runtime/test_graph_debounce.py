@@ -12,7 +12,7 @@ import pytest
 
 from app.runtime.data import Data, Key
 from app.runtime.graph import GraphError, compile_graph
-from app.runtime.node import NODE_REGISTRY, _NODE_META, node
+from app.runtime.node import _NODE_META, NODE_REGISTRY, node
 from app.runtime.placement import clear_bindings
 from app.runtime.sink import Sink
 from app.runtime.source import Source

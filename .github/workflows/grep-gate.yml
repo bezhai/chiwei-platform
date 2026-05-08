@@ -1,0 +1,123 @@
+name: dataflow grep gate
+
+# Phase 7a CI gate: closed-gap exact-zero + open-gap baseline.
+#
+# Closed gaps (Gap 7 / 9 / 11 from Phase 7a) must stay at zero
+# occurrences in business code; new violations block the PR.
+#
+# Open gaps (Gap 13 / 14 / 15 / 16 / 19 — slated for 7c/7d/7e) carry
+# a baseline count in .github/grep-baselines.json. PRs that increase
+# the count block; reductions are allowed (and the baseline gets
+# rewritten in the PR that closes the gap).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  closed-gap-zero:
+    name: Closed-gap exact-zero (Gap 7+9+11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gap 7 — no business retry loops, no insert_idempotent call sites
+        shell: bash
+        run: |
+          set -e
+          # business code must not implement its own retry / sleep loops
+          c=$(grep -rn -E "while.*retry|for.*range.*retry" \
+              apps/agent-service/app/{chat,life,memory,nodes}/ \
+              2>/dev/null | grep -v "__pycache__\|/test_" | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
+          # business code must not call insert_idempotent — runtime owns dedup.
+          # Match call sites only (excludes docstrings + comments referring to it).
+          c=$(grep -rn -E '\binsert_idempotent\(' apps/agent-service/app/ \
+              2>/dev/null | grep -v "runtime/persist.py\|runtime/durable.py\|__pycache__\|/test_" | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c insert_idempotent call sites"; exit 1; }
+      - name: Gap 11 — no direct contextvar / header reads in dataflow business code
+        shell: bash
+        run: |
+          set -e
+          # trace_id_var / lane_var allowlist: runtime/{propagation,middleware,
+          # durable,sink_dispatch,emit}, api/middleware, infra/rabbitmq,
+          # capabilities/* (HTTP capability injects trace into outbound calls).
+          c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
+              2>/dev/null \
+              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|capabilities/\|__pycache__\|/test_" \
+              | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
+          # nobody reads message.headers["trace_id"|"lane"] except propagation
+          c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
+              2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
+
+  open-gap-baseline:
+    name: Open-gap baseline no-new (Gap 13/14/15/16/19)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare counts against baseline
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json, subprocess, sys
+
+          baselines = json.load(open(".github/grep-baselines.json"))
+          patterns = {
+              "gap_13_get_session": (
+                  r"get_session\(|AsyncSessionLocal",
+                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
+                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
+                   "apps/agent-service/app/memory/", "apps/agent-service/app/long_tasks/"],
+              ),
+              "gap_14_redis_setnx_business": (
+                  r"redis\.set\(.*nx=True|redis\.eval\(|redis\.smembers\(|redis\.sadd\(",
+                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
+                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
+                   "apps/agent-service/app/memory/"],
+              ),
+              "gap_15_arq_imports": (
+                  r"from arq|enqueue_job|create_pool",
+                  ["apps/agent-service/app/"],
+              ),
+              "gap_16_httpx_business": (
+                  r"import httpx|from httpx",
+                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
+                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
+                   "apps/agent-service/app/memory/"],
+              ),
+              "gap_19_create_task_business": (
+                  r"asyncio\.create_task|asyncio\.ensure_future",
+                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
+                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
+                   "apps/agent-service/app/memory/"],
+              ),
+          }
+          fail = False
+          for key, (pat, dirs) in patterns.items():
+              try:
+                  out = subprocess.check_output(
+                      ["grep", "-rn", "-E", pat, *dirs],
+                      text=True, stderr=subprocess.DEVNULL,
+                  )
+                  count = len([
+                      ln for ln in out.splitlines()
+                      if "__pycache__" not in ln and "/test_" not in ln
+                  ])
+              except subprocess.CalledProcessError:
+                  count = 0
+              base = baselines.get(key, 0)
+              print(f"{key}: count={count} baseline={base}", flush=True)
+              if count > base:
+                  print(
+                      f"  FAIL: {count} > baseline {base}; either reduce the "
+                      f"violations in this PR or update the baseline if you "
+                      f"truly need to add a new occurrence (rare, requires "
+                      f"reviewer sign-off).",
+                      file=sys.stderr, flush=True,
+                  )
+                  fail = True
+          sys.exit(1 if fail else 0)
+          PY
