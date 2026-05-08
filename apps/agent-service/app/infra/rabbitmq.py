@@ -68,6 +68,41 @@ MEMORY_FRAGMENT_VECTORIZE = Route(
 MEMORY_ABSTRACT_VECTORIZE = Route(
     "memory_abstract_vectorize", "task.memory_abstract_vectorize"
 )
+
+# runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
+# APP_NAME so an envelope published from agent-service is consumed only
+# by an agent-service runtime (preserving emit()'s in-process / cross-
+# process fan-out decisions which depend on APP_NAME). Lane queues use
+# lane_fallback=False so a feat-x lane envelope never spills into prod.
+KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service", "vectorize-worker"]
+DELAYED_TRIGGER_ROUTES = [
+    Route(
+        queue=f"runtime_delayed_trigger_{app}",
+        rk=f"runtime.delayed_trigger.{app}",
+        lane_fallback=False,
+    )
+    for app in KNOWN_APPS_FOR_DELAYED_TRIGGER
+]
+
+
+def trigger_route_for(app: str) -> Route:
+    """Return the runtime_delayed_trigger Route for ``app``.
+
+    Caller MUST pass an app from KNOWN_APPS_FOR_DELAYED_TRIGGER; an
+    unknown app would publish to a queue that no consumer subscribes
+    to and the envelope would never fire.
+    """
+    if app not in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+        raise ValueError(
+            f"app={app!r} not in KNOWN_APPS_FOR_DELAYED_TRIGGER "
+            f"({KNOWN_APPS_FOR_DELAYED_TRIGGER}); update the list in "
+            f"app/infra/rabbitmq.py to register a new origin app."
+        )
+    for r in DELAYED_TRIGGER_ROUTES:
+        if r.queue == f"runtime_delayed_trigger_{app}":
+            return r
+    raise RuntimeError(f"trigger route for {app!r} not registered")  # unreachable
+
 ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
@@ -75,6 +110,7 @@ ALL_ROUTES = [
     VECTORIZE,
     MEMORY_FRAGMENT_VECTORIZE,
     MEMORY_ABSTRACT_VECTORIZE,
+    *DELAYED_TRIGGER_ROUTES,
 ]
 
 # ---------------------------------------------------------------------------
@@ -198,7 +234,7 @@ class _RabbitMQ:
             q = await self._channel.declare_queue(
                 lane_queue(route.queue, lane),
                 durable=True,
-                arguments=_build_queue_args(route.rk, lane),
+                arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
             )
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 

@@ -144,6 +144,23 @@ class Runtime:
         """Boot the runtime and block until cancelled."""
         if self._migrate_schema_on_run:
             await self.migrate_schema()
+        # Register the runtime-internal delayed-trigger wire BEFORE
+        # start_consumers (which calls compile_graph and freezes the
+        # WIRING_REGISTRY snapshot). Skip silently when the configured
+        # APP_NAME doesn't have a trigger route — emit_delayed durable
+        # publishes will then fail-fast with a clear error rather than
+        # crashing runtime startup.
+        from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
+        from app.runtime.delayed_trigger import register_runtime_trigger_wire
+
+        if self.app_name in KNOWN_APPS_FOR_DELAYED_TRIGGER:
+            register_runtime_trigger_wire(self.app_name)
+        else:
+            logger.info(
+                "runtime: app=%s has no delayed trigger route; "
+                "emit_delayed(durability='durable') will be unavailable",
+                self.app_name,
+            )
         await start_consumers(app_name=self.app_name)
         await self.start_source_loops()
         try:
@@ -455,6 +472,23 @@ class Runtime:
         await channel.set_qos(prefetch_count=10)
 
         actual_queue = lane_queue(queue_base, current_lane())
+
+        # Lazy lane-queue declare: declare_topology runs at fixture/boot
+        # time using the lane that was current then. If LANE was set
+        # later (test code, late lifespan hook), the lane queue may not
+        # exist yet — passive get_queue would NOT_FOUND crash. Look up
+        # the route in ALL_ROUTES and ask mq to ensure the lane queue
+        # is declared with the route's exact args (idempotent). For
+        # queues outside ALL_ROUTES (legacy adoption tests), skip and
+        # fall through to passive get_queue as before.
+        from app.infra.rabbitmq import ALL_ROUTES
+        for r in ALL_ROUTES:
+            if r.queue == queue_base:
+                lane = current_lane()
+                if lane:
+                    await mq._ensure_lane_queue(r, lane)  # type: ignore[attr-defined]
+                break
+
         try:
             # Passive fetch: the queue is owned by whoever publishes to
             # it (lark-server for ``vectorize``, ``declare_topology`` for
