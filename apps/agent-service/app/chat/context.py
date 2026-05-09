@@ -31,7 +31,6 @@ from app.chat.content_parser import parse_content
 from app.chat.quick_search import quick_search
 from app.domain.chat_events import ConversationMessageContentSynced
 from app.infra.image import ImageRegistry
-from app.infra.redis import get_redis
 from app.runtime import emit
 
 logger = logging.getLogger(__name__)
@@ -124,8 +123,7 @@ async def build_chat_context(
         ))
 
     # Register all images
-    redis = await get_redis()
-    registry = ImageRegistry(message_id, redis)
+    registry = ImageRegistry(message_id)
     image_key_to_filename: dict[str, str] = {}
     if image_key_to_url:
         keys_ordered = list(image_key_to_url.keys())

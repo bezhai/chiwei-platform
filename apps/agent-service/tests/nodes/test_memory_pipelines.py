@@ -1,12 +1,13 @@
-import pytest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
-from app.nodes.memory_pipelines import (
-    _LOCK_RELEASE_LUA, afterthought_check, drift_check,
-)
+from app.nodes.memory_pipelines import afterthought_check, drift_check
 from app.runtime.debounce import DebounceReschedule
-from app.runtime.node import NODE_REGISTRY, _NODE_META
+from app.runtime.node import _NODE_META, NODE_REGISTRY
+from app.runtime.single_flight import SingleFlightConflict
 
 
 @pytest.fixture(autouse=True)
@@ -20,31 +21,44 @@ def _node_registry_isolation():
     _NODE_META.update(meta)
 
 
-@pytest.mark.asyncio
-async def test_drift_check_lock_acquired_runs_run_drift_and_releases(monkeypatch):
-    fake_redis = AsyncMock()
-    fake_redis.set = AsyncMock(return_value=True)  # SETNX 成功
-    fake_redis.eval = AsyncMock(return_value=1)  # Lua release 删掉
-    monkeypatch.setattr("app.nodes.memory_pipelines.get_redis",
-                        AsyncMock(return_value=fake_redis))
+def _patch_single_flight(monkeypatch, target_module: str, *, conflict: bool):
+    """Replace single_flight in `target_module` with a fake CM.
 
+    conflict=True → raises SingleFlightConflict on entry.
+    conflict=False → yields normally.
+    """
+    captured: dict = {}
+
+    @asynccontextmanager
+    async def _fake(key, *, ttl):
+        captured["key"] = key
+        captured["ttl"] = ttl
+        if conflict:
+            raise SingleFlightConflict(key)
+        yield
+
+    monkeypatch.setattr(f"{target_module}.single_flight", _fake)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_drift_check_lock_acquired_runs_run_drift(monkeypatch):
+    captured = _patch_single_flight(
+        monkeypatch, "app.nodes.memory_pipelines", conflict=False
+    )
     fake_run_drift = AsyncMock()
     monkeypatch.setattr("app.nodes.memory_pipelines._run_drift", fake_run_drift)
 
     await drift_check(DriftTrigger(chat_id="c1", persona_id="p1"))
 
     fake_run_drift.assert_awaited_once_with("c1", "p1")
-    fake_redis.eval.assert_awaited_once()
-    assert fake_redis.eval.call_args.args[0] == _LOCK_RELEASE_LUA
+    assert captured["key"] == "phase2:drift:c1:p1"
+    assert captured["ttl"] == 600
 
 
 @pytest.mark.asyncio
 async def test_drift_check_lock_busy_raises_debounce_reschedule(monkeypatch):
-    fake_redis = AsyncMock()
-    fake_redis.set = AsyncMock(return_value=False)  # SETNX 失败
-    monkeypatch.setattr("app.nodes.memory_pipelines.get_redis",
-                        AsyncMock(return_value=fake_redis))
-
+    _patch_single_flight(monkeypatch, "app.nodes.memory_pipelines", conflict=True)
     fake_run_drift = AsyncMock()
     monkeypatch.setattr("app.nodes.memory_pipelines._run_drift", fake_run_drift)
 
@@ -55,57 +69,43 @@ async def test_drift_check_lock_busy_raises_debounce_reschedule(monkeypatch):
     assert exc_info.value.data.chat_id == "c1"
     assert exc_info.value.data.persona_id == "p1"
     fake_run_drift.assert_not_awaited()
-    fake_redis.eval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_drift_check_run_drift_raises_still_releases_lock(monkeypatch):
-    fake_redis = AsyncMock()
-    fake_redis.set = AsyncMock(return_value=True)
-    fake_redis.eval = AsyncMock(return_value=1)
-    monkeypatch.setattr("app.nodes.memory_pipelines.get_redis",
-                        AsyncMock(return_value=fake_redis))
+async def test_drift_check_run_drift_raises_propagates(monkeypatch):
+    _patch_single_flight(monkeypatch, "app.nodes.memory_pipelines", conflict=False)
+    monkeypatch.setattr(
+        "app.nodes.memory_pipelines._run_drift",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    )
 
-    monkeypatch.setattr("app.nodes.memory_pipelines._run_drift",
-                        AsyncMock(side_effect=RuntimeError("boom")))
-
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="boom"):
         await drift_check(DriftTrigger(chat_id="c1", persona_id="p1"))
-
-    # finally 释放锁
-    fake_redis.eval.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_drift_check_release_uses_token_compare_and_delete(monkeypatch):
-    """LLM 卡过 TTL 后旧 finally 不能误删新锁：Lua compare-and-delete
-    在 token 不匹配时返回 0，不动 redis（reviewer round-2 H2）."""
-    fake_redis = AsyncMock()
-    fake_redis.set = AsyncMock(return_value=True)
-    fake_redis.eval = AsyncMock(return_value=0)  # token 不匹配 → no-op
-    monkeypatch.setattr("app.nodes.memory_pipelines.get_redis",
-                        AsyncMock(return_value=fake_redis))
-
-    fake_run_drift = AsyncMock()
-    monkeypatch.setattr("app.nodes.memory_pipelines._run_drift", fake_run_drift)
-
-    await drift_check(DriftTrigger(chat_id="c1", persona_id="p1"))
-
-    fake_redis.eval.assert_awaited_once()
-    fake_run_drift.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_afterthought_check_lock_busy_raises_debounce_reschedule(monkeypatch):
-    fake_redis = AsyncMock()
-    fake_redis.set = AsyncMock(return_value=False)
-    monkeypatch.setattr("app.nodes.memory_pipelines.get_redis",
-                        AsyncMock(return_value=fake_redis))
-
-    monkeypatch.setattr("app.nodes.memory_pipelines._generate_fragment",
-                        AsyncMock())
+    _patch_single_flight(monkeypatch, "app.nodes.memory_pipelines", conflict=True)
+    monkeypatch.setattr(
+        "app.nodes.memory_pipelines._generate_fragment", AsyncMock()
+    )
 
     with pytest.raises(DebounceReschedule) as exc_info:
         await afterthought_check(AfterthoughtTrigger(chat_id="c1", persona_id="p1"))
 
     assert isinstance(exc_info.value.data, AfterthoughtTrigger)
+
+
+@pytest.mark.asyncio
+async def test_afterthought_check_lock_acquired_uses_900s_ttl(monkeypatch):
+    captured = _patch_single_flight(
+        monkeypatch, "app.nodes.memory_pipelines", conflict=False
+    )
+    fake_gen = AsyncMock()
+    monkeypatch.setattr("app.nodes.memory_pipelines._generate_fragment", fake_gen)
+
+    await afterthought_check(AfterthoughtTrigger(chat_id="c1", persona_id="p1"))
+
+    fake_gen.assert_awaited_once_with("c1", "p1")
+    assert captured["key"] == "phase2:afterthought:c1:p1"
+    assert captured["ttl"] == 900

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.core import Agent, AgentConfig
 from app.api.middleware import get_lane
+from app.capabilities import banned_words as _banned_words
 from app.data.queries import get_safety_status, set_safety_status
 from app.domain.safety import (
     PostSafetyRequest,
@@ -27,7 +28,6 @@ from app.domain.safety import (
     PreSafetyVerdict,
     Recall,
 )
-from app.infra.redis import get_redis
 from app.runtime import node
 
 logger = logging.getLogger(__name__)
@@ -43,9 +43,6 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"passed", "blocked", "recalled", "recall_failed"}
 )
-
-# Redis key for banned words set
-_BANNED_WORDS_KEY = "banned_words"
 
 # Personas that block NSFW content (minors)
 _NSFW_BLOCKED_PERSONAS = frozenset({"ayana"})
@@ -124,15 +121,7 @@ class _OutputSafetyResult(BaseModel):
 
 async def _check_banned_word(text: str) -> str | None:
     """Return the matched banned word, or None if clean."""
-    redis = await get_redis()
-    banned_words = await redis.smembers(_BANNED_WORDS_KEY)
-    if not banned_words:
-        return None
-    normalized = text.replace(" ", "").lower()
-    for word in banned_words:
-        if word in normalized:
-            return word
-    return None
+    return await _banned_words.contains(text)
 
 
 # ---------------------------------------------------------------------------
