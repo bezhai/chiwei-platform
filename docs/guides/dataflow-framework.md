@@ -70,7 +70,7 @@ class SummaryFragment(Data):
 
 **两种模式**:
 
-**Native mode(默认)** —— runtime 自动为你建表(`data_summaryfragment`),表结构 append-only,写入自动算 `dedup_hash` + `version`。无需写 `class Meta`。
+**Native mode(默认)** —— runtime 自动为你建表（`data_summary_fragment` —— 表名是 `data_<to_snake(ClassName)>`，注意 PascalCase 在 to_snake 下会拆词），表结构 append-only,写入自动算 `dedup_hash` + `version`。无需写 `class Meta`。**注意**：runtime 只在存在 `wire(D).as_latest()` 时才落表（详见 §2.3 / §3 Cookbook），不是有 Data class 就自动建表 + 自动写入。
 
 **Adoption mode** —— 接管**已存在的老表**(不想让 migrator 碰它)。写 `Meta.existing_table` + `Meta.dedup_column`(指向老表里的真实唯一列),runtime 的 `dedup_hash` / `version` 机制**整体让位**给老表的唯一约束。典型例子:
 
@@ -88,7 +88,7 @@ class Message(Data):
 
     @classmethod
     def from_cm(cls, cm: "ConversationMessage") -> "Message":
-        # Bridge 用这个把 ORM 行 lift 成 Data
+        # 类方法把 ORM 行映射成 Data 字段；纯字段映射，不碰 DB / MQ。
         return cls(message_id=cm.message_id, ...)
 ```
 
@@ -188,7 +188,7 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 
 | 方法 | 语义 | 何时用 |
 |---|---|---|
-| `.to(*targets)` | 消费者(@node 或 SinkSpec) | 必填,可多个(fan-out) |
+| `.to(*targets)` | 消费者(@node 或 SinkSpec) | 必填，可多个(fan-out)。**例外**：state-only Data（只想被 `with_latest()` / `query()` 读取，不需要触发任何 consumer）可以只声明 `wire(D).as_latest()` 不带 `.to(...)`，runtime 单独 persist 不分派 |
 | `.from_(*sources)` | 入口 Source | 外部触发才需要(MQ / cron / HTTP) |
 | `.durable()` | 跨进程:RabbitMQ + `runtime_inflight` dedup + lease 续约 | 跨 Deployment、要重启续跑、失败需可回放时 |
 | `.retry(n=, backoff=, base_delay_ms=, max_delay_ms=, lease_ms=)` | 边级重试（指数/线性 backoff，n 是含首次的总尝试数）；耗尽后按 `.on_error()` 决定终态 | 想自动重试瞬时失败前再进 DLQ |
@@ -229,7 +229,7 @@ Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
 ```
 
-> **不在这里**：飞书 webhook 在 lark-proxy(TS) 收，转给 lark-server publish 到 MQ；agent-service 这一侧的入口永远是 `Source.mq("vectorize" / "safety_check" / "chat_request")`，不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
+> **不在这里**：飞书 webhook 在 lark-proxy(TS) 收，转给 lark-server publish 到 MQ；agent-service 这一侧的入口是 `Source.mq("chat_request")` / `Source.mq("vectorize")` / `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` 等（实际队列清单见 `app/infra/rabbitmq.py::ALL_ROUTES`），不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 
 用法:
 
@@ -241,8 +241,8 @@ wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
 - 目标 @node 必须**单参数**(第一个 Data 就是 decode 目标)。
 - runtime 读 MQ body 时会**过滤掉**不在 `req_cls.model_fields` 里的字段(适配老 publisher 带额外字段),所以 Data 保持严格 `extra="forbid"` 不会误伤。
 - Queue 名按 lane 自动加后缀:`"vectorize"` 在 df-v0 lane 变成 `"vectorize_df-v0"`。
-- **队列由 publisher 拥有**:`Source.mq("name")` 在 consumer 侧是 *passive* 拿队列(`channel.get_queue`),自己不 declare。语义是 "我跟 publisher 约定了这个队列名,publisher 负责建"。**部署约束**:新 lane 必须先起 publisher(比如 lark-server) 让它 declare 队列,再起 consumer(比如 vectorize-worker);顺序错了 consumer 会 `get_queue` 失败 → CrashLoopBackoff。
-- 如果这个 `Source.mq` 还被 `emit()` 当作跨进程 publish bridge（producer 在 dataflow 图内，consumer 在另一个 app），queue 必须能在 `ALL_ROUTES` 中找到 `Route`，否则 runtime 不知道 routing key。纯外部 publisher source 和 dataflow 内部 bridge 要分开判断。
+- **队列归属与 lazy ensure**：`ALL_ROUTES` 里登记的队列（chat_request / vectorize / memory_*_vectorize 等），consumer 启动时如果当前 lane 队列不存在，runtime 会按 Route 的参数 idempotent 声明该 lane 队列（见 `app/runtime/engine.py::_source_loop_mq` 的 lazy ensure 分支），新 lane 部署不再硬性要求"先起 publisher 后起 consumer"。`ALL_ROUTES` 之外的老队列（adoption 测试场景）仍是 passive `get_queue`，要先 declare。
+- 如果这个 `Source.mq` 还被 `emit()` 当作跨进程 publish bridge（producer 在 dataflow 图内，consumer 在另一个 app），queue 必须能在 `ALL_ROUTES` 中找到 `Route`，否则 runtime 不知道 routing key。新加 cross-app durable 边时记得在 `ALL_ROUTES` 注册。
 
 ### 2.5 `Sink` —— 图的出口
 
@@ -265,21 +265,7 @@ wire(Reply).to(Sink.mq("chat_response"))
 
 > `Sink.mq` 已接入 sink dispatch。`compile_graph()` 会校验 queue 是否在 `ALL_ROUTES` 中；未知 queue 启动即失败。
 
-### 2.6 `Bridge` —— 过渡层
-
-老代码写 `ConversationMessage` ORM 行是事实,把它"lift" 成 Data 推进图,就是 Bridge 的唯一职责:
-
-```python
-# app/bridges/message_bridge.py
-async def emit_legacy_message(cm: ConversationMessage) -> None:
-    await emit(Message.from_cm(cm))
-```
-
-**每个老写入点在 `session.commit()` 之后调一次**(见 `app/life/proactive.py`)。commit 之前 emit 会让下游 @node 查不到行。
-
-**Bridge 是临时的**:等老 writer 全迁到 @node(或 @node 拿到直接 write 权限),Bridge 文件整体删除。不要基于 Bridge 搭长期逻辑。
-
-### 2.7 错误策略（`.on_error(...)`）
+### 2.6 错误策略（`.on_error(...)`）
 
 `from app.runtime import DuplicateData, NeedsReview`。
 
@@ -323,7 +309,7 @@ review queue：默认假设"每条都要单独看" → 运营逐条决策（repl
 
 ## 3. Cookbook:加一个新 @node
 
-场景:**读每条 Message,生成一句话摘要,存进 pg 的 `data_summaryfragment` 表**(新建 Data,native mode)。
+场景:**读每条 Message,生成一句话摘要,存进 pg 的 `data_summary_fragment` 表**(新建 Data,native mode)。
 
 ### Step 1 — 建 Data
 
@@ -341,7 +327,7 @@ class SummaryFragment(Data):
     created_at: int
 ```
 
-没有 `class Meta` → native mode → migrator 自动建 `data_summaryfragment` 表(含 `dedup_hash`、`version`、以上四个字段)。
+没有 `class Meta` → native mode → migrator 自动建 `data_summary_fragment` 表（表名 `data_<to_snake(ClassName)>`；含 `dedup_hash`、`version`、以上四个字段）。**但只有在下面 Step 3 声明了 `wire(SummaryFragment).as_latest()` 后，emit 时 runtime 才真的写表** —— Data class 自身不触发持久化，必须有 wire 声明 `.as_latest()`（详见 §2.3 表格 + `app/runtime/emit.py::emit`）。
 
 ### Step 2 — 写 @node
 
@@ -382,11 +368,14 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 from app.domain.summary import SummaryFragment
 from app.nodes.summarize import summarize
 
-wire(Message).to(summarize).durable()  # 和 vectorize 共享 Message durable,fan-out 两条独立消费
-# SummaryFragment 不声明下游 = 只走持久化(runtime 自动 persist 到 data_summaryfragment)
+wire(Message).to(summarize).durable().on_error("dlq")  # 和 vectorize 共享 Message durable，fan-out 两条独立消费
+wire(SummaryFragment).as_latest()                       # ← 不能省。没这行 emit 走完不写 data_summary_fragment 表。
 ```
 
-**注意**:`Message` 已经有一条 `wire(Message).to(vectorize).durable()`。再加 `.to(summarize)` 就是 fan-out —— 两个消费者各自独立队列 + 各自 dedup + 各自 ack,互不影响。任一边 handler 失败只影响自己的 DLQ。
+**两条 wire 各管一件事**：
+
+- 第一条 `wire(Message).to(summarize)` — 触发 consumer。`Message` 已经有一条 `.to(vectorize)`，再加 `.to(summarize)` 就是 fan-out（两条独立队列、独立 dedup、独立 DLQ；任一边 handler 失败只影响自己）。`.on_error("dlq")` 是默认值，写出来自描述（详见 §2.6）。
+- 第二条 `wire(SummaryFragment).as_latest()` — 触发持久化。**state-only 的 Data 必须显式声明 `.as_latest()`**，否则 emit 时 runtime 不会写表（runtime 不会因为有 Data class 就自动建表 + 自动写入；落表条件见 `app/runtime/emit.py::emit` —— "any wire(cls).as_latest()"）。下游能用 `with_latest(SummaryFragment)` / `query(SummaryFragment).where(...).all()` 读最新版本。
 
 ### Step 4 — Deployment placement（仅框架维护者）
 
@@ -470,7 +459,7 @@ make logs APP=vectorize-worker LANE=<your-lane> SINCE=5m
 # summarize: done                                  ← 新的
 
 # 6. 查 DB 确认 summary 落表
-/ops-db @chiwei "SELECT * FROM data_summaryfragment ORDER BY version DESC LIMIT 5"
+/ops-db @chiwei "SELECT * FROM data_summary_fragment ORDER BY version DESC LIMIT 5"
 ```
 
 ---
@@ -682,7 +671,7 @@ from app.capabilities.vector_store import VectorStore
 store = VectorStore("messages_recall")
 ```
 
-例外:Bridge 层(`app/bridges/*`)为了 lift legacy ORM,可以碰 infra —— 它本来就是过渡适配层。
+从 ORM 行 lift 到 Data 用 `Data.from_cm(...)` 这类纯字段映射类方法（见 §2.1 Adoption mode 例子），不直接读/写 infra；写业务表 + 触发 Data 走 `transactional_emit`（见 §3-bis）。
 
 ### #3 Data 继承错基类
 
@@ -810,21 +799,23 @@ wire(Message).to(extract_tag).when(lambda m: m.content.startswith("#")).durable(
 
 ### #10 cutover 期保留两条写路径
 
-改造一个老功能,**写路径只能有一条**。Bridge 只在读侧 lift 老数据,不是"老代码一份新代码一份都保留"。
+改造一个老功能,**写路径只能有一条**。从 ORM 行 lift 成 Data 用 `Data.from_cm(...)` 类方法（纯字段映射）+ `transactional_emit`，把老队列 publish 一次性切掉。
 
 ```python
-# ❌
+# ❌ 双写
 async def write_message(cm):
-    session.add(cm)
-    await session.commit()
-    await emit_legacy_message(cm)        # Bridge 发 Data
-    await mq.publish(VECTORIZE, {...})   # 同时又走老队列
+    async with get_session() as s:
+        s.add(cm)
+        async with transactional_emit(s) as emitter:
+            await emitter.append(Message.from_cm(cm))
+    await mq.publish(VECTORIZE, {...})   # 老队列也 publish 了一份 → 下游会被触发两次
 
-# ✅  Bridge 是老 writer 的延长线,老 publisher 下游切到 runtime 就结束
+# ✅ 单一路径，老 publisher 下游已切到 runtime
 async def write_message(cm):
-    session.add(cm)
-    await session.commit()
-    await emit_legacy_message(cm)  # 仅此一条
+    async with get_session() as s:
+        s.add(cm)
+        async with transactional_emit(s) as emitter:
+            await emitter.append(Message.from_cm(cm))
 ```
 
 ### #12 mutation function 在 `async with get_session()` 块外 emit
