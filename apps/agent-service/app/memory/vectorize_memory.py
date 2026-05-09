@@ -24,7 +24,6 @@ from typing import Any
 
 from app.agent.embedding import embed_dense
 from app.data.queries import get_abstract_by_id, get_fragment_by_id
-from app.data.session import get_session
 from app.infra.qdrant import qdrant
 
 logger = logging.getLogger(__name__)
@@ -44,8 +43,7 @@ def _qdrant_id(db_id: str) -> str:
 
 async def vectorize_fragment(fragment_id: str) -> bool:
     """Embed a Fragment's content and upsert into the memory_fragment Qdrant collection."""
-    async with get_session() as s:
-        fragment = await get_fragment_by_id(s, fragment_id)
+    fragment = await get_fragment_by_id(fragment_id)
     if fragment is None:
         logger.warning("Fragment %s not found for vectorize", fragment_id)
         return False
@@ -75,8 +73,7 @@ async def vectorize_fragment(fragment_id: str) -> bool:
 
 async def vectorize_abstract(abstract_id: str) -> bool:
     """Embed an AbstractMemory's subject+content and upsert into memory_abstract."""
-    async with get_session() as s:
-        a = await get_abstract_by_id(s, abstract_id)
+    a = await get_abstract_by_id(abstract_id)
     if a is None:
         logger.warning("Abstract %s not found for vectorize", abstract_id)
         return False

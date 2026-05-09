@@ -1,5 +1,6 @@
 """Tests for app.agent.tools.history — chat history and group member tools."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,6 +77,17 @@ class TestFormatHelpers:
 
 
 # ---------------------------------------------------------------------------
+# tx() stub for tests — Phase 7d Task 4: business code now uses
+# `async with tx():` instead of `async with get_session() as s:`
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _fake_tx():
+    yield
+
+
+# ---------------------------------------------------------------------------
 # check_chat_history
 # ---------------------------------------------------------------------------
 
@@ -91,19 +103,13 @@ class TestCheckChatHistory:
 
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch("app.agent.tools.history.get_session") as mock_session_ctx,
+            patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
                 new_callable=AsyncMock,
                 return_value=[],
             ),
         ):
-            mock_session = AsyncMock()
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(
-                return_value=mock_session
-            )
-            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
-
             result = await check_chat_history.coroutine("test")
             assert "没有聊天记录" in result
 
@@ -135,7 +141,7 @@ class TestCheckChatHistory:
 
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch("app.agent.tools.history.get_session") as mock_session_ctx,
+            patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
                 new_callable=AsyncMock,
@@ -151,12 +157,6 @@ class TestCheckChatHistory:
                 side_effect=[mock_parsed1, mock_parsed2],
             ),
         ):
-            mock_session = AsyncMock()
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(
-                return_value=mock_session
-            )
-            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
-
             result = await check_chat_history.coroutine("新番")
             assert "新番" in result
 
@@ -174,20 +174,14 @@ class TestListGroupMembers:
         mock_context = MagicMock()
         mock_context.context = AgentContext(chat_id="test_chat")
 
-        mock_result = MagicMock()
-        mock_result.all.return_value = []
-
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch("app.agent.tools.history.get_session") as mock_session_ctx,
+            patch(
+                "app.data.queries.find_group_members",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
-            mock_session = AsyncMock()
-            mock_session.execute = AsyncMock(return_value=mock_result)
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(
-                return_value=mock_session
-            )
-            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
-
             result = await list_group_members.coroutine()
             assert "无成员" in result
 
@@ -205,24 +199,14 @@ class TestListGroupMembers:
         member3 = MagicMock(is_owner=False, is_manager=False)
         user3 = MagicMock(name="Normal")
 
-        mock_result = MagicMock()
-        mock_result.all.return_value = [
-            (member1, user1),
-            (member2, user2),
-            (member3, user3),
-        ]
-
         with (
             patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch("app.agent.tools.history.get_session") as mock_session_ctx,
+            patch(
+                "app.data.queries.find_group_members",
+                new_callable=AsyncMock,
+                return_value=[(member1, user1), (member2, user2), (member3, user3)],
+            ),
         ):
-            mock_session = AsyncMock()
-            mock_session.execute = AsyncMock(return_value=mock_result)
-            mock_session_ctx.return_value.__aenter__ = AsyncMock(
-                return_value=mock_session
-            )
-            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
-
             result = await list_group_members.coroutine()
             assert "3人" in result
             assert "[群主]" in result

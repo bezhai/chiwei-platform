@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field
 from app.agent.core import Agent, AgentConfig
 from app.api.middleware import get_lane
 from app.data.queries import get_safety_status, set_safety_status
-from app.data.session import get_session
 from app.domain.safety import (
     PostSafetyRequest,
     PreSafetyRequest,
@@ -319,8 +318,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     blocked 路径**不写 status**——recall-worker 会写最终 recalled / recall_failed，
     避免 race（spec §3.2）。
     """
-    async with get_session() as s:
-        current = await get_safety_status(s, req.session_id)
+    current = await get_safety_status(req.session_id)
     if current is None:
         raise RuntimeError(
             f"agent_responses row missing for session_id={req.session_id}; "
@@ -347,10 +345,9 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
             lane=get_lane(),
         )
 
-    async with get_session() as s:
-        await set_safety_status(
-            s, req.session_id, "passed", {"checked_at": checked_at}
-        )
+    await set_safety_status(
+        req.session_id, "passed", {"checked_at": checked_at}
+    )
     return None
 
 

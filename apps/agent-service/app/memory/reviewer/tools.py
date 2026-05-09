@@ -22,7 +22,7 @@ from app.data.queries import (
     touch_fragment,
     update_abstract_content_query,
 )
-from app.data.session import get_session
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,7 @@ logger = logging.getLogger(__name__)
 @tool_error("update_abstract_content 失败")
 async def update_abstract_content(abstract_id: str, new_content: str, reason: str) -> dict:
     """Rewrite the content of an existing abstract (演化 / 合并)."""
-    async with get_session() as s:
-        await update_abstract_content_query(s, abstract_id=abstract_id, new_content=new_content)
+    await update_abstract_content_query(abstract_id=abstract_id, new_content=new_content)
     logger.info("reviewer update_abstract %s: %s", abstract_id, reason)
     return {"ok": True}
 
@@ -60,8 +59,7 @@ async def fade_node(node_id: str, node_type: str, clarity: str, reason: str) -> 
     """
     if clarity not in ("clear", "vague", "forgotten"):
         return {"ok": False, "error": f"invalid clarity {clarity}"}
-    async with get_session() as s:
-        await set_clarity(s, node_id=node_id, node_type=node_type, clarity=clarity)
+    await set_clarity(node_id=node_id, node_type=node_type, clarity=clarity)
     logger.info("reviewer fade %s (%s) -> %s: %s", node_id, node_type, clarity, reason)
     return {"ok": True}
 
@@ -70,13 +68,12 @@ async def fade_node(node_id: str, node_type: str, clarity: str, reason: str) -> 
 @tool_error("touch_node 失败")
 async def touch_node(node_id: str, node_type: str) -> dict:
     """Strengthen a node (update last_touched_at)."""
-    async with get_session() as s:
-        if node_type == "abstract":
-            await touch_abstract(s, node_id)
-        elif node_type == "fact":
-            await touch_fragment(s, node_id)
-        else:
-            return {"ok": False, "error": f"unknown node_type {node_type}"}
+    if node_type == "abstract":
+        await touch_abstract(node_id)
+    elif node_type == "fact":
+        await touch_fragment(node_id)
+    else:
+        return {"ok": False, "error": f"unknown node_type {node_type}"}
     return {"ok": True}
 
 
@@ -84,8 +81,7 @@ async def touch_node(node_id: str, node_type: str) -> dict:
 @tool_error("delete_fragment 失败")
 async def delete_fragment(fragment_id: str, reason: str) -> dict:
     """Permanently remove a fragment (trivial-only; for abstract use fade_node→forgotten)."""
-    async with get_session() as s:
-        await delete_fragment_query(s, fragment_id=fragment_id)
+    await delete_fragment_query(fragment_id=fragment_id)
     logger.info("reviewer delete_fragment %s: %s", fragment_id, reason)
     return {"ok": True}
 
@@ -99,25 +95,25 @@ async def connect(
     """Create an edge. edge_type ∈ {'supports','parent_of','related_to','conflicts_with'}."""
     if edge_type not in ("supports", "parent_of", "related_to", "conflicts_with"):
         return {"ok": False, "error": f"invalid edge_type {edge_type}"}
-    async with get_session() as s:
+    async with tx():
         if from_type == "abstract":
-            n = await get_abstract_by_id(s, from_id)
+            n = await get_abstract_by_id(from_id)
         else:
-            n = await get_fragment_by_id(s, from_id)
+            n = await get_fragment_by_id(from_id)
         if n is None:
             return {"ok": False, "error": f"from node {from_id} not found"}
         persona_id = n.persona_id
 
         # verify to_node exists
         if to_type == "abstract":
-            to_n = await get_abstract_by_id(s, to_id)
+            to_n = await get_abstract_by_id(to_id)
         else:
-            to_n = await get_fragment_by_id(s, to_id)
+            to_n = await get_fragment_by_id(to_id)
         if to_n is None:
             return {"ok": False, "error": f"to node {to_id} not found"}
 
         await insert_memory_edge(
-            s, id=new_id("e"), persona_id=persona_id,
+            id=new_id("e"), persona_id=persona_id,
             from_id=from_id, from_type=from_type,
             to_id=to_id, to_type=to_type,
             edge_type=edge_type, created_by="reviewer", reason=reason,
@@ -129,8 +125,7 @@ async def connect(
 @tool_error("disconnect 失败")
 async def disconnect(edge_id: str, reason: str) -> dict:
     """Remove an edge."""
-    async with get_session() as s:
-        await delete_edge(s, edge_id=edge_id)
+    await delete_edge(edge_id=edge_id)
     logger.info("reviewer disconnect %s: %s", edge_id, reason)
     return {"ok": True}
 

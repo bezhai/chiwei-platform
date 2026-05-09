@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.future import select as sa_select
 
 from app.data.models import ConversationMessage
-from app.data.session import get_session
+from app.runtime.db import current_session, tx
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def get_unseen_messages(
 
     Returns up to *limit* messages in chronological order.
     """
-    async with get_session() as session:
+    async with tx():
         stmt = (
             sa_select(ConversationMessage)
             .where(
@@ -48,7 +48,7 @@ async def get_unseen_messages(
             .order_by(ConversationMessage.create_time.desc())
             .limit(limit)
         )
-        result = await session.execute(stmt)
+        result = await current_session().execute(stmt)
         rows = list(result.scalars().all())
 
     rows.reverse()  # restore chronological order
@@ -70,14 +70,14 @@ async def _resolve_target_message(
 
     from app.data import queries as Q
 
-    async with get_session() as s:
+    async with tx():
         if target_message_id.isdigit():
-            message_id = await Q.resolve_message_id_by_row_id(s, target_message_id)
+            message_id = await Q.resolve_message_id_by_row_id(target_message_id)
             if not message_id:
                 return None
-            msg = await Q.find_message_by_id(s, message_id)
+            msg = await Q.find_message_by_id(message_id)
         else:
-            msg = await Q.find_message_by_id(s, target_message_id)
+            msg = await Q.find_message_by_id(target_message_id)
 
     if msg and msg.chat_id == chat_id:
         return msg
@@ -107,8 +107,7 @@ async def submit_proactive_chat(
     target_lark_id = target_msg.message_id if target_msg else None
     root_message_id = target_msg.root_message_id if target_msg else None
 
-    async with get_session() as s:
-        bot_name = await Q.resolve_bot_name_for_persona(s, persona_id, chat_id)
+    bot_name = await Q.resolve_bot_name_for_persona(persona_id, chat_id)
 
     session_id = str(uuid.uuid4())
     message_id = f"proactive_{int(time.time() * 1000)}"
@@ -126,9 +125,9 @@ async def submit_proactive_chat(
     from app.domain.chat_dataflow import ChatTrigger
     from app.domain.message import Message
     from app.infra.rabbitmq import current_lane
-    from app.runtime import transactional_emit  # local import to avoid boot cycles
+    from app.runtime.db import emit_tx  # local import to avoid boot cycles
 
-    async with get_session() as session:
+    async with tx():
         msg = ConversationMessage(
             message_id=message_id,
             user_id=PROACTIVE_USER_ID,
@@ -142,23 +141,22 @@ async def submit_proactive_chat(
             message_type="proactive_trigger",
             bot_name=bot_name,
         )
-        session.add(msg)
-        async with transactional_emit(session) as emitter:
-            await emitter.append(Message.from_cm(msg))
-            await emitter.append(
-                ChatTrigger(
-                    message_id=message_id,
-                    session_id=session_id,
-                    chat_id=chat_id,
-                    is_p2p=False,
-                    root_id=target_lark_id or None,
-                    user_id=PROACTIVE_USER_ID,
-                    bot_name=bot_name,
-                    is_proactive=True,
-                    lane=current_lane(),
-                    enqueued_at=now_ms,
-                )
+        current_session().add(msg)
+        await emit_tx(Message.from_cm(msg))
+        await emit_tx(
+            ChatTrigger(
+                message_id=message_id,
+                session_id=session_id,
+                chat_id=chat_id,
+                is_p2p=False,
+                root_id=target_lark_id or None,
+                user_id=PROACTIVE_USER_ID,
+                bot_name=bot_name,
+                is_proactive=True,
+                lane=current_lane(),
+                enqueued_at=now_ms,
             )
+        )
 
     logger.info(
         "Proactive request submitted: session_id=%s, target=%s",
@@ -183,7 +181,7 @@ async def get_recent_proactive_records(chat_id: str, bot_name: str) -> list[dict
     today_start = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_ms = int(today_start.timestamp() * 1000)
 
-    async with get_session() as session:
+    async with tx():
         stmt = (
             sa_select(ConversationMessage)
             .where(
@@ -194,7 +192,7 @@ async def get_recent_proactive_records(chat_id: str, bot_name: str) -> list[dict
             )
             .order_by(ConversationMessage.create_time.desc())
         )
-        result = await session.execute(stmt)
+        result = await current_session().execute(stmt)
         rows = result.scalars().all()
 
     records = []

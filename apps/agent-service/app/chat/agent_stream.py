@@ -37,7 +37,6 @@ from app.chat.stream import (
     is_length_truncated,
 )
 from app.data.queries import find_latest_reply_style, resolve_persona_id
-from app.data.session import get_session
 from app.memory._persona import load_persona
 from app.memory.context import build_inner_context
 
@@ -227,13 +226,11 @@ async def _load_bot_context(
     if persona_id:
         pid = persona_id
     else:
-        async with get_session() as s:
-            pid = await resolve_persona_id(s, bot_name)
+        pid = await resolve_persona_id(bot_name)
 
     pc = await load_persona(pid)
 
-    async with get_session() as s:
-        voice_content = await find_latest_reply_style(s, pid) or ""
+    voice_content = await find_latest_reply_style(pid) or ""
 
     return _BotCtx(
         persona_id=pid,

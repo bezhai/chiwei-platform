@@ -18,8 +18,8 @@ from app.data.queries import (
     list_abstracts_window,
     list_fragments_window,
 )
-from app.data.session import get_session
 from app.memory.reviewer.tools import make_reviewer_tools
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +68,10 @@ async def run_light_review(*, persona_id: str, window_minutes: int) -> None:
     now = datetime.now(CST)
     since = now - timedelta(minutes=window_minutes)
 
-    async with get_session() as s:
-        fragments = await list_fragments_window(s, persona_id=persona_id, since=since)
-        abstracts = await list_abstracts_window(s, persona_id=persona_id, since=since)
-        notes = await get_active_notes(s, persona_id=persona_id)
+    async with tx():
+        fragments = await list_fragments_window(persona_id=persona_id, since=since)
+        abstracts = await list_abstracts_window(persona_id=persona_id, since=since)
+        notes = await get_active_notes(persona_id=persona_id)
 
     if not fragments and not abstracts and not notes:
         logger.info("[%s] light review: empty window, skip", persona_id)

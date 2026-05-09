@@ -13,10 +13,9 @@ from app.data.queries import (
     insert_abstract_memory,
     insert_memory_edge,
 )
-from app.data.session import get_session
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 from app.memory.conflict import detect_conflict
-from app.runtime import transactional_emit
+from app.runtime.db import emit_tx, tx
 
 
 async def _commit_abstract_impl(
@@ -35,9 +34,9 @@ async def _commit_abstract_impl(
 
     # Validate fact ids exist before mutating anything
     if supported_by_fact_ids:
-        async with get_session() as s:
+        async with tx():
             for fid in supported_by_fact_ids:
-                f = await get_fragment_by_id(s, fid)
+                f = await get_fragment_by_id(fid)
                 if f is None:
                     return {"error": f"fact id {fid} 不存在"}
 
@@ -46,26 +45,25 @@ async def _commit_abstract_impl(
     )
 
     aid = new_id("a")
-    async with get_session() as s:
+    async with tx():
         await insert_abstract_memory(
-            s, id=aid, persona_id=persona_id,
+            id=aid, persona_id=persona_id,
             subject=subject, content=content,
             created_by="chiwei",
         )
         for fid in supported_by_fact_ids or []:
             await insert_memory_edge(
-                s, id=new_id("e"), persona_id=persona_id,
+                id=new_id("e"), persona_id=persona_id,
                 from_id=fid, from_type="fact",
                 to_id=aid, to_type="abstract",
                 edge_type="supports", created_by="chiwei",
                 reason=reasoning,
             )
-        async with transactional_emit(s) as emitter:
-            await emitter.append(AbstractMemoryCommitted(
-                abstract_id=aid,
-                persona_id=persona_id,
-                chat_id=chat_id,
-            ))
+        await emit_tx(AbstractMemoryCommitted(
+            abstract_id=aid,
+            persona_id=persona_id,
+            chat_id=chat_id,
+        ))
 
     return {"id": aid, "conflict_hint": hint}
 

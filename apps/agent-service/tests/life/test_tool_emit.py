@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,21 +17,19 @@ async def test_commit_life_state_emits_event(monkeypatch):
 
     captured: list = []
 
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
+
     @asynccontextmanager
-    async def _fake_te(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_tx():
+        yield
 
     async def _fake_insert(*_args, **_kwargs):
         return 12345
     monkeypatch.setattr("app.life.tool.insert_life_state", _fake_insert)
 
-    class _SessionCtx:
-        async def __aenter__(self): return AsyncMock()
-        async def __aexit__(self, *_): return False
-    monkeypatch.setattr("app.life.tool.get_session", lambda: _SessionCtx())
-    monkeypatch.setattr("app.life.tool.transactional_emit", _fake_te)
+    monkeypatch.setattr("app.life.tool.tx", _fake_tx)
+    monkeypatch.setattr("app.life.tool.emit_tx", _fake_emit_tx)
 
     now = datetime.now(CST)
     end = now + timedelta(hours=1)

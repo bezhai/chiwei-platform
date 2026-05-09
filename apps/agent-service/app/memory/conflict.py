@@ -18,7 +18,6 @@ from typing import Any
 
 from app.agent.embedding import embed_dense
 from app.data.queries import get_abstracts_by_subject
-from app.data.session import get_session
 from app.memory.vectorize_memory import EMBEDDING_MODEL_ID
 
 logger = logging.getLogger(__name__)
@@ -64,10 +63,9 @@ async def detect_conflict(
     when the top match is below ``similarity_threshold``, or when embedding
     calls fail.
     """
-    async with get_session() as s:
-        existing = await get_abstracts_by_subject(
-            s, persona_id=persona_id, subject=subject, limit=MAX_ABSTRACTS_TO_COMPARE
-        )
+    existing = await get_abstracts_by_subject(
+        persona_id=persona_id, subject=subject, limit=MAX_ABSTRACTS_TO_COMPARE
+    )
     if not existing:
         return None
 

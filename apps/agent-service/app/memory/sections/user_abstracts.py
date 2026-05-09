@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from app.data.queries import get_abstracts_by_subjects
-from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +29,10 @@ async def build_user_abstracts_section(
         subjects.extend([trigger_username, f"和 {trigger_username} 的关系"])
 
     try:
-        async with get_session() as s:
-            rows = await get_abstracts_by_subjects(
-                s, persona_id=persona_id,
-                subjects=subjects, limit_per_subject=MAX_PER_SUBJECT,
-            )
+        rows = await get_abstracts_by_subjects(
+            persona_id=persona_id,
+            subjects=subjects, limit_per_subject=MAX_PER_SUBJECT,
+        )
     except Exception as e:
         logger.warning("user_abstracts failed: %s", e)
         return ""

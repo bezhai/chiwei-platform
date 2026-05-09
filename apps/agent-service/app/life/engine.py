@@ -15,7 +15,6 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.core import Agent, AgentConfig
 from app.data import queries as Q
-from app.data.session import get_session
 from app.life.tool import CommitResult, commit_life_state_impl
 
 _LIFE_TICK_CFG = AgentConfig("life_engine_tick", "offline-model", "life-tick")
@@ -31,8 +30,7 @@ MAX_TICK_ATTEMPTS = 2
 async def _build_activity_context(persona_id: str, now: datetime) -> tuple[str, str]:
     """Aggregate today's activity timeline. Return (duration_text, timeline_text)."""
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    async with get_session() as s:
-        rows = await Q.find_today_activity_states(s, persona_id, today_start)
+    rows = await Q.find_today_activity_states(persona_id, today_start)
     if not rows:
         return "", "(today just started)"
 
@@ -132,8 +130,7 @@ async def _think(
     pc = await load_persona(persona_id)
 
     today = now.strftime("%Y-%m-%d")
-    async with get_session() as s:
-        schedule = await Q.find_plan_for_period(s, "daily", today, today, persona_id)
+    schedule = await Q.find_plan_for_period("daily", today, today, persona_id)
     schedule_text = schedule.content if schedule else "（今天还没有安排）"
 
     duration_text, timeline_text = await _build_activity_context(persona_id, now)
@@ -149,10 +146,9 @@ async def _think(
         else ""
     )
 
-    async with get_session() as s:
-        today_frags = await Q.list_today_fragments(
-            s, persona_id, sources=["afterthought"]
-        )
+    today_frags = await Q.list_today_fragments(
+        persona_id, sources=["afterthought"]
+    )
     frag_text = (
         "\n".join(f.content for f in today_frags[-5:])
         if today_frags
@@ -202,8 +198,7 @@ async def tick(
     no separate persist step).
     `force=True` ignores skip_until.
     """
-    async with get_session() as s:
-        row = await Q.find_latest_life_state(s, persona_id)
+    row = await Q.find_latest_life_state(persona_id)
 
     now = datetime.now(CST)
 

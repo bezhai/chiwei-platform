@@ -1,4 +1,4 @@
-"""Proactive appends Message + ChatTrigger to outbox via transactional_emit.
+"""Proactive appends Message + ChatTrigger to outbox via emit_tx.
 
 Invariant: After writing a ConversationMessage, proactive appends two
 Data instances in order: ``Message.from_cm(msg)`` first (so memory v4
@@ -8,7 +8,6 @@ route_chat_node fan-outs into ChatRequest).
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,31 +22,24 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
 
     captured: list = []
 
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
+
     @asynccontextmanager
-    async def _fake_te(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_tx():
+        yield
 
     # Stub DB session — we care about outbox appends, not DB commit.
     class _FakeSession:
         def add(self, _msg):
             pass
 
-        execute = AsyncMock()  # needed by OutboxEmitter if transactional_emit isn't fully mocked
+    monkeypatch.setattr(pro, "tx", _fake_tx)
+    monkeypatch.setattr(pro, "current_session", lambda: _FakeSession())
 
-    class _FakeSessionCtx:
-        async def __aenter__(self):
-            return _FakeSession()
-
-        async def __aexit__(self, *a):
-            return False
-
-    monkeypatch.setattr(pro, "get_session", lambda: _FakeSessionCtx())
-
-    # Patch transactional_emit at the runtime module level (local import inside function)
-    import app.runtime
-    monkeypatch.setattr(app.runtime, "transactional_emit", _fake_te)
+    # Patch emit_tx at the runtime.db module level (local import inside function)
+    import app.runtime.db
+    monkeypatch.setattr(app.runtime.db, "emit_tx", _fake_emit_tx)
 
     # Stub queries.resolve_bot_name_for_persona
     async def fake_resolve_bot_name(*args, **kwargs):

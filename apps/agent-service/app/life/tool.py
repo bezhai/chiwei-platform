@@ -12,9 +12,8 @@ from datetime import datetime
 from typing import Any
 
 from app.data.queries import insert_life_state
-from app.data.session import get_session
 from app.domain.life_dataflow import LifeStateChanged
-from app.runtime import transactional_emit
+from app.runtime.db import emit_tx, tx
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +83,8 @@ async def commit_life_state_impl(
     # tool layer does not mechanically enforce it beyond the above checks.
 
     prev_activity = (prev_state.activity_type if prev_state else "") or ""
-    async with get_session() as s:
+    async with tx():
         life_state_id = await insert_life_state(
-            s,
             persona_id=persona_id,
             current_state=current_state,
             activity_type=activity_type,
@@ -95,12 +93,11 @@ async def commit_life_state_impl(
             skip_until=skip_until,
             state_end_at=state_end_at,
         )
-        async with transactional_emit(s) as emitter:
-            await emitter.append(LifeStateChanged(
-                persona_id=persona_id,
-                activity_type=activity_type,
-                prev_activity_type=prev_activity,
-                ts=now.isoformat(),
-            ))
+        await emit_tx(LifeStateChanged(
+            persona_id=persona_id,
+            activity_type=activity_type,
+            prev_activity_type=prev_activity,
+            ts=now.isoformat(),
+        ))
 
     return CommitResult(ok=True, is_refresh=is_refresh, life_state_id=life_state_id)

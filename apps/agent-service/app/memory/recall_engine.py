@@ -21,13 +21,13 @@ from app.data.queries import (
     touch_abstracts_bulk,
     touch_fragments_bulk,
 )
-from app.data.session import get_session
 from app.infra.qdrant import qdrant
 from app.memory.vectorize_memory import (
     COLLECTION_ABSTRACT,
     COLLECTION_FRAGMENT,
     EMBEDDING_MODEL_ID,
 )
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -119,25 +119,24 @@ async def run_recall(
             k=k_abs,
         )
 
-        async with get_session() as s:
+        async with tx():
             for aid in abstract_ids:
                 if aid in seen_abstract_ids:
                     continue
 
-                abstract = await get_abstract_by_id(s, aid)
+                abstract = await get_abstract_by_id(aid)
                 if abstract is None or abstract.clarity == "forgotten":
                     continue
 
                 seen_abstract_ids.add(aid)
 
                 edges = await list_edges_to(
-                    s,
                     persona_id=persona_id,
                     to_id=aid,
                     edge_type="supports",
                 )
                 fact_ids = [str(e.from_id) for e in edges[:k_facts_per_abs]]
-                fragments = await get_fragments_by_ids(s, fact_ids)
+                fragments = await get_fragments_by_ids(fact_ids)
 
                 supporting_facts: list[dict[str, Any]] = []
                 for fragment in fragments:
@@ -172,7 +171,7 @@ async def run_recall(
                 new_ids = [
                     fid for fid in fragment_ids if fid not in seen_fragment_ids
                 ]
-                fragments = await get_fragments_by_ids(s, new_ids)
+                fragments = await get_fragments_by_ids(new_ids)
                 for fragment in fragments:
                     if fragment.clarity == "forgotten":
                         continue
@@ -187,8 +186,8 @@ async def run_recall(
 
     # Touch every surfaced node so recall counts as usage.
     if seen_abstract_ids or seen_fragment_ids:
-        async with get_session() as s:
-            await touch_abstracts_bulk(s, list(seen_abstract_ids))
-            await touch_fragments_bulk(s, list(seen_fragment_ids))
+        async with tx():
+            await touch_abstracts_bulk(list(seen_abstract_ids))
+            await touch_fragments_bulk(list(seen_fragment_ids))
 
     return result

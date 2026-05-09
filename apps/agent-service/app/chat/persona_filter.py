@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 
 from app.data.queries import resolve_mentioned_personas, resolve_persona_id
-from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +42,13 @@ class MessageRouter:
             persona_id list; empty means "don't reply"
         """
         if is_p2p or is_proactive:
-            async with get_session() as s:
-                pid = await resolve_persona_id(s, bot_name)
+            pid = await resolve_persona_id(bot_name)
             label = "Proactive" if is_proactive else "P2P"
             logger.info("%s route: bot_name=%s -> persona_id=%s", label, bot_name, pid)
             return [pid]
 
         if mentions:
-            async with get_session() as s:
-                persona_ids = await resolve_mentioned_personas(s, mentions)
+            persona_ids = await resolve_mentioned_personas(mentions)
             logger.info(
                 "Group @mention route: mentions=%s -> persona_ids=%s",
                 mentions,

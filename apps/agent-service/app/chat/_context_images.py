@@ -12,7 +12,6 @@ import time
 from app.chat.content_parser import parse_content
 from app.chat.quick_search import QuickSearchResult
 from app.data.queries import find_group_download_permission
-from app.data.session import get_session
 from app.infra.image import image_client
 
 logger = logging.getLogger(__name__)
@@ -33,8 +32,7 @@ async def allows_download(chat_id: str, chat_type: str) -> bool:
         return cached[0]
 
     try:
-        async with get_session() as s:
-            setting = await find_group_download_permission(s, chat_id)
+        setting = await find_group_download_permission(chat_id)
         allows = setting != "not_anyone"
     except Exception:
         logger.warning(

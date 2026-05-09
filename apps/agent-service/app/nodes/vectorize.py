@@ -26,7 +26,6 @@ from app.agent.embedding import InstructionBuilder
 from app.capabilities.embed import EmbedderClient
 from app.chat.content_parser import parse_content
 from app.data.queries import find_group_download_permission
-from app.data.session import get_session
 from app.domain.fragment import Fragment
 from app.domain.message import Message
 from app.infra.image import image_client
@@ -54,8 +53,7 @@ async def vectorize(msg: Message) -> Fragment | None:
 
     # 3. Permission check — drop images for "only_owner" groups
     if image_keys:
-        async with get_session() as s:
-            perm = await find_group_download_permission(s, msg.chat_id)
+        perm = await find_group_download_permission(msg.chat_id)
         if perm == "only_owner":
             logger.debug(
                 "vectorize: chat=%s download restricted, drop %d image(s)",

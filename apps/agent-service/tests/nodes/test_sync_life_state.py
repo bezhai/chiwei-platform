@@ -1,7 +1,6 @@
 """Phase 6 v4 Gap 4: sync_life_state_node replaces arq state_sync_worker."""
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,25 +9,17 @@ from app.domain.agent_tool_events import ScheduleRevisionCreated
 from app.nodes.sync_life_state import sync_life_state_node
 
 
-@asynccontextmanager
-async def _session_cm(_session):
-    yield _session
-
-
 @pytest.mark.asyncio
 async def test_sync_life_state_calls_refresh_with_revision_data():
     revision = MagicMock(persona_id="akao-001", content="周五加班")
 
-    fake_session = MagicMock()
-
-    async def fake_get(_s, rid):
+    async def fake_get(rid):
         assert rid == "sr_1"
         return revision
 
     fake_refresh = AsyncMock(return_value=MagicMock(ok=True, life_state_id="ls_1", is_refresh=True))
 
-    with patch("app.nodes.sync_life_state.get_session", return_value=_session_cm(fake_session)), \
-         patch("app.nodes.sync_life_state.get_schedule_revision_by_id", new=fake_get), \
+    with patch("app.nodes.sync_life_state.get_schedule_revision_by_id", new=fake_get), \
          patch("app.nodes.sync_life_state.state_only_refresh", new=fake_refresh):
         await sync_life_state_node(
             ScheduleRevisionCreated(revision_id="sr_1", persona_id="akao-001")
@@ -42,15 +33,12 @@ async def test_sync_life_state_calls_refresh_with_revision_data():
 
 @pytest.mark.asyncio
 async def test_sync_life_state_skips_when_revision_not_found():
-    fake_session = MagicMock()
-
-    async def fake_get(_s, _rid):
+    async def fake_get(_rid):
         return None
 
     fake_refresh = AsyncMock()
 
-    with patch("app.nodes.sync_life_state.get_session", return_value=_session_cm(fake_session)), \
-         patch("app.nodes.sync_life_state.get_schedule_revision_by_id", new=fake_get), \
+    with patch("app.nodes.sync_life_state.get_schedule_revision_by_id", new=fake_get), \
          patch("app.nodes.sync_life_state.state_only_refresh", new=fake_refresh):
         await sync_life_state_node(
             ScheduleRevisionCreated(revision_id="sr_missing", persona_id="akao-001")

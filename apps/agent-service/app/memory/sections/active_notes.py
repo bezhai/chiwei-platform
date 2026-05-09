@@ -6,7 +6,6 @@ import logging
 from datetime import timedelta, timezone
 
 from app.data.queries import get_active_notes
-from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +21,7 @@ def _fmt_when(dt) -> str:
 
 async def build_active_notes_section(*, persona_id: str) -> str:
     try:
-        async with get_session() as s:
-            notes = await get_active_notes(s, persona_id=persona_id)
+        notes = await get_active_notes(persona_id=persona_id)
     except Exception as e:
         logger.warning("active_notes failed: %s", e)
         return ""

@@ -29,14 +29,14 @@ from app.data.queries import (
     insert_fragment,
     resolve_bot_name_for_persona,
 )
-from app.data.session import get_session
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 from app.domain.memory_request import MemoryAbstractRequest, MemoryFragmentRequest
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.runtime import emit, transactional_emit
+from app.runtime import emit
+from app.runtime.db import emit_tx, tx
 from app.runtime.debounce import DebounceReschedule
 from app.runtime.node import node
 
@@ -96,8 +96,7 @@ async def _recent_timeline(
     start_ts = int(start_dt.timestamp() * 1000)
     end_ts = int(datetime.now(_CST).timestamp() * 1000)
 
-    async with get_session() as s:
-        messages = await find_messages_in_range(s, chat_id, start_ts, end_ts)
+    messages = await find_messages_in_range(chat_id, start_ts, end_ts)
     if not messages:
         return ""
 
@@ -114,11 +113,11 @@ async def _recent_persona_replies(
     start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
 
-    async with get_session() as s:
-        messages = await find_messages_in_range(s, chat_id, start_ts, end_ts)
+    async with tx():
+        messages = await find_messages_in_range(chat_id, start_ts, end_ts)
         if not messages:
             return ""
-        bot_name = await resolve_bot_name_for_persona(s, persona_id, chat_id)
+        bot_name = await resolve_bot_name_for_persona(persona_id, chat_id)
 
     persona_msgs = [
         m for m in messages if m.role == "assistant" and m.bot_name == bot_name
@@ -152,8 +151,7 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
     start_ts = int((now - timedelta(hours=_LOOKBACK_HOURS)).timestamp() * 1000)
     end_ts = int(now.timestamp() * 1000)
 
-    async with get_session() as s:
-        messages = await find_messages_in_range(s, chat_id, start_ts, end_ts)
+    messages = await find_messages_in_range(chat_id, start_ts, end_ts)
 
     if not messages:
         logger.info(
@@ -191,17 +189,15 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
         return
 
     fid = new_id("f")
-    async with get_session() as s:
+    async with tx():
         await insert_fragment(
-            s,
             id=fid,
             persona_id=persona_id,
             content=content,
             source="afterthought",
             chat_id=chat_id,
         )
-        async with transactional_emit(s) as emitter:
-            await emitter.append(MemoryFragmentRequest(fragment_id=fid))
+        await emit_tx(MemoryFragmentRequest(fragment_id=fid))
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,
@@ -215,15 +211,13 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
     if chat_type == "p2p":
         for msg in messages:
             if msg.role == "user" and msg.user_id:
-                async with get_session() as s:
-                    name = await find_username(s, msg.user_id)
+                name = await find_username(msg.user_id)
                 if name:
                     return f"和{name}的私聊"
         return "一段私聊"
 
     try:
-        async with get_session() as s:
-            group_name = await find_group_name(s, chat_id)
+        group_name = await find_group_name(chat_id)
         if group_name:
             return f"在「{group_name}」群里"
     except Exception:

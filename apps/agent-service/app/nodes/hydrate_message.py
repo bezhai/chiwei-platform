@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 
 from app.data.queries import find_message_by_id
-from app.data.session import get_session
 from app.domain.message import Message
 from app.domain.message_request import MessageRequest
 from app.runtime import node
@@ -25,8 +24,7 @@ logger = logging.getLogger(__name__)
 @node
 async def hydrate_message(req: MessageRequest) -> Message | None:
     logger.info("hydrate_message: start message_id=%s", req.message_id)
-    async with get_session() as s:
-        cm = await find_message_by_id(s, req.message_id)
+    cm = await find_message_by_id(req.message_id)
     if cm is None:
         logger.warning(
             "hydrate_message: message_id=%s not found, drop", req.message_id

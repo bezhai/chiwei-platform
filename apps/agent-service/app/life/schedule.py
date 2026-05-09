@@ -17,11 +17,11 @@ from app.agent.core import Agent, AgentConfig, extract_text
 from app.agent.tools.search import search_web
 from app.data import queries as Q
 from app.data.models import AkaoSchedule
-from app.data.session import get_session
 from app.life._date_utils import CST, WEEKDAY_CN
 from app.life.sister_theater import run_sister_theater
 from app.life.wild_agents import run_wild_agents
 from app.memory._persona import load_persona
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +162,10 @@ async def _get_recent_daily_schedules(
     before_date: date, persona_id: str, count: int = 3
 ) -> list[AkaoSchedule]:
     """Fetch recent daily schedules before a date (for Critic context)."""
-    async with get_session() as s:
-        results = await Q.list_schedules(
-            s, plan_type="daily", persona_id=persona_id,
-            active_only=True, limit=count + 5,
-        )
+    results = await Q.list_schedules(
+        plan_type="daily", persona_id=persona_id,
+        active_only=True, limit=count + 5,
+    )
     return [sched for sched in results if sched.period_start < before_date.isoformat()][:count]
 
 
@@ -197,8 +196,7 @@ async def _run_persona_pipeline(
     date_str = target_date.isoformat()
 
     # Skip if already generated
-    async with get_session() as s:
-        existing = await Q.find_plan_for_period(s, "daily", date_str, date_str, persona_id)
+    existing = await Q.find_plan_for_period("daily", date_str, date_str, persona_id)
     if existing:
         logger.info("[%s] Daily plan already exists for %s, skip", persona_id, date_str)
         return existing.content
@@ -216,17 +214,17 @@ async def _run_persona_pipeline(
     )
     today_start = datetime.combine(target_date, datetime.min.time(), tzinfo=CST)
 
-    async with get_session() as s:
+    async with tx():
         self_abs_rows = await Q.get_abstracts_by_subjects(
-            s, persona_id=persona_id,
+            persona_id=persona_id,
             subjects=["self", "我自己"], limit_per_subject=10,
         )
         recent_frag_rows = await Q.find_fragments_since(
-            s, persona_id, since_dt=yesterday_start,
+            persona_id, since_dt=yesterday_start,
             sources=["afterthought"], limit=30,
         )
         yesterday_state_rows = await Q.find_life_states_in_range(
-            s, persona_id, start_dt=yesterday_start, end_dt=today_start,
+            persona_id, start_dt=yesterday_start, end_dt=today_start,
         )
 
     self_abstracts_text = (
@@ -296,18 +294,16 @@ async def _run_persona_pipeline(
         return None
 
     # Persist
-    async with get_session() as s:
-        await Q.upsert_schedule(
-            s,
-            AkaoSchedule(
-                plan_type="daily",
-                period_start=date_str,
-                period_end=date_str,
-                persona_id=persona_id,
-                content=schedule_text,
-                model="offline-model",
-            ),
-        )
+    await Q.upsert_schedule(
+        AkaoSchedule(
+            plan_type="daily",
+            period_start=date_str,
+            period_end=date_str,
+            persona_id=persona_id,
+            content=schedule_text,
+            model="offline-model",
+        ),
+    )
 
     logger.info("[%s] Daily plan generated for %s: %d chars", persona_id, date_str, len(schedule_text))
     return schedule_text
@@ -345,8 +341,7 @@ async def build_schedule_context(persona_id: str) -> str:
     now = datetime.now(CST)
     today = now.strftime("%Y-%m-%d")
 
-    async with get_session() as s:
-        daily = await Q.find_plan_for_period(s, "daily", today, today, persona_id)
+    daily = await Q.find_plan_for_period("daily", today, today, persona_id)
 
     if not daily:
         return ""

@@ -19,7 +19,6 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.core import Agent, AgentConfig
 from app.data.queries import find_latest_life_state
-from app.data.session import get_session
 from app.life.tool import CommitResult, commit_life_state_impl
 
 logger = logging.getLogger(__name__)
@@ -109,8 +108,7 @@ async def state_only_refresh(
     """
     now = now or datetime.now(CST)
 
-    async with get_session() as s:
-        prev = await find_latest_life_state(s, persona_id)
+    prev = await find_latest_life_state(persona_id)
     if prev is None:
         logger.info("[%s] no prev state, skip refresh", persona_id)
         return None

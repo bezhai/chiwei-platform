@@ -130,7 +130,7 @@ async def test_empty_content_and_no_images_returns_none():
 async def test_permission_only_owner_drops_images_but_text_continues():
     with patch(
         "app.nodes.vectorize.parse_content", return_value=_parsed("t", ["k1"])
-    ), patch("app.nodes.vectorize.get_session", _stub_session()), patch(
+    ), patch(
         "app.nodes.vectorize.find_group_download_permission",
         new_callable=AsyncMock,
         return_value="only_owner",
@@ -158,7 +158,7 @@ async def test_permission_only_owner_drops_images_but_text_continues():
 async def test_permission_allowed_downloads_images():
     with patch(
         "app.nodes.vectorize.parse_content", return_value=_parsed("t", ["k1", "k2"])
-    ), patch("app.nodes.vectorize.get_session", _stub_session()), patch(
+    ), patch(
         "app.nodes.vectorize.find_group_download_permission",
         new_callable=AsyncMock,
         return_value=None,
@@ -186,7 +186,7 @@ async def test_permission_allowed_downloads_images():
 async def test_image_download_all_fail_no_text_returns_none():
     with patch(
         "app.nodes.vectorize.parse_content", return_value=_parsed("", ["k1"])
-    ), patch("app.nodes.vectorize.get_session", _stub_session()), patch(
+    ), patch(
         "app.nodes.vectorize.find_group_download_permission",
         new_callable=AsyncMock,
         return_value=None,
@@ -211,7 +211,7 @@ async def test_image_download_partial_failure_filters_successes():
     with patch(
         "app.nodes.vectorize.parse_content",
         return_value=_parsed("", ["k1", "k2"]),
-    ), patch("app.nodes.vectorize.get_session", _stub_session()), patch(
+    ), patch(
         "app.nodes.vectorize.find_group_download_permission",
         new_callable=AsyncMock,
         return_value=None,

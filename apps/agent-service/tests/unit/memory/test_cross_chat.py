@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.data.queries import find_bot_names_for_persona, find_cross_chat_messages
+
+
+@asynccontextmanager
+async def _fake_auto_tx():
+    yield
+
+
+def _patch_query_session(module: str, session):
+    """Start patches that route current_session()/auto_tx() to *session*."""
+    patches = [
+        patch(f"{module}.auto_tx", _fake_auto_tx),
+        patch(f"{module}.current_session", return_value=session),
+    ]
+    for p in patches:
+        p.start()
+    return patches
+
+
+def _stop(patches):
+    for p in patches:
+        p.stop()
 
 
 @pytest.mark.asyncio
@@ -17,10 +39,14 @@ async def test_find_bot_names_for_persona():
     mock_result.scalars.return_value.all.return_value = ["chiwei", "fly", "dev"]
     mock_session.execute.return_value = mock_result
 
-    result = await find_bot_names_for_persona(mock_session, "akao")
+    patches = _patch_query_session("app.data.queries.persona", mock_session)
+    try:
+        result = await find_bot_names_for_persona("akao")
 
-    assert result == ["chiwei", "fly", "dev"]
-    mock_session.execute.assert_called_once()
+        assert result == ["chiwei", "fly", "dev"]
+        mock_session.execute.assert_called_once()
+    finally:
+        _stop(patches)
 
 
 @pytest.mark.asyncio
@@ -31,9 +57,12 @@ async def test_find_bot_names_for_persona_empty():
     mock_result.scalars.return_value.all.return_value = []
     mock_session.execute.return_value = mock_result
 
-    result = await find_bot_names_for_persona(mock_session, "nonexistent")
-
-    assert result == []
+    patches = _patch_query_session("app.data.queries.persona", mock_session)
+    try:
+        result = await find_bot_names_for_persona("nonexistent")
+        assert result == []
+    finally:
+        _stop(patches)
 
 
 @pytest.mark.asyncio
@@ -44,17 +73,19 @@ async def test_find_cross_chat_messages_calls_db():
     mock_result.scalars.return_value.all.return_value = []
     mock_session.execute.return_value = mock_result
 
-    result = await find_cross_chat_messages(
-        mock_session,
-        user_id="user_1",
-        bot_names=["chiwei"],
-        exclude_chat_id="chat_current",
-        since_ms=1000,
-        excluded_chat_ids=["oc_to_skip"],
-    )
-
-    assert result == []
-    mock_session.execute.assert_called_once()
+    patches = _patch_query_session("app.data.queries.messages", mock_session)
+    try:
+        result = await find_cross_chat_messages(
+            user_id="user_1",
+            bot_names=["chiwei"],
+            exclude_chat_id="chat_current",
+            since_ms=1000,
+            excluded_chat_ids=["oc_to_skip"],
+        )
+        assert result == []
+        mock_session.execute.assert_called_once()
+    finally:
+        _stop(patches)
 
 
 @pytest.mark.asyncio
@@ -96,11 +127,7 @@ async def test_build_cross_chat_uses_dynamic_config_excluded():
             "app.memory.cross_chat.find_cross_chat_messages",
             new=AsyncMock(return_value=mock_messages),
         ) as mock_find,
-        patch("app.memory.cross_chat.get_session") as mock_gs,
     ):
-        mock_gs.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
-        mock_gs.return_value.__aexit__ = AsyncMock(return_value=False)
-
         await build_cross_chat_context(
             persona_id="akao",
             trigger_user_id="user_1",
@@ -302,11 +329,7 @@ async def test_build_cross_chat_context_excludes_other_users_private_content():
             "app.memory.cross_chat.find_cross_chat_messages",
             AsyncMock(return_value=[target_user_msg, target_reply, leaked_reply]),
         ),
-        patch("app.memory.cross_chat.get_session") as mock_gs,
     ):
-        mock_gs.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
-        mock_gs.return_value.__aexit__ = AsyncMock(return_value=None)
-
         result = await build_cross_chat_context(
             persona_id="akao",
             trigger_user_id="user_1",
@@ -349,11 +372,7 @@ async def test_build_cross_chat_context_keeps_most_recent_messages():
         ),
         patch("app.memory.cross_chat._max_total_messages", return_value=1),
         patch("app.memory.cross_chat.find_group_name", AsyncMock(return_value="测试群")),
-        patch("app.memory.cross_chat.get_session") as mock_gs,
     ):
-        mock_gs.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
-        mock_gs.return_value.__aexit__ = AsyncMock(return_value=None)
-
         result = await build_cross_chat_context(
             persona_id="akao",
             trigger_user_id="user_1",

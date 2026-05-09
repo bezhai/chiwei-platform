@@ -12,9 +12,8 @@ from app.agent.tools._common import tool_error
 from app.data.ids import new_id
 from app.data.queries import get_active_notes, insert_note
 from app.data.queries import resolve_note as resolve_note_query
-from app.data.session import get_session
 from app.domain.agent_tool_events import NoteCreated
-from app.runtime import transactional_emit
+from app.runtime.db import current_session, emit_tx, tx
 
 
 async def _write_note_impl(
@@ -28,18 +27,16 @@ async def _write_note_impl(
         return {"error": "content 不能为空"}
 
     nid = new_id("n")
-    async with get_session() as s:
+    async with tx():
         await insert_note(
-            s,
             id=nid,
             persona_id=persona_id,
             content=content,
             when_at=when_at,
         )
-        await s.flush()
-        rows = await get_active_notes(s, persona_id=persona_id)
-        async with transactional_emit(s) as emitter:
-            await emitter.append(NoteCreated(note_id=nid, persona_id=persona_id))
+        await current_session().flush()
+        rows = await get_active_notes(persona_id=persona_id)
+        await emit_tx(NoteCreated(note_id=nid, persona_id=persona_id))
 
     return {
         "id": nid,
@@ -64,8 +61,7 @@ async def _resolve_note_impl(
     if not note_id or not resolution:
         return {"error": "note_id 和 resolution 都不能为空"}
 
-    async with get_session() as s:
-        await resolve_note_query(s, note_id=note_id, resolution=resolution)
+    await resolve_note_query(note_id=note_id, resolution=resolution)
 
     return {"ok": True}
 

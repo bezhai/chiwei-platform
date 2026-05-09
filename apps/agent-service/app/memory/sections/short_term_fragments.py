@@ -11,7 +11,6 @@ import logging
 from datetime import timedelta, timezone
 
 from app.data.queries import get_recent_fragments_for_injection
-from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +30,11 @@ async def build_short_term_fragments_section(
     trigger_user_id: str | None,
 ) -> str:
     try:
-        async with get_session() as s:
-            fragments = await get_recent_fragments_for_injection(
-                s,
-                persona_id=persona_id,
-                chat_id=chat_id,
-                _trigger_user_id=trigger_user_id,
-            )
+        fragments = await get_recent_fragments_for_injection(
+            persona_id=persona_id,
+            chat_id=chat_id,
+            _trigger_user_id=trigger_user_id,
+        )
     except Exception as e:
         logger.warning("short_term_fragments failed: %s", e)
         return ""

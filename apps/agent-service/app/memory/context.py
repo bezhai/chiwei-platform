@@ -18,7 +18,6 @@ import logging
 from datetime import timedelta, timezone
 
 from app.data.queries import find_latest_life_state
-from app.data.session import get_session
 from app.memory.sections.active_notes import build_active_notes_section
 from app.memory.sections.recall_index import build_recall_index_section
 from app.memory.sections.schedule import build_schedule_section
@@ -33,8 +32,7 @@ _CST = timezone(timedelta(hours=8))
 
 async def _build_life_state(persona_id: str) -> str:
     try:
-        async with get_session() as s:
-            row = await find_latest_life_state(s, persona_id)
+        row = await find_latest_life_state(persona_id)
         if not row:
             return ""
         current = row.current_state

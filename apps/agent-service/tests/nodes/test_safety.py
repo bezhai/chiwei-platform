@@ -54,16 +54,11 @@ async def test_run_post_safety_short_circuits_on_terminal_status(status):
     fake_get = AsyncMock(return_value=status)
     fake_audit = AsyncMock()
     fake_set = AsyncMock()
-    fake_session = AsyncMock()
-    fake_session.__aenter__.return_value = fake_session
-    fake_session.__aexit__.return_value = None
-    fake_get_session = MagicMock(return_value=fake_session)
 
     with (
         patch.object(m, "get_safety_status", fake_get),
         patch.object(m, "_run_audit", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
-        patch.object(m, "get_session", fake_get_session),
     ):
         result = await m.run_post_safety(req)
 
@@ -78,14 +73,9 @@ async def test_run_post_safety_raises_when_row_missing():
     from app.nodes import safety as m
 
     fake_get = AsyncMock(return_value=None)
-    fake_session = AsyncMock()
-    fake_session.__aenter__.return_value = fake_session
-    fake_session.__aexit__.return_value = None
-    fake_get_session = MagicMock(return_value=fake_session)
 
     with (
         patch.object(m, "get_safety_status", fake_get),
-        patch.object(m, "get_session", fake_get_session),
     ):
         with pytest.raises(RuntimeError) as excinfo:
             await m.run_post_safety(_make_req("missing-row"))
@@ -101,24 +91,19 @@ async def test_run_post_safety_passed_writes_status_and_returns_none():
     fake_get = AsyncMock(return_value="pending")
     fake_audit = AsyncMock(return_value=m._PostAuditOutcome(is_blocked=False))
     fake_set = AsyncMock()
-    fake_session = AsyncMock()
-    fake_session.__aenter__.return_value = fake_session
-    fake_session.__aexit__.return_value = None
-    fake_get_session = MagicMock(return_value=fake_session)
 
     with (
         patch.object(m, "get_safety_status", fake_get),
         patch.object(m, "_run_audit", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
-        patch.object(m, "get_session", fake_get_session),
     ):
         result = await m.run_post_safety(_make_req("sess-pass"))
 
     assert result is None
     fake_set.assert_awaited_once()
     args = fake_set.await_args.args
-    assert args[1] == "sess-pass"
-    assert args[2] == "passed"
+    assert args[0] == "sess-pass"
+    assert args[1] == "passed"
 
 
 @pytest.mark.asyncio
@@ -133,16 +118,11 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
         )
     )
     fake_set = AsyncMock()
-    fake_session = AsyncMock()
-    fake_session.__aenter__.return_value = fake_session
-    fake_session.__aexit__.return_value = None
-    fake_get_session = MagicMock(return_value=fake_session)
 
     with (
         patch.object(m, "get_safety_status", fake_get),
         patch.object(m, "_run_audit", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
-        patch.object(m, "get_session", fake_get_session),
         patch.object(m, "get_lane", MagicMock(return_value="dev")),
     ):
         result = await m.run_post_safety(_make_req("sess-block"))

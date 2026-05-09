@@ -16,7 +16,7 @@ from pydantic import Field
 
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
-from app.data.session import get_session
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,8 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
     from app.chat.content_parser import parse_content
     from app.data.queries import find_messages_in_range, find_username
 
-    async with get_session() as session:
-        messages = await find_messages_in_range(session, chat_id, start_ts, end_ts)
+    async with tx():
+        messages = await find_messages_in_range(chat_id, start_ts, end_ts)
         if not messages:
             return "这段时间好像没有聊天记录..."
 
@@ -98,7 +98,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
             if msg.role == "assistant":
                 speaker = "我"
             else:
-                name = await find_username(session, msg.user_id)
+                name = await find_username(msg.user_id)
                 speaker = name or "?"
             rendered = parse_content(msg.content).render()
             if rendered and rendered.strip():
@@ -193,15 +193,13 @@ async def search_group_history(
     # 4. Query context messages from DB
     from app.data.queries import find_context_messages_for_anchors
 
-    async with get_session() as session:
-        rows = await find_context_messages_for_anchors(
-            session,
-            chat_id=context.chat_id,
-            anchor_message_ids=anchor_message_ids,
-            anchor_timestamps=anchor_timestamps,
-            anchor_root_ids=anchor_root_ids,
-            context_window_ms=CONTEXT_WINDOW_MS,
-        )
+    rows = await find_context_messages_for_anchors(
+        chat_id=context.chat_id,
+        anchor_message_ids=anchor_message_ids,
+        anchor_timestamps=anchor_timestamps,
+        anchor_root_ids=anchor_root_ids,
+        context_window_ms=CONTEXT_WINDOW_MS,
+    )
 
     if not rows:
         return "未找到相关消息"
@@ -239,8 +237,7 @@ async def list_group_members(role: str | None = None) -> str:
 
     from app.data.queries import find_group_members
 
-    async with get_session() as session:
-        rows = await find_group_members(session, context.chat_id, role)
+    rows = await find_group_members(context.chat_id, role)
 
     if not rows:
         return "群内无成员" if not role else f"未找到 {role} 角色的成员"

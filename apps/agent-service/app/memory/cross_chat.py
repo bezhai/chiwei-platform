@@ -19,7 +19,6 @@ from app.data.queries import (
     find_cross_chat_messages,
     find_group_name,
 )
-from app.data.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -170,23 +169,20 @@ async def build_cross_chat_context(
         return ""
 
     try:
-        async with get_session() as s:
-            bot_names = await find_bot_names_for_persona(s, persona_id)
+        bot_names = await find_bot_names_for_persona(persona_id)
         if not bot_names:
             return ""
 
         now_ms = int(datetime.now(_CST).timestamp() * 1000)
         since_ms = now_ms - _24H_MS
 
-        async with get_session() as s:
-            messages = await find_cross_chat_messages(
-                s,
-                user_id=trigger_user_id,
-                bot_names=bot_names,
-                exclude_chat_id=current_chat_id,
-                since_ms=since_ms,
-                excluded_chat_ids=_excluded_chats(),
-            )
+        messages = await find_cross_chat_messages(
+            user_id=trigger_user_id,
+            bot_names=bot_names,
+            exclude_chat_id=current_chat_id,
+            since_ms=since_ms,
+            excluded_chat_ids=_excluded_chats(),
+        )
 
         max_total = _max_total_messages()
         if max_total > 0:
@@ -207,8 +203,7 @@ async def build_cross_chat_context(
             if sample.chat_type == "p2p":
                 chat_names[chat_id] = "私聊"
             else:
-                async with get_session() as s:
-                    name = await find_group_name(s, chat_id)
+                name = await find_group_name(chat_id)
                 chat_names[chat_id] = name or chat_id[:8]
 
         return _format_interactions(grouped, trigger_username, chat_names)
