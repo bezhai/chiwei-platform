@@ -236,31 +236,35 @@ def plan_migration(
                     base, default = desired_typ.split(" DEFAULT ", 1)
                     stmts.append(
                         Stmt(
-                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-                            f"{col} {base} DEFAULT {default}"
+                            f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS '
+                            f'"{col}" {base} DEFAULT {default}'
                         )
                     )
                 else:
                     stmts.append(
                         Stmt(
-                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-                            f"{col} {desired_typ}"
+                            f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS '
+                            f'"{col}" {desired_typ}'
                         )
                     )
             continue
 
-        col_ddl = ", ".join(f"{n} {t}" for n, t in desired_cols.items())
+        # Quote column names so reserved words (e.g. ``limit``) compile.
+        # PostgreSQL preserves quoted lowercase identifiers as the same
+        # canonical name an unquoted identifier folds to, so existing
+        # information_schema lookups still match.
+        col_ddl = ", ".join(f'"{n}" {t}' for n, t in desired_cols.items())
         stmts.append(Stmt(f"CREATE TABLE IF NOT EXISTS {table} ({col_ddl})"))
         stmts.append(
             Stmt(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS ix_{table}_dedup "
-                f"ON {table}(dedup_hash)"
+                f'ON {table}("dedup_hash")'
             )
         )
         ver = version_field(cls)
         if ver:
             keys = key_fields(cls)
-            cols = ", ".join(keys) + f", {ver} DESC"
+            cols = ", ".join(f'"{k}"' for k in keys) + f', "{ver}" DESC'
             stmts.append(
                 Stmt(
                     f"CREATE INDEX IF NOT EXISTS ix_{table}_key_ver ON {table}({cols})"
