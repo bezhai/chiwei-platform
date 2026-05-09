@@ -134,7 +134,8 @@ async def claim_inflight(
             return ClaimOutcome(action="run", attempts=1, fresh=True)
 
         state = row["state"]
-        if state == "succeeded":
+        # Phase 7b Gap 18 round-4 finding 1: review is a terminal too.
+        if state in ("succeeded", "review"):
             return ClaimOutcome(action="skip", attempts=0, fresh=False)
         now = datetime.now(UTC)
         locked_until = row["locked_until"]
@@ -195,3 +196,19 @@ async def mark_failed(
             "    last_error=:err, updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
         ), {"err": last_error[:8000], "e": edge_id, "k": idempotent_key})
+
+
+async def mark_review(*, edge_id: str, idempotent_key: str) -> None:
+    """Phase 7b Gap 18: terminal state for messages routed to manual-review.
+
+    Once a row is in 'review', claim_inflight will skip it. Operators
+    must delete_inflight() it before any replay (see runbook).
+    """
+    async with get_session() as s:
+        await s.execute(text(
+            "UPDATE runtime_inflight "
+            "SET state='review', locked_until=NULL, worker_id=NULL, "
+            "    updated_at=now() "
+            "WHERE edge_id=:e AND idempotent_key=:k"
+        ), {"e": edge_id, "k": idempotent_key})
+        await s.commit()

@@ -49,6 +49,7 @@ from app.runtime.inflight import (
     edge_id_for,
     mark_failed,
     mark_history_backfill,
+    mark_review,
     mark_succeeded,
 )
 from app.runtime.migrator import _table_name
@@ -62,6 +63,7 @@ from app.runtime.propagation import (
     inject_context,
 )
 from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry
+from app.runtime.review_queue import publish_to_review_queue
 from app.runtime.wire import WireSpec
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
@@ -271,7 +273,7 @@ async def _route_consumer_exception(
 
     if isinstance(exc, NeedsReview) and wire.on_error == "manual-review":
         confirmed = await publish_to_review_queue(
-            wire=wire, data=data, exc=exc,
+            wire=wire, consumer=consumer, data=data, exc=exc,
             attempts=attempts, last_error=last_error,
         )
         if not confirmed:
@@ -321,7 +323,7 @@ async def _route_consumer_exception(
     # 3. dlq fallback (.on_error("manual-review") with retry-exhausted handled here too)
     if wire.on_error == "manual-review":
         confirmed = await publish_to_review_queue(
-            wire=wire, data=data, exc=exc,
+            wire=wire, consumer=consumer, data=data, exc=exc,
             attempts=attempts, last_error=last_error,
         )
         if not confirmed:
@@ -335,15 +337,6 @@ async def _route_consumer_exception(
         return
 
     raise exc  # default on_error="dlq" -> caller's process(requeue=False)
-
-
-# Phase 7b temporary stubs — replaced in Task 3 when manual-review queue lands.
-async def publish_to_review_queue(*args, **kwargs):  # pragma: no cover
-    raise NotImplementedError("manual-review queue not yet wired (Task 3)")
-
-
-async def mark_review(*args, **kwargs):  # pragma: no cover
-    raise NotImplementedError("manual-review marking not yet wired (Task 3)")
 
 
 async def start_consumers(app_name: str | None = None) -> None:
@@ -412,6 +405,21 @@ async def start_consumers(app_name: str | None = None) -> None:
                 actual_queue,
                 consumer.__name__,
             )
+
+            # Phase 7b Gap 18: declare review queue for wires that opted
+            # into on_error='manual-review'. No consumer — it's a terminal
+            # inspect-only queue; operators replay via admin endpoints.
+            if w.on_error == "manual-review":
+                from app.runtime.review_queue import (
+                    _route_for_review,
+                    review_queue_name_for,
+                )
+                review_route = _route_for_review(review_queue_name_for(w, consumer))
+                await mq.declare_route(review_route)
+                logger.info(
+                    "review queue declared: %s",
+                    review_route.queue,
+                )
 
 
 async def stop_consumers() -> None:
