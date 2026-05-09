@@ -38,7 +38,6 @@ dependencies = [
     "starlette>=0.47.1",
     "tenacity>=9.1.2",
     "uvicorn>=0.35.0",
-    "arq>=0.25.0",
     "pytz>=2025.2",
     "bidict>=0.23.1",
     "volcengine-python-sdk[ark]>=5.0.3",
