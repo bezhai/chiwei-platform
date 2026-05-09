@@ -8,7 +8,7 @@ in nodes/dlq_admin (the management API has no transactional guarantees).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -18,7 +18,7 @@ import httpx
 @dataclass
 class RabbitMQManagementClient:
     base_url: str
-    auth: tuple[str, str]
+    auth: tuple[str, str] = field(repr=False)  # password leaks via repr otherwise
     vhost: str
 
     @classmethod
