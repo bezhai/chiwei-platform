@@ -120,25 +120,13 @@ async def _drain_once(*, app: str, lane: str | None,
 
 
 async def dispatcher_loop(*, batch_size: int = 32, idle_sleep_ms: int = 200) -> None:
-    """Long-running loop. Cancel the task to stop.
-
-    DB connection failures are retried with a 5 s back-off so a
-    temporarily unavailable database (startup race, migration in
-    progress) doesn't crash the loop permanently.
-    """
+    """Long-running loop. Cancel the task to stop."""
     app = _current_app()
     lane = current_lane()
     logger.info("outbox dispatcher started app=%s lane=%s", app, lane)
     try:
         while True:
-            try:
-                n = await _drain_once(app=app, lane=lane, batch_size=batch_size)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("outbox dispatcher _drain_once error; retrying in 5 s")
-                await asyncio.sleep(5)
-                continue
+            n = await _drain_once(app=app, lane=lane, batch_size=batch_size)
             if n == 0:
                 await asyncio.sleep(idle_sleep_ms / 1000)
     except asyncio.CancelledError:

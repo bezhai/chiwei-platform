@@ -170,22 +170,30 @@ class Runtime:
                 self.app_name,
             )
         await start_consumers(app_name=self.app_name)
-        self._outbox_dispatcher_task = asyncio.create_task(
-            dispatcher_loop(), name="outbox_dispatcher"
-        )
+        # Outbox dispatcher needs DB. Tests opting out via
+        # migrate_schema_on_run=False are signalling "no DB in this
+        # process" and must also opt out of the dispatcher.
+        if self._migrate_schema_on_run:
+            self._outbox_dispatcher_task = asyncio.create_task(
+                dispatcher_loop(), name="outbox_dispatcher"
+            )
         await self.start_source_loops()
         try:
             assert self._stop_event is not None
             await self._stop_event.wait()
         finally:
-            await self.stop_source_loops()
-            await stop_consumers()
+            # Cancel the dispatcher before stopping consumers so any
+            # in-flight emit() the dispatcher started can still complete
+            # against a live wire/consumer. Same teardown order as
+            # main.py lifespan.
             if self._outbox_dispatcher_task is not None:
                 self._outbox_dispatcher_task.cancel()
                 try:
                     await self._outbox_dispatcher_task
                 except asyncio.CancelledError:
                     pass
+            await self.stop_source_loops()
+            await stop_consumers()
 
         if self._source_error is not None:
             raise self._source_error
