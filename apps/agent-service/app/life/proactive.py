@@ -12,10 +12,8 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy.future import select as sa_select
-
 from app.data.models import ConversationMessage
-from app.runtime.db import current_session, tx
+from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
 
@@ -36,21 +34,14 @@ async def get_unseen_messages(
 
     Returns up to *limit* messages in chronological order.
     """
-    async with tx():
-        stmt = (
-            sa_select(ConversationMessage)
-            .where(
-                ConversationMessage.chat_id == chat_id,
-                ConversationMessage.role == "user",
-                ConversationMessage.user_id != PROACTIVE_USER_ID,
-                ConversationMessage.create_time > after,
-            )
-            .order_by(ConversationMessage.create_time.desc())
-            .limit(limit)
-        )
-        result = await current_session().execute(stmt)
-        rows = list(result.scalars().all())
+    from app.data import queries as Q
 
+    rows = await Q.find_user_messages_after(
+        chat_id,
+        after=after,
+        limit=limit,
+        exclude_user_id=PROACTIVE_USER_ID,
+    )
     rows.reverse()  # restore chronological order
     return rows
 
@@ -127,21 +118,22 @@ async def submit_proactive_chat(
     from app.infra.rabbitmq import current_lane
     from app.runtime.db import emit_tx  # local import to avoid boot cycles
 
+    msg = ConversationMessage(
+        message_id=message_id,
+        user_id=PROACTIVE_USER_ID,
+        content=content,
+        role="user",
+        root_message_id=root_message_id or message_id,
+        reply_message_id=target_lark_id,
+        chat_id=chat_id,
+        chat_type="group",
+        create_time=now_ms,
+        message_type="proactive_trigger",
+        bot_name=bot_name,
+    )
+
     async with tx():
-        msg = ConversationMessage(
-            message_id=message_id,
-            user_id=PROACTIVE_USER_ID,
-            content=content,
-            role="user",
-            root_message_id=root_message_id or message_id,
-            reply_message_id=target_lark_id,
-            chat_id=chat_id,
-            chat_type="group",
-            create_time=now_ms,
-            message_type="proactive_trigger",
-            bot_name=bot_name,
-        )
-        current_session().add(msg)
+        await Q.insert_proactive_message(msg)
         await emit_tx(Message.from_cm(msg))
         await emit_tx(
             ChatTrigger(
@@ -177,23 +169,17 @@ async def get_recent_proactive_records(chat_id: str, bot_name: str) -> list[dict
     Returns list of ``{"time": "HH:MM", "summary": "..."}`` dicts.
     """
     from app.chat.content_parser import parse_content
+    from app.data import queries as Q
 
     today_start = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_ms = int(today_start.timestamp() * 1000)
 
-    async with tx():
-        stmt = (
-            sa_select(ConversationMessage)
-            .where(
-                ConversationMessage.chat_id == chat_id,
-                ConversationMessage.user_id == PROACTIVE_USER_ID,
-                ConversationMessage.bot_name == bot_name,
-                ConversationMessage.create_time >= today_start_ms,
-            )
-            .order_by(ConversationMessage.create_time.desc())
-        )
-        result = await current_session().execute(stmt)
-        rows = result.scalars().all()
+    rows = await Q.find_proactive_messages_in_chat(
+        chat_id,
+        bot_name=bot_name,
+        proactive_user_id=PROACTIVE_USER_ID,
+        since_ms=today_start_ms,
+    )
 
     records = []
     for msg in rows:

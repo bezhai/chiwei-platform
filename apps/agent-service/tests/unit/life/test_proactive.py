@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -23,23 +23,33 @@ def _make_emit_tx_mock():
     return _fake_emit_tx, captured
 
 
+def _make_insert_mock():
+    """Capture ConversationMessage entities passed to insert_proactive_message."""
+    captured: list = []
+
+    async def _fake_insert(message):
+        captured.append(message)
+
+    return _fake_insert, captured
+
+
 @pytest.mark.asyncio
 async def test_submit_proactive_chat_uses_existing_lark_target_root():
     from app.domain.chat_dataflow import ChatTrigger
     from app.domain.message import Message
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_target",
         root_message_id="om_root",
         chat_id="oc_test",
     )
     fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
         patch(f"{MODULE}.tx", _fake_tx),
-        patch(f"{MODULE}.current_session", return_value=session),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch("app.data.queries.find_message_by_id", AsyncMock(return_value=target)),
         patch(
             "app.data.queries.resolve_bot_name_for_persona",
@@ -60,7 +70,8 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
         )
 
     assert session_id == "session-1"
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1, f"expect 1 insert_proactive_message call, got {inserted}"
+    added = inserted[0]
     assert added.message_id == "proactive_1234567"
     assert added.root_message_id == "om_root"
     assert added.reply_message_id == "om_target"
@@ -90,17 +101,17 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
     from app.domain.chat_dataflow import ChatTrigger
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_from_row",
         root_message_id="om_root",
         chat_id="oc_test",
     )
     fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
         patch(f"{MODULE}.tx", _fake_tx),
-        patch(f"{MODULE}.current_session", return_value=session),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch(
             "app.data.queries.resolve_message_id_by_row_id",
             AsyncMock(return_value="om_from_row"),
@@ -123,7 +134,8 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
         )
 
     mock_resolve_row.assert_awaited_once()
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1
+    added = inserted[0]
     assert added.root_message_id == "om_root"
     assert added.reply_message_id == "om_from_row"
 
@@ -137,17 +149,17 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
     from app.domain.chat_dataflow import ChatTrigger
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_other",
         root_message_id="om_other_root",
         chat_id="oc_other",
     )
     fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
         patch(f"{MODULE}.tx", _fake_tx),
-        patch(f"{MODULE}.current_session", return_value=session),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch("app.data.queries.find_message_by_id", AsyncMock(return_value=target)),
         patch(
             "app.data.queries.resolve_bot_name_for_persona",
@@ -165,7 +177,8 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
             stimulus="想接一句",
         )
 
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1
+    added = inserted[0]
     assert added.root_message_id == "proactive_1234567"
     assert added.reply_message_id is None
 

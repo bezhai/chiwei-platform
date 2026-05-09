@@ -21,21 +21,24 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
     from app.life import proactive as pro
 
     captured: list = []
+    inserted: list = []
 
     async def _fake_emit_tx(ev):
         captured.append(ev)
+
+    async def _fake_insert(message):
+        inserted.append(message)
 
     @asynccontextmanager
     async def _fake_tx():
         yield
 
-    # Stub DB session — we care about outbox appends, not DB commit.
-    class _FakeSession:
-        def add(self, _msg):
-            pass
-
     monkeypatch.setattr(pro, "tx", _fake_tx)
-    monkeypatch.setattr(pro, "current_session", lambda: _FakeSession())
+
+    # The DB write goes through Q.insert_proactive_message — stub it so
+    # we don't open a real session.
+    from app.data import queries as Q
+    monkeypatch.setattr(Q, "insert_proactive_message", _fake_insert)
 
     # Patch emit_tx at the runtime.db module level (local import inside function)
     import app.runtime.db
@@ -45,7 +48,6 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
     async def fake_resolve_bot_name(*args, **kwargs):
         return "赤尾"
 
-    from app.data import queries as Q
     monkeypatch.setattr(Q, "resolve_bot_name_for_persona", fake_resolve_bot_name)
 
     # Stub current_lane for ChatTrigger.lane
@@ -59,6 +61,7 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
         stimulus="hi",
     )
 
+    assert len(inserted) == 1, f"expect 1 insert_proactive_message call, got {inserted}"
     assert len(captured) == 2, f"expect 2 appends (Message, ChatTrigger), got {captured}"
 
     msg_emitted = captured[0]
