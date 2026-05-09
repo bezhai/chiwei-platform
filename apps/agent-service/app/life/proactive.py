@@ -123,6 +123,11 @@ async def submit_proactive_chat(
         ensure_ascii=False,
     )
 
+    from app.domain.chat_dataflow import ChatTrigger
+    from app.domain.message import Message
+    from app.infra.rabbitmq import current_lane
+    from app.runtime import transactional_emit  # local import to avoid boot cycles
+
     async with get_session() as session:
         msg = ConversationMessage(
             message_id=message_id,
@@ -138,29 +143,22 @@ async def submit_proactive_chat(
             bot_name=bot_name,
         )
         session.add(msg)
-    # get_session() commits on block exit; emit AFTER commit so downstream
-    # consumers querying pg will see the row.
-    from app.domain.chat_dataflow import ChatTrigger
-    from app.domain.message import Message
-    from app.infra.rabbitmq import current_lane
-    from app.runtime import emit  # local import to avoid boot cycles
-
-    await emit(Message.from_cm(msg))
-
-    await emit(
-        ChatTrigger(
-            message_id=message_id,
-            session_id=session_id,
-            chat_id=chat_id,
-            is_p2p=False,
-            root_id=target_lark_id or None,
-            user_id=PROACTIVE_USER_ID,
-            bot_name=bot_name,
-            is_proactive=True,
-            lane=current_lane(),
-            enqueued_at=now_ms,
-        )
-    )
+        async with transactional_emit(session) as emitter:
+            await emitter.append(Message.from_cm(msg))
+            await emitter.append(
+                ChatTrigger(
+                    message_id=message_id,
+                    session_id=session_id,
+                    chat_id=chat_id,
+                    is_p2p=False,
+                    root_id=target_lark_id or None,
+                    user_id=PROACTIVE_USER_ID,
+                    bot_name=bot_name,
+                    is_proactive=True,
+                    lane=current_lane(),
+                    enqueued_at=now_ms,
+                )
+            )
 
     logger.info(
         "Proactive request submitted: session_id=%s, target=%s",

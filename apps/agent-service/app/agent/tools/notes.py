@@ -14,7 +14,7 @@ from app.data.queries import get_active_notes, insert_note
 from app.data.queries import resolve_note as resolve_note_query
 from app.data.session import get_session
 from app.domain.agent_tool_events import NoteCreated
-from app.runtime import emit
+from app.runtime import transactional_emit
 
 
 async def _write_note_impl(
@@ -38,8 +38,8 @@ async def _write_note_impl(
         )
         await s.flush()
         rows = await get_active_notes(s, persona_id=persona_id)
-
-    await emit(NoteCreated(note_id=nid, persona_id=persona_id))
+        async with transactional_emit(s) as emitter:
+            await emitter.append(NoteCreated(note_id=nid, persona_id=persona_id))
 
     return {
         "id": nid,

@@ -5,11 +5,25 @@ The base-class debouncer tests (on_event / phase1 / phase2) are dropped —
 the equivalent runtime behaviour is covered by tests/runtime/test_debounce.py.
 """
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.domain.memory_request import MemoryFragmentRequest
+
+
+def _make_transactional_emit_mock():
+    """Async context manager stub that captures emitter.append() calls."""
+    captured: list = []
+
+    @asynccontextmanager
+    async def _fake(_session):
+        emitter = MagicMock()
+        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
+        yield emitter
+
+    return _fake, captured
 
 # ---------------------------------------------------------------------------
 # _generate_fragment — v4 write path
@@ -51,10 +65,11 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
                                 "app.nodes.memory_pipelines.insert_fragment",
                                 new=AsyncMock(),
                             ) as mock_ins:
+                                fake_te, captured = _make_transactional_emit_mock()
                                 with patch(
-                                    "app.nodes.memory_pipelines.emit",
-                                    new=AsyncMock(),
-                                ) as mock_enq:
+                                    "app.nodes.memory_pipelines.transactional_emit",
+                                    fake_te,
+                                ):
                                     with patch(
                                         "app.nodes.memory_pipelines.get_session",
                                     ) as mock_session:
@@ -71,8 +86,8 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
     assert kwargs["persona_id"] == "ayana"
     assert kwargs["content"] == "this is the generated content"
     assert kwargs["id"].startswith("f_")
-    mock_enq.assert_awaited_once()
-    emitted = mock_enq.await_args.args[0]
+    assert len(captured) == 1
+    emitted = captured[0]
     assert isinstance(emitted, MemoryFragmentRequest)
     assert emitted.fragment_id == kwargs["id"]
 

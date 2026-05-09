@@ -36,7 +36,7 @@ from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.runtime import emit
+from app.runtime import emit, transactional_emit
 from app.runtime.debounce import DebounceReschedule
 from app.runtime.node import node
 
@@ -200,7 +200,8 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
             source="afterthought",
             chat_id=chat_id,
         )
-    await emit(MemoryFragmentRequest(fragment_id=fid))
+        async with transactional_emit(s) as emitter:
+            await emitter.append(MemoryFragmentRequest(fragment_id=fid))
     logger.info(
         "[%s] Conversation fragment created for %s: %s...",
         persona_id,
