@@ -1,6 +1,6 @@
 # Dataflow Phase 7b — Reliability + Error Policy + Outbox 设计
 
-**状态**: Draft v4（2026-05-09，吸收 reviewer 三轮 findings：v3 = dispatcher 调 emit() fan-out / helper contract handled-return + dlq-raise / publish-confirm fall-through DLQ / 迁移分类按"持有事务并 commit 后 emit" / DLQ 6-step transaction-like 协议 / at-least-once 措辞；v4 增量 = dispatcher 加 lane 复合过滤防 prod/lane 抢 row / delete_inflight state filter + AlreadySucceededError 防 zombie 二次 replay 重跑 / §4.7 in-process consumer 使用约束）
+**状态**: Draft v5（2026-05-09，吸收 reviewer 四轮 findings：v3 = dispatcher 调 emit() fan-out / helper contract handled-return + dlq-raise / publish-confirm fall-through DLQ / 迁移分类按"持有事务并 commit 后 emit" / DLQ 6-step transaction-like 协议 / at-least-once 措辞；v4 = dispatcher 加 lane 复合过滤 / delete_inflight state filter + AlreadySucceededError / §4.7 in-process consumer 使用约束；v5 增量 = claim_inflight 把 review 加进 skip 终态防 manual-review 回流重跑 / delete_inflight 按模式分语义（edge_idempotent 抛 / trace_id 删非 succeeded）/ OutboxEmitter.append + dispatcher SELECT 同源用 current_lane() 归一）
 **前置**: PR #212（Phase 7a transport primitives）已 ship 到 prod 1.0.1.10，Gap 7 / 9 / 11 闭合
 **承接**: `docs/superpowers/specs/2026-05-08-dataflow-phase-7-gap-analysis.md` §2 中 Gap 8 / 12 / 18
 **分支**: `refactor/flow-parse-7b`
@@ -189,6 +189,18 @@ async def _route_consumer_exception(exc, *, wire, inflight_key, data, attempts):
 
 **inflight 状态扩展**：`runtime_inflight.state` 现在 `{processing, succeeded, failed}`，7b 加 `review`。state 字段是 TEXT 不需要 schema 改动（inflight.py:55），只是 helper / mark_review 的实现增量。
 
+**claim_inflight 终态识别（接受 reviewer round-4 finding 1）**：现 `claim_inflight` (inflight.py:137-153) 只把 `succeeded` 当终态 skip；其他（含 `review`）走"take over"分支重跑 consumer。7b 必须**同步修改 claim_inflight**：
+
+```python
+# inflight.py:137 改造
+if state in ("succeeded", "review"):
+    return ClaimOutcome(action="skip", attempts=0, fresh=False)
+```
+
+理由：消息进入 manual-review 后，如果同一 (edge_id, idempotent_key) 因 outbox at-least-once / 误投 / runtime 重启等再次进 durable queue，若不 skip 会重跑 consumer 再发一条 review，循环放大。
+
+**review 终态的运维 replay 路径**：要让一条 review 状态的 inflight 重新被消费，必须先 `delete_inflight(by="edge_idempotent", edge_id=..., idempotent_key=...)`（见 §3.2 zombie 协议）再人工重投到原 durable queue（不是 review queue）。**review queue 自身不接 consumer**——里面的消息本就是终态，仅供运维 inspect / 决策。
+
 > **mismatch 处理（语义补充）**：DuplicateData / NeedsReview 在 mismatch on_error 下**降级到通用 Exception 路径**——走 mark_failed + decide_retry + on_error 默认。这意味着 `raise DuplicateData(...)` 在 `on_error="dlq"` 配置下不会静默 ack，会跟普通异常一样进 DLQ。安全默认：业务作者错配获得"消息保留可观察"，而非隐式丢消息。
 
 ### 2.5 业务侧迁移
@@ -206,7 +218,7 @@ async def _route_consumer_exception(exc, *, wire, inflight_key, data, attempts):
 | Endpoint | Method | 入参 | 出参 |
 |---|---|---|---|
 | `/admin/dlq/inspect` | POST | `{queue, limit=20, queue_kind="dlq"\|"review"}` | `[{message_id, trace_id, data_type, payload, first_failed_at, last_error, attempts}, ...]` |
-| `/admin/dlq/clear-idempotent` | POST | `{by: "trace_id" \| "edge_idempotent", trace_id?, edge_id?, idempotent_key?}` | `{deleted: N}` |
+| `/admin/dlq/clear-idempotent` | POST | `{by: "trace_id" \| "edge_idempotent", trace_id?, edge_id?, idempotent_key?}` | `{deleted: N, skipped_succeeded: M}` (edge_idempotent 模式碰 succeeded → 409 + AlreadySucceeded) |
 | `/admin/dlq/dry-run` | POST | `{queue, limit=20, queue_kind}` | `{plan: [{message_id, will_clear_idempotent: bool, target_queue}, ...]}` |
 | `/admin/dlq/requeue` | POST | `{queue, queue_kind, limit=20, clear_idempotent=false}` | `{requeued: N, audit_id}` |
 
@@ -216,13 +228,20 @@ async def _route_consumer_exception(exc, *, wire, inflight_key, data, attempts):
 
 **inspect**：调 RabbitMQ Management HTTP API `GET /api/queues/{vhost}/{queue}/get`，参数 `ackmode=ack_requeue_true`（peek 不消费）。解 envelope 拿 trace_id / data_type / attempts；`first_failed_at` 不在 envelope 里，按 trace_id JOIN `runtime_inflight` 取 `created_at` 当 first_failed_at（7a 状态机已 ship，inflight 行在 first attempt 时 INSERT）。如果 inflight 行已被 clear，first_failed_at 字段返回 null。
 
-**clear-idempotent**：在 `runtime/inflight.py` 新增 `delete_inflight(*, by, trace_id=None, edge_id=None, idempotent_key=None) -> int`（7a 故意没做，留给 7b）。两种入参模式：
-- `by="trace_id"`：按 trace_id 删该 trace 下所有 inflight 行（适合「整条业务流重投」）
-- `by="edge_idempotent"`：按 `(edge_id, idempotent_key)` 复合 PK 精确删一行（适合「单条消息重投」）
+**clear-idempotent**：在 `runtime/inflight.py` 新增 `delete_inflight(*, by, trace_id=None, edge_id=None, idempotent_key=None) -> DeleteOutcome`（7a 故意没做，留给 7b）。两种入参模式行为不同（接受 reviewer round-4 finding 2）：
 
-endpoint 调它，互斥参数（同时给会报 400）。
+- **`by="edge_idempotent"`**（精确单消息 replay）：
+  - 先 SELECT 目标行 state
+  - state == 'succeeded' → 抛 `AlreadySucceededError`，不删任何行（zombie 路径，6-step 协议依赖此）
+  - 其他 state（processing / failed / review） → DELETE 单行
+  - 返回 `DeleteOutcome(deleted=0|1, skipped_succeeded=0)`
 
-**state filter（接受 reviewer round-3 finding 2）**：`delete_inflight` 内部 WHERE 加 `state != 'succeeded'`——只删非 succeeded 的行；如果检测到匹配的行已是 succeeded，**抛 `AlreadySucceededError`**，不删任何行。理由见 6-step 协议失败分析（下文）。
+- **`by="trace_id"`**（整 trace replay，trace 内多 edge 混合 state 是常态）：
+  - DELETE WHERE trace_id=:t AND state != 'succeeded'
+  - 保留 succeeded 行（已成功消费过的 edge 不重跑）
+  - 返回 `DeleteOutcome(deleted=N, skipped_succeeded=M)`，**永不抛 AlreadySucceededError**
+
+endpoint 调它，互斥参数（同时给会报 400）。返回体把 `skipped_succeeded` 透传到 `/admin/dlq/clear-idempotent` 响应供运维知情。
 
 **dry-run**：跑 inspect + 模拟 clear（不真改 DB / queue），给运维看 replay 计划。
 
@@ -231,7 +250,7 @@ endpoint 调它，互斥参数（同时给会报 400）。
 ```
 1. msg = basic_get(no_ack=False)             # message 进 unack 状态，未 ack 不丢
 2. INSERT runtime_dlq_audit (status=cleared, recovery_token=msg_id, ...)  # 必须先于改状态
-3. delete_inflight(...)                      # 清 idempotent，让 consumer 不 dedup
+3. delete_inflight(by='edge_idempotent', edge_id=..., idempotent_key=...)  # 精确单行，遇 succeeded 抛 AlreadySucceededError
 4. publish_with_confirm(原 queue, envelope)  # 重投；从 envelope 重建 propagation
 5. UPDATE runtime_dlq_audit SET status='requeued'
 6. msg.ack()                                 # 真正消费走 DLQ 消息
@@ -343,7 +362,12 @@ class OutboxEmitter:
     """事务内 append outbox 行；commit 后由 dispatcher 异步 emit。"""
     def __init__(self, session: AsyncSession): ...
     async def append(self, data: Data) -> None:
-        # 1. 取当前 propagation context：origin_app=APP_NAME, lane=lane_var.get(), trace_id=trace_id_var.get()
+        # 1. 取当前 propagation context（用归一化函数，与 dispatcher 同源）：
+        #    - origin_app = _current_app()                # APP_NAME env
+        #    - lane = current_lane()                       # infra/rabbitmq.py:122：lane_var → LANE env → prod 归 None
+        #    - trace_id = trace_id_var.get()
+        #    **不允许**裸用 lane_var.get()——后台路径 contextvar 未绑定时会写出 NULL，
+        #    与 dispatcher 的 current_lane() 过滤不同源，导致 prod dispatcher 抓走 dev 泳道 row（reviewer round-4 finding 3）
         # 2. payload_json = data.model_dump(mode='json')
         #    data_type = f"{cls.__module__}.{cls.__qualname__}"
         # 3. session.execute(INSERT runtime_outbox (data_type, payload_json, origin_app, lane,
@@ -394,7 +418,8 @@ async def dispatcher_loop(*, batch_size: int = 32, idle_sleep_ms: int = 200):
                 ORDER BY id
                 LIMIT :n
                 FOR UPDATE SKIP LOCKED
-            """), {"n": batch_size, "app": _current_app(), "lane": _current_lane()})
+            """), {"n": batch_size, "app": _current_app(), "lane": current_lane()})
+            # current_lane() 同 OutboxEmitter.append 同源（infra/rabbitmq.py:122），保证写读用同一归一化
             for row in rows:
                 try:
                     # 1. 重建 origin app/lane/trace propagation context
@@ -428,7 +453,7 @@ async def dispatcher_loop(*, batch_size: int = 32, idle_sleep_ms: int = 200):
 - backoff：失败 `5s * 2^attempts`（attempt=0 立即；1=5s；2=20s；3=45s；…）
 - **永不主动判 fail**：dispatcher 永远 retry（broker 故障最终会恢复），到达上限的运维侧 alert（监控信号 `runtime_outbox.attempts > 10` 计数）
 - propagation context 从 row 重建（dispatcher 跟原业务调用栈解耦）—— `origin_app` / `lane` / `trace_id` 已在 §4.1 schema 中
-- **dispatcher 按 (origin_app, lane) 复合过滤**（接受 reviewer round-3 finding 1）：APP_NAME 是进程角色（agent-service / arq-worker / vectorize-worker），不含 lane；lane 单独从 `lane_var` / LANE env 拿，prod 归一成 NULL。如果只按 origin_app 过滤，dev 泳道 pod（如 agent-service-feat-x，APP_NAME 仍为 'agent-service'）会跟 prod pod 抢同一行 outbox。复合过滤后每个 (deployment, lane) 的 dispatcher 只看自己 lane 的 row，跨 lane 不互相影响
+- **dispatcher 按 (origin_app, lane) 复合过滤**（接受 reviewer round-3 finding 1 + round-4 finding 3）：APP_NAME 是进程角色（agent-service / arq-worker / vectorize-worker），不含 lane；lane 用 `infra/rabbitmq.py:122` 已有的 `current_lane()` 归一函数（lane_var → LANE env → prod 归 None）。**OutboxEmitter.append 写入 lane 与 dispatcher 过滤 lane 必须同源用 `current_lane()`**——不允许 append 裸读 lane_var.get()（后台路径 contextvar 未绑定时会写 NULL，prod dispatcher 抓走错乱）。如果只按 origin_app 过滤，dev 泳道 pod（如 agent-service-feat-x，APP_NAME 仍为 'agent-service'）会跟 prod pod 抢同一行 outbox。复合过滤后每个 (deployment, lane) 的 dispatcher 只看自己 lane 的 row，跨 lane 不互相影响
 
 **at-least-once 性质**（接受 reviewer P1-2）：dispatcher 是「先 emit 成功再 update DB」——publish/in-process 完成后 UPDATE 到 dispatched 之间崩溃，下一个 dispatcher loop 会再次抓到该 row 重发。consumer 端 `runtime_inflight` 状态机（7a 已 ship）按 `(edge_id, idempotent_key)` 兜底 dedup，业务效果一次。drill 验收措辞要明确这一点（§6.4 drill G）。
 
@@ -549,7 +574,7 @@ grep word-boundary 仍会命中 docstring 反引号包裹的 ``await emit(...)``
 | 1 | spec | `docs(spec): Phase 7b reliability + error policy + outbox plan` |
 | 2 | Gap 18 | `feat(runtime): typed errors (DuplicateData / NeedsReview) + wire .on_error() builder` |
 | 3 | Gap 18 | `feat(runtime): durable handler routes by error policy (single-except + helper)` |
-| 4 | Gap 18 | `feat(runtime): manual-review queue + publish_to_review_queue` |
+| 4 | Gap 18 | `feat(runtime): manual-review queue + publish_to_review_queue + claim_inflight skip review` |
 | 5 | Gap 18 | `refactor(nodes): drop "不要 catch" comment + explicit .on_error("dlq")` |
 | 6 | Gap 12 | `feat(runtime): inflight.delete_inflight() + RabbitMQ management client` |
 | 7 | Gap 12 | `feat(runtime): admin DLQ endpoints + audit_log (6-step transaction-like requeue)` |
@@ -638,6 +663,7 @@ grep -rn "# 不要 catch\|# don't catch\|requeue=False\|nack" \
 | G | 多 pod dispatcher 并发：两个同 (origin_app, lane) pod 同时跑 | 同一 row 只被一个 pod 发（FOR UPDATE SKIP LOCKED 生效）；durable wire 路径下游 `runtime_inflight` dedup 后业务效果一次；in-process wire 路径**重发即重跑**（§4.7 约束保证 in-process consumer 无副作用 / 自幂等）|
 | G2 | 跨 lane 隔离：feat-x 泳道触发 mutation 写 outbox row → prod dispatcher **不抓** | prod dispatcher 不抓 lane='feat-x' row；只 feat-x pod 的 dispatcher 抓走 emit |
 | H | publish-confirm fall-through：retry envelope publish 失败 / review queue publish 失败 | helper raise → 进 DLQ；inflight state='failed'；DLQ 消息可被后续 replay |
+| I | review 状态消息回流：将一条 inflight state='review' 的 (edge_id, idempotent_key) 对应 Data 重新投到 durable queue | claim_inflight skip（action='skip'），consumer **不**执行；review queue 不重复增加消息 |
 
 drill 全过 + 写 retrospective `docs/superpowers/retrospectives/2026-MM-DD-phase7b-drill.md`。
 
