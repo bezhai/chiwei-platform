@@ -13,6 +13,7 @@ needed to write a node and may change without notice.
 
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
 from app.runtime.emit import emit, emit_at, emit_delayed
+from app.runtime.errors import DuplicateData, NeedsReview
 from app.runtime.node import node
 from app.runtime.placement import bind
 from app.runtime.query import query
@@ -24,7 +25,9 @@ __all__ = [
     "AdminOnly",
     "Data",
     "DedupKey",
+    "DuplicateData",
     "Key",
+    "NeedsReview",
     "Version",
     "Sink",
     "Source",
