@@ -10,6 +10,7 @@ from app.infra.rabbitmq import (
     ALL_ROUTES,
     CHAT_REQUEST,
     CHAT_RESPONSE,
+    DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
     EXCHANGE_NAME,
     MEMORY_ABSTRACT_VECTORIZE,
@@ -190,11 +191,14 @@ class TestRouteConstants:
             VECTORIZE,
             MEMORY_FRAGMENT_VECTORIZE,
             MEMORY_ABSTRACT_VECTORIZE,
+            *DELAYED_TRIGGER_ROUTES,
         }
         assert set(ALL_ROUTES) == expected
 
-    def test_all_routes_have_six_entries(self):
-        assert len(ALL_ROUTES) == 6
+    def test_all_routes_match_business_plus_delayed_trigger(self):
+        # 6 business routes + one runtime_delayed_trigger route per
+        # KNOWN_APPS_FOR_DELAYED_TRIGGER entry (Phase 7a Gap 9.1.2).
+        assert len(ALL_ROUTES) == 6 + len(DELAYED_TRIGGER_ROUTES)
 
     def test_each_route_has_queue_and_rk(self):
         for route in ALL_ROUTES:

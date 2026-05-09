@@ -137,12 +137,10 @@ def _patch_runtime(monkeypatch, redis_fake, mq_fake):
         "app.runtime.debounce.get_redis", AsyncMock(return_value=redis_fake)
     )
     monkeypatch.setattr("app.runtime.debounce.mq", mq_fake)
-    monkeypatch.setattr(
-        "app.runtime.debounce.trace_id_var", MagicMock(get=lambda: "")
-    )
-    monkeypatch.setattr(
-        "app.runtime.debounce.lane_var", MagicMock(get=lambda: "")
-    )
+    # Phase 7a: debounce no longer reads contextvars directly; trace_id /
+    # lane flow through runtime.propagation.inject_context. Tests don't
+    # need to mock the contextvars — get() returns None when unset, which
+    # propagation tolerates.
 
 
 # ---------------------------------------------------------------------------
