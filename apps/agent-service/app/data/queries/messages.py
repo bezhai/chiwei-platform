@@ -6,7 +6,6 @@ Operates on tables: ``ConversationMessage``, ``LarkUser``,
 from __future__ import annotations
 
 from sqlalchemy import func, or_
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import (
@@ -16,6 +15,7 @@ from app.data.models import (
     LarkGroupMember,
     LarkUser,
 )
+from app.runtime.db import auto_tx, current_session
 
 __all__ = [
     "find_cross_chat_messages",
@@ -34,7 +34,6 @@ __all__ = [
 
 
 async def find_cross_chat_messages(
-    session: AsyncSession,
     user_id: str,
     bot_names: list[str],
     exclude_chat_id: str,
@@ -64,102 +63,103 @@ async def find_cross_chat_messages(
     )
     if excluded_chat_ids:
         stmt = stmt.where(~ConversationMessage.chat_id.in_(excluded_chat_ids))
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
-async def find_message_content(session: AsyncSession, message_id: str) -> str | None:
+async def find_message_content(message_id: str) -> str | None:
     """Fetch message content by message_id."""
     stmt = select(ConversationMessage.content).where(
         ConversationMessage.message_id == message_id
     )
-    return await session.scalar(stmt)
+    async with auto_tx():
+        return await current_session().scalar(stmt)
 
 
 async def find_messages_in_range(
-    session: AsyncSession,
     chat_id: str,
     start_time: int,
     end_time: int,
     limit: int = 2000,
 ) -> list[ConversationMessage]:
     """Fetch messages in a chat within a time range (ascending)."""
-    result = await session.execute(
-        select(ConversationMessage)
-        .where(ConversationMessage.chat_id == chat_id)
-        .where(ConversationMessage.create_time >= start_time)
-        .where(ConversationMessage.create_time < end_time)
-        .order_by(ConversationMessage.create_time.asc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
-async def find_username(session: AsyncSession, user_id: str) -> str | None:
-    """Look up display name from lark_user by union_id."""
-    result = await session.execute(
-        select(LarkUser.name).where(LarkUser.union_id == user_id)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_group_name(session: AsyncSession, chat_id: str) -> str | None:
-    """Look up group name from lark_group_chat_info."""
-    result = await session.execute(
-        select(LarkGroupChatInfo.name).where(LarkGroupChatInfo.chat_id == chat_id)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_group_download_permission(
-    session: AsyncSession, chat_id: str
-) -> str | None:
-    """Fetch download_has_permission_setting for a group chat, or None."""
-    result = await session.execute(
-        select(LarkGroupChatInfo.download_has_permission_setting).where(
-            LarkGroupChatInfo.chat_id == chat_id
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage)
+            .where(ConversationMessage.chat_id == chat_id)
+            .where(ConversationMessage.create_time >= start_time)
+            .where(ConversationMessage.create_time < end_time)
+            .order_by(ConversationMessage.create_time.asc())
+            .limit(limit)
         )
-    )
-    return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
 
-async def find_message_by_id(
-    session: AsyncSession, message_id: str
-) -> ConversationMessage | None:
+async def find_username(user_id: str) -> str | None:
+    """Look up display name from lark_user by union_id."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkUser.name).where(LarkUser.union_id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_group_name(chat_id: str) -> str | None:
+    """Look up group name from lark_group_chat_info."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkGroupChatInfo.name).where(LarkGroupChatInfo.chat_id == chat_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_group_download_permission(chat_id: str) -> str | None:
+    """Fetch download_has_permission_setting for a group chat, or None."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkGroupChatInfo.download_has_permission_setting).where(
+                LarkGroupChatInfo.chat_id == chat_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_message_by_id(message_id: str) -> ConversationMessage | None:
     """Fetch full message object by message_id."""
-    result = await session.execute(
-        select(ConversationMessage).where(ConversationMessage.message_id == message_id)
-    )
-    return result.scalar_one_or_none()
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage).where(ConversationMessage.message_id == message_id)
+        )
+        return result.scalar_one_or_none()
 
 
-async def resolve_message_id_by_row_id(
-    session: AsyncSession, row_id: str | int
-) -> str | None:
+async def resolve_message_id_by_row_id(row_id: str | int) -> str | None:
     """Resolve int row id to lark message_id (om_xxx). Returns None if not found."""
     try:
         rid = int(row_id)
     except (ValueError, TypeError):
         return None
-    result = await session.execute(
-        select(ConversationMessage.message_id).where(ConversationMessage.id == rid)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_last_bot_reply_time(session: AsyncSession, chat_id: str) -> int:
-    """Return the latest assistant reply create_time (ms) in a chat, or 0."""
-    result = await session.execute(
-        select(func.max(ConversationMessage.create_time)).where(
-            ConversationMessage.chat_id == chat_id,
-            ConversationMessage.role == "assistant",
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage.message_id).where(ConversationMessage.id == rid)
         )
-    )
-    return result.scalar_one_or_none() or 0
+        return result.scalar_one_or_none()
+
+
+async def find_last_bot_reply_time(chat_id: str) -> int:
+    """Return the latest assistant reply create_time (ms) in a chat, or 0."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(func.max(ConversationMessage.create_time)).where(
+                ConversationMessage.chat_id == chat_id,
+                ConversationMessage.role == "assistant",
+            )
+        )
+        return result.scalar_one_or_none() or 0
 
 
 async def find_context_messages_for_anchors(
-    session: AsyncSession,
     chat_id: str,
     anchor_message_ids: list[str],
     anchor_timestamps: list[int],
@@ -195,12 +195,12 @@ async def find_context_messages_for_anchors(
         )
         .order_by(ConversationMessage.create_time.asc())
     )
-    result = await session.execute(stmt)
-    return list(result.all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.all())
 
 
 async def find_group_members(
-    session: AsyncSession,
     chat_id: str,
     role: str | None = None,
 ) -> list[tuple[LarkGroupMember, LarkUser]]:
@@ -221,11 +221,12 @@ async def find_group_members(
     elif role == "manager":
         stmt = stmt.where(LarkGroupMember.is_manager)
 
-    result = await session.execute(stmt)
-    return list(result.all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.all())
 
 
-async def find_gray_config(session: AsyncSession, message_id: str) -> dict | None:
+async def find_gray_config(message_id: str) -> dict | None:
     """Look up gray_config for the chat that a message belongs to."""
     stmt = (
         select(LarkBaseChatInfo.gray_config)
@@ -235,4 +236,5 @@ async def find_gray_config(session: AsyncSession, message_id: str) -> dict | Non
         )
         .where(ConversationMessage.message_id == message_id)
     )
-    return await session.scalar(stmt)
+    async with auto_tx():
+        return await current_session().scalar(stmt)
