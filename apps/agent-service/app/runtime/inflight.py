@@ -211,4 +211,3 @@ async def mark_review(*, edge_id: str, idempotent_key: str) -> None:
             "    updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
         ), {"e": edge_id, "k": idempotent_key})
-        await s.commit()

@@ -345,17 +345,6 @@ def compile_graph() -> CompiledGraph:
                 f"main-service endpoint that publishes to MQ explicitly."
             )
 
-    # Phase 7b Gap 18: validate review queue names for durable wires that
-    # opted into on_error='manual-review'. Idempotent — just computes Route
-    # objects at compile time so name errors surface at startup. Broker
-    # declaration happens in start_consumers() where mq is connected.
-    for w in wires:
-        if not w.durable or w.on_error != "manual-review":
-            continue
-        from app.runtime.review_queue import _route_for_review, review_queue_name_for
-        for c in w.consumers:
-            _route_for_review(review_queue_name_for(w, c))
-
     data_types: set[type[Data]] = {w.data_type for w in wires} | {
         t for w in wires for t in w.with_latest
     }
