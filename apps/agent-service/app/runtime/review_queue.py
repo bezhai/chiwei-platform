@@ -30,7 +30,7 @@ def review_queue_name_for(wire: WireSpec, consumer: Callable) -> str:
     return f"durable_{data_snake}_{consumer.__name__}_review"
 
 
-def _route_for_review(queue: str) -> Route:
+def route_for_review(queue: str) -> Route:
     """Build a Route for a review queue.
 
     Review queues are simple direct-bound queues with no DLX and
@@ -55,7 +55,7 @@ async def publish_to_review_queue(
     falls through to DLQ raise (helper contract).
     """
     queue = review_queue_name_for(wire, consumer)
-    route = _route_for_review(queue)
+    route = route_for_review(queue)
     body = {
         "data": data.model_dump(mode="json"),
         "data_type": f"{type(data).__module__}.{type(data).__qualname__}",

@@ -63,7 +63,11 @@ from app.runtime.propagation import (
     inject_context,
 )
 from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry
-from app.runtime.review_queue import publish_to_review_queue
+from app.runtime.review_queue import (
+    publish_to_review_queue,
+    review_queue_name_for,
+    route_for_review,
+)
 from app.runtime.wire import WireSpec
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
@@ -285,7 +289,8 @@ async def _route_consumer_exception(
             await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
                               last_error=last_error)
             raise exc
-        await mark_review(edge_id=edge_id, idempotent_key=idem_key)
+        await mark_review(edge_id=edge_id, idempotent_key=idem_key,
+                          last_error=last_error)
         return
 
     # 2. generic Exception path (incl. typed exceptions in mismatched policies)
@@ -333,7 +338,8 @@ async def _route_consumer_exception(
                 edge_id, idem_key,
             )
             raise exc
-        await mark_review(edge_id=edge_id, idempotent_key=idem_key)
+        await mark_review(edge_id=edge_id, idempotent_key=idem_key,
+                          last_error=last_error)
         return
 
     raise exc  # default on_error="dlq" -> caller's process(requeue=False)
@@ -410,11 +416,7 @@ async def start_consumers(app_name: str | None = None) -> None:
             # into on_error='manual-review'. No consumer — it's a terminal
             # inspect-only queue; operators replay via admin endpoints.
             if w.on_error == "manual-review":
-                from app.runtime.review_queue import (
-                    _route_for_review,
-                    review_queue_name_for,
-                )
-                review_route = _route_for_review(review_queue_name_for(w, consumer))
+                review_route = route_for_review(review_queue_name_for(w, consumer))
                 await mq.declare_route(review_route)
                 logger.info(
                     "review queue declared: %s",

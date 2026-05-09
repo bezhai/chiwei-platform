@@ -60,5 +60,12 @@ async def test_mark_review_writes_review_state(inflight_db: object) -> None:
             "data_table, state, attempts) VALUES (:e, :k, 't', 'processing', 1)"
         ), {"e": edge, "k": key})
         await s.commit()
-    await mark_review(edge_id=edge, idempotent_key=key)
-    assert await _row_state(edge, key) == "review"
+    await mark_review(edge_id=edge, idempotent_key=key,
+                      last_error="needs operator approval")
+    async with get_session() as s:
+        row = (await s.execute(text(
+            "SELECT state, last_error FROM runtime_inflight "
+            "WHERE edge_id=:e AND idempotent_key=:k"
+        ), {"e": edge, "k": key})).mappings().first()
+    assert row["state"] == "review"
+    assert row["last_error"] == "needs operator approval"
