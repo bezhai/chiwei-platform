@@ -43,6 +43,7 @@ from aio_pika.abc import AbstractIncomingMessage
 from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.runtime.data import Data
+from app.runtime.errors import DuplicateData, NeedsReview
 from app.runtime.inflight import (
     claim_inflight,
     edge_id_for,
@@ -67,6 +68,10 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 _DEFAULT_LEASE_MS = 300_000  # 5 min — only used when wire has no .retry()
 
 logger = logging.getLogger(__name__)
+
+# Module-level alias so tests can patch "app.runtime.durable.publish_with_confirm"
+# without needing to reach into mq.publish_with_confirm.
+publish_with_confirm = mq.publish_with_confirm
 
 
 def _route_for(w: WireSpec, consumer: Callable) -> Route:
@@ -214,67 +219,131 @@ def _build_handler(w: WireSpec, consumer: Callable):
                 )
                 try:
                     await consumer(**{param_name: obj})
-                except Exception as e:
-                    await mark_failed(
+                except Exception as exc:
+                    await _route_consumer_exception(
+                        exc, wire=w, consumer=consumer,
+                        inflight_key=(edge_id, idem_key),
+                        data=obj, attempts=outcome.attempts,
+                        headers=dict(message.headers or {}),
+                    )
+                else:
+                    await mark_succeeded(
                         edge_id=edge_id,
                         idempotent_key=idem_key,
-                        last_error=f"{type(e).__name__}: {e!s}",
                     )
-                    # Retry transport (Gap 7.2): if wire has retry policy
-                    # and budget remains, publish-with-confirm a delayed
-                    # copy carrying x-delivery-count++. On confirm: ack
-                    # the original (broker now owns the retry copy). On
-                    # confirm failure: re-raise → process(requeue=False)
-                    # nacks → DLQ as fallback (operator can replay).
-                    decision = decide_retry(
-                        headers=message.headers,
-                        policy=w.retry,
-                    )
-                    if decision.action == "retry":
-                        new_headers = dict(message.headers or {})
-                        new_headers[DELIVERY_COUNT_HEADER] = decision.attempt
-                        body_dict = json.loads(message.body)
-                        retry_lane = new_headers.get("lane") or None
-                        if isinstance(retry_lane, str) and not retry_lane:
-                            retry_lane = None
-                        route = _route_for(w, consumer)
-                        confirmed = await mq.publish_with_confirm(
-                            route,
-                            body_dict,
-                            headers=new_headers,
-                            lane=retry_lane,
-                            delay_ms=decision.delay_ms,
-                        )
-                        if confirmed:
-                            logger.info(
-                                "durable consumer %s: retry queued "
-                                "attempt=%d delay_ms=%d key=%s",
-                                consumer.__name__,
-                                decision.attempt,
-                                decision.delay_ms,
-                                idem_key,
-                            )
-                            # Return WITHOUT message.ack(): the enclosing
-                            # ``async with message.process(requeue=False)``
-                            # context manager will ack on clean exit.
-                            # An explicit ack here would be a double-ack
-                            # (process __aexit__ raises MessageProcessError
-                            # = "Message already processed"), which we
-                            # observed in dev-phase7a drill 2.
-                            return
-                        logger.warning(
-                            "durable consumer %s: retry publish-confirm "
-                            "failed, falling through to DLQ key=%s",
-                            consumer.__name__,
-                            idem_key,
-                        )
-                    raise
-                await mark_succeeded(
-                    edge_id=edge_id,
-                    idempotent_key=idem_key,
-                )
 
     return handler
+
+
+async def _route_consumer_exception(
+    exc: BaseException,
+    *,
+    wire: WireSpec,
+    consumer: Callable,
+    inflight_key: tuple[str, str],
+    data: Data,
+    attempts: int,
+    headers: dict | None = None,
+) -> None:
+    """Phase 7b Gap 18: dispatch a consumer exception per wire.on_error.
+
+    Contract:
+      - return -> 'handled' path: caller's ``async with message.process(...)``
+        will ack on clean exit. inflight terminal state is updated here.
+      - raise  -> 'dlq' path: caller's ``process(requeue=False)`` will nack
+        and the broker will route to DLX. Always re-raises the ORIGINAL
+        exception (so DLQ message body keeps the cause).
+
+    Helper itself NEVER calls message.ack() / message.nack() — see project
+    memory feedback_aio_pika_process_context_double_ack.
+    """
+    edge_id, idem_key = inflight_key
+    last_error = str(exc)
+
+    # 1. typed exception in matching policy
+    if isinstance(exc, DuplicateData) and wire.on_error == "ignore-duplicate":
+        logger.warning(
+            "durable consumer: duplicate ignored (edge=%s key=%s reason=%s)",
+            edge_id, idem_key, last_error,
+        )
+        await mark_succeeded(edge_id=edge_id, idempotent_key=idem_key)
+        return
+
+    if isinstance(exc, NeedsReview) and wire.on_error == "manual-review":
+        confirmed = await publish_to_review_queue(
+            wire=wire, data=data, exc=exc,
+            attempts=attempts, last_error=last_error,
+        )
+        if not confirmed:
+            logger.warning(
+                "durable consumer: review queue publish-confirm failed, "
+                "falling through to DLQ (edge=%s key=%s)",
+                edge_id, idem_key,
+            )
+            await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
+                              last_error=last_error)
+            raise exc
+        await mark_review(edge_id=edge_id, idempotent_key=idem_key)
+        return
+
+    # 2. generic Exception path (incl. typed exceptions in mismatched policies)
+    await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
+                      last_error=last_error)
+    decision = decide_retry(
+        headers=headers or {},
+        policy=wire.retry,
+    )
+    if decision.action == "retry":
+        new_headers = dict(headers or {})
+        new_headers[DELIVERY_COUNT_HEADER] = decision.attempt
+        body = data.model_dump(mode="json") if hasattr(data, "model_dump") else {}
+        retry_lane = new_headers.get("lane") or None
+        if isinstance(retry_lane, str) and not retry_lane:
+            retry_lane = None
+        route = _route_for(wire, consumer) if hasattr(wire, "data_type") else None
+        confirmed = await publish_with_confirm(
+            route, body, headers=new_headers,
+            lane=retry_lane, delay_ms=decision.delay_ms,
+        )
+        if not confirmed:
+            logger.warning(
+                "durable consumer: retry publish-confirm failed, falling "
+                "through to DLQ (edge=%s key=%s attempt=%d)",
+                edge_id, idem_key, decision.attempt,
+            )
+            raise exc
+        logger.info(
+            "durable consumer: retry queued attempt=%d delay_ms=%d key=%s",
+            decision.attempt, decision.delay_ms, idem_key,
+        )
+        return
+
+    # 3. dlq fallback (.on_error("manual-review") with retry-exhausted handled here too)
+    if wire.on_error == "manual-review":
+        confirmed = await publish_to_review_queue(
+            wire=wire, data=data, exc=exc,
+            attempts=attempts, last_error=last_error,
+        )
+        if not confirmed:
+            logger.warning(
+                "durable consumer: review queue publish-confirm failed, "
+                "falling through to DLQ (edge=%s key=%s)",
+                edge_id, idem_key,
+            )
+            raise exc
+        await mark_review(edge_id=edge_id, idempotent_key=idem_key)
+        return
+
+    raise exc  # default on_error="dlq" -> caller's process(requeue=False)
+
+
+# Phase 7b temporary stubs — replaced in Task 3 when manual-review queue lands.
+async def publish_to_review_queue(*args, **kwargs):  # pragma: no cover
+    raise NotImplementedError("manual-review queue not yet wired (Task 3)")
+
+
+async def mark_review(*args, **kwargs):  # pragma: no cover
+    raise NotImplementedError("manual-review marking not yet wired (Task 3)")
 
 
 async def start_consumers(app_name: str | None = None) -> None:
