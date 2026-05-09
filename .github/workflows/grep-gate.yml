@@ -64,9 +64,24 @@ jobs:
           c=$(grep -rn '\bawait emit(' \
               apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
               apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ apps/agent-service/app/long_tasks/ \
+              apps/agent-service/app/memory/ \
               --include='*.py' 2>/dev/null | wc -l)
           [ "$c" -eq 14 ] || { echo "Gap 8 violation: business await emit count=$c, expected 14"; exit 1; }
+      - name: Gap 15 — no arq imports, no arq dependency
+        shell: bash
+        run: |
+          set -e
+          # Phase 7c retired the arq-worker Deployment and the long_tasks
+          # subsystem. Nothing in agent-service should import arq, and
+          # arq must not appear in pyproject.toml.
+          c=$(grep -rn -E "from arq|enqueue_job|create_pool" \
+              apps/agent-service/app/ 2>/dev/null \
+              | grep -v "__pycache__\|/test_" | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 15 violation: $c arq import/call sites"; exit 1; }
+          if grep -qE '^[[:space:]]*"arq[[:space:]>=<]' apps/agent-service/pyproject.toml; then
+              echo "Gap 15 violation: arq still in apps/agent-service/pyproject.toml"
+              exit 1
+          fi
       - name: Gap 8 — no commit-then-emit comments
         shell: bash
         run: |
@@ -106,7 +121,7 @@ jobs:
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
 
   open-gap-baseline:
-    name: Open-gap baseline no-new (Gap 13/14/15/16/19)
+    name: Open-gap baseline no-new (Gap 13/14/16/19)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,17 +137,13 @@ jobs:
                   r"get_session\(|AsyncSessionLocal",
                   ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
                    "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
-                   "apps/agent-service/app/memory/", "apps/agent-service/app/long_tasks/"],
+                   "apps/agent-service/app/memory/"],
               ),
               "gap_14_redis_setnx_business": (
                   r"redis\.set\(.*nx=True|redis\.eval\(|redis\.smembers\(|redis\.sadd\(",
                   ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
                    "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
                    "apps/agent-service/app/memory/"],
-              ),
-              "gap_15_arq_imports": (
-                  r"from arq|enqueue_job|create_pool",
-                  ["apps/agent-service/app/"],
               ),
               "gap_16_httpx_business": (
                   r"import httpx|from httpx",
