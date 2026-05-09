@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,13 +17,16 @@ class _FakeWire:
 
 
 # We'll import the helper after it exists; keep a thin wrapper.
-async def _call_helper(*, exc, wire, **kw):
+async def _call_helper(*, exc, wire, data=None, **kw):
     from app.runtime.durable import _route_consumer_exception
     async def _fake_consumer(): pass
+    if data is None:
+        data = MagicMock()
+        data.model_dump.return_value = {}
     return await _route_consumer_exception(
         exc, wire=wire, consumer=_fake_consumer,
         inflight_key=("edge", "key"),
-        data=object(), attempts=kw.get("attempts", 1),
+        data=data, attempts=kw.get("attempts", 1),
         headers={},
     )
 
@@ -78,6 +81,7 @@ async def test_generic_retry_publish_confirmed_acks_silently():
     wire = _FakeWire(on_error="dlq")
     with patch("app.runtime.durable.mark_failed", new=AsyncMock()), \
          patch("app.runtime.durable.decide_retry") as dr, \
+         patch("app.runtime.durable._route_for", return_value=("queue", "key")), \
          patch("app.runtime.durable.publish_with_confirm", new=AsyncMock(return_value=True)):
         dr.return_value = type("D", (), {"action": "retry", "attempt": 2, "delay_ms": 100})()
         # retry envelope publish; helper returns (ack)
@@ -89,6 +93,7 @@ async def test_generic_retry_publish_unconfirmed_falls_through_to_dlq():
     wire = _FakeWire(on_error="dlq")
     with patch("app.runtime.durable.mark_failed", new=AsyncMock()), \
          patch("app.runtime.durable.decide_retry") as dr, \
+         patch("app.runtime.durable._route_for", return_value=("queue", "key")), \
          patch("app.runtime.durable.publish_with_confirm", new=AsyncMock(return_value=False)):
         dr.return_value = type("D", (), {"action": "retry", "attempt": 2, "delay_ms": 100})()
         original = RuntimeError("boom")

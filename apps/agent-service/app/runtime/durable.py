@@ -296,11 +296,11 @@ async def _route_consumer_exception(
     if decision.action == "retry":
         new_headers = dict(headers or {})
         new_headers[DELIVERY_COUNT_HEADER] = decision.attempt
-        body = data.model_dump(mode="json") if hasattr(data, "model_dump") else {}
+        body = data.model_dump(mode="json")
         retry_lane = new_headers.get("lane") or None
         if isinstance(retry_lane, str) and not retry_lane:
             retry_lane = None
-        route = _route_for(wire, consumer) if hasattr(wire, "data_type") else None
+        route = _route_for(wire, consumer)
         confirmed = await publish_with_confirm(
             route, body, headers=new_headers,
             lane=retry_lane, delay_ms=decision.delay_ms,
