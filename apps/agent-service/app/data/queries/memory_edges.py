@@ -103,8 +103,10 @@ async def insert_note(
     when_at: datetime | None = None,
 ) -> None:
     async with auto_tx():
+        s = current_session()
         n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
-        current_session().add(n)
+        s.add(n)
+        await s.flush()
 
 
 async def get_active_notes(persona_id: str) -> list[Note]:

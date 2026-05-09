@@ -24,13 +24,6 @@ def _make_emit_tx_mock():
     return _fake_emit_tx, captured
 
 
-def _fake_current_session():
-    """Return a stub session whose .flush() is a no-op AsyncMock."""
-    s = MagicMock()
-    s.flush = AsyncMock()
-    return s
-
-
 @pytest.mark.asyncio
 async def test_write_note_creates_and_returns_id_with_active_list():
     from app.domain.agent_tool_events import NoteCreated
@@ -41,10 +34,9 @@ async def test_write_note_creates_and_returns_id_with_active_list():
         with patch("app.agent.tools.notes.get_active_notes", new=AsyncMock(return_value=active)):
             with patch("app.agent.tools.notes.tx", _fake_tx):
                 with patch("app.agent.tools.notes.emit_tx", fake_emit):
-                    with patch("app.agent.tools.notes.current_session", return_value=_fake_current_session()):
-                        out = await _write_note_impl(
-                            persona_id="chiwei", content="周五看电影", when_at=None,
-                        )
+                    out = await _write_note_impl(
+                        persona_id="chiwei", content="周五看电影", when_at=None,
+                    )
     assert "id" in out
     assert out["id"].startswith("n_")
     assert len(out["active_notes"]) == 1
@@ -110,10 +102,9 @@ async def test_write_note_passes_when_at_through():
         with patch("app.agent.tools.notes.get_active_notes", new=AsyncMock(return_value=[])):
             with patch("app.agent.tools.notes.tx", _fake_tx):
                 with patch("app.agent.tools.notes.emit_tx", fake_emit):
-                    with patch("app.agent.tools.notes.current_session", return_value=_fake_current_session()):
-                        out = await _write_note_impl(
-                            persona_id="chiwei", content="周五看电影", when_at=when,
-                        )
+                    out = await _write_note_impl(
+                        persona_id="chiwei", content="周五看电影", when_at=when,
+                    )
     assert ins.await_args.kwargs["when_at"] == when
     assert len(captured) == 1
     emitted = captured[0]
