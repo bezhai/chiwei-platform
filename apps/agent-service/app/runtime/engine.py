@@ -31,6 +31,7 @@ from app.runtime.data import DATA_REGISTRY
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
 from app.runtime.migrator import plan_migration
+from app.runtime.outbox_dispatcher import dispatcher_loop
 from app.runtime.placement import DEFAULT_APP, known_apps, nodes_for_app
 from app.runtime.source import SourceSpec
 from app.runtime.wire import WireSpec
@@ -68,6 +69,7 @@ class Runtime:
         # reporting the first one is enough to fail the pod fast.
         self._source_error: BaseException | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._outbox_dispatcher_task: asyncio.Task | None = None
 
     async def migrate_schema(self) -> None:
         """Read live schema from PostgreSQL, diff against ``DATA_REGISTRY``,
@@ -168,6 +170,9 @@ class Runtime:
                 self.app_name,
             )
         await start_consumers(app_name=self.app_name)
+        self._outbox_dispatcher_task = asyncio.create_task(
+            dispatcher_loop(), name="outbox_dispatcher"
+        )
         await self.start_source_loops()
         try:
             assert self._stop_event is not None
@@ -175,6 +180,12 @@ class Runtime:
         finally:
             await self.stop_source_loops()
             await stop_consumers()
+            if self._outbox_dispatcher_task is not None:
+                self._outbox_dispatcher_task.cancel()
+                try:
+                    await self._outbox_dispatcher_task
+                except asyncio.CancelledError:
+                    pass
 
         if self._source_error is not None:
             raise self._source_error
