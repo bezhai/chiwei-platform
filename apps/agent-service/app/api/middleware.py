@@ -144,6 +144,11 @@ HEADER_CONFIG: dict[str, dict[str, Any]] = {
         "default_factory": lambda: None,
         "required": False,
     },
+    "X-Operator": {
+        "var_name": "operator",
+        "default_factory": lambda: None,
+        "required": False,
+    },
 }
 
 for _header_name, _cfg in HEADER_CONFIG.items():
@@ -154,6 +159,8 @@ for _header_name, _cfg in HEADER_CONFIG.items():
 # directly (e.g. ``app.runtime.durable`` propagates these across RabbitMQ).
 trace_id_var = header_vars["trace_id"]
 lane_var = header_vars["lane"]
+# Phase 7b Gap 12: operator identity for DLQ admin audit trail.
+operator_var = header_vars["operator"]
 
 
 class HeaderContextMiddleware(BaseHTTPMiddleware):

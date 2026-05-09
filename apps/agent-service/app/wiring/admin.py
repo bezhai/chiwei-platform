@@ -70,3 +70,30 @@ wire(ScheduleCreateRequest).from_(
 wire(ScheduleDeleteRequest).from_(
     Source.http("/api/schedule/{schedule_id}", method="DELETE", response=True)
 ).to(delete_schedule_node)
+
+# Phase 7b Gap 12: DLQ admin endpoints.
+from app.domain.dlq_admin_events import (  # noqa: E402
+    DlqClearIdempotentRequest,
+    DlqDryRunRequest,
+    DlqInspectRequest,
+    DlqRequeueRequest,
+)
+from app.nodes.dlq_admin import (  # noqa: E402
+    dlq_clear_idempotent_node,
+    dlq_dry_run_node,
+    dlq_inspect_node,
+    dlq_requeue_node,
+)
+
+wire(DlqInspectRequest).from_(
+    Source.http("/admin/dlq/inspect", method="POST", response=True)
+).to(dlq_inspect_node)
+wire(DlqClearIdempotentRequest).from_(
+    Source.http("/admin/dlq/clear-idempotent", method="POST", response=True)
+).to(dlq_clear_idempotent_node)
+wire(DlqDryRunRequest).from_(
+    Source.http("/admin/dlq/dry-run", method="POST", response=True)
+).to(dlq_dry_run_node)
+wire(DlqRequeueRequest).from_(
+    Source.http("/admin/dlq/requeue", method="POST", response=True)
+).to(dlq_requeue_node)
