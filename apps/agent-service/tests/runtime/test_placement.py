@@ -39,4 +39,4 @@ def test_unbound_nodes_go_to_agent_service():
 def test_rebind_rejected():
     bind(worker_node).to_app("vectorize-worker")
     with pytest.raises(RuntimeError, match="already bound"):
-        bind(worker_node).to_app("arq-worker")
+        bind(worker_node).to_app("recall-worker")

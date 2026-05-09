@@ -114,14 +114,6 @@ class Settings:
         default_factory=lambda: _env_or_none("FORWARD_PROXY_URL")
     )
 
-    # -- Long task --
-    long_task_batch_size: int = field(
-        default_factory=lambda: _env_int("LONG_TASK_BATCH_SIZE", 5)
-    )
-    long_task_lock_timeout: int = field(
-        default_factory=lambda: _env_int("LONG_TASK_LOCK_TIMEOUT", 1800)
-    )
-
     # -- Lane (fallback for workers without HTTP context) --
     lane: str | None = field(default_factory=lambda: _env_or_none("LANE"))
 
