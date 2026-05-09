@@ -1,9 +1,10 @@
 name: dataflow grep gate
 
-# Phase 7a CI gate: closed-gap exact-zero + open-gap baseline.
+# Phase 7a/7b CI gate: closed-gap exact-zero + open-gap baseline.
 #
-# Closed gaps (Gap 7 / 9 / 11 from Phase 7a) must stay at zero
-# occurrences in business code; new violations block the PR.
+# Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 12 / 18 from
+# Phase 7b) must stay at zero occurrences in business code; new
+# violations block the PR.
 #
 # Open gaps (Gap 13 / 14 / 15 / 16 / 19 — slated for 7c/7d/7e) carry
 # a baseline count in .github/grep-baselines.json. PRs that increase
@@ -52,6 +53,57 @@ jobs:
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
               2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
+      - name: Gap 8 — business `await emit(` count == 14 (12 category-B + 2 docstring)
+        shell: bash
+        run: |
+          set -e
+          # The 7 category-A mutation sites migrated to transactional_emit
+          # in Task 10. Anyone adding a new category-A site MUST register
+          # it (spec §4.5.1) and update this count; otherwise the gate
+          # catches the regression.
+          c=$(grep -rn '\bawait emit(' \
+              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+              apps/agent-service/app/memory/ apps/agent-service/app/long_tasks/ \
+              --include='*.py' 2>/dev/null | wc -l)
+          [ "$c" -eq 14 ] || { echo "Gap 8 violation: business await emit count=$c, expected 14"; exit 1; }
+      - name: Gap 8 — no commit-then-emit comments
+        shell: bash
+        run: |
+          set -e
+          c=$(grep -rn "# emit AFTER commit\|# commit-then-emit" \
+              apps/agent-service/app/ 2>/dev/null | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 8 violation: $c commit-then-emit comments"; exit 1; }
+      - name: Gap 12 — Makefile DLQ targets and runbook present
+        shell: bash
+        run: |
+          set -e
+          grep -q "^dlq-inspect:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-inspect target"; exit 1; }
+          grep -q "^dlq-replay:" Makefile  || { echo "Gap 12 violation: Makefile missing dlq-replay target"; exit 1; }
+          grep -q "^dlq-dry-run:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-dry-run target"; exit 1; }
+          test -f docs/runbooks/dlq-replay.md || { echo "Gap 12 violation: docs/runbooks/dlq-replay.md missing"; exit 1; }
+      - name: Gap 18 — no don't-catch comments / requeue=False / business nack
+        shell: bash
+        run: |
+          set -e
+          # No more "不要 catch" / "don't catch" warnings: the wire DSL
+          # expresses error policy via .on_error("dlq") explicitly.
+          c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
+              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+              apps/agent-service/app/memory/ 2>/dev/null | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
+          # Manual ack/nack/requeue=False belongs to the framework
+          # (runtime/* + workers/common). The DLQ admin tooling at
+          # nodes/dlq_admin.py is the only business-facing exception
+          # (the 6-step requeue protocol). Scan business dirs only.
+          c=$(grep -rn "requeue=False\|\.nack(" \
+              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+              apps/agent-service/app/memory/ 2>/dev/null \
+              | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
+              | wc -l)
+          [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
 
   open-gap-baseline:
     name: Open-gap baseline no-new (Gap 13/14/15/16/19)
