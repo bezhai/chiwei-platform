@@ -45,6 +45,7 @@ from typing import Literal
 from sqlalchemy import text
 
 from app.data.session import get_session
+from app.runtime.errors import AlreadySucceededError
 
 RUNTIME_INFLIGHT_DDL: list[str] = [
     """
@@ -96,6 +97,12 @@ class ClaimOutcome:
     action: Literal["run", "skip"]
     attempts: int  # 0 if action == 'skip'
     fresh: bool    # True iff inflight row was just inserted this call
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    deleted: int
+    skipped_succeeded: int
 
 
 async def claim_inflight(
@@ -215,3 +222,65 @@ async def mark_review(
             "    last_error=:err, updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
         ), {"err": last_error[:8000], "e": edge_id, "k": idempotent_key})
+
+
+async def delete_inflight(
+    *,
+    by: Literal["edge_idempotent", "trace_id"],
+    trace_id: str | None = None,
+    edge_id: str | None = None,
+    idempotent_key: str | None = None,
+) -> DeleteOutcome:
+    """Phase 7b Gap 12: clear inflight rows for DLQ replay.
+
+    Modes:
+      - edge_idempotent: target a single (edge_id, idempotent_key) row.
+        Refuses to delete a 'succeeded' row — raises AlreadySucceededError
+        so the DLQ requeue protocol can route to the zombie-ack path.
+      - trace_id: delete every non-succeeded row for the trace; preserves
+        succeeded rows (mixed-state traces are normal). Returns counts;
+        never raises AlreadySucceededError.
+    """
+    if by not in ("edge_idempotent", "trace_id"):
+        raise ValueError(
+            f"by must be one of ('edge_idempotent', 'trace_id'), got {by!r}"
+        )
+
+    if by == "edge_idempotent":
+        if not edge_id or not idempotent_key:
+            raise ValueError(
+                "edge_idempotent mode requires both edge_id and idempotent_key"
+            )
+        async with get_session() as s:
+            row = (await s.execute(text(
+                "SELECT state FROM runtime_inflight "
+                "WHERE edge_id=:e AND idempotent_key=:k"
+            ), {"e": edge_id, "k": idempotent_key})).mappings().first()
+            if row is None:
+                return DeleteOutcome(deleted=0, skipped_succeeded=0)
+            if row["state"] == "succeeded":
+                raise AlreadySucceededError(
+                    edge_id=edge_id, idempotent_key=idempotent_key,
+                )
+            await s.execute(text(
+                "DELETE FROM runtime_inflight "
+                "WHERE edge_id=:e AND idempotent_key=:k AND state != 'succeeded'"
+            ), {"e": edge_id, "k": idempotent_key})
+            await s.commit()
+        return DeleteOutcome(deleted=1, skipped_succeeded=0)
+
+    # by == "trace_id"
+    if not trace_id:
+        raise ValueError("trace_id mode requires trace_id")
+    async with get_session() as s:
+        skipped = (await s.execute(text(
+            "SELECT count(*) FROM runtime_inflight "
+            "WHERE trace_id=:t AND state='succeeded'"
+        ), {"t": trace_id})).scalar()
+        result = await s.execute(text(
+            "DELETE FROM runtime_inflight "
+            "WHERE trace_id=:t AND state != 'succeeded'"
+        ), {"t": trace_id})
+        await s.commit()
+        deleted = result.rowcount or 0
+    return DeleteOutcome(deleted=deleted, skipped_succeeded=int(skipped or 0))
