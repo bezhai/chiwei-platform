@@ -12,7 +12,6 @@ import time
 from typing import Any
 
 import httpx
-from redis.asyncio import Redis
 
 from app.api.middleware import get_app_name, get_trace_id
 from app.infra.config import settings
@@ -253,23 +252,32 @@ class ImageRegistry:
     Redis key: ``image_registry:{message_id}``
     Fields: ``__counter__`` -> N, ``1.png`` -> url, ``2.png`` -> url, ...
     TTL: 30 minutes.
+
+    Phase 7d Gap 14: registry self-fetches the Redis client via
+    ``app.infra.redis.get_redis()`` so callers don't need to reach into
+    the redis layer just to construct one.
     """
 
-    def __init__(self, message_id: str, redis: Redis) -> None:
+    def __init__(self, message_id: str) -> None:
         self.message_id = message_id
         self._key = f"image_registry:{message_id}"
-        self._redis = redis
 
     async def register(self, tos_url: str) -> str:
         """Register a TOS URL, return filename like ``3.png``."""
-        n = await self._redis.eval(_REGISTER_LUA, 1, self._key, tos_url, _REGISTRY_TTL)
+        from app.infra.redis import get_redis
+
+        redis = await get_redis()
+        n = await redis.eval(_REGISTER_LUA, 1, self._key, tos_url, _REGISTRY_TTL)
         return f"{n}.png"
 
     async def register_batch(self, urls: list[str]) -> list[str]:
         """Register multiple URLs via pipeline."""
         if not urls:
             return []
-        pipe = self._redis.pipeline(transaction=False)
+        from app.infra.redis import get_redis
+
+        redis = await get_redis()
+        pipe = redis.pipeline(transaction=False)
         for url in urls:
             pipe.eval(_REGISTER_LUA, 1, self._key, url, _REGISTRY_TTL)
         results = await pipe.execute()
@@ -277,10 +285,16 @@ class ImageRegistry:
 
     async def resolve(self, filename: str) -> str | None:
         """Resolve a filename to its TOS URL."""
-        return await self._redis.hget(self._key, filename)
+        from app.infra.redis import get_redis
+
+        redis = await get_redis()
+        return await redis.hget(self._key, filename)
 
     async def resolve_all(self) -> dict[str, str]:
         """Get all filename -> URL mappings (excludes __counter__)."""
-        data: dict[str, Any] = await self._redis.hgetall(self._key)
+        from app.infra.redis import get_redis
+
+        redis = await get_redis()
+        data: dict[str, Any] = await redis.hgetall(self._key)
         data.pop("__counter__", None)
         return data
