@@ -110,9 +110,10 @@ class Runtime:
         # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
         # regardless of whether the Data plan is empty — these tables are
         # framework state, not Data, and aren't tracked by plan_migration.
+        from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
 
-        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL)
+        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL) + list(RUNTIME_DLQ_AUDIT_DDL)
 
         if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")

@@ -80,21 +80,57 @@ async def test_requeue_zombie_path_acks_without_publish(dlq_admin_db: object) ->
 
 
 async def test_requeue_publish_failed_nacks_and_audits(dlq_admin_db: object) -> None:
+    """publish_with_confirm returns False -> nack + audit publish_failed.
+
+    A real Route for the target queue is patched into ALL_ROUTES so the
+    code path actually reaches publish_with_confirm; otherwise the impl
+    short-circuits on route=None and the publish_with_confirm mock is
+    never called.
+    """
+    from app.infra.rabbitmq import Route
     from app.nodes.dlq_admin import dlq_requeue_impl
     fake_msg = type("M", (), {
-        "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1","origin_queue":"q"}',
+        "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1","origin_queue":"target_q"}',
         "ack": AsyncMock(),
         "nack": AsyncMock(),
     })()
+    fake_route = Route(queue="target_q", rk="target.q")
     with patch("app.nodes.dlq_admin._basic_get_one", new=AsyncMock(return_value=fake_msg)), \
          patch("app.nodes.dlq_admin.delete_inflight", new=AsyncMock()), \
+         patch("app.nodes.dlq_admin.ALL_ROUTES", new=[fake_route]), \
          patch("app.nodes.dlq_admin.mq") as mq:
         mq.publish_with_confirm = AsyncMock(return_value=False)
         body = {"queue": "q", "queue_kind": "dlq", "limit": 1, "clear_idempotent": True}
         resp = await dlq_requeue_impl(body, operator="op-x")
+    mq.publish_with_confirm.assert_awaited_once()
     fake_msg.nack.assert_awaited_once()
     fake_msg.ack.assert_not_awaited()
     assert resp["publish_failed"] == 1
+
+
+async def test_requeue_success_path_publishes_and_acks(dlq_admin_db: object) -> None:
+    """Happy path: publish confirms -> audit requeued + ack."""
+    from app.infra.rabbitmq import Route
+    from app.nodes.dlq_admin import dlq_requeue_impl
+    fake_msg = type("M", (), {
+        "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1","origin_queue":"target_q"}',
+        "ack": AsyncMock(),
+        "nack": AsyncMock(),
+    })()
+    fake_route = Route(queue="target_q", rk="target.q")
+    with patch("app.nodes.dlq_admin._basic_get_one", new=AsyncMock(return_value=fake_msg)), \
+         patch("app.nodes.dlq_admin.delete_inflight", new=AsyncMock()), \
+         patch("app.nodes.dlq_admin.ALL_ROUTES", new=[fake_route]), \
+         patch("app.nodes.dlq_admin.mq") as mq:
+        mq.publish_with_confirm = AsyncMock(return_value=True)
+        body = {"queue": "q", "queue_kind": "dlq", "limit": 1, "clear_idempotent": True}
+        resp = await dlq_requeue_impl(body, operator="op-x")
+    mq.publish_with_confirm.assert_awaited_once()
+    fake_msg.ack.assert_awaited_once()
+    fake_msg.nack.assert_not_awaited()
+    assert resp["requeued"] == 1
+    assert resp["publish_failed"] == 0
+    assert resp["zombie_acked"] == 0
 
 
 async def test_dry_run_does_not_mutate(dlq_admin_db: object) -> None:
