@@ -45,8 +45,6 @@ class TestSettingsDefaults:
             assert s.postgres_port == 5432
             assert s.qdrant_service_port == 6333
             assert s.main_server_timeout == 10
-            assert s.long_task_batch_size == 5
-            assert s.long_task_lock_timeout == 1800
             assert s.identity_drift_debounce_seconds == 120
             assert s.identity_drift_max_buffer == 10
             assert s.identity_drift_ttl_seconds == 86400
@@ -74,7 +72,6 @@ class TestSettingsFromEnv:
             "LANE": "dev",
             "MAIN_SERVER_TIMEOUT": "30",
             "SILICONFLOW_BASE_URL": "https://custom.url/v1",
-            "LONG_TASK_BATCH_SIZE": "10",
         }
         with patch.dict("os.environ", env, clear=True):
             from app.infra.config import Settings
@@ -87,7 +84,6 @@ class TestSettingsFromEnv:
             assert s.lane == "dev"
             assert s.main_server_timeout == 30
             assert s.siliconflow_base_url == "https://custom.url/v1"
-            assert s.long_task_batch_size == 10
 
     def test_empty_string_treated_as_none(self):
         """Empty string env vars should become None for optional fields."""
