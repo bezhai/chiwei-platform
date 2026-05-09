@@ -58,19 +58,24 @@ Source (外部触发)
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime import Data, Key
+from app.runtime import Data, Key, Version
 
 
 class SummaryFragment(Data):
-    message_id: Annotated[str, Key]  # 必须至少一个 Key
+    message_id: Annotated[str, Key]   # 必须至少一个 Key
     chat_id: str
     summary: str
     created_at: int
+    version: Annotated[int, Version] = 0   # ← 想要 append-only 多版本必须显式标 Version
 ```
 
 **两种模式**:
 
-**Native mode(默认)** —— runtime 自动为你建表（`data_summary_fragment` —— 表名是 `data_<to_snake(ClassName)>`，注意 PascalCase 在 to_snake 下会拆词），表结构 append-only,写入自动算 `dedup_hash` + `version`。无需写 `class Meta`。**注意**：runtime 只在存在 `wire(D).as_latest()` 时才落表（详见 §2.3 / §3 Cookbook），不是有 Data class 就自动建表 + 自动写入。
+**Native mode(默认)** —— runtime 自动为你建表（`data_summary_fragment` —— 表名是 `data_<to_snake(ClassName)>`，PascalCase 会拆词），表结构 append-only，写入自动算 `dedup_hash`。无需写 `class Meta`。
+
+**关于 `version` 列**：**不是 native mode 自动列**，必须在 Data 上显式声明 `Annotated[int, Version]` 字段才生效（见 `app/runtime/persist.py::insert_append` 的 `ver_col = version_field(cls)` 分支）。声明了 Version 后 runtime 才会按 Key 自增版本 + 建 `ix_<table>_key_ver` 索引；没声明就只是普通 append（`dedup_hash` 唯一约束兜底）。
+
+**关于"自动写表"**：runtime 只在存在 `wire(D).as_latest()` 时才把 emit 的 Data 落表（详见 §2.3 / §3 Cookbook），不是有 Data class 就自动建表 + 自动写入。
 
 **Adoption mode** —— 接管**已存在的老表**(不想让 migrator 碰它)。写 `Meta.existing_table` + `Meta.dedup_column`(指向老表里的真实唯一列),runtime 的 `dedup_hash` / `version` 机制**整体让位**给老表的唯一约束。典型例子:
 
@@ -317,7 +322,7 @@ review queue：默认假设"每条都要单独看" → 运营逐条决策（repl
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime import Data, Key
+from app.runtime import Data, Key, Version
 
 
 class SummaryFragment(Data):
@@ -325,9 +330,10 @@ class SummaryFragment(Data):
     chat_id: str
     summary: str
     created_at: int
+    version: Annotated[int, Version] = 0   # 想要 append-only 多版本必须显式标 Version（详见 §2.1）
 ```
 
-没有 `class Meta` → native mode → migrator 自动建 `data_summary_fragment` 表（表名 `data_<to_snake(ClassName)>`；含 `dedup_hash`、`version`、以上四个字段）。**但只有在下面 Step 3 声明了 `wire(SummaryFragment).as_latest()` 后，emit 时 runtime 才真的写表** —— Data class 自身不触发持久化，必须有 wire 声明 `.as_latest()`（详见 §2.3 表格 + `app/runtime/emit.py::emit`）。
+没有 `class Meta` → native mode → migrator 自动建 `data_summary_fragment` 表（表名 `data_<to_snake(ClassName)>`；含 `dedup_hash`、`version`、以上五个字段）。**但只有在下面 Step 3 声明了 `wire(SummaryFragment).as_latest()` 后，emit 时 runtime 才真的写表** —— Data class 自身不触发持久化，必须有 wire 声明 `.as_latest()`（详见 §2.3 表格 + `app/runtime/emit.py::emit`）。
 
 ### Step 2 — 写 @node
 
@@ -534,16 +540,21 @@ async def submit_proactive_chat(persona_id, chat_id, content):
 
 ### 决策树：要不要用 `transactional_emit`？
 
+判断标准是**谁持有 session**，不是写代码的形态：
+
 ```
-你要写的是一个普通 async function 还是 @node？
- ├─ @node（接收 Data 入参，pure transform，return Data 让 runtime 自动持久化）
- │    → 不用 transactional_emit。Cookbook A 路径。
- ├─ async function（要 async with get_session() 写自己的业务表）
- │    ├─ 写完表后要触发 EventData？ → 用 transactional_emit
- │    └─ 写完表不触发 EventData？   → 不用 transactional_emit（就 session 收尾就行）
+你的函数 / @node body 里有 async with get_session() as s 写业务表吗？
+ ├─ 没有，纯 Data → Data（pure transform） → 不用 transactional_emit。Cookbook A 路径。
+ ├─ 有 → 写完业务表后要触发 EventData 吗？
+ │    ├─ 要 → 在 session 块内 async with transactional_emit(s) as emitter: ...
+ │    └─ 不要 → 不用 transactional_emit
 ```
 
-**反例**：在 @node 里调 `transactional_emit` 是过度复杂（@node 的 Data 持久化由 runtime 接管，不需要业务管事务）。
+**关键**：@node 也可以持有 session 写业务表（或委托 mutation function 持有）。这种 @node 内部写或者它调用的 mutation function **必须**用 `transactional_emit`。
+
+真实例子：`@node afterthought_check`（`app/nodes/memory_pipelines.py:283`）调用 `_generate_fragment`，后者持有 session 写 `fragments` 表 + `transactional_emit` append `MemoryFragmentRequest`（`memory_pipelines.py:203`）—— 完全合法且推荐。
+
+**反例**：在 pure transform @node 里硬给 `return Data` 配一个 `transactional_emit` 是过度复杂（runtime 已经接管了 Data 持久化，业务不需要再管事务）。
 
 ### 测试
 
@@ -617,7 +628,11 @@ from app.capabilities.agent import AgentRunner
 from app.agent.core import AgentConfig
 
 runner = AgentRunner(
-    AgentConfig(name="my_agent", system_prompt="You are..."),
+    AgentConfig(
+        prompt_id="my_prompt",       # Langfuse prompt id（不是 inline system prompt）
+        model_id="gpt-5.4",
+        trace_name="my_agent",        # 可选；用作 Langfuse trace name
+    ),
     tools=[...],
 )
 
@@ -626,6 +641,8 @@ async for chunk in runner.stream(messages=[...]):
     ...
 structured = await runner.extract(MyPydanticModel, messages=[...])
 ```
+
+> **prompt 来自 Langfuse**，不是 inline string。`prompt_id` 在 Langfuse 平台上注册并管理（含变量、版本、A/B test）；代码侧只引用 id。改 prompt 走 Langfuse skill，不是改代码。
 
 ---
 
@@ -880,13 +897,22 @@ async def vectorize(msg: Message) -> Fragment | None:
 
 ## 6. 现有节点清单 + 源码索引
 
-### Phase 1 已上线节点
+不列每个 @node 的逐字段，按 pipeline 维度列**当前 topology**，让你一眼判断"我的改动落在哪一片"。每片下面给 wiring 文件 + 入口 Source。详细 @node 名 / Data 名读对应 wiring 文件即可（每个文件 < 80 行）。
 
-| 节点 | 文件 | 输入 | 输出 | Deployment |
+### 当前 topology（按 pipeline）
+
+| Pipeline | 入口 Source | wiring 文件 | 主要 @node | Deployment |
 |---|---|---|---|---|
-| `hydrate_message` | `app/nodes/hydrate_message.py` | `MessageRequest` | `Message \| None` | vectorize-worker |
-| `vectorize` | `app/nodes/vectorize.py` | `Message` | `Fragment \| None` | vectorize-worker |
-| `save_fragment` | `app/nodes/save_fragment.py` | `Fragment` | `None`(终点) | vectorize-worker |
+| **message → vectorize** | `Source.mq("vectorize")` | `wiring/memory.py` | hydrate_message → vectorize → save_fragment | vectorize-worker |
+| **chat 主链路** | `Source.mq("chat_request")` | `wiring/chat.py` | route_chat_node → chat_node (durable) → ChatResponseSegment Sink ← lark-server | agent-service |
+| **safety check** | 由 chat_node 内部 emit | `wiring/safety.py` | run_pre_safety / run_post_safety (durable) → Recall Sink | agent-service |
+| **life cron 循环** | `Source.cron("* * * * *")` 等 | `wiring/life_dataflow.py` | MinuteTick / LightDayTick / GlimpseTick / HeavyReviewTick / DailyPlanTick → 各 fan_out → 业务 node | agent-service |
+| **memory debounce** | 由 chat 流程 emit | `wiring/memory_triggers.py` | DriftTrigger / AfterthoughtTrigger（`.debounce()` 合流） → drift_check / afterthought_check | agent-service |
+| **memory fragment/abstract vectorize** | `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` | `wiring/memory_vectorize.py` | vectorize_memory_fragment / vectorize_memory_abstract | vectorize-worker |
+| **agent tool events** | tool 调用触发 (transactional_emit) | `wiring/agent_tool_events.py` | AbstractMemoryCommitted → on_abstract_committed → MemoryAbstractRequest（再走 vectorize 队列） | agent-service |
+| **admin HTTP（运维触发）** | `Source.http("/admin/trigger-*")` | `wiring/admin.py` | trigger-life-engine-tick / trigger-glimpse / debug-glimpse / trigger-voice / trigger-schedule + Phase 7b 的 `/admin/dlq/*` | agent-service |
+
+要看具体 wire / @node，去对应 `wiring/<file>.py` —— 每个文件就 30~80 行，wire 声明顺序 = 数据流顺序，读起来最快。
 
 ### 读源码最短路径
 
