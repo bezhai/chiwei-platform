@@ -190,7 +190,9 @@ wire(SummaryFragment).to(save_summary)      # 默认 = 同进程直调
 |---|---|---|
 | `.to(*targets)` | 消费者(@node 或 SinkSpec) | 必填,可多个(fan-out) |
 | `.from_(*sources)` | 入口 Source | 外部触发才需要(MQ / cron / HTTP) |
-| `.durable()` | 跨进程:RabbitMQ + consumer 侧 `insert_idempotent` dedup;handler 异常 → DLQ(无自动 retry,人工 replay) | 跨 Deployment、要重启续跑、失败需可回放时 |
+| `.durable()` | 跨进程:RabbitMQ + `runtime_inflight` dedup + lease 续约 | 跨 Deployment、要重启续跑、失败需可回放时 |
+| `.retry(n=, backoff=, base_delay_ms=, max_delay_ms=, lease_ms=)` | 边级重试（指数/线性 backoff，n 是含首次的总尝试数）；耗尽后按 `.on_error()` 决定终态 | 想自动重试瞬时失败前再进 DLQ |
+| `.on_error("dlq" \| "ignore-duplicate" \| "manual-review")` | consumer 抛异常的终态分发；默认 `"dlq"`，详见 §2.7 | 想让特定异常类型走 DLQ 之外的路径 |
 | `.as_latest()` | `emit()` 持久化新版本(append + version),下游 `with_latest` / `query()` 读最新 | Data 是"状态快照",需要被后续节点引用 |
 | `.when(predicate)` | 谓词过滤 | Data 到了但某些场景不想触发 |
 | `.debounce(seconds=, max_buffer=, key_by=...)` | 防抖合流 | 已实现；适合 drift / afterthought 这类"同一 key 短时间多次触发只跑最后一次" |
@@ -212,7 +214,9 @@ durable(跨进程): emit Data ──RabbitMQ 发到 consumer 所在 App──▶
 - 跨 Deployment(比如 vectorize-worker → chat-response-worker) → `.durable()`。
 - 做状态机、事件源、要回放、失败需进 DLQ 由运维 replay → `.durable()`。
 
-> **关于"重试":durable 边当前不做自动 retry。** consumer 抛异常时 runtime 调 `message.process(requeue=False)`,broker 路由到 DLX/DLQ 就停下了 —— 没有指数退避、没有自动重发。叠加 consumer 侧 `insert_idempotent`,语义是 **at-least-once via dedup**:运维从 DLQ 手动 replay 一条已经处理过的消息,在 consumer 侧是 no-op。业务 node 不允许用 `try/except + sleep` 自实现边级 retry；只有 capability 内部的 provider retry（如 LLM/HTTP client）是例外。需要边级 retry 等 Phase 7 的 `wire.retry(...)`。
+> **重试 + 失败终态（Phase 7a/7b 已上线）**：边级重试用 `.retry(...)`，framework 用 RabbitMQ delayed-message exchange 自己 republish，consumer 侧 `runtime_inflight` 状态机做 dedup + lease 续约。重试耗尽后按 `.on_error(...)` 决定走 DLQ / ignore / manual-review（详见 §2.7）。DLQ 不再是黑洞 —— `make dlq-replay` 一行重放，详见 `docs/runbooks/dlq-replay.md`。
+>
+> 业务 node **仍然不允许**用 `try/except + sleep` 自实现边级 retry。capability 内部的 provider retry（LLM/HTTP client）依然是例外。
 
 ### 2.4 `Source` —— 图的入口
 
@@ -274,6 +278,46 @@ async def emit_legacy_message(cm: ConversationMessage) -> None:
 **每个老写入点在 `session.commit()` 之后调一次**(见 `app/life/proactive.py`)。commit 之前 emit 会让下游 @node 查不到行。
 
 **Bridge 是临时的**:等老 writer 全迁到 @node(或 @node 拿到直接 write 权限),Bridge 文件整体删除。不要基于 Bridge 搭长期逻辑。
+
+### 2.7 错误策略（`.on_error(...)`）
+
+`from app.runtime import DuplicateData, NeedsReview`。
+
+durable consumer 抛异常时，framework 根据 wire 的 `.on_error(...)` 分发，**业务作者不要 try/except 包整个 body**（包了 framework 看不到，DLQ 永远空，监控失效）。
+
+| `.on_error(...)` | consumer 该 raise 什么 | framework 行为 | 业务场景 |
+|---|---|---|---|
+| `"dlq"`（默认） | 任意 `Exception` | 走 `.retry(...)`；耗尽后进 DLQ + 报警；运维 `make dlq-replay` 重放 | **大多数情况选这个**：瞬时失败 + 真 bug 都能兜住 |
+| `"ignore-duplicate"` | `raise DuplicateData(...)` | 框架认为是业务级重复，**ack + log warning + 不进 DLQ + 不报警** | consumer 自己的业务表已有相同记录（不是 inflight 的 message-level 去重，是业务语义层面的"我已经做过这件事了"） |
+| `"manual-review"` | `raise NeedsReview(...)` | 进独立 review queue（`durable_<data>_<consumer>_review`），inflight 行 `state='review'` 带 `last_error`，**等运营人工决策** | LLM tool 输出可疑、参数歧义、需要 KOL 确认 —— **不想报警因为运维改不动这条，但也不想丢** |
+
+**注意：这两个 typed exception 是 Phase 7b 新加的 framework surface，目前业务代码还没有实际使用案例（grep `DuplicateData` / `NeedsReview` 在 `apps/agent-service/app/{nodes,agent,chat,life,memory}/` 下零结果）。下面的"何时用"是判断标准 + 假想场景，第一个用上的人记得写 retrospective 验证经验。**
+
+**`ignore-duplicate` vs `dlq`** —— 两个去重层别混：
+
+```
+runtime_inflight 表（framework 自动）：同一条 message 多次投递只跑一次（message-level）
+DuplicateData（业务作者主动 raise）：两条不同 message，业务语义上是同一件事
+```
+
+判断标准：你的 consumer 在 `if` 检查里 `return None` 跳过的那段逻辑，**如果你想让 audit 看到"这条进来了但被业务级判重跳过了"**，就改成 `raise DuplicateData(...)` + wire 配 `.on_error("ignore-duplicate")`。区别只是观测性 —— `ignore-duplicate` 路径会 `mark_succeeded` + log warning，留下"被吞了"的痕迹；`return None` 静默跳过没有任何痕迹。
+
+**`manual-review` vs `dlq`**：
+
+```
+DLQ：默认假设"这条消息因为代码 bug 失败了" → 改代码 + redeploy + make dlq-replay 一把过
+review queue：默认假设"每条都要单独看" → 运营逐条决策（replay / 丢弃 / 修业务数据再 replay）
+```
+
+判断标准：失败原因如果**改代码部署后再 replay 就能修好** → 默认 `dlq` 就好；失败原因如果**改代码也 replay 不出来**（比如 LLM 提取的 payload 内在歧义、需要人决定取舍）→ `manual-review`。
+
+**假想场景**（业务还没真的这么写，但合理）：`update_schedule._update_schedule_impl` 发现 LLM 提取的 schedule payload 字段对不上业务规则 —— 不是代码 bug，是模型这次理解错了。可以 `raise NeedsReview(f"schedule looks malformed: {payload!r}")` 让运营看具体内容决定。
+
+**确认契约**：
+
+- helper `_route_consumer_exception`（`app/runtime/durable.py`）根据 `.on_error(...)` 分发；business code 永远不直接读 framework 的 ack/nack/process —— 该 raise 就 raise。
+- review queue **没有 consumer**，是 inspect-only 终态；要从 review queue 处理消息走 `make dlq-replay QUEUE=<...>_review KIND=review`。
+- `DuplicateData` / `NeedsReview` 在 `.on_error` 不匹配时（比如配的是 `"dlq"` 但 consumer raise 了 `NeedsReview`），fall through 到通用 Exception 路径 —— 等于退化为 DLQ。**别依靠这条 fallback**，配置写明显比兜底更可读。
 
 ---
 
@@ -428,6 +472,93 @@ make logs APP=vectorize-worker LANE=<your-lane> SINCE=5m
 # 6. 查 DB 确认 summary 落表
 /ops-db @chiwei "SELECT * FROM data_summaryfragment ORDER BY version DESC LIMIT 5"
 ```
+
+---
+
+---
+
+## 3-bis. Cookbook B：写 mutation function（写业务表 + 触发 EventData）
+
+§3 Cookbook A 教的是 **pure transform**：输入 Data → 输出 Data，runtime 自动持久化（`data_<X>` 表）。
+
+但项目里很多业务**不是** pure transform，而是要：
+
+1. **打开业务事务**写自己的业务表（不是 Data 自动持久化的表，而是已存在的 ORM 表，比如 `notes` / `schedule_revisions` / `abstract_memories`）
+2. 同时**触发一个 EventData**让下游知道发生了什么
+
+这种代码**形态不是 @node，是普通 async function**，被以下三种入口之一调用：
+
+| 入口 | 代码位置 | 例子 |
+|---|---|---|
+| LLM tool（被 agent 调用） | `apps/agent-service/app/agent/tools/` | `commit_abstract_memory` / `write_note` / `update_schedule` |
+| @node 内部委托 | `app/nodes/*.py` 里 `@node` 调底层 mutation | `afterthought_check`(@node) → `_generate_fragment`(mutation) |
+| 主动触发（cron / chat loop） | `app/life/*.py` | `submit_proactive_chat` / `commit_life_state_impl` |
+
+**所有这种 mutation function 必须用 `transactional_emit(s)` 在事务内 append**，不能 commit 后再 `await emit(...)`。
+
+### 旧错误模式 vs 新正确模式
+
+```python
+# ❌ 老模式：commit-then-emit
+async def _commit_abstract_impl(persona_id, text, fact_ids):
+    async with get_session() as s:
+        abstract_id = await insert_abstract_memory(s, persona_id, text)
+        await insert_memory_edge(s, abstract_id, fact_ids)
+    # session 已 commit
+    await emit(AbstractMemoryCommitted(abstract_id=abstract_id))
+    # ↑ broker 挂 / 网络抖一下，emit 失败但业务表已 commit
+    #   → 下游永远不知道，数据不一致就此埋下
+```
+
+历史上这种代码会再补一个 `try/except: logger.warning("emit failed; row committed; downstream may be delayed")` 来"兜" —— 那是用日志掩盖丢消息。Phase 7b 之前 `update_schedule.py` 和 `life/tool.py` 两处真有这种代码，已经在迁移中删除。
+
+```python
+# ✅ 新模式：transactional_emit
+from app.runtime import transactional_emit
+
+async def _commit_abstract_impl(persona_id, text, fact_ids):
+    async with get_session() as s:
+        abstract_id = await insert_abstract_memory(s, persona_id, text)
+        await insert_memory_edge(s, abstract_id, fact_ids)
+        async with transactional_emit(s) as emitter:
+            await emitter.append(AbstractMemoryCommitted(abstract_id=abstract_id))
+    # session.__aexit__ commit：业务表 + outbox 行同事务可见
+    # 后台 dispatcher 拾起 outbox 行 → emit(data) → wire fan-out
+    # broker 挂了 outbox 行就在那躺着，broker 恢复 dispatcher 自己重试
+```
+
+### 多个 emit 共用一个 emitter
+
+同事务里 emit 多个 EventData，复用同一个 `emitter`（不要嵌套 `transactional_emit`）：
+
+```python
+async def submit_proactive_chat(persona_id, chat_id, content):
+    async with get_session() as session:
+        msg = await insert_proactive_message(session, persona_id, chat_id, content)
+        async with transactional_emit(session) as emitter:
+            await emitter.append(Message.from_cm(msg))
+            await emitter.append(ChatTrigger(chat_id=chat_id))
+    # 一次 commit，两条 outbox 行都进
+```
+
+参见 `app/life/proactive.py` 真实代码。
+
+### 决策树：要不要用 `transactional_emit`？
+
+```
+你要写的是一个普通 async function 还是 @node？
+ ├─ @node（接收 Data 入参，pure transform，return Data 让 runtime 自动持久化）
+ │    → 不用 transactional_emit。Cookbook A 路径。
+ ├─ async function（要 async with get_session() 写自己的业务表）
+ │    ├─ 写完表后要触发 EventData？ → 用 transactional_emit
+ │    └─ 写完表不触发 EventData？   → 不用 transactional_emit（就 session 收尾就行）
+```
+
+**反例**：在 @node 里调 `transactional_emit` 是过度复杂（@node 的 Data 持久化由 runtime 接管，不需要业务管事务）。
+
+### 测试
+
+`transactional_emit(s)` 是 contextmanager，单测里 mock 它要用 `asynccontextmanager` stub + 用 `captured` list 验证 `append` 行为。具体范式见 `tests/unit/agent/tools/test_commit_abstract.py` 现成例子。
 
 ---
 
@@ -696,6 +827,42 @@ async def write_message(cm):
     await emit_legacy_message(cm)  # 仅此一条
 ```
 
+### #12 mutation function 在 `async with get_session()` 块外 emit
+
+写业务表后想触发 EventData，**必须**在 session 块**内** `transactional_emit` 而不是块**外** `await emit(...)`。
+
+```python
+# ❌
+async with get_session() as s:
+    await insert_note(s, ...)
+await emit(NoteCreated(...))   # broker 挂这一步，DB 已 commit，下游永远收不到
+
+# ✅
+async with get_session() as s:
+    await insert_note(s, ...)
+    async with transactional_emit(s) as emitter:
+        await emitter.append(NoteCreated(...))
+```
+
+详见 §3-bis。CI grep gate `Gap 8` 卡 `await emit(` 在业务区的总数（当前 14：12 个 category-B 合法 + 2 个 docstring）；新加 mutation function 必须用 `transactional_emit`，否则 CI 红。
+
+### #13 durable consumer 内 try/except 包整个 body
+
+包了 framework 看不到异常 → 永远 ack → DLQ 永远空 → 监控失效。该 raise 就 raise，配 `wire(...).on_error("...")` 决定终态（详见 §2.7）。
+
+```python
+# ❌ Phase 7b 之前 update_schedule.py / life/tool.py 的真实代码
+try:
+    await emit(SomethingHappened(...))
+except Exception:
+    logger.exception("emit failed; row committed; downstream may be delayed")
+# 用日志掩盖丢消息
+
+# ✅ transactional_emit 把 emit 失败的可能性消除了；该抛就抛
+async with transactional_emit(s) as emitter:
+    await emitter.append(SomethingHappened(...))
+```
+
 ### #11 忘记在返回 `None` 时做真正的 early return
 
 `@node` 返回 `None` 表示"跳过下游",wrapper 看到 `None` 就不 emit。但如果先算了昂贵的外部调用再 `return None`,钱就烧了。早退。
@@ -750,13 +917,19 @@ async def vectorize(msg: Message) -> Fragment | None:
 |---|---|
 | @node 装饰器做什么 | `app/runtime/node.py` |
 | Data 校验规则 | `app/runtime/data.py::__pydantic_init_subclass__` |
-| wire DSL 全部方法 | `app/runtime/wire.py::WireBuilder` |
+| wire DSL 全部方法（含 `.retry` / `.on_error`） | `app/runtime/wire.py::WireBuilder` |
 | 所有 Source 种类 | `app/runtime/source.py::Source` |
 | emit 分派逻辑 | `app/runtime/emit.py::emit` |
-| durable 边实现 | `app/runtime/durable.py` |
+| durable 边实现 + 错误路由 helper | `app/runtime/durable.py::_route_consumer_exception` |
 | MQSource 消费循环 | `app/runtime/engine.py::_source_loop_mq` |
 | Node → App 绑定 | `app/runtime/placement.py::bind` |
 | Capability 清单 | `app/capabilities/` |
+| `transactional_emit` / `OutboxEmitter` | `app/runtime/outbox.py` |
+| Outbox 后台调度循环 | `app/runtime/outbox_dispatcher.py::dispatcher_loop` |
+| `DuplicateData` / `NeedsReview` | `app/runtime/errors.py` |
+| Inflight 状态机（claim / mark_review / delete_inflight） | `app/runtime/inflight.py` |
+| Manual-review queue 声明 + publish | `app/runtime/review_queue.py` |
+| DLQ 运维操作 runbook | `docs/runbooks/dlq-replay.md` |
 
 ---
 
@@ -772,3 +945,5 @@ async def vectorize(msg: Message) -> Fragment | None:
 6. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
 7. Runtime 启动时 `compile_graph()` 会检查 wire 一致性(生产者 Data 类型 ↔ 消费者签名)—— 启动报错看这里。
 8. `emit(data)` 不会匹配任何 wire 时静默 no-op(不是错),测试里的 wiring 清空是利用这一点。
+9. **mutation function（普通 async function 持有 session 写业务表 + 触发 EventData）必须用 `transactional_emit(s)` 在 session 块内 append**，不能在块外 `await emit(...)`。CI grep gate `Gap 8` 卡业务区 `await emit(` 计数。
+10. **durable consumer 内禁止 try/except 包整个 body** —— 让 framework 看到异常它才能按 `.on_error(...)` 分发。该 raise 就 raise。
