@@ -112,9 +112,9 @@ async def _generate_image_openai(
         from app.infra.config import settings
 
         if settings.forward_proxy_url:
-            import httpx
+            from app.capabilities.image_gen import proxy_http_client
 
-            http_client = httpx.AsyncClient(proxy=settings.forward_proxy_url)
+            http_client = proxy_http_client(settings.forward_proxy_url)
             kwargs["http_client"] = http_client
 
     client = AsyncOpenAI(**kwargs)

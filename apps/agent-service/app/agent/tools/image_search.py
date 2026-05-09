@@ -7,7 +7,6 @@ import logging
 import time
 from typing import Annotated, Any
 
-import httpx
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 from pydantic import Field
@@ -19,7 +18,7 @@ from app.agent.tools._common import (
     tool_error,
     upload_and_register,
 )
-from app.infra.config import settings
+from app.capabilities.image_search import image_search as _image_search_capability
 
 logger = logging.getLogger(__name__)
 
@@ -58,32 +57,15 @@ async def search_images(
     Args:
         query: 搜索关键词。
     """
-    if not settings.you_search_host or not settings.you_search_api_key:
-        return "图片搜索服务未配置"
-
-    url = f"{settings.you_search_host}/images"
-    params = {"q": query}
-    headers = {"X-API-Key": settings.you_search_api_key}
-
     try:
         t_start = time.monotonic()
-
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        hits = await _image_search_capability(query, count=IMAGE_MAX_RESULTS)
         t_search = time.monotonic() - t_start
         IMAGE_SEARCH_DURATION.labels(step="search_api").observe(t_search)
 
-        raw_images = data.get("images", [])
-        if isinstance(raw_images, dict):
-            images = raw_images.get("results", [])
-        else:
-            images = raw_images
-        if not images:
-            return "未搜索到相关图片"
-
-        images = images[:IMAGE_MAX_RESULTS]
+        if not hits:
+            IMAGE_SEARCH_TOTAL.labels(status="empty").inc()
+            return "图片搜索服务未配置或未搜索到相关图片"
 
         # Upload each to TOS and register
         context = get_runtime(AgentContext).context
@@ -93,11 +75,11 @@ async def search_images(
         upload_tasks = [
             upload_and_register(
                 source_type="url",
-                data=img.get("image_url") or img.get("url", ""),
+                data=h.image_url,
                 registry=registry,
             )
-            for img in images
-            if img.get("image_url") or img.get("url")
+            for h in hits
+            if h.image_url
         ]
         results = await asyncio.gather(*upload_tasks, return_exceptions=True)
         t_upload = time.monotonic() - t0
@@ -145,12 +127,6 @@ async def search_images(
         content_blocks.insert(0, {"type": "text", "text": summary})
         return content_blocks
 
-    except httpx.TimeoutException:
-        IMAGE_SEARCH_TOTAL.labels(status="timeout").inc()
-        return "图片搜索超时"
-    except httpx.HTTPStatusError as exc:
-        IMAGE_SEARCH_TOTAL.labels(status="http_error").inc()
-        return f"图片搜索失败: HTTP {exc.response.status_code}"
     except Exception as exc:
         IMAGE_SEARCH_TOTAL.labels(status="error").inc()
         return f"图片搜索失败: {exc}"

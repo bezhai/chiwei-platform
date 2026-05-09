@@ -7,7 +7,6 @@ import logging
 import time
 from typing import Annotated
 
-import httpx
 from bs4 import BeautifulSoup
 from langchain.tools import tool
 from pydantic import Field
@@ -17,7 +16,15 @@ from app.agent.tools._common import (
     get_or_create_histogram,
     tool_error,
 )
-from app.infra.config import settings
+from app.capabilities.web_search import (
+    read_webpage as _read_webpage_capability,
+)
+from app.capabilities.web_search import (
+    rerank as _rerank_capability,
+)
+from app.capabilities.web_search import (
+    web_search as _web_search_capability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +51,6 @@ CHUNK_SIZE = 2_000
 CHUNK_OVERLAP = 200
 RERANK_TOP_K = 5
 MIN_RELEVANCE_SCORE = 0.1
-RERANK_MODEL = "Qwen/Qwen3-Reranker-4B"
 
 
 # ---------------------------------------------------------------------------
@@ -66,34 +72,9 @@ def _html_to_text(html: str) -> str:
 
 
 async def _read_webpage(url: str) -> str:
-    """Fetch webpage content via You Search Contents API, return markdown."""
-    if not settings.you_search_host or not settings.you_search_api_key:
-        return ""
-
-    api_url = f"{settings.you_search_host}/v1/contents"
-    headers = {
-        "X-API-Key": settings.you_search_api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {"urls": [url], "formats": ["markdown", "html"]}
-
+    """Fetch webpage content via the web_search capability, return markdown/text."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(api_url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-        if isinstance(data, dict):
-            data = data.get("contents") or data.get("results") or []
-        if not data:
-            return ""
-
-        result = data[0]
-        if result.get("markdown"):
-            return result["markdown"]
-        if result.get("html"):
-            return _html_to_text(result["html"])
-        return ""
+        return await _read_webpage_capability(url)
     except Exception as exc:
         logger.error("read_webpage(%s) failed: %s", url, exc)
         return ""
@@ -170,10 +151,7 @@ async def _rerank_chunks(
     results: list[dict],
     top_k: int = RERANK_TOP_K,
 ) -> list[dict]:
-    """Chunk-level reranking via SiliconFlow cross-encoder."""
-    if not settings.siliconflow_api_key:
-        return _rerank_fallback(results, top_k)
-
+    """Chunk-level reranking via the rerank capability with truncation fallback."""
     all_chunks: list[dict] = []
     for r in results:
         content = r.get("content", "")
@@ -194,29 +172,12 @@ async def _rerank_chunks(
 
     try:
         documents = [c["chunk"] for c in all_chunks]
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{settings.siliconflow_base_url}/rerank",
-                headers={
-                    "Authorization": f"Bearer {settings.siliconflow_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": RERANK_MODEL,
-                    "query": query,
-                    "documents": documents,
-                    "top_n": top_k,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        ranked_pairs = await _rerank_capability(query, documents, top_k=top_k)
 
-        ranked = []
-        for item in data.get("results", []):
-            score = item.get("relevance_score", 0)
+        ranked: list[dict] = []
+        for idx, score in ranked_pairs:
             if score < MIN_RELEVANCE_SCORE:
                 continue
-            idx = item["index"]
             c = all_chunks[idx]
             ranked.append(
                 {
@@ -231,64 +192,6 @@ async def _rerank_chunks(
     except Exception:
         logger.exception("rerank_chunks failed, using truncation fallback")
         return _rerank_fallback(results, top_k)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers — search providers
-# ---------------------------------------------------------------------------
-
-
-async def _google_search(query: str, num: int) -> list[dict]:
-    """Google Custom Search via proxy."""
-    params = {
-        "q": query,
-        "ak": settings.google_search_api_key,
-        "cx": settings.google_search_cx,
-        "num": num,
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(settings.google_search_host, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    items = data.get("items", [])
-    logger.info("Google search returned %d items", len(items))
-    return [
-        {
-            "link": item.get("link", ""),
-            "title": item.get("title", ""),
-            "snippet": item.get("snippet", ""),
-            "displayLink": item.get("displayLink", ""),
-        }
-        for item in items
-    ]
-
-
-async def _you_search(query: str, num: int, gl: str, hl: str) -> list[dict]:
-    """You Search API (primary search provider)."""
-    params: dict[str, str | int] = {
-        "query": query,
-        "count": num,
-        "country": gl,
-        "language": hl,
-    }
-    headers = {"X-API-Key": settings.you_search_api_key or ""}
-    async with httpx.AsyncClient(timeout=15) as client:
-        url = f"{settings.you_search_host}/v1/search"
-        resp = await client.get(url, params=params, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    web_results = data.get("results", {}).get("web", [])
-    logger.info("You Search returned %d results", len(web_results))
-    return [
-        {
-            "link": r.get("url", ""),
-            "title": r.get("title", ""),
-            "snippet": r.get("description", ""),
-        }
-        for r in web_results
-    ]
 
 
 # =========================================================================
@@ -319,29 +222,27 @@ async def search_web(
     start = time.monotonic()
     status = "error"
     try:
-        if settings.you_search_host and settings.you_search_api_key:
-            organic_results = await _you_search(query, num, gl, hl)
-        elif settings.google_search_host and settings.google_search_api_key:
-            organic_results = await _google_search(query, num)
-        else:
-            logger.error("No search provider configured")
-            return "搜索服务未配置"
+        hits = await _web_search_capability(
+            query, count=num, country=gl, language=hl
+        )
+        if not hits:
+            logger.error("Web search returned no results / not configured")
+            WEB_SEARCH_REQUESTS.labels(status="empty").inc()
+            WEB_SEARCH_DURATION.observe(time.monotonic() - start)
+            return "搜索服务未配置或未搜索到结果"
+        organic_results = [
+            {"link": h.url, "title": h.title, "snippet": h.snippet} for h in hits
+        ]
         status = "ok"
-    except httpx.TimeoutException:
-        status = "timeout"
-        logger.error("Web search timed out")
-        return "网页搜索超时"
-    except httpx.HTTPStatusError as exc:
-        status = f"http_{exc.response.status_code}"
-        logger.error("Web search HTTP error: %s", exc)
-        return f"网页搜索失败: HTTP {exc.response.status_code}"
     except Exception as exc:
-        logger.error("Web search unexpected error: %s", exc)
+        logger.error("Web search failed: %s", exc)
+        WEB_SEARCH_REQUESTS.labels(status=status).inc()
+        WEB_SEARCH_DURATION.observe(time.monotonic() - start)
         return f"网页搜索失败: {exc}"
     finally:
-        duration = time.monotonic() - start
-        WEB_SEARCH_REQUESTS.labels(status=status).inc()
-        WEB_SEARCH_DURATION.observe(duration)
+        if status == "ok":
+            WEB_SEARCH_REQUESTS.labels(status=status).inc()
+            WEB_SEARCH_DURATION.observe(time.monotonic() - start)
 
     # Fetch page content concurrently
     enriched = await asyncio.gather(*[_fetch_content(r) for r in organic_results])

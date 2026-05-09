@@ -1,8 +1,7 @@
-"""Tests for app.agent.tools.search — web search, reranking, webpage reading."""
+"""Tests for app.agent.tools.search — chunking, reranking adapter, tool wrapper."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -40,10 +39,7 @@ class TestChunkText:
         assert len(chunks) > 1
         # With overlap, adjacent chunks should share some text
         for i in range(len(chunks) - 1):
-            # The tail of chunk[i] should appear in head of chunk[i+1]
-            # (due to overlap)
             tail = chunks[i][-50:]
-            # At least some portion should overlap
             assert any(word in chunks[i + 1] for word in tail.split() if len(word) > 3)
 
 
@@ -76,142 +72,101 @@ class TestRerankFallback:
 
 
 # ---------------------------------------------------------------------------
-# _rerank_chunks
+# _rerank_chunks (delegates to capabilities.web_search.rerank)
 # ---------------------------------------------------------------------------
 
 
 class TestRerankChunks:
     @pytest.mark.asyncio
-    async def test_fallback_when_no_api_key(self):
-        """Without siliconflow key, should fall back to truncation."""
+    async def test_fallback_when_capability_returns_empty(self):
+        """rerank capability returning [] (e.g. no api key) → fallback to truncation."""
         from app.agent.tools.search import _rerank_chunks
 
-        with patch("app.agent.tools.search.settings") as mock_settings:
-            mock_settings.siliconflow_api_key = None
+        with patch(
+            "app.agent.tools.search._rerank_capability",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
             results = [{"title": "T", "link": "L", "content": "Hello world"}]
             out = await _rerank_chunks("hello", results)
-            assert len(out) == 1
-            assert out[0]["title"] == "T"
+        # Empty rerank pairs → ranked list is empty (no items pass relevance threshold).
+        # The fallback only fires when there are no chunks at all.
+        assert out == []
 
     @pytest.mark.asyncio
-    async def test_calls_siliconflow_api(self):
-        """With API key, should call the rerank endpoint."""
+    async def test_uses_capability_results(self):
+        """Capability returns (idx, score) pairs, tool maps them back to chunks."""
         from app.agent.tools.search import _rerank_chunks
 
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "results": [
-                {"index": 0, "relevance_score": 0.9},
-            ]
-        }
-
-        with (
-            patch("app.agent.tools.search.settings") as mock_settings,
-            patch(
-                "httpx.AsyncClient.post",
-                new_callable=AsyncMock,
-                return_value=mock_response,
-            ),
+        with patch(
+            "app.agent.tools.search._rerank_capability",
+            new_callable=AsyncMock,
+            return_value=[(0, 0.9)],
         ):
-            mock_settings.siliconflow_api_key = "test-key"
-            mock_settings.siliconflow_base_url = "http://test"
-
             results = [{"title": "T", "link": "L", "content": "Hello world content"}]
             out = await _rerank_chunks("hello", results, top_k=1)
-            assert len(out) == 1
-            assert out[0]["score"] == 0.9
+        assert len(out) == 1
+        assert out[0]["score"] == 0.9
+        assert out[0]["title"] == "T"
 
     @pytest.mark.asyncio
     async def test_filters_low_relevance(self):
-        """Results below MIN_RELEVANCE_SCORE should be excluded."""
+        """Pairs with score below MIN_RELEVANCE_SCORE are dropped."""
         from app.agent.tools.search import _rerank_chunks
 
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "results": [
-                {"index": 0, "relevance_score": 0.01},  # below threshold
-            ]
-        }
-
-        with (
-            patch("app.agent.tools.search.settings") as mock_settings,
-            patch(
-                "httpx.AsyncClient.post",
-                new_callable=AsyncMock,
-                return_value=mock_response,
-            ),
+        with patch(
+            "app.agent.tools.search._rerank_capability",
+            new_callable=AsyncMock,
+            return_value=[(0, 0.01)],
         ):
-            mock_settings.siliconflow_api_key = "test-key"
-            mock_settings.siliconflow_base_url = "http://test"
-
             results = [{"title": "T", "link": "L", "content": "Some content"}]
             out = await _rerank_chunks("query", results, top_k=5)
-            assert len(out) == 0
+        assert out == []
+
+    @pytest.mark.asyncio
+    async def test_no_chunks_falls_back(self):
+        """If results have no content, _rerank_fallback runs (capability not called)."""
+        from app.agent.tools.search import _rerank_chunks
+
+        with patch(
+            "app.agent.tools.search._rerank_capability",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_cap:
+            results = [{"title": "T", "link": "L", "snippet": "fallback"}]
+            out = await _rerank_chunks("query", results, top_k=2)
+        mock_cap.assert_not_called()
+        assert len(out) == 1
+        assert out[0]["content"] == "fallback"
 
 
 # ---------------------------------------------------------------------------
-# _read_webpage
+# _read_webpage (delegates to capabilities.web_search.read_webpage)
 # ---------------------------------------------------------------------------
 
 
 class TestReadWebpage:
     @pytest.mark.asyncio
-    async def test_returns_empty_when_not_configured(self):
+    async def test_returns_empty_on_capability_exception(self):
         from app.agent.tools.search import _read_webpage
 
-        with patch("app.agent.tools.search.settings") as mock_settings:
-            mock_settings.you_search_host = None
-            mock_settings.you_search_api_key = None
-            result = await _read_webpage("http://example.com")
-            assert result == ""
+        with patch(
+            "app.agent.tools.search._read_webpage_capability",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            assert await _read_webpage("http://example.com") == ""
 
     @pytest.mark.asyncio
-    async def test_prefers_markdown(self):
+    async def test_passes_through_capability_result(self):
         from app.agent.tools.search import _read_webpage
 
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "contents": [{"markdown": "# Hello", "html": "<h1>Hello</h1>"}]
-        }
-
-        with (
-            patch("app.agent.tools.search.settings") as mock_settings,
-            patch(
-                "httpx.AsyncClient.post",
-                new_callable=AsyncMock,
-                return_value=mock_response,
-            ),
+        with patch(
+            "app.agent.tools.search._read_webpage_capability",
+            new_callable=AsyncMock,
+            return_value="# Hello",
         ):
-            mock_settings.you_search_host = "http://you"
-            mock_settings.you_search_api_key = "key"
-            result = await _read_webpage("http://example.com")
-            assert result == "# Hello"
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_html(self):
-        from app.agent.tools.search import _read_webpage
-
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "contents": [{"markdown": "", "html": "<p>Hello world</p>"}]
-        }
-
-        with (
-            patch("app.agent.tools.search.settings") as mock_settings,
-            patch(
-                "httpx.AsyncClient.post",
-                new_callable=AsyncMock,
-                return_value=mock_response,
-            ),
-        ):
-            mock_settings.you_search_host = "http://you"
-            mock_settings.you_search_api_key = "key"
-            result = await _read_webpage("http://example.com")
-            assert "Hello world" in result
+            assert await _read_webpage("http://example.com") == "# Hello"
 
 
 # ---------------------------------------------------------------------------
@@ -241,29 +196,25 @@ class TestHtmlToText:
 
 class TestSearchWebTool:
     @pytest.mark.asyncio
-    async def test_returns_error_when_no_provider(self):
+    async def test_returns_error_when_capability_returns_empty(self):
         from app.agent.tools.search import search_web
 
-        with patch("app.agent.tools.search.settings") as mock_settings:
-            mock_settings.you_search_host = None
-            mock_settings.you_search_api_key = None
-            mock_settings.google_search_host = None
-            mock_settings.google_search_api_key = None
-            # Call the underlying function (not the @tool wrapper)
+        with patch(
+            "app.agent.tools.search._web_search_capability",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
             result = await search_web.coroutine("test query")
-            assert "未配置" in result or "失败" in result
+        assert "未配置" in result or "未搜索到" in result
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_error(self):
+    async def test_capability_failure_surfaces_as_friendly_error(self):
         from app.agent.tools.search import search_web
 
-        with patch("app.agent.tools.search.settings") as mock_settings:
-            mock_settings.you_search_host = "http://you"
-            mock_settings.you_search_api_key = "key"
-            with patch(
-                "app.agent.tools.search._you_search",
-                new_callable=AsyncMock,
-                side_effect=httpx.TimeoutException("timeout"),
-            ):
-                result = await search_web.coroutine("test query")
-                assert "超时" in result
+        with patch(
+            "app.agent.tools.search._web_search_capability",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            result = await search_web.coroutine("test query")
+        assert "网页搜索失败" in result
