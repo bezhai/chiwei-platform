@@ -9,6 +9,7 @@ from app.data.queries import (
     find_messages_with_user_chat_persona_by_root,
     find_messages_with_user_chat_persona_in_chat,
 )
+from app.life.proactive import PROACTIVE_USER_ID
 
 
 class QuickSearchResult:
@@ -41,12 +42,6 @@ class QuickSearchResult:
         self.chat_id = chat_id
         self.bot_name = bot_name
         self.persona_id = persona_id
-
-
-# Sentinel used to exclude proactive trigger rows from the supplemental
-# quick-search window. Kept here (not imported from life.proactive) so
-# this module stays UI-layer-only.
-_PROACTIVE_USER_ID = "__proactive__"
 
 
 async def quick_search(
@@ -90,7 +85,7 @@ async def quick_search(
             exclude_root_message_id=current_msg.root_message_id,
             after_create_time=time_threshold,
             before_create_time=current_msg.create_time,
-            exclude_user_id=_PROACTIVE_USER_ID,
+            exclude_user_id=PROACTIVE_USER_ID,
             limit=needed,
         )
 
