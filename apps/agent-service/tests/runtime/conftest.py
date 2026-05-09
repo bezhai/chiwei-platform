@@ -223,6 +223,23 @@ async def dlq_admin_db(test_db: object) -> AsyncGenerator[object, None]:
 
 
 @pytest.fixture
+async def outbox_db(test_db: object) -> AsyncGenerator[object, None]:
+    """Create the runtime_outbox schema on the test DB and yield the engine.
+
+    Phase 7b Gap 8: mirrors inflight_db; applies RUNTIME_OUTBOX_DDL so
+    outbox tests get a clean table every test.
+    """
+    from sqlalchemy import text
+
+    from app.runtime.outbox import RUNTIME_OUTBOX_DDL
+
+    async with test_db.begin() as conn:
+        for ddl in RUNTIME_OUTBOX_DDL:
+            await conn.execute(text(ddl))
+    yield test_db
+
+
+@pytest.fixture
 async def test_db(
     test_db_dsn: str,
     monkeypatch: pytest.MonkeyPatch,

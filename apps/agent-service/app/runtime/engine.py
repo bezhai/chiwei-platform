@@ -112,8 +112,13 @@ class Runtime:
         # framework state, not Data, and aren't tracked by plan_migration.
         from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+        from app.runtime.outbox import RUNTIME_OUTBOX_DDL
 
-        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL) + list(RUNTIME_DLQ_AUDIT_DDL)
+        runtime_internal_stmts = (
+            list(RUNTIME_INFLIGHT_DDL)
+            + list(RUNTIME_DLQ_AUDIT_DDL)
+            + list(RUNTIME_OUTBOX_DDL)
+        )
 
         if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")
