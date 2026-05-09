@@ -1,6 +1,6 @@
 # Dataflow Phase 7b — Reliability + Error Policy + Outbox 设计
 
-**状态**: Draft v3（2026-05-09，吸收 reviewer 二轮 findings：dispatcher 改 emit() fan-out 一致化 / helper contract 明确 handled-return + dlq-raise / publish-confirm 失败 fall-through DLQ / 迁移分类表按"本函数是否持有事务并 commit 后 emit"重做 / DLQ requeue 6-step transaction-like 协议 / at-least-once 措辞）
+**状态**: Draft v4（2026-05-09，吸收 reviewer 三轮 findings：v3 = dispatcher 调 emit() fan-out / helper contract handled-return + dlq-raise / publish-confirm fall-through DLQ / 迁移分类按"持有事务并 commit 后 emit" / DLQ 6-step transaction-like 协议 / at-least-once 措辞；v4 增量 = dispatcher 加 lane 复合过滤防 prod/lane 抢 row / delete_inflight state filter + AlreadySucceededError 防 zombie 二次 replay 重跑 / §4.7 in-process consumer 使用约束）
 **前置**: PR #212（Phase 7a transport primitives）已 ship 到 prod 1.0.1.10，Gap 7 / 9 / 11 闭合
 **承接**: `docs/superpowers/specs/2026-05-08-dataflow-phase-7-gap-analysis.md` §2 中 Gap 8 / 12 / 18
 **分支**: `refactor/flow-parse-7b`
@@ -222,6 +222,8 @@ async def _route_consumer_exception(exc, *, wire, inflight_key, data, attempts):
 
 endpoint 调它，互斥参数（同时给会报 400）。
 
+**state filter（接受 reviewer round-3 finding 2）**：`delete_inflight` 内部 WHERE 加 `state != 'succeeded'`——只删非 succeeded 的行；如果检测到匹配的行已是 succeeded，**抛 `AlreadySucceededError`**，不删任何行。理由见 6-step 协议失败分析（下文）。
+
 **dry-run**：跑 inspect + 模拟 clear（不真改 DB / queue），给运维看 replay 计划。
 
 **requeue（transaction-like 协议）**：管理 API 的 `/get` 模式不能做写操作（reviewer P0-3 — 消费后任何一步失败都丢消息）。改用 AMQP `basic_get(no_ack=False)`，按以下顺序操作，每步都有失败回滚路径：
@@ -236,10 +238,14 @@ endpoint 调它，互斥参数（同时给会报 400）。
 ```
 
 失败处理：
-- step 4 失败 → `msg.nack(requeue=True)` 还原 DLQ 消息；audit row 标 status='publish_failed' + recovery_hint。consumer 端不会 dedup（idempotent 已清 + 消息回 DLQ），下次 replay 直接走 step 4，等价幂等。
-- step 5/6 失败 → broker unack 超时（默认 30 min）后自动 requeue；下游 consumer 会再次收到——consumer 端 inflight dedup 兜底（7a 状态机），不会重复处理。
+- step 3 抛 `AlreadySucceededError`（消息已被先前 replay 成功消费过，DLQ 里这条是 zombie）→ 跳到 step 6 直接 `msg.ack()` 清掉 zombie + audit row 标 status='zombie_acked'。**不再做 step 4 publish**（consumer 已成功处理过）。
+- step 4 失败 → `msg.nack(requeue=True)` 还原 DLQ 消息；audit row 标 status='publish_failed' + recovery_hint。consumer 端不会 dedup（idempotent 已清 + 消息回 DLQ），下次 replay 直接走 step 3-4，等价幂等。
+- step 5/6 失败 → broker unack 超时（默认 30 min）后自动 requeue；下次 replay 时 step 3 检测到 inflight 已 succeeded（consumer 在第一次 step 4 后已经成功消费）→ 抛 `AlreadySucceededError` → 走 zombie 路径直接 ack。**这是 finding 2 修订的核心**：避免 step 5/6 失败 + 二次 replay 时 step 3 误删 succeeded 行造成消费者重跑。
 
-**关键性质**：`clear_idempotent` 必须先于 `publish_with_confirm`（顺序反了，consumer 收到消息时 idempotent 还在，会被 dedup 跳过——退化回 7a 之前的"replay 默认 no-op" bug）。这是协议级硬性顺序，不可换。
+**关键性质**：
+- `clear_idempotent` 必须先于 `publish_with_confirm`（顺序反了，consumer 收到消息时 idempotent 还在，会被 dedup 跳过——退化回 7a 之前的"replay 默认 no-op" bug）
+- `delete_inflight` **不删 succeeded 行**——consumer 已成功处理的消息不应该被 replay 重复触发副作用
+- step 1-6 协议是 transaction-like 但**不是真原子**：靠 (a) audit 表作为状态机记录、(b) inflight state filter 防 zombie 重跑、(c) broker unack timeout + nack(requeue) 兜底未 ack 消息，三层组合保证最坏情况下消息不丢且不重复处理
 
 ### 3.3 audit 表
 
@@ -247,7 +253,7 @@ endpoint 调它，互斥参数（同时给会报 400）。
 CREATE TABLE runtime_dlq_audit (
   id BIGSERIAL PRIMARY KEY,
   action TEXT NOT NULL,             -- 'requeue' / 'clear-idempotent'
-  status TEXT NOT NULL,             -- 'cleared' / 'requeued' / 'publish_failed'（多 step 协议状态）
+  status TEXT NOT NULL,             -- 'cleared' / 'requeued' / 'publish_failed' / 'zombie_acked' / 'already_succeeded'（多 step 协议状态）
   queue TEXT,
   queue_kind TEXT,                  -- 'dlq' / 'review'
   message_ids JSONB,                -- ["..."]
@@ -383,11 +389,12 @@ async def dispatcher_loop(*, batch_size: int = 32, idle_sleep_ms: int = 200):
                 FROM runtime_outbox
                 WHERE state = 'pending'
                   AND next_attempt_at <= now()
-                  AND origin_app = :app    -- 只发自己 APP_NAME 的 outbox row
+                  AND origin_app = :app                  -- 进程角色：agent-service / arq-worker / vectorize-worker
+                  AND lane IS NOT DISTINCT FROM :lane    -- NULL-safe：prod 归一成 NULL
                 ORDER BY id
                 LIMIT :n
                 FOR UPDATE SKIP LOCKED
-            """), {"n": batch_size, "app": _current_app()})
+            """), {"n": batch_size, "app": _current_app(), "lane": _current_lane()})
             for row in rows:
                 try:
                     # 1. 重建 origin app/lane/trace propagation context
@@ -420,7 +427,8 @@ async def dispatcher_loop(*, batch_size: int = 32, idle_sleep_ms: int = 200):
 - `FOR UPDATE SKIP LOCKED`：多 pod 安全，行被锁的 pod 跳过即可
 - backoff：失败 `5s * 2^attempts`（attempt=0 立即；1=5s；2=20s；3=45s；…）
 - **永不主动判 fail**：dispatcher 永远 retry（broker 故障最终会恢复），到达上限的运维侧 alert（监控信号 `runtime_outbox.attempts > 10` 计数）
-- propagation context 从 row 重建（dispatcher 跟原业务调用栈解耦）—— `origin_app` / `lane` / `trace_id` 已在 §4.1 schema 中。dispatcher SELECT 时按 `origin_app = APP_NAME` 过滤：每个 deployment（agent-service / arq-worker / vectorize-worker，APP_NAME 不同）的 dispatcher 只发自己 app 的 outbox row
+- propagation context 从 row 重建（dispatcher 跟原业务调用栈解耦）—— `origin_app` / `lane` / `trace_id` 已在 §4.1 schema 中
+- **dispatcher 按 (origin_app, lane) 复合过滤**（接受 reviewer round-3 finding 1）：APP_NAME 是进程角色（agent-service / arq-worker / vectorize-worker），不含 lane；lane 单独从 `lane_var` / LANE env 拿，prod 归一成 NULL。如果只按 origin_app 过滤，dev 泳道 pod（如 agent-service-feat-x，APP_NAME 仍为 'agent-service'）会跟 prod pod 抢同一行 outbox。复合过滤后每个 (deployment, lane) 的 dispatcher 只看自己 lane 的 row，跨 lane 不互相影响
 
 **at-least-once 性质**（接受 reviewer P1-2）：dispatcher 是「先 emit 成功再 update DB」——publish/in-process 完成后 UPDATE 到 dispatched 之间崩溃，下一个 dispatcher loop 会再次抓到该 row 重发。consumer 端 `runtime_inflight` 状态机（7a 已 ship）按 `(edge_id, idempotent_key)` 兜底 dedup，业务效果一次。drill 验收措辞要明确这一点（§6.4 drill G）。
 
@@ -443,7 +451,7 @@ async def lifespan(app):
     runtime._outbox_dispatcher_task.cancel()
 ```
 
-**部署形态**：所有 agent-service 镜像产出的 pod（agent-service / arq-worker / vectorize-worker，APP_NAME 不同）都启 dispatcher。多个 dispatcher 共享同一张 `runtime_outbox` 表，靠 `FOR UPDATE SKIP LOCKED` 协调；按 `origin_app` 过滤保证每个 deployment 只发自己产生的 row。
+**部署形态**：所有 agent-service 镜像产出的 pod（agent-service / arq-worker / vectorize-worker，APP_NAME 不同；prod / dev 泳道，lane 不同）都启 dispatcher。多个 dispatcher 共享同一张 `runtime_outbox` 表，靠 `FOR UPDATE SKIP LOCKED` 协调；按 `(origin_app, lane)` 复合过滤保证每个 (deployment, lane) 的 dispatcher 只发自己产生的 row。dev 泳道 agent-service-feat-x pod 的 dispatcher 跟 prod agent-service pod 的 dispatcher**不会互相抢 row**。
 
 ### 4.5 业务调用方迁移清单（接受 reviewer P1-1 + P1-3）
 
@@ -501,6 +509,34 @@ grep word-boundary 仍会命中 docstring 反引号包裹的 ``await emit(...)``
 「统一」的含义是：**所有 mutation node 的 emit 都经过 dispatcher 异步触发**——不是「都走 RabbitMQ」。in-process wire 仍然走内存直调，没有引入额外开销，只是触发时机从「业务调用栈内同步」推迟到「dispatcher loop 异步」。
 
 如果以后有性能压力（in-process 路径不希望经过 PostgreSQL outbox 表）：再加 fast path（mutation node 显式 opt-in"内存直发"），**7b 不做**。
+
+### 4.7 transactional_emit 使用约束（接受 reviewer round-3 finding 3）
+
+**事实**：`runtime_inflight` dedup 状态机只在 durable handler（`durable.py`）里生效；`emit()` 的 in-process 分支（emit.py:97-99）是 `await c(**kwargs)` 直接调，**没有 dedup 兜底**。
+
+**含义**：dispatcher at-least-once 重发时——
+
+| wire 类型 | 重发处理 |
+|---|---|
+| durable wire | consumer 端 `runtime_inflight (edge_id, idempotent_key)` dedup 后业务效果一次 |
+| in-process wire | **直接重跑 consumer**，没有 framework 级 dedup |
+
+**约束**：用 `transactional_emit` append 的 Data，下游连的 in-process consumer **必须满足以下之一**：
+- (a) 副作用为零（pure transform / fan-out / re-emit 到 durable wire）
+- (b) consumer 自身是幂等的（重复输入产生相同输出，副作用相等于跑一次）
+
+**当前 §4.5.2 类别 B 中的 in-process consumer 全数核对**：
+
+| 文件:行 | wire 类型 | 副作用 | 幂等性 | 是否符合 |
+|---|---|---|---|---|
+| `nodes/life_dataflow.py:72, 275, 296` | cron 触发 fan-out | 触发 durable 子任务（durable 自带 dedup）| 是 | ✅ |
+| `nodes/chat_node.py:97, 142, 209, 242, 271` | streaming pure transform | 触发 chat 主流（streaming 序号自带）| 是 | ✅ |
+| `chat/post_actions.py:46` | 触发 durable PostSafetyRequest | durable wire 自带 dedup | 是 | ✅ |
+| `chat/post_actions.py:62` | 触发 durable memory trigger | durable wire 自带 dedup | 是 | ✅ |
+| `chat/context.py:117` | 触发 durable TOS 同步 | durable wire 自带 dedup | 是 | ✅ |
+| `nodes/memory_pipelines.py:297` | in-process re-emit MemoryAbstractRequest | 触发 durable consumer | 是 | ✅ |
+
+类别 B 全部符合约束（pure transform → 触发 durable）。新业务作者用 transactional_emit 时如果**直接连 in-process consumer 写 DB**——必须 PR review 时拍下来要求改 durable wire 或加业务级 dedup。
 
 ---
 
@@ -599,7 +635,8 @@ grep -rn "# 不要 catch\|# don't catch\|requeue=False\|nack" \
 | D | mutation node 写 DB 失败（raise in `session.execute`）| outbox 表无对应 row（事务回滚生效）|
 | E | mutation node 写成功 → dispatcher 拉走 → in-process consumer 收到（AbstractMemoryCommitted → on_abstract_committed）+ durable consumer 收到（MemoryAbstractRequest → vectorize-worker）| trace_id 完整传播；outbox row state=dispatched |
 | F | dispatcher 重发失败：mock `emit` raise | row attempts 累加，next_attempt_at 按 backoff 推后；恢复后成功 dispatch |
-| G | 多 pod dispatcher 并发：两个 pod 同时跑 | 同一 row 只被一个 pod 发（FOR UPDATE SKIP LOCKED 生效）；publish/in-process 自身是 at-least-once，下游 `runtime_inflight` (edge_id, idempotent_key) dedup 后**业务效果一次**（验收 consumer 端只 mark_succeeded 一次）|
+| G | 多 pod dispatcher 并发：两个同 (origin_app, lane) pod 同时跑 | 同一 row 只被一个 pod 发（FOR UPDATE SKIP LOCKED 生效）；durable wire 路径下游 `runtime_inflight` dedup 后业务效果一次；in-process wire 路径**重发即重跑**（§4.7 约束保证 in-process consumer 无副作用 / 自幂等）|
+| G2 | 跨 lane 隔离：feat-x 泳道触发 mutation 写 outbox row → prod dispatcher **不抓** | prod dispatcher 不抓 lane='feat-x' row；只 feat-x pod 的 dispatcher 抓走 emit |
 | H | publish-confirm fall-through：retry envelope publish 失败 / review queue publish 失败 | helper raise → 进 DLQ；inflight state='failed'；DLQ 消息可被后续 replay |
 
 drill 全过 + 写 retrospective `docs/superpowers/retrospectives/2026-MM-DD-phase7b-drill.md`。
@@ -611,7 +648,10 @@ drill 全过 + 写 retrospective `docs/superpowers/retrospectives/2026-MM-DD-pha
 ### 7.1 风险
 
 **R1: dispatcher 多 pod SKIP LOCKED 失效 → 重复 emit**
-缓解：下游 idempotent 兜底（`runtime_inflight` 7a 已建状态机 + `(edge_id, idempotent_key)` 复合 PK + history backfill），重复 emit 在 consumer 侧静默 dedup。drill G 真验。
+缓解（分 wire 类型）：
+- **durable wire**：consumer 端 `runtime_inflight (edge_id, idempotent_key)` dedup 静默吃掉重复（7a 已建）
+- **in-process wire**：**没有 framework dedup**——靠 §4.7 使用约束保证 in-process consumer 无副作用或自幂等
+- drill G 验 durable 路径；G2 验 lane 隔离
 
 **R2: 业务侧迁移漏改 → 仍有 commit-then-emit**
 缓解：CI gate `\bawait emit(` 命中计数 == 14 守底；超过即阻塞 PR。
