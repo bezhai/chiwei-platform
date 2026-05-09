@@ -406,3 +406,19 @@ class _RabbitMQ:
 
 # Module-level instance
 mq = _RabbitMQ()
+
+
+async def basic_get(queue: str, *, no_ack: bool = False):
+    """Phase 7b Gap 12: blocking basic.get for DLQ replay.
+
+    Returns aio_pika.IncomingMessage or None if queue is empty. Caller is
+    responsible for ack()/nack(requeue=...) on the returned message.
+
+    Uses the shared ``mq._channel`` — caller must ensure ``mq.connect()``
+    has been called before invoking this helper (same precondition as all
+    other ``mq`` operations).
+    """
+    if mq._channel is None:
+        raise RuntimeError("must call mq.connect() first")
+    queue_obj = await mq._channel.declare_queue(queue, passive=True)
+    return await queue_obj.get(timeout=5, fail=False, no_ack=no_ack)

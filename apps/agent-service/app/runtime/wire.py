@@ -15,6 +15,8 @@ from app.runtime.data import Data
 from app.runtime.sink import SinkSpec
 from app.runtime.source import SourceSpec
 
+VALID_ON_ERROR: tuple[str, ...] = ("dlq", "ignore-duplicate", "manual-review")
+
 
 @dataclass(frozen=True)
 class RetryPolicy:
@@ -56,6 +58,9 @@ class WireSpec:
     debounce_key_by: Callable[[Data], str] | None = None
     with_latest: tuple[type[Data], ...] = ()
     retry: RetryPolicy | None = None
+    # str (not Literal) for forward-compat with future policies — matches
+    # RetryPolicy.backoff. Validated at builder time via VALID_ON_ERROR.
+    on_error: str = "dlq"
 
 
 WIRING_REGISTRY: list[WireSpec] = []
@@ -153,6 +158,23 @@ class WireBuilder:
             max_delay_ms=max_delay_ms,
             lease_ms=lease_ms,
         )
+        return self
+
+    def on_error(self, policy: str) -> WireBuilder:
+        """Configure error policy for this wire (Gap 18).
+
+        Valid values: 'dlq' (default — fall to DLQ),
+        'ignore-duplicate' (ack DuplicateData silently),
+        'manual-review' (route NeedsReview to review queue).
+        retry is controlled separately by .retry(); on_error decides
+        what happens AFTER retries are exhausted or for non-retryable
+        errors.
+        """
+        if policy not in VALID_ON_ERROR:
+            raise ValueError(
+                f"on_error policy must be one of {VALID_ON_ERROR}, got {policy!r}"
+            )
+        self._spec.on_error = policy
         return self
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,13 +11,27 @@ from app.agent.tools.commit_abstract import _commit_abstract_impl
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 
 
+def _make_transactional_emit_mock():
+    """Async context manager stub that captures emitter.append() calls."""
+    captured: list = []
+
+    @asynccontextmanager
+    async def _fake(_session):
+        emitter = MagicMock()
+        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
+        yield emitter
+
+    return _fake, captured
+
+
 @pytest.mark.asyncio
 async def test_commit_writes_abstract_and_edges():
+    fake_te, captured = _make_transactional_emit_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=None)):
         with patch("app.agent.tools.commit_abstract.get_fragment_by_id", new=AsyncMock(return_value=MagicMock())):
             with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()) as ins_a:
                 with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                    with patch("app.agent.tools.commit_abstract.emit", new_callable=AsyncMock) as enq:
+                    with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
                         out = await _commit_abstract_impl(
                             persona_id="chiwei",
                             chat_id=None,
@@ -29,8 +44,8 @@ async def test_commit_writes_abstract_and_edges():
     assert out["conflict_hint"] is None
     ins_a.assert_awaited_once()
     assert ins_e.await_count == 2
-    enq.assert_awaited_once()
-    emitted = enq.await_args.args[0]
+    assert len(captured) == 1
+    emitted = captured[0]
     assert isinstance(emitted, AbstractMemoryCommitted)
     assert emitted.abstract_id == out["id"]
     assert emitted.persona_id == "chiwei"
@@ -39,10 +54,11 @@ async def test_commit_writes_abstract_and_edges():
 @pytest.mark.asyncio
 async def test_commit_returns_conflict_hint():
     hint = {"conflicting_abstract_id": "a_old", "similarity": 0.91, "conflicting_content": "他不爱甜"}
+    fake_te, captured = _make_transactional_emit_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=hint)):
         with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()) as ins_a:
             with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                with patch("app.agent.tools.commit_abstract.emit", new_callable=AsyncMock):
+                with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
                     out = await _commit_abstract_impl(
                         persona_id="chiwei", chat_id=None, subject="浩南",
                         content="他喝奶茶了", supported_by_fact_ids=None, reasoning=None,
@@ -97,11 +113,12 @@ async def test_commit_rejects_whitespace_only_content():
 
 @pytest.mark.asyncio
 async def test_commit_passes_reasoning_to_edge():
+    fake_te, _captured = _make_transactional_emit_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=None)):
         with patch("app.agent.tools.commit_abstract.get_fragment_by_id", new=AsyncMock(return_value=MagicMock())):
             with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()):
                 with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                    with patch("app.agent.tools.commit_abstract.emit", new_callable=AsyncMock):
+                    with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
                         await _commit_abstract_impl(
                             persona_id="chiwei",
                             chat_id=None,

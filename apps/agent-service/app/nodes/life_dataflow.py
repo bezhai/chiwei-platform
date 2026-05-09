@@ -300,12 +300,6 @@ async def glimpse_event_node(c: LifeStateChanged) -> None:
 
 @node
 async def run_glimpse_node(r: GlimpseRequest) -> None:
-    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里.
-
-    **不 try/except**: durable handler 在 ``message.process(requeue=False)``
-    上下文里依靠 consumer 抛异常来 nack → DLX → DLQ。捕获异常会让
-    handler 看到正常返回 → ack → message 永远不会进 DLQ，PR #202 的
-    DLQ 监控失效。参照 ``run_post_safety`` 范式（row 不存在直接 raise）。
-    """
+    """LLM 重活，走 .durable() consumer。两条上游路径汇入这里."""
     from app.life.glimpse import run_glimpse
     await run_glimpse(r.persona_id, r.chat_id)

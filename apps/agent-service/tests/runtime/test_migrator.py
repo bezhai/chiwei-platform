@@ -30,7 +30,7 @@ def test_plan_creates_table_for_new_data():
     plan = plan_migration([Msg], existing_schema={})
     stmts = [s.sql for s in plan.stmts]
     assert any("CREATE TABLE IF NOT EXISTS data_msg" in s for s in stmts)
-    assert any("mid VARCHAR" in s or "mid TEXT" in s for s in stmts)
+    assert any('"mid" VARCHAR' in s or '"mid" TEXT' in s for s in stmts)
     # dedup_hash UNIQUE for idempotent durable writes
     assert any("dedup_hash" in s for s in stmts)
 
@@ -87,8 +87,8 @@ def test_optional_unwraps_to_nullable_pg_type():
     # Optional[X] columns must get the scalar PG type of X, not JSONB.
     plan = plan_migration([Optional1], existing_schema={})
     ddl = " ".join(s.sql for s in plan.stmts)
-    assert "mood TEXT" in ddl
-    assert "when TIMESTAMPTZ" in ddl
+    assert '"mood" TEXT' in ddl
+    assert '"when" TIMESTAMPTZ' in ddl
 
 
 def test_non_optional_union_rejected():

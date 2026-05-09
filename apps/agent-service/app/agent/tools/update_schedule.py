@@ -7,8 +7,6 @@ in agent-service main process. arq state_sync_worker retired.
 
 from __future__ import annotations
 
-import logging
-
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
 
@@ -18,9 +16,7 @@ from app.data.ids import new_id
 from app.data.queries import insert_schedule_revision
 from app.data.session import get_session
 from app.domain.agent_tool_events import ScheduleRevisionCreated
-from app.runtime import emit
-
-logger = logging.getLogger(__name__)
+from app.runtime import transactional_emit
 
 
 async def _update_schedule_impl(
@@ -37,18 +33,8 @@ async def _update_schedule_impl(
             s, id=rid, persona_id=persona_id,
             content=content, reason=reason, created_by=created_by,
         )
-
-    # emit AFTER commit (Gap 8 spec convention) — durable wire routes to
-    # sync_life_state_node in main process. emit failure must not lose the
-    # already-committed revision; downstream state-sync is replayed via
-    # mq redelivery / DLQ.
-    try:
-        await emit(ScheduleRevisionCreated(revision_id=rid, persona_id=persona_id))
-    except Exception as e:
-        logger.warning(
-            "emit ScheduleRevisionCreated failed for %s: %s — revision is committed; "
-            "state-sync may be delayed", rid, e,
-        )
+        async with transactional_emit(s) as emitter:
+            await emitter.append(ScheduleRevisionCreated(revision_id=rid, persona_id=persona_id))
 
     return {"revision_id": rid, "schedule": content}
 

@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.life.tool import commit_life_state_impl
+
+
+@asynccontextmanager
+async def _null_transactional_emit(_session):
+    """Stub transactional_emit that discards all appends."""
+    emitter = MagicMock()
+    emitter.append = AsyncMock()
+    yield emitter
+
+
+def _null_session_ctx():
+    """Return an async context manager that yields an AsyncMock session."""
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx
 
 CST = timezone(timedelta(hours=8))
 
@@ -85,15 +102,17 @@ async def test_prev_not_expired_allows_in_segment_refresh():
     prev_end = now + timedelta(minutes=30)
     prev = MagicMock(activity_type="study", state_end_at=prev_end)
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=42)) as ins:
-        r = await commit_life_state_impl(
-            persona_id="chiwei",
-            activity_type="study",
-            current_state="reading more focused",
-            response_mood="calm",
-            state_end_at=prev_end,
-            skip_until=now + timedelta(minutes=10),
-            reasoning=None, now=now, prev_state=prev,
-        )
+        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
+            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+                r = await commit_life_state_impl(
+                    persona_id="chiwei",
+                    activity_type="study",
+                    current_state="reading more focused",
+                    response_mood="calm",
+                    state_end_at=prev_end,
+                    skip_until=now + timedelta(minutes=10),
+                    reasoning=None, now=now, prev_state=prev,
+                )
     assert r.ok is True
     assert r.is_refresh is True
     assert r.life_state_id == 42
@@ -108,15 +127,17 @@ async def test_prev_expired_allows_new_activity():
         state_end_at=now - timedelta(minutes=5),
     )
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=7)) as ins:
-        r = await commit_life_state_impl(
-            persona_id="chiwei",
-            activity_type="transit",
-            current_state="walking home",
-            response_mood="calm",
-            state_end_at=now + timedelta(minutes=30),
-            skip_until=None, reasoning=None,
-            now=now, prev_state=prev,
-        )
+        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
+            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+                r = await commit_life_state_impl(
+                    persona_id="chiwei",
+                    activity_type="transit",
+                    current_state="walking home",
+                    response_mood="calm",
+                    state_end_at=now + timedelta(minutes=30),
+                    skip_until=None, reasoning=None,
+                    now=now, prev_state=prev,
+                )
     assert r.ok is True
     assert r.is_refresh is False
     assert r.life_state_id == 7
@@ -129,14 +150,16 @@ async def test_prev_no_state_end_at_allows_new_activity():
     now = _now()
     prev = MagicMock(activity_type="study", state_end_at=None)
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=1)) as ins:
-        r = await commit_life_state_impl(
-            persona_id="chiwei",
-            activity_type="transit",
-            current_state="walking", response_mood="calm",
-            state_end_at=now + timedelta(minutes=30),
-            skip_until=None, reasoning=None,
-            now=now, prev_state=prev,
-        )
+        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
+            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+                r = await commit_life_state_impl(
+                    persona_id="chiwei",
+                    activity_type="transit",
+                    current_state="walking", response_mood="calm",
+                    state_end_at=now + timedelta(minutes=30),
+                    skip_until=None, reasoning=None,
+                    now=now, prev_state=prev,
+                )
     assert r.ok is True
     assert r.is_refresh is False
     ins.assert_awaited_once()

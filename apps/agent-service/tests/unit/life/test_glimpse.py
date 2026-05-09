@@ -1,6 +1,7 @@
 """Tests for app.life.glimpse — browsing observation pipeline."""
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,6 +9,19 @@ import pytest
 
 from app.domain.memory_request import MemoryFragmentRequest
 from app.life.glimpse import GlimpseResult, parse_glimpse_response
+
+
+def _make_transactional_emit_mock():
+    """Async context manager stub that captures emitter.append() calls."""
+    captured: list = []
+
+    @asynccontextmanager
+    async def _fake(_session):
+        emitter = MagicMock()
+        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
+        yield emitter
+
+    return _fake, captured
 
 CST = timezone(timedelta(hours=8))
 
@@ -134,6 +148,7 @@ async def test_glimpse_creates_fragment_and_state():
             "want_to_speak": False,
         }
     )
+    fake_te, captured = _make_transactional_emit_mock()
 
     with patch(f"{MODULE}.get_session") as mock_gs:
         mock_session = AsyncMock()
@@ -186,9 +201,7 @@ async def test_glimpse_creates_fragment_and_state():
                 new_callable=AsyncMock,
                 return_value="番剧群",
             ),
-            patch(
-                f"{MODULE}.emit", new_callable=AsyncMock
-            ) as mock_enqueue,
+            patch(f"{MODULE}.transactional_emit", fake_te),
         ):
             result = await run_glimpse("akao-001", "oc_test")
 
@@ -200,8 +213,8 @@ async def test_glimpse_creates_fragment_and_state():
             assert kwargs["chat_id"] == "oc_test"
             assert kwargs["content"] == "群里在聊新番"
             assert kwargs["id"].startswith("f_")
-            mock_enqueue.assert_awaited_once()
-            emitted = mock_enqueue.await_args.args[0]
+            assert len(captured) == 1
+            emitted = captured[0]
             assert isinstance(emitted, MemoryFragmentRequest)
             assert emitted.fragment_id == kwargs["id"]
 
@@ -277,7 +290,7 @@ async def test_glimpse_not_interesting_still_writes_state():
                 new_callable=AsyncMock,
                 return_value="番剧群",
             ),
-            patch(f"{MODULE}.emit", new_callable=AsyncMock),
+            patch(f"{MODULE}.transactional_emit", _make_transactional_emit_mock()[0]),
         ):
             result = await run_glimpse("akao-001", "oc_test")
 
@@ -349,7 +362,7 @@ async def test_glimpse_want_to_speak_submits_proactive():
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
-            patch(f"{MODULE}.emit", new_callable=AsyncMock),
+            patch(f"{MODULE}.transactional_emit", _make_transactional_emit_mock()[0]),
             patch(
                 f"{MODULE}.load_persona",
                 new_callable=AsyncMock,
@@ -443,7 +456,7 @@ async def test_glimpse_chat_submit_failure_marks_state_and_persists():
             patch(
                 f"{MODULE}.Q.insert_glimpse_state", new_callable=AsyncMock
             ) as mock_state,
-            patch(f"{MODULE}.emit", new_callable=AsyncMock),
+            patch(f"{MODULE}.transactional_emit", _make_transactional_emit_mock()[0]),
             patch(
                 f"{MODULE}.load_persona",
                 new_callable=AsyncMock,

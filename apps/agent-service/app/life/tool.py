@@ -13,6 +13,8 @@ from typing import Any
 
 from app.data.queries import insert_life_state
 from app.data.session import get_session
+from app.domain.life_dataflow import LifeStateChanged
+from app.runtime import transactional_emit
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ async def commit_life_state_impl(
     # §9.5 Validation 5 — state_end_at is an LLM self-discipline commitment;
     # tool layer does not mechanically enforce it beyond the above checks.
 
+    prev_activity = (prev_state.activity_type if prev_state else "") or ""
     async with get_session() as s:
         life_state_id = await insert_life_state(
             s,
@@ -92,24 +95,12 @@ async def commit_life_state_impl(
             skip_until=skip_until,
             state_end_at=state_end_at,
         )
-
-    # Emit event for event-driven downstream (glimpse / etc).
-    # try/except wraps emit so a downstream wire failure doesn't fail the
-    # langchain tool — life_state already persisted; we don't want
-    # life-engine retry causing a duplicate insert.
-    try:
-        from app.domain.life_dataflow import LifeStateChanged
-        from app.runtime import emit
-        prev_activity = (prev_state.activity_type if prev_state else "") or ""
-        await emit(LifeStateChanged(
-            persona_id=persona_id,
-            activity_type=activity_type,
-            prev_activity_type=prev_activity,
-            ts=now.isoformat(),
-        ))
-    except Exception:
-        logger.exception(
-            "[%s] LifeStateChanged emit failed; commit succeeded", persona_id,
-        )
+        async with transactional_emit(s) as emitter:
+            await emitter.append(LifeStateChanged(
+                persona_id=persona_id,
+                activity_type=activity_type,
+                prev_activity_type=prev_activity,
+                ts=now.isoformat(),
+            ))
 
     return CommitResult(ok=True, is_refresh=is_refresh, life_state_id=life_state_id)

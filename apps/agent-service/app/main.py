@@ -14,6 +14,7 @@ from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
 from app.infra.config import settings
 from app.infra.qdrant import init_collections
+from app.runtime.outbox_dispatcher import dispatcher_loop
 
 load_dotenv()
 setup_logging(log_dir="/logs/agent-service", log_file="app.log")
@@ -105,7 +106,20 @@ async def lifespan(app: FastAPI):
     await runtime_for_sources.start_source_loops()
     logger.info("dataflow source loops started")
 
+    # Phase 7b Gap 8: outbox dispatcher (HTTP process entry).
+    # Dual-entry with Runtime.run() (worker process entry) — both must
+    # drain the outbox so mutations from either process are forwarded.
+    outbox_task = asyncio.create_task(dispatcher_loop(), name="outbox_dispatcher")
+
     yield
+
+    # Phase 7b Gap 8: stop outbox dispatcher before tearing down consumers
+    # so any in-flight emit() calls can still complete.
+    outbox_task.cancel()
+    try:
+        await outbox_task
+    except asyncio.CancelledError:
+        pass
 
     # Phase 4: stop source loops first; in-progress sources can still
     # emit() to durable consumers cleanly because consumers are still alive.

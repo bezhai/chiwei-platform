@@ -25,7 +25,7 @@ from app.life.proactive import (
 )
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.runtime import emit
+from app.runtime import transactional_emit
 
 _GLIMPSE_CFG = AgentConfig("glimpse_observe", "offline-model", "glimpse-observe")
 
@@ -239,7 +239,8 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
                 source="glimpse",
                 chat_id=chat_id,
             )
-        await emit(MemoryFragmentRequest(fragment_id=fid))
+            async with transactional_emit(s) as emitter:
+                await emitter.append(MemoryFragmentRequest(fragment_id=fid))
         logger.info("[%s] Glimpse fragment %s: %s...", persona_id, fid, observation[:60])
 
     # 7. Proactive chat

@@ -31,6 +31,7 @@ from app.runtime.data import DATA_REGISTRY
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
 from app.runtime.migrator import plan_migration
+from app.runtime.outbox_dispatcher import dispatcher_loop
 from app.runtime.placement import DEFAULT_APP, known_apps, nodes_for_app
 from app.runtime.source import SourceSpec
 from app.runtime.wire import WireSpec
@@ -68,6 +69,7 @@ class Runtime:
         # reporting the first one is enough to fail the pod fast.
         self._source_error: BaseException | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._outbox_dispatcher_task: asyncio.Task | None = None
 
     async def migrate_schema(self) -> None:
         """Read live schema from PostgreSQL, diff against ``DATA_REGISTRY``,
@@ -110,9 +112,15 @@ class Runtime:
         # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
         # regardless of whether the Data plan is empty — these tables are
         # framework state, not Data, and aren't tracked by plan_migration.
+        from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+        from app.runtime.outbox import RUNTIME_OUTBOX_DDL
 
-        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL)
+        runtime_internal_stmts = (
+            list(RUNTIME_INFLIGHT_DDL)
+            + list(RUNTIME_DLQ_AUDIT_DDL)
+            + list(RUNTIME_OUTBOX_DDL)
+        )
 
         if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")
@@ -162,11 +170,28 @@ class Runtime:
                 self.app_name,
             )
         await start_consumers(app_name=self.app_name)
+        # Outbox dispatcher needs DB. Tests opting out via
+        # migrate_schema_on_run=False are signalling "no DB in this
+        # process" and must also opt out of the dispatcher.
+        if self._migrate_schema_on_run:
+            self._outbox_dispatcher_task = asyncio.create_task(
+                dispatcher_loop(), name="outbox_dispatcher"
+            )
         await self.start_source_loops()
         try:
             assert self._stop_event is not None
             await self._stop_event.wait()
         finally:
+            # Cancel the dispatcher before stopping consumers so any
+            # in-flight emit() the dispatcher started can still complete
+            # against a live wire/consumer. Same teardown order as
+            # main.py lifespan.
+            if self._outbox_dispatcher_task is not None:
+                self._outbox_dispatcher_task.cancel()
+                try:
+                    await self._outbox_dispatcher_task
+                except asyncio.CancelledError:
+                    pass
             await self.stop_source_loops()
             await stop_consumers()
 

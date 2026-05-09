@@ -77,7 +77,7 @@ wire(HeavyReviewRequest).to(heavy_review_node)
 # Glimpse dual-path converge into GlimpseRequest
 wire(GlimpseTickRequest).to(glimpse_tick_node)         # 5min periodic path
 wire(LifeStateChanged).to(glimpse_event_node)          # immediate event path
-wire(GlimpseRequest).to(run_glimpse_node).durable()    # durable multi-process
+wire(GlimpseRequest).to(run_glimpse_node).durable().on_error("dlq")
 
 # Schedule revision triggers life-state refresh (durable: cross-process tool->consumer).
 wire(ScheduleRevisionCreated).to(sync_life_state_node).durable()

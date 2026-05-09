@@ -16,7 +16,7 @@ from app.data.queries import (
 from app.data.session import get_session
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 from app.memory.conflict import detect_conflict
-from app.runtime import emit
+from app.runtime import transactional_emit
 
 
 async def _commit_abstract_impl(
@@ -60,12 +60,12 @@ async def _commit_abstract_impl(
                 edge_type="supports", created_by="chiwei",
                 reason=reasoning,
             )
-
-    await emit(AbstractMemoryCommitted(
-        abstract_id=aid,
-        persona_id=persona_id,
-        chat_id=chat_id,
-    ))
+        async with transactional_emit(s) as emitter:
+            await emitter.append(AbstractMemoryCommitted(
+                abstract_id=aid,
+                persona_id=persona_id,
+                chat_id=chat_id,
+            ))
 
     return {"id": aid, "conflict_hint": hint}
 
