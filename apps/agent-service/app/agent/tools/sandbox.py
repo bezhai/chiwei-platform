@@ -3,28 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from langchain.tools import tool
 
 from app.agent.tools._common import tool_error
-
-if TYPE_CHECKING:
-    from app.skills.sandbox_client import SandboxClient
+from app.capabilities.sandbox import run as _sandbox_run
 
 logger = logging.getLogger(__name__)
 
 # Module-level reference for easy mock patching in tests
-_sandbox_client: SandboxClient | None = None
-
-
-def _get_sandbox_client() -> SandboxClient:
-    global _sandbox_client
-    if _sandbox_client is None:
-        from app.skills.sandbox_client import sandbox_client
-
-        _sandbox_client = sandbox_client
-    return _sandbox_client
+# (patch ``app.agent.tools.sandbox.run`` to stub sandbox execution).
+run = _sandbox_run
 
 
 @tool
@@ -42,8 +31,14 @@ async def sandbox_bash(command: str) -> str:
     Args:
         command: 要执行的 bash 命令（如 python3 -c "print(1+1)"）
     """
-    client = _get_sandbox_client()
-    result = await client.execute(command)
-
-    logger.info("Sandbox executed, output length: %d", len(result))
-    return result
+    result = await run(command=command)
+    if result.exit_code != 0:
+        output = (
+            f"命令退出码 {result.exit_code}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    else:
+        output = result.stdout
+    logger.info("Sandbox executed, output length: %d", len(output))
+    return output

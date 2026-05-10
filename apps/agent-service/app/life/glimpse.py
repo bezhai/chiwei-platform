@@ -16,7 +16,6 @@ from langchain_core.messages import HumanMessage
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.data import queries as Q
 from app.data.ids import new_id
-from app.data.session import get_session
 from app.domain.memory_request import MemoryFragmentRequest
 from app.life.proactive import (
     get_recent_proactive_records,
@@ -25,7 +24,7 @@ from app.life.proactive import (
 )
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.runtime import transactional_emit
+from app.runtime.db import emit_tx, tx
 
 _GLIMPSE_CFG = AgentConfig("glimpse_observe", "offline-model", "glimpse-observe")
 
@@ -74,8 +73,7 @@ def list_target_groups() -> list[str]:
 
 async def _get_group_name(chat_id: str) -> str:
     try:
-        async with get_session() as s:
-            name = await Q.find_group_name(s, chat_id)
+        name = await Q.find_group_name(chat_id)
         return name or chat_id[:10]
     except Exception:
         return chat_id[:10]
@@ -169,14 +167,12 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
     now = _now_cst()
 
     # 1. Load glimpse state (incremental since last seen)
-    async with get_session() as s:
-        state = await Q.find_latest_glimpse_state(s, persona_id, chat_id)
+    state = await Q.find_latest_glimpse_state(persona_id, chat_id)
     last_seen = state.last_seen_msg_time if state else 0
     last_observation = state.observation if state else ""
 
     # 2. Skip conversations bot already participated in
-    async with get_session() as s:
-        bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
+    bot_reply_time = await Q.find_last_bot_reply_time(chat_id)
     effective_after = max(last_seen, bot_reply_time)
 
     # 3. Fetch incremental messages
@@ -197,8 +193,7 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
         return GlimpseResult.SKIPPED_EMPTY_TIMELINE
 
     # 4b. Today's proactive history (for LLM self-regulation + engineering cap)
-    async with get_session() as s:
-        bot_name = await Q.resolve_bot_name_for_persona(s, persona_id, chat_id)
+    bot_name = await Q.resolve_bot_name_for_persona(persona_id, chat_id)
     recent_proactive = await get_recent_proactive_records(chat_id, bot_name)
 
     # 5. LLM observation
@@ -216,31 +211,27 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
 
     if not decision.get("interesting"):
         logger.info("[%s] Glimpse: nothing interesting in %s", persona_id, group_name)
-        async with get_session() as s:
-            await Q.insert_glimpse_state(
-                s,
-                persona_id=persona_id,
-                chat_id=chat_id,
-                last_seen_msg_time=new_last_seen,
-                observation="",
-            )
+        await Q.insert_glimpse_state(
+            persona_id=persona_id,
+            chat_id=chat_id,
+            last_seen_msg_time=new_last_seen,
+            observation="",
+        )
         return GlimpseResult.SKIPPED_NOT_INTERESTING
 
     # 6. Create fragment
     observation = decision.get("observation", "")
     if observation:
         fid = new_id("f")
-        async with get_session() as s:
+        async with tx():
             await Q.insert_fragment(
-                s,
                 id=fid,
                 persona_id=persona_id,
                 content=observation,
                 source="glimpse",
                 chat_id=chat_id,
             )
-            async with transactional_emit(s) as emitter:
-                await emitter.append(MemoryFragmentRequest(fragment_id=fid))
+            await emit_tx(MemoryFragmentRequest(fragment_id=fid))
         logger.info("[%s] Glimpse fragment %s: %s...", persona_id, fid, observation[:60])
 
     # 7. Proactive chat
@@ -295,13 +286,11 @@ async def run_glimpse(persona_id: str, chat_id: str) -> GlimpseResult:
         state_observation = f"{observation}\n[no_speak] reason={speak_reason}"
 
     # 8. Persist glimpse state
-    async with get_session() as s:
-        await Q.insert_glimpse_state(
-            s,
-            persona_id=persona_id,
-            chat_id=chat_id,
-            last_seen_msg_time=new_last_seen,
-            observation=state_observation,
-        )
+    await Q.insert_glimpse_state(
+        persona_id=persona_id,
+        chat_id=chat_id,
+        last_seen_msg_time=new_last_seen,
+        observation=state_observation,
+    )
 
     return GlimpseResult.FRAGMENT_CREATED

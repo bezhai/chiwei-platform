@@ -14,14 +14,9 @@ MODULE = "app.memory.reviewer.heavy"
 CST = timezone(timedelta(hours=8))
 
 
-def _noop_session():
-    """Async context manager that yields a dummy session."""
-
-    @asynccontextmanager
-    async def _cm():
-        yield MagicMock()
-
-    return _cm()
+@asynccontextmanager
+async def _fake_tx():
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +27,7 @@ def _noop_session():
 @pytest.mark.asyncio
 async def test_skip_when_all_windows_empty():
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_recent_life_states", new=AsyncMock(return_value=[])),
@@ -58,7 +53,7 @@ async def test_runs_with_full_day_summary():
     frag.content = "今天学了新东西"
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[frag])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_recent_life_states", new=AsyncMock(return_value=[])),
@@ -92,7 +87,7 @@ async def test_runs_when_only_life_states_present():
     state.response_mood = "calm"
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(

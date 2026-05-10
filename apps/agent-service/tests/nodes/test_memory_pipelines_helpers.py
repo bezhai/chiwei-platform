@@ -13,17 +13,19 @@ import pytest
 from app.domain.memory_request import MemoryFragmentRequest
 
 
-def _make_transactional_emit_mock():
-    """Async context manager stub that captures emitter.append() calls."""
+@asynccontextmanager
+async def _fake_tx():
+    yield
+
+
+def _make_emit_tx_mock():
     captured: list = []
 
-    @asynccontextmanager
-    async def _fake(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
 
-    return _fake, captured
+    return _fake_emit_tx, captured
+
 
 # ---------------------------------------------------------------------------
 # _generate_fragment — v4 write path
@@ -37,47 +39,34 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
     from app.nodes.memory_pipelines import _generate_fragment
 
     fake_message = MagicMock(role="user", user_id="u1", chat_type="p2p")
+    fake_emit, captured = _make_emit_tx_mock()
     with patch(
         "app.nodes.memory_pipelines.find_messages_in_range",
         new=AsyncMock(return_value=[fake_message]),
+    ), patch(
+        "app.nodes.memory_pipelines.load_persona",
+        new=AsyncMock(return_value=MagicMock(display_name="ayana", persona_lite="x")),
+    ), patch(
+        "app.nodes.memory_pipelines._build_scene",
+        new=AsyncMock(return_value="scene"),
+    ), patch(
+        "app.nodes.memory_pipelines.format_timeline",
+        new=AsyncMock(return_value="t"),
+    ), patch("app.nodes.memory_pipelines.Agent") as MockAgent, patch(
+        "app.nodes.memory_pipelines.extract_text",
+        return_value="this is the generated content",
+    ), patch(
+        "app.nodes.memory_pipelines.insert_fragment",
+        new=AsyncMock(),
+    ) as mock_ins, patch(
+        "app.nodes.memory_pipelines.tx", _fake_tx
+    ), patch(
+        "app.nodes.memory_pipelines.emit_tx", fake_emit
     ):
-        with patch(
-            "app.nodes.memory_pipelines.load_persona",
-            new=AsyncMock(return_value=MagicMock(display_name="ayana", persona_lite="x")),
-        ):
-            with patch(
-                "app.nodes.memory_pipelines._build_scene",
-                new=AsyncMock(return_value="scene"),
-            ):
-                with patch(
-                    "app.nodes.memory_pipelines.format_timeline",
-                    new=AsyncMock(return_value="t"),
-                ):
-                    with patch("app.nodes.memory_pipelines.Agent") as MockAgent:
-                        MockAgent.return_value.run = AsyncMock(
-                            return_value=MagicMock(content="hello world")
-                        )
-                        with patch(
-                            "app.nodes.memory_pipelines.extract_text",
-                            return_value="this is the generated content",
-                        ):
-                            with patch(
-                                "app.nodes.memory_pipelines.insert_fragment",
-                                new=AsyncMock(),
-                            ) as mock_ins:
-                                fake_te, captured = _make_transactional_emit_mock()
-                                with patch(
-                                    "app.nodes.memory_pipelines.transactional_emit",
-                                    fake_te,
-                                ):
-                                    with patch(
-                                        "app.nodes.memory_pipelines.get_session",
-                                    ) as mock_session:
-                                        mock_ctx = AsyncMock()
-                                        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
-                                        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-                                        mock_session.return_value = mock_ctx
-                                        await _generate_fragment("chat_1", "ayana")
+        MockAgent.return_value.run = AsyncMock(
+            return_value=MagicMock(content="hello world")
+        )
+        await _generate_fragment("chat_1", "ayana")
 
     mock_ins.assert_awaited_once()
     kwargs = mock_ins.call_args.kwargs
@@ -98,23 +87,14 @@ async def test_generate_fragment_skip_when_no_messages():
     from app.nodes.memory_pipelines import _generate_fragment
 
     with patch(
-        "app.nodes.memory_pipelines.get_session",
-    ) as mock_session:
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_session.return_value = mock_ctx
-        with patch(
-            "app.nodes.memory_pipelines.find_messages_in_range",
-            new=AsyncMock(return_value=[]),
-        ):
-            with patch(
-                "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
-            ) as mock_ins:
-                with patch(
-                    "app.nodes.memory_pipelines.emit", new=AsyncMock()
-                ) as mock_enq:
-                    await _generate_fragment("chat_1", "ayana")
+        "app.nodes.memory_pipelines.find_messages_in_range",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
+    ) as mock_ins, patch(
+        "app.nodes.memory_pipelines.emit", new=AsyncMock()
+    ) as mock_enq:
+        await _generate_fragment("chat_1", "ayana")
 
     mock_ins.assert_not_awaited()
     mock_enq.assert_not_awaited()
@@ -129,42 +109,28 @@ async def test_generate_fragment_skip_when_empty_content():
     with patch(
         "app.nodes.memory_pipelines.find_messages_in_range",
         new=AsyncMock(return_value=[fake_message]),
-    ):
-        with patch(
-            "app.nodes.memory_pipelines.load_persona",
-            new=AsyncMock(return_value=MagicMock(display_name="ayana", persona_lite="x")),
-        ):
-            with patch(
-                "app.nodes.memory_pipelines._build_scene",
-                new=AsyncMock(return_value="scene"),
-            ):
-                with patch(
-                    "app.nodes.memory_pipelines.format_timeline",
-                    new=AsyncMock(return_value="t"),
-                ):
-                    with patch("app.nodes.memory_pipelines.Agent") as MockAgent:
-                        MockAgent.return_value.run = AsyncMock(
-                            return_value=MagicMock(content="")
-                        )
-                        with patch(
-                            "app.nodes.memory_pipelines.extract_text",
-                            return_value="",
-                        ):
-                            with patch(
-                                "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
-                            ) as mock_ins:
-                                with patch(
-                                    "app.nodes.memory_pipelines.emit",
-                                    new=AsyncMock(),
-                                ) as mock_enq:
-                                    with patch(
-                                        "app.nodes.memory_pipelines.get_session",
-                                    ) as mock_session:
-                                        mock_ctx = AsyncMock()
-                                        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
-                                        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-                                        mock_session.return_value = mock_ctx
-                                        await _generate_fragment("chat_1", "ayana")
+    ), patch(
+        "app.nodes.memory_pipelines.load_persona",
+        new=AsyncMock(return_value=MagicMock(display_name="ayana", persona_lite="x")),
+    ), patch(
+        "app.nodes.memory_pipelines._build_scene",
+        new=AsyncMock(return_value="scene"),
+    ), patch(
+        "app.nodes.memory_pipelines.format_timeline",
+        new=AsyncMock(return_value="t"),
+    ), patch("app.nodes.memory_pipelines.Agent") as MockAgent, patch(
+        "app.nodes.memory_pipelines.extract_text",
+        return_value="",
+    ), patch(
+        "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
+    ) as mock_ins, patch(
+        "app.nodes.memory_pipelines.emit",
+        new=AsyncMock(),
+    ) as mock_enq:
+        MockAgent.return_value.run = AsyncMock(
+            return_value=MagicMock(content="")
+        )
+        await _generate_fragment("chat_1", "ayana")
 
     mock_ins.assert_not_awaited()
     mock_enq.assert_not_awaited()

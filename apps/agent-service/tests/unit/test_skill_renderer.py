@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.capabilities.sandbox import SandboxResult
 from app.skills.loader import PreprocessDirective, SkillDefinition
 from app.skills.renderer import render_skill
 
@@ -38,9 +39,11 @@ class TestRenderSkill:
         assert "$SKILL_DIR" not in result
 
     @pytest.mark.asyncio
-    @patch("app.skills.renderer.sandbox_client")
-    async def test_preprocessing_executed(self, mock_sandbox):
-        mock_sandbox.execute = AsyncMock(return_value="Linux 5.15 x86_64")
+    @patch("app.skills.renderer.run", new_callable=AsyncMock)
+    async def test_preprocessing_executed(self, mock_run):
+        mock_run.return_value = SandboxResult(
+            exit_code=0, stdout="Linux 5.15 x86_64", stderr=""
+        )
 
         skill = _make_skill(
             raw_body="## Info\n\n```\n!`uname -a`\n```\n\n## Instructions\n\nShow info.",
@@ -49,14 +52,33 @@ class TestRenderSkill:
 
         result = await render_skill(skill)
 
-        mock_sandbox.execute.assert_called_once_with("uname -a", "test_skill")
+        mock_run.assert_called_once_with(command="uname -a", skill_name="test_skill")
         assert "Linux 5.15 x86_64" in result
         assert "!`uname -a`" not in result
 
     @pytest.mark.asyncio
-    @patch("app.skills.renderer.sandbox_client")
-    async def test_preprocessing_failure_graceful(self, mock_sandbox):
-        mock_sandbox.execute = AsyncMock(side_effect=RuntimeError("sandbox down"))
+    @patch("app.skills.renderer.run", new_callable=AsyncMock)
+    async def test_preprocessing_nonzero_exit_formatted(self, mock_run):
+        mock_run.return_value = SandboxResult(
+            exit_code=2, stdout="partial", stderr="bad arg"
+        )
+
+        skill = _make_skill(
+            raw_body="```\n!`failing_cmd`\n```\n\nInstructions.",
+            preprocessing=(PreprocessDirective(command="failing_cmd", label=""),),
+        )
+
+        result = await render_skill(skill)
+
+        assert "命令退出码 2" in result
+        assert "partial" in result
+        assert "bad arg" in result
+        assert "Instructions." in result
+
+    @pytest.mark.asyncio
+    @patch("app.skills.renderer.run", new_callable=AsyncMock)
+    async def test_preprocessing_failure_graceful(self, mock_run):
+        mock_run.side_effect = RuntimeError("sandbox down")
 
         skill = _make_skill(
             raw_body="```\n!`broken_cmd`\n```\n\nInstructions.",
@@ -70,9 +92,12 @@ class TestRenderSkill:
         assert "Instructions." in result
 
     @pytest.mark.asyncio
-    @patch("app.skills.renderer.sandbox_client")
-    async def test_multiple_preprocessing(self, mock_sandbox):
-        mock_sandbox.execute = AsyncMock(side_effect=["table_schema", "query_result"])
+    @patch("app.skills.renderer.run", new_callable=AsyncMock)
+    async def test_multiple_preprocessing(self, mock_run):
+        mock_run.side_effect = [
+            SandboxResult(exit_code=0, stdout="table_schema", stderr=""),
+            SandboxResult(exit_code=0, stdout="query_result", stderr=""),
+        ]
 
         skill = _make_skill(
             raw_body="```\n!`get_schema`\n```\n\n```\n!`run_query`\n```\n\nAnalyze.",
@@ -84,7 +109,7 @@ class TestRenderSkill:
 
         result = await render_skill(skill)
 
-        assert mock_sandbox.execute.call_count == 2
+        assert mock_run.call_count == 2
         assert "table_schema" in result
         assert "query_result" in result
         assert "Analyze." in result

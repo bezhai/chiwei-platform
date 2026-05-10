@@ -2,31 +2,35 @@
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 MODULE = "app.life.proactive"
 
 
-def _mock_session_cm(session):
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(return_value=session)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    return cm
+@asynccontextmanager
+async def _fake_tx():
+    yield
 
 
-def _make_transactional_emit_mock():
-    """Async context manager stub that captures emitter.append() calls."""
+def _make_emit_tx_mock():
     captured: list = []
 
-    @asynccontextmanager
-    async def _fake(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
 
-    return _fake, captured
+    return _fake_emit_tx, captured
+
+
+def _make_insert_mock():
+    """Capture ConversationMessage entities passed to insert_proactive_message."""
+    captured: list = []
+
+    async def _fake_insert(message):
+        captured.append(message)
+
+    return _fake_insert, captured
 
 
 @pytest.mark.asyncio
@@ -35,16 +39,17 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
     from app.domain.message import Message
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_target",
         root_message_id="om_root",
         chat_id="oc_test",
     )
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_mock_session_cm(session)),
+        patch(f"{MODULE}.tx", _fake_tx),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch("app.data.queries.find_message_by_id", AsyncMock(return_value=target)),
         patch(
             "app.data.queries.resolve_bot_name_for_persona",
@@ -52,7 +57,9 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-1"),
-        patch("app.runtime.transactional_emit", fake_te),
+        # emit_tx is imported lazily inside submit_proactive_chat to avoid boot
+        # cycles, so patch the underlying source rather than MODULE.emit_tx.
+        patch("app.runtime.db.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         session_id = await submit_proactive_chat(
@@ -63,7 +70,8 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
         )
 
     assert session_id == "session-1"
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1, f"expect 1 insert_proactive_message call, got {inserted}"
+    added = inserted[0]
     assert added.message_id == "proactive_1234567"
     assert added.root_message_id == "om_root"
     assert added.reply_message_id == "om_target"
@@ -93,16 +101,17 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
     from app.domain.chat_dataflow import ChatTrigger
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_from_row",
         root_message_id="om_root",
         chat_id="oc_test",
     )
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_mock_session_cm(session)),
+        patch(f"{MODULE}.tx", _fake_tx),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch(
             "app.data.queries.resolve_message_id_by_row_id",
             AsyncMock(return_value="om_from_row"),
@@ -114,7 +123,7 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-2"),
-        patch("app.runtime.transactional_emit", fake_te),
+        patch("app.runtime.db.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         await submit_proactive_chat(
@@ -125,7 +134,8 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
         )
 
     mock_resolve_row.assert_awaited_once()
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1
+    added = inserted[0]
     assert added.root_message_id == "om_root"
     assert added.reply_message_id == "om_from_row"
 
@@ -139,16 +149,17 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
     from app.domain.chat_dataflow import ChatTrigger
     from app.life.proactive import submit_proactive_chat
 
-    session = MagicMock()
     target = SimpleNamespace(
         message_id="om_other",
         root_message_id="om_other_root",
         chat_id="oc_other",
     )
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_mock_session_cm(session)),
+        patch(f"{MODULE}.tx", _fake_tx),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
         patch("app.data.queries.find_message_by_id", AsyncMock(return_value=target)),
         patch(
             "app.data.queries.resolve_bot_name_for_persona",
@@ -156,7 +167,7 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-3"),
-        patch("app.runtime.transactional_emit", fake_te),
+        patch("app.runtime.db.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         await submit_proactive_chat(
@@ -166,7 +177,8 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
             stimulus="想接一句",
         )
 
-    added = session.add.call_args.args[0]
+    assert len(inserted) == 1
+    added = inserted[0]
     assert added.root_message_id == "proactive_1234567"
     assert added.reply_message_id is None
 

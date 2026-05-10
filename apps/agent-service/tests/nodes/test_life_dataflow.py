@@ -145,7 +145,7 @@ def mock_life_state(monkeypatch):
     """回拨函数允许测试逐次设置 activity."""
     state_box: dict = {"activity": ""}
 
-    async def _fake_find(_session, _persona_id):
+    async def _fake_find(_persona_id):
         a = state_box["activity"]
         return _FakeState(a) if a else None
     monkeypatch.setattr("app.data.queries.find_latest_life_state", _fake_find)

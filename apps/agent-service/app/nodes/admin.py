@@ -18,7 +18,6 @@ from app.data.queries import (
     list_schedules,
     upsert_schedule,
 )
-from app.data.session import get_session
 from app.domain.admin import (
     AdminGlimpseRequest,
     AdminLifeTickRequest,
@@ -69,13 +68,11 @@ async def admin_debug_glimpse_node(r: DebugGlimpseRequest):
     now = _now_cst()
     groups_info = []
     for chat_id in list_target_groups():
-        async with get_session() as s:
-            state = await Q.find_latest_glimpse_state(s, r.persona_id, chat_id)
+        state = await Q.find_latest_glimpse_state(r.persona_id, chat_id)
         last_seen = state.last_seen_msg_time if state else 0
         last_obs = (state.observation if state else "")[:100]
 
-        async with get_session() as s:
-            bot_reply_time = await Q.find_last_bot_reply_time(s, chat_id)
+        bot_reply_time = await Q.find_last_bot_reply_time(chat_id)
         effective_after = max(last_seen, bot_reply_time)
         messages = await get_unseen_messages(chat_id, after=effective_after)
 
@@ -148,14 +145,12 @@ async def admin_search_node(r: AdminSearchRequest):
 
 @node
 async def list_schedules_node(r: ScheduleListRequest):
-    async with get_session() as s:
-        entries = await list_schedules(
-            s,
-            plan_type=r.plan_type,
-            persona_id=r.persona_id,
-            active_only=r.active_only,
-            limit=r.limit,
-        )
+    entries = await list_schedules(
+        plan_type=r.plan_type,
+        persona_id=r.persona_id,
+        active_only=r.active_only,
+        limit=r.limit,
+    )
     return [_to_out(e) for e in entries]
 
 
@@ -168,8 +163,7 @@ async def current_schedule_node(r: ScheduleCurrentRequest):
 
 @node
 async def daily_entries_node(r: ScheduleDailyRequest):
-    async with get_session() as s:
-        entries = await find_daily_entries(s, r.target_date, r.persona_id)
+    entries = await find_daily_entries(r.target_date, r.persona_id)
     return [_to_out(e) for e in entries]
 
 
@@ -195,15 +189,13 @@ async def create_schedule_node(r: ScheduleCreateRequest):
         model=r.model,
         is_active=r.is_active,
     )
-    async with get_session() as s:
-        saved = await upsert_schedule(s, entry)
+    saved = await upsert_schedule(entry)
     return _to_out(saved)
 
 
 @node
 async def delete_schedule_node(r: ScheduleDeleteRequest):
-    async with get_session() as s:
-        ok = await delete_schedule(s, r.schedule_id)
+    ok = await delete_schedule(r.schedule_id)
     if not ok:
         raise HTTPException(404, "Schedule entry not found")
     return {"ok": True}

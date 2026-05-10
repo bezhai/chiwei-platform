@@ -1,9 +1,9 @@
-"""Test update_schedule tool — Phase 7b outbox-based version."""
+"""Test update_schedule tool — Phase 7d tx/emit_tx version."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -11,40 +11,31 @@ from app.agent.tools.update_schedule import _update_schedule_impl
 from app.domain.agent_tool_events import ScheduleRevisionCreated
 
 
-def _make_session_mock():
-    """Return an AsyncMock that behaves as 'async with get_session() as s'."""
-    session = AsyncMock()
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=session)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return ctx, session
+def _make_tx_mock():
+    @asynccontextmanager
+    async def _fake_tx():
+        yield
+
+    return _fake_tx
 
 
-def _make_transactional_emit_mock():
-    """Return a (patch-target, captured_events) pair.
-
-    The patch replaces transactional_emit with an async context manager that
-    captures every data object passed to emitter.append().
-    """
+def _make_emit_tx_mock():
+    """Return (async function, captured list)."""
     captured: list = []
 
-    @asynccontextmanager
-    async def _fake_transactional_emit(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
 
-    return _fake_transactional_emit, captured
+    return _fake_emit_tx, captured
 
 
 @pytest.mark.asyncio
 async def test_update_schedule_writes_revision_and_enqueues_outbox():
-    fake_te, captured = _make_transactional_emit_mock()
-    session_ctx, _session = _make_session_mock()
+    fake_emit, captured = _make_emit_tx_mock()
 
     with patch("app.agent.tools.update_schedule.insert_schedule_revision", new=AsyncMock()) as ins:
-        with patch("app.agent.tools.update_schedule.get_session", return_value=session_ctx):
-            with patch("app.agent.tools.update_schedule.transactional_emit", fake_te):
+        with patch("app.agent.tools.update_schedule.tx", _make_tx_mock()):
+            with patch("app.agent.tools.update_schedule.emit_tx", fake_emit):
                 out = await _update_schedule_impl(
                     persona_id="chiwei", content="今天...", reason="first draft",
                     created_by="chiwei",
@@ -61,12 +52,11 @@ async def test_update_schedule_writes_revision_and_enqueues_outbox():
 
 @pytest.mark.asyncio
 async def test_update_schedule_rejects_empty():
-    fake_te, captured = _make_transactional_emit_mock()
-    session_ctx, _session = _make_session_mock()
+    fake_emit, captured = _make_emit_tx_mock()
 
     with patch("app.agent.tools.update_schedule.insert_schedule_revision", new=AsyncMock()) as ins:
-        with patch("app.agent.tools.update_schedule.get_session", return_value=session_ctx):
-            with patch("app.agent.tools.update_schedule.transactional_emit", fake_te):
+        with patch("app.agent.tools.update_schedule.tx", _make_tx_mock()):
+            with patch("app.agent.tools.update_schedule.emit_tx", fake_emit):
                 out = await _update_schedule_impl(
                     persona_id="chiwei", content=" ", reason="", created_by="chiwei",
                 )

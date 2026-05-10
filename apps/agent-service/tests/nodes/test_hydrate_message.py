@@ -28,12 +28,9 @@ from app.domain.message_request import MessageRequest
 hydrate_mod = importlib.import_module("app.nodes.hydrate_message")
 
 
-def _stub_session():
-    @asynccontextmanager
-    async def _cm():
-        yield AsyncMock()
-
-    return _cm
+@asynccontextmanager
+async def _fake_tx():
+    yield
 
 
 def _cm() -> ConversationMessage:
@@ -57,8 +54,6 @@ def _cm() -> ConversationMessage:
 @pytest.mark.asyncio
 async def test_hydrates_existing_message():
     with patch(
-        "app.nodes.hydrate_message.get_session", _stub_session()
-    ), patch(
         "app.nodes.hydrate_message.find_message_by_id",
         new_callable=AsyncMock,
         return_value=_cm(),
@@ -83,8 +78,6 @@ async def test_hydrates_existing_message():
 @pytest.mark.asyncio
 async def test_missing_message_returns_none():
     with patch(
-        "app.nodes.hydrate_message.get_session", _stub_session()
-    ), patch(
         "app.nodes.hydrate_message.find_message_by_id",
         new_callable=AsyncMock,
         return_value=None,

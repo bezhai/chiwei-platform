@@ -7,10 +7,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import func
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import AbstractMemory, Fragment
+from app.runtime.db import auto_tx, current_session
 
 # CST timezone for date boundary calculations (CST 00:00 day boundary).
 _CST = timezone(timedelta(hours=8))
@@ -29,7 +29,6 @@ __all__ = [
 
 
 async def list_today_fragments(
-    session: AsyncSession,
     persona_id: str,
     *,
     sources: list[str] | None = None,
@@ -45,12 +44,12 @@ async def list_today_fragments(
     if sources:
         stmt = stmt.where(Fragment.source.in_(sources))
     stmt = stmt.order_by(Fragment.created_at.asc())
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
 async def find_fragments_since(
-    session: AsyncSession,
     persona_id: str,
     since_dt: datetime,
     *,
@@ -67,57 +66,59 @@ async def find_fragments_since(
     if sources:
         stmt = stmt.where(Fragment.source.in_(sources))
     stmt = stmt.order_by(Fragment.created_at.desc()).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
 async def list_fragments_window(
-    session: AsyncSession, *, persona_id: str, since: datetime,
+    *, persona_id: str, since: datetime,
 ) -> list[Fragment]:
-    result = await session.execute(
-        select(Fragment)
-        .where(Fragment.persona_id == persona_id)
-        .where(Fragment.created_at >= since)
-        .where(Fragment.clarity != "forgotten")
-        .order_by(Fragment.created_at)
-    )
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(
+            select(Fragment)
+            .where(Fragment.persona_id == persona_id)
+            .where(Fragment.created_at >= since)
+            .where(Fragment.clarity != "forgotten")
+            .order_by(Fragment.created_at)
+        )
+        return list(result.scalars().all())
 
 
 async def list_abstracts_window(
-    session: AsyncSession, *, persona_id: str, since: datetime,
+    *, persona_id: str, since: datetime,
 ) -> list[AbstractMemory]:
-    result = await session.execute(
-        select(AbstractMemory)
-        .where(AbstractMemory.persona_id == persona_id)
-        .where(AbstractMemory.created_at >= since)
-        .where(AbstractMemory.clarity != "forgotten")
-        .order_by(AbstractMemory.created_at)
-    )
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(
+            select(AbstractMemory)
+            .where(AbstractMemory.persona_id == persona_id)
+            .where(AbstractMemory.created_at >= since)
+            .where(AbstractMemory.clarity != "forgotten")
+            .order_by(AbstractMemory.created_at)
+        )
+        return list(result.scalars().all())
 
 
 async def get_abstracts_by_subject(
-    session: AsyncSession,
     *,
     persona_id: str,
     subject: str,
     limit: int = 20,
 ) -> list[AbstractMemory]:
     """Fetch non-forgotten abstracts for a subject, newest-touched first."""
-    result = await session.execute(
-        select(AbstractMemory)
-        .where(AbstractMemory.persona_id == persona_id)
-        .where(AbstractMemory.subject == subject)
-        .where(AbstractMemory.clarity != "forgotten")
-        .order_by(AbstractMemory.last_touched_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(
+            select(AbstractMemory)
+            .where(AbstractMemory.persona_id == persona_id)
+            .where(AbstractMemory.subject == subject)
+            .where(AbstractMemory.clarity != "forgotten")
+            .order_by(AbstractMemory.last_touched_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 async def get_abstracts_by_subjects(
-    session: AsyncSession,
     *,
     persona_id: str,
     subjects: list[str],
@@ -126,17 +127,18 @@ async def get_abstracts_by_subjects(
     """Get abstracts whose subject is in given list (for always-on injection)."""
     if not subjects:
         return []
-    result = await session.execute(
-        select(AbstractMemory)
-        .where(AbstractMemory.persona_id == persona_id)
-        .where(AbstractMemory.subject.in_(subjects))
-        .where(AbstractMemory.clarity != "forgotten")
-        .order_by(
-            AbstractMemory.subject,
-            AbstractMemory.last_touched_at.desc(),
+    async with auto_tx():
+        result = await current_session().execute(
+            select(AbstractMemory)
+            .where(AbstractMemory.persona_id == persona_id)
+            .where(AbstractMemory.subject.in_(subjects))
+            .where(AbstractMemory.clarity != "forgotten")
+            .order_by(
+                AbstractMemory.subject,
+                AbstractMemory.last_touched_at.desc(),
+            )
         )
-    )
-    rows = list(result.scalars().all())
+        rows = list(result.scalars().all())
     # Keep at most `limit_per_subject` per subject
     by_subject: dict[str, list[AbstractMemory]] = {}
     for r in rows:
@@ -148,41 +150,40 @@ async def get_abstracts_by_subjects(
 
 
 async def get_recent_abstract_titles(
-    session: AsyncSession,
     *,
     persona_id: str,
     limit: int = 10,
 ) -> list[AbstractMemory]:
     """Recently touched abstracts — for recall-index hint."""
-    result = await session.execute(
-        select(AbstractMemory)
-        .where(AbstractMemory.persona_id == persona_id)
-        .where(AbstractMemory.clarity != "forgotten")
-        .order_by(AbstractMemory.last_touched_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(
+            select(AbstractMemory)
+            .where(AbstractMemory.persona_id == persona_id)
+            .where(AbstractMemory.clarity != "forgotten")
+            .order_by(AbstractMemory.last_touched_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 async def count_abstracts_per_subject_prefix(
-    session: AsyncSession,
     *,
     persona_id: str,
     prefix: str,
 ) -> int:
     """Count non-forgotten abstracts whose subject starts with prefix."""
-    result = await session.execute(
-        select(func.count())
-        .select_from(AbstractMemory)
-        .where(AbstractMemory.persona_id == persona_id)
-        .where(AbstractMemory.subject.like(f"{prefix}%"))
-        .where(AbstractMemory.clarity != "forgotten")
-    )
-    return int(result.scalar_one())
+    async with auto_tx():
+        result = await current_session().execute(
+            select(func.count())
+            .select_from(AbstractMemory)
+            .where(AbstractMemory.persona_id == persona_id)
+            .where(AbstractMemory.subject.like(f"{prefix}%"))
+            .where(AbstractMemory.clarity != "forgotten")
+        )
+        return int(result.scalar_one())
 
 
 async def get_recent_fragments_for_injection(
-    session: AsyncSession,
     *,
     persona_id: str,
     chat_id: str | None,
@@ -206,8 +207,9 @@ async def get_recent_fragments_for_injection(
         .order_by(Fragment.created_at.desc())
         .limit(max_same_chat + max_other_chat * 20)
     )
-    result = await session.execute(stmt)
-    all_recent = list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        all_recent = list(result.scalars().all())
 
     same_chat: list[Fragment] = []
     other_chats: dict[str, Fragment] = {}

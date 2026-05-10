@@ -4,10 +4,10 @@ Operates on tables: ``ModelProvider``, ``ModelMapping``.
 """
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import ModelMapping, ModelProvider
+from app.runtime.db import auto_tx, current_session
 
 __all__ = [
     "parse_model_id",
@@ -27,19 +27,19 @@ def parse_model_id(model_id: str) -> tuple[str, str]:
     return "302.ai", model_id.strip()
 
 
-async def find_model_mapping(session: AsyncSession, alias: str) -> ModelMapping | None:
+async def find_model_mapping(alias: str) -> ModelMapping | None:
     """Look up a model mapping by alias."""
-    result = await session.execute(
-        select(ModelMapping).where(ModelMapping.alias == alias)
-    )
-    return result.scalar_one_or_none()
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ModelMapping).where(ModelMapping.alias == alias)
+        )
+        return result.scalar_one_or_none()
 
 
-async def find_provider_by_name(
-    session: AsyncSession, name: str
-) -> ModelProvider | None:
+async def find_provider_by_name(name: str) -> ModelProvider | None:
     """Look up a model provider by name."""
-    result = await session.execute(
-        select(ModelProvider).where(ModelProvider.name == name)
-    )
-    return result.scalar_one_or_none()
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ModelProvider).where(ModelProvider.name == name)
+        )
+        return result.scalar_one_or_none()

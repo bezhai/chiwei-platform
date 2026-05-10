@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass, field
 
 from app.data.queries import find_persona
-from app.data.session import get_session
 
 _CACHE_TTL = 300  # seconds
 
@@ -39,8 +38,7 @@ async def load_persona(persona_id: str) -> PersonaContext:
         if now < expire_ts:
             return ctx
 
-    async with get_session() as s:
-        persona = await find_persona(s, persona_id)
+    persona = await find_persona(persona_id)
 
     if persona:
         ctx = PersonaContext(

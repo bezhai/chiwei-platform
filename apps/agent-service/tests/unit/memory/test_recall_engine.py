@@ -100,28 +100,27 @@ def recall_mocks(monkeypatch):
     state.qdrant = qdrant_mock
     monkeypatch.setattr(re_mod, "qdrant", qdrant_mock)
 
-    # get_session: yields a sentinel session — none of the patched query
-    # helpers care about the argument.
+    # tx(): no-op context manager — recall_engine no longer uses get_session.
     @asynccontextmanager
-    async def fake_get_session():
-        yield MagicMock(name="session")
+    async def fake_tx():
+        yield
 
-    monkeypatch.setattr(re_mod, "get_session", fake_get_session)
+    monkeypatch.setattr(re_mod, "tx", fake_tx)
 
-    # Query helpers: read from the scenario dicts.
-    async def fake_get_abstract_by_id(_session, aid):
+    # Query helpers: read from the scenario dicts (Phase 7d: no session arg).
+    async def fake_get_abstract_by_id(aid):
         return state.abstracts_by_id.get(aid)
 
     state.get_abstract_by_id = AsyncMock(side_effect=fake_get_abstract_by_id)
     monkeypatch.setattr(re_mod, "get_abstract_by_id", state.get_abstract_by_id)
 
-    async def fake_list_edges_to(_session, *, persona_id, to_id, edge_type):
+    async def fake_list_edges_to(*, persona_id, to_id, edge_type):
         return state.edges_by_abstract.get(to_id, [])
 
     state.list_edges_to = AsyncMock(side_effect=fake_list_edges_to)
     monkeypatch.setattr(re_mod, "list_edges_to", state.list_edges_to)
 
-    async def fake_get_fragments_by_ids(_session, ids):
+    async def fake_get_fragments_by_ids(ids):
         return [state.fragments_by_id[i] for i in ids if i in state.fragments_by_id]
 
     state.get_fragments_by_ids = AsyncMock(side_effect=fake_get_fragments_by_ids)
@@ -207,7 +206,7 @@ async def test_run_recall_cross_query_dedup(recall_mocks):
 
     assert len(result.abstracts) == 1
     recall_mocks.touch_abstracts_bulk.assert_awaited_once()
-    ids_arg = recall_mocks.touch_abstracts_bulk.await_args.args[1]
+    ids_arg = recall_mocks.touch_abstracts_bulk.await_args.args[0]
     assert sorted(ids_arg) == ["a_1"]
 
 
@@ -271,7 +270,7 @@ async def test_run_recall_calls_touch_bulk(recall_mocks):
     recall_mocks.touch_abstracts_bulk.assert_awaited_once()
     recall_mocks.touch_fragments_bulk.assert_awaited_once()
 
-    abs_ids = recall_mocks.touch_abstracts_bulk.await_args.args[1]
-    frag_ids = recall_mocks.touch_fragments_bulk.await_args.args[1]
+    abs_ids = recall_mocks.touch_abstracts_bulk.await_args.args[0]
+    frag_ids = recall_mocks.touch_fragments_bulk.await_args.args[0]
     assert sorted(abs_ids) == ["a_1"]
     assert sorted(frag_ids) == ["f_1"]

@@ -16,7 +16,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.data.queries import list_all_persona_ids
-from app.data.session import get_session
 from app.domain.life_dataflow import (
     DailyPlanRequest,
     DailyPlanTick,
@@ -52,8 +51,7 @@ def _is_prod() -> bool:
 
 
 async def _list_persona_ids() -> list[str]:
-    async with get_session() as s:
-        return await list_all_persona_ids(s)
+    return await list_all_persona_ids()
 
 
 async def _fan_out_per_persona(label: str, build_request) -> None:
@@ -260,8 +258,7 @@ async def glimpse_tick_node(r: GlimpseTickRequest) -> None:
     from app.data.queries import find_latest_life_state
     from app.life.glimpse import list_target_groups
     try:
-        async with get_session() as s:
-            state = await find_latest_life_state(s, r.persona_id)
+        state = await find_latest_life_state(r.persona_id)
     except Exception:
         logger.exception("[%s] glimpse_tick read life_state failed", r.persona_id)
         return

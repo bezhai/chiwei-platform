@@ -11,13 +11,11 @@ from datetime import UTC, datetime, timezone
 
 from app.chat.content_parser import parse_content
 from app.data.queries import find_username
-from app.data.session import get_session
 
 
 async def _default_resolve_name(user_id: str) -> str | None:
     """Look up display name via data layer."""
-    async with get_session() as s:
-        return await find_username(s, user_id)
+    return await find_username(user_id)
 
 
 async def format_timeline(

@@ -10,17 +10,18 @@ import pytest
 from app.agent.tools.notes import _resolve_note_impl, _write_note_impl
 
 
-def _make_transactional_emit_mock():
-    """Async context manager stub that captures emitter.append() calls."""
+@asynccontextmanager
+async def _fake_tx():
+    yield
+
+
+def _make_emit_tx_mock():
     captured: list = []
 
-    @asynccontextmanager
-    async def _fake(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
 
-    return _fake, captured
+    return _fake_emit_tx, captured
 
 
 @pytest.mark.asyncio
@@ -28,13 +29,14 @@ async def test_write_note_creates_and_returns_id_with_active_list():
     from app.domain.agent_tool_events import NoteCreated
 
     active = [MagicMock(id="n_existing", content="已有笔记", when_at=None)]
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
     with patch("app.agent.tools.notes.insert_note", new=AsyncMock()) as ins:
         with patch("app.agent.tools.notes.get_active_notes", new=AsyncMock(return_value=active)):
-            with patch("app.agent.tools.notes.transactional_emit", fake_te):
-                out = await _write_note_impl(
-                    persona_id="chiwei", content="周五看电影", when_at=None,
-                )
+            with patch("app.agent.tools.notes.tx", _fake_tx):
+                with patch("app.agent.tools.notes.emit_tx", fake_emit):
+                    out = await _write_note_impl(
+                        persona_id="chiwei", content="周五看电影", when_at=None,
+                    )
     assert "id" in out
     assert out["id"].startswith("n_")
     assert len(out["active_notes"]) == 1
@@ -48,10 +50,11 @@ async def test_write_note_creates_and_returns_id_with_active_list():
 
 @pytest.mark.asyncio
 async def test_write_note_rejects_empty_content():
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
     with patch("app.agent.tools.notes.insert_note", new=AsyncMock()) as ins:
-        with patch("app.agent.tools.notes.transactional_emit", fake_te):
-            out = await _write_note_impl(persona_id="chiwei", content="  ", when_at=None)
+        with patch("app.agent.tools.notes.tx", _fake_tx):
+            with patch("app.agent.tools.notes.emit_tx", fake_emit):
+                out = await _write_note_impl(persona_id="chiwei", content="  ", when_at=None)
     assert "error" in out
     ins.assert_not_awaited()
     assert len(captured) == 0
@@ -94,13 +97,14 @@ async def test_write_note_passes_when_at_through():
     from app.domain.agent_tool_events import NoteCreated
 
     when = datetime(2026, 4, 18, 19, 0, tzinfo=UTC)
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
     with patch("app.agent.tools.notes.insert_note", new=AsyncMock()) as ins:
         with patch("app.agent.tools.notes.get_active_notes", new=AsyncMock(return_value=[])):
-            with patch("app.agent.tools.notes.transactional_emit", fake_te):
-                out = await _write_note_impl(
-                    persona_id="chiwei", content="周五看电影", when_at=when,
-                )
+            with patch("app.agent.tools.notes.tx", _fake_tx):
+                with patch("app.agent.tools.notes.emit_tx", fake_emit):
+                    out = await _write_note_impl(
+                        persona_id="chiwei", content="周五看电影", when_at=when,
+                    )
     assert ins.await_args.kwargs["when_at"] == when
     assert len(captured) == 1
     emitted = captured[0]

@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 
 from app.data.queries import get_schedule_revision_by_id
-from app.data.session import get_session
 from app.domain.agent_tool_events import ScheduleRevisionCreated
 from app.life.state_sync import state_only_refresh
 from app.runtime import node
@@ -20,8 +19,7 @@ logger = logging.getLogger(__name__)
 
 @node
 async def sync_life_state_node(e: ScheduleRevisionCreated) -> None:
-    async with get_session() as s:
-        rev = await get_schedule_revision_by_id(s, e.revision_id)
+    rev = await get_schedule_revision_by_id(e.revision_id)
     if rev is None:
         logger.warning(
             "state_sync: revision %s not found, skip", e.revision_id

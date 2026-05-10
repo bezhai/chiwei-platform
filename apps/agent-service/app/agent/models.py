@@ -138,10 +138,10 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
             find_provider_by_name,
             parse_model_id,
         )
-        from app.data.session import get_session
+        from app.runtime.db import tx
 
-        async with get_session() as session:
-            mapping = await find_model_mapping(session, model_id)
+        async with tx():
+            mapping = await find_model_mapping(model_id)
 
             if mapping:
                 provider_name = mapping.provider_name
@@ -149,10 +149,10 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
             else:
                 provider_name, actual_model_name = parse_model_id(model_id)
 
-            provider = await find_provider_by_name(session, provider_name)
+            provider = await find_provider_by_name(provider_name)
 
             if not provider:
-                provider = await find_provider_by_name(session, "302.ai")
+                provider = await find_provider_by_name("302.ai")
 
             if not provider:
                 _model_info_cache[model_id] = (None, now + _CACHE_TTL_SECONDS)

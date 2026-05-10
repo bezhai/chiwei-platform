@@ -20,15 +20,14 @@ from pydantic import BaseModel, Field
 
 from app.agent.core import Agent, AgentConfig
 from app.api.middleware import get_lane
+from app.capabilities import banned_words as _banned_words
 from app.data.queries import get_safety_status, set_safety_status
-from app.data.session import get_session
 from app.domain.safety import (
     PostSafetyRequest,
     PreSafetyRequest,
     PreSafetyVerdict,
     Recall,
 )
-from app.infra.redis import get_redis
 from app.runtime import node
 
 logger = logging.getLogger(__name__)
@@ -44,9 +43,6 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"passed", "blocked", "recalled", "recall_failed"}
 )
-
-# Redis key for banned words set
-_BANNED_WORDS_KEY = "banned_words"
 
 # Personas that block NSFW content (minors)
 _NSFW_BLOCKED_PERSONAS = frozenset({"ayana"})
@@ -125,15 +121,7 @@ class _OutputSafetyResult(BaseModel):
 
 async def _check_banned_word(text: str) -> str | None:
     """Return the matched banned word, or None if clean."""
-    redis = await get_redis()
-    banned_words = await redis.smembers(_BANNED_WORDS_KEY)
-    if not banned_words:
-        return None
-    normalized = text.replace(" ", "").lower()
-    for word in banned_words:
-        if word in normalized:
-            return word
-    return None
+    return await _banned_words.contains(text)
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +307,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     blocked 路径**不写 status**——recall-worker 会写最终 recalled / recall_failed，
     避免 race（spec §3.2）。
     """
-    async with get_session() as s:
-        current = await get_safety_status(s, req.session_id)
+    current = await get_safety_status(req.session_id)
     if current is None:
         raise RuntimeError(
             f"agent_responses row missing for session_id={req.session_id}; "
@@ -347,10 +334,9 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
             lane=get_lane(),
         )
 
-    async with get_session() as s:
-        await set_safety_status(
-            s, req.session_id, "passed", {"checked_at": checked_at}
-        )
+    await set_safety_status(
+        req.session_id, "passed", {"checked_at": checked_at}
+    )
     return None
 
 

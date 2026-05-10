@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -20,13 +21,33 @@ class _ScalarResult:
         return self.value
 
 
+@asynccontextmanager
+async def _fake_auto_tx():
+    yield
+
+
+def _patch_session(session):
+    """Patch auto_tx + current_session to return *session* for both query modules."""
+    return [
+        patch("app.data.queries.agent_response.auto_tx", _fake_auto_tx),
+        patch("app.data.queries.agent_response.current_session", return_value=session),
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["completed", "recalled"])
 async def test_chat_request_completed_for_terminal_status(status):
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult(status))
 
-    assert await is_chat_request_completed(session, "session-1") is True
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        assert await is_chat_request_completed("session-1") is True
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
@@ -35,15 +56,29 @@ async def test_chat_request_not_completed_for_non_terminal_status(status):
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult(status))
 
-    assert await is_chat_request_completed(session, "session-1") is False
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        assert await is_chat_request_completed("session-1") is False
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
 async def test_chat_request_not_completed_without_session_id():
     session = AsyncMock()
 
-    assert await is_chat_request_completed(session, None) is False
-    session.execute.assert_not_called()
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        assert await is_chat_request_completed(None) is False
+        session.execute.assert_not_called()
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
@@ -55,14 +90,20 @@ async def test_proactive_request_completed_by_existing_assistant_reply(
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult(reply_count))
 
-    assert (
-        await is_chat_request_completed(
-            session,
-            "session-1",
-            is_proactive=True,
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        assert (
+            await is_chat_request_completed(
+                "session-1",
+                is_proactive=True,
+            )
+            is expected
         )
-        is expected
-    )
+    finally:
+        for p in patches:
+            p.stop()
 
 
 # === get_safety_status ===
@@ -74,8 +115,15 @@ async def test_get_safety_status_returns_existing_value():
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult("pending"))
 
-    result = await get_safety_status(session, "sess-1")
-    assert result == "pending"
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        result = await get_safety_status("sess-1")
+        assert result == "pending"
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
@@ -84,8 +132,15 @@ async def test_get_safety_status_returns_none_when_row_missing():
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult(None))
 
-    result = await get_safety_status(session, "sess-does-not-exist")
-    assert result is None
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        result = await get_safety_status("sess-does-not-exist")
+        assert result is None
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
@@ -94,13 +149,20 @@ async def test_get_safety_status_uses_correct_query_and_param():
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult("passed"))
 
-    await get_safety_status(session, "sess-xyz")
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        await get_safety_status("sess-xyz")
 
-    session.execute.assert_awaited_once()
-    args = session.execute.await_args.args
-    sql_obj = args[0]
-    sql_text = str(sql_obj)
-    assert "SELECT safety_status" in sql_text
-    assert "agent_responses" in sql_text
-    assert "WHERE session_id = :sid" in sql_text
-    assert args[1] == {"sid": "sess-xyz"}
+        session.execute.assert_awaited_once()
+        args = session.execute.await_args.args
+        sql_obj = args[0]
+        sql_text = str(sql_obj)
+        assert "SELECT safety_status" in sql_text
+        assert "agent_responses" in sql_text
+        assert "WHERE session_id = :sid" in sql_text
+        assert args[1] == {"sid": "sess-xyz"}
+    finally:
+        for p in patches:
+            p.stop()

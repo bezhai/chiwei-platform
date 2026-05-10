@@ -1,15 +1,16 @@
 name: dataflow grep gate
 
-# Phase 7a/7b CI gate: closed-gap exact-zero + open-gap baseline.
+# Phase 7a/7b/7c/7d CI gate: closed-gap exact-zero + open-gap baseline.
 #
 # Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 12 / 18 from
-# Phase 7b) must stay at zero occurrences in business code; new
-# violations block the PR.
+# Phase 7b + Gap 15 from Phase 7c + Gap 13 / 14 / 16 from Phase 7d)
+# must stay at zero occurrences in business code; new violations
+# block the PR.
 #
-# Open gaps (Gap 13 / 14 / 15 / 16 / 19 — slated for 7c/7d/7e) carry
-# a baseline count in .github/grep-baselines.json. PRs that increase
-# the count block; reductions are allowed (and the baseline gets
-# rewritten in the PR that closes the gap).
+# Open gaps (Gap 19 — slated for 7e) carry a baseline count in
+# .github/grep-baselines.json. PRs that increase the count block;
+# reductions are allowed (and the baseline gets rewritten in the PR
+# that closes the gap).
 
 on:
   pull_request:
@@ -19,7 +20,7 @@ on:
 
 jobs:
   closed-gap-zero:
-    name: Closed-gap exact-zero (Gap 7+9+11)
+    name: Closed-gap exact-zero (Gap 7/8/9/11/12/13/14/15/16/18)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,9 +120,73 @@ jobs:
               | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
               | wc -l)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
+      - name: Gap 13 — no DB session leakage in business code
+        shell: bash
+        run: |
+          set -e
+          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
+          # No `from app.data.session import …` in business
+          c=$(grep -rnE "from app\.data\.session import|from app\.data import session" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c data.session imports in business"; exit 1; }
+          # No `current_session` import in business (queries layer is internal)
+          c=$(grep -rnE "from app\.runtime\.db import.*current_session|from app\.runtime import.*current_session" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session imports in business"; exit 1; }
+          # No session-factory call sites in business
+          c=$(grep -rnE "get_session\(|async_session\(|AsyncSessionLocal|current_session\(" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c session factory call sites in business"; exit 1; }
+          # No AsyncSession type references in business (queries own the type)
+          c=$(grep -rn "AsyncSession" "${BUSINESS[@]}" 2>/dev/null \
+              | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c AsyncSession references in business"; exit 1; }
+          # No direct session.<op> in business (session.execute / .commit / ...)
+          c1=$(grep -rnE "\bsession\.(execute|commit|add|merge|flush|rollback)\(" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          c2=$(grep -rnE "\bs\.(execute|commit|add|merge|flush|rollback)\(" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          c=$((c1 + c2))
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c direct session.* in business"; exit 1; }
+          # transactional_emit was renamed; emit_tx via app.runtime is the public surface
+          c=$(grep -rn "transactional_emit" "${BUSINESS[@]}" 2>/dev/null \
+              | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c transactional_emit in business"; exit 1; }
+          # Business must not import from app.runtime.outbox (use app.runtime.emit_tx)
+          c=$(grep -rn "from app\.runtime\.outbox import" "${BUSINESS[@]}" 2>/dev/null \
+              | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c app.runtime.outbox imports in business"; exit 1; }
+      - name: Gap 14 — no Redis primitives in business code
+        shell: bash
+        run: |
+          set -e
+          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
+          c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c infra.redis imports in business"; exit 1; }
+          c=$(grep -rnE "redis\.set\(.*nx=True|redis\.eval\(|redis\.smembers\(|redis\.sadd\(" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c SETNX/eval/smembers/sadd in business"; exit 1; }
+      - name: Gap 16 — no httpx or HTTPClient direct imports in business code
+        shell: bash
+        run: |
+          set -e
+          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
+          c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
+              | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
+          c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
+              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c HTTPClient direct imports in business"; exit 1; }
 
   open-gap-baseline:
-    name: Open-gap baseline no-new (Gap 13/14/16/19)
+    name: Open-gap baseline no-new (Gap 19)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,24 +198,6 @@ jobs:
 
           baselines = json.load(open(".github/grep-baselines.json"))
           patterns = {
-              "gap_13_get_session": (
-                  r"get_session\(|AsyncSessionLocal",
-                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
-                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
-                   "apps/agent-service/app/memory/"],
-              ),
-              "gap_14_redis_setnx_business": (
-                  r"redis\.set\(.*nx=True|redis\.eval\(|redis\.smembers\(|redis\.sadd\(",
-                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
-                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
-                   "apps/agent-service/app/memory/"],
-              ),
-              "gap_16_httpx_business": (
-                  r"import httpx|from httpx",
-                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
-                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
-                   "apps/agent-service/app/memory/"],
-              ),
               "gap_19_create_task_business": (
                   r"asyncio\.create_task|asyncio\.ensure_future",
                   ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",

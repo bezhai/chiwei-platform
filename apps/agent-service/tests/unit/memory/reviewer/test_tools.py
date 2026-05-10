@@ -10,14 +10,9 @@ import pytest
 MODULE = "app.memory.reviewer.tools"
 
 
-def _noop_session():
-    """Async context manager that yields a dummy session."""
-
-    @asynccontextmanager
-    async def _cm():
-        yield MagicMock()
-
-    return _cm()
+@asynccontextmanager
+async def _fake_tx():
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +25,7 @@ async def test_update_abstract_content_writes_content():
     from app.memory.reviewer.tools import update_abstract_content
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.update_abstract_content_query", new=AsyncMock()) as q,
     ):
         result = await update_abstract_content.ainvoke(
@@ -54,7 +49,7 @@ async def test_fade_node_sets_clarity():
     from app.memory.reviewer.tools import fade_node
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.set_clarity", new=AsyncMock()) as q,
     ):
         result = await fade_node.ainvoke(
@@ -91,7 +86,7 @@ async def test_touch_node_abstract_calls_touch_abstract():
     from app.memory.reviewer.tools import touch_node
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()) as ta,
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()) as tf,
     ):
@@ -107,7 +102,7 @@ async def test_touch_node_fact_calls_touch_fragment():
     from app.memory.reviewer.tools import touch_node
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()) as ta,
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()) as tf,
     ):
@@ -123,7 +118,7 @@ async def test_touch_node_rejects_unknown_type():
     from app.memory.reviewer.tools import touch_node
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()),
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()),
     ):
@@ -143,7 +138,7 @@ async def test_delete_fragment_deletes():
     from app.memory.reviewer.tools import delete_fragment
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.delete_fragment_query", new=AsyncMock()) as q,
     ):
         result = await delete_fragment.ainvoke(
@@ -169,7 +164,7 @@ async def test_connect_uses_from_node_persona():
     fake_to_node = MagicMock()
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=fake_node)),
         patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=fake_to_node)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
@@ -219,7 +214,7 @@ async def test_connect_returns_error_when_from_node_missing():
     from app.memory.reviewer.tools import connect
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=None)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
     ):
@@ -247,7 +242,7 @@ async def test_connect_returns_error_when_to_node_missing():
     fake_from_node.persona_id = "chiwei"
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=fake_from_node)),
         patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=None)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
@@ -278,7 +273,7 @@ async def test_disconnect_removes_edge():
     from app.memory.reviewer.tools import disconnect
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.delete_edge", new=AsyncMock()) as q,
     ):
         result = await disconnect.ainvoke(
@@ -300,7 +295,7 @@ def test_make_reviewer_tools_returns_all_eight():
         patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock()),
         patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()),
         patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()),
-        patch("app.agent.tools.commit_abstract.transactional_emit", new=AsyncMock()),
+        patch("app.agent.tools.commit_abstract.emit_tx", new=AsyncMock()),
     ):
         from app.memory.reviewer.tools import make_reviewer_tools
 

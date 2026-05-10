@@ -19,14 +19,9 @@ MODULE = "app.memory.reviewer.light"
 CST = timezone(timedelta(hours=8))
 
 
-def _noop_session():
-    """Async context manager that yields a dummy session."""
-
-    @asynccontextmanager
-    async def _cm():
-        yield MagicMock()
-
-    return _cm()
+@asynccontextmanager
+async def _fake_tx():
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +32,7 @@ def _noop_session():
 @pytest.mark.asyncio
 async def test_noop_when_empty_window():
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[])),
@@ -61,7 +56,7 @@ async def test_runs_agent_with_window_summary():
     frag.content = "test fragment content"
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[frag])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[])),
@@ -90,7 +85,7 @@ async def test_runs_when_only_notes_present():
     note.when_at = None
 
     with (
-        patch(f"{MODULE}.get_session", return_value=_noop_session()),
+        patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[note])),

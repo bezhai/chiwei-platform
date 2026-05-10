@@ -1,12 +1,12 @@
 """Chat message queries — conversation_messages + lark_user / lark_group_*.
 
 Operates on tables: ``ConversationMessage``, ``LarkUser``,
-``LarkGroupChatInfo``, ``LarkGroupMember``, ``LarkBaseChatInfo``.
+``LarkGroupChatInfo``, ``LarkGroupMember``, ``LarkBaseChatInfo``,
+``agent_responses`` (raw subquery — no ORM model).
 """
 from __future__ import annotations
 
-from sqlalchemy import func, or_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, literal_column, or_, text
 from sqlalchemy.future import select
 
 from app.data.models import (
@@ -16,6 +16,7 @@ from app.data.models import (
     LarkGroupMember,
     LarkUser,
 )
+from app.runtime.db import auto_tx, current_session
 
 __all__ = [
     "find_cross_chat_messages",
@@ -30,11 +31,33 @@ __all__ = [
     "find_context_messages_for_anchors",
     "find_group_members",
     "find_gray_config",
+    "find_user_messages_after",
+    "find_proactive_messages_in_chat",
+    "insert_proactive_message",
+    "find_messages_with_user_chat_persona_by_root",
+    "find_messages_with_user_chat_persona_in_chat",
+    "update_messages_tos_files",
 ]
 
 
+def _agent_responses_subquery():
+    """Build subquery exposing ``agent_responses.session_id`` + ``persona_id``.
+
+    ``agent_responses`` has no ORM model, so we hand-roll a subquery via
+    ``literal_column`` and ``text``. Centralized here to keep the hack
+    out of the business layer.
+    """
+    return (
+        select(
+            literal_column("agent_responses.session_id").label("ar_session_id"),
+            literal_column("agent_responses.persona_id").label("ar_persona_id"),
+        )
+        .select_from(text("agent_responses"))
+        .subquery("ar")
+    )
+
+
 async def find_cross_chat_messages(
-    session: AsyncSession,
     user_id: str,
     bot_names: list[str],
     exclude_chat_id: str,
@@ -64,102 +87,103 @@ async def find_cross_chat_messages(
     )
     if excluded_chat_ids:
         stmt = stmt.where(~ConversationMessage.chat_id.in_(excluded_chat_ids))
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
-async def find_message_content(session: AsyncSession, message_id: str) -> str | None:
+async def find_message_content(message_id: str) -> str | None:
     """Fetch message content by message_id."""
     stmt = select(ConversationMessage.content).where(
         ConversationMessage.message_id == message_id
     )
-    return await session.scalar(stmt)
+    async with auto_tx():
+        return await current_session().scalar(stmt)
 
 
 async def find_messages_in_range(
-    session: AsyncSession,
     chat_id: str,
     start_time: int,
     end_time: int,
     limit: int = 2000,
 ) -> list[ConversationMessage]:
     """Fetch messages in a chat within a time range (ascending)."""
-    result = await session.execute(
-        select(ConversationMessage)
-        .where(ConversationMessage.chat_id == chat_id)
-        .where(ConversationMessage.create_time >= start_time)
-        .where(ConversationMessage.create_time < end_time)
-        .order_by(ConversationMessage.create_time.asc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
-
-
-async def find_username(session: AsyncSession, user_id: str) -> str | None:
-    """Look up display name from lark_user by union_id."""
-    result = await session.execute(
-        select(LarkUser.name).where(LarkUser.union_id == user_id)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_group_name(session: AsyncSession, chat_id: str) -> str | None:
-    """Look up group name from lark_group_chat_info."""
-    result = await session.execute(
-        select(LarkGroupChatInfo.name).where(LarkGroupChatInfo.chat_id == chat_id)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_group_download_permission(
-    session: AsyncSession, chat_id: str
-) -> str | None:
-    """Fetch download_has_permission_setting for a group chat, or None."""
-    result = await session.execute(
-        select(LarkGroupChatInfo.download_has_permission_setting).where(
-            LarkGroupChatInfo.chat_id == chat_id
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage)
+            .where(ConversationMessage.chat_id == chat_id)
+            .where(ConversationMessage.create_time >= start_time)
+            .where(ConversationMessage.create_time < end_time)
+            .order_by(ConversationMessage.create_time.asc())
+            .limit(limit)
         )
-    )
-    return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
 
-async def find_message_by_id(
-    session: AsyncSession, message_id: str
-) -> ConversationMessage | None:
+async def find_username(user_id: str) -> str | None:
+    """Look up display name from lark_user by union_id."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkUser.name).where(LarkUser.union_id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_group_name(chat_id: str) -> str | None:
+    """Look up group name from lark_group_chat_info."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkGroupChatInfo.name).where(LarkGroupChatInfo.chat_id == chat_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_group_download_permission(chat_id: str) -> str | None:
+    """Fetch download_has_permission_setting for a group chat, or None."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(LarkGroupChatInfo.download_has_permission_setting).where(
+                LarkGroupChatInfo.chat_id == chat_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+
+async def find_message_by_id(message_id: str) -> ConversationMessage | None:
     """Fetch full message object by message_id."""
-    result = await session.execute(
-        select(ConversationMessage).where(ConversationMessage.message_id == message_id)
-    )
-    return result.scalar_one_or_none()
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage).where(ConversationMessage.message_id == message_id)
+        )
+        return result.scalar_one_or_none()
 
 
-async def resolve_message_id_by_row_id(
-    session: AsyncSession, row_id: str | int
-) -> str | None:
+async def resolve_message_id_by_row_id(row_id: str | int) -> str | None:
     """Resolve int row id to lark message_id (om_xxx). Returns None if not found."""
     try:
         rid = int(row_id)
     except (ValueError, TypeError):
         return None
-    result = await session.execute(
-        select(ConversationMessage.message_id).where(ConversationMessage.id == rid)
-    )
-    return result.scalar_one_or_none()
-
-
-async def find_last_bot_reply_time(session: AsyncSession, chat_id: str) -> int:
-    """Return the latest assistant reply create_time (ms) in a chat, or 0."""
-    result = await session.execute(
-        select(func.max(ConversationMessage.create_time)).where(
-            ConversationMessage.chat_id == chat_id,
-            ConversationMessage.role == "assistant",
+    async with auto_tx():
+        result = await current_session().execute(
+            select(ConversationMessage.message_id).where(ConversationMessage.id == rid)
         )
-    )
-    return result.scalar_one_or_none() or 0
+        return result.scalar_one_or_none()
+
+
+async def find_last_bot_reply_time(chat_id: str) -> int:
+    """Return the latest assistant reply create_time (ms) in a chat, or 0."""
+    async with auto_tx():
+        result = await current_session().execute(
+            select(func.max(ConversationMessage.create_time)).where(
+                ConversationMessage.chat_id == chat_id,
+                ConversationMessage.role == "assistant",
+            )
+        )
+        return result.scalar_one_or_none() or 0
 
 
 async def find_context_messages_for_anchors(
-    session: AsyncSession,
     chat_id: str,
     anchor_message_ids: list[str],
     anchor_timestamps: list[int],
@@ -195,12 +219,12 @@ async def find_context_messages_for_anchors(
         )
         .order_by(ConversationMessage.create_time.asc())
     )
-    result = await session.execute(stmt)
-    return list(result.all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.all())
 
 
 async def find_group_members(
-    session: AsyncSession,
     chat_id: str,
     role: str | None = None,
 ) -> list[tuple[LarkGroupMember, LarkUser]]:
@@ -221,11 +245,12 @@ async def find_group_members(
     elif role == "manager":
         stmt = stmt.where(LarkGroupMember.is_manager)
 
-    result = await session.execute(stmt)
-    return list(result.all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.all())
 
 
-async def find_gray_config(session: AsyncSession, message_id: str) -> dict | None:
+async def find_gray_config(message_id: str) -> dict | None:
     """Look up gray_config for the chat that a message belongs to."""
     stmt = (
         select(LarkBaseChatInfo.gray_config)
@@ -235,4 +260,195 @@ async def find_gray_config(session: AsyncSession, message_id: str) -> dict | Non
         )
         .where(ConversationMessage.message_id == message_id)
     )
-    return await session.scalar(stmt)
+    async with auto_tx():
+        return await current_session().scalar(stmt)
+
+
+async def find_user_messages_after(
+    chat_id: str,
+    *,
+    after: int,
+    limit: int,
+    exclude_user_id: str,
+) -> list[ConversationMessage]:
+    """Fetch user messages in a chat newer than *after* (ms), descending.
+
+    Used by Glimpse/proactive to get the most recent unseen user
+    messages. Caller is expected to ``reverse()`` for chronological
+    order if needed.
+    """
+    stmt = (
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.chat_id == chat_id,
+            ConversationMessage.role == "user",
+            ConversationMessage.user_id != exclude_user_id,
+            ConversationMessage.create_time > after,
+        )
+        .order_by(ConversationMessage.create_time.desc())
+        .limit(limit)
+    )
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
+
+
+async def find_proactive_messages_in_chat(
+    chat_id: str,
+    *,
+    bot_name: str,
+    proactive_user_id: str,
+    since_ms: int,
+) -> list[ConversationMessage]:
+    """Fetch proactive trigger messages for a persona in a chat since *since_ms*.
+
+    Returns rows in descending create_time order. Business layer is
+    responsible for projection (parse_content / time formatting).
+    """
+    stmt = (
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.chat_id == chat_id,
+            ConversationMessage.user_id == proactive_user_id,
+            ConversationMessage.bot_name == bot_name,
+            ConversationMessage.create_time >= since_ms,
+        )
+        .order_by(ConversationMessage.create_time.desc())
+    )
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
+
+
+async def insert_proactive_message(message: ConversationMessage) -> None:
+    """Persist a proactive trigger ``ConversationMessage`` entity.
+
+    Caller constructs the entity (proactive submit needs the full row to
+    pass into ``Message.from_cm`` for the outbox emit). This query just
+    owns the ``session.add`` so business code never touches the session.
+    """
+    async with auto_tx():
+        current_session().add(message)
+
+
+async def find_messages_with_user_chat_persona_by_root(
+    *,
+    root_message_id: str,
+    until_create_time: int,
+) -> list[tuple[ConversationMessage, str | None, str | None, str | None]]:
+    """Quick-search root chain query.
+
+    Fetch all messages sharing ``root_message_id`` with create_time
+    <= ``until_create_time``, joined with ``LarkUser.name``,
+    ``LarkGroupChatInfo.name`` and the ``agent_responses.persona_id``
+    via response_id. Ordered by create_time ascending.
+
+    Returns ``(message, username, chat_name, persona_id)`` tuples.
+    """
+    ar = _agent_responses_subquery()
+    stmt = (
+        select(
+            ConversationMessage,
+            LarkUser.name.label("username"),
+            LarkGroupChatInfo.name.label("chat_name"),
+            ar.c.ar_persona_id.label("persona_id"),
+        )
+        .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
+        .outerjoin(
+            LarkGroupChatInfo,
+            ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
+        )
+        .outerjoin(ar, ConversationMessage.response_id == ar.c.ar_session_id)
+        .where(ConversationMessage.root_message_id == root_message_id)
+        .where(ConversationMessage.create_time <= until_create_time)
+        .order_by(ConversationMessage.create_time.asc())
+    )
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return [(row[0], row[1], row[2], row[3]) for row in result.all()]
+
+
+async def find_messages_with_user_chat_persona_in_chat(
+    *,
+    chat_id: str,
+    exclude_root_message_id: str,
+    after_create_time: int,
+    before_create_time: int,
+    exclude_user_id: str,
+    limit: int,
+) -> list[tuple[ConversationMessage, str | None, str | None, str | None]]:
+    """Quick-search supplemental window query.
+
+    Fetch messages in *chat_id* outside of *exclude_root_message_id*'s
+    chain, within ``[after_create_time, before_create_time)``, excluding
+    *exclude_user_id*. Joined with user/chat/agent_responses like the
+    root query. Ordered by create_time descending, capped at *limit*.
+
+    Returns ``(message, username, chat_name, persona_id)`` tuples in
+    the same shape as ``find_messages_with_user_chat_persona_by_root``.
+    """
+    ar = _agent_responses_subquery()
+    stmt = (
+        select(
+            ConversationMessage,
+            LarkUser.name.label("username"),
+            LarkGroupChatInfo.name.label("chat_name"),
+            ar.c.ar_persona_id.label("persona_id"),
+        )
+        .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
+        .outerjoin(
+            LarkGroupChatInfo,
+            ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
+        )
+        .outerjoin(ar, ConversationMessage.response_id == ar.c.ar_session_id)
+        .where(
+            ConversationMessage.chat_id == chat_id,
+            ConversationMessage.root_message_id != exclude_root_message_id,
+            ConversationMessage.create_time >= after_create_time,
+            ConversationMessage.create_time < before_create_time,
+            ConversationMessage.user_id != exclude_user_id,
+        )
+        .order_by(ConversationMessage.create_time.desc())
+        .limit(limit)
+    )
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return [(row[0], row[1], row[2], row[3]) for row in result.all()]
+
+
+async def update_messages_tos_files(
+    updates: dict[str, dict[str, str]],
+) -> int:
+    """Apply tos_file mappings into ``ConversationMessage.content`` rows.
+
+    *updates* maps ``message_id -> {image_key: tos_file_id}``. For each
+    message we read the row, apply ``update_tos_files`` to merge the
+    mapping into the v2 content JSON, and write it back. Single tx so
+    the whole batch commits atomically.
+
+    Returns the count of messages actually updated (i.e. content
+    changed). Missing rows or no-op merges silently skip.
+    """
+    if not updates:
+        return 0
+
+    # Local import: ``app.chat`` package init transitively imports
+    # ``app.data.queries``, so a top-level import here would cycle.
+    from app.chat.content_parser import update_tos_files
+
+    updated_count = 0
+    async with auto_tx():
+        s = current_session()
+        for mid, mapping in updates.items():
+            row = await s.scalar(
+                select(ConversationMessage).where(
+                    ConversationMessage.message_id == mid
+                )
+            )
+            if row is None:
+                continue
+            new_content = update_tos_files(row.content, mapping)
+            if new_content:
+                row.content = new_content
+                updated_count += 1
+    return updated_count

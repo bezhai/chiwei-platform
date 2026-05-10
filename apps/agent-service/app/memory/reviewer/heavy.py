@@ -18,8 +18,9 @@ from app.data.queries import (
     list_recent_life_states,
     list_recent_schedule_revisions,
 )
-from app.data.session import get_session
 from app.memory.reviewer.tools import make_reviewer_tools
+from app.runtime.db import tx
+
 logger = logging.getLogger(__name__)
 
 CST = timezone(timedelta(hours=8))
@@ -54,11 +55,11 @@ async def run_heavy_review_for_persona(persona_id: str) -> None:
     now = datetime.now(CST)
     since = now - timedelta(days=1)
 
-    async with get_session() as s:
-        fragments = await list_fragments_window(s, persona_id=persona_id, since=since)
-        abstracts = await list_abstracts_window(s, persona_id=persona_id, since=since)
-        life_states = await list_recent_life_states(s, persona_id=persona_id, since=since)
-        schedules = await list_recent_schedule_revisions(s, persona_id=persona_id, since=since)
+    async with tx():
+        fragments = await list_fragments_window(persona_id=persona_id, since=since)
+        abstracts = await list_abstracts_window(persona_id=persona_id, since=since)
+        life_states = await list_recent_life_states(persona_id=persona_id, since=since)
+        schedules = await list_recent_schedule_revisions(persona_id=persona_id, since=since)
 
     if not fragments and not abstracts and not life_states and not schedules:
         logger.info("[%s] heavy review: empty day, skip", persona_id)

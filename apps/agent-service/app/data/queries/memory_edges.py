@@ -7,10 +7,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import func, update
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.data.models import MemoryEdge, Note
+from app.runtime.db import auto_tx, current_session
 
 __all__ = [
     "insert_memory_edge",
@@ -24,7 +24,6 @@ __all__ = [
 
 
 async def insert_memory_edge(
-    session: AsyncSession,
     *,
     id: str,
     persona_id: str,
@@ -36,30 +35,29 @@ async def insert_memory_edge(
     created_by: str,
     reason: str | None = None,
 ) -> None:
-    e = MemoryEdge(
-        id=id,
-        persona_id=persona_id,
-        from_id=from_id,
-        from_type=from_type,
-        to_id=to_id,
-        to_type=to_type,
-        edge_type=edge_type,
-        created_by=created_by,
-        reason=reason,
-    )
-    session.add(e)
+    async with auto_tx():
+        e = MemoryEdge(
+            id=id,
+            persona_id=persona_id,
+            from_id=from_id,
+            from_type=from_type,
+            to_id=to_id,
+            to_type=to_type,
+            edge_type=edge_type,
+            created_by=created_by,
+            reason=reason,
+        )
+        current_session().add(e)
 
 
-async def delete_edge(
-    session: AsyncSession, *, edge_id: str
-) -> None:
-    await session.execute(
-        MemoryEdge.__table__.delete().where(MemoryEdge.id == edge_id)
-    )
+async def delete_edge(*, edge_id: str) -> None:
+    async with auto_tx():
+        await current_session().execute(
+            MemoryEdge.__table__.delete().where(MemoryEdge.id == edge_id)
+        )
 
 
 async def list_edges_to(
-    session: AsyncSession,
     *,
     persona_id: str,
     to_id: str,
@@ -73,12 +71,12 @@ async def list_edges_to(
     )
     if edge_type:
         stmt = stmt.where(MemoryEdge.edge_type == edge_type)
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
 async def list_edges_from(
-    session: AsyncSession,
     *,
     persona_id: str,
     from_id: str,
@@ -92,39 +90,40 @@ async def list_edges_from(
     )
     if edge_type:
         stmt = stmt.where(MemoryEdge.edge_type == edge_type)
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        return list(result.scalars().all())
 
 
 async def insert_note(
-    session: AsyncSession,
     *,
     id: str,
     persona_id: str,
     content: str,
     when_at: datetime | None = None,
 ) -> None:
-    n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
-    session.add(n)
+    async with auto_tx():
+        s = current_session()
+        n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
+        s.add(n)
+        await s.flush()
 
 
-async def get_active_notes(
-    session: AsyncSession, persona_id: str
-) -> list[Note]:
-    result = await session.execute(
-        select(Note)
-        .where(Note.persona_id == persona_id)
-        .where(Note.resolved_at.is_(None))
-        .order_by(Note.created_at.desc())
-    )
-    return list(result.scalars().all())
+async def get_active_notes(persona_id: str) -> list[Note]:
+    async with auto_tx():
+        result = await current_session().execute(
+            select(Note)
+            .where(Note.persona_id == persona_id)
+            .where(Note.resolved_at.is_(None))
+            .order_by(Note.created_at.desc())
+        )
+        return list(result.scalars().all())
 
 
-async def resolve_note(
-    session: AsyncSession, *, note_id: str, resolution: str
-) -> None:
-    await session.execute(
-        update(Note)
-        .where(Note.id == note_id)
-        .values(resolved_at=func.now(), resolution=resolution)
-    )
+async def resolve_note(*, note_id: str, resolution: str) -> None:
+    async with auto_tx():
+        await current_session().execute(
+            update(Note)
+            .where(Note.id == note_id)
+            .values(resolved_at=func.now(), resolution=resolution)
+        )

@@ -11,35 +11,37 @@ from app.agent.tools.commit_abstract import _commit_abstract_impl
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 
 
-def _make_transactional_emit_mock():
-    """Async context manager stub that captures emitter.append() calls."""
+@asynccontextmanager
+async def _fake_tx():
+    yield
+
+
+def _make_emit_tx_mock():
     captured: list = []
 
-    @asynccontextmanager
-    async def _fake(_session):
-        emitter = MagicMock()
-        emitter.append = AsyncMock(side_effect=lambda ev: captured.append(ev) or None)
-        yield emitter
+    async def _fake_emit_tx(ev):
+        captured.append(ev)
 
-    return _fake, captured
+    return _fake_emit_tx, captured
 
 
 @pytest.mark.asyncio
 async def test_commit_writes_abstract_and_edges():
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, captured = _make_emit_tx_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=None)):
         with patch("app.agent.tools.commit_abstract.get_fragment_by_id", new=AsyncMock(return_value=MagicMock())):
             with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()) as ins_a:
                 with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                    with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
-                        out = await _commit_abstract_impl(
-                            persona_id="chiwei",
-                            chat_id=None,
-                            subject="浩南",
-                            content="他最近压力大",
-                            supported_by_fact_ids=["f_1", "f_2"],
-                            reasoning=None,
-                        )
+                    with patch("app.agent.tools.commit_abstract.tx", _fake_tx):
+                        with patch("app.agent.tools.commit_abstract.emit_tx", fake_emit):
+                            out = await _commit_abstract_impl(
+                                persona_id="chiwei",
+                                chat_id=None,
+                                subject="浩南",
+                                content="他最近压力大",
+                                supported_by_fact_ids=["f_1", "f_2"],
+                                reasoning=None,
+                            )
     assert "id" in out
     assert out["conflict_hint"] is None
     ins_a.assert_awaited_once()
@@ -54,15 +56,16 @@ async def test_commit_writes_abstract_and_edges():
 @pytest.mark.asyncio
 async def test_commit_returns_conflict_hint():
     hint = {"conflicting_abstract_id": "a_old", "similarity": 0.91, "conflicting_content": "他不爱甜"}
-    fake_te, captured = _make_transactional_emit_mock()
+    fake_emit, _captured = _make_emit_tx_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=hint)):
         with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()) as ins_a:
             with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
-                    out = await _commit_abstract_impl(
-                        persona_id="chiwei", chat_id=None, subject="浩南",
-                        content="他喝奶茶了", supported_by_fact_ids=None, reasoning=None,
-                    )
+                with patch("app.agent.tools.commit_abstract.tx", _fake_tx):
+                    with patch("app.agent.tools.commit_abstract.emit_tx", fake_emit):
+                        out = await _commit_abstract_impl(
+                            persona_id="chiwei", chat_id=None, subject="浩南",
+                            content="他喝奶茶了", supported_by_fact_ids=None, reasoning=None,
+                        )
     ins_a.assert_awaited_once()
     ins_e.assert_not_awaited()
     assert out["conflict_hint"] == hint
@@ -73,10 +76,11 @@ async def test_commit_validates_fact_ids_exist():
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=None)):
         with patch("app.agent.tools.commit_abstract.get_fragment_by_id", new=AsyncMock(return_value=None)):
             with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()) as ins_a:
-                out = await _commit_abstract_impl(
-                    persona_id="chiwei", chat_id=None, subject="浩南",
-                    content="x", supported_by_fact_ids=["f_missing"], reasoning=None,
-                )
+                with patch("app.agent.tools.commit_abstract.tx", _fake_tx):
+                    out = await _commit_abstract_impl(
+                        persona_id="chiwei", chat_id=None, subject="浩南",
+                        content="x", supported_by_fact_ids=["f_missing"], reasoning=None,
+                    )
     assert "error" in out
     ins_a.assert_not_awaited()
 
@@ -113,18 +117,19 @@ async def test_commit_rejects_whitespace_only_content():
 
 @pytest.mark.asyncio
 async def test_commit_passes_reasoning_to_edge():
-    fake_te, _captured = _make_transactional_emit_mock()
+    fake_emit, _captured = _make_emit_tx_mock()
     with patch("app.agent.tools.commit_abstract.detect_conflict", new=AsyncMock(return_value=None)):
         with patch("app.agent.tools.commit_abstract.get_fragment_by_id", new=AsyncMock(return_value=MagicMock())):
             with patch("app.agent.tools.commit_abstract.insert_abstract_memory", new=AsyncMock()):
                 with patch("app.agent.tools.commit_abstract.insert_memory_edge", new=AsyncMock()) as ins_e:
-                    with patch("app.agent.tools.commit_abstract.transactional_emit", fake_te):
-                        await _commit_abstract_impl(
-                            persona_id="chiwei",
-                            chat_id=None,
-                            subject="浩南",
-                            content="他最近压力大",
-                            supported_by_fact_ids=["f_1"],
-                            reasoning="因为他连续三天加班到凌晨",
-                        )
+                    with patch("app.agent.tools.commit_abstract.tx", _fake_tx):
+                        with patch("app.agent.tools.commit_abstract.emit_tx", fake_emit):
+                            await _commit_abstract_impl(
+                                persona_id="chiwei",
+                                chat_id=None,
+                                subject="浩南",
+                                content="他最近压力大",
+                                supported_by_fact_ids=["f_1"],
+                                reasoning="因为他连续三天加班到凌晨",
+                            )
     assert ins_e.await_args.kwargs["reason"] == "因为他连续三天加班到凌晨"

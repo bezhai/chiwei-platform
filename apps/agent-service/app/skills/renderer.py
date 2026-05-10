@@ -9,27 +9,14 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
+from app.capabilities.sandbox import run as _sandbox_run
 from app.skills.loader import SkillDefinition
-
-if TYPE_CHECKING:
-    from app.skills.sandbox_client import SandboxClient
 
 logger = logging.getLogger(__name__)
 
-# 模块级引用，支持 mock patch
-sandbox_client: SandboxClient | None = None
-
-
-def _get_sandbox_client() -> SandboxClient:
-    """获取 sandbox client 单例（延迟初始化）。"""
-    global sandbox_client
-    if sandbox_client is None:
-        from app.skills.sandbox_client import sandbox_client as _client
-
-        sandbox_client = _client
-    return sandbox_client
+# 模块级引用，支持测试 mock patch（patch ``app.skills.renderer.run``）
+run = _sandbox_run
 
 
 async def render_skill(skill: SkillDefinition) -> str:
@@ -41,14 +28,22 @@ async def render_skill(skill: SkillDefinition) -> str:
     Returns:
         渲染后的 markdown 文本
     """
-    client = _get_sandbox_client()
-
     content = skill.raw_body
 
     # 1. 执行 !`command` 预处理
     for directive in skill.preprocessing:
         try:
-            result = await client.execute(directive.command, skill.name)
+            sandbox_result = await run(
+                command=directive.command, skill_name=skill.name
+            )
+            if sandbox_result.exit_code != 0:
+                result = (
+                    f"命令退出码 {sandbox_result.exit_code}\n"
+                    f"stdout:\n{sandbox_result.stdout}\n"
+                    f"stderr:\n{sandbox_result.stderr}"
+                )
+            else:
+                result = sandbox_result.stdout
         except Exception as e:
             logger.error(
                 "Skill %s preprocessing failed: %s (command: %s)",

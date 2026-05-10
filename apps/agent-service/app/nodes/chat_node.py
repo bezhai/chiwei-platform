@@ -28,7 +28,6 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
     set_agent_response_bot,
 )
-from app.data.session import get_session
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
@@ -60,10 +59,9 @@ async def route_chat_node(t: ChatTrigger) -> None:
         t.bot_name,
     )
 
-    async with get_session() as s:
-        already_done = await is_chat_request_completed(
-            s, t.session_id, is_proactive=t.is_proactive
-        )
+    already_done = await is_chat_request_completed(
+        t.session_id, is_proactive=t.is_proactive
+    )
     if already_done:
         logger.warning(
             "skip redelivered chat_request: session_id=%s, message_id=%s",
@@ -122,11 +120,9 @@ async def chat_node(req: ChatRequest) -> None:
       6. final 段 + pre-safety blocked 路径
     """
     # 1. prep
-    async with get_session() as s:
-        raw_content = await find_message_content(s, req.message_id)
+    raw_content = await find_message_content(req.message_id)
     parsed = parse_content(raw_content) if raw_content else None
-    async with get_session() as s:
-        gray_config = (await find_gray_config(s, req.message_id)) or {}
+    gray_config = (await find_gray_config(req.message_id)) or {}
     effective_persona = req.persona_id or req.bot_name or ""
     guard_message = await fetch_guard_message(effective_persona)
     pre_task = asyncio.create_task(
@@ -161,18 +157,16 @@ async def chat_node(req: ChatRequest) -> None:
         return
 
     # 3. resolve response_bot_name + 更新 agent_responses 行
-    async with get_session() as s:
-        response_bot_name = await resolve_bot_name_for_persona(
-            s, req.persona_id, req.chat_id or "",
-        )
+    response_bot_name = await resolve_bot_name_for_persona(
+        req.persona_id, req.chat_id or "",
+    )
     if not response_bot_name:
         response_bot_name = req.bot_name or ""
     if req.session_id:
         try:
-            async with get_session() as s:
-                await set_agent_response_bot(
-                    s, req.session_id, response_bot_name, req.persona_id,
-                )
+            await set_agent_response_bot(
+                req.session_id, response_bot_name, req.persona_id,
+            )
         except Exception as e:
             logger.warning("Failed to update agent_response: %s", e)
 

@@ -18,7 +18,6 @@ from app.data.queries import (
     insert_reply_style,
     list_today_fragments,
 )
-from app.data.session import get_session
 from app.memory._persona import load_persona
 
 _VOICE_CFG = AgentConfig("voice_generator", "offline-model", "voice-generator")
@@ -39,22 +38,19 @@ async def generate_voice(
     if pc.display_name == persona_id and not pc.persona_lite:
         return None
 
-    async with get_session() as s:
-        le_state = await find_latest_life_state(s, persona_id)
+    le_state = await find_latest_life_state(persona_id)
     current_state = le_state.current_state if le_state else "（状态未知）"
     response_mood = le_state.response_mood if le_state else ""
 
     now = datetime.now(_CST)
     today = now.strftime("%Y-%m-%d")
 
-    async with get_session() as s:
-        schedule = await find_plan_for_period(s, "daily", today, today, persona_id)
+    schedule = await find_plan_for_period("daily", today, today, persona_id)
     schedule_text = schedule.content if schedule else "（今天没有安排）"
 
-    async with get_session() as s:
-        frags = await list_today_fragments(
-            s, persona_id, sources=["afterthought"]
-        )
+    frags = await list_today_fragments(
+        persona_id, sources=["afterthought"]
+    )
     frag_text = (
         "\n".join(f.content[:100] for f in frags[-3:])
         if frags
@@ -85,9 +81,8 @@ async def generate_voice(
         logger.warning("[%s] Voice generation returned empty", persona_id)
         return None
 
-    async with get_session() as s:
-        await insert_reply_style(
-            s, persona_id=persona_id, style_text=content, source=source
-        )
+    await insert_reply_style(
+        persona_id=persona_id, style_text=content, source=source
+    )
     logger.info("[%s] Voice generated (%s): %s...", persona_id, source, content[:60])
     return content

@@ -10,11 +10,8 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
-
-from app.chat.content_parser import parse_content, update_tos_files
-from app.data.models import ConversationMessage
-from app.data.session import async_session
+from app.chat.content_parser import parse_content
+from app.data.queries import update_messages_tos_files
 from app.domain.chat_events import ConversationMessageContentSynced
 from app.runtime import node
 
@@ -46,18 +43,7 @@ async def persist_tos_files_node(e: ConversationMessageContentSynced) -> None:
         if not msg_updates:
             return
 
-        async with async_session() as session:
-            for mid, mapping in msg_updates.items():
-                row = await session.scalar(
-                    select(ConversationMessage).where(
-                        ConversationMessage.message_id == mid
-                    )
-                )
-                if row:
-                    updated = update_tos_files(row.content, mapping)
-                    if updated:
-                        row.content = updated
-            await session.commit()
-            logger.info("tos_file persisted for %d messages", len(msg_updates))
+        updated = await update_messages_tos_files(msg_updates)
+        logger.info("tos_file persisted for %d messages", updated)
     except Exception:
         logger.warning("tos_file persistence failed", exc_info=True)

@@ -12,19 +12,12 @@ from app.life.tool import commit_life_state_impl
 
 
 @asynccontextmanager
-async def _null_transactional_emit(_session):
-    """Stub transactional_emit that discards all appends."""
-    emitter = MagicMock()
-    emitter.append = AsyncMock()
-    yield emitter
+async def _fake_tx():
+    yield
 
 
-def _null_session_ctx():
-    """Return an async context manager that yields an AsyncMock session."""
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return ctx
+async def _null_emit_tx(_ev):
+    return None
 
 CST = timezone(timedelta(hours=8))
 
@@ -102,8 +95,8 @@ async def test_prev_not_expired_allows_in_segment_refresh():
     prev_end = now + timedelta(minutes=30)
     prev = MagicMock(activity_type="study", state_end_at=prev_end)
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=42)) as ins:
-        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
-            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+        with patch("app.life.tool.tx", _fake_tx):
+            with patch("app.life.tool.emit_tx", _null_emit_tx):
                 r = await commit_life_state_impl(
                     persona_id="chiwei",
                     activity_type="study",
@@ -127,8 +120,8 @@ async def test_prev_expired_allows_new_activity():
         state_end_at=now - timedelta(minutes=5),
     )
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=7)) as ins:
-        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
-            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+        with patch("app.life.tool.tx", _fake_tx):
+            with patch("app.life.tool.emit_tx", _null_emit_tx):
                 r = await commit_life_state_impl(
                     persona_id="chiwei",
                     activity_type="transit",
@@ -150,8 +143,8 @@ async def test_prev_no_state_end_at_allows_new_activity():
     now = _now()
     prev = MagicMock(activity_type="study", state_end_at=None)
     with patch("app.life.tool.insert_life_state", new=AsyncMock(return_value=1)) as ins:
-        with patch("app.life.tool.get_session", return_value=_null_session_ctx()):
-            with patch("app.life.tool.transactional_emit", _null_transactional_emit):
+        with patch("app.life.tool.tx", _fake_tx):
+            with patch("app.life.tool.emit_tx", _null_emit_tx):
                 r = await commit_life_state_impl(
                     persona_id="chiwei",
                     activity_type="transit",
