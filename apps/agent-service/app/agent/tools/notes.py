@@ -9,7 +9,7 @@ Tools exposed:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from langchain.tools import tool
 from langgraph.runtime import get_runtime
@@ -43,7 +43,7 @@ def _serialize(n) -> dict:
         "when_label": format_when_label(
             when_at=n.when_at,
             created_at=n.created_at,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         ),
     }
 

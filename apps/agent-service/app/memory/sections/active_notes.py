@@ -9,7 +9,7 @@ truncation hint pointing the agent at ``list_note`` for the full picture.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.data.queries import list_active_notes, select_notes_for_context
 from app.memory.notes_format import format_when_label
@@ -34,7 +34,7 @@ async def build_active_notes_section(*, persona_id: str) -> str:
     if shown == 0:
         return f"你的清单里还有 {total} 条没动的事（用 list_note 看）。"
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lines = ["你的清单（最近活跃，全部用 list_note 查）："]
     for n in injected:
         label = format_when_label(when_at=n.when_at, created_at=n.created_at, now=now)

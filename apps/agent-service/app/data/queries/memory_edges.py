@@ -4,7 +4,7 @@ Operates on tables: ``MemoryEdge``, ``Note``.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, update
 from sqlalchemy.future import select
@@ -181,7 +181,7 @@ async def select_notes_for_context(persona_id: str) -> list[Note]:
     Order: notes with ``when_at`` first (ascending — soonest first), then
     notes without ``when_at`` (most recent created first). Capped at 15 rows.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     overdue_cutoff = now - timedelta(days=_CONTEXT_RECENT_OVERDUE_DAYS)
     memo_cutoff = now - timedelta(days=_CONTEXT_NEW_MEMO_DAYS)
 
