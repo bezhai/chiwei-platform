@@ -374,6 +374,10 @@ class Note(Base):
         DateTime(timezone=True), nullable=True
     )
     resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delete_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ScheduleRevision(Base):
