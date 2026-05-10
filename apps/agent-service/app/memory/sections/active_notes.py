@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta, timezone
 
-from app.data.queries import get_active_notes
+from app.data.queries.memory_edges import get_active_notes
 
 logger = logging.getLogger(__name__)
 

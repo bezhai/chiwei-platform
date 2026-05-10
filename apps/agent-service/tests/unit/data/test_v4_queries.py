@@ -10,12 +10,10 @@ import pytest
 from app.data.models import AbstractMemory, Fragment, MemoryEdge, Note
 from app.data.queries import (
     count_abstracts_by_persona,
-    get_active_notes,
     get_current_schedule,
     insert_abstract_memory,
     insert_fragment,
     insert_memory_edge,
-    insert_note,
     insert_schedule_revision,
     resolve_note,
     touch_abstract,
@@ -153,38 +151,6 @@ async def test_insert_memory_edge_adds_to_session():
 
 # memory_edges.py — notes
 @pytest.mark.asyncio
-async def test_insert_note_adds_to_session():
-    session = AsyncMock()
-    session.add = lambda obj: setattr(session, "_added", obj)
-    patches = _patch_module("app.data.queries.memory_edges", session)
-    try:
-        await insert_note(
-            id="n1",
-            persona_id="chiwei",
-            content="周五看电影",
-        )
-        added = session._added
-        assert isinstance(added, Note)
-        assert added.content == "周五看电影"
-        assert added.when_at is None
-    finally:
-        _stop(patches)
-
-
-@pytest.mark.asyncio
-async def test_get_active_notes_returns_list():
-    note = Note(id="n1", persona_id="chiwei", content="x")
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=_IterResult([note]))
-    patches = _patch_module("app.data.queries.memory_edges", session)
-    try:
-        result = await get_active_notes(persona_id="chiwei")
-        assert result == [note]
-    finally:
-        _stop(patches)
-
-
-@pytest.mark.asyncio
 async def test_resolve_note_executes_update():
     session = AsyncMock()
     session.execute = AsyncMock()
@@ -300,6 +266,25 @@ async def test_upsert_note_unknown_id_raises():
                 content="x",
                 note_id="n_does_not_exist",
             )
+    finally:
+        _stop(patches)
+
+
+# memory_edges.py — delete_note (Notes redesign 2026-05-10)
+@pytest.mark.asyncio
+async def test_delete_note_soft_deletes():
+    session = AsyncMock()
+    session.execute = AsyncMock()
+    patches = _patch_module("app.data.queries.memory_edges", session)
+    try:
+        from app.data.queries import delete_note
+        await delete_note(note_id="n_abc", reason="改主意了")
+        session.execute.assert_awaited_once()
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt)
+        assert "UPDATE notes" in compiled
+        assert "deleted_at" in compiled
+        assert "delete_reason" in compiled
     finally:
         _stop(patches)
 

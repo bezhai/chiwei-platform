@@ -18,9 +18,8 @@ __all__ = [
     "delete_edge",
     "list_edges_to",
     "list_edges_from",
-    "insert_note",
     "upsert_note",
-    "get_active_notes",
+    "delete_note",
     "resolve_note",
 ]
 
@@ -166,6 +165,20 @@ async def upsert_note(
             existing.when_at = when_at  # type: ignore[assignment]
         await s.flush()
         return existing
+
+
+async def delete_note(*, note_id: str, reason: str) -> None:
+    """Soft-delete a note (sets deleted_at + delete_reason).
+
+    Does not raise if note_id does not exist; the UPDATE simply affects 0 rows.
+    The tool layer is responsible for verifying existence if needed.
+    """
+    async with auto_tx():
+        await current_session().execute(
+            update(Note)
+            .where(Note.id == note_id)
+            .values(deleted_at=func.now(), delete_reason=reason)
+        )
 
 
 async def resolve_note(*, note_id: str, resolution: str) -> None:

@@ -14,10 +14,10 @@ from langchain_core.messages import HumanMessage
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.data.queries import (
-    get_active_notes,
     list_abstracts_window,
     list_fragments_window,
 )
+from app.data.queries.memory_edges import get_active_notes
 from app.memory.reviewer.tools import make_reviewer_tools
 from app.runtime.db import tx
 

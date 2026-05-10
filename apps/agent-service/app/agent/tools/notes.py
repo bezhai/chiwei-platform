@@ -10,8 +10,8 @@ from langgraph.runtime import get_runtime
 from app.agent.context import AgentContext
 from app.agent.tools._common import tool_error
 from app.data.ids import new_id
-from app.data.queries import get_active_notes, insert_note
 from app.data.queries import resolve_note as resolve_note_query
+from app.data.queries.memory_edges import get_active_notes, insert_note
 from app.domain.agent_tool_events import NoteCreated
 from app.runtime.db import emit_tx, tx
 
