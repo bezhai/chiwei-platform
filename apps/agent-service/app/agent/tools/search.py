@@ -67,7 +67,7 @@ def _html_to_text(html: str) -> str:
         text = soup.get_text(separator="\n", strip=True)
         return "\n".join(line.strip() for line in text.split("\n") if line.strip())
     except Exception as exc:
-        logger.error("HTML→text conversion failed: %s", exc)
+        logger.error("HTML→text conversion failed: %r", exc)
         return ""
 
 
@@ -76,7 +76,7 @@ async def _read_webpage(url: str) -> str:
     try:
         return await _read_webpage_capability(url)
     except Exception as exc:
-        logger.error("read_webpage(%s) failed: %s", url, exc)
+        logger.error("read_webpage(%s) failed: %r", url, exc)
         return ""
 
 
@@ -235,7 +235,7 @@ async def search_web(
         ]
         status = "ok"
     except Exception as exc:
-        logger.error("Web search failed: %s", exc)
+        logger.error("Web search failed: %r", exc)
         WEB_SEARCH_REQUESTS.labels(status=status).inc()
         WEB_SEARCH_DURATION.observe(time.monotonic() - start)
         return f"网页搜索失败: {exc}"
