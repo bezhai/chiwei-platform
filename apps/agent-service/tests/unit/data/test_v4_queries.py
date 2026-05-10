@@ -290,6 +290,39 @@ async def test_list_active_notes_filters_resolved_and_deleted():
         _stop(patches)
 
 
+# memory_edges.py — select_notes_for_context (Notes redesign 2026-05-10)
+@pytest.mark.asyncio
+async def test_select_notes_for_context_window_and_limit():
+    """SQL has the 3-day / 7-day window + 15-row limit."""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_IterResult([]))
+    patches = _patch_module("app.data.queries.memory_edges", session)
+    try:
+        from app.data.queries import select_notes_for_context
+        await select_notes_for_context(persona_id="chiwei")
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "LIMIT 15" in compiled
+        assert "when_at" in compiled
+        assert "created_at" in compiled
+    finally:
+        _stop(patches)
+
+
+@pytest.mark.asyncio
+async def test_select_notes_for_context_returns_results():
+    n = Note(id="n_1", persona_id="chiwei", content="x")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_IterResult([n]))
+    patches = _patch_module("app.data.queries.memory_edges", session)
+    try:
+        from app.data.queries import select_notes_for_context
+        result = await select_notes_for_context(persona_id="chiwei")
+        assert result == [n]
+    finally:
+        _stop(patches)
+
+
 # memory_edges.py — delete_note (Notes redesign 2026-05-10)
 @pytest.mark.asyncio
 async def test_delete_note_soft_deletes():

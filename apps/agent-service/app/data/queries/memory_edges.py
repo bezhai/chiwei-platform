@@ -4,7 +4,7 @@ Operates on tables: ``MemoryEdge``, ``Note``.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, update
 from sqlalchemy.future import select
@@ -21,6 +21,7 @@ __all__ = [
     "upsert_note",
     "delete_note",
     "list_active_notes",
+    "select_notes_for_context",
     "resolve_note",
 ]
 
@@ -184,6 +185,46 @@ async def list_active_notes(persona_id: str) -> list[Note]:
                 Note.when_at.asc().nulls_last(),
                 Note.created_at.desc(),
             )
+        )
+        return list(result.scalars().all())
+
+
+_CONTEXT_RECENT_OVERDUE_DAYS = 3
+_CONTEXT_NEW_MEMO_DAYS = 7
+_CONTEXT_NOTES_LIMIT = 15
+
+
+async def select_notes_for_context(persona_id: str) -> list[Note]:
+    """Return notes appropriate for live context injection.
+
+    Filters:
+    - Notes with ``when_at`` are kept if ``when_at >= now - 3 days``
+      (upcoming + recently overdue).
+    - Notes without ``when_at`` are kept if ``created_at >= now - 7 days``
+      (fresh memos).
+
+    Order: notes with ``when_at`` first (ascending — soonest first), then
+    notes without ``when_at`` (most recent created first). Capped at 15 rows.
+    """
+    now = datetime.now(timezone.utc)
+    overdue_cutoff = now - timedelta(days=_CONTEXT_RECENT_OVERDUE_DAYS)
+    memo_cutoff = now - timedelta(days=_CONTEXT_NEW_MEMO_DAYS)
+
+    async with auto_tx():
+        result = await current_session().execute(
+            select(Note)
+            .where(Note.persona_id == persona_id)
+            .where(Note.resolved_at.is_(None))
+            .where(Note.deleted_at.is_(None))
+            .where(
+                (Note.when_at.is_not(None) & (Note.when_at >= overdue_cutoff))
+                | (Note.when_at.is_(None) & (Note.created_at >= memo_cutoff))
+            )
+            .order_by(
+                Note.when_at.asc().nulls_last(),
+                Note.created_at.desc(),
+            )
+            .limit(_CONTEXT_NOTES_LIMIT)
         )
         return list(result.scalars().all())
 
