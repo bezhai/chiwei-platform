@@ -101,31 +101,6 @@ async def list_edges_from(
         return list(result.scalars().all())
 
 
-async def insert_note(
-    *,
-    id: str,
-    persona_id: str,
-    content: str,
-    when_at: datetime | None = None,
-) -> None:
-    async with auto_tx():
-        s = current_session()
-        n = Note(id=id, persona_id=persona_id, content=content, when_at=when_at)
-        s.add(n)
-        await s.flush()
-
-
-async def get_active_notes(persona_id: str) -> list[Note]:
-    async with auto_tx():
-        result = await current_session().execute(
-            select(Note)
-            .where(Note.persona_id == persona_id)
-            .where(Note.resolved_at.is_(None))
-            .order_by(Note.created_at.desc())
-        )
-        return list(result.scalars().all())
-
-
 async def upsert_note(
     *,
     persona_id: str,
