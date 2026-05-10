@@ -270,6 +270,26 @@ async def test_upsert_note_unknown_id_raises():
         _stop(patches)
 
 
+# memory_edges.py — list_active_notes (Notes redesign 2026-05-10)
+@pytest.mark.asyncio
+async def test_list_active_notes_filters_resolved_and_deleted():
+    n_active = Note(id="n_active", persona_id="chiwei", content="alive")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_IterResult([n_active]))
+    patches = _patch_module("app.data.queries.memory_edges", session)
+    try:
+        from app.data.queries import list_active_notes
+        result = await list_active_notes(persona_id="chiwei")
+        assert result == [n_active]
+        # WHERE clause filters both resolved_at and deleted_at IS NULL.
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "resolved_at IS NULL" in compiled
+        assert "deleted_at IS NULL" in compiled
+    finally:
+        _stop(patches)
+
+
 # memory_edges.py — delete_note (Notes redesign 2026-05-10)
 @pytest.mark.asyncio
 async def test_delete_note_soft_deletes():

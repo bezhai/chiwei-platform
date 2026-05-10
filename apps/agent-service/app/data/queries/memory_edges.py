@@ -20,6 +20,7 @@ __all__ = [
     "list_edges_from",
     "upsert_note",
     "delete_note",
+    "list_active_notes",
     "resolve_note",
 ]
 
@@ -165,6 +166,26 @@ async def upsert_note(
             existing.when_at = when_at  # type: ignore[assignment]
         await s.flush()
         return existing
+
+
+async def list_active_notes(persona_id: str) -> list[Note]:
+    """Return all notes that are neither resolved nor deleted.
+
+    Ordered: notes with ``when_at`` first (ascending — soonest first),
+    then notes without ``when_at`` (most recently created first).
+    """
+    async with auto_tx():
+        result = await current_session().execute(
+            select(Note)
+            .where(Note.persona_id == persona_id)
+            .where(Note.resolved_at.is_(None))
+            .where(Note.deleted_at.is_(None))
+            .order_by(
+                Note.when_at.asc().nulls_last(),
+                Note.created_at.desc(),
+            )
+        )
+        return list(result.scalars().all())
 
 
 async def delete_note(*, note_id: str, reason: str) -> None:
