@@ -35,7 +35,7 @@ async def test_noop_when_empty_window():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
-        patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[])),
+        patch(f"{MODULE}.list_active_notes", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}._run_reviewer_agent", new=AsyncMock()) as agent,
     ):
         result = await run_light_review(persona_id="chiwei", window_minutes=30)
@@ -59,7 +59,7 @@ async def test_runs_agent_with_window_summary():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[frag])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
-        patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[])),
+        patch(f"{MODULE}.list_active_notes", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}._run_reviewer_agent", new=AsyncMock()) as agent,
     ):
         await run_light_review(persona_id="chiwei", window_minutes=30)
@@ -88,7 +88,7 @@ async def test_runs_when_only_notes_present():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.list_fragments_window", new=AsyncMock(return_value=[])),
         patch(f"{MODULE}.list_abstracts_window", new=AsyncMock(return_value=[])),
-        patch(f"{MODULE}.get_active_notes", new=AsyncMock(return_value=[note])),
+        patch(f"{MODULE}.list_active_notes", new=AsyncMock(return_value=[note])),
         patch(f"{MODULE}._run_reviewer_agent", new=AsyncMock()) as agent,
     ):
         await run_light_review(persona_id="chiwei", window_minutes=60)

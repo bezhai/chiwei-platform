@@ -6,7 +6,7 @@ memory_search.py，所以本测试覆盖 9 个 domain 模块。
 from __future__ import annotations
 
 # 来自 spec §3.3 + §3.6 memory 细拆 + Phase 7d Task 5 hoist (6 个新增 messages
-# query)，硬编码作为期望基线（80 函数）。
+# query) + Notes redesign 2026-05-10，硬编码作为期望基线（82 函数）。
 EXPECTED_FUNCTIONS = {
     # model_provider (3)
     "parse_model_id", "find_model_mapping", "find_provider_by_name",
@@ -41,9 +41,10 @@ EXPECTED_FUNCTIONS = {
     "get_fragments_by_ids", "touch_fragments_bulk", "insert_abstract_memory",
     "touch_abstract", "touch_abstracts_bulk", "count_abstracts_by_persona",
     "update_abstract_content_query", "set_clarity", "delete_fragment_query",
-    # memory_edges (7) — edges + notes
+    # memory_edges (9) — edges + notes
     "insert_memory_edge", "delete_edge", "list_edges_to", "list_edges_from",
-    "insert_note", "get_active_notes", "resolve_note",
+    "upsert_note", "delete_note", "list_active_notes", "select_notes_for_context",
+    "resolve_note",
     # memory_search (9) — read helpers
     "list_today_fragments", "find_fragments_since", "list_fragments_window",
     "list_abstracts_window", "get_abstracts_by_subject", "get_abstracts_by_subjects",

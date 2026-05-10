@@ -15,7 +15,7 @@ from app.agent.tools.history import (
 )
 from app.agent.tools.image import generate_image, read_images
 from app.agent.tools.image_search import search_images
-from app.agent.tools.notes import resolve_note, write_note
+from app.agent.tools.notes import delete_note, list_note, resolve_note, upsert_note
 from app.agent.tools.recall import recall
 from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
@@ -30,8 +30,10 @@ BASE_TOOLS = [
     read_images,
     recall,
     commit_abstract_memory,
-    write_note,
+    upsert_note,
+    list_note,
     resolve_note,
+    delete_note,
     update_schedule,
 ]
 
@@ -56,8 +58,10 @@ __all__ = [
     "read_images",
     "recall",
     "commit_abstract_memory",
-    "write_note",
+    "upsert_note",
+    "list_note",
     "resolve_note",
+    "delete_note",
     "update_schedule",
     "check_chat_history",
     "search_group_history",

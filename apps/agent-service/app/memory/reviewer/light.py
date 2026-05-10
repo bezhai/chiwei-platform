@@ -14,8 +14,8 @@ from langchain_core.messages import HumanMessage
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.data.queries import (
-    get_active_notes,
     list_abstracts_window,
+    list_active_notes,
     list_fragments_window,
 )
 from app.memory.reviewer.tools import make_reviewer_tools
@@ -71,7 +71,7 @@ async def run_light_review(*, persona_id: str, window_minutes: int) -> None:
     async with tx():
         fragments = await list_fragments_window(persona_id=persona_id, since=since)
         abstracts = await list_abstracts_window(persona_id=persona_id, since=since)
-        notes = await get_active_notes(persona_id=persona_id)
+        notes = await list_active_notes(persona_id=persona_id)
 
     if not fragments and not abstracts and not notes:
         logger.info("[%s] light review: empty window, skip", persona_id)
