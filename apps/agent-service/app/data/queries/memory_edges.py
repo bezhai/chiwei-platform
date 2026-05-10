@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy import func, update
 from sqlalchemy.future import select
 
+from app.data.ids import new_id
 from app.data.models import MemoryEdge, Note
 from app.runtime.db import auto_tx, current_session
 
@@ -18,9 +19,13 @@ __all__ = [
     "list_edges_to",
     "list_edges_from",
     "insert_note",
+    "upsert_note",
     "get_active_notes",
     "resolve_note",
 ]
+
+
+_UNSET: object = object()
 
 
 async def insert_memory_edge(
@@ -118,6 +123,49 @@ async def get_active_notes(persona_id: str) -> list[Note]:
             .order_by(Note.created_at.desc())
         )
         return list(result.scalars().all())
+
+
+async def upsert_note(
+    *,
+    persona_id: str,
+    content: str,
+    when_at: datetime | None | object = _UNSET,
+    note_id: str | None = None,
+) -> Note:
+    """Create or update a Note.
+
+    - ``note_id is None`` → create new note (id auto-generated as ``n_<hex>``)
+    - ``note_id`` provided + ``when_at is _UNSET`` → update content only
+    - ``note_id`` provided + ``when_at is None`` → clear when_at column
+    - ``note_id`` provided + ``when_at`` is datetime → update when_at column
+
+    Returns the persisted Note. Raises ``LookupError`` if updating an unknown id.
+    """
+    async with auto_tx():
+        s = current_session()
+        if note_id is None:
+            nid = new_id("n")
+            when_value = None if when_at is _UNSET else when_at
+            n = Note(
+                id=nid,
+                persona_id=persona_id,
+                content=content,
+                when_at=when_value,
+            )
+            s.add(n)
+            await s.flush()
+            return n
+
+        result = await s.execute(select(Note).where(Note.id == note_id))
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            raise LookupError(f"note not found: {note_id}")
+
+        existing.content = content
+        if when_at is not _UNSET:
+            existing.when_at = when_at  # type: ignore[assignment]
+        await s.flush()
+        return existing
 
 
 async def resolve_note(*, note_id: str, resolution: str) -> None:
