@@ -36,8 +36,32 @@ services:
       timeout: 5s
       retries: 5
 
+  chiwei-test-redis:
+    image: redis:7-alpine
+    container_name: chiwei-test-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${CHIWEI_TEST_REDIS_PASSWORD:?password required}
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6380:6379"  # prod redis 占 6379，test 用 6380
+    volumes:
+      - chiwei_test_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${CHIWEI_TEST_REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   chiwei_test_pg_data:
     name: chiwei_test_pg_data
   chiwei_test_mq_data:
     name: chiwei_test_mq_data
+  chiwei_test_redis_data:
+    name: chiwei_test_redis_data

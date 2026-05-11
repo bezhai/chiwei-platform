@@ -11,6 +11,9 @@ docker compose up -d chiwei-test-postgres
 
 export CHIWEI_TEST_MQ_PASSWORD=<set-a-password>
 docker compose up -d chiwei-test-rabbitmq
+
+export CHIWEI_TEST_REDIS_PASSWORD=<set-a-password>
+docker compose up -d chiwei-test-redis
 ```
 
 ## 验证
@@ -26,6 +29,9 @@ docker exec chiwei-test-rabbitmq rabbitmq-diagnostics -q ping
 # 期望: Ping succeeded
 
 # 浏览器开 http://cpu1:15673 用 chiwei_test / <password> 登录 management UI
+
+docker exec chiwei-test-redis redis-cli -a $CHIWEI_TEST_REDIS_PASSWORD ping
+# 期望: PONG
 ```
 
 ## 销毁
@@ -38,4 +44,8 @@ docker volume rm chiwei_test_pg_data  # 慎用，会丢测试数据
 docker compose stop chiwei-test-rabbitmq
 docker compose rm -f chiwei-test-rabbitmq
 docker volume rm chiwei_test_mq_data  # 慎用，会丢测试 MQ 数据
+
+docker compose stop chiwei-test-redis
+docker compose rm -f chiwei-test-redis
+docker volume rm chiwei_test_redis_data  # 慎用，会丢测试 redis 数据
 ```
