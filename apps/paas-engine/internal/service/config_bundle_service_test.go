@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -434,5 +435,114 @@ func TestResolveConfig_FullMerge(t *testing.T) {
 		if entry.Source != c.source {
 			t.Errorf("result[%q].Source = %q, want %q", c.key, entry.Source, c.source)
 		}
+	}
+}
+
+// --- ValidateRequiredKeys tests ---
+
+func TestValidateRequiredKeys_AllKeysOverridden_Pass(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "test-pg", "POSTGRES_DB": "chiwei_test"},
+		},
+		RequiredKeys: map[string][]string{
+			"coe": {"POSTGRES_HOST", "POSTGRES_DB"},
+		},
+	}}
+	if err := ValidateRequiredKeys(bundles, "coe"); err != nil {
+		t.Fatalf("expected pass, got %v", err)
+	}
+}
+
+func TestValidateRequiredKeys_KeyMissing_Reject(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "test-pg"}, // POSTGRES_DB missing
+		},
+		RequiredKeys: map[string][]string{
+			"coe": {"POSTGRES_HOST", "POSTGRES_DB"},
+		},
+	}}
+	err := ValidateRequiredKeys(bundles, "coe")
+	if err == nil {
+		t.Fatal("expected reject, got nil")
+	}
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("error must wrap ErrInvalidInput for HTTP 400 mapping: %v", err)
+	}
+	// error message must mention bundle name + key name
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "pg-main") || !strings.Contains(errMsg, "POSTGRES_DB") {
+		t.Fatalf("error must mention bundle and key: %v", err)
+	}
+}
+
+func TestValidateRequiredKeys_KeyEmptyValue_Reject(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "test-pg", "POSTGRES_DB": ""}, // empty value treated as missing
+		},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
+	}}
+	if err := ValidateRequiredKeys(bundles, "coe"); err == nil {
+		t.Fatal("empty value should reject")
+	}
+}
+
+func TestValidateRequiredKeys_ProdClass_NoCheck(t *testing.T) {
+	// prod class has no RequiredKeys config → no check
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST"}},
+	}}
+	if err := ValidateRequiredKeys(bundles, "prod"); err != nil {
+		t.Fatalf("prod class should not trigger coe RequiredKeys: %v", err)
+	}
+}
+
+func TestValidateRequiredKeys_NoRequiredKeys_NoCheck(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "inter-service-auth",
+		Keys: map[string]string{"AUTH_TOKEN": "xxx"},
+		// no RequiredKeys field → no check
+	}}
+	if err := ValidateRequiredKeys(bundles, "coe"); err != nil {
+		t.Fatalf("bundle without RequiredKeys should pass: %v", err)
+	}
+}
+
+// --- GetBundlesForApp tests ---
+
+func TestGetBundlesForApp_ReturnsBundles(t *testing.T) {
+	bundles := []*domain.ConfigBundle{
+		{Name: "pg-main", Keys: map[string]string{"POSTGRES_HOST": "postgres"}},
+		{Name: "redis", Keys: map[string]string{"REDIS_HOST": "redis"}},
+	}
+	app := &domain.App{Name: "agent-service", ConfigBundles: []string{"pg-main", "redis"}}
+	svc := newSvcWithBundles(t, bundles)
+
+	got, err := svc.GetBundlesForApp(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 bundles, got %d", len(got))
+	}
+}
+
+func TestGetBundlesForApp_EmptyConfigBundles_ReturnsNil(t *testing.T) {
+	app := &domain.App{Name: "minimal-app"} // no ConfigBundles
+	svc := newSvcWithBundles(t, nil)
+
+	got, err := svc.GetBundlesForApp(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil, got %v", got)
 	}
 }

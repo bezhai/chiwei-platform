@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -387,4 +388,36 @@ func (s *ConfigBundleService) ResolveBundleEnvs(ctx context.Context, app *domain
 		}
 	}
 	return result, nil
+}
+
+// ValidateRequiredKeys 校验 bundles 中标记 RequiredKeys[classKey] 的 key 都在 ClassOverrides[classKey] 里有非空值。
+// 任一 key 缺失或空值 → 返回 wrap ErrInvalidInput 的 error，明示 bundle + key。
+// 若所有 bundle 都没声明 RequiredKeys[classKey]，直接 pass（无校验对象）。
+func ValidateRequiredKeys(bundles []*domain.ConfigBundle, classKey string) error {
+	for _, bundle := range bundles {
+		required, ok := bundle.RequiredKeys[classKey]
+		if !ok || len(required) == 0 {
+			continue
+		}
+		overrides := bundle.ClassOverrides[classKey]
+		for _, key := range required {
+			val, present := overrides[key]
+			if !present || val == "" {
+				return fmt.Errorf(
+					"%w: bundle %q requires class %q to override key %q (currently missing or empty); operator must set ClassOverrides[%s][%s] before deploying %s lanes",
+					domain.ErrInvalidInput, bundle.Name, classKey, key, classKey, key, classKey,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// GetBundlesForApp 拿 app 引用的所有 bundle（含 RequiredKeys/ClassOverrides 字段）。
+// 用于 ReleaseService 在 deploy 前跑 ValidateRequiredKeys。
+func (s *ConfigBundleService) GetBundlesForApp(ctx context.Context, app *domain.App) ([]*domain.ConfigBundle, error) {
+	if len(app.ConfigBundles) == 0 {
+		return nil, nil
+	}
+	return s.bundleRepo.FindByNames(ctx, app.ConfigBundles)
 }
