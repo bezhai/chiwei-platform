@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -90,7 +91,7 @@ func TestCreateRelease_DeployFailure_SetsMessage(t *testing.T) {
 		deployErr: errors.New("wait for rollout: deployment myapp-prod failed: pod myapp-prod-abc is in CrashLoopBackOff: exit code 1"),
 	}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -125,7 +126,7 @@ func TestCreateRelease_DeploySuccess_ClearsMessage(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -158,7 +159,7 @@ func TestGetReleaseStatus(t *testing.T) {
 	}
 	deployer := &stubDeployer{status: expectedStatus}
 
-	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	// 先存一个 release
 	rel := &domain.Release{ID: "r1", AppName: "myapp", Lane: "prod", DeployName: "myapp-prod"}
@@ -176,10 +177,69 @@ func TestGetReleaseStatus(t *testing.T) {
 	}
 }
 
+func TestCreateOrUpdateRelease_RejectsBadLaneName(t *testing.T) {
+	appRepo := &stubAppRepo{app: &domain.App{
+		Name:          "agent-service",
+		ImageRepoName: "agent-service",
+		Port:          8080,
+	}}
+	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
+		Name:     "agent-service",
+		Registry: "harbor.local:30002/inner-bot/agent-service",
+	}}
+	releaseRepo := newReleaseTestReleaseRepo()
+	deployer := &stubDeployer{}
+
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "feature-x", // 无前缀，应 reject
+		ImageTag: "1.0.0.1",
+	})
+
+	if err == nil {
+		t.Fatal("expected lane validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "lane") {
+		t.Fatalf("error should mention 'lane', got: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AcceptsValidLanes(t *testing.T) {
+	cases := []string{"prod", "blue", "coe-test-1", "ppe-canary"}
+	for _, lane := range cases {
+		t.Run(lane, func(t *testing.T) {
+			appRepo := &stubAppRepo{app: &domain.App{
+				Name:          "agent-service",
+				ImageRepoName: "agent-service",
+				Port:          8080,
+			}}
+			imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
+				Name:     "agent-service",
+				Registry: "harbor.local:30002/inner-bot/agent-service",
+			}}
+			releaseRepo := newReleaseTestReleaseRepo()
+			deployer := &stubDeployer{}
+
+			svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
+
+			_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+				AppName:  "agent-service",
+				Lane:     lane,
+				ImageTag: "1.0.0.1",
+			})
+			if err != nil && strings.Contains(err.Error(), "lane") {
+				t.Fatalf("lane %q should pass lane validation but got: %v", lane, err)
+			}
+		})
+	}
+}
+
 func TestGetReleaseStatus_NotFound(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
-	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer, nil)
+	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	_, err := svc.GetReleaseStatus(context.Background(), "nonexistent")
 	if !errors.Is(err, domain.ErrReleaseNotFound) {

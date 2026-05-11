@@ -78,7 +78,9 @@ func main() {
 	buildSvc := service.NewBuildService(imageRepoRepo, buildRepo, buildExecutor, lokiClient)
 	configBundleSvc := service.NewConfigBundleService(configBundleRepo, appRepo, releaseRepo)
 	dynamicConfigSvc := service.NewDynamicConfigService(dynamicConfigRepo)
-	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer, configBundleSvc)
+	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer, configBundleSvc, service.ReleaseServiceConfig{
+		LegacyLaneWhitelist: cfg.LegacyLaneWhitelist,
+	})
 	logSvc := service.NewLogService(appRepo, lokiClient, cfg.DeployNamespace)
 	pipelineSvc := service.NewPipelineService(ciConfigRepo, pipelineRunRepo, testExecutor, buildSvc, releaseSvc, appRepo, imageRepoRepo, lokiClient, cfg.CINamespace)
 
