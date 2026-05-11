@@ -14,7 +14,7 @@ docker compose up -d chiwei-test-postgres
 
 ```bash
 docker exec chiwei-test-postgres pg_isready -U chiwei_test -d chiwei_test
-# 期望: localhost:5432 - accepting connections
+# 期望: /var/run/postgresql:5432 - accepting connections
 
 docker exec chiwei-test-postgres psql -U chiwei_test -d chiwei_test -c '\dt'
 # 期望: Did not find any relations.
@@ -23,6 +23,7 @@ docker exec chiwei-test-postgres psql -U chiwei_test -d chiwei_test -c '\dt'
 ## 销毁
 
 ```bash
-docker compose down chiwei-test-postgres
+docker compose stop chiwei-test-postgres
+docker compose rm -f chiwei-test-postgres
 docker volume rm chiwei_test_pg_data  # 慎用，会丢测试数据
 ```
