@@ -10,6 +10,64 @@ import (
 	"github.com/chiwei-platform/paas-engine/internal/port"
 )
 
+// newReleaseSvcWithBundles 构造带 configBundleSvc 的 ReleaseService，供 RequiredKeys 校验测试使用。
+func newReleaseSvcWithBundles(t *testing.T, apps []*domain.App, bundles []*domain.ConfigBundle) *ReleaseService {
+	t.Helper()
+
+	appRepo := &multiAppRepo{byName: make(map[string]*domain.App)}
+	for _, a := range apps {
+		appRepo.byName[a.Name] = a
+	}
+
+	bundleRepo := newStubConfigBundleRepo()
+	for _, b := range bundles {
+		_ = bundleRepo.Save(context.Background(), b)
+	}
+
+	configBundleSvc := NewConfigBundleService(bundleRepo, appRepo, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+
+	return NewReleaseService(
+		appRepo,
+		&stubImageRepoRepo{repo: &domain.ImageRepo{Name: "agent-service", Registry: "harbor.local/inner-bot/agent-service"}},
+		&stubBuildRepo{},
+		newReleaseTestReleaseRepo(),
+		&stubDeployer{},
+		configBundleSvc,
+		ReleaseServiceConfig{},
+	)
+}
+
+// multiAppRepo is a stub AppRepository that returns apps by name from a map.
+type multiAppRepo struct {
+	byName map[string]*domain.App
+}
+
+func (r *multiAppRepo) Save(_ context.Context, app *domain.App) error {
+	r.byName[app.Name] = app
+	return nil
+}
+func (r *multiAppRepo) Update(_ context.Context, app *domain.App) error {
+	r.byName[app.Name] = app
+	return nil
+}
+func (r *multiAppRepo) Delete(_ context.Context, name string) error {
+	delete(r.byName, name)
+	return nil
+}
+func (r *multiAppRepo) FindAll(_ context.Context) ([]*domain.App, error) {
+	result := make([]*domain.App, 0, len(r.byName))
+	for _, a := range r.byName {
+		result = append(result, a)
+	}
+	return result, nil
+}
+func (r *multiAppRepo) FindByName(_ context.Context, name string) (*domain.App, error) {
+	if a, ok := r.byName[name]; ok {
+		return a, nil
+	}
+	return nil, domain.ErrNotFound
+}
+
 // --- stubs for release tests ---
 
 type releaseTestReleaseRepo struct {
@@ -244,5 +302,51 @@ func TestGetReleaseStatus_NotFound(t *testing.T) {
 	_, err := svc.GetReleaseStatus(context.Background(), "nonexistent")
 	if !errors.Is(err, domain.ErrReleaseNotFound) {
 		t.Errorf("expected ErrReleaseNotFound, got %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_RejectsCoeWithMissingRequiredKey(t *testing.T) {
+	bundle := &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres", "POSTGRES_DB": "chiwei"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "test-pg"}, // POSTGRES_DB 漏了
+		},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
+	}
+	app := &domain.App{Name: "agent-service", ImageRepoName: "agent-service", Port: 8000, ConfigBundles: []string{"pg-main"}}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, []*domain.ConfigBundle{bundle})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err == nil {
+		t.Fatal("expected reject for missing RequiredKey")
+	}
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("error must wrap ErrInvalidInput: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
+	// prod lane 不触发 coe RequiredKeys 校验
+	bundle := &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
+	}
+	app := &domain.App{Name: "agent-service", ImageRepoName: "agent-service", Port: 8000, ConfigBundles: []string{"pg-main"}}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, []*domain.ConfigBundle{bundle})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "prod",
+		ImageTag: "1.0.0",
+	})
+	// prod 泳道不应该触发 coe RequiredKeys 校验
+	if err != nil && (strings.Contains(err.Error(), "RequiredKeys") || strings.Contains(err.Error(), "ClassOverrides")) {
+		t.Fatalf("prod lane should not trigger coe RequiredKeys check: %v", err)
 	}
 }

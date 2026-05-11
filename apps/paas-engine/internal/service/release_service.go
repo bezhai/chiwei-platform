@@ -142,6 +142,21 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 	}
 	release.DeployName = release.ResourceName()
 
+	// RequiredKeys 校验：根据 lane class 强制完整 override
+	// spec: docs/superpowers/specs/2026-05-11-dev-workflow-v2-phase-2-design.md §Fail-closed 部署校验
+	if s.configBundleSvc != nil && len(app.ConfigBundles) > 0 {
+		class, classErr := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		if classErr == nil {
+			bundles, bErr := s.configBundleSvc.GetBundlesForApp(ctx, app)
+			if bErr != nil {
+				return nil, bErr
+			}
+			if vErr := ValidateRequiredKeys(bundles, class.String()); vErr != nil {
+				return nil, fmt.Errorf("release create rejected: %w", vErr)
+			}
+		}
+	}
+
 	// Resolve bundle envs
 	var bundleEnvs map[string]string
 	if s.configBundleSvc != nil && len(app.ConfigBundles) > 0 {
