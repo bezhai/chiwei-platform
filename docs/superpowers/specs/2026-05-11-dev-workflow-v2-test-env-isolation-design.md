@@ -33,7 +33,7 @@ lane 注册时 paas-engine 强制校验前缀决定其类别：
 K8s 集群本身共享，但业务运行时碰到的所有资源都跟 prod 物理隔离：
 
 - **PG**：独立 docker 容器（`chiwei-test-postgres`）跑在 cpu1，独立卷、独立端口、独立监控。**不共享 prod PG 实例**——契约测试可能制造大事务 / 大 WAL / 大批量临时文件 / autovacuum 风暴 / 磁盘打满，这些是实例级故障，schema 级隔离（role / connection quota / database 隔离）兜不住。codex 在 review 中明确戳穿这点：PG 没有 per-database 磁盘配额这个原生能力，WAL 和 temp file 是实例级共享。
-- **RabbitMQ**：同实例新建 `test_vhost`。vhost 级隔离对 MQ 已经够：队列、exchange、user permission、DLX policy、connection 限制全部 vhost 级，互不影响 prod。
+- **RabbitMQ**：独立 docker 容器（`chiwei-test-rabbitmq`）跑在 cpu1，独立卷、独立端口、独立监控。**不共享 prod RabbitMQ 实例**——同 PG 一样的实例级故障逻辑：memory watermark 触发的 publish block、磁盘 alarm、connection 数上限、erlang process 上限、file descriptor 耗尽都是实例级，跨 vhost 共享。契约测试可能制造大消息 / 大 backlog / connection 风暴这些场景，vhost 级隔离兜不住。
 - **Redis**：独立 redis 实例。不用 `select db number` —— Redis 多 db 是历史遗留 feature，client 支持参差、Redis Cluster 完全不支持、监控统计混在一起，作者自己说不推荐。独立实例代价跟 docker run 一样小。
 - **K8s namespace**：`chiwei-test` ns + ResourceQuota 限 CPU/内存防 test 抢 prod 资源 + NetworkPolicy 防跨 ns 误访问。
 - **飞书入口**：写 `mock-feishu` service 跑在 `chiwei-test` ns，提供假的 webhook 端点和假的 send-message 端点。lark-proxy 在 coe-* lane 收到 webhook 时派到 mock-feishu 而不是真飞书。
@@ -64,11 +64,15 @@ lane 注册和 deploy 两个时机：
 
 业务代码完全无感、只读 dynamic config 派出来的连接串和 endpoint。
 
+**翻译层自身 fail-closed 红线**：deploy 前 paas-engine 必须校验派给 coe-* lane 的所有 dynamic config 不含任何 prod 资源标识——包括 prod PG/MQ/Redis 的 hostname、port、role、prod 飞书 endpoint、prod 外部 API endpoint、prod secret。含任何一项就 reject 部署。这是 lane 命名 fail-closed 之外的第二层防御——lane 名校验过了不代表翻译层不会因 bug / 漏字段派出 prod 连接串，那样业务 SDK 拿到 prod URL 就直接打 prod，是单点漏。
+
 ### 上线门禁——framework 契约测试
 
 光有独立测试环境不够，还得有**强制使用**机制——否则 framework bug 还是会被绕过测试直接合码。
 
 每个 coe-* lane 部署完成后，paas-engine 必须触发一组 framework 契约测试套件，覆盖完整 dataflow 执行链路：部署 → 真触发 → 状态推进 → 失败回传 → 清理。**未通过则 release 不算成功**，进而 ship 流程拦住合码。
+
+**测试结果必须绑 release artifact**：契约测试结果记录的 key 是 `(commit_sha, image_digest)`，ship 时 paas-engine 校验当前要 release 的 image digest 是否有 PASS 记录，否则 reject。否则 ship 可能用上一次 PASS 结果放过未测过的新版本——改了代码、build 新 image，但 lane 上一次跑过测试的 PASS 标记还在、ship 看一眼就放过。
 
 契约测试覆盖 framework 容易踩雷的几类：
 
@@ -121,3 +125,5 @@ A：用户明确选 mock 路线。理由：(1) 测试环境聚焦内部基建，
 第一轮 codex 给 3 必改：(a) 隔离基建只解决"安全测"没解决"framework bug 必被测到"——必须有契约测试上线门禁；(b) PG 同实例多 database 隔离不够，权限/quota/磁盘/锁等待/扩展全局配置都会传导，建议独立 PG；(c) lane 前缀 fail-open 危险，无前缀默认 prod 类等于"误命名静默打 prod"。
 
 第二轮 Claude 接受 (a)(c)，反驳 (b)（业务量小论据）。codex 推翻反驳：契约测试自身就可能制造大事务/大 WAL/大磁盘，role+quota 是 schema 级 / 兜不住实例级，且 PG 没有 per-database 磁盘配额原生能力。Claude 接受、改成独立 PG docker 容器。同时 codex 第二轮新追加 3 建议（契约测试覆盖完整链路、统一资源熔断、mock 契约漂移检测从 sub-spec 升级），全部并入。
+
+第三轮（spec 落盘后 final pass）codex 又抓 3 必改：(a) 契约测试结果必须绑 commit/image digest，否则 ship 可能用旧绿结果放过未测版本；(b) dynamic config 翻译层自身要 fail-closed 校验，部署前拒绝任何 prod 资源标识，否则翻译层 bug 是单点漏；(c) RabbitMQ 仅 vhost 隔离跟 PG 同实例同问题，spec 内部不一致——memory watermark / disk alarm / connection 风暴是实例级。Claude 全接受：契约测试加 artifact 绑定、翻译层加 fail-closed 校验、RabbitMQ 改独立实例。
