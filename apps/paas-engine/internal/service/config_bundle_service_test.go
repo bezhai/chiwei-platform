@@ -85,14 +85,14 @@ func (r *allAppsStubRepo) FindByName(_ context.Context, name string) (*domain.Ap
 // --- helpers ---
 
 func newConfigBundleService(bundleRepo *stubConfigBundleRepo, appRepo *stubAppRepo, releaseRepo *releaseTestReleaseRepo) *ConfigBundleService {
-	return NewConfigBundleService(bundleRepo, appRepo, releaseRepo)
+	return NewConfigBundleService(bundleRepo, appRepo, releaseRepo, ConfigBundleServiceConfig{})
 }
 
 // --- tests ---
 
 func TestCreateConfigBundle_Success(t *testing.T) {
 	bundleRepo := newStubConfigBundleRepo()
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.CreateBundle(context.Background(), CreateBundleRequest{
 		Name:        "pg-main",
@@ -115,7 +115,7 @@ func TestCreateConfigBundle_Success(t *testing.T) {
 
 func TestCreateConfigBundle_InvalidName(t *testing.T) {
 	bundleRepo := newStubConfigBundleRepo()
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	_, err := svc.CreateBundle(context.Background(), CreateBundleRequest{
 		Name: "INVALID_NAME",
@@ -127,7 +127,7 @@ func TestCreateConfigBundle_InvalidName(t *testing.T) {
 
 func TestCreateConfigBundle_Duplicate(t *testing.T) {
 	bundleRepo := newStubConfigBundleRepo()
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	_, err := svc.CreateBundle(context.Background(), CreateBundleRequest{Name: "pg-main"})
 	if err != nil {
@@ -152,7 +152,7 @@ func TestDeleteConfigBundle_ReferencedByApp(t *testing.T) {
 		{Name: "my-app", ConfigBundles: []string{"pg-main"}},
 	}}
 
-	svc := NewConfigBundleService(bundleRepo, appRepo, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, appRepo, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	if err := svc.DeleteBundle(context.Background(), "pg-main"); !errors.Is(err, domain.ErrCannotDelete) {
 		t.Errorf("expected ErrCannotDelete, got %v", err)
@@ -165,7 +165,7 @@ func TestSetKeys_MergesWithExisting(t *testing.T) {
 		Name: "pg-main",
 		Keys: map[string]string{"PG_HOST": "localhost"},
 	}
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.SetKeys(context.Background(), "pg-main", []byte(`{"PG_PORT":"5432"}`))
 	if err != nil {
@@ -185,7 +185,7 @@ func TestSetKeys_DeleteKeyWithNull(t *testing.T) {
 		Name: "pg-main",
 		Keys: map[string]string{"PG_HOST": "localhost", "PG_PORT": "5432"},
 	}
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.SetKeys(context.Background(), "pg-main", []byte(`{"PG_PORT":null}`))
 	if err != nil {
@@ -208,7 +208,7 @@ func TestDeleteKey_AlsoRemovesFromLaneOverrides(t *testing.T) {
 			"dev": {"PG_PORT": "5433", "PG_HOST": "dev-db"},
 		},
 	}
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.DeleteKey(context.Background(), "pg-main", "PG_PORT")
 	if err != nil {
@@ -234,7 +234,7 @@ func TestSetLaneOverrides_Success(t *testing.T) {
 		Name: "pg-main",
 		Keys: map[string]string{"PG_HOST": "localhost"},
 	}
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.SetLaneOverrides(context.Background(), "pg-main", "dev", []byte(`{"PG_HOST":"dev-db"}`))
 	if err != nil {
@@ -251,7 +251,7 @@ func TestGenerateKey_CreatesRandomValue(t *testing.T) {
 		Name: "pg-main",
 		Keys: map[string]string{},
 	}
-	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo())
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
 
 	bundle, err := svc.GenerateKey(context.Background(), "pg-main", "SECRET_KEY", 32)
 	if err != nil {
@@ -264,6 +264,109 @@ func TestGenerateKey_CreatesRandomValue(t *testing.T) {
 	// 32 bytes hex encoded = 64 chars
 	if len(val) != 64 {
 		t.Errorf("generated key length = %d, want 64 (hex of 32 bytes)", len(val))
+	}
+}
+
+// newSvcWithBundles constructs a ConfigBundleService with a pre-seeded stub bundle repo.
+func newSvcWithBundles(t *testing.T, bundles []*domain.ConfigBundle) *ConfigBundleService {
+	t.Helper()
+	bundleRepo := newStubConfigBundleRepo()
+	for _, b := range bundles {
+		bundleRepo.bundles[b.Name] = b
+	}
+	return NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+}
+
+func TestResolveBundleEnvs_ClassOverridesAppliesAfterBaseline(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres", "POSTGRES_DB": "chiwei"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "chiwei-test-postgres"},
+		},
+	}}
+	app := &domain.App{Name: "agent-service", ConfigBundles: []string{"pg-main"}}
+	svc := newSvcWithBundles(t, bundles)
+
+	envs, err := svc.ResolveBundleEnvs(context.Background(), app, "coe-foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envs["POSTGRES_HOST"] != "chiwei-test-postgres" {
+		t.Fatalf("class override not applied: HOST=%q", envs["POSTGRES_HOST"])
+	}
+	if envs["POSTGRES_DB"] != "chiwei" {
+		t.Fatalf("baseline POSTGRES_DB lost: %q", envs["POSTGRES_DB"])
+	}
+}
+
+func TestResolveBundleEnvs_LaneOverrideBeatsClassOverride(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "chiwei-test-postgres"},
+		},
+		LaneOverrides: map[string]map[string]string{
+			"coe-foo": {"POSTGRES_HOST": "coe-foo-special"},
+		},
+	}}
+	app := &domain.App{Name: "agent-service", ConfigBundles: []string{"pg-main"}}
+	svc := newSvcWithBundles(t, bundles)
+
+	envs, _ := svc.ResolveBundleEnvs(context.Background(), app, "coe-foo")
+	if envs["POSTGRES_HOST"] != "coe-foo-special" {
+		t.Fatalf("lane override should beat class: HOST=%q", envs["POSTGRES_HOST"])
+	}
+}
+
+func TestResolveBundleEnvs_ProdLaneNoClassOverride(t *testing.T) {
+	bundles := []*domain.ConfigBundle{{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "chiwei-test-postgres"},
+		},
+	}}
+	app := &domain.App{Name: "agent-service", ConfigBundles: []string{"pg-main"}}
+	svc := newSvcWithBundles(t, bundles)
+
+	envs, _ := svc.ResolveBundleEnvs(context.Background(), app, "prod")
+	if envs["POSTGRES_HOST"] != "postgres" {
+		t.Fatalf("prod should get baseline: HOST=%q", envs["POSTGRES_HOST"])
+	}
+}
+
+func TestResolveConfig_ClassOverrideHasCorrectSource(t *testing.T) {
+	bundleRepo := newStubConfigBundleRepo()
+	bundleRepo.bundles["pg-main"] = &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "chiwei-test-postgres"},
+		},
+	}
+	appRepo := &stubAppRepo{
+		app: &domain.App{
+			Name:          "agent-service",
+			ConfigBundles: []string{"pg-main"},
+		},
+	}
+	svc := NewConfigBundleService(bundleRepo, appRepo, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+
+	resolved, err := svc.ResolveConfig(context.Background(), "agent-service", "coe-foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := resolved["POSTGRES_HOST"]
+	if !ok {
+		t.Fatal("POSTGRES_HOST not found in resolved config")
+	}
+	if entry.Source != "pg-main[class:coe]" {
+		t.Fatalf("source = %q, want pg-main[class:coe]", entry.Source)
+	}
+	if entry.Value != "chiwei-test-postgres" {
+		t.Fatalf("value = %q, want chiwei-test-postgres", entry.Value)
 	}
 }
 
@@ -299,7 +402,7 @@ func TestResolveConfig_FullMerge(t *testing.T) {
 		Version: "1.0.0",
 	})
 
-	svc := NewConfigBundleService(bundleRepo, appRepo, releaseRepo)
+	svc := NewConfigBundleService(bundleRepo, appRepo, releaseRepo, ConfigBundleServiceConfig{})
 
 	result, err := svc.ResolveConfig(context.Background(), "my-app", "dev")
 	if err != nil {

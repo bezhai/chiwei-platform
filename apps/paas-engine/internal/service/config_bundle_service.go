@@ -17,11 +17,17 @@ type ResolvedConfigEntry struct {
 	Source string `json:"source"`
 }
 
+// ConfigBundleServiceConfig 持有 ConfigBundleService 的配置。
+type ConfigBundleServiceConfig struct {
+	LegacyLaneWhitelist []string
+}
+
 // ConfigBundleService 提供 ConfigBundle 的 CRUD、Key 管理、泳道覆盖和配置解析。
 type ConfigBundleService struct {
 	bundleRepo  port.ConfigBundleRepository
 	appRepo     port.AppRepository
 	releaseRepo port.ReleaseRepository
+	cfg         ConfigBundleServiceConfig
 }
 
 // NewConfigBundleService 创建 ConfigBundleService 实例。
@@ -29,11 +35,13 @@ func NewConfigBundleService(
 	bundleRepo port.ConfigBundleRepository,
 	appRepo port.AppRepository,
 	releaseRepo port.ReleaseRepository,
+	cfg ConfigBundleServiceConfig,
 ) *ConfigBundleService {
 	return &ConfigBundleService{
 		bundleRepo:  bundleRepo,
 		appRepo:     appRepo,
 		releaseRepo: releaseRepo,
+		cfg:         cfg,
 	}
 }
 
@@ -288,16 +296,25 @@ func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane s
 
 	result := make(map[string]ResolvedConfigEntry)
 
-	// 1. Bundle baseline + lane override
+	// 1. Bundle baseline + class override + lane override
 	if len(app.ConfigBundles) > 0 {
 		bundles, err := s.bundleRepo.FindByNames(ctx, app.ConfigBundles)
 		if err != nil {
 			return nil, err
 		}
+		// 用 ClassifyLane 确定 lane class；error 时得到 LaneClassUnknown（"unknown"），class override 不命中，fail-safe。
+		class, _ := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		classKey := class.String()
 		for _, bundle := range bundles {
 			// baseline
 			for k, v := range bundle.Keys {
 				result[k] = ResolvedConfigEntry{Value: v, Source: bundle.Name}
+			}
+			// class override
+			if classOverrides, ok := bundle.ClassOverrides[classKey]; ok {
+				for k, v := range classOverrides {
+					result[k] = ResolvedConfigEntry{Value: v, Source: bundle.Name + "[class:" + classKey + "]"}
+				}
 			}
 			// lane override
 			if overrides, ok := bundle.LaneOverrides[lane]; ok {
@@ -334,7 +351,7 @@ func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane s
 	return result, nil
 }
 
-// ResolveBundleEnvs 仅解析 bundle 层（baseline + lane override），供 deployer 使用。
+// ResolveBundleEnvs 仅解析 bundle 层（baseline → class override → lane override），供 deployer 使用。
 // 如果 App 没有 ConfigBundles，返回 nil。
 func (s *ConfigBundleService) ResolveBundleEnvs(ctx context.Context, app *domain.App, lane string) (map[string]string, error) {
 	if len(app.ConfigBundles) == 0 {
@@ -346,13 +363,25 @@ func (s *ConfigBundleService) ResolveBundleEnvs(ctx context.Context, app *domain
 		return nil, err
 	}
 
+	// 用 ClassifyLane 确定 lane class；error 时得到 LaneClassUnknown（"unknown"），class override 不命中，fail-safe。
+	class, _ := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+	classKey := class.String()
+
 	result := make(map[string]string)
 	for _, bundle := range bundles {
+		// baseline
 		for k, v := range bundle.Keys {
 			result[k] = v
 		}
-		if overrides, ok := bundle.LaneOverrides[lane]; ok {
-			for k, v := range overrides {
+		// class override
+		if classOverrides, ok := bundle.ClassOverrides[classKey]; ok {
+			for k, v := range classOverrides {
+				result[k] = v
+			}
+		}
+		// lane override
+		if laneOverrides, ok := bundle.LaneOverrides[lane]; ok {
+			for k, v := range laneOverrides {
 				result[k] = v
 			}
 		}
