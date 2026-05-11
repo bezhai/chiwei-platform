@@ -110,23 +110,13 @@ func bundleToModel(b *domain.ConfigBundle) (*ConfigBundleModel, error) {
 		return nil, fmt.Errorf("marshal RequiredKeys: %w", err)
 	}
 
-	// Preserve empty maps as "{}" instead of "null"
-	classOverridesStr := string(classOverridesJSON)
-	if classOverridesStr == "null" {
-		classOverridesStr = "{}"
-	}
-	requiredKeysStr := string(requiredKeysJSON)
-	if requiredKeysStr == "null" {
-		requiredKeysStr = "{}"
-	}
-
 	return &ConfigBundleModel{
 		Name:           b.Name,
 		Description:    b.Description,
 		Keys:           string(keysJSON),
 		LaneOverrides:  string(laneOverridesJSON),
-		ClassOverrides: classOverridesStr,
-		RequiredKeys:   requiredKeysStr,
+		ClassOverrides: string(classOverridesJSON),
+		RequiredKeys:   string(requiredKeysJSON),
 		CreatedAt:      b.CreatedAt,
 		UpdatedAt:      b.UpdatedAt,
 	}, nil
@@ -134,25 +124,25 @@ func bundleToModel(b *domain.ConfigBundle) (*ConfigBundleModel, error) {
 
 func modelToBundle(m *ConfigBundleModel) (*domain.ConfigBundle, error) {
 	keys := make(map[string]string)
-	if m.Keys != "" {
+	if m.Keys != "" && m.Keys != "null" {
 		if err := json.Unmarshal([]byte(m.Keys), &keys); err != nil {
 			return nil, err
 		}
 	}
 	laneOverrides := make(map[string]map[string]string)
-	if m.LaneOverrides != "" {
+	if m.LaneOverrides != "" && m.LaneOverrides != "null" {
 		if err := json.Unmarshal([]byte(m.LaneOverrides), &laneOverrides); err != nil {
 			return nil, err
 		}
 	}
 	classOverrides := make(map[string]map[string]string)
-	if m.ClassOverrides != "" {
+	if m.ClassOverrides != "" && m.ClassOverrides != "null" {
 		if err := json.Unmarshal([]byte(m.ClassOverrides), &classOverrides); err != nil {
 			return nil, fmt.Errorf("unmarshal ClassOverrides: %w", err)
 		}
 	}
 	requiredKeys := make(map[string][]string)
-	if m.RequiredKeys != "" {
+	if m.RequiredKeys != "" && m.RequiredKeys != "null" {
 		if err := json.Unmarshal([]byte(m.RequiredKeys), &requiredKeys); err != nil {
 			return nil, fmt.Errorf("unmarshal RequiredKeys: %w", err)
 		}

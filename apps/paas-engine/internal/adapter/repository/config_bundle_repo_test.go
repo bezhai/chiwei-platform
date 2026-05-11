@@ -157,33 +157,35 @@ func TestRoundTrip_ComplexClassOverridesAndRequiredKeys(t *testing.T) {
 	}
 }
 
-// TestEmptyClassOverridesAndRequiredKeys tests with empty/nil values.
-func TestEmptyClassOverridesAndRequiredKeys(t *testing.T) {
+// TestRoundTrip_EmptyClassOverridesAndRequiredKeys tests that nil/empty maps
+// remain non-nil empty maps after a full round-trip serialization.
+func TestRoundTrip_EmptyClassOverridesAndRequiredKeys(t *testing.T) {
 	bundle := &domain.ConfigBundle{
 		Name: "simple-bundle",
 		Keys: map[string]string{"KEY": "value"},
-		// ClassOverrides and RequiredKeys intentionally empty
+		// ClassOverrides and RequiredKeys intentionally nil
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
+	// Serialize to model
 	model, err := bundleToModel(bundle)
 	if err != nil {
 		t.Fatalf("bundleToModel failed: %v", err)
 	}
 
-	// Empty maps should serialize to "{}" or ""
+	// Deserialize back to bundle
 	deserialized, err := modelToBundle(model)
 	if err != nil {
 		t.Fatalf("modelToBundle failed: %v", err)
 	}
 
-	// Should have empty maps, not nil
+	// Round-trip should guarantee non-nil empty maps for all blob fields
 	if deserialized.ClassOverrides == nil {
-		t.Fatal("ClassOverrides should be empty map, not nil")
+		t.Fatal("ClassOverrides should be empty map, not nil, after round-trip")
 	}
 	if deserialized.RequiredKeys == nil {
-		t.Fatal("RequiredKeys should be empty map, not nil")
+		t.Fatal("RequiredKeys should be empty map, not nil, after round-trip")
 	}
 	if len(deserialized.ClassOverrides) != 0 {
 		t.Fatalf("ClassOverrides should be empty, got %d items", len(deserialized.ClassOverrides))
