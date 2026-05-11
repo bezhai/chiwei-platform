@@ -12,6 +12,7 @@ from inner_shared.middlewares.context_propagation import (
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
+from app.data.bootstrap import ensure_business_schema
 from app.infra.config import settings
 from app.infra.qdrant import init_collections
 from app.runtime.outbox_dispatcher import dispatcher_loop
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle — init resources, start consumers, teardown."""
+    # Phase 2: ensure business schema exists before any downstream operation
+    # (Qdrant, RabbitMQ topology, sources, consumers)
+    await ensure_business_schema()
+
     await init_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 
