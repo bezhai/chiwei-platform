@@ -287,7 +287,7 @@ func (s *ConfigBundleService) DeleteLaneOverrideKey(ctx context.Context, bundleN
 }
 
 // ResolveConfig 解析 App 在指定泳道的完整配置，按层次合并并标注来源。
-// 优先级（低→高）：bundle baseline → bundle lane override → app.Envs → release.Envs → auto-injected
+// 优先级（低→高）：bundle baseline → bundle class override → bundle lane override → app.Envs → release.Envs → auto-injected
 func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane string) (map[string]ResolvedConfigEntry, error) {
 	app, err := s.appRepo.FindByName(ctx, appName)
 	if err != nil {
