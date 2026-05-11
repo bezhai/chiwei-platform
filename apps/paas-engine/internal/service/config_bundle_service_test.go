@@ -546,3 +546,49 @@ func TestGetBundlesForApp_EmptyConfigBundles_ReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }
+
+// --- Phase 2 field tests ---
+
+func TestUpdateBundle_AcceptsClassOverrides(t *testing.T) {
+	bundleRepo := newStubConfigBundleRepo()
+	bundleRepo.bundles["pg-main"] = &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"PG_HOST": "localhost"},
+	}
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+
+	_, err := svc.UpdateBundle(context.Background(), "pg-main", []byte(`{"class_overrides":{"coe":{"K":"V"}}}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fetched, err := bundleRepo.FindByName(context.Background(), "pg-main")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.ClassOverrides["coe"]["K"] != "V" {
+		t.Errorf("ClassOverrides[coe][K] = %q, want %q", fetched.ClassOverrides["coe"]["K"], "V")
+	}
+}
+
+func TestUpdateBundle_AcceptsRequiredKeys(t *testing.T) {
+	bundleRepo := newStubConfigBundleRepo()
+	bundleRepo.bundles["pg-main"] = &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"PG_HOST": "localhost"},
+	}
+	svc := NewConfigBundleService(bundleRepo, &stubAppRepo{}, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+
+	_, err := svc.UpdateBundle(context.Background(), "pg-main", []byte(`{"required_keys":{"coe":["K1","K2"]}}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fetched, err := bundleRepo.FindByName(context.Background(), "pg-main")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if len(fetched.RequiredKeys["coe"]) != 2 || fetched.RequiredKeys["coe"][0] != "K1" || fetched.RequiredKeys["coe"][1] != "K2" {
+		t.Errorf("RequiredKeys[coe] = %v, want [K1 K2]", fetched.RequiredKeys["coe"])
+	}
+}

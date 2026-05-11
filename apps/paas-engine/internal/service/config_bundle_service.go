@@ -123,6 +123,14 @@ func (s *ConfigBundleService) UpdateBundle(ctx context.Context, name string, bod
 		return nil, domain.ErrInvalidInput
 	}
 
+	if err := ApplyField(fields, "class_overrides", &bundle.ClassOverrides); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	if err := ApplyField(fields, "required_keys", &bundle.RequiredKeys); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
 	bundle.UpdatedAt = time.Now()
 	if err := s.bundleRepo.Update(ctx, bundle); err != nil {
 		return nil, err
