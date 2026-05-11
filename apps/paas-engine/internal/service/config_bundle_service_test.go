@@ -82,12 +82,6 @@ func (r *allAppsStubRepo) FindByName(_ context.Context, name string) (*domain.Ap
 	return nil, domain.ErrAppNotFound
 }
 
-// --- helpers ---
-
-func newConfigBundleService(bundleRepo *stubConfigBundleRepo, appRepo *stubAppRepo, releaseRepo *releaseTestReleaseRepo) *ConfigBundleService {
-	return NewConfigBundleService(bundleRepo, appRepo, releaseRepo, ConfigBundleServiceConfig{})
-}
-
 // --- tests ---
 
 func TestCreateConfigBundle_Success(t *testing.T) {
