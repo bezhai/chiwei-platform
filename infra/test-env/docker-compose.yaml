@@ -1,0 +1,23 @@
+version: "3.9"
+services:
+  chiwei-test-postgres:
+    image: postgres:16-alpine
+    container_name: chiwei-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chiwei_test
+      POSTGRES_USER: chiwei_test
+      POSTGRES_PASSWORD: ${CHIWEI_TEST_PG_PASSWORD:?password required}
+    ports:
+      - "5433:5432"  # prod PG 占 5432，test 用 5433
+    volumes:
+      - chiwei_test_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chiwei_test -d chiwei_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  chiwei_test_pg_data:
+    name: chiwei_test_pg_data
