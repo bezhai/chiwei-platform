@@ -36,9 +36,10 @@ def test_runtime_entry_main_calls_ensure_business_schema_before_runtime_run(monk
 
     monkeypatch.setenv("APP_NAME", "vectorize-worker")
 
-    async def mock_main_async():
-        # This will be called instead of the real _main_async
+    async def track_ensure_calls():
         call_order.append("ensure_business_schema")
+
+    async def track_run_calls():
         call_order.append("runtime_run")
 
     with patch("app.workers.runtime_entry.setup_logging"), \
@@ -50,16 +51,6 @@ def test_runtime_entry_main_calls_ensure_business_schema_before_runtime_run(monk
         mock_instance.run = AsyncMock()
         MockRuntime.return_value = mock_instance
 
-        # Track calls in the actual _main_async
-        original_ensure_called = []
-        original_run_called = []
-
-        async def track_ensure_calls():
-            original_ensure_called.append(True)
-
-        async def track_run_calls():
-            original_run_called.append(True)
-
         mock_ensure.side_effect = track_ensure_calls
         mock_instance.run.side_effect = track_run_calls
 
@@ -67,7 +58,7 @@ def test_runtime_entry_main_calls_ensure_business_schema_before_runtime_run(monk
 
         main()
 
-        # Verify ensure_business_schema was called
-        assert mock_ensure.called, "ensure_business_schema should be called"
-        # Verify Runtime.run() was called
-        assert mock_instance.run.called, "Runtime.run() should be called"
+        # Verify call order: ensure_business_schema must run before runtime.run()
+        assert call_order == ["ensure_business_schema", "runtime_run"], (
+            f"ensure_business_schema must be called before Runtime.run(); got {call_order}"
+        )
