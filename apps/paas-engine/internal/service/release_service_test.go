@@ -350,3 +350,65 @@ func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
 		t.Fatalf("prod lane should not trigger coe RequiredKeys check: %v", err)
 	}
 }
+
+func TestCreateOrUpdateRelease_RejectsLarkProxyToCoe(t *testing.T) {
+	app := &domain.App{
+		Name:               "lark-proxy",
+		ImageRepoName:      "lark-proxy",
+		Port:               3003,
+		AllowedLaneClasses: []string{"prod"},
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "lark-proxy",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err == nil {
+		t.Fatal("expected reject for lark-proxy to coe lane")
+	}
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("must wrap ErrInvalidInput: %v", err)
+	}
+	if !strings.Contains(err.Error(), "lark-proxy") || !strings.Contains(err.Error(), "coe") {
+		t.Fatalf("error must mention app and lane class: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AllowsLarkProxyToProd(t *testing.T) {
+	app := &domain.App{
+		Name:               "lark-proxy",
+		ImageRepoName:      "lark-proxy",
+		Port:               3003,
+		AllowedLaneClasses: []string{"prod"},
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "lark-proxy",
+		Lane:     "prod",
+		ImageTag: "1.0.0",
+	})
+	// 注意：可能因 build 不存在等其他原因报错，但不应该是 AllowedLaneClasses reject
+	if err != nil && strings.Contains(err.Error(), "AllowedLaneClasses") {
+		t.Fatalf("prod should not be rejected by AllowedLaneClasses: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AppWithoutAllowedLaneClasses_AllowsAll(t *testing.T) {
+	// 没设 AllowedLaneClasses（nil）= 全允许（向后兼容现有 App）
+	app := &domain.App{
+		Name:          "agent-service",
+		ImageRepoName: "agent-service",
+		Port:          8000,
+		// AllowedLaneClasses 不设
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err != nil && strings.Contains(err.Error(), "AllowedLaneClasses") {
+		t.Fatalf("nil AllowedLaneClasses should allow all: %v", err)
+	}
+}

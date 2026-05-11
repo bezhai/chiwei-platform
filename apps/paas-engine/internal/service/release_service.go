@@ -76,6 +76,28 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		return nil, err
 	}
 
+	// AllowedLaneClasses 校验：限制 App 只能部署到指定 lane class
+	// spec: docs/superpowers/specs/2026-05-11-dev-workflow-v2-phase-2-design.md §lark-proxy 部署门禁
+	if len(app.AllowedLaneClasses) > 0 {
+		class, classErr := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		if classErr == nil {
+			classKey := class.String()
+			allowed := false
+			for _, c := range app.AllowedLaneClasses {
+				if c == classKey {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf(
+					"%w: app %q only allowed in lane classes %v, lane %q is class %q (AllowedLaneClasses)",
+					domain.ErrInvalidInput, app.Name, app.AllowedLaneClasses, lane, classKey,
+				)
+			}
+		}
+	}
+
 	// 通过 App → ImageRepo 拼完整镜像地址
 	var fullImage string
 	if app.ImageRepoName != "" {
