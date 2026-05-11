@@ -5,11 +5,13 @@ import "time"
 // ConfigBundle 表示一组按基础设施实例分组的配置项。
 // 每个 key 是最终注入容器的环境变量名（如 PG_MAIN_HOST）。
 type ConfigBundle struct {
-	Name          string                       `json:"name"`
-	Description   string                       `json:"description,omitempty"`
-	Keys          map[string]string            `json:"keys,omitempty"`
-	LaneOverrides map[string]map[string]string `json:"lane_overrides,omitempty"`
-	ReferencedBy  []string                     `json:"referenced_by,omitempty"`
-	CreatedAt     time.Time                    `json:"created_at"`
-	UpdatedAt     time.Time                    `json:"updated_at"`
+	Name           string                       `json:"name"`
+	Description    string                       `json:"description,omitempty"`
+	Keys           map[string]string            `json:"keys,omitempty"`
+	ClassOverrides map[string]map[string]string `json:"class_overrides,omitempty"`
+	LaneOverrides  map[string]map[string]string `json:"lane_overrides,omitempty"`
+	RequiredKeys   map[string][]string          `json:"required_keys,omitempty"`
+	ReferencedBy   []string                     `json:"referenced_by,omitempty"`
+	CreatedAt      time.Time                    `json:"created_at"`
+	UpdatedAt      time.Time                    `json:"updated_at"`
 }
