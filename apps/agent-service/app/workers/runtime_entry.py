@@ -13,8 +13,20 @@ import os
 
 from inner_shared.logger import setup_logging
 
+from app.data.bootstrap import ensure_business_schema
 from app.runtime.bootstrap import load_dataflow_graph
 from app.runtime.engine import Runtime
+
+
+async def _main_async() -> None:
+    """Async entry point."""
+    # Phase 2: ensure business schema exists before any downstream operation
+    # (dataflow nodes, RabbitMQ topology, sources, consumers)
+    await ensure_business_schema()
+    load_dataflow_graph()
+    app_name = os.getenv("APP_NAME")
+    runtime = Runtime(app_name=app_name)
+    await runtime.run()
 
 
 def main() -> None:
@@ -30,8 +42,7 @@ def main() -> None:
             "(per-Deployment injection is owned by PaaS)"
         )
     setup_logging(log_dir="/logs/agent-service", log_file=f"{app_name}.log")
-    load_dataflow_graph()
-    asyncio.run(Runtime(app_name=app_name).run())
+    asyncio.run(_main_async())
 
 
 if __name__ == "__main__":
