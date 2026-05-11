@@ -18,6 +18,26 @@ services:
       timeout: 5s
       retries: 5
 
+  chiwei-test-rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: chiwei-test-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: chiwei_test
+      RABBITMQ_DEFAULT_PASS: ${CHIWEI_TEST_MQ_PASSWORD:?password required}
+    ports:
+      - "5673:5672"      # AMQP（prod 占 5672，test 用 5673）
+      - "15673:15672"    # Management UI
+    volumes:
+      - chiwei_test_mq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   chiwei_test_pg_data:
     name: chiwei_test_pg_data
+  chiwei_test_mq_data:
+    name: chiwei_test_mq_data
