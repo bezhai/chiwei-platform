@@ -1,6 +1,25 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestClassifyLane_ErrorWrapsInvalidInput(t *testing.T) {
+	// Reject 的 error 必须 wrap ErrInvalidInput，让 HTTP handler 自动归类成 400
+	cases := []string{"", "feature-x", "Coe-Foo", "coe-"}
+	for _, lane := range cases {
+		t.Run(lane, func(t *testing.T) {
+			_, err := ClassifyLane(lane, nil)
+			if err == nil {
+				t.Fatalf("expected error for lane %q", lane)
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("error must wrap ErrInvalidInput for HTTP 400 mapping, got: %v", err)
+			}
+		})
+	}
+}
 
 func TestClassifyLane(t *testing.T) {
 	cases := []struct {

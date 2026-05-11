@@ -43,7 +43,7 @@ var reservedNames = []string{"prod", "blue"}
 //   - 其他：返回 error，caller 必须 reject
 func ClassifyLane(lane string, whitelist []string) (LaneClass, error) {
 	if lane == "" {
-		return LaneClassUnknown, fmt.Errorf("lane name is empty")
+		return LaneClassUnknown, fmt.Errorf("%w: lane name is empty", ErrInvalidInput)
 	}
 	if slices.Contains(reservedNames, lane) {
 		return LaneClassProd, nil
@@ -58,7 +58,7 @@ func ClassifyLane(lane string, whitelist []string) (LaneClass, error) {
 		return LaneClassPpe, nil
 	}
 	return LaneClassUnknown, fmt.Errorf(
-		"lane %q rejected: must match prod | blue | coe-<name> | ppe-<name>; got no recognized prefix",
-		lane,
+		"%w: lane %q rejected: must match prod | blue | coe-<name> | ppe-<name>; got no recognized prefix",
+		ErrInvalidInput, lane,
 	)
 }
