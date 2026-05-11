@@ -19,7 +19,9 @@ services:
       retries: 5
 
   chiwei-test-rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    # 复用 prod 镜像（已预装 rabbitmq_delayed_message_exchange plugin），
+    # 否则业务 declare exchange type='x-delayed-message' 时 PRECONDITION_FAILED 启动 crash。
+    image: harbor.local:30002/inner-bot/rabbitmq:latest
     container_name: chiwei-test-rabbitmq
     restart: unless-stopped
     environment:
