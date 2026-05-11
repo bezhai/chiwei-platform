@@ -186,3 +186,19 @@ func TestUpdateApp_ConfigBundleNotFound(t *testing.T) {
 		t.Error("expected error for missing bundle")
 	}
 }
+
+func TestUpdateApp_AcceptsAllowedLaneClasses(t *testing.T) {
+	appRepo := &stubAppRepo{app: &domain.App{
+		Name: "myapp",
+	}}
+	svc := NewAppService(appRepo, &stubImageRepoRepo{}, &stubReleaseRepo{}, nil)
+
+	app, err := svc.UpdateApp(context.Background(), "myapp", []byte(`{"allowed_lane_classes":["prod"]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(app.AllowedLaneClasses) != 1 || app.AllowedLaneClasses[0] != "prod" {
+		t.Errorf("AllowedLaneClasses = %v, want [prod]", app.AllowedLaneClasses)
+	}
+}

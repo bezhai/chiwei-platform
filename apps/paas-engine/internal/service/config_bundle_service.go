@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -17,11 +18,17 @@ type ResolvedConfigEntry struct {
 	Source string `json:"source"`
 }
 
+// ConfigBundleServiceConfig 持有 ConfigBundleService 的配置。
+type ConfigBundleServiceConfig struct {
+	LegacyLaneWhitelist []string
+}
+
 // ConfigBundleService 提供 ConfigBundle 的 CRUD、Key 管理、泳道覆盖和配置解析。
 type ConfigBundleService struct {
 	bundleRepo  port.ConfigBundleRepository
 	appRepo     port.AppRepository
 	releaseRepo port.ReleaseRepository
+	cfg         ConfigBundleServiceConfig
 }
 
 // NewConfigBundleService 创建 ConfigBundleService 实例。
@@ -29,11 +36,13 @@ func NewConfigBundleService(
 	bundleRepo port.ConfigBundleRepository,
 	appRepo port.AppRepository,
 	releaseRepo port.ReleaseRepository,
+	cfg ConfigBundleServiceConfig,
 ) *ConfigBundleService {
 	return &ConfigBundleService{
 		bundleRepo:  bundleRepo,
 		appRepo:     appRepo,
 		releaseRepo: releaseRepo,
+		cfg:         cfg,
 	}
 }
 
@@ -111,6 +120,14 @@ func (s *ConfigBundleService) UpdateBundle(ctx context.Context, name string, bod
 
 	bundle.Keys, err = MergeEnvs(bundle.Keys, fields["keys"])
 	if err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	if err := ApplyField(fields, "class_overrides", &bundle.ClassOverrides); err != nil {
+		return nil, domain.ErrInvalidInput
+	}
+
+	if err := ApplyField(fields, "required_keys", &bundle.RequiredKeys); err != nil {
 		return nil, domain.ErrInvalidInput
 	}
 
@@ -279,7 +296,7 @@ func (s *ConfigBundleService) DeleteLaneOverrideKey(ctx context.Context, bundleN
 }
 
 // ResolveConfig 解析 App 在指定泳道的完整配置，按层次合并并标注来源。
-// 优先级（低→高）：bundle baseline → bundle lane override → app.Envs → release.Envs → auto-injected
+// 优先级（低→高）：bundle baseline → bundle class override → bundle lane override → app.Envs → release.Envs → auto-injected
 func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane string) (map[string]ResolvedConfigEntry, error) {
 	app, err := s.appRepo.FindByName(ctx, appName)
 	if err != nil {
@@ -288,16 +305,25 @@ func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane s
 
 	result := make(map[string]ResolvedConfigEntry)
 
-	// 1. Bundle baseline + lane override
+	// 1. Bundle baseline + class override + lane override
 	if len(app.ConfigBundles) > 0 {
 		bundles, err := s.bundleRepo.FindByNames(ctx, app.ConfigBundles)
 		if err != nil {
 			return nil, err
 		}
+		// 用 ClassifyLane 确定 lane class；error 时得到 LaneClassUnknown（"unknown"），class override 不命中，fail-safe。
+		class, _ := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		classKey := class.String()
 		for _, bundle := range bundles {
 			// baseline
 			for k, v := range bundle.Keys {
 				result[k] = ResolvedConfigEntry{Value: v, Source: bundle.Name}
+			}
+			// class override
+			if classOverrides, ok := bundle.ClassOverrides[classKey]; ok {
+				for k, v := range classOverrides {
+					result[k] = ResolvedConfigEntry{Value: v, Source: bundle.Name + "[class:" + classKey + "]"}
+				}
 			}
 			// lane override
 			if overrides, ok := bundle.LaneOverrides[lane]; ok {
@@ -334,7 +360,7 @@ func (s *ConfigBundleService) ResolveConfig(ctx context.Context, appName, lane s
 	return result, nil
 }
 
-// ResolveBundleEnvs 仅解析 bundle 层（baseline + lane override），供 deployer 使用。
+// ResolveBundleEnvs 仅解析 bundle 层（baseline → class override → lane override），供 deployer 使用。
 // 如果 App 没有 ConfigBundles，返回 nil。
 func (s *ConfigBundleService) ResolveBundleEnvs(ctx context.Context, app *domain.App, lane string) (map[string]string, error) {
 	if len(app.ConfigBundles) == 0 {
@@ -346,16 +372,60 @@ func (s *ConfigBundleService) ResolveBundleEnvs(ctx context.Context, app *domain
 		return nil, err
 	}
 
+	// 用 ClassifyLane 确定 lane class；error 时得到 LaneClassUnknown（"unknown"），class override 不命中，fail-safe。
+	class, _ := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+	classKey := class.String()
+
 	result := make(map[string]string)
 	for _, bundle := range bundles {
+		// baseline
 		for k, v := range bundle.Keys {
 			result[k] = v
 		}
-		if overrides, ok := bundle.LaneOverrides[lane]; ok {
-			for k, v := range overrides {
+		// class override
+		if classOverrides, ok := bundle.ClassOverrides[classKey]; ok {
+			for k, v := range classOverrides {
+				result[k] = v
+			}
+		}
+		// lane override
+		if laneOverrides, ok := bundle.LaneOverrides[lane]; ok {
+			for k, v := range laneOverrides {
 				result[k] = v
 			}
 		}
 	}
 	return result, nil
+}
+
+// ValidateRequiredKeys 校验 bundles 中标记 RequiredKeys[classKey] 的 key 都在 ClassOverrides[classKey] 里有非空值。
+// 任一 key 缺失或空值 → 返回 wrap ErrInvalidInput 的 error，明示 bundle + key。
+// 若所有 bundle 都没声明 RequiredKeys[classKey]，直接 pass（无校验对象）。
+func ValidateRequiredKeys(bundles []*domain.ConfigBundle, classKey string) error {
+	for _, bundle := range bundles {
+		required, ok := bundle.RequiredKeys[classKey]
+		if !ok || len(required) == 0 {
+			continue
+		}
+		overrides := bundle.ClassOverrides[classKey]
+		for _, key := range required {
+			val, present := overrides[key]
+			if !present || val == "" {
+				return fmt.Errorf(
+					"%w: bundle %q requires class %q to override key %q (currently missing or empty); operator must set ClassOverrides[%s][%s] before deploying %s lanes",
+					domain.ErrInvalidInput, bundle.Name, classKey, key, classKey, key, classKey,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// GetBundlesForApp 拿 app 引用的所有 bundle（含 RequiredKeys/ClassOverrides 字段）。
+// 用于 ReleaseService 在 deploy 前跑 ValidateRequiredKeys。
+func (s *ConfigBundleService) GetBundlesForApp(ctx context.Context, app *domain.App) ([]*domain.ConfigBundle, error) {
+	if len(app.ConfigBundles) == 0 {
+		return nil, nil
+	}
+	return s.bundleRepo.FindByNames(ctx, app.ConfigBundles)
 }

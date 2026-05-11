@@ -30,6 +30,10 @@ type Config struct {
 	CIGitRepo       string        // monorepo git URL for CI test jobs
 	GitHubToken     string        // GitHub PAT for polling branch commits
 	GitPollInterval time.Duration // git polling interval (default 60s)
+
+	// Lane 命名前缀强制校验的历史兼容白名单。CSV，例如 "dev,old-lane"。
+	// 命中即按 prod 类别处理。白名单有过期日期，过期清掉。
+	LegacyLaneWhitelist []string
 }
 
 func Load() *Config {
@@ -56,6 +60,8 @@ func Load() *Config {
 		CIGitRepo:       os.Getenv("CI_GIT_REPO"),
 		GitHubToken:     os.Getenv("GITHUB_TOKEN"),
 		GitPollInterval: parseDuration(os.Getenv("GIT_POLL_INTERVAL"), 60*time.Second),
+
+		LegacyLaneWhitelist: splitCSV(os.Getenv("LEGACY_LANE_WHITELIST")),
 	}
 }
 

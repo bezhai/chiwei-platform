@@ -13,6 +13,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// ReleaseServiceConfig 装载 release 流程的 runtime 策略，例如历史 lane 白名单。
+// 字段保持 minimal：每加一项都要有明确 spec 依据。
+type ReleaseServiceConfig struct {
+	// LegacyLaneWhitelist 是历史无前缀 lane 名（如 "dev"）的兼容白名单，
+	// 命中即按 prod 类别处理。白名单有过期日期，过期清掉。
+	LegacyLaneWhitelist []string
+}
+
 type ReleaseService struct {
 	appRepo         port.AppRepository
 	imageRepoRepo   port.ImageRepoRepository
@@ -20,6 +28,7 @@ type ReleaseService struct {
 	releaseRepo     port.ReleaseRepository
 	deployer        port.Deployer
 	configBundleSvc *ConfigBundleService
+	cfg             ReleaseServiceConfig
 }
 
 func NewReleaseService(
@@ -29,6 +38,7 @@ func NewReleaseService(
 	releaseRepo port.ReleaseRepository,
 	deployer port.Deployer,
 	configBundleSvc *ConfigBundleService,
+	cfg ReleaseServiceConfig,
 ) *ReleaseService {
 	return &ReleaseService{
 		appRepo:         appRepo,
@@ -37,6 +47,7 @@ func NewReleaseService(
 		releaseRepo:     releaseRepo,
 		deployer:        deployer,
 		configBundleSvc: configBundleSvc,
+		cfg:             cfg,
 	}
 }
 
@@ -50,9 +61,41 @@ type CreateReleaseRequest struct {
 }
 
 func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateReleaseRequest) (*domain.Release, error) {
+	// lane 命名前缀强制校验（fail-closed）
+	// spec: docs/superpowers/specs/2026-05-11-dev-workflow-v2-test-env-isolation-design.md §lane 分类用命名前缀
+	lane := req.Lane
+	if lane == "" {
+		lane = domain.DefaultLane
+	}
+	if _, err := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist); err != nil {
+		return nil, fmt.Errorf("release create rejected: %w", err)
+	}
+
 	app, err := s.appRepo.FindByName(ctx, req.AppName)
 	if err != nil {
 		return nil, err
+	}
+
+	// AllowedLaneClasses 校验：限制 App 只能部署到指定 lane class
+	// spec: docs/superpowers/specs/2026-05-11-dev-workflow-v2-phase-2-design.md §lark-proxy 部署门禁
+	if len(app.AllowedLaneClasses) > 0 {
+		class, classErr := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		if classErr == nil {
+			classKey := class.String()
+			allowed := false
+			for _, c := range app.AllowedLaneClasses {
+				if c == classKey {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf(
+					"%w: app %q only allowed in lane classes %v, lane %q is class %q (AllowedLaneClasses)",
+					domain.ErrInvalidInput, app.Name, app.AllowedLaneClasses, lane, classKey,
+				)
+			}
+		}
 	}
 
 	// 通过 App → ImageRepo 拼完整镜像地址
@@ -63,11 +106,6 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 			return nil, err
 		}
 		fullImage = imageRepo.FullImageRef(req.ImageTag)
-	}
-
-	lane := req.Lane
-	if lane == "" {
-		lane = domain.DefaultLane
 	}
 
 	// prod 泳道禁止 test channel 镜像
@@ -125,6 +163,21 @@ func (s *ReleaseService) CreateOrUpdateRelease(ctx context.Context, req CreateRe
 		}
 	}
 	release.DeployName = release.ResourceName()
+
+	// RequiredKeys 校验：根据 lane class 强制完整 override
+	// spec: docs/superpowers/specs/2026-05-11-dev-workflow-v2-phase-2-design.md §Fail-closed 部署校验
+	if s.configBundleSvc != nil && len(app.ConfigBundles) > 0 {
+		class, classErr := domain.ClassifyLane(lane, s.cfg.LegacyLaneWhitelist)
+		if classErr == nil {
+			bundles, bErr := s.configBundleSvc.GetBundlesForApp(ctx, app)
+			if bErr != nil {
+				return nil, bErr
+			}
+			if vErr := ValidateRequiredKeys(bundles, class.String()); vErr != nil {
+				return nil, fmt.Errorf("release create rejected: %w", vErr)
+			}
+		}
+	}
 
 	// Resolve bundle envs
 	var bundleEnvs map[string]string

@@ -1,0 +1,67 @@
+version: "3.9"
+services:
+  chiwei-test-postgres:
+    image: postgres:16-alpine
+    container_name: chiwei-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chiwei_test
+      POSTGRES_USER: chiwei_test
+      POSTGRES_PASSWORD: ${CHIWEI_TEST_PG_PASSWORD:?password required}
+    ports:
+      - "5433:5432"  # prod PG 占 5432，test 用 5433
+    volumes:
+      - chiwei_test_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chiwei_test -d chiwei_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chiwei-test-rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: chiwei-test-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: chiwei_test
+      RABBITMQ_DEFAULT_PASS: ${CHIWEI_TEST_MQ_PASSWORD:?password required}
+    ports:
+      - "5673:5672"      # AMQP（prod 占 5672，test 用 5673）
+      - "15673:15672"    # Management UI
+    volumes:
+      - chiwei_test_mq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chiwei-test-redis:
+    image: redis:7-alpine
+    container_name: chiwei-test-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${CHIWEI_TEST_REDIS_PASSWORD:?password required}
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6380:6379"  # prod redis 占 6379，test 用 6380
+    volumes:
+      - chiwei_test_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${CHIWEI_TEST_REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  chiwei_test_pg_data:
+    name: chiwei_test_pg_data
+  chiwei_test_mq_data:
+    name: chiwei_test_mq_data
+  chiwei_test_redis_data:
+    name: chiwei_test_redis_data

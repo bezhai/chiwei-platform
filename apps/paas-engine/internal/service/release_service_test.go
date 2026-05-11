@@ -3,11 +3,70 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 	"github.com/chiwei-platform/paas-engine/internal/port"
 )
+
+// newReleaseSvcWithBundles 构造带 configBundleSvc 的 ReleaseService，供 RequiredKeys 校验测试使用。
+func newReleaseSvcWithBundles(t *testing.T, apps []*domain.App, bundles []*domain.ConfigBundle) *ReleaseService {
+	t.Helper()
+
+	appRepo := &multiAppRepo{byName: make(map[string]*domain.App)}
+	for _, a := range apps {
+		appRepo.byName[a.Name] = a
+	}
+
+	bundleRepo := newStubConfigBundleRepo()
+	for _, b := range bundles {
+		_ = bundleRepo.Save(context.Background(), b)
+	}
+
+	configBundleSvc := NewConfigBundleService(bundleRepo, appRepo, newReleaseTestReleaseRepo(), ConfigBundleServiceConfig{})
+
+	return NewReleaseService(
+		appRepo,
+		&stubImageRepoRepo{repo: &domain.ImageRepo{Name: "agent-service", Registry: "harbor.local/inner-bot/agent-service"}},
+		&stubBuildRepo{},
+		newReleaseTestReleaseRepo(),
+		&stubDeployer{},
+		configBundleSvc,
+		ReleaseServiceConfig{},
+	)
+}
+
+// multiAppRepo is a stub AppRepository that returns apps by name from a map.
+type multiAppRepo struct {
+	byName map[string]*domain.App
+}
+
+func (r *multiAppRepo) Save(_ context.Context, app *domain.App) error {
+	r.byName[app.Name] = app
+	return nil
+}
+func (r *multiAppRepo) Update(_ context.Context, app *domain.App) error {
+	r.byName[app.Name] = app
+	return nil
+}
+func (r *multiAppRepo) Delete(_ context.Context, name string) error {
+	delete(r.byName, name)
+	return nil
+}
+func (r *multiAppRepo) FindAll(_ context.Context) ([]*domain.App, error) {
+	result := make([]*domain.App, 0, len(r.byName))
+	for _, a := range r.byName {
+		result = append(result, a)
+	}
+	return result, nil
+}
+func (r *multiAppRepo) FindByName(_ context.Context, name string) (*domain.App, error) {
+	if a, ok := r.byName[name]; ok {
+		return a, nil
+	}
+	return nil, domain.ErrNotFound
+}
 
 // --- stubs for release tests ---
 
@@ -90,7 +149,7 @@ func TestCreateRelease_DeployFailure_SetsMessage(t *testing.T) {
 		deployErr: errors.New("wait for rollout: deployment myapp-prod failed: pod myapp-prod-abc is in CrashLoopBackOff: exit code 1"),
 	}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -125,7 +184,7 @@ func TestCreateRelease_DeploySuccess_ClearsMessage(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
 
-	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	release, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
 		AppName:  "myapp",
@@ -158,7 +217,7 @@ func TestGetReleaseStatus(t *testing.T) {
 	}
 	deployer := &stubDeployer{status: expectedStatus}
 
-	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer, nil)
+	svc := NewReleaseService(appRepo, nil, nil, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	// 先存一个 release
 	rel := &domain.Release{ID: "r1", AppName: "myapp", Lane: "prod", DeployName: "myapp-prod"}
@@ -176,13 +235,180 @@ func TestGetReleaseStatus(t *testing.T) {
 	}
 }
 
+func TestCreateOrUpdateRelease_RejectsBadLaneName(t *testing.T) {
+	appRepo := &stubAppRepo{app: &domain.App{
+		Name:          "agent-service",
+		ImageRepoName: "agent-service",
+		Port:          8080,
+	}}
+	imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
+		Name:     "agent-service",
+		Registry: "harbor.local:30002/inner-bot/agent-service",
+	}}
+	releaseRepo := newReleaseTestReleaseRepo()
+	deployer := &stubDeployer{}
+
+	svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "feature-x", // 无前缀，应 reject
+		ImageTag: "1.0.0.1",
+	})
+
+	if err == nil {
+		t.Fatal("expected lane validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "lane") {
+		t.Fatalf("error should mention 'lane', got: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AcceptsValidLanes(t *testing.T) {
+	cases := []string{"prod", "blue", "coe-test-1", "ppe-canary"}
+	for _, lane := range cases {
+		t.Run(lane, func(t *testing.T) {
+			appRepo := &stubAppRepo{app: &domain.App{
+				Name:          "agent-service",
+				ImageRepoName: "agent-service",
+				Port:          8080,
+			}}
+			imageRepoRepo := &stubImageRepoRepo{repo: &domain.ImageRepo{
+				Name:     "agent-service",
+				Registry: "harbor.local:30002/inner-bot/agent-service",
+			}}
+			releaseRepo := newReleaseTestReleaseRepo()
+			deployer := &stubDeployer{}
+
+			svc := NewReleaseService(appRepo, imageRepoRepo, &stubBuildRepo{}, releaseRepo, deployer, nil, ReleaseServiceConfig{})
+
+			_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+				AppName:  "agent-service",
+				Lane:     lane,
+				ImageTag: "1.0.0.1",
+			})
+			if err != nil && strings.Contains(err.Error(), "lane") {
+				t.Fatalf("lane %q should pass lane validation but got: %v", lane, err)
+			}
+		})
+	}
+}
+
 func TestGetReleaseStatus_NotFound(t *testing.T) {
 	releaseRepo := newReleaseTestReleaseRepo()
 	deployer := &stubDeployer{}
-	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer, nil)
+	svc := NewReleaseService(nil, nil, nil, releaseRepo, deployer, nil, ReleaseServiceConfig{})
 
 	_, err := svc.GetReleaseStatus(context.Background(), "nonexistent")
 	if !errors.Is(err, domain.ErrReleaseNotFound) {
 		t.Errorf("expected ErrReleaseNotFound, got %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_RejectsCoeWithMissingRequiredKey(t *testing.T) {
+	bundle := &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres", "POSTGRES_DB": "chiwei"},
+		ClassOverrides: map[string]map[string]string{
+			"coe": {"POSTGRES_HOST": "test-pg"}, // POSTGRES_DB 漏了
+		},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
+	}
+	app := &domain.App{Name: "agent-service", ImageRepoName: "agent-service", Port: 8000, ConfigBundles: []string{"pg-main"}}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, []*domain.ConfigBundle{bundle})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err == nil {
+		t.Fatal("expected reject for missing RequiredKey")
+	}
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("error must wrap ErrInvalidInput: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
+	// prod lane 不触发 coe RequiredKeys 校验
+	bundle := &domain.ConfigBundle{
+		Name: "pg-main",
+		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
+	}
+	app := &domain.App{Name: "agent-service", ImageRepoName: "agent-service", Port: 8000, ConfigBundles: []string{"pg-main"}}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, []*domain.ConfigBundle{bundle})
+
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "prod",
+		ImageTag: "1.0.0",
+	})
+	// prod 泳道不应该触发 coe RequiredKeys 校验
+	if err != nil && (strings.Contains(err.Error(), "RequiredKeys") || strings.Contains(err.Error(), "ClassOverrides")) {
+		t.Fatalf("prod lane should not trigger coe RequiredKeys check: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_RejectsLarkProxyToCoe(t *testing.T) {
+	app := &domain.App{
+		Name:               "lark-proxy",
+		ImageRepoName:      "lark-proxy",
+		Port:               3003,
+		AllowedLaneClasses: []string{"prod"},
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "lark-proxy",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err == nil {
+		t.Fatal("expected reject for lark-proxy to coe lane")
+	}
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("must wrap ErrInvalidInput: %v", err)
+	}
+	if !strings.Contains(err.Error(), "lark-proxy") || !strings.Contains(err.Error(), "coe") {
+		t.Fatalf("error must mention app and lane class: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AllowsLarkProxyToProd(t *testing.T) {
+	app := &domain.App{
+		Name:               "lark-proxy",
+		ImageRepoName:      "lark-proxy",
+		Port:               3003,
+		AllowedLaneClasses: []string{"prod"},
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "lark-proxy",
+		Lane:     "prod",
+		ImageTag: "1.0.0",
+	})
+	// 注意：可能因 build 不存在等其他原因报错，但不应该是 AllowedLaneClasses reject
+	if err != nil && strings.Contains(err.Error(), "AllowedLaneClasses") {
+		t.Fatalf("prod should not be rejected by AllowedLaneClasses: %v", err)
+	}
+}
+
+func TestCreateOrUpdateRelease_AppWithoutAllowedLaneClasses_AllowsAll(t *testing.T) {
+	// 没设 AllowedLaneClasses（nil）= 全允许（向后兼容现有 App）
+	app := &domain.App{
+		Name:          "agent-service",
+		ImageRepoName: "agent-service",
+		Port:          8000,
+		// AllowedLaneClasses 不设
+	}
+	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
+	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
+		AppName:  "agent-service",
+		Lane:     "coe-foo",
+		ImageTag: "1.0.0",
+	})
+	if err != nil && strings.Contains(err.Error(), "AllowedLaneClasses") {
+		t.Fatalf("nil AllowedLaneClasses should allow all: %v", err)
 	}
 }

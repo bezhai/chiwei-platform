@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 	"github.com/chiwei-platform/paas-engine/internal/port"
@@ -96,6 +97,10 @@ func appToModel(a *domain.App) (*AppModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowedLaneClassesJSON, err := json.Marshal(a.AllowedLaneClasses)
+	if err != nil {
+		return nil, fmt.Errorf("marshal AllowedLaneClasses: %w", err)
+	}
 	volumesJSON, err := json.Marshal(a.Volumes)
 	if err != nil {
 		return nil, err
@@ -111,6 +116,7 @@ func appToModel(a *domain.App) (*AppModel, error) {
 		EnvFromConfigMaps: string(envFromConfigMapsJSON),
 		Envs:              string(envsJSON),
 		ConfigBundles:     string(configBundlesJSON),
+		AllowedLaneClasses: string(allowedLaneClassesJSON),
 		SidecarEnabled:    a.SidecarEnabled,
 		Volumes:           string(volumesJSON),
 		CreatedAt:         a.CreatedAt,
@@ -149,6 +155,12 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 			return nil, err
 		}
 	}
+	var allowedLaneClasses []string
+	if m.AllowedLaneClasses != "" && m.AllowedLaneClasses != "null" {
+		if err := json.Unmarshal([]byte(m.AllowedLaneClasses), &allowedLaneClasses); err != nil {
+			return nil, fmt.Errorf("unmarshal AllowedLaneClasses: %w", err)
+		}
+	}
 	var volumes []domain.VolumeMount
 	if m.Volumes != "" {
 		if err := json.Unmarshal([]byte(m.Volumes), &volumes); err != nil {
@@ -166,6 +178,7 @@ func modelToApp(m *AppModel) (*domain.App, error) {
 		EnvFromConfigMaps: envFromConfigMaps,
 		Envs:              envs,
 		ConfigBundles:     configBundles,
+		AllowedLaneClasses: allowedLaneClasses,
 		SidecarEnabled:    m.SidecarEnabled,
 		Volumes:           volumes,
 		CreatedAt:         m.CreatedAt,
