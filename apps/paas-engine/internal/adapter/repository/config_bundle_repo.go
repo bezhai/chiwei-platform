@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 	"github.com/chiwei-platform/paas-engine/internal/port"
@@ -100,35 +101,70 @@ func bundleToModel(b *domain.ConfigBundle) (*ConfigBundleModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	classOverridesJSON, err := json.Marshal(b.ClassOverrides)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ClassOverrides: %w", err)
+	}
+	requiredKeysJSON, err := json.Marshal(b.RequiredKeys)
+	if err != nil {
+		return nil, fmt.Errorf("marshal RequiredKeys: %w", err)
+	}
+
+	// Preserve empty maps as "{}" instead of "null"
+	classOverridesStr := string(classOverridesJSON)
+	if classOverridesStr == "null" {
+		classOverridesStr = "{}"
+	}
+	requiredKeysStr := string(requiredKeysJSON)
+	if requiredKeysStr == "null" {
+		requiredKeysStr = "{}"
+	}
+
 	return &ConfigBundleModel{
-		Name:          b.Name,
-		Description:   b.Description,
-		Keys:          string(keysJSON),
-		LaneOverrides: string(laneOverridesJSON),
-		CreatedAt:     b.CreatedAt,
-		UpdatedAt:     b.UpdatedAt,
+		Name:           b.Name,
+		Description:    b.Description,
+		Keys:           string(keysJSON),
+		LaneOverrides:  string(laneOverridesJSON),
+		ClassOverrides: classOverridesStr,
+		RequiredKeys:   requiredKeysStr,
+		CreatedAt:      b.CreatedAt,
+		UpdatedAt:      b.UpdatedAt,
 	}, nil
 }
 
 func modelToBundle(m *ConfigBundleModel) (*domain.ConfigBundle, error) {
-	var keys map[string]string
+	keys := make(map[string]string)
 	if m.Keys != "" {
 		if err := json.Unmarshal([]byte(m.Keys), &keys); err != nil {
 			return nil, err
 		}
 	}
-	var laneOverrides map[string]map[string]string
+	laneOverrides := make(map[string]map[string]string)
 	if m.LaneOverrides != "" {
 		if err := json.Unmarshal([]byte(m.LaneOverrides), &laneOverrides); err != nil {
 			return nil, err
 		}
 	}
+	classOverrides := make(map[string]map[string]string)
+	if m.ClassOverrides != "" {
+		if err := json.Unmarshal([]byte(m.ClassOverrides), &classOverrides); err != nil {
+			return nil, fmt.Errorf("unmarshal ClassOverrides: %w", err)
+		}
+	}
+	requiredKeys := make(map[string][]string)
+	if m.RequiredKeys != "" {
+		if err := json.Unmarshal([]byte(m.RequiredKeys), &requiredKeys); err != nil {
+			return nil, fmt.Errorf("unmarshal RequiredKeys: %w", err)
+		}
+	}
 	return &domain.ConfigBundle{
-		Name:          m.Name,
-		Description:   m.Description,
-		Keys:          keys,
-		LaneOverrides: laneOverrides,
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
+		Name:           m.Name,
+		Description:    m.Description,
+		Keys:           keys,
+		LaneOverrides:  laneOverrides,
+		ClassOverrides: classOverrides,
+		RequiredKeys:   requiredKeys,
+		CreatedAt:      m.CreatedAt,
+		UpdatedAt:      m.UpdatedAt,
 	}, nil
 }
