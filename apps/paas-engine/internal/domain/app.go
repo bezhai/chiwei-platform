@@ -23,6 +23,7 @@ type App struct {
 	EnvFromConfigMaps []string          `json:"env_from_config_maps,omitempty"`
 	Envs              map[string]string `json:"envs,omitempty"`
 	ConfigBundles     []string          `json:"config_bundles,omitempty"` // 关联的 ConfigBundle 名称列表
+	AllowedLaneClasses []string         `json:"allowed_lane_classes,omitempty"` // 限制可部署的 lane class，nil 或空 = 全允许
 	SidecarEnabled    bool              `json:"sidecar_enabled,omitempty"`
 	Volumes           []VolumeMount     `json:"volumes,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
