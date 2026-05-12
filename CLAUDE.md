@@ -104,18 +104,16 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 **禁止直接在 main 分支上修改代码。** 每次需求变更：
 
-1. **需求分析**：用 `superpowers:brainstorming` 探索意图、澄清需求、对比方案
-2. **出方案**：用 `superpowers:writing-plans` 生成分步实现计划（超 10 行改动必须）
-3. **切分支**：从 main 切分支（可用 `/worktree` skill）
-4. **执行方案**：用 `superpowers:executing-plans` 按计划逐步实现，写代码遵循 `superpowers:test-driven-development` 红-绿-重构循环
-5. **遇到 bug**：用 `superpowers:systematic-debugging` 结构化排查（与"3 次后必须停"互补）
-6. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
-7. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建/破坏性改动用 `coe-<name>`），不直接用 `dev`
-8. 飞书测试必须绑定 dev bot: `/ops bind bot dev <lane>`
-9. **完成前验证**：用 `superpowers:verification-before-completion` 确保有证据再宣称完成
-10. 验收后解绑 + 下泳道: `/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`
-11. `ghc pr merge --squash` 合并到 main（**必须用项目 `ship` skill，禁止用 `superpowers:finishing-a-development-branch`**）
-12. `make self-deploy`（paas-engine）或 `make deploy APP=<app>`
+1. **需求分析 + 出方案**：超 10 行改动前先写 spec 文件落盘（含目标 / 不做什么 / 关键决策 / 调用方全覆盖清单 / 数据&部署影响），让 codex 做一次外部 review
+2. **切分支**：从 main 切分支，用 `/worktree`
+3. **执行方案**：按 spec 实施。写代码遵循 TDD 红-绿-重构（先写测试再写实现）
+4. **遇到 bug**：3 次内仍未解决必须停（同一报错 ≥2 次 / 同一测试 ≥3 次 / A↔B 往返），结构化分析根因，必要时叫 codex 做独立诊断
+5. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
+6. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建/破坏性改动用 `coe-<name>`），不直接用 `dev`
+7. 飞书测试必须绑定 dev bot: `/ops bind bot dev <lane>`
+8. **完成前验证**：拿出可验证的证据（命令 + 实际输出）再宣称完成，禁止"看着对、应该没问题"
+9. 验收后解绑 + 下泳道: `/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`
+10. `/ship` 合码并部署 prod（合码铁律见 `.claude/rules/merge-and-ship.md`）
 
 ### 上线前必须完成的检查（TODO）
 
@@ -125,13 +123,6 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 - [ ] **数据读写一致**：如果改了写入的目标表，确认所有读取方也已切换。如果新建了表，确认旧表的读取方不会读到空数据。
 - [ ] **副作用清单**：列出这次改动的所有副作用（新表、新 prompt、新 agent 注册、DB schema 变更），确认每个都已就绪。
 - [ ] **部署影响**：如果有后台异步任务正在运行（rebuild、afterthought），部署会杀掉它们。部署前确认没有正在跑的任务，或者明确告知用户"部署会中断 X"。
-
-### superpowers 禁用项
-
-以下 superpowers skill 与项目自有 skill 冲突，**禁止使用**：
-
-- `superpowers:finishing-a-development-branch` → 用项目 `/ship` 替代（遵守合码铁律）
-- `superpowers:using-git-worktrees` → 用项目 `/worktree` 替代（遵守部署约束）
 
 ## 部署命令
 
