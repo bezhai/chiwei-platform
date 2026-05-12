@@ -6,7 +6,7 @@ import { cacheProxy } from "../utils/cache";
 // 创建 Pixiv 客户端实例
 const pixivClient = createPixivClient({
   proxyHost: process.env.PIXIV_PROXY_HOST || 'http://www.yuanzhi.xyz',
-  httpSecret: process.env.HTTP_SECRET || '',
+  httpSecret: process.env.HTTP_SECRET || process.env.PROXY_HTTP_SECRET || '',
   defaultUserId: '35384654',
   getVersion: async () => redisClient.get("version"),
 });

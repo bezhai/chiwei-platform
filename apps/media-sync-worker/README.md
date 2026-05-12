@@ -16,7 +16,7 @@
 
 ## 必需环境变量
 
-- `MONGO_HOST`
+- `MONGO_HOST`（可包含端口；包含端口时不再读取 `MONGO_PORT`）
 - `MONGO_PORT`
 - `MONGO_INITDB_ROOT_USERNAME`
 - `MONGO_INITDB_ROOT_PASSWORD`
@@ -27,7 +27,7 @@
 - `APP_ID`
 - `APP_SECRET`
 - `SELF_CHAT_ID`
-- `HTTP_SECRET`
+- `HTTP_SECRET` 或 `PROXY_HTTP_SECRET`
 - `BANGUMI_ACCESS_TOKEN`
 
 ## 部署验证开关
@@ -36,6 +36,8 @@
 - `DISABLE_CONSUMER=true`：不启动下载任务消费者
 
 两个开关同时打开时，进程会保持存活，便于先验证镜像、Pod、环境变量和基础连接。
+
+- `RUN_CONNECTIVITY_CHECK=true`：在两个开关同时打开时，只检查 MongoDB/Redis 连通性，不启动定时任务或消费者。
 
 ## 本地开发
 

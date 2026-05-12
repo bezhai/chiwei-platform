@@ -7,12 +7,14 @@ declare namespace NodeJS {
     MONGO_INITDB_ROOT_PASSWORD: string;
     SELF_CHAT_ID: string;
     HTTP_SECRET: string;
+    PROXY_HTTP_SECRET: string;
     REDIS_HOST: string;
     REDIS_PORT: string;
     BANGUMI_ACCESS_TOKEN: string;
     MONGO_HOST: string;
     MONGO_PORT: string;
     MONGO_CONNECT_TIMEOUT_MS: string;
+    RUN_CONNECTIVITY_CHECK: string;
     DISABLE_SCHEDULES: string;
     DISABLE_CONSUMER: string;
   }

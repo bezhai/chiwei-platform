@@ -54,6 +54,22 @@ const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<
 
 const disableSchedules = isEnabled(process.env.DISABLE_SCHEDULES);
 const disableConsumer = isEnabled(process.env.DISABLE_CONSUMER);
+const runConnectivityCheck = isEnabled(process.env.RUN_CONNECTIVITY_CHECK);
+
+async function checkDataConnections() {
+  console.log('Checking MongoDB and Redis connectivity...');
+
+  const [{ mongoInitPromise }, { default: redisClient }] = await Promise.all([
+    import('./mongo/client'),
+    import('./redis/redisClient'),
+  ]);
+
+  await mongoInitPromise;
+  await redisClient.getNativeClient().ping();
+  await redisClient.close();
+
+  console.log('MongoDB and Redis connectivity check completed.');
+}
 
 if (disableSchedules) {
   console.log('Cron schedules disabled by DISABLE_SCHEDULES.');
@@ -76,6 +92,9 @@ if (disableSchedules) {
   if (disableConsumer) {
     console.log('Download task consumer disabled by DISABLE_CONSUMER.');
     if (disableSchedules) {
+      if (runConnectivityCheck) {
+        await checkDataConnections();
+      }
       console.log('All cronjob work is disabled; keeping process alive for deployment validation.');
       waitForever();
     }

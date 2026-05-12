@@ -29,6 +29,10 @@ function parseEnvInt(name: string, defaultValue: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 }
 
+function hostHasPort(host: string): boolean {
+  return host.includes(':');
+}
+
 /**
  * 创建 Bangumi Archive 相关的索引
  */
@@ -73,10 +77,12 @@ async function createBangumiIndexes(): Promise<void> {
 
 export const mongoInitPromise = (async () => {
   try {
+    const mongoHost = process.env.MONGO_HOST || 'mongo';
+
     // 使用共享的 MongoService
     mongoService = getMongoService({
-      host: process.env.MONGO_HOST || 'mongo',
-      port: parseEnvInt('MONGO_PORT', 27017),
+      host: mongoHost,
+      port: hostHasPort(mongoHost) ? undefined : parseEnvInt('MONGO_PORT', 27017),
       username: process.env.MONGO_INITDB_ROOT_USERNAME,
       password: process.env.MONGO_INITDB_ROOT_PASSWORD,
       database: 'chiwei',
