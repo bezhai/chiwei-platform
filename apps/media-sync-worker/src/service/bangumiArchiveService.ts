@@ -83,7 +83,7 @@ export class BangumiArchiveService {
     try {
       const response = await axios.get(this.LATEST_JSON_URL, {
         headers: {
-          'User-Agent': 'chiwei-bot-cronjob/1.0.0'
+          'User-Agent': 'media-sync-worker/1.0.0'
         },
         timeout: 10000
       });
@@ -114,7 +114,7 @@ export class BangumiArchiveService {
         responseType: 'stream',
         timeout: 300000, // 5分钟超时
         headers: {
-          'User-Agent': 'chiwei-bot-cronjob/1.0.0'
+          'User-Agent': 'media-sync-worker/1.0.0'
         }
       });
 

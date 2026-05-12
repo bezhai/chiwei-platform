@@ -8,7 +8,7 @@ COPY apps/lark-server/package.json ./apps/lark-server/
 COPY apps/lark-proxy/package.json ./apps/lark-proxy/
 COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
-COPY apps/cloud/cronjob/package.json ./apps/cloud/cronjob/
+COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/
 COPY packages/ts-shared/package.json ./packages/ts-shared/
 COPY packages/pixiv-client/package.json ./packages/pixiv-client/
 COPY packages/lark-utils/package.json ./packages/lark-utils/

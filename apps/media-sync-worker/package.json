@@ -1,7 +1,7 @@
 {
-  "name": "chiwei-bot-cronjob",
+  "name": "media-sync-worker",
   "version": "1.0.0",
-  "description": "一些定时任务",
+  "description": "Pixiv and Bangumi media sync worker",
   "main": "src/index.ts",
   "scripts": {
     "start": "bun run src/index.ts",

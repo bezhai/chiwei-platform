@@ -11,6 +11,7 @@ COPY apps/lark-server/package.json ./apps/lark-server/package.json
 COPY apps/lark-proxy/package.json ./apps/lark-proxy/package.json
 COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/package.json
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/package.json
+COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/package.json
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/pixiv-client ./packages/pixiv-client
 COPY packages/lark-utils ./packages/lark-utils

@@ -5,8 +5,8 @@
     "": {
       "name": "chiwei-platform",
     },
-    "apps/cloud/cronjob": {
-      "name": "chiwei-bot-cronjob",
+    "apps/media-sync-worker": {
+      "name": "media-sync-worker",
       "version": "1.0.0",
       "dependencies": {
         "@inner/lark-utils": "*",
@@ -647,7 +647,7 @@
 
     "chalk": ["chalk@4.1.2", "https://bnpm.byted.org/chalk/-/chalk-4.1.2.tgz", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
 
-    "chiwei-bot-cronjob": ["chiwei-bot-cronjob@workspace:apps/cloud/cronjob"],
+    "media-sync-worker": ["media-sync-worker@workspace:apps/media-sync-worker"],
 
     "classnames": ["classnames@2.5.1", "https://bnpm.byted.org/classnames/-/classnames-2.5.1.tgz", {}, "sha512-saHYOzhIQs6wy2sVxTM6bUDsQO4F50V9RQ22qBpEdCW+I+/Wmke2HOl6lS6dTpdxVhb88/I6+Hs+438c3lfUow=="],
 
@@ -1493,7 +1493,7 @@
 
     "@volcengine/tos-sdk/axios": ["axios@0.30.2", "https://bnpm.byted.org/axios/-/axios-0.30.2.tgz", { "dependencies": { "follow-redirects": "^1.15.4", "form-data": "^4.0.4", "proxy-from-env": "^1.1.0" } }, "sha512-0pE4RQ4UQi1jKY6p7u6i1Tkzqmu+d+/tHS7Q7rKunWLB9WyilBTpHHpXzPNMDj5hTbK0B0PTLSz07yqMBiF6xg=="],
 
-    "chiwei-bot-cronjob/@types/node": ["@types/node@22.19.19", "https://bnpm.byted.org/@types/node/-/node-22.19.19.tgz", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew=="],
+    "media-sync-worker/@types/node": ["@types/node@22.19.19", "https://bnpm.byted.org/@types/node/-/node-22.19.19.tgz", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew=="],
 
     "cli-truncate/string-width": ["string-width@7.2.0", "https://bnpm.byted.org/string-width/-/string-width-7.2.0.tgz", { "dependencies": { "emoji-regex": "^10.3.0", "get-east-asian-width": "^1.0.0", "strip-ansi": "^7.1.0" } }, "sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ=="],
 
@@ -1571,7 +1571,7 @@
 
     "@typescript-eslint/typescript-estree/minimatch/brace-expansion": ["brace-expansion@5.0.3", "https://bnpm.byted.org/brace-expansion/-/brace-expansion-5.0.3.tgz", { "dependencies": { "balanced-match": "^4.0.2" } }, "sha512-fy6KJm2RawA5RcHkLa1z/ScpBeA762UF9KmZQxwIbDtRJrgLzM10depAiEQ+CXYcoiqW1/m96OAAoke2nE9EeA=="],
 
-    "chiwei-bot-cronjob/@types/node/undici-types": ["undici-types@6.21.0", "https://bnpm.byted.org/undici-types/-/undici-types-6.21.0.tgz", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
+    "media-sync-worker/@types/node/undici-types": ["undici-types@6.21.0", "https://bnpm.byted.org/undici-types/-/undici-types-6.21.0.tgz", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
     "cli-truncate/string-width/emoji-regex": ["emoji-regex@10.6.0", "https://bnpm.byted.org/emoji-regex/-/emoji-regex-10.6.0.tgz", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
