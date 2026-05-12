@@ -6,12 +6,14 @@
 
 ## 标准流程
 
-1. 部署改动的服务到独立泳道：`make deploy APP=<app> LANE=<lane>`
-2. 绑定 dev bot：`/ops bind TYPE=bot KEY=dev LANE=<lane>`
+**飞书消息流必须用 `ppe-<name>` 泳道**，不能用 `coe-*`。原因：飞书消息要落 prod mongo / qdrant 才有完整的回路（recall / vectorize 都依赖线上数据），coe-* 的离线组件里没有 prod 的历史数据，跑出来的行为不真实。如果是基建/破坏性改动需要 coe-*，就不要走飞书 e2e、改用直接调 endpoint 测。
+
+1. 部署改动的服务到独立泳道：`make deploy APP=<app> LANE=ppe-<name>`
+2. 绑定 dev bot：`/ops bind TYPE=bot KEY=dev LANE=ppe-<name>`
 3. 在飞书 dev bot 发消息验证
 4. 验证完毕后清理：
    - `/ops unbind TYPE=bot KEY=dev`
-   - `make undeploy APP=<app> LANE=<lane>`
+   - `make undeploy APP=<app> LANE=ppe-<name>`
 
 ## 消息流转链路
 

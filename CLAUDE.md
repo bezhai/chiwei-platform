@@ -85,6 +85,21 @@ SDK (agent-service/lark-server) → paas-engine (读取 API, /internal/dynamic-c
 - 镜像 tag: 语义化版本号（如 `1.0.0.2`），由 PaaS Engine 服务端分配
 - **配置管理统一走 ConfigBundle API**（`/api/paas/config-bundles/`），禁止直接操作 K8s Secret/ConfigMap。查看 app 最终配置用 `GET /api/paas/apps/{app}/resolved-config?lane=prod`。
 
+## 泳道命名规范（强制，paas-engine 校验）
+
+paas-engine `domain.ClassifyLane` fail-closed 拒绝未知前缀。**所有新泳道必须用以下命名**：
+
+| 命名 | 基础设施 | 用途 |
+|---|---|---|
+| `prod` | 线上 | 生产，所有服务共用 |
+| `blue` | 共用线上 | **仅 paas-engine 蓝绿自部署专用**，其他服务禁用 |
+| `ppe-<name>` | 共用 prod 全部组件（PG/Redis/MQ/Qdrant/Mongo） | **功能性验证**：业务逻辑、prompt、agent 行为，对线上数据有读写 |
+| `coe-<name>` | 独立离线（chiwei-test 容器集，连接串由 ConfigBundle `class_overrides[coe]` 注入） | **基建开发 / 破坏性改动**：schema 变更、消息协议变更、重写 worker，不污染 prod 数据 |
+
+**选型口诀**：能复用线上数据就 `ppe-*`，要建表/改协议/可能炸的就 `coe-*`。飞书 dev bot 测试 → `ppe-*`（消息要落 prod mongo / qdrant）。
+
+ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-* 的连接串切到 chiwei-test 容器，业务代码不感知。详见 [[project_dev_workflow_v2]]。
+
 ## 开发流程
 
 **禁止直接在 main 分支上修改代码。** 每次需求变更：
@@ -95,7 +110,7 @@ SDK (agent-service/lark-server) → paas-engine (读取 API, /internal/dynamic-c
 4. **执行方案**：用 `superpowers:executing-plans` 按计划逐步实现，写代码遵循 `superpowers:test-driven-development` 红-绿-重构循环
 5. **遇到 bug**：用 `superpowers:systematic-debugging` 结构化排查（与"3 次后必须停"互补）
 6. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
-7. 部署独立泳道（如 `feat-alert-v2`），不直接用 `dev`
+7. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建/破坏性改动用 `coe-<name>`），不直接用 `dev`
 8. 飞书测试必须绑定 dev bot: `/ops bind bot dev <lane>`
 9. **完成前验证**：用 `superpowers:verification-before-completion` 确保有证据再宣称完成
 10. 验收后解绑 + 下泳道: `/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`
