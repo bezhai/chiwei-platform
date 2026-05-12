@@ -330,23 +330,40 @@ Expected: 如果 chiwei-test-qdrant 是 fresh 容器，`{"result":{"collections"
 bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/apps/agent-service/resolved-config?lane=prod" "Authorization: Bearer $PAAS_TOKEN" | jq -S '.' > /tmp/agent-service-prod-resolved-BEFORE.json
 bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/apps/vectorize-worker/resolved-config?lane=prod" "Authorization: Bearer $PAAS_TOKEN" | jq -S '.' > /tmp/vectorize-worker-prod-resolved-BEFORE.json
 
-# 同时 capture prod qdrant collections list（Task 10 Step 3 用）
+# 同时 capture prod qdrant collections list + 每个 chiwei collection 的 vectors_count（Task 10 Step 3 diff 用）
 # 需要 kubectl exec 进 prod agent-service pod
 PROD_AS_POD=$(bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/dashboard/api/ops/services/agent-service/pods?lane=prod" "X-API-Key: $DASHBOARD_CC_TOKEN" | jq -r '.data.pods[0].name')
-kubectl exec -n prod "$PROD_AS_POD" -- curl -sf "http://qdrant:6333/collections" -H "api-key: $(jq -r '.data.resolved.QDRANT_SERVICE_API_KEY' /tmp/agent-service-prod-resolved-BEFORE.json)" | jq -S '.' > /tmp/prod-qdrant-coll-BEFORE.json
+PROD_QDRANT_KEY=$(jq -r '.data.resolved.QDRANT_SERVICE_API_KEY' /tmp/agent-service-prod-resolved-BEFORE.json)
+
+kubectl exec -n prod "$PROD_AS_POD" -- curl -sf "http://qdrant:6333/collections" -H "api-key: $PROD_QDRANT_KEY" | jq -S '.' > /tmp/prod-qdrant-coll-BEFORE.json
+
+# 详细 vectors_count（diff 时拦"误写已有 prod collection"）
+for coll in messages_recall messages_cluster memory_fragment memory_abstract; do
+  kubectl exec -n prod "$PROD_AS_POD" -- curl -sf "http://qdrant:6333/collections/$coll" -H "api-key: $PROD_QDRANT_KEY" | jq "{coll: \"$coll\", points_count: .result.points_count}"
+done | jq -s -S '.' > /tmp/prod-qdrant-counts-BEFORE.json
 ```
 
-Expected: 3 个文件都生成且非空。
+Expected: 4 个文件都生成且非空。**注意**：`prod-qdrant-counts-BEFORE.json` 是非确定信号（prod 用户流量会让 count 涨），Task 10 Step 3 把它当辅助证据，主信号是 Task 10 Step 0 的 agent-service log。
 
-- [ ] **Step 1: GET 备份当前 qdrant bundle 完整 JSON**
+- [ ] **Step 1: GET 备份当前 qdrant bundle 完整 JSON + 立即生成 rollback body**
 
 ```bash
-bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/config-bundles/qdrant" "Authorization: Bearer $PAAS_TOKEN" | tee /tmp/qdrant-bundle-before.json
+bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/config-bundles/qdrant" "Authorization: Bearer $PAAS_TOKEN" | jq -S '.data' | tee /tmp/qdrant-bundle-before.json
+
+# 立即从 before.json 生成 rollback body —— 把 keys 原样保留，class_overrides/required_keys 设 null
+# 这样无论 Step 3 的 PUT 中途失败或后续任何 Task 出 prod 回归，都能立即一行恢复
+jq '{keys: .keys, class_overrides: null, required_keys: null}' /tmp/qdrant-bundle-before.json > /tmp/qdrant-bundle-rollback.json
+cat /tmp/qdrant-bundle-rollback.json  # 人工 sanity check
 ```
 
-Expected: 200 状态码 + 含 baseline keys（QDRANT_SERVICE_HOST=qdrant 等 4 key）+ `class_overrides: null` + `required_keys: null`。
+Expected: 200 状态码 + before.json 含 baseline keys（QDRANT_SERVICE_HOST=qdrant 等 4 key）+ `class_overrides: null` + `required_keys: null`；rollback.json 是有效 JSON 含完整 keys 字段。
 
 **如果 baseline keys 跟 ops-db 查到的不一致**（之前 ops-db 看到 4 key 含 QDRANT_API_KEY 死 key），停下来跟用户确认。
+
+**回滚一行命令**（无论何时执行都能立即回到改动前状态）：
+```bash
+bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/qdrant" "$(cat /tmp/qdrant-bundle-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
+```
 
 - [ ] **Step 2: 构造 PUT body**
 
@@ -407,12 +424,35 @@ diff /tmp/agent-service-prod-resolved-BEFORE.json /tmp/agent-service-prod-resolv
 diff /tmp/vectorize-worker-prod-resolved-BEFORE.json /tmp/vectorize-worker-prod-resolved-AFTER.json
 ```
 
-Expected: **两个 diff 输出都为空**（byte-equal）。如果不为空，**立即回滚** —— PUT bundle 把 class_overrides/required_keys 改回 null：
+Expected: **两个 diff 输出都为空**（byte-equal）。如果不为空，**立即回滚**：
 
 ```bash
-echo '{"class_overrides":null,"required_keys":null,"keys":{...原值...}}' > /tmp/qdrant-rollback.json
-bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/qdrant" "$(cat /tmp/qdrant-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
+bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/qdrant" "$(cat /tmp/qdrant-bundle-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
 ```
+
+（Step 1 已经预生成 rollback.json，这里直接用，无需现场拼。）
+
+- [ ] **Step 6: coe-validation lane resolved-config smoke check**
+
+PUT 后立即验证 coe lane 真派 chiwei-test endpoint（避免后续部署 + Pod Crash 才发现 source 错）：
+
+```bash
+for app in agent-service vectorize-worker; do
+  echo "=== $app coe-validation resolved ==="
+  bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/apps/$app/resolved-config?lane=coe-validation" "Authorization: Bearer $PAAS_TOKEN" | jq '.data.resolved | {QDRANT_SERVICE_HOST, QDRANT_SERVICE_PORT, QDRANT_SERVICE_API_KEY, QDRANT_API_KEY}'
+done
+```
+
+Expected: 4 个 key 全部派 chiwei-test 值（`QDRANT_SERVICE_HOST=10.37.6.235`，`QDRANT_SERVICE_PORT=16333`，两个 API_KEY 都是 chiwei-test 弱密钥），不是 prod 的 `qdrant` / `6333`。
+
+**source 标签验证**（如果 paas-engine 支持 verbose 模式）：
+```bash
+bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/apps/agent-service/resolved-config?lane=coe-validation&verbose=1" "Authorization: Bearer $PAAS_TOKEN" | jq '.data.sources'
+```
+
+Expected: qdrant 相关 key 的 source 标签 `qdrant[class:coe]`。
+
+如果 verbose 模式 paas-engine 不支持，跳过 source 验证，靠 value 派对就行。
 
 无 commit（bundle 改动不进 git）。
 
@@ -438,13 +478,21 @@ kubectl exec -n prod "$PROD_LS_POD" -- mongosh --quiet --eval 'JSON.stringify({c
 
 Expected: 4 个文件生成且非空。
 
-- [ ] **Step 1: GET 备份当前 mongo bundle**
+- [ ] **Step 1: GET 备份当前 mongo bundle + 立即生成 rollback body**
 
 ```bash
-bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/config-bundles/mongo" "Authorization: Bearer $PAAS_TOKEN" | tee /tmp/mongo-bundle-before.json
+bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/config-bundles/mongo" "Authorization: Bearer $PAAS_TOKEN" | jq -S '.data' | tee /tmp/mongo-bundle-before.json
+
+jq '{keys: .keys, class_overrides: null, required_keys: null}' /tmp/mongo-bundle-before.json > /tmp/mongo-bundle-rollback.json
+cat /tmp/mongo-bundle-rollback.json  # sanity check
 ```
 
-Expected: 200 + baseline keys = `{MONGO_HOST=mongodb, MONGO_INITDB_ROOT_USERNAME=chiwei, MONGO_INITDB_ROOT_PASSWORD=<prod 现值>}` + `class_overrides: null` + `required_keys: null`。
+Expected: 200 + baseline keys = `{MONGO_HOST=mongodb, MONGO_INITDB_ROOT_USERNAME=chiwei, MONGO_INITDB_ROOT_PASSWORD=<prod 现值>}` + `class_overrides: null` + `required_keys: null`；rollback.json 是有效 JSON。
+
+**回滚一行命令**：
+```bash
+bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/mongo" "$(cat /tmp/mongo-bundle-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
+```
 
 - [ ] **Step 2: 构造 PUT body**
 
@@ -499,67 +547,35 @@ done
 Expected: 三个 diff 都为空。
 
 如果任一非空，**立即回滚**：
+```bash
+bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/mongo" "$(cat /tmp/mongo-bundle-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
+```
+
+- [ ] **Step 6: coe-validation lane resolved-config smoke check**
 
 ```bash
-echo '{"keys":<原 keys>,"class_overrides":null,"required_keys":null}' > /tmp/mongo-rollback.json
-bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/mongo" "$(cat /tmp/mongo-rollback.json)" "Authorization: Bearer $PAAS_TOKEN"
+for app in lark-server chat-response-worker recall-worker; do
+  echo "=== $app coe-validation resolved ==="
+  bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/apps/$app/resolved-config?lane=coe-validation" "Authorization: Bearer $PAAS_TOKEN" | jq '.data.resolved | {MONGO_HOST, MONGO_INITDB_ROOT_USERNAME, MONGO_INITDB_ROOT_PASSWORD}'
+done
 ```
+
+Expected: 3 个 App 全部派 chiwei-test 值（`MONGO_HOST=10.37.6.235:27018`，`MONGO_INITDB_ROOT_USERNAME=chiwei-test`，password 是 chiwei-test 弱密码），不是 prod `mongodb` / `chiwei`。
 
 ---
 
-## Task 7: 反向测试 RequiredKeys reject
+## Task 7: ~~反向测试 RequiredKeys reject~~（跳过）
 
-**Files:** 无文件改动（临时操作，测完恢复）
+**Files:** 无文件改动
 
-**目的**：验证 RequiredKeys[coe] 真的强制——故意删 class_overrides[coe] 里的一个 key，deploy 期望 HTTP 400。
+**跳过理由**：RequiredKeys[coe] 反向 reject 机制 Phase 2 已端到端验证（参考 [[project_dev_workflow_v2]] memory：PR #218 ppe-phase-2-validation lane 故意删 POSTGRES_DB 后 deploy → HTTP 400 验证通过）。
 
-- [ ] **Step 1: 把 qdrant bundle 的 class_overrides[coe] 临时删一个 key**
+Phase 3 在 prod PaaS DB 上临时写"坏 qdrant bundle"会有：
+1. **时间窗口风险**：哪怕 5 秒内，恰好有 coe lane deploy 请求来会被污染（即使 spec 已说 Phase 3 前 coe lane 禁用，仍是真实风险面）
+2. **断电留坏**：如果 Claude 进程 / 网络在恢复 PUT 前死掉，bundle 永远留坏状态
+3. **冗余**：测的是 paas-engine 1.0.0.52 同一段代码，Phase 1+2 已验证过同一行为
 
-PUT body 改为（删 `QDRANT_SERVICE_PORT`）：
-
-```json
-{
-  ...
-  "class_overrides": {
-    "coe": {
-      "QDRANT_SERVICE_HOST": "10.37.6.235",
-      "QDRANT_SERVICE_API_KEY": "<CHIWEI_TEST_QDRANT_API_KEY>",
-      "QDRANT_API_KEY": "<CHIWEI_TEST_QDRANT_API_KEY>"
-    }
-  },
-  "required_keys": {
-    "coe": ["QDRANT_SERVICE_HOST", "QDRANT_SERVICE_PORT", "QDRANT_SERVICE_API_KEY", "QDRANT_API_KEY"]
-  }
-}
-```
-
-PUT 到 paas-engine。
-
-- [ ] **Step 2: 试 deploy agent-service 到 coe-validation lane**
-
-```bash
-make deploy APP=agent-service LANE=coe-validation GIT_REF=feat/dev-workflow-v2-phase-3 2>&1 | tail -20
-```
-
-Expected: 部署被 paas-engine reject，HTTP 400，错误信息含 `required key QDRANT_SERVICE_PORT not in class_overrides[coe]` 类似措辞。
-
-- [ ] **Step 3: 立即恢复 qdrant bundle**
-
-把 Task 5 Step 2 的完整 PUT body 重新提交，恢复 class_overrides[coe] 含 4 个 key。
-
-```bash
-bash .claude/skills/api-test/scripts/http.sh PUT "$PAAS_API/api/paas/config-bundles/qdrant" "$(cat /tmp/qdrant-bundle-after.json)" "Authorization: Bearer $PAAS_TOKEN"
-```
-
-- [ ] **Step 4: GET 验证恢复**
-
-```bash
-bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/api/paas/config-bundles/qdrant" "Authorization: Bearer $PAAS_TOKEN" | jq '.data.class_overrides.coe | keys'
-```
-
-Expected: 输出 `["QDRANT_API_KEY", "QDRANT_SERVICE_API_KEY", "QDRANT_SERVICE_HOST", "QDRANT_SERVICE_PORT"]`。
-
-无 commit。
+如未来 paas-engine 升级了 RequiredKeys 校验逻辑，可在 ppe-* lane（专门的 ppe-validation 测试 PaaS 自身）回归测试，不应在 prod PaaS DB 上验。
 
 ---
 
@@ -693,6 +709,18 @@ make logs APP=<app> KEYWORD="lifespan\|error" SINCE=3m
 
 **Files:** 无文件改动
 
+- [ ] **Step 0: 部署后**立即用 agent-service log 证明 qdrant 连接走 chiwei-test**
+
+prod qdrant `/collections` diff 拦不住"coe 误把 vector 写到已存在 prod collection"——必须靠 log 直接证明 agent-service 连的是哪个 endpoint。
+
+```bash
+make logs APP=agent-service LANE=coe-validation KEYWORD="qdrant\|Creating collection\|10.37.6.235\|:6333\|:16333" SINCE=5m 2>&1 | tee /tmp/agent-service-qdrant-log.txt | head -40
+```
+
+Expected: log 含 `10.37.6.235:16333` 或者跟 chiwei-test-qdrant 关联的字符串；**不能**含 prod qdrant 的 `qdrant:6333` 或 prod qdrant URL。
+
+如果 log 显示 prod qdrant URL，**立即 undeploy** agent-service coe-validation lane（防止持续写入）+ 回滚 bundle（Task 5 rollback 一行命令）+ 跟用户报告 root cause。
+
 - [ ] **Step 1: deploy 后再 snapshot qdrant collections**
 
 ```bash
@@ -720,17 +748,27 @@ make logs APP=agent-service LANE=coe-validation KEYWORD="Creating collection\|in
 
 Expected log 含 "Creating collection messages_recall" 或 "Collection already exists" 等明确显示 agent-service 在跟 **chiwei-test qdrant**（10.37.6.235:16333）通信的字符串。
 
-- [ ] **Step 3: 验证 prod qdrant 零变化**
+- [ ] **Step 3: 验证 prod qdrant 零变化（细化到 vectors_count）**
+
+不只 list collections（拦不住"coe 误写已有 prod collection"），还要查每个 collection 的 `vectors_count`：
 
 ```bash
-# prod qdrant 地址：内部 DNS qdrant:6333（从 prod 内访问），开发机不能直接连，要 kubectl exec
-kubectl exec -n prod <prod-agent-service-pod> -- curl -sf "http://qdrant:6333/collections" -H "api-key: <prod QDRANT_SERVICE_API_KEY>" > /tmp/prod-qdrant-coll.json
+PROD_AS_POD=$(bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/dashboard/api/ops/services/agent-service/pods?lane=prod" "X-API-Key: $DASHBOARD_CC_TOKEN" | jq -r '.data.pods[0].name')
+PROD_QDRANT_KEY=$(jq -r '.data.resolved.QDRANT_SERVICE_API_KEY' /tmp/agent-service-prod-resolved-BEFORE.json)
 
-# 跟改动前的 prod qdrant collection list 比对（最好在 Task 4 Step 3 之前先 capture）
-diff /tmp/prod-qdrant-coll-BEFORE.json /tmp/prod-qdrant-coll.json
+# 拿 prod qdrant 4 个 chiwei collection 的当前 vectors_count
+for coll in messages_recall messages_cluster memory_fragment memory_abstract; do
+  echo "=== prod $coll ==="
+  kubectl exec -n prod "$PROD_AS_POD" -- curl -sf "http://qdrant:6333/collections/$coll" -H "api-key: $PROD_QDRANT_KEY" | jq '{name: .result.config.params.name // "'$coll'", vectors_count: .result.points_count}'
+done | tee /tmp/prod-qdrant-counts-AFTER.json
+
+# 跟 BEFORE 比对
+diff <(jq -S '.' /tmp/prod-qdrant-counts-BEFORE.json) <(jq -S '.' /tmp/prod-qdrant-counts-AFTER.json)
 ```
 
-Expected: diff 为空（prod qdrant 无新 collection / 无 vectors_count 变化）。
+**前提**：Task 5 Step 0 capture prod baseline 时也要 capture `points_count`，不只 list。回去补充 Task 5 Step 0 的 capture 命令同款（先存到 `/tmp/prod-qdrant-counts-BEFORE.json`）。
+
+Expected: diff 为空（vectors_count 改动前后一致）。如果有差，可能是 prod 用户正常流量写入（不一定是 coe lane 污染），结合 Step 0 log 证据综合判断；如果 Step 0 log 显示 coe lane 真的连 chiwei-test 而 vectors_count 仍变化，那是 prod 用户流量。**注意：vectors_count 受 prod 高峰流量影响、不是确定信号，主信号是 Step 0 log。**
 
 无 commit。
 
@@ -773,18 +811,35 @@ ObjectId 时间戳验证：
 - 看 lark-server logs：`make logs APP=lark-server LANE=coe-validation KEYWORD="insertEvent\|MongoDB" SINCE=5m`
 - 看 chiwei-test-mongo logs：`ssh cpu1 'docker logs --tail 50 chiwei-test-mongo'`
 
-- [ ] **Step 4: 验证 prod mongo 零变化**
+- [ ] **Step 4: 验证 prod mongo 零变化（用 dev bot app_id 负向查询）**
 
-记录 deploy 时间 T0 到现在，prod mongo lark_event count 增量应该来自 prod bot 流量（**不**应该来自 dev bot —— dev bot 全部流量被绑到 coe-validation lane）。
+只看 count 不靠谱（prod 高峰流量天然让 count 涨）。直接 filter dev bot 的 app_id 在 prod mongo 是否出现：
 
 ```bash
-# 从 prod 内部访问 prod mongo（这里也是 read-only kubectl exec）
-kubectl exec -n prod <prod-lark-server-pod> -- sh -c "mongosh --quiet --eval 'db.getSiblingDB(\"chiwei\").lark_event.find({_id: {\$gt: ObjectId(\"<T0 的 ObjectId\")}}).count()'"
+# 拿到 dev bot 的 app_id
+DEV_BOT_APP_ID=$(bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/dashboard/api/ops/lane-bindings" "X-API-Key: $DASHBOARD_CC_TOKEN" | jq -r '.data.bindings[] | select(.type=="bot" and .key=="dev") | .bot_app_id // empty')
+# 如果 bot_app_id 字段名不对，看 paas-engine bot_config 表 schema 或问用户
+
+# T0 转 ObjectId（前 8 hex 是 unix 秒）
+T0_UNIX=$(date -u -d "$(cat /tmp/deploy-T0.txt)" +%s)
+T0_OID_PREFIX=$(printf '%08x' $T0_UNIX)
+
+# 从 prod lark-server pod 跑负向查询
+PROD_LS_POD=$(bash .claude/skills/api-test/scripts/http.sh GET "$PAAS_API/dashboard/api/ops/services/lark-server/pods?lane=prod" "X-API-Key: $DASHBOARD_CC_TOKEN" | jq -r '.data.pods[0].name')
+
+kubectl exec -n prod "$PROD_LS_POD" -- mongosh --quiet --eval "
+  db.getSiblingDB('chiwei').lark_event.countDocuments({
+    'header.app_id': '$DEV_BOT_APP_ID',
+    _id: { \$gt: ObjectId('${T0_OID_PREFIX}0000000000000000') }
+  })
+"
 ```
 
-Expected: count 来自的 event 都不带 dev bot app_id（dev bot 流量被 coe lane 接走了）。
+Expected: 输出 `0`（T0 后 prod mongo 没有任何 dev bot app_id 的 event —— dev bot 流量全部被 coe-validation lane 接走）。
 
-如果 prod mongo 出现 dev bot event，说明 lark-proxy 路由失败 fallback 到 prod 了 —— 这是另一个 bug，停下来诊断。
+如果输出 > 0，说明 lark-proxy lane_routing 路由失败 fallback 到 prod 了，停下来诊断：
+- 看 lark-proxy logs：`make logs APP=lark-proxy KEYWORD="lane\|fallback\|$DEV_BOT_APP_ID" SINCE=10m`
+- 看 paas-engine lane_routing 表：`/ops-db @paas_engine SELECT * FROM lane_routing WHERE route_type='bot' AND route_key='dev'`
 
 无 commit。
 
@@ -896,7 +951,7 @@ EOF
 | §3.4 rabbitmq 漏 commit | Task 1-2 |
 | §3.5 零业务代码改动 | 整个 plan 不动业务代码 |
 | §4 实施顺序 | Task 1-12 一致 |
-| §5 验收 | Task 4 / Task 7 / Task 10 / Task 11 |
+| §5 验收 | Task 4 + Task 5/6 Step 6（resolved-config smoke check） + Task 10 + Task 11；RequiredKeys 反向 reject 引用 Phase 2 已验证（Task 7 跳过，见 Task 7 跳过理由） |
 | §6.2 OSS/TOS mandatory 缓解 | Task 8 |
 | §7 风险 + 回滚 | "整体回滚预案" 段 |
 | §8 验证后 memory | Task 12 完成后另起 memory update（不在 plan 内）|
