@@ -19,7 +19,7 @@ services:
       retries: 5
 
   chiwei-test-rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    image: harbor.local:30002/inner-bot/rabbitmq@sha256:879c8c73943ed7169df2f7d6062740fab1f247d03068721d84a9610dabd7fa70  # Phase 2 漏 commit 补：harbor 镜像含 rabbitmq_delayed_message_exchange plugin
     container_name: chiwei-test-rabbitmq
     restart: unless-stopped
     environment:
@@ -58,6 +58,40 @@ services:
       timeout: 5s
       retries: 5
 
+  chiwei-test-qdrant:
+    image: qdrant/qdrant:v1.11.0
+    container_name: chiwei-test-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${CHIWEI_TEST_QDRANT_API_KEY:?qdrant api key required}
+    ports:
+      - "16333:6333"  # HTTP REST API（prod qdrant 占 6333，test 用 16333）
+      - "16334:6334"  # gRPC
+    volumes:
+      - chiwei_test_qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && printf \"GET /readyz HTTP/1.0\\r\\napi-key: $$QDRANT__SERVICE__API_KEY\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chiwei-test-mongo:
+    image: mongo:7.0.14-jammy
+    container_name: chiwei-test-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: chiwei-test
+      MONGO_INITDB_ROOT_PASSWORD: ${CHIWEI_TEST_MONGO_PASSWORD:?mongo password required}
+    ports:
+      - "27018:27017"  # prod mongo 占 27017，test 用 27018
+    volumes:
+      - chiwei_test_mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok", "--username", "chiwei-test", "--password", "${CHIWEI_TEST_MONGO_PASSWORD}", "--authenticationDatabase", "admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   chiwei_test_pg_data:
     name: chiwei_test_pg_data
@@ -65,3 +99,7 @@ volumes:
     name: chiwei_test_mq_data
   chiwei_test_redis_data:
     name: chiwei_test_redis_data
+  chiwei_test_qdrant_data:
+    name: chiwei_test_qdrant_data
+  chiwei_test_mongo_data:
+    name: chiwei_test_mongo_data
