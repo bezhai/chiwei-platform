@@ -15,7 +15,11 @@ const isEnabled = (value: string | undefined): boolean => {
   return value === '1' || value?.toLowerCase() === 'true';
 };
 
-const waitForever = () => new Promise(() => {});
+const waitForever = () => {
+  setInterval(() => {
+    // Keep the worker process alive when all business loops are disabled.
+  }, 60 * 60 * 1000);
+};
 
 // 抽象定时任务启动函数
 const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<any> | any) => {
@@ -73,7 +77,7 @@ if (disableSchedules) {
     console.log('Download task consumer disabled by DISABLE_CONSUMER.');
     if (disableSchedules) {
       console.log('All cronjob work is disabled; keeping process alive for deployment validation.');
-      await waitForever();
+      waitForever();
     }
     return;
   }
