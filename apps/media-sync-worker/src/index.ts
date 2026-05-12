@@ -3,7 +3,7 @@ dotenv.config();
 
 import cron from 'node-cron';  // 导入 node-cron
 
-const DOWNLOAD_CRON = '18 17 * * *';
+const DOWNLOAD_CRON = '3 11 * * *';
 
 // 重试配置
 const RETRY_DELAYS = [1000, 5000, 15000]; // 重试延迟时间（毫秒）
