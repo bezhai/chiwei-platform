@@ -301,7 +301,23 @@ async def _route_consumer_exception(
                           last_error=last_error)
         return
 
-    # 2. generic Exception path (incl. typed exceptions in mismatched policies)
+    # 2. swallow_and_log (contract §4.2 / B4): generic-Exception last-resort
+    #    bucket. Typed DuplicateData / NeedsReview paired with their matching
+    #    policy already returned above; everything else (including typed
+    #    exceptions in mismatched policies — they fell through) is swallowed:
+    #    log + mark_succeeded + return (caller's `async with message.process`
+    #    will ack). NEVER default — only edges that explicitly declared
+    #    .on_error("swallow_and_log") land here.
+    if wire.on_error == "swallow_and_log":
+        logger.warning(
+            "durable consumer: swallow_and_log policy ate exception "
+            "(edge=%s key=%s attempts=%d type=%s reason=%s)",
+            edge_id, idem_key, attempts, type(exc).__name__, last_error,
+        )
+        await mark_succeeded(edge_id=edge_id, idempotent_key=idem_key)
+        return
+
+    # 3. generic Exception path (incl. typed exceptions in mismatched policies)
     await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
                       last_error=last_error)
     decision = decide_retry(

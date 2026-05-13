@@ -67,7 +67,7 @@
 | W10 | `.retry(n=...)`：`n >= 1`，`backoff ∈ {'exponential', 'linear'}`，`lease_ms >= 1` | 当前 | `wire.py:146-153` |
 | W11 | `.durable()` 不能跟 `.with_latest(...)` 组合 | 当前 | `graph.py:261-274` |
 | W12 | `.durable()` 要求 data type 不是 `Meta.transient = True` | 当前 | `graph.py:286-298` |
-| W13 | `.on_error(policy)`：`policy ∈ {'dlq', 'ignore-duplicate', 'manual-review', 'swallow_and_log'}` | 当前 3 种（B4 补第 4 种 `swallow_and_log`） | `wire.py:18, 173-178`（policy 集合）；`durable.py:268-345`（分路由实现）；`swallow_and_log` **缺失，B4 落地** |
+| W13 | `.on_error(policy)`：`policy ∈ {'dlq', 'ignore-duplicate', 'manual-review', 'swallow_and_log'}` | 当前 4 种（B4 已落地 `swallow_and_log`） | `wire.py:VALID_ON_ERROR + on_error()`；`durable.py:_route_consumer_exception`（typed-match → swallow → generic retry/DLQ 三段优先级） |
 | W14 | `.on_error(...) != 'dlq'` 时 wire 必须 `.durable()`——in-process 边异常直接 propagate，on_error 仅对 durable 边有意义 | **未来目标（补 startup）** | **缺失断言 W14**，加到 `graph.py` |
 
 ### 3.4 debounce 组合
@@ -107,7 +107,7 @@ W19-W22 见 `emit.py:208-275`，当前契约。略表展开。
 | consumer 抛任何 `Exception` + `.retry()` 未 exhausted | `mark_failed` + `republish` delayed copy | 当前 | `durable.py:296-326` |
 | consumer 抛任何 `Exception` + retry exhausted + `on_error='manual-review'` | `publish_to_review_queue`；publish 失败 fall through DLQ | 当前 | `durable.py:328-343` |
 | consumer 抛任何 `Exception` + retry exhausted + `on_error='dlq'`（默认） | re-raise → `process(requeue=False)` → DLX | 当前 | `durable.py:345` |
-| consumer 抛任何 `Exception` + `on_error='swallow_and_log'` | log + `mark_succeeded` + ack（**禁止默认开启**——必须显式声明） | **未来目标**（B4 落地） | **缺失，加到 `durable.py:_route_consumer_exception`** |
+| consumer 抛任何 `Exception` + `on_error='swallow_and_log'` | log warning + `mark_succeeded` + ack（**禁止默认开启**——必须显式声明）。**优先级**：放在 typed-policy match 之后、generic retry/DLQ 之前；DuplicateData/NeedsReview 配套自己的 policy 仍先匹配，typed exception 落到 swallow wire（policy 不匹配）按 generic 处理一并吃掉 | **已落地（B4）** | `durable.py:_route_consumer_exception` 第 2 段 swallow_and_log 分支 |
 
 ### 4.3 runtime 层：in-process emit
 
@@ -228,7 +228,7 @@ contract 违反 → `GraphError`，启动失败。运行时无 wire 层异常。
 | W2a | `graph.py` block 4e（W11 之后）| `with_latest(X)` 的 X 必须有 Key，emit 的 primary data 必须有同名属性 | **A0 已完成**（`graph.py` block 4e） |
 | W4a | `emit.py` cross-app 分支 | cross-app wire 必须至少有 `.durable()` / `Source.mq` 一种 transport；runtime 触发时 raise RuntimeError，禁止静默 skip | **A0 已完成**（`emit.py:108-117`） |
 | W14 | `graph.py` block 4d | `on_error != 'dlq'` 但 wire 不 `.durable()` → `GraphError` | **A0 已完成**（`graph.py` block 4d） |
-| swallow_and_log | `wire.py:VALID_ON_ERROR` 扩 + `durable.py:_route_consumer_exception` 加分支 | 第 4 种 on_error policy | B4 阶段补 |
+| swallow_and_log | `wire.py:VALID_ON_ERROR` 扩 + `durable.py:_route_consumer_exception` 加分支 | 第 4 种 on_error policy | **B4 已落地** |
 | cron/interval emit 异常 vs infra 异常分清 | `engine.py:_source_loop_cron / _source_loop_interval` | 当前一律杀 pod，目标：emit() 抛的异常 log+继续；connection 等 infra 异常杀 pod | A2 阶段补 |
 
 ### 6.2 不是断言，是 manual review 待办
