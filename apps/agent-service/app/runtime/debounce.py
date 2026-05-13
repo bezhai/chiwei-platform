@@ -424,6 +424,8 @@ async def stop_debounce_consumers() -> None:
         try:
             await queue.cancel(tag)
         except Exception as e:  # pragma: no cover — best effort on teardown
+            # Classification: HARMLESS teardown (mirror durable.py:stop_consumers;
+            # broker reaps consumer tags on connection close).
             logger.warning("failed to cancel debounce consumer %s: %s", tag, e)
     _consumer_tags.clear()
     # Yield so any handler mid-``message.process()`` can complete.

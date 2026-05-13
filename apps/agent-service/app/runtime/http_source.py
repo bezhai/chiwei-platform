@@ -53,6 +53,10 @@ def _bind_one(app: FastAPI, w, src) -> None:
             try:
                 body = await req.json()
             except Exception:
+                # Classification: HARMLESS per-request fallback. Empty / missing
+                # / non-JSON body is treated as "no body fields"; query string
+                # alone may still satisfy the Data class. Validation fails below
+                # (data_cls(**kwargs)) → returns HTTP 422 to the caller.
                 body = {}
             if isinstance(body, dict):
                 # Body wins on conflict: explicit body fields take precedence
@@ -62,6 +66,10 @@ def _bind_one(app: FastAPI, w, src) -> None:
         try:
             data_obj = data_cls(**kwargs)
         except Exception as exc:
+            # Classification: PER-REQUEST validation failure → caller's
+            # responsibility. Returns 422 to the HTTP caller; loop semantics
+            # (contract §4.1) don't apply—HTTP source is a request/response
+            # endpoint, not a polling loop.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if not sync_response:

@@ -86,6 +86,10 @@ def _resolve_data_class(data_type: str) -> type[Data] | None:
             return None
         return cls
     except Exception:
+        # Classification: PER-MESSAGE drop. data_type may reference a Data class
+        # whose module was deleted between publish and consume. Caller
+        # (_runtime_trigger_consumer) interprets None as "drop the envelope"
+        # → ack on context exit → no broker requeue / no DLX.
         logger.exception("failed resolving data_type=%s", data_type)
         return None
 
@@ -130,6 +134,11 @@ async def _runtime_trigger_consumer(envelope: DelayedTriggerEnvelope) -> None:
     try:
         data = cls(**envelope.payload)
     except Exception:
+        # Classification: PER-MESSAGE drop. Malformed payload (data_type may
+        # have evolved since publish—schema mismatch, missing required field).
+        # Drop the envelope; caller's durable wrapper acks via process(
+        # requeue=False) so it doesn't loop—business loss is acceptable because
+        # the envelope is a delayed self-trigger, not user-visible data.
         logger.exception(
             "delayed trigger envelope payload failed validation: data_type=%s",
             envelope.data_type,

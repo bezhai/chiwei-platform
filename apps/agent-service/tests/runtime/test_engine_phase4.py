@@ -133,17 +133,27 @@ async def test_normal_stop_does_not_exit(monkeypatch):
 
 
 class _BadTick(Data):
-    ts: Annotated[str, Key]
+    """Lacks required 'ts' field — _build_payload (non-emit path) raises."""
+
+    tid: Annotated[str, Key]
 
 
 @node
-async def _bad_consumer(t: _BadTick) -> None:
-    raise RuntimeError("consumer raises every tick")
+async def _bad_consumer(t: _BadTick) -> None:  # pragma: no cover — never reached
+    raise AssertionError("_bad_consumer should not run; build_payload errors first")
 
 
 @pytest.mark.asyncio
 async def test_watchdog_exits_on_source_error(monkeypatch):
-    """A fatal source loop error triggers os._exit(1)."""
+    """A fatal source loop error (non-emit path) triggers os._exit(1).
+
+    Contract §4.1 (A2): only **infra / payload-build / clock setup** failures
+    along the source-loop are fatal; emit() exceptions are log+continue.
+    This test uses a Data without a ``ts`` field so ``_build_payload``
+    raises BEFORE emit() — confirming the still-fatal classification.
+    The "consumer raises on every tick" case is owned by
+    ``tests/runtime/test_engine_source_error.py``.
+    """
     clear_wiring()
     clear_bindings()
     reset_emit_runtime()

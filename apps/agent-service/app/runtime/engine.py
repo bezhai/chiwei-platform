@@ -213,6 +213,9 @@ class Runtime:
         try:
             return w.data_type(ts=ts.isoformat())
         except (TypeError, ValidationError) as e:
+            # Classification: FATAL contract violation. Surfaces to source-loop
+            # outer try → _record_source_error → watchdog kill pod, matching the
+            # "payload build / clock setup" fatal category in contract §4.1.
             raise RuntimeError(
                 f"cron/interval source for {w.data_type.__name__} requires "
                 f"a 'ts: str' field"
@@ -317,6 +320,9 @@ class Runtime:
             except asyncio.CancelledError:
                 pass
             except Exception as e:
+                # Classification: HARMLESS teardown swallow (contract §4 not
+                # applicable—不是消息处理路径，是 stop 阶段 await 已取消任务).
+                # 单个任务退出态报错不影响后续任务清理，记一条 warning 即可.
                 logger.warning("runtime: task %s exited with %r", t.get_name(), e)
         self._source_tasks.clear()
         self._watchdog_task = None
@@ -380,11 +386,29 @@ class Runtime:
                     await asyncio.sleep(delay)
                 payload = self._build_payload(w, next_ts)
                 trace_id = f"cron:{expr_slug}:{uuid.uuid4().hex[:8]}"
-                async with bind_context(Context(trace_id=trace_id, lane=None)):
-                    await emit(payload)
+                # contract §4.1: emit() 抛 Exception = log + 继续下一 tick.
+                # 错过一次 tick 不应该是 fatal——业务/wire/consumer 的故障由
+                # wire on_error / durable retry 等下游策略决定，不在 source loop
+                # 抬给 watchdog。infra 故障（croniter 配置 / 时钟 setup / payload
+                # build 等非 emit 路径）仍传播到外层 try → _record_source_error。
+                try:
+                    async with bind_context(Context(trace_id=trace_id, lane=None)):
+                        await emit(payload)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as emit_exc:
+                    logger.exception(
+                        "runtime: cron source %s emit() raised %r; "
+                        "skipping this tick and continuing",
+                        name,
+                        emit_exc,
+                    )
+                    continue
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            # 非 emit 路径 fatal: croniter 故障 / payload build (TypeError /
+            # ValidationError → RuntimeError) / 时钟设置等启动期或 invariant 违反.
             self._record_source_error(name, e)
             return
 
@@ -421,11 +445,26 @@ class Runtime:
                 next_fire += seconds
                 payload = self._build_payload(w, ts)
                 trace_id = f"interval:{seconds}s:{uuid.uuid4().hex[:8]}"
-                async with bind_context(Context(trace_id=trace_id, lane=None)):
-                    await emit(payload)
+                # contract §4.1: emit() 抛 Exception = log + 继续下一 tick.
+                # 见 _source_loop_cron 同段注释。next_fire 已在 emit 前 += seconds,
+                # 即使本 tick emit 失败，下一 tick 的调度时间不会因失败被打乱。
+                try:
+                    async with bind_context(Context(trace_id=trace_id, lane=None)):
+                        await emit(payload)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as emit_exc:
+                    logger.exception(
+                        "runtime: interval source %s emit() raised %r; "
+                        "skipping this tick and continuing",
+                        name,
+                        emit_exc,
+                    )
+                    continue
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            # 非 emit 路径 fatal: 时钟 setup / payload build / 时钟相关故障.
             self._record_source_error(name, e)
             return
 
@@ -525,13 +564,16 @@ class Runtime:
             # ``mq.consume``'s ``get_queue`` for exactly that reason.
             queue = await channel.get_queue(actual_queue)
         except Exception as e:
-            # Queue missing at consume time is a deployment-level bug
+            # Classification: FATAL infra (contract §4.1 row "Source loop infra
+            # 故障"). Queue missing at consume time is a deployment-level bug
             # (topology / publisher ordering). Fail fast so PaaS restarts
             # us and the operator sees the real cause.
             self._record_source_error(name, e)
             try:
                 await channel.close()
             except Exception:  # pragma: no cover
+                # HARMLESS cleanup: best-effort close on the error path;
+                # the connection is already in a bad state, swallow either way.
                 pass
             return
 
@@ -618,14 +660,13 @@ class Runtime:
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        # One bad message: either decode failed (re-raised
-                        # from the inner block above) or the @node target
-                        # itself raised. Both surface through
-                        # ``process(requeue=False)`` -> DLX. The loop
-                        # must stay alive to drain subsequent messages,
-                        # so we log and move on instead of tripping
-                        # _record_source_error (which would kill the
-                        # pod for a single bad message).
+                        # Classification: PER-MESSAGE routed (contract §4.1
+                        # rows "MQ Source 单条消息 decode 失败" + "MQ Source
+                        # 内 @node target 抛 Exception"). Both surface through
+                        # ``process(requeue=False)`` -> DLX. The loop must
+                        # stay alive to drain subsequent messages, so we log
+                        # and move on instead of tripping _record_source_error
+                        # (which would kill the pod for a single bad message).
                         logger.exception(
                             "mq source %s: target %s message DLX'd (%r); continuing",
                             actual_queue,
@@ -635,9 +676,9 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            # Only infrastructure errors (channel/connection death,
-            # consume-iterator setup failure) reach here — those *are*
-            # fatal and should restart the pod.
+            # Classification: FATAL infra (contract §4.1 "Source loop infra
+            # 故障"). Only channel/connection death + consume-iterator setup
+            # failure reach here — those *are* fatal and should restart the pod.
             self._record_source_error(name, e)
             return
         finally:
@@ -648,4 +689,6 @@ class Runtime:
             try:
                 await channel.close()
             except Exception:  # pragma: no cover — best-effort
+                # HARMLESS cleanup: channel may already be closed by a prior
+                # error path; swallow rather than mask the original exception.
                 pass

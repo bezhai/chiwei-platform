@@ -104,6 +104,13 @@ async def _drain_once(*, app: str, lane: str | None,
                     "WHERE id=:i"
                 ), {"i": row["id"]})
             except Exception as exc:
+                # Classification: PER-ROW routed (contract §4.4). Dispatcher
+                # loop must keep draining the next outbox row even when one
+                # emit() crashes—we record the failure on the row (attempts++
+                # with exponential backoff in next_attempt_at) so the next pass
+                # retries; ack semantics happen at row level via state column,
+                # not via broker. Killing the dispatcher loop here would stall
+                # every other pending row in the table.
                 logger.exception(
                     "outbox dispatch failed id=%s data_type=%s",
                     row["id"], row["data_type"],

@@ -226,6 +226,14 @@ def _build_handler(w: WireSpec, consumer: Callable):
                 try:
                     await consumer(**{param_name: obj})
                 except Exception as exc:
+                    # Classification: PER-MESSAGE routed (contract §4.2). The
+                    # router dispatches by exception type × wire.on_error policy:
+                    # DuplicateData/NeedsReview → ack with terminal state; retry
+                    # exhausted + dlq (default) → re-raise so process(requeue=
+                    # False) routes to DLX; retry available → mark_failed +
+                    # republish with delay. _route_consumer_exception NEVER
+                    # silently swallows—every path either ack's with a terminal
+                    # state or re-raises.
                     await _route_consumer_exception(
                         exc, wire=w, consumer=consumer,
                         inflight_key=(edge_id, idem_key),
@@ -436,6 +444,9 @@ async def stop_consumers() -> None:
         try:
             await queue.cancel(tag)
         except Exception as e:  # pragma: no cover — best effort on teardown
+            # Classification: HARMLESS teardown. Failing to cancel one consumer
+            # must not block cancelling the rest; broker reaps the consumer when
+            # the connection closes anyway.
             logger.warning("failed to cancel consumer %s: %s", tag, e)
     _consumer_tags.clear()
     # Yield so any handler that was mid-``message.process()`` can complete.
