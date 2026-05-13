@@ -39,6 +39,20 @@ class TMsg(Data):
         transient = True
 
 
+class JoinKeyOnly(Data):
+    """W2a: with_latest target whose Key (sid) is absent on M.mid — must reject."""
+
+    sid: Annotated[str, Key]
+    v: int = 0
+
+
+class MatchingKey(Data):
+    """W2a: with_latest target whose Key (mid) matches M.mid — must pass."""
+
+    mid: Annotated[str, Key]
+    v: int = 0
+
+
 def setup_function():
     clear_wiring()
     clear_bindings()
@@ -258,4 +272,106 @@ def test_http_source_consumer_in_default_app_ok():
     async def main_handler(m: M) -> None: ...
 
     wire(M).to(main_handler).from_(Source.http("/api/trigger"))
+    compile_graph()  # no raise
+
+
+# ---------------------------------------------------------------------------
+# A0 contract —缺失断言 W2a / W4a / W14
+# ---------------------------------------------------------------------------
+
+
+def test_w2a_with_latest_join_key_must_exist_on_primary():
+    # W2a: with_latest(X) 把 X 的第一个 Key 当作 join key 在 emit 时从 primary
+    # data 同名属性上取（emit.py:_resolve_inputs 的 getattr(data, key)）。primary
+    # 类没有同名属性时，当前是 emit 首次触发才 raise RuntimeError——compile_graph
+    # 必须在 boot 时就拒绝。
+    # M 只有 mid，JoinKeyOnly.Key=sid → primary 没有 sid 属性
+    @node
+    async def needs_join(m: M, s: JoinKeyOnly) -> None: ...
+
+    @node
+    async def join_producer(s: JoinKeyOnly) -> None: ...
+
+    wire(JoinKeyOnly).to(join_producer).as_latest()
+    wire(M).to(needs_join).with_latest(JoinKeyOnly)
+
+    with pytest.raises(GraphError, match="with_latest.*JoinKeyOnly.*sid"):
+        compile_graph()
+
+
+def test_w2a_with_latest_join_key_present_ok():
+    # primary 类拥有 join key 同名属性时通过
+    @node
+    async def reader(m: M, mk: MatchingKey) -> None: ...
+
+    @node
+    async def producer(mk: MatchingKey) -> None: ...
+
+    wire(MatchingKey).to(producer).as_latest()
+    wire(M).to(reader).with_latest(MatchingKey)
+    compile_graph()  # no raise
+
+
+def test_w4a_cross_app_compile_does_not_reject():
+    # W4a 是 runtime 检查（在 emit() 触发时 raise），不是 compile-time。
+    # compile_graph 无法判断 emit 触发方所在 app（无状态），所以这里只确认
+    # compile 通过，真正的 raise 测试见 tests/runtime/test_emit_cross_process.py
+    # 的 test_emit_raises_when_no_mq_source_and_consumer_other_app。
+    @node
+    async def vectorize_consumer(x: X) -> None: ...
+
+    bind(vectorize_consumer).to_app("vectorize-worker")
+    wire(X).to(vectorize_consumer)
+    # compile 通过——emit 触发时才知道是 cross-app 静默 skip
+    compile_graph()
+
+
+def test_w4a_cross_app_wire_with_durable_ok():
+    # 跨 app + .durable() 走 publish_durable 队列，路径正确
+    @node
+    async def vectorize_consumer(x: X) -> None: ...
+
+    bind(vectorize_consumer).to_app("vectorize-worker")
+    wire(X).to(vectorize_consumer).durable()
+    compile_graph()  # no raise
+
+
+def test_w4a_same_app_wire_without_transport_ok():
+    # 同 app（in-process）不需要 transport，正常通过
+    @node
+    async def local_consumer(x: X) -> None: ...
+
+    wire(X).to(local_consumer)
+    compile_graph()  # no raise
+
+
+def test_w14_on_error_non_default_requires_durable():
+    # W14: on_error != 'dlq' 时 wire 必须 .durable()。in-process 边异常直接
+    # propagate，on_error 在 in-process 路径上没有意义；声明了 != 'dlq' 但忘
+    # .durable() 说明业务认知错了，必须 boot 时拒绝。
+    @node
+    async def reviewer(x: X) -> None: ...
+
+    wire(X).to(reviewer).on_error("manual-review")  # 缺 .durable()
+
+    with pytest.raises(GraphError, match="on_error.*durable|durable.*on_error"):
+        compile_graph()
+
+
+def test_w14_on_error_dlq_default_ok_without_durable():
+    # 默认 on_error='dlq' 的 in-process wire 是合法状态——dlq 是默认值，
+    # 业务没显式声明任何 policy，不算违反 W14
+    @node
+    async def consumer(x: X) -> None: ...
+
+    wire(X).to(consumer)  # 没 .on_error()，没 .durable()
+    compile_graph()  # no raise
+
+
+def test_w14_on_error_with_durable_ok():
+    # on_error != 'dlq' + .durable() 是设计内的正确组合
+    @node
+    async def reviewer(x: X) -> None: ...
+
+    wire(X).to(reviewer).durable().on_error("manual-review")
     compile_graph()  # no raise

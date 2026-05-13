@@ -108,11 +108,10 @@ class TestCacheExpiry:
         # Insert expired entry
         mod._model_info_cache["expired-model"] = (info, time.monotonic() - 1)
 
-        # Expired entry triggers fresh DB lookup → mock tx to confirm bypass
-        with patch(
-            "app.runtime.db.tx",
-            side_effect=RuntimeError("no DB"),
-        ):
+        # Expired entry triggers fresh DB lookup → mock tx to confirm bypass.
+        # Patch tx at the module-level reference inside app.agent.models so
+        # the substitution wins over the live runtime.db ref.
+        with patch.object(mod, "tx", side_effect=RuntimeError("no DB")):
             with pytest.raises(RuntimeError, match="no DB"):
                 await _get_model_and_provider_info("expired-model")
 

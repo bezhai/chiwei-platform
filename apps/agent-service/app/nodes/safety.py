@@ -3,14 +3,13 @@
 合并 ``app/chat/safety.py`` 和 post safety chain 的所有逻辑：
 - module-level 私有 helpers：banned word + 4 个 LLM 检查 + ``_run_audit``
 - module-level enum / config：``BlockReason`` / ``_GUARD_*``
-- @node：``run_pre_safety`` / ``resolve_pre_safety_waiter`` / ``run_post_safety``
+- @node：``run_pre_safety`` / ``run_post_safety``
 - 常量：``TERMINAL_STATUSES``
 
 节点 / wiring / 外部入口由后续 Task 6-9 添加；本 Task 只搬迁 helper 保留行为。
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ from pydantic import BaseModel, Field
 from app.agent.core import Agent, AgentConfig
 from app.api.middleware import get_lane
 from app.capabilities import banned_words as _banned_words
+from app.capabilities.concurrency import fan_out_wait
 from app.data.queries import get_safety_status, set_safety_status
 from app.domain.safety import (
     PostSafetyRequest,
@@ -220,24 +220,26 @@ async def _run_pre_audit(
     except Exception as e:
         logger.error("Banned word check failed: %s", e)
 
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                _check_injection(message_content),
-                _check_politics(message_content),
-                _check_nsfw(message_content, persona_id),
-                return_exceptions=True,
-            ),
-            timeout=20.0,
-        )
-    except TimeoutError:
+    # fan_out_wait cancels in-flight checks on deadline trip (improvement
+    # over the legacy ``wait_for(gather(...))`` which leaked the slow
+    # task). Slow checks surface as TimeoutError in their result slot;
+    # fail-open keeps the original pass-through verdict.
+    results = await fan_out_wait(
+        [
+            _check_injection(message_content),
+            _check_politics(message_content),
+            _check_nsfw(message_content, persona_id),
+        ],
+        timeout_s=20.0,
+    )
+
+    if any(isinstance(r, TimeoutError) for r in results):
         logger.warning("Pre-check exceeded 20s, passing through")
-        return _PreCheckOutcome()
 
     for r in results:
         if isinstance(r, _PreCheckOutcome) and r.is_blocked:
             return r
-        if isinstance(r, Exception):
+        if isinstance(r, Exception) and not isinstance(r, TimeoutError):
             logger.error("Pre-check sub-task failed: %s", r)
 
     return _PreCheckOutcome()
@@ -357,10 +359,7 @@ async def run_pre_safety(req: PreSafetyRequest) -> PreSafetyVerdict:
     )
 
 
-@node
-async def resolve_pre_safety_waiter(verdict: PreSafetyVerdict) -> None:
-    """收尾节点：把 verdict 塞回本进程的 Future registry."""
-    # 延迟 import 避免循环依赖（pre_safety_gate import nodes.safety 反过来）
-    from app.chat import pre_safety_gate
-    pre_safety_gate.resolve(verdict)
-    return None
+# B1: ``resolve_pre_safety_waiter`` removed. The PreSafetyVerdict auto-
+# emitted by ``run_pre_safety`` is now picked up generically by
+# ``emit_and_wait``'s notify() hook in app/runtime/emit.py — no
+# dedicated reply-side node is required.

@@ -42,15 +42,21 @@ def mock_prod():
 
 @pytest.fixture
 def mock_personas(monkeypatch):
-    async def _fake_list():
-        return ["p1", "p2"]
-    monkeypatch.setattr("app.nodes.life_dataflow._list_persona_ids", _fake_list)
+    """B7: ``_persona_dicts`` replaces the old ``_list_persona_ids``
+    helper; the wire-level ``fan_out_per`` calls it to fan a template
+    Request into per-persona copies."""
+    async def _fake_dicts():
+        return [{"persona_id": "p1"}, {"persona_id": "p2"}]
+    monkeypatch.setattr("app.nodes.life_dataflow._persona_dicts", _fake_dicts)
 
 
 @pytest.mark.asyncio
 async def test_fan_out_life_tick_emits_per_persona(reset_runtime, mock_prod, mock_personas):
-    from app.nodes.life_dataflow import fan_out_life_tick
+    """fan_out_life_tick emits a template Request; the wire's
+    ``.fan_out_per(_persona_dicts)`` fans it into per-persona copies."""
+    from app.nodes.life_dataflow import _persona_dicts, fan_out_life_tick
     from app.runtime import wire
+    from app.runtime.graph import compile_graph
     from app.runtime.node import node
 
     seen: list[LifeTickRequest] = []
@@ -58,7 +64,8 @@ async def test_fan_out_life_tick_emits_per_persona(reset_runtime, mock_prod, moc
     async def _capture(r: LifeTickRequest) -> None:
         seen.append(r)
     probe = node(_capture)
-    wire(LifeTickRequest).to(probe)
+    wire(LifeTickRequest).fan_out_per(_persona_dicts).to(probe)
+    compile_graph()
 
     await fan_out_life_tick(MinuteTick(ts="2026-04-30T08:00:00+08:00"))
     assert {r.persona_id for r in seen} == {"p1", "p2"}
@@ -66,16 +73,20 @@ async def test_fan_out_life_tick_emits_per_persona(reset_runtime, mock_prod, moc
 
 @pytest.mark.asyncio
 async def test_fan_out_life_tick_skips_non_prod(reset_runtime, mock_personas, monkeypatch):
+    """Non-prod lane → fan_out_xxx @node returns without emit; nothing
+    reaches the wire's fan_out_per stage."""
     monkeypatch.setattr("app.nodes.life_dataflow._is_prod", lambda: False)
-    from app.nodes.life_dataflow import fan_out_life_tick
+    from app.nodes.life_dataflow import _persona_dicts, fan_out_life_tick
     from app.runtime import wire
+    from app.runtime.graph import compile_graph
     from app.runtime.node import node
 
     seen: list = []
 
     async def _capture(r: LifeTickRequest) -> None:
         seen.append(r)
-    wire(LifeTickRequest).to(node(_capture))
+    wire(LifeTickRequest).fan_out_per(_persona_dicts).to(node(_capture))
+    compile_graph()
 
     await fan_out_life_tick(MinuteTick(ts="2026-04-30T08:00:00+08:00"))
     assert seen == []
@@ -83,27 +94,41 @@ async def test_fan_out_life_tick_skips_non_prod(reset_runtime, mock_personas, mo
 
 @pytest.mark.asyncio
 async def test_fan_out_life_tick_swallows_db_error(reset_runtime, mock_prod, monkeypatch, caplog):
-    """DB 抖动不冒泡到 source loop。"""
+    """DB 抖动不冒泡到 source loop — extractor exception is now caught
+    by ``emit._dispatch_fan_out`` (was caught by the hand-rolled
+    ``_fan_out_per_persona`` try/except before B7)."""
+    import logging
+
     async def _boom():
         raise RuntimeError("db down")
-    monkeypatch.setattr("app.nodes.life_dataflow._list_persona_ids", _boom)
+    monkeypatch.setattr("app.nodes.life_dataflow._persona_dicts", _boom)
 
-    from app.nodes.life_dataflow import fan_out_life_tick
+    from app.nodes.life_dataflow import _persona_dicts, fan_out_life_tick
+    from app.runtime import wire
+    from app.runtime.graph import compile_graph
+    from app.runtime.node import node
 
-    # No exception raised — only logged
-    await fan_out_life_tick(MinuteTick(ts="2026-04-30T08:00:00+08:00"))
-    assert "list_persona_ids failed" in caplog.text
+    async def _capture(r: LifeTickRequest) -> None: ...
+    wire(LifeTickRequest).fan_out_per(_persona_dicts).to(node(_capture))
+    compile_graph()
+
+    with caplog.at_level(logging.WARNING):
+        # No exception raised — extractor failure is swallowed + logged.
+        await fan_out_life_tick(MinuteTick(ts="2026-04-30T08:00:00+08:00"))
+    assert "fan_out_per extractor failed" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_fan_out_voice_only_at_top_of_hour(reset_runtime, mock_prod, mock_personas):
-    from app.nodes.life_dataflow import fan_out_voice
+    from app.nodes.life_dataflow import _persona_dicts, fan_out_voice
     from app.runtime import wire
+    from app.runtime.graph import compile_graph
     from app.runtime.node import node
 
     seen: list = []
     async def _capture(r: VoiceRequest) -> None: seen.append(r)
-    wire(VoiceRequest).to(node(_capture))
+    wire(VoiceRequest).fan_out_per(_persona_dicts).to(node(_capture))
+    compile_graph()
 
     # 8:30 — wrong minute, no emit
     await fan_out_voice(MinuteTick(ts="2026-04-30T08:30:00+08:00"))

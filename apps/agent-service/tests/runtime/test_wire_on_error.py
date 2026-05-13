@@ -31,7 +31,9 @@ def test_on_error_returns_builder_for_chaining():
     assert same is builder
 
 
-@pytest.mark.parametrize("policy", ["dlq", "ignore-duplicate", "manual-review"])
+@pytest.mark.parametrize(
+    "policy", ["dlq", "ignore-duplicate", "manual-review", "swallow_and_log"]
+)
 def test_on_error_accepts_valid_policies(policy):
     wire(_D).durable().on_error(policy)
 
@@ -44,3 +46,9 @@ def test_on_error_rejects_invalid_policy():
 def test_on_error_rejects_typo():
     with pytest.raises(ValueError):
         wire(_D).durable().on_error("dql")
+
+
+def test_on_error_swallow_and_log_writes_into_wire_spec():
+    """B4: swallow_and_log is the 4th policy (contract §4.2). Stored verbatim."""
+    builder = wire(_D).durable().on_error("swallow_and_log")
+    assert builder._spec.on_error == "swallow_and_log"

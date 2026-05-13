@@ -77,12 +77,10 @@ async def test_emit_no_matching_wire_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_emit_skips_in_process_consumer_bound_to_other_app(monkeypatch):
-    """In-process consumers bound to a worker app must NOT run in the
-    main process. bind(...).to_app() is the placement contract — emit
-    has to honour it the same way the durable consumer / source loop
-    already do, otherwise a main-process emit would silently run a
-    worker-only @node here.
+async def test_emit_inprocess_consumer_bound_to_other_app(monkeypatch):
+    """A0 W4a: emit 必须 raise 在 main process 触发 worker-only wire 时
+    （contract "禁止静默兜底"——之前的 silent skip 留下隐式 wiring bug）。
+    在 bound worker process 内 emit 正常走 in-process 路径。
     """
     from app.runtime.placement import bind
 
@@ -91,16 +89,17 @@ async def test_emit_skips_in_process_consumer_bound_to_other_app(monkeypatch):
         calls.append(m)
 
     bind(worker_only).to_app("vectorize-worker")
-    wire(M).to(worker_only)  # in-process
+    wire(M).to(worker_only)  # in-process within worker, no cross-app transport
     compile_graph()
 
     # Main process: APP_NAME unset / DEFAULT_APP. worker_only bound to
-    # vectorize-worker -> emit must skip it.
+    # vectorize-worker -> emit must raise (not silent skip).
     monkeypatch.delenv("APP_NAME", raising=False)
-    await emit(M(mid="m1", text="hi"))
+    with pytest.raises(RuntimeError, match="cross-app dispatch has no transport"):
+        await emit(M(mid="m1", text="hi"))
     assert calls == []
 
-    # Same emit from inside the bound worker process: should run.
+    # Same emit from inside the bound worker process: should run in-process.
     monkeypatch.setenv("APP_NAME", "vectorize-worker")
     await emit(M(mid="m1", text="hi"))
     assert len(calls) == 1

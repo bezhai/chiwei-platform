@@ -13,10 +13,13 @@ from app.capabilities import banned_words
 
 @pytest.fixture
 async def fake_redis(monkeypatch: pytest.MonkeyPatch) -> fakeredis.aioredis.FakeRedis:
+    import app.capabilities.redis as redis_cap_mod
     import app.infra.redis as redis_mod
 
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_mod, "_redis", fake)
+    # Reset capability singleton so it rebuilds against fakeredis.
+    monkeypatch.setattr(redis_cap_mod, "_singleton", None)
     return fake
 
 

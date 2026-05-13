@@ -90,6 +90,17 @@ class _ImageClient:
         """POST to tool-service, unwrap ``{success, data, message}`` envelope.
 
         Returns ``data`` dict on success, ``None`` on any failure.
+
+        contract-allowed None (§4.8) for legacy-pinned reason: this client
+        has 4 call-sites in ``infra.image`` plus 3 external callers
+        (``_context_images.py``, ``vectorize.py``, ``agent/tools/_common.py``)
+        that all branch on ``if data:`` / ``return_exceptions=True``. Migrating
+        to ``raise CapabilityTimeout/CallFailed`` is correct per the contract
+        but is a deliberate behavior change; tracked as backlog L1 follow-up
+        (image_client typed-error migration). Outer wrappers (e.g.
+        ``upload_and_register``) currently re-catch ``Exception`` so the
+        migration is mechanical but needs its own dedicated single-purpose
+        commit + caller-by-caller verification.
         """
         actual_timeout = timeout or self._timeout
         start = time.monotonic()
@@ -185,7 +196,13 @@ class _ImageClient:
         message_id: str | None,
         bot_name: str | None = None,
     ) -> str | None:
-        """Download an image and return it as a data URI."""
+        """Download an image and return it as a data URI.
+
+        contract-allowed None (§4.8): same legacy pin as ``_post`` — the
+        ``vectorize.py`` call site uses ``gather(return_exceptions=True)``
+        and filters by ``isinstance(r, str)``, so flipping to raise is
+        safe but is deferred to the dedicated image-client migration
+        (backlog L1)."""
         try:
             result = await self.process_image(file_key, message_id, bot_name)
             if not result:
@@ -253,9 +270,12 @@ class ImageRegistry:
     Fields: ``__counter__`` -> N, ``1.png`` -> url, ``2.png`` -> url, ...
     TTL: 30 minutes.
 
-    Phase 7d Gap 14: registry self-fetches the Redis client via
-    ``app.infra.redis.get_redis()`` so callers don't need to reach into
-    the redis layer just to construct one.
+    Cross-service contract: chat-response-worker reads the same bare
+    key when rendering the AI reply (replaces ``N.png`` in the text
+    with the registered TOS URL). Lane isolation is delegated to the
+    ConfigBundle (coe-* lanes get a separate Redis container); the key
+    is never rewritten by the capability — that broke ppe→prod sharing
+    in trace 3de371aea10290b327f1386ea56f180c.
     """
 
     def __init__(self, message_id: str) -> None:
@@ -264,37 +284,41 @@ class ImageRegistry:
 
     async def register(self, tos_url: str) -> str:
         """Register a TOS URL, return filename like ``3.png``."""
-        from app.infra.redis import get_redis
+        from app.capabilities.redis import get_redis_capability
 
-        redis = await get_redis()
-        n = await redis.eval(_REGISTER_LUA, 1, self._key, tos_url, _REGISTRY_TTL)
+        cap = await get_redis_capability()
+        n = await cap.eval(
+            _REGISTER_LUA,
+            keys=[self._key],
+            args=[tos_url, _REGISTRY_TTL],
+        )
         return f"{n}.png"
 
     async def register_batch(self, urls: list[str]) -> list[str]:
         """Register multiple URLs via pipeline."""
         if not urls:
             return []
-        from app.infra.redis import get_redis
+        from app.capabilities.redis import get_redis_capability
 
-        redis = await get_redis()
-        pipe = redis.pipeline(transaction=False)
-        for url in urls:
-            pipe.eval(_REGISTER_LUA, 1, self._key, url, _REGISTRY_TTL)
-        results = await pipe.execute()
+        cap = await get_redis_capability()
+        async with cap.pipeline() as pipe:
+            for url in urls:
+                pipe.eval(_REGISTER_LUA, 1, self._key, url, _REGISTRY_TTL)
+            results = await pipe.execute()
         return [f"{n}.png" for n in results]
 
     async def resolve(self, filename: str) -> str | None:
         """Resolve a filename to its TOS URL."""
-        from app.infra.redis import get_redis
+        from app.capabilities.redis import get_redis_capability
 
-        redis = await get_redis()
-        return await redis.hget(self._key, filename)
+        cap = await get_redis_capability()
+        return await cap.hget(self._key, filename)
 
     async def resolve_all(self) -> dict[str, str]:
         """Get all filename -> URL mappings (excludes __counter__)."""
-        from app.infra.redis import get_redis
+        from app.capabilities.redis import get_redis_capability
 
-        redis = await get_redis()
-        data: dict[str, Any] = await redis.hgetall(self._key)
+        cap = await get_redis_capability()
+        data: dict[str, Any] = await cap.hgetall(self._key)
         data.pop("__counter__", None)
         return data

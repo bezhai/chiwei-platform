@@ -41,7 +41,7 @@ CST = ZoneInfo("Asia/Shanghai")
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — used by ``.fan_out_per(_persona_dicts)`` on the wires below.
 # ---------------------------------------------------------------------------
 
 
@@ -50,30 +50,25 @@ def _is_prod() -> bool:
     return not (settings.lane and settings.lane != "prod")
 
 
-async def _list_persona_ids() -> list[str]:
-    return await list_all_persona_ids()
+async def _persona_dicts() -> list[dict]:
+    """Wire-level fan_out_per extractor.
 
-
-async def _fan_out_per_persona(label: str, build_request) -> None:
-    """通用 fan-out：包住 list_persona_ids + emit 循环，所有异常 log 不冒泡.
-
-    DB 抖动 / emit 失败一律不扔回 source loop —— 否则 ``_record_source_error``
-    会让进程退出。fan-out 失败的代价是这一拍丢，下一拍自然恢复。
+    Returns the list of ``{"persona_id": pid}`` dicts the runtime merges
+    into the in-flight template Data via ``model_copy(update=...)``.
+    Failure here (DB jitter on persona listing) is swallowed and logged
+    by ``emit._dispatch_fan_out`` so the source loop never sees the
+    exception — same fail-soft guarantee the old hand-rolled
+    ``_fan_out_per_persona`` provided around ``list_all_persona_ids``.
     """
-    try:
-        pids = await _list_persona_ids()
-    except Exception:
-        logger.exception("%s: list_persona_ids failed", label)
-        return
-    for pid in pids:
-        try:
-            await emit(build_request(pid))
-        except Exception:
-            logger.exception("[%s] %s fan-out failed", pid, label)
+    pids = await list_all_persona_ids()
+    return [{"persona_id": pid} for pid in pids]
 
 
 # ---------------------------------------------------------------------------
-# Cron fan-out @node
+# Cron tick @node — emit a per-persona template Request; the wire's
+# ``.fan_out_per(_persona_dicts)`` then fans it into per-key copies with
+# failure isolation between personas. Lane gate and time filters stay
+# here because they don't depend on persona identity.
 # ---------------------------------------------------------------------------
 
 
@@ -81,9 +76,7 @@ async def _fan_out_per_persona(label: str, build_request) -> None:
 async def fan_out_life_tick(t: MinuteTick) -> None:
     if not _is_prod():
         return
-    await _fan_out_per_persona(
-        "life_tick", lambda pid: LifeTickRequest(persona_id=pid, ts=t.ts)
-    )
+    await emit(LifeTickRequest(ts=t.ts))
 
 
 @node
@@ -95,38 +88,28 @@ async def fan_out_voice(t: MinuteTick) -> None:
         return
     if cst_ts.minute != 0:
         return  # voice 整点触发
-    await _fan_out_per_persona(
-        "voice", lambda pid: VoiceRequest(persona_id=pid, ts=t.ts)
-    )
+    await emit(VoiceRequest(ts=t.ts))
 
 
 @node
 async def fan_out_light_day(t: LightDayTick) -> None:
     if not _is_prod():
         return
-    await _fan_out_per_persona(
-        "light_day",
-        lambda pid: LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=30),
-    )
+    await emit(LightReviewRequest(ts=t.ts, window_minutes=30))
 
 
 @node
 async def fan_out_light_night(t: LightNightTick) -> None:
     if not _is_prod():
         return
-    await _fan_out_per_persona(
-        "light_night",
-        lambda pid: LightReviewRequest(persona_id=pid, ts=t.ts, window_minutes=60),
-    )
+    await emit(LightReviewRequest(ts=t.ts, window_minutes=60))
 
 
 @node
 async def fan_out_heavy(t: HeavyReviewTick) -> None:
     if not _is_prod():
         return
-    await _fan_out_per_persona(
-        "heavy", lambda pid: HeavyReviewRequest(persona_id=pid, ts=t.ts)
-    )
+    await emit(HeavyReviewRequest(ts=t.ts))
 
 
 # ---------------------------------------------------------------------------
@@ -151,16 +134,12 @@ async def run_shared_daily_pipeline_node(t: DailyPlanTick) -> SharedDailyContext
 
 @node
 async def fan_out_daily_plan(c: SharedDailyContext) -> None:
-    await _fan_out_per_persona(
-        "daily_plan",
-        lambda pid: DailyPlanRequest(
-            persona_id=pid,
-            target_date=c.target_date,
-            wild_materials=c.wild_materials,
-            search_anchors=c.search_anchors,
-            theater=c.theater,
-        ),
-    )
+    await emit(DailyPlanRequest(
+        target_date=c.target_date,
+        wild_materials=c.wild_materials,
+        search_anchors=c.search_anchors,
+        theater=c.theater,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -240,12 +219,11 @@ def _new_glimpse_request(persona_id: str, chat_id: str, ts: str, kind: str) -> G
 
 @node
 async def fan_out_glimpse(t: GlimpseTick) -> None:
-    """5min cron → 对每个 persona emit GlimpseTickRequest."""
+    """5min cron → emit GlimpseTickRequest template; the wire's
+    ``.fan_out_per(_persona_dicts)`` fans it into per-persona copies."""
     if not _is_prod():
         return
-    await _fan_out_per_persona(
-        "glimpse_tick", lambda pid: GlimpseTickRequest(persona_id=pid, ts=t.ts)
-    )
+    await emit(GlimpseTickRequest(ts=t.ts))
 
 
 @node

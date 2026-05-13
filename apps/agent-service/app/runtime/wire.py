@@ -15,7 +15,12 @@ from app.runtime.data import Data
 from app.runtime.sink import SinkSpec
 from app.runtime.source import SourceSpec
 
-VALID_ON_ERROR: tuple[str, ...] = ("dlq", "ignore-duplicate", "manual-review")
+VALID_ON_ERROR: tuple[str, ...] = (
+    "dlq",
+    "ignore-duplicate",
+    "manual-review",
+    "swallow_and_log",
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,12 @@ class WireSpec:
     # str (not Literal) for forward-compat with future policies — matches
     # RetryPolicy.backoff. Validated at builder time via VALID_ON_ERROR.
     on_error: str = "dlq"
+    # B7: declarative per-key fan-out. The extractor is called at emit
+    # time and must return ``list[dict]`` — each dict is merged into the
+    # primary Data via ``model_copy(update=item)`` before the consumer
+    # is invoked. Per-key consumer calls are isolated: one key's failure
+    # does NOT abort the others.
+    fan_out_extractor: Callable | None = None
 
 
 WIRING_REGISTRY: list[WireSpec] = []
@@ -160,15 +171,48 @@ class WireBuilder:
         )
         return self
 
-    def on_error(self, policy: str) -> WireBuilder:
-        """Configure error policy for this wire (Gap 18).
+    def fan_out_per(self, extractor: Callable) -> WireBuilder:
+        """Declare per-key fan-out on this wire (B7).
 
-        Valid values: 'dlq' (default — fall to DLQ),
-        'ignore-duplicate' (ack DuplicateData silently),
-        'manual-review' (route NeedsReview to review queue).
-        retry is controlled separately by .retry(); on_error decides
-        what happens AFTER retries are exhausted or for non-retryable
-        errors.
+        At emit time, ``extractor()`` is called to produce ``list[dict]``
+        (or an awaitable returning that). For each item, the runtime
+        builds ``data.model_copy(update=item)`` and invokes the
+        consumer(s) with the patched copy. Per-key consumer invocations
+        are **isolated**: one raise does NOT abort the other keys —
+        emit collects all calls via ``asyncio.gather(return_exceptions=
+        True)`` and logs failures.
+
+        Cannot combine with ``.durable()``, ``.debounce()``, or
+        ``.with_latest()`` (rejected at compile time). Replaces
+        hand-rolled fan-out loops inside @node bodies.
+        """
+        if not callable(extractor):
+            raise TypeError(
+                f"fan_out_per(extractor) requires a callable, got {type(extractor).__name__}"
+            )
+        self._spec.fan_out_extractor = extractor
+        return self
+
+    def on_error(self, policy: str) -> WireBuilder:
+        """Configure error policy for this wire (Gap 18, contract §4.2).
+
+        Valid values:
+          - 'dlq' (default — fall to DLQ via process(requeue=False))
+          - 'ignore-duplicate' (ack DuplicateData silently, mark succeeded)
+          - 'manual-review' (route NeedsReview / retry-exhausted to review queue)
+          - 'swallow_and_log' (B4): consumer raised any Exception → log warning
+            + mark_succeeded + ack. **Do not default-enable**. Only declare on
+            edges where "I know this occasionally fails and I genuinely do not
+            care" is the explicit business stance. swallow covers the generic-
+            Exception last-resort bucket: typed DuplicateData / NeedsReview
+            paired with their matching policy still take precedence (see
+            durable._route_consumer_exception). A typed exception in a wire
+            with on_error='swallow_and_log' is treated as a generic Exception
+            and gets swallowed (consistent with the "typed exception in
+            mismatched policy ⇒ generic path" rule).
+
+        retry is controlled separately by .retry(); on_error decides what
+        happens AFTER retries are exhausted or for non-retryable errors.
         """
         if policy not in VALID_ON_ERROR:
             raise ValueError(

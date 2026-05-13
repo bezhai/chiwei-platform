@@ -1,9 +1,9 @@
 """Unified worker entry. Reads ``APP_NAME`` from env, boots :class:`Runtime`.
 
-Calls ``load_dataflow_graph()`` to register wiring/deployment side-
-effects + validate, the same hook the FastAPI main process uses. This
-keeps every process on the same boot contract — see
-``app/runtime/bootstrap.py``.
+Goes through ``bootstrap.prepare_for_run`` so the boot phase order (load
+graph -> register runtime-internal trigger wire -> migrate -> start
+consumers / source loops) matches the FastAPI lifespan in ``app.main``
+exactly. See ``app/runtime/bootstrap.py`` for the contract.
 """
 
 from __future__ import annotations
@@ -14,17 +14,27 @@ import os
 from inner_shared.logger import setup_logging
 
 from app.data.bootstrap import ensure_business_schema
-from app.runtime.bootstrap import load_dataflow_graph
+from app.runtime.bootstrap import prepare_for_run
 from app.runtime.engine import Runtime
 
 
 async def _main_async() -> None:
     """Async entry point."""
-    # Phase 2: ensure business schema exists before any downstream operation
-    # (dataflow nodes, RabbitMQ topology, sources, consumers)
+    # Phase 0: ensure business schema exists before any downstream
+    # operation (dataflow nodes, RabbitMQ topology, sources, consumers).
     await ensure_business_schema()
-    load_dataflow_graph()
+
+    # Phase 1+2 (load graph) + Phase 1.5 (register trigger wire).
+    # Worker entries don't pre-declare durable topology — start_consumers
+    # already declares the consumer side, and workers are consumer
+    # processes by definition.
     app_name = os.getenv("APP_NAME")
+    assert app_name is not None  # main() validated this already
+    await prepare_for_run(app_name)
+
+    # Phase 3+ (migrate, start consumers, start source loops) are owned
+    # by Runtime.run(). It already short-circuits register_runtime_trigger_wire
+    # if the wire is already registered (the second call is a no-op).
     runtime = Runtime(app_name=app_name)
     await runtime.run()
 

@@ -297,6 +297,96 @@ def compile_graph() -> CompiledGraph:
                 f"or drop ``.durable()`` and keep this edge in-process."
             )
 
+    # 4e) A0 W2a: with_latest(X) 把 X 的第一个 Key 作为 join key 在 emit 时从
+    # primary data 同名属性上读取（emit._resolve_inputs 的 getattr(data, key)）。
+    # primary 类没有同名属性 → emit 首次触发才 raise RuntimeError。compile 时
+    # 反射验证 join key 是 primary data 类的字段，把这个失败搬到 boot。
+    # 放在 4a/4b 之后让 W3 (签名 strict equality) + W11 (durable+with_latest)
+    # 先抛——它们的违反场景跟 W2a 的违反场景有重叠。
+    from app.runtime.data import key_fields
+
+    for w in wires:
+        for t in w.with_latest:
+            t_keys = key_fields(t)
+            if not t_keys:
+                raise GraphError(
+                    f"wire({w.data_type.__name__}).with_latest({t.__name__}): "
+                    f"{t.__name__} declares no Key field, cannot be used as a "
+                    f"join target (with_latest joins on the latest target's "
+                    f"first Key field)"
+                )
+            join_key = t_keys[0]
+            primary_fields = w.data_type.model_fields
+            if join_key not in primary_fields:
+                raise GraphError(
+                    f"wire({w.data_type.__name__}).with_latest({t.__name__}): "
+                    f"join key {join_key!r} (first Key field of "
+                    f"{t.__name__}) is not declared on "
+                    f"{w.data_type.__name__} — emit-time getattr would fail. "
+                    f"Add {join_key!r} to {w.data_type.__name__}, or change "
+                    f"{t.__name__}'s first Key, or drop the with_latest."
+                )
+
+    # 4d) A0 W14: on_error != 'dlq' requires .durable(). in-process emit 路径
+    # 上 consumer 抛异常直接 propagate 到 emit 调用方（emit.py docstring），
+    # on_error 由 durable handler 在 _route_consumer_exception 落实，对
+    # in-process 边没有意义。声明了非默认 on_error 但忘 .durable() 说明业务
+    # 认知错位，boot 时拒掉。
+    for w in wires:
+        if w.on_error == "dlq":
+            continue  # default — equivalent to not having declared anything
+        if not w.durable:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).on_error({w.on_error!r}): "
+                f"on_error policies other than 'dlq' only take effect on "
+                f"durable edges (the in-process path propagates consumer "
+                f"exceptions directly to emit's caller). Add .durable(), "
+                f"or drop .on_error() to fall back to the default."
+            )
+
+    # 4f) B7 fan_out_per combo restrictions. fan_out_per mutates the
+    # primary Data via ``model_copy(update=...)`` and dispatches per-key
+    # with isolation, which makes a few combinations either ambiguous
+    # or load-bearing on semantics we haven't designed yet:
+    #   * durable: per-key isolation overlaps the durable retry/DLQ path
+    #     in ways we haven't reasoned about; refuse until needed.
+    #   * debounce: debounce ships its own mq transport and is keyed by
+    #     a single (DataType, key) — overlaying fan_out_per would
+    #     duplicate the partitioning concept.
+    #   * with_latest: join-key resolution reads ``getattr(data, key)``
+    #     on the primary Data; if fan_out_per mutates that field
+    #     per-key, the joined latest changes per-key too — likely the
+    #     intent, but the contract is unverified. Refuse until a user
+    #     genuinely needs it.
+    for w in wires:
+        if w.fan_out_extractor is None:
+            continue
+        if w.durable:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per().durable(): "
+                f"fan_out_per dispatches per-key with per-call isolation; "
+                f"combining with durable (queue + retry + DLQ) is not yet "
+                f"designed. Pick one: drop durable, or do the fan-out "
+                f"upstream and put each per-key Data on its own durable wire."
+            )
+        if w.debounce is not None:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per().debounce(): "
+                f"debounce is keyed by a single (DataType, key) and "
+                f"ships its own mq transport; combining with fan_out_per "
+                f"would duplicate the partitioning concept. Pick one."
+            )
+        if w.with_latest:
+            latest = sorted(t.__name__ for t in w.with_latest)
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per()"
+                f".with_latest({', '.join(latest)}): with_latest joins on "
+                f"the primary Data's attribute, but fan_out_per mutates "
+                f"those attributes per-key; the join semantic is "
+                f"unverified. Resolve the latest types upstream of emit "
+                f"and pass them through the trigger Data instead."
+            )
+
     # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
     # reference a queue declared in ALL_ROUTES, otherwise the engine
     # wouldn't know which routing key to use when publishing (lane

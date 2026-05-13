@@ -1,7 +1,9 @@
 """Phase 2 safety wiring.
 
-Pre-check 控制面进 graph：chat pipeline emit(PreSafetyRequest) → run_pre_safety
-→ PreSafetyVerdict → resolve_pre_safety_waiter（把 verdict 塞回本进程 Future）。
+Pre-check 控制面进 graph：chat pipeline ``run_pre_safety_check`` 通过
+``emit_and_wait`` emit(PreSafetyRequest) → run_pre_safety →
+PreSafetyVerdict（auto-emit）；verdict 由 ``emit_and_wait`` 的
+notify hook 直接 set future，不需要专门的 reply-side node。
 
 Post-check 数据面走 durable：chat pipeline emit(PostSafetyRequest) → durable
 queue → run_post_safety → blocked 时 return Recall → Sink.mq("recall") →
@@ -13,19 +15,16 @@ safety-worker，因为单条审计的工作量小（一次 banned word + 一次 
 from app.domain.safety import (
     PostSafetyRequest,
     PreSafetyRequest,
-    PreSafetyVerdict,
     Recall,
 )
 from app.nodes.safety import (
-    resolve_pre_safety_waiter,
     run_post_safety,
     run_pre_safety,
 )
 from app.runtime import Sink, bind, wire
 
-# Pre-check：双段 in-process wire
+# Pre-check：单 wire — verdict 由 emit_and_wait 的 notify() 直接消费
 wire(PreSafetyRequest).to(run_pre_safety)
-wire(PreSafetyVerdict).to(resolve_pre_safety_waiter)
 
 # Post-check：durable
 wire(PostSafetyRequest).to(run_post_safety).durable()
@@ -33,7 +32,6 @@ wire(PostSafetyRequest).to(run_post_safety).durable()
 # Recall 出 graph 给 lark-server recall-worker
 wire(Recall).to(Sink.mq("recall"))
 
-# Placement — 4 个节点都在 agent-service 主进程
+# Placement — agent-service 主进程
 bind(run_pre_safety).to_app("agent-service")
-bind(resolve_pre_safety_waiter).to_app("agent-service")
 bind(run_post_safety).to_app("agent-service")

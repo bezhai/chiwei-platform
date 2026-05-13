@@ -57,9 +57,7 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-1"),
-        # emit_tx is imported lazily inside submit_proactive_chat to avoid boot
-        # cycles, so patch the underlying source rather than MODULE.emit_tx.
-        patch("app.runtime.db.emit_tx", fake_emit),
+        patch(f"{MODULE}.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         session_id = await submit_proactive_chat(
@@ -123,7 +121,7 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-2"),
-        patch("app.runtime.db.emit_tx", fake_emit),
+        patch(f"{MODULE}.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         await submit_proactive_chat(
@@ -167,7 +165,7 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
         ),
         patch(f"{MODULE}.time.time", return_value=1234.567),
         patch(f"{MODULE}.uuid.uuid4", return_value="session-3"),
-        patch("app.runtime.db.emit_tx", fake_emit),
+        patch(f"{MODULE}.emit_tx", fake_emit),
         patch("app.infra.rabbitmq.current_lane", return_value="prod"),
     ):
         await submit_proactive_chat(

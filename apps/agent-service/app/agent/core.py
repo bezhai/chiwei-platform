@@ -48,6 +48,7 @@ from pydantic import BaseModel
 from app.agent.context import AgentContext
 from app.agent.models import build_chat_model
 from app.agent.prompts import compile_to_messages, get_prompt
+from app.capabilities.retry import retry as _retry_decorator
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,10 @@ logger = logging.getLogger(__name__)
 # Retry configuration
 # ---------------------------------------------------------------------------
 
-RETRYABLE_EXCEPTIONS = (
+# TODO(C3): once LLM/HTTP capability layer translates upstream openai errors
+# into typed CapabilityError subclasses, switch this tuple to the typed
+# defaults exported by ``app.capabilities.retry``.
+RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     APITimeoutError,
     APIConnectionError,
     InternalServerError,
@@ -63,8 +67,8 @@ RETRYABLE_EXCEPTIONS = (
 )
 
 _DEFAULT_MAX_RETRIES = 2
-_BACKOFF_BASE = 2  # seconds
-_BACKOFF_MAX = 8  # seconds
+_BACKOFF_BASE = 2  # seconds (exponential base)
+_BACKOFF_MAX = 8  # seconds (clamp)
 
 # LangGraph recursion limit: 12 steps ~ 6 tool calls
 _DEFAULT_RECURSION_LIMIT = 12
@@ -173,19 +177,19 @@ class Agent:
         full_messages = [*prompt_messages, *messages]
         config = self._build_config()
 
-        async def _invoke(msgs: Any, *, config: Any) -> AIMessage:
+        @_retry_decorator(
+            attempts=max_retries,
+            base_delay_s=float(_BACKOFF_BASE),
+            max_delay_s=float(_BACKOFF_MAX),
+            retry_on=RETRYABLE_EXCEPTIONS,
+        )
+        async def _invoke() -> AIMessage:
             result = await agent.ainvoke(
-                {"messages": msgs}, context=context, config=config
+                {"messages": full_messages}, context=context, config=config
             )
             return result["messages"][-1]
 
-        return await _retry(
-            _invoke,
-            full_messages,
-            config,
-            max_retries=max_retries,
-            label=f"Agent({self._cfg.trace_name}).run",
-        )
+        return await _invoke()
 
     async def stream(
         self,
@@ -195,7 +199,14 @@ class Agent:
         context: AgentContext | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[AIMessageChunk | ToolMessage, None]:
-        """Stream tokens."""
+        """Stream tokens.
+
+        Cannot use ``@retry`` directly: once a token is yielded downstream,
+        retrying would emit duplicate prefixes. Loop is inline but the
+        backoff math matches ``app.capabilities.retry`` (exponential
+        ``base * 2^(N-1)`` clamped to ``max_delay_s``) so behaviour stays
+        consistent with non-streaming paths.
+        """
         agent, prompt_messages = await self._build_agent(prompt_vars or {})
         full_messages = [*prompt_messages, *messages]
         config = self._build_config()
@@ -213,21 +224,20 @@ class Agent:
                     yield token
                 return
             except RETRYABLE_EXCEPTIONS as e:
-                if tokens_yielded:
+                if tokens_yielded or attempt >= max_retries:
                     raise
-                if attempt < max_retries:
-                    delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
-                    logger.warning(
-                        "Agent(%s).stream() attempt %d/%d failed: %s, retrying in %ds",
-                        self._cfg.trace_name,
-                        attempt,
-                        max_retries,
-                        e,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    raise
+                delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
+                logger.warning(
+                    "Agent(%s).stream attempt %d/%d failed (%s: %s); "
+                    "retrying in %.2fs",
+                    self._cfg.trace_name,
+                    attempt,
+                    max_retries,
+                    type(e).__name__,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
     async def extract(
         self,
@@ -254,48 +264,17 @@ class Agent:
             messages = [*prompt_messages, *messages]
 
         config = self._build_config()
-        return await _retry(
-            structured.ainvoke,
-            messages,
-            config,
-            max_retries=max_retries,
-            label=f"Agent({self._cfg.trace_name}).extract",
+
+        @_retry_decorator(
+            attempts=max_retries,
+            base_delay_s=float(_BACKOFF_BASE),
+            max_delay_s=float(_BACKOFF_MAX),
+            retry_on=RETRYABLE_EXCEPTIONS,
         )
+        async def _invoke() -> BaseModel:
+            return await structured.ainvoke(messages, config=config)
 
-
-# ---------------------------------------------------------------------------
-# Shared retry helper
-# ---------------------------------------------------------------------------
-
-
-async def _retry(
-    invoke_fn: Any,
-    full_messages: list[Any],
-    config: dict[str, Any],
-    *,
-    max_retries: int,
-    label: str,
-) -> Any:
-    """Exponential-backoff retry wrapper for non-streaming invoke calls."""
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await invoke_fn(full_messages, config=config)
-        except RETRYABLE_EXCEPTIONS as e:
-            if attempt < max_retries:
-                delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
-                logger.warning(
-                    "%s attempt %d/%d failed: %s, retrying in %ds",
-                    label,
-                    attempt,
-                    max_retries,
-                    e,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-
-    raise RuntimeError("Unreachable: all retry attempts exhausted")
+        return await _invoke()
 
 
 # ---------------------------------------------------------------------------

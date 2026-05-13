@@ -41,6 +41,10 @@ async def schedule_after(
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Classification: EXPLICIT swallow per best_effort contract (module
+            # docstring). Callers opt in via emit_delayed(durability=
+            # "best_effort"); the durable path runs through the delayed-trigger
+            # queue (delayed_trigger.py + durable.py) instead.
             logger.exception("scheduled task raised; swallowing")
 
     task = asyncio.create_task(runner())

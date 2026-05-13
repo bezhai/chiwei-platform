@@ -120,7 +120,13 @@ MessageHandler = Callable[[AbstractIncomingMessage], Coroutine[Any, Any, None]]
 
 
 def current_lane() -> str | None:
-    """Return current lane (None means prod)."""
+    """Return current lane (None means prod).
+
+    contract-allowed None (§4.8): "no lane" is a normal value (prod),
+    not a failure. The middleware-import try/except handles the worker
+    path where contextvars aren't installed; ENV ``LANE`` is the
+    fallback. No upstream call here.
+    """
     try:
         from app.api.middleware import get_lane
 

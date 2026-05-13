@@ -74,7 +74,12 @@ class GlimpseTick(Data):
 
 
 class LifeTickRequest(Data):
-    persona_id: Annotated[str, Key]
+    # persona_id default="" lets fan_out_xxx @node emit a template
+    # carrying only ts; the wire's ``.fan_out_per(...)`` then mutates
+    # persona_id per-key via ``data.model_copy(update={...})``.
+    # Consumers (life_tick_node etc.) only ever see post-fan-out copies
+    # with a real persona_id.
+    persona_id: Annotated[str, Key] = ""
     ts: str
 
     class Meta:
@@ -82,7 +87,7 @@ class LifeTickRequest(Data):
 
 
 class VoiceRequest(Data):
-    persona_id: Annotated[str, Key]
+    persona_id: Annotated[str, Key] = ""
     ts: str
 
     class Meta:
@@ -90,7 +95,7 @@ class VoiceRequest(Data):
 
 
 class LightReviewRequest(Data):
-    persona_id: Annotated[str, Key]
+    persona_id: Annotated[str, Key] = ""
     ts: str
     window_minutes: int
 
@@ -99,7 +104,7 @@ class LightReviewRequest(Data):
 
 
 class HeavyReviewRequest(Data):
-    persona_id: Annotated[str, Key]
+    persona_id: Annotated[str, Key] = ""
     ts: str
 
     class Meta:
@@ -109,7 +114,7 @@ class HeavyReviewRequest(Data):
 class GlimpseTickRequest(Data):
     """5min 周期 fan-out 出的 per-persona 触发；下游 glimpse_tick_node
     内部判 activity 决定是否 emit GlimpseRequest。"""
-    persona_id: Annotated[str, Key]
+    persona_id: Annotated[str, Key] = ""
     ts: str
 
     class Meta:
@@ -134,7 +139,7 @@ class SharedDailyContext(Data):
 
 
 class DailyPlanRequest(Data):
-    persona_id: Annotated[str, Key]
+    persona_id: Annotated[str, Key] = ""
     target_date: str
     wild_materials: str
     search_anchors: str

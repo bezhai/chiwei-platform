@@ -1,5 +1,10 @@
 """Single-flight lock — Phase 7d Gap 14.
 
+Runtime-internal: this module reaches into ``app.infra.redis.get_redis()``
+directly rather than going through ``RedisCapability`` (plan B5/C5).
+Capabilities sit above the runtime — having the runtime depend on a
+capability would invert the dependency direction.
+
 Idiom:
     async with single_flight(f"drift:{chat}:{persona}", ttl=600):
         await _do_work()

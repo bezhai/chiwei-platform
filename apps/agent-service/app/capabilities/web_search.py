@@ -35,7 +35,11 @@ async def web_search(
     country: str = "CN",
     language: str = "ZH-HANS",
 ) -> list[SearchHit]:
-    """Route to You Search / Google CSE based on settings; empty list if neither configured."""
+    """Route to You Search / Google CSE based on settings; empty list if neither configured.
+
+    contract-allowed empty list (§4.8): config-not-provisioned is a
+    deployment outcome. Transport / HTTP errors propagate.
+    """
     if settings.you_search_host and settings.you_search_api_key:
         return await _you_search(query, count, country, language)
     if settings.google_search_host and settings.google_search_api_key:
@@ -88,7 +92,12 @@ async def _google_search(query: str, count: int) -> list[SearchHit]:
 
 
 async def read_webpage(url: str) -> str:
-    """Fetch + html→markdown via You Contents API. Empty string if not configured."""
+    """Fetch + html→markdown via You Contents API. Empty string if not configured.
+
+    contract-allowed empty string (§4.8): config-not-provisioned plus
+    "no contents in response" are business outcomes. Transport errors
+    propagate from ``HTTPClient``.
+    """
     if not settings.you_search_host or not settings.you_search_api_key:
         return ""
     api_url = f"{settings.you_search_host}/v1/contents"
