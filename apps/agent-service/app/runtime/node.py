@@ -17,6 +17,10 @@ path; manual ``await emit(...)`` is reserved for genuine multi-output
 cases (fan-out, per-chunk segment emission) — in active use since
 Phase 4 (see ``nodes/life_dataflow._fan_out_per_persona``). The wrapper
 still returns the value to its caller so unit tests can assert on it.
+
+Full rule set: ``docs/guides/dataflow-node-contract.md`` §1 (N1-N8) and
+the "N6 自动 emit 边界" paragraph. Behavior coverage:
+``tests/runtime/test_node_auto_emit.py``.
 """
 
 from __future__ import annotations
