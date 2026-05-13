@@ -44,6 +44,18 @@ class _Qdrant:
     # ------------------------------------------------------------------
 
     async def create_collection(self, collection_name: str, vector_size: int) -> bool:
+        """Return True if newly created, False if create_collection rejected
+        (typically "collection already exists"); init_collections relies on
+        this False signal to log a benign warning.
+
+        contract-allowed False (§4.8): idempotent create. Connection /
+        auth failures still surface as warnings here; the caller
+        (``init_collections``) wraps this in its own try/except and only
+        runs at startup so transient infra failure becomes "collection
+        not created" not "service down" — startup will re-attempt next
+        boot. NOTE: this is a documented A3 exception. Tightening to
+        catch only ``UnexpectedResponse`` (collection-exists) is tracked
+        as backlog L1 once we have qdrant test coverage."""
         try:
             await self.client.create_collection(
                 collection_name=collection_name,
@@ -57,7 +69,11 @@ class _Qdrant:
     async def create_hybrid_collection(
         self, collection_name: str, dense_size: int = 1024
     ) -> bool:
-        """Create a collection with dense + sparse vector support."""
+        """Create a collection with dense + sparse vector support.
+
+        contract-allowed False (§4.8): same idempotent-create semantics as
+        ``create_collection``. Tightening to ``UnexpectedResponse``-only
+        is tracked as backlog L1."""
         try:
             await self.client.create_collection(
                 collection_name=collection_name,

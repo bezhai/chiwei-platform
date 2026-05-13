@@ -23,7 +23,13 @@ class ImageHit:
 
 
 async def image_search(query: str, *, count: int = 5) -> list[ImageHit]:
-    """Search images via You Images API; empty list if not configured."""
+    """Search images via You Images API; empty list if not configured.
+
+    contract-allowed empty list (§4.8): "config not provisioned" is a
+    deployment-time outcome, not a runtime capability failure. Transport
+    errors propagate from ``HTTPClient`` as ``httpx`` exceptions (caller
+    decides whether to wrap as ``CapabilityTimeout`` / ``CapabilityCallFailed``).
+    """
     if not settings.you_search_host or not settings.you_search_api_key:
         return []
     url = f"{settings.you_search_host}/images"

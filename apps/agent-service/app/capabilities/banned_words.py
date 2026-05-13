@@ -18,7 +18,12 @@ _KEY = "banned_words"
 
 
 async def contains(text: str) -> str | None:
-    """Return the matched banned word, or None if the text is clean."""
+    """Return the matched banned word, or None if the text is clean.
+
+    contract-allowed None (§4.8): "no match" is a business outcome, not a
+    capability failure. Redis connection / decode failures propagate from
+    the underlying ``redis`` client unchanged.
+    """
     redis = await get_redis()
     words = await redis.smembers(_KEY)
     if not words:

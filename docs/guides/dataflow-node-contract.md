@@ -182,6 +182,30 @@ contract 违反 → `GraphError`，启动失败。运行时无 wire 层异常。
 
 例外清单要在 A3 落地时和代码 review 一起 freeze——不在清单内的 None/False 都要抛异常。
 
+#### A3 例外清单（2026-05-13 落地，代码已加 docstring 标注 `contract-allowed`）
+
+每条标注 `file:function | reason | follow-up`。后续新增 capability / infra 函数若返回 None/False 必须**先**加进此清单 + 加 docstring，否则禁止合码。
+
+| file:function | 类型 | 理由 | follow-up |
+| --- | --- | --- | --- |
+| `app/capabilities/banned_words.py:contains` | None | "查不到 banned word" 是业务结果，非失败 | 无（永久例外） |
+| `app/capabilities/image_search.py:image_search` | `[]` | 配置未配 → empty 是部署语义 | transport 错误已透传，无需改 |
+| `app/capabilities/web_search.py:web_search` | `[]` | 同上 | 同上 |
+| `app/capabilities/web_search.py:read_webpage` | `""` | 配置未配 + 服务端 contents 为空 → empty | 同上 |
+| `app/infra/qdrant.py:create_collection` | False | 幂等 create，已存在 collection 返回 False；启动时调用方靠此分支判断 | L1：收窄 catch 到 `UnexpectedResponse`-only |
+| `app/infra/qdrant.py:create_hybrid_collection` | False | 同上 | 同上 |
+| `app/infra/rabbitmq.py:current_lane` | None | "无 lane = prod" 是正常值 | 无（永久例外） |
+| `app/infra/rabbitmq.py:publish_with_confirm` | False | 显式的"caller-decision"语义：retry 走 dlq-fallback，emit_delayed 走 raise；docstring 已写明 | 无（永久例外） |
+| `app/infra/image.py:_post` | None | 历史遗留：4 个内部 + 3 个外部调用方都靠 `if data:` 分支；外层 `upload_and_register` 等已经 `except Exception` 兜底 | L1：image_client typed-error 迁移（单 commit 改 raise + 逐调用方验证） |
+| `app/infra/image.py:download_image_as_base64` | None | 同上：`vectorize.py` 用 `gather(return_exceptions=True)` 过滤 | 同上 |
+
+**非例外**（不在清单上、不允许新增 `return None` / `return False`）：
+- 任何 capability / infra 函数捕获 transport 异常（httpx Timeout / 5xx / connection refused / DB connection error / aio_pika 异常）后吞掉
+- 任何"上游说找不到资源"的语义——必须 `raise CapabilityNotFound`
+- 任何参数 validation 失败——必须 `raise CapabilityInvalidArg`
+
+业务节点（`app/nodes/`、`app/chat/`、`app/life/`、`app/memory/`）现状：grep 未发现"catch capability 异常 → 字符串化进 LLM context"的实例（唯一一处 `str(e)` 在 `app/nodes/admin.py:142`，是 admin API 的 user-facing 响应，不进 LLM）。`@tool_error` 的字符串化是 C3 改造对象（依赖 B4 `swallow_and_log`），本 A3 不动。其余 catch 均为 fail-open / fire-and-forget / config-fallback，属于 B4 节点级 try-except 兜底清零范围，本 A3 不动。
+
 ## 5. 契约违反时的行为
 
 无论哪一层违反契约：
