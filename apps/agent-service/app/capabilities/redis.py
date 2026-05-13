@@ -157,6 +157,41 @@ class RedisCapability:
         ) as e:
             raise _wrap_error(e, op="incr", key=prefixed) from e
 
+    # -- Hash + Set read accessors ------------------------------------------
+
+    async def hget(self, key: str, field: str) -> Any:
+        """``HGET key field`` — lane-prefixed; returns ``None`` if missing."""
+        prefixed = _prefix(key)
+        try:
+            return await self._client.hget(prefixed, field)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="hget", key=prefixed) from e
+
+    async def hgetall(self, key: str) -> dict[str, Any]:
+        """``HGETALL key`` — lane-prefixed; returns ``{}`` if missing."""
+        prefixed = _prefix(key)
+        try:
+            return await self._client.hgetall(prefixed)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="hgetall", key=prefixed) from e
+
+    async def smembers(self, key: str) -> set[Any]:
+        """``SMEMBERS key`` — lane-prefixed; returns empty set if missing."""
+        prefixed = _prefix(key)
+        try:
+            return await self._client.smembers(prefixed)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="smembers", key=prefixed) from e
+
     # -- Lua scripts ---------------------------------------------------------
 
     async def eval(

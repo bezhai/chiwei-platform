@@ -241,6 +241,15 @@ class _RaisingRedis:
     async def eval(self, *a, **kw):  # noqa: ARG002
         raise self._exc
 
+    async def hget(self, key, field):  # noqa: ARG002
+        raise self._exc
+
+    async def hgetall(self, key):  # noqa: ARG002
+        raise self._exc
+
+    async def smembers(self, key):  # noqa: ARG002
+        raise self._exc
+
     def pipeline(self, *_a, **_kw):  # pragma: no cover — not used by these tests
         raise self._exc
 
@@ -274,3 +283,128 @@ async def test_asyncio_timeout_maps_to_capability_timeout(lane_prod):
     cap = RedisCapability(_RaisingRedis(asyncio.TimeoutError()))
     with pytest.raises(CapabilityTimeout):
         await cap.eval("return 1", keys=["k"], args=[])
+
+
+# ---------------------------------------------------------------------------
+# Hash + Set read accessors (added for C5 — image_registry / banned_words)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hget_returns_field(cap, lane_prod, fake_redis):
+    await fake_redis.hset("h:k", "field1", "value1")
+    assert await cap.hget("h:k", "field1") == "value1"
+
+
+@pytest.mark.asyncio
+async def test_hget_missing_returns_none(cap, lane_prod):
+    assert await cap.hget("h:missing", "field1") is None
+
+
+@pytest.mark.asyncio
+async def test_hget_lane_prefixes_key(cap, fake_redis):
+    token = _set_lane("ppe-x")
+    try:
+        await fake_redis.hset("ppe-x:h:lane", "f", "v")
+        # Bare key untouched
+        assert await fake_redis.hget("h:lane", "f") is None
+        # Capability sees prefixed key transparently
+        assert await cap.hget("h:lane", "f") == "v"
+    finally:
+        lane_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_hgetall_returns_dict(cap, lane_prod, fake_redis):
+    await fake_redis.hset("h:all", mapping={"a": "1", "b": "2"})
+    assert await cap.hgetall("h:all") == {"a": "1", "b": "2"}
+
+
+@pytest.mark.asyncio
+async def test_hgetall_missing_returns_empty(cap, lane_prod):
+    assert await cap.hgetall("h:missing") == {}
+
+
+@pytest.mark.asyncio
+async def test_hgetall_lane_prefixes_key(cap, fake_redis):
+    token = _set_lane("coe-y")
+    try:
+        await fake_redis.hset("coe-y:h:all", mapping={"a": "1"})
+        # Capability finds the prefixed key transparently
+        assert await cap.hgetall("h:all") == {"a": "1"}
+        # Bare key untouched
+        assert await fake_redis.hgetall("h:all") == {}
+    finally:
+        lane_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_smembers_returns_set(cap, lane_prod, fake_redis):
+    await fake_redis.sadd("s:k", "a", "b", "c")
+    assert await cap.smembers("s:k") == {"a", "b", "c"}
+
+
+@pytest.mark.asyncio
+async def test_smembers_missing_returns_empty(cap, lane_prod):
+    assert await cap.smembers("s:missing") == set()
+
+
+@pytest.mark.asyncio
+async def test_smembers_lane_prefixes_key(cap, fake_redis):
+    token = _set_lane("ppe-z")
+    try:
+        await fake_redis.sadd("ppe-z:s:lane", "x", "y")
+        # Capability sees prefixed key
+        assert await cap.smembers("s:lane") == {"x", "y"}
+        # Bare key untouched
+        assert await fake_redis.smembers("s:lane") == set()
+    finally:
+        lane_var.reset(token)
+
+
+# Typed-error mapping for new accessors
+
+
+@pytest.mark.asyncio
+async def test_hget_redis_error_maps_to_call_failed(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
+    with pytest.raises(CapabilityCallFailed) as ei:
+        await cap.hget("k", "f")
+    assert ei.value.meta.get("op") == "hget"
+
+
+@pytest.mark.asyncio
+async def test_hget_timeout_maps_to_capability_timeout(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.TimeoutError("slow")))
+    with pytest.raises(CapabilityTimeout):
+        await cap.hget("k", "f")
+
+
+@pytest.mark.asyncio
+async def test_hgetall_redis_error_maps_to_call_failed(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
+    with pytest.raises(CapabilityCallFailed) as ei:
+        await cap.hgetall("k")
+    assert ei.value.meta.get("op") == "hgetall"
+
+
+@pytest.mark.asyncio
+async def test_hgetall_timeout_maps_to_capability_timeout(lane_prod):
+    cap = RedisCapability(_RaisingRedis(asyncio.TimeoutError()))
+    with pytest.raises(CapabilityTimeout):
+        await cap.hgetall("k")
+
+
+@pytest.mark.asyncio
+async def test_smembers_redis_error_maps_to_call_failed(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
+    with pytest.raises(CapabilityCallFailed) as ei:
+        await cap.smembers("k")
+    assert ei.value.meta.get("op") == "smembers"
+
+
+@pytest.mark.asyncio
+async def test_smembers_timeout_maps_to_capability_timeout(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.TimeoutError("slow")))
+    with pytest.raises(CapabilityTimeout):
+        await cap.smembers("k")
