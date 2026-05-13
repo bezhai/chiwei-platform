@@ -1,4 +1,13 @@
-"""Tests for wiring/safety.py — verify 4 wires + bind correctness."""
+"""Tests for wiring/safety.py — verify wires + bind correctness.
+
+B1: ``resolve_pre_safety_waiter`` was removed — PreSafetyVerdict is now
+consumed generically by ``emit_and_wait``'s notify() hook, so there is
+no longer a dedicated reply-side wire to assert. We keep coverage on:
+  * PreSafetyRequest -> run_pre_safety (in-process)
+  * PostSafetyRequest -> run_post_safety (durable)
+  * Recall -> Sink.mq("recall")
+  * agent-service bindings on the two remaining @nodes.
+"""
 from __future__ import annotations
 
 import importlib
@@ -30,15 +39,18 @@ def test_pre_safety_request_wire():
     assert any(run_pre_safety in w.consumers and w.durable is False for w in wires)
 
 
-def test_pre_safety_verdict_wire():
+def test_pre_safety_verdict_has_no_dedicated_wire():
+    """B1: PreSafetyVerdict consumed by emit_and_wait notify(), not a wire."""
     _fresh_import()
 
     from app.domain.safety import PreSafetyVerdict
-    from app.nodes.safety import resolve_pre_safety_waiter
     from app.runtime.wire import WIRING_REGISTRY
 
     wires = [w for w in WIRING_REGISTRY if w.data_type is PreSafetyVerdict]
-    assert any(resolve_pre_safety_waiter in w.consumers for w in wires)
+    assert wires == [], (
+        f"PreSafetyVerdict must have no wires after B1 — generic "
+        f"emit_and_wait.notify() handles it. Found: {wires}"
+    )
 
 
 def test_post_safety_request_wire_durable():
@@ -73,7 +85,6 @@ def test_agent_service_bindings():
     _fresh_import()
 
     from app.nodes.safety import (
-        resolve_pre_safety_waiter,
         run_post_safety,
         run_pre_safety,
     )
@@ -81,5 +92,4 @@ def test_agent_service_bindings():
 
     b = dict(iter_bindings())
     assert b[run_pre_safety] == "agent-service"
-    assert b[resolve_pre_safety_waiter] == "agent-service"
     assert b[run_post_safety] == "agent-service"

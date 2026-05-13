@@ -3,7 +3,7 @@
 合并 ``app/chat/safety.py`` 和 post safety chain 的所有逻辑：
 - module-level 私有 helpers：banned word + 4 个 LLM 检查 + ``_run_audit``
 - module-level enum / config：``BlockReason`` / ``_GUARD_*``
-- @node：``run_pre_safety`` / ``resolve_pre_safety_waiter`` / ``run_post_safety``
+- @node：``run_pre_safety`` / ``run_post_safety``
 - 常量：``TERMINAL_STATUSES``
 
 节点 / wiring / 外部入口由后续 Task 6-9 添加；本 Task 只搬迁 helper 保留行为。
@@ -359,10 +359,7 @@ async def run_pre_safety(req: PreSafetyRequest) -> PreSafetyVerdict:
     )
 
 
-@node
-async def resolve_pre_safety_waiter(verdict: PreSafetyVerdict) -> None:
-    """收尾节点：把 verdict 塞回本进程的 Future registry."""
-    # 延迟 import 避免循环依赖（pre_safety_gate import nodes.safety 反过来）
-    from app.chat import pre_safety_gate
-    pre_safety_gate.resolve(verdict)
-    return None
+# B1: ``resolve_pre_safety_waiter`` removed. The PreSafetyVerdict auto-
+# emitted by ``run_pre_safety`` is now picked up generically by
+# ``emit_and_wait``'s notify() hook in app/runtime/emit.py — no
+# dedicated reply-side node is required.

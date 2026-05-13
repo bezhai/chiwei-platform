@@ -20,7 +20,7 @@ from app.chat.agent_stream import _build_and_stream
 from app.chat.content_parser import parse_content
 from app.chat.persona_filter import MessageRouter
 from app.chat.post_actions import fetch_guard_message
-from app.chat.pre_safety_gate import run_pre_safety_via_graph
+from app.chat.pre_safety import run_pre_safety_check
 from app.data.queries import (
     find_gray_config,
     find_message_content,
@@ -126,7 +126,7 @@ async def chat_node(req: ChatRequest) -> None:
     effective_persona = req.persona_id or req.bot_name or ""
     guard_message = await fetch_guard_message(effective_persona)
     pre_task = asyncio.create_task(
-        run_pre_safety_via_graph(
+        run_pre_safety_check(
             message_id=req.message_id,
             content=parsed.render() if parsed else "",
             persona_id=effective_persona,

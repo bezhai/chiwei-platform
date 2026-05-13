@@ -135,7 +135,10 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
     fake_set.assert_not_called()
 
 
-# === run_pre_safety + resolve_pre_safety_waiter ===
+# === run_pre_safety ===
+# B1: resolve_pre_safety_waiter removed — emit_and_wait.notify() picks up
+# PreSafetyVerdict directly. Coverage of the request/reply round-trip
+# lives in tests/runtime/test_emit_wait.py.
 
 
 @pytest.mark.asyncio
@@ -180,17 +183,3 @@ async def test_run_pre_safety_returns_block_verdict_with_reason():
     assert verdict.detail == "confidence=0.9"
 
 
-@pytest.mark.asyncio
-async def test_resolve_pre_safety_waiter_calls_gate_resolve():
-    """节点 body 把 verdict 塞回本进程 pre_safety_gate.resolve."""
-    from app.nodes import safety as m
-
-    verdict = PreSafetyVerdict(
-        pre_request_id="pr-3", message_id="m-1", is_blocked=False
-    )
-    fake_resolve = MagicMock()
-    with patch("app.chat.pre_safety_gate.resolve", fake_resolve):
-        result = await m.resolve_pre_safety_waiter(verdict)
-
-    assert result is None
-    fake_resolve.assert_called_once_with(verdict)
