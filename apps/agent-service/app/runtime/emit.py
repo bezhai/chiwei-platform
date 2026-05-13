@@ -68,6 +68,17 @@ async def emit(data: Data) -> None:
     own_nodes = nodes_for_app(_current_app())
     cls = type(data)
 
+    # B1: emit_and_wait integration — surface ``data`` to any local
+    # waiter eagerly so an auto-emitted reply Data resolves its future
+    # before the parent emit() chain returns. Notification must happen
+    # *before* further dispatch to support synchronous-reply patterns
+    # like pre-safety (chat -> req -> node -> auto-emit reply).
+    # ``notify`` is a tight, no-op-when-empty check; safe to call on
+    # every emit.
+    from app.runtime.emit_wait import notify as _emit_wait_notify
+
+    _emit_wait_notify(data)
+
     # Persist before dispatch: any wire(cls).as_latest() declaration
     # means the Data must land in pg first, so downstream with_latest()
     # readers see it. Same instance, one append per emit — multiple
