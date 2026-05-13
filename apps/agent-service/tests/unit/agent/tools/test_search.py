@@ -209,6 +209,14 @@ class TestSearchWebTool:
 
     @pytest.mark.asyncio
     async def test_capability_failure_surfaces_as_friendly_error(self):
+        """``search_web`` has its own in-tool ``try/except Exception`` (around
+        the capability call) that records error metrics and returns a friendly
+        string. That predates C3 and bypasses the @tool_error path entirely.
+
+        TODO(C3 follow-up): migrate this tool to raise typed errors or let
+        them propagate to wire ``on_error`` — see
+        ``docs/guides/dataflow-node-contract.md`` §4.7/§4.8.
+        """
         from app.agent.tools.search import search_web
 
         with patch(

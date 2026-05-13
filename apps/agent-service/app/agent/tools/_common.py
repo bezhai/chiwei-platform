@@ -8,6 +8,16 @@ from typing import Any
 
 from prometheus_client import Counter, Histogram
 
+from app.agent.tools.outcome import (
+    ToolInvalidArgs,
+    ToolNotFound,
+    ToolOutcomeError,
+)
+from app.capabilities._errors import (
+    CapabilityInvalidArg,
+    CapabilityNotFound,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,10 +53,24 @@ def get_or_create_histogram(
 
 
 def tool_error(error_message: str):
-    """Decorator: catch exceptions, log, and return a friendly error string.
+    """Decorator: route tool failures per contract §4.7/§4.8 — C3.
 
-    Applied to ``@tool`` functions so that tool failures surface as readable
-    text instead of crashing the agent loop.
+    Routing table:
+
+    * ``CapabilityInvalidArg``  → converted to ``ToolInvalidArgs`` and
+      returned to the LLM as a ``ToolOutcomeError(kind="invalid_args")``
+      dict. The LLM sees a structured outcome and can adjust the next call.
+    * ``CapabilityNotFound``    → same path with ``kind="not_found"``.
+    * ``CapabilityTimeout``     → propagated. Wire ``on_error`` decides
+      DLQ / retry / manual-review (contract §1 forbids node-level on_error).
+    * ``CapabilityRateLimited`` → propagated.
+    * ``CapabilityCallFailed``  → propagated.
+    * any other ``Exception``   → propagated. No silent swallow.
+
+    The ``error_message`` argument is kept for call-site context (it
+    prefixes the LLM-visible message); historical "friendly string" return
+    is gone. Tools that return strings/dicts/lists on success are
+    unaffected — success values pass through unchanged.
     """
 
     def decorator(func):
@@ -54,9 +78,36 @@ def tool_error(error_message: str):
         async def wrapper(*args, **kwargs):
             try:
                 return await func(*args, **kwargs)
-            except Exception as exc:
-                logger.error("%s failed: %s", func.__name__, exc, exc_info=True)
-                return f"{error_message}: {exc}"
+            except CapabilityInvalidArg as exc:
+                logger.warning(
+                    "%s: invalid args — %s (meta=%s)",
+                    func.__name__,
+                    exc,
+                    exc.meta,
+                )
+                typed = ToolInvalidArgs(str(exc), detail=exc.meta or None)
+                return ToolOutcomeError(
+                    kind="invalid_args",
+                    message=f"{error_message}: {typed.message}"
+                    if error_message
+                    else typed.message,
+                    detail=typed.detail or None,
+                ).model_dump()
+            except CapabilityNotFound as exc:
+                logger.warning(
+                    "%s: resource not found — %s (meta=%s)",
+                    func.__name__,
+                    exc,
+                    exc.meta,
+                )
+                typed = ToolNotFound(str(exc), detail=exc.meta or None)
+                return ToolOutcomeError(
+                    kind="not_found",
+                    message=f"{error_message}: {typed.message}"
+                    if error_message
+                    else typed.message,
+                    detail=typed.detail or None,
+                ).model_dump()
 
         return wrapper
 
