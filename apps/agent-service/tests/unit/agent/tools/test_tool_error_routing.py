@@ -84,54 +84,111 @@ class TestNotFoundRouting:
 
 
 # ---------------------------------------------------------------------------
-# Propagated (NOT LLM-visible, wire on_error decides)
+# Non-business errors: surfaced to LLM via kind="tool_error"
 # ---------------------------------------------------------------------------
+#
+# Hotfix 2026-05-13: keeping the agent alive matters more than perfectly
+# typed error routing. A bare ``Exception`` propagating out of @tool_error
+# (e.g. an httpx 400 from generate_image that wasn't wrapped in a typed
+# CapabilityInvalidArg) used to kill the entire agent turn. The new
+# contract is "every tool failure is LLM-visible" — the model gets a
+# ToolOutcomeError back and can retry / change strategy / give up
+# verbally, instead of the user staring at a half-finished reply.
 
 
-class TestPropagatedExceptions:
+class TestNonBusinessFailuresSurfaceToLLM:
     @pytest.mark.asyncio
-    async def test_capability_timeout_propagates(self):
-        @tool_error("x")
+    async def test_capability_timeout_becomes_tool_error_outcome(self):
+        @tool_error("generate image failed")
         async def fn():
             raise CapabilityTimeout("upstream took too long")
 
-        with pytest.raises(CapabilityTimeout):
-            await fn()
+        out = await fn()
+        assert out["kind"] == "tool_error"
+        assert "generate image failed" in out["message"]
+        assert "upstream took too long" in out["message"]
+        assert out["detail"]["original_error_type"] == "CapabilityTimeout"
 
     @pytest.mark.asyncio
-    async def test_capability_rate_limited_propagates(self):
+    async def test_capability_rate_limited_becomes_tool_error_outcome(self):
         @tool_error("x")
         async def fn():
             raise CapabilityRateLimited("429")
 
-        with pytest.raises(CapabilityRateLimited):
-            await fn()
+        out = await fn()
+        assert out["kind"] == "tool_error"
+        assert out["detail"]["original_error_type"] == "CapabilityRateLimited"
 
     @pytest.mark.asyncio
-    async def test_capability_call_failed_propagates(self):
+    async def test_capability_call_failed_becomes_tool_error_outcome(self):
         @tool_error("x")
         async def fn():
             raise CapabilityCallFailed("502")
 
-        with pytest.raises(CapabilityCallFailed):
-            await fn()
+        out = await fn()
+        assert out["kind"] == "tool_error"
+        assert out["detail"]["original_error_type"] == "CapabilityCallFailed"
 
     @pytest.mark.asyncio
-    async def test_runtime_error_propagates(self):
+    async def test_runtime_error_becomes_tool_error_outcome(self):
         @tool_error("x")
         async def fn():
             raise RuntimeError("boom")
 
-        with pytest.raises(RuntimeError):
-            await fn()
+        out = await fn()
+        assert out["kind"] == "tool_error"
+        assert "boom" in out["message"]
+        assert out["detail"]["original_error_type"] == "RuntimeError"
 
     @pytest.mark.asyncio
-    async def test_value_error_propagates(self):
+    async def test_value_error_becomes_tool_error_outcome(self):
         @tool_error("x")
         async def fn():
             raise ValueError("nope")
 
-        with pytest.raises(ValueError):
+        out = await fn()
+        assert out["kind"] == "tool_error"
+
+    @pytest.mark.asyncio
+    async def test_httpx_400_unwrapped_becomes_tool_error_outcome(self):
+        """Acceptance: trace 9b5a451cd00ccf735427cbb2059a95fb on
+        ppe-refactor — generate_image got a 400 from Doubao for
+        ``size='2K'`` (API wants ``'2k'``); the httpx error wasn't
+        wrapped in a typed CapabilityInvalidArg, so the original
+        @tool_error let it propagate and the whole agent turn died.
+        Now the same path returns a ToolOutcomeError that the LLM can
+        see and react to."""
+        import httpx
+
+        @tool_error("generate image failed")
+        async def fn():
+            # Mimics what the doubao client raises today.
+            request = httpx.Request("POST", "https://example/v3/images")
+            response = httpx.Response(400, request=request)
+            raise httpx.HTTPStatusError(
+                "size must be one of 'WIDTHxHEIGHT', '1k', '2k', or '4k'",
+                request=request,
+                response=response,
+            )
+
+        out = await fn()
+        assert out["kind"] == "tool_error"
+        assert "generate image failed" in out["message"]
+        assert "1k" in out["message"]  # LLM can read the constraint
+        assert out["detail"]["original_error_type"] == "HTTPStatusError"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_still_propagates(self):
+        """BaseException subclasses (CancelledError) must NOT be wrapped —
+        they signal shutdown / cancellation and have to travel up to the
+        runtime so source loops can unwind cleanly."""
+        import asyncio
+
+        @tool_error("x")
+        async def fn():
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
             await fn()
 
 

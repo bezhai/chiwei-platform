@@ -53,24 +53,29 @@ def get_or_create_histogram(
 
 
 def tool_error(error_message: str):
-    """Decorator: route tool failures per contract §4.7/§4.8 — C3.
+    """Decorator: route tool failures per contract §4.7/§4.8.
+
+    Every failure surfaces to the LLM as a ``ToolOutcomeError`` dict —
+    no exception escapes the wrapper. The agent turn stays alive even
+    when a single tool call goes wrong; the LLM gets to decide whether
+    to retry, change strategy, or tell the user the tool isn't working.
 
     Routing table:
 
-    * ``CapabilityInvalidArg``  → converted to ``ToolInvalidArgs`` and
-      returned to the LLM as a ``ToolOutcomeError(kind="invalid_args")``
-      dict. The LLM sees a structured outcome and can adjust the next call.
-    * ``CapabilityNotFound``    → same path with ``kind="not_found"``.
-    * ``CapabilityTimeout``     → propagated. Wire ``on_error`` decides
-      DLQ / retry / manual-review (contract §1 forbids node-level on_error).
-    * ``CapabilityRateLimited`` → propagated.
-    * ``CapabilityCallFailed``  → propagated.
-    * any other ``Exception``   → propagated. No silent swallow.
+    * ``CapabilityInvalidArg`` → ``ToolOutcomeError(kind="invalid_args")``
+    * ``CapabilityNotFound``   → ``ToolOutcomeError(kind="not_found")``
+    * any other ``Exception``  → ``ToolOutcomeError(kind="tool_error")``
+      with ``detail["original_error_type"]`` set so the LLM can reason
+      about it. Hotfix 2026-05-13 — previously this branch propagated
+      and killed the whole agent turn (trace
+      9b5a451cd00ccf735427cbb2059a95fb).
 
-    The ``error_message`` argument is kept for call-site context (it
-    prefixes the LLM-visible message); historical "friendly string" return
-    is gone. Tools that return strings/dicts/lists on success are
-    unaffected — success values pass through unchanged.
+    ``BaseException`` subclasses (``CancelledError`` /
+    ``KeyboardInterrupt`` / ``SystemExit``) deliberately do NOT get
+    wrapped; they signal shutdown / cancellation and must travel up so
+    the runtime can unwind cleanly.
+
+    Success values pass through unchanged.
     """
 
     def decorator(func):
@@ -107,6 +112,24 @@ def tool_error(error_message: str):
                     if error_message
                     else typed.message,
                     detail=typed.detail or None,
+                ).model_dump()
+            except Exception as exc:
+                # Catch-all to keep the agent turn alive. Log with
+                # exc_info so the technical detail survives in
+                # observability while the LLM gets a structured outcome.
+                logger.warning(
+                    "%s: tool failure — %s",
+                    func.__name__,
+                    exc,
+                    exc_info=True,
+                )
+                message = (
+                    f"{error_message}: {exc}" if error_message else str(exc)
+                )
+                return ToolOutcomeError(
+                    kind="tool_error",
+                    message=message,
+                    detail={"original_error_type": type(exc).__name__},
                 ).model_dump()
 
         return wrapper

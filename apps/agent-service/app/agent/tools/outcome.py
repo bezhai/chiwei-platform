@@ -28,12 +28,25 @@ from pydantic import BaseModel
 class ToolOutcomeError(BaseModel):
     """Structured tool failure visible to the LLM.
 
-    The LLM treats this as "you called the tool wrong / resource missing"
-    — actionable for the next turn — not "system is broken, please retry".
-    Retryable failures never reach this model; they propagate.
+    Three kinds:
+
+    * ``invalid_args`` — caller passed bad arguments (typed
+      ``CapabilityInvalidArg``). LLM should adjust the next call.
+    * ``not_found``    — target resource doesn't exist (typed
+      ``CapabilityNotFound``). LLM should change strategy.
+    * ``tool_error``   — anything else (timeout / 4xx / 5xx / unwrapped
+      upstream error). LLM can retry, swap tools, or tell the user the
+      tool isn't working. The decorator hands this back instead of
+      propagating so the agent turn stays alive — losing a tool call
+      shouldn't kill the whole reply (see trace
+      9b5a451cd00ccf735427cbb2059a95fb).
+
+    ``detail`` carries optional structured context (``param`` for
+    invalid_args, ``resource_id`` for not_found, ``original_error_type``
+    for tool_error). The LLM treats it as best-effort hints.
     """
 
-    kind: Literal["invalid_args", "not_found"]
+    kind: Literal["invalid_args", "not_found", "tool_error"]
     message: str
     detail: dict[str, Any] | None = None
 
