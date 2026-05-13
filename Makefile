@@ -26,6 +26,12 @@ define require_main_for_prod
 	fi
 endef
 
+# 一镜像多服务映射：deploy/release 时自动连同 sibling 服务一起处理。
+# 镜像 → 同步服务清单（不含主 APP 自身）。映射表单一来源，见 CLAUDE.md 镜像与服务映射表。
+SIBLINGS_agent-service := vectorize-worker
+SIBLINGS_lark-server   := recall-worker chat-response-worker
+# `$(SIBLINGS_$(APP))` 在 make 解析阶段展开，未匹配的 APP 得空串（无 sibling，安静跳过 for）。
+
 define require_pushed
 	@if git show-ref --verify --quiet refs/heads/$(GIT_REF) 2>/dev/null; then \
 		if ! git show-ref --verify --quiet refs/remotes/origin/$(GIT_REF) 2>/dev/null; then \
@@ -85,6 +91,14 @@ deploy:
 		-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 		-d "{\"app_name\":\"$(APP)\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
 		| python3 -m json.tool && \
+	for SIB in $(SIBLINGS_$(APP)); do \
+		echo ">>> 同步 release $$SIB -> $(LANE), tag: $$ACTUAL_TAG"; \
+		curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
+			-H 'Content-Type: application/json' \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+			-d "{\"app_name\":\"$$SIB\",\"lane\":\"$(LANE)\",\"image_tag\":\"$$ACTUAL_TAG\",\"replicas\":1}" \
+			| python3 -m json.tool || { echo ">>> 错误: sibling $$SIB release 失败"; exit 1; }; \
+	done && \
 	echo ">>> 部署完成"
 
 ## paas-engine 蓝绿自部署：构建 → 等待 → prod → blue
@@ -131,6 +145,7 @@ self-deploy:
 
 ## 仅发布（不构建），用于切换泳道/回滚
 ## 用法: make release APP=xxx LANE=yyy VERSION=1.0.0.5
+## 注：agent-service / lark-server 类多服务镜像会同步 release sibling（vectorize-worker / recall-worker / chat-response-worker）。
 release:
 	@$(call require_app)
 	$(if $(VERSION),,$(error VERSION 未指定。用法: make release APP=<app> LANE=<lane> VERSION=<version>))
@@ -141,6 +156,14 @@ release:
 	  -H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
 	  -d '{"app_name":"$(APP)","lane":"$(LANE)","image_tag":"$(VERSION)","replicas":1}' \
 	  | python3 -m json.tool
+	@for SIB in $(SIBLINGS_$(APP)); do \
+		echo ">>> 同步 release $$SIB -> $(LANE), 版本: $(VERSION)"; \
+		curl -sf -X POST $(PAAS_API)/api/paas/releases/ \
+			-H 'Content-Type: application/json' \
+			-H 'X-API-Key: $(PAAS_TOKEN)' $(CURL_LANE) \
+			-d "{\"app_name\":\"$$SIB\",\"lane\":\"$(LANE)\",\"image_tag\":\"$(VERSION)\",\"replicas\":1}" \
+			| python3 -m json.tool || { echo ">>> 错误: sibling $$SIB release 失败"; exit 1; }; \
+	done
 
 ## 按 app+lane 删除 Release
 ## 用法: make undeploy APP=xxx LANE=yyy
