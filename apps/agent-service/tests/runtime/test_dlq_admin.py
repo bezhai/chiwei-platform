@@ -1,4 +1,8 @@
-"""Phase 7b Gap 12: admin DLQ nodes (inspect / clear-idempotent / dry-run / requeue)."""
+"""Phase 7b Gap 12: admin DLQ nodes (inspect / clear-idempotent / dry-run / requeue).
+
+Patch points target the module-level ``_cap`` (DLQAdminCapability instance,
+plan B6); business node no longer imports runtime internals directly.
+"""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -6,23 +10,35 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import text
 
+from app.capabilities.dlq import ClearInflightResult
 from app.data.session import get_session
-from app.runtime.errors import AlreadySucceededError
 
 pytestmark = pytest.mark.integration
 
 
+def _ok_clear(deleted: int = 1, skipped: int = 0) -> ClearInflightResult:
+    return ClearInflightResult(
+        deleted=deleted, skipped_succeeded=skipped, already_succeeded=False,
+    )
+
+
+def _zombie_clear(edge_id: str = "e1",
+                  idempotent_key: str = "k1") -> ClearInflightResult:
+    return ClearInflightResult(
+        deleted=0, skipped_succeeded=0, already_succeeded=True,
+        edge_id=edge_id, idempotent_key=idempotent_key,
+    )
+
+
 async def test_inspect_returns_peeked_rows(dlq_admin_db: object) -> None:
-    from app.nodes.dlq_admin import dlq_inspect_impl
+    from app.nodes import dlq_admin as mod
     fake = [{
         "properties": {"headers": {"trace_id": "t1"}},
         "payload": '{"data_type":"x.Y","payload":{}}',
     }]
-    with patch("app.nodes.dlq_admin._lazy_mgmt") as m:
-        m.return_value = AsyncMock()
-        m.return_value.peek_messages = AsyncMock(return_value=fake)
-        rows = await dlq_inspect_impl(queue="durable_x_y_dlx", limit=5,
-                                      queue_kind="dlq")
+    with patch.object(mod._cap, "peek", new=AsyncMock(return_value=fake)):
+        rows = await mod.dlq_inspect_impl(queue="durable_x_y_dlx", limit=5,
+                                          queue_kind="dlq")
     assert len(rows) == 1
     assert rows[0]["trace_id"] == "t1"
 
@@ -59,21 +75,21 @@ async def test_clear_idempotent_trace_skips_succeeded(dlq_admin_db: object) -> N
 
 
 async def test_requeue_zombie_path_acks_without_publish(dlq_admin_db: object) -> None:
-    """If delete_inflight raises AlreadySucceededError, the requeue path
+    """If capability.clear_inflight returns already_succeeded, requeue
     must ack the DLQ message and write a 'zombie_acked' audit row."""
-    from app.nodes.dlq_admin import dlq_requeue_impl
+    from app.nodes import dlq_admin as mod
     fake_msg = type("M", (), {
         "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1"}',
         "ack": AsyncMock(),
         "nack": AsyncMock(),
     })()
     with patch("app.nodes.dlq_admin._basic_get_one", new=AsyncMock(return_value=fake_msg)), \
-         patch("app.nodes.dlq_admin.delete_inflight",
-               new=AsyncMock(side_effect=AlreadySucceededError(edge_id="e1", idempotent_key="k1"))), \
+         patch.object(mod._cap, "clear_inflight",
+                      new=AsyncMock(return_value=_zombie_clear())), \
          patch("app.nodes.dlq_admin.mq") as mq:
         mq.publish_with_confirm = AsyncMock(return_value=True)
         body = {"queue": "q", "queue_kind": "dlq", "limit": 1, "clear_idempotent": True}
-        resp = await dlq_requeue_impl(body, operator="op-x")
+        resp = await mod.dlq_requeue_impl(body, operator="op-x")
     fake_msg.ack.assert_awaited_once()
     mq.publish_with_confirm.assert_not_awaited()
     assert resp["zombie_acked"] == 1
@@ -88,7 +104,7 @@ async def test_requeue_publish_failed_nacks_and_audits(dlq_admin_db: object) -> 
     never called.
     """
     from app.infra.rabbitmq import Route
-    from app.nodes.dlq_admin import dlq_requeue_impl
+    from app.nodes import dlq_admin as mod
     fake_msg = type("M", (), {
         "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1","origin_queue":"target_q"}',
         "ack": AsyncMock(),
@@ -96,12 +112,13 @@ async def test_requeue_publish_failed_nacks_and_audits(dlq_admin_db: object) -> 
     })()
     fake_route = Route(queue="target_q", rk="target.q")
     with patch("app.nodes.dlq_admin._basic_get_one", new=AsyncMock(return_value=fake_msg)), \
-         patch("app.nodes.dlq_admin.delete_inflight", new=AsyncMock()), \
+         patch.object(mod._cap, "clear_inflight",
+                      new=AsyncMock(return_value=_ok_clear())), \
          patch("app.nodes.dlq_admin.ALL_ROUTES", new=[fake_route]), \
          patch("app.nodes.dlq_admin.mq") as mq:
         mq.publish_with_confirm = AsyncMock(return_value=False)
         body = {"queue": "q", "queue_kind": "dlq", "limit": 1, "clear_idempotent": True}
-        resp = await dlq_requeue_impl(body, operator="op-x")
+        resp = await mod.dlq_requeue_impl(body, operator="op-x")
     mq.publish_with_confirm.assert_awaited_once()
     fake_msg.nack.assert_awaited_once()
     fake_msg.ack.assert_not_awaited()
@@ -111,7 +128,7 @@ async def test_requeue_publish_failed_nacks_and_audits(dlq_admin_db: object) -> 
 async def test_requeue_success_path_publishes_and_acks(dlq_admin_db: object) -> None:
     """Happy path: publish confirms -> audit requeued + ack."""
     from app.infra.rabbitmq import Route
-    from app.nodes.dlq_admin import dlq_requeue_impl
+    from app.nodes import dlq_admin as mod
     fake_msg = type("M", (), {
         "body": b'{"data":{"id":"x"},"data_type":"x.Y","origin_app":"agent-service","lane":null,"trace_id":"t1","edge_id":"e1","idempotent_key":"k1","origin_queue":"target_q"}',
         "ack": AsyncMock(),
@@ -119,12 +136,13 @@ async def test_requeue_success_path_publishes_and_acks(dlq_admin_db: object) -> 
     })()
     fake_route = Route(queue="target_q", rk="target.q")
     with patch("app.nodes.dlq_admin._basic_get_one", new=AsyncMock(return_value=fake_msg)), \
-         patch("app.nodes.dlq_admin.delete_inflight", new=AsyncMock()), \
+         patch.object(mod._cap, "clear_inflight",
+                      new=AsyncMock(return_value=_ok_clear())), \
          patch("app.nodes.dlq_admin.ALL_ROUTES", new=[fake_route]), \
          patch("app.nodes.dlq_admin.mq") as mq:
         mq.publish_with_confirm = AsyncMock(return_value=True)
         body = {"queue": "q", "queue_kind": "dlq", "limit": 1, "clear_idempotent": True}
-        resp = await dlq_requeue_impl(body, operator="op-x")
+        resp = await mod.dlq_requeue_impl(body, operator="op-x")
     mq.publish_with_confirm.assert_awaited_once()
     fake_msg.ack.assert_awaited_once()
     fake_msg.nack.assert_not_awaited()
@@ -134,13 +152,10 @@ async def test_requeue_success_path_publishes_and_acks(dlq_admin_db: object) -> 
 
 
 async def test_dry_run_does_not_mutate(dlq_admin_db: object) -> None:
-    from app.nodes.dlq_admin import dlq_dry_run_impl
-    with patch("app.nodes.dlq_admin._lazy_mgmt") as m:
-        m.return_value = AsyncMock()
-        m.return_value.peek_messages = AsyncMock(return_value=[
-            {"payload": '{"edge_id":"e1","idempotent_key":"k1"}'}
-        ])
+    from app.nodes import dlq_admin as mod
+    fake = [{"payload": '{"edge_id":"e1","idempotent_key":"k1"}'}]
+    with patch.object(mod._cap, "peek", new=AsyncMock(return_value=fake)):
         body = {"queue": "q", "queue_kind": "dlq", "limit": 5}
-        plan = await dlq_dry_run_impl(body)
+        plan = await mod.dlq_dry_run_impl(body)
     assert "plan" in plan
     assert len(plan["plan"]) == 1
