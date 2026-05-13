@@ -102,18 +102,31 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 ## 开发流程
 
-**禁止直接在 main 分支上修改代码。** 每次需求变更：
+**禁止直接在 main 分支上修改代码。** 分支由用户切好递给 Claude（worktree 不归 Claude 管），Claude 接到需求后按下面主线推进：
 
-1. **需求分析 + 出方案**：超 10 行改动前先写 spec 文件落盘（含目标 / 不做什么 / 关键决策 / 调用方全覆盖清单 / 数据&部署影响），让 codex 做一次外部 review
-2. **切分支**：从 main 切分支，用 `/worktree`
-3. **执行方案**：按 spec 实施。写代码遵循 TDD 红-绿-重构（先写测试再写实现）
-4. **遇到 bug**：3 次内仍未解决必须停（同一报错 ≥2 次 / 同一测试 ≥3 次 / A↔B 往返），结构化分析根因，必要时叫 codex 做独立诊断
-5. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）
-6. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建/破坏性改动用 `coe-<name>`），不直接用 `dev`
-7. 飞书测试必须绑定 dev bot: `/ops bind bot dev <lane>`
-8. **完成前验证**：拿出可验证的证据（命令 + 实际输出）再宣称完成，禁止"看着对、应该没问题"
-9. 验收后解绑 + 下泳道: `/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`
-10. `/ship` 合码并部署 prod（合码铁律见 `.claude/rules/merge-and-ship.md`）
+1. **判断简单 / 复杂**：typo / rename / 一两行无行为变化的改动，直接做，跳过下面。其他走完整流程。
+2. **先 Explore，再写 spec**：派 Explore 子 agent 查清调用方、现有实现、相关数据流。主对话只接结论。**禁止凭印象写 spec**。
+3. **写 spec（`/spec`）**：含目标、不做什么、关键设计决策、调用方全覆盖、数据&部署影响、粗颗粒 task 清单。**spec 里的 task 只写"目标 + 产出 + 验收口径"，禁止出现代码片段 / 文件行号 / 实现步骤**；具体验证命令在实现阶段基于实际改动补齐 —— 实现细节是动手时才能生成的知识，spec 阶段预写就是想象，必失真。
+4. **codex T1 review**：spec 定稿叫一次 codex，重点检查任务颗粒度是否合适、有没有藏着的实现想象。逐条采纳 / 驳回写理由，更新 spec。
+5. **实现**：
+   - 同 spec 内 task 互相独立无依赖的，派 `general-purpose` 子 agent 并行做，每个 agent 自己生成实现细节并产出验证证据
+   - 有依赖的 task 主会话串行做
+   - 跨需求并行（多个独立 feature）走另一个 worktree / 会话，不用子 agent
+   - 不管谁做，都走 TDD 红-绿-重构（先写测试再写实现）
+6. **遇到死循环必停**：同一报错 ≥2 次 / 同一测试 ≥3 次 / A↔B 往返。结构化分析根因，必要时叫 codex T4 独立诊断（必须先告诉用户、等同意）。
+7. **commit 前**：含设计或逻辑变动的批叫 codex T3 review。完成前必须列出验证证据（命令 + 实际输出），禁止"看着对、应该没问题"。
+8. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）。
+9. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建 / 破坏性改动用 `coe-<name>`），不直接用 `dev`。
+10. 飞书测试必须绑定 dev bot：`/ops bind bot dev <lane>`。
+11. 验收后解绑 + 下泳道：`/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`。
+12. `/ship` 合码并部署 prod（合码铁律见 `.claude/rules/merge-and-ship.md`）。
+
+### 子 agent 与 codex 的使用边界
+
+- **Explore 子 agent**：研究代码，不写代码。在 spec 阶段用来查调用方 / 现有实现 / 类似模式，主对话只接结论。
+- **general-purpose 子 agent（并行）**：仅用于**同 spec 内、互相独立的 task**。每个 agent 拿一条 task 自己想细节、自己写测试、自己跑验证、自己报产出。主会话只接产出 + 证据，不参与中间过程。
+- **跨需求并行**：用 worktree + 多会话，不在一个会话里塞多个独立 feature。
+- **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/codex-collaboration.md`。
 
 ### 上线前必须完成的检查（TODO）
 
