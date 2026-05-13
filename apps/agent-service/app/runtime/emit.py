@@ -99,12 +99,24 @@ async def emit(data: Data) -> None:
                 continue
 
             # Consumer is in another process. If the wire has Source.mq,
-            # publish to that queue so the worker pod consumes it. Otherwise
-            # silently skip — preserves prior behavior for wires that have
-            # no MQ bridge declared.
+            # publish to that queue so the worker pod consumes it.
+            # Otherwise raise — A0 contract W4a: cross-app dispatch
+            # without an explicit transport (`.durable()` / Source.mq) is
+            # banned because it silently drops the Data on the floor.
+            # Surfaces the wiring bug at the first emit instead of letting
+            # downstream logic mysteriously never run.
             mq_src = next((s for s in w.sources if s.kind == "mq"), None)
             if mq_src is not None:
                 await _mq_publish_for_source(mq_src, data)
+                continue
+            raise RuntimeError(
+                f"wire({cls.__name__}).to({c.__name__}): cross-app dispatch "
+                f"has no transport — add .durable() so emit publishes to "
+                f"the consumer's queue, or add .from_(Source.mq(...)) so "
+                f"an external producer can reach the consumer. Current "
+                f"emit-side app is {_current_app()!r}; consumer is bound "
+                f"elsewhere."
+            )
         # Phase 2: sink dispatch — out-of-graph publish (RabbitMQ).
         # compile_graph 已校验 Sink.mq(name) ∈ ALL_ROUTES，这里直接调。
         for s in w.sinks:
