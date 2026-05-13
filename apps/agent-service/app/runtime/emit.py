@@ -10,6 +10,12 @@ fan-out (sibling consumers and later-matching wires) is aborted and the
 exception propagates to ``emit``'s caller. Use ``.durable()`` when
 independent isolation between consumers is required.
 
+``.fan_out_per(extractor)`` (B7) is the one in-process exception to the
+"strict propagation" rule: each per-key consumer call is awaited via
+``asyncio.gather(return_exceptions=True)``, so one key's raise is
+logged and the other keys still run. This is the contract that lets
+business code drop hand-rolled ``for pid in pids: try: ...`` loops.
+
 Persistence: a wire declared ``.as_latest()`` makes ``emit`` append a
 new versioned row to the Data class's table before dispatching. This is
 what lets a downstream ``with_latest(X)`` consumer (or any out-of-graph
@@ -26,12 +32,17 @@ without an ``X`` to join against.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import logging
 import os
 from datetime import UTC
 
 from app.runtime.data import Data
 from app.runtime.graph import CompiledGraph, compile_graph
 from app.runtime.placement import DEFAULT_APP, nodes_for_app
+
+logger = logging.getLogger(__name__)
 
 _graph: CompiledGraph | None = None
 
@@ -82,6 +93,20 @@ async def emit(data: Data) -> None:
             for c in w.consumers:
                 await publish_debounce(w, c, data)
             continue
+        if w.fan_out_extractor is not None:
+            # B7: per-key fan-out with failure isolation. Each per-key
+            # consumer call is awaited concurrently with
+            # ``return_exceptions=True`` so one persona's failure does
+            # not abort the others. compile_graph 已校验 fan_out_per 不
+            # 跟 durable / debounce / with_latest 组合，所以这里走纯
+            # in-process 分发，sinks 仍按非 fan-out 路径走。
+            await _dispatch_fan_out(w, data, own_nodes)
+            for s in w.sinks:
+                if s.kind == "mq":
+                    from app.runtime.sink_dispatch import _dispatch_mq_sink
+
+                    await _dispatch_mq_sink(s, data)
+            continue
         for c in w.consumers:
             if w.durable:
                 # durable: publish to the consumer's queue; the bound
@@ -124,6 +149,84 @@ async def emit(data: Data) -> None:
                 from app.runtime.sink_dispatch import _dispatch_mq_sink
 
                 await _dispatch_mq_sink(s, data)
+
+
+async def _dispatch_fan_out(wire_spec, data: Data, own_nodes) -> None:
+    """B7: fan_out_per dispatch with per-key isolation.
+
+    Calls ``wire_spec.fan_out_extractor()`` (sync or async) to get a
+    ``list[dict]``; for each item builds ``data.model_copy(update=item)``
+    and invokes every consumer in parallel via ``asyncio.gather`` with
+    ``return_exceptions=True``. Per-key failures are logged but do NOT
+    abort the rest — this is the contract that lets business code drop
+    hand-rolled ``for pid in pids: try: ...`` loops.
+
+    Extractor failure (e.g. DB jitter on persona listing) is also
+    swallowed and logged: same fail-soft semantic as
+    ``_fan_out_per_persona``'s outer try/except, so a single jittered
+    tick doesn't bubble back to the source loop and crash the process.
+    """
+    extractor = wire_spec.fan_out_extractor
+    try:
+        result = extractor()
+        if inspect.isawaitable(result):
+            items = await result
+        else:
+            items = result
+    except Exception:
+        logger.exception(
+            "fan_out_per extractor failed for wire(%s); dropping this emit",
+            type(data).__name__,
+        )
+        return
+
+    if not items:
+        return
+
+    tasks = []
+    labels: list[tuple[str, dict]] = []
+    for item in items:
+        try:
+            data_copy = data.model_copy(update=dict(item))
+        except Exception:
+            logger.exception(
+                "fan_out_per could not apply update=%r to %s; skipping this key",
+                item,
+                type(data).__name__,
+            )
+            continue
+        for c in wire_spec.consumers:
+            if wire_spec.durable:
+                # compile-time check already rejects this combo; defensive.
+                raise RuntimeError(
+                    "fan_out_per + durable should have been rejected at compile"
+                )
+            if c in own_nodes:
+                kwargs = await _resolve_inputs(c, data_copy, wire_spec)
+                tasks.append(c(**kwargs))
+                labels.append((c.__name__, dict(item)))
+            else:
+                # Cross-process within fan_out_per is unsupported for now.
+                # Mirrors emit()'s default-path requirement of an explicit
+                # transport (.durable() / Source.mq), but fan_out_per
+                # forbids durable. Surface the wiring bug.
+                raise RuntimeError(
+                    f"wire({type(data).__name__}).fan_out_per().to("
+                    f"{c.__name__}): consumer is bound to another app; "
+                    f"fan_out_per is in-process only (durable combo is "
+                    f"disallowed)."
+                )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for (cname, key), res in zip(labels, results, strict=False):
+        if isinstance(res, BaseException):
+            logger.warning(
+                "fan_out_per consumer %s failed for key=%r on %s: %r",
+                cname,
+                key,
+                type(data).__name__,
+                res,
+            )
 
 
 async def _resolve_inputs(consumer, data: Data, wire_spec) -> dict:

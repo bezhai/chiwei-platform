@@ -34,6 +34,7 @@ from app.domain.life_dataflow import (
     VoiceRequest,
 )
 from app.nodes.life_dataflow import (
+    _persona_dicts,
     daily_plan_node,
     fan_out_daily_plan,
     fan_out_glimpse,
@@ -56,7 +57,10 @@ from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
 
-# Cron tick entry points
+# Cron tick entry points — fan_out_xxx @node emits a per-persona-less
+# template Request; the wire from that Request to the business node
+# declares ``.fan_out_per(_persona_dicts)`` to expand it per persona
+# with built-in failure isolation between personas.
 wire(MinuteTick).from_(Source.cron("* * * * *", tz=TZ)).to(fan_out_life_tick, fan_out_voice)
 wire(LightDayTick).from_(Source.cron("0,30 8-21 * * *", tz=TZ)).to(fan_out_light_day)
 wire(LightNightTick).from_(Source.cron("0 22,23,0,1,2,4,5,6,7 * * *", tz=TZ)).to(fan_out_light_night)
@@ -64,18 +68,21 @@ wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
 wire(DailyPlanTick).from_(Source.cron("0 5 * * *", tz=TZ)).to(run_shared_daily_pipeline_node)
 wire(GlimpseTick).from_(Source.cron("*/5 * * * *", tz=TZ)).to(fan_out_glimpse)
 
-# Daily plan internal chain
+# Daily plan internal chain — SharedDailyContext → template Request → fan-out.
 wire(SharedDailyContext).to(fan_out_daily_plan)
-wire(DailyPlanRequest).to(daily_plan_node)
+wire(DailyPlanRequest).fan_out_per(_persona_dicts).to(daily_plan_node)
 
-# Per-persona business
-wire(LifeTickRequest).to(life_tick_node)
-wire(VoiceRequest).to(voice_node)
-wire(LightReviewRequest).to(light_review_node)
-wire(HeavyReviewRequest).to(heavy_review_node)
+# Per-persona business (declarative fan-out replaces hand-rolled
+# ``_fan_out_per_persona`` loops; one persona failing does not abort
+# the others — guaranteed by emit._dispatch_fan_out's
+# asyncio.gather(return_exceptions=True)).
+wire(LifeTickRequest).fan_out_per(_persona_dicts).to(life_tick_node)
+wire(VoiceRequest).fan_out_per(_persona_dicts).to(voice_node)
+wire(LightReviewRequest).fan_out_per(_persona_dicts).to(light_review_node)
+wire(HeavyReviewRequest).fan_out_per(_persona_dicts).to(heavy_review_node)
 
 # Glimpse dual-path converge into GlimpseRequest
-wire(GlimpseTickRequest).to(glimpse_tick_node)         # 5min periodic path
+wire(GlimpseTickRequest).fan_out_per(_persona_dicts).to(glimpse_tick_node)  # 5min periodic path
 wire(LifeStateChanged).to(glimpse_event_node)          # immediate event path
 wire(GlimpseRequest).to(run_glimpse_node).durable().on_error("dlq")
 

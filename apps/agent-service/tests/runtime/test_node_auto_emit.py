@@ -205,8 +205,10 @@ async def test_manual_emit_other_data_plus_return_is_legal_fan_out():
     legitimate multi-output pattern: a node produces several Data types,
     emits them individually, and returns one of them (or another). Each
     emit reaches its own consumer exactly once; the returned Data is
-    auto-emitted by the wrapper exactly once. This mirrors
-    ``life_dataflow._fan_out_per_persona`` and similar real nodes.
+    auto-emitted by the wrapper exactly once. Per-key fan-out (the old
+    ``life_dataflow._fan_out_per_persona`` pattern) is now declarative
+    via ``wire(D).fan_out_per(extractor).to(...)`` (B7), so this test
+    covers the remaining genuine multi-Data-type case.
     """
 
     @node

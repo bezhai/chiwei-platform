@@ -66,6 +66,12 @@ class WireSpec:
     # str (not Literal) for forward-compat with future policies — matches
     # RetryPolicy.backoff. Validated at builder time via VALID_ON_ERROR.
     on_error: str = "dlq"
+    # B7: declarative per-key fan-out. The extractor is called at emit
+    # time and must return ``list[dict]`` — each dict is merged into the
+    # primary Data via ``model_copy(update=item)`` before the consumer
+    # is invoked. Per-key consumer calls are isolated: one key's failure
+    # does NOT abort the others.
+    fan_out_extractor: Callable | None = None
 
 
 WIRING_REGISTRY: list[WireSpec] = []
@@ -163,6 +169,28 @@ class WireBuilder:
             max_delay_ms=max_delay_ms,
             lease_ms=lease_ms,
         )
+        return self
+
+    def fan_out_per(self, extractor: Callable) -> WireBuilder:
+        """Declare per-key fan-out on this wire (B7).
+
+        At emit time, ``extractor()`` is called to produce ``list[dict]``
+        (or an awaitable returning that). For each item, the runtime
+        builds ``data.model_copy(update=item)`` and invokes the
+        consumer(s) with the patched copy. Per-key consumer invocations
+        are **isolated**: one raise does NOT abort the other keys —
+        emit collects all calls via ``asyncio.gather(return_exceptions=
+        True)`` and logs failures.
+
+        Cannot combine with ``.durable()``, ``.debounce()``, or
+        ``.with_latest()`` (rejected at compile time). Replaces
+        hand-rolled fan-out loops inside @node bodies.
+        """
+        if not callable(extractor):
+            raise TypeError(
+                f"fan_out_per(extractor) requires a callable, got {type(extractor).__name__}"
+            )
+        self._spec.fan_out_extractor = extractor
         return self
 
     def on_error(self, policy: str) -> WireBuilder:

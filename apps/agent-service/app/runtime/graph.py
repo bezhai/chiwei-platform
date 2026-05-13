@@ -344,6 +344,49 @@ def compile_graph() -> CompiledGraph:
                 f"or drop .on_error() to fall back to the default."
             )
 
+    # 4f) B7 fan_out_per combo restrictions. fan_out_per mutates the
+    # primary Data via ``model_copy(update=...)`` and dispatches per-key
+    # with isolation, which makes a few combinations either ambiguous
+    # or load-bearing on semantics we haven't designed yet:
+    #   * durable: per-key isolation overlaps the durable retry/DLQ path
+    #     in ways we haven't reasoned about; refuse until needed.
+    #   * debounce: debounce ships its own mq transport and is keyed by
+    #     a single (DataType, key) — overlaying fan_out_per would
+    #     duplicate the partitioning concept.
+    #   * with_latest: join-key resolution reads ``getattr(data, key)``
+    #     on the primary Data; if fan_out_per mutates that field
+    #     per-key, the joined latest changes per-key too — likely the
+    #     intent, but the contract is unverified. Refuse until a user
+    #     genuinely needs it.
+    for w in wires:
+        if w.fan_out_extractor is None:
+            continue
+        if w.durable:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per().durable(): "
+                f"fan_out_per dispatches per-key with per-call isolation; "
+                f"combining with durable (queue + retry + DLQ) is not yet "
+                f"designed. Pick one: drop durable, or do the fan-out "
+                f"upstream and put each per-key Data on its own durable wire."
+            )
+        if w.debounce is not None:
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per().debounce(): "
+                f"debounce is keyed by a single (DataType, key) and "
+                f"ships its own mq transport; combining with fan_out_per "
+                f"would duplicate the partitioning concept. Pick one."
+            )
+        if w.with_latest:
+            latest = sorted(t.__name__ for t in w.with_latest)
+            raise GraphError(
+                f"wire({w.data_type.__name__}).fan_out_per()"
+                f".with_latest({', '.join(latest)}): with_latest joins on "
+                f"the primary Data's attribute, but fan_out_per mutates "
+                f"those attributes per-key; the join semantic is "
+                f"unverified. Resolve the latest types upstream of emit "
+                f"and pass them through the trigger Data instead."
+            )
+
     # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
     # reference a queue declared in ALL_ROUTES, otherwise the engine
     # wouldn't know which routing key to use when publishing (lane
