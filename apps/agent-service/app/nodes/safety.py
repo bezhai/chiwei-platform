@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ from pydantic import BaseModel, Field
 from app.agent.core import Agent, AgentConfig
 from app.api.middleware import get_lane
 from app.capabilities import banned_words as _banned_words
+from app.capabilities.concurrency import fan_out_wait
 from app.data.queries import get_safety_status, set_safety_status
 from app.domain.safety import (
     PostSafetyRequest,
@@ -220,24 +220,26 @@ async def _run_pre_audit(
     except Exception as e:
         logger.error("Banned word check failed: %s", e)
 
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                _check_injection(message_content),
-                _check_politics(message_content),
-                _check_nsfw(message_content, persona_id),
-                return_exceptions=True,
-            ),
-            timeout=20.0,
-        )
-    except TimeoutError:
+    # fan_out_wait cancels in-flight checks on deadline trip (improvement
+    # over the legacy ``wait_for(gather(...))`` which leaked the slow
+    # task). Slow checks surface as TimeoutError in their result slot;
+    # fail-open keeps the original pass-through verdict.
+    results = await fan_out_wait(
+        [
+            _check_injection(message_content),
+            _check_politics(message_content),
+            _check_nsfw(message_content, persona_id),
+        ],
+        timeout_s=20.0,
+    )
+
+    if any(isinstance(r, TimeoutError) for r in results):
         logger.warning("Pre-check exceeded 20s, passing through")
-        return _PreCheckOutcome()
 
     for r in results:
         if isinstance(r, _PreCheckOutcome) and r.is_blocked:
             return r
-        if isinstance(r, Exception):
+        if isinstance(r, Exception) and not isinstance(r, TimeoutError):
             logger.error("Pre-check sub-task failed: %s", r)
 
     return _PreCheckOutcome()

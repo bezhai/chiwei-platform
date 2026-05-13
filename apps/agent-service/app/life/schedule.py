@@ -9,12 +9,12 @@ directly from diverse external stimuli instead of narrowing funnels.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import date, datetime, timedelta
 
 from app.agent.core import Agent, AgentConfig, extract_text
 from app.agent.tools.search import search_web
+from app.capabilities.concurrency import fan_out_wait
 from app.data import queries as Q
 from app.data.models import AkaoSchedule
 from app.life._date_utils import CST, WEEKDAY_CN
@@ -74,21 +74,26 @@ async def _run_shared_pipeline(target_date: date) -> tuple[str, str, str]:
 
     Returns (wild_materials, search_anchors, theater_text).
     """
-    wild_task = run_wild_agents(target_date)
-    search_task = _fetch_search_anchors(target_date)
-    theater_task = run_sister_theater(target_date)
+    results = await fan_out_wait(
+        {
+            "Wild agents": run_wild_agents(target_date),
+            "Search anchors": _fetch_search_anchors(target_date),
+            "Sister theater": run_sister_theater(target_date),
+        }
+    )
 
-    results = await asyncio.gather(wild_task, search_task, theater_task, return_exceptions=True)
+    for label, value in results.items():
+        if isinstance(value, BaseException):
+            logger.warning("%s failed: %s", label, value)
 
-    wild = results[0] if not isinstance(results[0], Exception) else ""
-    anchors = results[1] if not isinstance(results[1], Exception) else ""
-    theater = results[2] if not isinstance(results[2], Exception) else ""
+    def _str_or_empty(value: object) -> str:
+        return value if isinstance(value, str) else ""
 
-    for i, label in enumerate(["Wild agents", "Search anchors", "Sister theater"]):
-        if isinstance(results[i], Exception):
-            logger.warning("%s failed: %s", label, results[i])
-
-    return wild, anchors, theater
+    return (
+        _str_or_empty(results["Wild agents"]),
+        _str_or_empty(results["Search anchors"]),
+        _str_or_empty(results["Sister theater"]),
+    )
 
 
 # ---------------------------------------------------------------------------

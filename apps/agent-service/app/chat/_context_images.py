@@ -5,10 +5,10 @@ orchestrator slim by moving the image processing pipeline into a focused module.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
+from app.capabilities.concurrency import fan_out_wait
 from app.chat.content_parser import parse_content
 from app.chat.quick_search import QuickSearchResult
 from app.data.queries import find_group_download_permission
@@ -71,8 +71,9 @@ async def collect_images(
 
     # Cached images: sign URLs only
     if cached_keys:
-        tasks = [image_client.get_url(tos_file) for _, tos_file in cached_keys]
-        url_results = await asyncio.gather(*tasks, return_exceptions=True)
+        url_results = await fan_out_wait(
+            [image_client.get_url(tos_file) for _, tos_file in cached_keys]
+        )
         for i, result in enumerate(url_results):
             key, tos_file = cached_keys[i]
             if isinstance(result, str) and result:
@@ -95,11 +96,12 @@ async def collect_images(
 
     # Uncached: full pipeline (Lark download -> compress -> TOS)
     if uncached_keys:
-        tasks = [
-            image_client.process_image(key, msg_id if role == "user" else None)
-            for key, msg_id, role in uncached_keys
-        ]
-        process_results = await asyncio.gather(*tasks, return_exceptions=True)
+        process_results = await fan_out_wait(
+            [
+                image_client.process_image(key, msg_id if role == "user" else None)
+                for key, msg_id, role in uncached_keys
+            ]
+        )
         for i, result in enumerate(process_results):
             key, msg_id, _ = uncached_keys[i]
             if isinstance(result, dict) and result:
