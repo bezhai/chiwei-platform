@@ -124,7 +124,11 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
     Cache policy:
       - Hit and fresh -> return cached value.
       - Miss or stale -> query DB -> cache (including None, to prevent stampede).
-      - DB exception -> do NOT cache (allow retry next call), return None.
+      - DB exception -> propagate to caller (no cache write — next call retries).
+        Per dataflow contract §4.6: nodes do not log+raise as a courtesy; the
+        wire-level on_error decides DLQ / review / swallow_and_log. The caller
+        (build_agent_chat_model / build_agent_model) wraps this in
+        ModelBuildError, preserving the original exception via __cause__.
     """
     now = time.monotonic()
 
@@ -134,45 +138,41 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
         if now < expire_at:
             return dict(value) if value is not None else None
 
-    try:
-        from app.data.queries import (
-            find_model_mapping,
-            find_provider_by_name,
-            parse_model_id,
-        )
+    from app.data.queries import (
+        find_model_mapping,
+        find_provider_by_name,
+        parse_model_id,
+    )
 
-        async with tx():
-            mapping = await find_model_mapping(model_id)
+    async with tx():
+        mapping = await find_model_mapping(model_id)
 
-            if mapping:
-                provider_name = mapping.provider_name
-                actual_model_name = mapping.real_model_name
-            else:
-                provider_name, actual_model_name = parse_model_id(model_id)
+        if mapping:
+            provider_name = mapping.provider_name
+            actual_model_name = mapping.real_model_name
+        else:
+            provider_name, actual_model_name = parse_model_id(model_id)
 
-            provider = await find_provider_by_name(provider_name)
+        provider = await find_provider_by_name(provider_name)
 
-            if not provider:
-                provider = await find_provider_by_name("302.ai")
+        if not provider:
+            provider = await find_provider_by_name("302.ai")
 
-            if not provider:
-                _model_info_cache[model_id] = (None, now + _CACHE_TTL_SECONDS)
-                return None
+        if not provider:
+            _model_info_cache[model_id] = (None, now + _CACHE_TTL_SECONDS)
+            return None
 
-            result: dict[str, Any] = {
-                "model_name": actual_model_name,
-                "api_key": provider.api_key,
-                "base_url": provider.base_url,
-                "is_active": provider.is_active,
-                "client_type": provider.client_type or "openai",
-                "use_proxy": provider.use_proxy,
-            }
+        result: dict[str, Any] = {
+            "model_name": actual_model_name,
+            "api_key": provider.api_key,
+            "base_url": provider.base_url,
+            "is_active": provider.is_active,
+            "client_type": provider.client_type or "openai",
+            "use_proxy": provider.use_proxy,
+        }
 
-        _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)
-        return dict(result)
-    except Exception as e:
-        logger.error("DB lookup failed for model %s: %s", model_id, e)
-        raise
+    _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)
+    return dict(result)
 
 
 # ---------------------------------------------------------------------------
