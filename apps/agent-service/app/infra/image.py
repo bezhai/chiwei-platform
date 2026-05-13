@@ -270,10 +270,12 @@ class ImageRegistry:
     Fields: ``__counter__`` -> N, ``1.png`` -> url, ``2.png`` -> url, ...
     TTL: 30 minutes.
 
-    C5 cutover: registry goes through ``RedisCapability`` (plan B5) so
-    keys auto-prefix with ``{lane}:`` on non-prod lanes — two lanes
-    registering against the same ``message_id`` get independent counters
-    (the C5 acceptance scenario).
+    Cross-service contract: chat-response-worker reads the same bare
+    key when rendering the AI reply (replaces ``N.png`` in the text
+    with the registered TOS URL). Lane isolation is delegated to the
+    ConfigBundle (coe-* lanes get a separate Redis container); the key
+    is never rewritten by the capability — that broke ppe→prod sharing
+    in trace 3de371aea10290b327f1386ea56f180c.
     """
 
     def __init__(self, message_id: str) -> None:

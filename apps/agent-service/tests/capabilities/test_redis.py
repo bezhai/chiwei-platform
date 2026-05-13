@@ -103,33 +103,45 @@ async def test_pipeline_batches(cap, lane_prod):
 
 
 # ---------------------------------------------------------------------------
-# Lane prefix behaviour
+# Lane key space: no implicit prefix
 # ---------------------------------------------------------------------------
+#
+# Contract (post-hotfix 2026-05-13): RedisCapability does NOT inject any
+# lane prefix into keys. Cross-lane isolation is the ConfigBundle's job —
+# coe-* lanes get a physically separate Redis container (chiwei-test) via
+# ``class_overrides[coe]``; ppe-* lanes intentionally share prod Redis
+# because that's the whole point of ppe ("functional verification against
+# real prod data"). An implicit ``{lane}:`` prefix broke that contract: it
+# made ppe-* agent-service write to ``ppe-foo:image_registry:...`` while
+# prod chat-response-worker (which reads bare ``image_registry:...``)
+# silently missed every entry — image links dropped on lane verification
+# (see trace 3de371aea10290b327f1386ea56f180c).
 
 
 @pytest.mark.asyncio
 async def test_prod_lane_no_prefix(cap, lane_prod, fake_redis):
-    """Prod (lane=None) leaves keys bare so existing prod data keeps working."""
+    """Prod lane stores keys bare — baseline."""
     await cap.incr("c:prod")
-    # raw client sees the bare key — no prefix
     assert await fake_redis.get("c:prod") == "1"
 
 
 @pytest.mark.asyncio
-async def test_non_prod_lane_prefixes_incr(cap, fake_redis):
+async def test_non_prod_lane_also_no_prefix(cap, fake_redis):
+    """Non-prod lanes share the same key space — capability does not
+    silently rewrite keys based on lane."""
     token = _set_lane("ppe-foo")
     try:
         await cap.incr("c:lane")
     finally:
         lane_var.reset(token)
-    # Bare key is empty; prefixed key holds the value
-    assert await fake_redis.get("c:lane") is None
-    assert await fake_redis.get("ppe-foo:c:lane") == "1"
+    # Same bare key as prod would have written.
+    assert await fake_redis.get("c:lane") == "1"
+    assert await fake_redis.get("ppe-foo:c:lane") is None
 
 
 @pytest.mark.asyncio
-async def test_non_prod_lane_prefixes_eval_keys(cap, fake_redis):
-    """``eval`` rewrites every key in ``keys`` with the lane prefix."""
+async def test_eval_keys_pass_through_unchanged(cap, fake_redis):
+    """``eval`` passes ``keys`` to Lua verbatim regardless of lane."""
     token = _set_lane("coe-bar")
     script = """
     redis.call('SET', KEYS[1], ARGV[1])
@@ -140,15 +152,15 @@ async def test_non_prod_lane_prefixes_eval_keys(cap, fake_redis):
         await cap.eval(script, keys=["k:a", "k:b"], args=["v1", "v2"])
     finally:
         lane_var.reset(token)
-    assert await fake_redis.get("coe-bar:k:a") == "v1"
-    assert await fake_redis.get("coe-bar:k:b") == "v2"
-    # Bare keys untouched.
-    assert await fake_redis.get("k:a") is None
-    assert await fake_redis.get("k:b") is None
+    assert await fake_redis.get("k:a") == "v1"
+    assert await fake_redis.get("k:b") == "v2"
+    # No phantom prefixed keys.
+    assert await fake_redis.get("coe-bar:k:a") is None
+    assert await fake_redis.get("coe-bar:k:b") is None
 
 
 @pytest.mark.asyncio
-async def test_pipeline_prefixes_keys(cap, fake_redis):
+async def test_pipeline_keys_pass_through_unchanged(cap, fake_redis):
     token = _set_lane("ppe-pipe")
     try:
         async with cap.pipeline() as pipe:
@@ -157,8 +169,8 @@ async def test_pipeline_prefixes_keys(cap, fake_redis):
             await pipe.execute()
     finally:
         lane_var.reset(token)
-    assert await fake_redis.get("c:p") is None
-    assert await fake_redis.get("ppe-pipe:c:p") == "2"
+    assert await fake_redis.get("c:p") == "2"
+    assert await fake_redis.get("ppe-pipe:c:p") is None
 
 
 # ---------------------------------------------------------------------------
@@ -189,38 +201,53 @@ async def _register(cap: RedisCapability, message_id: str, url: str) -> int:
 
 
 @pytest.mark.asyncio
-async def test_two_lanes_dedup_lua_independent(cap, fake_redis):
-    """B5 acceptance: two lanes hammering the same logical ``message_id``
-    each see their own counter — no cross-lane interference."""
+async def test_coe_lane_isolation_via_separate_redis_instances(fake_redis):
+    """Acceptance (post-hotfix 2026-05-13): cross-lane Redis isolation
+    is the ConfigBundle's job, not the capability's.
 
-    async def run_in_lane(lane: str, url_prefix: str) -> list[int]:
-        token = lane_var.set(lane)
-        try:
-            results = []
-            for i in range(5):
-                n = await _register(cap, message_id="msg-1", url=f"{url_prefix}/{i}")
-                results.append(n)
-                # yield so the other coroutine interleaves
-                await asyncio.sleep(0)
-            return results
-        finally:
-            lane_var.reset(token)
+    coe-* lanes get a physically separate Redis container (chiwei-test)
+    via ``class_overrides[coe]`` — different ``RedisCapability`` instances
+    point at different clients. Two coe-* lanes running the same logical
+    key against their own clients are naturally isolated; the capability
+    never touches the key.
 
-    res_ppe, res_coe = await asyncio.gather(
-        run_in_lane("ppe-alpha", "https://tos/ppe"),
-        run_in_lane("coe-beta", "https://tos/coe"),
+    ppe-* lanes share prod Redis on purpose ("functional verification
+    against prod data") so cross-ppe isolation is intentionally NOT
+    provided — that's a property of ppe, not a bug. The test below
+    only exercises the coe case, which is the one we actually rely on.
+    """
+    import fakeredis.aioredis as fakeredis_aio
+
+    # Two physically distinct fakeredis backing stores — simulating two
+    # coe lanes pointing at two chiwei-test Redis containers via
+    # ConfigBundle ``class_overrides[coe]``.
+    coe_one_client = fakeredis_aio.FakeRedis(decode_responses=True)
+    coe_two_client = fakeredis_aio.FakeRedis(decode_responses=True)
+    cap_one = RedisCapability(coe_one_client)
+    cap_two = RedisCapability(coe_two_client)
+
+    async def run(cap: RedisCapability, url_prefix: str) -> list[int]:
+        results = []
+        for i in range(5):
+            n = await _register(cap, message_id="msg-1", url=f"{url_prefix}/{i}")
+            results.append(n)
+            await asyncio.sleep(0)
+        return results
+
+    res_one, res_two = await asyncio.gather(
+        run(cap_one, "https://tos/one"),
+        run(cap_two, "https://tos/two"),
     )
 
-    # Each lane sees the full 1..5 sequence — independent counters.
-    assert res_ppe == [1, 2, 3, 4, 5]
-    assert res_coe == [1, 2, 3, 4, 5]
+    assert res_one == [1, 2, 3, 4, 5]
+    assert res_two == [1, 2, 3, 4, 5]
 
-    # Underlying state confirms isolation: each lane owns its own Hash.
-    ppe_hash = await fake_redis.hgetall("ppe-alpha:image_registry:msg-1")
-    coe_hash = await fake_redis.hgetall("coe-beta:image_registry:msg-1")
-    assert ppe_hash["1.png"] == "https://tos/ppe/0"
-    assert coe_hash["1.png"] == "https://tos/coe/0"
-    # No bare-key contamination.
+    one_hash = await coe_one_client.hgetall("image_registry:msg-1")
+    two_hash = await coe_two_client.hgetall("image_registry:msg-1")
+    assert one_hash["1.png"] == "https://tos/one/0"
+    assert two_hash["1.png"] == "https://tos/two/0"
+    # The "main" cap (prod-style shared fakeredis) is unaffected — it
+    # would only contain entries written through itself.
     assert await fake_redis.hgetall("image_registry:msg-1") == {}
 
 
@@ -302,14 +329,14 @@ async def test_hget_missing_returns_none(cap, lane_prod):
 
 
 @pytest.mark.asyncio
-async def test_hget_lane_prefixes_key(cap, fake_redis):
+async def test_hget_passes_key_through_unchanged(cap, fake_redis):
+    """Capability does NOT rewrite the key on lane changes."""
     token = _set_lane("ppe-x")
     try:
-        await fake_redis.hset("ppe-x:h:lane", "f", "v")
-        # Bare key untouched
-        assert await fake_redis.hget("h:lane", "f") is None
-        # Capability sees prefixed key transparently
+        await fake_redis.hset("h:lane", "f", "v")
         assert await cap.hget("h:lane", "f") == "v"
+        # The phantom prefixed key is empty.
+        assert await fake_redis.hget("ppe-x:h:lane", "f") is None
     finally:
         lane_var.reset(token)
 
@@ -326,14 +353,12 @@ async def test_hgetall_missing_returns_empty(cap, lane_prod):
 
 
 @pytest.mark.asyncio
-async def test_hgetall_lane_prefixes_key(cap, fake_redis):
+async def test_hgetall_passes_key_through_unchanged(cap, fake_redis):
     token = _set_lane("coe-y")
     try:
-        await fake_redis.hset("coe-y:h:all", mapping={"a": "1"})
-        # Capability finds the prefixed key transparently
+        await fake_redis.hset("h:all", mapping={"a": "1"})
         assert await cap.hgetall("h:all") == {"a": "1"}
-        # Bare key untouched
-        assert await fake_redis.hgetall("h:all") == {}
+        assert await fake_redis.hgetall("coe-y:h:all") == {}
     finally:
         lane_var.reset(token)
 
@@ -350,14 +375,12 @@ async def test_smembers_missing_returns_empty(cap, lane_prod):
 
 
 @pytest.mark.asyncio
-async def test_smembers_lane_prefixes_key(cap, fake_redis):
+async def test_smembers_passes_key_through_unchanged(cap, fake_redis):
     token = _set_lane("ppe-z")
     try:
-        await fake_redis.sadd("ppe-z:s:lane", "x", "y")
-        # Capability sees prefixed key
+        await fake_redis.sadd("s:lane", "x", "y")
         assert await cap.smembers("s:lane") == {"x", "y"}
-        # Bare key untouched
-        assert await fake_redis.smembers("s:lane") == set()
+        assert await fake_redis.smembers("ppe-z:s:lane") == set()
     finally:
         lane_var.reset(token)
 

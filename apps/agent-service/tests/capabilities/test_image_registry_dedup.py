@@ -1,13 +1,18 @@
-"""C5 acceptance: ``ImageRegistry`` lane isolation via ``RedisCapability``.
+"""Acceptance: ``ImageRegistry`` round-trip + cross-lane isolation
+delegated to the ConfigBundle (not to the capability).
 
-The drill (plan C5 acceptance scenario): two lanes concurrently register
-images against the same logical ``message_id`` — counters and storage stay
-fully independent because the underlying ``RedisCapability`` auto-prefixes
-keys with ``{lane}:``.
+Hotfix 2026-05-13 removed the implicit ``{lane}:`` key prefix from
+``RedisCapability`` (see trace 3de371aea10290b327f1386ea56f180c — the
+prefix split agent-service-ppe-refactor and chat-response-worker
+between two key spaces and dropped images on the floor). Lane isolation
+is now physical:
 
-Backs ``app.infra.image.ImageRegistry`` against fakeredis + lane_var to
-prove the cutover from raw ``await get_redis()`` to the capability didn't
-silently regress the dedup behavior.
+* coe-* lanes get a separate Redis container (chiwei-test) via
+  ConfigBundle ``class_overrides[coe]`` — two coe lanes are isolated
+  because they hold two different clients.
+* ppe-* lanes share prod Redis on purpose ("functional verification
+  against real prod data"), so ppe-* writes are intentionally visible
+  to prod readers (chat-response-worker).
 """
 from __future__ import annotations
 
@@ -16,8 +21,8 @@ import asyncio
 import fakeredis.aioredis
 import pytest
 
-from app.api.middleware import lane_var
 from app.capabilities import redis as redis_cap_mod
+from app.capabilities.redis import RedisCapability
 from app.infra import redis as redis_infra_mod
 from app.infra.image import ImageRegistry
 
@@ -86,72 +91,84 @@ async def test_register_batch_empty_returns_empty(fake_redis):
 
 
 # ---------------------------------------------------------------------------
-# C5 acceptance: two lanes concurrent registration, independent state
+# Acceptance: coe-* lanes isolated via separate Redis backing stores
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_two_lanes_concurrent_dedup_independent(fake_redis):
-    """C5 acceptance: registering against ``message_id="m"`` from two
-    different lanes must produce two independent counters."""
+async def test_coe_lanes_isolated_via_separate_redis_instances():
+    """ConfigBundle physical isolation: two coe-* lanes point at two
+    chiwei-test Redis containers. ``ImageRegistry`` against each client
+    produces fully independent counters.
 
-    async def register_in_lane(lane: str, url_prefix: str) -> list[str]:
-        token = lane_var.set(lane)
-        try:
-            reg = ImageRegistry("shared-msg")
-            names: list[str] = []
-            for i in range(4):
-                n = await reg.register(f"{url_prefix}/{i}")
-                names.append(n)
-                # let the other coroutine interleave
-                await asyncio.sleep(0)
-            return names
-        finally:
-            lane_var.reset(token)
+    The capability does NOT auto-prefix keys; isolation is purely the
+    consequence of pointing at a different Redis instance, which is how
+    ``class_overrides[coe]`` is supposed to work.
+    """
+    coe_one_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    coe_two_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cap_one = RedisCapability(coe_one_client)
+    cap_two = RedisCapability(coe_two_client)
 
-    res_ppe, res_coe = await asyncio.gather(
-        register_in_lane("ppe-one", "https://tos/ppe"),
-        register_in_lane("coe-two", "https://tos/coe"),
+    async def register_against(cap: RedisCapability, url_prefix: str) -> list[str]:
+        # ImageRegistry pulls the capability lazily via
+        # ``get_redis_capability()``. Tests that want a specific client
+        # call the Lua directly through the cap to mirror the same
+        # script the registry would have run.
+        names: list[str] = []
+        key = "image_registry:shared-msg"
+        from app.infra.image import _REGISTER_LUA, _REGISTRY_TTL
+
+        for i in range(4):
+            n = await cap.eval(
+                _REGISTER_LUA,
+                keys=[key],
+                args=[f"{url_prefix}/{i}", _REGISTRY_TTL],
+            )
+            names.append(f"{int(n)}.png")
+            await asyncio.sleep(0)
+        return names
+
+    res_one, res_two = await asyncio.gather(
+        register_against(cap_one, "https://tos/one"),
+        register_against(cap_two, "https://tos/two"),
     )
 
-    # Each lane sees its own 1..4 sequence — counters are independent.
-    assert res_ppe == ["1.png", "2.png", "3.png", "4.png"]
-    assert res_coe == ["1.png", "2.png", "3.png", "4.png"]
+    assert res_one == ["1.png", "2.png", "3.png", "4.png"]
+    assert res_two == ["1.png", "2.png", "3.png", "4.png"]
 
-    # Underlying keys are lane-prefixed; the bare key is empty.
-    ppe_hash = await fake_redis.hgetall("ppe-one:image_registry:shared-msg")
-    coe_hash = await fake_redis.hgetall("coe-two:image_registry:shared-msg")
-    bare = await fake_redis.hgetall("image_registry:shared-msg")
-    assert ppe_hash["1.png"] == "https://tos/ppe/0"
-    assert coe_hash["1.png"] == "https://tos/coe/0"
-    assert bare == {}
+    one_hash = await coe_one_client.hgetall("image_registry:shared-msg")
+    two_hash = await coe_two_client.hgetall("image_registry:shared-msg")
+    assert one_hash["1.png"] == "https://tos/one/0"
+    assert two_hash["1.png"] == "https://tos/two/0"
 
 
 @pytest.mark.asyncio
-async def test_resolve_isolated_per_lane(fake_redis):
-    """A URL registered in lane A is invisible from lane B for the same
-    logical ``message_id``."""
-    # Register in ppe-a
-    token = lane_var.set("ppe-a")
+async def test_ppe_lane_shares_prod_key_space(fake_redis, monkeypatch):
+    """Contract: ppe-* lanes deliberately share prod Redis. An image
+    written from ppe-* is visible to a prod reader looking up the same
+    bare key — that's the whole point of ppe ("verify against real prod
+    data").
+
+    Failure of this contract is what dropped images in trace
+    3de371aea10290b327f1386ea56f180c — the prior auto-prefix put the
+    ppe entry under ``ppe-foo:image_registry:...`` while
+    chat-response-worker read ``image_registry:...``.
+    """
+    from app.api.middleware import lane_var
+
+    # Write from a ppe lane.
+    token = lane_var.set("ppe-share")
     try:
-        reg_a = ImageRegistry("msg-iso")
-        await reg_a.register("https://tos/from-a")
+        reg = ImageRegistry("msg-ppe-share")
+        await reg.register("https://tos/from-ppe")
     finally:
         lane_var.reset(token)
 
-    # Look it up from coe-b — should miss
-    token = lane_var.set("coe-b")
-    try:
-        reg_b = ImageRegistry("msg-iso")
-        assert await reg_b.resolve("1.png") is None
-        assert await reg_b.resolve_all() == {}
-    finally:
-        lane_var.reset(token)
+    # Read with no lane set (i.e. prod), same logical key — should hit.
+    reg_prod = ImageRegistry("msg-ppe-share")
+    assert await reg_prod.resolve("1.png") == "https://tos/from-ppe"
 
-    # And from ppe-a, the original is still there
-    token = lane_var.set("ppe-a")
-    try:
-        reg_a = ImageRegistry("msg-iso")
-        assert await reg_a.resolve("1.png") == "https://tos/from-a"
-    finally:
-        lane_var.reset(token)
+    # And the raw key is the bare prod key.
+    bare = await fake_redis.hgetall("image_registry:msg-ppe-share")
+    assert bare["1.png"] == "https://tos/from-ppe"

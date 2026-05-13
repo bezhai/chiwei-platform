@@ -4,19 +4,26 @@ Wraps a raw ``redis.asyncio.Redis`` client behind a domain-shaped API.
 Business code never reaches into the raw client; every read/write goes
 through this capability so:
 
-* Keys auto-prefix with ``{lane}:`` when ``current_lane()`` returns a
-  non-prod lane name. Prod (``current_lane() is None``) leaves keys bare
-  so existing prod data isn't migrated.
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
   ``CapabilityTimeout`` exceptions (contract §4.8) — no naked
   ``redis.RedisError`` escapes capability boundaries.
-* ``pipeline()`` returns a lane-aware proxy that applies the same key
-  prefix to every queued op.
+* The pipeline proxy enforces the same small public surface as the
+  capability itself, so call-sites can't sneak back to raw ops.
 
-Used by ``infra/image.py`` (registry Lua), debounce / single-flight
-runtime, and the ``banned_words`` capability. The cutover of those
-call-sites is plan item C5 — B5 only ships the capability + the
-two-lane dedup-Lua acceptance scenario.
+**No implicit lane key prefix.** Cross-lane isolation is the
+ConfigBundle's job, not the capability's. ``coe-*`` lanes get a
+physically separate Redis container (chiwei-test) via
+``class_overrides[coe]``; ``ppe-*`` lanes intentionally share prod
+Redis ("functional verification against real prod data"). An implicit
+``{lane}:`` prefix split agent-service-ppe-refactor and
+chat-response-worker between two key spaces and silently dropped
+images on lane verification — see trace
+``3de371aea10290b327f1386ea56f180c`` and hotfix commit on
+2026-05-13.
+
+Used by ``infra/image.py`` (registry Lua), the runtime's debounce /
+single-flight modules talk to the raw client directly to avoid
+inverting the dependency stack (capability → runtime).
 """
 from __future__ import annotations
 
@@ -31,27 +38,8 @@ from redis.asyncio import Redis
 from redis.asyncio.client import Pipeline as _RawPipeline
 
 from app.capabilities._errors import CapabilityCallFailed, CapabilityTimeout
-from app.infra.rabbitmq import current_lane
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Key prefixing
-# ---------------------------------------------------------------------------
-
-
-def _prefix(key: str) -> str:
-    """Return ``{lane}:{key}`` for non-prod lanes, bare ``key`` for prod."""
-    lane = current_lane()
-    return f"{lane}:{key}" if lane else key
-
-
-def _prefix_all(keys: list[str]) -> list[str]:
-    lane = current_lane()
-    if not lane:
-        return list(keys)
-    return [f"{lane}:{k}" for k in keys]
 
 
 # ---------------------------------------------------------------------------
@@ -82,40 +70,37 @@ def _wrap_error(exc: BaseException, *, op: str, key: str | None = None) -> Excep
 
 
 class _LanePipeline:
-    """Pipeline wrapper that auto-prefixes keys for every queued op.
+    """Pipeline wrapper exposing the small subset of ``Pipeline`` methods
+    business code actually needs (incr / eval / hset / set / expire).
 
-    Mirrors the small subset of ``redis.asyncio.client.Pipeline`` methods
-    the codebase actually queues today (incr / eval / hset / set / expire).
-    Add more proxied methods as call-sites need them — keeping the surface
-    small forces consumers to come back to this file when they need
-    something new, rather than silently growing a god-pipeline.
+    The class name "_LanePipeline" survives only as a moniker; there is
+    no lane key rewriting any more (see module docstring). Keys pass to
+    the raw pipeline verbatim. The narrow surface still forces consumers
+    to come back to this file when they need something new, instead of
+    silently growing a god-pipeline.
     """
 
     def __init__(self, raw: _RawPipeline) -> None:
         self._raw = raw
 
     def incr(self, key: str, amount: int = 1) -> "_LanePipeline":
-        self._raw.incr(_prefix(key), amount)
+        self._raw.incr(key, amount)
         return self
 
     def set(self, key: str, value: Any, **kw: Any) -> "_LanePipeline":
-        self._raw.set(_prefix(key), value, **kw)
+        self._raw.set(key, value, **kw)
         return self
 
     def hset(self, key: str, *a: Any, **kw: Any) -> "_LanePipeline":
-        self._raw.hset(_prefix(key), *a, **kw)
+        self._raw.hset(key, *a, **kw)
         return self
 
     def expire(self, key: str, seconds: int) -> "_LanePipeline":
-        self._raw.expire(_prefix(key), seconds)
+        self._raw.expire(key, seconds)
         return self
 
     def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> "_LanePipeline":
-        # numkeys keys, then args. Prefix the first numkeys positional args.
-        keys = list(keys_and_args[:numkeys])
-        args = list(keys_and_args[numkeys:])
-        prefixed = _prefix_all(keys)
-        self._raw.eval(script, numkeys, *prefixed, *args)
+        self._raw.eval(script, numkeys, *keys_and_args)
         return self
 
     async def execute(self) -> list[Any]:
@@ -134,12 +119,12 @@ class _LanePipeline:
 
 
 class RedisCapability:
-    """Lane-aware Redis adapter.
+    """Domain-shaped Redis adapter.
 
     Construct one per process and inject; modules that want a singleton
-    should reach for ``app.capabilities.redis.redis_capability`` (lazy
-    accessor below). Keys passed in are *logical* — the capability adds
-    the lane prefix transparently.
+    should reach for ``get_redis_capability()`` below. Keys are passed
+    to the underlying client verbatim — cross-lane isolation is the
+    ConfigBundle's job (see module docstring).
     """
 
     def __init__(self, client: Redis) -> None:
@@ -148,49 +133,45 @@ class RedisCapability:
     # -- atomic counters -----------------------------------------------------
 
     async def incr(self, key: str, amount: int = 1) -> int:
-        prefixed = _prefix(key)
         try:
-            return await self._client.incr(prefixed, amount)
+            return await self._client.incr(key, amount)
         except (
             asyncio.TimeoutError,
             redis.exceptions.RedisError,
         ) as e:
-            raise _wrap_error(e, op="incr", key=prefixed) from e
+            raise _wrap_error(e, op="incr", key=key) from e
 
     # -- Hash + Set read accessors ------------------------------------------
 
     async def hget(self, key: str, field: str) -> Any:
-        """``HGET key field`` — lane-prefixed; returns ``None`` if missing."""
-        prefixed = _prefix(key)
+        """``HGET key field`` — returns ``None`` if missing."""
         try:
-            return await self._client.hget(prefixed, field)
+            return await self._client.hget(key, field)
         except (
             asyncio.TimeoutError,
             redis.exceptions.RedisError,
         ) as e:
-            raise _wrap_error(e, op="hget", key=prefixed) from e
+            raise _wrap_error(e, op="hget", key=key) from e
 
     async def hgetall(self, key: str) -> dict[str, Any]:
-        """``HGETALL key`` — lane-prefixed; returns ``{}`` if missing."""
-        prefixed = _prefix(key)
+        """``HGETALL key`` — returns ``{}`` if missing."""
         try:
-            return await self._client.hgetall(prefixed)
+            return await self._client.hgetall(key)
         except (
             asyncio.TimeoutError,
             redis.exceptions.RedisError,
         ) as e:
-            raise _wrap_error(e, op="hgetall", key=prefixed) from e
+            raise _wrap_error(e, op="hgetall", key=key) from e
 
     async def smembers(self, key: str) -> set[Any]:
-        """``SMEMBERS key`` — lane-prefixed; returns empty set if missing."""
-        prefixed = _prefix(key)
+        """``SMEMBERS key`` — returns empty set if missing."""
         try:
-            return await self._client.smembers(prefixed)
+            return await self._client.smembers(key)
         except (
             asyncio.TimeoutError,
             redis.exceptions.RedisError,
         ) as e:
-            raise _wrap_error(e, op="smembers", key=prefixed) from e
+            raise _wrap_error(e, op="smembers", key=key) from e
 
     # -- Lua scripts ---------------------------------------------------------
 
@@ -201,29 +182,26 @@ class RedisCapability:
         keys: list[str],
         args: list[Any],
     ) -> Any:
-        """Execute a Lua ``EVAL``.
-
-        ``keys`` are auto-prefixed (the script sees the prefixed forms in
-        ``KEYS``). ``args`` pass through untouched.
-        """
-        prefixed = _prefix_all(keys)
+        """Execute a Lua ``EVAL`` with ``keys`` and ``args`` passed
+        through untouched."""
         try:
-            return await self._client.eval(script, len(prefixed), *prefixed, *args)
+            return await self._client.eval(script, len(keys), *keys, *args)
         except (
             asyncio.TimeoutError,
             redis.exceptions.RedisError,
         ) as e:
-            key_repr = prefixed[0] if prefixed else None
+            key_repr = keys[0] if keys else None
             raise _wrap_error(e, op="eval", key=key_repr) from e
 
     # -- pipeline ------------------------------------------------------------
 
     @asynccontextmanager
     async def pipeline(self) -> AsyncIterator[_LanePipeline]:
-        """Yield a lane-aware pipeline; auto-rolls back on exception.
+        """Yield a pipeline proxy; auto-resets on exception.
 
-        The yielded object queues ops via prefixed keys; ``execute()``
-        runs the pipeline and re-maps redis failures to typed exceptions.
+        The yielded object queues ops verbatim against the raw pipeline;
+        ``execute()`` runs the pipeline and maps redis failures to typed
+        exceptions.
         """
         raw = self._client.pipeline(transaction=False)
         try:
