@@ -143,9 +143,15 @@ async def _runtime_trigger_consumer(envelope: DelayedTriggerEnvelope) -> None:
 def register_runtime_trigger_wire(app: str) -> None:
     """Register the trigger Source.mq → consumer wire for ``app``.
 
-    Called from Runtime.run() between migrate_schema and start_consumers
-    so compile_graph sees the wire. Runtime-internal — business code
-    must NOT call this.
+    Called from ``bootstrap.prepare_for_run`` after load_dataflow_graph
+    and before any consumer freezes a WIRING_REGISTRY snapshot.
+    Runtime-internal — business code must NOT call this.
+
+    Idempotent: if a wire for ``DelayedTriggerEnvelope`` with the same
+    queue is already in ``WIRING_REGISTRY`` we no-op. This lets
+    ``Runtime.run`` keep its legacy fallback call (some test fixtures
+    drive Runtime directly without going through bootstrap) without
+    double-registering when bootstrap already ran.
 
     ``app`` must be in KNOWN_APPS_FOR_DELAYED_TRIGGER (rabbitmq.py); a
     fresh app needs its trigger queue route declared in ALL_ROUTES
@@ -159,6 +165,25 @@ def register_runtime_trigger_wire(app: str) -> None:
             f"register the trigger route in app/infra/rabbitmq.py first."
         )
     queue = trigger_route_for(app).queue
+
+    # Idempotency check: a wire whose data_type is DelayedTriggerEnvelope
+    # AND whose sources include an mq source on the same queue already
+    # exists in the registry.
+    from app.runtime.wire import WIRING_REGISTRY
+
+    for w in WIRING_REGISTRY:
+        if w.data_type is not DelayedTriggerEnvelope:
+            continue
+        for s in w.sources:
+            if s.kind == "mq" and s.params.get("queue") == queue:
+                logger.debug(
+                    "runtime_delayed_trigger wire already registered for "
+                    "app=%s queue=%s; skipping",
+                    app,
+                    queue,
+                )
+                return
+
     wire(DelayedTriggerEnvelope).from_(Source.mq(queue)).to(
         _runtime_trigger_consumer
     )

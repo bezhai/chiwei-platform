@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.data.models import ConversationMessage
-from app.runtime.db import tx
+from app.runtime.db import emit_tx, tx
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,6 @@ async def submit_proactive_chat(
     from app.domain.chat_dataflow import ChatTrigger
     from app.domain.message import Message
     from app.infra.rabbitmq import current_lane
-    from app.runtime.db import emit_tx  # local import to avoid boot cycles
 
     msg = ConversationMessage(
         message_id=message_id,

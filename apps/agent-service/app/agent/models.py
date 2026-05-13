@@ -17,6 +17,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
+from app.runtime.db import tx
+
 logger = logging.getLogger(__name__)
 
 
@@ -138,7 +140,6 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
             find_provider_by_name,
             parse_model_id,
         )
-        from app.runtime.db import tx
 
         async with tx():
             mapping = await find_model_mapping(model_id)

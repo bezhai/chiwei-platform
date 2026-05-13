@@ -44,7 +44,7 @@ def test_runtime_entry_main_calls_ensure_business_schema_before_runtime_run(monk
 
     with patch("app.workers.runtime_entry.setup_logging"), \
          patch("app.workers.runtime_entry.ensure_business_schema", new_callable=AsyncMock) as mock_ensure, \
-         patch("app.workers.runtime_entry.load_dataflow_graph"), \
+         patch("app.workers.runtime_entry.prepare_for_run", new_callable=AsyncMock), \
          patch("app.workers.runtime_entry.Runtime") as MockRuntime:
 
         mock_instance = MagicMock()

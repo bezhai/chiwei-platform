@@ -40,9 +40,9 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
     from app.data import queries as Q
     monkeypatch.setattr(Q, "insert_proactive_message", _fake_insert)
 
-    # Patch emit_tx at the runtime.db module level (local import inside function)
-    import app.runtime.db
-    monkeypatch.setattr(app.runtime.db, "emit_tx", _fake_emit_tx)
+    # emit_tx is imported at the proactive module top level; patch it
+    # there so the test substitution wins over the live runtime.db ref.
+    monkeypatch.setattr(pro, "emit_tx", _fake_emit_tx)
 
     # Stub queries.resolve_bot_name_for_persona
     async def fake_resolve_bot_name(*args, **kwargs):

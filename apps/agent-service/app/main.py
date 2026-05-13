@@ -33,17 +33,17 @@ async def lifespan(app: FastAPI):
     await init_collections()
     logger.info("shared pkg loaded: %s", shared_hello())
 
-    # Wire up the dataflow graph before anything in this process emit()s.
-    # proactive.py emits Message directly via runtime emit, which dispatches
-    # via WIRING_REGISTRY — without this load step the registry would be
-    # empty here and the call would silently no-op. The FastAPI main
-    # process is a *producer* (proactive Message -> vectorize-worker), so
-    # it must also pre-declare the durable routes; otherwise messages
-    # publish before the consumer pod has had a chance to declare its
-    # queue, and the broker drops them.
-    from app.runtime.bootstrap import declare_durable_topology, load_dataflow_graph
+    # Wire up the dataflow graph + register runtime-internal trigger wire
+    # + (when MQ is configured) pre-declare durable topology so this
+    # producer-side process can emit() to downstream worker queues
+    # before the worker pods have had a chance to declare them.
+    # See app/runtime/bootstrap.py for the contract.
+    from app.runtime.bootstrap import prepare_for_run
 
-    load_dataflow_graph()
+    await prepare_for_run(
+        "agent-service",
+        declare_topology=bool(settings.rabbitmq_url),
+    )
 
     # Phase 4: migrate schema BEFORE start_consumers — durable consumer
     # for GlimpseRequest needs data_glimpse_request table to exist.
@@ -54,20 +54,6 @@ async def lifespan(app: FastAPI):
         migrate_schema_on_run=False,  # we drive migrate explicitly below
     )
     await runtime_for_sources.migrate_schema()
-
-    # Register the runtime-internal delayed-trigger wire BEFORE
-    # start_consumers (which calls compile_graph and freezes the
-    # WIRING_REGISTRY snapshot). Runtime.run() does the same; this
-    # branch covers the FastAPI lifespan path that drives migrate /
-    # consumers / source loops directly without going through run().
-    from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
-    from app.runtime.delayed_trigger import register_runtime_trigger_wire
-
-    if "agent-service" in KNOWN_APPS_FOR_DELAYED_TRIGGER:
-        register_runtime_trigger_wire("agent-service")
-
-    if settings.rabbitmq_url:
-        await declare_durable_topology()
 
     # Load skill definitions
     import os
