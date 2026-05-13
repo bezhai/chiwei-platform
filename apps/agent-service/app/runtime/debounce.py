@@ -1,5 +1,13 @@
 """Runtime support for ``wire(T).debounce(...)``.
 
+Note on Redis access: this module is *runtime-internal* and intentionally
+reaches into ``app.infra.redis.get_redis()`` directly rather than going
+through ``RedisCapability`` (plan B5/C5). Capabilities layer sits *above*
+the runtime in the dependency stack; making the runtime depend on a
+capability would invert that direction. Cross-lane state collisions on
+the debounce redis keys are a known follow-up (will need a different
+prefixing strategy in the runtime itself, not via the capability).
+
 Pipeline shape:
 
     upstream emit -> publish_debounce
