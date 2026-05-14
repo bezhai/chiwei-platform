@@ -1,0 +1,42 @@
+name: framework governance gate
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  require-framework-spec:
+    name: Require spec for framework-layer changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check PR body
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          framework_changed="$(printf '%s\n' "$changed" | grep -E '^(apps/agent-service/app/runtime/|apps/agent-service/app/wiring/|apps/agent-service/app/deployment\.py|apps/agent-service/app/main\.py|apps/agent-service/app/workers/runtime_entry\.py|docs/governance/|docs/guides/dataflow-|\.github/workflows/)' || true)"
+
+          if [ -z "$framework_changed" ]; then
+            echo "No framework-layer files changed."
+            exit 0
+          fi
+
+          echo "Framework-layer files changed:"
+          printf '%s\n' "$framework_changed"
+
+          if printf '%s\n' "$PR_BODY" | grep -Eq 'Framework-Layer-Spec:[[:space:]]+docs/[^[:space:]]+\.md'; then
+            echo "Framework-Layer-Spec found."
+            exit 0
+          fi
+
+          echo "Framework-layer changes require a PR body line like:"
+          echo "Framework-Layer-Spec: docs/plan/example.md"
+          exit 1

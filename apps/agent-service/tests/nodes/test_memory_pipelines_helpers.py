@@ -92,7 +92,7 @@ async def test_generate_fragment_skip_when_no_messages():
     ), patch(
         "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
     ) as mock_ins, patch(
-        "app.nodes.memory_pipelines.emit", new=AsyncMock()
+        "app.nodes.memory_pipelines.emit_tx", new=AsyncMock()
     ) as mock_enq:
         await _generate_fragment("chat_1", "ayana")
 
@@ -124,7 +124,7 @@ async def test_generate_fragment_skip_when_empty_content():
     ), patch(
         "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
     ) as mock_ins, patch(
-        "app.nodes.memory_pipelines.emit",
+        "app.nodes.memory_pipelines.emit_tx",
         new=AsyncMock(),
     ) as mock_enq:
         MockAgent.return_value.run = AsyncMock(

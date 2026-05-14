@@ -73,14 +73,14 @@ async def _persona_dicts() -> list[dict]:
 
 
 @node
-async def fan_out_life_tick(t: MinuteTick) -> None:
+async def fan_out_life_tick(t: MinuteTick) -> LifeTickRequest | None:
     if not _is_prod():
         return
-    await emit(LifeTickRequest(ts=t.ts))
+    return LifeTickRequest(ts=t.ts)
 
 
 @node
-async def fan_out_voice(t: MinuteTick) -> None:
+async def fan_out_voice(t: MinuteTick) -> VoiceRequest | None:
     if not _is_prod():
         return
     cst_ts = datetime.fromisoformat(t.ts).astimezone(CST)
@@ -88,28 +88,28 @@ async def fan_out_voice(t: MinuteTick) -> None:
         return
     if cst_ts.minute != 0:
         return  # voice 整点触发
-    await emit(VoiceRequest(ts=t.ts))
+    return VoiceRequest(ts=t.ts)
 
 
 @node
-async def fan_out_light_day(t: LightDayTick) -> None:
+async def fan_out_light_day(t: LightDayTick) -> LightReviewRequest | None:
     if not _is_prod():
         return
-    await emit(LightReviewRequest(ts=t.ts, window_minutes=30))
+    return LightReviewRequest(ts=t.ts, window_minutes=30)
 
 
 @node
-async def fan_out_light_night(t: LightNightTick) -> None:
+async def fan_out_light_night(t: LightNightTick) -> LightReviewRequest | None:
     if not _is_prod():
         return
-    await emit(LightReviewRequest(ts=t.ts, window_minutes=60))
+    return LightReviewRequest(ts=t.ts, window_minutes=60)
 
 
 @node
-async def fan_out_heavy(t: HeavyReviewTick) -> None:
+async def fan_out_heavy(t: HeavyReviewTick) -> HeavyReviewRequest | None:
     if not _is_prod():
         return
-    await emit(HeavyReviewRequest(ts=t.ts))
+    return HeavyReviewRequest(ts=t.ts)
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +133,13 @@ async def run_shared_daily_pipeline_node(t: DailyPlanTick) -> SharedDailyContext
 
 
 @node
-async def fan_out_daily_plan(c: SharedDailyContext) -> None:
-    await emit(DailyPlanRequest(
+async def fan_out_daily_plan(c: SharedDailyContext) -> DailyPlanRequest:
+    return DailyPlanRequest(
         target_date=c.target_date,
         wild_materials=c.wild_materials,
         search_anchors=c.search_anchors,
         theater=c.theater,
-    ))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +218,12 @@ def _new_glimpse_request(persona_id: str, chat_id: str, ts: str, kind: str) -> G
 
 
 @node
-async def fan_out_glimpse(t: GlimpseTick) -> None:
+async def fan_out_glimpse(t: GlimpseTick) -> GlimpseTickRequest | None:
     """5min cron → emit GlimpseTickRequest template; the wire's
     ``.fan_out_per(_persona_dicts)`` fans it into per-persona copies."""
     if not _is_prod():
         return
-    await emit(GlimpseTickRequest(ts=t.ts))
+    return GlimpseTickRequest(ts=t.ts)
 
 
 @node

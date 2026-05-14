@@ -5,11 +5,10 @@ The dataflow ``vectorize_memory_fragment`` / ``vectorize_memory_abstract``
 runtime decodes an incoming MQ frame from
 ``Source.mq("memory_fragment_vectorize")`` / ``Source.mq("memory_abstract_vectorize")``.
 
-Publisher-side enqueue is now uniform: callers do
-``await emit(MemoryFragmentRequest(fragment_id=fid))`` /
-``await emit(MemoryAbstractRequest(abstract_id=aid))`` — runtime emit()
-auto-publishes to the right queue when the consumer is in another process
-(see app/runtime/emit.py:_mq_publish_for_source).
+Publisher-side enqueue is now uniform: callers emit MemoryFragmentRequest /
+MemoryAbstractRequest Data; runtime emit auto-publishes to the right queue
+when the consumer is in another process (see
+app/runtime/emit.py:_mq_publish_for_source).
 
 Qdrant point ids must be uint or UUID, so we use a deterministic ``uuid5``
 derived from the prefixed DB id (``f_xxx`` / ``a_xxx``) and stash the original

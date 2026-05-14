@@ -54,7 +54,7 @@ jobs:
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
               2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
-      - name: Gap 8 — business `await emit(` count == 14 (12 category-B + 2 docstring)
+      - name: Gap 8 — business `await emit(` count == 10 reviewed call sites
         shell: bash
         run: |
           set -e
@@ -67,7 +67,7 @@ jobs:
               apps/agent-service/app/chat/ apps/agent-service/app/life/ \
               apps/agent-service/app/memory/ \
               --include='*.py' 2>/dev/null | wc -l)
-          [ "$c" -eq 14 ] || { echo "Gap 8 violation: business await emit count=$c, expected 14"; exit 1; }
+          [ "$c" -eq 10 ] || { echo "Gap 8 violation: business await emit count=$c, expected 10"; exit 1; }
       - name: Gap 15 — no arq imports, no arq dependency
         shell: bash
         run: |

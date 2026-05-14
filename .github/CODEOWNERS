@@ -1,0 +1,9 @@
+# Framework/runtime changes should always get an explicit owner review.
+/apps/agent-service/app/runtime/ @bezhai
+/apps/agent-service/app/wiring/ @bezhai
+/apps/agent-service/app/deployment.py @bezhai
+/apps/agent-service/app/main.py @bezhai
+/apps/agent-service/app/workers/runtime_entry.py @bezhai
+/docs/governance/ @bezhai
+/docs/guides/dataflow-* @bezhai
+/.github/workflows/ @bezhai

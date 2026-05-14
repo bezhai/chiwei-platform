@@ -30,6 +30,10 @@ from pydantic import ValidationError
 from app.runtime.data import DATA_REGISTRY
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
+from app.runtime.lane_policy import (
+    current_deployment_lane,
+    time_sources_enabled_by_default,
+)
 from app.runtime.migrator import plan_migration
 from app.runtime.outbox_dispatcher import dispatcher_loop
 from app.runtime.placement import DEFAULT_APP, known_apps, nodes_for_app
@@ -59,9 +63,15 @@ class Runtime:
         app_name: str | None = None,
         *,
         migrate_schema_on_run: bool = True,
+        time_sources_enabled: bool | None = None,
     ) -> None:
         self.app_name = app_name or os.getenv("APP_NAME") or DEFAULT_APP
         self._migrate_schema_on_run = migrate_schema_on_run
+        self._time_sources_enabled = (
+            time_sources_enabled_by_default()
+            if time_sources_enabled is None
+            else time_sources_enabled
+        )
         self._source_tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
         # First fatal error a source loop hit (so ``run()`` can re-raise
@@ -259,6 +269,7 @@ class Runtime:
         allowed_nodes = nodes_for_app(self.app_name)
         loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
+        skipped_time_sources = 0
 
         for w in graph.wires:
             if not w.consumers:
@@ -267,6 +278,9 @@ class Runtime:
                 continue
             for src in w.sources:
                 if src.kind == "cron":
+                    if not self._time_sources_enabled:
+                        skipped_time_sources += 1
+                        continue
                     self._source_tasks.append(
                         loop.create_task(
                             self._source_loop_cron(w, src),
@@ -274,6 +288,9 @@ class Runtime:
                         )
                     )
                 elif src.kind == "interval":
+                    if not self._time_sources_enabled:
+                        skipped_time_sources += 1
+                        continue
                     self._source_tasks.append(
                         loop.create_task(
                             self._source_loop_interval(w, src),
@@ -287,6 +304,16 @@ class Runtime:
                             name=f"mq[{w.data_type.__name__}]",
                         )
                     )
+
+        if skipped_time_sources:
+            lane = current_deployment_lane()
+            logger.warning(
+                "runtime: app=%s skipped %d cron/interval source(s) in lane=%s; "
+                "set DATAFLOW_ENABLE_TIME_SOURCES=1 to run them intentionally",
+                self.app_name,
+                skipped_time_sources,
+                lane or "prod",
+            )
 
         self._watchdog_task = loop.create_task(
             self._watch_source_error(),
