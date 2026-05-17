@@ -45,6 +45,143 @@
 
 入站事件 adapter、平台无关的内部消息模型、出站回复 adapter、bot 命中契约。代码里的飞书耦合恰好就集中在这四个地方，而 agent-service 这条中间链路本身对消息来自哪个平台是无感知的，所以这四层契约能把平台差异完全收敛在 adapter 内部，中间链路不用动。
 
+## 抽象设计
+
+这一节把这套 channel 抽象具体画出来：四层契约各自的接口长什么样、平台无关的消息模型有哪些字段、三类身份怎么映射、飞书和 QQ 各自要实现什么、一条消息从进来到回出去怎么串。下面的接口用类型签名草图表达，目的是把契约形态这个设计决策定下来；签名内部的具体实现逻辑是动手时通过 TDD 生成的，这里不预写。
+
+### 整体分层
+
+一条消息的完整路径是这样的：
+
+```
+平台 webhook
+  → channel-proxy：按回调 path 上的 bot 标识查到它是哪个平台、哪个 bot，
+                    查 lane_routing 决定路由到哪个泳道的 channel-server
+  → channel-server：
+      1. InboundAdapter[platform].verify(request)        验签（飞书 token / QQ Ed25519）
+      2. InboundAdapter[platform].parse(rawEvent)         平台事件 → 平台无关 InboundMessage
+      3. AddressingPolicy[platform].isAddressedToBot(...)  这条消息是否在叫 bot
+                                                           不中：记日志后丢弃（不再静默）
+      4. IdentityResolver.resolve(InboundMessage)          平台内 ID → 全局内部 ID
+      5. 存 conversation_messages（全部用全局 ID）
+      6. 发 ChatTrigger（带 platform + 全局 ID）到 RabbitMQ
+  → agent-service：对来自哪个平台完全无感知，逻辑不动
+  → ChatResponseSegment（带 platform + 全局 ID）回到 RabbitMQ
+  → chat-response-worker：
+      1. IdentityResolver.toChannel(全局 ID)              全局 ID → 平台内 ID（反查映射表）
+      2. OutboundAdapter[platform].reply/send(...)        纯文本回复发回平台
+```
+
+`channel-proxy` 和 `channel-server` 这两个进程本身是平台无关的，所有平台差异都收敛在 `InboundAdapter` / `OutboundAdapter` / `AddressingPolicy` 这三个按平台分实现的东西里，加上一个 `IdentityResolver`（平台无关，负责 ID 翻译）。
+
+### 契约一：入站事件 adapter（InboundAdapter）
+
+每个平台实现一份。职责是把平台的原始 webhook 请求，变成平台无关的 `InboundMessage`。
+
+```
+interface InboundAdapter {
+  // 回调地址校验。飞书是 challenge 应答，QQ 是 webhook 验证请求，
+  // 返回需要原样回给平台的响应体；不是校验请求则返回 null
+  handleVerification(request): VerificationResponse | null
+
+  // 验签。飞书用 verification_token + encrypt_key，QQ 用 Ed25519（botSecret 生成密钥对）
+  verify(request): boolean
+
+  // 平台事件 → 平台无关消息。非消息类事件（如成员变更）返回 null 或对应的非消息事件
+  parse(rawEvent): InboundMessage | null
+}
+```
+
+### 契约二：平台无关内部消息模型（InboundMessage）
+
+所有 adapter 的 `parse` 都产出这同一个结构。注意所有身份字段都带 `channel` 前缀，表示它是"平台内的 ID"，还没翻译成全局 ID：
+
+```
+InboundMessage {
+  platform:                   "lark" | "qq"
+  bot_name:                   string          // 哪个 bot 收到的
+  channel_message_id:         string          // 平台内的消息 ID，平台内唯一，不是全局唯一
+  channel_chat_id:            string          // 平台内的会话 ID
+  channel_user_id:            string          // 平台内的发送者 ID
+  chat_type:                  "p2p" | "group"
+  reply_to_channel_message_id: string | null  // 回复的是哪条平台内消息
+  root_channel_message_id:    string | null   // 话题根消息（proactive / 多轮用）
+  raw_mentions:               ChannelMention[] // 平台内的 @ 信息，给 AddressingPolicy 判定用
+  content:                    ContentItem[]    // 统一内容；这期只有 Text 一种
+  received_at:                int
+}
+```
+
+`ContentItem` 这期只定义 `Text`，图片/富文本/表情留出枚举位但不实现。`ChannelMention` 是平台无关的"被 @ 的对象"描述（至少含被 @ 者的平台内 ID），飞书和 QQ 各自从自己的事件结构里填。
+
+### 契约三：bot 命中（AddressingPolicy）
+
+判定一条入站消息是否该触发 bot 回复。这是这次新提升为核心的契约（原来藏在飞书规则引擎里、不中还静默丢弃）。
+
+```
+interface AddressingPolicy {
+  // bot_identity 由 bot_config 按 platform 取该平台的 bot 标识
+  // （飞书是 robot_union_id，QQ 是 bot 的 appid）
+  isAddressedToBot(msg: InboundMessage, bot_identity): boolean
+}
+```
+
+平台无关的判定骨架是一致的：私聊（p2p）一律算在叫 bot；群聊看 `msg.raw_mentions` 里有没有命中 `bot_identity`。差异只在"怎么从平台 mention 结构里认出这是不是本 bot"，这部分在各平台实现里。**判定不通过时必须记一条可查日志再丢弃，不能像现在这样静默 break**——否则 QQ 群消息出问题根本查不到。
+
+### 契约四：出站回复 adapter（OutboundAdapter）
+
+每个平台实现一份。这期只要求纯文本。
+
+```
+interface OutboundAdapter {
+  send(channel_chat_id, content):  channel_message_id   // 在会话里新发一条
+  reply(channel_message_id, content): channel_message_id // 回复某条消息
+}
+```
+
+鉴权各平台自理：飞书用现有 SDK client（app_id/app_secret），QQ 用 AccessToken（AppID/AppSecret 换取，7200 秒过期，adapter 内部负责接近过期时自动刷新）。富文本、图片、分段流式这期不做，接口先不开这些方法。
+
+### 三类身份映射
+
+三张结构相同的映射表，把"平台内 ID"翻译成"平台无关的全局内部 ID"：
+
+```
+identity_user     (platform, channel_user_id)    → internal_user_id     [(platform,channel_user_id) 唯一]
+identity_chat     (platform, channel_chat_id)    → internal_chat_id
+identity_message  (platform, channel_message_id) → internal_message_id
+```
+
+`internal_*_id` 是新分配的、平台无关的全局字符串 ID（用 ULID 这类，保证不同平台不会撞）。飞书历史数据迁移时，对每个旧的 `union_id` / `chat_id` / `message_id`，以 `platform=lark`、`channel_*_id=原飞书ID` 插入映射表并分配一个全局 ID，然后把"调用方覆盖"里那 7 张表的对应字段、加上 Qdrant 里的 chat_id / root_id，全部原地重写成全局 ID。`IdentityResolver` 就是读写这三张表的那层，正查（平台内→全局，进站用）和反查（全局→平台内，出站用）都走它。
+
+### bot_config 多平台化后的形态
+
+```
+bot_config {
+  bot_name      (主键)
+  platform      "lark" | "qq"
+  persona_id
+  bot_role      "persona" | "utility"
+  is_active / is_dev
+  credentials   JSONB
+     // lark: { app_id, app_secret, encrypt_key, verification_token, robot_union_id }
+     // qq:   { app_id, app_secret, bot_secret }
+}
+```
+
+原来散在独立列里的飞书凭据全部迁进 `credentials` JSONB，旧列删掉（不留双形态）。bot 加载链路读到一条记录后，按 `platform` 选对应的 `InboundAdapter` / `OutboundAdapter` / `AddressingPolicy` 实现，凭据从 `credentials` 取。
+
+### 飞书 adapter 和 QQ adapter 各自要实现什么
+
+| 契约 | 飞书 adapter | QQ adapter |
+|---|---|---|
+| handleVerification | 飞书 challenge 应答 | QQ webhook 验证请求应答 |
+| verify | verification_token + encrypt_key 解密校验 | Ed25519（botSecret 派生密钥对）验签 |
+| parse | 飞书 `im.message.receive_v1` 等事件 → InboundMessage | QQ 消息事件（C2C 私聊 / 群 @ 消息）→ InboundMessage |
+| AddressingPolicy | p2p 直通；群聊看 mention 里有没有 robot_union_id | C2C 直通；群聊看 QQ at 结构里有没有 bot appid |
+| send / reply | 现有飞书 SDK 的发送 / 回复接口 | QQ OpenAPI 发送接口 + AccessToken 自刷新 |
+
+agent-service、RabbitMQ 拓扑、lane_routing 都不在这张表里——它们对平台无感知，不需要每平台实现。
+
 ## 调用方覆盖
 
 下面这些是 grep 加 Explore 子 agent 实际查出来的，不是凭印象列的。
