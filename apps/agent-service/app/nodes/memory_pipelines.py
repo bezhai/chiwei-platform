@@ -33,7 +33,6 @@ from app.domain.memory_request import MemoryAbstractRequest, MemoryFragmentReque
 from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
-from app.runtime import emit
 from app.runtime.db import emit_tx, tx
 from app.runtime.debounce import DebounceReschedule
 from app.runtime.node import node
@@ -260,13 +259,13 @@ async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
 
 
 @node
-async def on_abstract_committed(e: AbstractMemoryCommitted) -> None:
+async def on_abstract_committed(e: AbstractMemoryCommitted) -> MemoryAbstractRequest:
     """Translate a tool-event into a vectorize request.
 
     commit_abstract emits AbstractMemoryCommitted after DB commit; this
-    in-process node re-emits MemoryAbstractRequest so vectorize-worker
+    in-process node returns MemoryAbstractRequest so vectorize-worker
     picks it up via Source.mq. Future subscribers (reviewer notification,
     dirty cache invalidation, etc.) attach via wire(AbstractMemoryCommitted)
     instead of patching the tool body.
     """
-    await emit(MemoryAbstractRequest(abstract_id=e.abstract_id))
+    return MemoryAbstractRequest(abstract_id=e.abstract_id)

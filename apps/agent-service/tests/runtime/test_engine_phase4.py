@@ -76,8 +76,10 @@ async def test_cron_source_uses_declared_tz(monkeypatch):
     ))
     await asyncio.sleep(0.05)
     task.cancel()
-    try: await task
-    except asyncio.CancelledError: pass
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
     assert captured["base"].tzinfo == ZoneInfo("Asia/Shanghai")
 
@@ -86,12 +88,21 @@ class _StartTick(Data):
     ts: Annotated[str, Key]
 
 
+class _MqTick(Data):
+    message_id: Annotated[str, Key]
+
+
 _start_seen: list[_StartTick] = []
 
 
 @node
 async def _record_start(t: _StartTick) -> None:
     _start_seen.append(t)
+
+
+@node
+async def _record_mq_tick(t: _MqTick) -> None:  # pragma: no cover - never reached
+    raise AssertionError("_record_mq_tick should be stubbed before execution")
 
 
 @pytest.mark.asyncio
@@ -108,6 +119,70 @@ async def test_start_source_loops_starts_only_sources():
     try:
         await asyncio.sleep(0.2)
         assert len(_start_seen) >= 2
+    finally:
+        await rt.stop_source_loops()
+
+
+@pytest.mark.asyncio
+async def test_start_source_loops_skips_time_sources_in_ppe(monkeypatch, caplog):
+    clear_wiring()
+    clear_bindings()
+    reset_emit_runtime()
+    _start_seen.clear()
+    monkeypatch.setenv("LANE", "ppe-refactor")
+    monkeypatch.delenv("DATAFLOW_ENABLE_TIME_SOURCES", raising=False)
+
+    wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
+
+    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    await rt.start_source_loops()
+    try:
+        await asyncio.sleep(0.2)
+        assert _start_seen == []
+        assert "skipped 1 cron/interval source(s)" in caplog.text
+    finally:
+        await rt.stop_source_loops()
+
+
+@pytest.mark.asyncio
+async def test_start_source_loops_override_allows_time_sources_in_ppe(monkeypatch):
+    clear_wiring()
+    clear_bindings()
+    reset_emit_runtime()
+    _start_seen.clear()
+    monkeypatch.setenv("LANE", "ppe-refactor")
+    monkeypatch.setenv("DATAFLOW_ENABLE_TIME_SOURCES", "1")
+
+    wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
+
+    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    await rt.start_source_loops()
+    try:
+        await asyncio.sleep(0.2)
+        assert len(_start_seen) >= 1
+    finally:
+        await rt.stop_source_loops()
+
+
+@pytest.mark.asyncio
+async def test_start_source_loops_keeps_mq_sources_in_ppe(monkeypatch):
+    clear_wiring()
+    clear_bindings()
+    reset_emit_runtime()
+    monkeypatch.setenv("LANE", "ppe-refactor")
+    monkeypatch.delenv("DATAFLOW_ENABLE_TIME_SOURCES", raising=False)
+
+    async def _fake_source_loop_mq(self, w, src):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Runtime, "_source_loop_mq", _fake_source_loop_mq)
+
+    wire(_MqTick).from_(Source.mq("runtime_test_mq")).to(_record_mq_tick)
+
+    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    await rt.start_source_loops()
+    try:
+        assert [t.get_name() for t in rt._source_tasks] == ["mq[_MqTick]"]
     finally:
         await rt.stop_source_loops()
 
