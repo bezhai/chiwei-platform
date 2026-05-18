@@ -6,15 +6,41 @@
 
 // ---- 内容 ----
 
-// 这期只有纯文本；kind 留作扩展位（图片 / 富文本等后续迭代再加）。
-export type ContentItem = { kind: 'text'; text: string };
+// 一条消息可由多个内容片段组成（如富文本里文字+图片交替）。kind 是跨 channel
+// 都讲得通的"通用媒体语义"，不是某个 IM 的消息类型枚举：任何 channel 把它的
+// 原生类型映射到这几类里，渠道专有结构/字段名只能留在各自 adapter 内，不上浮
+// 到契约层。
+//   text        纯文字
+//   image       图片，key 是 channel 内可解析回原图的引用
+//   audio       语音，key 是音频引用；meta 可带 duration 等
+//   file        文件/视频等"可下载附件"，key 是附件引用；meta 可带 file_name 等
+//   sticker     表情包，key 是表情引用
+//   unsupported channel 能识别但本通道不渲染的类型；text 是给人看的占位串，
+//               meta.original_type 保留原类型名，保证"收到了但没处理"可观测，
+//               堵死静默丢弃。
+export type ContentItem =
+    | { kind: 'text'; text: string }
+    | { kind: 'image'; key: string; meta?: Record<string, unknown> }
+    | { kind: 'audio'; key: string; meta?: Record<string, unknown> }
+    | { kind: 'file'; key: string; meta?: Record<string, unknown> }
+    | { kind: 'sticker'; key: string; meta?: Record<string, unknown> }
+    | { kind: 'unsupported'; text: string; meta?: Record<string, unknown> };
 
 // ---- 线程 / 关联引用 ----
 
-// IM 的"回复某条消息 / 话题根"放这里；没有回复语义的 channel 直接传 null。
+// "这条回复挂在哪"的通用锚点集合；没有回复语义的 channel 直接传 null。
+//   selfChannelMessageId 触发本次处理的那条消息自身的 id —— "回复用户刚发的
+//                        这条" 这个最常见锚点。缺它时 IM 回复会从"回复原消息"
+//                        退化成顶层发送。
+//   replyToChannelMessageId / rootChannelMessageId 回复树上游/根（可选）。
+//   inThread 这次回复是否要留在同一话题串内。是否真有"话题"概念由各 channel
+//            决定；非线程 channel 不设即可（视作 false）。这字段刻意是通用的
+//            "保持在同一会话串"语义，不绑定任何 IM 的 thread 实现。
 export interface ThreadRef {
+    selfChannelMessageId?: string;
     replyToChannelMessageId?: string;
     rootChannelMessageId?: string;
+    inThread?: boolean;
 }
 
 // ---- 寻址线索 ----
@@ -95,6 +121,13 @@ export interface AddressingDecision {
     reason: string;
 }
 
+// botIdentity 契约约束（跨 channel 通用，不含任何渠道专有命名）：
+// 调用方传入的 botIdentity 必须与该 channel 的 AddressingHint.targetId 处在
+// 同一 ID 空间——decide 是靠 hint.targetId === botIdentity 判断"这条冲 bot 来"。
+// 每个 channel 的 InboundAdapter 自己决定 targetId 用哪种 ID 口径，调用方就
+// 必须按同口径取 bot 标识。传错 ID 空间会让 @bot 永不命中、bot 静默不响应。
+// 各 channel 的具体 ID 口径写在该 channel 自己的 adapter 内部注释 + 等价性
+// 测试里，契约层不感知（见各 adapter 测试，如 lark-adapter.test.ts）。
 export interface AddressingPolicy {
     decide(msg: InboundMessage, botIdentity: string): AddressingDecision;
 }
@@ -142,8 +175,11 @@ export function assertValidInboundMessage(m: unknown): asserts m is InboundMessa
             throw new Error(`InboundMessage.${f} must be a non-empty string`);
         }
     }
-    if (x.thread_ref !== null && typeof x.thread_ref !== 'object') {
-        throw new Error('InboundMessage.thread_ref must be ThreadRef or null');
+    if (x.thread_ref !== null) {
+        if (typeof x.thread_ref !== 'object') {
+            throw new Error('InboundMessage.thread_ref must be ThreadRef or null');
+        }
+        assertThreadRefHasAnchor(x.thread_ref as Record<string, unknown>);
     }
     if (!Array.isArray(x.addressing_hints)) {
         throw new Error('InboundMessage.addressing_hints must be an array');
@@ -151,7 +187,60 @@ export function assertValidInboundMessage(m: unknown): asserts m is InboundMessa
     if (!Array.isArray(x.content) || x.content.length === 0) {
         throw new Error('InboundMessage.content must be a non-empty array');
     }
+    for (const item of x.content as unknown[]) {
+        assertValidContentItem(item);
+    }
     if (typeof x.received_at !== 'number') {
         throw new Error('InboundMessage.received_at must be a number');
+    }
+}
+
+// 一个非 null 的 ThreadRef 必须至少带一个非空字符串锚点（self/replyTo/root
+// 任一）。inThread 只是"是否留在同一话题串"的布尔修饰，不是锚点——光有它
+// deliver()→reply() 会把回复目标解析成空字符串再去调 channel reply，违反
+// 设计文档"禁止静默丢弃"。空锚点必须在入站边界炸，而不是无声发到错地方。
+function assertThreadRefHasAnchor(tr: Record<string, unknown>): void {
+    const anchorFields = [
+        'selfChannelMessageId',
+        'replyToChannelMessageId',
+        'rootChannelMessageId',
+    ];
+    const hasAnchor = anchorFields.some(
+        (f) => typeof tr[f] === 'string' && (tr[f] as string).length > 0,
+    );
+    if (!hasAnchor) {
+        throw new Error(
+            'InboundMessage.thread_ref is non-null but carries no usable anchor; ' +
+                'at least one of selfChannelMessageId/replyToChannelMessageId/' +
+                'rootChannelMessageId must be a non-empty string (use thread_ref=null ' +
+                'when there is no reply semantics) — silent drop is forbidden',
+        );
+    }
+}
+
+// 单个内容片段的形状守卫：text/unsupported 必须有非空 text，其余媒体类必须有
+// 非空 key。形状不对就在入站边界炸，而不是流到下游才出诡异 bug。
+function assertValidContentItem(item: unknown): asserts item is ContentItem {
+    if (typeof item !== 'object' || item === null) {
+        throw new Error('ContentItem must be an object');
+    }
+    const it = item as Record<string, unknown>;
+    switch (it.kind) {
+        case 'text':
+        case 'unsupported':
+            if (typeof it.text !== 'string' || (it.text as string).length === 0) {
+                throw new Error(`ContentItem(${it.kind}).text must be a non-empty string`);
+            }
+            return;
+        case 'image':
+        case 'audio':
+        case 'file':
+        case 'sticker':
+            if (typeof it.key !== 'string' || (it.key as string).length === 0) {
+                throw new Error(`ContentItem(${it.kind}).key must be a non-empty string`);
+            }
+            return;
+        default:
+            throw new Error(`ContentItem.kind is not a recognized kind: ${String(it.kind)}`);
     }
 }
