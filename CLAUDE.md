@@ -104,15 +104,17 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 **禁止直接在 main 分支上修改代码。** 分支由用户切好递给 Claude（worktree 不归 Claude 管），Claude 接到需求后按下面主线推进：
 
-1. **判断简单 / 复杂**：typo / rename / 一两行无行为变化的改动，直接做，跳过下面。其他走完整流程。
-2. **先 Explore，再写 spec**：派 Explore 子 agent 查清调用方、现有实现、相关数据流。主对话只接结论。**禁止凭印象写 spec**。
+0. **主会话对仓库文件零直接接触（硬规则）**：主会话**禁止**直接接触本仓库文件——任何排查（Read / Grep / Glob / 读仓库内容的 Bash）和任何修改（Edit / Write / 写仓库内容的 Bash）都**必须**委派子 agent，主会话只接结论与 diff + 证据。这条线一直拉到末端：应用 reviewer（codex）反馈去改 spec 或代码，这个动作**本身也是一个子 agent 任务**，不论目标文件在不在仓库内。本规则对所有 skill 一视同仁、**不开任何豁免口子**——会写仓库文件的 skill（如 `/init`、`/simplify`、`/update-config`）在主会话被拦时，正确反应是把那一步委派子 agent，不是放行。
+1. **判断简单 / 复杂**：typo / rename / 一两行无行为变化的改动，仍须委派子 agent 执行（主会话零直接接触不因改动小而豁免），但可跳过下面的 spec / review 流程。其他走完整流程。
+2. **先 Explore，再写 spec**：**必须**派 Explore 子 agent 查清调用方、现有实现、相关数据流。主对话只接结论。**禁止**凭印象写 spec，**禁止**主会话自己 Read / Grep 仓库代码。
 3. **写 spec（`/spec`）**：含目标、不做什么、关键设计决策、调用方全覆盖、数据&部署影响、粗颗粒 task 清单。**spec 里的 task 只写"目标 + 产出 + 验收口径"，禁止出现代码片段 / 文件行号 / 实现步骤**；具体验证命令在实现阶段基于实际改动补齐 —— 实现细节是动手时才能生成的知识，spec 阶段预写就是想象，必失真。
 4. **codex T1 review**：spec 定稿叫一次 codex，重点检查任务颗粒度是否合适、有没有藏着的实现想象。逐条采纳 / 驳回写理由，更新 spec。
-5. **实现**：
-   - 同 spec 内 task 互相独立无依赖的，派 `general-purpose` 子 agent 并行做，每个 agent 自己生成实现细节并产出验证证据
-   - 有依赖的 task 主会话串行做
-   - 跨需求并行（多个独立 feature）走另一个 worktree / 会话，不用子 agent
-   - 不管谁做，都走 TDD 红-绿-重构（先写测试再写实现）
+5. **实现（全部委派子 agent，主会话不亲手改文件）**：
+   - **两段式：先 map 再 parallel**。并行派修改类子 agent 之前，**必须**先派一个 Explore 子 agent 摸出"哪些 task 互不碰文件"的真实分区图——按各 task 方法实际能触达的文件算，**不是**按声明产出算。据此分区结果再并行。
+   - **无文件冲突时鼓励并行**：分区图确认互不碰文件的 task，派 `general-purpose` 子 agent 并行做，每个 agent 自己生成实现细节并产出验证证据。主会话只接产出 + 证据，不参与中间过程。
+   - **有文件冲突 / 有依赖的 task**：仍委派子 agent，串行做（主会话不亲手实现），按依赖顺序逐个派。
+   - 跨需求并行（多个独立 feature）走另一个 worktree / 会话，不用子 agent。
+   - **TDD 红-绿-重构 ownership 落在修改类子 agent 内部**：先写测试再写实现，由该子 agent 自己完成；主会话**禁止**亲手写测试或实现。
 6. **遇到死循环必停**：同一报错 ≥2 次 / 同一测试 ≥3 次 / A↔B 往返。结构化分析根因，必要时叫 codex T4 独立诊断（必须先告诉用户、等同意）。
 7. **commit 前**：含设计或逻辑变动的批叫 codex T3 review。完成前必须列出验证证据（命令 + 实际输出），禁止"看着对、应该没问题"。
 8. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）。
@@ -123,9 +125,13 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 ### 子 agent 与 codex 的使用边界
 
-- **Explore 子 agent**：研究代码，不写代码。在 spec 阶段用来查调用方 / 现有实现 / 类似模式，主对话只接结论。
-- **general-purpose 子 agent（并行）**：仅用于**同 spec 内、互相独立的 task**。每个 agent 拿一条 task 自己想细节、自己写测试、自己跑验证、自己报产出。主会话只接产出 + 证据，不参与中间过程。
+**铁律：主会话对仓库文件零直接接触。** 任何排查（Read / Grep / Glob / 读仓库内容的 Bash）和任何修改（Edit / Write / 写仓库内容的 Bash）都**必须**委派子 agent，主会话只接结论与 diff + 证据。本规则对所有 skill 一视同仁，**不开任何豁免口子**。
+
+- **Explore 子 agent**：研究代码，不写代码。读仓库内容回答用户提问、查调用方 / 现有实现 / 类似模式，**必须**派 Explore，主对话只接结论。主会话**禁止**自己 Read / Grep / Glob 仓库文件。
+- **general-purpose 子 agent（并行）**：所有仓库文件修改**必须**经它，主会话不亲手改。**先 map 再 parallel**：并行前**必须**先派一个 Explore 子 agent 按"各 task 方法实际能触达哪些文件"摸出真实分区图（不是按声明产出算），无文件冲突的 task **鼓励并行**派多个子 agent；有冲突 / 有依赖的串行委派。每个 agent 拿一条 task 自己想细节、自己走 TDD 红-绿-重构（先写测试再写实现）、自己跑验证、自己报产出。主会话只接产出 + 证据，不参与中间过程。
+- **应用 reviewer 反馈本身是子 agent 任务**：采纳 codex 反馈去改 spec 或代码，这个落地动作**必须**委派子 agent 执行，不论目标文件在不在仓库内，主会话不亲手改。
 - **跨需求并行**：用 worktree + 多会话，不在一个会话里塞多个独立 feature。
+- **编排豁免边界**：主会话仍可直接跑 git 版本控制 / make / 部署 / `ghc`，以及 skill 驱动的脚本（codex-worker / api-test / ops 等）——这些是编排，不是排查。但 `git show <path>` / `git cat-file` 这类借 git 读逐文件内容的形态**算排查、不算编排**，**必须**委派子 agent。
 - **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/codex-collaboration.md`。
 
 ### 上线前必须完成的检查（TODO）
