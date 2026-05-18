@@ -21,6 +21,9 @@ class ChatTrigger(Data):
     在 ChatRequest 上完成。message_id 设 Optional 以容忍 lark-server
     偶发缺字段的 payload 反序列化失败。
     """
+    # 来源 channel。agent-service 对它无感知、只透传；默认 "lark" 保证停机
+    # 迁移时 MQ/outbox 残留的旧 payload（不带 channel）反序列化不炸。
+    channel: str = "lark"
     message_id: Annotated[str | None, Key] = None
     session_id: str | None = None
     chat_id: str | None = None
@@ -44,6 +47,7 @@ class ChatRequest(Data):
     (message_id, persona_id) 联合 Key 提供 in-graph durable redelivery
     去重。
     """
+    channel: str = "lark"
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     session_id: str | None = None
@@ -71,6 +75,7 @@ class ChatResponseSegment(Data):
     chat-response-worker 直接读 payload.lane 路由飞书回复。
     transient=True：段是事件流，不落 agent-service 自己的表。
     """
+    channel: str = "lark"
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     part_index: Annotated[int, Key] = 0

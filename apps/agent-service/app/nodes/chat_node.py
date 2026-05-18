@@ -93,6 +93,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
     for i, pid in enumerate(persona_ids):
         session_for_persona = t.session_id if i == 0 else str(uuid4())
         await emit(ChatRequest(
+            channel=t.channel,
             message_id=t.message_id,
             persona_id=pid,
             session_id=session_for_persona,
@@ -136,6 +137,7 @@ async def chat_node(req: ChatRequest) -> None:
     # 2. fetch 为空 -> emit 1 段 "未找到" + return
     if not raw_content:
         await emit(ChatResponseSegment(
+            channel=req.channel,
             message_id=req.message_id,
             persona_id=req.persona_id,
             part_index=0,
@@ -172,6 +174,7 @@ async def chat_node(req: ChatRequest) -> None:
 
     # 4. base_payload (segments 共用字段)
     base_payload = dict(
+        channel=req.channel,
         message_id=req.message_id,
         persona_id=req.persona_id,
         session_id=req.session_id,

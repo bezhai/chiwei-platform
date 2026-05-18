@@ -162,3 +162,34 @@ async def test_route_chat_node_empty_persona_list_no_emit(monkeypatch):
     t = ChatTrigger(message_id="m1", session_id="s1")
     await chat_node_mod.route_chat_node(t)
     assert emitted == []
+
+
+@pytest.mark.asyncio
+async def test_route_chat_node_propagates_channel(monkeypatch):
+    """channel 必须从 ChatTrigger 透传到 fan-out 的 ChatRequest。
+    缺失则非 lark 渠道被 Data 默认值静默改回 lark，多渠道直接击穿。
+    """
+    from app.domain.chat_dataflow import ChatRequest
+    from app.nodes import chat_node as chat_node_mod
+
+    async def fake_completed(*a, **k):
+        return False
+
+    class _Router:
+        async def route(self, **kw):
+            return ["p1"]
+
+    emitted: list[ChatRequest] = []
+
+    async def fake_emit(d):
+        emitted.append(d)
+
+    monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
+    monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
+    monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
+
+    t = ChatTrigger(message_id="m1", session_id="s1", channel="qq")
+    await chat_node_mod.route_chat_node(t)
+
+    assert len(emitted) == 1
+    assert emitted[0].channel == "qq"
