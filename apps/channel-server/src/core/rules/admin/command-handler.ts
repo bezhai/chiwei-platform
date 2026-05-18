@@ -1,7 +1,7 @@
 import { UserGroupBindingRepository, GroupMemberRepository, BaseChatInfoRepository, UserBlacklistRepository, ConversationMessageRepository, AgentResponseRepository } from '@infrastructure/dal/repositories/repositories';
 import { Message } from '@core/models/message';
 import { replyMessage } from '@lark/basic/message';
-import { combineRule, RegexpMatch } from '@core/rules/rule';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 import { getUserInfo } from '@lark-client';
 
 const commandRules = [
@@ -320,7 +320,30 @@ const commandRules = [
     },
 ];
 
-export const { rule: CommandRule, handler: CommandHandler } = combineRule<string>(
-    commandRules,
-    (key) => (message) => RegexpMatch(`^/${key}`)(message),
-);
+// lark-only handler（指令处理深度绑死飞书 SDK/实体，chatRule 声明
+// channels:['lark']）。CommandRule/CommandHandler 入口适配 RuleMessage：
+//   - CommandRule 谓词在平台无关 clearText 上判定（与改造前 RegexpMatch 等价）。
+//   - CommandHandler 取回飞书 Message 跑不变的内部指令逻辑；缺 lark
+//     channelContext fail-loud（requireLarkContext），绝不静默。
+function matchesCommandKey(text: string, key: string): boolean {
+    try {
+        return new RegExp(`^/${key}`).test(text);
+    } catch {
+        return false;
+    }
+}
+
+export const CommandRule = (message: RuleMessage): boolean => {
+    const text = message.clearText();
+    return commandRules.some((r) => matchesCommandKey(text, r.key));
+};
+
+export const CommandHandler = async (message: RuleMessage): Promise<void> => {
+    const lark = requireLarkContext(message).larkMessage;
+    const text = message.clearText();
+    for (const r of commandRules) {
+        if (matchesCommandKey(text, r.key)) {
+            await r.handler(lark);
+        }
+    }
+};

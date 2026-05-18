@@ -2,8 +2,16 @@ import { replyCard, replyMessage } from '@lark/basic/message';
 import { CardHeader, LarkCard, MarkdownComponent, TableColumn, TableComponent } from 'feishu-card';
 import { Message } from 'core/models/message';
 import { getAIKeyInfo, getBalance } from 'infrastructure/integrations/provider-admin';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 
-export async function sendBalance(message: Message) {
+// lark-only handler（chatRule 声明 channels:['lark']，RuleMessage 必带 lark
+// channelContext）。入口适配 RuleMessage → 取回飞书 Message 跑不变的内部
+// 逻辑；缺 channelContext fail-loud（requireLarkContext），绝不静默。
+export async function sendBalance(message: RuleMessage) {
+    return sendBalanceImpl(requireLarkContext(message).larkMessage);
+}
+
+async function sendBalanceImpl(message: Message) {
     try {
         const [balance, aiKeyInfo] = await Promise.all([getBalance(), getAIKeyInfo()]);
 

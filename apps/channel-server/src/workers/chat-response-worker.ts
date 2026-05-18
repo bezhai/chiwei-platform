@@ -33,6 +33,8 @@ import { replyPost, sendPost } from '@lark/basic/message';
 import { markdownToPostContent } from 'core/services/message/post-content-processor';
 import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
 import { MessageContentUtils } from 'core/models/message-content';
+import { reverseResolveForLark } from '@core/channels/outbound-pipeline';
+import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
 import { hgetall } from '@cache/redis-client';
 import dayjs from 'dayjs';
 import { Readable } from 'stream';
@@ -265,63 +267,102 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         }
 
         try {
+            // ---- 出站反查（5b 边界点 6）----
+            // ChatTrigger/ChatResponseSegment 入站若走过渠道契约链，message_id
+            // /chat_id/root_id 是全局 internal_*_id。这里用 IdentityResolver
+            // .toChannel 反查回飞书裸 ID，再喂给现状飞书富文本出站路径
+            // （sendPost/replyPost + 识图/markdown→post 全部保留不动——飞书
+            // native 出站交互，不塞进纯文本 OutboundAdapter，否则丢图片/格式，
+            // 是「飞书非文字/看图聊天零截断」硬约束不允许的回归）。反查不到
+            // 明确抛错（落入下方 catch），绝不静默把回复发到错地方。
+            const reverseResolver = getIdentityResolver();
+            // channel === 'lark' 边界断言在 reverseResolveForLark 内做：
+            // T6 接 QQ 后，误把非飞书全局 ID 喂飞书富文本发送器会在此炸出来，
+            // 绝不静默发到错地方（fail-loud 出站对偶）。
+            const rr = await reverseResolveForLark({
+                resolver: reverseResolver,
+                messageGlobalId: message_id,
+                chatGlobalId: chat_id,
+                rootGlobalId: root_id || undefined,
+            });
+            const larkMessageId = rr.channelMessageId;
+            const larkChatId = rr.channelChatId;
+            const larkRootId = rr.channelRootId;
+
             // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
             // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
+            // 用反查回的飞书裸 ID（resolveMentionsForGroup 走飞书群成员、
+            // resolveImageReferences 走 redis image_registry，均按飞书裸键）。
             const tResolve0 = Date.now();
             let resolvedContent = is_p2p
                 ? content
-                : await resolveMentionsForGroup(content, chat_id);
-            resolvedContent = await resolveImageReferences(resolvedContent, message_id);
+                : await resolveMentionsForGroup(content, larkChatId);
+            resolvedContent = await resolveImageReferences(resolvedContent, larkMessageId);
             const resolveMs = Date.now() - tResolve0;
             chatResponseDuration.labels({ stage: 'resolve' }).observe(resolveMs / 1000);
 
             const postContent = markdownToPostContent(resolvedContent);
 
-            // 发送消息并捕获 AI 消息 ID
+            // 发送消息并捕获 AI 消息 ID（飞书裸 ID 寻址，行为与现状一致）
             const tSend0 = Date.now();
             let aiMessageId: string | undefined;
             if (part_index === 0) {
                 if (is_proactive) {
                     // proactive: reply to real message if available, else send new
-                    if (root_id) {
-                        aiMessageId = await replyPost(root_id, postContent);
+                    if (larkRootId) {
+                        aiMessageId = await replyPost(larkRootId, postContent);
                     } else {
-                        aiMessageId = await sendPost(chat_id, postContent);
+                        aiMessageId = await sendPost(larkChatId, postContent);
                     }
                 } else {
-                    aiMessageId = await replyPost(message_id, postContent);
+                    aiMessageId = await replyPost(larkMessageId, postContent);
                 }
             } else {
                 await sleep(SEND_DELAY_MS);
-                aiMessageId = await sendPost(chat_id, postContent);
+                aiMessageId = await sendPost(larkChatId, postContent);
             }
             const sendMs = Date.now() - tSend0;
             chatResponseDuration.labels({ stage: 'lark_send' }).observe(sendMs / 1000);
 
-            const effectiveMessageId = aiMessageId || `${message_id}_part${part_index}`;
+            const effectiveLarkMessageId = aiMessageId || `${larkMessageId}_part${part_index}`;
+            // bot 自己的回复消息也全局化（与入站写入点全局化一致）：把这条新
+            // 飞书消息 id 正查分配/取全局 internal_message_id 后再落库，保证
+            // conversation_messages 的 assistant 行身份列同样是全局 ID。
+            // reverseResolveForLark 已断言 channel==='lark'，这里出站发的是
+            // 飞书 native 富文本，新消息 id 是飞书裸 id，按 (lark, 裸id) 正查
+            // 分配全局 internal_message_id（与入站写入点全局化一致）。
+            const globalAssistantMessageId = await reverseResolver.resolve(
+                'message',
+                'lark',
+                effectiveLarkMessageId,
+            );
 
-            // 每条消息发完后立即存 conversation_messages
+            // 每条消息发完后立即存 conversation_messages（身份列写全局 ID）
             const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
             await storeMessage({
                 user_id: botName || context.getBotName() || '',
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
-                message_id: effectiveMessageId,
+                message_id: globalAssistantMessageId,
                 message_type: 'post',
                 chat_id: chat_id,
                 chat_type: is_p2p ? 'p2p' : 'group',
                 create_time: String(now),
-                root_message_id: is_proactive ? (root_id || effectiveMessageId) : (root_id || message_id),
+                root_message_id: is_proactive ? (root_id || globalAssistantMessageId) : (root_id || message_id),
                 reply_message_id: is_proactive ? (root_id || undefined) : message_id,
                 response_id: session_id,
             });
 
             // proactive 没有 agent_response 记录，跳过 replies 追加和状态更新
             if (agentResponse) {
+                // agent_responses.replies[].message_id 由 5c-scope 读取方
+                // （recall / delete-message）按飞书裸 message id 消费。本步
+                // 不动这些读取方，故此处保持飞书裸 id（effectiveLarkMessageId），
+                // 全局化留给 5c，不在本步擅自切。
                 const replyEntry = [
                     {
-                        message_id: effectiveMessageId,
+                        message_id: effectiveLarkMessageId,
                         content_type: 'post',
                         sent_at: new Date().toISOString(),
                     },
@@ -350,7 +391,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const dbWriteMs = Date.now() - tDbWrite0;
             chatResponseDuration.labels({ stage: 'db_write' }).observe(dbWriteMs / 1000);
 
-            console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}, part=${part_index}, ai_msg_id=${effectiveMessageId}`);
+            console.info(`[ChatResponseWorker] Reply sent: session_id=${session_id}, part=${part_index}, ai_msg_id=${effectiveLarkMessageId}`);
 
             const totalMs = Date.now() - tStart;
             chatResponseDuration.labels({ stage: 'total' }).observe(totalMs / 1000);

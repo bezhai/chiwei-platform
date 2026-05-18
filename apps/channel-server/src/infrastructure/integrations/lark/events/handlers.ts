@@ -35,6 +35,29 @@ import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
 import { rabbitmqClient, PROACTIVE_EVAL } from '@integrations/rabbitmq';
 import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
+import { runInboundContractChain } from '@core/channels/inbound-pipeline';
+import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
+import { getBotUnionId } from '@core/services/bot/bot-var';
+import { buildLarkRuleMessage } from 'core/rules/rule-message';
+import { setBotIdentityResolver } from 'core/rules/rule';
+
+// runRules 内 NeedRobotMention 谓词的 botIdentity 解析（飞书=robot_union_id）。
+// 飞书侧 RuleMessage.addressedTargetIds 来源与 hasMention(union_id) 同源
+// （见 buildLarkRuleMessage / lark-adapter），口径一致，逐场景行为零变化。
+// 非飞书消息（QQ 等）无 lark channelContext，按各自 channel 的 addressing
+// 口径——此 resolver 只对 lark 给 robot_union_id，其余给空串（group 不命中、
+// direct 仍直通，与各 channel adapter decide 一致）。
+setBotIdentityResolver((m) => {
+    if (m.channel !== 'lark') return '';
+    // robot_union_id 在 bot_config.credentials（T4）；getBotUnionId 读当前
+    // context bot，与现状 NeedRobotMention 同源。无 context 时给空串
+    // （group 不命中、direct 仍直通，与现状一致）。
+    try {
+        return getBotUnionId();
+    } catch {
+        return '';
+    }
+});
 
 /**
  * Lark事件处理器类
@@ -76,20 +99,10 @@ export class LarkEventHandlers {
                 }
             }
 
-            await storeMessage({
-                user_id: message.sender,
-                content: message.toStorageFormat(),
-                role: 'user',
-                message_id: message.messageId,
-                chat_id: message.chatId,
-                chat_type: message.isP2P() ? 'p2p' : 'group',
-                create_time: message.createTime ?? '0',
-                root_message_id: message.rootId,
-                reply_message_id: message.parentMessageId,
-                message_type: message.messageType,
-            });
-
-            // 增量写入 bot_chat_presence（记录当前 bot 在此 chat 中活跃）
+            // ---- 飞书 native 渠道专属副作用（保留不动，spec G）----
+            // 识图管线 / bot_chat_presence 是飞书渠道专属（QQ 不需要），不在
+            // chatRules 里、按飞书裸 ID 走飞书自己的管线，与身份契约链解耦。
+            // 它们对 contract chain 成败无依赖，先做（保留现状行为零变化）。
             const currentBotName = context.getBotName();
             if (currentBotName && message.chatId) {
                 AppDataSource.getRepository(BotChatPresence)
@@ -100,8 +113,117 @@ export class LarkEventHandlers {
                     .catch(err => console.warn('[BotChatPresence] upsert failed:', err));
             }
 
+            // ---- 钉死的渠道契约链（决策五 / spec 整体分层，顺序不可调换）----
+            // adapter.parse → AddressingPolicy.decide+enforceDecision(前置总闸)
+            //   → IdentityResolver.resolve(换全局 internal_*_id)
+            //   → runRules(吃平台无关 RuleMessage，单一终态出口)
+            //   → storeMessage(写全局 ID) → 发 MQ(makeTextReply 带 channel+全局 ID)
+            // fail-loud（spec 5b）：契约链任一步失败 → 不写库、不发 MQ、记
+            // 可查错误日志，**绝不退回飞书裸 ID 往下走**。
+            const botName = context.getBotName();
+            const triple = botName ? multiBotManager.getChannelTriple(botName) : null;
+            if (!triple) {
+                // 装配不出三件套 = bot 配置/加载异常 = fail-loud（不静默吞）。
+                console.error(
+                    `[inbound] no channel triple for bot "${botName}"; ` +
+                        `fail-loud, message dropped (not written/queued): ` +
+                        `lark_message_id=${message.messageId}`,
+                );
+                return;
+            }
 
-            await runRules(message);
+            const chain = await runInboundContractChain({
+                params,
+                parse: (raw) => triple.inbound.parse(raw),
+                decide: (m, b) => triple.addressing.decide(m, b),
+                // 飞书 botIdentity 口径 = robot_union_id，与现状
+                // NeedRobotMention / LarkAddressingPolicy 同源。
+                botIdentity: getBotUnionId(),
+                resolver: getIdentityResolver(),
+                logSkip: (reason) =>
+                    console.info(
+                        `[inbound] addressing front-gate respond=false: ` +
+                            `lark_message_id=${message.messageId} reason=${reason}`,
+                    ),
+            });
+
+            if (!chain.ok) {
+                if (chain.reason === 'parsed_null') {
+                    // adapter 判定这不是要处理的消息（飞书杂事件）。
+                    console.info(
+                        `[inbound] adapter parsed null (non-message event), skipped: ` +
+                            `lark_message_id=${params.message?.message_id}`,
+                    );
+                    return;
+                }
+                // contract_chain_error：fail-loud —— 不写库、不发 MQ、不退裸 ID。
+                console.error(
+                    `[inbound] contract chain failed (fail-loud, message NOT ` +
+                        `stored/queued, no raw-id fallback): ` +
+                        `lark_message_id=${message.messageId} detail=${chain.detail}`,
+                );
+                return;
+            }
+
+            // 全局 ID 就绪。派生平台无关 RuleMessage（飞书强绑能力经
+            // channelContext 旁挂 Message，lark-only handler 用 requireLarkContext
+            // 取回跑不变内部逻辑）。
+            const ruleMessage = buildLarkRuleMessage(message, {
+                botName: botName ?? '',
+                internalUserId: chain.globalUserId,
+                internalChatId: chain.globalChatId,
+                internalMessageId: chain.globalMessageId,
+                internalRootId: chain.globalRootId,
+                // addressedTargetIds 与 hasMention(union_id) 同源
+                // （lark-adapter 的 addressing_hints[].targetId = union_id）。
+                addressedTargetIds: chain.inbound.addressing_hints.map(
+                    (h) => h.targetId,
+                ),
+            });
+
+            // 识图管线（飞书渠道专属，spec G 保留）：按飞书裸 message_id /
+            // image_key 走飞书 native 管线，与全局身份契约链解耦。
+            if (message.allowDownloadResource()) {
+                const toolClient = laneRouter.createClient('tool-service');
+                for (const imageKey of message.imageKeys()) {
+                    toolClient.post(
+                        '/api/image-pipeline/process',
+                        { message_id: message.messageId, file_key: imageKey },
+                        {
+                            headers: {
+                                Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
+                                'X-App-Name': botName,
+                            },
+                        },
+                    ).catch((err) => {
+                        console.error('Error in upload image:', err);
+                    });
+                }
+            }
+
+            // storeMessage 写全局 internal_*_id（决策二/spec D）。
+            // reply_message_id 是飞书"回复某条消息"锚点，5c 读取方/快照范围，
+            // 本步保持原值不动，不静默猜。runRules 的 persona 主链路
+            // makeTextReply 已直接消费 RuleMessage 上的全局 ID（reply.ts）。
+            await storeMessage({
+                user_id: chain.globalUserId,
+                content: message.toStorageFormat(),
+                role: 'user',
+                message_id: chain.globalMessageId,
+                chat_id: chain.globalChatId,
+                chat_type: message.isP2P() ? 'p2p' : 'group',
+                create_time: message.createTime ?? '0',
+                root_message_id: chain.globalRootId ?? chain.globalMessageId,
+                reply_message_id: message.parentMessageId,
+                message_type: message.messageType,
+            });
+
+            // runRules：平台无关统一引擎，单一终态出口。前置总闸 respond
+            // 仅 gate persona 主链路；飞书 native 复读用 NeedNotRobotMention，
+            // 非 @bot 群消息必须照常进 runRules（否则飞书复读回归——违反
+            // "飞书逐场景零变化"硬约束）。故无论 respond 与否都进 runRules，
+            // persona 链路由 NeedRobotMention 谓词自行 gate（与现状等价）。
+            await runRules(ruleMessage);
         } catch (error) {
             console.error(
                 'Error handling message receive:',

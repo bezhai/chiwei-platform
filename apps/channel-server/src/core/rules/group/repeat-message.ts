@@ -4,6 +4,7 @@ import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/reposito
 import { Message } from 'core/models/message';
 import { sendSticker, replyMessage, sendPost } from '@lark/basic/message';
 import { createPostContentFromText } from '@core/services/message/post-content-processor';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 
 interface RepeatMsg {
     chatId: string;
@@ -53,7 +54,12 @@ async function addRepeatMsgAndCheck(chatId: string, msg: string): Promise<boolea
     return msgBody.repeatTime === 3;
 }
 
-export async function repeatMessage(message: Message) {
+// lark-only handler：入口适配 RuleMessage → 飞书 Message 跑不变内部逻辑。
+export async function repeatMessage(message: RuleMessage) {
+    return repeatMessageImpl(requireLarkContext(message).larkMessage);
+}
+
+async function repeatMessageImpl(message: Message) {
     if (
         message.isTextOnly() &&
         (await addRepeatMsgAndCheck(message.chatId, message.withMentionText()))
@@ -69,10 +75,12 @@ export async function repeatMessage(message: Message) {
     }
 }
 
+// lark-only handler 工厂：入口适配 RuleMessage → 飞书 Message 跑不变内部逻辑。
 export function changeRepeatStatus(
     open_repeat_message: boolean,
-): (message: Message) => Promise<void> {
-    return async function (message: Message) {
+): (message: RuleMessage) => Promise<void> {
+    return async function (rm: RuleMessage) {
+        const message = requireLarkContext(rm).larkMessage;
         await BaseChatInfoRepository.createQueryBuilder()
             .update()
             .set({

@@ -1,5 +1,6 @@
 import { AxiosResponse } from 'axios';
 import { Message } from '@core/models/message';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 import { Meme } from 'types/meme';
 import { Readable } from 'node:stream';
 import { uploadImage, downloadResource } from '@lark-client';
@@ -32,7 +33,13 @@ class MemeService {
     }
 }
 
-export async function checkMeme(message: Message): Promise<boolean> {
+// lark-only async_rule / handler：Meme 规则声明 channels:['lark']，故只在飞书
+// 消息上跑，RuleMessage 必带 lark channelContext；入口适配后跑不变内部逻辑。
+export async function checkMeme(rm: RuleMessage): Promise<boolean> {
+    return checkMemeImpl(requireLarkContext(rm).larkMessage);
+}
+
+async function checkMemeImpl(message: Message): Promise<boolean> {
     try {
         const memeList = await MemeService.getMemeList();
 
@@ -185,7 +192,11 @@ function parseCommandText(text: string): string[] {
     return result;
 }
 
-export async function genMeme(message: Message) {
+export async function genMeme(rm: RuleMessage) {
+    return genMemeImpl(requireLarkContext(rm).larkMessage);
+}
+
+async function genMemeImpl(message: Message) {
     try {
         const memeList = await MemeService.getMemeList();
 

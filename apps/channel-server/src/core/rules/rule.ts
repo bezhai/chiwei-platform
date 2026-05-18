@@ -1,76 +1,27 @@
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
-import { Message } from 'core/models/message';
-import { getBotAppId, getBotUnionId } from '@core/services/bot/bot-var';
 import { UserBlacklistRepository } from '@infrastructure/dal/repositories/repositories';
+import { type RuleMessage, requireLarkContext } from './rule-message';
 
-// 定义规则函数类型
-type Rule = (message: Message) => boolean;
+// 规则/处理器一律消费平台无关 RuleMessage（决策五）。平台无关规则
+// （EqualText/RegexpMatch/OnlyGroup/文本限定/NeedRobotMention 等）直接读
+// RuleMessage 的平台无关视图；飞书强绑规则（WhiteGroupCheck/IsAdmin）经
+// requireLarkContext 取回 LarkRuleContext 跑不变的内部逻辑（缺 context
+// fail-loud，绝不静默）。
 
-type AsyncRule = (message: Message) => Promise<boolean>;
+type Rule = (message: RuleMessage) => boolean;
 
-// 定义权限函数类型
-type Handler = (message: Message) => Promise<void>;
+type AsyncRule = (message: RuleMessage) => Promise<boolean>;
 
-// 组合规则返回的类型
-export interface GenCombineRule {
-    rule: Rule; // 一个函数，判断消息是否满足至少一个规则
-    handler: Handler; // 一个异步函数，依次执行满足规则的处理函数
-}
-
-/**
- * combineRule
- *
- * 该函数用于将一组规则与处理器组合成一个通用的规则和处理器。
- * 它可以根据提供的规则和适配器函数，生成一个组合规则对象。
- *
- * @template T - 规则键的类型，可以是任意类型（如字符串、数字或对象）。
- *
- * @param originRule - 一个规则数组，每个规则包含：
- *   - `key`: 规则的键，类型为泛型 `T`。
- *   - `handler`: 一个异步处理函数，当规则被触发时会执行。
- *
- * @param adaptor - 一个适配器函数，它将规则的 `key` 转换为一个 `Rule` 函数。
- *   - 该 `Rule` 函数接收一个 `message` 对象，并返回一个布尔值，表示消息是否满足规则。
- *
- * @returns {GenCombineRule} - 返回一个组合规则对象，包含：
- *   - `rule`: 一个函数，用于判断消息是否满足任意一个规则。
- *   - `handler`: 一个异步函数，用于执行所有满足规则的处理器。
- *
- * @example
- * const originRules = [
- *   { key: "rule1", handler: async (message) => console.info("Handled rule1") },
- *   { key: "rule2", handler: async (message) => console.info("Handled rule2") },
- * ];
- *
- * const adaptor = (key: string) => (message: Message) => message.text().includes(key);
- *
- * const combined = combineRule(originRules, adaptor);
- *
- * const message = { content: "This is a test for rule1" };
- *
- * if (combined.rule(message)) {
- *   combined.handler(message); // Output: "Handled rule1"
- * }
- */
-export const combineRule = <T>(
-    originRule: { key: T; handler: Handler }[],
-    adaptor: (key: T) => Rule,
-): GenCombineRule => {
-    const rule: Rule = (message) => originRule.some((rule) => adaptor(rule.key)(message));
-    const handler: Handler = async (message) => {
-        for (const rule of originRule) {
-            if (adaptor(rule.key)(message)) {
-                await rule.handler(message);
-            }
-        }
-    };
-    return { rule, handler };
-};
+type Handler = (message: RuleMessage) => Promise<void>;
 
 /** 规则分类：utility=工具功能, persona=拟人聊天 */
 export type RuleCategory = 'utility' | 'persona';
 
-// 定义规则和对应处理逻辑的结构
+// 定义规则和对应处理逻辑的结构。新增 channels 渠道声明字段（决策五范围收紧）：
+//   - 不声明 = 默认全平台（只有 persona 文本主链路这样，真正平台无关）。
+//   - 声明 ['lark'] = 仅飞书：runRules 按消息 channel 过滤，非飞书消息跳过
+//     （并入终态记录的 skipped）。凡 import 飞书 SDK/card/实体或读飞书专属
+//     字段的 chatRule 必须显式声明 channels:['lark']。
 export interface RuleConfig {
     rules: Rule[];
     async_rules?: AsyncRule[];
@@ -78,11 +29,34 @@ export interface RuleConfig {
     fallthrough?: boolean;
     comment?: string;
     category?: RuleCategory;
+    channels?: string[];
 }
 
-// 工具函数：通用规则
-export const NeedRobotMention: Rule = (message) =>
-    message.hasMention(getBotUnionId()) || message.isP2P();
+// ---- 平台无关规则（直接读 RuleMessage 平台无关视图）----
+
+// 与现有 NeedRobotMention 逻辑等价：被 @bot（addressedTargetIds 含 botIdentity）
+// 或私聊（isDirect）。注意：runRules 的前置总闸（AddressingPolicy.decide +
+// enforceDecision）已在接线点 D 前置判定过"要不要回"，这里保留 NeedRobotMention
+// 仅作为 chatRule 内部的 rule 谓词（与改造前同语义），保证飞书逐场景行为零
+// 变化——尤其复读规则用 NeedNotRobotMention，依赖本谓词的取反。
+//
+// botIdentity 由调用方按 channel 取（飞书是 robot_union_id）；为保持 rule 谓词
+// 签名（只吃 message），这里读 RuleMessage 自带的 addressedTargetIds 是否含
+// 该消息所属 bot 的标识。飞书侧 addressedTargetIds 来源与 hasMention(union_id)
+// 同源（见 buildLarkRuleMessage / lark-adapter）。
+let botIdentityResolver: (m: RuleMessage) => string = () => '';
+
+// 接线点注入"按当前消息所属 bot 取 botIdentity"的函数（飞书=robot_union_id）。
+// 默认空串：未注入时 group 永不命中、private 仍直通（与改造前 P2P 直通一致）。
+export function setBotIdentityResolver(fn: (m: RuleMessage) => string): void {
+    botIdentityResolver = fn;
+}
+
+export const NeedRobotMention: Rule = (message) => {
+    if (message.isDirect) return true;
+    const botIdentity = botIdentityResolver(message);
+    return botIdentity.length > 0 && message.addressedTargetIds.includes(botIdentity);
+};
 
 export const NeedNotRobotMention: Rule = (message) => !NeedRobotMention(message);
 
@@ -108,26 +82,39 @@ export const RegexpMatch =
         }
     };
 
-export const OnlyP2P: Rule = (message) => message.isP2P();
+export const OnlyP2P: Rule = (message) => message.isDirect;
 
-export const OnlyGroup: Rule = (message) => !message.isP2P();
+export const OnlyGroup: Rule = (message) => !message.isDirect;
+
+// ---- 飞书强绑规则（经 requireLarkContext 取回 LarkRuleContext）----
+// 这些 chatRule 必声明 channels:['lark']，故 RuleMessage 必带 lark
+// channelContext；缺则 requireLarkContext fail-loud（绝不静默）。内部判定逻辑
+// 与改造前逐字一致，只是从 message.basicChatInfo / message.senderInfo 改成
+// 从 LarkRuleContext.larkMessage 上取。
 
 export const WhiteGroupCheck =
     (checkFunc: (chatInfo: LarkBaseChatInfo) => boolean): Rule =>
     (message) => {
-        const chatInfo = message.basicChatInfo;
+        const lark = requireLarkContext(message).larkMessage;
+        const chatInfo = lark.basicChatInfo;
         return chatInfo ? checkFunc(chatInfo) : false;
     };
 
-export const IsAdmin: Rule = (message) => message.senderInfo?.is_admin ?? false;
+export const IsAdmin: Rule = (message) => {
+    const lark = requireLarkContext(message).larkMessage;
+    return lark.senderInfo?.is_admin ?? false;
+};
 
-// 异步规则：检查用户是否未被拉黑
+// 异步规则：检查用户是否未被拉黑。决策四链路顺序 D：NotBlocked 改成查全局
+// user ID（用 IdentityResolver.resolve 后的 internal user id）。黑名单表
+// union_id 列 → 全局 ID 的数据迁移属 5d；5b 只改查询逻辑：用 RuleMessage 上
+// 已是全局 ID 的 internalUserId 作为查询值（列名 5d 迁移，本步不改 schema）。
 export const NotBlocked: AsyncRule = async (message) => {
-    const unionId = message.sender;
-    if (!unionId || unionId === 'unknown_sender') return true;
+    const globalUserId = message.internalUserId;
+    if (!globalUserId || globalUserId === 'unknown_sender') return true;
 
     const blocked = await UserBlacklistRepository.findOne({
-        where: { union_id: unionId },
+        where: { union_id: globalUserId },
     });
     return !blocked;
 };

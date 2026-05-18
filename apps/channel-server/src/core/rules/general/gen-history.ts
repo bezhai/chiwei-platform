@@ -15,6 +15,13 @@ import {
 import { Message } from 'core/models/message';
 import { buildWeeklyWordCloud } from '@core/services/text-analytics/jieba';
 import { replyCard, searchGroupMessage } from '@lark/basic/message';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
+
+// lark-only handler：入口适配 RuleMessage → 取回飞书 Message 跑不变的内部
+// 逻辑（水群报告深度依赖飞书群消息/卡片）；缺 lark channelContext fail-loud。
+export async function genHistoryCard(message: RuleMessage) {
+    return genHistoryCardImpl(requireLarkContext(message).larkMessage);
+}
 
 function splitTime(start: number, end: number, splitSize: number): number[][] {
     // 确保输入有效
@@ -36,7 +43,7 @@ function splitTime(start: number, end: number, splitSize: number): number[][] {
     return result;
 }
 
-export async function genHistoryCard(message: Message) {
+async function genHistoryCardImpl(message: Message) {
     const allMessages = humanMessageFilter(await getHistoryMessage(message.chatId, 13, 0));
 
     const activeChartSpec = new LineChartSpec(

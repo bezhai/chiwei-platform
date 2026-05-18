@@ -2,8 +2,15 @@ import { getMessageInfo, deleteMessage } from '@lark-client';
 import { Message } from 'core/models/message';
 import { getBotAppId } from '@core/services/bot/bot-var';
 import { replyMessage } from '@lark/basic/message';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 
-export async function deleteBotMessage(message: Message) {
+// lark-only handler：入口适配 RuleMessage → 取回飞书 Message 跑不变的内部
+// 逻辑；缺 lark channelContext fail-loud，绝不静默。
+export async function deleteBotMessage(message: RuleMessage) {
+    return deleteBotMessageImpl(requireLarkContext(message).larkMessage);
+}
+
+async function deleteBotMessageImpl(message: Message) {
     try {
         if (!message.parentMessageId) {
             throw new Error('没有父消息，无法撤回');

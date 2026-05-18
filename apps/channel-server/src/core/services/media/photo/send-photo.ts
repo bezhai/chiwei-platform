@@ -2,8 +2,14 @@ import { GroupChatInfoRepository } from 'infrastructure/dal/repositories/reposit
 import { Message } from 'core/models/message';
 import { replyCard, replyMessage } from '@lark/basic/message';
 import { searchAndBuildPhotoCard } from './photo-card';
+import { type RuleMessage, requireLarkContext } from 'core/rules/rule-message';
 
-export async function sendPhoto(message: Message) {
+// lark-only handler：入口适配 RuleMessage → 飞书 Message 跑不变内部逻辑。
+export async function sendPhoto(message: RuleMessage) {
+    return sendPhotoImpl(requireLarkContext(message).larkMessage);
+}
+
+async function sendPhotoImpl(message: Message) {
     try {
         const tags = message
             .clearText()
