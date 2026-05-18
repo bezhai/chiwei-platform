@@ -122,11 +122,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/validate-bash.sh \"$TOOL_INPUT\""
+            "command": "bash .claude/hooks/enforce-routing.sh"
           }
         ]
       }
