@@ -5,20 +5,17 @@ export class BotConfig {
     @PrimaryColumn({ type: 'varchar', length: 50 })
     bot_name!: string; // 机器人名称，用作唯一标识
 
-    @Column({ type: 'varchar', length: 100 })
-    app_id!: string; // 飞书应用ID
+    // 接入渠道，不是写死枚举（"lark" / "qq" / 以后任意）。bot 加载链路按它分发
+    // 到对应 channel 的 InboundAdapter / OutboundAdapter / AddressingPolicy 三件套。
+    @Column({ type: 'varchar', length: 20, default: 'lark' })
+    channel!: string;
 
-    @Column({ type: 'varchar', length: 200 })
-    app_secret!: string; // 飞书应用密钥
-
-    @Column({ type: 'varchar', length: 100 })
-    encrypt_key!: string; // 加密密钥
-
-    @Column({ type: 'varchar', length: 100 })
-    verification_token!: string; // 验证令牌
-
-    @Column({ type: 'varchar', length: 100 })
-    robot_union_id!: string; // 机器人Union ID
+    // 各 channel 自己的凭据结构，框架不约束 JSONB 形状（形状由各 adapter 解释）。
+    //   lark: { app_id, app_secret, encrypt_key, verification_token, robot_union_id }
+    //   qq:   { app_id, app_secret, bot_secret }
+    // 飞书原来散在独立列里的凭据已一刀切迁进这里，旧列已删（不留双形态）。
+    @Column({ type: 'jsonb', nullable: true })
+    credentials?: Record<string, unknown> | null;
 
     @Column({ type: 'varchar', length: 20, default: 'http' })
     init_type!: 'http' | 'websocket'; // 初始化类型：http或websocket

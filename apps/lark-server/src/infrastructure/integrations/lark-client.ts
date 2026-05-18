@@ -1,5 +1,6 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { larkCredentials } from '@core/services/bot/lark-credentials';
 import { context } from '@middleware/context';
 import { register } from '@middleware/metrics';
 import { Counter, Histogram } from 'prom-client';
@@ -47,9 +48,11 @@ class LarkClientManager {
         this.clientPool.clear();
 
         for (const bot of allBots) {
+            if (bot.channel !== 'lark') continue;
+            const cred = larkCredentials(bot);
             const client = new lark.Client({
-                appId: bot.app_id,
-                appSecret: bot.app_secret,
+                appId: cred.app_id,
+                appSecret: cred.app_secret,
             });
             this.clientPool.set(bot.bot_name, client);
         }

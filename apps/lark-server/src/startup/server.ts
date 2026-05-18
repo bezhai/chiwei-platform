@@ -62,7 +62,10 @@ export class HttpServerManager {
                     version: process.env.VERSION || process.env.GIT_SHA || 'unknown',
                     bots: allBots.map((bot) => ({
                         name: bot.bot_name,
-                        app_id: bot.app_id,
+                        channel: bot.channel,
+                        app_id:
+                            (bot.credentials?.app_id as string | undefined) ??
+                            undefined,
                         init_type: bot.init_type,
                         is_active: bot.is_active,
                     })),

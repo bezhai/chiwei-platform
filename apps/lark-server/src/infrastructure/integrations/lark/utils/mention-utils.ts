@@ -1,5 +1,6 @@
 import { LarkMention } from 'types/lark';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { larkCredentials } from '@core/services/bot/lark-credentials';
 
 export class MentionUtils {
     static addMentions(mentions: LarkMention[] | undefined): string[] {
@@ -14,7 +15,10 @@ export class MentionUtils {
         if (!mentions) return [];
         return mentions
             .filter((m) => m.mentioned_type === 'bot')
-            .map((m) => multiBotManager.getBotConfigByUnionId(m.id.union_id!)?.app_id)
+            .map((m) => {
+                const bc = multiBotManager.getBotConfigByUnionId(m.id.union_id!);
+                return bc ? larkCredentials(bc).app_id : undefined;
+            })
             .filter((appId): appId is string => !!appId);
     }
 
@@ -35,7 +39,7 @@ export class MentionUtils {
                       acc[m.id.union_id!] = {
                           name: m.name,
                           openId: m.id.open_id!,
-                          appId: botConfig?.app_id,
+                          appId: botConfig ? larkCredentials(botConfig).app_id : undefined,
                       };
                       return acc;
                   },

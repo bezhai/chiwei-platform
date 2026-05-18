@@ -2,12 +2,21 @@ import { In } from 'typeorm';
 import { BotConfig } from '@entities/bot-config';
 import { BotPersona } from '@entities/bot-persona';
 import { botConfigRepository } from '@repositories/bot-config-repository';
+import { larkCredentials } from './lark-credentials';
+import {
+    resolveBotChannelTriples,
+    type ChannelTriple,
+} from '../../channels/channel-registry';
 import AppDataSource from 'ormconfig';
 
 export class MultiBotManager {
     private static instance: MultiBotManager;
     private botConfigs: Map<string, BotConfig> = new Map();
     private appIdToDisplayName: Map<string, string> = new Map();
+    // bot_name -> 该 bot channel 的三件套。加载阶段按 bot_config.channel 解析
+    // 并校验后装配（未知 channel 已在 resolveBotChannelTriples fail-closed）。
+    // 收发消息真正用它是 T5 接线范围，T4 只负责加载期装配。
+    private channelTriples: Map<string, ChannelTriple> = new Map();
     private initialized = false;
 
     private constructor() {}
@@ -25,7 +34,16 @@ export class MultiBotManager {
 
         // 所有启用的机器人都加载进内存；后续由调用方按环境筛选是否启动 http/ws
         const allBots = await botConfigRepository.getAllActiveBots();
+
+        // 加载阶段就按 channel 解析+校验+装配三件套。未知 channel 在这里
+        // fail-closed 抛错（整个 initialize 失败），绝不让 bot 半死不活地起来。
+        // 必须在写 botConfigs map 之前做：校验没过就不该有任何 bot 被装载。
+        const triples = resolveBotChannelTriples(
+            allBots.map((b) => ({ bot_name: b.bot_name, channel: b.channel })),
+        );
+
         this.botConfigs.clear();
+        this.channelTriples = triples;
 
         for (const bot of allBots) {
             this.botConfigs.set(bot.bot_name, bot);
@@ -43,20 +61,22 @@ export class MultiBotManager {
         return this.botConfigs.get(botName) || null;
     }
 
-    // 根据app_id获取机器人配置
+    // 根据飞书 app_id 反查机器人配置（飞书专有反查，凭据现在在 credentials JSONB）
     getBotConfigByAppId(appId: string): BotConfig | null {
         for (const bot of this.botConfigs.values()) {
-            if (bot.app_id === appId) {
+            if (bot.channel !== 'lark') continue;
+            if (larkCredentials(bot).app_id === appId) {
                 return bot;
             }
         }
         return null;
     }
 
-    // 根据union_id获取机器人配置
+    // 根据飞书 robot_union_id 反查机器人配置（飞书专有反查，凭据在 credentials JSONB）
     getBotConfigByUnionId(unionId: string): BotConfig | null {
         for (const bot of this.botConfigs.values()) {
-            if (bot.robot_union_id === unionId) {
+            if (bot.channel !== 'lark') continue;
+            if (larkCredentials(bot).robot_union_id === unionId) {
                 return bot;
             }
         }
@@ -66,6 +86,12 @@ export class MultiBotManager {
     // 获取所有机器人配置
     getAllBotConfigs(): BotConfig[] {
         return Array.from(this.botConfigs.values());
+    }
+
+    // 取某 bot 加载阶段装配好的 channel 三件套。T5 消息收发接线会用到；
+    // T4 阶段只保证它在加载期被正确解析+校验+装配（未知 channel 已 fail-closed）。
+    getChannelTriple(botName: string): ChannelTriple | null {
+        return this.channelTriples.get(botName) || null;
     }
 
     // 获取指定初始化类型的机器人
@@ -99,8 +125,12 @@ export class MultiBotManager {
         const personaMap = new Map(personas.map((p) => [p.persona_id, p.display_name]));
 
         for (const bot of bots) {
+            // appId -> displayName 是飞书 app_id 维度的映射；app_id 现在在
+            // credentials JSONB。非 lark bot 没有飞书 app_id 概念，跳过。
+            if (bot.channel !== 'lark') continue;
             if (bot.persona_id && personaMap.has(bot.persona_id)) {
-                this.appIdToDisplayName.set(bot.app_id, personaMap.get(bot.persona_id)!);
+                const appId = larkCredentials(bot).app_id;
+                this.appIdToDisplayName.set(appId, personaMap.get(bot.persona_id)!);
             }
         }
     }

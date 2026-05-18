@@ -4,6 +4,20 @@ import { Pool } from 'pg';
 import { EventForwarder } from './forwarder';
 import { adaptHono } from './lark-adapter';
 
+// lark-proxy 只是飞书 webhook 入口，只认 channel='lark' 的 bot。bot_config
+// 多 channel 化后飞书五件套已迁进 credentials JSONB、旧裸列被删，这里按
+// credentials 解释凭据，非 lark 的记录直接跳过（不是 webhook 入口的事）。
+const LARK_CHANNEL = 'lark';
+
+interface BotConfigRow {
+    bot_name: string;
+    channel: string;
+    credentials: Record<string, unknown> | null;
+    init_type: string;
+    is_active: boolean;
+    is_dev: boolean;
+}
+
 interface BotConfig {
     bot_name: string;
     app_id: string;
@@ -13,6 +27,34 @@ interface BotConfig {
     init_type: string;
     is_active: boolean;
     is_dev: boolean;
+}
+
+// 把一条 lark bot_config 记录的 credentials JSONB 解释成飞书四件套。缺字段
+// 直接抛错而不是静默放过——凭据缺失静默会让飞书鉴权在运行期出诡异错。
+function toLarkBotConfig(row: BotConfigRow): BotConfig {
+    const c = row.credentials;
+    if (typeof c !== 'object' || c === null) {
+        throw new Error(`lark bot "${row.bot_name}" has no credentials JSONB payload`);
+    }
+    const read = (field: string): string => {
+        const v = (c as Record<string, unknown>)[field];
+        if (typeof v !== 'string' || v.length === 0) {
+            throw new Error(
+                `lark bot "${row.bot_name}" missing required credential "${field}"`,
+            );
+        }
+        return v;
+    };
+    return {
+        bot_name: row.bot_name,
+        app_id: read('app_id'),
+        app_secret: read('app_secret'),
+        encrypt_key: read('encrypt_key'),
+        verification_token: read('verification_token'),
+        init_type: row.init_type,
+        is_active: row.is_active,
+        is_dev: row.is_dev,
+    };
 }
 
 type WebSocketClient = {
@@ -74,14 +116,14 @@ export class BotManager {
 
     private async loadBotConfigs(): Promise<BotConfig[]> {
         const isDev = process.env.NODE_ENV !== 'production';
-        const result = await this.pool.query<BotConfig>(
-            'SELECT bot_name, app_id, app_secret, encrypt_key, verification_token, init_type, is_active, is_dev FROM bot_config WHERE is_active = true',
+        const result = await this.pool.query<BotConfigRow>(
+            "SELECT bot_name, channel, credentials, init_type, is_active, is_dev FROM bot_config WHERE is_active = true AND channel = 'lark'",
         );
 
-        return result.rows.filter((bot) => {
-            if (isDev) return true;
-            return !bot.is_dev;
-        });
+        return result.rows
+            .filter((row) => row.channel === LARK_CHANNEL)
+            .filter((row) => (isDev ? true : !row.is_dev))
+            .map((row) => toLarkBotConfig(row));
     }
 
     closeWebSocketClients(): void {

@@ -101,7 +101,10 @@ export class ApplicationManager {
         const allBots = multiBotManager.getAllBotConfigs();
         console.info(`Loaded ${allBots.length} bot configurations:`);
         allBots.forEach((bot) => {
-            console.info(`  - ${bot.bot_name} (${bot.app_id}) [${bot.init_type}]`);
+            const appId = (bot.credentials?.app_id as string | undefined) ?? '-';
+            console.info(
+                `  - ${bot.bot_name} [${bot.channel}] (${appId}) [${bot.init_type}]`,
+            );
         });
     }
 

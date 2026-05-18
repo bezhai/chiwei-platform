@@ -31,13 +31,6 @@ export class BotConfigRepository {
         });
     }
 
-    // 根据app_id获取机器人配置
-    async getBotByAppId(appId: string): Promise<BotConfig | null> {
-        return this.repository.findOne({
-            where: { app_id: appId, is_active: true },
-        });
-    }
-
     // 获取指定初始化类型的机器人
     async getBotsByInitType(initType: 'http' | 'websocket'): Promise<BotConfig[]> {
         return this.repository.find({

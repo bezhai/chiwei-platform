@@ -1,5 +1,6 @@
 import { context } from '@middleware/context';
 import { multiBotManager } from './multi-bot-manager';
+import { larkCredentials } from './lark-credentials';
 
 function getBotConfigInternal() {
     const botName = context.getBotName();
@@ -14,10 +15,12 @@ function getBotConfigInternal() {
     throw new Error(`Bot configuration not found for bot: ${botName}`);
 }
 
+// 签名与返回类型保持不变，调用方零感知。内部从 credentials JSONB 取（旧独立
+// 列 app_id / robot_union_id 已删）；对同一 bot 返回值与改造前完全一致。
 export function getBotAppId(): string {
-    return getBotConfigInternal().app_id;
+    return larkCredentials(getBotConfigInternal()).app_id;
 }
 
 export function getBotUnionId(): string {
-    return getBotConfigInternal().robot_union_id;
+    return larkCredentials(getBotConfigInternal()).robot_union_id;
 }
