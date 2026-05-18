@@ -28,16 +28,16 @@
 
 ```
 飞书消息
-  → lark-proxy-prod  (/webhook/{bot}/event, lane_routing 查询)
-  → lark-server-{lane}  (/api/internal/lark-event, x-lane 注入 context)
+  → channel-proxy-prod  (/webhook/{bot}/event, lane_routing 查询)
+  → channel-server-{lane}  (/api/internal/lark-event, x-lane 注入 context)
   → agent-service-{lane} (POST /chat/sse, LaneRouter 根据 context lane 路由)
   → safety_check_{lane} 队列 → vectorize_{lane} 队列 → recall_{lane} 队列
-  → chat-response-worker → lark-server → 飞书回复
+  → chat-response-worker → channel-server → 飞书回复
 ```
 
-## lark-proxy 自身测试（特殊流程）
+## channel-proxy 自身测试（特殊流程）
 
-lark-proxy 是飞书 webhook 入口，无法通过泳道路由测试自身。**仅 lark-proxy 允许使用临时 Ingress 劫持流量测试，其他服务禁止。**
+channel-proxy 是飞书 webhook 入口，无法通过泳道路由测试自身。**仅 channel-proxy 允许使用临时 Ingress 劫持流量测试，其他服务禁止。**
 
 步骤：
 1. 部署到独立泳道

@@ -30,7 +30,7 @@ func setupGateway(t *testing.T, upstream *httptest.Server) (*Gateway, *registry.
 
 	routes := []route.Route{
 		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080},
-		{Prefix: "/webhook/", Service: "lark-proxy", Port: 3003},
+		{Prefix: "/webhook/", Service: "channel-proxy", Port: 3003},
 	}
 	matcher := route.NewMatcher(routes)
 

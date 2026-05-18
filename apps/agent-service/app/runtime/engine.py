@@ -508,7 +508,7 @@ class Runtime:
           so lane isolation + TTL fallback behave the same as every
           other MQ consumer in the process;
         * declare is idempotent (``durable=True, auto_delete=False,
-          passive=False``) — if lark-server or ``declare_topology``
+          passive=False``) — if channel-server or ``declare_topology``
           already created the queue, re-declare is a no-op;
         * ``prefetch_count=10`` moves the old ``semaphore(10)`` back-
           pressure to the broker; handlers can stay single-task;
@@ -584,7 +584,7 @@ class Runtime:
 
         try:
             # Passive fetch: the queue is owned by whoever publishes to
-            # it (lark-server for ``vectorize``, ``declare_topology`` for
+            # it (channel-server for ``vectorize``, ``declare_topology`` for
             # the static ALL_ROUTES set). Trying to re-declare with our
             # own args would clash on DLX / TTL settings — see
             # ``_build_queue_args`` in ``app/infra/rabbitmq.py``. Mirror
@@ -615,7 +615,7 @@ class Runtime:
                 async for incoming in qit:
                     ctx = extract_context(incoming.headers)
                     # Gap 11 mq-source fallback: external producers
-                    # (e.g. lark-server publishing CHAT_REQUEST) may not
+                    # (e.g. channel-server publishing CHAT_REQUEST) may not
                     # inject trace_id into the message header. Without a
                     # fallback the entire downstream chain runs with
                     # trace_id=None — runtime_inflight rows, langfuse
@@ -646,7 +646,7 @@ class Runtime:
                                     body = _json.loads(incoming.body.decode())
                                     # MQSource adapts external producers whose
                                     # payloads may carry fields meant for other
-                                    # consumers (e.g. lark-server adds 'lane' to
+                                    # consumers (e.g. channel-server adds 'lane' to
                                     # {"message_id"} — we read lane from
                                     # headers). Data's extra='forbid' is a
                                     # deliberate policy on our internal

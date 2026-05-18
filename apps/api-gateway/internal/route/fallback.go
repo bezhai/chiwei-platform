@@ -4,7 +4,7 @@ package route
 func FallbackRoutes() []Route {
 	routes := []Route{
 		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080},
-		{Prefix: "/webhook/", Service: "lark-proxy", Port: 3003},
+		{Prefix: "/webhook/", Service: "channel-proxy", Port: 3003},
 		{Prefix: "/dashboard/api/", Service: "monitor-dashboard", Port: 3002},
 		{Prefix: "/dashboard/", Service: "monitor-dashboard-web", Port: 80},
 	}

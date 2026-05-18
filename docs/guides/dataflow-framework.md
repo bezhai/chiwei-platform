@@ -234,7 +234,7 @@ Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
 ```
 
-> **不在这里**：飞书 webhook 在 lark-proxy(TS) 收，转给 lark-server publish 到 MQ；agent-service 这一侧的入口是 `Source.mq("chat_request")` / `Source.mq("vectorize")` / `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` 等（实际队列清单见 `app/infra/rabbitmq.py::ALL_ROUTES`），不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
+> **不在这里**：飞书 webhook 在 channel-proxy(TS) 收，转给 channel-server publish 到 MQ；agent-service 这一侧的入口是 `Source.mq("chat_request")` / `Source.mq("vectorize")` / `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` 等（实际队列清单见 `app/infra/rabbitmq.py::ALL_ROUTES`），不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 
 用法:
 
@@ -619,7 +619,7 @@ hits = await recall_store.search(embedding=hybrid, limit=10, query_filter=...)
 
 ```python
 from app.capabilities.http import HTTPClient
-client = HTTPClient(service="lark-server")    # 或 service=None + 绝对 URL
+client = HTTPClient(service="channel-server")    # 或 service=None + 绝对 URL
 
 resp = await client.get("/internal/xyz")
 resp = await client.post("/api/foo", json={"x": 1})
@@ -930,7 +930,7 @@ async def vectorize(msg: Message) -> Fragment | None:
 | Pipeline | 入口 Source | wiring 文件 | 主要 @node | Deployment |
 |---|---|---|---|---|
 | **message → vectorize** | `Source.mq("vectorize")` | `wiring/memory.py` | hydrate_message → vectorize → save_fragment | vectorize-worker |
-| **chat 主链路** | `Source.mq("chat_request")` | `wiring/chat.py` | route_chat_node → chat_node (durable) → ChatResponseSegment Sink ← lark-server | agent-service |
+| **chat 主链路** | `Source.mq("chat_request")` | `wiring/chat.py` | route_chat_node → chat_node (durable) → ChatResponseSegment Sink ← channel-server | agent-service |
 | **safety check** | 由 chat_node 内部 emit | `wiring/safety.py` | run_pre_safety / run_post_safety (durable) → Recall Sink | agent-service |
 | **life cron 循环** | `Source.cron("* * * * *")` 等 | `wiring/life_dataflow.py` | MinuteTick / LightDayTick / GlimpseTick / HeavyReviewTick / DailyPlanTick → 各 fan_out → 业务 node | agent-service |
 | **memory debounce** | 由 chat 流程 emit | `wiring/memory_triggers.py` | DriftTrigger / AfterthoughtTrigger（`.debounce()` 合流） → drift_check / afterthought_check | agent-service |

@@ -41,7 +41,7 @@ enabled = dynamic_config.get_bool("feature_x_enabled", default=False)
 count = dynamic_config.get_int("max_retry", default=3)
 ```
 
-### TypeScript（lark-server 等）
+### TypeScript（channel-server 等）
 
 ```typescript
 // src/infrastructure/dynamic-config.ts — 创建一次，全局使用

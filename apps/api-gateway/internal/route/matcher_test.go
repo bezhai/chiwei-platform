@@ -7,7 +7,7 @@ func newTestMatcher() *Matcher {
 		{Prefix: "/dashboard/api/", Service: "monitor-dashboard", Port: 3002, StripPrefix: "/dashboard/api", RewritePrefix: "/dashboard"},
 		{Prefix: "/dashboard/", Service: "monitor-dashboard-web", Port: 80},
 		{Prefix: "/api/paas/", Service: "paas-engine", Port: 8080},
-		{Prefix: "/webhook/", Service: "lark-proxy", Port: 3003},
+		{Prefix: "/webhook/", Service: "channel-proxy", Port: 3003},
 	}
 	sortRoutes(routes)
 	return NewMatcher(routes)
@@ -25,10 +25,10 @@ func TestMatchLongestPrefix(t *testing.T) {
 		{"/dashboard/api/metrics", "monitor-dashboard", true, false},
 		{"/dashboard/index.html", "monitor-dashboard-web", true, false},
 		{"/api/paas/apps/", "paas-engine", true, false},
-		{"/webhook/bot1/event", "lark-proxy", true, false},
+		{"/webhook/bot1/event", "channel-proxy", true, false},
 		{"/unknown/path", "", false, false},
 		{"/dashboard", "monitor-dashboard-web", true, true},
-		{"/webhook", "lark-proxy", true, true},
+		{"/webhook", "channel-proxy", true, true},
 		{"/api/paas", "paas-engine", true, true},
 	}
 

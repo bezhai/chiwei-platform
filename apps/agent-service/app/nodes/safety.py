@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Post-safety 节点入口的"已完成"短路集合（Phase 2 §3.2 / §4.4）。
 # - passed / blocked: agent-service 写的（"blocked" 是迁移期遗留瞬态）
-# - recalled / recall_failed: lark-server recall-worker 写的终态
+# - recalled / recall_failed: channel-server recall-worker 写的终态
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"passed", "blocked", "recalled", "recall_failed"}
 )
@@ -302,7 +302,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     """Audit + 决定是否撤回，单节点完成（Phase 2 §3.2）。
 
     幂等用 ``safety_status`` 短路：
-      - row 不存在 → raise → DLQ（lark-server INSERT 链路问题）
+      - row 不存在 → raise → DLQ（channel-server INSERT 链路问题）
       - 已 ``TERMINAL_STATUSES``（passed/blocked/recalled/recall_failed） → return None
       - pending → 跑 audit；blocked 路径 return Recall（@node 自动 emit -> sink），
         passed 路径写 status="passed"
@@ -313,7 +313,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     if current is None:
         raise RuntimeError(
             f"agent_responses row missing for session_id={req.session_id}; "
-            f"lark-server must INSERT before agent-service emits "
+            f"channel-server must INSERT before agent-service emits "
             f"PostSafetyRequest"
         )
     if current in TERMINAL_STATUSES:

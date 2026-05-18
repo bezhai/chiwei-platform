@@ -1,7 +1,7 @@
 """bot_config 多 channel 化后 tool-service 侧读 bot 凭据的调用方必须跟着改。
 
 tool-service 的 init_lark_clients 原来直接读 bot.app_id / bot.app_secret 裸列建
-Lark SDK client。lark-server 把飞书凭据迁进 credentials JSONB 并删了 app_id /
+Lark SDK client。channel-server 把飞书凭据迁进 credentials JSONB 并删了 app_id /
 app_secret 独立列后，再 SELECT 旧列运行期会 column does not exist。
 
 这里把 "从一条 bot_config 记录解释飞书 app_id/app_secret" 抽成纯函数断言：

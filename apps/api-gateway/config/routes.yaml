@@ -6,12 +6,12 @@ routes:
 
   # Lark 管理 API（泳道绑定等）
   - prefix: /api/lark/
-    service: lark-proxy
+    service: channel-proxy
     port: 3003
 
   # Lark webhook 回调入口
   - prefix: /webhook/
-    service: lark-proxy
+    service: channel-proxy
     port: 3003
 
   # Agent Service（日记/周记调试等）

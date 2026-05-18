@@ -78,7 +78,7 @@ def test_recall_key_is_session_id():
 
 
 def test_recall_lane_optional():
-    """lane 可选（lark-server recall-worker 从 payload.lane 读，必须支持显式 None / str）。"""
+    """lane 可选（channel-server recall-worker 从 payload.lane 读，必须支持显式 None / str）。"""
     r = Recall(
         session_id="s1", chat_id="c1", trigger_message_id="m1",
         reason="banned_word",

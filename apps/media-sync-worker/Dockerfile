@@ -4,8 +4,8 @@ WORKDIR /repo
 
 # 复制 workspace 元数据和 lockfile，匹配 PaaS / Kaniko 的根目录构建模式
 COPY package.json bun.lock bunfig.toml ./
-COPY apps/lark-server/package.json ./apps/lark-server/
-COPY apps/lark-proxy/package.json ./apps/lark-proxy/
+COPY apps/channel-server/package.json ./apps/channel-server/
+COPY apps/channel-proxy/package.json ./apps/channel-proxy/
 COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
 COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/

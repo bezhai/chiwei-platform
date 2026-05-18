@@ -15,7 +15,7 @@ func TestResolveWithLane(t *testing.T) {
 			Services map[string]ServiceInfo `json:"services"`
 		}{
 			Services: map[string]ServiceInfo{
-				"lark-proxy": {Lanes: []string{"dev", "prod"}, Port: 3003},
+				"channel-proxy": {Lanes: []string{"dev", "prod"}, Port: 3003},
 				"paas-engine": {Lanes: []string{"prod"}, Port: 8080},
 			},
 		}
@@ -35,9 +35,9 @@ func TestResolveWithLane(t *testing.T) {
 		wantHost    string
 		wantPort    int
 	}{
-		{"lark-proxy", "dev", 3003, "lark-proxy-dev", 3003},
-		{"lark-proxy", "prod", 3003, "lark-proxy", 3003},
-		{"lark-proxy", "", 3003, "lark-proxy", 3003},
+		{"channel-proxy", "dev", 3003, "channel-proxy-dev", 3003},
+		{"channel-proxy", "prod", 3003, "channel-proxy", 3003},
+		{"channel-proxy", "", 3003, "channel-proxy", 3003},
 		{"paas-engine", "dev", 8080, "paas-engine", 8080}, // dev lane not in registry
 		{"unknown-svc", "dev", 9090, "unknown-svc", 9090}, // unknown service
 	}

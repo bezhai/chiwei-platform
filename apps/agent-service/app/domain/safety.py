@@ -1,8 +1,8 @@
 """Safety Data — Phase 2 dataflow types.
 
 PreSafetyRequest / PreSafetyVerdict 是请求路径内的瞬时控制面数据（transient）；
-PostSafetyRequest 用 adoption mode adopt 已有的 ``agent_responses`` 表（lark-server
-那边 INSERT 的）；Recall 是出 graph 给 lark-server recall-worker 的事件。
+PostSafetyRequest 用 adoption mode adopt 已有的 ``agent_responses`` 表（channel-server
+那边 INSERT 的）；Recall 是出 graph 给 channel-server recall-worker 的事件。
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class PreSafetyVerdict(Data):
 class PostSafetyRequest(Data):
     """Post-safety check 请求；adoption mode adopt agent_responses 表。
 
-    Row 由 lark-server 在 chat 完成时已 INSERT；agent-service 仅作为
+    Row 由 channel-server 在 chat 完成时已 INSERT；agent-service 仅作为
     durable wire 的入口 trigger。session_id 是 agent_responses 的
     unique business key（无 dedup_hash 列），所以业务幂等通过节点入口
     查 safety_status 短路实现。
@@ -57,7 +57,7 @@ class PostSafetyRequest(Data):
 
 
 class Recall(Data):
-    """撤回事件，通过 Sink.mq("recall") 出 graph 给 lark-server recall-worker。
+    """撤回事件，通过 Sink.mq("recall") 出 graph 给 channel-server recall-worker。
 
     payload schema 与旧 ``mq.publish(RECALL, ...)`` 一致；lane 字段
     被 recall-worker.ts 从 payload 直接读取，必须显式带。

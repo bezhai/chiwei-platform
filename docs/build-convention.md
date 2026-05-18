@@ -22,14 +22,14 @@ POST /api/v1/apps/my-standalone-service/builds/
 
 ### 模式二：Monorepo 根目录构建
 
-适用于 Bun workspace 中的 TS 服务（如 lark-server、lark-proxy）或依赖 `packages/` 共享包的服务。所有 TS 服务统一使用此模式。
+适用于 Bun workspace 中的 TS 服务（如 channel-server、channel-proxy）或依赖 `packages/` 共享包的服务。所有 TS 服务统一使用此模式。
 
 - `context_dir` 设为 `.`（repo 根目录）
 - Kaniko 不使用 `--context-sub-path`，上下文为整个仓库
 - **Dockerfile 路径自动推导**：`apps/<app_name>/Dockerfile`（通过 `--dockerfile` 参数指定）
 
 ```
-POST /api/v1/apps/lark-server/builds/
+POST /api/v1/apps/channel-server/builds/
 {
   "git_ref": "main",
   "context_dir": "."

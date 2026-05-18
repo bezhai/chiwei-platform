@@ -8,8 +8,8 @@ Monorepo 平台，包含多个微服务和共享包。部署在 K8s `prod` names
 apps/
   paas-engine/      # PaaS 引擎 (Go) - 管理应用构建和蓝绿部署
   lite-registry/    # 泳道注册表 (Go) - 提供泳道路由数据
-  lark-server/      # 飞书机器人服务 (TypeScript)
-  lark-proxy/       # 飞书事件代理 (TypeScript)
+  channel-server/      # 飞书机器人服务 (TypeScript)
+  channel-proxy/       # 飞书事件代理 (TypeScript)
   agent-service/    # AI Agent 服务 (Python)
   tool-service/     # 工具服务 (Python)
 packages/

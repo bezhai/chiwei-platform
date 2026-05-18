@@ -319,7 +319,7 @@ func TestDeployWorkerSkipsService(t *testing.T) {
 		ID:       "r3",
 		AppName:  "recall-worker",
 		Lane:     "prod",
-		Image:    "harbor.local/inner-bot/lark-server:abc123",
+		Image:    "harbor.local/inner-bot/channel-server:abc123",
 		Replicas: 1,
 	}
 

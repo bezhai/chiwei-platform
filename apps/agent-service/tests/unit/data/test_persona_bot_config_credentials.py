@@ -1,7 +1,7 @@
 """bot_config 多 channel 化后，agent-service 侧读 bot 凭据的调用方必须跟着改。
 
 唯一读 bot_config 凭据列的地方是 ``resolve_mentioned_personas``：原来
-``WHERE app_id = ANY(:mentions)`` 直接吃裸 ``app_id`` 列。lark-server 把飞书
+``WHERE app_id = ANY(:mentions)`` 直接吃裸 ``app_id`` 列。channel-server 把飞书
 凭据迁进 ``credentials`` JSONB 并删了独立列后，这条 SQL 必须改成查
 ``credentials->>'app_id'``，否则 mention -> persona 路由会全军覆没（查不到任何
 bot，@ 赤尾在群里永远不回）。

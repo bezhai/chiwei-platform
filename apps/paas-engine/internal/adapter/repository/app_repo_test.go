@@ -11,8 +11,8 @@ import (
 // TestAppToModel_AllowedLaneClasses tests serialization of AllowedLaneClasses.
 func TestAppToModel_AllowedLaneClasses(t *testing.T) {
 	app := &domain.App{
-		Name:               "lark-proxy-test",
-		ImageRepoName:      "lark-proxy",
+		Name:               "channel-proxy-test",
+		ImageRepoName:      "channel-proxy",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 		CreatedAt:          time.Now(),
@@ -42,8 +42,8 @@ func TestModelToApp_AllowedLaneClasses(t *testing.T) {
 	allowedLaneClassesJSON := `["prod"]`
 
 	model := &AppModel{
-		Name:                  "lark-proxy-test",
-		ImageRepoName:         "lark-proxy",
+		Name:                  "channel-proxy-test",
+		ImageRepoName:         "channel-proxy",
 		Port:                  3003,
 		AllowedLaneClasses:    allowedLaneClassesJSON,
 		CreatedAt:             time.Now(),

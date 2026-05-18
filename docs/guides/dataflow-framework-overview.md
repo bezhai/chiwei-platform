@@ -35,7 +35,7 @@ flowchart LR
     P -.-> LLM
 ```
 
-飞书消息 → lark-proxy → lark-server publish 到 `chat_request` → 进图 → `chat_response` 出图 → chat-response-worker 调飞书 send_message。
+飞书消息 → channel-proxy → channel-server publish 到 `chat_request` → 进图 → `chat_response` 出图 → chat-response-worker 调飞书 send_message。
 
 ## 边的两种：默认 vs durable
 

@@ -25,7 +25,7 @@ __all__ = [
 # 往里塞字符串常量会破坏该契约。需要它的测试按名字显式 import 即可。
 
 # bot_config 多 channel 化后，飞书 app_id 不再是裸列，而是存进 credentials
-# JSONB（lark-server 侧 schema 变更，旧 app_id 列已删）。mention -> persona
+# JSONB（channel-server 侧 schema 变更，旧 app_id 列已删）。mention -> persona
 # 路由必须经由 credentials->>'app_id' 取，否则查不到任何 bot、@ 赤尾永远不回。
 #
 # 必须限定 channel='lark'：QQ 的 credentials 同样有 app_id，跨 channel 命名空间

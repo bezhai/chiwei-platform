@@ -100,7 +100,7 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
     wire(_Req).to(ingest).from_(Source.mq("mqsrc_basic"))
 
     # Declare the queue/binding *before* the engine tries to consume it.
-    # Production: lark-server (publisher) + declare_topology own queue
+    # Production: channel-server (publisher) + declare_topology own queue
     # creation; the engine is a passive consumer. Matching that ordering
     # in the test keeps the engine's ``get_queue`` passive fetch sound.
     route = Route("mqsrc_basic", "mqsrc_basic.rk")
@@ -138,7 +138,7 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
 async def test_mq_source_generates_fallback_trace_id_when_header_missing(
     rabbitmq,
 ):
-    """Gap 11 mq-source fallback: external producers (e.g. lark-server)
+    """Gap 11 mq-source fallback: external producers (e.g. channel-server)
     may publish without a trace_id header. The engine must auto-generate
     ``mq:<queue_base>:<uuid8>`` so downstream nodes / runtime_inflight
     rows / langfuse spans don't lose trace continuity at the boundary."""
@@ -158,7 +158,7 @@ async def test_mq_source_generates_fallback_trace_id_when_header_missing(
 
     rt, task = await _run_runtime()
     try:
-        # NO headers — mirror lark-server's current publish shape.
+        # NO headers — mirror channel-server's current publish shape.
         await mq.publish(route, {"message_id": "x1"})
 
         ok = await _wait_until(lambda: len(received) >= 1, timeout=5.0)

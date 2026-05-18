@@ -15,7 +15,7 @@ func TestClient_Lookup(t *testing.T) {
 				"lanes": []string{"dev", "feat-test"},
 				"port":  8000,
 			},
-			"lark-server": map[string]any{
+			"channel-server": map[string]any{
 				"lanes": []string{"dev"},
 				"port":  3000,
 			},

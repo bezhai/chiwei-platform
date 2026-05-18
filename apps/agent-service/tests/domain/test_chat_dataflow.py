@@ -23,7 +23,7 @@ def test_chat_trigger_optional_fields_default_none():
 
 
 def test_chat_trigger_message_id_can_be_none_for_validation_resilience():
-    """lark-server 偶尔不带 message_id；Data 反序列化要能成功。"""
+    """channel-server 偶尔不带 message_id；Data 反序列化要能成功。"""
     from app.domain.chat_dataflow import ChatTrigger
     t = ChatTrigger()
     assert t.message_id is None

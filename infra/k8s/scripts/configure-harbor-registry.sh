@@ -82,4 +82,4 @@ else
 fi
 echo ""
 echo "=== Configuration complete ==="
-echo "Verify with: sudo crictl pull ${HARBOR_ADDR}/${HARBOR_PROJECT:-inner-bot}/lark-server:<tag>"
+echo "Verify with: sudo crictl pull ${HARBOR_ADDR}/${HARBOR_PROJECT:-inner-bot}/channel-server:<tag>"

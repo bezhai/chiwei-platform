@@ -101,7 +101,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: lark-server
+  name: channel-server
   namespace: monitoring
   labels:
     release: kube-prometheus-stack
@@ -111,7 +111,7 @@ spec:
       - prod
   selector:
     matchLabels:
-      app: lark-server
+      app: channel-server
       lane: prod
   endpoints:
     - port: http
@@ -121,7 +121,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: lark-proxy
+  name: channel-proxy
   namespace: monitoring
   labels:
     release: kube-prometheus-stack
@@ -131,7 +131,7 @@ spec:
       - prod
   selector:
     matchLabels:
-      app: lark-proxy
+      app: channel-proxy
       lane: prod
   endpoints:
     - port: http
