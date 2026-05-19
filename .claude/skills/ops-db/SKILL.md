@@ -14,6 +14,7 @@ user_invocable: true
 
 ```
 /ops-db @chiwei <SQL>            # 查询 chiwei（业务数据）
+/ops-db @chiwei-test <SQL>       # 查询 chiwei-test（COE 隔离离线库）
 /ops-db @paas_engine <SQL>       # 查询 paas_engine（PaaS 元数据）
 /ops-db @chiwei schema           # 查看 chiwei 的表结构
 /ops-db @paas_engine schema      # 查看 paas_engine 的表结构
@@ -47,6 +48,7 @@ user_invocable: true
 |------|------|---------|
 | `paas_engine` | PaaS 元数据：apps、builds、releases、config_bundles 等表 | 操作 PaaS 管理数据 |
 | `chiwei` | 业务数据：messages、chats、users、memory 等表 | 操作赤尾业务数据 |
+| `chiwei-test` | COE 隔离的独立离线 PG 容器集（chiwei_test 库） | 操作 coe-* 泳道测试数据，与线上隔离 |
 
 **提交前**先用 `@数据库 schema` 确认目标库和表结构正确。
 

@@ -125,6 +125,14 @@ func main() {
 			opsDbs["chiwei"] = chiweiDB
 		}
 	}
+	if cfg.ChiweiTestDatabaseURL != "" {
+		chiweiTestDB, err := repository.OpenReadOnlyDB(cfg.ChiweiTestDatabaseURL)
+		if err != nil {
+			slog.Warn("chiwei_test database unavailable for ops queries", "error", err)
+		} else {
+			opsDbs["chiwei_test"] = chiweiTestDB
+		}
+	}
 
 	// Ops 写连接池（用于执行审批通过的 DDL/DML）
 	writeDbs := map[string]*gorm.DB{"paas_engine": db}
@@ -134,6 +142,14 @@ func main() {
 			slog.Warn("chiwei write database unavailable for mutations", "error", err)
 		} else {
 			writeDbs["chiwei"] = chiweiWriteDB
+		}
+	}
+	if cfg.ChiweiTestDatabaseURL != "" {
+		chiweiTestWriteDB, err := repository.OpenWriteDB(cfg.ChiweiTestDatabaseURL)
+		if err != nil {
+			slog.Warn("chiwei_test write database unavailable for mutations", "error", err)
+		} else {
+			writeDbs["chiwei_test"] = chiweiTestWriteDB
 		}
 	}
 

@@ -21,6 +21,8 @@ DB_ALIASES = {
     "paas-engine": "paas_engine",
     "paas_engine": "paas_engine",
     "chiwei": "chiwei",
+    "chiwei-test": "chiwei_test",
+    "chiwei_test": "chiwei_test",
 }
 DEFAULT_DB = "paas_engine"
 
