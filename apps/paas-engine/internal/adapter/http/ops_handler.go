@@ -153,6 +153,16 @@ func (h *OpsHandler) SubmitMutation(w http.ResponseWriter, r *http.Request) {
 	if req.DB == "" {
 		req.DB = "paas_engine"
 	}
+	if _, ok := h.writeDbs[req.DB]; !ok {
+		available := make([]string, 0, len(h.writeDbs))
+		for k := range h.writeDbs {
+			available = append(available, k)
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("unknown database %q, available: %s", req.DB, strings.Join(available, ", ")),
+		})
+		return
+	}
 	if req.SubmittedBy == "" {
 		req.SubmittedBy = "unknown"
 	}

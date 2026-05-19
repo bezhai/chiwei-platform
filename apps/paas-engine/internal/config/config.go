@@ -22,8 +22,9 @@ type Config struct {
 	BuildNoProxy      string
 	APIToken          string
 	LokiURL           string
-	ChiweiDatabaseURL string
-	SidecarImage      string
+	ChiweiDatabaseURL     string
+	ChiweiTestDatabaseURL string
+	SidecarImage          string
 
 	// CI Pipeline
 	CINamespace     string        // K8s namespace for CI test jobs
@@ -53,7 +54,8 @@ func Load() *Config {
 		BuildNoProxy:      os.Getenv("BUILD_NO_PROXY"),
 		APIToken:          os.Getenv("API_TOKEN"),
 		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
-		ChiweiDatabaseURL: os.Getenv("CHIWEI_DATABASE_URL"),
+		ChiweiDatabaseURL:     os.Getenv("CHIWEI_DATABASE_URL"),
+		ChiweiTestDatabaseURL: os.Getenv("CHIWEI_TEST_DATABASE_URL"),
 		SidecarImage:      os.Getenv("SIDECAR_IMAGE"),
 
 		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),

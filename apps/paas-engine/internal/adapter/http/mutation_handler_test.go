@@ -12,6 +12,7 @@ import (
 
 	"github.com/chiwei-platform/paas-engine/internal/adapter/repository"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 // fakeMutationStore 是 MutationStore 的内存实现，用于单元测试。
@@ -80,6 +81,53 @@ func TestSubmitMutation_MissingSQL(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d", rec.Code)
+	}
+}
+
+func TestSubmitMutation_UnknownDB(t *testing.T) {
+	// db 必须按 writeDbs 白名单校验：未知库 fail fast，否则会创建
+	// 审批时才失败的 pending 记录（canonical 权威在服务端 map）。
+	store := newFakeMutationStore()
+	h := NewOpsHandler(nil, map[string]*gorm.DB{"chiwei_test": nil}, store)
+	r := chi.NewRouter()
+	r.Post("/mutations", h.SubmitMutation)
+
+	body, _ := json.Marshal(map[string]string{"db": "chiwei-test", "sql": "ALTER TABLE t ADD c INT"})
+	req := httptest.NewRequest(http.MethodPost, "/mutations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for unknown db, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	// 核心副作用：未知 db 绝不能落成 pending 记录（否则审批时才炸）。
+	if got, _ := store.List(context.Background(), ""); len(got) != 0 {
+		t.Errorf("unknown db must not create a pending record, got %d", len(got))
+	}
+}
+
+func TestSubmitMutation_KnownDB_OK(t *testing.T) {
+	store := newFakeMutationStore()
+	h := NewOpsHandler(nil, map[string]*gorm.DB{"chiwei_test": nil}, store)
+	r := chi.NewRouter()
+	r.Post("/mutations", h.SubmitMutation)
+
+	body, _ := json.Marshal(map[string]string{"db": "chiwei_test", "sql": "ALTER TABLE t ADD c INT"})
+	req := httptest.NewRequest(http.MethodPost, "/mutations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("want 201 for known db, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	got, _ := store.List(context.Background(), "")
+	if len(got) != 1 {
+		t.Fatalf("want 1 persisted mutation, got %d", len(got))
+	}
+	if got[0].DB != "chiwei_test" {
+		t.Errorf("want persisted db=chiwei_test, got %q", got[0].DB)
 	}
 }
 
