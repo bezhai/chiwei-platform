@@ -342,6 +342,10 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const now = dayjs().valueOf();
             await storeMessage({
                 user_id: botName || context.getBotName() || '',
+                // assistant 行的显示名读取端按 role 派生（dashboard='赤尾'、
+                // history='我'），username 列冗余落 bot 名（现成已解析值，
+                // 不新造数据源），保持列非空一致。
+                username: botName || context.getBotName() || undefined,
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
                 message_id: globalAssistantMessageId,

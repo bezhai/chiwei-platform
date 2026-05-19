@@ -13,6 +13,13 @@ export interface ChatMessage {
     user_id: string;
 
     /**
+     * 发送者显示名（冗余落库）。身份全局化后 user_id 是全局
+     * internal_user_id，读取端不再 JOIN lark_user 取名，改读
+     * conversation_messages.username。来源未知时为空。
+     */
+    username?: string;
+
+    /**
      * 转义成markdown的消息内容, 包括图片等
      */
     content: string;

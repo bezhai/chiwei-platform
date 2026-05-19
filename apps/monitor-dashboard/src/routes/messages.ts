@@ -3,6 +3,20 @@ import { AppDataSource, ConversationMessage, LarkUser, LarkGroupChatInfo } from 
 
 const app = new Hono();
 
+// 身份全局化：p2p 会话名取自 conversation_messages.username 冗余列。
+// DISTINCT ON (chat_id) + ORDER BY chat_id, create_time DESC 取每个会话
+// 最新一条 user 消息的名字；最新一行 username 可能为空（拉不到发送者名
+// 时落 null，不写脏占位），必须 username IS NOT NULL 过滤，否则 DISTINCT
+// ON 选中空行会丢掉本来更早可用的名字。
+export const P2P_NAME_SQL = `SELECT DISTINCT ON (cm.chat_id)
+         cm.chat_id,
+         cm.username AS user_name
+       FROM conversation_messages cm
+       WHERE cm.chat_id = ANY($1)
+         AND cm.role = 'user'
+         AND cm.username IS NOT NULL
+       ORDER BY cm.chat_id, cm.create_time DESC`;
+
 const parseNumber = (value: string | undefined, defaultValue: number) => {
   if (!value) {
     return defaultValue;
@@ -29,10 +43,11 @@ app.get('/api/messages', async (c) => {
     .createQueryBuilder('msg')
     .select([
       'msg.*',
-      `CASE WHEN msg.role = 'assistant' THEN '赤尾' ELSE COALESCE(lu.name, msg.user_id) END AS user_name`,
+      // 身份全局化：不再 JOIN lark_user 取名，直接读 conversation_messages
+      // .username 冗余列（无 fallback）。assistant 行显示名仍按 role 派生。
+      `CASE WHEN msg.role = 'assistant' THEN '赤尾' ELSE msg.username END AS user_name`,
       'gc.name AS group_name',
     ])
-    .leftJoin('lark_user', 'lu', 'msg.user_id = lu.union_id')
     .leftJoin('lark_group_chat_info', 'gc', 'msg.chat_id = gc.chat_id');
 
   if (chatId) {
@@ -84,13 +99,7 @@ app.get('/api/messages', async (c) => {
   let p2pNameMap: Record<string, string> = {};
   if (p2pChatIds.length > 0) {
     const p2pRows: { chat_id: string; user_name: string }[] = await AppDataSource.query(
-      `SELECT DISTINCT ON (cm.chat_id)
-         cm.chat_id,
-         COALESCE(lu.name, cm.user_id) AS user_name
-       FROM conversation_messages cm
-       LEFT JOIN lark_user lu ON cm.user_id = lu.union_id
-       WHERE cm.chat_id = ANY($1) AND cm.role = 'user'
-       ORDER BY cm.chat_id, cm.create_time DESC`,
+      P2P_NAME_SQL,
       [p2pChatIds]
     );
     for (const r of p2pRows) {

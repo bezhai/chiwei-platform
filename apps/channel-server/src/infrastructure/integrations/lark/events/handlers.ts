@@ -33,7 +33,8 @@ import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
-import { rabbitmqClient, PROACTIVE_EVAL } from '@integrations/rabbitmq';
+import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST } from '@integrations/rabbitmq';
+import { setNx } from '@cache/redis-client';
 import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
 import { runInboundContractChain } from '@core/channels/inbound-pipeline';
 import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
@@ -181,49 +182,98 @@ export class LarkEventHandlers {
                 ),
             });
 
-            // 识图管线（飞书渠道专属，spec G 保留）：按飞书裸 message_id /
-            // image_key 走飞书 native 管线，与全局身份契约链解耦。
-            if (message.allowDownloadResource()) {
-                const toolClient = laneRouter.createClient('tool-service');
-                for (const imageKey of message.imageKeys()) {
-                    toolClient.post(
-                        '/api/image-pipeline/process',
-                        { message_id: message.messageId, file_key: imageKey },
-                        {
-                            headers: {
-                                Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
-                                'X-App-Name': botName,
-                            },
-                        },
-                    ).catch((err) => {
-                        console.error('Error in upload image:', err);
-                    });
-                }
+            // ---- 5b 入站重排（决策一/二/三）：顺序硬钉 ----
+            //   resolve(契约链, 已完成) → runRules(规则判定 + 各 utility/native
+            //   副作用，persona 主链路**不实际 publish**，只把待发 ChatTrigger
+            //   意图登记到 RuleTerminalState.pendingChatTrigger)
+            //   → storeMessage(无条件执行，不看 terminal kind ——
+            //   非 @bot 群消息复读照常入库，飞书逐场景零变化)
+            //   → 若 terminal 带 pending 意图：取去重锁；拿到锁才 publish。
+            //
+            // 为什么 storeMessage 必须先于 publish：下游 agent-service
+            // chat_node 按 message_id 回查 conversation_messages，读空会短路
+            // emit "未找到相关消息记录"。先存后发是硬依赖。
+            //
+            // runRules 单一终态出口，不向调用方抛错（决策四），所有退出路径
+            // 收敛成 RuleTerminalState。blocked / no_match / handler_error
+            // 等终态 storeMessage 仍无条件执行（与现状一致、行为不变），
+            // 只有 pendingChatTrigger 存在才 publish。
+            const terminal = await runRules(ruleMessage);
+
+            // storeMessage 写全局 internal_*_id（决策二/spec D）。无条件执行
+            // （保住非 @bot 群消息照常入库）。
+            // reply_message_id 是飞书"回复某条消息"锚点，与 root 一样经
+            // IdentityResolver 翻成全局 internal_message_id 再落库 —— 否则
+            // 裸 parentMessageId 与全局 message_id 主键失配，按它做回复链
+            // walk 的读取方（cross_chat.py / _context_messages.py）会断链。
+            // 无 parent 时 chain.globalReplyToId 为 undefined，保持原"空就空"
+            // 语义，不凭空造 id。
+            //
+            // fail-loud（5b 新增语义）：storeMessage 失败 → 记可查错误日志
+            // 并 return，**绝不 publish**（否则下游回查读空走"未找到消息
+            // 记录"短路，等于发了个注定失败的请求）。
+            try {
+                await storeMessage({
+                    user_id: chain.globalUserId,
+                    // 发送者显示名冗余落库。来源 = message.senderInfo
+                    // （MessageBuilder.buildMetadataFromEvent 已按 union_id
+                    // 拉过的 LarkUser 行），不新造数据源。拉不到则留空，
+                    // 读取端按空处理（决策：不写脏占位）。
+                    username: message.senderInfo?.name,
+                    content: message.toStorageFormat(),
+                    role: 'user',
+                    message_id: chain.globalMessageId,
+                    chat_id: chain.globalChatId,
+                    chat_type: message.isP2P() ? 'p2p' : 'group',
+                    create_time: message.createTime ?? '0',
+                    root_message_id: chain.globalRootId ?? chain.globalMessageId,
+                    reply_message_id: chain.globalReplyToId,
+                    message_type: message.messageType,
+                });
+            } catch (storeErr) {
+                console.error(
+                    `[inbound] storeMessage failed (fail-loud, ChatTrigger ` +
+                        `NOT published): message=${chain.globalMessageId} ` +
+                        `chat=${chain.globalChatId} ` +
+                        `detail=${(storeErr as Error).message}`,
+                );
+                return;
             }
 
-            // storeMessage 写全局 internal_*_id（决策二/spec D）。
-            // reply_message_id 是飞书"回复某条消息"锚点，5c 读取方/快照范围，
-            // 本步保持原值不动，不静默猜。runRules 的 persona 主链路
-            // makeTextReply 已直接消费 RuleMessage 上的全局 ID（reply.ts）。
-            await storeMessage({
-                user_id: chain.globalUserId,
-                content: message.toStorageFormat(),
-                role: 'user',
-                message_id: chain.globalMessageId,
-                chat_id: chain.globalChatId,
-                chat_type: message.isP2P() ? 'p2p' : 'group',
-                create_time: message.createTime ?? '0',
-                root_message_id: chain.globalRootId ?? chain.globalMessageId,
-                reply_message_id: message.parentMessageId,
-                message_type: message.messageType,
-            });
-
-            // runRules：平台无关统一引擎，单一终态出口。前置总闸 respond
-            // 仅 gate persona 主链路；飞书 native 复读用 NeedNotRobotMention，
-            // 非 @bot 群消息必须照常进 runRules（否则飞书复读回归——违反
-            // "飞书逐场景零变化"硬约束）。故无论 respond 与否都进 runRules，
-            // persona 链路由 NeedRobotMention 谓词自行 gate（与现状等价）。
-            await runRules(ruleMessage);
+            // storeMessage 已成功。若 runRules 登记了待发 ChatTrigger 意图
+            // （仅 persona 文本主链路命中时），现在才取去重锁、落 pending
+            // 行、发 MQ。三者紧邻（决策二 / 必改2）：多 bot 同群时同一全局
+            // message_id 只有第一个拿到锁的 bot 落 agent_responses pending
+            // 行并真正发，其余静默跳过、不写孤儿 pending 行；锁后移避免拿
+            // 锁后 storeMessage 失败导致锁空占 60s。
+            if (terminal.pendingChatTrigger) {
+                const { payload, lane, dedupeKey, savePending } =
+                    terminal.pendingChatTrigger;
+                const lock = await setNx(dedupeKey, '1', 60);
+                if (lock === null) {
+                    console.info(
+                        `[inbound] duplicate ChatTrigger skipped (lock held by ` +
+                            `another bot): message=${chain.globalMessageId}`,
+                    );
+                    return;
+                }
+                // 抢到锁才落 agent_responses pending 行（必改2）：未抢锁的
+                // bot 已在上面 return，不会到这里 → 不留永不完成的孤儿行。
+                await savePending();
+                await rabbitmqClient.publish(
+                    CHAT_REQUEST,
+                    payload as unknown as Record<string, unknown>,
+                    undefined,
+                    undefined,
+                    lane,
+                );
+                console.info(
+                    `[inbound] Published chat.request: ` +
+                        `session_id=${payload.session_id}, ` +
+                        `message=${chain.globalMessageId}, ` +
+                        `lane=${lane || 'prod'}`,
+                );
+            }
         } catch (error) {
             console.error(
                 'Error handling message receive:',

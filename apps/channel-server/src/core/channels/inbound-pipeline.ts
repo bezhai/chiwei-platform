@@ -54,6 +54,9 @@ export type InboundContractChainResult =
           globalChatId: string;
           globalMessageId: string;
           globalRootId: string | undefined;
+          // 全局化的"回复某条消息"锚点（飞书 parentMessageId 经 resolve）。
+          // 无 parent 时 undefined —— 不凭空造 id（与 globalRootId 同语义）。
+          globalReplyToId: string | undefined;
           // 原始解析出的平台无关消息（供调用方派生 RuleMessage）。
           inbound: InboundMessage;
       }
@@ -109,6 +112,19 @@ export async function runInboundContractChain(
                 rootChannelMsgId,
             );
         }
+        // "回复某条消息"锚点同 root 一样翻全局 id：未 resolve 的飞书裸
+        // parentMessageId 落库会让按全局 message_id 主键关联的读取方
+        // （cross_chat.py / _context_messages.py 的回复链 walk）失配。
+        // 无 parent 则 undefined —— 不凭空造 id（与现状语义一致）。
+        let globalReplyToId: string | undefined;
+        const replyToChannelMsgId = msg.thread_ref?.replyToChannelMessageId;
+        if (replyToChannelMsgId) {
+            globalReplyToId = await input.resolver.resolve(
+                'message',
+                msg.channel,
+                replyToChannelMsgId,
+            );
+        }
 
         return {
             ok: true,
@@ -117,6 +133,7 @@ export async function runInboundContractChain(
             globalChatId,
             globalMessageId,
             globalRootId,
+            globalReplyToId,
             inbound: msg,
         };
     } catch (e) {

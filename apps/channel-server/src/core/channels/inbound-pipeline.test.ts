@@ -142,6 +142,71 @@ describe('runInboundContractChain pinned order + fail-loud', () => {
         if (!res.ok) expect(res.reason).toBe('contract_chain_error');
     });
 
+    it('replyToChannelMessageId present -> resolved into globalReplyToId (loop closure: stored reply_message_id must be global, not raw parentMessageId)', async () => {
+        const resolver = new InMemoryIdentityResolver();
+        const msg = inbound('direct');
+        msg.thread_ref = {
+            selfChannelMessageId: 'lm1',
+            replyToChannelMessageId: 'lm_parent_raw',
+            inThread: true,
+        };
+        const res = await runInboundContractChain({
+            params: {},
+            parse: () => msg,
+            decide: policy.decide,
+            botIdentity: 'on_bot',
+            resolver,
+            logSkip: () => {},
+        });
+        expect(res.ok).toBe(true);
+        if (res.ok) {
+            // 裸 parentMessageId 必须被 resolve 成全局 internal id，
+            // 不能把飞书裸 id 直接当 reply_message_id 落库（否则
+            // cross_chat.py / _context_messages.py 按全局 PK 关联会失配）。
+            expect(res.globalReplyToId).toBeTruthy();
+            expect(res.globalReplyToId).not.toBe('lm_parent_raw');
+            // 同一裸 id 再次出现命中既有映射（幂等），返回同一全局 id。
+            const again = await resolver.resolve('message', 'lark', 'lm_parent_raw');
+            expect(res.globalReplyToId).toBe(again);
+        }
+    });
+
+    it('no replyToChannelMessageId -> globalReplyToId stays undefined (never fabricate an id when there is no parent)', async () => {
+        const resolver = new InMemoryIdentityResolver();
+        const msg = inbound('direct');
+        msg.thread_ref = { selfChannelMessageId: 'lm1', inThread: true };
+        const res = await runInboundContractChain({
+            params: {},
+            parse: () => msg,
+            decide: policy.decide,
+            botIdentity: 'on_bot',
+            resolver,
+            logSkip: () => {},
+        });
+        expect(res.ok).toBe(true);
+        if (res.ok) {
+            expect(res.globalReplyToId).toBeUndefined();
+        }
+    });
+
+    it('thread_ref=null -> globalReplyToId undefined (no reply semantics channel)', async () => {
+        const resolver = new InMemoryIdentityResolver();
+        const msg = inbound('direct');
+        msg.thread_ref = null;
+        const res = await runInboundContractChain({
+            params: {},
+            parse: () => msg,
+            decide: policy.decide,
+            botIdentity: 'on_bot',
+            resolver,
+            logSkip: () => {},
+        });
+        expect(res.ok).toBe(true);
+        if (res.ok) {
+            expect(res.globalReplyToId).toBeUndefined();
+        }
+    });
+
     it('group without mention -> respond=false but still resolves global ids (复读 path needs message in runRules; persona path gated separately)', async () => {
         let skipReason = '';
         const res = await runInboundContractChain({

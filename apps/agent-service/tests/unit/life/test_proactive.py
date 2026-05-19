@@ -184,3 +184,122 @@ async def test_submit_proactive_chat_ignores_target_from_other_chat():
     trigger = next((d for d in captured if isinstance(d, ChatTrigger)), None)
     assert trigger is not None, f"no ChatTrigger in captured: {captured}"
     assert trigger.root_id is None
+
+
+# ---------------------------------------------------------------------------
+# T5-5c: 全局 ID 下 proactive 目标解析契约
+#
+# 身份全局化后 target_message_id / chat_id 是全局 internal_*_id（ULID =
+# Crockford base32，永远不会是纯数字）。_resolve_target_message 的
+# .isdigit() 分支本意是「DB 自增 row id vs message_id」，与「飞书裸 ID vs
+# 全局 ID」正交：全局 ULID 永远走 find_message_by_id 直查，绝不被误判进
+# resolve_message_id_by_row_id 行号反查路径。跨会话拒绝按全局 chat_id 比较。
+# 本测试钉死这两条，证明 proactive 读取路径在全局 ID 下无残留飞书裸 ID 假设。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_proactive_global_ulid_target_skips_row_id_branch():
+    """全局 ULID message_id 直查 find_message_by_id，不走 row-id 反查。"""
+    from app.domain.chat_dataflow import ChatTrigger
+    from app.life.proactive import submit_proactive_chat
+
+    global_msg_id = "01J8XGLOBALMSGID00000000AB"
+    global_chat_id = "01J8XGLOBALCHATID0000000000"
+    global_root_id = "01J8XGLOBALROOTID0000000000"
+    target = SimpleNamespace(
+        message_id=global_msg_id,
+        root_message_id=global_root_id,
+        chat_id=global_chat_id,
+    )
+    fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
+
+    with (
+        patch(f"{MODULE}.tx", _fake_tx),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
+        patch(
+            "app.data.queries.resolve_message_id_by_row_id",
+            AsyncMock(return_value="SHOULD_NOT_BE_USED"),
+        ) as mock_resolve_row,
+        patch(
+            "app.data.queries.find_message_by_id",
+            AsyncMock(return_value=target),
+        ) as mock_find_by_id,
+        patch(
+            "app.data.queries.resolve_bot_name_for_persona",
+            AsyncMock(return_value="akao"),
+        ),
+        patch(f"{MODULE}.time.time", return_value=1234.567),
+        patch(f"{MODULE}.uuid.uuid4", return_value="session-ulid"),
+        patch(f"{MODULE}.emit_tx", fake_emit),
+        patch("app.infra.rabbitmq.current_lane", return_value="prod"),
+    ):
+        await submit_proactive_chat(
+            chat_id=global_chat_id,
+            persona_id="akao-001",
+            target_message_id=global_msg_id,
+            stimulus="想接一句",
+        )
+
+    # 全局 ULID 非纯数字 → 绝不走 row-id 反查分支
+    mock_resolve_row.assert_not_awaited()
+    mock_find_by_id.assert_awaited_once_with(global_msg_id)
+
+    assert len(inserted) == 1
+    added = inserted[0]
+    assert added.root_message_id == global_root_id
+    assert added.reply_message_id == global_msg_id
+
+    trigger = next((d for d in captured if isinstance(d, ChatTrigger)), None)
+    assert trigger is not None
+    assert trigger.root_id == global_msg_id
+    assert trigger.chat_id == global_chat_id
+
+
+@pytest.mark.asyncio
+async def test_submit_proactive_cross_chat_rejected_by_global_chat_id():
+    """跨会话拒绝按全局 internal_chat_id 比较，不残留飞书裸 chat_id 假设。"""
+    from app.domain.chat_dataflow import ChatTrigger
+    from app.life.proactive import submit_proactive_chat
+
+    # 目标消息属于另一个全局会话
+    target = SimpleNamespace(
+        message_id="01J8XOTHERMSG0000000000000",
+        root_message_id="01J8XOTHERROOT000000000000",
+        chat_id="01J8XOTHERCHAT000000000000",
+    )
+    fake_emit, captured = _make_emit_tx_mock()
+    fake_insert, inserted = _make_insert_mock()
+
+    with (
+        patch(f"{MODULE}.tx", _fake_tx),
+        patch("app.data.queries.insert_proactive_message", fake_insert),
+        patch(
+            "app.data.queries.find_message_by_id",
+            AsyncMock(return_value=target),
+        ),
+        patch(
+            "app.data.queries.resolve_bot_name_for_persona",
+            AsyncMock(return_value="akao"),
+        ),
+        patch(f"{MODULE}.time.time", return_value=1234.567),
+        patch(f"{MODULE}.uuid.uuid4", return_value="session-xchat"),
+        patch(f"{MODULE}.emit_tx", fake_emit),
+        patch("app.infra.rabbitmq.current_lane", return_value="prod"),
+    ):
+        await submit_proactive_chat(
+            chat_id="01J8XCURRENTCHAT0000000000",
+            persona_id="akao-001",
+            target_message_id="01J8XOTHERMSG0000000000000",
+            stimulus="想接一句",
+        )
+
+    # 全局 chat_id 不一致 → 目标被忽略，root_id 落 None
+    assert len(inserted) == 1
+    added = inserted[0]
+    assert added.root_message_id == "proactive_1234567"
+    assert added.reply_message_id is None
+    trigger = next((d for d in captured if isinstance(d, ChatTrigger)), None)
+    assert trigger is not None
+    assert trigger.root_id is None

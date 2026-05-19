@@ -83,7 +83,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
     end_ts = int(now.timestamp() * 1000)
 
     from app.chat.content_parser import parse_content
-    from app.data.queries import find_messages_in_range, find_username
+    from app.data.queries import find_messages_in_range
 
     async with tx():
         messages = await find_messages_in_range(chat_id, start_ts, end_ts)
@@ -98,8 +98,10 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
             if msg.role == "assistant":
                 speaker = "我"
             else:
-                name = await find_username(msg.user_id)
-                speaker = name or "?"
+                # 身份全局化：直接读这条消息行自身的 username 冗余列
+                # （行级本意 = 发这条消息时的发送者名），不再按全局
+                # user_id 调 find_username 查该 user 最近非空名。
+                speaker = msg.username or "?"
             rendered = parse_content(msg.content).render()
             if rendered and rendered.strip():
                 lines.append(f"[{time_str}] {speaker}: {rendered[:150]}")
@@ -210,13 +212,21 @@ async def search_group_history(
     anchor_set = set(anchor_message_ids)
     lines = [f"找到 {len(anchor_set)} 条相关消息及其上下文：\n"]
     prev_ts = None
-    for msg, user in rows:
+    for msg, username in rows:
         if prev_ts and (msg.create_time - prev_ts) > TIME_GAP_THRESHOLD_MS:
             lines.append("\n--- 时间间隔 ---\n")
         time_str = _format_timestamp(msg.create_time)
         content = _truncate(parse_content(msg.content).render())
         marker = "→ " if msg.message_id in anchor_set else "  "
-        lines.append(f"{marker}[{time_str}] {user.name}: {content}")
+        # assistant 行 username 列本就为空（只 user 行落名），不能直接
+        # username or '?'（会全显 '?'）。按 role 派生说话人，与本文件
+        # check_chat_history 的 assistant 显示风格 '我' 一致；user 行读
+        # username 冗余列。
+        if msg.role == "assistant":
+            speaker = "我"
+        else:
+            speaker = username or "?"
+        lines.append(f"{marker}[{time_str}] {speaker}: {content}")
         prev_ts = msg.create_time
 
     return "\n".join(lines)

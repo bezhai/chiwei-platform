@@ -121,10 +121,20 @@ async def find_messages_in_range(
 
 
 async def find_username(user_id: str) -> str | None:
-    """Look up display name from lark_user by union_id."""
+    """Look up sender display name for a (global) user_id.
+
+    身份全局化后 ``user_id`` 是全局 internal_user_id，不再能 JOIN
+    ``lark_user.union_id``。显示名作为冗余列随消息写入
+    ``conversation_messages.username``，这里取该 user 最近一条消息上
+    的 username（无 lark_user JOIN、无 COALESCE fallback）。
+    """
     async with auto_tx():
         result = await current_session().execute(
-            select(LarkUser.name).where(LarkUser.union_id == user_id)
+            select(ConversationMessage.username)
+            .where(ConversationMessage.user_id == user_id)
+            .where(ConversationMessage.username.is_not(None))
+            .order_by(ConversationMessage.create_time.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
@@ -189,10 +199,13 @@ async def find_context_messages_for_anchors(
     anchor_timestamps: list[int],
     anchor_root_ids: set[str],
     context_window_ms: int = 300_000,
-) -> list[tuple[ConversationMessage, LarkUser]]:
+) -> list[tuple[ConversationMessage, str | None]]:
     """Find messages surrounding anchor points (for search_group_history).
 
-    Returns list of (ConversationMessage, LarkUser) tuples.
+    身份全局化后不再 JOIN lark_user 取名，发送者显示名直接读
+    ``conversation_messages.username`` 冗余列。
+
+    Returns list of ``(ConversationMessage, username | None)`` tuples.
     """
     time_conditions = [
         ConversationMessage.create_time.between(
@@ -211,8 +224,7 @@ async def find_context_messages_for_anchors(
         )
 
     stmt = (
-        select(ConversationMessage, LarkUser)
-        .join(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
+        select(ConversationMessage, ConversationMessage.username)
         .where(
             ConversationMessage.chat_id == chat_id,
             or_(*or_conditions),
@@ -221,7 +233,7 @@ async def find_context_messages_for_anchors(
     )
     async with auto_tx():
         result = await current_session().execute(stmt)
-        return list(result.all())
+        return [(row[0], row[1]) for row in result.all()]
 
 
 async def find_group_members(
@@ -339,8 +351,10 @@ async def find_messages_with_user_chat_persona_by_root(
     """Quick-search root chain query.
 
     Fetch all messages sharing ``root_message_id`` with create_time
-    <= ``until_create_time``, joined with ``LarkUser.name``,
-    ``LarkGroupChatInfo.name`` and the ``agent_responses.persona_id``
+    <= ``until_create_time``, with sender display name read from the
+    ``conversation_messages.username`` redundant column (身份全局化后
+    ``user_id`` 是全局 internal_user_id，不再 JOIN lark_user.union_id),
+    plus ``LarkGroupChatInfo.name`` and the ``agent_responses.persona_id``
     via response_id. Ordered by create_time ascending.
 
     Returns ``(message, username, chat_name, persona_id)`` tuples.
@@ -349,11 +363,10 @@ async def find_messages_with_user_chat_persona_by_root(
     stmt = (
         select(
             ConversationMessage,
-            LarkUser.name.label("username"),
+            ConversationMessage.username.label("username"),
             LarkGroupChatInfo.name.label("chat_name"),
             ar.c.ar_persona_id.label("persona_id"),
         )
-        .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
         .outerjoin(
             LarkGroupChatInfo,
             ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,
@@ -381,8 +394,10 @@ async def find_messages_with_user_chat_persona_in_chat(
 
     Fetch messages in *chat_id* outside of *exclude_root_message_id*'s
     chain, within ``[after_create_time, before_create_time)``, excluding
-    *exclude_user_id*. Joined with user/chat/agent_responses like the
-    root query. Ordered by create_time descending, capped at *limit*.
+    *exclude_user_id*. Sender display name read from the
+    ``conversation_messages.username`` redundant column (身份全局化后
+    不再 JOIN lark_user.union_id), joined with chat/agent_responses like
+    the root query. Ordered by create_time descending, capped at *limit*.
 
     Returns ``(message, username, chat_name, persona_id)`` tuples in
     the same shape as ``find_messages_with_user_chat_persona_by_root``.
@@ -391,11 +406,10 @@ async def find_messages_with_user_chat_persona_in_chat(
     stmt = (
         select(
             ConversationMessage,
-            LarkUser.name.label("username"),
+            ConversationMessage.username.label("username"),
             LarkGroupChatInfo.name.label("chat_name"),
             ar.c.ar_persona_id.label("persona_id"),
         )
-        .outerjoin(LarkUser, ConversationMessage.user_id == LarkUser.union_id)
         .outerjoin(
             LarkGroupChatInfo,
             ConversationMessage.chat_id == LarkGroupChatInfo.chat_id,

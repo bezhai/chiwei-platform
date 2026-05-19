@@ -22,6 +22,7 @@ import { sendBalance } from './admin/balance';
 import { context } from '@middleware/context';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { requireLarkContext, type RuleMessage } from './rule-message';
+import type { ChatRequestPayload } from 'core/services/ai/reply';
 
 const TOOL_BOT_APPLY_URL = process.env.TOOL_BOT_APPLY_URL || '';
 
@@ -37,6 +38,36 @@ export type RuleTerminalKind =
     | 'rule_error' // 规则执行阶段本身抛异常：notBlocked 调用 / sync 谓词 / async rule
     | 'no_match'; // 走完所有规则无任何匹配（含被 channel/botRole 过滤跳过）
 
+// 待发 ChatTrigger 意图（决策一）。persona 文本主链路 handler 在 runRules
+// 阶段不实际 publish —— 只把"该发什么"登记下来，由接线点 handlers.ts 在
+// storeMessage 成功之后再发 MQ（保证下游 find_message_content 先存后查、
+// 不读空走"未找到消息记录"短路）。dedupeKey 是多 bot 去重锁键（全局
+// internal_message_id 口径，跨 channel 唯一），锁的获取也后移到 publish
+// 紧邻处（避免拿锁后 storeMessage 失败导致锁空占 60s）。
+//
+// savePending（必改2）：agent_responses pending 行的落库副作用，由
+// makeTextReply 构造为闭包（AgentResponse 仓储逻辑仍只在 reply.ts 一处），
+// 但**不在 runRules 阶段执行**。接线点 handlers.ts 抢到去重锁后才调用它，
+// 与 publish 原子相邻 —— 多 bot 同群处理同一全局 message_id 时只有抢锁的
+// bot 写 pending 行，未抢锁 bot 不留永不完成的孤儿 pending 行（重排前
+// setNx 在 pending save 之前、未抢锁者直接 return 不 save，故这是本次
+// 重排须保持的语义）。
+export interface PendingChatTrigger {
+    payload: ChatRequestPayload;
+    lane: string | undefined;
+    dedupeKey: string;
+    savePending: () => Promise<void>;
+}
+
+// handler 可选第二参（决策一）。persona handler 用 registerPendingChatTrigger
+// 把待发意图回传给引擎；引擎把它折进唯一终态。其余 handler 忽略此参
+// （签名向后兼容，无需改动）。这不是模块级可变 outbox —— 每次
+// runRulesWith 调用一个本地 capture，并发消息互不污染（与 lastResponded
+// 同构、与决策四单一终态出口同构）。
+export interface RuleHandlerContext {
+    registerPendingChatTrigger(p: PendingChatTrigger): void;
+}
+
 export interface RuleTerminalState {
     kind: RuleTerminalKind;
     channel: string;
@@ -48,6 +79,10 @@ export interface RuleTerminalState {
     // 走到 no_match 之前，被 channel 过滤 / botRole 不匹配 / 规则不通过而跳过
     // 的规则清单。每一条跳过都在此留痕——禁止任何静默跳过不留记录。
     skipped: string[];
+    // 命中 persona 文本主链路时，handler 登记的待发 ChatTrigger 意图。
+    // 仅 responded 终态且 handler 主动登记才有；blocked / no_match /
+    // handler_error / rule_error 一律为 undefined（绝不凭空造发送意图）。
+    pendingChatTrigger?: PendingChatTrigger;
 }
 
 // runRules 的可注入内核：依赖（chatRules / botRole / NotBlocked）全部从参数
@@ -84,6 +119,13 @@ export async function runRulesWith(
     // fallthrough 路径下"最后一次成功响应"的本地暂存（单一终态：循环结束
     // 统一收敛）。本地变量而非模块级——并发消息互不污染。
     let lastResponded: RuleTerminalState | undefined;
+    // persona handler 登记的待发 ChatTrigger 意图（决策一 / 建议1）。
+    // 每个 handler 执行作用域内单独捕获：进入命中 handler 前新建一个
+    // 本次专属 capture + 本次专属 ctx，handler 只能写自己这次的 capture。
+    // 终态只绑定「产生该终态的那个 handler」本次注册的 pending —— 不再
+    // 用整个 runRulesWith 调用共享的单变量、不再有"循环结束用最新
+    // pending 回填"的防御写法（避免靠后 handler 没注册时把前一个
+    // handler 的 pending 错绑过去）。并发安全与单一终态出口语义不变。
 
     // 退出路径 1：黑名单挡掉 —— 终态 blocked。
     // 退出路径 1b：黑名单检查本身抛错/reject —— 收敛终态 rule_error，不裸逃。
@@ -188,10 +230,21 @@ export async function runRulesWith(
             continue;
         }
 
-        // 命中：执行 handler。退出路径 5（handler 抛异常）/ 6（handler 成功）。
+        // 命中：执行 handler。建议1：本次 handler 专属 capture + 专属
+        // ctx，handler 只能写自己这次的 pending，不污染、不被污染。
+        // 退出路径 5（handler 抛异常）/ 6（handler 成功）。
+        let scopedPending: PendingChatTrigger | undefined;
+        const scopedCtx: RuleHandlerContext = {
+            registerPendingChatTrigger: (p) => {
+                scopedPending = p;
+            },
+        };
         try {
-            await handler(message);
+            await handler(message, scopedCtx);
         } catch (e) {
+            // handler 抛错 = 没成功响应，绝不带回任何待发意图（即便
+            // 抛错前可能登记过——失败路径不发 MQ；scopedPending 随本次
+            // 作用域丢弃）。
             return {
                 ...base,
                 kind: 'handler_error',
@@ -202,15 +255,30 @@ export async function runRulesWith(
         }
 
         if (!fallthrough) {
-            return { ...base, kind: 'responded', matchedRule: label, skipped };
+            return {
+                ...base,
+                kind: 'responded',
+                matchedRule: label,
+                skipped,
+                pendingChatTrigger: scopedPending,
+            };
         }
         // fallthrough=true：handler 已执行（已响应），继续往下试更多规则。
-        // 终态记最后一次成功响应——循环结束后统一收敛（见下方 lastResponded）。
-        lastResponded = { ...base, kind: 'responded', matchedRule: label, skipped };
+        // 终态记最后一次成功响应（连同它本次注册的 pending 一起快照）——
+        // 循环结束后直接用 lastResponded，不再回填任何"最新 pending"。
+        lastResponded = {
+            ...base,
+            kind: 'responded',
+            matchedRule: label,
+            skipped,
+            pendingChatTrigger: scopedPending,
+        };
     }
 
     // 退出路径 7：循环走完。要么有过 fallthrough 响应（responded），要么
     // 无任何规则匹配（no_match）。两者都是明确可查终态，绝无静默 return。
+    // 建议1：直接用 lastResponded（它已快照「最后一个 fallthrough 响应
+    // handler」本次注册的 pending），不再回填任何"最新 pending"。
     if (lastResponded) return lastResponded;
     return { ...base, kind: 'no_match', skipped };
 }

@@ -1,6 +1,7 @@
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import { UserBlacklistRepository } from '@infrastructure/dal/repositories/repositories';
 import { type RuleMessage, requireLarkContext } from './rule-message';
+import type { RuleHandlerContext } from './engine';
 
 // 规则/处理器一律消费平台无关 RuleMessage（决策五）。平台无关规则
 // （EqualText/RegexpMatch/OnlyGroup/文本限定/NeedRobotMention 等）直接读
@@ -12,7 +13,13 @@ type Rule = (message: RuleMessage) => boolean;
 
 type AsyncRule = (message: RuleMessage) => Promise<boolean>;
 
-type Handler = (message: RuleMessage) => Promise<void>;
+// handler 第二参 ctx 可选（决策一）：persona 文本主链路用
+// ctx.registerPendingChatTrigger 把待发 ChatTrigger 意图回传引擎，由接线点
+// 在 storeMessage 成功后再发 MQ。其余 handler 不声明此参即可（向后兼容）。
+type Handler = (
+    message: RuleMessage,
+    ctx?: RuleHandlerContext,
+) => Promise<void>;
 
 /** 规则分类：utility=工具功能, persona=拟人聊天 */
 export type RuleCategory = 'utility' | 'persona';
