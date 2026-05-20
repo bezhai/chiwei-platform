@@ -25,7 +25,7 @@ const AppDataSource = new DataSource({
     username: process.env.POSTGRES_USER!,
     password: process.env.POSTGRES_PASSWORD!,
     database: process.env.POSTGRES_DB!,
-    synchronize: process.env.SYNCHRONIZE_DB === 'true', // 是否自动同步数据库结构,
+    synchronize: false, // 禁止 ORM 在启动时 sync schema; DDL 走 /ops-db submit 或 migration
     logging: ['error', 'schema', 'warn'], // 是否启用日志
     entities: [
         LarkEmoji,

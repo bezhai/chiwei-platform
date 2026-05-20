@@ -1,4 +1,4 @@
-import { Entity, PrimaryColumn, Column, Index, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryColumn, Column, Unique, CreateDateColumn } from 'typeorm';
 
 // 三类身份映射表（T5）。结构完全相同：(channel, channel_*_id) 复合唯一，
 // internal_*_id 全局唯一。三张表对应 IdentityKind 的三个独立命名空间
@@ -8,9 +8,7 @@ import { Entity, PrimaryColumn, Column, Index, CreateDateColumn } from 'typeorm'
 // internal_*_id 用 ULID 字符串（见 db-identity-resolver.ts 选型说明）。
 
 @Entity('identity_user')
-@Index('uq_identity_user_channel', ['channel', 'channel_user_id'], {
-    unique: true,
-})
+@Unique('uq_identity_user_channel', ['channel', 'channel_user_id'])
 export class IdentityUser {
     @PrimaryColumn({ type: 'varchar', length: 26 })
     internal_user_id!: string;
@@ -26,9 +24,7 @@ export class IdentityUser {
 }
 
 @Entity('identity_chat')
-@Index('uq_identity_chat_channel', ['channel', 'channel_chat_id'], {
-    unique: true,
-})
+@Unique('uq_identity_chat_channel', ['channel', 'channel_chat_id'])
 export class IdentityChat {
     @PrimaryColumn({ type: 'varchar', length: 26 })
     internal_chat_id!: string;
@@ -44,9 +40,7 @@ export class IdentityChat {
 }
 
 @Entity('identity_message')
-@Index('uq_identity_message_channel', ['channel', 'channel_message_id'], {
-    unique: true,
-})
+@Unique('uq_identity_message_channel', ['channel', 'channel_message_id'])
 export class IdentityMessage {
     @PrimaryColumn({ type: 'varchar', length: 26 })
     internal_message_id!: string;
