@@ -270,16 +270,20 @@ s = sys.stdin.read()
 # normal > / < guard and continue to block.
 #
 # Regex breakdown:
-#   (?<![\w&])  — left boundary: previous char is NOT a word char or `&` (so
-#                 `&>` and `&>>` do not match; `1>&2` does because left of `1`
-#                 is space/start).
+#   (?<!&)      — left boundary: previous char is NOT `&` (so `&>` and `&>>`
+#                 do not match — bash treats those as the file-write sugar
+#                 `&>file`/`&>>file`). Word chars ARE allowed left (`var1>&2`
+#                 / adjacent fd-copies `2>&1>&2` both legitimately match the
+#                 trailing `>&2`). Codex T3 follow-up: the prior `\w` exclusion
+#                 caused `2>&1>&2` (two fd-copies, no space) to wrongly block
+#                 because the trailing match had a digit `1` to the left.
 #   ([0-9]+)?   — optional source fd number.
 #   ([><])&     — direction + literal `&`.
 #   ([0-9]+)    — destination fd number (REQUIRED, must be digits — this is
 #                 what excludes `>&file`).
 #   (?!\w)      — right boundary: next char is NOT a word char (so `>&12foo`
 #                 does not match, but `>&1` followed by space/end/| does).
-FD_COPY_RE = re.compile(r"(?<![\w&])([0-9]+)?([><])&([0-9]+)(?!\w)")
+FD_COPY_RE = re.compile(r"(?<!&)([0-9]+)?([><])&([0-9]+)(?!\w)")
 fd_copy_spans = [(m.start(), m.end()) for m in FD_COPY_RE.finditer(s)]
 
 def in_fd_copy(idx):

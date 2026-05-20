@@ -241,6 +241,63 @@ run_case "main pipe less -> block"  2 "$(main_tool Bash "$(bash_in 'git diff | l
 run_case "main pipe xargs rm -> block" 2 "$(main_tool Bash "$(bash_in 'git status | xargs rm')")"
 run_case "main pipe more -> block"  2 "$(main_tool Bash "$(bash_in 'git log | more')")"
 
+# ---------- Codex T3 review follow-up: FD_COPY_RE boundary probes (17 cases) ----------
+# Codex T3 pointed at the FD_COPY_RE right boundary `(?!\w)`; running 17 probes
+# uncovered an unrelated LEFT-boundary bug: `2>&1>&2` (two fd-copies adjacent,
+# no space) blocked because the second `>&2` couldn't match (prev char `1` is
+# a word char). Fix: drop `\w` from left lookbehind, keep `&` exclusion. Probes
+# below pin every edge the audit covered so regressions surface fast.
+#
+# Probe 1: `2>&1>file` — fd-copy then file write -> smuggling guard MUST fire.
+run_case "probe1 main 2>&1>file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>out')")"
+# Probe 2: `2>&1<file` — fd-copy then file read -> smuggling guard MUST fire.
+run_case "probe2 main 2>&1<file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1<in')")"
+# Probe 3: `2>&1>&2` — TWO fd-copies adjacent, NO space. Pre-fix: blocked
+# because left lookbehind disallowed `1` (word char). Post-fix: allow.
+run_case "probe3 main 2>&1>&2 adjacent -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>&2')")"
+# Probe 4: `2>&1&>foo` — fd-copy then `&>foo` (file write sugar). Block.
+run_case "probe4 main 2>&1&>foo -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1&>out')")"
+# Probe 5: `2>&1$(date)` — fd-copy then command substitution. Block.
+run_case "probe5 main 2>&1\$(date) -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1$(date)')")"
+# Probe 6: `2>&12` — fd 12 (two-digit destination). Allow as fd-copy.
+run_case "probe6 main 2>&12 fd-12 -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12')")"
+# Probe 7: `2>&12 file` — fd 12 then a separate arg word. Allow.
+run_case "probe7 main 2>&12 + arg -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12 file')")"
+# Probe 8: `2>&1foo` — destination is `1foo` (digits+letters). Right boundary
+# `(?!\w)` rejects -> no fd-copy match -> smuggling guard fires. Bash itself
+# rejects this as ambiguous redirect, so blocking is conservative-safe.
+run_case "probe8 main 2>&1foo ambiguous -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1foo')")"
+# Probe 9: `>&12word` — same as probe 8 with two-digit + letter tail. Block.
+run_case "probe9 main >&12word -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&12word')")"
+# Probe 10: `"2>&1 leak"` — entirely inside double quotes -> literal. Allow.
+run_case "probe10 main dq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in 'git status "2>&1 leak"')")"
+# Probe 11: `'2>&1 leak'` — single-quote literal. Allow.
+run_case "probe11 main sq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in "git status '2>&1 leak'")")"
+# Probe 12: `> &1` — `>` with space before `&1` is NOT fd-copy syntax. Block.
+run_case "probe12 main > &1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo > &1')")"
+# Probe 13: `2>&1 cmd` — fd-copy at start of command. The smuggling guard
+# passes (fd-copy is marked safe), but the segment's argv0 becomes `2>&1`
+# which is not allowlisted -> block at allowlist layer. Documents the
+# bash-uncommon-but-valid leading-redirect form.
+run_case "probe13 main leading fd-copy -> block (allowlist)" 2 "$(main_tool Bash "$(bash_in '2>&1 echo hi')")"
+# Probe 14: `2>& 1` — space between `&` and `1` is not valid fd-copy. Block.
+run_case "probe14 main 2>& 1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>& 1')")"
+# Probe 15: `>&-` — bash fd-close syntax (`-` is not a digit). Block (regex
+# doesn't match `>&-`; smuggling guard fires on `>`). Conservative-safe.
+run_case "probe15 main >&- fd-close -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&-')")"
+# Probe 16: `2>&1; echo hi` — fd-copy then segment separator. First segment
+# allows (`make logs ... 2>&1`); second segment `echo hi` not allowlisted ->
+# block. Use git status as second segment to assert "; after fd-copy splits"
+# without dragging in unrelated allowlist failure.
+run_case "probe16 main 2>&1; allowlisted -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1; git status')")"
+# Probe 17: `2>&1 | tail` — the user's real pain point. Allow.
+run_case "probe17 main 2>&1 | tail -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | tail')")"
+# Bonus: probe-3 variant WITHOUT allowlisted argv0 — confirms the smuggling
+# guard alone (independent of allowlist) accepts adjacent fd-copies after fix.
+# We assert exit 2 (allowlist still blocks `cmd`) but the FAILURE REASON must
+# be allowlist, not smuggling. Bash echo on stderr would assert that but the
+# test harness drops stderr; this case is documented in the report instead.
+
 # ---------- Codex T1 review combo cases: safe-prefix + dangerous tail ----------
 # 2>&1 alone is safe, but stapling `> out` (file write) or `&& cat <repo>` after
 # it must still trip the existing guards. Hook can't short-circuit on a benign
