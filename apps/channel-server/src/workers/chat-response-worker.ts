@@ -26,6 +26,7 @@ import {
     laneQueue,
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { resolveBotIdentity } from '@core/services/bot/bot-identity';
 import { initializeLarkClients, uploadImage } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
@@ -337,15 +338,30 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 effectiveLarkMessageId,
             );
 
+            // bot 自身的全局身份（user_id / username）必须走 IdentityResolver，
+            // 否则直接落 botName 字符串（"dev"/"chiwei"）会破坏 spec
+            // 「conversation_messages 全字段 internal ULID」承诺，下游按全局
+            // internal_user_id 反查的读取方就会全 miss。
+            // resolveBotIdentity 内部：取 bot 的 robot_union_id → resolve(
+            // 'user','lark',robot_union_id) → ULID；首次出现自动 bootstrap
+            // identity_user 表行（5a ON CONFLICT 收敛语义）。displayName 取
+            // persona display_name，与入站行的 username 冗余口径一致。
+            const botIdentity = await resolveBotIdentity(
+                botName,
+                reverseResolver,
+                multiBotManager,
+            );
+
             // 每条消息发完后立即存 conversation_messages（身份列写全局 ID）
             const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
             await storeMessage({
-                user_id: botName || context.getBotName() || '',
+                user_id: botIdentity.globalUserId,
                 // assistant 行的显示名读取端按 role 派生（dashboard='赤尾'、
-                // history='我'），username 列冗余落 bot 名（现成已解析值，
-                // 不新造数据源），保持列非空一致。
-                username: botName || context.getBotName() || undefined,
+                // history='我'），username 列冗余落 persona display_name
+                // （resolveBotIdentity 已经从 multiBotManager 取过），保持列
+                // 非空一致；persona 查不到则为 undefined（不写脏占位）。
+                username: botIdentity.displayName,
                 content: MessageContentUtils.wrapMarkdownAsV2(content),
                 role: 'assistant',
                 message_id: globalAssistantMessageId,
