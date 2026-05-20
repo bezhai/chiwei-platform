@@ -210,6 +210,16 @@ seg_is_allowed() {
   if echo "$first" | grep -qPi '^codex\b'; then
     return 0
   fi
+  # stdout filter argv0 allowlist (spec 2026-05-20): read-from-stdin,
+  # write-to-stdout, no file write, no command construction, not interactive.
+  # Intentionally EXCLUDES `tee` (writes files), `less`/`more` (interactive),
+  # `xargs` (constructs arbitrary commands), `cat`/`find` (file readers).
+  # A-plan trade-off: argv is NOT inspected here, so `tail CLAUDE.md` slips
+  # past the hook; rationale is spec-side (read-only, small output, not code
+  # exploration). Argv-path-aware filtering is explicitly out of scope.
+  if echo "$first" | grep -qPi '^(tail|head|grep|awk|sed|cut|sort|uniq|wc|jq|column)\b'; then
+    return 0
+  fi
 
   return 1
 }
@@ -247,9 +257,37 @@ seg_is_allowed() {
 # hole. (This is distinct from the bad-JSON path above, which stays fail-open
 # and is intentionally NOT changed here.)
 SEGMENTS="$(printf '%s' "$COMMAND" | python3 -c '
-import sys
+import sys, re
 
 s = sys.stdin.read()
+
+# RELAX (spec 2026-05-20): fd-to-fd copy `[n]>&[m]` / `[n]<&[m]` (m MUST be a
+# digit) is just kernel fd-table duplication — no file open, no repo touch.
+# Pre-scan and mark these byte ranges as "safe": the smuggling guard below
+# skips > / < that fall inside one of them. Strictness on the right side is
+# load-bearing: `>&out` / `&>file` / `&>>log` MUST NOT match (right side is a
+# non-digit word or the left side starts with `&`), so they keep hitting the
+# normal > / < guard and continue to block.
+#
+# Regex breakdown:
+#   (?<![\w&])  — left boundary: previous char is NOT a word char or `&` (so
+#                 `&>` and `&>>` do not match; `1>&2` does because left of `1`
+#                 is space/start).
+#   ([0-9]+)?   — optional source fd number.
+#   ([><])&     — direction + literal `&`.
+#   ([0-9]+)    — destination fd number (REQUIRED, must be digits — this is
+#                 what excludes `>&file`).
+#   (?!\w)      — right boundary: next char is NOT a word char (so `>&12foo`
+#                 does not match, but `>&1` followed by space/end/| does).
+FD_COPY_RE = re.compile(r"(?<![\w&])([0-9]+)?([><])&([0-9]+)(?!\w)")
+fd_copy_spans = [(m.start(), m.end()) for m in FD_COPY_RE.finditer(s)]
+
+def in_fd_copy(idx):
+    for a, b in fd_copy_spans:
+        if a <= idx < b:
+            return True
+    return False
+
 segs = []          # list of independent commands (each: list of pipeline stages)
 cur = ""           # current pipeline-stage buffer
 stages = []        # pipeline stages of the current independent command
@@ -290,7 +328,9 @@ while i < n:
     # < << <( by matching the single chars $( ` > < .
     if c == "$" and i + 1 < n and s[i + 1] == "(":
         sys.exit(4)
-    if c == "`" or c == ">" or c == "<":
+    if c == "`":
+        sys.exit(4)
+    if (c == ">" or c == "<") and not in_fd_copy(i):
         sys.exit(4)
     if c == ";" or c == "\n":
         # A real newline OUTSIDE quotes is a command separator just like `;`
