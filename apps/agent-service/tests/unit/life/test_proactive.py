@@ -34,7 +34,14 @@ def _make_insert_mock():
 
 
 @pytest.mark.asyncio
-async def test_submit_proactive_chat_uses_existing_lark_target_root():
+async def test_submit_proactive_chat_skips_lark_raw_root_to_prevent_reverse_resolve_crash():
+    """Bug 2: target_msg.message_id 仍是飞书裸 om_* 时，必须不放进
+    ChatTrigger.root_id —— 否则 chat-response-worker 出站
+    reverseResolveForLark(rootGlobalId=om_x...) 抛 IdentityNotFoundError，
+    回复整段炸（prod 已遇到丢消息）。同样保护 root_message_id 落库链路。
+
+    Pre-T5-5c 数据迁移完成前 conversation_messages.message_id 可能仍是
+    飞书裸 id，proactive 取出来不能盲信是全局 ULID。"""
     from app.domain.chat_dataflow import ChatTrigger
     from app.domain.message import Message
     from app.life.proactive import submit_proactive_chat
@@ -71,8 +78,14 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
     assert len(inserted) == 1, f"expect 1 insert_proactive_message call, got {inserted}"
     added = inserted[0]
     assert added.message_id == "proactive_1234567"
-    assert added.root_message_id == "om_root"
-    assert added.reply_message_id == "om_target"
+    # 飞书裸 root_message_id / reply_message_id 不可落入 conversation_messages
+    # 否则回复链 walk 按全局 message_id 主键失配
+    assert added.root_message_id == "proactive_1234567", (
+        f"lark raw root_message_id must not be persisted; got {added.root_message_id!r}"
+    )
+    assert added.reply_message_id is None, (
+        f"lark raw reply_message_id must not be persisted; got {added.reply_message_id!r}"
+    )
 
     # Both Message and ChatTrigger are appended to the outbox in call order
     assert len(captured) == 2, f"expect 2 appends, got {len(captured)}: {captured}"
@@ -87,7 +100,12 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
     assert trigger.session_id == "session-1"
     assert trigger.chat_id == "oc_test"
     assert trigger.is_p2p is False
-    assert trigger.root_id == "om_target"
+    # 关键断言：飞书裸 om_* 不能放进 root_id，否则 chat-response-worker 出站
+    # reverseResolveForLark 必抛 IdentityNotFoundError 丢消息
+    assert trigger.root_id is None, (
+        f"lark raw om_* must not leak into ChatTrigger.root_id; "
+        f"got {trigger.root_id!r} (would crash chat-response-worker)"
+    )
     assert trigger.user_id == "__proactive__"
     assert trigger.bot_name == "akao"
     assert trigger.is_proactive is True
@@ -95,7 +113,9 @@ async def test_submit_proactive_chat_uses_existing_lark_target_root():
 
 
 @pytest.mark.asyncio
-async def test_submit_proactive_chat_resolves_numeric_target_row_id():
+async def test_submit_proactive_chat_resolves_numeric_target_row_id_skips_lark_raw():
+    """Bug 2 同款保护：行号反查回 lark 裸 message_id 时同样不准落
+    ChatTrigger.root_id / conversation_messages.reply_message_id。"""
     from app.domain.chat_dataflow import ChatTrigger
     from app.life.proactive import submit_proactive_chat
 
@@ -134,12 +154,14 @@ async def test_submit_proactive_chat_resolves_numeric_target_row_id():
     mock_resolve_row.assert_awaited_once()
     assert len(inserted) == 1
     added = inserted[0]
-    assert added.root_message_id == "om_root"
-    assert added.reply_message_id == "om_from_row"
+    # lark 裸 om_* root 不准落库
+    assert added.root_message_id == "proactive_1234567"
+    assert added.reply_message_id is None
 
     trigger = next((d for d in captured if isinstance(d, ChatTrigger)), None)
     assert trigger is not None, f"no ChatTrigger in captured: {captured}"
-    assert trigger.root_id == "om_from_row"
+    # lark 裸 om_* 不准放进 ChatTrigger.root_id（会让 chat-response-worker 炸）
+    assert trigger.root_id is None
 
 
 @pytest.mark.asyncio
