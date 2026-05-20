@@ -12,14 +12,17 @@ import type { IdentityKind } from './identity-resolver';
 // DbIdentityResolver 的单测用一个内存版 IdentityStore 顶替真实 DB（生产走
 // TypeORM 实现，运行时才接真实 PG）。这个 fake 必须忠实模拟真实表 upsert 的
 // 关键语义：upsertMapping 走 INSERT ... ON CONFLICT (channel, channel_*_id)
-// DO NOTHING 然后回取 internal_id——并发首次出现下永远收敛到同一个
-// internal_id，且不依赖外层事务是否存在/隔离级别。PK(ULID) 冲突单独信号。
+// DO UPDATE ... RETURNING——并发首次出现下永远收敛到同一个 internal_id，
+// 且不依赖外层事务是否存在/隔离级别（DO UPDATE 永远 RETURNING 那条行，不再
+// 像 DO NOTHING + UNION ALL 那样在 read committed 下并发 race 返回 0 行）。
+// PK(ULID) 冲突单独信号。
 
 interface Stored extends IdentityRow {}
 
 // 行为可控的内存 store，模拟真实 PG 的两类约束：
-//   - forward-key (kind, channel, channelId) 复合唯一：ON CONFLICT DO NOTHING
-//     语义——已存在则不插，直接收敛回已有 internalId（绝不抛错）。
+//   - forward-key (kind, channel, channelId) 复合唯一：ON CONFLICT DO UPDATE
+//     语义——已存在则 SET 一个 no-op 字段触发 RETURNING，直接收敛回已有
+//     internalId（绝不抛错）。
 //   - internal_*_id 主键(ULID)唯一：极罕见撞了抛 PrimaryKeyConflictError，
 //     resolver 负责重新生成 ULID 重试，不当 forward-key 冲突。
 class FakeIdentityStore implements IdentityStore {
@@ -65,8 +68,8 @@ class FakeIdentityStore implements IdentityStore {
 
     async upsertMapping(row: IdentityRow): Promise<string> {
         this.upsertCalls += 1;
-        // forward-key 已存在：ON CONFLICT DO NOTHING -> 回取已有 internalId，
-        // 永远收敛到同一个，绝不抛错（这是不依赖外层事务的关键）。
+        // forward-key 已存在：ON CONFLICT DO UPDATE RETURNING -> 拉回已有
+        // internalId，永远收敛到同一个，绝不抛错（这是不依赖外层事务的关键）。
         const fwd = this.rows.find(
             (r) =>
                 r.kind === row.kind &&
@@ -139,7 +142,7 @@ describe('DbIdentityResolver upsert 写路径与冲突处理', () => {
         const r = new DbIdentityResolver(txnStore);
         const a = await r.resolve('chat', 'qq', 'txn-1');
         // 第二次：事务已脆弱，若 resolver 还走 check/回读会抛 aborted；
-        // upsert 化后只调 upsertMapping，DO NOTHING 收敛回 a，不读。
+        // upsert 化后只调 upsertMapping，DO UPDATE RETURNING 收敛回 a，不读。
         const b = await r.resolve('chat', 'qq', 'txn-1');
         expect(a).toBe(b);
     });

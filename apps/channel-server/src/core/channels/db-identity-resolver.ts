@@ -9,11 +9,14 @@
 // 落哪张表，三张表结构相同。
 //
 // 写路径用单 SQL upsert（INSERT ... ON CONFLICT (channel, channel_*_id)
-// DO NOTHING 然后回取 internal_id），不再 check-then-insert-catch：
+// DO UPDATE ... RETURNING），不再 check-then-insert-catch：
 //   - 不依赖 TypeORM 默认 autocommit / READ COMMITTED——即使后续接线把 resolve
 //     包进外层显式 PG 事务，也不会因 23505 让事务进 aborted 后回读全失败；
-//   - forward-key (channel, channel_*_id) 冲突由 ON CONFLICT 在引擎内收敛，
-//     永远拿回同一个 internal_id；
+//   - forward-key (channel, channel_*_id) 冲突由 ON CONFLICT DO UPDATE 在
+//     引擎内收敛，DO UPDATE 永远 RETURNING 那条行（哪怕 SET 是 no-op），
+//     永远拿回同一个 internal_id（旧实现用 DO NOTHING + CTE UNION ALL
+//     SELECT 兜底，read committed 下并发同 forward-key 会让 UNION ALL 的
+//     SELECT 看不到 conflicting row，返回 0 行让 fail-loud 误伤）；
 //   - internal_*_id 主键(ULID)冲突是另一类（store 抛 PrimaryKeyConflictError），
 //     极罕见，由本模块重新生成 ULID 有限次重试，绝不当 forward-key 冲突收敛。
 
@@ -33,8 +36,8 @@ export interface IdentityRow {
 }
 
 // internal_*_id 主键(ULID)唯一约束被违反时抛这个。与 forward-key 冲突严格区分：
-// forward-key 冲突由 upsert 的 ON CONFLICT DO NOTHING 在 DB 引擎内静默收敛
-// （store 不抛错、直接回取已有 internalId）；只有 ULID 主键撞了（同一 ULID 被
+// forward-key 冲突由 upsert 的 ON CONFLICT DO UPDATE 在 DB 引擎内静默收敛
+// （store 不抛错、DO UPDATE RETURNING 直接拉回已有 internalId）；只有 ULID 主键撞了（同一 ULID 被
 // 两条不同 forward-key 占用，128bit 熵下概率极低）才抛本错误，让 resolver
 // 重新生成 ULID 重试，绝不把它误当 forward-key 冲突收敛到别人的映射。
 export class PrimaryKeyConflictError extends Error {
@@ -65,8 +68,13 @@ export interface IdentityStore {
     ): Promise<{ channel: string; channelId: string } | null>;
 
     // upsert 语义（单 SQL，事务安全无脆弱假设）：
-    //   INSERT ... ON CONFLICT (channel, channel_*_id) DO NOTHING
-    //   然后回取该 (channel, channel_*_id) 的 internal_*_id 返回。
+    //   INSERT ... ON CONFLICT (channel, channel_*_id) DO UPDATE
+    //     SET <channel_id_col> = EXCLUDED.<channel_id_col>
+    //   RETURNING <internal_id_col>
+    //   —— DO UPDATE 永远 RETURNING 那条行（哪怕 SET 是 no-op），不再需要
+    //   CTE UNION ALL SELECT 兜底；旧 DO NOTHING + UNION ALL 在 PG read
+    //   committed 下并发同 forward-key 会让 UNION ALL 的 SELECT 看不到
+    //   conflicting row 返回 0 行 → fail-loud 丢消息。
     // 行为契约：
     //   - forward-key (kind, channel, channelId) 已存在 -> 不插入，返回已有
     //     internalId（并发首次出现时所有竞争者都收敛到同一个；绝不抛错，
@@ -145,8 +153,8 @@ export class DbIdentityResolver implements IdentityResolver {
         }
 
         // 未命中：走单 SQL upsert（ON CONFLICT (channel, channel_*_id)
-        // DO NOTHING + 回取 internal_id）。forward-key 冲突由 DB 引擎在
-        // 单条语句内收敛——无 check-then-insert 竞态，不依赖外层事务/隔离级别。
+        // DO UPDATE ... RETURNING）。forward-key 冲突由 DB 引擎在单条语句
+        // 内收敛——无 check-then-insert 竞态，不依赖外层事务/隔离级别。
         // 唯一需要应用层处理的是 internal_*_id 主键(ULID)冲突：换 ULID 重试。
         let lastErr: unknown;
         for (let attempt = 0; attempt < MAX_PK_RETRIES; attempt++) {
