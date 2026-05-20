@@ -83,8 +83,13 @@ run_case "main http.sh -> allow"    0 "$(main_tool Bash "$(bash_in 'bash .claude
 run_case "main git show file -> block" 2 "$(main_tool Bash "$(bash_in 'git show HEAD:apps/lark-proxy/main.ts')")"
 run_case "main git cat-file -> block"  2 "$(main_tool Bash "$(bash_in 'git cat-file -p HEAD:foo.go')")"
 run_case "main cat file -> block"      2 "$(main_tool Bash "$(bash_in 'cat apps/lark-proxy/main.ts')")"
-run_case "main sed file -> block"      2 "$(main_tool Bash "$(bash_in 'sed -n 1,20p foo.go')")"
-run_case "main grep cmd -> block"      2 "$(main_tool Bash "$(bash_in 'grep -r foo apps/')")"
+# Spec 2026-05-20 trade-off: sed/grep are now stdout filter argv0 (read-only
+# integers). Hook does NOT inspect argv for repo paths — so `sed foo.go` /
+# `grep -r foo apps/` slip past the hook. Documented in spec "扩展放行" section
+# (the three reasons: read-only, small output, not code exploration). Tests
+# pinned to that contract: these now ALLOW.
+run_case "main sed file -> allow (spec trade-off)" 0 "$(main_tool Bash "$(bash_in 'sed -n 1,20p foo.go')")"
+run_case "main grep cmd -> allow (spec trade-off)" 0 "$(main_tool Bash "$(bash_in 'grep -r foo apps/')")"
 
 # ---------- Security layer: kubectl write / curl POST -> BLOCK (main AND sub) ----------
 run_case "main kubectl apply -> block"  2 "$(main_tool Bash "$(bash_in 'kubectl apply -f x.yaml')")"
@@ -103,13 +108,13 @@ run_case "main dispatch Task -> allow"  0 "$(main_tool Task '{"description":"x"}
 run_case "main cd . && git status -> allow"   0 "$(main_tool Bash "$(bash_in 'cd . && git status')")"
 run_case "main cd /tmp && git log -> allow"   0 "$(main_tool Bash "$(bash_in 'cd /tmp && git log')")"
 run_case "main git add && git commit -> allow" 0 "$(main_tool Bash "$(bash_in 'git add x && git commit -m y')")"
-# T3 HARDENING: every pipeline stage's argv0 must be allowlisted now. The old
-# "pipeline only vets first stage" carve-out was a real downstream-bypass hole
-# (codex T3). `grep`/`head` argv0 are NOT on the allowlist -> these now BLOCK.
-# This is the INTENDED tightening, not a regression. Want fewer git lines: use
-# `git log -n`. Want to filter: dispatch a subagent.
-run_case "main git status | grep -> block (T3)"  2 "$(main_tool Bash "$(bash_in 'git status | grep foo')")"
-run_case "main git log | head -> block (T3)"     2 "$(main_tool Bash "$(bash_in 'git log --oneline | head -20')")"
+# T3 HARDENING + spec 2026-05-20 RELAX: every pipeline stage's argv0 is still
+# vetted (downstream-bypass hole stays closed), but stdout filter argv0
+# (tail/head/grep/awk/sed/cut/sort/uniq/wc/jq/column) are now on the allowlist.
+# So `git status | grep foo` and `git log | head -20` now ALLOW. `cat`, `tee`,
+# `xargs`, `less` are deliberately NOT on the filter allowlist and still BLOCK.
+run_case "main git status | grep -> allow (spec relax)" 0 "$(main_tool Bash "$(bash_in 'git status | grep foo')")"
+run_case "main git log | head -> allow (spec relax)"    0 "$(main_tool Bash "$(bash_in 'git log --oneline | head -20')")"
 
 # Bug 2 (false allow / security hole): allowlisted leading token let trailing
 # repo-touching segments through unchecked.
@@ -195,6 +200,123 @@ run_case "sub curl -dfoo -> block"            2 "$(sub_tool Bash "$(bash_in64 'Y
 # Main context too (defense-in-depth: blocked either way).
 run_case "main curl --request=POST -> block"  2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtLXJlcXVlc3Q9UE9TVCBodHRwOi8veA==')")"
 run_case "main curl -dfoo -> block"           2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtZGZvbyBodHRwOi8veA==')")"
+
+# ---------- RELAX: fd-to-fd copy [n]>&[m] / [n]<&[m] (m must be a digit) ----------
+# Pure fd table duplication, no file I/O — main session can do it directly.
+run_case "main fd 2>&1 -> allow"  0 "$(main_tool Bash "$(bash_in 'git status 2>&1')")"
+run_case "main fd 1>&2 -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs 1>&2')")"
+run_case "main fd 3<&0 -> allow"  0 "$(main_tool Bash "$(bash_in 'git status 3<&0')")"
+run_case "main fd 2>&3 -> allow"  0 "$(main_tool Bash "$(bash_in 'git diff 2>&3')")"
+# fd-copy tokens inside double quotes are literal anyway — must still allow.
+run_case "main fd dq literal 2>&1 -> allow" 0 "$(main_tool Bash "$(bash_in 'git status "x 2>&1"')")"
+
+# ---------- BLOCK: fd boundary cases that look like fd ops but actually touch files ----------
+# &> / &>> are `cmd > out 2>&1` sugar with a file target on the right.
+run_case "main &> file -> block"      2 "$(main_tool Bash "$(bash_in 'git status &> out')")"
+run_case "main &>> file -> block"     2 "$(main_tool Bash "$(bash_in 'git log &>> log')")"
+# >&file (right side is a non-digit token) is normal file redirection sugar.
+run_case "main >&file -> block"       2 "$(main_tool Bash "$(bash_in 'git status >&out')")"
+# 2>file with no & is just normal file redirection.
+run_case "main 2>file -> block"       2 "$(main_tool Bash "$(bash_in 'git status 2>err.log')")"
+# Process substitution opens a Trojan command channel.
+run_case "main >(proc-subst) -> block" 2 "$(main_tool Bash "$(bash_in 'git status > >(tee log)')")"
+run_case "main <(proc-subst) -> block" 2 "$(main_tool Bash "$(bash_in 'git diff <(cat CLAUDE.md)')")"
+
+# ---------- RELAX: stdout filter argv0 allowlist (pipe segments) ----------
+# Read-from-stdin, write-to-stdout, no file write, no command construction.
+run_case "main pipe tail -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | tail -150')")"
+run_case "main pipe head -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | head -100')")"
+run_case "main pipe grep filter -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | grep ERROR')")"
+run_case "main pipe awk -> allow"   0 "$(main_tool Bash "$(bash_in "make logs APP=foo | awk '{print \$1}'")")"
+run_case "main pipe sed -> allow"   0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | sed s/x/y/')")"
+run_case "main pipe jq -> allow"    0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | jq .')")"
+run_case "main pipe cut -> allow"   0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | cut -d: -f1')")"
+run_case "main pipe sort uniq wc -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | sort | uniq | wc -l')")"
+run_case "main git diff | wc -> allow" 0 "$(main_tool Bash "$(bash_in 'git diff | wc -l')")"
+
+# ---------- BLOCK: dangerous argv0 still not allowed as pipe segments ----------
+# tee writes files; less/more are interactive; xargs constructs new commands.
+run_case "main pipe tee -> block"   2 "$(main_tool Bash "$(bash_in 'git status | tee /tmp/x')")"
+run_case "main pipe less -> block"  2 "$(main_tool Bash "$(bash_in 'git diff | less foo')")"
+run_case "main pipe xargs rm -> block" 2 "$(main_tool Bash "$(bash_in 'git status | xargs rm')")"
+run_case "main pipe more -> block"  2 "$(main_tool Bash "$(bash_in 'git log | more')")"
+
+# ---------- Codex T3 review follow-up: FD_COPY_RE boundary probes (17 cases) ----------
+# Codex T3 pointed at the FD_COPY_RE right boundary `(?!\w)`; running 17 probes
+# uncovered an unrelated LEFT-boundary bug: `2>&1>&2` (two fd-copies adjacent,
+# no space) blocked because the second `>&2` couldn't match (prev char `1` is
+# a word char). Fix: drop `\w` from left lookbehind, keep `&` exclusion. Probes
+# below pin every edge the audit covered so regressions surface fast.
+#
+# Probe 1: `2>&1>file` — fd-copy then file write -> smuggling guard MUST fire.
+run_case "probe1 main 2>&1>file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>out')")"
+# Probe 2: `2>&1<file` — fd-copy then file read -> smuggling guard MUST fire.
+run_case "probe2 main 2>&1<file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1<in')")"
+# Probe 3: `2>&1>&2` — TWO fd-copies adjacent, NO space. Pre-fix: blocked
+# because left lookbehind disallowed `1` (word char). Post-fix: allow.
+run_case "probe3 main 2>&1>&2 adjacent -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>&2')")"
+# Probe 4: `2>&1&>foo` — fd-copy then `&>foo` (file write sugar). Block.
+run_case "probe4 main 2>&1&>foo -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1&>out')")"
+# Probe 5: `2>&1$(date)` — fd-copy then command substitution. Block.
+run_case "probe5 main 2>&1\$(date) -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1$(date)')")"
+# Probe 6: `2>&12` — fd 12 (two-digit destination). Allow as fd-copy.
+run_case "probe6 main 2>&12 fd-12 -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12')")"
+# Probe 7: `2>&12 file` — fd 12 then a separate arg word. Allow.
+run_case "probe7 main 2>&12 + arg -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12 file')")"
+# Probe 8: `2>&1foo` — destination is `1foo` (digits+letters). Right boundary
+# `(?!\w)` rejects -> no fd-copy match -> smuggling guard fires. Bash itself
+# rejects this as ambiguous redirect, so blocking is conservative-safe.
+run_case "probe8 main 2>&1foo ambiguous -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1foo')")"
+# Probe 9: `>&12word` — same as probe 8 with two-digit + letter tail. Block.
+run_case "probe9 main >&12word -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&12word')")"
+# Probe 10: `"2>&1 leak"` — entirely inside double quotes -> literal. Allow.
+run_case "probe10 main dq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in 'git status "2>&1 leak"')")"
+# Probe 11: `'2>&1 leak'` — single-quote literal. Allow.
+run_case "probe11 main sq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in "git status '2>&1 leak'")")"
+# Probe 12: `> &1` — `>` with space before `&1` is NOT fd-copy syntax. Block.
+run_case "probe12 main > &1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo > &1')")"
+# Probe 13: `2>&1 cmd` — fd-copy at start of command. The smuggling guard
+# passes (fd-copy is marked safe), but the segment's argv0 becomes `2>&1`
+# which is not allowlisted -> block at allowlist layer. Documents the
+# bash-uncommon-but-valid leading-redirect form.
+run_case "probe13 main leading fd-copy -> block (allowlist)" 2 "$(main_tool Bash "$(bash_in '2>&1 echo hi')")"
+# Probe 14: `2>& 1` — space between `&` and `1` is not valid fd-copy. Block.
+run_case "probe14 main 2>& 1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>& 1')")"
+# Probe 15: `>&-` — bash fd-close syntax (`-` is not a digit). Block (regex
+# doesn't match `>&-`; smuggling guard fires on `>`). Conservative-safe.
+run_case "probe15 main >&- fd-close -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&-')")"
+# Probe 16: `2>&1; echo hi` — fd-copy then segment separator. First segment
+# allows (`make logs ... 2>&1`); second segment `echo hi` not allowlisted ->
+# block. Use git status as second segment to assert "; after fd-copy splits"
+# without dragging in unrelated allowlist failure.
+run_case "probe16 main 2>&1; allowlisted -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1; git status')")"
+# Probe 17: `2>&1 | tail` — the user's real pain point. Allow.
+run_case "probe17 main 2>&1 | tail -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | tail')")"
+# Bonus: probe-3 variant WITHOUT allowlisted argv0 — confirms the smuggling
+# guard alone (independent of allowlist) accepts adjacent fd-copies after fix.
+# We assert exit 2 (allowlist still blocks `cmd`) but the FAILURE REASON must
+# be allowlist, not smuggling. Bash echo on stderr would assert that but the
+# test harness drops stderr; this case is documented in the report instead.
+
+# ---------- Codex T1 review combo cases: safe-prefix + dangerous tail ----------
+# 2>&1 alone is safe, but stapling `> out` (file write) or `&& cat <repo>` after
+# it must still trip the existing guards. Hook can't short-circuit on a benign
+# prefix.
+run_case "main 2>&1 > out -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 > out')")"
+run_case "main 2>&1 && cat repo -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 && cat CLAUDE.md')")"
+# The user's real pain point: must allow end-to-end.
+run_case "main 2>&1 | tail -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | tail -150')")"
+run_case "main 2>&1 | grep -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | grep ERROR')")"
+
+# ---------- Smuggling regression guard: existing blocks must still block ----------
+# These should have been blocked already by the existing $( ` > < guard; restate
+# explicitly to pin the contract under the new fd-copy relaxation.
+run_case "main smuggling > CLAUDE.md regress -> block" 2 "$(main_tool Bash "$(bash_in 'git status > CLAUDE.md')")"
+run_case "main smuggling >> ./foo regress -> block"    2 "$(main_tool Bash "$(bash_in 'git status >> ./foo')")"
+run_case "main smuggling \$(cat) regress -> block"     2 "$(main_tool Bash "$(bash_in 'git status $(cat CLAUDE.md)')")"
+run_case "main smuggling backtick regress -> block"    2 "$(main_tool Bash "$(bash_in 'cat \`whoami\`')")"
+run_case "main smuggling < file regress -> block"      2 "$(main_tool Bash "$(bash_in 'grep foo < src/x.py')")"
+run_case "main smuggling <<< herestring regress -> block" 2 "$(main_tool Bash "$(bash_in 'git status <<<$(date)')")"
 
 # ---------- Misc ----------
 run_case "empty stdin -> allow" 0 "$EMPTY"
