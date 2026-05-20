@@ -1,9 +1,12 @@
 // 生产运行时的 IdentityStore 实现：用 TypeORM 读写 identity_user /
 // identity_chat / identity_message 三张映射表。写路径用真实的
-// INSERT ... ON CONFLICT (channel, channel_*_id) DO NOTHING + RETURNING /
-// 回取，把 forward-key 冲突交给 PG 引擎在单条语句内收敛（事务安全、不依赖
-// 隔离级别），只把 internal_*_id 主键(ULID)冲突翻译成
-// PrimaryKeyConflictError 让 DbIdentityResolver 换 ULID 重试。
+// INSERT ... ON CONFLICT (channel, channel_*_id) DO UPDATE ... RETURNING，
+// 把 forward-key 冲突交给 PG 引擎在单条语句内收敛（事务安全、不依赖隔离
+// 级别——DO UPDATE 永远 RETURNING，不需要 CTE/UNION ALL 兜底；之前用 DO
+// NOTHING + UNION ALL SELECT 在 read committed 下 race 时 SELECT 看不到
+// conflicting row，会返回 0 行让上游 fail-loud）。只把 internal_*_id 主键
+// (ULID) 冲突翻译成 PrimaryKeyConflictError 让 DbIdentityResolver 换 ULID
+// 重试。
 //
 // 单测不 import 本文件（它静态依赖 TypeORM 数据源）；DbIdentityResolver 的
 // 单测走内存版 FakeIdentityStore。本文件只在运行时接线时使用。
@@ -99,22 +102,23 @@ export class TypeOrmIdentityStore implements IdentityStore {
 
     async upsertMapping(row: IdentityRow): Promise<string> {
         const t = KIND_TABLE[row.kind];
-        // 单 SQL upsert：对 forward-key 复合唯一约束 ON CONFLICT DO NOTHING；
-        // DO NOTHING 时 RETURNING 不产出行，故用 CTE 在 INSERT 不命中时回取
-        // 已存在行的 internal id，保证恒返回收敛后的 internal id（一条语句、
-        // 不依赖外层事务/隔离级别——并发首次出现下 PG 引擎内收敛）。
+        // 单 SQL upsert：对 forward-key 复合唯一约束 ON CONFLICT DO UPDATE。
+        // 之前用 DO NOTHING + 同 CTE UNION ALL SELECT 回取，PG read committed
+        // 下当 DO NOTHING 触发时同语句的 SELECT 看不到 conflicting row（快照
+        // 边界），并发同 (channel, channel_*_id) 第二次进来 SELECT 0 行 → 整体
+        // 0 行 → 调用方 fail-loud → prod 丢消息。
+        //
+        // DO UPDATE 即使 SET 为 no-op（把 channel_*_id 设回 EXCLUDED.* 同值）
+        // 仍会"涉及行"，把那条行通过 RETURNING 拉回来，永远拿到 internal_id；
+        // forward-key 在 PG 引擎单语句内收敛，不依赖外层事务/隔离级别。
+        // 注意：永远不要 SET internal_*_id —— 那是全局主键，DO UPDATE 时
+        // 已存在行的 internal_id 不能被来访 candidate ULID 覆盖。
         const sql = `
-            WITH ins AS (
-                INSERT INTO ${t.table} (${t.internalCol}, channel, ${t.channelIdCol})
-                VALUES ($1, $2, $3)
-                ON CONFLICT ON CONSTRAINT ${t.forwardConstraint} DO NOTHING
-                RETURNING ${t.internalCol} AS internal_id
-            )
-            SELECT internal_id FROM ins
-            UNION ALL
-            SELECT ${t.internalCol} AS internal_id FROM ${t.table}
-            WHERE channel = $2 AND ${t.channelIdCol} = $3
-            LIMIT 1
+            INSERT INTO ${t.table} (${t.internalCol}, channel, ${t.channelIdCol})
+            VALUES ($1, $2, $3)
+            ON CONFLICT ON CONSTRAINT ${t.forwardConstraint}
+            DO UPDATE SET ${t.channelIdCol} = EXCLUDED.${t.channelIdCol}
+            RETURNING ${t.internalCol} AS internal_id
         `;
         try {
             const rows = (await AppDataSource.query(sql, [
