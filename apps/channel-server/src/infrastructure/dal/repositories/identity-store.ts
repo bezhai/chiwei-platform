@@ -1,24 +1,17 @@
-// 生产运行时的 IdentityStore 实现：用 TypeORM Repository 标准 ORM 接口
-// （findOne / save）读写 identity_user / identity_chat / identity_message
-// 三张映射表。
+// 生产运行时的 IdentityStore 实现：用 TypeORM 读写 identity_user /
+// identity_chat / identity_message 三张映射表。写路径用真实的
+// INSERT ... ON CONFLICT (channel, channel_*_id) DO UPDATE ... RETURNING，
+// 把 forward-key 冲突交给 PG 引擎在单条语句内收敛（事务安全、不依赖隔离
+// 级别——DO UPDATE 永远 RETURNING，不需要 CTE/UNION ALL 兜底；之前用 DO
+// NOTHING + UNION ALL SELECT 在 read committed 下 race 时 SELECT 看不到
+// conflicting row，会返回 0 行让上游 fail-loud）。只把 internal_*_id 主键
+// (ULID) 冲突翻译成 PrimaryKeyConflictError 让 DbIdentityResolver 换 ULID
+// 重试。
 //
-// 设计：findOne -> 命中即返回；未命中走 save；save 撞 forward-key 唯一约束
-// (23505 on uq_identity_*_channel) → race winner 已抢先写入 → 重新 findOne 拿
-// 现有行返回。撞主键 (23505 on identity_*_pkey) → 抛 PrimaryKeyConflictError
-// 让 DbIdentityResolver 换 ULID 重试。
-//
-// 为什么不用 raw SQL ON CONFLICT DO UPDATE RETURNING？之前那版工作，但 raw
-// SQL 是 critical concurrency primitive 上的硬骨头：表名/列名/约束名靠字符串
-// 拼，迁移容易漏；ON CONFLICT 的 visibility 细节难维护。改用 ORM 标准接口
-// 后，PG-internal visibility 语义交给 TypeORM；race 安全靠 try-save +
-// catch-unique-violation + 重读这种与 ORM 同构的模式，业务代码不再碰 SQL 字
-// 符串。
-//
-// 单测不 import 本文件实际接 TypeORM 数据源——它通过 mock @ormconfig 的
-// getRepository 注入 fake repo 验证调用形态。DbIdentityResolver 的单测走
-// 内存版 FakeIdentityStore（不经过本文件）。
+// 单测不 import 本文件（它静态依赖 TypeORM 数据源）；DbIdentityResolver 的
+// 单测走内存版 FakeIdentityStore。本文件只在运行时接线时使用。
 
-import { QueryFailedError, type Repository } from 'typeorm';
+import { QueryFailedError } from 'typeorm';
 import AppDataSource from '@ormconfig';
 import {
     IdentityUser,
@@ -32,24 +25,27 @@ import {
     PrimaryKeyConflictError,
 } from '@core/channels/db-identity-resolver';
 
-// 每个 kind 对应哪张实体、哪两列名、forward-key 约束名（与 DDL 一致，用于
-// 区分 23505 是 forward-key 冲突还是主键冲突）。三张表结构相同，只是列名/
-// 约束名带各自前缀。
+// 每个 kind 对应哪张表、哪两个列、表名、约束名。三张表结构相同，
+// 只是列名/约束名带各自前缀。约束名必须与 DDL（multi-channel-T5-
+// identity-mapping-tables.sql）一致，ON CONFLICT 按约束名引用。
 const KIND_TABLE = {
     user: {
         entity: IdentityUser,
+        table: 'identity_user',
         internalCol: 'internal_user_id',
         channelIdCol: 'channel_user_id',
         forwardConstraint: 'uq_identity_user_channel',
     },
     chat: {
         entity: IdentityChat,
+        table: 'identity_chat',
         internalCol: 'internal_chat_id',
         channelIdCol: 'channel_chat_id',
         forwardConstraint: 'uq_identity_chat_channel',
     },
     message: {
         entity: IdentityMessage,
+        table: 'identity_message',
         internalCol: 'internal_message_id',
         channelIdCol: 'channel_message_id',
         forwardConstraint: 'uq_identity_message_channel',
@@ -60,56 +56,33 @@ const KIND_TABLE = {
 const PG_UNIQUE_VIOLATION = '23505';
 
 // 把 driverError 拆出来：PG 在 23505 时附带 constraint（违反的约束名），
-// 用它区分 forward-key 冲突 vs 主键 (ULID) 冲突。
+// 用它区分 forward-key 冲突 vs 主键(ULID)冲突。
 function pgError(
     err: unknown,
 ): { code?: string; constraint?: string } | null {
-    if (err instanceof QueryFailedError) {
-        const d = (
-            err as unknown as {
-                driverError?: { code?: string; constraint?: string };
-            }
-        ).driverError;
-        return d ?? null;
-    }
-    // 测试 / 部分 driver 直接把 code/constraint 挂在 Error 上；同样支持。
-    if (err && typeof err === 'object') {
-        const e = err as { code?: string; constraint?: string; driverError?: { code?: string; constraint?: string } };
-        if (e.driverError) return e.driverError;
-        if (e.code) return { code: e.code, constraint: e.constraint };
-    }
-    return null;
+    if (!(err instanceof QueryFailedError)) return null;
+    const d = (
+        err as unknown as {
+            driverError?: { code?: string; constraint?: string };
+        }
+    ).driverError;
+    return d ?? null;
 }
 
 export class TypeOrmIdentityStore implements IdentityStore {
-    private repoFor<K extends IdentityKind>(
-        kind: K,
-    ): {
-        repo: Repository<object>;
-        internalCol: string;
-        channelIdCol: string;
-        forwardConstraint: string;
-    } {
-        const t = KIND_TABLE[kind];
-        return {
-            repo: AppDataSource.getRepository(t.entity) as unknown as Repository<object>,
-            internalCol: t.internalCol,
-            channelIdCol: t.channelIdCol,
-            forwardConstraint: t.forwardConstraint,
-        };
-    }
-
     async findInternalId(
         kind: IdentityKind,
         channel: string,
         channelId: string,
     ): Promise<string | null> {
-        const { repo, internalCol, channelIdCol } = this.repoFor(kind);
+        const t = KIND_TABLE[kind];
+        const repo = AppDataSource.getRepository(t.entity);
         const row = await repo.findOne({
-            where: { channel, [channelIdCol]: channelId } as object,
+            where: { channel, [t.channelIdCol]: channelId } as object,
         });
         return row
-            ? ((row as unknown as Record<string, string>)[internalCol] ?? null)
+            ? ((row as unknown as Record<string, string>)[t.internalCol] ??
+                  null)
             : null;
     }
 
@@ -117,64 +90,65 @@ export class TypeOrmIdentityStore implements IdentityStore {
         kind: IdentityKind,
         internalId: string,
     ): Promise<{ channel: string; channelId: string } | null> {
-        const { repo, internalCol, channelIdCol } = this.repoFor(kind);
+        const t = KIND_TABLE[kind];
+        const repo = AppDataSource.getRepository(t.entity);
         const row = await repo.findOne({
-            where: { [internalCol]: internalId } as object,
+            where: { [t.internalCol]: internalId } as object,
         });
         if (!row) return null;
         const r = row as unknown as Record<string, string>;
-        return { channel: r.channel!, channelId: r[channelIdCol]! };
+        return { channel: r.channel!, channelId: r[t.channelIdCol]! };
     }
 
     async upsertMapping(row: IdentityRow): Promise<string> {
-        const { repo, internalCol, channelIdCol, forwardConstraint } =
-            this.repoFor(row.kind);
-
-        // 快路径：先 findOne 看 forward-key 是否已存在。命中即幂等返回（最常见
-        // 的并发场景：第一个 resolve 把行写进去，后续都从这里返回）。
-        const existing = await repo.findOne({
-            where: { channel: row.channel, [channelIdCol]: row.channelId } as object,
-        });
-        if (existing) {
-            return (existing as unknown as Record<string, string>)[internalCol]!;
-        }
-
-        // 未命中：尝试 save。race 输给并发竞争者会撞 23505：
-        //   - 撞 forward-key 唯一约束 -> race winner 已写入 -> 重读返回 winner
-        //     的 internalId（绝不抛错，绝不写入 candidate 的 ULID）
-        //   - 撞主键 (internal_*_id) 唯一约束 -> 极罕见 ULID 撞 -> 抛
-        //     PrimaryKeyConflictError 让 resolver 换 ULID 重试
-        const entity = {
-            [internalCol]: row.internalId,
-            channel: row.channel,
-            [channelIdCol]: row.channelId,
-        };
+        const t = KIND_TABLE[row.kind];
+        // 单 SQL upsert：对 forward-key 复合唯一约束 ON CONFLICT DO UPDATE。
+        // 之前用 DO NOTHING + 同 CTE UNION ALL SELECT 回取，PG read committed
+        // 下当 DO NOTHING 触发时同语句的 SELECT 看不到 conflicting row（快照
+        // 边界），并发同 (channel, channel_*_id) 第二次进来 SELECT 0 行 → 整体
+        // 0 行 → 调用方 fail-loud → prod 丢消息。
+        //
+        // DO UPDATE 即使 SET 为 no-op（把 channel_*_id 设回 EXCLUDED.* 同值）
+        // 仍会"涉及行"，把那条行通过 RETURNING 拉回来，永远拿到 internal_id；
+        // forward-key 在 PG 引擎单语句内收敛，不依赖外层事务/隔离级别。
+        // 注意：永远不要 SET internal_*_id —— 那是全局主键，DO UPDATE 时
+        // 已存在行的 internal_id 不能被来访 candidate ULID 覆盖。
+        const sql = `
+            INSERT INTO ${t.table} (${t.internalCol}, channel, ${t.channelIdCol})
+            VALUES ($1, $2, $3)
+            ON CONFLICT ON CONSTRAINT ${t.forwardConstraint}
+            DO UPDATE SET ${t.channelIdCol} = EXCLUDED.${t.channelIdCol}
+            RETURNING ${t.internalCol} AS internal_id
+        `;
         try {
-            const saved = (await repo.save(entity as object)) as unknown as Record<string, string>;
-            return saved[internalCol]!;
+            const rows = (await AppDataSource.query(sql, [
+                row.internalId,
+                row.channel,
+                row.channelId,
+            ])) as Array<{ internal_id: string }>;
+            const internalId = rows[0]?.internal_id;
+            if (internalId == null) {
+                // 理论不可达：要么 INSERT 成功 RETURNING，要么 DO NOTHING
+                // 后 SELECT 命中已存在行。读不到说明 store 状态不一致。
+                throw new Error(
+                    `identity ${row.kind} upsert (${row.channel}, ${row.channelId}) ` +
+                        `returned no internal id; store is inconsistent`,
+                );
+            }
+            return internalId;
         } catch (err) {
             const d = pgError(err);
             if (d?.code === PG_UNIQUE_VIOLATION) {
-                if (d.constraint === forwardConstraint) {
-                    // race 输了：另一个并发已经写入同 (channel, channelId)。
-                    // 重读拿现有 internalId 返回——收敛到 race winner，不抛错。
-                    const winner = await repo.findOne({
-                        where: { channel: row.channel, [channelIdCol]: row.channelId } as object,
-                    });
-                    if (winner) {
-                        return (winner as unknown as Record<string, string>)[internalCol]!;
-                    }
-                    // 理论不可达：23505 forward 约束触发但回读不到说明 store 不
-                    // 一致（PG 出了别的问题）。明确抛错而不是吞掉。
-                    throw new Error(
-                        `identity ${row.kind} forward-key conflict on (${row.channel}, ` +
-                            `${row.channelId}) but re-read returned no row; store is inconsistent`,
+                // 23505 但不是 forward-key 约束 -> 是 internal_*_id 主键(ULID)
+                // 冲突。区分二者：forward-key 冲突已被 ON CONFLICT DO NOTHING
+                // 吸收不会冒到这里；冒到这里的 23505 即主键冲突，翻译成
+                // PrimaryKeyConflictError 让 resolver 换 ULID 重试。
+                if (d.constraint !== t.forwardConstraint) {
+                    throw new PrimaryKeyConflictError(
+                        row.kind,
+                        row.internalId,
                     );
                 }
-                // 23505 但不是 forward-key 约束 -> 是 internal_*_id 主键 (ULID)
-                // 冲突。抛 PrimaryKeyConflictError 让 resolver 换 ULID 重试，
-                // 绝不当 forward-key 冲突静默收敛到别人的映射。
-                throw new PrimaryKeyConflictError(row.kind, row.internalId);
             }
             throw err;
         }

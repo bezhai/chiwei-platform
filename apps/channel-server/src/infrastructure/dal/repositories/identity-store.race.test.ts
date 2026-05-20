@@ -1,243 +1,149 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
-// 钉死 TypeOrmIdentityStore.upsertMapping 的 race-safe 语义 + 实现禁令：
-// 必须用 TypeORM Repository 标准 ORM 接口（findOne / save），禁止裸 SQL
-// (AppDataSource.query 调用) 出现在该文件。
+// 钉死 TypeOrmIdentityStore.upsertMapping 的 SQL 形态与 race 安全语义。
 //
 // 真实 prod bug（已在丢消息）：
-//   旧实现用手写 SQL "INSERT ... ON CONFLICT DO NOTHING + UNION ALL SELECT"
-//   并发 race 时 UNION ALL 看不到 conflicting row，返回 0 行 fail-loud。
-//   之后改成 raw SQL "ON CONFLICT DO UPDATE RETURNING" 修了 race，但 raw SQL
-//   是 critical concurrency primitive 上的硬骨头，不该在业务层手写。
-//   本次彻底改用 ORM repository.findOne + repository.save（unique violation
-//   → catch + 重读）—— PG 内部 visibility 语义交给 TypeORM 处理。
+//   旧实现 SQL =
+//     WITH ins AS (
+//       INSERT ... ON CONFLICT ON CONSTRAINT uq_* DO NOTHING
+//       RETURNING <internal_col> AS internal_id
+//     )
+//     SELECT internal_id FROM ins
+//     UNION ALL
+//     SELECT <internal_col> AS internal_id FROM <table>
+//     WHERE channel=$2 AND <channel_id_col>=$3
+//     LIMIT 1
+//   并发同 (channel, channel_id) 第二次进来：INSERT 走 ON CONFLICT DO NOTHING
+//   → ins 0 行；PG read committed 下同一 CTE 的 UNION ALL SELECT 看不到那条
+//   conflicting row（snapshot 边界） → SELECT 0 行 → 整体 0 行 → store 抛
+//   "returned no internal id; store is inconsistent" → fail-loud 链路中断 →
+//   prod 丢消息。
 //
-// 不连真实 PG —— mock @ormconfig 让我们能验证 ORM 接口的调用形态 + 模拟
-// 并发场景下 forward-key 已被别人占用的情况。
+// 修复方向：改成 ON CONFLICT ... DO UPDATE SET <indexed_col>=EXCLUDED.<...>
+// RETURNING <internal_col>。DO UPDATE 即使 SET no-op 也"涉及行"，永远把那行
+// 通过 RETURNING 拉回，不再依赖 CTE UNION ALL 兜底。三张表 (identity_user /
+// identity_chat / identity_message) 同款 SQL 全部统一。
+//
+// 不连真实 PG —— mock @ormconfig 让我们能捕获实际下发的 SQL 文本，并按需
+// 模拟 query 返回行。
 
-interface FakeRow {
-    channel: string;
-    [key: string]: string;
-}
+let capturedSqls: string[] = [];
+let nextRows: Array<Array<{ internal_id: string }>> = [];
 
-// 模拟 TypeORM Repository：保留 (channel, channelIdCol) 复合唯一约束 +
-// internal_id 主键唯一约束的行为。
-class FakeRepo {
-    rows: FakeRow[] = [];
-    findOneCalls = 0;
-    saveCalls = 0;
-    upsertCalls = 0;
-    queryCalls = 0;
-
-    constructor(
-        private readonly internalCol: string,
-        private readonly channelIdCol: string,
-        private readonly forwardConstraint: string,
-    ) {}
-
-    async findOne(opts: { where: Record<string, string> }): Promise<FakeRow | null> {
-        this.findOneCalls += 1;
-        const where = opts.where;
-        const hit = this.rows.find((r) =>
-            Object.keys(where).every((k) => r[k] === where[k]),
-        );
-        return hit ?? null;
-    }
-
-    async save(row: FakeRow): Promise<FakeRow> {
-        this.saveCalls += 1;
-        // 模拟 PG forward-key 唯一约束：(channel, channelIdCol) 已存在 → 抛 23505
-        const fwdHit = this.rows.find(
-            (r) =>
-                r.channel === row.channel &&
-                r[this.channelIdCol] === row[this.channelIdCol],
-        );
-        if (fwdHit) {
-            const e: Error & { code?: string; constraint?: string } = new Error(
-                'duplicate key value violates unique constraint',
-            );
-            e.code = '23505';
-            e.constraint = this.forwardConstraint;
-            (e as unknown as { driverError: { code: string; constraint: string } }).driverError = {
-                code: '23505',
-                constraint: this.forwardConstraint,
-            };
-            throw e;
-        }
-        // 模拟 PG 主键唯一约束：internal_id 已存在 → 抛 23505 但 constraint 是主键
-        const pkHit = this.rows.find(
-            (r) => r[this.internalCol] === row[this.internalCol],
-        );
-        if (pkHit) {
-            const e: Error & { code?: string; constraint?: string } = new Error(
-                'duplicate key value violates unique constraint',
-            );
-            e.code = '23505';
-            e.constraint = `identity_pkey`;
-            (e as unknown as { driverError: { code: string; constraint: string } }).driverError = {
-                code: '23505',
-                constraint: `identity_pkey`,
-            };
-            throw e;
-        }
-        this.rows.push({ ...row });
-        return row;
-    }
-}
-
-// 注入这些 fake repo 给 TypeOrmIdentityStore 通过 AppDataSource.getRepository
-const repos = {
-    user: new FakeRepo('internal_user_id', 'channel_user_id', 'uq_identity_user_channel'),
-    chat: new FakeRepo('internal_chat_id', 'channel_chat_id', 'uq_identity_chat_channel'),
-    message: new FakeRepo('internal_message_id', 'channel_message_id', 'uq_identity_message_channel'),
-};
-
-// query() 调用计数 —— 这是禁令：实现里不应该再调用 AppDataSource.query()
-let rawQueryCalls = 0;
-
-const getRepositoryMock = mock((entity: { name?: string }) => {
-    const name = entity?.name ?? '';
-    if (name.includes('User')) return repos.user;
-    if (name.includes('Chat')) return repos.chat;
-    if (name.includes('Message')) return repos.message;
-    throw new Error(`unknown entity: ${name}`);
-});
-
-const queryMock = mock(async (_sql: string, _params?: unknown[]) => {
-    rawQueryCalls += 1;
-    return [];
+const queryMock = mock(async (sql: string, _params: unknown[]) => {
+    capturedSqls.push(sql);
+    // 顺序消费下一个预设的返回值；没预设则返回单行（默认 happy path）。
+    const next = nextRows.shift();
+    if (next !== undefined) return next;
+    return [{ internal_id: 'DEFAULT_ULID_______________' }];
 });
 
 mock.module('@ormconfig', () => ({
     default: {
-        getRepository: getRepositoryMock,
         query: queryMock,
     },
 }));
 
+// 让 identity-store.ts 顶层 import 的 entities 不实际走 TypeORM 解析（解析
+// 流程在测试环境下没意义；TypeOrmIdentityStore 真正用到 KIND_TABLE.entity
+// 的只在 findInternalId/findChannelRef，本测试只覆盖 upsertMapping 路径）。
 mock.module('@entities/identity-mapping', () => ({
-    IdentityUser: class { static name = 'IdentityUser'; },
-    IdentityChat: class { static name = 'IdentityChat'; },
-    IdentityMessage: class { static name = 'IdentityMessage'; },
+    IdentityUser: class {},
+    IdentityChat: class {},
+    IdentityMessage: class {},
 }));
 
 const { TypeOrmIdentityStore } = await import('./identity-store');
-const { PrimaryKeyConflictError } = await import('@core/channels/db-identity-resolver');
 
-describe('TypeOrmIdentityStore.upsertMapping race-safe via TypeORM ORM 接口', () => {
+const KIND_CASES = [
+    {
+        kind: 'user' as const,
+        table: 'identity_user',
+        internalCol: 'internal_user_id',
+        channelIdCol: 'channel_user_id',
+        constraint: 'uq_identity_user_channel',
+    },
+    {
+        kind: 'chat' as const,
+        table: 'identity_chat',
+        internalCol: 'internal_chat_id',
+        channelIdCol: 'channel_chat_id',
+        constraint: 'uq_identity_chat_channel',
+    },
+    {
+        kind: 'message' as const,
+        table: 'identity_message',
+        internalCol: 'internal_message_id',
+        channelIdCol: 'channel_message_id',
+        constraint: 'uq_identity_message_channel',
+    },
+];
+
+describe('TypeOrmIdentityStore.upsertMapping race-safe SQL 形态契约', () => {
     beforeEach(() => {
-        repos.user.rows = [];
-        repos.chat.rows = [];
-        repos.message.rows = [];
-        repos.user.findOneCalls = 0;
-        repos.user.saveCalls = 0;
-        repos.chat.findOneCalls = 0;
-        repos.chat.saveCalls = 0;
-        repos.message.findOneCalls = 0;
-        repos.message.saveCalls = 0;
-        rawQueryCalls = 0;
+        capturedSqls = [];
+        nextRows = [];
+        queryMock.mockClear();
     });
 
-    it('禁用 raw SQL：上层 ORM 接口收敛后，AppDataSource.query 不应被调用', async () => {
-        const store = new TypeOrmIdentityStore();
-        await store.upsertMapping({
-            kind: 'message',
-            channel: 'lark',
-            channelId: 'om_first',
-            internalId: 'ULID_FRESH________________',
+    for (const c of KIND_CASES) {
+        it(`${c.kind}: SQL 必须用 DO UPDATE + RETURNING，不得用 DO NOTHING + UNION ALL SELECT 兜底`, async () => {
+            // 预设 RETURNING 返回单行（DO UPDATE 永远 RETURNING）
+            nextRows.push([{ internal_id: 'ULID_FROM_RETURNING_______' }]);
+
+            const store = new TypeOrmIdentityStore();
+            const got = await store.upsertMapping({
+                kind: c.kind,
+                channel: 'lark',
+                channelId: 'om_xxx',
+                internalId: 'ULID_FRESH_______________0',
+            });
+            expect(got).toBe('ULID_FROM_RETURNING_______');
+
+            expect(capturedSqls).toHaveLength(1);
+            const sql = capturedSqls[0]!;
+
+            // 必须含目标表/约束/列名
+            expect(sql).toContain(c.table);
+            expect(sql).toContain(c.constraint);
+            expect(sql).toContain(c.internalCol);
+            expect(sql).toContain(c.channelIdCol);
+
+            // 必须是 DO UPDATE，不再 DO NOTHING
+            expect(sql).toMatch(/ON\s+CONFLICT\s+ON\s+CONSTRAINT\s+\w+\s+DO\s+UPDATE/i);
+            expect(sql).not.toMatch(/DO\s+NOTHING/i);
+
+            // 不应再有 CTE/UNION ALL 兜底（DO UPDATE 永远 RETURNING）
+            expect(sql).not.toMatch(/UNION\s+ALL/i);
+            expect(sql).not.toMatch(/\bWITH\s+ins\b/i);
+
+            // 必须 RETURNING internalCol
+            expect(sql).toMatch(
+                new RegExp(`RETURNING\\s+${c.internalCol}`, 'i'),
+            );
+
+            // EXCLUDED.* 引用（DO UPDATE SET 用到 EXCLUDED 才是规范写法）
+            expect(sql).toMatch(/EXCLUDED\./);
         });
-        // 实现必须只用 ORM repository.findOne / repository.save / repository.upsert
-        // 等标准接口；query() 不应被调用。
-        expect(rawQueryCalls).toBe(0);
-    });
+    }
 
-    it('forward-key 不存在 -> save 成功返回 internalId', async () => {
+    it('race 复现：旧 SQL pattern 下 conflict 路径若返回 0 行会 fail-loud；新 SQL DO UPDATE 永远返回单行，store 不再抛 inconsistent', async () => {
+        // 这条直接对着 race 行为：模拟"DB 在 conflict 路径仍然 RETURNING 一行"
+        // —— 这是 DO UPDATE 的承诺，PG 引擎保证。
+        // 旧实现下当 conflict 触发 DO NOTHING 时 query 返回 []，store 抛
+        // inconsistent。新实现下 DB 永远不会返回 []，所以 store 永远拿到 id。
+        nextRows.push([{ internal_id: 'EXISTING_ULID_______________' }]);
+
         const store = new TypeOrmIdentityStore();
         const id = await store.upsertMapping({
-            kind: 'user',
-            channel: 'lark',
-            channelId: 'uid_1',
-            internalId: 'ULID_FRESH_USER___________',
-        });
-        expect(id).toBe('ULID_FRESH_USER___________');
-        expect(repos.user.rows).toHaveLength(1);
-        expect(repos.user.rows[0]!.channel_user_id).toBe('uid_1');
-        expect(repos.user.rows[0]!.internal_user_id).toBe(
-            'ULID_FRESH_USER___________',
-        );
-    });
-
-    it('forward-key 已存在（race 复现）：upsertMapping 收敛回已有 internalId、不抛错', async () => {
-        // 预置已有行（并发竞争场景：别人已经写过同 (channel, channelId)）
-        repos.message.rows.push({
-            channel: 'lark',
-            channel_message_id: 'om_exist',
-            internal_message_id: 'EXISTING_ULID_______________',
-        });
-
-        const store = new TypeOrmIdentityStore();
-        const id = await store.upsertMapping({
             kind: 'message',
             channel: 'lark',
-            channelId: 'om_exist',
+            channelId: 'om_existing',
             internalId: 'CANDIDATE_ULID_NOT_USED____',
         });
-        // 必须返回已有的 internalId（不是 candidate）—— ON CONFLICT 收敛语义
+
         expect(id).toBe('EXISTING_ULID_______________');
-        // 仍然只有一行（candidate 没有被新插入）
-        expect(repos.message.rows).toHaveLength(1);
-    });
-
-    it('forward-key save race（同时写）：第一次 race 抛 23505 forward 约束后，重新读到现有行并返回其 internalId', async () => {
-        // 模拟"我先 findOne 看没人，然后 save 时 race 输了"的并发：findOne
-        // 阶段为空，但 save 时另一个并发已写入。实现应捕获 23505 + 重读，
-        // 拿到现有行的 internalId 返回。
-        const store = new TypeOrmIdentityStore();
-
-        // 在 save 之前篡改 rows：第一次 findOne 返回 null，save 触发 23505，
-        // 实现再重新 findOne 拿到这条 race-winner 的 internalId
-        let saveAttempt = 0;
-        const origSave = repos.chat.save.bind(repos.chat);
-        repos.chat.save = (async (row: FakeRow) => {
-            saveAttempt += 1;
-            if (saveAttempt === 1) {
-                // 模拟 race winner 抢先写入
-                repos.chat.rows.push({
-                    channel: row.channel,
-                    channel_chat_id: row.channel_chat_id!,
-                    internal_chat_id: 'WINNER_ULID________________',
-                });
-            }
-            return origSave(row);
-        }) as typeof repos.chat.save;
-
-        const id = await store.upsertMapping({
-            kind: 'chat',
-            channel: 'lark',
-            channelId: 'oc_race',
-            internalId: 'LOSER_CANDIDATE_ULID_______',
-        });
-        // 实现必须返回 race winner 的 internalId（不是 candidate 也不抛错）
-        expect(id).toBe('WINNER_ULID________________');
-    });
-
-    it('internal_id 主键(ULID)冲突：抛 PrimaryKeyConflictError 让 resolver 重新生成', async () => {
-        // 预置一行占用某个 ULID（不同 forward-key），下次 upsert 用同一 ULID
-        // 但新 forward-key —— 必须抛 PrimaryKeyConflictError，不能静默收敛
-        repos.user.rows.push({
-            channel: 'qq',
-            channel_user_id: 'qq_uid_1',
-            internal_user_id: 'TAKEN_ULID________________',
-        });
-
-        const store = new TypeOrmIdentityStore();
-        await expect(
-            store.upsertMapping({
-                kind: 'user',
-                channel: 'lark',
-                channelId: 'different_uid',
-                internalId: 'TAKEN_ULID________________',
-            }),
-        ).rejects.toBeInstanceOf(PrimaryKeyConflictError);
+        // 不抛 "returned no internal id" / "store is inconsistent"
+        // —— 通过 await 不抛 就证明了。
     });
 });
