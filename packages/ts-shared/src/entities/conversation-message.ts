@@ -8,6 +8,13 @@ export class ConversationMessage {
     @Column({ length: 100 })
     user_id!: string;
 
+    /**
+     * 发送者显示名冗余列。身份全局化后 user_id 是全局 internal_user_id，
+     * 读取端不再 JOIN lark_user 取名，改读本列。历史数据迁移前为空。
+     */
+    @Column({ length: 100, nullable: true })
+    username?: string;
+
     @Column({ type: 'text' })
     content!: string;
 

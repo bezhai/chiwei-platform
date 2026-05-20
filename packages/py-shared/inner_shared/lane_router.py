@@ -72,7 +72,7 @@ class LaneRouter:
             lane_provider=get_lane,  # 注入 contextvars 读取函数
         )
 
-        url = lane_router.resolve_url("lark-server", "/api/image/process")
+        url = lane_router.resolve_url("channel-server", "/api/image/process")
         headers = lane_router.get_headers()
     """
 

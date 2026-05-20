@@ -34,6 +34,24 @@ user_invocable: true
 - 提交后返回 `mutation_id`，状态为 `pending`
 - **告知用户**：已提交审批，ID=<id>，请前往 Dashboard → DB 变更 页面审批
 
+### 提交变更申请（大文本 / 含特殊字符，走文件入口）
+
+当 SQL 含 PL/pgSQL `DO $$ ... $$`、`$var`、单双引号、`%`、换行，或要复刻
+persona 这类大文本时，**不要**走命令行（`$ARGUMENTS` 经 shell 会把 `$$`
+展开成进程 PID，SQL 损坏）。改用 `--file` 入口，SQL 从文件逐字节原样读取，
+完全不经 shell：
+
+```
+python3 .claude/skills/ops-db/query.py submit @chiwei-test --file /tmp/seed.sql --reason "复刻 prod bot_persona 到 chiwei-test"
+```
+
+- 先把 SQL 写入纯路径文件（如 `/tmp/seed.sql`，路径不含特殊字符）
+- `--file <path>`：从该文件按 UTF-8 逐字节读取 SQL，原样提交，不做任何处理
+- `--reason <text>`：变更说明用独立参数传，**不再**从 SQL 里正则切
+  `-- reason:`（避免 persona 文本里的同形子串被误当成 reason）
+- `@数据库`、返回格式、审批流程与上面的命令行 submit 完全一致
+- 命令行 `submit @db <SQL> -- reason:` 旧用法保持不变，仅在需要文件入口时使用 `--file`
+
 ### 查询审批状态
 
 ```

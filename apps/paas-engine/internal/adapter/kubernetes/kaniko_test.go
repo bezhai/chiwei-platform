@@ -20,8 +20,8 @@ func TestSubmit_ContextDirArgs(t *testing.T) {
 	}{
 		{
 			name:       "子目录构建：使用 --context-sub-path",
-			contextDir: "apps/lark-proxy",
-			wantArg:    "--context-sub-path=apps/lark-proxy",
+			contextDir: "apps/channel-proxy",
+			wantArg:    "--context-sub-path=apps/channel-proxy",
 		},
 		{
 			name:       "空 context_dir：不追加子路径",

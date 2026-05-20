@@ -149,6 +149,82 @@ def cmd_submit(args):
     print(json.dumps(resp, default=str, ensure_ascii=False))
 
 
+def cmd_submit_file(dbname, file_path, reason):
+    """submit @<db> --file <path> --reason <text>
+
+    Shell-free SQL submission. The SQL is read verbatim from file_path as
+    UTF-8 and POSTed byte-for-byte (no -- reason: regex, no join/split, no
+    shell). Used for payloads that break the argv path: PL/pgSQL $$ blocks,
+    $vars, quotes, %, newlines, literal '-- reason:' substrings.
+    """
+    if dbname not in DB_ALIASES:
+        print(f"ERROR: 未知数据库 '{dbname}'", file=sys.stderr)
+        sys.exit(1)
+    dbname = DB_ALIASES[dbname]
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            sql = f.read()
+    except OSError as e:
+        print(f"ERROR: 无法读取 SQL 文件 '{file_path}': {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not sql.strip():
+        print("ERROR: SQL 文件为空", file=sys.stderr)
+        sys.exit(1)
+
+    paas_api, cc_token = get_env()
+    resp = curl_post(
+        f"{paas_api}/dashboard/api/ops/db-mutations",
+        {"db": dbname, "sql": sql, "reason": reason, "submitted_by": "claude-code"},
+        cc_token,
+    )
+    if "error" in resp and resp.get("error"):
+        print(f"ERROR: {resp['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(json.dumps(resp, default=str, ensure_ascii=False))
+
+
+def parse_submit_file_argv(argv):
+    """Parse `submit [@db] --file <path> [--reason <text>]` from a raw argv
+    list (discrete elements, never joined/split). Returns
+    (dbname, file_path, reason) or None if this is not a --file submit.
+    """
+    if not argv or argv[0].lower() != "submit" or "--file" not in argv:
+        return None
+
+    rest = argv[1:]
+    dbname = DEFAULT_DB
+    file_path = None
+    reason = ""
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("@"):
+            dbname = tok[1:]
+            i += 1
+        elif tok == "--file":
+            if i + 1 >= len(rest):
+                print("ERROR: --file 缺少路径参数", file=sys.stderr)
+                sys.exit(1)
+            file_path = rest[i + 1]
+            i += 2
+        elif tok == "--reason":
+            if i + 1 >= len(rest):
+                print("ERROR: --reason 缺少说明参数", file=sys.stderr)
+                sys.exit(1)
+            reason = rest[i + 1]
+            i += 2
+        else:
+            print(f"ERROR: --file 模式下无法识别的参数 '{tok}'", file=sys.stderr)
+            sys.exit(1)
+
+    if file_path is None:
+        return None
+    return dbname, file_path, reason
+
+
 def cmd_status(args):
     """status <id> — 查询 mutation 审批状态。"""
     if not args:
@@ -169,6 +245,14 @@ def main():
         print("用法: query.py <command> [args...]", file=sys.stderr)
         print("命令: [@db] <SQL|schema>  |  submit @<db> <SQL>  |  status <id>", file=sys.stderr)
         sys.exit(1)
+
+    # --file 模式：从原始 argv（离散元素，不 join/不 split、不经 shell）解析。
+    # 必须先于下面的 join/split，否则 SQL 文件内容与 reason 会被破坏。
+    file_submit = parse_submit_file_argv(sys.argv[1:])
+    if file_submit is not None:
+        dbname, file_path, reason = file_submit
+        cmd_submit_file(dbname, file_path, reason)
+        return
 
     # skill 预处理以 "$ARGUMENTS" 传入，所有参数合为单个字符串。
     # 先拼回完整文本，再按首词分派。

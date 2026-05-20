@@ -45,11 +45,11 @@ class Route(NamedTuple):
 CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 RECALL = Route("recall", "action.recall")
-# ``vectorize`` is published by lark-server (TS, identical
+# ``vectorize`` is published by channel-server (TS, identical
 # ``buildQueueArgs``/``DLX_NAME``/``EXCHANGE_NAME`` constants) and
 # consumed by the dataflow runtime via ``Source.mq("vectorize")``. We
 # co-declare it from agent-service's ``ALL_ROUTES`` so a lane that
-# only deploys agent-service + vectorize-worker (no lark-server in the
+# only deploys agent-service + vectorize-worker (no channel-server in the
 # lane) can still create the lane queue ``vectorize_<lane>`` —
 # otherwise vectorize-worker's MQ source loop hits NOT_FOUND on
 # passive ``get_queue`` and the runtime crashes. Re-declare on the

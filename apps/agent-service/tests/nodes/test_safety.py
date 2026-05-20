@@ -80,7 +80,7 @@ async def test_run_post_safety_raises_when_row_missing():
         with pytest.raises(RuntimeError) as excinfo:
             await m.run_post_safety(_make_req("missing-row"))
     assert "missing-row" in str(excinfo.value)
-    assert "lark-server" in str(excinfo.value)
+    assert "channel-server" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ function getConfig(): { baseURL: string; headers: Record<string, string> } {
 }
 
 function getLarkConfig(): { baseURL: string; headers: Record<string, string> } {
-  const larkApi = process.env.DASHBOARD_LARK_API || 'http://lark-proxy:3003';
+  const larkApi = process.env.DASHBOARD_CHANNEL_API || 'http://channel-proxy:3003';
   const paasToken = process.env.DASHBOARD_PAAS_TOKEN;
   if (!paasToken) {
     throw new Error('DASHBOARD_PAAS_TOKEN not configured');

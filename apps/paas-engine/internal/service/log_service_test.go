@@ -230,7 +230,7 @@ func TestQueryLogs_MultiApp(t *testing.T) {
 	svc := NewLogService(appRepo, querier, "prod")
 
 	_, err := svc.QueryLogs(context.Background(), LogQueryOptions{
-		App:   "lark-server,agent-service",
+		App:   "channel-server,agent-service",
 		Since: "1h",
 	})
 	if err != nil {
@@ -239,7 +239,7 @@ func TestQueryLogs_MultiApp(t *testing.T) {
 	if len(querier.lastQuery.Apps) != 2 {
 		t.Fatalf("expected 2 apps, got %v", querier.lastQuery.Apps)
 	}
-	if querier.lastQuery.Apps[0] != "lark-server" || querier.lastQuery.Apps[1] != "agent-service" {
-		t.Errorf("apps = %v, want [lark-server agent-service]", querier.lastQuery.Apps)
+	if querier.lastQuery.Apps[0] != "channel-server" || querier.lastQuery.Apps[1] != "agent-service" {
+		t.Errorf("apps = %v, want [channel-server agent-service]", querier.lastQuery.Apps)
 	}
 }

@@ -1,6 +1,6 @@
 """Core SQLAlchemy ORM models.
 
-Note: bot_config, bot_chat_presence, agent_responses 等表由 lark-server 管理，
+Note: bot_config, bot_chat_presence, agent_responses 等表由 channel-server 管理，
 此处未定义 ORM model，queries.py 中通过 raw SQL 访问。
 
 Tables:
@@ -137,6 +137,10 @@ class ConversationMessage(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
     message_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(100))
+    # 发送者显示名冗余列。身份全局化后 user_id 是全局 internal_user_id，
+    # 不再能 JOIN lark_user.union_id 取名，改由写入端把发送者显示名
+    # 一并落库、读取端直接读本列。历史数据迁移前为空 → nullable。
+    username: Mapped[str | None] = mapped_column(String(100), nullable=True)
     content: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(20))
     root_message_id: Mapped[str] = mapped_column(String(100))

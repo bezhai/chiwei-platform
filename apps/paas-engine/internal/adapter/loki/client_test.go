@@ -221,7 +221,7 @@ func TestQueryAppLogs_WithRegexp(t *testing.T) {
 	c := NewClient(srv.URL)
 	_, err := c.QueryAppLogs(context.Background(), port.AppLogQuery{
 		Namespace: "prod",
-		Apps:      []string{"lark-server"},
+		Apps:      []string{"channel-server"},
 		Regexp:    "timeout|deadline",
 		Start:     time.Unix(0, 0),
 		End:       time.Now(),
@@ -261,7 +261,7 @@ func TestQueryAppLogs_NoApp(t *testing.T) {
 func TestQueryAppLogs_MultiApp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
-		if !contains(q, `app=~"lark-server|agent-service"`) {
+		if !contains(q, `app=~"channel-server|agent-service"`) {
 			t.Errorf("expected multi-app regex, got %q", q)
 		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
@@ -271,7 +271,7 @@ func TestQueryAppLogs_MultiApp(t *testing.T) {
 	c := NewClient(srv.URL)
 	_, err := c.QueryAppLogs(context.Background(), port.AppLogQuery{
 		Namespace: "prod",
-		Apps:      []string{"lark-server", "agent-service"},
+		Apps:      []string{"channel-server", "agent-service"},
 		Start:     time.Unix(0, 0),
 		End:       time.Now(),
 		Limit:     100,
@@ -284,7 +284,7 @@ func TestQueryAppLogs_MultiApp(t *testing.T) {
 func TestQueryAppLogs_PodPrefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
-		if !contains(q, `pod=~"lark-server-abc.*"`) {
+		if !contains(q, `pod=~"channel-server-abc.*"`) {
 			t.Errorf("expected pod prefix match, got %q", q)
 		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
@@ -294,8 +294,8 @@ func TestQueryAppLogs_PodPrefix(t *testing.T) {
 	c := NewClient(srv.URL)
 	_, err := c.QueryAppLogs(context.Background(), port.AppLogQuery{
 		Namespace: "prod",
-		Apps:      []string{"lark-server"},
-		Pod:       "lark-server-abc",
+		Apps:      []string{"channel-server"},
+		Pod:       "channel-server-abc",
 		Start:     time.Unix(0, 0),
 		End:       time.Now(),
 		Limit:     100,
@@ -398,13 +398,13 @@ func TestBuildLogQL(t *testing.T) {
 			name: "full combination",
 			query: port.AppLogQuery{
 				Namespace: "prod",
-				Apps:      []string{"lark-server"},
+				Apps:      []string{"channel-server"},
 				Lane:      "dev",
 				Keyword:   "error",
 				Exclude:   "healthcheck",
 				Regexp:    "timeout|deadline",
 			},
-			expected: `{namespace="prod", app="lark-server", lane="dev"} |= "error" != "healthcheck" |~ "timeout|deadline"`,
+			expected: `{namespace="prod", app="channel-server", lane="dev"} |= "error" != "healthcheck" |~ "timeout|deadline"`,
 		},
 	}
 

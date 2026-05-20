@@ -86,8 +86,8 @@ data:
       "api-gateway|http://api-gateway.prod:8080/healthz" \
       "paas-engine|http://paas-engine.prod:8080/healthz" \
       "lite-registry|http://lite-registry.prod:8080/healthz" \
-      "lark-server|http://lark-server.prod:3000/api/health" \
-      "lark-proxy|http://lark-proxy.prod:3003/api/health" \
+      "channel-server|http://channel-server.prod:3000/api/health" \
+      "channel-proxy|http://channel-proxy.prod:3003/api/health" \
       "agent-service|http://agent-service.prod:8000/health" \
       "tool-service|http://tool-service.prod:8000/health"
     do

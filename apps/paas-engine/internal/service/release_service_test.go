@@ -351,40 +351,40 @@ func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
 	}
 }
 
-func TestCreateOrUpdateRelease_RejectsLarkProxyToCoe(t *testing.T) {
+func TestCreateOrUpdateRelease_RejectsChannelProxyToCoe(t *testing.T) {
 	app := &domain.App{
-		Name:               "lark-proxy",
-		ImageRepoName:      "lark-proxy",
+		Name:               "channel-proxy",
+		ImageRepoName:      "channel-proxy",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 	}
 	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
 	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
-		AppName:  "lark-proxy",
+		AppName:  "channel-proxy",
 		Lane:     "coe-foo",
 		ImageTag: "1.0.0",
 	})
 	if err == nil {
-		t.Fatal("expected reject for lark-proxy to coe lane")
+		t.Fatal("expected reject for channel-proxy to coe lane")
 	}
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("must wrap ErrInvalidInput: %v", err)
 	}
-	if !strings.Contains(err.Error(), "lark-proxy") || !strings.Contains(err.Error(), "coe") {
+	if !strings.Contains(err.Error(), "channel-proxy") || !strings.Contains(err.Error(), "coe") {
 		t.Fatalf("error must mention app and lane class: %v", err)
 	}
 }
 
-func TestCreateOrUpdateRelease_AllowsLarkProxyToProd(t *testing.T) {
+func TestCreateOrUpdateRelease_AllowsChannelProxyToProd(t *testing.T) {
 	app := &domain.App{
-		Name:               "lark-proxy",
-		ImageRepoName:      "lark-proxy",
+		Name:               "channel-proxy",
+		ImageRepoName:      "channel-proxy",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 	}
 	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
 	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
-		AppName:  "lark-proxy",
+		AppName:  "channel-proxy",
 		Lane:     "prod",
 		ImageTag: "1.0.0",
 	})

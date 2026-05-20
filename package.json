@@ -2,8 +2,8 @@
   "name": "chiwei-platform",
   "private": true,
   "workspaces": [
-    "apps/lark-server",
-    "apps/lark-proxy",
+    "apps/channel-server",
+    "apps/channel-proxy",
     "apps/monitor-dashboard",
     "apps/monitor-dashboard-web",
     "apps/media-sync-worker",

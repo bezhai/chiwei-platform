@@ -29,7 +29,7 @@ endef
 # 一镜像多服务映射：deploy/release 时自动连同 sibling 服务一起处理。
 # 镜像 → 同步服务清单（不含主 APP 自身）。映射表单一来源，见 CLAUDE.md 镜像与服务映射表。
 SIBLINGS_agent-service := vectorize-worker
-SIBLINGS_lark-server   := recall-worker chat-response-worker
+SIBLINGS_channel-server := recall-worker chat-response-worker
 # `$(SIBLINGS_$(APP))` 在 make 解析阶段展开，未匹配的 APP 得空串（无 sibling，安静跳过 for）。
 
 define require_pushed
@@ -145,7 +145,7 @@ self-deploy:
 
 ## 仅发布（不构建），用于切换泳道/回滚
 ## 用法: make release APP=xxx LANE=yyy VERSION=1.0.0.5
-## 注：agent-service / lark-server 类多服务镜像会同步 release sibling（vectorize-worker / recall-worker / chat-response-worker）。
+## 注：agent-service / channel-server 类多服务镜像会同步 release sibling（vectorize-worker / recall-worker / chat-response-worker）。
 release:
 	@$(call require_app)
 	$(if $(VERSION),,$(error VERSION 未指定。用法: make release APP=<app> LANE=<lane> VERSION=<version>))
@@ -259,9 +259,9 @@ END       ?=
 ## 查询应用运行时日志
 ## 用法: make logs APP=agent-service KEYWORD=error SINCE=30m
 ##       make logs KEYWORD=timeout EXCLUDE=health              （全 namespace）
-##       make logs APP=lark-server,agent-service KEYWORD=trace  （多 app）
-##       make logs APP=lark-server POD=lark-server-abc          （Pod 前缀）
-##       make logs APP=lark-server START=2024-01-01T10:00:00Z END=2024-01-01T11:00:00Z
+##       make logs APP=channel-server,agent-service KEYWORD=trace  （多 app）
+##       make logs APP=channel-server POD=channel-server-abc          （Pod 前缀）
+##       make logs APP=channel-server START=2024-01-01T10:00:00Z END=2024-01-01T11:00:00Z
 logs:
 	@urlencode() { python3 -c "import urllib.parse; print(urllib.parse.quote('''$$1''', safe=''))"; }; \
 	PARAMS="limit=$(LIMIT)&direction=$(DIRECTION)"; \
@@ -325,7 +325,7 @@ BRANCH   ?= $(shell git rev-parse --abbrev-ref HEAD)
 SERVICES ?=
 
 ## 注册 CI 泳道
-## 用法: make ci-init LANE=feat-auth BRANCH=feat/auth-rework SERVICES=agent-service,lark-server
+## 用法: make ci-init LANE=feat-auth BRANCH=feat/auth-rework SERVICES=agent-service,channel-server
 ci-init:
 	$(if $(LANE),,$(error LANE 未指定))
 	$(if $(BRANCH),,$(error BRANCH 未指定))

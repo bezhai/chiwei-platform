@@ -62,3 +62,76 @@ def test_available_list_includes_chiwei_test(capsys):
         query.cmd_query(["@nope", "SELECT", "1"])
     err = capsys.readouterr().err
     assert "chiwei_test" in err
+
+
+# --- --file / --reason input path (shell-free SQL submission) ---
+
+# Deliberately hostile payload: PL/pgSQL $$ dollar-quoting, shell $var,
+# single + double quotes, %s, multi-line newlines, a -- comment, and a
+# literal "-- reason: xxx" substring that MUST NOT be stripped as a reason.
+HOSTILE_SQL = (
+    "DO $$\n"
+    "DECLARE v_id INT;\n"
+    "BEGIN\n"
+    "  INSERT INTO bot_persona (name, persona_core)\n"
+    "  VALUES ('赤尾', 'she said \"hi\" -- reason: not a real reason\\n100% $HOME');\n"
+    "  -- a trailing sql comment with $var and 'quotes'\n"
+    "END $$;\n"
+)
+
+
+def test_submit_file_sends_bytes_verbatim(captured, tmp_path):
+    """SQL read via --file must reach HTTP layer byte-identical: $$ preserved,
+    no -- reason: stripping, reason taken from --reason not from SQL."""
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text(HOSTILE_SQL, encoding="utf-8")
+
+    query.cmd_submit_file(
+        dbname="chiwei_test",
+        file_path=str(sql_file),
+        reason="复刻 prod bot_persona 到 chiwei-test",
+    )
+
+    payload = captured["payload"]
+    assert payload["sql"] == HOSTILE_SQL  # byte-identical, $$ intact
+    assert "$$" in payload["sql"]
+    assert payload["sql"].count("\n") == HOSTILE_SQL.count("\n")
+    assert payload["reason"] == "复刻 prod bot_persona 到 chiwei-test"
+    assert payload["db"] == "chiwei_test"
+    assert payload["submitted_by"] == "claude-code"
+
+
+def test_submit_file_resolves_db_alias(captured, tmp_path):
+    sql_file = tmp_path / "x.sql"
+    sql_file.write_text("INSERT INTO t VALUES (1);", encoding="utf-8")
+    query.cmd_submit_file(
+        dbname=query.DB_ALIASES["chiwei-test"],
+        file_path=str(sql_file),
+        reason="r",
+    )
+    assert captured["payload"]["db"] == "chiwei_test"
+
+
+def test_submit_file_via_main_argv(captured, tmp_path, monkeypatch):
+    """End-to-end through main(): `submit @chiwei-test --file P --reason R`.
+    The path/reason are discrete argv elements and must not be word-split."""
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text(HOSTILE_SQL, encoding="utf-8")
+    monkeypatch.setattr(
+        sys, "argv",
+        ["query.py", "submit", "@chiwei-test",
+         "--file", str(sql_file), "--reason", "seed persona data"],
+    )
+    query.main()
+    assert captured["payload"]["sql"] == HOSTILE_SQL
+    assert captured["payload"]["db"] == "chiwei_test"
+    assert captured["payload"]["reason"] == "seed persona data"
+
+
+def test_submit_file_missing_file_errors(captured, tmp_path):
+    with pytest.raises(SystemExit):
+        query.cmd_submit_file(
+            dbname="chiwei",
+            file_path=str(tmp_path / "nope.sql"),
+            reason="r",
+        )

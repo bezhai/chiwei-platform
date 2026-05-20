@@ -32,12 +32,40 @@ def _extract_error(response) -> str:
             pass
     return ", ".join(parts)
 
+_LARK_CHANNEL = "lark"
+
 # bot_name -> lark.Client
 _clients: dict[str, lark.Client] = {}
 
 
+def lark_credentials_from_row(bot) -> tuple[str, str] | None:
+    """把一条 bot_config 记录解释成 (app_id, app_secret)。
+
+    bot_config 多 channel 化后飞书凭据迁进 credentials JSONB、旧裸列已删。
+    tool-service 只建飞书 SDK client：非 lark 记录返回 None（跳过，不是
+    tool-service 的事）；lark 记录缺凭据明确抛错而不是静默放过——凭据缺失
+    静默会让飞书鉴权在运行期出诡异错。
+    """
+    if getattr(bot, "channel", _LARK_CHANNEL) != _LARK_CHANNEL:
+        return None
+    creds = bot.credentials
+    if not isinstance(creds, dict):
+        raise ValueError(
+            f"lark bot {bot.bot_name!r} has no credentials JSONB payload"
+        )
+    out = []
+    for field in ("app_id", "app_secret"):
+        v = creds.get(field)
+        if not isinstance(v, str) or not v:
+            raise ValueError(
+                f"lark bot {bot.bot_name!r} missing required credential {field!r}"
+            )
+        out.append(v)
+    return out[0], out[1]
+
+
 async def init_lark_clients() -> None:
-    """Load all active bot configs from DB and create Lark SDK clients."""
+    """Load all active lark bot configs from DB and create Lark SDK clients."""
     session_factory = get_session_factory()
     if session_factory is None:
         logger.warning("Database not configured, Lark clients disabled")
@@ -50,9 +78,13 @@ async def init_lark_clients() -> None:
         bots = result.scalars().all()
 
     for bot in bots:
+        creds = lark_credentials_from_row(bot)
+        if creds is None:
+            continue
+        app_id, app_secret = creds
         _clients[bot.bot_name] = lark.Client.builder() \
-            .app_id(bot.app_id) \
-            .app_secret(bot.app_secret) \
+            .app_id(app_id) \
+            .app_secret(app_secret) \
             .build()
         logger.info(f"Lark client initialized for bot: {bot.bot_name}")
 

@@ -47,6 +47,20 @@ def extract_reply_chain(
     return chain, other
 
 
+def _speaker_of(msg: QuickSearchResult) -> str:
+    """群上下文里这条消息的说话人。
+
+    身份全局化删了 lark_user JOIN：assistant 行本就无 username，
+    历史 user 行迁移前也全空。assistant 行按 role 派生固定说话人
+    （与 history.py 的 check_chat_history / search_group_history 一致：
+    用 "我"，不读 username），只有 user 行才 `username or 占位`，
+    避免把赤尾历史发言渲染成占位词喂给模型。
+    """
+    if msg.role == "assistant":
+        return "我"
+    return msg.username or "未知用户"
+
+
 def build_group_messages(
     messages: list[QuickSearchResult],
     trigger_id: str,
@@ -64,17 +78,17 @@ def build_group_messages(
     chain_lines = []
     for msg in chain:
         time_str = msg.create_time.strftime("%H:%M:%S")
-        username = msg.username or "未知用户"
+        speaker = _speaker_of(msg)
         text = parse_content(msg.content).render(image_fn=img_fn)
         marker = " ⭐" if msg.message_id == trigger_id else ""
-        chain_lines.append(f"[{time_str}] {username}: {text}{marker}")
+        chain_lines.append(f"[{time_str}] {speaker}: {text}{marker}")
 
     other_lines = []
     for msg in other:
         time_str = msg.create_time.strftime("%H:%M:%S")
-        username = msg.username or "未知用户"
+        speaker = _speaker_of(msg)
         text = parse_content(msg.content).render(image_fn=img_fn)
-        other_lines.append(f"[{time_str}] {username}: {text}")
+        other_lines.append(f"[{time_str}] {speaker}: {text}")
 
     user_content = get_prompt("context_builder").compile(
         reply_chain="\n".join(chain_lines) if chain_lines else "（无回复链）",

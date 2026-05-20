@@ -2,7 +2,7 @@
 
 Two entry points, one pipeline:
   * ``Source.mq("vectorize")`` feeds ``hydrate_message`` — legacy publishers
-    (lark-server today) keep posting ``{"message_id": X}`` frames to the
+    (channel-server today) keep posting ``{"message_id": X}`` frames to the
     old queue; the engine decodes them into ``MessageRequest`` and invokes
     ``hydrate_message`` which pulls the real row and emits a ``Message``.
   * ``proactive.py`` and other Python-side ConversationMessage writers lift
@@ -22,7 +22,7 @@ from app.nodes.save_fragment import save_fragment
 from app.nodes.vectorize import vectorize
 from app.runtime import Source, wire
 
-# MQ entry: lark-server publishes {"message_id": X} to the "vectorize" queue.
+# MQ entry: channel-server publishes {"message_id": X} to the "vectorize" queue.
 wire(MessageRequest).to(hydrate_message).from_(Source.mq("vectorize"))
 
 # Message durable -> vectorize (both entry paths converge here).

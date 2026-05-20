@@ -7,7 +7,7 @@ notify hook 直接 set future，不需要专门的 reply-side node。
 
 Post-check 数据面走 durable：chat pipeline emit(PostSafetyRequest) → durable
 queue → run_post_safety → blocked 时 return Recall → Sink.mq("recall") →
-lark-server recall-worker。
+channel-server recall-worker。
 
 所有节点都跑在 agent-service 主进程；post 复用 agent-service 而不是新开
 safety-worker，因为单条审计的工作量小（一次 banned word + 一次 guard LLM）。
@@ -29,7 +29,7 @@ wire(PreSafetyRequest).to(run_pre_safety)
 # Post-check：durable
 wire(PostSafetyRequest).to(run_post_safety).durable()
 
-# Recall 出 graph 给 lark-server recall-worker
+# Recall 出 graph 给 channel-server recall-worker
 wire(Recall).to(Sink.mq("recall"))
 
 # Placement — agent-service 主进程

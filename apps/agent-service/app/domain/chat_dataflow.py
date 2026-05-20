@@ -1,6 +1,6 @@
 """Phase 5a chat pipeline Data 类。
 
-ChatTrigger:        mq(chat_request) 入口的原始 body（lark-server publish）。
+ChatTrigger:        mq(chat_request) 入口的原始 body（channel-server publish）。
 ChatRequest:        route_chat_node fan-out 后 per-persona 的请求。
 ChatResponseSegment: chat_node 输出的段，最终 publish 到 mq(chat_response)。
 """
@@ -18,9 +18,12 @@ class ChatTrigger(Data):
 
     transient=True：source.mq 不做 insert_idempotent，business 幂等由
     route_chat_node 进入 graph 后的 (message_id, persona_id) 联合 Key
-    在 ChatRequest 上完成。message_id 设 Optional 以容忍 lark-server
+    在 ChatRequest 上完成。message_id 设 Optional 以容忍 channel-server
     偶发缺字段的 payload 反序列化失败。
     """
+    # 来源 channel。agent-service 对它无感知、只透传；默认 "lark" 保证停机
+    # 迁移时 MQ/outbox 残留的旧 payload（不带 channel）反序列化不炸。
+    channel: str = "lark"
     message_id: Annotated[str | None, Key] = None
     session_id: str | None = None
     chat_id: str | None = None
@@ -44,6 +47,7 @@ class ChatRequest(Data):
     (message_id, persona_id) 联合 Key 提供 in-graph durable redelivery
     去重。
     """
+    channel: str = "lark"
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     session_id: str | None = None
@@ -71,6 +75,7 @@ class ChatResponseSegment(Data):
     chat-response-worker 直接读 payload.lane 路由飞书回复。
     transient=True：段是事件流，不落 agent-service 自己的表。
     """
+    channel: str = "lark"
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     part_index: Annotated[int, Key] = 0

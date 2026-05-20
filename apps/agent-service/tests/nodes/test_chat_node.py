@@ -415,3 +415,54 @@ async def test_resolve_pre_safety_for_part_fail_open_on_exception():
     result = await _resolve_pre_safety_for_part("hello", pre_task, "GUARD")
     assert result.blocked is False
     assert result.content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_propagates_channel_to_response_segment(monkeypatch):
+    """chat_node 产出的 ChatResponseSegment 必须透传 req.channel。
+    走 fetch-empty 分支（raw_content 空 -> emit 一段后 return），覆盖
+    显式字段那处 emit；base_payload 路径由 route_chat_node TDD 同构保护。
+    """
+    from app.nodes import chat_node as cn
+
+    async def fake_find_message(mid):
+        return ""  # raw_content 空 -> 走 fetch-empty 分支
+
+    async def fake_find_gray(mid):
+        return {}
+
+    async def fake_guard(persona):
+        return "guard"
+
+    async def fake_pre_safety(message_id, content, persona_id):
+        from app.domain.safety import PreSafetyVerdict
+        return PreSafetyVerdict(
+            pre_request_id="x", message_id=message_id, is_blocked=False,
+        )
+
+    def parse_content_fn(s):
+        class _P:
+            def render(self):
+                return s
+
+        return _P()
+
+    emitted = []
+
+    async def fake_emit(d):
+        emitted.append(d)
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_message)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre_safety)
+    monkeypatch.setattr(cn, "parse_content", parse_content_fn)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="p1", session_id="s1", channel="qq",
+    )
+    await cn.chat_node(req)
+
+    assert len(emitted) >= 1
+    assert all(seg.channel == "qq" for seg in emitted)
