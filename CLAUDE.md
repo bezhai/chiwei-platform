@@ -131,7 +131,7 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 - **general-purpose 子 agent（并行）**：所有仓库文件修改**必须**经它，主会话不亲手改。**先 map 再 parallel**：并行前**必须**先派一个 Explore 子 agent 按"各 task 方法实际能触达哪些文件"摸出真实分区图（不是按声明产出算），无文件冲突的 task **鼓励并行**派多个子 agent；有冲突 / 有依赖的串行委派。每个 agent 拿一条 task 自己想细节、自己走 TDD 红-绿-重构（先写测试再写实现）、自己跑验证、自己报产出。主会话只接产出 + 证据，不参与中间过程。
 - **应用 reviewer 反馈本身是子 agent 任务**：采纳 codex 反馈去改 spec 或代码，这个落地动作**必须**委派子 agent 执行，不论目标文件在不在仓库内，主会话不亲手改。
 - **跨需求并行**：用 worktree + 多会话，不在一个会话里塞多个独立 feature。
-- **编排豁免边界**：主会话仍可直接跑 git 版本控制 / make / 部署 / `ghc`，以及 skill 驱动的脚本（codex-worker / api-test / ops 等）——这些是编排，不是排查。但 `git show <path>` / `git cat-file` 这类借 git 读逐文件内容的形态**算排查、不算编排**，**必须**委派子 agent。Bash 元字符 / argv0 的边界也按同一思路划：判定标准是这条命令**是否触发对仓库内容的实际读写**，不是是否含某个字符。fd-to-fd 复制 `[n]>&[m]` 和 `[n]<&[m]`（m 必须是数字，典型如 `2>&1` `1>&2` `3<&0`）只是复制 fd 表项，不打开文件，主会话直接做；管道 `|` 接 stdout filter argv0（`tail` / `head` / `grep` / `awk` / `sed` / `cut` / `sort` / `uniq` / `wc` / `jq` / `column`）是输出整形不构造命令，主会话直接做；串联 `;` / `&&` / `||` 每段独立走 argv allowlist 校验，主会话直接做。反过来，文件重定向 `>` `>>` `<` 和写文件的语法糖 `&>` `&>>` `>&file`（右侧是文件名 token，非纯数字 fd 编号）、命令替换 `$(...)` 和反引号、输入重定向 `<<<` 和 heredoc `<<` `<<-`、进程替换 `<(...)` `>(...)`，以及 `tee`（写文件）/ `less` `more`（交互）/ `xargs`（任意命令构造）/ `cat` `find` 等读 repo 文件的 argv0——任何一条命中都可能 leak 或污染仓库内容，**必须**委派子 agent。
+- **编排豁免边界**：主会话仍可直接跑 git 版本控制 / make / 部署 / `ghc`，以及 skill 驱动的脚本（codex-worker / api-test / ops 等）——这些是编排，不是排查。但 `git show <path>` / `git cat-file` 这类借 git 读逐文件内容的形态**算排查、不算编排**，**必须**委派子 agent。
 - **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/codex-collaboration.md`。
 
 ### 上线前必须完成的检查（TODO）
