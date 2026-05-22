@@ -38,6 +38,7 @@ func main() {
 	pipelineRunRepo := repository.NewPipelineRunRepo(db)
 	configBundleRepo := repository.NewConfigBundleRepo(db)
 	dynamicConfigRepo := repository.NewDynamicConfigRepo(db)
+	gatewayRuleRepo := repository.NewGatewayRuleRepo(db)
 
 	// K8s 客户端（可选，无集群时降级运行）
 	cs, _, k8sErr := kubernetes.NewClientset(cfg.KubeconfigPath)
@@ -80,6 +81,7 @@ func main() {
 		LegacyLaneWhitelist: cfg.LegacyLaneWhitelist,
 	})
 	dynamicConfigSvc := service.NewDynamicConfigService(dynamicConfigRepo)
+	gatewayRuleSvc := service.NewGatewayRuleService(gatewayRuleRepo)
 	releaseSvc := service.NewReleaseService(appRepo, imageRepoRepo, buildRepo, releaseRepo, deployer, configBundleSvc, service.ReleaseServiceConfig{
 		LegacyLaneWhitelist: cfg.LegacyLaneWhitelist,
 	})
@@ -89,6 +91,14 @@ func main() {
 	// 启动 Build Informer
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 幂等 ensure api-gateway 的 6 条基线路由规则：by name 不存在才插入，
+	// 已存在则不动（人工改过的不被重启覆盖）。这 6 条是系统基线，缺了业务路径会全断。
+	if err := gatewayRuleSvc.EnsureBaseline(ctx); err != nil {
+		slog.Warn("failed to ensure baseline gateway rules", "error", err)
+	} else {
+		slog.Info("baseline gateway rules ensured")
+	}
 	if buildExecutor != nil {
 		go func() {
 			if err := buildExecutor.Watch(ctx, buildSvc.OnBuildStatusChange); err != nil {
@@ -165,6 +175,7 @@ func main() {
 		httpadapter.NewPipelineHandler(pipelineSvc),
 		httpadapter.NewConfigBundleHandler(configBundleSvc),
 		httpadapter.NewDynamicConfigHandler(dynamicConfigSvc),
+		httpadapter.NewGatewayRuleHandler(gatewayRuleSvc),
 		cfg.APIToken,
 	)
 
