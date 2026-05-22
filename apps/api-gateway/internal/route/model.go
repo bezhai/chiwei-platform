@@ -27,9 +27,11 @@ type Target struct {
 	RewritePrefix string `json:"rewrite_prefix,omitempty"`
 }
 
-// Fallback decides what happens when the resolved target lane has no
-// instance in lite-registry: "prod" falls back to the service's prod
-// instance, "reject" returns 503.
+// Fallback is part of the wire schema (set by paas-engine) describing what
+// should happen when the target lane has no instance: "prod" falls back to the
+// service's prod instance, "reject" fails closed. The api-gateway no longer
+// acts on this — lane resolution and fail-closed are delegated to the
+// lane-sidecar — so the field is currently advisory only.
 type Fallback struct {
 	Mode string `json:"mode"`
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/chiwei-platform/api-gateway/internal/gateway"
 	"github.com/chiwei-platform/api-gateway/internal/loader"
 	"github.com/chiwei-platform/api-gateway/internal/middleware"
-	"github.com/chiwei-platform/api-gateway/internal/registry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -28,11 +27,9 @@ func main() {
 	ld := loader.New(cfg.GatewayRulesURL)
 	ld.Start(pollInterval)
 
-	// Start registry client (polls lite-registry in background)
-	reg := registry.NewClient(cfg.RegistryURL, pollInterval)
-
-	// Build gateway handler
-	gw := gateway.New(ld, reg, time.Duration(cfg.ProxyTimeoutSeconds)*time.Second)
+	// Build gateway handler. Lane resolution is delegated to the lane-sidecar, so
+	// the gateway no longer runs an in-process service-discovery client.
+	gw := gateway.New(ld, time.Duration(cfg.ProxyTimeoutSeconds)*time.Second)
 
 	// Build HTTP mux with health checks
 	mux := http.NewServeMux()

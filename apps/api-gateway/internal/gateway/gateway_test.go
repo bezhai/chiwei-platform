@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chiwei-platform/api-gateway/internal/registry"
 	"github.com/chiwei-platform/api-gateway/internal/route"
 )
 
@@ -22,18 +20,6 @@ type snapProvider struct {
 
 func (p *snapProvider) Current() *route.Snapshot { return p.snap.Load() }
 func (p *snapProvider) set(s *route.Snapshot)    { p.snap.Store(s) }
-
-// mockRegistry builds a registry client backed by the given services map.
-func mockRegistry(t *testing.T, services map[string]registry.ServiceInfo) *registry.Client {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"services": services})
-	}))
-	t.Cleanup(srv.Close)
-	reg := registry.NewClient(srv.URL, 1*time.Hour)
-	time.Sleep(50 * time.Millisecond)
-	return reg
-}
 
 func rule(name, prefix, reqLane string, t route.Target, fb string) route.Rule {
 	return route.Rule{
@@ -47,9 +33,8 @@ func rule(name, prefix, reqLane string, t route.Target, fb string) route.Rule {
 }
 
 func TestGatewayColdStartEmergencyRoutes(t *testing.T) {
-	reg := mockRegistry(t, nil)
 	p := &snapProvider{} // current == nil -> cold start
-	gw := New(p, reg, 5*time.Second)
+	gw := New(p, 5*time.Second)
 
 	// Emergency-covered prefixes should NOT 503 from the matcher (they reach proxy and 502 on dead upstream).
 	emergency := []string{"/api/paas/apps/", "/dashboard/index.html", "/dashboard/api/metrics"}
@@ -75,12 +60,11 @@ func TestGatewayColdStartEmergencyRoutes(t *testing.T) {
 }
 
 func TestGatewayNoMatch404(t *testing.T) {
-	reg := mockRegistry(t, nil)
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
 		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}, "prod"),
 	}))
-	gw := New(p, reg, 5*time.Second)
+	gw := New(p, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/totally/unknown", nil)
 	w := httptest.NewRecorder()
@@ -90,85 +74,130 @@ func TestGatewayNoMatch404(t *testing.T) {
 	}
 }
 
-// resolveTarget is the lane-resolution unit under test, isolated from proxying.
-func TestResolveTargetLanePassthrough(t *testing.T) {
-	reg := mockRegistry(t, map[string]registry.ServiceInfo{
-		"agent-service": {Lanes: []string{"prod", "ppe-x"}, Port: 8000},
-	})
-	p := &snapProvider{}
-	gw := New(p, reg, 5*time.Second)
+// TestForwardEffectiveLane locks the post-migration forwarding contract: the
+// gateway always dials the logical service name and writes X-Ctx-Lane =
+// effective_lane (target.Lane overrides request lane; empty -> header omitted).
+// Lane resolution is the sidecar's job, so the gateway never rewrites the host
+// to "service-lane" and never 503s on a missing lane.
+func TestForwardEffectiveLane(t *testing.T) {
+	var gotCtxLane string
+	var ctxLanePresent bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCtxLane = r.Header.Get("X-Ctx-Lane")
+		_, ctxLanePresent = r.Header["X-Ctx-Lane"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
 
-	// target.lane empty -> follow request_lane
-	tg := route.Target{Service: "agent-service", Port: 8000}
-
-	host, _, status := gw.resolveTarget(tg, route.Fallback{Mode: "prod"}, "ppe-x")
-	if status != 0 || host != "agent-service-ppe-x" {
-		t.Errorf("passthrough ppe-x: host=%q status=%d", host, status)
+	var dialedAddr string
+	transport := &http.Transport{
+		// Disable keep-alive so every case dials afresh (all cases dial the same
+		// logical host, so a pooled connection would hide the dialed address).
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialedAddr = addr
+			return net.Dial(network, upstreamURL.Host)
+		},
 	}
 
-	host, _, status = gw.resolveTarget(tg, route.Fallback{Mode: "prod"}, "prod")
-	if status != 0 || host != "agent-service" {
-		t.Errorf("passthrough prod: host=%q status=%d", host, status)
+	cases := []struct {
+		name        string
+		requestLane string
+		targetLane  string
+		fallback    string
+		wantCtxLane string
+		wantCtxSet  bool
+	}{
+		{"default prod omits header", "", "", "prod", "", false},
+		{"passthrough request lane", "ppe-a", "", "prod", "ppe-a", true},
+		{"force target lane", "", "ppe-a", "prod", "ppe-a", true},
+		{"target lane overrides request", "ppe-a", "ppe-b", "prod", "ppe-b", true},
+		{"force prod", "ppe-a", "prod", "prod", "prod", true},
+		{"absent lane with reject does not 503", "", "ppe-missing", route.FallbackReject, "ppe-missing", true},
 	}
 
-	host, _, status = gw.resolveTarget(tg, route.Fallback{Mode: "prod"}, "")
-	if status != 0 || host != "agent-service" {
-		t.Errorf("passthrough empty: host=%q status=%d", host, status)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dialedAddr, gotCtxLane, ctxLanePresent = "", "", false
+
+			p := &snapProvider{}
+			p.set(route.NewSnapshot(1, []route.Rule{
+				rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Lane: tc.targetLane, Port: 8000}, tc.fallback),
+			}))
+			gw := New(p, 5*time.Second)
+			gw.transport = transport
+
+			req := httptest.NewRequest("GET", "/api/agent/health", nil)
+			if tc.requestLane != "" {
+				req.Header.Set("x-lane", tc.requestLane)
+			}
+			w := httptest.NewRecorder()
+			gw.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 (reached upstream), got %d", w.Code)
+			}
+			if dialedAddr != "agent-service:8000" {
+				t.Errorf("dialed host: got %q want agent-service:8000 (must be logical name)", dialedAddr)
+			}
+			if ctxLanePresent != tc.wantCtxSet {
+				t.Errorf("X-Ctx-Lane present=%v want %v (value=%q)", ctxLanePresent, tc.wantCtxSet, gotCtxLane)
+			}
+			if tc.wantCtxSet && gotCtxLane != tc.wantCtxLane {
+				t.Errorf("X-Ctx-Lane: got %q want %q", gotCtxLane, tc.wantCtxLane)
+			}
+		})
 	}
 }
 
-func TestResolveTargetLaneForced(t *testing.T) {
-	reg := mockRegistry(t, map[string]registry.ServiceInfo{
-		"agent-service": {Lanes: []string{"prod", "ppe-x"}, Port: 8000},
-	})
-	p := &snapProvider{}
-	gw := New(p, reg, 5*time.Second)
+// TestColdStartForwardEffectiveLane verifies the same forwarding contract holds
+// on the cold-start (nil snapshot -> EmergencyRules) path: the gateway dials the
+// logical service and propagates the request lane as X-Ctx-Lane.
+func TestColdStartForwardEffectiveLane(t *testing.T) {
+	var gotCtxLane string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCtxLane = r.Header.Get("X-Ctx-Lane")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
 
-	// target.lane non-empty -> force that lane, ignore request_lane
-	tg := route.Target{Service: "agent-service", Lane: "ppe-x", Port: 8000}
-	host, _, status := gw.resolveTarget(tg, route.Fallback{Mode: "prod"}, "prod")
-	if status != 0 || host != "agent-service-ppe-x" {
-		t.Errorf("forced ppe-x ignoring request prod: host=%q status=%d", host, status)
+	var dialedAddr string
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialedAddr = addr
+			return net.Dial(network, upstreamURL.Host)
+		},
 	}
-}
 
-func TestResolveTargetFallbackReject(t *testing.T) {
-	reg := mockRegistry(t, map[string]registry.ServiceInfo{
-		"agent-service": {Lanes: []string{"prod"}, Port: 8000}, // ppe-missing not present
-	})
-	p := &snapProvider{}
-	gw := New(p, reg, 5*time.Second)
+	p := &snapProvider{} // current == nil -> cold start, EmergencyRules
+	gw := New(p, 5*time.Second)
+	gw.transport = transport
 
-	// forced lane not in registry, fallback=reject -> status 503
-	tg := route.Target{Service: "agent-service", Lane: "ppe-missing", Port: 8000}
-	_, _, status := gw.resolveTarget(tg, route.Fallback{Mode: route.FallbackReject}, "prod")
-	if status != http.StatusServiceUnavailable {
-		t.Errorf("reject: expected 503, got status=%d", status)
+	req := httptest.NewRequest("GET", "/api/paas/apps/", nil)
+	req.Header.Set("x-lane", "ppe-a")
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("cold-start emergency forward: expected 200, got %d", w.Code)
 	}
-}
-
-func TestResolveTargetFallbackProd(t *testing.T) {
-	reg := mockRegistry(t, map[string]registry.ServiceInfo{
-		"agent-service": {Lanes: []string{"prod"}, Port: 8000},
-	})
-	p := &snapProvider{}
-	gw := New(p, reg, 5*time.Second)
-
-	// forced lane not in registry, fallback=prod -> resolve to service prod
-	tg := route.Target{Service: "agent-service", Lane: "ppe-missing", Port: 8000}
-	host, _, status := gw.resolveTarget(tg, route.Fallback{Mode: route.FallbackProd}, "prod")
-	if status != 0 || host != "agent-service" {
-		t.Errorf("prod fallback: host=%q status=%d", host, status)
+	if dialedAddr != "paas-engine:8080" {
+		t.Errorf("dialed host: got %q want paas-engine:8080 (logical name)", dialedAddr)
+	}
+	if gotCtxLane != "ppe-a" {
+		t.Errorf("X-Ctx-Lane: got %q want ppe-a", gotCtxLane)
 	}
 }
 
 func TestGatewayRedirectTrailingSlash(t *testing.T) {
-	reg := mockRegistry(t, nil)
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
 		rule("webhook", "/webhook/", "", route.Target{Service: "channel-proxy", Port: 3003}, "prod"),
 	}))
-	gw := New(p, reg, 5*time.Second)
+	gw := New(p, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/webhook?foo=bar", nil)
 	w := httptest.NewRecorder()
@@ -196,12 +225,11 @@ func TestGatewayInjectsCtxLane(t *testing.T) {
 		},
 	}
 
-	reg := mockRegistry(t, nil)
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
 		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}, "prod"),
 	}))
-	gw := New(p, reg, 5*time.Second)
+	gw := New(p, 5*time.Second)
 	gw.transport = transport
 
 	req := httptest.NewRequest("GET", "/api/paas/apps/", nil)
@@ -231,12 +259,11 @@ func TestGatewayStripPrefixForwarded(t *testing.T) {
 		},
 	}
 
-	reg := mockRegistry(t, nil)
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
 		rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Port: 8000, StripPrefix: "/api/agent"}, "prod"),
 	}))
-	gw := New(p, reg, 5*time.Second)
+	gw := New(p, 5*time.Second)
 	gw.transport = transport
 
 	req := httptest.NewRequest("GET", "/api/agent/health", nil)
