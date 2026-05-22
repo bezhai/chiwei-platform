@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/chiwei-platform/api-gateway/internal/middleware"
-	"github.com/chiwei-platform/api-gateway/internal/registry"
 	"github.com/chiwei-platform/api-gateway/internal/route"
 )
 
@@ -24,13 +23,12 @@ type SnapshotProvider interface {
 // the x-lane header, then proxies to the resolved upstream.
 type Gateway struct {
 	snapshots SnapshotProvider
-	registry  *registry.Client
 	timeout   time.Duration
 	transport *http.Transport
 }
 
 // New creates a Gateway.
-func New(snapshots SnapshotProvider, reg *registry.Client, timeout time.Duration) *Gateway {
+func New(snapshots SnapshotProvider, timeout time.Duration) *Gateway {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 100
 	t.MaxIdleConnsPerHost = 100
@@ -38,7 +36,6 @@ func New(snapshots SnapshotProvider, reg *registry.Client, timeout time.Duration
 
 	return &Gateway{
 		snapshots: snapshots,
-		registry:  reg,
 		timeout:   timeout,
 		transport: t,
 	}
@@ -109,20 +106,17 @@ func (g *Gateway) serveEmergency(w http.ResponseWriter, r *http.Request, request
 	g.forward(w, r, result.Rule, requestLane)
 }
 
-// forward resolves the upstream for a matched rule and proxies the request.
+// forward proxies the request to the matched target's logical service. Lane
+// resolution is delegated to the lane-sidecar via the X-Ctx-Lane header; the
+// gateway never resolves "service-lane" itself.
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, rt route.Rule, requestLane string) {
 	target := rt.Targets[0]
-
-	host, port, status := g.resolveTarget(target, rt.Fallback, requestLane)
-	if status != 0 {
-		http.Error(w, "service unavailable", status)
-		return
-	}
+	effLane := effectiveLane(target, requestLane)
 
 	targetPath := route.RewritePath(r.URL.Path, target)
 	upstreamURL := &url.URL{
 		Scheme:   "http",
-		Host:     fmt.Sprintf("%s:%d", host, port),
+		Host:     fmt.Sprintf("%s:%d", target.Service, target.Port),
 		Path:     targetPath,
 		RawQuery: r.URL.RawQuery,
 	}
@@ -134,8 +128,10 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, rt route.Rule,
 		Director: func(req *http.Request) {
 			req.URL = upstreamURL
 			req.Host = upstreamURL.Host
-			if requestLane != "" {
-				req.Header.Set("X-Ctx-Lane", requestLane)
+			if effLane != "" {
+				req.Header.Set("X-Ctx-Lane", effLane)
+			} else {
+				req.Header.Del("X-Ctx-Lane")
 			}
 			if _, ok := req.Header["User-Agent"]; !ok {
 				req.Header.Set("User-Agent", "")
@@ -154,37 +150,14 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, rt route.Rule,
 	middleware.ProxyDuration.WithLabelValues(target.Service).Observe(time.Since(proxyStart).Seconds())
 }
 
-// resolveTarget computes the upstream host:port for a target.
-//
-// Lane selection: target.Lane empty -> follow requestLane (passthrough, current
-// behavior); non-empty -> force that lane.
-//
-// Fallback: if the desired lane is non-empty and non-"prod" but the registry
-// has no instance for it, registry.Resolve returns the bare service host
-// (prod). We detect that "lane not found" condition and apply fallback.Mode:
-// "prod" keeps the prod resolution, "reject" returns status 503. A returned
-// status of 0 means "proceed with host:port".
-func (g *Gateway) resolveTarget(t route.Target, fb route.Fallback, requestLane string) (host string, port int, status int) {
-	desiredLane := t.Lane
-	if desiredLane == "" {
-		desiredLane = requestLane
+// effectiveLane is the lane intent propagated downstream via X-Ctx-Lane:
+// target.Lane overrides, otherwise the request lane passes through. Resolving
+// that lane to a real pod (and any fail-closed behavior) is the sidecar's job.
+func effectiveLane(t route.Target, requestLane string) string {
+	if t.Lane != "" {
+		return t.Lane
 	}
-
-	host, port = g.registry.Resolve(t.Service, desiredLane, t.Port)
-
-	// A non-empty, non-prod desired lane that did not produce a "{service}-{lane}"
-	// host means the lane has no instance in the registry -> fallback applies.
-	laneRequested := desiredLane != "" && desiredLane != "prod"
-	laneResolved := host == fmt.Sprintf("%s-%s", t.Service, desiredLane)
-	if laneRequested && !laneResolved {
-		if fb.Mode == route.FallbackReject {
-			slog.Warn("target lane not in registry, rejecting",
-				"service", t.Service, "lane", desiredLane)
-			return "", 0, http.StatusServiceUnavailable
-		}
-		// FallbackProd (or default): keep prod resolution (host already == service).
-	}
-	return host, port, 0
+	return requestLane
 }
 
 type proxyResponseWriter struct {
