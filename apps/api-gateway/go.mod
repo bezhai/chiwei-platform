@@ -2,10 +2,7 @@ module github.com/chiwei-platform/api-gateway
 
 go 1.25
 
-require (
-	github.com/prometheus/client_golang v1.23.2
-	gopkg.in/yaml.v3 v3.0.1
-)
+require github.com/prometheus/client_golang v1.23.2
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

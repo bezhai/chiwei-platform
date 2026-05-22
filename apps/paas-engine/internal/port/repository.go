@@ -58,3 +58,14 @@ type DynamicConfigRepository interface {
 	DeleteByKeyAndLane(ctx context.Context, key, lane string) error
 	DeleteByKey(ctx context.Context, key string) error
 }
+
+type GatewayRuleRepository interface {
+	// Upsert 以 name 为冲突 key，存在则覆盖（管理 API PUT 用）。
+	Upsert(ctx context.Context, rule *domain.GatewayRule) error
+	// InsertIfAbsent 仅插入：name 已存在则 do-nothing、不覆盖（基线 ensure 用，
+	// 关掉 Upsert 的 TOCTOU 覆盖窗口，绝不冲掉人工编辑/并发插入）。
+	InsertIfAbsent(ctx context.Context, rule *domain.GatewayRule) error
+	FindByName(ctx context.Context, name string) (*domain.GatewayRule, error)
+	FindAll(ctx context.Context) ([]*domain.GatewayRule, error)
+	Delete(ctx context.Context, name string) error
+}

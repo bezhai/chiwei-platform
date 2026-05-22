@@ -23,4 +23,5 @@ var (
 	ErrCIConfigNotFound      = fmt.Errorf("ci config %w", ErrNotFound)
 	ErrPipelineRunNotFound   = fmt.Errorf("pipeline run %w", ErrNotFound)
 	ErrDynamicConfigNotFound = fmt.Errorf("dynamic config %w", ErrNotFound)
+	ErrGatewayRuleNotFound   = fmt.Errorf("gateway rule %w", ErrNotFound)
 )

@@ -26,6 +26,7 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 		&ConfigBundleModel{},
 		&DbMutationModel{},
 		&DynamicConfigModel{},
+		&GatewayRuleModel{},
 	); err != nil {
 		return nil, err
 	}

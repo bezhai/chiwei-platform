@@ -8,7 +8,7 @@ import (
 type Config struct {
 	HTTPPort            string
 	RegistryURL         string
-	RoutesConfig        string
+	GatewayRulesURL     string
 	PollIntervalSeconds int
 	ProxyTimeoutSeconds int
 }
@@ -17,7 +17,7 @@ func Load() *Config {
 	return &Config{
 		HTTPPort:            getEnv("HTTP_PORT", "8080"),
 		RegistryURL:         getEnv("REGISTRY_URL", "http://lite-registry:8080"),
-		RoutesConfig:        getEnv("ROUTES_CONFIG", "/etc/api-gateway/routes.yaml"),
+		GatewayRulesURL:     getEnv("GATEWAY_RULES_URL", "http://paas-engine:8080"),
 		PollIntervalSeconds: getEnvInt("POLL_INTERVAL_SECONDS", 30),
 		ProxyTimeoutSeconds: getEnvInt("PROXY_TIMEOUT_SECONDS", 60),
 	}

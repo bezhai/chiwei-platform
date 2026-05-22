@@ -11,30 +11,28 @@ import (
 
 	"github.com/chiwei-platform/api-gateway/internal/config"
 	"github.com/chiwei-platform/api-gateway/internal/gateway"
+	"github.com/chiwei-platform/api-gateway/internal/loader"
 	"github.com/chiwei-platform/api-gateway/internal/middleware"
 	"github.com/chiwei-platform/api-gateway/internal/registry"
-	"github.com/chiwei-platform/api-gateway/internal/route"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
 	cfg := config.Load()
 
-	// Load routes from YAML, fallback to hardcoded routes
-	routes, err := route.LoadFromFile(cfg.RoutesConfig)
-	if err != nil {
-		slog.Warn("failed to load routes config, using fallback", "path", cfg.RoutesConfig, "error", err)
-		routes = route.FallbackRoutes()
-	}
-	slog.Info("routes loaded", "count", len(routes))
+	pollInterval := time.Duration(cfg.PollIntervalSeconds) * time.Second
 
-	matcher := route.NewMatcher(routes)
+	// Start the dynamic rules loader: initial fetch + 30s polling of
+	// paas-engine /internal/gateway-rules, atomic snapshot swap, three-layer
+	// fallback (last-good on failure, emergency routes at cold start).
+	ld := loader.New(cfg.GatewayRulesURL)
+	ld.Start(pollInterval)
 
 	// Start registry client (polls lite-registry in background)
-	reg := registry.NewClient(cfg.RegistryURL, time.Duration(cfg.PollIntervalSeconds)*time.Second)
+	reg := registry.NewClient(cfg.RegistryURL, pollInterval)
 
 	// Build gateway handler
-	gw := gateway.New(matcher, reg, time.Duration(cfg.ProxyTimeoutSeconds)*time.Second)
+	gw := gateway.New(ld, reg, time.Duration(cfg.ProxyTimeoutSeconds)*time.Second)
 
 	// Build HTTP mux with health checks
 	mux := http.NewServeMux()

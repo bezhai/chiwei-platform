@@ -17,6 +17,7 @@ func NewRouter(
 	pipelineH *PipelineHandler,
 	configBundleH *ConfigBundleHandler,
 	dynamicConfigH *DynamicConfigHandler,
+	gatewayRuleH *GatewayRuleHandler,
 	apiToken string,
 ) http.Handler {
 	r := chi.NewRouter()
@@ -33,6 +34,9 @@ func NewRouter(
 
 	// Dynamic Config — internal read endpoint (no auth, for SDK)
 	r.Get("/internal/dynamic-config/resolved", dynamicConfigH.Resolve)
+
+	// Gateway Rules — internal read endpoint (no auth, for api-gateway polling)
+	r.Get("/internal/gateway-rules", gatewayRuleH.Snapshot)
 
 	r.Route("/api/paas", func(r chi.Router) {
 		r.Use(authMiddleware(apiToken))
@@ -144,6 +148,14 @@ func NewRouter(
 			r.Get("/resolved", dynamicConfigH.Resolve)
 			r.Put("/{key}", dynamicConfigH.Set)
 			r.Delete("/{key}", dynamicConfigH.Delete)
+		})
+
+		// Gateway Rules (management)
+		r.Route("/gateway-rules", func(r chi.Router) {
+			r.Get("/", gatewayRuleH.List)
+			r.Get("/{name}", gatewayRuleH.Get)
+			r.Put("/{name}", gatewayRuleH.Upsert)
+			r.Delete("/{name}", gatewayRuleH.Delete)
 		})
 	})
 

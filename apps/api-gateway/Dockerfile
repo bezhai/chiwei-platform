@@ -9,6 +9,5 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/api-gateway ./cmd/api-gatewa
 FROM harbor.local:30002/library/alpine:3.21
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /bin/api-gateway /usr/local/bin/api-gateway
-COPY config/routes.yaml /etc/api-gateway/routes.yaml
 EXPOSE 8080
 ENTRYPOINT ["api-gateway"]
