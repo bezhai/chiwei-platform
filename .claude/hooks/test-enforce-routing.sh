@@ -7,10 +7,13 @@
 #
 # Run: bash .claude/hooks/test-enforce-routing.sh
 #
-# NOTE: this is an OFFLINE logic test. Real fresh-session end-to-end
-# verification (main session blocked / subagent allowed / security layer
-# blocks both / git+make pass) is a separate pre-merge gate that CANNOT
-# be done in the authoring session (hooks load at session start).
+# The hook now has ONLY the SECURITY layer (the main-session ROUTE layer was
+# removed 2026-05-22). So the contract is simply:
+#   * dangerous Bash (kubectl write / curl write / internal connect / DB
+#     client) -> BLOCK, regardless of caller (main OR subagent).
+#   * everything else -> ALLOW. Repo-file tools (Read/Edit/Write/Grep/Glob),
+#     plain-Bash repo reads (cat/git show), and any orchestration command all
+#     pass; subagent delegation is now a judgment call, not a mechanical block.
 
 set -uo pipefail
 
@@ -35,7 +38,8 @@ run_case() {
   fi
 }
 
-# JSON builders (compact, single line)
+# JSON builders (compact, single line). Both main and subagent shapes are kept
+# to prove the security layer is caller-agnostic (agent_id never exempts).
 main_tool()    { printf '{"tool_name":"%s","tool_input":%s}' "$1" "$2"; }
 sub_tool()     { printf '{"agent_id":"a2d1da75943f62b02","agent_type":"Explore","tool_name":"%s","tool_input":%s}' "$1" "$2"; }
 
@@ -53,273 +57,70 @@ bash_in() { printf '{"command":%s}' "$(python3 -c 'import json,sys; print(json.d
 # string never appears verbatim in the harness command line.
 bash_in64() { bash_in "$(printf '%s' "$1" | base64 -d)"; }
 
-# ---------- Route layer: main session file tools -> BLOCK ----------
-run_case "main Read -> block"   2 "$(main_tool Read "$READ_IN")"
-run_case "main Edit -> block"   2 "$(main_tool Edit "$EDIT_IN")"
-run_case "main Write -> block"  2 "$(main_tool Write "$WRITE_IN")"
-run_case "main Grep -> block"   2 "$(main_tool Grep "$GREP_IN")"
-run_case "main Glob -> block"   2 "$(main_tool Glob "$GLOB_IN")"
-run_case "main NotebookEdit -> block" 2 "$(main_tool NotebookEdit '{"notebook_path":"/x.ipynb"}')"
+# ---------- Main session file tools -> ALLOW (route layer removed) ----------
+run_case "main Read -> allow"   0 "$(main_tool Read "$READ_IN")"
+run_case "main Edit -> allow"   0 "$(main_tool Edit "$EDIT_IN")"
+run_case "main Write -> allow"  0 "$(main_tool Write "$WRITE_IN")"
+run_case "main Grep -> allow"   0 "$(main_tool Grep "$GREP_IN")"
+run_case "main Glob -> allow"   0 "$(main_tool Glob "$GLOB_IN")"
+run_case "main NotebookEdit -> allow" 0 "$(main_tool NotebookEdit '{"notebook_path":"/x.ipynb"}')"
 
-# ---------- Route layer: subagent same tools -> ALLOW ----------
+# ---------- Subagent file tools -> ALLOW (unchanged) ----------
 run_case "sub Read -> allow"   0 "$(sub_tool Read "$READ_IN")"
 run_case "sub Edit -> allow"   0 "$(sub_tool Edit "$EDIT_IN")"
 run_case "sub Write -> allow"  0 "$(sub_tool Write "$WRITE_IN")"
 run_case "sub Grep -> allow"   0 "$(sub_tool Grep "$GREP_IN")"
 run_case "sub Glob -> allow"   0 "$(sub_tool Glob "$GLOB_IN")"
 
-# ---------- Route layer: main session orchestration Bash -> ALLOW ----------
+# ---------- Main session Bash -> ALLOW (no orchestration allowlist anymore) -
 run_case "main git status -> allow" 0 "$(main_tool Bash "$(bash_in 'git status --porcelain')")"
 run_case "main git log -> allow"    0 "$(main_tool Bash "$(bash_in 'git log --oneline -5')")"
 run_case "main git diff -> allow"   0 "$(main_tool Bash "$(bash_in 'git diff HEAD')")"
-run_case "main git commit -> allow" 0 "$(main_tool Bash "$(bash_in 'git commit -m x')")"
-run_case "main git revert -> allow" 0 "$(main_tool Bash "$(bash_in 'git revert abc123')")"
 run_case "main make deploy -> allow" 0 "$(main_tool Bash "$(bash_in 'make deploy APP=lark-proxy GIT_REF=main')")"
-run_case "main ghc pr -> allow"     0 "$(main_tool Bash "$(bash_in 'ghc pr view 123')")"
-run_case "main run_codex.sh -> allow" 0 "$(main_tool Bash "$(bash_in 'bash ~/.claude/skills/codex-worker/scripts/run_codex.sh "review this"')")"
-run_case "main http.sh -> allow"    0 "$(main_tool Bash "$(bash_in 'bash .claude/skills/api-test/scripts/http.sh GET /x')")"
+# Plain repo reads via Bash now ALLOW (no route layer to block them).
+run_case "main git show file -> allow" 0 "$(main_tool Bash "$(bash_in 'git show HEAD:apps/lark-proxy/main.ts')")"
+run_case "main cat file -> allow"      0 "$(main_tool Bash "$(bash_in 'cat apps/lark-proxy/main.ts')")"
+run_case "main grep cmd -> allow"      0 "$(main_tool Bash "$(bash_in 'grep -r foo apps/')")"
+# Compound / redirection / substitution were route-layer smuggling concerns;
+# with the route layer gone these are ordinary commands -> ALLOW.
+run_case "main git status > file -> allow"  0 "$(main_tool Bash "$(bash_in 'git status > out.txt')")"
+run_case "main git status \$(cat) -> allow" 0 "$(main_tool Bash "$(bash_in 'git status $(echo hi)')")"
+run_case "main cd && cat -> allow"          0 "$(main_tool Bash "$(bash_in 'cd /tmp && cat foo')")"
 
-# ---------- Route layer: main session repo-reading Bash -> BLOCK ----------
-run_case "main git show file -> block" 2 "$(main_tool Bash "$(bash_in 'git show HEAD:apps/lark-proxy/main.ts')")"
-run_case "main git cat-file -> block"  2 "$(main_tool Bash "$(bash_in 'git cat-file -p HEAD:foo.go')")"
-run_case "main cat file -> block"      2 "$(main_tool Bash "$(bash_in 'cat apps/lark-proxy/main.ts')")"
-# Spec 2026-05-20 trade-off: sed/grep are now stdout filter argv0 (read-only
-# integers). Hook does NOT inspect argv for repo paths — so `sed foo.go` /
-# `grep -r foo apps/` slip past the hook. Documented in spec "扩展放行" section
-# (the three reasons: read-only, small output, not code exploration). Tests
-# pinned to that contract: these now ALLOW.
-run_case "main sed file -> allow (spec trade-off)" 0 "$(main_tool Bash "$(bash_in 'sed -n 1,20p foo.go')")"
-run_case "main grep cmd -> allow (spec trade-off)" 0 "$(main_tool Bash "$(bash_in 'grep -r foo apps/')")"
-
-# ---------- Security layer: kubectl write / curl POST -> BLOCK (main AND sub) ----------
+# ---------- Security layer: kubectl write -> BLOCK (main AND sub) ----------
 run_case "main kubectl apply -> block"  2 "$(main_tool Bash "$(bash_in 'kubectl apply -f x.yaml')")"
-run_case "main curl POST -> block"      2 "$(main_tool Bash "$(bash_in 'curl -X POST http://x/y -d a=b')")"
+run_case "main kubectl delete -> block" 2 "$(main_tool Bash "$(bash_in 'kubectl delete pod x')")"
+run_case "main kubectl exec -> block"   2 "$(main_tool Bash "$(bash_in 'kubectl exec pod -- ls')")"
 run_case "sub kubectl apply -> block"   2 "$(sub_tool Bash "$(bash_in 'kubectl apply -f x.yaml')")"
-run_case "sub curl POST -> block"       2 "$(sub_tool Bash "$(bash_in 'curl -X POST http://x/y -d a=b')")"
-run_case "sub psql -> block"            2 "$(sub_tool Bash "$(bash_in 'psql -h db -c "select 1"')")"
 
-# ---------- Subagent dispatch from main session -> ALLOW (not route-killed) ----------
+# ---------- Security layer: curl write -> BLOCK (main AND sub) ----------
+run_case "main curl POST -> block"      2 "$(main_tool Bash "$(bash_in 'curl -X POST http://x/y -d a=b')")"
+run_case "sub curl POST -> block"       2 "$(sub_tool Bash "$(bash_in 'curl -X POST http://x/y -d a=b')")"
+# Raw payloads base64-encoded so the danger string never hits THIS session's
+# command line (live security layer would block the harness itself otherwise).
+# 'curl --request=POST http://x'
+run_case "main curl --request=POST -> block"  2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtLXJlcXVlc3Q9UE9TVCBodHRwOi8veA==')")"
+run_case "sub curl --request=POST -> block"   2 "$(sub_tool Bash "$(bash_in64 'Y3VybCAtLXJlcXVlc3Q9UE9TVCBodHRwOi8veA==')")"
+# 'curl -dfoo http://x'   (-d glued to value, no space)
+run_case "main curl -dfoo -> block"           2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtZGZvbyBodHRwOi8veA==')")"
+run_case "sub curl -dfoo -> block"            2 "$(sub_tool Bash "$(bash_in64 'Y3VybCAtZGZvbyBodHRwOi8veA==')")"
+
+# ---------- Security layer: direct internal connection -> BLOCK ----------
+run_case "main curl localhost port -> block"  2 "$(main_tool Bash "$(bash_in 'curl http://localhost:8000/foo')")"
+run_case "main curl svc.cluster.local -> block" 2 "$(main_tool Bash "$(bash_in 'curl http://x.svc.cluster.local/bar')")"
+
+# ---------- Security layer: DB client -> BLOCK (main AND sub) ----------
+run_case "main psql -> block"  2 "$(main_tool Bash "$(bash_in 'psql -h db -c "select 1"')")"
+run_case "sub psql -> block"   2 "$(sub_tool Bash "$(bash_in 'psql -h db -c "select 1"')")"
+run_case "main redis-cli -> block" 2 "$(main_tool Bash "$(bash_in 'redis-cli get foo')")"
+
+# ---------- Subagent dispatch from main session -> ALLOW ----------
 run_case "main dispatch Agent -> allow" 0 "$(main_tool Agent '{"description":"x","prompt":"do","subagent_type":"general-purpose"}')"
 run_case "main dispatch Task -> allow"  0 "$(main_tool Task '{"description":"x"}')"
 
-# ---------- Route layer: compound / pipeline command segmentation ----------
-# Bug 1 (false block): leading non-allowlist orchestration token (cd) made the
-# whole command blocked even though every real segment is allowlisted.
-run_case "main cd . && git status -> allow"   0 "$(main_tool Bash "$(bash_in 'cd . && git status')")"
-run_case "main cd /tmp && git log -> allow"   0 "$(main_tool Bash "$(bash_in 'cd /tmp && git log')")"
-run_case "main git add && git commit -> allow" 0 "$(main_tool Bash "$(bash_in 'git add x && git commit -m y')")"
-# T3 HARDENING + spec 2026-05-20 RELAX: every pipeline stage's argv0 is still
-# vetted (downstream-bypass hole stays closed), but stdout filter argv0
-# (tail/head/grep/awk/sed/cut/sort/uniq/wc/jq/column) are now on the allowlist.
-# So `git status | grep foo` and `git log | head -20` now ALLOW. `cat`, `tee`,
-# `xargs`, `less` are deliberately NOT on the filter allowlist and still BLOCK.
-run_case "main git status | grep -> allow (spec relax)" 0 "$(main_tool Bash "$(bash_in 'git status | grep foo')")"
-run_case "main git log | head -> allow (spec relax)"    0 "$(main_tool Bash "$(bash_in 'git log --oneline | head -20')")"
-
-# Bug 2 (false allow / security hole): allowlisted leading token let trailing
-# repo-touching segments through unchecked.
-run_case "main cd /repo && cat -> block"      2 "$(main_tool Bash "$(bash_in 'cd /repo && cat CLAUDE.md')")"
-run_case "main git add && rm -> block"        2 "$(main_tool Bash "$(bash_in 'git add x && rm CLAUDE.md')")"
-run_case "main git status; curl GET -> block" 2 "$(main_tool Bash "$(bash_in 'git status; curl http://x')")"
-run_case "main cat | grep -> block"           2 "$(main_tool Bash "$(bash_in 'cat file | grep x')")"
-# Per-segment decision-4 enforcement must survive segmentation.
-run_case "main git show:path && git status -> block" 2 "$(main_tool Bash "$(bash_in 'git show HEAD:CLAUDE.md && git status')")"
-
-# ---------- Quote-aware segmentation ----------
-# Separators (; && || |) INSIDE single/double quotes must NOT split the
-# command. Only separators OUTSIDE quotes are real segment boundaries.
-run_case "main commit msg with && -> allow"   0 "$(main_tool Bash "$(bash_in 'git commit -m "fix: a && b"')")"
-run_case "main commit msg with ; -> allow"    0 "$(main_tool Bash "$(bash_in 'git commit -m "a; b"')")"
-run_case "main commit msg with | -> allow"    0 "$(main_tool Bash "$(bash_in 'git commit -m "x | y"')")"
-run_case "main commit msg nested single quote -> allow" 0 "$(main_tool Bash "$(bash_in "git commit -m \"msg with 'nested' single quote\"")")"
-# Quote-awareness must NOT go too far: real OUTSIDE separators still split.
-run_case "main commit && rm -> block"         2 "$(main_tool Bash "$(bash_in 'git commit -m "real" && rm CLAUDE.md')")"
-run_case "main git status; cat file -> block" 2 "$(main_tool Bash "$(bash_in 'git status; cat file')")"
-# Fail-closed: unbalanced quotes cannot be reliably tokenized -> block.
-run_case "main unbalanced quote -> block"     2 "$(main_tool Bash "$(bash_in 'git commit -m "unbalanced')")"
-
-# ---------- T3 HARDENING: codex adversarial bypass cases ----------
-# Command substitution / backticks / redirection smuggle a repo-file touch past
-# a benign-looking allowlisted argv0. Out-of-quote $( ` > < must hard-block.
-run_case "main git status \$(cat) -> block"   2 "$(main_tool Bash "$(bash_in 'git status $(cat CLAUDE.md)')")"
-run_case "main git status backtick -> block"  2 "$(main_tool Bash "$(bash_in 'git status `cat CLAUDE.md`')")"
-run_case "main git status > file -> block"    2 "$(main_tool Bash "$(bash_in 'git status > CLAUDE.md')")"
-run_case "main git status < file -> block"    2 "$(main_tool Bash "$(bash_in 'git status < CLAUDE.md')")"
-run_case "main git status >> file -> block"   2 "$(main_tool Bash "$(bash_in 'git status >> CLAUDE.md')")"
-run_case "main proc-subst >(x) -> block"      2 "$(main_tool Bash "$(bash_in 'git status > >(tee CLAUDE.md)')")"
-# Pipeline downstream repo touch: every segment argv0 must pass.
-run_case "main git status | cat file -> block" 2 "$(main_tool Bash "$(bash_in 'git status | cat CLAUDE.md')")"
-# Skill-script allowlist must be argv0-anchored, not a substring anywhere.
-run_case "main cat X /skills/.../scripts -> block" 2 "$(main_tool Bash "$(bash_in 'cat CLAUDE.md /skills/foo/scripts/x')")"
-# env-prefixed command must NOT be specially allowed (argv0 treated as not on
-# allowlist; the inner allowlist check does not peek past env).
-run_case "main env git status -> block"       2 "$(main_tool Bash "$(bash_in 'env FOO=1 git status')")"
-# Redirection / separator chars INSIDE quotes are literal -> still allow.
-# This holds for BOTH single and double quotes: bash does NOT do redirection
-# or word-splitting on `> < ; && || |` inside any quote, so the state machine
-# must keep treating them as literals there (regression guard).
-run_case "main commit msg with > -> allow"    0 "$(main_tool Bash "$(bash_in 'git commit -m "fix > bug"')")"
-# QUOTE-SEMANTICS FIX (codex round 2): bash executes `$(...)` and backticks
-# INSIDE DOUBLE quotes (only single quotes make them literal). The old state
-# machine treated single and double quotes identically, so these two cases
-# used to (wrongly) expect ALLOW — they ran `cat`/`date` for real. They are
-# now flipped to BLOCK: a double-quoted command substitution next to an
-# allowlisted argv0 is still a Trojan for an unvetted repo-file touch.
-run_case "main commit msg dq \$( -> block (codex r2)"  2 "$(main_tool Bash "$(bash_in 'git commit -m "use $(date)"')")"
-run_case "main commit msg dq backtick -> block (codex r2)" 2 "$(main_tool Bash "$(bash_in 'git commit -m "run \`x\`"')")"
-
-# ---------- Single vs double quote semantics (codex round 2) ----------
-# Double quotes: $( and backtick are LIVE in bash -> must BLOCK even with an
-# allowlisted argv0. Other metachars (> < ; && || |) stay literal -> allow.
-run_case "main git status dq \$(cat) -> block"   2 "$(main_tool Bash "$(bash_in 'git status "$(cat CLAUDE.md)"')")"
-run_case "main git status dq backtick -> block"  2 "$(main_tool Bash "$(bash_in 'git status "`cat CLAUDE.md`"')")"
-run_case "main git commit dq \$(cat) -> block"   2 "$(main_tool Bash "$(bash_in 'git commit -m "$(cat CLAUDE.md)"')")"
-run_case "main git commit dq > literal -> allow" 0 "$(main_tool Bash "$(bash_in 'git commit -m "fix > bug"')")"
-run_case "main git commit dq && literal -> allow" 0 "$(main_tool Bash "$(bash_in 'git commit -m "a && b"')")"
-# Single quotes: EVERYTHING literal — $( backtick > < ; && || | all inert.
-run_case "main git commit sq \$(x) -> allow"     0 "$(main_tool Bash "$(bash_in "git commit -m 'literal \$(x) text'")")"
-run_case "main git commit sq seps -> allow"      0 "$(main_tool Bash "$(bash_in "git commit -m 'a ; b && c | d > e'")")"
-run_case "main git commit sq backtick -> allow"  0 "$(main_tool Bash "$(bash_in "git commit -m 'run \`x\` here'")")"
-run_case "main git commit sq full literal -> allow" 0 "$(main_tool Bash "$(bash_in "git commit -m 'literal \$(x) ; > text'")")"
-# Explicit real-newline injection (a literal LF inside the command string,
-# OUTSIDE quotes, acts as a command separator). codex noted this currently
-# blocks only via the `<`/`$(` smuggling side effect; pin it down explicitly:
-# a real newline must split into segments and the `cat` segment must block.
-run_case "main real-newline cat injection -> block" 2 "$(main_tool Bash "$(bash_in 'git status
-cat CLAUDE.md')")"
-
-# ---------- Security layer cheap patch: curl equivalent write forms ----------
-# Raw payloads base64-encoded so the danger string never hits THIS session's
-# command line (live security layer would block the harness itself otherwise).
-# 'curl --request=POST http://x'  — sub context isolates the SECURITY layer
-# (route layer never blocks subagent, so a sub block here proves the security
-# regex caught it, not the allowlist fallthrough).
-run_case "sub curl --request=POST -> block"   2 "$(sub_tool Bash "$(bash_in64 'Y3VybCAtLXJlcXVlc3Q9UE9TVCBodHRwOi8veA==')")"
-# 'curl -dfoo http://x'   (-d glued to value, no space)
-run_case "sub curl -dfoo -> block"            2 "$(sub_tool Bash "$(bash_in64 'Y3VybCAtZGZvbyBodHRwOi8veA==')")"
-# Main context too (defense-in-depth: blocked either way).
-run_case "main curl --request=POST -> block"  2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtLXJlcXVlc3Q9UE9TVCBodHRwOi8veA==')")"
-run_case "main curl -dfoo -> block"           2 "$(main_tool Bash "$(bash_in64 'Y3VybCAtZGZvbyBodHRwOi8veA==')")"
-
-# ---------- RELAX: fd-to-fd copy [n]>&[m] / [n]<&[m] (m must be a digit) ----------
-# Pure fd table duplication, no file I/O — main session can do it directly.
-run_case "main fd 2>&1 -> allow"  0 "$(main_tool Bash "$(bash_in 'git status 2>&1')")"
-run_case "main fd 1>&2 -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs 1>&2')")"
-run_case "main fd 3<&0 -> allow"  0 "$(main_tool Bash "$(bash_in 'git status 3<&0')")"
-run_case "main fd 2>&3 -> allow"  0 "$(main_tool Bash "$(bash_in 'git diff 2>&3')")"
-# fd-copy tokens inside double quotes are literal anyway — must still allow.
-run_case "main fd dq literal 2>&1 -> allow" 0 "$(main_tool Bash "$(bash_in 'git status "x 2>&1"')")"
-
-# ---------- BLOCK: fd boundary cases that look like fd ops but actually touch files ----------
-# &> / &>> are `cmd > out 2>&1` sugar with a file target on the right.
-run_case "main &> file -> block"      2 "$(main_tool Bash "$(bash_in 'git status &> out')")"
-run_case "main &>> file -> block"     2 "$(main_tool Bash "$(bash_in 'git log &>> log')")"
-# >&file (right side is a non-digit token) is normal file redirection sugar.
-run_case "main >&file -> block"       2 "$(main_tool Bash "$(bash_in 'git status >&out')")"
-# 2>file with no & is just normal file redirection.
-run_case "main 2>file -> block"       2 "$(main_tool Bash "$(bash_in 'git status 2>err.log')")"
-# Process substitution opens a Trojan command channel.
-run_case "main >(proc-subst) -> block" 2 "$(main_tool Bash "$(bash_in 'git status > >(tee log)')")"
-run_case "main <(proc-subst) -> block" 2 "$(main_tool Bash "$(bash_in 'git diff <(cat CLAUDE.md)')")"
-
-# ---------- RELAX: stdout filter argv0 allowlist (pipe segments) ----------
-# Read-from-stdin, write-to-stdout, no file write, no command construction.
-run_case "main pipe tail -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | tail -150')")"
-run_case "main pipe head -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | head -100')")"
-run_case "main pipe grep filter -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | grep ERROR')")"
-run_case "main pipe awk -> allow"   0 "$(main_tool Bash "$(bash_in "make logs APP=foo | awk '{print \$1}'")")"
-run_case "main pipe sed -> allow"   0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | sed s/x/y/')")"
-run_case "main pipe jq -> allow"    0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | jq .')")"
-run_case "main pipe cut -> allow"   0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | cut -d: -f1')")"
-run_case "main pipe sort uniq wc -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo | sort | uniq | wc -l')")"
-run_case "main git diff | wc -> allow" 0 "$(main_tool Bash "$(bash_in 'git diff | wc -l')")"
-
-# ---------- BLOCK: dangerous argv0 still not allowed as pipe segments ----------
-# tee writes files; less/more are interactive; xargs constructs new commands.
-run_case "main pipe tee -> block"   2 "$(main_tool Bash "$(bash_in 'git status | tee /tmp/x')")"
-run_case "main pipe less -> block"  2 "$(main_tool Bash "$(bash_in 'git diff | less foo')")"
-run_case "main pipe xargs rm -> block" 2 "$(main_tool Bash "$(bash_in 'git status | xargs rm')")"
-run_case "main pipe more -> block"  2 "$(main_tool Bash "$(bash_in 'git log | more')")"
-
-# ---------- Codex T3 review follow-up: FD_COPY_RE boundary probes (17 cases) ----------
-# Codex T3 pointed at the FD_COPY_RE right boundary `(?!\w)`; running 17 probes
-# uncovered an unrelated LEFT-boundary bug: `2>&1>&2` (two fd-copies adjacent,
-# no space) blocked because the second `>&2` couldn't match (prev char `1` is
-# a word char). Fix: drop `\w` from left lookbehind, keep `&` exclusion. Probes
-# below pin every edge the audit covered so regressions surface fast.
-#
-# Probe 1: `2>&1>file` — fd-copy then file write -> smuggling guard MUST fire.
-run_case "probe1 main 2>&1>file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>out')")"
-# Probe 2: `2>&1<file` — fd-copy then file read -> smuggling guard MUST fire.
-run_case "probe2 main 2>&1<file -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1<in')")"
-# Probe 3: `2>&1>&2` — TWO fd-copies adjacent, NO space. Pre-fix: blocked
-# because left lookbehind disallowed `1` (word char). Post-fix: allow.
-run_case "probe3 main 2>&1>&2 adjacent -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1>&2')")"
-# Probe 4: `2>&1&>foo` — fd-copy then `&>foo` (file write sugar). Block.
-run_case "probe4 main 2>&1&>foo -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1&>out')")"
-# Probe 5: `2>&1$(date)` — fd-copy then command substitution. Block.
-run_case "probe5 main 2>&1\$(date) -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1$(date)')")"
-# Probe 6: `2>&12` — fd 12 (two-digit destination). Allow as fd-copy.
-run_case "probe6 main 2>&12 fd-12 -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12')")"
-# Probe 7: `2>&12 file` — fd 12 then a separate arg word. Allow.
-run_case "probe7 main 2>&12 + arg -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&12 file')")"
-# Probe 8: `2>&1foo` — destination is `1foo` (digits+letters). Right boundary
-# `(?!\w)` rejects -> no fd-copy match -> smuggling guard fires. Bash itself
-# rejects this as ambiguous redirect, so blocking is conservative-safe.
-run_case "probe8 main 2>&1foo ambiguous -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1foo')")"
-# Probe 9: `>&12word` — same as probe 8 with two-digit + letter tail. Block.
-run_case "probe9 main >&12word -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&12word')")"
-# Probe 10: `"2>&1 leak"` — entirely inside double quotes -> literal. Allow.
-run_case "probe10 main dq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in 'git status "2>&1 leak"')")"
-# Probe 11: `'2>&1 leak'` — single-quote literal. Allow.
-run_case "probe11 main sq fd literal -> allow" 0 "$(main_tool Bash "$(bash_in "git status '2>&1 leak'")")"
-# Probe 12: `> &1` — `>` with space before `&1` is NOT fd-copy syntax. Block.
-run_case "probe12 main > &1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo > &1')")"
-# Probe 13: `2>&1 cmd` — fd-copy at start of command. The smuggling guard
-# passes (fd-copy is marked safe), but the segment's argv0 becomes `2>&1`
-# which is not allowlisted -> block at allowlist layer. Documents the
-# bash-uncommon-but-valid leading-redirect form.
-run_case "probe13 main leading fd-copy -> block (allowlist)" 2 "$(main_tool Bash "$(bash_in '2>&1 echo hi')")"
-# Probe 14: `2>& 1` — space between `&` and `1` is not valid fd-copy. Block.
-run_case "probe14 main 2>& 1 not fd-copy -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>& 1')")"
-# Probe 15: `>&-` — bash fd-close syntax (`-` is not a digit). Block (regex
-# doesn't match `>&-`; smuggling guard fires on `>`). Conservative-safe.
-run_case "probe15 main >&- fd-close -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo >&-')")"
-# Probe 16: `2>&1; echo hi` — fd-copy then segment separator. First segment
-# allows (`make logs ... 2>&1`); second segment `echo hi` not allowlisted ->
-# block. Use git status as second segment to assert "; after fd-copy splits"
-# without dragging in unrelated allowlist failure.
-run_case "probe16 main 2>&1; allowlisted -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1; git status')")"
-# Probe 17: `2>&1 | tail` — the user's real pain point. Allow.
-run_case "probe17 main 2>&1 | tail -> allow" 0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | tail')")"
-# Bonus: probe-3 variant WITHOUT allowlisted argv0 — confirms the smuggling
-# guard alone (independent of allowlist) accepts adjacent fd-copies after fix.
-# We assert exit 2 (allowlist still blocks `cmd`) but the FAILURE REASON must
-# be allowlist, not smuggling. Bash echo on stderr would assert that but the
-# test harness drops stderr; this case is documented in the report instead.
-
-# ---------- Codex T1 review combo cases: safe-prefix + dangerous tail ----------
-# 2>&1 alone is safe, but stapling `> out` (file write) or `&& cat <repo>` after
-# it must still trip the existing guards. Hook can't short-circuit on a benign
-# prefix.
-run_case "main 2>&1 > out -> block"   2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 > out')")"
-run_case "main 2>&1 && cat repo -> block" 2 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 && cat CLAUDE.md')")"
-# The user's real pain point: must allow end-to-end.
-run_case "main 2>&1 | tail -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | tail -150')")"
-run_case "main 2>&1 | grep -> allow"  0 "$(main_tool Bash "$(bash_in 'make logs APP=foo 2>&1 | grep ERROR')")"
-
-# ---------- Smuggling regression guard: existing blocks must still block ----------
-# These should have been blocked already by the existing $( ` > < guard; restate
-# explicitly to pin the contract under the new fd-copy relaxation.
-run_case "main smuggling > CLAUDE.md regress -> block" 2 "$(main_tool Bash "$(bash_in 'git status > CLAUDE.md')")"
-run_case "main smuggling >> ./foo regress -> block"    2 "$(main_tool Bash "$(bash_in 'git status >> ./foo')")"
-run_case "main smuggling \$(cat) regress -> block"     2 "$(main_tool Bash "$(bash_in 'git status $(cat CLAUDE.md)')")"
-run_case "main smuggling backtick regress -> block"    2 "$(main_tool Bash "$(bash_in 'cat \`whoami\`')")"
-run_case "main smuggling < file regress -> block"      2 "$(main_tool Bash "$(bash_in 'grep foo < src/x.py')")"
-run_case "main smuggling <<< herestring regress -> block" 2 "$(main_tool Bash "$(bash_in 'git status <<<$(date)')")"
-
 # ---------- Misc ----------
 run_case "empty stdin -> allow" 0 "$EMPTY"
+run_case "bad json -> allow (fail-open)" 0 'not valid json {{{'
 
 echo "----"
 echo "PASS=$PASS FAIL=$FAIL"
