@@ -3,7 +3,7 @@ package domain
 import "time"
 
 // GatewayRule 表示一条 api-gateway 动态路由规则。
-// Name 是业务主键 + 幂等 key；match / targets / fallback 在 DB 用 jsonb 列存。
+// Name 是业务主键 + 幂等 key；match / targets 在 DB 用 jsonb 列存。
 type GatewayRule struct {
 	Name        string          `json:"name"`
 	Enabled     bool            `json:"enabled"`
@@ -12,7 +12,6 @@ type GatewayRule struct {
 	RequestLane string          `json:"request_lane,omitempty"`
 	Match       GatewayMatch    `json:"match"`
 	Targets     []GatewayTarget `json:"targets"`
-	Fallback    GatewayFallback `json:"fallback"`
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 	Version     int64           `json:"version"`
@@ -30,7 +29,7 @@ type GatewayMatch struct {
 	Cookies     map[string]string `json:"cookies,omitempty"`
 }
 
-// GatewayTarget 是规则的转发目标。MVP 强制单 target、weight==100。
+// GatewayTarget 是规则的转发目标。支持多 target 加权分流，weight 总和须为 100。
 type GatewayTarget struct {
 	Service       string `json:"service"`
 	Lane          string `json:"lane"`
@@ -38,11 +37,6 @@ type GatewayTarget struct {
 	Weight        int    `json:"weight"`
 	StripPrefix   string `json:"strip_prefix,omitempty"`
 	RewritePrefix string `json:"rewrite_prefix,omitempty"`
-}
-
-// GatewayFallback 决定 target lane 在 registry 找不到时的兜底行为。
-type GatewayFallback struct {
-	Mode string `json:"mode"`
 }
 
 // GatewaySnapshot 是 /internal/gateway-rules 返回的完整快照。

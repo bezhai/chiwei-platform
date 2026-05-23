@@ -21,7 +21,6 @@ func sampleGatewayRule() *domain.GatewayRule {
 		Targets: []domain.GatewayTarget{
 			{Service: "agent-service", Lane: "prod", Port: 8000, Weight: 100, StripPrefix: "/api/agent"},
 		},
-		Fallback:  domain.GatewayFallback{Mode: "prod"},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Version:   3,
@@ -58,14 +57,6 @@ func TestGatewayRuleToModel_SerializesJSON(t *testing.T) {
 	}
 	if len(targets) != 1 || targets[0].StripPrefix != "/api/agent" {
 		t.Errorf("targets not preserved: %+v", targets)
-	}
-
-	var fb domain.GatewayFallback
-	if err := json.Unmarshal([]byte(m.Fallback), &fb); err != nil {
-		t.Fatalf("fallback not valid JSON: %v", err)
-	}
-	if fb.Mode != "prod" {
-		t.Errorf("fallback.mode mismatch: %q", fb.Mode)
 	}
 }
 
@@ -107,9 +98,6 @@ func TestGatewayRuleRoundTrip(t *testing.T) {
 	if got.Targets[0].StripPrefix != "/api/agent" {
 		t.Errorf("strip_prefix not preserved: %q", got.Targets[0].StripPrefix)
 	}
-	if got.Fallback.Mode != "prod" {
-		t.Errorf("fallback.mode mismatch: %q", got.Fallback.Mode)
-	}
 }
 
 func TestModelToGatewayRule_TargetsNeverNil(t *testing.T) {
@@ -118,7 +106,6 @@ func TestModelToGatewayRule_TargetsNeverNil(t *testing.T) {
 		PathPrefix: "/x/",
 		Match:      `{"path_prefix":"/x/"}`,
 		Targets:    "",
-		Fallback:   `{"mode":"prod"}`,
 	}
 	got, err := modelToGatewayRule(m)
 	if err != nil {

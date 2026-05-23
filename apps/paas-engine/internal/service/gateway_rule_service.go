@@ -32,7 +32,6 @@ type UpsertGatewayRuleRequest struct {
 	RequestLane string                 `json:"request_lane"`
 	Match       domain.GatewayMatch    `json:"match"`
 	Targets     []domain.GatewayTarget `json:"targets"`
-	Fallback    domain.GatewayFallback `json:"fallback"`
 }
 
 // enabledOrDefault 解析 Enabled 三态：nil（未提供）-> true（规则默认启用）；
@@ -56,7 +55,6 @@ func (s *GatewayRuleService) Upsert(ctx context.Context, name string, req Upsert
 		RequestLane: req.RequestLane,
 		Match:       req.Match,
 		Targets:     req.Targets,
-		Fallback:    req.Fallback,
 		UpdatedAt:   now,
 	}
 
@@ -91,7 +89,6 @@ func (s *GatewayRuleService) ensureRule(ctx context.Context, name string, req Up
 		RequestLane: req.RequestLane,
 		Match:       req.Match,
 		Targets:     req.Targets,
-		Fallback:    req.Fallback,
 		Version:     1,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -123,6 +120,17 @@ func (s *GatewayRuleService) List(ctx context.Context) ([]*domain.GatewayRule, e
 // Delete 删除一条规则。
 func (s *GatewayRuleService) Delete(ctx context.Context, name string) error {
 	return s.repo.Delete(ctx, name)
+}
+
+// Explain 预览一个请求会命中哪条规则、为何命中、其余规则为何没命中。
+// 取全部规则交给 domain.ExplainGatewayMatch（与 api-gateway matcher 对齐的纯逻辑）。
+func (s *GatewayRuleService) Explain(ctx context.Context, path, requestLane string) (*domain.GatewayExplainResult, error) {
+	rules, err := s.repo.FindAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := domain.ExplainGatewayMatch(rules, path, requestLane)
+	return &res, nil
 }
 
 // Snapshot 组装 /internal/gateway-rules 返回的快照。

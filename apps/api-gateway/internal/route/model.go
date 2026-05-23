@@ -1,11 +1,5 @@
 package route
 
-// Fallback modes.
-const (
-	FallbackProd   = "prod"
-	FallbackReject = "reject"
-)
-
 // Match holds the conditions a request must satisfy to select a rule.
 // Only PathPrefix and RequestLane are honored in this version; the other
 // fields are accepted in the wire schema but rejected by paas-engine's
@@ -27,15 +21,6 @@ type Target struct {
 	RewritePrefix string `json:"rewrite_prefix,omitempty"`
 }
 
-// Fallback is part of the wire schema (set by paas-engine) describing what
-// should happen when the target lane has no instance: "prod" falls back to the
-// service's prod instance, "reject" fails closed. The api-gateway no longer
-// acts on this — lane resolution and fail-closed are delegated to the
-// lane-sidecar — so the field is currently advisory only.
-type Fallback struct {
-	Mode string `json:"mode"`
-}
-
 // Rule is one routing rule.
 type Rule struct {
 	Name     string   `json:"name"`
@@ -43,5 +28,4 @@ type Rule struct {
 	Priority int      `json:"priority"`
 	Match    Match    `json:"match"`
 	Targets  []Target `json:"targets"`
-	Fallback Fallback `json:"fallback"`
 }

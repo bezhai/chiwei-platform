@@ -26,7 +26,6 @@ func validRule() GatewayRule {
 				Weight:  100,
 			},
 		},
-		Fallback: GatewayFallback{Mode: "prod"},
 	}
 }
 
@@ -170,16 +169,63 @@ func TestValidateGatewayRule_TargetsEmpty(t *testing.T) {
 	assertReject(t, r, "targets")
 }
 
-func TestValidateGatewayRule_TargetsMultiple(t *testing.T) {
+func TestValidateGatewayRule_TargetsMultipleSumming100OK(t *testing.T) {
+	// 二期放开多 target：权重总和=100 必须通过。
 	r := validRule()
-	r.Targets = append(r.Targets, GatewayTarget{Service: "x", Lane: "prod", Port: 80, Weight: 100})
-	assertReject(t, r, "targets")
+	r.Targets[0].Weight = 90
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "ppe-new", Port: 8000, Weight: 10})
+	if err := ValidateGatewayRule(r); err != nil {
+		t.Fatalf("expected 90/10 dual target to pass, got: %v", err)
+	}
 }
 
-func TestValidateGatewayRule_TargetWeightNot100(t *testing.T) {
+func TestValidateGatewayRule_TargetsMultipleSumNot100Rejected(t *testing.T) {
+	r := validRule()
+	r.Targets[0].Weight = 90
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "ppe-new", Port: 8000, Weight: 5})
+	assertReject(t, r, "weight")
+}
+
+func TestValidateGatewayRule_TargetsMultipleWithZeroWeightOK(t *testing.T) {
+	// 单 target 权重 0 合法（验收：把某 target 权重改 0 让流量回 prod），总和仍=100。
+	r := validRule()
+	r.Targets[0].Weight = 100
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "ppe-new", Port: 8000, Weight: 0})
+	if err := ValidateGatewayRule(r); err != nil {
+		t.Fatalf("expected 100/0 dual target to pass, got: %v", err)
+	}
+}
+
+func TestValidateGatewayRule_SingleTargetWeight100OK(t *testing.T) {
+	// 现网 6 条单 target weight=100 规则在新校验下必须仍合法。
+	r := validRule()
+	r.Targets[0].Weight = 100
+	if err := ValidateGatewayRule(r); err != nil {
+		t.Fatalf("expected single target weight=100 to pass, got: %v", err)
+	}
+}
+
+func TestValidateGatewayRule_SingleTargetWeightNot100Rejected(t *testing.T) {
 	r := validRule()
 	r.Targets[0].Weight = 50
 	assertReject(t, r, "weight")
+}
+
+func TestValidateGatewayRule_NegativeWeightRejected(t *testing.T) {
+	r := validRule()
+	r.Targets[0].Weight = 110
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "ppe-new", Port: 8000, Weight: -10})
+	assertReject(t, r, "weight")
+}
+
+func TestValidateGatewayRule_DuplicateTargetIdentityRejected(t *testing.T) {
+	// set-weights 用 service+lane 标识 target，要求规则内 service+lane 唯一；
+	// 否则会出现「能创建却无法 set-weights」的规则。两个 service+lane 相同的
+	// target（仅权重不同）必须被拒。
+	r := validRule()
+	r.Targets[0].Weight = 60
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "prod", Port: 8000, Weight: 40})
+	assertReject(t, r, "duplicate")
 }
 
 func TestValidateGatewayRule_TargetServiceEmpty(t *testing.T) {
@@ -210,6 +256,28 @@ func TestValidateGatewayRule_TargetLaneInvalid(t *testing.T) {
 	assertReject(t, r, "lane")
 }
 
+func TestValidateGatewayRule_SecondTargetLaneBlue(t *testing.T) {
+	// 校验必须遍历所有 target，不只校验第 0 个：第二个 target lane=blue 也要拒。
+	r := validRule()
+	r.Targets[0].Weight = 90
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "blue", Port: 8000, Weight: 10})
+	assertReject(t, r, "lane")
+}
+
+func TestValidateGatewayRule_SecondTargetPortOutOfRange(t *testing.T) {
+	r := validRule()
+	r.Targets[0].Weight = 90
+	r.Targets = append(r.Targets, GatewayTarget{Service: "agent-service", Lane: "ppe-new", Port: 70000, Weight: 10})
+	assertReject(t, r, "port")
+}
+
+func TestValidateGatewayRule_SecondTargetServiceEmpty(t *testing.T) {
+	r := validRule()
+	r.Targets[0].Weight = 90
+	r.Targets = append(r.Targets, GatewayTarget{Service: "", Lane: "prod", Port: 8000, Weight: 10})
+	assertReject(t, r, "service")
+}
+
 func TestValidateGatewayRule_TargetPortZero(t *testing.T) {
 	r := validRule()
 	r.Targets[0].Port = 0
@@ -229,20 +297,6 @@ func TestValidateGatewayRule_TargetPortBoundaries(t *testing.T) {
 		if err := ValidateGatewayRule(r); err != nil {
 			t.Fatalf("expected port %d to pass, got: %v", p, err)
 		}
-	}
-}
-
-func TestValidateGatewayRule_FallbackModeInvalid(t *testing.T) {
-	r := validRule()
-	r.Fallback.Mode = "target"
-	assertReject(t, r, "fallback")
-}
-
-func TestValidateGatewayRule_FallbackModeReject(t *testing.T) {
-	r := validRule()
-	r.Fallback.Mode = "reject"
-	if err := ValidateGatewayRule(r); err != nil {
-		t.Fatalf("expected fallback=reject to pass, got: %v", err)
 	}
 }
 

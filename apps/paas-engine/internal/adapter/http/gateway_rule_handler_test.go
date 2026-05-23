@@ -79,8 +79,7 @@ func validRuleBody() string {
 		"priority": 100,
 		"path_prefix": "/api/agent/",
 		"match": {"path_prefix": "/api/agent/"},
-		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100, "strip_prefix": "/api/agent"}],
-		"fallback": {"mode": "prod"}
+		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100, "strip_prefix": "/api/agent"}]
 	}`
 }
 
@@ -163,8 +162,7 @@ func bodyWithoutEnabled() string {
 		"priority": 100,
 		"path_prefix": "/api/agent/",
 		"match": {"path_prefix": "/api/agent/"},
-		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100}],
-		"fallback": {"mode": "prod"}
+		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100}]
 	}`
 }
 
@@ -174,8 +172,7 @@ func bodyEnabledFalse() string {
 		"priority": 100,
 		"path_prefix": "/api/agent/",
 		"match": {"path_prefix": "/api/agent/"},
-		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100}],
-		"fallback": {"mode": "prod"}
+		"targets": [{"service": "agent-service", "lane": "prod", "port": 8000, "weight": 100}]
 	}`
 }
 
@@ -219,7 +216,7 @@ func TestGatewayHandler_PutExplicitEnabledTrueStaysTrue(t *testing.T) {
 
 func TestGatewayHandler_PutInvalidReturns400(t *testing.T) {
 	r, _ := newGatewayTestRouter()
-	body := `{"enabled":true,"priority":100,"path_prefix":"no-slash/","match":{"path_prefix":"no-slash/"},"targets":[{"service":"x","lane":"prod","port":80,"weight":100}],"fallback":{"mode":"prod"}}`
+	body := `{"enabled":true,"priority":100,"path_prefix":"no-slash/","match":{"path_prefix":"no-slash/"},"targets":[{"service":"x","lane":"prod","port":80,"weight":100}]}`
 	rec := doReq(t, r, http.MethodPut, "/api/paas/gateway-rules/bad", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid rule, got %d: %s", rec.Code, rec.Body.String())

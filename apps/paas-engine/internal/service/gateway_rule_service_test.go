@@ -78,7 +78,6 @@ func validUpsertReq() service_UpsertReq {
 		Targets: []domain.GatewayTarget{
 			{Service: "agent-service", Lane: "prod", Port: 8000, Weight: 100},
 		},
-		Fallback: domain.GatewayFallback{Mode: "prod"},
 	}
 }
 

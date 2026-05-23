@@ -21,14 +21,16 @@ type snapProvider struct {
 func (p *snapProvider) Current() *route.Snapshot { return p.snap.Load() }
 func (p *snapProvider) set(s *route.Snapshot)    { p.snap.Store(s) }
 
-func rule(name, prefix, reqLane string, t route.Target, fb string) route.Rule {
+func rule(name, prefix, reqLane string, t route.Target) route.Rule {
+	if t.Weight == 0 {
+		t.Weight = 100
+	}
 	return route.Rule{
 		Name:     name,
 		Enabled:  true,
 		Priority: 100,
 		Match:    route.Match{PathPrefix: prefix, RequestLane: reqLane},
 		Targets:  []route.Target{t},
-		Fallback: route.Fallback{Mode: fb},
 	}
 }
 
@@ -62,7 +64,7 @@ func TestGatewayColdStartEmergencyRoutes(t *testing.T) {
 func TestGatewayNoMatch404(t *testing.T) {
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
-		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}, "prod"),
+		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}),
 	}))
 	gw := New(p, 5*time.Second)
 
@@ -105,16 +107,15 @@ func TestForwardEffectiveLane(t *testing.T) {
 		name        string
 		requestLane string
 		targetLane  string
-		fallback    string
 		wantCtxLane string
 		wantCtxSet  bool
 	}{
-		{"default prod omits header", "", "", "prod", "", false},
-		{"passthrough request lane", "ppe-a", "", "prod", "ppe-a", true},
-		{"force target lane", "", "ppe-a", "prod", "ppe-a", true},
-		{"target lane overrides request", "ppe-a", "ppe-b", "prod", "ppe-b", true},
-		{"force prod", "ppe-a", "prod", "prod", "prod", true},
-		{"absent lane with reject does not 503", "", "ppe-missing", route.FallbackReject, "ppe-missing", true},
+		{"default prod omits header", "", "", "", false},
+		{"passthrough request lane", "ppe-a", "", "ppe-a", true},
+		{"force target lane", "", "ppe-a", "ppe-a", true},
+		{"target lane overrides request", "ppe-a", "ppe-b", "ppe-b", true},
+		{"force prod", "ppe-a", "prod", "prod", true},
+		{"absent target lane passes through missing request lane", "", "ppe-missing", "ppe-missing", true},
 	}
 
 	for _, tc := range cases {
@@ -123,7 +124,7 @@ func TestForwardEffectiveLane(t *testing.T) {
 
 			p := &snapProvider{}
 			p.set(route.NewSnapshot(1, []route.Rule{
-				rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Lane: tc.targetLane, Port: 8000}, tc.fallback),
+				rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Lane: tc.targetLane, Port: 8000}),
 			}))
 			gw := New(p, 5*time.Second)
 			gw.transport = transport
@@ -195,7 +196,7 @@ func TestColdStartForwardEffectiveLane(t *testing.T) {
 func TestGatewayRedirectTrailingSlash(t *testing.T) {
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
-		rule("webhook", "/webhook/", "", route.Target{Service: "channel-proxy", Port: 3003}, "prod"),
+		rule("webhook", "/webhook/", "", route.Target{Service: "channel-proxy", Port: 3003}),
 	}))
 	gw := New(p, 5*time.Second)
 
@@ -227,7 +228,7 @@ func TestGatewayInjectsCtxLane(t *testing.T) {
 
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
-		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}, "prod"),
+		rule("paas", "/api/paas/", "", route.Target{Service: "paas-engine", Port: 8080}),
 	}))
 	gw := New(p, 5*time.Second)
 	gw.transport = transport
@@ -241,6 +242,77 @@ func TestGatewayInjectsCtxLane(t *testing.T) {
 	}
 	if gotCtxLane != "ppe-x" {
 		t.Errorf("X-Ctx-Lane: got %q want ppe-x", gotCtxLane)
+	}
+}
+
+// TestForwardWeightedRandomPicksTarget locks the end-to-end forwarding for a
+// multi-target rule: with the random source injected to a fixed draw, the
+// gateway dials the chosen target's service and writes its lane into
+// X-Ctx-Lane. draw=0.0 -> 90-weight target A (lane prod), draw=0.95 -> 10-weight
+// target B (lane ppe-new). Deterministic, not flaky.
+func TestForwardWeightedRandomPicksTarget(t *testing.T) {
+	var gotCtxLane string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCtxLane = r.Header.Get("X-Ctx-Lane")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	var dialedAddr string
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialedAddr = addr
+			return net.Dial(network, upstreamURL.Host)
+		},
+	}
+
+	multiRule := route.Rule{
+		Name:     "agent",
+		Enabled:  true,
+		Priority: 100,
+		Match:    route.Match{PathPrefix: "/api/agent/"},
+		Targets: []route.Target{
+			{Service: "agent-a", Lane: "prod", Port: 8000, Weight: 90},
+			{Service: "agent-b", Lane: "ppe-new", Port: 8000, Weight: 10},
+		},
+	}
+
+	cases := []struct {
+		name        string
+		draw        float64
+		wantService string
+		wantCtxLane string
+	}{
+		{"draw below boundary picks A", 0.0, "agent-a", "prod"},
+		{"draw at boundary picks B", 0.90, "agent-b", "ppe-new"},
+		{"draw in B range picks B", 0.95, "agent-b", "ppe-new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dialedAddr, gotCtxLane = "", ""
+			p := &snapProvider{}
+			p.set(route.NewSnapshot(1, []route.Rule{multiRule}))
+			gw := New(p, 5*time.Second)
+			gw.transport = transport
+			gw.rng = func() float64 { return tc.draw }
+
+			req := httptest.NewRequest("GET", "/api/agent/health", nil)
+			w := httptest.NewRecorder()
+			gw.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			wantAddr := tc.wantService + ":8000"
+			if dialedAddr != wantAddr {
+				t.Errorf("dialed: got %q want %q", dialedAddr, wantAddr)
+			}
+			if gotCtxLane != tc.wantCtxLane {
+				t.Errorf("X-Ctx-Lane: got %q want %q", gotCtxLane, tc.wantCtxLane)
+			}
+		})
 	}
 }
 
@@ -261,7 +333,7 @@ func TestGatewayStripPrefixForwarded(t *testing.T) {
 
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
-		rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Port: 8000, StripPrefix: "/api/agent"}, "prod"),
+		rule("agent", "/api/agent/", "", route.Target{Service: "agent-service", Port: 8000, StripPrefix: "/api/agent"}),
 	}))
 	gw := New(p, 5*time.Second)
 	gw.transport = transport

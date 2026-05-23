@@ -3,23 +3,22 @@ package route
 import "testing"
 
 // helper to build a rule with a single target
-func rule(name, prefix, reqLane string, priority int, enabled bool, t Target, fbMode string) Rule {
+func rule(name, prefix, reqLane string, priority int, enabled bool, t Target) Rule {
 	return Rule{
 		Name:     name,
 		Enabled:  enabled,
 		Priority: priority,
 		Match:    Match{PathPrefix: prefix, RequestLane: reqLane},
 		Targets:  []Target{t},
-		Fallback: Fallback{Mode: fbMode},
 	}
 }
 
 func TestMatchLongestPrefixAndPriority(t *testing.T) {
 	rules := []Rule{
-		rule("dash-api", "/dashboard/api/", "", 100, true, Target{Service: "monitor-dashboard", Port: 3002}, "prod"),
-		rule("dash-web", "/dashboard/", "", 100, true, Target{Service: "monitor-dashboard-web", Port: 80}, "prod"),
-		rule("paas", "/api/paas/", "", 100, true, Target{Service: "paas-engine", Port: 8080}, "prod"),
-		rule("webhook", "/webhook/", "", 100, true, Target{Service: "channel-proxy", Port: 3003}, "prod"),
+		rule("dash-api", "/dashboard/api/", "", 100, true, Target{Service: "monitor-dashboard", Port: 3002}),
+		rule("dash-web", "/dashboard/", "", 100, true, Target{Service: "monitor-dashboard-web", Port: 80}),
+		rule("paas", "/api/paas/", "", 100, true, Target{Service: "paas-engine", Port: 8080}),
+		rule("webhook", "/webhook/", "", 100, true, Target{Service: "channel-proxy", Port: 3003}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 
@@ -49,8 +48,8 @@ func TestMatchLongestPrefixAndPriority(t *testing.T) {
 func TestMatchPriorityWins(t *testing.T) {
 	// Two rules same path_prefix, different priority: higher priority wins.
 	rules := []Rule{
-		rule("low", "/api/paas/", "", 100, true, Target{Service: "old-svc", Port: 1}, "prod"),
-		rule("high", "/api/paas/", "", 200, true, Target{Service: "new-svc", Port: 2}, "prod"),
+		rule("low", "/api/paas/", "", 100, true, Target{Service: "old-svc", Port: 1}),
+		rule("high", "/api/paas/", "", 200, true, Target{Service: "new-svc", Port: 2}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 	res, ok := m.Match("/api/paas/x", "")
@@ -64,8 +63,8 @@ func TestMatchPriorityWins(t *testing.T) {
 
 func TestMatchSamePriorityLongerPrefixWins(t *testing.T) {
 	rules := []Rule{
-		rule("short", "/dashboard/", "", 100, true, Target{Service: "web", Port: 80}, "prod"),
-		rule("long", "/dashboard/api/", "", 100, true, Target{Service: "api", Port: 3002}, "prod"),
+		rule("short", "/dashboard/", "", 100, true, Target{Service: "web", Port: 80}),
+		rule("long", "/dashboard/api/", "", 100, true, Target{Service: "api", Port: 3002}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 	res, ok := m.Match("/dashboard/api/metrics", "")
@@ -79,8 +78,8 @@ func TestMatchSamePriorityLongerPrefixWins(t *testing.T) {
 
 func TestMatchDisabledSkipped(t *testing.T) {
 	rules := []Rule{
-		rule("disabled", "/api/paas/", "", 200, false, Target{Service: "disabled-svc", Port: 1}, "prod"),
-		rule("enabled", "/api/paas/", "", 100, true, Target{Service: "enabled-svc", Port: 8080}, "prod"),
+		rule("disabled", "/api/paas/", "", 200, false, Target{Service: "disabled-svc", Port: 1}),
+		rule("enabled", "/api/paas/", "", 100, true, Target{Service: "enabled-svc", Port: 8080}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 	res, ok := m.Match("/api/paas/x", "")
@@ -95,9 +94,9 @@ func TestMatchDisabledSkipped(t *testing.T) {
 func TestMatchRequestLaneFilter(t *testing.T) {
 	rules := []Rule{
 		// rule requires request_lane == ppe-x
-		rule("laned", "/api/paas/", "ppe-x", 200, true, Target{Service: "laned-svc", Port: 1}, "prod"),
+		rule("laned", "/api/paas/", "ppe-x", 200, true, Target{Service: "laned-svc", Port: 1}),
 		// generic rule, no lane constraint
-		rule("generic", "/api/paas/", "", 100, true, Target{Service: "generic-svc", Port: 8080}, "prod"),
+		rule("generic", "/api/paas/", "", 100, true, Target{Service: "generic-svc", Port: 8080}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 
