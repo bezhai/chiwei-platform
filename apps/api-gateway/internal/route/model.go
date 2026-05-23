@@ -28,4 +28,9 @@ type Rule struct {
 	Priority int      `json:"priority"`
 	Match    Match    `json:"match"`
 	Targets  []Target `json:"targets"`
+	// SplitKeyHeaders is an ordered list of header names used for stable
+	// (sticky) target selection: the first present, non-empty header value is
+	// hashed with the rule name to pick a target deterministically. Empty means
+	// no stable split (weighted-random selection).
+	SplitKeyHeaders []string `json:"split_key_headers,omitempty"`
 }

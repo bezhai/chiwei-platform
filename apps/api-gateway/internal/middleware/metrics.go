@@ -36,6 +36,14 @@ var (
 		Help:    "Proxy request duration in seconds.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"service"})
+
+	// GatewaySplitFallbackTotal counts requests where a rule configured for
+	// stable split could not resolve a split key and fell back to weighted
+	// random target selection, labeled by rule name.
+	GatewaySplitFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_split_fallback_total",
+		Help: "Requests that fell back to weighted random because a stable-split rule could not resolve a key.",
+	}, []string{"rule"})
 )
 
 // Metrics is an HTTP middleware that records request metrics.

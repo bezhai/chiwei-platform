@@ -156,8 +156,13 @@ func NewRouter(
 		// 字面后缀。explain 必须在 /gateway-rules 子路由之外注册，否则会变成
 		// "gateway-rules/:explain"（多一段斜杠），与对外契约不符。
 		r.Post("/gateway-rules:explain", gatewayRuleH.Explain)
+		// rollback 同 explain：collection 级 custom method，注册在 /gateway-rules 子路由
+		// 之外（冒号紧跟 collection，无斜杠），把历史某版本规则集回滚成当前配置。
+		r.Post("/gateway-rules:rollback", gatewayRuleH.Rollback)
 		r.Route("/gateway-rules", func(r chi.Router) {
 			r.Get("/", gatewayRuleH.List)
+			// snapshots 列表在 /{name} 之前注册，否则 "snapshots" 会被 {name} 误吃。
+			r.Get("/snapshots", gatewayRuleH.ListSnapshots)
 			r.Get("/{name}", gatewayRuleH.Get)
 			r.Put("/{name}", gatewayRuleH.Upsert)
 			r.Delete("/{name}", gatewayRuleH.Delete)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 	"github.com/chiwei-platform/paas-engine/internal/port"
@@ -32,7 +33,7 @@ func (r *GatewayRuleRepo) Upsert(ctx context.Context, rule *domain.GatewayRule) 
 		Columns: []clause.Column{{Name: "name"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"enabled", "priority", "path_prefix", "request_lane",
-			"match", "targets", "version", "updated_at",
+			"match", "targets", "split_key_headers", "version", "updated_at",
 		}),
 	}).Create(m).Error
 }
@@ -90,6 +91,96 @@ func (r *GatewayRuleRepo) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
+// Tx 在一个 GORM 事务内执行 fn，传入一个事务作用域的 GatewayRuleRepo（同一 *gorm.DB
+// 事务句柄）。fn 返回非 nil 则整个事务回滚——"改规则 + 写快照"要么全成要么全不成。
+func (r *GatewayRuleRepo) Tx(ctx context.Context, fn func(repo port.GatewayRuleRepository) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(&GatewayRuleRepo{db: tx})
+	})
+}
+
+// SaveSnapshot 插入一条规则快照历史。snapshot_version 是 bigserial 主键，由 DB 序列
+// 在 INSERT 时原子分配（单调、并发安全），GORM 把分配到的值回填进模型后返回。
+func (r *GatewayRuleRepo) SaveSnapshot(ctx context.Context, rules []domain.GatewayRule, createdBy, reason string) (int64, error) {
+	rulesJSON, err := json.Marshal(rules)
+	if err != nil {
+		return 0, fmt.Errorf("marshal snapshot rules: %w", err)
+	}
+	m := &GatewayRuleSnapshotModel{
+		Rules:     string(rulesJSON),
+		CreatedBy: createdBy,
+		Reason:    reason,
+		CreatedAt: time.Now(),
+	}
+	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+		return 0, err
+	}
+	return m.SnapshotVersion, nil
+}
+
+// LatestSnapshotVersion 返回最大的 snapshot_version（无快照返回 0）。
+func (r *GatewayRuleRepo) LatestSnapshotVersion(ctx context.Context) (int64, error) {
+	var version int64
+	err := r.db.WithContext(ctx).
+		Model(&GatewayRuleSnapshotModel{}).
+		Select("COALESCE(MAX(snapshot_version), 0)").
+		Scan(&version).Error
+	if err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+// ListSnapshots 按 snapshot_version 倒序返回最近 limit 条快照（limit<=0 返回全部）。
+func (r *GatewayRuleRepo) ListSnapshots(ctx context.Context, limit int) ([]*domain.GatewayRuleSnapshot, error) {
+	q := r.db.WithContext(ctx).Order("snapshot_version desc")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	var models []GatewayRuleSnapshotModel
+	if err := q.Find(&models).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*domain.GatewayRuleSnapshot, 0, len(models))
+	for i := range models {
+		snap, err := modelToGatewaySnapshot(&models[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, snap)
+	}
+	return out, nil
+}
+
+// GetSnapshot 按版本号取一条快照，不存在返回 ErrGatewayRuleNotFound。
+func (r *GatewayRuleRepo) GetSnapshot(ctx context.Context, version int64) (*domain.GatewayRuleSnapshot, error) {
+	var m GatewayRuleSnapshotModel
+	result := r.db.WithContext(ctx).First(&m, "snapshot_version = ?", version)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, domain.ErrGatewayRuleNotFound
+		}
+		return nil, result.Error
+	}
+	return modelToGatewaySnapshot(&m)
+}
+
+func modelToGatewaySnapshot(m *GatewayRuleSnapshotModel) (*domain.GatewayRuleSnapshot, error) {
+	rules := []domain.GatewayRule{}
+	if m.Rules != "" {
+		if err := json.Unmarshal([]byte(m.Rules), &rules); err != nil {
+			return nil, fmt.Errorf("unmarshal snapshot %d rules: %w", m.SnapshotVersion, err)
+		}
+	}
+	return &domain.GatewayRuleSnapshot{
+		SnapshotVersion: m.SnapshotVersion,
+		Rules:           rules,
+		CreatedBy:       m.CreatedBy,
+		Reason:          m.Reason,
+		CreatedAt:       m.CreatedAt,
+	}, nil
+}
+
 func gatewayRuleToModel(rule *domain.GatewayRule) (*GatewayRuleModel, error) {
 	matchJSON, err := json.Marshal(rule.Match)
 	if err != nil {
@@ -99,17 +190,28 @@ func gatewayRuleToModel(rule *domain.GatewayRule) (*GatewayRuleModel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal targets: %w", err)
 	}
+	// Empty split list 存 "[]"（合法 jsonb 空数组），不能存 ""——jsonb 列拒绝空字符串
+	// （22P02），会让整条 INSERT 失败。配置了的列表存成 JSON 数组。
+	splitKeyJSON := "[]"
+	if len(rule.SplitKeyHeaders) > 0 {
+		b, err := json.Marshal(rule.SplitKeyHeaders)
+		if err != nil {
+			return nil, fmt.Errorf("marshal split_key_headers: %w", err)
+		}
+		splitKeyJSON = string(b)
+	}
 	return &GatewayRuleModel{
-		Name:        rule.Name,
-		Enabled:     rule.Enabled,
-		Priority:    rule.Priority,
-		PathPrefix:  rule.PathPrefix,
-		RequestLane: rule.RequestLane,
-		Match:       string(matchJSON),
-		Targets:     string(targetsJSON),
-		Version:     rule.Version,
-		CreatedAt:   rule.CreatedAt,
-		UpdatedAt:   rule.UpdatedAt,
+		Name:            rule.Name,
+		Enabled:         rule.Enabled,
+		Priority:        rule.Priority,
+		PathPrefix:      rule.PathPrefix,
+		RequestLane:     rule.RequestLane,
+		Match:           string(matchJSON),
+		Targets:         string(targetsJSON),
+		SplitKeyHeaders: splitKeyJSON,
+		Version:         rule.Version,
+		CreatedAt:       rule.CreatedAt,
+		UpdatedAt:       rule.UpdatedAt,
 	}, nil
 }
 
@@ -126,16 +228,23 @@ func modelToGatewayRule(m *GatewayRuleModel) (*domain.GatewayRule, error) {
 			return nil, fmt.Errorf("unmarshal targets for rule %q: %w", m.Name, err)
 		}
 	}
+	var splitKeyHeaders []string
+	if m.SplitKeyHeaders != "" {
+		if err := json.Unmarshal([]byte(m.SplitKeyHeaders), &splitKeyHeaders); err != nil {
+			return nil, fmt.Errorf("unmarshal split_key_headers for rule %q: %w", m.Name, err)
+		}
+	}
 	return &domain.GatewayRule{
-		Name:        m.Name,
-		Enabled:     m.Enabled,
-		Priority:    m.Priority,
-		PathPrefix:  m.PathPrefix,
-		RequestLane: m.RequestLane,
-		Match:       match,
-		Targets:     targets,
-		Version:     m.Version,
-		CreatedAt:   m.CreatedAt,
-		UpdatedAt:   m.UpdatedAt,
+		Name:            m.Name,
+		Enabled:         m.Enabled,
+		Priority:        m.Priority,
+		PathPrefix:      m.PathPrefix,
+		RequestLane:     m.RequestLane,
+		Match:           match,
+		Targets:         targets,
+		SplitKeyHeaders: splitKeyHeaders,
+		Version:         m.Version,
+		CreatedAt:       m.CreatedAt,
+		UpdatedAt:       m.UpdatedAt,
 	}, nil
 }

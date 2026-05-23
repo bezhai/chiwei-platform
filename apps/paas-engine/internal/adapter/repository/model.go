@@ -4,21 +4,21 @@ import "time"
 
 // AppModel 是 App 的数据库持久化模型。
 type AppModel struct {
-	Name              string `gorm:"primaryKey"`
-	Description       string
-	ImageRepoName     string
-	Port              int
-	ServiceAccount    string
-	Command           string // JSON 序列化的 []string
-	EnvFromSecrets    string // JSON 序列化的 []string
-	EnvFromConfigMaps string // JSON 序列化的 []string
-	Envs              string // JSON 序列化的 map[string]string
-	ConfigBundles     string // JSON 序列化的 []string
+	Name               string `gorm:"primaryKey"`
+	Description        string
+	ImageRepoName      string
+	Port               int
+	ServiceAccount     string
+	Command            string // JSON 序列化的 []string
+	EnvFromSecrets     string // JSON 序列化的 []string
+	EnvFromConfigMaps  string // JSON 序列化的 []string
+	Envs               string // JSON 序列化的 map[string]string
+	ConfigBundles      string // JSON 序列化的 []string
 	AllowedLaneClasses string // JSON 序列化的 []string
-	SidecarEnabled    bool
-	Volumes           string // JSON 序列化的 []VolumeMount
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	SidecarEnabled     bool
+	Volumes            string // JSON 序列化的 []VolumeMount
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 func (AppModel) TableName() string { return "apps" }
@@ -165,9 +165,9 @@ func (DbMutationModel) TableName() string { return "db_mutations" }
 
 // DynamicConfigModel 是 DynamicConfig 的数据库持久化模型。
 type DynamicConfigModel struct {
-	Key       string    `gorm:"primaryKey"`
-	Lane      string    `gorm:"primaryKey;default:prod"`
-	Value     string    `gorm:"not null"`
+	Key       string `gorm:"primaryKey"`
+	Lane      string `gorm:"primaryKey;default:prod"`
+	Value     string `gorm:"not null"`
 	UpdatedAt time.Time
 }
 
@@ -177,16 +177,34 @@ func (DynamicConfigModel) TableName() string { return "dynamic_configs" }
 // match / targets 用 jsonb 列存（写入 JSON 序列化字符串）；
 // path_prefix / request_lane 提到顶层列做索引与反查。
 type GatewayRuleModel struct {
-	Name        string    `gorm:"primaryKey"`
-	Enabled     bool      `gorm:"not null;default:true;index:idx_gateway_enabled_priority,priority:1"`
-	Priority    int       `gorm:"not null;default:100;index:idx_gateway_enabled_priority,sort:desc,priority:2"`
-	PathPrefix  string    `gorm:"not null;index"`
-	RequestLane string    `gorm:""`
-	Match       string    `gorm:"type:jsonb;not null"`
-	Targets     string    `gorm:"type:jsonb;not null"`
-	Version     int64     `gorm:"not null;default:1"`
-	CreatedAt   time.Time `gorm:"not null"`
-	UpdatedAt   time.Time `gorm:"not null"`
+	Name        string `gorm:"primaryKey"`
+	Enabled     bool   `gorm:"not null;default:true;index:idx_gateway_enabled_priority,priority:1"`
+	Priority    int    `gorm:"not null;default:100;index:idx_gateway_enabled_priority,sort:desc,priority:2"`
+	PathPrefix  string `gorm:"not null;index"`
+	RequestLane string `gorm:""`
+	Match       string `gorm:"type:jsonb;not null"`
+	Targets     string `gorm:"type:jsonb;not null"`
+	// SplitKeyHeaders holds a JSON array of header names for stable split.
+	// Nullable jsonb (pure-increment column): empty for rules with no stable
+	// split; AutoMigrate adds it without touching existing rows.
+	SplitKeyHeaders string    `gorm:"type:jsonb"`
+	Version         int64     `gorm:"not null;default:1"`
+	CreatedAt       time.Time `gorm:"not null"`
+	UpdatedAt       time.Time `gorm:"not null"`
 }
 
 func (GatewayRuleModel) TableName() string { return "gateway_routing_rules" }
+
+// GatewayRuleSnapshotModel 是 gateway 规则快照历史的持久化模型。
+// SnapshotVersion 是独立单调序列（bigserial / 事务内 max+1 分配），不依赖
+// max(rule.version)——这样删掉 version 最高的规则也不会让快照版本回退。
+// Rules 是当时完整规则集的 jsonb 序列化（[]domain.GatewayRule）。
+type GatewayRuleSnapshotModel struct {
+	SnapshotVersion int64     `gorm:"primaryKey;autoIncrement"`
+	Rules           string    `gorm:"type:jsonb;not null"`
+	CreatedBy       string    `gorm:"not null"`
+	Reason          string    `gorm:"type:text"`
+	CreatedAt       time.Time `gorm:"not null"`
+}
+
+func (GatewayRuleSnapshotModel) TableName() string { return "gateway_rule_snapshots" }

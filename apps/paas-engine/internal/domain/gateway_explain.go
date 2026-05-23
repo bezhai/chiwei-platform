@@ -60,6 +60,13 @@ type GatewayExplainResult struct {
 	// when Matched. WouldRedirect mirrors the matcher's trailing-slash 301.
 	WouldForward  bool `json:"would_forward"`
 	WouldRedirect bool `json:"would_redirect"`
+	// StableSplit reports whether the winning rule configures stable (sticky)
+	// target selection via split_key_headers. False means weighted-random.
+	StableSplit bool `json:"stable_split"`
+	// SplitKeyHeaders is the winning rule's ordered split key header list (the
+	// headers api-gateway probes, in order, for the stable-split key). Empty
+	// when StableSplit is false.
+	SplitKeyHeaders []string `json:"split_key_headers,omitempty"`
 	// CandidateTargets are the winning rule's targets with effective lanes.
 	CandidateTargets []GatewayExplainTarget `json:"candidate_targets,omitempty"`
 	// EffectiveLaneNote explains how effective lane is derived.
@@ -140,6 +147,8 @@ func ExplainGatewayMatch(rules []*GatewayRule, path, requestLane string) Gateway
 			result.WinningReason = entry.Reason
 			result.CandidateTargets = buildCandidates(r, requestLane)
 			result.EffectiveLaneNote = effectiveLaneNote(r, requestLane)
+			result.StableSplit = len(r.SplitKeyHeaders) > 0
+			result.SplitKeyHeaders = r.SplitKeyHeaders
 		default:
 			// Would have matched, but a higher-priority rule already won.
 			entry.Status = ExplainStatusShadowed

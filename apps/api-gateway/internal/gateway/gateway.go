@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -29,6 +30,9 @@ type Gateway struct {
 	// rng returns a value in [0,1) used for weighted-random target selection.
 	// Injectable so tests can drive deterministic target choices.
 	rng func() float64
+	// hash maps the (rule_name + split key) string to a uint64 for stable
+	// (sticky) target selection. Injectable so tests can pin a bucket.
+	hash hashFunc
 }
 
 // New creates a Gateway.
@@ -43,7 +47,15 @@ func New(snapshots SnapshotProvider, timeout time.Duration) *Gateway {
 		timeout:   timeout,
 		transport: t,
 		rng:       rand.Float64,
+		hash:      fnvHash,
 	}
+}
+
+// fnvHash is the production stable-split hash: FNV-1a over the input bytes.
+func fnvHash(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum64()
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -114,8 +126,24 @@ func (g *Gateway) serveEmergency(w http.ResponseWriter, r *http.Request, request
 // forward proxies the request to the matched target's logical service. Lane
 // resolution is delegated to the lane-sidecar via the X-Ctx-Lane header; the
 // gateway never resolves "service-lane" itself.
+// chooseTarget selects the upstream target for a matched rule. When the rule
+// configures split_key_headers and a key resolves from the request, selection
+// is stable (hash(rule+key) -> fixed bucket). Otherwise it falls back to
+// weighted random; if the rule was configured for stable split but no key
+// resolved, the fallback metric is bumped for the rule.
+func (g *Gateway) chooseTarget(rt route.Rule, r *http.Request) route.Target {
+	if len(rt.SplitKeyHeaders) > 0 {
+		if key, ok := resolveSplitKey(rt.SplitKeyHeaders, r.Header); ok {
+			bucket := stableBucket(g.hash, rt.Name, key)
+			return selectTargetStable(rt.Targets, bucket)
+		}
+		middleware.GatewaySplitFallbackTotal.WithLabelValues(rt.Name).Inc()
+	}
+	return selectTarget(rt.Targets, g.rng())
+}
+
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, rt route.Rule, requestLane string) {
-	target := selectTarget(rt.Targets, g.rng())
+	target := g.chooseTarget(rt, r)
 	effLane := effectiveLane(target, requestLane)
 
 	targetPath := route.RewritePath(r.URL.Path, target)
