@@ -126,7 +126,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/enforce-routing.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/enforce-routing.sh"
           }
         ]
       }
