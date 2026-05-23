@@ -190,9 +190,9 @@ func gatewayRuleToModel(rule *domain.GatewayRule) (*GatewayRuleModel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal targets: %w", err)
 	}
-	// Empty split list stays NULL in the jsonb column (rules without stable
-	// split); a configured list is stored as a JSON array.
-	splitKeyJSON := ""
+	// Empty split list 存 "[]"（合法 jsonb 空数组），不能存 ""——jsonb 列拒绝空字符串
+	// （22P02），会让整条 INSERT 失败。配置了的列表存成 JSON 数组。
+	splitKeyJSON := "[]"
 	if len(rule.SplitKeyHeaders) > 0 {
 		b, err := json.Marshal(rule.SplitKeyHeaders)
 		if err != nil {

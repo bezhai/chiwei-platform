@@ -41,6 +41,21 @@ func TestGatewayRuleRoundTrip_SplitKeyHeaders(t *testing.T) {
 	}
 }
 
+// TestGatewayRuleToModel_EmptySplitKeyHeadersIsValidJSONB: 空 split list 写入
+// jsonb 列必须是合法 JSON。存空字符串 '' 会被 PG jsonb 拒绝（22P02），导致
+// EnsureBaseline / Upsert 整条 INSERT 失败——真机泳道演练（ppe-gw3）抓到的回归。
+func TestGatewayRuleToModel_EmptySplitKeyHeadersIsValidJSONB(t *testing.T) {
+	rule := sampleGatewayRule()
+	rule.SplitKeyHeaders = nil
+	m, err := gatewayRuleToModel(rule)
+	if err != nil {
+		t.Fatalf("gatewayRuleToModel failed: %v", err)
+	}
+	if !json.Valid([]byte(m.SplitKeyHeaders)) {
+		t.Fatalf("empty split_key_headers must serialize to valid jsonb, got %q", m.SplitKeyHeaders)
+	}
+}
+
 // TestModelToGatewayRule_SplitKeyHeadersEmpty: an empty/absent jsonb column
 // decodes to an empty (nil) slice, not an error.
 func TestModelToGatewayRule_SplitKeyHeadersEmpty(t *testing.T) {
