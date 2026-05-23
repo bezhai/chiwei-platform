@@ -177,7 +177,7 @@ func TestEnsureBaseline_DoesNotOverwriteManualEdit(t *testing.T) {
 	manual.Priority = 500
 	manual.PathPrefix = "/api/agent/"
 	manual.Match.PathPrefix = "/api/agent/"
-	if err := svc.Upsert(ctx, "default-agent-service-api", manual); err != nil {
+	if _, err := svc.Upsert(ctx, "default-agent-service-api", manual); err != nil {
 		t.Fatal(err)
 	}
 
@@ -234,7 +234,7 @@ func TestEnsureBaseline_DoesNotOverwriteEvenViaRepoPath(t *testing.T) {
 	manual.Match.PathPrefix = "/dashboard/"
 	manual.Targets[0].Service = "monitor-dashboard-web"
 	manual.Targets[0].Port = 80
-	if err := svc.Upsert(ctx, "default-monitor-dashboard-web", manual); err != nil {
+	if _, err := svc.Upsert(ctx, "default-monitor-dashboard-web", manual); err != nil {
 		t.Fatal(err)
 	}
 	repo.upsertCalls = 0 // 重置，只关心 ensure 是否再次 Upsert

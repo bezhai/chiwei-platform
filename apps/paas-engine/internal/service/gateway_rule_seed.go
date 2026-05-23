@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
+	"github.com/chiwei-platform/paas-engine/internal/port"
 )
 
 // BaselineGatewayRule 是一条基线种子规则：name + 对应的 Upsert 请求体。
@@ -71,6 +72,22 @@ func (s *GatewayRuleService) EnsureBaseline(ctx context.Context) error {
 	for _, seed := range BaselineGatewayRules() {
 		if err := s.ensureRule(ctx, seed.Name, seed.Request); err != nil {
 			return fmt.Errorf("ensure baseline rule %q: %w", seed.Name, err)
+		}
+	}
+
+	// 启动期 ensure 走 insert-do-nothing，本身不写快照（否则每次重启都灌一条历史）。
+	// 但 snapshot_version 是 api-gateway 拉取快照的唯一版本来源——若历史为空（全新库
+	// 首启），补写一条 bootstrap 快照让基线规则有 version>0；已有历史则不动。
+	version, err := s.repo.LatestSnapshotVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("read latest snapshot version: %w", err)
+	}
+	if version == 0 {
+		if err := s.repo.Tx(ctx, func(txRepo port.GatewayRuleRepository) error {
+			_, err := recordSnapshot(ctx, txRepo, "bootstrap baseline rules")
+			return err
+		}); err != nil {
+			return fmt.Errorf("bootstrap baseline snapshot: %w", err)
 		}
 	}
 	return nil

@@ -72,9 +72,35 @@ $HTTP DELETE "$BASE/ops/lane-bindings?type=<TYPE>&key=<KEY>" "$AUTH"
 
 ### `gateway` — api-gateway 路由规则调度
 
-调度 api-gateway 的流量路由规则：预览命中、止血启停、调整权重。所有动作经 Dashboard 中转写审计，再转发到 paas-engine 的 gateway-rules 管理 API。
+调度 api-gateway 的流量路由规则：查看配置、预览命中、增删改、止血启停、调权、回滚。所有写动作经 Dashboard 中转写审计（caller/规则名/before→after/reason/快照版本），再转发到 paas-engine 的 gateway-rules 管理 API。
 
-> ⚠️ **依赖 Dashboard 中转端点（当前为 gap，见文末「Dashboard 待补能力」）。** 在 Dashboard 落地 `/ops/gateway-rules*` 中转 + 审计前，下列命令会 404，不可用于线上调度。
+#### `gateway list` — 列出全部规则（只读）
+
+```bash
+$HTTP GET "$BASE/ops/gateway-rules" "$AUTH"
+```
+
+#### `gateway get NAME` — 看单条规则（只读）
+
+```bash
+$HTTP GET "$BASE/ops/gateway-rules/<NAME>" "$AUTH"
+```
+
+#### `gateway snapshot` — 看 paas-engine 当前下发的期望配置（version + 规则，只读）
+
+```bash
+$HTTP GET "$BASE/ops/gateway-rules/snapshot" "$AUTH"
+```
+
+这是「流量调度配置长什么样」的权威来源——paas-engine 的当前快照，即 api-gateway 应当执行的规则。看调度现状用这个。
+
+#### `gateway snapshots [LIMIT]` — 列出最近 N 条规则快照历史（只读）
+
+```bash
+$HTTP GET "$BASE/ops/gateway-rules/snapshots?limit=<LIMIT>" "$AUTH"
+```
+
+每条快照含 snapshot_version / created_by / reason / created_at / 规则全量。用于回滚前定位目标版本。
 
 #### `gateway explain PATH [LANE]` — 预览一个请求会命中哪条规则
 
@@ -85,7 +111,7 @@ $HTTP POST "$BASE/ops/gateway-rules:explain" \
   "$AUTH"
 ```
 
-返回：是否命中、命中规则名 + 原因、would_forward / would_redirect、候选 targets（含 effective_lane）、其余规则未命中原因（disabled / request_lane 不匹配 / path 不匹配 / 被更高优先级 shadowed）。**上线权重分流前必须先 explain 确认命中符合预期。**
+返回：是否命中、命中规则名 + 原因、would_forward / would_redirect、候选 targets（含 effective_lane）、是否启用稳定分流（stable_split + split_key_headers）、其余规则未命中原因（disabled / request_lane 不匹配 / path 不匹配 / 被更高优先级 shadowed）。**上线权重分流前必须先 explain 确认命中符合预期。**
 
 #### `gateway disable NAME REASON` — 停用一条规则（止血）
 
@@ -117,6 +143,34 @@ $HTTP POST "$BASE/ops/gateway-rules/<NAME>:set-weights" \
 ```
 
 返回 before/after 的 targets 权重。target 集合必须与规则现有 target 完全一致（缺失/多余/重复都会被拒绝）。
+
+#### `gateway upsert NAME REASON` — 创建或更新一条规则（写）
+
+按 NAME 整体创建/覆盖一条规则。请求体字段：`path_prefix`（路径前缀，必须 `/` 开头）、`match.path_prefix`（匹配条件，与顶层 path_prefix 一致）、`targets`（每项含 `service`/`lane`/`port`/`weight`，weight 总和=100，lane 留空表示跟随请求 x-lane 透传）、`priority`、`enabled`、可选 `split_key_headers`。`split_key_headers` 非空时启用稳定分流：按请求里第一个命中的 header 值做 hash 分桶，同一来源稳定落同一 target；为空则退化为加权随机。
+
+```bash
+$HTTP PUT "$BASE/ops/gateway-rules/<NAME>" \
+  '{"reason":"<REASON>","priority":10,"enabled":true,"path_prefix":"/api/agent/","match":{"path_prefix":"/api/agent/"},"targets":[{"service":"agent-service","lane":"","port":8000,"weight":100}],"split_key_headers":["x-user-id"]}' \
+  "$AUTH"
+```
+
+#### `gateway delete NAME REASON` — 删除一条规则（写）
+
+```bash
+$HTTP DELETE "$BASE/ops/gateway-rules/<NAME>" \
+  '{"reason":"<REASON>"}' \
+  "$AUTH"
+```
+
+#### `gateway rollback VERSION REASON` — 回滚到历史某快照版本（写）
+
+把整套规则回滚到 `gateway snapshots` 列出的某个 `snapshot_version`，会分配一个新的、更高的快照版本（不是原地复活旧版本号）。回滚前先用 `gateway snapshots` 确认目标版本内容。
+
+```bash
+$HTTP POST "$BASE/ops/gateway-rules:rollback" \
+  '{"reason":"<REASON>","snapshot_version":<VERSION>}' \
+  "$AUTH"
+```
 
 ### `audit [caller=xxx] [action=xxx]` — 审计日志查询
 
@@ -197,20 +251,5 @@ $HTTP DELETE "$BASE/skills/<NAME>" "$AUTH"
 
 ## 注意事项
 
-- 写操作（bind/unbind/gateway disable/enable/set-weights/skill-create/skill-edit/skill-delete）影响线上，执行前先告知用户
+- 写操作（bind/unbind/gateway upsert/delete/disable/enable/set-weights/rollback/skill-create/skill-edit/skill-delete）影响线上，执行前先告知用户
 - 不涵盖 deploy/undeploy/release/self-deploy/logs，这些仍走 `make` 命令
-
-## Dashboard 待补能力（gateway 调度的跨 repo gap）
-
-`gateway` 子命令依赖 Dashboard（不在本 repo）新增以下中转端点，本 repo 只完成了 paas-engine 引擎侧 API（`/api/paas/gateway-rules:explain`、`/{name}:disable`、`:enable`、`:set-weights`）。**在 Dashboard 落地前 gateway 命令不可用。**
-
-Dashboard 需新增并把请求转发到 paas-engine 对应端点：
-
-| Dashboard 中转端点 | 转发到 paas-engine | 审计 |
-|---|---|---|
-| `POST /dashboard/api/ops/gateway-rules:explain` | `POST /api/paas/gateway-rules:explain` | 只读，可不审计 |
-| `POST /dashboard/api/ops/gateway-rules/{name}:disable` | 同名 | 必须审计 |
-| `POST /dashboard/api/ops/gateway-rules/{name}:enable` | 同名 | 必须审计 |
-| `POST /dashboard/api/ops/gateway-rules/{name}:set-weights` | 同名 | 必须审计 |
-
-止血动作（disable/enable/set-weights）的审计必须记录：操作者、规则名、before→after 值、reason、生效时间、当前快照版本。paas-engine 端点已在响应里返回 before/after 供 Dashboard 落审计。**在审计中转就绪前，止血端点不应投入 ops 日常使用**（否则出现「能改但未被审计」的空窗）。

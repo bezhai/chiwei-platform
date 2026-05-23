@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 	"github.com/chiwei-platform/paas-engine/internal/service"
@@ -47,7 +48,8 @@ func (h *GatewayRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, domain.ErrInvalidInput)
 		return
 	}
-	if err := h.svc.Upsert(r.Context(), name, req); err != nil {
+	snapVersion, err := h.svc.Upsert(r.Context(), name, req)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
@@ -56,17 +58,24 @@ func (h *GatewayRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rule)
+	// 平铺规则字段 + 事务分配的 snapshot_version（审计游标，区别于 rule.version）。
+	writeJSON(w, http.StatusOK, struct {
+		*domain.GatewayRule
+		SnapshotVersion int64 `json:"snapshot_version"`
+	}{rule, snapVersion})
 }
 
-// Delete 删除规则。
+// Delete 删除规则。reason 从 body 读（可空，仅落进快照历史）。
 func (h *GatewayRuleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if err := h.svc.Delete(r.Context(), name); err != nil {
+	var req reasonRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // DELETE body 可空，解析失败按无 reason 处理
+	snapVersion, err := h.svc.Delete(r.Context(), name, req.Reason)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": name, "snapshot_version": snapVersion})
 }
 
 // explainRequest 是 POST /api/paas/gateway-rules:explain 的请求体。
@@ -140,6 +149,52 @@ func (h *GatewayRuleHandler) SetWeights(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	res, err := h.svc.SetWeights(r.Context(), name, req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// ListSnapshots 返回最近 N 条规则快照历史（管理面，{data:[...]} 风格直接返数组）。
+// limit 来自查询参数 ?limit=，缺省/非法时默认 20、上限 200。
+func (h *GatewayRuleHandler) ListSnapshots(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	snaps, err := h.svc.ListSnapshots(r.Context(), limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snaps)
+}
+
+// rollbackRequest 是 POST /gateway-rules:rollback 的请求体。
+type rollbackRequest struct {
+	SnapshotVersion int64  `json:"snapshot_version"`
+	Reason          string `json:"reason"`
+}
+
+// Rollback 把历史某版本规则集重新写入当前表，分配更大的新 snapshot_version。
+// 是 collection 级 custom method（:rollback），不针对单条规则。
+func (h *GatewayRuleHandler) Rollback(w http.ResponseWriter, r *http.Request) {
+	var req rollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, domain.ErrInvalidInput)
+		return
+	}
+	if req.SnapshotVersion <= 0 {
+		writeError(w, fmt.Errorf("%w: snapshot_version is required and must be positive", domain.ErrInvalidInput))
+		return
+	}
+	res, err := h.svc.Rollback(r.Context(), req.SnapshotVersion, req.Reason)
 	if err != nil {
 		writeError(w, err)
 		return

@@ -9,17 +9,56 @@ import (
 	"testing"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
+	"github.com/chiwei-platform/paas-engine/internal/port"
 	"github.com/chiwei-platform/paas-engine/internal/service"
 	"github.com/go-chi/chi/v5"
 )
 
 // in-memory stub repo for handler tests
 type gwStubRepo struct {
-	rules map[string]*domain.GatewayRule
+	rules     map[string]*domain.GatewayRule
+	snapshots []domain.GatewayRuleSnapshot
+	seq       int64
 }
 
 func newGwStubRepo() *gwStubRepo {
 	return &gwStubRepo{rules: make(map[string]*domain.GatewayRule)}
+}
+
+func (r *gwStubRepo) Tx(_ context.Context, fn func(repo port.GatewayRuleRepository) error) error {
+	return fn(r)
+}
+func (r *gwStubRepo) SaveSnapshot(_ context.Context, rules []domain.GatewayRule, createdBy, reason string) (int64, error) {
+	r.seq++
+	cp := make([]domain.GatewayRule, len(rules))
+	copy(cp, rules)
+	r.snapshots = append(r.snapshots, domain.GatewayRuleSnapshot{
+		SnapshotVersion: r.seq, Rules: cp, CreatedBy: createdBy, Reason: reason,
+	})
+	return r.seq, nil
+}
+func (r *gwStubRepo) LatestSnapshotVersion(_ context.Context) (int64, error) {
+	return r.seq, nil
+}
+func (r *gwStubRepo) ListSnapshots(_ context.Context, limit int) ([]*domain.GatewayRuleSnapshot, error) {
+	out := make([]*domain.GatewayRuleSnapshot, 0, len(r.snapshots))
+	for i := len(r.snapshots) - 1; i >= 0; i-- {
+		cp := r.snapshots[i]
+		out = append(out, &cp)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+func (r *gwStubRepo) GetSnapshot(_ context.Context, version int64) (*domain.GatewayRuleSnapshot, error) {
+	for i := range r.snapshots {
+		if r.snapshots[i].SnapshotVersion == version {
+			cp := r.snapshots[i]
+			return &cp, nil
+		}
+	}
+	return nil, domain.ErrGatewayRuleNotFound
 }
 
 func (r *gwStubRepo) Upsert(_ context.Context, rule *domain.GatewayRule) error {
@@ -271,5 +310,52 @@ func TestGatewayHandler_SnapshotPayloadShape(t *testing.T) {
 	}
 	if snap.Rules[0].Name != "default-agent-service-api" {
 		t.Errorf("rule name mismatch: %q", snap.Rules[0].Name)
+	}
+}
+
+// PUT/DELETE 必须在响应里带回事务分配的 snapshot_version，否则 Dashboard 审计
+// 拿不到改后快照版本（只能误取 rule.version 或记 null）。snapshot_version 与
+// rule.version 是两套版本号：前者是审计/回滚游标，后者是单条规则的修订计数。
+func TestGatewayHandler_PutAndDeleteReturnSnapshotVersion(t *testing.T) {
+	r, _ := newGatewayTestRouter()
+
+	rec := doReq(t, r, http.MethodPut, "/api/paas/gateway-rules/default-agent-service-api", validRuleBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var putEnv struct {
+		Data struct {
+			Version         int64 `json:"version"`
+			SnapshotVersion int64 `json:"snapshot_version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &putEnv); err != nil {
+		t.Fatalf("decode PUT: %v", err)
+	}
+	if putEnv.Data.SnapshotVersion != 1 {
+		t.Errorf("PUT response must carry tx-assigned snapshot_version=1, got %d", putEnv.Data.SnapshotVersion)
+	}
+	if putEnv.Data.Version != 1 {
+		t.Errorf("PUT response must still carry rule version=1, got %d", putEnv.Data.Version)
+	}
+
+	rec = doReq(t, r, http.MethodDelete, "/api/paas/gateway-rules/default-agent-service-api", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE expected 200, got %d", rec.Code)
+	}
+	var delEnv struct {
+		Data struct {
+			Deleted         string `json:"deleted"`
+			SnapshotVersion int64  `json:"snapshot_version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &delEnv); err != nil {
+		t.Fatalf("decode DELETE: %v", err)
+	}
+	if delEnv.Data.SnapshotVersion != 2 {
+		t.Errorf("DELETE response must carry tx-assigned snapshot_version=2, got %d", delEnv.Data.SnapshotVersion)
+	}
+	if delEnv.Data.Deleted != "default-agent-service-api" {
+		t.Errorf("DELETE response must echo deleted name, got %q", delEnv.Data.Deleted)
 	}
 }

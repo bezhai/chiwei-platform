@@ -4,11 +4,23 @@ import { AppDataSource } from '../db';
 import { AuditLog } from '../entities/audit-log';
 
 /** Map route path to a human-readable action name */
-function deriveAction(method: string, path: string): string {
+export function deriveAction(method: string, path: string): string {
   // Strip /dashboard prefix for matching
   const p = path.replace(/^\/dashboard/, '');
 
   const patterns: [RegExp, string][] = [
+    // gateway-rules：custom method（:explain / :disable / ...）匹配必须排在
+    // /{name} 之前，否则带冒号的整段会被 {name} 误吃；snapshot 同理要先于 {name}。
+    [/^\/api\/ops\/gateway-rules:explain$/, 'ops.gateway-rules.explain'],
+    [/^\/api\/ops\/gateway-rules:rollback$/, 'ops.gateway-rules.rollback'],
+    [/^\/api\/ops\/gateway-rules\/[^/]+:disable$/, 'ops.gateway-rules.disable'],
+    [/^\/api\/ops\/gateway-rules\/[^/]+:enable$/, 'ops.gateway-rules.enable'],
+    [/^\/api\/ops\/gateway-rules\/[^/]+:set-weights$/, 'ops.gateway-rules.set-weights'],
+    // snapshots（历史列表）与 snapshot（当前期望配置）都必须排在 /{name} 之前。
+    [/^\/api\/ops\/gateway-rules\/snapshots$/, 'ops.gateway-rules.snapshots'],
+    [/^\/api\/ops\/gateway-rules\/snapshot$/, 'ops.gateway-rules.snapshot'],
+    [/^\/api\/ops\/gateway-rules$/, 'ops.gateway-rules.list'],
+    [/^\/api\/ops\/gateway-rules\/[^/]+$/, method === 'PUT' ? 'ops.gateway-rules.update' : method === 'DELETE' ? 'ops.gateway-rules.delete' : 'ops.gateway-rules.get'],
     [/^\/api\/ops\/services\/[^/]+\/pods$/, 'ops.pods.read'],
     [/^\/api\/ops\/services$/, 'ops.services.read'],
     [/^\/api\/ops\/builds\/[^/]+\/latest$/, 'ops.builds.read'],
@@ -92,6 +104,15 @@ export const auditMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
       delete body.password;
       delete body.api_key;
       params.body = body;
+    }
+
+    // Structured audit payload stashed by a handler (e.g. gateway-rules write ops).
+    // Lifted to top-level params keys (rule_name/reason/before/after/snapshot_version)
+    // so audit_logs.params is JSONB-queryable by rule_name or snapshot_version.
+    // before/after/snapshot_version 的真值取自 paas-engine 写操作响应、不是中转层编的。
+    const stashed = c.get('gatewayAudit');
+    if (stashed && typeof stashed === 'object') {
+      Object.assign(params, stashed);
     }
 
     // Fire-and-forget audit write

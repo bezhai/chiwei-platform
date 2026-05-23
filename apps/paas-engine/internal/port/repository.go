@@ -68,4 +68,20 @@ type GatewayRuleRepository interface {
 	FindByName(ctx context.Context, name string) (*domain.GatewayRule, error)
 	FindAll(ctx context.Context) ([]*domain.GatewayRule, error)
 	Delete(ctx context.Context, name string) error
+
+	// Tx 在一个 DB 事务内执行 fn，传入一个事务作用域的 repo。
+	// 每次规则写操作（含 delete / rollback）都用它把"改规则 + 分配新
+	// snapshot_version + 写快照"包成一个原子单元，保证 snapshot version 单调
+	// 前进、历史与当前一致、并发写不串版。
+	Tx(ctx context.Context, fn func(repo GatewayRuleRepository) error) error
+	// SaveSnapshot 在当前（事务）作用域内分配下一个独立单调 snapshot_version，
+	// 把传入的完整规则集连同 createdBy/reason 落一条历史，返回分配到的版本号。
+	SaveSnapshot(ctx context.Context, rules []domain.GatewayRule, createdBy, reason string) (int64, error)
+	// LatestSnapshotVersion 返回最新的 snapshot_version（无快照时返回 0）。
+	// 它是 api-gateway 拉取快照时 version 的唯一来源。
+	LatestSnapshotVersion(ctx context.Context) (int64, error)
+	// ListSnapshots 按 snapshot_version 倒序返回最近 limit 条历史快照。
+	ListSnapshots(ctx context.Context, limit int) ([]*domain.GatewayRuleSnapshot, error)
+	// GetSnapshot 按版本号取一条历史快照，不存在返回 ErrGatewayRuleNotFound。
+	GetSnapshot(ctx context.Context, version int64) (*domain.GatewayRuleSnapshot, error)
 }

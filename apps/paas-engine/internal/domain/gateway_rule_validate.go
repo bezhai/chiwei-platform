@@ -39,6 +39,30 @@ func ValidateGatewayRule(rule GatewayRule) error {
 	if err := validateGatewayTargets(rule.Targets); err != nil {
 		return err
 	}
+	if err := validateGatewaySplitKeyHeaders(rule.SplitKeyHeaders); err != nil {
+		return err
+	}
+	return nil
+}
+
+// httpHeaderNamePattern matches an RFC 7230 header field-name (a token): one or
+// more token characters, no spaces / colons / control characters.
+var httpHeaderNamePattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
+
+// validateGatewaySplitKeyHeaders accepts an empty/nil list (no stable split);
+// when non-empty, every element must be a valid HTTP header name.
+func validateGatewaySplitKeyHeaders(headers []string) error {
+	for i, h := range headers {
+		if h == "" {
+			return fmt.Errorf("%w: split_key_headers[%d] must not be empty", ErrInvalidInput, i)
+		}
+		if !httpHeaderNamePattern.MatchString(h) {
+			return fmt.Errorf(
+				"%w: split_key_headers[%d] %q is not a valid HTTP header name",
+				ErrInvalidInput, i, h,
+			)
+		}
+	}
 	return nil
 }
 

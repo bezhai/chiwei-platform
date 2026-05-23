@@ -115,3 +115,44 @@ func TestModelToGatewayRule_TargetsNeverNil(t *testing.T) {
 		t.Error("expected non-nil empty targets slice")
 	}
 }
+
+func TestModelToGatewaySnapshot_RoundTrip(t *testing.T) {
+	rules := []domain.GatewayRule{
+		{Name: "ra", PathPrefix: "/a/", Match: domain.GatewayMatch{PathPrefix: "/a/"}, Version: 2},
+		{Name: "rb", PathPrefix: "/b/", Match: domain.GatewayMatch{PathPrefix: "/b/"}, Version: 1},
+	}
+	rulesJSON, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatalf("marshal rules: %v", err)
+	}
+	m := &GatewayRuleSnapshotModel{
+		SnapshotVersion: 7,
+		Rules:           string(rulesJSON),
+		CreatedBy:       "ops",
+		Reason:          "rollback to v2",
+		CreatedAt:       time.Now(),
+	}
+	got, err := modelToGatewaySnapshot(m)
+	if err != nil {
+		t.Fatalf("modelToGatewaySnapshot failed: %v", err)
+	}
+	if got.SnapshotVersion != 7 {
+		t.Errorf("snapshot_version mismatch: %d", got.SnapshotVersion)
+	}
+	if got.CreatedBy != "ops" || got.Reason != "rollback to v2" {
+		t.Errorf("created_by/reason not preserved: %q / %q", got.CreatedBy, got.Reason)
+	}
+	if len(got.Rules) != 2 || got.Rules[0].Name != "ra" || got.Rules[1].Name != "rb" {
+		t.Errorf("rules not round-tripped: %+v", got.Rules)
+	}
+}
+
+func TestModelToGatewaySnapshot_EmptyRulesNeverNil(t *testing.T) {
+	got, err := modelToGatewaySnapshot(&GatewayRuleSnapshotModel{SnapshotVersion: 1, Rules: ""})
+	if err != nil {
+		t.Fatalf("modelToGatewaySnapshot failed: %v", err)
+	}
+	if got.Rules == nil {
+		t.Error("expected non-nil empty rules slice")
+	}
+}

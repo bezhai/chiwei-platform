@@ -52,9 +52,14 @@ function createClient(configFn: () => { baseURL: string; headers: Record<string,
       return unwrap(res.data);
     },
 
-    async del(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>) {
+    async del(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>, body?: unknown) {
       const { baseURL, headers } = configFn();
-      const config: AxiosRequestConfig = { headers: { ...headers, ...extraHeaders }, timeout: TIMEOUT, params };
+      const config: AxiosRequestConfig = {
+        headers: { ...headers, 'Content-Type': 'application/json', ...extraHeaders },
+        timeout: TIMEOUT,
+        params,
+        data: body,
+      };
       const res = await axios.delete(`${baseURL}${path}`, config);
       return unwrap(res.data);
     },
