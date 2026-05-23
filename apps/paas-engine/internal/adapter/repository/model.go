@@ -174,7 +174,7 @@ type DynamicConfigModel struct {
 func (DynamicConfigModel) TableName() string { return "dynamic_configs" }
 
 // GatewayRuleModel 是 GatewayRule 的数据库持久化模型。
-// match / targets / fallback 用 jsonb 列存（写入 JSON 序列化字符串）；
+// match / targets 用 jsonb 列存（写入 JSON 序列化字符串）；
 // path_prefix / request_lane 提到顶层列做索引与反查。
 type GatewayRuleModel struct {
 	Name        string    `gorm:"primaryKey"`
@@ -184,7 +184,6 @@ type GatewayRuleModel struct {
 	RequestLane string    `gorm:""`
 	Match       string    `gorm:"type:jsonb;not null"`
 	Targets     string    `gorm:"type:jsonb;not null"`
-	Fallback    string    `gorm:"type:jsonb;not null"`
 	Version     int64     `gorm:"not null;default:1"`
 	CreatedAt   time.Time `gorm:"not null"`
 	UpdatedAt   time.Time `gorm:"not null"`

@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/chiwei-platform/api-gateway/internal/route"
 )
 
 // onePayload is in the EXACT wire format paas-engine emits from
@@ -224,6 +222,9 @@ func TestValidationRejectsNilFields(t *testing.T) {
 }
 
 func TestValidPayloadParsesAllFields(t *testing.T) {
+	// The "fallback" field is still present in this payload on purpose: during
+	// cutover paas-engine may keep emitting it. The loader must tolerate the
+	// now-unknown field (json ignores it) and parse everything else.
 	body := `{"version":9,"rules":[
 	  {"name":"agent","enabled":true,"priority":100,
 	   "match":{"path_prefix":"/api/agent/","request_lane":"ppe-x"},
@@ -240,10 +241,7 @@ func TestValidPayloadParsesAllFields(t *testing.T) {
 		t.Errorf("match parse wrong: %+v", r)
 	}
 	tg := r.Targets[0]
-	if tg.Service != "agent-service" || tg.Lane != "prod" || tg.Port != 8000 || tg.StripPrefix != "/api/agent" {
+	if tg.Service != "agent-service" || tg.Lane != "prod" || tg.Port != 8000 || tg.StripPrefix != "/api/agent" || tg.Weight != 100 {
 		t.Errorf("target parse wrong: %+v", tg)
-	}
-	if r.Fallback.Mode != route.FallbackReject {
-		t.Errorf("fallback parse wrong: %q", r.Fallback.Mode)
 	}
 }

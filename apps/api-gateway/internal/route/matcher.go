@@ -63,16 +63,13 @@ func RewritePath(path string, t Target) string {
 func EmergencyRules() []Rule {
 	return []Rule{
 		{Name: "emergency-paas", Enabled: true, Priority: 100,
-			Match:    Match{PathPrefix: "/api/paas/"},
-			Targets:  []Target{{Service: "paas-engine", Port: 8080}},
-			Fallback: Fallback{Mode: FallbackProd}},
+			Match:   Match{PathPrefix: "/api/paas/"},
+			Targets: []Target{{Service: "paas-engine", Port: 8080, Weight: 100}}},
 		{Name: "emergency-dashboard-api", Enabled: true, Priority: 100,
-			Match:    Match{PathPrefix: "/dashboard/api/"},
-			Targets:  []Target{{Service: "monitor-dashboard", Port: 3002}},
-			Fallback: Fallback{Mode: FallbackProd}},
+			Match:   Match{PathPrefix: "/dashboard/api/"},
+			Targets: []Target{{Service: "monitor-dashboard", Port: 3002, Weight: 100}}},
 		{Name: "emergency-dashboard-web", Enabled: true, Priority: 100,
-			Match:    Match{PathPrefix: "/dashboard/"},
-			Targets:  []Target{{Service: "monitor-dashboard-web", Port: 80}},
-			Fallback: Fallback{Mode: FallbackProd}},
+			Match:   Match{PathPrefix: "/dashboard/"},
+			Targets: []Target{{Service: "monitor-dashboard-web", Port: 80, Weight: 100}}},
 	}
 }

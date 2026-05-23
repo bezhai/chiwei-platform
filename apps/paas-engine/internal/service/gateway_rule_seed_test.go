@@ -94,9 +94,6 @@ func TestBaselineGatewayRules_MatchRoutesYaml(t *testing.T) {
 		if tg.StripPrefix != want.stripPrefix {
 			t.Errorf("%s: target.strip_prefix got %q want %q", want.name, tg.StripPrefix, want.stripPrefix)
 		}
-		if req.Fallback.Mode != "prod" {
-			t.Errorf("%s: fallback.mode got %q want prod", want.name, req.Fallback.Mode)
-		}
 	}
 }
 
@@ -111,7 +108,6 @@ func TestBaselineGatewayRules_PassValidation(t *testing.T) {
 			RequestLane: s.Request.RequestLane,
 			Match:       s.Request.Match,
 			Targets:     s.Request.Targets,
-			Fallback:    s.Request.Fallback,
 		}
 		if err := domain.ValidateGatewayRule(rule); err != nil {
 			t.Errorf("baseline rule %q failed validation: %v", s.Name, err)

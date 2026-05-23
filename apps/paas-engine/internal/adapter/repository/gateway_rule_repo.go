@@ -32,7 +32,7 @@ func (r *GatewayRuleRepo) Upsert(ctx context.Context, rule *domain.GatewayRule) 
 		Columns: []clause.Column{{Name: "name"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"enabled", "priority", "path_prefix", "request_lane",
-			"match", "targets", "fallback", "version", "updated_at",
+			"match", "targets", "version", "updated_at",
 		}),
 	}).Create(m).Error
 }
@@ -99,10 +99,6 @@ func gatewayRuleToModel(rule *domain.GatewayRule) (*GatewayRuleModel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal targets: %w", err)
 	}
-	fallbackJSON, err := json.Marshal(rule.Fallback)
-	if err != nil {
-		return nil, fmt.Errorf("marshal fallback: %w", err)
-	}
 	return &GatewayRuleModel{
 		Name:        rule.Name,
 		Enabled:     rule.Enabled,
@@ -111,7 +107,6 @@ func gatewayRuleToModel(rule *domain.GatewayRule) (*GatewayRuleModel, error) {
 		RequestLane: rule.RequestLane,
 		Match:       string(matchJSON),
 		Targets:     string(targetsJSON),
-		Fallback:    string(fallbackJSON),
 		Version:     rule.Version,
 		CreatedAt:   rule.CreatedAt,
 		UpdatedAt:   rule.UpdatedAt,
@@ -131,12 +126,6 @@ func modelToGatewayRule(m *GatewayRuleModel) (*domain.GatewayRule, error) {
 			return nil, fmt.Errorf("unmarshal targets for rule %q: %w", m.Name, err)
 		}
 	}
-	var fallback domain.GatewayFallback
-	if m.Fallback != "" {
-		if err := json.Unmarshal([]byte(m.Fallback), &fallback); err != nil {
-			return nil, fmt.Errorf("unmarshal fallback for rule %q: %w", m.Name, err)
-		}
-	}
 	return &domain.GatewayRule{
 		Name:        m.Name,
 		Enabled:     m.Enabled,
@@ -145,7 +134,6 @@ func modelToGatewayRule(m *GatewayRuleModel) (*domain.GatewayRule, error) {
 		RequestLane: m.RequestLane,
 		Match:       match,
 		Targets:     targets,
-		Fallback:    fallback,
 		Version:     m.Version,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,

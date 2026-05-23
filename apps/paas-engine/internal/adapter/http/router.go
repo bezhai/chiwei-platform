@@ -151,11 +151,19 @@ func NewRouter(
 		})
 
 		// Gateway Rules (management)
+		// explain 是 collection 级 custom method，注册为 "gateway-rules:explain"（冒号紧跟
+		// collection，无斜杠）；带 name 的 action 用 "{name}:action"。两者都走 chi 的段内
+		// 字面后缀。explain 必须在 /gateway-rules 子路由之外注册，否则会变成
+		// "gateway-rules/:explain"（多一段斜杠），与对外契约不符。
+		r.Post("/gateway-rules:explain", gatewayRuleH.Explain)
 		r.Route("/gateway-rules", func(r chi.Router) {
 			r.Get("/", gatewayRuleH.List)
 			r.Get("/{name}", gatewayRuleH.Get)
 			r.Put("/{name}", gatewayRuleH.Upsert)
 			r.Delete("/{name}", gatewayRuleH.Delete)
+			r.Post("/{name}:disable", gatewayRuleH.Disable)
+			r.Post("/{name}:enable", gatewayRuleH.Enable)
+			r.Post("/{name}:set-weights", gatewayRuleH.SetWeights)
 		})
 	})
 

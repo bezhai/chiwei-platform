@@ -21,7 +21,6 @@ type BaselineGatewayRule struct {
 //
 // 关键约定：所有 target.lane 全部留空——空表示"跟随请求 x-lane 透传"，
 // 跟当前 routes.yaml 的泳道路由行为完全一致，绝不写死 prod。
-// fallback.mode 统一 prod，平迁现状的 silent fallback 行为。
 func BaselineGatewayRules() []BaselineGatewayRule {
 	enabled := true
 	rule := func(name, prefix, service string, port int, stripPrefix string) BaselineGatewayRule {
@@ -46,7 +45,6 @@ func BaselineGatewayRules() []BaselineGatewayRule {
 						StripPrefix: stripPrefix,
 					},
 				},
-				Fallback: domain.GatewayFallback{Mode: "prod"},
 			},
 		}
 	}

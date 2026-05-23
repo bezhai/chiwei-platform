@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -25,6 +26,9 @@ type Gateway struct {
 	snapshots SnapshotProvider
 	timeout   time.Duration
 	transport *http.Transport
+	// rng returns a value in [0,1) used for weighted-random target selection.
+	// Injectable so tests can drive deterministic target choices.
+	rng func() float64
 }
 
 // New creates a Gateway.
@@ -38,6 +42,7 @@ func New(snapshots SnapshotProvider, timeout time.Duration) *Gateway {
 		snapshots: snapshots,
 		timeout:   timeout,
 		transport: t,
+		rng:       rand.Float64,
 	}
 }
 
@@ -110,7 +115,7 @@ func (g *Gateway) serveEmergency(w http.ResponseWriter, r *http.Request, request
 // resolution is delegated to the lane-sidecar via the X-Ctx-Lane header; the
 // gateway never resolves "service-lane" itself.
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, rt route.Rule, requestLane string) {
-	target := rt.Targets[0]
+	target := selectTarget(rt.Targets, g.rng())
 	effLane := effectiveLane(target, requestLane)
 
 	targetPath := route.RewritePath(r.URL.Path, target)
