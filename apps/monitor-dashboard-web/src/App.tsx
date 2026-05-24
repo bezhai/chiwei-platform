@@ -17,6 +17,7 @@ import {
   MenuUnfoldOutlined,
   ThunderboltOutlined,
   AuditOutlined,
+  DeploymentUnitOutlined,
   EditOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
@@ -39,6 +40,7 @@ const AuditLogs = lazy(() => import('./pages/AuditLogs'));
 const DbMutations = lazy(() => import('./pages/DbMutations'));
 const DynamicConfig = lazy(() => import('./pages/DynamicConfig'));
 const Skills = lazy(() => import('./pages/Skills'));
+const GatewayRouting = lazy(() => import('./pages/GatewayRouting'));
 import { themeConfig } from './theme';
 import { clearToken, getLane } from './api/client';
 
@@ -60,6 +62,7 @@ const menuItems: MenuItem[] = [
   { key: '/messages', icon: <MessageOutlined />, label: '消息记录' },
   { key: '/audit-logs', icon: <AuditOutlined />, label: '审计日志' },
   { key: '/db-mutations', icon: <EditOutlined />, label: 'DB 变更' },
+  { key: '/gateway-routing', icon: <DeploymentUnitOutlined />, label: '网关调度' },
   { type: 'divider' },
   { key: '/providers', icon: <CloudServerOutlined />, label: '服务商' },
   { key: '/model-mappings', icon: <ApiOutlined />, label: '模型映射' },
@@ -283,6 +286,7 @@ export default function App() {
                   <Route path="/activity" element={<Activity />} />
                   <Route path="/audit-logs" element={<AuditLogs />} />
                   <Route path="/db-mutations" element={<DbMutations />} />
+                  <Route path="/gateway-routing" element={<GatewayRouting />} />
                   <Route path="/kibana" element={<Kibana />} />
                   <Route path="/langfuse" element={<Langfuse />} />
                   <Route path="/messages" element={<Messages />} />
