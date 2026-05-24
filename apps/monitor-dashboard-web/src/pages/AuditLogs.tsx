@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Card, Table, Tag, Typography, Space, Select, DatePicker, Input, Button, Tooltip } from 'antd';
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 
 const { Title, Text } = Typography;
@@ -30,13 +31,14 @@ const resultColors: Record<string, string> = {
 };
 
 export default function AuditLogs() {
+  const [searchParams] = useSearchParams();
   const [data, setData] = useState<AuditLogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [caller, setCaller] = useState<string>();
-  const [action, setAction] = useState<string>();
+  const [action, setAction] = useState<string>(() => searchParams.get('action') || undefined);
   const [result, setResult] = useState<string>();
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null]>();
 
@@ -66,6 +68,11 @@ export default function AuditLogs() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    setAction(searchParams.get('action') || undefined);
+    setPage(1);
+  }, [searchParams]);
 
   const columns = [
     {
