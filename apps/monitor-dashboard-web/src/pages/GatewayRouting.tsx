@@ -7,6 +7,7 @@ import {
   Col,
   Descriptions,
   Divider,
+  Dropdown,
   Drawer,
   Empty,
   Form,
@@ -32,8 +33,10 @@ import {
   EditOutlined,
   EyeOutlined,
   HistoryOutlined,
+  MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  QuestionCircleOutlined,
   ReloadOutlined,
   RetweetOutlined,
   RollbackOutlined,
@@ -163,11 +166,11 @@ const statusMeta: Record<string, { label: string; color: string }> = {
 };
 
 function requestLaneLabel(lane?: string) {
-  return lane ? lane : '跟随请求 x-lane';
+  return lane ? `只匹配 ${lane}` : '不限制请求泳道';
 }
 
 function targetLaneLabel(lane?: string) {
-  return lane ? lane : '跟随请求';
+  return lane ? `${lane} 泳道` : '跟随请求泳道（x-lane）';
 }
 
 function formatTime(value?: string) {
@@ -192,18 +195,77 @@ function getErrorMessage(error: unknown) {
 }
 
 function targetIdentity(target: Pick<GatewayTarget, 'service' | 'lane'>) {
-  return `${target.service} / ${targetLaneLabel(target.lane)}`;
+  return `${target.service}（${targetLaneLabel(target.lane)}）`;
 }
 
 function targetSummary(targets: GatewayTarget[]) {
   if (targets.length === 0) {
-    return '无 target';
+    return '未配置转发目标';
   }
-  return targets.map((target) => `${targetIdentity(target)} ${target.weight}`).join(' · ');
+  return `转发：${targets.map((target) => `${target.service}（${targetLaneLabel(target.lane)}，${target.weight}%）`).join('；')}`;
 }
 
 function stableSplitLabel(rule: GatewayRule) {
-  return rule.split_key_headers?.length ? rule.split_key_headers.join(', ') : '未开启';
+  return rule.split_key_headers?.length ? `按 ${rule.split_key_headers.join(', ')} 固定分流` : '按流量比例随机分配';
+}
+
+function splitHelpLabel() {
+  return (
+    <Space size={4}>
+      <span>稳定分流依据</span>
+      <Tooltip title="可选。配置后，同一个请求来源会稳定落到同一个目标，常用于灰度；为空时按流量比例随机分配。">
+        <QuestionCircleOutlined style={{ color: '#94a3b8' }} />
+      </Tooltip>
+    </Space>
+  );
+}
+
+function pathRewriteHelpLabel() {
+  return (
+    <Space size={4}>
+      <span>路径处理</span>
+      <Tooltip title="转发前是否去掉某段路径前缀，或把路径改写成另一个前缀。多数规则不需要配置。">
+        <QuestionCircleOutlined style={{ color: '#94a3b8' }} />
+      </Tooltip>
+    </Space>
+  );
+}
+
+function formatPathRewrite(target: GatewayTarget) {
+  const items = [];
+  if (target.strip_prefix) {
+    items.push(`去掉 ${target.strip_prefix}`);
+  }
+  if (target.rewrite_prefix) {
+    items.push(`改写为 ${target.rewrite_prefix}`);
+  }
+  return items.length ? items.join('，') : '不改路径';
+}
+
+function explainRuleReason(record: GatewayRuleExplain) {
+  switch (record.status) {
+    case 'winner':
+      return '按路径、泳道和优先级命中';
+    case 'shadowed':
+      return '也能匹配，但已有更靠前的规则命中';
+    case 'disabled':
+      return '规则已停用';
+    case 'request_lane_mismatch':
+      return '请求 x-lane 不符合该规则要求';
+    case 'path_prefix_mismatch':
+      return '路径前缀不匹配';
+    default:
+      return record.reason || '-';
+  }
+}
+
+function explainTargetSummary(targets?: GatewayExplainTarget[]) {
+  if (!targets?.length) {
+    return '无候选目标';
+  }
+  return targets
+    .map((target) => `${target.service}（${target.effective_lane || '默认泳道'}，${target.weight}%）`)
+    .join('；');
 }
 
 function pathMatchesPrefix(path: string, prefix: string) {
@@ -314,7 +376,7 @@ export default function GatewayRouting() {
       onOk: async () => {
         const trimmed = reason.trim();
         if (!trimmed) {
-          message.error('reason 必填');
+          message.error('操作原因必填');
           throw new Error('reason required');
         }
         await onConfirm(trimmed);
@@ -382,11 +444,11 @@ export default function GatewayRouting() {
     const values = await ruleForm.validateFields();
     const weightSum = values.targets.reduce((sum, target) => sum + Number(target.weight || 0), 0);
     if (weightSum !== 100) {
-      message.error(`targets weight 总和必须为 100，当前为 ${weightSum}`);
+      message.error(`流量比例总和必须为 100%，当前为 ${weightSum}%`);
       return;
     }
     if (!canCreateWithPreview(values)) {
-      message.error('新建规则前必须先在 Preview 面板预览覆盖该 path_prefix 的请求');
+      message.error('新建规则前必须先在预览面板验证覆盖该匹配路径的请求');
       return;
     }
 
@@ -463,22 +525,22 @@ export default function GatewayRouting() {
     }));
     const sum = weights.reduce((acc, target) => acc + target.weight, 0);
     if (sum !== 100) {
-      message.error(`targets weight 总和必须为 100，当前为 ${sum}`);
+      message.error(`流量比例总和必须为 100%，当前为 ${sum}%`);
       return;
     }
-    await setRuleWeights(selectedRule, weights, values.reason.trim(), '权重已更新');
+    await setRuleWeights(selectedRule, weights, values.reason.trim(), '流量比例已更新');
     setWeightsModalOpen(false);
   };
 
   const cutBackToProd = (rule: GatewayRule) => {
     const prodTargets = rule.targets.filter((target) => target.lane === 'prod');
     if (prodTargets.length !== 1) {
-      message.error('切回 prod 需要且只能有一个 lane=prod 的 target');
+      message.error('当前规则没有唯一的 prod 目标，无法一键切回 prod');
       return;
     }
     withReason(
       '切回 prod',
-      <Text type="secondary">会把 lane=prod 的 target 权重设为 100，其他 target 权重设为 0。</Text>,
+      <Text type="secondary">会把 prod 目标设为 100%，其他目标设为 0%。</Text>,
       async (reason) => {
         const weights = rule.targets.map((target) => ({
           service: target.service,
@@ -493,15 +555,15 @@ export default function GatewayRouting() {
   const toggleRule = (rule: GatewayRule) => {
     const action = rule.enabled ? 'disable' : 'enable';
     withReason(
-      rule.enabled ? '禁用规则' : '启用规则',
-      <Text type="secondary">{rule.enabled ? '禁用后 matcher 会跳过该规则。' : '启用后该规则会重新参与 matcher。'}</Text>,
+      rule.enabled ? '停用规则' : '启用规则',
+      <Text type="secondary">{rule.enabled ? '停用后，请求不会再命中这条规则。' : '启用后，这条规则会重新参与匹配。'}</Text>,
       async (reason) => {
         await runWrite(
           `${action}-${rule.name}`,
           async () => {
             await api.post(`/ops/gateway-rules/${encodeURIComponent(rule.name)}:${action}`, { reason });
           },
-          rule.enabled ? '规则已禁用' : '规则已启用',
+          rule.enabled ? '规则已停用' : '规则已启用',
         );
       },
     );
@@ -510,7 +572,7 @@ export default function GatewayRouting() {
   const deleteRule = (rule: GatewayRule) => {
     withReason(
       '删除规则',
-      <Text type="danger">删除会生成新的期望快照，历史快照仍可用于回滚。</Text>,
+      <Text type="danger">删除后仍可从历史快照回滚。</Text>,
       async (reason) => {
         await runWrite(
           `delete-${rule.name}`,
@@ -530,7 +592,7 @@ export default function GatewayRouting() {
         <Alert
           showIcon
           type="warning"
-          message="会把当前规则恢复为该快照内容，并生成一个新的 snapshot_version。不是把版本号倒回去。"
+          message="会把当前规则恢复为该快照内容，并记录一条新的回滚操作。"
         />
       ),
       async (reason) => {
@@ -570,59 +632,54 @@ export default function GatewayRouting() {
 
   const targetColumns: ColumnsType<GatewayTarget> = [
     {
-      title: 'service',
+      title: '服务',
       dataIndex: 'service',
       render: (value: string) => <Text strong>{value}</Text>,
     },
     {
-      title: 'lane',
+      title: '目标泳道',
       dataIndex: 'lane',
       render: (value: string) => <Tag bordered={false}>{targetLaneLabel(value)}</Tag>,
     },
     {
-      title: 'port',
+      title: '端口',
       dataIndex: 'port',
       width: 80,
     },
     {
-      title: 'weight',
+      title: '流量比例',
       dataIndex: 'weight',
       width: 90,
-      render: (value: number) => <Text strong>{value}</Text>,
+      render: (value: number) => <Text strong>{value}%</Text>,
     },
     {
-      title: 'strip / rewrite',
+      title: pathRewriteHelpLabel(),
       key: 'rewrite',
-      render: (_: unknown, target) => (
-        <Space direction="vertical" size={2}>
-          <Text type="secondary" style={{ fontSize: 12 }}>strip: {target.strip_prefix || '-'}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>rewrite: {target.rewrite_prefix || '-'}</Text>
-        </Space>
-      ),
+      render: (_: unknown, target) => <Text type="secondary">{formatPathRewrite(target)}</Text>,
     },
   ];
 
   const candidateColumns: ColumnsType<GatewayExplainTarget> = [
     {
-      title: 'service',
+      title: '服务',
       dataIndex: 'service',
       render: (value: string) => <Text strong>{value}</Text>,
     },
     {
-      title: 'lane',
+      title: '配置泳道',
       dataIndex: 'lane',
       render: (value: string) => <Tag bordered={false}>{targetLaneLabel(value)}</Tag>,
     },
     {
-      title: 'effective lane',
+      title: '实际泳道',
       dataIndex: 'effective_lane',
-      render: (value: string) => <Tag color={value ? 'blue' : 'default'} bordered={false}>{value || '空'}</Tag>,
+      render: (value: string) => <Tag color={value ? 'blue' : 'default'} bordered={false}>{value || '默认泳道'}</Tag>,
     },
     {
-      title: 'weight',
+      title: '流量比例',
       dataIndex: 'weight',
       width: 90,
-      render: (value: number) => <Text strong>{value}</Text>,
+      render: (value: number) => <Text strong>{value}%</Text>,
     },
   ];
 
@@ -649,7 +706,7 @@ export default function GatewayRouting() {
     {
       title: '原因',
       dataIndex: 'reason',
-      render: (value: string) => <Text type="secondary">{value}</Text>,
+      render: (_: string, record) => <Text type="secondary">{explainRuleReason(record)}</Text>,
     },
   ];
 
@@ -677,7 +734,7 @@ export default function GatewayRouting() {
       render: (value: string) => value || <Text type="secondary">-</Text>,
     },
     {
-      title: 'created_by',
+      title: '创建人',
       dataIndex: 'created_by',
       width: 120,
       render: (value: string) => <Tag bordered={false}>{value}</Tag>,
@@ -717,7 +774,7 @@ export default function GatewayRouting() {
         <div>
           <h1 className="page-title">网关调度</h1>
           <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
-            api-gateway 动态路由规则、命中预览与快照回滚
+            管理入口路径、流量比例和快照回滚
           </Text>
         </div>
         <Space wrap>
@@ -733,35 +790,28 @@ export default function GatewayRouting() {
         </Space>
       </div>
 
-      <Alert
-        showIcon
-        type="info"
-        className="gateway-alert"
-        message="这里展示的是 paas-engine 期望配置，不是 gateway 实例运行状态。"
-      />
-
       <Row gutter={[16, 16]} className="gateway-stats">
         <Col xs={24} sm={12} lg={6}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="期望快照" value={`v${snapshot.version || 0}`} prefix={<HistoryOutlined />} />
+            <Statistic title="当前快照" value={`v${snapshot.version || 0}`} prefix={<HistoryOutlined />} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="规则总数" value={rules.length} suffix={`启用 ${enabledCount}`} />
+            <Statistic title="规则状态" value={`${rules.length} 条`} />
+            <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+              启用 {enabledCount} 条，停用 {disabledCount} 条
+            </Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="禁用规则" value={disabledCount} valueStyle={{ color: disabledCount ? '#dc2626' : undefined }} />
+            <Statistic title="停用规则" value={`${disabledCount} 条`} valueStyle={{ color: disabledCount ? '#dc2626' : undefined }} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
             <Statistic title="最近变更" value={latestSnapshot ? formatTime(latestSnapshot.created_at) : '-'} />
-            <Text type="secondary" ellipsis style={{ display: 'block', marginTop: 4 }}>
-              {latestSnapshot?.reason || '暂无快照原因'}
-            </Text>
           </Card>
         </Col>
       </Row>
@@ -786,15 +836,14 @@ export default function GatewayRouting() {
                   <div className="gateway-rule-line">
                     <Space>
                       <Tag bordered={false} color={rule.enabled ? 'green' : 'red'}>
-                        {rule.enabled ? '启用' : '禁用'}
+                        {rule.enabled ? '启用' : '停用'}
                       </Tag>
                       <Text strong>{rule.name}</Text>
                     </Space>
-                    <Text type="secondary">P{rule.priority}</Text>
                   </div>
                   <Text code className="gateway-rule-path">{rule.path_prefix}</Text>
                   <div className="gateway-rule-meta">
-                    <Text type="secondary">lane: {requestLaneLabel(rule.request_lane)}</Text>
+                    <Text type="secondary">匹配泳道：{requestLaneLabel(rule.request_lane)} · 优先级 {rule.priority}</Text>
                     <Text type="secondary">{targetSummary(rule.targets)}</Text>
                   </div>
                 </button>
@@ -809,48 +858,70 @@ export default function GatewayRouting() {
               <div className="gateway-panel-header">
                 <div>
                   <Title level={4}>{selectedRule.name}</Title>
-                  <Text type="secondary">version {selectedRule.version} · 更新 {formatTime(selectedRule.updated_at)}</Text>
+                  <Text type="secondary">规则版本 {selectedRule.version} · 更新 {formatTime(selectedRule.updated_at)}</Text>
                 </div>
                 <Space wrap>
                   <Button icon={<EditOutlined />} onClick={() => openEditRule(selectedRule)}>
                     编辑
                   </Button>
                   <Button icon={<SwapOutlined />} onClick={() => openWeights(selectedRule)}>
-                    调权
+                    调整流量
                   </Button>
-                  <Button icon={<RetweetOutlined />} onClick={() => cutBackToProd(selectedRule)}>
-                    切回 prod
-                  </Button>
-                  <Button
-                    danger={selectedRule.enabled}
-                    icon={selectedRule.enabled ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                    loading={actionLoading === `${selectedRule.enabled ? 'disable' : 'enable'}-${selectedRule.name}`}
-                    onClick={() => toggleRule(selectedRule)}
+                  <Dropdown
+                    menu={{
+                      items: [
+                        {
+                          key: 'cut-prod',
+                          icon: <RetweetOutlined />,
+                          label: '切回 prod',
+                        },
+                        {
+                          key: 'toggle',
+                          icon: selectedRule.enabled ? <PauseCircleOutlined /> : <PlayCircleOutlined />,
+                          label: selectedRule.enabled ? '停用规则' : '启用规则',
+                        },
+                        {
+                          type: 'divider',
+                        },
+                        {
+                          key: 'delete',
+                          danger: true,
+                          icon: <DeleteOutlined />,
+                          label: '删除规则',
+                        },
+                      ],
+                      onClick: ({ key }) => {
+                        if (key === 'cut-prod') {
+                          cutBackToProd(selectedRule);
+                        } else if (key === 'toggle') {
+                          toggleRule(selectedRule);
+                        } else if (key === 'delete') {
+                          deleteRule(selectedRule);
+                        }
+                      },
+                    }}
                   >
-                    {selectedRule.enabled ? '禁用' : '启用'}
-                  </Button>
-                  <Button danger icon={<DeleteOutlined />} onClick={() => deleteRule(selectedRule)}>
-                    删除
-                  </Button>
+                    <Button icon={<MoreOutlined />}>更多操作</Button>
+                  </Dropdown>
                 </Space>
               </div>
 
               <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
-                <Descriptions.Item label="enabled">
+                <Descriptions.Item label="状态">
                   <Tag bordered={false} color={selectedRule.enabled ? 'green' : 'red'}>
-                    {selectedRule.enabled ? 'true' : 'false'}
+                    {selectedRule.enabled ? '启用中' : '已停用'}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="priority">{selectedRule.priority}</Descriptions.Item>
-                <Descriptions.Item label="path_prefix">
+                <Descriptions.Item label="优先级">{selectedRule.priority}</Descriptions.Item>
+                <Descriptions.Item label="匹配路径">
                   <Text code>{selectedRule.path_prefix}</Text>
                 </Descriptions.Item>
-                <Descriptions.Item label="request_lane">{requestLaneLabel(selectedRule.request_lane)}</Descriptions.Item>
-                <Descriptions.Item label="split_key_headers">{stableSplitLabel(selectedRule)}</Descriptions.Item>
-                <Descriptions.Item label="created_at">{fullTime(selectedRule.created_at)}</Descriptions.Item>
+                <Descriptions.Item label="匹配泳道">{requestLaneLabel(selectedRule.request_lane)}</Descriptions.Item>
+                <Descriptions.Item label={splitHelpLabel()}>{stableSplitLabel(selectedRule)}</Descriptions.Item>
+                <Descriptions.Item label="创建时间">{fullTime(selectedRule.created_at)}</Descriptions.Item>
               </Descriptions>
 
-              <Divider orientation="left">targets</Divider>
+              <Divider orientation="left">转发目标</Divider>
               <Table
                 rowKey={(target) => `${target.service}:${target.lane}:${target.port}`}
                 columns={targetColumns}
@@ -868,8 +939,8 @@ export default function GatewayRouting() {
       <section className="gateway-panel gateway-preview-panel">
         <div className="gateway-panel-header">
           <div>
-            <Title level={5}>Preview</Title>
-            <Text type="secondary">输入 path + 可选 x-lane，预览当前期望规则会如何匹配。</Text>
+            <Title level={5}>预览</Title>
+            <Text type="secondary">输入请求路径和可选泳道，查看当前规则会如何匹配。</Text>
           </div>
         </div>
         <Form
@@ -881,15 +952,15 @@ export default function GatewayRouting() {
           <Form.Item
             name="path"
             rules={[
-              { required: true, message: '请输入 path' },
-              { pattern: /^\//, message: 'path 必须以 / 开头' },
+              { required: true, message: '请输入请求路径' },
+              { pattern: /^\//, message: '请求路径必须以 / 开头' },
             ]}
             style={{ flex: 1, minWidth: 260 }}
           >
             <Input prefix={<AimOutlined />} placeholder="/api/agent/health" />
           </Form.Item>
           <Form.Item name="x_lane" style={{ width: 220 }}>
-            <Input placeholder="x-lane 空=未指定" />
+            <Input placeholder="请求泳道，不填=未指定" />
           </Form.Item>
           <Form.Item>
             <Button type="primary" loading={actionLoading === 'preview'} onClick={preview}>
@@ -910,8 +981,8 @@ export default function GatewayRouting() {
               }
               description={
                 explainResult.matched
-                  ? `${explainResult.winning_reason || ''}；${explainResult.stable_split ? `稳定分流：${explainResult.split_key_headers?.join(', ')}` : '未开启稳定分流'}`
-                  : '请求会落入 api-gateway 的未匹配处理。'
+                  ? `候选目标：${explainTargetSummary(explainResult.candidate_targets)}；${explainResult.stable_split ? `稳定分流依据：${explainResult.split_key_headers?.join(', ')}` : '按流量比例随机分配'}`
+                  : '这类请求不会被当前规则处理。'
               }
             />
             {explainResult.candidate_targets?.length ? (
@@ -938,7 +1009,7 @@ export default function GatewayRouting() {
         <div className="gateway-panel-header">
           <div>
             <Title level={5}>快照历史</Title>
-            <Text type="secondary">最近 20 条期望配置快照。</Text>
+            <Text type="secondary">最近 20 条快照历史。</Text>
           </div>
         </div>
         <Table
@@ -970,7 +1041,7 @@ export default function GatewayRouting() {
             <Col xs={24} md={12}>
               <Form.Item
                 name="name"
-                label="name"
+                label="规则名"
                 rules={[
                   { required: true, message: '请输入规则名' },
                   { pattern: /^[a-z0-9][a-z0-9-]*$/, message: '仅支持小写字母、数字和 -' },
@@ -980,12 +1051,12 @@ export default function GatewayRouting() {
               </Form.Item>
             </Col>
             <Col xs={12} md={6}>
-              <Form.Item name="enabled" label="enabled" valuePropName="checked">
+              <Form.Item name="enabled" label="状态" valuePropName="checked">
                 <Switch checkedChildren="启用" unCheckedChildren="禁用" />
               </Form.Item>
             </Col>
             <Col xs={12} md={6}>
-              <Form.Item name="priority" label="priority" rules={[{ required: true, message: '请输入优先级' }]}>
+              <Form.Item name="priority" label="优先级" rules={[{ required: true, message: '请输入优先级' }]}>
                 <InputNumber min={0} precision={0} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
@@ -994,26 +1065,26 @@ export default function GatewayRouting() {
             <Col xs={24} md={12}>
               <Form.Item
                 name="path_prefix"
-                label="path_prefix"
+                label="匹配路径"
                 rules={[
-                  { required: true, message: '请输入 path_prefix' },
-                  { pattern: /^\/.*\/$/, message: 'path_prefix 必须以 / 开头并以 / 结尾' },
+                  { required: true, message: '请输入匹配路径' },
+                  { pattern: /^\/.*\/$/, message: '匹配路径必须以 / 开头并以 / 结尾' },
                 ]}
               >
                 <Input placeholder="/api/agent/" />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
-              <Form.Item name="request_lane" label="request_lane">
-                <Input placeholder="空=不限制请求 x-lane" />
+              <Form.Item name="request_lane" label="匹配泳道">
+                <Input placeholder="不填=不限制请求 x-lane" />
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item name="split_key_headers" label="split_key_headers">
+          <Form.Item name="split_key_headers" label={splitHelpLabel()}>
             <Select mode="tags" placeholder="例如 x-user-id" tokenSeparators={[',']} />
           </Form.Item>
 
-          <Divider orientation="left">targets</Divider>
+          <Divider orientation="left">转发目标</Divider>
           <Form.List name="targets">
             {(fields, { add, remove }) => (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -1024,23 +1095,23 @@ export default function GatewayRouting() {
                         <Form.Item
                           {...field}
                           name={[field.name, 'service']}
-                          label="service"
-                          rules={[{ required: true, message: 'service 必填' }]}
+                          label="服务"
+                          rules={[{ required: true, message: '服务必填' }]}
                         >
                           <Input placeholder="agent-service" />
                         </Form.Item>
                       </Col>
                       <Col xs={24} md={5}>
-                        <Form.Item {...field} name={[field.name, 'lane']} label="lane">
-                          <Input placeholder="空=跟随请求" />
+                        <Form.Item {...field} name={[field.name, 'lane']} label="目标泳道">
+                          <Input placeholder="不填=使用请求里的 x-lane" />
                         </Form.Item>
                       </Col>
                       <Col xs={12} md={4}>
                         <Form.Item
                           {...field}
                           name={[field.name, 'port']}
-                          label="port"
-                          rules={[{ required: true, message: 'port 必填' }]}
+                          label="端口"
+                          rules={[{ required: true, message: '端口必填' }]}
                         >
                           <InputNumber min={1} precision={0} style={{ width: '100%' }} />
                         </Form.Item>
@@ -1049,8 +1120,8 @@ export default function GatewayRouting() {
                         <Form.Item
                           {...field}
                           name={[field.name, 'weight']}
-                          label="weight"
-                          rules={[{ required: true, message: 'weight 必填' }]}
+                          label="流量比例"
+                          rules={[{ required: true, message: '流量比例必填' }]}
                         >
                           <InputNumber min={0} max={100} precision={0} style={{ width: '100%' }} />
                         </Form.Item>
@@ -1065,12 +1136,12 @@ export default function GatewayRouting() {
                     </Row>
                     <Row gutter={12}>
                       <Col xs={24} md={12}>
-                        <Form.Item {...field} name={[field.name, 'strip_prefix']} label="strip_prefix">
+                        <Form.Item {...field} name={[field.name, 'strip_prefix']} label="去掉路径前缀">
                           <Input placeholder="可选" />
                         </Form.Item>
                       </Col>
                       <Col xs={24} md={12}>
-                        <Form.Item {...field} name={[field.name, 'rewrite_prefix']} label="rewrite_prefix">
+                        <Form.Item {...field} name={[field.name, 'rewrite_prefix']} label="改写路径前缀">
                           <Input placeholder="可选" />
                         </Form.Item>
                       </Col>
@@ -1078,26 +1149,26 @@ export default function GatewayRouting() {
                   </div>
                 ))}
                 <Button block onClick={() => add({ service: '', lane: '', port: 80, weight: 0 })}>
-                  添加 target
+                  添加转发目标
                 </Button>
               </Space>
             )}
           </Form.List>
 
           <Divider />
-          <Form.Item name="reason" label="reason" rules={[{ required: true, whitespace: true, message: 'reason 必填' }]}>
+          <Form.Item name="reason" label="变更原因" rules={[{ required: true, whitespace: true, message: '变更原因必填' }]}>
             <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} placeholder="填写本次规则变更原因" />
           </Form.Item>
         </Form>
       </Modal>
 
       <Modal
-        title={selectedRule ? `调权 ${selectedRule.name}` : '调权'}
+        title={selectedRule ? `调整流量 ${selectedRule.name}` : '调整流量'}
         open={weightsModalOpen}
         onOk={saveWeights}
         onCancel={() => setWeightsModalOpen(false)}
         confirmLoading={actionLoading?.startsWith('weights-')}
-        okText="保存权重"
+        okText="保存比例"
         cancelText="取消"
         width={640}
         destroyOnClose
@@ -1109,11 +1180,11 @@ export default function GatewayRouting() {
                 <div key={`${target.service}:${target.lane}`} className="gateway-weight-row">
                   <div>
                     <Text strong>{targetIdentity(target)}</Text>
-                    <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>port {target.port}</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>端口 {target.port}</Text>
                   </div>
                   <Form.Item
                     name={['weights', index, 'weight']}
-                    rules={[{ required: true, message: 'weight 必填' }]}
+                    rules={[{ required: true, message: '流量比例必填' }]}
                     style={{ margin: 0 }}
                   >
                     <InputNumber min={0} max={100} precision={0} addonAfter="%" />
@@ -1123,11 +1194,11 @@ export default function GatewayRouting() {
             </Space>
             <Form.Item
               name="reason"
-              label="reason"
-              rules={[{ required: true, whitespace: true, message: 'reason 必填' }]}
+              label="变更原因"
+              rules={[{ required: true, whitespace: true, message: '变更原因必填' }]}
               style={{ marginTop: 20 }}
             >
-              <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} placeholder="填写本次调权原因" />
+              <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} placeholder="填写本次调整原因" />
             </Form.Item>
           </Form>
         )}
@@ -1142,10 +1213,10 @@ export default function GatewayRouting() {
         {snapshotDrawer && (
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             <Descriptions bordered size="small" column={1}>
-              <Descriptions.Item label="created_at">{fullTime(snapshotDrawer.created_at)}</Descriptions.Item>
-              <Descriptions.Item label="created_by">{snapshotDrawer.created_by}</Descriptions.Item>
-              <Descriptions.Item label="reason">{snapshotDrawer.reason || '-'}</Descriptions.Item>
-              <Descriptions.Item label="rules_count">{snapshotDrawer.rules.length}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{fullTime(snapshotDrawer.created_at)}</Descriptions.Item>
+              <Descriptions.Item label="创建人">{snapshotDrawer.created_by}</Descriptions.Item>
+              <Descriptions.Item label="原因">{snapshotDrawer.reason || '-'}</Descriptions.Item>
+              <Descriptions.Item label="规则数">{snapshotDrawer.rules.length}</Descriptions.Item>
             </Descriptions>
             <pre className="json-preview">{JSON.stringify(snapshotDrawer.rules, null, 2)}</pre>
           </Space>
