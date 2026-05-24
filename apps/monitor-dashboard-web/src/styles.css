@@ -340,6 +340,40 @@ a {
   margin-bottom: 16px;
 }
 
+.gateway-stat-title {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.gateway-rule-status-counts {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 38px;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+.gateway-rule-status-counts .total {
+  color: #0f172a;
+}
+
+.gateway-rule-status-counts .disabled {
+  color: #dc2626;
+}
+
+.gateway-rule-status-counts .enabled {
+  color: #16a34a;
+}
+
+.gateway-rule-status-counts .separator {
+  color: #cbd5e1;
+  font-weight: 500;
+}
+
 .gateway-workbench {
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.8fr);

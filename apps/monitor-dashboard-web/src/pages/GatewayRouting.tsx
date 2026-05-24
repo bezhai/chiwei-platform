@@ -791,25 +791,24 @@ export default function GatewayRouting() {
       </div>
 
       <Row gutter={[16, 16]} className="gateway-stats">
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={8}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
             <Statistic title="当前快照" value={`v${snapshot.version || 0}`} prefix={<HistoryOutlined />} />
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={8}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="规则状态" value={`${rules.length} 条`} />
-            <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
-              启用 {enabledCount} 条，停用 {disabledCount} 条
-            </Text>
+            <Text type="secondary" className="gateway-stat-title">规则状态（总数 / 停用 / 启用）</Text>
+            <div className="gateway-rule-status-counts">
+              <span className="total">{rules.length}</span>
+              <span className="separator">/</span>
+              <span className="disabled">{disabledCount}</span>
+              <span className="separator">/</span>
+              <span className="enabled">{enabledCount}</span>
+            </div>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="停用规则" value={`${disabledCount} 条`} valueStyle={{ color: disabledCount ? '#dc2626' : undefined }} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={8}>
           <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
             <Statistic title="最近变更" value={latestSnapshot ? formatTime(latestSnapshot.created_at) : '-'} />
           </Card>
