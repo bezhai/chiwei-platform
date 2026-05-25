@@ -15,7 +15,7 @@ Sections (order matters for prompt flow):
 from __future__ import annotations
 
 import logging
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.data.queries import find_latest_life_state
 from app.memory.sections.active_notes import build_active_notes_section
@@ -30,10 +30,32 @@ logger = logging.getLogger(__name__)
 _CST = timezone(timedelta(hours=8))
 
 
+def _as_cst(value: datetime) -> datetime:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=_CST)
+    return value.astimezone(_CST)
+
+
+def _is_life_state_expired(row, now: datetime) -> bool:
+    state_end_at = getattr(row, "state_end_at", None)
+    if not state_end_at:
+        return False
+    return _as_cst(state_end_at) <= now
+
+
 async def _build_life_state(persona_id: str) -> str:
     try:
         row = await find_latest_life_state(persona_id)
         if not row:
+            return ""
+        now = datetime.now(_CST)
+        if _is_life_state_expired(row, now):
+            logger.debug(
+                "[%s] Ignoring expired life state id=%s state_end_at=%s",
+                persona_id,
+                getattr(row, "id", None),
+                getattr(row, "state_end_at", None),
+            )
             return ""
         current = row.current_state
         mood = row.response_mood

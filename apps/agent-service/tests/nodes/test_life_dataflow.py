@@ -1,9 +1,8 @@
 """Phase 4 life_dataflow @node tests."""
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
 from unittest.mock import patch
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,9 +17,6 @@ from app.domain.life_dataflow import (
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.placement import clear_bindings
 from app.runtime.wire import clear_wiring
-
-
-CST = ZoneInfo("Asia/Shanghai")
 
 
 @pytest.fixture
@@ -144,6 +140,46 @@ async def test_fan_out_voice_only_at_top_of_hour(reset_runtime, mock_prod, mock_
     assert seen == []
 
 
+@pytest.mark.asyncio
+async def test_life_tick_node_times_out(monkeypatch, caplog):
+    import logging
+
+    async def _hang(_persona_id: str):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr("app.life.engine.tick", _hang)
+    monkeypatch.setattr("app.nodes.life_dataflow._LIFE_TICK_TIMEOUT_S", 0.01)
+
+    from app.nodes.life_dataflow import life_tick_node
+
+    with caplog.at_level(logging.ERROR):
+        await life_tick_node(
+            LifeTickRequest(persona_id="p1", ts="2026-04-30T08:00:00+08:00")
+        )
+
+    assert "[p1] life_tick timed out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_voice_node_times_out(monkeypatch, caplog):
+    import logging
+
+    async def _hang(_persona_id: str):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr("app.memory.voice.generate_voice", _hang)
+    monkeypatch.setattr("app.nodes.life_dataflow._VOICE_TIMEOUT_S", 0.01)
+
+    from app.nodes.life_dataflow import voice_node
+
+    with caplog.at_level(logging.ERROR):
+        await voice_node(
+            VoiceRequest(persona_id="p1", ts="2026-04-30T08:00:00+08:00")
+        )
+
+    assert "[p1] voice timed out" in caplog.text
+
+
 @pytest.fixture
 def mock_target_groups(monkeypatch):
     monkeypatch.setattr("app.life.glimpse.list_target_groups", lambda: ["chatA", "chatB"])
@@ -179,7 +215,6 @@ def mock_life_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_glimpse_tick_skips_sleeping(reset_runtime, mock_target_groups, mock_life_state):
-    from app.domain.life_dataflow import GlimpseRequest, GlimpseTickRequest
     from app.nodes.life_dataflow import glimpse_tick_node
     from app.runtime import wire
     from app.runtime.node import node
@@ -195,7 +230,6 @@ async def test_glimpse_tick_skips_sleeping(reset_runtime, mock_target_groups, mo
 
 @pytest.mark.asyncio
 async def test_glimpse_tick_browsing_emits_for_each_target(reset_runtime, mock_target_groups, mock_life_state):
-    from app.domain.life_dataflow import GlimpseRequest, GlimpseTickRequest
     from app.nodes.life_dataflow import glimpse_tick_node
     from app.runtime import wire
     from app.runtime.node import node
@@ -213,7 +247,6 @@ async def test_glimpse_tick_browsing_emits_for_each_target(reset_runtime, mock_t
 
 @pytest.mark.asyncio
 async def test_glimpse_tick_other_activity_15pct_hit(reset_runtime, mock_target_groups, mock_life_state, mock_random_below_threshold):
-    from app.domain.life_dataflow import GlimpseRequest, GlimpseTickRequest
     from app.nodes.life_dataflow import glimpse_tick_node
     from app.runtime import wire
     from app.runtime.node import node
@@ -229,7 +262,6 @@ async def test_glimpse_tick_other_activity_15pct_hit(reset_runtime, mock_target_
 
 @pytest.mark.asyncio
 async def test_glimpse_tick_other_activity_15pct_miss(reset_runtime, mock_target_groups, mock_life_state, mock_random_above_threshold):
-    from app.domain.life_dataflow import GlimpseRequest, GlimpseTickRequest
     from app.nodes.life_dataflow import glimpse_tick_node
     from app.runtime import wire
     from app.runtime.node import node
@@ -245,7 +277,6 @@ async def test_glimpse_tick_other_activity_15pct_miss(reset_runtime, mock_target
 
 @pytest.mark.asyncio
 async def test_glimpse_event_only_for_browsing(reset_runtime, mock_prod, mock_target_groups):
-    from app.domain.life_dataflow import GlimpseRequest, LifeStateChanged
     from app.nodes.life_dataflow import glimpse_event_node
     from app.runtime import wire
     from app.runtime.node import node
@@ -281,7 +312,6 @@ async def test_glimpse_event_only_for_browsing(reset_runtime, mock_prod, mock_ta
 @pytest.mark.asyncio
 async def test_run_glimpse_node_does_not_swallow_exception(monkeypatch):
     """durable 节点必须把异常抛出去，让 mq handler nack→DLQ。"""
-    from app.domain.life_dataflow import GlimpseRequest
     from app.nodes.life_dataflow import run_glimpse_node
 
     async def _boom(_pid, _chat):

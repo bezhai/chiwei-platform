@@ -5,11 +5,15 @@ the composer passes correct args and concatenates non-empty sections."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.memory.context import build_inner_context
+from app.memory.context import _build_life_state, build_inner_context
+
+CST = timezone(timedelta(hours=8))
 
 
 @pytest.mark.asyncio
@@ -33,6 +37,37 @@ async def test_p2p_assembles_all_sections():
         )
     for token in ("LIFE", "SELF", "USER", "SCHED", "NOTES", "FRAG", "RECALL", "CROSS"):
         assert token in out
+
+
+@pytest.mark.asyncio
+async def test_build_life_state_ignores_expired_state():
+    row = SimpleNamespace(
+        id=1,
+        current_state="准备睡觉",
+        response_mood="低电量",
+        state_end_at=datetime.now(CST) - timedelta(minutes=1),
+    )
+
+    with patch("app.memory.context.find_latest_life_state", new=AsyncMock(return_value=row)):
+        out = await _build_life_state("akao")
+
+    assert out == ""
+
+
+@pytest.mark.asyncio
+async def test_build_life_state_keeps_current_state_before_end():
+    row = SimpleNamespace(
+        id=1,
+        current_state="正在做饭",
+        response_mood="轻松",
+        state_end_at=datetime.now(CST) + timedelta(minutes=10),
+    )
+
+    with patch("app.memory.context.find_latest_life_state", new=AsyncMock(return_value=row)):
+        out = await _build_life_state("akao")
+
+    assert "正在做饭" in out
+    assert "轻松" in out
 
 
 @pytest.mark.asyncio

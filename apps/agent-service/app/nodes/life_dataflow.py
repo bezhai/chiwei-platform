@@ -9,6 +9,7 @@ glimpse 相关节点（Task 6）在本文件之外，单独处理。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import uuid
@@ -38,6 +39,9 @@ from app.runtime import emit, node
 
 logger = logging.getLogger(__name__)
 CST = ZoneInfo("Asia/Shanghai")
+
+_LIFE_TICK_TIMEOUT_S = 120.0
+_VOICE_TIMEOUT_S = 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +155,16 @@ async def fan_out_daily_plan(c: SharedDailyContext) -> DailyPlanRequest:
 async def life_tick_node(r: LifeTickRequest) -> None:
     from app.life.engine import tick
     try:
-        await tick(r.persona_id)
+        await asyncio.wait_for(
+            tick(r.persona_id),
+            timeout=_LIFE_TICK_TIMEOUT_S,
+        )
+    except TimeoutError:
+        logger.error(
+            "[%s] life_tick timed out after %.0fs",
+            r.persona_id,
+            _LIFE_TICK_TIMEOUT_S,
+        )
     except Exception:
         logger.exception("[%s] life_tick failed", r.persona_id)
 
@@ -160,7 +173,16 @@ async def life_tick_node(r: LifeTickRequest) -> None:
 async def voice_node(r: VoiceRequest) -> None:
     from app.memory.voice import generate_voice
     try:
-        await generate_voice(r.persona_id)
+        await asyncio.wait_for(
+            generate_voice(r.persona_id),
+            timeout=_VOICE_TIMEOUT_S,
+        )
+    except TimeoutError:
+        logger.error(
+            "[%s] voice timed out after %.0fs",
+            r.persona_id,
+            _VOICE_TIMEOUT_S,
+        )
     except Exception:
         logger.exception("[%s] voice failed", r.persona_id)
 
