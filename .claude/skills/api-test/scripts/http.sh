@@ -1,60 +1,153 @@
-#!/bin/bash
-# 标准化 HTTP 请求工具 — 替代所有手写 curl
-# 用法:
-#   http.sh GET  <url> [header:value ...]
-#   http.sh POST <url> '<json_body>' [header:value ...]
+#!/usr/bin/env bash
+# Small HTTP helper for common JSON API calls.
 #
-# 输出: JSON 格式 {"status":<code>,"body":<response>}
-# 始终返回 exit 0，状态码在 JSON 中
+# It is not meant to replace curl. For unsupported cases, use curl directly.
+#
+# Usage:
+#   http.sh [--timeout SEC] [--raw] METHOD URL [BODY] [HEADER...]
+#   http.sh [--timeout SEC] [--raw] METHOD URL --data <BODY> [HEADER...]
+#   http.sh [--timeout SEC] [--raw] METHOD URL --data-binary @file [HEADER...]
+#   http.sh --curl <curl args...>
+#
+# Examples:
+#   http.sh GET "$PAAS_API/health"
+#   http.sh --timeout 120 POST "$URL" '{"a":1}' "X-API-Key: $TOKEN"
+#   http.sh PUT "$URL" @/tmp/body.json "Content-Type: application/json"
+#   http.sh --curl -v --max-time 300 -H "X-API-Key: $TOKEN" "$URL"
 
 set -uo pipefail
 
-METHOD="${1:?用法: http.sh METHOD URL [BODY] [HEADERS...]}"
-URL="${2:?用法: http.sh METHOD URL [BODY] [HEADERS...]}"
+usage() {
+  cat >&2 <<'USAGE'
+http.sh [--timeout SEC] [--raw] METHOD URL [BODY] [HEADER...]
+http.sh [--timeout SEC] [--raw] METHOD URL --data <BODY> [HEADER...]
+http.sh [--timeout SEC] [--raw] METHOD URL --data-binary @file [HEADER...]
+http.sh --curl <curl args...>
+
+Common:
+  http.sh GET "$PAAS_API/health"
+  http.sh --timeout 120 POST "$URL" '{"a":1}' "X-API-Key: $TOKEN"
+  http.sh PUT "$URL" @/tmp/body.json "Content-Type: application/json"
+  http.sh --curl -v --max-time 300 -H "X-API-Key: $TOKEN" "$URL"
+USAGE
+  exit 2
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+# Escape hatch: pass arguments to curl unchanged.
+if [[ "${1:-}" == "--curl" ]]; then
+  shift
+  exec curl "$@"
+fi
+
+TIMEOUT="${HTTP_TIMEOUT:-60}"
+RAW=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --timeout)
+      [[ $# -ge 2 ]] || usage
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --raw)
+      RAW=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -ge 2 ]] || usage
+
+METHOD="$1"
+URL="$2"
 shift 2
 
 BODY=""
-CURL_ARGS=(-s --max-time 15)
+CURL_ARGS=(-sS --max-time "$TIMEOUT")
 
-# POST/PUT/DELETE: 以 { 或 [ 开头的参数是 JSON body
-if [[ "$METHOD" != "GET" ]] && [[ $# -gt 0 ]] && [[ "$1" == "{"* || "$1" == "["* ]]; then
-  BODY="$1"
-  shift
+# Non-GET methods may take a JSON body or @file body as the first argument.
+# Plain/non-JSON bodies should be passed with --data or --data-binary.
+if [[ "$METHOD" != "GET" && $# -gt 0 ]]; then
+  case "$1" in
+    --data)
+      [[ $# -ge 2 ]] || usage
+      CURL_ARGS+=(-d "$2")
+      shift 2
+      ;;
+    --data-binary)
+      [[ $# -ge 2 ]] || usage
+      CURL_ARGS+=(--data-binary "$2")
+      shift 2
+      ;;
+    \{*|\[*)
+      BODY="$1"
+      CURL_ARGS+=(-H "Content-Type: application/json" -d "$BODY")
+      shift
+      ;;
+    @*)
+      BODY="$1"
+      CURL_ARGS+=(--data-binary "$BODY")
+      shift
+      ;;
+  esac
 fi
 
-# 添加 headers
 while [[ $# -gt 0 ]]; do
   CURL_ARGS+=(-H "$1")
   shift
 done
 
-if [[ -n "$BODY" ]]; then
-  CURL_ARGS+=(-H "Content-Type: application/json" -d "$BODY")
+if [[ "$RAW" == "1" ]]; then
+  exec curl "${CURL_ARGS[@]}" -X "$METHOD" "$URL"
 fi
 
-# 用进程 ID 隔离临时文件，避免并发竞态
-_TMP_BODY="/tmp/_http_body_$$.txt"
-_TMP_ERR="/tmp/_http_err_$$.txt"
-trap 'rm -f "$_TMP_BODY" "$_TMP_ERR"' EXIT
+TMP_BODY="$(mktemp /tmp/http_body.XXXXXX)"
+TMP_ERR="$(mktemp /tmp/http_err.XXXXXX)"
+trap 'rm -f "$TMP_BODY" "$TMP_ERR"' EXIT
 
-# 执行请求，分离 status code 和 body
-HTTP_CODE=$(curl "${CURL_ARGS[@]}" -X "$METHOD" -o "$_TMP_BODY" -w "%{http_code}" "$URL" 2>"$_TMP_ERR")
+HTTP_CODE=$(curl "${CURL_ARGS[@]}" -X "$METHOD" -o "$TMP_BODY" -w "%{http_code}" "$URL" 2>"$TMP_ERR")
 CURL_EXIT=$?
 
 if [[ $CURL_EXIT -ne 0 ]]; then
-  CURL_ERR=$(cat "$_TMP_ERR" 2>/dev/null || echo "curl failed")
-  echo "{\"status\":0,\"error\":\"curl exit $CURL_EXIT: $CURL_ERR\"}"
+  CURL_ERR=$(cat "$TMP_ERR" 2>/dev/null || echo "curl failed")
+  python3 - "$CURL_EXIT" "$CURL_ERR" <<'PY'
+import json
+import sys
+print(json.dumps({"status": 0, "error": f"curl exit {sys.argv[1]}: {sys.argv[2]}"}, ensure_ascii=False))
+PY
   exit 0
 fi
 
-# 用 python 安全地组装 JSON 输出
-python3 -c "
-import json, sys
-status = int('$HTTP_CODE') if '$HTTP_CODE'.isdigit() else 0
-body_raw = open('$_TMP_BODY', 'r').read()
+python3 - "$HTTP_CODE" "$TMP_BODY" <<'PY' || echo "{\"status\":$HTTP_CODE,\"body\":\"(parse error)\"}"
+import json
+import sys
+
+status = int(sys.argv[1]) if sys.argv[1].isdigit() else 0
+with open(sys.argv[2], "r", encoding="utf-8", errors="replace") as f:
+    raw = f.read()
+
 try:
-    body = json.loads(body_raw)
-except:
-    body = body_raw
-print(json.dumps({'status': status, 'body': body}, ensure_ascii=False))
-" 2>/dev/null || echo "{\"status\":$HTTP_CODE,\"body\":\"(parse error)\"}"
+    body = json.loads(raw)
+except Exception:
+    body = raw
+
+print(json.dumps({"status": status, "body": body}, ensure_ascii=False))
+PY
