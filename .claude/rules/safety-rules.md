@@ -10,7 +10,7 @@
 2. **禁止提取生产密钥**：不允许从 pod 中获取密码、secret_key、API key 等凭据用于本地脚本。
 3. **禁止绕过 langfuse skill 操作 Langfuse**：Langfuse 的所有操作必须通过 langfuse skill 执行，不能写 ad-hoc 脚本或 kubectl exec 调 API。
 4. **禁止绕过已有 skill/工具**：如果已有 skill（如 ops-db）能完成任务，必须用 skill，不允许自己写脚本绕过。
-5. **禁止直接使用 curl 调接口**：调用 API 必须通过 `/api-test` skill 的 `scripts/http.sh` 或 Makefile 命令。
+5. **不要机械绕过项目工具**：常规 JSON API 调用优先用 `/api-test` 的 `scripts/http.sh` 或 Makefile 命令；当 helper 不支持长超时、stream、文件、复杂 header/TLS/proxy、详细调试等场景时，可以直接用 `curl`，但要说明原因和关键参数。
 
 ## 操作验证
 

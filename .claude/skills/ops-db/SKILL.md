@@ -1,12 +1,14 @@
 ---
 name: ops-db
-description: 安全查询 PaaS Engine PostgreSQL 数据库，以及提交 DDL/DML 变更申请
+description: 受控数据库访问。用于只读查询 chiwei/chiwei-test/paas_engine，以及提交需要人工审批的 DDL/DML 变更申请。
 user_invocable: true
 ---
 
-# /ops-db
+# /ops-db：受控数据库访问
 
 查询 PostgreSQL 数据库（只读），或提交 DDL/DML 变更申请（需人工审批后执行）。
+
+名字保留 `/ops-db` 是为了不打断现有调用；语义上它不是普通 ops，而是 DB access + mutation workflow。
 
 ## 用法
 
