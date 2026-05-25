@@ -31,12 +31,12 @@ jobs:
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" \
               apps/agent-service/app/{chat,life,memory,nodes}/ \
-              2>/dev/null | grep -v "__pycache__\|/test_" | wc -l)
+              2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
           # business code must not call insert_idempotent — runtime owns dedup.
           # Match call sites only (excludes docstrings + comments referring to it).
           c=$(grep -rn -E '\binsert_idempotent\(' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/persist.py\|runtime/durable.py\|__pycache__\|/test_" | wc -l)
+              2>/dev/null | grep -v "runtime/persist.py\|runtime/durable.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c insert_idempotent call sites"; exit 1; }
       - name: Gap 11 — no direct contextvar / header reads in dataflow business code
         shell: bash
@@ -48,11 +48,11 @@ jobs:
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
               | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|runtime/outbox.py\|runtime/outbox_dispatcher.py\|capabilities/\|__pycache__\|/test_" \
-              | wc -l)
+              | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l)
+              2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
       - name: Gap 8 — business `await emit(` count == 10 reviewed call sites
         shell: bash
@@ -66,7 +66,7 @@ jobs:
               apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
               apps/agent-service/app/chat/ apps/agent-service/app/life/ \
               apps/agent-service/app/memory/ \
-              --include='*.py' 2>/dev/null | wc -l)
+              --include='*.py' 2>/dev/null | wc -l || true)
           [ "$c" -eq 10 ] || { echo "Gap 8 violation: business await emit count=$c, expected 10"; exit 1; }
       - name: Gap 15 — no arq imports, no arq dependency
         shell: bash
@@ -77,7 +77,7 @@ jobs:
           # arq must not appear in pyproject.toml.
           c=$(grep -rn -E "from arq|enqueue_job|create_pool" \
               apps/agent-service/app/ 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l)
+              | grep -v "__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 15 violation: $c arq import/call sites"; exit 1; }
           if grep -qE '^[[:space:]]*"arq[[:space:]>=<]' apps/agent-service/pyproject.toml; then
               echo "Gap 15 violation: arq still in apps/agent-service/pyproject.toml"
@@ -88,7 +88,7 @@ jobs:
         run: |
           set -e
           c=$(grep -rn "# emit AFTER commit\|# commit-then-emit" \
-              apps/agent-service/app/ 2>/dev/null | wc -l)
+              apps/agent-service/app/ 2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 8 violation: $c commit-then-emit comments"; exit 1; }
       - name: Gap 12 — Makefile DLQ targets and runbook present
         shell: bash
@@ -107,7 +107,7 @@ jobs:
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
               apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
               apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ 2>/dev/null | wc -l)
+              apps/agent-service/app/memory/ 2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
           # (runtime/* + workers/common). The DLQ admin tooling at
@@ -118,7 +118,7 @@ jobs:
               apps/agent-service/app/chat/ apps/agent-service/app/life/ \
               apps/agent-service/app/memory/ 2>/dev/null \
               | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
-              | wc -l)
+              | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
       - name: Gap 13 — no DB session leakage in business code
         shell: bash
