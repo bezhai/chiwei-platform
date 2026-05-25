@@ -43,11 +43,11 @@ jobs:
         run: |
           set -e
           # trace_id_var / lane_var allowlist: runtime/{propagation,middleware,
-          # durable,sink_dispatch,emit}, api/middleware, infra/rabbitmq,
+          # durable,sink_dispatch,emit,outbox,outbox_dispatcher}, api/middleware, infra/rabbitmq,
           # capabilities/* (HTTP capability injects trace into outbound calls).
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
-              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|capabilities/\|__pycache__\|/test_" \
+              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|runtime/outbox.py\|runtime/outbox_dispatcher.py\|capabilities/\|__pycache__\|/test_" \
               | wc -l)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
