@@ -37,6 +37,7 @@ import { MessageContentUtils } from 'core/models/message-content';
 import { reverseResolveForLark } from '@core/channels/outbound-pipeline';
 import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
 import { hgetall } from '@cache/redis-client';
+import { imageRegistryLookupId } from './image-registry-key';
 import dayjs from 'dayjs';
 import { Readable } from 'stream';
 import { Counter, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
@@ -290,15 +291,20 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const larkChatId = rr.channelChatId;
             const larkRootId = rr.channelRootId;
 
-            // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>
-            // 解析 @N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key
-            // 用反查回的飞书裸 ID（resolveMentionsForGroup 走飞书群成员、
-            // resolveImageReferences 走 redis image_registry，均按飞书裸键）。
+            // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>：走飞书群成员，
+            // 必须用反查回的飞书裸 chatId（larkChatId）。
+            // 解析 N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key：走 redis
+            // image_registry，agent-service 用【全局 internal message_id】注册（见
+            // image-registry-key.ts），所以这里必须用全局 message_id 查，绝不能用
+            // 反查后的飞书裸 om_*（那个键从没写过，会 miss → 图片被静默吞掉）。
             const tResolve0 = Date.now();
             let resolvedContent = is_p2p
                 ? content
                 : await resolveMentionsForGroup(content, larkChatId);
-            resolvedContent = await resolveImageReferences(resolvedContent, larkMessageId);
+            resolvedContent = await resolveImageReferences(
+                resolvedContent,
+                imageRegistryLookupId(payload),
+            );
             const resolveMs = Date.now() - tResolve0;
             chatResponseDuration.labels({ stage: 'resolve' }).observe(resolveMs / 1000);
 
