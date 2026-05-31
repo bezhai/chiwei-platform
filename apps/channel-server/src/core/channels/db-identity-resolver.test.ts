@@ -15,7 +15,7 @@ import type { IdentityKind } from './identity-resolver';
 // DO UPDATE ... RETURNING——并发首次出现下永远收敛到同一个 internal_id，
 // 且不依赖外层事务是否存在/隔离级别（DO UPDATE 永远 RETURNING 那条行，不再
 // 像 DO NOTHING + UNION ALL 那样在 read committed 下并发 race 返回 0 行）。
-// PK(ULID) 冲突单独信号。
+// PK(UUIDv7) 冲突单独信号。
 
 interface Stored extends IdentityRow {}
 
@@ -23,17 +23,17 @@ interface Stored extends IdentityRow {}
 //   - forward-key (kind, channel, channelId) 复合唯一：ON CONFLICT DO UPDATE
 //     语义——已存在则 SET 一个 no-op 字段触发 RETURNING，直接收敛回已有
 //     internalId（绝不抛错）。
-//   - internal_*_id 主键(ULID)唯一：极罕见撞了抛 PrimaryKeyConflictError，
-//     resolver 负责重新生成 ULID 重试，不当 forward-key 冲突。
+//   - internal_*_id 主键(UUIDv7)唯一：极罕见撞了抛 PrimaryKeyConflictError，
+//     resolver 负责重新生成 UUIDv7 重试，不当 forward-key 冲突。
 class FakeIdentityStore implements IdentityStore {
     private rows: Stored[] = [];
     upsertCalls = 0;
-    // 注入一组"伪造的 ULID"，让前 N 次 upsert 的 internalId 撞已占用主键，
+    // 注入一组"伪造的 UUID"，让前 N 次 upsert 的 internalId 撞已占用主键，
     // 用来确定性地触发 PK 冲突重试路径（真实 PG 下概率极低、无法稳定复现）。
     poisonedInternalIds = new Set<string>();
 
     seedOccupiedInternalId(kind: IdentityKind, internalId: string): void {
-        // 占位一行（不同 forward-key），让后续不同来源若复用同一 ULID 撞主键
+        // 占位一行（不同 forward-key），让后续不同来源若复用同一 UUID 撞主键
         this.rows.push({
             kind,
             channel: '__seed__',
@@ -78,8 +78,8 @@ class FakeIdentityStore implements IdentityStore {
         );
         if (fwd) return fwd.internalId;
 
-        // forward-key 不存在但拿到的 internalId 撞了主键(ULID)：单独信号，
-        // 让 resolver 重新生成 ULID 重试，绝不当 forward-key 冲突收敛。
+        // forward-key 不存在但拿到的 internalId 撞了主键(UUIDv7)：单独信号，
+        // 让 resolver 重新生成 UUIDv7 重试，绝不当 forward-key 冲突收敛。
         const pkClash = this.rows.find(
             (r) => r.kind === row.kind && r.internalId === row.internalId,
         );
@@ -147,22 +147,23 @@ describe('DbIdentityResolver upsert 写路径与冲突处理', () => {
         expect(a).toBe(b);
     });
 
-    it('ULID 主键冲突触发重新生成有限次重试，不误当 forward-key 冲突抛错', async () => {
+    it('UUIDv7 主键冲突触发重新生成有限次重试，不误当 forward-key 冲突抛错', async () => {
         const store = new FakeIdentityStore();
         const r = new DbIdentityResolver(store);
 
-        // 先正常分配一个全局 ID，拿到它真实占用的 ULID
+        // 先正常分配一个全局 ID，拿到它真实占用的 UUIDv7
         const taken = await r.resolve('user', 'lark', 'first');
-        // 占位让"下一次新来源若复用同一 ULID"撞主键。通过覆盖 generateUlid
-        // 注入：让 resolver 第一次生成的 ULID 恰好等于 taken（撞主键），
-        // 第二次生成一个新 ULID（成功）。
-        const seq = [taken, 'ZZZZZZZZZZZZZZZZZZZZZZZZZZ'];
+        // 占位让"下一次新来源若复用同一 UUID"撞主键。通过覆盖 genUuid
+        // 注入：让 resolver 第一次生成的 UUID 恰好等于 taken（撞主键），
+        // 第二次生成一个新 UUID（成功）。
+        const fresh = '019e7827-0ee7-74ab-8503-feecfd430d0c';
+        const seq = [taken, fresh];
         let i = 0;
         const r2 = new DbIdentityResolver(store, () => seq[i++]!);
-        // 新来源 (lark, second)：forward-key 不存在，第一次 ULID=taken 撞主键，
-        // 必须重生成（第二个 ULID）成功，绝不当 forward-key 冲突收敛回 taken。
+        // 新来源 (lark, second)：forward-key 不存在，第一次 UUID=taken 撞主键，
+        // 必须重生成（第二个 UUID）成功，绝不当 forward-key 冲突收敛回 taken。
         const id = await r2.resolve('user', 'lark', 'second');
-        expect(id).toBe('ZZZZZZZZZZZZZZZZZZZZZZZZZZ');
+        expect(id).toBe(fresh);
         expect(id).not.toBe(taken);
         expect(await r2.toChannel('user', id)).toEqual({
             channel: 'lark',
@@ -170,26 +171,57 @@ describe('DbIdentityResolver upsert 写路径与冲突处理', () => {
         });
     });
 
-    it('ULID 主键冲突重试超过上限仍冲突时抛错，不死循环', async () => {
+    it('UUIDv7 主键冲突重试超过上限仍冲突时抛错，不死循环', async () => {
         const store = new FakeIdentityStore();
-        // 预占一个 ULID，并让生成器永远吐这个被占的 ULID
-        await new DbIdentityResolver(store, () => 'AAAAAAAAAAAAAAAAAAAAAAAAAA').resolve(
+        const occupied = '019e7827-0ee7-74ab-8503-feecfd430d0c';
+        // 预占一个 UUID，并让生成器永远吐这个被占的 UUID
+        await new DbIdentityResolver(store, () => occupied).resolve(
             'user',
             'lark',
             'occupier',
         );
-        const rBad = new DbIdentityResolver(
-            store,
-            () => 'AAAAAAAAAAAAAAAAAAAAAAAAAA',
-        );
+        const rBad = new DbIdentityResolver(store, () => occupied);
         await expect(
             rBad.resolve('user', 'lark', 'victim'),
         ).rejects.toThrow();
     });
 
-    it('生成的 internal id 形如 ULID（26 位 Crockford base32，大写）', async () => {
+    it('生成的 internal id 是合法 UUIDv7（小写、版本位=7、variant 位正确）', async () => {
         const r = new DbIdentityResolver(new FakeIdentityStore());
         const id = await r.resolve('message', 'lark', 'om_x');
-        expect(id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+        // 8-4-4-4-12 小写十六进制；第 13 个 hex（version nibble）必须是 7；
+        // variant nibble（第 17 个 hex，即第 4 组首字符）必须落在 8/9/a/b。
+        expect(id).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        // 不含任何大写字符（detail 文档硬约束：UUIDv7 小写）。
+        expect(id).toBe(id.toLowerCase());
+    });
+
+    it('UUIDv7 跨多次生成唯一', async () => {
+        const r = new DbIdentityResolver(new FakeIdentityStore());
+        const ids = await Promise.all(
+            Array.from({ length: 1000 }, (_, i) =>
+                r.resolve('message', 'lark', `om_${i}`),
+            ),
+        );
+        expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it('UUIDv7 时间前缀单调：较晚生成的 id 字典序不小于较早的', async () => {
+        // UUIDv7 高 48bit 是毫秒时间戳，小写十六进制下字典序与时间序一致。
+        // 取每个 id 的前 48bit（前 8 hex + 后 4 hex，去掉连字符）比较。
+        const r = new DbIdentityResolver(new FakeIdentityStore());
+        const prefixes: string[] = [];
+        for (let i = 0; i < 50; i++) {
+            const id = await r.resolve('message', 'lark', `mono_${i}`);
+            prefixes.push(id.slice(0, 8) + id.slice(9, 13));
+            // 制造跨毫秒边界，确保至少能观察到时间前缀递增而非全相等。
+            await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        const sorted = [...prefixes].sort();
+        expect(prefixes).toEqual(sorted);
+        // 至少有一次严格递增（否则说明没在测时间前缀，只是恰好全相等）。
+        expect(prefixes[prefixes.length - 1]! > prefixes[0]!).toBe(true);
     });
 });

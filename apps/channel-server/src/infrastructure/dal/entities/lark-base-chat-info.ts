@@ -20,6 +20,8 @@ export class LarkBaseChatInfo {
         is_canary?: boolean;
     }; // 权限配置，包含所有权限相关设置
 
+    // DB 列 nullable：清空灰度配置时写 null（见 plugins/lark/commands/command-handler.ts
+    // 的 /config unset）。类型需含 null，否则 TypeORM update 的 partial 拒绝 null。
     @Column({ type: 'jsonb', nullable: true })
-    gray_config?: Record<string, string>; // 灰度配置，存储 key-value 对
+    gray_config?: Record<string, string> | null; // 灰度配置，存储 key-value 对
 }

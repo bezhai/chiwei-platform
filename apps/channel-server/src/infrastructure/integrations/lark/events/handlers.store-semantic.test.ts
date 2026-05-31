@@ -82,19 +82,30 @@ afterAll(() => {
     transferSpy.mockRestore();
 });
 
-mock.module('./event-registry', () => ({ EventHandler: () => () => undefined }));
-mock.module('core/rules/engine', () => ({ runRules: runRulesMock }));
+mock.module('core/rules/engine', () => ({
+    runRules: runRulesMock,
+    setUtilityRedirectResponder: mock(),
+}));
+mock.module('@core/services/ai/reply', () => ({ setChatRequestEnricher: mock() }));
+mock.module('@core/services/message/resolve-mentions', () => ({
+    resolveMentionsForGroup: mock(async () => []),
+}));
 mock.module('infrastructure/integrations/memory', () => ({
     storeMessage: storeMessageMock,
 }));
-mock.module('@cache/redis-client', () => ({ setNx: setNxMock }));
-mock.module('@core/services/callback/fetch-photo-detail', () => ({
+mock.module('@cache/redis-client', () => ({
+    setNx: setNxMock,
+    hgetall: mock(async () => ({})),
+    exists: mock(async () => 0),
+}));
+mock.module('@plugins/lark/services/callback/fetch-photo-detail', () => ({
     fetchAndSendPhotoDetail: mock(),
 }));
-mock.module('@core/services/callback/update-card', () => ({
+mock.module('@plugins/lark/services/callback/update-card', () => ({
     handleUpdatePhotoCard: mock(),
     handleUpdateDailyPhotoCard: mock(),
 }));
+mock.module('@plugins/lark/commands', () => ({ larkCommands: [] }));
 mock.module('infrastructure/dal/entities', () => ({
     LarkGroupMember: class {},
     LarkUser: class {},
@@ -109,6 +120,12 @@ mock.module('infrastructure/dal/entities/bot-chat-presence', () => ({
 mock.module('infrastructure/integrations/lark-client', () => ({
     getUserInfo: mock(async () => ({ user: {} })),
 }));
+mock.module('@lark-client', () => ({
+    getUserInfo: mock(async () => ({ user: {} })),
+    uploadImage: mock(async () => ({ image_key: 'img_key' })),
+    deleteMessage: mock(async () => undefined),
+    downloadResource: mock(async () => Buffer.from('')),
+}));
 mock.module('infrastructure/dal/repositories/repositories', () => ({
     GroupMemberRepository: { save: mock() },
     UserRepository: { save: mock() },
@@ -122,16 +139,42 @@ mock.module('@core/services/bot/bot-var', () => ({
 }));
 mock.module('@core/services/bot/multi-bot-manager', () => ({
     multiBotManager: {
-        getChannelTriple: () => ({
-            inbound: { parse: (r: unknown) => r },
-            addressing: { decide: () => ({ respond: true }) },
-        }),
+        getBotConfig: () => ({ bot_name: 'chiwei', channel: 'lark' }),
     },
+}));
+// 注：bun mock.module 是进程级全局。本 stub 会泄漏到同进程其他测试，故除了
+// 本文件用到的 get，还实现 has/channels，让真实注册表形状（has('lark')）的
+// 断言（handlers.plugin-registration.test.ts）不被本 stub 顶掉而误失败。
+mock.module('@core/registry/channel-registry', () => ({
+    registerPlugin: mock(),
+    getChannelRegistry: () => ({
+        has: () => true,
+        channels: () => ['lark'],
+        get: () => ({
+            inbound: { parse: (r: unknown) => r },
+            addressing: { decide: () => ({ respond: true, reason: 'x' }) },
+        }),
+    }),
 }));
 mock.module('@lark/basic/group', () => ({
     searchLarkChatInfo: mock(),
     searchLarkChatMember: mock(),
     addChatMember: mock(),
+}));
+mock.module('@lark/basic/message', () => ({
+    sendMsg: mock(async () => undefined),
+    sendSticker: mock(async () => undefined),
+    replyMessage: mock(async () => undefined),
+    sendPost: mock(async () => 'm_reply'),
+    replyPost: mock(async () => 'm_reply'),
+    sendCard: mock(async () => undefined),
+    replyCard: mock(async () => undefined),
+    replyImage: mock(async () => undefined),
+    replyTemplate: mock(async () => undefined),
+    searchGroupMessage: mock(async () => []),
+}));
+mock.module('@aliyun/oss', () => ({
+    getOss: () => ({ getFile: mock(async () => undefined) }),
 }));
 mock.module('ormconfig', () => ({
     default: {
@@ -142,13 +185,31 @@ mock.module('ormconfig', () => ({
 mock.module('@infrastructure/lane-router', () => ({
     laneRouter: { createClient: () => ({ post: mock() }) },
 }));
+// context mock 补全 createContext/run：bun mock.module 进程级全局，缺这两个会
+// 泄漏污染同进程里用真实 context 的测试（dispatch.test.ts 调 context.createContext）。
 mock.module('@middleware/context', () => ({
-    context: { getBotName: () => 'chiwei', getLane: () => undefined },
+    context: {
+        getBotName: () => 'chiwei',
+        getTraceId: () => 'trace-test',
+        getLane: () => undefined,
+        createContext: (botName?: string, traceId?: string, lane?: string) => ({
+            botName,
+            traceId: traceId ?? 't',
+            lane,
+        }),
+        run: async (_ctx: unknown, cb: () => Promise<unknown>) => cb(),
+    },
 }));
 mock.module('@integrations/rabbitmq', () => ({
     rabbitmqClient: { publish: publishMock },
     PROACTIVE_EVAL: 'proactive_eval',
     CHAT_REQUEST: { queue: 'chat_request', rk: 'chat.request' },
+    getLane: () => undefined,
+}));
+// 处理层泳道分流决策点。flag 默认 off → dispatched=false → 走现状入站路径，
+// 本测试断言不变。mock 掉避免把 lane-router(TypeORM)/dynamic-config 真链拉进测试图。
+mock.module('@integrations/inbound-lane-dispatch', () => ({
+    dispatchInboundIfNeeded: async () => false,
 }));
 mock.module('@core/channels/inbound-pipeline', () => ({
     runInboundContractChain: mock(async () => ({
@@ -164,8 +225,11 @@ mock.module('@core/channels/inbound-pipeline', () => ({
 mock.module('@integrations/identity-resolver-runtime', () => ({
     getIdentityResolver: () => ({ resolve: mock(async () => 'x') }),
 }));
-mock.module('core/rules/rule-message', () => ({
-    buildLarkRuleMessage: mock(() => ({ channel: 'lark' })),
+mock.module('@plugins/lark/build-rule-message', () => ({
+    buildLarkRuleMessage: mock(() => ({ channel: 'lark', internalMessageId: 'internal_msg_1' })),
+}));
+mock.module('@plugins/lark/lark-context-store', () => ({
+    larkContextStore: { put: mock(() => {}), get: mock(() => ({})), clear: mock(() => {}) },
 }));
 mock.module('core/rules/rule', () => ({ setBotIdentityResolver: mock() }));
 

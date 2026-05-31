@@ -30,8 +30,13 @@ export async function processImage(
     if (options.quality) params.set('quality', String(options.quality));
     if (options.format) params.set('format', options.format);
 
+    // Buffer<ArrayBufferLike> 不是合法的 BlobPart（Bun 类型要求 BlobPart 的底层
+    // 是普通 ArrayBuffer，而 Buffer 的底层可能是 SharedArrayBuffer）。复制进一个
+    // 全新 Uint8Array（必由普通 ArrayBuffer 支撑），得到合法 BlobPart。一次性图片
+    // 上传，单次拷贝无性能问题。
+    const fileBytes = Uint8Array.from(buffer);
     const formData = new FormData();
-    formData.append('file', new Blob([buffer]), 'image.bin');
+    formData.append('file', new Blob([fileBytes]), 'image.bin');
 
     const response = await laneRouter.fetch('tool-service', `/api/image/process?${params.toString()}`, {
         method: 'POST',

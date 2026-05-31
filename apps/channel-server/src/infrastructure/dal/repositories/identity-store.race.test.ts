@@ -21,8 +21,8 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test';
 //
 // 修复方向：改成 ON CONFLICT ... DO UPDATE SET <indexed_col>=EXCLUDED.<...>
 // RETURNING <internal_col>。DO UPDATE 即使 SET no-op 也"涉及行"，永远把那行
-// 通过 RETURNING 拉回，不再依赖 CTE UNION ALL 兜底。三张表 (identity_user /
-// identity_chat / identity_message) 同款 SQL 全部统一。
+// 通过 RETURNING 拉回，不再依赖 CTE UNION ALL 兜底。三张表 (identity_user_v2 /
+// identity_conversation_v2 / identity_message_v2) 同款 SQL 全部统一。
 //
 // 不连真实 PG —— mock @ormconfig 让我们能捕获实际下发的 SQL 文本，并按需
 // 模拟 query 返回行。
@@ -49,7 +49,7 @@ mock.module('@ormconfig', () => ({
 // 的只在 findInternalId/findChannelRef，本测试只覆盖 upsertMapping 路径）。
 mock.module('@entities/identity-mapping', () => ({
     IdentityUser: class {},
-    IdentityChat: class {},
+    IdentityConversation: class {},
     IdentityMessage: class {},
 }));
 
@@ -58,24 +58,24 @@ const { TypeOrmIdentityStore } = await import('./identity-store');
 const KIND_CASES = [
     {
         kind: 'user' as const,
-        table: 'identity_user',
+        table: 'identity_user_v2',
         internalCol: 'internal_user_id',
         channelIdCol: 'channel_user_id',
-        constraint: 'uq_identity_user_channel',
+        constraint: 'uq_identity_user_v2_channel',
     },
     {
         kind: 'chat' as const,
-        table: 'identity_chat',
-        internalCol: 'internal_chat_id',
-        channelIdCol: 'channel_chat_id',
-        constraint: 'uq_identity_chat_channel',
+        table: 'identity_conversation_v2',
+        internalCol: 'internal_conversation_id',
+        channelIdCol: 'channel_conversation_id',
+        constraint: 'uq_identity_conversation_v2_channel',
     },
     {
         kind: 'message' as const,
-        table: 'identity_message',
+        table: 'identity_message_v2',
         internalCol: 'internal_message_id',
         channelIdCol: 'channel_message_id',
-        constraint: 'uq_identity_message_channel',
+        constraint: 'uq_identity_message_v2_channel',
     },
 ];
 

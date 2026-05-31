@@ -35,7 +35,6 @@ function msg(over: Partial<RuleMessage> = {}): RuleMessage {
         isStickerOnly: () => false,
         stickerKey: () => '',
         imageKeys: () => [],
-        channelContext: undefined,
         ...over,
     };
 }

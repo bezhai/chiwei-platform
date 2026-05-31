@@ -241,3 +241,9 @@ class RabbitMQClient {
 }
 
 export const rabbitmqClient = RabbitMQClient.getInstance();
+
+// 暴露共享 amqp Channel 给需要直接操作 Channel 的模块（inbound-lane 的 fail-closed
+// 队列不能走 publish/consume 那套默认 lane 队列参数，必须自己 assertQueue）。
+export function getRabbitChannel(): Channel {
+    return rabbitmqClient.getChannel();
+}

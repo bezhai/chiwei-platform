@@ -18,6 +18,7 @@
         "paths": {
             "@/*": ["./*"],
             "@core/*": ["core/*"],
+            "@plugins/*": ["plugins/*"],
             "@api/*": ["api/*"],
             "@middleware/*": ["middleware/*"],
             "@utils/*": ["utils/*"],

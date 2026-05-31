@@ -5,10 +5,10 @@ import {
     ImgComponent,
     LarkCard,
 } from 'feishu-card';
-import { fetchUploadedImages } from '@core/services/media/photo/upload';
+import { fetchUploadedImages } from '@plugins/lark/services/photo/upload';
 import { replyCard, sendCard, sendMsg } from '@lark/basic/message';
 import { Crontab, registerCrontabService } from '@crontab/decorators';
-import { searchAndBuildDailyPhotoCard } from '@core/services/media/photo/photo-card';
+import { searchAndBuildDailyPhotoCard } from '@plugins/lark/services/photo/photo-card';
 
 export class DailyPhotoService {
     /**

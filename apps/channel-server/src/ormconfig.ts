@@ -14,8 +14,9 @@ import {
     AgentResponse,
     BotChatPresence,
     IdentityUser,
-    IdentityChat,
+    IdentityConversation,
     IdentityMessage,
+    LaneRouting,
 } from './infrastructure/dal/entities';
 
 const AppDataSource = new DataSource({
@@ -42,8 +43,9 @@ const AppDataSource = new DataSource({
         AgentResponse,
         BotChatPresence,
         IdentityUser,
-        IdentityChat,
+        IdentityConversation,
         IdentityMessage,
+        LaneRouting,
     ],
 });
 

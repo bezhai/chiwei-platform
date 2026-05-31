@@ -8,6 +8,8 @@ import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
+import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
+import { larkIngressBots } from './lark-ingress-bots';
 
 /**
  * 服务器配置
@@ -87,6 +89,12 @@ export class HttpServerManager {
         this.app.route('', metricsApp);
         this.registerHealthCheck();
         this.app.route('', internalLarkRoutes);
+
+        // 飞书 HTTP webhook 是被动入口，注册路由本身无副作用；实际流量是否进入
+        // channel-server 由 api-gateway / 泳道路由决定。
+        const httpBots = larkIngressBots(multiBotManager.getBotsByInitType('http'));
+        new LarkEventIngress().registerHttpBots(this.app, httpBots);
+        console.info(`[ingress] lark webhook registered ${httpBots.length} http bot(s)`);
 
         // 启动服务器
         Bun.serve({ port: this.config.port, fetch: this.app.fetch });

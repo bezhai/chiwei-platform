@@ -27,39 +27,30 @@ import {
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { resolveBotIdentity } from '@core/services/bot/bot-identity';
-import { initializeLarkClients, uploadImage } from '@integrations/lark-client';
+import { initializeLarkClients } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
-import { replyPost, sendPost } from '@lark/basic/message';
-import { markdownToPostContent } from 'core/services/message/post-content-processor';
-import { resolveMentionsForGroup } from 'core/services/message/resolve-mentions';
 import { MessageContentUtils } from 'core/models/message-content';
-import { reverseResolveForLark } from '@core/channels/outbound-pipeline';
+import { reverseResolveOutbound } from '@plugins/lark/outbound-reverse-resolve';
 import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
-import { hgetall } from '@cache/redis-client';
+import { getChannelRegistry } from '@core/registry/channel-registry';
+import '@plugins/index';
 import { imageRegistryLookupId } from './image-registry-key';
+import { dispatchChatResponseOutbound } from './chat-response-outbound';
 import dayjs from 'dayjs';
-import { Readable } from 'stream';
-import { Counter, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+import { Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import type { ConsumeMessage } from 'amqplib';
+
+// 出站走渠道能力端口（B3）：飞书富文本/图片渲染 + send/reply 收进 plugins/lark
+// 的 OutboundCapabilities，worker 不再 import 任何飞书 SDK。import '@plugins/index'
+// 触发飞书插件自注册（进 ChannelRegistry），下方 getChannelRegistry().get('lark')
+// 取其 capabilities。当前出站链路只服务飞书；T6 接其他 channel 时按 payload.channel
+// 取对应插件。
+const OUTBOUND_CHANNEL = 'lark';
 
 // Metrics (chat-response-worker is a standalone process, needs its own registry)
 const metricsRegistry = new Registry();
 collectDefaultMetrics({ register: metricsRegistry });
-
-const imageResolveDuration = new Histogram({
-    name: 'image_resolve_step_duration_seconds',
-    help: 'Duration of each image resolve step',
-    labelNames: ['step'] as const,  // redis, download_tos, upload_lark
-    registers: [metricsRegistry],
-});
-
-const imageResolveTotal = new Counter({
-    name: 'image_resolve_requests_total',
-    help: 'Total image resolve outcomes',
-    labelNames: ['status'] as const,  // success, not_found, download_failed, upload_failed
-    registers: [metricsRegistry],
-});
 
 const chatResponseDuration = new Histogram({
     name: 'chat_response_duration_seconds',
@@ -77,101 +68,6 @@ const chatResponseQueueDelay = new Histogram({
 });
 
 const SEND_DELAY_MS = 2500;
-const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@?(\d+\.png)\)/g;
-
-/**
- * Resolve @N.png references in markdown image syntax.
- * Downloads TOS URL → uploads to Lark → replaces with image_key.
- */
-async function resolveImageReferences(content: string, messageId: string): Promise<string> {
-    const matches = [...content.matchAll(IMAGE_REF_PATTERN)];
-    if (matches.length === 0) return content;
-
-    const tStart = Date.now();
-
-    // Load registry from Redis
-    const registry = await hgetall(`image_registry:${messageId}`);
-    const tRedis = (Date.now() - tStart) / 1000;
-    imageResolveDuration.labels({ step: 'redis' }).observe(tRedis);
-
-    if (!registry || Object.keys(registry).length === 0) {
-        console.warn(`[ChatResponseWorker] No image registry found for message_id=${messageId}`);
-        return content;
-    }
-
-    let result = content;
-
-    // Resolve single image: download TOS → upload Lark → return replacement
-    async function resolveSingle(match: RegExpExecArray): Promise<{ fullMatch: string; replacement: string }> {
-        const fullMatch = match[0];
-        const alt = match[1];
-        const filename = match[2];
-
-        const tosUrl = registry[filename];
-        if (!tosUrl) {
-            console.warn(`[ChatResponseWorker] Image ${filename} not found in registry`);
-            imageResolveTotal.labels({ status: 'not_found' }).inc();
-            return { fullMatch, replacement: `(图片 ${filename} 不可用)` };
-        }
-
-        try {
-            // Download from TOS
-            const tDl0 = Date.now();
-            const response = await fetch(tosUrl);
-            if (!response.ok) {
-                console.error(`[ChatResponseWorker] Failed to download ${filename}: ${response.status}`);
-                imageResolveTotal.labels({ status: 'download_failed' }).inc();
-                return { fullMatch, replacement: `(图片 ${filename} 下载失败)` };
-            }
-
-            const buffer = Buffer.from(await response.arrayBuffer());
-            const tDownload = (Date.now() - tDl0) / 1000;
-            imageResolveDuration.labels({ step: 'download_tos' }).observe(tDownload);
-
-            // Upload to Lark
-            const tUp0 = Date.now();
-            const stream = Readable.from(buffer);
-            const uploadResult = await uploadImage(stream);
-            const imageKey = uploadResult?.image_key || uploadResult?.data?.image_key;
-            const tUpload = (Date.now() - tUp0) / 1000;
-            imageResolveDuration.labels({ step: 'upload_lark' }).observe(tUpload);
-
-            if (!imageKey) {
-                console.error(`[ChatResponseWorker] Failed to upload ${filename} to Lark, response:`, JSON.stringify(uploadResult));
-                imageResolveTotal.labels({ status: 'upload_failed' }).inc();
-                return { fullMatch, replacement: `(图片 ${filename} 上传失败)` };
-            }
-
-            imageResolveTotal.labels({ status: 'success' }).inc();
-            console.info(
-                `[ChatResponseWorker] Resolved ${filename} -> ${imageKey} ` +
-                `(size=${Math.round(buffer.length / 1024)}KB download=${Math.round(tDownload * 1000)}ms upload=${Math.round(tUpload * 1000)}ms)`,
-            );
-            return { fullMatch, replacement: `![${alt}](${imageKey})` };
-        } catch (e) {
-            console.error(`[ChatResponseWorker] Error resolving ${filename}:`, e);
-            return { fullMatch, replacement: `(图片 ${filename} 处理失败)` };
-        }
-    }
-
-    // Process in batches of 5 concurrently
-    const CONCURRENCY = 5;
-    for (let i = 0; i < matches.length; i += CONCURRENCY) {
-        const batch = matches.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(batch.map(m => resolveSingle(m)));
-        for (const { fullMatch, replacement } of results) {
-            result = result.replace(fullMatch, replacement);
-        }
-    }
-
-    const tTotal = Date.now() - tStart;
-    console.info(
-        `[ChatResponseWorker] resolveImageReferences done: ${matches.length} refs, ` +
-        `redis=${Math.round(tRedis * 1000)}ms total=${tTotal}ms`,
-    );
-
-    return result;
-}
 
 interface ChatResponsePayload {
     session_id: string;
@@ -269,19 +165,15 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         }
 
         try {
-            // ---- 出站反查（5b 边界点 6）----
-            // ChatTrigger/ChatResponseSegment 入站若走过渠道契约链，message_id
-            // /chat_id/root_id 是全局 internal_*_id。这里用 IdentityResolver
-            // .toChannel 反查回飞书裸 ID，再喂给现状飞书富文本出站路径
-            // （sendPost/replyPost + 识图/markdown→post 全部保留不动——飞书
-            // native 出站交互，不塞进纯文本 OutboundAdapter，否则丢图片/格式，
-            // 是「飞书非文字/看图聊天零截断」硬约束不允许的回归）。反查不到
+            // ---- 出站反查（全局 internal_*_id → 渠道裸 id）----
+            // ChatTrigger/ChatResponseSegment 入站走过渠道契约链，message_id /
+            // chat_id / root_id 是全局 internal_*_id。这里用 IdentityResolver
+            // .toChannel 反查回渠道裸 id，构造能力端口要的渠道内 ref。反查不到
             // 明确抛错（落入下方 catch），绝不静默把回复发到错地方。
             const reverseResolver = getIdentityResolver();
-            // channel === 'lark' 边界断言在 reverseResolveForLark 内做：
-            // T6 接 QQ 后，误把非飞书全局 ID 喂飞书富文本发送器会在此炸出来，
-            // 绝不静默发到错地方（fail-loud 出站对偶）。
-            const rr = await reverseResolveForLark({
+            // channel === 'lark' 边界断言在 reverseResolveOutbound 内做：
+            // 误把非飞书全局 ID 喂飞书出站会在此炸出来（fail-loud 出站对偶）。
+            const rr = await reverseResolveOutbound({
                 resolver: reverseResolver,
                 messageGlobalId: message_id,
                 chatGlobalId: chat_id,
@@ -291,51 +183,45 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             const larkChatId = rr.channelChatId;
             const larkRootId = rr.channelRootId;
 
-            // 群聊中将 @用户名 替换为 <at union_id="xxx">用户名</at>：走飞书群成员，
-            // 必须用反查回的飞书裸 chatId（larkChatId）。
-            // 解析 N.png 引用 → 下载 TOS → 上传飞书 → 替换为 image_key：走 redis
-            // image_registry，agent-service 用【全局 internal message_id】注册（见
-            // image-registry-key.ts），所以这里必须用全局 message_id 查，绝不能用
-            // 反查后的飞书裸 om_*（那个键从没写过，会 miss → 图片被静默吞掉）。
-            const tResolve0 = Date.now();
-            let resolvedContent = is_p2p
-                ? content
-                : await resolveMentionsForGroup(content, larkChatId);
-            resolvedContent = await resolveImageReferences(
-                resolvedContent,
-                imageRegistryLookupId(payload),
-            );
-            const resolveMs = Date.now() - tResolve0;
-            chatResponseDuration.labels({ stage: 'resolve' }).observe(resolveMs / 1000);
-
-            const postContent = markdownToPostContent(resolvedContent);
-
-            // 发送消息并捕获 AI 消息 ID（飞书裸 ID 寻址，行为与现状一致）
-            const tSend0 = Date.now();
-            let aiMessageId: string | undefined;
-            if (part_index === 0) {
-                if (is_proactive) {
-                    // proactive: reply to real message if available, else send new
-                    if (larkRootId) {
-                        aiMessageId = await replyPost(larkRootId, postContent);
-                    } else {
-                        aiMessageId = await sendPost(larkChatId, postContent);
-                    }
-                } else {
-                    aiMessageId = await replyPost(larkMessageId, postContent);
-                }
-            } else {
+            // part > 0 续段：发送前节流（与现状一致，worker 侧出站节奏，非渲染）。
+            if (part_index > 0) {
                 await sleep(SEND_DELAY_MS);
-                aiMessageId = await sendPost(larkChatId, postContent);
             }
+
+            // ---- 出站走渠道能力端口（B3）----
+            // content 是 AI 原始 markdown（平台无关）；飞书富文本渲染
+            // （@N.png 上传飞书、@用户名 mention、markdown→PostContent、send/reply）
+            // 由 lark 插件的 OutboundCapabilities 内部做，worker 不碰飞书结构/SDK。
+            // RenderContext：
+            //   imageRegistryId 必须用【全局 message_id】（agent-service 注册图片用的
+            //     同一个 key，见 image-registry-key.ts）——绝不能用反查后的飞书裸 om_*，
+            //     那个键从没写过、会 miss → 图片被静默吞掉。故它走渲染上下文、不混进渠道 ref。
+            //   larkChatId 群 mention 解析所需的飞书裸 chatId；
+            //   resolveMentions 群聊解析 @用户名、私聊跳过（与现状 is_p2p 跳过一致，
+            //     由 dispatch 据 isP2p 决定）。
+            // dispatch 据 part_index/proactive 选 reply(回复触发/root) 还是 sendText(新发)，
+            // 返回新消息的渠道裸 id。
+            const tSend0 = Date.now();
+            const capabilities = getChannelRegistry().get(OUTBOUND_CHANNEL).capabilities;
+            const sentRef = await dispatchChatResponseOutbound(capabilities, {
+                content,
+                larkMessageId,
+                larkChatId,
+                larkRootId,
+                imageRegistryId: imageRegistryLookupId(payload),
+                isP2p: is_p2p,
+                partIndex: part_index,
+                isProactive: is_proactive,
+            });
             const sendMs = Date.now() - tSend0;
             chatResponseDuration.labels({ stage: 'lark_send' }).observe(sendMs / 1000);
 
+            const aiMessageId = sentRef.channelId || undefined;
             const effectiveLarkMessageId = aiMessageId || `${larkMessageId}_part${part_index}`;
             // bot 自己的回复消息也全局化（与入站写入点全局化一致）：把这条新
             // 飞书消息 id 正查分配/取全局 internal_message_id 后再落库，保证
             // conversation_messages 的 assistant 行身份列同样是全局 ID。
-            // reverseResolveForLark 已断言 channel==='lark'，这里出站发的是
+            // reverseResolveOutbound 已断言 channel==='lark'，这里出站发的是
             // 飞书 native 富文本，新消息 id 是飞书裸 id，按 (lark, 裸id) 正查
             // 分配全局 internal_message_id（与入站写入点全局化一致）。
             const globalAssistantMessageId = await reverseResolver.resolve(
@@ -427,7 +313,6 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
                 part_index,
                 queue_ms: queueDelayMs,
                 db_query_ms: dbQueryMs,
-                resolve_ms: resolveMs,
                 send_ms: sendMs,
                 db_write_ms: dbWriteMs,
                 total_ms: totalMs,

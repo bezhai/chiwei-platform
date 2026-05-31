@@ -3,19 +3,16 @@ import { describe, it, expect } from 'bun:test';
 import {
     type InboundMessage,
     type InboundAdapter,
-    type OutboundAdapter,
     type AddressingPolicy,
     type AddressingDecision,
-    type ReplyTarget,
     assertValidInboundMessage,
-    deliver,
     enforceDecision,
 } from './contracts';
 
 // 这组测试用一个"假想的纯 HTTP 问答 channel"当验证载体：它跟 IM 形态差别很大
 // （没有 webhook 握手、没有 @、没有群、没有回复树）。spec 的验收底线是：接这种
-// channel 只需实现三件套（InboundAdapter / OutboundAdapter / AddressingPolicy），
-// 不碰核心、不碰别的 adapter。如果这个最小实现写不出来，说明契约被 IM 绑架了。
+// channel 只需实现入站 + 寻址（InboundAdapter / AddressingPolicy），不碰核心、
+// 不碰别的 adapter。如果这个最小实现写不出来，说明契约被 IM 绑架了。
 
 // ---- 假想 HTTP 问答 channel 的三件套实现（全部在测试内，是契约的可执行规格）----
 
@@ -42,30 +39,19 @@ const httpInbound: InboundAdapter = {
     },
 };
 
-// adapter 只实现两个原子操作；"无回复语义时退化为 send 该发到哪" 不再由
-// 每个 adapter 自己写（旧实现硬编码 'degraded' 掩盖了它根本不知道发哪），
-// 而是由 contracts.ts 的中心化 deliver() 决定。
-const sent: Array<{ via: 'send' | 'reply'; target: string; text: string }> = [];
-const httpOutbound: OutboundAdapter = {
-    send(channelChatId, content) {
-        sent.push({ via: 'send', target: channelChatId, text: content });
-        return Promise.resolve('out-' + channelChatId);
-    },
-    reply(threadRef, content) {
-        sent.push({ via: 'reply', target: JSON.stringify(threadRef), text: content });
-        return Promise.resolve('out-reply');
-    },
-};
-
 const httpPolicy: AddressingPolicy = {
     decide(): AddressingDecision {
         return { respond: true, reason: 'http-qa always answers' };
     },
 };
 
-describe('channel 四层契约 — 用假想 HTTP 问答 channel 验证不被 IM 绑架', () => {
+describe('channel 接入契约 — 用假想 HTTP 问答 channel 验证不被 IM 绑架', () => {
     it('InboundAdapter.parse 产出合法的、无 IM 假设的 InboundMessage', () => {
         const msg = httpInbound.parse({ qid: 'q1', user: 'u1', question: 'hello?' });
+        // InboundAdapter.parse 契约允许返回 null（拒收非法输入）；这里输入合法，
+        // 断言非空既验证行为又向类型系统收窄掉 null 分支。
+        expect(msg).not.toBeNull();
+        if (msg === null) throw new Error('parse should return a message for valid input');
         expect(msg.channel).toBe('http-qa');
         expect(msg.conversation_scope).toBe('direct');
         expect(msg.thread_ref).toBeNull(); // 无回复树
@@ -86,27 +72,6 @@ describe('channel 四层契约 — 用假想 HTTP 问答 channel 验证不被 IM
 
     it('不需要握手的 channel：handleHandshake 返回 null 是合法的', () => {
         expect(httpInbound.handleHandshake({})).toBeNull();
-    });
-
-    it('deliver 在无回复语义(threadRef=null)时退化为 send 到 channelChatId', async () => {
-        sent.length = 0;
-        const target: ReplyTarget = { channelChatId: 'u9', threadRef: null };
-        await deliver(httpOutbound, target, 'the answer');
-        expect(sent).toHaveLength(1);
-        expect(sent[0].via).toBe('send');
-        // 关键：必须发到真实会话 u9，而不是旧实现硬编码的 'degraded'
-        expect(sent[0].target).toBe('u9');
-    });
-
-    it('deliver 在有 threadRef 时走 reply 语义', async () => {
-        sent.length = 0;
-        const target: ReplyTarget = {
-            channelChatId: 'u9',
-            threadRef: { replyToChannelMessageId: 'm1' },
-        };
-        await deliver(httpOutbound, target, 'the answer');
-        expect(sent).toHaveLength(1);
-        expect(sent[0].via).toBe('reply');
     });
 
     it('AddressingPolicy 返回带 reason 的决策，不是裸 bool', () => {

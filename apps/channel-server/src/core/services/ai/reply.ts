@@ -25,23 +25,41 @@ export interface ChatRequestPayload {
     mentions: string[];
 }
 
-// 纯函数：从平台无关 RuleMessage 构造 chat.request 载荷。is_canary / mentions
-// 是飞书专属语义——仅当 channelContext 是 lark 时从 LarkRuleContext 取，其余
-// channel 取中性默认（false / []），绝不把飞书绑定泄漏到非飞书 channel。
+// chat.request 的 channel 专属富化字段（is_canary / mentions）。这些是飞书
+// 专属语义，core 的 reply.ts 不认识飞书对象（B2 删掉了 #228 的 channelContext
+// .larkMessage 逃生口）。由各 channel 插件经下面的注入点提供；未注入时取中性
+// 默认（is_canary=false / mentions=[]），绝不把平台绑定泄漏到非该 channel。
+export interface ChatRequestEnrichment {
+    isCanary: boolean;
+    mentions: string[];
+}
+
+export type ChatRequestEnricher = (message: RuleMessage) => ChatRequestEnrichment;
+
+const neutralEnricher: ChatRequestEnricher = () => ({ isCanary: false, mentions: [] });
+
+let chatRequestEnricher: ChatRequestEnricher = neutralEnricher;
+
+// channel 插件 import 期注入"按本平台富化 chat.request"的实现（飞书=从 lark
+// 私有 store 取 is_canary / getBotAppIds）。core 只调注入点，不碰平台 SDK。
+export function setChatRequestEnricher(fn: ChatRequestEnricher): void {
+    chatRequestEnricher = fn;
+}
+
+// 测试钩子：恢复中性默认，避免跨用例污染。
+export function resetChatRequestEnricher(): void {
+    chatRequestEnricher = neutralEnricher;
+}
+
+// 纯函数：从平台无关 RuleMessage 构造 chat.request 载荷。飞书专属的 is_canary /
+// mentions 经注入的 enricher 取（未注入则中性默认），core 不读任何飞书对象。
 export function buildChatRequestPayload(
     message: RuleMessage,
     sessionId: string,
     botName: string | undefined,
     lane: string | undefined,
 ): ChatRequestPayload {
-    let isCanary = false;
-    let mentions: string[] = [];
-    const ctx = message.channelContext;
-    if (ctx && ctx.channel === 'lark') {
-        const lark = ctx.larkMessage;
-        isCanary = lark.basicChatInfo?.permission_config?.is_canary ?? false;
-        mentions = lark.getBotAppIds();
-    }
+    const { isCanary, mentions } = chatRequestEnricher(message);
     return {
         session_id: sessionId,
         channel: message.channel,

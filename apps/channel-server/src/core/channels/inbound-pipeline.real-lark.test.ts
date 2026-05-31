@@ -1,96 +1,192 @@
-import { describe, it, expect } from 'bun:test';
-
+// inbound-pipeline 5b 集成测试：用真实飞书入站组件（larkInbound / larkAddressing）
+// 把契约链跑通，钉死 parse→decide(enforceDecision)→resolve 的顺序和真实语义。
+// 不 mock adapter / policy —— 这是新插件入站实现的集成回归基线。
+// （RuleMessage 派生由 plugins/lark/build-rule-message.test.ts 单独覆盖；此处只
+// 钉死契约链本身，不依赖 buildLarkRuleMessage——它在别处被 mock.module 进程级
+// 替换，跨文件同进程会污染这里的断言。）
 import { runInboundContractChain } from './inbound-pipeline';
-import { InMemoryIdentityResolver } from './identity-resolver';
-import { LarkInboundAdapter, LarkAddressingPolicy } from './lark/lark-adapter';
-import type { LarkReceiveMessage } from 'types/lark';
+import { assertValidInboundMessage } from './contracts';
+import { describe, it, expect, mock } from 'bun:test';
+import { larkInbound, LARK_CHANNEL } from '@plugins/lark/inbound';
+import { larkAddressing } from '@plugins/lark/addressing';
 
-// 必改1 钉死：codex 质疑「非 @bot 群消息照常入库+复读」零变化硬约束
-// 没真正闭环 —— 怀疑真实契约链对非 @bot 群消息会短路（chain.ok=false /
-// skip），而 handlers.inbound-order.test.ts 把 chain 固定 mock 成
-// ok:true/respond:true，掩盖了真实语义。
-//
-// 本测试用**真实** LarkInboundAdapter.parse + **真实** LarkAddressingPolicy
-// .decide + **真实** enforceDecision，过**真实** runInboundContractChain，
-// 喂一条**群里没有 @bot 的真实飞书文本事件**，钉死真实语义：
-//
-//   LarkAddressingPolicy 对非 @bot 群消息返回 respond:false 且 reason
-//   **非空**（'group message without bot ... mention; not addressed to
-//   bot'）→ enforceDecision 不抛错（空 reason 才抛）→ runInboundContract
-//   Chain 不进 catch 分支 → 返回 ok:true, respond:false，且 resolve 仍
-//   翻全局 ID。即真实链路对非 @bot 群消息**不短路**：handlers.ts 只看
-//   chain.ok（=true）就照常 runRules → storeMessage，复读 + 入库不被丢。
-//
-// 这消除 codex 指出的 mock 盲区：非 @bot 群消息的 ok/respond 由真实
-// LarkAddressingPolicy 决定，而非黑盒固定 ok:true/respond:true。
+const LARK = LARK_CHANNEL;
 
-const adapter = new LarkInboundAdapter();
-const policy = new LarkAddressingPolicy();
-const BOT_UNION_ID = 'on_bot_union_xyz';
+describe('5b real-lark contract chain (no mock adapter/policy)', () => {
+    // identity resolver：lark 裸 id → 全局 global_* id（黑盒桩）。
+    const resolver = {
+        resolve: mock(async (kind: string, _channel: string, id: string) => {
+            return `global_${kind}_${id}`;
+        }),
+    };
 
-// 一条群里没有 @bot 的真实飞书文本事件（mentions 为空）。
-function nonMentionGroupEvent(): LarkReceiveMessage {
-    return {
-        app_id: 'cli_x',
-        sender: { sender_id: { union_id: 'on_user_aaa' } },
-        message: {
-            message_id: 'om_real_1',
-            chat_id: 'oc_real_1',
-            chat_type: 'group',
-            message_type: 'text',
-            create_time: '1700000000000',
-            content: JSON.stringify({ text: '大家早上好' }),
-            mentions: [],
-        },
-    } as unknown as LarkReceiveMessage;
-}
-
-describe('必改1: real LarkAddressingPolicy non-@bot group message does NOT short-circuit', () => {
-    it('ok:true respond:false, global ids resolved, skip reason logged (no contract_chain_error)', async () => {
-        let skipReason = '';
-        const res = await runInboundContractChain({
-            params: nonMentionGroupEvent(),
-            parse: (raw) => adapter.parse(raw as LarkReceiveMessage),
-            decide: (m, b) => policy.decide(m, b),
-            botIdentity: BOT_UNION_ID,
-            resolver: new InMemoryIdentityResolver(),
-            logSkip: (r) => {
-                skipReason = r;
+    function p2pTextEvent() {
+        return {
+            app_id: 'cli_app',
+            sender: { sender_id: { union_id: 'on_user', open_id: 'ou_user' }, sender_type: 'user' },
+            message: {
+                message_id: 'om_msg1',
+                chat_id: 'oc_chat1',
+                chat_type: 'p2p',
+                message_type: 'text',
+                create_time: '1700000000000',
+                content: JSON.stringify({ text: 'hello bot' }),
             },
-        });
+        };
+    }
 
-        // 真实链路结论：ok=true（不是 parsed_null，也不是
-        // contract_chain_error 短路），respond=false。
-        expect(res.ok).toBe(true);
-        if (res.ok) {
-            expect(res.respond).toBe(false);
-            // resolve 仍翻全局 ID —— 飞书 native 链路（复读 / storeMessage）
-            // 对非 @bot 群消息照常运行的数据来源。
-            expect(res.globalMessageId).toBeTruthy();
-            expect(res.globalChatId).toBeTruthy();
-            expect(res.globalUserId).toBeTruthy();
-        }
-        // enforceDecision 收到非空 reason → 记可查日志、不抛错（空 reason
-        // 才抛 → 才会进 catch → 才 ok:false 短路）。
-        expect(skipReason.length).toBeGreaterThan(0);
-        expect(skipReason).toContain('not addressed to bot');
+    function groupMentionEvent(mentionUnionIds: string[]) {
+        return {
+            app_id: 'cli_app',
+            sender: { sender_id: { union_id: 'on_sender', open_id: 'ou_sender' }, sender_type: 'user' },
+            message: {
+                message_id: 'om_msg2',
+                chat_id: 'oc_group',
+                chat_type: 'group',
+                message_type: 'text',
+                create_time: '1700000001000',
+                root_id: 'om_root',
+                content: JSON.stringify({ text: '@_user_1 hi' }),
+                mentions: mentionUnionIds.map((uid, i) => ({
+                    key: `@_user_${i + 1}`,
+                    id: { union_id: uid, open_id: `ou_${uid}` },
+                    name: uid,
+                    mentioned_type: 'user',
+                })),
+            },
+        };
+    }
+
+    it('p2p text: parse->decide(respond)->resolve all global ids', async () => {
+        const result = await runInboundContractChain({
+            params: p2pTextEvent(),
+            parse: (raw) => larkInbound.parse(raw as never),
+            decide: (m, b) => larkAddressing.decide(m, b),
+            botIdentity: 'on_user',
+            resolver: resolver as never,
+            logSkip: () => {},
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.respond).toBe(true);
+        expect(result.globalUserId).toBe('global_user_on_user');
+        expect(result.globalChatId).toBe('global_chat_oc_chat1');
+        expect(result.globalMessageId).toBe('global_message_om_msg1');
     });
 
-    it('@bot group message via real policy: ok:true respond:true', async () => {
-        // 对照组：群里 @ 了 bot（mentions 含 bot union_id）→ respond:true。
-        const ev = nonMentionGroupEvent();
-        (ev.message as { mentions: unknown[] }).mentions = [
-            { id: { union_id: BOT_UNION_ID } },
-        ];
-        const res = await runInboundContractChain({
-            params: ev,
-            parse: (raw) => adapter.parse(raw as LarkReceiveMessage),
-            decide: (m, b) => policy.decide(m, b),
-            botIdentity: BOT_UNION_ID,
-            resolver: new InMemoryIdentityResolver(),
-            logSkip: () => undefined,
+    it('group @bot: respond=true, hints carry union ids', async () => {
+        const result = await runInboundContractChain({
+            params: groupMentionEvent(['on_bot']),
+            parse: (raw) => larkInbound.parse(raw as never),
+            decide: (m, b) => larkAddressing.decide(m, b),
+            botIdentity: 'on_bot',
+            resolver: resolver as never,
+            logSkip: () => {},
         });
-        expect(res.ok).toBe(true);
-        if (res.ok) expect(res.respond).toBe(true);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.respond).toBe(true);
+    });
+
+    it('group non-@bot: respond=false but ok=true (real policy non-empty reason)', async () => {
+        const logged: string[] = [];
+        const result = await runInboundContractChain({
+            params: groupMentionEvent(['on_other']),
+            parse: (raw) => larkInbound.parse(raw as never),
+            decide: (m, b) => larkAddressing.decide(m, b),
+            botIdentity: 'on_bot',
+            resolver: resolver as never,
+            logSkip: (r) => logged.push(r),
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.respond).toBe(false);
+        expect(logged.length).toBe(1);
+        expect(logged[0].length).toBeGreaterThan(0);
+    });
+
+    it('parse returns null for non-message -> ok:false parsed_null', async () => {
+        const result = await runInboundContractChain({
+            params: { app_id: 'x', sender: {} },
+            parse: (raw) => larkInbound.parse(raw as never),
+            decide: (m, b) => larkAddressing.decide(m, b),
+            botIdentity: 'on_bot',
+            resolver: resolver as never,
+            logSkip: () => {},
+        });
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.reason).toBe('parsed_null');
+    });
+
+    it('chain exposes inbound + resolved global ids for downstream RuleMessage derivation', async () => {
+        const result = await runInboundContractChain({
+            params: p2pTextEvent(),
+            parse: (raw) => larkInbound.parse(raw as never),
+            decide: (m, b) => larkAddressing.decide(m, b),
+            botIdentity: 'on_user',
+            resolver: resolver as never,
+            logSkip: () => {},
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // 下游 buildLarkRuleMessage 的数据来源：全局 id + inbound 的 addressing_hints。
+        expect(result.globalMessageId).toBe('global_message_om_msg1');
+        expect(result.inbound.channel).toBe(LARK);
+        expect(result.inbound.addressing_hints).toEqual([]);
+    });
+});
+
+// -------- 入站消息形状（adapter parse + guard）--------
+
+describe('5b real-lark inbound message shape (adapter parse + guard)', () => {
+    function p2pTextEvent() {
+        return {
+            app_id: 'cli_app',
+            sender: { sender_id: { union_id: 'on_user', open_id: 'ou_user' }, sender_type: 'user' },
+            message: {
+                message_id: 'om_msg1',
+                chat_id: 'oc_chat1',
+                chat_type: 'p2p',
+                message_type: 'text',
+                create_time: '1700000000000',
+                content: JSON.stringify({ text: 'hello bot' }),
+            },
+        };
+    }
+
+    function groupMentionEvent(mentionUnionIds: string[]) {
+        return {
+            app_id: 'cli_app',
+            sender: { sender_id: { union_id: 'on_sender' }, sender_type: 'user' },
+            message: {
+                message_id: 'om_msg3',
+                chat_id: 'oc_group2',
+                chat_type: 'group',
+                message_type: 'text',
+                create_time: '1700000002000',
+                content: '{}',
+                mentions: mentionUnionIds.map((uid, i) => ({
+                    key: `@_user_${i + 1}`,
+                    id: { union_id: uid, open_id: `ou_${uid}` },
+                    name: uid,
+                    mentioned_type: 'user',
+                })),
+            },
+        };
+    }
+
+    it('adapter.parse output passes assertValidInboundMessage', () => {
+        const msg = larkInbound.parse(p2pTextEvent() as never);
+        expect(msg).not.toBeNull();
+        assertValidInboundMessage(msg);
+        expect(msg!.channel).toBe(LARK);
+    });
+
+    it('decide respects botIdentity = union id (mention hit)', () => {
+        const ev = groupMentionEvent(['on_bot']);
+        const msg = larkInbound.parse(ev as never);
+        const d = larkAddressing.decide(msg!, 'on_bot');
+        expect(d.respond).toBe(true);
     });
 });

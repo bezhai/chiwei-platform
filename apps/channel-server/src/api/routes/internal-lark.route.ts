@@ -1,18 +1,5 @@
 import { Hono } from 'hono';
-import { insertEvent } from '@dal/mongo/client';
-import { context } from '@middleware/context';
-import { EventRegistry, registerEventHandlerInstance } from '@lark/events/event-registry';
-import { larkEventHandlers } from '@lark/events/handlers';
-
-// 确保事件处理器已注册
-let initialized = false;
-function ensureHandlersInitialized(): void {
-    if (!initialized) {
-        registerEventHandlerInstance(larkEventHandlers);
-        initialized = true;
-        console.info('Internal lark route: Event handlers initialized');
-    }
-}
+import { dispatchLarkEvent } from '@plugins/lark/webhook/dispatch';
 
 const app = new Hono();
 
@@ -51,28 +38,16 @@ app.post('/api/internal/lark-event', async (c) => {
         return c.json({ error: 'Missing event_type or params' }, 400);
     }
 
-    // 4. MongoDB 审计日志（fire-and-forget）
-    insertEvent(params).catch((err) => {
-        console.error('insert event error:', err);
+    // 4. 统一收口：审计落库、handler 初始化与 context 分发由 dispatchLarkEvent 负责。
+    await dispatchLarkEvent({
+        eventType: event_type,
+        params,
+        botName: botName || undefined,
+        traceId: traceId || undefined,
+        lane,
     });
 
-    // 5. 确保 handler 已初始化
-    ensureHandlersInitialized();
-
-    // 6. 在 bot 上下文中异步执行 handler
-    const contextData = context.createContext(botName || undefined, traceId || undefined, lane);
-    context.run(contextData, async () => {
-        const handler = EventRegistry.getHandlerByEventType(event_type);
-        if (handler) {
-            handler(params).catch((err) => {
-                console.error(`handler ${event_type} failed:`, err);
-            });
-        } else {
-            console.warn(`No handler for event_type: ${event_type}`);
-        }
-    });
-
-    // 7. 立即返回
+    // 5. 立即返回
     return c.json({ ok: true }, 200);
 });
 

@@ -1,13 +1,14 @@
 import { describe, it, expect, mock } from 'bun:test';
 
-// Mock the bot-var module to avoid pulling in real dependencies.
-// bun mock.module 是进程级全局：这个 stub 会替换整个 bot-var 模块，
-// 必须覆盖真实模块的全部导出（getBotAppId + getBotUnionId），否则
-// 同进程其他用例（bot-var.test.ts、handlers 入站链路）import
-// getBotUnionId 时会 "Export named 'getBotUnionId' not found"。
-mock.module('@core/services/bot/bot-var', () => ({
-    getBotAppId: mock(() => 'bot_app_id'),
-    getBotUnionId: mock(() => 'bot_union_id'),
+// message-content.ts 只依赖 multiBotManager（resolveMentions 里查 display_name），
+// 不再 import bot-var。这里只 stub multi-bot-manager，避免被测模块拉起 TypeORM /
+// ormconfig 真实依赖。注意：不要在这里 stub bot-var —— bun mock.module 是进程级
+// 全局，stub 整个 bot-var 会泄漏到同进程的 bot-var.test.ts，让它拿到 stub 而非真
+// 实实现导致 fail。
+mock.module('@core/services/bot/multi-bot-manager', () => ({
+    multiBotManager: {
+        getDisplayNameByAppId: () => null,
+    },
 }));
 
 import { ContentType, MessageContentUtils, MessageContent } from './message-content';
