@@ -15,3 +15,4 @@ export * from './agent-response';
 export * from './bot-chat-presence';
 
 export * from './identity-mapping';
+export * from './lane-routing';
