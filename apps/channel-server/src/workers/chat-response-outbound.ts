@@ -7,7 +7,7 @@
 // @用户名 mention、markdown→PostContent）由能力端口内部做，本函数不碰飞书结构。
 //
 // 入参里的飞书裸 id（larkMessageId/larkChatId/larkRootId）由 worker 用
-// reverseResolveForLark 从全局 id 反查得到；imageRegistryId 是【全局】message_id
+// reverseResolveOutbound 从全局 id 反查得到；imageRegistryId 是【全局】message_id
 // （图片注册表的 key），绝不是飞书裸 id —— 二者刻意分开，避免「用裸 id 查注册表
 // 必 miss、图片被吞」那类回归（见 image-registry-key.ts / 对应回归测试）。
 

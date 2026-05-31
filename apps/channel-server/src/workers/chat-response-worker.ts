@@ -31,7 +31,7 @@ import { initializeLarkClients } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { storeMessage } from '@integrations/memory';
 import { MessageContentUtils } from 'core/models/message-content';
-import { reverseResolveForLark } from '@core/channels/outbound-pipeline';
+import { reverseResolveOutbound } from '@plugins/lark/outbound-reverse-resolve';
 import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
 import { getChannelRegistry } from '@core/registry/channel-registry';
 import '@plugins/index';
@@ -171,9 +171,9 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             // .toChannel 反查回渠道裸 id，构造能力端口要的渠道内 ref。反查不到
             // 明确抛错（落入下方 catch），绝不静默把回复发到错地方。
             const reverseResolver = getIdentityResolver();
-            // channel === 'lark' 边界断言在 reverseResolveForLark 内做：
+            // channel === 'lark' 边界断言在 reverseResolveOutbound 内做：
             // 误把非飞书全局 ID 喂飞书出站会在此炸出来（fail-loud 出站对偶）。
-            const rr = await reverseResolveForLark({
+            const rr = await reverseResolveOutbound({
                 resolver: reverseResolver,
                 messageGlobalId: message_id,
                 chatGlobalId: chat_id,
@@ -221,7 +221,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             // bot 自己的回复消息也全局化（与入站写入点全局化一致）：把这条新
             // 飞书消息 id 正查分配/取全局 internal_message_id 后再落库，保证
             // conversation_messages 的 assistant 行身份列同样是全局 ID。
-            // reverseResolveForLark 已断言 channel==='lark'，这里出站发的是
+            // reverseResolveOutbound 已断言 channel==='lark'，这里出站发的是
             // 飞书 native 富文本，新消息 id 是飞书裸 id，按 (lark, 裸id) 正查
             // 分配全局 internal_message_id（与入站写入点全局化一致）。
             const globalAssistantMessageId = await reverseResolver.resolve(
