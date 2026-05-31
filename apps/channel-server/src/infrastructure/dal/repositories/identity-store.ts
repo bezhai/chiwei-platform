@@ -1,5 +1,6 @@
-// 生产运行时的 IdentityStore 实现：用 TypeORM 读写 identity_user /
-// identity_conversation / identity_message 三张映射表。写路径用真实的
+// 生产运行时的 IdentityStore 实现：用 TypeORM 读写 identity_user_v2 /
+// identity_conversation_v2 / identity_message_v2 三张映射表（_v2 后缀避开 #228
+// 遗留的同名 varchar 身份表，详见 entities/identity-mapping.ts 注释）。写路径用真实的
 // INSERT ... ON CONFLICT (channel, channel_*_id) DO UPDATE ... RETURNING，
 // 把 forward-key 冲突交给 PG 引擎在单条语句内收敛（事务安全、不依赖隔离
 // 级别——DO UPDATE 永远 RETURNING，不需要 CTE/UNION ALL 兜底；之前用 DO
@@ -35,24 +36,24 @@ import {
 const KIND_TABLE = {
     user: {
         entity: IdentityUser,
-        table: 'identity_user',
+        table: 'identity_user_v2',
         internalCol: 'internal_user_id',
         channelIdCol: 'channel_user_id',
-        forwardConstraint: 'uq_identity_user_channel',
+        forwardConstraint: 'uq_identity_user_v2_channel',
     },
     chat: {
         entity: IdentityConversation,
-        table: 'identity_conversation',
+        table: 'identity_conversation_v2',
         internalCol: 'internal_conversation_id',
         channelIdCol: 'channel_conversation_id',
-        forwardConstraint: 'uq_identity_conversation_channel',
+        forwardConstraint: 'uq_identity_conversation_v2_channel',
     },
     message: {
         entity: IdentityMessage,
-        table: 'identity_message',
+        table: 'identity_message_v2',
         internalCol: 'internal_message_id',
         channelIdCol: 'channel_message_id',
-        forwardConstraint: 'uq_identity_message_channel',
+        forwardConstraint: 'uq_identity_message_v2_channel',
     },
 } as const;
 

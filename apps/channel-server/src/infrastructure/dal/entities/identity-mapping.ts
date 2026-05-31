@@ -10,9 +10,14 @@ import { Entity, PrimaryColumn, Column, Unique, CreateDateColumn } from 'typeorm
 // 拆分属于 C2 迁移：要把 250 万 conversation_messages + Qdrant 一起折进去，
 // 在真实数据上做一次，不在 C1 预建空表。C1 只把这张身份映射做对到目标世界
 // （UUIDv7 + conversation 命名）。
+//
+// 表名/约束名带 _v2 后缀：prod 仍有 #228 遗留的 varchar 主键身份表
+// （identity_user / identity_chat / identity_message），与本套 UUIDv7 重设计
+// 同名，且 PG 唯一约束名在 schema 内全局唯一会撞索引名。在 #228 旧表被 C2
+// 迁移清掉之前，本套表与约束统一带 _v2 与之并存、互不干扰。
 
-@Entity('identity_user')
-@Unique('uq_identity_user_channel', ['channel', 'channel_user_id'])
+@Entity('identity_user_v2')
+@Unique('uq_identity_user_v2_channel', ['channel', 'channel_user_id'])
 export class IdentityUser {
     @PrimaryColumn({ type: 'uuid' })
     internal_user_id!: string;
@@ -27,8 +32,8 @@ export class IdentityUser {
     createdAt!: Date;
 }
 
-@Entity('identity_conversation')
-@Unique('uq_identity_conversation_channel', ['channel', 'channel_conversation_id'])
+@Entity('identity_conversation_v2')
+@Unique('uq_identity_conversation_v2_channel', ['channel', 'channel_conversation_id'])
 export class IdentityConversation {
     @PrimaryColumn({ type: 'uuid' })
     internal_conversation_id!: string;
@@ -43,8 +48,8 @@ export class IdentityConversation {
     createdAt!: Date;
 }
 
-@Entity('identity_message')
-@Unique('uq_identity_message_channel', ['channel', 'channel_message_id'])
+@Entity('identity_message_v2')
+@Unique('uq_identity_message_v2_channel', ['channel', 'channel_message_id'])
 export class IdentityMessage {
     @PrimaryColumn({ type: 'uuid' })
     internal_message_id!: string;
