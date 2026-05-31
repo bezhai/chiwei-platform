@@ -23,7 +23,16 @@ mock.module('@core/services/bot/multi-bot-manager', () => ({
     },
 }));
 mock.module('@middleware/context', () => ({
-    context: { getBotName: () => currentBotName },
+    context: {
+        getBotName: () => currentBotName,
+        getLane: () => undefined,
+        createContext: (botName?: string, traceId?: string, lane?: string) => ({
+            botName,
+            traceId: traceId ?? 't',
+            lane,
+        }),
+        run: async (_ctx: unknown, cb: () => Promise<unknown>) => cb(),
+    },
 }));
 
 let getBotAppId: () => string;

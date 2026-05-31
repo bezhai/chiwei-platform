@@ -35,6 +35,12 @@ mock.module('@middleware/context', () => ({
     context: {
         getBotName: () => 'chiwei',
         getLane: () => undefined,
+        createContext: (botName?: string, traceId?: string, lane?: string) => ({
+            botName,
+            traceId: traceId ?? 't',
+            lane,
+        }),
+        run: async (_ctx: unknown, cb: () => Promise<unknown>) => cb(),
     },
 }));
 

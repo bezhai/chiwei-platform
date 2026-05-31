@@ -40,7 +40,8 @@ import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
-import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST } from '@integrations/rabbitmq';
+import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
+import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
 import { setNx } from '@cache/redis-client';
 import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
 import { runInboundContractChain } from '@core/channels/inbound-pipeline';
@@ -181,6 +182,27 @@ export class LarkEventHandlers {
                         `stored/queued, no raw-id fallback): ` +
                         `lark_message_id=${message.messageId} detail=${chain.detail}`,
                 );
+                return;
+            }
+
+            // ---- 处理层泳道分流决策点（lane-routing-redesign §3.1）----
+            // 全局 ID 就绪后、派生 RuleMessage / 入库 / 发 MQ 之前：按统一概念
+            // （channel + 全局 bot）算 lane。非本进程 lane → 投 inbound_lane.{lane}
+            // 给目标 lane 的 channel-server，本地到此为止；本进程 lane → 继续现状链路。
+            // flag 默认 off = 完全旁路（dispatchInboundIfNeeded 内零回归），现状行为不变。
+            const dispatched = await dispatchInboundIfNeeded({
+                currentLane: getLane() ?? 'prod',
+                channel: botConfig.channel,
+                botGlobalId: botName ?? '',
+                eventType: 'im.message.receive_v1',
+                globalMessageId: chain.globalMessageId,
+                traceId: context.getTraceId(),
+                params,
+            });
+            if (dispatched) {
+                // 已投到目标 lane 的 inbound_lane 队列，本进程不再入库/发 MQ
+                // （目标 lane channel-server 消费后走入站后半段）。此处尚未
+                // buildLarkRuleMessage、还没写 lark store entry，无需 clear。
                 return;
             }
 

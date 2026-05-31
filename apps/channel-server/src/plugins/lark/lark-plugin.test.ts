@@ -1,11 +1,28 @@
-import { describe, it, expect } from 'bun:test';
-import { larkPlugin } from './index';
-import { getChannelRegistry } from '@core/registry/channel-registry';
-import { getCommandRegistry } from '@core/registry/command-registry';
+import { describe, it, expect, mock } from 'bun:test';
 
 // B1 行为契约：飞书插件 import 期自注册——把自己注册进 ChannelRegistry 单例，
 // 并把它的 10 条平台指令注册进 CommandRegistry 单例(channel='lark')。
 // 这是「加平台 = 新增 plugins/xxx + 在 plugins/index.ts import 一行」的命门。
+
+mock.module('@aliyun/oss', () => ({
+    getOss: () => ({ getFile: mock(async () => undefined) }),
+}));
+const redisMock = {
+    get: mock(async () => null),
+    setWithExpire: mock(async () => undefined),
+    hgetall: mock(async () => ({})),
+    setNx: mock(async () => 'OK'),
+    exists: mock(async () => 0),
+};
+mock.module('@cache/redis-client', () => redisMock);
+mock.module('infrastructure/cache/redis-client', () => redisMock);
+mock.module('@infrastructure/lane-router', () => ({
+    laneRouter: { createClient: () => ({ post: mock(async () => undefined) }) },
+}));
+
+const { larkPlugin } = await import('./index');
+const { getChannelRegistry } = await import('@core/registry/channel-registry');
+const { getCommandRegistry } = await import('@core/registry/command-registry');
 
 describe('lark 插件自注册', () => {
     it('import 即把 lark 插件注册进 ChannelRegistry 单例', () => {

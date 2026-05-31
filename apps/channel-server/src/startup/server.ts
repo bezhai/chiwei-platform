@@ -8,6 +8,9 @@ import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import internalLarkRoutes from '@api/routes/internal-lark.route';
+import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
+import { isDirectIngressEnabled } from '@plugins/lark/webhook/ingress-gate';
+import { larkIngressBots } from './lark-ingress-bots';
 
 /**
  * 服务器配置
@@ -87,6 +90,17 @@ export class HttpServerManager {
         this.app.route('', metricsApp);
         this.registerHealthCheck();
         this.app.route('', internalLarkRoutes);
+
+        // 飞书直连 webhook 入口（HTTP bot），env gate 默认 off。off 时不注册任何
+        // /webhook/{bot}/* 路由——channel-proxy 仍是入口，行为与现状一致。③ cutover
+        // 在场时设 LARK_DIRECT_INGRESS=true 才接管（同时下线 channel-proxy，防双跑）。
+        if (isDirectIngressEnabled()) {
+            const httpBots = larkIngressBots(multiBotManager.getBotsByInitType('http'));
+            new LarkEventIngress().registerHttpBots(this.app, httpBots);
+            console.info(
+                `[ingress] direct lark webhook ON: registered ${httpBots.length} http bot(s)`,
+            );
+        }
 
         // 启动服务器
         Bun.serve({ port: this.config.port, fetch: this.app.fetch });

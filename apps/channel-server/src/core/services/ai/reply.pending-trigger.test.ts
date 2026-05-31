@@ -25,6 +25,7 @@ mock.module('@integrations/rabbitmq', () => ({
 }));
 mock.module('@cache/redis-client', () => ({
     setNx: setNxMock,
+    exists: mock(async () => 0),
 }));
 mock.module('@repositories/repositories', () => ({
     AgentResponseRepository: { create: agentCreateMock, save: agentSaveMock },
@@ -33,7 +34,16 @@ mock.module('@entities/agent-response', () => ({
     AgentResponse: class {},
 }));
 mock.module('@middleware/context', () => ({
-    context: { getBotName: () => 'bot-q', getLane: () => 'ppe-x' },
+    context: {
+        getBotName: () => 'bot-q',
+        getLane: () => 'ppe-x',
+        createContext: (botName?: string, traceId?: string, lane?: string) => ({
+            botName,
+            traceId: traceId ?? 't',
+            lane,
+        }),
+        run: async (_ctx: unknown, cb: () => Promise<unknown>) => cb(),
+    },
 }));
 
 const { makeTextReply } = await import('./reply');

@@ -4,7 +4,12 @@ import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { botInitialization } from './initializers/bot';
 import { initializeLarkClients } from '@integrations/lark-client';
 import { initializeCrontabs } from '@crontab/index';
-import { rabbitmqClient } from '@integrations/rabbitmq';
+import { rabbitmqClient, getLane } from '@integrations/rabbitmq';
+import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
+import { larkEventHandlers } from '@lark/events/handlers';
+import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
+import { isDirectIngressEnabled } from '@plugins/lark/webhook/ingress-gate';
+import { larkIngressBots } from './lark-ingress-bots';
 
 /**
  * 应用程序配置
@@ -20,6 +25,7 @@ export interface ApplicationConfig {
 export class ApplicationManager {
     private httpServer?: HttpServerManager;
     private config: ApplicationConfig;
+    private larkIngress?: LarkEventIngress;
 
     constructor(config: ApplicationConfig) {
         this.config = config;
@@ -50,6 +56,28 @@ export class ApplicationManager {
         await rabbitmqClient.connect();
         await rabbitmqClient.declareTopology();
         console.info('RabbitMQ connected!');
+
+        // 5.5 lane channel-server 起 inbound_lane.{lane} 消费者（处理层分流接收端）。
+        // 仅 lane 部署（getLane() 非空）才起：消费 prod channel-server 投来的本 lane
+        // 消息，走与现状一致的入站后半段。prod 部署不起（prod 不消费 inbound_lane.*，
+        // §4.2）。与 flag 无关——flag 控制 prod 是否分流，消费端只要是 lane 部署就该
+        // 待命（flag off 时队列为空，消费者空转无害）。
+        const lane = getLane();
+        if (lane) {
+            await startInboundLaneConsumer(lane, (params) =>
+                larkEventHandlers.handleMessageReceive(params as never),
+            );
+            console.info(`[inbound-lane] consumer started for lane=${lane}`);
+        }
+
+        // 5.6 飞书直连 ws 入口（websocket bot），env gate 默认 off（防与 channel-proxy
+        // 双连同一 bot）。off 时不起任何 WSClient，行为与现状一致。
+        if (isDirectIngressEnabled()) {
+            this.larkIngress = new LarkEventIngress();
+            const wsBots = larkIngressBots(multiBotManager.getBotsByInitType('websocket'));
+            await this.larkIngress.startWebSocketBots(wsBots);
+            console.info(`[ingress] direct lark ws ON: started ${wsBots.length} ws bot(s)`);
+        }
 
         // 6. 启动所有定时任务
         initializeCrontabs();
@@ -84,6 +112,8 @@ export class ApplicationManager {
         console.info('Gracefully shutting down...');
 
         try {
+            // 关闭飞书 ws 长连（如启用了直连入口）
+            this.larkIngress?.closeWebSocketClients();
             // 关闭 RabbitMQ 连接
             await rabbitmqClient.close();
             // 关闭数据库连接
