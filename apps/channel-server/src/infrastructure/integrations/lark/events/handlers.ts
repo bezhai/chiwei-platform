@@ -1,3 +1,9 @@
+// HTTP 飞书入站入口经 getChannelRegistry().get(bot.channel) 取插件 parse/decide。
+// 插件靠 import 期自注册，必须确保 @plugins/index 进了 HTTP 服务模块图——否则
+// getChannelRegistry().get('lark') fail-closed、每条入站被丢。worker 各自 import
+// 了它，HTTP 入站链路由本模块负责拉进来（插件自注册靠 import 副作用触发，
+// 这条 side-effect import 不能少）。
+import '@plugins/index';
 import type {
     LarkReceiveMessage,
     LarkCallbackInfo,
@@ -13,8 +19,8 @@ import {
     FetchPhotoDetails,
     UpdateDailyPhotoCard,
 } from 'types/lark';
-import { fetchAndSendPhotoDetail } from '@core/services/callback/fetch-photo-detail';
-import { handleUpdatePhotoCard, handleUpdateDailyPhotoCard } from '@core/services/callback/update-card';
+import { fetchAndSendPhotoDetail } from '@plugins/lark/services/callback/fetch-photo-detail';
+import { handleUpdatePhotoCard, handleUpdateDailyPhotoCard } from '@plugins/lark/services/callback/update-card';
 import { LarkGroupMember, LarkUser } from 'infrastructure/dal/entities';
 import { LarkUserOpenId } from 'infrastructure/dal/entities/lark-user-open-id';
 import { getUserInfo } from 'infrastructure/integrations/lark-client';
@@ -27,6 +33,7 @@ import {
 } from 'infrastructure/dal/repositories/repositories';
 import { getBotAppId } from '@core/services/bot/bot-var';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { getChannelRegistry } from '@core/registry/channel-registry';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
@@ -39,12 +46,13 @@ import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
 import { runInboundContractChain } from '@core/channels/inbound-pipeline';
 import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
 import { getBotUnionId } from '@core/services/bot/bot-var';
-import { buildLarkRuleMessage } from 'core/rules/rule-message';
+import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
+import { larkContextStore } from '@plugins/lark/lark-context-store';
 import { setBotIdentityResolver } from 'core/rules/rule';
 
 // runRules 内 NeedRobotMention 谓词的 botIdentity 解析（飞书=robot_union_id）。
 // 飞书侧 RuleMessage.addressedTargetIds 来源与 hasMention(union_id) 同源
-// （见 buildLarkRuleMessage / lark-adapter），口径一致，逐场景行为零变化。
+// （见 buildLarkRuleMessage / plugins/lark 的 inbound），口径一致，逐场景行为零变化。
 // 非飞书消息（QQ 等）无 lark channelContext，按各自 channel 的 addressing
 // 口径——此 resolver 只对 lark 给 robot_union_id，其余给空串（group 不命中、
 // direct 仍直通，与各 channel adapter decide 一致）。
@@ -122,23 +130,33 @@ export class LarkEventHandlers {
             // fail-loud（spec 5b）：契约链任一步失败 → 不写库、不发 MQ、记
             // 可查错误日志，**绝不退回飞书裸 ID 往下走**。
             const botName = context.getBotName();
-            const triple = botName ? multiBotManager.getChannelTriple(botName) : null;
-            if (!triple) {
-                // 装配不出三件套 = bot 配置/加载异常 = fail-loud（不静默吞）。
+            // 按该 bot 的 channel 经 ChannelRegistry 取对应插件（决策 10：每个
+            // bot 用其 channel 对应组件）。bot 配置/未注册插件 = fail-loud，不
+            // 静默吞——getChannelRegistry().get() 对未注册 channel 抛错。
+            const botConfig = botName ? multiBotManager.getBotConfig(botName) : null;
+            let plugin;
+            try {
+                if (!botConfig) {
+                    throw new Error(`bot config not found for "${botName}"`);
+                }
+                plugin = getChannelRegistry().get(botConfig.channel);
+            } catch (resolveErr) {
                 console.error(
-                    `[inbound] no channel triple for bot "${botName}"; ` +
-                        `fail-loud, message dropped (not written/queued): ` +
-                        `lark_message_id=${message.messageId}`,
+                    `[inbound] no channel plugin for bot "${botName}" ` +
+                        `(channel="${botConfig?.channel}"); fail-loud, message ` +
+                        `dropped (not written/queued): ` +
+                        `lark_message_id=${message.messageId} ` +
+                        `detail=${(resolveErr as Error).message}`,
                 );
                 return;
             }
 
             const chain = await runInboundContractChain({
                 params,
-                parse: (raw) => triple.inbound.parse(raw),
-                decide: (m, b) => triple.addressing.decide(m, b),
+                parse: (raw) => plugin.inbound.parse(raw),
+                decide: (m, b) => plugin.addressing.decide(m, b),
                 // 飞书 botIdentity 口径 = robot_union_id，与现状
-                // NeedRobotMention / LarkAddressingPolicy 同源。
+                // NeedRobotMention / plugins/lark addressing 同源。
                 botIdentity: getBotUnionId(),
                 resolver: getIdentityResolver(),
                 logSkip: (reason) =>
@@ -166,9 +184,10 @@ export class LarkEventHandlers {
                 return;
             }
 
-            // 全局 ID 就绪。派生平台无关 RuleMessage（飞书强绑能力经
-            // channelContext 旁挂 Message，lark-only handler 用 requireLarkContext
-            // 取回跑不变内部逻辑）。
+            // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
+            // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage
+            // 把飞书 Message put 进 lark 私有 store（key=全局 internalMessageId），
+            // lark 谓词/handler 按此 key get 取回（B2，#228 的 larkMessage 逃生口已删）。
             const ruleMessage = buildLarkRuleMessage(message, {
                 botName: botName ?? '',
                 internalUserId: chain.globalUserId,
@@ -176,12 +195,16 @@ export class LarkEventHandlers {
                 internalMessageId: chain.globalMessageId,
                 internalRootId: chain.globalRootId,
                 // addressedTargetIds 与 hasMention(union_id) 同源
-                // （lark-adapter 的 addressing_hints[].targetId = union_id）。
+                // （plugins/lark inbound 的 addressing_hints[].targetId = union_id）。
                 addressedTargetIds: chain.inbound.addressing_hints.map(
                     (h) => h.targetId,
                 ),
             });
 
+            // 本条消息处理结束（无论命中哪条退出路径）后，clear lark store entry，
+            // 避免 Map 无限增长（内存泄漏）。finally 覆盖 storeMessage 失败 return、
+            // 抢锁失败 return、publish 成功等所有路径。
+            try {
             // ---- 5b 入站重排（决策一/二/三）：顺序硬钉 ----
             //   resolve(契约链, 已完成) → runRules(规则判定 + 各 utility/native
             //   副作用，persona 主链路**不实际 publish**，只把待发 ChatTrigger
@@ -273,6 +296,10 @@ export class LarkEventHandlers {
                         `message=${chain.globalMessageId}, ` +
                         `lane=${lane || 'prod'}`,
                 );
+            }
+            } finally {
+                // 处理结束清理 lark store entry（无内存泄漏）。
+                larkContextStore.clear(ruleMessage.internalMessageId);
             }
         } catch (error) {
             console.error(

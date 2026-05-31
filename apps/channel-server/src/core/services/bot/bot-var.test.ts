@@ -29,8 +29,16 @@ mock.module('@middleware/context', () => ({
 let getBotAppId: () => string;
 let getBotUnionId: () => string;
 
+// 用绝对文件路径导入被测模块，强制加载真实 bot-var 实现。bun mock.module 是
+// 进程级且按 specifier 注册：同进程其他用例（handlers 入站链路）会
+// mock.module('@core/services/bot/bot-var', stub) 来切断其依赖链，该 stub 会
+// 泄漏到本文件——若用 specifier/相对路径 import，本文件就拿到 stub 而非真实实现。
+// 走绝对文件路径触发真实模块求值，覆盖泄漏的 specifier stub，使本测试对兄弟用例
+// 执行顺序免疫。
+const REAL_BOT_VAR = new URL('./bot-var.ts', import.meta.url).href;
+
 beforeEach(async () => {
-    const mod = await import('./bot-var');
+    const mod = await import(REAL_BOT_VAR);
     getBotAppId = mod.getBotAppId;
     getBotUnionId = mod.getBotUnionId;
 });

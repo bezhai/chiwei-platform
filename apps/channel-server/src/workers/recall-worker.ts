@@ -26,9 +26,17 @@ import {
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { initializeLarkClients } from '@integrations/lark-client';
-import { deleteMessage } from '@lark-client';
 import { context } from '@middleware/context';
+import { getChannelRegistry } from '@core/registry/channel-registry';
+import '@plugins/index';
+import { recallReplies } from './recall-outbound';
 import type { ConsumeMessage } from 'amqplib';
+
+// 撤回走渠道能力端口（B3）：飞书 deleteMessage 收进 plugins/lark 的
+// OutboundCapabilities.recall，worker 不再 import 飞书 SDK。import '@plugins/index'
+// 触发飞书插件自注册。当前 recall 链路只服务飞书；T6 接其他 channel 时按 payload
+// 带的 channel 取对应插件。
+const OUTBOUND_CHANNEL = 'lark';
 
 const MAX_RETRY = 3;
 const RETRY_DELAYS = [5000, 10000, 15000];
@@ -117,17 +125,12 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
     let failedCount = 0;
 
     await context.run(contextData, async () => {
-        // 逐条撤回
-        for (const reply of agentResponse.replies) {
-            try {
-                await deleteMessage(reply.message_id);
-                recalledCount++;
-                console.info(`[RecallWorker] Recalled message: ${reply.message_id}`);
-            } catch (e) {
-                failedCount++;
-                console.error(`[RecallWorker] Failed to recall message: ${reply.message_id}`, e);
-            }
-        }
+        // 逐条撤回走渠道能力端口（飞书 deleteMessage 在 plugins/lark 内）。
+        // replies[].message_id 现状存的是渠道裸 message id，直接构造渠道内 ref。
+        const capabilities = getChannelRegistry().get(OUTBOUND_CHANNEL).capabilities;
+        const result = await recallReplies(capabilities, agentResponse.replies);
+        recalledCount = result.recalled;
+        failedCount = result.failed;
     });
 
     // 仅当实际撤回了消息才标记为 recalled

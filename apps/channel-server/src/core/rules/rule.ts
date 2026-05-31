@@ -1,13 +1,13 @@
-import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import { UserBlacklistRepository } from '@infrastructure/dal/repositories/repositories';
-import { type RuleMessage, requireLarkContext } from './rule-message';
+import { type RuleMessage } from './rule-message';
 import type { RuleHandlerContext } from './engine';
 
-// 规则/处理器一律消费平台无关 RuleMessage（决策五）。平台无关规则
-// （EqualText/RegexpMatch/OnlyGroup/文本限定/NeedRobotMention 等）直接读
-// RuleMessage 的平台无关视图；飞书强绑规则（WhiteGroupCheck/IsAdmin）经
-// requireLarkContext 取回 LarkRuleContext 跑不变的内部逻辑（缺 context
-// fail-loud，绝不静默）。
+// 规则/处理器一律消费平台无关 RuleMessage（决策五）。本文件只保留**真正平台
+// 无关**的规则（EqualText/RegexpMatch/OnlyGroup/文本限定/NeedRobotMention/
+// NotBlocked 等），直接读 RuleMessage 的平台无关视图。
+//
+// 飞书强绑规则（WhiteGroupCheck/IsAdmin）已搬进 plugins/lark/lark-rules.ts
+// （B2）：它们读飞书专属字段、从 lark 私有 store 取飞书数据，不属于 core。
 
 type Rule = (message: RuleMessage) => boolean;
 
@@ -50,7 +50,7 @@ export interface RuleConfig {
 // botIdentity 由调用方按 channel 取（飞书是 robot_union_id）；为保持 rule 谓词
 // 签名（只吃 message），这里读 RuleMessage 自带的 addressedTargetIds 是否含
 // 该消息所属 bot 的标识。飞书侧 addressedTargetIds 来源与 hasMention(union_id)
-// 同源（见 buildLarkRuleMessage / lark-adapter）。
+// 同源（见 buildLarkRuleMessage / plugins/lark 的 inbound）。
 let botIdentityResolver: (m: RuleMessage) => string = () => '';
 
 // 接线点注入"按当前消息所属 bot 取 botIdentity"的函数（飞书=robot_union_id）。
@@ -92,25 +92,6 @@ export const RegexpMatch =
 export const OnlyP2P: Rule = (message) => message.isDirect;
 
 export const OnlyGroup: Rule = (message) => !message.isDirect;
-
-// ---- 飞书强绑规则（经 requireLarkContext 取回 LarkRuleContext）----
-// 这些 chatRule 必声明 channels:['lark']，故 RuleMessage 必带 lark
-// channelContext；缺则 requireLarkContext fail-loud（绝不静默）。内部判定逻辑
-// 与改造前逐字一致，只是从 message.basicChatInfo / message.senderInfo 改成
-// 从 LarkRuleContext.larkMessage 上取。
-
-export const WhiteGroupCheck =
-    (checkFunc: (chatInfo: LarkBaseChatInfo) => boolean): Rule =>
-    (message) => {
-        const lark = requireLarkContext(message).larkMessage;
-        const chatInfo = lark.basicChatInfo;
-        return chatInfo ? checkFunc(chatInfo) : false;
-    };
-
-export const IsAdmin: Rule = (message) => {
-    const lark = requireLarkContext(message).larkMessage;
-    return lark.senderInfo?.is_admin ?? false;
-};
 
 // 异步规则：检查用户是否未被拉黑。决策四链路顺序 D：NotBlocked 改成查全局
 // user ID（用 IdentityResolver.resolve 后的 internal user id）。黑名单表

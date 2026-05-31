@@ -81,37 +81,6 @@ export interface InboundAdapter {
     parse(raw: any): InboundMessage | null;
 }
 
-// ---- 契约四：出站 adapter ----
-
-// adapter 只实现两个原子操作。退化逻辑不在这里——见下方 deliver()。
-export interface OutboundAdapter {
-    // 在指定会话里新发一条。
-    send(channelChatId: string, content: string): Promise<string>;
-    // 在某线程/某条消息下回复。只在确有回复语义时被 deliver 调用。
-    reply(threadRef: ThreadRef, content: string): Promise<string>;
-}
-
-// 一次出站投递的目标：发去哪个会话(channelChatId)，以及可选的回复锚点。
-// channelChatId 始终必须有——这正是旧 reply(threadRef) 签名缺失、导致
-// 无回复语义 channel "不知道发哪" 而硬编码兜底的根因。
-export interface ReplyTarget {
-    channelChatId: string;
-    threadRef: ThreadRef | null;
-}
-
-// 中心化出站投递：有回复锚点就走 reply，没有就退化为发到 channelChatId。
-// 退化逻辑只此一处，所有 channel 复用，adapter 不再各自实现退化。
-export async function deliver(
-    adapter: OutboundAdapter,
-    target: ReplyTarget,
-    content: string,
-): Promise<string> {
-    if (target.threadRef !== null) {
-        return adapter.reply(target.threadRef, content);
-    }
-    return adapter.send(target.channelChatId, content);
-}
-
 // ---- 契约三：是否需要 bot 响应 ----
 
 // 决策刻意不是裸 boolean：不响应时必须带上 reason，让"为什么不回这条消息"
@@ -127,7 +96,8 @@ export interface AddressingDecision {
 // 每个 channel 的 InboundAdapter 自己决定 targetId 用哪种 ID 口径，调用方就
 // 必须按同口径取 bot 标识。传错 ID 空间会让 @bot 永不命中、bot 静默不响应。
 // 各 channel 的具体 ID 口径写在该 channel 自己的 adapter 内部注释 + 等价性
-// 测试里，契约层不感知（见各 adapter 测试，如 lark-adapter.test.ts）。
+// 测试里，契约层不感知（见各 channel 插件的入站/寻址测试，如
+// plugins/lark/inbound.test.ts、plugins/lark/addressing.test.ts）。
 export interface AddressingPolicy {
     decide(msg: InboundMessage, botIdentity: string): AddressingDecision;
 }
@@ -197,8 +167,8 @@ export function assertValidInboundMessage(m: unknown): asserts m is InboundMessa
 
 // 一个非 null 的 ThreadRef 必须至少带一个非空字符串锚点（self/replyTo/root
 // 任一）。inThread 只是"是否留在同一话题串"的布尔修饰，不是锚点——光有它
-// deliver()→reply() 会把回复目标解析成空字符串再去调 channel reply，违反
-// 设计文档"禁止静默丢弃"。空锚点必须在入站边界炸，而不是无声发到错地方。
+// 出站 reply 会把回复目标解析成空字符串再去调 channel reply，违反设计文档
+//"禁止静默丢弃"。空锚点必须在入站边界炸，而不是无声发到错地方。
 function assertThreadRefHasAnchor(tr: Record<string, unknown>): void {
     const anchorFields = [
         'selfChannelMessageId',

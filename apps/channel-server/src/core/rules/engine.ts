@@ -1,30 +1,31 @@
-import { replyMessage, replyTemplate } from '@lark/basic/message';
-import { CommandHandler, CommandRule } from './admin/command-handler';
-import { deleteBotMessage } from './admin/delete-message';
-import { genHistoryCard } from './general/gen-history';
-import { checkMeme, genMeme } from '@core/services/media/meme/meme';
-import { changeRepeatStatus, repeatMessage } from './group/repeat-message';
-import {
-    EqualText,
-    NeedNotRobotMention,
-    NeedRobotMention,
-    OnlyGroup,
-    RegexpMatch,
-    RuleConfig,
-    TextMessageLimit,
-    WhiteGroupCheck,
-    IsAdmin,
-    NotBlocked,
-} from './rule';
-import { sendPhoto } from '@core/services/media/photo/send-photo';
+import { NeedRobotMention, RuleConfig, NotBlocked } from './rule';
 import { makeTextReply } from 'core/services/ai/reply';
-import { sendBalance } from './admin/balance';
 import { context } from '@middleware/context';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { requireLarkContext, type RuleMessage } from './rule-message';
+import { getCommandRegistry } from '@core/registry/command-registry';
+import { type RuleMessage } from './rule-message';
 import type { ChatRequestPayload } from 'core/services/ai/reply';
 
-const TOOL_BOT_APPLY_URL = process.env.TOOL_BOT_APPLY_URL || '';
+// ---- utility-redirect 提示的平台无关注入点（B2）----
+// persona bot 被 @ 却命中 utility 指令时，给用户发"工具类功能已迁移"引导。
+// 这个引导消息怎么发是平台专属（飞书发飞书卡片回复、QQ 发 QQ 消息），engine
+// 不认识任何平台 SDK：它只调用注入的 responder。默认实现是 no-op（仅记日志），
+// 各 channel 插件在 import 期 setUtilityRedirectResponder 注册自己的真实发法。
+// responder 拿到的是平台无关 RuleMessage —— 飞书插件内部按 internalMessageId
+// 从 lark 私有 store 取回飞书 Message 发回复（core 看不到飞书对象）。
+export type UtilityRedirectResponder = (message: RuleMessage) => void;
+
+let utilityRedirectResponder: UtilityRedirectResponder = (message) => {
+    console.info(
+        `[runRules] utility-redirect hint skipped (no responder registered for ` +
+            `channel=${message.channel}, message=${message.internalMessageId})`,
+    );
+};
+
+// channel 插件 import 期注入"按本平台发 utility-redirect 引导"的实现。
+export function setUtilityRedirectResponder(fn: UtilityRedirectResponder): void {
+    utilityRedirectResponder = fn;
+}
 
 // ---- 决策四：单一终态出口 ----
 // 每一条进入 runRules 的消息，无论走哪条退出路径，都必须收敛到一个唯一、
@@ -193,16 +194,9 @@ export async function runRulesWith(
             if (deps.botRole === 'persona' && NeedRobotMention(message)) {
                 // persona bot 被 @ 但命中 utility 规则 → 引导申请工具 bot。
                 // 这是一个明确"响应了什么"的终态（发了引导消息），不是静默。
-                const applyHint = TOOL_BOT_APPLY_URL
-                    ? `，请点击 ${TOOL_BOT_APPLY_URL} 申请将工具人添加到群聊`
-                    : '';
+                // 怎么发由 channel 插件注入的 responder 决定（engine 不碰平台 SDK）。
                 try {
-                    const lark = requireLarkContext(message).larkMessage;
-                    replyMessage(
-                        lark.messageId,
-                        `工具类功能已迁移至「赤尾工具人」${applyHint}`,
-                        true,
-                    );
+                    utilityRedirectResponder(message);
                 } catch (e) {
                     // 引导消息本身失败也必须收敛到可查终态，不静默吞。
                     return {
@@ -289,8 +283,11 @@ export async function runRulesWith(
 export async function runRules(message: RuleMessage): Promise<RuleTerminalState> {
     const botRole = multiBotManager.getBotConfig(context.getBotName() || '')?.bot_role;
 
+    // 指令来源从「engine 硬编码 chatRules 常量」改成「CommandRegistry.forChannel」：
+    // 该 channel 的平台指令在前（由各插件 import 期注册）+ 核心通用聊天主链路在后。
+    // engine 不再认识任何具体平台指令——归属靠注册，不靠 channels flag。
     const state = await runRulesWith(message, {
-        chatRules,
+        chatRules: getCommandRegistry().forChannel(message.channel),
         botRole,
         notBlocked: NotBlocked,
     });
@@ -314,95 +311,16 @@ function logTerminalState(s: RuleTerminalState): void {
     }
 }
 
-// 定义规则和对应处理逻辑。决策五范围收紧：只有 persona 文本主链路
-// makeTextReply 不声明 channels（默认全平台、真正平台无关）；其余所有 chatRule
-// （凡 import 飞书 SDK/card/实体或读飞书专属字段的）显式声明 channels:['lark']，
-// 内部业务逻辑不重新设计，只按 RuleMessage+LarkRuleContext 接口适配，飞书逐
-// 场景行为零变化。
-const chatRules: RuleConfig[] = [
+// 决策五范围收紧的终态：只有 persona 文本主链路 makeTextReply 是真正平台无关、
+// 默认全平台的核心通用指令。它经 CommandRegistry.registerCore 注册，由 forChannel
+// 拼接在「该 channel 平台指令之后」作为 NeedRobotMention 的 catch-all 兜底。
+// 飞书等平台专属 utility 指令的归属已搬到各自插件（plugins/<channel>），靠注册而
+// 非 channels flag 决定归属——engine 不再认识任何具体平台指令。
+getCommandRegistry().registerCore([
     {
-        rules: [
-            NeedNotRobotMention,
-            OnlyGroup,
-            WhiteGroupCheck((chatInfo) => chatInfo.permission_config?.open_repeat_message ?? false),
-        ],
-        handler: repeatMessage,
-        fallthrough: true,
-        comment: '复读功能',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('余额'), TextMessageLimit, NeedRobotMention, IsAdmin],
-        handler: sendBalance,
-        comment: '发送余额信息',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('帮助'), TextMessageLimit, NeedRobotMention],
-        handler: async (message) => {
-            const lark = requireLarkContext(message).larkMessage;
-            replyTemplate(lark.messageId, 'ctp_AAYrltZoypBP', undefined);
-        },
-        comment: '给用户发送帮助信息',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('撤回'), TextMessageLimit, NeedRobotMention],
-        handler: deleteBotMessage,
-        comment: '撤回消息',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('水群', '水群趋势'), TextMessageLimit, NeedRobotMention],
-        handler: genHistoryCard,
-        comment: '生成水群历史卡片',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('开启复读'), TextMessageLimit, NeedRobotMention, OnlyGroup],
-        handler: changeRepeatStatus(true),
-        category: 'utility',
-        comment: '开启复读',
-        channels: ['lark'],
-    },
-    {
-        rules: [EqualText('关闭复读'), TextMessageLimit, NeedRobotMention, OnlyGroup],
-        handler: changeRepeatStatus(false),
-        category: 'utility',
-        comment: '关闭复读',
-        channels: ['lark'],
-    },
-    {
-        rules: [CommandRule, TextMessageLimit, NeedRobotMention],
-        handler: CommandHandler,
-        comment: '指令处理',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [RegexpMatch('^发图'), TextMessageLimit, NeedRobotMention],
-        handler: sendPhoto,
-        comment: '发送图片',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        rules: [NeedRobotMention],
-        async_rules: [checkMeme],
-        handler: genMeme,
-        comment: 'Meme',
-        category: 'utility',
-        channels: ['lark'],
-    },
-    {
-        // persona 文本主链路：唯一真正平台无关、默认全平台（不声明 channels）。
         rules: [NeedRobotMention],
         handler: makeTextReply,
         comment: '聊天',
         category: 'persona',
     },
-];
+]);

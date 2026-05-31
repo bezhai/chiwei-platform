@@ -97,10 +97,10 @@ mock.module('infrastructure/integrations/memory', () => ({
     storeMessage: storeMessageMock,
 }));
 mock.module('@cache/redis-client', () => ({ setNx: setNxMock }));
-mock.module('@core/services/callback/fetch-photo-detail', () => ({
+mock.module('@plugins/lark/services/callback/fetch-photo-detail', () => ({
     fetchAndSendPhotoDetail: mock(),
 }));
-mock.module('@core/services/callback/update-card', () => ({
+mock.module('@plugins/lark/services/callback/update-card', () => ({
     handleUpdatePhotoCard: mock(),
     handleUpdateDailyPhotoCard: mock(),
 }));
@@ -131,11 +131,23 @@ mock.module('@core/services/bot/bot-var', () => ({
 }));
 mock.module('@core/services/bot/multi-bot-manager', () => ({
     multiBotManager: {
-        getChannelTriple: () => ({
-            inbound: { parse: (r: unknown) => r },
-            addressing: { decide: () => ({ respond: true }) },
-        }),
+        getBotConfig: () => ({ bot_name: 'chiwei', channel: 'lark' }),
     },
+}));
+// handlers 现在按 bot 的 channel 经 ChannelRegistry 取插件；契约链黑盒
+// mock 已固定返回，故插件 inbound/addressing 只需类型满足、不参与判定。
+// 注：bun mock.module 是进程级全局。本 stub 会泄漏到同进程其他测试，故除了
+// 本文件用到的 get，还实现 has/channels，让真实注册表形状（has('lark')）的
+// 断言（handlers.plugin-registration.test.ts）不被本 stub 顶掉而误失败。
+mock.module('@core/registry/channel-registry', () => ({
+    getChannelRegistry: () => ({
+        has: () => true,
+        channels: () => ['lark'],
+        get: () => ({
+            inbound: { parse: (r: unknown) => r },
+            addressing: { decide: () => ({ respond: true, reason: 'x' }) },
+        }),
+    }),
 }));
 mock.module('@lark/basic/group', () => ({
     searchLarkChatInfo: mock(),
@@ -160,7 +172,7 @@ mock.module('@integrations/rabbitmq', () => ({
     CHAT_REQUEST: { queue: 'chat_request', rk: 'chat.request' },
 }));
 // 必改1：契约链对非 @bot 群消息的真实语义是 ok:true, respond:false
-// （真实 LarkAddressingPolicy 给非空 reason → enforceDecision 不抛 →
+// （真实 larkAddressing 给非空 reason → enforceDecision 不抛 →
 // 不短路；见 inbound-pipeline.real-lark.test.ts 用真实组件钉死）。
 // 故这里 chainRespond 可控，S2（非 @bot 群复读）设 false 贴近真实链路，
 // 钉死 handlers.ts 只看 chain.ok（=true）就照常 runRules→storeMessage，
@@ -180,8 +192,11 @@ mock.module('@core/channels/inbound-pipeline', () => ({
 mock.module('@integrations/identity-resolver-runtime', () => ({
     getIdentityResolver: () => ({ resolve: mock(async () => 'x') }),
 }));
-mock.module('core/rules/rule-message', () => ({
-    buildLarkRuleMessage: mock(() => ({ channel: 'lark' })),
+mock.module('@plugins/lark/build-rule-message', () => ({
+    buildLarkRuleMessage: mock(() => ({ channel: 'lark', internalMessageId: 'internal_msg_1' })),
+}));
+mock.module('@plugins/lark/lark-context-store', () => ({
+    larkContextStore: { put: mock(() => {}), get: mock(() => ({})), clear: mock(() => {}) },
 }));
 mock.module('core/rules/rule', () => ({ setBotIdentityResolver: mock() }));
 
@@ -257,7 +272,7 @@ describe('handlers inbound reorder: resolve -> runRules -> storeMessage -> publi
 
     it('S2 non-@bot group (real chain: ok:true respond:false): repeat fires, storeMessage still runs, NO publish', async () => {
         // 必改1：贴近真实契约链对非 @bot 群消息的返回 —— ok:true 但
-        // respond:false（真实 LarkAddressingPolicy 给非空 reason，
+        // respond:false（真实 larkAddressing 给非空 reason，
         // enforceDecision 不抛、不短路；见 inbound-pipeline.real-lark
         // .test.ts）。钉死 handlers.ts 只看 chain.ok（=true）就照常
         // runRules→storeMessage，respond=false 不 gate 飞书 native 链路

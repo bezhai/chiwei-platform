@@ -64,10 +64,10 @@ mock.module('infrastructure/integrations/memory', () => ({
     storeMessage: storeMessageMock,
 }));
 
-mock.module('@core/services/callback/fetch-photo-detail', () => ({
+mock.module('@plugins/lark/services/callback/fetch-photo-detail', () => ({
     fetchAndSendPhotoDetail: mock(),
 }));
-mock.module('@core/services/callback/update-card', () => ({
+mock.module('@plugins/lark/services/callback/update-card', () => ({
     handleUpdatePhotoCard: mock(),
     handleUpdateDailyPhotoCard: mock(),
 }));
@@ -98,11 +98,21 @@ mock.module('@core/services/bot/bot-var', () => ({
 }));
 mock.module('@core/services/bot/multi-bot-manager', () => ({
     multiBotManager: {
-        getChannelTriple: () => ({
-            inbound: { parse: (r: unknown) => r },
-            addressing: { decide: () => ({ respond: true }) },
-        }),
+        getBotConfig: () => ({ bot_name: 'chiwei', channel: 'lark' }),
     },
+}));
+// 注：bun mock.module 是进程级全局。本 stub 会泄漏到同进程其他测试，故除了
+// 本文件用到的 get，还实现 has/channels，让真实注册表形状（has('lark')）的
+// 断言（handlers.plugin-registration.test.ts）不被本 stub 顶掉而误失败。
+mock.module('@core/registry/channel-registry', () => ({
+    getChannelRegistry: () => ({
+        has: () => true,
+        channels: () => ['lark'],
+        get: () => ({
+            inbound: { parse: (r: unknown) => r },
+            addressing: { decide: () => ({ respond: true, reason: 'x' }) },
+        }),
+    }),
 }));
 mock.module('@lark/basic/group', () => ({
     searchLarkChatInfo: mock(),
@@ -139,8 +149,11 @@ mock.module('@core/channels/inbound-pipeline', () => ({
 mock.module('@integrations/identity-resolver-runtime', () => ({
     getIdentityResolver: () => ({ resolve: mock(async () => 'x') }),
 }));
-mock.module('core/rules/rule-message', () => ({
-    buildLarkRuleMessage: mock(() => ({ channel: 'lark' })),
+mock.module('@plugins/lark/build-rule-message', () => ({
+    buildLarkRuleMessage: mock(() => ({ channel: 'lark', internalMessageId: 'internal_msg_1' })),
+}));
+mock.module('@plugins/lark/lark-context-store', () => ({
+    larkContextStore: { put: mock(() => {}), get: mock(() => ({})), clear: mock(() => {}) },
 }));
 mock.module('core/rules/rule', () => ({
     setBotIdentityResolver: mock(),

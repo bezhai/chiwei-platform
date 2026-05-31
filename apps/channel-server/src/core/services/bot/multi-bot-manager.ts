@@ -3,20 +3,12 @@ import { BotConfig } from '@entities/bot-config';
 import { BotPersona } from '@entities/bot-persona';
 import { botConfigRepository } from '@repositories/bot-config-repository';
 import { larkCredentials } from './lark-credentials';
-import {
-    resolveBotChannelTriples,
-    type ChannelTriple,
-} from '../../channels/channel-registry';
 import AppDataSource from 'ormconfig';
 
 export class MultiBotManager {
     private static instance: MultiBotManager;
     private botConfigs: Map<string, BotConfig> = new Map();
     private appIdToDisplayName: Map<string, string> = new Map();
-    // bot_name -> 该 bot channel 的三件套。加载阶段按 bot_config.channel 解析
-    // 并校验后装配（未知 channel 已在 resolveBotChannelTriples fail-closed）。
-    // 收发消息真正用它是 T5 接线范围，T4 只负责加载期装配。
-    private channelTriples: Map<string, ChannelTriple> = new Map();
     private initialized = false;
 
     private constructor() {}
@@ -32,18 +24,12 @@ export class MultiBotManager {
     async initialize(): Promise<void> {
         if (this.initialized) return;
 
-        // 所有启用的机器人都加载进内存；后续由调用方按环境筛选是否启动 http/ws
+        // 所有启用的机器人都加载进内存；后续由调用方按环境筛选是否启动 http/ws。
+        // channel→插件的解析改成消费方按需经 getChannelRegistry().get(bot.channel)
+        // 取（未注册 channel 在取用时 fail-closed），本管理器只持有 bot 配置。
         const allBots = await botConfigRepository.getAllActiveBots();
 
-        // 加载阶段就按 channel 解析+校验+装配三件套。未知 channel 在这里
-        // fail-closed 抛错（整个 initialize 失败），绝不让 bot 半死不活地起来。
-        // 必须在写 botConfigs map 之前做：校验没过就不该有任何 bot 被装载。
-        const triples = resolveBotChannelTriples(
-            allBots.map((b) => ({ bot_name: b.bot_name, channel: b.channel })),
-        );
-
         this.botConfigs.clear();
-        this.channelTriples = triples;
 
         for (const bot of allBots) {
             this.botConfigs.set(bot.bot_name, bot);
@@ -86,12 +72,6 @@ export class MultiBotManager {
     // 获取所有机器人配置
     getAllBotConfigs(): BotConfig[] {
         return Array.from(this.botConfigs.values());
-    }
-
-    // 取某 bot 加载阶段装配好的 channel 三件套。T5 消息收发接线会用到；
-    // T4 阶段只保证它在加载期被正确解析+校验+装配（未知 channel 已 fail-closed）。
-    getChannelTriple(botName: string): ChannelTriple | null {
-        return this.channelTriples.get(botName) || null;
     }
 
     // 获取指定初始化类型的机器人

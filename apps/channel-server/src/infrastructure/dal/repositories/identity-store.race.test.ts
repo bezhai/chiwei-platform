@@ -22,7 +22,7 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test';
 // 修复方向：改成 ON CONFLICT ... DO UPDATE SET <indexed_col>=EXCLUDED.<...>
 // RETURNING <internal_col>。DO UPDATE 即使 SET no-op 也"涉及行"，永远把那行
 // 通过 RETURNING 拉回，不再依赖 CTE UNION ALL 兜底。三张表 (identity_user /
-// identity_chat / identity_message) 同款 SQL 全部统一。
+// identity_conversation / identity_message) 同款 SQL 全部统一。
 //
 // 不连真实 PG —— mock @ormconfig 让我们能捕获实际下发的 SQL 文本，并按需
 // 模拟 query 返回行。
@@ -49,7 +49,7 @@ mock.module('@ormconfig', () => ({
 // 的只在 findInternalId/findChannelRef，本测试只覆盖 upsertMapping 路径）。
 mock.module('@entities/identity-mapping', () => ({
     IdentityUser: class {},
-    IdentityChat: class {},
+    IdentityConversation: class {},
     IdentityMessage: class {},
 }));
 
@@ -65,10 +65,10 @@ const KIND_CASES = [
     },
     {
         kind: 'chat' as const,
-        table: 'identity_chat',
-        internalCol: 'internal_chat_id',
-        channelIdCol: 'channel_chat_id',
-        constraint: 'uq_identity_chat_channel',
+        table: 'identity_conversation',
+        internalCol: 'internal_conversation_id',
+        channelIdCol: 'channel_conversation_id',
+        constraint: 'uq_identity_conversation_channel',
     },
     {
         kind: 'message' as const,

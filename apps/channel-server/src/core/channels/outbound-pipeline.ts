@@ -2,9 +2,9 @@
 // internal_*_id（入站走过契约链翻译过的）。这里 IdentityResolver.toChannel
 // 反查回 channel 裸 ID，再喂回各 channel 的 native 出站路径。
 //
-// 飞书出站沿用现状富文本 sendPost/replyPost（保留，不走 T2 纯文本
-// OutboundAdapter）——避免富文本/图片回归（"飞书非文字/看图聊天零截断"
-// 硬约束）。本函数只负责"全局 ID → 飞书裸 ID"反查 + channel 边界断言。
+// 飞书出站走能力端口 OutboundCapabilities（富文本 sendText/reply）——避免
+// 富文本/图片回归（"飞书非文字/看图聊天零截断"硬约束）。本函数只负责
+//"全局 ID → 飞书裸 ID"反查 + channel 边界断言。
 //
 // channel === 'lark' 边界断言：T6 接 QQ 后，若某条非飞书的全局 ID 误流到
 // 飞书出站路径，必须在喂给飞书发送器**之前**炸出来，绝不把 QQ 的回复发到

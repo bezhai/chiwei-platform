@@ -1,14 +1,11 @@
 import { describe, it, expect } from 'bun:test';
 
-import {
-    type RuleMessage,
-    type LarkRuleContext,
-    requireLarkContext,
-} from './rule-message';
+import type { RuleMessage } from './rule-message';
 
-// RuleMessage 是 InboundMessage 派生的平台无关视图 + 可选 channelContext。
-// 平台无关部分必须支撑 runRules 的平台无关规则；飞书强绑的东西经
-// channelContext 旁挂（LarkRuleContext），缺它时 lark-only handler fail-loud。
+// RuleMessage 是 InboundMessage 派生的**纯平台无关视图**（B2 杀掉 #228 的
+// larkMessage 旁挂之后）。它只承载平台无关字段（channel / 全局 internal_*_id /
+// is_direct / 结构化 mentions / createTime / 文本&媒体工具）。任何飞书原始
+// 对象都不在 RuleMessage 上 —— 飞书数据全部走 lark 插件私有 context store。
 
 function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
     return {
@@ -29,7 +26,6 @@ function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
         isStickerOnly: () => false,
         stickerKey: () => '',
         imageKeys: () => [],
-        channelContext: undefined,
         ...over,
     };
 }
@@ -48,32 +44,14 @@ describe('RuleMessage platform-neutral view', () => {
         expect(m.isTextOnly()).toBe(true);
         expect(m.addressedTargetIds).toEqual(['bot-union-1']);
         expect(m.isDirect).toBe(true);
-        expect(m.channelContext).toBeUndefined();
-    });
-});
-
-describe('requireLarkContext fail-loud', () => {
-    it('returns the LarkRuleContext when present', () => {
-        const fakeLark = { messageId: 'lark-m' } as unknown;
-        const ctx: LarkRuleContext = {
-            channel: 'lark',
-            larkMessage: fakeLark as never,
-        };
-        const m = neutralMsg({ channel: 'lark', channelContext: ctx });
-        expect(requireLarkContext(m)).toBe(ctx);
     });
 
-    it('throws (fail-loud, no silent skip) when a lark-only handler runs without channelContext', () => {
-        const m = neutralMsg({ channel: 'lark', channelContext: undefined });
-        expect(() => requireLarkContext(m)).toThrow(/lark/i);
-    });
-
-    it('throws when channelContext is for a different channel', () => {
-        const ctx = {
-            channel: 'qq',
-            larkMessage: {} as never,
-        } as unknown as LarkRuleContext;
-        const m = neutralMsg({ channel: 'lark', channelContext: ctx });
-        expect(() => requireLarkContext(m)).toThrow();
+    it('has no lark side-channel field (no channelContext / larkMessage escape hatch)', () => {
+        const m = neutralMsg();
+        // 灵魂检查：core 的 RuleMessage 类型上根本没有取回飞书对象的逃生口。
+        expect('channelContext' in m).toBe(false);
+        // RuleMessage 与 Record<string, unknown> 无足够结构重叠，按 TS 提示经
+        // unknown 中转再断言成索引字典，用于运行期确认渠道私有逃生口不存在。
+        expect((m as unknown as Record<string, unknown>).larkMessage).toBeUndefined();
     });
 });

@@ -6,7 +6,7 @@ export class BotConfig {
     bot_name!: string; // 机器人名称，用作唯一标识
 
     // 接入渠道，不是写死枚举（"lark" / "qq" / 以后任意）。bot 加载链路按它分发
-    // 到对应 channel 的 InboundAdapter / OutboundAdapter / AddressingPolicy 三件套。
+    // 到对应 channel 的 InboundAdapter / OutboundCapabilities / AddressingPolicy。
     @Column({ type: 'varchar', length: 20, default: 'lark' })
     channel!: string;
 
