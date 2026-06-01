@@ -13,13 +13,12 @@ import type {
 import { EventHandler } from './event-registry';
 import { runRules } from 'core/rules/engine';
 import { MessageTransferer } from './factory';
-import {
-    UpdatePhotoCard,
-    FetchPhotoDetails,
-    UpdateDailyPhotoCard,
-} from 'types/lark';
+import { UpdatePhotoCard, FetchPhotoDetails, UpdateDailyPhotoCard } from 'types/lark';
 import { fetchAndSendPhotoDetail } from '@plugins/lark/services/callback/fetch-photo-detail';
-import { handleUpdatePhotoCard, handleUpdateDailyPhotoCard } from '@plugins/lark/services/callback/update-card';
+import {
+    handleUpdatePhotoCard,
+    handleUpdateDailyPhotoCard,
+} from '@plugins/lark/services/callback/update-card';
 import { LarkGroupMember, LarkUser } from 'infrastructure/dal/entities';
 import { LarkUserOpenId } from 'infrastructure/dal/entities/lark-user-open-id';
 import { getUserInfo } from 'infrastructure/integrations/lark-client';
@@ -52,6 +51,7 @@ import {
     ensureLarkCommonConversation,
     prepareLarkInboundProjection,
     storeLarkInboundMessage,
+    withLarkInboundProjectionLock,
 } from '@plugins/lark/common-projector';
 
 async function upsertCommonBotPresence(
@@ -114,18 +114,20 @@ export class LarkEventHandlers {
                 const toolClient = laneRouter.createClient('tool-service');
                 const botName = context.getBotName();
                 for (const imageKey of message.imageKeys()) {
-                    toolClient.post(
-                        '/api/image-pipeline/process',
-                        { message_id: message.messageId, file_key: imageKey },
-                        {
-                            headers: {
-                                Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
-                                'X-App-Name': botName,
+                    toolClient
+                        .post(
+                            '/api/image-pipeline/process',
+                            { message_id: message.messageId, file_key: imageKey },
+                            {
+                                headers: {
+                                    Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
+                                    'X-App-Name': botName,
+                                },
                             },
-                        },
-                    ).catch((err) => {
-                        console.error('Error in upload image:', err);
-                    });
+                        )
+                        .catch((err) => {
+                            console.error('Error in upload image:', err);
+                        });
                 }
             }
 
@@ -178,137 +180,139 @@ export class LarkEventHandlers {
                         `lark_message_id=${message.messageId} reason=${reason}`,
                 ),
             );
-            const projection = await prepareLarkInboundProjection(
-                params,
-                message,
-                inbound,
-            );
-            upsertCommonBotPresence(
-                projection.commonConversationId,
-                context.getBotName(),
-                true,
-            ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
+            // 同一条飞书 om_id 会被同群多个 bot 并发处理。这里在 lark 层按
+            // om_id 串行到 store 完成：第一个 bot 生成并写入 common_id，后续
+            // bot 进入 prepare 时必须读到同一个 common_id，不能再造 bot 维度
+            // 的 orphan common_message。
+            await withLarkInboundProjectionLock(params.message.message_id, async () => {
+                const projection = await prepareLarkInboundProjection(params, message, inbound);
+                upsertCommonBotPresence(
+                    projection.commonConversationId,
+                    context.getBotName(),
+                    true,
+                ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
 
-            // ---- 处理层泳道分流决策点（lane-routing-redesign §3.1）----
-            // 全局 ID 就绪后、派生 RuleMessage / 入库 / 发 MQ 之前：按统一概念
-            // （channel + 全局 bot）算 lane。非本进程 lane → 投 inbound_lane.{lane}
-            // 给目标 lane 的 channel-server，本地到此为止；本进程 lane → 继续现状链路。
-            // flag 默认 off = 完全旁路（dispatchInboundIfNeeded 内零回归），现状行为不变。
-            const dispatched = await dispatchInboundIfNeeded({
-                currentLane: getLane() ?? 'prod',
-                channel: botConfig.channel,
-                botGlobalId: botName ?? '',
-                eventType: 'im.message.receive_v1',
-                globalMessageId: projection.commonMessageId,
-                traceId: context.getTraceId(),
-                params,
-            });
-            if (dispatched) {
-                // 已投到目标 lane 的 inbound_lane 队列，本进程不再入库/发 MQ
-                // （目标 lane channel-server 消费后走入站后半段）。此处尚未
-                // buildLarkRuleMessage、还没写 lark store entry，无需 clear。
-                return;
-            }
-
-            // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
-            // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage
-            // 把飞书 Message put 进 lark 私有 store（key=全局 commonMessageId），
-            // lark 谓词/handler 按此 key get 取回（B2，#228 的 larkMessage 逃生口已删）。
-            const ruleMessage = buildLarkRuleMessage(message, {
-                botName: botName ?? '',
-                commonUserId: projection.commonUserId,
-                commonConversationId: projection.commonConversationId,
-                commonMessageId: projection.commonMessageId,
-                commonRootMessageId: projection.commonRootMessageId,
-                // addressedTargetIds 与 hasMention(union_id) 同源
-                // （plugins/lark inbound 的 addressing_hints[].targetId = union_id）。
-                addressedTargetIds: inbound.addressing_hints.map((h) => h.targetId),
-            });
-
-            // 本条消息处理结束（无论命中哪条退出路径）后，clear lark store entry，
-            // 避免 Map 无限增长（内存泄漏）。finally 覆盖 store 失败 return、
-            // 抢锁失败 return、publish 成功等所有路径。
-            try {
-            // ---- 5b 入站重排（决策一/二/三）：顺序硬钉 ----
-            //   resolve(契约链, 已完成) → runRules(规则判定 + 各 utility/native
-            //   副作用，persona 主链路**不实际 publish**，只把待发 ChatTrigger
-            //   意图登记到 RuleTerminalState.pendingChatTrigger)
-            //   → storeLarkInboundMessage(无条件执行，不看 terminal kind ——
-            //   非 @bot 群消息复读照常入库，飞书逐场景零变化)
-            //   → 若 terminal 带 pending 意图：取去重锁；拿到锁才 publish。
-            //
-            // 为什么 common message 写入必须先于 publish：下游 agent-service
-            // chat_node 按 message_id 回查 common_message，读空会短路
-            // emit "未找到相关消息记录"。先存后发是硬依赖。
-            //
-            // runRules 单一终态出口，不向调用方抛错（决策四），所有退出路径
-            // 收敛成 RuleTerminalState。blocked / no_match / handler_error
-            // 等终态 store 仍无条件执行（与现状一致、行为不变），
-            // 只有 pendingChatTrigger 存在才 publish。
-            const terminal = await runRules(ruleMessage);
-
-            // storeLarkInboundMessage 写 common_message + lark_message。无条件执行
-            // （保住非 @bot 群消息照常入库）。
-            // reply_message_id 是飞书"回复某条消息"锚点，与 root 一样由 lark
-            // common projector 收敛为 common_message_id 再落库，避免渠道裸 id
-            // 与 common_message_id 混用导致回复链断开。
-            // 无 parent 时 projection.commonReplyMessageId 为 undefined，保持原"空就空"
-            // 语义，不凭空造 id。
-            //
-            // fail-loud（5b 新增语义）：store 失败 → 记可查错误日志
-            // 并 return，**绝不 publish**（否则下游回查读空走"未找到消息
-            // 记录"短路，等于发了个注定失败的请求）。
-            try {
-                await storeLarkInboundMessage(params, projection, message);
-            } catch (storeErr) {
-                console.error(
-                    `[inbound] storeLarkInboundMessage failed (fail-loud, ` +
-                        `ChatTrigger NOT published): ` +
-                        `message=${projection.commonMessageId} ` +
-                        `chat=${projection.commonConversationId} ` +
-                        `detail=${(storeErr as Error).message}`,
-                );
-                return;
-            }
-
-            // common/lark message 已成功。若 runRules 登记了待发 ChatTrigger 意图
-            // （仅 persona 文本主链路命中时），现在才取去重锁、落 pending
-            // 行、发 MQ。三者紧邻（决策二 / 必改2）：多 bot 同群时同一
-            // common_message_id 只有第一个拿到锁的 bot 落 common_agent_response pending
-            // 行并真正发，其余静默跳过、不写孤儿 pending 行；锁后移避免拿
-            // 锁后 store 失败导致锁空占 60s。
-            if (terminal.pendingChatTrigger) {
-                const { payload, lane, dedupeKey, savePending } =
-                    terminal.pendingChatTrigger;
-                const lock = await setNx(dedupeKey, '1', 60);
-                if (lock === null) {
-                    console.info(
-                        `[inbound] duplicate ChatTrigger skipped (lock held by ` +
-                            `another bot): message=${projection.commonMessageId}`,
-                    );
+                // ---- 处理层泳道分流决策点（lane-routing-redesign §3.1）----
+                // 全局 ID 就绪后、派生 RuleMessage / 入库 / 发 MQ 之前：按统一概念
+                // （channel + 全局 bot）算 lane。非本进程 lane → 投 inbound_lane.{lane}
+                // 给目标 lane 的 channel-server，本地到此为止；本进程 lane → 继续现状链路。
+                // flag 默认 off = 完全旁路（dispatchInboundIfNeeded 内零回归），现状行为不变。
+                const dispatched = await dispatchInboundIfNeeded({
+                    currentLane: getLane() ?? 'prod',
+                    channel: botConfig.channel,
+                    botGlobalId: botName ?? '',
+                    eventType: 'im.message.receive_v1',
+                    globalMessageId: projection.commonMessageId,
+                    traceId: context.getTraceId(),
+                    params,
+                });
+                if (dispatched) {
+                    // 已投到目标 lane 的 inbound_lane 队列，本进程不再入库/发 MQ
+                    // （目标 lane channel-server 消费后走入站后半段）。此处尚未
+                    // buildLarkRuleMessage、还没写 lark store entry，无需 clear。
                     return;
                 }
-                // 抢到锁才落 common_agent_response pending 行（必改2）：未抢锁的
-                // bot 已在上面 return，不会到这里 → 不留永不完成的孤儿行。
-                await savePending();
-                await rabbitmqClient.publish(
-                    CHAT_REQUEST,
-                    payload as unknown as Record<string, unknown>,
-                    undefined,
-                    undefined,
-                    lane,
-                );
-                console.info(
-                    `[inbound] Published chat.request: ` +
-                        `session_id=${payload.session_id}, ` +
-                        `message=${projection.commonMessageId}, ` +
-                        `lane=${lane || 'prod'}`,
-                );
-            }
-            } finally {
-                // 处理结束清理 lark store entry（无内存泄漏）。
-                larkContextStore.clear(ruleMessage);
-            }
+
+                // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
+                // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage
+                // 把飞书 Message put 进 lark 私有 store（key=全局 commonMessageId），
+                // lark 谓词/handler 按此 key get 取回（B2，#228 的 larkMessage 逃生口已删）。
+                const ruleMessage = buildLarkRuleMessage(message, {
+                    botName: botName ?? '',
+                    commonUserId: projection.commonUserId,
+                    commonConversationId: projection.commonConversationId,
+                    commonMessageId: projection.commonMessageId,
+                    commonRootMessageId: projection.commonRootMessageId,
+                    // addressedTargetIds 与 hasMention(union_id) 同源
+                    // （plugins/lark inbound 的 addressing_hints[].targetId = union_id）。
+                    addressedTargetIds: inbound.addressing_hints.map((h) => h.targetId),
+                });
+
+                // 本条消息处理结束（无论命中哪条退出路径）后，clear lark store entry，
+                // 避免 Map 无限增长（内存泄漏）。finally 覆盖 store 失败 return、
+                // 抢锁失败 return、publish 成功等所有路径。
+                try {
+                    // ---- 5b 入站重排（决策一/二/三）：顺序硬钉 ----
+                    //   resolve(契约链, 已完成) → runRules(规则判定 + 各 utility/native
+                    //   副作用，persona 主链路**不实际 publish**，只把待发 ChatTrigger
+                    //   意图登记到 RuleTerminalState.pendingChatTrigger)
+                    //   → storeLarkInboundMessage(无条件执行，不看 terminal kind ——
+                    //   非 @bot 群消息复读照常入库，飞书逐场景零变化)
+                    //   → 若 terminal 带 pending 意图：取去重锁；拿到锁才 publish。
+                    //
+                    // 为什么 common message 写入必须先于 publish：下游 agent-service
+                    // chat_node 按 message_id 回查 common_message，读空会短路
+                    // emit "未找到相关消息记录"。先存后发是硬依赖。
+                    //
+                    // runRules 单一终态出口，不向调用方抛错（决策四），所有退出路径
+                    // 收敛成 RuleTerminalState。blocked / no_match / handler_error
+                    // 等终态 store 仍无条件执行（与现状一致、行为不变），
+                    // 只有 pendingChatTrigger 存在才 publish。
+                    const terminal = await runRules(ruleMessage);
+
+                    // storeLarkInboundMessage 写 common_message + lark_message。无条件执行
+                    // （保住非 @bot 群消息照常入库）。
+                    // reply_message_id 是飞书"回复某条消息"锚点，与 root 一样由 lark
+                    // common projector 收敛为 common_message_id 再落库，避免渠道裸 id
+                    // 与 common_message_id 混用导致回复链断开。
+                    // 无 parent 时 projection.commonReplyMessageId 为 undefined，保持原"空就空"
+                    // 语义，不凭空造 id。
+                    //
+                    // fail-loud（5b 新增语义）：store 失败 → 记可查错误日志
+                    // 并 return，**绝不 publish**（否则下游回查读空走"未找到消息
+                    // 记录"短路，等于发了个注定失败的请求）。
+                    try {
+                        await storeLarkInboundMessage(params, projection, message);
+                    } catch (storeErr) {
+                        console.error(
+                            `[inbound] storeLarkInboundMessage failed (fail-loud, ` +
+                                `ChatTrigger NOT published): ` +
+                                `message=${projection.commonMessageId} ` +
+                                `chat=${projection.commonConversationId} ` +
+                                `detail=${(storeErr as Error).message}`,
+                        );
+                        return;
+                    }
+
+                    // common/lark message 已成功。若 runRules 登记了待发 ChatTrigger 意图
+                    // （仅 persona 文本主链路命中时），现在才取去重锁、落 pending
+                    // 行、发 MQ。三者紧邻（决策二 / 必改2）：多 bot 同群时同一
+                    // common_message_id 只有第一个拿到锁的 bot 落 common_agent_response pending
+                    // 行并真正发，其余静默跳过、不写孤儿 pending 行；锁后移避免拿
+                    // 锁后 store 失败导致锁空占 60s。
+                    if (terminal.pendingChatTrigger) {
+                        const { payload, lane, dedupeKey, savePending } =
+                            terminal.pendingChatTrigger;
+                        const lock = await setNx(dedupeKey, '1', 60);
+                        if (lock === null) {
+                            console.info(
+                                `[inbound] duplicate ChatTrigger skipped (lock held by ` +
+                                    `another bot): message=${projection.commonMessageId}`,
+                            );
+                            return;
+                        }
+                        // 抢到锁才落 common_agent_response pending 行（必改2）：未抢锁的
+                        // bot 已在上面 return，不会到这里 → 不留永不完成的孤儿行。
+                        await savePending();
+                        await rabbitmqClient.publish(
+                            CHAT_REQUEST,
+                            payload as unknown as Record<string, unknown>,
+                            undefined,
+                            undefined,
+                            lane,
+                        );
+                        console.info(
+                            `[inbound] Published chat.request: ` +
+                                `session_id=${payload.session_id}, ` +
+                                `message=${projection.commonMessageId}, ` +
+                                `lane=${lane || 'prod'}`,
+                        );
+                    }
+                } finally {
+                    // 处理结束清理 lark store entry（无内存泄漏）。
+                    larkContextStore.clear(ruleMessage);
+                }
+            });
         } catch (error) {
             console.error(
                 'Error handling message receive:',

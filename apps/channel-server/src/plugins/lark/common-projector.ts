@@ -11,6 +11,7 @@ import { LarkUserOpenId } from '@entities/lark-user-open-id';
 import { context } from '@middleware/context';
 import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
 import { getBotAppId } from '@core/services/bot/bot-var';
+import { evalScript, setNx } from '@cache/redis-client';
 import type { LarkReceiveMessage } from 'types/lark';
 
 interface EnsureCommonUserInput {
@@ -39,6 +40,51 @@ export interface LarkInboundProjection {
     content: ContentItem[];
     contentText: string | undefined;
     scope: string;
+}
+
+const LARK_MESSAGE_PROJECTION_LOCK_TTL_SECONDS = 120;
+const LARK_MESSAGE_PROJECTION_LOCK_TIMEOUT_MS = 60_000;
+const LARK_MESSAGE_PROJECTION_LOCK_RETRY_MS = 25;
+const RELEASE_LOCK_SCRIPT = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+end
+return 0
+`;
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function withLarkInboundProjectionLock<T>(
+    omId: string,
+    task: () => Promise<T>,
+): Promise<T> {
+    const key = `lock:lark:message-projection:${omId}`;
+    const token = uuidv7();
+    const deadline = Date.now() + LARK_MESSAGE_PROJECTION_LOCK_TIMEOUT_MS;
+
+    for (;;) {
+        const acquired = await setNx(key, token, LARK_MESSAGE_PROJECTION_LOCK_TTL_SECONDS);
+        if (acquired === 'OK') break;
+        if (Date.now() >= deadline) {
+            throw new Error(`timeout acquiring lark message projection lock: ${omId}`);
+        }
+        await sleep(LARK_MESSAGE_PROJECTION_LOCK_RETRY_MS);
+    }
+
+    try {
+        return await task();
+    } finally {
+        try {
+            await evalScript(RELEASE_LOCK_SCRIPT, 1, key, token);
+        } catch (err) {
+            console.warn(
+                `[lark common projector] failed to release projection lock ` +
+                    `om_id=${omId}: ${(err as Error).message}`,
+            );
+        }
+    }
 }
 
 function textProjection(content: ContentItem[]): string | undefined {
@@ -198,9 +244,7 @@ export async function prepareLarkInboundProjection(
     const commonConversationId = await ensureLarkCommonConversation({
         chatId: event.message.chat_id,
         scope: inbound.conversation_scope,
-        displayName: message.isP2P()
-            ? message.senderInfo?.name
-            : message.groupChatInfo?.name,
+        displayName: message.isP2P() ? message.senderInfo?.name : message.groupChatInfo?.name,
         avatarUrl: message.isP2P()
             ? message.senderInfo?.avatar_origin
             : message.groupChatInfo?.avatar,
@@ -209,9 +253,7 @@ export async function prepareLarkInboundProjection(
         downloadAllowed: message.allowDownloadResource(),
     });
 
-    const existingCommonMessageId = await findCommonMessageIdByOmId(
-        event.message.message_id,
-    );
+    const existingCommonMessageId = await findCommonMessageIdByOmId(event.message.message_id);
     const commonMessageId = existingCommonMessageId ?? uuidv7();
     const commonRootMessageId =
         (await resolveReferencedMessage(
@@ -248,6 +290,20 @@ export async function storeLarkInboundMessage(
     let inserted = false;
 
     await AppDataSource.transaction(async (manager) => {
+        const existingLarkMessage = await manager.getRepository(LarkMessage).findOne({
+            where: { om_id: event.message.message_id },
+        });
+        if (
+            existingLarkMessage &&
+            existingLarkMessage.common_message_id !== projection.commonMessageId
+        ) {
+            throw new Error(
+                `lark message ${event.message.message_id} already maps to ` +
+                    `${existingLarkMessage.common_message_id}, not ` +
+                    `${projection.commonMessageId}`,
+            );
+        }
+
         const insertResult = await manager
             .createQueryBuilder()
             .insert()
@@ -272,23 +328,25 @@ export async function storeLarkInboundMessage(
             .execute();
         inserted = insertResult.identifiers.length > 0;
 
-        await manager
-            .createQueryBuilder()
-            .insert()
-            .into(LarkMessage)
-            .values({
-                om_id: event.message.message_id,
-                common_message_id: projection.commonMessageId,
-                chat_id: event.message.chat_id,
-                sender_open_id: event.sender.sender_id?.open_id,
-                sender_union_id: event.sender.sender_id?.union_id,
-                root_om_id: event.message.root_id,
-                reply_om_id: event.message.parent_id,
-                message_type: event.message.message_type,
-                raw_event: event as any,
-            })
-            .orIgnore()
-            .execute();
+        if (!existingLarkMessage) {
+            await manager
+                .createQueryBuilder()
+                .insert()
+                .into(LarkMessage)
+                .values({
+                    om_id: event.message.message_id,
+                    common_message_id: projection.commonMessageId,
+                    chat_id: event.message.chat_id,
+                    sender_open_id: event.sender.sender_id?.open_id,
+                    sender_union_id: event.sender.sender_id?.union_id,
+                    root_om_id: event.message.root_id,
+                    reply_om_id: event.message.parent_id,
+                    message_type: event.message.message_type,
+                    raw_event: event as any,
+                })
+                .orIgnore()
+                .execute();
+        }
     });
 
     if (inserted && projection.contentText) {

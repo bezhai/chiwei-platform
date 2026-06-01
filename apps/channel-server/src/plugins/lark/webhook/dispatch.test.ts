@@ -49,6 +49,7 @@ mock.module('@aliyun/oss', () => ({
 mock.module('@cache/redis-client', () => ({
     hgetall: mock(async () => ({})),
     setNx: mock(async () => 'OK'),
+    evalScript: mock(async () => 1),
     exists: mock(async () => 0),
 }));
 mock.module('@infrastructure/lane-router', () => ({
