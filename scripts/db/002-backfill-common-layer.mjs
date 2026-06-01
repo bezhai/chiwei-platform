@@ -158,24 +158,26 @@ function normalizeMessageContent(rawContent) {
     return { content: [], contentText: null };
   }
 
-  const parsed = parseJson(rawContent);
+  const rawText = stripNulString(String(rawContent));
+  const parsed = parseJson(rawText);
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    const content = Array.isArray(parsed.items) ? parsed.items : [{ type: 'text', value: String(rawContent) }];
-    const contentText = typeof parsed.text === 'string' ? parsed.text : String(rawContent);
-    return { content, contentText };
+    const content = Array.isArray(parsed.items) ? parsed.items : [{ type: 'text', value: rawText }];
+    const contentText = typeof parsed.text === 'string' ? parsed.text : rawText;
+    return { content: stripNulDeep(content), contentText: textOrNull(contentText) };
   }
   if (Array.isArray(parsed)) {
-    return { content: parsed, contentText: String(rawContent) };
+    return { content: stripNulDeep(parsed), contentText: textOrNull(rawText) };
   }
 
   return {
-    content: [{ type: 'text', value: String(rawContent) }],
-    contentText: String(rawContent),
+    content: [{ type: 'text', value: rawText }],
+    contentText: textOrNull(rawText),
   };
 }
 
 function scopeFromChatType(chatType) {
-  return chatType === 'p2p' ? 'direct' : (chatType || 'group');
+  const cleanChatType = textOrNull(chatType);
+  return cleanChatType === 'p2p' ? 'direct' : (cleanChatType || 'group');
 }
 
 function buildAttachmentPolicy(row) {
@@ -763,27 +765,27 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
         common_conversation_id: commonConversationId,
         common_user_id: commonUserId,
         sender_display_name: textOrNull(row.username),
-        role: row.role,
+        role: textOrNull(row.role) ?? 'user',
         content: jsonbValue(content),
         content_text: contentText,
         common_root_message_id: rootCommonMessageId,
         common_reply_message_id: replyAssigned?.commonMessageId ?? null,
         scope: scopeFromChatType(row.chat_type),
-        message_type: row.message_type ?? 'text',
+        message_type: textOrNull(row.message_type) ?? 'text',
         bot_name: textOrNull(row.bot_name),
-        response_id: row.response_id ?? null,
+        response_id: textOrNull(row.response_id),
         event_time: row.create_time,
       });
 
       if (assigned.omId) {
         larkRows.push({
-          om_id: assigned.omId,
+          om_id: textOrNull(assigned.omId),
           common_message_id: assigned.commonMessageId,
-          chat_id: row.lark_chat_id,
+          chat_id: textOrNull(row.lark_chat_id),
           sender_union_id: row.role === 'user' ? textOrNull(row.user_id) : null,
-          root_om_id: rootAssigned?.omId ?? null,
-          reply_om_id: replyAssigned?.omId ?? null,
-          message_type: row.message_type ?? 'text',
+          root_om_id: textOrNull(rootAssigned?.omId),
+          reply_om_id: textOrNull(replyAssigned?.omId),
+          message_type: textOrNull(row.message_type) ?? 'text',
           raw_event: jsonbValue(null),
         });
       }
@@ -895,7 +897,7 @@ async function migrateAgentResponses(client, options, chatMaps) {
 
       responseRows.push({
         response_id: uuidFromLegacy(row.id) ?? uuidv7(),
-        session_id: row.session_id,
+        session_id: textOrNull(row.session_id),
         trigger_common_message_id: trigger.commonMessageId,
         common_conversation_id: commonConversationId,
         bot_name: textOrNull(row.bot_name),
@@ -904,9 +906,9 @@ async function migrateAgentResponses(client, options, chatMaps) {
         replies: jsonbValue(replies),
         response_text: textOrNull(row.response_text),
         agent_metadata: jsonbValue(row.agent_metadata ?? {}),
-        safety_status: row.safety_status ?? 'pending',
+        safety_status: textOrNull(row.safety_status) ?? 'pending',
         safety_result: row.safety_result === null || row.safety_result === undefined ? null : jsonbValue(row.safety_result),
-        status: row.status ?? 'pending',
+        status: textOrNull(row.status) ?? 'pending',
         created_at: row.created_at,
         updated_at: row.updated_at,
       });
