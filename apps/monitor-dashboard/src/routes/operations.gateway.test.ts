@@ -37,7 +37,7 @@ mock.module('../paas-client', () => {
       put: record('PUT'),
       del: recordDel,
     },
-    larkClient: {
+    channelClient: {
       get: record('GET'),
       post: record('POST'),
       put: record('PUT'),

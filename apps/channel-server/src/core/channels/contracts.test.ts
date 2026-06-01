@@ -85,11 +85,11 @@ describe('channel 接入契约 — 用假想 HTTP 问答 channel 验证不被 IM
 // ---- 一个 IM 风格的 AddressingPolicy：验证 direct/group 行为且"不响应必有理由" ----
 
 const imPolicy: AddressingPolicy = {
-    decide(msg: InboundMessage, botIdentity: string): AddressingDecision {
+    decide(msg: InboundMessage, botMentionTarget: string): AddressingDecision {
         if (msg.conversation_scope === 'direct') {
             return { respond: true, reason: 'direct message' };
         }
-        const hit = msg.addressing_hints.some((h) => h.targetId === botIdentity);
+        const hit = msg.addressing_hints.some((h) => h.targetId === botMentionTarget);
         return hit
             ? { respond: true, reason: 'bot addressed in group' }
             : { respond: false, reason: 'group message not addressed to this bot' };

@@ -5,7 +5,6 @@ WORKDIR /repo
 # ① 仅复制 package.json + lockfile（变动频率低，保护 install 缓存层）
 COPY package.json bun.lock bunfig.toml ./
 COPY apps/channel-server/package.json ./apps/channel-server/
-COPY apps/channel-proxy/package.json ./apps/channel-proxy/
 COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
 COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/

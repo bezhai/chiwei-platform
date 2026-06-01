@@ -1,7 +1,7 @@
 /**
  * Recall Worker — 独立进程
  *
- * 消费 RabbitMQ recall queue，根据 session_id 查找 agent_responses，
+ * 消费 RabbitMQ recall queue，根据 session_id 查找 common_agent_response，
  * 调用飞书 deleteMessage 撤回消息，更新 safety_status。
  */
 
@@ -17,7 +17,7 @@ LoggerFactory.createLogger({
 });
 
 import AppDataSource from 'ormconfig';
-import { AgentResponse } from '@entities/agent-response';
+import { CommonAgentResponse } from '@entities/common-agent-response';
 import {
     rabbitmqClient,
     RECALL,
@@ -56,7 +56,7 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
 
     console.info(`[RecallWorker] Processing recall: session_id=${session_id}, reason=${reason}`);
 
-    const repo = AppDataSource.getRepository(AgentResponse);
+    const repo = AppDataSource.getRepository(CommonAgentResponse);
     const agentResponse = await repo.findOneBy({ session_id });
 
     // Phase 2: 终态短路，防止重复 Recall 把 recalled 覆盖成 recall_failed。

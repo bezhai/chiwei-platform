@@ -1,6 +1,7 @@
-import { Entity, Column, PrimaryColumn } from 'typeorm';
+import { Entity, Column, Index, PrimaryColumn } from 'typeorm';
 
 @Entity('lark_user_open_id') // 表名
+@Index('idx_lark_user_open_id_common_user_id', ['commonUserId'])
 export class LarkUserOpenId {
     @PrimaryColumn({ name: 'app_id', type: 'varchar' })
     appId!: string; // 应用的唯一标识
@@ -13,4 +14,7 @@ export class LarkUserOpenId {
 
     @Column({ type: 'varchar' })
     name!: string; // 用户名称
+
+    @Column({ name: 'common_user_id', type: 'uuid', nullable: true })
+    commonUserId?: string;
 }

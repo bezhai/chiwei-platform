@@ -1,8 +1,4 @@
-"""agent_responses table queries — chat_request completion + safety status.
-
-Operates on tables: ``agent_responses`` (raw SQL),
-``ConversationMessage`` (proactive completion check joins here).
-"""
+"""common_agent_response queries — chat_request completion + safety status."""
 from __future__ import annotations
 
 import json
@@ -10,7 +6,7 @@ import json
 from sqlalchemy import func, text
 from sqlalchemy.future import select
 
-from app.data.models import ConversationMessage
+from app.data.models import CommonMessage
 from app.runtime.db import auto_tx, current_session
 
 __all__ = [
@@ -26,11 +22,12 @@ async def set_agent_response_bot(
     bot_name: str,
     persona_id: str,
 ) -> None:
-    """Update bot_name and persona_id on agent_responses row."""
+    """Update bot_name and persona_id on common_agent_response row."""
     async with auto_tx():
         await current_session().execute(
             text(
-                "UPDATE agent_responses SET bot_name = :bn, persona_id = :pid "
+                "UPDATE common_agent_response "
+                "SET bot_name = :bn, persona_id = :pid, updated_at = NOW() "
                 "WHERE session_id = :sid"
             ),
             {"bn": bot_name, "pid": persona_id, "sid": session_id},
@@ -50,14 +47,14 @@ async def is_chat_request_completed(
         if is_proactive:
             result = await current_session().execute(
                 select(func.count())
-                .select_from(ConversationMessage)
-                .where(ConversationMessage.response_id == session_id)
-                .where(ConversationMessage.role == "assistant")
+                .select_from(CommonMessage)
+                .where(CommonMessage.response_id == session_id)
+                .where(CommonMessage.role == "assistant")
             )
             return (result.scalar_one() or 0) > 0
 
         result = await current_session().execute(
-            text("SELECT status FROM agent_responses WHERE session_id = :sid"),
+            text("SELECT status FROM common_agent_response WHERE session_id = :sid"),
             {"sid": session_id},
         )
         status = result.scalar_one_or_none()
@@ -65,7 +62,7 @@ async def is_chat_request_completed(
 
 
 async def get_safety_status(session_id: str) -> str | None:
-    """Read ``safety_status`` from ``agent_responses``; None if row missing.
+    """Read ``safety_status`` from ``common_agent_response``; None if row missing.
 
     Phase 2 ``run_post_safety`` 节点入口判 None 时 raise（让 durable
     handler 进 DLQ）—— None 不再被当成 fail-open 的 pending 处理，
@@ -73,7 +70,10 @@ async def get_safety_status(session_id: str) -> str | None:
     """
     async with auto_tx():
         result = await current_session().execute(
-            text("SELECT safety_status FROM agent_responses WHERE session_id = :sid"),
+            text(
+                "SELECT safety_status FROM common_agent_response "
+                "WHERE session_id = :sid"
+            ),
             {"sid": session_id},
         )
         return result.scalar_one_or_none()
@@ -84,11 +84,11 @@ async def set_safety_status(
     status: str,
     result_json: dict | None = None,
 ) -> None:
-    """Update safety_status (and optional result) on agent_responses row."""
+    """Update safety_status (and optional result) on common_agent_response row."""
     async with auto_tx():
         await current_session().execute(
             text(
-                "UPDATE agent_responses "
+                "UPDATE common_agent_response "
                 "SET safety_status = :status, "
                 "    safety_result = CAST(:result AS jsonb), "
                 "    updated_at = NOW() "

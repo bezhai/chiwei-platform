@@ -1,11 +1,29 @@
-import { describe, it, expect } from 'bun:test';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
 import { recallReplies } from './recall-outbound';
 import type { OutboundCapabilities, MessageRef } from '@core/ports/channel-plugin';
 
-// B3：recall-worker 撤回走能力端口。逐条撤回 agent_responses.replies[].message_id
-// （现状是飞书裸 message id），改 capabilities.recall({channelId: 裸id})；撤回循环
-// /计数（recalled/failed）是 worker 编排，留在 worker，端口只做「撤回这一条」。
+const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
+
+mock.module('ormconfig', () => ({
+    default: {
+        getRepository: (entity: { name?: string }) => {
+            if (entity.name !== 'LarkMessage') {
+                throw new Error(`unexpected repository: ${entity.name}`);
+            }
+            return {
+                findOne: mock(
+                    async ({ where }: { where: { common_message_id: string } }) =>
+                        larkMessages.get(where.common_message_id) ?? null,
+                ),
+            };
+        },
+    },
+}));
+
+// recall-worker 撤回走能力端口。逐条读取 common_agent_response.replies[]
+// .common_message_id，先在 lark 插件内部经 lark_message 反查飞书裸 message id，
+// 再调用 capabilities.recall({ channelId: 裸id })。
 
 function makeCap(failFor: Set<string> = new Set()): {
     cap: OutboundCapabilities;
@@ -30,11 +48,18 @@ function makeCap(failFor: Set<string> = new Set()): {
 }
 
 describe('recallReplies', () => {
-    it('逐条调 capabilities.recall(裸 message id)，全成功 → recalled 计数', async () => {
+    beforeEach(() => {
+        larkMessages.clear();
+    });
+
+    it('逐条 common_message_id 反查后调 capabilities.recall(裸 message id)，全成功 → recalled 计数', async () => {
+        larkMessages.set('018f-a', { common_message_id: '018f-a', om_id: 'om_a' });
+        larkMessages.set('018f-b', { common_message_id: '018f-b', om_id: 'om_b' });
+
         const { cap, recalled } = makeCap();
         const result = await recallReplies(cap, [
-            { message_id: 'om_a' },
-            { message_id: 'om_b' },
+            { common_message_id: '018f-a' },
+            { common_message_id: '018f-b' },
         ]);
 
         expect(recalled).toEqual(['om_a', 'om_b']);
@@ -43,11 +68,15 @@ describe('recallReplies', () => {
     });
 
     it('部分失败 → 成功计 recalled、失败计 failed，不中断后续', async () => {
+        larkMessages.set('018f-a', { common_message_id: '018f-a', om_id: 'om_a' });
+        larkMessages.set('018f-b', { common_message_id: '018f-b', om_id: 'om_b' });
+        larkMessages.set('018f-c', { common_message_id: '018f-c', om_id: 'om_c' });
+
         const { cap, recalled } = makeCap(new Set(['om_b']));
         const result = await recallReplies(cap, [
-            { message_id: 'om_a' },
-            { message_id: 'om_b' },
-            { message_id: 'om_c' },
+            { common_message_id: '018f-a' },
+            { common_message_id: '018f-b' },
+            { common_message_id: '018f-c' },
         ]);
 
         expect(recalled).toEqual(['om_a', 'om_c']);
@@ -56,10 +85,13 @@ describe('recallReplies', () => {
     });
 
     it('全失败 → recalled=0、failed=全部（worker 据此标 recall_failed）', async () => {
+        larkMessages.set('018f-a', { common_message_id: '018f-a', om_id: 'om_a' });
+        larkMessages.set('018f-b', { common_message_id: '018f-b', om_id: 'om_b' });
+
         const { cap, recalled } = makeCap(new Set(['om_a', 'om_b']));
         const result = await recallReplies(cap, [
-            { message_id: 'om_a' },
-            { message_id: 'om_b' },
+            { common_message_id: '018f-a' },
+            { common_message_id: '018f-b' },
         ]);
 
         expect(recalled).toEqual([]);
@@ -76,6 +108,17 @@ describe('recallReplies', () => {
                 throw new Error('not used');
             },
         } as OutboundCapabilities;
-        await expect(recallReplies(cap, [{ message_id: 'om_a' }])).rejects.toThrow();
+        await expect(
+            recallReplies(cap, [{ common_message_id: '018f-a' }]),
+        ).rejects.toThrow();
+    });
+
+    it('common_message_id 找不到 lark_message 映射 → 计 failed，不调用 recall', async () => {
+        const { cap, recalled } = makeCap();
+        const result = await recallReplies(cap, [{ common_message_id: '018f-missing' }]);
+
+        expect(recalled).toEqual([]);
+        expect(result.recalled).toBe(0);
+        expect(result.failed).toBe(1);
     });
 });

@@ -9,7 +9,7 @@ import { larkContextStore } from '../lark-context-store';
 // Message 跑不变的内部逻辑；缺 store entry fail-loud（larkContextStore.get），
 // 绝不静默。
 export async function sendBalance(message: RuleMessage) {
-    return sendBalanceImpl(larkContextStore.get(message.internalMessageId));
+    return sendBalanceImpl(larkContextStore.get(message.commonMessageId));
 }
 
 async function sendBalanceImpl(message: Message) {

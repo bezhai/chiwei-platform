@@ -2,8 +2,7 @@
 
 MQ-entry adapter: consumes ``MessageRequest`` frames that the engine
 decoded from ``Source.mq("vectorize")`` bodies, looks up the real
-``ConversationMessage`` row by id, and lifts it into a ``Message`` Data
-via ``Message.from_cm``.
+``common_message`` row by id, and lifts it into a transient ``Message`` Data.
 
 Returns ``None`` when the row is missing — a publisher racing a pg
 deletion should ack-and-skip, never poison the queue. The runtime's
@@ -24,16 +23,16 @@ logger = logging.getLogger(__name__)
 @node
 async def hydrate_message(req: MessageRequest) -> Message | None:
     logger.info("hydrate_message: start message_id=%s", req.message_id)
-    cm = await find_message_by_id(req.message_id)
-    if cm is None:
+    record = await find_message_by_id(req.message_id)
+    if record is None:
         logger.warning(
             "hydrate_message: message_id=%s not found, drop", req.message_id
         )
         return None
     logger.info(
         "hydrate_message: done message_id=%s chat_id=%s bot_name=%s",
-        cm.message_id,
-        cm.chat_id,
-        cm.bot_name,
+        record.message_id,
+        record.chat_id,
+        record.bot_name,
     )
-    return Message.from_cm(cm)
+    return Message.from_record(record)

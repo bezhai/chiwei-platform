@@ -1,14 +1,13 @@
-// 飞书 webhook / ws 入站收口。channel-server 自己接飞书事件（不再靠 channel-proxy
-// HTTP 转发）：按 bot 起飞书 SDK 的 EventDispatcher（HTTP 模式注册 /webhook/{bot}/
+// 飞书 webhook / ws 入站收口。channel-server 自己接飞书事件：按 bot 起飞书
+// SDK 的 EventDispatcher（HTTP 模式注册 /webhook/{bot}/
 // event|card 路由）和 WSClient（长连模式），SDK 解析+验签+解密后回调，回调把事件
 // 投给 dispatchLarkEvent → 本进程入站链路。
 //
 // 数据源用已加载的 BotConfig（凭据经 larkCredentials 从 credentials JSONB 取），
 // 不自己起 pg.Pool 查 bot_config（避免与 multi-bot-manager 重复一套 bot 加载）。
 //
-// ⚠️ 双跑红线：channel-proxy 在 ③ 切流前仍在主动连飞书。本入口由 server.ts 的
-// LARK_DIRECT_INGRESS env gate 包住，默认不挂载——两个进程绝不同时连同一 bot
-// 造成双消费。③ 在场切流时才打开本入口、同步下掉 channel-proxy。
+// HTTP webhook 路由是被动入口，是否有流量由 api-gateway 规则决定。WSClient 是
+// 主动入口，仍由 LARK_DIRECT_INGRESS 控制。
 
 import * as Lark from '@larksuiteoapi/node-sdk';
 import type { Hono } from 'hono';
@@ -17,7 +16,7 @@ import { larkCredentials, type LarkCredentials } from '@core/services/bot/lark-c
 import { adaptHono } from './lark-adapter';
 import { dispatchLarkEvent } from './dispatch';
 
-// 与 channel-proxy 一致的飞书事件清单：同一个 handler 注册到所有类型，回调内按
+// 飞书事件清单：同一个 handler 注册到所有类型，回调内按
 // params.event_type 区分。
 const REGISTERED_EVENT_TYPES = [
     'im.message.receive_v1',
@@ -37,7 +36,7 @@ const REGISTERED_EVENT_TYPES = [
 type SdkAck = Record<string, never>;
 
 // SDK 事件回调 → dispatch。同一 handler 用于所有事件类型，按 params.event_type
-// 区分（与 channel-proxy forwarder 行为一致）。fire-and-forget：SDK 要求快速 ack，
+// 区分。fire-and-forget：SDK 要求快速 ack，
 // 返回 {} 立刻应答，真正处理异步走 dispatch。
 export function createLarkEventHandler(botName: string): (params: unknown) => SdkAck {
     return (params: unknown): SdkAck => {

@@ -7,7 +7,7 @@ import type { Message } from '@core/models/message';
 //
 // 飞书指令需要飞书原始数据（admin 状态、群信息、原始 message_id），但 core 的
 // RuleMessage 不能再携带任何飞书对象。机制：lark adapter 入站时把该消息的飞书
-// Message put 进这个 store（key=全局 internalMessageId）；搬到 plugins/lark 的
+// Message put 进这个 store（key=全局 commonMessageId）；搬到 plugins/lark 的
 // 飞书指令的谓词/handler 通过闭包 store.get(key) 拿飞书数据 —— lark→lark 插件
 // 内部流转，core 永远看不到飞书对象。一次处理结束后 clear，避免内存泄漏。
 

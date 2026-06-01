@@ -7,7 +7,7 @@ graph. Factories on ``Source`` construct specs; the engine interprets
 Surface kept intentionally minimal — every kind here has a real
 adapter wired up in the engine. Business-specific entry points
 (feishu webhooks, ops-manual triggers, ...) live in their own services
-(channel-proxy, /ops endpoints) and feed the graph through ``Source.mq``
+(channel-server webhook ingress, /ops endpoints) and feed the graph through ``Source.mq``
 or a plain ``Source.http`` route.
 """
 

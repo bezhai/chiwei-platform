@@ -9,6 +9,10 @@ import pytest
 
 from app.data.queries import find_bot_names_for_persona, find_cross_chat_messages
 
+USER_ID = "00000000-0000-7000-8000-000000000001"
+CURRENT_CHAT_ID = "00000000-0000-7000-8000-000000000002"
+SKIP_CHAT_ID = "00000000-0000-7000-8000-000000000003"
+
 
 @asynccontextmanager
 async def _fake_auto_tx():
@@ -76,11 +80,11 @@ async def test_find_cross_chat_messages_calls_db():
     patches = _patch_query_session("app.data.queries.messages", mock_session)
     try:
         result = await find_cross_chat_messages(
-            user_id="user_1",
+            user_id=USER_ID,
             bot_names=["chiwei"],
-            exclude_chat_id="chat_current",
+            exclude_chat_id=CURRENT_CHAT_ID,
             since_ms=1000,
-            excluded_chat_ids=["oc_to_skip"],
+            excluded_chat_ids=[SKIP_CHAT_ID],
         )
         assert result == []
         mock_session.execute.assert_called_once()

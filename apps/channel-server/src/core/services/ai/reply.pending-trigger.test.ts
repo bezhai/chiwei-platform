@@ -1,17 +1,17 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
 // 5b 入站重排 + 必改2：makeTextReply 不再自己 publish / 取 setNx 锁 /
-// 落 agent_responses pending 行。它在 runRules 阶段只做纯预备工作：
+// 落 common_agent_response pending 行。它在 runRules 阶段只做纯预备工作：
 // buildChatRequestPayload + 构造 pending 行落库闭包 savePending；通过
 // ctx.registerPendingChatTrigger 登记 payload + lane + dedupeKey +
-// savePending，由 handlers.ts 在 storeMessage 成功、抢到去重锁后才调
+// savePending，由 handlers.ts 在 common/lark 入站消息写入成功、抢到去重锁后才调
 // savePending() 并 publish（多 bot 同群只有抢锁 bot 写 pending 行，未
 // 抢锁 bot 不留孤儿 pending 行）。本测试钉死：
 //
 //   makeTextReply 调用后 —— 不直接 publish、不取 setNx 锁、
 //   **不立即 save pending 行**，而是 registerPendingChatTrigger 被调用
 //   一次，payload 全局 ID 正确，savePending 是个尚未执行的闭包；
-//   仅当显式调用 captured.savePending() 时 agent_responses 行才落库。
+//   仅当显式调用 captured.savePending() 时 common_agent_response 行才落库。
 
 const publishMock = mock(async () => undefined);
 const setNxMock = mock(async () => 'OK');
@@ -28,10 +28,7 @@ mock.module('@cache/redis-client', () => ({
     exists: mock(async () => 0),
 }));
 mock.module('@repositories/repositories', () => ({
-    AgentResponseRepository: { create: agentCreateMock, save: agentSaveMock },
-}));
-mock.module('@entities/agent-response', () => ({
-    AgentResponse: class {},
+    CommonAgentResponseRepository: { create: agentCreateMock, save: agentSaveMock },
 }));
 mock.module('@middleware/context', () => ({
     context: {
@@ -54,10 +51,10 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
     return {
         channel: 'qq',
         botName: 'bot-q',
-        internalUserId: 'GU',
-        internalChatId: 'GC',
-        internalMessageId: 'GM',
-        internalRootId: 'GR',
+        commonUserId: 'GU',
+        commonConversationId: 'GC',
+        commonMessageId: 'GM',
+        commonRootMessageId: 'GR',
         isDirect: true,
         addressedTargetIds: [],
         createTime: 1,
@@ -101,7 +98,7 @@ describe('makeTextReply registers pending ChatTrigger instead of publishing', ()
         expect(captured!.lane).toBe('ppe-x');
         // dedupe lock key 后移到 handlers，但 key 口径必须跟旧实现一致
         expect(captured!.dedupeKey).toBe('make_reply:GM');
-        // 必改2：agent_responses pending 行 save 后移 —— makeTextReply
+        // 必改2：common_agent_response pending 行 save 后移 —— makeTextReply
         // 内**不得**落库；只登记一个尚未执行的闭包。
         expect(agentSaveMock).not.toHaveBeenCalled();
         expect(typeof captured!.savePending).toBe('function');

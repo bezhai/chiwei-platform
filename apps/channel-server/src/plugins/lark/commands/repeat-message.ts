@@ -58,7 +58,7 @@ async function addRepeatMsgAndCheck(chatId: string, msg: string): Promise<boolea
 // lark-only handler：入口适配 RuleMessage → 从 lark 私有 store 取回飞书 Message
 // 跑不变内部逻辑。
 export async function repeatMessage(message: RuleMessage) {
-    return repeatMessageImpl(larkContextStore.get(message.internalMessageId));
+    return repeatMessageImpl(larkContextStore.get(message.commonMessageId));
 }
 
 async function repeatMessageImpl(message: Message) {
@@ -82,7 +82,7 @@ export function changeRepeatStatus(
     open_repeat_message: boolean,
 ): (message: RuleMessage) => Promise<void> {
     return async function (rm: RuleMessage) {
-        const message = larkContextStore.get(rm.internalMessageId);
+        const message = larkContextStore.get(rm.commonMessageId);
         await BaseChatInfoRepository.createQueryBuilder()
             .update()
             .set({

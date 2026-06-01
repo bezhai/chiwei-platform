@@ -8,7 +8,7 @@ import { larkContextStore } from '../../lark-context-store';
 // lark-only handler：入口适配 RuleMessage → 从 lark 私有 store 取回飞书 Message
 // 跑不变内部逻辑。
 export async function sendPhoto(message: RuleMessage) {
-    return sendPhotoImpl(larkContextStore.get(message.internalMessageId));
+    return sendPhotoImpl(larkContextStore.get(message.commonMessageId));
 }
 
 async function sendPhotoImpl(message: Message) {

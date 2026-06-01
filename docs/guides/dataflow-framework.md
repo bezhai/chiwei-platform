@@ -234,7 +234,7 @@ Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
 ```
 
-> **不在这里**：飞书 webhook 在 channel-proxy(TS) 收，转给 channel-server publish 到 MQ；agent-service 这一侧的入口是 `Source.mq("chat_request")` / `Source.mq("vectorize")` / `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` 等（实际队列清单见 `app/infra/rabbitmq.py::ALL_ROUTES`），不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
+> **不在这里**：飞书 webhook 在 channel-server(TS) 收并 publish 到 MQ；agent-service 这一侧的入口是 `Source.mq("chat_request")` / `Source.mq("vectorize")` / `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` 等（实际队列清单见 `app/infra/rabbitmq.py::ALL_ROUTES`），不是直接收 webhook。运维手工触发(rebuild / afterthought)走 `/ops` 命令调内部 endpoint，写法是 `Source.http("/api/internal/rebuild")` —— 没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 
 用法:
 

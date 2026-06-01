@@ -11,8 +11,8 @@ import (
 // TestAppToModel_AllowedLaneClasses tests serialization of AllowedLaneClasses.
 func TestAppToModel_AllowedLaneClasses(t *testing.T) {
 	app := &domain.App{
-		Name:               "channel-proxy-test",
-		ImageRepoName:      "channel-proxy",
+		Name:               "prod-only-service-test",
+		ImageRepoName:      "prod-only-service",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 		CreatedAt:          time.Now(),
@@ -42,12 +42,12 @@ func TestModelToApp_AllowedLaneClasses(t *testing.T) {
 	allowedLaneClassesJSON := `["prod"]`
 
 	model := &AppModel{
-		Name:                  "channel-proxy-test",
-		ImageRepoName:         "channel-proxy",
-		Port:                  3003,
-		AllowedLaneClasses:    allowedLaneClassesJSON,
-		CreatedAt:             time.Now(),
-		UpdatedAt:             time.Now(),
+		Name:               "prod-only-service-test",
+		ImageRepoName:      "prod-only-service",
+		Port:               3003,
+		AllowedLaneClasses: allowedLaneClassesJSON,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
 	}
 
 	app, err := modelToApp(model)
@@ -110,9 +110,9 @@ func TestAppRoundTrip_AllowedLaneClasses(t *testing.T) {
 // remains nil after a full round-trip serialization.
 func TestAppRoundTrip_EmptyAllowedLaneClasses(t *testing.T) {
 	app := &domain.App{
-		Name:           "simple-app",
-		ImageRepoName:  "simple-image",
-		Port:           8080,
+		Name:          "simple-app",
+		ImageRepoName: "simple-image",
+		Port:          8080,
 		// AllowedLaneClasses intentionally nil
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),

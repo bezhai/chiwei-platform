@@ -1,21 +1,19 @@
 // 平台无关的泳道决策能力（lane-routing-redesign §3）。本期只做 bot 维度：
-// 在统一处理层之后、IdentityResolver 把渠道内标识翻成全局标识之后，基于平台无关
-// 的「全局 Bot 概念」算出这条消息该走哪个 lane。
+// 在 lark common projector 收敛出 common id 之后，基于平台无关的「全局 Bot
+// 概念」算出这条消息该走哪个 lane。
 //
 // 决策优先级本期就两档（§3.2）：
 //   bot 维度命中 lane_routing  >  prod（默认）
 //
 // 平台无关红线（§3.2）：resolveLane 的入参只认 channel + 全局 bot 标识，
-// 绝不出现任何飞书原始消息体字段名。飞书插件 + IdentityResolver 负责把渠道内
-// 标识映射成全局标识，决策层只认全局标识。（lane-router.test.ts 里有一条守卫
-// 会扫描本文件源码，确保连注释都不出现那批飞书字段名 —— 故此处刻意不逐字列举。）
+// 绝不出现任何飞书原始消息体字段名。平台插件负责把渠道内标识收敛成 common
+// 口径，决策层只认 common 口径。
 //
-// 与 ORM 解耦：本模块只依赖结构型接口 LaneRoutingStore（参考
-// db-identity-resolver.ts 的 IdentityStore 做法），不 import 任何 TypeORM 实体
-// 或数据源，单测可纯跑。生产运行时由 infrastructure 层提供一个 TypeORM 实现
-// （读 lane_routing 表 route_type=Bot）注入进来。
+// 与 ORM 解耦：本模块只依赖结构型接口 LaneRoutingStore，不 import 任何
+// TypeORM 实体或数据源，单测可纯跑。生产运行时由 infrastructure 层提供一个
+// TypeORM 实现（读 lane_routing 表 route_type=Bot）注入进来。
 //
-// 缓存：沿用现状 channel-proxy LaneResolver 已验证的 30s 内存缓存语义——决策走
+// 缓存：沿用 lane_routing 决策已验证的 30s 内存缓存语义——决策走
 // 本地缓存，不为每条消息打 DB；缓存 key 含 channel + 全局 bot 标识，跨 channel
 // 同名 bot 不串。clearCache 主动失效能力不能丢：L6 admin 改绑定 / `/ops bind`
 // 后要本进程直接调它，把「改绑定后最多 30s 才生效」的窗口压到接近零（§3.3）。
@@ -24,7 +22,7 @@
 // 的语义落点。
 const DEFAULT_LANE = 'prod';
 
-// 决策缓存 TTL，沿用现状 channel-proxy LaneResolver 的 30s（§3.3 已验证）。
+// 决策缓存 TTL，沿用 lane_routing 决策的 30s（§3.3 已验证）。
 const CACHE_TTL_MS = 30_000;
 
 // LaneRouter 对底层存储的全部需求。结构型接口，不绑 ORM。

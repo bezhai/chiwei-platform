@@ -1,12 +1,10 @@
 """Core SQLAlchemy ORM models.
 
-Note: bot_config, bot_chat_presence, agent_responses 等表由 channel-server 管理，
-此处未定义 ORM model，queries.py 中通过 raw SQL 访问。
+Note: bot_config and bot_chat_presence are managed by channel-server.
 
 Tables:
-  - lark_user, lark_group_chat_info, lark_base_chat_info, lark_group_member
+  - common_user, common_conversation, common_message, common_agent_response
   - model_provider, model_mappings
-  - conversation_messages
   - bot_persona
   - akao_schedule
   - life_engine_state, glimpse_state
@@ -24,7 +22,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    Identity,
     Integer,
     String,
     Text,
@@ -40,55 +37,114 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
-# Lark / Feishu
+# Common channel facts
 # ---------------------------------------------------------------------------
 
 
-class LarkUser(Base):
-    __tablename__ = "lark_user"
+class CommonUser(Base):
+    __tablename__ = "common_user"
 
-    id: Mapped[int] = mapped_column(BigInteger, autoincrement=True, unique=True)
-    union_id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String)
-    avatar_origin: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_admin: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-
-
-class LarkGroupChatInfo(Base):
-    __tablename__ = "lark_group_chat_info"
-
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    name: Mapped[str] = mapped_column(String)
-    avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    user_count: Mapped[int] = mapped_column(BigInteger)
-    chat_status: Mapped[str] = mapped_column(String(20))
-    is_leave: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
-    download_has_permission_setting: Mapped[str | None] = mapped_column(
-        String(20), nullable=True
+    common_user_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    channel: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
     )
 
 
-class LarkBaseChatInfo(Base):
-    __tablename__ = "lark_base_chat_info"
+class CommonConversation(Base):
+    __tablename__ = "common_conversation"
 
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    chat_mode: Mapped[str] = mapped_column(String(10))
-    permission_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    gray_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
-
-class LarkGroupMember(Base):
-    __tablename__ = "lark_group_member"
-
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    union_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    is_owner: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_manager: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_leave: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    common_conversation_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    channel: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    member_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    attachment_policy: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CommonMessage(Base):
+    __tablename__ = "common_message"
+
+    common_message_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    channel: Mapped[str] = mapped_column(String(64), nullable=False)
+    common_conversation_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    common_user_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    sender_display_name: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    content_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    common_root_message_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    common_reply_message_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    message_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    response_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True
+    )
+    event_time: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+class CommonAgentResponse(Base):
+    __tablename__ = "common_agent_response"
+
+    response_id: Mapped[PyUUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    trigger_common_message_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    common_conversation_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    persona_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    response_type: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="reply"
+    )
+    replies: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    safety_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending"
+    )
+    safety_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -124,35 +180,6 @@ class ModelMapping(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), onupdate=func.now()
     )
-
-
-# ---------------------------------------------------------------------------
-# Conversation messages
-# ---------------------------------------------------------------------------
-
-
-class ConversationMessage(Base):
-    __tablename__ = "conversation_messages"
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
-    message_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(100))
-    # 发送者显示名冗余列。身份全局化后 user_id 是全局 internal_user_id，
-    # 不再能 JOIN lark_user.union_id 取名，改由写入端把发送者显示名
-    # 一并落库、读取端直接读本列。历史数据迁移前为空 → nullable。
-    username: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    content: Mapped[str] = mapped_column(Text)
-    role: Mapped[str] = mapped_column(String(20))
-    root_message_id: Mapped[str] = mapped_column(String(100))
-    reply_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    chat_id: Mapped[str] = mapped_column(String(100))
-    chat_type: Mapped[str] = mapped_column(String(10))
-    create_time: Mapped[int] = mapped_column(BigInteger)
-    message_type: Mapped[str | None] = mapped_column(
-        String(30), nullable=True, default="text"
-    )
-    bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    response_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 # ---------------------------------------------------------------------------

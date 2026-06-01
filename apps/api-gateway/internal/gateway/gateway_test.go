@@ -196,7 +196,7 @@ func TestColdStartForwardEffectiveLane(t *testing.T) {
 func TestGatewayRedirectTrailingSlash(t *testing.T) {
 	p := &snapProvider{}
 	p.set(route.NewSnapshot(1, []route.Rule{
-		rule("webhook", "/webhook/", "", route.Target{Service: "channel-proxy", Port: 3003}),
+		rule("webhook", "/webhook/", "", route.Target{Service: "channel-server", Lane: "prod", Port: 3000}),
 	}))
 	gw := New(p, 5*time.Second)
 

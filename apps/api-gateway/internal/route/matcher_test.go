@@ -18,7 +18,7 @@ func TestMatchLongestPrefixAndPriority(t *testing.T) {
 		rule("dash-api", "/dashboard/api/", "", 100, true, Target{Service: "monitor-dashboard", Port: 3002}),
 		rule("dash-web", "/dashboard/", "", 100, true, Target{Service: "monitor-dashboard-web", Port: 80}),
 		rule("paas", "/api/paas/", "", 100, true, Target{Service: "paas-engine", Port: 8080}),
-		rule("webhook", "/webhook/", "", 100, true, Target{Service: "channel-proxy", Port: 3003}),
+		rule("webhook", "/webhook/", "", 100, true, Target{Service: "channel-server", Lane: "prod", Port: 3000}),
 	}
 	m := NewMatcher(NewSnapshot(1, rules))
 
@@ -30,7 +30,7 @@ func TestMatchLongestPrefixAndPriority(t *testing.T) {
 		{"/dashboard/api/metrics", "monitor-dashboard", true},
 		{"/dashboard/index.html", "monitor-dashboard-web", true},
 		{"/api/paas/apps/", "paas-engine", true},
-		{"/webhook/bot1/event", "channel-proxy", true},
+		{"/webhook/bot1/event", "channel-server", true},
 		{"/unknown/path", "", false},
 	}
 	for _, tt := range tests {

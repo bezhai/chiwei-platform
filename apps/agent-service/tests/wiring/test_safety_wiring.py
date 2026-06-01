@@ -4,7 +4,7 @@ B1: ``resolve_pre_safety_waiter`` was removed — PreSafetyVerdict is now
 consumed generically by ``emit_and_wait``'s notify() hook, so there is
 no longer a dedicated reply-side wire to assert. We keep coverage on:
   * PreSafetyRequest -> run_pre_safety (in-process)
-  * PostSafetyRequest -> run_post_safety (durable)
+  * PostSafetyRequest -> run_post_safety (in-process transient trigger)
   * Recall -> Sink.mq("recall")
   * agent-service bindings on the two remaining @nodes.
 """
@@ -53,7 +53,7 @@ def test_pre_safety_verdict_has_no_dedicated_wire():
     )
 
 
-def test_post_safety_request_wire_durable():
+def test_post_safety_request_wire_in_process():
     _fresh_import()
 
     from app.domain.safety import PostSafetyRequest
@@ -61,7 +61,7 @@ def test_post_safety_request_wire_durable():
     from app.runtime.wire import WIRING_REGISTRY
 
     wires = [w for w in WIRING_REGISTRY if w.data_type is PostSafetyRequest]
-    assert any(run_post_safety in w.consumers and w.durable is True for w in wires)
+    assert any(run_post_safety in w.consumers and w.durable is False for w in wires)
 
 
 def test_recall_sink_wire():

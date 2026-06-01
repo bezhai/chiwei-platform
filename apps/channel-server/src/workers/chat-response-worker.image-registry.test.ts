@@ -1,49 +1,85 @@
-import { describe, it, expect } from 'bun:test';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
-import { reverseResolveOutbound } from '../plugins/lark/outbound-reverse-resolve';
-import { InMemoryIdentityResolver } from '../core/channels/identity-resolver';
 import { imageRegistryLookupId } from './image-registry-key';
+
+const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
+const larkChats = new Map<string, { chat_id: string; common_conversation_id: string }>();
+
+mock.module('ormconfig', () => ({
+    default: {
+        getRepository: (entity: { name?: string }) => {
+            if (entity.name === 'LarkMessage') {
+                return {
+                    findOne: mock(
+                        async ({ where }: { where: { common_message_id: string } }) =>
+                            larkMessages.get(where.common_message_id) ?? null,
+                    ),
+                };
+            }
+            if (entity.name === 'LarkBaseChatInfo') {
+                return {
+                    findOne: mock(
+                        async ({
+                            where,
+                        }: {
+                            where: { common_conversation_id: string };
+                        }) => larkChats.get(where.common_conversation_id) ?? null,
+                    ),
+                };
+            }
+            throw new Error(`unexpected repository: ${entity.name}`);
+        },
+    },
+}));
+
+const { reverseResolveOutbound } = await import('../plugins/lark/outbound-reverse-resolve');
 
 // 发图被吞回归钉死（trace aae2dd2cacbc711123da9e41d1525e4f）：
 //
-// agent-service 在 app/chat/context.py 用 ImageRegistry(req.message_id) 把
-// generate_image 产出的图片注册到 Redis，key = image_registry:{全局 internal
-// message_id ULID}。chat-response-worker 必须用【同一个全局 id】去查 registry。
+// agent-service 在 app/chat/context.py 用 ImageRegistry(req.message_id) 把 generate_image
+// 产出的图片注册到 Redis，key = image_registry:{common_message_id}。
+// chat-response-worker 必须用同一个 common_message_id 去查 registry。
 //
-// 多渠道改造（PR #228）后，worker 先把 payload.message_id 用
-// reverseResolveOutbound 反查成飞书裸 om_* 再查 registry —— 那个裸键 agent-service
-// 从来没写过，registry 必 miss，resolveImageReferences 原样返回带 N.png 的文本，
-// markdownToPostContent 再静默跳过未解析的 N.png，最终用户什么图都收不到。
+// worker 需要把 payload.message_id 反查成飞书裸 om_* 用于 reply，但 registry 查询
+// 仍然必须使用 common_message_id。用裸 om_* 查 registry 会 miss。
 //
-// 本测试钉死：image registry 的查询 id 是【全局 payload.message_id】，
-// 且它跟 reverseResolveOutbound 反查出来的飞书裸 id 是不同的字符串 —— 用反查后的
-// 裸 id 查 registry 就是这个 bug 本身。
+// 本测试钉死：image registry 的查询 id 是 payload.message_id（common id），
+// 且它跟 reverseResolveOutbound 反查出来的飞书裸 id 是不同的字符串。
 
-describe('image registry 查询 id 契约：必须用全局 message_id，不能用反查后的飞书裸 id', () => {
-    it('registry 查询 id == 全局 payload.message_id（agent-service 注册用的同一个 key）', () => {
-        const globalMsg = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
-        expect(imageRegistryLookupId({ message_id: globalMsg })).toBe(globalMsg);
+describe('image registry 查询 id 契约：必须用 common message_id，不能用反查后的飞书裸 id', () => {
+    beforeEach(() => {
+        larkMessages.clear();
+        larkChats.clear();
     });
 
-    it('全局 message_id 反查出的飞书裸 id 与全局 id 不同 —— 用裸 id 查 registry 必 miss（复现 bug）', async () => {
-        const r = new InMemoryIdentityResolver();
-        const globalMsg = await r.resolve('message', 'lark', 'om_real_msg');
-        const globalChat = await r.resolve('chat', 'lark', 'oc_real_chat');
+    it('registry 查询 id == payload.message_id（agent-service 注册用的同一个 key）', () => {
+        const commonMsg = '018f-common-msg';
+        expect(imageRegistryLookupId({ message_id: commonMsg })).toBe(commonMsg);
+    });
 
-        const rr = await reverseResolveOutbound({
-            resolver: r,
-            messageGlobalId: globalMsg,
-            chatGlobalId: globalChat,
-            rootGlobalId: undefined,
+    it('common message_id 反查出的飞书裸 id 与 common id 不同 —— 用裸 id 查 registry 必 miss', async () => {
+        larkMessages.set('018f-common-msg', {
+            common_message_id: '018f-common-msg',
+            om_id: 'om_real_msg',
+        });
+        larkChats.set('018f-common-chat', {
+            common_conversation_id: '018f-common-chat',
+            chat_id: 'oc_real_chat',
         });
 
-        // 反查回的飞书裸 id 就是 om_real_msg，跟全局 ULID 是两个不同字符串
-        expect(rr.channelMessageId).toBe('om_real_msg');
-        expect(rr.channelMessageId).not.toBe(globalMsg);
+        const rr = await reverseResolveOutbound({
+            commonMessageId: '018f-common-msg',
+            commonConversationId: '018f-common-chat',
+            commonRootMessageId: undefined,
+        });
 
-        // registry 查询必须用全局 id，绝不能用 rr.channelMessageId（bug 路径）
-        const lookupId = imageRegistryLookupId({ message_id: globalMsg });
-        expect(lookupId).toBe(globalMsg);
+        // 反查回的飞书裸 id 就是 om_real_msg，跟 common id 是两个不同字符串
+        expect(rr.channelMessageId).toBe('om_real_msg');
+        expect(rr.channelMessageId).not.toBe('018f-common-msg');
+
+        // registry 查询必须用 common id，绝不能用 rr.channelMessageId（bug 路径）
+        const lookupId = imageRegistryLookupId({ message_id: '018f-common-msg' });
+        expect(lookupId).toBe('018f-common-msg');
         expect(lookupId).not.toBe(rr.channelMessageId);
     });
 });

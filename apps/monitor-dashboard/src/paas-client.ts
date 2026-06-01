@@ -12,14 +12,14 @@ function getConfig(): { baseURL: string; headers: Record<string, string> } {
   };
 }
 
-function getLarkConfig(): { baseURL: string; headers: Record<string, string> } {
-  const larkApi = process.env.DASHBOARD_CHANNEL_API || 'http://channel-proxy:3003';
+function getChannelConfig(): { baseURL: string; headers: Record<string, string> } {
+  const channelApi = process.env.DASHBOARD_CHANNEL_API || 'http://channel-server:3000';
   const paasToken = process.env.DASHBOARD_PAAS_TOKEN;
   if (!paasToken) {
     throw new Error('DASHBOARD_PAAS_TOKEN not configured');
   }
   return {
-    baseURL: larkApi,
+    baseURL: channelApi,
     headers: { 'X-API-Key': paasToken },
   };
 }
@@ -77,4 +77,4 @@ function createClient(configFn: () => { baseURL: string; headers: Record<string,
 }
 
 export const paasClient = createClient(getConfig);
-export const larkClient = createClient(getLarkConfig);
+export const channelClient = createClient(getChannelConfig);

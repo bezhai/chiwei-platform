@@ -245,18 +245,8 @@ async def list_group_members(role: str | None = None) -> str:
     """
     context = get_runtime(AgentContext).context
 
-    from app.data.queries import find_group_members
-
-    rows = await find_group_members(context.chat_id, role)
-
-    if not rows:
-        return "群内无成员" if not role else f"未找到 {role} 角色的成员"
-
-    lines = [f"群成员列表（共{len(rows)}人）：\n"]
-    for member, user in rows:
-        role_tag = (
-            " [群主]" if member.is_owner else " [管理员]" if member.is_manager else ""
-        )
-        lines.append(f"• {user.name}{role_tag}")
-
-    return "\n".join(lines)
+    raise RuntimeError(
+        f"group member listing is not available for common conversation "
+        f"{context.chat_id}; channel-private member tables are not consumed "
+        "by agent-service"
+    )

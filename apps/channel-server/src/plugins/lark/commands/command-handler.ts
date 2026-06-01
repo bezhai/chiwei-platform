@@ -1,4 +1,11 @@
-import { UserGroupBindingRepository, GroupMemberRepository, BaseChatInfoRepository, UserBlacklistRepository, ConversationMessageRepository, AgentResponseRepository } from '@infrastructure/dal/repositories/repositories';
+import {
+    UserGroupBindingRepository,
+    GroupMemberRepository,
+    BaseChatInfoRepository,
+    UserBlacklistRepository,
+    CommonMessageRepository,
+    LarkMessageRepository,
+} from '@infrastructure/dal/repositories/repositories';
 import { Message } from '@core/models/message';
 import { replyMessage } from '@lark/basic/message';
 import type { RuleMessage } from 'core/rules/rule-message';
@@ -275,35 +282,35 @@ const commandRules = [
                 return;
             }
 
-            const convMsg = await ConversationMessageRepository.findOne({
-                where: { message_id: message.parentMessageId },
+            const larkMessage = await LarkMessageRepository.findOne({
+                where: { om_id: message.parentMessageId },
             });
 
-            if (!convMsg) {
+            if (!larkMessage) {
                 replyMessage(message.messageId, '唔...这条消息人家不认识，找不到记录呢 (´•ω•`)', true);
                 return;
             }
 
-            if (convMsg.role !== 'assistant') {
+            const commonMessage = await CommonMessageRepository.findOne({
+                where: { common_message_id: larkMessage.common_message_id },
+            });
+
+            if (!commonMessage) {
+                replyMessage(message.messageId, '唔...这条消息人家不认识，找不到记录呢 (´•ω•`)', true);
+                return;
+            }
+
+            if (commonMessage.role !== 'assistant') {
                 replyMessage(message.messageId, '这条消息不是人家发的哦，要回复人家的消息才能查 session 呀～', true);
                 return;
             }
 
-            if (!convMsg.reply_message_id) {
+            if (!commonMessage.response_id) {
                 replyMessage(message.messageId, '找不到对应的触发消息，session 不见了呢 (；´д｀)', true);
                 return;
             }
 
-            const agentResp = await AgentResponseRepository.findOne({
-                where: { trigger_message_id: convMsg.reply_message_id },
-            });
-
-            if (!agentResp) {
-                replyMessage(message.messageId, '找遍了也没有找到 session 记录，可能已经消失了呢 (´；ω；`)', true);
-                return;
-            }
-
-            replyMessage(message.messageId, `找到啦！session_id 是：\n${agentResp.session_id}`, true);
+            replyMessage(message.messageId, `找到啦！session_id 是：\n${commonMessage.response_id}`, true);
         },
     },
     {
@@ -340,7 +347,7 @@ export const CommandRule = (message: RuleMessage): boolean => {
 };
 
 export const CommandHandler = async (message: RuleMessage): Promise<void> => {
-    const lark = larkContextStore.get(message.internalMessageId);
+    const lark = larkContextStore.get(message.commonMessageId);
     const text = message.clearText();
     for (const r of commandRules) {
         if (matchesCommandKey(text, r.key)) {

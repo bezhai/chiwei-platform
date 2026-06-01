@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, mock } from 'bun:test';
 
 // dispatchLarkEvent 是飞书事件进入本进程入站链路的唯一收口：审计落库 +
-// 在 bot context 内按 event_type 找 handler 异步执行。webhook 入口和（③ 切流前
-// 仍在的）internal HTTP route 都调它，避免两份重复的分发逻辑。
+// 在 bot context 内按 event_type 找 handler 异步执行。webhook 入口调它，
+// 避免两份重复的分发逻辑。
 //
 // 这里只验它的分发契约（找到 handler→调用、找不到→不抛、审计被调用），
 // 不碰真实 mongo / handlers。
@@ -24,6 +24,9 @@ mock.module('@lark/events/event-registry', () => ({
         getHandlerByEventType: (t: string) => registered[t],
     },
     registerEventHandlerInstance: () => {},
+}));
+mock.module('@lark/events/handlers', () => ({
+    larkEventHandlers: {},
 }));
 mock.module('@middleware/context', () => ({
     context: {
@@ -53,7 +56,10 @@ mock.module('@infrastructure/lane-router', () => ({
 }));
 mock.module('@plugins/lark/commands', () => ({ larkCommands: [] }));
 
-const { dispatchLarkEvent } = await import('./dispatch');
+// 其他 webhook 测试会 mock.module('./dispatch') 来隔离 ingress glue。bun 的
+// module mock 是进程级的，这里用绝对 file URL 强制加载真实 dispatch 实现。
+const REAL_DISPATCH = new URL('./dispatch.ts', import.meta.url).href;
+const { dispatchLarkEvent } = await import(REAL_DISPATCH);
 
 describe('dispatchLarkEvent', () => {
     beforeEach(() => {

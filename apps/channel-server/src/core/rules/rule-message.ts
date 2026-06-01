@@ -2,14 +2,14 @@
 //
 // 一条消息进 runRules 前由各 channel adapter 派生成 RuleMessage：平台无关部分
 // （is_direct / 文本工具 / 结构化 mentions / createTime / 媒体类型判断 / 全局
-// internal_*_id / channel）足以支撑 runRules 里真正平台无关的规则（persona 文本
+// common_*_id / channel）足以支撑 runRules 里真正平台无关的规则（persona 文本
 // 主链路 makeTextReply、EqualText、RegexpMatch、OnlyGroup、文本限定等）。
 //
 // 飞书 ORM/SDK 强绑的东西（basicChatInfo / permission_config / senderInfo.is_admin
 // / 原始 message_id / mentionMap 等）**绝不进这个契约**，也**不再旁挂任何飞书
 // 对象**（B2 杀掉了 #228 的 larkMessage 逃生口）。飞书数据全部在 lark 插件内部
 // 经私有 context store（plugins/lark/lark-context-store.ts）流转：lark adapter
-// put、lark 谓词/handler 按全局 internalMessageId get —— core 永远看不到飞书对象。
+// put、lark 谓词/handler 按全局 commonMessageId get —— core 永远看不到飞书对象。
 //
 // 各 channel 的 RuleMessage 由各自插件构造（飞书侧见
 // plugins/lark/build-rule-message.ts，平台无关字段委托 Message 等价方法，飞书
@@ -21,11 +21,11 @@ export interface RuleMessage {
     channel: string;
     botName: string;
 
-    // 全局 internal_*_id（IdentityResolver.resolve 之后的，不是 channel 裸 ID）。
-    internalUserId: string;
-    internalChatId: string;
-    internalMessageId: string;
-    internalRootId: string | undefined;
+    // common_* id，不是 channel 裸 ID。
+    commonUserId: string;
+    commonConversationId: string;
+    commonMessageId: string;
+    commonRootMessageId: string | undefined;
 
     // 派生自 InboundMessage.conversation_scope（飞书 p2p → direct → isDirect）。
     isDirect: boolean;

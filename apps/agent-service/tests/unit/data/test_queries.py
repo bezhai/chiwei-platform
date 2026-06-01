@@ -145,7 +145,7 @@ async def test_get_safety_status_returns_none_when_row_missing():
 
 @pytest.mark.asyncio
 async def test_get_safety_status_uses_correct_query_and_param():
-    """SELECT safety_status FROM agent_responses WHERE session_id = :sid，参数 sid。"""
+    """SELECT safety_status FROM common_agent_response WHERE session_id = :sid."""
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_ScalarResult("passed"))
 
@@ -160,7 +160,7 @@ async def test_get_safety_status_uses_correct_query_and_param():
         sql_obj = args[0]
         sql_text = str(sql_obj)
         assert "SELECT safety_status" in sql_text
-        assert "agent_responses" in sql_text
+        assert "common_agent_response" in sql_text
         assert "WHERE session_id = :sid" in sql_text
         assert args[1] == {"sid": "sess-xyz"}
     finally:

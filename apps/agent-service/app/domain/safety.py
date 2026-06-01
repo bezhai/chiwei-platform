@@ -1,8 +1,8 @@
 """Safety Data — Phase 2 dataflow types.
 
 PreSafetyRequest / PreSafetyVerdict 是请求路径内的瞬时控制面数据（transient）；
-PostSafetyRequest 用 adoption mode adopt 已有的 ``agent_responses`` 表（channel-server
-那边 INSERT 的）；Recall 是出 graph 给 channel-server recall-worker 的事件。
+PostSafetyRequest is a transient graph trigger. Durable state is stored in
+``common_agent_response`` by the data query layer.
 """
 from __future__ import annotations
 
@@ -39,21 +39,14 @@ class PreSafetyVerdict(Data):
 
 
 class PostSafetyRequest(Data):
-    """Post-safety check 请求；adoption mode adopt agent_responses 表。
-
-    Row 由 channel-server 在 chat 完成时已 INSERT；agent-service 仅作为
-    durable wire 的入口 trigger。session_id 是 agent_responses 的
-    unique business key（无 dedup_hash 列），所以业务幂等通过节点入口
-    查 safety_status 短路实现。
-    """
+    """Post-safety check request keyed by response session_id."""
     session_id: Annotated[str, Key]
     trigger_message_id: str
     chat_id: str
     response_text: str
 
     class Meta:
-        existing_table = "agent_responses"
-        dedup_column = "session_id"
+        transient = True
 
 
 class Recall(Data):

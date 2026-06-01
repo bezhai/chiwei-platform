@@ -11,14 +11,14 @@ import type { ChatRequestPayload } from 'core/services/ai/reply';
 // 这个引导消息怎么发是平台专属（飞书发飞书卡片回复、QQ 发 QQ 消息），engine
 // 不认识任何平台 SDK：它只调用注入的 responder。默认实现是 no-op（仅记日志），
 // 各 channel 插件在 import 期 setUtilityRedirectResponder 注册自己的真实发法。
-// responder 拿到的是平台无关 RuleMessage —— 飞书插件内部按 internalMessageId
+// responder 拿到的是平台无关 RuleMessage —— 飞书插件内部按 commonMessageId
 // 从 lark 私有 store 取回飞书 Message 发回复（core 看不到飞书对象）。
 export type UtilityRedirectResponder = (message: RuleMessage) => void;
 
 let utilityRedirectResponder: UtilityRedirectResponder = (message) => {
     console.info(
         `[runRules] utility-redirect hint skipped (no responder registered for ` +
-            `channel=${message.channel}, message=${message.internalMessageId})`,
+            `channel=${message.channel}, message=${message.commonMessageId})`,
     );
 };
 
@@ -41,13 +41,13 @@ export type RuleTerminalKind =
 
 // 待发 ChatTrigger 意图（决策一）。persona 文本主链路 handler 在 runRules
 // 阶段不实际 publish —— 只把"该发什么"登记下来，由接线点 handlers.ts 在
-// storeMessage 成功之后再发 MQ（保证下游 find_message_content 先存后查、
+// common/lark 入站消息写入成功之后再发 MQ（保证下游 find_message_content 先存后查、
 // 不读空走"未找到消息记录"短路）。dedupeKey 是多 bot 去重锁键（全局
-// internal_message_id 口径，跨 channel 唯一），锁的获取也后移到 publish
-// 紧邻处（避免拿锁后 storeMessage 失败导致锁空占 60s）。
+// common_message_id 口径，跨 channel 唯一），锁的获取也后移到 publish
+// 紧邻处（避免拿锁后消息写入失败导致锁空占 60s）。
 //
-// savePending（必改2）：agent_responses pending 行的落库副作用，由
-// makeTextReply 构造为闭包（AgentResponse 仓储逻辑仍只在 reply.ts 一处），
+// savePending：common_agent_response pending 行的落库副作用，由
+// makeTextReply 构造为闭包（仓储逻辑仍只在 reply.ts 一处），
 // 但**不在 runRules 阶段执行**。接线点 handlers.ts 抢到去重锁后才调用它，
 // 与 publish 原子相邻 —— 多 bot 同群处理同一全局 message_id 时只有抢锁的
 // bot 写 pending 行，未抢锁 bot 不留永不完成的孤儿 pending 行（重排前
@@ -72,7 +72,7 @@ export interface RuleHandlerContext {
 export interface RuleTerminalState {
     kind: RuleTerminalKind;
     channel: string;
-    messageId: string; // 全局 internal_message_id
+    messageId: string; // 全局 common_message_id
     chatId: string;
     userId: string;
     matchedRule?: string; // responded/handler_error 时命中的规则 comment
@@ -112,9 +112,9 @@ export async function runRulesWith(
 ): Promise<RuleTerminalState> {
     const base = {
         channel: message.channel,
-        messageId: message.internalMessageId,
-        chatId: message.internalChatId,
-        userId: message.internalUserId,
+        messageId: message.commonMessageId,
+        chatId: message.commonConversationId,
+        userId: message.commonUserId,
     };
     const skipped: string[] = [];
     // fallthrough 路径下"最后一次成功响应"的本地暂存（单一终态：循环结束
@@ -146,7 +146,7 @@ export async function runRulesWith(
         return {
             ...base,
             kind: 'blocked',
-            detail: `user ${message.internalUserId} is blacklisted`,
+            detail: `user ${message.commonUserId} is blacklisted`,
             skipped,
         };
     }

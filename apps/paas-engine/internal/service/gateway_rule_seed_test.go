@@ -7,7 +7,7 @@ import (
 	"github.com/chiwei-platform/paas-engine/internal/domain"
 )
 
-// seedExpectation 是从 routes.yaml 平迁来的 6 条基线规则的预期定义，
+// seedExpectation 是从 routes.yaml 平迁来的基线规则预期定义，
 // 用来逐条核对 BaselineGatewayRules() 没写错（prefix/service/port/strip_prefix/lane）。
 type seedExpectation struct {
 	name        string
@@ -15,16 +15,17 @@ type seedExpectation struct {
 	service     string
 	port        int
 	stripPrefix string
+	lane        string
 }
 
 func expectedBaselineSeeds() []seedExpectation {
 	return []seedExpectation{
-		{"default-paas-engine-api", "/api/paas/", "paas-engine", 8080, ""},
-		{"default-channel-proxy-lark", "/api/lark/", "channel-proxy", 3003, ""},
-		{"default-channel-proxy-webhook", "/webhook/", "channel-proxy", 3003, ""},
-		{"default-agent-service-api", "/api/agent/", "agent-service", 8000, "/api/agent"},
-		{"default-monitor-dashboard-api", "/dashboard/api/", "monitor-dashboard", 3002, ""},
-		{"default-monitor-dashboard-web", "/dashboard/", "monitor-dashboard-web", 80, ""},
+		{"default-paas-engine-api", "/api/paas/", "paas-engine", 8080, "", ""},
+		{"default-channel-server-webhook", "/webhook/", "channel-server", 3000, "", "prod"},
+		{"default-channel-server-lane-bindings", "/api/lane-bindings/", "channel-server", 3000, "", "prod"},
+		{"default-agent-service-api", "/api/agent/", "agent-service", 8000, "/api/agent", ""},
+		{"default-monitor-dashboard-api", "/dashboard/api/", "monitor-dashboard", 3002, "", ""},
+		{"default-monitor-dashboard-web", "/dashboard/", "monitor-dashboard-web", 80, "", ""},
 	}
 }
 
@@ -84,9 +85,8 @@ func TestBaselineGatewayRules_MatchRoutesYaml(t *testing.T) {
 		if tg.Port != want.port {
 			t.Errorf("%s: target.port got %d want %d", want.name, tg.Port, want.port)
 		}
-		// 关键：target.lane 必须留空（透传请求 x-lane），平迁现状。
-		if tg.Lane != "" {
-			t.Errorf("%s: target.lane MUST be empty (透传), got %q", want.name, tg.Lane)
+		if tg.Lane != want.lane {
+			t.Errorf("%s: target.lane got %q want %q", want.name, tg.Lane, want.lane)
 		}
 		if tg.Weight != 100 {
 			t.Errorf("%s: target.weight got %d want 100", want.name, tg.Weight)
@@ -115,8 +115,8 @@ func TestBaselineGatewayRules_PassValidation(t *testing.T) {
 	}
 }
 
-// TestEnsureBaseline_EmptyTableInsertsSix：空表跑一次插入 6 条。
-func TestEnsureBaseline_EmptyTableInsertsSix(t *testing.T) {
+// TestEnsureBaseline_EmptyTableInsertsSeeds：空表跑一次插入全部基线规则。
+func TestEnsureBaseline_EmptyTableInsertsSeeds(t *testing.T) {
 	repo := newStubGatewayRuleRepo()
 	svc := NewGatewayRuleService(repo)
 
@@ -128,8 +128,9 @@ func TestEnsureBaseline_EmptyTableInsertsSix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 6 {
-		t.Fatalf("expected 6 rules after ensure on empty table, got %d", len(rules))
+	expectedCount := len(expectedBaselineSeeds())
+	if len(rules) != expectedCount {
+		t.Fatalf("expected %d rules after ensure on empty table, got %d", expectedCount, len(rules))
 	}
 	for _, r := range rules {
 		if r.Version != 1 {
@@ -138,7 +139,7 @@ func TestEnsureBaseline_EmptyTableInsertsSix(t *testing.T) {
 	}
 }
 
-// TestEnsureBaseline_RerunIdempotent：已有 6 条的表上重跑不报错、不重复、不 bump version。
+// TestEnsureBaseline_RerunIdempotent：已有基线规则的表上重跑不报错、不重复、不 bump version。
 func TestEnsureBaseline_RerunIdempotent(t *testing.T) {
 	repo := newStubGatewayRuleRepo()
 	svc := NewGatewayRuleService(repo)
@@ -155,8 +156,9 @@ func TestEnsureBaseline_RerunIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 6 {
-		t.Fatalf("expected still 6 rules after rerun, got %d", len(rules))
+	expectedCount := len(expectedBaselineSeeds())
+	if len(rules) != expectedCount {
+		t.Fatalf("expected still %d rules after rerun, got %d", expectedCount, len(rules))
 	}
 	for _, r := range rules {
 		// 已存在则不动 -> version 不应被 bump。
@@ -193,10 +195,11 @@ func TestEnsureBaseline_DoesNotOverwriteManualEdit(t *testing.T) {
 		t.Errorf("ensure must not overwrite manual edit: priority got %d want 500", got.Priority)
 	}
 
-	// 其余 5 条仍被补齐。
+	// 其余基线规则仍被补齐。
 	rules, _ := svc.List(ctx)
-	if len(rules) != 6 {
-		t.Fatalf("expected 6 rules total (1 manual + 5 seeded), got %d", len(rules))
+	expectedCount := len(expectedBaselineSeeds())
+	if len(rules) != expectedCount {
+		t.Fatalf("expected %d rules total after seeding around manual edit, got %d", expectedCount, len(rules))
 	}
 }
 
@@ -214,7 +217,8 @@ func TestEnsureBaseline_UsesInsertIfAbsentNotUpsert(t *testing.T) {
 	if repo.upsertCalls != 0 {
 		t.Errorf("ensure must not call Upsert (覆盖语义), got %d calls", repo.upsertCalls)
 	}
-	if repo.insertIfAbsentCalls != 6 {
+	expectedCount := len(expectedBaselineSeeds())
+	if repo.insertIfAbsentCalls != expectedCount {
 		t.Errorf("ensure must call InsertIfAbsent once per seed, got %d", repo.insertIfAbsentCalls)
 	}
 }

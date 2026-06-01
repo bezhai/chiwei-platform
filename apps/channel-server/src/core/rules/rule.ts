@@ -15,7 +15,7 @@ type AsyncRule = (message: RuleMessage) => Promise<boolean>;
 
 // handler 第二参 ctx 可选（决策一）：persona 文本主链路用
 // ctx.registerPendingChatTrigger 把待发 ChatTrigger 意图回传引擎，由接线点
-// 在 storeMessage 成功后再发 MQ。其余 handler 不声明此参即可（向后兼容）。
+// 在 common/lark 入站消息写入成功后再发 MQ。其余 handler 不声明此参即可。
 type Handler = (
     message: RuleMessage,
     ctx?: RuleHandlerContext,
@@ -41,68 +41,72 @@ export interface RuleConfig {
 
 // ---- 平台无关规则（直接读 RuleMessage 平台无关视图）----
 
-// 与现有 NeedRobotMention 逻辑等价：被 @bot（addressedTargetIds 含 botIdentity）
+// 与现有 NeedRobotMention 逻辑等价：被 @bot（addressedTargetIds 含 botMentionTarget）
 // 或私聊（isDirect）。注意：runRules 的前置总闸（AddressingPolicy.decide +
 // enforceDecision）已在接线点 D 前置判定过"要不要回"，这里保留 NeedRobotMention
 // 仅作为 chatRule 内部的 rule 谓词（与改造前同语义），保证飞书逐场景行为零
 // 变化——尤其复读规则用 NeedNotRobotMention，依赖本谓词的取反。
 //
-// botIdentity 由调用方按 channel 取（飞书是 robot_union_id）；为保持 rule 谓词
+// botMentionTarget 由调用方按 channel 取（飞书是 robot_union_id）；为保持 rule 谓词
 // 签名（只吃 message），这里读 RuleMessage 自带的 addressedTargetIds 是否含
 // 该消息所属 bot 的标识。飞书侧 addressedTargetIds 来源与 hasMention(union_id)
 // 同源（见 buildLarkRuleMessage / plugins/lark 的 inbound）。
-let botIdentityResolver: (m: RuleMessage) => string = () => '';
+var botMentionTargetResolver: (m: RuleMessage) => string = () => '';
 
-// 接线点注入"按当前消息所属 bot 取 botIdentity"的函数（飞书=robot_union_id）。
+// 接线点注入"按当前消息所属 bot 取 mention target"的函数（飞书=robot_union_id）。
 // 默认空串：未注入时 group 永不命中、private 仍直通（与改造前 P2P 直通一致）。
-export function setBotIdentityResolver(fn: (m: RuleMessage) => string): void {
-    botIdentityResolver = fn;
+export function setBotMentionTargetResolver(fn: (m: RuleMessage) => string): void {
+    botMentionTargetResolver = fn;
 }
 
-export const NeedRobotMention: Rule = (message) => {
+export function NeedRobotMention(message: RuleMessage): boolean {
     if (message.isDirect) return true;
-    const botIdentity = botIdentityResolver(message);
-    return botIdentity.length > 0 && message.addressedTargetIds.includes(botIdentity);
-};
+    const botMentionTarget = botMentionTargetResolver(message);
+    return botMentionTarget.length > 0 && message.addressedTargetIds.includes(botMentionTarget);
+}
 
-export const NeedNotRobotMention: Rule = (message) => !NeedRobotMention(message);
+export function NeedNotRobotMention(message: RuleMessage): boolean {
+    return !NeedRobotMention(message);
+}
 
-export const TextMessageLimit: Rule = (message) => message.isTextOnly();
+export function TextMessageLimit(message: RuleMessage): boolean {
+    return message.isTextOnly();
+}
 
-export const ContainKeyword =
-    (keyword: string): Rule =>
-    (message) =>
-        message.text().includes(keyword);
+export function ContainKeyword(keyword: string): Rule {
+    return (message) => message.text().includes(keyword);
+}
 
-export const EqualText =
-    (...texts: string[]): Rule =>
-    (message) =>
-        texts.some((text) => message.clearText() === text);
+export function EqualText(...texts: string[]): Rule {
+    return (message) => texts.some((text) => message.clearText() === text);
+}
 
-export const RegexpMatch =
-    (pattern: string): Rule =>
-    (message) => {
+export function RegexpMatch(pattern: string): Rule {
+    return (message) => {
         try {
             return new RegExp(pattern).test(message.clearText());
         } catch {
             return false;
         }
     };
+}
 
-export const OnlyP2P: Rule = (message) => message.isDirect;
+export function OnlyP2P(message: RuleMessage): boolean {
+    return message.isDirect;
+}
 
-export const OnlyGroup: Rule = (message) => !message.isDirect;
+export function OnlyGroup(message: RuleMessage): boolean {
+    return !message.isDirect;
+}
 
-// 异步规则：检查用户是否未被拉黑。决策四链路顺序 D：NotBlocked 改成查全局
-// user ID（用 IdentityResolver.resolve 后的 internal user id）。黑名单表
-// union_id 列 → 全局 ID 的数据迁移属 5d；5b 只改查询逻辑：用 RuleMessage 上
-// 已是全局 ID 的 internalUserId 作为查询值（列名 5d 迁移，本步不改 schema）。
-export const NotBlocked: AsyncRule = async (message) => {
-    const globalUserId = message.internalUserId;
+// 异步规则：检查用户是否未被拉黑。黑名单表当前列名仍为 union_id，但值口径
+// 已收敛为 common_user_id；后续只需要单独改列名，不再依赖飞书 union_id。
+export async function NotBlocked(message: RuleMessage): Promise<boolean> {
+    const globalUserId = message.commonUserId;
     if (!globalUserId || globalUserId === 'unknown_sender') return true;
 
     const blocked = await UserBlacklistRepository.findOne({
         where: { union_id: globalUserId },
     });
     return !blocked;
-};
+}

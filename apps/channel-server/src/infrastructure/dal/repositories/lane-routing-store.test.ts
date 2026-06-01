@@ -2,8 +2,7 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
 // 钉死 TypeOrmLaneRoutingStore.findBotLane 的 wire 契约：lane_routing.route_type
 // 列在真实 @chiwei 业务库里是 character varying（字符串），值是 'bot' / 'chat' /
-// 'group'。channel-proxy lane-resolver.ts 生产在跑的写法就是 WHERE route_type = 'bot'
-// 字符串。
+// 'group'。生产查询写法必须是 WHERE route_type = 'bot' 字符串。
 //
 // 这条契约当初被 mock-only 单测漏掉过：上一版把 route_type 误编码成整数枚举
 // （enum RouteType { Bot = 1 }，查 route_type = '1'），mock 的 store 测不到这层

@@ -1,7 +1,7 @@
 import { describe, it, expect, mock, afterEach } from 'bun:test';
 
 // 飞书侧 utility-redirect 引导提示（B2 从 engine.ts 搬进 plugins/lark）。
-// 它从 lark 私有 store 按 internalMessageId 取回飞书 Message，对原始
+// 它从 lark 私有 store 按 commonMessageId 取回飞书 Message，对原始
 // messageId 发飞书回复（reply_in_thread=true）。engine 只调注入的 responder。
 
 const replyMessageMock = mock(() => {});
@@ -14,14 +14,14 @@ import { larkContextStore } from './lark-context-store';
 import type { Message } from '@core/models/message';
 import type { RuleMessage } from '@core/rules/rule-message';
 
-function rm(internalMessageId: string): RuleMessage {
+function rm(commonMessageId: string): RuleMessage {
     return {
         channel: 'lark',
         botName: 'bot-x',
-        internalUserId: 'U1',
-        internalChatId: 'C1',
-        internalMessageId,
-        internalRootId: undefined,
+        commonUserId: 'U1',
+        commonConversationId: 'C1',
+        commonMessageId,
+        commonRootMessageId: undefined,
         isDirect: false,
         addressedTargetIds: [],
         createTime: 0,

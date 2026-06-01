@@ -15,7 +15,7 @@ import type { RuleConfig } from '@core/rules/rule';
 
 // 出站目标的渠道内引用。插件本身已绑定某 channel,故只需渠道内 id;
 // 不在 core 里出现裸 id 的语义泄漏——这些 ref 只在 channel-server 出站边界
-// (worker / 指令调能力端口时)由 IdentityResolver.toChannel 翻出后传入。
+// (worker / 指令调能力端口时)由对应插件的私有映射从 common id 翻出后传入。
 export interface ConversationRef {
     channelId: string;
 }

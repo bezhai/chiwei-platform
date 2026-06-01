@@ -6,7 +6,7 @@ that the declarative wire/bind calls produce the expected topology:
 
     Source.mq("vectorize") -> hydrate_message      (MessageRequest)
                     |
-                 Message (durable)
+                 Message (in-process)
                     v
                 vectorize
                     |
@@ -62,7 +62,7 @@ def test_mq_entry_wired_to_hydrate():
     )
 
 
-def test_message_durable_to_vectorize():
+def test_message_in_process_to_vectorize():
     _fresh_import()
 
     from app.domain.message import Message
@@ -70,7 +70,7 @@ def test_message_durable_to_vectorize():
     from app.runtime.wire import WIRING_REGISTRY
 
     wires = [w for w in WIRING_REGISTRY if w.data_type is Message]
-    assert any(w.durable and vectorize in w.consumers for w in wires)
+    assert any((not w.durable) and vectorize in w.consumers for w in wires)
 
 
 def test_fragment_to_save_fragment():

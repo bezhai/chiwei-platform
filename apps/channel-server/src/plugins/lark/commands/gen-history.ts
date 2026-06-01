@@ -21,7 +21,7 @@ import { larkContextStore } from '../lark-context-store';
 // lark-only handler：入口适配 RuleMessage → 从 lark 私有 store 取回飞书 Message
 // 跑不变的内部逻辑（水群报告深度依赖飞书群消息/卡片）；缺 store entry fail-loud。
 export async function genHistoryCard(message: RuleMessage) {
-    return genHistoryCardImpl(larkContextStore.get(message.internalMessageId));
+    return genHistoryCardImpl(larkContextStore.get(message.commonMessageId));
 }
 
 function splitTime(start: number, end: number, splitSize: number): number[][] {

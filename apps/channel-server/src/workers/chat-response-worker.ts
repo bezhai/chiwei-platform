@@ -3,7 +3,7 @@
  *
  * 消费 RabbitMQ chat_response queue，
  * 按 part_index 直接发送 post 消息到飞书，
- * 每条消息发送后立即存 conversation_messages 并追加 agent_responses.replies，
+ * 每条消息发送后立即存 common_message/lark_message 并追加 common_agent_response.replies，
  * is_last 时更新 response_text 和状态为 completed。
  */
 
@@ -18,7 +18,7 @@ LoggerFactory.createLogger({
 
 import { createServer } from 'http';
 import AppDataSource from 'ormconfig';
-import { AgentResponse } from '@entities/agent-response';
+import { CommonAgentResponse } from '@entities/common-agent-response';
 import {
     rabbitmqClient,
     CHAT_RESPONSE,
@@ -26,13 +26,11 @@ import {
     laneQueue,
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { resolveBotIdentity } from '@core/services/bot/bot-identity';
+import { larkCredentials } from '@core/services/bot/lark-credentials';
 import { initializeLarkClients } from '@integrations/lark-client';
 import { context } from '@middleware/context';
-import { storeMessage } from '@integrations/memory';
-import { MessageContentUtils } from 'core/models/message-content';
 import { reverseResolveOutbound } from '@plugins/lark/outbound-reverse-resolve';
-import { getIdentityResolver } from '@integrations/identity-resolver-runtime';
+import { storeLarkOutboundMessage } from '@plugins/lark/common-projector';
 import { getChannelRegistry } from '@core/registry/channel-registry';
 import '@plugins/index';
 import { imageRegistryLookupId } from './image-registry-key';
@@ -128,7 +126,7 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         `[ChatResponseWorker] Processing: session_id=${session_id}, status=${status}, part=${part_index}, is_last=${is_last}, queue_delay=${queueDelayMs}ms`,
     );
 
-    const repo = AppDataSource.getRepository(AgentResponse);
+    const repo = AppDataSource.getRepository(CommonAgentResponse);
 
     // 查询 agent_response 获取 bot_name
     const tDbQuery0 = Date.now();
@@ -165,19 +163,15 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
         }
 
         try {
-            // ---- 出站反查（全局 internal_*_id → 渠道裸 id）----
-            // ChatTrigger/ChatResponseSegment 入站走过渠道契约链，message_id /
-            // chat_id / root_id 是全局 internal_*_id。这里用 IdentityResolver
-            // .toChannel 反查回渠道裸 id，构造能力端口要的渠道内 ref。反查不到
+            // ---- 出站反查（common_*_id → 飞书裸 id）----
+            // ChatTrigger/ChatResponseSegment 入站走过 lark common projector，
+            // message_id / chat_id / root_id 是 common_*_id。这里由 lark 插件
+            // 读取 lark_* 映射反查回飞书裸 id，构造能力端口要的渠道内 ref。反查不到
             // 明确抛错（落入下方 catch），绝不静默把回复发到错地方。
-            const reverseResolver = getIdentityResolver();
-            // channel === 'lark' 边界断言在 reverseResolveOutbound 内做：
-            // 误把非飞书全局 ID 喂飞书出站会在此炸出来（fail-loud 出站对偶）。
             const rr = await reverseResolveOutbound({
-                resolver: reverseResolver,
-                messageGlobalId: message_id,
-                chatGlobalId: chat_id,
-                rootGlobalId: root_id || undefined,
+                commonMessageId: message_id,
+                commonConversationId: chat_id,
+                commonRootMessageId: root_id || undefined,
             });
             const larkMessageId = rr.channelMessageId;
             const larkChatId = rr.channelChatId;
@@ -218,70 +212,44 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
             const aiMessageId = sentRef.channelId || undefined;
             const effectiveLarkMessageId = aiMessageId || `${larkMessageId}_part${part_index}`;
-            // bot 自己的回复消息也全局化（与入站写入点全局化一致）：把这条新
-            // 飞书消息 id 正查分配/取全局 internal_message_id 后再落库，保证
-            // conversation_messages 的 assistant 行身份列同样是全局 ID。
-            // reverseResolveOutbound 已断言 channel==='lark'，这里出站发的是
-            // 飞书 native 富文本，新消息 id 是飞书裸 id，按 (lark, 裸id) 正查
-            // 分配全局 internal_message_id（与入站写入点全局化一致）。
-            const globalAssistantMessageId = await reverseResolver.resolve(
-                'message',
-                'lark',
-                effectiveLarkMessageId,
-            );
+            const botConfig = multiBotManager.getBotConfig(botName);
+            const senderDisplayName =
+                botConfig?.channel === OUTBOUND_CHANNEL
+                    ? (multiBotManager.getDisplayNameByAppId(
+                          larkCredentials(botConfig).app_id,
+                      ) ?? undefined)
+                    : undefined;
 
-            // bot 自身的全局身份（user_id / username）必须走 IdentityResolver，
-            // 否则直接落 botName 字符串（"dev"/"chiwei"）会破坏 spec
-            // 「conversation_messages 全字段 internal ULID」承诺，下游按全局
-            // internal_user_id 反查的读取方就会全 miss。
-            // resolveBotIdentity 内部：取 bot 的 robot_union_id → resolve(
-            // 'user','lark',robot_union_id) → ULID；首次出现自动 bootstrap
-            // identity_user 表行（5a ON CONFLICT 收敛语义）。displayName 取
-            // persona display_name，与入站行的 username 冗余口径一致。
-            const botIdentity = await resolveBotIdentity(
-                botName,
-                reverseResolver,
-                multiBotManager,
-            );
-
-            // 每条消息发完后立即存 conversation_messages（身份列写全局 ID）
+            // 每条消息发完后立即存 common_message + lark_message
             const tDbWrite0 = Date.now();
             const now = dayjs().valueOf();
-            await storeMessage({
-                user_id: botIdentity.globalUserId,
-                // assistant 行的显示名读取端按 role 派生（dashboard='赤尾'、
-                // history='我'），username 列冗余落 persona display_name
-                // （resolveBotIdentity 已经从 multiBotManager 取过），保持列
-                // 非空一致；persona 查不到则为 undefined（不写脏占位）。
-                username: botIdentity.displayName,
-                content: MessageContentUtils.wrapMarkdownAsV2(content),
-                role: 'assistant',
-                message_id: globalAssistantMessageId,
-                message_type: 'post',
-                chat_id: chat_id,
-                chat_type: is_p2p ? 'p2p' : 'group',
-                create_time: String(now),
-                root_message_id: is_proactive ? (root_id || globalAssistantMessageId) : (root_id || message_id),
-                reply_message_id: is_proactive ? (root_id || undefined) : message_id,
-                response_id: session_id,
+            const commonAssistantMessageId = await storeLarkOutboundMessage({
+                omId: effectiveLarkMessageId,
+                chatId: larkChatId,
+                commonConversationId: chat_id,
+                commonRootMessageId: is_proactive ? root_id : (root_id || message_id),
+                commonReplyMessageId: is_proactive ? root_id : message_id,
+                contentText: content,
+                botName,
+                senderDisplayName,
+                scope: is_p2p ? 'direct' : 'group',
+                eventTime: now,
+                messageType: 'post',
+                responseId: session_id,
             });
 
             // proactive 没有 agent_response 记录，跳过 replies 追加和状态更新
             if (agentResponse) {
-                // agent_responses.replies[].message_id 由 5c-scope 读取方
-                // （recall / delete-message）按飞书裸 message id 消费。本步
-                // 不动这些读取方，故此处保持飞书裸 id（effectiveLarkMessageId），
-                // 全局化留给 5c，不在本步擅自切。
                 const replyEntry = [
                     {
-                        message_id: effectiveLarkMessageId,
+                        common_message_id: commonAssistantMessageId,
                         content_type: 'post',
                         sent_at: new Date().toISOString(),
                     },
                 ];
                 await repo
                     .createQueryBuilder()
-                    .update(AgentResponse)
+                    .update(CommonAgentResponse)
                     .set({
                         replies: () =>
                             `COALESCE(replies, '[]'::jsonb) || :replyEntry::jsonb`,

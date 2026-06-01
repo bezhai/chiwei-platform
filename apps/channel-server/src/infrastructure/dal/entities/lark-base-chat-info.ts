@@ -1,6 +1,9 @@
-import { Entity, PrimaryColumn, Column } from 'typeorm';
+import { Entity, PrimaryColumn, Column, Index } from 'typeorm';
 
 @Entity('lark_base_chat_info')
+@Index('uq_lark_base_chat_info_common_conversation_id', ['common_conversation_id'], {
+    unique: true,
+})
 export class LarkBaseChatInfo {
     @PrimaryColumn()
     chat_id!: string; // 对话 ID
@@ -24,4 +27,7 @@ export class LarkBaseChatInfo {
     // 的 /config unset）。类型需含 null，否则 TypeORM update 的 partial 拒绝 null。
     @Column({ type: 'jsonb', nullable: true })
     gray_config?: Record<string, string> | null; // 灰度配置，存储 key-value 对
+
+    @Column({ type: 'uuid', nullable: true })
+    common_conversation_id?: string;
 }

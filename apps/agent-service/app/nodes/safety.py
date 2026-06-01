@@ -312,7 +312,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     current = await get_safety_status(req.session_id)
     if current is None:
         raise RuntimeError(
-            f"agent_responses row missing for session_id={req.session_id}; "
+            f"common_agent_response row missing for session_id={req.session_id}; "
             f"channel-server must INSERT before agent-service emits "
             f"PostSafetyRequest"
         )

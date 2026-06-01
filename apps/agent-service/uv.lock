@@ -52,6 +52,7 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "starlette" },
     { name = "tenacity" },
+    { name = "uuid6" },
     { name = "uvicorn" },
     { name = "volcengine-python-sdk", extra = ["ark"] },
 ]
@@ -122,6 +123,7 @@ requires-dist = [
     { name = "sse-starlette", specifier = ">=2.4.1" },
     { name = "starlette", specifier = ">=0.47.1" },
     { name = "tenacity", specifier = ">=9.1.2" },
+    { name = "uuid6", specifier = ">=2025.0.1" },
     { name = "uvicorn", specifier = ">=0.35.0" },
     { name = "volcengine-python-sdk", extras = ["ark"], specifier = ">=5.0.3" },
 ]
@@ -3044,6 +3046,15 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/d1/c8/929d81665d83f0b2ffaecb8e66c3091a50f62c7cb5b65e678bd75a96684e/uuid_utils-0.14.0-pp311-pypy311_pp73-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:cdbd82ff20147461caefc375551595ecf77ebb384e46267f128aca45a0f2cdfc" },
     { url = "https://mirrors.aliyun.com/pypi/packages/8e/a0/27d7daa1bfed7163f4ccaf52d7d2f4ad7bb1002a85b45077938b91ee584f/uuid_utils-0.14.0-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:eff57e8a5d540006ce73cf0841a643d445afe78ba12e75ac53a95ca2924a56be" },
     { url = "https://mirrors.aliyun.com/pypi/packages/63/d4/acad86ce012b42ce18a12f31ee2aa3cbeeb98664f865f05f68c882945913/uuid_utils-0.14.0-pp311-pypy311_pp73-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:3fd9112ca96978361201e669729784f26c71fecc9c13a7f8a07162c31bd4d1e2" },
+]
+
+[[package]]
+name = "uuid6"
+version = "2025.0.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ca/b7/4c0f736ca824b3a25b15e8213d1bcfc15f8ac2ae48d1b445b310892dc4da/uuid6-2025.0.1.tar.gz", hash = "sha256:cd0af94fa428675a44e32c5319ec5a3485225ba2179eefcf4c3f205ae30a81bd" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/3d/b2/93faaab7962e2aa8d6e174afb6f76be2ca0ce89fde14d3af835acebcaa59/uuid6-2025.0.1-py3-none-any.whl", hash = "sha256:80530ce4d02a93cdf82e7122ca0da3ebbbc269790ec1cb902481fa3e9cc9ff99" },
 ]
 
 [[package]]

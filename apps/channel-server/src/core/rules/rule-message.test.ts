@@ -3,7 +3,7 @@ import { describe, it, expect } from 'bun:test';
 import type { RuleMessage } from './rule-message';
 
 // RuleMessage 是 InboundMessage 派生的**纯平台无关视图**（B2 杀掉 #228 的
-// larkMessage 旁挂之后）。它只承载平台无关字段（channel / 全局 internal_*_id /
+// larkMessage 旁挂之后）。它只承载平台无关字段（channel / 全局 common_*_id /
 // is_direct / 结构化 mentions / createTime / 文本&媒体工具）。任何飞书原始
 // 对象都不在 RuleMessage 上 —— 飞书数据全部走 lark 插件私有 context store。
 
@@ -11,10 +11,10 @@ function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
     return {
         channel: 'qq',
         botName: 'bot-x',
-        internalUserId: 'U1',
-        internalChatId: 'C1',
-        internalMessageId: 'M1',
-        internalRootId: undefined,
+        commonUserId: 'U1',
+        commonConversationId: 'C1',
+        commonMessageId: 'M1',
+        commonRootMessageId: undefined,
         isDirect: false,
         addressedTargetIds: [],
         createTime: 100,
@@ -39,7 +39,7 @@ describe('RuleMessage platform-neutral view', () => {
             isDirect: true,
         });
         expect(m.channel).toBe('qq');
-        expect(m.internalUserId).toBe('U1');
+        expect(m.commonUserId).toBe('U1');
         expect(m.clearText()).toBe('余额');
         expect(m.isTextOnly()).toBe(true);
         expect(m.addressedTargetIds).toEqual(['bot-union-1']);

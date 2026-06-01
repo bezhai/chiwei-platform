@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
-import { paasClient, larkClient } from '../paas-client';
+import { channelClient, paasClient } from '../paas-client';
 
 const app = new Hono<AppEnv>();
 
@@ -61,7 +61,7 @@ app.post('/api/ops/db-query', async (c) => {
 
 /** GET /api/ops/lane-bindings — 列出泳道绑定 */
 app.get('/api/ops/lane-bindings', async (c) => {
-  const data = await larkClient.get('/api/lark/lane-bindings');
+  const data = await channelClient.get('/api/lane-bindings');
   return c.json(data);
 });
 
@@ -118,7 +118,7 @@ app.post('/api/ops/lane-bindings', async (c) => {
   if (!route_type || !route_key || !lane_name) {
     return c.json({ message: 'route_type, route_key, and lane_name are required' }, 400);
   }
-  const data = await larkClient.post('/api/lark/lane-bindings', {
+  const data = await channelClient.post('/api/lane-bindings', {
     route_type,
     route_key,
     lane_name,
@@ -133,7 +133,7 @@ app.delete('/api/ops/lane-bindings', async (c) => {
   if (!type || !key) {
     return c.json({ message: 'type and key query params are required' }, 400);
   }
-  const data = await larkClient.del('/api/lark/lane-bindings', { type, key });
+  const data = await channelClient.del('/api/lane-bindings', { type, key });
   return c.json(data);
 });
 

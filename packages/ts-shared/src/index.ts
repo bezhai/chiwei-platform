@@ -59,7 +59,12 @@ export type {
 export { StateMachine, RateLimiter, TextUtils } from './utils';
 
 // Entity exports (requires typeorm as peer dependency)
-export { ConversationMessage, LarkUser, LarkGroupChatInfo } from './entities';
+export {
+    CommonUser,
+    CommonConversation,
+    CommonMessage,
+    CommonAgentResponse,
+} from './entities';
 
 // MongoDB exports
 export type { MongoConfig, IndexDefinition, BulkWriteResult } from './mongo';

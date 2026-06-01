@@ -7,33 +7,33 @@ import { larkContextStore } from './lark-context-store';
 //
 // 与改造前的关键差别：不再把 Message 旁挂到 RuleMessage.channelContext
 // （那是 #228 的逃生口）。改成把 Message put 进 lark 私有 store（key=全局
-// internalMessageId），由 lark 谓词/handler 后续 get 取回。RuleMessage 保持
+// commonMessageId），由 lark 谓词/handler 后续 get 取回。RuleMessage 保持
 // 纯平台无关视图：飞书逐场景行为零变化（runRules 看到的 is_direct/clearText/
 // mentions 与改造前完全一致），但 core 再也看不到飞书对象。
 //
-// 全局 internal_*_id 由调用方（接线点 handlers.ts）经 IdentityResolver.resolve
-// 后传入；本函数不碰 DB / resolver，纯派生 + put store。
+// common_* id 由调用方（接线点 handlers.ts）从 lark common projector 传入；
+// 本函数不碰 DB，纯派生 + put store。
 export function buildLarkRuleMessage(
     larkMessage: Message,
     ids: {
         botName: string;
-        internalUserId: string;
-        internalChatId: string;
-        internalMessageId: string;
-        internalRootId: string | undefined;
+        commonUserId: string;
+        commonConversationId: string;
+        commonMessageId: string;
+        commonRootMessageId: string | undefined;
         addressedTargetIds: string[];
     },
 ): RuleMessage {
     // 飞书原始 Message 进 lark 私有 store，供 lark 谓词/handler 取回。
-    larkContextStore.put(ids.internalMessageId, larkMessage);
+    larkContextStore.put(ids.commonMessageId, larkMessage);
 
     return {
         channel: 'lark',
         botName: ids.botName,
-        internalUserId: ids.internalUserId,
-        internalChatId: ids.internalChatId,
-        internalMessageId: ids.internalMessageId,
-        internalRootId: ids.internalRootId,
+        commonUserId: ids.commonUserId,
+        commonConversationId: ids.commonConversationId,
+        commonMessageId: ids.commonMessageId,
+        commonRootMessageId: ids.commonRootMessageId,
         isDirect: larkMessage.isP2P(),
         addressedTargetIds: ids.addressedTargetIds,
         createTime: Number(larkMessage.createTime) || 0,

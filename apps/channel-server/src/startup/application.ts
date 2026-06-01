@@ -52,7 +52,7 @@ export class ApplicationManager {
         await botInitialization();
         console.info('Bot initialized successfully!');
 
-        // 5. 连接 RabbitMQ（storeMessage 需要）
+        // 5. 连接 RabbitMQ（入站消息写入后的 ChatTrigger 发布需要）
         await rabbitmqClient.connect();
         await rabbitmqClient.declareTopology();
         console.info('RabbitMQ connected!');
@@ -70,8 +70,8 @@ export class ApplicationManager {
             console.info(`[inbound-lane] consumer started for lane=${lane}`);
         }
 
-        // 5.6 飞书直连 ws 入口（websocket bot），env gate 默认 off（防与 channel-proxy
-        // 双连同一 bot）。off 时不起任何 WSClient，行为与现状一致。
+        // 5.6 飞书直连 ws 入口（websocket bot）。HTTP webhook 入口已由本服务承接；
+        // WS 长连仍显式用部署开关控制，避免未准备好的 bot 被当前进程主动接管。
         if (isDirectIngressEnabled()) {
             this.larkIngress = new LarkEventIngress();
             const wsBots = larkIngressBots(multiBotManager.getBotsByInitType('websocket'));
@@ -93,7 +93,7 @@ export class ApplicationManager {
      * 启动服务
      */
     async start(): Promise<void> {
-        // 启动 HTTP 服务（Lark webhook 已由 lane-proxy 处理）
+        // 启动 HTTP 服务（包含 Lark webhook 入口）
         await this.startHttpServer();
     }
 
