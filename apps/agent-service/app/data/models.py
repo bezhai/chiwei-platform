@@ -1,9 +1,10 @@
 """Core SQLAlchemy ORM models.
 
-Note: bot_config and bot_chat_presence are managed by channel-server.
+Note: bot_config and common_bot_presence are managed by channel-server.
 
 Tables:
   - common_user, common_conversation, common_message, common_agent_response
+  - common_bot_presence (raw SQL, managed by channel-server)
   - model_provider, model_mappings
   - bot_persona
   - akao_schedule

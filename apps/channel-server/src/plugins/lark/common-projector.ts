@@ -20,7 +20,7 @@ interface EnsureCommonUserInput {
     displayName: string | undefined;
 }
 
-interface EnsureCommonConversationInput {
+export interface EnsureLarkCommonConversationInput {
     chatId: string;
     scope: string;
     displayName: string | undefined;
@@ -96,8 +96,8 @@ async function ensureCommonUser(input: EnsureCommonUserInput): Promise<string> {
     return linked.commonUserId ?? commonUserId;
 }
 
-async function ensureCommonConversation(
-    input: EnsureCommonConversationInput,
+export async function ensureLarkCommonConversation(
+    input: EnsureLarkCommonConversationInput,
 ): Promise<string> {
     const larkChatRepo = AppDataSource.getRepository(LarkBaseChatInfo);
     const existing = await larkChatRepo.findOne({
@@ -195,7 +195,7 @@ export async function prepareLarkInboundProjection(
         displayName: message.senderInfo?.name,
     });
 
-    const commonConversationId = await ensureCommonConversation({
+    const commonConversationId = await ensureLarkCommonConversation({
         chatId: event.message.chat_id,
         scope: inbound.conversation_scope,
         displayName: message.isP2P()

@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS common_agent_response (
   CONSTRAINT uq_common_agent_response_session UNIQUE(session_id)
 );
 
+CREATE TABLE IF NOT EXISTS common_bot_presence (
+  common_conversation_id uuid NOT NULL REFERENCES common_conversation(common_conversation_id),
+  bot_name varchar(50) NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(common_conversation_id, bot_name)
+);
+CREATE INDEX IF NOT EXISTS idx_common_bot_presence_bot
+  ON common_bot_presence(bot_name);
+
 CREATE TABLE IF NOT EXISTS lark_message (
   om_id varchar(256) PRIMARY KEY,
   common_message_id uuid NOT NULL UNIQUE REFERENCES common_message(common_message_id),

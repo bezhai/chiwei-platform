@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { getMetadataArgsStorage } from 'typeorm';
 import {
     CommonAgentResponse,
+    CommonBotPresence,
     CommonConversation,
     CommonMessage,
     CommonUser,
@@ -26,6 +27,7 @@ describe('common/lark layer entity metadata', () => {
         expect(tableName(CommonConversation)).toBe('common_conversation');
         expect(tableName(CommonMessage)).toBe('common_message');
         expect(tableName(CommonAgentResponse)).toBe('common_agent_response');
+        expect(tableName(CommonBotPresence)).toBe('common_bot_presence');
     });
 
     it('keeps lark native mapping in lark-owned tables', () => {

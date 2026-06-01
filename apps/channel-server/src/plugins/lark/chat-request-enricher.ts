@@ -1,18 +1,20 @@
 import type { RuleMessage } from '@core/rules/rule-message';
 import type { ChatRequestEnrichment } from '@core/services/ai/reply';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { larkContextStore } from './lark-context-store';
 
-// 飞书侧 chat.request 富化（B2 从 core/services/ai/reply.ts 的 channelContext
-// 读取搬进 plugins/lark）。is_canary / mentions 是飞书专属：从 lark 私有 store
-// 按 commonMessageId 取回飞书 Message，读 permission_config.is_canary 和
-// getBotAppIds()。非飞书 channel 取中性默认（不泄漏飞书绑定）。
+// 飞书侧 chat.request 富化。Lark app_id 只在插件层解析成 persona_id；
+// agent-service 不再读取 bot_config.credentials 或理解 Lark mention。
 export function enrichLarkChatRequest(message: RuleMessage): ChatRequestEnrichment {
     if (message.channel !== 'lark') {
-        return { isCanary: false, mentions: [] };
+        return { isCanary: false, personaIds: [] };
     }
     const lark = larkContextStore.get(message);
+    const personaIds = lark.getBotAppIds()
+        .map((appId) => multiBotManager.getBotConfigByAppId(appId)?.persona_id)
+        .filter((personaId): personaId is string => Boolean(personaId));
     return {
         isCanary: lark.basicChatInfo?.permission_config?.is_canary ?? false,
-        mentions: lark.getBotAppIds(),
+        personaIds: Array.from(new Set(personaIds)),
     };
 }

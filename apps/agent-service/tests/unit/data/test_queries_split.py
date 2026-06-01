@@ -6,14 +6,13 @@ memory_search.py，所以本测试覆盖 9 个 domain 模块。
 from __future__ import annotations
 
 # 来自 spec §3.3 + §3.6 memory 细拆 + Phase 7d Task 5 hoist (6 个新增 messages
-# query) + Notes redesign 2026-05-10，硬编码作为期望基线（80 函数）。
+# query) + Notes redesign 2026-05-10，硬编码作为期望基线。
 EXPECTED_FUNCTIONS = {
     # model_provider (3)
     "parse_model_id", "find_model_mapping", "find_provider_by_name",
-    # persona (6)
+    # persona (5)
     "find_persona", "list_all_persona_ids", "resolve_persona_id",
-    "resolve_bot_name_for_persona", "resolve_mentioned_personas",
-    "find_bot_names_for_persona",
+    "resolve_bot_name_for_persona", "find_bot_names_for_persona",
     # messages (16 — common 层收敛后移除 channel-private/group-member helpers)
     "find_cross_chat_messages", "find_message_content", "find_messages_in_range",
     "find_username", "find_group_name", "find_group_download_permission",

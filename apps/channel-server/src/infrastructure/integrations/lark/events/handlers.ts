@@ -42,16 +42,34 @@ import { context } from '@middleware/context';
 import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
 import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
 import { setNx } from '@cache/redis-client';
-import { BotChatPresence } from 'infrastructure/dal/entities/bot-chat-presence';
+import { CommonBotPresence } from 'infrastructure/dal/entities/common-bot-presence';
 import { enforceDecision } from '@core/channels/contracts';
 import { getBotUnionId } from '@core/services/bot/bot-var';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
 import { setBotMentionTargetResolver } from 'core/rules/rule';
 import {
+    ensureLarkCommonConversation,
     prepareLarkInboundProjection,
     storeLarkInboundMessage,
 } from '@plugins/lark/common-projector';
+
+async function upsertCommonBotPresence(
+    commonConversationId: string,
+    botName: string | undefined,
+    isActive: boolean,
+): Promise<void> {
+    if (!botName) return;
+    await AppDataSource.getRepository(CommonBotPresence).upsert(
+        {
+            common_conversation_id: commonConversationId,
+            bot_name: botName,
+            is_active: isActive,
+            updated_at: new Date(),
+        },
+        ['common_conversation_id', 'bot_name'],
+    );
+}
 
 // runRules 内 NeedRobotMention 谓词的 botMentionTarget 解析（飞书=robot_union_id）。
 // 飞书侧 RuleMessage.addressedTargetIds 来源与 hasMention(union_id) 同源
@@ -112,18 +130,9 @@ export class LarkEventHandlers {
             }
 
             // ---- 飞书 native 渠道专属副作用（保留不动，spec G）----
-            // 识图管线 / bot_chat_presence 是飞书渠道专属（QQ 不需要），不在
-            // chatRules 里、按飞书裸 ID 走飞书自己的管线，与身份契约链解耦。
-            // 它们对 contract chain 成败无依赖，先做（保留现状行为零变化）。
-            const currentBotName = context.getBotName();
-            if (currentBotName && message.chatId) {
-                AppDataSource.getRepository(BotChatPresence)
-                    .upsert(
-                        { chat_id: message.chatId, bot_name: currentBotName, is_active: true, updated_at: new Date() },
-                        ['chat_id', 'bot_name'],
-                    )
-                    .catch(err => console.warn('[BotChatPresence] upsert failed:', err));
-            }
+            // 识图管线仍按飞书裸 message/file id 走飞书自己的管线；bot presence
+            // 必须等 common projector 产出 common_conversation_id 后写 common 表，
+            // 不能把 oc_* 暴露给 agent-service。
 
             // ---- 钉死的渠道契约链（决策五 / spec 整体分层，顺序不可调换）----
             // adapter.parse → AddressingPolicy.decide+enforceDecision(前置总闸)
@@ -174,6 +183,11 @@ export class LarkEventHandlers {
                 message,
                 inbound,
             );
+            upsertCommonBotPresence(
+                projection.commonConversationId,
+                context.getBotName(),
+                true,
+            ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
 
             // ---- 处理层泳道分流决策点（lane-routing-redesign §3.1）----
             // 全局 ID 就绪后、派生 RuleMessage / 入库 / 发 MQ 之前：按统一概念
@@ -430,15 +444,19 @@ export class LarkEventHandlers {
             LarkUserOpenIdRepository.save(openIdUsers),
         ]);
 
-        // bot 入群 → 记录 bot_chat_presence
+        const commonConversationId = await ensureLarkCommonConversation({
+            chatId: data.chat_id!,
+            scope: 'group',
+            displayName: groupInfo.name,
+            avatarUrl: groupInfo.avatar,
+            memberCount: groupInfo.user_count,
+            isActive: !groupInfo.is_leave,
+            downloadAllowed: groupInfo.download_has_permission_setting !== 'not_anyone',
+        });
+
+        // bot 入群 → 记录 common_bot_presence。agent-service 只读 common 口径。
         const botName = context.getBotName();
-        if (botName && data.chat_id) {
-            await AppDataSource.getRepository(BotChatPresence)
-                .upsert(
-                    { chat_id: data.chat_id, bot_name: botName, is_active: true, updated_at: new Date() },
-                    ['chat_id', 'bot_name'],
-                );
-        }
+        await upsertCommonBotPresence(commonConversationId, botName, true);
     }
 
     /**
@@ -450,14 +468,27 @@ export class LarkEventHandlers {
             is_leave: true,
         });
 
-        // bot 退群 → 标记 is_active=false
+        // bot 退群 → 标记 common_bot_presence.is_active=false。退群事件只有
+        // 飞书 chat_id，先经 lark 层映射回 common_conversation_id。
         const botName = context.getBotName();
         if (botName && data.chat_id) {
-            await AppDataSource.getRepository(BotChatPresence)
-                .update(
-                    { chat_id: data.chat_id, bot_name: botName },
-                    { is_active: false, updated_at: new Date() },
+            const linkedChat = await AppDataSource.getRepository(LarkBaseChatInfo).findOne({
+                where: { chat_id: data.chat_id },
+            });
+            if (!linkedChat?.common_conversation_id) {
+                console.warn(
+                    `[CommonBotPresence] cannot mark inactive; no common_conversation_id ` +
+                        `for lark chat ${data.chat_id}`,
                 );
+                return;
+            }
+            await AppDataSource.getRepository(CommonBotPresence).update(
+                {
+                    common_conversation_id: linkedChat.common_conversation_id,
+                    bot_name: botName,
+                },
+                { is_active: false, updated_at: new Date() },
+            );
         }
     }
 

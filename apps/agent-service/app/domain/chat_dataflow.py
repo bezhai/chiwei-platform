@@ -33,7 +33,7 @@ class ChatTrigger(Data):
     lane: str | None = None
     is_proactive: bool = False
     bot_name: str | None = None
-    mentions: list[str] = Field(default_factory=list)
+    persona_ids: list[str] = Field(default_factory=list)
     enqueued_at: int | None = None
 
     class Meta:

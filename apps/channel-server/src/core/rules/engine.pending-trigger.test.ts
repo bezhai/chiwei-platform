@@ -54,7 +54,7 @@ const fakePending: PendingChatTrigger = {
         is_canary: false,
         lane: undefined,
         enqueued_at: 0,
-        mentions: [],
+        persona_ids: [],
     },
     lane: undefined,
     dedupeKey: 'make_reply:M1',

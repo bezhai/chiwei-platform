@@ -21,26 +21,29 @@ export interface ChatRequestPayload {
     is_canary: boolean;
     lane: string | undefined;
     enqueued_at: number;
-    mentions: string[];
+    persona_ids: string[];
 }
 
-// chat.request 的 channel 专属富化字段（is_canary / mentions）。这些是飞书
-// 专属语义，core 的 reply.ts 不认识飞书对象（B2 删掉了 #228 的 channelContext
-// .larkMessage 逃生口）。由各 channel 插件经下面的注入点提供；未注入时取中性
-// 默认（is_canary=false / mentions=[]），绝不把平台绑定泄漏到非该 channel。
+// chat.request 的 channel 专属富化字段（is_canary / persona_ids）。channel
+// 插件负责把平台私有寻址信息收敛成 persona_id，core 的 reply.ts 不认识飞书对象。
+// 未注入时取中性默认（is_canary=false / persona_ids=[]），绝不把平台绑定泄漏
+// 到 agent-service。
 export interface ChatRequestEnrichment {
     isCanary: boolean;
-    mentions: string[];
+    personaIds: string[];
 }
 
 export type ChatRequestEnricher = (message: RuleMessage) => ChatRequestEnrichment;
 
-const neutralEnricher: ChatRequestEnricher = () => ({ isCanary: false, mentions: [] });
+const neutralEnricher: ChatRequestEnricher = () => ({
+    isCanary: false,
+    personaIds: [],
+});
 
 let chatRequestEnricher: ChatRequestEnricher = neutralEnricher;
 
-// channel 插件 import 期注入"按本平台富化 chat.request"的实现（飞书=从 lark
-// 私有 store 取 is_canary / getBotAppIds）。core 只调注入点，不碰平台 SDK。
+// channel 插件 import 期注入"按本平台富化 chat.request"的实现。core 只调
+// 注入点，不碰平台 SDK。
 export function setChatRequestEnricher(fn: ChatRequestEnricher): void {
     chatRequestEnricher = fn;
 }
@@ -50,15 +53,15 @@ export function resetChatRequestEnricher(): void {
     chatRequestEnricher = neutralEnricher;
 }
 
-// 纯函数：从平台无关 RuleMessage 构造 chat.request 载荷。飞书专属的 is_canary /
-// mentions 经注入的 enricher 取（未注入则中性默认），core 不读任何飞书对象。
+// 纯函数：从平台无关 RuleMessage 构造 chat.request 载荷。平台专属的寻址结果
+// 必须在插件层收敛成 persona_ids，agent-service 不再解析 app_id/open_id。
 export function buildChatRequestPayload(
     message: RuleMessage,
     sessionId: string,
     botName: string | undefined,
     lane: string | undefined,
 ): ChatRequestPayload {
-    const { isCanary, mentions } = chatRequestEnricher(message);
+    const { isCanary, personaIds } = chatRequestEnricher(message);
     return {
         session_id: sessionId,
         channel: message.channel,
@@ -71,7 +74,7 @@ export function buildChatRequestPayload(
         is_canary: isCanary,
         lane,
         enqueued_at: Date.now(),
-        mentions,
+        persona_ids: personaIds,
     };
 }
 

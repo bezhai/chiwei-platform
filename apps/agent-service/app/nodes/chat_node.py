@@ -73,7 +73,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
     router = MessageRouter()
     persona_ids = await router.route(
         chat_id=t.chat_id or "",
-        mentions=list(t.mentions),
+        persona_ids=list(t.persona_ids),
         bot_name=t.bot_name or "",
         is_p2p=t.is_p2p,
         is_proactive=t.is_proactive,

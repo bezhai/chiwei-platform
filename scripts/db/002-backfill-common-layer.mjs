@@ -29,6 +29,7 @@ function parseArgs(argv) {
     startCreateTime: null,
     startMessageId: '',
     skipResponses: false,
+    onlyResponses: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -39,6 +40,8 @@ function parseArgs(argv) {
       options.apply = false;
     } else if (arg === '--skip-responses') {
       options.skipResponses = true;
+    } else if (arg === '--only-responses') {
+      options.onlyResponses = true;
     } else if (arg === '--batch-size') {
       options.batchSize = Number.parseInt(argv[++i] ?? '', 10);
     } else if (arg.startsWith('--batch-size=')) {
@@ -75,6 +78,9 @@ function parseArgs(argv) {
   if (options.startCreateTime === null && options.startMessageId) {
     throw new Error('--start-message-id requires --start-create-time');
   }
+  if (options.onlyResponses && options.skipResponses) {
+    throw new Error('--only-responses cannot be combined with --skip-responses');
+  }
 
   return options;
 }
@@ -91,6 +97,7 @@ Options:
   --start-create-time <n> Resume messages after this create_time cursor.
   --start-message-id <id> Resume messages after this message_id cursor when create_time ties.
   --skip-responses       Skip agent_responses backfill.
+  --only-responses       Backfill common_agent_response only; assumes messages already exist.
 
 The script connects directly to PostgreSQL. It never uses kubectl, pods,
 services, or cluster-local port-forwarding.`);
@@ -105,15 +112,34 @@ function uuidFromLegacy(value) {
 }
 
 function jsonbValue(value) {
-  return JSON.stringify(value ?? null);
+  return JSON.stringify(stripNulDeep(value ?? null));
 }
 
 function textOrNull(value) {
   if (value === undefined || value === null) {
     return null;
   }
-  const text = String(value);
+  const text = stripNulString(String(value));
   return text.length === 0 ? null : text;
+}
+
+function stripNulString(value) {
+  return value.replace(/\u0000/g, '');
+}
+
+function stripNulDeep(value) {
+  if (typeof value === 'string') {
+    return stripNulString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(stripNulDeep);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, inner]) => [key, stripNulDeep(inner)]),
+    );
+  }
+  return value;
 }
 
 function parseJson(value) {
@@ -300,8 +326,8 @@ async function migrateChats(client, options) {
       common_conversation_id: commonConversationId,
       channel: 'lark',
       scope: row.chat_mode === 'p2p' ? 'direct' : 'group',
-      display_name: row.name ?? null,
-      avatar_url: row.avatar ?? null,
+      display_name: textOrNull(row.name),
+      avatar_url: textOrNull(row.avatar),
       member_count: row.user_count ?? null,
       is_active: row.is_leave === null || row.is_leave === undefined ? true : !row.is_leave,
       attachment_policy: jsonbValue(buildAttachmentPolicy(row)),
@@ -413,8 +439,8 @@ async function migrateUsers(client, options) {
       commonRows.push({
         common_user_id: commonUserId,
         channel: 'lark',
-        display_name: displayName,
-        avatar_url: row.avatar_origin ?? null,
+        display_name: textOrNull(displayName),
+        avatar_url: textOrNull(row.avatar_origin),
       });
       seenCommonUsers.add(commonUserId);
     }
@@ -457,7 +483,7 @@ async function migrateUsers(client, options) {
       extraCommonRows.push({
         common_user_id: commonUserId,
         channel: 'lark',
-        display_name: row.username ?? null,
+        display_name: textOrNull(row.username),
         avatar_url: null,
       });
       seenCommonUsers.add(commonUserId);
@@ -736,7 +762,7 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
         channel: 'lark',
         common_conversation_id: commonConversationId,
         common_user_id: commonUserId,
-        sender_display_name: row.username ?? null,
+        sender_display_name: textOrNull(row.username),
         role: row.role,
         content: jsonbValue(content),
         content_text: contentText,
@@ -744,7 +770,7 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
         common_reply_message_id: replyAssigned?.commonMessageId ?? null,
         scope: scopeFromChatType(row.chat_type),
         message_type: row.message_type ?? 'text',
-        bot_name: row.bot_name ?? null,
+        bot_name: textOrNull(row.bot_name),
         response_id: row.response_id ?? null,
         event_time: row.create_time,
       });
@@ -872,11 +898,11 @@ async function migrateAgentResponses(client, options, chatMaps) {
         session_id: row.session_id,
         trigger_common_message_id: trigger.commonMessageId,
         common_conversation_id: commonConversationId,
-        bot_name: row.bot_name ?? null,
-        persona_id: row.persona_id ?? null,
-        response_type: row.response_type ?? 'reply',
+        bot_name: textOrNull(row.bot_name),
+        persona_id: textOrNull(row.persona_id),
+        response_type: textOrNull(row.response_type) ?? 'reply',
         replies: jsonbValue(replies),
-        response_text: row.response_text ?? null,
+        response_text: textOrNull(row.response_text),
         agent_metadata: jsonbValue(row.agent_metadata ?? {}),
         safety_status: row.safety_status ?? 'pending',
         safety_result: row.safety_result === null || row.safety_result === undefined ? null : jsonbValue(row.safety_result),
@@ -955,10 +981,14 @@ async function main() {
       await client.query('BEGIN');
     }
     const chatMaps = await migrateChats(client, options);
-    const userMaps = await migrateUsers(client, options);
-    await migrateMessages(client, options, chatMaps, userMaps);
-    if (!options.skipResponses) {
+    if (options.onlyResponses) {
       await migrateAgentResponses(client, options, chatMaps);
+    } else {
+      const userMaps = await migrateUsers(client, options);
+      await migrateMessages(client, options, chatMaps, userMaps);
+      if (!options.skipResponses) {
+        await migrateAgentResponses(client, options, chatMaps);
+      }
     }
     if (!options.apply) {
       await client.query('ROLLBACK');
