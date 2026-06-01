@@ -34,28 +34,30 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
     };
 }
 
-function putLark(key: string, over: Partial<Record<string, unknown>>): Message {
+function putLark(key: RuleMessage, over: Partial<Record<string, unknown>>): Message {
     const m = over as unknown as Message;
     larkContextStore.put(key, m);
     return m;
 }
 
 afterEach(() => {
-    larkContextStore.clear('GM');
+    larkContextStore.clear(rm());
 });
 
 describe('IsAdmin (lark, reads from plugin store)', () => {
     it('true when senderInfo.is_admin is true', () => {
-        putLark('GM', { senderInfo: { is_admin: true } });
-        expect(IsAdmin(rm())).toBe(true);
+        const message = rm();
+        putLark(message, { senderInfo: { is_admin: true } });
+        expect(IsAdmin(message)).toBe(true);
     });
 
     it('false when senderInfo.is_admin is false / missing', () => {
-        putLark('GM', { senderInfo: { is_admin: false } });
-        expect(IsAdmin(rm())).toBe(false);
-        larkContextStore.clear('GM');
-        putLark('GM', { senderInfo: undefined });
-        expect(IsAdmin(rm())).toBe(false);
+        const message = rm();
+        putLark(message, { senderInfo: { is_admin: false } });
+        expect(IsAdmin(message)).toBe(false);
+        larkContextStore.clear(message);
+        putLark(message, { senderInfo: undefined });
+        expect(IsAdmin(message)).toBe(false);
     });
 
     it('fail-loud when lark Message absent from store (no silent skip)', () => {
@@ -65,18 +67,20 @@ describe('IsAdmin (lark, reads from plugin store)', () => {
 
 describe('WhiteGroupCheck (lark, reads from plugin store)', () => {
     it('applies the predicate to basicChatInfo when present', () => {
-        putLark('GM', {
+        const message = rm();
+        putLark(message, {
             basicChatInfo: { permission_config: { open_repeat_message: true } },
         });
         const rule = WhiteGroupCheck(
             (info: LarkBaseChatInfo) => info.permission_config?.open_repeat_message ?? false,
         );
-        expect(rule(rm())).toBe(true);
+        expect(rule(message)).toBe(true);
     });
 
     it('returns false when basicChatInfo missing (behaviour unchanged)', () => {
-        putLark('GM', { basicChatInfo: undefined });
+        const message = rm();
+        putLark(message, { basicChatInfo: undefined });
         const rule = WhiteGroupCheck(() => true);
-        expect(rule(rm())).toBe(false);
+        expect(rule(message)).toBe(false);
     });
 });

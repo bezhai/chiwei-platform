@@ -293,7 +293,7 @@ export class LarkEventHandlers {
             }
             } finally {
                 // 处理结束清理 lark store entry（无内存泄漏）。
-                larkContextStore.clear(ruleMessage.commonMessageId);
+                larkContextStore.clear(ruleMessage);
             }
         } catch (error) {
             console.error(

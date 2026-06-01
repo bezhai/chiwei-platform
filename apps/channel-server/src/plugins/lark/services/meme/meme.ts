@@ -37,7 +37,7 @@ class MemeService {
 // lark-only async_rule / handler：Meme 规则声明 channels:['lark']，故只在飞书
 // 消息上跑，RuleMessage 必带 lark channelContext；入口适配后跑不变内部逻辑。
 export async function checkMeme(rm: RuleMessage): Promise<boolean> {
-    return checkMemeImpl(larkContextStore.get(rm.commonMessageId));
+    return checkMemeImpl(larkContextStore.get(rm));
 }
 
 async function checkMemeImpl(message: Message): Promise<boolean> {
@@ -194,7 +194,7 @@ function parseCommandText(text: string): string[] {
 }
 
 export async function genMeme(rm: RuleMessage) {
-    return genMemeImpl(larkContextStore.get(rm.commonMessageId));
+    return genMemeImpl(larkContextStore.get(rm));
 }
 
 async function genMemeImpl(message: Message) {

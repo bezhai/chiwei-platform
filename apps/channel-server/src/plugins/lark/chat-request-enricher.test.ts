@@ -32,26 +32,28 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
 }
 
 afterEach(() => {
-    larkContextStore.clear('GM');
+    larkContextStore.clear(rm());
 });
 
 describe('enrichLarkChatRequest', () => {
     it('reads is_canary + getBotAppIds from the lark Message in store', () => {
-        larkContextStore.put('GM', {
+        const message = rm();
+        larkContextStore.put(message, {
             basicChatInfo: { permission_config: { is_canary: true } },
             getBotAppIds: () => ['app-1', 'app-2'],
         } as unknown as Message);
-        const e = enrichLarkChatRequest(rm());
+        const e = enrichLarkChatRequest(message);
         expect(e.isCanary).toBe(true);
         expect(e.mentions).toEqual(['app-1', 'app-2']);
     });
 
     it('defaults is_canary=false when permission_config missing', () => {
-        larkContextStore.put('GM', {
+        const message = rm();
+        larkContextStore.put(message, {
             basicChatInfo: undefined,
             getBotAppIds: () => [],
         } as unknown as Message);
-        const e = enrichLarkChatRequest(rm());
+        const e = enrichLarkChatRequest(message);
         expect(e.isCanary).toBe(false);
         expect(e.mentions).toEqual([]);
     });

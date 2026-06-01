@@ -14,12 +14,12 @@ type Rule = (message: RuleMessage) => boolean;
 export const WhiteGroupCheck =
     (checkFunc: (chatInfo: LarkBaseChatInfo) => boolean): Rule =>
     (message) => {
-        const lark = larkContextStore.get(message.commonMessageId);
+        const lark = larkContextStore.get(message);
         const chatInfo = lark.basicChatInfo;
         return chatInfo ? checkFunc(chatInfo) : false;
     };
 
 export const IsAdmin: Rule = (message) => {
-    const lark = larkContextStore.get(message.commonMessageId);
+    const lark = larkContextStore.get(message);
     return lark.senderInfo?.is_admin ?? false;
 };

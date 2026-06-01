@@ -48,7 +48,7 @@ export const larkCommands: RuleConfig[] = [
     {
         rules: [EqualText('帮助'), TextMessageLimit, NeedRobotMention],
         handler: async (message) => {
-            const lark = larkContextStore.get(message.commonMessageId);
+            const lark = larkContextStore.get(message);
             replyTemplate(lark.messageId, 'ctp_AAYrltZoypBP', undefined);
         },
         comment: '给用户发送帮助信息',

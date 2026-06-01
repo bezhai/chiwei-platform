@@ -12,6 +12,6 @@ export function sendLarkUtilityRedirect(message: RuleMessage): void {
     const applyHint = TOOL_BOT_APPLY_URL
         ? `，请点击 ${TOOL_BOT_APPLY_URL} 申请将工具人添加到群聊`
         : '';
-    const lark = larkContextStore.get(message.commonMessageId);
+    const lark = larkContextStore.get(message);
     replyMessage(lark.messageId, `工具类功能已迁移至「赤尾工具人」${applyHint}`, true);
 }

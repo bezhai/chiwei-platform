@@ -10,7 +10,7 @@ export function enrichLarkChatRequest(message: RuleMessage): ChatRequestEnrichme
     if (message.channel !== 'lark') {
         return { isCanary: false, mentions: [] };
     }
-    const lark = larkContextStore.get(message.commonMessageId);
+    const lark = larkContextStore.get(message);
     return {
         isCanary: lark.basicChatInfo?.permission_config?.is_canary ?? false,
         mentions: lark.getBotAppIds(),

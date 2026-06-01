@@ -38,13 +38,14 @@ function rm(commonMessageId: string): RuleMessage {
 
 afterEach(() => {
     replyMessageMock.mockClear();
-    larkContextStore.clear('GM');
+    larkContextStore.clear(rm('GM'));
 });
 
 describe('sendLarkUtilityRedirect', () => {
     it('replies to the raw lark messageId fetched from the plugin store', () => {
-        larkContextStore.put('GM', { messageId: 'lark-raw-1' } as unknown as Message);
-        sendLarkUtilityRedirect(rm('GM'));
+        const message = rm('GM');
+        larkContextStore.put(message, { messageId: 'lark-raw-1' } as unknown as Message);
+        sendLarkUtilityRedirect(message);
         expect(replyMessageMock).toHaveBeenCalledTimes(1);
         const [target, text, inThread] = replyMessageMock.mock.calls[0] as unknown as [
             string,

@@ -347,7 +347,7 @@ export const CommandRule = (message: RuleMessage): boolean => {
 };
 
 export const CommandHandler = async (message: RuleMessage): Promise<void> => {
-    const lark = larkContextStore.get(message.commonMessageId);
+    const lark = larkContextStore.get(message);
     const text = message.clearText();
     for (const r of commandRules) {
         if (matchesCommandKey(text, r.key)) {

@@ -50,7 +50,7 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         // RuleMessage 与 Record<string, unknown> 无足够结构重叠，按 TS 提示经
         // unknown 中转再断言成索引字典，用于运行期确认渠道私有逃生口不存在。
         expect((rm as unknown as Record<string, unknown>).larkMessage).toBeUndefined();
-        larkContextStore.clear('GM');
+        larkContextStore.clear(rm);
     });
 
     it('neutral text/media tools delegate to the lark Message (behaviour unchanged)', () => {
@@ -64,14 +64,25 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         expect(rm.imageKeys()).toEqual(['img-1']);
         expect(rm.isDirect).toBe(false);
         expect(rm.createTime).toBe(1700000000000);
-        larkContextStore.clear('GM');
+        larkContextStore.clear(rm);
     });
 
-    it('puts the lark Message into the plugin store keyed by commonMessageId', () => {
+    it('puts the lark Message into the plugin store keyed by bot and commonMessageId', () => {
         const lark = fakeLark();
         const rm = buildLarkRuleMessage(lark, ids);
         // 飞书谓词/handler 经全局 commonMessageId 从 store 取回原 Message。
-        expect(larkContextStore.get(rm.commonMessageId)).toBe(lark);
-        larkContextStore.clear('GM');
+        expect(larkContextStore.get(rm)).toBe(lark);
+        larkContextStore.clear(rm);
+    });
+
+    it('separates the same commonMessageId across bots', () => {
+        const larkA = fakeLark({ messageId: 'raw-a' });
+        const larkB = fakeLark({ messageId: 'raw-b' });
+        const rmA = buildLarkRuleMessage(larkA, { ...ids, botName: 'bot-a' });
+        const rmB = buildLarkRuleMessage(larkB, { ...ids, botName: 'bot-b' });
+
+        larkContextStore.clear(rmA);
+        expect(larkContextStore.get(rmB)).toBe(larkB);
+        larkContextStore.clear(rmB);
     });
 });
