@@ -26,6 +26,8 @@ function parseArgs(argv) {
     apply: false,
     batchSize: 1000,
     limit: null,
+    startCreateTime: null,
+    startMessageId: '',
     skipResponses: false,
   };
 
@@ -45,6 +47,14 @@ function parseArgs(argv) {
       options.limit = Number.parseInt(argv[++i] ?? '', 10);
     } else if (arg.startsWith('--limit=')) {
       options.limit = Number.parseInt(arg.slice('--limit='.length), 10);
+    } else if (arg === '--start-create-time') {
+      options.startCreateTime = Number.parseInt(argv[++i] ?? '', 10);
+    } else if (arg.startsWith('--start-create-time=')) {
+      options.startCreateTime = Number.parseInt(arg.slice('--start-create-time='.length), 10);
+    } else if (arg === '--start-message-id') {
+      options.startMessageId = argv[++i] ?? '';
+    } else if (arg.startsWith('--start-message-id=')) {
+      options.startMessageId = arg.slice('--start-message-id='.length);
     } else if (arg === '-h' || arg === '--help') {
       printUsage();
       process.exit(0);
@@ -59,6 +69,12 @@ function parseArgs(argv) {
   if (options.limit !== null && (!Number.isInteger(options.limit) || options.limit < 1)) {
     throw new Error('--limit must be a positive integer');
   }
+  if (options.startCreateTime !== null && !Number.isInteger(options.startCreateTime)) {
+    throw new Error('--start-create-time must be an integer create_time cursor');
+  }
+  if (options.startCreateTime === null && options.startMessageId) {
+    throw new Error('--start-message-id requires --start-create-time');
+  }
 
   return options;
 }
@@ -72,6 +88,8 @@ Options:
   --apply                Commit the migration.
   --batch-size <n>       conversation_messages batch size, default 1000, max 5000.
   --limit <n>            Process at most n conversation_messages rows. Intended for rehearsal.
+  --start-create-time <n> Resume messages after this create_time cursor.
+  --start-message-id <id> Resume messages after this message_id cursor when create_time ties.
   --skip-responses       Skip agent_responses backfill.
 
 The script connects directly to PostgreSQL. It never uses kubectl, pods,
@@ -653,7 +671,7 @@ async function insertLarkMessages(client, rows) {
 }
 
 async function migrateMessages(client, options, chatMaps, userMaps) {
-  let cursor = { createTime: null, messageId: '' };
+  let cursor = { createTime: options.startCreateTime, messageId: options.startMessageId };
   let processed = 0;
   let inserted = 0;
   let skippedMissingChat = 0;
