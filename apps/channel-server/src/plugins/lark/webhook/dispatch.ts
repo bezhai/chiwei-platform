@@ -1,6 +1,5 @@
-// 飞书事件进入本进程入站链路的唯一收口。webhook 入口（plugins/lark/webhook）和
-// ③ 切流前仍存在的 internal HTTP route（internal-lark.route.ts）都调它，分发逻辑
-// 只此一份：
+// 飞书事件进入本进程入站链路的唯一收口。webhook 入口（plugins/lark/webhook）调它，
+// 分发逻辑只此一份：
 //   1. MongoDB 审计落库（fire-and-forget，不阻塞）
 //   2. 确保 handler 已注册进 EventRegistry
 //   3. 在 bot context（botName + traceId + lane）内按 event_type 找 handler 异步执行

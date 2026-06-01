@@ -5,7 +5,7 @@ Responsibilities (orchestrator):
   - Detect proactive scan messages and extract stimulus
   - Delegate image collection to _context_images.collect_images
   - Delegate message-shape construction to _context_messages.build_*
-  - Emit ConversationMessageContentSynced for any new TOS files
+  - Emit CommonMessageContentSynced for any new TOS files
 
 Image pipeline:
   1. feishu image_key -> process_image -> TOS URL
@@ -29,7 +29,7 @@ from app.chat._context_images import collect_images
 from app.chat._context_messages import build_group_messages, build_p2p_messages
 from app.chat.content_parser import parse_content
 from app.chat.quick_search import quick_search
-from app.domain.chat_events import ConversationMessageContentSynced
+from app.domain.chat_events import CommonMessageContentSynced
 from app.infra.image import ImageRegistry
 from app.runtime import emit
 
@@ -113,7 +113,7 @@ async def build_chat_context(
 
     # Persist new TOS files in background via dataflow (Phase 6 v4 Gap 5).
     if image_key_to_file:
-        await emit(ConversationMessageContentSynced(
+        await emit(CommonMessageContentSynced(
             message_id=message_id,
             messages_json=[
                 {"message_id": m.message_id, "content": m.content}

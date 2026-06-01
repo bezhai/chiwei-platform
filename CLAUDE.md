@@ -14,8 +14,7 @@ Monorepo，所有应用在 `apps/` 下。部署在 K8s `prod` namespace。
 apps/
   paas-engine/    # PaaS 引擎 (Go) - 管理应用构建和蓝绿部署
   lite-registry/  # 泳道注册表 (Go) - Watch K8s Services，提供泳道路由数据
-  channel-proxy/  # 飞书 webhook 入口 (Bun/TS) - 查 lane_routing 决定路由
-  channel-server/ # 飞书消息处理 (Bun/TS) - 同一镜像产出 3 个独立 Deployment（见下方映射表）
+  channel-server/ # 飞书 webhook 入口 + 消息处理 (Bun/TS) - 同一镜像产出 3 个独立 Deployment（见下方映射表）
   agent-service/  # AI 对话引擎 (Python) - 同一镜像产出 3 个独立 Deployment（见下方映射表）
   api-gateway/    # 反向代理入口 (Go)
 ```
@@ -39,8 +38,8 @@ apps/
 ### 飞书消息处理
 
 ```
-飞书 → channel-proxy:3003 (webhook 入口, 查 lane_routing 决定路由)
-     → channel-server:3000 (消息处理, 注入 x-lane 到 context)
+飞书 → api-gateway
+     → channel-server:3000 (webhook 入口 + 消息处理, 按 common 口径决定 lane)
      → agent-service:8000 (AI 对话, 工具调用)
      → RabbitMQ: safety_check → vectorize → recall 队列
      → chat-response-worker → channel-server → 飞书回复
@@ -144,7 +143,7 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 ## 部署命令
 
-部署命令必须显式写 `GIT_REF`，如 `make deploy APP=channel-proxy GIT_REF=main`，禁止省略。
+部署命令必须显式写 `GIT_REF`，如 `make deploy APP=channel-server GIT_REF=main`，禁止省略。
 
 ```bash
 make deploy APP=<app> [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1] [GIT_REF=main]  # 构建 → 等待 → 发布

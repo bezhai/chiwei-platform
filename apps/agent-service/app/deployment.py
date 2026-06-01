@@ -36,7 +36,7 @@ bind(vectorize_memory_abstract).to_app("vectorize-worker")
 # agent-service main process. Replaces arq state_sync_worker (Task 8).
 bind(sync_life_state_node).to_app("agent-service")
 
-# Phase 6 v4 Gap 5: durable consumer for ConversationMessageContentSynced runs
+# Phase 6 v4 Gap 5: durable consumer for CommonMessageContentSynced runs
 # in the agent-service main process — matches the old asyncio.create_task
 # placement (chat handler co-located DB write).
 bind(persist_tos_files_node).to_app("agent-service")

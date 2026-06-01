@@ -7,7 +7,7 @@ import { botContextMiddleware } from '@middleware/bot-context';
 import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import internalLarkRoutes from '@api/routes/internal-lark.route';
+import laneBindingsRoutes from '@api/routes/lane-bindings.route';
 import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
 import { larkIngressBots } from './lark-ingress-bots';
 
@@ -88,7 +88,7 @@ export class HttpServerManager {
         // 注册 /metrics 和健康检查路由
         this.app.route('', metricsApp);
         this.registerHealthCheck();
-        this.app.route('', internalLarkRoutes);
+        this.app.route('', laneBindingsRoutes);
 
         // 飞书 HTTP webhook 是被动入口，注册路由本身无副作用；实际流量是否进入
         // channel-server 由 api-gateway / 泳道路由决定。
@@ -108,7 +108,7 @@ export class HttpServerManager {
     private logAvailableRoutes(): void {
         console.info('Available routes:');
         console.info('  - /api/health (health check)');
-        console.info('  - /api/internal/lark-event (lane-proxy forwarded events)');
+        console.info('  - /api/lane-bindings (lane routing admin)');
     }
 
     /**

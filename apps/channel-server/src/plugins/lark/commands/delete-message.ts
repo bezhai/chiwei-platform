@@ -8,7 +8,7 @@ import { larkContextStore } from '../lark-context-store';
 // lark-only handler：入口适配 RuleMessage → 从 lark 私有 store 取回飞书 Message
 // 跑不变的内部逻辑；缺 store entry fail-loud，绝不静默。
 export async function deleteBotMessage(message: RuleMessage) {
-    return deleteBotMessageImpl(larkContextStore.get(message.internalMessageId));
+    return deleteBotMessageImpl(larkContextStore.get(message));
 }
 
 async function deleteBotMessageImpl(message: Message) {

@@ -1,3 +1,4 @@
-export { ConversationMessage } from './conversation-message';
-export { LarkUser } from './lark-user';
-export { LarkGroupChatInfo } from './lark-group-chat-info';
+export { CommonUser } from './common-user';
+export { CommonConversation } from './common-conversation';
+export { CommonMessage } from './common-message';
+export { CommonAgentResponse } from './common-agent-response';

@@ -8,7 +8,6 @@ WORKDIR /repo
 # Copy all workspace metadata and shared packages
 COPY package.json bun.lock ./
 COPY apps/channel-server/package.json ./apps/channel-server/package.json
-COPY apps/channel-proxy/package.json ./apps/channel-proxy/package.json
 COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/package.json
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/package.json
 COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/package.json

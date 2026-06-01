@@ -1,4 +1,10 @@
-# 身份层迁移 Runbook（C2）
+# 身份层迁移 Runbook（C2，已废弃）
+
+> **废弃说明**：本 runbook 是旧 identity_* 方案草案，不再作为当前迁移依据。
+> 当前实现以 `common_*` 作为平台无关层，Lark 映射保留在 `lark_*`，执行入口是
+> `scripts/db/run-common-layer-migration.sh` 与
+> `scripts/db/002-backfill-common-layer.mjs`。历史 UUIDv7 只能由 JS 脚本调用
+> `uuid` 包的 `v7()` 生成，禁止手写 UUIDv7 算法或在 SQL 中自造生成函数。
 
 > 把混合态身份层（旧 ULID + 飞书裸 id）迁到 UUIDv7 两层表（底层 `"user"`/`conversation`/`message`
 > + 每平台 `lark_*`）。配套 DDL：`channel-layer-identity-mapping-tables.sql`；数据模型：
@@ -46,8 +52,8 @@ length(message_id)=26 的 61649 行 ULID，按 `identity_message.internal_messag
   user_blacklist / user_group_binding 仍按 union_id 键，是否一并切 uuid 或保留 union_id 域，需定。
 - **P2 — conversation_messages 实时写入**：实测 last write 2026-05-30，**它仍在被实时写**。所以
   drain gate（步骤 ⑤）必须真关死入口，不能当冻结表跳过。迁移窗口期入站消息要么停、要么排队。
-- **P3 — UUIDv7 生成**：PG 无原生 uuidv7()，按 db-identity-resolver.ts 的 generateUuidV7（RFC 9562）
-  在迁移脚本里生成，禁用 gen_random_uuid()（那是 v4 无序，违背选型）。
+- **P3 — UUIDv7 生成（已改）**：PG 无原生 uuidv7()；当前迁移脚本只能通过
+  `uuid` 包的 `v7()` 生成，禁用手写算法和 `gen_random_uuid()`。
 - **P4 — 表名 `"user"`**：`user` 是 PG 保留字需全程双引号。是否改名 app_user/chat_user 规避，需定。
 - **P5 — Qdrant 回填策略**：point id = uuid5(NS, message_id)。message_id 从 ULID/om_ 改成 uuid 后，
   同一条消息的 point id 会变。两条路：① 改 _ids.py 让 uuid5 输入用 internal_message_id，重算全量
@@ -114,8 +120,8 @@ FROM conversation_messages;
 ```sql
 -- 2a 建表：执行 channel-layer-identity-mapping-tables.sql（coe 上先跑通）
 -- 2b lark_message + 底层 message：一次性脚本读 SELECT DISTINCT message_id（并入 root/reply 引用到的
---    所有 om_）-> generateUuidV7() 生成 uuid -> COPY 进 lark_message(om_id, internal_message_id)
---    与 message(internal_message_id, ...)。禁用 gen_random_uuid（v4 无序）。
+--    所有 om_）-> uuid.v7() 生成 uuid -> COPY 进 lark_message(om_id, internal_message_id)
+--    与 message(internal_message_id, ...)。禁用手写算法和 gen_random_uuid（v4 无序）。
 -- 2c lark_user + 底层 "user"：SELECT DISTINCT user_id(open_id) -> uuidv7；
 --    union_id/name/avatar 经 lark_user_open_id（open_id->union_id->lark_user profile）关联回填。
 -- 2d lark_conversation + 底层 conversation：SELECT DISTINCT chat_id -> uuidv7；

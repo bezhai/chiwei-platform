@@ -1,6 +1,6 @@
 // 入站 lane 消费者（lane-routing-redesign §4.3/§4.4）。lane channel-server 起这个
 // 消费者，**只**消费自己 lane 的 inbound_lane.{LANE}。当前重放完整入站链
-// （含 MessageTransferer、识图管线、BotChatPresence upsert 等前置副作用）；
+// （含 MessageTransferer、识图管线、common bot presence upsert 等前置副作用）；
 // 抽出真正后半段是已知待办，本文件暂不改变行为。
 //
 // 队列声明走 fail-closed 的 assertInboundLaneQueue（无 10s TTL、无 DLX 回 prod，§4.6）。

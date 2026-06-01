@@ -1,12 +1,10 @@
 import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
 
 // lane_routing：泳道路由绑定表（@chiwei 业务库）。一行 = 「某个绑定对象当前路由到
-// 哪个 lane」。本期 channel-server 只读 bot 维度（route_type='bot'）做泳道决策；写入面
-// （admin / `/ops bind`）随 channel-proxy 取消另行迁移（lane-routing-redesign Task 6），
-// 本文件只承载读取所需的实体定义。
+// 哪个 lane」。channel-server 读取 bot 维度（route_type='bot'）做泳道决策；
+// lane-bindings admin API 写入同一张表并主动失效本进程缓存。
 //
-// route_type 是字符串判别值（与现状 channel-proxy lane-resolver.ts 同口径，真实
-// @chiwei 库该列是 character varying）：
+// route_type 是字符串判别值（真实 @chiwei 库该列是 character varying）：
 //   'bot'   = 按全局 bot 标识绑定（本期唯一读取的维度）
 //   'chat'  = 按会话绑定（本期不读、不参与决策）
 //   'group' = 按群绑定（本期不读、不参与决策）

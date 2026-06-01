@@ -14,13 +14,13 @@ from typing import Annotated
 from app.runtime import Data, Key
 
 
-class ConversationMessageContentSynced(Data):
-    """Trigger background sync of message.content tos_file mappings.
+class CommonMessageContentSynced(Data):
+    """Trigger background sync of common message content tos_file mappings.
 
     Carries the (message_id, content) tuples from quick_search plus the
     image_key -> tos_file mapping discovered during ``build_chat_context``.
-    The ``persist_tos_files_node`` rewrites ``ConversationMessage.content``
-    rows so subsequent reads find tos_file references inline.
+    The ``persist_tos_files_node`` rewrites ``common_message.content`` rows so
+    subsequent reads find tos_file references inline.
 
     Persisted (NOT transient) — wire is ``.durable()`` so the DB write
     runs out of band of the chat stream; durable wires require a real pg

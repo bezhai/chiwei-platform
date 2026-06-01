@@ -8,23 +8,22 @@ import {
 import type { RuleMessage } from 'core/rules/rule-message';
 
 // makeTextReply 是 persona 文本主链路，决策五里唯一真正平台无关的规则。
-// 它必须直接消费 RuleMessage 上已是全局 internal_*_id 的身份字段（不再绕
+// 它必须直接消费 RuleMessage 上已是全局 common_*_id 的身份字段（不再绕
 // channel-binding context 退回飞书裸 ID）。ChatTrigger 带 channel + 全局 ID，
 // agent-service 无感知透传，ChatResponseSegment 原路带回。
 //
-// B2：is_canary / mentions 是飞书专属语义。core 的 reply.ts 不再读任何飞书
-// 旁挂对象（#228 的 channelContext.larkMessage 逃生口已删）。这些飞书富化
-// 字段经平台无关的「enricher 注入点」由 lark 插件提供：未注入时取中性默认
-// （is_canary=false / mentions=[]），core 永远看不到飞书对象。
+// B2：is_canary / persona_ids 是 channel 插件富化结果。core 的 reply.ts
+// 不读任何飞书旁挂对象（#228 的 channelContext.larkMessage 逃生口已删）。
+// 未注入时取中性默认（is_canary=false / persona_ids=[]）。
 
 function rm(over: Partial<RuleMessage> = {}): RuleMessage {
     return {
         channel: 'qq',
         botName: 'bot-q',
-        internalUserId: 'GU',
-        internalChatId: 'GC',
-        internalMessageId: 'GM',
-        internalRootId: 'GR',
+        commonUserId: 'GU',
+        commonConversationId: 'GC',
+        commonMessageId: 'GM',
+        commonRootMessageId: 'GR',
         isDirect: true,
         addressedTargetIds: [],
         createTime: 1,
@@ -45,7 +44,7 @@ afterEach(() => {
 });
 
 describe('buildChatRequestPayload (platform-neutral persona path)', () => {
-    it('uses global internal_*_id from RuleMessage, carries channel', () => {
+    it('uses global common_*_id from RuleMessage, carries channel', () => {
         const p = buildChatRequestPayload(rm(), 'sess-1', 'bot-q', undefined);
         expect(p.channel).toBe('qq');
         expect(p.message_id).toBe('GM');
@@ -56,9 +55,9 @@ describe('buildChatRequestPayload (platform-neutral persona path)', () => {
         expect(p.session_id).toBe('sess-1');
     });
 
-    it('root_id falls back to message_id when no internalRootId', () => {
+    it('root_id falls back to message_id when no commonRootMessageId', () => {
         const p = buildChatRequestPayload(
-            rm({ internalRootId: undefined }),
+            rm({ commonRootMessageId: undefined }),
             's',
             'b',
             undefined,
@@ -66,16 +65,16 @@ describe('buildChatRequestPayload (platform-neutral persona path)', () => {
         expect(p.root_id).toBe('GM');
     });
 
-    it('no enricher registered: is_canary=false, mentions=[] (no platform binding leaked)', () => {
+    it('no enricher registered: is_canary=false, persona_ids=[] (no platform binding leaked)', () => {
         const p = buildChatRequestPayload(rm({ channel: 'qq' }), 's', 'b', undefined);
         expect(p.is_canary).toBe(false);
-        expect(p.mentions).toEqual([]);
+        expect(p.persona_ids).toEqual([]);
     });
 
-    it('registered enricher supplies is_canary + mentions (lark provides this seam)', () => {
+    it('registered enricher supplies is_canary + persona_ids', () => {
         setChatRequestEnricher((m) => {
-            if (m.channel !== 'lark') return { isCanary: false, mentions: [] };
-            return { isCanary: true, mentions: ['app-1', 'app-2'] };
+            if (m.channel !== 'lark') return { isCanary: false, personaIds: [] };
+            return { isCanary: true, personaIds: ['persona-1', 'persona-2'] };
         });
         const p = buildChatRequestPayload(
             rm({ channel: 'lark', isDirect: false }),
@@ -86,17 +85,17 @@ describe('buildChatRequestPayload (platform-neutral persona path)', () => {
         expect(p.channel).toBe('lark');
         expect(p.is_p2p).toBe(false);
         expect(p.is_canary).toBe(true);
-        expect(p.mentions).toEqual(['app-1', 'app-2']);
+        expect(p.persona_ids).toEqual(['persona-1', 'persona-2']);
     });
 
     it('enricher only enriches its own channel; non-lark stays neutral', () => {
         setChatRequestEnricher((m) =>
             m.channel === 'lark'
-                ? { isCanary: true, mentions: ['x'] }
-                : { isCanary: false, mentions: [] },
+                ? { isCanary: true, personaIds: ['x'] }
+                : { isCanary: false, personaIds: [] },
         );
         const p = buildChatRequestPayload(rm({ channel: 'qq' }), 's', 'b', undefined);
         expect(p.is_canary).toBe(false);
-        expect(p.mentions).toEqual([]);
+        expect(p.persona_ids).toEqual([]);
     });
 });

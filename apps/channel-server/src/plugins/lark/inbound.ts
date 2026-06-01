@@ -35,17 +35,16 @@ function handleHandshake(raw: unknown): unknown | null {
     return null;
 }
 
-// 飞书回调安全靠 verification_token + encrypt_key 校验（解密 + token 比对），
-// 该校验在飞书 webhook 入口（channel-proxy）完成，事件抵达本服务时已解密验证。
-// 契约要求"没有签名机制的 channel 实现为恒 true 并说明为何安全"——进到本适配
-// 的事件已过 channel-proxy 的 token+encrypt_key 校验，故恒 true 安全。
+// 飞书回调安全靠 verification_token + encrypt_key 校验（解密 + token 比对）。
+// HTTP/WS 入口由 plugins/lark/webhook/ingress 使用飞书 SDK 承接，进到本适配
+// 的事件已经过 SDK 校验与解密，故这里保持纯转换。
 function verify(_raw: unknown): boolean {
     return true;
 }
 
 // 纯转换：飞书原生事件 → 通用 InboundMessage，零 I/O。内容映射、mention →
-// addressing_hints、字段抽取全是同步的；身份翻译（裸 ID → 全局 ID）不在这里，
-// 由下游 IdentityResolver 负责（契约把它留给 pipeline）。
+// addressing_hints、字段抽取全是同步的；common_* 投影不在这里做，由 lark
+// common projector 在入站接线点处理。
 function parse(raw: LarkReceiveMessage): InboundMessage | null {
     const event = raw;
     if (!event?.message || !event.message.message_id) return null;
@@ -82,7 +81,7 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
         bot_name: event.app_id ?? '',
         channel_message_id: event.message.message_id,
         channel_chat_id: event.message.chat_id,
-        channel_user_id: event.sender.sender_id?.union_id ?? 'unknown_sender',
+        channel_user_id: event.sender.sender_id?.open_id ?? 'unknown_sender',
         conversation_scope: conversationScope,
         thread_ref: threadRef,
         addressing_hints: addressingHints,

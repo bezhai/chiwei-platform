@@ -1,4 +1,7 @@
 import type { Message } from '@core/models/message';
+import type { RuleMessage } from '@core/rules/rule-message';
+
+export type LarkContextKey = Pick<RuleMessage, 'botName' | 'commonMessageId'>;
 
 // lark 插件私有的 keyed context store —— B2 杀掉 #228「larkMessage 旁挂在
 // RuleMessage 上」的逃生口后，飞书原始数据的唯一落脚点。
@@ -7,9 +10,12 @@ import type { Message } from '@core/models/message';
 // 必须拿到飞书 Message 富对象；但 core 的 RuleMessage 是平台无关契约，绝不能
 // 再携带任何飞书对象。机制是 lark→lark 的插件内部流转：
 //   - lark adapter 入站派生 RuleMessage 时，把该消息的飞书 Message put 进来，
-//     key = 该消息的全局 internalMessageId（跨 channel 唯一、稳定）。
+//     key = botName + 全局 commonMessageId。commonMessageId 跨 channel 唯一，但
+//     同一条飞书消息会被多个 bot 并行处理；必须带 botName，避免先结束的 bot
+//     clear 掉另一个 bot 的上下文。
 //   - 搬到 plugins/lark 的飞书谓词/handler 只拿到平台无关 RuleMessage，通过
-//     闭包用 message.internalMessageId 向本 store get(key) 取回飞书 Message，
+//     闭包用 message.botName + message.commonMessageId 向本 store get(key)
+//     取回飞书 Message，
 //     跑不变的内部逻辑。core 永远看不到 Message —— 它不在任何 core 类型/接口上。
 //   - 一次消息处理结束后 clear(key)，避免 Map 无限增长（内存泄漏）。
 //
@@ -18,23 +24,28 @@ import type { Message } from '@core/models/message';
 class LarkContextStore {
     private readonly byMessageId = new Map<string, Message>();
 
-    put(internalMessageId: string, larkMessage: Message): void {
-        this.byMessageId.set(internalMessageId, larkMessage);
+    private keyOf(key: LarkContextKey): string {
+        return JSON.stringify([key.botName, key.commonMessageId]);
     }
 
-    get(internalMessageId: string): Message {
-        const m = this.byMessageId.get(internalMessageId);
+    put(key: LarkContextKey, larkMessage: Message): void {
+        this.byMessageId.set(this.keyOf(key), larkMessage);
+    }
+
+    get(key: LarkContextKey): Message {
+        const m = this.byMessageId.get(this.keyOf(key));
         if (!m) {
             throw new Error(
                 `lark-only rule/handler invoked but no lark Message in store for ` +
-                    `message=${internalMessageId}; fail-loud — silent skip/degrade is forbidden`,
+                    `bot=${key.botName} message=${key.commonMessageId}; ` +
+                    `fail-loud — silent skip/degrade is forbidden`,
             );
         }
         return m;
     }
 
-    clear(internalMessageId: string): void {
-        this.byMessageId.delete(internalMessageId);
+    clear(key: LarkContextKey): void {
+        this.byMessageId.delete(this.keyOf(key));
     }
 }
 

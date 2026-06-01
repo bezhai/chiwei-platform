@@ -1,6 +1,6 @@
 """Internal timeline formatter for memory pipelines.
 
-Formats a list of ``ConversationMessage`` into ``[HH:MM] speaker: content``
+Formats common message records into ``[HH:MM] speaker: content``
 text.  Used by afterthought, drift, and relationship extraction.
 """
 

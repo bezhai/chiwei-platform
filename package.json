@@ -3,12 +3,15 @@
   "private": true,
   "workspaces": [
     "apps/channel-server",
-    "apps/channel-proxy",
     "apps/monitor-dashboard",
     "apps/monitor-dashboard-web",
     "apps/media-sync-worker",
     "packages/ts-shared",
     "packages/pixiv-client",
     "packages/lark-utils"
-  ]
+  ],
+  "dependencies": {
+    "pg": "^8.11.3",
+    "uuid": "^10.0.0"
+  }
 }

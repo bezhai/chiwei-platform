@@ -3,8 +3,18 @@ import { Hono } from 'hono';
 import type { BotConfig } from '@entities/bot-config';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
-mock.module('@plugins/lark/webhook/dispatch', () => ({
-    dispatchLarkEvent: mock(async () => undefined),
+mock.module('@dal/mongo/client', () => ({
+    insertEvent: async () => undefined,
+}));
+mock.module('@lark/events/event-registry', () => ({
+    EventHandler: () => () => undefined,
+    EventRegistry: {
+        getHandlerByEventType: () => undefined,
+    },
+    registerEventHandlerInstance: () => {},
+}));
+mock.module('@lark/events/handlers', () => ({
+    larkEventHandlers: {},
 }));
 
 const { HttpServerManager } = await import('./server');

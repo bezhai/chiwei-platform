@@ -22,6 +22,7 @@ from app.life.proactive import (
     get_unseen_messages,
     submit_proactive_chat,
 )
+from app.infra.config import settings
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.runtime.db import emit_tx, tx
@@ -34,12 +35,6 @@ CST = timezone(timedelta(hours=8))
 
 # Engineering cap on proactive messages per hour (LLM self-regulation is primary)
 HOURLY_PROACTIVE_LIMIT = 2
-
-TARGET_CHAT_IDS = [
-    "oc_a44255e98af05f1359aeb29eeb503536",
-    "oc_54713c53ff0b46cb9579d3695e16cbf8",
-    "oc_ab610a017d40e1413c6803ca6c6a11e0",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +62,8 @@ def _now_cst() -> datetime:
 
 
 def list_target_groups() -> list[str]:
-    """Return all groups to monitor."""
-    return TARGET_CHAT_IDS
+    """Return common_conversation_id values to monitor."""
+    return settings.glimpse_target_chat_ids
 
 
 async def _get_group_name(chat_id: str) -> str:

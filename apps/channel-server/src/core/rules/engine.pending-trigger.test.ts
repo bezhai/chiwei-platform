@@ -8,8 +8,8 @@ import type { RuleMessage } from './rule-message';
 // "待发 ChatTrigger 意图"登记，引擎把它折进唯一终态 RuleTerminalState
 // 的可选字段 pendingChatTrigger（与决策四单一终态出口同构、类型强制、
 // 并发安全 —— 每次 runRulesWith 调用一个本地 capture，不引入模块级
-// 可变 outbox）。调用方据 terminal.pendingChatTrigger 决定 storeMessage
-// 成功后是否发 MQ。本测试钉死：
+// 可变 outbox）。调用方据 terminal.pendingChatTrigger 决定 common/lark 入站消息
+// 写入成功后是否发 MQ。本测试钉死：
 //
 //   handler 调 ctx.registerPendingChatTrigger → 终态 responded 且
 //   terminal.pendingChatTrigger 带回该意图；
@@ -20,10 +20,10 @@ function msg(over: Partial<RuleMessage> = {}): RuleMessage {
     return {
         channel: 'lark',
         botName: 'bot-x',
-        internalUserId: 'U1',
-        internalChatId: 'C1',
-        internalMessageId: 'M1',
-        internalRootId: undefined,
+        commonUserId: 'U1',
+        commonConversationId: 'C1',
+        commonMessageId: 'M1',
+        commonRootMessageId: undefined,
         isDirect: true,
         addressedTargetIds: [],
         createTime: 100,
@@ -54,7 +54,7 @@ const fakePending: PendingChatTrigger = {
         is_canary: false,
         lane: undefined,
         enqueued_at: 0,
-        mentions: [],
+        persona_ids: [],
     },
     lane: undefined,
     dedupeKey: 'make_reply:M1',

@@ -19,6 +19,11 @@ def _env_int(key: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _env_list(key: str) -> list[str]:
+    raw = environ.get(key, "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Immutable application settings loaded from environment variables."""
@@ -120,6 +125,9 @@ class Settings:
     # -- Life Engine --
     life_engine_model: str = field(
         default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
+    )
+    glimpse_target_chat_ids: list[str] = field(
+        default_factory=lambda: _env_list("GLIMPSE_TARGET_CHAT_IDS")
     )
 
     # -- Identity drift --

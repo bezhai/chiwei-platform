@@ -22,7 +22,7 @@ POST /api/v1/apps/my-standalone-service/builds/
 
 ### 模式二：Monorepo 根目录构建
 
-适用于 Bun workspace 中的 TS 服务（如 channel-server、channel-proxy）或依赖 `packages/` 共享包的服务。所有 TS 服务统一使用此模式。
+适用于 Bun workspace 中的 TS 服务（如 channel-server、monitor-dashboard）或依赖 `packages/` 共享包的服务。所有 TS 服务统一使用此模式。
 
 - `context_dir` 设为 `.`（repo 根目录）
 - Kaniko 不使用 `--context-sub-path`，上下文为整个仓库

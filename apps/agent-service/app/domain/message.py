@@ -1,9 +1,7 @@
-"""Message Data — takes over the legacy conversation_messages table.
+"""Message Data used inside agent-service.
 
-Fields mirror ``app.data.models.ConversationMessage`` 1:1 (minus the auto-
-increment ``id`` column, which the migrator's adoption-mode ignores). The
-table is owned by pre-existing migrations; this Data class is the new typed
-interface for reading/writing through runtime.persist / runtime.query.
+``message_id`` is the common message id. This Data object is transient; DB
+reads are owned by ``app.data.queries.messages`` against ``common_message``.
 """
 from __future__ import annotations
 
@@ -12,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated
 from app.runtime import Data, Key
 
 if TYPE_CHECKING:
-    from app.data.models import ConversationMessage
+    from app.data.message_record import CommonMessageRecord
 
 
 class Message(Data):
@@ -30,14 +28,10 @@ class Message(Data):
     response_id: str | None = None
 
     class Meta:
-        existing_table = "conversation_messages"
-        # Real PK is ``message_id``; there is no ``dedup_hash`` column,
-        # so the persist layer must ON CONFLICT on message_id instead.
-        dedup_column = "message_id"
+        transient = True
 
     @classmethod
-    def from_cm(cls, cm: ConversationMessage) -> Message:
-        """Lift a legacy ``ConversationMessage`` ORM row into a ``Message`` Data."""
+    def from_record(cls, cm: CommonMessageRecord) -> Message:
         return cls(
             message_id=cm.message_id,
             user_id=cm.user_id,

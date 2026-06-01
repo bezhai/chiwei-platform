@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { AppDataSource, ConversationMessage, LarkGroupChatInfo, DiaryEntry, WeeklyReview } from '../db';
+import { AppDataSource, CommonConversation, CommonMessage, DiaryEntry, WeeklyReview } from '../db';
 
 const app = new Hono();
 
@@ -23,14 +23,18 @@ app.get('/api/activity/overview', async (c) => {
   const since = msAgo(days);
   const todayMs = todayStartMs();
 
-  const repo = AppDataSource.getRepository(ConversationMessage);
+  const repo = AppDataSource.getRepository(CommonMessage);
 
   // Single query, all aggregation in JS
   const rows = await repo
     .createQueryBuilder('cm')
-    .select(['cm.chat_id', 'cm.create_time', 'cm.role'])
-    .where('cm.create_time >= :since', { since })
-    .getMany();
+    .select([
+      'cm.common_conversation_id AS chat_id',
+      'cm.event_time AS create_time',
+      'cm.role AS role',
+    ])
+    .where('cm.event_time >= :since', { since })
+    .getRawMany();
 
   // Compute summary from rows
   const todayChats = new Set<string>();
@@ -47,10 +51,11 @@ app.get('/api/activity/overview', async (c) => {
   // Group name lookup
   const chatIds = [...new Set(rows.map((r) => r.chat_id))];
   const groupInfos = chatIds.length > 0
-    ? await AppDataSource.getRepository(LarkGroupChatInfo)
+    ? await AppDataSource.getRepository(CommonConversation)
         .createQueryBuilder('g')
-        .where('g.chat_id IN (:...chatIds)', { chatIds })
-        .getMany()
+        .select(['g.common_conversation_id AS chat_id', 'g.display_name AS name'])
+        .where('g.common_conversation_id IN (:...chatIds)', { chatIds })
+        .getRawMany()
     : [];
   const nameMap = new Map(groupInfos.map((g) => [g.chat_id, g.name]));
 

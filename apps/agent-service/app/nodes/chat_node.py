@@ -73,7 +73,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
     router = MessageRouter()
     persona_ids = await router.route(
         chat_id=t.chat_id or "",
-        mentions=list(t.mentions),
+        persona_ids=list(t.persona_ids),
         bot_name=t.bot_name or "",
         is_p2p=t.is_p2p,
         is_proactive=t.is_proactive,
@@ -115,7 +115,7 @@ async def chat_node(req: ChatRequest) -> None:
     Phases (内部分块，不拆 node):
       1. prep: fetch + parse + gray + guard + pre_task 启动
       2. fetch-empty short-circuit: emit 1 段 "未找到" + return
-      3. resolve response_bot_name + agent_responses 行更新
+      3. resolve response_bot_name + common_agent_response 行更新
       4. base_payload 构造（含 lane）
       5. 主循环 + 段边界 pre-safety + 中段 emit
       6. final 段 + pre-safety blocked 路径
@@ -158,7 +158,7 @@ async def chat_node(req: ChatRequest) -> None:
         pre_task.cancel()
         return
 
-    # 3. resolve response_bot_name + 更新 agent_responses 行
+    # 3. resolve response_bot_name + 更新 common_agent_response 行
     response_bot_name = await resolve_bot_name_for_persona(
         req.persona_id, req.chat_id or "",
     )

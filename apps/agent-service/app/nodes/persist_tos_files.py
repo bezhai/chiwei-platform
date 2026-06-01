@@ -12,15 +12,15 @@ import logging
 
 from app.chat.content_parser import parse_content
 from app.data.queries import update_messages_tos_files
-from app.domain.chat_events import ConversationMessageContentSynced
+from app.domain.chat_events import CommonMessageContentSynced
 from app.runtime import node
 
 logger = logging.getLogger(__name__)
 
 
 @node
-async def persist_tos_files_node(e: ConversationMessageContentSynced) -> None:
-    """Persist tos_file mappings into ConversationMessage.content rows.
+async def persist_tos_files_node(e: CommonMessageContentSynced) -> None:
+    """Persist tos_file mappings into common_message.content rows.
 
     Internal failures are logged and swallowed — this is fire-and-forget
     background sync, the data is still recoverable on the next chat turn

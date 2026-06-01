@@ -87,6 +87,10 @@ export class Message {
         return this.metadata.basicChatInfo;
     }
 
+    get groupChatInfo() {
+        return this.metadata.groupChatInfo;
+    }
+
     get senderInfo(): LarkUser | undefined {
         return this.metadata.senderInfo;
     }

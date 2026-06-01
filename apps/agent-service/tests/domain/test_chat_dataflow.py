@@ -18,7 +18,7 @@ def test_chat_trigger_optional_fields_default_none():
     assert t.lane is None
     assert t.is_proactive is False
     assert t.bot_name is None
-    assert t.mentions == []
+    assert t.persona_ids == []
     assert t.enqueued_at is None
 
 

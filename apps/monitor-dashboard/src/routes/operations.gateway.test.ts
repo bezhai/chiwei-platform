@@ -11,23 +11,33 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test';
 // ---------------------------------------------------------------------------
 
 // mock paas-client，记录每次转发的 path/body，并返回可控的下游响应
-const calls: Array<{ method: string; path: string; body?: unknown; delBody?: unknown }> = [];
+const calls: Array<{
+  method: string;
+  path: string;
+  body?: unknown;
+  extraHeaders?: unknown;
+  delBody?: unknown;
+}> = [];
 let nextResponse: unknown = {};
 
 mock.module('../paas-client', () => {
-  const record = (method: string) => async (path: string, bodyOrParams?: unknown) => {
-    calls.push({ method, path, body: bodyOrParams });
+  const record = (method: string) => async (
+    path: string,
+    bodyOrParams?: unknown,
+    extraHeaders?: unknown,
+  ) => {
+    calls.push({ method, path, body: bodyOrParams, extraHeaders });
     return nextResponse;
   };
   // del 的 body 是第 4 个位置参（前 3 个是 path/params/extraHeaders），
   // 单独记录 delBody 以钉死 reason 确实被转发到下游 body 而不是丢在 query。
   const recordDel = async (
     path: string,
-    _params?: unknown,
-    _extraHeaders?: unknown,
+    params?: unknown,
+    extraHeaders?: unknown,
     body?: unknown,
   ) => {
-    calls.push({ method: 'DELETE', path, delBody: body });
+    calls.push({ method: 'DELETE', path, body: params, extraHeaders, delBody: body });
     return nextResponse;
   };
   return {
@@ -37,7 +47,7 @@ mock.module('../paas-client', () => {
       put: record('PUT'),
       del: recordDel,
     },
-    larkClient: {
+    channelClient: {
       get: record('GET'),
       post: record('POST'),
       put: record('PUT'),
@@ -159,6 +169,58 @@ describe('gateway-rules 中转：下游路径映射', () => {
     });
     expect(res.status).toBe(200);
     expect(calls[0]).toMatchObject({ method: 'POST', path: '/api/paas/gateway-rules/r1:set-weights' });
+  });
+});
+
+describe('lane-bindings 中转：泳道 header 透传给 channel-server', () => {
+  it('GET lane-bindings forwards x-lane as x-ctx-lane', async () => {
+    nextResponse = [];
+    const res = await operationsApp.request('/api/ops/lane-bindings', {
+      headers: { 'x-lane': 'ppe-migrate-histori' },
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0]).toMatchObject({
+      method: 'GET',
+      path: '/api/lane-bindings',
+      extraHeaders: { 'x-ctx-lane': 'ppe-migrate-histori' },
+    });
+  });
+
+  it('POST lane-bindings forwards x-ctx-lane', async () => {
+    nextResponse = { ok: true };
+    const res = await operationsApp.request('/api/ops/lane-bindings', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-ctx-lane': 'ppe-migrate-histori',
+      },
+      body: JSON.stringify({
+        route_type: 'bot',
+        route_key: 'dev',
+        lane_name: 'ppe-migrate-histori',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      path: '/api/lane-bindings',
+      extraHeaders: { 'x-ctx-lane': 'ppe-migrate-histori' },
+    });
+  });
+
+  it('DELETE lane-bindings forwards x-lane', async () => {
+    nextResponse = { ok: true };
+    const res = await operationsApp.request('/api/ops/lane-bindings?type=bot&key=dev', {
+      method: 'DELETE',
+      headers: { 'x-lane': 'ppe-migrate-histori' },
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0]).toMatchObject({
+      method: 'DELETE',
+      path: '/api/lane-bindings',
+      body: { type: 'bot', key: 'dev' },
+      extraHeaders: { 'x-ctx-lane': 'ppe-migrate-histori' },
+    });
   });
 });
 

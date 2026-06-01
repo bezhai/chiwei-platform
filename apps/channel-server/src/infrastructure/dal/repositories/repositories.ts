@@ -7,8 +7,11 @@ import {
     LarkUser,
     LarkUserOpenId,
     UserBlacklist,
-    ConversationMessage,
-    AgentResponse,
+    CommonUser,
+    CommonConversation,
+    CommonMessage,
+    CommonAgentResponse,
+    LarkMessage,
 } from '@entities';
 import { UserGroupBindingRepository as CustomUserGroupBindingRepository } from './user-group-binding-repository';
 
@@ -22,5 +25,8 @@ export const LarkUserOpenIdRepository = AppDataSource.getRepository(LarkUserOpen
 export const UserGroupBindingRepository = new CustomUserGroupBindingRepository(AppDataSource);
 
 export const UserBlacklistRepository = AppDataSource.getRepository(UserBlacklist);
-export const ConversationMessageRepository = AppDataSource.getRepository(ConversationMessage);
-export const AgentResponseRepository = AppDataSource.getRepository(AgentResponse);
+export const CommonUserRepository = AppDataSource.getRepository(CommonUser);
+export const CommonConversationRepository = AppDataSource.getRepository(CommonConversation);
+export const CommonMessageRepository = AppDataSource.getRepository(CommonMessage);
+export const CommonAgentResponseRepository = AppDataSource.getRepository(CommonAgentResponse);
+export const LarkMessageRepository = AppDataSource.getRepository(LarkMessage);

@@ -1,19 +1,16 @@
 """Message routing — decide which personas should reply to a message.
 
-Renamed from ``chat/router.py`` in Phase 6 v4 to disambiguate from
-``nodes/chat_node:route_chat_node`` (graph fan-out). This module's
-``MessageRouter.route()`` filters which persona_ids should reply based
-on @mentions; the fan-out node decides how to dispatch downstream.
-
-Phase 2: @mention routing only.
-Phase 3 extension point: no-@ generic judge, proactive scanning.
+Channel-specific addressing is resolved before agent-service. For Lark,
+channel-server maps mentioned bot app_ids to common persona_ids and sends
+those ids in ``ChatTrigger.persona_ids``. agent-service never reads Lark
+credentials or app ids.
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.data.queries import resolve_mentioned_personas, resolve_persona_id
+from app.data.queries import resolve_persona_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +21,7 @@ class MessageRouter:
     async def route(
         self,
         chat_id: str,
-        mentions: list[str],
+        persona_ids: list[str],
         bot_name: str,
         is_p2p: bool,
         is_proactive: bool = False,
@@ -33,7 +30,7 @@ class MessageRouter:
 
         Args:
             chat_id: conversation ID
-            mentions: @mentioned bot app_id values
+            persona_ids: channel-resolved persona IDs
             bot_name: the bot that grabbed the MQ lock
             is_p2p: whether this is a private chat
             is_proactive: whether this is a proactive trigger message
@@ -47,14 +44,13 @@ class MessageRouter:
             logger.info("%s route: bot_name=%s -> persona_id=%s", label, bot_name, pid)
             return [pid]
 
-        if mentions:
-            persona_ids = await resolve_mentioned_personas(mentions)
+        if persona_ids:
+            deduped = list(dict.fromkeys(persona_ids))
             logger.info(
-                "Group @mention route: mentions=%s -> persona_ids=%s",
-                mentions,
-                persona_ids,
+                "Group addressed route: persona_ids=%s",
+                deduped,
             )
-            return persona_ids
+            return deduped
 
-        # Group without @ -> no reply (Phase 3 extension point)
+        # Group without channel-resolved persona target -> no reply.
         return []

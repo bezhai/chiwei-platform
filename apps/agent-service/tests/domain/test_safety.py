@@ -42,14 +42,11 @@ def test_pre_safety_verdict_default_passes():
     assert v.detail is None
 
 
-def test_post_safety_request_adopts_agent_responses():
-    """PostSafetyRequest 用 adoption mode adopt agent_responses 表。"""
+def test_post_safety_request_is_transient():
+    """PostSafetyRequest is a transient trigger; DB state is common_agent_response."""
     meta = getattr(PostSafetyRequest, "Meta", None)
     assert meta is not None
-    assert getattr(meta, "existing_table", None) == "agent_responses"
-    assert getattr(meta, "dedup_column", None) == "session_id"
-    # 不能 transient（durable wire 要 row）
-    assert getattr(meta, "transient", False) is False
+    assert getattr(meta, "transient", False) is True
 
 
 def test_post_safety_request_key_is_session_id():

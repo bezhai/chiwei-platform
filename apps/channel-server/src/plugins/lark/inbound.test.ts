@@ -67,7 +67,7 @@ describe('larkInbound.handleHandshake', () => {
 });
 
 describe('larkInbound.verify', () => {
-    it('is constant-true (handshake verified at channel-proxy)', () => {
+    it('is constant-true after webhook ingress verification', () => {
         expect(larkInbound.verify({})).toBe(true);
     });
 });
@@ -80,7 +80,7 @@ describe('larkInbound.parse', () => {
         expect(msg.channel).toBe(LARK);
         expect(msg.channel_message_id).toBe('om_msg1');
         expect(msg.channel_chat_id).toBe('oc_chat1');
-        expect(msg.channel_user_id).toBe('on_user');
+        expect(msg.channel_user_id).toBe('ou_user');
         expect(msg.conversation_scope).toBe('direct');
         expect(msg.thread_ref).toEqual({
             selfChannelMessageId: 'om_msg1',

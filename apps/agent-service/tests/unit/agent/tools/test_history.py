@@ -377,48 +377,25 @@ class TestSearchGroupHistoryQdrantFilterContract:
 
 class TestListGroupMembers:
     @pytest.mark.asyncio
-    async def test_empty_group(self):
+    async def test_not_available_from_common_layer(self):
         from app.agent.tools.history import list_group_members
 
         mock_context = MagicMock()
         mock_context.context = AgentContext(chat_id="test_chat")
 
-        with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch(
-                "app.data.queries.find_group_members",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-        ):
+        with patch("app.agent.tools.history.get_runtime", return_value=mock_context):
             result = await list_group_members.coroutine()
-            assert "无成员" in result
+            assert result["kind"] == "tool_error"
+            assert "not available for common conversation" in result["message"]
 
     @pytest.mark.asyncio
-    async def test_formats_members_with_roles(self):
+    async def test_role_filter_still_returns_common_layer_error(self):
         from app.agent.tools.history import list_group_members
 
         mock_context = MagicMock()
         mock_context.context = AgentContext(chat_id="test_chat")
 
-        member1 = MagicMock(is_owner=True, is_manager=False)
-        user1 = MagicMock(name="Owner")
-        member2 = MagicMock(is_owner=False, is_manager=True)
-        user2 = MagicMock(name="Admin")
-        member3 = MagicMock(is_owner=False, is_manager=False)
-        user3 = MagicMock(name="Normal")
-
-        with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
-            patch(
-                "app.data.queries.find_group_members",
-                new_callable=AsyncMock,
-                return_value=[(member1, user1), (member2, user2), (member3, user3)],
-            ),
-        ):
-            result = await list_group_members.coroutine()
-            assert "3人" in result
-            assert "[群主]" in result
-            assert "[管理员]" in result
-            assert "Owner" in result
-            assert "Normal" in result
+        with patch("app.agent.tools.history.get_runtime", return_value=mock_context):
+            result = await list_group_members.coroutine(role="manager")
+            assert result["kind"] == "tool_error"
+            assert "channel-private member tables" in result["message"]

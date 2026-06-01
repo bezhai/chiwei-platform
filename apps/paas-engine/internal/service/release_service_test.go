@@ -333,8 +333,8 @@ func TestCreateOrUpdateRelease_RejectsCoeWithMissingRequiredKey(t *testing.T) {
 func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
 	// prod lane 不触发 coe RequiredKeys 校验
 	bundle := &domain.ConfigBundle{
-		Name: "pg-main",
-		Keys: map[string]string{"POSTGRES_HOST": "postgres"},
+		Name:         "pg-main",
+		Keys:         map[string]string{"POSTGRES_HOST": "postgres"},
 		RequiredKeys: map[string][]string{"coe": {"POSTGRES_HOST", "POSTGRES_DB"}},
 	}
 	app := &domain.App{Name: "agent-service", ImageRepoName: "agent-service", Port: 8000, ConfigBundles: []string{"pg-main"}}
@@ -351,40 +351,40 @@ func TestCreateOrUpdateRelease_AllowsProdEvenWithCoeRequiredKeys(t *testing.T) {
 	}
 }
 
-func TestCreateOrUpdateRelease_RejectsChannelProxyToCoe(t *testing.T) {
+func TestCreateOrUpdateRelease_RejectsProdOnlyServiceToCoe(t *testing.T) {
 	app := &domain.App{
-		Name:               "channel-proxy",
-		ImageRepoName:      "channel-proxy",
+		Name:               "prod-only-service",
+		ImageRepoName:      "prod-only-service",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 	}
 	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
 	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
-		AppName:  "channel-proxy",
+		AppName:  "prod-only-service",
 		Lane:     "coe-foo",
 		ImageTag: "1.0.0",
 	})
 	if err == nil {
-		t.Fatal("expected reject for channel-proxy to coe lane")
+		t.Fatal("expected reject for prod-only-service to coe lane")
 	}
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("must wrap ErrInvalidInput: %v", err)
 	}
-	if !strings.Contains(err.Error(), "channel-proxy") || !strings.Contains(err.Error(), "coe") {
+	if !strings.Contains(err.Error(), "prod-only-service") || !strings.Contains(err.Error(), "coe") {
 		t.Fatalf("error must mention app and lane class: %v", err)
 	}
 }
 
-func TestCreateOrUpdateRelease_AllowsChannelProxyToProd(t *testing.T) {
+func TestCreateOrUpdateRelease_AllowsProdOnlyServiceToProd(t *testing.T) {
 	app := &domain.App{
-		Name:               "channel-proxy",
-		ImageRepoName:      "channel-proxy",
+		Name:               "prod-only-service",
+		ImageRepoName:      "prod-only-service",
 		Port:               3003,
 		AllowedLaneClasses: []string{"prod"},
 	}
 	svc := newReleaseSvcWithBundles(t, []*domain.App{app}, nil)
 	_, err := svc.CreateOrUpdateRelease(context.Background(), CreateReleaseRequest{
-		AppName:  "channel-proxy",
+		AppName:  "prod-only-service",
 		Lane:     "prod",
 		ImageTag: "1.0.0",
 	})

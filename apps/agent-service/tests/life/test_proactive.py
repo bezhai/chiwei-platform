@@ -1,9 +1,9 @@
-"""Proactive appends Message + ChatTrigger to outbox via emit_tx.
+"""Proactive appends MessageRequest + ChatTrigger to outbox via emit_tx.
 
-Invariant: After writing a ConversationMessage, proactive appends two
-Data instances in order: ``Message.from_cm(msg)`` first (so memory v4
-sees the row), then ``ChatTrigger(...)`` (so dispatcher fires
-route_chat_node fan-outs into ChatRequest).
+Invariant: After writing a CommonMessage, proactive appends
+``MessageRequest(message_id=...)`` first (so vectorize hydrates common_message),
+then ``ChatTrigger(...)`` (so dispatcher fires route_chat_node fan-outs into
+ChatRequest).
 """
 from __future__ import annotations
 
@@ -12,12 +12,14 @@ from contextlib import asynccontextmanager
 import pytest
 
 from app.domain.chat_dataflow import ChatTrigger
-from app.domain.message import Message
+from app.domain.message_request import MessageRequest
+
+CHAT_ID = "00000000-0000-7000-8000-000000000003"
 
 
 @pytest.mark.asyncio
 async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
-    """submit_proactive_chat → DB write → outbox(Message) → outbox(ChatTrigger)."""
+    """submit_proactive_chat -> DB write -> MessageRequest -> ChatTrigger."""
     from app.life import proactive as pro
 
     captured: list = []
@@ -55,25 +57,24 @@ async def test_proactive_submit_emits_message_then_chat_trigger(monkeypatch):
     monkeypatch.setattr(app.infra.rabbitmq, "current_lane", lambda: "prod")
 
     session_id = await pro.submit_proactive_chat(
-        chat_id="c1",
+        chat_id=CHAT_ID,
         persona_id="p1",
         target_message_id=None,
         stimulus="hi",
     )
 
     assert len(inserted) == 1, f"expect 1 insert_proactive_message call, got {inserted}"
-    assert len(captured) == 2, f"expect 2 appends (Message, ChatTrigger), got {captured}"
+    assert len(captured) == 2, (
+        f"expect 2 appends (MessageRequest, ChatTrigger), got {captured}"
+    )
 
     msg_emitted = captured[0]
-    assert isinstance(msg_emitted, Message)
-    assert msg_emitted.chat_id == "c1"
-    assert msg_emitted.bot_name == "赤尾"
-    assert msg_emitted.message_type == "proactive_trigger"
-    assert msg_emitted.role == "user"
+    assert isinstance(msg_emitted, MessageRequest)
 
     trigger = captured[1]
     assert isinstance(trigger, ChatTrigger)
-    assert trigger.chat_id == "c1"
+    assert trigger.message_id == msg_emitted.message_id
+    assert trigger.chat_id == CHAT_ID
     assert trigger.bot_name == "赤尾"
     assert trigger.is_proactive is True
     assert trigger.user_id == "__proactive__"

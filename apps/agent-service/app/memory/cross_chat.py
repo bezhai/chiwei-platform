@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from inner_shared.dynamic_config import dynamic_config
 
 from app.chat.content_parser import parse_content
-from app.data.models import ConversationMessage
+from app.data.message_record import CommonMessageRecord
 from app.data.queries import (
     find_bot_names_for_persona,
     find_cross_chat_messages,
@@ -48,9 +48,9 @@ def _max_total_messages() -> int:
 
 
 def _filter_direct_interactions(
-    messages: list[ConversationMessage],
+    messages: list[CommonMessageRecord],
     user_id: str,
-) -> list[ConversationMessage]:
+) -> list[CommonMessageRecord]:
     """Keep only trigger user's messages and assistant replies to those messages."""
     user_message_ids = {
         msg.message_id
@@ -67,15 +67,15 @@ def _filter_direct_interactions(
 
 
 def _group_and_trim(
-    messages: list[ConversationMessage],
+    messages: list[CommonMessageRecord],
     max_pairs_per_chat: int = _MAX_PAIRS_PER_CHAT,
-) -> dict[str, list[ConversationMessage]]:
+) -> dict[str, list[CommonMessageRecord]]:
     """Group messages by chat_id, keep last N interaction pairs per chat."""
-    by_chat: dict[str, list[ConversationMessage]] = defaultdict(list)
+    by_chat: dict[str, list[CommonMessageRecord]] = defaultdict(list)
     for msg in messages:
         by_chat[msg.chat_id].append(msg)
 
-    trimmed: dict[str, list[ConversationMessage]] = {}
+    trimmed: dict[str, list[CommonMessageRecord]] = {}
     for chat_id, chat_msgs in by_chat.items():
         pair_count = sum(1 for m in chat_msgs if m.role == "user")
         if pair_count <= max_pairs_per_chat:
@@ -116,7 +116,7 @@ def _relative_time(ts_ms: int) -> str:
 
 
 def _format_interactions(
-    grouped: dict[str, list[ConversationMessage]],
+    grouped: dict[str, list[CommonMessageRecord]],
     username: str,
     chat_names: dict[str, str],
 ) -> str:

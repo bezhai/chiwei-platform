@@ -14,17 +14,17 @@ type BaselineGatewayRule struct {
 	Request UpsertGatewayRuleRequest
 }
 
-// BaselineGatewayRules 返回 api-gateway 的 6 条系统基线路由规则，从历史
-// apps/api-gateway/config/routes.yaml 1:1 平迁而来。
+// BaselineGatewayRules 返回 api-gateway 的系统基线路由规则。
 //
-// 这 6 条是系统基线——api-gateway 没有它们业务路径会全断，所以由 paas-engine
+// 这些规则是系统基线——api-gateway 没有它们业务路径会全断，所以由 paas-engine
 // 在启动时幂等 ensure 保证存在，不依赖人工记得灌。
 //
-// 关键约定：所有 target.lane 全部留空——空表示"跟随请求 x-lane 透传"，
-// 跟当前 routes.yaml 的泳道路由行为完全一致，绝不写死 prod。
+// 关键约定：普通业务路径 target.lane 留空，表示"跟随请求 x-lane 透传"。
+// webhook 入口强制指向 prod channel-server，lane 决策只能在 channel-server 内部发生。
+// lane-bindings 也固定打到 prod channel-server，保证绑定变更清的是入口决策点缓存。
 func BaselineGatewayRules() []BaselineGatewayRule {
 	enabled := true
-	rule := func(name, prefix, service string, port int, stripPrefix string) BaselineGatewayRule {
+	rule := func(name, prefix, service string, port int, stripPrefix string, lane string) BaselineGatewayRule {
 		return BaselineGatewayRule{
 			Name: name,
 			Request: UpsertGatewayRuleRequest{
@@ -38,9 +38,8 @@ func BaselineGatewayRules() []BaselineGatewayRule {
 				},
 				Targets: []domain.GatewayTarget{
 					{
-						Service: service,
-						// lane 留空 = 跟随请求 x-lane 透传（平迁现状）。
-						Lane:        "",
+						Service:     service,
+						Lane:        lane,
 						Port:        port,
 						Weight:      100,
 						StripPrefix: stripPrefix,
@@ -51,16 +50,16 @@ func BaselineGatewayRules() []BaselineGatewayRule {
 	}
 
 	return []BaselineGatewayRule{
-		rule("default-paas-engine-api", "/api/paas/", "paas-engine", 8080, ""),
-		rule("default-channel-proxy-lark", "/api/lark/", "channel-proxy", 3003, ""),
-		rule("default-channel-proxy-webhook", "/webhook/", "channel-proxy", 3003, ""),
-		rule("default-agent-service-api", "/api/agent/", "agent-service", 8000, "/api/agent"),
-		rule("default-monitor-dashboard-api", "/dashboard/api/", "monitor-dashboard", 3002, ""),
-		rule("default-monitor-dashboard-web", "/dashboard/", "monitor-dashboard-web", 80, ""),
+		rule("default-paas-engine-api", "/api/paas/", "paas-engine", 8080, "", ""),
+		rule("default-channel-server-webhook", "/webhook/", "channel-server", 3000, "", "prod"),
+		rule("default-channel-server-lane-bindings", "/api/lane-bindings/", "channel-server", 3000, "", "prod"),
+		rule("default-agent-service-api", "/api/agent/", "agent-service", 8000, "/api/agent", ""),
+		rule("default-monitor-dashboard-api", "/dashboard/api/", "monitor-dashboard", 3002, "", ""),
+		rule("default-monitor-dashboard-web", "/dashboard/", "monitor-dashboard-web", 80, "", ""),
 	}
 }
 
-// EnsureBaseline 幂等地确保 6 条基线规则存在：by name 不存在才插入，已存在则不动。
+// EnsureBaseline 幂等地确保基线规则存在：by name 不存在才插入，已存在则不动。
 //
 // 幂等语义（保护落在 repo 层的 InsertIfAbsent / OnConflict DoNothing）：
 //   - 不存在 -> 插入（version=1）

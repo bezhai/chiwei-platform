@@ -54,7 +54,7 @@ export interface AddressingHint {
 // ---- 通用入站消息 ----
 
 // 所有 InboundAdapter.parse 都产出这同一个结构。身份字段带 channel_ 前缀，
-// 表示是"channel 内的 ID"，还没经 IdentityResolver 翻译成全局 ID。
+// 表示是"channel 内的 ID"；各插件接线点负责把它投影到 common_*。
 export interface InboundMessage {
     channel: string;
     bot_name: string;
@@ -90,16 +90,16 @@ export interface AddressingDecision {
     reason: string;
 }
 
-// botIdentity 契约约束（跨 channel 通用，不含任何渠道专有命名）：
-// 调用方传入的 botIdentity 必须与该 channel 的 AddressingHint.targetId 处在
-// 同一 ID 空间——decide 是靠 hint.targetId === botIdentity 判断"这条冲 bot 来"。
+// botMentionTarget 契约约束（跨 channel 通用，不含任何渠道专有命名）：
+// 调用方传入的 botMentionTarget 必须与该 channel 的 AddressingHint.targetId 处在
+// 同一 ID 空间——decide 是靠 hint.targetId === botMentionTarget 判断"这条冲 bot 来"。
 // 每个 channel 的 InboundAdapter 自己决定 targetId 用哪种 ID 口径，调用方就
 // 必须按同口径取 bot 标识。传错 ID 空间会让 @bot 永不命中、bot 静默不响应。
 // 各 channel 的具体 ID 口径写在该 channel 自己的 adapter 内部注释 + 等价性
 // 测试里，契约层不感知（见各 channel 插件的入站/寻址测试，如
 // plugins/lark/inbound.test.ts、plugins/lark/addressing.test.ts）。
 export interface AddressingPolicy {
-    decide(msg: InboundMessage, botIdentity: string): AddressingDecision;
+    decide(msg: InboundMessage, botMentionTarget: string): AddressingDecision;
 }
 
 // 把"不响应必须带可记录 reason"从约定变成强制。channel-server 不直接看

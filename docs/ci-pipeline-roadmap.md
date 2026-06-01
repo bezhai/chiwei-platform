@@ -39,7 +39,6 @@ Git Push → GitPoller (60s轮询 GitHub API)
 | paas-engine | go | `go test ./... -v -count=1` |
 | agent-service | python | `uv run pytest tests/ -v` |
 | channel-server | bun | `bun test` |
-| channel-proxy | bun | `bun test` |
 | tool-service | python | `uv run pytest tests/ -v` |
 
 API 端点:

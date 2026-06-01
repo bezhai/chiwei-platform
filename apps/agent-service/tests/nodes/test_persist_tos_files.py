@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.domain.chat_events import ConversationMessageContentSynced
+from app.domain.chat_events import CommonMessageContentSynced
 from app.nodes.persist_tos_files import persist_tos_files_node
 
 
@@ -17,7 +17,7 @@ async def test_persist_tos_files_skips_when_no_messages():
         new=AsyncMock(return_value=0),
     ) as update_mock:
         await persist_tos_files_node(
-            ConversationMessageContentSynced(
+            CommonMessageContentSynced(
                 message_id="m1",
                 messages_json=[],
                 image_key_to_file={},
@@ -36,7 +36,7 @@ async def test_persist_tos_files_swallows_exceptions():
     ):
         # Must not raise.
         await persist_tos_files_node(
-            ConversationMessageContentSynced(
+            CommonMessageContentSynced(
                 message_id="m1",
                 messages_json=[
                     {

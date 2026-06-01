@@ -1,6 +1,6 @@
 # 赤尾平台 · 服务拓扑现状
 
-> 范围:`apps/` 下 13 个可部署单元(含一镜像多服务)+ 1 个注入式 sidecar + `packages/` 4 个共享包。
+> 范围:`apps/` 下 12 个可部署单元(含一镜像多服务)+ 1 个注入式 sidecar + `packages/` 4 个共享包。
 > 这是**现状**梳理,不含目标架构和改造方案。术语在文中随用随解释。
 
 ---
@@ -9,7 +9,7 @@
 
 一句话:这是一个跑在 K8s `prod` namespace 的 monorepo,核心业务是让虚拟人「赤尾(三姐妹)」在飞书里像真人一样聊天和自主活动。围绕这个核心,平台自己还长出了一整套**部署系统**(自建 PaaS)、**运维后台**、和**泳道路由**(让一份代码能并行跑多套隔离环境用于测试)。
 
-所以这 13 个服务并不在同一个层面,它们分属五个不同的「面」:
+所以这 12 个服务并不在同一个层面,它们分属五个不同的「面」:
 
 - **数据面**:真正处理消息、跑 AI 对话的链路。
 - **AI 工具后端**:agent 推理时会调用的外部能力(执行代码、处理图片)。
@@ -21,7 +21,7 @@
 
 ---
 
-## 二、13 个服务全景
+## 二、12 个服务全景
 
 外部流量(飞书 webhook、运维浏览器、开发机)统一从 **api-gateway** 进集群,它按规则把请求分流到对应服务,并盖上泳道 header。
 
@@ -35,8 +35,7 @@ flowchart TB
     GW["api-gateway<br/>外部统一入口 · 按规则分流 + 盖 lane header"]
 
     subgraph data["数据面 · 消息处理 + AI 对话"]
-        CP["channel-proxy<br/>webhook 门卫"]
-        CS["channel-server<br/>渠道核心 + 规则引擎"]
+        CS["channel-server<br/>webhook 入口 + 渠道核心 + 规则引擎"]
         AS["agent-service<br/>AI 对话 + 生命引擎"]
         CRW["chat-response-worker<br/>发回复"]
         RW["recall-worker<br/>撤回"]
@@ -66,7 +65,7 @@ flowchart TB
 
     Feishu -->|webhook| GW
     Browser -->|/dashboard| GW
-    GW --> CP --> CS --> AS
+    GW --> CS --> AS
     GW --> DW
     GW --> DB --> PE
     AS -. chat_response .-> CRW --> Feishu
@@ -91,16 +90,14 @@ flowchart TB
 sequenceDiagram
     participant U as 飞书用户
     participant GW as api-gateway
-    participant CP as channel-proxy
     participant CS as channel-server
     participant MQ as RabbitMQ
     participant AS as agent-service
     participant CRW as chat-response-worker
 
     U->>GW: webhook 事件
-    GW->>CP: 转发 /webhook/
-    CP->>CP: 查 lane_routing 决定走哪个泳道
-    CP->>CS: POST /api/internal/lark-event(注入 x-lane)
+    GW->>CS: 转发 /webhook/
+    CS->>CS: 验签解析,收敛 common 口径并决定 lane
     Note over CS: 渠道契约链:解析→判定是否响应→换全局身份→规则引擎→存储
     CS->>MQ: publish chat_request(带 channel + 全局 ID)
     MQ->>AS: 消费 chat_request
@@ -112,8 +109,7 @@ sequenceDiagram
 
 三个服务各自的角色,用人话说:
 
-- **channel-proxy** 是「门卫」。它只做一件事:收到 webhook,查一下这个 bot / 群该走哪个泳道,然后原样转发给对应的 channel-server。它不懂业务,不做决策。
-- **channel-server** 是「渠道核心 + 规则引擎」。它已经做过一轮多渠道抽象(PR #228):入站走一条钉死顺序的契约链——adapter 解析成平台无关的 `InboundMessage` → `AddressingPolicy` 判定要不要回 → `IdentityResolver` 把渠道内 ID 换成全局内部 ID → 平台无关的规则引擎分发 → 存消息 → 发 `chat_request`。**但这层抽象目前是泄漏的**(详见第十节)。
+- **channel-server** 是「webhook 入口 + 渠道核心 + 规则引擎」。飞书 webhook 经 api-gateway 直达它；入站走一条钉死顺序的契约链——插件验签解析 → 收敛成 common 口径 → 平台无关的规则引擎分发 → 存消息 → 发 `chat_request`。
 - **agent-service** 是「大脑」。它消费 `chat_request`,把赤尾的人格、当前状态、相关记忆「组装」成上下文喂给大模型,模型推理过程中可以调工具(搜索、画图、翻记忆、执行代码),最后把回复分段流式地丢回 `chat_response` 队列。
 
 除了「回复」这条主线,赤尾还有两条后台循环(详见 `docs/chiwei-system-design.md`):**生命引擎**(每分钟 tick 一次,决定她此刻在干嘛、什么心情,偶尔主动翻群搭话)和**记忆沉淀**(聊完回味、每晚做梦压缩记忆)。这两条循环目前都跑在 agent-service 主进程里。
@@ -202,7 +198,7 @@ flowchart LR
 ```
 
 - **paas-engine** 是这条线的核心,自建 PaaS 引擎。它本职是**构建**(用 Kaniko 在 K8s 里跑构建 Job,推 Harbor)和**部署**(创建 K8s Deployment + Service,支持蓝绿)。但它还累积了不少别的职责:网关规则的增删改查、动态配置(运行时下发给业务 SDK 的模型/阈值/开关)、ConfigBundle(部署时的环境变量集)、CI 流水线、日志查询(Loki),以及一个能对**业务库**跑 SQL 和 DDL/DML 审批的 ops 网关。
-- **monitor-dashboard** 是无状态的 **BFF(给前端用的后端)+ 审计网关**。它本身不做任何控制决策,只是:校验授权 → 把请求转发给 paas-engine(或 channel-proxy 做泳道绑定)→ 把每次写操作记进审计日志库。它存在的核心价值是「统一审计入口」和「给前端收口」。
+- **monitor-dashboard** 是无状态的 **BFF(给前端用的后端)+ 审计网关**。它本身不做任何控制决策,只是:校验授权 → 把请求转发给 paas-engine(或 channel-server 做泳道绑定)→ 把每次写操作记进审计日志库。它存在的核心价值是「统一审计入口」和「给前端收口」。
 - **monitor-dashboard-web** 是纯静态 React SPA,Nginx 托管,把 `/dashboard/api/*` 反代到 api-gateway。
 
 ---
@@ -218,7 +214,7 @@ flowchart LR
 | channel-server | **chat-response-worker** | 消费 chat_response 队列,发飞书回复 |
 | agent-service | **agent-service** | HTTP + 多个 durable 消费者 + 生命引擎 cron |
 | agent-service | **vectorize-worker** | 消费向量化队列,embedding → Qdrant |
-| 其余 10 个 | 各自 1 个同名 Deployment | — |
+| 其余 9 个 | 各自 1 个同名 Deployment | — |
 
 `lane-sidecar` 不在此表——它不是独立 Deployment,而是注入到上面每个业务 pod 里的容器。
 
@@ -245,8 +241,7 @@ flowchart LR
 
 | 服务 | 栈 | 面 | 一句话职责 |
 |---|---|---|---|
-| channel-proxy | Bun/TS | 数据面 | webhook 门卫,查泳道后转发,不做业务 |
-| channel-server | Bun/TS | 数据面 | 渠道契约链 + 规则引擎 + 存储,决定是否触发 AI(多渠道抽象泄漏,见第十节) |
+| channel-server | Bun/TS | 数据面 | webhook 入口 + 渠道契约链 + 规则引擎 + 存储,决定是否触发 AI |
 | recall-worker | Bun/TS | 数据面 | 消费 recall,调飞书撤回消息 |
 | chat-response-worker | Bun/TS | 数据面 | 消费 chat_response,发飞书回复 + 存储 |
 | agent-service | Python | 数据面 | AI 对话引擎 + 生命引擎 + 记忆系统 |

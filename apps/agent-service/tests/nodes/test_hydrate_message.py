@@ -1,8 +1,8 @@
 """hydrate_message @node: MessageRequest -> Message | None.
 
 Two branches to cover:
-  * row present in pg -> returns ``Message`` with every field pass-through
-    via ``Message.from_cm``;
+  * common row present in pg -> returns ``Message`` with every field
+    pass-through via ``Message.from_record``;
   * row missing -> returns ``None`` (runtime drops None before the
     durable edge, so the next node never sees a stale request).
 
@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.data.models import ConversationMessage
+from app.data.message_record import CommonMessageRecord
 from app.domain.message import Message
 from app.domain.message_request import MessageRequest
 
@@ -33,11 +33,12 @@ async def _fake_tx():
     yield
 
 
-def _cm() -> ConversationMessage:
-    """Full 13-field CM so we can assert every field is carried through."""
-    return ConversationMessage(
+def _record() -> CommonMessageRecord:
+    """Full common message record so every field pass-through is covered."""
+    return CommonMessageRecord(
         message_id="m1",
         user_id="u1",
+        username="alice",
         content="hello",
         role="user",
         root_message_id="r1",
@@ -56,7 +57,7 @@ async def test_hydrates_existing_message():
     with patch(
         "app.nodes.hydrate_message.find_message_by_id",
         new_callable=AsyncMock,
-        return_value=_cm(),
+        return_value=_record(),
     ):
         msg = await hydrate_mod.hydrate_message(MessageRequest(message_id="m1"))
 

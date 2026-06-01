@@ -585,7 +585,6 @@ func (s *PipelineService) resolveUnitTestCommand(svcName string) (runtime, cmd s
 		"paas-engine":   {"go", "cd apps/paas-engine && go test ./... -v -count=1"},
 		"agent-service": {"python", "cd apps/agent-service && uv run pytest tests/ -v"},
 		"channel-server": {"bun", "cd apps/channel-server && bun test"},
-		"channel-proxy":  {"bun", "cd apps/channel-proxy && bun test"},
 		"tool-service":  {"python", "cd apps/tool-service && uv run pytest tests/ -v"},
 	}
 	if info, ok := knownServices[svcName]; ok {
