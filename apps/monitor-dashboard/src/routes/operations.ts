@@ -61,7 +61,7 @@ app.post('/api/ops/db-query', async (c) => {
 
 /** GET /api/ops/lane-bindings — 列出泳道绑定 */
 app.get('/api/ops/lane-bindings', async (c) => {
-  const data = await channelClient.get('/api/lane-bindings');
+  const data = await channelClient.get('/api/lane-bindings', undefined, laneHeaders(c));
   return c.json(data);
 });
 
@@ -122,7 +122,7 @@ app.post('/api/ops/lane-bindings', async (c) => {
     route_type,
     route_key,
     lane_name,
-  });
+  }, laneHeaders(c));
   return c.json(data);
 });
 
@@ -133,7 +133,7 @@ app.delete('/api/ops/lane-bindings', async (c) => {
   if (!type || !key) {
     return c.json({ message: 'type and key query params are required' }, 400);
   }
-  const data = await channelClient.del('/api/lane-bindings', { type, key });
+  const data = await channelClient.del('/api/lane-bindings', { type, key }, laneHeaders(c));
   return c.json(data);
 });
 
