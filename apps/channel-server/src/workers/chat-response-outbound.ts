@@ -43,16 +43,17 @@ export async function dispatchChatResponseOutbound(
             // proactive：有 root 回复 root，无 root 新发到会话。
             if (input.larkRootId) {
                 return cap.reply(
-                    { selfChannelMessageId: input.larkRootId, inThread: true },
+                    { selfChannelMessageId: input.larkRootId },
                     content,
                     ctx,
                 );
             }
             return cap.sendText({ channelId: input.larkChatId }, content, ctx);
         }
-        // 非 proactive：回复触发消息本身（留在话题串内）。
+        // 非 proactive：回复触发消息本身。不要默认开启飞书 thread；是否进 thread
+        // 必须由调用方显式给 inThread=true，避免普通聊天回复被挂进话题串。
         return cap.reply(
-            { selfChannelMessageId: input.larkMessageId, inThread: true },
+            { selfChannelMessageId: input.larkMessageId },
             content,
             ctx,
         );

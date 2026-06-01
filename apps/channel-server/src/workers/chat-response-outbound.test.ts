@@ -62,7 +62,7 @@ describe('dispatchChatResponseOutbound', () => {
         expect(calls.sendText.length).toBe(0);
         expect(calls.reply.length).toBe(1);
         expect(calls.reply[0].thread.selfChannelMessageId).toBe('om_trigger');
-        expect(calls.reply[0].thread.inThread).toBe(true);
+        expect(calls.reply[0].thread.inThread).toBeUndefined();
         // content = AI 原始 markdown（飞书化由能力端口内部做）
         expect(calls.reply[0].content).toEqual([{ kind: 'text', text: '赤尾的回复 ![p](1.png)' }]);
         // ctx：registry 用全局 id；groupConversationId 飞书裸；群聊 resolveMentions=true
@@ -84,6 +84,7 @@ describe('dispatchChatResponseOutbound', () => {
 
         expect(calls.reply.length).toBe(1);
         expect(calls.reply[0].thread.selfChannelMessageId).toBe('om_root');
+        expect(calls.reply[0].thread.inThread).toBeUndefined();
         expect(calls.sendText.length).toBe(0);
     });
 
