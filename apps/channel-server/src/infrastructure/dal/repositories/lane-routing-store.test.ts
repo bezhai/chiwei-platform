@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
-// 钉死 TypeOrmLaneRoutingStore.findBotLane 的 wire 契约：lane_routing.route_type
+// 钉死 TypeOrmLaneRoutingStore 的 wire 契约：lane_routing.route_type
 // 列在真实 @chiwei 业务库里是 character varying（字符串），值是 'bot' / 'chat' /
 // 'group'。生产查询写法必须是 WHERE route_type = 'bot' 字符串。
 //
@@ -25,15 +25,14 @@ interface CapturedWhere {
 let capturedWheres: CapturedWhere[] = [];
 let nextRow: { lane_name: string } | null = null;
 
-const findOneMock = mock(
-    async (opts: { where: CapturedWhere }): Promise<unknown> => {
-        capturedWheres.push(opts.where);
-        return nextRow;
-    },
-);
+const findOneMock = mock(async (opts: { where: CapturedWhere }): Promise<unknown> => {
+    capturedWheres.push(opts.where);
+    return nextRow;
+});
 
 mock.module('@ormconfig', () => ({
     default: {
+        createEntityManager: mock(() => ({})),
         getRepository: () => ({ findOne: findOneMock }),
     },
 }));
@@ -46,7 +45,7 @@ mock.module('@entities/lane-routing', () => ({
 
 const { TypeOrmLaneRoutingStore } = await import('./lane-routing-store');
 
-describe('TypeOrmLaneRoutingStore.findBotLane — route_type wire 契约（字符串 bot）', () => {
+describe('TypeOrmLaneRoutingStore — route_type wire 契约（字符串 chat/bot）', () => {
     beforeEach(() => {
         capturedWheres = [];
         nextRow = null;
@@ -70,6 +69,22 @@ describe('TypeOrmLaneRoutingStore.findBotLane — route_type wire 契约（字�
         expect(typeof where.route_type).toBe('string');
         // route_key 透传全局 bot 标识；is_active 只取生效绑定。
         expect(where.route_key).toBe('赤尾');
+        expect(where.is_active).toBe(true);
+    });
+
+    it('chat 查询条件 route_type 必须是字符串字面量 chat，route_key 是 common_conversation_id', async () => {
+        nextRow = { lane_name: 'ppe-chat' };
+
+        const store = new TypeOrmLaneRoutingStore();
+        const lane = await store.findChatLane('018f-common-chat');
+
+        expect(lane).toBe('ppe-chat');
+        expect(capturedWheres).toHaveLength(1);
+
+        const where = capturedWheres[0]!;
+        expect(where.route_type).toBe('chat');
+        expect(typeof where.route_type).toBe('string');
+        expect(where.route_key).toBe('018f-common-chat');
         expect(where.is_active).toBe(true);
     });
 

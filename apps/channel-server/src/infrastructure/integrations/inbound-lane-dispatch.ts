@@ -21,6 +21,7 @@ export interface InboundDispatchContext {
     currentLane: string;
     channel: string;
     botGlobalId: string;
+    commonConversationId?: string;
     eventType: string;
     globalMessageId: string;
     traceId: string;
@@ -29,17 +30,16 @@ export interface InboundDispatchContext {
 }
 
 // 返回 true = 已投到别的 lane，handler 应 return；false = 本地继续处理。
-export async function dispatchInboundIfNeeded(
-    ctx: InboundDispatchContext,
-): Promise<boolean> {
+export async function dispatchInboundIfNeeded(ctx: InboundDispatchContext): Promise<boolean> {
     const flagEnabled = await isInboundLaneDispatchEnabled();
     const decision = await resolveInboundDispatch({
         flagEnabled,
         currentLane: ctx.currentLane,
         channel: ctx.channel,
         botGlobalId: ctx.botGlobalId,
-        resolveLane: (channel, botGlobalId) =>
-            getLaneRouter().resolveLane(channel, botGlobalId),
+        commonConversationId: ctx.commonConversationId,
+        resolveLane: (channel, botGlobalId, commonConversationId) =>
+            getLaneRouter().resolveLane(channel, botGlobalId, commonConversationId),
     });
 
     if (decision.action === 'local') {

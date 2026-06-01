@@ -1,9 +1,9 @@
-// 平台无关的泳道决策能力（lane-routing-redesign §3）。本期只做 bot 维度：
-// 在 lark common projector 收敛出 common id 之后，基于平台无关的「全局 Bot
-// 概念」算出这条消息该走哪个 lane。
+// 平台无关的泳道决策能力（lane-routing-redesign §3）。在 lark common
+// projector 收敛出 common id 之后，基于平台无关的「会话 / 全局 Bot」
+// 概念算出这条消息该走哪个 lane。
 //
-// 决策优先级本期就两档（§3.2）：
-//   bot 维度命中 lane_routing  >  prod（默认）
+// 决策优先级：
+//   chat 维度命中 lane_routing > bot 维度命中 lane_routing > prod（默认）
 //
 // 平台无关红线（§3.2）：resolveLane 的入参只认 channel + 全局 bot 标识，
 // 绝不出现任何飞书原始消息体字段名。平台插件负责把渠道内标识收敛成 common
@@ -11,7 +11,7 @@
 //
 // 与 ORM 解耦：本模块只依赖结构型接口 LaneRoutingStore，不 import 任何
 // TypeORM 实体或数据源，单测可纯跑。生产运行时由 infrastructure 层提供一个
-// TypeORM 实现（读 lane_routing 表 route_type=Bot）注入进来。
+// TypeORM 实现（读 lane_routing 表）注入进来。
 //
 // 缓存：沿用 lane_routing 决策已验证的 30s 内存缓存语义——决策走
 // 本地缓存，不为每条消息打 DB；缓存 key 含 channel + 全局 bot 标识，跨 channel
@@ -26,8 +26,11 @@ const DEFAULT_LANE = 'prod';
 const CACHE_TTL_MS = 30_000;
 
 // LaneRouter 对底层存储的全部需求。结构型接口，不绑 ORM。
-// 本期只有 bot 维度，所以只暴露按全局 bot 标识查 lane 这一个能力。
 export interface LaneRoutingStore {
+    // 按平台无关 common_conversation_id 查 lane（对应 lane_routing 表
+    // route_type=chat AND route_key=commonConversationId AND is_active=true）。
+    // 没有绑定返回 null。
+    findChatLane(commonConversationId: string): Promise<string | null>;
     // 按全局 bot 标识查它当前绑定的 lane（对应 lane_routing 表
     // route_type=Bot AND route_key=botGlobalId AND is_active=true）。
     // 没有绑定返回 null。
@@ -48,10 +51,14 @@ export class LaneRouter {
         private readonly now: () => number = Date.now,
     ) {}
 
-    // 平台无关的泳道决策：只认 channel + 全局 bot 标识。
+    // 平台无关的泳道决策：只认 channel + common conversation + 全局 bot 标识。
     // 命中绑定返回 lane_name，未命中返回 prod 默认。
-    async resolveLane(channel: string, botGlobalId: string): Promise<string> {
-        const cacheKey = `${channel}:${botGlobalId}`;
+    async resolveLane(
+        channel: string,
+        botGlobalId: string,
+        commonConversationId: string | undefined,
+    ): Promise<string> {
+        const cacheKey = `${channel}:${commonConversationId ?? '-'}:${botGlobalId}`;
         const now = this.now();
 
         const cached = this.cache.get(cacheKey);
@@ -59,8 +66,17 @@ export class LaneRouter {
             return cached.lane;
         }
 
-        const bound = await this.store.findBotLane(botGlobalId);
-        const lane = bound ?? DEFAULT_LANE;
+        const bound =
+            commonConversationId !== undefined
+                ? await this.store.findChatLane(commonConversationId)
+                : null;
+        if (bound !== null) {
+            this.cache.set(cacheKey, { lane: bound, expiry: now + CACHE_TTL_MS });
+            return bound;
+        }
+
+        const botBound = await this.store.findBotLane(botGlobalId);
+        const lane = botBound ?? DEFAULT_LANE;
         this.cache.set(cacheKey, { lane, expiry: now + CACHE_TTL_MS });
         return lane;
     }

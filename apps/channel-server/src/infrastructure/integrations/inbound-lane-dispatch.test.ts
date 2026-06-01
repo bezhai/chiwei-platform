@@ -19,10 +19,15 @@ mock.module('./inbound-lane-flag', () => ({
     isInboundLaneDispatchEnabled: async () => flagValue,
 }));
 
-let resolveLaneImpl: (channel: string, bot: string) => Promise<string> = async () => 'prod';
+let resolveLaneImpl: (
+    channel: string,
+    bot: string,
+    commonConversationId: string | undefined,
+) => Promise<string> = async () => 'prod';
 mock.module('./lane-router-runtime', () => ({
     getLaneRouter: () => ({
-        resolveLane: (channel: string, bot: string) => resolveLaneImpl(channel, bot),
+        resolveLane: (channel: string, bot: string, commonConversationId: string | undefined) =>
+            resolveLaneImpl(channel, bot, commonConversationId),
     }),
 }));
 
@@ -32,6 +37,7 @@ const baseInput = {
     currentLane: 'prod',
     channel: 'lark',
     botGlobalId: 'chiwei',
+    commonConversationId: '018f-chat',
     eventType: 'im.message.receive_v1',
     globalMessageId: 'gmid-1',
     traceId: 'trace-1',
@@ -85,5 +91,18 @@ describe('dispatchInboundIfNeeded', () => {
             bot_name: 'chiwei',
             params: baseInput.params,
         });
+    });
+
+    it('passes commonConversationId into lane resolution for chat binding', async () => {
+        flagValue = true;
+        let seenConversationId: string | undefined;
+        resolveLaneImpl = async (_channel, _bot, commonConversationId) => {
+            seenConversationId = commonConversationId;
+            return 'prod';
+        };
+
+        await dispatchInboundIfNeeded(baseInput);
+
+        expect(seenConversationId).toBe('018f-chat');
     });
 });

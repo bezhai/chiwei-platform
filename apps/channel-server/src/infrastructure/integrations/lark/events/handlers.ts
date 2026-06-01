@@ -201,6 +201,7 @@ export class LarkEventHandlers {
                     currentLane: getLane() ?? 'prod',
                     channel: botConfig.channel,
                     botGlobalId: botName ?? '',
+                    commonConversationId: projection.commonConversationId,
                     eventType: 'im.message.receive_v1',
                     globalMessageId: projection.commonMessageId,
                     traceId: context.getTraceId(),
