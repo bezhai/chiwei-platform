@@ -5,7 +5,7 @@
 //   flag on + lane!=本进程lane → dispatch（投 inbound_lane.{lane}，本地不再处理）
 //
 // resolveLane 由调用方注入（生产=getLaneRouter().resolveLane），决策只看平台无关
-// 的 channel + 全局 bot 标识（§3.2 平台无关红线）。
+// 的 channel + common conversation + 全局 bot 标识（§3.2 平台无关红线）。
 
 export interface InboundDispatchInput {
     // 动态 flag「是否启用处理层分流」（§3 / Task 10）。默认 off = 现状行为。
@@ -14,8 +14,13 @@ export interface InboundDispatchInput {
     currentLane: string;
     channel: string;
     botGlobalId: string;
+    commonConversationId?: string;
     // 平台无关的 lane 决策（注入，便于测试 + 解耦 ORM）。
-    resolveLane: (channel: string, botGlobalId: string) => Promise<string>;
+    resolveLane: (
+        channel: string,
+        botGlobalId: string,
+        commonConversationId: string | undefined,
+    ) => Promise<string>;
 }
 
 export interface InboundDispatchDecision {
@@ -32,7 +37,11 @@ export async function resolveInboundDispatch(
         return { action: 'local', lane: input.currentLane };
     }
 
-    const lane = await input.resolveLane(input.channel, input.botGlobalId);
+    const lane = await input.resolveLane(
+        input.channel,
+        input.botGlobalId,
+        input.commonConversationId,
+    );
 
     // lane == 本进程 lane（含 prod 占绝大多数）：本地处理，绝不投 MQ（§4.2 prod 不发
     // MQ；也防把消息投给自己造成双跑）。

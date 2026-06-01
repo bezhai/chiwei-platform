@@ -12,6 +12,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
             currentLane: 'prod',
             channel: 'lark',
             botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
             resolveLane: async () => {
                 called = true;
                 return 'ppe-foo';
@@ -27,6 +28,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
             currentLane: 'prod',
             channel: 'lark',
             botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
             resolveLane: async () => 'prod',
         });
         expect(r.action).toBe('local');
@@ -39,6 +41,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
             currentLane: 'prod',
             channel: 'lark',
             botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
             resolveLane: async () => 'ppe-foo',
         });
         expect(r.action).toBe('dispatch');
@@ -51,8 +54,25 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
             currentLane: 'ppe-foo',
             channel: 'lark',
             botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
             resolveLane: async () => 'ppe-foo',
         });
         expect(r.action).toBe('local');
+    });
+
+    it('flag on → 把 commonConversationId 传给 resolveLane', async () => {
+        let seenConversationId: string | undefined;
+        await resolveInboundDispatch({
+            flagEnabled: true,
+            currentLane: 'prod',
+            channel: 'lark',
+            botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
+            resolveLane: async (_channel, _bot, commonConversationId) => {
+                seenConversationId = commonConversationId;
+                return 'prod';
+            },
+        });
+        expect(seenConversationId).toBe('018f-chat');
     });
 });

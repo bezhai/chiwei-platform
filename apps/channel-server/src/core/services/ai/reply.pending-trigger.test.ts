@@ -25,6 +25,7 @@ mock.module('@integrations/rabbitmq', () => ({
 }));
 mock.module('@cache/redis-client', () => ({
     setNx: setNxMock,
+    evalScript: mock(async () => 1),
     exists: mock(async () => 0),
 }));
 mock.module('@repositories/repositories', () => ({

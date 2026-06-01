@@ -38,7 +38,8 @@ interface MessageRow {
   chat_name: string;
   chat_type: string;
   bot_name?: string | null;
-  content: string;
+  content: unknown;
+  content_text?: string | null;
   message_type?: string | null;
   root_message_id: string;
   reply_message_id?: string | null;
@@ -175,6 +176,87 @@ const fallbackCopy = (text: string, successMessage: string) => {
     message.error('复制失败');
   }
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function renderContentItem(item: unknown): string {
+  if (typeof item === 'string') return item;
+  if (!isRecord(item)) return item == null ? '' : String(item);
+
+  const kind = typeof item.kind === 'string' ? item.kind : 'unsupported';
+  const text = nonEmptyString(item.text);
+  if (text) return text;
+
+  const meta = isRecord(item.meta) ? item.meta : undefined;
+  const fileName = nonEmptyString(meta?.file_name) || nonEmptyString(meta?.name);
+  const labelMap: Record<string, string> = {
+    image: '图片',
+    audio: '音频',
+    file: '文件',
+    sticker: '表情',
+    unsupported: '不支持',
+  };
+  const label = labelMap[kind] || kind;
+  return fileName ? `[${label}: ${fileName}]` : `[${label}]`;
+}
+
+function renderMessageContent(content: unknown): string {
+  const parsed = parseMaybeJson(content);
+
+  if (typeof parsed === 'string') return parsed;
+  if (Array.isArray(parsed)) return parsed.map(renderContentItem).join('');
+  if (isRecord(parsed)) {
+    const text = nonEmptyString(parsed.text);
+    if (text) return text;
+    if (Array.isArray(parsed.items)) return renderMessageContent(parsed.items);
+    if (typeof parsed.kind === 'string') return renderContentItem(parsed);
+    return safeJsonStringify(parsed);
+  }
+  if (parsed == null) return '';
+  return String(parsed);
+}
+
+function normalizeMessageContent(row: MessageRow) {
+  const parsed = parseMaybeJson(row.content);
+  const displayText = nonEmptyString(row.content_text) || renderMessageContent(parsed);
+
+  let structureData: unknown | null = null;
+  if (isRecord(parsed) && Array.isArray(parsed.items)) {
+    structureData = parsed.items;
+  } else if (Array.isArray(parsed) || isRecord(parsed)) {
+    structureData = parsed;
+  }
+
+  return {
+    displayText: displayText || '-',
+    structureData,
+  };
+}
 
 // --- Component ---
 
@@ -419,32 +501,21 @@ export default function Messages() {
         title: '内容',
         dataIndex: 'content',
         width: 300,
-        render: (text: string) => {
-          if (!text) return '-';
-          let displayText = text;
-          let itemsData = null;
-          try {
-            const parsed = typeof text === 'string' ? JSON.parse(text) : text;
-            if (parsed && typeof parsed === 'object') {
-              if (parsed.text) displayText = parsed.text;
-              if (parsed.items) itemsData = parsed.items;
-            }
-          } catch (e) {
-            // ignore error, use original text
-          }
+        render: (_content: unknown, record) => {
+          const { displayText, structureData } = normalizeMessageContent(record);
 
-          const handleCopyItems = () => {
-            if (itemsData) {
-              copyToClipboard(JSON.stringify(itemsData, null, 2), '已复制 items 结构');
+          const handleCopyStructure = () => {
+            if (structureData) {
+              copyToClipboard(JSON.stringify(structureData, null, 2), '已复制内容结构');
             }
           };
 
           const popoverContent = (
             <div style={{ maxWidth: 400, maxHeight: 300, overflow: 'auto' }}>
               <div style={{ marginBottom: 8, whiteSpace: 'pre-wrap' }}>{displayText}</div>
-              {itemsData && (
-                <Button size="small" icon={<CopyOutlined />} onClick={handleCopyItems}>
-                  复制 Items 结构
+              {structureData && (
+                <Button size="small" icon={<CopyOutlined />} onClick={handleCopyStructure}>
+                  复制内容结构
                 </Button>
               )}
             </div>

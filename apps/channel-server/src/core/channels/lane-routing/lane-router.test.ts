@@ -4,43 +4,79 @@ import { join } from 'node:path';
 
 import { LaneRouter, type LaneRoutingStore } from './lane-router';
 
-// LaneRouter 是平台无关的泳道决策能力（本期只做 bot 维度）。它的入参只认统一概念
-// （channel + 全局 bot 标识），绝不接触飞书原始字段。读取靠注入的结构型
+// LaneRouter 是平台无关的泳道决策能力。它的入参只认统一概念
+// （channel + common conversation + 全局 bot 标识），绝不接触飞书原始字段。读取靠注入的结构型
 // LaneRoutingStore（ORM-free，生产由 TypeORM 实现注入），所以本测试用内存 fake
 // 顶替真实 DB，纯跑、不连库。
 //
-// 这个 fake 忠实模拟真实 lane_routing 表的查询语义：按「全局 bot 标识」查命中的
-// lane_name；没绑定返回 null。LaneRouter 据此决定 lane：命中返回 lane_name，
-// 未命中返回 'prod'（本期决策优先级就两档：bot 命中 > prod 默认）。
+// 这个 fake 忠实模拟真实 lane_routing 表的查询语义：按「common conversation」
+// 优先查，再按「全局 bot 标识」查；没绑定返回 null。LaneRouter 据此决定 lane：
+// 命中返回 lane_name，未命中返回 'prod'。
 
 // 一个可计数、可重设绑定的内存 store，记录被查了几次，用来验证缓存命中不打 DB。
 class FakeLaneRoutingStore implements LaneRoutingStore {
+    findChatLaneCalls = 0;
     findBotLaneCalls = 0;
-    private bindings = new Map<string, string>();
+    private chatBindings = new Map<string, string>();
+    private botBindings = new Map<string, string>();
+
+    setChatBinding(commonConversationId: string, lane: string): void {
+        this.chatBindings.set(commonConversationId, lane);
+    }
 
     setBotBinding(botGlobalId: string, lane: string): void {
-        this.bindings.set(botGlobalId, lane);
+        this.botBindings.set(botGlobalId, lane);
     }
 
     removeBotBinding(botGlobalId: string): void {
-        this.bindings.delete(botGlobalId);
+        this.botBindings.delete(botGlobalId);
+    }
+
+    async findChatLane(commonConversationId: string): Promise<string | null> {
+        this.findChatLaneCalls += 1;
+        return this.chatBindings.get(commonConversationId) ?? null;
     }
 
     async findBotLane(botGlobalId: string): Promise<string | null> {
         this.findBotLaneCalls += 1;
-        return this.bindings.get(botGlobalId) ?? null;
+        return this.botBindings.get(botGlobalId) ?? null;
     }
 }
 
 const NOW = 1_700_000_000_000;
 
-describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', () => {
+describe('LaneRouter.resolveLane — 平台无关的 chat/bot 泳道决策', () => {
+    it('chat 命中绑定：优先返回 chat lane，不再查 bot', async () => {
+        const store = new FakeLaneRoutingStore();
+        store.setChatBinding('018f-chat', 'ppe-chat');
+        store.setBotBinding('赤尾', 'ppe-bot');
+        const router = new LaneRouter(store);
+
+        const lane = await router.resolveLane('lark', '赤尾', '018f-chat');
+
+        expect(lane).toBe('ppe-chat');
+        expect(store.findChatLaneCalls).toBe(1);
+        expect(store.findBotLaneCalls).toBe(0);
+    });
+
+    it('chat 未命中时回退到 bot 绑定', async () => {
+        const store = new FakeLaneRoutingStore();
+        store.setBotBinding('赤尾', 'ppe-bot');
+        const router = new LaneRouter(store);
+
+        const lane = await router.resolveLane('lark', '赤尾', '018f-chat');
+
+        expect(lane).toBe('ppe-bot');
+        expect(store.findChatLaneCalls).toBe(1);
+        expect(store.findBotLaneCalls).toBe(1);
+    });
+
     it('bot 命中绑定：返回绑定的 lane_name', async () => {
         const store = new FakeLaneRoutingStore();
         store.setBotBinding('赤尾', 'ppe-foo');
         const router = new LaneRouter(store);
 
-        const lane = await router.resolveLane('lark', '赤尾');
+        const lane = await router.resolveLane('lark', '赤尾', undefined);
         expect(lane).toBe('ppe-foo');
     });
 
@@ -48,7 +84,7 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         const store = new FakeLaneRoutingStore();
         const router = new LaneRouter(store);
 
-        const lane = await router.resolveLane('lark', '没绑定的bot');
+        const lane = await router.resolveLane('lark', '没绑定的bot', undefined);
         expect(lane).toBe('prod');
     });
 
@@ -57,7 +93,7 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         store.setBotBinding('赤尾', 'prod');
         const router = new LaneRouter(store);
 
-        const lane = await router.resolveLane('lark', '赤尾');
+        const lane = await router.resolveLane('lark', '赤尾', undefined);
         expect(lane).toBe('prod');
     });
 
@@ -67,11 +103,11 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         let clock = NOW;
         const router = new LaneRouter(store, () => clock);
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
         // TTL 内推进时间但不超过 30s：仍走缓存。
         clock = NOW + 29_999;
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
 
         expect(store.findBotLaneCalls).toBe(1);
     });
@@ -80,8 +116,8 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         const store = new FakeLaneRoutingStore();
         const router = new LaneRouter(store);
 
-        expect(await router.resolveLane('lark', '没绑定')).toBe('prod');
-        expect(await router.resolveLane('lark', '没绑定')).toBe('prod');
+        expect(await router.resolveLane('lark', '没绑定', undefined)).toBe('prod');
+        expect(await router.resolveLane('lark', '没绑定', undefined)).toBe('prod');
         expect(store.findBotLaneCalls).toBe(1);
     });
 
@@ -91,11 +127,11 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         let clock = NOW;
         const router = new LaneRouter(store, () => clock);
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
         expect(store.findBotLaneCalls).toBe(1);
         // 跨过 30s TTL：缓存失效，重新查 DB。
         clock = NOW + 30_001;
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
         expect(store.findBotLaneCalls).toBe(2);
     });
 
@@ -104,10 +140,10 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         store.setBotBinding('赤尾', 'ppe-foo');
         const router = new LaneRouter(store);
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
         // store 只按 botGlobalId 查（本期 route_type=bot 单维度），另一个 channel
         // 的同名 bot 应触发一次新的 DB 查询，而不是命中 lark 的缓存。
-        await router.resolveLane('qq', '赤尾');
+        await router.resolveLane('qq', '赤尾', undefined);
         expect(store.findBotLaneCalls).toBe(2);
     });
 
@@ -116,14 +152,14 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         store.setBotBinding('赤尾', 'ppe-foo');
         const router = new LaneRouter(store);
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
         expect(store.findBotLaneCalls).toBe(1);
 
         // 模拟 admin 改绑定：换 lane 后主动 clearCache，下一次决策必须看到新值。
         store.setBotBinding('赤尾', 'ppe-bar');
         router.clearCache();
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-bar');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-bar');
         expect(store.findBotLaneCalls).toBe(2);
     });
 
@@ -132,12 +168,12 @@ describe('LaneRouter.resolveLane — 平台无关的 bot 维度泳道决策', ()
         store.setBotBinding('赤尾', 'ppe-foo');
         const router = new LaneRouter(store);
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('ppe-foo');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('ppe-foo');
 
         store.removeBotBinding('赤尾');
         router.clearCache();
 
-        expect(await router.resolveLane('lark', '赤尾')).toBe('prod');
+        expect(await router.resolveLane('lark', '赤尾', undefined)).toBe('prod');
     });
 });
 
@@ -156,8 +192,7 @@ describe('LaneRouter 平台无关红线 — 决策能力源码不含任何飞书
             /\bevent\b/,
         ];
         for (const f of FORBIDDEN_LARK_FIELDS) {
-            const hit =
-                typeof f === 'string' ? src.includes(f) : f.test(src);
+            const hit = typeof f === 'string' ? src.includes(f) : f.test(src);
             expect(hit).toBe(false);
         }
     });
