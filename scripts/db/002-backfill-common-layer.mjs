@@ -527,6 +527,27 @@ async function migrateUsers(client, options) {
   return { legacyUserToCommon, larkUserByOpenId, larkUserByUnionId };
 }
 
+async function insertCommonUsers(client, rows) {
+  if (rows.length === 0) {
+    return;
+  }
+  const insert = makeValuesInsert(
+    'common_user',
+    [
+      { name: 'common_user_id' },
+      { name: 'channel' },
+      { name: 'display_name' },
+      { name: 'avatar_url' },
+    ],
+    rows,
+    `ON CONFLICT (common_user_id) DO UPDATE SET
+      display_name = COALESCE(EXCLUDED.display_name, common_user.display_name),
+      avatar_url = COALESCE(EXCLUDED.avatar_url, common_user.avatar_url),
+      updated_at = now()`,
+  );
+  await client.query(insert.sql, insert.params);
+}
+
 async function resolveLegacyMessageSources(client, legacyIds) {
   const ids = [...new Set(legacyIds.filter(Boolean))];
   if (ids.length === 0) {
@@ -727,6 +748,8 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
 
     const commonRows = [];
     const larkRows = [];
+    const commonUserRows = [];
+    const seenBatchUsers = new Set();
     for (const row of batch) {
       const assigned = idMap.get(row.message_id);
       if (!assigned) {
@@ -747,10 +770,23 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
         commonUserId =
           userMaps.legacyUserToCommon.get(row.user_id) ??
           userMaps.larkUserByUnionId.get(row.user_id) ??
-          userMaps.larkUserByOpenId.get(row.user_id) ??
-          uuidFromLegacy(row.user_id);
+          userMaps.larkUserByOpenId.get(row.user_id);
+        if (!commonUserId) {
+          commonUserId = uuidFromLegacy(row.user_id);
+          if (commonUserId) {
+            userMaps.legacyUserToCommon.set(row.user_id, commonUserId);
+          }
+        }
         if (!commonUserId) {
           unresolvedUsers += 1;
+        } else if (!seenBatchUsers.has(commonUserId)) {
+          commonUserRows.push({
+            common_user_id: commonUserId,
+            channel: 'lark',
+            display_name: textOrNull(row.username),
+            avatar_url: null,
+          });
+          seenBatchUsers.add(commonUserId);
         }
       }
 
@@ -792,6 +828,7 @@ async function migrateMessages(client, options, chatMaps, userMaps) {
     }
 
     await withTransaction(client, options, `conversation_messages batch after ${cursor.createTime ?? 'start'}/${cursor.messageId || '-'}`, async () => {
+      await insertCommonUsers(client, commonUserRows);
       await insertCommonMessages(client, commonRows);
       await insertLarkMessages(client, larkRows);
     });
