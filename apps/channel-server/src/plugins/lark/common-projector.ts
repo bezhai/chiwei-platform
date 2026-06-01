@@ -329,23 +329,29 @@ export async function storeLarkInboundMessage(
         inserted = insertResult.identifiers.length > 0;
 
         if (!existingLarkMessage) {
-            await manager
-                .createQueryBuilder()
-                .insert()
-                .into(LarkMessage)
-                .values({
-                    om_id: event.message.message_id,
-                    common_message_id: projection.commonMessageId,
-                    chat_id: event.message.chat_id,
-                    sender_open_id: event.sender.sender_id?.open_id,
-                    sender_union_id: event.sender.sender_id?.union_id,
-                    root_om_id: event.message.root_id,
-                    reply_om_id: event.message.parent_id,
-                    message_type: event.message.message_type,
-                    raw_event: event as any,
-                })
-                .orIgnore()
-                .execute();
+            try {
+                await manager
+                    .createQueryBuilder()
+                    .insert()
+                    .into(LarkMessage)
+                    .values({
+                        om_id: event.message.message_id,
+                        common_message_id: projection.commonMessageId,
+                        chat_id: event.message.chat_id,
+                        sender_open_id: event.sender.sender_id?.open_id,
+                        sender_union_id: event.sender.sender_id?.union_id,
+                        root_om_id: event.message.root_id,
+                        reply_om_id: event.message.parent_id,
+                        message_type: event.message.message_type,
+                        raw_event: event as any,
+                    })
+                    .execute();
+            } catch (err) {
+                throw new Error(
+                    `lark message ${event.message.message_id} mapping insert failed; ` +
+                        `common_message insert rolled back: ${(err as Error).message}`,
+                );
+            }
         }
     });
 

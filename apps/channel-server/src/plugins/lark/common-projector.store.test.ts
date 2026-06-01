@@ -4,6 +4,7 @@ const larkMessages = new Map<string, { om_id: string; common_message_id: string 
 const commonMessages = new Set<string>();
 const larkInsertCalls: unknown[] = [];
 const vectorizePublishes: unknown[] = [];
+let larkInsertRaceWinner: { om_id: string; common_message_id: string } | null = null;
 
 function insertBuilder() {
     let target: { name?: string } | undefined;
@@ -35,6 +36,12 @@ function insertBuilder() {
             if (target?.name === 'LarkMessage') {
                 larkInsertCalls.push(payload);
                 const omId = payload.om_id as string;
+                if (larkInsertRaceWinner?.om_id === omId) {
+                    larkMessages.set(omId, larkInsertRaceWinner);
+                    throw new Error(
+                        'duplicate key value violates unique constraint "lark_message_pkey"',
+                    );
+                }
                 if (!larkMessages.has(omId)) {
                     larkMessages.set(omId, {
                         om_id: omId,
@@ -76,21 +83,32 @@ mock.module('ormconfig', () => ({
                 upsert: mock(async () => ({ identifiers: [] })),
             };
         },
-        transaction: async (task: (manager: unknown) => Promise<void>) =>
-            task({
-                getRepository: (entity: { name?: string }) => {
-                    if (entity.name === 'LarkMessage') {
-                        return {
-                            findOne: mock(
-                                async ({ where }: { where: { om_id: string } }) =>
-                                    larkMessages.get(where.om_id) ?? null,
-                            ),
-                        };
-                    }
-                    throw new Error(`unexpected repository: ${entity.name}`);
-                },
-                createQueryBuilder: () => insertBuilder(),
-            }),
+        transaction: async (task: (manager: unknown) => Promise<void>) => {
+            const commonSnapshot = new Set(commonMessages);
+            const larkSnapshot = new Map(larkMessages);
+            try {
+                return await task({
+                    getRepository: (entity: { name?: string }) => {
+                        if (entity.name === 'LarkMessage') {
+                            return {
+                                findOne: mock(
+                                    async ({ where }: { where: { om_id: string } }) =>
+                                        larkMessages.get(where.om_id) ?? null,
+                                ),
+                            };
+                        }
+                        throw new Error(`unexpected repository: ${entity.name}`);
+                    },
+                    createQueryBuilder: () => insertBuilder(),
+                });
+            } catch (err) {
+                commonMessages.clear();
+                for (const id of commonSnapshot) commonMessages.add(id);
+                larkMessages.clear();
+                for (const [omId, row] of larkSnapshot) larkMessages.set(omId, row);
+                throw err;
+            }
+        },
     },
 }));
 
@@ -167,6 +185,7 @@ describe('storeLarkInboundMessage', () => {
         commonMessages.clear();
         larkInsertCalls.length = 0;
         vectorizePublishes.length = 0;
+        larkInsertRaceWinner = null;
     });
 
     it('writes the lark mapping once for a new om_id', async () => {
@@ -199,5 +218,20 @@ describe('storeLarkInboundMessage', () => {
         await expect(
             storeLarkInboundMessage(event('om_1') as any, projection('018f-common-new'), message),
         ).rejects.toThrow(/already maps to 018f-common-existing/);
+    });
+
+    it('rolls back common_message when lark_message insert loses a race', async () => {
+        larkInsertRaceWinner = {
+            om_id: 'om_1',
+            common_message_id: '018f-common-existing',
+        };
+
+        await expect(
+            storeLarkInboundMessage(event('om_1') as any, projection('018f-common-new'), message),
+        ).rejects.toThrow(/mapping insert failed/);
+
+        expect(commonMessages.has('018f-common-new')).toBe(false);
+        expect(larkMessages.has('om_1')).toBe(false);
+        expect(vectorizePublishes.length).toBe(0);
     });
 });
