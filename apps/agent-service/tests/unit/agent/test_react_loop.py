@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pytest
 from openai import APITimeoutError
@@ -512,3 +514,103 @@ class TestStreamLoop:
         )
         assert assistant_turn.reasoning_content == "let me think"
         assert assistant_turn.text() == "calling tool"
+
+
+# ---------------------------------------------------------------------------
+# tool span output — record the dispatched tool's result on its span so
+# langfuse shows the output instead of `undefined`
+# ---------------------------------------------------------------------------
+
+
+def _recording_tool_span(spans: list):
+    """A ``_tool_span`` replacement that hands back a recording MagicMock span."""
+
+    @contextmanager
+    def _span(*, name, input):
+        span = MagicMock()
+        span.tool_name = name
+        spans.append(span)
+        yield span
+
+    return _span
+
+
+class TestToolSpanOutput:
+    """The tool span must record the dispatched tool's output. langfuse rendered
+    tool outputs as ``undefined`` because the loop opened the span (capturing the
+    arguments as ``input``) but never wrote the result back to it."""
+
+    async def test_run_loop_records_string_tool_output(self, monkeypatch):
+        from app.agent import core
+
+        spans: list = []
+        monkeypatch.setattr(core, "_tool_span", _recording_tool_span(spans))
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="done"),
+            ]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        assert len(spans) == 1
+        spans[0].update.assert_called_once_with(output="echoed:x")
+
+    async def test_run_loop_block_list_output_is_json_serialisable(self, monkeypatch):
+        from app.agent import core
+
+        spans: list = []
+        monkeypatch.setattr(core, "_tool_span", _recording_tool_span(spans))
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="blocks_tool", arguments={"x": "v"})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="done"),
+            ]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[blocks_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        output = spans[0].update.call_args.kwargs["output"]
+        # plain dicts (not ContentBlock objects) so langfuse can serialise it
+        assert isinstance(output, list)
+        assert all(isinstance(b, dict) for b in output)
+        json.dumps(output)  # must not raise
+        assert output[0]["type"] == "text"
+        assert output[1]["type"] == "image_url"
+
+    async def test_stream_loop_records_tool_output(self, monkeypatch):
+        from app.agent import core
+
+        spans: list = []
+        monkeypatch.setattr(core, "_tool_span", _recording_tool_span(spans))
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(tool_call=call), StreamChunk(finish_reason="tool_calls")],
+                [StreamChunk(text="final"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=12,
+        ):
+            pass
+        assert len(spans) == 1
+        spans[0].update.assert_called_once_with(output="echoed:x")

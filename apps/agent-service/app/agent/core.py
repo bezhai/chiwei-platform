@@ -238,6 +238,27 @@ def _tool_span(*, name: str, input: Any):
         yield span
 
 
+def _record_tool_output(span: Any, result: ToolResult) -> None:
+    """Record a dispatched tool's result on its span (best-effort).
+
+    The loop opens the tool span before dispatch so the call arguments land as
+    ``input``; without this the span has no ``output`` and langfuse renders the
+    tool result as ``undefined``. Content is reduced to JSON-serialisable form
+    (block lists → plain dicts) since langfuse must serialise the span. Guarded:
+    a tracing failure must never break the tool loop.
+    """
+    try:
+        content = result.content
+        output: Any = (
+            [b.to_dict() for b in content]
+            if isinstance(content, list)
+            else content
+        )
+        span.update(output=output)
+    except Exception as exc:  # pragma: no cover - tracing must not break dispatch
+        logger.warning("langfuse tool span output update failed: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
@@ -317,10 +338,12 @@ async def _run_loop(
 
         convo.append(last)
         for call in last.tool_calls:
-            with _tool_span(name=call.name, input=call.arguments):
+            with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
-            convo.append(_normalise_tool_result(result).to_message())
+                normalised = _normalise_tool_result(result)
+                _record_tool_output(span, normalised)
+            convo.append(normalised.to_message())
 
     # recursion limit hit: return the last assistant message we have.
     return last if last is not None else Message(role=Role.ASSISTANT, content="")
@@ -381,10 +404,11 @@ async def _stream_loop(
             )
         )
         for call in turn_calls:
-            with _tool_span(name=call.name, input=call.arguments):
+            with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
-            result = _normalise_tool_result(result)
+                result = _normalise_tool_result(result)
+                _record_tool_output(span, result)
             convo.append(result.to_message())
             yield StreamChunk(tool_result=result)
 
