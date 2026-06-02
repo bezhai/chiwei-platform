@@ -43,12 +43,14 @@ def _part(
     thought: bool = False,
     function_call: Any = None,
     inline_data: Any = None,
+    thought_signature: bytes | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         text=text,
         thought=thought,
         function_call=function_call,
         inline_data=inline_data,
+        thought_signature=thought_signature,
     )
 
 
@@ -493,6 +495,125 @@ async def test_tool_result_image_block_surfaces_as_image_part(mock_sdk):
     ]
     assert len(img_parts) == 1
     assert img_parts[0].file_data.file_uri == "https://img/3.png"
+
+
+# ---------------------------------------------------------------------------
+# thought_signature — Gemini 2.5 thinking models attach an opaque signature to
+# the functionCall part. It MUST round-trip: resending an assistant
+# function_call turn WITHOUT its signature 400s with
+# "Function call is missing a thought_signature in functionCall parts"
+# (INVALID_ARGUMENT), which broke multi-turn tool loops (load_skill) on ppe.
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_captures_thought_signature_on_tool_call(mock_sdk):
+    """A function_call part's thought_signature lands on the neutral ToolCall."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(
+            parts=[
+                _part(
+                    function_call=_function_call("load_skill", {"name": "x"}, "c1"),
+                    thought_signature=b"sig-abc",
+                )
+            ]
+        )
+    )
+
+    out = await adapter.complete([Message(role=Role.USER, content="q")])
+    assert out.tool_calls[0].signature == b"sig-abc"
+
+
+async def test_stream_captures_thought_signature_on_tool_call(mock_sdk):
+    """The streamed tool_call chunk carries the part's thought_signature too."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_stream(
+        [
+            _response(
+                parts=[
+                    _part(
+                        function_call=_function_call(
+                            "load_skill", {"name": "x"}, "c1"
+                        ),
+                        thought_signature=b"sig-xyz",
+                    )
+                ],
+                finish_reason="STOP",
+            )
+        ]
+    )
+    tools = [
+        ToolDef(name="load_skill", description="d", parameters={"type": "object"})
+    ]
+    chunks = [
+        c
+        async for c in adapter.stream(
+            [Message(role=Role.USER, content="q")], tools=tools
+        )
+    ]
+    tc_chunks = [c for c in chunks if c.tool_call is not None]
+    assert tc_chunks[0].tool_call.signature == b"sig-xyz"
+
+
+async def test_assistant_tool_call_reattaches_thought_signature_on_wire(mock_sdk):
+    """Resending an assistant function_call turn re-attaches its thought_signature
+    to the wire Part — else Gemini 2.5 rejects the next turn (400 INVALID_ARGUMENT,
+    missing thought_signature)."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="use skill"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="load_skill",
+                    arguments={"name": "x"},
+                    signature=b"sig-abc",
+                )
+            ],
+        ),
+        Message(role=Role.TOOL, content="ok", tool_call_id="c1"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    fc_part = contents[1].parts[0]
+    assert fc_part.function_call.name == "load_skill"
+    assert fc_part.thought_signature == b"sig-abc"
+
+
+async def test_tool_call_without_signature_omits_it_on_wire(mock_sdk):
+    """A ToolCall with no signature must not force a (None) thought_signature
+    that would itself trip the API — the part simply carries no signature."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="hi"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="search", arguments={"q": "x"})],
+        ),
+        Message(role=Role.TOOL, content="ok", tool_call_id="c1"),
+    ]
+    await adapter.complete(history)
+
+    fc_part = mock_sdk.instance.last_generate_kwargs["contents"][1].parts[0]
+    assert fc_part.function_call.name == "search"
+    assert fc_part.thought_signature is None
 
 
 # ---------------------------------------------------------------------------

@@ -343,7 +343,12 @@ def _block_to_part(block: ContentBlock) -> types.Part | None:
 
 
 def _tool_call_to_part(tc: ToolCall) -> types.Part:
-    return types.Part.from_function_call(name=tc.name, args=tc.arguments)
+    part = types.Part.from_function_call(name=tc.name, args=tc.arguments)
+    # Echo the opaque thought_signature back on the functionCall part; Gemini 2.5
+    # thinking models 400 the next turn without it. Absent ⇒ leave it unset.
+    if tc.signature is not None:
+        part.thought_signature = tc.signature
+    return part
 
 
 def _tool_result_to_content(
@@ -401,7 +406,7 @@ def _response_to_message(response: Any) -> Message:
     for part in parts:
         fc = getattr(part, "function_call", None)
         if fc is not None:
-            tool_calls.append(_function_call_to_neutral(fc))
+            tool_calls.append(_function_call_to_neutral(fc, _part_signature(part)))
             continue
         text = getattr(part, "text", None)
         if not text:
@@ -425,7 +430,11 @@ def _chunk_to_neutral(chunk: Any) -> list[StreamChunk]:
     for part in _candidate_parts(chunk):
         fc = getattr(part, "function_call", None)
         if fc is not None:
-            out.append(StreamChunk(tool_call=_function_call_to_neutral(fc)))
+            out.append(
+                StreamChunk(
+                    tool_call=_function_call_to_neutral(fc, _part_signature(part))
+                )
+            )
             continue
         text = getattr(part, "text", None)
         if not text:
@@ -451,11 +460,26 @@ def _candidate_parts(response: Any) -> list[Any]:
     return getattr(content, "parts", None) or []
 
 
-def _function_call_to_neutral(fc: Any) -> ToolCall:
-    """Gemini function_call → neutral ToolCall (synthesise id when absent)."""
+def _function_call_to_neutral(fc: Any, signature: bytes | None = None) -> ToolCall:
+    """Gemini function_call → neutral ToolCall (synthesise id when absent).
+
+    ``signature`` is the part's ``thought_signature`` (Gemini 2.5 thinking
+    models). It must travel with the call so the next turn can echo it back;
+    omitting it 400s the following request.
+    """
     call_id = getattr(fc, "id", None) or f"call_{uuid.uuid4().hex[:12]}"
     args = getattr(fc, "args", None) or {}
-    return ToolCall(id=call_id, name=getattr(fc, "name", ""), arguments=dict(args))
+    return ToolCall(
+        id=call_id,
+        name=getattr(fc, "name", ""),
+        arguments=dict(args),
+        signature=signature,
+    )
+
+
+def _part_signature(part: Any) -> bytes | None:
+    """The opaque ``thought_signature`` Gemini attaches to a functionCall part."""
+    return getattr(part, "thought_signature", None)
 
 
 def _finish_reason(response: Any) -> str | None:

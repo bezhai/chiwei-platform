@@ -162,6 +162,23 @@ def test_assistant_message_carries_tool_calls():
     assert back.tool_calls[0].arguments == {"query": "cats"}
 
 
+def test_tool_call_carries_opaque_signature_but_keeps_to_dict_json_safe():
+    """ToolCall holds an opaque provider signature (Gemini thought_signature) in
+    memory, but to_dict() must stay JSON-serialisable for langfuse spans, so the
+    raw bytes are not emitted."""
+    import json
+
+    tc = ToolCall(
+        id="c1", name="load_skill", arguments={"name": "x"}, signature=b"sig-abc"
+    )
+    assert tc.signature == b"sig-abc"
+
+    dumped = tc.to_dict()
+    # bytes must not leak into the trace payload (would break JSON serialisation)
+    json.dumps(dumped)  # raises if a non-serialisable value snuck in
+    assert "signature" not in dumped
+
+
 def test_tool_result_round_trip():
     res = ToolResult(tool_call_id="call_42", content="found 3 cats")
     assert res.tool_call_id == "call_42"

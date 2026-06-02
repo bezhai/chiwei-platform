@@ -118,11 +118,21 @@ class ToolDef:
 
 @dataclass(slots=True)
 class ToolCall:
-    """The model's request to invoke a tool."""
+    """The model's request to invoke a tool.
+
+    ``signature`` is an opaque, provider-specific blob the model attaches to a
+    tool call and demands back verbatim on the next turn. Gemini 2.5 thinking
+    models put a ``thought_signature`` on the functionCall part and reject the
+    following turn with 400 INVALID_ARGUMENT if it isn't echoed. It is carried
+    in memory through the ReAct loop only (bytes aren't JSON-serialisable), so
+    ``to_dict`` / ``from_dict`` deliberately omit it — those serve langfuse
+    tracing, not the wire.
+    """
 
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    signature: bytes | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "arguments": self.arguments}
