@@ -59,6 +59,15 @@ _turn_trace_seed: ContextVar[str | None] = ContextVar(
     "agent_turn_trace_seed", default=None
 )
 
+# The trace-level name every root span in a turn writes. A turn's guards, main
+# stream, and post-safety are separate root spans on one trace; langfuse derives
+# the trace name from whichever root span is ingested last (post-safety, which
+# runs last), so the whole trace would otherwise read "post-safety-check". Each
+# root span writes THIS name instead, so the trace name is stable regardless of
+# ingestion order. This is the trace-level name only — each span keeps its own
+# observation name (pre-nsfw-check / main / post-safety-check / ...).
+TURN_TRACE_NAME = "chat-turn"
+
 
 @contextmanager
 def turn_trace(seed: str) -> Iterator[None]:

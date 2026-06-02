@@ -232,6 +232,100 @@ class TestRootSpanTurnTrace:
         assert seen[0]["trace_id"]
 
 
+class TestTurnTraceUnifiedName:
+    """In a unified turn trace the guards / main / post-safety are separate root
+    spans on ONE trace; langfuse names the whole trace after whichever root span
+    is ingested LAST (post-safety, since it runs last). Every root span instead
+    writes the SAME trace-level name so the trace name is stable. Crucially the
+    per-span OBSERVATION names stay distinct — trace name and span name are
+    independent langfuse fields, so unifying the trace name must not pollute the
+    sub-span names."""
+
+    def test_guard_root_span_keeps_span_name_sets_unified_trace_name(self):
+        from app.agent import core
+        from app.agent.trace import TURN_TRACE_NAME, turn_trace
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with turn_trace("msg-1:persona-2"):
+                with core._root_span(
+                    name="pre-nsfw-check", input=[{"x": 1}], update_trace=False
+                ):
+                    pass
+        # the OBSERVATION/span name is preserved — NOT polluted to the trace name
+        assert (
+            client.start_as_current_span.call_args.kwargs["name"] == "pre-nsfw-check"
+        )
+        # the TRACE-level name is the unified turn name
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw["name"] == TURN_TRACE_NAME
+        # a guard does NOT own the trace input
+        assert kw.get("input") is None
+
+    def test_main_root_span_sets_unified_name_and_owns_input(self):
+        from app.agent import core
+        from app.agent.trace import TURN_TRACE_NAME, turn_trace
+
+        client = MagicMock()
+        chat_input = [{"role": "user", "content": "hi"}]
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with turn_trace("msg-1:persona-2"):
+                with core._root_span(
+                    name="main", input=chat_input, update_trace=True
+                ):
+                    pass
+        # span name preserved
+        assert client.start_as_current_span.call_args.kwargs["name"] == "main"
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw["name"] == TURN_TRACE_NAME
+        # main owns the trace input (the chat), so the trace top reads the turn
+        assert kw["input"] == chat_input
+
+    def test_two_turn_root_spans_write_same_trace_name(self):
+        """The fix's invariant: main (runs first) and post-safety (ingested last)
+        both write TURN_TRACE_NAME, so order no longer decides the trace name."""
+        from app.agent import core
+        from app.agent.trace import TURN_TRACE_NAME, turn_trace
+
+        client = MagicMock()
+        names: list = []
+        client.update_current_trace.side_effect = lambda **kw: names.append(
+            kw.get("name")
+        )
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with turn_trace("msg-9:persona-3"):
+                with core._root_span(name="main", input=[], update_trace=True):
+                    pass
+                with core._root_span(
+                    name="post-safety-check", input=[], update_trace=False
+                ):
+                    pass
+        assert names == [TURN_TRACE_NAME, TURN_TRACE_NAME]
+
+    def test_outside_turn_keeps_span_name_as_trace_name(self):
+        """No turn → unchanged: update_trace=True still names the trace after the
+        span (afterthought / voice / post-safety-without-turn become their own
+        traces named after themselves)."""
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(name="afterthought", input=[1], update_trace=True):
+                pass
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw["name"] == "afterthought"
+        assert kw["input"] == [1]
+
+    def test_outside_turn_no_update_when_update_trace_false(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(name="guard", input=[], update_trace=False):
+                pass
+        client.update_current_trace.assert_not_called()
+
+
 class TestAgentConfig:
     def test_frozen(self):
         cfg = AgentConfig("p", "m", "t")

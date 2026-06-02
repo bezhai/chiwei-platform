@@ -73,7 +73,11 @@ from app.agent.neutral import (
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
-from app.agent.trace import current_generation_context, current_turn_trace_id
+from app.agent.trace import (
+    TURN_TRACE_NAME,
+    current_generation_context,
+    current_turn_trace_id,
+)
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra.config import settings
 
@@ -147,6 +151,18 @@ class _NoOpRootSpan:
         pass
 
 
+def _set_current_trace(*, name: str | None = None, input: Any = None) -> None:
+    """Set the current trace's name / input, swallowing any langfuse failure.
+
+    ``None`` fields are skipped by the SDK, so passing only ``name`` updates the
+    trace name and leaves its input untouched. Tracing must never break the call.
+    """
+    try:
+        _get_trace_client().update_current_trace(name=name, input=input)
+    except Exception as exc:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse update_current_trace failed: %s", exc)
+
+
 @contextmanager
 def _safe_current_span(
     span_name: str, input: Any, trace_context: dict[str, Any] | None = None
@@ -216,11 +232,19 @@ def _root_span(
     tid = current_turn_trace_id()
     trace_context = {"trace_id": tid} if tid else None
     with _safe_current_span(span_name, input, trace_context) as span:
-        if update_trace:
-            try:
-                _get_trace_client().update_current_trace(name=span_name, input=input)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("langfuse update_current_trace failed: %s", exc)
+        if tid is not None:
+            # Inside a turn the guards / main / post-safety are separate root
+            # spans on one trace; langfuse would name the whole trace after the
+            # last one ingested (post-safety). Every root span writes the SAME
+            # unified trace name so the name is stable — this is the trace-level
+            # name only, each span keeps its own observation name. Only the main
+            # path (``update_trace``) owns the trace input, so the trace top
+            # reads the chat turn, not a guard's safety prompt.
+            _set_current_trace(
+                name=TURN_TRACE_NAME, input=input if update_trace else None
+            )
+        elif update_trace:
+            _set_current_trace(name=span_name, input=input)
         yield span
 
 
