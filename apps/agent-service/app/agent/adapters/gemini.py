@@ -145,7 +145,7 @@ class GeminiAdapter(ModelClient):
         )
 
         with generation_span(
-            name="llm.complete",
+            name=self._model,
             model=self._model,
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
@@ -177,7 +177,7 @@ class GeminiAdapter(ModelClient):
         )
 
         with generation_span(
-            name="llm.stream",
+            name=self._model,
             model=self._model,
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
@@ -232,7 +232,7 @@ class GeminiAdapter(ModelClient):
         )
 
         with generation_span(
-            name="llm.structured",
+            name=self._model,
             model=self._model,
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),

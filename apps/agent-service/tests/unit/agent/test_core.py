@@ -145,6 +145,36 @@ class TestRootSpanRobustness:
                 entered = True
             assert entered
 
+    def test_tool_span_reparents_under_current_generation(self):
+        """A tool span attaches to the model call that requested it: the
+        generation's TraceContext (parent_span_id) so it nests under that
+        generation, not flat under the agent root."""
+        from app.agent import core
+
+        fake_ctx = {"trace_id": "a" * 32, "parent_span_id": "b" * 16}
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "current_generation_context", return_value=fake_ctx),
+        ):
+            with core._tool_span(name="recall", input={}):
+                pass
+        kwargs = client.start_as_current_span.call_args.kwargs
+        assert kwargs.get("trace_context") == fake_ctx
+
+    def test_tool_span_no_reparent_without_generation(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "current_generation_context", return_value=None),
+        ):
+            with core._tool_span(name="recall", input={}):
+                pass
+        kwargs = client.start_as_current_span.call_args.kwargs
+        assert kwargs.get("trace_context") is None
+
 
 class TestRootSpanTurnTrace:
     """Root span attaches the active turn's langfuse trace, so the guard

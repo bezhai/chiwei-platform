@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+import opentelemetry.trace as _otel_trace
 from langfuse import Langfuse
 
 from app.infra.config import settings
@@ -85,6 +86,48 @@ def current_turn_trace_id() -> str | None:
     if not seed:
         return None
     return Langfuse.create_trace_id(seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# Model-call generation context: nest tool spans under their model call
+# ---------------------------------------------------------------------------
+
+# In a ReAct loop the model call's generation span has already closed by the
+# time the loop dispatches the tools it requested, so a tool span would nest
+# flat under the agent root. We snapshot the generation's span context here and
+# let the loop re-parent each tool span under it via parent_span_id (a closed
+# span is still a valid parent), so the trace reads model-call → its tools.
+_current_generation_ctx: ContextVar[dict[str, str] | None] = ContextVar(
+    "agent_current_generation_ctx", default=None
+)
+
+
+def _capture_current_span_context() -> dict[str, str] | None:
+    """Snapshot the current OTel span as a langfuse TraceContext, or None.
+
+    Returns ``{"trace_id", "parent_span_id"}`` (32-/16-hex, the shapes langfuse
+    TraceContext wants) for the active span, or None when no valid span is
+    current (langfuse unavailable / outside any span).
+    """
+    span = _otel_trace.get_current_span()
+    ctx = span.get_span_context() if span is not None else None
+    if ctx is None or not ctx.is_valid:
+        return None
+    return {
+        "trace_id": _otel_trace.format_trace_id(ctx.trace_id),
+        "parent_span_id": _otel_trace.format_span_id(ctx.span_id),
+    }
+
+
+def current_generation_context() -> dict[str, str] | None:
+    """The most recent model call's TraceContext in this task, or None.
+
+    Set as a side effect of ``generation_span`` (never reset — it is overwritten
+    by the next model call and dies with the task; not resetting also avoids a
+    ContextVar token being reset across an async-generator yield). The ReAct loop
+    reads it to parent each tool span under the model call that requested it.
+    """
+    return _current_generation_ctx.get()
 
 
 def _get_client() -> Langfuse:
@@ -151,22 +194,40 @@ def generation_span(
 
     A langfuse failure (unconfigured keys, network) degrades to a no-op span;
     the wrapped LLM call always proceeds.
+
+    Opened *as the current span* so the loop can snapshot its context (for tool
+    re-parenting) and so anything nested during the call hangs under it.
     """
     try:
-        gen = _get_client().start_generation(
+        cm = _get_client().start_as_current_generation(
             name=name,
             model=model,
             input=input,
             model_parameters=model_parameters,
             metadata=metadata,
         )
+        gen = cm.__enter__()
     except Exception as exc:
         logger.warning("langfuse generation span unavailable: %s", exc)
         yield _NoOpSpan()
         return
 
+    # Record this generation's span context so a tool span dispatched right after
+    # (in the ReAct loop, once this generation has closed) re-parents under it.
+    _current_generation_ctx.set(_capture_current_span_context())
+
     span = _SafeSpan(gen)
+    body_exc: BaseException | None = None
     try:
         yield span
+    except BaseException as exc:  # noqa: BLE001 - re-raised after closing span
+        body_exc = exc
+        raise
     finally:
-        span.end()
+        try:
+            if body_exc is not None:
+                cm.__exit__(type(body_exc), body_exc, body_exc.__traceback__)
+            else:
+                cm.__exit__(None, None, None)
+        except Exception as exc:  # pragma: no cover - span teardown failure
+            logger.warning("langfuse generation span teardown failed: %s", exc)

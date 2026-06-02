@@ -133,7 +133,7 @@ class OpenAIAdapter(ModelClient):
             request["tools"] = [_tool_to_wire(t) for t in tools]
 
         with generation_span(
-            name="llm.complete",
+            name=self._model,
             model=self._model,
             input=wire_messages,
             model_parameters=_model_parameters(request),
@@ -171,7 +171,7 @@ class OpenAIAdapter(ModelClient):
             request["tools"] = [_tool_to_wire(t) for t in tools]
 
         with generation_span(
-            name="llm.stream",
+            name=self._model,
             model=self._model,
             input=wire_messages,
             model_parameters=_model_parameters(request),
@@ -254,7 +254,7 @@ class OpenAIAdapter(ModelClient):
         }
 
         with generation_span(
-            name="llm.structured",
+            name=self._model,
             model=self._model,
             input=wire_messages,
             model_parameters=_model_parameters(request),

@@ -73,7 +73,7 @@ from app.agent.neutral import (
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
-from app.agent.trace import current_turn_trace_id
+from app.agent.trace import current_generation_context, current_turn_trace_id
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra.config import settings
 
@@ -226,8 +226,15 @@ def _root_span(
 
 @contextmanager
 def _tool_span(*, name: str, input: Any):
-    """Open a span around one tool dispatch; degrade to no-op on langfuse error."""
-    with _safe_current_span(f"tool.{name}", input) as span:
+    """Open a span around one tool dispatch; degrade to no-op on langfuse error.
+
+    Re-parents under the model call that requested the tool (its generation span
+    has closed by now, but its parent_span_id is still a valid parent), so the
+    trace reads model-call → its tools instead of a flat list under the agent.
+    """
+    with _safe_current_span(
+        f"tool.{name}", input, trace_context=current_generation_context()
+    ) as span:
         yield span
 
 

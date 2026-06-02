@@ -18,30 +18,42 @@ import pytest
 from app.agent.trace import generation_span
 
 
+class _FakeGenCM:
+    """Stand-in for langfuse ``start_as_current_generation``'s context manager.
+
+    ``__enter__`` yields the recording generation; ``__exit__`` (how the span is
+    now ended) flags it.
+    """
+
+    def __init__(self, gen: SimpleNamespace) -> None:
+        self.gen = gen
+
+    def __enter__(self) -> SimpleNamespace:
+        return self.gen
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self.gen.ended = True
+        return False
+
+
 @pytest.fixture
 def mock_langfuse(monkeypatch):
     """Patch the trace module's langfuse client getter with a recorder."""
     created: list[SimpleNamespace] = []
 
-    def _start_generation(**kwargs: Any) -> SimpleNamespace:
+    def _start_as_current_generation(**kwargs: Any) -> _FakeGenCM:
         gen = SimpleNamespace(
             start_kwargs=kwargs,
             update_kwargs=None,
             ended=False,
         )
-
-        def _update(**kw: Any) -> None:
-            gen.update_kwargs = kw
-
-        def _end(**kw: Any) -> None:
-            gen.ended = True
-
-        gen.update = _update
-        gen.end = _end
+        gen.update = lambda **kw: setattr(gen, "update_kwargs", kw)
         created.append(gen)
-        return gen
+        return _FakeGenCM(gen)
 
-    client = SimpleNamespace(start_generation=_start_generation)
+    client = SimpleNamespace(
+        start_as_current_generation=_start_as_current_generation
+    )
     monkeypatch.setattr("app.agent.trace._get_client", lambda: client)
     return created
 
@@ -102,13 +114,17 @@ def test_generation_span_swallows_update_failure(monkeypatch):
     langfuse serialisation error there must be swallowed, not propagated.
     """
 
-    def _start_generation(**_kwargs: Any) -> Any:
-        def _bad_update(**_kw: Any) -> None:
-            raise RuntimeError("langfuse update exploded")
+    class _BadUpdateCM:
+        def __enter__(self) -> Any:
+            def _bad_update(**_kw: Any) -> None:
+                raise RuntimeError("langfuse update exploded")
 
-        return SimpleNamespace(update=_bad_update, end=lambda **_kw: None)
+            return SimpleNamespace(update=_bad_update)
 
-    client = SimpleNamespace(start_generation=_start_generation)
+        def __exit__(self, *_exc: Any) -> bool:
+            return False
+
+    client = SimpleNamespace(start_as_current_generation=lambda **_k: _BadUpdateCM())
     monkeypatch.setattr("app.agent.trace._get_client", lambda: client)
 
     # update() raising inside the block must not surface
@@ -117,15 +133,16 @@ def test_generation_span_swallows_update_failure(monkeypatch):
 
 
 def test_generation_span_swallows_end_failure(monkeypatch):
-    """A throwing ``end`` on context exit must not surface either."""
+    """A throwing context-exit (the span's ``end``) must not surface either."""
 
-    def _start_generation(**_kwargs: Any) -> Any:
-        def _bad_end(**_kw: Any) -> None:
+    class _BadExitCM:
+        def __enter__(self) -> Any:
+            return SimpleNamespace(update=lambda **_kw: None)
+
+        def __exit__(self, *_exc: Any) -> bool:
             raise RuntimeError("end exploded")
 
-        return SimpleNamespace(update=lambda **_kw: None, end=_bad_end)
-
-    client = SimpleNamespace(start_generation=_start_generation)
+    client = SimpleNamespace(start_as_current_generation=lambda **_k: _BadExitCM())
     monkeypatch.setattr("app.agent.trace._get_client", lambda: client)
 
     with generation_span(name="llm", model="gpt-4o", input=[]):
@@ -194,3 +211,36 @@ async def test_turn_trace_propagates_through_fan_out_wait():
 
     assert expected is not None
     assert seen == [expected, expected]
+
+
+# ---------------------------------------------------------------------------
+# model-call generation context: re-parent tool spans under the generation
+# that requested them (tool dispatched after the generation span has closed,
+# but parent_span_id is still valid).
+# ---------------------------------------------------------------------------
+
+from app.agent.trace import (  # noqa: E402
+    _capture_current_span_context,
+    current_generation_context,
+)
+
+
+def test_capture_current_span_context_inside_and_outside_span():
+    from opentelemetry import trace as ot
+    from opentelemetry.sdk.trace import TracerProvider
+
+    assert _capture_current_span_context() is None  # no active span
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("gen"):
+        cap = _capture_current_span_context()
+        assert cap is not None
+        assert set(cap) == {"trace_id", "parent_span_id"}
+        assert len(cap["trace_id"]) == 32  # langfuse 32-hex trace id
+        assert len(cap["parent_span_id"]) == 16  # OTel 16-hex span id
+    assert _capture_current_span_context() is None  # reverts after the span
+    # capture and TraceContext shape line up so it can be passed straight through
+    _ = ot.format_span_id  # imported symbol used by the helper
+
+
+def test_current_generation_context_none_by_default():
+    assert current_generation_context() is None
