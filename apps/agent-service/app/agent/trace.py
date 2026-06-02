@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from langfuse import Langfuse
@@ -34,6 +35,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _client: Langfuse | None = None
+
+
+# ---------------------------------------------------------------------------
+# Turn-trace context: unify one chat turn's Agent spans into one langfuse trace
+# ---------------------------------------------------------------------------
+
+# A chat turn's per-LLM operations (pre-check guards via emit_and_wait, the main
+# stream) run in *separate* @node / async-task contexts, so each Agent root span
+# would otherwise open its own top-level langfuse trace. The OTel current-span
+# does not propagate across those dataflow boundaries. We instead derive a
+# deterministic langfuse trace_id from a per-turn seed (``message_id:persona_id``)
+# and attach every Agent root span to it, so guards + main land in ONE trace.
+#
+# This is OPT-IN: only per-turn @nodes (run_pre_safety, chat_node) enter
+# ``turn_trace`` from their request's (message_id, persona_id). Debounced
+# post-actions (afterthought / voice) deliberately do NOT — they are
+# (chat, persona) aggregations, not a turn, and must stay separate traces. A
+# debounce-propagated runtime trace_id would have leaked them into a turn trace,
+# which is exactly why we don't seed from the runtime trace_id.
+_turn_trace_seed: ContextVar[str | None] = ContextVar(
+    "agent_turn_trace_seed", default=None
+)
+
+
+@contextmanager
+def turn_trace(seed: str) -> Iterator[None]:
+    """Mark the current async scope as one chat turn keyed by ``seed``.
+
+    Every ``Agent`` root span opened inside this scope attaches to the same
+    langfuse trace (derived deterministically from ``seed``). Restores the
+    previous value on exit (success or exception).
+    """
+    token = _turn_trace_seed.set(seed)
+    try:
+        yield
+    finally:
+        _turn_trace_seed.reset(token)
+
+
+def current_turn_trace_id() -> str | None:
+    """The langfuse trace_id for the active turn, or None when outside any turn.
+
+    Deterministic in the seed: two scopes that compute the same
+    ``message_id:persona_id`` (e.g. run_pre_safety and chat_node) get the same
+    trace_id and therefore the same trace.
+    """
+    seed = _turn_trace_seed.get()
+    if not seed:
+        return None
+    return Langfuse.create_trace_id(seed=seed)
 
 
 def _get_client() -> Langfuse:

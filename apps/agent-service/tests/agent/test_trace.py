@@ -130,3 +130,67 @@ def test_generation_span_swallows_end_failure(monkeypatch):
 
     with generation_span(name="llm", model="gpt-4o", input=[]):
         pass
+
+
+# ---------------------------------------------------------------------------
+# turn-trace contextvar — unify one (message_id, persona_id) turn's Agent
+# root spans into ONE langfuse trace (guards + main), opt-in per turn node.
+# ---------------------------------------------------------------------------
+
+from app.agent.trace import current_turn_trace_id, turn_trace  # noqa: E402
+
+
+def test_current_turn_trace_id_none_outside_turn():
+    assert current_turn_trace_id() is None
+
+
+def test_current_turn_trace_id_deterministic_within_turn():
+    with turn_trace("msg-1:persona-7"):
+        a = current_turn_trace_id()
+        b = current_turn_trace_id()
+    assert a is not None
+    assert a == b
+
+
+def test_turn_trace_different_seed_different_id():
+    with turn_trace("msg-1:persona-7"):
+        a = current_turn_trace_id()
+    with turn_trace("msg-1:persona-8"):
+        c = current_turn_trace_id()
+    assert a != c
+
+
+def test_turn_trace_resets_on_exit():
+    with turn_trace("msg-1:persona-7"):
+        assert current_turn_trace_id() is not None
+    assert current_turn_trace_id() is None
+
+
+def test_same_seed_across_scopes_yields_same_id():
+    """The unification invariant: run_pre_safety and chat_node compute the same
+    seed independently from (message_id, persona_id) → same langfuse trace_id,
+    so guards and main land in one trace."""
+    with turn_trace("msg-9:persona-3"):
+        guard_tid = current_turn_trace_id()
+    with turn_trace("msg-9:persona-3"):
+        main_tid = current_turn_trace_id()
+    assert guard_tid == main_tid
+
+
+async def test_turn_trace_propagates_through_fan_out_wait():
+    """Guards run via fan_out_wait (ensure_future child tasks). The turn seed set
+    before the fan-out must reach those tasks so each guard's Agent root span
+    attaches to the turn trace, not a separate top-level trace."""
+    from app.capabilities.concurrency import fan_out_wait
+
+    seen: list[str | None] = []
+
+    async def _probe() -> None:
+        seen.append(current_turn_trace_id())
+
+    with turn_trace("msg-7:persona-2"):
+        expected = current_turn_trace_id()
+        await fan_out_wait([_probe(), _probe()], timeout_s=5.0)
+
+    assert expected is not None
+    assert seen == [expected, expected]

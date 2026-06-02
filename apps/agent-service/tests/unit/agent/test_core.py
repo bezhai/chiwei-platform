@@ -146,6 +146,62 @@ class TestRootSpanRobustness:
             assert entered
 
 
+class TestRootSpanTurnTrace:
+    """Root span attaches the active turn's langfuse trace, so the guard
+    extracts and the main stream of one (message_id, persona_id) turn land in
+    ONE trace instead of separate top-level traces."""
+
+    def test_root_span_attaches_turn_trace_context(self):
+        from app.agent import core
+        from app.agent.trace import current_turn_trace_id, turn_trace
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with turn_trace("msg-1:persona-2"):
+                expected_tid = current_turn_trace_id()
+                with core._root_span(name="main", input=[], update_trace=False):
+                    pass
+        kwargs = client.start_as_current_span.call_args.kwargs
+        assert kwargs.get("trace_context") == {"trace_id": expected_tid}
+
+    def test_root_span_no_trace_context_outside_turn(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(name="main", input=[], update_trace=False):
+                pass
+        kwargs = client.start_as_current_span.call_args.kwargs
+        assert kwargs.get("trace_context") is None
+
+    def test_two_root_spans_same_turn_share_trace_id(self):
+        """Anti-false-positive (codex T1 必改 3 at the root layer): a guard
+        root span and a main root span opened under the SAME turn attach to the
+        SAME trace_id — real unification, not each opening its own trace."""
+        from app.agent import core
+        from app.agent.trace import turn_trace
+
+        client = MagicMock()
+        seen = []
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with turn_trace("msg-5:persona-1"):
+                with core._root_span(
+                    name="pre-nsfw-check", input=[], update_trace=False
+                ):
+                    pass
+                seen.append(
+                    client.start_as_current_span.call_args.kwargs.get("trace_context")
+                )
+                with core._root_span(name="main", input=[], update_trace=True):
+                    pass
+                seen.append(
+                    client.start_as_current_span.call_args.kwargs.get("trace_context")
+                )
+        assert seen[0] is not None
+        assert seen[0] == seen[1]
+        assert seen[0]["trace_id"]
+
+
 class TestAgentConfig:
     def test_frozen(self):
         cfg = AgentConfig("p", "m", "t")

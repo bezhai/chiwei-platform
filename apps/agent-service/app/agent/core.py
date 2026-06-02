@@ -73,6 +73,7 @@ from app.agent.neutral import (
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
+from app.agent.trace import current_turn_trace_id
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra.config import settings
 
@@ -147,7 +148,9 @@ class _NoOpRootSpan:
 
 
 @contextmanager
-def _safe_current_span(span_name: str, input: Any):
+def _safe_current_span(
+    span_name: str, input: Any, trace_context: dict[str, Any] | None = None
+):
     """Enter a langfuse ``start_as_current_span`` defensively, yield it (or no-op).
 
     Tracing must never break the wrapped call. Both *creating* the span and
@@ -156,9 +159,15 @@ def _safe_current_span(span_name: str, input: Any):
     exceptions (e.g. a retryable LLM error) are NOT swallowed — they propagate
     so the Agent's retry logic still sees them; only span ``__exit__`` failures
     on the way out are swallowed.
+
+    ``trace_context`` (e.g. ``{"trace_id": ...}``) attaches the span to an
+    existing trace; used by ``_root_span`` to fold one turn's guard + main spans
+    into one trace. ``None`` lets langfuse start a fresh trace (current behaviour).
     """
     try:
-        cm = _get_trace_client().start_as_current_span(name=span_name, input=input)
+        cm = _get_trace_client().start_as_current_span(
+            name=span_name, input=input, trace_context=trace_context
+        )
         span = cm.__enter__()
     except Exception as exc:
         logger.warning("langfuse span %s unavailable: %s", span_name, exc)
@@ -198,9 +207,15 @@ def _root_span(
     parent trace keeps its identity while still getting our spans.
 
     Tracing must never break the call: every langfuse touch degrades to no-op.
+
+    When opened inside a ``turn_trace`` scope (per-turn @node), the span attaches
+    to that turn's langfuse trace_id so this turn's guard + main spans fold into
+    one trace; outside a turn it stays None and langfuse starts a fresh trace.
     """
     span_name = name or "agent"
-    with _safe_current_span(span_name, input) as span:
+    tid = current_turn_trace_id()
+    trace_context = {"trace_id": tid} if tid else None
+    with _safe_current_span(span_name, input, trace_context) as span:
         if update_trace:
             try:
                 _get_trace_client().update_current_trace(name=span_name, input=input)
