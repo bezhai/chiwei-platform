@@ -263,8 +263,23 @@ async def test_complete_assistant_role_maps_to_model(mock_sdk):
 # ---------------------------------------------------------------------------
 
 
-async def test_complete_chat_history_image_block_becomes_image_part(mock_sdk):
-    """A neutral ``image`` block (url) becomes a Gemini image part."""
+async def test_complete_chat_history_image_block_downloaded_to_inline_part(
+    mock_sdk, monkeypatch
+):
+    """A neutral ``image`` block (http url) is downloaded to inline_data bytes.
+
+    Gemini does not fetch arbitrary http urls via file_data and rejects wildcard
+    mime types, so — mirroring the old langchain-google-genai path — the adapter
+    downloads the bytes and sends them inline with a concrete mime type.
+    """
+    fetched: dict[str, str] = {}
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        fetched["url"] = url
+        return b"PNGBYTES", "image/png"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
     adapter = GeminiAdapter(
         model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
     )
@@ -281,14 +296,27 @@ async def test_complete_chat_history_image_block_becomes_image_part(mock_sdk):
 
     parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
     assert parts[0].text == "look"
-    # second part is an image part carrying the uri
     img = parts[1]
-    assert getattr(img, "file_data", None) is not None
-    assert img.file_data.file_uri == "https://img/dog.png"
+    # inlined bytes, NOT a file_data uri-by-reference with image/*
+    assert getattr(img, "file_data", None) is None
+    assert img.inline_data is not None
+    assert img.inline_data.data == b"PNGBYTES"
+    assert img.inline_data.mime_type == "image/png"
+    assert fetched["url"] == "https://img/dog.png"
 
 
-async def test_complete_openai_style_image_url_block_becomes_image_part(mock_sdk):
-    """A tool-returned OpenAI-style ``image_url`` block reaches a Gemini image part."""
+async def test_complete_openai_style_image_url_block_downloaded_to_inline_part(
+    mock_sdk, monkeypatch
+):
+    """A tool-returned OpenAI-style ``image_url`` block is downloaded + inlined."""
+    fetched: dict[str, str] = {}
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        fetched["url"] = url
+        return b"JPEGBYTES", "image/jpeg"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
     adapter = GeminiAdapter(
         model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
     )
@@ -305,8 +333,38 @@ async def test_complete_openai_style_image_url_block_becomes_image_part(mock_sdk
 
     parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
     img = parts[1]
-    assert getattr(img, "file_data", None) is not None
-    assert img.file_data.file_uri == "https://img/out.png"
+    assert getattr(img, "file_data", None) is None
+    assert img.inline_data.data == b"JPEGBYTES"
+    assert img.inline_data.mime_type == "image/jpeg"
+    assert fetched["url"] == "https://img/out.png"
+
+
+async def test_complete_data_uri_image_decoded_inline_without_network(
+    mock_sdk, monkeypatch
+):
+    """A ``data:`` URI image is decoded inline; it must NOT hit the network."""
+
+    async def _boom(url: str) -> tuple[bytes, str]:
+        raise AssertionError("data: URI must be decoded locally, not downloaded")
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _boom)
+
+    import base64
+
+    payload = base64.b64encode(b"JPEGBYTES").decode()
+    data_uri = f"data:image/jpeg;base64,{payload}"
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=data_uri)])
+    await adapter.complete([msg])
+
+    img = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts[0]
+    assert img.inline_data.data == b"JPEGBYTES"
+    assert img.inline_data.mime_type == "image/jpeg"
 
 
 # ---------------------------------------------------------------------------
@@ -447,15 +505,22 @@ async def test_complete_sends_assistant_tool_call_and_tool_result(mock_sdk):
     assert fr_part.function_response.response == {"result": "3 results"}
 
 
-async def test_tool_result_image_block_surfaces_as_image_part(mock_sdk):
+async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeypatch):
     """A tool result carrying image blocks must NOT silently drop the images.
 
     read_images / generate_image return list[ContentBlock] with image_url blocks.
     Gemini's function_response part is structured JSON (no image); flattening the
     tool message with .text() drops the image entirely, so the model never sees
     what the tool returned. The fix keeps the function_response (text result)
-    AND surfaces each image block as a Gemini image part on the same user turn.
+    AND surfaces each image block as a downloaded inline_data part on the same
+    user turn.
     """
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        return b"IMG3", "image/png"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
     adapter = GeminiAdapter(
         model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
     )
@@ -487,14 +552,11 @@ async def test_tool_result_image_block_surfaces_as_image_part(mock_sdk):
     assert len(fr_parts) == 1
     assert fr_parts[0].function_response.name == "read_images"
 
-    # the image block reached the wire as a Gemini image part (not dropped)
-    img_parts = [
-        p
-        for p in tool_turn.parts
-        if getattr(p, "file_data", None) is not None
-    ]
+    # the image block reached the wire as a downloaded inline image part
+    img_parts = [p for p in tool_turn.parts if getattr(p, "inline_data", None)]
     assert len(img_parts) == 1
-    assert img_parts[0].file_data.file_uri == "https://img/3.png"
+    assert img_parts[0].inline_data.data == b"IMG3"
+    assert img_parts[0].inline_data.mime_type == "image/png"
 
 
 # ---------------------------------------------------------------------------

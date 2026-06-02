@@ -18,8 +18,13 @@ turn list into ``config.system_instruction``; ``ASSISTANT`` maps to ``model``;
 ``function_response`` part, per Gemini's protocol).
 
 **Multimodal.** A neutral ``image`` block (``url``) and an OpenAI-style
-``image_url`` block both become a Gemini *file_data* part (``from_uri``),
-carrying the image by reference.
+``image_url`` block both carry an http(s) (pre-signed TOS) url or a ``data:``
+URI. Gemini does NOT fetch arbitrary http urls through ``file_data`` (only
+gs:// / Files-API URIs) and rejects wildcard mime types, so — mirroring the
+old ``langchain-google-genai`` path (``ImageBytesLoader.load_part``) — the
+adapter *downloads* http(s) urls (and decodes ``data:`` URIs) to bytes and
+sends them as an *inline_data* part with a concrete mime type. Because this
+needs network I/O, ``neutral → wire`` content building is async.
 
 **Thinking.** Outbound we ask for thoughts via
 ``thinking_config.include_thoughts=True``; inbound, a response ``Part`` with
@@ -47,12 +52,15 @@ http client through ``settings.forward_proxy_url`` (sync + async client args).
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -131,7 +139,7 @@ class GeminiAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> Message:
-        contents, system_instruction = self._to_wire_contents(messages)
+        contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction, tools=tools, **kwargs
         )
@@ -163,7 +171,7 @@ class GeminiAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
-        contents, system_instruction = self._to_wire_contents(messages)
+        contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction, tools=tools, **kwargs
         )
@@ -214,7 +222,7 @@ class GeminiAdapter(ModelClient):
         schema: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
-        contents, system_instruction = self._to_wire_contents(messages)
+        contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction,
             tools=None,
@@ -273,14 +281,15 @@ class GeminiAdapter(ModelClient):
         cfg.update(_passthrough_kwargs(kwargs))
         return types.GenerateContentConfig(**cfg)
 
-    def _to_wire_contents(
+    async def _to_wire_contents(
         self, messages: list[Message]
     ) -> tuple[list[types.Content], str | None]:
         """neutral messages → (Gemini contents, system_instruction).
 
         System turns are hoisted to system_instruction (concatenated). A tool
         result needs the name of the call it answers, so we track call_id→name
-        as we walk the assistant function_call turns.
+        as we walk the assistant function_call turns. Async because image blocks
+        are downloaded to inline bytes (see module docstring).
         """
         contents: list[types.Content] = []
         system_parts: list[str] = []
@@ -291,11 +300,11 @@ class GeminiAdapter(ModelClient):
                 system_parts.append(msg.text())
                 continue
             if msg.role == Role.TOOL:
-                contents.append(_tool_result_to_content(msg, call_names))
+                contents.append(await _tool_result_to_content(msg, call_names))
                 continue
 
             role = "model" if msg.role == Role.ASSISTANT else "user"
-            parts = _message_parts(msg)
+            parts = await _message_parts(msg)
             for tc in msg.tool_calls:
                 call_names[tc.id] = tc.name
                 parts.append(_tool_call_to_part(tc))
@@ -310,7 +319,7 @@ class GeminiAdapter(ModelClient):
 # ---------------------------------------------------------------------------
 
 
-def _message_parts(message: Message) -> list[types.Part]:
+async def _message_parts(message: Message) -> list[types.Part]:
     """Build the content parts for a user/model message (text + images)."""
     content = message.content
     if isinstance(content, str):
@@ -318,28 +327,81 @@ def _message_parts(message: Message) -> list[types.Part]:
 
     parts: list[types.Part] = []
     for block in content:
-        part = _block_to_part(block)
+        part = await _block_to_part(block)
         if part is not None:
             parts.append(part)
     return parts
 
 
-def _block_to_part(block: ContentBlock) -> types.Part | None:
+async def _block_to_part(block: ContentBlock) -> types.Part | None:
     """neutral ContentBlock → Gemini Part.
 
     ``text``      → text part
-    ``image``     → file_data part (chat-history image, url)
-    ``image_url`` → file_data part (OpenAI-style tool-returned block)
+    ``image``     → inline_data part (chat-history image; url downloaded)
+    ``image_url`` → inline_data part (OpenAI-style tool-returned block)
     """
     if block.type == "text":
         return types.Part.from_text(text=block.text or "")
-    if block.type == "image" and block.url:
-        return types.Part.from_uri(file_uri=block.url, mime_type="image/*")
-    if block.type == "image_url" and block.image_url:
-        url = block.image_url.get("url")
-        if url:
-            return types.Part.from_uri(file_uri=url, mime_type="image/*")
+    url = _image_block_url(block)
+    if url:
+        return await _image_url_to_part(url)
     return None
+
+
+def _image_block_url(block: ContentBlock) -> str | None:
+    """Pull the image reference (http(s) / data: / gs:// url) out of a block."""
+    if block.type == "image":
+        return block.url
+    if block.type == "image_url" and block.image_url:
+        return block.image_url.get("url")
+    return None
+
+
+async def _image_url_to_part(url: str) -> types.Part:
+    """Resolve an image reference to a Gemini image Part.
+
+    ``data:`` URIs are decoded locally; ``gs://`` URIs are passed by reference
+    (the one case Gemini fetches itself); everything else (our pre-signed TOS
+    http(s) urls) is downloaded to bytes and sent inline — Gemini won't fetch
+    arbitrary http urls and rejects wildcard mime types.
+    """
+    if url.startswith("data:"):
+        data, mime = _decode_data_uri(url)
+        return types.Part(inline_data=types.Blob(data=data, mime_type=mime))
+    if url.startswith("gs://"):
+        mime, _ = mimetypes.guess_type(url)
+        return types.Part(file_data=types.FileData(file_uri=url, mime_type=mime))
+    data, mime = await _fetch_remote_image(url)
+    return types.Part(inline_data=types.Blob(data=data, mime_type=mime))
+
+
+async def _fetch_remote_image(url: str) -> tuple[bytes, str]:
+    """Download an http(s) image to (bytes, concrete mime type)."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+    return resp.content, _normalise_image_mime(resp.headers.get("content-type"), url)
+
+
+def _decode_data_uri(uri: str) -> tuple[bytes, str]:
+    """Decode a ``data:<mime>;base64,<payload>`` URI to (bytes, mime)."""
+    header, _, payload = uri.partition(",")
+    meta = header[len("data:") :] if header.startswith("data:") else ""
+    mime = meta.split(";")[0] if meta else ""
+    return base64.b64decode(payload), _normalise_image_mime(mime)
+
+
+def _normalise_image_mime(content_type: str | None, url: str | None = None) -> str:
+    """Pick a concrete image mime Gemini accepts (it rejects ``image/*``)."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    if mime == "image/jpg":
+        mime = "image/jpeg"
+    if mime.startswith("image/") and mime != "image/*":
+        return mime
+    guessed, _ = mimetypes.guess_type(url or "")
+    if guessed:
+        return "image/jpeg" if guessed == "image/jpg" else guessed
+    return "image/jpeg"
 
 
 def _tool_call_to_part(tc: ToolCall) -> types.Part:
@@ -351,7 +413,7 @@ def _tool_call_to_part(tc: ToolCall) -> types.Part:
     return part
 
 
-def _tool_result_to_content(
+async def _tool_result_to_content(
     message: Message, call_names: dict[str, str]
 ) -> types.Content:
     """A neutral TOOL message → a user-role Content with a function_response part.
@@ -376,7 +438,7 @@ def _tool_result_to_content(
     if isinstance(message.content, list):
         for block in message.content:
             if block.type in ("image", "image_url"):
-                img_part = _block_to_part(block)
+                img_part = await _block_to_part(block)
                 if img_part is not None:
                     parts.append(img_part)
     return types.Content(role="user", parts=parts)
@@ -550,6 +612,15 @@ def _part_for_trace(part: types.Part) -> dict[str, Any]:
     fr = getattr(part, "function_response", None)
     if fr is not None:
         return {"function_response": {"name": fr.name}}
+    inline = getattr(part, "inline_data", None)
+    if inline is not None:
+        data = getattr(inline, "data", b"") or b""
+        return {
+            "inline_data": {
+                "mime_type": getattr(inline, "mime_type", None),
+                "bytes": len(data),
+            }
+        }
     fd = getattr(part, "file_data", None)
     if fd is not None:
         return {"file_data": {"file_uri": getattr(fd, "file_uri", None)}}
