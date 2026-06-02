@@ -8,11 +8,10 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
 from pydantic import Field
 
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_and_register
 
 logger = logging.getLogger(__name__)
@@ -36,7 +35,7 @@ async def read_images(
     Args:
         filenames: 图片文件名列表（如 ["3.png", "5.png"]）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     registry = context.image_registry
 
     if not registry:
@@ -84,7 +83,7 @@ async def generate_image(
     ] = None,
 ) -> str | list[dict[str, Any]]:
     """生成图片。调用前必须先 load_skill("drawing") 加载画图指南并遵循其流程。"""
-    context = get_runtime(AgentContext).context
+    context = get_context()
     registry = context.image_registry
 
     # Resolve reference images from registry

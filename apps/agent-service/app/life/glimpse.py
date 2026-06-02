@@ -11,18 +11,17 @@ import logging
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
-from langchain_core.messages import HumanMessage
-
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
 from app.data import queries as Q
 from app.data.ids import new_id
 from app.domain.memory_request import MemoryFragmentRequest
+from app.infra.config import settings
 from app.life.proactive import (
     get_recent_proactive_records,
     get_unseen_messages,
     submit_proactive_chat,
 )
-from app.infra.config import settings
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.runtime.db import emit_tx, tx
@@ -98,7 +97,7 @@ async def _call_glimpse_llm(
         )
 
     result = await Agent(_GLIMPSE_CFG).run(
-        messages=[HumanMessage(content="观察群消息")],
+        messages=[Message(role=Role.USER, content="观察群消息")],
         prompt_vars={
             "persona_name": persona_name,
             "persona_lite": persona_lite,
@@ -112,7 +111,7 @@ async def _call_glimpse_llm(
             "recent_proactive": proactive_hint,
         },
     )
-    return extract_text(result.content)
+    return result.text()
 
 
 # ---------------------------------------------------------------------------

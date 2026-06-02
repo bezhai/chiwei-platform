@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
 from app.agent.tools.search import search_web
 from app.capabilities.concurrency import fan_out_wait
 from app.data import queries as Q
@@ -107,7 +107,7 @@ async def _run_curator(persona_lite: str, all_materials: str) -> str:
         messages=[],
         prompt_vars={"persona_lite": persona_lite, "all_materials": all_materials},
     )
-    return extract_text(result.content)
+    return result.text()
 
 
 async def _run_writer(
@@ -138,7 +138,7 @@ async def _run_writer(
             "critic_feedback": critic_feedback,
         },
     )
-    return extract_text(result.content)
+    return result.text()
 
 
 async def _run_critic(
@@ -155,7 +155,7 @@ async def _run_critic(
             "recent_schedules": recent_schedules_text,
         },
     )
-    return extract_text(result.content)
+    return result.text()
 
 
 # ---------------------------------------------------------------------------

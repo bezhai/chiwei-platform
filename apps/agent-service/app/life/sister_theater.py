@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
 from app.life._date_utils import WEEKDAY_CN, get_season
 
 logger = logging.getLogger(__name__)
@@ -36,4 +36,4 @@ async def run_sister_theater(
             "prev_theater_summary": prev_theater_summary or "（昨天没有小剧场记录）",
         },
     )
-    return extract_text(result.content)
+    return result.text()

@@ -1,62 +1,106 @@
-from types import SimpleNamespace
+"""LLMClient — neutral ModelClient adapter for dataflow nodes.
+
+Post-cutover, ``LLMClient`` resolves a neutral ``ModelClient`` via
+``build_model_client`` and speaks neutral ``Message`` / ``StreamChunk`` to it,
+exposing plain ``str`` in / out. These tests assert that contract against a
+fake ModelClient (no langchain).
+"""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.agent.neutral import Message, Role, StreamChunk
 from app.capabilities.llm import LLMClient
 
 
+def _fake_model(*, complete_text="ok"):
+    model = AsyncMock()
+    model.complete = AsyncMock(
+        return_value=Message(role=Role.ASSISTANT, content=complete_text)
+    )
+    return model
+
+
 @pytest.mark.asyncio
-async def test_complete_delegates_to_langchain():
+async def test_complete_returns_message_text():
+    model = _fake_model(complete_text="ok")
     with patch(
-        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
-    ) as m:
-        fake = AsyncMock()
-        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
-        m.return_value = fake
+        "app.capabilities.llm.build_model_client",
+        new_callable=AsyncMock,
+        return_value=model,
+    ):
         client = LLMClient(model_id="deepseek-chat")
         out = await client.complete("hi")
     assert out == "ok"
-    fake.ainvoke.assert_awaited_once()
+    model.complete.assert_awaited_once()
+    # the prompt was wrapped as a neutral USER message
+    sent_messages = model.complete.await_args.args[0]
+    assert sent_messages[0].role == Role.USER
+    assert sent_messages[0].text() == "hi"
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_chunks():
-    async def fake_stream(*args, **kwargs):
+async def test_stream_yields_text_from_chunks():
+    async def fake_stream(messages, **kwargs):
         for s in ["a", "b", "c"]:
-            yield SimpleNamespace(content=s)
+            yield StreamChunk(text=s)
 
+    model = AsyncMock()
+    model.stream = fake_stream
     with patch(
-        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
-    ) as m:
-        m.return_value = SimpleNamespace(astream=fake_stream)
+        "app.capabilities.llm.build_model_client",
+        new_callable=AsyncMock,
+        return_value=model,
+    ):
         client = LLMClient(model_id="x")
         out = [c async for c in client.stream("hi")]
     assert out == ["a", "b", "c"]
 
 
 @pytest.mark.asyncio
-async def test_complete_passes_kwargs_through():
+async def test_stream_skips_non_text_chunks():
+    async def fake_stream(messages, **kwargs):
+        yield StreamChunk(reasoning="thinking")
+        yield StreamChunk(text="visible")
+        yield StreamChunk(finish_reason="stop")
+
+    model = AsyncMock()
+    model.stream = fake_stream
     with patch(
-        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
-    ) as m:
-        fake = AsyncMock()
-        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
-        m.return_value = fake
+        "app.capabilities.llm.build_model_client",
+        new_callable=AsyncMock,
+        return_value=model,
+    ):
+        client = LLMClient(model_id="x")
+        out = [c async for c in client.stream("hi")]
+    assert out == ["visible"]
+
+
+@pytest.mark.asyncio
+async def test_complete_passes_kwargs_through():
+    model = _fake_model()
+    with patch(
+        "app.capabilities.llm.build_model_client",
+        new_callable=AsyncMock,
+        return_value=model,
+    ):
         client = LLMClient(model_id="x")
         await client.complete("hi", temperature=0.7, max_tokens=100)
-    fake.ainvoke.assert_awaited_once_with("hi", temperature=0.7, max_tokens=100)
+    kwargs = model.complete.await_args.kwargs
+    assert kwargs["temperature"] == 0.7
+    assert kwargs["max_tokens"] == 100
 
 
 @pytest.mark.asyncio
 async def test_model_is_built_once_across_calls():
+    model = _fake_model()
     with patch(
-        "app.capabilities.llm.build_chat_model", new_callable=AsyncMock
+        "app.capabilities.llm.build_model_client",
+        new_callable=AsyncMock,
+        return_value=model,
     ) as m:
-        fake = AsyncMock()
-        fake.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
-        m.return_value = fake
         client = LLMClient(model_id="x")
         await client.complete("a")
         await client.complete("b")
-    assert m.await_count == 1  # built_chat_model called once, model reused
+    assert m.await_count == 1  # build_model_client called once, model reused

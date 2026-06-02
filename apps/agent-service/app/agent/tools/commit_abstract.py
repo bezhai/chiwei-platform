@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
-
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.ids import new_id
 from app.data.queries import (
@@ -91,7 +89,7 @@ async def commit_abstract_memory(
         supported_by_fact_ids: 可选，支撑这条认识的 fragment id 列表
         reasoning: 可选，你写下这条认识的原因（帮助未来 review）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _commit_abstract_impl(
         persona_id=context.persona_id,
         chat_id=context.chat_id or None,

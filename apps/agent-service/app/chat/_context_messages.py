@@ -8,8 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from langchain_core.messages import AIMessage, HumanMessage
-
+from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.prompts import get_prompt
 from app.chat.content_parser import parse_content
 from app.chat.quick_search import QuickSearchResult
@@ -66,7 +65,7 @@ def build_group_messages(
     trigger_id: str,
     image_key_to_url: dict[str, str],
     image_key_to_filename: dict[str, str],
-) -> list[HumanMessage | AIMessage]:
+) -> list[Message]:
     """Build group chat message list.
 
     Reply chain messages include image content blocks; other messages
@@ -95,7 +94,7 @@ def build_group_messages(
         other_messages="\n".join(other_lines) if other_lines else "（无其他消息）",
     )
 
-    content_blocks: list = [{"type": "text", "text": user_content}]
+    content_blocks: list[ContentBlock] = [ContentBlock.from_text(user_content)]
 
     # Attach reply chain images as content blocks
     for msg in chain:
@@ -104,10 +103,10 @@ def build_group_messages(
             fn = image_key_to_filename.get(key)
             url = image_key_to_url.get(key)
             if fn and url:
-                content_blocks.append({"type": "text", "text": f"@{fn}:"})
-                content_blocks.append({"type": "image", "url": url})
+                content_blocks.append(ContentBlock.from_text(f"@{fn}:"))
+                content_blocks.append(ContentBlock.from_image(url=url))
 
-    return [HumanMessage(content_blocks=content_blocks)]  # type: ignore[arg-type]
+    return [Message(role=Role.USER, content=content_blocks)]
 
 
 def build_p2p_messages(
@@ -115,25 +114,25 @@ def build_p2p_messages(
     image_key_to_url: dict[str, str],
     image_key_to_filename: dict[str, str],
     current_persona_id: str = "",
-) -> list[HumanMessage | AIMessage]:
+) -> list[Message]:
     """Build P2P message list with full image content blocks."""
-    result: list[HumanMessage | AIMessage] = []
+    result: list[Message] = []
     img_fn = image_fn(image_key_to_filename)
 
     for msg in messages:
         parsed = parse_content(msg.content)
         text_content = parsed.render(image_fn=img_fn)
 
-        content_blocks: list = []
+        content_blocks: list[ContentBlock] = []
         if text_content:
-            content_blocks.append({"type": "text", "text": text_content})
+            content_blocks.append(ContentBlock.from_text(text_content))
 
         for key in parsed.image_keys:
             fn = image_key_to_filename.get(key)
             url = image_key_to_url.get(key)
             if fn and url:
-                content_blocks.append({"type": "text", "text": f"@{fn}:"})
-                content_blocks.append({"type": "image", "url": url})
+                content_blocks.append(ContentBlock.from_text(f"@{fn}:"))
+                content_blocks.append(ContentBlock.from_image(url=url))
             elif not fn:
                 logger.warning(
                     "Image not registered: key=%s, msg=%s", key, msg.message_id
@@ -142,16 +141,14 @@ def build_p2p_messages(
         if not content_blocks:
             continue
 
-        # Current persona's messages -> AIMessage; everything else -> HumanMessage
+        # Current persona's messages -> ASSISTANT; everything else -> USER
         msg_persona_id = getattr(msg, "persona_id", None)
         is_self = (
             msg.role == "assistant"
             and bool(msg_persona_id)
             and msg_persona_id == current_persona_id
         )
-        if is_self:
-            result.append(AIMessage(content_blocks=content_blocks))  # type: ignore[arg-type]
-        else:
-            result.append(HumanMessage(content_blocks=content_blocks))  # type: ignore[arg-type]
+        role = Role.ASSISTANT if is_self else Role.USER
+        result.append(Message(role=role, content=content_blocks))
 
     return result

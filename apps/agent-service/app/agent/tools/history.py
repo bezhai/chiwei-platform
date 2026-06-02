@@ -10,11 +10,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
 from pydantic import Field
 
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.runtime.db import tx
 
@@ -74,7 +73,7 @@ async def check_chat_history(what_to_look_for: str, time_hint: str = "") -> str:
         what_to_look_for: 你想找什么
         time_hint: 大概什么时候的（如"今天上午"、"昨天"），不确定可以不填
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     chat_id = context.chat_id
 
     now = datetime.now(CST)
@@ -134,7 +133,7 @@ async def search_group_history(
         query: 你隐约记得的内容（自然语言描述）
         limit: 返回的锚点消息数量（默认5条，每条会附带上下文）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     limit = max(1, min(limit, 10))
 
     # 1. Generate hybrid embedding for query
@@ -243,7 +242,7 @@ async def list_group_members(role: str | None = None) -> str:
             - "manager": 管理员
             - None: 所有成员
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
 
     raise RuntimeError(
         f"group member listing is not available for common conversation "

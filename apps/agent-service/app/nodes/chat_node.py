@@ -15,6 +15,7 @@ from uuid import uuid4
 
 # MessageRouter / emit / 各 helper 都 imported at module level so 单元测试可
 # 用 monkeypatch.setattr(chat_node_mod, ...) 替换，节点内直接复用同名引用。
+from app.agent.trace import turn_trace
 from app.api.middleware import CHAT_FIRST_TOKEN, CHAT_PIPELINE_DURATION
 from app.chat.agent_stream import _build_and_stream
 from app.chat.content_parser import parse_content
@@ -213,41 +214,47 @@ async def chat_node(req: ChatRequest) -> None:
             published_at=int(time.time() * 1000),
         ))
 
-    async for text in _build_and_stream(
-        req.message_id,
-        gray_config,
-        session_id=req.session_id,
-        persona_id=req.persona_id,
-    ):
-        if not text:
-            continue
-        if t_first_token is None:
-            t_first_token = time.monotonic()
-        token_count += 1
-        full_content += text
-        pending = full_content[sent_length:]
-        while SPLIT_MARKER in pending and part_index < MAX_MESSAGES - 1:
-            idx = pending.index(SPLIT_MARKER)
-            part = pending[:idx].strip()
-            if part:
-                result = await _resolve_pre_safety_for_part(
-                    part, pre_task, guard_message,
-                )
-                if result.blocked:
-                    await _emit_block_guard()
-                    return
-                await emit(ChatResponseSegment(
-                    **base_payload,
-                    part_index=part_index,
-                    content=result.content,
-                    status="success",
-                    is_last=False,
-                    full_content=None,
-                    published_at=int(time.time() * 1000),
-                ))
-                part_index += 1
-            sent_length += idx + len(SPLIT_MARKER)
+    # One chat turn = one langfuse trace: seed from (message_id,
+    # effective_persona) — the SAME seed run_pre_safety uses — so this main
+    # stream and the turn's 3 pre-check guards fold into one trace. In
+    # chat_node (a coroutine, not an async generator) the contextvar set/reset
+    # never straddles a yield-to-caller, so the token always resets in-context.
+    with turn_trace(f"{req.message_id}:{effective_persona}"):
+        async for text in _build_and_stream(
+            req.message_id,
+            gray_config,
+            session_id=req.session_id,
+            persona_id=req.persona_id,
+        ):
+            if not text:
+                continue
+            if t_first_token is None:
+                t_first_token = time.monotonic()
+            token_count += 1
+            full_content += text
             pending = full_content[sent_length:]
+            while SPLIT_MARKER in pending and part_index < MAX_MESSAGES - 1:
+                idx = pending.index(SPLIT_MARKER)
+                part = pending[:idx].strip()
+                if part:
+                    result = await _resolve_pre_safety_for_part(
+                        part, pre_task, guard_message,
+                    )
+                    if result.blocked:
+                        await _emit_block_guard()
+                        return
+                    await emit(ChatResponseSegment(
+                        **base_payload,
+                        part_index=part_index,
+                        content=result.content,
+                        status="success",
+                        is_last=False,
+                        full_content=None,
+                        published_at=int(time.time() * 1000),
+                    ))
+                    part_index += 1
+                sent_length += idx + len(SPLIT_MARKER)
+                pending = full_content[sent_length:]
 
     t_stream_end = time.monotonic()
     if t_first_token is not None:

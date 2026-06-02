@@ -204,7 +204,7 @@ class TestSearchWebTool:
             new_callable=AsyncMock,
             return_value=[],
         ):
-            result = await search_web.coroutine("test query")
+            result = await search_web.invoke({"query": "test query"})
         assert "未配置" in result or "未搜索到" in result
 
     @pytest.mark.asyncio
@@ -224,5 +224,5 @@ class TestSearchWebTool:
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ):
-            result = await search_web.coroutine("test query")
+            result = await search_web.invoke({"query": "test query"})
         assert "网页搜索失败" in result

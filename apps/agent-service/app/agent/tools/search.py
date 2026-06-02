@@ -8,9 +8,9 @@ import time
 from typing import Annotated
 
 from bs4 import BeautifulSoup
-from langchain.tools import tool
 from pydantic import Field
 
+from app.agent.tooling import tool
 from app.agent.tools._common import (
     get_or_create_counter,
     get_or_create_histogram,

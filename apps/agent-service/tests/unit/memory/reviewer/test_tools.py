@@ -28,7 +28,7 @@ async def test_update_abstract_content_writes_content():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.update_abstract_content_query", new=AsyncMock()) as q,
     ):
-        result = await update_abstract_content.ainvoke(
+        result = await update_abstract_content.invoke(
             {"abstract_id": "a_1", "new_content": "updated content", "reason": "merge"}
         )
 
@@ -52,7 +52,7 @@ async def test_fade_node_sets_clarity():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.set_clarity", new=AsyncMock()) as q,
     ):
-        result = await fade_node.ainvoke(
+        result = await fade_node.invoke(
             {"node_id": "a_1", "node_type": "abstract", "clarity": "vague", "reason": "old"}
         )
 
@@ -68,7 +68,7 @@ async def test_fade_node_sets_clarity():
 async def test_fade_node_rejects_invalid_clarity():
     from app.memory.reviewer.tools import fade_node
 
-    result = await fade_node.ainvoke(
+    result = await fade_node.invoke(
         {"node_id": "a_1", "node_type": "abstract", "clarity": "gone", "reason": "test"}
     )
 
@@ -90,7 +90,7 @@ async def test_touch_node_abstract_calls_touch_abstract():
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()) as ta,
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()) as tf,
     ):
-        result = await touch_node.ainvoke({"node_id": "a_1", "node_type": "abstract"})
+        result = await touch_node.invoke({"node_id": "a_1", "node_type": "abstract"})
 
     assert result == {"ok": True}
     ta.assert_awaited_once()
@@ -106,7 +106,7 @@ async def test_touch_node_fact_calls_touch_fragment():
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()) as ta,
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()) as tf,
     ):
-        result = await touch_node.ainvoke({"node_id": "f_1", "node_type": "fact"})
+        result = await touch_node.invoke({"node_id": "f_1", "node_type": "fact"})
 
     assert result == {"ok": True}
     tf.assert_awaited_once()
@@ -122,7 +122,7 @@ async def test_touch_node_rejects_unknown_type():
         patch(f"{MODULE}.touch_abstract", new=AsyncMock()),
         patch(f"{MODULE}.touch_fragment", new=AsyncMock()),
     ):
-        result = await touch_node.ainvoke({"node_id": "x_1", "node_type": "unknown"})
+        result = await touch_node.invoke({"node_id": "x_1", "node_type": "unknown"})
 
     assert result["ok"] is False
     assert "unknown node_type" in result["error"]
@@ -141,7 +141,7 @@ async def test_delete_fragment_deletes():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.delete_fragment_query", new=AsyncMock()) as q,
     ):
-        result = await delete_fragment.ainvoke(
+        result = await delete_fragment.invoke(
             {"fragment_id": "f_1", "reason": "trivial noise"}
         )
 
@@ -169,7 +169,7 @@ async def test_connect_uses_from_node_persona():
         patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=fake_to_node)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
     ):
-        result = await connect.ainvoke(
+        result = await connect.invoke(
             {
                 "from_id": "f_1",
                 "from_type": "fact",
@@ -194,7 +194,7 @@ async def test_connect_uses_from_node_persona():
 async def test_connect_rejects_invalid_edge_type():
     from app.memory.reviewer.tools import connect
 
-    result = await connect.ainvoke(
+    result = await connect.invoke(
         {
             "from_id": "f_1",
             "from_type": "fact",
@@ -218,7 +218,7 @@ async def test_connect_returns_error_when_from_node_missing():
         patch(f"{MODULE}.get_fragment_by_id", new=AsyncMock(return_value=None)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
     ):
-        result = await connect.ainvoke(
+        result = await connect.invoke(
             {
                 "from_id": "f_missing",
                 "from_type": "fact",
@@ -247,7 +247,7 @@ async def test_connect_returns_error_when_to_node_missing():
         patch(f"{MODULE}.get_abstract_by_id", new=AsyncMock(return_value=None)),
         patch(f"{MODULE}.insert_memory_edge", new=AsyncMock()) as ins,
     ):
-        result = await connect.ainvoke(
+        result = await connect.invoke(
             {
                 "from_id": "f_1",
                 "from_type": "fact",
@@ -276,7 +276,7 @@ async def test_disconnect_removes_edge():
         patch(f"{MODULE}.tx", _fake_tx),
         patch(f"{MODULE}.delete_edge", new=AsyncMock()) as q,
     ):
-        result = await disconnect.ainvoke(
+        result = await disconnect.invoke(
             {"edge_id": "e_1", "reason": "duplicate edge"}
         )
 

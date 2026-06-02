@@ -16,9 +16,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain_core.messages import HumanMessage
-
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
 from app.chat.content_parser import parse_content
 from app.data.ids import new_id
 from app.data.queries import (
@@ -165,9 +164,9 @@ async def _generate_fragment(chat_id: str, persona_id: str) -> None:
             "scene": scene,
             "messages": timeline,
         },
-        messages=[HumanMessage(content="生成经历碎片")],
+        messages=[Message(role=Role.USER, content="生成经历碎片")],
     )
-    content = extract_text(result.content)
+    content = result.text()
 
     if not content:
         logger.warning(

@@ -14,10 +14,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage
-
 from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
+from app.agent.tooling import tool
 from app.data.queries import find_latest_life_state
 from app.life.tool import CommitResult, commit_life_state_impl
 
@@ -89,7 +88,7 @@ async def _run_refresh_agent(
     }
 
     await Agent(_REFRESH_CFG, tools=[tool_instance]).run(
-        messages=[HumanMessage(content="按新 schedule 重新评估状态")],
+        messages=[Message(role=Role.USER, content="按新 schedule 重新评估状态")],
         prompt_vars=prompt_vars,
     )
     return captured.get("result")

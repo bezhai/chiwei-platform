@@ -1,16 +1,19 @@
-"""Tests for app.chat.stream — StreamState + handle_token.
+"""Tests for app.chat.stream — StreamState + handle_token over neutral chunks.
 
-Covers:
-  - Stream state tracking (token counting, content accumulation)
-  - Content filter and length truncation signals
-  - Tool call boundary split marker injection
+Post-cutover, ``handle_token`` consumes the neutral ``StreamChunk`` (five
+fields: text / reasoning / finish_reason / tool_call / tool_result) instead of
+langchain ``AIMessageChunk`` / ``ToolMessage``. The branch behaviour is
+preserved:
 
-Originally in test_pipeline.py; relocated when pipeline.py was deleted
-in Phase 5a Task 12.
+  - ``finish_reason == "content_filter"`` -> ``[None]`` signal,
+  - ``finish_reason == "length"``         -> truncation signal,
+  - ``text``                              -> accumulate + yield,
+  - ``tool_call`` after text in this turn -> SPLIT_MARKER,
+  - ``tool_result``                       -> silently counted,
+  - ``reasoning`` / empty                 -> nothing yielded.
 """
 
-from unittest.mock import MagicMock
-
+from app.agent.neutral import StreamChunk, ToolCall, ToolResult
 from app.chat.stream import (
     SPLIT_MARKER,
     StreamState,
@@ -21,35 +24,6 @@ from app.chat.stream import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_ai_chunk(
-    text: str = "",
-    finish_reason: str | None = None,
-    tool_call_chunks: list | None = None,
-):
-    """Create a mock AIMessageChunk."""
-    from langchain_core.messages import AIMessageChunk
-
-    chunk = MagicMock(spec=AIMessageChunk)
-    chunk.__class__ = AIMessageChunk
-    chunk.text = text
-    chunk.response_metadata = {"finish_reason": finish_reason} if finish_reason else {}
-    chunk.tool_call_chunks = tool_call_chunks or []
-    return chunk
-
-
-def _make_tool_message():
-    from langchain_core.messages import ToolMessage
-
-    msg = MagicMock(spec=ToolMessage)
-    msg.__class__ = ToolMessage
-    return msg
-
-
-# ---------------------------------------------------------------------------
 # StreamState + handle_token tests
 # ---------------------------------------------------------------------------
 
@@ -57,8 +31,7 @@ def _make_tool_message():
 class TestHandleToken:
     def test_text_token(self):
         state = StreamState()
-        chunk = _make_ai_chunk(text="hello")
-        result = handle_token(chunk, state)
+        result = handle_token(StreamChunk(text="hello"), state)
 
         assert result == ["hello"]
         assert state.full_content == "hello"
@@ -66,8 +39,15 @@ class TestHandleToken:
 
     def test_empty_text_token(self):
         state = StreamState()
-        chunk = _make_ai_chunk(text="")
-        result = handle_token(chunk, state)
+        result = handle_token(StreamChunk(text=""), state)
+
+        assert result == []
+        assert state.full_content == ""
+        assert state.agent_token_count == 0
+
+    def test_reasoning_chunk_yields_nothing(self):
+        state = StreamState()
+        result = handle_token(StreamChunk(reasoning="thinking..."), state)
 
         assert result == []
         assert state.full_content == ""
@@ -75,64 +55,59 @@ class TestHandleToken:
 
     def test_content_filter(self):
         state = StreamState()
-        chunk = _make_ai_chunk(finish_reason="content_filter")
-        result = handle_token(chunk, state)
+        result = handle_token(StreamChunk(finish_reason="content_filter"), state)
 
         assert is_content_filter(result)
         assert not is_length_truncated(result)
 
     def test_length_truncated(self):
         state = StreamState()
-        chunk = _make_ai_chunk(finish_reason="length")
-        result = handle_token(chunk, state)
+        result = handle_token(StreamChunk(finish_reason="length"), state)
 
         assert is_length_truncated(result)
         assert not is_content_filter(result)
         assert result == ["(后续内容被截断)"]
 
+    def test_stop_finish_reason_yields_nothing(self):
+        state = StreamState()
+        result = handle_token(StreamChunk(finish_reason="stop"), state)
+        assert result == []
+
     def test_tool_call_boundary(self):
         state = StreamState()
-        handle_token(_make_ai_chunk(text="before"), state)
-        chunk = _make_ai_chunk(text="", tool_call_chunks=[{"name": "search"}])
-        result = handle_token(chunk, state)
+        handle_token(StreamChunk(text="before"), state)
+        call = ToolCall(id="c1", name="search", arguments={})
+        result = handle_token(StreamChunk(tool_call=call), state)
 
         assert result == [SPLIT_MARKER]
         assert state._has_text_in_current_turn is False
 
-    def test_tool_call_same_chunk_as_text(self):
-        state = StreamState()
-        handle_token(_make_ai_chunk(text="a"), state)
-        chunk = _make_ai_chunk(text="b", tool_call_chunks=[{"name": "search"}])
-        result = handle_token(chunk, state)
-
-        assert result == ["b", SPLIT_MARKER]
-        assert state.full_content == "ab"
-
-    def test_tool_message(self):
+    def test_tool_result_counted_silently(self):
         state = StreamState()
         state._has_text_in_current_turn = True
-        result = handle_token(_make_tool_message(), state)
+        tr = ToolResult(tool_call_id="c1", content="ok")
+        result = handle_token(StreamChunk(tool_result=tr), state)
 
         assert result == []
         assert state.tool_call_count == 1
         assert state._has_text_in_current_turn is False
 
-    def test_unknown_token_type(self):
+    def test_unknown_empty_chunk(self):
         state = StreamState()
-        assert handle_token("unknown", state) == []
+        assert handle_token(StreamChunk(), state) == []
 
     def test_accumulation(self):
         state = StreamState()
         for word in ["hello", " ", "world"]:
-            handle_token(_make_ai_chunk(text=word), state)
+            handle_token(StreamChunk(text=word), state)
 
         assert state.full_content == "hello world"
         assert state.agent_token_count == 3
 
     def test_no_split_without_prior_text(self):
         state = StreamState()
-        chunk = _make_ai_chunk(text="", tool_call_chunks=[{"name": "search"}])
-        result = handle_token(chunk, state)
+        call = ToolCall(id="c1", name="search", arguments={})
+        result = handle_token(StreamChunk(tool_call=call), state)
         assert SPLIT_MARKER not in result
 
 

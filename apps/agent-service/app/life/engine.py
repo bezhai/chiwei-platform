@@ -10,10 +10,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage
-
 from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
+from app.agent.tooling import tool
 from app.data import queries as Q
 from app.life.tool import CommitResult, commit_life_state_impl
 
@@ -72,7 +71,7 @@ async def _build_activity_context(persona_id: str, now: datetime) -> tuple[str, 
 def _make_commit_tool(
     persona_id: str, now: datetime, prev_state: Any | None, captured: dict
 ):
-    """Build a langchain @tool that the LLM calls to commit its decision.
+    """Build a @tool that the LLM calls to commit its decision.
 
     `captured` is a mutable dict owned by the caller; the tool writes the result
     under the "result" key. We don't use a module-level singleton because tick
@@ -177,7 +176,7 @@ async def _think(
     tool_instance = _make_commit_tool(persona_id, now, prev_state_row, captured)
 
     await Agent(_LIFE_TICK_CFG, tools=[tool_instance]).run(
-        messages=[HumanMessage(content=content)],
+        messages=[Message(role=Role.USER, content=content)],
         prompt_vars=prompt_vars,
     )
     return captured.get("result")

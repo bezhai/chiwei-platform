@@ -18,6 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from app.agent.core import Agent, AgentConfig
+from app.agent.trace import turn_trace
 from app.api.middleware import get_lane
 from app.capabilities import banned_words as _banned_words
 from app.capabilities.concurrency import fan_out_wait
@@ -349,7 +350,11 @@ async def run_pre_safety(req: PreSafetyRequest) -> PreSafetyVerdict:
     内部调 ``_run_pre_audit`` 复用 banned word + 3 个 LLM 检查；
     fail-open 已在 audit 内部处理（超时 / 异常 → 通过 verdict）。
     """
-    outcome = await _run_pre_audit(req.message_content, req.persona_id)
+    # Same turn seed as the main stream (agent_stream._build_and_stream) so the
+    # 3 pre-check guard spans land in this turn's langfuse trace, not 3 separate
+    # top-level traces.
+    with turn_trace(f"{req.message_id}:{req.persona_id}"):
+        outcome = await _run_pre_audit(req.message_content, req.persona_id)
     return PreSafetyVerdict(
         pre_request_id=req.pre_request_id,
         message_id=req.message_id,
