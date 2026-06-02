@@ -3,6 +3,7 @@ import type { LarkInboundProjection } from './common-projector';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
 const commonMessages = new Set<string>();
+const commonMessageRows = new Map<string, Record<string, unknown>>();
 const commonInsertCalls: Record<string, unknown>[] = [];
 const larkInsertCalls: unknown[] = [];
 const vectorizePublishes: unknown[] = [];
@@ -34,6 +35,7 @@ function insertBuilder() {
                     return { identifiers: [] };
                 }
                 commonMessages.add(id);
+                commonMessageRows.set(id, payload);
                 return { identifiers: [{ common_message_id: id }] };
             }
             if (target?.name === 'LarkMessage') {
@@ -76,6 +78,24 @@ mock.module('ormconfig', () => ({
                     ),
                 };
             }
+            if (entity.name === 'CommonMessage') {
+                return {
+                    update: mock(
+                        async (
+                            where: { common_message_id: string; role: string },
+                            patch: Record<string, unknown>,
+                        ) => {
+                            const row = commonMessageRows.get(where.common_message_id);
+                            if (!row || row.role !== where.role) return { affected: 0 };
+                            commonMessageRows.set(where.common_message_id, {
+                                ...row,
+                                ...patch,
+                            });
+                            return { affected: 1 };
+                        },
+                    ),
+                };
+            }
             return {
                 findOne: mock(async () => null),
                 findOneOrFail: mock(async () => ({})),
@@ -88,6 +108,7 @@ mock.module('ormconfig', () => ({
         },
         transaction: async (task: (manager: unknown) => Promise<void>) => {
             const commonSnapshot = new Set(commonMessages);
+            const commonRowSnapshot = new Map(commonMessageRows);
             const larkSnapshot = new Map(larkMessages);
             try {
                 return await task({
@@ -107,6 +128,8 @@ mock.module('ormconfig', () => ({
             } catch (err) {
                 commonMessages.clear();
                 for (const id of commonSnapshot) commonMessages.add(id);
+                commonMessageRows.clear();
+                for (const [id, row] of commonRowSnapshot) commonMessageRows.set(id, row);
                 larkMessages.clear();
                 for (const [omId, row] of larkSnapshot) larkMessages.set(omId, row);
                 throw err;
@@ -146,7 +169,11 @@ mock.module('@integrations/rabbitmq', () => ({
 }));
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
-const { storeLarkInboundMessage, storeLarkOutboundMessage } = await import('./common-projector');
+const {
+    claimLarkInboundMessageForBot,
+    storeLarkInboundMessage,
+    storeLarkOutboundMessage,
+} = await import('./common-projector');
 const originalGetBotCommonUserId = multiBotManager.getBotCommonUserId;
 
 afterEach(() => {
@@ -194,6 +221,7 @@ describe('storeLarkInboundMessage', () => {
     beforeEach(() => {
         larkMessages.clear();
         commonMessages.clear();
+        commonMessageRows.clear();
         commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
         vectorizePublishes.length = 0;
@@ -246,12 +274,28 @@ describe('storeLarkInboundMessage', () => {
         expect(larkMessages.has('om_1')).toBe(false);
         expect(vectorizePublishes.length).toBe(0);
     });
+
+    it('lets the responding bot claim an existing user common_message', async () => {
+        await storeLarkInboundMessage(event('om_1') as any, projection('018f-common-1'), message);
+
+        await claimLarkInboundMessageForBot({
+            commonMessageId: '018f-common-1',
+            botName: 'dev',
+            commonUserId: '018f-canonical-user',
+        });
+
+        expect(commonMessageRows.get('018f-common-1')?.bot_name).toBe('dev');
+        expect(commonMessageRows.get('018f-common-1')?.common_user_id).toBe(
+            '018f-canonical-user',
+        );
+    });
 });
 
 describe('storeLarkOutboundMessage', () => {
     beforeEach(() => {
         larkMessages.clear();
         commonMessages.clear();
+        commonMessageRows.clear();
         commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
         vectorizePublishes.length = 0;

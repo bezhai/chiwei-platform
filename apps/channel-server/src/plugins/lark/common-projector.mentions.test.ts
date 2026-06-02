@@ -15,8 +15,23 @@ mock.module('ormconfig', () => ({
                         async ({
                             where,
                         }: {
-                            where: { appId: string; openId: string };
-                        }) => larkUsers.get(`${where.appId}:${where.openId}`) ?? null,
+                            where:
+                                | { appId: string; openId: string }
+                                | { unionId: string };
+                        }) => {
+                            if ('unionId' in where) {
+                                return (
+                                    [...larkUsers.values()]
+                                        .filter((row) => row.unionId === where.unionId)
+                                        .sort((a, b) =>
+                                            (a.commonUserId ?? '').localeCompare(
+                                                b.commonUserId ?? '',
+                                            ),
+                                        )[0] ?? null
+                                );
+                            }
+                            return larkUsers.get(`${where.appId}:${where.openId}`) ?? null;
+                        },
                     ),
                     findOneOrFail: mock(
                         async ({
@@ -169,5 +184,28 @@ describe('projectLarkMentionedCommonUserIds', () => {
         ]);
 
         expect(ids).toEqual(['018f-current-bot-common']);
+    });
+
+    it('reuses an existing common user across app-scoped open ids when union id matches', async () => {
+        larkUsers.set('cli-a:ou_alice_a', {
+            appId: 'cli-a',
+            openId: 'ou_alice_a',
+            unionId: 'on_alice',
+            name: 'Alice',
+            commonUserId: '018f-alice-common',
+        });
+
+        const ids = await projectLarkMentionedCommonUserIds('cli-b', [
+            {
+                key: '@_user_1',
+                id: { union_id: 'on_alice', open_id: 'ou_alice_b' },
+                name: 'Alice',
+                mentioned_type: 'user',
+            },
+        ]);
+
+        expect(ids).toEqual(['018f-alice-common']);
+        expect(larkUsers.get('cli-b:ou_alice_b')?.commonUserId).toBe('018f-alice-common');
+        expect(commonUsers.has('018f-alice-common')).toBe(true);
     });
 });

@@ -107,15 +107,34 @@ async function ensureCommonUser(input: EnsureCommonUserInput): Promise<string> {
     const existing = await larkUserRepo.findOne({
         where: { appId: input.appId, openId: input.openId },
     });
-    if (existing?.commonUserId) {
-        await larkUserRepo.update(
-            { appId: input.appId, openId: input.openId },
+
+    const existingByUnionId = input.unionId
+        ? await larkUserRepo.findOne({
+              where: { unionId: input.unionId },
+              order: { commonUserId: 'ASC' },
+          })
+        : null;
+    const canonicalCommonUserId = existingByUnionId?.commonUserId ?? existing?.commonUserId;
+    if (canonicalCommonUserId) {
+        await AppDataSource.getRepository(CommonUser).upsert(
             {
-                unionId: input.unionId ?? existing.unionId,
-                name: input.displayName ?? existing.name,
+                common_user_id: canonicalCommonUserId,
+                channel: 'lark',
+                display_name: input.displayName,
             },
+            ['common_user_id'],
         );
-        return existing.commonUserId;
+        await larkUserRepo.upsert(
+            {
+                appId: input.appId,
+                openId: input.openId,
+                unionId: input.unionId ?? existing?.unionId,
+                name: input.displayName ?? existing?.name ?? '',
+                commonUserId: canonicalCommonUserId,
+            },
+            ['appId', 'openId'],
+        );
+        return canonicalCommonUserId;
     }
 
     const commonUserId = uuidv7();
@@ -419,6 +438,29 @@ export async function storeLarkInboundMessage(
             undefined,
             undefined,
             lane,
+        );
+    }
+}
+
+export async function claimLarkInboundMessageForBot(input: {
+    commonMessageId: string;
+    botName: string;
+    commonUserId: string;
+}): Promise<void> {
+    const result = await AppDataSource.getRepository(CommonMessage).update(
+        {
+            common_message_id: input.commonMessageId,
+            role: 'user',
+        },
+        {
+            bot_name: input.botName,
+            common_user_id: input.commonUserId,
+        },
+    );
+    if (!result.affected) {
+        throw new Error(
+            `common user message ${input.commonMessageId} not found; ` +
+                `cannot claim bot_name=${input.botName}`,
         );
     }
 }

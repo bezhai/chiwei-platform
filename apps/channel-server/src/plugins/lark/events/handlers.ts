@@ -47,6 +47,7 @@ import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
 import {
+    claimLarkInboundMessageForBot,
     ensureLarkCommonConversation,
     prepareLarkInboundProjection,
     storeLarkInboundMessage,
@@ -264,6 +265,17 @@ export class LarkEventHandlers {
                             );
                             return;
                         }
+                        if (!botName) {
+                            throw new Error(
+                                `cannot claim common message ${projection.commonMessageId}: ` +
+                                    'botName missing from context',
+                            );
+                        }
+                        await claimLarkInboundMessageForBot({
+                            commonMessageId: projection.commonMessageId,
+                            botName,
+                            commonUserId: projection.commonUserId,
+                        });
                         // 抢到锁才落 common_agent_response pending 行（必改2）：未抢锁的
                         // bot 已在上面 return，不会到这里 → 不留永不完成的孤儿行。
                         await savePending();
