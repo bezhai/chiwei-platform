@@ -225,6 +225,7 @@ async def chat_node(req: ChatRequest) -> None:
             gray_config,
             session_id=req.session_id,
             persona_id=req.persona_id,
+            channel=req.channel,
         ):
             if not text:
                 continue

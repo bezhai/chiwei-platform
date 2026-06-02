@@ -41,28 +41,13 @@ export interface RuleConfig {
 
 // ---- 平台无关规则（直接读 RuleMessage 平台无关视图）----
 
-// 与现有 NeedRobotMention 逻辑等价：被 @bot（addressedTargetIds 含 botMentionTarget）
-// 或私聊（isDirect）。注意：runRules 的前置总闸（AddressingPolicy.decide +
-// enforceDecision）已在接线点 D 前置判定过"要不要回"，这里保留 NeedRobotMention
-// 仅作为 chatRule 内部的 rule 谓词（与改造前同语义），保证飞书逐场景行为零
-// 变化——尤其复读规则用 NeedNotRobotMention，依赖本谓词的取反。
-//
-// botMentionTarget 由调用方按 channel 取（飞书是 robot_union_id）；为保持 rule 谓词
-// 签名（只吃 message），这里读 RuleMessage 自带的 addressedTargetIds 是否含
-// 该消息所属 bot 的标识。飞书侧 addressedTargetIds 来源与 hasMention(union_id)
-// 同源（见 buildLarkRuleMessage / plugins/lark 的 inbound）。
-var botMentionTargetResolver: (m: RuleMessage) => string = () => '';
-
-// 接线点注入"按当前消息所属 bot 取 mention target"的函数（飞书=robot_union_id）。
-// 默认空串：未注入时 group 永不命中、private 仍直通（与改造前 P2P 直通一致）。
-export function setBotMentionTargetResolver(fn: (m: RuleMessage) => string): void {
-    botMentionTargetResolver = fn;
-}
-
+// 与现有 NeedRobotMention 逻辑等价：私聊直通，群聊必须 @ 当前 bot。区别是
+// 这里完全用 common identity：botCommonUserId 是当前 bot 在 common_user 里的
+// 身份，mentionedUserIds 是消息里所有可识别 mention 投影后的 common_user_id
+// 列表。飞书 open_id/union_id、QQ appid 等平台裸 id 必须在插件层换完，core 不知道。
 export function NeedRobotMention(message: RuleMessage): boolean {
     if (message.isDirect) return true;
-    const botMentionTarget = botMentionTargetResolver(message);
-    return botMentionTarget.length > 0 && message.addressedTargetIds.includes(botMentionTarget);
+    return message.mentionedUserIds.includes(message.botCommonUserId);
 }
 
 export function NeedNotRobotMention(message: RuleMessage): boolean {

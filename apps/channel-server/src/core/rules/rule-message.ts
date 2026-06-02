@@ -1,9 +1,10 @@
 // RuleMessage —— runRules 消费的纯平台无关统一视图（决策五 / B2）。
 //
 // 一条消息进 runRules 前由各 channel adapter 派生成 RuleMessage：平台无关部分
-// （is_direct / 文本工具 / 结构化 mentions / createTime / 媒体类型判断 / 全局
-// common_*_id / channel）足以支撑 runRules 里真正平台无关的规则（persona 文本
-// 主链路 makeTextReply、EqualText、RegexpMatch、OnlyGroup、文本限定等）。
+// （is_direct / 文本工具 / common mention list / createTime / 媒体类型判断 / 全局
+// common_*_id / channel / 当前 bot common user id）足以支撑 runRules 里真正平台
+// 无关的规则（persona 文本主链路 makeTextReply、EqualText、RegexpMatch、OnlyGroup、
+// 文本限定等）。
 //
 // 飞书 ORM/SDK 强绑的东西（basicChatInfo / permission_config / senderInfo.is_admin
 // / 原始 message_id / mentionMap 等）**绝不进这个契约**，也**不再旁挂任何飞书
@@ -30,8 +31,13 @@ export interface RuleMessage {
     // 派生自 InboundMessage.conversation_scope（飞书 p2p → direct → isDirect）。
     isDirect: boolean;
 
-    // 结构化寻址线索（飞书是 mention 的 union_id 列表；QQ 是 at 的 appid）。
-    addressedTargetIds: string[];
+    // 当前处理这条消息的 bot 在 common_user 里的身份。所有 channel 在进入
+    // runRules 前都必须已为 bot 分配 common user id；core 只比较 common id。
+    botCommonUserId: string;
+
+    // 消息中被提及的 common user id 列表。普通用户和已注册 bot 都必须在
+    // channel 插件内投影到 common_user_id；core 不接触 open_id / union_id / appid。
+    mentionedUserIds: string[];
 
     // 派生自 received_at。
     createTime: number;

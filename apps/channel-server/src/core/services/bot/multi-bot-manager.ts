@@ -1,6 +1,8 @@
 import { In } from 'typeorm';
+import { v7 as uuidv7 } from 'uuid';
 import { BotConfig } from '@entities/bot-config';
 import { BotPersona } from '@entities/bot-persona';
+import { CommonUser } from '@entities/common-user';
 import { botConfigRepository } from '@repositories/bot-config-repository';
 import { larkCredentials } from './lark-credentials';
 import AppDataSource from 'ormconfig';
@@ -28,6 +30,7 @@ export class MultiBotManager {
         // channel→插件的解析改成消费方按需经 getChannelRegistry().get(bot.channel)
         // 取（未注册 channel 在取用时 fail-closed），本管理器只持有 bot 配置。
         const allBots = await botConfigRepository.getAllActiveBots();
+        await this.ensureBotCommonUsers(allBots);
 
         this.botConfigs.clear();
 
@@ -67,6 +70,20 @@ export class MultiBotManager {
             }
         }
         return null;
+    }
+
+    getBotCommonUserId(botName: string): string {
+        const bot = this.getBotConfig(botName);
+        if (!bot) {
+            throw new Error(`Bot configuration not found for bot: ${botName}`);
+        }
+        if (!bot.common_user_id) {
+            throw new Error(
+                `bot ${botName} has no common_user_id; bot identity initialization ` +
+                    `must run before channel runtime starts`,
+            );
+        }
+        return bot.common_user_id;
     }
 
     // 获取所有机器人配置
@@ -111,6 +128,35 @@ export class MultiBotManager {
             if (bot.persona_id && personaMap.has(bot.persona_id)) {
                 const appId = larkCredentials(bot).app_id;
                 this.appIdToDisplayName.set(appId, personaMap.get(bot.persona_id)!);
+            }
+        }
+    }
+
+    private async ensureBotCommonUsers(bots: BotConfig[]): Promise<void> {
+        const commonUserRepo = AppDataSource.getRepository(CommonUser);
+        const botRepo = AppDataSource.getRepository(BotConfig);
+
+        for (const bot of bots) {
+            const commonUserId = bot.common_user_id ?? uuidv7();
+            await commonUserRepo.upsert(
+                {
+                    common_user_id: commonUserId,
+                    channel: bot.channel,
+                    display_name: bot.bot_name,
+                },
+                ['common_user_id'],
+            );
+
+            if (!bot.common_user_id) {
+                await botRepo.update(
+                    { bot_name: bot.bot_name },
+                    { common_user_id: commonUserId },
+                );
+                bot.common_user_id = commonUserId;
+                console.info(
+                    `[multi-bot] assigned common_user_id=${commonUserId} ` +
+                        `to bot=${bot.bot_name}`,
+                );
             }
         }
     }

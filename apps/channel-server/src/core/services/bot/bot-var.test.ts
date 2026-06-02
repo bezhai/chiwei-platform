@@ -8,6 +8,7 @@ let currentBotName = 'chiwei';
 const botConfig = {
     bot_name: 'chiwei',
     channel: 'lark',
+    common_user_id: '018f-bot-common-user',
     credentials: {
         app_id: 'cli_app_v2',
         app_secret: 'sec',
@@ -37,6 +38,7 @@ mock.module('@middleware/context', () => ({
 
 let getBotAppId: () => string;
 let getBotUnionId: () => string;
+let getBotCommonUserId: () => string;
 
 // 用绝对文件路径导入被测模块，强制加载真实 bot-var 实现。bun mock.module 是
 // 进程级且按 specifier 注册：同进程其他用例（handlers 入站链路）会
@@ -50,6 +52,7 @@ beforeEach(async () => {
     const mod = await import(REAL_BOT_VAR);
     getBotAppId = mod.getBotAppId;
     getBotUnionId = mod.getBotUnionId;
+    getBotCommonUserId = mod.getBotCommonUserId;
 });
 
 describe('bot-var: 签名不变 + 内部改读 credentials JSONB', () => {
@@ -61,6 +64,11 @@ describe('bot-var: 签名不变 + 内部改读 credentials JSONB', () => {
     it('getBotUnionId() 无参、返回 string，值来自 credentials.robot_union_id', () => {
         const v: string = getBotUnionId();
         expect(v).toBe('on_union_v2');
+    });
+
+    it('getBotCommonUserId() 无参、返回 string，值来自 bot_config.common_user_id', () => {
+        const v: string = getBotCommonUserId();
+        expect(v).toBe('018f-bot-common-user');
     });
 
     it('context 无 botName 时仍按原契约抛错（行为未变）', () => {

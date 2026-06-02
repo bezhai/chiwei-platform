@@ -2,7 +2,7 @@
  * Recall Worker — 独立进程
  *
  * 消费 RabbitMQ recall queue，根据 session_id 查找 common_agent_response，
- * 调用飞书 deleteMessage 撤回消息，更新 safety_status。
+ * 调用对应 channel 插件撤回消息，更新 safety_status。
  */
 
 
@@ -25,23 +25,23 @@ import {
     laneQueue,
 } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { initializeLarkClients } from '@integrations/lark-client';
 import { context } from '@middleware/context';
 import { getChannelRegistry } from '@core/registry/channel-registry';
 import '@plugins/index';
+import { initializeChannelPlugins } from '@plugins/initialize';
 import { recallReplies } from './recall-outbound';
 import type { ConsumeMessage } from 'amqplib';
 
-// 撤回走渠道能力端口（B3）：飞书 deleteMessage 收进 plugins/lark 的
-// OutboundCapabilities.recall，worker 不再 import 飞书 SDK。import '@plugins/index'
-// 触发飞书插件自注册。当前 recall 链路只服务飞书；T6 接其他 channel 时按 payload
-// 带的 channel 取对应插件。
-const OUTBOUND_CHANNEL = 'lark';
+// 撤回走渠道能力端口：worker 只按 payload.channel 取插件，common id 反查和
+// 平台 delete/recall 都由当前 channel 的 capabilities 完成。旧 payload 不带
+// channel 时仍按 lark 处理。
+const DEFAULT_CHANNEL = 'lark';
 
 const MAX_RETRY = 3;
 const RETRY_DELAYS = [5000, 10000, 15000];
 
 interface RecallPayload {
+    channel?: string;
     session_id: string;
     chat_id?: string;
     trigger_message_id?: string;
@@ -52,9 +52,9 @@ interface RecallPayload {
 
 async function handleRecall(msg: ConsumeMessage): Promise<void> {
     const payload: RecallPayload = JSON.parse(msg.content.toString());
-    const { session_id, reason, detail } = payload;
+    const { session_id, reason, detail, channel = DEFAULT_CHANNEL } = payload;
 
-    console.info(`[RecallWorker] Processing recall: session_id=${session_id}, reason=${reason}`);
+    console.info(`[RecallWorker] Processing recall: session_id=${session_id}, channel=${channel}, reason=${reason}`);
 
     const repo = AppDataSource.getRepository(CommonAgentResponse);
     const agentResponse = await repo.findOneBy({ session_id });
@@ -125,9 +125,9 @@ async function handleRecall(msg: ConsumeMessage): Promise<void> {
     let failedCount = 0;
 
     await context.run(contextData, async () => {
-        // 逐条撤回走渠道能力端口（飞书 deleteMessage 在 plugins/lark 内）。
-        // replies[].message_id 现状存的是渠道裸 message id，直接构造渠道内 ref。
-        const capabilities = getChannelRegistry().get(OUTBOUND_CHANNEL).capabilities;
+        // 逐条撤回走渠道能力端口。common_message_id → 渠道裸 message id 的反查
+        // 在插件内完成，worker 不碰任何平台私有映射表。
+        const capabilities = getChannelRegistry().get(channel).capabilities;
         const result = await recallReplies(capabilities, agentResponse.replies);
         recalledCount = result.recalled;
         failedCount = result.failed;
@@ -167,10 +167,10 @@ async function main(): Promise<void> {
     await AppDataSource.initialize();
     console.info('[RecallWorker] Database connected');
 
-    // 2. 初始化 Lark 客户端（用于 deleteMessage）
+    // 2. 初始化 channel 插件客户端
     await multiBotManager.initialize();
-    await initializeLarkClients();
-    console.info('[RecallWorker] Lark clients initialized');
+    await initializeChannelPlugins();
+    console.info('[RecallWorker] Channel plugins initialized');
 
     // 3. 连接 RabbitMQ 并声明拓扑
     await rabbitmqClient.connect();

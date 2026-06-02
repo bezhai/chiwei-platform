@@ -35,9 +35,10 @@ def test_module_imports():
 # === run_post_safety ===
 
 
-def _make_req(session_id="sess-1") -> PostSafetyRequest:
+def _make_req(session_id="sess-1", channel="lark") -> PostSafetyRequest:
     return PostSafetyRequest(
         session_id=session_id,
+        channel=channel,
         trigger_message_id="msg-1",
         chat_id="chat-1",
         response_text="hello world",
@@ -125,10 +126,11 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
         patch.object(m, "set_safety_status", fake_set),
         patch.object(m, "get_lane", MagicMock(return_value="dev")),
     ):
-        result = await m.run_post_safety(_make_req("sess-block"))
+        result = await m.run_post_safety(_make_req("sess-block", channel="qq"))
 
     assert isinstance(result, Recall)
     assert result.session_id == "sess-block"
+    assert result.channel == "qq"
     assert result.reason == "output_unsafe"
     assert result.detail == "confidence=0.9"
     assert result.lane == "dev"
@@ -181,5 +183,4 @@ async def test_run_pre_safety_returns_block_verdict_with_reason():
     assert verdict.is_blocked is True
     assert verdict.block_reason == "prompt_injection"
     assert verdict.detail == "confidence=0.9"
-
 

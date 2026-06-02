@@ -33,6 +33,7 @@ class FakeChannel {
 }
 
 const envelope: InboundLaneEnvelope = {
+    channel: 'lark',
     event_type: 'im.message.receive_v1',
     global_message_id: 'gmid-1',
     trace_id: 'trace-1',

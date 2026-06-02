@@ -1,10 +1,11 @@
-import type { LarkReceiveMessage, LarkHistoryMessage } from 'types/lark';
-import { LarkMessageMetaInfo } from 'types/mongo';
-import { LarkBaseChatInfo, LarkUser } from 'infrastructure/dal/entities';
 import { getBotAppId } from '@core/services/bot/bot-var';
-import { MessageMetadata, MessageMetadataUtils } from './message-metadata';
+import {
+    MessageMetadata,
+    MessageMetadataUtils,
+    type MessageBasicChatInfo,
+    type MessageSenderInfo,
+} from './message-metadata';
 import { ContentType, MessageContent, MessageContentUtils } from './message-content';
-import { MessageBuilder } from './message-builder';
 
 export class Message {
     private metadata: MessageMetadata;
@@ -13,29 +14,6 @@ export class Message {
     constructor(metadata: MessageMetadata, content: MessageContent) {
         this.metadata = metadata;
         this.content = content;
-    }
-
-    // Factory methods
-    static async fromEvent(event: LarkReceiveMessage, content: MessageContent): Promise<Message> {
-        const metadata = await MessageBuilder.buildMetadataFromEvent(event);
-        return new Message(metadata, content);
-    }
-
-    static async fromMessage(message: LarkMessageMetaInfo): Promise<Message> {
-        const metadata = MessageBuilder.buildMetadataFromInfo(message);
-        const content = MessageBuilder.buildContentFromInfo(message);
-
-        // const mentionMap =
-        //     content.mentions.length > 0 ? await batchGetUserName(content.mentions) : undefined;
-        // content.mentionMap = mentionMap;
-
-        return new Message(metadata, content);
-    }
-
-    static fromHistoryMessage(message: LarkHistoryMessage): Message {
-        const metadata = MessageBuilder.buildMetadataFromHistory(message);
-        const content = MessageBuilder.buildContentFromHistory(message);
-        return new Message(metadata, content);
     }
 
     // Metadata accessors
@@ -83,7 +61,7 @@ export class Message {
         return this.metadata.messageType;
     }
 
-    get basicChatInfo(): LarkBaseChatInfo | undefined {
+    get basicChatInfo(): MessageBasicChatInfo | undefined {
         return this.metadata.basicChatInfo;
     }
 
@@ -91,7 +69,7 @@ export class Message {
         return this.metadata.groupChatInfo;
     }
 
-    get senderInfo(): LarkUser | undefined {
+    get senderInfo(): MessageSenderInfo | undefined {
         return this.metadata.senderInfo;
     }
 

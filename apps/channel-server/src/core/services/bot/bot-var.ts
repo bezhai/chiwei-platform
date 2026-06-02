@@ -24,3 +24,14 @@ export function getBotAppId(): string {
 export function getBotUnionId(): string {
     return larkCredentials(getBotConfigInternal()).robot_union_id;
 }
+
+export function getBotCommonUserId(): string {
+    const id = getBotConfigInternal().common_user_id;
+    if (!id) {
+        throw new Error(
+            `Bot ${context.getBotName()} has no common_user_id; ` +
+                'bot identity initialization must run before message handling',
+        );
+    }
+    return id;
+}

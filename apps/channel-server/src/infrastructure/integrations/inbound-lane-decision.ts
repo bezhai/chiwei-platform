@@ -1,6 +1,7 @@
 // 入站分流决策（lane-routing-redesign §3/§4.2）。把决策点的分叉逻辑抽成纯函数：
 //
 //   flag off                  → local（完全旁路，零回归：不算 lane、不发 MQ）
+//   flag on + 本进程非 prod    → local（已在 inbound_lane.{lane} 消费侧，信封 lane 是权威）
 //   flag on + lane==本进程lane → local（prod 消息本地处理，绝不投 inbound_lane.prod）
 //   flag on + lane!=本进程lane → dispatch（投 inbound_lane.{lane}，本地不再处理）
 //
@@ -34,6 +35,13 @@ export async function resolveInboundDispatch(
 ): Promise<InboundDispatchDecision> {
     // flag off：完全旁路。不调 resolveLane（零回归 + 不打 DB），按本进程 lane 本地处理。
     if (!input.flagEnabled) {
+        return { action: 'local', lane: input.currentLane };
+    }
+
+    // lane 消费者已经在 inbound_lane.{currentLane} 上拿到了信封。此时不能再次查
+    // 绑定，否则绑定在 prod 投递后变更时会把同一条消息二次转投到别的 lane/prod，
+    // 破坏信封三元组幂等并可能投到没有消费者的 inbound_lane.prod。
+    if (input.currentLane !== 'prod') {
         return { action: 'local', lane: input.currentLane };
     }
 

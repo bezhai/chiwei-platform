@@ -9,18 +9,28 @@
 // 把它渲染成飞书 PostContent 再发。worker 不再 import 任何飞书 SDK。
 //
 // 飞书 SDK / redis / DB 这些 I/O 协作者全部由 LarkOutboundDeps 注入：生产默认
-// 接现有 @lark/basic/message + @lark-client + redis + resolve-mentions（见
+// 接现有 @lark/basic/message + @lark-client + redis + 插件内 mention 解析（见
 // defaultLarkOutboundDeps），单测注入 spy 验证渲染口径与现状逐字一致。
 
 import type {
+    CommonMessageResolveInput,
     ConversationRef,
     MessageRef,
+    OutboundMessageRecordInput,
     OutboundCapabilities,
+    OutboundTargetResolveInput,
     RenderContext,
 } from '@core/ports/channel-plugin';
 import type { ContentItem, ThreadRef } from '@core/channels/contracts';
 import type { PostContent } from 'types/content-types';
 import { markdownToPostContent } from '@core/services/message/post-content-processor';
+import { larkCredentials } from '@core/services/bot/lark-credentials';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { storeLarkOutboundMessage } from './common-projector';
+import {
+    resolveLarkMessageRef,
+    reverseResolveOutbound,
+} from './outbound-reverse-resolve';
 
 // markdown 里的 @N.png 图片占位引用（与现状 chat-response-worker 同一正则）。
 const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@?(\d+\.png)\)/g;
@@ -169,6 +179,50 @@ export function createLarkOutboundCapabilities(
     deps: LarkOutboundDeps,
 ): OutboundCapabilities {
     return {
+        async resolveOutboundTarget(input: OutboundTargetResolveInput) {
+            const refs = await reverseResolveOutbound({
+                commonMessageId: input.commonMessageId,
+                commonConversationId: input.commonConversationId,
+                commonRootMessageId: input.commonRootMessageId,
+            });
+            return {
+                message: { channelId: refs.channelMessageId },
+                conversation: { channelId: refs.channelChatId },
+                rootMessage: refs.channelRootId
+                    ? { channelId: refs.channelRootId }
+                    : undefined,
+            };
+        },
+
+        async resolveMessageRef(input: CommonMessageResolveInput): Promise<MessageRef> {
+            return { channelId: await resolveLarkMessageRef(input.commonMessageId) };
+        },
+
+        async recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string> {
+            const botConfig = multiBotManager.getBotConfig(input.botName);
+            const senderDisplayName =
+                botConfig?.channel === 'lark'
+                    ? (multiBotManager.getDisplayNameByAppId(
+                          larkCredentials(botConfig).app_id,
+                      ) ?? undefined)
+                    : undefined;
+
+            return storeLarkOutboundMessage({
+                omId: input.channelMessageId,
+                chatId: input.channelConversationId,
+                commonConversationId: input.commonConversationId,
+                commonRootMessageId: input.commonRootMessageId,
+                commonReplyMessageId: input.commonReplyMessageId,
+                contentText: input.contentText,
+                botName: input.botName,
+                senderDisplayName,
+                scope: input.scope,
+                eventTime: input.eventTime,
+                messageType: input.messageType,
+                responseId: input.responseId,
+            });
+        },
+
         async sendText(
             conv: ConversationRef,
             content: ContentItem[],

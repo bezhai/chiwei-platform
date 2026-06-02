@@ -44,6 +44,7 @@ class PostSafetyRequest(Data):
     trigger_message_id: str
     chat_id: str
     response_text: str
+    channel: str = "lark"
 
     class Meta:
         transient = True
@@ -59,6 +60,7 @@ class Recall(Data):
     chat_id: str
     trigger_message_id: str
     reason: str
+    channel: str = "lark"
     detail: str | None = None
     lane: str | None = None
 

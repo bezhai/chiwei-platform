@@ -15,6 +15,12 @@ function fakePlugin(channel: string, withRecall = true): ChannelPlugin {
             decide: () => ({ respond: true, reason: '' }),
         },
         capabilities: {
+            resolveOutboundTarget: async () => ({
+                message: { channelId: 'm1' },
+                conversation: { channelId: 'c1' },
+            }),
+            resolveMessageRef: async () => ({ channelId: 'm1' }),
+            recordOutboundMessage: async () => 'cm1',
             sendText: async () => ({ channelId: 'm1' }),
             reply: async () => ({ channelId: 'm1' }),
             ...(withRecall ? { recall: async () => {} } : {}),

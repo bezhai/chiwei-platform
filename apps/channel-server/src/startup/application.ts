@@ -1,15 +1,17 @@
 import { DatabaseManager } from './database';
 import { HttpServerManager, ServerConfig } from './server';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { botInitialization } from './initializers/bot';
-import { initializeLarkClients } from '@integrations/lark-client';
 import { initializeCrontabs } from '@crontab/index';
 import { rabbitmqClient, getLane } from '@integrations/rabbitmq';
 import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
-import { larkEventHandlers } from '@lark/events/handlers';
-import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
-import { isDirectIngressEnabled } from '@plugins/lark/webhook/ingress-gate';
-import { larkIngressBots } from './lark-ingress-bots';
+import '@plugins/index';
+import {
+    handleInboundLaneEnvelope,
+    initializeChannelRuntimes,
+    runChannelInitializers,
+    shutdownChannelRuntimes,
+    startChannelDirectIngresses,
+} from '@plugins/runtime';
 
 /**
  * 应用程序配置
@@ -25,7 +27,6 @@ export interface ApplicationConfig {
 export class ApplicationManager {
     private httpServer?: HttpServerManager;
     private config: ApplicationConfig;
-    private larkIngress?: LarkEventIngress;
 
     constructor(config: ApplicationConfig) {
         this.config = config;
@@ -44,13 +45,13 @@ export class ApplicationManager {
         await multiBotManager.initialize();
         console.info('Multi-bot manager initialized!');
 
-        // 3. 初始化 Lark 客户端池
-        await initializeLarkClients();
-        console.info('Lark client pool initialized!');
+        // 3. 初始化各 channel runtime（平台 SDK client 等）
+        await initializeChannelRuntimes();
+        console.info('Channel runtimes initialized!');
 
-        // 4. 初始化机器人
-        await botInitialization();
-        console.info('Bot initialized successfully!');
+        // 4. 运行各 channel runtime 的可选初始化任务（如 NEED_INIT=true 的群信息同步）
+        await runChannelInitializers();
+        console.info('Channel runtime initializers completed!');
 
         // 5. 连接 RabbitMQ（入站消息写入后的 ChatTrigger 发布需要）
         await rabbitmqClient.connect();
@@ -64,20 +65,12 @@ export class ApplicationManager {
         // 待命（flag off 时队列为空，消费者空转无害）。
         const lane = getLane();
         if (lane) {
-            await startInboundLaneConsumer(lane, (params) =>
-                larkEventHandlers.handleMessageReceive(params as never),
-            );
+            await startInboundLaneConsumer(lane, handleInboundLaneEnvelope);
             console.info(`[inbound-lane] consumer started for lane=${lane}`);
         }
 
-        // 5.6 飞书直连 ws 入口（websocket bot）。HTTP webhook 入口已由本服务承接；
-        // WS 长连仍显式用部署开关控制，避免未准备好的 bot 被当前进程主动接管。
-        if (isDirectIngressEnabled()) {
-            this.larkIngress = new LarkEventIngress();
-            const wsBots = larkIngressBots(multiBotManager.getBotsByInitType('websocket'));
-            await this.larkIngress.startWebSocketBots(wsBots);
-            console.info(`[ingress] direct lark ws ON: started ${wsBots.length} ws bot(s)`);
-        }
+        // 5.6 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
+        await startChannelDirectIngresses(multiBotManager.getBotsByInitType('websocket'));
 
         // 6. 启动所有定时任务
         initializeCrontabs();
@@ -93,7 +86,7 @@ export class ApplicationManager {
      * 启动服务
      */
     async start(): Promise<void> {
-        // 启动 HTTP 服务（包含 Lark webhook 入口）
+        // 启动 HTTP 服务（包含各 channel runtime 注册的 webhook/ingress 入口）
         await this.startHttpServer();
     }
 
@@ -112,8 +105,8 @@ export class ApplicationManager {
         console.info('Gracefully shutting down...');
 
         try {
-            // 关闭飞书 ws 长连（如启用了直连入口）
-            this.larkIngress?.closeWebSocketClients();
+            // 关闭各 channel runtime 主动入口（如 WS 长连）
+            await shutdownChannelRuntimes();
             // 关闭 RabbitMQ 连接
             await rabbitmqClient.close();
             // 关闭数据库连接
@@ -133,7 +126,8 @@ export class ApplicationManager {
         allBots.forEach((bot) => {
             const appId = (bot.credentials?.app_id as string | undefined) ?? '-';
             console.info(
-                `  - ${bot.bot_name} [${bot.channel}] (${appId}) [${bot.init_type}]`,
+                `  - ${bot.bot_name} [${bot.channel}] (${appId}) ` +
+                    `[${bot.init_type}] common_user_id=${bot.common_user_id ?? '-'}`,
             );
         });
     }

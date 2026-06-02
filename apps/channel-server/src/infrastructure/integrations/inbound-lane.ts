@@ -20,6 +20,8 @@ import { getRabbitChannel } from './rabbitmq';
 // lane 写进信封（不是 HTTP header，跨 lane 是 MQ），lane channel-server 消费时从
 // 信封读出 lane 注入 context（§6）。
 export interface InboundLaneEnvelope {
+    // 目标 channel。旧队列信封可能没有该字段，消费侧按 lark 兼容。
+    channel?: string;
     event_type: string;
     global_message_id: string;
     // 当前请求 traceId。跨 lane 走 MQ 时不能靠 HTTP header 透传，必须写进信封，

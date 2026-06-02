@@ -1,4 +1,4 @@
-import { Message } from 'core/models/message';
+import type { Message } from 'core/models/message';
 import {
     TextContent,
     ImageContent,
@@ -11,6 +11,7 @@ import {
 import type { LarkReceiveMessage } from 'types/lark';
 import { ContentType, ContentItem } from 'core/models/message-content';
 import { MentionUtils } from '@lark/utils/mention-utils';
+import { createLarkMessageFromEvent } from '@plugins/lark/message-factory';
 
 export interface MessageContentHandler {
     generateContent(): ContentItem[];
@@ -258,7 +259,7 @@ export class MessageTransferer {
             console.warn('Failed to generate content:', event.message.message_id);
             return null;
         }
-        return Message.fromEvent(event, {
+        return createLarkMessageFromEvent(event, {
             items,
             mentions: MentionUtils.addMentions(event.message.mentions),
             mentionMap: MentionUtils.addMentionMap(event.message.mentions),

@@ -4,7 +4,7 @@ import { WhiteGroupCheck, IsAdmin } from './lark-rules';
 import { larkContextStore } from './lark-context-store';
 import type { Message } from '@core/models/message';
 import type { RuleMessage } from '@core/rules/rule-message';
-import type { LarkBaseChatInfo } from 'infrastructure/dal/entities';
+import type { MessageBasicChatInfo } from '@core/models/message-metadata';
 
 // B2：飞书强绑谓词 WhiteGroupCheck / IsAdmin 从 core/rules/rule.ts 搬进
 // plugins/lark。它们不再经 requireLarkContext 掏旁挂的 larkMessage，而是用
@@ -20,7 +20,8 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
         commonMessageId: 'GM',
         commonRootMessageId: undefined,
         isDirect: false,
-        addressedTargetIds: [],
+        botCommonUserId: 'BOT-U',
+        mentionedUserIds: [],
         createTime: 0,
         clearText: () => '',
         text: () => '',
@@ -72,7 +73,7 @@ describe('WhiteGroupCheck (lark, reads from plugin store)', () => {
             basicChatInfo: { permission_config: { open_repeat_message: true } },
         });
         const rule = WhiteGroupCheck(
-            (info: LarkBaseChatInfo) => info.permission_config?.open_repeat_message ?? false,
+            (info: MessageBasicChatInfo) => info.permission_config?.open_repeat_message ?? false,
         );
         expect(rule(message)).toBe(true);
     });

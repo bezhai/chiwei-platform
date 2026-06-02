@@ -1,4 +1,4 @@
-import type { LarkBaseChatInfo } from 'infrastructure/dal/entities';
+import type { MessageBasicChatInfo } from '@core/models/message-metadata';
 import type { RuleMessage } from '@core/rules/rule-message';
 import { larkContextStore } from './lark-context-store';
 
@@ -12,7 +12,7 @@ import { larkContextStore } from './lark-context-store';
 type Rule = (message: RuleMessage) => boolean;
 
 export const WhiteGroupCheck =
-    (checkFunc: (chatInfo: LarkBaseChatInfo) => boolean): Rule =>
+    (checkFunc: (chatInfo: MessageBasicChatInfo) => boolean): Rule =>
     (message) => {
         const lark = larkContextStore.get(message);
         const chatInfo = lark.basicChatInfo;

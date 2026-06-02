@@ -18,17 +18,22 @@ export interface OutboundChannelRefs {
     channelRootId: string | undefined;
 }
 
-export async function reverseResolveOutbound(
-    input: ReverseResolveOutboundInput,
-): Promise<OutboundChannelRefs> {
+export async function resolveLarkMessageRef(commonMessageId: string): Promise<string> {
     const msg = await AppDataSource.getRepository(LarkMessage).findOne({
-        where: { common_message_id: input.commonMessageId },
+        where: { common_message_id: commonMessageId },
     });
     if (!msg) {
         throw new Error(
-            `lark outbound cannot resolve common_message_id=${input.commonMessageId}`,
+            `lark outbound cannot resolve common_message_id=${commonMessageId}`,
         );
     }
+    return msg.om_id;
+}
+
+export async function reverseResolveOutbound(
+    input: ReverseResolveOutboundInput,
+): Promise<OutboundChannelRefs> {
+    const channelMessageId = await resolveLarkMessageRef(input.commonMessageId);
 
     const chat = await AppDataSource.getRepository(LarkBaseChatInfo).findOne({
         where: { common_conversation_id: input.commonConversationId },
@@ -41,19 +46,17 @@ export async function reverseResolveOutbound(
 
     let channelRootId: string | undefined;
     if (input.commonRootMessageId) {
-        const root = await AppDataSource.getRepository(LarkMessage).findOne({
-            where: { common_message_id: input.commonRootMessageId },
-        });
-        if (!root) {
+        try {
+            channelRootId = await resolveLarkMessageRef(input.commonRootMessageId);
+        } catch (_e) {
             throw new Error(
                 `lark outbound cannot resolve root common_message_id=${input.commonRootMessageId}`,
             );
         }
-        channelRootId = root.om_id;
     }
 
     return {
-        channelMessageId: msg.om_id,
+        channelMessageId,
         channelChatId: chat.chat_id,
         channelRootId,
     };

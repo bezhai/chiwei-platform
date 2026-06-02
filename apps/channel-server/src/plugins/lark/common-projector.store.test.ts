@@ -1,7 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import type { LarkInboundProjection } from './common-projector';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
 const commonMessages = new Set<string>();
+const commonInsertCalls: Record<string, unknown>[] = [];
 const larkInsertCalls: unknown[] = [];
 const vectorizePublishes: unknown[] = [];
 let larkInsertRaceWinner: { om_id: string; common_message_id: string } | null = null;
@@ -26,6 +28,7 @@ function insertBuilder() {
         },
         async execute() {
             if (target?.name === 'CommonMessage') {
+                commonInsertCalls.push(payload);
                 const id = payload.common_message_id as string;
                 if (commonMessages.has(id)) {
                     return { identifiers: [] };
@@ -141,7 +144,14 @@ mock.module('@integrations/rabbitmq', () => ({
         }),
     },
 }));
-const { storeLarkInboundMessage } = await import('./common-projector');
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+
+const { storeLarkInboundMessage, storeLarkOutboundMessage } = await import('./common-projector');
+const originalGetBotCommonUserId = multiBotManager.getBotCommonUserId;
+
+afterEach(() => {
+    multiBotManager.getBotCommonUserId = originalGetBotCommonUserId;
+});
 
 function event(omId: string) {
     return {
@@ -166,23 +176,25 @@ const message = {
     senderInfo: { name: 'sender' },
 } as any;
 
-function projection(commonMessageId: string) {
+function projection(commonMessageId: string): LarkInboundProjection {
     return {
         commonUserId: '018f-user',
         commonConversationId: '018f-chat',
         commonMessageId,
         commonRootMessageId: commonMessageId,
         commonReplyMessageId: undefined,
+        mentionedUserIds: [],
         content: [{ kind: 'text', text: 'hello' }],
         contentText: 'hello',
         scope: 'group',
-    } as const;
+    };
 }
 
 describe('storeLarkInboundMessage', () => {
     beforeEach(() => {
         larkMessages.clear();
         commonMessages.clear();
+        commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
         vectorizePublishes.length = 0;
         larkInsertRaceWinner = null;
@@ -233,5 +245,37 @@ describe('storeLarkInboundMessage', () => {
         expect(commonMessages.has('018f-common-new')).toBe(false);
         expect(larkMessages.has('om_1')).toBe(false);
         expect(vectorizePublishes.length).toBe(0);
+    });
+});
+
+describe('storeLarkOutboundMessage', () => {
+    beforeEach(() => {
+        larkMessages.clear();
+        commonMessages.clear();
+        commonInsertCalls.length = 0;
+        larkInsertCalls.length = 0;
+        vectorizePublishes.length = 0;
+        multiBotManager.getBotCommonUserId = (() =>
+            '018f-bot-common-user') as typeof multiBotManager.getBotCommonUserId;
+    });
+
+    it('writes assistant common_message with the bot common user id', async () => {
+        await storeLarkOutboundMessage({
+            omId: 'om_assistant_1',
+            chatId: 'oc_chat',
+            commonConversationId: '018f-chat',
+            commonRootMessageId: undefined,
+            commonReplyMessageId: undefined,
+            contentText: 'reply',
+            botName: 'chiwei',
+            senderDisplayName: '赤尾',
+            scope: 'group',
+            eventTime: 1780309200000,
+            messageType: 'text',
+            responseId: 'resp-1',
+        });
+
+        expect(commonInsertCalls[0].role).toBe('assistant');
+        expect(commonInsertCalls[0].common_user_id).toBe('018f-bot-common-user');
     });
 });

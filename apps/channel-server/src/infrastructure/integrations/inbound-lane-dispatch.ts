@@ -50,6 +50,7 @@ export async function dispatchInboundIfNeeded(ctx: InboundDispatchContext): Prom
     // bot_name = botGlobalId：bot 维度下全局 bot 标识就是 bot_name，lane 消费侧据此
     // 注入 context.botName。
     await dispatchToInboundLane({
+        channel: ctx.channel,
         event_type: ctx.eventType,
         global_message_id: ctx.globalMessageId,
         trace_id: ctx.traceId,

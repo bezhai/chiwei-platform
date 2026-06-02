@@ -24,6 +24,7 @@ mock.module('@infrastructure/lane-router', () => ({
 const { larkPlugin } = await import('./index');
 const { getChannelRegistry } = await import('@core/registry/channel-registry');
 const { getCommandRegistry } = await import('@core/registry/command-registry');
+const { getChannelRuntime } = await import('@plugins/runtime');
 
 describe('lark 插件自注册', () => {
     it('import 即把 lark 插件注册进 ChannelRegistry 单例', () => {
@@ -31,6 +32,13 @@ describe('lark 插件自注册', () => {
         expect(reg.has('lark')).toBe(true);
         expect(reg.get('lark')).toBe(larkPlugin);
         expect(larkPlugin.channel).toBe('lark');
+    });
+
+    it('import 即把 lark runtime 注册进 runtime registry', () => {
+        const runtime = getChannelRuntime('lark');
+        expect(runtime.channel).toBe('lark');
+        expect(typeof runtime.registerHttpIngress).toBe('function');
+        expect(typeof runtime.handleInboundLaneEnvelope).toBe('function');
     });
 
     it('插件自带 10 条平台指令，且经 CommandRegistry 注册到 lark', () => {

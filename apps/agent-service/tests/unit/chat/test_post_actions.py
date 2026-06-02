@@ -21,6 +21,7 @@ async def test_publish_post_check_emits_post_safety_request():
     with patch("app.chat.post_actions.emit", fake_emit):
         await _publish_post_check(
             session_id="sess-1",
+            channel="qq",
             response_text="hello",
             chat_id="chat-1",
             trigger_message_id="msg-1",
@@ -30,6 +31,7 @@ async def test_publish_post_check_emits_post_safety_request():
     req = captured[0]
     assert isinstance(req, PostSafetyRequest)
     assert req.session_id == "sess-1"
+    assert req.channel == "qq"
     assert req.trigger_message_id == "msg-1"
     assert req.chat_id == "chat-1"
     assert req.response_text == "hello"
@@ -47,6 +49,7 @@ async def test_publish_post_check_swallows_emit_errors():
         # 不应抛
         await _publish_post_check(
             session_id="sess-1",
+            channel="qq",
             response_text="hello",
             chat_id="chat-1",
             trigger_message_id="msg-1",

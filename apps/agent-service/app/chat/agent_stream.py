@@ -11,7 +11,7 @@ agent-execution helpers remained orthogonal to those orchestration
 concerns and are reused verbatim by ``chat_node``.
 
 Public surface (callable from chat_node only):
-    _build_and_stream(message_id, gray_config, session_id, persona_id)
+    _build_and_stream(message_id, gray_config, session_id, persona_id, channel)
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ async def _build_and_stream(
     gray_config: dict,
     session_id: str | None = None,
     persona_id: str | None = None,
+    channel: str = "lark",
 ) -> AsyncGenerator[str, None]:
     """Build agent context and execute streaming generation."""
     t_build_start = time.monotonic()
@@ -169,6 +170,7 @@ async def _build_and_stream(
         await schedule_post_actions(
             full_content=state.full_content,
             session_id=session_id,
+            channel=channel,
             chat_id=ctx.chat_id,
             message_id=message_id,
             persona_id=bot_ctx.persona_id,

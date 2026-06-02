@@ -57,8 +57,9 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
     // 飞书 p2p → direct，其余（group）→ group。
     const conversationScope = event.message.chat_type === 'p2p' ? 'direct' : 'group';
 
-    // 飞书 mention → addressing_hints。targetId 用 union_id 口径，与 addressing
-    // 的 hasMention(robot_union_id) 比对同源（见 addressing.ts）。
+    // 飞书 mention → addressing_hints。这里仍是飞书 union_id，只服务 Lark
+    // AddressingPolicy 的前置总闸；进入 RuleMessage 前，common-projector 会把
+    // 所有 mention（含已注册 bot）投影成 common_user_id。
     const mentions: LarkMention[] = event.message.mentions ?? [];
     const addressingHints = mentions.map((m) => ({ targetId: m.id.union_id! }));
 

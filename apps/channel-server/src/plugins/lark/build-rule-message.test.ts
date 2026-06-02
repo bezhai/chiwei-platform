@@ -33,7 +33,8 @@ const ids = {
     commonConversationId: 'GC',
     commonMessageId: 'GM',
     commonRootMessageId: 'GR',
-    addressedTargetIds: ['bot-union-1'],
+    botCommonUserId: 'BOT-U',
+    mentionedUserIds: ['BOT-U', 'OTHER-U'],
 };
 
 describe('buildLarkRuleMessage (lark plugin)', () => {
@@ -44,7 +45,8 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         expect(rm.commonConversationId).toBe('GC');
         expect(rm.commonMessageId).toBe('GM');
         expect(rm.commonRootMessageId).toBe('GR');
-        expect(rm.addressedTargetIds).toEqual(['bot-union-1']);
+        expect(rm.botCommonUserId).toBe('BOT-U');
+        expect(rm.mentionedUserIds).toEqual(['BOT-U', 'OTHER-U']);
         // 灵魂检查：RuleMessage 不再携带任何飞书逃生口。
         expect('channelContext' in rm).toBe(false);
         // RuleMessage 与 Record<string, unknown> 无足够结构重叠，按 TS 提示经

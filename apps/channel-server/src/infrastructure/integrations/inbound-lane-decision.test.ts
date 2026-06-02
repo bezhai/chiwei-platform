@@ -60,6 +60,24 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         expect(r.action).toBe('local');
     });
 
+    it('flag on + 非 prod 进程消费 inbound_lane 信封 → 信封 lane 已定，不再二次 resolve/dispatch', async () => {
+        let called = false;
+        const r = await resolveInboundDispatch({
+            flagEnabled: true,
+            currentLane: 'ppe-foo',
+            channel: 'lark',
+            botGlobalId: 'bot-1',
+            commonConversationId: '018f-chat',
+            resolveLane: async () => {
+                called = true;
+                return 'prod';
+            },
+        });
+
+        expect(r).toEqual({ action: 'local', lane: 'ppe-foo' });
+        expect(called).toBe(false);
+    });
+
     it('flag on → 把 commonConversationId 传给 resolveLane', async () => {
         let seenConversationId: string | undefined;
         await resolveInboundDispatch({

@@ -61,6 +61,7 @@ def test_post_safety_request_required_fields():
         response_text="hello",
     )
     assert req.session_id == "s1"
+    assert req.channel == "lark"
     assert req.response_text == "hello"
 
 
@@ -81,24 +82,27 @@ def test_recall_lane_optional():
         reason="banned_word",
     )
     assert r.lane is None
+    assert r.channel == "lark"
     r2 = Recall(
         session_id="s1", chat_id="c1", trigger_message_id="m1",
-        reason="banned_word", lane="dev",
+        reason="banned_word", channel="qq", lane="dev",
     )
+    assert r2.channel == "qq"
     assert r2.lane == "dev"
 
 
-def test_recall_serialization_matches_legacy_schema():
-    """Recall.model_dump 字段集与旧 mq.publish(RECALL,...) 保持一致。"""
+def test_recall_serialization_carries_channel_for_pluginized_worker():
+    """Recall.model_dump 字段集带 channel，recall-worker 按它取插件。"""
     r = Recall(
         session_id="s1", chat_id="c1", trigger_message_id="m1",
-        reason="banned_word", detail="hit", lane="dev",
+        reason="banned_word", channel="qq", detail="hit", lane="dev",
     )
     body = r.model_dump(mode="json")
     assert set(body.keys()) == {
-        "session_id", "chat_id", "trigger_message_id",
+        "session_id", "channel", "chat_id", "trigger_message_id",
         "reason", "detail", "lane",
     }
+    assert body["channel"] == "qq"
 
 
 def test_data_class_extra_forbid():

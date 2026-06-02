@@ -24,17 +24,14 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
         .andWhere('m.is_leave = false')
         .getRawMany<GroupMemberInfo>();
 
-    // 按 name 长度降序，避免短名误匹配长名子串
+    // 按 name 长度降序，避免短名误匹配长名子串。
     members.sort((a, b) => b.name.length - a.name.length);
 
     cache.set(chatId, { members, ts: Date.now() });
     return members;
 }
 
-/**
- * 将 AI 回复中的 @用户名 替换为 <at union_id="xxx">用户名</at>
- */
-export async function resolveMentionsForGroup(
+export async function resolveLarkMentionsForGroup(
     content: string,
     chatId: string,
 ): Promise<string> {

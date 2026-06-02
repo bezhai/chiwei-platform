@@ -18,6 +18,8 @@ import { sendLarkUtilityRedirect } from './utility-redirect';
 import { enrichLarkChatRequest } from './chat-request-enricher';
 import { createLarkOutboundCapabilities } from './outbound-capabilities';
 import { defaultLarkOutboundDeps } from './default-outbound-deps';
+import { registerChannelRuntime } from '@plugins/runtime';
+import { larkRuntime } from './runtime';
 
 // 出站能力：飞书富文本/图片回复 + 撤回收进能力端口。chat-response-worker
 // / recall-worker 统一走这里，不再各自 import @lark/basic/message / @lark-client。
@@ -46,6 +48,7 @@ export const larkPlugin: ChannelPlugin = {
 // （engine 不认识飞书 SDK，发法由本插件提供）。plugins/index.ts import 本
 // 模块即触发。重复注册由各注册表 fail-closed 兜底。
 registerPlugin(larkPlugin);
+registerChannelRuntime(larkRuntime);
 getCommandRegistry().register(larkPlugin.channel, larkPlugin.commands);
 setUtilityRedirectResponder(sendLarkUtilityRedirect);
 setChatRequestEnricher(enrichLarkChatRequest);

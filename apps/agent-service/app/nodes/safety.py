@@ -330,6 +330,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
     if decision.is_blocked:
         return Recall(
             session_id=req.session_id,
+            channel=req.channel,
             chat_id=req.chat_id,
             trigger_message_id=req.trigger_message_id,
             reason=decision.reason or "unknown",
