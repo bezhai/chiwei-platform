@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langfuse import Langfuse
 from langfuse.model import TextPromptClient
 
+from app.agent.neutral import Message, Role
 from app.api.middleware import get_lane
 from app.infra.config import settings
 
@@ -65,24 +65,26 @@ def get_prompt(
     )
 
 
-_ROLE_TO_MESSAGE: dict[str, type[BaseMessage]] = {
-    "system": SystemMessage,
-    "user": HumanMessage,
-    "assistant": AIMessage,
+_ROLE_MAP: dict[str, Role] = {
+    "system": Role.SYSTEM,
+    "user": Role.USER,
+    "assistant": Role.ASSISTANT,
 }
 
 
-def compile_to_messages(prompt: Any, **variables: Any) -> list[BaseMessage]:
-    """Compile a Langfuse prompt into LangChain messages.
+def compile_to_messages(prompt: Any, **variables: Any) -> list[Message]:
+    """Compile a Langfuse prompt into neutral ``Message`` list.
 
-    Text prompts become a single SystemMessage.
-    Chat prompts become a list of typed messages matching each role.
+    Text prompts become a single SYSTEM message.
+    Chat prompts become a list of messages matching each role (unknown roles
+    fall back to SYSTEM, mirroring the prior langchain behaviour).
     """
     if isinstance(prompt, TextPromptClient):
-        return [SystemMessage(content=prompt.compile(**variables))]
+        return [Message(role=Role.SYSTEM, content=prompt.compile(**variables))]
     return [
-        _ROLE_TO_MESSAGE.get(m.get("role", ""), SystemMessage)(
-            content=m.get("content", "")
+        Message(
+            role=_ROLE_MAP.get(m.get("role", ""), Role.SYSTEM),
+            content=m.get("content", ""),
         )
         for m in prompt.compile(**variables)
     ]

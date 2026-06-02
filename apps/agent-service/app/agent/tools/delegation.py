@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
-
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
 logger = logging.getLogger(__name__)
@@ -32,19 +30,18 @@ async def deep_research(task: str) -> str:
         task: 调研任务的详细描述，应包含用户的具体问题和需要关注的方面
     """
     # Lazy import to avoid circular dependency
-    from langchain_core.messages import HumanMessage
-
     from app.agent.core import Agent, AgentConfig
+    from app.agent.neutral import Message, Role
     from app.agent.tools.search import search_web
 
     _RESEARCH_CFG = AgentConfig("research_agent", "research-model", "research")
-    context = get_runtime(AgentContext).context
+    context = get_context()
     agent = Agent(_RESEARCH_CFG, tools=[search_web], update_trace=False)
     result = await agent.run(
-        [HumanMessage(content=task)],
+        [Message(role=Role.USER, content=task)],
         context=context,
     )
 
-    text = result.content if hasattr(result, "content") else str(result)
+    text = result.text()
     logger.info("Research agent completed, result length: %d", len(text))
     return text

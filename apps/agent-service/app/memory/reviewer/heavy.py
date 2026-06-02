@@ -8,10 +8,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain_core.messages import HumanMessage
-
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
 from app.data.queries import (
     list_abstracts_window,
     list_fragments_window,
@@ -38,7 +37,7 @@ async def _run_agent(
     schedule_text: str,
 ) -> None:
     await Agent(_HEAVY_CFG, tools=make_reviewer_tools()).run(
-        messages=[HumanMessage(content="执行重档 review（睡前整理）")],
+        messages=[Message(role=Role.USER, content="执行重档 review（睡前整理）")],
         prompt_vars={
             "persona_id": persona_id,
             "now": now.isoformat(),

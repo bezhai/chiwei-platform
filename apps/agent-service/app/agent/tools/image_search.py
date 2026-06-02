@@ -7,11 +7,10 @@ import logging
 import time
 from typing import Annotated, Any
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
 from pydantic import Field
 
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import (
     get_or_create_counter,
     get_or_create_histogram,
@@ -68,7 +67,7 @@ async def search_images(
             return "图片搜索服务未配置或未搜索到相关图片"
 
         # Upload each to TOS and register
-        context = get_runtime(AgentContext).context
+        context = get_context()
         registry = context.image_registry
 
         t0 = time.monotonic()

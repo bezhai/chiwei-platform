@@ -98,11 +98,10 @@ class TestCheckChatHistory:
         """Empty message range returns friendly text."""
         from app.agent.tools.history import check_chat_history
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
         with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
+            patch("app.agent.tools.history.get_context", return_value=mock_context),
             patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
@@ -110,7 +109,7 @@ class TestCheckChatHistory:
                 return_value=[],
             ),
         ):
-            result = await check_chat_history.coroutine("test")
+            result = await check_chat_history.invoke({"what_to_look_for": "test"})
             assert "没有聊天记录" in result
 
     @pytest.mark.asyncio
@@ -118,8 +117,7 @@ class TestCheckChatHistory:
         """Messages matching keywords are returned preferentially."""
         from app.agent.tools.history import check_chat_history
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
         msg1 = MagicMock(
             create_time=1712000000000,
@@ -140,7 +138,7 @@ class TestCheckChatHistory:
         mock_parsed2.render.return_value = "吃了什么"
 
         with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
+            patch("app.agent.tools.history.get_context", return_value=mock_context),
             patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
@@ -157,7 +155,7 @@ class TestCheckChatHistory:
                 side_effect=[mock_parsed1, mock_parsed2],
             ),
         ):
-            result = await check_chat_history.coroutine("新番")
+            result = await check_chat_history.invoke({"what_to_look_for": "新番"})
             assert "新番" in result
 
 
@@ -168,8 +166,7 @@ class TestCheckChatHistory:
         者名，而非该 user 最近一条非空名）。"""
         from app.agent.tools.history import check_chat_history
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
         msg = MagicMock(
             create_time=1712000000000,
@@ -187,7 +184,7 @@ class TestCheckChatHistory:
             )
 
         with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
+            patch("app.agent.tools.history.get_context", return_value=mock_context),
             patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
@@ -200,7 +197,7 @@ class TestCheckChatHistory:
                 return_value=mock_parsed,
             ),
         ):
-            result = await check_chat_history.coroutine("hello")
+            result = await check_chat_history.invoke({"what_to_look_for": "hello"})
             assert "行级当时名" in result
 
     @pytest.mark.asyncio
@@ -209,8 +206,7 @@ class TestCheckChatHistory:
         但来源是行级列，不是 find_username。"""
         from app.agent.tools.history import check_chat_history
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
         msg = MagicMock(
             create_time=1712000000000,
@@ -223,7 +219,7 @@ class TestCheckChatHistory:
         mock_parsed.render.return_value = "world"
 
         with (
-            patch("app.agent.tools.history.get_runtime", return_value=mock_context),
+            patch("app.agent.tools.history.get_context", return_value=mock_context),
             patch("app.agent.tools.history.tx", _fake_tx),
             patch(
                 "app.data.queries.find_messages_in_range",
@@ -235,7 +231,7 @@ class TestCheckChatHistory:
                 return_value=mock_parsed,
             ),
         ):
-            result = await check_chat_history.coroutine("world")
+            result = await check_chat_history.invoke({"what_to_look_for": "world"})
             assert "?: world" in result
 
 
@@ -252,8 +248,7 @@ class TestSearchGroupHistorySpeaker:
         assistant 显示风格 '我' 一致；user 行仍读 username。"""
         from app.agent.tools import history
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
         assistant_msg = MagicMock(
             create_time=1712000000000,
@@ -286,7 +281,7 @@ class TestSearchGroupHistorySpeaker:
 
         with (
             patch.object(
-                history, "get_runtime", return_value=mock_context
+                history, "get_context", return_value=mock_context
             ),
             patch(
                 "app.agent.embedding.embed_hybrid",
@@ -304,7 +299,7 @@ class TestSearchGroupHistorySpeaker:
                 side_effect=[parsed_a, parsed_u],
             ),
         ):
-            result = await history.search_group_history.coroutine("回想")
+            result = await history.search_group_history.invoke({"query": "回想"})
 
         # assistant 行：按 role 派生，显示 '我'（与本文件既有风格一致），
         # 绝不能是 '?'
@@ -336,8 +331,7 @@ class TestSearchGroupHistoryQdrantFilterContract:
         from app.agent.tools import history
 
         global_chat_id = "01J8XGLOBALCHATID0000000000"
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id=global_chat_id)
+        mock_context = AgentContext(chat_id=global_chat_id)
 
         fake_embedding = MagicMock()
         fake_embedding.dense = [0.1]
@@ -347,7 +341,7 @@ class TestSearchGroupHistoryQdrantFilterContract:
         fake_qdrant.hybrid_search = AsyncMock(return_value=[])
 
         with (
-            patch.object(history, "get_runtime", return_value=mock_context),
+            patch.object(history, "get_context", return_value=mock_context),
             patch(
                 "app.agent.embedding.embed_hybrid",
                 new_callable=AsyncMock,
@@ -355,7 +349,7 @@ class TestSearchGroupHistoryQdrantFilterContract:
             ),
             patch("app.infra.qdrant.qdrant", fake_qdrant),
         ):
-            await history.search_group_history.coroutine("回想")
+            await history.search_group_history.invoke({"query": "回想"})
 
         fake_qdrant.hybrid_search.assert_awaited_once()
         query_filter = fake_qdrant.hybrid_search.await_args.kwargs[
@@ -380,11 +374,10 @@ class TestListGroupMembers:
     async def test_not_available_from_common_layer(self):
         from app.agent.tools.history import list_group_members
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
-        with patch("app.agent.tools.history.get_runtime", return_value=mock_context):
-            result = await list_group_members.coroutine()
+        with patch("app.agent.tools.history.get_context", return_value=mock_context):
+            result = await list_group_members.invoke({})
             assert result["kind"] == "tool_error"
             assert "not available for common conversation" in result["message"]
 
@@ -392,10 +385,9 @@ class TestListGroupMembers:
     async def test_role_filter_still_returns_common_layer_error(self):
         from app.agent.tools.history import list_group_members
 
-        mock_context = MagicMock()
-        mock_context.context = AgentContext(chat_id="test_chat")
+        mock_context = AgentContext(chat_id="test_chat")
 
-        with patch("app.agent.tools.history.get_runtime", return_value=mock_context):
-            result = await list_group_members.coroutine(role="manager")
+        with patch("app.agent.tools.history.get_context", return_value=mock_context):
+            result = await list_group_members.invoke({"role": "manager"})
             assert result["kind"] == "tool_error"
             assert "channel-private member tables" in result["message"]

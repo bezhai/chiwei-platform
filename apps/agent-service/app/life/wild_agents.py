@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import date
 
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
 from app.life._date_utils import WEEKDAY_CN, get_season
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ async def _run_one(cfg: AgentConfig, prompt_vars: dict) -> str:
         messages=[],
         prompt_vars=prompt_vars,
     )
-    return extract_text(result.content)
+    return result.text()
 
 
 async def run_wild_agents(target_date: date, weather: str = "") -> str:

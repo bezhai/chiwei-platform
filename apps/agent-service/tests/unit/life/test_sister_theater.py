@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.agent.neutral import Message, Role
 from app.life.sister_theater import run_sister_theater
 
 MODULE = "app.life.sister_theater"
@@ -14,9 +15,7 @@ MODULE = "app.life.sister_theater"
 @patch(f"{MODULE}.Agent")
 async def test_generates_theater(MockAgent):
     mock_instance = AsyncMock()
-    mock_instance.run.return_value = MagicMock(
-        content="[上午] 绫奈书包拉链坏了\n[下午] 千凪带了公司的蛋糕回来"
-    )
+    mock_instance.run.return_value = Message(role=Role.ASSISTANT, content="[上午] 绫奈书包拉链坏了\n[下午] 千凪带了公司的蛋糕回来")
     MockAgent.return_value = mock_instance
 
     result = await run_sister_theater(date(2026, 4, 15))
@@ -29,7 +28,7 @@ async def test_generates_theater(MockAgent):
 @patch(f"{MODULE}.Agent")
 async def test_passes_prev_summary(MockAgent):
     mock_instance = AsyncMock()
-    mock_instance.run.return_value = MagicMock(content="theater output")
+    mock_instance.run.return_value = Message(role=Role.ASSISTANT, content="theater output")
     MockAgent.return_value = mock_instance
 
     await run_sister_theater(date(2026, 4, 15), prev_theater_summary="昨天千凪加班")
@@ -43,7 +42,7 @@ async def test_passes_prev_summary(MockAgent):
 @patch(f"{MODULE}.Agent")
 async def test_default_prev_summary_when_empty(MockAgent):
     mock_instance = AsyncMock()
-    mock_instance.run.return_value = MagicMock(content="theater output")
+    mock_instance.run.return_value = Message(role=Role.ASSISTANT, content="theater output")
     MockAgent.return_value = mock_instance
 
     await run_sister_theater(date(2026, 4, 15))

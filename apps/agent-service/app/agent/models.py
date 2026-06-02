@@ -1,10 +1,12 @@
-"""Model building — resolve model_id to a LangChain BaseChatModel.
+"""Model info resolution — resolve a model_id to validated provider config.
 
 Responsibilities:
   - TTL cache for DB lookups (5 min, asyncio-safe without locks)
-  - _ReasoningChatOpenAI subclass preserving DeepSeek reasoning_content
-  - Dispatch to AzureChatOpenAI / ChatGoogleGenerativeAI / ChatOpenAI
-    based on provider's ``client_type``
+  - resolve_model_info: validate provider config (active / required fields)
+
+Construction of the actual client lives in ``app.agent.client`` (the neutral
+``ModelClient`` + per-provider adapters). This module is the shared resolution
+seam: ``client`` / ``embedding`` / ``image_gen`` all call ``resolve_model_info``.
 """
 
 from __future__ import annotations
@@ -13,83 +15,9 @@ import logging
 import time
 from typing import Any
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
-
 from app.runtime.db import tx
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# DeepSeek reasoning_content preservation
-# ---------------------------------------------------------------------------
-
-
-class _ReasoningChatOpenAI(ChatOpenAI):
-    """ChatOpenAI subclass that preserves ``reasoning_content`` for DeepSeek.
-
-    langchain-openai loses reasoning_content in two stages:
-      1. ``_create_chat_result`` ignores it when parsing the raw response.
-      2. ``_get_request_payload`` drops reasoning_content blocks when
-         formatting messages for the next request.
-
-    This subclass patches both stages.
-    """
-
-    def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
-        """Extract reasoning_content from raw response into additional_kwargs."""
-        result = super()._create_chat_result(response, generation_info)
-
-        response_dict = (
-            response if isinstance(response, dict) else response.model_dump()
-        )
-        choices = response_dict.get("choices") or []
-        for choice, gen in zip(choices, result.generations, strict=False):
-            rc = choice.get("message", {}).get("reasoning_content")
-            if rc is not None and isinstance(gen.message, AIMessage):
-                gen.message.additional_kwargs["reasoning_content"] = rc
-
-        return result
-
-    @staticmethod
-    def _normalize_content(content: Any) -> str:
-        """Normalise content to a plain string (DeepSeek rejects null / arrays)."""
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            return "".join(text_parts)
-        if content is None:
-            return ""
-        return content
-
-    def _get_request_payload(
-        self, input_: Any, *, stop: Any = None, **kwargs: Any
-    ) -> dict:
-        """Inject reasoning_content and normalise content for DeepSeek."""
-        messages = self._convert_input(input_).to_messages()
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-
-        if "messages" not in payload:
-            return payload
-
-        # 1) assistant messages: inject reasoning_content
-        for lc_msg, api_msg in zip(messages, payload["messages"], strict=False):
-            if isinstance(lc_msg, AIMessage) and api_msg.get("role") == "assistant":
-                rc = lc_msg.additional_kwargs.get("reasoning_content")
-                if rc is not None:
-                    api_msg["reasoning_content"] = rc
-
-        # 2) all messages: normalise content to string
-        for api_msg in payload["messages"]:
-            api_msg["content"] = self._normalize_content(api_msg.get("content"))
-
-        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +55,8 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
       - DB exception -> propagate to caller (no cache write — next call retries).
         Per dataflow contract §4.6: nodes do not log+raise as a courtesy; the
         wire-level on_error decides DLQ / review / swallow_and_log. The caller
-        (build_agent_chat_model / build_agent_model) wraps this in
-        ModelBuildError, preserving the original exception via __cause__.
+        (resolve_model_info) wraps this in ModelBuildError, preserving the
+        original exception via __cause__.
     """
     now = time.monotonic()
 
@@ -200,7 +128,7 @@ async def resolve_model_info(
 ) -> dict[str, Any]:
     """Resolve model_id to validated provider info.
 
-    Shared by build_chat_model and embedding/image_gen modules.
+    Shared by the model client and embedding/image_gen modules.
     Raises ModelBuildError on missing / inactive / incomplete config.
     """
     try:
@@ -215,84 +143,3 @@ async def resolve_model_info(
     if missing:
         raise ModelBuildError(model_id, f"missing fields: {', '.join(missing)}")
     return info
-
-
-_ALLOWED_KWARGS = frozenset({
-    "temperature", "top_p", "max_tokens", "reasoning_effort",
-    "stop", "seed", "n", "frequency_penalty", "presence_penalty",
-    "logit_bias", "response_format", "stream_options",
-    "metadata", "tags",
-})
-
-
-async def build_chat_model(
-    model_id: str, *, max_retries: int = 3, **kwargs: Any
-) -> BaseChatModel:
-    """Build a LangChain ``BaseChatModel`` from a model_id.
-
-    Dispatches to the correct LangChain class based on ``client_type``:
-      - ``azure-http``        -> ``AzureChatOpenAI``
-      - ``google``            -> ``ChatGoogleGenerativeAI``
-      - ``openai-responses``  -> ``ChatOpenAI`` (Responses API)
-      - ``deepseek``          -> ``_ReasoningChatOpenAI`` (preserves reasoning_content)
-      - default               -> ``ChatOpenAI`` (Completions API)
-
-    Raises:
-        ModelBuildError: when model info is missing / inactive / incomplete.
-    """
-    info = await resolve_model_info(
-        model_id, required_fields=("api_key", "base_url", "model_name")
-    )
-    client_type = info.get("client_type", "")
-
-    # Only pass through known-safe model behavior kwargs
-    safe_kwargs = {k: v for k, v in kwargs.items() if k in _ALLOWED_KWARGS}
-
-    if client_type == "azure-http":
-        return AzureChatOpenAI(
-            openai_api_type="azure",
-            openai_api_version="2024-08-01-preview",
-            azure_endpoint=info["base_url"],
-            openai_api_key=info["api_key"],
-            deployment_name=info["model_name"],
-            max_retries=max_retries,
-            **safe_kwargs,
-        )
-
-    if client_type == "google":
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        from app.infra.config import settings
-
-        params: dict[str, Any] = {
-            "api_key": info["api_key"],
-            "base_url": info["base_url"],
-            "model": info["model_name"],
-            "max_retries": max_retries,
-            **safe_kwargs,
-        }
-        if info.get("use_proxy") and settings.forward_proxy_url:
-            params["client_args"] = {"proxy": settings.forward_proxy_url}
-        return ChatGoogleGenerativeAI(**params)
-
-    # OpenAI-compatible: openai-responses / deepseek / default completions
-    cls = _ReasoningChatOpenAI if client_type == "deepseek" else ChatOpenAI
-    params = {
-        "api_key": info["api_key"],
-        "base_url": info["base_url"],
-        "model": info["model_name"],
-        "max_retries": max_retries,
-        "use_responses_api": client_type == "openai-responses",
-        **safe_kwargs,
-    }
-    if info.get("use_proxy"):
-        _inject_proxy(params)
-    return cls(**params)
-
-
-def _inject_proxy(params: dict[str, Any]) -> None:
-    """Add ``openai_proxy`` to *params* if the forward proxy is configured."""
-    from app.infra.config import settings
-
-    if settings.forward_proxy_url:
-        params["openai_proxy"] = settings.forward_proxy_url

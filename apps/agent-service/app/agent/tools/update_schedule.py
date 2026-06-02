@@ -7,10 +7,8 @@ in agent-service main process. arq state_sync_worker retired.
 
 from __future__ import annotations
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
-
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.ids import new_id
 from app.data.queries import insert_schedule_revision
@@ -51,7 +49,7 @@ async def update_schedule(content: str, reason: str) -> dict:
         content: 新的日程段落
         reason: 本次更新的原因
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _update_schedule_impl(
         persona_id=context.persona_id,
         content=content, reason=reason,

@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from langchain_core.messages import HumanMessage
-
-from app.agent.core import Agent, AgentConfig, extract_text
+from app.agent.core import Agent, AgentConfig
+from app.agent.neutral import Message, Role
 from app.data.queries import (
     find_latest_life_state,
     find_plan_for_period,
@@ -72,10 +71,10 @@ async def generate_voice(
             "recent_context": recent_ctx_block,
             "current_time": now.strftime("%H:%M"),
         },
-        messages=[HumanMessage(content="生成当前状态的内心独白和语气示例")],
+        messages=[Message(role=Role.USER, content="生成当前状态的内心独白和语气示例")],
     )
 
-    content = extract_text(result.content)
+    content = result.text()
 
     if not content:
         logger.warning("[%s] Voice generation returned empty", persona_id)

@@ -61,8 +61,8 @@ def _run(messages, trigger_id):
         return_value=fake_prompt,
     ):
         out = build_group_messages(messages, trigger_id, {}, {})
-    # single HumanMessage with a text content block
-    return out[0].content[0]["text"]  # type: ignore[index]
+    # single neutral USER Message with a text content block
+    return out[0].content[0].text
 
 
 def test_assistant_row_not_rendered_as_placeholder_in_reply_chain():

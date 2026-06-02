@@ -1,6 +1,6 @@
 """Life Engine v4 — commit_life_state tool + §9.5 hard validations.
 
-This tool is called by the Life Engine's LLM via a langchain tool binding. It's
+This tool is called by the Life Engine's LLM via the agent's tool binding. It's
 NOT exposed to the chat agent — only internal to the life pipeline.
 """
 

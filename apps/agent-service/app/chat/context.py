@@ -23,8 +23,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 
-from langchain_core.messages import AIMessage, HumanMessage
-
+from app.agent.neutral import Message
 from app.chat._context_images import collect_images
 from app.chat._context_messages import build_group_messages, build_p2p_messages
 from app.chat.content_parser import parse_content
@@ -50,7 +49,7 @@ proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 class ChatContext:
     """Assembled chat context returned by ``build_chat_context``."""
 
-    messages: list[HumanMessage | AIMessage]
+    messages: list[Message]
     image_registry: ImageRegistry | None
     chat_id: str
     trigger_username: str

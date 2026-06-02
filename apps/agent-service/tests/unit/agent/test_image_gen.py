@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -285,6 +286,29 @@ class TestGenerateImageGemini:
         mock_genai.Client.return_value = mock_client
         return mock_genai, mock_aio
 
+    @staticmethod
+    @contextmanager
+    def _patch_genai(mock_genai, mock_types):
+        """Patch genai both via sys.modules and the parent-package attribute.
+
+        ``image_gen`` does ``from google import genai`` / ``from google.genai
+        import types`` at call time. Once *any* code (e.g. the gemini adapter)
+        has imported the real ``google.genai``, ``from google import genai``
+        binds the package attribute, not ``sys.modules`` — so patching only
+        ``sys.modules`` leaks the real SDK. Patch both to stay order-robust.
+        """
+        import google
+
+        mock_genai.types = mock_types
+        with (
+            patch.dict(
+                "sys.modules",
+                {"google.genai": mock_genai, "google.genai.types": mock_types},
+            ),
+            patch.object(google, "genai", mock_genai, create=True),
+        ):
+            yield
+
     async def test_empty_response_raises(self):
         mock_response = SimpleNamespace(candidates=[])
         mock_genai, mock_aio = self._make_gemini_mocks(mock_response)
@@ -294,10 +318,7 @@ class TestGenerateImageGemini:
         mock_settings.forward_proxy_url = ""
 
         with (
-            patch.dict("sys.modules", {
-                "google.genai": mock_genai,
-                "google.genai.types": mock_types,
-            }),
+            self._patch_genai(mock_genai, mock_types),
             patch("app.infra.config.settings", mock_settings),
         ):
             with pytest.raises(RuntimeError, match="no candidates"):
@@ -324,10 +345,7 @@ class TestGenerateImageGemini:
         mock_settings.forward_proxy_url = ""
 
         with (
-            patch.dict("sys.modules", {
-                "google.genai": mock_genai,
-                "google.genai.types": mock_types,
-            }),
+            self._patch_genai(mock_genai, mock_types),
             patch("app.infra.config.settings", mock_settings),
         ):
             with pytest.raises(RuntimeError, match="no image data"):

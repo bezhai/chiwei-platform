@@ -11,10 +11,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
-
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.queries import (
     delete_note as delete_note_query,
@@ -168,7 +166,7 @@ async def upsert_note(
             想清空已有的 when_at 传 "clear"（仅在更新场景有意义）。
         note_id: 已有 note 的 id（形如 "n_xxx"，从清单里看到）；不传则新建。
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _upsert_note_impl(
         persona_id=context.persona_id,
         content=content,
@@ -194,7 +192,7 @@ async def list_note() -> dict:
         ``{"items": [{"note_id": "n_xxx", "content": "...", "when_at": "...|null",
         "created_at": "...", "when_label": "还有 2 天"}, ...]}``
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _list_note_impl(persona_id=context.persona_id)
 
 
@@ -211,7 +209,7 @@ async def resolve_note(note_id: str, resolution: str) -> dict:
         note_id: 笔记 id（形如 "n_xxxxxx"）
         resolution: 结果描述（必填）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _resolve_note_impl(
         persona_id=context.persona_id,
         note_id=note_id,
@@ -235,7 +233,7 @@ async def delete_note(note_id: str, reason: str) -> dict:
         note_id: 笔记 id（形如 "n_xxx"）
         reason: 必填，写明为什么删（"改主意了" / "记错了" / "和 n_xyz 重复"）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _delete_note_impl(
         persona_id=context.persona_id,
         note_id=note_id,

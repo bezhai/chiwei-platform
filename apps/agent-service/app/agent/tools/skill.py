@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from langchain.tools import tool
-
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
 logger = logging.getLogger(__name__)

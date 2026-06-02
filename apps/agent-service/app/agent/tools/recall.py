@@ -6,10 +6,8 @@ pure function; this file only wires it into the agent tool system.
 
 from __future__ import annotations
 
-from langchain.tools import tool
-from langgraph.runtime import get_runtime
-
-from app.agent.context import AgentContext
+from app.agent.runtime_context import get_context
+from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.memory.recall_engine import run_recall
 
@@ -41,7 +39,7 @@ async def recall(queries: list[str]) -> dict:
     Args:
         queries: 自然语言查询列表（批量）
     """
-    context = get_runtime(AgentContext).context
+    context = get_context()
     return await _recall_impl(
         persona_id=context.persona_id,
         queries=queries,

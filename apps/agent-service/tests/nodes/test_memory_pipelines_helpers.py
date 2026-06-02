@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.agent.neutral import Message, Role
 from app.domain.memory_request import MemoryFragmentRequest
 
 
@@ -53,9 +54,6 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
         "app.nodes.memory_pipelines.format_timeline",
         new=AsyncMock(return_value="t"),
     ), patch("app.nodes.memory_pipelines.Agent") as MockAgent, patch(
-        "app.nodes.memory_pipelines.extract_text",
-        return_value="this is the generated content",
-    ), patch(
         "app.nodes.memory_pipelines.insert_fragment",
         new=AsyncMock(),
     ) as mock_ins, patch(
@@ -64,7 +62,9 @@ async def test_generate_fragment_writes_to_new_table_and_enqueues_vectorize():
         "app.nodes.memory_pipelines.emit_tx", fake_emit
     ):
         MockAgent.return_value.run = AsyncMock(
-            return_value=MagicMock(content="hello world")
+            return_value=Message(
+                role=Role.ASSISTANT, content="this is the generated content"
+            )
         )
         await _generate_fragment("chat_1", "ayana")
 
@@ -119,16 +119,13 @@ async def test_generate_fragment_skip_when_empty_content():
         "app.nodes.memory_pipelines.format_timeline",
         new=AsyncMock(return_value="t"),
     ), patch("app.nodes.memory_pipelines.Agent") as MockAgent, patch(
-        "app.nodes.memory_pipelines.extract_text",
-        return_value="",
-    ), patch(
         "app.nodes.memory_pipelines.insert_fragment", new=AsyncMock()
     ) as mock_ins, patch(
         "app.nodes.memory_pipelines.emit_tx",
         new=AsyncMock(),
     ) as mock_enq:
         MockAgent.return_value.run = AsyncMock(
-            return_value=MagicMock(content="")
+            return_value=Message(role=Role.ASSISTANT, content="")
         )
         await _generate_fragment("chat_1", "ayana")
 
