@@ -109,6 +109,22 @@ describe('larkInbound.parse', () => {
         });
     });
 
+    it('replaces Lark mention placeholders with display text before storage', () => {
+        const ev = groupMentionEvent(['on_bot1', 'on_bot2', 'on_human']);
+        ev.message.content = JSON.stringify({
+            text: '@_user_1 @_user_2 你们俩认识 @_user_3 么',
+        });
+        ev.message.mentions = [
+            { key: '@_user_2', id: { union_id: 'on_bot2' }, name: '天才小画家绫奈' },
+            { key: '@_user_1', id: { union_id: 'on_bot1' }, name: '赤尾小助手（内测版）' },
+            { key: '@_user_3', id: { union_id: 'on_human' }, name: '陈儒' },
+        ];
+        const msg = larkInbound.parse(ev) as InboundMessage;
+        expect(msg.content).toEqual([
+            { kind: 'text', text: '@赤尾小助手（内测版） @天才小画家绫奈 你们俩认识 @陈儒 么' },
+        ]);
+    });
+
     it('image -> image content item', () => {
         const msg = larkInbound.parse(eventOfType('image', { image_key: 'img_x' })) as InboundMessage;
         assertValidInboundMessage(msg);
