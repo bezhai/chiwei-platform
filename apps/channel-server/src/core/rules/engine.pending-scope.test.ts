@@ -28,7 +28,6 @@ function msg(over: Partial<RuleMessage> = {}): RuleMessage {
         createTime: 100,
         clearText: () => '',
         text: () => '',
-        withMentionText: () => '',
         withoutEmojiText: () => '',
         isTextOnly: () => true,
         isStickerOnly: () => false,
@@ -67,8 +66,7 @@ describe('建议1: per-handler-scoped pending capture, no latest-pending fallthr
         const rules: RuleConfig[] = [
             {
                 rules: [pass],
-                handler: async (_m, ctx) =>
-                    ctx?.registerPendingChatTrigger(pendingFor('A')),
+                handler: async (_m, ctx) => ctx?.registerPendingChatTrigger(pendingFor('A')),
                 comment: 'A registers pending',
                 fallthrough: true,
             },
@@ -105,8 +103,7 @@ describe('建议1: per-handler-scoped pending capture, no latest-pending fallthr
             },
             {
                 rules: [pass],
-                handler: async (_m, ctx) =>
-                    ctx?.registerPendingChatTrigger(pendingFor('persona')),
+                handler: async (_m, ctx) => ctx?.registerPendingChatTrigger(pendingFor('persona')),
                 comment: '聊天',
                 category: 'persona',
                 // 非 fallthrough：命中即终态，应携带本 handler 注册的 pending。
@@ -131,8 +128,7 @@ describe('建议1: per-handler-scoped pending capture, no latest-pending fallthr
         const rules: RuleConfig[] = [
             {
                 rules: [pass],
-                handler: async (_m, ctx) =>
-                    ctx?.registerPendingChatTrigger(pendingFor('persona')),
+                handler: async (_m, ctx) => ctx?.registerPendingChatTrigger(pendingFor('persona')),
                 comment: '聊天',
                 category: 'persona',
                 fallthrough: true,

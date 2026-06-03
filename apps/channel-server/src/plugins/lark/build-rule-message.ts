@@ -41,7 +41,6 @@ export function buildLarkRuleMessage(
         createTime: Number(larkMessage.createTime) || 0,
         clearText: () => larkMessage.clearText(),
         text: () => larkMessage.text(),
-        withMentionText: () => larkMessage.withMentionText(),
         withoutEmojiText: () => larkMessage.withoutEmojiText(),
         isTextOnly: () => larkMessage.isTextOnly(),
         isStickerOnly: () => larkMessage.isStickerOnly(),

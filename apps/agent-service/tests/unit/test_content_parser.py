@@ -355,6 +355,22 @@ class TestRender:
         assert result.mentions[1]["user_id"] == "ou_bbb"
         assert result.render() == "@张三 @李四 你们好"
 
+    def test_render_mention_items(self):
+        """v2 mention item 渲染为平台无关 @展示名"""
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "@张三 你好",
+                "items": [
+                    {"type": "mention", "value": "张三"},
+                    {"type": "text", "value": " 你好"},
+                ],
+                "mentions": [{"user_id": "u_common", "name": "张三"}],
+            }
+        )
+        result = parse_content(raw)
+        assert result.render() == "@张三 你好"
+
     def test_no_mentions_field(self):
         """无 mentions 字段时默认空列表"""
         raw = json.dumps(

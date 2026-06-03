@@ -4,7 +4,7 @@ import {
     type MessageBasicChatInfo,
     type MessageSenderInfo,
 } from './message-metadata';
-import { ContentType, MessageContent, MessageContentUtils } from './message-content';
+import { type ContentItem, MessageContent, MessageContentUtils } from './message-content';
 
 export class Message {
     private metadata: MessageMetadata;
@@ -97,10 +97,6 @@ export class Message {
         return MessageContentUtils.withoutEmojiText(this.content);
     }
 
-    withMentionText(): string {
-        return MessageContentUtils.withMentionText(this.content);
-    }
-
     imageKeys(): string[] {
         return MessageContentUtils.imageKeys(this.content);
     }
@@ -117,23 +113,23 @@ export class Message {
         return MessageContentUtils.isStickerOnly(this.content);
     }
 
-    hasMention(openId: string): boolean {
-        return this.content.mentions.includes(openId);
+    hasMention(mentionId: string): boolean {
+        return this.content.mentions.some((mention) => mention.id === mentionId);
     }
 
     getMentionedUsers(): string[] {
-        return this.content.mentions;
+        return this.content.mentions.map((mention) => mention.id);
     }
 
     /**
      * 从 mention 列表中找到第一个真实用户（排除所有 bot mention）
-     * bot mention 在 mentionMap 中有 botCommonUserId 字段，user mention 没有
      */
     getFirstMentionedHuman(): string | undefined {
-        return this.content.mentions.find((unionId) => {
-            const info = this.content.mentionMap?.[unionId];
-            return info && !info.botCommonUserId;
-        });
+        return this.content.mentions.find((mention) => !mention.botCommonUserId)?.id;
+    }
+
+    contentItems(): readonly ContentItem[] {
+        return this.content.items;
     }
 
     // For debugging
@@ -150,10 +146,9 @@ export class Message {
 
     toStorageFormat(excludeBotCommonUserId?: string): string {
         const mentions = this.content.mentions
-            .map((unionId) => {
-                const info = this.content.mentionMap?.[unionId];
-                if (!info || info.botCommonUserId === excludeBotCommonUserId) return null;
-                return { user_id: info.openId, name: info.name };
+            .map((mention) => {
+                if (mention.botCommonUserId === excludeBotCommonUserId) return null;
+                return { user_id: mention.id, name: mention.displayName };
             })
             .filter((m): m is NonNullable<typeof m> => m !== null);
 
@@ -162,10 +157,7 @@ export class Message {
             text: this.toMarkdown(),
             items: this.content.items.map((item) => ({
                 type: item.type,
-                value:
-                    item.type === ContentType.Text
-                        ? MessageContentUtils.resolveMentions(item.value, this.content)
-                        : item.value,
+                value: item.value,
                 ...(item.meta ? { meta: item.meta } : {}),
             })),
             ...(mentions.length > 0 ? { mentions } : {}),

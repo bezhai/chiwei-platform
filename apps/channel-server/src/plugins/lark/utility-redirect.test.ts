@@ -28,7 +28,6 @@ function rm(commonMessageId: string): RuleMessage {
         createTime: 0,
         clearText: () => '',
         text: () => '',
-        withMentionText: () => '',
         withoutEmojiText: () => '',
         isTextOnly: () => true,
         isStickerOnly: () => false,

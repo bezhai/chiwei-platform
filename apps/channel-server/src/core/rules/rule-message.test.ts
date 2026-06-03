@@ -21,7 +21,6 @@ function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
         createTime: 100,
         clearText: () => '',
         text: () => '',
-        withMentionText: () => '',
         withoutEmojiText: () => '',
         isTextOnly: () => true,
         isStickerOnly: () => false,

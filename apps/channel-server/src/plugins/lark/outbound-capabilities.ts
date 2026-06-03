@@ -23,7 +23,7 @@ import type {
 } from '@core/ports/channel-plugin';
 import type { ContentItem, ThreadRef } from '@core/channels/contracts';
 import type { PostContent } from 'types/content-types';
-import { markdownToPostContent } from '@core/services/message/post-content-processor';
+import { markdownToPostContent } from './post-content-processor';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { storeLarkOutboundMessage } from './common-projector';
 import { resolveLarkMessageRef, reverseResolveOutbound } from './outbound-reverse-resolve';

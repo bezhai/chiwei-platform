@@ -2,6 +2,7 @@ import { TextUtils } from '@inner/shared';
 
 export enum ContentType {
     Text = 'text',
+    Mention = 'mention',
     Image = 'image',
     Sticker = 'sticker',
     Media = 'media',
@@ -16,17 +17,15 @@ export interface ContentItem {
     meta?: Record<string, unknown>;
 }
 
+export interface MessageMention {
+    id: string;
+    displayName: string;
+    botCommonUserId?: string;
+}
+
 export interface MessageContent {
     items: ContentItem[];
-    mentions: string[];
-    mentionMap?: Record<
-        string,
-        {
-            name: string;
-            openId: string;
-            botCommonUserId?: string;
-        }
-    >;
+    mentions: MessageMention[];
 }
 
 export class MessageContentUtils {
@@ -35,6 +34,9 @@ export class MessageContentUtils {
             .map((item) => {
                 if (item.type === ContentType.Text) {
                     return item.value;
+                }
+                if (item.type === ContentType.Mention) {
+                    return `@${item.value}`;
                 }
                 if (item.type === ContentType.Image) {
                     if (!allowDownload) {
@@ -62,24 +64,13 @@ export class MessageContentUtils {
             })
             .join('');
 
-        return this.resolveMentions(markdown, content);
-    }
-
-    static resolveMentions(text: string, content: MessageContent): string {
-        let result = text;
-        content.mentions.forEach((mention, index) => {
-            const mentionInfo = content.mentionMap?.[mention];
-            if (mentionInfo) {
-                result = result.replace(`@_user_${index + 1}`, `@${mentionInfo.name}`);
-            }
-        });
-        return result;
+        return markdown;
     }
 
     static texts(content: MessageContent): string[] {
         return content.items
-            .filter((item) => item.type === ContentType.Text)
-            .map((item) => item.value);
+            .filter((item) => item.type === ContentType.Text || item.type === ContentType.Mention)
+            .map((item) => (item.type === ContentType.Mention ? `@${item.value}` : item.value));
     }
 
     static imageKeys(content: MessageContent): string[] {
@@ -105,16 +96,10 @@ export class MessageContentUtils {
         return TextUtils.removeEmoji(this.clearText(content));
     }
 
-    static withMentionText(content: MessageContent): string {
-        let text = this.fullText(content);
-        content.mentions.forEach((mention, index) => {
-            text = text.replace(`@_user_${index + 1}`, `<at user_id="${mention}"></at>`);
-        });
-        return text;
-    }
-
     static isTextOnly(content: MessageContent): boolean {
-        return content.items.every((item) => item.type === ContentType.Text);
+        return content.items.every(
+            (item) => item.type === ContentType.Text || item.type === ContentType.Mention,
+        );
     }
 
     static isStickerOnly(content: MessageContent): boolean {

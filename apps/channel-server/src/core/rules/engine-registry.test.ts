@@ -26,7 +26,6 @@ function msg(over: Partial<RuleMessage> = {}): RuleMessage {
         createTime: 100,
         clearText: () => 'hi',
         text: () => 'hi',
-        withMentionText: () => 'hi',
         withoutEmojiText: () => 'hi',
         isTextOnly: () => true,
         isStickerOnly: () => false,

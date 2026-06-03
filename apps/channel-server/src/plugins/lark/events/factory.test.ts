@@ -4,12 +4,6 @@ import { describe, it, expect, mock } from 'bun:test';
 mock.module('@plugins/lark/message-factory', () => ({
     createLarkMessageFromEvent: mock(),
 }));
-mock.module('@lark/utils/mention-utils', () => ({
-    MentionUtils: {
-        addMentions: mock(() => []),
-        addMentionMap: mock(() => ({})),
-    },
-}));
 
 import { ContentType } from '@core/models/message-content';
 import { MessageTransferer } from './factory';

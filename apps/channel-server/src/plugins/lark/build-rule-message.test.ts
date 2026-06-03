@@ -17,7 +17,6 @@ function fakeLark(over: Partial<Record<string, unknown>> = {}): Message {
         createTime: '1700000000000',
         clearText: () => '余额',
         text: () => '余额 text',
-        withMentionText: () => '@bot 余额',
         withoutEmojiText: () => '余额',
         isTextOnly: () => true,
         isStickerOnly: () => false,
@@ -59,7 +58,6 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         const rm = buildLarkRuleMessage(fakeLark(), ids);
         expect(rm.clearText()).toBe('余额');
         expect(rm.text()).toBe('余额 text');
-        expect(rm.withMentionText()).toBe('@bot 余额');
         expect(rm.withoutEmojiText()).toBe('余额');
         expect(rm.isTextOnly()).toBe(true);
         expect(rm.isStickerOnly()).toBe(false);

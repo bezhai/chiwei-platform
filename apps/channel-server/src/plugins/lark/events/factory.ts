@@ -259,10 +259,10 @@ export class MessageTransferer {
             console.warn('Failed to generate content:', event.message.message_id);
             return null;
         }
+        const mentions = MentionUtils.addMentions(event.message.mentions);
         return createLarkMessageFromEvent(event, {
-            items,
-            mentions: MentionUtils.addMentions(event.message.mentions),
-            mentionMap: MentionUtils.addMentionMap(event.message.mentions),
+            items: MentionUtils.applyMentionTokens(items, mentions),
+            mentions,
         });
     }
 }

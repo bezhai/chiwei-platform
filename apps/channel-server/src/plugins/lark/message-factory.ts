@@ -30,9 +30,7 @@ async function buildMetadataFromEvent(event: LarkReceiveMessage): Promise<Messag
     ]);
 
     const finalBasicChatInfo =
-        event.message.chat_type !== 'p2p'
-            ? (groupChatInfo?.baseChatInfo ?? null)
-            : basicChatInfo;
+        event.message.chat_type !== 'p2p' ? (groupChatInfo?.baseChatInfo ?? null) : basicChatInfo;
 
     return {
         messageId: event.message.message_id,
@@ -77,7 +75,10 @@ function buildContentFromHistory(message: LarkHistoryMessage): MessageContent {
 
         return {
             items,
-            mentions: (message.mentions ?? []).map((m) => m.id),
+            mentions: (message.mentions ?? []).map((m) => ({
+                id: m.id,
+                displayName: m.name ?? m.id,
+            })),
         };
     } catch (error) {
         console.error('Error parsing history message content:', error);

@@ -30,7 +30,6 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
         createTime: 1,
         clearText: () => 'hi',
         text: () => 'hi',
-        withMentionText: () => 'hi',
         withoutEmojiText: () => 'hi',
         isTextOnly: () => true,
         isStickerOnly: () => false,

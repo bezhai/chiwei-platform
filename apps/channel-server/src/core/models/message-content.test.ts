@@ -75,6 +75,19 @@ describe('MessageContentUtils.toMarkdown', () => {
             'look at this: ![image](img_key) and [视频: clip.mp4]',
         );
     });
+
+    it('should render neutral mention items by display name only', () => {
+        const content: MessageContent = {
+            items: [
+                { type: ContentType.Mention, value: 'Alice' },
+                { type: ContentType.Text, value: ' hi' },
+            ],
+            mentions: [{ id: 'channel-user-1', displayName: 'Alice' }],
+        };
+
+        expect(MessageContentUtils.toMarkdown(content, true)).toBe('@Alice hi');
+        expect(MessageContentUtils.fullText(content)).toBe('@Alice hi');
+    });
 });
 
 describe('MessageContentUtils filter methods with new types', () => {
