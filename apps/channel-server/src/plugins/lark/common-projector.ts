@@ -10,10 +10,14 @@ import { LarkMessage } from '@entities/lark-message';
 import { LarkUserOpenId } from '@entities/lark-user-open-id';
 import { context } from '@middleware/context';
 import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
-import { getBotAppId } from '@core/services/bot/bot-var';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { evalScript, setNx } from '@cache/redis-client';
 import type { LarkMention, LarkReceiveMessage } from 'types/lark';
+import {
+    getCurrentLarkBotAppId,
+    getLarkBotConfigByAppId,
+    getLarkBotConfigByUnionId,
+} from './bot-identity';
 
 interface EnsureCommonUserInput {
     appId: string;
@@ -165,11 +169,9 @@ async function ensureCommonUser(input: EnsureCommonUserInput): Promise<string> {
 
 function commonUserIdForRegisteredBot(mention: LarkMention): string | undefined {
     const byAppId = mention.bot_info?.app_id
-        ? multiBotManager.getBotConfigByAppId(mention.bot_info.app_id)
+        ? getLarkBotConfigByAppId(mention.bot_info.app_id)
         : null;
-    const byUnionId = mention.id.union_id
-        ? multiBotManager.getBotConfigByUnionId(mention.id.union_id)
-        : null;
+    const byUnionId = mention.id.union_id ? getLarkBotConfigByUnionId(mention.id.union_id) : null;
     const bot = byAppId ?? byUnionId;
     if (!bot) return undefined;
     if (!bot.common_user_id) {
@@ -298,7 +300,7 @@ export async function prepareLarkInboundProjection(
     message: Message,
     inbound: InboundMessage,
 ): Promise<LarkInboundProjection> {
-    const appId = event.app_id || getBotAppId();
+    const appId = event.app_id || getCurrentLarkBotAppId();
     const openId = event.sender.sender_id?.open_id;
     if (!openId) {
         throw new Error('lark inbound sender open_id missing; cannot map common_user');

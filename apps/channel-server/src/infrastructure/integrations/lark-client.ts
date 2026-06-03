@@ -1,6 +1,6 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { larkCredentials } from '@core/services/bot/lark-credentials';
+import { larkCredentials } from '@plugins/lark/bot-identity';
 import { context } from '@middleware/context';
 import { register } from '@middleware/metrics';
 import { Counter, Histogram } from 'prom-client';

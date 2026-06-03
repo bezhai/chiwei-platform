@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'bun:test';
 
 import {
     buildChatRequestPayload,
-    setChatRequestEnricher,
-    resetChatRequestEnricher,
+    registerChatRequestEnricher,
+    resetChatRequestEnrichers,
 } from './reply';
 import type { RuleMessage } from 'core/rules/rule-message';
 
@@ -41,7 +41,7 @@ function rm(over: Partial<RuleMessage> = {}): RuleMessage {
 }
 
 afterEach(() => {
-    resetChatRequestEnricher();
+    resetChatRequestEnrichers();
 });
 
 describe('buildChatRequestPayload (platform-neutral persona path)', () => {
@@ -73,8 +73,7 @@ describe('buildChatRequestPayload (platform-neutral persona path)', () => {
     });
 
     it('registered enricher supplies is_canary + persona_ids', () => {
-        setChatRequestEnricher((m) => {
-            if (m.channel !== 'lark') return { isCanary: false, personaIds: [] };
+        registerChatRequestEnricher('lark', (m) => {
             return { isCanary: true, personaIds: ['persona-1', 'persona-2'] };
         });
         const p = buildChatRequestPayload(
@@ -90,11 +89,10 @@ describe('buildChatRequestPayload (platform-neutral persona path)', () => {
     });
 
     it('enricher only enriches its own channel; non-lark stays neutral', () => {
-        setChatRequestEnricher((m) =>
-            m.channel === 'lark'
-                ? { isCanary: true, personaIds: ['x'] }
-                : { isCanary: false, personaIds: [] },
-        );
+        registerChatRequestEnricher('lark', () => ({
+            isCanary: true,
+            personaIds: ['x'],
+        }));
         const p = buildChatRequestPayload(rm({ channel: 'qq' }), 's', 'b', undefined);
         expect(p.is_canary).toBe(false);
         expect(p.persona_ids).toEqual([]);

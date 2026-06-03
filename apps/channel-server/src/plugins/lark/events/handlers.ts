@@ -29,7 +29,6 @@ import {
     GroupChatInfoRepository,
     UserGroupBindingRepository,
 } from 'infrastructure/dal/repositories/repositories';
-import { getBotAppId } from '@core/services/bot/bot-var';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { getChannelRegistry } from '@core/registry/channel-registry';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
@@ -42,7 +41,7 @@ import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
 import { setNx } from '@cache/redis-client';
 import { CommonBotPresence } from 'infrastructure/dal/entities/common-bot-presence';
 import { enforceDecision } from '@core/channels/contracts';
-import { getBotUnionId } from '@core/services/bot/bot-var';
+import { getCurrentLarkBotAppId, getCurrentLarkBotUnionId } from '@plugins/lark/bot-identity';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
@@ -139,7 +138,7 @@ export class LarkEventHandlers {
                 );
                 return;
             }
-            const decision = plugin.addressing.decide(inbound, getBotUnionId());
+            const decision = plugin.addressing.decide(inbound, getCurrentLarkBotUnionId());
             enforceDecision(decision, (reason) =>
                 console.info(
                     `[inbound] addressing front-gate respond=false: ` +
@@ -360,7 +359,7 @@ export class LarkEventHandlers {
         const openIds: LarkUserOpenId[] =
             data.users?.map((user) => {
                 return {
-                    appId: getBotAppId(),
+                    appId: getCurrentLarkBotAppId(),
                     openId: user.user_id?.open_id!,
                     unionId: user.user_id?.union_id!,
                     name: user.name!,

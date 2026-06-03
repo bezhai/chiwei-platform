@@ -5,6 +5,32 @@ const larkUsers = new Map<
     { appId: string; openId: string; unionId?: string; name: string; commonUserId?: string }
 >();
 const commonUsers = new Set<string>();
+const registeredBots = [
+    {
+        bot_name: 'current-bot',
+        channel: 'lark',
+        common_user_id: '018f-current-bot-common',
+        credentials: {
+            app_id: 'cli-current-bot',
+            app_secret: 'sec',
+            encrypt_key: 'enc',
+            verification_token: 'vt',
+            robot_union_id: 'on_current_bot',
+        },
+    },
+    {
+        bot_name: 'other-bot',
+        channel: 'lark',
+        common_user_id: '018f-other-bot-common',
+        credentials: {
+            app_id: 'cli-other-bot',
+            app_secret: 'sec',
+            encrypt_key: 'enc',
+            verification_token: 'vt',
+            robot_union_id: 'on_other_bot',
+        },
+    },
+];
 
 mock.module('ormconfig', () => ({
     default: {
@@ -15,9 +41,7 @@ mock.module('ormconfig', () => ({
                         async ({
                             where,
                         }: {
-                            where:
-                                | { appId: string; openId: string }
-                                | { unionId: string };
+                            where: { appId: string; openId: string } | { unionId: string };
                         }) => {
                             if ('unionId' in where) {
                                 return (
@@ -34,11 +58,7 @@ mock.module('ormconfig', () => ({
                         },
                     ),
                     findOneOrFail: mock(
-                        async ({
-                            where,
-                        }: {
-                            where: { appId: string; openId: string };
-                        }) => {
+                        async ({ where }: { where: { appId: string; openId: string } }) => {
                             const row = larkUsers.get(`${where.appId}:${where.openId}`);
                             if (!row) throw new Error('not found');
                             return row;
@@ -55,15 +75,13 @@ mock.module('ormconfig', () => ({
                         },
                     ),
                     upsert: mock(
-                        async (
-                            row: {
-                                appId: string;
-                                openId: string;
-                                unionId?: string;
-                                name: string;
-                                commonUserId: string;
-                            },
-                        ) => {
+                        async (row: {
+                            appId: string;
+                            openId: string;
+                            unionId?: string;
+                            name: string;
+                            commonUserId: string;
+                        }) => {
                             larkUsers.set(`${row.appId}:${row.openId}`, row);
                         },
                     ),
@@ -71,11 +89,9 @@ mock.module('ormconfig', () => ({
             }
             if (entity.name === 'CommonUser') {
                 return {
-                    upsert: mock(
-                        async (row: { common_user_id: string }) => {
-                            commonUsers.add(row.common_user_id);
-                        },
-                    ),
+                    upsert: mock(async (row: { common_user_id: string }) => {
+                        commonUsers.add(row.common_user_id);
+                    }),
                 };
             }
             return {
@@ -109,24 +125,9 @@ mock.module('@integrations/rabbitmq', () => ({
 
 mock.module('@core/services/bot/multi-bot-manager', () => ({
     multiBotManager: {
-        getBotConfigByAppId: (appId: string) => {
-            const map: Record<string, { bot_name: string; common_user_id: string }> = {
-                'cli-other-bot': {
-                    bot_name: 'other-bot',
-                    common_user_id: '018f-other-bot-common',
-                },
-            };
-            return map[appId] ?? null;
-        },
-        getBotConfigByUnionId: (unionId: string) => {
-            const map: Record<string, { bot_name: string; common_user_id: string }> = {
-                on_current_bot: {
-                    bot_name: 'current-bot',
-                    common_user_id: '018f-current-bot-common',
-                },
-            };
-            return map[unionId] ?? null;
-        },
+        getAllBotConfigs: () => registeredBots,
+        getBotConfig: () => null,
+        getBotCommonUserId: () => '018f-current-bot-common',
     },
 }));
 

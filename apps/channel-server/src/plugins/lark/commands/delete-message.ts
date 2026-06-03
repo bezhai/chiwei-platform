@@ -1,6 +1,6 @@
 import { getMessageInfo, deleteMessage } from '@lark-client';
 import { Message } from 'core/models/message';
-import { getBotAppId } from '@core/services/bot/bot-var';
+import { getCurrentLarkBotAppId } from '@plugins/lark/bot-identity';
 import { replyMessage } from '@lark/basic/message';
 import type { RuleMessage } from 'core/rules/rule-message';
 import { larkContextStore } from '../lark-context-store';
@@ -29,7 +29,7 @@ async function deleteBotMessageImpl(message: Message) {
 
         const parentMessage = parentMessageInfo.items[0];
 
-        if (parentMessage?.sender?.id !== getBotAppId()) {
+        if (parentMessage?.sender?.id !== getCurrentLarkBotAppId()) {
             // 这里拿到的不是union_id, 而是app_id
             throw new Error('只能撤回机器人自己发送的消息');
         }

@@ -24,13 +24,10 @@ import type {
 import type { ContentItem, ThreadRef } from '@core/channels/contracts';
 import type { PostContent } from 'types/content-types';
 import { markdownToPostContent } from '@core/services/message/post-content-processor';
-import { larkCredentials } from '@core/services/bot/lark-credentials';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { storeLarkOutboundMessage } from './common-projector';
-import {
-    resolveLarkMessageRef,
-    reverseResolveOutbound,
-} from './outbound-reverse-resolve';
+import { resolveLarkMessageRef, reverseResolveOutbound } from './outbound-reverse-resolve';
+import { getLarkDisplayNameByAppId, larkCredentials } from './bot-identity';
 
 // markdown 里的 @N.png 图片占位引用（与现状 chat-response-worker 同一正则）。
 const IMAGE_REF_PATTERN = /!\[([^\]]*)\]\(@?(\d+\.png)\)/g;
@@ -175,9 +172,7 @@ async function resolveSingleImage(
 
 // 工厂：注入 deps，返回 OutboundCapabilities。生产用 defaultLarkOutboundDeps，
 // 单测注入 spy。
-export function createLarkOutboundCapabilities(
-    deps: LarkOutboundDeps,
-): OutboundCapabilities {
+export function createLarkOutboundCapabilities(deps: LarkOutboundDeps): OutboundCapabilities {
     return {
         async resolveOutboundTarget(input: OutboundTargetResolveInput) {
             const refs = await reverseResolveOutbound({
@@ -188,9 +183,7 @@ export function createLarkOutboundCapabilities(
             return {
                 message: { channelId: refs.channelMessageId },
                 conversation: { channelId: refs.channelChatId },
-                rootMessage: refs.channelRootId
-                    ? { channelId: refs.channelRootId }
-                    : undefined,
+                rootMessage: refs.channelRootId ? { channelId: refs.channelRootId } : undefined,
             };
         },
 
@@ -202,9 +195,7 @@ export function createLarkOutboundCapabilities(
             const botConfig = multiBotManager.getBotConfig(input.botName);
             const senderDisplayName =
                 botConfig?.channel === 'lark'
-                    ? (multiBotManager.getDisplayNameByAppId(
-                          larkCredentials(botConfig).app_id,
-                      ) ?? undefined)
+                    ? (getLarkDisplayNameByAppId(larkCredentials(botConfig).app_id) ?? undefined)
                     : undefined;
 
             return storeLarkOutboundMessage({

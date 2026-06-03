@@ -1,15 +1,4 @@
-import { describe, it, expect, mock } from 'bun:test';
-
-// message-content.ts 只依赖 multiBotManager（resolveMentions 里查 display_name），
-// 不再 import bot-var。这里只 stub multi-bot-manager，避免被测模块拉起 TypeORM /
-// ormconfig 真实依赖。注意：不要在这里 stub bot-var —— bun mock.module 是进程级
-// 全局，stub 整个 bot-var 会泄漏到同进程的 bot-var.test.ts，让它拿到 stub 而非真
-// 实实现导致 fail。
-mock.module('@core/services/bot/multi-bot-manager', () => ({
-    multiBotManager: {
-        getDisplayNameByAppId: () => null,
-    },
-}));
+import { describe, it, expect } from 'bun:test';
 
 import { ContentType, MessageContentUtils, MessageContent } from './message-content';
 

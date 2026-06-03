@@ -7,6 +7,7 @@ import { larkEventHandlers } from '@plugins/lark/events/handlers';
 import { LarkEventIngress } from './webhook/ingress';
 import { isDirectIngressEnabled } from './webhook/ingress-gate';
 import { upsertAllLarkChatInfo } from './group-initializer';
+import { loadLarkDisplayNames } from './bot-identity';
 
 let directIngress: LarkEventIngress | undefined;
 
@@ -14,6 +15,7 @@ export const larkRuntime: ChannelRuntime = {
     channel: 'lark',
 
     async initialize(): Promise<void> {
+        await loadLarkDisplayNames();
         await initializeLarkClients();
     },
 

@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'bun:test';
+import { afterEach, describe, it, expect } from 'bun:test';
 
-import { runRulesWith, type RuleTerminalState } from './engine';
+import {
+    registerUtilityRedirectResponder,
+    resetUtilityRedirectResponders,
+    runRulesWith,
+} from './engine';
 import type { RuleConfig } from './rule';
 import type { RuleMessage } from './rule-message';
 
@@ -38,11 +42,21 @@ function msg(over: Partial<RuleMessage> = {}): RuleMessage {
 
 const alwaysPass = () => true;
 
+afterEach(() => {
+    resetUtilityRedirectResponders();
+});
+
 describe('runRules single terminal-state exit', () => {
     it('NotBlocked=false -> exactly one terminal state: blocked', async () => {
         let handled = false;
         const rules: RuleConfig[] = [
-            { rules: [alwaysPass], handler: async () => { handled = true; }, comment: 'chat' },
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    handled = true;
+                },
+                comment: 'chat',
+            },
         ];
         const st = await runRulesWith(msg(), {
             chatRules: rules,
@@ -127,7 +141,13 @@ describe('runRules 规则执行阶段异常也收敛到单一终态', () => {
     it('notBlocked throws -> terminal state rule_error, no exception escapes', async () => {
         let handled = false;
         const rules: RuleConfig[] = [
-            { rules: [alwaysPass], handler: async () => { handled = true; }, comment: 'chat' },
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    handled = true;
+                },
+                comment: 'chat',
+            },
         ];
         const st = await runRulesWith(msg(), {
             chatRules: rules,
@@ -196,7 +216,9 @@ describe('runRules channel filtering + 渠道声明', () => {
         const rules: RuleConfig[] = [
             {
                 rules: [alwaysPass],
-                handler: async () => { handled = true; },
+                handler: async () => {
+                    handled = true;
+                },
                 comment: '帮助',
                 channels: ['lark'],
             },
@@ -251,5 +273,66 @@ describe('runRules botRole/category filtering收敛到终态', () => {
         });
         expect(st.kind).toBe('no_match');
         expect(st.skipped.some((s) => s.includes('聊天'))).toBe(true);
+    });
+
+    it('utility-redirect responder is selected by message channel', async () => {
+        registerUtilityRedirectResponder('lark', () => {
+            throw new Error('lark responder must not handle qq messages');
+        });
+
+        const rules: RuleConfig[] = [
+            {
+                rules: [alwaysPass],
+                handler: async () => {},
+                comment: '帮助',
+                category: 'utility',
+            },
+        ];
+        const qqState = await runRulesWith(
+            msg({
+                channel: 'qq',
+                isDirect: false,
+                mentionedUserIds: ['BOT-U'],
+            }),
+            {
+                chatRules: rules,
+                botRole: 'persona',
+                notBlocked: async () => true,
+            },
+        );
+        expect(qqState.kind).toBe('responded');
+
+        let qqResponderCalled = false;
+        registerUtilityRedirectResponder('qq', () => {
+            qqResponderCalled = true;
+        });
+        const larkState = await runRulesWith(
+            msg({
+                channel: 'lark',
+                isDirect: false,
+                mentionedUserIds: ['BOT-U'],
+            }),
+            {
+                chatRules: rules,
+                botRole: 'persona',
+                notBlocked: async () => true,
+            },
+        );
+        expect(larkState.kind).toBe('handler_error');
+
+        const handledQqState = await runRulesWith(
+            msg({
+                channel: 'qq',
+                isDirect: false,
+                mentionedUserIds: ['BOT-U'],
+            }),
+            {
+                chatRules: rules,
+                botRole: 'persona',
+                notBlocked: async () => true,
+            },
+        );
+        expect(handledQqState.kind).toBe('responded');
+        expect(qqResponderCalled).toBe(true);
     });
 });

@@ -1,16 +1,12 @@
-import { In } from 'typeorm';
 import { v7 as uuidv7 } from 'uuid';
 import { BotConfig } from '@entities/bot-config';
-import { BotPersona } from '@entities/bot-persona';
 import { CommonUser } from '@entities/common-user';
 import { botConfigRepository } from '@repositories/bot-config-repository';
-import { larkCredentials } from './lark-credentials';
 import AppDataSource from 'ormconfig';
 
 export class MultiBotManager {
     private static instance: MultiBotManager;
     private botConfigs: Map<string, BotConfig> = new Map();
-    private appIdToDisplayName: Map<string, string> = new Map();
     private initialized = false;
 
     private constructor() {}
@@ -38,9 +34,6 @@ export class MultiBotManager {
             this.botConfigs.set(bot.bot_name, bot);
         }
 
-        // 预加载 app_id → persona display_name 映射
-        await this.loadDisplayNames(allBots);
-
         this.initialized = true;
         console.info(`Loaded ${allBots.length} bot configurations`);
     }
@@ -48,28 +41,6 @@ export class MultiBotManager {
     // 根据机器人名称获取配置
     getBotConfig(botName: string): BotConfig | null {
         return this.botConfigs.get(botName) || null;
-    }
-
-    // 根据飞书 app_id 反查机器人配置（飞书专有反查，凭据现在在 credentials JSONB）
-    getBotConfigByAppId(appId: string): BotConfig | null {
-        for (const bot of this.botConfigs.values()) {
-            if (bot.channel !== 'lark') continue;
-            if (larkCredentials(bot).app_id === appId) {
-                return bot;
-            }
-        }
-        return null;
-    }
-
-    // 根据飞书 robot_union_id 反查机器人配置（飞书专有反查，凭据在 credentials JSONB）
-    getBotConfigByUnionId(unionId: string): BotConfig | null {
-        for (const bot of this.botConfigs.values()) {
-            if (bot.channel !== 'lark') continue;
-            if (larkCredentials(bot).robot_union_id === unionId) {
-                return bot;
-            }
-        }
-        return null;
     }
 
     getBotCommonUserId(botName: string): string {
@@ -101,37 +72,6 @@ export class MultiBotManager {
         });
     }
 
-    // 根据 app_id 获取 persona display_name
-    getDisplayNameByAppId(appId: string): string | null {
-        return this.appIdToDisplayName.get(appId) || null;
-    }
-
-    private async loadDisplayNames(bots: BotConfig[]): Promise<void> {
-        this.appIdToDisplayName.clear();
-        const personaIds = bots
-            .filter((b) => b.persona_id)
-            .map((b) => b.persona_id!);
-
-        if (personaIds.length === 0) return;
-
-        const personaRepo = AppDataSource.getRepository(BotPersona);
-        const personas = await personaRepo.findBy({
-            persona_id: In(personaIds),
-        });
-
-        const personaMap = new Map(personas.map((p) => [p.persona_id, p.display_name]));
-
-        for (const bot of bots) {
-            // appId -> displayName 是飞书 app_id 维度的映射；app_id 现在在
-            // credentials JSONB。非 lark bot 没有飞书 app_id 概念，跳过。
-            if (bot.channel !== 'lark') continue;
-            if (bot.persona_id && personaMap.has(bot.persona_id)) {
-                const appId = larkCredentials(bot).app_id;
-                this.appIdToDisplayName.set(appId, personaMap.get(bot.persona_id)!);
-            }
-        }
-    }
-
     private async ensureBotCommonUsers(bots: BotConfig[]): Promise<void> {
         const commonUserRepo = AppDataSource.getRepository(CommonUser);
         const botRepo = AppDataSource.getRepository(BotConfig);
@@ -148,10 +88,7 @@ export class MultiBotManager {
             );
 
             if (!bot.common_user_id) {
-                await botRepo.update(
-                    { bot_name: bot.bot_name },
-                    { common_user_id: commonUserId },
-                );
+                await botRepo.update({ bot_name: bot.bot_name }, { common_user_id: commonUserId });
                 bot.common_user_id = commonUserId;
                 console.info(
                     `[multi-bot] assigned common_user_id=${commonUserId} ` +

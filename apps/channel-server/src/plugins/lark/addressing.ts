@@ -1,6 +1,6 @@
 // 飞书寻址策略：判断一条入站消息是否冲 bot 来、要不要响应。实现 contracts.ts
 // 的 AddressingPolicy 契约（decide），与现状 NeedRobotMention 逻辑等价：
-//   NeedRobotMention = message.hasMention(getBotUnionId()) || message.isP2P()
+//   NeedRobotMention = mentionedUserIds.includes(botCommonUserId) || message.isP2P()
 // 其中 isP2P() <=> conversation_scope === 'direct'（inbound 把 p2p 映射到
 // direct）。这里是 Lark 插件自己的前置总闸，仍用飞书 union_id 同口径比较；
 // 进入 runRules 前，common-projector 会把 mention list 换成 common_user_id。

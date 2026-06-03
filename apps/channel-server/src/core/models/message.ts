@@ -1,4 +1,3 @@
-import { getBotAppId } from '@core/services/bot/bot-var';
 import {
     MessageMetadata,
     MessageMetadataUtils,
@@ -128,21 +127,13 @@ export class Message {
 
     /**
      * 从 mention 列表中找到第一个真实用户（排除所有 bot mention）
-     * bot mention 在 mentionMap 中有 appId 字段，user mention 没有
+     * bot mention 在 mentionMap 中有 botCommonUserId 字段，user mention 没有
      */
     getFirstMentionedHuman(): string | undefined {
         return this.content.mentions.find((unionId) => {
             const info = this.content.mentionMap?.[unionId];
-            return info && !info.appId;
+            return info && !info.botCommonUserId;
         });
-    }
-
-    getBotAppIds(): string[] {
-        return this.content.botAppIds || [];
-    }
-
-    hasBotMention(appId: string): boolean {
-        return this.getBotAppIds().includes(appId);
     }
 
     // For debugging
@@ -157,12 +148,11 @@ export class Message {
         return MessageContentUtils.toMarkdown(this.content, this.allowDownloadResource());
     }
 
-    toStorageFormat(): string {
-        const currentAppId = getBotAppId();
+    toStorageFormat(excludeBotCommonUserId?: string): string {
         const mentions = this.content.mentions
             .map((unionId) => {
                 const info = this.content.mentionMap?.[unionId];
-                if (!info || info.appId === currentAppId) return null;
+                if (!info || info.botCommonUserId === excludeBotCommonUserId) return null;
                 return { user_id: info.openId, name: info.name };
             })
             .filter((m): m is NonNullable<typeof m> => m !== null);
