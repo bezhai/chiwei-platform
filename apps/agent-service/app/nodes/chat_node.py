@@ -6,6 +6,7 @@
 替代了原 ``app.workers.chat_consumer`` + ``app.chat.pipeline.stream_chat``
 路径，由 dataflow runtime 直接驱动 chat_request 队列。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +24,7 @@ from app.chat.persona_filter import MessageRouter
 from app.chat.post_actions import fetch_guard_message
 from app.chat.pre_safety import run_pre_safety_check
 from app.data.queries import (
+    create_pending_agent_response,
     find_gray_config,
     find_message_content,
     is_chat_request_completed,
@@ -48,9 +50,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
       3. fan-out emit ChatRequest（每个 persona 一条；后续 persona uuid 重生成 session_id）
     """
     if t.message_id is None:
-        raise ValueError(
-            "ChatTrigger.message_id is None; cannot fan out ChatRequest"
-        )
+        raise ValueError("ChatTrigger.message_id is None; cannot fan out ChatRequest")
 
     logger.info(
         "route_chat_node received: session_id=%s, message_id=%s, lane=%s, bot_name=%s",
@@ -93,20 +93,34 @@ async def route_chat_node(t: ChatTrigger) -> None:
 
     for i, pid in enumerate(persona_ids):
         session_for_persona = t.session_id if i == 0 else str(uuid4())
-        await emit(ChatRequest(
-            channel=t.channel,
-            message_id=t.message_id,
-            persona_id=pid,
-            session_id=session_for_persona,
-            chat_id=t.chat_id,
-            is_p2p=t.is_p2p,
-            root_id=t.root_id,
-            user_id=t.user_id,
-            is_proactive=t.is_proactive,
-            bot_name=t.bot_name,
-            lane=t.lane,
-            enqueued_at=t.enqueued_at,
-        ))
+        if i > 0 and not t.is_proactive:
+            if not session_for_persona or not t.chat_id:
+                raise ValueError(
+                    "multi-persona ChatTrigger requires session_id and chat_id "
+                    "to create per-persona response rows"
+                )
+            await create_pending_agent_response(
+                session_id=session_for_persona,
+                trigger_common_message_id=t.message_id,
+                common_conversation_id=t.chat_id,
+                bot_name=t.bot_name,
+            )
+        await emit(
+            ChatRequest(
+                channel=t.channel,
+                message_id=t.message_id,
+                persona_id=pid,
+                session_id=session_for_persona,
+                chat_id=t.chat_id,
+                is_p2p=t.is_p2p,
+                root_id=t.root_id,
+                user_id=t.user_id,
+                is_proactive=t.is_proactive,
+                bot_name=t.bot_name,
+                lane=t.lane,
+                enqueued_at=t.enqueued_at,
+            )
+        )
 
 
 @node
@@ -137,56 +151,61 @@ async def chat_node(req: ChatRequest) -> None:
 
     # 2. fetch 为空 -> emit 1 段 "未找到" + return
     if not raw_content:
-        await emit(ChatResponseSegment(
-            channel=req.channel,
-            message_id=req.message_id,
-            persona_id=req.persona_id,
-            part_index=0,
-            session_id=req.session_id,
-            chat_id=req.chat_id,
-            is_p2p=req.is_p2p,
-            root_id=req.root_id,
-            user_id=req.user_id,
-            is_proactive=req.is_proactive,
-            bot_name=req.bot_name,
-            lane=req.lane,
-            content="抱歉，未找到相关消息记录",
-            status="success",
-            is_last=True,
-            full_content=None,
-            published_at=int(time.time() * 1000),
-        ))
+        await emit(
+            ChatResponseSegment(
+                channel=req.channel,
+                message_id=req.message_id,
+                persona_id=req.persona_id,
+                part_index=0,
+                session_id=req.session_id,
+                chat_id=req.chat_id,
+                is_p2p=req.is_p2p,
+                root_id=req.root_id,
+                user_id=req.user_id,
+                is_proactive=req.is_proactive,
+                bot_name=req.bot_name,
+                lane=req.lane,
+                content="抱歉，未找到相关消息记录",
+                status="success",
+                is_last=True,
+                full_content=None,
+                published_at=int(time.time() * 1000),
+            )
+        )
         pre_task.cancel()
         return
 
     # 3. resolve response_bot_name + 更新 common_agent_response 行
     response_bot_name = await resolve_bot_name_for_persona(
-        req.persona_id, req.chat_id or "",
+        req.persona_id,
+        req.chat_id or "",
     )
     if not response_bot_name:
         response_bot_name = req.bot_name or ""
     if req.session_id:
         try:
             await set_agent_response_bot(
-                req.session_id, response_bot_name, req.persona_id,
+                req.session_id,
+                response_bot_name,
+                req.persona_id,
             )
         except Exception as e:
             logger.warning("Failed to update agent_response: %s", e)
 
     # 4. base_payload (segments 共用字段)
-    base_payload = dict(
-        channel=req.channel,
-        message_id=req.message_id,
-        persona_id=req.persona_id,
-        session_id=req.session_id,
-        chat_id=req.chat_id,
-        is_p2p=req.is_p2p,
-        root_id=req.root_id,
-        user_id=req.user_id,
-        is_proactive=req.is_proactive,
-        bot_name=response_bot_name,
-        lane=req.lane,  # CRITICAL: sink 不会自动注入 header lane
-    )
+    base_payload = {
+        "channel": req.channel,
+        "message_id": req.message_id,
+        "persona_id": req.persona_id,
+        "session_id": req.session_id,
+        "chat_id": req.chat_id,
+        "is_p2p": req.is_p2p,
+        "root_id": req.root_id,
+        "user_id": req.user_id,
+        "is_proactive": req.is_proactive,
+        "bot_name": response_bot_name,
+        "lane": req.lane,  # CRITICAL: sink 不会自动注入 header lane
+    }
 
     # 5. 主循环 + 中段 emit (with pre-safety BLOCK termination)
     SPLIT_MARKER = "---split---"
@@ -204,15 +223,17 @@ async def chat_node(req: ChatRequest) -> None:
     token_count = 0
 
     async def _emit_block_guard():
-        await emit(ChatResponseSegment(
-            **base_payload,
-            part_index=part_index,
-            content=guard_message,
-            status="success",
-            is_last=True,
-            full_content=guard_message,
-            published_at=int(time.time() * 1000),
-        ))
+        await emit(
+            ChatResponseSegment(
+                **base_payload,
+                part_index=part_index,
+                content=guard_message,
+                status="success",
+                is_last=True,
+                full_content=guard_message,
+                published_at=int(time.time() * 1000),
+            )
+        )
 
     # One chat turn = one langfuse trace: seed from (message_id,
     # effective_persona) — the SAME seed run_pre_safety uses — so this main
@@ -268,20 +289,24 @@ async def chat_node(req: ChatRequest) -> None:
         (remaining or full_content) if (remaining or part_index == 0) else ""
     )
     result = await _resolve_pre_safety_for_part(
-        final_content, pre_task, guard_message,
+        final_content,
+        pre_task,
+        guard_message,
     )
     if result.blocked:
         await _emit_block_guard()
         return
-    await emit(ChatResponseSegment(
-        **base_payload,
-        part_index=part_index,
-        content=result.content,
-        status="success",
-        is_last=True,
-        full_content=clean_full,
-        published_at=int(time.time() * 1000),
-    ))
+    await emit(
+        ChatResponseSegment(
+            **base_payload,
+            part_index=part_index,
+            content=result.content,
+            status="success",
+            is_last=True,
+            full_content=clean_full,
+            published_at=int(time.time() * 1000),
+        )
+    )
 
     t_end = time.monotonic()
     CHAT_PIPELINE_DURATION.labels(stage="total").observe(t_end - t_start)

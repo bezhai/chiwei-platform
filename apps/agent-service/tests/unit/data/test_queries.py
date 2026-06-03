@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.data.queries import get_safety_status, is_chat_request_completed
+from app.data.queries import (
+    create_pending_agent_response,
+    get_safety_status,
+    is_chat_request_completed,
+)
 
 
 class _ScalarResult:
@@ -32,6 +36,39 @@ def _patch_session(session):
         patch("app.data.queries.agent_response.auto_tx", _fake_auto_tx),
         patch("app.data.queries.agent_response.current_session", return_value=session),
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_pending_agent_response_inserts_idempotent_row():
+    session = AsyncMock()
+    session.execute = AsyncMock()
+
+    patches = _patch_session(session)
+    for p in patches:
+        p.start()
+    try:
+        await create_pending_agent_response(
+            session_id="session-2",
+            trigger_common_message_id="00000000-0000-7000-8000-000000000001",
+            common_conversation_id="00000000-0000-7000-8000-000000000002",
+            bot_name="bot-x",
+        )
+        sql, params = session.execute.call_args.args
+        sql_text = str(sql)
+        assert "INSERT INTO common_agent_response" in sql_text
+        assert "ON CONFLICT (session_id) DO NOTHING" in sql_text
+        assert params["session_id"] == "session-2"
+        assert (
+            params["trigger_common_message_id"]
+            == "00000000-0000-7000-8000-000000000001"
+        )
+        assert params["common_conversation_id"] == (
+            "00000000-0000-7000-8000-000000000002"
+        )
+        assert params["bot_name"] == "bot-x"
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.mark.asyncio
