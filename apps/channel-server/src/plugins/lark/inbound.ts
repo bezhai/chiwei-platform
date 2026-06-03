@@ -1,11 +1,3 @@
-// 飞书入站适配：飞书原始事件 → 通用 InboundMessage。这是飞书入站耦合的唯一
-// 收口处——im.message.receive_v1 / union_id / chat_id / challenge /
-// verification_token / image_key / file_key 这些飞书字眼只允许出现在本文件内，
-// core 契约层只见通用 InboundMessage / ContentItem / ThreadRef。
-//
-// 实现 contracts.ts 的 InboundAdapter 契约（handleHandshake / verify / parse）。
-// 出站不在这里——出站已收进 plugins/lark 的 OutboundCapabilities。
-
 import type { LarkMention, LarkReceiveMessage } from 'types/lark';
 import type {
     TextContent,
@@ -22,11 +14,15 @@ import type {
     InboundMessage,
     ThreadRef,
 } from '@core/channels/contracts';
+import {
+    getLarkBotConfigByAppId,
+    getLarkBotConfigByUnionId,
+    getLarkDisplayNameByAppId,
+    larkCredentials,
+} from './bot-identity';
 
 export const LARK_CHANNEL = 'lark';
 
-// 飞书回调握手：url_verification 事件原样回 challenge；其余（含真实消息事件）
-// 不是握手，返回 null 让上层继续走 verify/parse。复刻飞书现状语义。
 function handleHandshake(raw: unknown): unknown | null {
     const r = raw as { type?: string; challenge?: string };
     if (r && r.type === 'url_verification' && typeof r.challenge === 'string') {
@@ -35,31 +31,20 @@ function handleHandshake(raw: unknown): unknown | null {
     return null;
 }
 
-// 飞书回调安全靠 verification_token + encrypt_key 校验（解密 + token 比对）。
-// HTTP/WS 入口由 plugins/lark/webhook/ingress 使用飞书 SDK 承接，进到本适配
-// 的事件已经过 SDK 校验与解密，故这里保持纯转换。
 function verify(_raw: unknown): boolean {
     return true;
 }
 
-// 纯转换：飞书原生事件 → 通用 InboundMessage，零 I/O。内容映射、mention →
-// addressing_hints、字段抽取全是同步的；common_* 投影不在这里做，由 lark
-// common projector 在入站接线点处理。
 function parse(raw: LarkReceiveMessage): InboundMessage | null {
     const event = raw;
     if (!event?.message || !event.message.message_id) return null;
 
-    // 飞书原生类型逐一映射到通用 ContentItem，绝不因接契约就把图片/富文本/
-    // sticker/media/file/audio/合并转发/未知类型当没收到。
-    const content = parseLarkContent(event.message.message_type, event.message.content);
+    const mentions: LarkMention[] = event.message.mentions ?? [];
+    const content = parseLarkContent(event.message.message_type, event.message.content, mentions);
     if (content.length === 0) return null;
 
-    // 飞书 p2p → direct，其余（group）→ group。
     const conversationScope = event.message.chat_type === 'p2p' ? 'direct' : 'group';
 
-    // 飞书 mention → addressing_hints。targetId 用 union_id 口径，与 addressing
-    // 的 hasMention(robot_union_id) 比对同源（见 addressing.ts）。
-    const mentions: LarkMention[] = event.message.mentions ?? [];
     const addressingHints = mentions.map((m) => ({ targetId: m.id.union_id! }));
 
     // 飞书出站现状是 reply(message_id, content, replyInThread=true)——回复触发那
@@ -90,15 +75,38 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
     };
 }
 
-// 飞书原生消息类型 → 通用 ContentItem[]。飞书专有字段名（image_key/file_key/
-// zh_cn 等）只在本函数内出现；merge_forward/share_chat/share_user/未知类型 →
-// unsupported（保留 original_type，绝不静默丢弃）。
-function parseLarkContent(messageType: string, rawContent: string): ContentItem[] {
+function mentionDisplay(m: LarkMention): string {
+    if (m.mentioned_type === 'bot') {
+        const bot = m.bot_info?.app_id
+            ? getLarkBotConfigByAppId(m.bot_info.app_id)
+            : m.id.union_id
+              ? getLarkBotConfigByUnionId(m.id.union_id)
+              : null;
+        const appId = bot ? larkCredentials(bot).app_id : null;
+        const personaName = appId ? getLarkDisplayNameByAppId(appId) : null;
+        if (personaName) return personaName;
+    }
+    return m.name?.trim() || m.id.union_id || m.id.user_id || m.id.open_id || m.key;
+}
+
+function applyMentionText(text: string, mentions: LarkMention[]): string {
+    const byKey = new Map(mentions.map((m) => [m.key, m]));
+    return text.replace(/@_user_\d+/g, (token) => {
+        const mention = byKey.get(token);
+        return mention ? `@${mentionDisplay(mention)}` : token;
+    });
+}
+
+function parseLarkContent(
+    messageType: string,
+    rawContent: string,
+    mentions: LarkMention[] = [],
+): ContentItem[] {
     switch (messageType) {
         case 'text': {
             try {
                 const c: TextContent = JSON.parse(rawContent);
-                return [{ kind: 'text', text: c.text }];
+                return [{ kind: 'text', text: applyMentionText(c.text, mentions) }];
             } catch (err) {
                 console.error('Failed to parse text content:', err);
                 return [{ kind: 'text', text: '[文本]' }];
@@ -129,7 +137,10 @@ function parseLarkContent(messageType: string, rawContent: string): ContentItem[
                 c.content.forEach((row) => {
                     row.forEach((node) => {
                         if (node.tag === 'text' && node.text) {
-                            items.push({ kind: 'text', text: node.text });
+                            items.push({
+                                kind: 'text',
+                                text: applyMentionText(node.text, mentions),
+                            });
                         } else if (node.tag === 'img' && node.image_key) {
                             items.push({ kind: 'image', key: node.image_key });
                         }

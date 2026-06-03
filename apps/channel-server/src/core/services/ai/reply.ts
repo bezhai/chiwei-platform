@@ -40,17 +40,21 @@ const neutralEnricher: ChatRequestEnricher = () => ({
     personaIds: [],
 });
 
-let chatRequestEnricher: ChatRequestEnricher = neutralEnricher;
+const chatRequestEnrichers = new Map<string, ChatRequestEnricher>();
 
-// channel 插件 import 期注入"按本平台富化 chat.request"的实现。core 只调
-// 注入点，不碰平台 SDK。
-export function setChatRequestEnricher(fn: ChatRequestEnricher): void {
-    chatRequestEnricher = fn;
+// channel 插件 import 期注册"按本平台富化 chat.request"的实现。core 只按
+// message.channel 找对应 enricher，不碰平台 SDK。
+export function registerChatRequestEnricher(channel: string, fn: ChatRequestEnricher): void {
+    chatRequestEnrichers.set(channel, fn);
 }
 
-// 测试钩子：恢复中性默认，避免跨用例污染。
-export function resetChatRequestEnricher(): void {
-    chatRequestEnricher = neutralEnricher;
+// 测试钩子：清空注册表，避免跨用例污染。
+export function resetChatRequestEnrichers(): void {
+    chatRequestEnrichers.clear();
+}
+
+function chatRequestEnricherFor(channel: string): ChatRequestEnricher {
+    return chatRequestEnrichers.get(channel) ?? neutralEnricher;
 }
 
 // 纯函数：从平台无关 RuleMessage 构造 chat.request 载荷。平台专属的寻址结果
@@ -61,7 +65,7 @@ export function buildChatRequestPayload(
     botName: string | undefined,
     lane: string | undefined,
 ): ChatRequestPayload {
-    const { isCanary, personaIds } = chatRequestEnricher(message);
+    const { isCanary, personaIds } = chatRequestEnricherFor(message.channel)(message);
     return {
         session_id: sessionId,
         channel: message.channel,
@@ -100,10 +104,7 @@ export function buildChatRequestPayload(
  * trigger_message_id 查，只有 chat.response 真回来才命中，而那必在
  * publish 之后），故 save 时序后移安全（见回报 grep 求证）。
  */
-export async function makeTextReply(
-    message: RuleMessage,
-    ctx?: RuleHandlerContext,
-): Promise<void> {
+export async function makeTextReply(message: RuleMessage, ctx?: RuleHandlerContext): Promise<void> {
     const sessionId = uuidv4();
     const botName = context.getBotName() || undefined;
 

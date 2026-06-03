@@ -88,6 +88,7 @@ const { consumeInboundLaneEnvelope, startInboundLaneConsumer } = await import(
 );
 
 const env: InboundLaneEnvelope = {
+    channel: 'lark',
     event_type: 'im.message.receive_v1',
     global_message_id: 'gmid-42',
     trace_id: 'trace-lane-1',
@@ -206,8 +207,11 @@ describe('startInboundLaneConsumer 失败重投', () => {
             nack: () => {},
         };
         createdContexts.length = 0;
+        let handled: InboundLaneEnvelope | undefined;
 
-        await startInboundLaneConsumer('ppe-foo', async () => {});
+        await startInboundLaneConsumer('ppe-foo', async (e) => {
+            handled = e;
+        });
         await consumeCallback!({
             content: Buffer.from(JSON.stringify(env)),
         });
@@ -217,6 +221,7 @@ describe('startInboundLaneConsumer 失败重投', () => {
             traceId: 'trace-lane-1',
             lane: 'ppe-foo',
         });
+        expect(handled).toEqual(env);
         rabbitChannel = undefined;
     });
 

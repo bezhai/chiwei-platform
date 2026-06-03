@@ -6,14 +6,14 @@ import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 mock.module('@dal/mongo/client', () => ({
     insertEvent: async () => undefined,
 }));
-mock.module('@lark/events/event-registry', () => ({
+mock.module('@plugins/lark/events/event-registry', () => ({
     EventHandler: () => () => undefined,
     EventRegistry: {
         getHandlerByEventType: () => undefined,
     },
     registerEventHandlerInstance: () => {},
 }));
-mock.module('@lark/events/handlers', () => ({
+mock.module('@plugins/lark/events/handlers', () => ({
     larkEventHandlers: {},
 }));
 

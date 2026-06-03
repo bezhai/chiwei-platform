@@ -32,6 +32,7 @@ async def fetch_guard_message(persona_or_bot: str) -> str:
 
 async def _publish_post_check(
     session_id: str,
+    channel: str,
     response_text: str,
     chat_id: str,
     trigger_message_id: str,
@@ -45,6 +46,7 @@ async def _publish_post_check(
     try:
         await emit(PostSafetyRequest(
             session_id=session_id,
+            channel=channel,
             trigger_message_id=trigger_message_id,
             chat_id=chat_id,
             response_text=response_text,
@@ -72,6 +74,7 @@ async def _emit_memory_trigger(trigger: Data) -> None:
 async def schedule_post_actions(
     full_content: str,
     session_id: str | None,
+    channel: str,
     chat_id: str,
     message_id: str,
     persona_id: str,
@@ -89,7 +92,7 @@ async def schedule_post_actions(
 
     # 1. Post safety check (durable wire -> run_post_safety)
     if session_id:
-        await _publish_post_check(session_id, full_content, chat_id, message_id)
+        await _publish_post_check(session_id, channel, full_content, chat_id, message_id)
 
     # 2. Identity drift (debounced voice regeneration via dataflow)
     await _emit_memory_trigger(

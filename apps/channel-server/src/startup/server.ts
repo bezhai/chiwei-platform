@@ -8,8 +8,8 @@ import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import laneBindingsRoutes from '@api/routes/lane-bindings.route';
-import { LarkEventIngress } from '@plugins/lark/webhook/ingress';
-import { larkIngressBots } from './lark-ingress-bots';
+import '@plugins/index';
+import { registerChannelHttpIngresses } from '@plugins/runtime';
 
 /**
  * 服务器配置
@@ -68,6 +68,7 @@ export class HttpServerManager {
                         app_id:
                             (bot.credentials?.app_id as string | undefined) ??
                             undefined,
+                        common_user_id: bot.common_user_id,
                         init_type: bot.init_type,
                         is_active: bot.is_active,
                     })),
@@ -90,11 +91,12 @@ export class HttpServerManager {
         this.registerHealthCheck();
         this.app.route('', laneBindingsRoutes);
 
-        // 飞书 HTTP webhook 是被动入口，注册路由本身无副作用；实际流量是否进入
-        // channel-server 由 api-gateway / 泳道路由决定。
-        const httpBots = larkIngressBots(multiBotManager.getBotsByInitType('http'));
-        new LarkEventIngress().registerHttpBots(this.app, httpBots);
-        console.info(`[ingress] lark webhook registered ${httpBots.length} http bot(s)`);
+        // 各 channel runtime 注册自己的被动 HTTP ingress。路由注册本身无副作用；
+        // 实际流量是否进入 channel-server 由 api-gateway / 泳道路由决定。
+        await registerChannelHttpIngresses(
+            this.app,
+            multiBotManager.getBotsByInitType('http'),
+        );
 
         // 启动服务器
         Bun.serve({ port: this.config.port, fetch: this.app.fetch });

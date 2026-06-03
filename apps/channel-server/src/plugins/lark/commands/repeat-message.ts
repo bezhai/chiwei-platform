@@ -3,9 +3,10 @@ import { get, setWithExpire } from 'infrastructure/cache/redis-client';
 import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/repositories';
 import { Message } from 'core/models/message';
 import { sendSticker, replyMessage, sendPost } from '@lark/basic/message';
-import { createPostContentFromText } from '@core/services/message/post-content-processor';
+import { createPostContentFromText } from '../post-content-processor';
 import type { RuleMessage } from 'core/rules/rule-message';
 import { larkContextStore } from '../lark-context-store';
+import { renderLarkMentionText } from '../mention-renderer';
 
 interface RepeatMsg {
     chatId: string;
@@ -62,11 +63,8 @@ export async function repeatMessage(message: RuleMessage) {
 }
 
 async function repeatMessageImpl(message: Message) {
-    if (
-        message.isTextOnly() &&
-        (await addRepeatMsgAndCheck(message.chatId, message.withMentionText()))
-    ) {
-        const mentionText = message.withMentionText();
+    const mentionText = renderLarkMentionText(message);
+    if (message.isTextOnly() && (await addRepeatMsgAndCheck(message.chatId, mentionText))) {
         const postContent = await createPostContentFromText(mentionText);
         sendPost(message.chatId, postContent);
     } else if (

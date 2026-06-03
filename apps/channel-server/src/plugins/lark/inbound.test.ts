@@ -1,10 +1,25 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, mock } from 'bun:test';
 import {
     assertValidInboundMessage,
     type InboundMessage,
 } from '@core/channels/contracts';
-import { larkInbound } from './inbound';
 import type { LarkReceiveMessage } from 'types/lark';
+
+const registeredLarkBots = new Map([
+    ['on_bot1', { channel: 'lark', credentials: { app_id: 'cli_bot1' } }],
+    ['on_bot2', { channel: 'lark', credentials: { app_id: 'cli_bot2' } }],
+]);
+
+mock.module('./bot-identity', () => ({
+    getLarkBotConfigByAppId: (appId: string) =>
+        [...registeredLarkBots.values()].find((bot) => bot.credentials.app_id === appId) ?? null,
+    getLarkBotConfigByUnionId: (unionId: string) => registeredLarkBots.get(unionId) ?? null,
+    getLarkDisplayNameByAppId: (appId: string) =>
+        ({ cli_bot1: '赤尾', cli_bot2: '绫奈' })[appId] ?? null,
+    larkCredentials: (bot: { credentials: { app_id: string } }) => bot.credentials,
+}));
+
+const { larkInbound } = await import('./inbound');
 
 const LARK = 'lark';
 
@@ -107,6 +122,48 @@ describe('larkInbound.parse', () => {
             rootChannelMessageId: 'om_root',
             inThread: true,
         });
+    });
+
+    it('replaces Lark mention placeholders with display text before storage', () => {
+        const ev = groupMentionEvent(['on_bot1', 'on_bot2', 'on_human']);
+        ev.message.content = JSON.stringify({
+            text: '@_user_1 @_user_2 你们俩认识 @_user_3 么',
+        });
+        ev.message.mentions = [
+            {
+                key: '@_user_2',
+                id: { union_id: 'on_bot2' },
+                name: '天才小画家绫奈',
+                mentioned_type: 'bot',
+            },
+            {
+                key: '@_user_1',
+                id: { union_id: 'on_bot1' },
+                name: '赤尾小助手（内测版）',
+                mentioned_type: 'bot',
+            },
+            { key: '@_user_3', id: { union_id: 'on_human' }, name: '陈儒' },
+        ];
+        const msg = larkInbound.parse(ev) as InboundMessage;
+        expect(msg.content).toEqual([
+            { kind: 'text', text: '@赤尾 @绫奈 你们俩认识 @陈儒 么' },
+        ]);
+    });
+
+    it('falls back to Lark bot name for unregistered bot mentions', () => {
+        const ev = groupMentionEvent(['on_external']);
+        ev.message.mentions = [
+            {
+                key: '@_user_1',
+                id: { union_id: 'on_external' },
+                name: '外部机器人',
+                mentioned_type: 'bot',
+            },
+        ];
+        const msg = larkInbound.parse(ev) as InboundMessage;
+        expect(msg.content).toEqual([
+            { kind: 'text', text: '@外部机器人 hi' },
+        ]);
     });
 
     it('image -> image content item', () => {

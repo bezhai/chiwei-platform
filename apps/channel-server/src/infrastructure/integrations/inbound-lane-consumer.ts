@@ -53,7 +53,7 @@ export async function consumeInboundLaneEnvelope(
 // handleMessage 由调用方注入，避免本模块直接 import 飞书 handlers 把 ORM/SDK 拉进来。
 export async function startInboundLaneConsumer(
     lane: string,
-    handleMessage: (params: unknown) => Promise<void>,
+    handleEnvelope: (env: InboundLaneEnvelope) => Promise<void>,
 ): Promise<void> {
     const ch = getRabbitChannel();
     await assertInboundLaneQueue(ch, lane);
@@ -76,7 +76,7 @@ export async function startInboundLaneConsumer(
                     await context.run(
                         context.createContext(e.bot_name, e.trace_id, e.lane),
                         async () => {
-                            await handleMessage(e.params);
+                            await handleEnvelope(e);
                         },
                     );
                 },

@@ -19,25 +19,24 @@ sequenceDiagram
   participant App as ApplicationManager
   participant DB as DatabaseManager
   participant MBot as multiBotManager
-  participant Lark as LarkClients
-  participant BotInit as botInitialization
+  participant Runtime as ChannelRuntimes
   participant Cron as Crontab
   participant HTTP as HttpServerManager
 
   App->>DB: initialize()
   App->>MBot: initialize()
-  App->>Lark: initializeLarkClients()
-  App->>BotInit: botInitialization()
+  App->>Runtime: initializeChannelRuntimes()
+  App->>Runtime: runChannelInitializers()
   App->>Cron: initializeCrontabs()
   App-->>App: start()
-  App->>HTTP: start() (注册 http 路由)
-  App->>Lark: websocket 启动（按策略）
+  App->>HTTP: start() (各 channel runtime 注册 http ingress)
+  App->>Runtime: startDirectIngresses()（按 channel 策略）
 ```
 
 ## 关键职责
 
-- 初始化：数据库、多机器人管理器、Lark 客户端池
-- 启动：WebSocket 服务（按策略）、HTTP 服务（按路由配置）
+- 初始化：数据库、多机器人管理器、各 channel runtime
+- 启动：各 channel 的主动入口（按策略）、HTTP 服务（由 runtime 注册 ingress）
 - 关闭：处理 SIGINT/SIGTERM，优雅释放资源（DB/Redis 等）
 - 可观察性：打印当前加载的机器人配置与路由列表
 

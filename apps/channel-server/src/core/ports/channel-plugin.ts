@@ -23,6 +23,36 @@ export interface MessageRef {
     channelId: string;
 }
 
+export interface OutboundTargetResolveInput {
+    commonMessageId: string;
+    commonConversationId: string;
+    commonRootMessageId?: string;
+}
+
+export interface OutboundResolvedTarget {
+    message: MessageRef;
+    conversation: ConversationRef;
+    rootMessage?: MessageRef;
+}
+
+export interface CommonMessageResolveInput {
+    commonMessageId: string;
+}
+
+export interface OutboundMessageRecordInput {
+    channelMessageId: string;
+    channelConversationId: string;
+    commonConversationId: string;
+    commonRootMessageId?: string;
+    commonReplyMessageId?: string;
+    contentText: string;
+    botName: string;
+    scope: string;
+    eventTime: number;
+    messageType: string;
+    responseId?: string;
+}
+
 // 出站渲染上下文。这些不是消息「内容」(那是 ContentItem[]),而是把 content
 // 渲染成平台格式时所需的「外部引用」——它们不属于渠道内 id 命名空间,故不能塞进
 // ConversationRef/MessageRef/ThreadRef(那些只承载渠道内裸 id)。
@@ -54,6 +84,13 @@ export interface RenderContext {
 // 对象 {},逼出「这条出站到底带不带渲染上下文」的决策,堵死「忘传 ctx 导致图片/
 // mention 被静默吞掉」那类回归。ctx 字段一律平台无关命名,不出现任何平台名。
 export interface OutboundCapabilities {
+    // worker / 指令只持有 common_* 全局 id。真正调用平台 API 之前，由当前
+    // channel 插件把 common id 反查成渠道内 ref。反查失败必须 fail-loud。
+    resolveOutboundTarget(input: OutboundTargetResolveInput): Promise<OutboundResolvedTarget>;
+    resolveMessageRef(input: CommonMessageResolveInput): Promise<MessageRef>;
+    // 每条助手出站消息发送成功后，仍由当前 channel 插件记录 common_message +
+    // channel 私有映射。worker 只提交中性字段，不能直接写 lark_message / qq_message。
+    recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string>;
     // 在某会话里新发一条(承载富 Content:文本/图片/富文本等)。ctx 携带渲染所需
     // 的外部引用(图片注册表 id / mention 会话 id),无渲染数据时传空对象 {}。
     sendText(conv: ConversationRef, content: ContentItem[], ctx: RenderContext): Promise<MessageRef>;

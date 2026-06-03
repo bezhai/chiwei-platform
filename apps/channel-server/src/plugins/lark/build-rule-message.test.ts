@@ -17,7 +17,6 @@ function fakeLark(over: Partial<Record<string, unknown>> = {}): Message {
         createTime: '1700000000000',
         clearText: () => '余额',
         text: () => '余额 text',
-        withMentionText: () => '@bot 余额',
         withoutEmojiText: () => '余额',
         isTextOnly: () => true,
         isStickerOnly: () => false,
@@ -33,7 +32,8 @@ const ids = {
     commonConversationId: 'GC',
     commonMessageId: 'GM',
     commonRootMessageId: 'GR',
-    addressedTargetIds: ['bot-union-1'],
+    botCommonUserId: 'BOT-U',
+    mentionedUserIds: ['BOT-U', 'OTHER-U'],
 };
 
 describe('buildLarkRuleMessage (lark plugin)', () => {
@@ -44,7 +44,8 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         expect(rm.commonConversationId).toBe('GC');
         expect(rm.commonMessageId).toBe('GM');
         expect(rm.commonRootMessageId).toBe('GR');
-        expect(rm.addressedTargetIds).toEqual(['bot-union-1']);
+        expect(rm.botCommonUserId).toBe('BOT-U');
+        expect(rm.mentionedUserIds).toEqual(['BOT-U', 'OTHER-U']);
         // 灵魂检查：RuleMessage 不再携带任何飞书逃生口。
         expect('channelContext' in rm).toBe(false);
         // RuleMessage 与 Record<string, unknown> 无足够结构重叠，按 TS 提示经
@@ -57,7 +58,6 @@ describe('buildLarkRuleMessage (lark plugin)', () => {
         const rm = buildLarkRuleMessage(fakeLark(), ids);
         expect(rm.clearText()).toBe('余额');
         expect(rm.text()).toBe('余额 text');
-        expect(rm.withMentionText()).toBe('@bot 余额');
         expect(rm.withoutEmojiText()).toBe('余额');
         expect(rm.isTextOnly()).toBe(true);
         expect(rm.isStickerOnly()).toBe(false);

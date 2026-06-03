@@ -23,9 +23,9 @@ EXPECTED_FUNCTIONS = {
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
     "update_messages_tos_files",
-    # agent_response (4)
-    "set_agent_response_bot", "is_chat_request_completed",
-    "get_safety_status", "set_safety_status",
+    # agent_response (5)
+    "create_pending_agent_response", "set_agent_response_bot",
+    "is_chat_request_completed", "get_safety_status", "set_safety_status",
     # schedule (11)
     "find_active_schedules_for_date", "find_latest_plan", "find_plan_for_period",
     "find_daily_entries", "list_schedules", "upsert_schedule", "delete_schedule",

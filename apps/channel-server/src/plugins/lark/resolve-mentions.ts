@@ -1,6 +1,7 @@
 import AppDataSource from 'ormconfig';
 import { LarkGroupMember } from '@entities/lark-group-member';
 import { LarkUser } from '@entities/lark-user';
+import { getLarkBotMentionAliases } from './bot-identity';
 
 interface GroupMemberInfo {
     union_id: string;
@@ -24,21 +25,30 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
         .andWhere('m.is_leave = false')
         .getRawMany<GroupMemberInfo>();
 
-    // 按 name 长度降序，避免短名误匹配长名子串
+    // 按 name 长度降序，避免短名误匹配长名子串。
     members.sort((a, b) => b.name.length - a.name.length);
 
     cache.set(chatId, { members, ts: Date.now() });
     return members;
 }
 
-/**
- * 将 AI 回复中的 @用户名 替换为 <at union_id="xxx">用户名</at>
- */
-export async function resolveMentionsForGroup(
+function mentionCandidates(members: GroupMemberInfo[]): GroupMemberInfo[] {
+    const seen = new Set<string>();
+    return [...members, ...getLarkBotMentionAliases()]
+        .filter(({ union_id, name }) => {
+            const key = `${union_id}\0${name}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return name.length > 0;
+        })
+        .sort((a, b) => b.name.length - a.name.length);
+}
+
+export async function resolveLarkMentionsForGroup(
     content: string,
     chatId: string,
 ): Promise<string> {
-    const members = await getGroupMembers(chatId);
+    const members = mentionCandidates(await getGroupMembers(chatId));
     if (members.length === 0) return content;
 
     let result = content;

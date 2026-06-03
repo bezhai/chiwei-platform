@@ -7,8 +7,9 @@ import { join, relative } from 'node:path';
 // 与 --compile 单二进制零冲突)。
 //
 // 规则:src/core/** 下任何文件都不许 import 平台 SDK(飞书 @lark/* / @lark-client
-// / feishu-card / @larksuiteoapi)或任何 plugins/**。这是「平台无关核心 + 平台
-// 插件」架构的命门——#228 烂掉就是因为完全没有这道检查,飞书代码慢慢渗回核心。
+// / feishu-card / @larksuiteoapi)、飞书原生类型/实体或任何 plugins/**。这是
+// 「平台无关核心 + 平台插件」架构的命门——#228 烂掉就是因为完全没有这道检查,
+// 飞书代码慢慢渗回核心。
 //
 // BASELINE:当前(改造前)已存在的违规文件。它们在 B 阶段会被搬进 plugins/lark
 // 或改成走能力端口;在那之前先记进 baseline 容忍,但:
@@ -22,6 +23,10 @@ const FORBIDDEN = [
     /from\s+['"]@lark-client/,
     /from\s+['"]feishu-card/,
     /from\s+['"]@larksuiteoapi/,
+    /from\s+['"]types\/lark['"]/,
+    /from\s+['"]types\/mongo['"]/,
+    /from\s+['"](?:@entities\/lark-|[^'"]*\/entities\/lark-)/,
+    /import\s+\{[^}]*Lark[^}]*\}\s+from\s+['"](?:@infrastructure\/dal\/entities|infrastructure\/dal\/entities)['"]/,
     /from\s+['"][^'"]*\/plugins\//,
     /from\s+['"]@plugins\//,
 ];
@@ -33,16 +38,9 @@ const FORBIDDEN = [
 // 进 plugins/lark）、callback/* + media/meme + media/photo/*（飞书专属服务整体
 // 搬进 plugins/lark/services）。它们都已从 core 移除或脱离飞书 SDK。
 //
-// 仅剩 message-builder.ts：它被 core/models/message.ts（Message 类）import，而
-// Message 类本身是飞书强绑模型（由 LarkReceiveMessage 构造、暴露 LarkUser /
-// LarkBaseChatInfo）。要把 message-builder 移出 core，必须连同整个 Message 模型
-// 家族 + 入站 factory.ts 一起搬进 plugins/lark —— 那是一次独立的、波及 ~15 个
-// 文件和入站 parse 管线的大改（与 B3 出站 / 入站 pipeline 工作相邻），不在 B2
-// 「杀 larkMessage 旁挂 + 飞书谓词/服务归位」的范围内。诚实留在 baseline，留待
-// 后续 Message 模型家族迁移步骤清零。
-const BASELINE = new Set<string>([
-    'models/message-builder.ts',
-]);
+// B3 已清空：message-builder.ts 迁入 plugins/lark/message-factory.ts，core 下
+// 不再允许任何平台 SDK / plugins import baseline。
+const BASELINE = new Set<string>();
 
 const CORE_DIR = join(import.meta.dir);
 

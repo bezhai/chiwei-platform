@@ -6,6 +6,7 @@ import {
     CommonConversation,
     CommonMessage,
     CommonUser,
+    BotConfig,
     LarkBaseChatInfo,
     LarkMessage,
     LarkUserOpenId,
@@ -28,6 +29,10 @@ describe('common/lark layer entity metadata', () => {
         expect(tableName(CommonMessage)).toBe('common_message');
         expect(tableName(CommonAgentResponse)).toBe('common_agent_response');
         expect(tableName(CommonBotPresence)).toBe('common_bot_presence');
+    });
+
+    it('bot_config carries bot common user identity', () => {
+        expect(columnNames(BotConfig)).toContain('common_user_id');
     });
 
     it('keeps lark native mapping in lark-owned tables', () => {

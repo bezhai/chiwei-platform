@@ -18,14 +18,14 @@ const handlerCalls: Array<{ type: string; params: unknown }> = [];
 let registered: Record<string, ((p: unknown) => Promise<void>) | undefined> = {};
 type TestContext = { botName?: string; traceId?: string; lane?: string };
 let activeContext: TestContext = {};
-mock.module('@lark/events/event-registry', () => ({
+mock.module('@plugins/lark/events/event-registry', () => ({
     EventHandler: () => () => undefined,
     EventRegistry: {
         getHandlerByEventType: (t: string) => registered[t],
     },
     registerEventHandlerInstance: () => {},
 }));
-mock.module('@lark/events/handlers', () => ({
+mock.module('@plugins/lark/events/handlers', () => ({
     larkEventHandlers: {},
 }));
 mock.module('@middleware/context', () => ({

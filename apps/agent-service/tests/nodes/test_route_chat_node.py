@@ -1,4 +1,5 @@
 """route_chat_node 单元测试（Task 4-6 累积）。"""
+
 import pytest
 
 from app.domain.chat_dataflow import ChatTrigger
@@ -120,15 +121,24 @@ async def test_route_chat_node_multi_persona_regenerates_session_id(monkeypatch)
             return ["p1", "p2", "p3"]
 
     emitted: list[ChatRequest] = []
+    pending_rows: list[dict] = []
 
     async def fake_emit(data):
         emitted.append(data)
 
+    async def fake_create_pending(**kwargs):
+        pending_rows.append(kwargs)
+
     monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
     monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
     monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
+    monkeypatch.setattr(
+        chat_node_mod,
+        "create_pending_agent_response",
+        fake_create_pending,
+    )
 
-    t = ChatTrigger(message_id="m1", session_id="s1")
+    t = ChatTrigger(message_id="m1", session_id="s1", chat_id="c1", bot_name="bot-x")
     await chat_node_mod.route_chat_node(t)
 
     assert len(emitted) == 3
@@ -137,6 +147,20 @@ async def test_route_chat_node_multi_persona_regenerates_session_id(monkeypatch)
     assert emitted[1].session_id != "s1"
     assert emitted[2].session_id != "s1"
     assert emitted[1].session_id != emitted[2].session_id
+    assert pending_rows == [
+        {
+            "session_id": emitted[1].session_id,
+            "trigger_common_message_id": "m1",
+            "common_conversation_id": "c1",
+            "bot_name": "bot-x",
+        },
+        {
+            "session_id": emitted[2].session_id,
+            "trigger_common_message_id": "m1",
+            "common_conversation_id": "c1",
+            "bot_name": "bot-x",
+        },
+    ]
 
 
 @pytest.mark.asyncio

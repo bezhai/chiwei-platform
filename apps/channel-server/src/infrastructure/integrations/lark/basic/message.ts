@@ -2,7 +2,8 @@ import { ValidLarkCard } from 'feishu-card';
 import { reply, getMessageList, send } from '@lark-client';
 import { PostContent } from 'types/content-types';
 import { RateLimiter } from '@inner/shared';
-import { Message } from 'core/models/message';
+import type { Message } from 'core/models/message';
+import { createLarkMessageFromHistory } from '@plugins/lark/message-factory';
 
 export async function sendMsg(chat_id: string, message: string) {
     return send(chat_id, { text: message }, 'text');
@@ -67,7 +68,7 @@ export async function searchGroupMessage(chat_id: string, start_time: number, en
             messageList.push(
                 ...res.items
                     .filter((item) => !item.deleted && item.msg_type !== 'merge_forward')
-                    .map((item) => Message.fromHistoryMessage(item)),
+                    .map((item) => createLarkMessageFromHistory(item)),
             );
             pageToken = res?.page_token;
         }

@@ -58,6 +58,8 @@ class ParsedContent:
 
             if item_type == "text":
                 parts.append(value)
+            elif item_type == "mention":
+                parts.append(f"@{value}" if value else "")
             elif item_type == "image":
                 if image_fn:
                     parts.append(image_fn(img_idx, value))

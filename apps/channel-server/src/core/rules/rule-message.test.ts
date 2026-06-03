@@ -4,7 +4,7 @@ import type { RuleMessage } from './rule-message';
 
 // RuleMessage 是 InboundMessage 派生的**纯平台无关视图**（B2 杀掉 #228 的
 // larkMessage 旁挂之后）。它只承载平台无关字段（channel / 全局 common_*_id /
-// is_direct / 结构化 mentions / createTime / 文本&媒体工具）。任何飞书原始
+// is_direct / common mention list / bot common user id / createTime / 文本&媒体工具）。任何飞书原始
 // 对象都不在 RuleMessage 上 —— 飞书数据全部走 lark 插件私有 context store。
 
 function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
@@ -16,11 +16,11 @@ function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
         commonMessageId: 'M1',
         commonRootMessageId: undefined,
         isDirect: false,
-        addressedTargetIds: [],
+        botCommonUserId: 'BOT-U',
+        mentionedUserIds: [],
         createTime: 100,
         clearText: () => '',
         text: () => '',
-        withMentionText: () => '',
         withoutEmojiText: () => '',
         isTextOnly: () => true,
         isStickerOnly: () => false,
@@ -35,14 +35,16 @@ describe('RuleMessage platform-neutral view', () => {
         const m = neutralMsg({
             clearText: () => '余额',
             isTextOnly: () => true,
-            addressedTargetIds: ['bot-union-1'],
+            botCommonUserId: 'BOT-U',
+            mentionedUserIds: ['BOT-U', 'OTHER-U'],
             isDirect: true,
         });
         expect(m.channel).toBe('qq');
         expect(m.commonUserId).toBe('U1');
         expect(m.clearText()).toBe('余额');
         expect(m.isTextOnly()).toBe(true);
-        expect(m.addressedTargetIds).toEqual(['bot-union-1']);
+        expect(m.botCommonUserId).toBe('BOT-U');
+        expect(m.mentionedUserIds).toEqual(['BOT-U', 'OTHER-U']);
         expect(m.isDirect).toBe(true);
     });
 

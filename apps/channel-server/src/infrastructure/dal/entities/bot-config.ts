@@ -10,6 +10,12 @@ export class BotConfig {
     @Column({ type: 'varchar', length: 20, default: 'lark' })
     channel!: string;
 
+    // bot 在 common_user 里的身份。channel-server 启动加载 bot_config 时会为缺失
+    // 的 bot 分配一个 common_user_id，并在整个 channel 生命周期内通过 BotConfig
+    // 暴露。群聊 @bot 判断只比较 common user id，不再比较平台 union/open id。
+    @Column({ name: 'common_user_id', type: 'uuid', nullable: true })
+    common_user_id?: string;
+
     // 各 channel 自己的凭据结构，框架不约束 JSONB 形状（形状由各 adapter 解释）。
     //   lark: { app_id, app_secret, encrypt_key, verification_token, robot_union_id }
     //   qq:   { app_id, app_secret, bot_secret }

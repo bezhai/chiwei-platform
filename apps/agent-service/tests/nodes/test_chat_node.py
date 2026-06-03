@@ -10,7 +10,7 @@ from app.domain.chat_dataflow import ChatRequest
 def base_request():
     return ChatRequest(
         message_id="m1", persona_id="p1", session_id="s1",
-        chat_id="c1", is_p2p=True, user_id="u1", lane="dev",
+        channel="qq", chat_id="c1", is_p2p=True, user_id="u1", lane="dev",
     )
 
 
@@ -43,6 +43,7 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
         )
 
     async def fake_build_and_stream(*a, **k):
+        calls.append(("build_and_stream_channel", k.get("channel")))
         if False:
             yield ""
 
@@ -90,6 +91,7 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
     assert "find_gray_config" in names
     assert "fetch_guard_message" in names
     assert "run_pre_safety_check" in names
+    assert ("build_and_stream_channel", "qq") in calls
     assert names.index("find_message_content") < names.index("parse_content")
     assert names.index("parse_content") < names.index("run_pre_safety_check")
 

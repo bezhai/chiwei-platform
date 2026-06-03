@@ -1,150 +1,144 @@
-# Main Server (主服务)
+# Channel Server
 
-本项目为内部机器人系统的核心后端，基于 Koa.js 与 TypeScript。职责包括：
-- 处理飞书（Lark）事件回调与消息交互
-- 执行业务规则与 AI 对话流程
-- 管理持久化与缓存
-- 对外提供管理/健康检查等 HTTP 接口
+`channel-server` is the channel gateway for the bot system. It owns channel ingress,
+channel-neutral rule dispatch, common/channel message mapping, outbound delivery, recall,
+and lane routing. The HTTP server is Bun + Hono.
 
-## 架构概览
+## Responsibilities
 
-采用模块化设计，职责清晰、便于维护。
+- Receive channel events through plugin-registered HTTP or direct ingress.
+- Normalize channel payloads into common message contracts before core rule handling.
+- Publish chat triggers and consume lane envelopes through RabbitMQ.
+- Send assistant replies and recall messages through the current channel plugin capability.
+- Keep `core` channel-neutral; platform SDKs and platform payloads stay outside core.
 
-- **api**：HTTP 路由（如图片处理接口）
-- **core**：领域内的模型、规则与服务（AI对话、媒体处理）
-- **infrastructure**：底层设施（缓存、DAL、HTTP、外部集成、日志）
-- **middleware**：Koa 中间件（链路追踪、上下文注入、参数校验）
-- **startup**：应用启动/关闭编排
-- **types**：类型定义（AI、聊天、Lark、Mongo 等）
-- **utils**：工具库（状态机、文本处理、限流、SSE 客户端等）
+## Directory Shape
 
-### 系统组件关系（Mermaid）
+- `api`: HTTP routes such as health, metrics, lane binding admin, and feature routes.
+- `core`: channel-neutral contracts, rules, registries, domain models, and services.
+- `infrastructure`: storage, cache, RabbitMQ, logging, HTTP clients, and SDK integration helpers.
+- `plugins`: channel plugins and channel runtime registration.
+- `startup`: application lifecycle orchestration only.
+- `workers`: RabbitMQ consumers for chat response, recall, and async jobs.
+- `middleware`, `types`, `utils`, `config`: shared server support code.
+
+## Plugin Model
+
+There are two related plugin surfaces.
+
+`ChannelPlugin` is the core-facing capability contract:
+
+- `inbound`: verify/parse raw channel payloads into common messages.
+- `addressing`: decide whether a bot should respond.
+- `capabilities`: send, reply, recall, resolve common IDs to channel refs, and record outbound mappings.
+- `commands`: channel-specific command rules.
+- `parseCredentials`: interpret `bot_config.credentials` for that channel.
+
+`ChannelRuntime` is the startup-facing runtime contract:
+
+- `initialize`: initialize platform SDK clients or other channel runtime state.
+- `runInitializers`: run optional channel data initializers, such as Lark group sync under `NEED_INIT=true`.
+- `registerHttpIngress`: register passive HTTP webhook routes for that channel's HTTP bots.
+- `startDirectIngress`: start active ingress such as WebSocket clients for that channel's WS bots.
+- `handleInboundLaneEnvelope`: consume lane-dispatched inbound events by channel.
+- `shutdown`: close runtime-owned long-lived resources.
+
+Each channel registers both surfaces from its plugin entrypoint. Startup imports
+`@plugins/index` once and then talks only to `@plugins/runtime`.
+
+## Current Flow
 
 ```mermaid
 flowchart LR
-  subgraph Client[飞书客户端]
-    U[用户消息]
-  end
+  Platform[Channel Platform] --> Runtime[ChannelRuntime ingress]
+  Runtime --> PluginInbound[ChannelPlugin inbound]
+  PluginInbound --> Core[Core rules and common contracts]
+  Core --> MQ[RabbitMQ ChatTrigger]
+  MQ --> Agent[agent-service]
+  Agent --> OutboundWorker[chat-response-worker / recall-worker]
+  OutboundWorker --> Cap[ChannelPlugin capabilities]
+  Cap --> Platform
 
-  U -->|事件| R[Router]
-  R --> MW[Middleware]
-  MW --> RE[规则引擎]
-  RE -->|命中-聊天| AI[AI 服务 SSE]
-  RE -->|命中-图片| Media[媒体服务]
-  RE -->|命中-管理| Admin[管理/指令]
-
-  AI --> Card[卡片生命周期管理]
-  Card --> Store[Memory 持久化]
-
-  subgraph Infra[Infrastructure]
-    DB[(PostgreSQL)]
-    MG[(MongoDB)]
-    RD[(Redis)]
-    LarkSDK[Lark OpenAPI/WS]
-  end
-
-  R -.-> LarkSDK
-  RE --> DB
-  RE --> RD
-  Store --> MG
+  Runtime -. lane envelope with channel .-> Lane[Inbound lane consumer]
+  Lane --> Runtime
 ```
 
-## 启动流程
+Outbound workers do not import Lark send/delete helpers. They select the plugin by
+`payload.channel`, resolve common IDs through plugin capabilities, and let the channel
+implementation render rich content and record platform-specific mappings.
+
+Inbound lane envelopes carry `channel`. Old in-flight envelopes may omit it; the runtime
+dispatcher defaults those to `lark` so queued messages created before the channel field was
+added can still drain.
+
+## Startup Flow
 
 ```mermaid
 sequenceDiagram
   participant App as ApplicationManager
   participant DB as DatabaseManager
-  participant MBot as multiBotManager
-  participant Lark as LarkClients
-  participant BotInit as botInitialization
-  participant Cron as Crontab
+  participant Bot as multiBotManager
+  participant Runtime as ChannelRuntimes
+  participant MQ as RabbitMQ
+  participant Lane as InboundLaneConsumer
+  participant Cron as Crontabs
   participant HTTP as HttpServerManager
 
   App->>DB: initialize()
-  App->>MBot: initialize()
-  App->>Lark: initializeLarkClients()
-  App->>BotInit: botInitialization()
+  App->>Bot: initialize()
+  App->>Runtime: initialize()
+  App->>Runtime: runInitializers()
+  App->>MQ: connect() + declareTopology()
+  App->>Lane: start when DEPLOYMENT_LANE is set
+  App->>Runtime: startDirectIngress(websocket bots)
   App->>Cron: initializeCrontabs()
-  App-->>App: start()
-  App->>HTTP: start() (注册 http 路由)
-  App->>Lark: websocket 启动（按策略）
+  App->>HTTP: start()
+  HTTP->>Runtime: registerHttpIngress(http bots)
 ```
 
-## 技术栈
+`startup` should not import a concrete channel implementation. Channel-specific startup
+work belongs in the channel runtime, for example `plugins/lark/runtime.ts`.
 
-- Node.js + TypeScript + Koa.js
-- PostgreSQL（主数据）、MongoDB（消息存储）、Redis（缓存/锁/Stream）
-- TypeORM（PostgreSQL）、ioredis
-- 飞书 OpenAPI SDK（HTTP/WS）
-- Docker
+## Lark Plugin
 
-## 配置
+The current Lark plugin owns:
 
-PaaS 相关变量（PAAS_API, PAAS_TOKEN）已通过 shell 环境加载（见 ~/.zshrc）。其他关键项：
-- 数据库：POSTGRES_* / MONGO_* / REDIS_*
-- AI 服务：AI_SERVER_HOST / AI_SERVER_PORT
-- 代理/日志：PROXY_* / LOG_LEVEL 等
+- inbound parsing and addressing rules;
+- Lark-only commands and utility redirects;
+- rich text/image/mention rendering for outbound replies;
+- common-to-Lark reverse resolution and outbound message mapping;
+- Lark HTTP webhook registration, WebSocket ingress, client initialization, and group sync.
 
-## 核心流程与算法
+## Configuration
 
-### 1) 规则引擎（runRules）
-- 以数组方式维护规则集，支持同步规则（rules）与异步规则（async_rules）。所有规则通过后执行对应 handler；可通过 fallthrough 控制继续匹配。
-- 典型功能：复读检测、余额/帮助、撤回、水群统计、发图、Meme检测、AI聊天卡片回复。
+Bot configuration drives runtime selection:
 
-### 2) 聊天状态机 + SSE 流式对话
-- 有限状态：ACCEPT → START_REPLY → SEND → SUCCESS/FAILED → END。
-- SSE 客户端具备自动重连、重试、分段解析；状态机在 onMessage 中驱动回调（status/think/text），最终通过 onSaveMessage 持久化。
-- 卡片生命周期：通过 CardLifecycleManager 回调创建/更新卡片；支持失败重试（reCreateCard）。
+- `channel`: selects the plugin/runtime, such as `lark`.
+- `init_type`: selects passive HTTP ingress or direct WebSocket ingress.
+- `credentials`: opaque to core and interpreted only by the selected channel plugin.
 
-```mermaid
-stateDiagram-v2
-  [*] --> ACCEPT
-  ACCEPT --> START_REPLY
-  START_REPLY --> SEND
-  SEND --> SUCCESS
-  SEND --> FAILED
-  SUCCESS --> END
-  FAILED --> END
+Other important environment groups:
+
+- database/cache: `POSTGRES_*`, `MONGO_*`, `REDIS_*`;
+- RabbitMQ/lane routing: RabbitMQ variables plus lane binding config;
+- AI service: `AI_SERVER_HOST`, `AI_SERVER_PORT`;
+- logging/proxy: `LOG_LEVEL`, `ENABLE_FILE_LOGGING`, `LOG_DIR`, `PROXY_*`.
+
+## Boundary Notes
+
+- `core` must not import platform SDKs, platform message types, or platform DAL tables.
+- `startup` must stay channel-neutral and use `@plugins/runtime` for lifecycle work.
+- `workers` should route by channel and use `ChannelPlugin.capabilities`, not platform helpers.
+- Lark event orchestration lives under `plugins/lark/events`; low-level SDK/client helpers may
+  stay in `infrastructure`, but infra should not own plugin-specific inbound orchestration.
+- Global injection hooks registered from `plugins/lark/index.ts` remain a pluginization risk for
+  future channels because they are process-wide rather than selected per channel.
+
+## Local Commands
+
+```bash
+bun test
+bunx tsc --noEmit
 ```
 
-### 3) 水群历史卡片统计
-- 并发拉取历史消息（按时间区间切分），构建近 7 天活跃趋势与分时段柱状图；基于本周与上周的消息聚合计算龙王榜排名变化；过滤超链与 emoji 后生成词云。
-
-### 4) 复读检测
-- 文本/贴纸内容进行 MD5 哈希，按群维度在 Redis 中计数；同一内容在群内累计出现 3 次即触发复读。支持开关更新（permission_config 合并）。
-
-### 5) 通用状态机框架（可扩展）
-- 提供状态转换校验、必需处理器等待、并发转换队列、状态栈与上下文元数据，供复杂流程参考与复用。
-
-### 6) 分布式锁装饰器（RedisLock）
-- 方法装饰器形式，支持动态 key、ttl/timeout/retryInterval，释放锁使用 Lua 脚本原子化保障。
-
-## 中间件与上下文
-- traceMiddleware：生成/传递 X-Trace-Id，贯穿请求生命周期（AsyncLocalStorage）。
-- context：获取/设置 traceId、botName；HTTP 客户端与 AI SSE 请求注入头部（X-Trace-Id、X-App-Name）。
-- validation：通用校验工具（必填/类型/长度/正则/自定义），为图片处理等接口提供安全防线。
-
-## 集成与路由
-- HTTP 模式：通过 HttpRouterManager 为每个 bot 创建事件/卡片路由，适配 Koa。
-- WebSocket 模式：WebSocketManager 注册事件处理器、启动 WSClient 并注入上下文装饰器。
-- 健康检查：/api/health 返回 bot 与服务状态。
-
-## 特殊用法与约定
-- 规则划分：同步轻校验；异步外部依赖校验（如 meme）。命中控制通过 fallthrough 防重复响应。
-- 时区约定：统计统一转东八区，保持报表一致。
-- AI 服务地址：源自环境变量；SSE 失败确保 onFailed 调用并 forceEnd 状态机。
-- 资源下载权限：消息 toMarkdown 受群下载权限影响。
-- 日志与 console 覆盖：无需将 `console.*` 统一替换为 `logger.*`。当启用文件日志（`ENABLE_FILE_LOGGING=true`）且默认开启控制台重写时，系统会自动将 `console.log/info/warn/error` 代理到 winston 并注入 traceId；开发态未启用文件日志则不覆盖。详细说明见 `channel-server/src/infrastructure/logger/README.md`。
-
-## 最佳实践
-- 规则命中应单一、明确，避免过度 fallthrough。
-- 异步规则需设定超时与异常兜底，防止阻塞主流程。
-- RedisLock 合理设置 ttl/timeout；对写操作尽可能采用条件更新与幂等处理。
-- 路由与中间件顺序：trace → botContext → body parser，保证上下文与追踪一致。
-- 日志配置：设置 `LOG_LEVEL`，按需开启 `ENABLE_FILE_LOGGING` 与 `LOG_DIR`；确保 `traceMiddleware` 前置以输出正确 traceId。
-
-## 扩展指引
-- 新增规则：在 core/rules 下添加规则与 handler，并加入规则集；需要 AI 时复用 sseChat 与 onSaveMessage 钩子。
-- 扩展状态机：新增 Step 与 transitions，并按需注册 required 处理器。
-- 新报表卡片：复用并行查询与分组逻辑，结合 feishu-card 组件产出图表与表格。
+For targeted verification, prefer the package-local paths under `apps/channel-server/src`.

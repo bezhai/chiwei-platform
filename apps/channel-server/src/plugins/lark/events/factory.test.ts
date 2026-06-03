@@ -1,14 +1,8 @@
 import { describe, it, expect, mock } from 'bun:test';
 
 // Mock heavy dependencies that factory.ts imports but tests don't need
-mock.module('core/models/message', () => ({
-    Message: { fromEvent: mock() },
-}));
-mock.module('@lark/utils/mention-utils', () => ({
-    MentionUtils: {
-        addMentions: mock(() => []),
-        addMentionMap: mock(() => ({})),
-    },
+mock.module('@plugins/lark/message-factory', () => ({
+    createLarkMessageFromEvent: mock(),
 }));
 
 import { ContentType } from '@core/models/message-content';

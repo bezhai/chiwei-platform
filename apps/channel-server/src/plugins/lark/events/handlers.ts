@@ -29,25 +29,24 @@ import {
     GroupChatInfoRepository,
     UserGroupBindingRepository,
 } from 'infrastructure/dal/repositories/repositories';
-import { getBotAppId } from '@core/services/bot/bot-var';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { getChannelRegistry } from '@core/registry/channel-registry';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
-import { laneRouter } from '@infrastructure/lane-router';
 import { context } from '@middleware/context';
 import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
 import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
 import { setNx } from '@cache/redis-client';
 import { CommonBotPresence } from 'infrastructure/dal/entities/common-bot-presence';
 import { enforceDecision } from '@core/channels/contracts';
-import { getBotUnionId } from '@core/services/bot/bot-var';
+import { getCurrentLarkBotAppId, getCurrentLarkBotUnionId } from '@plugins/lark/bot-identity';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
+import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
-import { setBotMentionTargetResolver } from 'core/rules/rule';
 import {
+    claimLarkInboundMessageForBot,
     ensureLarkCommonConversation,
     prepareLarkInboundProjection,
     storeLarkInboundMessage,
@@ -71,24 +70,6 @@ async function upsertCommonBotPresence(
     );
 }
 
-// runRules 内 NeedRobotMention 谓词的 botMentionTarget 解析（飞书=robot_union_id）。
-// 飞书侧 RuleMessage.addressedTargetIds 来源与 hasMention(union_id) 同源
-// （见 buildLarkRuleMessage / plugins/lark 的 inbound），口径一致，逐场景行为零变化。
-// 非飞书消息（QQ 等）无 lark channelContext，按各自 channel 的 addressing
-// 口径——此 resolver 只对 lark 给 robot_union_id，其余给空串（group 不命中、
-// direct 仍直通，与各 channel adapter decide 一致）。
-setBotMentionTargetResolver((m) => {
-    if (m.channel !== 'lark') return '';
-    // robot_union_id 在 bot_config.credentials（T4）；getBotUnionId 读当前
-    // context bot，与现状 NeedRobotMention 同源。无 context 时给空串
-    // （group 不命中、direct 仍直通，与现状一致）。
-    try {
-        return getBotUnionId();
-    } catch {
-        return '';
-    }
-});
-
 /**
  * Lark事件处理器类
  * 使用装饰器自动注册事件处理器
@@ -110,35 +91,10 @@ export class LarkEventHandlers {
                 return;
             }
 
-            if (message.allowDownloadResource()) {
-                const toolClient = laneRouter.createClient('tool-service');
-                const botName = context.getBotName();
-                for (const imageKey of message.imageKeys()) {
-                    toolClient
-                        .post(
-                            '/api/image-pipeline/process',
-                            { message_id: message.messageId, file_key: imageKey },
-                            {
-                                headers: {
-                                    Authorization: `Bearer ${process.env.INNER_HTTP_SECRET}`,
-                                    'X-App-Name': botName,
-                                },
-                            },
-                        )
-                        .catch((err) => {
-                            console.error('Error in upload image:', err);
-                        });
-                }
-            }
-
-            // ---- 飞书 native 渠道专属副作用（保留不动，spec G）----
-            // 识图管线仍按飞书裸 message/file id 走飞书自己的管线；bot presence
-            // 必须等 common projector 产出 common_conversation_id 后写 common 表，
-            // 不能把 oc_* 暴露给 agent-service。
-
             // ---- 钉死的渠道契约链（决策五 / spec 整体分层，顺序不可调换）----
             // adapter.parse → AddressingPolicy.decide+enforceDecision(前置总闸)
             //   → lark common projector(换 common_*_id)
+            //   → lane dispatch(只有实际处理 lane 才跑渠道副作用/规则/入库/MQ)
             //   → runRules(吃平台无关 RuleMessage，单一终态出口)
             //   → storeLarkInboundMessage(写 common+lark) → 发 MQ(makeTextReply 带 common ID)
             // fail-loud（spec 5b）：契约链任一步失败 → 不写库、不发 MQ、记
@@ -149,10 +105,19 @@ export class LarkEventHandlers {
             // 静默吞——getChannelRegistry().get() 对未注册 channel 抛错。
             const botConfig = botName ? multiBotManager.getBotConfig(botName) : null;
             let plugin;
+            let botCommonUserId: string;
             try {
                 if (!botConfig) {
                     throw new Error(`bot config not found for "${botName}"`);
                 }
+                const id = botConfig.common_user_id;
+                if (!id) {
+                    throw new Error(
+                        `bot "${botName}" has no common_user_id; bot identity ` +
+                            'initialization must run before inbound handling',
+                    );
+                }
+                botCommonUserId = id;
                 plugin = getChannelRegistry().get(botConfig.channel);
             } catch (resolveErr) {
                 console.error(
@@ -173,7 +138,7 @@ export class LarkEventHandlers {
                 );
                 return;
             }
-            const decision = plugin.addressing.decide(inbound, getBotUnionId());
+            const decision = plugin.addressing.decide(inbound, getCurrentLarkBotUnionId());
             enforceDecision(decision, (reason) =>
                 console.info(
                     `[inbound] addressing front-gate respond=false: ` +
@@ -186,11 +151,6 @@ export class LarkEventHandlers {
             // 的 orphan common_message。
             await withLarkInboundProjectionLock(params.message.message_id, async () => {
                 const projection = await prepareLarkInboundProjection(params, message, inbound);
-                upsertCommonBotPresence(
-                    projection.commonConversationId,
-                    context.getBotName(),
-                    true,
-                ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
 
                 // ---- 处理层泳道分流决策点（lane-routing-redesign §3.1）----
                 // 全局 ID 就绪后、派生 RuleMessage / 入库 / 发 MQ 之前：按统一概念
@@ -214,6 +174,19 @@ export class LarkEventHandlers {
                     return;
                 }
 
+                // ---- 飞书 native 渠道专属副作用（仅在实际处理 lane 执行）----
+                // prod 入口若已分流到 inbound_lane.{lane}，不能先触发识图管线或
+                // common_bot_presence 写入；目标 lane 消费信封后会在本分支执行。
+                // 识图管线仍按飞书裸 message/file id 走飞书自己的管线；bot presence
+                // 等 common projector 产出 common_conversation_id 后写 common 表，
+                // 不能把 oc_* 暴露给 agent-service。
+                upsertCommonBotPresence(
+                    projection.commonConversationId,
+                    context.getBotName(),
+                    true,
+                ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
+                enqueueLarkImagePipeline(message, botName);
+
                 // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
                 // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage
                 // 把飞书 Message put 进 lark 私有 store（key=全局 commonMessageId），
@@ -224,9 +197,8 @@ export class LarkEventHandlers {
                     commonConversationId: projection.commonConversationId,
                     commonMessageId: projection.commonMessageId,
                     commonRootMessageId: projection.commonRootMessageId,
-                    // addressedTargetIds 与 hasMention(union_id) 同源
-                    // （plugins/lark inbound 的 addressing_hints[].targetId = union_id）。
-                    addressedTargetIds: inbound.addressing_hints.map((h) => h.targetId),
+                    botCommonUserId,
+                    mentionedUserIds: projection.mentionedUserIds,
                 });
 
                 // 本条消息处理结束（无论命中哪条退出路径）后，clear lark store entry，
@@ -292,6 +264,17 @@ export class LarkEventHandlers {
                             );
                             return;
                         }
+                        if (!botName) {
+                            throw new Error(
+                                `cannot claim common message ${projection.commonMessageId}: ` +
+                                    'botName missing from context',
+                            );
+                        }
+                        await claimLarkInboundMessageForBot({
+                            commonMessageId: projection.commonMessageId,
+                            botName,
+                            commonUserId: projection.commonUserId,
+                        });
                         // 抢到锁才落 common_agent_response pending 行（必改2）：未抢锁的
                         // bot 已在上面 return，不会到这里 → 不留永不完成的孤儿行。
                         await savePending();
@@ -376,7 +359,7 @@ export class LarkEventHandlers {
         const openIds: LarkUserOpenId[] =
             data.users?.map((user) => {
                 return {
-                    appId: getBotAppId(),
+                    appId: getCurrentLarkBotAppId(),
                     openId: user.user_id?.open_id!,
                     unionId: user.user_id?.union_id!,
                     name: user.name!,

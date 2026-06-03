@@ -15,7 +15,7 @@ import type { ConversationRef, MessageRef } from '@core/ports/channel-plugin';
 //   part 0 + proactive + 无 root     → sendText(chat)
 //   part >0                          → sendText(chat)
 // 且 content 是 AI 原始 markdown 文本、ctx 带 imageRegistryId（全局 id）+
-// larkChatId（飞书裸 chatId）+ resolveMentions（群=true / p2p=false）。
+// groupConversationId（渠道裸群会话 id）+ resolveMentions（群=true / p2p=false）。
 
 function makeCap(): {
     cap: OutboundCapabilities;
@@ -29,6 +29,15 @@ function makeCap(): {
         sendText: [] as Array<{ conv: ConversationRef; content: ContentItem[]; ctx: RenderContext }>,
     };
     const cap: OutboundCapabilities = {
+        async resolveOutboundTarget() {
+            throw new Error('not used');
+        },
+        async resolveMessageRef() {
+            throw new Error('not used');
+        },
+        async recordOutboundMessage() {
+            throw new Error('not used');
+        },
         async reply(thread, content, ctx): Promise<MessageRef> {
             calls.reply.push({ thread, content, ctx });
             return { channelId: 'new_reply_id' };
@@ -43,9 +52,9 @@ function makeCap(): {
 
 const baseInput = {
     content: '赤尾的回复 ![p](1.png)',
-    larkMessageId: 'om_trigger',
-    larkChatId: 'oc_chat',
-    larkRootId: 'om_root' as string | undefined,
+    channelMessageId: 'om_trigger',
+    channelConversationId: 'oc_chat',
+    channelRootMessageId: 'om_root' as string | undefined,
     imageRegistryId: 'global_msg_ulid',
     isP2p: false,
 };
@@ -65,7 +74,7 @@ describe('dispatchChatResponseOutbound', () => {
         expect(calls.reply[0].thread.inThread).toBeUndefined();
         // content = AI 原始 markdown（飞书化由能力端口内部做）
         expect(calls.reply[0].content).toEqual([{ kind: 'text', text: '赤尾的回复 ![p](1.png)' }]);
-        // ctx：registry 用全局 id；groupConversationId 飞书裸；群聊 resolveMentions=true
+        // ctx：registry 用全局 id；groupConversationId 渠道裸；群聊 resolveMentions=true
         expect(calls.reply[0].ctx).toEqual({
             imageRegistryId: 'global_msg_ulid',
             groupConversationId: 'oc_chat',
@@ -92,7 +101,7 @@ describe('dispatchChatResponseOutbound', () => {
         const { cap, calls } = makeCap();
         await dispatchChatResponseOutbound(cap, {
             ...baseInput,
-            larkRootId: undefined,
+            channelRootMessageId: undefined,
             partIndex: 0,
             isProactive: true,
         });

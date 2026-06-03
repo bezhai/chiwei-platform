@@ -10,9 +10,14 @@ import { LarkMessage } from '@entities/lark-message';
 import { LarkUserOpenId } from '@entities/lark-user-open-id';
 import { context } from '@middleware/context';
 import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
-import { getBotAppId } from '@core/services/bot/bot-var';
+import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { evalScript, setNx } from '@cache/redis-client';
-import type { LarkReceiveMessage } from 'types/lark';
+import type { LarkMention, LarkReceiveMessage } from 'types/lark';
+import {
+    getCurrentLarkBotAppId,
+    getLarkBotConfigByAppId,
+    getLarkBotConfigByUnionId,
+} from './bot-identity';
 
 interface EnsureCommonUserInput {
     appId: string;
@@ -37,6 +42,7 @@ export interface LarkInboundProjection {
     commonMessageId: string;
     commonRootMessageId: string | undefined;
     commonReplyMessageId: string | undefined;
+    mentionedUserIds: string[];
     content: ContentItem[];
     contentText: string | undefined;
     scope: string;
@@ -105,15 +111,34 @@ async function ensureCommonUser(input: EnsureCommonUserInput): Promise<string> {
     const existing = await larkUserRepo.findOne({
         where: { appId: input.appId, openId: input.openId },
     });
-    if (existing?.commonUserId) {
-        await larkUserRepo.update(
-            { appId: input.appId, openId: input.openId },
+
+    const existingByUnionId = input.unionId
+        ? await larkUserRepo.findOne({
+              where: { unionId: input.unionId },
+              order: { commonUserId: 'ASC' },
+          })
+        : null;
+    const canonicalCommonUserId = existingByUnionId?.commonUserId ?? existing?.commonUserId;
+    if (canonicalCommonUserId) {
+        await AppDataSource.getRepository(CommonUser).upsert(
             {
-                unionId: input.unionId ?? existing.unionId,
-                name: input.displayName ?? existing.name,
+                common_user_id: canonicalCommonUserId,
+                channel: 'lark',
+                display_name: input.displayName,
             },
+            ['common_user_id'],
         );
-        return existing.commonUserId;
+        await larkUserRepo.upsert(
+            {
+                appId: input.appId,
+                openId: input.openId,
+                unionId: input.unionId ?? existing?.unionId,
+                name: input.displayName ?? existing?.name ?? '',
+                commonUserId: canonicalCommonUserId,
+            },
+            ['appId', 'openId'],
+        );
+        return canonicalCommonUserId;
     }
 
     const commonUserId = uuidv7();
@@ -140,6 +165,53 @@ async function ensureCommonUser(input: EnsureCommonUserInput): Promise<string> {
         where: { appId: input.appId, openId: input.openId },
     });
     return linked.commonUserId ?? commonUserId;
+}
+
+function commonUserIdForRegisteredBot(mention: LarkMention): string | undefined {
+    const byAppId = mention.bot_info?.app_id
+        ? getLarkBotConfigByAppId(mention.bot_info.app_id)
+        : null;
+    const byUnionId = mention.id.union_id ? getLarkBotConfigByUnionId(mention.id.union_id) : null;
+    const bot = byAppId ?? byUnionId;
+    if (!bot) return undefined;
+    if (!bot.common_user_id) {
+        throw new Error(
+            `registered bot mention "${bot.bot_name}" has no common_user_id; ` +
+                'bot identity initialization must run before Lark mention projection',
+        );
+    }
+    return bot.common_user_id;
+}
+
+export async function projectLarkMentionedCommonUserIds(
+    appId: string,
+    mentions: LarkMention[],
+): Promise<string[]> {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const mention of mentions) {
+        let commonUserId = commonUserIdForRegisteredBot(mention);
+        if (!commonUserId) {
+            const openId = mention.id.open_id;
+            if (!openId) {
+                throw new Error(
+                    `lark mention "${mention.name}" has no open_id and is not a ` +
+                        'registered bot; cannot map mention to common_user',
+                );
+            }
+            commonUserId = await ensureCommonUser({
+                appId,
+                openId,
+                unionId: mention.id.union_id,
+                displayName: mention.name,
+            });
+        }
+        if (!seen.has(commonUserId)) {
+            seen.add(commonUserId);
+            out.push(commonUserId);
+        }
+    }
+    return out;
 }
 
 export async function ensureLarkCommonConversation(
@@ -228,7 +300,7 @@ export async function prepareLarkInboundProjection(
     message: Message,
     inbound: InboundMessage,
 ): Promise<LarkInboundProjection> {
-    const appId = event.app_id || getBotAppId();
+    const appId = event.app_id || getCurrentLarkBotAppId();
     const openId = event.sender.sender_id?.open_id;
     if (!openId) {
         throw new Error('lark inbound sender open_id missing; cannot map common_user');
@@ -240,6 +312,10 @@ export async function prepareLarkInboundProjection(
         unionId: event.sender.sender_id?.union_id,
         displayName: message.senderInfo?.name,
     });
+    const mentionedUserIds = await projectLarkMentionedCommonUserIds(
+        appId,
+        event.message.mentions ?? [],
+    );
 
     const commonConversationId = await ensureLarkCommonConversation({
         chatId: event.message.chat_id,
@@ -275,6 +351,7 @@ export async function prepareLarkInboundProjection(
         commonMessageId,
         commonRootMessageId,
         commonReplyMessageId,
+        mentionedUserIds,
         content: inbound.content,
         contentText: textProjection(inbound.content),
         scope: inbound.conversation_scope,
@@ -367,6 +444,29 @@ export async function storeLarkInboundMessage(
     }
 }
 
+export async function claimLarkInboundMessageForBot(input: {
+    commonMessageId: string;
+    botName: string;
+    commonUserId: string;
+}): Promise<void> {
+    const result = await AppDataSource.getRepository(CommonMessage).update(
+        {
+            common_message_id: input.commonMessageId,
+            role: 'user',
+        },
+        {
+            bot_name: input.botName,
+            common_user_id: input.commonUserId,
+        },
+    );
+    if (!result.affected) {
+        throw new Error(
+            `common user message ${input.commonMessageId} not found; ` +
+                `cannot claim bot_name=${input.botName}`,
+        );
+    }
+}
+
 export interface StoreLarkOutboundMessageInput {
     omId: string;
     chatId: string;
@@ -387,6 +487,7 @@ export async function storeLarkOutboundMessage(
 ): Promise<string> {
     const existing = await findCommonMessageIdByOmId(input.omId);
     const commonMessageId = existing ?? uuidv7();
+    const botCommonUserId = multiBotManager.getBotCommonUserId(input.botName);
     let inserted = false;
 
     await AppDataSource.transaction(async (manager) => {
@@ -398,7 +499,7 @@ export async function storeLarkOutboundMessage(
                 common_message_id: commonMessageId,
                 channel: 'lark',
                 common_conversation_id: input.commonConversationId,
-                common_user_id: undefined,
+                common_user_id: botCommonUserId,
                 sender_display_name: input.senderDisplayName,
                 role: 'assistant',
                 content: [{ kind: 'text', text: input.contentText }],

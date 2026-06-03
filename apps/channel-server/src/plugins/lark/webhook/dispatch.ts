@@ -11,8 +11,8 @@ import { context } from '@middleware/context';
 import {
     EventRegistry,
     registerEventHandlerInstance,
-} from '@lark/events/event-registry';
-import { larkEventHandlers } from '@lark/events/handlers';
+} from '@plugins/lark/events/event-registry';
+import { larkEventHandlers } from '@plugins/lark/events/handlers';
 
 let handlersInitialized = false;
 function ensureHandlersInitialized(): void {

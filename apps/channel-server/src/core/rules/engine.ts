@@ -9,22 +9,36 @@ import type { ChatRequestPayload } from 'core/services/ai/reply';
 // ---- utility-redirect 提示的平台无关注入点（B2）----
 // persona bot 被 @ 却命中 utility 指令时，给用户发"工具类功能已迁移"引导。
 // 这个引导消息怎么发是平台专属（飞书发飞书卡片回复、QQ 发 QQ 消息），engine
-// 不认识任何平台 SDK：它只调用注入的 responder。默认实现是 no-op（仅记日志），
-// 各 channel 插件在 import 期 setUtilityRedirectResponder 注册自己的真实发法。
+// 不认识任何平台 SDK：它只按消息 channel 调用已注册 responder。默认实现是
+// no-op（仅记日志），各 channel 插件在 import 期注册自己的真实发法。
 // responder 拿到的是平台无关 RuleMessage —— 飞书插件内部按 commonMessageId
 // 从 lark 私有 store 取回飞书 Message 发回复（core 看不到飞书对象）。
 export type UtilityRedirectResponder = (message: RuleMessage) => void;
 
-let utilityRedirectResponder: UtilityRedirectResponder = (message) => {
+const neutralUtilityRedirectResponder: UtilityRedirectResponder = (message) => {
     console.info(
         `[runRules] utility-redirect hint skipped (no responder registered for ` +
             `channel=${message.channel}, message=${message.commonMessageId})`,
     );
 };
 
-// channel 插件 import 期注入"按本平台发 utility-redirect 引导"的实现。
-export function setUtilityRedirectResponder(fn: UtilityRedirectResponder): void {
-    utilityRedirectResponder = fn;
+const utilityRedirectResponders = new Map<string, UtilityRedirectResponder>();
+
+// channel 插件 import 期注册"按本平台发 utility-redirect 引导"的实现。
+export function registerUtilityRedirectResponder(
+    channel: string,
+    fn: UtilityRedirectResponder,
+): void {
+    utilityRedirectResponders.set(channel, fn);
+}
+
+// 测试钩子：清空注册表，避免跨用例污染。
+export function resetUtilityRedirectResponders(): void {
+    utilityRedirectResponders.clear();
+}
+
+function utilityRedirectResponderFor(channel: string): UtilityRedirectResponder {
+    return utilityRedirectResponders.get(channel) ?? neutralUtilityRedirectResponder;
 }
 
 // ---- 决策四：单一终态出口 ----
@@ -194,9 +208,9 @@ export async function runRulesWith(
             if (deps.botRole === 'persona' && NeedRobotMention(message)) {
                 // persona bot 被 @ 但命中 utility 规则 → 引导申请工具 bot。
                 // 这是一个明确"响应了什么"的终态（发了引导消息），不是静默。
-                // 怎么发由 channel 插件注入的 responder 决定（engine 不碰平台 SDK）。
+                // 怎么发由 channel 插件注册的 responder 决定（engine 不碰平台 SDK）。
                 try {
-                    utilityRedirectResponder(message);
+                    utilityRedirectResponderFor(message.channel)(message);
                 } catch (e) {
                     // 引导消息本身失败也必须收敛到可查终态，不静默吞。
                     return {
@@ -215,9 +229,7 @@ export async function runRulesWith(
                 };
             }
             // utility bot 跳过 persona 规则 / 非 @ 的 utility：跳过（留痕）。
-            skipped.push(
-                `${label} (botRole=${deps.botRole} != category=${category})`,
-            );
+            skipped.push(`${label} (botRole=${deps.botRole} != category=${category})`);
             if (!fallthrough) {
                 return { ...base, kind: 'no_match', skipped };
             }

@@ -8,10 +8,10 @@
 import { sendPost, replyPost } from '@lark/basic/message';
 import { uploadImage, deleteMessage } from '@lark-client';
 import { hgetall } from '@cache/redis-client';
-import { resolveMentionsForGroup } from '@core/services/message/resolve-mentions';
 import { Readable } from 'node:stream';
 import type { PostContent } from 'types/content-types';
 import type { LarkOutboundDeps } from './outbound-capabilities';
+import { resolveLarkMentionsForGroup } from './resolve-mentions';
 
 export const defaultLarkOutboundDeps: LarkOutboundDeps = {
     async send(chatId: string, content: PostContent) {
@@ -34,7 +34,7 @@ export const defaultLarkOutboundDeps: LarkOutboundDeps = {
         return hgetall(key);
     },
     async resolveMentionsForGroup(content: string, chatId: string) {
-        return resolveMentionsForGroup(content, chatId);
+        return resolveLarkMentionsForGroup(content, chatId);
     },
     async fetchImage(url: string) {
         const response = await fetch(url);

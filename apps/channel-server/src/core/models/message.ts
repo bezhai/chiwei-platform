@@ -1,10 +1,10 @@
-import type { LarkReceiveMessage, LarkHistoryMessage } from 'types/lark';
-import { LarkMessageMetaInfo } from 'types/mongo';
-import { LarkBaseChatInfo, LarkUser } from 'infrastructure/dal/entities';
-import { getBotAppId } from '@core/services/bot/bot-var';
-import { MessageMetadata, MessageMetadataUtils } from './message-metadata';
-import { ContentType, MessageContent, MessageContentUtils } from './message-content';
-import { MessageBuilder } from './message-builder';
+import {
+    MessageMetadata,
+    MessageMetadataUtils,
+    type MessageBasicChatInfo,
+    type MessageSenderInfo,
+} from './message-metadata';
+import { type ContentItem, MessageContent, MessageContentUtils } from './message-content';
 
 export class Message {
     private metadata: MessageMetadata;
@@ -13,29 +13,6 @@ export class Message {
     constructor(metadata: MessageMetadata, content: MessageContent) {
         this.metadata = metadata;
         this.content = content;
-    }
-
-    // Factory methods
-    static async fromEvent(event: LarkReceiveMessage, content: MessageContent): Promise<Message> {
-        const metadata = await MessageBuilder.buildMetadataFromEvent(event);
-        return new Message(metadata, content);
-    }
-
-    static async fromMessage(message: LarkMessageMetaInfo): Promise<Message> {
-        const metadata = MessageBuilder.buildMetadataFromInfo(message);
-        const content = MessageBuilder.buildContentFromInfo(message);
-
-        // const mentionMap =
-        //     content.mentions.length > 0 ? await batchGetUserName(content.mentions) : undefined;
-        // content.mentionMap = mentionMap;
-
-        return new Message(metadata, content);
-    }
-
-    static fromHistoryMessage(message: LarkHistoryMessage): Message {
-        const metadata = MessageBuilder.buildMetadataFromHistory(message);
-        const content = MessageBuilder.buildContentFromHistory(message);
-        return new Message(metadata, content);
     }
 
     // Metadata accessors
@@ -83,7 +60,7 @@ export class Message {
         return this.metadata.messageType;
     }
 
-    get basicChatInfo(): LarkBaseChatInfo | undefined {
+    get basicChatInfo(): MessageBasicChatInfo | undefined {
         return this.metadata.basicChatInfo;
     }
 
@@ -91,7 +68,7 @@ export class Message {
         return this.metadata.groupChatInfo;
     }
 
-    get senderInfo(): LarkUser | undefined {
+    get senderInfo(): MessageSenderInfo | undefined {
         return this.metadata.senderInfo;
     }
 
@@ -120,10 +97,6 @@ export class Message {
         return MessageContentUtils.withoutEmojiText(this.content);
     }
 
-    withMentionText(): string {
-        return MessageContentUtils.withMentionText(this.content);
-    }
-
     imageKeys(): string[] {
         return MessageContentUtils.imageKeys(this.content);
     }
@@ -140,31 +113,23 @@ export class Message {
         return MessageContentUtils.isStickerOnly(this.content);
     }
 
-    hasMention(openId: string): boolean {
-        return this.content.mentions.includes(openId);
+    hasMention(mentionId: string): boolean {
+        return this.content.mentions.some((mention) => mention.id === mentionId);
     }
 
     getMentionedUsers(): string[] {
-        return this.content.mentions;
+        return this.content.mentions.map((mention) => mention.id);
     }
 
     /**
      * 从 mention 列表中找到第一个真实用户（排除所有 bot mention）
-     * bot mention 在 mentionMap 中有 appId 字段，user mention 没有
      */
     getFirstMentionedHuman(): string | undefined {
-        return this.content.mentions.find((unionId) => {
-            const info = this.content.mentionMap?.[unionId];
-            return info && !info.appId;
-        });
+        return this.content.mentions.find((mention) => !mention.botCommonUserId)?.id;
     }
 
-    getBotAppIds(): string[] {
-        return this.content.botAppIds || [];
-    }
-
-    hasBotMention(appId: string): boolean {
-        return this.getBotAppIds().includes(appId);
+    contentItems(): readonly ContentItem[] {
+        return this.content.items;
     }
 
     // For debugging
@@ -179,13 +144,11 @@ export class Message {
         return MessageContentUtils.toMarkdown(this.content, this.allowDownloadResource());
     }
 
-    toStorageFormat(): string {
-        const currentAppId = getBotAppId();
+    toStorageFormat(excludeBotCommonUserId?: string): string {
         const mentions = this.content.mentions
-            .map((unionId) => {
-                const info = this.content.mentionMap?.[unionId];
-                if (!info || info.appId === currentAppId) return null;
-                return { user_id: info.openId, name: info.name };
+            .map((mention) => {
+                if (mention.botCommonUserId === excludeBotCommonUserId) return null;
+                return { user_id: mention.id, name: mention.displayName };
             })
             .filter((m): m is NonNullable<typeof m> => m !== null);
 
@@ -194,10 +157,7 @@ export class Message {
             text: this.toMarkdown(),
             items: this.content.items.map((item) => ({
                 type: item.type,
-                value:
-                    item.type === ContentType.Text
-                        ? MessageContentUtils.resolveMentions(item.value, this.content)
-                        : item.value,
+                value: item.value,
                 ...(item.meta ? { meta: item.meta } : {}),
             })),
             ...(mentions.length > 0 ? { mentions } : {}),

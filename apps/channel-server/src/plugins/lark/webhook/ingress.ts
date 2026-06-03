@@ -12,7 +12,7 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import type { Hono } from 'hono';
 import { BotConfig } from '@entities/bot-config';
-import { larkCredentials, type LarkCredentials } from '@core/services/bot/lark-credentials';
+import { larkCredentials, type LarkCredentials } from '../bot-identity';
 import { adaptHono } from './lark-adapter';
 import { dispatchLarkEvent } from './dispatch';
 

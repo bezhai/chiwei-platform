@@ -9,7 +9,7 @@
 用于将类方法标记为某个（或多个）事件类型的处理器，自动完成事件类型与处理函数的关联。
 
 ```typescript
-// src/services/lark/events/handlers.ts
+// src/plugins/lark/events/handlers.ts
 import { EventHandler } from '../../../utils/bot/event-handler.decorator';
 
 export class LarkEventHandlers {
@@ -22,7 +22,7 @@ export class LarkEventHandlers {
 
 ### LarkEventHandlers
 
-集中维护所有事件处理方法（文件：src/services/lark/events/handlers.ts）。每个方法通过 @EventHandler 进行声明式注册。
+集中维护所有事件处理方法（文件：src/plugins/lark/events/handlers.ts）。每个方法通过 @EventHandler 进行声明式注册。
 
 ### 注册与分发
 

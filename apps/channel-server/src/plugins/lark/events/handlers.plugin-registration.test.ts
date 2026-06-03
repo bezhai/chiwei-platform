@@ -4,9 +4,9 @@ import { describe, it, expect, mock } from 'bun:test';
 // .get(bot.channel) 取插件来 parse/decide。插件靠 import 期自注册；若 HTTP
 // 入站链路没有任何地方 import '@plugins/index'，lark 插件就不会注册，handlers 取插件时
 // fail-closed 抛错 → 每条入站消息被丢。worker 各自 import 了 @plugins/index，
-// 但 HTTP 服务入口（index.ts → application → internal-lark.route → handlers）
-// 之前并不导入它。本测试钉死：import handlers 这条 HTTP 入站模块后，lark
-// 插件必须已在 ChannelRegistry 注册（即 handlers 模块图把自注册副作用拉进来）。
+// 但 HTTP 服务入口（index.ts → application → lark runtime/webhook → handlers）
+// 之前并不导入它。本测试钉死：import handlers 这条 Lark 插件入站模块后，lark
+// 插件必须已在 ChannelRegistry 注册（即插件事件模块图把自注册副作用拉进来）。
 
 mock.module('@aliyun/oss', () => ({
     getOss: () => ({ getFile: mock(async () => undefined) }),
