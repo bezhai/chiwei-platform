@@ -1,6 +1,7 @@
 import AppDataSource from 'ormconfig';
 import { LarkGroupMember } from '@entities/lark-group-member';
 import { LarkUser } from '@entities/lark-user';
+import { getLarkBotMentionAliases } from './bot-identity';
 
 interface GroupMemberInfo {
     union_id: string;
@@ -31,11 +32,23 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
     return members;
 }
 
+function mentionCandidates(members: GroupMemberInfo[]): GroupMemberInfo[] {
+    const seen = new Set<string>();
+    return [...members, ...getLarkBotMentionAliases()]
+        .filter(({ union_id, name }) => {
+            const key = `${union_id}\0${name}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return name.length > 0;
+        })
+        .sort((a, b) => b.name.length - a.name.length);
+}
+
 export async function resolveLarkMentionsForGroup(
     content: string,
     chatId: string,
 ): Promise<string> {
-    const members = await getGroupMembers(chatId);
+    const members = mentionCandidates(await getGroupMembers(chatId));
     if (members.length === 0) return content;
 
     let result = content;

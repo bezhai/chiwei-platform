@@ -124,6 +124,19 @@ export function getLarkDisplayNameByAppId(appId: string): string | null {
     return appIdToDisplayName.get(appId) ?? null;
 }
 
+export function getLarkBotMentionAliases(): Array<{ union_id: string; name: string }> {
+    return multiBotManager
+        .getAllBotConfigs()
+        .filter((bot) => bot.channel === LARK_CHANNEL)
+        .map((bot) => {
+            const credentials = larkCredentials(bot);
+            const displayName = getLarkDisplayNameByAppId(credentials.app_id);
+            if (!displayName) return null;
+            return { union_id: credentials.robot_union_id, name: displayName };
+        })
+        .filter((alias): alias is { union_id: string; name: string } => alias !== null);
+}
+
 export function resetLarkDisplayNames(): void {
     appIdToDisplayName.clear();
 }
