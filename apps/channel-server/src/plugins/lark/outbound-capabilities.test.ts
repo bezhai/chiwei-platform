@@ -100,11 +100,8 @@ describe('lark OutboundCapabilities', () => {
             });
 
             expect(calls.mentionResolved).toEqual([{ content: '喂 @小明 在吗', chatId: 'oc_group' }]);
-            expect(calls.replied[0].content.content[0]).toEqual([
-                { tag: 'md', text: '喂 ' },
-                { tag: 'at', user_id: 'u_xiaoming' },
-                { tag: 'md', text: ' 在吗' },
-            ]);
+            const md = (calls.replied[0].content.content.flat()[0] as { tag: string; text: string });
+            expect(md.text).toContain('<at user_id="u_xiaoming">小明</at>');
         });
 
         it('p2p 回复（resolveMentions=false）：不调 resolveMentionsForGroup', async () => {

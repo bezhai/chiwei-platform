@@ -3,7 +3,7 @@ import { LarkGroupMember } from '@entities/lark-group-member';
 import { LarkUser } from '@entities/lark-user';
 
 interface GroupMemberInfo {
-    user_id: string;
+    union_id: string;
     name: string;
 }
 
@@ -19,7 +19,7 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
     const members = await AppDataSource.getRepository(LarkGroupMember)
         .createQueryBuilder('m')
         .innerJoin(LarkUser, 'u', 'u.union_id = m.union_id')
-        .select(['m.union_id AS user_id', 'u.name AS name'])
+        .select(['m.union_id AS union_id', 'u.name AS name'])
         .where('m.chat_id = :chatId', { chatId })
         .andWhere('m.is_leave = false')
         .getRawMany<GroupMemberInfo>();
@@ -39,8 +39,8 @@ export async function resolveLarkMentionsForGroup(
     if (members.length === 0) return content;
 
     let result = content;
-    for (const { user_id, name } of members) {
-        result = result.replaceAll(`@${name}`, `<at user_id="${user_id}"></at>`);
+    for (const { union_id, name } of members) {
+        result = result.replaceAll(`@${name}`, `<at user_id="${union_id}">${name}</at>`);
     }
     return result;
 }

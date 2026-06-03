@@ -2,8 +2,6 @@ import { PostContent } from 'types/content-types';
 import { PostNode, TextPostNode, AtPostNode, EmotionNode, MdPostNode, ImgPostNode } from 'types/post-node-types';
 import { emojiService } from 'infrastructure/crontab/services/emoji';
 
-const AT_PATTERN = /<at user_id="([^"]+)">[\s\S]*?<\/at>/g;
-
 /**
  * 从文本中提取形如 [xxx] 的子串
  */
@@ -25,11 +23,12 @@ function extractEmojiTexts(text: string): string[] {
 function processTextSegment(text: string): PostNode[] {
     const nodes: PostNode[] = [];
 
+    // 正则表达式匹配 <at user_id="xxx"></at> 格式
+    const atRegex = /<at user_id="([^"]+)"><\/at>/g;
     let lastIndex = 0;
     let match;
-    AT_PATTERN.lastIndex = 0;
 
-    while ((match = AT_PATTERN.exec(text)) !== null) {
+    while ((match = atRegex.exec(text)) !== null) {
         // 添加 @ 符号前的文本
         if (match.index > lastIndex) {
             const textBefore = text.substring(lastIndex, match.index);
@@ -62,36 +61,6 @@ function processTextSegment(text: string): PostNode[] {
     }
 
     return nodes;
-}
-
-function processMarkdownSegment(text: string): PostNode[] {
-    const trimmed = text.trim();
-    if (!trimmed) return [];
-
-    const nodes: PostNode[] = [];
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    AT_PATTERN.lastIndex = 0;
-
-    while ((match = AT_PATTERN.exec(trimmed)) !== null) {
-        if (match.index > lastIndex) {
-            const before = trimmed.substring(lastIndex, match.index);
-            if (before) {
-                nodes.push({ tag: 'md', text: before } as MdPostNode);
-            }
-        }
-        nodes.push({ tag: 'at', user_id: match[1] } as AtPostNode);
-        lastIndex = match.index + match[0].length;
-    }
-
-    if (lastIndex < trimmed.length) {
-        const remaining = trimmed.substring(lastIndex);
-        if (remaining) {
-            nodes.push({ tag: 'md', text: remaining } as MdPostNode);
-        }
-    }
-
-    return nodes.length > 0 ? nodes : [{ tag: 'md', text: trimmed } as MdPostNode];
 }
 
 /**
@@ -176,9 +145,9 @@ export function markdownToPostContent(markdown: string): PostContent {
 
     while ((match = IMAGE_PATTERN.exec(markdown)) !== null) {
         if (match.index > lastIndex) {
-            const nodes = processMarkdownSegment(markdown.slice(lastIndex, match.index));
-            if (nodes.length > 0) {
-                content.push(nodes);
+            const text = markdown.slice(lastIndex, match.index).trim();
+            if (text) {
+                content.push([{ tag: 'md', text } as MdPostNode]);
             }
         }
         lastIndex = match.index + match[0].length;
@@ -196,9 +165,9 @@ export function markdownToPostContent(markdown: string): PostContent {
     }
 
     if (lastIndex < markdown.length) {
-        const nodes = processMarkdownSegment(markdown.slice(lastIndex));
-        if (nodes.length > 0) {
-            content.push(nodes);
+        const text = markdown.slice(lastIndex).trim();
+        if (text) {
+            content.push([{ tag: 'md', text } as MdPostNode]);
         }
     }
 

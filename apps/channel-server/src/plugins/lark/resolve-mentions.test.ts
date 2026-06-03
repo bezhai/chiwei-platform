@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 
-const membersByChat = new Map<string, Array<{ user_id: string; name: string }>>();
+const membersByChat = new Map<string, Array<{ union_id: string; name: string }>>();
 
 function queryBuilder() {
     let chatId = '';
@@ -37,8 +37,8 @@ const { resolveLarkMentionsForGroup } = await import('./resolve-mentions');
 describe('resolveLarkMentionsForGroup', () => {
     it('replaces longer names first to avoid partial @name matches', async () => {
         membersByChat.set('oc_mentions_1', [
-            { user_id: 'on_alice', name: 'Alice' },
-            { user_id: 'on_alice_wang', name: 'Alice Wang' },
+            { union_id: 'ou_alice', name: 'Alice' },
+            { union_id: 'ou_alice_wang', name: 'Alice Wang' },
         ]);
 
         const out = await resolveLarkMentionsForGroup(
@@ -47,8 +47,8 @@ describe('resolveLarkMentionsForGroup', () => {
         );
 
         expect(out).toBe(
-            '<at user_id="on_alice_wang"></at> hi, ' +
-                '<at user_id="on_alice"></at> hi',
+            '<at user_id="ou_alice_wang">Alice Wang</at> hi, ' +
+                '<at user_id="ou_alice">Alice</at> hi',
         );
     });
 

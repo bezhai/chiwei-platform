@@ -17,21 +17,6 @@ describe('markdownToPostContent', () => {
         });
     });
 
-    it('should convert resolved at tags into at nodes', () => {
-        const md = 'hi <at user_id="ou_alice"></at> and <at user_id="ou_bob">Bob</at>';
-        const result = markdownToPostContent(md);
-        expect(result).toEqual({
-            content: [
-                [
-                    { tag: 'md', text: 'hi ' },
-                    { tag: 'at', user_id: 'ou_alice' },
-                    { tag: 'md', text: ' and ' },
-                    { tag: 'at', user_id: 'ou_bob' },
-                ],
-            ],
-        });
-    });
-
     it('should split text and image into md + img nodes', () => {
         const md = 'Before image ![photo](img_v3_abc) after image';
         const result = markdownToPostContent(md);
