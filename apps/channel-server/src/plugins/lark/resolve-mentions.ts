@@ -1,8 +1,6 @@
 import AppDataSource from 'ormconfig';
 import { LarkGroupMember } from '@entities/lark-group-member';
 import { LarkUser } from '@entities/lark-user';
-import { LarkUserOpenId } from '@entities/lark-user-open-id';
-import { getCurrentLarkBotAppId } from './bot-identity';
 
 interface GroupMemberInfo {
     user_id: string;
@@ -13,9 +11,7 @@ const cache = new Map<string, { members: GroupMemberInfo[]; ts: number }>();
 const CACHE_TTL_MS = 60_000;
 
 async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
-    const appId = getCurrentLarkBotAppId();
-    const cacheKey = `${appId}:${chatId}`;
-    const cached = cache.get(cacheKey);
+    const cached = cache.get(chatId);
     if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
         return cached.members;
     }
@@ -23,13 +19,7 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
     const members = await AppDataSource.getRepository(LarkGroupMember)
         .createQueryBuilder('m')
         .innerJoin(LarkUser, 'u', 'u.union_id = m.union_id')
-        .innerJoin(
-            LarkUserOpenId,
-            'ou',
-            'ou.union_id = m.union_id AND ou.app_id = :appId',
-            { appId },
-        )
-        .select(['ou.open_id AS user_id', 'u.name AS name'])
+        .select(['m.union_id AS user_id', 'u.name AS name'])
         .where('m.chat_id = :chatId', { chatId })
         .andWhere('m.is_leave = false')
         .getRawMany<GroupMemberInfo>();
@@ -37,7 +27,7 @@ async function getGroupMembers(chatId: string): Promise<GroupMemberInfo[]> {
     // 按 name 长度降序，避免短名误匹配长名子串。
     members.sort((a, b) => b.name.length - a.name.length);
 
-    cache.set(cacheKey, { members, ts: Date.now() });
+    cache.set(chatId, { members, ts: Date.now() });
     return members;
 }
 
