@@ -18,9 +18,9 @@ jobs:
           # Extract text between ## Summary and next ## (or EOF)
           SUMMARY=$(echo "$PR_BODY" | sed -n '/^## Summary/,/^## /{/^## Summary/d;/^## /d;p}')
 
-          # Fallback: if no Summary section, take first 5 lines
+          # Fallback: if no Summary section, take the first 20 lines
           if [ -z "$(echo "$SUMMARY" | tr -d '[:space:]')" ]; then
-            SUMMARY=$(echo "$PR_BODY" | head -5)
+            SUMMARY=$(echo "$PR_BODY" | head -20)
           fi
 
           # Fallback: if body is empty
@@ -30,6 +30,18 @@ jobs:
 
           # Trim leading/trailing blank lines
           SUMMARY=$(echo "$SUMMARY" | sed '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba}')
+
+          # Keep Feishu cards compact even when the fallback body is long
+          SUMMARY=$(SUMMARY="$SUMMARY" python3 - <<'PY'
+          import os
+
+          summary = os.environ["SUMMARY"]
+          limit = 2000
+          if len(summary) > limit:
+              summary = summary[:limit].rstrip() + "\n..."
+          print(summary)
+          PY
+          )
 
           # Write to output (handle multiline)
           {
