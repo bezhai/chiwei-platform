@@ -86,32 +86,6 @@ describe('MessageTransferer.getContentFactory', () => {
             expect(items[2]).toEqual({ type: ContentType.Text, value: 'second line' });
         });
 
-        it('should preserve post at nodes as mention items', () => {
-            const postContent = {
-                content: [
-                    [
-                        { tag: 'text', text: 'hello ' },
-                        { tag: 'at', user_id: 'on_alice' },
-                    ],
-                ],
-            };
-            const factory = MessageTransferer.getContentFactory(
-                'post',
-                JSON.stringify(postContent),
-            );
-
-            const items = factory.generateContent();
-
-            expect(items).toEqual([
-                { type: ContentType.Text, value: 'hello ' },
-                {
-                    type: ContentType.Mention,
-                    value: 'on_alice',
-                    meta: { channel_user_id: 'on_alice' },
-                },
-            ]);
-        });
-
         it('should return placeholder for empty post content', () => {
             const factory = MessageTransferer.getContentFactory(
                 'post',

@@ -46,43 +46,6 @@ function groupMentionEvent(mentionUnionIds: string[]): LarkReceiveMessage {
     };
 }
 
-function mixedMentionTextEvent(): LarkReceiveMessage {
-    return {
-        app_id: 'cli_app',
-        sender: { sender_id: { union_id: 'on_sender', open_id: 'ou_sender' }, sender_type: 'user' },
-        message: {
-            message_id: 'om_mixed_mentions',
-            chat_id: 'oc_group',
-            chat_type: 'group',
-            message_type: 'text',
-            create_time: '1700000002000',
-            content: JSON.stringify({ text: '@_user_1 @_user_2 你俩认识@_user_3 么' }),
-            mentions: [
-                {
-                    key: '@_user_2',
-                    id: { union_id: 'on_bot2', open_id: 'ou_bot2' },
-                    name: '绫奈',
-                    mentioned_type: 'bot',
-                    bot_info: { app_id: 'cli_bot2' },
-                },
-                {
-                    key: '@_user_1',
-                    id: { union_id: 'on_bot1', open_id: 'ou_bot1' },
-                    name: '赤尾',
-                    mentioned_type: 'bot',
-                    bot_info: { app_id: 'cli_bot1' },
-                },
-                {
-                    key: '@_user_3',
-                    id: { union_id: 'on_human', open_id: 'ou_human' },
-                    name: '原智鸿',
-                    mentioned_type: 'user',
-                },
-            ],
-        },
-    };
-}
-
 function eventOfType(messageType: string, content: unknown): LarkReceiveMessage {
     const ev = p2pTextEvent();
     ev.message.message_type = messageType;
@@ -138,92 +101,12 @@ describe('larkInbound.parse', () => {
             { targetId: 'on_bot' },
             { targetId: 'on_other' },
         ]);
-        expect(msg.content).toEqual([
-            {
-                kind: 'mention',
-                id: 'on_bot',
-                label: 'on_bot',
-                meta: { open_id: 'ou_on_bot', union_id: 'on_bot', mentioned_type: 'user' },
-            },
-            { kind: 'text', text: ' hi' },
-        ]);
         expect(msg.thread_ref).toEqual({
             selfChannelMessageId: 'om_msg2',
             replyToChannelMessageId: 'om_parent',
             rootChannelMessageId: 'om_root',
             inThread: true,
         });
-    });
-
-    it('splits Lark mention placeholders into structured mention items by key', () => {
-        const msg = larkInbound.parse(mixedMentionTextEvent()) as InboundMessage;
-        assertValidInboundMessage(msg);
-        expect(JSON.stringify(msg.content)).not.toContain('@_user_');
-        expect(msg.content).toEqual([
-            {
-                kind: 'mention',
-                id: 'on_bot1',
-                label: '赤尾',
-                meta: {
-                    open_id: 'ou_bot1',
-                    union_id: 'on_bot1',
-                    mentioned_type: 'bot',
-                    bot_app_id: 'cli_bot1',
-                },
-            },
-            { kind: 'text', text: ' ' },
-            {
-                kind: 'mention',
-                id: 'on_bot2',
-                label: '绫奈',
-                meta: {
-                    open_id: 'ou_bot2',
-                    union_id: 'on_bot2',
-                    mentioned_type: 'bot',
-                    bot_app_id: 'cli_bot2',
-                },
-            },
-            { kind: 'text', text: ' 你俩认识' },
-            {
-                kind: 'mention',
-                id: 'on_human',
-                label: '原智鸿',
-                meta: {
-                    open_id: 'ou_human',
-                    union_id: 'on_human',
-                    mentioned_type: 'user',
-                },
-            },
-            { kind: 'text', text: ' 么' },
-        ]);
-    });
-
-    it('uses mention id as display fallback without changing identity', () => {
-        const event = groupMentionEvent(['on_target']);
-        event.message.content = JSON.stringify({ text: '@_user_1 你好' });
-        event.message.mentions = [
-            {
-                key: '@_user_1',
-                id: { union_id: 'on_target', open_id: 'ou_target' },
-                name: '',
-                mentioned_type: 'user',
-            },
-        ];
-        const msg = larkInbound.parse(event) as InboundMessage;
-        assertValidInboundMessage(msg);
-        expect(msg.content).toEqual([
-            {
-                kind: 'mention',
-                id: 'on_target',
-                label: 'on_target',
-                meta: {
-                    open_id: 'ou_target',
-                    union_id: 'on_target',
-                    mentioned_type: 'user',
-                },
-            },
-            { kind: 'text', text: ' 你好' },
-        ]);
     });
 
     it('image -> image content item', () => {
@@ -254,43 +137,6 @@ describe('larkInbound.parse', () => {
             { kind: 'text', text: 'hello ' },
             { kind: 'image', key: 'img_in_post' },
             { kind: 'text', text: 'world' },
-        ]);
-    });
-
-    it('post at node -> structured mention item matched by lark ids', () => {
-        const event = eventOfType('post', {
-            content: [
-                [
-                    { tag: 'text', text: 'hello ' },
-                    { tag: 'at', user_id: 'on_alice' },
-                    { tag: 'text', text: ' end' },
-                ],
-            ],
-        });
-        event.message.mentions = [
-            {
-                key: '@_user_1',
-                id: { union_id: 'on_alice', open_id: 'ou_alice' },
-                name: 'Alice',
-                mentioned_type: 'user',
-            },
-        ];
-
-        const msg = larkInbound.parse(event) as InboundMessage;
-        assertValidInboundMessage(msg);
-        expect(msg.content).toEqual([
-            { kind: 'text', text: 'hello ' },
-            {
-                kind: 'mention',
-                id: 'on_alice',
-                label: 'Alice',
-                meta: {
-                    open_id: 'ou_alice',
-                    union_id: 'on_alice',
-                    mentioned_type: 'user',
-                },
-            },
-            { kind: 'text', text: ' end' },
         ]);
     });
 

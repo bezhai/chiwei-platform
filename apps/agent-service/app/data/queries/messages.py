@@ -68,14 +68,6 @@ def _content_item_to_v2(item: dict) -> dict:
     kind = item.get("kind")
     if kind == "text":
         return {"type": "text", "value": item.get("text", "")}
-    if kind == "mention":
-        out = {"type": "mention", "value": item.get("label") or item.get("id", "")}
-        meta = dict(item.get("meta") or {})
-        if item.get("id"):
-            meta.setdefault("id", item["id"])
-        if meta:
-            out["meta"] = meta
-        return out
     if kind in {"image", "audio", "file", "sticker"}:
         out = {"type": kind, "value": item.get("key", "")}
         if item.get("meta"):
@@ -97,12 +89,8 @@ def _content_text(content: list[dict], content_text: str | None) -> str:
     for item in content:
         if item.get("kind") == "text":
             parts.append(str(item.get("text", "")))
-        elif item.get("kind") == "mention":
-            parts.append("@" + str(item.get("label") or item.get("id") or ""))
         elif item.get("type") == "text":
             parts.append(str(item.get("value", "")))
-        elif item.get("type") == "mention":
-            parts.append("@" + str(item.get("value", "")))
     return "".join(parts)
 
 

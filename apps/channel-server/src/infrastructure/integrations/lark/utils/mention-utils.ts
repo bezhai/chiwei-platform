@@ -10,22 +10,14 @@ import {
 export class MentionUtils {
     static addMentions(mentions: LarkMention[] | undefined): MessageMention[] {
         return mentions
-            ? mentions.flatMap((m) => {
-                  const id = m.id.union_id ?? m.id.user_id ?? m.id.open_id;
-                  if (!id) return [];
+            ? mentions.map((m) => {
                   const botConfig =
                       m.mentioned_type === 'bot'
                           ? m.bot_info?.app_id
                               ? getLarkBotConfigByAppId(m.bot_info.app_id)
-                              : m.id.union_id
-                                ? getLarkBotConfigByUnionId(m.id.union_id)
-                                : null
+                              : getLarkBotConfigByUnionId(m.id.union_id!)
                           : null;
                   const appId = botConfig ? larkCredentials(botConfig).app_id : undefined;
-                  const configuredDisplayName = appId
-                      ? getLarkDisplayNameByAppId(appId)
-                      : undefined;
-                  const displayName = configuredDisplayName?.trim() || m.name?.trim() || id;
                   if (botConfig && !botConfig.common_user_id) {
                       throw new Error(
                           `registered bot mention "${botConfig.bot_name}" has no ` +
@@ -34,9 +26,8 @@ export class MentionUtils {
                       );
                   }
                   return {
-                      key: m.key,
-                      id,
-                      displayName,
+                      id: m.id.union_id!,
+                      displayName: appId ? (getLarkDisplayNameByAppId(appId) ?? m.name) : m.name,
                       botCommonUserId: botConfig?.common_user_id,
                   };
               })
@@ -44,16 +35,11 @@ export class MentionUtils {
     }
 
     static applyMentionTokens(items: ContentItem[], mentions: MessageMention[]): ContentItem[] {
-        const mentionByKey = new Map(
-            mentions
-                .filter((mention) => mention.key)
-                .map((mention) => [mention.key as string, mention]),
-        );
         return items.flatMap((item) => {
             if (item.type !== ContentType.Text) return [item];
 
             const out: ContentItem[] = [];
-            const tokenPattern = /@_user_\d+/g;
+            const tokenPattern = /@_user_(\d+)/g;
             let lastIndex = 0;
             let match: RegExpExecArray | null;
 
@@ -65,7 +51,7 @@ export class MentionUtils {
                     });
                 }
 
-                const mention = mentionByKey.get(match[0]);
+                const mention = mentions[Number(match[1]) - 1];
                 if (mention) {
                     out.push({
                         type: ContentType.Mention,

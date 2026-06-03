@@ -15,14 +15,11 @@
 //   audio       语音，key 是音频引用；meta 可带 duration 等
 //   file        文件/视频等"可下载附件"，key 是附件引用；meta 可带 file_name 等
 //   sticker     表情包，key 是表情引用
-//   mention     被提及对象，id 是 channel adapter 已知的稳定身份 id，label 仅用于展示；
-//               meta 可放 open_id/user_id/union_id/mentioned_type 等 channel 原生补充字段。
 //   unsupported channel 能识别但本通道不渲染的类型；text 是给人看的占位串，
 //               meta.original_type 保留原类型名，保证"收到了但没处理"可观测，
 //               堵死静默丢弃。
 export type ContentItem =
     | { kind: 'text'; text: string }
-    | { kind: 'mention'; id: string; label: string; meta?: Record<string, unknown> }
     | { kind: 'image'; key: string; meta?: Record<string, unknown> }
     | { kind: 'audio'; key: string; meta?: Record<string, unknown> }
     | { kind: 'file'; key: string; meta?: Record<string, unknown> }
@@ -203,14 +200,6 @@ function assertValidContentItem(item: unknown): asserts item is ContentItem {
         case 'unsupported':
             if (typeof it.text !== 'string' || (it.text as string).length === 0) {
                 throw new Error(`ContentItem(${it.kind}).text must be a non-empty string`);
-            }
-            return;
-        case 'mention':
-            if (typeof it.id !== 'string' || (it.id as string).length === 0) {
-                throw new Error('ContentItem(mention).id must be a non-empty string');
-            }
-            if (typeof it.label !== 'string' || (it.label as string).length === 0) {
-                throw new Error('ContentItem(mention).label must be a non-empty string');
             }
             return;
         case 'image':
