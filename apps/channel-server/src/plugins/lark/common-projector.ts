@@ -99,6 +99,9 @@ function textProjection(content: ContentItem[]): string | undefined {
             if (item.kind === 'text' || item.kind === 'unsupported') {
                 return item.text;
             }
+            if (item.kind === 'mention') {
+                return `@${item.label || item.id}`;
+            }
             return `[${item.kind}]`;
         })
         .join('')

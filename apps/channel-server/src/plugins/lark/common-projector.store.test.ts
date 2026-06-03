@@ -171,6 +171,7 @@ import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
 const {
     claimLarkInboundMessageForBot,
+    prepareLarkInboundProjection,
     storeLarkInboundMessage,
     storeLarkOutboundMessage,
 } = await import('./common-projector');
@@ -216,6 +217,45 @@ function projection(commonMessageId: string): LarkInboundProjection {
         scope: 'group',
     };
 }
+
+describe('prepareLarkInboundProjection', () => {
+    beforeEach(() => {
+        larkMessages.clear();
+        commonMessages.clear();
+        commonMessageRows.clear();
+    });
+
+    it('projects structured mentions to readable content_text', async () => {
+        const inbound = {
+            channel: 'lark',
+            bot_name: 'chiwei',
+            channel_message_id: 'om_mentions',
+            channel_chat_id: 'oc_chat',
+            channel_user_id: 'ou_sender',
+            conversation_scope: 'group',
+            thread_ref: { selfChannelMessageId: 'om_mentions', inThread: true },
+            addressing_hints: [],
+            content: [
+                { kind: 'mention', id: 'on_bot', label: '赤尾' },
+                { kind: 'text', text: ' 你好' },
+            ],
+            received_at: 1780309200000,
+        };
+
+        const out = await prepareLarkInboundProjection(
+            { app_id: 'cli_app', ...event('om_mentions') } as any,
+            {
+                senderInfo: { name: 'sender' },
+                groupChatInfo: { name: 'group' },
+                isP2P: () => false,
+                allowDownloadResource: () => true,
+            } as any,
+            inbound as any,
+        );
+
+        expect(out.contentText).toBe('@赤尾 你好');
+    });
+});
 
 describe('storeLarkInboundMessage', () => {
     beforeEach(() => {

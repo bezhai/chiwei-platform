@@ -51,7 +51,12 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
 
     // 飞书原生类型逐一映射到通用 ContentItem，绝不因接契约就把图片/富文本/
     // sticker/media/file/audio/合并转发/未知类型当没收到。
-    const content = parseLarkContent(event.message.message_type, event.message.content);
+    const mentions: LarkMention[] = event.message.mentions ?? [];
+    const content = parseLarkContent(
+        event.message.message_type,
+        event.message.content,
+        mentions,
+    );
     if (content.length === 0) return null;
 
     // 飞书 p2p → direct，其余（group）→ group。
@@ -60,8 +65,13 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
     // 飞书 mention → addressing_hints。这里仍是飞书 union_id，只服务 Lark
     // AddressingPolicy 的前置总闸；进入 RuleMessage 前，common-projector 会把
     // 所有 mention（含已注册 bot）投影成 common_user_id。
-    const mentions: LarkMention[] = event.message.mentions ?? [];
-    const addressingHints = mentions.map((m) => ({ targetId: m.id.union_id! }));
+    const addressingHints = mentions
+        .map((m) => m.id.union_id)
+        .filter(
+            (targetId): targetId is string =>
+                typeof targetId === 'string' && targetId.length > 0,
+        )
+        .map((targetId) => ({ targetId }));
 
     // 飞书出站现状是 reply(message_id, content, replyInThread=true)——回复触发那
     // 条消息本身、留在话题串内。所以入站消息自身就是回复锚点：selfChannelMessageId
@@ -94,12 +104,80 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
 // 飞书原生消息类型 → 通用 ContentItem[]。飞书专有字段名（image_key/file_key/
 // zh_cn 等）只在本函数内出现；merge_forward/share_chat/share_user/未知类型 →
 // unsupported（保留 original_type，绝不静默丢弃）。
-function parseLarkContent(messageType: string, rawContent: string): ContentItem[] {
+function mentionToContentItem(mention: LarkMention): ContentItem | null {
+    const id = mention.id.union_id ?? mention.id.user_id ?? mention.id.open_id;
+    if (!id) return null;
+    const label = mention.name?.trim() || id || mention.key;
+    const meta: Record<string, unknown> = {};
+    if (mention.id.open_id) meta.open_id = mention.id.open_id;
+    if (mention.id.user_id) meta.user_id = mention.id.user_id;
+    if (mention.id.union_id) meta.union_id = mention.id.union_id;
+    if (mention.mentioned_type) meta.mentioned_type = mention.mentioned_type;
+    if (mention.bot_info?.app_id) meta.bot_app_id = mention.bot_info.app_id;
+    return {
+        kind: 'mention',
+        id,
+        label,
+        ...(Object.keys(meta).length > 0 ? { meta } : {}),
+    };
+}
+
+function larkMentionMatchesId(mention: LarkMention, id: string): boolean {
+    return (
+        mention.id.union_id === id ||
+        mention.id.user_id === id ||
+        mention.id.open_id === id
+    );
+}
+
+function postAtToContentItem(userId: string, mentions: LarkMention[]): ContentItem {
+    const mention = mentions.find((m) => larkMentionMatchesId(m, userId));
+    const mentionItem = mention ? mentionToContentItem(mention) : null;
+    return (
+        mentionItem ?? {
+            kind: 'mention',
+            id: userId,
+            label: userId,
+            meta: { user_id: userId },
+        }
+    );
+}
+
+function applyMentionTokensToText(text: string, mentions: LarkMention[]): ContentItem[] {
+    const out: ContentItem[] = [];
+    const tokenPattern = /@_user_\d+/g;
+    const mentionByKey = new Map(mentions.map((mention) => [mention.key, mention]));
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = tokenPattern.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+            out.push({ kind: 'text', text: text.slice(lastIndex, match.index) });
+        }
+
+        const mention = mentionByKey.get(match[0]);
+        const mentionItem = mention ? mentionToContentItem(mention) : null;
+        out.push(mentionItem ?? { kind: 'text', text: match[0] });
+        lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < text.length) {
+        out.push({ kind: 'text', text: text.slice(lastIndex) });
+    }
+
+    return out.length > 0 ? out : [{ kind: 'text', text }];
+}
+
+function parseLarkContent(
+    messageType: string,
+    rawContent: string,
+    mentions: LarkMention[] = [],
+): ContentItem[] {
     switch (messageType) {
         case 'text': {
             try {
                 const c: TextContent = JSON.parse(rawContent);
-                return [{ kind: 'text', text: c.text }];
+                return applyMentionTokensToText(c.text, mentions);
             } catch (err) {
                 console.error('Failed to parse text content:', err);
                 return [{ kind: 'text', text: '[文本]' }];
@@ -130,7 +208,9 @@ function parseLarkContent(messageType: string, rawContent: string): ContentItem[
                 c.content.forEach((row) => {
                     row.forEach((node) => {
                         if (node.tag === 'text' && node.text) {
-                            items.push({ kind: 'text', text: node.text });
+                            items.push(...applyMentionTokensToText(node.text, mentions));
+                        } else if (node.tag === 'at' && node.user_id) {
+                            items.push(postAtToContentItem(node.user_id, mentions));
                         } else if (node.tag === 'img' && node.image_key) {
                             items.push({ kind: 'image', key: node.image_key });
                         }

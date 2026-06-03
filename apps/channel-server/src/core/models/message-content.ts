@@ -18,6 +18,7 @@ export interface ContentItem {
 }
 
 export interface MessageMention {
+    key?: string;
     id: string;
     displayName: string;
     botCommonUserId?: string;

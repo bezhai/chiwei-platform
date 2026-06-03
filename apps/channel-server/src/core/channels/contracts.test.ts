@@ -70,6 +70,20 @@ describe('channel 接入契约 — 用假想 HTTP 问答 channel 验证不被 IM
         expect(() => assertValidInboundMessage(bad)).toThrow();
     });
 
+    it('assertValidInboundMessage accepts structured mention content with identity and label', () => {
+        const msg = httpInbound.parse({ qid: 'q', user: 'u', question: 'x' }) as InboundMessage;
+        msg.content = [{ kind: 'mention', id: 'user-1', label: 'Alice' }];
+
+        expect(() => assertValidInboundMessage(msg)).not.toThrow();
+    });
+
+    it('assertValidInboundMessage rejects mention content without usable identity', () => {
+        const msg = httpInbound.parse({ qid: 'q', user: 'u', question: 'x' }) as InboundMessage;
+        msg.content = [{ kind: 'mention', id: '', label: 'Alice' }];
+
+        expect(() => assertValidInboundMessage(msg)).toThrow(/mention.*id/);
+    });
+
     it('不需要握手的 channel：handleHandshake 返回 null 是合法的', () => {
         expect(httpInbound.handleHandshake({})).toBeNull();
     });

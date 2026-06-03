@@ -96,6 +96,12 @@ class PostMessageContentFactory extends BaseMessageContentFactory {
                             type: ContentType.Image,
                             value: node.image_key,
                         });
+                    } else if (node.tag === 'at' && node.user_id) {
+                        items.push({
+                            type: ContentType.Mention,
+                            value: node.user_id,
+                            meta: { channel_user_id: node.user_id },
+                        });
                     }
                 });
             });

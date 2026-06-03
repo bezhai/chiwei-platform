@@ -16,8 +16,13 @@ const { MentionUtils } = await import(REAL_MENTION_UTILS);
 describe('MentionUtils', () => {
     it('converts Lark @_user_N tokens into neutral mention content items', () => {
         const mentions = [
-            { id: 'on_alice', displayName: 'Alice' },
-            { id: 'on_bot', displayName: '赤尾', botCommonUserId: 'bot-common' },
+            {
+                key: '@_user_2',
+                id: 'on_bot',
+                displayName: '赤尾',
+                botCommonUserId: 'bot-common',
+            },
+            { key: '@_user_1', id: 'on_alice', displayName: 'Alice' },
         ];
 
         const items = MentionUtils.applyMentionTokens(
@@ -36,6 +41,26 @@ describe('MentionUtils', () => {
                 type: ContentType.Mention,
                 value: '赤尾',
                 meta: { channel_user_id: 'on_bot', bot_common_user_id: 'bot-common' },
+            },
+        ]);
+    });
+
+    it('builds mention identities from ids and falls back display name to id', () => {
+        const mentions = MentionUtils.addMentions([
+            {
+                key: '@_user_1',
+                id: { open_id: 'ou_alice' },
+                name: '',
+                mentioned_type: 'user',
+            },
+        ]);
+
+        expect(mentions).toEqual([
+            {
+                key: '@_user_1',
+                id: 'ou_alice',
+                displayName: 'ou_alice',
+                botCommonUserId: undefined,
             },
         ]);
     });
