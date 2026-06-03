@@ -14,6 +14,12 @@ import type {
     InboundMessage,
     ThreadRef,
 } from '@core/channels/contracts';
+import {
+    getLarkBotConfigByAppId,
+    getLarkBotConfigByUnionId,
+    getLarkDisplayNameByAppId,
+    larkCredentials,
+} from './bot-identity';
 
 export const LARK_CHANNEL = 'lark';
 
@@ -70,6 +76,16 @@ function parse(raw: LarkReceiveMessage): InboundMessage | null {
 }
 
 function mentionDisplay(m: LarkMention): string {
+    if (m.mentioned_type === 'bot') {
+        const bot = m.bot_info?.app_id
+            ? getLarkBotConfigByAppId(m.bot_info.app_id)
+            : m.id.union_id
+              ? getLarkBotConfigByUnionId(m.id.union_id)
+              : null;
+        const appId = bot ? larkCredentials(bot).app_id : null;
+        const personaName = appId ? getLarkDisplayNameByAppId(appId) : null;
+        if (personaName) return personaName;
+    }
     return m.name?.trim() || m.id.union_id || m.id.user_id || m.id.open_id || m.key;
 }
 
