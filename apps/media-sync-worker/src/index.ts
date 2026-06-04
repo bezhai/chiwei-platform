@@ -69,6 +69,13 @@ async function checkDataConnections() {
   await redisClient.close();
 
   console.log('MongoDB and Redis connectivity check completed.');
+
+  console.log('Checking OSS and MinIO connectivity...');
+  const { checkStorageConnectivity } = await import('./storage/connectivity');
+  const storage = await checkStorageConnectivity();
+  console.log(
+    `Storage connectivity check completed: OSS=${storage.oss ? 'OK' : 'FAILED'}, MinIO=${storage.minio ? 'OK' : 'FAILED'}.`,
+  );
 }
 
 if (disableSchedules) {
