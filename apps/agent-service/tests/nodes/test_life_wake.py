@@ -1,20 +1,22 @@
-"""life_wake_node — 三姐妹同构 life 节点 (Task 3).
+"""life_wake_node — 三姐妹同构 life 节点 (Task 3, agent 工具循环).
 
-被 EventArrived 攒批唤醒后她做一轮：读自己 LifeState（主观快照）+ 读自己信箱
-未读 event → LLM 想一轮做主观解读 → 更新 LifeState → 该 emit 意图就 raise_intent
-→ 标已读（只标本轮读到的 event_id）。
+被 EventArrived 攒批唤醒后她跑一个 ReAct 循环：读自己 LifeState（主观快照）+ 读
+自己信箱未读 event → 喂进 ``Agent(...).run`` 跑工具循环（连续调 update_life_state /
+raise_intent 行动）→ 收口标已读（只标本轮读到的 event_id）。输出来自工具调用，不
+再填一张 LifeDecision 表。
 
-这些是节点逻辑测试，LLM 用 mock —— 验证编排正确性，不是验证 LLM 想得对。
-最致命的几条（spec 钉死）：
+这些是节点编排测试：``Agent.run`` 用 fake 模拟模型在循环里调工具，验证编排正确性，
+不验证 LLM 想得对。最致命的几条（spec 钉死）：
 
   * **信息差命门**：一轮的输入 = 她自己的 LifeState + 她自己信箱未读 event，
-    绝不含 WorldState 全局快照。一旦全局真相漏进她上下文她就全知了。
-  * **无 state_end_at / 不自排闹钟**：她脑子里没有"做到几点"。被 event 推、
-    不自己定时唤醒自己。
-  * **大状态进行中被推醒重想**：她处在一个状态里，信箱进一条指向她的 event，
-    被唤醒会读未读 + 重想（更新 LifeState），不干等到原状态"结束"——这是修复
-    旧卡死的核心。
-  * **标已读只标本轮**：传给 mark_events_read 的就是本轮实际读到的那批 event_id。
+    绝不含 WorldState 全局快照。本模块绝不 import / 读 world 快照。
+  * **空信箱 early-return**：信箱没未读就不烧模型、不建工具、不写、不标已读。
+  * **single_flight 锁**：同 (lane,persona) 两轮并发，第二轮拿不到锁 →
+    DebounceReschedule（不覆盖、不静默吞 event）。
+  * **收口标已读只标本轮**：传给 mark_events_read 的就是本轮实际读到的那批
+    event_id，即使一次 update 都没调也照常标已读（看了但没改状态，正常）。
+  * **max_retries=1 + session_id**：run 必须传 max_retries=1（关掉整轮重放、不
+    重放 durable 工具）和按 (lane, persona, 今天) 派生的 session_id。
 """
 
 from __future__ import annotations
@@ -39,11 +41,10 @@ from app.runtime.debounce import DebounceReschedule
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> fakeredis.aioredis.FakeRedis:
     """Swap ``app.infra.redis._redis`` with an in-memory FakeRedis.
 
-    Autouse: ``life_wake_node`` now takes a ``(lane, persona)`` single-flight
-    lock at the start of every round (必改 2), so *every* test here needs a
-    redis. ``get_redis()`` short-circuits when ``_redis`` is non-None, so the
-    SETNX + Lua release run against a real (if in-memory) interpreter —
-    concurrency contention in the single-flight test is genuine.
+    Autouse: ``life_wake_node`` 每轮开头按 (lane, persona) 取一把 single-flight
+    锁（必改 2），所以这里每个测试都需要 redis。``get_redis()`` 在 ``_redis`` 非
+    None 时短路，SETNX + Lua 释放跑在真（in-memory）解释器上 —— single-flight
+    测试的并发竞争是真实的。
     """
     import app.infra.redis as redis_mod
 
@@ -52,7 +53,9 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> fakeredis.aioredis.FakeRedis:
     return fake
 
 
-def _envelope(event_id, summary, *, kind=EVENT_KIND_AMBIENT, occurred_at="2026-06-03T12:30:00Z"):
+def _envelope(
+    event_id, summary, *, kind=EVENT_KIND_AMBIENT, occurred_at="2026-06-03T12:30:00Z"
+):
     return EventEnvelope(
         lane="coe-t3",
         persona_id="akao",
@@ -65,28 +68,74 @@ def _envelope(event_id, summary, *, kind=EVENT_KIND_AMBIENT, occurred_at="2026-0
     )
 
 
-class _StubThink:
-    """记录被喂进 LLM 的 prompt_vars，回放一个固定决策。"""
+class _FakeAgent:
+    """模拟 ``Agent(cfg, tools=...).run(...)``：记录构造 + run 参数，回放脚本。
 
-    def __init__(self, decision):
-        self.decision = decision
-        self.captured_vars = None
+    ``script`` 是一个 ``async def(tools) -> None`` 回调，模拟模型在循环里调哪些
+    工具（直接 invoke 传进来的 Tool），从而触发 handler 副作用。默认什么工具都
+    不调（模拟模型看了但没改状态）。
+    """
 
-    async def __call__(self, *, persona_id, snapshot, unread, prompt_vars):
-        self.captured_vars = prompt_vars
-        return self.decision
+    # 记录跨实例的所有构造 / run（节点每轮 new 一个 Agent）。
+    instances: list = []
+
+    def __init__(self, cfg, *, tools=None, **kwargs):
+        self.cfg = cfg
+        self.tools = tools or []
+        self.run_calls: list[dict] = []
+        _FakeAgent.instances.append(self)
+
+    @classmethod
+    def reset(cls):
+        cls.instances = []
+
+    @classmethod
+    def install(cls, monkeypatch, script=None):
+        cls.reset()
+        cls._script = staticmethod(script) if script else None
+        monkeypatch.setattr(lw, "Agent", cls)
+        return cls
+
+    async def run(self, messages, *, prompt_vars=None, context=None, max_retries=None):
+        self.run_calls.append(
+            {
+                "messages": messages,
+                "prompt_vars": prompt_vars,
+                "context": context,
+                "max_retries": max_retries,
+            }
+        )
+        script = getattr(_FakeAgent, "_script", None)
+        if script is not None:
+            await script(self.tools)
+        from app.agent.neutral import Message, Role
+
+        return Message(role=Role.ASSISTANT, content="ok")
+
+    # 便于断言：节点这一轮唯一那个 Agent 的 run_call。
+    @classmethod
+    def last_run(cls):
+        assert cls.instances, "Agent 从没被构造（run 没被调）"
+        last = cls.instances[-1]
+        assert last.run_calls, "Agent 被构造但 run 没被调"
+        return last.run_calls[-1]
 
 
 @pytest.fixture
 def patched(monkeypatch):
-    """把节点的所有 IO 依赖换成可观测的 fake，LLM 思考换成 stub。"""
+    """把节点的 IO 依赖换成可观测 fake；工具的 handler 也打桩。
+
+    工具是 build_life_tools 造出来的真 Tool，但底下的 save_life_state /
+    raise_intent handler 在 life_tools 模块里被打桩成记录副作用。
+    """
+    import app.nodes.life_tools as lt
 
     state = {
-        "snapshot": None,          # find_life_state 返回
-        "unread": [],              # list_unread_events 返回
-        "saved": [],               # save_life_state 收到的
-        "marked": [],              # mark_events_read 收到的 event_ids
-        "intents": [],             # raise_intent 收到的
+        "snapshot": None,  # find_life_state 返回
+        "unread": [],  # list_unread_events 返回
+        "saved": [],  # save_life_state 收到的
+        "marked": [],  # mark_events_read 收到的 event_ids
+        "intents": [],  # raise_intent 收到的
     }
 
     async def fake_find(*, lane, persona_id):
@@ -95,16 +144,14 @@ def patched(monkeypatch):
     async def fake_unread(*, lane, persona_id):
         return list(state["unread"])
 
-    async def fake_save(**kwargs):
-        state["saved"].append(kwargs)
-
     async def fake_mark(*, lane, persona_id, event_ids):
         state["marked"].append(event_ids)
 
-    async def fake_intent(*, lane, intent_id, persona_id, summary, occurred_at):
-        state["intents"].append(
-            {"intent_id": intent_id, "persona_id": persona_id, "summary": summary}
-        )
+    async def fake_save(**kwargs):
+        state["saved"].append(kwargs)
+
+    async def fake_intent(**kwargs):
+        state["intents"].append(kwargs)
 
     async def fake_load_persona(persona_id):
         from app.memory._persona import PersonaContext
@@ -117,32 +164,50 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(lw, "find_life_state", fake_find)
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
-    monkeypatch.setattr(lw, "save_life_state", fake_save)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
-    monkeypatch.setattr(lw, "raise_intent", fake_intent)
     monkeypatch.setattr(lw, "load_persona", fake_load_persona)
+    # 工具底下的 durable handler：在 life_tools 模块里打桩。
+    monkeypatch.setattr(lt, "save_life_state", fake_save)
+    monkeypatch.setattr(lt, "raise_intent", fake_intent)
     return state
 
 
-def _decision(current_state="发呆", response_mood="平静", activity_type="idle", intent_summary=None):
-    return lw.LifeDecision(
-        current_state=current_state,
-        response_mood=response_mood,
-        activity_type=activity_type,
-        intent_summary=intent_summary,
-    )
+# 脚本：模型在循环里"调一次 update_life_state"。
+def _script_update(current_state="起身去厨房", response_mood="迷糊", activity_type="move"):
+    async def _run(tools):
+        by_name = {t.name: t for t in tools}
+        await by_name["update_life_state"].invoke(
+            {
+                "current_state": current_state,
+                "response_mood": response_mood,
+                "activity_type": activity_type,
+            }
+        )
+
+    return _run
+
+
+def _script_update_then_intent(summary="去厨房煮咖啡"):
+    async def _run(tools):
+        by_name = {t.name: t for t in tools}
+        await by_name["update_life_state"].invoke(
+            {"current_state": "醒了", "response_mood": "迷糊", "activity_type": "move"}
+        )
+        await by_name["raise_intent"].invoke({"summary": summary})
+
+    return _run
 
 
 @pytest.mark.asyncio
-async def test_wake_reads_unread_thinks_saves_marks(patched, monkeypatch):
-    """完整一轮：读未读 → 想 → 存新快照 → 标已读（只标本轮读到的）。"""
+async def test_wake_runs_loop_updates_state_marks_read(patched, monkeypatch):
+    """完整一轮：读未读 → 跑循环（模型调 update_life_state）→ 收口标已读（只标本轮）。"""
     patched["unread"] = [_envelope("e1", "水壶在响"), _envelope("e2", "千凪在厨房")]
-    think = _StubThink(_decision(current_state="起身去厨房", response_mood="迷糊"))
-    monkeypatch.setattr(lw, "_think", think)
+    _FakeAgent.install(
+        monkeypatch, script=_script_update(current_state="起身去厨房", response_mood="迷糊")
+    )
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    # 存了新快照
     assert len(patched["saved"]) == 1
     saved = patched["saved"][0]
     assert saved["lane"] == "coe-t3"
@@ -154,22 +219,64 @@ async def test_wake_reads_unread_thinks_saves_marks(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_input_excludes_world_state(patched, monkeypatch):
-    """信息差命门：喂给 LLM 的输入只含她自己的快照 + 自己信箱未读，绝不含 WorldState。"""
-    patched["snapshot"] = LifeState(
-        lane="coe-t3", persona_id="akao",
-        current_state="睡觉", response_mood="困", activity_type="sleep",
-        observed_at="2026-06-03T08:00:00Z",
-    )
-    patched["unread"] = [_envelope("e1", "晌午的光很亮")]
-    think = _StubThink(_decision())
-    monkeypatch.setattr(lw, "_think", think)
+async def test_zero_update_still_marks_read(patched, monkeypatch):
+    """0 次 update 也照常标已读（她看了但没改状态，正常 —— spec 决策 2）。"""
+    patched["unread"] = [_envelope("e1", "外面在下雨")]
+    # 脚本什么工具都不调
+    _FakeAgent.install(monkeypatch, script=None)
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    pv = think.captured_vars
+    assert patched["saved"] == []  # 没改状态
+    assert patched["marked"] == [["e1"]]  # 但照常标已读
+
+
+@pytest.mark.asyncio
+async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
+    """run 必须传 max_retries=1（关整轮重放）+ 按 (lane, persona, 今天) 的 session_id。"""
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    # 钉死 now，使 session_id 的日期可断言
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 3, 12, 30, tzinfo=tz)
+
+    monkeypatch.setattr(lw, "datetime", _FixedDateTime)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    assert call["max_retries"] == 1, "run 必须传 max_retries=1，否则整轮重放重放 durable 工具"
+    ctx = call["context"]
+    assert ctx is not None
+    # session 按 (lane, persona, 今天 YYYY-MM-DD) 派生
+    from app.agent.trace import make_session_id
+
+    assert ctx.session_id == make_session_id("coe-t3", "akao", "2026-06-03")
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_world_state(patched, monkeypatch):
+    """信息差命门：喂给 run 的 prompt_vars 只含她自己快照 + 自己信箱未读，绝不含 WorldState。"""
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="睡觉",
+        response_mood="困",
+        activity_type="sleep",
+        observed_at="2026-06-03T08:00:00Z",
+    )
+    patched["unread"] = [_envelope("e1", "晌午的光很亮")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    pv = _FakeAgent.last_run()["prompt_vars"]
     assert pv is not None
-    # 不含任何 world 全局快照的痕迹
     blob = repr(pv).lower()
     assert "worldstate" not in blob
     assert "world_state" not in blob
@@ -179,17 +286,41 @@ async def test_input_excludes_world_state(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decision_carries_no_state_end_at(patched, monkeypatch):
-    """无 state_end_at：LLM 决策结构里压根没有"做到几点"这个字段。"""
-    assert "state_end_at" not in lw.LifeDecision.model_fields
-    assert "skip_until" not in lw.LifeDecision.model_fields
+async def test_no_world_snapshot_import():
+    """信息差结构保证：life_wake 模块绝不 import / 读 world 快照（代码层面）。
+
+    扫 AST 的 import 语句（不是 docstring 文本）—— docstring 里解释"绝不读
+    WorldState"是合法的，真正的命门是模块没 import / 引用任何 world 快照符号。
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(lw))
+    imported_modules: list[str] = []
+    for stmt in ast.walk(tree):
+        if isinstance(stmt, ast.ImportFrom) and stmt.module:
+            imported_modules.append(stmt.module)
+        elif isinstance(stmt, ast.Import):
+            imported_modules.extend(a.name for a in stmt.names)
+
+    for mod in imported_modules:
+        assert not mod.startswith("app.world"), f"life_wake 不该 import world 模块: {mod}"
+
+    # 也不该按名字引用任何 world 快照符号（在非注释/非 docstring 的标识符里）
+    referenced_names = {
+        n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
+    } | {
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+    }
+    for forbidden in ("WorldState", "read_presence", "read_world_state"):
+        assert forbidden not in referenced_names, f"life_wake 引用了 world 符号 {forbidden}"
 
 
 @pytest.mark.asyncio
 async def test_no_self_alarm_scheduled(patched, monkeypatch):
     """不自排闹钟：一轮里绝不 emit_delayed / emit_at 给自己定时唤醒。"""
     patched["unread"] = [_envelope("e1", "在看书")]
-    monkeypatch.setattr(lw, "_think", _StubThink(_decision(current_state="看书")))
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="看书"))
 
     called = {"delayed": 0, "at": 0}
 
@@ -199,7 +330,6 @@ async def test_no_self_alarm_scheduled(patched, monkeypatch):
     async def boom_at(*a, **k):
         called["at"] += 1
 
-    # 节点模块即便能 import 到这些原语，也绝不能调它们给自己排闹钟
     monkeypatch.setattr(lw, "emit_delayed", boom_delayed, raising=False)
     monkeypatch.setattr(lw, "emit_at", boom_at, raising=False)
 
@@ -209,61 +339,81 @@ async def test_no_self_alarm_scheduled(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_big_state_interrupted_and_rethinks(patched, monkeypatch):
-    """修复旧卡死的核心：处在一个大状态里，进一条指向她的 event 能把她推醒重想。"""
-    # 她正"在上课"——旧设计会锁死干等到 state_end_at
-    patched["snapshot"] = LifeState(
-        lane="coe-t3", persona_id="akao",
-        current_state="在上课", response_mood="专注", activity_type="study",
-        observed_at="2026-06-03T08:05:00Z",
-    )
-    patched["unread"] = [_envelope("e9", "千凪在门口喊你")]
-    think = _StubThink(_decision(current_state="被姐姐喊、抬头应一声", response_mood="无奈"))
-    monkeypatch.setattr(lw, "_think", think)
-
-    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
-
-    # 她读到了那条打断的 event（旧快照"在上课"被推醒重想，不干等）
-    assert "千凪在门口喊你" in repr(think.captured_vars)
-    # 重想后状态变了
-    assert patched["saved"][0]["current_state"] == "被姐姐喊、抬头应一声"
-    assert patched["marked"] == [["e9"]]
-
-
-@pytest.mark.asyncio
 async def test_digests_external_message_event(patched, monkeypatch):
     """消化外部消息：信箱里有 kind=external（刚和用户聊过）的 event，她能读到。"""
     patched["unread"] = [
         _envelope("ex1", "刚和原智鸿聊了几句", kind=EVENT_KIND_EXTERNAL),
     ]
-    think = _StubThink(_decision())
-    monkeypatch.setattr(lw, "_think", think)
+    _FakeAgent.install(monkeypatch, script=None)
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert "刚和原智鸿聊了几句" in repr(think.captured_vars)
+    pv = _FakeAgent.last_run()["prompt_vars"]
+    assert "刚和原智鸿聊了几句" in repr(pv)
     assert patched["marked"] == [["ex1"]]
 
 
 @pytest.mark.asyncio
-async def test_raises_intent_when_decided(patched, monkeypatch):
-    """她想完起了个意图 → raise_intent 回灌唤醒 world。"""
+async def test_raises_intent_when_model_calls_it(patched, monkeypatch):
+    """模型在循环里调 raise_intent → 回灌唤醒 world，intent_id 由本轮 event_ids 派生。"""
     patched["unread"] = [_envelope("e1", "天亮了")]
-    think = _StubThink(_decision(intent_summary="起床去厨房做早饭"))
-    monkeypatch.setattr(lw, "_think", think)
+    _FakeAgent.install(
+        monkeypatch, script=_script_update_then_intent(summary="起床去厨房做早饭")
+    )
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
     assert len(patched["intents"]) == 1
     assert patched["intents"][0]["persona_id"] == "akao"
     assert patched["intents"][0]["summary"] == "起床去厨房做早饭"
+    assert patched["intents"][0]["lane"] == "coe-t3"
+    # intent_id 必须是基于本轮 event_ids 的确定派生（整轮重放幂等）
+    import uuid
+
+    seed = "coe-t3:akao:e1"
+    expected = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    assert patched["intents"][0]["intent_id"] == expected
+
+
+def _script_intent_twice(summary1="去厨房煮咖啡", summary2="顺便给千凪带一杯"):
+    async def _run(tools):
+        by_name = {t.name: t for t in tools}
+        await by_name["raise_intent"].invoke({"summary": summary1})
+        await by_name["raise_intent"].invoke({"summary": summary2})
+
+    return _run
 
 
 @pytest.mark.asyncio
-async def test_no_intent_when_none(patched, monkeypatch):
-    """没起意图就不回灌 world（她只是默默换了个状态）。"""
+async def test_two_raise_intent_in_one_round_only_first_emits(patched, monkeypatch):
+    """一轮里模型调两次 raise_intent：只有第一个真正起意图（emit 一个 IntentRaised）。
+
+    intent_id 由本轮 event_ids 派生，同一轮两次共用同一个 intent_id —— 第二个会被
+    durable 去重层静默吞掉、意图无声丢失。第一刀：本轮已起过意图后第二次不再落
+    handler（绝不静默吞，工具层 log + 喂回提示）。
+    """
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(
+        monkeypatch,
+        script=_script_intent_twice(summary1="起床去厨房", summary2="再去叫醒千凪"),
+    )
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 一轮只起一个意图：只有第一个落到 handler
+    assert len(patched["intents"]) == 1
+    assert patched["intents"][0]["summary"] == "起床去厨房"
+    assert patched["intents"][0]["persona_id"] == "akao"
+    assert patched["intents"][0]["lane"] == "coe-t3"
+    # 收口照常标已读
+    assert patched["marked"] == [["e1"]]
+
+
+@pytest.mark.asyncio
+async def test_no_intent_when_model_doesnt_call_it(patched, monkeypatch):
+    """没调 raise_intent 就不回灌 world（她只是默默换了个状态）。"""
     patched["unread"] = [_envelope("e1", "外面在下雨")]
-    monkeypatch.setattr(lw, "_think", _StubThink(_decision(intent_summary=None)))
+    _FakeAgent.install(monkeypatch, script=_script_update())
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
@@ -272,79 +422,101 @@ async def test_no_intent_when_none(patched, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_unread_is_noop(patched, monkeypatch):
-    """信箱没未读（空唤醒）：不烧 LLM、不写快照、不标已读。"""
+    """信箱没未读（空唤醒）：不烧模型（不建 Agent）、不写、不标已读。"""
     patched["unread"] = []
-    think = _StubThink(_decision())
-    monkeypatch.setattr(lw, "_think", think)
+    _FakeAgent.install(monkeypatch, script=_script_update())
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert think.captured_vars is None  # LLM 没被调
+    assert _FakeAgent.instances == []  # Agent 从没被构造（模型没被烧）
     assert patched["saved"] == []
     assert patched["marked"] == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_cap_truncates_and_logs(patched, monkeypatch, caplog):
+    """安全阀（spec 决策 4）：一轮读 inbox 设上限，积压过多分批 / 截断并 log（不静默）。
+
+    只读上限那批喂给模型 + 只标那批已读；剩下的留未读、下轮再处理（不被吞）。
+    """
+    cap = lw._LIFE_INBOX_MAX
+    overflow = cap + 3
+    patched["unread"] = [_envelope(f"e{i}", f"动静{i}") for i in range(overflow)]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 只标了上限那批（前 cap 个），剩下的没标、仍未读
+    assert len(patched["marked"]) == 1
+    assert patched["marked"][0] == [f"e{i}" for i in range(cap)]
+    # 截断要 log，不静默
+    assert any("inbox" in r.message.lower() or "积压" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_recursion_limit_is_generous(monkeypatch):
+    """recursion_limit 给够（≥10）：让她在一轮里能连续调多次工具，不被 6 卡住。"""
+    assert lw._LIFE_WAKE_CFG.recursion_limit >= 10
 
 
 @pytest.mark.asyncio
 async def test_concurrent_second_round_reschedules_no_overwrite_no_loss(
     patched, fake_redis, monkeypatch
 ):
-    """必改 2 复现：同 (lane,persona) 两轮并发，第二轮单飞落空 → DebounceReschedule。
+    """必改 2：同 (lane,persona) 两轮并发，第二轮单飞落空 → DebounceReschedule。
 
-    旧 bug：life 一轮 LLM 跑几十秒 > debounce 窗口（5s），期间来新 event 会 fire
-    第二轮 life_wake **并发**。两轮并发会互相覆盖 LifeState、把 event 静默标已读
-    丢掉，绕回原痛点。
-
-    复现：让第一轮在 LLM 思考处阻塞（持锁不释放），同时启动第二轮。第二轮拿不到
-    单飞锁 → raise DebounceReschedule（交给 debounce handler CAS 重排，稍后再试），
-    且**不写快照、不标已读、不起意图**——既不覆盖第一轮，也不静默吞掉 event。
+    第一轮在循环里阻塞（持锁不释放），第二轮拿不到单飞锁 → raise
+    DebounceReschedule，且不写快照、不标已读、不起意图（既不覆盖第一轮，也不
+    静默吞 event）。
     """
     patched["unread"] = [_envelope("e1", "水壶在响"), _envelope("e2", "千凪在厨房")]
 
-    round1_in_think = asyncio.Event()
+    round1_in_run = asyncio.Event()
     release_round1 = asyncio.Event()
+    run_count = {"n": 0}
 
-    class _BlockingThink:
-        """第一轮在 LLM 思考处阻塞，模拟 LLM 跑几十秒未返回——持锁不释放。
+    async def _blocking_script(tools):
+        run_count["n"] += 1
+        if run_count["n"] == 1:
+            round1_in_run.set()
+            await release_round1.wait()
+            by_name = {t.name: t for t in tools}
+            await by_name["update_life_state"].invoke(
+                {
+                    "current_state": "第一轮慢慢想出的状态",
+                    "response_mood": "平静",
+                    "activity_type": "idle",
+                }
+            )
+        else:
+            by_name = {t.name: t for t in tools}
+            await by_name["update_life_state"].invoke(
+                {
+                    "current_state": "第二轮并发（不该发生）",
+                    "response_mood": "x",
+                    "activity_type": "y",
+                }
+            )
 
-        只有第一次调用阻塞；万一第二轮（无锁的旧 bug 下）也跑到 _think，让它
-        立即返回，不死锁——这样旧 bug 表现为"第二轮也写了快照/标了已读"的干净
-        断言失败（红），而不是 hang。
-        """
-
-        def __init__(self):
-            self.calls = 0
-
-        async def __call__(self, *, persona_id, snapshot, unread, prompt_vars):
-            self.calls += 1
-            if self.calls == 1:
-                round1_in_think.set()
-                await release_round1.wait()
-                return _decision(current_state="第一轮慢慢想出的状态")
-            return _decision(current_state="第二轮并发想出的状态（不该发生）")
-
-    think = _BlockingThink()
-    monkeypatch.setattr(lw, "_think", think)
+    _FakeAgent.install(monkeypatch, script=_blocking_script)
 
     arrived = EventArrived(lane="coe-t3", persona_id="akao")
 
-    # 第一轮：开始跑，会卡在 _think 里（持锁）
     round1 = asyncio.create_task(lw.life_wake_node(arrived))
-    await round1_in_think.wait()
+    await round1_in_run.wait()
 
-    # 第二轮：同 (lane,persona) 此刻并发进来 —— 单飞锁被第一轮持有，必须落空
     with pytest.raises(DebounceReschedule) as ei:
         await lw.life_wake_node(arrived)
 
-    # raise 的是这一批 EventArrived（让 handler 用它 CAS 重排）
     assert ei.value.data is arrived
-
-    # 第二轮没烧 LLM（只第一轮调了 _think），没覆盖第一轮快照，没标已读、没起意图
-    assert think.calls == 1, "第二轮不该并发再跑一遍 LLM"
+    assert run_count["n"] == 1, "第二轮不该并发再跑一遍循环"
     assert patched["saved"] == [], "第二轮被 reschedule 时绝不能写 LifeState（避免覆盖）"
     assert patched["marked"] == [], "第二轮绝不能标已读（避免静默吞掉 event）"
     assert patched["intents"] == []
 
-    # 放第一轮跑完：它正常写自己的快照 + 标自己读到的那批
     release_round1.set()
     await round1
 
@@ -356,17 +528,16 @@ async def test_concurrent_second_round_reschedules_no_overwrite_no_loss(
 async def test_single_flight_lock_released_allows_next_round(
     patched, fake_redis, monkeypatch
 ):
-    """单飞锁跑完即释放：上一轮结束后，下一轮能正常拿到锁、不被永久卡住。"""
+    """单飞锁跑完即释放：上一轮结束后，下一轮能正常拿锁、不被永久卡住。"""
     patched["unread"] = [_envelope("e1", "天亮了")]
-    monkeypatch.setattr(lw, "_think", _StubThink(_decision(current_state="第一轮")))
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="第一轮"))
     arrived = EventArrived(lane="coe-t3", persona_id="akao")
 
-    await lw.life_wake_node(arrived)  # 第一轮跑完、释放锁
+    await lw.life_wake_node(arrived)
 
     patched["unread"] = [_envelope("e2", "中午了")]
-    monkeypatch.setattr(lw, "_think", _StubThink(_decision(current_state="第二轮")))
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="第二轮"))
 
-    # 第二轮（串行、上一轮已释放锁）能正常拿锁、不抛 DebounceReschedule
     await lw.life_wake_node(arrived)
 
     assert [s["current_state"] for s in patched["saved"]] == ["第一轮", "第二轮"]

@@ -1,15 +1,19 @@
-"""world engine 节点 — Task 2 + stage3 联调收口.
+"""world engine 节点 — Task 2（agent 工具循环）.
 
-world 是这个世界的发动机。它被**三源唤醒**，每次唤醒走同一条回路：world_time
-跟现实走 → 读自己的客观快照（无快照=冷启动，让 LLM 按现实时间+节律放置三姐妹）
-→ 让 LLM 推演此刻该不该挪人（presence_changes）、有没有"够格成为 event"的事、
-锚在哪个房间 → 先应用在场变更（set_presence）再按所锚房间的当前在场集合投递
-（客观感官投影、绝不含情绪）→ 落最新快照 → 自排下次醒。
+world 是这个世界的发动机。它被**三源唤醒**，每次唤醒走同一条回路：先对账信箱
+自愈 → world_time 跟现实走 → 读自己的客观快照（无快照=冷启动）→ 把"谁在哪 /
+现在几点 / 这家作息节律 / 刚才大致光景"作为 prompt context 一次喂全，**跑一个
+agent 工具循环**：world 在循环里连续调 move_persona / emit_event / sleep 推进
+世界，平淡时段也主动产 event → 循环收口后落一版只含 world_time 的快照。
 
-世界"动起来"靠两条驱动：① 节律驱动（到点该上学/放学/吃饭，world 按客观边界把
-人挪到对应房间并产对应 ambient event）；② 意图裁决驱动（reason="intent" 时
-life 说"我想去厨房"，world LLM 判断合理就挪人并产 event）。谁移动、移动到哪、
-产不产 event、裁不裁准意图——全由 LLM 判断，代码只忠实落它的决定。
+它不再"填一张表"返回结构化大对象。"够不够格成 event""谁该感知""挪谁""睡多久"
+全在循环里由 LLM 用工具表达——把一个被训练成"连续调工具行动"的模型用它擅长的
+方式驱动，平淡时段也持续产生活的质感，世界不再凝固。
+
+世界"动起来"靠两条驱动：① 节律驱动（到点该上学/放学/吃饭，world 按客观边界
+move_persona 并 emit_event）；② 意图裁决驱动（reason="intent" 时 life 说"我想去
+厨房"，world 判断合理就 move_persona 并 emit_event）。谁移动、产不产 event、裁
+不裁准意图——全由 LLM 在循环里判断，代码只提供工具、忠实落它调工具的副作用。
 
 三个唤醒源（都打到 ``world_tick`` 节点，靠 :class:`WorldTick` 的 ``reason``
 区分）：
@@ -21,30 +25,37 @@ life 说"我想去厨房"，world LLM 判断合理就挪人并产 event）。谁
      都靠 world 启动，world 睡死世界就死。时间源不直接喂 ``WorldTick``：那会在
      源循环 ``_build_payload(WorldTick(ts=...))`` 处 ValidationError 杀 Pod
      （``WorldTick`` 无 ts、缺必填 lane），world 在生产里永远起不来。
-  2. **自排提前卡点**：world 处理完决定下次几时醒，``emit_delayed`` 一个
-     WorldTick，**只能在 10 分钟保底心跳内提前**（``WORLD_MAX_SELF_WAKE_MS
-     == WORLD_HEARTBEAT_MS``）。绝不许排长闹钟（早 6 点排到下午没人能踹它）。
+  2. **自排下次醒**：world 在循环里调 ``sleep(seconds)`` 工具
+     （:func:`app.world.tools.sleep`）决定下次几时醒，工具 ``emit_delayed`` 一个
+     ``WorldTick(reason="self")``，到期经 in-process 边接回本节点。sleep 上限
+     1h（``WORLD_SLEEP_MAX_SECONDS``），超限工具报错喂回模型重调，不静默夹。
   3. **life 回灌的意图**：life emit ``IntentRaised`` → :func:`intent_to_world_tick`
      翻成 ``WorldTick(reason="intent")`` 打到这个节点，world 被唤醒去裁决。
 
 赤尾设计宪法（硬约束）：
-  * "够不够格成 event""谁该感知""客观世界变没变"全由 LLM 判断——代码里没有
-    任何阈值 / 计数器 / 随机池 / if 分支替它决策。10 分钟心跳 / 自排只决定
-    "何时醒"，绝不进入世界内容的决策。
+  * "够不够格成 event""谁该感知""客观世界变没变""睡多久"全由 LLM 在循环里用
+    工具判断——代码里没有任何阈值 / 计数器 / 随机池 / if 分支替它决策。10 分钟
+    心跳 / sleep 上限只决定"何时醒 / 别睡死"，绝不进入世界内容的决策。
   * world 只做"客观事实 → 各位置客观可感形态"的感官投影，**绝不碰情绪 / 主观
-    解读**（那是 life 的事）。这条由喂 LLM 的 :func:`world_deliberation_instruction`
-    在 prompt 层钉死。
+    解读**（那是 life 的事）。这条由喂 LLM 的 :func:`world_loop_instruction` 在
+    prompt 层钉死。
   * 信息差产生侧过滤：event 锚定房间，只投给该房间当前在场的 persona（不为不
-    在场的人产 event）。
+    在场的人产 event）。这条由 :func:`app.world.tools.emit_event` 工具落实。
 
-框架原语：``Source.interval`` 心跳、``emit_delayed`` 自排、``deliver_event``
-投递（Task 1，按 room_id + 在场集合）、``insert_append`` / ``select_latest``
-快照（经 ``app.world.state``）。本节点只用现成原语，不改 runtime。
+失败语义命门：循环调 ``Agent.run`` 必须传 ``max_retries=1``——core 的 ``run``
+把整轮 ReAct 包在 ``@retry`` 里，一次 model 调用瞬时失败会整轮重放、重放已执行
+的 durable 工具（move/emit 是 durable 写）。关掉整轮重放后中途失败就抛、收口本
+轮已做的，靠 10min 保底心跳 + 开头的 ``renotify_unread`` 下次补（决策 3）。
+
+框架原语：``Source.interval`` 心跳、``emit_delayed`` 自排（经 sleep 工具）、
+``deliver_event`` 投递（经 emit_event 工具）、``insert_append`` /
+``select_latest`` 快照（经 ``app.world.state``）、``Agent.run`` agent 循环。本
+节点只用现成原语，不改 runtime / core。
 
 wiring（interval 心跳源 → WorldHeartbeatTick → heartbeat_to_world_tick；
 IntentRaised → intent_to_world_tick；WorldTick 纯 in-process 接回 world_tick）
-在 ``app/wiring/life_dataflow.py`` 收口。本模块提供节点 + domain + LLM 推演 +
-两个翻译节点。
+在 ``app/wiring/life_dataflow.py`` 收口。本模块提供 world 节点 + 唤醒信号 domain
++ agent 循环组装 + 两个翻译节点；world 的工具集在 ``app/world/tools.py``。
 """
 
 from __future__ import annotations
@@ -54,24 +65,28 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from pydantic import BaseModel
-
+from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
-from app.data.queries.mailbox import deliver_event, renotify_unread
-from app.domain.world_events import EVENT_KIND_AMBIENT, IntentRaised
+from app.agent.trace import make_session_id
+from app.data.queries.mailbox import renotify_unread
+from app.domain.world_events import IntentRaised
 from app.runtime.data import Data, Key
-from app.runtime.emit import emit, emit_delayed  # module-level so tests can monkeypatch
+from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.world.rhythm import household_rhythm
 from app.world.state import (
     WorldState,
-    personas_in_room,
     read_presence,
     read_world_state,
-    set_presence,
     write_world_state,
+)
+from app.world.tools import (
+    FEATURE_EMIT_COUNT,
+    FEATURE_SELF_WAKE,
+    WORLD_TOOLS,
+    fire_self_wake,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,13 +94,22 @@ logger = logging.getLogger(__name__)
 _CST = timezone(timedelta(hours=8))
 
 # 保底心跳：world 最长不睡过 10 分钟。这钉死最长停摆——所有 life 都靠 world
-# 启动，world 睡死世界就死。自排只能在这个窗口内提前卡点。
+# 启动，world 睡死世界就死。world 自己用 sleep 工具定下次几时醒（≤1h），这条
+# interval 是"睡死了没人踹"的兜底。
 WORLD_HEARTBEAT_SECONDS = 600
 WORLD_HEARTBEAT_MS = WORLD_HEARTBEAT_SECONDS * 1000
-# 自排上限 == 保底心跳：world 不许排长闹钟。
-WORLD_MAX_SELF_WAKE_MS = WORLD_HEARTBEAT_MS
 
-_WORLD_CFG = AgentConfig("world_deliberate", "offline-model", "world-deliberate")
+# agent 循环的 recursion_limit：给 world 足够轮数连续行动（一轮 model 调用可 batch
+# 多个工具，10~15 足矣）。设够而非无限，是"别失控空转"的安全阀（决策 4），不进
+# 世界内容决策。
+WORLD_RECURSION_LIMIT = 12
+
+_WORLD_CFG = AgentConfig(
+    "world_deliberate",
+    "offline-model",
+    "world-deliberate",
+    recursion_limit=WORLD_RECURSION_LIMIT,
+)
 
 
 class WorldHeartbeatTick(Data):
@@ -119,6 +143,7 @@ class WorldTick(Data):
 
     lane: Annotated[str, Key]
     reason: str = "heartbeat"          # heartbeat | self | intent
+    intent_id: str = ""                # reason==intent 时：意图稳定标识（round_id 派生靠它）
     intent_persona_id: str = ""        # reason==intent 时：谁起的意图
     intent_summary: str = ""           # reason==intent 时：意图内容
 
@@ -126,126 +151,40 @@ class WorldTick(Data):
         transient = True
 
 
-class WorldEventDraft(BaseModel):
-    """LLM 推演产出的一条 event 草案（客观感官投影）。
+def world_loop_instruction() -> str:
+    """喂给 world agent 循环的指令：用工具主动按节律推进世界、客观投影不碰情绪。
 
-    ``room_id`` 是 event 锚定的房间——world 按此房间的当前在场集合投递。
-    ``summary`` 是客观可感形态的文字（"飘来饭菜香"），绝不含情绪 / 解读。
-    """
-
-    room_id: str
-    summary: str
-    occurred_at: str
-
-
-class PresenceChange(BaseModel):
-    """LLM 推演产出的一条在场变更：某 persona 此刻挪到某房间。
-
-    这是世界"动起来"的核心——节律驱动（到点上学 / 放学 / 吃饭，world 按客观
-    边界把人挪到对应房间）和意图裁决驱动（life 说"我想去厨房"、world 判断合理
-    就挪人）两条路径都用这同一张表达。``room_id`` 与 event 锚定房间复用同一套
-    命名（LLM 看得到当前在场分布文本，引导它复用）。
-    """
-
-    persona_id: str
-    room_id: str
-
-
-class WorldDeliberation(BaseModel):
-    """LLM 一轮推演的结构化产出。
-
-    ``presence_changes`` 为空 = 没人挪动；非空 = world 判断该把某些人挪到新
-    房间（节律到点 / 意图裁准）。``events`` 为空 = world 克制不产 event（大部分
-    心跳如此）。``next_situation`` 让 world 落最新客观情形文字（world_time 不由
-    LLM 决定——它跟现实走，见 :func:`world_tick`）。
-
-    BaseModel（非 durable Data），所以可以用 list 字段表达多条变更，不撞
-    framework persist 层的 JSONB gap。
-    """
-
-    presence_changes: list[PresenceChange] = []
-    events: list[WorldEventDraft] = []
-    next_situation: str = ""
-    # 可选的提前卡点需求：world LLM 觉得"过会儿得再看一眼"（饭快好了想 5 分钟后
-    # 看一眼）时，填一个"几秒后再看"的秒数；不需要提前看就留 0。只有 0 < x 时
-    # world_tick 才 emit 一条 self WorldTick（夹到 ≤ 保底心跳），否则靠 interval
-    # 保底心跳兜底、不自排——避免每轮无条件自排在源循环下线性累积（必改 1）。
-    # 提前与否由 LLM 判断（赤尾宪法：代码不设阈值 / 定时替它决策）。
-    next_check_seconds: int = 0
-    # 历史兼容字段：world_time 现在跟现实走、不读这个；保留只为不破坏旧 LLM 输出
-    # 解析（LLM 多填一个字段无害）。world_tick 不再读它。
-    next_world_time: str = ""
-
-
-def world_deliberation_instruction() -> str:
-    """喂给 LLM 的推演指令：客观感官投影 + 在场变更 + 克制 + 绝不碰情绪。
-
-    赤尾设计宪法在 prompt 层的钉子——world 只产"客观可感形态"、只做"客观在场"，
-    禁止情绪 / 主观解读，且大部分时候克制不产 event。同时告诉 LLM 它能/该表达
-    在场变更（到点按节律挪人、裁准意图挪人）。
+    赤尾设计宪法在 prompt 层的钉子——world 是客观层，只产"客观可感形态"、只做
+    "客观在场"，禁止情绪 / 主观解读。这是 agent 工具指令（不是填表指令）：告诉她
+    她有 move_persona / emit_event / sleep 三个工具，主动按这家作息节律推进世界，
+    平淡时段也把生活质感 emit 出来，宁可多产平淡也别让世界死寂。
     """
     return (
-        "你是这个世界的客观层（world）。你只描述客观发生了什么、谁在哪个房间、"
-        "谁能感知到，绝不替任何角色决定她怎么想、怎么反应。\n\n"
-        "你能做两件客观的事：\n\n"
-        "【一、维护在场（presence_changes）】\n"
-        "你看得到三姐妹此刻各在哪个房间。结合这家的作息节律和当前缘由，判断此刻"
-        "该不该把谁挪到别的房间：\n"
-        "- 节律到点（绫奈该出门上学 / 放学回家、到饭点该去餐桌、千凪起床去厨房…）"
-        "这类有客观边界的事，把相关 persona 挪到对应房间；\n"
-        "- 有人起了意图要去某处（缘由里会写），你判断合理就把她挪过去。\n"
-        "用 presence_changes 表达：每条 = 某 persona_id 挪到某 room_id。没人需要"
-        "挪动就留空。room_id 用你在‘谁在哪个房间’里看到的同一套房间命名"
-        "（kitchen / 各自房间 / 玄关 / 客厅 / 餐桌 / 学校…）。\n\n"
-        "【二、产客观 event（events）】\n"
-        "判断此刻客观世界有没有‘够格成为 event’的事。绝大多数时刻是平淡的，"
-        "不值得惊动谁——这时就别产 event。只有真的发生了客观可感的变化时才产。\n"
-        "产出的每条 event：\n"
-        "- 锚定到它发生的房间（room_id），world 只会投给当时在那个房间的人。挪了"
-        "人就用挪动后的房间锚 event（比如把绫奈挪进玄关、就在玄关产‘开关门的声音’）；\n"
-        "- summary 必须是‘客观可感的形态’——是感官投影，比如‘厨房飘来煎蛋和"
-        "咖啡的香味’‘玄关传来开关门的声音’‘晌午的光照进房间’。\n"
-        "- 绝对禁止写情绪、主观解读或谁的心情（不要写‘千凪在疼你们’‘她很开心’"
-        "这类）。那是各角色自己的事，不是你的事。\n\n"
-        "【三、要不要过会儿再看一眼（next_check_seconds）】\n"
-        "你默认每 10 分钟会被叫醒看一眼世界。如果此刻有件事接下来很快会变化、值得"
-        "提前再看（比如饭快好了、想几分钟后看看出锅没；有人快到家了），填一个"
-        "next_check_seconds = 几秒后再看（必须小于 600 秒，也就是 10 分钟内提前）。"
-        "没有这种需要提前看的事就填 0，靠默认的 10 分钟节拍兜底。这只决定‘下次几时"
-        "再看一眼’，不进世界内容的决策。"
+        "你是这个世界的客观层（world）。你只负责客观发生了什么、谁在哪个房间、"
+        "谁能感知到，绝不替任何角色决定她怎么想、怎么反应——情绪和主观解读是各"
+        "角色自己的事，不是你的事。\n\n"
+        "你不是填一张表，而是一个会持续行动的世界引擎。你有三个工具，看一眼世界"
+        "后连续调用它们来推进世界，想清楚了再调，直到这一轮没有别的要做了就停："
+        "\n\n"
+        "- move_persona(persona_id, room_id)：按这家作息节律把谁挪到该在的房间"
+        "（绫奈到点出门上学 / 放学回家、到饭点去餐桌、千凪清晨起床去厨房…），"
+        "或裁准某人的意图把她挪过去。room_id 用你看到的同一套房间命名。\n"
+        "- emit_event(room_id, summary)：在某个房间产生一条客观可感的动静，只会"
+        "投给此刻在那个房间的人。summary 必须是感官投影——‘厨房飘来煎蛋和咖啡的"
+        "香味’‘玄关传来开关门的声音’‘晌午的光斜照进房间’‘窗外有鸟叫’。绝对禁止"
+        "写情绪、心情或主观解读。\n"
+        "- sleep(seconds)：看完这一轮，定多久后再来看一眼世界（必须 ≤ 3600 秒，"
+        "也就是最长 1 小时）。这是你唯一的自排手段。\n\n"
+        "世界是持续活的，不是只有大事才值得记。平淡的工作日下午也有午后的光、"
+        "厨房的水声、窗外的车响、楼下巷子的人声——把这些客观可感的生活质感主动"
+        "emit 出来。宁可多产几条平淡的动静，也别让世界陷入死寂。挪了人就用挪动后"
+        "的房间锚 event（把绫奈挪进玄关、就在玄关产‘开关门的声音’）。\n\n"
+        "看完、行动完这一轮后，用 sleep 定下次多久再看。"
     )
-
-
-async def _world_deliberate(
-    *,
-    lane: str,
-    snapshot: WorldState,
-    presence_text: str,
-    wake_reason: str,
-) -> WorldDeliberation:
-    """让 LLM 读客观快照 + 在场 + 节律，判断此刻产不产 event、产什么。
-
-    用 structured output（``Agent.extract``）拿回 :class:`WorldDeliberation`。
-    "够不够格成 event""谁该感知"全由 LLM 决定，代码不设阈值。测试 mock 本函数。
-    """
-    user_content = (
-        f"{world_deliberation_instruction()}\n\n"
-        f"【这家的作息节律（客观背景）】\n{household_rhythm()}\n\n"
-        f"【世界此刻】{snapshot.world_time}\n"
-        f"【当前客观情形】{snapshot.situation}\n"
-        f"【谁在哪个房间】\n{presence_text}\n\n"
-        f"【这次醒来的缘由】{wake_reason}\n\n"
-        "看一眼这个世界，判断此刻有没有够格成为 event 的客观变化。"
-    )
-    result = await Agent(_WORLD_CFG, update_trace=False).extract(
-        WorldDeliberation,
-        messages=[Message(role=Role.USER, content=user_content)],
-    )
-    return result  # type: ignore[return-value]
 
 
 async def _presence_text(lane: str) -> str:
-    """把三姐妹当前在场拼成一段客观文本喂给 LLM。"""
+    """把三姐妹当前在场拼成一段客观文本喂给 world 循环。"""
     lines = []
     for pid in ("chinagi", "akao", "ayana"):
         room = await read_presence(lane=lane, persona_id=pid)
@@ -254,114 +193,155 @@ async def _presence_text(lane: str) -> str:
 
 
 def _wake_reason_text(tick: WorldTick, *, cold_start: bool) -> str:
-    """把唤醒信号翻成给 LLM 的缘由文本。"""
+    """把唤醒信号翻成给 world 循环的缘由文本。"""
     if cold_start:
         return (
             "世界冷启动：这是 world 首次醒来，三姐妹还没被放置到任何房间。"
             "请按现实当前时间 + 这家作息节律，判断此刻三姐妹大致各在哪个房间，"
-            "用 presence_changes 把她们放置好。"
+            "用 move_persona 把她们放置好，再看看此刻该产什么动静。"
         )
     if tick.reason == "intent" and tick.intent_summary:
         who = tick.intent_persona_id or "某人"
-        return f"{who} 起了一个意图要裁决：{tick.intent_summary}"
+        return f"{who} 起了一个意图要你裁决：{tick.intent_summary}"
     if tick.reason == "self":
-        return "上一轮自排的提前卡点到了，再看一眼世界。"
-    return "保底心跳：例行看一眼世界。"
+        return "上一轮你自排的提前卡点到了，再看一眼世界。"
+    return "例行看一眼世界，看看此刻该推进些什么。"
+
+
+def _world_loop_messages(
+    *, snapshot: WorldState, presence_text: str, wake_reason: str
+) -> list[Message]:
+    """把"谁在哪 / 现在几点 / 作息节律 / 刚才大致光景"拼成喂给循环的 user 消息。
+
+    不再让模型写 situation（决策 6）；下次唤醒的"刚才大致什么样"由"谁在哪 +
+    最近 event"重建。这里把当前客观 context 一次喂全，让 world 在循环里行动。
+    """
+    user_content = (
+        f"{world_loop_instruction()}\n\n"
+        f"【这家的作息节律（客观背景）】\n{household_rhythm()}\n\n"
+        f"【世界此刻】{snapshot.world_time}\n"
+        f"【谁在哪个房间】\n{presence_text}\n\n"
+        f"【这次醒来的缘由】{wake_reason}\n\n"
+        "看一眼这个世界，连续调用工具推进它，最后用 sleep 定下次多久再看。"
+    )
+    return [Message(role=Role.USER, content=user_content)]
+
+
+def _derive_round_id(tick: WorldTick, now_iso: str) -> str:
+    """本轮确定性标识，按**触发源**稳定派生（整轮重放 event_id 幂等命门，决策 3）。
+
+    round_id 喂进 :func:`app.world.tools.derive_event_id`，整轮重放时同一条 event
+    要落同一 id 才能靠 ``deliver_event`` 去重。所以 round_id 不能从 now_iso 派生
+    （重投会取新时刻 → 新 event_id → 去重失效）：
+
+      * ``reason == "intent"``：意图唤醒经 ``wire(IntentRaised).durable()`` 跨进程，
+        world_tick 半途失败会被 durable 重投。用意图的稳定标识 ``intent_id`` 派生，
+        同一 IntentRaised 重投得同一 round_id → 同 event_id → 去重成功。
+      * heartbeat / self：纯 in-process、不会 durable 重投，用现实时刻派生即可
+        （不同时刻不同 round，符合"不同唤醒不同轮"的语义）。
+    """
+    if tick.reason == "intent" and tick.intent_id:
+        seed = f"{tick.lane}\x1fintent\x1f{tick.intent_id}"
+    else:
+        seed = f"{tick.lane}\x1f{tick.reason}\x1f{now_iso}"
+    return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 
 @node
 async def world_tick(tick: WorldTick) -> None:
-    """world 发动机的唯一入口：被三源唤醒 → 对账补敲遗留信箱 → 推演 → 改在场 → 投递 → 自排下次醒。
+    """world 发动机的唯一入口：被三源唤醒 → 对账补敲遗留信箱 → 跑 agent 工具循环 → 落快照。
 
     一次唤醒：
-      1. world_time 跟现实走：取现实当前时间（CST），不依赖 LLM 填。
-      2. 读自己的客观快照；无快照 = 冷启动，缘由告诉 LLM 这是首次醒来、要按现实
-         时间 + 节律把三姐妹放置到各自此刻该在的房间（不硬编逐时刻死表）。
-      3. 让 LLM 推演：此刻该不该挪人（presence_changes）、产不产 event（克制是常态）。
-      4. **先应用在场变更（set_presence），再按房间在场集合投递**——顺序命门：
-         刚挪进某房间的人，要能收到锚到该房间的 event。
-      5. 对每条 event：按所锚房间的当前在场集合投递（不在场的收不到）。
-      6. 落最新世界快照（world_time = 现实当前时间；situation 由 LLM 推进）。
-      7. 自排下次醒（≤ 10 分钟保底心跳，world 不许排长闹钟）。
+      1. **先对账补敲遗留信箱**（renotify_unread）—— 机械 IO 兜底，先于循环、
+         不依赖循环成功。
+      2. world_time 跟现实走：取现实当前时间（CST），不依赖 LLM 填。
+      3. 读自己的客观快照；无快照 = 冷启动，缘由告诉 LLM 这是首次醒来。
+      4. 把"谁在哪 / 现在几点 / 作息节律 / 刚才大致光景"作为 prompt context 喂入，
+         跑 agent 工具循环：world 在循环里连续调 move_persona / emit_event / sleep
+         推进世界（平淡时段也主动产 event）。工具读 ctx 里的 lane + round_id 行动。
+      5. 循环自然收口（不再调工具就停）；中途瞬时失败因 max_retries=1 直接抛、
+         收口本轮已做的，靠保底心跳 + 下次 renotify 补。
+      6. 落一版只含 world_time 的快照（不写 situation —— 决策 6）。
+
+    session：当天 world 的所有唤醒归到她自己一条按天滚动的 langfuse session
+    （make_session_id(lane, "world", 今天)），能连续看 world 一天的意识流。
     """
     lane = tick.lane
 
-    # 信箱对账自愈（放在最前、先于 LLM 推演）：补敲该 lane 下所有还有未读 event
+    # 信箱对账自愈（放在最前、先于 agent 循环）：补敲该 lane 下所有还有未读 event
     # 的 persona。deliver_event 的"落库 + emit 敲门"非原子，敲门撞上瞬时 redis
     # 失败时 event 会永久躺在信箱里没人读。world 保底心跳纯 in-process、不依赖
-    # redis，所以一定有机会跑——每轮一进来先把遗留的、丢掉的敲门补回来（某次敲门
-    # 丢了最多一个心跳周期后补上）。放在推演之前是关键：哪怕这轮 _world_deliberate
-    # 抛异常，积压的 stranded 信箱也已先补过敲。这是机械 IO 兜底、不经 LLM、不进
-    # 世界内容决策（补敲已读完的 persona 也无害：life_wake 空信箱 early-return +
-    # single_flight 锁），不违赤尾宪法。
+    # redis，所以一定有机会跑——每轮一进来先把遗留的、丢掉的敲门补回来。放在循环
+    # 之前是关键：哪怕这轮循环抛异常，积压的 stranded 信箱也已先补过敲。这是机械
+    # IO 兜底、不经 LLM、不进世界内容决策（补敲已读完的 persona 也无害：life_wake
+    # 空信箱 early-return + single_flight 锁），不违赤尾宪法。
     await renotify_unread(lane=lane)
 
     # world_time 跟现实走、不快进、不依赖 LLM —— spec key decision 2。
-    now_iso = datetime.now(_CST).isoformat()
+    now = datetime.now(_CST)
+    now_iso = now.isoformat()
 
     snapshot = await read_world_state(lane=lane)
     cold_start = snapshot is None
     if cold_start:
-        # 冷启动：还没有客观世界快照，起一版。起手 situation 只铺"现在大致是什么
-        # 光景"，不下命令、不碰情绪。三姐妹的初始放置交给 LLM 推演（见 wake_reason）。
-        snapshot = WorldState(
-            lane=lane,
-            world_time=now_iso,
-            situation="（世界刚起手，还没有人被放置。）",
-        )
+        # 冷启动：还没有客观世界快照，起一版只含 world_time（不写 situation）。
+        # 三姐妹的初始放置交给 LLM 在循环里 move_persona（见 wake_reason）。
+        snapshot = WorldState(lane=lane, world_time=now_iso, situation="")
 
     presence_text = await _presence_text(lane)
     wake_reason = _wake_reason_text(tick, cold_start=cold_start)
-
-    deliberation = await _world_deliberate(
-        lane=lane,
-        snapshot=snapshot,
-        presence_text=presence_text,
-        wake_reason=wake_reason,
+    messages = _world_loop_messages(
+        snapshot=snapshot, presence_text=presence_text, wake_reason=wake_reason
     )
 
-    # 先应用在场变更，再投递（顺序命门：刚挪进房间的人要收得到锚该房间的 event）。
-    # 谁移动、移动到哪全由 LLM 判断——这里只忠实落它的决定。
-    for change in deliberation.presence_changes:
-        await set_presence(
-            lane=lane, persona_id=change.persona_id, room_id=change.room_id
-        )
+    # 本轮确定性标识：派生 event_id 靠它（整轮重放同一条 event 同一 id，幂等去重）。
+    # round_id 必须从**触发源**稳定派生，不能从 now_iso：world_tick 半途失败被
+    # durable 重投时，若 round_id 取新 now_iso → 同 summary 生成新 event_id →
+    # deliver_event 去重失效、event 重复投（决策 3 命门）。
+    #   * intent 唤醒会 durable 重投 → 用意图稳定标识 intent_id 派生，重投得同一
+    #     round_id → 同 event_id → 去重成功。
+    #   * heartbeat / self 唤醒纯 in-process、不会 durable 重投 → 用现实时刻派生即可。
+    round_id = _derive_round_id(tick, now_iso)
 
-    # 按 event 锚定房间的当前在场集合投递（产生侧在场过滤：信息差命门）
-    for draft in deliberation.events:
-        recipients = await personas_in_room(lane=lane, room_id=draft.room_id)
-        event_id = uuid.uuid4().hex
-        for persona_id in recipients:
-            await deliver_event(
-                lane=lane,
-                persona_id=persona_id,
-                event_id=event_id,
-                summary=draft.summary,
-                occurred_at=draft.occurred_at,
-                kind=EVENT_KIND_AMBIENT,
-                source="world",
-                room_id=draft.room_id,
-            )
+    # session 按角色按天滚动：world 当天所有唤醒归到她自己一条 session（决策 5）。
+    session_id = make_session_id(lane, "world", now.strftime("%Y-%m-%d"))
 
-    # 落最新世界快照：world_time = 现实当前时间（每次唤醒都前进）；situation 由
-    # LLM 推进（没填就保留上一版）。冷启动也落这一版，让世界有了起点快照。
-    await write_world_state(
-        lane=lane,
-        world_time=now_iso,
-        situation=deliberation.next_situation or snapshot.situation,
+    # 工具体读 ctx.features 里的 lane + round_id 行动（lane / round 是机制层的，
+    # 不让模型在工具签名里填）。每轮新建两块 round-scoped 可变 state：
+    #   * FEATURE_EMIT_COUNT：emit_event 累计本轮已 emit 数，撑 soft cap 安全阀；
+    #   * FEATURE_SELF_WAKE：sleep 把待办 self-wake 写进来（覆盖而非追加），循环
+    #     收口后这里读它 emit 至多一条 self WorldTick（决策 4 唤醒风暴命门）。
+    context = AgentContext(
+        session_id=session_id,
+        features={
+            "world_lane": lane,
+            "world_round_id": round_id,
+            FEATURE_EMIT_COUNT: {"n": 0},
+            FEATURE_SELF_WAKE: {},
+        },
     )
 
-    # 自排下次醒：**只在 LLM 明确想提前看一眼时**才 emit 一条 self WorldTick。
-    # 没给提前需求（next_check_seconds <= 0）就不 emit，靠 wiring 里固定 600s 的
-    # interval 保底心跳唯一兜底——避免每轮无条件自排在源循环下线性累积（必改 1）。
-    # 提前与否由 world LLM 判断（赤尾宪法）；代码只把它的提前秒数夹到 ≤ 保底心跳
-    # （world 不许排长闹钟把世界睡死）后忠实落成一条 emit_delayed。
-    if deliberation.next_check_seconds > 0:
-        delay_ms = min(deliberation.next_check_seconds * 1000, WORLD_MAX_SELF_WAKE_MS)
-        await emit_delayed(
-            WorldTick(lane=lane, reason="self"),
-            delay_ms=delay_ms,
-        )
+    # 跑 agent 工具循环。max_retries=1 关掉整轮重放：move/emit 是 durable 写，一次
+    # model 调用瞬时失败若整轮重放会重放已执行的 durable 工具（决策 3 失败语义）。
+    # 中途失败就让它抛、收口本轮已做的，靠保底心跳 + 下次 renotify 补。
+    await Agent(_WORLD_CFG, tools=WORLD_TOOLS).run(
+        messages,
+        context=context,
+        max_retries=1,
+    )
+
+    # 循环收口后 emit 至多一条 self WorldTick（决策 4 唤醒风暴命门）：sleep 工具
+    # 把"下次几时醒"写进 round-scoped FEATURE_SELF_WAKE（覆盖而非追加），这里读
+    # 最后一次的待办、emit 唯一一条。没调 sleep（无待办）就不 emit，靠 10min 保底
+    # 心跳兜底。firing 机制收口在工具域（fire_self_wake），engine 只在循环收口处
+    # 触发。放在 write 之前还是之后无所谓——self-wake 不依赖快照。
+    await fire_self_wake(lane=lane, self_wake=context.features.get(FEATURE_SELF_WAKE))
+
+    # 落一版只含 world_time 的快照（决策 6：不让模型写 situation，避免退化成隐藏
+    # 填表 + 第二事实源）。world_time = 现实当前时间，每次唤醒都前进。冷启动也落
+    # 这一版，让世界有了起点快照。下次唤醒的"刚才大致什么样"由"谁在哪 + 最近
+    # event"重建。
+    await write_world_state(lane=lane, world_time=now_iso, situation="")
 
 
 @node
@@ -395,8 +375,11 @@ async def heartbeat_to_world_tick(_tick: WorldHeartbeatTick) -> None:
 async def intent_to_world_tick(intent: IntentRaised) -> None:
     """把 life 回灌的 ``IntentRaised`` 翻成 ``WorldTick(reason="intent")``。
 
-    life emit 的意图字段（persona_id / summary）翻进 WorldTick 的 intent_*，
-    让 world 被 reason="intent" 唤醒、把意图内容透给 LLM 裁决。这是 life → world
+    life emit 的意图字段（intent_id / persona_id / summary）翻进 WorldTick 的
+    intent_*，让 world 被 reason="intent" 唤醒、把意图内容透给 LLM 裁决。
+    ``intent_id`` 是意图的稳定标识，world_tick 用它派生本轮 round_id —— 同一条
+    IntentRaised 被 durable 重投时得同一 round_id → 同 event_id → 去重幂等
+    （决策 3 命门）。这是 life → world
     的回灌边的"变速箱"：上游 ``wire(IntentRaised).to(intent_to_world_tick)
     .durable()`` 承载 durable 跨进程；下游 ``WorldTick`` 经 in-process 边打到
     ``world_tick``。
@@ -408,6 +391,7 @@ async def intent_to_world_tick(intent: IntentRaised) -> None:
         WorldTick(
             lane=intent.lane,
             reason="intent",
+            intent_id=intent.intent_id,
             intent_persona_id=intent.persona_id,
             intent_summary=intent.summary,
         )

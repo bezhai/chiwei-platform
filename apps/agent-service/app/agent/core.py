@@ -151,14 +151,21 @@ class _NoOpRootSpan:
         pass
 
 
-def _set_current_trace(*, name: str | None = None, input: Any = None) -> None:
-    """Set the current trace's name / input, swallowing any langfuse failure.
+def _set_current_trace(
+    *, name: str | None = None, input: Any = None, session_id: str | None = None
+) -> None:
+    """Set the current trace's name / input / session, swallowing langfuse errors.
 
     ``None`` fields are skipped by the SDK, so passing only ``name`` updates the
-    trace name and leaves its input untouched. Tracing must never break the call.
+    trace name and leaves its input untouched. ``session_id`` is a *trace*
+    attribute (the langfuse v3 way to group related traces — it is NOT part of a
+    span's ``trace_context``); passing it groups this trace into that session.
+    Tracing must never break the call.
     """
     try:
-        _get_trace_client().update_current_trace(name=name, input=input)
+        _get_trace_client().update_current_trace(
+            name=name, input=input, session_id=session_id
+        )
     except Exception as exc:  # pragma: no cover - tracing must not break the call
         logger.warning("langfuse update_current_trace failed: %s", exc)
 
@@ -212,6 +219,7 @@ def _root_span(
     name: str | None,
     input: Any,
     update_trace: bool,
+    session_id: str | None = None,
 ):
     """Open the run/stream/extract root span and (optionally) name the trace.
 
@@ -221,6 +229,12 @@ def _root_span(
     context). When ``update_trace`` is set, the trace's name / input is
     overwritten with this agent's — guard / deep_research pass ``False`` so the
     parent trace keeps its identity while still getting our spans.
+
+    ``session_id`` (when provided) groups this trace into a langfuse session,
+    independently of who owns the trace name/input: a guard span with
+    ``update_trace=False`` still tags the session. ``None`` leaves the trace's
+    session untouched — the chat path passes nothing and behaves exactly as
+    before.
 
     Tracing must never break the call: every langfuse touch degrades to no-op.
 
@@ -232,6 +246,11 @@ def _root_span(
     tid = current_turn_trace_id()
     trace_context = {"trace_id": tid} if tid else None
     with _safe_current_span(span_name, input, trace_context) as span:
+        if session_id is not None:
+            # Session grouping is orthogonal to the name/input ownership below:
+            # set it whenever provided so even a guard (update_trace=False) on a
+            # session-bound run tags the trace's session.
+            _set_current_trace(session_id=session_id)
         if tid is not None:
             # Inside a turn the guards / main / post-safety are separate root
             # spans on one trace; langfuse would name the whole trace after the
@@ -518,6 +537,7 @@ class Agent:
                 name=self._cfg.trace_name,
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
+                session_id=context.session_id if context else None,
             ):
                 return await _run_loop(
                     model,
@@ -555,6 +575,7 @@ class Agent:
                     name=self._cfg.trace_name,
                     input=[m.to_dict() for m in full_messages],
                     update_trace=self._update_trace,
+                    session_id=context.session_id if context else None,
                 ):
                     async for chunk in _stream_loop(
                         model,

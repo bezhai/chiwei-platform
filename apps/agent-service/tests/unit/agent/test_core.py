@@ -326,6 +326,160 @@ class TestTurnTraceUnifiedName:
         client.update_current_trace.assert_not_called()
 
 
+class TestRootSpanSession:
+    """A run can be bound to a langfuse session so several traces (e.g. a
+    persona's whole day of thinking) group together. session_id is a *trace*
+    attribute (langfuse ``update_current_trace(session_id=...)``), NOT part of
+    ``start_as_current_span``'s ``trace_context``. When None the trace is
+    untouched re: session — the chat path passes no session and must behave
+    exactly as before."""
+
+    def test_session_id_set_on_trace_when_provided(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(
+                name="world-deliberate",
+                input=[1],
+                update_trace=True,
+                session_id="prod:world:2026-06-04",
+            ):
+                pass
+        # session_id reaches langfuse via update_current_trace (the only place
+        # session_id can be associated with a trace in the v3 SDK)
+        seen = [
+            c.kwargs.get("session_id")
+            for c in client.update_current_trace.call_args_list
+        ]
+        assert "prod:world:2026-06-04" in seen
+
+    def test_session_id_set_even_when_update_trace_false(self):
+        """A guard span (update_trace=False) on a session-bound run must still
+        tag the trace's session — session grouping is orthogonal to who owns the
+        trace name/input."""
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(
+                name="guard",
+                input=[],
+                update_trace=False,
+                session_id="prod:world:2026-06-04",
+            ):
+                pass
+        seen = [
+            c.kwargs.get("session_id")
+            for c in client.update_current_trace.call_args_list
+        ]
+        assert "prod:world:2026-06-04" in seen
+
+    def test_no_session_id_does_not_touch_trace_session(self):
+        """Backward compat: without a session_id the run behaves exactly as
+        before — no update_current_trace call carries a session_id, and an
+        update_trace=False/no-turn run still makes no update_current_trace call
+        at all (this is the chat / guard status quo)."""
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(name="guard", input=[], update_trace=False):
+                pass
+        client.update_current_trace.assert_not_called()
+
+    def test_no_session_id_with_update_trace_keeps_status_quo(self):
+        """update_trace=True without a session: still only name+input, no
+        session_id leaks into the call."""
+        from app.agent import core
+
+        client = MagicMock()
+        with patch.object(core, "_get_trace_client", return_value=client):
+            with core._root_span(name="afterthought", input=[1], update_trace=True):
+                pass
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw["name"] == "afterthought"
+        assert kw["input"] == [1]
+        assert kw.get("session_id") is None
+
+
+class TestRunSessionPlumbing:
+    """The session_id rides on AgentContext (the existing per-run context) so no
+    new public parameter is needed; chat passes a context without a session and
+    is unaffected, while world/life pass a context carrying their daily session
+    id."""
+
+    async def test_run_threads_context_session_id_to_root_span(self, mock_deps):
+        captured: dict = {}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _spy_span(*, name, input, update_trace, session_id=None):
+            captured["session_id"] = session_id
+            yield MagicMock()
+
+        with patch("app.agent.core._root_span", _spy_span):
+            await Agent(_CFG).run(
+                messages=[Message(role=Role.USER, content="hi")],
+                context=AgentContext(
+                    persona_id="luna", session_id="prod:luna:2026-06-04"
+                ),
+            )
+        assert captured["session_id"] == "prod:luna:2026-06-04"
+
+    async def test_run_without_context_passes_none_session(self, mock_deps):
+        captured: dict = {}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _spy_span(*, name, input, update_trace, session_id=None):
+            captured["session_id"] = session_id
+            yield MagicMock()
+
+        with patch("app.agent.core._root_span", _spy_span):
+            await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
+        assert captured["session_id"] is None
+
+    async def test_run_context_without_session_passes_none(self, mock_deps):
+        """The chat path: AgentContext built without session_id → no session."""
+        captured: dict = {}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _spy_span(*, name, input, update_trace, session_id=None):
+            captured["session_id"] = session_id
+            yield MagicMock()
+
+        with patch("app.agent.core._root_span", _spy_span):
+            await Agent(_CFG).run(
+                messages=[Message(role=Role.USER, content="hi")],
+                context=AgentContext(message_id="m", chat_id="c", persona_id="luna"),
+            )
+        assert captured["session_id"] is None
+
+    async def test_stream_threads_context_session_id_to_root_span(self, mock_deps):
+        captured: dict = {}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _spy_span(*, name, input, update_trace, session_id=None):
+            captured["session_id"] = session_id
+            yield MagicMock()
+
+        async def fake_stream(messages, *, tools=None, **kwargs):
+            yield StreamChunk(text="hi")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = fake_stream
+        with patch("app.agent.core._root_span", _spy_span):
+            async for _ in Agent(_CFG).stream(
+                messages=[Message(role=Role.USER, content="hi")],
+                context=AgentContext(session_id="prod:world:2026-06-04"),
+            ):
+                pass
+        assert captured["session_id"] == "prod:world:2026-06-04"
+
+
 class TestAgentConfig:
     def test_frozen(self):
         cfg = AgentConfig("p", "m", "t")

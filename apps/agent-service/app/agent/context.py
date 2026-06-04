@@ -27,6 +27,10 @@ class AgentContext:
     persona_id: str = ""
     image_registry: ImageRegistry | None = None
     features: dict[str, Any] = field(default_factory=dict)
+    # Optional langfuse session: when set, this run's trace is grouped into the
+    # named session so several traces (e.g. a persona's whole day of thinking)
+    # read as one stream. The chat path leaves it None — unbound, status quo.
+    session_id: str | None = None
 
     def get_feature(self, key: str, default: Any = None) -> Any:
         return self.features.get(key, default)

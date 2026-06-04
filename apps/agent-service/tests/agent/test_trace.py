@@ -244,3 +244,45 @@ def test_capture_current_span_context_inside_and_outside_span():
 
 def test_current_generation_context_none_by_default():
     assert current_generation_context() is None
+
+
+# ---------------------------------------------------------------------------
+# make_session_id — deterministic langfuse session id keyed by
+# (lane, actor, date). A persona's whole day of thinking groups into one
+# session so we can read a single role's "stream of consciousness" for a day.
+# ---------------------------------------------------------------------------
+
+from app.agent.trace import make_session_id  # noqa: E402
+
+
+def test_make_session_id_stable_for_same_inputs():
+    a = make_session_id("prod", "world", "2026-06-04")
+    b = make_session_id("prod", "world", "2026-06-04")
+    assert a == b
+
+
+def test_make_session_id_changes_across_days():
+    today = make_session_id("prod", "world", "2026-06-04")
+    tomorrow = make_session_id("prod", "world", "2026-06-05")
+    assert today != tomorrow
+
+
+def test_make_session_id_differs_per_actor():
+    world = make_session_id("prod", "world", "2026-06-04")
+    luna = make_session_id("prod", "luna", "2026-06-04")
+    assert world != luna
+
+
+def test_make_session_id_differs_per_lane():
+    prod = make_session_id("prod", "world", "2026-06-04")
+    coe = make_session_id("coe-x", "world", "2026-06-04")
+    assert prod != coe
+
+
+def test_make_session_id_is_readable():
+    """A human reading langfuse should recognise the session: the lane, actor,
+    and date are visible in the id, not opaquely hashed away."""
+    sid = make_session_id("prod", "world", "2026-06-04")
+    assert "prod" in sid
+    assert "world" in sid
+    assert "2026-06-04" in sid

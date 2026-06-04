@@ -84,6 +84,21 @@ def turn_trace(seed: str) -> Iterator[None]:
         _turn_trace_seed.reset(token)
 
 
+def make_session_id(lane: str, actor: str, date: str) -> str:
+    """Deterministic, readable langfuse session id for one actor's day.
+
+    Groups every LLM call an actor makes on a given day into a single langfuse
+    session, so a role's "stream of consciousness" for that day reads as one
+    thread. Same ``(lane, actor, date)`` always yields the same id; the date
+    rolls the session daily, and a different lane / actor never collides.
+
+    ``actor`` is "world" or a persona_id; ``date`` is ``YYYY-MM-DD``. The id is
+    left human-readable (lane / actor / date visible) rather than hashed so the
+    session is recognisable when browsing langfuse.
+    """
+    return f"{lane}:{actor}:{date}"
+
+
 def current_turn_trace_id() -> str | None:
     """The langfuse trace_id for the active turn, or None when outside any turn.
 
