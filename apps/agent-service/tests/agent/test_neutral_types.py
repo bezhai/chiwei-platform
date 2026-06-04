@@ -252,3 +252,90 @@ def test_stream_chunk_tool_result():
 def test_stream_chunk_reasoning_passthrough():
     chunk = StreamChunk(reasoning="thinking...")
     assert chunk.reasoning == "thinking..."
+
+
+# ---------------------------------------------------------------------------
+# Lossless replay serialization (session 续接)
+# ---------------------------------------------------------------------------
+#
+# ``to_dict`` / ``from_dict`` deliberately drop ``ToolCall.signature`` (the
+# gemini ``thought_signature`` blob) because they serve langfuse tracing, not
+# the wire. Replaying a stored transcript back into the model is a different
+# job: it MUST be lossless, including provider-private blobs, or the model's
+# behaviour drifts on the next turn. ``to_replay_dict`` / ``from_replay_dict``
+# are that lossless path — they round-trip through JSON (no raw bytes).
+
+
+def test_tool_call_replay_roundtrip_preserves_signature():
+    import json
+
+    tc = ToolCall(
+        id="c1",
+        name="emit_event",
+        arguments={"summary": "晚餐"},
+        signature=b"\x00\xff\x10gemini-thought",
+    )
+    # round-trips through JSON (Redis stores text) without loss
+    blob = json.dumps(tc.to_replay_dict())
+    restored = ToolCall.from_replay_dict(json.loads(blob))
+    assert restored.id == "c1"
+    assert restored.name == "emit_event"
+    assert restored.arguments == {"summary": "晚餐"}
+    assert restored.signature == b"\x00\xff\x10gemini-thought"
+
+
+def test_tool_call_replay_roundtrip_without_signature():
+    tc = ToolCall(id="c2", name="sleep", arguments={})
+    restored = ToolCall.from_replay_dict(tc.to_replay_dict())
+    assert restored.signature is None
+
+
+def test_to_dict_still_drops_signature_for_tracing():
+    # the existing tracing path must be unchanged: it omits signature.
+    tc = ToolCall(id="c1", name="x", arguments={}, signature=b"abc")
+    assert "signature" not in tc.to_dict()
+
+
+def test_message_replay_roundtrip_preserves_tool_calls_with_signature():
+    import json
+
+    msg = Message(
+        role=Role.ASSISTANT,
+        content="thinking out loud",
+        reasoning_content="internal monologue",
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                name="emit_event",
+                arguments={"summary": "晚餐进行中"},
+                signature=b"\x01\x02sig",
+            )
+        ],
+    )
+    blob = json.dumps(msg.to_replay_dict())
+    restored = Message.from_replay_dict(json.loads(blob))
+    assert restored.role == Role.ASSISTANT
+    assert restored.content == "thinking out loud"
+    assert restored.reasoning_content == "internal monologue"
+    assert len(restored.tool_calls) == 1
+    assert restored.tool_calls[0].signature == b"\x01\x02sig"
+    assert restored.tool_calls[0].arguments == {"summary": "晚餐进行中"}
+
+
+def test_message_replay_roundtrip_preserves_multimodal_content():
+    import json
+
+    msg = Message(
+        role=Role.TOOL,
+        content=[
+            ContentBlock.from_text("@3.png:"),
+            ContentBlock.from_image_url({"url": "https://x/3.png"}),
+        ],
+        tool_call_id="c1",
+    )
+    restored = Message.from_replay_dict(json.loads(json.dumps(msg.to_replay_dict())))
+    assert isinstance(restored.content, list)
+    assert restored.content[0].type == "text"
+    assert restored.content[1].type == "image_url"
+    assert restored.content[1].image_url == {"url": "https://x/3.png"}
+    assert restored.tool_call_id == "c1"

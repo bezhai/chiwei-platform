@@ -902,3 +902,299 @@ class TestExtract:
         assert sent[0].role == Role.SYSTEM
         assert sent[1].role == Role.USER
         assert sent[2].text() == "more"
+
+
+# ---------------------------------------------------------------------------
+# session续接 — stateful continuation across runs via a session_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_session_store(monkeypatch):
+    """Back the session store with a real RedisCapability over fakeredis.
+
+    ``app.agent.session`` resolves its capability via ``get_redis_capability``
+    when no ``cap`` is passed; the core passes none, so patching that resolver
+    routes the Agent's session reads/writes into an in-test fakeredis we can
+    inspect. Returns the capability so tests can assert what landed in Redis.
+    """
+    import fakeredis.aioredis
+
+    from app.agent import session as session_mod
+    from app.capabilities.redis import RedisCapability
+
+    cap = RedisCapability(fakeredis.aioredis.FakeRedis(decode_responses=True))
+
+    async def _get_cap():
+        return cap
+
+    monkeypatch.setattr(session_mod, "get_redis_capability", _get_cap)
+    return cap
+
+
+class TestSessionContinuation:
+    """``Agent.run / stream`` with a ``session_id`` reads the stored transcript,
+    prepends it (between the system prompt and the new messages) so the model
+    continues, and appends this round's new messages back to Redis with a
+    refreshed TTL. Without a session_id the path is byte-for-byte unchanged and
+    never touches Redis (chat status quo)."""
+
+    async def test_second_run_input_carries_first_round_transcript(
+        self, mock_deps, fake_session_store
+    ):
+        from app.agent.neutral import ToolCall
+
+        # First round: a tool call + result, then a final reply. The assistant
+        # tool call carries a provider-private signature that MUST survive replay.
+        from app.agent.tooling import tool
+
+        @tool
+        async def world_tool(x: str) -> str:
+            """A world tool.
+
+            Args:
+                x: in.
+            """
+            return "餐桌已收"
+
+        mock_deps["model"].complete = AsyncMock(
+            side_effect=[
+                Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    reasoning_content="想了想",
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="world_tool",
+                            arguments={"x": "v"},
+                            signature=b"\x00\xffsig",
+                        )
+                    ],
+                ),
+                Message(role=Role.ASSISTANT, content="第一轮做完了"),
+            ]
+        )
+        sid = "prod:world:2026-06-04"
+        await Agent(_CFG, tools=[world_tool]).run(
+            messages=[Message(role=Role.USER, content="第一轮醒")],
+            session_id=sid,
+        )
+
+        # Second round: a single reply. Capture what the model is fed.
+        mock_deps["model"].complete = AsyncMock(
+            return_value=Message(role=Role.ASSISTANT, content="第二轮")
+        )
+        await Agent(_CFG, tools=[world_tool]).run(
+            messages=[Message(role=Role.USER, content="第二轮醒")],
+            session_id=sid,
+        )
+
+        sent = mock_deps["model"].complete.await_args.args[0]
+        texts = [m.text() for m in sent]
+        # the system prompt is first, then the FIRST round's transcript, then
+        # this round's new message — the model is genuinely continuing.
+        assert "第一轮醒" in texts
+        assert "第一轮做完了" in texts
+        assert "第二轮醒" in texts
+        # lossless replay: the stored assistant tool-call kept its signature.
+        replayed_assistant = next(
+            m for m in sent if m.role == Role.ASSISTANT and m.tool_calls
+        )
+        assert replayed_assistant.tool_calls[0].signature == b"\x00\xffsig"
+        assert replayed_assistant.reasoning_content == "想了想"
+        # the tool RESULT from round 1 is replayed too
+        tool_msg = next(m for m in sent if m.role == Role.TOOL)
+        assert tool_msg.text() == "餐桌已收"
+        # ordering: system prompt precedes replayed history precedes new turn
+        assert sent[0].role == Role.SYSTEM
+        assert texts.index("第一轮醒") < texts.index("第二轮醒")
+
+    async def test_no_session_id_does_not_touch_redis(
+        self, mock_deps, fake_session_store
+    ):
+        # Without a session_id the run must not read or write Redis at all.
+        from app.agent import session as session_mod
+
+        loads: list = []
+        appends: list = []
+        orig_load = session_mod.load_session
+        orig_append = session_mod.append_session
+
+        async def _spy_load(*a, **k):
+            loads.append(a)
+            return await orig_load(*a, **k)
+
+        async def _spy_append(*a, **k):
+            appends.append(a)
+            return await orig_append(*a, **k)
+
+        import app.agent.core as core_mod
+
+        with (
+            patch.object(core_mod, "load_session", _spy_load),
+            patch.object(core_mod, "append_session", _spy_append),
+        ):
+            result = await Agent(_CFG).run(
+                messages=[Message(role=Role.USER, content="hi")]
+            )
+        assert result.text() == "hello"
+        assert loads == []
+        assert appends == []
+
+    async def test_no_session_id_input_is_unchanged(self, mock_deps):
+        # byte-for-byte status quo: prompt + messages, nothing prepended.
+        mock_deps["compile_to_messages"].return_value = [
+            Message(role=Role.SYSTEM, content="sys"),
+        ]
+        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
+        sent = mock_deps["model"].complete.await_args.args[0]
+        assert [m.text() for m in sent] == ["sys", "hi"]
+
+    async def test_run_appends_round_to_redis_and_refreshes_ttl(
+        self, mock_deps, fake_session_store
+    ):
+        from app.agent.session import (
+            SESSION_TTL_SECONDS,
+            load_session,
+            session_key,
+        )
+
+        sid = "prod:world:2026-06-04"
+        await Agent(_CFG).run(
+            messages=[Message(role=Role.USER, content="醒了")],
+            session_id=sid,
+        )
+        stored = await load_session(sid, cap=fake_session_store)
+        # the round (user input + assistant reply) was persisted
+        assert [m.text() for m in stored] == ["醒了", "hello"]
+        # TTL set/refreshed to the 24h window
+        ttl = await fake_session_store._client.ttl(session_key(sid))
+        assert 0 < ttl <= SESSION_TTL_SECONDS
+
+    async def test_session_id_drives_langfuse_session_grouping(self, mock_deps):
+        # The same id is both the Redis key AND the langfuse session tag
+        # (decision 3). A run with a session_id groups its trace into that
+        # session even without a context.
+        captured: dict = {}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _spy_span(*, name, input, update_trace, session_id=None):
+            captured["session_id"] = session_id
+            yield MagicMock()
+
+        with (
+            patch("app.agent.core._root_span", _spy_span),
+            patch("app.agent.core.load_session", new_callable=AsyncMock,
+                  return_value=[]),
+            patch("app.agent.core.append_session", new_callable=AsyncMock),
+        ):
+            await Agent(_CFG).run(
+                messages=[Message(role=Role.USER, content="hi")],
+                session_id="prod:world:2026-06-04",
+            )
+        assert captured["session_id"] == "prod:world:2026-06-04"
+
+    async def test_stream_continuation_carries_prior_transcript(
+        self, mock_deps, fake_session_store
+    ):
+        # First round via stream: text reply only.
+        async def round1(messages, *, tools=None, **kwargs):
+            yield StreamChunk(text="第一轮回复")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = round1
+        sid = "prod:akao:2026-06-04"
+        async for _ in Agent(_CFG).stream(
+            messages=[Message(role=Role.USER, content="第一轮")],
+            session_id=sid,
+        ):
+            pass
+
+        # Second round: capture what the model is fed.
+        async def round2(messages, *, tools=None, **kwargs):
+            yield StreamChunk(text="第二轮回复")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = round2
+        async for _ in Agent(_CFG).stream(
+            messages=[Message(role=Role.USER, content="第二轮")],
+            session_id=sid,
+        ):
+            pass
+
+        # assert via the persisted transcript (stream is a plain fn, no mock to
+        # introspect args): round 1's user + assistant reply landed, and round 2
+        # appended on top — proving the stream path also reads + writes the
+        # session.
+        from app.agent.session import load_session
+
+        stored = await load_session(sid, cap=fake_session_store)
+        texts = [m.text() for m in stored]
+        assert texts == ["第一轮", "第一轮回复", "第二轮", "第二轮回复"]
+
+
+class TestSessionWriteFailureSwallowed:
+    """The session store is a *working cache*: a write-back failure must NOT turn
+    an already-completed round (with its tool side effects emit/move/state writes
+    already done) into a failed round. If durable nodes saw the exception they'd
+    re-deliver / DLQ a round whose effects already happened. So append failures
+    are logged and swallowed; the run still returns its final assistant message,
+    and next round cold-starts from PG hard facts (symmetric to load's missing
+    key → cold start)."""
+
+    async def test_run_returns_result_when_append_session_raises(
+        self, mock_deps, fake_session_store, caplog
+    ):
+        import logging
+
+        from app.capabilities._errors import CapabilityCallFailed
+
+        with patch(
+            "app.agent.core.append_session",
+            new_callable=AsyncMock,
+            side_effect=CapabilityCallFailed("redis set_with_ttl failed"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = await Agent(_CFG).run(
+                    messages=[Message(role=Role.USER, content="醒了")],
+                    session_id="prod:world:2026-06-04",
+                )
+        # the round's final assistant message is still returned, not an error
+        assert result.text() == "hello"
+        # the failure was logged (observable), not silently dropped
+        assert any(
+            "session" in r.message.lower() for r in caplog.records
+        )
+
+    async def test_stream_completes_when_append_session_raises(
+        self, mock_deps, fake_session_store, caplog
+    ):
+        import logging
+
+        from app.capabilities._errors import CapabilityCallFailed
+
+        async def fake_stream(messages, *, tools=None, **kwargs):
+            yield StreamChunk(text="第一轮回复")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = fake_stream
+
+        with patch(
+            "app.agent.core.append_session",
+            new_callable=AsyncMock,
+            side_effect=CapabilityCallFailed("redis set_with_ttl failed"),
+        ):
+            collected = []
+            with caplog.at_level(logging.WARNING):
+                async for chunk in Agent(_CFG).stream(
+                    messages=[Message(role=Role.USER, content="第一轮")],
+                    session_id="prod:akao:2026-06-04",
+                ):
+                    collected.append(chunk)
+        # the stream produced its chunks and finished cleanly despite the
+        # write-back blowing up — no exception propagated to the consumer.
+        texts = "".join(c.text or "" for c in collected)
+        assert texts == "第一轮回复"
+        assert any("session" in r.message.lower() for r in caplog.records)

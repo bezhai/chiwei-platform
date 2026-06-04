@@ -72,6 +72,7 @@ from app.agent.neutral import (
 )
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
+from app.agent.session import append_session, load_session
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
@@ -351,6 +352,7 @@ async def _run_loop(
     context: AgentContext | None,
     recursion_limit: int,
     model_kwargs: dict[str, Any] | None = None,
+    transcript_sink: list[Message] | None = None,
 ) -> Message:
     """Drive ``model.complete`` until the assistant stops calling tools.
 
@@ -363,6 +365,12 @@ async def _run_loop(
     forwarded to every model call — dropping them silently changes behaviour.
     ``recursion_limit`` caps the number of model calls so a model that keeps
     asking for tools can't loop forever.
+
+    ``transcript_sink`` (when given) collects every message *this loop produces*
+    — each assistant turn (with tool calls) + each tool result message + the
+    final assistant reply — in order, so the session store can persist the round
+    losslessly (the in-memory ``Message`` objects still carry provider blobs like
+    ``ToolCall.signature``). It is left untouched on the stateless path.
 
     Tool calls within one assistant turn are dispatched *sequentially* (langgraph
     ToolNode ran them concurrently). Results are identical; only multi-tool-turn
@@ -377,16 +385,23 @@ async def _run_loop(
     for _ in range(max(1, recursion_limit)):
         last = await model.complete(convo, tools=tool_defs, **extra)
         if not last.tool_calls:
+            if transcript_sink is not None:
+                transcript_sink.append(last)
             return last
 
         convo.append(last)
+        if transcript_sink is not None:
+            transcript_sink.append(last)
         for call in last.tool_calls:
             with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
                 normalised = _normalise_tool_result(result)
                 _record_tool_output(span, normalised)
-            convo.append(normalised.to_message())
+            tool_msg = normalised.to_message()
+            convo.append(tool_msg)
+            if transcript_sink is not None:
+                transcript_sink.append(tool_msg)
 
     # recursion limit hit: return the last assistant message we have.
     return last if last is not None else Message(role=Role.ASSISTANT, content="")
@@ -400,6 +415,7 @@ async def _stream_loop(
     context: AgentContext | None,
     recursion_limit: int,
     model_kwargs: dict[str, Any] | None = None,
+    transcript_sink: list[Message] | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Stream neutral chunks; on a tool-call turn, dispatch and loop.
 
@@ -412,6 +428,12 @@ async def _stream_loop(
 
     ``model_kwargs`` are forwarded to every model call. ``recursion_limit`` caps
     the number of streamed turns.
+
+    ``transcript_sink`` (when given) collects every message this loop produces —
+    each assistant tool-call turn + each tool result + the final assistant reply
+    (reconstructed from the accumulated text/reasoning, since the no-tool-call
+    final turn is never appended to ``convo``) — so the session store can persist
+    the round. Untouched on the stateless path.
     """
     convo = list(messages)
     tool_defs = _tooldefs(tools)
@@ -432,33 +454,69 @@ async def _stream_loop(
             yield chunk
 
         if not turn_calls:
+            # final assistant turn — never appended to convo, so capture it for
+            # the session round explicitly (mirrors _run_loop's final append).
+            if transcript_sink is not None:
+                transcript_sink.append(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content="".join(text_parts),
+                        reasoning_content="".join(reasoning_parts) or None,
+                    )
+                )
             return
 
         # rebuild the assistant turn from what we streamed, then dispatch. The
         # reasoning is carried back too (mirroring _run_loop, where the Message
         # returned by model.complete already holds reasoning_content) so the
         # next turn's context doesn't lose the model's thoughts.
-        convo.append(
-            Message(
-                role=Role.ASSISTANT,
-                content="".join(text_parts),
-                reasoning_content="".join(reasoning_parts) or None,
-                tool_calls=list(turn_calls),
-            )
+        assistant_turn = Message(
+            role=Role.ASSISTANT,
+            content="".join(text_parts),
+            reasoning_content="".join(reasoning_parts) or None,
+            tool_calls=list(turn_calls),
         )
+        convo.append(assistant_turn)
+        if transcript_sink is not None:
+            transcript_sink.append(assistant_turn)
         for call in turn_calls:
             with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
                 result = _normalise_tool_result(result)
                 _record_tool_output(span, result)
-            convo.append(result.to_message())
+            tool_msg = result.to_message()
+            convo.append(tool_msg)
+            if transcript_sink is not None:
+                transcript_sink.append(tool_msg)
             yield StreamChunk(tool_result=result)
 
 
 @contextmanager
 def _nullctx():
     yield None
+
+
+async def _persist_session(session_id: str, messages: list[Message]) -> None:
+    """Write this round back to the session cache, swallowing write failures.
+
+    The session store is a working cache (spec decision 2), and this runs only
+    *after* the round's model + tool side effects have completed. A Redis write
+    failure here must never escape: an exception out of ``Agent.run`` makes the
+    caller's durable @node treat an already-completed round as failed → re-deliver
+    / DLQ a round whose effects already happened, and the @node's turn marker
+    never gets written so idempotency is defeated. Logging + swallowing keeps the
+    round successful; the next round simply cold-starts from PG hard facts
+    (symmetric to ``load_session`` returning ``[]`` on a missing key).
+    """
+    try:
+        await append_session(session_id, messages)
+    except Exception as exc:  # noqa: BLE001 - cache write-back must not fail a round
+        logger.warning(
+            "agent session %s write-back failed, round kept (cold-start next): %s",
+            session_id,
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -520,11 +578,26 @@ class Agent:
         *,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
+        session_id: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> Message:
-        """Execute the ReAct loop and return the final assistant ``Message``."""
+        """Execute the ReAct loop and return the final assistant ``Message``.
+
+        ``session_id`` (decision 1) turns this into a *stateful* continuation:
+        the stored transcript for that id is read from Redis and prepended after
+        the system prompt, the run continues from there, and this round's new
+        messages are appended back (24h TTL refreshed). ``None`` is the stateless
+        status quo — Redis is never touched and behaviour is byte-for-byte as
+        before. The id also tags the langfuse session (same id, both jobs —
+        decision 3).
+        """
         model, prompt_messages = await self._prepare(prompt_vars or {})
-        full_messages = [*prompt_messages, *messages]
+
+        # Read the stored history ONCE (before retry) so a retried attempt
+        # replays the same prefix and never double-reads. None → stateless.
+        history = await load_session(session_id) if session_id else []
+        full_messages = [*prompt_messages, *history, *messages]
+        trace_session_id = session_id or (context.session_id if context else None)
 
         @_retry_decorator(
             attempts=max_retries,
@@ -532,23 +605,38 @@ class Agent:
             max_delay_s=float(_BACKOFF_MAX),
             retry_on=RETRYABLE_EXCEPTIONS,
         )
-        async def _invoke() -> Message:
+        async def _invoke() -> tuple[Message, list[Message]]:
+            sink: list[Message] | None = [] if session_id else None
             with _root_span(
                 name=self._cfg.trace_name,
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
-                session_id=context.session_id if context else None,
+                session_id=trace_session_id,
             ):
-                return await _run_loop(
+                result = await _run_loop(
                     model,
                     messages=full_messages,
                     tools=self._tools,
                     context=context,
                     recursion_limit=self._cfg.recursion_limit,
                     model_kwargs=self._model_kwargs,
+                    transcript_sink=sink,
                 )
+                return result, (sink or [])
 
-        return await _invoke()
+        result, produced = await _invoke()
+        # Append this round only on success (after the loop returns / retries
+        # settle), so a transient failure that retries the whole call doesn't
+        # leave a half-written turn behind. The session store is a *working
+        # cache*: by the time we get here the round's tool side effects
+        # (emit/move/state writes) have already happened, so a cache write-back
+        # failure must NOT bubble out — that would make a durable node treat an
+        # already-completed round as failed and re-deliver / DLQ it. Log and
+        # swallow; next round cold-starts from PG hard facts (symmetric to
+        # load_session's missing-key → cold start).
+        if session_id:
+            await _persist_session(session_id, [*messages, *produced])
+        return result
 
     async def stream(
         self,
@@ -556,6 +644,7 @@ class Agent:
         *,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
+        session_id: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream neutral ``StreamChunk``s through the ReAct loop.
@@ -564,18 +653,28 @@ class Agent:
         consumer, replaying would duplicate the prefix. Backoff math matches
         ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
         streaming and non-streaming paths stay consistent.
+
+        ``session_id`` (decision 1) makes the stream a stateful continuation:
+        the stored transcript is read once up front and prepended after the
+        system prompt; once the stream completes, this round's new messages are
+        appended back (24h TTL refreshed). ``None`` is the stateless status quo —
+        Redis untouched, behaviour byte-for-byte as before.
         """
         model, prompt_messages = await self._prepare(prompt_vars or {})
-        full_messages = [*prompt_messages, *messages]
+
+        history = await load_session(session_id) if session_id else []
+        full_messages = [*prompt_messages, *history, *messages]
+        trace_session_id = session_id or (context.session_id if context else None)
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
+            sink: list[Message] | None = [] if session_id else None
             try:
                 with _root_span(
                     name=self._cfg.trace_name,
                     input=[m.to_dict() for m in full_messages],
                     update_trace=self._update_trace,
-                    session_id=context.session_id if context else None,
+                    session_id=trace_session_id,
                 ):
                     async for chunk in _stream_loop(
                         model,
@@ -584,9 +683,16 @@ class Agent:
                         context=context,
                         recursion_limit=self._cfg.recursion_limit,
                         model_kwargs=self._model_kwargs,
+                        transcript_sink=sink,
                     ):
                         tokens_yielded = True
                         yield chunk
+                # Stream finished cleanly — persist this round (success only).
+                # Same working-cache rule as run(): a write-back failure here is
+                # logged and swallowed, never propagated, so an already-streamed
+                # round isn't turned into a failed round by a cache miss.
+                if session_id:
+                    await _persist_session(session_id, [*messages, *(sink or [])])
                 return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded or attempt >= max_retries:

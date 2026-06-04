@@ -277,6 +277,15 @@ class _RaisingRedis:
     async def smembers(self, key):  # noqa: ARG002
         raise self._exc
 
+    async def get(self, key):  # noqa: ARG002
+        raise self._exc
+
+    async def set(self, *a, **kw):  # noqa: ARG002
+        raise self._exc
+
+    async def expire(self, *a, **kw):  # noqa: ARG002
+        raise self._exc
+
     def pipeline(self, *_a, **_kw):  # pragma: no cover — not used by these tests
         raise self._exc
 
@@ -431,3 +440,71 @@ async def test_smembers_timeout_maps_to_capability_timeout(lane_prod):
     cap = RedisCapability(_RaisingRedis(redis.exceptions.TimeoutError("slow")))
     with pytest.raises(CapabilityTimeout):
         await cap.smembers("k")
+
+
+# ---------------------------------------------------------------------------
+# String get / set_with_ttl / expire (added for agent session续接)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_with_ttl_then_get(cap, lane_prod, fake_redis):
+    await cap.set_with_ttl("s:k", "payload", ttl_seconds=60)
+    assert await cap.get("s:k") == "payload"
+    # TTL was applied
+    assert 0 < await fake_redis.ttl("s:k") <= 60
+
+
+@pytest.mark.asyncio
+async def test_get_missing_returns_none(cap, lane_prod):
+    assert await cap.get("s:missing") is None
+
+
+@pytest.mark.asyncio
+async def test_set_with_ttl_refreshes_ttl(cap, lane_prod, fake_redis):
+    await cap.set_with_ttl("s:k", "v1", ttl_seconds=10)
+    # rewriting with a longer ttl refreshes it (SET resets the key's expiry)
+    await cap.set_with_ttl("s:k", "v2", ttl_seconds=100)
+    assert await cap.get("s:k") == "v2"
+    assert await fake_redis.ttl("s:k") > 10
+
+
+@pytest.mark.asyncio
+async def test_expire_refreshes_ttl(cap, lane_prod, fake_redis):
+    await cap.set_with_ttl("s:k", "v", ttl_seconds=10)
+    await cap.expire("s:k", 200)
+    assert await fake_redis.ttl("s:k") > 10
+
+
+@pytest.mark.asyncio
+async def test_get_passes_key_through_unchanged(cap, fake_redis):
+    token = _set_lane("ppe-s")
+    try:
+        await cap.set_with_ttl("s:lane", "v", ttl_seconds=60)
+        assert await cap.get("s:lane") == "v"
+        assert await fake_redis.get("ppe-s:s:lane") is None
+    finally:
+        lane_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_get_redis_error_maps_to_call_failed(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
+    with pytest.raises(CapabilityCallFailed) as ei:
+        await cap.get("k")
+    assert ei.value.meta.get("op") == "get"
+
+
+@pytest.mark.asyncio
+async def test_set_with_ttl_timeout_maps_to_capability_timeout(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.TimeoutError("slow")))
+    with pytest.raises(CapabilityTimeout):
+        await cap.set_with_ttl("k", "v", ttl_seconds=10)
+
+
+@pytest.mark.asyncio
+async def test_expire_redis_error_maps_to_call_failed(lane_prod):
+    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
+    with pytest.raises(CapabilityCallFailed) as ei:
+        await cap.expire("k", 10)
+    assert ei.value.meta.get("op") == "expire"
