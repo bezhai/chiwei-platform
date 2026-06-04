@@ -29,7 +29,7 @@ def test_life_dataflow_wiring_compiles():
     assert graph is not None
 
 
-def test_life_dataflow_wire_count_is_11():
+def test_life_dataflow_wire_count_is_12():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
@@ -40,15 +40,17 @@ def test_life_dataflow_wire_count_is_11():
     #   per-persona business：VoiceRequest、LightReviewRequest、HeavyReviewRequest（3）
     #   world/life event 闭环：WorldHeartbeatTick、WorldTick、IntentRaised、
     #     EventArrived（4）
-    #   = 4 + 3 + 4 = 11。
+    #   降频（task2）：IntentWorldTick（intent→world 60s 合并闸那条边，1）
+    #   = 4 + 3 + 4 + 1 = 12。
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
         "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
         "VoiceRequest", "LightReviewRequest", "HeavyReviewRequest",
         "WorldHeartbeatTick", "WorldTick", "IntentRaised", "EventArrived",
+        "IntentWorldTick",
     }
     assert types == expected
-    assert len(WIRING_REGISTRY) == 11
+    assert len(WIRING_REGISTRY) == 12
 
 
 def test_minute_tick_drives_voice_fan_out():

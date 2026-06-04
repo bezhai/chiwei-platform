@@ -56,6 +56,7 @@ from app.agent.trace import make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
 from app.domain.life_state import find_life_state
 from app.domain.world_events import EventArrived, EventEnvelope
+from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.nodes.life_tools import build_life_tools
 from app.runtime import node
@@ -72,6 +73,23 @@ _LIFE_WAKE_LOCK_TTL_SECONDS = 600
 # 一轮读 inbox 的上限（spec 决策 4 安全阀）：正常够不着；积压过多时只读这批喂给
 # 模型 + 只标这批已读，剩下的留未读、下轮再处理（不静默吞）。触顶要 log。
 _LIFE_INBOX_MAX = 50
+
+# 一轮跑完后的冷却时长（spec 决策 5 第三层降频）。一轮成功收口后落一个 cd key
+# （TTL=这么多秒），cd 内再被唤醒就 raise DebounceReschedule 把这批 event 推迟到
+# cd 后——延迟 + 合并、绝不 drop（reschedule 攒着，cd 结束一并醒）。
+#
+# 时长定 45s：略小于 world 的 60s 唤醒合并闸（WORLD_INTENT_WAKE_DEBOUNCE_SECONDS）。
+# world 是唯一启动源、被唤醒最小间隔 1min，三姐妹的轮次节奏比世界唤醒间隔密一点点
+# （她们仍能在世界推进的间隙感知、回应），但已足够把"几乎每轮起意图→唤醒 world→
+# world 广播→三人又醒"的 82/min 量级自激压下去：一个 persona 两轮之间至少隔 45s
+# + 一轮自身耗时，三人合起来最坏几轮/分钟，而非几十。这是机制层的节奏闸（跟现有
+# debounce 窗口、world 60s 闸同类），不进世界内容决策（赤尾宪法）。
+_LIFE_CD_SECONDS = 45
+
+# cd key 在 redis 与 single-flight 锁分开（锁管"正在跑"，cd 管"刚跑完的冷却"），
+# 用不同 key 前缀，两者不互相干扰。
+def _cd_key(lane: str, persona_id: str) -> str:
+    return f"life_cd:{lane}:{persona_id}"
 
 # offline-model：异步后台思考用离线模型（见 feedback_model_selection），主对话才用
 # gemini。recursion_limit 给够（让她在一轮里连续调多次工具，不被默认 6 卡住）。
@@ -122,7 +140,27 @@ async def life_wake_node(arrived: EventArrived) -> None:
 
 
 async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) -> None:
-    """一轮 life 的实际编排（已在单飞锁内）：读未读 → 跑工具循环 → 收口标已读。"""
+    """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → 读未读 → 跑工具循环 → 收口标已读。
+
+    **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，
+    就 ``raise DebounceReschedule(arrived)`` 把这批 event 推迟到 cd 后（延迟 + 合并、
+    绝不 drop：reschedule 把 EventArrived 攒着，cd 结束一并醒一并感知）。cd 内不烧
+    模型、不写、不标已读。cd 检查在单飞锁内、读 inbox 之前：single_flight 管"正在
+    跑"、cd 管"刚跑完的冷却"，两层各管各的、用不同 redis key、不冲突。
+
+    一轮成功收口（标完已读）后落一个 cd key（TTL=cd 秒）开启下一段冷却。
+    """
+    redis = await get_redis()
+    cd_key = _cd_key(lane, persona_id)
+    if await redis.get(cd_key):
+        # 还在上一轮的 cd 内：把这批 event 推迟到 cd 后，绝不 drop（reschedule 攒着）。
+        logger.info(
+            "[life_wake] %s/%s still in cd, reschedule (events kept, not dropped)",
+            lane,
+            persona_id,
+        )
+        raise DebounceReschedule(arrived)
+
     unread = await list_unread_events(lane=lane, persona_id=persona_id)
     if not unread:
         # 空唤醒（去重命中后的残留信号等）：不烧模型、不建工具、不写、不标已读。
@@ -156,8 +194,6 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
         "prev_state": prev_state,
         "prev_mood": prev_mood,
         "prev_activity": prev_activity,
-        # 她信箱里这一轮感知到的几件事（客观可感形态）
-        "unread_events": _format_unread(unread),
     }
 
     # intent_id 从 (lane, persona, 本轮读到的 event_ids) 派生 —— durable 边重投 /
@@ -179,20 +215,49 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
     session_id = make_session_id(lane, persona_id, now.strftime("%Y-%m-%d"))
     context = AgentContext(persona_id=persona_id, session_id=session_id)
 
+    # 本轮她感知到的几件事拼进 **USER stimulus**（不再走 prompt_vars→system prompt）：
+    # core 的 transcript 只存"本轮传入 messages + 助手 + 工具结果"，system prompt 不进
+    # transcript。若感知留在 prompt_vars 里渲染进 system prompt，它就不进写回 session 的
+    # 内容、第二轮 replay 看不到"上一轮我感知了什么"——她只记得自己说过做过啥、却忘了
+    # 当时为何而动。把感知放进 USER message（像 world 把客观 context 拼进 USER 那样），
+    # 它就进 messages → 进 transcript → 第二轮可 replay，"她真的记得自己经历过什么"。
+    #
+    # 信息差命门不破：进 transcript 的只是她自己信箱里的未读 event（_format_unread 只取
+    # summary/kind/时间，全是投给她的、她够得着的），绝不含 world 全局快照。
+    stimulus = (
+        "这会儿你感知到信箱里这些客观动静（按发生先后）：\n"
+        f"{_format_unread(unread)}\n\n"
+        "过你自己的这一刻。"
+    )
+
     # max_retries=1：关掉整轮重放。run 把整个 ReAct 循环包在 retry 里，一次 model
     # 调用瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复起意图）。
     # 关掉后中途失败就抛、本轮不收口（event 没标已读 → 下轮仍未读、靠 world
     # renotify 再唤醒）。
+    #
+    # **显式传 session_id 续接**（spec 决策 1/3）：task1 的 run 见到显式 session_id
+    # 才从 Redis 读这条 transcript 拼到 messages 前、跑完把本轮（含工具调用与结果）
+    # 追加写回、刷 24h TTL（只塞 context.session_id 不读写历史）。显式 session_id
+    # 优先于 context.session_id。于是三姐妹每轮接着上一轮往下、记得刚才想过做过啥。
     await Agent(_LIFE_WAKE_CFG, tools=tools).run(
-        messages=[Message(role=Role.USER, content="此刻你感知到了这些，过你自己的这一刻。")],
+        messages=[Message(role=Role.USER, content=stimulus)],
         prompt_vars=prompt_vars,
         context=context,
+        session_id=session_id,
         max_retries=1,
     )
 
     # 收口：标已读，只标本轮实际读到的那批 event_id（绝不按 persona 全标）。即使
     # 一次 update 都没调也照常标已读——她看了但没改状态，正常。
     await mark_events_read(lane=lane, persona_id=persona_id, event_ids=read_ids)
+
+    # cd 降频（spec 决策 5 第三层）：成功收口后开启一段冷却。落一个带 TTL 的 cd key，
+    # cd 内再被唤醒就 reschedule 攒着（见本函数开头）。只在成功跑完才落——撞锁 /
+    # 中途失败的轮不落，避免用虚假 cd 卡住真正该跑的下一轮。
+    redis = await get_redis()
+    await redis.set(_cd_key(lane, persona_id), "1", ex=_LIFE_CD_SECONDS)
+
     logger.info(
-        "[life_wake] %s/%s ran a round, marked %d read", lane, persona_id, len(read_ids)
+        "[life_wake] %s/%s ran a round, marked %d read, cd %ds",
+        lane, persona_id, len(read_ids), _LIFE_CD_SECONDS,
     )

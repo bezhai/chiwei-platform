@@ -26,6 +26,7 @@ from app.world.tools import (
     FEATURE_SELF_WAKE,
     WORLD_EMIT_SOFT_CAP,
     WORLD_SLEEP_MAX_SECONDS,
+    WORLD_SLEEP_MIN_SECONDS,
     derive_event_id,
     emit_event,
     move_persona,
@@ -213,6 +214,37 @@ async def test_sleep_over_limit_returns_error_no_pending_wake(_ctx):
     assert isinstance(result, dict)
     assert result.get("kind") == "tool_error"
     # 绝不静默夹到上限：没有任何自排发生（既不 emit、也不留待办）
+    assert tools_mod._test_self_wakes == []
+    assert _ctx.features[FEATURE_SELF_WAKE] == {}
+
+
+@pytest.mark.asyncio
+async def test_sleep_at_min_floor_is_allowed(_ctx):
+    """sleep == 60s 下限 → 合法（边界含下限），记进 round state。
+
+    降频配套：world 自排下限 1 分钟（光靠下限挡不住 intent 立即唤醒，但 self/常规
+    自排不该排得太密）。
+    """
+    with agent_context(_ctx):
+        await sleep.invoke({"seconds": WORLD_SLEEP_MIN_SECONDS})
+    assert (
+        _ctx.features[FEATURE_SELF_WAKE]["delay_ms"]
+        == WORLD_SLEEP_MIN_SECONDS * 1000
+    )
+
+
+@pytest.mark.asyncio
+async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
+    """sleep < 60s → 返回错误喂回模型让它重调（跟上限超限处理风格一致）、不留待办。
+
+    下限处理跟现有上限超限对称：报错喂回让模型自己重选一个 ≥ 60 的值，不静默夹。
+    """
+    with agent_context(_ctx):
+        result = await sleep.invoke({"seconds": 30})
+
+    assert isinstance(result, dict)
+    assert result.get("kind") == "tool_error"
+    # 不静默夹：没有任何自排发生（既不 emit、也不留待办）
     assert tools_mod._test_self_wakes == []
     assert _ctx.features[FEATURE_SELF_WAKE] == {}
 

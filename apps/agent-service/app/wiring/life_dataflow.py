@@ -42,10 +42,15 @@ from app.nodes.life_wake import life_wake_node
 from app.runtime import Source, wire
 from app.world.engine import (
     WORLD_HEARTBEAT_SECONDS,
+    WORLD_INTENT_WAKE_DEBOUNCE_SECONDS,
+    WORLD_INTENT_WAKE_MAX_BUFFER,
+    IntentWorldTick,
     WorldHeartbeatTick,
     WorldTick,
     heartbeat_to_world_tick,
     intent_to_world_tick,
+    intent_wake_key,
+    world_intent_wake,
     world_tick,
 )
 
@@ -96,9 +101,24 @@ wire(WorldHeartbeatTick).from_(Source.interval(WORLD_HEARTBEAT_SECONDS)).to(
 # WorldTick，统一打到 world_tick。
 wire(WorldTick).to(world_tick)
 
-# life 回灌意图 → 翻成 WorldTick(reason="intent") 唤醒 world 裁决。durable：
-# life 进程起意写信箱，world 进程消费、翻译、打到自己的 world_tick（跨进程不丢）。
+# life 回灌意图 → world 裁决，中间夹一道 60s 合并闸（spec 决策 5：world 被唤醒
+# 最小间隔 1min，短于 1min 的连续 intent 合并成一次唤醒）。两段：
+#   1) IntentRaised .durable() → intent_to_world_tick：durable 跨进程（life 进程
+#      起意写信箱，world 进程消费、翻成 transient IntentWorldTick）。这条边原样
+#      保留 durable —— IntentRaised 的 (lane,intent_id) 自然键幂等不被破坏。
+#   2) IntentWorldTick .debounce(60s, per-lane) → world_intent_wake：合并闸。同一
+#      lane（= 一个 world）1min 窗口内的连续 intent 合并成一次唤醒；闸后
+#      world_intent_wake 翻成 WorldTick(reason=intent) 直接调 world_tick。world
+#      撞锁时对 intent 抛 SingleFlightConflict，world_intent_wake 捕获后
+#      raise DebounceReschedule 让闸重排（intent 绝不丢）。
+# 不能直接 debounce IntentRaised：它是 durable 持久化 Data（有 PG 表），而 debounce
+# 的硬约束是 transient + 不可与 .durable() 组合，所以闸放在闸后的 transient 信号上。
 wire(IntentRaised).to(intent_to_world_tick).durable()
+wire(IntentWorldTick).debounce(
+    seconds=WORLD_INTENT_WAKE_DEBOUNCE_SECONDS,
+    max_buffer=WORLD_INTENT_WAKE_MAX_BUFFER,
+    key_by=intent_wake_key,
+).to(world_intent_wake)
 
 # 信箱来新 event → debounce 攒批唤醒对应 life（同构跑三姐妹，persona 由
 # EventArrived 决定）。key_by 复用 event_knock_key，每个 (lane, persona) 自己

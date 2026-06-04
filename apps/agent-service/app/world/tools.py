@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 # "别睡死"的机制边界，不进世界内容决策（赤尾宪法）。
 WORLD_SLEEP_MAX_SECONDS = 3600
 
+# sleep 下限：world 自排最短 1 分钟（spec 决策 5 机制闸配套）。低于下限报错喂回
+# 模型重调（跟上限超限处理对称、不静默夹），让常规 / self 自排不排得太密。注意
+# 下限只挡 sleep 自排——intent 立即唤醒由 intent→world 边上的 60s 合并闸挡。
+WORLD_SLEEP_MIN_SECONDS = 60
+
 # 一轮 emit 条数安全阀：正常够不着，触及要 log（不静默截断）—— 决策 4。
 WORLD_EMIT_SOFT_CAP = 30
 
@@ -216,16 +221,17 @@ async def emit_event(room_id: str, summary: str) -> str:
 @tool
 @tool_error("安排下次醒来失败")
 async def sleep(
-    seconds: Annotated[int, Field(description="多少秒后再看一眼世界，必须 ≤ 3600")],
+    seconds: Annotated[
+        int, Field(description="多少秒后再看一眼世界，必须在 60～3600 之间")
+    ],
 ) -> str:
     """决定过多久再看一眼世界（你唯一的自排手段）。
 
-    看完这一轮，用它定下次多久再醒来看世界。``seconds`` 必须 ≤ 3600（最长睡 1h）。
-    超过 1h 会报错，请改填一个 ≤ 3600 的值重调。平淡时段也别睡太久——世界是持续
-    活的。
+    看完这一轮，用它定下次多久再醒来看世界。``seconds`` 必须在 60～3600 之间
+    （最短睡 1 分钟、最长睡 1h）。超出范围会报错，请改填一个 60～3600 的值重调。
 
     Args:
-        seconds: 多少秒后再看一眼世界（≤ 3600）。
+        seconds: 多少秒后再看一眼世界（60 ≤ seconds ≤ 3600）。
 
     Returns:
         一句确认文本。
@@ -236,8 +242,12 @@ async def sleep(
             f"sleep 的 seconds={seconds} 超过上限 {WORLD_SLEEP_MAX_SECONDS} 秒"
             f"（最长睡 1h）。请改填一个 ≤ {WORLD_SLEEP_MAX_SECONDS} 的值重调。"
         )
-    if seconds < 0:
-        seconds = 0
+    if seconds < WORLD_SLEEP_MIN_SECONDS:
+        WORLD_SLEEP_REJECTED.inc()
+        raise ValueError(
+            f"sleep 的 seconds={seconds} 低于下限 {WORLD_SLEEP_MIN_SECONDS} 秒"
+            f"（最短睡 1 分钟）。请改填一个 ≥ {WORLD_SLEEP_MIN_SECONDS} 的值重调。"
+        )
     # 不直接 emit_delayed：那样一轮内多次 sleep / 多轮 sleep 会各排一条未来 self
     # WorldTick → 叠加 heartbeat 唤醒风暴（决策 4 命门）。改为只把待办 self-wake
     # 记进 round-scoped state（覆盖而非追加 → 一轮内最后一次 sleep 为准），由

@@ -96,12 +96,16 @@ class _FakeAgent:
         monkeypatch.setattr(lw, "Agent", cls)
         return cls
 
-    async def run(self, messages, *, prompt_vars=None, context=None, max_retries=None):
+    async def run(
+        self, messages, *, prompt_vars=None, context=None, session_id=None,
+        max_retries=None,
+    ):
         self.run_calls.append(
             {
                 "messages": messages,
                 "prompt_vars": prompt_vars,
                 "context": context,
+                "session_id": session_id,
                 "max_retries": max_retries,
             }
         )
@@ -233,7 +237,11 @@ async def test_zero_update_still_marks_read(patched, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
-    """run 必须传 max_retries=1（关整轮重放）+ 按 (lane, persona, 今天) 的 session_id。"""
+    """run 必须传 max_retries=1（关整轮重放）+ 按 (lane, persona, 今天) 的 session_id。
+
+    session_id 既塞进 context（langfuse 归类一致），也**显式传给 run**（task1 的
+    run 见到显式 session_id 才真从 Redis 读历史续接、跑完写回；只塞 context 不读写）。
+    """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(monkeypatch, script=_script_update())
 
@@ -256,12 +264,23 @@ async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
     # session 按 (lane, persona, 今天 YYYY-MM-DD) 派生
     from app.agent.trace import make_session_id
 
-    assert ctx.session_id == make_session_id("coe-t3", "akao", "2026-06-03")
+    expected = make_session_id("coe-t3", "akao", "2026-06-03")
+    assert ctx.session_id == expected
+    # 续接命门：必须**显式**把 session_id 传给 run（不只塞 context）—— task1 的 run
+    # 只在收到显式 session_id 时才读 Redis 历史续接 + 写回。
+    assert call["session_id"] == expected, (
+        "life 必须显式把 session_id 传给 run，否则不续接（只塞 context 不读写历史）"
+    )
 
 
 @pytest.mark.asyncio
 async def test_context_excludes_world_state(patched, monkeypatch):
-    """信息差命门：喂给 run 的 prompt_vars 只含她自己快照 + 自己信箱未读，绝不含 WorldState。"""
+    """信息差命门：喂给 run 的输入（prompt_vars + messages）只含她自己快照 + 自己信箱未读，绝不含 WorldState。
+
+    她此刻的主观快照走 prompt_vars（system prompt）；她信箱里这一轮感知到的 event 走
+    USER messages（进 transcript，第二轮可 replay）。两处合起来是她这一轮的全部输入，
+    都不该含任何 world 全局快照。
+    """
     patched["snapshot"] = LifeState(
         lane="coe-t3",
         persona_id="akao",
@@ -275,14 +294,18 @@ async def test_context_excludes_world_state(patched, monkeypatch):
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    pv = _FakeAgent.last_run()["prompt_vars"]
+    call = _FakeAgent.last_run()
+    pv = call["prompt_vars"]
     assert pv is not None
-    blob = repr(pv).lower()
-    assert "worldstate" not in blob
-    assert "world_state" not in blob
-    # 输入确实只是她自己的快照字段 + 她自己信箱的 summary
+    # 信息差命门：prompt_vars 与 USER messages 两处都绝不含 WorldState 全局符号
+    msg_blob = "".join(m.text() for m in call["messages"])
+    full_blob = (repr(pv) + msg_blob).lower()
+    assert "worldstate" not in full_blob
+    assert "world_state" not in full_blob
+    # 她自己的主观快照在 prompt_vars
     assert "睡觉" in repr(pv)
-    assert "晌午的光很亮" in repr(pv)
+    # 她信箱里感知到的 event 在 USER messages（→进 transcript→第二轮可 replay）
+    assert "晌午的光很亮" in msg_blob
 
 
 @pytest.mark.asyncio
@@ -348,8 +371,9 @@ async def test_digests_external_message_event(patched, monkeypatch):
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    pv = _FakeAgent.last_run()["prompt_vars"]
-    assert "刚和原智鸿聊了几句" in repr(pv)
+    # 感知到的 external event 进 USER messages（→进 transcript→第二轮可 replay）
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "刚和原智鸿聊了几句" in msg_blob
     assert patched["marked"] == [["ex1"]]
 
 
@@ -528,12 +552,19 @@ async def test_concurrent_second_round_reschedules_no_overwrite_no_loss(
 async def test_single_flight_lock_released_allows_next_round(
     patched, fake_redis, monkeypatch
 ):
-    """单飞锁跑完即释放：上一轮结束后，下一轮能正常拿锁、不被永久卡住。"""
+    """单飞锁跑完即释放：上一轮结束后，cd 过后下一轮能正常拿锁、不被永久卡住。
+
+    cd 把"刚跑完的冷却"压在 reschedule 上，所以这里把 cd key 在第一轮后清掉模拟
+    cd 已过（cd 的延迟语义由专门的 cd 测试覆盖），验单飞锁本身释放后第二轮能跑。
+    """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(monkeypatch, script=_script_update(current_state="第一轮"))
     arrived = EventArrived(lane="coe-t3", persona_id="akao")
 
     await lw.life_wake_node(arrived)
+
+    # 模拟 cd 已过（删 cd key），验单飞锁释放后第二轮能跑。
+    await fake_redis.delete(lw._cd_key("coe-t3", "akao"))
 
     patched["unread"] = [_envelope("e2", "中午了")]
     _FakeAgent.install(monkeypatch, script=_script_update(current_state="第二轮"))
@@ -542,3 +573,211 @@ async def test_single_flight_lock_released_allows_next_round(
 
     assert [s["current_state"] for s in patched["saved"]] == ["第一轮", "第二轮"]
     assert patched["marked"] == [["e1"], ["e2"]]
+
+
+# ---------------------------------------------------------------------------
+# cd（一轮跑完后的冷却，降频）—— spec 决策 5 的第三层"延迟+合并不丢事件"。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cd_is_reasonable_and_under_world_gate():
+    """cd 时长合理：> 0 且不长于 world 的 60s 唤醒合并闸（life 对齐或略小）。"""
+    assert 0 < lw._LIFE_CD_SECONDS <= 60
+
+
+@pytest.mark.asyncio
+async def test_successful_round_sets_cd_key(patched, fake_redis, monkeypatch):
+    """一轮成功跑完后落一个 cd key（TTL=cd 秒），把"刚跑完的冷却"记在 redis。"""
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    cd_key = lw._cd_key("coe-t3", "akao")
+    assert await fake_redis.get(cd_key) is not None, "成功跑完应落 cd key"
+    ttl = await fake_redis.ttl(cd_key)
+    assert 0 < ttl <= lw._LIFE_CD_SECONDS, "cd key 必须带 TTL（不能永不过期）"
+
+
+@pytest.mark.asyncio
+async def test_round_in_cd_reschedules_without_running_or_dropping(
+    patched, fake_redis, monkeypatch
+):
+    """cd 内来的 event 不立即醒：raise DebounceReschedule 攒着，不烧模型、不丢 event。
+
+    复用现有 DebounceReschedule 机制——cd 内到达的 event 被推迟到 cd 后，绝不 drop
+    （reschedule 把 EventArrived 重排，cd 结束一并醒）。cd 内这一轮：不建 Agent、
+    不写快照、不标已读、不起意图。
+    """
+    arrived = EventArrived(lane="coe-t3", persona_id="akao")
+    # 预置 cd key（模拟上一轮刚跑完、还在冷却里）
+    await fake_redis.set(lw._cd_key("coe-t3", "akao"), "1", ex=lw._LIFE_CD_SECONDS)
+
+    patched["unread"] = [_envelope("e1", "cd 内来的动静")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    with pytest.raises(DebounceReschedule) as ei:
+        await lw.life_wake_node(arrived)
+
+    # 重排的就是这批 EventArrived（不丢）
+    assert ei.value.data is arrived
+    # cd 内绝不跑：不建 Agent、不写、不标已读、不起意图
+    assert _FakeAgent.instances == [], "cd 内不该烧模型（不建 Agent）"
+    assert patched["saved"] == []
+    assert patched["marked"] == []
+    assert patched["intents"] == []
+
+
+@pytest.mark.asyncio
+async def test_after_cd_expires_round_runs_and_consumes_events(
+    patched, fake_redis, monkeypatch
+):
+    """cd 结束后：被重排攒着的 event 一并醒、一并感知、一并标已读（不丢）。
+
+    模拟 cd 已过（删 cd key）后再唤醒——这一轮正常跑、读到 cd 内攒下的 event。
+    """
+    arrived = EventArrived(lane="coe-t3", persona_id="akao")
+    # 先处在 cd 内：第一次唤醒被 reschedule
+    await fake_redis.set(lw._cd_key("coe-t3", "akao"), "1", ex=lw._LIFE_CD_SECONDS)
+    patched["unread"] = [_envelope("e1", "cd 内攒下的动静")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+    with pytest.raises(DebounceReschedule):
+        await lw.life_wake_node(arrived)
+    assert patched["marked"] == []  # cd 内确实没消费
+
+    # cd 过了（删 key）：重排到点再唤醒 —— 这一轮正常跑、读到攒下的 event
+    await fake_redis.delete(lw._cd_key("coe-t3", "akao"))
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="cd 后醒了"))
+
+    await lw.life_wake_node(arrived)
+
+    assert [s["current_state"] for s in patched["saved"]] == ["cd 后醒了"]
+    assert patched["marked"] == [["e1"]], "cd 内攒下的 event 在 cd 后被一并消费、标已读"
+
+
+@pytest.mark.asyncio
+async def test_cd_not_set_on_single_flight_conflict(
+    patched, fake_redis, monkeypatch
+):
+    """单飞撞锁被 reschedule 的那轮不落 cd key（它根本没成功跑完一轮）。
+
+    cd 管"刚成功跑完的冷却"，single_flight 管"正在跑"。撞锁的轮没跑完，不该污染
+    cd —— 否则真正跑完的那轮反而被这条虚假 cd 卡住。
+    """
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+
+    round1_in_run = asyncio.Event()
+    release_round1 = asyncio.Event()
+    run_count = {"n": 0}
+
+    async def _blocking_script(tools):
+        run_count["n"] += 1
+        round1_in_run.set()
+        await release_round1.wait()
+        by_name = {t.name: t for t in tools}
+        await by_name["update_life_state"].invoke(
+            {"current_state": "想完了", "response_mood": "平静", "activity_type": "idle"}
+        )
+
+    _FakeAgent.install(monkeypatch, script=_blocking_script)
+    arrived = EventArrived(lane="coe-t3", persona_id="akao")
+
+    round1 = asyncio.create_task(lw.life_wake_node(arrived))
+    await round1_in_run.wait()
+
+    # 第二轮撞锁 → DebounceReschedule；撞锁的轮不该落 cd key
+    with pytest.raises(DebounceReschedule):
+        await lw.life_wake_node(arrived)
+    # 第一轮还在跑（没收口），此刻 cd key 还不该存在
+    assert await fake_redis.get(lw._cd_key("coe-t3", "akao")) is None
+
+    release_round1.set()
+    await round1
+
+    # 第一轮成功收口后才落 cd key
+    assert await fake_redis.get(lw._cd_key("coe-t3", "akao")) is not None
+
+
+# ---------------------------------------------------------------------------
+# 动态感知进 transcript（session 续接命门）—— life 这一轮感知到的 event 必须进
+# 写回 session 的 messages，第二轮 replay 才看得到"上一轮我感知了什么"。
+#
+# 旧 bug：unread_events 经 prompt_vars 渲染进 langfuse 模板的 **system prompt**，
+# system prompt 不进 transcript（core 的 transcript 只存本轮传入 messages + 助手
+# + 工具结果）；life 传的 messages 是一句固定文案，于是写回 session 的只有固定
+# 文案、不含她感知的 event 原文 —— 第二轮看不到上一轮感知。对比 world：world 把
+# 当前 context 拼进 USER message（进 messages → 进 transcript），记忆完整。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_perceived_events_enter_user_stimulus_for_transcript(patched, monkeypatch):
+    """life 这一轮感知到的 event 原文必须进传给 run 的 messages（=写回 session 的内容）。
+
+    run 收到的 messages 就是 ``append_session(session_id, [*messages, *produced])``
+    写回 transcript 的"本轮传入"部分。若感知只在 prompt_vars（→system prompt），
+    它不进 transcript、第二轮 replay 看不到。命门：感知必须在 USER message 里。
+    """
+    patched["unread"] = [
+        _envelope("e1", "水壶在响"),
+        _envelope("e2", "千凪在厨房煎蛋"),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    # 写回 transcript 的"本轮传入 messages"必须含她感知到的 event 原文
+    msg_blob = "".join(m.text() for m in call["messages"])
+    assert "水壶在响" in msg_blob, (
+        "感知到的 event 必须进 USER message（=写回 session 的内容），"
+        "否则第二轮 replay 看不到上一轮感知"
+    )
+    assert "千凪在厨房煎蛋" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_perceived_events_replayable_in_second_round(
+    patched, fake_redis, monkeypatch
+):
+    """端到端续接：第一轮真写回 session，第二轮 load_session 能 replay 到上一轮感知。
+
+    用真 ``append_session`` 把第一轮写回 fakeredis，再 ``load_session`` 读回，断言
+    历史里含第一轮她感知到的 event 原文（不只固定文案）—— 这是"她真的记得自己经历
+    过什么"的命门。
+    """
+    from app.agent.session import append_session, load_session
+    from app.capabilities.redis import RedisCapability
+
+    cap = RedisCapability(fake_redis)
+    patched["unread"] = [_envelope("e1", "晨光斜照进房间")]
+
+    captured: dict = {}
+
+    async def _capture_then_persist(tools):
+        # 拿到本轮真正传给 run 的 messages，模拟 core 的写回（本轮无工具调用 →
+        # produced 只有最终助手回复，这里聚焦"本轮传入 messages"进了 transcript）。
+        call = _FakeAgent.instances[-1].run_calls[-1]
+        captured["messages"] = call["messages"]
+        captured["session_id"] = call["session_id"]
+
+    _FakeAgent.install(monkeypatch, script=_capture_then_persist)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 模拟 core 在成功后 append_session(session_id, [*messages, *produced])
+    from app.agent.neutral import Message, Role
+
+    await append_session(
+        captured["session_id"],
+        [*captured["messages"], Message(role=Role.ASSISTANT, content="ok")],
+        cap=cap,
+    )
+
+    # 第二轮 load 这条 session：必须能 replay 到第一轮她感知到的 event 原文
+    history = await load_session(captured["session_id"], cap=cap)
+    replayed = "".join(m.text() for m in history)
+    assert "晨光斜照进房间" in replayed, (
+        "第二轮 replay 必须看到上一轮感知到的 event 原文，而非只有固定文案"
+    )

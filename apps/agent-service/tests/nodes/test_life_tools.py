@@ -188,6 +188,29 @@ async def test_raise_intent_second_call_does_not_emit_and_feeds_back(
     assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
+def test_raise_intent_description_guides_toward_low_intent():
+    """raise_intent 措辞软引导降频（spec 决策 5 内容判断那层）。
+
+    旧措辞"回应刚才的动静就调"是高频自激起点（每个 event 都触发一次起意图）。改成
+    引导她"多数时候只是经历这一刻（更新状态就够），只有真要改变处境才起意图"。这是
+    软内容引导（赤尾宪法：不加 if 强制），所以只能断言指令文本已改、不能断言行为。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            intent_id="i-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["raise_intent"].definition.description
+    # 旧的高频自激措辞已移除（"回应刚才的动静"这句是每个 event 都起意图的起点）
+    assert "回应刚才的动静" not in desc
+    # 新措辞软引导：多数时候只是经历这一刻 + 只有真改变处境才起意图
+    assert "改变处境" in desc
+    assert ("经历这一刻" in desc) or ("多数时候" in desc)
+
+
 @pytest.mark.asyncio
 async def test_tool_failure_returns_outcome_not_raise(monkeypatch):
     """单个工具自身抛错被吞掉、喂回模型让它自纠，不炸整轮（spec 决策 3）。"""
