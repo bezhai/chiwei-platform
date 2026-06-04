@@ -87,6 +87,14 @@ def _stub_state(monkeypatch):
             {"lane": lane, "world_time": world_time, "situation": situation}
         )
 
+    # 信箱对账自愈是 world_tick 每轮顺带跑的一步（查 pg + 补敲），默认打桩成无操作，
+    # 让纯机制测试不碰真库；专测对账的用例自己再 monkeypatch 它来断言调用。
+    renotify_calls: list[str] = []
+
+    async def fake_renotify_unread(*, lane):
+        renotify_calls.append(lane)
+        return 0
+
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "read_presence", fake_read_presence)
     monkeypatch.setattr(engine_mod, "personas_in_room", fake_in_room)
@@ -94,12 +102,14 @@ def _stub_state(monkeypatch):
     monkeypatch.setattr(engine_mod, "write_world_state", fake_write_world_state)
     monkeypatch.setattr(engine_mod, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(engine_mod, "emit_delayed", fake_emit_delayed)
+    monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
 
     engine_mod._test_delivered = delivered  # type: ignore[attr-defined]
     engine_mod._test_self_wakes = self_wakes  # type: ignore[attr-defined]
     engine_mod._test_presence = presence  # type: ignore[attr-defined]
     engine_mod._test_set_calls = set_calls  # type: ignore[attr-defined]
     engine_mod._test_world_writes = world_writes  # type: ignore[attr-defined]
+    engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     yield
 
 
@@ -467,6 +477,60 @@ async def test_cold_start_places_sisters_then_deliberates(monkeypatch):
         "akao": "akao_room",
         "ayana": "ayana_room",
     }
+
+
+@pytest.mark.asyncio
+async def test_world_tick_renotifies_unread_mailboxes(monkeypatch):
+    """唤醒自愈：world_tick 每轮顺带对账信箱，对该 lane 下有未读的 persona 补敲。
+
+    模拟"敲门曾失败"——某 persona 信箱里有 EventEnvelope、没人醒（没对应
+    EventRead）。world 的保底心跳不依赖 redis，所以一定有机会跑；让它每轮调一次
+    renotify_unread，把丢掉的敲门补回来。这里 mock renotify_unread 断言 world_tick
+    确实把对账这一步接进了它的回路、且按当前 lane 调。
+    """
+    _mock_deliberate(monkeypatch, WorldDeliberation(events=[]))
+
+    renotify_calls: list[str] = []
+
+    async def fake_renotify(*, lane):
+        renotify_calls.append(lane)
+        return 0
+
+    monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert renotify_calls == ["coe-t2"], (
+        f"world_tick 每轮应对当前 lane 调一次 renotify_unread，实际 {renotify_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_world_tick_renotify_runs_before_deliberation(monkeypatch):
+    """对账在 LLM 推演之前跑（顺序契约）：兜底不依赖推演成功。
+
+    renotify 是机械 IO 兜底。若挂在推演—投递—写快照之后，一旦
+    ``_world_deliberate`` 抛异常，积压的 stranded 信箱这轮就补不了敲。放在
+    world_tick 最前，保证哪怕这轮推演失败，上一轮遗留的未读也已先被补敲。
+    """
+    order: list[str] = []
+
+    async def tracking_deliberate(*, lane, snapshot, presence_text, wake_reason):
+        order.append("deliberate")
+        return WorldDeliberation(events=[])
+
+    async def fake_renotify(*, lane):
+        order.append("renotify_unread")
+        return 0
+
+    monkeypatch.setattr(engine_mod, "_world_deliberate", tracking_deliberate)
+    monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert order == ["renotify_unread", "deliberate"], (
+        f"renotify_unread 应在 LLM 推演之前跑（兜底不依赖推演成功），实际 {order}"
+    )
 
 
 @pytest.mark.asyncio

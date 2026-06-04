@@ -102,6 +102,45 @@ async def list_unread_events(
         ]
 
 
+async def list_personas_with_unread(*, lane: str) -> list[str]:
+    """该 lane 下还有未读 event 的 distinct persona_id —— 信箱对账的读侧。
+
+    复用 :func:`list_unread_events` 同一条 LEFT JOIN 反连接（envelope 有、read
+    表无对应行 = 未读），只是聚到 persona 维度：``SELECT DISTINCT e.persona_id``。
+    给唤醒自愈回路用——查出"信箱里有东西、却没人来读"的人，挨个补敲。
+    """
+    sql = (
+        f"SELECT DISTINCT e.persona_id FROM {_ENVELOPE_TABLE} e "
+        f"LEFT JOIN {_READ_TABLE} r "
+        f"  ON e.lane = r.lane "
+        f" AND e.persona_id = r.persona_id "
+        f" AND e.event_id = r.event_id "
+        f"WHERE e.lane = :lane "
+        f"  AND r.event_id IS NULL "
+        f"ORDER BY e.persona_id ASC"
+    )
+    async with get_session() as s:
+        result = await s.execute(text(sql), {"lane": lane})
+        return [row["persona_id"] for row in result.mappings().all()]
+
+
+async def renotify_unread(*, lane: str) -> int:
+    """信箱对账自愈：对该 lane 下每个还有未读的 persona 补敲一次 ``EventArrived``。
+
+    deliver_event 的"落库 + 敲门"两步非原子——落库成功但 emit 敲门撞上瞬时
+    redis 失败时，event 会永久躺在信箱里没人读。这个对账函数不依赖那次敲门是否
+    成功：查出真有未读的 persona、挨个重发 ``EventArrived`` 让 life-wake 有机会被
+    重新唤醒。补敲幂等安全——life_wake_node 一进来 ``list_unread_events``，空信箱
+    直接 early-return，且有 single_flight 锁，所以补敲没未读 / 正在思考的 persona
+    都无害。由 world 的保底心跳（纯 in-process、不依赖 redis）每轮调一次，丢掉的
+    敲门最多一个心跳周期后补上。返回补敲了几个 persona。
+    """
+    personas = await list_personas_with_unread(lane=lane)
+    for persona_id in personas:
+        await emit(EventArrived(lane=lane, persona_id=persona_id))
+    return len(personas)
+
+
 async def mark_events_read(
     *, lane: str, persona_id: str, event_ids: list[str]
 ) -> None:

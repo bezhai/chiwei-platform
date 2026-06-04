@@ -58,7 +58,7 @@ from pydantic import BaseModel
 
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
-from app.data.queries.mailbox import deliver_event
+from app.data.queries.mailbox import deliver_event, renotify_unread
 from app.domain.world_events import EVENT_KIND_AMBIENT, IntentRaised
 from app.runtime.data import Data, Key
 from app.runtime.emit import emit, emit_delayed  # module-level so tests can monkeypatch
@@ -271,7 +271,7 @@ def _wake_reason_text(tick: WorldTick, *, cold_start: bool) -> str:
 
 @node
 async def world_tick(tick: WorldTick) -> None:
-    """world 发动机的唯一入口：被三源唤醒 → 推演 → 改在场 → 投递 → 自排下次醒。
+    """world 发动机的唯一入口：被三源唤醒 → 对账补敲遗留信箱 → 推演 → 改在场 → 投递 → 自排下次醒。
 
     一次唤醒：
       1. world_time 跟现实走：取现实当前时间（CST），不依赖 LLM 填。
@@ -285,6 +285,16 @@ async def world_tick(tick: WorldTick) -> None:
       7. 自排下次醒（≤ 10 分钟保底心跳，world 不许排长闹钟）。
     """
     lane = tick.lane
+
+    # 信箱对账自愈（放在最前、先于 LLM 推演）：补敲该 lane 下所有还有未读 event
+    # 的 persona。deliver_event 的"落库 + emit 敲门"非原子，敲门撞上瞬时 redis
+    # 失败时 event 会永久躺在信箱里没人读。world 保底心跳纯 in-process、不依赖
+    # redis，所以一定有机会跑——每轮一进来先把遗留的、丢掉的敲门补回来（某次敲门
+    # 丢了最多一个心跳周期后补上）。放在推演之前是关键：哪怕这轮 _world_deliberate
+    # 抛异常，积压的 stranded 信箱也已先补过敲。这是机械 IO 兜底、不经 LLM、不进
+    # 世界内容决策（补敲已读完的 persona 也无害：life_wake 空信箱 early-return +
+    # single_flight 锁），不违赤尾宪法。
+    await renotify_unread(lane=lane)
 
     # world_time 跟现实走、不快进、不依赖 LLM —— spec key decision 2。
     now_iso = datetime.now(_CST).isoformat()
