@@ -25,7 +25,7 @@ async def get_redis() -> Redis:
 
         pool = ConnectionPool(
             host=settings.redis_host,
-            port=6379,
+            port=settings.redis_port,
             password=settings.redis_password,
             decode_responses=True,
             max_connections=10,

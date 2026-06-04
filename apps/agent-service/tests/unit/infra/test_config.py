@@ -49,6 +49,14 @@ class TestSettingsDefaults:
             assert s.identity_drift_max_buffer == 10
             assert s.identity_drift_ttl_seconds == 86400
 
+    def test_redis_port_defaults_to_6379(self):
+        """REDIS_PORT defaults to 6379 so prod (port 6379) is unaffected."""
+        with patch.dict("os.environ", {}, clear=True):
+            from app.infra.config import Settings
+
+            s = Settings()
+            assert s.redis_port == 6379
+
     def test_default_string_fields(self):
         """String fields with non-None defaults."""
         with patch.dict("os.environ", {}, clear=True):
@@ -66,6 +74,7 @@ class TestSettingsFromEnv:
     def test_reads_env_vars(self):
         env = {
             "REDIS_HOST": "redis.local",
+            "REDIS_PORT": "6380",
             "REDIS_PASSWORD": "s3cret",
             "POSTGRES_PORT": "5433",
             "RABBITMQ_URL": "amqp://guest:guest@mq:5672/",
@@ -78,6 +87,7 @@ class TestSettingsFromEnv:
 
             s = Settings()
             assert s.redis_host == "redis.local"
+            assert s.redis_port == 6380
             assert s.redis_password == "s3cret"
             assert s.postgres_port == 5433
             assert s.rabbitmq_url == "amqp://guest:guest@mq:5672/"

@@ -30,6 +30,7 @@ class Settings:
 
     # -- Redis --
     redis_host: str | None = field(default_factory=lambda: _env_or_none("REDIS_HOST"))
+    redis_port: int = field(default_factory=lambda: _env_int("REDIS_PORT", 6379))
     redis_password: str | None = field(
         default_factory=lambda: _env_or_none("REDIS_PASSWORD")
     )
