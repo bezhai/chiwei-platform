@@ -264,6 +264,48 @@ export async function checkExistPixivImg(imgName: string): Promise<boolean> {
 }
 
 /**
+ * 构建「取已落 OSS 的图片文档」的 Mongo 查询条件。
+ *
+ * 语义：按 pixiv_addr 命中，且只匹配 tos_file_name 非空（非 null、非空串）的文档——
+ * 历史上同一 pixiv_addr 可能有重复 / 空 tos_file_name 的文档，不加这个约束 findOne
+ * 可能挑到空 key 的那条，漏掉真实已写 OSS 的文档（MinIO 同步会拿不到 key 而跳过）。
+ *
+ * @param pixivAddr - Pixiv 图片名（imageUrl 最后一段）
+ * @returns 查询 filter；pixivAddr 为空串时返回 null（调用方据此短路成 null 文档）
+ */
+export function buildImageByPixivAddrFilter(
+  pixivAddr: string
+): Filter<PixivImageInfo> | null {
+  if (pixivAddr === "") {
+    return null;
+  }
+
+  return {
+    pixiv_addr: pixivAddr,
+    // DB 里 tos_file_name 实际可能为 null / 缺失 / 空串（比 TS interface 的 string 宽），
+    // $nin [null, ''] 同时排除这三种（$nin 含 null 时也排除字段缺失的文档）。
+    tos_file_name: { $nin: [null, ""] } as Filter<PixivImageInfo>["tos_file_name"],
+  };
+}
+
+/**
+ * 按 pixiv_addr 取一条已落 OSS 的图片文档（用于读取代理回填的 tos_file_name）。
+ * @param pixivAddr - Pixiv 图片名（imageUrl 最后一段）
+ * @returns 命中的文档；未命中（含 pixivAddr 为空 / 无非空 tos_file_name）返回 null
+ * @throws 数据库错误向上抛出，由调用方决定是否吞错（best-effort 同步在外层兜）
+ */
+export async function findImageByPixivAddr(
+  pixivAddr: string
+): Promise<PixivImageInfo | null> {
+  const filter = buildImageByPixivAddrFilter(pixivAddr);
+  if (filter === null) {
+    return null;
+  }
+
+  return ImgCollection.findOne(filter);
+}
+
+/**
  * 将字符串的前缀部分转换为整数，如果失败则返回默认值
  * @param pixivAddr - Pixiv 地址
  * @returns 提取到的 illust_id 或默认值 0

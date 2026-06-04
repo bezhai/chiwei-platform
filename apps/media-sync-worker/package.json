@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "bun test"
   },
   "keywords": [],
   "author": "",
@@ -24,12 +25,14 @@
     "@inner/shared": "*",
     "@larksuiteoapi/node-sdk": "^1.38.0",
     "adm-zip": "^0.5.16",
+    "ali-oss": "^6.23.0",
     "axios": "^1.7.7",
     "dayjs": "^1.11.13",
     "dotenv": "^16.4.5",
     "feishu-card": "^0.0.18",
     "ioredis": "^5.4.1",
     "lodash": "^4.17.21",
+    "minio": "^8.0.1",
     "mongodb": "^6.10.0",
     "node-cron": "^3.0.3",
     "unzipper": "^0.12.3"

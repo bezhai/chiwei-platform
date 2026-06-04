@@ -1,0 +1,18 @@
+# MinIO 运行在宿主机 Docker 上，通过 headless Service + Endpoints 代理
+# Endpoints 包含宿主机 IP，不纳入版本管理，需手动 kubectl apply
+# 参考: kubectl -n prod apply -f <endpoints.yaml>
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: prod
+  labels:
+    app: minio
+    tier: infra
+spec:
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  clusterIP: None
