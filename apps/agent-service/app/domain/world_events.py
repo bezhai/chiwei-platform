@@ -1,0 +1,144 @@
+"""World/life event 流转骨架的 Data 形态 — Task 1.
+
+赤尾世界靠 event 推动。event 有三类来源：
+
+  * ``ambient``   环境感知（含在场说话 / 喊话 —— 说话是动作、声音是 ambient），
+                  由 world 客观投影产出。
+  * ``intent``    某 life "我想做什么"，回灌唤醒 world 去裁决。
+  * ``external``  外部消息 —— 用户和某 persona 聊完一次，作为"刚聊过"回灌进
+                  她自己的信箱。
+
+四个 Data：
+
+  * :class:`EventEnvelope` —— durable 信箱条目。每个 (lane, persona, event)
+    一行；这是 life 读未读的来源。
+  * :class:`EventRead` —— durable 已读标记。每个 (lane, persona, event) 一行
+    表示"这个 persona 读过这条 event"。未读 = envelope 里没有对应 read 行的。
+    把已读拆成 per-event 行，是为了在结构上杜绝"按 persona 全标"——life 想
+    一轮期间新进的 event 天然没有 read 行、永远不会被误吞。
+  * :class:`EventArrived` —— transient 敲门信号。信箱来新 event 时 emit，
+    走 debounce 攒批一次唤醒 life；内容不在信号里，在 durable 信箱里。
+  * :class:`IntentRaised` —— durable 意图，life emit 后回灌唤醒 world。
+
+lane 隔离：所有 durable Data 的自然键都含 ``lane``。runtime 持久化不会自动
+加 lane，不显式带上 coe / ppe 泳道会覆盖 prod 的未读事件（写脏线上客观真相），
+所以 lane 进 Key 是定义处的硬约束，不是事后补。
+
+形态扩展：event 形态不写死成只能装环境感知—— ``kind`` 已是 ambient / intent /
+external 三类的开放枚举，``room_id`` 为按在场集合投递预留。后续"直连 / 地点
+痕迹"需要的结构化负载（一个 JSONB ``payload`` 列）靠 migrator 的 additive
+``ALTER TABLE ADD COLUMN`` 加进来——但 framework 的 ``insert_idempotent`` /
+``insert_append`` 目前**不能把 dict 字段序列化进 JSONB 列**（无 json 编解码），
+所以第一刀不放 dict 字段，等 framework 补上 JSONB 持久化再加（见产出里的
+framework capability gap）。
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from app.runtime.data import Data, Key
+from app.runtime.emit import emit  # module-level so tests can monkeypatch
+
+# event kind 协议常量。机制层硬定（不是让 LLM 猜的字符串），消费方按这三类
+# 路由 / 解读。
+EVENT_KIND_AMBIENT = "ambient"
+EVENT_KIND_INTENT = "intent"
+EVENT_KIND_EXTERNAL = "external"
+
+
+class EventEnvelope(Data):
+    """durable 信箱条目：一条投递给某 persona 的 event。
+
+    自然键 ``(lane, persona_id, event_id)``：同一条 event 投给同一 persona
+    重复投递（mq redelivery）靠 dedup_hash 去重，只进一行。
+
+    ``room_id`` 记 event 锚定的房间（为后续按在场集合过滤 / 投递预留；第一刀
+    不实现在场判定，空串表示无房间锚点）。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+    event_id: Annotated[str, Key]
+    kind: str            # ambient | intent | external
+    source: str          # 产出方：world / 说话者 persona_id / chat ...
+    room_id: str = ""    # 锚定房间，为在场过滤预留
+    summary: str         # 客观可感形态的文字描述
+    occurred_at: str     # event 发生时间 (ISO8601)
+
+
+class EventRead(Data):
+    """durable 已读标记：某 persona 读过某条 event。
+
+    自然键 ``(lane, persona_id, event_id)`` 与 envelope 对齐。标已读 = 为本轮
+    实际读到的每个 event_id 插一行；重复标记靠 dedup_hash 幂等。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+    event_id: Annotated[str, Key]
+
+
+class EventArrived(Data):
+    """transient 敲门信号：某 persona 信箱来了新 event。
+
+    只当唤醒信号用——内容存在 durable 信箱里。走 debounce 攒批，多条积压只
+    唤醒 life 一次。``Meta.transient`` 是 debounce 的硬约束（不落 pg）。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+
+    class Meta:
+        transient = True
+
+
+def event_knock_key(arrived: EventArrived) -> str:
+    """debounce 攒批分区键：按 (lane, persona) 区分。
+
+    每个 (lane, persona) 自己攒批——不同 persona、不同 lane 互不干扰。Task 3
+    把 life-wake 节点接到 ``wire(EventArrived).debounce(key_by=event_knock_key)``
+    上时复用这个键，保证攒批分区和信箱隔离口径一致。
+    """
+    return f"{arrived.lane}:{arrived.persona_id}"
+
+
+class IntentRaised(Data):
+    """durable 意图：某 life "我想做什么"，回灌唤醒 world 去裁决。
+
+    world 节点本身是 Task 2 的活；这里只立"意图能回灌唤醒 world"这条边 + 它
+    的数据形态。durable 让意图跨进程（life → world 进程）可达且不丢。
+
+    自然键 ``(lane, intent_id)``：world 端按 intent_id 幂等消化。结构化意图
+    细节同样等 framework 补上 JSONB 持久化后再 additive 加列（见 capability gap）。
+    """
+
+    lane: Annotated[str, Key]
+    intent_id: Annotated[str, Key]
+    persona_id: str      # 谁起的意图
+    summary: str         # 意图的文字描述
+    occurred_at: str     # 起意时间 (ISO8601)
+
+
+async def raise_intent(
+    *,
+    lane: str,
+    intent_id: str,
+    persona_id: str,
+    summary: str,
+    occurred_at: str,
+) -> None:
+    """某 life 起意 → emit ``IntentRaised`` 回灌唤醒 world 去裁决。
+
+    Task 3 的 life 节点想完一轮、产出"我想做什么"时调用本 helper。world 端
+    （Task 2）通过 ``wire(IntentRaised).to(world_node).durable()`` 消化。
+    """
+    await emit(
+        IntentRaised(
+            lane=lane,
+            intent_id=intent_id,
+            persona_id=persona_id,
+            summary=summary,
+            occurred_at=occurred_at,
+        )
+    )

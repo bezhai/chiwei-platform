@@ -5,7 +5,7 @@ the composer passes correct args and concatenates non-empty sections."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -40,34 +40,60 @@ async def test_p2p_assembles_all_sections():
 
 
 @pytest.mark.asyncio
-async def test_build_life_state_ignores_expired_state():
-    row = SimpleNamespace(
-        id=1,
-        current_state="准备睡觉",
-        response_mood="低电量",
-        state_end_at=datetime.now(CST) - timedelta(minutes=1),
+async def test_build_life_state_reads_new_snapshot_by_lane():
+    """_build_life_state reads the new LifeState snapshot keyed by deployment lane."""
+    snap = SimpleNamespace(
+        current_state="正在做饭",
+        response_mood="轻松",
+        activity_type="cook",
+        observed_at="2026-06-03T10:00:00+00:00",
     )
-
-    with patch("app.memory.context.find_latest_life_state", new=AsyncMock(return_value=row)):
+    find = AsyncMock(return_value=snap)
+    with (
+        patch("app.memory.context.find_life_state", new=find),
+        patch(
+            "app.memory.context.current_deployment_lane", return_value="ppe-x"
+        ),
+    ):
         out = await _build_life_state("akao")
 
-    assert out == ""
+    # reads new snapshot's current_state + response_mood
+    assert "正在做饭" in out
+    assert "轻松" in out
+    # lane口径 == 写入端：current_deployment_lane() or "prod"
+    assert find.await_args.kwargs == {"lane": "ppe-x", "persona_id": "akao"}
 
 
 @pytest.mark.asyncio
-async def test_build_life_state_keeps_current_state_before_end():
-    row = SimpleNamespace(
-        id=1,
-        current_state="正在做饭",
-        response_mood="轻松",
-        state_end_at=datetime.now(CST) + timedelta(minutes=10),
+async def test_build_life_state_lane_falls_back_to_prod():
+    """prod (LANE unset → None) normalizes to 'prod', matching the write side."""
+    snap = SimpleNamespace(
+        current_state="看书",
+        response_mood="安静",
+        activity_type="read",
+        observed_at="2026-06-03T10:00:00+00:00",
     )
-
-    with patch("app.memory.context.find_latest_life_state", new=AsyncMock(return_value=row)):
+    find = AsyncMock(return_value=snap)
+    with (
+        patch("app.memory.context.find_life_state", new=find),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+    ):
         out = await _build_life_state("akao")
 
-    assert "正在做饭" in out
-    assert "轻松" in out
+    assert "看书" in out
+    assert find.await_args.kwargs == {"lane": "prod", "persona_id": "akao"}
+
+
+@pytest.mark.asyncio
+async def test_build_life_state_empty_when_no_snapshot():
+    """No snapshot yet (she hasn't lived a round) → empty string, no error."""
+    with (
+        patch("app.memory.context.find_life_state", new=AsyncMock(return_value=None)),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+    ):
+        out = await _build_life_state("akao")
+
+    assert out == ""
 
 
 @pytest.mark.asyncio

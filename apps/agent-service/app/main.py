@@ -45,8 +45,9 @@ async def lifespan(app: FastAPI):
         declare_topology=bool(settings.rabbitmq_url),
     )
 
-    # Phase 4: migrate schema BEFORE start_consumers — durable consumer
-    # for GlimpseRequest needs data_glimpse_request table to exist.
+    # Migrate schema BEFORE start_consumers — durable consumers (e.g. the
+    # world/life event mailbox + intent edges) need their data tables to
+    # exist before the source loops start delivering.
     from app.runtime.engine import Runtime
 
     runtime_for_sources = Runtime(

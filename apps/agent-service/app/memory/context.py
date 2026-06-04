@@ -15,50 +15,33 @@ Sections (order matters for prompt flow):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
-from app.data.queries import find_latest_life_state
+from app.domain.life_state import find_life_state
 from app.memory.sections.active_notes import build_active_notes_section
 from app.memory.sections.recall_index import build_recall_index_section
 from app.memory.sections.schedule import build_schedule_section
 from app.memory.sections.self_abstracts import build_self_abstracts_section
 from app.memory.sections.short_term_fragments import build_short_term_fragments_section
 from app.memory.sections.user_abstracts import build_user_abstracts_section
+from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
-_CST = timezone(timedelta(hours=8))
-
-
-def _as_cst(value: datetime) -> datetime:
-    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-        return value.replace(tzinfo=_CST)
-    return value.astimezone(_CST)
-
-
-def _is_life_state_expired(row, now: datetime) -> bool:
-    state_end_at = getattr(row, "state_end_at", None)
-    if not state_end_at:
-        return False
-    return _as_cst(state_end_at) <= now
-
 
 async def _build_life_state(persona_id: str) -> str:
+    """读某姐妹此刻的主观快照 (LifeState)，拼成 chat 注入文本。
+
+    lane 口径与 world/life 写入端一致：``current_deployment_lane() or "prod"``
+    （进程级泳道，prod 归一到 "prod"）。读不到自己泳道写的快照就拼不出状态。
+    没有快照（她还没活过一轮）返回空串。
+    """
     try:
-        row = await find_latest_life_state(persona_id)
-        if not row:
+        lane = current_deployment_lane() or "prod"
+        snap = await find_life_state(lane=lane, persona_id=persona_id)
+        if not snap:
             return ""
-        now = datetime.now(_CST)
-        if _is_life_state_expired(row, now):
-            logger.debug(
-                "[%s] Ignoring expired life state id=%s state_end_at=%s",
-                persona_id,
-                getattr(row, "id", None),
-                getattr(row, "state_end_at", None),
-            )
-            return ""
-        current = row.current_state
-        mood = row.response_mood
+        current = snap.current_state
+        mood = snap.response_mood
         if current:
             return (
                 f"你此刻的状态：{current}\n你的心情：{mood}"

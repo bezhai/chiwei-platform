@@ -1,8 +1,11 @@
-"""Test schedule section."""
+"""Test schedule section.
+
+Schedules are no longer generated (life engine schedule pipeline removed).
+``build_schedule_section`` is now a no-op that always returns an empty string,
+so the composer never appends a schedule section and never errors.
+"""
 
 from __future__ import annotations
-
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -10,15 +13,7 @@ from app.memory.sections.schedule import build_schedule_section
 
 
 @pytest.mark.asyncio
-async def test_empty_when_no_schedule():
-    with patch("app.memory.sections.schedule.get_current_schedule", new=AsyncMock(return_value=None)):
-        text = await build_schedule_section(persona_id="chiwei")
+async def test_schedule_section_always_empty():
+    """No schedule generated → empty string, no DB read, no error."""
+    text = await build_schedule_section(persona_id="chiwei")
     assert text == ""
-
-
-@pytest.mark.asyncio
-async def test_renders_schedule_content():
-    sr = MagicMock(content="今天周五，早上 8-12 两节课...", reason="first draft")
-    with patch("app.memory.sections.schedule.get_current_schedule", new=AsyncMock(return_value=sr)):
-        text = await build_schedule_section(persona_id="chiwei")
-    assert "今天" in text

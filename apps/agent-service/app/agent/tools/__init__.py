@@ -20,7 +20,6 @@ from app.agent.tools.recall import recall
 from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
 from app.agent.tools.skill import load_skill
-from app.agent.tools.update_schedule import update_schedule
 
 # Base tools: available to all agents (including sub-agents like research)
 BASE_TOOLS = [
@@ -34,7 +33,6 @@ BASE_TOOLS = [
     list_note,
     resolve_note,
     delete_note,
-    update_schedule,
 ]
 
 # All tools: only for the main agent.
@@ -62,7 +60,6 @@ __all__ = [
     "list_note",
     "resolve_note",
     "delete_note",
-    "update_schedule",
     "check_chat_history",
     "search_group_history",
     "list_group_members",

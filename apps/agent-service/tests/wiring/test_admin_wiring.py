@@ -1,4 +1,8 @@
-"""Phase 6 v4 Gap 1 acceptance: admin wiring registers all 11 HTTP routes."""
+"""Admin wiring acceptance.
+
+旧 life-tick / glimpse / schedule 触发 + schedule CRUD 路由已随 world/life
+重写删除。剩 voice 触发 + search（DLQ admin 在 test_dlq_admin 覆盖）。
+"""
 from __future__ import annotations
 
 import importlib
@@ -37,20 +41,26 @@ def test_admin_wiring_registers_all_paths():
             paths_methods.add((r.path, m))
 
     expected = {
+        ("/admin/trigger-voice", "POST"),
+        ("/admin/search", "POST"),
+    }
+    missing = expected - paths_methods
+    assert not missing, f"missing wires: {missing}"
+
+    # 旧 life / glimpse / schedule 路由必须已删干净。
+    deleted = {
         ("/admin/trigger-life-engine-tick", "POST"),
         ("/admin/trigger-glimpse", "POST"),
         ("/admin/debug-glimpse", "POST"),
-        ("/admin/trigger-voice", "POST"),
         ("/admin/trigger-schedule", "POST"),
-        ("/admin/search", "POST"),
         ("/api/schedule", "GET"),
         ("/api/schedule", "POST"),
         ("/api/schedule/current", "GET"),
         ("/api/schedule/daily/{target_date}", "GET"),
         ("/api/schedule/{schedule_id}", "DELETE"),
     }
-    missing = expected - paths_methods
-    assert not missing, f"missing wires: {missing}"
+    leftover = deleted & paths_methods
+    assert not leftover, f"deleted routes still wired: {leftover}"
 
 
 def test_routes_py_only_health():

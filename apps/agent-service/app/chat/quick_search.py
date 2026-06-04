@@ -9,7 +9,10 @@ from app.data.queries import (
     find_messages_with_user_chat_persona_by_root,
     find_messages_with_user_chat_persona_in_chat,
 )
-from app.life.proactive import PROACTIVE_USER_ID
+
+# 主动触发消息的合成 user_id 标记。归属在这条 chat 路径的叶子模块，
+# context.py 再 import 它（避免 context ↔ quick_search 循环 import）。
+PROACTIVE_USER_ID = "__proactive__"
 
 
 class QuickSearchResult:

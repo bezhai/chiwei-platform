@@ -1,7 +1,9 @@
-"""Phase 4 life_dataflow Data classes — surface check."""
-from __future__ import annotations
+"""Cron-tick dataflow Data classes — surface check.
 
-import pytest
+旧 life tick / glimpse / daily-plan 的 Data 已在 world/life 重写中删除，对应
+断言随之移除。这里只覆盖保留的 voice + light/heavy reviewer 调度信号。
+"""
+from __future__ import annotations
 
 from app.runtime.data import key_fields
 
@@ -11,58 +13,42 @@ def test_all_classes_importable():
 
     for name in [
         "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
-        "DailyPlanTick", "GlimpseTick",
-        "LifeTickRequest", "VoiceRequest", "LightReviewRequest",
-        "HeavyReviewRequest", "GlimpseTickRequest",
-        "SharedDailyContext", "DailyPlanRequest",
-        "LifeStateChanged", "GlimpseRequest",
+        "VoiceRequest", "LightReviewRequest", "HeavyReviewRequest",
     ]:
         assert hasattr(ld, name), f"{name} missing"
 
 
 def test_tick_classes_are_transient():
     from app.domain.life_dataflow import (
-        MinuteTick, LightDayTick, LightNightTick, HeavyReviewTick,
-        DailyPlanTick, GlimpseTick,
+        HeavyReviewTick,
+        LightDayTick,
+        LightNightTick,
+        MinuteTick,
     )
-    for cls in [MinuteTick, LightDayTick, LightNightTick, HeavyReviewTick,
-                DailyPlanTick, GlimpseTick]:
+    for cls in [MinuteTick, LightDayTick, LightNightTick, HeavyReviewTick]:
         meta = getattr(cls, "Meta", None)
         assert meta is not None and getattr(meta, "transient", False), (
             f"{cls.__name__} should declare Meta.transient = True"
         )
 
 
-def test_glimpse_request_is_persisted():
-    """GlimpseRequest is durable -> must NOT be transient."""
-    from app.domain.life_dataflow import GlimpseRequest
-    meta = getattr(GlimpseRequest, "Meta", None)
-    if meta is not None:
-        assert not getattr(meta, "transient", False), (
-            "GlimpseRequest goes through .durable() — must not be transient"
-        )
-
-
-def test_glimpse_request_key_is_request_id():
-    from app.domain.life_dataflow import GlimpseRequest
-    assert key_fields(GlimpseRequest) == ("request_id",)
-
-
-def test_other_business_requests_keyed_by_persona():
+def test_business_requests_keyed_by_persona():
     from app.domain.life_dataflow import (
-        LifeTickRequest, VoiceRequest, LightReviewRequest, HeavyReviewRequest,
-        GlimpseTickRequest, DailyPlanRequest,
+        HeavyReviewRequest,
+        LightReviewRequest,
+        VoiceRequest,
     )
-    for cls in [LifeTickRequest, VoiceRequest, LightReviewRequest,
-                HeavyReviewRequest, GlimpseTickRequest, DailyPlanRequest]:
+    for cls in [VoiceRequest, LightReviewRequest, HeavyReviewRequest]:
         assert key_fields(cls) == ("persona_id",), f"{cls.__name__} key wrong"
 
 
-def test_shared_daily_context_keyed_by_date():
-    from app.domain.life_dataflow import SharedDailyContext
-    assert key_fields(SharedDailyContext) == ("target_date",)
+def test_deleted_classes_gone():
+    """旧 life tick / glimpse / daily-plan 的 Data 必须已删干净。"""
+    from app.domain import life_dataflow as ld
 
-
-def test_life_state_changed_keyed_by_persona():
-    from app.domain.life_dataflow import LifeStateChanged
-    assert key_fields(LifeStateChanged) == ("persona_id",)
+    for name in [
+        "LifeTickRequest", "DailyPlanTick", "GlimpseTick", "GlimpseTickRequest",
+        "SharedDailyContext", "DailyPlanRequest", "LifeStateChanged",
+        "GlimpseRequest",
+    ]:
+        assert not hasattr(ld, name), f"{name} should have been deleted"

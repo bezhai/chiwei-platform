@@ -2,9 +2,9 @@
 
 These ``Data`` types only carry the DB id of a memory v4 row queued for
 embedding. They never reach pg — the real Fragment / Abstract row is
-already persisted by the publisher (``commit_abstract``, ``afterthought``,
-``glimpse``); the request is just an MQ frame triggering the vectorize
-worker to embed and upsert into qdrant.
+already persisted by the publisher (``commit_abstract``, ``afterthought``);
+the request is just an MQ frame triggering the vectorize worker to embed
+and upsert into qdrant.
 """
 from __future__ import annotations
 

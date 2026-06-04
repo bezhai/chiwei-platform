@@ -1,20 +1,13 @@
-"""Always-on injection: today_schedule (latest revision)."""
+"""Schedule section — retired.
+
+Schedules are no longer generated (the life-engine schedule pipeline was
+removed in the world/life rewrite). This section is kept as a no-op so the
+context composer's call site stays uniform: it always gets an empty string
+back, never appends a schedule section, and never errors.
+"""
 
 from __future__ import annotations
 
-import logging
-
-from app.data.queries import get_current_schedule
-
-logger = logging.getLogger(__name__)
-
 
 async def build_schedule_section(*, persona_id: str) -> str:
-    try:
-        sr = await get_current_schedule(persona_id=persona_id)
-    except Exception as e:
-        logger.warning("schedule section failed: %s", e)
-        return ""
-    if sr is None:
-        return ""
-    return f"今天的安排：\n{sr.content}"
+    return ""

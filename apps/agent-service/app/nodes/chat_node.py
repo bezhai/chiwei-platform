@@ -31,10 +31,13 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
     set_agent_response_bot,
 )
+from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
+from app.domain.world_events import EVENT_KIND_EXTERNAL
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
 from app.runtime.emit import emit
+from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
@@ -325,3 +328,38 @@ async def chat_node(req: ChatRequest) -> None:
             "parts": part_index + 1,
         },
     )
+
+    # 对话回灌：聊完一次，作为一条 external event 进这个 persona 的信箱（她事后
+    # 知道"刚和谁聊过"），不让"聊天里的她"和"世界里的她"分叉。快路径回复已经
+    # emit 完，回灌在这之后、不挡回复；回灌失败只 log、不拖垮 chat。第一刀只回
+    # 灌"发生过一次对话"，不抠"她答应了什么"。event_id 用 session_id 让重投幂等。
+    await _replay_conversation_to_mailbox(req)
+
+
+async def _replay_conversation_to_mailbox(req: ChatRequest) -> None:
+    """把"刚和某用户聊过一次"投进 req.persona_id 的信箱。
+
+    lane 取**进程级部署泳道**（``current_deployment_lane() or "prod"``），与
+    world / life 写读、取用端读全链路统一（必改 3）。不能用 ``req.lane``：prod
+    下 ``req.lane`` 常为空 → external event 进 ``lane=""`` 信箱，而 life 在
+    ``"prod"`` 唤醒读不到 → 对话回灌闭环分叉。失败吞掉只 log —— 这是对话之后的
+    事后回灌，绝不能影响已经回完的即时回复。
+    """
+    if not req.persona_id:
+        return
+    lane = current_deployment_lane() or "prod"
+    try:
+        await deliver_event(
+            lane=lane,
+            persona_id=req.persona_id,
+            event_id=f"chat:{req.session_id}",
+            kind=EVENT_KIND_EXTERNAL,
+            source=f"user:{req.user_id}",
+            summary=f"刚和用户 {req.user_id} 聊过一次",
+            occurred_at=str(int(time.time() * 1000)),
+        )
+    except Exception as e:  # noqa: BLE001 — 事后回灌失败不拖垮 chat 快路径
+        logger.warning(
+            "conversation replay to mailbox failed: persona=%s session=%s: %s",
+            req.persona_id, req.session_id, e,
+        )

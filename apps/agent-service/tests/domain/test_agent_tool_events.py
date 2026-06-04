@@ -6,13 +6,18 @@ def test_data_classes_register():
     from app.domain.agent_tool_events import (
         AbstractMemoryCommitted,
         NoteCreated,
-        ScheduleRevisionCreated,
     )
     from app.runtime.data import DATA_REGISTRY
 
     assert AbstractMemoryCommitted in DATA_REGISTRY
-    assert ScheduleRevisionCreated in DATA_REGISTRY
     assert NoteCreated in DATA_REGISTRY
+
+
+def test_schedule_revision_created_deleted():
+    """update_schedule tool 删除后 ScheduleRevisionCreated 不再存在。"""
+    from app.domain import agent_tool_events as evt
+
+    assert not hasattr(evt, "ScheduleRevisionCreated")
 
 
 def test_abstract_memory_committed_fields():
@@ -25,13 +30,6 @@ def test_abstract_memory_committed_fields():
 
     e2 = AbstractMemoryCommitted(abstract_id="a_2", persona_id="akao-001", chat_id="oc_xx")
     assert e2.chat_id == "oc_xx"
-
-
-def test_schedule_revision_created_fields():
-    from app.domain.agent_tool_events import ScheduleRevisionCreated
-
-    e = ScheduleRevisionCreated(revision_id="r_1", persona_id="akao-001")
-    assert e.revision_id == "r_1"
 
 
 def test_note_created_fields():

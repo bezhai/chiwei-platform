@@ -27,14 +27,16 @@ from app.agent.neutral import Message
 from app.chat._context_images import collect_images
 from app.chat._context_messages import build_group_messages, build_p2p_messages
 from app.chat.content_parser import parse_content
-from app.chat.quick_search import quick_search
+from app.chat.quick_search import PROACTIVE_USER_ID, quick_search
 from app.domain.chat_events import CommonMessageContentSynced
 from app.infra.image import ImageRegistry
 from app.runtime import emit
 
 logger = logging.getLogger(__name__)
 
-PROACTIVE_USER_ID = "__proactive__"
+# PROACTIVE_USER_ID re-exported from quick_search (its leaf home) — callers
+# and tests still do ``from app.chat.context import PROACTIVE_USER_ID``.
+_ = PROACTIVE_USER_ID
 
 # ContextVars for proactive scan state (read by pipeline.py)
 is_proactive_var: contextvars.ContextVar[bool] = contextvars.ContextVar(

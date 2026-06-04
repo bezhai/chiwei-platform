@@ -39,26 +39,3 @@ def test_compile_succeeds_with_new_wires():
     from app.runtime.graph import compile_graph
 
     compile_graph()
-
-
-def test_schedule_revision_wired_durable():
-    _fresh_import()
-
-    from app.domain.agent_tool_events import ScheduleRevisionCreated
-    from app.nodes.sync_life_state import sync_life_state_node
-    from app.runtime.wire import WIRING_REGISTRY
-
-    wires = [w for w in WIRING_REGISTRY if w.data_type is ScheduleRevisionCreated]
-    assert len(wires) == 1
-    assert wires[0].durable
-    assert sync_life_state_node in wires[0].consumers
-
-
-def test_sync_life_state_bound_to_agent_service():
-    _fresh_import()
-
-    from app.nodes.sync_life_state import sync_life_state_node
-    from app.runtime.placement import iter_bindings
-
-    b = dict(iter_bindings())
-    assert b[sync_life_state_node] == "agent-service"

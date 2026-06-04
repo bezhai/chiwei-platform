@@ -12,12 +12,12 @@ from datetime import datetime, timedelta, timezone
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
 from app.data.queries import (
-    find_latest_life_state,
-    find_plan_for_period,
     insert_reply_style,
     list_today_fragments,
 )
+from app.domain.life_state import find_life_state
 from app.memory._persona import load_persona
+from app.runtime.lane_policy import current_deployment_lane
 
 _VOICE_CFG = AgentConfig("voice_generator", "offline-model", "voice-generator")
 
@@ -37,15 +37,13 @@ async def generate_voice(
     if pc.display_name == persona_id and not pc.persona_lite:
         return None
 
-    le_state = await find_latest_life_state(persona_id)
-    current_state = le_state.current_state if le_state else "（状态未知）"
-    response_mood = le_state.response_mood if le_state else ""
+    # lane 口径与 world/life 写入端一致：current_deployment_lane() or "prod"。
+    lane = current_deployment_lane() or "prod"
+    snap = await find_life_state(lane=lane, persona_id=persona_id)
+    current_state = snap.current_state if snap else "（状态未知）"
+    response_mood = snap.response_mood if snap else ""
 
     now = datetime.now(_CST)
-    today = now.strftime("%Y-%m-%d")
-
-    schedule = await find_plan_for_period("daily", today, today, persona_id)
-    schedule_text = schedule.content if schedule else "（今天没有安排）"
 
     frags = await list_today_fragments(
         persona_id, sources=["afterthought"]
@@ -66,7 +64,6 @@ async def generate_voice(
             "persona_lite": pc.persona_lite,
             "current_state": current_state,
             "response_mood": response_mood,
-            "schedule_segment": schedule_text,
             "recent_fragments": frag_text,
             "recent_context": recent_ctx_block,
             "current_time": now.strftime("%H:%M"),

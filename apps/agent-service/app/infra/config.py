@@ -126,9 +126,6 @@ class Settings:
     life_engine_model: str = field(
         default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
     )
-    glimpse_target_chat_ids: list[str] = field(
-        default_factory=lambda: _env_list("GLIMPSE_TARGET_CHAT_IDS")
-    )
 
     # -- Identity drift --
     identity_drift_model: str = field(

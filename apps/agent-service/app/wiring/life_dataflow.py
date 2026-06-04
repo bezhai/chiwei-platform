@@ -1,90 +1,110 @@
-"""Phase 4 wiring: cron / event source -> fan-out / business node.
+"""Wiring: voice + reviewer cron ticks + world/life event 闭环.
 
-Graph topology (see docs/superpowers/specs/2026-04-30-dataflow-phase-4-...):
+Graph topology:
 
-  cron */1   -> MinuteTick -> fan_out_life_tick + fan_out_voice
-  cron 0,30 8-21 -> LightDayTick -> fan_out_light_day
+  cron */1       -> MinuteTick     -> fan_out_voice
+  cron 0,30 8-21 -> LightDayTick   -> fan_out_light_day
   cron 0 22-7 except 3 -> LightNightTick -> fan_out_light_night
-  cron 0 3 -> HeavyReviewTick -> fan_out_heavy
-  cron 0 5 -> DailyPlanTick -> run_shared_daily_pipeline_node -> SharedDailyContext
-                                                                -> fan_out_daily_plan
-  cron */5 -> GlimpseTick -> fan_out_glimpse -> GlimpseTickRequest -> glimpse_tick_node
-  LifeStateChanged -> glimpse_event_node
-  GlimpseRequest .durable() -> run_glimpse_node
-  ScheduleRevisionCreated .durable() -> sync_life_state_node
+  cron 0 3       -> HeavyReviewTick -> fan_out_heavy
+
+  interval 10min -> WorldHeartbeatTick -> heartbeat_to_world_tick -> WorldTick -> world_tick
+  WorldTick (in-process: heartbeat / self-schedule / intent) -> world_tick
+  IntentRaised .durable() -> intent_to_world_tick -> WorldTick
+  EventArrived .debounce() -> life_wake_node
+
+旧 life tick / glimpse / schedule 生成的 wire 已在 world/life 重写中删除
+（life_tick / glimpse / daily_plan / sync_life_state）。voice 与 light/heavy
+reviewer 的 cron 保留，只是读状态口换成新 LifeState 主观快照。
 """
 from __future__ import annotations
 
-from app.domain.agent_tool_events import ScheduleRevisionCreated
 from app.domain.life_dataflow import (
-    DailyPlanRequest,
-    DailyPlanTick,
-    GlimpseRequest,
-    GlimpseTick,
-    GlimpseTickRequest,
     HeavyReviewRequest,
     HeavyReviewTick,
-    LifeStateChanged,
-    LifeTickRequest,
     LightDayTick,
     LightNightTick,
     LightReviewRequest,
     MinuteTick,
-    SharedDailyContext,
     VoiceRequest,
 )
+from app.domain.world_events import EventArrived, IntentRaised, event_knock_key
 from app.nodes.life_dataflow import (
     _persona_dicts,
-    daily_plan_node,
-    fan_out_daily_plan,
-    fan_out_glimpse,
     fan_out_heavy,
-    fan_out_life_tick,
     fan_out_light_day,
     fan_out_light_night,
     fan_out_voice,
-    glimpse_event_node,
-    glimpse_tick_node,
     heavy_review_node,
-    life_tick_node,
     light_review_node,
-    run_glimpse_node,
-    run_shared_daily_pipeline_node,
     voice_node,
 )
-from app.nodes.sync_life_state import sync_life_state_node
+from app.nodes.life_wake import life_wake_node
 from app.runtime import Source, wire
+from app.world.engine import (
+    WORLD_HEARTBEAT_SECONDS,
+    WorldHeartbeatTick,
+    WorldTick,
+    heartbeat_to_world_tick,
+    intent_to_world_tick,
+    world_tick,
+)
 
 TZ = "Asia/Shanghai"
+
+# world/life event 闭环攒批窗口：EventArrived 走 debounce 攒批唤醒 life，多条
+# 积压只醒一次。窗口决定"何时醒 / 攒多久"，绝不进世界内容决策（spec key
+# decision 2 的原语边界）。几秒窗口让同一轮里挤进来的多条 event 打成一批；
+# max_buffer 只是防积压溢出的安全阀（攒够这么多条立即触发一次，不无限等）。
+LIFE_WAKE_DEBOUNCE_SECONDS = 5
+LIFE_WAKE_DEBOUNCE_MAX_BUFFER = 20
 
 # Cron tick entry points — fan_out_xxx @node emits a per-persona-less
 # template Request; the wire from that Request to the business node
 # declares ``.fan_out_per(_persona_dicts)`` to expand it per persona
 # with built-in failure isolation between personas.
-wire(MinuteTick).from_(Source.cron("* * * * *", tz=TZ)).to(fan_out_life_tick, fan_out_voice)
+wire(MinuteTick).from_(Source.cron("* * * * *", tz=TZ)).to(fan_out_voice)
 wire(LightDayTick).from_(Source.cron("0,30 8-21 * * *", tz=TZ)).to(fan_out_light_day)
 wire(LightNightTick).from_(Source.cron("0 22,23,0,1,2,4,5,6,7 * * *", tz=TZ)).to(fan_out_light_night)
 wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
-wire(DailyPlanTick).from_(Source.cron("0 5 * * *", tz=TZ)).to(run_shared_daily_pipeline_node)
-wire(GlimpseTick).from_(Source.cron("*/5 * * * *", tz=TZ)).to(fan_out_glimpse)
-
-# Daily plan internal chain — SharedDailyContext → template Request → fan-out.
-wire(SharedDailyContext).to(fan_out_daily_plan)
-wire(DailyPlanRequest).fan_out_per(_persona_dicts).to(daily_plan_node)
 
 # Per-persona business (declarative fan-out replaces hand-rolled
 # ``_fan_out_per_persona`` loops; one persona failing does not abort
 # the others — guaranteed by emit._dispatch_fan_out's
 # asyncio.gather(return_exceptions=True)).
-wire(LifeTickRequest).fan_out_per(_persona_dicts).to(life_tick_node)
 wire(VoiceRequest).fan_out_per(_persona_dicts).to(voice_node)
 wire(LightReviewRequest).fan_out_per(_persona_dicts).to(light_review_node)
 wire(HeavyReviewRequest).fan_out_per(_persona_dicts).to(heavy_review_node)
 
-# Glimpse dual-path converge into GlimpseRequest
-wire(GlimpseTickRequest).fan_out_per(_persona_dicts).to(glimpse_tick_node)  # 5min periodic path
-wire(LifeStateChanged).to(glimpse_event_node)          # immediate event path
-wire(GlimpseRequest).to(run_glimpse_node).durable().on_error("dlq")
+# ---------------------------------------------------------------------------
+# world/life event 闭环 wiring。
+# ---------------------------------------------------------------------------
 
-# Schedule revision triggers life-state refresh (durable: cross-process tool->consumer).
-wire(ScheduleRevisionCreated).to(sync_life_state_node).durable()
+# world 发动机三源同一入口（world_tick），但时间源不直接喂 WorldTick：
+#   1) 保底心跳：interval 每 10 分钟喂一条单字段 WorldHeartbeatTick（满足框架
+#      时间源的单字段 ts 约定），翻译节点 heartbeat_to_world_tick 补上进程级
+#      泳道 + reason 后 emit WorldTick 接回 world_tick。WorldTick 直接挂时间源
+#      会在源循环 _build_payload(WorldTick(ts=...)) 处 ValidationError 杀 Pod
+#      （WorldTick 无 ts、且缺必填 lane），world 在生产里永远起不来。
+#   2) 自排提前卡点：world_tick 内部 emit_delayed(WorldTick(reason="self"))，到期
+#      emit(WorldTick) 经下面的 in-process 边接回 world_tick。
+#   3) intent 回灌：intent_to_world_tick emit 的 WorldTick(reason="intent") 同样
+#      经那条 in-process 边到 world_tick。
+wire(WorldHeartbeatTick).from_(Source.interval(WORLD_HEARTBEAT_SECONDS)).to(
+    heartbeat_to_world_tick
+)
+# WorldTick 退回纯 in-process：承载心跳翻译 / 自排 / 意图翻译三种来源 emit 的
+# WorldTick，统一打到 world_tick。
+wire(WorldTick).to(world_tick)
+
+# life 回灌意图 → 翻成 WorldTick(reason="intent") 唤醒 world 裁决。durable：
+# life 进程起意写信箱，world 进程消费、翻译、打到自己的 world_tick（跨进程不丢）。
+wire(IntentRaised).to(intent_to_world_tick).durable()
+
+# 信箱来新 event → debounce 攒批唤醒对应 life（同构跑三姐妹，persona 由
+# EventArrived 决定）。key_by 复用 event_knock_key，每个 (lane, persona) 自己
+# 攒批，互不干扰，与信箱隔离口径一致。
+wire(EventArrived).debounce(
+    seconds=LIFE_WAKE_DEBOUNCE_SECONDS,
+    max_buffer=LIFE_WAKE_DEBOUNCE_MAX_BUFFER,
+    key_by=event_knock_key,
+).to(life_wake_node)

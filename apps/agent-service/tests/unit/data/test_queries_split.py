@@ -31,10 +31,10 @@ EXPECTED_FUNCTIONS = {
     "find_daily_entries", "list_schedules", "upsert_schedule", "delete_schedule",
     "insert_schedule_revision", "get_current_schedule", "get_schedule_revision_by_id",
     "list_recent_schedule_revisions",
-    # life (9)
-    "find_latest_life_state", "insert_life_state", "find_today_activity_states",
-    "find_life_states_in_range", "find_latest_glimpse_state", "insert_glimpse_state",
-    "insert_reply_style", "find_latest_reply_style", "list_recent_life_states",
+    # life → reply-style only (2): 旧 life_engine_state / glimpse_state 查询已随
+    # world/life 重写删除；她此刻状态读新 LifeState Data。只剩 voice 写 / chat 读
+    # 的 reply_style 这一对。
+    "insert_reply_style", "find_latest_reply_style",
     # memory (13) — fragments + abstracts CRUD
     "get_fragment_by_id", "get_abstract_by_id", "insert_fragment", "touch_fragment",
     "get_fragments_by_ids", "touch_fragments_bulk", "insert_abstract_memory",

@@ -8,7 +8,6 @@ Tables:
   - model_provider, model_mappings
   - bot_persona
   - akao_schedule
-  - life_engine_state, glimpse_state
   - memory_entity, reply_style_log
   # Memory v4
   - fragment, abstract_memory, memory_edge, notes, schedule_revision
@@ -252,45 +251,8 @@ class AkaoSchedule(Base):
 
 
 # ---------------------------------------------------------------------------
-# Memory — experience fragments, glimpse, life engine
+# Memory — experience fragments + entity mapping
 # ---------------------------------------------------------------------------
-
-
-class LifeEngineState(Base):
-    """Life Engine 状态 — append-only"""
-
-    __tablename__ = "life_engine_state"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    current_state: Mapped[str] = mapped_column(Text, nullable=False)
-    activity_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    response_mood: Mapped[str] = mapped_column(Text, nullable=False)
-    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
-    skip_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    state_end_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class GlimpseState(Base):
-    """Glimpse 观察状态 — append-only"""
-
-    __tablename__ = "glimpse_state"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    last_seen_msg_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    observation: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
 
 
 class MemoryEntity(Base):

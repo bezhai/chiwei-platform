@@ -14,6 +14,5 @@ from app.runtime import wire
 # MemoryAbstractRequest (which has Source.mq + cross-process consumer).
 wire(AbstractMemoryCommitted).to(on_abstract_committed)
 
-# ScheduleRevisionCreated wire deferred to Task 7 (sync_life_state_node).
 # NoteCreated has no default subscriber yet — Data class registered so
 # downstream code can subscribe later without redefining the type.
