@@ -9,5 +9,6 @@ resources:
   - redis/
   - qdrant/
   - rabbitmq/
+  - minio/
   - meme/
   - forward-proxy/

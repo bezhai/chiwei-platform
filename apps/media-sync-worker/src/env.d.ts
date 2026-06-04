@@ -17,5 +17,16 @@ declare namespace NodeJS {
     RUN_CONNECTIVITY_CHECK: string;
     DISABLE_SCHEDULES: string;
     DISABLE_CONSUMER: string;
+    END_POINT: string;
+    OSS_ACCESS_KEY_ID: string;
+    OSS_ACCESS_KEY_SECRET: string;
+    OSS_BUCKET: string;
+    MINIO_ENDPOINT: string;
+    MINIO_PORT: string;
+    MINIO_USE_SSL: string;
+    MINIO_ACCESS_KEY: string;
+    MINIO_SECRET_KEY: string;
+    MINIO_BUCKET: string;
+    MINIO_SYNC_ENABLED: string;
   }
 }
