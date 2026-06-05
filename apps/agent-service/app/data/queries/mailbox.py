@@ -37,6 +37,29 @@ _ENVELOPE_TABLE = _table_name(EventEnvelope)
 _READ_TABLE = _table_name(EventRead)
 
 
+def _occurred_at_real_instant(col: str) -> str:
+    """把混格式 ``occurred_at`` 列归一成真实时刻 ``timestamptz`` 的 SQL 表达式。
+
+    信箱里 ``occurred_at`` 是 TEXT，历史脏数据混着两种格式：chat 老链路写 Unix
+    毫秒（纯数字串 ``"1780..."``，以 1 开头），world/life 写 offset-aware ISO
+    （``"2026-..."``，以 2 开头）。raw TEXT 排序会把 Unix 毫秒整体排在 ISO 前
+    （字符串序 ``"1" < "2"``），哪怕那条 Unix 毫秒的真实时刻其实更晚——"按发生
+    先后"被打乱。这个表达式按格式分支归一到真实时刻：纯数字 → ``to_timestamp``
+    （毫秒 / 1000），否则 ``::timestamptz``。
+
+    依赖生产侧契约：非数字分支的值必须是 offset-aware ISO（world/life/chat 现在
+    都写带偏移量的 ISO）。这跟 ``intents.py`` 的 ``::timestamptz`` cast 同口径——
+    读侧不在 SQL 里吞解析错（吞错会静默漏 event、与"按发生先后"初衷相悖），脏数据
+    由生产侧守住格式契约。chat 已改写 CST aware ISO（阶段 0），新写不再产 Unix
+    毫秒；纯数字分支只为向后兼容读历史脏数据存在（spec：历史不迁移、读侧兼容读）。
+    """
+    return (
+        f"CASE WHEN {col} ~ '^[0-9]+$' "
+        f"     THEN to_timestamp({col}::double precision / 1000) "
+        f"     ELSE {col}::timestamptz END"
+    )
+
+
 async def deliver_event(
     *,
     lane: str,
@@ -80,7 +103,12 @@ async def list_unread_events(
 
     未读 = envelope 里有、read 表里没有对应 ``(lane, persona_id, event_id)``
     的那些行。lane + persona 双重过滤保证泳道隔离 + 信息差。
+
+    排序按**真实时刻**升序（不是 raw TEXT 字符串序）：``occurred_at`` 混着 Unix
+    毫秒（历史 chat）和 ISO（world/life/新 chat），字符串序会乱排，归一到真实
+    时刻才是真正的"按发生先后"（见 :func:`_occurred_at_real_instant`）。
     """
+    order_expr = _occurred_at_real_instant("e.occurred_at")
     sql = (
         f"SELECT e.* FROM {_ENVELOPE_TABLE} e "
         f"LEFT JOIN {_READ_TABLE} r "
@@ -89,7 +117,7 @@ async def list_unread_events(
         f" AND e.event_id = r.event_id "
         f"WHERE e.lane = :lane AND e.persona_id = :persona_id "
         f"  AND r.event_id IS NULL "
-        f"ORDER BY e.occurred_at ASC"
+        f"ORDER BY {order_expr} ASC"
     )
     async with get_session() as s:
         result = await s.execute(

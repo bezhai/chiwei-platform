@@ -48,7 +48,6 @@ import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from langfuse import Langfuse
@@ -80,6 +79,7 @@ from app.agent.trace import (
     current_turn_trace_id,
 )
 from app.capabilities.retry import retry as _retry_decorator
+from app.infra import cst_time
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
@@ -560,10 +560,14 @@ class Agent:
             )
         langfuse_prompt = get_prompt(self._cfg.prompt_id)
         model = await build_model_client(self._cfg.model_id)
+        # 全局注入的"现在"显式取 CST（北京时间），不依赖容器时区——naive
+        # ``datetime.now()`` 在 TZ 不确定的容器里可能是 UTC，喂给每条 prompt 的
+        # currTime 就跟 world/life 的 CST 时刻差 8 小时。这一处修正整条 chat 线。
+        now = cst_time.now_cst()
         prompt_messages = compile_to_messages(
             langfuse_prompt,
-            currDate=datetime.now().strftime("%Y-%m-%d"),
-            currTime=datetime.now().strftime("%H:%M:%S"),
+            currDate=now.strftime("%Y-%m-%d"),
+            currTime=now.strftime("%H:%M:%S"),
             **prompt_vars,
         )
         return model, prompt_messages

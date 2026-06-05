@@ -441,6 +441,34 @@ def test_intent_since_cutoff_anchors_on_intent_occurred_at():
     )
 
 
+def test_intent_batch_text_shows_occurred_at_in_cst():
+    """intent 批次清单里的 occurred_at 显示转 CST（兜历史 UTC intent）。
+
+    life 历史 intent 可能写 UTC（``...12:30:00+00:00``），world 把它喂给模型时
+    必须显示成 CST（20:30），否则跟 world_time（CST）同框混着、模型看到差 8 小时
+    的两个时刻。已是 CST 的串显示仍是该 CST 钟点（不二次偏移）。
+    """
+    from app.domain.world_events import IntentRaised
+    from app.world.engine import _intent_batch_text
+
+    intents = [
+        IntentRaised(
+            lane="x", intent_id="i1", persona_id="akao",
+            summary="想去厨房", occurred_at="2026-06-04T12:30:00+00:00",  # UTC
+        ),
+        IntentRaised(
+            lane="x", intent_id="i2", persona_id="ayana",
+            summary="想出门", occurred_at="2026-06-04T20:30:00+08:00",  # CST
+        ),
+    ]
+    text = _intent_batch_text(intents)
+    # UTC 12:30 → CST 20:30；CST 20:30 仍 20:30
+    assert "20:30" in text, "UTC intent 时刻该显示成 CST"
+    assert "CST" in text, "显示要让模型看得出是 CST"
+    # summary 仍在
+    assert "想去厨房" in text and "想出门" in text
+
+
 @pytest.mark.asyncio
 async def test_non_intent_wake_does_not_read_intents(monkeypatch):
     """heartbeat / self 唤醒不读 intent 批次（只有 intent 唤醒才需要呈现意图）。"""

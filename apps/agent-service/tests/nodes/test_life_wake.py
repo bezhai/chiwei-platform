@@ -140,6 +140,7 @@ def patched(monkeypatch):
         "saved": [],  # save_life_state 收到的
         "marked": [],  # mark_events_read 收到的 event_ids
         "intents": [],  # raise_intent 收到的
+        "transcript": [],  # load_session 探测返回（空=冷启）
     }
 
     async def fake_find(*, lane, persona_id):
@@ -147,6 +148,9 @@ def patched(monkeypatch):
 
     async def fake_unread(*, lane, persona_id):
         return list(state["unread"])
+
+    async def fake_load_session(session_id, **kwargs):
+        return list(state["transcript"])
 
     async def fake_mark(*, lane, persona_id, event_ids):
         state["marked"].append(event_ids)
@@ -170,6 +174,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
     monkeypatch.setattr(lw, "load_persona", fake_load_persona)
+    monkeypatch.setattr(lw, "load_session", fake_load_session)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
     monkeypatch.setattr(lt, "raise_intent", fake_intent)
@@ -245,7 +250,8 @@ async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(monkeypatch, script=_script_update())
 
-    # 钉死 now，使 session_id 的日期可断言
+    # 钉死 now，使 session_id 的日期可断言。now 现在走 cst_time.now_cst()（CST
+    # aware），日期由 CST 钟点算，所以这里钉的就是 CST 时区的 now。
     import datetime as _dt
 
     class _FixedDateTime(_dt.datetime):
@@ -253,7 +259,7 @@ async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
         def now(cls, tz=None):
             return cls(2026, 6, 3, 12, 30, tzinfo=tz)
 
-    monkeypatch.setattr(lw, "datetime", _FixedDateTime)
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
@@ -273,13 +279,123 @@ async def test_run_gets_max_retries_one_and_session_id(patched, monkeypatch):
     )
 
 
+# ---------------------------------------------------------------------------
+# CST 时间归一（阶段 0 Task 1）—— life 这一轮产 / 显示的所有时间都走 CST 口径。
+# 只测时间值这一层；prompt_vars 键集合 / stimulus 结构是 Task 2，这里不动。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_observed_at_is_cst_aware_iso(patched, monkeypatch):
+    """她这一轮写的 observed_at 是 CST aware ISO（含 +08:00），不再 UTC。
+
+    旧 bug：``_TZ = UTC`` → observed_at 写 ``...+00:00``，跟 world 的 CST、chat
+    的 Unix 毫秒同框混着喂给 agent、时间窗口比较差 8 小时。改成 CST aware ISO。
+    """
+    from app.infra import cst_time
+
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(patched["saved"]) == 1
+    observed_at = patched["saved"][0]["observed_at"]
+    assert "+08:00" in observed_at, (
+        f"observed_at 必须是 CST aware ISO（含 +08:00），实际 {observed_at!r}"
+    )
+    assert cst_time.parse(observed_at) is not None
+
+
+@pytest.mark.asyncio
+async def test_intent_occurred_at_is_cst_aware_iso(patched, monkeypatch):
+    """intent 的 occurred_at 是 observed_at 的 pass-through → 也跟着 CST aware。"""
+    from app.infra import cst_time
+
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(
+        monkeypatch, script=_script_update_then_intent(summary="去厨房")
+    )
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(patched["intents"]) == 1
+    occ = patched["intents"][0]["occurred_at"]
+    assert "+08:00" in occ, f"intent occurred_at 该 CST aware，实际 {occ!r}"
+    assert cst_time.parse(occ) is not None
+
+
+@pytest.mark.asyncio
+async def test_current_time_shows_cst_in_user_stimulus(patched, monkeypatch):
+    """"现在几点"作为当轮新感知显示成 CST，且进 USER message（Task 2 挪出 prompt_vars）。
+
+    钉死 now 让 CST 钟点可断言：真实 UTC 12:30 → CST 20:30。Task 2 后 current_time
+    不再走 prompt_vars→system，而是当轮新感知拼进 USER stimulus。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # 真实 UTC 12:30 这个时刻，按传入 tz 表示
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    pv = call["prompt_vars"]
+    assert "current_time" not in pv, "Task 2：current_time 不再走 prompt_vars→system"
+    msg_blob = "".join(m.text() for m in call["messages"])
+    assert "20:30" in msg_blob, (
+        f"当轮几点该显示 CST 钟点并进 USER（UTC 12:30 → CST 20:30），实际 {msg_blob!r}"
+    )
+    assert "CST" in msg_blob
+
+
+def _utc_millis(y, mo, d, h, mi, s):
+    import datetime as _dt
+
+    return int(
+        _dt.datetime(y, mo, d, h, mi, s, tzinfo=_dt.timezone.utc).timestamp() * 1000
+    )
+
+
+@pytest.mark.asyncio
+async def test_format_unread_shows_event_time_in_cst(patched, monkeypatch):
+    """信箱里 event 的 occurred_at 显示转 CST（兜历史 UTC / Unix 毫秒）。
+
+    UTC 串 ``...12:30:00Z`` 显示成 CST 20:30；Unix 毫秒同理。stimulus 文本结构
+    本任务不动（Task 2），只验时间值显示是 CST。
+    """
+    millis = _utc_millis(2026, 6, 3, 5, 0, 0)  # 真实 UTC 05:00 → CST 13:00
+    patched["unread"] = [
+        _envelope("e1", "晨光", occurred_at="2026-06-03T12:30:00Z"),
+        _envelope("e2", "午后", occurred_at=str(millis)),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # UTC 12:30 → CST 20:30；Unix 05:00 → CST 13:00
+    assert "20:30" in msg_blob, "UTC event 时刻该显示成 CST"
+    assert "13:00" in msg_blob, "Unix 毫秒 event 时刻该显示成 CST"
+    assert "CST" in msg_blob
+
+
 @pytest.mark.asyncio
 async def test_context_excludes_world_state(patched, monkeypatch):
     """信息差命门：喂给 run 的输入（prompt_vars + messages）只含她自己快照 + 自己信箱未读，绝不含 WorldState。
 
-    她此刻的主观快照走 prompt_vars（system prompt）；她信箱里这一轮感知到的 event 走
-    USER messages（进 transcript，第二轮可 replay）。两处合起来是她这一轮的全部输入，
-    都不该含任何 world 全局快照。
+    Task 2 后她此刻的主观快照不再走 prompt_vars；冷启（transcript 空）时作状态恢复段
+    进 USER message，信箱里这一轮感知到的 event 也走 USER messages（进 transcript，
+    第二轮可 replay）。两处合起来是她这一轮的全部输入，都不该含任何 world 全局快照。
     """
     patched["snapshot"] = LifeState(
         lane="coe-t3",
@@ -302,8 +418,8 @@ async def test_context_excludes_world_state(patched, monkeypatch):
     full_blob = (repr(pv) + msg_blob).lower()
     assert "worldstate" not in full_blob
     assert "world_state" not in full_blob
-    # 她自己的主观快照在 prompt_vars
-    assert "睡觉" in repr(pv)
+    # 冷启（transcript 空）→ 她自己的主观快照作恢复段进 USER message
+    assert "睡觉" in msg_blob
     # 她信箱里感知到的 event 在 USER messages（→进 transcript→第二轮可 replay）
     assert "晌午的光很亮" in msg_blob
 
@@ -780,4 +896,168 @@ async def test_perceived_events_replayable_in_second_round(
     replayed = "".join(m.text() for m in history)
     assert "晨光斜照进房间" in replayed, (
         "第二轮 replay 必须看到上一轮感知到的 event 原文，而非只有固定文案"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 2 —— life 上下文三层归位（spec 决策 4/5/6）。
+#
+# system prompt 收敛成纯静态身份（prompt_vars 只剩 persona_name / persona_lite）；
+# 当轮新感知（几点 CST + 信箱动静）进 USER；上一刻状态正常靠意识流（transcript）
+# 延续、只在意识流断了（transcript 空）时从 LifeState 兜底恢复。冷启探测复用
+# world 的"节点自己 load_session 一次"模式（一致性靠 single_flight 锁）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prompt_vars_only_static_identity(patched, monkeypatch):
+    """prompt_vars 收敛成纯静态身份：只剩 persona_name / persona_lite。
+
+    决策 4：current_time / prev_state / prev_mood / prev_activity 这些每轮都变的
+    动态值全出 prompt_vars（→ system prompt），不再钉死在身份层。
+    """
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="睡觉",
+        response_mood="困",
+        activity_type="sleep",
+        observed_at="2026-06-03T08:00:00Z",
+    )
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    pv = _FakeAgent.last_run()["prompt_vars"]
+    assert set(pv.keys()) == {"persona_name", "persona_lite"}, (
+        f"prompt_vars 应只剩纯静态身份，实际键 {set(pv.keys())}"
+    )
+    for dynamic in ("current_time", "prev_state", "prev_mood", "prev_activity"):
+        assert dynamic not in pv, f"{dynamic} 不该再在 prompt_vars 里（决策 4）"
+
+
+@pytest.mark.asyncio
+async def test_current_perception_in_user_message(patched, monkeypatch):
+    """当轮新感知（几点 + 信箱动静）进 USER message，不走 prompt_vars→system。"""
+    patched["unread"] = [
+        _envelope("e1", "水壶在响"),
+        _envelope("e2", "千凪在厨房"),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    msg_blob = "".join(m.text() for m in call["messages"])
+    # 几点（带 CST 标识）+ 信箱动静都在 USER
+    assert "CST" in msg_blob
+    assert "水壶在响" in msg_blob
+    assert "千凪在厨房" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_transcript_non_empty_no_recovery_segment(patched, monkeypatch):
+    """transcript 非空（意识流没断）→ USER 不注入状态恢复段（状态在意识流里本就有）。
+
+    决策 5：上一刻状态正常靠当天连续意识流延续；只有意识流断了才从 LifeState 兜底。
+    """
+    from app.agent.neutral import Message, Role
+
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在客厅看书很专注",
+        response_mood="平静",
+        activity_type="rest",
+        observed_at="2026-06-03T08:00:00Z",
+    )
+    # 意识流非空：上一轮她说过做过的东西还在
+    patched["transcript"] = [
+        Message(role=Role.USER, content="上一轮的感知"),
+        Message(role=Role.ASSISTANT, content="上一轮她的回应"),
+    ]
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # transcript 非空 → 不该把 LifeState 的 current_state 当"上次记得"重新喂
+    assert "在客厅看书很专注" not in msg_blob, (
+        "意识流非空时不该注入状态恢复段（状态在 transcript 里本就有，重复=冗余）"
+    )
+    # 但当轮新感知照常在 USER
+    assert "门铃响了" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_transcript_empty_injects_recovery_segment(patched, monkeypatch):
+    """transcript 空（冷启 / Redis 丢 / 跨天新 session）→ USER 含状态恢复段、带 snapshot 的 prev_state。
+
+    决策 5：只判 transcript 空不空、不判 observed_at 是哪天（跨天先记得、不翻篇）。
+    """
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在厨房煮咖啡",
+        response_mood="慵懒",
+        activity_type="rest",
+        observed_at="2026-06-02T23:50:00Z",  # 哪怕是"昨晚"也照样恢复（只判空、不判日期）
+    )
+    patched["transcript"] = []  # 意识流断了
+    patched["unread"] = [_envelope("e1", "新的一天的光")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 恢复段必须带 snapshot 的 current_state（她"上次记得在做"什么）
+    assert "在厨房煮咖啡" in msg_blob, (
+        "意识流断了时必须从 LifeState 恢复上次状态喂进 USER（不彻底失忆）"
+    )
+    # 当轮新感知照常在
+    assert "新的一天的光" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_transcript_empty_no_snapshot_no_crash(patched, monkeypatch):
+    """transcript 空且从没有过 LifeState（snapshot=None）→ 不崩、不硬塞假状态。"""
+    patched["snapshot"] = None
+    patched["transcript"] = []
+    patched["unread"] = [_envelope("e1", "第一次睁眼")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    msg_blob = "".join(m.text() for m in call["messages"])
+    # 当轮新感知照常在；没有 snapshot 就别恢复（兜底不崩即可）
+    assert "第一次睁眼" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_cold_start_probe_uses_round_session_id(patched, monkeypatch):
+    """冷启探测用的 session_id 与 run 续接的 session_id 是同一个（同 (lane, persona, 今天)）。
+
+    决策 5/双读一致性：节点自己 load_session 探 transcript 空不空，探测用的 session_id
+    必须就是 run 续接那条——否则探的是空的、run 续的是另一条，双读不一致。
+    """
+    seen: dict = {}
+
+    async def _probe_load(session_id, **kwargs):
+        seen["probe_session_id"] = session_id
+        return list(patched["transcript"])
+
+    monkeypatch.setattr(lw, "load_session", _probe_load)
+
+    patched["transcript"] = []
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    run_session_id = _FakeAgent.last_run()["session_id"]
+    assert seen["probe_session_id"] == run_session_id, (
+        "冷启探测的 session_id 必须与 run 续接的 session_id 一致（双读同一条 transcript）"
     )

@@ -561,6 +561,35 @@ class TestRun:
         assert "currDate" in call_kwargs
         assert "currTime" in call_kwargs
 
+    async def test_curr_time_injected_in_cst(self, mock_deps):
+        """全局注入的 currTime / currDate 是 CST（不再 naive 系统时间）。
+
+        旧 bug：``datetime.now().strftime(...)`` 是 naive，容器 TZ 不确定（可能
+        UTC），喂给每条 prompt 的"现在"跟 world/life 的 CST 时刻差 8 小时。改成
+        显式 CST。钉死 now：真实 UTC 12:30 → CST 20:30、CST 日期 2026-06-03。
+        """
+        import datetime as _dt
+
+        from app.infra import cst_time
+
+        class _FixedDateTime(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = cls(2026, 6, 3, 12, 30, 45, tzinfo=_dt.timezone.utc)
+                return (
+                    base.astimezone(tz) if tz is not None
+                    else base.replace(tzinfo=None)
+                )
+
+        with patch.object(cst_time, "datetime", _FixedDateTime):
+            await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
+
+        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
+        assert call_kwargs["currTime"] == "20:30:45", (
+            f"currTime 该是 CST（UTC 12:30:45 → CST 20:30:45），实际 {call_kwargs['currTime']!r}"
+        )
+        assert call_kwargs["currDate"] == "2026-06-03"
+
     async def test_prompt_messages_prepended(self, mock_deps):
         mock_deps["compile_to_messages"].return_value = [
             Message(role=Role.SYSTEM, content="sys prompt"),

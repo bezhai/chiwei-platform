@@ -47,15 +47,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
 
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
+from app.agent.session import load_session
 from app.agent.trace import make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
 from app.domain.life_state import find_life_state
 from app.domain.world_events import EventArrived, EventEnvelope
+from app.infra import cst_time
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
 from app.nodes.life_tools import build_life_tools
@@ -98,18 +99,17 @@ _LIFE_WAKE_CFG = AgentConfig(
     "life_wake", "offline-model", "life-wake", recursion_limit=12
 )
 
-# observed_at 用 ISO8601 UTC；展示层时区由读取方处理。
-_TZ = UTC
-
-
 def _format_unread(unread: list[EventEnvelope]) -> str:
     """把未读 event 拼成她"刚感知到 / 想起的几件事"的文字，按发生时间顺序。
 
     只放 event 的客观可感形态（summary）+ 类型 + 发生时间——这些都是投进她信箱的、
-    她够得着的信息，不含任何 world 全局视角。
+    她够得着的信息，不含任何 world 全局视角。event 的 ``occurred_at`` 在信箱里混着
+    历史格式（chat 写 Unix 毫秒、world 写 CST、life 写 UTC），显示时一律过
+    ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
     """
     return "\n".join(
-        f"- [{ev.kind}] {ev.occurred_at} {ev.summary}" for ev in unread
+        f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} {ev.summary}"
+        for ev in unread
     )
 
 
@@ -140,7 +140,7 @@ async def life_wake_node(arrived: EventArrived) -> None:
 
 
 async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) -> None:
-    """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → 读未读 → 跑工具循环 → 收口标已读。
+    """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → 读未读 → 冷启探测 → 跑工具循环 → 收口标已读。
 
     **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，
     就 ``raise DebounceReschedule(arrived)`` 把这批 event 推迟到 cd 后（延迟 + 合并、
@@ -180,20 +180,15 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
     snapshot = await find_life_state(lane=lane, persona_id=persona_id)
     pc = await load_persona(persona_id)
 
-    now = datetime.now(_TZ)
-    observed_at = now.isoformat()
-    prev_state = snapshot.current_state if snapshot else "（还没有此刻状态）"
-    prev_mood = snapshot.response_mood if snapshot else ""
-    prev_activity = snapshot.activity_type if snapshot else ""
+    now = cst_time.now_cst()
+    observed_at = cst_time.now_cst_iso()
 
+    # system prompt 收敛成纯静态身份（spec 决策 4）：每轮都变的动态值（几点 / 上一刻
+    # 状态）全出 prompt_vars——它们进 system 会让前缀缓存每轮失效、且把"会变的东西"
+    # 钉死在本该恒定的身份层是语义错位。动态值改走当轮 USER message（见下方 stimulus）。
     prompt_vars = {
         "persona_name": pc.display_name,
         "persona_lite": pc.persona_lite,
-        "current_time": now.strftime("%H:%M"),
-        # 她此刻自己的主观快照（不是 world 全局真相）
-        "prev_state": prev_state,
-        "prev_mood": prev_mood,
-        "prev_activity": prev_activity,
     }
 
     # intent_id 从 (lane, persona, 本轮读到的 event_ids) 派生 —— durable 边重投 /
@@ -215,20 +210,54 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
     session_id = make_session_id(lane, persona_id, now.strftime("%Y-%m-%d"))
     context = AgentContext(persona_id=persona_id, session_id=session_id)
 
-    # 本轮她感知到的几件事拼进 **USER stimulus**（不再走 prompt_vars→system prompt）：
+    # 冷启探测（spec 决策 5 + 双读一致性）：自己 load_session 探这条 transcript 空不空，
+    # 复用 world 的"节点自己 load 一次"模式（_run_world_round 也先 load_session 做 turn
+    # 幂等查重）。两次读（这里探 + Agent.run 内部续接）一致靠 (lane, persona)
+    # single_flight 锁覆盖整段"探测 → run → 写回"——同 session 无并发写。探测用的就是
+    # run 续接那条 session_id，绝不另起一条。
+    history = await load_session(session_id)
+    cold_start = not history
+    if cold_start:
+        # 冷启探测命中（spec 决策 5 + codex T3 可观测性）：transcript 空 → 这一轮会从
+        # PG LifeState 兜底恢复状态（若有）。log 出来便于 coe 观察恢复段是否异常频繁——
+        # 正常当天多轮续接不该冷启，只有首轮 / Redis 过期丢失 / 跨天新 session 才冷启。
+        logger.info(
+            "[life_wake] %s/%s cold start (empty transcript), %s",
+            lane,
+            persona_id,
+            "recover from LifeState" if snapshot else "no prior state",
+        )
+
+    # 本轮她感知到的当下动静拼进 **USER stimulus**（不再走 prompt_vars→system prompt）：
     # core 的 transcript 只存"本轮传入 messages + 助手 + 工具结果"，system prompt 不进
-    # transcript。若感知留在 prompt_vars 里渲染进 system prompt，它就不进写回 session 的
-    # 内容、第二轮 replay 看不到"上一轮我感知了什么"——她只记得自己说过做过啥、却忘了
-    # 当时为何而动。把感知放进 USER message（像 world 把客观 context 拼进 USER 那样），
-    # 它就进 messages → 进 transcript → 第二轮可 replay，"她真的记得自己经历过什么"。
+    # transcript。若动态值留在 prompt_vars 里渲染进 system prompt，它就不进写回 session
+    # 的内容、第二轮 replay 看不到"上一轮我几点、感知了什么"——她只记得自己说过做过啥、
+    # 却忘了当时为何而动。把当轮感知放进 USER message（像 world 把客观 context 拼进 USER
+    # 那样），它就进 messages → 进 transcript → 第二轮可 replay，"她真的记得自己经历过
+    # 什么"。
     #
-    # 信息差命门不破：进 transcript 的只是她自己信箱里的未读 event（_format_unread 只取
-    # summary/kind/时间，全是投给她的、她够得着的），绝不含 world 全局快照。
-    stimulus = (
+    # 信息差命门不破：进 transcript 的只是当下时刻 + 她自己信箱里的未读 event
+    # （_format_unread 只取 summary/kind/时间，全是投给她的、她够得着的），绝不含 world
+    # 全局快照。
+    parts = [f"现在是 {cst_time.to_cst_hm(observed_at)}。"]
+
+    # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
+    # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript
+    # 空）时，才从 PG 的 LifeState 兜底恢复，作"醒来记得之前在做什么"喂进当前 USER。
+    # 只判 transcript 空不空、不判 observed_at 是哪天（bezhai 决策：跨天先记得、不翻篇）。
+    # snapshot 为 None（从没活过一轮）就不加恢复段——没有可恢复的状态，硬塞假状态反而误导。
+    if cold_start and snapshot is not None:
+        parts.append(
+            f"你上次记得自己在做：{snapshot.current_state}"
+            f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
+        )
+
+    parts.append(
         "这会儿你感知到信箱里这些客观动静（按发生先后）：\n"
         f"{_format_unread(unread)}\n\n"
         "过你自己的这一刻。"
     )
+    stimulus = "\n".join(parts)
 
     # max_retries=1：关掉整轮重放。run 把整个 ReAct 循环包在 retry 里，一次 model
     # 调用瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复起意图）。

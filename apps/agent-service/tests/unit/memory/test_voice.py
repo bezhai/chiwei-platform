@@ -94,3 +94,49 @@ async def test_voice_handles_missing_snapshot():
         out = await generate_voice("akao")
 
     assert out == "<voice>x</voice>"
+
+
+@pytest.mark.asyncio
+async def test_voice_current_time_shows_cst_via_helper():
+    """current_time 注入值显示成 CST（带 CST 标识），走 cst_time helper 归一。
+
+    钉死 now 让 CST 钟点可断言：真实 UTC 12:30 → CST 20:30。
+    """
+    import datetime as _dt
+
+    from app.infra import cst_time
+
+    captured: dict = {}
+
+    class _FakeResult:
+        def text(self):
+            return "<voice>x</voice>"
+
+    class _FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *, prompt_vars, messages):
+            captured["prompt_vars"] = prompt_vars
+            return _FakeResult()
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    with (
+        patch(f"{MODULE}.load_persona", new=AsyncMock(return_value=_persona())),
+        patch(f"{MODULE}.find_life_state", new=AsyncMock(return_value=None)),
+        patch(f"{MODULE}.current_deployment_lane", return_value="coe-x"),
+        patch(f"{MODULE}.list_today_fragments", new=AsyncMock(return_value=[])),
+        patch(f"{MODULE}.insert_reply_style", new=AsyncMock()),
+        patch(f"{MODULE}.Agent", _FakeAgent),
+        patch.object(cst_time, "datetime", _FixedDateTime),
+    ):
+        await generate_voice("akao")
+
+    ct = captured["prompt_vars"]["current_time"]
+    assert "20:30" in ct, f"current_time 该显示 CST 钟点（UTC 12:30 → CST 20:30），实际 {ct!r}"
+    assert "CST" in ct

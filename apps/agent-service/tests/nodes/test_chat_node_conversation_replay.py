@@ -81,6 +81,43 @@ async def test_chat_completion_delivers_external_event_to_persona(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_replay_occurred_at_is_cst_aware_iso(monkeypatch):
+    """回灌 event 的 occurred_at 是 CST aware ISO（不再 Unix 毫秒）。
+
+    旧 bug：``occurred_at=str(int(time.time() * 1000))`` 写 Unix 毫秒，跟 world
+    的 CST ISO / life 的 UTC ISO 同框混着喂给 agent、时间窗口比较差 8 小时。
+    阶段 0 改成 CST aware ISO（含 +08:00），跟全链路同一个"现在"。
+    """
+    from app.infra import cst_time
+    from app.nodes import chat_node as cn
+
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id="c1", is_p2p=True, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    occ = delivered[0]["occurred_at"]
+    # 不再是纯 Unix 毫秒数字串
+    assert not occ.isdigit(), f"occurred_at 不该再是 Unix 毫秒，实际 {occ!r}"
+    # 是 CST aware ISO（带 +08:00），且可被 helper 解析回真实时刻
+    assert "+08:00" in occ
+    assert cst_time.parse(occ) is not None
+
+
+@pytest.mark.asyncio
 async def test_replay_failure_does_not_break_chat(monkeypatch):
     """回灌失败不能拖垮 chat 快路径(回复早已 emit 完)。"""
     from app.nodes import chat_node as cn

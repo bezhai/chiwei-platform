@@ -209,6 +209,50 @@ async def test_unread_ordered_by_occurred_at(mailbox_db):
 
 
 @pytest.mark.integration
+async def test_unread_mixed_format_ordered_by_real_instant(mailbox_db):
+    """混格式 occurred_at 按真实时刻排序（Unix 毫秒 / ISO 不能字符串序乱排）。
+
+    历史脏数据现实：chat 老链路写 Unix 毫秒（``"1780..."``，以 1 开头），world/life
+    写 ISO（``"2026-..."``，以 2 开头）。raw TEXT 字符串序会把 Unix 毫秒整体排在
+    ISO 前面（``"1" < "2"``），哪怕那条 Unix 毫秒的真实时刻其实更晚——"按发生先后"
+    被打乱、life 看到的顺序错乱。归一到真实时刻排序后，必须按真实先后。
+
+    这里构造：
+      * ISO 早（真实 UTC 2026-06-03 00:00）
+      * Unix 毫秒晚（真实 UTC 2026-06-03 12:00，字符串以 1 开头）
+      * ISO 最晚（真实 UTC 2026-06-03 23:00）
+    真实先后应是 [iso_early, unix_mid, iso_late]，而非字符串序的 [unix_mid, ...]。
+    """
+    from datetime import datetime, timezone
+
+    unix_mid_ms = int(
+        datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="iso_late",
+        kind="ambient", source="world", room_id="", summary="最晚-ISO",
+        occurred_at="2026-06-03T23:00:00+00:00",
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="unix_mid",
+        kind="external", source="user:u1", room_id="", summary="中间-Unix毫秒",
+        occurred_at=str(unix_mid_ms),
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="iso_early",
+        kind="ambient", source="world", room_id="", summary="最早-ISO",
+        occurred_at="2026-06-03T00:00:00+00:00",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert [e.event_id for e in unread] == ["iso_early", "unix_mid", "iso_late"], (
+        "混格式必须按真实时刻排序——Unix 毫秒不能因字符串以 1 开头就被排到 ISO 前面"
+    )
+
+
+@pytest.mark.integration
 async def test_list_personas_with_unread_only_returns_unread(mailbox_db):
     """信箱对账查询：只返回该 lane 下还有未读 event 的 persona。
 

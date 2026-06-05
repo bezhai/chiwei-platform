@@ -7,7 +7,6 @@ section injected into the system prompt.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
@@ -16,14 +15,13 @@ from app.data.queries import (
     list_today_fragments,
 )
 from app.domain.life_state import find_life_state
+from app.infra import cst_time
 from app.memory._persona import load_persona
 from app.runtime.lane_policy import current_deployment_lane
 
 _VOICE_CFG = AgentConfig("voice_generator", "offline-model", "voice-generator")
 
 logger = logging.getLogger(__name__)
-
-_CST = timezone(timedelta(hours=8))
 
 
 async def generate_voice(
@@ -43,7 +41,7 @@ async def generate_voice(
     current_state = snap.current_state if snap else "（状态未知）"
     response_mood = snap.response_mood if snap else ""
 
-    now = datetime.now(_CST)
+    current_time = cst_time.to_cst_hm(cst_time.now_cst_iso())
 
     frags = await list_today_fragments(
         persona_id, sources=["afterthought"]
@@ -66,7 +64,7 @@ async def generate_voice(
             "response_mood": response_mood,
             "recent_fragments": frag_text,
             "recent_context": recent_ctx_block,
-            "current_time": now.strftime("%H:%M"),
+            "current_time": current_time,
         },
         messages=[Message(role=Role.USER, content="生成当前状态的内心独白和语气示例")],
     )

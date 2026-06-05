@@ -73,6 +73,7 @@ from app.agent.trace import make_session_id
 from app.data.queries.intents import list_recent_intents
 from app.data.queries.mailbox import renotify_unread
 from app.domain.world_events import IntentRaised
+from app.infra import cst_time
 from app.runtime.data import Data, Key
 from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
@@ -339,8 +340,10 @@ def _intent_batch_text(intents: list[IntentRaised]) -> str:
     """
     if not intents:
         return "（这段时间没读到具体意图记录，按你看到的世界现状判断该不该推进。）"
+    # intent 的 occurred_at 来自 life 历史（可能 UTC），显示时过 cst_time 归一到
+    # CST——跟 world_time（CST）同框、模型看到的所有时刻是同一个 CST 口径。
     lines = [
-        f"- {i.persona_id or '某人'} 想：{i.summary}（{i.occurred_at}）"
+        f"- {i.persona_id or '某人'} 想：{i.summary}（{cst_time.to_cst_hms(i.occurred_at)}）"
         for i in intents
     ]
     return "\n".join(lines)

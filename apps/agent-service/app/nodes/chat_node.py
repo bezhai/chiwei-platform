@@ -34,6 +34,7 @@ from app.data.queries import (
 from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.domain.world_events import EVENT_KIND_EXTERNAL
+from app.infra.cst_time import now_cst_iso
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
 from app.runtime.emit import emit
@@ -356,7 +357,9 @@ async def _replay_conversation_to_mailbox(req: ChatRequest) -> None:
             kind=EVENT_KIND_EXTERNAL,
             source=f"user:{req.user_id}",
             summary=f"刚和用户 {req.user_id} 聊过一次",
-            occurred_at=str(int(time.time() * 1000)),
+            # CST aware ISO（含 +08:00），与 world/life 写入端同一个"现在"——
+            # 旧的 Unix 毫秒会跟 ISO 同框混着喂给 agent、时间窗口比较差 8 小时。
+            occurred_at=now_cst_iso(),
         )
     except Exception as e:  # noqa: BLE001 — 事后回灌失败不拖垮 chat 快路径
         logger.warning(
