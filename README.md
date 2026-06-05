@@ -23,6 +23,7 @@ docs/
 ## 文档
 
 - [构建约定与服务接入指南](docs/build-convention.md) — 构建模式、Dockerfile 编写、新服务接入步骤
+- [配置管理](docs/config-management.md) — ConfigBundle、环境变量、Dynamic Config 和最终生效优先级
 - [泳道路由架构](docs/archive/lane-routing.md) — Lite-Registry + LaneRouter SDK 架构存档
 
 ## 快速开始

@@ -18,4 +18,4 @@
 
 ## 环境变量
 
-环境变量由 PaaS 管理。直接改 K8s Secret 会被 PaaS 部署覆盖，必须通过 PaaS API 添加 env。
+环境变量由 PaaS 管理。直接改 K8s Secret 会被 PaaS 部署覆盖，必须通过 PaaS API 添加 env。配置管理规则见 `docs/config-management.md`。

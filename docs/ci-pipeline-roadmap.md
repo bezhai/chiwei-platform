@@ -57,7 +57,7 @@ API 端点:
 ### Phase 0.5: Git Poller 自动触发 ✅
 
 - 轮询 GitHub API 检测注册分支的新 commit
-- 配置: `GITHUB_TOKEN` + `CI_GIT_REPO`（环境变量）
+- 配置: `GITHUB_TOKEN` + `CI_GIT_REPO`（通过 PaaS 配置管理注入的环境变量）
 - 跳过 main/master 分支
 - 间隔可配: `GIT_POLL_INTERVAL`（默认 60s）
 
@@ -122,12 +122,14 @@ lark_flow:
 
 ## 环境变量
 
+CI Pipeline 相关变量属于 paas-engine 自身配置，管理方式见 [配置管理](./config-management.md#paas-engine-自身环境变量)。
+
 | 变量 | 说明 | 存储 |
 |------|------|------|
-| `CI_NAMESPACE` | CI Job 运行的 namespace | app envs（默认 `paas-builds`）|
-| `CI_GIT_REPO` | monorepo 地址（user/repo 格式）| app envs |
-| `GITHUB_TOKEN` | GitHub PAT | app envs（建议迁至 Secret）|
-| `GIT_POLL_INTERVAL` | 轮询间隔 | app envs（默认 60s）|
+| `CI_NAMESPACE` | CI Job 运行的 namespace | PaaS 管理，默认 `paas-builds` |
+| `CI_GIT_REPO` | monorepo 地址（user/repo 格式） | PaaS 管理 |
+| `GITHUB_TOKEN` | GitHub PAT | PaaS 管理，不写入 git |
+| `GIT_POLL_INTERVAL` | 轮询间隔 | PaaS 管理，默认 `60s` |
 
 ## 数据库表
 

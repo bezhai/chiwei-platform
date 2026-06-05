@@ -267,12 +267,8 @@ agent-service/app/
 │   └── router.py          # 路由汇总和健康检查
 ├── agents/                # AI代理系统
 │   └── bangumi/           # 番剧相关代理
-├── config/                # 配置管理
-│   ├── config.py          # 主配置文件
-│   ├── logging_config.json # 日志配置
-│   ├── memory_config.py   # 内存服务配置
-│   ├── memory_service.py  # 内存服务实现
-│   └── openai_config.py   # OpenAI配置
+├── infra/                 # 外部系统客户端与配置
+│   └── config.py          # 主配置入口，从环境变量加载 Settings
 ├── core/                  # 核心功能模块
 │   ├── clients/           # 外部客户端
 │   │   └── openai.py      # OpenAI客户端封装
@@ -535,31 +531,13 @@ graph TB
 
 ### 环境变量
 
-```bash
+agent-service 从进程环境变量读取基础设施连接和外部服务凭证；线上值由 PaaS 配置管理注入。
 
-# 数据库配置
-POSTGRES_USER=your_db_user
-POSTGRES_PASSWORD=your_db_password
-POSTGRES_DB=your_db_name
-POSTGRES_HOST=localhost
-
-# Redis配置
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=your_redis_password
-
-# 内存服务配置
-MEMORY_BASE_URL=http://localhost:8002
-
-# 搜索服务配置
-SEARCH_API_KEY=your_search_key
-```
+常见类别包括 PostgreSQL、Redis、RabbitMQ、Qdrant、Langfuse、搜索服务、代理和 lane fallback。配置管理规则见 [`docs/config-management.md`](../../../docs/config-management.md)，代码入口见 `app/infra/config.py`。
 
 ### 配置文件
 
-- `config/config.py`: 主配置文件，使用pydantic_settings管理
-- `config/logging_config.json`: 日志配置
-- `config/memory_config.py`: 内存服务配置
+- `app/infra/config.py`: 主配置入口，使用 frozen dataclass 从环境变量加载
 
 ## 启动服务
 
