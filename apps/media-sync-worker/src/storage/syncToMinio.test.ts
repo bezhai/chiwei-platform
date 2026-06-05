@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // ---- mock OSS client module ----
 let ossGetImpl: (fileName: string) => Promise<any> = async () => ({ content: Buffer.from('') });
@@ -28,10 +28,15 @@ mock.module('../minio/client', () => ({
 
 const { syncOssObjectToMinio } = await import('./syncToMinio');
 
+const infoSpy = mock((..._args: any[]) => {});
+const originalInfo = console.info;
+
 function resetMocks() {
     ossGet.mockClear();
     statObject.mockClear();
     putObject.mockClear();
+    infoSpy.mockClear();
+    console.info = infoSpy as unknown as typeof console.info;
     // default: OSS returns bytes, object does NOT exist in MinIO, put succeeds
     ossGetImpl = async () => ({ content: Buffer.from('IMAGE-BYTES') });
     statImpl = async () => {
@@ -45,6 +50,10 @@ function resetMocks() {
 describe('syncOssObjectToMinio', () => {
     beforeEach(() => {
         resetMocks();
+    });
+
+    afterEach(() => {
+        console.info = originalInfo;
     });
 
     it('happy path: reads from OSS, finds object missing, writes to MinIO with correct bucket/key/bytes', async () => {
@@ -67,6 +76,12 @@ describe('syncOssObjectToMinio', () => {
         expect(putObject.mock.calls[0][0]).toBe('pixiv');
         expect(putObject.mock.calls[0][1]).toBe('123_p0.png');
         expect(putObject.mock.calls[0][2]).toBe(bytes);
+
+        const logged = infoSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(logged).toContain('MinIO 同步成功');
+        expect(logged).toContain('bucket=pixiv');
+        expect(logged).toContain('object=123_p0.png');
+        expect(logged).toContain('oss_key=123_p0.png');
     });
 
     it('path-prefixed key: OSS read uses full key, MinIO stat/put use basename only', async () => {
@@ -89,6 +104,12 @@ describe('syncOssObjectToMinio', () => {
         expect(putObject.mock.calls[0][0]).toBe('pixiv');
         expect(putObject.mock.calls[0][1]).toBe('123_p0.png');
         expect(putObject.mock.calls[0][2]).toBe(bytes);
+
+        const logged = infoSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(logged).toContain('MinIO 同步成功');
+        expect(logged).toContain('bucket=pixiv');
+        expect(logged).toContain('object=123_p0.png');
+        expect(logged).toContain('oss_key=pixiv_img_v2/20260604/123_p0.png');
     });
 
     it('idempotent with path-prefixed key: statObject checks basename, skips when present', async () => {
@@ -100,6 +121,12 @@ describe('syncOssObjectToMinio', () => {
         expect(statObject.mock.calls[0][1]).toBe('123_p0.png');
         expect(putObject).not.toHaveBeenCalled();
         expect(ossGet).not.toHaveBeenCalled();
+
+        const logged = infoSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(logged).toContain('MinIO 对象已存在，跳过同步');
+        expect(logged).toContain('bucket=pixiv');
+        expect(logged).toContain('object=123_p0.png');
+        expect(logged).toContain('oss_key=pixiv_img_v2/20260604/123_p0.png');
     });
 
     it('idempotent: object already exists in MinIO, skips putObject and returns normally', async () => {
@@ -111,6 +138,12 @@ describe('syncOssObjectToMinio', () => {
         expect(putObject).not.toHaveBeenCalled();
         // OSS read must NOT happen when object already present (no point downloading)
         expect(ossGet).not.toHaveBeenCalled();
+
+        const logged = infoSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(logged).toContain('MinIO 对象已存在，跳过同步');
+        expect(logged).toContain('bucket=pixiv');
+        expect(logged).toContain('object=123_p0.png');
+        expect(logged).toContain('oss_key=123_p0.png');
     });
 
     it('propagates OSS read failure (does not swallow)', async () => {

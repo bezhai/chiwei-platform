@@ -28,6 +28,9 @@ export async function syncOssObjectToMinio(key: string): Promise<void> {
     const minioKey = minioObjectName(key);
 
     if (await minioObjectExists(minio, bucket, minioKey)) {
+        console.info(
+            `MinIO 对象已存在，跳过同步：bucket=${bucket} object=${minioKey} oss_key=${key}`
+        );
         return;
     }
 
@@ -35,6 +38,7 @@ export async function syncOssObjectToMinio(key: string): Promise<void> {
     const content: Buffer = ossObject.content;
 
     await minio.putObject(bucket, minioKey, content);
+    console.info(`MinIO 同步成功：bucket=${bucket} object=${minioKey} oss_key=${key}`);
 }
 
 /**
