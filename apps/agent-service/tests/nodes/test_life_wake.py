@@ -2,8 +2,8 @@
 
 被 EventArrived 攒批唤醒后她跑一个 ReAct 循环：读自己 LifeState（主观快照）+ 读
 自己信箱未读 event → 喂进 ``Agent(...).run`` 跑工具循环（连续调 update_life_state /
-raise_intent 行动）→ 收口标已读（只标本轮读到的 event_id）。输出来自工具调用，不
-再填一张 LifeDecision 表。
+act 行动）→ 收口标已读（只标本轮读到的 event_id）。输出来自工具调用，不再填一张
+LifeDecision 表。
 
 这些是节点编排测试：``Agent.run`` 用 fake 模拟模型在循环里调工具，验证编排正确性，
 不验证 LLM 想得对。最致命的几条（spec 钉死）：
@@ -130,7 +130,7 @@ def patched(monkeypatch):
     """把节点的 IO 依赖换成可观测 fake；工具的 handler 也打桩。
 
     工具是 build_life_tools 造出来的真 Tool，但底下的 save_life_state /
-    raise_intent handler 在 life_tools 模块里被打桩成记录副作用。
+    perform_act handler 在 life_tools 模块里被打桩成记录副作用。
     """
     import app.nodes.life_tools as lt
 
@@ -139,7 +139,7 @@ def patched(monkeypatch):
         "unread": [],  # list_unread_events 返回
         "saved": [],  # save_life_state 收到的
         "marked": [],  # mark_events_read 收到的 event_ids
-        "intents": [],  # raise_intent 收到的
+        "acts": [],  # perform_act 收到的
         "transcript": [],  # load_session 探测返回（空=冷启）
     }
 
@@ -158,8 +158,8 @@ def patched(monkeypatch):
     async def fake_save(**kwargs):
         state["saved"].append(kwargs)
 
-    async def fake_intent(**kwargs):
-        state["intents"].append(kwargs)
+    async def fake_act(**kwargs):
+        state["acts"].append(kwargs)
 
     async def fake_load_persona(persona_id):
         from app.memory._persona import PersonaContext
@@ -177,7 +177,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(lw, "load_session", fake_load_session)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
-    monkeypatch.setattr(lt, "raise_intent", fake_intent)
+    monkeypatch.setattr(lt, "perform_act", fake_act)
     return state
 
 
@@ -196,13 +196,13 @@ def _script_update(current_state="起身去厨房", response_mood="迷糊", acti
     return _run
 
 
-def _script_update_then_intent(summary="去厨房煮咖啡"):
+def _script_update_then_act(description="我去厨房煮咖啡"):
     async def _run(tools):
         by_name = {t.name: t for t in tools}
         await by_name["update_life_state"].invoke(
             {"current_state": "醒了", "response_mood": "迷糊", "activity_type": "move"}
         )
-        await by_name["raise_intent"].invoke({"summary": summary})
+        await by_name["act"].invoke({"description": description})
 
     return _run
 
@@ -308,20 +308,20 @@ async def test_observed_at_is_cst_aware_iso(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_intent_occurred_at_is_cst_aware_iso(patched, monkeypatch):
-    """intent 的 occurred_at 是 observed_at 的 pass-through → 也跟着 CST aware。"""
+async def test_act_occurred_at_is_cst_aware_iso(patched, monkeypatch):
+    """act 的 occurred_at 是 observed_at 的 pass-through → 也跟着 CST aware。"""
     from app.infra import cst_time
 
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
-        monkeypatch, script=_script_update_then_intent(summary="去厨房")
+        monkeypatch, script=_script_update_then_act(description="我去厨房")
     )
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert len(patched["intents"]) == 1
-    occ = patched["intents"][0]["occurred_at"]
-    assert "+08:00" in occ, f"intent occurred_at 该 CST aware，实际 {occ!r}"
+    assert len(patched["acts"]) == 1
+    occ = patched["acts"][0]["occurred_at"]
+    assert "+08:00" in occ, f"act occurred_at 该 CST aware，实际 {occ!r}"
     assert cst_time.parse(occ) is not None
 
 
@@ -494,70 +494,70 @@ async def test_digests_external_message_event(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_raises_intent_when_model_calls_it(patched, monkeypatch):
-    """模型在循环里调 raise_intent → 回灌唤醒 world，intent_id 由本轮 event_ids 派生。"""
+async def test_acts_when_model_calls_it(patched, monkeypatch):
+    """模型在循环里调 act → 回灌唤醒 world 推演，act_id 由本轮 event_ids 派生。"""
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
-        monkeypatch, script=_script_update_then_intent(summary="起床去厨房做早饭")
+        monkeypatch, script=_script_update_then_act(description="我起床去厨房做早饭")
     )
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert len(patched["intents"]) == 1
-    assert patched["intents"][0]["persona_id"] == "akao"
-    assert patched["intents"][0]["summary"] == "起床去厨房做早饭"
-    assert patched["intents"][0]["lane"] == "coe-t3"
-    # intent_id 必须是基于本轮 event_ids 的确定派生（整轮重放幂等）
+    assert len(patched["acts"]) == 1
+    assert patched["acts"][0]["persona_id"] == "akao"
+    assert patched["acts"][0]["description"] == "我起床去厨房做早饭"
+    assert patched["acts"][0]["lane"] == "coe-t3"
+    # act_id 必须是基于本轮 event_ids 的确定派生（整轮重放幂等）
     import uuid
 
     seed = "coe-t3:akao:e1"
     expected = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
-    assert patched["intents"][0]["intent_id"] == expected
+    assert patched["acts"][0]["act_id"] == expected
 
 
-def _script_intent_twice(summary1="去厨房煮咖啡", summary2="顺便给千凪带一杯"):
+def _script_act_twice(description1="我去厨房煮咖啡", description2="再去叫醒千凪"):
     async def _run(tools):
         by_name = {t.name: t for t in tools}
-        await by_name["raise_intent"].invoke({"summary": summary1})
-        await by_name["raise_intent"].invoke({"summary": summary2})
+        await by_name["act"].invoke({"description": description1})
+        await by_name["act"].invoke({"description": description2})
 
     return _run
 
 
 @pytest.mark.asyncio
-async def test_two_raise_intent_in_one_round_only_first_emits(patched, monkeypatch):
-    """一轮里模型调两次 raise_intent：只有第一个真正起意图（emit 一个 IntentRaised）。
+async def test_two_acts_in_one_round_only_first_emits(patched, monkeypatch):
+    """一轮里模型调两次 act：只有第一个真正做事（emit 一个 ActPerformed）。
 
-    intent_id 由本轮 event_ids 派生，同一轮两次共用同一个 intent_id —— 第二个会被
-    durable 去重层静默吞掉、意图无声丢失。第一刀：本轮已起过意图后第二次不再落
-    handler（绝不静默吞，工具层 log + 喂回提示）。
+    act_id 由本轮 event_ids 派生，同一轮两次共用同一个 act_id —— 第二个会被 durable
+    去重层静默吞掉、动作无声丢失。第一刀：本轮已做过一件事后第二次不再落 handler
+    （绝不静默吞，工具层 log + 喂回提示）。
     """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
         monkeypatch,
-        script=_script_intent_twice(summary1="起床去厨房", summary2="再去叫醒千凪"),
+        script=_script_act_twice(description1="我起床去厨房", description2="再去叫醒千凪"),
     )
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    # 一轮只起一个意图：只有第一个落到 handler
-    assert len(patched["intents"]) == 1
-    assert patched["intents"][0]["summary"] == "起床去厨房"
-    assert patched["intents"][0]["persona_id"] == "akao"
-    assert patched["intents"][0]["lane"] == "coe-t3"
+    # 一轮只做一件事：只有第一个落到 handler
+    assert len(patched["acts"]) == 1
+    assert patched["acts"][0]["description"] == "我起床去厨房"
+    assert patched["acts"][0]["persona_id"] == "akao"
+    assert patched["acts"][0]["lane"] == "coe-t3"
     # 收口照常标已读
     assert patched["marked"] == [["e1"]]
 
 
 @pytest.mark.asyncio
-async def test_no_intent_when_model_doesnt_call_it(patched, monkeypatch):
-    """没调 raise_intent 就不回灌 world（她只是默默换了个状态）。"""
+async def test_no_act_when_model_doesnt_call_it(patched, monkeypatch):
+    """没调 act 就不回灌 world（她只是默默换了个状态）。"""
     patched["unread"] = [_envelope("e1", "外面在下雨")]
     _FakeAgent.install(monkeypatch, script=_script_update())
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert patched["intents"] == []
+    assert patched["acts"] == []
 
 
 @pytest.mark.asyncio
@@ -655,7 +655,7 @@ async def test_concurrent_second_round_reschedules_no_overwrite_no_loss(
     assert run_count["n"] == 1, "第二轮不该并发再跑一遍循环"
     assert patched["saved"] == [], "第二轮被 reschedule 时绝不能写 LifeState（避免覆盖）"
     assert patched["marked"] == [], "第二轮绝不能标已读（避免静默吞掉 event）"
-    assert patched["intents"] == []
+    assert patched["acts"] == []
 
     release_round1.set()
     await round1
@@ -738,11 +738,11 @@ async def test_round_in_cd_reschedules_without_running_or_dropping(
 
     # 重排的就是这批 EventArrived（不丢）
     assert ei.value.data is arrived
-    # cd 内绝不跑：不建 Agent、不写、不标已读、不起意图
+    # cd 内绝不跑：不建 Agent、不写、不标已读、不做事
     assert _FakeAgent.instances == [], "cd 内不该烧模型（不建 Agent）"
     assert patched["saved"] == []
     assert patched["marked"] == []
-    assert patched["intents"] == []
+    assert patched["acts"] == []
 
 
 @pytest.mark.asyncio

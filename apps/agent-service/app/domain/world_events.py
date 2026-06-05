@@ -1,12 +1,15 @@
 """World/life event 流转骨架的 Data 形态 — Task 1.
 
-赤尾世界靠 event 推动。event 有三类来源：
+赤尾世界靠 event 推动。event 有两类来源：
 
   * ``ambient``   环境感知（含在场说话 / 喊话 —— 说话是动作、声音是 ambient），
                   由 world 客观投影产出。
-  * ``intent``    某 life "我想做什么"，回灌唤醒 world 去裁决。
   * ``external``  外部消息 —— 用户和某 persona 聊完一次，作为"刚聊过"回灌进
                   她自己的信箱。
+
+新范式：world 退成"世界推演者"，不再是导演 / 裁决者。角色用 ``act`` 自主做事
+（自然语言），world 只推演这件事的客观结果、不批准。Data 层的体现是
+``ActPerformed``（她做了的事），durable 回灌唤醒 world 去推演客观结果。
 
 四个 Data：
 
@@ -18,14 +21,15 @@
     一轮期间新进的 event 天然没有 read 行、永远不会被误吞。
   * :class:`EventArrived` —— transient 敲门信号。信箱来新 event 时 emit，
     走 debounce 攒批一次唤醒 life；内容不在信号里，在 durable 信箱里。
-  * :class:`IntentRaised` —— durable 意图，life emit 后回灌唤醒 world。
+  * :class:`ActPerformed` —— durable 动作，某 life 自主做了一件影响外部世界的
+    事后 emit，回灌唤醒 world 去**推演客观结果**（不是申请裁决）。
 
 lane 隔离：所有 durable Data 的自然键都含 ``lane``。runtime 持久化不会自动
 加 lane，不显式带上 coe / ppe 泳道会覆盖 prod 的未读事件（写脏线上客观真相），
 所以 lane 进 Key 是定义处的硬约束，不是事后补。
 
-形态扩展：event 形态不写死成只能装环境感知—— ``kind`` 已是 ambient / intent /
-external 三类的开放枚举，``room_id`` 为按在场集合投递预留。后续"直连 / 地点
+形态扩展：event 形态不写死成只能装环境感知—— ``kind`` 已是 ambient /
+external 的开放枚举，``room_id`` 为按在场集合投递预留。后续"直连 / 地点
 痕迹"需要的结构化负载（一个 JSONB ``payload`` 列）靠 migrator 的 additive
 ``ALTER TABLE ADD COLUMN`` 加进来——但 framework 的 ``insert_idempotent`` /
 ``insert_append`` 目前**不能把 dict 字段序列化进 JSONB 列**（无 json 编解码），
@@ -40,10 +44,9 @@ from typing import Annotated
 from app.runtime.data import Data, Key
 from app.runtime.emit import emit  # module-level so tests can monkeypatch
 
-# event kind 协议常量。机制层硬定（不是让 LLM 猜的字符串），消费方按这三类
+# event kind 协议常量。机制层硬定（不是让 LLM 猜的字符串），消费方按这两类
 # 路由 / 解读。
 EVENT_KIND_AMBIENT = "ambient"
-EVENT_KIND_INTENT = "intent"
 EVENT_KIND_EXTERNAL = "external"
 
 
@@ -60,7 +63,7 @@ class EventEnvelope(Data):
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
     event_id: Annotated[str, Key]
-    kind: str            # ambient | intent | external
+    kind: str            # ambient | external
     source: str          # 产出方：world / 说话者 persona_id / chat ...
     room_id: str = ""    # 锚定房间，为在场过滤预留
     summary: str         # 客观可感形态的文字描述
@@ -103,42 +106,45 @@ def event_knock_key(arrived: EventArrived) -> str:
     return f"{arrived.lane}:{arrived.persona_id}"
 
 
-class IntentRaised(Data):
-    """durable 意图：某 life "我想做什么"，回灌唤醒 world 去裁决。
+class ActPerformed(Data):
+    """durable 动作：某 life 自主做的一件影响外部世界的事。
 
-    world 节点本身是 Task 2 的活；这里只立"意图能回灌唤醒 world"这条边 + 它
-    的数据形态。durable 让意图跨进程（life → world 进程）可达且不丢。
+    新范式下角色不再"申请意图待裁决"，而是直接做事（自然语言 ``description``，
+    如"我去厨房做饭"）。这件事 durable 回灌唤醒 world，world 只去**推演它的
+    客观结果**、不批准。durable 让动作跨进程（life → world 进程）可达且不丢。
 
-    自然键 ``(lane, intent_id)``：world 端按 intent_id 幂等消化。结构化意图
-    细节同样等 framework 补上 JSONB 持久化后再 additive 加列（见 capability gap）。
+    自然键 ``(lane, act_id)``：world 端按 act_id 幂等消化；整轮重放同一批唤醒
+    派生同一 act_id → 自然键去重，同一动作不会被重复推演。lane 进 Key 是泳道
+    隔离硬约束（同其它 durable Data 的理由）。结构化动作细节同样等 framework
+    补上 JSONB 持久化后再 additive 加列（见 capability gap）。
     """
 
     lane: Annotated[str, Key]
-    intent_id: Annotated[str, Key]
-    persona_id: str      # 谁起的意图
-    summary: str         # 意图的文字描述
-    occurred_at: str     # 起意时间 (ISO8601)
+    act_id: Annotated[str, Key]
+    persona_id: str      # 谁做的
+    description: str     # 她做了什么,自然语言（如"我去厨房做饭"）
+    occurred_at: str     # 做这件事的时刻 (ISO8601)
 
 
-async def raise_intent(
+async def perform_act(
     *,
     lane: str,
-    intent_id: str,
+    act_id: str,
     persona_id: str,
-    summary: str,
+    description: str,
     occurred_at: str,
 ) -> None:
-    """某 life 起意 → emit ``IntentRaised`` 回灌唤醒 world 去裁决。
+    """某 life 自主做了一件事 → emit ``ActPerformed`` 回灌唤醒 world 推演。
 
-    Task 3 的 life 节点想完一轮、产出"我想做什么"时调用本 helper。world 端
-    （Task 2）通过 ``wire(IntentRaised).to(world_node).durable()`` 消化。
+    life 节点想完一轮、决定做某件事时调用本 helper。world 端通过
+    ``wire(ActPerformed).to(...).durable()`` 消化，去推演这件事的客观结果。
     """
     await emit(
-        IntentRaised(
+        ActPerformed(
             lane=lane,
-            intent_id=intent_id,
+            act_id=act_id,
             persona_id=persona_id,
-            summary=summary,
+            description=description,
             occurred_at=occurred_at,
         )
     )

@@ -7,8 +7,9 @@
 
   1. 读自己的 ``LifeState``（主观快照）+ 读自己信箱里的未读 event。
   2. 跑 ``Agent(...).run`` —— 在循环里连续调工具行动：``update_life_state``
-     更新此刻状态（0/N 次，多次以最后一次为准），``raise_intent`` 起意图回灌
-     world。她想啥、做啥、什么情绪、要不要起意图，全由模型在循环里自己定。
+     更新此刻状态（0/N 次，多次以最后一次为准），``act`` 自主做一件影响外部世界
+     的事、汇给 world 推演。她想啥、做啥、什么情绪、要不要做事，全由模型在循环里
+     自己定（act 是"她做了"，不是申请待批准）。
   3. 收口：标已读 —— **只标本轮实际读到的那批 event_id**（即使一次 update 都没
      调也照常标已读：她看了但没改状态，正常）。
 
@@ -25,19 +26,19 @@
     ``DebounceReschedule`` 交给 handler 重排（这批 event 不被吞）。
 
   * **失败不整轮重放**：``run`` 把整个 ReAct 循环包在 retry 里，一次 model 调用
-    瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复起意图）。
+    瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复做事）。
     所以 life 调 ``run`` 传 ``max_retries=1`` 关掉整轮重放；中途失败就抛、本轮
     不收口（event 没标已读 → 下轮仍未读、靠 world renotify 再唤醒）。
 
   * **无 state_end_at、不自排闹钟**：她脑子里没有"做到几点"，只有"此刻什么样"。
     她被 event 推、**不 emit_delayed / emit_at 给自己定时唤醒**。
 
-  * **赤尾设计宪法**：她想啥、做啥、什么情绪、要不要起意图，全由模型在循环里
+  * **赤尾设计宪法**：她想啥、做啥、什么情绪、要不要做事，全由模型在循环里
     判断。本模块不用阈值 / 计数器 / 随机池 / if 分支替她决策——只做 IO 编排 +
     机制安全阀（单飞锁、空信箱、inbox 上限）。
 
-intent_id 从 ``(lane, persona, 本轮读到的 event_ids)`` 派生（durable 边重投 / 重试
-同一批唤醒产同一个 intent_id，world 按 intent_id 幂等消化），在本节点算好后
+act_id 从 ``(lane, persona, 本轮读到的 event_ids)`` 派生（durable 边重投 / 重试
+同一批唤醒产同一个 act_id，world 按 act_id 幂等消化），在本节点算好后
 capture 进 ``build_life_tools`` 的闭包，不让模型生成。
 
 wiring 见 ``app/wiring/life_dataflow.py``，本模块只提供 ``@node`` 函数 + 依赖。
@@ -79,9 +80,9 @@ _LIFE_INBOX_MAX = 50
 # （TTL=这么多秒），cd 内再被唤醒就 raise DebounceReschedule 把这批 event 推迟到
 # cd 后——延迟 + 合并、绝不 drop（reschedule 攒着，cd 结束一并醒）。
 #
-# 时长定 45s：略小于 world 的 60s 唤醒合并闸（WORLD_INTENT_WAKE_DEBOUNCE_SECONDS）。
+# 时长定 45s：略小于 world 的 60s 唤醒合并闸（WORLD_ACT_WAKE_DEBOUNCE_SECONDS）。
 # world 是唯一启动源、被唤醒最小间隔 1min，三姐妹的轮次节奏比世界唤醒间隔密一点点
-# （她们仍能在世界推进的间隙感知、回应），但已足够把"几乎每轮起意图→唤醒 world→
+# （她们仍能在世界推进的间隙感知、回应），但已足够把"几乎每轮做事→唤醒 world→
 # world 广播→三人又醒"的 82/min 量级自激压下去：一个 persona 两轮之间至少隔 45s
 # + 一轮自身耗时，三人合起来最坏几轮/分钟，而非几十。这是机制层的节奏闸（跟现有
 # debounce 窗口、world 60s 闸同类），不进世界内容决策（赤尾宪法）。
@@ -191,17 +192,17 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
         "persona_lite": pc.persona_lite,
     }
 
-    # intent_id 从 (lane, persona, 本轮读到的 event_ids) 派生 —— durable 边重投 /
-    # 重试同一批唤醒时产同一个 intent_id，world 按 intent_id 幂等消化。capture
+    # act_id 从 (lane, persona, 本轮读到的 event_ids) 派生 —— durable 边重投 /
+    # 重试同一批唤醒时产同一个 act_id，world 按 act_id 幂等消化。capture
     # 进工具闭包，不让模型生成。
     read_ids = [ev.event_id for ev in unread]
     seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
-    intent_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    act_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
 
     tools = build_life_tools(
         lane=lane,
         persona_id=persona_id,
-        intent_id=intent_id,
+        act_id=act_id,
         observed_at=observed_at,
     )
 
@@ -260,7 +261,7 @@ async def _run_life_round(arrived: EventArrived, *, lane: str, persona_id: str) 
     stimulus = "\n".join(parts)
 
     # max_retries=1：关掉整轮重放。run 把整个 ReAct 循环包在 retry 里，一次 model
-    # 调用瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复起意图）。
+    # 调用瞬时失败会整轮重放、重放已执行的 durable 工具（重复写快照 / 重复做事）。
     # 关掉后中途失败就抛、本轮不收口（event 没标已读 → 下轮仍未读、靠 world
     # renotify 再唤醒）。
     #

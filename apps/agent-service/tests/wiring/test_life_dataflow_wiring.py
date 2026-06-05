@@ -38,16 +38,16 @@ def test_life_dataflow_wire_count_is_12():
     #   cron：MinuteTick（只剩 fan_out_voice 这半）、LightDayTick、LightNightTick、
     #     HeavyReviewTick（4）
     #   per-persona business：VoiceRequest、LightReviewRequest、HeavyReviewRequest（3）
-    #   world/life event 闭环：WorldHeartbeatTick、WorldTick、IntentRaised、
+    #   world/life event 闭环：WorldHeartbeatTick、WorldTick、ActPerformed、
     #     EventArrived（4）
-    #   降频（task2）：IntentWorldTick（intent→world 60s 合并闸那条边，1）
+    #   降频（act 范式）：ActWorldTick（act→world 60s 合并闸那条边，1）
     #   = 4 + 3 + 4 + 1 = 12。
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
         "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
         "VoiceRequest", "LightReviewRequest", "HeavyReviewRequest",
-        "WorldHeartbeatTick", "WorldTick", "IntentRaised", "EventArrived",
-        "IntentWorldTick",
+        "WorldHeartbeatTick", "WorldTick", "ActPerformed", "EventArrived",
+        "ActWorldTick",
     }
     assert types == expected
     assert len(WIRING_REGISTRY) == 12
@@ -65,11 +65,11 @@ def test_minute_tick_drives_voice_fan_out():
     assert minute_wires[0].consumers == [fan_out_voice]
 
 
-def test_intent_wire_is_durable():
+def test_act_wire_is_durable():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
-    intent_wires = [w for w in WIRING_REGISTRY if w.data_type.__name__ == "IntentRaised"]
-    assert len(intent_wires) == 1
-    assert intent_wires[0].durable is True
+    act_wires = [w for w in WIRING_REGISTRY if w.data_type.__name__ == "ActPerformed"]
+    assert len(act_wires) == 1
+    assert act_wires[0].durable is True

@@ -1,19 +1,17 @@
-"""world/life event 闭环的 wiring — stage3 联调收口.
+"""world/life event 闭环的 wiring — stage3 联调收口（act 范式）.
 
-把 stage1/2/3 各自单测绿了的零件拼成一个能动的世界，靠这四条新 wire：
+把 stage1/2/3 各自单测绿了的零件拼成一个能动的世界，靠这几条 wire：
 
   1. ``Source.interval(600) -> WorldHeartbeatTick -> heartbeat_to_world_tick``：
      保底心跳（≤10 分钟）。时间源喂单字段 WorldHeartbeatTick（满足框架单字段 ts
      约定），翻译节点补 lane/reason emit WorldTick；WorldTick 经一条纯 in-process
      边接回 world_tick，world_tick 内部 ``emit_delayed(WorldTick(reason="self"))``
      的自排回环也走这同一条 in-process 边（三源同一入口）。
-  2. ``IntentRaised -> intent_to_world_tick -> WorldTick -> world_tick``：life
-     回灌意图翻成 WorldTick(reason="intent")，durable 跨进程。
+  2. ``ActPerformed -> act_to_world_tick -> ActWorldTick .debounce() ->
+     world_act_wake -> WorldTick -> world_tick``：life 回灌动作翻成
+     WorldTick(reason="act")，durable 跨进程 + 60s 合并闸。
   3. ``EventArrived.debounce(key_by=event_knock_key) -> life_wake_node``：攒批
      唤醒 life（多条积压只醒一次）。
-
-stage4 才删旧 wire；本测试只验"新 wire 加上了、graph 仍能编译"，不验旧 wire
-被删（新旧并存）。
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ def _wires_for(name: str):
 
 
 def test_graph_still_compiles_with_world_life_wires():
-    """加上 world/life event 的四条新 wire 后，整图仍能编译（无 GraphError）。"""
+    """加上 world/life event 的几条 wire 后，整图仍能编译（无 GraphError）。"""
     _fresh_import()
     from app.runtime.graph import compile_graph
 
@@ -95,74 +93,74 @@ def test_self_loop_world_tick_routes_back_in_process():
     )
 
 
-def test_intent_raised_translated_durably_to_world():
-    """life 回灌意图：IntentRaised → intent_to_world_tick，durable 跨进程。"""
+def test_act_performed_translated_durably_to_world():
+    """life 回灌动作：ActPerformed → act_to_world_tick，durable 跨进程。"""
     _fresh_import()
-    from app.world.engine import intent_to_world_tick
+    from app.world.engine import act_to_world_tick
 
-    intent_wires = _wires_for("IntentRaised")
-    translated = [w for w in intent_wires if intent_to_world_tick in w.consumers]
-    assert translated, "IntentRaised 没有接到 intent_to_world_tick 翻译节点"
+    act_wires = _wires_for("ActPerformed")
+    translated = [w for w in act_wires if act_to_world_tick in w.consumers]
+    assert translated, "ActPerformed 没有接到 act_to_world_tick 翻译节点"
     # durable：life 进程 → world 进程跨进程可达且不丢
     assert any(w.durable for w in translated), (
-        "IntentRaised → intent_to_world_tick 必须 durable（跨进程回灌）"
+        "ActPerformed → act_to_world_tick 必须 durable（跨进程回灌）"
     )
 
 
-def test_intent_world_tick_debounced_per_lane_min_wake_interval():
-    """intent→world 合并闸：IntentWorldTick.debounce(60s, per-lane) → world_intent_wake。
+def test_act_world_tick_debounced_per_lane_min_wake_interval():
+    """act→world 合并闸：ActWorldTick.debounce(60s, per-lane) → world_act_wake。
 
-    "world 被唤醒最小间隔 1 分钟"做成 intent→world 边上的合并闸：intent 翻成
-    transient IntentWorldTick 走 60s debounce（短于 1min 的连续 intent 合并成一次
-    唤醒），闸后的 world_intent_wake 再翻成 WorldTick(reason=intent) 打到 world_tick。
+    "world 被唤醒最小间隔 1 分钟"做成 act→world 边上的合并闸：act 翻成
+    transient ActWorldTick 走 60s debounce（短于 1min 的连续 act 合并成一次
+    唤醒），闸后的 world_act_wake 再翻成 WorldTick(reason=act) 打到 world_tick。
     复用现成 debounce 原语（不新建一堆原语）。
     """
     _fresh_import()
-    from app.world.engine import world_intent_wake
+    from app.world.engine import world_act_wake
 
-    wires = _wires_for("IntentWorldTick")
+    wires = _wires_for("ActWorldTick")
     debounced = [
         w
         for w in wires
-        if w.debounce is not None and world_intent_wake in w.consumers
+        if w.debounce is not None and world_act_wake in w.consumers
     ]
-    assert debounced, "IntentWorldTick 没有 debounce 合并闸接到 world_intent_wake"
+    assert debounced, "ActWorldTick 没有 debounce 合并闸接到 world_act_wake"
     w = debounced[0]
     # 最小唤醒间隔 1 分钟
     assert w.debounce["seconds"] == 60, "world 被唤醒最小间隔必须是 60s"
-    # max_buffer 必须够大、几乎不触发 fire_now —— 否则攒够 N 条 intent 会在 60s 窗口
-    # 内立即触发一次 world 唤醒，破坏"被唤醒最小间隔 60s"硬闸。intent 经 life cd 已
+    # max_buffer 必须够大、几乎不触发 fire_now —— 否则攒够 N 条 act 会在 60s 窗口
+    # 内立即触发一次 world 唤醒，破坏"被唤醒最小间隔 60s"硬闸。act 经 life cd 已
     # 降频、本不该高频，所以闸放到大到正常够不着的量级，让 60s 闸更硬。
     assert w.debounce["max_buffer"] >= 1000, (
-        "intent 合并闸 max_buffer 必须够大（≥1000），否则 fire_now 会在攒够 N 条时"
+        "act 合并闸 max_buffer 必须够大（≥1000），否则 fire_now 会在攒够 N 条时"
         "立即触发、破坏 world 被唤醒最小间隔 60s 硬闸"
     )
-    # 按 lane 分区：world 是单 actor，同 lane 的 intent 合并成一次唤醒
+    # 按 lane 分区：world 是单 actor，同 lane 的 act 合并成一次唤醒
     key = w.debounce_key_by(
-        __import__("app.world.engine", fromlist=["IntentWorldTick"]).IntentWorldTick(
-            lane="coe-x", intent_id="i", intent_persona_id="akao", intent_summary="s"
+        __import__("app.world.engine", fromlist=["ActWorldTick"]).ActWorldTick(
+            lane="coe-x", act_id="a", act_persona_id="akao", act_description="s"
         )
     )
     assert "coe-x" in key
 
 
-def test_intent_raised_durable_idempotency_preserved():
-    """加合并闸后 IntentRaised 仍 durable（intent_id 派生那套幂等不被破坏）。
+def test_act_performed_durable_idempotency_preserved():
+    """加合并闸后 ActPerformed 仍 durable（act_id 派生那套幂等不被破坏）。
 
-    合并闸放在闸**之后**的 transient IntentWorldTick 上；IntentRaised →
-    intent_to_world_tick 那条 durable 边原样保留（durable 跨进程 + (lane,intent_id)
+    合并闸放在闸**之后**的 transient ActWorldTick 上；ActPerformed →
+    act_to_world_tick 那条 durable 边原样保留（durable 跨进程 + (lane,act_id)
     自然键幂等）。
     """
     _fresh_import()
-    from app.world.engine import intent_to_world_tick
+    from app.world.engine import act_to_world_tick
 
-    intent_wires = _wires_for("IntentRaised")
-    translated = [w for w in intent_wires if intent_to_world_tick in w.consumers]
-    assert translated, "IntentRaised 没有接到 intent_to_world_tick"
+    act_wires = _wires_for("ActPerformed")
+    translated = [w for w in act_wires if act_to_world_tick in w.consumers]
+    assert translated, "ActPerformed 没有接到 act_to_world_tick"
     assert any(w.durable for w in translated), (
-        "IntentRaised → intent_to_world_tick 必须仍 durable（intent_id 幂等不被破坏）"
+        "ActPerformed → act_to_world_tick 必须仍 durable（act_id 幂等不被破坏）"
     )
-    # 这条边不该被改成 debounce（debounce 闸在闸后的 IntentWorldTick 上）
+    # 这条边不该被改成 debounce（debounce 闸在闸后的 ActWorldTick 上）
     assert all(w.debounce is None for w in translated)
 
 

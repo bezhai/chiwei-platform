@@ -5,8 +5,8 @@
 lane —— **lane 必须从进程级部署泳道显式取**，因为 interval 源循环的 context lane
 是 ``None``（时间源不携带 request lane），靠不上 context 注入。
 
-这条 lane 注入是整条 world/life 回环的 lane 种子（world 快照 / 在场 / 信箱的分区键
-都从这里的 WorldTick.lane 一路传下去），所以单独锁死它的行为。
+这条 lane 注入是整条 world/life 回环的 lane 种子（world 叙述快照 / 信箱 / 动作的
+分区键都从这里的 WorldTick.lane 一路传下去），所以单独锁死它的行为。
 """
 
 from __future__ import annotations
@@ -40,9 +40,10 @@ async def test_heartbeat_translated_to_world_tick_with_lane(monkeypatch):
     assert isinstance(tick, WorldTick)
     assert tick.lane == "coe-hb"
     assert tick.reason == "heartbeat"
-    # 心跳不携带意图字段
-    assert tick.intent_persona_id == ""
-    assert tick.intent_summary == ""
+    # 心跳不携带动作字段
+    assert tick.act_id == ""
+    assert tick.act_persona_id == ""
+    assert tick.act_description == ""
 
 
 @pytest.mark.asyncio
