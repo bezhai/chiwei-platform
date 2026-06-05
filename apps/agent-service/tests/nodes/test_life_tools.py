@@ -205,8 +205,8 @@ async def test_act_second_call_does_not_emit_and_feeds_back(stub_handlers, caplo
 def test_act_description_guides_toward_low_action():
     """act 措辞软引导降频（spec 决策 5 内容判断那层）。
 
-    多数时候她只是经历这一刻（更新状态就够），只有真要做一件影响外部世界的事才
-    act。这是软内容引导（赤尾宪法：不加 if 强制），所以只能断言指令文本已改、不能
+    多数时候她只是经历这一刻（更新状态就够），只有做的事会在自己之外留下痕迹、被
+    够得着的人感知到时才 act。这是软内容引导（赤尾宪法：不加 if 强制），所以只能断言指令文本已改、不能
     断言行为。也验证旧"申请 / 裁决"语义已不在文案里——act 是"你做了"不是"你请求"。
     """
     tools = _tools_by_name(
@@ -218,8 +218,8 @@ def test_act_description_guides_toward_low_action():
         )
     )
     desc = tools["act"].definition.description
-    # 新措辞软引导：多数时候只是经历这一刻 + 只有真要做影响外部世界的事才 act
-    assert "影响外部世界" in desc
+    # 新判据软引导：act 是"会在你之外的世界留下痕迹、被够得着的人感知到"的事
+    assert "留下痕迹" in desc
     assert ("经历这一刻" in desc) or ("多数时候" in desc)
     # act 是"你做了"不是"申请 / 等批准"——旧裁决语义不该残留
     assert "裁决" not in desc
