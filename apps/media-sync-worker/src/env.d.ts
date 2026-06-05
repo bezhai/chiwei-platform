@@ -14,6 +14,7 @@ declare namespace NodeJS {
     MONGO_HOST: string;
     MONGO_PORT: string;
     MONGO_CONNECT_TIMEOUT_MS: string;
+    DOWNLOAD_CRON: string;
     RUN_CONNECTIVITY_CHECK: string;
     DISABLE_SCHEDULES: string;
     DISABLE_CONSUMER: string;

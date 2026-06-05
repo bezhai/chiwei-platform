@@ -30,6 +30,10 @@
 - `HTTP_SECRET` 或 `PROXY_HTTP_SECRET`
 - `BANGUMI_ACCESS_TOKEN`
 
+## 可选环境变量
+
+- `DOWNLOAD_CRON`：Pixiv 下载任务 cron 表达式，默认 `12 10 * * *`（每天 10:12）。
+
 ## 部署验证开关
 
 - `DISABLE_SCHEDULES=true`：不注册定时任务
