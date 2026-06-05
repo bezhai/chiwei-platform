@@ -2,8 +2,7 @@ import * as dotenv from 'dotenv';  // 导入 dotenv
 dotenv.config();
 
 import cron from 'node-cron';  // 导入 node-cron
-
-const DOWNLOAD_CRON = '3 11 * * *';
+import { loadDownloadCron } from './config/cron';
 
 // 重试配置
 const RETRY_DELAYS = [1000, 5000, 15000]; // 重试延迟时间（毫秒）
@@ -81,8 +80,10 @@ async function checkDataConnections() {
 if (disableSchedules) {
   console.log('Cron schedules disabled by DISABLE_SCHEDULES.');
 } else {
+  const downloadCron = loadDownloadCron();
+
   // 定时任务：下载任务
-  scheduleTask(DOWNLOAD_CRON, 'download task', async () => {
+  scheduleTask(downloadCron, 'download task', async () => {
     const { startDownload } = await import('./service/dailyDownload');
     await startDownload();
   });
