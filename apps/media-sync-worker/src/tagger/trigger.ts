@@ -18,9 +18,19 @@ export interface TriggerTaggerDeps {
 }
 
 export type TriggerTaggerResult =
-    | { status: 'skipped'; reason: Exclude<MinioSyncForTaggerResult['status'], 'synced'> }
+    | ({
+        status: 'skipped';
+        reason: Exclude<MinioSyncForTaggerResult['status'], 'synced'>;
+    } & TriggerSkipDetails)
     | { status: 'submitted'; taskId: string; objectName: string }
     | { status: 'submit_failed'; objectName: string; error: string };
+
+interface TriggerSkipDetails {
+    objectName?: string;
+    ossKey?: string;
+    timeoutMs?: number;
+    error?: string;
+}
 
 export async function triggerTaggerForPixivAddr(
     pixivAddr: string,
@@ -28,7 +38,11 @@ export async function triggerTaggerForPixivAddr(
 ): Promise<TriggerTaggerResult> {
     const syncResult = await deps.syncPixivToMinio(pixivAddr);
     if (syncResult.status !== 'synced') {
-        return { status: 'skipped', reason: syncResult.status };
+        return {
+            status: 'skipped',
+            reason: syncResult.status,
+            ...skipDetails(syncResult),
+        };
     }
 
     const objectName = syncResult.objectName;
@@ -57,5 +71,21 @@ export async function triggerTaggerForPixivAddr(
             objectName,
             error,
         };
+    }
+}
+
+function skipDetails(syncResult: Exclude<MinioSyncForTaggerResult, { status: 'synced' }>): TriggerSkipDetails {
+    switch (syncResult.status) {
+        case 'timeout':
+            return {
+                objectName: syncResult.objectName,
+                ossKey: syncResult.ossKey,
+                timeoutMs: syncResult.timeoutMs,
+            };
+        case 'failed':
+            return { error: syncResult.error };
+        case 'disabled':
+        case 'missing_key':
+            return {};
     }
 }

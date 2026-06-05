@@ -30,6 +30,7 @@ export function createTaggerCallbackHandler(
         }
 
         if (request.headers.get('authorization') !== `Bearer ${config.authToken}`) {
+            console.warn(`Tagger callback rejected: reason=unauthorized path=${url.pathname}`);
             return json({ error: 'unauthorized' }, 401);
         }
 
@@ -37,10 +38,24 @@ export function createTaggerCallbackHandler(
         try {
             payload = validateCallbackPayload(await request.json());
         } catch (err) {
+            console.warn(`Tagger callback rejected: reason=invalid_payload error=${formatError(err)}`);
             return json({ error: err instanceof Error ? err.message : String(err) }, 400);
         }
 
-        await repository.applyCallback(payload);
+        console.log(
+            `Tagger callback received: task_id=${payload.task_id} status=${payload.status} rows=${payload.rows.length} dups=${payload.dups?.length ?? 0}`
+        );
+        try {
+            await repository.applyCallback(payload);
+        } catch (err) {
+            console.error(
+                `Tagger callback write failed: task_id=${payload.task_id} status=${payload.status} rows=${payload.rows.length} error=${formatError(err)}`
+            );
+            return json({ error: 'callback write failed' }, 500);
+        }
+        console.log(
+            `Tagger callback stored: task_id=${payload.task_id} status=${payload.status} rows=${payload.rows.length}`
+        );
         return json({ status: 'ok' });
     };
 }
@@ -99,6 +114,10 @@ function validateCallbackPayload(value: unknown): TaggerCallbackPayload {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function formatError(err: unknown): string {
+    return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
 function json(body: unknown, status = 200): Response {

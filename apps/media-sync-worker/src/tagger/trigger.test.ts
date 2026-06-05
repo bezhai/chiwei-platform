@@ -51,6 +51,40 @@ describe('triggerTaggerForPixivAddr', () => {
         expect((d.repository as FakeRepo).submitted).toEqual([]);
     });
 
+    it('keeps MinIO timeout details when submit is skipped', async () => {
+        const d = deps({
+            status: 'timeout',
+            pixivAddr: 'a.jpg',
+            ossKey: 'pixiv_img_v2/20260605/a.jpg',
+            objectName: 'a.jpg',
+            timeoutMs: 30000,
+        });
+
+        const result = await triggerTaggerForPixivAddr('a.jpg', d);
+
+        expect(result).toEqual({
+            status: 'skipped',
+            reason: 'timeout',
+            ossKey: 'pixiv_img_v2/20260605/a.jpg',
+            objectName: 'a.jpg',
+            timeoutMs: 30000,
+        });
+        expect((d.submitClient as FakeSubmitClient).calls).toEqual([]);
+    });
+
+    it('keeps MinIO sync errors when submit is skipped', async () => {
+        const d = deps({ status: 'failed', pixivAddr: 'a.jpg', error: 'source object missing' });
+
+        const result = await triggerTaggerForPixivAddr('a.jpg', d);
+
+        expect(result).toEqual({
+            status: 'skipped',
+            reason: 'failed',
+            error: 'source object missing',
+        });
+        expect((d.submitClient as FakeSubmitClient).calls).toEqual([]);
+    });
+
     it('submits the MinIO basename and records the accepted task', async () => {
         const d = deps({
             status: 'synced',

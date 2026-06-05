@@ -4,8 +4,12 @@ import type { TaggerCallbackPayload } from './types';
 
 class FakeRepo implements TaggerCallbackRepository {
     payloads: TaggerCallbackPayload[] = [];
+    nextError: Error | null = null;
 
     async applyCallback(payload: TaggerCallbackPayload): Promise<void> {
+        if (this.nextError) {
+            throw this.nextError;
+        }
         this.payloads.push(payload);
     }
 }
@@ -77,6 +81,30 @@ describe('createTaggerCallbackHandler', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ status: 'ok' });
         expect(repo.payloads).toEqual([payload]);
+    });
+
+    it('returns 500 when callback storage fails so entry can retry', async () => {
+        const repo = new FakeRepo();
+        repo.nextError = new Error('mongo unavailable');
+        const handler = createTaggerCallbackHandler(repo, { authToken: 'callback-token' });
+        const payload = {
+            task_id: 'task-1',
+            status: 'completed',
+            rows: [{ id: '100363338_p1.jpg', schema_version: 1 }],
+            dups: [],
+        };
+
+        const res = await handler(
+            request('/internal/tagger/callback', {
+                method: 'POST',
+                headers: { authorization: 'Bearer callback-token' },
+                body: JSON.stringify(payload),
+            })
+        );
+
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: 'callback write failed' });
+        expect(repo.payloads).toEqual([]);
     });
 
     it('returns 404 for unknown routes', async () => {

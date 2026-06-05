@@ -45,6 +45,9 @@ export class TaggerSubmitClient {
                 if (!this.shouldRetry(err, attempt)) {
                     throw err;
                 }
+                console.warn(
+                    `Tagger submit retrying: paths=${req.paths.join(',')} attempt=${attempt + 1}/${this.config.retries + 1} error=${formatError(err)}`
+                );
             }
         }
 
@@ -104,4 +107,11 @@ export class TaggerSubmitClient {
         }
         return true;
     }
+}
+
+function formatError(err: unknown): string {
+    if (err instanceof TaggerSubmitError) {
+        return `${err.name}: ${err.message}${err.status ? ` status=${err.status}` : ''}`;
+    }
+    return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
