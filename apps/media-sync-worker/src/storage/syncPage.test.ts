@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { PixivImageInfo } from '../mongo/types';
-import { bestEffortSyncToMinio, type BestEffortSyncDeps } from './syncPage';
+import {
+    bestEffortSyncToMinio,
+    syncPixivToMinioForTagger,
+    type BestEffortSyncDeps,
+} from './syncPage';
 
 // Dependencies are injected (not mock.module) so this test can't pollute the
 // real ./syncToMinio module for sibling test files in the same bun run.
@@ -200,4 +204,87 @@ describe('bestEffortSyncToMinio: MINIO_SYNC_ENABLED switch OFF (default)', () =>
             expect(syncOssObjectToMinio).not.toHaveBeenCalled();
         });
     }
+});
+
+describe('syncPixivToMinioForTagger', () => {
+    let originalEnv: string | undefined;
+
+    beforeEach(() => {
+        resetMocks();
+        originalEnv = process.env[ENV_KEY];
+        setEnv('true');
+    });
+
+    afterEach(() => {
+        setEnv(originalEnv);
+    });
+
+    it('returns synced with basename objectName after OSS -> MinIO sync succeeds', async () => {
+        const result = await syncPixivToMinioForTagger('123_p0.png', deps);
+
+        expect(result).toEqual({
+            status: 'synced',
+            pixivAddr: '123_p0.png',
+            ossKey: 'pixiv_img_v2/20260604/123_p0.png',
+            objectName: '123_p0.png',
+        });
+        expect(syncOssObjectToMinio).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns disabled without touching Mongo when MINIO_SYNC_ENABLED is off', async () => {
+        setEnv(undefined);
+
+        const result = await syncPixivToMinioForTagger('123_p0.png', deps);
+
+        expect(result).toEqual({
+            status: 'disabled',
+            pixivAddr: '123_p0.png',
+        });
+        expect(findImageByPixivAddr).not.toHaveBeenCalled();
+        expect(syncOssObjectToMinio).not.toHaveBeenCalled();
+    });
+
+    it('returns missing_key when the source doc has no tos_file_name', async () => {
+        findImpl = async () => null;
+
+        const result = await syncPixivToMinioForTagger('123_p0.png', deps);
+
+        expect(result).toEqual({
+            status: 'missing_key',
+            pixivAddr: '123_p0.png',
+        });
+        expect(syncOssObjectToMinio).not.toHaveBeenCalled();
+    });
+
+    it('returns failed instead of throwing when sync fails', async () => {
+        syncImpl = async () => {
+            throw new Error('MinIO put boom');
+        };
+
+        const result = await syncPixivToMinioForTagger('123_p0.png', deps);
+
+        expect(result.status).toBe('failed');
+        expect(result.pixivAddr).toBe('123_p0.png');
+        if (result.status !== 'failed') {
+            throw new Error('expected failed result');
+        }
+        expect(result.error).toContain('MinIO put boom');
+    });
+
+    it('returns timeout when sync does not finish before timeoutMs', async () => {
+        syncImpl = () => new Promise<void>(() => {});
+
+        const result = await syncPixivToMinioForTagger('123_p0.png', {
+            ...deps,
+            timeoutMs: 20,
+        });
+
+        expect(result).toEqual({
+            status: 'timeout',
+            pixivAddr: '123_p0.png',
+            ossKey: 'pixiv_img_v2/20260604/123_p0.png',
+            objectName: '123_p0.png',
+            timeoutMs: 20,
+        });
+    });
 });
