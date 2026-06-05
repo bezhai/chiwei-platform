@@ -1,6 +1,8 @@
 import axios, { AxiosResponse } from 'axios';
 import crypto from 'crypto';
 
+const PROXY_REQUEST_TIMEOUT_MS = 180_000;
+
 /**
  * 生成随机盐
  */
@@ -42,6 +44,7 @@ export async function sendAuthenticatedRequest<T>(
                 'X-Token': token,
                 'Content-Type': 'application/json',
             },
+            timeout: PROXY_REQUEST_TIMEOUT_MS,
         });
 
         return response.data;
