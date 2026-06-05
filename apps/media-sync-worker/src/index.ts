@@ -3,6 +3,7 @@ dotenv.config();
 
 import cron from 'node-cron';  // 导入 node-cron
 import { loadDownloadCron } from './config/cron';
+import { initTaggerRuntime } from './tagger/runtime';
 
 // 重试配置
 const RETRY_DELAYS = [1000, 5000, 15000]; // 重试延迟时间（毫秒）
@@ -54,6 +55,10 @@ const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<
 const disableSchedules = isEnabled(process.env.DISABLE_SCHEDULES);
 const disableConsumer = isEnabled(process.env.DISABLE_CONSUMER);
 const runConnectivityCheck = isEnabled(process.env.RUN_CONNECTIVITY_CHECK);
+const taggerRuntimeInitPromise = initTaggerRuntime().catch((err) => {
+  console.error('Tagger runtime initialization failed:', err);
+  process.exit(1);
+});
 
 async function checkDataConnections() {
   console.log('Checking MongoDB and Redis connectivity...');
@@ -114,6 +119,7 @@ if (disableSchedules) {
       import('./mongo/client'),
       import('./service/consumeService'),
     ]);
+    await taggerRuntimeInitPromise;
     await mongoInitPromise;  // 等待 MongoDB 初始化完成
     await consumeDownloadTaskAsync();  // 启动异步任务的消费逻辑
   } catch (err) {

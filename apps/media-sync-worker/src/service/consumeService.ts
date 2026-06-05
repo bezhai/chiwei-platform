@@ -13,7 +13,7 @@ import { getIllustInfoWithCache, getIllustPageDetail } from "../pixiv/pixiv";
 import redisClient from "../redis/redisClient";
 import { MultiTag } from "../mongo/types";
 import { getContent } from "../pixiv/pixivProxy";
-import { bestEffortSyncToMinio } from "../storage/syncPage";
+import { syncMinioAndMaybeSubmitTagger } from "../tagger/runtime";
 
 // 异步消费下载任务的函数
 export async function consumeDownloadTaskAsync() {
@@ -193,8 +193,8 @@ async function downloadIllust(illustId: string) {
       return;
     }
 
-    // addImage 成功后，best-effort 同步该图到自建 MinIO（内部已吞错，不影响主路径）
-    await bestEffortSyncToMinio(pixivAddr);
+    // addImage 成功后，同步 MinIO；tagger 开启时继续提交打标，失败不影响主路径。
+    await syncMinioAndMaybeSubmitTagger(pixivAddr);
   });
 
   // 使用并发限制执行下载任务

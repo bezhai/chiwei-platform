@@ -19,6 +19,34 @@ export interface BestEffortSyncDeps {
 
 const DEFAULT_SYNC_TIMEOUT_MS = 30000;
 
+export type MinioSyncForTaggerResult =
+    | {
+        status: 'disabled';
+        pixivAddr: string;
+    }
+    | {
+        status: 'missing_key';
+        pixivAddr: string;
+    }
+    | {
+        status: 'synced';
+        pixivAddr: string;
+        ossKey: string;
+        objectName: string;
+    }
+    | {
+        status: 'timeout';
+        pixivAddr: string;
+        ossKey: string;
+        objectName: string;
+        timeoutMs: number;
+    }
+    | {
+        status: 'failed';
+        pixivAddr: string;
+        error: string;
+    };
+
 /**
  * 同款 env flag 判定（与 index.ts 的 isEnabled 一致）：'1' 或 'true'（大小写不敏感）
  * 才算开，其它（含未设置）都算关。
@@ -43,6 +71,69 @@ const defaultDeps: BestEffortSyncDeps = {
 /** 超时哨兵：区分「同步真完成」和「等超了」。 */
 const SYNC_TIMEOUT = Symbol('minio-sync-timeout');
 
+function objectNameFromOssKey(key: string): string {
+    const parts = key.split('/');
+    return parts[parts.length - 1] || key;
+}
+
+export async function syncPixivToMinioForTagger(
+    pixivAddr: string,
+    deps: BestEffortSyncDeps = defaultDeps
+): Promise<MinioSyncForTaggerResult> {
+    if (!isEnabled(process.env.MINIO_SYNC_ENABLED)) {
+        return { status: 'disabled', pixivAddr };
+    }
+
+    try {
+        const doc = await deps.findImageByPixivAddr(pixivAddr);
+        const key = doc?.tos_file_name;
+
+        if (!key) {
+            return { status: 'missing_key', pixivAddr };
+        }
+
+        const timeoutMs = resolveTimeoutMs(deps);
+        const objectName = objectNameFromOssKey(key);
+        const syncPromise = deps.syncOssObjectToMinio(key);
+        syncPromise.catch(() => {});
+
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<typeof SYNC_TIMEOUT>((resolve) => {
+            timer = setTimeout(() => resolve(SYNC_TIMEOUT), timeoutMs);
+        });
+
+        try {
+            const result = await Promise.race([syncPromise, timeoutPromise]);
+            if (result === SYNC_TIMEOUT) {
+                return {
+                    status: 'timeout',
+                    pixivAddr,
+                    ossKey: key,
+                    objectName,
+                    timeoutMs,
+                };
+            }
+        } finally {
+            if (timer) {
+                clearTimeout(timer);
+            }
+        }
+
+        return {
+            status: 'synced',
+            pixivAddr,
+            ossKey: key,
+            objectName,
+        };
+    } catch (err) {
+        return {
+            status: 'failed',
+            pixivAddr,
+            error: err instanceof Error ? err.message : String(err),
+        };
+    }
+}
+
 /**
  * Best-effort 地把某张 pixiv 图从 OSS 同步进 MinIO。
  *
@@ -63,50 +154,25 @@ export async function bestEffortSyncToMinio(
     // 安全闸：MINIO_SYNC_ENABLED 默认关。关闭时第一件事就 return —— 不查 Mongo、
     // 不读 OSS、不写 MinIO、不抛错，worker 退回纯下载。per-page 每张图都会进来，
     // 关闭时保持静默不刷屏。
-    if (!isEnabled(process.env.MINIO_SYNC_ENABLED)) {
-        return;
-    }
-
-    try {
-        const doc = await deps.findImageByPixivAddr(pixivAddr);
-        const key = doc?.tos_file_name;
-
-        if (!key) {
+    const result = await syncPixivToMinioForTagger(pixivAddr, deps);
+    switch (result.status) {
+        case 'disabled':
+        case 'synced':
+            return;
+        case 'missing_key':
             console.warn(
                 `跳过 MinIO 同步：pixiv_addr=${pixivAddr} 未查到 tos_file_name`
             );
             return;
-        }
-
-        const timeoutMs = resolveTimeoutMs(deps);
-
-        // 超时后底层 sync promise 仍可能在跑（OSS/MinIO 半断时挂住），
-        // 给它挂 .catch 避免 unhandledRejection；它的结果丢弃即可。
-        const syncPromise = deps.syncOssObjectToMinio(key);
-        syncPromise.catch(() => {});
-
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<typeof SYNC_TIMEOUT>((resolve) => {
-            timer = setTimeout(() => resolve(SYNC_TIMEOUT), timeoutMs);
-        });
-
-        try {
-            const result = await Promise.race([syncPromise, timeoutPromise]);
-            if (result === SYNC_TIMEOUT) {
-                console.warn(
-                    `MinIO 同步超时（best-effort，已跳过，${timeoutMs}ms）pixiv_addr=${pixivAddr}`
-                );
-                return;
-            }
-        } finally {
-            if (timer) {
-                clearTimeout(timer);
-            }
-        }
-    } catch (err) {
-        console.warn(
-            `MinIO 同步失败（best-effort，已忽略）pixiv_addr=${pixivAddr}:`,
-            err
-        );
+        case 'timeout':
+            console.warn(
+                `MinIO 同步超时（best-effort，已跳过，${result.timeoutMs}ms）pixiv_addr=${pixivAddr}`
+            );
+            return;
+        case 'failed':
+            console.warn(
+                `MinIO 同步失败（best-effort，已忽略）pixiv_addr=${pixivAddr}:`,
+                result.error
+            );
     }
 }
