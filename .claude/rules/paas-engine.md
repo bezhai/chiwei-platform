@@ -39,16 +39,9 @@ make lint     # go vet
 
 ## 环境变量
 
-| 变量 | 说明 | 存储位置 |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL 连接串 | Secret `paas-engine-secret` |
-| `API_TOKEN` | API 认证 token | Secret `paas-engine-secret` |
-| `DEPLOY_NAMESPACE` | 部署 namespace | App envs |
-| `KANIKO_IMAGE` | Kaniko 镜像 | App envs |
-| `KANIKO_CACHE_REPO` | Kaniko 远程层缓存 repo（空则禁用） | App envs |
-| `BUILD_HTTP_PROXY` | 构建 Pod 代理 | App envs |
-| `REGISTRY_MIRRORS` | Docker Hub 镜像源 | App envs |
-| `INSECURE_REGISTRIES` | 不安全 registry | App envs |
+paas-engine 自身也是一个 PaaS App。环境变量说明见 `docs/config-management.md` 的「PaaS Engine 自身环境变量」。
+
+日常变更必须走 PaaS API（ConfigBundle / App envs / Release envs），不要直接改 K8s Secret/ConfigMap。`internal/config/config.go` 是代码侧读取变量的单一来源。
 
 ## K8s 资源
 
@@ -56,7 +49,7 @@ make lint     # go vet
 |---|---|---|
 | SA `deploy-api` | prod | paas-engine 的 ServiceAccount |
 | ClusterRole `deploy-api` | - | deployments, services, jobs, secrets |
-| Secret `paas-engine-secret` | prod | DATABASE_URL, API_TOKEN |
+| Secret `paas-engine-secret` | prod | 初始化凭证资源，非日常配置入口 |
 | Secret `harbor-secret` | prod, paas-builds | Harbor registry 凭证 |
 
 ## 注意事项
