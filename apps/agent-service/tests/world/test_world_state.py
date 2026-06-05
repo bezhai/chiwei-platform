@@ -22,6 +22,7 @@ import pytest
 from app.world.state import (
     WorldState,
     read_world_state,
+    set_next_wake_at,
     write_world_state,
 )
 from tests.runtime.conftest import migrate
@@ -107,3 +108,47 @@ async def test_world_state_appends_new_version(world_db):
 async def test_read_world_state_cold_start_returns_none(world_db):
     """没写过任何快照的 lane 读回 None（冷启动）。"""
     assert await read_world_state(lane="coe-never-written") is None
+
+
+# ---------------------------------------------------------------------------
+# next_wake_at —— 阶段 1B Task 1（到点 gate 的 state 字段）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_next_wake_at_defaults_null_and_insert_roundtrips(world_db):
+    """write_world_state 不带 next_wake_at → 列存 NULL（additive nullable 列能 insert+读回）。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-05T20:00:00+08:00",
+        detail="入夜，三姐妹各自关门。",
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.next_wake_at is None, "没排过下次醒时 next_wake_at 为 None"
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_appends_version_preserving_detail(world_db):
+    """set_next_wake_at append 一版、写进目标时刻、保留最新 detail/world_time。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-05T22:30:00+08:00",
+        detail="夜深了，屋里只剩冰箱的低鸣。",
+    )
+    target = "2026-06-06T06:30:00+08:00"
+    await set_next_wake_at(lane="coe-t2", next_wake_at=target)
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.next_wake_at == target, "next_wake_at 写入后能读回"
+    # detail / world_time 沿用上一版（set_next_wake_at 不丢叙述）
+    assert snap.detail == "夜深了，屋里只剩冰箱的低鸣。"
+    assert snap.world_time == "2026-06-05T22:30:00+08:00"
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_cold_start_no_snapshot_is_noop_or_safe(world_db):
+    """从没写过 WorldState 的 lane 调 set_next_wake_at 不抛（冷启容错）。"""
+    # 不应抛异常；冷启时还没有可承载 next_wake_at 的快照，安全跳过即可。
+    await set_next_wake_at(lane="coe-never", next_wake_at="2026-06-06T06:30:00+08:00")

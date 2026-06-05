@@ -499,7 +499,12 @@ async def test_world_tick_seeds_round_scoped_self_wake_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_world_tick_emits_one_self_wake_from_round_state(monkeypatch):
-    """循环里（模拟模型调 sleep）记下的待办 self-wake，engine 收口后只 emit 一条。"""
+    """循环里（模拟模型调 sleep）记下的待办 self-wake，engine 收口后只 emit 一条。
+
+    阶段 1B：这条用 heartbeat 唤醒（snapshot.next_wake_at=None → 心跳放行 gate），
+    专测「循环收口只 emit 一条 self-wake」。fire_self_wake 现在还会写 next_wake_at，
+    stub 掉避免碰真库。
+    """
     import app.world.tools as tools_mod
     from app.world.tools import FEATURE_SELF_WAKE
 
@@ -508,7 +513,11 @@ async def test_world_tick_emits_one_self_wake_from_round_state(monkeypatch):
     async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
         delayed.append({"data": data, "delay_ms": delay_ms})
 
+    async def fake_set_next_wake_at(*, lane, next_wake_at):
+        return None
+
     monkeypatch.setattr(tools_mod, "emit_delayed", fake_emit_delayed)
+    monkeypatch.setattr(tools_mod, "set_next_wake_at", fake_set_next_wake_at)
 
     async def fake_run(
         self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
@@ -519,13 +528,14 @@ async def test_world_tick_emits_one_self_wake_from_round_state(monkeypatch):
 
     monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
 
-    await world_tick(WorldTick(lane="coe-t2", reason="self"))
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     assert len(delayed) == 1, "一轮最多 emit 一条 self WorldTick（最后一次 sleep 为准）"
     assert delayed[0]["delay_ms"] == 600_000
     tick = delayed[0]["data"]
     assert tick.lane == "coe-t2"
     assert tick.reason == "self"
+    assert tick.target_wake_at, "emit 的 self WorldTick 必须携带目标唤醒时刻（stale 判定靠它）"
 
 
 @pytest.mark.asyncio

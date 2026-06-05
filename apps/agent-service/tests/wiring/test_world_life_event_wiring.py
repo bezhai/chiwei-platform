@@ -183,3 +183,44 @@ def test_event_arrived_debounced_to_life_wake():
     # debounce 参数合理（窗口 > 0、max_buffer > 0）
     assert w.debounce["seconds"] > 0
     assert w.debounce["max_buffer"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 阶段 1B Task 2 —— life 自排唤醒：独立 LifeWakeTick 信号接回 life_self_wake_node。
+# self wake 绝不复用 EventArrived 通道（spec decision 6）。
+# ---------------------------------------------------------------------------
+
+
+def test_life_wake_tick_routes_in_process_to_life_self_wake():
+    """LifeWakeTick → life_self_wake_node，in-process（自排回环，对称 world self WorldTick）。
+
+    life schedule 收口 emit_delayed(LifeWakeTick(reason=self)) 到期 emit，必须有一条
+    in-process（非 durable）wire 把它接回 life_self_wake_node，否则自排空转。
+    """
+    _fresh_import()
+    from app.nodes.life_wake import life_self_wake_node
+
+    wires = _wires_for("LifeWakeTick")
+    consumer_wires = [w for w in wires if life_self_wake_node in w.consumers]
+    assert consumer_wires, "LifeWakeTick 没有接到 life_self_wake_node"
+    assert any(not w.durable for w in consumer_wires), (
+        "LifeWakeTick → life_self_wake_node 没有 in-process 边，自排回环会空转"
+    )
+
+
+def test_life_self_wake_does_not_reuse_event_arrived_channel():
+    """self wake 是独立信号：LifeWakeTick 与 EventArrived 是两个不同 Data，互不复用。"""
+    _fresh_import()
+    from app.domain.world_events import EventArrived
+    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
+
+    # LifeWakeTick 不接到 event 的 life_wake_node；EventArrived 不接到 self 的节点
+    lifewake_wires = _wires_for("LifeWakeTick")
+    assert all(life_wake_node not in w.consumers for w in lifewake_wires), (
+        "self wake（LifeWakeTick）绝不复用 EventArrived 的 life_wake_node 通道"
+    )
+    arrived_wires = _wires_for("EventArrived")
+    assert all(life_self_wake_node not in w.consumers for w in arrived_wires), (
+        "EventArrived 不该接到 self wake 节点（两条独立通道）"
+    )
+    assert LifeWakeTick is not EventArrived

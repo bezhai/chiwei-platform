@@ -589,17 +589,22 @@ async def test_world_session_continuation_second_round_carries_history(
 
     lane = "coe-cont"
 
+    # 这两轮不调 sleep —— 专测 transcript 续接，不掺到点 gate。若第一轮 sleep(600)
+    # 会把 next_wake_at 排到 10 分钟后，紧接着的第二轮 heartbeat 会被 gate 正确判废
+    # （阶段 1B），那是另一条用例（test_world_self_wake_gate）覆盖的行为。这里只想
+    # 跑满两轮验续接：第一轮不排下次醒（next_wake_at 保持 None）→ 第二轮心跳放行。
     _world_llm(
         _agent_run,
         [
-            [_update_world("第一版世界叙述"), _sleep(600)],
-            [_update_world("第二版世界叙述"), _sleep(600)],
+            [_update_world("第一版世界叙述")],
+            [_update_world("第二版世界叙述")],
         ],
     )
 
     # 第一轮（heartbeat）
     await world_tick(WorldTick(lane=lane, reason="heartbeat"))
-    # 极短间隔起第二轮（heartbeat，round_id 随时刻变、不会被 turn 幂等跳过）
+    # 极短间隔起第二轮（heartbeat，round_id 随时刻变、不会被 turn 幂等跳过；第一轮
+    # 没排 next_wake_at → 心跳不被 gate）
     import asyncio
 
     await asyncio.sleep(0.01)
@@ -705,12 +710,16 @@ async def test_concurrent_wakes_serialized_no_transcript_corruption(
     lane = "coe-concur"
 
     # 三轮脚本：前两轮给并发的 heartbeat/self（只会跑成功一轮），第三轮给随后串行。
+    # 不调 sleep —— 这条专测「并发串行化 + 续接不被破坏」，不掺到点 gate。若各轮
+    # sleep(600) 会把 next_wake_at 排到 10 分钟后，随后立刻起的串行 heartbeat 会被
+    # gate 正确判废（阶段 1B 行为，由 test_world_self_wake_gate 覆盖），这里跑不满
+    # 两轮。第一轮不排 next_wake_at（保持 None）→ 随后心跳放行，验续接增长。
     _world_llm(
         _agent_run,
         [
-            [_update_world("v1"), _sleep(600)],
-            [_update_world("v2"), _sleep(600)],
-            [_update_world("v3"), _sleep(600)],
+            [_update_world("v1")],
+            [_update_world("v2")],
+            [_update_world("v3")],
         ],
     )
 

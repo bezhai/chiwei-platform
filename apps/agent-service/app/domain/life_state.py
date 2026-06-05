@@ -46,6 +46,12 @@ class LifeState(Data):
     response_mood: str       # 此刻的情绪 / 回应基调
     activity_type: str       # 活动类型（sleep / study / rest / move ...）
     observed_at: str         # 这份主观快照观测到的时刻 (ISO8601)
+    # 下次该醒的**现实**时刻（CST aware ISO，阶段 1B Task 2 到点 gate）。她调 schedule
+    # 自排后由收口 fire_life_self_wake 写进来；她的自排唤醒入口（LifeWakeTick reason=self）
+    # 走 gate 时读它判到点 + stale。nullable：从没自排过（首轮 / 只被 notify 起头）时为
+    # None。framework migrate 对已有数据的表加 nullable 列是 additive、不阻塞。比较一律用
+    # 现实时间，对称 world WorldState.next_wake_at。
+    next_wake_at: str | None = None
 
 
 async def save_life_state(
@@ -61,7 +67,17 @@ async def save_life_state(
 
     ``insert_append`` 自动递增 ``ver``；旧版留作历史。对外读用
     :func:`find_life_state` 取最新一版。
+
+    **沿用上一版的 ``next_wake_at``（必改 2 命门）**：``next_wake_at`` 是她的自排意愿
+    （何时再醒），由 ``schedule`` 工具收口的 :func:`set_life_next_wake_at` 负责写。
+    update_life_state（→ 本函数）只改主观快照（在干嘛 / 情绪 / 活动），**绝不动自排
+    意愿**。若这里默认把 ``next_wake_at`` 清成 None，event 唤醒她、她 update 但没重新
+    schedule 时，之前排的 next_wake_at 被清 → 旧 self wake 到期被 gate 判 stale（携带
+    target != None）作废 → 她不再自排醒、链断、回到等 event。所以 append 时读最新一版、
+    沿用它的 ``next_wake_at``，与 :func:`set_life_next_wake_at` 沿用主观字段对称：两个
+    写路径各改各字段、沿用对方最新值，只有 schedule（set）能改 next_wake_at。
     """
+    prev = await find_life_state(lane=lane, persona_id=persona_id)
     await insert_append(
         LifeState(
             lane=lane,
@@ -70,6 +86,7 @@ async def save_life_state(
             response_mood=response_mood,
             activity_type=activity_type,
             observed_at=observed_at,
+            next_wake_at=prev.next_wake_at if prev is not None else None,
         )
     )
 
@@ -78,3 +95,34 @@ async def find_life_state(*, lane: str, persona_id: str) -> LifeState | None:
     """读某姐妹在某泳道的最新主观快照，没有则 ``None``（她还没活过一轮）。"""
     snap = await select_latest(LifeState, {"lane": lane, "persona_id": persona_id})
     return snap  # type: ignore[return-value]
+
+
+async def set_life_next_wake_at(
+    *, lane: str, persona_id: str, next_wake_at: str
+) -> None:
+    """记下某姐妹下次该醒的现实时刻（阶段 1B Task 2 到点 gate，对称 world set_next_wake_at）。
+
+    她调 schedule 决定下次几时醒后，由收口 :func:`app.nodes.life_tools.fire_life_self_wake`
+    把目标唤醒时刻（现实 now + schedule 秒数）写进来。LifeState 是 append-only（带
+    ``ver`` Version）：这里读最新一版、沿用它的主观快照各字段（current_state /
+    response_mood / activity_type / observed_at，不丢状态），只把 ``next_wake_at``
+    换成新目标，append 一版。双键 (lane, persona_id) —— 只动这一个 persona 的 state。
+
+    冷启容错：还没有任何 LifeState 快照（她从没活过一轮）时无可承载 next_wake_at 的
+    快照，安全跳过（不造假状态占位）。这种情形下 next_wake_at 没排上，靠 world 在
+    饭点 / 早晨的 notify 起头兜底——不抛、不卡死。
+    """
+    snapshot = await find_life_state(lane=lane, persona_id=persona_id)
+    if snapshot is None:
+        return
+    await insert_append(
+        LifeState(
+            lane=lane,
+            persona_id=persona_id,
+            current_state=snapshot.current_state,
+            response_mood=snapshot.response_mood,
+            activity_type=snapshot.activity_type,
+            observed_at=snapshot.observed_at,
+            next_wake_at=next_wake_at,
+        )
+    )

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import timedelta
 from typing import Annotated
 
 from pydantic import Field
@@ -44,7 +45,7 @@ from app.data.queries.mailbox import deliver_event
 from app.domain.world_events import EVENT_KIND_AMBIENT
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
-from app.world.state import write_world_state
+from app.world.state import set_next_wake_at, write_world_state
 
 logger = logging.getLogger(__name__)
 
@@ -234,12 +235,21 @@ async def sleep(
 
 
 async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
-    """循环收口后 emit 至多一条 self ``WorldTick``（唤醒风暴命门）。
+    """循环收口后 emit 至多一条 self ``WorldTick`` + 落下次该醒时刻（唤醒风暴 + 到点 gate 命门）。
 
     engine 在 agent 循环跑完后调本函数。``self_wake`` 是本轮 round-scoped 的待办
     self-wake 容器（:func:`sleep` 写的 ``{"delay_ms": int}``，覆盖而非追加 → 一轮
-    内多次 sleep 最后一次为准）。有待办就 emit 唯一一条 self WorldTick；没调过
-    sleep（空容器）就不 emit，靠 10min 保底心跳兜底。返回是否 emit。
+    内多次 sleep 最后一次为准）。有待办时一次性收口三件事（阶段 1B 到点 gate）：
+
+      1. 算目标唤醒时刻 = 现实 now + delay（用现实 CST aware 时间，不用 world_time，
+         world_time 会因 gate 停滞）。
+      2. 把目标时刻写进 ``WorldState.next_wake_at``（:func:`set_next_wake_at`）——
+         唤醒入口对 self / 心跳走 gate 时读它判到点。
+      3. emit 唯一一条 self ``WorldTick``，**携带这个目标时刻**（``target_wake_at``）：
+         到期时与 state 当前 next_wake_at 比对判 stale（被新自排 / 外部覆盖即作废）。
+
+    写 state 与 emit 携带同一个 target_iso（相等是 stale 判定的命门）。没调过 sleep
+    （空容器）就不写、不 emit，靠 10min 保底心跳兜底。返回是否 emit。
 
     self-wake 的实际投递（``emit_delayed``）留在本模块：world 的自排是工具域的
     事，engine 只在循环收口处触发，firing 机制单一收口在这里。
@@ -247,10 +257,22 @@ async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
     delay_ms = (self_wake or {}).get("delay_ms")
     if delay_ms is None:
         return False
+
+    # 目标唤醒时刻 = 现实 now + delay（现实 CST aware ISO，gate 比较的口径）。
+    target = cst_time.now_cst() + timedelta(milliseconds=delay_ms)
+    target_iso = target.isoformat()
+
+    # 落 next_wake_at（gate 到点判定读它）。写 state 与 emit 携带同一 target_iso：
+    # 相等是 stale 判定命门——self 到期时只有携带的目标 == state 当前值才作数。
+    await set_next_wake_at(lane=lane, next_wake_at=target_iso)
+
     # 延迟唤醒在 engine 里 import，避免 tools ↔ engine 循环 import。
     from app.world.engine import WorldTick
 
-    await emit_delayed(WorldTick(lane=lane, reason="self"), delay_ms=delay_ms)
+    await emit_delayed(
+        WorldTick(lane=lane, reason="self", target_wake_at=target_iso),
+        delay_ms=delay_ms,
+    )
     return True
 
 

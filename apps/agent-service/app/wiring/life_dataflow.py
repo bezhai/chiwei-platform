@@ -38,7 +38,7 @@ from app.nodes.life_dataflow import (
     light_review_node,
     voice_node,
 )
-from app.nodes.life_wake import life_wake_node
+from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
 from app.runtime import Source, wire
 from app.world.engine import (
     WORLD_ACT_WAKE_DEBOUNCE_SECONDS,
@@ -128,3 +128,11 @@ wire(EventArrived).debounce(
     max_buffer=LIFE_WAKE_DEBOUNCE_MAX_BUFFER,
     key_by=event_knock_key,
 ).to(life_wake_node)
+
+# life 自排唤醒（阶段 1B Task 2）：她调 schedule 自排 → 收口
+# emit_delayed(LifeWakeTick(reason="self"))，到期 emit(LifeWakeTick) 经这条纯
+# in-process 边接回 life_self_wake_node（对称 world 的 self WorldTick 回环）。
+# **独立信号、不复用 EventArrived 通道**（spec decision 6）：self 唤醒入口走到点
+# gate + 空信箱也跑一轮，与信箱敲门的 life_wake_node 是两条独立路径。LifeWakeTick
+# 是 transient，不挂时间源（life 没有独立保底心跳），只承载自排回环这一种来源。
+wire(LifeWakeTick).to(life_self_wake_node)

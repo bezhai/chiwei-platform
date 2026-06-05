@@ -187,6 +187,10 @@ class WorldTick(Data):
 
     lane: Annotated[str, Key]
     reason: str = "heartbeat"          # heartbeat | self | act
+    # reason==self 时：这条 self 唤醒被排时的目标唤醒时刻（现实 CST aware ISO）。
+    # 到期时与 WorldState 当前 next_wake_at 比对判 stale —— 不一致说明这条 self 已被
+    # 新自排 / 外部刺激覆盖、作废（阶段 1B 到点 gate）。Task 2 的 life 自排照搬此字段。
+    target_wake_at: str = ""
     act_id: str = ""                   # reason==act 时：动作稳定标识（round_id 派生靠它）
     act_persona_id: str = ""           # reason==act 时：谁做的
     act_description: str = ""          # reason==act 时：她做了什么（自然语言）
@@ -273,6 +277,63 @@ def world_loop_instruction() -> str:
         "也不要为了'让世界别太安静'硬造动静——安静本身就是工作日午后真实的样子。\n\n"
         "看完、推演完这一轮后，用 sleep 定下次多久再看。"
     )
+
+
+# 走到点 gate 的唤醒源：self（world 自排）与 heartbeat（保底心跳）。外部刺激
+# （act 角色动作、未来真人聊天）永远放行、不走 gate——能立刻打断长睡。
+_GATED_REASONS = frozenset({"self", "heartbeat"})
+
+
+def _self_wake_gate_passes(
+    tick: WorldTick,
+    *,
+    next_wake_at: str | None,
+    now: datetime,
+) -> bool:
+    """到点 gate（阶段 1B Task 1）：判这次唤醒此刻作不作数。
+
+    唤醒按语义分两类：
+
+      * **外部刺激**（``reason`` 不在 :data:`_GATED_REASONS` 里，如 act 角色动作）：
+        永远放行——外部刺激能立刻打断长睡。
+      * **self / heartbeat**：走 gate，判两件事——
+          1. **到点没到**：现实 ``now`` ≥ ``next_wake_at`` 才作数（比较一律用现实
+             aware 时间，**不用 world_time**：world_time 会因 gate 停滞、拿它判到点
+             会永远不醒）。
+          2. **这条唤醒还作不作数（仅 self）**：self 携带它被排时的目标时刻
+             ``tick.target_wake_at``，到期时与 state 当前 ``next_wake_at`` 比对，不一致
+             说明已被新自排 / 外部刺激覆盖、判废（旧 self 到期不能误触发推演）。
+
+    ``next_wake_at`` 为 None（从没排过：首轮 / 冷启 / 只 update_world 没 sleep）时
+    心跳放行（别卡死首轮）；self 不该在没排过时来，None 时 self 也判废（没有合法
+    目标可比对）。
+
+    这是"让自排意愿真生效"的机制护栏，不替 world 决定推演内容（赤尾宪法）。
+    """
+    if tick.reason not in _GATED_REASONS:
+        return True
+
+    if next_wake_at is None:
+        # 从没排过下次醒：心跳放行（首轮不卡死）；self 没有合法目标可比对、判废。
+        return tick.reason == "heartbeat"
+
+    target = cst_time.parse(next_wake_at)
+    if target is None:
+        # next_wake_at 脏 / 无法解析（不该发生，写时是 aware ISO）：心跳放行兜底，
+        # 别因脏 state 把世界卡死；self 无可信目标可比对、判废。
+        return tick.reason == "heartbeat"
+
+    # 到点没到（用现实时间比，不用 world_time）。
+    if now < target:
+        return False
+
+    # self：携带的目标时刻必须 == state 当前 next_wake_at，否则这条已被覆盖（stale）。
+    if tick.reason == "self":
+        carried = cst_time.parse(tick.target_wake_at)
+        if carried is None or carried != target:
+            return False
+
+    return True
 
 
 def _wake_reason_text(tick: WorldTick, *, cold_start: bool) -> str:
@@ -467,8 +528,9 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     """一轮 world 的实际编排（已在 actor 锁内）：对账 → 续接 run → 收口排下次醒。
 
     一次唤醒：
-      1. **先对账补敲遗留信箱**（renotify_unread）—— 机械 IO 兜底，先于循环、
-         不依赖循环成功。
+      1. **先对账补敲遗留信箱**（renotify_unread）—— 纯机械 IO 兜底，先于到点
+         gate、先于循环、不依赖循环成功。即使这次 tick 随后被 gate 判废（如长睡
+         期间的保底心跳），补敲也已经做过，stranded 信箱不会被 gate 挡住没人补。
       2. 算现实此刻时间（CST），喂给 prompt（world 时间由 update_world 工具落，
          engine 不主动写快照）。
       3. 读自己上一版客观世界叙述；无快照 = 冷启动，缘由告诉 LLM 这是首次醒来、
@@ -489,21 +551,46 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     （make_session_id(lane,"world",今天)）；同一个 id 既是 langfuse session 标签
     也是 transcript key，"看到的连续 session"背后真有连续上下文。
     """
-    # 信箱对账自愈（放在最前、先于 agent 循环）：补敲该 lane 下所有还有未读 event
-    # 的 persona。deliver_event 的"落库 + emit 敲门"非原子，敲门撞上瞬时失败时
-    # event 会永久躺在信箱里没人读。world 保底心跳纯 in-process、不依赖外部敲门，
-    # 所以一定有机会跑——每轮一进来先把遗留的、丢掉的敲门补回来。放在循环之前是
-    # 关键：哪怕这轮循环抛异常，积压的 stranded 信箱也已先补过敲。这是机械 IO 兜底、
-    # 不经 LLM、不进世界内容决策（补敲已读完的 persona 也无害），不违赤尾宪法。
-    await renotify_unread(lane=lane)
-
-    # 现实此刻时间（CST），喂给 prompt。world_time 的快照由 update_world 工具落、
-    # 不在 engine 主动写——engine 只把"现在几点"作为推演起点喂给 world。
+    # 现实此刻时间（CST）：gate 到点判定 + 喂 prompt 都用它（gate 比较一律用现实
+    # 时间，绝不用会因 gate 停滞的 world_time）。world_time 快照由 update_world 工具
+    # 落、engine 不主动写——engine 只把"现在几点"作为推演起点喂给 world。
     now = datetime.now(_CST)
     now_iso = now.isoformat()
 
+    # 信箱对账自愈（先于到点 gate、先于 agent 循环）：补敲该 lane 下所有还有未读
+    # event 的 persona。deliver_event 的"落库 + emit 敲门"非原子，敲门撞上瞬时失败时
+    # event 会永久躺在信箱里没人读。world 保底心跳纯 in-process、不依赖外部敲门，
+    # 所以一定有机会跑——每个 tick 一进来先把遗留的、丢掉的敲门补回来。
+    #
+    # 关键：补敲放在到点 gate **之前**。renotify_unread 是纯机械 IO 兜底（不经 LLM、
+    # 不进世界内容决策、对已读 persona 也无害），不该被到点 gate 挡掉——否则 world
+    # 长睡期间每个保底心跳都被 gate 判废、stranded 信箱就永远没人补敲。所以先补敲、
+    # 再走 gate；gate 判废仍 early return（但补敲已经做过）。也先于 agent 循环：哪怕
+    # 这轮循环抛异常，积压的 stranded 信箱也已先补过敲。不违赤尾宪法。
+    await renotify_unread(lane=lane)
+
     snapshot = await read_world_state(lane=lane)
     cold_start = snapshot is None
+
+    # 到点 gate（阶段 1B Task 1）：self / 心跳唤醒在真正推演前先判此刻作不作数——
+    # 未到 next_wake_at 的心跳、未到点或已被覆盖（stale）的 self 一律判废、早返：
+    # 不推演、不产新 state，让 world 的长睡意愿真生效（不再被保底心跳拍醒）。补敲
+    # 信箱已在 gate 之前做过、不被 gate 挡。外部刺激（act 角色动作）reason 不在 gate
+    # 范围、永远放行，立刻打断长睡。
+    next_wake_at = snapshot.next_wake_at if snapshot is not None else None
+    if not _self_wake_gate_passes(tick, next_wake_at=next_wake_at, now=now):
+        logger.info(
+            "[world_tick] %s %s wake gated out (now=%s next_wake_at=%s "
+            "carried_target=%s): not due / stale, skip deliberation "
+            "(mailbox already renotified before gate)",
+            lane,
+            tick.reason,
+            now_iso,
+            next_wake_at,
+            tick.target_wake_at or "-",
+        )
+        return
+
     if cold_start:
         # 冷启动：还没有上一版世界叙述。给 detail 段一个占位文本喂 prompt，由
         # wake_reason 引导 world 推演 + update_world 写第一版（不在 engine 造占位
