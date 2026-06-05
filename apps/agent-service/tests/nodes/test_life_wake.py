@@ -853,20 +853,21 @@ async def test_perceived_events_enter_user_stimulus_for_transcript(patched, monk
     assert "千凪在厨房煎蛋" in msg_blob
 
 
-@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_perceived_events_replayable_in_second_round(
-    patched, fake_redis, monkeypatch
+    patched, fake_redis, test_db, monkeypatch
 ):
     """端到端续接：第一轮真写回 session，第二轮 load_session 能 replay 到上一轮感知。
 
-    用真 ``append_session`` 把第一轮写回 fakeredis，再 ``load_session`` 读回，断言
-    历史里含第一轮她感知到的 event 原文（不只固定文案）—— 这是"她真的记得自己经历
-    过什么"的命门。
+    用真 ``append_session`` 把第一轮写回 PG durable transcript，再 ``load_session``
+    读回，断言历史里含第一轮她感知到的 event 原文（不只固定文案）—— 这是"她真的
+    记得自己经历过什么"的命门。
     """
     from app.agent.session import append_session, load_session
-    from app.capabilities.redis import RedisCapability
+    from app.domain.session_transcript import SessionTranscript
+    from tests.runtime.conftest import migrate
 
-    cap = RedisCapability(fake_redis)
+    await migrate(SessionTranscript, test_db)
     patched["unread"] = [_envelope("e1", "晨光斜照进房间")]
 
     captured: dict = {}
@@ -888,11 +889,10 @@ async def test_perceived_events_replayable_in_second_round(
     await append_session(
         captured["session_id"],
         [*captured["messages"], Message(role=Role.ASSISTANT, content="ok")],
-        cap=cap,
     )
 
     # 第二轮 load 这条 session：必须能 replay 到第一轮她感知到的 event 原文
-    history = await load_session(captured["session_id"], cap=cap)
+    history = await load_session(captured["session_id"])
     replayed = "".join(m.text() for m in history)
     assert "晨光斜照进房间" in replayed, (
         "第二轮 replay 必须看到上一轮感知到的 event 原文，而非只有固定文案"

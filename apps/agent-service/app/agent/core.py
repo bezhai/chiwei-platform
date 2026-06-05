@@ -498,16 +498,22 @@ def _nullctx():
 
 
 async def _persist_session(session_id: str, messages: list[Message]) -> None:
-    """Write this round back to the session cache, swallowing write failures.
+    """Write this round back to the session store, swallowing write failures.
 
-    The session store is a working cache (spec decision 2), and this runs only
-    *after* the round's model + tool side effects have completed. A Redis write
-    failure here must never escape: an exception out of ``Agent.run`` makes the
-    caller's durable @node treat an already-completed round as failed → re-deliver
-    / DLQ a round whose effects already happened, and the @node's turn marker
-    never gets written so idempotency is defeated. Logging + swallowing keeps the
-    round successful; the next round simply cold-starts from PG hard facts
-    (symmetric to ``load_session`` returning ``[]`` on a missing key).
+    The transcript store is now durable PG (``SessionTranscript``), but this
+    write-back stays **best-effort continuity**: it runs only *after* the round's
+    model + tool side effects have completed, so a write failure here must never
+    escape. An exception out of ``Agent.run`` makes the caller's durable @node
+    treat an already-completed round as failed → re-deliver / DLQ a round whose
+    effects already happened, and the @node's turn marker never gets written so
+    idempotency is defeated. Logging + swallowing keeps the round successful; the
+    next round simply cold-starts from PG hard facts (symmetric to
+    ``load_session`` returning ``[]`` on a missing row).
+
+    So "durable" means the transcript *survives restarts once written* — not that
+    every round is guaranteed persisted. A failed write-back drops *that* round's
+    continuity (next round cold-starts), by design; the ``log.warning`` makes the
+    drop observable rather than silent.
     """
     try:
         await append_session(session_id, messages)

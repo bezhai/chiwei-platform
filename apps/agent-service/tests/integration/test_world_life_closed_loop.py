@@ -36,6 +36,7 @@ from app.domain.world_events import (
     EventRead,
     IntentRaised,
 )
+from app.domain.session_transcript import SessionTranscript
 from app.runtime.persist import insert_idempotent
 from app.world.engine import (
     WORLD_HEARTBEAT_MS,
@@ -68,13 +69,13 @@ def _sleep(seconds: int) -> tuple[str, dict]:
 
 @pytest.fixture(autouse=True)
 def _fake_redis(monkeypatch):
-    """In-memory redis for life/world single-flight 锁 + world session 续接.
+    """In-memory redis for life/world single-flight 锁.
 
-    ``life_wake_node`` 每轮拿 ``(lane, persona)`` 单飞锁；``world_tick`` 现在也按
-    actor 拿锁 + 用确定性 session_id 读 / 写 transcript（task2）。这两条都打 redis，
-    用 fakeredis 让闭环集成测试自包含、不连真实 redis。同时重置
-    ``get_redis_capability`` 的 singleton（world 的 load_session 走它，monkeypatch
-    ``_redis`` 不影响已建的 singleton）。
+    ``life_wake_node`` 每轮拿 ``(lane, persona)`` 单飞锁；``world_tick`` 也按 actor
+    拿锁串行化。这两条都打 redis，用 fakeredis 让闭环集成测试自包含、不连真实
+    redis。session 续接 transcript 现在是 PG durable（``world_db`` 建表），不再走
+    redis。同时重置 ``get_redis_capability`` 的 singleton（monkeypatch ``_redis``
+    不影响已建的 singleton）。
     """
     import app.capabilities.redis as cap_mod
     import app.infra.redis as redis_mod
@@ -86,13 +87,14 @@ def _fake_redis(monkeypatch):
 
 @pytest.fixture
 async def world_db(test_db):
-    """建齐闭环需要的所有真实表：world 快照 / 在场 / 信箱 / 已读 / life 快照。"""
+    """建齐闭环需要的所有真实表：world 快照 / 在场 / 信箱 / 已读 / life 快照 / 续接 transcript。"""
     await migrate(WorldState, test_db)
     await migrate(RoomPresence, test_db)
     await migrate(EventEnvelope, test_db)
     await migrate(EventRead, test_db)
     await migrate(LifeState, test_db)
     await migrate(IntentRaised, test_db)
+    await migrate(SessionTranscript, test_db)
     yield test_db
 
 
@@ -144,7 +146,7 @@ class _AgentRunController:
             for tool_name, args in script:
                 await by_name[tool_name].invoke(args)
         # 镜像 task1 真实 run 的会话写回：world 续接（session_id 显式传入）时把本轮
-        # 消息追加进 Redis transcript，让续接 / turn 幂等查重在集成里真生效。
+        # 消息追加进 PG durable transcript，让续接 / turn 幂等查重在集成里真生效。
         if session_id is not None:
             from app.agent.session import append_session
 

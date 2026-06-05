@@ -37,12 +37,11 @@ from app.world.tools import WORLD_TOOLS
 
 @pytest.fixture(autouse=True)
 def _fake_redis(monkeypatch):
-    """In-memory redis for world_tick 的串行化锁 + session 续接读写.
+    """In-memory redis for world_tick 的串行化锁.
 
-    world_tick 现在开头按 actor 拿单飞锁（覆盖全段），并用确定性 session_id
-    读 / 写 transcript。这两条都打 redis，给 fakeredis 让引擎单测自包含。同时
-    重置 ``get_redis_capability`` 的 singleton（它可能被先前测试用真 redis 填过，
-    monkeypatch ``_redis`` 不会影响已建的 singleton）。
+    world_tick 开头按 actor 拿单飞锁（覆盖全段），这条打 redis，给 fakeredis 让
+    引擎单测自包含。同时重置 ``get_redis_capability`` 的 singleton（它可能被先前
+    测试用真 redis 填过，monkeypatch ``_redis`` 不会影响已建的 singleton）。
     """
     import app.capabilities.redis as cap_mod
     import app.infra.redis as redis_mod
@@ -50,6 +49,49 @@ def _fake_redis(monkeypatch):
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_mod, "_redis", fake)
     monkeypatch.setattr(cap_mod, "_singleton", None)
+
+
+@pytest.fixture(autouse=True)
+def _inmem_session(monkeypatch):
+    """In-memory session transcript store for the engine unit tests.
+
+    The transcript store is now durable PG (Data ``SessionTranscript``).
+    world_tick reads it every tick (turn-idempotency round_id probe) and the
+    round write-back goes through ``append_session``. These engine tests follow
+    ``_stub_state``'s "不碰真库" philosophy — verifying engine *orchestration*,
+    not PG — so back the store with an in-memory dict that still exercises the
+    *real* serialise / ``_cap_transcript`` / lossless-replay logic by delegating
+    to ``app.agent.session``'s own helpers. The genuine PG round-trip is covered
+    by ``tests/domain/test_session_transcript.py`` and the closed-loop
+    integration test.
+    """
+    import json
+
+    from app.agent.neutral import Message
+    from app.agent import session as session_mod
+
+    store: dict[str, str] = {}
+
+    async def fake_load(session_id: str):
+        raw = store.get(session_id)
+        if raw is None:
+            return []
+        return [Message.from_replay_dict(d) for d in json.loads(raw)]
+
+    async def fake_append(session_id: str, new_messages):
+        if not new_messages:
+            return
+        existing = await fake_load(session_id)
+        combined = session_mod._cap_transcript(existing + new_messages, session_id)
+        store[session_id] = json.dumps(
+            [m.to_replay_dict() for m in combined], ensure_ascii=False
+        )
+
+    # engine imported ``load_session`` into its own namespace; patch there.
+    monkeypatch.setattr(engine_mod, "load_session", fake_load)
+    # the round write-back calls the session module's ``append_session`` (via
+    # Agent.run, or directly in the replay-idempotency test's fake_run).
+    monkeypatch.setattr(session_mod, "append_session", fake_append)
 
 
 @pytest.fixture(autouse=True)
@@ -720,7 +762,7 @@ async def test_intent_replay_skips_already_processed_round(monkeypatch):
         self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
     ):
         run_calls.append(session_id)
-        # 模拟 task1 的 run：把带 round 标记的本轮写回 session（真 Redis）
+        # 模拟 task1 的 run：把带 round 标记的本轮写回 session（durable transcript）
         from app.agent.session import append_session
 
         await append_session(session_id, list(messages))
@@ -747,7 +789,7 @@ async def test_intent_replay_skips_already_processed_round(monkeypatch):
 async def test_world_tick_serializes_under_actor_lock(monkeypatch):
     """world_tick 按 actor 拿单飞锁、覆盖全段：并发第二源拿不到锁不能并行进。
 
-    确定性 session_id 把三源打到同一个 Redis transcript key，并发会互相覆盖。
+    确定性 session_id 把三源打到同一条 transcript，并发会互相覆盖。
     所以 world 按 actor（lane）串行化，锁覆盖「读历史→run→写回」整段。这里让第一
     轮 run 阻塞住、并发起第二轮，断言第二轮在第一轮持锁期间进不去 run。
     """

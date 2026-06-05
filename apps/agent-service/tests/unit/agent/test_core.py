@@ -939,37 +939,32 @@ class TestExtract:
 
 
 @pytest.fixture
-def fake_session_store(monkeypatch):
-    """Back the session store with a real RedisCapability over fakeredis.
+async def session_store_db(test_db):
+    """Back the session store with the real PG ``SessionTranscript`` table.
 
-    ``app.agent.session`` resolves its capability via ``get_redis_capability``
-    when no ``cap`` is passed; the core passes none, so patching that resolver
-    routes the Agent's session reads/writes into an in-test fakeredis we can
-    inspect. Returns the capability so tests can assert what landed in Redis.
+    The session transcript store is now durable PG: ``app.agent.session`` reads /
+    writes via ``select_latest`` / ``insert_append`` against the app DB, which the
+    ``test_db`` fixture repoints at the test container. Building the table here
+    lets the Agent's session reads/writes round-trip through real PG so tests can
+    assert what was persisted. Returns the test engine.
     """
-    import fakeredis.aioredis
+    from app.domain.session_transcript import SessionTranscript
+    from tests.runtime.conftest import migrate
 
-    from app.agent import session as session_mod
-    from app.capabilities.redis import RedisCapability
-
-    cap = RedisCapability(fakeredis.aioredis.FakeRedis(decode_responses=True))
-
-    async def _get_cap():
-        return cap
-
-    monkeypatch.setattr(session_mod, "get_redis_capability", _get_cap)
-    return cap
+    await migrate(SessionTranscript, test_db)
+    return test_db
 
 
+@pytest.mark.integration
 class TestSessionContinuation:
     """``Agent.run / stream`` with a ``session_id`` reads the stored transcript,
     prepends it (between the system prompt and the new messages) so the model
-    continues, and appends this round's new messages back to Redis with a
-    refreshed TTL. Without a session_id the path is byte-for-byte unchanged and
-    never touches Redis (chat status quo)."""
+    continues, and appends this round's new messages back to durable PG. Without a
+    session_id the path is byte-for-byte unchanged and never touches the store
+    (chat status quo)."""
 
     async def test_second_run_input_carries_first_round_transcript(
-        self, mock_deps, fake_session_store
+        self, mock_deps, session_store_db
     ):
         from app.agent.neutral import ToolCall
 
@@ -1039,10 +1034,8 @@ class TestSessionContinuation:
         assert sent[0].role == Role.SYSTEM
         assert texts.index("第一轮醒") < texts.index("第二轮醒")
 
-    async def test_no_session_id_does_not_touch_redis(
-        self, mock_deps, fake_session_store
-    ):
-        # Without a session_id the run must not read or write Redis at all.
+    async def test_no_session_id_does_not_touch_store(self, mock_deps):
+        # Without a session_id the run must not read or write the store at all.
         from app.agent import session as session_mod
 
         loads: list = []
@@ -1080,29 +1073,22 @@ class TestSessionContinuation:
         sent = mock_deps["model"].complete.await_args.args[0]
         assert [m.text() for m in sent] == ["sys", "hi"]
 
-    async def test_run_appends_round_to_redis_and_refreshes_ttl(
-        self, mock_deps, fake_session_store
+    async def test_run_appends_round_to_durable_store(
+        self, mock_deps, session_store_db
     ):
-        from app.agent.session import (
-            SESSION_TTL_SECONDS,
-            load_session,
-            session_key,
-        )
+        from app.agent.session import load_session
 
         sid = "prod:world:2026-06-04"
         await Agent(_CFG).run(
             messages=[Message(role=Role.USER, content="醒了")],
             session_id=sid,
         )
-        stored = await load_session(sid, cap=fake_session_store)
-        # the round (user input + assistant reply) was persisted
+        stored = await load_session(sid)
+        # the round (user input + assistant reply) was persisted to PG
         assert [m.text() for m in stored] == ["醒了", "hello"]
-        # TTL set/refreshed to the 24h window
-        ttl = await fake_session_store._client.ttl(session_key(sid))
-        assert 0 < ttl <= SESSION_TTL_SECONDS
 
     async def test_session_id_drives_langfuse_session_grouping(self, mock_deps):
-        # The same id is both the Redis key AND the langfuse session tag
+        # The same id is both the session store key AND the langfuse session tag
         # (decision 3). A run with a session_id groups its trace into that
         # session even without a context.
         captured: dict = {}
@@ -1126,7 +1112,7 @@ class TestSessionContinuation:
         assert captured["session_id"] == "prod:world:2026-06-04"
 
     async def test_stream_continuation_carries_prior_transcript(
-        self, mock_deps, fake_session_store
+        self, mock_deps, session_store_db
     ):
         # First round via stream: text reply only.
         async def round1(messages, *, tools=None, **kwargs):
@@ -1159,11 +1145,12 @@ class TestSessionContinuation:
         # session.
         from app.agent.session import load_session
 
-        stored = await load_session(sid, cap=fake_session_store)
+        stored = await load_session(sid)
         texts = [m.text() for m in stored]
         assert texts == ["第一轮", "第一轮回复", "第二轮", "第二轮回复"]
 
 
+@pytest.mark.integration
 class TestSessionWriteFailureSwallowed:
     """The session store is a *working cache*: a write-back failure must NOT turn
     an already-completed round (with its tool side effects emit/move/state writes
@@ -1174,7 +1161,7 @@ class TestSessionWriteFailureSwallowed:
     key → cold start)."""
 
     async def test_run_returns_result_when_append_session_raises(
-        self, mock_deps, fake_session_store, caplog
+        self, mock_deps, session_store_db, caplog
     ):
         import logging
 
@@ -1183,7 +1170,7 @@ class TestSessionWriteFailureSwallowed:
         with patch(
             "app.agent.core.append_session",
             new_callable=AsyncMock,
-            side_effect=CapabilityCallFailed("redis set_with_ttl failed"),
+            side_effect=CapabilityCallFailed("session transcript write failed"),
         ):
             with caplog.at_level(logging.WARNING):
                 result = await Agent(_CFG).run(
@@ -1198,7 +1185,7 @@ class TestSessionWriteFailureSwallowed:
         )
 
     async def test_stream_completes_when_append_session_raises(
-        self, mock_deps, fake_session_store, caplog
+        self, mock_deps, session_store_db, caplog
     ):
         import logging
 
@@ -1213,7 +1200,7 @@ class TestSessionWriteFailureSwallowed:
         with patch(
             "app.agent.core.append_session",
             new_callable=AsyncMock,
-            side_effect=CapabilityCallFailed("redis set_with_ttl failed"),
+            side_effect=CapabilityCallFailed("session transcript write failed"),
         ):
             collected = []
             with caplog.at_level(logging.WARNING):
