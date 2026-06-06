@@ -217,6 +217,22 @@ async def test_complete_plain_text_roundtrip(mock_sdk):
     assert last.parts[0].text == "hi"
 
 
+async def test_complete_pops_session_id_out_of_params(mock_sdk):
+    """session_id is a prompt-cache-key control param meaningless to Gemini's
+    native wire; the adapter consumes it instead of leaking it into the trace's
+    model_parameters (abstraction leak) or the genai config."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="hi")], session_id="s"
+    )
+
+    assert "session_id" not in _span_calls[0]["model_parameters"]
+
+
 async def test_complete_system_message_goes_to_system_instruction(mock_sdk):
     """A neutral system message becomes config.system_instruction, not a turn."""
     adapter = GeminiAdapter(

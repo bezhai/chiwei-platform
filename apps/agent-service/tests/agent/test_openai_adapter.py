@@ -972,3 +972,177 @@ async def test_generation_span_produced_for_structured(mock_sdk):
     )
 
     assert len(_span_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# prompt cache — azure (字节 GPT openapi 网关) does implicit prompt caching.
+# A stable session_id (via the ``extra`` JSON header) + a retention window let a
+# long stable prefix be reused across wakeups. The adapter must wire both, and
+# surface cached_tokens so a cache hit is observable in the trace.
+# ---------------------------------------------------------------------------
+
+
+def _usage_with_cache(prompt: int, completion: int, cached: int) -> SimpleNamespace:
+    """openai usage shape with the nested prompt_tokens_details.cached_tokens."""
+    return SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
+    )
+
+
+async def test_azure_complete_sends_cache_retention_and_session_id(mock_sdk):
+    """azure-http carries prompt_cache_retention (body) + session_id (header)."""
+    import json
+
+    adapter = OpenAIAdapter(
+        model_name="gpt-5.5",
+        api_key="sk",
+        base_url="https://gw",
+        client_type="azure-http",
+    )
+    mock_sdk.azure_instance.set_result(_completion(content="ok"))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="hi")],
+        session_id="coe-world-life2:world:2026-06-06",
+    )
+
+    sent = mock_sdk.azure_instance.last_create_kwargs
+    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert json.loads(sent["extra_headers"]["extra"]) == {
+        "session_id": "coe-world-life2:world:2026-06-06"
+    }
+    # session_id must NOT leak as a top-level create() kwarg (SDK would reject it)
+    assert "session_id" not in sent
+
+
+async def test_azure_complete_retention_without_session_id(mock_sdk):
+    """Retention is unconditional on azure; the session header only when given."""
+    adapter = OpenAIAdapter(
+        model_name="gpt-5.5",
+        api_key="sk",
+        base_url="https://gw",
+        client_type="azure-http",
+    )
+    mock_sdk.azure_instance.set_result(_completion(content="ok"))
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    sent = mock_sdk.azure_instance.last_create_kwargs
+    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert "extra_headers" not in sent
+
+
+async def test_non_azure_complete_omits_cache_params(mock_sdk):
+    """Non-azure providers must NOT get the azure-gateway-only cache params.
+
+    prompt_cache_retention / the ``extra`` session header are 字节-gateway
+    specific; sending them to deepseek / 302 / moonshot risks an unknown-field
+    error. session_id is still popped so it never reaches the SDK.
+    """
+    adapter = OpenAIAdapter(
+        model_name="gpt-4o",
+        api_key="sk",
+        base_url="https://x",
+        client_type="openai",
+    )
+    mock_sdk.instance.set_result(_completion(content="ok"))
+
+    await adapter.complete([Message(role=Role.USER, content="hi")], session_id="s")
+
+    sent = mock_sdk.instance.last_create_kwargs
+    assert "extra_body" not in sent
+    assert "extra_headers" not in sent
+    assert "session_id" not in sent
+
+
+async def test_complete_records_cached_tokens_in_usage(mock_sdk):
+    """A cache hit's cached_tokens surfaces on the span (命中 observable)."""
+    adapter = OpenAIAdapter(
+        model_name="gpt-5.5",
+        api_key="sk",
+        base_url="https://gw",
+        client_type="azure-http",
+    )
+    comp = _completion(content="ok")
+    comp.usage = _usage_with_cache(prompt=62000, completion=18, cached=60000)
+    mock_sdk.azure_instance.set_result(comp)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    span = _MOST_RECENT_SPAN[-1]
+    usage_updates = [u for u in span.updates if "usage_details" in u]
+    assert usage_updates, "complete span never recorded usage_details"
+    details = usage_updates[-1]["usage_details"]
+    assert details["input"] == 62000
+    assert details["cache_read_input_tokens"] == 60000
+
+
+async def test_usage_without_cache_details_omits_cache_key(mock_sdk):
+    """No prompt_tokens_details (or cached=0) ⇒ no fabricated cache key."""
+    adapter = OpenAIAdapter(
+        model_name="gpt-4o",
+        api_key="sk",
+        base_url="https://x",
+        client_type="openai",
+    )
+    mock_sdk.instance.set_result(_completion(content="ok"))  # plain usage, no details
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    span = _MOST_RECENT_SPAN[-1]
+    details = [u for u in span.updates if "usage_details" in u][-1]["usage_details"]
+    assert "cache_read_input_tokens" not in details
+
+
+async def test_azure_stream_sends_cache_params(mock_sdk):
+    """Streaming azure requests also carry retention + session_id."""
+    import json
+
+    adapter = OpenAIAdapter(
+        model_name="gpt-5.5",
+        api_key="sk",
+        base_url="https://gw",
+        client_type="azure-http",
+    )
+    mock_sdk.azure_instance.set_stream(
+        [_chunk(content="hi"), _chunk(finish_reason="stop")]
+    )
+
+    async for _ in adapter.stream(
+        [Message(role=Role.USER, content="x")], session_id="sess-1"
+    ):
+        pass
+
+    sent = mock_sdk.azure_instance.last_create_kwargs
+    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "sess-1"}
+
+
+async def test_azure_cache_params_merge_into_existing_extra(mock_sdk):
+    """Cache params merge into a caller-supplied extra_body/extra_headers, not
+    clobber them — preserves the ModelClient **kwargs passthrough contract."""
+    import json
+
+    adapter = OpenAIAdapter(
+        model_name="gpt-5.5",
+        api_key="sk",
+        base_url="https://gw",
+        client_type="azure-http",
+    )
+    mock_sdk.azure_instance.set_result(_completion(content="ok"))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="hi")],
+        session_id="s",
+        extra_body={"foo": 1},
+        extra_headers={"X-Trace": "t"},
+    )
+
+    sent = mock_sdk.azure_instance.last_create_kwargs
+    assert sent["extra_body"]["foo"] == 1
+    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert sent["extra_headers"]["X-Trace"] == "t"
+    assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "s"}

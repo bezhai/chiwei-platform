@@ -480,6 +480,42 @@ class TestRunSessionPlumbing:
         assert captured["session_id"] == "prod:world:2026-06-04"
 
 
+class TestModelCacheSessionId:
+    """The trace session_id (run arg or context) is forwarded to model.complete /
+    model.stream as the prompt-cache key, so the azure adapter can wire it into
+    the gateway's session cache header. None when there is no session (adapter
+    no-ops), keeping the chat / stateless path unchanged."""
+
+    async def test_run_forwards_context_session_id_to_model(self, mock_deps):
+        await Agent(_CFG).run(
+            [Message(role=Role.USER, content="hi")],
+            context=AgentContext(session_id="prod:world:2026-06-04"),
+        )
+        kw = mock_deps["model"].complete.call_args.kwargs
+        assert kw.get("session_id") == "prod:world:2026-06-04"
+
+    async def test_run_without_session_forwards_none(self, mock_deps):
+        await Agent(_CFG).run([Message(role=Role.USER, content="hi")])
+        kw = mock_deps["model"].complete.call_args.kwargs
+        assert kw.get("session_id") is None
+
+    async def test_stream_forwards_context_session_id_to_model(self, mock_deps):
+        captured: dict = {}
+
+        async def fake_stream(messages, *, tools=None, **kwargs):
+            captured.update(kwargs)
+            yield StreamChunk(text="hi")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = fake_stream
+        async for _ in Agent(_CFG).stream(
+            [Message(role=Role.USER, content="hi")],
+            context=AgentContext(session_id="prod:world:2026-06-04"),
+        ):
+            pass
+        assert captured.get("session_id") == "prod:world:2026-06-04"
+
+
 class TestAgentConfig:
     def test_frozen(self):
         cfg = AgentConfig("p", "m", "t")

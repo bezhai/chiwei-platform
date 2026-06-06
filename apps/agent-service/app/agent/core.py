@@ -351,6 +351,7 @@ async def _run_loop(
     tools: list[Tool],
     context: AgentContext | None,
     recursion_limit: int,
+    session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> Message:
@@ -383,7 +384,9 @@ async def _run_loop(
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
-        last = await model.complete(convo, tools=tool_defs, **extra)
+        last = await model.complete(
+            convo, tools=tool_defs, **{**extra, "session_id": session_id}
+        )
         if not last.tool_calls:
             if transcript_sink is not None:
                 transcript_sink.append(last)
@@ -414,6 +417,7 @@ async def _stream_loop(
     tools: list[Tool],
     context: AgentContext | None,
     recursion_limit: int,
+    session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -444,7 +448,9 @@ async def _stream_loop(
         reasoning_parts: list[str] = []
         turn_calls = []
 
-        async for chunk in model.stream(convo, tools=tool_defs, **extra):
+        async for chunk in model.stream(
+            convo, tools=tool_defs, **{**extra, "session_id": session_id}
+        ):
             if chunk.text:
                 text_parts.append(chunk.text)
             if chunk.reasoning:
@@ -629,6 +635,7 @@ class Agent:
                     tools=self._tools,
                     context=context,
                     recursion_limit=self._cfg.recursion_limit,
+                    session_id=trace_session_id,
                     model_kwargs=self._model_kwargs,
                     transcript_sink=sink,
                 )
@@ -692,6 +699,7 @@ class Agent:
                         tools=self._tools,
                         context=context,
                         recursion_limit=self._cfg.recursion_limit,
+                        session_id=trace_session_id,
                         model_kwargs=self._model_kwargs,
                         transcript_sink=sink,
                     ):

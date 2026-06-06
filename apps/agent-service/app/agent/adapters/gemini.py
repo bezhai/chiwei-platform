@@ -139,6 +139,7 @@ class GeminiAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> Message:
+        kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction, tools=tools, **kwargs
@@ -171,6 +172,7 @@ class GeminiAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
+        kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction, tools=tools, **kwargs
@@ -222,6 +224,7 @@ class GeminiAdapter(ModelClient):
         schema: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
+        kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction,

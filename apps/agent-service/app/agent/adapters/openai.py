@@ -64,6 +64,11 @@ logger = logging.getLogger(__name__)
 
 _AZURE_API_VERSION = "2024-08-01-preview"
 
+# 字节 GPT openapi 网关做隐式 prompt cache:请求带上 retention 窗口(body)+ 稳定的
+# session_id(``extra`` JSON header),让长而稳定的前缀跨唤醒复用。retention 取 1h,
+# 跨过 world 10~30min 的唤醒间隔——默认窗口太短,下次醒来缓存已过期就是 0 命中。
+_PROMPT_CACHE_RETENTION = "3600s"
+
 
 class OpenAIAdapter(ModelClient):
     """Chat-Completions adapter for every openai-compatible provider."""
@@ -112,6 +117,27 @@ class OpenAIAdapter(ModelClient):
             return httpx.AsyncClient(proxy=settings.forward_proxy_url)
         return None
 
+    def _apply_cache_params(
+        self, request: dict[str, Any], session_id: str | None
+    ) -> None:
+        """Wire the 字节 GPT 网关 implicit prompt-cache params (azure-http only).
+
+        The gateway reuses a long stable prefix when the request carries a
+        retention window (body) + a stable session_id (the ``extra`` JSON
+        header). Other openai-compatible providers don't understand these and
+        could 400 on the unknown field, so this is scoped to azure-http. The
+        session header is only added when a session_id is actually present.
+        """
+        if self._client_type != "azure-http":
+            return
+        # Merge into any caller-supplied extra_body/extra_headers rather than
+        # replacing them, so the **kwargs passthrough contract is preserved.
+        extra_body = request.setdefault("extra_body", {})
+        extra_body["prompt_cache_retention"] = _PROMPT_CACHE_RETENTION
+        if session_id:
+            extra_headers = request.setdefault("extra_headers", {})
+            extra_headers["extra"] = json.dumps({"session_id": session_id})
+
     # ------------------------------------------------------------------
     # ModelClient: complete (non-streaming)
     # ------------------------------------------------------------------
@@ -123,6 +149,7 @@ class OpenAIAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> Message:
+        session_id = kwargs.pop("session_id", None)
         wire_messages = self._to_wire_messages(messages)
         request: dict[str, Any] = {
             "model": self._model,
@@ -131,6 +158,7 @@ class OpenAIAdapter(ModelClient):
         }
         if tools:
             request["tools"] = [_tool_to_wire(t) for t in tools]
+        self._apply_cache_params(request, session_id)
 
         with generation_span(
             name=self._model,
@@ -157,6 +185,7 @@ class OpenAIAdapter(ModelClient):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
+        session_id = kwargs.pop("session_id", None)
         wire_messages = self._to_wire_messages(messages)
         request: dict[str, Any] = {
             "model": self._model,
@@ -169,6 +198,7 @@ class OpenAIAdapter(ModelClient):
         }
         if tools:
             request["tools"] = [_tool_to_wire(t) for t in tools]
+        self._apply_cache_params(request, session_id)
 
         with generation_span(
             name=self._model,
@@ -239,6 +269,7 @@ class OpenAIAdapter(ModelClient):
         schema: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
+        session_id = kwargs.pop("session_id", None)
         wire_messages = self._to_wire_messages(messages)
         request: dict[str, Any] = {
             "model": self._model,
@@ -252,6 +283,7 @@ class OpenAIAdapter(ModelClient):
             },
             **kwargs,
         }
+        self._apply_cache_params(request, session_id)
 
         with generation_span(
             name=self._model,
@@ -493,7 +525,16 @@ def _part_to_block_dict(part: dict[str, Any]) -> dict[str, Any]:
 
 def _model_parameters(request: dict[str, Any]) -> dict[str, Any]:
     """Extract trace-worthy model params from a request (skip bulky fields)."""
-    skip = {"model", "messages", "tools", "stream", "stream_options", "response_format"}
+    skip = {
+        "model",
+        "messages",
+        "tools",
+        "stream",
+        "stream_options",
+        "response_format",
+        "extra_body",
+        "extra_headers",
+    }
     return {k: v for k, v in request.items() if k not in skip}
 
 
@@ -501,11 +542,19 @@ def _usage_details(response: Any) -> dict[str, int] | None:
     usage = getattr(response, "usage", None)
     if usage is None:
         return None
-    return {
+    details = {
         "input": getattr(usage, "prompt_tokens", 0) or 0,
         "output": getattr(usage, "completion_tokens", 0) or 0,
         "total": getattr(usage, "total_tokens", 0) or 0,
     }
+    # prompt-cache hit: cached_tokens lives under prompt_tokens_details. Surface
+    # it as a langfuse cache key so a hit is observable — only when non-zero, so
+    # a 0 doesn't read as "measured, missed" when the field is simply absent.
+    ptd = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(ptd, "cached_tokens", 0) if ptd is not None else 0
+    if cached:
+        details["cache_read_input_tokens"] = cached
+    return details
 
 
 # ---------------------------------------------------------------------------
