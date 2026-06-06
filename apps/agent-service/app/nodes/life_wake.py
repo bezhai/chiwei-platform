@@ -225,12 +225,11 @@ _LIFE_INBOX_MAX = 50
 # （TTL=这么多秒），cd 内再被唤醒就 raise DebounceReschedule 把这批 event 推迟到
 # cd 后——延迟 + 合并、绝不 drop（reschedule 攒着，cd 结束一并醒）。
 #
-# 时长定 45s：略小于 world 的 60s 唤醒合并闸（WORLD_ACT_WAKE_DEBOUNCE_SECONDS）。
-# world 是唯一启动源、被唤醒最小间隔 1min，三姐妹的轮次节奏比世界唤醒间隔密一点点
-# （她们仍能在世界推进的间隙感知、回应），但已足够把"几乎每轮做事→唤醒 world→
-# world 广播→三人又醒"的 82/min 量级自激压下去：一个 persona 两轮之间至少隔 45s
-# + 一轮自身耗时，三人合起来最坏几轮/分钟，而非几十。这是机制层的节奏闸（跟现有
-# debounce 窗口、world 60s 闸同类），不进世界内容决策（赤尾宪法）。
+# 时长定 45s：把一个 persona 两轮之间的最小间隔压到 45s + 一轮自身耗时，三人合起来
+# 最坏几轮/分钟、而非几十，挡住"几乎每轮做事就再被唤醒"的自激。这是机制层的节奏闸
+# （跟现有 debounce 窗口同类），不进世界内容决策（赤尾宪法）。注：pull 范式下 act 已
+# 不再唤醒 world（act 落 PG、world 按自排节奏 pull），这道 life 侧 cd 只管 life 自己
+# 的轮次节奏、与 world 唤醒频率解耦。
 _LIFE_CD_SECONDS = 45
 
 # cd key 在 redis 与 single-flight 锁分开（锁管"正在跑"，cd 管"刚跑完的冷却"），

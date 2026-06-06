@@ -54,8 +54,9 @@ logger = logging.getLogger(__name__)
 WORLD_SLEEP_MAX_SECONDS = 3600
 
 # sleep 下限：world 自排最短 1 分钟。低于下限报错喂回模型重调（跟上限超限处理对称、
-# 不静默夹），让常规 / self 自排不排得太密。注意下限只挡 sleep 自排——act 立即唤醒
-# 由 act→world 边上的 60s 合并闸挡。
+# 不静默夹），让 self 自排不排得太密。pull 范式下 act 不再唤醒 world（act 只落库、
+# world 醒来按游标 pull），所以唤醒频率完全由这条 sleep 决定，没有别的旁路把 world
+# 拽起来。
 WORLD_SLEEP_MIN_SECONDS = 60
 
 # round-scoped 可变 state 的 features key（engine 每轮新建、工具体跨调用读写、

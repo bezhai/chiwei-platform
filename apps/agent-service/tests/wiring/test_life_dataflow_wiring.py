@@ -29,29 +29,30 @@ def test_life_dataflow_wiring_compiles():
     assert graph is not None
 
 
-def test_life_dataflow_wire_count_is_13():
+def test_life_dataflow_wire_count_is_11():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
-    # stage4 删旧 life tick / glimpse / schedule 生成 wire 后剩：
+    # 删旧 life tick / glimpse / schedule 生成 wire 后、pull 范式删 act 唤醒链后剩：
     #   cron：MinuteTick（只剩 fan_out_voice 这半）、LightDayTick、LightNightTick、
     #     HeavyReviewTick（4）
     #   per-persona business：VoiceRequest、LightReviewRequest、HeavyReviewRequest（3）
-    #   world/life event 闭环：WorldHeartbeatTick、WorldTick、ActPerformed、
-    #     EventArrived（4）
-    #   降频（act 范式）：ActWorldTick（act→world 60s 合并闸那条边，1）
+    #   world/life event 闭环：WorldHeartbeatTick、WorldTick、EventArrived（3）
     #   阶段 1B Task 2：LifeWakeTick（life 自排 in-process 回环那条边，1）
-    #   = 4 + 3 + 4 + 1 + 1 = 13。
+    #   = 4 + 3 + 3 + 1 = 11。
+    #
+    # pull 范式：ActPerformed 不再有 wire（act 落 PG 不唤醒 world）、ActWorldTick 已删
+    # （act→world 60s 合并闸整条链拆掉），相比旧版少了这两条。
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
         "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
         "VoiceRequest", "LightReviewRequest", "HeavyReviewRequest",
-        "WorldHeartbeatTick", "WorldTick", "ActPerformed", "EventArrived",
-        "ActWorldTick", "LifeWakeTick",
+        "WorldHeartbeatTick", "WorldTick", "EventArrived",
+        "LifeWakeTick",
     }
     assert types == expected
-    assert len(WIRING_REGISTRY) == 13
+    assert len(WIRING_REGISTRY) == 11
 
 
 def test_minute_tick_drives_voice_fan_out():
@@ -66,11 +67,11 @@ def test_minute_tick_drives_voice_fan_out():
     assert minute_wires[0].consumers == [fan_out_voice]
 
 
-def test_act_wire_is_durable():
+def test_act_performed_has_no_wire():
+    """pull 范式：ActPerformed 不再有 wire（act 落 PG 不唤醒 world）。"""
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
     act_wires = [w for w in WIRING_REGISTRY if w.data_type.__name__ == "ActPerformed"]
-    assert len(act_wires) == 1
-    assert act_wires[0].durable is True
+    assert act_wires == []

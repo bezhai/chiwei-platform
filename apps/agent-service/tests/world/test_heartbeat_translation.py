@@ -40,10 +40,8 @@ async def test_heartbeat_translated_to_world_tick_with_lane(monkeypatch):
     assert isinstance(tick, WorldTick)
     assert tick.lane == "coe-hb"
     assert tick.reason == "heartbeat"
-    # 心跳不携带动作字段
-    assert tick.act_id == ""
-    assert tick.act_persona_id == ""
-    assert tick.act_description == ""
+    # pull 范式：WorldTick 不再有 act_* 字段（act 不是唤醒源）
+    assert not hasattr(tick, "act_id")
 
 
 @pytest.mark.asyncio

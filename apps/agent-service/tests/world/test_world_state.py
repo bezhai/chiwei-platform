@@ -21,6 +21,7 @@ import pytest
 
 from app.world.state import (
     WorldState,
+    advance_act_cursor,
     read_world_state,
     set_next_wake_at,
     write_world_state,
@@ -152,3 +153,129 @@ async def test_set_next_wake_at_cold_start_no_snapshot_is_noop_or_safe(world_db)
     """从没写过 WorldState 的 lane 调 set_next_wake_at 不抛（冷启容错）。"""
     # 不应抛异常；冷启时还没有可承载 next_wake_at 的快照，安全跳过即可。
     await set_next_wake_at(lane="coe-never", next_wake_at="2026-06-06T06:30:00+08:00")
+
+
+# ---------------------------------------------------------------------------
+# act 消费游标 —— world 按复合游标 (created_at, act_id) pull act 后推进游标
+#
+# 游标用 created_at（单调落库序）而非 occurred_at（life 轮首固定的做事时刻、与落库
+# 顺序可乱序）—— out-of-order 漏读命门见 tests/domain/test_act_read.py。
+# ---------------------------------------------------------------------------
+
+
+def test_worldstate_has_nullable_act_cursor():
+    """WorldState 多一对 act 消费游标字段，nullable（冷启动时为 None）。"""
+    assert "act_cursor_created_at" in WorldState.model_fields
+    assert "act_cursor_act_id" in WorldState.model_fields
+    snap = WorldState(lane="x", world_time="t", detail="d")
+    assert snap.act_cursor_created_at is None
+    assert snap.act_cursor_act_id is None
+
+
+def test_worldstate_has_no_occurred_at_cursor():
+    """游标不再有 occurred_at 字段（已改成 created_at，零残留）。"""
+    assert "act_cursor_occurred_at" not in WorldState.model_fields
+
+
+@pytest.mark.integration
+async def test_act_cursor_defaults_null_and_insert_roundtrips(world_db):
+    """write_world_state 不带游标 → 列存 NULL（additive nullable 列能 insert+读回）。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-05T20:00:00+08:00",
+        detail="入夜。",
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at is None
+    assert snap.act_cursor_act_id is None
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_appends_version_writing_cursor(world_db):
+    """advance_act_cursor append 一版、写进复合游标、保留最新 detail/world_time。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-05T22:30:00+08:00",
+        detail="夜深。",
+    )
+    await advance_act_cursor(
+        lane="coe-t2",
+        created_at="2026-06-05T22:40:00+08:00",
+        act_id="a9",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at == "2026-06-05T22:40:00+08:00"
+    assert snap.act_cursor_act_id == "a9"
+    # detail / world_time 沿用上一版（advance_act_cursor 不丢叙述）
+    assert snap.detail == "夜深。"
+    assert snap.world_time == "2026-06-05T22:30:00+08:00"
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_preserves_next_wake_at(world_db):
+    """advance_act_cursor 保留 next_wake_at（游标与到点时刻是两块独立调度状态）。"""
+    await write_world_state(
+        lane="coe-t2", world_time="t", detail="d"
+    )
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-06T06:30:00+08:00")
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-06T05:00:00+08:00", act_id="a1"
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.next_wake_at == "2026-06-06T06:30:00+08:00", (
+        "advance_act_cursor 不该丢掉 next_wake_at"
+    )
+    assert snap.act_cursor_act_id == "a1"
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_preserves_act_cursor(world_db):
+    """set_next_wake_at 保留 act 游标（写到点时刻不丢已消费游标）。"""
+    await write_world_state(lane="coe-t2", world_time="t", detail="d")
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-06T05:00:00+08:00", act_id="a1"
+    )
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-06T06:30:00+08:00")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.act_cursor_created_at == "2026-06-06T05:00:00+08:00"
+    assert snap.act_cursor_act_id == "a1"
+    assert snap.next_wake_at == "2026-06-06T06:30:00+08:00"
+
+
+@pytest.mark.integration
+async def test_write_world_state_preserves_scheduling_state(world_db):
+    """update_world 改叙述时保留 next_wake_at + act 游标（叙述更新不清调度状态）。
+
+    update_world 工具在循环中途调，只该更新世界叙述（world_time + detail），绝不
+    清掉收口才写的 next_wake_at / 游标——否则每轮更新叙述都把游标打回 None、下轮
+    重读全部 act。
+    """
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-06T05:00:00+08:00", act_id="a1"
+    )
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-06T06:30:00+08:00")
+
+    # 再调 update_world 改叙述（模拟下一轮中途）
+    await write_world_state(lane="coe-t2", world_time="t1", detail="新叙述")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.detail == "新叙述"
+    assert snap.world_time == "t1"
+    assert snap.next_wake_at == "2026-06-06T06:30:00+08:00", (
+        "update_world 不该清掉 next_wake_at"
+    )
+    assert snap.act_cursor_act_id == "a1", "update_world 不该清掉 act 游标"
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_cold_start_no_snapshot_is_safe(world_db):
+    """从没写过 WorldState 的 lane 调 advance_act_cursor 不抛（冷启容错）。"""
+    await advance_act_cursor(
+        lane="coe-never", created_at="2026-06-06T05:00:00+08:00", act_id="a1"
+    )

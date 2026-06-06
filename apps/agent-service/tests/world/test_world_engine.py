@@ -1,10 +1,10 @@
-"""world engine 节点契约 — 阶段 1A（world 推演者）.
+"""world engine 节点契约 — pull 范式（world 按自排节奏醒来、批量 pull act）.
 
-world 是世界的推演层，不是导演。它被三源唤醒（保底心跳 / 自排提前卡点 / life
-回灌的 ``ActPerformed``）。被唤醒后它**跑一个 agent 工具循环**：用 update_world
-写下世界此刻的叙述、对收到的角色动作推演客观结果、用 notify 把够得着的角色推演
-出来投客观动静、用 sleep 定下次再看。它不替角色决定她想做什么、不批准 / 拒绝
-她的动作。
+world 是世界的推演层，不是导演。pull 范式下它只被**两源唤醒**（保底心跳 / 自排提前
+卡点），都走到点 gate；act 不再唤醒 world。任何唤醒源醒来后它**跑一个 agent 工具
+循环**：从"上次消费游标之后"批量读这段时间攒下的 act（``list_recent_acts``，一轮
+最多 N 条）一并推演，用 update_world 写下世界叙述、对动作推演客观结果、用 notify
+把够得着的角色推演出来投客观动静、用 sleep 定下次再看，最后把游标推进到本批末尾。
 
 这些测试 mock ``Agent.run``（模拟模型连续调工具）+ stub 现成 handler，钉死
 机制层硬约束，不是 LLM 决策：
@@ -16,11 +16,11 @@ world 是世界的推演层，不是导演。它被三源唤醒（保底心跳 /
   * run 的 context.features 带 world 本轮 lane + round_id（工具体读它行动）；
   * cold_start：无 WorldState 时也走循环、prompt 里告诉模型这是冷启动；
   * **engine 收口不再写快照**（世界叙述改由 update_world 工具在循环里负责写）；
-  * act 唤醒：从 PG 读全那一批 act 喂 world、reason="act"。
+  * **任何唤醒源**都从游标 pull act 喂 world、读满 N 条告知积压、收口推进游标。
 
 赤尾设计宪法：world 推演谁够得着、产什么动静、世界什么样全由 LLM 在循环里
 判断，代码里没有阈值 / 计数器替它决策。10 分钟保底心跳 + sleep 上限只决定
-"何时醒 / 别睡死"，绝不进入世界内容决策。
+"何时醒 / 别睡死"，N=10 读取上限只是防单轮 context 爆炸的护栏，都不进世界内容决策。
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ def _inmem_session(monkeypatch):
     """In-memory session transcript store for the engine unit tests."""
     import json
 
-    from app.agent.neutral import Message
     from app.agent import session as session_mod
+    from app.agent.neutral import Message
 
     store: dict[str, str] = {}
 
@@ -78,10 +78,10 @@ def _inmem_session(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_state(monkeypatch):
-    """world 节点读快照、对账信箱、读 act 批次都打桩，专测引擎机制（不碰真库）。
+    """world 节点读快照、对账信箱、读 act 批次、推进游标都打桩，专测引擎机制（不碰真库）。
 
     收口不再写快照（世界叙述改由 update_world 工具负责写），所以这里不再 stub
-    write_world_state。
+    write_world_state。advance_act_cursor 打桩成记录调用，验证收口推进游标。
     """
 
     async def fake_read_world_state(*, lane):
@@ -99,16 +99,24 @@ def _stub_state(monkeypatch):
         renotify_calls.append(lane)
         return 0
 
-    async def fake_list_recent_acts(*, lane, since_iso):
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
         # 默认空批次：专测引擎机制的用例不碰真库。需要断言动作内容的用例自己
         # 覆写这个桩（monkeypatch.setattr engine_mod.list_recent_acts）。
+        # 返回 list[tuple[ActPerformed, created_at_str]]（pull 范式：游标用 created_at）。
         return []
+
+    cursor_calls: list[dict] = []
+
+    async def fake_advance_act_cursor(*, lane, created_at, act_id):
+        cursor_calls.append({"lane": lane, "created_at": created_at, "act_id": act_id})
 
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
+    monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
 
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
+    engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
     yield
 
 
@@ -131,6 +139,27 @@ def _mock_run(monkeypatch, *, order: list[str] | None = None):
 
     monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
     return captured
+
+
+def _act(lane, act_id, persona_id, description, occurred_at, created_at):
+    """构造一条 (ActPerformed, created_at) 元组（list_recent_acts 的新返回形态）。
+
+    pull 范式游标用 created_at（单调落库序），occurred_at 只用于 prompt 显示。所以
+    stub 必须给两个时刻：occurred_at（做事时刻、prompt 显示）+ created_at（落库时刻、
+    游标推进 / round_id 派生靠它）。
+    """
+    from app.domain.world_events import ActPerformed
+
+    return (
+        ActPerformed(
+            lane=lane,
+            act_id=act_id,
+            persona_id=persona_id,
+            description=description,
+            occurred_at=occurred_at,
+        ),
+        created_at,
+    )
 
 
 @pytest.mark.asyncio
@@ -218,8 +247,8 @@ async def test_world_tick_does_not_write_snapshot_in_engine(monkeypatch):
     """engine 收口不再写快照（世界叙述改由 update_world 工具在循环里写 —— 1A）。
 
     旧范式 engine 收口落一版只含 world_time 的快照；新范式世界叙述（world_time +
-    detail）由 update_world 工具负责，engine 收口只剩 fire_self_wake，不再调
-    write_world_state。
+    detail）由 update_world 工具负责，engine 收口只剩 fire_self_wake + advance_act_cursor，
+    不再调 write_world_state。
     """
     writes: list = []
 
@@ -250,191 +279,662 @@ async def test_cold_start_runs_loop_and_tells_model(monkeypatch):
     assert ("冷启动" in blob) or ("首次" in blob)
 
 
+# ---------------------------------------------------------------------------
+# pull 范式：任何唤醒源都从游标批量读 act 喂 world
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_act_wake_passes_act_to_model(monkeypatch):
-    """act 唤醒：动作内容透给模型（在喂入的 prompt context 里）。
+async def test_any_wake_source_reads_acts_from_cursor(monkeypatch):
+    """heartbeat / self 唤醒都从游标 pull act 喂 world（不再只 act 唤醒才读）。"""
+    from datetime import timedelta
 
-    内容从 PG 读全那一批 act（list_recent_acts）拼进 prompt，不再靠合并闸透进来
-    的单条 payload。
-    """
-    from app.domain.world_events import ActPerformed
+    from app.world.engine import _CST
+    from app.world.state import WorldState
 
-    async def fake_list_recent_acts(*, lane, since_iso):
+    # self 走到点 gate：需要 snapshot 有已过的 next_wake_at + self 携带匹配 target。
+    past = (datetime.now(_CST) - timedelta(seconds=5)).isoformat()
+
+    async def snapshot(*, lane):
+        return WorldState(lane=lane, world_time="t", detail="d", next_wake_at=past)
+
+    calls: list[str] = []
+
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
+        calls.append(lane)
+        return []
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    await world_tick(WorldTick(lane="coe-t2", reason="self", target_wake_at=past))
+
+    assert calls == ["coe-t2", "coe-t2"], (
+        "pull 范式下任何唤醒源都该从游标读 act 批次"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pull_passes_acts_to_model(monkeypatch):
+    """读到的 act 内容透给模型（在喂入的 prompt context 里）。"""
+
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
         return [
-            ActPerformed(lane=lane, act_id="a1", persona_id="chinagi",
-                         description="我起床去厨房煮咖啡", occurred_at="2026-06-04T08:00:00+08:00"),
+            _act(lane, "a1", "chinagi", "我起床去厨房煮咖啡",
+                 "2026-06-04T08:00:00+08:00", "2026-06-04T08:00:00+08:00"),
         ]
 
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     captured = _mock_run(monkeypatch)
 
-    await world_tick(
-        WorldTick(
-            lane="coe-t2",
-            reason="act",
-            act_id="a1",
-            act_persona_id="chinagi",
-            act_description="我起床去厨房煮咖啡",
-        )
-    )
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
     assert "煮咖啡" in blob
 
 
 @pytest.mark.asyncio
-async def test_act_wake_reads_all_recent_acts_not_just_latest(monkeypatch):
-    """act 唤醒从 PG 读这段时间所有 act 全喂 world，不止合并闸最后一条。
+async def test_pull_reads_all_acts_in_batch(monkeypatch):
+    """一批多条 act 全喂 world（对称 life 读 mailbox）。"""
 
-    合并闸 latest-only 只把最后一条 act 的 payload 透进 WorldTick；前面几条对
-    world 等价丢失。修：world 被 act 唤醒时调 list_recent_acts 读全那一批。
-    这里 tick 只带最后一条（千凪），但 PG 里还有前两条——三条都必须出现在喂给
-    模型的 context 里。
-    """
-    from app.domain.world_events import ActPerformed
-
-    async def fake_list_recent_acts(*, lane, since_iso):
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
         return [
-            ActPerformed(lane=lane, act_id="a1", persona_id="ayana",
-                         description="我出门上学", occurred_at="2026-06-04T08:00:00+08:00"),
-            ActPerformed(lane=lane, act_id="a2", persona_id="akao",
-                         description="我去找千凪", occurred_at="2026-06-04T08:00:20+08:00"),
-            ActPerformed(lane=lane, act_id="a3", persona_id="chinagi",
-                         description="我起床去厨房煮咖啡", occurred_at="2026-06-04T08:00:40+08:00"),
+            _act(lane, "a1", "ayana", "我出门上学",
+                 "2026-06-04T08:00:00+08:00", "2026-06-04T08:00:00+08:00"),
+            _act(lane, "a2", "akao", "我去找千凪",
+                 "2026-06-04T08:00:20+08:00", "2026-06-04T08:00:20+08:00"),
+            _act(lane, "a3", "chinagi", "我起床去厨房煮咖啡",
+                 "2026-06-04T08:00:40+08:00", "2026-06-04T08:00:40+08:00"),
         ]
 
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     captured = _mock_run(monkeypatch)
 
-    await world_tick(
-        WorldTick(
-            lane="coe-t2",
-            reason="act",
-            act_id="a3",
-            act_persona_id="chinagi",
-            act_description="我起床去厨房煮咖啡",
-        )
-    )
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
-    assert "我出门上学" in blob, "前面被合并闸丢掉的 act（绫奈出门）必须从 PG 读回喂 world"
-    assert "我去找千凪" in blob, "前面被合并闸丢掉的 act（赤尾找人）必须从 PG 读回喂 world"
-    assert "我起床去厨房煮咖啡" in blob, "最后那条 act 也在"
+    assert "我出门上学" in blob
+    assert "我去找千凪" in blob
+    assert "我起床去厨房煮咖啡" in blob
 
 
 @pytest.mark.asyncio
-async def test_act_wake_query_since_uses_lane_and_lookback(monkeypatch):
-    """act 唤醒按 lane 读、since 截断点存在（不读无界历史）。"""
+async def test_pull_query_uses_lane_cursor_and_limit(monkeypatch):
+    """pull 按 lane + 复合游标读、传 N 上限（不读无界）。
+
+    冷启动快照（read_world_state stub 无游标）→ cursor 为 None，读全既有。
+    """
     calls: list[dict] = []
 
-    async def fake_list_recent_acts(*, lane, since_iso):
-        calls.append({"lane": lane, "since_iso": since_iso})
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
+        calls.append(
+            {
+                "lane": lane,
+                "cursor_created_at": cursor_created_at,
+                "cursor_act_id": cursor_act_id,
+                "limit": limit,
+            }
+        )
         return []
 
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     _mock_run(monkeypatch)
 
-    await world_tick(
-        WorldTick(
-            lane="coe-t2",
-            reason="act",
-            act_id="a1",
-            act_persona_id="chinagi",
-            act_description="我去厨房",
-        )
-    )
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
-    assert len(calls) == 1, "act 唤醒必须读一次最近 act 批次"
+    assert len(calls) == 1
     assert calls[0]["lane"] == "coe-t2"
-    assert calls[0]["since_iso"], "since 截断点必须非空（有界窗口，不读无界历史）"
+    # 默认快照无游标 → None（读全既有）
+    assert calls[0]["cursor_created_at"] is None
+    assert calls[0]["cursor_act_id"] is None
+    assert calls[0]["limit"] == engine_mod.WORLD_ACT_PULL_LIMIT
+    assert calls[0]["limit"] > 0, "读取上限必须是正整数（有界，防 context 爆炸）"
 
 
 @pytest.mark.asyncio
-async def test_act_wake_window_anchored_to_act_not_world_time(monkeypatch):
-    """since 窗口锚定触发 act 的 occurred_at，不被 world_time 漂移挤掉。
-
-    heartbeat / self / 并发 world 轮次推进了 world_time，但它们不读 act。随后 act
-    wake 若用 world_time（更晚的快照）当 since 下界，会把这条未被消费的 act 排除出
-    窗口 → 又静默丢掉。这里让快照 world_time 比 act occurred_at 更晚（模拟 heartbeat
-    已推进时钟），断言 since_iso 仍 ≤ act 的 occurred_at（窗口覆盖这条未消费 act）。
-    """
-    from datetime import timedelta
-
-    from app.world.engine import _CST
+async def test_pull_passes_state_cursor_to_query(monkeypatch):
+    """world 醒来按 WorldState 里上次消费到的复合游标（created_at）读 act。"""
     from app.world.state import WorldState
 
-    now = datetime.now(_CST)
-    act_occurred = (now - timedelta(seconds=40)).isoformat()
-    snapshot_world_time = (now - timedelta(seconds=10)).isoformat()
+    async def snapshot_with_cursor(*, lane):
+        return WorldState(
+            lane=lane,
+            world_time="2026-06-04T08:00:00+08:00",
+            detail="d",
+            act_cursor_created_at="2026-06-04T07:30:00+08:00",
+            act_cursor_act_id="prev-act",
+        )
 
-    async def fresh_snapshot(*, lane):
-        return WorldState(lane=lane, world_time=snapshot_world_time, detail="")
+    calls: list[dict] = []
 
-    captured_since: list[str] = []
-
-    async def fake_list_recent_acts(*, lane, since_iso):
-        captured_since.append(since_iso)
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
+        calls.append({"created": cursor_created_at, "id": cursor_act_id})
         return []
 
-    monkeypatch.setattr(engine_mod, "read_world_state", fresh_snapshot)
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot_with_cursor)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     _mock_run(monkeypatch)
 
-    await world_tick(
-        WorldTick(
-            lane="coe-t2",
-            reason="act",
-            act_id="a-late",
-            act_persona_id="chinagi",
-            act_description="我去厨房",
-            act_occurred_at=act_occurred,
-        )
-    )
+    # snapshot 无 next_wake_at（None）→ heartbeat gate 放行（首轮不卡死）；用 heartbeat
+    # 验证游标传递（self 在 next_wake_at=None 时会被 gate 判废，不适合这条用例）。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
-    assert len(captured_since) == 1
-    since_dt = datetime.fromisoformat(captured_since[0])
-    act_dt = datetime.fromisoformat(act_occurred)
-    assert since_dt <= act_dt, (
-        f"since 窗口必须覆盖触发 act 的 occurred_at（{act_occurred}），"
-        f"不能被更晚的 world_time 快照挤掉，实际 since={captured_since[0]}"
+    assert calls == [{"created": "2026-06-04T07:30:00+08:00", "id": "prev-act"}], (
+        "pull 必须把 WorldState 当前 created_at 游标传给 list_recent_acts"
     )
 
 
-def test_act_since_cutoff_anchors_on_act_occurred_at():
-    """回看窗口下界 = 触发 act 的 occurred_at - lookback（锚 act，不锚 now/world_time）。
+@pytest.mark.asyncio
+async def test_pull_full_batch_tells_model_backlog(monkeypatch):
+    """读满 N 条（积压）→ 缘由 / 批次文本告诉 world 还有动作没读完，由她自己排短 sleep。"""
 
-    occurred_at 缺失 / naive 时退回 now - lookback 兜底（不抛、仍读近窗 act）。
+    async def full_batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        # engine 传进来的 limit == WORLD_ACT_PULL_LIMIT；返回正好读满 limit 条模拟积压。
+        return [
+            _act(lane, f"a{i}", "akao", f"动作{i}",
+                 f"2026-06-04T08:00:{i:02d}+08:00", f"2026-06-04T08:00:{i:02d}+08:00")
+            for i in range(limit)
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", full_batch)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert ("积压" in blob) or ("没读完" in blob) or ("还有" in blob), (
+        "读满 N 条必须在 prompt 里告知 world 有积压（由她排短 sleep 尽快消化）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pull_partial_batch_no_backlog_text(monkeypatch):
+    """没读满 N 条 → 不告知积压（只读到的就是全部）。"""
+
+    async def partial(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a1", "akao", "唯一一条",
+                 "2026-06-04T08:00:00+08:00", "2026-06-04T08:00:00+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", partial)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "积压" not in blob, "没读满 N 条不该告知积压"
+
+
+# ---------------------------------------------------------------------------
+# 收口推进游标：成功才推进、到本批末尾（用 created_at）；空批次不推进
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cursor_advances_to_batch_end_on_success(monkeypatch):
+    """推演成功收口 → 把游标推进到本批最后一条 act 的 (created_at, act_id)。
+
+    游标用 created_at（落库时刻），不是 occurred_at（做事时刻）。这里给两个时刻不同，
+    钉死游标推进用的是 created_at 那个。
     """
-    from datetime import timedelta
 
-    from app.world.engine import (
-        _CST,
-        WORLD_ACT_LOOKBACK_SECONDS,
-        WorldTick,
-        _act_since_cutoff,
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a1", "akao", "先",
+                 "2026-06-04T08:05:00+08:00", "2026-06-04T08:00:00+08:00"),
+            _act(lane, "a2", "ayana", "后",
+                 "2026-06-04T08:01:00+08:00", "2026-06-04T08:00:30+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_cursor_calls == [
+        {"lane": "coe-t2", "created_at": "2026-06-04T08:00:30+08:00", "act_id": "a2"}
+    ], "游标必须推进到本批末尾的 created_at（不是 occurred_at）"
+
+
+@pytest.mark.asyncio
+async def test_cursor_not_advanced_on_empty_batch(monkeypatch):
+    """空批次（醒来没新 act）→ 不推进游标（没读到东西没什么可推进）。"""
+    _mock_run(monkeypatch)  # 默认 list_recent_acts 返回 []
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_cursor_calls == [], "空批次不该推进游标"
+
+
+@pytest.mark.asyncio
+async def test_cursor_not_advanced_on_run_failure(monkeypatch):
+    """场景②（run 失败）：推演中途失败（run 抛）→ 游标不推进、marker 没写。
+
+    下轮重读起点同 round_id、marker 不在 → 不命中 → 重新 run（正常重试）。
+    """
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a1", "akao", "x",
+                 "2026-06-04T08:00:00+08:00", "2026-06-04T08:00:00+08:00"),
+        ]
+
+    async def boom_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        raise RuntimeError("model boom")
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", boom_run)
+
+    with pytest.raises(RuntimeError):
+        await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_cursor_calls == [], "run 失败时游标绝不推进（下轮重读）"
+
+
+# ---------------------------------------------------------------------------
+# round_id：非空批次从游标起点派生（崩溃扩批仍同 round_id）、空批次按 now
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_round_id_stable_across_replays_for_same_start_cursor(monkeypatch):
+    """同一游标起点重读 → 同 round_id（turn 幂等 + event_id 去重命门）。
+
+    必改 2：批次非空时 round_id 从**游标起点**（cursor_created_at, cursor_act_id）派生
+    （不从本批 act 集合、不用 now）。游标起点不变 → round_id 不变（哪怕批集合 / 时刻变）。
+    """
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        # 固定游标起点（C0）。
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00",
+            act_cursor_act_id="c0",
+        )
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a1", "akao", "x",
+                 "2026-06-04T08:01:00+08:00", "2026-06-04T08:01:00+08:00"),
+            _act(lane, "a2", "ayana", "y",
+                 "2026-06-04T08:02:00+08:00", "2026-06-04T08:02:00+08:00"),
+        ]
+
+    rounds: list[str] = []
+
+    async def capture_run(self, messages, *, prompt_vars=None, context=None,
+                          session_id=None, max_retries=2):
+        rounds.append(context.features["world_round_id"])
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    import asyncio
+
+    await asyncio.sleep(0.002)  # 时间变了，但同起点 round_id 应不变
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert rounds[0] == rounds[1], (
+        f"同一游标起点重读应得同一 round_id（与 now / 批集合无关），实际 {rounds}"
     )
 
-    now = datetime(2026, 6, 4, 8, 0, 0, tzinfo=_CST)
-    occurred = (now - timedelta(seconds=40)).isoformat()
 
-    tick = WorldTick(
-        lane="x", reason="act", act_id="a1",
-        act_persona_id="akao", act_description="s",
-        act_occurred_at=occurred,
-    )
-    cutoff = datetime.fromisoformat(_act_since_cutoff(tick, now))
-    assert cutoff == datetime.fromisoformat(occurred) - timedelta(
-        seconds=WORLD_ACT_LOOKBACK_SECONDS
-    ), "下界 = 触发 act occurred_at - lookback"
+@pytest.mark.asyncio
+async def test_round_id_stable_when_batch_grows_same_start_cursor(monkeypatch):
+    """场景④核心：游标起点不变但批集合变大（崩溃后新增 act）→ round_id 仍不变。
 
-    tick_empty = WorldTick(
-        lane="x", reason="act", act_id="a2",
-        act_persona_id="akao", act_description="s",
+    必改 2 的命门——旧实现 round_id 绑"本批 act 集合"，崩溃后新增 act 让批变大、
+    round_id 变 → turn 幂等失效 → 旧 act 被重复推演。改成绑游标起点后批集合变大
+    round_id 不变 → marker 仍命中、不重推。
+    """
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00",
+            act_cursor_act_id="c0",
+        )
+
+    batches = [
+        # 第一轮：批到 a5（C5）。
+        [
+            _act("coe-t2", f"a{i}", "akao", f"动作{i}",
+                 f"2026-06-04T08:0{i}:00+08:00", f"2026-06-04T08:0{i}:00+08:00")
+            for i in range(1, 6)
+        ],
+        # 第二轮：崩溃期间新增 a6（C6），批变大到 a6。起点不变。
+        [
+            _act("coe-t2", f"a{i}", "akao", f"动作{i}",
+                 f"2026-06-04T08:0{i}:00+08:00", f"2026-06-04T08:0{i}:00+08:00")
+            for i in range(1, 7)
+        ],
+    ]
+
+    rounds: list[str] = []
+
+    async def capture_run(self, messages, *, prompt_vars=None, context=None,
+                          session_id=None, max_retries=2):
+        rounds.append(context.features["world_round_id"])
+        return Message(role=Role.ASSISTANT, content="")
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return batches.pop(0)
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert rounds[0] == rounds[1], (
+        f"游标起点不变、批集合变大 round_id 也必须不变（绑起点不绑批集合），实际 {rounds}"
     )
-    cutoff_fallback = datetime.fromisoformat(_act_since_cutoff(tick_empty, now))
-    assert cutoff_fallback == now - timedelta(seconds=WORLD_ACT_LOOKBACK_SECONDS), (
-        "occurred_at 缺失退回 now - lookback 兜底"
+
+
+@pytest.mark.asyncio
+async def test_round_id_varies_with_time_for_empty_batch(monkeypatch):
+    """场景⑤（空批次）：纯 self / heartbeat 推进 → round_id 从 now 派生（每次新 round）。"""
+    rounds: list[str] = []
+
+    async def capture_run(self, messages, *, prompt_vars=None, context=None,
+                          session_id=None, max_retries=2):
+        rounds.append(context.features["world_round_id"])
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    import asyncio
+
+    await asyncio.sleep(0.002)
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert rounds[0] != rounds[1], "空批次 round_id 随时刻变（不被误幂等）"
+
+
+@pytest.mark.asyncio
+async def test_round_id_differs_for_different_start_cursor(monkeypatch):
+    """不同游标起点 → 不同 round_id（推进过的下一批不会误判成同轮跳过）。"""
+    from app.world.state import WorldState
+
+    snapshots = [
+        WorldState(lane="coe-t2", world_time="t", detail="d",
+                   act_cursor_created_at="2026-06-04T08:00:00+08:00", act_cursor_act_id="c0"),
+        WorldState(lane="coe-t2", world_time="t", detail="d",
+                   act_cursor_created_at="2026-06-04T08:05:00+08:00", act_cursor_act_id="c5"),
+    ]
+
+    async def snapshot(*, lane):
+        return snapshots.pop(0)
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "ax", "ayana", "y",
+                 "2026-06-04T09:00:00+08:00", "2026-06-04T09:00:00+08:00"),
+        ]
+
+    rounds: list[str] = []
+
+    async def capture_run(self, messages, *, prompt_vars=None, context=None,
+                          session_id=None, max_retries=2):
+        rounds.append(context.features["world_round_id"])
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert rounds[0] != rounds[1], "不同游标起点应得不同 round_id"
+
+
+@pytest.mark.asyncio
+async def test_cold_start_round_id_stable_across_replays(monkeypatch):
+    """场景⑥（冷启动）：游标为 None 时 round_id 从固定 cold seed 派生，崩溃重读同 round_id。
+
+    冷启动游标为 None，不能用 now 派生（否则崩溃重读 round_id 变、turn 幂等失效）。
+    用固定 cold seed（lane + ":cold"）→ 冷启动崩溃重读得同 round_id。
+    """
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a1", "akao", "x",
+                 "2026-06-04T08:00:00+08:00", "2026-06-04T08:00:00+08:00"),
+        ]
+
+    rounds: list[str] = []
+
+    async def capture_run(self, messages, *, prompt_vars=None, context=None,
+                          session_id=None, max_retries=2):
+        rounds.append(context.features["world_round_id"])
+        return Message(role=Role.ASSISTANT, content="")
+
+    # 默认 _stub_state 的 read_world_state 返回的 snapshot 无游标（cursor None）= 冷启动游标。
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    import asyncio
+
+    await asyncio.sleep(0.002)  # 时刻变，但冷启动 cold seed 派生 round_id 应不变
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert rounds[0] == rounds[1], (
+        f"冷启动（游标 None）非空批次 round_id 必须从固定 cold seed 派生、重读不变，实际 {rounds}"
     )
+
+
+@pytest.mark.asyncio
+async def test_normal_success_writes_marker_and_advances_cursor(monkeypatch):
+    """场景①（正常）：起点 C0 读批末尾 C5、run 成功 → 写 marker(round, 终点C5)、游标进到 C5。"""
+    from app.agent.session import append_session
+    from app.world.engine import _derive_round_id, _round_already_processed
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00", act_cursor_act_id="c0",
+        )
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a5", "akao", "批末尾那条",
+                 "2026-06-04T08:05:00+08:00", "2026-06-04T08:05:00+08:00"),
+        ]
+
+    captured_msgs: dict = {}
+
+    async def fake_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        captured_msgs["msgs"] = list(messages)
+        await append_session(session_id, list(messages))
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # 游标推进到批末尾 C5。
+    assert engine_mod._test_cursor_calls == [
+        {"lane": "coe-t2", "created_at": "2026-06-04T08:05:00+08:00", "act_id": "a5"}
+    ]
+    # marker 写进 transcript，编码了 round_id（从起点 C0 派生）+ 批终点游标 (C5, a5)：
+    # 用 _round_already_processed 反查，命中并返回终点游标。
+    round_id = _derive_round_id(
+        "coe-t2",
+        cursor_created_at="2026-06-04T08:00:00+08:00",
+        cursor_act_id="c0",
+        has_acts=True,
+        now_iso="ignored",
+    )
+    hit = _round_already_processed(captured_msgs["msgs"], round_id)
+    assert hit == ("2026-06-04T08:05:00+08:00", "a5"), (
+        f"成功收口写的 marker 必须编码批终点游标 (C5, a5)，反查得 {hit}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_replay_advances_to_marker_end_and_skips(monkeypatch):
+    """场景③（崩溃）：run 成功写了 transcript+marker、但 advance 崩。
+
+    重读起点 C0、round_id=R(C0)、marker 在、终点 C5 → 推进游标到 C5、跳过 run。
+    """
+    from app.agent.session import append_session
+    from app.world.engine import _round_marker
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00", act_cursor_act_id="c0",
+        )
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a5", "akao", "批末尾",
+                 "2026-06-04T08:05:00+08:00", "2026-06-04T08:05:00+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+
+    # 预置一条 transcript：模拟"上一轮 run 成功写了带终点 C5 的 marker、但 advance 崩了"。
+    # 先算出本轮 round_id（从起点 C0 派生），手工写一条带 marker（含终点 C5）的 USER 消息。
+    round_id = engine_mod._derive_round_id(
+        "coe-t2",
+        cursor_created_at="2026-06-04T08:00:00+08:00",
+        cursor_act_id="c0",
+        has_acts=True,
+        now_iso="ignored",
+    )
+    today = datetime.now().strftime("%Y-%m-%d")
+    from app.agent.trace import make_session_id
+
+    session_id = make_session_id("coe-t2", "world", today)
+    marker = _round_marker(round_id, end_created_at="2026-06-04T08:05:00+08:00", end_act_id="a5")
+    await append_session(session_id, [Message(role=Role.USER, content=f"{marker}\n上一轮内容")])
+
+    run_calls: list = []
+
+    async def fake_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        run_calls.append(1)
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert run_calls == [], "marker 命中应跳过 run（不重推）"
+    assert engine_mod._test_cursor_calls == [
+        {"lane": "coe-t2", "created_at": "2026-06-04T08:05:00+08:00", "act_id": "a5"}
+    ], "命中时游标推进到 marker 记的终点 C5（不是当前批末尾）"
+
+
+@pytest.mark.asyncio
+async def test_crash_grow_replay_advances_to_marker_end_not_new_batch_end(monkeypatch):
+    """场景④（崩溃+扩批）：marker(R(C0),C5) 已写、advance 崩、期间新增 act C6。
+
+    重读起点 C0、批变成到 C6、但 round_id 仍=R(C0)（起点派生）→ marker 命中、终点 C5
+    → 游标推进到 **C5**（不是 C6）→ 跳过；下轮起点 C5 正常推 C6（不重不漏不重推）。
+    """
+    from app.agent.session import append_session
+    from app.world.engine import _round_marker
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00", act_cursor_act_id="c0",
+        )
+
+    # 批扩到 C6（新增 a6），但起点仍 C0。
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a5", "akao", "C5",
+                 "2026-06-04T08:05:00+08:00", "2026-06-04T08:05:00+08:00"),
+            _act(lane, "a6", "ayana", "C6（崩溃期间新增）",
+                 "2026-06-04T08:06:00+08:00", "2026-06-04T08:06:00+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+
+    round_id = engine_mod._derive_round_id(
+        "coe-t2",
+        cursor_created_at="2026-06-04T08:00:00+08:00",
+        cursor_act_id="c0",
+        has_acts=True,
+        now_iso="ignored",
+    )
+    today = datetime.now().strftime("%Y-%m-%d")
+    from app.agent.trace import make_session_id
+
+    session_id = make_session_id("coe-t2", "world", today)
+    # marker 记的终点是 C5（崩溃前那批末尾），不是现在扩出的 C6。
+    marker = _round_marker(round_id, end_created_at="2026-06-04T08:05:00+08:00", end_act_id="a5")
+    await append_session(session_id, [Message(role=Role.USER, content=f"{marker}\n上一轮")])
+
+    run_calls: list = []
+
+    async def fake_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        run_calls.append(1)
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert run_calls == [], "崩溃+扩批：marker 命中应跳过 run（不重推旧 act）"
+    assert engine_mod._test_cursor_calls == [
+        {"lane": "coe-t2", "created_at": "2026-06-04T08:05:00+08:00", "act_id": "a5"}
+    ], "命中时游标推进到 marker 记的终点 C5（不是扩出的新批末尾 C6）"
+
+
+@pytest.mark.asyncio
+async def test_marker_encodes_and_parses_end_cursor():
+    """marker 编码 round_id + 批终点游标 (created_at, act_id)，能原样解析回。"""
+    from app.world.engine import _round_already_processed, _round_marker
+
+    marker = _round_marker(
+        "round123", end_created_at="2026-06-04T08:05:00+08:00", end_act_id="a5"
+    )
+    msg = Message(role=Role.USER, content=f"{marker}\nsome content")
+
+    hit = _round_already_processed([msg], "round123")
+    assert hit == ("2026-06-04T08:05:00+08:00", "a5"), (
+        f"_round_already_processed 命中应返回终点游标，实际 {hit}"
+    )
+    miss = _round_already_processed([msg], "other-round")
+    assert miss is None, "round_id 不匹配应返回 None"
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_marker_has_no_end_cursor_hit_no_advance(monkeypatch):
+    """空批次 marker 命中 → 无终点游标、不推进（空批次本就不推进游标）。"""
+    from app.world.engine import _round_already_processed, _round_marker
+
+    marker = _round_marker("emptyround", end_created_at=None, end_act_id=None)
+    msg = Message(role=Role.USER, content=f"{marker}\nempty round")
+
+    hit = _round_already_processed([msg], "emptyround")
+    assert hit is None, "空批次 marker 命中应返回 None（无终点游标可推进）"
 
 
 def test_act_batch_text_shows_occurred_at_in_cst():
@@ -463,24 +963,6 @@ def test_act_batch_text_shows_occurred_at_in_cst():
 
 
 @pytest.mark.asyncio
-async def test_non_act_wake_does_not_read_acts(monkeypatch):
-    """heartbeat / self 唤醒不读 act 批次（只有 act 唤醒才需要呈现动作）。"""
-    calls: list = []
-
-    async def fake_list_recent_acts(*, lane, since_iso):
-        calls.append(lane)
-        return []
-
-    monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
-    _mock_run(monkeypatch)
-
-    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
-    await world_tick(WorldTick(lane="coe-t2", reason="self"))
-
-    assert calls == [], "非 act 唤醒不该读 act 批次"
-
-
-@pytest.mark.asyncio
 async def test_world_tick_seeds_round_scoped_self_wake_state(monkeypatch):
     """run 的 context.features 带 round-scoped 的待办 self-wake 容器。
 
@@ -501,8 +983,8 @@ async def test_world_tick_seeds_round_scoped_self_wake_state(monkeypatch):
 async def test_world_tick_emits_one_self_wake_from_round_state(monkeypatch):
     """循环里（模拟模型调 sleep）记下的待办 self-wake，engine 收口后只 emit 一条。
 
-    阶段 1B：这条用 heartbeat 唤醒（snapshot.next_wake_at=None → 心跳放行 gate），
-    专测「循环收口只 emit 一条 self-wake」。fire_self_wake 现在还会写 next_wake_at，
+    这条用 heartbeat 唤醒（snapshot.next_wake_at=None → 心跳放行 gate），专测
+    「循环收口只 emit 一条 self-wake」。fire_self_wake 现在还会写 next_wake_at，
     stub 掉避免碰真库。
     """
     import app.world.tools as tools_mod
@@ -554,92 +1036,6 @@ async def test_world_tick_no_sleep_emits_no_self_wake(monkeypatch):
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     assert delayed == [], "没调 sleep 就不该 emit self-wake"
-
-
-@pytest.mark.asyncio
-async def test_act_wake_round_id_stable_across_replays(monkeypatch):
-    """同一 ActPerformed（同 act_id）重投 → 同 round_id（外层重放幂等命门）。"""
-    rounds: list[str] = []
-
-    async def capture_run(
-        self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
-    ):
-        rounds.append(context.features["world_round_id"])
-        return Message(role=Role.ASSISTANT, content="")
-
-    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
-
-    tick = WorldTick(
-        lane="coe-t2",
-        reason="act",
-        act_id="act-stable-1",
-        act_persona_id="chinagi",
-        act_description="我去厨房煮咖啡",
-    )
-    await world_tick(tick)
-    await world_tick(tick)  # durable 重投同一条
-
-    assert rounds[0] == rounds[1], (
-        f"同一 act_id 重投应得同一 round_id，实际 {rounds}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_round_id_varies_with_time(monkeypatch):
-    """heartbeat/self 唤醒不会 durable 重投 → round_id 从时刻派生即可（随时间变）。"""
-    rounds: list[str] = []
-
-    async def capture_run(
-        self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
-    ):
-        rounds.append(context.features["world_round_id"])
-        return Message(role=Role.ASSISTANT, content="")
-
-    monkeypatch.setattr(engine_mod.Agent, "run", capture_run)
-
-    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
-    import asyncio
-
-    await asyncio.sleep(0.001)
-    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
-
-    assert rounds[0] != rounds[1]
-
-
-@pytest.mark.asyncio
-async def test_act_tick_carries_act_id(monkeypatch):
-    """act_to_world_tick 把 ActPerformed.act_id 透传进 ActWorldTick（闸 + round_id 派生靠它）。
-
-    act 不直接打 WorldTick，而是经一个 transient ActWorldTick 走 60s 合并闸
-    （debounce）再翻成 WorldTick。act_id 必须透传，闸合并 / round_id 派生 /
-    durable 重投幂等都靠它。
-    """
-    from app.domain.world_events import ActPerformed
-    from app.world.engine import ActWorldTick
-
-    emitted: list = []
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    monkeypatch.setattr(engine_mod, "emit", fake_emit)
-
-    await engine_mod.act_to_world_tick(
-        ActPerformed(
-            lane="coe-t2",
-            act_id="act-xyz",
-            persona_id="akao",
-            description="我去厨房",
-            occurred_at="2026-06-03T12:30:00Z",
-        )
-    )
-
-    assert isinstance(emitted[0], ActWorldTick)
-    assert emitted[0].act_id == "act-xyz"
-    assert emitted[0].lane == "coe-t2"
-    assert emitted[0].act_persona_id == "akao"
-    assert emitted[0].act_description == "我去厨房"
-    assert emitted[0].act_occurred_at == "2026-06-03T12:30:00Z"
 
 
 @pytest.mark.asyncio
@@ -718,49 +1114,11 @@ async def test_world_tick_stamps_round_marker_in_stimulus(monkeypatch):
     """喂给循环的 user 消息里带本轮 round_id 标记（turn 幂等查重靠它）。"""
     captured = _mock_run(monkeypatch)
 
-    tick = WorldTick(
-        lane="coe-t2",
-        reason="act",
-        act_id="act-marker-1",
-        act_persona_id="akao",
-        act_description="我去厨房",
-    )
-    await world_tick(tick)
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
-    now_iso = datetime.now(engine_mod._CST).isoformat()
-    round_id = engine_mod._derive_round_id(tick, now_iso)
     blob = "".join(m.text() for m in captured["messages"])
-    assert round_id in blob, "stimulus 必须带本轮 round_id 标记（幂等查重靠它）"
-
-
-@pytest.mark.asyncio
-async def test_act_replay_skips_already_processed_round(monkeypatch):
-    """同一 durable act 重投：第二次从 session 历史查到本轮标记 → 跳过，不再 run。"""
-    run_calls: list = []
-
-    async def fake_run(
-        self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
-    ):
-        run_calls.append(session_id)
-        from app.agent.session import append_session
-
-        await append_session(session_id, list(messages))
-        return Message(role=Role.ASSISTANT, content="")
-
-    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
-
-    tick = WorldTick(
-        lane="coe-t2",
-        reason="act",
-        act_id="act-replay-1",
-        act_persona_id="akao",
-        act_description="我去厨房",
-    )
-    await world_tick(tick)
-    await world_tick(tick)  # durable 重投同一条
-
-    assert len(run_calls) == 1, (
-        f"同一 act 重投不该再跑一轮（turn 幂等），实际 run {len(run_calls)} 次"
+    assert engine_mod._ROUND_MARKER_PREFIX in blob, (
+        "stimulus 必须带本轮 round_id 标记（幂等查重靠它）"
     )
 
 
@@ -817,23 +1175,3 @@ async def test_self_lock_conflict_is_swallowed(monkeypatch):
 
     async with single_flight("world:coe-t2", ttl=60):
         await world_tick(WorldTick(lane="coe-t2", reason="self"))
-
-
-@pytest.mark.asyncio
-async def test_act_lock_conflict_raises_for_reschedule(monkeypatch):
-    """act 撞锁：抛 SingleFlightConflict 让上游（debounce 闸）重排——绝不丢动作。"""
-    from app.runtime.single_flight import SingleFlightConflict, single_flight
-
-    _mock_run(monkeypatch)
-
-    async with single_flight("world:coe-t2", ttl=60):
-        with pytest.raises(SingleFlightConflict):
-            await world_tick(
-                WorldTick(
-                    lane="coe-t2",
-                    reason="act",
-                    act_id="a-conflict",
-                    act_persona_id="akao",
-                    act_description="我去厨房",
-                )
-            )

@@ -7,12 +7,12 @@
   * world 决定 sleep(seconds) 时，目标唤醒时刻 = 现实 now + seconds，在循环收口
     （fire_self_wake）写进 WorldState.next_wake_at；emit 的 self WorldTick 携带这个
     目标时刻（``target_wake_at``），到期时供判 stale。
-  * world_tick 真正推演前走「到点 gate」：
+  * world_tick 真正推演前走「到点 gate」（pull 范式下只剩 self / heartbeat 两源、
+    都走 gate；act 已退出唤醒语义）：
       - reason == self / heartbeat：走 gate。到点判定用**现实时间**（now ≥
         next_wake_at）且（对 self）它携带的目标时刻 == WorldState 当前 next_wake_at
         （没被更新覆盖）；不满足判废（log + 不推演 + 不产新 state）。next_wake_at
         为 None（从没排过）时心跳放行（别卡死首轮）。
-      - reason == act 及其它外部刺激：永远放行、不走 gate（外部刺激立刻打断长睡）。
       - gate 比较一律用现实 aware 时间，不用 world_time（world_time 会因 gate 停滞）。
 
 这些测试 mock ``Agent.run`` + stub 现成 handler，钉死 gate 机制（不是 LLM 决策）。
@@ -75,16 +75,20 @@ def _inmem_session(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_io(monkeypatch):
-    """stub 信箱对账 / act 批次读取（不碰真库）；read_world_state 由每个用例自定。"""
+    """stub 信箱对账 / act 批次读取 / 游标推进（不碰真库）；read_world_state 由每个用例自定。"""
 
     async def fake_renotify_unread(*, lane):
         return 0
 
-    async def fake_list_recent_acts(*, lane, since_iso):
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
         return []
+
+    async def fake_advance_act_cursor(*, lane, created_at, act_id):
+        return None
 
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
+    monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
 
 
 def _stub_state(monkeypatch, snapshot: WorldState | None):
@@ -246,34 +250,6 @@ async def test_self_wake_stale_target_is_gated_out(monkeypatch):
     assert captured["ran"] is False, (
         "self 携带的目标时刻与 state 当前 next_wake_at 不符（被覆盖）必须判废 stale"
     )
-
-
-# ---------------------------------------------------------------------------
-# gate：外部刺激永远放行（不走 gate）
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_act_wake_always_passes_even_during_long_sleep(monkeypatch):
-    """act 唤醒（角色 act）永远放行 —— 外部刺激立刻打断长睡，不走 gate。"""
-    future = (_now_cst() + timedelta(minutes=50)).isoformat()
-    _stub_state(
-        monkeypatch,
-        WorldState(lane="coe-t2", world_time="t", detail="d", next_wake_at=future),
-    )
-    captured = _mock_run(monkeypatch)
-
-    await world_tick(
-        WorldTick(
-            lane="coe-t2",
-            reason="act",
-            act_id="a1",
-            act_persona_id="chinagi",
-            act_description="我去厨房煮咖啡",
-        )
-    )
-
-    assert captured["ran"] is True, "act 唤醒是外部刺激，长睡中也必须立刻放行"
 
 
 # ---------------------------------------------------------------------------

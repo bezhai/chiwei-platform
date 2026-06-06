@@ -526,11 +526,11 @@ def _script_act_twice(description1="我去厨房煮咖啡", description2="再去
 
 @pytest.mark.asyncio
 async def test_two_acts_in_one_round_only_first_emits(patched, monkeypatch):
-    """一轮里模型调两次 act：只有第一个真正做事（emit 一个 ActPerformed）。
+    """一轮里模型调两次 act：只有第一个真正做事（落一条 ActPerformed）。
 
-    act_id 由本轮 event_ids 派生，同一轮两次共用同一个 act_id —— 第二个会被 durable
-    去重层静默吞掉、动作无声丢失。第一刀：本轮已做过一件事后第二次不再落 handler
-    （绝不静默吞，工具层 log + 喂回提示）。
+    act_id 由本轮 event_ids 派生，同一轮两次共用同一个 act_id —— 第二个会被
+    insert_idempotent 去重静默吞掉、动作无声丢失。第一刀：本轮已做过一件事后第二次
+    不再落 handler（绝不静默吞，工具层 log + 喂回提示）。
     """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
@@ -1742,11 +1742,11 @@ async def test_replay_skips_does_not_redo_durable_act(patched, fake_redis, monke
 # round marker（上面那层）只在 Agent.run 成功写回 transcript 后生效。它挡不住"durable
 # 工具已副作用（perform_act 写了 ActPerformed）、Agent.run 未成功写回 transcript（marker
 # 没落）→ 整轮重投"——这条没落 marker、load_session 查不到、会再进 run 第二次 perform_act。
-# 真正兜这条的是 act 的 act_id durable 去重：perform_act → emit(ActPerformed) → 该 Data
-# 的 durable 边在 consume 侧用 insert_idempotent 按 (lane, act_id) 自然键幂等。同一批唤醒
-# 重投 → 同 round_id → 同 act_id → 第二次 perform_act 产同一个 (lane, act_id) → durable
-# 去重、ActPerformed 只一条不重复。本测从真实 PG durable 持久化层（insert_idempotent）钉死
-# 这层——这正是 durable 消费端对同一条 ActPerformed redelivery 做的去重动作。
+# 真正兜这条的是 act 的 act_id 幂等：pull 范式下 perform_act → insert_idempotent(ActPerformed)
+# 直接落库，按 (lane, act_id) 自然键 ON CONFLICT DO NOTHING。同一批唤醒重投 → 同 round_id →
+# 同 act_id → 第二次 perform_act 产同一个 (lane, act_id) → 去重、ActPerformed 只一条不重复。
+# 本测从真实 PG 持久化层（insert_idempotent）钉死这层——这正是 perform_act 对同一条
+# ActPerformed 重写做的去重动作。
 # ---------------------------------------------------------------------------
 
 
@@ -1755,8 +1755,8 @@ async def test_act_id_durable_dedup_blocks_reinvoke_before_writeback(test_db):
     """act_id 去重拦住"写回前崩溃 → 重投第二次 perform_act"：同 (lane, act_id) 只落一条。
 
     模拟 act 已执行（perform_act 写 ActPerformed）但 Agent.run 未写回 transcript（marker
-    没落）→ 整轮重投（同 round_id → 同 act_id）→ act 再 perform_act 同 act_id。durable
-    消费端按 (lane, act_id) 自然键 insert_idempotent，第二次 ON CONFLICT DO NOTHING →
+    没落）→ 整轮重投（同 round_id → 同 act_id）→ act 再 perform_act 同 act_id。perform_act
+    按 (lane, act_id) 自然键 insert_idempotent，第二次 ON CONFLICT DO NOTHING →
     ActPerformed 只一条不重复（哪怕第二次 description 不同，act_id 同就去重）。
     """
     from app.domain.world_events import ActPerformed
@@ -1769,7 +1769,7 @@ async def test_act_id_durable_dedup_blocks_reinvoke_before_writeback(test_db):
     # act_id 由本轮稳定派生（重投取同值，不依赖 now / 模型）。
     act_id = "round-derived-act-id"
 
-    # 第一次：act 执行 → 写 ActPerformed（durable consume 端的 insert_idempotent）。
+    # 第一次：act 执行 → perform_act 直接 insert_idempotent 写 ActPerformed。
     n1 = await insert_idempotent(
         ActPerformed(
             lane=lane, act_id=act_id, persona_id="akao",

@@ -1,15 +1,16 @@
-"""world + life event 闭环端到端集成 — 阶段 1A act 范式联调收口（最高风险一环）.
+"""world + life event 闭环端到端集成 — pull 范式联调收口（最高风险一环）.
 
 event 骨架、world engine（推演者）、life 三姐妹（自主做事）各自单测都绿，但拼
-起来世界是死的。这个文件证明拼起来**世界真能动**，且走的是新范式的完整自主循环：
+起来世界是死的。这个文件证明拼起来**世界真能动**，且走的是 pull 范式的完整自主循环：
 
   1. world 冷启醒来 → ``update_world(detail)`` 写第一版世界叙述 →
      ``notify(recipients, observation)`` 把客观动静投给推演指定的角色 → ``sleep``。
   2. 被 notify 的角色（life）被唤醒 → 读到信箱里的 observation → ``act(description)``
-     自主做事 → 收口。
-  3. 角色 act → ``ActPerformed`` durable → 经 wiring 唤醒 world → world 读到这批 act
-     （``list_recent_acts``）→ 在推演里消化、``update_world`` 更新世界叙述 + ``notify``
-     该感知到的人。
+     自主做事 → 收口。``act`` 直接 ``insert_idempotent(ActPerformed)`` 落 PG，**不唤醒
+     world**（pull 范式）。
+  3. world 按自己 sleep 的节奏（self / 心跳）下次醒来 → 从游标批量 pull 这段时间攒下
+     的 act（``list_recent_acts``）→ 在推演里消化、``update_world`` 更新世界叙述 +
+     ``notify`` 该感知到的人 → 收口推进游标到本批末尾。
 
 真 Postgres（testcontainers），只 mock 一处 LLM：``Agent.run``——按 ``cfg.prompt_id``
 把 world / life 两条循环分流，各自在真实 ``agent_context`` 下回放脚本里的工具调用
@@ -17,18 +18,19 @@ event 骨架、world engine（推演者）、life 三姐妹（自主做事）各
 工具的真实 DB 副作用全发生。别的全走真实持久化：mock 掉持久化等于什么都没测。
 world 的 sleep 自排打桩成记录 delay，不连 RabbitMQ。
 
-新范式的命门（对应 1A 交付）：
+pull 范式的命门：
   * 完整自主循环每一棒交接成功；
   * detail 落 durable 且读回续上（world 续接认得上一版世界叙述）；
   * notify 的 observation 投进推演指定 recipient 的信箱、没投给够不着的人（信息差）；
-  * act 唤醒 world 一轮、world 读到该 act（list_recent_acts）；
+  * act 落 PG 不唤醒 world；world 下次自排醒来从游标 pull 到该 act、推完推进游标；
+  * 同一批失败重读不重复推演 / 不重复投递（round_id 从本批集合稳定派生 + turn 幂等）；
   * 不卡死：life 处在大状态、新 observation 进信箱、被唤醒能读到并换状态；
   * 全程没有 move_persona / emit_event / raise_intent / presence / room_id。
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import fakeredis.aioredis
 import pytest
@@ -197,34 +199,37 @@ def _agent_run(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _capture_act_to_pg(monkeypatch):
-    """life 的 ``act`` → ``perform_act`` 这条动作：捕获 + 落进 PG（== durable wire）.
+    """life 的 ``act`` → ``perform_act`` 这条动作：落进 PG（真原语）+ 捕获供断言.
 
-    真机里 ``wire(ActPerformed).to(act_to_world_tick).durable()`` 把 emit 的
-    ActPerformed 经 durable publish 落进 ``data_act_performed`` 表，world 被 act
-    唤醒后用 ``list_recent_acts`` 从那张表读全那一批。集成里没接 RabbitMQ，所以这里
-    把 perform_act 替成只 ``insert_idempotent`` 进 PG（== durable wire 落库用的同一个
-    framework 原语 —— durable publish 的消费端最终也是落这张表），让 world 真从 PG
-    读到这条 act。不调原 perform_act 的 emit（那会走 publish_durable 连 MQ）；act
-    唤醒 world 的路由由 wiring 测试 + 本文件的 world_tick(reason=act) 直喂覆盖。捕获
-    的 act 列表供断言。
+    pull 范式：``perform_act`` 本身就是 ``insert_idempotent(ActPerformed)`` 落
+    ``data_act_performed`` 表、不唤醒 world。这里包一层真 perform_act（不替换它的
+    行为，只在前面记一条供断言），让 world 下次自排醒来真从 PG 读到这条 act。
 
     perform_act handler 由 life_tools 模块级引用，patch 那里才拦得住。
     """
     import app.nodes.life_tools as life_tools_mod
+    from app.domain.world_events import perform_act as real_perform_act
 
     captured: list[ActPerformed] = []
 
     async def capture_perform_act(*, lane, act_id, persona_id, description, occurred_at):
-        act = ActPerformed(
+        captured.append(
+            ActPerformed(
+                lane=lane,
+                act_id=act_id,
+                persona_id=persona_id,
+                description=description,
+                occurred_at=occurred_at,
+            )
+        )
+        # 真原语落 PG（pull 范式：insert_idempotent、不唤醒），world 才读得到。
+        await real_perform_act(
             lane=lane,
             act_id=act_id,
             persona_id=persona_id,
             description=description,
             occurred_at=occurred_at,
         )
-        captured.append(act)
-        # 同 framework 原语落 PG（== durable wire 落库），world 才读得到。
-        await insert_idempotent(act)
 
     monkeypatch.setattr(life_tools_mod, "perform_act", capture_perform_act)
     engine_mod._test_captured_acts = captured  # type: ignore[attr-defined]
@@ -283,15 +288,15 @@ def _stub_persona(monkeypatch):
 async def test_full_closed_loop_world_to_life_to_world(
     world_db, _stub_persona, _agent_run, _capture_act_to_pg, monkeypatch
 ):
-    """整条 act-范式闭环从头跑到尾，断言每一棒交接成功（最致命的一条集成测试）.
+    """整条 pull-范式闭环从头跑到尾，断言每一棒交接成功（最致命的一条集成测试）.
 
     棒次：
       1. world 冷启动 → update_world 写第一版世界叙述 + notify 把一条客观动静投给
          推演指定的 akao（只 akao 够得着）。
       2. life（akao）被唤醒 → 读信箱拿到那条 observation → 想一轮（换状态）→
-         act 自主做一件事（去厨房煮咖啡）。
-      3. act 回灌 → 翻成 WorldTick(reason=act) → world 被 act 唤醒 → 从 PG 读到这条
-         act → update_world 更新世界叙述（厨房有了动静）+ notify 该感知到的人。
+         act 自主做一件事（去厨房煮咖啡）。act 直接落 PG，**不唤醒 world**。
+      3. world 按自排节奏下次醒来（这里用 heartbeat 直喂）→ 从游标 pull 到这条 act →
+         update_world 更新世界叙述（厨房有了动静）+ notify 该感知到的人 → 推进游标。
     """
     lane = "coe-loop"
 
@@ -305,7 +310,8 @@ async def test_full_closed_loop_world_to_life_to_world(
                 _notify(["akao"], "晌午的光斜照进房间"),
                 _sleep(600),
             ],
-            # 第二次唤醒（act 推演）：读到 akao 去了厨房，更新世界叙述 + 投给厨房在场的人。
+            # 第二次唤醒（pull 到 akao 的 act）：读到 akao 去了厨房，更新世界叙述 +
+            # 投给厨房在场的人。
             [
                 _update_world("akao 走进厨房，开始煮咖啡，水汽升腾。chinagi 也在厨房。"),
                 _notify(["chinagi"], "厨房传来煮咖啡的声音和香气"),
@@ -355,24 +361,18 @@ async def test_full_closed_loop_world_to_life_to_world(
     )
     assert "worldstate" not in blob and "world_state" not in blob
 
-    # --- 棒 3：act 回灌 → 翻成 WorldTick → world 被 act 唤醒推演 ---
-    # 真机里 ActPerformed durable 边 → act_to_world_tick → 合并闸 → world_act_wake →
-    # WorldTick(reason=act) → world_tick。这里直接喂回 world_tick 验业务推演（wiring
-    # 路由由 wiring 测试覆盖）。带上 act_id / act_occurred_at —— world 读 PG 的回看
-    # 窗口下界 = act_occurred_at − 90s，覆盖刚落库的这条 act。
-    act = _capture_act_to_pg[0]
-    await world_tick(
-        WorldTick(
-            lane=lane,
-            reason="act",
-            act_id=act.act_id,
-            act_persona_id=act.persona_id,
-            act_description=act.description,
-            act_occurred_at=act.occurred_at,
-        )
-    )
+    # --- 棒 3：world 自排醒来从游标 pull 到这条 act 推演 ---
+    # pull 范式：act 落 PG 不唤醒 world。world 棒 1 sleep(600) 后排了 next_wake_at。
+    # 模拟"排的那次 self 自排到点了"：把 next_wake_at 改写成刚过去的时刻，再喂一条
+    # self WorldTick 携带这个目标（== state 当前值、到点、不 stale → gate 放行）。
+    # 然后 world 从游标（仍是 None，棒 1 是空批次没推进）批量 pull 到刚落库的 act。
+    from app.world.state import set_next_wake_at
 
-    # 棒 3 交接证据：world 读到这条 act 并透给循环推演（list_recent_acts 真读到）
+    past_target = (datetime.now(engine_mod._CST) - timedelta(seconds=1)).isoformat()
+    await set_next_wake_at(lane=lane, next_wake_at=past_target)
+    await world_tick(WorldTick(lane=lane, reason="self", target_wake_at=past_target))
+
+    # 棒 3 交接证据：world 从游标读到这条 act 并透给循环推演（list_recent_acts 真读到）
     assert "煮咖啡" in world_calls[1]["messages_text"]
     # 世界叙述被更新（厨房有了动静）
     snap2 = await read_world_state(lane=lane)
@@ -380,6 +380,11 @@ async def test_full_closed_loop_world_to_life_to_world(
     # 推演产的新 observation 投给了厨房在场的 chinagi
     chinagi_unread = await list_unread_events(lane=lane, persona_id="chinagi")
     assert "厨房传来煮咖啡的声音和香气" in [e.summary for e in chinagi_unread]
+    # 棒 3 收口把游标推进到这条 act（下轮不重读）
+    snap_cursor = await read_world_state(lane=lane)
+    assert snap_cursor.act_cursor_act_id == _capture_act_to_pg[0].act_id, (
+        "推演成功收口后游标应推进到本批末尾"
+    )
 
     # 两轮 world 各调一次 sleep 定下次几时醒：第一轮 sleep(600)、第二轮 sleep(300)。
     # 都 ≤ 10 分钟保底心跳（sleep 工具上限 1h，这里更紧）。
@@ -511,36 +516,35 @@ async def test_batched_observations_consumed_in_one_life_round(
 
 
 @pytest.mark.integration
-async def test_act_gate_wakes_world_reads_recent_acts(
+async def test_world_self_wake_pulls_recent_acts_from_cursor(
     world_db, _agent_run, _capture_act_to_pg, monkeypatch
 ):
-    """act→world 合并闸后的唤醒真能把 world 踹醒、且 world 读到那批 act：
+    """pull 范式：world 自排醒来从游标 pull 到攒下的 act、推完推进游标。
 
-    act 现在走 60s debounce 合并闸：ActPerformed → act_to_world_tick → (debounce) →
-    world_act_wake → WorldTick(reason=act) → world_tick。闸的 delayed MQ 由 debounce
-    runtime 单测覆盖；这里验闸**之后**那一棒 world_act_wake 把 world 踹醒，且 world
-    从 PG 读到这批 act（list_recent_acts）透给循环推演。
+    act 落 PG 不唤醒 world（pull 范式）。world 按自己 sleep 排的 next_wake_at 到点
+    self 醒来 → 从游标（None=冷启读全既有）pull 到这条 act → 透给循环推演 → 收口
+    推进游标到这条 act。
     """
-    from app.world.engine import ActWorldTick, world_act_wake
-    from app.world.state import write_world_state
+    from app.world.state import read_world_state, set_next_wake_at, write_world_state
 
     lane = "coe-route"
 
-    # 先种一版 WorldState，让这次唤醒不是冷启动 —— 缘由走 act 分支、能验 act 内容透到。
+    # 先种一版 WorldState（含已过的 next_wake_at）：让这次 self 唤醒到点放行、不冷启。
+    past_target = (datetime.now(engine_mod._CST) - timedelta(seconds=1)).isoformat()
     await write_world_state(
         lane=lane,
         world_time="2026-06-03T14:00:00+08:00",
         detail="客厅安静，akao 在阳台边。",
     )
+    await set_next_wake_at(lane=lane, next_wake_at=past_target)
 
     world_calls = _world_llm(
         _agent_run,
-        [[_sleep(600)]],  # 推演：顺着世界、只 sleep 不广播，验被踹醒 + 读到 act
+        [[_sleep(600)]],  # 推演：顺着世界、只 sleep 不广播，验醒来 + 读到 act
     )
 
-    # 真机里 life act → emit(ActPerformed) 经 durable wire 落 PG，闸后 world 才读得到。
-    # 这里把这条 ActPerformed 用 insert_idempotent 落进 PG（== durable wire 同一个
-    # framework 原语），occurred_at 取当下（落在 90s 回看窗内），world 才真读到「看花」。
+    # life act → perform_act → insert_idempotent 落 PG（pull 范式：不唤醒）。occurred_at
+    # 取当下，world 醒来从游标读全既有时读得到。
     occurred_at = datetime.now(UTC).isoformat()
     await insert_idempotent(
         ActPerformed(
@@ -552,25 +556,20 @@ async def test_act_gate_wakes_world_reads_recent_acts(
         )
     )
 
-    # 闸后那一棒（debounce fire 后调它）：翻成 WorldTick 直接调 world_tick。
-    # 带上 act_occurred_at —— world 读 PG 的回看窗口下界 = 它 − 90s，覆盖刚落库的 act。
-    await world_act_wake(
-        ActWorldTick(
-            lane=lane,
-            act_id="a1",
-            act_persona_id="akao",
-            act_description="我走到阳台看花",
-            act_occurred_at=occurred_at,
-        )
-    )
+    # world 自排到点醒来（self 携带匹配 target、到点、不 stale → gate 放行）。
+    await world_tick(WorldTick(lane=lane, reason="self", target_wake_at=past_target))
 
-    # world_tick 真被踹醒：跑了循环、act 透给模型推演
-    assert world_calls, "act 闸→world 空转：world_tick 没被踹醒"
+    # world_tick 真醒来：跑了循环、act 从游标 pull 到透给模型推演
+    assert world_calls, "self 自排→world 空转：world_tick 没醒来"
     assert "看花" in world_calls[0]["messages_text"]
-    # world 确实从 PG 读到了这批 act（list_recent_acts 命中）
-    since = (datetime.now(UTC).replace(microsecond=0)).isoformat()
-    recent = await list_recent_acts(lane=lane, since_iso="2026-06-03T00:00:00+08:00")
-    assert [a.description for a in recent] == ["我走到阳台看花"]
+    # world 确实从 PG 读到了这批 act（list_recent_acts 命中）。返回 (act, created_at) 元组。
+    recent = await list_recent_acts(
+        lane=lane, cursor_created_at=None, cursor_act_id=None, limit=10
+    )
+    assert [a.description for a, _c in recent] == ["我走到阳台看花"]
+    # 收口把游标推进到这条 act（下轮不重读）
+    snap = await read_world_state(lane=lane)
+    assert snap.act_cursor_act_id == "a1", "推演成功收口后游标应推进到本批末尾"
 
 
 @pytest.mark.integration
@@ -620,27 +619,37 @@ async def test_world_session_continuation_second_round_carries_history(
 
 
 @pytest.mark.integration
-async def test_act_replay_no_duplicate_emit_or_append(
+async def test_same_batch_replay_no_duplicate_emit_or_append(
     world_db, _agent_run, monkeypatch
 ):
-    """重投幂等：同一 durable act 重投，world 不重复追加 transcript、不重复 notify.
+    """同批重读幂等：游标没推进时重读同一批 act，world 不重复追加 transcript、不重复 notify.
 
-    同一 ActPerformed（同 act_id）被 durable 重投两次（闸后两次 world_act_wake）：
-    第一次 world 跑一轮（update_world + notify + 写回带 round 标记的 transcript）；
-    第二次重投得同一 round_id，world_tick load_session 查到本轮标记 → 跳过，不再
-    run、不重复 notify、不重复追加 transcript（turn 幂等）。
+    pull 范式失败重读场景（必改 2 的崩溃场景③）：world 第一轮跑成功（update_world +
+    notify + 写回带 round 标记的 transcript），但游标推进没落（模拟进程在 transcript
+    写回与游标推进之间挂了——这里把 advance_act_cursor 打成 no-op 模拟）。第二轮重读
+    同一**游标起点** → 从游标起点派生得**同一** round_id → world_tick load_session
+    查到本轮标记 → 推进游标到 marker 记的终点后跳过，不再 run、不重复 notify、不重复
+    追加 transcript（turn 幂等）。
     """
-    from app.world.engine import ActWorldTick, world_act_wake
-    from app.world.state import write_world_state
+    from app.world.state import set_next_wake_at, write_world_state
 
     lane = "coe-replay"
 
-    # 非冷启动，让 act 推演能真 update_world + notify
+    # 非冷启动 + 已过 next_wake_at（让两次 self 唤醒都到点放行），让 act 推演能真
+    # update_world + notify。
+    past_target = (datetime.now(engine_mod._CST) - timedelta(seconds=1)).isoformat()
     await write_world_state(
         lane=lane, world_time="2026-06-03T14:00:00+08:00", detail="客厅安静。"
     )
+    await set_next_wake_at(lane=lane, next_wake_at=past_target)
 
-    # 先落进 PG 这条 act，world 醒来读得到。occurred_at 取当下落在回看窗内。
+    # 游标推进打成 no-op（模拟"transcript 写回成功、游标推进没落"），两轮都读同一批。
+    async def noop_advance(*, lane, created_at, act_id):
+        return None
+
+    monkeypatch.setattr(engine_mod, "advance_act_cursor", noop_advance)
+
+    # 先落进 PG 这条 act，world 醒来从游标读得到。occurred_at 取当下。
     occurred_at = datetime.now(UTC).isoformat()
     await insert_idempotent(
         ActPerformed(
@@ -653,7 +662,7 @@ async def test_act_replay_no_duplicate_emit_or_append(
     )
 
     # world 这一轮：update_world + notify 一条 observation 给 chinagi。只注册一轮脚本——
-    # 若第二次重投也跑一轮，world_rounds 会被 pop 空、第二轮变成"无脚本空跑"也仍会
+    # 若第二次重读也跑一轮，world_rounds 会被 pop 空、第二轮变成"无脚本空跑"也仍会
     # 写回，所以这里用"第二次不该再跑"来证幂等（脚本只够一轮）。
     _world_llm(
         _agent_run,
@@ -666,26 +675,19 @@ async def test_act_replay_no_duplicate_emit_or_append(
         ],
     )
 
-    wake = ActWorldTick(
-        lane=lane,
-        act_id="act-replay-x",
-        act_persona_id="akao",
-        act_description="我去厨房煮咖啡",
-        act_occurred_at=occurred_at,
-    )
-    await world_act_wake(wake)
+    await world_tick(WorldTick(lane=lane, reason="self", target_wake_at=past_target))
     # chinagi 收到那条 observation 一次
     first = await list_unread_events(lane=lane, persona_id="chinagi")
     assert [e.summary for e in first] == ["厨房传来煮咖啡的声音"]
 
-    # 重投同一条 act（同 act_id → 同 round_id）：应被 turn 幂等跳过
-    await world_act_wake(wake)
+    # 游标没推进 → 第二次重读同一游标起点（同起点 → 同 round_id）：应被 turn 幂等跳过
+    await world_tick(WorldTick(lane=lane, reason="self", target_wake_at=past_target))
     second = await list_unread_events(lane=lane, persona_id="chinagi")
     # observation 没被重复投（仍只一条；event_id 幂等 + turn 幂等双保险）
     assert [e.summary for e in second] == ["厨房传来煮咖啡的声音"]
-    # 只跑过一轮（第二次重投没再 run）—— world_calls 只有一条
+    # 只跑过一轮（第二次重读没再 run）—— world_calls 只有一条
     assert len(_agent_run.world_calls) == 1, (
-        f"同一 act 重投不该再跑一轮 world，实际 {len(_agent_run.world_calls)} 次"
+        f"同一批 act 重读不该再跑一轮 world，实际 {len(_agent_run.world_calls)} 次"
     )
 
 
