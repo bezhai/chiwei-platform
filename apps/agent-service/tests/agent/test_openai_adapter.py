@@ -1010,7 +1010,7 @@ async def test_azure_complete_sends_cache_retention_and_session_id(mock_sdk):
     )
 
     sent = mock_sdk.azure_instance.last_create_kwargs
-    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert sent["extra_body"]["prompt_cache_retention"] == "24h"
     assert json.loads(sent["extra_headers"]["extra"]) == {
         "session_id": "coe-world-life2:world:2026-06-06"
     }
@@ -1031,7 +1031,7 @@ async def test_azure_complete_retention_without_session_id(mock_sdk):
     await adapter.complete([Message(role=Role.USER, content="hi")])
 
     sent = mock_sdk.azure_instance.last_create_kwargs
-    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert sent["extra_body"]["prompt_cache_retention"] == "24h"
     assert "extra_headers" not in sent
 
 
@@ -1117,7 +1117,7 @@ async def test_azure_stream_sends_cache_params(mock_sdk):
         pass
 
     sent = mock_sdk.azure_instance.last_create_kwargs
-    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert sent["extra_body"]["prompt_cache_retention"] == "24h"
     assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "sess-1"}
 
 
@@ -1143,6 +1143,6 @@ async def test_azure_cache_params_merge_into_existing_extra(mock_sdk):
 
     sent = mock_sdk.azure_instance.last_create_kwargs
     assert sent["extra_body"]["foo"] == 1
-    assert sent["extra_body"]["prompt_cache_retention"] == "3600s"
+    assert sent["extra_body"]["prompt_cache_retention"] == "24h"
     assert sent["extra_headers"]["X-Trace"] == "t"
     assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "s"}

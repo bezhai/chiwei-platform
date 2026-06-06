@@ -65,9 +65,10 @@ logger = logging.getLogger(__name__)
 _AZURE_API_VERSION = "2024-08-01-preview"
 
 # 字节 GPT openapi 网关做隐式 prompt cache:请求带上 retention 窗口(body)+ 稳定的
-# session_id(``extra`` JSON header),让长而稳定的前缀跨唤醒复用。retention 取 1h,
-# 跨过 world 10~30min 的唤醒间隔——默认窗口太短,下次醒来缓存已过期就是 0 命中。
-_PROMPT_CACHE_RETENTION = "3600s"
+# session_id(``extra`` JSON header),让长而稳定的前缀跨唤醒复用。网关只接受枚举值
+# ``in_memory`` / ``24h``(传 "3600s" 这类秒数会被 400 拒绝,param 校验);取 24h
+# 远超 world 10~30min 的唤醒间隔——默认窗口太短,下次醒来缓存已过期就是 0 命中。
+_PROMPT_CACHE_RETENTION = "24h"
 
 
 class OpenAIAdapter(ModelClient):
