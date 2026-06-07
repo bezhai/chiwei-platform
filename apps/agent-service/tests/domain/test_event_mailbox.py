@@ -47,7 +47,6 @@ async def test_deliver_then_read_full_loop(mailbox_db):
         event_id="e1",
         kind="ambient",
         source="world",
-        room_id="kitchen",
         summary="水壶在响",
         occurred_at="2026-06-03T08:00:00Z",
     )
@@ -59,8 +58,75 @@ async def test_deliver_then_read_full_loop(mailbox_db):
     assert ev.event_id == "e1"
     assert ev.kind == "ambient"
     assert ev.source == "world"
-    assert ev.room_id == "kitchen"
     assert ev.summary == "水壶在响"
+
+
+@pytest.mark.integration
+async def test_deliver_then_read_surroundings_kind(mailbox_db):
+    """周遭切片（kind=surroundings）durable 投递 → 读回，kind 字段如实保留（1C Task 2）。
+
+    world 五官用 sense 投 kind=surroundings 的周遭切片；life 读回时按 kind 分层呈现
+    （周遭进「此刻你周遭」段、动静进动静段），所以 kind 必须在 durable round-trip 里
+    如实保留、不被归一成 ambient。
+    """
+    await deliver_event(
+        lane="coe-t1",
+        persona_id="ayana",
+        event_id="s1",
+        kind="surroundings",
+        source="world",
+        summary="你在客厅写作业，厨房飘来香味。",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="ayana")
+
+    assert len(unread) == 1
+    assert unread[0].kind == "surroundings"
+    assert unread[0].summary == "你在客厅写作业，厨房飘来香味。"
+
+
+@pytest.mark.integration
+async def test_deliver_then_read_speech_kind(mailbox_db):
+    """对话原话（kind=speech）durable 投递 → 读回，kind/source 如实保留（1C Task 3）。
+
+    chat 把原话直投收件人信箱（kind=speech、source=说话者 persona_id）。life 读回时
+    按 kind 分层呈现成「X 对你说：原话」，所以 kind 与 source 必须 durable round-trip
+    保留、不被归一成 ambient。
+    """
+    await deliver_event(
+        lane="coe-t1",
+        persona_id="ayana",
+        event_id="sp1",
+        kind="speech",
+        source="akao",
+        summary="绫奈姐姐你在做什么好吃的呀",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="ayana")
+
+    assert len(unread) == 1
+    assert unread[0].kind == "speech"
+    assert unread[0].source == "akao", "speech 的 source 是说话者（渲染「X 对你说」要用）"
+    assert unread[0].summary == "绫奈姐姐你在做什么好吃的呀", "原话原样保留"
+
+
+def test_event_envelope_has_no_room_id_field():
+    """room_id 已物理删除：EventEnvelope 不再有这个字段。
+
+    room_id 是当初为静态 presence 预留、从不读、恒为空的字段（1C 范式：在场靠
+    world 自然语言推演、绝不建结构化在场名单）。物理删除杜绝后人顺手填它复活
+    presence。这条钉死字段不存在。
+    """
+    assert "room_id" not in EventEnvelope.model_fields
+
+
+def test_deliver_event_rejects_room_id_kwarg():
+    """deliver_event 不再接受 room_id 参数（投递面已无 presence 锚点）。"""
+    import inspect
+
+    assert "room_id" not in inspect.signature(deliver_event).parameters
 
 
 @pytest.mark.integration
@@ -68,7 +134,7 @@ async def test_mark_read_removes_from_unread(mailbox_db):
     """标已读后，那条 event 不再出现在未读集里。"""
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
     batch = await list_unread_events(lane="coe-t1", persona_id="akao")
@@ -90,12 +156,12 @@ async def test_lane_isolation_on_mailbox(mailbox_db):
     """
     await deliver_event(
         lane="prod", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="prod-evt",
+        kind="ambient", source="world", summary="prod-evt",
         occurred_at="2026-06-03T08:00:00Z",
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="coe-evt",
+        kind="ambient", source="world", summary="coe-evt",
         occurred_at="2026-06-03T08:00:00Z",
     )
 
@@ -118,7 +184,7 @@ async def test_persona_isolation_on_mailbox(mailbox_db):
     """信息差底座：投给 akao 的 event,chinagi 读不到。"""
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="给赤尾的",
+        kind="ambient", source="world", summary="给赤尾的",
         occurred_at="2026-06-03T08:00:00Z",
     )
 
@@ -142,12 +208,12 @@ async def test_new_events_during_think_round_stay_unread(mailbox_db):
     # 1. 本轮开始前已有 e1, e2
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e2",
-        kind="ambient", source="world", room_id="", summary="s2",
+        kind="ambient", source="world", summary="s2",
         occurred_at="2026-06-03T08:00:01Z",
     )
 
@@ -159,7 +225,7 @@ async def test_new_events_during_think_round_stay_unread(mailbox_db):
     # 2. life "想一轮"期间，world 又投进来一条 e3
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e3",
-        kind="ambient", source="world", room_id="", summary="想的时候进来的",
+        kind="ambient", source="world", summary="想的时候进来的",
         occurred_at="2026-06-03T08:00:05Z",
     )
 
@@ -182,7 +248,7 @@ async def test_deliver_is_idempotent_on_redelivery(mailbox_db):
     for _ in range(3):
         await deliver_event(
             lane="coe-t1", persona_id="akao", event_id="e1",
-            kind="ambient", source="world", room_id="", summary="s1",
+            kind="ambient", source="world", summary="s1",
             occurred_at="2026-06-03T08:00:00Z",
         )
 
@@ -195,12 +261,12 @@ async def test_unread_ordered_by_occurred_at(mailbox_db):
     """未读批次按发生时间升序返回(life 按时间顺序消化)。"""
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="late",
-        kind="ambient", source="world", room_id="", summary="后发生",
+        kind="ambient", source="world", summary="后发生",
         occurred_at="2026-06-03T09:00:00Z",
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="early",
-        kind="ambient", source="world", room_id="", summary="先发生",
+        kind="ambient", source="world", summary="先发生",
         occurred_at="2026-06-03T08:00:00Z",
     )
 
@@ -231,17 +297,17 @@ async def test_unread_mixed_format_ordered_by_real_instant(mailbox_db):
 
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="iso_late",
-        kind="ambient", source="world", room_id="", summary="最晚-ISO",
+        kind="ambient", source="world", summary="最晚-ISO",
         occurred_at="2026-06-03T23:00:00+00:00",
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="unix_mid",
-        kind="external", source="user:u1", room_id="", summary="中间-Unix毫秒",
+        kind="external", source="user:u1", summary="中间-Unix毫秒",
         occurred_at=str(unix_mid_ms),
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="iso_early",
-        kind="ambient", source="world", room_id="", summary="最早-ISO",
+        kind="ambient", source="world", summary="最早-ISO",
         occurred_at="2026-06-03T00:00:00+00:00",
     )
 
@@ -263,13 +329,13 @@ async def test_list_personas_with_unread_only_returns_unread(mailbox_db):
     # akao：有一条未读 event（模拟敲门曾失败，envelope 在但没人读）
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="给赤尾的",
+        kind="ambient", source="world", summary="给赤尾的",
         occurred_at="2026-06-03T08:00:00Z",
     )
     # chinagi：投了一条，但本轮已全部读过（envelope 有、read 也有）
     await deliver_event(
         lane="coe-t1", persona_id="chinagi", event_id="e2",
-        kind="ambient", source="world", room_id="", summary="给千凪的",
+        kind="ambient", source="world", summary="给千凪的",
         occurred_at="2026-06-03T08:00:01Z",
     )
     await mark_events_read(lane="coe-t1", persona_id="chinagi", event_ids=["e2"])
@@ -287,18 +353,18 @@ async def test_list_personas_with_unread_distinct_and_lane_scoped(mailbox_db):
     # akao 在 coe-t1 有两条未读 → distinct 后只算一个 persona
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e2",
-        kind="ambient", source="world", room_id="", summary="s2",
+        kind="ambient", source="world", summary="s2",
         occurred_at="2026-06-03T08:00:01Z",
     )
     # 另一 lane 有未读 → 不该出现在 coe-t1 的对账结果里
     await deliver_event(
         lane="prod", persona_id="chinagi", event_id="e3",
-        kind="ambient", source="world", room_id="", summary="prod-evt",
+        kind="ambient", source="world", summary="prod-evt",
         occurred_at="2026-06-03T08:00:02Z",
     )
 
@@ -320,12 +386,12 @@ async def test_renotify_unread_reemits_for_unread_personas(mailbox_db, monkeypat
     # akao：有未读（敲门曾失败的场景）；chinagi：已读完
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
     await deliver_event(
         lane="coe-t1", persona_id="chinagi", event_id="e2",
-        kind="ambient", source="world", room_id="", summary="s2",
+        kind="ambient", source="world", summary="s2",
         occurred_at="2026-06-03T08:00:01Z",
     )
     await mark_events_read(lane="coe-t1", persona_id="chinagi", event_ids=["e2"])
@@ -372,7 +438,7 @@ async def test_stranded_event_recovered_by_renotify(mailbox_db, monkeypatch):
     with pytest.raises(RedisConnectionError):
         await deliver_event(
             lane="coe-t1", persona_id="akao", event_id="e1",
-            kind="ambient", source="world", room_id="kitchen",
+            kind="ambient", source="world",
             summary="厨房飘来饭菜香", occurred_at="2026-06-03T12:00:00Z",
         )
 

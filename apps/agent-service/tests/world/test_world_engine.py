@@ -962,6 +962,49 @@ def test_act_batch_text_shows_occurred_at_in_cst():
     assert "去厨房做饭" in text and "出门上学" in text
 
 
+# ---------------------------------------------------------------------------
+# 1C Task 3：world 低成本感知链路（双轨）—— world 凭元信息反映氛围、绝不读对话原话
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_world_sees_conversation_meta_not_original_speech(monkeypatch):
+    """② world 低成本感知链路（承重红线）：world 拿到的是对话元信息、绝不含逐句原话。
+
+    chat 走双轨：原话直投收件人信箱（kind=speech、不经 world），同时给 world 一条
+    **不含原话**的低成本元信息（复用 act 流）。这条元信息以 ActPerformed 落库、world
+    醒来 pull 它，让 world 在客观叙事里反映「有人在交谈」（隔壁第三人感知到「厨房有
+    人在交谈」）。命门：world 醒来读到的批次里只有元信息事实、绝无对话逐句原话。
+
+    本测模拟 world pull 到一条"对话发生"的元信息 act（description 是元信息、不带原话）
+    + 断言：① world 的输入里**没有**对话逐句原话（红线钉死）；② world 输入里**有**
+    「有人在交谈」这类元信息（让它能反映氛围）。
+    """
+    secret_line = "绫奈姐姐你在做什么好吃的呀这句是绝密原话"
+
+    async def fake_list_recent_acts(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            # chat 给 world 的低成本元信息：只有"和谁交谈"的事实，绝无逐句原话。
+            _act(lane, "c1", "akao", "我和 ayana 说了几句话",
+                 "2026-06-04T12:30:00+08:00", "2026-06-04T12:30:00+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 承重红线：world 的输入里绝不出现对话逐句原话。
+    assert secret_line not in blob, (
+        "world 绝不读对话原话——pull 到的批次 / 喂给 world 的 context 里不能有逐句原话"
+    )
+    # world 凭元信息知道"有人在交谈"（提到交谈对象），能据此反映氛围。
+    assert "交谈" in blob or "说了几句" in blob, (
+        "world 应从元信息知道有一场对话在发生（反映氛围），即便读不到原话"
+    )
+
+
 @pytest.mark.asyncio
 async def test_world_tick_seeds_round_scoped_self_wake_state(monkeypatch):
     """run 的 context.features 带 round-scoped 的待办 self-wake 容器。
@@ -1044,9 +1087,39 @@ async def test_world_instruction_demands_objective_projection():
     instruction = engine_mod.world_loop_instruction()
     assert "客观" in instruction
     assert ("情绪" in instruction) or ("主观" in instruction) or ("解读" in instruction)
-    # 三工具范式：提到她能用工具行动
+    # 四工具范式：提到她能用工具行动
     assert ("notify" in instruction) or ("update_world" in instruction)
     assert ("sleep" in instruction) or ("再看" in instruction)
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_enumerates_sense_tool():
+    """必改：world_loop_instruction 必须把 1C 新增的 sense（五官）枚举进工具清单。
+
+    Task2 给 world 加了 sense 工具（per-person 投周遭客观切片）。但循环指令若还写
+    「三个工具」、只枚举 update_world / notify / sleep，真实模型就不知道有 sense、
+    根本不会调 —— Task2 的「world 当五官投周遭」形同虚设。所以指令必须：
+
+      * 明确提到 sense 工具（按名字枚举）；
+      * 工具数从「三个」改成「四个」（不能再写「三个工具」）；
+      * 引导 world 为单个 recipient 逐角色推演「此刻她在哪、谁在身边、环境怎样」的
+        客观周遭切片并 sense 给她，且守信息差（每人只拿到她够得着的那份）。
+    """
+    instruction = engine_mod.world_loop_instruction()
+    assert "sense" in instruction, "循环指令必须枚举 sense 工具（否则模型不会调它）"
+    assert "三个工具" not in instruction, "工具已是四个，指令不能再写「三个工具」"
+    assert "四个工具" in instruction, "工具清单应明确是四个（含 sense）"
+    # sense 是逐角色（per-person）投周遭客观切片：引导逐角色 + 信息差
+    assert ("逐角色" in instruction) or ("每个角色" in instruction) or ("单个" in instruction), (
+        "sense 引导应说明是逐角色（per-person）投周遭切片"
+    )
+    assert ("信息差" in instruction) or ("够得着" in instruction), (
+        "sense 引导应守信息差（每人只拿到她够得着的那份）"
+    )
+    # 周遭切片的口径：此刻她在哪 / 谁在身边 / 环境怎样
+    assert ("周遭" in instruction) or ("身边" in instruction), (
+        "sense 引导应说明投的是她此刻的周遭客观切片"
+    )
 
 
 @pytest.mark.asyncio
@@ -1095,7 +1168,7 @@ async def test_world_instruction_has_no_world_setting():
     """world_loop_instruction 是 USER 层行动指令，不该描述世界设定 / 谁是谁 / 作息。
 
     世界长什么样 / 家庭布局 / 三姐妹是谁 / 几点干嘛这类设定性内容归 system prompt
-    一处；USER 层指令只讲三个工具（notify/update_world/sleep）的说明 + 本轮怎么做。
+    一处；USER 层指令只讲四个工具（notify/update_world/sense/sleep）的说明 + 本轮怎么做。
     """
     instruction = engine_mod.world_loop_instruction()
     # 不该出现三姐妹的名字 / 年龄 / 作息坐标这类世界设定内容
@@ -1104,8 +1177,9 @@ async def test_world_instruction_has_no_world_setting():
             f"USER 层指令不该描述世界设定（谁是谁）：{setting!r}"
         )
     assert "作息" not in instruction, "USER 层指令不该描述作息（归 system 一处）"
-    # 仍是三工具行动指令
+    # 仍是四工具行动指令（含 1C 新增的 sense 五官）
     assert ("notify" in instruction) and ("update_world" in instruction)
+    assert "sense" in instruction
     assert "sleep" in instruction
 
 

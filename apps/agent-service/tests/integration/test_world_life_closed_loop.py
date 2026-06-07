@@ -71,6 +71,10 @@ def _notify(recipients: list[str], observation: str) -> tuple[str, dict]:
     return ("notify", {"recipients": recipients, "observation": observation})
 
 
+def _sense(recipient: str, surroundings: str) -> tuple[str, dict]:
+    return ("sense", {"recipient": recipient, "surroundings": surroundings})
+
+
 def _sleep(seconds: int) -> tuple[str, dict]:
     return ("sleep", {"seconds": seconds})
 
@@ -88,6 +92,10 @@ def _update_life(current_state: str, response_mood: str, activity_type: str) -> 
 
 def _act(description: str) -> tuple[str, dict]:
     return ("act", {"description": description})
+
+
+def _chat(recipient: str, content: str) -> tuple[str, dict]:
+    return ("chat", {"recipient": recipient, "content": content})
 
 
 @pytest.fixture(autouse=True)
@@ -415,6 +423,147 @@ async def test_info_gap_notify_only_reaches_recipients(world_db, _agent_run, mon
     akao_unread = await list_unread_events(lane=lane, persona_id="akao")
     assert [e.summary for e in chinagi_unread] == ["厨房飘来煎蛋的香味"]
     assert akao_unread == []
+
+
+@pytest.mark.integration
+async def test_world_senses_per_recipient_surroundings_with_info_gap(
+    world_db, _stub_persona, _agent_run, monkeypatch
+):
+    """world 五官（1C Task 2）：逐角色投不同周遭切片，每人只拿到自己那份（信息差）。
+
+    world 有全局视角，但用 sense 逐角色投——给客厅的绫奈投她的客厅周遭、给厨房的赤尾
+    投她的厨房周遭。切片由 world 逐角色推演产出（不是按某结构裁的全局），每人信箱里
+    只有投给她的那份：
+
+      * 正例：绫奈拿到她的客厅切片、赤尾拿到她的厨房切片，且 kind=surroundings。
+      * 负例（信息差命门）：睡着的千凪没被 sense → 她信箱空，不会收到任何旁白式全局
+        世界信息；绫奈的切片里是她够得着的（厨房飘来的香味），赤尾的切片是厨房视角，
+        两份互不为对方的全局视角——代码层只把投给某人的 event 放进她信箱，world 全局
+        状态绝不整个喂给某个 life。
+    """
+    from app.domain.world_events import EVENT_KIND_SURROUNDINGS
+
+    lane = "coe-sense"
+    _world_llm(
+        _agent_run,
+        [
+            [
+                _update_world("午后。绫奈在客厅写作业，赤尾在厨房做饭，千凪在卧室睡觉。"),
+                _sense("ayana", "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。"),
+                _sense("akao", "你在厨房做饭，灶上煮着汤，客厅那头隐约有翻书的声音。"),
+                _sleep(600),
+            ]
+        ],
+    )
+
+    await world_tick(WorldTick(lane=lane, reason="heartbeat"))
+
+    # 正例：绫奈、赤尾各拿到自己那份周遭切片（kind=surroundings）
+    ayana_unread = await list_unread_events(lane=lane, persona_id="ayana")
+    akao_unread = await list_unread_events(lane=lane, persona_id="akao")
+    assert [e.summary for e in ayana_unread] == [
+        "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。"
+    ]
+    assert [e.kind for e in ayana_unread] == [EVENT_KIND_SURROUNDINGS]
+    assert [e.summary for e in akao_unread] == [
+        "你在厨房做饭，灶上煮着汤，客厅那头隐约有翻书的声音。"
+    ]
+    assert [e.kind for e in akao_unread] == [EVENT_KIND_SURROUNDINGS]
+
+    # 负例（信息差命门）：睡着的千凪没被 sense → 信箱空，没有旁白式全局世界信息
+    assert await list_unread_events(lane=lane, persona_id="chinagi") == []
+
+    # 信息差命门：绫奈的切片不含赤尾那份的厨房视角（各拿各的切片，全局不反向泄露）
+    ayana_blob = ayana_unread[0].summary
+    assert "客厅那头隐约有翻书的声音" not in ayana_blob
+
+
+@pytest.mark.integration
+async def test_world_never_reads_chat_original_speech_end_to_end(
+    world_db, _stub_persona, _agent_run, _capture_act_to_pg, monkeypatch
+):
+    """端到端「world 不读对话原话」（codex 建议 3，真 PG 集成、非 mock 假测）.
+
+    现有 world 不读原话的单测是 mock 假测（手造一条不含原话的 meta act 再断言）。这里
+    走真链路证承重红线在真 PG 上成立：
+
+      1. life（akao）真调 ``chat(ayana, 绝密原话)`` —— 双轨真发生：原话经真实 deliver_event
+         直投 ayana 信箱（speech）；不含原话的 meta 经真实 perform_act 落进 PG ActPerformed。
+      2. 断言 PG 里的 ActPerformed.description **不含**对话原话（只「我和 ayana 说了几句话」）。
+      3. world 自排醒来从游标真 pull（``list_recent_acts``）→ 断言 world 读到的批次 /
+         喂给 world 的 stimulus **不含**对话原话（红线在真链路上钉死）。
+      4. 反向证据：原话确实送达了 ayana 信箱（说明红线不是靠"根本没投递"蒙混）。
+    """
+    from app.world.state import read_world_state, set_next_wake_at, write_world_state
+
+    lane = "coe-chat-redline"
+    secret_line = "绫奈姐姐你在做什么好吃的呀这句是绝密对话原话"
+
+    # 先种一版 WorldState（含已过 next_wake_at）：让随后的 world self 唤醒到点放行、不冷启。
+    past_target = (datetime.now(engine_mod._CST) - timedelta(seconds=1)).isoformat()
+    await write_world_state(
+        lane=lane, world_time="2026-06-03T14:00:00+08:00", detail="厨房里有人在忙活。"
+    )
+    await set_next_wake_at(lane=lane, next_wake_at=past_target)
+
+    # --- life（akao）真调 chat：原话直投 ayana、不含原话的 meta 落 PG ---
+    # world notify 一条动静起头唤醒 akao（用真实 world notify 投进她信箱）。
+    async def _notify_akao(observation: str) -> None:
+        from app.agent.context import AgentContext
+        from app.agent.runtime_context import agent_context
+        from app.world.tools import FEATURE_SELF_WAKE, notify
+
+        wctx = AgentContext(
+            features={
+                "world_lane": lane,
+                "world_round_id": f"seed-{observation}",
+                FEATURE_SELF_WAKE: {},
+            }
+        )
+        with agent_context(wctx):
+            await notify.invoke({"recipients": ["akao"], "observation": observation})
+
+    await _notify_akao("厨房飘来做饭的香味")
+
+    _agent_run.life_round = [_chat("ayana", secret_line)]
+    await lw.life_wake_node(EventArrived(lane=lane, persona_id="akao"))
+
+    # 棒 1 真链路证据：原话直投了 ayana 信箱（红线不是靠"没投递"蒙混）。
+    ayana_unread = await list_unread_events(lane=lane, persona_id="ayana")
+    assert secret_line in [e.summary for e in ayana_unread], (
+        "对话原话应真送达 ayana 信箱（speech 直投）"
+    )
+
+    # 棒 2 真链路证据：PG ActPerformed（chat 的 world meta）里绝不含对话原话。
+    meta_acts = await list_recent_acts(
+        lane=lane, cursor_created_at=None, cursor_act_id=None, limit=10
+    )
+    assert meta_acts, "chat 应落一条不含原话的 world meta act 进 PG"
+    for a, _created in meta_acts:
+        assert secret_line not in a.description, (
+            "承重红线：PG ActPerformed.description 绝不含对话原话（只『和谁交谈』的事实）"
+        )
+    assert any("ayana" in a.description for a, _c in meta_acts), (
+        "meta 应记『和 ayana 交谈』让 world 能反映氛围"
+    )
+
+    # --- world 自排醒来从游标真 pull 这条 meta act ---
+    world_calls = _world_llm(_agent_run, [[_update_world("厨房那头有人在低声交谈。"), _sleep(600)]])
+    await world_tick(WorldTick(lane=lane, reason="self", target_wake_at=past_target))
+
+    # 棒 3 承重红线：world 真 pull 到的批次 / 喂给 world 的 stimulus 绝不含对话原话。
+    assert world_calls, "world self 唤醒应真醒来跑一轮"
+    world_blob = world_calls[0]["messages_text"]
+    assert secret_line not in world_blob, (
+        "world 绝不读对话原话——真 pull 到的批次 / 喂给 world 的 context 里不能有逐句原话"
+    )
+    # world 仍从 meta 知道「有人在交谈」（反映氛围），即便读不到原话。
+    assert ("交谈" in world_blob) or ("说了几句" in world_blob), (
+        "world 应从 meta 知道有一场对话在发生（反映氛围）"
+    )
+    # world 推演成功收口（世界叙述被更新），佐证它真消化了这条 meta。
+    snap = await read_world_state(lane=lane)
+    assert "低声交谈" in snap.detail
 
 
 @pytest.mark.integration

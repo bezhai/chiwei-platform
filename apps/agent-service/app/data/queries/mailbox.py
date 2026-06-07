@@ -69,7 +69,6 @@ async def deliver_event(
     occurred_at: str,
     kind: str = EVENT_KIND_AMBIENT,
     source: str = "world",
-    room_id: str = "",
 ) -> int:
     """往 ``(lane, persona_id)`` 的信箱投一条 event,投成功后敲门唤醒 life。
 
@@ -86,7 +85,6 @@ async def deliver_event(
             event_id=event_id,
             kind=kind,
             source=source,
-            room_id=room_id,
             summary=summary,
             occurred_at=occurred_at,
         )

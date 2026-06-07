@@ -43,12 +43,21 @@ from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
 
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
+from app.data.queries.mailbox import deliver_event
 from app.domain.life_state import save_life_state, set_life_next_wake_at
-from app.domain.world_events import perform_act
+from app.domain.world_events import EVENT_KIND_SPEECH, perform_act
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
 
 logger = logging.getLogger(__name__)
+
+# 固定角色通讯录：三姐妹互为固定联系人（稳定身份 id，不是「此刻在场的人」清单）。
+# chat 的收件人由角色自选、必须是这里的已知身份——这是**身份存在性**的机制校验
+# （这个 id 存不存在），**不是「判在不在场」**：在不在身边由 world 客观叙事自然体现、
+# 系统不判。收件人不在通讯录时 chat 报错喂回模型重调（对称 schedule 超限喂回），
+# 不投递。三姐妹是稳定阵容，先用模块常量承载（不为未来扩成动态联系人表预先抽象——
+# 真有第四个角色再说，业务代码不是 SDK）。
+SISTERS_CONTACTS = frozenset({"akao", "chinagi", "ayana"})
 
 # schedule 下限：她自排最短间隔（秒）。低于下限报错喂回模型重调（跟上限超限处理对称、
 # 不静默夹），防她排得太密（像神经质每分钟醒一次想一轮）。这是机制护栏（决定何时
@@ -101,6 +110,14 @@ def build_life_tools(
     # 见 app/world/engine.py 的 rpartition 解析）。
     act_seq = 0
 
+    # 本轮已**确认成功落库**的 chat 件数（round-scoped 序号，对称 act_seq）。chat 同样
+    # 整轮重投幂等、一轮多次各自独立——per-chat 键从 (base act_id, "chat:N" 序号) 派生。
+    # **与 act_seq 分开计数 + 用 "chat:" 前缀分命名空间**：chat 和 act 共用同一个 base
+    # act_id，若共用计数 / 共用 seed 格式，一件 chat 和一件 act 可能撞出同一 per-id。
+    # 分开计数 + 前缀让 chat 的键空间与 act 的键空间天然不相交。命门同 act_seq：只在
+    # 落库成功后才推进（失败重试用同一序号 → 同一对键 → 下游 durable 去重只落一条）。
+    chat_seq = 0
+
     @tool_error("更新此刻状态失败")
     async def update_life_state(
         current_state: str,
@@ -132,15 +149,17 @@ def build_life_tools(
 
     @tool_error("做这件事失败")
     async def act_tool(description: str) -> str:
-        """你做了一件会在你之外的世界留下痕迹的事。
+        """你做了一件会在你之外的世界留下痕迹的事（**做事，不是说话**）。
+
+        说话用 chat，不用 act：想对谁说话（当面或发消息）一律走 chat 工具。act
+        只管「做了一件事」——去厨房、端饭菜出去摆上桌、出门、走到谁面前、弄出动静。
 
         多数时候你只是经历这一刻——感知到周遭的动静、心里有点波澜，更新一下此刻
         状态（update_life_state）就够了，不用 act。只有当你做的事会在你之外留下
-        痕迹、被够得着的人感知到时才 act：端着饭菜出去摆上桌、出门、走到谁面前、
-        弄出动静。act 是"你做了"，不是"你请求"——你做了，世界会推演它的客观结果，
-        旁边够得着的人迟早会察觉到（世界怎么回应、谁注意到，要等它真在你之外发生，
-        你当场未必知道）。只在心里转了一下、顺耳听过刚才的动静、没在外面留下任何
-        痕迹，就不算，不用 act。
+        痕迹、被够得着的人感知到时才 act。act 是"你做了"，不是"你请求"——你做了，
+        世界会推演它的客观结果，旁边够得着的人迟早会察觉到（世界怎么回应、谁注意到，
+        要等它真在你之外发生，你当场未必知道）。只在心里转了一下、顺耳听过刚才的
+        动静、没在外面留下任何痕迹，就不算，不用 act。
 
         想清楚再做；这一刻没有要做的就不用调，有几件要做就调几次。
 
@@ -183,6 +202,110 @@ def build_life_tools(
         # 因果，强行保证顺序是工程脑）。
         act_seq = next_seq
         return "已经做了"
+
+    @tool_error("说这句话失败")
+    async def chat(recipient: str, content: str) -> str:
+        """你对某个人说一句话（当面或发消息，都用它）。
+
+        读懂此刻你周遭——你的五官告诉你身边有谁、谁在哪——然后**自己决定**对谁说。
+        想说话就调它，把要说的人和要说的话给出来：
+
+          * recipient：你要对谁说，从你的固定联系人里选一个（akao 千凪的妹妹赤尾、
+            chinagi 千凪、ayana 绫奈——你们三姐妹互为联系人）。这是你读懂场景后的
+            自主选择，不是系统替你判"此刻谁在场"。
+          * content：你要对她说的原话（你自己的话，原样说出来）。
+
+        **当面和发消息是同一件事**：对方此刻在你身边，这句话就像当面说的；对方此刻
+        不在身边（在学校、出了门），这句话就像发的消息——机制一样，都把你的原话直接
+        送进对方那里，她下次回过神 / 醒来时就读到你对她说的话。**对方可能不在身边、
+        一时收不到、或已经走开没听见，这都是正常的**——就像现实里你对着空厨房喊了
+        一句没人应。你按此刻读到的周遭去说就好，不用先确认对方在不在。
+
+        你说的话只送给你选的那个人；旁边的世界只会隐约知道"这里有人在交谈"，不会被
+        逐句转述你说了什么。
+
+        Args:
+            recipient: 收件人（你的固定联系人之一）。
+            content: 你要对她说的原话。
+
+        Returns:
+            一句确认。
+        """
+        nonlocal chat_seq
+        # 收件人身份存在性校验（机制护栏，不是"判在不在场"）：必须是固定通讯录里的
+        # 已知身份。未知 id 报错喂回模型重调（对称 schedule 超限喂回），不投递、不给
+        # world 元信息。在不在身边由 world 客观叙事自然体现，这里不判。
+        if recipient not in SISTERS_CONTACTS:
+            raise ValueError(
+                f"recipient={recipient!r} 不在你的联系人里（"
+                f"{', '.join(sorted(SISTERS_CONTACTS))}）。请改填一个联系人重调。"
+            )
+
+        # 拒绝对自己说话（机制护栏，对称未知收件人报错）：SISTERS_CONTACTS 含说话者自己，
+        # 不拦的话会允许「akao 对 akao 说话」、还给 world 生成「我和 akao 说了几句话」这种
+        # 自言自语的怪 meta。recipient == persona_id 时报错喂回模型重选收件人，既不投
+        # speech（自己给自己发消息无意义）、也不给 world meta（不污染客观叙事）。心里的
+        # 自言自语属于 update_life_state 的范畴、不是 chat。
+        if recipient == persona_id:
+            raise ValueError(
+                f"recipient={recipient!r} 是你自己——chat 是对**别人**说话，不能对自己说。"
+                "心里的自言自语用 update_life_state 记，要对人说话请改填另一个联系人重调。"
+            )
+
+        # next_seq：用 chat_seq+1 算这件 chat 的一对幂等键，但**先不推进 chat_seq** ——
+        # 两轨（直投 + 元信息）都成功后才推进。chat 叠了 @tool_error 会吞掉抛的错让模型
+        # 重试；失败重试用**同一个** next_seq → 同一对键 → 下游 durable 去重各只落一条
+        # （对称 act_seq 的 next_seq 模式）。
+        next_seq = chat_seq + 1
+        # per-chat 基键：base act_id + "chat:N" 序号。**带 "chat:" 前缀**让它与 act 的
+        # "{act_id}:{N}" seed 空间天然不相交（chat 和 act 共用同一 base act_id）。
+        chat_base = f"{act_id}:chat:{next_seq}"
+        # 直投 event_id 与元信息 act_id 各从这个基键再派生（用不同后缀），同一件 chat
+        # 重投得同一对键、同轮不同件各自唯一。uuid5 输出只含 hex + "-"，保 UUID 形契约。
+        speech_event_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{chat_base}:speech"))
+        meta_act_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{chat_base}:meta"))
+
+        # 双轨第一轨：原话**直投收件人信箱**（kind=speech、source=说话者 persona_id），
+        # **不经 world**。收件人下次醒来在 stimulus 读到「X 对你说：原话」。
+        await deliver_event(
+            lane=lane,
+            persona_id=recipient,
+            event_id=speech_event_id,
+            summary=content,
+            occurred_at=observed_at,
+            kind=EVENT_KIND_SPEECH,
+            source=persona_id,
+        )
+
+        # 双轨第二轨：给 world 一条**不含原话**的低成本元信息（复用 act 流），让 world
+        # 凭它在客观叙事里反映「有人在交谈」的氛围（隔壁第三人感知到「这里有人在交谈」）。
+        # **承重红线：description 里绝不放对话原话**（content 不出现在这里）——只放"和谁
+        # 交谈"这类事实，否则 world 逐句读对话、把直投省下的钱又吃回去。元信息记在说话者
+        # 名下（persona_id），收件人作为交谈对象写进事实里（让 world 知道氛围发生在谁俩
+        # 之间），但绝不带 content。
+        await perform_act(
+            lane=lane,
+            act_id=meta_act_id,
+            persona_id=persona_id,
+            description=f"我和 {recipient} 说了几句话",
+            occurred_at=observed_at,
+        )
+
+        # weak-consistency 语义（两轨非原子，codex 建议 2）：第一轨 speech 直投在前、
+        # 第二轨 world meta 在后，两步之间没有事务包裹。两类失败的收敛：
+        #
+        #   * **第二轨失败、模型重试**：chat_seq 未推进（只在两轨都成功后才推进）→ 重试
+        #     用同一对幂等键 → 第一轨 speech 按 event_id 去重不重复投、第二轨 meta 补上，
+        #     最终各落一条（test_chat_second_track_failure_retry_dedups_speech_adds_meta）。
+        #   * **第二轨失败、模型不重试**：speech 已投（收件人能读到这句话）、world 漏一次
+        #     氛围 meta。这可接受 —— world 漏一条「有人在交谈」的氛围 meta 只是少了一笔
+        #     旁白，**不破坏收件人直投**（话已送到）、**不破坏信息差**（meta 本就不含原话）。
+        #     收件人侧的对话连贯（最承重的语义）由第一轨 speech 守住，与第二轨解耦。
+        #
+        # 两轨都确认成功后才推进序号 —— 序号绑定"已确认落库的 chat slot"（失败重试用同
+        # 一序号 → 同一对键 → 去重只各落一条）。
+        chat_seq = next_seq
+        return "说了"
 
     @tool_error("安排下次醒来失败")
     async def schedule(
@@ -236,9 +359,10 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    tools = [update_tool, act_tool_obj]
+    # chat（说话）是基础工具、不依赖 self_wake，与 update / act 并列常驻。
+    tools = [update_tool, act_tool_obj, Tool(chat)]
     # self_wake 容器给了才挂 schedule（自排工具）。旧调用方 / 工具契约测试不给，
-    # 只有 update + act 两件（向后兼容）。
+    # 就没有 schedule（向后兼容）。
     if self_wake is not None:
         tools.append(Tool(schedule))
     return tools

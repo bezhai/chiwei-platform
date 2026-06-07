@@ -1,15 +1,20 @@
 """world 的 agent 工具集 — 阶段 1A（world 推演者）.
 
 world 不再"填一张表"返回结构化对象，而是在一个 agent 循环里**连续调工具去推演
-世界**。新范式下 world 是世界的推演层、不是导演，它有三个工具：
+世界**。新范式下 world 是世界的推演层、不是导演，它有四个工具：
 
   * :func:`update_world` —— 写一段自然语言、记"世界此刻什么样"。落 durable 快照。
     ``world_time`` 由工具体自填（现实当前 CST，客观时间不让模型编），``detail``
     是模型给的世界叙述，一起 ``write_world_state`` append 一版。
   * :func:`notify`       —— world 推演出"这条客观动静此刻谁够得着"，把 observation
     （自然语言客观描述）投给 recipients（persona_id 列表）。对每个 recipient 包
-    ``deliver_event`` 投进其信箱（kind=ambient、source="world"、无房间锚点）。谁
-    够得着由 world 在 prompt 层推演，工具只忠实把它推演出的 recipients 落投递。
+    ``deliver_event`` 投进其信箱（kind=ambient、source="world"）。谁够得着由
+    world 在 prompt 层推演，工具只忠实把它推演出的 recipients 落投递。
+  * :func:`sense`        —— world 五官（1C Task 2）：给**单个**角色投她此刻的周遭
+    客观切片（你在哪、谁在你身边、环境怎样），``deliver_event`` 进她信箱
+    （kind=surroundings）。per-person 形态（区别于 notify 的"一条动静多人够得着"
+    广播），逼 world 逐角色推演每人那份切片 —— 这既是五官、也是信息差的守门：每人
+    只拿到为她推演的那份，全局视角不经五官反向泄露。
   * :func:`sleep`        —— 决定下次多久再看一眼世界。它不直接 ``emit_delayed``，
     而是把待办 self-wake 记进本轮 round-scoped state（一轮内多次 sleep 覆盖而非
     追加，最后一次为准），由 engine 在循环收口后 emit 至多一条 self ``WorldTick``
@@ -42,7 +47,7 @@ from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.data.queries.mailbox import deliver_event
-from app.domain.world_events import EVENT_KIND_AMBIENT
+from app.domain.world_events import EVENT_KIND_AMBIENT, EVENT_KIND_SURROUNDINGS
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
 from app.world.state import set_next_wake_at, write_world_state
@@ -68,8 +73,16 @@ FEATURE_SELF_WAKE = "world_self_wake"  # {} | {"delay_ms": int} —— 本轮待
 # 稳定可复现（整轮重放幂等命门）。
 _EVENT_ID_NS = uuid.UUID("6f1c8b2a-5e7d-4c3a-9f0b-1d2e3a4b5c6d")
 
+# 周遭切片（sense）的 event_id 派生命名空间：与 notify 的 _EVENT_ID_NS 分开，让同样
+# 文字的「周遭切片」与「动静」派生出不同 id、不在 deliver_event 幂等里互相吞掉
+# （两类是不同语义的 event）。
+_SURROUNDINGS_EVENT_ID_NS = uuid.UUID("9a3d7c1e-2b4f-4e6a-8c0d-7f1a2b3c4d5e")
+
 WORLD_NOTIFY_EVENTS = get_or_create_counter(
     "world_notify_events_total", "world notify 投递的 event 计数", ["status"]
+)
+WORLD_SENSE_EVENTS = get_or_create_counter(
+    "world_sense_events_total", "world sense 投递的周遭切片计数", ["status"]
 )
 WORLD_SLEEP_REJECTED = get_or_create_counter(
     "world_sleep_rejected_total", "world sleep 超出 60s~1h 上下限被拒次数", []
@@ -82,10 +95,33 @@ def derive_event_id(*, lane: str, observation: str, round_id: str) -> str:
     整轮重放时模型重复调 notify 同一条 observation，派生出同一 event_id，
     ``deliver_event`` 按 (lane, persona, event_id) 幂等去重，不会重复投递。
     同一 observation 投多个 recipient 共享这一 id（persona 不同自然键不同，
-    不冲突）。不同 observation（不同的动静）派生不同 id。不含房间——新范式没有
-    房间锚点，谁够得着由 world 推演。
+    不冲突）。不同 observation（不同的动静）派生不同 id。谁够得着由 world 推演，
+    不靠房间锚点。
     """
     return uuid.uuid5(_EVENT_ID_NS, f"{lane}\x1f{observation}\x1f{round_id}").hex
+
+
+def derive_surroundings_event_id(
+    *, lane: str, recipient: str, surroundings: str, round_id: str
+) -> str:
+    """确定性派生一份周遭切片的 id：同 (lane, recipient, surroundings, round_id) 同 id。
+
+    与 :func:`derive_event_id` 的两点区别（都是命门）：
+
+      * **把 recipient 纳入派生源**：周遭切片是 per-person 的（绫奈和赤尾这一轮的
+        切片即便文字偶然一样，也是两条独立 event），收件人不同就该是不同 id，否则
+        在 ``deliver_event`` 幂等（自然键含 persona）外、若哪天派生没带 persona 会
+        让两人切片误共享。带上 recipient 让派生源天然 per-person、稳健。
+      * **独立命名空间**（``_SURROUNDINGS_EVENT_ID_NS``）：同样文字的「周遭切片」
+        与「动静」派生出不同 id，不在投递幂等里互相吞掉。
+
+    整轮重放时 world 重复调 sense 同一份切片，派生出同一 event_id，``deliver_event``
+    按 (lane, persona, event_id) 幂等去重，不重复投递。
+    """
+    return uuid.uuid5(
+        _SURROUNDINGS_EVENT_ID_NS,
+        f"{lane}\x1f{recipient}\x1f{surroundings}\x1f{round_id}",
+    ).hex
 
 
 def _world_round() -> tuple[str, str]:
@@ -198,6 +234,64 @@ async def notify(recipients: list[str], observation: str) -> str:
 
 
 @tool
+@tool_error("投递周遭切片失败")
+async def sense(recipient: str, surroundings: str) -> str:
+    """给**一个**角色投她此刻的周遭客观切片（你是她的五官）。
+
+    你有全局视角，但每个角色只能感知到她**够得着**的那一份。所以这条工具是逐角色
+    的：你为**这一个** recipient 推演「此刻她在哪、谁在她身边、周围环境怎样」，把这
+    份切片投给她——她醒来就能感知到自己所处的周遭，不用问就知道身边有谁、能据此自主
+    行动（去找谁、做什么）。
+
+    surroundings 是一段**客观可感**的周遭叙事，从**她**的位置出发写：她在哪个空间、
+    此刻谁在她身边或近旁、环境里有什么声响光线气味动静。比如给客厅写作业的绫奈投
+    「你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来」。绝不写情绪、心情、
+    主观解读、建议或指令——那是角色自己的事，你只投客观的周遭。
+
+    **信息差是硬约束**：你的全局视角绝不能整个倒给一个角色。睡着的、出门的、在学校
+    的角色，她的周遭切片就是她那个空间的样子（卧室漆黑安静 / 教室里同学的动静），
+    **不该**包含她够不着的别处（厨房在发生什么、客厅有谁）。逐角色分别推演、各投各的
+    切片，就是信息差的守门。
+
+    Args:
+        recipient: 这份周遭切片投给谁（单个角色 id，如 "ayana"）。
+        surroundings: 从她的位置出发的、此刻她周遭的客观可感叙事。
+
+    Returns:
+        一句确认文本。
+    """
+    lane, round_id = _world_round()
+
+    event_id = derive_surroundings_event_id(
+        lane=lane, recipient=recipient, surroundings=surroundings, round_id=round_id
+    )
+    # occurred_at 跟现实走，由代码填（客观时间不让模型编）。
+    occurred_at = cst_time.now_cst_iso()
+    try:
+        await deliver_event(
+            lane=lane,
+            persona_id=recipient,
+            event_id=event_id,
+            summary=surroundings,
+            occurred_at=occurred_at,
+            kind=EVENT_KIND_SURROUNDINGS,
+            source="world",
+        )
+    except Exception:
+        WORLD_SENSE_EVENTS.labels(status="failed").inc()
+        logger.warning(
+            "world sense 投递给 %s 失败（lane=%s event=%s）",
+            recipient,
+            lane,
+            event_id,
+            exc_info=True,
+        )
+        return f"周遭切片投给 {recipient} 失败了"
+    WORLD_SENSE_EVENTS.labels(status="delivered").inc()
+    return f"已把此刻的周遭切片投给 {recipient}"
+
+
+@tool
 @tool_error("安排下次醒来失败")
 async def sleep(
     seconds: Annotated[
@@ -277,4 +371,4 @@ async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
     return True
 
 
-WORLD_TOOLS = [notify, update_world, sleep]
+WORLD_TOOLS = [notify, update_world, sense, sleep]

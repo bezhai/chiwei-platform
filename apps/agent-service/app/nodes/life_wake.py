@@ -59,7 +59,12 @@ from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
 from app.domain.life_state import find_life_state
 from app.domain.thinking_cost import record_round_cost
-from app.domain.world_events import EventArrived, EventEnvelope
+from app.domain.world_events import (
+    EVENT_KIND_SPEECH,
+    EVENT_KIND_SURROUNDINGS,
+    EventArrived,
+    EventEnvelope,
+)
 from app.infra import cst_time
 from app.infra.redis import get_redis
 from app.memory._persona import load_persona
@@ -245,18 +250,74 @@ _LIFE_WAKE_CFG = AgentConfig(
     "life_wake", "offline-model", "life-wake", recursion_limit=12
 )
 
-def _format_unread(unread: list[EventEnvelope]) -> str:
-    """把未读 event 拼成她"刚感知到 / 想起的几件事"的文字，按发生时间顺序。
+def _format_surroundings(surroundings: list[EventEnvelope]) -> str:
+    """把周遭切片（kind=surroundings）拼成「此刻你周遭」的客观叙事。
 
-    只放 event 的客观可感形态（summary）+ 类型 + 发生时间——这些都是投进她信箱的、
-    她够得着的信息，不含任何 world 全局视角。event 的 ``occurred_at`` 在信箱里混着
-    历史格式（chat 写 Unix 毫秒、world 写 CST、life 写 UTC），显示时一律过
-    ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
+    周遭切片是 world 五官为她逐角色推演的「此刻你在哪、谁在你身边、环境怎样」
+    （1C Task 2）。它是底框、不是清单条目，所以**不带** ``[kind]`` 机读前缀——直接
+    给她当前周遭的客观叙事。一轮可能攒了多版切片（world 多次推演），按发生先后铺开、
+    末尾那版是最新的周遭；都喂给她、由她读懂此刻所处。occurred_at 过 ``cst_time`` 归一
+    到 CST（同 :func:`_format_dynamics`）。
+    """
+    return "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.summary}"
+        for ev in surroundings
+    )
+
+
+def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
+    """把离散动静（kind=ambient / external）拼成她"刚感知到的几件事"，按发生先后。
+
+    放 event 的客观可感形态（summary）+ 类型 + 发生时间——都是投进她信箱的、她够得着
+    的信息，不含任何 world 全局视角。这些是「环境里出现的新声响光线气味」「刚和谁聊
+    过」这类离散动静，区别于 :func:`_format_surroundings` 的周遭底框。event 的
+    ``occurred_at`` 在信箱里混着历史格式（chat 写 Unix 毫秒、world 写 CST、life 写
+    UTC），显示时一律过 ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
     """
     return "\n".join(
         f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} {ev.summary}"
-        for ev in unread
+        for ev in dynamics
     )
+
+
+def _format_speech(speech: list[EventEnvelope]) -> str:
+    """把别人直接对她说的话（kind=speech）拼成「X 对你说：原话」，按发生先后（1C Task 3）。
+
+    speech 是另一角色调 chat 把原话**直投**进她信箱的（``source`` = 说话者 persona_id、
+    ``summary`` = 原话），不经 world、原话原样。呈现成「X 对你说：原话」让她看清是谁
+    对她说了什么——区别于周遭底框（surroundings）和离散动静（ambient）：这是直接冲她
+    来的话、有明确说话人。``source`` 是说话者 id；``occurred_at`` 过 ``cst_time`` 归一
+    到 CST（同其它两类）。对话连贯靠双方各自 transcript 天然承载，这里只如实呈现收到
+    的每句。
+    """
+    return "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.source} 对你说：{ev.summary}"
+        for ev in speech
+    )
+
+
+def _split_perception(
+    unread: list[EventEnvelope],
+) -> tuple[list[EventEnvelope], list[EventEnvelope], list[EventEnvelope]]:
+    """把未读分成（周遭切片, 对话, 离散动静），各保持原始（按发生先后）顺序。
+
+    三类语义不同、stimulus 里分层呈现：
+
+      * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框。
+      * 对话（kind=speech）—— 另一角色调 chat 直投进她信箱的原话「X 对你说：原话」
+        （1C Task 3）。有明确说话人、原话原样，独立成一层、不混进周遭底框或离散动静。
+      * 离散动静（其余 ambient / external）—— 环境里出现的新声响光线气味、刚聊过等。
+
+    按 kind 三分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。
+    """
+    surroundings = [e for e in unread if e.kind == EVENT_KIND_SURROUNDINGS]
+    speech = [e for e in unread if e.kind == EVENT_KIND_SPEECH]
+    dynamics = [
+        e
+        for e in unread
+        if e.kind not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH)
+    ]
+    return surroundings, speech, dynamics
 
 
 @node
@@ -549,8 +610,8 @@ async def _run_life_round(
     # 什么"。
     #
     # 信息差命门不破：进 transcript 的只是当下时刻 + 她自己信箱里的未读 event
-    # （_format_unread 只取 summary/kind/时间，全是投给她的、她够得着的），绝不含 world
-    # 全局快照。
+    # （_format_surroundings / _format_dynamics 只取 summary/kind/时间，全是投给她的、
+    # 她够得着的），绝不含 world 全局快照。
     # 开头印一行本轮标记（round_id）：写回 transcript 后，下次同 round_id 重投能从
     # session 历史里查到这行 → turn 幂等跳过（对称 world 把标记印进 USER stimulus）。
     # 机读用，对模型无害（它只当是一行元信息）。
@@ -567,12 +628,33 @@ async def _run_life_round(
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 
+    # 五官分层呈现（1C Task 2 + Task 3）：她信箱里有三类——「周遭切片」（surroundings，
+    # world 五官为她逐角色推演的此刻所处环境，作底框）、「别人对你说的话」（speech，
+    # 另一角色调 chat 直投的原话「X 对你说：原话」，Task 3）、「离散动静」（ambient /
+    # external，环境里出现的新声响 / 刚聊过这类事件）。分层呈现让她既感知到自己周遭
+    # 什么样、又看清是谁直接对她说了话、还知道刚发生了什么动静（三类不互相混淆）。
+    # 三类都只取自她自己信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给
+    # 她的、她够得着的），绝不含 world 全局快照——信息差命门由 world 逐角色推演产出每人
+    # 切片守住，不在这里。speech 是直投（不经 world），它的原话只在收件人这条流里出现、
+    # world 那条流绝不含原话（承重红线，由 chat 工具双轨守住）。
     if unread:
-        parts.append(
-            "这会儿你感知到信箱里这些客观动静（按发生先后）：\n"
-            f"{_format_unread(unread)}\n\n"
-            "过你自己的这一刻。"
-        )
+        surroundings, speech, dynamics = _split_perception(unread)
+        if surroundings:
+            parts.append(
+                "【此刻你周遭】（你此刻所处的环境、身边有谁，由你的感官投射给你）：\n"
+                f"{_format_surroundings(surroundings)}"
+            )
+        if speech:
+            parts.append(
+                "【有人对你说话】（直接冲你来的话，按发生先后）：\n"
+                f"{_format_speech(speech)}"
+            )
+        if dynamics:
+            parts.append(
+                "这会儿你还感知到这些客观动静（按发生先后）：\n"
+                f"{_format_dynamics(dynamics)}"
+            )
+        parts.append("读懂此刻你周遭，过你自己的这一刻。")
     elif is_self:
         # self 唤醒且信箱空（decision 6）：不是被新动静叫醒、是自己排的时间到了。输入
         # 语义就是"你自排的时间到了，接着过下一刻"——没有外部新动静，照样往下过日子

@@ -29,7 +29,9 @@ from app.world.tools import (
     WORLD_SLEEP_MAX_SECONDS,
     WORLD_SLEEP_MIN_SECONDS,
     derive_event_id,
+    derive_surroundings_event_id,
     notify,
+    sense,
     sleep,
     update_world,
 )
@@ -226,6 +228,93 @@ async def test_notify_one_recipient_failure_does_not_strand_others(_ctx, caplog)
 
 
 # ---------------------------------------------------------------------------
+# sense — 1C Task 2：world 五官，给单个角色投她此刻的周遭客观切片
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sense_delivers_surroundings_to_single_recipient(_ctx):
+    """sense 把一份周遭客观切片投给**单个** recipient（落 summary、kind=surroundings）。
+
+    周遭切片是 world 为这一个角色逐角色推演的「此刻你在哪、谁在你身边、环境怎样」，
+    本质 per-person（绫奈的周遭 ≠ 赤尾的周遭），所以收件人是单数——区别于 notify
+    那种"一条动静多人够得着"的广播形态。这逼 world 分别推演每个人的切片（信息差
+    的守门：每人只拿到为她推演的那份）。
+    """
+    with agent_context(_ctx):
+        await sense.invoke(
+            {
+                "recipient": "ayana",
+                "surroundings": "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。",
+            }
+        )
+
+    assert len(tools_mod._test_delivered) == 1
+    d = tools_mod._test_delivered[0]
+    assert d["persona_id"] == "ayana"
+    assert d["summary"] == "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。"
+    assert d["kind"] == "surroundings"
+    assert d["source"] == "world"
+    assert d["lane"] == "coe-t2"
+
+
+@pytest.mark.asyncio
+async def test_sense_event_id_idempotent_per_round(_ctx):
+    """同一 (lane, recipient, surroundings, round_id) 派生同一 event_id（整轮重放幂等）。"""
+    args = {
+        "recipient": "ayana",
+        "surroundings": "你在客厅写作业，厨房有动静。",
+    }
+    with agent_context(_ctx):
+        await sense.invoke(args)
+    first = tools_mod._test_delivered[0]["event_id"]
+
+    tools_mod._test_delivered.clear()
+    with agent_context(_ctx):
+        await sense.invoke(args)
+    second = tools_mod._test_delivered[0]["event_id"]
+    assert second == first, "同输入重放应派生同一 event_id（deliver_event 幂等去重）"
+
+
+@pytest.mark.asyncio
+async def test_sense_event_id_differs_per_recipient(_ctx):
+    """同一轮给不同角色投周遭切片 → 不同 event_id（per-person 切片不互相覆盖）。
+
+    周遭切片 per-person：绫奈和赤尾这一轮的切片即便文字偶然一样，也是两条独立 event，
+    不能因共享 id 在 deliver_event 幂等里互相吞掉。event_id 把 recipient 纳入派生源。
+    """
+    id_ayana = derive_surroundings_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="一样的文字", round_id="r"
+    )
+    id_akao = derive_surroundings_event_id(
+        lane="coe-t2", recipient="akao", surroundings="一样的文字", round_id="r"
+    )
+    assert id_ayana != id_akao
+
+
+@pytest.mark.asyncio
+async def test_sense_event_id_distinct_from_notify(_ctx):
+    """周遭切片与动静的 event_id 命名空间不撞（同文字也不互相幂等吞掉）。
+
+    sense 投的周遭切片和 notify 投的动静走不同语义；即便文字偶然相同，也是两类
+    不同 event，不能因派生命名空间重叠而在 deliver_event 幂等里互相覆盖。
+    """
+    notify_id = derive_event_id(lane="coe-t2", observation="同一句话", round_id="r")
+    sense_id = derive_surroundings_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="同一句话", round_id="r"
+    )
+    assert notify_id != sense_id
+
+
+@pytest.mark.asyncio
+async def test_sense_in_world_tools():
+    """sense 是 world 的工具之一（WORLD_TOOLS 含 sense）。"""
+    from app.world.tools import WORLD_TOOLS
+
+    assert sense in WORLD_TOOLS
+
+
+# ---------------------------------------------------------------------------
 # sleep — 1A 完全不动（保留原行为）
 # ---------------------------------------------------------------------------
 
@@ -303,8 +392,12 @@ async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
 # ---------------------------------------------------------------------------
 
 
-def test_world_tools_are_notify_update_world_sleep():
-    """WORLD_TOOLS = [notify, update_world, sleep]（不再有 move_persona / emit_event）。"""
+def test_world_tools_are_notify_update_world_sense_sleep():
+    """WORLD_TOOLS = [notify, update_world, sense, sleep]（1C Task 2 加 sense 五官）。
+
+    没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
+    给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
+    """
     from app.world.tools import WORLD_TOOLS
 
-    assert WORLD_TOOLS == [notify, update_world, sleep]
+    assert WORLD_TOOLS == [notify, update_world, sense, sleep]

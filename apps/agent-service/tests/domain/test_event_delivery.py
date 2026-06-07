@@ -34,7 +34,7 @@ async def test_deliver_emits_knock_for_target_persona(mailbox_db, monkeypatch):
 
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
 
@@ -53,12 +53,12 @@ async def test_duplicate_delivery_does_not_knock(mailbox_db, monkeypatch):
 
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
     await deliver_event(  # 同一 (lane, persona, event_id) 重投
         lane="coe-t1", persona_id="akao", event_id="e1",
-        kind="ambient", source="world", room_id="", summary="s1",
+        kind="ambient", source="world", summary="s1",
         occurred_at="2026-06-03T08:00:00Z",
     )
 

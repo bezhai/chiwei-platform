@@ -31,6 +31,8 @@ from app.domain.life_state import LifeState
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
     EVENT_KIND_EXTERNAL,
+    EVENT_KIND_SPEECH,
+    EVENT_KIND_SURROUNDINGS,
     EventArrived,
     EventEnvelope,
 )
@@ -54,15 +56,20 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> fakeredis.aioredis.FakeRedis:
 
 
 def _envelope(
-    event_id, summary, *, kind=EVENT_KIND_AMBIENT, occurred_at="2026-06-03T12:30:00Z"
+    event_id,
+    summary,
+    *,
+    kind=EVENT_KIND_AMBIENT,
+    occurred_at="2026-06-03T12:30:00Z",
+    source="world",
+    persona_id="akao",
 ):
     return EventEnvelope(
         lane="coe-t3",
-        persona_id="akao",
+        persona_id=persona_id,
         event_id=event_id,
         kind=kind,
-        source="world",
-        room_id="",
+        source=source,
         summary=summary,
         occurred_at=occurred_at,
     )
@@ -491,6 +498,163 @@ async def test_digests_external_message_event(patched, monkeypatch):
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
     assert "刚和原智鸿聊了几句" in msg_blob
     assert patched["marked"] == [["ex1"]]
+
+
+# ---------------------------------------------------------------------------
+# 1C Task 2：world 五官 —— life stimulus 呈现「此刻你周遭」（周遭切片 vs 动静分层）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_surroundings_event_rendered_as_this_moment_around_you(patched, monkeypatch):
+    """信箱里 kind=surroundings 的周遭切片 → stimulus 里呈现成「此刻你周遭」段。
+
+    1C Task 2：world 给每个 life 投更丰富的周遭客观切片（你在哪、谁在你身边、环境
+    怎样），life 醒来读到的不再只是零碎「动静」，而是「此刻你周遭：……」的客观叙事，
+    据此自主行动（不用问就知道周遭有谁）。
+    """
+    patched["unread"] = [
+        _envelope(
+            "s1",
+            "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。",
+            kind=EVENT_KIND_SURROUNDINGS,
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 周遭切片原文进 stimulus（→进 transcript→第二轮可 replay）
+    assert "你在客厅写作业，厨房飘来赤尾做饭的香味，午后的光斜照进来。" in msg_blob
+    # 呈现成「此刻你周遭」的框（而不是混在零碎动静清单里）
+    assert "此刻你周遭" in msg_blob, (
+        "周遭切片应呈现成「此刻你周遭」段，让她感知到所处环境，而非零碎动静"
+    )
+    # 这条照常标已读
+    assert patched["marked"] == [["s1"]]
+
+
+@pytest.mark.asyncio
+async def test_surroundings_and_ambient_rendered_in_separate_sections(patched, monkeypatch):
+    """周遭切片与离散动静分层呈现：周遭进「此刻你周遭」、动静进「动静」段，互不混淆。
+
+    周遭（surroundings）是 world 推演的「此刻你所处的环境」客观叙事；离散动静
+    （ambient）是「环境里出现的某个新声响光线气味」。两者语义不同——周遭是底框、
+    动静是其上发生的事——life 分层呈现，让她既知道自己周遭什么样、又知道刚发生了
+    什么动静。
+    """
+    patched["unread"] = [
+        _envelope(
+            "s1",
+            "你在客厅，姐姐们在厨房忙活。",
+            kind=EVENT_KIND_SURROUNDINGS,
+        ),
+        _envelope("a1", "玄关传来开关门的声音", kind=EVENT_KIND_AMBIENT),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "你在客厅，姐姐们在厨房忙活。" in msg_blob
+    assert "玄关传来开关门的声音" in msg_blob
+    # 分两段呈现：周遭段（「此刻你周遭」）+ 动静段（「这会儿你还感知到」），各有标题
+    assert "此刻你周遭" in msg_blob
+    assert "这会儿你还感知到" in msg_blob, "离散动静应单列动静段、不混进周遭段"
+    # 结构正确：周遭段标题在前、动静段标题在后；周遭文字落在周遭段（两标题之间），
+    # 离散动静文字落在动静段（动静段标题之后）。
+    around_idx = msg_blob.index("此刻你周遭")
+    dynamics_idx = msg_blob.index("这会儿你还感知到")
+    assert around_idx < dynamics_idx
+    surroundings_section = msg_blob[around_idx:dynamics_idx]
+    dynamics_section = msg_blob[dynamics_idx:]
+    assert "你在客厅，姐姐们在厨房忙活。" in surroundings_section
+    assert "玄关传来开关门的声音" not in surroundings_section, (
+        "离散动静不该被塞进「此刻你周遭」段"
+    )
+    assert "玄关传来开关门的声音" in dynamics_section
+    assert "你在客厅，姐姐们在厨房忙活。" not in dynamics_section, (
+        "周遭切片不该被塞进动静段"
+    )
+    # 两条都标已读
+    assert patched["marked"] == [["s1", "a1"]]
+
+
+# ---------------------------------------------------------------------------
+# 1C Task 3：角色直连对话 —— 收件人 stimulus 呈现「X 对你说：原话」（speech 分层）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_speech_event_rendered_as_someone_said_to_you(patched, monkeypatch):
+    """① 直投链路（收件人侧）：信箱里 kind=speech 的对话 → stimulus 呈现「X 对你说：原话」。
+
+    1C Task 3：另一姐妹 chat 给她的原话直投进她信箱（kind=speech、source=说话者），
+    她醒来在 stimulus 里读到「赤尾对你说：原话」——原话原样呈现（非 world 换词版）。
+    """
+    # speech event 的 source 是说话者 persona_id（akao）—— 渲染「X 对你说」要用它。
+    patched["unread"] = [
+        _envelope(
+            "sp1",
+            "绫奈姐姐你在做什么好吃的呀",
+            kind=EVENT_KIND_SPEECH,
+            source="akao",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 原话原样进 stimulus（非 world 换词版）
+    assert "绫奈姐姐你在做什么好吃的呀" in msg_blob
+    # 呈现成「X 对你说」（带说话者身份），不混进周遭底框 / 零碎动静
+    assert "对你说" in msg_blob, "speech 应呈现成「X 对你说：原话」"
+    # 带说话者身份（akao）
+    assert "akao" in msg_blob, "speech 要带说话者身份"
+
+
+@pytest.mark.asyncio
+async def test_speech_rendered_separately_from_surroundings_and_dynamics(
+    patched, monkeypatch
+):
+    """speech 是独立一层，不混进「此刻你周遭」底框、也不混进离散动静段。
+
+    三类语义不同：周遭（surroundings）是底框、动静（ambient）是其上的离散事件、
+    speech 是"有人直接对你说的话"。分层呈现，speech 单列自己的段。
+    """
+    patched["unread"] = [
+        _envelope(
+            "s1", "你在客厅，午后的光斜照进来。", kind=EVENT_KIND_SURROUNDINGS,
+            persona_id="ayana",
+        ),
+        _envelope(
+            "a1", "玄关传来开关门的声音", kind=EVENT_KIND_AMBIENT, persona_id="ayana",
+        ),
+        _envelope(
+            "sp1", "绫奈姐姐你在做什么好吃的呀", kind=EVENT_KIND_SPEECH,
+            source="akao", persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    around_idx = msg_blob.index("此刻你周遭")
+    surroundings_section = msg_blob[
+        around_idx : msg_blob.index("绫奈姐姐你在做什么好吃的呀")
+    ]
+    # speech 原话不该被塞进「此刻你周遭」底框
+    assert "绫奈姐姐你在做什么好吃的呀" not in surroundings_section, (
+        "speech 原话不该混进「此刻你周遭」底框"
+    )
+    # speech 段带「对你说」标识，与离散动静的「[ambient]」清单分开
+    assert "对你说" in msg_blob
+    # 三条都标已读
+    assert patched["marked"] == [["s1", "a1", "sp1"]]
 
 
 @pytest.mark.asyncio

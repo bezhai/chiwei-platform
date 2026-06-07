@@ -26,7 +26,7 @@ from app.agent.tooling import Tool
 @pytest.fixture
 def stub_handlers(monkeypatch):
     """把工具底下的 durable handler 换成可观测 fake。"""
-    state: dict = {"saved": [], "acts": []}
+    state: dict = {"saved": [], "acts": [], "delivered": []}
 
     async def fake_save_life_state(**kwargs):
         state["saved"].append(kwargs)
@@ -34,8 +34,13 @@ def stub_handlers(monkeypatch):
     async def fake_perform_act(**kwargs):
         state["acts"].append(kwargs)
 
+    async def fake_deliver_event(**kwargs):
+        state["delivered"].append(kwargs)
+        return 1
+
     monkeypatch.setattr(lt, "save_life_state", fake_save_life_state)
     monkeypatch.setattr(lt, "perform_act", fake_perform_act)
+    monkeypatch.setattr(lt, "deliver_event", fake_deliver_event)
     return state
 
 
@@ -43,8 +48,8 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
     return {t.name: t for t in tools}
 
 
-def test_build_life_tools_returns_the_two_tools():
-    """工具集就是 update_life_state + act 两件，且都是 neutral Tool。"""
+def test_build_life_tools_returns_base_tools():
+    """不给 self_wake 时工具集是 update_life_state + act + chat（chat 是 1C 常驻基础工具）。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -52,7 +57,7 @@ def test_build_life_tools_returns_the_two_tools():
         observed_at="2026-06-03T12:30:00+00:00",
     )
     by_name = _tools_by_name(tools)
-    assert set(by_name) == {"update_life_state", "act"}
+    assert set(by_name) == {"update_life_state", "act", "chat"}
     for t in tools:
         assert isinstance(t, Tool)
 
@@ -394,7 +399,7 @@ def test_act_description_guides_toward_low_action():
 
 
 def test_build_life_tools_includes_schedule_when_slot_given():
-    """传 self_wake 容器时，工具集多一件 schedule（共 update_life_state + act + schedule）。"""
+    """传 self_wake 容器时多一件 schedule（共 update_life_state + act + chat + schedule）。"""
     slot: dict = {}
     tools = lt.build_life_tools(
         lane="coe-t3",
@@ -404,7 +409,7 @@ def test_build_life_tools_includes_schedule_when_slot_given():
         self_wake=slot,
     )
     by_name = _tools_by_name(tools)
-    assert set(by_name) == {"update_life_state", "act", "schedule"}
+    assert set(by_name) == {"update_life_state", "act", "chat", "schedule"}
 
 
 def test_schedule_tool_hides_mechanism_only_seconds_exposed():
@@ -668,3 +673,416 @@ async def test_tool_failure_returns_outcome_not_raise(monkeypatch):
     # @tool_error 把失败变成结构化 outcome dict，不抛
     assert isinstance(out, dict)
     assert out["kind"] == "tool_error"
+
+
+# ---------------------------------------------------------------------------
+# chat —— 角色直连对话工具（1C Task 3）。
+#
+# 「说话」从 act 里分出来：act 只管"做了一件事"，chat 管"对谁说了一句话"。chat 走
+# 双轨：原话直投收件人信箱（speech event、不经 world），同时给 world 一条不含原话的
+# 低成本元信息（复用 act 流）。收件人取自固定通讯录（三姐妹互为固定联系人）、由角色
+# 自选，不是在场名单、不抠自然语言。
+# ---------------------------------------------------------------------------
+
+
+def test_build_life_tools_includes_chat():
+    """工具集多一件 chat（与 update_life_state / act / schedule 并列）。"""
+    slot: dict = {}
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+            self_wake=slot,
+        )
+    )
+    assert "chat" in tools
+    assert isinstance(tools["chat"], Tool)
+
+
+def test_chat_tool_schema_hides_mechanism_only_recipient_and_content():
+    """模型只看见 recipient + content 业务参数，看不见 lane / persona_id / act_id。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    props = set(tools["chat"].definition.parameters["properties"])
+    assert props == {"recipient", "content"}
+
+
+@pytest.mark.asyncio
+async def test_chat_delivers_original_speech_to_recipient_inbox(stub_handlers):
+    """① 直投链路：chat(收件人, 原话) → 原话作为 speech event 直投收件人信箱。
+
+    原话（content）原样进收件人信箱的 summary，kind=speech、source=说话者 persona_id；
+    收件人是工具参数给的（akao 对 ayana 说），不是 world 路由的。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["chat"].invoke(
+        {"recipient": "ayana", "content": "绫奈姐姐你在做什么好吃的呀"}
+    )
+
+    assert len(stub_handlers["delivered"]) == 1
+    d = stub_handlers["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "ayana", "原话直投收件人信箱（不是说话者自己）"
+    assert d["summary"] == "绫奈姐姐你在做什么好吃的呀", "原话原样进收件人信箱"
+    assert d["kind"] == lt_speech_kind(), "speech 是独立 kind、不混进 ambient/surroundings"
+    assert d["source"] == "akao", "source 是说话者 persona_id（不是 world）"
+    assert d["occurred_at"] == "2026-06-03T12:30:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_chat_gives_world_meta_without_original_speech(stub_handlers):
+    """② world 低成本感知链路：chat 给 world 的是不含原话的元信息（承重红线）。
+
+    world 凭这条元信息反映「有人在交谈」的氛围，但绝不读对话原话。复用 act 流
+    （perform_act）把元信息送给 world —— 关键断言：perform_act 的 description 里
+    **不含**对话原话逐句内容，只有"和谁交谈"这类事实。
+    """
+    secret_line = "绫奈姐姐你在做什么好吃的呀这句是绝密原话"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["chat"].invoke({"recipient": "ayana", "content": secret_line})
+
+    # world 凭 act 流感知到"有一场对话在发生"——必须恰好一条元信息进 world。
+    assert len(stub_handlers["acts"]) == 1, "chat 要给 world 一条元信息（复用 act 流）"
+    meta = stub_handlers["acts"][0]
+    assert meta["lane"] == "coe-t3"
+    assert meta["persona_id"] == "akao", "元信息记在说话者名下"
+    # 承重红线：world 拿到的 description 绝不含对话原话逐句内容。
+    assert secret_line not in meta["description"], (
+        "world 绝不读对话原话——给 world 的元信息里不能出现逐句原话内容"
+    )
+    # 元信息仍是"有交谈"的事实（提到了交谈对象 ayana，让 world 能反映氛围）。
+    assert "ayana" in meta["description"], "元信息要让 world 知道和谁在交谈（反映氛围）"
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_route_through_world_recipient_chosen_by_caller(stub_handlers):
+    """收件人是工具参数自选、原话直投，world 不参与对话路由（决策 2）。
+
+    给"不在身边"的人 chat 也照样直投其信箱（当面与发消息统一、不分支判在不在场）。
+    系统不判在场、不建在场名单，只把角色自选的 recipient 落投递。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    # chinagi 此刻"在学校"（不在身边）—— 不分支判在场，照样直投。
+    await tools["chat"].invoke({"recipient": "chinagi", "content": "姐姐放学早点回"})
+
+    assert len(stub_handlers["delivered"]) == 1
+    assert stub_handlers["delivered"][0]["persona_id"] == "chinagi", (
+        "不在身边的人也直投其信箱（异步送达），不分支判在不在场"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_multiple_in_round_independent_idempotency_keys(stub_handlers):
+    """一轮多次 chat 各有独立幂等键（直投 event_id 与元信息 act_id 都各自唯一）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    await tools["chat"].invoke({"recipient": "chinagi", "content": "放学没"})
+
+    # 两条直投各自唯一 event_id
+    event_ids = [d["event_id"] for d in stub_handlers["delivered"]]
+    assert len(set(event_ids)) == 2, f"一轮两次 chat 直投应各唯一 event_id，实得 {event_ids}"
+    # 两条 world 元信息各自唯一 act_id
+    act_ids = [a["act_id"] for a in stub_handlers["acts"]]
+    assert len(set(act_ids)) == 2, f"一轮两次 chat 元信息应各唯一 act_id，实得 {act_ids}"
+
+
+@pytest.mark.asyncio
+async def test_chat_stable_under_round_replay(stub_handlers):
+    """整轮重投同一批 chat（同 base act_id）→ 同序 chat 得同一直投 event_id + 元信息 act_id。
+
+    幂等命门：base act_id 整轮重投稳定，per-chat 键从 (base, chat 序号) 纯函数派生 ——
+    重投同序 chat 得同一 event_id / act_id，deliver_event / perform_act 按自然键去重，
+    不重复投递、不重复让 world 推演。
+    """
+    tools_a = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_a["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    await tools_a["chat"].invoke({"recipient": "chinagi", "content": "放学没"})
+    first_event_ids = [d["event_id"] for d in stub_handlers["delivered"]]
+    first_act_ids = [a["act_id"] for a in stub_handlers["acts"]]
+
+    stub_handlers["delivered"].clear()
+    stub_handlers["acts"].clear()
+
+    tools_b = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_b["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    await tools_b["chat"].invoke({"recipient": "chinagi", "content": "放学没"})
+    replay_event_ids = [d["event_id"] for d in stub_handlers["delivered"]]
+    replay_act_ids = [a["act_id"] for a in stub_handlers["acts"]]
+
+    assert replay_event_ids == first_event_ids, "重投同序 chat 直投 event_id 必须稳定（幂等）"
+    assert replay_act_ids == first_act_ids, "重投同序 chat 元信息 act_id 必须稳定（幂等）"
+
+
+@pytest.mark.asyncio
+async def test_chat_seq_advances_only_after_delivery_succeeds(monkeypatch):
+    """幂等命门：chat 键只在落库成功后才推进 —— 失败重试用同一对键（对称 act_seq）。
+
+    deliver_event 第一次抛错（写成功但 ack 丢 / 或纯写失败）、模型重试同一意图：两次
+    必须用同一个直投 event_id + 同一个元信息 act_id，下游 durable 去重才能只落一条。
+    """
+    seen_event_ids: list[str] = []
+    seen_act_ids: list[str] = []
+    calls = {"n": 0}
+
+    async def flaky_deliver_event(**kwargs):
+        seen_event_ids.append(kwargs["event_id"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("ack lost after commit")
+        return 1
+
+    async def ok_perform_act(**kwargs):
+        seen_act_ids.append(kwargs["act_id"])
+
+    monkeypatch.setattr(lt, "deliver_event", flaky_deliver_event)
+    monkeypatch.setattr(lt, "perform_act", ok_perform_act)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+
+    out1 = await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    assert isinstance(out1, dict) and out1["kind"] == "tool_error"
+
+    out2 = await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    assert isinstance(out2, str) and out2
+
+    assert len(seen_event_ids) == 2
+    assert seen_event_ids[0] == seen_event_ids[1], (
+        f"失败重试必须用同一个直投 event_id（去重靠它只落一条），实得 {seen_event_ids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_second_track_failure_retry_dedups_speech_adds_meta(monkeypatch):
+    """第二轨（world meta）失败重试：speech 按 event_id 去重不重复投、meta 补上（codex 建议 2）。
+
+    chat 是双轨：第一轨 deliver_event 直投收件人 speech，第二轨 perform_act 给 world
+    一条不含原话的 meta。原有测试只覆盖第一轨失败重试。这里补第二轨场景：
+
+      * 第一次调：第一轨 speech 投递成功，第二轨 perform_act 抛错 → @tool_error 吞掉、
+        把错误 outcome 喂回模型。
+      * 模型重试：因为 chat_seq 只在两轨都成功后才推进，重试用同一对幂等键 ——
+          - 第一轨 speech 用同一 event_id 再投一次，deliver_event 按 (lane, persona,
+            event_id) 自然键去重，**不重复落第二条**；
+          - 第二轨 perform_act 这次成功，meta 补上。
+      * 最终：speech 各落一条（去重）、meta 各落一条（补上），weak-consistency 收敛。
+    """
+    delivered: list[dict] = []
+    acts: list[dict] = []
+    perform_calls = {"n": 0}
+
+    async def dedup_deliver_event(**kwargs):
+        # 模拟 deliver_event 的自然键去重：同 (lane, persona, event_id) 只落一条。
+        key = (kwargs["lane"], kwargs["persona_id"], kwargs["event_id"])
+        if key not in {(d["lane"], d["persona_id"], d["event_id"]) for d in delivered}:
+            delivered.append(kwargs)
+        return 1
+
+    async def flaky_perform_act(**kwargs):
+        perform_calls["n"] += 1
+        if perform_calls["n"] == 1:
+            raise RuntimeError("world meta 落库瞬时失败")
+        acts.append(kwargs)
+
+    monkeypatch.setattr(lt, "deliver_event", dedup_deliver_event)
+    monkeypatch.setattr(lt, "perform_act", flaky_perform_act)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+
+    # 第一次：speech 投成功、meta 落库抛错 → @tool_error 吞、返回错误 outcome。
+    out1 = await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    assert isinstance(out1, dict) and out1["kind"] == "tool_error", (
+        "第二轨失败应被 @tool_error 吞成错误 outcome 喂回模型"
+    )
+
+    # 模型重试同一意图（chat_seq 未推进 → 同一对幂等键）。
+    out2 = await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    assert isinstance(out2, str) and out2, "重试成功应返回正常确认文本"
+
+    # speech 第一轨调了两次（首次成功 + 重试再调），但按 event_id 去重只落一条。
+    assert len(delivered) == 1, (
+        f"speech 按 event_id 去重应只落一条（first-landed-wins），实得 {len(delivered)}"
+    )
+    assert delivered[0]["summary"] == "你在干嘛"
+    # meta 第二轨首次失败、重试补上，最终恰好一条。
+    assert len(acts) == 1, f"world meta 重试后应补上、恰好一条，实得 {len(acts)}"
+    assert "ayana" in acts[0]["description"], "meta 是不含原话的「和谁交谈」事实"
+    assert "你在干嘛" not in acts[0]["description"], "meta 绝不含对话原话（承重红线）"
+
+
+@pytest.mark.asyncio
+async def test_chat_unknown_recipient_errors_no_delivery(stub_handlers):
+    """收件人不在固定通讯录 → 报错喂回模型重调（机制护栏），不投递、不给 world 元信息。
+
+    通讯录是稳定身份 id 集合（三姐妹互为固定联系人）。这不是"判在不在场"，是"这个
+    身份 id 存不存在"的机制校验（对称 schedule 超限报错喂回）。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["chat"].invoke({"recipient": "陌生人", "content": "你好"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error"
+    assert stub_handlers["delivered"] == [], "未知收件人不投递"
+    assert stub_handlers["acts"] == [], "未知收件人不给 world 元信息"
+
+
+@pytest.mark.asyncio
+async def test_chat_to_self_errors_no_delivery(stub_handlers):
+    """收件人 == 说话者自己 → 报错喂回模型重调，不投递、不给 world 元信息（codex 建议 1）。
+
+    SISTERS_CONTACTS 含说话者自己，原实现允许「akao 对 akao 说话」、还会给 world 生成
+    「我和 akao 说了几句话」这种自言自语的怪 meta。改成对称「不在通讯录」的报错：
+    recipient == persona_id 时报错喂回模型让它重选收件人，既不投 speech、也不给 world
+    meta（不污染 world 客观叙事）。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["chat"].invoke({"recipient": "akao", "content": "我在自言自语"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error", "对自己说话应报错喂回模型重调"
+    assert stub_handlers["delivered"] == [], "对自己说话不投 speech"
+    assert stub_handlers["acts"] == [], "对自己说话不给 world meta（不污染客观叙事）"
+
+
+@pytest.mark.asyncio
+async def test_chat_meta_act_id_is_uuid_shaped_wire_contract(stub_handlers):
+    """chat 的 world 元信息 act_id 必须保持 UUID 形 —— world marker 解析的硬契约。
+
+    元信息复用 act 流落 ActPerformed，world 醒来 pull 它、把 act_id 编进 round marker
+    （``|`` 分隔、``rpartition("|")`` 解析回，见 app/world/engine.py）。所以 chat 的
+    meta act_id 不能引入 ``|`` / ``]`` / ``:`` 等字符，否则炸 world 解析。speech 直投
+    event_id 同理保 UUID 形（虽不进 world marker，但保持一致稳健）。
+    """
+    import uuid as _uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["chat"].invoke({"recipient": "ayana", "content": "你在干嘛"})
+    await tools["chat"].invoke({"recipient": "chinagi", "content": "放学没"})
+
+    for a in stub_handlers["acts"]:
+        parsed = _uuid.UUID(a["act_id"])
+        assert str(parsed) == a["act_id"], f"meta act_id 必须是合法 UUID 形：{a['act_id']}"
+    for d in stub_handlers["delivered"]:
+        parsed = _uuid.UUID(d["event_id"])
+        assert str(parsed) == d["event_id"], f"speech event_id 应是合法 UUID 形：{d['event_id']}"
+
+
+def test_chat_description_guides_self_chosen_recipient_and_async_ok():
+    """chat 文案：读懂周遭后自选收件人说话、当面和发消息都用它、对方可能收不到是正常的。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["chat"].definition.description
+    # 收件人由角色自选（读懂周遭后决定对谁说）
+    assert "对谁" in desc or "收件人" in desc or "联系人" in desc
+    # 当面与发消息统一
+    assert "当面" in desc and "发消息" in desc
+    # 对方可能不在身边、收不到是正常的（信息差天然）
+    assert ("不在身边" in desc) or ("不在" in desc)
+
+
+def test_act_description_no_longer_carries_speech():
+    """act 文案分出说话后：act 只管"做了一件事"，说话引导去 chat（不再让 act 承载说话）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    # 说话改走 chat —— act 文案应引导"说话用 chat"
+    assert "chat" in desc, "act 文案应把说话引导到 chat 工具"
+
+
+def lt_speech_kind() -> str:
+    """speech event 的 kind 常量（让测试与实现共用同一来源，不硬编码字面量）。"""
+    return lt.EVENT_KIND_SPEECH
