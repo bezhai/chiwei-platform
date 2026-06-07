@@ -495,7 +495,7 @@ async def test_digests_external_message_event(patched, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_acts_when_model_calls_it(patched, monkeypatch):
-    """模型在循环里调 act → 回灌唤醒 world 推演，act_id 由本轮 event_ids 派生。"""
+    """模型在循环里调 act → 落 ActPerformed，per-act id 从本轮 base act_id 派生。"""
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
         monkeypatch, script=_script_update_then_act(description="我起床去厨房做早饭")
@@ -507,11 +507,12 @@ async def test_acts_when_model_calls_it(patched, monkeypatch):
     assert patched["acts"][0]["persona_id"] == "akao"
     assert patched["acts"][0]["description"] == "我起床去厨房做早饭"
     assert patched["acts"][0]["lane"] == "coe-t3"
-    # act_id 必须是基于本轮 event_ids 的确定派生（整轮重放幂等）
+    # base act_id 仍按本轮 event_ids 派生（整轮重投幂等不退化）；工具给第 1 件 act
+    # 派 per-act id = uuid5(base, "...:1")。
     import uuid
 
-    seed = "coe-t3:akao:e1"
-    expected = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    base = str(uuid.uuid5(uuid.NAMESPACE_DNS, "coe-t3:akao:e1"))
+    expected = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:1"))
     assert patched["acts"][0]["act_id"] == expected
 
 
@@ -525,12 +526,12 @@ def _script_act_twice(description1="我去厨房煮咖啡", description2="再去
 
 
 @pytest.mark.asyncio
-async def test_two_acts_in_one_round_only_first_emits(patched, monkeypatch):
-    """一轮里模型调两次 act：只有第一个真正做事（落一条 ActPerformed）。
+async def test_two_acts_in_one_round_both_emit_distinct_ids(patched, monkeypatch):
+    """一轮里模型调两次 act：两件都真正做事、各落一条 ActPerformed、各自唯一 id。
 
-    act_id 由本轮 event_ids 派生，同一轮两次共用同一个 act_id —— 第二个会被
-    insert_idempotent 去重静默吞掉、动作无声丢失。第一刀：本轮已做过一件事后第二次
-    不再落 handler（绝不静默吞，工具层 log + 喂回提示）。
+    P6 修复：删掉"一轮只生效一件"的 if 守卫（那是用 if 替角色决策、违反赤尾宪法）。
+    per-act id 用 base act_id + 本轮第 N 件序号派生：两件序号不同 → 两个不同 id →
+    insert_idempotent 不再把第二件按同 id 去重吞掉。一轮想做几件就做几件。
     """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
@@ -540,11 +541,22 @@ async def test_two_acts_in_one_round_only_first_emits(patched, monkeypatch):
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    # 一轮只做一件事：只有第一个落到 handler
-    assert len(patched["acts"]) == 1
-    assert patched["acts"][0]["description"] == "我起床去厨房"
-    assert patched["acts"][0]["persona_id"] == "akao"
-    assert patched["acts"][0]["lane"] == "coe-t3"
+    # 两件都落到 handler（不再"一轮只生效一件"）
+    assert len(patched["acts"]) == 2
+    assert [a["description"] for a in patched["acts"]] == ["我起床去厨房", "再去叫醒千凪"]
+    assert all(a["persona_id"] == "akao" for a in patched["acts"])
+    assert all(a["lane"] == "coe-t3" for a in patched["acts"])
+    # 两件各自唯一 act_id（per-act 派生）
+    act_ids = [a["act_id"] for a in patched["acts"]]
+    assert len(set(act_ids)) == 2, f"两件 act 应各自唯一 id，实得 {act_ids}"
+    # 两件 id 都从本轮 base（event_ids 派生）+ 序号派生
+    import uuid
+
+    base = str(uuid.uuid5(uuid.NAMESPACE_DNS, "coe-t3:akao:e1"))
+    assert act_ids == [
+        str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:1")),
+        str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:2")),
+    ]
     # 收口照常标已读
     assert patched["marked"] == [["e1"]]
 
@@ -1464,7 +1476,13 @@ async def test_self_wake_act_id_independent_of_event_ids(patched, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_event_wake_act_id_seed_unchanged(patched, monkeypatch):
-    """event 唤醒的 act_id 种子语义不退化：仍按本轮 event_ids 派生（重放幂等）。"""
+    """event 唤醒的 base act_id 种子语义不退化：仍按本轮 event_ids 派生（重放幂等）。
+
+    P6 修复后 per-act id 多套一层 uuid5(base, 序号)，但 **base 种子必须仍来自
+    event_ids**（不能退回 now 派生，否则重投得新 base → 新 per-act id → world 重复
+    推演）。这里钉死：第 1 件 act 的 id == uuid5(base, "...:1") 且 base ==
+    uuid5(DNS, "coe-t3:akao:e1") —— 若 base 改从 now 派生，这个等式会断。
+    """
     patched["unread"] = [_envelope("e1", "天亮了")]
     _FakeAgent.install(
         monkeypatch, script=_script_update_then_act(description="我起床去厨房做早饭")
@@ -1475,10 +1493,10 @@ async def test_event_wake_act_id_seed_unchanged(patched, monkeypatch):
     assert len(patched["acts"]) == 1
     import uuid
 
-    seed = "coe-t3:akao:e1"
-    expected = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    base = str(uuid.uuid5(uuid.NAMESPACE_DNS, "coe-t3:akao:e1"))
+    expected = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:1"))
     assert patched["acts"][0]["act_id"] == expected, (
-        "event 唤醒的 act_id 种子必须仍按本轮 event_ids 派生（重放幂等不退化）"
+        "event 唤醒的 base act_id 种子必须仍按本轮 event_ids 派生（重放幂等不退化）"
     )
 
 
@@ -1792,6 +1810,90 @@ async def test_act_id_durable_dedup_blocks_reinvoke_before_writeback(test_db):
     rows = await select_all_versions(ActPerformed, {"lane": lane, "act_id": act_id})
     assert len(rows) == 1, f"同 (lane, act_id) 只该有一条 ActPerformed，实际 {len(rows)} 条"
     assert rows[0].description == "我去厨房煮咖啡", "保留第一次的 act，不被重投覆盖"
+
+
+@pytest.mark.integration
+async def test_act_tool_derived_id_lands_and_dedups_end_to_end(test_db):
+    """端到端串起 build_life_tools 派生 per_act_id → 真实 perform_act/ActPerformed 落库 + 去重。
+
+    采纳补充 #2（codex T3）：现有 test_life_tools 在工具层 mock perform_act 验派生、
+    test_act_id_durable_dedup_blocks_reinvoke_before_writeback 单独用真实 PG 验去重，缺
+    一条把两端串起来的——即 act 工具自己派生的那个 per_act_id 真落进 PG、且整轮重投
+    （重建工具集、重做同序 act）经真实 insert_idempotent 去重只落一条。
+
+    P6 失败重试命门也一并端到端钉死：第一件 act 成功落库后，第二件 act 派生的是不同
+    序号的不同 id（同轮两件各自落库）；重投整轮（同 base act_id、同序）→ 同 per_act_id
+    → durable 去重 → PG 里每件仍只一条。
+    """
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.domain.world_events import ActPerformed
+    from app.nodes.life_tools import build_life_tools
+    from app.runtime.persist import select_all_versions
+    from tests.runtime.conftest import migrate
+
+    await migrate(ActPerformed, test_db)
+
+    lane = "coe-t3"
+    base_act_id = "round-derived-base-id"
+    observed_at = "2026-06-05T21:00:00+08:00"
+
+    # 工具内部派生 per_act_id = uuid5(NAMESPACE_OID, f"{base}:{seq}")；端到端要钉死
+    # "工具自己派生的那个 id 真落进 PG"，所以这里照同一口径算出期望 id。
+    def _expected_id(seq: int) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base_act_id}:{seq}"))
+
+    async def _row_count() -> int:
+        async with test_db.connect() as conn:
+            r = await conn.execute(
+                text("SELECT count(*) FROM data_act_performed WHERE lane = :lane"),
+                {"lane": lane},
+            )
+            return r.scalar_one()
+
+    def _act_tool():
+        tools = {
+            t.name: t
+            for t in build_life_tools(
+                lane=lane,
+                persona_id="akao",
+                act_id=base_act_id,
+                observed_at=observed_at,
+            )
+        }
+        return tools["act"]
+
+    # 第一轮：同一 base act_id 下真做两件 act（走真实 perform_act → insert_idempotent）。
+    act_a = _act_tool()
+    assert await act_a.invoke({"description": "我去厨房煮咖啡"}) == "已经做了"
+    assert await act_a.invoke({"description": "顺便给千凪带一杯"}) == "已经做了"
+
+    # 工具派生的第 1 / 第 2 件 id 真落进 PG（端到端：派生口径 = 落库 act_id）。
+    seq1 = await select_all_versions(
+        ActPerformed, {"lane": lane, "act_id": _expected_id(1)}
+    )
+    seq2 = await select_all_versions(
+        ActPerformed, {"lane": lane, "act_id": _expected_id(2)}
+    )
+    assert [r.description for r in seq1] == ["我去厨房煮咖啡"]
+    assert [r.description for r in seq2] == ["顺便给千凪带一杯"]
+    assert await _row_count() == 2, "同轮两件 act 应各自落一条（不同序号 → 不同 id）"
+
+    # 重投整轮：重建工具集（同 base act_id）、重做同序两件 → 同 per_act_id → durable 去重。
+    act_b = _act_tool()
+    assert await act_b.invoke({"description": "我去厨房煮咖啡"}) == "已经做了"
+    assert await act_b.invoke({"description": "顺便给千凪带一杯"}) == "已经做了"
+
+    assert await _row_count() == 2, (
+        "重投同序两件应被 (lane, act_id) 去重、不新增"
+    )
+    # 仍是首次那两条（first-landed-wins，不被重投覆盖）。
+    rows1 = await select_all_versions(
+        ActPerformed, {"lane": lane, "act_id": _expected_id(1)}
+    )
+    assert [r.description for r in rows1] == ["我去厨房煮咖啡"]
 
 
 # ---------------------------------------------------------------------------

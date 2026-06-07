@@ -10,14 +10,19 @@
 
   * ``act`` —— 她**自主做一件影响外部世界的事**（自然语言，如"我去厨房做饭"），
     直接汇给 world 让它推演客观结果。新范式：角色完全自主，act 是"她做了"、不是
-    "申请待批准"。act_id 不由模型生成、而是本轮 (lane + persona + 读到的
-    event_ids) 派生的确定值（在节点里算好、capture 进闭包）：整轮重放同一批唤醒
-    时产同一个 act_id，world 端按 act_id 幂等消化，不会重复推演同一个动作。
+    "申请待批准"。**一轮想做几件就做几件**（不再 if 守卫限"一轮只生效一件"——那是
+    用 if 分支替角色决策、违反赤尾宪法）。act_id 不由模型生成：节点算好一个本轮
+    确定的 base act_id（lane + persona + 唤醒源派生）capture 进闭包，工具内给**每件
+    act** 派 ``per_act_id = uuid5(base act_id, 本轮第 N 件序号)``。序号是纯机制 seed
+    （只标"第几件"、不当行为闸），整轮重投时 base 稳定 + 序号按调用次序稳定对齐 →
+    同一件 act 重投得同一 id（world 按 (lane, act_id) 幂等去重、不重复推演），同轮
+    不同件序号不同 → 各自唯一 id。
 
 为什么是 per-round 闭包而不是 module-level @tool：工具要把"她是谁 / 哪个泳道 /
-本轮 act_id / 观测时刻"这些**机制绑定** capture 进去，模型只看见业务参数
-（current_state / response_mood / activity_type / description），看不见 lane /
-act_id 这些不该让它填的东西。AgentContext 是 chat 链路共享的 frozen 契约
+本轮 base act_id / 观测时刻"这些**机制绑定** capture 进去（还要在闭包内攒本轮
+act 序号给每件 act 派 per-act id），模型只看见业务参数（current_state /
+response_mood / activity_type / description），看不见 lane / act_id 这些不该让它
+填的东西。AgentContext 是 chat 链路共享的 frozen 契约
 （Task 1 owns），不往里塞 life 专用字段；用闭包把绑定收在 life 域里更干净。
 
 失败语义（spec 决策 3）：每件工具叠 ``@tool_error`` —— 单个工具自身抛错时吞掉、
@@ -28,6 +33,7 @@ act_id 这些不该让它填的东西。AgentContext 是 chat 链路共享的 fr
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import timedelta
 from typing import Annotated
 
@@ -66,7 +72,9 @@ def build_life_tools(
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
 
     ``lane`` / ``persona_id`` —— 她是谁、哪个泳道（durable 写的 Key 命门）。
-    ``act_id`` —— 本轮派生的确定动作键（整轮重放幂等），不让模型生成。
+    ``act_id`` —— 本轮派生的确定 **base 动作键**（整轮重投稳定），不让模型生成；
+        工具内给每件 act 派 ``per_act_id = uuid5(act_id, 本轮第 N 件序号)``，一轮多件
+        各自唯一、同件重投幂等。
     ``observed_at`` —— 本轮观测时刻（ISO8601），快照 / 动作都用它，使重放一致。
     ``self_wake`` —— 本轮 round-scoped 的待办 self-wake 容器（``{} | {"delay_ms": int}``，
         engine 每轮新建）。给了它工具集就多一件 ``schedule``（自排下次醒），照搬 world
@@ -74,11 +82,24 @@ def build_life_tools(
         不给（旧调用方 / 工具契约测试）就只有 update_life_state + act 两件。
     """
 
-    # 本轮是否已做过一件事（round-scoped，随这一轮的闭包活着）。act_id 由本轮
-    # event_ids 派生，同一轮 N 次 act 共用同一个 act_id —— 第二个及以后会被 durable
-    # 去重层按 act_id 静默吞掉、动作无声丢失。第一刀：一轮只允许做一件事生效，
-    # 第二次调用不再落 handler，而是 log + 喂回提示（绝不静默吞）。
-    act_performed = False
+    # 本轮已**确认成功落库**的 act 件数（round-scoped 序号，随这一轮的闭包活着）。
+    # 它是**纯机制 seed**：只标识"这是本轮第几件已落库的 act"，绝不参与"她能不能做 /
+    # 该不该做"的判断（删掉旧的 act_performed if 守卫 —— 那是用 if 分支替角色决策、
+    # 违反赤尾宪法）。
+    #
+    # 命门（P6 必改）：act_seq 绑定的是"已确认落库的 act slot"，**不是**"调用尝试次数"。
+    # 序号只在 perform_act 成功返回后才推进（next_seq 模式）。act_tool 叠了 @tool_error
+    # 会吞掉 perform_act 抛的错、把错误 outcome 喂回模型让它重试；若序号在 perform_act
+    # **之前**就 +1，则"写库成功但返回链路抛错（ack 丢 / 网络抖动）"时模型重试会用 +1 后
+    # 的新序号派生**新** id → 同一件 act 落两条、world 推演两次。改成成功后才推进：失败
+    # 重试用**同一个** per_act_id → world 按 (lane, act_id) 幂等去重只落一条。
+    #
+    # per-act id = uuid5(base act_id 入参, 序号)：base act_id 整轮重投稳定 + 序号在重投下
+    # 按调用次序稳定对齐 → 同一件 act 重投得同一 id（world 幂等去重、不重复推演）；同轮
+    # 不同件 act 序号不同 → 各自唯一 id（不再共用 base 被去重层静默吞）。uuid5 输出只含
+    # hex + ``-``，保住 world marker 解析的 UUID 形契约（不引入 ``|`` / ``]`` / ``:`` ——
+    # 见 app/world/engine.py 的 rpartition 解析）。
+    act_seq = 0
 
     @tool_error("更新此刻状态失败")
     async def update_life_state(
@@ -121,7 +142,11 @@ def build_life_tools(
         你当场未必知道）。只在心里转了一下、顺耳听过刚才的动静、没在外面留下任何
         痕迹，就不算，不用 act。
 
-        一轮只生效一件事：这一刻只能做一件，想清楚再做；没有就不用调。
+        想清楚再做；这一刻没有要做的就不用调，有几件要做就调几次。
+
+        first-landed-wins 语义：整轮重投 / 工具失败重试时，同一件 act（同序号）派生
+        同一个 per_act_id，world 按 ``(lane, act_id)`` 只保留**首次**落库那条。transcript
+        可能记到重试时模型给的不同措辞，但 world 推演依据的客观事实以首次落库那条为准。
 
         Args:
             description: 你做了什么，自然语言描述（如"我去厨房做饭"）。
@@ -129,29 +154,34 @@ def build_life_tools(
         Returns:
             一句确认。
         """
-        nonlocal act_performed
-        if act_performed:
-            # 本轮已做过一件事：第二次及以后不再落 handler（共用同一个 act_id 会被
-            # durable 去重层静默吞掉）。log + 把这句喂回模型让它知道这轮已经做过一件
-            # 事了，绝不静默吞。
-            logger.warning(
-                "[life_tools] %s/%s act called again in one round "
-                "(act_id=%s); only the first act takes effect this round, "
-                "ignoring description=%r",
-                lane,
-                persona_id,
-                act_id,
-                description,
-            )
-            return "你这一轮已经做了一件事了，一轮只生效一件；这件没有做，留到下一刻。"
+        nonlocal act_seq
+        # next_seq：用 act_seq+1 算这件 act 的 per-act id，但**先不推进 act_seq** ——
+        # perform_act 成功返回后才把 act_seq 推进到 next_seq。act_tool 叠了 @tool_error
+        # 会吞掉 perform_act 抛的错让模型重试；若 perform_act 写库成功但返回链路抛错
+        # （ack 丢 / 网络抖动），act_seq 不变 → 模型重试用**同一个** next_seq → 同一个
+        # per_act_id → world 按 (lane, act_id) 幂等去重只落一条。若 perform_act 纯写失败
+        # （没落库），act_seq 同样不变 → 重试用同一序号、这次成功只落一条。两种都只落
+        # 一条，序号从此绑定"已确认成功落库的 act slot"而非"调用尝试次数"。
+        next_seq = act_seq + 1
+        # per-act id：base act_id（整轮重投稳定）+ 本轮序号（重投下按调用次序稳定
+        # 对齐）经 uuid5 派生。同一件 act 重投得同一 id（world 按 (lane, act_id) 幂等
+        # 去重、不重复推演）；同轮不同件序号不同 → 各自唯一 id（不再共用 base 被去重
+        # 层静默吞）。NAMESPACE_OID + uuid5 输出只含 hex + "-"，保住 world marker 解析
+        # 的 UUID 形契约（不引入 "|" / "]" / ":" —— 见 app/world/engine.py 的 rpartition）。
+        per_act_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{act_id}:{next_seq}"))
         await perform_act(
             lane=lane,
-            act_id=act_id,
+            act_id=per_act_id,
             persona_id=persona_id,
             description=description,
             occurred_at=observed_at,
         )
-        act_performed = True
+        # 落库确认成功后才推进序号 —— 序号绑定"已确认落库的 act slot"。
+        # 注：同 occurred_at 下多件 act 的微观先后，world 端按 created_at 优先、UUID 串
+        # 只作稳定 tie-breaker（非调用序），同刻多 act 的微观顺序**不保证**、由 world
+        # 推演者（LLM）自行理解因果。不在此加任何排序逻辑（赤尾宪法：world 会自己理解
+        # 因果，强行保证顺序是工程脑）。
+        act_seq = next_seq
         return "已经做了"
 
     @tool_error("安排下次醒来失败")

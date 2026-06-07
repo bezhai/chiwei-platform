@@ -143,8 +143,14 @@ async def test_update_life_state_multiple_calls_all_recorded(stub_handlers):
 
 
 @pytest.mark.asyncio
-async def test_act_tool_uses_round_act_id(stub_handlers):
-    """act 用本轮派生的 act_id（整轮重放幂等），模型只给 description。"""
+async def test_act_tool_derives_per_act_id_from_base(stub_handlers):
+    """act 落库用从 base act_id 派生的 per-act id（本轮第 1 件）；模型只给 description。
+
+    per-act id = uuid5(base act_id 入参, 本轮序号)：第一件序号 1 → 确定派生值，绑死
+    base + 序号 → 同件重投幂等。模型看不见 lane / act_id / 序号，只给 description。
+    """
+    import uuid
+
     tools = _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3",
@@ -154,10 +160,11 @@ async def test_act_tool_uses_round_act_id(stub_handlers):
         )
     )
     await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    expected_id = str(uuid.uuid5(uuid.NAMESPACE_OID, "derived-round-id:1"))
     assert stub_handlers["acts"] == [
         {
             "lane": "coe-t3",
-            "act_id": "derived-round-id",
+            "act_id": expected_id,
             "persona_id": "akao",
             "description": "我去厨房煮咖啡",
             "occurred_at": "2026-06-03T12:30:00+00:00",
@@ -166,15 +173,109 @@ async def test_act_tool_uses_round_act_id(stub_handlers):
 
 
 @pytest.mark.asyncio
-async def test_act_second_call_does_not_emit_and_feeds_back(stub_handlers, caplog):
-    """一轮里第二次调 act 不再落 handler（一轮只允许做一件事生效）。
+async def test_act_multiple_in_round_all_land_with_unique_ids(stub_handlers):
+    """一轮里调 N 次 act，每件都真正落 handler、各自唯一 act_id（不再被 if 守卫吞）。
 
-    act_id 由本轮 event_ids 派生 —— 同一轮里 N 次 act 会共用同一个 act_id，第二个
-    及以后会被 durable 去重层按 act_id 静默吞掉、动作无声丢失。第一刀：本轮已做过
-    一件事后，第二次调用不再落 handler，而是 log warning + 返回一句提示喂回模型
-    （绝不静默吞）。
+    P6 修复：角色一轮想做几件就做几件，不再"一轮只生效一件"。per-act id 用
+    base act_id + 本轮第 N 件的序号派生（序号是纯机制 seed、只标识第几件，不当
+    行为闸），每件 act 各自落库、各自唯一 id —— world 端按 (lane, act_id) 幂等消化，
+    N 件 act → N 个不同 id → N 次推演（第二件不再被静默吞）。
     """
-    import logging
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+
+    r1 = await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    r2 = await tools["act"].invoke({"description": "顺便给千凪带一杯"})
+    r3 = await tools["act"].invoke({"description": "把窗帘拉开"})
+
+    # 三件都真正落到 handler（不再"一轮只生效一件"）
+    assert [a["description"] for a in stub_handlers["acts"]] == [
+        "我去厨房煮咖啡",
+        "顺便给千凪带一杯",
+        "把窗帘拉开",
+    ]
+    # 每件各自唯一 act_id（per-act 派生、不共用 base）
+    act_ids = [a["act_id"] for a in stub_handlers["acts"]]
+    assert len(set(act_ids)) == 3, f"每件 act 应各自唯一 id，实得 {act_ids}"
+    # 每件都正常返回确认（不是某件被吞、不返回拒绝提示）
+    for r in (r1, r2, r3):
+        assert isinstance(r, str) and r
+
+
+@pytest.mark.asyncio
+async def test_act_per_act_id_stable_under_round_replay(stub_handlers):
+    """整轮重投同一批唤醒（同一 base act_id）→ 同一件 act（同序号）得同一 per-act id。
+
+    幂等命门：base act_id 由唤醒源派生、整轮重投稳定不变；per-act id 从 (base act_id,
+    本轮第 N 件序号) 纯函数派生 —— 第一轮第 1 件与重投第 1 件得同一 id，world 端
+    insert_idempotent 按 (lane, act_id) 去重 → 不重复推演同一动作。
+    """
+    # 第一轮：同一 base act_id 下做两件
+    tools_a = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="same-base-act-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_a["act"].invoke({"description": "我去厨房煮咖啡"})
+    await tools_a["act"].invoke({"description": "顺便给千凪带一杯"})
+    first_round_ids = [a["act_id"] for a in stub_handlers["acts"]]
+
+    stub_handlers["acts"].clear()
+
+    # 重投：整轮重新构建工具（同一 base act_id）、LLM 重新做同序的两件
+    tools_b = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="same-base-act-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_b["act"].invoke({"description": "我去厨房煮咖啡"})
+    await tools_b["act"].invoke({"description": "顺便给千凪带一杯"})
+    replay_round_ids = [a["act_id"] for a in stub_handlers["acts"]]
+
+    # 同序号的 act 在重投下得同一 per-act id（幂等：world 不重复推演）
+    assert replay_round_ids == first_round_ids
+
+
+@pytest.mark.asyncio
+async def test_act_seq_advances_only_after_perform_act_succeeds(monkeypatch):
+    """P6 必改：act_seq 只在 perform_act 成功后才推进 —— 失败重试用同一个 per_act_id。
+
+    bug：旧实现 ``act_seq += 1`` 发生在 perform_act **之前**。act_tool 叠 @tool_error
+    会吞掉 perform_act 抛的错（把错误 outcome 喂回模型让它重试），所以"perform_act
+    写库成功了但返回链路抛错（DB commit 后 ack 丢失 / 网络抖动）"这种场景下：
+    模型重试 act → act_seq 又 +1 → 用新序号派生**新的** per_act_id → 同一件 act 落两条、
+    world 推演两次。根因是序号绑定了"调用尝试次数"而非"已确认落库的 act slot"。
+
+    修法：用 act_seq+1 算 per_act_id、perform_act **成功后**才把 act_seq 推进到那个值。
+    本测模拟：第一次 perform_act 抛错（写成功但 ack 丢 / 或纯写失败），第二次正常落库；
+    模型重试同一意图（连调两次 act）。断言两次尝试用**同一个** per_act_id —— 这样
+    world 端 (lane, act_id) durable 去重才能把它当同一件、只落一条。
+    """
+    seen_ids: list[str] = []
+    calls = {"n": 0}
+
+    async def flaky_perform_act(**kwargs):
+        # 记下每次尝试用的 act_id（不论成败），断言重试用同一个。
+        seen_ids.append(kwargs["act_id"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 第一次：模拟写库成功但返回链路抛错（ack 丢 / 网络抖动）。
+            raise RuntimeError("ack lost after commit")
+        # 第二次（模型重试）：正常落库。
+
+    monkeypatch.setattr(lt, "perform_act", flaky_perform_act)
 
     tools = _tools_by_name(
         lt.build_life_tools(
@@ -185,21 +286,79 @@ async def test_act_second_call_does_not_emit_and_feeds_back(stub_handlers, caplo
         )
     )
 
-    with caplog.at_level(logging.WARNING):
-        first = await tools["act"].invoke({"description": "我去厨房煮咖啡"})
-        second = await tools["act"].invoke({"description": "顺便给千凪带一杯"})
+    # 第一次尝试：perform_act 抛错 → @tool_error 吞错、返回结构化 outcome（不抛）。
+    out1 = await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    assert isinstance(out1, dict) and out1["kind"] == "tool_error"
 
-    # 只有第一次真正落到 handler（只 emit 一个动作），第二次不落
-    assert len(stub_handlers["acts"]) == 1
-    assert stub_handlers["acts"][0]["description"] == "我去厨房煮咖啡"
+    # 模型重试同一意图：再调一次 act。
+    out2 = await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    assert out2 == "已经做了"
 
-    # 第二次返回一句提示喂回模型，不是 None、不是静默吞
-    assert isinstance(second, str)
-    assert second != first
-    assert second  # 非空提示
+    # 命门断言：两次尝试用的是同一个 per_act_id（失败没消耗序号）。
+    assert len(seen_ids) == 2
+    assert seen_ids[0] == seen_ids[1], (
+        f"失败重试必须用同一个 per_act_id（durable 去重靠它只落一条），"
+        f"实得 {seen_ids}"
+    )
 
-    # 第二次被丢要 log warning（不静默）
-    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+@pytest.mark.asyncio
+async def test_act_seq_advances_per_act_when_perform_act_succeeds(monkeypatch):
+    """成功路径下 act_seq 正常推进 —— 同轮连做两件各自唯一 id（修复不破坏多件语义）。
+
+    修了失败重试不消耗序号后，必须保证成功路径仍然每件 act 推进序号、同轮不同件
+    得不同 id（否则就退化成"一轮只生效一件"被去重吞）。
+    """
+    seen_ids: list[str] = []
+
+    async def ok_perform_act(**kwargs):
+        seen_ids.append(kwargs["act_id"])
+
+    monkeypatch.setattr(lt, "perform_act", ok_perform_act)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    await tools["act"].invoke({"description": "顺便给千凪带一杯"})
+
+    assert len(seen_ids) == 2
+    assert seen_ids[0] != seen_ids[1], (
+        f"成功路径下同轮两件 act 应各自唯一 id（序号正常推进），实得 {seen_ids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_act_per_act_id_is_uuid_shaped_wire_contract(stub_handlers):
+    """per-act id 必须保持 UUID 形（只含 hex + ``-``）—— world 端 marker 解析的硬契约。
+
+    world engine 的 round marker 用 ``|`` 分隔、``rpartition("|")`` 解析回 act_id
+    （app/world/engine.py），文档明写"act_id 是 UUID 串（只有 hex + ``-``、不含
+    ``|`` ``]``）"。改派生格式不能引入 ``|`` / ``]`` / ``:`` 等字符，否则炸 world
+    解析。本测钉死 per-act id 仍是合法 UUID。
+    """
+    import uuid as _uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="derived-round-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["act"].invoke({"description": "我去厨房煮咖啡"})
+    await tools["act"].invoke({"description": "顺便给千凪带一杯"})
+
+    for a in stub_handlers["acts"]:
+        # 能被 UUID 解析回 = 只含 hex + "-"，绝无 | ] : 等会炸 world 解析的字符
+        parsed = _uuid.UUID(a["act_id"])
+        assert str(parsed) == a["act_id"]
 
 
 def test_act_description_guides_toward_low_action():
@@ -224,6 +383,9 @@ def test_act_description_guides_toward_low_action():
     # act 是"你做了"不是"申请 / 等批准"——旧裁决语义不该残留
     assert "裁决" not in desc
     assert "批准" not in desc
+    # P6 修复：删掉"一轮只生效一件事"的硬限制措辞（一轮做几件由她自己定）
+    assert "一轮只生效一件" not in desc
+    assert "只能做一件" not in desc
 
 
 # ---------------------------------------------------------------------------
