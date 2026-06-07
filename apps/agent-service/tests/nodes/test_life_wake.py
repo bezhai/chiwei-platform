@@ -1792,3 +1792,89 @@ async def test_act_id_durable_dedup_blocks_reinvoke_before_writeback(test_db):
     rows = await select_all_versions(ActPerformed, {"lane": lane, "act_id": act_id})
     assert len(rows) == 1, f"同 (lane, act_id) 只该有一条 ActPerformed，实际 {len(rows)} 条"
     assert rows[0].description == "我去厨房煮咖啡", "保留第一次的 act，不被重投覆盖"
+
+
+# ---------------------------------------------------------------------------
+# 观测刀：每轮 life 思考的 token 落 durable PG（不依赖会丢的 langfuse）。
+#
+# life_wake_node 用 collect_usage() 把 Agent.run 包住、run 完拿累计 token 调
+# record_round_cost 落库，actor = persona_id。这些测试用 fake agent 在 run 里
+# _accumulate_usage（模拟 adapter 在 collector 作用域内记 usage），断言收口确实把
+# 累计 token 记了下来（这里 record_round_cost 被打桩成记录调用参数）。
+# ---------------------------------------------------------------------------
+
+
+class _UsageAgent(_FakeAgent):
+    """run 时往当前 collector 累加一笔 usage（模拟 adapter 在 collect_usage 作用域内
+    经 span.update(usage_details=...) 记 token），用来验证节点确实把 run 包进了
+    collect_usage 且收口落库。"""
+
+    _usage = {"input": 30, "output": 10, "total": 40, "cache_read_input_tokens": 5}
+
+    async def run(self, messages, **kwargs):
+        from app.agent.trace import _accumulate_usage
+
+        _accumulate_usage(self._usage)
+        return await super().run(messages, **kwargs)
+
+
+@pytest.fixture
+def cost_recorded(monkeypatch):
+    """打桩 life_wake.record_round_cost，记录每次落库调用的 kwargs（含 usage）。"""
+    calls: list[dict] = []
+
+    async def fake_record(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(lw, "record_round_cost", fake_record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_life_round_records_token_cost_with_persona_actor(
+    patched, cost_recorded, monkeypatch
+):
+    """一轮 life 收口把本轮累计 token 落 PG，actor = persona_id、带 collect_usage 累计。"""
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _UsageAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(cost_recorded) == 1, "应落且只落一条本轮成本记录"
+    rec = cost_recorded[0]
+    assert rec["lane"] == "coe-t3"
+    assert rec["actor"] == "akao", "life 的 actor 必须是 persona_id"
+    # collect_usage 累计的本轮 token 原样传给 record_round_cost
+    assert rec["usage"]["input"] == 30
+    assert rec["usage"]["output"] == 10
+    assert rec["usage"]["total"] == 40
+    assert rec["usage"]["cache_read_input_tokens"] == 5
+    assert rec["usage"]["calls"] == 1, "本轮一次 LLM 调用 → calls=1"
+    assert rec["round_id"], "必须带 round_id（与 turn 幂等同源）"
+    assert rec["observed_at"], "必须带观测时刻"
+
+
+@pytest.mark.asyncio
+async def test_life_cost_record_failure_does_not_fail_round(
+    patched, monkeypatch
+):
+    """落成本失败必须 best-effort 吞掉，不把一轮真实思考搞成失败（标已读照常发生）。
+
+    打桩真实 ``thinking_cost.record_thinking_tokens`` 抛错（走 record_round_cost 里真正
+    的 swallow 路径），而非打桩节点的 record_round_cost —— 这样测的是真实吞错语义。
+    """
+    import app.domain.thinking_cost as tc
+
+    patched["unread"] = [_envelope("e1", "外面在下雨")]
+    _UsageAgent.install(monkeypatch, script=_script_update())
+
+    async def boom_record(**kwargs):
+        raise RuntimeError("PG down recording cost")
+
+    monkeypatch.setattr(tc, "record_thinking_tokens", boom_record)
+
+    # 不该抛——成本观测是旁路。
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 收口正常完成：标已读照常（成本失败不影响真实思考收口）。
+    assert patched["marked"] == [["e1"]]

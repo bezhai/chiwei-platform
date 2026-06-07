@@ -83,9 +83,10 @@ from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.session import load_session
-from app.agent.trace import make_session_id
+from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.acts import list_recent_acts
 from app.data.queries.mailbox import renotify_unread
+from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import ActPerformed
 from app.infra import cst_time
 from app.runtime.data import Data, Key
@@ -694,11 +695,27 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     # update_world / notify 是 durable 写，一次 model 调用瞬时失败若整轮重放会重放
     # 已执行的 durable 工具（失败语义命门）。中途失败直接抛 —— 下面的收口（推进游标
     # + 排下次醒）都不会执行，游标不推进、下轮重读这批（失败不推进、act 不丢）。
-    await Agent(_WORLD_CFG, tools=WORLD_TOOLS).run(
-        messages,
-        context=context,
-        session_id=session_id,
-        max_retries=1,
+    #
+    # **观测刀**：用 collect_usage() 把 run 包住，截下本轮所有 LLM 调用的 token 用量
+    # 落 durable PG（不依赖会系统性丢 trace 的 langfuse）。usage 来自 LLM response，
+    # 经 adapter 的 span.update → trace 累加器汇进 collector，run 完读 usage 落库。
+    with collect_usage() as usage:
+        await Agent(_WORLD_CFG, tools=WORLD_TOOLS).run(
+            messages,
+            context=context,
+            session_id=session_id,
+            max_retries=1,
+        )
+
+    # 本轮 token 落 durable PG（actor = "world"），best-effort 吞掉失败：成本观测是
+    # 旁路，绝不能因为记成本失败把一轮真实推演搞成失败重投。落库失败只 log，下面的收口
+    # （推进游标 + 排下次醒）照常进行（swallow 语义在 record_round_cost 里）。
+    await record_round_cost(
+        lane=lane,
+        actor="world",
+        round_id=round_id,
+        usage=usage,
+        observed_at=now_iso,
     )
 
     # 推演成功收口才把游标推进到本批末尾的 ``(created_at, act_id)``（pull 范式命门）：

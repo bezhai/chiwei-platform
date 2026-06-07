@@ -286,3 +286,174 @@ def test_make_session_id_is_readable():
     assert "prod" in sid
     assert "world" in sid
     assert "2026-06-04" in sid
+
+
+# ---------------------------------------------------------------------------
+# collect_usage — accumulate one Agent.run's token usage into a contextvar so
+# world/life收口 can record it to durable PG, INDEPENDENT of langfuse (the
+# whole point: langfuse drops durable-tool traces, PG must not). The hook lives
+# in _SafeSpan.update / _NoOpSpan.update — the sole funnel all three adapter
+# calls (complete / stream / structured) pass through.
+# ---------------------------------------------------------------------------
+
+from app.agent.trace import collect_usage  # noqa: E402
+
+
+def test_collect_usage_yields_zero_initialised_accumulator(mock_langfuse):
+    with collect_usage() as usage:
+        pass
+    assert usage == {
+        "input": 0,
+        "output": 0,
+        "total": 0,
+        "cache_read_input_tokens": 0,
+        "calls": 0,
+    }
+
+
+def test_collect_usage_accumulates_via_safespan_update(mock_langfuse):
+    """A _SafeSpan.update carrying usage_details accumulates into the collector;
+    each such update counts one model call."""
+    with collect_usage() as usage:
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(
+                output="a",
+                usage_details={"input": 10, "output": 4, "total": 14},
+            )
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(
+                output="b",
+                usage_details={
+                    "input": 6,
+                    "output": 2,
+                    "total": 8,
+                    "cache_read_input_tokens": 3,
+                },
+            )
+    assert usage == {
+        "input": 16,
+        "output": 6,
+        "total": 22,
+        "cache_read_input_tokens": 3,
+        "calls": 2,
+    }
+
+
+def test_collect_usage_update_without_usage_details_does_not_count_call(
+    mock_langfuse,
+):
+    """An update that only records output (no usage_details) is not a model call
+    and must not bump the call counter or any token dimension."""
+    with collect_usage() as usage:
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(output="just output")
+    assert usage["calls"] == 0
+    assert usage["input"] == 0
+    assert usage["total"] == 0
+
+
+def test_collect_usage_accumulates_when_langfuse_unavailable(monkeypatch):
+    """The whole point of this刀: token usage comes from the LLM response, not
+    langfuse. When langfuse is down the span is a _NoOpSpan — its update must
+    STILL accumulate, so cost observability survives langfuse loss."""
+
+    def _boom() -> Any:
+        raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr("app.agent.trace._get_client", _boom)
+
+    with collect_usage() as usage:
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(
+                output="x",
+                usage_details={"input": 7, "output": 3, "total": 10},
+            )
+    assert usage == {
+        "input": 7,
+        "output": 3,
+        "total": 10,
+        "cache_read_input_tokens": 0,
+        "calls": 1,
+    }
+
+
+def test_accumulate_usage_outside_collect_is_safe(mock_langfuse):
+    """No active collector → an update with usage_details must not raise."""
+    with generation_span(name="llm", model="m", input=[]) as span:
+        span.update(output="x", usage_details={"input": 1, "total": 1})
+    # reaching here without error is the assertion
+
+
+def test_collect_usage_resets_on_exit(mock_langfuse):
+    """Leaving the contextmanager clears the collector so a later update outside
+    it does not leak into a stale accumulator."""
+    with collect_usage() as first:
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(output="x", usage_details={"input": 5, "total": 5})
+    assert first["input"] == 5
+
+    # Outside collect now: an update must not mutate the old dict.
+    with generation_span(name="llm", model="m", input=[]) as span:
+        span.update(output="y", usage_details={"input": 99, "total": 99})
+    assert first["input"] == 5
+
+
+# ---------------------------------------------------------------------------
+# collect_usage — ContextVar leak boundary. ContextVars copy into tasks spawned
+# by asyncio.create_task, so a tool that fires a background LLM call inside a run
+# would inherit the parent's collector and bill someone else's tokens to this
+# round. world/life tools don't do this today; these tests pin the boundary so a
+# future background-LLM addition sees the contract.
+# ---------------------------------------------------------------------------
+
+from app.agent.trace import _usage_collector  # noqa: E402
+
+
+async def test_collect_usage_collector_cleared_after_scope_in_async():
+    """After collect_usage exits (in an async context), the collector ContextVar
+    is back to None — a later accumulate in this task does not leak into the
+    finished round's dict. This is the leak-prevention invariant the cost刀
+    relies on: one round's collector must not survive into the next."""
+    assert _usage_collector.get() is None  # clean before
+    with collect_usage() as first:
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(output="x", usage_details={"input": 5, "total": 5})
+        assert _usage_collector.get() is first  # active inside scope
+    # The whole point: collector cleared on exit, no stale accumulator lingers.
+    assert _usage_collector.get() is None
+
+
+async def test_collect_usage_collector_inherited_by_create_task_child(
+    mock_langfuse,
+):
+    """DOCUMENTED CURRENT BEHAVIOR (boundary marker, NOT a desired feature):
+
+    asyncio.create_task snapshots the current contextvars, so a child task
+    spawned *inside* a collect_usage scope inherits the SAME collector object.
+    Today no world/life tool spawns a background LLM call inside a run, so this
+    is harmless. But if one ever does, its tokens would accumulate into THIS
+    round's collector. This test exists so whoever adds such a path trips it and
+    sees the boundary, rather than silently mis-billing a round.
+    """
+    import asyncio
+
+    seen: list[dict | None] = []
+
+    async def _child() -> None:
+        # The child sees the parent's collector (ContextVar copied at task spawn)
+        # and an accumulate here lands in the parent's round dict.
+        seen.append(_usage_collector.get())
+        with generation_span(name="llm", model="m", input=[]) as span:
+            span.update(output="bg", usage_details={"input": 11, "total": 11})
+
+    with collect_usage() as usage:
+        task = asyncio.create_task(_child())
+        await task
+
+    # Child inherited the same collector object the parent yielded.
+    assert seen == [usage]
+    # And the child's background tokens were billed into this round — documenting
+    # exactly the mis-billing a future background-LLM tool would cause.
+    assert usage["input"] == 11
+    assert usage["total"] == 11
+    assert usage["calls"] == 1

@@ -1175,3 +1175,99 @@ async def test_self_lock_conflict_is_swallowed(monkeypatch):
 
     async with single_flight("world:coe-t2", ttl=60):
         await world_tick(WorldTick(lane="coe-t2", reason="self"))
+
+
+# ---------------------------------------------------------------------------
+# 观测刀：每轮 world 思考的 token 落 durable PG（不依赖会丢的 langfuse）。
+#
+# world_tick 用 collect_usage() 把 Agent.run 包住、run 完拿累计 token 调
+# record_round_cost 落库，actor = "world"。fake_run 在 collector 作用域内
+# _accumulate_usage 模拟 adapter 记 token，断言收口确实把累计 token 落了 PG。
+# ---------------------------------------------------------------------------
+
+
+def _mock_run_with_usage(monkeypatch, usage):
+    """fake Agent.run，在当前 collect_usage 作用域内累加一笔 usage。"""
+
+    async def fake_run(
+        self, messages, *, prompt_vars=None, context=None, session_id=None,
+        max_retries=2,
+    ):
+        from app.agent.trace import _accumulate_usage
+
+        _accumulate_usage(usage)
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
+
+
+@pytest.fixture
+def world_cost_recorded(monkeypatch):
+    """打桩 engine.record_round_cost，记录落库调用 kwargs（含 usage）。"""
+    calls: list[dict] = []
+
+    async def fake_record(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(engine_mod, "record_round_cost", fake_record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_world_round_records_token_cost_with_world_actor(
+    monkeypatch, world_cost_recorded
+):
+    """一轮 world 收口把本轮累计 token 落 PG，actor = "world"、带 collect_usage 累计。"""
+    _mock_run_with_usage(
+        monkeypatch,
+        {"input": 500, "output": 80, "total": 580, "cache_read_input_tokens": 100},
+    )
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert len(world_cost_recorded) == 1, "应落且只落一条本轮成本记录"
+    rec = world_cost_recorded[0]
+    assert rec["lane"] == "coe-t2"
+    assert rec["actor"] == "world", "world 的 actor 必须是 'world'"
+    # collect_usage 累计的本轮 token 原样传给 record_round_cost
+    assert rec["usage"]["input"] == 500
+    assert rec["usage"]["output"] == 80
+    assert rec["usage"]["total"] == 580
+    assert rec["usage"]["cache_read_input_tokens"] == 100
+    assert rec["usage"]["calls"] == 1
+    assert rec["round_id"], "必须带 round_id（与 turn 幂等同源）"
+    assert rec["observed_at"], "必须带观测时刻"
+
+
+@pytest.mark.asyncio
+async def test_world_cost_record_failure_does_not_fail_round(monkeypatch):
+    """落成本失败必须 best-effort 吞掉，不把一轮真实推演搞成失败（游标照常推进）。
+
+    打桩真实 ``thinking_cost.record_thinking_tokens`` 抛错（走 record_round_cost 里真正
+    的 swallow 路径），而非打桩 engine 的 record_round_cost —— 这样测的是真实吞错语义。
+    """
+    import app.domain.thinking_cost as tc
+
+    # 一批非空 act，让收口推进游标可被观测。
+    batch = [_act("coe-t2", "a1", "akao", "去厨房", "2026-06-03T06:00:00+08:00", "c1")]
+
+    async def fake_batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return batch
+
+    monkeypatch.setattr(engine_mod, "list_recent_acts", fake_batch)
+    _mock_run_with_usage(
+        monkeypatch, {"input": 1, "output": 1, "total": 2}
+    )
+
+    async def boom_record(**kwargs):
+        raise RuntimeError("PG down recording cost")
+
+    monkeypatch.setattr(tc, "record_thinking_tokens", boom_record)
+
+    # 不该抛——成本观测是旁路。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # 游标照常推进到本批末尾（成本失败不影响真实推演收口）。
+    assert engine_mod._test_cursor_calls == [
+        {"lane": "coe-t2", "created_at": "c1", "act_id": "a1"}
+    ], "记成本失败不该阻断游标推进"

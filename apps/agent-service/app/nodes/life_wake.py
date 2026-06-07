@@ -55,9 +55,10 @@ from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.session import load_session
-from app.agent.trace import make_session_id
+from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
 from app.domain.life_state import find_life_state
+from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import EventArrived, EventEnvelope
 from app.infra import cst_time
 from app.infra.redis import get_redis
@@ -592,12 +593,28 @@ async def _run_life_round(
     # 才从 Redis 读这条 transcript 拼到 messages 前、跑完把本轮（含工具调用与结果）
     # 追加写回、刷 24h TTL（只塞 context.session_id 不读写历史）。显式 session_id
     # 优先于 context.session_id。于是三姐妹每轮接着上一轮往下、记得刚才想过做过啥。
-    await Agent(_LIFE_WAKE_CFG, tools=tools).run(
-        messages=[Message(role=Role.USER, content=stimulus)],
-        prompt_vars=prompt_vars,
-        context=context,
-        session_id=session_id,
-        max_retries=1,
+    #
+    # **观测刀**：用 collect_usage() 把 run 包住，截下本轮所有 LLM 调用的 token 用量
+    # 落 durable PG（不依赖会系统性丢 trace 的 langfuse）。usage 来自 LLM response，
+    # 经 adapter 的 span.update → trace 累加器汇进 collector，run 完读 usage 落库。
+    with collect_usage() as usage:
+        await Agent(_LIFE_WAKE_CFG, tools=tools).run(
+            messages=[Message(role=Role.USER, content=stimulus)],
+            prompt_vars=prompt_vars,
+            context=context,
+            session_id=session_id,
+            max_retries=1,
+        )
+
+    # 本轮 token 落 durable PG（actor = persona_id），best-effort 吞掉失败：成本观测是
+    # 旁路，绝不能因为记成本失败把一轮真实思考搞成失败重投。落库失败只 log，下面的标
+    # 已读 / 排下次醒照常进行（swallow 语义在 record_round_cost 里）。
+    await record_round_cost(
+        lane=lane,
+        actor=persona_id,
+        round_id=round_id,
+        usage=usage,
+        observed_at=observed_at,
     )
 
     # 收口：标已读，只标本轮实际读到的那批 event_id（绝不按 persona 全标）。即使
