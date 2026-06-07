@@ -9,6 +9,10 @@ export interface TaggerTriggerConfig {
     batchSize: number;
     submitTimeoutMs: number;
     submitRetries: number;
+    workerIdleDelayMs: number;
+    retryDelayMs: number;
+    processingTimeoutMs: number;
+    maxAttempts: number;
 }
 
 export interface TaggerCallbackServerConfig {
@@ -88,6 +92,10 @@ export function loadTaggerTriggerConfig(env: Env = process.env): TaggerTriggerCo
         batchSize: parseOptionalPositiveInt(env, 'TAGGER_SUBMIT_BATCH_SIZE') ?? 1,
         submitTimeoutMs: parseOptionalPositiveInt(env, 'TAGGER_SUBMIT_TIMEOUT_MS') ?? 10000,
         submitRetries: parseOptionalNonNegativeInt(env, 'TAGGER_SUBMIT_RETRIES') ?? 2,
+        workerIdleDelayMs: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_WORKER_IDLE_DELAY_MS') ?? 5000,
+        retryDelayMs: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_RETRY_DELAY_MS') ?? 60000,
+        processingTimeoutMs: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS') ?? 600000,
+        maxAttempts: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_MAX_ATTEMPTS') ?? 5,
     };
 }
 

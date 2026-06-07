@@ -1,6 +1,6 @@
 import type { Document } from 'mongodb';
 
-export type TaggerTaskStatus = 'submitted' | 'completed' | 'failed';
+export type TaggerTaskStatus = 'queued' | 'processing' | 'retry' | 'submitted' | 'completed' | 'failed' | 'submit_failed';
 
 export interface TaggerCallbackPayload extends Record<string, unknown> {
     task_id: string;
@@ -24,10 +24,14 @@ export interface TaggerTaskDocument extends Document {
 export interface TaggerImageResultDocument extends Document {
     pixiv_addr: string;
     object_name: string;
-    task_id: string;
+    task_id?: string;
     status: TaggerTaskStatus | string;
     result?: Record<string, unknown>;
     error?: string | null;
+    queued_at?: Date;
+    processing_at?: Date;
+    next_attempt_at?: Date;
+    attempts?: number;
     submitted_at?: Date;
     completed_at?: Date;
     created_at: Date;

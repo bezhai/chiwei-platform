@@ -1,6 +1,7 @@
 import type {
     AnyBulkWriteOperation,
     CreateIndexesOptions,
+    FindOptions,
     IndexSpecification,
     UpdateFilter,
     UpdateOptions,
@@ -9,6 +10,12 @@ import type { TaggerCallbackPayload, TaggerImageResultDocument, TaggerTaskDocume
 
 export interface CollectionLike<T extends Record<string, unknown>> {
     createIndex(indexSpec: IndexSpecification, options?: CreateIndexesOptions): Promise<string>;
+    find(filter: Record<string, unknown>, options?: FindOptions<T>): Promise<T[]>;
+    findOneAndUpdate(
+        filter: Record<string, unknown>,
+        update: UpdateFilter<T>,
+        options?: { upsert?: boolean; returnDocument?: 'before' | 'after' }
+    ): Promise<T | null>;
     updateOneRaw(filter: Record<string, unknown>, update: UpdateFilter<T>, options?: UpdateOptions): Promise<void>;
     bulkWrite(operations: AnyBulkWriteOperation<T>[], options?: { ordered?: boolean }): Promise<unknown>;
 }
@@ -36,6 +43,111 @@ export class TaggerResultRepository {
         await this.collections.imageResults.createIndex(
             { task_id: 1 },
             { background: true, name: 'idx_tagger_image_results_task_id' }
+        );
+        await this.collections.imageResults.createIndex(
+            { status: 1, next_attempt_at: 1, queued_at: 1 },
+            { background: true, name: 'idx_tagger_image_results_outbox_due' }
+        );
+        await this.collections.imageResults.createIndex(
+            { status: 1, processing_at: 1 },
+            { background: true, name: 'idx_tagger_image_results_processing_stale' }
+        );
+    }
+
+    async enqueueForTrigger(pixivAddr: string): Promise<void> {
+        const at = this.now();
+        await this.collections.imageResults.updateOneRaw(
+            { pixiv_addr: pixivAddr },
+            {
+                $setOnInsert: {
+                    pixiv_addr: pixivAddr,
+                    object_name: pixivAddr,
+                    created_at: at,
+                },
+                $set: {
+                    status: 'queued',
+                    queued_at: at,
+                    next_attempt_at: at,
+                    attempts: 0,
+                    updated_at: at,
+                    error: null,
+                },
+            },
+            { upsert: true }
+        );
+    }
+
+    async findDueTriggerImages(params: { limit: number; processingTimeoutMs: number }): Promise<TaggerImageResultDocument[]> {
+        const at = this.now();
+        const processingStaleBefore = new Date(at.getTime() - params.processingTimeoutMs);
+        return this.collections.imageResults.find(
+            {
+                $or: [
+                    {
+                        status: { $in: ['queued', 'retry'] },
+                        $or: [
+                            { next_attempt_at: { $lte: at } },
+                            { next_attempt_at: { $exists: false } },
+                        ],
+                    },
+                    {
+                        status: 'processing',
+                        processing_at: { $lte: processingStaleBefore },
+                    },
+                ],
+            },
+            {
+                sort: { next_attempt_at: 1, queued_at: 1, created_at: 1 },
+                limit: params.limit,
+            }
+        );
+    }
+
+    async claimDueTriggerImage(params: { path: string; processingTimeoutMs: number }): Promise<TaggerImageResultDocument | null> {
+        const at = this.now();
+        const processingStaleBefore = new Date(at.getTime() - params.processingTimeoutMs);
+        return this.collections.imageResults.findOneAndUpdate(
+            {
+                pixiv_addr: params.path,
+                $or: [
+                    {
+                        status: { $in: ['queued', 'retry'] },
+                        $or: [
+                            { next_attempt_at: { $lte: at } },
+                            { next_attempt_at: { $exists: false } },
+                        ],
+                    },
+                    {
+                        status: 'processing',
+                        processing_at: { $lte: processingStaleBefore },
+                    },
+                ],
+            },
+            {
+                $set: {
+                    status: 'processing',
+                    processing_at: at,
+                    updated_at: at,
+                    error: null,
+                },
+            },
+            { returnDocument: 'after' }
+        );
+    }
+
+    async markRetry(params: { path: string; error: string; attempts: number; nextAttemptAt: Date }): Promise<void> {
+        const at = this.now();
+        await this.collections.imageResults.updateOneRaw(
+            { pixiv_addr: params.path },
+            {
+                $set: {
+                    status: 'retry',
+                    attempts: params.attempts,
+                    next_attempt_at: params.nextAttemptAt,
+                    updated_at: at,
+                    error: params.error,
+                },
+            }
         );
     }
 

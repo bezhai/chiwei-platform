@@ -6,6 +6,7 @@ class FakeCollection<T extends Record<string, unknown>> implements CollectionLik
     readonly indexes: Array<{ spec: Record<string, 1 | -1>; options?: Record<string, unknown> }> = [];
     readonly updates: Array<{ filter: Record<string, unknown>; update: Record<string, unknown>; options?: Record<string, unknown> }> = [];
     readonly bulkOperations: unknown[] = [];
+    findResult: T[] = [];
 
     async createIndex(spec: Record<string, 1 | -1>, options?: Record<string, unknown>): Promise<string> {
         this.indexes.push({ spec, options });
@@ -18,6 +19,19 @@ class FakeCollection<T extends Record<string, unknown>> implements CollectionLik
         options?: Record<string, unknown>
     ): Promise<void> {
         this.updates.push({ filter, update, options });
+    }
+
+    async find(_filter: Record<string, unknown>, _options?: Record<string, unknown>): Promise<T[]> {
+        return this.findResult;
+    }
+
+    async findOneAndUpdate(
+        filter: Record<string, unknown>,
+        update: Record<string, unknown>,
+        options?: Record<string, unknown>
+    ): Promise<T | null> {
+        this.updates.push({ filter, update, options });
+        return this.findResult[0] ?? null;
     }
 
     async bulkWrite(operations: unknown[]): Promise<void> {
@@ -54,6 +68,88 @@ describe('TaggerResultRepository', () => {
             {
                 spec: { task_id: 1 },
                 options: { background: true, name: 'idx_tagger_image_results_task_id' },
+            },
+            {
+                spec: { status: 1, next_attempt_at: 1, queued_at: 1 },
+                options: { background: true, name: 'idx_tagger_image_results_outbox_due' },
+            },
+            {
+                spec: { status: 1, processing_at: 1 },
+                options: { background: true, name: 'idx_tagger_image_results_processing_stale' },
+            },
+        ]);
+    });
+
+    it('enqueues an image for asynchronous trigger processing', async () => {
+        await repo.enqueueForTrigger('100363338_p1.jpg');
+
+        expect(imageResults.updates).toEqual([
+            {
+                filter: { pixiv_addr: '100363338_p1.jpg' },
+                update: {
+                    $setOnInsert: {
+                        pixiv_addr: '100363338_p1.jpg',
+                        object_name: '100363338_p1.jpg',
+                        created_at: now,
+                    },
+                    $set: {
+                        status: 'queued',
+                        queued_at: now,
+                        next_attempt_at: now,
+                        attempts: 0,
+                        updated_at: now,
+                        error: null,
+                    },
+                },
+                options: { upsert: true },
+            },
+        ]);
+    });
+
+    it('claims only due trigger images for processing', async () => {
+        imageResults.findResult = [
+            {
+                pixiv_addr: '100363338_p1.jpg',
+                object_name: '100363338_p1.jpg',
+                status: 'processing',
+                created_at: now,
+                updated_at: now,
+            },
+        ];
+
+        const claimed = await repo.claimDueTriggerImage({
+            path: '100363338_p1.jpg',
+            processingTimeoutMs: 600000,
+        });
+
+        expect(claimed?.pixiv_addr).toBe('100363338_p1.jpg');
+        expect(imageResults.updates).toEqual([
+            {
+                filter: {
+                    pixiv_addr: '100363338_p1.jpg',
+                    $or: [
+                        {
+                            status: { $in: ['queued', 'retry'] },
+                            $or: [
+                                { next_attempt_at: { $lte: now } },
+                                { next_attempt_at: { $exists: false } },
+                            ],
+                        },
+                        {
+                            status: 'processing',
+                            processing_at: { $lte: new Date('2026-06-05T09:50:00.000Z') },
+                        },
+                    ],
+                },
+                update: {
+                    $set: {
+                        status: 'processing',
+                        processing_at: now,
+                        updated_at: now,
+                        error: null,
+                    },
+                },
+                options: { returnDocument: 'after' },
             },
         ]);
     });
