@@ -96,13 +96,17 @@ class TestQueryWeather:
         from app.agent.tools.external_sources import query_weather
 
         def handler(req: httpx.Request) -> httpx.Response:
-            assert "devapi.qweather.com" in str(req.url)
+            # Host comes from per-account config now (QWeather assigns each key
+            # a dedicated API Host); assert the configured host + https scheme.
+            assert "test-host.qweatherapi.com" in str(req.url)
+            assert str(req.url).startswith("https://")
             return httpx.Response(200, json=_QWEATHER_OK)
 
         with patch(
             "app.agent.tools.external_sources.settings"
         ) as s, _stub_async_client(handler):
             s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_weather.invoke({})
 
         assert isinstance(result, dict)
@@ -130,6 +134,7 @@ class TestQueryWeather:
             "app.agent.tools.external_sources.settings"
         ) as s, _stub_async_client(handler):
             s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
             await query_weather.invoke({})
 
         # Key travels in the header, never in the query string.
@@ -150,6 +155,30 @@ class TestQueryWeather:
         assert "None" not in result["reason"]
 
     @pytest.mark.asyncio
+    async def test_missing_host_returns_ok_false_no_request(self):
+        # Host is per-account config (QWeather rejects the shared devapi host
+        # with "Invalid Host" 403). Without a configured host we degrade rather
+        # than fire a request at a host that will be refused.
+        from app.agent.tools.external_sources import query_weather
+
+        called = {"hit": False}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            called["hit"] = True
+            return httpx.Response(200, json=_QWEATHER_OK)
+
+        with patch(
+            "app.agent.tools.external_sources.settings"
+        ) as s, _stub_async_client(handler):
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = None
+            result = await query_weather.invoke({})
+
+        assert result["ok"] is False
+        assert result["reason"]
+        assert called["hit"] is False
+
+    @pytest.mark.asyncio
     async def test_network_failure_returns_ok_false_no_leak(self):
         from app.agent.tools.external_sources import query_weather
 
@@ -157,6 +186,7 @@ class TestQueryWeather:
             "app.agent.tools.external_sources.settings"
         ) as s, _stub_async_client(_raising_handler(httpx.ConnectError("boom"))):
             s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_weather.invoke({})
 
         assert result["ok"] is False
@@ -174,6 +204,7 @@ class TestQueryWeather:
             "app.agent.tools.external_sources.settings"
         ) as s, _stub_async_client(handler):
             s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_weather.invoke({})
 
         assert result["ok"] is False
@@ -190,6 +221,7 @@ class TestQueryWeather:
             "app.agent.tools.external_sources.settings"
         ) as s, _stub_async_client(handler):
             s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_weather.invoke({})
 
         assert result["ok"] is False

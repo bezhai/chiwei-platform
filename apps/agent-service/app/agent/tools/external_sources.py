@@ -43,8 +43,8 @@ _GUANGZHOU_LON = "113.27"
 _GUANGZHOU_LAT = "23.13"
 _GUANGZHOU_NAME = "广州"
 
-# 免费版必须打专属域名，打 api.qweather.com 会 403。
-_QWEATHER_BASE = "https://devapi.qweather.com"
+# 和风天气的 API Host 不写死：2024 改版后每个账号有专属 host（统一 devapi/api 域名
+# 对新 key 返 Invalid Host 403），host 从 settings.qweather_api_host 走 env 注入。
 _BANGUMI_CALENDAR_URL = "https://api.bgm.tv/calendar"
 _TIMOR_HOLIDAY_BASE = "https://timor.tech/api/holiday/info"
 
@@ -84,8 +84,12 @@ async def query_weather() -> dict[str, Any]:
     if not api_key:
         # 不把 key（None）拼进文本，只给人话原因。
         return _failed("未配置和风天气 API Key")
+    api_host = settings.qweather_api_host
+    if not api_host:
+        # host 没配就直接降级，不去打统一域名（必被 Invalid Host 403 拒）。
+        return _failed("未配置和风天气 API Host")
 
-    url = f"{_QWEATHER_BASE}/v7/weather/now"
+    url = f"https://{api_host}/v7/weather/now"
     params = {"location": f"{_GUANGZHOU_LON},{_GUANGZHOU_LAT}"}
     # key 只走 header，绝不进 url query —— reason 里贴 url 也不会泄露。
     headers = {"X-QW-Api-Key": api_key}

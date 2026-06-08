@@ -82,6 +82,11 @@ class Settings:
     qweather_api_key: str | None = field(
         default_factory=lambda: _env_or_none("QWEATHER_API_KEY")
     )
+    # 和风 2024 改版后每个账号分配专属 API Host（统一 devapi/api 域名对新 key 返
+    # Invalid Host 403）。host 是账号级敏感信息，走 env 注入、不入代码。
+    qweather_api_host: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_HOST")
+    )
     bangumi_access_token: str | None = field(
         default_factory=lambda: _env_or_none("BANGUMI_ACCESS_TOKEN")
     )
