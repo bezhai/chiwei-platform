@@ -250,18 +250,70 @@ _LIFE_WAKE_CFG = AgentConfig(
     "life_wake", "offline-model", "life-wake", recursion_limit=12
 )
 
-def _format_surroundings(surroundings: list[EventEnvelope]) -> str:
-    """把周遭切片（kind=surroundings）拼成「此刻你周遭」的客观叙事。
+def _humanize_elapsed(occurred_at: str, now: datetime) -> str | None:
+    """把「感知时刻 → now 已过去多久」拼成自然语言时间锚（认知留白维度，刀 3 Task 4）。
+
+    认知留白命门：角色对「别人此刻在哪」的认知全来自 world 投的周遭切片，但她对这条
+    信息没有「我是什么时候感知到的、可能已经过时」的留白，于是把可能过时的位置当既成
+    事实。这个 helper 给她她**自己感知切片**的时间锚——纯主观的「我多久前感知的」，
+    绝不比对 world 真相（那是确定性规则、违反赤尾宪法）。
+
+      * 感知时刻 ≈ now（刚感知、含未来钟漂）→ ``"刚刚"``：刚感知的不硬塞「N 分钟前」
+        让她对刚感知的也犯嘀咕，留白的诚实是「多久前就是多久前」。
+      * 1 小时内 → ``"X 分钟前"``；超 1 小时 → ``"X 小时前"``（不堆秒级噪声）。
+      * occurred_at 脏 / 无法解析（``cst_time.parse`` 返回 None）→ ``None``：算不出可信
+        时间锚，调用方降级（只铺周遭原文、留白靠「上一次感知到的周遭」的框兜，不靠这个
+        算不出的数字）。
+
+    just-now 阈值取 60 秒：周遭切片就是当前这一刻刚感知的（occurred_at ≈ now）时归入
+    「刚刚」，把语义噪声压住而不引入「确定性规则」（这不是替她决策、只是时间锚的措辞档）。
+    """
+    perceived = cst_time.parse(occurred_at)
+    if perceived is None:
+        return None
+    elapsed_seconds = (now - perceived).total_seconds()
+    if elapsed_seconds < 60:
+        # 刚感知（含 occurred_at 略晚于 now 的钟漂）：不硬塞 N 分钟前。
+        return "刚刚"
+    minutes = int(elapsed_seconds // 60)
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = int(elapsed_seconds // 3600)
+    return f"{hours} 小时前"
+
+
+def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> str:
+    """把周遭切片（kind=surroundings）拼成「你上一次感知到的周遭」+ 认知留白时间锚。
 
     周遭切片是 world 五官为她逐角色推演的「此刻你在哪、谁在你身边、环境怎样」
     （1C Task 2）。它是底框、不是清单条目，所以**不带** ``[kind]`` 机读前缀——直接
     给她当前周遭的客观叙事。一轮可能攒了多版切片（world 多次推演），按发生先后铺开、
     末尾那版是最新的周遭；都喂给她、由她读懂此刻所处。occurred_at 过 ``cst_time`` 归一
     到 CST（同 :func:`_format_dynamics`）。
+
+    **认知留白维度（刀 3 Task 4）**：开头带一行时间锚——「这是你上一次感知到的周遭，
+    感知于 X 分钟前」。穿帮根因是她把周遭切片里别人的位置当此刻既成事实（明写「仍在
+    家」的赤尾被千凪当成「刚出门」）；时间锚让她意识到她对别人位置的认知只是某个过去
+    时刻的快照、可能已变，从而像系统本能做对的那样自然留白（「你要是还在家就慢点走」），
+    而不是断言。时间锚按**最新那版切片**的感知时刻算（她对周遭的最新认知有多新）。
+
+    这是优化输入、不是加位置校验 if：只接她自己的 surroundings 切片 + now（她够得着
+    的纯主观信息），绝不比对 world 真相纠错（赤尾宪法）。occurred_at 脏 / 算不出时间锚
+    时降级（不带数字时间锚），留白仍由「上一次感知到的周遭」的框兜住。
     """
-    return "\n".join(
+    body = "\n".join(
         f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.summary}"
         for ev in surroundings
+    )
+    # 时间锚按最新那版（末尾）切片的感知时刻算——她对周遭的最近一次认知有多新。
+    anchor = _humanize_elapsed(surroundings[-1].occurred_at, now) if surroundings else None
+    if anchor is None:
+        # 算不出可信时间锚（脏 occurred_at）：降级，只框成「上一次感知到的周遭」+ 原文，
+        # 不硬编数字时间锚。
+        return f"（这是你上一次感知到的周遭，别人此刻的位置可能已经变了）\n{body}"
+    return (
+        f"（这是你上一次感知到的周遭，感知于{anchor}——别人此刻的位置可能已经变了）\n"
+        f"{body}"
     )
 
 
@@ -642,7 +694,7 @@ async def _run_life_round(
         if surroundings:
             parts.append(
                 "【此刻你周遭】（你此刻所处的环境、身边有谁，由你的感官投射给你）：\n"
-                f"{_format_surroundings(surroundings)}"
+                f"{_format_surroundings(surroundings, now)}"
             )
         if speech:
             parts.append(

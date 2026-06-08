@@ -88,13 +88,21 @@ from app.data.queries.acts import list_recent_acts
 from app.data.queries.mailbox import renotify_unread
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import ActPerformed
+from app.fetch.materials import (  # module-level so tests can monkeypatch
+    DailyMaterials,
+    find_daily_materials,
+)
 from app.infra import cst_time
 from app.runtime.data import Data, Key
 from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.runtime.single_flight import SingleFlightConflict, single_flight
-from app.world.state import advance_act_cursor, read_world_state
+from app.world.state import (
+    advance_act_cursor,
+    read_world_state,
+    record_world_round_close,
+)
 from app.world.tools import (
     FEATURE_SELF_WAKE,
     WORLD_TOOLS,
@@ -335,6 +343,31 @@ def _act_batch_text(acts: list[ActPerformed]) -> str:
     return "\n".join(lines)
 
 
+def _materials_section(materials: DailyMaterials) -> str:
+    """把当天的外部底料（``briefing``）渲染成喂给 world 的一段「今天的外部底料」公共背景文本。
+
+    底料是世界今天的真实节律（下雨 / 放假影响全家、番剧更新是公开信息）。world **当天
+    第一次醒**把它当**公共可得的背景知识**纳入一次（拼进这轮 user 消息、进意识流），
+    当天后续轮不再重喂。这里只渲染客观事实，不暗示任何角色去关注 / 行动（赤尾宪法：
+    world 不当导演——谁关心番剧是角色性格的事，不在这层决定）。
+
+    调用方（:func:`_run_world_round`）只在「今天有底料且本轮要纳入」时调本函数，所以
+    ``materials`` 必非 None —— 「今天没底料（None）」由调用方判定后**整段不拼**（不读
+    昨天、不冒充事实），不进这里。
+
+    底料就是抓取 agent 组织好的那段 ``briefing`` 中文话：它已把真实事实整理成连贯背景、
+    且对没拿到的源诚实说了「今天没拿到」（降级在 briefing 文本里就说清了，world 直接读
+    这段、不需要每源的成功标志）。这里只在 briefing 外裹一句背景定性、把它原样喂给 world。
+    """
+    return (
+        "下面是今天抓到的外部底料，作为全家此刻共处的同一个世界里**公共可得的背景"
+        "信息**——天气 / 节假日是客观环境（下雨、放假会影响全家此刻的样子），番剧"
+        "更新这类是公开消息（它就摆在那，谁会去关心是各角色性格的事，你只把它当世界"
+        "里客观存在的背景，绝不暗示谁去关注或行动）：\n"
+        f"{materials.briefing}"
+    )
+
+
 # 印在 stimulus 里的本轮标记前缀（turn 幂等查重靠它）：写回 transcript 后，下次
 # 同 round_id 重投能从 session 历史里查到这行 → 跳过、不重复追加同一轮、不重复
 # 推演（turn 幂等）。机读用，对模型无害（它只当是一行元信息）。
@@ -374,11 +407,12 @@ def _world_loop_messages(
     now_iso: str,
     wake_reason: str,
     round_id: str,
+    materials_text: str = "",
     act_batch_text: str = "",
     end_created_at: str | None = None,
     end_act_id: str | None = None,
 ) -> list[Message]:
-    """把"上一版世界叙述 / 现在几点 / 这批动作"拼成喂给循环的 user 消息。
+    """把"上一版世界叙述 / 现在几点 / 今天的外部底料 / 这批动作"拼成喂给循环的 user 消息。
 
     ``detail`` 是上一版世界叙述（冷启动时是一句"首次醒来、还没有上一版世界叙述"的
     占位文本）。``now_iso`` 是 engine 算的现实此刻时间（CST）。这里把当前客观 context
@@ -388,7 +422,13 @@ def _world_loop_messages(
 
     世界设定本身（这家是谁、屋里屋外的空间、三姐妹各自客观作息）由 system prompt
     一处承载，USER 层不再拼——避免世界设定两处真相。这里只喂"此刻动态"：上一版
-    叙述 / 现在几点 / 唤醒缘由 / 这批动作。
+    叙述 / 现在几点 / 今天的外部底料 / 唤醒缘由 / 这批动作。
+
+    ``materials_text``：当天外部底料渲染出的「今天的外部底料」段（:func:`_materials_section`
+    渲染的 briefing）。它是世界今天的真实节律（下雨 / 放假 / 番剧更新），作为**公共
+    背景知识**喂给 world。**只在 world 当天第一次醒、有底料且本轮要纳入时**由调用方
+    （:func:`_run_world_round`）传非空文本插这段（进意识流一次）；今天没底料 / 当天已
+    纳入过时传空串、不插这段（后续轮从 transcript 自然记得，不重喂）。
 
     ``act_batch_text``：这一批从游标 pull 到的所有人的动作清单（对称 life 读
     mailbox）。非空才插入「这一批动作」段——让 world 看到这段时间攒下的所有动作。
@@ -397,6 +437,9 @@ def _world_loop_messages(
     ``end_created_at`` / ``end_act_id``：本批终点游标（落库时刻 + act_id），编进 marker
     供重读命中时推进游标。空批次传 None（marker 编码成 ``end:-``，无终点可推进）。
     """
+    materials_section = (
+        f"【今天的外部底料】\n{materials_text}\n\n" if materials_text else ""
+    )
     act_section = (
         f"【这一批要你推演客观结果的动作（所有人）】\n{act_batch_text}\n\n"
         if act_batch_text
@@ -407,6 +450,7 @@ def _world_loop_messages(
         f"{world_loop_instruction()}\n\n"
         f"【现实此刻】{now_iso}\n"
         f"【你记得的上一版世界叙述】\n{detail}\n\n"
+        f"{materials_section}"
         f"【这次醒来的缘由】{wake_reason}\n\n"
         f"{act_section}"
         "看一眼这个世界，推演此刻它什么样，用 update_world 写下来；该让谁感知到的"
@@ -556,9 +600,11 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
          ``Agent.run(session_id=)``。工具读 ctx 里的 lane + round_id 行动。
       7. 循环自然收口（不再调工具就停）；中途瞬时失败因 max_retries=1 直接抛、
          **游标不推进**（失败不推进、下轮重读这批，act 不丢）。
-      8. **收口推演成功才推进游标到本批末尾 ``(created_at, act_id)`` + 排下次醒**
-         （advance_act_cursor + fire_self_wake）——世界叙述快照改由 update_world
-         工具在循环里负责写。
+      8. **收口推演成功才在同一次 WorldState append 里推进游标到本批末尾
+         ``(created_at, act_id)`` + 标记今天外部底料已纳入（当天首醒纳入那轮才标）**
+         （record_world_round_close）+ 排下次醒（fire_self_wake）——世界叙述快照改由
+         update_world 工具在循环里负责写。外部底料**当天第一次醒纳入一次、进意识流**
+         （后续轮从 transcript 自然记得、不重喂；今天没底料 / 已纳入则不拼这段）。
 
     session：当天 world 的所有唤醒归到她自己一条按天滚动的 session
     （make_session_id(lane,"world",今天)）；同一个 id 既是 langfuse session 标签
@@ -681,11 +727,39 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         tick, cold_start=cold_start, has_backlog=has_backlog
     )
 
+    # 当天外部底料：**当天第一次醒纳入一次、进意识流，之后当天不再重喂**（刀 3 调整）。
+    # world 有按天连续 session（意识流 transcript）：纳入那轮把底料写进 user 消息后，当天
+    # 后续轮次从 transcript 自然记得，不用每轮重喂。判断纳入与否：
+    #
+    #   * 按 (lane, **今天 CST**) 读底料（find_daily_materials 只按今天查，绝不读昨天）。
+    #   * 今天有底料（非 None）**且** snapshot.materials_ingested_date != 今天（当天还没
+    #     纳入过）→ 这轮纳入：渲染 briefing 拼进 user 消息，收口标记 materials_ingested_date
+    #     =今天。
+    #   * 今天已纳入过（== 今天）或今天还没底料（None）→ 不拼这段、不读昨天、不标记。
+    #
+    # today 用 now（CST）的 %Y-%m-%d，与 session_id / 收口标记的当天口径一致。
+    today = now.strftime("%Y-%m-%d")
+    prev_ingested_date = (
+        snapshot.materials_ingested_date if snapshot is not None else None
+    )
+    materials = await find_daily_materials(lane=lane, date=today)
+    # 本轮要纳入底料吗：有底料 + 当天还没纳入过。决定 → 渲染拼这段 + 收口标记今天。
+    ingest_materials_this_round = (
+        materials is not None and prev_ingested_date != today
+    )
+    materials_text = (
+        _materials_section(materials) if ingest_materials_this_round else ""
+    )
+    # 收口要标记的纳入日期：这轮纳入了就标今天，否则 None（record_world_round_close 收到
+    # None 不改 materials_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
+    mark_ingested_date = today if ingest_materials_this_round else None
+
     messages = _world_loop_messages(
         detail=detail,
         now_iso=now_iso,
         wake_reason=wake_reason,
         round_id=round_id,
+        materials_text=materials_text,
         act_batch_text=act_batch_text,
         end_created_at=batch_end_created_at,
         end_act_id=batch_end_act_id,
@@ -734,13 +808,27 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         observed_at=now_iso,
     )
 
-    # 推演成功收口才把游标推进到本批末尾的 ``(created_at, act_id)``（pull 范式命门）：
-    # 失败时上面的 run 已抛、不会走到这里，游标保持不动、下轮重读这批。空批次不推进
-    # （batch_end_* 为 None、没读到东西可推进）。游标用 created_at（落库序）不漏。
-    if batch_end_created_at is not None and batch_end_act_id is not None:
-        await advance_act_cursor(
-            lane=lane, created_at=batch_end_created_at, act_id=batch_end_act_id
-        )
+    # 推演成功收口：在**同一次** WorldState append 里推进游标 + 标记底料已纳入今天
+    # （record_world_round_close）。失败时上面的 run 已抛、不会走到这里，游标不推进、
+    # materials_ingested_date 不被误标记，下轮重读这批 act + 重新纳入底料（都不丢）。
+    #
+    #   * 游标：非空批传本批末尾 ``(created_at, act_id)``；空批次传 None（没读到 act 没什么
+    #     可推进，游标沿用上一版）。游标用 created_at（落库序）不漏。
+    #   * 底料：这轮纳入了传今天日期（标成今天）；没纳入（已纳入过 / 今天没底料）传 None
+    #     （不改、沿用上一版已有标记，绝不清回 None）。
+    #
+    # 两块并进一次 append：空批次但当天首醒纳入了底料时，游标传 None 不推进、但
+    # materials_ingested_date 仍能标成今天（一轮一版、不冲突、原子）。
+    advance_cursor_to = (
+        (batch_end_created_at, batch_end_act_id)
+        if batch_end_created_at is not None and batch_end_act_id is not None
+        else None
+    )
+    await record_world_round_close(
+        lane=lane,
+        advance_cursor_to=advance_cursor_to,
+        materials_ingested_date=mark_ingested_date,
+    )
 
     # 循环收口后 emit 至多一条 self WorldTick（唤醒风暴命门）：sleep 工具把"下次几时
     # 醒"写进 round-scoped FEATURE_SELF_WAKE（覆盖而非追加），这里读最后一次的待办、

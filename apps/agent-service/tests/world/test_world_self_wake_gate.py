@@ -86,9 +86,25 @@ def _stub_io(monkeypatch):
     async def fake_advance_act_cursor(*, lane, created_at, act_id):
         return None
 
+    async def fake_record_world_round_close(
+        *, lane, advance_cursor_to, materials_ingested_date
+    ):
+        # gate 放行的轮收口走统一收口（推游标 + 标记底料）；stub 成 no-op（不碰真库）。
+        return None
+
+    async def fake_find_daily_materials(*, lane, date):
+        # gate 放行的轮会读当天外部底料；这里 stub 成 None（今天没底料，不碰真库）。
+        return None
+
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
+    monkeypatch.setattr(
+        engine_mod, "record_world_round_close", fake_record_world_round_close
+    )
+    monkeypatch.setattr(
+        engine_mod, "find_daily_materials", fake_find_daily_materials
+    )
 
 
 def _stub_state(monkeypatch, snapshot: WorldState | None):

@@ -582,6 +582,190 @@ async def test_surroundings_and_ambient_rendered_in_separate_sections(patched, m
 
 
 # ---------------------------------------------------------------------------
+# 刀 3 Task 4：周遭感知的「认知留白」维度 —— 角色对他人此刻在哪不把过时信息当确定。
+#
+# 穿帮：角色对「别人此刻在哪」的认知全来自 world 的 surroundings 周遭切片，但她对
+# 这条信息没有「我是什么时候感知到的、可能已经过时」的留白，于是把可能过时的位置
+# 当既成事实（千凪对明写「仍在家」的赤尾说「刚出门慢点走」，把别人此刻的位置当确定）。
+#
+# 修法是优化输入、不是加位置校验 if：surroundings 段带上「这是你**上一次**感知到的
+# 周遭、感知于 X 分钟前」的时间锚，让她自然意识到她对别人位置的认知是某个过去时刻
+# 的快照、可能已变（像系统本能做对的「你要是还在家就慢点走」那种留白），而不是断言。
+#
+# 绝不比对 world 真相纠错（那是确定性规则、违反赤尾宪法）：这里只给她她自己感知的
+# 时间锚（她够得着的、纯主观的「我多久前感知的」），由她凭这个自己留白。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_surroundings_section_carries_perceived_time_anchor(patched, monkeypatch):
+    """周遭段必须带「这是你上一次感知到的周遭、感知于多久前」的时间锚（认知留白维度）。
+
+    红：现状 surroundings 段只客观铺开「此刻你周遭：……」，没有任何「我是什么时候
+    感知到的」的留白，于是模型把切片里别人的位置当此刻既成事实。绿：周遭段框成「你
+    **上一次**感知到的周遭」并带上感知时刻相对 now 的时间锚（多久前），让她意识到这
+    是个过去快照、别人此刻位置可能已变。
+
+    钉死 now 让「多久前」可断言：感知切片 occurred_at 比 now 早 25 分钟。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # 真实 UTC 12:30 这个时刻，按传入 tz 表示（→ CST 20:30）。
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    # 周遭切片感知于 25 分钟前（UTC 12:05 → CST 20:05），now 是 CST 20:30。
+    patched["unread"] = [
+        _envelope(
+            "s1",
+            "你在客厅写作业，绫奈姐姐在沙发上看书。",
+            kind=EVENT_KIND_SURROUNDINGS,
+            occurred_at="2026-06-03T12:05:00Z",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 周遭切片原文照常进 stimulus
+    assert "你在客厅写作业，绫奈姐姐在沙发上看书。" in msg_blob
+    # 框成「上一次感知到的周遭」——明确这是过去快照、不是此刻保证（认知留白命门）
+    assert "上一次" in msg_blob, (
+        "周遭段必须框成「你上一次感知到的周遭」，让她意识到这是过去快照、别人位置可能已变"
+    )
+    # 带上感知时刻相对 now 的时间锚：感知于 25 分钟前
+    assert "25 分钟前" in msg_blob, (
+        "周遭段必须带「感知于 X 分钟前」的时间锚（认知留白维度），实际 "
+        f"{msg_blob!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_surroundings_anchor_uses_latest_slice_when_multiple(patched, monkeypatch):
+    """一轮攒了多版周遭切片时，时间锚按**最新那版**的感知时刻算（她对周遭的最新认知）。
+
+    周遭切片是底框、末尾那版最新。时间锚应反映「她最近一次感知到周遭」是多久前——
+    用最新切片的 occurred_at，而不是最早那版（否则留白会过度、把刚感知的也说成很旧）。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    patched["unread"] = [
+        _envelope(
+            "s1", "更早的一版周遭：大家都在客厅。",
+            kind=EVENT_KIND_SURROUNDINGS, occurred_at="2026-06-03T11:30:00Z",  # 60 分钟前
+        ),
+        _envelope(
+            "s2", "较新的一版周遭：绫奈去厨房了。",
+            kind=EVENT_KIND_SURROUNDINGS, occurred_at="2026-06-03T12:25:00Z",  # 5 分钟前
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 时间锚按最新那版（5 分钟前）算，不是最早那版（60 分钟前）
+    assert "5 分钟前" in msg_blob, "时间锚应按最新切片的感知时刻算"
+    assert "60 分钟前" not in msg_blob, "不应按最早那版算时间锚（会过度留白）"
+
+
+@pytest.mark.asyncio
+async def test_surroundings_anchor_just_now_when_fresh(patched, monkeypatch):
+    """刚感知到的周遭（时间锚约等于此刻）不强行制造留白：说成「刚刚」而非「X 分钟前」。
+
+    认知留白是「信息可能过时」时才需要的；周遭切片就是此刻刚感知的（occurred_at ≈ now）
+    时不该硬塞「N 分钟前」让她对刚感知的也犯嘀咕。just-now 走「刚刚」措辞，保留留白维度
+    的诚实（多久前就是多久前，刚感知就是刚感知）。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    patched["unread"] = [
+        _envelope(
+            "s1", "你在客厅，绫奈在你旁边。",
+            kind=EVENT_KIND_SURROUNDINGS, occurred_at="2026-06-03T12:30:00Z",  # = now
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "刚刚" in msg_blob, "刚感知到的周遭时间锚应说「刚刚」，不硬塞 N 分钟前"
+
+
+@pytest.mark.asyncio
+async def test_surroundings_anchor_unparseable_occurred_at_no_crash(patched, monkeypatch):
+    """周遭切片 occurred_at 脏 / 无法解析时不崩、不硬编时间锚（兜底降级）。
+
+    occurred_at 脏（解析失败）→ 算不出「多久前」。此时不崩、照常铺出周遭原文，只是
+    这一版不带可信时间锚（认知留白靠 prompt 里「这是你上一次感知到的周遭」的框来兜，
+    不靠这个算不出的数字）。
+    """
+    patched["unread"] = [
+        _envelope(
+            "s1", "你在客厅，绫奈在沙发上。",
+            kind=EVENT_KIND_SURROUNDINGS, occurred_at="不是时间的脏串",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 周遭原文照常铺出（兜底不吞）
+    assert "你在客厅，绫奈在沙发上。" in msg_blob
+    # 仍框成「上一次感知到的周遭」（留白框不依赖能否算出 N 分钟前）
+    assert "上一次" in msg_blob
+
+
+def test_format_surroundings_no_world_truth_comparison():
+    """结构命门：认知留白只用她自己感知切片的时间锚，绝不比对 world 真相纠错。
+
+    赤尾宪法：这是优化输入、不是加位置校验 if。``_format_surroundings`` 的签名只接
+    她自己的 surroundings 切片 + now，绝不接 WorldState / presence / 别人的 LifeState
+    —— 结构上杜绝「比对 world 发现不一致就拦截 / 纠正」那类确定性规则。
+    """
+    import inspect
+
+    sig = inspect.signature(lw._format_surroundings)
+    params = list(sig.parameters)
+    # 只接 surroundings 切片 + now（她自己够得着的），不接任何 world 真相参数
+    for forbidden in ("world", "world_state", "presence", "others", "life_states"):
+        assert forbidden not in params, (
+            f"_format_surroundings 不该接 world 真相参数 {forbidden}（那是位置校验、违反赤尾宪法）"
+        )
+    # 源码里不出现任何「比对真相纠错」的符号
+    src = inspect.getsource(lw._format_surroundings)
+    for forbidden in ("WorldState", "read_presence", "find_life_state"):
+        assert forbidden not in src, (
+            f"_format_surroundings 引用了 world 真相符号 {forbidden}（位置校验、违反赤尾宪法）"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 1C Task 3：角色直连对话 —— 收件人 stimulus 呈现「X 对你说：原话」（speech 分层）
 # ---------------------------------------------------------------------------
 

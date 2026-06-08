@@ -23,6 +23,7 @@ from app.world.state import (
     WorldState,
     advance_act_cursor,
     read_world_state,
+    record_world_round_close,
     set_next_wake_at,
     write_world_state,
 )
@@ -278,4 +279,134 @@ async def test_advance_act_cursor_cold_start_no_snapshot_is_safe(world_db):
     """从没写过 WorldState 的 lane 调 advance_act_cursor 不抛（冷启容错）。"""
     await advance_act_cursor(
         lane="coe-never", created_at="2026-06-06T05:00:00+08:00", act_id="a1"
+    )
+
+
+# ---------------------------------------------------------------------------
+# materials_ingested_date —— 刀 3 调整：world「当天第一次醒纳入底料一次」的收口标记
+#
+# world 当天第一次醒、有底料且未纳入时把底料拼进意识流，收口时把
+# materials_ingested_date 标成今天；之后当天后续轮次不再重喂。这个标记必须和收口
+# 的游标推进并进同一次 WorldState append（原子、幂等、不和游标 / 到点时刻打架）。
+# ---------------------------------------------------------------------------
+
+
+def test_worldstate_has_nullable_materials_ingested_date():
+    """WorldState 多一个 materials_ingested_date 字段，nullable，默认 None（从没纳入过）。"""
+    assert "materials_ingested_date" in WorldState.model_fields
+    snap = WorldState(lane="x", world_time="t", detail="d")
+    assert snap.materials_ingested_date is None
+
+
+@pytest.mark.integration
+async def test_materials_ingested_date_defaults_null_and_insert_roundtrips(world_db):
+    """write_world_state 不带 materials_ingested_date → 列存 NULL（additive nullable 列）。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-08T06:30:00+08:00",
+        detail="清晨。",
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.materials_ingested_date is None, "从没纳入过底料时该字段为 None"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_marks_materials_and_advances_cursor(world_db):
+    """收口：同一次 append 既推进游标到本批末尾、又标记底料已纳入今天（原子、一版）。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-08T08:05:00+08:00", "a5"),
+        materials_ingested_date="2026-06-08",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at == "2026-06-08T08:05:00+08:00"
+    assert snap.act_cursor_act_id == "a5"
+    assert snap.materials_ingested_date == "2026-06-08"
+    # 叙述沿用上一版（收口不丢世界叙述）
+    assert snap.detail == "d0"
+    assert snap.world_time == "t0"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_marks_materials_on_empty_batch(world_db):
+    """空批次（没新 act 但当天首醒纳入了底料）→ 不推游标、但标记底料已纳入。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-08T07:00:00+08:00", act_id="prev"
+    )
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,  # 空批次：不推进游标
+        materials_ingested_date="2026-06-08",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    # 游标保持上一版不动（空批次不推进）
+    assert snap.act_cursor_created_at == "2026-06-08T07:00:00+08:00"
+    assert snap.act_cursor_act_id == "prev"
+    # 底料标记仍落上（即便没新 act）
+    assert snap.materials_ingested_date == "2026-06-08"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_advances_cursor_without_marking_materials(
+    world_db,
+):
+    """当天已纳入过底料 / 今天没底料 → materials_ingested_date 传 None：不改它，只推游标。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    # 上一版已标记今天纳入过
+    await record_world_round_close(
+        lane="coe-t2", advance_cursor_to=None, materials_ingested_date="2026-06-08"
+    )
+
+    # 同一天后续轮：只推游标，materials_ingested_date 传 None（不重标、保留已有值）
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-08T09:00:00+08:00", "a9"),
+        materials_ingested_date=None,
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at == "2026-06-08T09:00:00+08:00"
+    assert snap.act_cursor_act_id == "a9"
+    # materials_ingested_date 沿用上一版（传 None 不清掉已纳入标记）
+    assert snap.materials_ingested_date == "2026-06-08", (
+        "materials_ingested_date 传 None 时该保留已有值，不能被清回 None"
+    )
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_preserves_next_wake_at(world_db):
+    """收口标记底料 / 推游标都保留 next_wake_at（到点时刻是独立调度状态、不被打架）。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-08T10:00:00+08:00")
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-08T09:00:00+08:00", "a9"),
+        materials_ingested_date="2026-06-08",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.next_wake_at == "2026-06-08T10:00:00+08:00", (
+        "收口不该丢掉 next_wake_at"
+    )
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_cold_start_no_snapshot_is_safe(world_db):
+    """从没写过 WorldState 的 lane 调收口不抛（冷启容错，对称 advance_act_cursor）。"""
+    await record_world_round_close(
+        lane="coe-never",
+        advance_cursor_to=("2026-06-08T05:00:00+08:00", "a1"),
+        materials_ingested_date="2026-06-08",
     )

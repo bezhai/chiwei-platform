@@ -110,13 +110,55 @@ def _stub_state(monkeypatch):
     async def fake_advance_act_cursor(*, lane, created_at, act_id):
         cursor_calls.append({"lane": lane, "created_at": created_at, "act_id": act_id})
 
+    close_calls: list[dict] = []
+
+    async def fake_record_world_round_close(
+        *, lane, advance_cursor_to, materials_ingested_date
+    ):
+        # 正常成功收口走这个统一收口：既推游标（advance_cursor_to 非 None 时）又标记
+        # 底料已纳入（materials_ingested_date 非 None 时），一次 append。这里只记录调用，
+        # 同时把"推进游标"那部分镜像进 _test_cursor_calls，保持旧用例（断言游标推进）
+        # 不动——它们仍能断言"游标推到本批末尾"。
+        close_calls.append(
+            {
+                "lane": lane,
+                "advance_cursor_to": advance_cursor_to,
+                "materials_ingested_date": materials_ingested_date,
+            }
+        )
+        if advance_cursor_to is not None:
+            cursor_calls.append(
+                {
+                    "lane": lane,
+                    "created_at": advance_cursor_to[0],
+                    "act_id": advance_cursor_to[1],
+                }
+            )
+
+    materials_calls: list[dict] = []
+
+    async def fake_find_daily_materials(*, lane, date):
+        # 默认今天还没抓到底料（None）：专测引擎机制的用例不碰真库。需要断言外部
+        # 底料的用例自己覆写这个桩（monkeypatch.setattr engine_mod.find_daily_materials）。
+        materials_calls.append({"lane": lane, "date": date})
+        return None
+
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
+    monkeypatch.setattr(
+        engine_mod, "record_world_round_close", fake_record_world_round_close
+    )
+    monkeypatch.setattr(
+        engine_mod, "find_daily_materials", fake_find_daily_materials
+    )
+
+    engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
 
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
+    engine_mod._test_close_calls = close_calls  # type: ignore[attr-defined]
     yield
 
 
@@ -139,6 +181,29 @@ def _mock_run(monkeypatch, *, order: list[str] | None = None):
 
     monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
     return captured
+
+
+def _materials(
+    *,
+    lane="coe-t2",
+    date="2026-06-08",
+    briefing="今天广州多云转小雨，气温 22~28℃；《某番》今晚更新第 8 话；是普通工作日。",
+    fetched_at="2026-06-08T06:05:00+08:00",
+):
+    """构造一条 DailyMaterials（world 当天读到的外部底料）。
+
+    DailyMaterials 已简化成只存抓取 agent 组织好的那段 ``briefing`` 中文话 + date / lane
+    / fetched_at —— 某源是否拿到 agent 已在 briefing 里说清，不再有每源 ``*_text`` /
+    ``*_ok`` 字段。
+    """
+    from app.fetch.materials import DailyMaterials
+
+    return DailyMaterials(
+        lane=lane,
+        date=date,
+        briefing=briefing,
+        fetched_at=fetched_at,
+    )
 
 
 def _act(lane, act_id, persona_id, description, occurred_at, created_at):
@@ -466,6 +531,218 @@ async def test_pull_partial_batch_no_backlog_text(monkeypatch):
 
     blob = "".join(m.text() for m in captured["messages"])
     assert "积压" not in blob, "没读满 N 条不该告知积压"
+
+
+# ---------------------------------------------------------------------------
+# 刀 3 调整：world「当天第一次醒纳入底料一次、进意识流，之后当天不再重喂」
+#
+# 之前每轮都 find_daily_materials + _materials_section + 拼背景（啰嗦）。改成：
+# 今天有底料 **且** WorldState.materials_ingested_date != 今天 → 纳入一次（拼进
+# 这轮 user 消息），收口标记 materials_ingested_date=今天；当天后续轮次（已纳入）
+# 不再重喂；今天没底料（None）→ 不拼、不读昨天；纳入那轮崩溃 → 不误标记。
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with(monkeypatch, **kwargs):
+    """覆写 read_world_state，返回一个带指定字段的 WorldState（其余字段取默认）。"""
+    from app.world.state import WorldState
+
+    base = dict(lane="coe-t2", world_time="t", detail="d")
+    base.update(kwargs)
+
+    async def fake_read(*, lane):
+        return WorldState(**{**base, "lane": lane})
+
+    monkeypatch.setattr(engine_mod, "read_world_state", fake_read)
+
+
+@pytest.mark.asyncio
+async def test_first_wake_today_with_materials_ingests_briefing_and_marks(monkeypatch):
+    """① 当天第一次醒、有底料、未纳入 → briefing 进 user 消息，且收口标记 materials_ingested_date=今天。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    # 未纳入过（materials_ingested_date=None，区别于今天）。
+    _snapshot_with(monkeypatch, materials_ingested_date=None)
+
+    async def materials(*, lane, date):
+        return _materials(
+            briefing="今天广州一整天小雨；《某番》今晚更新第 8 话；普通工作日。",
+        )
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "小雨" in blob, "当天首醒有底料应把 briefing 纳入 world 的 USER 消息"
+    assert "第 8 话" in blob, "当天首醒有底料应把 briefing 纳入 world 的 USER 消息"
+
+    # 收口把 materials_ingested_date 标成今天（并进统一收口的同一次 append）。
+    assert engine_mod._test_close_calls, "纳入那轮收口必须走 record_world_round_close"
+    last = engine_mod._test_close_calls[-1]
+    assert last["materials_ingested_date"] == today, (
+        f"纳入那轮收口必须把 materials_ingested_date 标成今天 {today}，实际 {last}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_wake_queries_materials_for_today_cst(monkeypatch):
+    """未纳入时按 (当前 lane, 今天 CST date) 查底料 —— 绝不读昨天。"""
+    _snapshot_with(monkeypatch, materials_ingested_date=None)
+
+    calls: list[dict] = []
+
+    async def materials(*, lane, date):
+        calls.append({"lane": lane, "date": date})
+        return _materials(lane=lane, date=date)
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    assert calls == [{"lane": "coe-t2", "date": today}], (
+        f"未纳入时必须按 (当前 lane, 今天 CST date) 查底料，绝不读昨天，实际 {calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_second_wake_same_day_does_not_refeed_briefing(monkeypatch):
+    """② 同一天第二次醒（已纳入）→ briefing 不再进 user 消息（不重喂）。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    # 已纳入过今天（materials_ingested_date == 今天）。
+    _snapshot_with(monkeypatch, materials_ingested_date=today)
+
+    secret_briefing = "今天广州一整天小雨这串只在底料里出现"
+    queried: list = []
+
+    async def materials(*, lane, date):
+        queried.append(date)
+        return _materials(briefing=secret_briefing)
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert secret_briefing not in blob, (
+        "当天已纳入过底料，第二次醒不该再把 briefing 重喂进 user 消息"
+    )
+    assert "【今天的外部底料】" not in blob, "已纳入当天不再拼外部底料段（不重喂）"
+    # 收口也不再标记（传 None，不重标）。
+    assert engine_mod._test_close_calls, "收口仍应走 record_world_round_close"
+    assert engine_mod._test_close_calls[-1]["materials_ingested_date"] is None, (
+        "已纳入当天收口不再标记 materials_ingested_date（传 None）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_day_with_new_materials_reingests(monkeypatch):
+    """③ 跨到第二天有新底料（materials_ingested_date 是昨天）→ 重新纳入一次。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    yesterday = "2000-01-01"  # 任意 != 今天 的旧日期，模拟昨天纳入过
+    _snapshot_with(monkeypatch, materials_ingested_date=yesterday)
+
+    async def materials(*, lane, date):
+        return _materials(date=date, briefing="新的一天，今天台风蓝色预警。")
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "台风蓝色预警" in blob, "跨天有新底料应重新纳入一次"
+    assert engine_mod._test_close_calls[-1]["materials_ingested_date"] == today, (
+        "跨天重新纳入那轮收口应把 materials_ingested_date 标成今天（不是昨天）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_materials_today_does_not_feed_or_read_yesterday(monkeypatch):
+    """④ 今天没底料（None）→ 不拼底料段、不标记、不读昨天（find_daily_materials 只按今天查）。"""
+    _snapshot_with(monkeypatch, materials_ingested_date=None)
+
+    calls: list[dict] = []
+
+    async def no_materials(*, lane, date):
+        calls.append({"lane": lane, "date": date})
+        return None
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", no_materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 不拼底料段（None 时不喂、不冒充）。
+    assert "【今天的外部底料】" not in blob, "今天没底料时不该拼外部底料段"
+    assert "晴" not in blob, "没底料时绝不能凭空出现晴天等具体天气事实（冒充）"
+    # 只按今天查（绝不读昨天）。
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    assert calls == [{"lane": "coe-t2", "date": today}], (
+        f"find_daily_materials 只按今天查，绝不读昨天，实际 {calls}"
+    )
+    # 没纳入 → 收口不标记 materials_ingested_date（传 None）。
+    assert engine_mod._test_close_calls[-1]["materials_ingested_date"] is None, (
+        "今天没底料时收口不该标记 materials_ingested_date"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ingest_round_crash_does_not_mark_materials(monkeypatch):
+    """⑤ 纳入那轮崩溃（run 抛）→ 收口不执行，materials_ingested_date 不被误标记成已纳入。
+
+    崩溃时统一收口（record_world_round_close）根本不会被调到（run 抛在它之前），所以
+    materials_ingested_date 保持上一版（未标记），下轮重醒会重新纳入（底料不丢）。
+    """
+    _snapshot_with(monkeypatch, materials_ingested_date=None)
+
+    async def materials(*, lane, date):
+        return _materials(briefing="今天有底料。")
+
+    async def boom_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        raise RuntimeError("model boom during ingest round")
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    monkeypatch.setattr(engine_mod.Agent, "run", boom_run)
+
+    with pytest.raises(RuntimeError):
+        await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # 崩溃时统一收口没被调到 → 没标记（下轮重醒重新纳入，底料不丢）。
+    assert engine_mod._test_close_calls == [], (
+        "纳入那轮崩溃时收口绝不该执行（materials_ingested_date 不被误标记）"
+    )
+
+
+def test_render_materials_section_uses_briefing():
+    """渲染器：把 agent 组织好的 briefing 原样裹一句背景定性喂给 world。
+
+    DailyMaterials 已简化成只存 briefing —— 某源是否拿到 agent 已在 briefing 里说清，
+    渲染器不再做每源失败标注，只把 briefing 当公共背景渲染出来。
+    """
+    from app.world.engine import _materials_section
+
+    m = _materials(briefing="今天的连贯背景简报，天气源今天没拿到。")
+    section = _materials_section(m)
+    assert "今天的连贯背景简报，天气源今天没拿到。" in section, (
+        "主背景应原样用 agent 整理的 briefing"
+    )
+    assert "公共可得的背景信息" in section, "渲染器应裹一句背景定性"
 
 
 # ---------------------------------------------------------------------------

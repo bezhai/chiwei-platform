@@ -79,6 +79,9 @@ class Settings:
     )
 
     # -- Misc --
+    qweather_api_key: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_KEY")
+    )
     bangumi_access_token: str | None = field(
         default_factory=lambda: _env_or_none("BANGUMI_ACCESS_TOKEN")
     )

@@ -41,6 +41,7 @@ def _rebuild_production_graph():
         "admin",
         "agent_tool_events",
         "chat",
+        "fetch_dataflow",
         "life_dataflow",
         "memory",
         "memory_triggers",
