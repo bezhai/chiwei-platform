@@ -97,6 +97,10 @@ describe('loadTaggerTriggerConfig', () => {
             batchSize: 1,
             submitTimeoutMs: 10000,
             submitRetries: 2,
+            workerIdleDelayMs: 5000,
+            retryDelayMs: 60000,
+            processingTimeoutMs: 600000,
+            maxAttempts: 5,
         });
     });
 
@@ -109,11 +113,19 @@ describe('loadTaggerTriggerConfig', () => {
             TAGGER_SUBMIT_BATCH_SIZE: '4',
             TAGGER_SUBMIT_TIMEOUT_MS: '30000',
             TAGGER_SUBMIT_RETRIES: '5',
+            TAGGER_TRIGGER_WORKER_IDLE_DELAY_MS: '1000',
+            TAGGER_TRIGGER_RETRY_DELAY_MS: '15000',
+            TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS: '120000',
+            TAGGER_TRIGGER_MAX_ATTEMPTS: '9',
         });
 
         expect(config?.batchSize).toBe(4);
         expect(config?.submitTimeoutMs).toBe(30000);
         expect(config?.submitRetries).toBe(5);
+        expect(config?.workerIdleDelayMs).toBe(1000);
+        expect(config?.retryDelayMs).toBe(15000);
+        expect(config?.processingTimeoutMs).toBe(120000);
+        expect(config?.maxAttempts).toBe(9);
     });
 });
 

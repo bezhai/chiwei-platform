@@ -1,0 +1,17 @@
+[Unit]
+Description=Pixiv tagger backend service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<TAGGER_DEPLOY_ROOT>/current
+EnvironmentFile=<ABSOLUTE_PATH_TO_MACHINE_LOCAL_ENV>/tagger-backend.env
+ExecStart=<ABSOLUTE_PATH_TO_UV> run --no-sync uvicorn app.main:app --host ${TAGGER_HOST} --port ${TAGGER_PORT}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

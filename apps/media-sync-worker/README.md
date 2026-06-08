@@ -41,8 +41,9 @@ Tagger 结果存储例外：打标结果写入本地 Mongo，复用 channel-serv
 - `MINIO_SYNC_TIMEOUT_MS`：单张 OSS→MinIO 同步硬超时，默认 `30000`。
 - `TAGGER_RESULT_MONGO_ENABLED`：开启本地 Mongo 结果库连接，默认关闭。
 - `TAGGER_RESULT_MONGO_*`：本地 tagger 结果 Mongo 配置，必须和旧 `MONGO_*` 分开。
-- `TAGGER_TRIGGER_ENABLED`：开启下载后自动提交 tagger，默认关闭。
+- `TAGGER_TRIGGER_ENABLED`：开启下载后写入 tagger outbox，由后台 worker 自动提交 tagger，默认关闭。
 - `TAGGER_ENTRY_URL` / `TAGGER_API_TOKEN`：tagger entry 调用地址和 caller token。
+- `TAGGER_TRIGGER_WORKER_IDLE_DELAY_MS` / `TAGGER_TRIGGER_RETRY_DELAY_MS` / `TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS` / `TAGGER_TRIGGER_MAX_ATTEMPTS`：tagger outbox worker 轮询、重试和 processing 超时配置。
 - `TAGGER_CALLBACK_URL` / `TAGGER_CALLBACK_AUTH_TOKEN`：tagger-service 回调地址和回调鉴权 token。
 - `TAGGER_CALLBACK_SERVER_ENABLED` / `TAGGER_CALLBACK_PORT`：开启 worker 内部 HTTP callback 入口及端口。
 
