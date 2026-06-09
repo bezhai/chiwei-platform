@@ -1,8 +1,7 @@
 """Format a Note's when_at / created_at into a human-readable Chinese label.
 
-Used both by ``list_note`` tool output and ``build_active_notes_section``
-context injection. Day boundaries are computed in CST (UTC+8) so "今天" /
-"明天" align with the user's lived day, not UTC.
+Used by ``list_note`` tool output. Day boundaries are computed in CST (UTC+8)
+so "今天" / "明天" align with the user's lived day, not UTC.
 """
 
 from __future__ import annotations

@@ -1,15 +1,14 @@
-"""Memory context builder v4 — assemble always-on + conditional sections.
+"""Inner-context builder — what chat feeds 赤尾 each turn.
 
-Sections (order matters for prompt flow):
-  1. Scene (p2p/group/proactive)
-  2. Life state (current activity + mood)
-  3. Today schedule
-  4. Self abstracts (subject='self')
-  5. User abstracts (subject='user:<id>' / 和 X 的关系)  — skipped if no trigger_user
-  6. Active notes
-  7. Cross-chat (user-centric raw msgs)  — skipped if no trigger_user
-  8. Short-term fragments (§2.8)
-  9. Recall index (counts + recent titles)
+Two sections only, in order:
+  1. Scene (p2p / group / proactive) — who she's talking to, why.
+  2. Life snapshot — where she is, what she's doing, how she feels *right now*,
+     read straight from the life engine's LifeState. This is the main subject:
+     the 赤尾 talking to a real person is the 赤尾 living this moment.
+
+There is no RAG recall here. She speaks from what her life already knows
+(current_state + mood), nothing more — this keeps her information boundary
+(she isn't omniscient just because someone messaged her).
 """
 
 from __future__ import annotations
@@ -17,39 +16,43 @@ from __future__ import annotations
 import logging
 
 from app.domain.life_state import find_life_state
-from app.memory.sections.active_notes import build_active_notes_section
-from app.memory.sections.recall_index import build_recall_index_section
-from app.memory.sections.schedule import build_schedule_section
-from app.memory.sections.self_abstracts import build_self_abstracts_section
-from app.memory.sections.short_term_fragments import build_short_term_fragments_section
-from app.memory.sections.user_abstracts import build_user_abstracts_section
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
+# Cold start / thin state / read error all land here so inner_context never
+# collapses and chat can still hold a normal conversation.
+_LIFE_FALLBACK = "你此刻的状态暂时拿不到，就照你平时的样子自然聊吧。"
+
 
 async def _build_life_state(persona_id: str) -> str:
-    """读某姐妹此刻的主观快照 (LifeState)，拼成 chat 注入文本。
+    """她此刻的真实快照 (LifeState)，作为 inner_context 的主角。
 
     lane 口径与 world/life 写入端一致：``current_deployment_lane() or "prod"``
-    （进程级泳道，prod 归一到 "prod"）。读不到自己泳道写的快照就拼不出状态。
-    没有快照（她还没活过一轮）返回空串。
+    （进程级泳道，prod 归一到 "prod"）。
+
+    失败兜底（spec decision 6）：读不到快照（冷启 / 她还没活过一轮）、
+    current_state 稀薄、或读取报错时，返回一句简洁兜底而非空串——
+    inner_context 不能塌，chat 仍要能正常对话。
     """
     try:
         lane = current_deployment_lane() or "prod"
         snap = await find_life_state(lane=lane, persona_id=persona_id)
-        if not snap:
-            return ""
-        current = snap.current_state
-        mood = snap.response_mood
-        if current:
-            return (
-                f"你此刻的状态：{current}\n你的心情：{mood}"
-                if mood else f"你此刻的状态：{current}"
-            )
     except Exception as e:
         logger.warning("[%s] Failed to read life state: %s", persona_id, e)
-    return ""
+        return _LIFE_FALLBACK
+
+    if not snap:
+        return _LIFE_FALLBACK
+
+    current = (snap.current_state or "").strip()
+    if not current:
+        return _LIFE_FALLBACK
+
+    mood = (snap.response_mood or "").strip()
+    if mood:
+        return f"你此刻正在：{current}\n你的心情：{mood}"
+    return f"你此刻正在：{current}"
 
 
 def _scene_section(
@@ -88,11 +91,7 @@ async def build_inner_context(
     is_proactive: bool = False,
     proactive_stimulus: str = "",
 ) -> str:
-    """Assemble the full inner context string for chat injection (v4)."""
-
-    effective_user_id = (
-        None if (trigger_user_id in (None, "__proactive__")) else trigger_user_id
-    )
+    """Assemble inner_context: scene + life snapshot, nothing else."""
 
     sections: list[str] = []
 
@@ -102,54 +101,6 @@ async def build_inner_context(
     if scene:
         sections.append(scene)
 
-    life = await _build_life_state(persona_id)
-    if life:
-        sections.append(life)
-
-    sched = await build_schedule_section(persona_id=persona_id)
-    if sched:
-        sections.append(sched)
-
-    self_abs = await build_self_abstracts_section(persona_id=persona_id)
-    if self_abs:
-        sections.append(self_abs)
-
-    user_abs = await build_user_abstracts_section(
-        persona_id=persona_id,
-        trigger_user_id=effective_user_id,
-        trigger_username=trigger_username,
-    )
-    if user_abs:
-        sections.append(user_abs)
-
-    notes = await build_active_notes_section(persona_id=persona_id)
-    if notes:
-        sections.append(notes)
-
-    if effective_user_id:
-        from app.memory.cross_chat import (
-            build_cross_chat_context,  # lazy: avoids circular import
-        )
-
-        cross = await build_cross_chat_context(
-            persona_id=persona_id,
-            trigger_user_id=effective_user_id,
-            trigger_username=trigger_username or "",
-            current_chat_id=chat_id,
-        )
-        if cross:
-            sections.append(cross)
-
-    frag = await build_short_term_fragments_section(
-        persona_id=persona_id,
-        chat_id=chat_id,
-        trigger_user_id=effective_user_id,
-    )
-    if frag:
-        sections.append(frag)
-
-    recall_idx = await build_recall_index_section(persona_id=persona_id)
-    if recall_idx:
-        sections.append(recall_idx)
+    sections.append(await _build_life_state(persona_id))
 
     return "\n\n".join(sections)

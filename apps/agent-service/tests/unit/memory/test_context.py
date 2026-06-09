@@ -1,7 +1,10 @@
-"""Test build_inner_context v4 — section composition only.
+"""Test build_inner_context — scene + life snapshot only.
 
-Section internals are covered by tests/unit/memory/sections/. These tests verify
-the composer passes correct args and concatenates non-empty sections."""
+After the chat-input rewrite, inner_context is exactly two sections:
+the scene and the life "right now" snapshot. None of the old RAG sections
+(self/user abstracts, active notes, cross-chat, short-term fragments,
+recall index, schedule) are assembled anymore — those section functions
+are gone. These tests pin that contract and the life-snapshot fallback."""
 
 from __future__ import annotations
 
@@ -17,62 +20,97 @@ CST = timezone(timedelta(hours=8))
 
 
 @pytest.mark.asyncio
-async def test_p2p_assembles_all_sections():
-    # cross_chat is lazily imported inside the function body (avoids circular import),
-    # so we patch the source module rather than the context module namespace.
-    with (
-        patch("app.memory.context.build_schedule_section", new=AsyncMock(return_value="SCHED")),
-        patch("app.memory.context.build_self_abstracts_section", new=AsyncMock(return_value="SELF")),
-        patch("app.memory.context.build_user_abstracts_section", new=AsyncMock(return_value="USER")),
-        patch("app.memory.context.build_active_notes_section", new=AsyncMock(return_value="NOTES")),
-        patch("app.memory.context.build_short_term_fragments_section", new=AsyncMock(return_value="FRAG")),
-        patch("app.memory.context.build_recall_index_section", new=AsyncMock(return_value="RECALL")),
-        patch("app.memory.cross_chat.build_cross_chat_context", new=AsyncMock(return_value="CROSS")),
-        patch("app.memory.context._build_life_state", new=AsyncMock(return_value="LIFE")),
+async def test_p2p_assembles_scene_and_life_only():
+    """p2p inner_context = scene + life snapshot, nothing else."""
+    with patch(
+        "app.memory.context._build_life_state",
+        new=AsyncMock(return_value="你此刻在做饭，心情轻松"),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
             user_ids=["u1"], trigger_user_id="u1",
             trigger_username="浩南", persona_id="chiwei",
         )
-    for token in ("LIFE", "SELF", "USER", "SCHED", "NOTES", "FRAG", "RECALL", "CROSS"):
-        assert token in out
+
+    # scene present
+    assert "浩南" in out
+    # life snapshot present
+    assert "做饭" in out
+    # exactly two sections joined by the blank-line separator
+    assert out.count("\n\n") == 1
+
+
+@pytest.mark.asyncio
+async def test_no_old_rag_sections_assembled():
+    """The old RAG section builders must not be imported/called anymore.
+
+    Guards against accidental re-introduction: the names should no longer
+    exist on the context module, so patching them must raise AttributeError.
+    """
+    import app.memory.context as ctx
+
+    for name in (
+        "build_schedule_section",
+        "build_self_abstracts_section",
+        "build_user_abstracts_section",
+        "build_active_notes_section",
+        "build_short_term_fragments_section",
+        "build_recall_index_section",
+    ):
+        assert not hasattr(ctx, name), f"{name} should be removed from context module"
+
+
+@pytest.mark.asyncio
+async def test_inner_context_has_no_recall_or_relationship_text():
+    """No leftover RAG phrasing (recall hint / relationship / notes) in output."""
+    with patch(
+        "app.memory.context._build_life_state",
+        new=AsyncMock(return_value="你此刻在散步"),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    for marker in ("recall(", "关于你自己", "你们的关系", "你的清单", "抽象认识", "新鲜经历"):
+        assert marker not in out
+
+
+@pytest.mark.asyncio
+async def test_life_snapshot_is_the_main_subject():
+    """When life state exists, it leads as the snapshot of who she is right now."""
+    snap = SimpleNamespace(current_state="在房间里写作业", response_mood="有点烦躁")
+    with (
+        patch("app.memory.context.find_life_state", new=AsyncMock(return_value=snap)),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+    ):
+        out = await _build_life_state("chiwei")
+
+    assert "在房间里写作业" in out
+    assert "有点烦躁" in out
 
 
 @pytest.mark.asyncio
 async def test_build_life_state_reads_new_snapshot_by_lane():
-    """_build_life_state reads the new LifeState snapshot keyed by deployment lane."""
-    snap = SimpleNamespace(
-        current_state="正在做饭",
-        response_mood="轻松",
-        activity_type="cook",
-        observed_at="2026-06-03T10:00:00+00:00",
-    )
+    """_build_life_state reads the LifeState snapshot keyed by deployment lane."""
+    snap = SimpleNamespace(current_state="正在做饭", response_mood="轻松")
     find = AsyncMock(return_value=snap)
     with (
         patch("app.memory.context.find_life_state", new=find),
-        patch(
-            "app.memory.context.current_deployment_lane", return_value="ppe-x"
-        ),
+        patch("app.memory.context.current_deployment_lane", return_value="ppe-x"),
     ):
         out = await _build_life_state("akao")
 
-    # reads new snapshot's current_state + response_mood
     assert "正在做饭" in out
     assert "轻松" in out
-    # lane口径 == 写入端：current_deployment_lane() or "prod"
     assert find.await_args.kwargs == {"lane": "ppe-x", "persona_id": "akao"}
 
 
 @pytest.mark.asyncio
 async def test_build_life_state_lane_falls_back_to_prod():
     """prod (LANE unset → None) normalizes to 'prod', matching the write side."""
-    snap = SimpleNamespace(
-        current_state="看书",
-        response_mood="安静",
-        activity_type="read",
-        observed_at="2026-06-03T10:00:00+00:00",
-    )
+    snap = SimpleNamespace(current_state="看书", response_mood="安静")
     find = AsyncMock(return_value=snap)
     with (
         patch("app.memory.context.find_life_state", new=find),
@@ -85,61 +123,63 @@ async def test_build_life_state_lane_falls_back_to_prod():
 
 
 @pytest.mark.asyncio
-async def test_build_life_state_empty_when_no_snapshot():
-    """No snapshot yet (she hasn't lived a round) → empty string, no error."""
+async def test_life_snapshot_fallback_when_no_snapshot():
+    """No snapshot yet (cold start) → a simple fallback line, never empty.
+
+    inner_context must not collapse: chat still works even before she's
+    lived a round.
+    """
     with (
         patch("app.memory.context.find_life_state", new=AsyncMock(return_value=None)),
         patch("app.memory.context.current_deployment_lane", return_value=None),
     ):
         out = await _build_life_state("akao")
 
-    assert out == ""
+    assert out  # non-empty fallback
+    assert "此刻" in out  # references her current state in the fallback phrasing
 
 
 @pytest.mark.asyncio
-async def test_proactive_skips_cross_chat():
-    """When is_proactive=True with no trigger_user, cross-chat must not be called."""
-    cross_mock = AsyncMock(return_value="CROSS")
+async def test_life_snapshot_fallback_when_thin_current_state():
+    """current_state empty/whitespace → fallback, not a half-built section."""
+    snap = SimpleNamespace(current_state="   ", response_mood="平静")
     with (
-        patch("app.memory.context.build_schedule_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_self_abstracts_section", new=AsyncMock(return_value="SELF")),
-        patch("app.memory.context.build_user_abstracts_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_active_notes_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_short_term_fragments_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_recall_index_section", new=AsyncMock(return_value="")),
-        patch("app.memory.cross_chat.build_cross_chat_context", new=cross_mock),
-        patch("app.memory.context._build_life_state", new=AsyncMock(return_value="")),
+        patch("app.memory.context.find_life_state", new=AsyncMock(return_value=snap)),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+    ):
+        out = await _build_life_state("akao")
+
+    assert out  # non-empty fallback
+    assert "此刻" in out
+
+
+@pytest.mark.asyncio
+async def test_life_snapshot_fallback_on_error():
+    """find_life_state raising → fallback, inner_context still builds."""
+    with (
+        patch(
+            "app.memory.context.find_life_state",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+    ):
+        out = await _build_life_state("akao")
+
+    assert out  # non-empty fallback, no exception propagated
+
+
+@pytest.mark.asyncio
+async def test_inner_context_never_collapses_on_cold_start():
+    """Full build with no snapshot still yields scene + life fallback."""
+    with (
+        patch("app.memory.context.find_life_state", new=AsyncMock(return_value=None)),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
     ):
         out = await build_inner_context(
-            chat_id="oc_a", chat_type="group",
-            user_ids=[], trigger_user_id=None,
-            trigger_username=None, persona_id="chiwei",
-            is_proactive=True,
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
         )
-    assert "SELF" in out
-    cross_mock.assert_not_called()
 
-
-@pytest.mark.asyncio
-async def test_sentinel_trigger_user_is_normalized():
-    """trigger_user_id='__proactive__' should not trigger cross-chat or user_abstracts."""
-    user_abs_mock = AsyncMock(return_value="")
-    cross_mock = AsyncMock(return_value="CROSS")
-    with (
-        patch("app.memory.context.build_schedule_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_self_abstracts_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_user_abstracts_section", new=user_abs_mock),
-        patch("app.memory.context.build_active_notes_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_short_term_fragments_section", new=AsyncMock(return_value="")),
-        patch("app.memory.context.build_recall_index_section", new=AsyncMock(return_value="")),
-        patch("app.memory.cross_chat.build_cross_chat_context", new=cross_mock),
-        patch("app.memory.context._build_life_state", new=AsyncMock(return_value="")),
-    ):
-        await build_inner_context(
-            chat_id="oc_a", chat_type="group",
-            user_ids=[], trigger_user_id="__proactive__",
-            trigger_username=None, persona_id="chiwei",
-        )
-    # user_abstracts was called but with None → verify the effective id was None
-    assert user_abs_mock.call_args.kwargs["trigger_user_id"] is None
-    cross_mock.assert_not_called()
+    assert "浩南" in out  # scene
+    assert "此刻" in out  # life fallback
