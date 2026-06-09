@@ -44,13 +44,15 @@ def test_daily_materials_key_carries_lane_and_date():
 
 
 def test_daily_materials_has_no_dict_or_list_field():
-    """所有字段都是标量（str）—— framework persist 层无 JSONB 编解码，放
-    dict/list 会 asyncpg DataError。对齐 sibling WorldState / ThinkingTokensSpent。
+    """所有字段都是标量（str）—— DailyMaterials 的形态选择：表只存 agent 组织好的
+    那一段 briefing 话，world 直接读它，不需要每源拆成结构化字段。对齐 sibling
+    WorldState / ThinkingTokensSpent。（framework 已支持 dict/list→JSONB，这里
+    是业务设计约束、不是能力限制。）
     """
     for name, field in DailyMaterials.model_fields.items():
         ann = field.annotation
         assert ann not in (dict, list), (
-            f"DailyMaterials.{name} 是 {ann}，framework 暂不能持久化结构化字段"
+            f"DailyMaterials.{name} 是 {ann}，DailyMaterials 设计上只用标量字段"
         )
 
 

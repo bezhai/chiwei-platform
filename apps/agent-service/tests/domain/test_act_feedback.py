@@ -44,9 +44,11 @@ def test_act_natural_key_is_lane_and_act_id():
     assert key_fields(ActPerformed) == ("lane", "act_id")
 
 
-def test_act_fields_are_scalar_for_framework_persistence():
-    """所有字段都是标量 str —— framework 不能序列化 dict/list 进 JSONB，
-    durable 持久化（insert_idempotent）只吃 TEXT/标量。"""
+def test_act_fields_are_all_scalar_str():
+    """所有字段都是标量 str —— 这是 ActPerformed 的形态选择：一件做过的事用
+    自然语言 description 一句话承载就够，world 直接读这句话推演，不需要结构化
+    动作细节。（framework 已支持 dict/list→JSONB 持久化，这里是设计约束、不是
+    能力限制。）"""
     for name, fi in ActPerformed.model_fields.items():
         assert fi.annotation is str, f"{name} 必须是 str,实际 {fi.annotation!r}"
 

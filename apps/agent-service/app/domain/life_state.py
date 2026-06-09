@@ -17,8 +17,8 @@
     "她此刻状态"（写脏线上客观真相）。
 
 字段都是 str：``current_state`` / ``response_mood`` / ``activity_type`` +
-``observed_at``（ISO8601）。framework 当前 durable Data 不能用 dict / list
-字段（无 JSONB 持久化编解码），主观快照本就只需要这几个标量字段，不撞这个 gap。
+``observed_at``（ISO8601）。主观快照本就只需要这几个标量字段，是它的形态选择
+（framework 已支持 dict / list → JSONB 持久化，这里不放结构化字段是设计、不是限制）。
 
 ``observed_at`` 而非 ``updated_at``：``updated_at`` 是 runtime 保留列（migrator
 自动加），不能拿来当业务字段名。

@@ -21,11 +21,7 @@ migrator skips them entirely: no CREATE, no ALTER, no drop-check.
 
 from __future__ import annotations
 
-import datetime
-import types
-import typing
 from dataclasses import dataclass, field
-from typing import get_args, get_origin
 
 from pydantic.fields import FieldInfo
 
@@ -36,6 +32,7 @@ from app.runtime.data import (
     version_field,
 )
 from app.runtime.naming import to_snake
+from app.runtime.schema_types import UnmappablePgType, pg_type_for_annotation
 
 
 class MigrationError(Exception):
@@ -57,17 +54,6 @@ class Plan:
     stmts: list[Stmt] = field(default_factory=list)
 
 
-_PY_TO_PG: dict[type, str] = {
-    str: "TEXT",
-    int: "BIGINT",
-    float: "DOUBLE PRECISION",
-    bool: "BOOLEAN",
-    bytes: "BYTEA",
-    dict: "JSONB",
-    list: "JSONB",
-}
-
-
 def _table_name(cls: type[Data]) -> str:
     meta = getattr(cls, "Meta", None)
     existing = getattr(meta, "existing_table", None) if meta else None
@@ -76,45 +62,17 @@ def _table_name(cls: type[Data]) -> str:
     return f"data_{to_snake(cls.__name__)}"
 
 
-def _pg_type_for_pytype(t: object) -> str:
-    """Map a bare Python type (already Union-unwrapped) to a PG column type.
-
-    Unwraps ``Optional[X]`` (``Union[X, None]``) by recursing on ``X``; a
-    non-Optional Union cannot be mapped to a single column type and raises
-    :class:`MigrationError`.
-    """
-    origin = get_origin(t)
-    if origin is typing.Union or origin is types.UnionType:
-        args = [a for a in get_args(t) if a is not type(None)]
-        if len(args) == 1:
-            return _pg_type_for_pytype(args[0])
-        raise MigrationError(
-            f"cannot map Union type {t!r} to postgres column type; "
-            f"use a concrete type or Optional[X]"
-        )
-    if t in _PY_TO_PG:
-        return _PY_TO_PG[t]
-    if origin in _PY_TO_PG:
-        return _PY_TO_PG[origin]
-    if t is datetime.datetime:
-        return "TIMESTAMPTZ"
-    if t is datetime.date:
-        return "DATE"
-    # Unknown user type with a generic origin — preserve structure as JSONB.
-    if origin is not None:
-        return "JSONB"
-    return "TEXT"
-
-
 def _pg_type(fi: FieldInfo) -> str:
     """Map a pydantic FieldInfo annotation to a PostgreSQL column type.
 
-    Pydantic v2 already strips ``Annotated`` metadata before exposing the
-    bare runtime type on ``FieldInfo.annotation``. ``Optional[X]`` is
-    unwrapped so nullable fields get the correct scalar column type;
-    non-Optional unions are rejected.
+    Delegates to the shared :func:`pg_type_for_annotation` judgement (the
+    persist write path uses the same one) and re-raises an unmappable type
+    as a :class:`MigrationError` so DDL callers see a migration-shaped error.
     """
-    return _pg_type_for_pytype(fi.annotation)
+    try:
+        return pg_type_for_annotation(fi.annotation)
+    except UnmappablePgType as exc:
+        raise MigrationError(str(exc)) from exc
 
 
 # Columns owned by the append-only log convention, not declared on the

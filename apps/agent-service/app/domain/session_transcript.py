@@ -13,11 +13,11 @@ gemini ``thought_signature``）。
 
 设计上钉死的两条：
 
-  * **transcript 是 str 字段（JSON 文本），不是 list 字段。** framework 的 persist 层
-    暂不能把 list / dict 字段序列化进 JSONB 列（无 json 编解码，见 life_state.py:20 /
-    world/state.py 的 capability gap 注）。整条 transcript 序列化成
+  * **transcript 是 str 字段（JSON 文本），不是 list 字段。** 这是形态选择、不是
+    framework 限制（persist 层已支持 list / dict → JSONB）：整条 transcript 序列化成
     ``json.dumps([m.to_replay_dict() for m in combined], ensure_ascii=False)`` 这个
-    字符串，平移落进一个 TEXT 列即可——正是 Redis 版现在写的那个字符串。
+    字符串，1:1 平移落进一个 TEXT 列，正是 Redis 版现在写的那个字符串——保持与 Redis
+    格式逐字节一致，换存储不改序列化语义。
 
   * **as_latest + Version，Key = session_id（不额外加 lane Key）。** 每轮 append 一版，
     对外读永远 ``select_latest`` 取最新那版全文（旧版留作历史，可 SQL 查、不删）。

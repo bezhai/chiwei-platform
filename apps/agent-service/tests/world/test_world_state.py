@@ -44,13 +44,14 @@ def test_worldstate_key_carries_lane():
 
 
 def test_worldstate_has_no_dict_or_list_field():
-    """WorldState 不能有 dict / list 字段 —— framework persist 层无 JSONB
-    编解码，放结构化字段会 asyncpg DataError。叙述都是 TEXT。
+    """WorldState 不放 dict / list 字段 —— 它的形态选择：客观世界叙述就是一段
+    自然语言 detail（TEXT），"谁在哪、在干嘛"融在叙述里、不拆结构化表。
+    （framework 已支持 dict/list→JSONB，这里是业务设计约束、不是能力限制。）
     """
     for name, field in WorldState.model_fields.items():
         ann = field.annotation
         assert ann not in (dict, list), (
-            f"WorldState.{name} 是 {ann}，framework 暂不能持久化结构化字段"
+            f"WorldState.{name} 是 {ann}，WorldState 设计上叙述用 TEXT、不用结构化字段"
         )
 
 

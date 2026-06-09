@@ -17,10 +17,10 @@
 一次为准、不覆盖（一天就该只有一份底料、天然幂等）。没有 ``Version``——一天的底料是个
 确定事实、不需要版本演进（对齐 sibling :class:`app.domain.thinking_cost.ThinkingTokensSpent`）。
 
-字段都是标量（str），不撞 framework 当前 durable Data 不能用 dict/list 字段的 gap
-（无 JSONB 持久化编解码）。时刻字段叫 ``fetched_at`` 而非 ``created_at`` /
-``updated_at``——后者是 migrator 自动加的保留列，业务字段绕开（对齐
-``ThinkingTokensSpent.observed_at`` 的口径）。
+字段都是标量（str），是这张表的形态选择——只存 agent 组织好的那段 briefing 话
+（framework 已支持 dict/list → JSONB，这里不放结构化字段是设计、不是限制）。时刻
+字段叫 ``fetched_at`` 而非 ``created_at`` / ``updated_at``——后者是 migrator 自动加的
+保留列，业务字段绕开（对齐 ``ThinkingTokensSpent.observed_at`` 的口径）。
 """
 
 from __future__ import annotations

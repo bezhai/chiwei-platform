@@ -26,7 +26,8 @@ class WorldState(Data):
     """这家的客观世界叙述快照：世界时间 + 一段自然语言叙述。
 
     自然键 ``lane``（每个泳道一份客观世界）。``world_time`` / ``detail`` 都是
-    TEXT —— framework persist 层暂不能持久化结构化字段，所以快照里只放可读文本。
+    TEXT —— 客观世界叙述就是一段自然语言、不拆结构化表，是 world 的形态选择
+    （framework persist 层已支持 dict/list → JSONB，这里只放可读文本是设计、不是限制）。
     ``detail`` 是 world 推演出来的"世界此刻什么样"（谁大概在哪、在干嘛、什么氛围，
     位置融在叙述里），``version`` 让同一 lane 的多版快照 append-only 保留历史、读
     最新一版。

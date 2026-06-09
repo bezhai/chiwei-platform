@@ -24,9 +24,10 @@
 NOTHING、重投不重复计成本（成本记录天然幂等：同一轮就该只有一行）。没有 ``Version``
 —— 一轮的成本是个确定事实、不需要版本演进。
 
-字段都是标量（str / int），不撞 framework 当前 durable Data 不能用 dict/list 字段的
-gap（无 JSONB 持久化编解码）。``observed_at`` 而非 ``recorded_at`` 之类带 ``_at`` 的
-保留名冲突——``created_at`` / ``updated_at`` 是 migrator 自动加的保留列，业务字段绕开。
+字段都是标量（str / int），是这张观测表的形态选择——一轮成本就这几个标量维度
+（framework 已支持 dict/list → JSONB，这里不放结构化字段是设计、不是限制）。
+``observed_at`` 而非 ``recorded_at`` 之类带 ``_at`` 的保留名冲突——``created_at`` /
+``updated_at`` 是 migrator 自动加的保留列，业务字段绕开。
 
 **索引现状（已知、当前足够）**：migrator 只给幂等去重的 ``dedup_hash`` 建唯一索引；
 ``(lane, actor, observed_at)`` 这类"按时间段聚合查某 actor 花了多少"的复合索引**没建**。
