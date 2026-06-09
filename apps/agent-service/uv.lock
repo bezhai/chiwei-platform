@@ -19,6 +19,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
     { name = "bidict" },
+    { name = "cnlunar" },
     { name = "croniter" },
     { name = "fastapi" },
     { name = "google-genai" },
@@ -84,6 +85,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "bidict", specifier = ">=0.23.1" },
+    { name = "cnlunar", specifier = ">=0.2.4" },
     { name = "croniter", specifier = ">=6.2.2" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "google-genai", specifier = ">=1.0.0" },
@@ -480,6 +482,15 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3d/fa/656b739db8587d7b5dfa22e22ed02566950fbfbcdc20311993483657a5c0/click-8.3.1.tar.gz", hash = "sha256:12ff4785d337a1bb490bb7e9c2b1ee5da3112e94a8622f26a6c77f5d2fc6842a" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/98/78/01c019cdb5d6498122777c1a43056ebb3ebfeef2076d9d026bfe15583b2b/click-8.3.1-py3-none-any.whl", hash = "sha256:981153a64e25f12d547d3426c367a4857371575ee7ad18df2a6183ab0545b2a6" },
+]
+
+[[package]]
+name = "cnlunar"
+version = "0.2.4"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/4d/a4/9c000073a3a4f9085c86cdd3c7d5e888b89406cf69fe65083a4e6eb5f93d/cnlunar-0.2.4.tar.gz", hash = "sha256:a270238a657744dbc477cb48207b4dffe7c03100b327c81ae4622055d593463f" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/32/db/53464d3c05b3dd058eec95d754929ccee69fa62e390f6d1e5800c2e178d6/cnlunar-0.2.4-py3-none-any.whl", hash = "sha256:19689288604e86a3ef48dba23d39d6a7efbd5efabcb3923d4d656319762af4ea" },
 ]
 
 [[package]]

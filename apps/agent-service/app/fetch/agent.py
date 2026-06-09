@@ -25,6 +25,8 @@ from app.agent.core import AgentConfig
 from app.agent.tools.external_sources import (
     query_anime_calendar,
     query_holiday,
+    query_lunar_term,
+    query_sun_times,
     query_weather,
 )
 from app.agent.tools.search import search_web
@@ -36,8 +38,16 @@ FETCH_PROMPT_ID = "fetch_agent"
 # 设够而非无限，是"别失控空转"的安全阀，不进抓取内容决策。
 FETCH_RECURSION_LIMIT = 10
 
-# 抓取 agent 工具集：三个结构化查询 skill + search_web 兜底。
-FETCH_TOOLS = [query_weather, query_anime_calendar, query_holiday, search_web]
+# 抓取 agent 工具集：五个结构化查询 skill（天气 / 番剧 / 节假日 / 日出日落 /
+# 节气农历）+ search_web 兜底。
+FETCH_TOOLS = [
+    query_weather,
+    query_anime_calendar,
+    query_holiday,
+    query_sun_times,
+    query_lunar_term,
+    search_web,
+]
 
 # offline-model：异步后台思考用离线模型（对齐 world / life）。
 FETCH_CFG = AgentConfig(

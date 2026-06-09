@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import patch
 
 import httpx
@@ -510,18 +511,293 @@ class TestQueryHoliday:
 
 
 # ===========================================================================
+# Sun times — query_sun_times (QWeather astronomy, same host/key/header rules)
+# ===========================================================================
+
+_QWEATHER_SUN_OK = {
+    "code": "200",
+    "updateTime": "2026-06-08T07:00+08:00",
+    "fxLink": "https://example",
+    "sunrise": "2026-06-08T05:41+08:00",
+    "sunset": "2026-06-08T19:12+08:00",
+}
+
+
+class TestQuerySunTimes:
+    @pytest.mark.asyncio
+    async def test_parses_sunrise_sunset_into_hhmm(self):
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_sun_times
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            # Per-account host + https, astronomy/sun endpoint, today's date.
+            assert "test-host.qweatherapi.com" in str(req.url)
+            assert str(req.url).startswith("https://")
+            assert "/v7/astronomy/sun" in str(req.url)
+            assert "date=20260608" in str(req.url)
+            assert "location=113.27%2C23.13" in str(req.url) or (
+                "location=113.27,23.13" in str(req.url)
+            )
+            return httpx.Response(200, json=_QWEATHER_SUN_OK)
+
+        with patch.object(
+            external_sources, "now_cst"
+        ) as now, patch.object(
+            external_sources, "settings"
+        ) as s, _stub_async_client(handler):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await query_sun_times.invoke({})
+
+        assert isinstance(result, dict)
+        assert result["ok"] is True
+        # Times reduced to clean CST HH:MM (the +08:00 offset is the local time).
+        assert result["sunrise"] == "05:41"
+        assert result["sunset"] == "19:12"
+        _assert_no_key_anywhere(result, "secret-key-123")
+
+    @pytest.mark.asyncio
+    async def test_auth_header_carries_key_not_url(self):
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_sun_times
+
+        seen: dict[str, str] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["header"] = req.headers.get("X-QW-Api-Key", "")
+            seen["url"] = str(req.url)
+            return httpx.Response(200, json=_QWEATHER_SUN_OK)
+
+        with patch.object(
+            external_sources, "now_cst"
+        ) as now, patch.object(
+            external_sources, "settings"
+        ) as s, _stub_async_client(handler):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            await query_sun_times.invoke({})
+
+        assert seen["header"] == "secret-key-123"
+        assert "secret-key-123" not in seen["url"]
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_ok_false_no_leak(self):
+        from app.agent.tools.external_sources import query_sun_times
+
+        with patch("app.agent.tools.external_sources.settings") as s:
+            s.qweather_api_key = None
+            result = await query_sun_times.invoke({})
+
+        assert result["ok"] is False
+        assert result["reason"]
+        assert "None" not in result["reason"]
+
+    @pytest.mark.asyncio
+    async def test_missing_host_returns_ok_false_no_request(self):
+        from app.agent.tools.external_sources import query_sun_times
+
+        called = {"hit": False}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            called["hit"] = True
+            return httpx.Response(200, json=_QWEATHER_SUN_OK)
+
+        with patch(
+            "app.agent.tools.external_sources.settings"
+        ) as s, _stub_async_client(handler):
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = None
+            result = await query_sun_times.invoke({})
+
+        assert result["ok"] is False
+        assert called["hit"] is False
+
+    @pytest.mark.asyncio
+    async def test_network_failure_returns_ok_false_no_leak(self):
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_sun_times
+
+        with patch.object(
+            external_sources, "now_cst"
+        ) as now, patch.object(
+            external_sources, "settings"
+        ) as s, _stub_async_client(_raising_handler(httpx.ConnectError("boom"))):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await query_sun_times.invoke({})
+
+        assert result["ok"] is False
+        _assert_no_key_anywhere(result, "secret-key-123")
+
+    @pytest.mark.asyncio
+    async def test_api_error_code_returns_ok_false(self):
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_sun_times
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": "204"})
+
+        with patch.object(
+            external_sources, "now_cst"
+        ) as now, patch.object(
+            external_sources, "settings"
+        ) as s, _stub_async_client(handler):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await query_sun_times.invoke({})
+
+        assert result["ok"] is False
+        _assert_no_key_anywhere(result, "secret-key-123")
+
+    @pytest.mark.asyncio
+    async def test_missing_fields_returns_ok_false(self):
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_sun_times
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            # code ok but no sunrise/sunset.
+            return httpx.Response(200, json={"code": "200"})
+
+        with patch.object(
+            external_sources, "now_cst"
+        ) as now, patch.object(
+            external_sources, "settings"
+        ) as s, _stub_async_client(handler):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await query_sun_times.invoke({})
+
+        assert result["ok"] is False
+
+
+# ===========================================================================
+# Lunar / solar term — query_lunar_term (local astronomy, no network)
+# ===========================================================================
+
+
+class TestQueryLunarTerm:
+    @pytest.mark.asyncio
+    async def test_ordinary_day_has_lunar_date_and_nearby_term(self):
+        # 2026-06-08: not a solar-term day; next term 夏至 on 06-21.
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_lunar_term
+
+        with patch.object(
+            external_sources, "now_cst", return_value=datetime(2026, 6, 8)
+        ):
+            result = await query_lunar_term.invoke({})
+
+        assert isinstance(result, dict)
+        assert result["ok"] is True
+        # Lunar date: 农历四月廿三.
+        assert "四月" in result["lunar_date"]
+        assert "廿三" in result["lunar_date"]
+        # Ganzhi + zodiac year: 丙午 马年.
+        assert result["zodiac_year"] == "丙午马年"
+        # Today is not itself a solar term.
+        assert result["solar_term"] is None
+        # But the upcoming term is surfaced with days-until.
+        assert result["next_solar_term"] == "夏至"
+        assert result["days_to_next_term"] == 13
+
+    @pytest.mark.asyncio
+    async def test_solar_term_day_is_reported(self):
+        # 2026-06-21 is 夏至 itself.
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_lunar_term
+
+        with patch.object(
+            external_sources, "now_cst", return_value=datetime(2026, 6, 21)
+        ):
+            result = await query_lunar_term.invoke({})
+
+        assert result["ok"] is True
+        assert result["solar_term"] == "夏至"
+        # On a term day, days_to_next_term counts to the *following* term.
+        assert result["next_solar_term"] == "小暑"
+
+    @pytest.mark.asyncio
+    async def test_lichun_term_day(self):
+        # 2026-02-04 is 立春; lunar 腊月十七; year ganzhi 乙巳 蛇.
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_lunar_term
+
+        with patch.object(
+            external_sources, "now_cst", return_value=datetime(2026, 2, 4)
+        ):
+            result = await query_lunar_term.invoke({})
+
+        assert result["ok"] is True
+        assert result["solar_term"] == "立春"
+        assert "腊月" in result["lunar_date"]
+        assert "十七" in result["lunar_date"]
+        assert result["zodiac_year"] == "乙巳蛇年"
+
+    @pytest.mark.asyncio
+    async def test_handles_tz_aware_now_cst(self):
+        # now_cst() returns a *tz-aware* CST datetime in production; cnlunar's
+        # internal date math is naive, so the skill must cope with aware input
+        # rather than blow up. (Naive fixtures in the other tests hid this.)
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_lunar_term
+        from app.infra.cst_time import CST
+
+        aware = datetime(2026, 6, 8, 9, 30, tzinfo=CST)
+        with patch.object(external_sources, "now_cst", return_value=aware):
+            result = await query_lunar_term.invoke({})
+
+        assert result["ok"] is True
+        assert "四月" in result["lunar_date"]
+        assert result["days_to_next_term"] == 13
+
+    @pytest.mark.asyncio
+    async def test_computation_failure_degrades_without_killing_turn(self):
+        # If the lunar library raises, the @tool_error net catches it and the
+        # agent gets a structured tool_error outcome (not ok=True), so the turn
+        # stays alive and the agent can honestly say it didn't get the data.
+        from app.agent.tools import external_sources
+        from app.agent.tools.external_sources import query_lunar_term
+
+        with patch.object(
+            external_sources, "now_cst", return_value=datetime(2026, 6, 8)
+        ), patch.object(
+            external_sources.cnlunar, "Lunar", side_effect=RuntimeError("boom")
+        ):
+            result = await query_lunar_term.invoke({})
+
+        assert isinstance(result, dict)
+        # Not a fabricated success.
+        assert result.get("ok") is not True
+        # It is the structured tool_error outcome, not a raised exception.
+        assert result.get("kind") == "tool_error"
+
+
+# ===========================================================================
 # Tool wiring sanity — they are real @tool objects with descriptions
 # ===========================================================================
 
 
 class TestToolDefinitions:
-    def test_all_three_are_tools_with_descriptions(self):
+    def test_all_five_are_tools_with_descriptions(self):
         from app.agent.tools.external_sources import (
             query_anime_calendar,
             query_holiday,
+            query_lunar_term,
+            query_sun_times,
             query_weather,
         )
 
-        for t in (query_weather, query_anime_calendar, query_holiday):
+        for t in (
+            query_weather,
+            query_anime_calendar,
+            query_holiday,
+            query_sun_times,
+            query_lunar_term,
+        ):
             assert t.name
             assert t.definition.description  # docstring → description
