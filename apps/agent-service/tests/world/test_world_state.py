@@ -411,3 +411,179 @@ async def test_record_world_round_close_cold_start_no_snapshot_is_safe(world_db)
         advance_cursor_to=("2026-06-08T05:00:00+08:00", "a1"),
         materials_ingested_date="2026-06-08",
     )
+
+
+# ---------------------------------------------------------------------------
+# arc_reflected_date —— Task 2b：「当日反思已完成」的收口标记
+#
+# 反思环节（对表翻页）每日一次：engine 在标记 != 今天（含 None=冷启/部署后首跑）时
+# 跑反思，反思**成功**才 mark_arc_reflected 落标记（失败不落、同日后续轮重试）。
+# 这个标记必须被所有其他 WorldState 写入点保留（write_world_state /
+# set_next_wake_at / advance_act_cursor / record_world_round_close），否则任何一轮
+# 收口 / 排醒都会把它冲回 None、当天反复重跑反思——这是本任务最容易出 bug 的点。
+# ---------------------------------------------------------------------------
+
+
+def test_worldstate_has_nullable_arc_reflected_date():
+    """WorldState 多一个 arc_reflected_date 字段，nullable，默认 None（从没反思过）。"""
+    assert "arc_reflected_date" in WorldState.model_fields
+    snap = WorldState(lane="x", world_time="t", detail="d")
+    assert snap.arc_reflected_date is None
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_writes_date_preserving_everything(world_db):
+    """mark_arc_reflected 落标记、保留叙述 / 到点时刻 / 游标 / 底料标记（append 一版）。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-10T10:00:00+08:00")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-10T08:05:00+08:00", "a5"),
+        materials_ingested_date="2026-06-10",
+    )
+
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.arc_reflected_date == "2026-06-10"
+    # 其余字段全部沿用上一版（标记不冲掉任何状态）
+    assert snap.detail == "d0"
+    assert snap.world_time == "t0"
+    assert snap.next_wake_at == "2026-06-10T10:00:00+08:00"
+    assert snap.act_cursor_created_at == "2026-06-10T08:05:00+08:00"
+    assert snap.act_cursor_act_id == "a5"
+    assert snap.materials_ingested_date == "2026-06-10"
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_cold_start_persists_mark(world_db):
+    """冷启动（无任何 WorldState 行）落标记必须**持久化**——不能 no-op 丢标记。
+
+    反思先于续写跑：冷启动反思成功落标时还没有任何 WorldState 行。若这里 no-op，
+    冷启动反思成功的标记就丢了、同日每一轮都重跑反思（违反「每日一次、成功后同日
+    不再重复跑」）。修法：插一行最小占位快照承载标记——叙述字段中性空白（真实首版
+    叙述仍由续写的 update_world 写）、调度字段全 None（gate / 游标行为与真冷启一致）。
+    """
+    from app.world.state import mark_arc_reflected
+
+    await mark_arc_reflected(lane="coe-cold", date="2026-06-10")
+
+    snap = await read_world_state(lane="coe-cold")
+    assert snap is not None, "冷启动落标记必须持久化（不能 no-op 丢标记）"
+    assert snap.arc_reflected_date == "2026-06-10"
+    # 占位行中性：不冒充世界叙述、不带任何调度状态
+    assert snap.detail == "", "占位行不得冒充世界叙述（detail 空白）"
+    assert snap.next_wake_at is None
+    assert snap.act_cursor_created_at is None
+    assert snap.act_cursor_act_id is None
+    assert snap.materials_ingested_date is None
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_cold_start_mark_survives_first_real_detail(world_db):
+    """冷启动落标 → 续写 update_world 写真实首版 detail → 标记被保留链自然带上。"""
+    from app.world.state import mark_arc_reflected
+
+    await mark_arc_reflected(lane="coe-cold", date="2026-06-10")
+    await write_world_state(
+        lane="coe-cold",
+        world_time="2026-06-10T08:35:00+08:00",
+        detail="清晨，世界的第一版叙述。",
+    )
+
+    snap = await read_world_state(lane="coe-cold")
+    assert snap is not None
+    assert snap.detail == "清晨，世界的第一版叙述。"
+    assert snap.world_time == "2026-06-10T08:35:00+08:00"
+    assert snap.arc_reflected_date == "2026-06-10", (
+        "续写写真实首版 detail 不该冲掉冷启动落下的反思标记"
+    )
+
+
+@pytest.mark.integration
+async def test_write_world_state_preserves_arc_reflected_date(world_db):
+    """update_world 改叙述不冲掉当日反思标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+
+    await write_world_state(lane="coe-t2", world_time="t1", detail="新叙述")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-10", (
+        "update_world 不该冲掉 arc_reflected_date（否则当天反复重跑反思）"
+    )
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_preserves_arc_reflected_date(world_db):
+    """排下次醒（set_next_wake_at）不冲掉当日反思标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-10T11:00:00+08:00")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-10", (
+        "set_next_wake_at 不该冲掉 arc_reflected_date"
+    )
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_preserves_arc_reflected_date(world_db):
+    """推进 act 游标不冲掉当日反思标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-10T09:00:00+08:00", act_id="a9"
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-10", (
+        "advance_act_cursor 不该冲掉 arc_reflected_date"
+    )
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_preserves_arc_reflected_date(world_db):
+    """收口（推游标 + 标底料）不冲掉当日反思标记——最容易出 bug 的写入点。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-10T09:00:00+08:00", "a9"),
+        materials_ingested_date="2026-06-10",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-10", (
+        "record_world_round_close 不该冲掉 arc_reflected_date（否则每轮收口都把"
+        "当日反思标记打回 None、当天反复重跑反思）"
+    )
+    assert snap.act_cursor_act_id == "a9"
+    assert snap.materials_ingested_date == "2026-06-10"
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_preserved_then_overwritten_next_day(world_db):
+    """跨天再次反思成功 → 标记更新为新一天（append 新版、读最新）。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-10")
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-11")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-11"

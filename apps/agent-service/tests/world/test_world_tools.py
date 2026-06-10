@@ -186,11 +186,38 @@ async def test_update_world_does_not_touch_arc(_ctx):
     assert len(tools_mod._test_world_writes) == 1
 
 
-def test_update_arc_in_world_tools():
-    """update_arc 是 world 的工具之一（WORLD_TOOLS 含 update_arc）。"""
-    from app.world.tools import WORLD_TOOLS
+def test_update_arc_only_in_reflect_tools_not_world_tools():
+    """update_arc 归反思环节独占：在 WORLD_REFLECT_TOOLS、不在 WORLD_TOOLS。
 
-    assert update_arc in WORLD_TOOLS
+    续写姿态发现不了「页翻了」（coe 实证），翻页能力从续写剥离——互不干扰不靠
+    嘱咐，靠工具集物理隔离：续写无手碰长弧，反思无手碰 detail / notify / sense /
+    sleep。
+    """
+    from app.world.tools import WORLD_REFLECT_TOOLS, WORLD_TOOLS
+
+    assert update_arc not in WORLD_TOOLS, "续写工具集不得含 update_arc（翻页归反思）"
+    assert WORLD_REFLECT_TOOLS == [update_arc], "反思工具集只含 update_arc"
+
+
+@pytest.mark.asyncio
+async def test_update_arc_write_failure_propagates(_ctx, monkeypatch):
+    """write_world_arc 抛错必须穿透 update_arc 向上炸（不包 @tool_error）。
+
+    update_arc 是反思环节独占的 durable 写。写库失败若被 @tool_error 包成
+    tool result 字符串喂回模型，Agent.run 会正常返回 → run_arc_reflection 误判
+    成功 → mark_arc_reflected 落当日标记 → 同日重试被吃掉（假成功落标记）。
+    所以 durable 写失败必须让异常穿透工具、炸掉整次反思——run_arc_reflection
+    的 fail-open 接住它：不落标记、同日后续轮重试（durable mutation 失败要可见）。
+    """
+
+    async def boom_write(*, lane, narrative, turned_at):
+        raise RuntimeError("pg down during arc write")
+
+    monkeypatch.setattr(tools_mod, "write_world_arc", boom_write)
+
+    with agent_context(_ctx):
+        with pytest.raises(RuntimeError, match="pg down during arc write"):
+            await update_arc.invoke({"narrative": "这一页翻不动了。"})
 
 
 def test_update_arc_docstring_pins_arc_vs_detail_boundary():
@@ -493,14 +520,14 @@ async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
 # ---------------------------------------------------------------------------
 
 
-def test_world_tools_are_notify_update_world_update_arc_sense_sleep():
-    """WORLD_TOOLS = [notify, update_world, update_arc, sense, sleep]。
+def test_world_tools_are_notify_update_world_sense_sleep():
+    """WORLD_TOOLS = [notify, update_world, sense, sleep]（续写四工具）。
 
     没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
     给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
-    update_arc 是世界长弧的「翻页」工具（与 update_world 同族、分两层钟：detail 写
-    此刻、长弧写跨周月仍成立的进展）。
+    update_arc（世界长弧的「翻页」工具）**不在这里**——翻页归独立的反思环节独占
+    （WORLD_REFLECT_TOOLS），续写与反思靠工具集物理隔离互不干扰。
     """
     from app.world.tools import WORLD_TOOLS
 
-    assert WORLD_TOOLS == [notify, update_world, update_arc, sense, sleep]
+    assert WORLD_TOOLS == [notify, update_world, sense, sleep]

@@ -151,6 +151,15 @@ def _stub_state(monkeypatch):
         arc_reads.append(lane)
         return None
 
+    reflect_calls: list[dict] = []
+
+    async def fake_run_arc_reflection(**kwargs):
+        # 默认打桩反思环节（记录调用、不跑真 Agent / 不碰真库）：专测引擎机制的用例
+        # 不该触发真实反思（langfuse prompt 拉取 / PG 标记）。需要断言反思行为的用例
+        # 自己覆写这个桩（monkeypatch.setattr engine_mod.run_arc_reflection）。
+        reflect_calls.append(kwargs)
+
+    monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_run_arc_reflection)
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
@@ -165,6 +174,7 @@ def _stub_state(monkeypatch):
 
     engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
     engine_mod._test_arc_reads = arc_reads  # type: ignore[attr-defined]
+    engine_mod._test_reflect_calls = reflect_calls  # type: ignore[attr-defined]
 
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
@@ -557,7 +567,7 @@ def _snapshot_with(monkeypatch, **kwargs):
     """覆写 read_world_state，返回一个带指定字段的 WorldState（其余字段取默认）。"""
     from app.world.state import WorldState
 
-    base = dict(lane="coe-t2", world_time="t", detail="d")
+    base = {"lane": "coe-t2", "world_time": "t", "detail": "d"}
     base.update(kwargs)
 
     async def fake_read(*, lane):
@@ -787,15 +797,22 @@ async def test_round_feeds_latest_arc_into_messages(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_empty_arc_feeds_cold_start_guidance(monkeypatch):
-    """长弧为 None（还没翻过页）→ 长弧段给冷启动引导：长弧还是空白、引导先用 update_arc 写下来。"""
+    """长弧为 None（还没翻过页）→ 长弧段如实说明空白；**不**引导续写去调 update_arc。
+
+    翻页（含空弧写第一版）已归反思环节独占——续写工具集里没有 update_arc，引导它
+    去调一个不存在的工具只会让循环报错。空弧时续写只需知道长弧还是空白、顺着此刻
+    往前推演即可（第一版由反思写）。
+    """
     captured = _mock_run(monkeypatch)  # 默认 read_world_arc 桩返回 None
 
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
-    assert "【世界的长弧】" in blob, "空弧时长弧段也要出现（带冷启动引导）"
-    assert "空白" in blob, "引导必须明示长弧还是空白"
-    assert "update_arc" in blob, "引导必须指向 update_arc（先把世界走到哪写下来）"
+    assert "【世界的长弧】" in blob, "空弧时长弧段也要出现（带空白说明）"
+    assert "空白" in blob, "必须明示长弧还是空白"
+    assert "update_arc" not in blob, (
+        "续写输入不得引导 update_arc（翻页归反思独占，续写没有这只手）"
+    )
 
 
 def test_empty_arc_guidance_has_no_hardcoded_plot_facts():
@@ -825,29 +842,303 @@ async def test_arc_read_uses_current_lane(monkeypatch):
     )
 
 
-@pytest.mark.asyncio
-async def test_world_instruction_enumerates_update_arc_with_boundary():
-    """循环指令必须枚举 update_arc（第五个工具）并钉死长弧与 detail 的边界。
+# ---------------------------------------------------------------------------
+# 反思环节（Task 2b）：翻页能力从续写剥离、归独立反思——当日未反思先跑反思、先于
+# 续写；当日已反思不跑；续写读长弧必须在反思之后现读
+# ---------------------------------------------------------------------------
 
-    新工具若不在循环指令里枚举，真实模型就不知道有它、根本不会调（同 sense 的
-    必改命门）。边界判据（spec Key design decisions 1/2/4）必须进指令：detail 写
-    「此刻」明天就过时 / 长弧写「跨周月仍然成立的世界进展」；一句话判据「这句话
-    下周还成立吗」；以周月计的翻页级转变才动、日常起居不动；每次整篇重写当前仍
-    成立的长弧、翻过去的页被取代不是被追加、不写历史流水账。
+
+@pytest.mark.asyncio
+async def test_no_reflection_when_already_reflected_today(monkeypatch):
+    """普通轮（当日反思标记 == 今天）→ 不跑反思。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, arc_reflected_date=today)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_reflect_calls == [], "当日已反思过不该再跑反思"
+
+
+@pytest.mark.asyncio
+async def test_reflection_runs_before_deliberation_when_marker_empty(monkeypatch):
+    """标记为空（冷启 / 部署后首跑）→ 跑反思，且先于续写推演。"""
+    order: list[str] = []
+
+    async def fake_reflection(**kwargs):
+        order.append("reflect")
+
+    monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_reflection)
+    _mock_run(monkeypatch, order=order)
+    # 默认 _stub_state 的 snapshot 无 arc_reflected_date（None != 今天）。
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert order == ["reflect", "run"], (
+        f"反思必须先于续写推演（先对表翻页、续写再顺流），实际 {order}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reflection_runs_when_marker_stale(monkeypatch):
+    """标记是过去某天（!= 今天）→ 跑反思（跨天重新对表）。"""
+    _snapshot_with(monkeypatch, arc_reflected_date="2000-01-01")
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert len(engine_mod._test_reflect_calls) == 1, "标记非今日必须跑反思"
+
+
+@pytest.mark.asyncio
+async def test_reflection_receives_round_context(monkeypatch):
+    """反思拿到与续写同等的运行契约：lane / round_id / trace session / 快照 / 今日底料。"""
+    materials_obj = _materials()
+
+    async def materials(*, lane, date):
+        return materials_obj
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert len(engine_mod._test_reflect_calls) == 1
+    call = engine_mod._test_reflect_calls[0]
+    assert call["lane"] == "coe-t2"
+    assert call["round_id"] == captured["context"].features["world_round_id"]
+    assert call["trace_session_id"] == captured["session_id"]
+    assert call["materials"] is materials_obj, "反思必须拿到引擎读出的今日底料"
+    assert call["snapshot"] is not None and call["snapshot"].detail, (
+        "反思必须拿到最新 WorldState 快照（detail + world_time 喂对表）"
+    )
+    assert call["now"], "反思必须拿到现实此刻（对表的现实锚点）"
+
+
+@pytest.mark.asyncio
+async def test_deliberation_reads_arc_fresh_after_reflection(monkeypatch):
+    """续写读长弧必须在反思之后**现读**（不能用反思前缓存的值）。
+
+    模拟「update_arc 已 durable 落库、反思 Agent 随后失败（fail-open 不抛）」：
+    反思桩把长弧库里的最新版换成新一页，续写的输入必须读到新长弧、不是旧的。
+    """
+    current = {"narrative": "旧长弧：这一页还没翻。"}
+
+    async def fake_read_world_arc(*, lane):
+        return _arc(lane=lane, narrative=current["narrative"])
+
+    async def fake_reflection(**kwargs):
+        # update_arc 已落库（库里最新版变了）；随后反思 Agent 失败也不抛（fail-open）。
+        current["narrative"] = "新长弧：页已经翻过去了。"
+
+    monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_reflection)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "新长弧：页已经翻过去了。" in blob, (
+        "续写必须读到反思（update_arc）落库后的新长弧——长弧要在反思之后现读"
+    )
+    assert "旧长弧：这一页还没翻。" not in blob, "续写不能用反思前缓存的旧长弧"
+
+
+@pytest.mark.asyncio
+async def test_gated_wake_does_not_run_reflection(monkeypatch):
+    """被到点 gate 判废的唤醒（早返）→ 不跑反思（反思挂在 gate 之后的真实推演轮里）。"""
+    from datetime import timedelta
+
+    from app.world.engine import _CST
+
+    future = (datetime.now(_CST) + timedelta(seconds=300)).isoformat()
+    _snapshot_with(monkeypatch, next_wake_at=future)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_reflect_calls == [], "gate 判废的唤醒不该跑反思"
+
+
+@pytest.mark.asyncio
+async def test_turn_idempotent_skip_does_not_run_reflection(monkeypatch):
+    """turn 幂等命中（崩溃重读同一轮）→ 跳过整轮，也不跑反思（避免重读风暴重复反思）。"""
+    from app.agent.session import append_session
+    from app.agent.trace import make_session_id
+    from app.world.engine import _round_marker
+    from app.world.state import WorldState
+
+    async def snapshot(*, lane):
+        return WorldState(
+            lane=lane, world_time="t", detail="d",
+            act_cursor_created_at="2026-06-04T08:00:00+08:00", act_cursor_act_id="c0",
+        )
+
+    async def batch(*, lane, cursor_created_at, cursor_act_id, limit):
+        return [
+            _act(lane, "a5", "akao", "批末尾",
+                 "2026-06-04T08:05:00+08:00", "2026-06-04T08:05:00+08:00"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "read_world_state", snapshot)
+    monkeypatch.setattr(engine_mod, "list_recent_acts", batch)
+
+    round_id = engine_mod._derive_round_id(
+        "coe-t2",
+        cursor_created_at="2026-06-04T08:00:00+08:00",
+        cursor_act_id="c0",
+        has_acts=True,
+        now_iso="ignored",
+    )
+    session_id = make_session_id("coe-t2", "world", datetime.now().strftime("%Y-%m-%d"))
+    marker = _round_marker(
+        round_id, end_created_at="2026-06-04T08:05:00+08:00", end_act_id="a5"
+    )
+    await append_session(session_id, [Message(role=Role.USER, content=f"{marker}\n上一轮")])
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_reflect_calls == [], (
+        "turn 幂等跳过的轮不该跑反思（同日反思由下一个真实推演轮重试）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 冷启动反思标记的整条链（真实 PG）+ 占位快照不影响 gate / 冷启动分支
+#
+# 冷启动时反思先于续写跑：mark_arc_reflected 落标时还没有任何 WorldState 行。
+# 若它 no-op，标记丢失、同日每轮重跑反思。修法是插一行最小占位快照承载标记；
+# 占位行（detail 空白）不得改变 gate 行为，也不得被当成「已有世界叙述」。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cold_start_reflection_mark_chain_no_same_day_rerun(test_db, monkeypatch):
+    """整条链（真实 PG）：冷启动 → 反思成功落标 → 续写 update_world 写真实首版
+    detail 且标记被保留 → 同日下一轮不再反思。
+
+    反思桩用真实 mark_arc_reflected（被测主角），续写桩用真实 write_world_state
+    （保留链是被测的另一半）。若冷启动落标 no-op，第一轮后标记为 None、第二轮
+    会重跑反思——断言 reflect 只被调一次钉死「成功后同日不再重复跑」。
+    """
+    from app.world import state as state_mod
+    from app.world.state import WorldState
+    from tests.runtime.conftest import migrate
+
+    await migrate(WorldState, test_db)
+
+    # 引擎接回真实 state 函数（autouse _stub_state 替掉了它们）。
+    monkeypatch.setattr(engine_mod, "read_world_state", state_mod.read_world_state)
+    monkeypatch.setattr(engine_mod, "advance_act_cursor", state_mod.advance_act_cursor)
+    monkeypatch.setattr(
+        engine_mod, "record_world_round_close", state_mod.record_world_round_close
+    )
+
+    # 反思桩：模拟反思成功——真实落当日标记（冷启动时这就是被测链路的第一环）。
+    reflect_calls: list[str] = []
+
+    async def reflecting(**kwargs):
+        reflect_calls.append(kwargs["lane"])
+        await state_mod.mark_arc_reflected(
+            lane=kwargs["lane"], date=kwargs["now"].strftime("%Y-%m-%d")
+        )
+
+    monkeypatch.setattr(engine_mod, "run_arc_reflection", reflecting)
+
+    # 续写桩：模拟循环里 update_world 写真实首版叙述（真实落库、走保留链）。
+    async def fake_run(
+        self, messages, *, prompt_vars=None, context=None, session_id=None, max_retries=2
+    ):
+        await state_mod.write_world_state(
+            lane="coe-t2",
+            world_time="2026-06-10T08:35:00+08:00",
+            detail="清晨，世界的第一版叙述。",
+        )
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
+
+    # 第一轮（冷启动）：反思跑了、标记落了、续写写下首版叙述、标记被保留链带上。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    assert reflect_calls == ["coe-t2"], "冷启动（标记 None != 今天）必须跑反思"
+    snap = await state_mod.read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.detail == "清晨，世界的第一版叙述。"
+    today = datetime.now(engine_mod._CST).strftime("%Y-%m-%d")
+    assert snap.arc_reflected_date == today, (
+        "冷启动反思成功落的标记必须挺过续写写首版叙述（write_world_state 保留链）"
+    )
+
+    # 同日第二轮：标记 == 今天 → 不再反思（每日一次真生效）。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+    assert reflect_calls == ["coe-t2"], "同日第二轮不得重跑反思（标记已是今天）"
+
+
+@pytest.mark.asyncio
+async def test_placeholder_snapshot_keeps_cold_start_branch(monkeypatch):
+    """占位快照（detail 空白、仅承载反思标记）仍走冷启动分支。
+
+    冷启动反思成功落标后、续写若在写首版叙述前崩溃，下一轮读到的就是这行占位
+    快照——它不能被当成「已有世界叙述」喂给模型一段空叙述：prompt 仍要告知首次
+    醒来、不标注「这段叙述写于」；且占位行带的当日标记必须挡住重复反思。
+    """
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, detail="", world_time="", arc_reflected_date=today)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert ("冷启动" in blob) or ("首次" in blob), (
+        "占位快照（还没有真实世界叙述）仍是冷启动，prompt 必须告知模型"
+    )
+    assert "这段叙述写于" not in blob, "占位行无真实写入时刻，不得标注「这段叙述写于」"
+    assert engine_mod._test_reflect_calls == [], (
+        "占位行带的当日标记必须挡住重复反思（这正是占位行存在的意义）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_placeholder_snapshot_gate_behaves_like_cold_start(monkeypatch):
+    """占位快照 next_wake_at=None 的 gate 行为与真冷启一致：心跳放行、self 判废。
+
+    心跳放行由上面 test_placeholder_snapshot_keeps_cold_start_branch 证（它真跑了
+    一轮）；这里钉 self：占位行从没排过下次醒，self 唤醒没有合法目标可比对、判废。
+    """
+    _snapshot_with(monkeypatch, detail="", world_time="")
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(
+        WorldTick(
+            lane="coe-t2", reason="self", target_wake_at="2026-06-10T09:00:00+08:00"
+        )
+    )
+
+    assert "messages" not in captured, (
+        "占位快照（next_wake_at=None）下 self 唤醒必须被 gate 判废（与真冷启一致）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_does_not_enumerate_update_arc():
+    """续写指令**不再**枚举 update_arc——翻页归反思独占（工具集物理隔离的 prompt 面）。
+
+    续写工具回到四个（notify / update_world / sense / sleep）。长弧仍是续写的输入
+    （【世界的长弧】段保留），但续写无手碰长弧：指令里不能再有 update_arc 的使用
+    指令，否则模型会去调一个不存在的工具。
     """
     instruction = engine_mod.world_loop_instruction()
-    assert "update_arc" in instruction, "循环指令必须枚举 update_arc（否则模型不会调它）"
-    assert "四个工具" not in instruction, "工具已是五个，指令不能再写「四个工具」"
-    assert "五个工具" in instruction, "工具清单应明确是五个（含 update_arc）"
-    # 两层钟分界 + 一句话判据
-    assert "跨周月" in instruction
-    assert "下周" in instruction and "成立" in instruction
-    # 翻页粒度：翻页级转变才动、日常不动
-    assert "翻页" in instruction
-    assert "日常" in instruction
-    # 整篇重写语义：被取代不是被追加、不写流水账
-    assert "重写" in instruction
-    assert "流水账" in instruction
+    assert "update_arc" not in instruction, (
+        "续写指令不得枚举 update_arc（翻页已归反思环节独占）"
+    )
+    assert "五个工具" not in instruction, "续写工具已回到四个，指令不能再写「五个工具」"
+    assert "四个工具" in instruction, "工具清单应明确是四个（update_arc 已移出）"
 
 
 # ---------------------------------------------------------------------------
@@ -1490,7 +1781,9 @@ async def test_world_instruction_enumerates_sense_tool():
     instruction = engine_mod.world_loop_instruction()
     assert "sense" in instruction, "循环指令必须枚举 sense 工具（否则模型不会调它）"
     assert "三个工具" not in instruction, "工具早已不止三个，指令不能再写「三个工具」"
-    assert "五个工具" in instruction, "工具清单应明确是五个（含 sense / update_arc）"
+    assert "四个工具" in instruction, (
+        "工具清单应明确是四个（含 sense；update_arc 已归反思环节）"
+    )
     # sense 是逐角色（per-person）投周遭客观切片：引导逐角色 + 信息差
     assert ("逐角色" in instruction) or ("每个角色" in instruction) or ("单个" in instruction), (
         "sense 引导应说明是逐角色（per-person）投周遭切片"
@@ -1533,6 +1826,7 @@ async def test_world_loop_messages_carry_no_household_rhythm():
 
     messages = _world_loop_messages(
         detail="清晨厨房有了动静。",
+        detail_written_at=None,  # 必传：None 是"冷启动无上一版"的显式语义
         now_iso="2026-06-05T09:00:00+08:00",
         wake_reason="例行看一眼世界。",
         round_id="r1",
@@ -1546,13 +1840,54 @@ async def test_world_loop_messages_carry_no_household_rhythm():
         )
 
 
+# ---------------------------------------------------------------------------
+# spec 决策 5b：续写输入的「上一版叙述」段带写入时刻标注——让续写知道手里这帧画面
+# 是什么时候画下的，对着现实此刻一步跨过去而不是逐分钟回放
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prev_detail_section_carries_written_at(monkeypatch):
+    """「上一版叙述」段带写入时刻（快照的 world_time）标注。"""
+    _snapshot_with(
+        monkeypatch,
+        detail="深夜，屋里只剩冰箱的低鸣。",
+        world_time="2026-06-09T23:40:00+08:00",
+    )
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "写于" in blob, "上一版叙述段必须带「写于 X」的写入时刻标注（spec 决策 5b）"
+    assert "2026-06-09T23:40:00+08:00" in blob, (
+        "写入时刻必须是快照的 world_time（这帧画面画下的时刻）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cold_start_prev_detail_has_no_written_at(monkeypatch):
+    """冷启动（无上一版叙述）→ 不标「写于」（占位文本没有写入时刻可标）。"""
+
+    async def no_world_state(*, lane):
+        return None
+
+    monkeypatch.setattr(engine_mod, "read_world_state", no_world_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "写于" not in blob, "冷启动占位文本不该带「写于」标注（没有真实写入时刻）"
+
+
 @pytest.mark.asyncio
 async def test_world_instruction_has_no_world_setting():
     """world_loop_instruction 是 USER 层行动指令，不该描述世界设定 / 谁是谁 / 作息。
 
     世界长什么样 / 家庭布局 / 三姐妹是谁 / 几点干嘛这类设定性内容归 system prompt
-    一处；USER 层指令只讲五个工具（notify/update_world/update_arc/sense/sleep）的
-    说明 + 本轮怎么做。
+    一处；USER 层指令只讲四个工具（notify/update_world/sense/sleep）的说明 + 本轮
+    怎么做（update_arc 已归反思环节、不在续写指令里）。
     """
     instruction = engine_mod.world_loop_instruction()
     # 不该出现三姐妹的名字 / 年龄 / 作息坐标这类世界设定内容
@@ -1561,9 +1896,9 @@ async def test_world_instruction_has_no_world_setting():
             f"USER 层指令不该描述世界设定（谁是谁）：{setting!r}"
         )
     assert "作息" not in instruction, "USER 层指令不该描述作息（归 system 一处）"
-    # 仍是五工具行动指令（含 1C 新增的 sense 五官、长弧新增的 update_arc 翻页）
+    # 仍是四工具行动指令（含 1C 新增的 sense 五官；update_arc 归反思）
     assert ("notify" in instruction) and ("update_world" in instruction)
-    assert "update_arc" in instruction
+    assert "update_arc" not in instruction
     assert "sense" in instruction
     assert "sleep" in instruction
 

@@ -99,6 +99,9 @@ from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.runtime.single_flight import SingleFlightConflict, single_flight
 from app.world.arc import read_world_arc  # module-level so tests can monkeypatch
+from app.world.reflection import (  # module-level so tests can monkeypatch
+    run_arc_reflection,
+)
 from app.world.state import (
     advance_act_cursor,
     read_world_state,
@@ -196,30 +199,25 @@ def world_loop_instruction() -> str:
     不是加 if 分支强制（赤尾宪法：不用规则替 agent 决策）；配合连续记忆她也会知道
     "刚才已经够热闹了"。
 
-    工具枚举必须跟住 WORLD_TOOLS（五件：update_world / update_arc / sense /
-    notify / sleep）——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）、
-    长弧加的 ``update_arc``（翻页）若不在这段指令里枚举，真实模型就不知道有它、
-    根本不会调，「world 当五官投周遭」「世界长弧会翻页」形同虚设（必改命门）。
+    工具枚举必须跟住 WORLD_TOOLS（四件：update_world / sense / notify / sleep）
+    ——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）若不在这段指令里
+    枚举，真实模型就不知道有它、根本不会调，「world 当五官投周遭」形同虚设（必改
+    命门）。反过来 ``update_arc``（翻页）已归反思环节独占（Task 2b：续写姿态发现
+    不了「页翻了」，工具集物理隔离）——这里**不得**再枚举它，否则模型会去调一个
+    不存在的工具。长弧仍是续写的输入（【世界的长弧】段每轮拼），只是续写无手碰它。
     """
     return (
         "你是这个世界的推演层（world）。你不是导演、不是裁判——你不替任何角色决定"
         "她想做什么、怎么想、什么情绪（那是各角色自己的事）；你对角色做的事只推演"
         "客观上发生了什么，绝不批准或拒绝她想不想做（她几乎总能做到，除非客观世界"
         "里有硬冲突）。情绪和主观解读不是你的事。\n\n"
-        "你不是填一张表，而是一个会持续推演世界的脑子。你有五个工具，看一眼世界后"
+        "你不是填一张表，而是一个会持续推演世界的脑子。你有四个工具，看一眼世界后"
         "想清楚再调，直到这一轮没有别的要做了就停：\n\n"
         "- update_world(detail)：写下世界此刻的客观叙述。看你记得的上一版世界叙述"
         "+ 现在几点，推演世界此刻什么样：谁大概在哪、在干嘛、什么氛围（位置就融在"
         "叙述里，不用专门的房间字段）；对收到的角色动作，把它的客观结果也体现进来"
         "（她去厨房 → 厨房有了动静和她的身影）。只写客观发生了什么，绝不写谁的情绪"
         "/ 心情 / 主观解读。世界时间由系统按现实时刻自动记，你不用编。\n"
-        "- update_arc(narrative)：重写「世界的长弧走到哪」。它和 update_world 分两层"
-        "钟：detail 写「此刻的世界是什么样」，每轮都可能重写，明天就过时；长弧写"
-        "「跨周月仍然成立的世界进展」，写进去的话明天、下周读仍然为真。判据一句话："
-        "这句话下周还成立吗？成立才配进长弧。只有发生了以周月计的翻页级转变（考完、"
-        "放榜、搬家、换季、换工作）才动它，日常起居（一顿饭、一节课、一段午后）不动。"
-        "每次调用都是整篇重写当前仍成立的长弧：翻过去的页被新的一页取代、不是排在"
-        "后面被追加，绝不写成历史流水账。翻页时刻由系统按现实时刻自动记，你不用编。\n"
         "- sense(recipient, surroundings)：你是每个角色的五官。你有全局视角，但每个"
         "角色只能感知到她够得着的那一份，所以这条工具是**逐角色**的——为**单个** "
         "recipient 推演「此刻她在哪、谁在她身边、周围环境怎样」，把这份客观周遭切片"
@@ -353,18 +351,18 @@ def _act_batch_text(acts: list[ActPerformed]) -> str:
 
 
 def _arc_section(arc_narrative: str | None) -> str:
-    """渲染【世界的长弧】段的正文：有长弧给最新一版全文，空弧给冷启动引导。
+    """渲染【世界的长弧】段的正文：有长弧给最新一版全文，空弧如实说明空白。
 
     长弧是 world 自产的慢层状态（「跨周月仍然成立的世界进展」，只在翻页级转变时
     整篇重写），每轮推演都把最新一版喂回去——比此刻慢的世界进展不再只活在定格的
-    底色里。空弧（还没翻过页 / 冷启动）时给一段引导：明示长弧还是空白，引导 world
-    从底色和此刻读出世界已经走到哪、先用 update_arc 写下来。引导文案绝不硬编任何
-    剧情事实（高考、日期之类）——世界走到哪由 world 自己读出来，这是宪法。
+    底色里。**长弧对续写是只读输入**（Task 2b：翻页归反思环节独占、update_arc 不在
+    续写工具集里），所以空弧时只如实说明空白、绝不引导续写去调它没有的工具——
+    第一版由反思写（spec 决策 6）。文案绝不硬编任何剧情事实（宪法）。
     """
     if arc_narrative is None:
         return (
-            "长弧还是空白。如果你从世界的底色和此刻已经能读出这个世界走到了哪一页，"
-            "先用 update_arc 把它写下来。"
+            "长弧还是空白——还没有人写下这个世界走到了哪一页。你只管顺着底色和"
+            "此刻往前推演（长弧这一层由独立的反思环节负责书写，不归你动手）。"
         )
     return arc_narrative
 
@@ -430,6 +428,7 @@ def _round_marker(
 def _world_loop_messages(
     *,
     detail: str,
+    detail_written_at: str | None,
     now_iso: str,
     wake_reason: str,
     round_id: str,
@@ -447,16 +446,23 @@ def _world_loop_messages(
     标记（``round_id`` + 本批终点游标 ``(end_created_at, end_act_id)``），写回 transcript
     后重投能查重跳过（turn 幂等）、并据终点游标把游标补推到上一轮真正推完的位置。
 
+    ``detail_written_at``：上一版叙述的写入时刻（快照的 ``world_time``，spec 决策
+    5b）——「上一版叙述」段标注「这段叙述写于 X」，让续写知道手里这帧画面是什么
+    时候画下的，对着现实此刻一步跨过去而不是逐分钟回放（对「叙事落后现实八小时」
+    回放循环的釜底抽薪之一）。**必传、无默认值**（同 ``arc_narrative`` 的哲学）：
+    冷启动（占位文本、无真实写入时刻）显式传 None、不标注。
+
     世界设定本身（这家是谁、屋里屋外的空间、三姐妹各自客观作息）由 system prompt
     一处承载，USER 层不再拼——避免世界设定两处真相。这里只喂"此刻动态"：长弧 /
     上一版叙述 / 现在几点 / 今天的外部底料 / 唤醒缘由 / 这批动作。
 
     ``arc_narrative``：最新一版世界长弧的全文（「跨周月仍然成立的世界进展」，
-    :func:`_run_world_round` 每轮 ``read_world_arc`` 读出来传进来）。【世界的长弧】
-    段**每轮都拼**（与 materials 的"当天一次"不同——长弧是世界的慢层底座，每轮推演
-    都要看见）：有长弧给全文，None（还没翻过页）给冷启动引导（:func:`_arc_section`）。
-    **必传、无默认值**：None 是"还没翻过页"的显式语义，调用方必须显式给——漏传
-    应当在测试里炸出来（TypeError），而不是静默退化成冷启动引导。
+    :func:`_run_world_round` 每轮在反思之后 ``read_world_arc`` 现读传进来）。【世界
+    的长弧】段**每轮都拼**（与 materials 的"当天一次"不同——长弧是世界的慢层底座，
+    每轮推演都要看见）：有长弧给全文，None（还没翻过页）给空白说明（:func:`_arc_section`，
+    第一版由反思写、不引导续写动手）。**必传、无默认值**：None 是"还没翻过页"的
+    显式语义，调用方必须显式给——漏传应当在测试里炸出来（TypeError），而不是静默
+    退化成空白说明。
 
     ``materials_text``：当天外部底料渲染出的「今天的外部底料」段（:func:`_materials_section`
     渲染的 briefing）。它是世界今天的真实节律（下雨 / 放假 / 番剧更新），作为**公共
@@ -479,12 +485,19 @@ def _world_loop_messages(
         if act_batch_text
         else ""
     )
+    # 上一版叙述段带写入时刻标注（spec 决策 5b）；冷启动占位文本无真实写入时刻，
+    # 不标注。
+    detail_header = (
+        f"【你记得的上一版世界叙述】（这段叙述写于 {detail_written_at}）"
+        if detail_written_at
+        else "【你记得的上一版世界叙述】"
+    )
     user_content = (
         f"{_round_marker(round_id, end_created_at=end_created_at, end_act_id=end_act_id)}\n"
         f"{world_loop_instruction()}\n\n"
         f"【现实此刻】{now_iso}\n"
         f"【世界的长弧】\n{_arc_section(arc_narrative)}\n\n"
-        f"【你记得的上一版世界叙述】\n{detail}\n\n"
+        f"{detail_header}\n{detail}\n\n"
         f"{materials_section}"
         f"【这次醒来的缘由】{wake_reason}\n\n"
         f"{act_section}"
@@ -629,6 +642,10 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
       5. **turn 幂等查重**：load_session 读已有 transcript，若本轮 round_id 标记
          已在历史里（失败 / 崩溃重读）→ 推进游标到 **marker 记的终点** 后跳过，不再
          run、不重复推演（不是推进到当前批末尾——崩溃+扩批时当前批可能更大）。
+      5b. **反思环节（续写之前）**：当日尚未完成反思（``arc_reflected_date`` !=
+         今天，含 None=冷启动）→ 跑一次无会话的对表反思
+         （:func:`app.world.reflection.run_arc_reflection`，工具只有 update_arc、
+         fail-open、成功才落当日标记）；续写的长弧在反思**之后现读**。
       6. 把"上一版世界叙述 / 现在几点 / 这批动作"作为 prompt context 喂入（世界设定
          由 system prompt 一处承载，USER 层不拼），marker 编 round_id + 本批终点游标，
          用**确定性 session_id 续接**跑 agent 工具循环：把 session_id 显式传给
@@ -664,7 +681,13 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     await renotify_unread(lane=lane)
 
     snapshot = await read_world_state(lane=lane)
-    cold_start = snapshot is None
+    # 冷启动 = 没有快照，**或**快照还没有真实世界叙述（detail 空白）。后者是冷启动
+    # 反思成功落标后留下的最小占位行（mark_arc_reflected 冷启路径：只承载
+    # arc_reflected_date，叙述字段中性空白）——续写若在写首版叙述前崩溃，下一轮读到
+    # 的就是它，不能被当成「已有世界叙述」喂模型一段空叙述；仍走冷启动分支（占位
+    # detail 文本 + 冷启动缘由、不标注写入时刻）。占位行上的标记 / 游标 / next_wake_at
+    # 照常从 snapshot 读（不清掉——占位行存在的意义就是把当日反思标记带过冷启窗口）。
+    cold_start = snapshot is None or not snapshot.detail
 
     # 到点 gate（阶段 1B Task 1）：pull 范式下两源（self / 心跳）都走 gate，在真正
     # 推演前先判此刻作不作数——未到 next_wake_at 的心跳、未到点或已被覆盖（stale）的
@@ -687,10 +710,14 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     if cold_start:
         # 冷启动：还没有上一版世界叙述。给 detail 段一个占位文本喂 prompt，由
         # wake_reason 引导 world 推演 + update_world 写第一版（不在 engine 造占位
-        # WorldState，世界叙述统一由工具落）。
+        # WorldState，世界叙述统一由工具落）。占位文本无真实写入时刻，不标注。
         detail = "（首次醒来，还没有上一版世界叙述。）"
+        detail_written_at = None
     else:
         detail = snapshot.detail
+        # 上一版叙述的写入时刻（spec 决策 5b）：让续写知道手里这帧画面是什么时候
+        # 画下的，对着现实此刻一步跨过去而不是逐分钟回放。
+        detail_written_at = snapshot.world_time
 
     # 从游标 pull act（pull 范式核心）：任何唤醒源都从 WorldState 当前 act 游标之后
     # 批量读这段时间攒下的 act，一轮最多读 N 条（按落库顺序取最早的、剩下下轮接着读、
@@ -789,14 +816,37 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     # None 不改 materials_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
     mark_ingested_date = today if ingest_materials_this_round else None
 
+    # 反思环节（Task 2b，翻页归它独占）：当日尚未完成反思（arc_reflected_date !=
+    # 今天，含 None=冷启动 / 部署后首跑）→ **续写之前**先跑一次无会话的对表反思
+    # （独立 AgentConfig、工具只有 update_arc、max_retries=1）。当日完成标记独立于
+    # 底料 ingest 标记（spec 决策 5：续写成功不代表反思成功）；反思**成功**才落标记
+    # （在 run_arc_reflection 里 mark_arc_reflected），失败不落 → 同日后续轮自动
+    # 重试。fail-open：run_arc_reflection 绝不抛——失败只记 error 日志、当轮续写
+    # 照常。
+    prev_reflected_date = (
+        snapshot.arc_reflected_date if snapshot is not None else None
+    )
+    if prev_reflected_date != today:
+        await run_arc_reflection(
+            lane=lane,
+            now=now,
+            snapshot=snapshot,
+            materials=materials,
+            round_id=round_id,
+            trace_session_id=session_id,
+        )
+
     # 世界长弧（慢层）：每轮都读最新一版喂进推演输入——「跨周月仍然成立的世界进展」
     # 是每轮推演的底座，与 materials 的"当天纳入一次"不同。还没翻过页（None）时
-    # 由 _arc_section 给冷启动引导（长弧还是空白、引导 world 先用 update_arc 写下来）。
+    # 由 _arc_section 如实说明空白（第一版由反思写、续写无手碰长弧）。**必须在反思
+    # 之后现读**（spec 决策 5）：update_arc 已 durable 落库而反思 Agent 随后失败时，
+    # 续写也要读到新长弧——绝不能用反思前缓存的值。
     arc = await read_world_arc(lane=lane)
     arc_narrative = arc.narrative if arc is not None else None
 
     messages = _world_loop_messages(
         detail=detail,
+        detail_written_at=detail_written_at,
         now_iso=now_iso,
         wake_reason=wake_reason,
         round_id=round_id,
