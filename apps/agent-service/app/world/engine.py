@@ -135,13 +135,21 @@ WORLD_RECURSION_LIMIT = 12
 # 不误删别人的锁。
 WORLD_TICK_LOCK_TTL_SECONDS = 600
 
-# 一轮 pull act 的读取上限（防单轮 context 爆炸的护栏）。world 最长可睡 1h，期间
-# life 可能攒几十上百条 act，一次全塞 prompt 会把"高频烧钱"变成"单轮 context 爆炸
-# 甚至每轮失败重试"。所以一轮最多读 N 条（按发生顺序取最早的、游标只推进到已读末尾，
-# 剩下的下轮接着读、不截断丢弃）。读满 N 条时缘由文本告诉 world"还有积压"，由 world
-# **自己排短 sleep** 来尽快消化——决策仍在 world 手里，这不是"攒够 N 条提前唤醒
-# world"的机制提前拉起（频率主权交给 world 自己的 sleep）。
-WORLD_ACT_PULL_LIMIT = 10
+# 一轮 pull act 的防爆栅栏（不是节拍器）。world 醒来把游标之后攒下的 act **一次
+# 拉完**、把这段时间的账一口气收进「世界流到此刻的样子」、叙述落在现实此刻——
+# 正常情况下这个上限永远不该被触发。旧值 10 实际成了节拍器：coe 实证积压 100 条
+# 时 world 每轮只消化 10 条、按旧 act 的时间戳逐轮补叙，世界叙事落后现实 ~9 小时。
+#
+# 量级取 200 的理由：act 是单行短句（persona + 一句 description + 时刻 ≈ 几十字
+# / 行），200 行 ≈ 一两万字符，仍在单轮 prompt 的安全水位内；而三个 life 一天总共
+# 才产 ~125 条 act，200 条 ≈ 1.5 天的全量产出——正常节奏（一轮几条到几十条）乃至
+# 整天宕机后的追账都到不了它，只有病态洪峰（life 失控刷 act）才会命中。
+#
+# 命中必打 warning（截了多少、还剩多少、下轮从游标继续）——no silent caps；没命中
+# 时行为 = 全量。游标语义不变：只推进到实际消化的最后一条，剩下的下轮接着读、
+# 不截断丢弃；缘由文本告诉 world"还有积压"，由 world **自己排短 sleep** 来尽快
+# 消化——决策仍在 world 手里（频率主权交给 world 自己的 sleep）。
+WORLD_ACT_PULL_LIMIT = 200
 
 _WORLD_CFG = AgentConfig(
     "world_deliberate",
@@ -309,9 +317,9 @@ def _wake_reason_text(tick: WorldTick, *, cold_start: bool, has_backlog: bool) -
     """把唤醒信号翻成给 world 循环的缘由文本。
 
     pull 范式下缘由不分 act/非 act —— 任何唤醒都从游标 pull 这段时间攒下的 act
-    （内容在 :func:`_act_batch_text` 拼的批次清单里）。``has_backlog`` 为真（这一批
-    读满了 N 条上限、还有动作没读完）时在缘由里告诉 world，**由她自己排短 sleep**
-    来尽快回来消化剩下的（决策在 world 手里，不是机制提前唤醒她）。
+    （内容在 :func:`_act_batch_text` 拼的批次清单里）。``has_backlog`` 为真（命中
+    防爆栅栏：这一批被截在上限、还有动作排队）时在缘由里告诉 world，**由她自己排
+    短 sleep** 来尽快回来消化剩下的（决策在 world 手里，不是机制提前唤醒她）。
     """
     if cold_start:
         return (
@@ -336,8 +344,10 @@ def _wake_reason_text(tick: WorldTick, *, cold_start: bool, has_backlog: bool) -
 def _act_batch_text(acts: list[ActPerformed]) -> str:
     """把这一批 pull 到的 act 拼成一段清单文本喂给 world（对称 life 读 mailbox）。
 
-    呈现每个人这段时间做了什么，让 world 看到这一批所有人的动作、逐条推演客观结果。
-    空批次给一句兜底（醒来时这段没有新动作、纯 self / 心跳推进世界）。
+    呈现每个人这段时间做了什么，让 world 看到这一批所有人的动作、把它们的客观
+    结果一并收进世界流到此刻的样子（框架文案在 :func:`_world_loop_messages` 的
+    act 段明示"不逐条补叙旧时间戳"）。空批次给一句兜底（醒来时这段没有新动作、
+    纯 self / 心跳推进世界）。
     """
     if not acts:
         return "（这段时间没读到具体动作记录，按你看到的世界现状推演该不该推进。）"
@@ -480,8 +490,15 @@ def _world_loop_messages(
     materials_section = (
         f"【今天的外部底料】\n{materials_text}\n\n" if materials_text else ""
     )
+    # act 批的框架文案：一次拉完后这一批可能横跨几个小时，明示 world 把这段时间
+    # 的账一笔收进世界流到此刻的样子、叙述落在【现实此刻】——不按各条旧时间戳
+    # 逐条补叙旧场景（coe 实证不明示时模型会锚在旧 act 的时刻逐轮补叙旧戏）。
+    # 只是文案语义，不是机制：怎么收、收成什么样仍由 world 推演。
     act_section = (
-        f"【这一批要你推演客观结果的动作（所有人）】\n{act_batch_text}\n\n"
+        "【这一批要你推演客观结果的动作（所有人）】\n"
+        "（这批动作可能横跨了一段时间。不用按各条的旧时间戳逐条补叙旧场景——"
+        "把这段时间的来龙去脉一笔收进世界流到此刻的样子，叙述落在【现实此刻】。）\n"
+        f"{act_batch_text}\n\n"
         if act_batch_text
         else ""
     )
@@ -635,8 +652,10 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
       3. 读自己上一版客观世界叙述 + act 消费游标；无快照 = 冷启动，缘由告诉 LLM
          这是首次醒来、由它 update_world 写第一版。
       4. **从游标 pull act**（pull 范式）：任何唤醒源都从 ``(占游标 created_at,
-         act_id)`` 之后批量读这段时间攒下的 act（最多 N=WORLD_ACT_PULL_LIMIT 条、
-         按落库顺序取最早的、读满则在缘由文本告知 world 有积压）。游标用 created_at
+         act_id)`` 之后**一次拉完**这段时间攒下的 act（按落库顺序）。
+         WORLD_ACT_PULL_LIMIT 只是防病态洪峰撑爆单轮 prompt 的防爆栅栏（正常
+         永不触发）：命中必打 warning（截了多少、还剩多少）、缘由文本告知 world
+         有积压、游标只推进到实际消化的末尾、剩下下轮继续。游标用 created_at
          （单调落库序）不漏 out-of-order act。round_id 批次非空时从**游标起点**稳定
          派生（崩溃扩批仍同 round_id）、空批次从 now 派生。
       5. **turn 幂等查重**：load_session 读已有 transcript，若本轮 round_id 标记
@@ -720,8 +739,9 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         detail_written_at = snapshot.world_time
 
     # 从游标 pull act（pull 范式核心）：任何唤醒源都从 WorldState 当前 act 游标之后
-    # 批量读这段时间攒下的 act，一轮最多读 N 条（按落库顺序取最早的、剩下下轮接着读、
-    # 不截断丢弃）。游标为 None（冷启动 / 从没消费过）时读全既有。游标用 created_at
+    # **一次拉完**这段时间攒下的 act（按落库顺序）。WORLD_ACT_PULL_LIMIT 只是防爆
+    # 栅栏（正常永不触发，命中见下方探询 + warning；命中时剩下的下轮接着读、不截断
+    # 丢弃）。游标为 None（冷启动 / 从没消费过）时读全既有。游标用 created_at
     # （单调落库序）而非 occurred_at（做事时刻、与落库顺序可乱序）—— out-of-order
     # 漏读命门见 acts.py。list_recent_acts 返回 list[tuple[ActPerformed, created_at]]。
     cursor_created_at = snapshot.act_cursor_created_at if snapshot is not None else None
@@ -733,7 +753,6 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         limit=WORLD_ACT_PULL_LIMIT,
     )
     acts = [a for a, _created_at in recent]
-    has_backlog = len(recent) >= WORLD_ACT_PULL_LIMIT
     act_batch_text = _act_batch_text(acts) if acts else ""
 
     # 本批终点游标 ``(created_at, act_id)``：成功收口推进游标 / marker 记终点都用它。
@@ -745,6 +764,35 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     else:
         batch_end_created_at = None
         batch_end_act_id = None
+
+    # 防爆栅栏检查（no silent caps）：读满栅栏值时从本批末尾再探一眼还剩多少。
+    # 积压正好等于栅栏值（剩余 0）不算命中——行为与全量一致、不告警；真命中（还有
+    # 剩）必打 warning 说明截了多少、还剩多少、下轮从游标继续。探询本身也有界
+    # （最多再读一个栅栏值，剩余 ≥ 栅栏值时如实报 ">="），且只在病态洪峰才发生，
+    # 正常路径零额外查询。
+    remaining = 0
+    if recent and len(recent) >= WORLD_ACT_PULL_LIMIT:
+        overflow = await list_recent_acts(
+            lane=lane,
+            cursor_created_at=batch_end_created_at,
+            cursor_act_id=batch_end_act_id,
+            limit=WORLD_ACT_PULL_LIMIT,
+        )
+        remaining = len(overflow)
+        if remaining:
+            logger.warning(
+                "[world_tick] %s act pull hit fence: consumed %d acts this "
+                "round (WORLD_ACT_PULL_LIMIT), %s still queued; cursor "
+                "advances only to the consumed end, rest pulled next round",
+                lane,
+                len(recent),
+                (
+                    f">={remaining}"
+                    if remaining >= WORLD_ACT_PULL_LIMIT
+                    else str(remaining)
+                ),
+            )
+    has_backlog = remaining > 0
 
     # 本轮确定性标识：派生 event_id / turn 幂等查重靠它（整轮里同一条动静同一 id、
     # 失败 / 崩溃重读同一 round → 幂等去重）。必改 2：批次非空从**游标起点**稳定派生
