@@ -37,30 +37,26 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     """load_dataflow_graph() picks up the production wires + bindings,
     not an empty graph.
 
-    Same import / clear / reload idiom as ``tests/wiring/test_memory``:
-    first import triggers each module body once (which would otherwise
-    leave the registries pre-populated and fight the fixture's clear);
-    the second clear + reload then repopulates from a clean slate.
+    Uses clear + reload idiom to get a clean slate before checking that
+    real production wires are present.
     """
     import importlib
 
     import app.deployment as d
-    import app.wiring.memory as m
+    import app.wiring.memory_vectorize as mv
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(m)
+    importlib.reload(mv)
     importlib.reload(d)
 
     g = load_dataflow_graph()
-    assert any(w.data_type.__name__ == "Message" for w in g.wires)
-    # hydrate_message + vectorize + save_fragment are all bound
+    # v4 memory vectorize nodes are bound to vectorize-worker
     assert {n.__name__ for n in g.nodes} >= {
-        "hydrate_message",
-        "vectorize",
-        "save_fragment",
+        "vectorize_memory_fragment",
+        "vectorize_memory_abstract",
     }
 
 

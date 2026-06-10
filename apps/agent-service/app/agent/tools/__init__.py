@@ -7,11 +7,6 @@ Exports two tool lists:
 """
 
 from app.agent.tools.delegation import deep_research
-from app.agent.tools.history import (
-    check_chat_history,
-    list_group_members,
-    search_group_history,
-)
 from app.agent.tools.image import generate_image, read_images
 from app.agent.tools.image_search import search_images
 from app.agent.tools.notes import delete_note, list_note, resolve_note, upsert_note
@@ -32,11 +27,8 @@ BASE_TOOLS = [
 ]
 
 # All tools: only for the main agent.
-# History search tools are intentionally excluded: current-chat and cross-chat
-# context should be injected up front rather than searched ad hoc at reply time.
 ALL_TOOLS = [
     *BASE_TOOLS,
-    list_group_members,
     deep_research,
     load_skill,
     sandbox_bash,
@@ -54,9 +46,6 @@ __all__ = [
     "list_note",
     "resolve_note",
     "delete_note",
-    "check_chat_history",
-    "search_group_history",
-    "list_group_members",
     "deep_research",
     "load_skill",
     "sandbox_bash",

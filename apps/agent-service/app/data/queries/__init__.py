@@ -1,7 +1,7 @@
 """Data queries — split per domain. 调用方 import 不变 (`from app.data.queries import X`).
 
-7 个 domain 文件 + memory 细拆 2 个 → 9 modules：
-  - model_provider / persona / messages / agent_response / schedule / life
+8 个 domain 文件：
+  - model_provider / persona / messages / agent_response / life
   - memory（fragments + abstracts CRUD）/ memory_edges / memory_search
 
 Each domain file owns ``__all__``; this package aggregates via ``from X import *``.
@@ -26,8 +26,6 @@ from app.data.queries.model_provider import *  # noqa: F401,F403
 from app.data.queries.model_provider import __all__ as _mp
 from app.data.queries.persona import *  # noqa: F401,F403
 from app.data.queries.persona import __all__ as _persona
-from app.data.queries.schedule import *  # noqa: F401,F403
-from app.data.queries.schedule import __all__ as _schedule
 
 __all__ = [
     *_ar,
@@ -38,5 +36,4 @@ __all__ = [
     *_messages,
     *_mp,
     *_persona,
-    *_schedule,
 ]

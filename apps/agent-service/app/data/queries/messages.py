@@ -30,7 +30,6 @@ __all__ = [
     "find_group_download_permission",
     "find_message_by_id",
     "find_last_bot_reply_time",
-    "find_context_messages_for_anchors",
     "find_gray_config",
     "find_user_messages_after",
     "find_proactive_messages_in_chat",
@@ -264,43 +263,6 @@ async def find_last_bot_reply_time(chat_id: str) -> int:
             )
         )
         return result.scalar_one_or_none() or 0
-
-
-async def find_context_messages_for_anchors(
-    chat_id: str,
-    anchor_message_ids: list[str],
-    anchor_timestamps: list[int],
-    anchor_root_ids: set[str],
-    context_window_ms: int = 300_000,
-) -> list[tuple[CommonMessageRecord, str | None]]:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return []
-
-    time_conditions = [
-        CommonMessage.event_time.between(ts - context_window_ms, ts + context_window_ms)
-        for ts in anchor_timestamps
-        if ts
-    ]
-    message_ids = _uuid_list(anchor_message_ids)
-    root_ids = _uuid_list(anchor_root_ids)
-    or_conditions = [*time_conditions]
-    if message_ids:
-        or_conditions.append(CommonMessage.common_message_id.in_(message_ids))
-    if root_ids:
-        or_conditions.append(CommonMessage.common_root_message_id.in_(root_ids))
-    if not or_conditions:
-        return []
-
-    stmt = (
-        select(CommonMessage)
-        .where(CommonMessage.common_conversation_id == chat_uuid, or_(*or_conditions))
-        .order_by(CommonMessage.event_time.asc())
-    )
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        records = [_record(row) for row in result.scalars().all()]
-        return [(record, record.username) for record in records]
 
 
 async def find_gray_config(message_id: str) -> dict | None:

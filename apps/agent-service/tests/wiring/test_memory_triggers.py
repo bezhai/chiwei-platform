@@ -15,13 +15,12 @@ def _fresh_import():
 
     ``importlib.reload(wiring_pkg)`` only re-executes the package's
     ``__init__.py``. Python's import system short-circuits the
-    ``from app.wiring import memory, memory_triggers, ...`` line because
+    ``from app.wiring import memory_triggers, ...`` line because
     the children already sit in ``sys.modules`` from the first import,
     so their module-level ``wire(...)`` calls do *not* re-fire. Reload
     every submodule explicitly to repopulate ``WIRING_REGISTRY``.
     """
     import app.deployment as deployment
-    import app.wiring.memory as memory_mod
     import app.wiring.memory_triggers as memory_triggers_mod
     import app.wiring.memory_vectorize as memory_vectorize_mod
     import app.wiring.safety as safety_mod
@@ -30,7 +29,6 @@ def _fresh_import():
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(memory_mod)
     importlib.reload(memory_triggers_mod)
     importlib.reload(memory_vectorize_mod)
     importlib.reload(safety_mod)

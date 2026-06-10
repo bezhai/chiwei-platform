@@ -191,22 +191,6 @@ qdrant = _Qdrant()
 async def init_collections() -> None:
     """Create standard collections if they don't already exist."""
     try:
-        ok = await qdrant.create_hybrid_collection(
-            collection_name="messages_recall", dense_size=1024
-        )
-        if ok:
-            logger.info("Qdrant recall hybrid collection created")
-        else:
-            logger.warning("Qdrant recall hybrid collection may already exist")
-
-        ok = await qdrant.create_collection(
-            collection_name="messages_cluster", vector_size=1024
-        )
-        if ok:
-            logger.info("Qdrant cluster collection created")
-        else:
-            logger.warning("Qdrant cluster collection may already exist")
-
         # v4 memory collections — dense only, 1024d COSINE
         for name in ("memory_fragment", "memory_abstract"):
             ok = await qdrant.create_collection(

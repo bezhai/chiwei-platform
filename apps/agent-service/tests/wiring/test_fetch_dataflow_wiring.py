@@ -80,7 +80,6 @@ def test_fetch_dataflow_compiles_into_production_graph():
         "chat",
         "fetch_dataflow",
         "life_dataflow",
-        "memory",
         "memory_triggers",
         "memory_vectorize",
         "safety",

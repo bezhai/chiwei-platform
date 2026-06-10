@@ -54,8 +54,8 @@ def _clear_model_cache():
 # 看到残留的 .debounce() 直接 GraphError。autouse 把每个测试都重置回干净状态。
 #
 # tests/wiring/ 里的测试需要真实生产 wiring，它们在自己的 setup 里调
-# importlib.reload(app.wiring.memory) 重新执行 module body，把 wire/bind 调用
-# 重新跑一遍 —— 跟 autouse 的清理顺序兼容。
+# importlib.reload 重新执行 module body，把 wire/bind 调用重新跑一遍
+# —— 跟 autouse 的清理顺序兼容。
 @pytest.fixture(autouse=True)
 def _reset_runtime_registries():
     from app.runtime.emit import reset_emit_runtime

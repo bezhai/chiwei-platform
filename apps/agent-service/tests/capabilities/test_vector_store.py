@@ -19,11 +19,11 @@ async def test_upsert_unpacks_embedding_into_qdrant_call():
     payload = {"chat_id": "c1", "content": "hello"}
     with patch("app.capabilities.vector_store.qdrant") as mq:
         mq.upsert_hybrid_vectors = AsyncMock(return_value=None)
-        store = VectorStore(collection="messages_recall")
+        store = VectorStore(collection="memory_fragment")
         await store.upsert("point-42", emb, payload)
 
     mq.upsert_hybrid_vectors.assert_awaited_once_with(
-        "messages_recall",
+        "memory_fragment",
         "point-42",
         [0.1, 0.2, 0.3],
         [1, 7],
@@ -40,7 +40,7 @@ async def test_upsert_propagates_qdrant_failure():
         mq.upsert_hybrid_vectors = AsyncMock(
             side_effect=RuntimeError("qdrant offline")
         )
-        store = VectorStore(collection="messages_recall")
+        store = VectorStore(collection="memory_fragment")
         with pytest.raises(RuntimeError, match="qdrant offline"):
             await store.upsert("point-42", emb, {})
 
@@ -70,12 +70,12 @@ async def test_search_unpacks_embedding_and_forwards_filter():
     sentinel_filter = object()
     with patch("app.capabilities.vector_store.qdrant") as mq:
         mq.hybrid_search = AsyncMock(return_value=hits)
-        store = VectorStore(collection="messages_recall")
+        store = VectorStore(collection="memory_fragment")
         out = await store.search(emb, limit=5, query_filter=sentinel_filter)
 
     assert out == hits
     mq.hybrid_search.assert_awaited_once_with(
-        "messages_recall",
+        "memory_fragment",
         [0.1, 0.2, 0.3],
         [1, 7],
         [0.9, 0.5],

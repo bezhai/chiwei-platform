@@ -8,13 +8,11 @@ def _fresh_import():
     import app.deployment as d
     import app.wiring.agent_tool_events as w_evt
     import app.wiring.life_dataflow as w_life
-    import app.wiring.memory as w_mem
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(w_mem)
     importlib.reload(w_life)
     importlib.reload(w_evt)
     importlib.reload(d)

@@ -112,7 +112,6 @@ mock.module('@cache/redis-client', () => ({
 }));
 
 mock.module('@integrations/rabbitmq', () => ({
-    VECTORIZE: 'vectorize',
     CHAT_REQUEST: 'chat_request',
     PROACTIVE_EVAL: 'proactive_eval',
     getLane: () => undefined,
@@ -120,7 +119,6 @@ mock.module('@integrations/rabbitmq', () => ({
         assertQueue: mock(async () => undefined),
         sendToQueue: mock(() => true),
     }),
-    rabbitmqClient: { publish: mock(async () => undefined) },
 }));
 
 mock.module('@core/services/bot/multi-bot-manager', () => ({

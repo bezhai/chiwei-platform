@@ -1,23 +1,24 @@
 """Phase 6 第三刀验收：queries package 拆分完整性 + 无重名。
 
 memory.py 在 spec §3.6 预估超 300 行后细拆为 memory.py / memory_edges.py /
-memory_search.py，所以本测试覆盖 9 个 domain 模块。
+memory_search.py，所以本测试覆盖 8 个 domain 模块（schedule 模块已删除）。
 """
 from __future__ import annotations
 
 # 来自 spec §3.3 + §3.6 memory 细拆 + Phase 7d Task 5 hoist (6 个新增 messages
 # query) + Notes redesign 2026-05-10，硬编码作为期望基线。
+# schedule module 已删除（schedule 孤儿查询全部移除，models.py 保留）。
 EXPECTED_FUNCTIONS = {
     # model_provider (3)
     "parse_model_id", "find_model_mapping", "find_provider_by_name",
     # persona (5)
     "find_persona", "list_all_persona_ids", "resolve_persona_id",
     "resolve_bot_name_for_persona", "find_bot_names_for_persona",
-    # messages (16 — common 层收敛后移除 channel-private/group-member helpers)
+    # messages (15 — find_context_messages_for_anchors 随旧 RAG 管线删除)
     "find_cross_chat_messages", "find_message_content", "find_messages_in_range",
     "find_username", "find_group_name", "find_group_download_permission",
     "find_message_by_id", "find_last_bot_reply_time",
-    "find_context_messages_for_anchors", "find_gray_config",
+    "find_gray_config",
     "find_user_messages_after", "find_proactive_messages_in_chat",
     "insert_proactive_message",
     "find_messages_with_user_chat_persona_by_root",
@@ -26,11 +27,6 @@ EXPECTED_FUNCTIONS = {
     # agent_response (5)
     "create_pending_agent_response", "set_agent_response_bot",
     "is_chat_request_completed", "get_safety_status", "set_safety_status",
-    # schedule (11)
-    "find_active_schedules_for_date", "find_latest_plan", "find_plan_for_period",
-    "find_daily_entries", "list_schedules", "upsert_schedule", "delete_schedule",
-    "insert_schedule_revision", "get_current_schedule", "get_schedule_revision_by_id",
-    "list_recent_schedule_revisions",
     # life → reply-style only (2): 旧 life_engine_state / glimpse_state 查询已随
     # world/life 重写删除；她此刻状态读新 LifeState Data。只剩 voice 写 / chat 读
     # 的 reply_style 这一对。
@@ -79,7 +75,6 @@ def test_queries_no_duplicate_names():
         messages,
         model_provider,
         persona,
-        schedule,
     )
 
     modules = {
@@ -91,7 +86,6 @@ def test_queries_no_duplicate_names():
         "messages": messages,
         "model_provider": model_provider,
         "persona": persona,
-        "schedule": schedule,
     }
 
     seen: dict[str, str] = {}

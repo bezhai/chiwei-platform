@@ -6,7 +6,6 @@ const commonMessages = new Set<string>();
 const commonMessageRows = new Map<string, Record<string, unknown>>();
 const commonInsertCalls: Record<string, unknown>[] = [];
 const larkInsertCalls: unknown[] = [];
-const vectorizePublishes: unknown[] = [];
 let larkInsertRaceWinner: { om_id: string; common_message_id: string } | null = null;
 
 function insertBuilder() {
@@ -153,7 +152,6 @@ mock.module('@middleware/context', () => ({
     },
 }));
 mock.module('@integrations/rabbitmq', () => ({
-    VECTORIZE: 'vectorize',
     PROACTIVE_EVAL: 'proactive_eval',
     CHAT_REQUEST: 'chat_request',
     getLane: () => undefined,
@@ -161,11 +159,6 @@ mock.module('@integrations/rabbitmq', () => ({
         assertQueue: mock(async () => undefined),
         sendToQueue: mock(() => true),
     }),
-    rabbitmqClient: {
-        publish: mock(async (...args: unknown[]) => {
-            vectorizePublishes.push(args);
-        }),
-    },
 }));
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 
@@ -224,7 +217,6 @@ describe('storeLarkInboundMessage', () => {
         commonMessageRows.clear();
         commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
-        vectorizePublishes.length = 0;
         larkInsertRaceWinner = null;
     });
 
@@ -233,7 +225,6 @@ describe('storeLarkInboundMessage', () => {
 
         expect(larkMessages.get('om_1')?.common_message_id).toBe('018f-common-1');
         expect(larkInsertCalls.length).toBe(1);
-        expect(vectorizePublishes.length).toBe(1);
     });
 
     it('skips lark_message insert when the om_id already maps to the same common id', async () => {
@@ -246,7 +237,6 @@ describe('storeLarkInboundMessage', () => {
         await storeLarkInboundMessage(event('om_1') as any, projection('018f-common-1'), message);
 
         expect(larkInsertCalls.length).toBe(0);
-        expect(vectorizePublishes.length).toBe(0);
     });
 
     it('fails loud when an om_id is already mapped to another common id', async () => {
@@ -272,7 +262,6 @@ describe('storeLarkInboundMessage', () => {
 
         expect(commonMessages.has('018f-common-new')).toBe(false);
         expect(larkMessages.has('om_1')).toBe(false);
-        expect(vectorizePublishes.length).toBe(0);
     });
 
     it('lets the responding bot claim an existing user common_message', async () => {
@@ -298,7 +287,6 @@ describe('storeLarkOutboundMessage', () => {
         commonMessageRows.clear();
         commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
-        vectorizePublishes.length = 0;
         multiBotManager.getBotCommonUserId = (() =>
             '018f-bot-common-user') as typeof multiBotManager.getBotCommonUserId;
     });

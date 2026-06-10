@@ -6,7 +6,6 @@ from app.wiring import (  # noqa: F401
     chat,
     fetch_dataflow,
     life_dataflow,
-    memory,
     memory_triggers,
     memory_vectorize,
     safety,

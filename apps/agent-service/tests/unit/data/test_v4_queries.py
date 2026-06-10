@@ -10,11 +10,9 @@ import pytest
 from app.data.models import AbstractMemory, Fragment, MemoryEdge, Note
 from app.data.queries import (
     count_abstracts_by_persona,
-    get_current_schedule,
     insert_abstract_memory,
     insert_fragment,
     insert_memory_edge,
-    insert_schedule_revision,
     resolve_note,
     touch_abstract,
     touch_fragment,
@@ -342,36 +340,3 @@ async def test_delete_note_soft_deletes():
         _stop(patches)
 
 
-# schedule.py
-@pytest.mark.asyncio
-async def test_insert_schedule_revision_adds_to_session():
-    session = AsyncMock()
-    session.add = lambda obj: setattr(session, "_added", obj)
-    patches = _patch_module("app.data.queries.schedule", session)
-    try:
-        await insert_schedule_revision(
-            id="sr1",
-            persona_id="chiwei",
-            content="today...",
-            reason="init",
-            created_by="cron_morning",
-        )
-        added = session._added
-        assert added.content == "today..."
-        assert added.reason == "init"
-    finally:
-        _stop(patches)
-
-
-@pytest.mark.asyncio
-async def test_get_current_schedule_returns_latest():
-    sr = AsyncMock()
-    sr.id = "sr_latest"
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=_ScalarResult(sr))
-    patches = _patch_module("app.data.queries.schedule", session)
-    try:
-        result = await get_current_schedule(persona_id="chiwei")
-        assert result is sr
-    finally:
-        _stop(patches)
