@@ -1,7 +1,7 @@
 """每日抓取 cron 链路 wiring 契约（刀 3 Task2）。
 
 照搬 world heartbeat 的三层翻译解决「时间源必须单字段 ts」的框架硬约束：
-  cron 0 13 * * * → DailyMaterialsTick（单字段 ts）→ fetch_to_materials_tick（补 lane）
+  cron 0 4 * * * → DailyMaterialsTick（单字段 ts）→ fetch_to_materials_tick（补 lane）
     → DailyMaterialsFetch → daily_fetch_node。
 
 这些测试不跑引擎，只 inspect WIRING_REGISTRY + 断言图能 compile。单字段 ts 契约由
@@ -27,7 +27,7 @@ def _fresh_import():
 
 
 def test_fetch_cron_drives_translation_node():
-    """DailyMaterialsTick 由 cron 13:00 Asia/Shanghai 源驱动，打到翻译节点。"""
+    """DailyMaterialsTick 由 cron 04:00 Asia/Shanghai 源驱动，打到翻译节点。"""
     _fresh_import()
 
     from app.fetch.node import fetch_to_materials_tick
@@ -42,7 +42,7 @@ def test_fetch_cron_drives_translation_node():
     assert len(w.sources) == 1
     src = w.sources[0]
     assert src.kind == "cron"
-    assert src.params["expr"] == "0 13 * * *"
+    assert src.params["expr"] == "0 4 * * *"
     assert src.params["tz"] == "Asia/Shanghai"
 
 

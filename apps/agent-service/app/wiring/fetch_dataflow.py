@@ -2,7 +2,7 @@
 
 Graph topology（照搬 world heartbeat 的三层翻译）:
 
-  cron 0 13 * * * (Asia/Shanghai)
+  cron 0 4 * * * (Asia/Shanghai)
     -> DailyMaterialsTick     (单字段 ts 的 transient tick，满足时间源约定)
     -> fetch_to_materials_tick (翻译节点，从进程级泳道补 lane)
     -> DailyMaterialsFetch     (带 lane 的抓取信号)
@@ -27,10 +27,10 @@ from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
 
-# 临时 13:00 CST 触发（今天 6/9 高考最后一天、要重抓含高考的新底料验 3a；验完改回凌晨 04:00）。
+# 每日凌晨 04:00 CST 触发抓取（角色醒来前底料已就绪）。
 # cron 喂单字段 DailyMaterialsTick（满足时间源的单字段 ts 约定），翻译节点
 # fetch_to_materials_tick 补上进程级泳道后 emit DailyMaterialsFetch 接回 daily_fetch_node。
-wire(DailyMaterialsTick).from_(Source.cron("0 13 * * *", tz=TZ)).to(
+wire(DailyMaterialsTick).from_(Source.cron("0 4 * * *", tz=TZ)).to(
     fetch_to_materials_tick
 )
 # DailyMaterialsFetch 退回纯 in-process：只承载翻译节点 emit 的抓取信号，打到抓取节点。
