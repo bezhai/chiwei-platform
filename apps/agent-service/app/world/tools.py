@@ -1,11 +1,17 @@
 """world 的 agent 工具集 — 阶段 1A（world 推演者）.
 
 world 不再"填一张表"返回结构化对象，而是在一个 agent 循环里**连续调工具去推演
-世界**。新范式下 world 是世界的推演层、不是导演，它有四个工具：
+世界**。新范式下 world 是世界的推演层、不是导演，它有五个工具：
 
   * :func:`update_world` —— 写一段自然语言、记"世界此刻什么样"。落 durable 快照。
     ``world_time`` 由工具体自填（现实当前 CST，客观时间不让模型编），``detail``
     是模型给的世界叙述，一起 ``write_world_state`` append 一版。
+  * :func:`update_arc`   —— 重写「世界的长弧走到哪」（与 update_world 同族、分
+    两层钟：detail 写「此刻」明天就过时，长弧写「跨周月仍然成立的世界进展」、只在
+    翻页级转变时整篇重写）。``turned_at`` 由工具体自填（现实当前 CST，对称
+    update_world 的 world_time），``narrative`` 是模型整篇重写的长弧全文，一起
+    ``write_world_arc`` append 一版（durable、无 dedup，整轮重跑可能 append 语义
+    相同的一版——无害，读侧只认最新版）。
   * :func:`notify`       —— world 推演出"这条客观动静此刻谁够得着"，把 observation
     （自然语言客观描述）投给 recipients（persona_id 列表）。对每个 recipient 包
     ``deliver_event`` 投进其信箱（kind=ambient、source="world"）。谁够得着由
@@ -50,6 +56,7 @@ from app.data.queries.mailbox import deliver_event
 from app.domain.world_events import EVENT_KIND_AMBIENT, EVENT_KIND_SURROUNDINGS
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
+from app.world.arc import write_world_arc
 from app.world.state import set_next_wake_at, write_world_state
 
 logger = logging.getLogger(__name__)
@@ -169,6 +176,35 @@ async def update_world(detail: str) -> str:
     world_time = cst_time.now_cst_iso()
     await write_world_state(lane=lane, world_time=world_time, detail=detail)
     return "已记下世界此刻的样子"
+
+
+@tool
+@tool_error("重写世界长弧失败")
+async def update_arc(narrative: str) -> str:
+    """重写「世界的长弧走到哪」——只在翻页级转变时动（与 update_world 分两层钟）。
+
+    update_world 的 detail 写「此刻的世界是什么样」，每轮都可能重写，明天就过时；
+    长弧写「跨周月仍然成立的世界进展」，写进去的话明天、下周读仍然为真。判据一句话：
+    这句话下周还成立吗？成立才配进长弧。
+
+    只有发生了以周月计的翻页级转变（考完、放榜、搬家、换季、换工作）才动它，日常
+    起居（一顿饭、一节课、一段午后）不动。每次调用都是**整篇重写当前仍成立的长弧**：
+    翻过去的页被新的一页取代、不是排在后面被追加，绝不写成历史流水账。
+
+    翻页时刻由系统按现实当前时刻自动记下（你不用、也不能编时间）。
+
+    Args:
+        narrative: 当前仍成立的长弧全文（整篇重写的自然语言）。
+
+    Returns:
+        一句确认文本。
+    """
+    lane, _round_id = _world_round()
+    # turned_at 跟现实走，由代码填现实当前 CST（客观时间不让模型编，对称
+    # update_world 的 world_time）。
+    turned_at = cst_time.now_cst_iso()
+    await write_world_arc(lane=lane, narrative=narrative, turned_at=turned_at)
+    return "已翻页，记下了世界长弧的新一版"
 
 
 @tool
@@ -371,4 +407,4 @@ async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
     return True
 
 
-WORLD_TOOLS = [notify, update_world, sense, sleep]
+WORLD_TOOLS = [notify, update_world, update_arc, sense, sleep]

@@ -33,6 +33,7 @@ from app.world.tools import (
     notify,
     sense,
     sleep,
+    update_arc,
     update_world,
 )
 
@@ -70,11 +71,20 @@ def _stub_handlers(monkeypatch):
     async def fake_write_world_state(*, lane, world_time, detail):
         world_writes.append({"lane": lane, "world_time": world_time, "detail": detail})
 
+    arc_writes: list[dict] = []
+
+    async def fake_write_world_arc(*, lane, narrative, turned_at):
+        arc_writes.append(
+            {"lane": lane, "narrative": narrative, "turned_at": turned_at}
+        )
+
     monkeypatch.setattr(tools_mod, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(tools_mod, "write_world_state", fake_write_world_state)
+    monkeypatch.setattr(tools_mod, "write_world_arc", fake_write_world_arc)
 
     tools_mod._test_delivered = delivered  # type: ignore[attr-defined]
     tools_mod._test_world_writes = world_writes  # type: ignore[attr-defined]
+    tools_mod._test_arc_writes = arc_writes  # type: ignore[attr-defined]
     # sleep 不直接 emit_delayed（它把待办 self-wake 记进 round state、由 engine
     # 收口后 emit），这个空列表只用来断言"tool 层没有任何直接 self-wake 发生"。
     tools_mod._test_self_wakes = []  # type: ignore[attr-defined]
@@ -113,6 +123,97 @@ async def test_update_world_time_is_not_modeled(_ctx, monkeypatch):
         await update_world.invoke({"detail": "上午的光照进客厅。"})
 
     assert tools_mod._test_world_writes[0]["world_time"] == "2026-06-05T09:00:00+08:00"
+
+
+# ---------------------------------------------------------------------------
+# update_arc — 世界长弧的「翻页」工具（与 update_world 同族、分两层钟）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_arc_writes_narrative_with_self_filled_turned_at(_ctx):
+    """update_arc 落 narrative durable（write_world_arc），turned_at 由工具体自填现实 CST。
+
+    与 update_world 对 world_time 的处理同族对称：翻页时刻是客观时间、不让模型编，
+    由工具体按现实当前 CST 自填。
+    """
+    with agent_context(_ctx):
+        await update_arc.invoke(
+            {"narrative": "三姐妹家已经搬进新小区，妹妹换了新学校，眼下是初夏。"}
+        )
+
+    assert len(tools_mod._test_arc_writes) == 1
+    w = tools_mod._test_arc_writes[0]
+    assert w["lane"] == "coe-t2"
+    assert (
+        w["narrative"] == "三姐妹家已经搬进新小区，妹妹换了新学校，眼下是初夏。"
+    )
+    # turned_at 由工具体自填现实 CST（不让模型编）：非空、带 CST 偏移
+    assert w["turned_at"]
+    assert "+08:00" in w["turned_at"]
+
+
+@pytest.mark.asyncio
+async def test_update_arc_turned_at_is_not_modeled(_ctx, monkeypatch):
+    """turned_at 取现实当前 CST（cst_time.now_cst_iso），客观时间不让模型给。"""
+    monkeypatch.setattr(
+        tools_mod.cst_time, "now_cst_iso", lambda: "2026-06-10T09:00:00+08:00"
+    )
+    with agent_context(_ctx):
+        await update_arc.invoke({"narrative": "换季了，初夏的节律落进这个家。"})
+
+    assert tools_mod._test_arc_writes[0]["turned_at"] == "2026-06-10T09:00:00+08:00"
+
+
+@pytest.mark.asyncio
+async def test_update_arc_does_not_touch_state_or_mailbox(_ctx):
+    """update_arc 只写长弧：不碰 WorldState 快照、不投递任何信箱（与既有工具互不干扰）。"""
+    with agent_context(_ctx):
+        await update_arc.invoke({"narrative": "长弧翻了一页。"})
+
+    assert tools_mod._test_world_writes == [], "update_arc 不该写 WorldState 快照"
+    assert tools_mod._test_delivered == [], "update_arc 不该投递任何信箱 event"
+    assert len(tools_mod._test_arc_writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_world_does_not_touch_arc(_ctx):
+    """反向互不干扰：update_world 只写此刻快照，不碰长弧。"""
+    with agent_context(_ctx):
+        await update_world.invoke({"detail": "午后客厅很安静。"})
+
+    assert tools_mod._test_arc_writes == [], "update_world 不该写长弧"
+    assert len(tools_mod._test_world_writes) == 1
+
+
+def test_update_arc_in_world_tools():
+    """update_arc 是 world 的工具之一（WORLD_TOOLS 含 update_arc）。"""
+    from app.world.tools import WORLD_TOOLS
+
+    assert update_arc in WORLD_TOOLS
+
+
+def test_update_arc_docstring_pins_arc_vs_detail_boundary():
+    """update_arc 的 docstring（喂给 LLM 的工具说明）必须钉死长弧与 detail 的边界。
+
+    长弧与 detail 都是 world 写、world 读的自然语言快照，不在工具说明里钉住边界
+    会互相污染。必须含：① 两层钟分界（detail 写「此刻」明天就过时 / 长弧写「跨周月
+    仍然成立的世界进展」）；② 一句话判据（这句话下周还成立吗）；③ 翻页粒度（以周月
+    计的翻页级转变才动、日常起居不动）；④ 整篇重写语义（翻过去的页被取代不是被追加、
+    不写历史流水账）。
+    """
+    doc = update_arc.definition.description
+    # ① 两层钟分界
+    assert "此刻" in doc
+    assert "跨周月" in doc
+    # ② 一句话判据
+    assert "下周" in doc and "成立" in doc
+    # ③ 翻页粒度：翻页级转变才动、日常不动
+    assert "翻页" in doc
+    assert "日常" in doc
+    # ④ 整篇重写、不是追加、不写流水账
+    assert "重写" in doc
+    assert "流水账" in doc
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +493,14 @@ async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
 # ---------------------------------------------------------------------------
 
 
-def test_world_tools_are_notify_update_world_sense_sleep():
-    """WORLD_TOOLS = [notify, update_world, sense, sleep]（1C Task 2 加 sense 五官）。
+def test_world_tools_are_notify_update_world_update_arc_sense_sleep():
+    """WORLD_TOOLS = [notify, update_world, update_arc, sense, sleep]。
 
     没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
     给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
+    update_arc 是世界长弧的「翻页」工具（与 update_world 同族、分两层钟：detail 写
+    此刻、长弧写跨周月仍成立的进展）。
     """
     from app.world.tools import WORLD_TOOLS
 
-    assert WORLD_TOOLS == [notify, update_world, sense, sleep]
+    assert WORLD_TOOLS == [notify, update_world, update_arc, sense, sleep]

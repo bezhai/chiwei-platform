@@ -96,6 +96,10 @@ def _stub_io(monkeypatch):
         # gate 放行的轮会读当天外部底料；这里 stub 成 None（今天没底料，不碰真库）。
         return None
 
+    async def fake_read_world_arc(*, lane):
+        # gate 放行的轮会读最新世界长弧；这里 stub 成 None（长弧空白，不碰真库）。
+        return None
+
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
@@ -105,6 +109,7 @@ def _stub_io(monkeypatch):
     monkeypatch.setattr(
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
+    monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
 
 
 def _stub_state(monkeypatch, snapshot: WorldState | None):

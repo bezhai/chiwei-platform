@@ -50,6 +50,7 @@ from app.domain.world_events import (
     EventRead,
 )
 from app.runtime.persist import insert_idempotent
+from app.world.arc import WorldArc
 from app.world.engine import (
     WORLD_HEARTBEAT_MS,
     WorldTick,
@@ -118,12 +119,14 @@ def _fake_redis(monkeypatch):
 
 @pytest.fixture
 async def world_db(test_db):
-    """建齐闭环需要的所有真实表：world 叙述快照 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
+    """建齐闭环需要的所有真实表：world 叙述快照 / 长弧 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
 
-    新范式没有 presence 表了（RoomPresence 已删）。world 的客观状态只剩 WorldState
-    （世界叙述），位置融在 detail 自然语言里。act 走 ActPerformed durable 表。
+    新范式没有 presence 表了（RoomPresence 已删）。world 的客观状态是 WorldState
+    （此刻的世界叙述，位置融在 detail 自然语言里）+ WorldArc（世界长弧的慢层快照，
+    world_tick 每个放行轮都先 read_world_arc）。act 走 ActPerformed durable 表。
     """
     await migrate(WorldState, test_db)
+    await migrate(WorldArc, test_db)
     await migrate(EventEnvelope, test_db)
     await migrate(EventRead, test_db)
     await migrate(LifeState, test_db)

@@ -98,6 +98,7 @@ from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.runtime.single_flight import SingleFlightConflict, single_flight
+from app.world.arc import read_world_arc  # module-level so tests can monkeypatch
 from app.world.state import (
     advance_act_cursor,
     read_world_state,
@@ -195,22 +196,30 @@ def world_loop_instruction() -> str:
     不是加 if 分支强制（赤尾宪法：不用规则替 agent 决策）；配合连续记忆她也会知道
     "刚才已经够热闹了"。
 
-    工具枚举必须跟住 WORLD_TOOLS（四件：update_world / sense / notify / sleep）——
-    1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）若不在这段指令里枚举，
-    真实模型就不知道有它、根本不会调，「world 当五官投周遭」形同虚设（必改命门）。
+    工具枚举必须跟住 WORLD_TOOLS（五件：update_world / update_arc / sense /
+    notify / sleep）——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）、
+    长弧加的 ``update_arc``（翻页）若不在这段指令里枚举，真实模型就不知道有它、
+    根本不会调，「world 当五官投周遭」「世界长弧会翻页」形同虚设（必改命门）。
     """
     return (
         "你是这个世界的推演层（world）。你不是导演、不是裁判——你不替任何角色决定"
         "她想做什么、怎么想、什么情绪（那是各角色自己的事）；你对角色做的事只推演"
         "客观上发生了什么，绝不批准或拒绝她想不想做（她几乎总能做到，除非客观世界"
         "里有硬冲突）。情绪和主观解读不是你的事。\n\n"
-        "你不是填一张表，而是一个会持续推演世界的脑子。你有四个工具，看一眼世界后"
+        "你不是填一张表，而是一个会持续推演世界的脑子。你有五个工具，看一眼世界后"
         "想清楚再调，直到这一轮没有别的要做了就停：\n\n"
         "- update_world(detail)：写下世界此刻的客观叙述。看你记得的上一版世界叙述"
         "+ 现在几点，推演世界此刻什么样：谁大概在哪、在干嘛、什么氛围（位置就融在"
         "叙述里，不用专门的房间字段）；对收到的角色动作，把它的客观结果也体现进来"
         "（她去厨房 → 厨房有了动静和她的身影）。只写客观发生了什么，绝不写谁的情绪"
         "/ 心情 / 主观解读。世界时间由系统按现实时刻自动记，你不用编。\n"
+        "- update_arc(narrative)：重写「世界的长弧走到哪」。它和 update_world 分两层"
+        "钟：detail 写「此刻的世界是什么样」，每轮都可能重写，明天就过时；长弧写"
+        "「跨周月仍然成立的世界进展」，写进去的话明天、下周读仍然为真。判据一句话："
+        "这句话下周还成立吗？成立才配进长弧。只有发生了以周月计的翻页级转变（考完、"
+        "放榜、搬家、换季、换工作）才动它，日常起居（一顿饭、一节课、一段午后）不动。"
+        "每次调用都是整篇重写当前仍成立的长弧：翻过去的页被新的一页取代、不是排在"
+        "后面被追加，绝不写成历史流水账。翻页时刻由系统按现实时刻自动记，你不用编。\n"
         "- sense(recipient, surroundings)：你是每个角色的五官。你有全局视角，但每个"
         "角色只能感知到她够得着的那一份，所以这条工具是**逐角色**的——为**单个** "
         "recipient 推演「此刻她在哪、谁在她身边、周围环境怎样」，把这份客观周遭切片"
@@ -343,6 +352,23 @@ def _act_batch_text(acts: list[ActPerformed]) -> str:
     return "\n".join(lines)
 
 
+def _arc_section(arc_narrative: str | None) -> str:
+    """渲染【世界的长弧】段的正文：有长弧给最新一版全文，空弧给冷启动引导。
+
+    长弧是 world 自产的慢层状态（「跨周月仍然成立的世界进展」，只在翻页级转变时
+    整篇重写），每轮推演都把最新一版喂回去——比此刻慢的世界进展不再只活在定格的
+    底色里。空弧（还没翻过页 / 冷启动）时给一段引导：明示长弧还是空白，引导 world
+    从底色和此刻读出世界已经走到哪、先用 update_arc 写下来。引导文案绝不硬编任何
+    剧情事实（高考、日期之类）——世界走到哪由 world 自己读出来，这是宪法。
+    """
+    if arc_narrative is None:
+        return (
+            "长弧还是空白。如果你从世界的底色和此刻已经能读出这个世界走到了哪一页，"
+            "先用 update_arc 把它写下来。"
+        )
+    return arc_narrative
+
+
 def _materials_section(materials: DailyMaterials) -> str:
     """把当天的外部底料（``briefing``）渲染成喂给 world 的一段「今天的外部底料」公共背景文本。
 
@@ -407,12 +433,13 @@ def _world_loop_messages(
     now_iso: str,
     wake_reason: str,
     round_id: str,
+    arc_narrative: str | None,
     materials_text: str = "",
     act_batch_text: str = "",
     end_created_at: str | None = None,
     end_act_id: str | None = None,
 ) -> list[Message]:
-    """把"上一版世界叙述 / 现在几点 / 今天的外部底料 / 这批动作"拼成喂给循环的 user 消息。
+    """把"长弧 / 上一版世界叙述 / 现在几点 / 今天的外部底料 / 这批动作"拼成喂给循环的 user 消息。
 
     ``detail`` 是上一版世界叙述（冷启动时是一句"首次醒来、还没有上一版世界叙述"的
     占位文本）。``now_iso`` 是 engine 算的现实此刻时间（CST）。这里把当前客观 context
@@ -421,8 +448,15 @@ def _world_loop_messages(
     后重投能查重跳过（turn 幂等）、并据终点游标把游标补推到上一轮真正推完的位置。
 
     世界设定本身（这家是谁、屋里屋外的空间、三姐妹各自客观作息）由 system prompt
-    一处承载，USER 层不再拼——避免世界设定两处真相。这里只喂"此刻动态"：上一版
-    叙述 / 现在几点 / 今天的外部底料 / 唤醒缘由 / 这批动作。
+    一处承载，USER 层不再拼——避免世界设定两处真相。这里只喂"此刻动态"：长弧 /
+    上一版叙述 / 现在几点 / 今天的外部底料 / 唤醒缘由 / 这批动作。
+
+    ``arc_narrative``：最新一版世界长弧的全文（「跨周月仍然成立的世界进展」，
+    :func:`_run_world_round` 每轮 ``read_world_arc`` 读出来传进来）。【世界的长弧】
+    段**每轮都拼**（与 materials 的"当天一次"不同——长弧是世界的慢层底座，每轮推演
+    都要看见）：有长弧给全文，None（还没翻过页）给冷启动引导（:func:`_arc_section`）。
+    **必传、无默认值**：None 是"还没翻过页"的显式语义，调用方必须显式给——漏传
+    应当在测试里炸出来（TypeError），而不是静默退化成冷启动引导。
 
     ``materials_text``：当天外部底料渲染出的「今天的外部底料」段（:func:`_materials_section`
     渲染的 briefing）。它是世界今天的真实节律（下雨 / 放假 / 番剧更新），作为**公共
@@ -449,6 +483,7 @@ def _world_loop_messages(
         f"{_round_marker(round_id, end_created_at=end_created_at, end_act_id=end_act_id)}\n"
         f"{world_loop_instruction()}\n\n"
         f"【现实此刻】{now_iso}\n"
+        f"【世界的长弧】\n{_arc_section(arc_narrative)}\n\n"
         f"【你记得的上一版世界叙述】\n{detail}\n\n"
         f"{materials_section}"
         f"【这次醒来的缘由】{wake_reason}\n\n"
@@ -754,11 +789,18 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     # None 不改 materials_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
     mark_ingested_date = today if ingest_materials_this_round else None
 
+    # 世界长弧（慢层）：每轮都读最新一版喂进推演输入——「跨周月仍然成立的世界进展」
+    # 是每轮推演的底座，与 materials 的"当天纳入一次"不同。还没翻过页（None）时
+    # 由 _arc_section 给冷启动引导（长弧还是空白、引导 world 先用 update_arc 写下来）。
+    arc = await read_world_arc(lane=lane)
+    arc_narrative = arc.narrative if arc is not None else None
+
     messages = _world_loop_messages(
         detail=detail,
         now_iso=now_iso,
         wake_reason=wake_reason,
         round_id=round_id,
+        arc_narrative=arc_narrative,
         materials_text=materials_text,
         act_batch_text=act_batch_text,
         end_created_at=batch_end_created_at,

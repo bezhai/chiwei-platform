@@ -143,6 +143,14 @@ def _stub_state(monkeypatch):
         materials_calls.append({"lane": lane, "date": date})
         return None
 
+    arc_reads: list[str] = []
+
+    async def fake_read_world_arc(*, lane):
+        # 默认长弧还是空白（None = 冷启动）：需要断言长弧内容的用例自己覆写这个桩
+        # （monkeypatch.setattr engine_mod.read_world_arc）。
+        arc_reads.append(lane)
+        return None
+
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
@@ -153,8 +161,10 @@ def _stub_state(monkeypatch):
     monkeypatch.setattr(
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
+    monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
 
     engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
+    engine_mod._test_arc_reads = arc_reads  # type: ignore[attr-defined]
 
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
@@ -743,6 +753,101 @@ def test_render_materials_section_uses_briefing():
         "主背景应原样用 agent 整理的 briefing"
     )
     assert "公共可得的背景信息" in section, "渲染器应裹一句背景定性"
+
+
+# ---------------------------------------------------------------------------
+# 世界长弧：每轮推演输入带最新长弧；空弧给冷启动引导（不硬编任何剧情事实）
+# ---------------------------------------------------------------------------
+
+
+def _arc(*, lane="coe-t2", narrative, turned_at="2026-06-09T18:00:00+08:00"):
+    """构造一条 WorldArc（world 读到的最新一版世界长弧）。"""
+    from app.world.arc import WorldArc
+
+    return WorldArc(lane=lane, narrative=narrative, turned_at=turned_at)
+
+
+@pytest.mark.asyncio
+async def test_round_feeds_latest_arc_into_messages(monkeypatch):
+    """每轮推演输入带【世界的长弧】段，内容是最新一版长弧 narrative。"""
+    narrative = "三姐妹家已经搬进新小区，妹妹换了新学校，眼下是初夏。"
+
+    async def fake_read_world_arc(*, lane):
+        return _arc(lane=lane, narrative=narrative)
+
+    monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "【世界的长弧】" in blob, "每轮推演输入必须带【世界的长弧】段"
+    assert narrative in blob, "长弧段内容必须是最新一版 narrative"
+
+
+@pytest.mark.asyncio
+async def test_empty_arc_feeds_cold_start_guidance(monkeypatch):
+    """长弧为 None（还没翻过页）→ 长弧段给冷启动引导：长弧还是空白、引导先用 update_arc 写下来。"""
+    captured = _mock_run(monkeypatch)  # 默认 read_world_arc 桩返回 None
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "【世界的长弧】" in blob, "空弧时长弧段也要出现（带冷启动引导）"
+    assert "空白" in blob, "引导必须明示长弧还是空白"
+    assert "update_arc" in blob, "引导必须指向 update_arc（先把世界走到哪写下来）"
+
+
+def test_empty_arc_guidance_has_no_hardcoded_plot_facts():
+    """冷启动引导文案绝不硬编任何剧情事实（高考 / 具体日期 / 角色名之类）——这是宪法。
+
+    直接测引导渲染器 ``_arc_section(None)``（引导文案的单一来源）：世界走到哪由
+    world 自己从底色和此刻读出来，代码里一个剧情字都不许写。
+    """
+    from app.world.engine import _arc_section
+
+    guidance = _arc_section(None)
+    assert "高考" not in guidance, "引导文案不得硬编剧情事实（高考）"
+    assert not any(ch.isdigit() for ch in guidance), "引导文案不得硬编具体日期 / 数字事实"
+    for name in ("千凪", "赤尾", "绫奈", "chinagi", "akao", "ayana"):
+        assert name not in guidance, f"引导文案不得硬编剧情事实（角色 {name!r}）"
+
+
+@pytest.mark.asyncio
+async def test_arc_read_uses_current_lane(monkeypatch):
+    """长弧按当前 lane 读（泳道隔离命门同 WorldState）。"""
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_arc_reads == ["coe-t2"], (
+        "每轮必须 read_world_arc(lane=当前 lane)，绝不读别的泳道"
+    )
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_enumerates_update_arc_with_boundary():
+    """循环指令必须枚举 update_arc（第五个工具）并钉死长弧与 detail 的边界。
+
+    新工具若不在循环指令里枚举，真实模型就不知道有它、根本不会调（同 sense 的
+    必改命门）。边界判据（spec Key design decisions 1/2/4）必须进指令：detail 写
+    「此刻」明天就过时 / 长弧写「跨周月仍然成立的世界进展」；一句话判据「这句话
+    下周还成立吗」；以周月计的翻页级转变才动、日常起居不动；每次整篇重写当前仍
+    成立的长弧、翻过去的页被取代不是被追加、不写历史流水账。
+    """
+    instruction = engine_mod.world_loop_instruction()
+    assert "update_arc" in instruction, "循环指令必须枚举 update_arc（否则模型不会调它）"
+    assert "四个工具" not in instruction, "工具已是五个，指令不能再写「四个工具」"
+    assert "五个工具" in instruction, "工具清单应明确是五个（含 update_arc）"
+    # 两层钟分界 + 一句话判据
+    assert "跨周月" in instruction
+    assert "下周" in instruction and "成立" in instruction
+    # 翻页粒度：翻页级转变才动、日常不动
+    assert "翻页" in instruction
+    assert "日常" in instruction
+    # 整篇重写语义：被取代不是被追加、不写流水账
+    assert "重写" in instruction
+    assert "流水账" in instruction
 
 
 # ---------------------------------------------------------------------------
@@ -1364,7 +1469,7 @@ async def test_world_instruction_demands_objective_projection():
     instruction = engine_mod.world_loop_instruction()
     assert "客观" in instruction
     assert ("情绪" in instruction) or ("主观" in instruction) or ("解读" in instruction)
-    # 四工具范式：提到她能用工具行动
+    # 五工具范式：提到她能用工具行动
     assert ("notify" in instruction) or ("update_world" in instruction)
     assert ("sleep" in instruction) or ("再看" in instruction)
 
@@ -1384,8 +1489,8 @@ async def test_world_instruction_enumerates_sense_tool():
     """
     instruction = engine_mod.world_loop_instruction()
     assert "sense" in instruction, "循环指令必须枚举 sense 工具（否则模型不会调它）"
-    assert "三个工具" not in instruction, "工具已是四个，指令不能再写「三个工具」"
-    assert "四个工具" in instruction, "工具清单应明确是四个（含 sense）"
+    assert "三个工具" not in instruction, "工具早已不止三个，指令不能再写「三个工具」"
+    assert "五个工具" in instruction, "工具清单应明确是五个（含 sense / update_arc）"
     # sense 是逐角色（per-person）投周遭客观切片：引导逐角色 + 信息差
     assert ("逐角色" in instruction) or ("每个角色" in instruction) or ("单个" in instruction), (
         "sense 引导应说明是逐角色（per-person）投周遭切片"
@@ -1431,6 +1536,7 @@ async def test_world_loop_messages_carry_no_household_rhythm():
         now_iso="2026-06-05T09:00:00+08:00",
         wake_reason="例行看一眼世界。",
         round_id="r1",
+        arc_narrative=None,  # 必传：None 是"还没翻过页"的显式语义，不允许靠默认值
     )
     blob = "".join(m.text() for m in messages)
     assert "作息节律" not in blob, "USER 层不该再拼作息节律段（世界设定归 system 一处）"
@@ -1445,7 +1551,8 @@ async def test_world_instruction_has_no_world_setting():
     """world_loop_instruction 是 USER 层行动指令，不该描述世界设定 / 谁是谁 / 作息。
 
     世界长什么样 / 家庭布局 / 三姐妹是谁 / 几点干嘛这类设定性内容归 system prompt
-    一处；USER 层指令只讲四个工具（notify/update_world/sense/sleep）的说明 + 本轮怎么做。
+    一处；USER 层指令只讲五个工具（notify/update_world/update_arc/sense/sleep）的
+    说明 + 本轮怎么做。
     """
     instruction = engine_mod.world_loop_instruction()
     # 不该出现三姐妹的名字 / 年龄 / 作息坐标这类世界设定内容
@@ -1454,8 +1561,9 @@ async def test_world_instruction_has_no_world_setting():
             f"USER 层指令不该描述世界设定（谁是谁）：{setting!r}"
         )
     assert "作息" not in instruction, "USER 层指令不该描述作息（归 system 一处）"
-    # 仍是四工具行动指令（含 1C 新增的 sense 五官）
+    # 仍是五工具行动指令（含 1C 新增的 sense 五官、长弧新增的 update_arc 翻页）
     assert ("notify" in instruction) and ("update_world" in instruction)
+    assert "update_arc" in instruction
     assert "sense" in instruction
     assert "sleep" in instruction
 
