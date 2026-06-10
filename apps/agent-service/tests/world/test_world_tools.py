@@ -193,10 +193,12 @@ def test_update_arc_only_in_reflect_tools_not_world_tools():
     嘱咐，靠工具集物理隔离：续写无手碰长弧，反思无手碰 detail / notify / sense /
     sleep。
     """
-    from app.world.tools import WORLD_REFLECT_TOOLS, WORLD_TOOLS
+    from app.world.tools import WORLD_REFLECT_TOOLS, WORLD_TOOLS, update_attention
 
     assert update_arc not in WORLD_TOOLS, "续写工具集不得含 update_arc（翻页归反思）"
-    assert WORLD_REFLECT_TOOLS == [update_arc], "反思工具集只含 update_arc"
+    assert WORLD_REFLECT_TOOLS == [update_arc, update_attention], (
+        "反思工具集 = 翻页 + 关注两件"
+    )
 
 
 @pytest.mark.asyncio

@@ -49,8 +49,10 @@ from app.domain.world_events import (
     EventEnvelope,
     EventRead,
 )
+from app.fetch.materials import DailyMaterials
 from app.runtime.persist import insert_idempotent
 from app.world.arc import WorldArc
+from app.world.attention import WorldAttention
 from app.world.engine import (
     WORLD_HEARTBEAT_MS,
     WorldTick,
@@ -119,7 +121,7 @@ def _fake_redis(monkeypatch):
 
 @pytest.fixture
 async def world_db(test_db):
-    """建齐闭环需要的所有真实表：world 叙述快照 / 长弧 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
+    """建齐闭环需要的所有真实表：world 叙述快照 / 长弧 / 关注 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
 
     新范式没有 presence 表了（RoomPresence 已删）。world 的客观状态是 WorldState
     （此刻的世界叙述，位置融在 detail 自然语言里）+ WorldArc（世界长弧的慢层快照，
@@ -127,11 +129,15 @@ async def world_db(test_db):
     """
     await migrate(WorldState, test_db)
     await migrate(WorldArc, test_db)
+    await migrate(WorldAttention, test_db)
     await migrate(EventEnvelope, test_db)
     await migrate(EventRead, test_db)
     await migrate(LifeState, test_db)
     await migrate(ActPerformed, test_db)
     await migrate(SessionTranscript, test_db)
+    # world 每轮按 (lane, 今天) 查当天外部底料（engine 的 find_daily_materials 真打
+    # 这张表）——不建它，闭环里每个 world_tick 都死在 UndefinedTableError。
+    await migrate(DailyMaterials, test_db)
     yield test_db
 
 

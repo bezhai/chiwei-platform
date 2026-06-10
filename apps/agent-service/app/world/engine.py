@@ -661,10 +661,13 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
       5. **turn 幂等查重**：load_session 读已有 transcript，若本轮 round_id 标记
          已在历史里（失败 / 崩溃重读）→ 推进游标到 **marker 记的终点** 后跳过，不再
          run、不重复推演（不是推进到当前批末尾——崩溃+扩批时当前批可能更大）。
-      5b. **反思环节（续写之前）**：当日尚未完成反思（``arc_reflected_date`` !=
-         今天，含 None=冷启动）→ 跑一次无会话的对表反思
-         （:func:`app.world.reflection.run_arc_reflection`，工具只有 update_arc、
-         fail-open、成功才落当日标记）；续写的长弧在反思**之后现读**。
+      5b. **反思环节（续写之前，双触发）**：第一班「当日尚未反思」
+         （``arc_reflected_date`` != 今天，含 None=冷启动）；第二班「当日底料落地
+         且尚未被反思消化」（底料存在且 ``arc_materials_reflected_date`` != 今天）
+         ——任一命中跑一次无会话的对表反思（同轮命中两个也只跑一次：
+         :func:`app.world.reflection.run_arc_reflection`，工具只有 update_arc /
+         update_attention、fail-open、成功才落标记——带底料同落两个标记）；续写的
+         长弧在反思**之后现读**。
       6. 把"上一版世界叙述 / 现在几点 / 这批动作"作为 prompt context 喂入（世界设定
          由 system prompt 一处承载，USER 层不拼），marker 编 round_id + 本批终点游标，
          用**确定性 session_id 续接**跑 agent 工具循环：把 session_id 显式传给
@@ -864,17 +867,35 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     # None 不改 materials_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
     mark_ingested_date = today if ingest_materials_this_round else None
 
-    # 反思环节（Task 2b，翻页归它独占）：当日尚未完成反思（arc_reflected_date !=
-    # 今天，含 None=冷启动 / 部署后首跑）→ **续写之前**先跑一次无会话的对表反思
-    # （独立 AgentConfig、工具只有 update_arc、max_retries=1）。当日完成标记独立于
-    # 底料 ingest 标记（spec 决策 5：续写成功不代表反思成功）；反思**成功**才落标记
+    # 反思环节（Task 2b，翻页归它独占）：**续写之前**跑一次无会话的对表反思
+    # （独立 AgentConfig、工具只有 update_arc / update_attention、max_retries=1）。
+    # 双触发（眼睛闭环）：world 24×7，每天 00:0X 首轮就触发第一班——那时眼睛还没
+    # 出门、当天底料不存在，单一标记会让「当天 briefing 永远不被当天反思消化」。
+    # 所以分两班：
+    #
+    #   * 第一班照旧：arc_reflected_date != 今天（含 None=冷启动 / 部署后首跑），
+    #     无底料也凭常识对表翻页（现有语义不变）。
+    #   * 第二班补班：当日底料存在 且 arc_materials_reflected_date != 今天——白天
+    #     底料落地后再消化一次（眼睛带着旧关注看到的结果就在底料里）。
+    #
+    # 两个条件命中任一就跑、同轮命中两个也**只跑一次**（一次带底料的反思已覆盖
+    # 两班职责——比如午后部署时首轮就带底料）。落哪些标记由 run_arc_reflection 按
+    # 「本次是否带底料」决定：带底料同落两个、无底料只落第一班标记。反思标记独立
+    # 于底料 ingest 标记（spec 决策 5：续写成功不代表反思成功）；反思**成功**才落
     # （在 run_arc_reflection 里 mark_arc_reflected），失败不落 → 同日后续轮自动
     # 重试。fail-open：run_arc_reflection 绝不抛——失败只记 error 日志、当轮续写
     # 照常。
     prev_reflected_date = (
         snapshot.arc_reflected_date if snapshot is not None else None
     )
-    if prev_reflected_date != today:
+    prev_materials_reflected_date = (
+        snapshot.arc_materials_reflected_date if snapshot is not None else None
+    )
+    needs_daily_reflection = prev_reflected_date != today
+    needs_materials_reflection = (
+        materials is not None and prev_materials_reflected_date != today
+    )
+    if needs_daily_reflection or needs_materials_reflection:
         await run_arc_reflection(
             lane=lane,
             now=now,

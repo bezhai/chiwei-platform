@@ -1,8 +1,9 @@
-"""每日抓取 cron 链路 wiring 契约（刀 3 Task2）。
+"""每日底料 cron 链路 wiring 契约（眼睛 Task 3）。
 
 照搬 world heartbeat 的三层翻译解决「时间源必须单字段 ts」的框架硬约束：
-  cron 0 4 * * * → DailyMaterialsTick（单字段 ts）→ fetch_to_materials_tick（补 lane）
-    → DailyMaterialsFetch → daily_fetch_node。
+  cron 0 4-23 * * *（白天每小时打点，失败下一钟点重试）→ DailyMaterialsTick
+  （单字段 ts）→ fetch_to_materials_tick（补 lane）→ DailyMaterialsFetch
+    → daily_fetch_node。
 
 这些测试不跑引擎，只 inspect WIRING_REGISTRY + 断言图能 compile。单字段 ts 契约由
 ``test_time_source_payload_contract.py`` 的参数化用例覆盖（它现在也加载 fetch_dataflow）。
@@ -27,7 +28,11 @@ def _fresh_import():
 
 
 def test_fetch_cron_drives_translation_node():
-    """DailyMaterialsTick 由 cron 04:00 Asia/Shanghai 源驱动，打到翻译节点。"""
+    """DailyMaterialsTick 由 cron 白天每小时（04-23 点，Asia/Shanghai）源驱动，打到翻译节点。
+
+    04:00 第一班（角色醒来前底料就绪），之后每钟点打点做**同日重试**——某钟点眼睛
+    失败不落库，下一钟点自动再看；当天已成功则 node 早退（按天幂等仍是一天一份）。
+    """
     _fresh_import()
 
     from app.fetch.node import fetch_to_materials_tick
@@ -42,7 +47,7 @@ def test_fetch_cron_drives_translation_node():
     assert len(w.sources) == 1
     src = w.sources[0]
     assert src.kind == "cron"
-    assert src.params["expr"] == "0 4 * * *"
+    assert src.params["expr"] == "0 4-23 * * *"
     assert src.params["tz"] == "Asia/Shanghai"
 
 

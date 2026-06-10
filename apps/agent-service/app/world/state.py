@@ -69,6 +69,14 @@ class WorldState(Data):
     # nullable migrate（对齐 materials_ingested_date），默认 None 不撞 migrator
     # 保留列（id / created_at / updated_at / dedup_hash）。
     arc_reflected_date: str | None = None
+    # 「当日底料已被反思消化」的那一天（CST `YYYY-MM-DD`，眼睛闭环的第二班标记）。
+    # world 24×7，每天 00:0X 首轮就触发第一班反思（arc_reflected_date）——那时眼睛
+    # 还没出门、当天底料不存在，单一标记会让「当天 briefing 永远不被当天反思消化」。
+    # 所以 engine 在「当日底料存在且本字段 != 今天」时补一班带底料的反思；带底料的
+    # 成功反思同时落两个标记（它已覆盖两班职责，避免冗余第二班），无底料的成功反思
+    # 只落 arc_reflected_date、不碰本字段。同样成功才落、失败同日重试。nullable +
+    # additive migrate（对齐 arc_reflected_date），默认 None 不撞 migrator 保留列。
+    arc_materials_reflected_date: str | None = None
     version: Annotated[int, Version] = 0
 
 
@@ -95,6 +103,9 @@ async def write_world_state(*, lane: str, world_time: str, detail: str) -> None:
             ),
             arc_reflected_date=(
                 prev.arc_reflected_date if prev is not None else None
+            ),
+            arc_materials_reflected_date=(
+                prev.arc_materials_reflected_date if prev is not None else None
             ),
         )
     )
@@ -130,6 +141,7 @@ async def set_next_wake_at(*, lane: str, next_wake_at: str) -> None:
             act_cursor_act_id=snapshot.act_cursor_act_id,
             materials_ingested_date=snapshot.materials_ingested_date,
             arc_reflected_date=snapshot.arc_reflected_date,
+            arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
         )
     )
 
@@ -160,6 +172,7 @@ async def advance_act_cursor(*, lane: str, created_at: str, act_id: str) -> None
             act_cursor_act_id=act_id,
             materials_ingested_date=snapshot.materials_ingested_date,
             arc_reflected_date=snapshot.arc_reflected_date,
+            arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
         )
     )
 
@@ -215,28 +228,38 @@ async def record_world_round_close(
                 else snapshot.materials_ingested_date
             ),
             arc_reflected_date=snapshot.arc_reflected_date,
+            arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
         )
     )
 
 
-async def mark_arc_reflected(*, lane: str, date: str) -> None:
+async def mark_arc_reflected(
+    *, lane: str, date: str, materials_date: str | None = None
+) -> None:
     """反思环节成功后把「当日反思已完成」标记落成 ``date``（CST ``YYYY-MM-DD``）。
 
-    挂载条件的另一半在 engine：``arc_reflected_date != 今天`` 才跑反思（Task 2b）。
-    本函数只在反思 Agent 调用**成功**后被调——失败不落标记、同日后续轮自动重试，
-    直到成功才落（spec 决策 5：一天的机会不被吞掉）。WorldState 是 append-only：
-    读最新一版、沿用其余全部字段（叙述 / 到点时刻 / 游标 / 底料标记都不丢），只换
-    ``arc_reflected_date``，append 一版。
+    挂载条件的另一半在 engine：``arc_reflected_date != 今天`` 才跑第一班反思
+    （Task 2b）；当日底料存在且 ``arc_materials_reflected_date != 今天`` 时补第二班
+    （眼睛闭环）。本函数只在反思 Agent 调用**成功**后被调——失败不落标记、同日后续
+    轮自动重试，直到成功才落（spec 决策 5：一天的机会不被吞掉）。
+
+    ``materials_date``：这次反思**带底料**跑成时传当天日期——一次带底料的成功反思
+    已覆盖两班职责，``arc_materials_reflected_date`` 同时落掉（避免冗余第二班）；
+    **无底料**的反思传 None——不碰第二班标记、沿用上一版（绝不清回 None，否则白天
+    底料落地后的补班会被误吞）。
+
+    WorldState 是 append-only：读最新一版、沿用其余全部字段（叙述 / 到点时刻 /
+    游标 / 底料标记都不丢），只换反思标记，append 一版。
 
     冷启动**不能**像其他调度写入点那样安全跳过：反思先于续写跑，冷启动反思成功
     落标时还没有任何 WorldState 行——跳过 = 标记丢失，同日每一轮都重跑反思（违反
-    「每日一次、成功后同日不再重复跑」；与 set_next_wake_at / advance_act_cursor
-    的"跳过无害"不同，那两处丢的只是一次调度、有兜底）。所以冷启动插一行**最小
-    占位快照**承载标记：叙述字段中性空白（``detail`` / ``world_time`` 空串，真实
-    首版叙述仍由续写的 update_world 写——:func:`write_world_state` 的保留链会把
-    这里落的标记带上）、调度字段全 None（gate 对 None ``next_wake_at`` 的判定、
-    游标为 None 读全量的行为都与真冷启一致）。engine 把「detail 空白」继续当冷
-    启动分支对待（占位行不冒充世界叙述）。
+    「每班同日至多一次、成功后同日不再重复跑」；与 set_next_wake_at /
+    advance_act_cursor 的"跳过无害"不同，那两处丢的只是一次调度、有兜底）。所以
+    冷启动插一行**最小占位快照**承载标记（带底料时两个标记一起承载）：叙述字段
+    中性空白（``detail`` / ``world_time`` 空串，真实首版叙述仍由续写的 update_world
+    写——:func:`write_world_state` 的保留链会把这里落的标记带上）、调度字段全 None
+    （gate 对 None ``next_wake_at`` 的判定、游标为 None 读全量的行为都与真冷启
+    一致）。engine 把「detail 空白」继续当冷启动分支对待（占位行不冒充世界叙述）。
     """
     snapshot = await read_world_state(lane=lane)
     if snapshot is None:
@@ -246,6 +269,7 @@ async def mark_arc_reflected(*, lane: str, date: str) -> None:
                 world_time="",
                 detail="",
                 arc_reflected_date=date,
+                arc_materials_reflected_date=materials_date,
             )
         )
         return
@@ -259,5 +283,10 @@ async def mark_arc_reflected(*, lane: str, date: str) -> None:
             act_cursor_act_id=snapshot.act_cursor_act_id,
             materials_ingested_date=snapshot.materials_ingested_date,
             arc_reflected_date=date,
+            arc_materials_reflected_date=(
+                materials_date
+                if materials_date is not None
+                else snapshot.arc_materials_reflected_date
+            ),
         )
     )

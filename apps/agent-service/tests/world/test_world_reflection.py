@@ -1,23 +1,26 @@
-"""world 反思环节契约 — 翻页能力从续写剥离、归独立的反思（Task 2b）.
+"""world 反思环节契约 — 翻页能力从续写剥离、归独立的反思（Task 2b + 眼睛闭环）.
 
 续写姿态发现不了「页翻了」（coe 实证：长弧 v1 把过期底色结晶了进去），所以翻页
-归一个独立的「反思」环节：**无会话**（每次从证据现判，不背叙事惯性）、每日一次、
-对表翻页。这些测试钉死反思环节的机制层硬约束：
+归一个独立的「反思」环节：**无会话**（每次从证据现判，不背叙事惯性）、每日两班
+（第一班每日首轮对表；第二班当日底料落地后消化回看）、对表翻页 + 交代眼睛。
+这些测试钉死反思环节的机制层硬约束：
 
-  * 工具集物理隔离：反思工具集只含 update_arc（续写无手碰长弧，反思无手碰
-    detail / notify / sense / sleep）；
+  * 工具集物理隔离：反思工具集只含 update_arc + update_attention（续写无手碰
+    长弧和关注，反思无手碰 detail / notify / sense / sleep）；
   * 无会话：``Agent.run`` 不传 session_id（不续接 transcript）；
-  * durable 副作用边界同续写：``max_retries=1``（update_arc 是 durable 写，
-    整轮重放会重放它）；
-  * 工具运行契约：context.features 带 world_lane + world_round_id（update_arc
-    读 ambient context 取 lane）；
-  * 反思成功才落当日标记（mark_arc_reflected），失败不落（同日后续轮自动重试）；
+  * durable 副作用边界同续写：``max_retries=1``（update_arc / update_attention
+    是 durable 写，整轮重放会重放它们）；
+  * 工具运行契约：context.features 带 world_lane + world_round_id（工具读
+    ambient context 取 lane）；
+  * 反思成功才落标记（mark_arc_reflected）：带底料的成功反思同落两个标记（覆盖
+    两班职责）、无底料只落第一班标记；失败不落（同日后续轮自动重试）；
   * fail-open：反思抛错只记 error 日志、绝不向上抛（当轮续写照常）；
   * 输入拼装：所有快照都带时间标注（长弧 turned_at / 此刻叙述 world_time /
-    现实此刻+今天日期星期），缺失时如实说缺失，模板不硬编任何剧情事实。
+    底料 fetched_at / 关注 written_at / 现实此刻+今天日期星期），缺失时如实说
+    缺失，模板不硬编任何剧情事实。
 
-哪页该翻由反思推演自主判断（prompt 层约束粒度），代码里没有翻页检测器 /
-频率限制器（赤尾宪法）。
+哪页该翻、还想看什么由反思推演自主判断（prompt 层约束粒度），代码里没有翻页
+检测器 / 频率限制器（赤尾宪法）。
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from app.agent.neutral import Message, Role
 from app.world.arc import WorldArc
 from app.world.reflection import run_arc_reflection
 from app.world.state import WorldState
-from app.world.tools import WORLD_REFLECT_TOOLS, update_arc
+from app.world.tools import WORLD_REFLECT_TOOLS, update_arc, update_attention
 
 _CST = timezone(timedelta(hours=8))
 
@@ -73,16 +76,23 @@ def _materials(**kwargs):
 
 @pytest.fixture(autouse=True)
 def _stub_reflection_io(monkeypatch):
-    """stub 反思环节的 IO（读长弧 / 落标记 / 记成本），专测编排机制，不碰真库。"""
+    """stub 反思环节的 IO（读长弧 / 读关注 / 落标记 / 记成本），专测编排机制，不碰真库。"""
     arc_holder: dict = {"arc": None}
 
     async def fake_read_world_arc(*, lane):
         return arc_holder["arc"]
 
+    attention_holder: dict = {"attention": None}
+    attention_reads: list[str] = []
+
+    async def fake_read_world_attention(*, lane):
+        attention_reads.append(lane)
+        return attention_holder["attention"]
+
     marks: list[dict] = []
 
-    async def fake_mark_arc_reflected(*, lane, date):
-        marks.append({"lane": lane, "date": date})
+    async def fake_mark_arc_reflected(*, lane, date, materials_date=None):
+        marks.append({"lane": lane, "date": date, "materials_date": materials_date})
 
     costs: list[dict] = []
 
@@ -90,10 +100,18 @@ def _stub_reflection_io(monkeypatch):
         costs.append(kwargs)
 
     monkeypatch.setattr(reflection_mod, "read_world_arc", fake_read_world_arc)
+    # raising=False：red 阶段 reflection 还没 import read_world_attention，不让
+    # fixture 自己炸——让缺关注证据段的断言去红。
+    monkeypatch.setattr(
+        reflection_mod, "read_world_attention", fake_read_world_attention,
+        raising=False,
+    )
     monkeypatch.setattr(reflection_mod, "mark_arc_reflected", fake_mark_arc_reflected)
     monkeypatch.setattr(reflection_mod, "record_round_cost", fake_record_round_cost)
 
     reflection_mod._test_arc_holder = arc_holder  # type: ignore[attr-defined]
+    reflection_mod._test_attention_holder = attention_holder  # type: ignore[attr-defined]
+    reflection_mod._test_attention_reads = attention_reads  # type: ignore[attr-defined]
     reflection_mod._test_marks = marks  # type: ignore[attr-defined]
     reflection_mod._test_costs = costs  # type: ignore[attr-defined]
     yield
@@ -137,9 +155,9 @@ async def _reflect(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_reflect_toolset_contains_only_update_arc():
-    """反思工具集只含 update_arc（翻页归反思独占——工具集物理隔离）。"""
-    assert WORLD_REFLECT_TOOLS == [update_arc]
+def test_reflect_toolset_is_arc_and_attention_only():
+    """反思工具集只含 update_arc + update_attention（翻页与关注归反思独占——工具集物理隔离）。"""
+    assert WORLD_REFLECT_TOOLS == [update_arc, update_attention]
 
 
 def test_reflect_config_prompt_id_is_world_reflect():
@@ -219,7 +237,59 @@ async def test_reflection_success_marks_today(monkeypatch):
 
     await _reflect(lane="coe-t2", now=_NOW)
 
-    assert reflection_mod._test_marks == [{"lane": "coe-t2", "date": "2026-06-10"}]
+    assert reflection_mod._test_marks == [
+        {"lane": "coe-t2", "date": "2026-06-10", "materials_date": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reflection_success_without_materials_lands_only_daily_marker(monkeypatch):
+    """无底料的成功反思只落第一班标记（materials_date=None：第二班标记不被碰）。
+
+    第一班（每日首轮，00:0X）跑的时候眼睛还没出门、当天没有底料——这次反思没有
+    消化任何底料，绝不能把「当日底料已消化」标掉，否则白天底料落地后的补班会被
+    误吞、当天 briefing 永远不被当天反思消化。
+    """
+    _mock_run(monkeypatch)
+
+    await _reflect(lane="coe-t2", now=_NOW, materials=None)
+
+    assert reflection_mod._test_marks == [
+        {"lane": "coe-t2", "date": "2026-06-10", "materials_date": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reflection_success_with_materials_lands_both_markers(monkeypatch):
+    """带底料的成功反思一次落两个标记（已覆盖两班职责，避免冗余第二班）。
+
+    比如午后部署后的首轮：第一班触发时当天底料已经在了——这次反思已经消化了
+    当天 briefing，第二班标记同时落掉，当天不再冗余跑第二次。
+    """
+    _mock_run(monkeypatch)
+
+    await _reflect(lane="coe-t2", now=_NOW, materials=_materials())
+
+    assert reflection_mod._test_marks == [
+        {"lane": "coe-t2", "date": "2026-06-10", "materials_date": "2026-06-10"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reflection_failure_with_materials_does_not_mark(monkeypatch):
+    """带底料的反思失败 → 两个标记都不落（同日后续轮重试，底料消化的机会不被吞）。"""
+
+    async def boom_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        raise RuntimeError("model boom during materials reflection")
+
+    monkeypatch.setattr(reflection_mod.Agent, "run", boom_run)
+
+    await _reflect(materials=_materials())  # 不抛（fail-open）
+
+    assert reflection_mod._test_marks == [], (
+        "带底料的反思失败绝不落任何标记——同日下一轮才能重试消化底料"
+    )
 
 
 @pytest.mark.asyncio
@@ -363,7 +433,9 @@ async def test_reflection_retries_same_day_after_write_failure_then_marks(monkey
 
     state["healthy"] = True
     await _reflect()  # 同日下一轮重试：写库恢复 → 成功落标记
-    assert reflection_mod._test_marks == [{"lane": "coe-t2", "date": "2026-06-10"}]
+    assert reflection_mod._test_marks == [
+        {"lane": "coe-t2", "date": "2026-06-10", "materials_date": None}
+    ]
     assert len(writes) == 1, "恢复后的那轮真实落了一版长弧"
 
 
@@ -537,6 +609,47 @@ async def test_reflection_input_missing_materials_says_so(monkeypatch):
     assert "今天的外部底料" in blob or "底料" in blob
 
 
+@pytest.mark.asyncio
+async def test_reflection_input_carries_attention_with_written_at(monkeypatch):
+    """当前关注段：有关注给全文 + written_at 时间标注——反思要看出这版关注是哪天留的。"""
+    from app.world.attention import WorldAttention
+
+    reflection_mod._test_attention_holder["attention"] = WorldAttention(
+        lane="coe-t2",
+        narrative="想看看这周末天气会不会放晴。",
+        written_at="2026-06-09T23:30:00+08:00",
+    )
+    captured = _mock_run(monkeypatch)
+
+    await _reflect()
+
+    blob = _blob(captured)
+    assert "想看看这周末天气会不会放晴。" in blob
+    assert "2026-06-09T23:30:00+08:00" in blob, "关注必须带 written_at 时间标注"
+
+
+@pytest.mark.asyncio
+async def test_reflection_input_no_attention_says_so(monkeypatch):
+    """还没有任何关注（冷启动）→ 如实说「还没有人交代过眼睛要看什么」，不冒充。"""
+    reflection_mod._test_attention_holder["attention"] = None
+    captured = _mock_run(monkeypatch)
+
+    await _reflect()
+
+    blob = _blob(captured)
+    assert "还没有人交代过眼睛要看什么" in blob
+
+
+@pytest.mark.asyncio
+async def test_reflection_reads_attention_by_lane(monkeypatch):
+    """反思自己按当前 lane 现读关注（与长弧同款：不用调用方缓存的值）。"""
+    _mock_run(monkeypatch)
+
+    await _reflect(lane="coe-t2")
+
+    assert reflection_mod._test_attention_reads == ["coe-t2"]
+
+
 def test_reflect_instruction_has_no_hardcoded_plot_facts():
     """反思指令模板绝不硬编剧情事实（高考 / 角色名 / 日期数字）——宪法。"""
     instruction = reflection_mod.reflect_instruction()
@@ -559,6 +672,26 @@ def test_reflect_instruction_pins_recalibration_posture():
     assert "重写" in instruction
     # 禁止叙述场景（那是续写的事）
     assert "叙述" in instruction or "场景" in instruction
+
+
+def test_reflect_instruction_pins_attention_posture():
+    """反思指令钉交代眼睛的姿态：消化底料回看 + update_attention 重写 + 清空版语义。
+
+    对表之外的第二职：看今天底料带回了什么（眼睛带着旧关注去看的结果就在底料里），
+    决定接下来还想看什么。必须含：① update_attention 工具语义；② 整篇重写「当前
+    仍想看的」；③ 清空版——不再想看也要重写一版说明（append-only 链没有删除态，
+    不写这一版旧关注会被眼睛永远读下去）；④ 与长弧分界（关注写想看哪、长弧写走到哪）。
+    """
+    instruction = reflection_mod.reflect_instruction()
+    # ① 工具语义
+    assert "update_attention" in instruction
+    # ② 眼睛 / 关注的职责（看底料带回了什么、决定还想看什么）
+    assert "眼睛" in instruction
+    assert "想看" in instruction
+    # ③ 清空版：没有要看的也要写一版说明
+    assert "没有特别要看的" in instruction
+    # ④ 与长弧分界
+    assert "长弧" in instruction
 
 
 @pytest.mark.asyncio

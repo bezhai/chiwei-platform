@@ -587,3 +587,158 @@ async def test_mark_arc_reflected_preserved_then_overwritten_next_day(world_db):
 
     snap = await read_world_state(lane="coe-t2")
     assert snap.arc_reflected_date == "2026-06-11"
+
+
+# ---------------------------------------------------------------------------
+# arc_materials_reflected_date —— 眼睛闭环：「当日底料已被反思消化」的第二班标记
+#
+# world 24×7，每天 00:0X 首轮就触发第一班反思（arc_reflected_date）——那时眼睛还没
+# 跑、当天底料不存在，单一标记会让「当天 briefing 永远不被当天反思消化」。所以加
+# 第二班标记：当日底料存在且该标记 != 今天时再跑一次。一次带底料的成功反思同时落
+# 两个标记（它已覆盖两班职责——比如午后部署时首轮就带底料，不冗余跑第二班）；无
+# 底料的成功反思只落 arc_reflected_date。同 arc_reflected_date 的教训：所有其他
+# WorldState 写入点都必须保留这个新字段，否则任何一轮收口都把它冲回 None、当天
+# 反复重跑带底料反思。
+# ---------------------------------------------------------------------------
+
+
+def test_worldstate_has_nullable_arc_materials_reflected_date():
+    """WorldState 多一个 arc_materials_reflected_date 字段，nullable，默认 None。"""
+    assert "arc_materials_reflected_date" in WorldState.model_fields
+    snap = WorldState(lane="x", world_time="t", detail="d")
+    assert snap.arc_materials_reflected_date is None
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_with_materials_date_lands_both_markers(world_db):
+    """带底料的成功反思一次落两个标记（覆盖两班职责，避免冗余第二班）。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-10"
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "带底料的反思成功必须同时落第二班标记（它已消化了当天底料）"
+    )
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_without_materials_date_preserves_existing(world_db):
+    """无底料的成功反思只落 arc_reflected_date——不碰已有的第二班标记（绝不清回 None）。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    # 跨天首轮（无底料班）：只落新一天的 arc_reflected_date。
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-11", materials_date=None)
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_reflected_date == "2026-06-11"
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "materials_date 传 None 时该保留已有的第二班标记，不能被清回 None"
+    )
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_cold_start_with_materials_lands_both(world_db):
+    """冷启动带底料的成功反思（如午后部署首跑）→ 占位行同时承载两个标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await mark_arc_reflected(
+        lane="coe-cold", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    snap = await read_world_state(lane="coe-cold")
+    assert snap is not None, "冷启动落标记必须持久化（不能 no-op 丢标记）"
+    assert snap.arc_reflected_date == "2026-06-10"
+    assert snap.arc_materials_reflected_date == "2026-06-10"
+    # 占位行其余语义不变：不冒充叙述、不带调度状态
+    assert snap.detail == ""
+    assert snap.next_wake_at is None
+
+
+@pytest.mark.integration
+async def test_write_world_state_preserves_arc_materials_reflected_date(world_db):
+    """update_world 改叙述不冲掉第二班标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    await write_world_state(lane="coe-t2", world_time="t1", detail="新叙述")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "update_world 不该冲掉 arc_materials_reflected_date（否则当天反复重跑带底料反思）"
+    )
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_preserves_arc_materials_reflected_date(world_db):
+    """排下次醒（set_next_wake_at）不冲掉第二班标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-10T11:00:00+08:00")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "set_next_wake_at 不该冲掉 arc_materials_reflected_date"
+    )
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_preserves_arc_materials_reflected_date(world_db):
+    """推进 act 游标不冲掉第二班标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-10T09:00:00+08:00", act_id="a9"
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "advance_act_cursor 不该冲掉 arc_materials_reflected_date"
+    )
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_preserves_arc_materials_reflected_date(world_db):
+    """收口（推游标 + 标底料）不冲掉第二班标记——最容易出 bug 的写入点。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await mark_arc_reflected(
+        lane="coe-t2", date="2026-06-10", materials_date="2026-06-10"
+    )
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-10T09:00:00+08:00", "a9"),
+        materials_ingested_date="2026-06-10",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.arc_materials_reflected_date == "2026-06-10", (
+        "record_world_round_close 不该冲掉 arc_materials_reflected_date（否则每轮"
+        "收口都把第二班标记打回 None、当天反复重跑带底料反思）"
+    )

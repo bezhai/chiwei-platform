@@ -1211,6 +1211,121 @@ async def test_turn_idempotent_skip_does_not_run_reflection(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 反思双触发（眼睛闭环）：world 24×7，每天 00:0X 首轮就触发第一班反思——那时眼睛
+# 还没跑、当天底料不存在，单一标记会让「当天 briefing 永远不被当天反思消化」。
+# 改成两班：第一班照旧（arc_reflected_date != 今天，无底料也凭常识对表）；第二班
+# 当日底料存在且 arc_materials_reflected_date != 今天时再跑一次。一次带底料的成功
+# 反思同时落两个标记（覆盖两班职责），所以一天最多两次、绝不冗余第三次。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_materials_arrival_triggers_second_reflection_shift(monkeypatch):
+    """第二班：第一班已跑过（arc_reflected_date == 今天）、当日底料落地且第二班
+    标记不是今天 → 再跑一次反思（把当天 briefing 消化进对表）。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(
+        monkeypatch,
+        arc_reflected_date=today,
+        arc_materials_reflected_date=None,
+        materials_ingested_date=today,  # 续写已纳入过，与反思的第二班标记无关
+    )
+
+    materials_obj = _materials()
+
+    async def materials(*, lane, date):
+        return materials_obj
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert len(engine_mod._test_reflect_calls) == 1, (
+        "当日底料落地后必须补一班反思（否则当天 briefing 永远不被当天反思消化）"
+    )
+    assert engine_mod._test_reflect_calls[0]["materials"] is materials_obj, (
+        "补班反思必须拿到当天底料"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_second_shift_when_materials_already_reflected_today(monkeypatch):
+    """两班都跑过（两个标记都是今天）→ 即便底料还在，也不再跑反思（各班同日至多一次）。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(
+        monkeypatch,
+        arc_reflected_date=today,
+        arc_materials_reflected_date=today,
+        materials_ingested_date=today,
+    )
+
+    async def materials(*, lane, date):
+        return _materials()
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_reflect_calls == [], (
+        "两班标记都是今天时不得再跑反思（一天最多两次）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_shift_with_materials_runs_single_reflection(monkeypatch):
+    """带底料的首班（如午后部署首跑：两标记都空、底料已在）→ 只跑一次反思。
+
+    这一次反思已带底料、覆盖两班职责（run_arc_reflection 成功会同落两个标记），
+    engine 在同一轮里绝不能因为两个触发条件同时满足就跑两次。
+    """
+    _snapshot_with(
+        monkeypatch,
+        arc_reflected_date=None,
+        arc_materials_reflected_date=None,
+    )
+
+    async def materials(*, lane, date):
+        return _materials()
+
+    monkeypatch.setattr(engine_mod, "find_daily_materials", materials)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert len(engine_mod._test_reflect_calls) == 1, (
+        "两班条件同时满足时也只跑一次反思（一次带底料反思覆盖两班职责）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_second_shift_without_materials(monkeypatch):
+    """第一班已跑、今天没底料 → 不跑第二班（第二班只为消化底料而存在）。
+
+    这也是既有语义的回归钉子：单标记时代「arc_reflected_date == 今天就不再反思」
+    在没底料的日子必须原样成立。
+    """
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(
+        monkeypatch, arc_reflected_date=today, arc_materials_reflected_date=None
+    )
+    _mock_run(monkeypatch)  # 默认 find_daily_materials 桩返回 None
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_reflect_calls == [], (
+        "今天没底料时第二班不触发（无底料班只有每日首轮那一班）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 冷启动反思标记的整条链（真实 PG）+ 占位快照不影响 gate / 冷启动分支
 #
 # 冷启动时反思先于续写跑：mark_arc_reflected 落标时还没有任何 WorldState 行。
