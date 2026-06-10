@@ -1,6 +1,6 @@
 """关注（WorldAttention）版本链 + update_attention 工具契约 — world 的眼睛的落点.
 
-关注 = world 经反思环节留给眼睛的「想看哪」。长弧写「世界走到哪」、关注写「眼睛
+关注 = world 经反思环节留给眼睛的「想看哪」。世界阶段写「世界走到哪」、关注写「眼睛
 该看哪」，语义不混放、各落各的版本链。WorldAttention 照 WorldArc 模板：lane Key +
 narrative + written_at + Version，append-only、读最新一版、整篇重写——写「当前仍
 想看的」，看完的被新版取代、不是追加成清单。**清空也是一版**：append-only 链没有
@@ -146,7 +146,7 @@ def test_update_attention_docstring_pins_rewrite_and_clear_semantics():
 
     必须含：① 整篇重写当前仍想看的（不是追加成清单）；② 看完的被取代；③ 清空版
     语义（当下没有要看的就写一版说明没有——append-only 链没有删除态，不写这一版
-    旧关注会被眼睛永远读下去）；④ 与长弧的分界（长弧写走到哪、关注写想看哪）。
+    旧关注会被眼睛永远读下去）；④ 与世界阶段的分界（世界阶段写走到哪、关注写想看哪）。
     """
     from app.world.tools import update_attention
 
@@ -158,8 +158,8 @@ def test_update_attention_docstring_pins_rewrite_and_clear_semantics():
     assert "取代" in doc
     # ③ 清空版：没有要看的也要写一版说明
     assert "没有" in doc and "清空" in doc
-    # ④ 与长弧分界
-    assert "长弧" in doc
+    # ④ 与世界阶段分界
+    assert "世界阶段" in doc
     assert "想看" in doc
 
 

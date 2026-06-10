@@ -123,7 +123,7 @@ async def daily_fetch_node(signal: DailyMaterialsFetch) -> None:
        cron 自然重试，这里不 raise、不重试循环）。
     1. 算 CST「今天」；当天底料已存在直接早退（白天每小时打点的 cron 下，不再烧
        agent token——同日重试只补失败的天）。检查在锁内：锁外检查仍有并发窗口。
-    2. 跑眼睛（认知层在 :func:`app.world.eyes.run_world_eyes`：读长弧 / 关注、拼
+    2. 跑眼睛（认知层在 :func:`app.world.eyes.run_world_eyes`：读世界阶段 / 关注、拼
        两层感知 stimulus、agent 工具循环、返回当日叙述）。失败照实穿透：本轮不落
        库，下一钟点 cron 自动重试。collect_usage 包住整个认知层调用，截本轮累计
        token 落 durable PG（不依赖会系统性丢 trace 的 langfuse）。

@@ -1,15 +1,15 @@
-"""世界长弧快照的持久化契约 — 活的世界（时间常数分层）的慢层.
+"""世界阶段快照的持久化契约 — 活的世界（时间常数分层）的慢层.
 
 world 的状态分两层钟、两张表：
 
   * :class:`WorldState` —— 「此刻」的客观叙述快照，每轮都可能重写，明天就过时。
-  * :class:`WorldArc` —— 「世界的长弧走到哪」的自然语言全文快照，只在翻页级转变
+  * :class:`WorldArc` —— 「世界走到哪个阶段」的自然语言全文快照，只在翻页级转变
     （考完 / 放榜 / 搬家 / 换季）时整篇重写，写进去的话下周读仍然为真。as_latest
     （append-only + 读最新一版），Key 带 lane。
 
-这些都是真实 Postgres 持久化测试（testcontainers）——长弧的正确性故事全在
+这些都是真实 Postgres 持久化测试（testcontainers）——世界阶段的正确性故事全在
 "能不能 append 进去、版本是否递增、能不能按 lane 查回最新一版"，mock pg
-等于什么都没测。lane 隔离是命门：coe / ppe 绝不能覆盖 prod 的世界长弧。
+等于什么都没测。lane 隔离是命门：coe / ppe 绝不能覆盖 prod 的世界阶段。
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def test_worldarc_fields_avoid_framework_reserved_columns():
 
 @pytest.mark.integration
 async def test_write_then_read_world_arc(arc_db):
-    """写一版长弧 → 读回最新（含全文 narrative + 翻页时刻 turned_at）。"""
+    """写一版世界阶段 → 读回最新（含全文 narrative + 翻页时刻 turned_at）。"""
     await write_world_arc(
         lane="coe-t2",
         narrative="高考结束了，赤尾进入考后的漫长暑假，在等放榜。",
@@ -77,7 +77,7 @@ async def test_world_arc_appends_incrementing_versions(arc_db):
 
     versions = await select_all_versions(WorldArc, {"lane": "coe-t2"})
     assert [arc.version for arc in versions] == [1, 2], (
-        "长弧是 append-only 版本链：版本必须逐次递增、旧版保留"
+        "世界阶段是 append-only 版本链：版本必须逐次递增、旧版保留"
     )
 
 
@@ -103,7 +103,7 @@ async def test_read_world_arc_returns_latest_version(arc_db):
 
 @pytest.mark.integration
 async def test_read_world_arc_cold_start_returns_none(arc_db):
-    """没写过任何长弧的 lane 读回 None（冷启动：长弧还是空白，prompt 引导补写）。"""
+    """没写过任何世界阶段的 lane 读回 None（冷启动：世界阶段还是空白，prompt 引导补写）。"""
     assert await read_world_arc(lane="coe-never-written") is None
 
 
@@ -133,25 +133,25 @@ async def test_update_arc_tool_persists_to_pg_and_reads_back(arc_db):
     # turned_at 由工具体自填现实 CST（不让模型编）：非空、带 CST 偏移
     assert arc.turned_at
     assert "+08:00" in arc.turned_at
-    # lane 隔离：别的 lane 读不到这条长弧
+    # lane 隔离：别的 lane 读不到这条世界阶段
     assert await read_world_arc(lane="prod") is None
 
 
 @pytest.mark.integration
 async def test_world_arc_lane_isolation(arc_db):
-    """两个 lane 各一条长弧，互不可见，coe 绝不覆盖 prod 的世界长弧。"""
+    """两个 lane 各一条世界阶段，互不可见，coe 绝不覆盖 prod 的世界阶段。"""
     await write_world_arc(
         lane="prod",
-        narrative="prod 的长弧。",
+        narrative="prod 的世界阶段。",
         turned_at="2026-06-09T18:00:00+08:00",
     )
     await write_world_arc(
         lane="coe-t2",
-        narrative="coe 的长弧。",
+        narrative="coe 的世界阶段。",
         turned_at="2026-06-09T19:00:00+08:00",
     )
 
     prod_arc = await read_world_arc(lane="prod")
     coe_arc = await read_world_arc(lane="coe-t2")
-    assert prod_arc.narrative == "prod 的长弧。"
-    assert coe_arc.narrative == "coe 的长弧。"
+    assert prod_arc.narrative == "prod 的世界阶段。"
+    assert coe_arc.narrative == "coe 的世界阶段。"

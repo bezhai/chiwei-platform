@@ -148,7 +148,7 @@ def _stub_state(monkeypatch):
     arc_reads: list[str] = []
 
     async def fake_read_world_arc(*, lane):
-        # 默认长弧还是空白（None = 冷启动）：需要断言长弧内容的用例自己覆写这个桩
+        # 默认世界阶段还是空白（None = 冷启动）：需要断言阶段内容的用例自己覆写这个桩
         # （monkeypatch.setattr engine_mod.read_world_arc）。
         arc_reads.append(lane)
         return None
@@ -970,12 +970,12 @@ def test_render_materials_section_uses_briefing():
 
 
 # ---------------------------------------------------------------------------
-# 世界长弧：每轮推演输入带最新长弧；空弧给冷启动引导（不硬编任何剧情事实）
+# 世界阶段：每轮推演输入带最新阶段；空白给冷启动引导（不硬编任何剧情事实）
 # ---------------------------------------------------------------------------
 
 
 def _arc(*, lane="coe-t2", narrative, turned_at="2026-06-09T18:00:00+08:00"):
-    """构造一条 WorldArc（world 读到的最新一版世界长弧）。"""
+    """构造一条 WorldArc（world 读到的最新一版世界阶段）。"""
     from app.world.arc import WorldArc
 
     return WorldArc(lane=lane, narrative=narrative, turned_at=turned_at)
@@ -983,7 +983,7 @@ def _arc(*, lane="coe-t2", narrative, turned_at="2026-06-09T18:00:00+08:00"):
 
 @pytest.mark.asyncio
 async def test_round_feeds_latest_arc_into_messages(monkeypatch):
-    """每轮推演输入带【世界的长弧】段，内容是最新一版长弧 narrative。"""
+    """每轮推演输入带【世界阶段】段，内容是最新一版阶段 narrative。"""
     narrative = "三姐妹家已经搬进新小区，妹妹换了新学校，眼下是初夏。"
 
     async def fake_read_world_arc(*, lane):
@@ -995,16 +995,16 @@ async def test_round_feeds_latest_arc_into_messages(monkeypatch):
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
-    assert "【世界的长弧】" in blob, "每轮推演输入必须带【世界的长弧】段"
-    assert narrative in blob, "长弧段内容必须是最新一版 narrative"
+    assert "【世界阶段】" in blob, "每轮推演输入必须带【世界阶段】段"
+    assert narrative in blob, "世界阶段段落内容必须是最新一版 narrative"
 
 
 @pytest.mark.asyncio
 async def test_empty_arc_feeds_cold_start_guidance(monkeypatch):
-    """长弧为 None（还没翻过页）→ 长弧段如实说明空白；**不**引导续写去调 update_arc。
+    """世界阶段为 None（还没翻过页）→ 阶段段落如实说明空白；**不**引导续写去调 update_arc。
 
-    翻页（含空弧写第一版）已归反思环节独占——续写工具集里没有 update_arc，引导它
-    去调一个不存在的工具只会让循环报错。空弧时续写只需知道长弧还是空白、顺着此刻
+    翻页（含空白时写第一版）已归反思环节独占——续写工具集里没有 update_arc，引导它
+    去调一个不存在的工具只会让循环报错。阶段空白时续写只需知道它还是空白、顺着此刻
     往前推演即可（第一版由反思写）。
     """
     captured = _mock_run(monkeypatch)  # 默认 read_world_arc 桩返回 None
@@ -1012,8 +1012,8 @@ async def test_empty_arc_feeds_cold_start_guidance(monkeypatch):
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
-    assert "【世界的长弧】" in blob, "空弧时长弧段也要出现（带空白说明）"
-    assert "空白" in blob, "必须明示长弧还是空白"
+    assert "【世界阶段】" in blob, "阶段空白时【世界阶段】段也要出现（带空白说明）"
+    assert "空白" in blob, "必须明示世界阶段还是空白"
     assert "update_arc" not in blob, (
         "续写输入不得引导 update_arc（翻页归反思独占，续写没有这只手）"
     )
@@ -1036,7 +1036,7 @@ def test_empty_arc_guidance_has_no_hardcoded_plot_facts():
 
 @pytest.mark.asyncio
 async def test_arc_read_uses_current_lane(monkeypatch):
-    """长弧按当前 lane 读（泳道隔离命门同 WorldState）。"""
+    """世界阶段按当前 lane 读（泳道隔离命门同 WorldState）。"""
     _mock_run(monkeypatch)
 
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
@@ -1048,7 +1048,7 @@ async def test_arc_read_uses_current_lane(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 反思环节（Task 2b）：翻页能力从续写剥离、归独立反思——当日未反思先跑反思、先于
-# 续写；当日已反思不跑；续写读长弧必须在反思之后现读
+# 续写；当日已反思不跑；续写读世界阶段必须在反思之后现读
 # ---------------------------------------------------------------------------
 
 
@@ -1123,19 +1123,19 @@ async def test_reflection_receives_round_context(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_deliberation_reads_arc_fresh_after_reflection(monkeypatch):
-    """续写读长弧必须在反思之后**现读**（不能用反思前缓存的值）。
+    """续写读世界阶段必须在反思之后**现读**（不能用反思前缓存的值）。
 
     模拟「update_arc 已 durable 落库、反思 Agent 随后失败（fail-open 不抛）」：
-    反思桩把长弧库里的最新版换成新一页，续写的输入必须读到新长弧、不是旧的。
+    反思桩把世界阶段库里的最新版换成新一页，续写的输入必须读到新阶段、不是旧的。
     """
-    current = {"narrative": "旧长弧：这一页还没翻。"}
+    current = {"narrative": "旧的世界阶段：这一页还没翻。"}
 
     async def fake_read_world_arc(*, lane):
         return _arc(lane=lane, narrative=current["narrative"])
 
     async def fake_reflection(**kwargs):
         # update_arc 已落库（库里最新版变了）；随后反思 Agent 失败也不抛（fail-open）。
-        current["narrative"] = "新长弧：页已经翻过去了。"
+        current["narrative"] = "新的世界阶段：页已经翻过去了。"
 
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
     monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_reflection)
@@ -1144,10 +1144,10 @@ async def test_deliberation_reads_arc_fresh_after_reflection(monkeypatch):
     await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
 
     blob = "".join(m.text() for m in captured["messages"])
-    assert "新长弧：页已经翻过去了。" in blob, (
-        "续写必须读到反思（update_arc）落库后的新长弧——长弧要在反思之后现读"
+    assert "新的世界阶段：页已经翻过去了。" in blob, (
+        "续写必须读到反思（update_arc）落库后的新世界阶段——世界阶段要在反思之后现读"
     )
-    assert "旧长弧：这一页还没翻。" not in blob, "续写不能用反思前缓存的旧长弧"
+    assert "旧的世界阶段：这一页还没翻。" not in blob, "续写不能用反思前缓存的旧世界阶段"
 
 
 @pytest.mark.asyncio
@@ -1448,8 +1448,8 @@ async def test_placeholder_snapshot_gate_behaves_like_cold_start(monkeypatch):
 async def test_world_instruction_does_not_enumerate_update_arc():
     """续写指令**不再**枚举 update_arc——翻页归反思独占（工具集物理隔离的 prompt 面）。
 
-    续写工具回到四个（notify / update_world / sense / sleep）。长弧仍是续写的输入
-    （【世界的长弧】段保留），但续写无手碰长弧：指令里不能再有 update_arc 的使用
+    续写工具回到四个（notify / update_world / sense / sleep）。世界阶段仍是续写的输入
+    （【世界阶段】段保留），但续写无手碰世界阶段：指令里不能再有 update_arc 的使用
     指令，否则模型会去调一个不存在的工具。
     """
     instruction = engine_mod.world_loop_instruction()

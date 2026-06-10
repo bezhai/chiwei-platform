@@ -97,7 +97,7 @@ def _stub_io(monkeypatch):
         return None
 
     async def fake_read_world_arc(*, lane):
-        # gate 放行的轮会读最新世界长弧；这里 stub 成 None（长弧空白，不碰真库）。
+        # gate 放行的轮会读最新世界阶段；这里 stub 成 None（阶段空白，不碰真库）。
         return None
 
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)

@@ -121,10 +121,10 @@ def _fake_redis(monkeypatch):
 
 @pytest.fixture
 async def world_db(test_db):
-    """建齐闭环需要的所有真实表：world 叙述快照 / 长弧 / 关注 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
+    """建齐闭环需要的所有真实表：world 叙述快照 / 世界阶段 / 关注 / 信箱 / 已读 / 动作 / life 快照 / 续接 transcript。
 
     新范式没有 presence 表了（RoomPresence 已删）。world 的客观状态是 WorldState
-    （此刻的世界叙述，位置融在 detail 自然语言里）+ WorldArc（世界长弧的慢层快照，
+    （此刻的世界叙述，位置融在 detail 自然语言里）+ WorldArc（世界阶段的慢层快照，
     world_tick 每个放行轮都先 read_world_arc）。act 走 ActPerformed durable 表。
     """
     await migrate(WorldState, test_db)

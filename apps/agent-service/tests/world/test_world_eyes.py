@@ -4,12 +4,12 @@
 的独立采编台已消解）。这些测试钉死眼睛的机制层硬约束：
 
   * 两层感知的 stimulus：**本能扫视** = 开发者定的环境量必看清单（天气、日出日落、
-    农历节气、节假日——番剧**不在**必看清单）；**有意张望** = 最新长弧 + 最新关注，
-    全文带时间标注、缺失如实说空、绝不冒充；
-  * 工具箱沿用六件（含番剧工具——保留在手，但 stimulus 只让它在长弧 / 关注交代到
-    时上手）；
+    农历节气、节假日——番剧**不在**必看清单）；**有意张望** = 最新世界阶段 + 最新
+    关注，全文带时间标注、缺失如实说空、绝不冒充；
+  * 工具箱沿用六件（含番剧工具——保留在手，但 stimulus 只让它在世界阶段 / 关注
+    交代到时上手）；
   * 诚实约束：工具 ok=false 如实说没拿到、绝不编一个顶上；
-  * 入口编排：读长弧 / 关注 → 拼 stimulus → 无会话跑 Agent（max_retries=1、
+  * 入口编排：读世界阶段 / 关注 → 拼 stimulus → 无会话跑 Agent（max_retries=1、
     session_id 只进 context 做 langfuse 归组标签）→ 返回叙述文本；
   * 眼睛不吞错：失败照实抛给 node（本钟点不落库、下一钟点重试——重试在钟那层）。
 
@@ -74,7 +74,7 @@ def test_stimulus_contains_date_and_instinct_scan():
 
 
 def test_instinct_section_excludes_anime():
-    """本能扫视段里不出现番剧——番剧只归有意张望（长弧 / 关注交代到才看）。"""
+    """本能扫视段里不出现番剧——番剧只归有意张望（世界阶段 / 关注交代到才看）。"""
     s = build_eyes_stimulus(date="2026-06-10", arc=None, attention=None)
     start = s.index("本能扫视")
     end = s.index("有意张望")
@@ -82,30 +82,30 @@ def test_instinct_section_excludes_anime():
 
 
 def test_anime_tool_bounded_to_intentional_gaze():
-    """stimulus 说清番剧工具的边界：只在长弧 / 关注交代到时才用。"""
+    """stimulus 说清番剧工具的边界：只在世界阶段 / 关注交代到时才用。"""
     s = build_eyes_stimulus(date="2026-06-10", arc=None, attention=None)
     assert "番剧" in s
     assert "只在" in s and "交代" in s
 
 
 # ---------------------------------------------------------------------------
-# 有意张望：长弧 / 关注的三态（有 / 无 / 时间标注）
+# 有意张望：世界阶段 / 关注的三态（有 / 无 / 时间标注）
 # ---------------------------------------------------------------------------
 
 
 def test_stimulus_arc_present_carries_fulltext_and_time_label():
-    """有长弧：全文 + turned_at 时间标注进 stimulus（眼睛要知道这页是多久前翻的）。"""
+    """有世界阶段：全文 + turned_at 时间标注进 stimulus（眼睛要知道这页是多久前翻的）。"""
     s = build_eyes_stimulus(
         date="2026-06-10",
-        arc=_arc(narrative="长弧全文在此。", turned_at="2026-06-01T10:00:00+08:00"),
+        arc=_arc(narrative="世界阶段全文在此。", turned_at="2026-06-01T10:00:00+08:00"),
         attention=None,
     )
-    assert "长弧全文在此。" in s
+    assert "世界阶段全文在此。" in s
     assert "2026-06-01T10:00:00+08:00" in s
 
 
 def test_stimulus_arc_missing_is_honest():
-    """没有长弧：如实说世界还没写下走到哪，绝不冒充。"""
+    """没有世界阶段：如实说世界还没写下走到哪，绝不冒充。"""
     s = build_eyes_stimulus(date="2026-06-10", arc=None, attention=None)
     assert "世界还没写下走到哪" in s
 
@@ -197,7 +197,7 @@ def _mock_run(monkeypatch, *, briefing="今天的当日叙述。", raises=None):
 
 
 async def test_run_reads_arc_and_attention_into_single_user_message(monkeypatch):
-    """入口读最新长弧 + 最新关注，两层感知拼成单条 user 消息喂给 Agent。"""
+    """入口读最新世界阶段 + 最新关注，两层感知拼成单条 user 消息喂给 Agent。"""
     _stub_reads(
         monkeypatch,
         arc=_arc(narrative="世界走到这一页。"),

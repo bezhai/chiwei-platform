@@ -126,7 +126,7 @@ async def test_update_world_time_is_not_modeled(_ctx, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# update_arc — 世界长弧的「翻页」工具（与 update_world 同族、分两层钟）
+# update_arc — 世界阶段的「翻页」工具（与 update_world 同族、分两层钟）
 # ---------------------------------------------------------------------------
 
 
@@ -167,9 +167,9 @@ async def test_update_arc_turned_at_is_not_modeled(_ctx, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_update_arc_does_not_touch_state_or_mailbox(_ctx):
-    """update_arc 只写长弧：不碰 WorldState 快照、不投递任何信箱（与既有工具互不干扰）。"""
+    """update_arc 只写世界阶段：不碰 WorldState 快照、不投递任何信箱（与既有工具互不干扰）。"""
     with agent_context(_ctx):
-        await update_arc.invoke({"narrative": "长弧翻了一页。"})
+        await update_arc.invoke({"narrative": "世界阶段翻了一页。"})
 
     assert tools_mod._test_world_writes == [], "update_arc 不该写 WorldState 快照"
     assert tools_mod._test_delivered == [], "update_arc 不该投递任何信箱 event"
@@ -178,11 +178,11 @@ async def test_update_arc_does_not_touch_state_or_mailbox(_ctx):
 
 @pytest.mark.asyncio
 async def test_update_world_does_not_touch_arc(_ctx):
-    """反向互不干扰：update_world 只写此刻快照，不碰长弧。"""
+    """反向互不干扰：update_world 只写此刻快照，不碰世界阶段。"""
     with agent_context(_ctx):
         await update_world.invoke({"detail": "午后客厅很安静。"})
 
-    assert tools_mod._test_arc_writes == [], "update_world 不该写长弧"
+    assert tools_mod._test_arc_writes == [], "update_world 不该写世界阶段"
     assert len(tools_mod._test_world_writes) == 1
 
 
@@ -190,7 +190,7 @@ def test_update_arc_only_in_reflect_tools_not_world_tools():
     """update_arc 归反思环节独占：在 WORLD_REFLECT_TOOLS、不在 WORLD_TOOLS。
 
     续写姿态发现不了「页翻了」（coe 实证），翻页能力从续写剥离——互不干扰不靠
-    嘱咐，靠工具集物理隔离：续写无手碰长弧，反思无手碰 detail / notify / sense /
+    嘱咐，靠工具集物理隔离：续写无手碰世界阶段，反思无手碰 detail / notify / sense /
     sleep。
     """
     from app.world.tools import WORLD_REFLECT_TOOLS, WORLD_TOOLS, update_attention
@@ -223,10 +223,10 @@ async def test_update_arc_write_failure_propagates(_ctx, monkeypatch):
 
 
 def test_update_arc_docstring_pins_arc_vs_detail_boundary():
-    """update_arc 的 docstring（喂给 LLM 的工具说明）必须钉死长弧与 detail 的边界。
+    """update_arc 的 docstring（喂给 LLM 的工具说明）必须钉死世界阶段与 detail 的边界。
 
-    长弧与 detail 都是 world 写、world 读的自然语言快照，不在工具说明里钉住边界
-    会互相污染。必须含：① 两层钟分界（detail 写「此刻」明天就过时 / 长弧写「跨周月
+    世界阶段与 detail 都是 world 写、world 读的自然语言快照，不在工具说明里钉住边界
+    会互相污染。必须含：① 两层钟分界（detail 写「此刻」明天就过时 / 世界阶段写「跨周月
     仍然成立的世界进展」）；② 一句话判据（这句话下周还成立吗）；③ 翻页粒度（以周月
     计的翻页级转变才动、日常起居不动）；④ 整篇重写语义（翻过去的页被取代不是被追加、
     不写历史流水账）。
@@ -527,7 +527,7 @@ def test_world_tools_are_notify_update_world_sense_sleep():
 
     没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
     给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
-    update_arc（世界长弧的「翻页」工具）**不在这里**——翻页归独立的反思环节独占
+    update_arc（世界阶段的「翻页」工具）**不在这里**——翻页归独立的反思环节独占
     （WORLD_REFLECT_TOOLS），续写与反思靠工具集物理隔离互不干扰。
     """
     from app.world.tools import WORLD_TOOLS

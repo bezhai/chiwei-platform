@@ -1,8 +1,8 @@
 """world 反思环节 — 慢钟的写入者：无会话、每日两班、对表翻页 + 交代眼睛.
 
 「续写场景」和「质疑前提」是相互拮抗的两种姿态——塞进同一次推演里，续写的惯性
-永远赢（coe 实证：world 手握现实日期、常识、长弧引导三样线索，仍把过期底色结晶
-进了长弧 v1）。所以翻页能力从续写剥离，归这个独立的反思环节：
+永远赢（coe 实证：world 手握现实日期、常识、世界阶段引导三样线索，仍把过期底色
+结晶进了世界阶段 v1）。所以翻页能力从续写剥离，归这个独立的反思环节：
 
   * **无会话**：每次从证据现判、不背叙事惯性——``Agent.run`` 不传 session_id
     （不续接 transcript）。langfuse 归组仍用 world 当天的 session id（走
@@ -17,7 +17,7 @@
     无底料的只落 ``arc_reflected_date``。失败不落 → 同日后续轮自动重试，一天的
     机会不被吞掉（spec 决策 5）。
   * **对表翻页 + 交代眼睛**：输入是五样带时间标注的证据——现实此刻+今天日期星期、
-    长弧现状及其 turned_at、最新 detail 及其写入时刻、今日底料及其 date /
+    世界阶段现状及其 turned_at、最新 detail 及其写入时刻、今日底料及其 date /
     fetched_at、当前关注及其 written_at（缺失如实说）。没有时间标注，无会话的
     反思无从判断「手里这份快照已经陈旧了多少」（spec 决策 4）。对表之外的第二职：
     看今天底料带回了什么（眼睛带着旧关注去看的结果就在底料里），决定接下来还想
@@ -25,10 +25,10 @@
     说明（append-only 链没有删除态，不写这一版旧关注会被眼睛永远读下去）。
   * **工具集物理隔离**：只有 update_arc + update_attention
     （:data:`~app.world.tools.WORLD_REFLECT_TOOLS`）——反思无手碰 detail / notify /
-    sense / sleep，续写与眼睛无手碰长弧和关注。
+    sense / sleep，续写与眼睛无手碰世界阶段和关注。
   * **fail-open**：反思抛错只记 error 日志、绝不向上抛——当轮续写照常（用反思前
-    的长弧也只是旧一天，下轮重试）。update_arc 已 durable 落库而反思 Agent 随后
-    失败时，续写仍读到新长弧（engine 在反思之后**现读**长弧）。
+    的世界阶段也只是旧一天，下轮重试）。update_arc 已 durable 落库而反思 Agent 随后
+    失败时，续写仍读到新的世界阶段（engine 在反思之后**现读**世界阶段）。
   * **durable 写失败 = 整次反思失败**：update_arc / update_attention 故意不包
     @tool_error——write_world_arc / write_world_attention 抛错照实穿透、炸掉
     ``Agent.run``，走上面的 fail-open（不落标记、同日重试）。否则写库失败会被包
@@ -84,24 +84,24 @@ _WEEKDAY_CN = ("星期一", "星期二", "星期三", "星期四", "星期五", 
 def reflect_instruction() -> str:
     """喂给反思 Agent 的对表指令（代码侧是工具语义的权威来源）。
 
-    两职：① 对表——把手里的长弧放回现实此刻检查哪页该翻——底料有以底料为准、底料
-    没说的用对真实世界的常识加现实日期推；该翻就用 update_arc 整篇重写当前仍成立
-    的长弧（翻过去的页被取代不被追加）。② 交代眼睛——看今天底料带回了什么（眼睛
+    两职：① 对表——把手里的世界阶段放回现实此刻检查哪页该翻——底料有以底料为准、
+    底料没说的用对真实世界的常识加现实日期推；该翻就用 update_arc 整篇重写当前仍
+    成立的世界阶段（翻过去的页被取代不被追加）。② 交代眼睛——看今天底料带回了什么（眼睛
     带着旧关注去看的结果就在底料里），决定接下来还想看什么，用 update_attention
     整篇重写「当前仍想看的」；不再想看也要重写一版说明当下没有特别要看的
     （append-only 链没有删除态，不写清空版旧关注会被眼睛永远读下去）。关注写
-    「想看哪」、长弧写「走到哪」，语义不混。明令禁止叙述场景（那是续写的事）。
+    「想看哪」、世界阶段写「走到哪」，语义不混。明令禁止叙述场景（那是续写的事）。
     文案平直中文、不硬编任何剧情事实（高考 / 角色名 / 日期都不准出现在这里——宪法）。
     """
     return (
         "你是这个世界的反思环节。你有两件事要做。\n\n"
-        "第一件：对表。把手里的「世界长弧」放回现实此刻检查：这条长弧今天还成立"
+        "第一件：对表。把手里的「世界阶段」放回现实此刻检查：这个阶段今天还成立"
         "吗？有没有哪一页已经翻过去了？下面给你的每份材料都标了它写下的时刻。先看"
         "清楚手里这份是多久之前的，再判断它放到今天还成不成立。今日底料里说了的，"
         "以底料为准；底料没说的，用你对真实世界的常识加上今天的日期去推。\n\n"
-        "如果你判断有页已经翻了（或者长弧还是空白、而你已经能从材料读出这个世界"
-        "走到了哪一页），就用 update_arc 整篇重写**当前仍然成立**的长弧——翻过去"
-        "的页被新的一页取代、不是排在后面被追加，绝不写成历史流水账。长弧写的是"
+        "如果你判断有页已经翻了（或者世界阶段还是空白、而你已经能从材料读出这个世界"
+        "走到了哪一页），就用 update_arc 整篇重写**当前仍然成立**的世界阶段——翻过去"
+        "的页被新的一页取代、不是排在后面被追加，绝不写成历史流水账。世界阶段写的是"
         "「跨周月仍然成立的世界进展」，判据一句话：这句话下周还成立吗？\n\n"
         "第二件：交代眼睛。这个世界有一双每天清早出门看外面的眼睛，它带着你之前"
         "留下的「当前关注」去看，看到的（或没看到的）就写在今天的底料里。所以对完"
@@ -109,7 +109,7 @@ def reflect_instruction() -> str:
         "继续看？有没有新冒出来想确认的事？想清楚后用 update_attention 整篇重写"
         "**当前仍想看的**——看完的、不再关心的被新版取代、不是追加成清单。如果当下"
         "没有什么特别要看的，也要重写一版、说明现在没有特别要看的——不写这一版，"
-        "眼睛明早还会带着过时的关注去看。关注写的是「想看哪」，长弧写的是「世界"
+        "眼睛明早还会带着过时的关注去看。关注写的是「想看哪」，世界阶段写的是「世界"
         "走到哪」，两边不要混。\n\n"
         "你不叙述场景、不描画此刻的画面（那是续写的事），也不写情绪和主观解读。"
         "如果对完表确认没有哪页该翻、关注也不需要变，就什么工具也不调、直接说明。"
@@ -117,13 +117,13 @@ def reflect_instruction() -> str:
 
 
 def _arc_evidence(arc: WorldArc | None) -> str:
-    """长弧现状段：有长弧给全文 + turned_at 时间标注；空弧如实说明并引导写第一版。"""
+    """世界阶段现状段：有阶段给全文 + turned_at 时间标注；空白如实说明并引导写第一版。"""
     if arc is None:
         return (
-            "长弧还是空白——还没有人写下这个世界走到了哪一页。请从下面的材料读出"
+            "世界阶段还是空白——还没有人写下这个世界走到了哪一页。请从下面的材料读出"
             "世界现在走到哪，用 update_arc 写下第一版。"
         )
-    return f"（这版长弧写于 {arc.turned_at}）\n{arc.narrative}"
+    return f"（这版世界阶段写于 {arc.turned_at}）\n{arc.narrative}"
 
 
 def _detail_evidence(snapshot: WorldState | None) -> str:
@@ -141,7 +141,7 @@ def _detail_evidence(snapshot: WorldState | None) -> str:
 def _materials_evidence(materials: DailyMaterials | None) -> str:
     """今日底料段：有给 briefing 原文 + date / fetched_at 时间标注；缺失如实说缺失。
 
-    无会话的对表场景里，底料自己的抓取时刻就是证据——与长弧 turned_at / detail 的
+    无会话的对表场景里，底料自己的抓取时刻就是证据——与世界阶段 turned_at / detail 的
     world_time 同等待遇（所有快照都带时间标注），反思要能看出这份底料记的是哪一天、
     什么时候抓的。缺失如实说缺失（不读昨天、不冒充事实）。
     """
@@ -157,7 +157,7 @@ def _attention_evidence(attention: WorldAttention | None) -> str:
     """当前关注段：有关注给全文 + written_at 时间标注；没有如实说还没人交代过。
 
     关注是反思自己此前留给眼睛的「想看哪」——回看它才知道眼睛今天带着什么出的门、
-    底料里的回应该对照什么，进而决定续看还是清掉。written_at 与长弧 turned_at /
+    底料里的回应该对照什么，进而决定续看还是清掉。written_at 与世界阶段 turned_at /
     detail 的 world_time 同等待遇（所有快照都带时间标注）：反思要能看出这版关注
     是哪天留的、是不是已经过时。缺失（从没留过关注）如实说，不冒充——此时眼睛
     只做了本能扫视，要不要留第一版由反思对完表自己判断。
@@ -177,7 +177,7 @@ def _reflection_messages(
 ) -> list[Message]:
     """把对表的五样证据拼成**单条 user 消息**（无会话、一次喂全）。
 
-    所有快照都带时间标注（长弧 turned_at / detail 的 world_time / 底料 fetched_at /
+    所有快照都带时间标注（世界阶段 turned_at / detail 的 world_time / 底料 fetched_at /
     关注 written_at / 现实此刻+今天日期星期）——反思要能看出「手里这份是多久前的」。
     缺失的证据如实说缺失，绝不冒充。模板文案不硬编任何剧情事实（宪法）。
     """
@@ -186,11 +186,11 @@ def _reflection_messages(
     user_content = (
         f"{reflect_instruction()}\n\n"
         f"【现实此刻】{now.isoformat()}（今天是 {today}，{weekday}）\n\n"
-        f"【世界的长弧·现状】\n{_arc_evidence(arc)}\n\n"
+        f"【世界阶段·现状】\n{_arc_evidence(arc)}\n\n"
         f"【世界最新的此刻叙述】\n{_detail_evidence(snapshot)}\n\n"
         f"【今天的外部底料】\n{_materials_evidence(materials)}\n\n"
         f"【当前关注（之前留给眼睛的）】\n{_attention_evidence(attention)}\n\n"
-        "对完表：该翻页就用 update_arc 整篇重写当前仍成立的长弧，不该翻就不动它；"
+        "对完表：该翻页就用 update_arc 整篇重写当前仍成立的世界阶段，不该翻就不动它；"
         "再对照当前关注看看今天底料带回了什么，关注该变就用 update_attention 整篇"
         "重写（没有要看的就重写一版说明）；两边都不需要动就直接说明、不调任何工具。"
     )
@@ -210,7 +210,7 @@ async def run_arc_reflection(
 
     engine 分两班调本函数（都在续写之前）：第一班「当日尚未完成反思」
     （``arc_reflected_date != 今天``）；第二班「当日底料落地且尚未被反思消化」
-    （底料存在且 ``arc_materials_reflected_date != 今天``）。流程：现读长弧 + 关注
+    （底料存在且 ``arc_materials_reflected_date != 今天``）。流程：现读世界阶段 + 关注
     （自己读最新版，不用调用方缓存）→ 拼单条 user 消息 → 无会话跑反思 Agent（工具
     只有 update_arc / update_attention、max_retries=1、context 带与续写同等的
     lane / round features）→ **成功才**落标记（mark_arc_reflected）：本次**带底料**
@@ -218,8 +218,8 @@ async def run_arc_reflection(
     第二班），无底料只落 ``arc_reflected_date`` → 本次 LLM token 落 durable PG
     （actor="world_reflect"，与续写区分）。
 
-    任何一步抛错只记 error 日志：当轮续写照常（engine 在反思之后现读长弧——
-    update_arc 已落库而 Agent 随后失败时续写仍读到新长弧）、标记不落、同日后续轮
+    任何一步抛错只记 error 日志：当轮续写照常（engine 在反思之后现读世界阶段——
+    update_arc 已落库而 Agent 随后失败时续写仍读到新的世界阶段）、标记不落、同日后续轮
     自动重试。
     """
     try:

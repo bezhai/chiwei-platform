@@ -1,12 +1,12 @@
 """world 反思环节契约 — 翻页能力从续写剥离、归独立的反思（Task 2b + 眼睛闭环）.
 
-续写姿态发现不了「页翻了」（coe 实证：长弧 v1 把过期底色结晶了进去），所以翻页
+续写姿态发现不了「页翻了」（coe 实证：世界阶段 v1 把过期底色结晶了进去），所以翻页
 归一个独立的「反思」环节：**无会话**（每次从证据现判，不背叙事惯性）、每日两班
 （第一班每日首轮对表；第二班当日底料落地后消化回看）、对表翻页 + 交代眼睛。
 这些测试钉死反思环节的机制层硬约束：
 
   * 工具集物理隔离：反思工具集只含 update_arc + update_attention（续写无手碰
-    长弧和关注，反思无手碰 detail / notify / sense / sleep）；
+    世界阶段和关注，反思无手碰 detail / notify / sense / sleep）；
   * 无会话：``Agent.run`` 不传 session_id（不续接 transcript）；
   * durable 副作用边界同续写：``max_retries=1``（update_arc / update_attention
     是 durable 写，整轮重放会重放它们）；
@@ -15,7 +15,7 @@
   * 反思成功才落标记（mark_arc_reflected）：带底料的成功反思同落两个标记（覆盖
     两班职责）、无底料只落第一班标记；失败不落（同日后续轮自动重试）；
   * fail-open：反思抛错只记 error 日志、绝不向上抛（当轮续写照常）；
-  * 输入拼装：所有快照都带时间标注（长弧 turned_at / 此刻叙述 world_time /
+  * 输入拼装：所有快照都带时间标注（世界阶段 turned_at / 此刻叙述 world_time /
     底料 fetched_at / 关注 written_at / 现实此刻+今天日期星期），缺失时如实说
     缺失，模板不硬编任何剧情事实。
 
@@ -76,7 +76,7 @@ def _materials(**kwargs):
 
 @pytest.fixture(autouse=True)
 def _stub_reflection_io(monkeypatch):
-    """stub 反思环节的 IO（读长弧 / 读关注 / 落标记 / 记成本），专测编排机制，不碰真库。"""
+    """stub 反思环节的 IO（读世界阶段 / 读关注 / 落标记 / 记成本），专测编排机制，不碰真库。"""
     arc_holder: dict = {"arc": None}
 
     async def fake_read_world_arc(*, lane):
@@ -436,12 +436,12 @@ async def test_reflection_retries_same_day_after_write_failure_then_marks(monkey
     assert reflection_mod._test_marks == [
         {"lane": "coe-t2", "date": "2026-06-10", "materials_date": None}
     ]
-    assert len(writes) == 1, "恢复后的那轮真实落了一版长弧"
+    assert len(writes) == 1, "恢复后的那轮真实落了一版世界阶段"
 
 
 @pytest.mark.asyncio
 async def test_reflection_reads_arc_by_lane(monkeypatch):
-    """反思自己按当前 lane 现读长弧（不是用调用方缓存的值）。"""
+    """反思自己按当前 lane 现读世界阶段（不是用调用方缓存的值）。"""
     reads: list[str] = []
 
     async def fake_read(*, lane):
@@ -491,22 +491,22 @@ async def test_reflection_input_carries_now_and_weekday(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reflection_input_carries_arc_with_turned_at(monkeypatch):
-    """长弧现状带 turned_at 时间标注——反思要能看出手里这版长弧是多久前翻的。"""
+    """世界阶段现状带 turned_at 时间标注——反思要能看出手里这版阶段是多久前翻的。"""
     reflection_mod._test_arc_holder["arc"] = _arc(
-        narrative="这版长弧的全文内容。", turned_at="2026-06-01T10:00:00+08:00"
+        narrative="这版世界阶段的全文内容。", turned_at="2026-06-01T10:00:00+08:00"
     )
     captured = _mock_run(monkeypatch)
 
     await _reflect()
 
     blob = _blob(captured)
-    assert "这版长弧的全文内容。" in blob
-    assert "2026-06-01T10:00:00+08:00" in blob, "长弧必须带 turned_at 时间标注"
+    assert "这版世界阶段的全文内容。" in blob
+    assert "2026-06-01T10:00:00+08:00" in blob, "世界阶段必须带 turned_at 时间标注"
 
 
 @pytest.mark.asyncio
 async def test_reflection_input_blank_arc_guides_first_version(monkeypatch):
-    """长弧为空 → 如实说明空白、引导用 update_arc 写第一版（冷启动靠 prompt 引导）。"""
+    """世界阶段为空 → 如实说明空白、引导用 update_arc 写第一版（冷启动靠 prompt 引导）。"""
     reflection_mod._test_arc_holder["arc"] = None
     captured = _mock_run(monkeypatch)
 
@@ -577,7 +577,7 @@ async def test_reflection_input_materials_carry_date_and_fetched_at(monkeypatch)
     """底料段带底料自己的 date + fetched_at 时间标注。
 
     无会话的对表场景里，底料自己的抓取时刻就是证据——反思要能看出「这份底料记的
-    是哪一天、什么时候抓的」，与长弧 turned_at / detail 的 world_time 同等待遇
+    是哪一天、什么时候抓的」，与世界阶段 turned_at / detail 的 world_time 同等待遇
     （所有快照都带时间标注）。用与「今天」不同的 date 构造，钉死标注确实来自底料
     本身、不是输入里碰巧出现的今天日期。
     """
@@ -642,7 +642,7 @@ async def test_reflection_input_no_attention_says_so(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reflection_reads_attention_by_lane(monkeypatch):
-    """反思自己按当前 lane 现读关注（与长弧同款：不用调用方缓存的值）。"""
+    """反思自己按当前 lane 现读关注（与世界阶段同款：不用调用方缓存的值）。"""
     _mock_run(monkeypatch)
 
     await _reflect(lane="coe-t2")
@@ -666,7 +666,7 @@ def test_reflect_instruction_pins_recalibration_posture():
     """反思指令钉对表姿态：对表翻页 + 整篇重写语义 + 禁止叙述场景。"""
     instruction = reflection_mod.reflect_instruction()
     assert "update_arc" in instruction, "代码侧 instruction 是工具语义的权威来源"
-    # 对表：放回现实此刻检查长弧还成不成立
+    # 对表：放回现实此刻检查世界阶段还成不成立
     assert "成立" in instruction
     # 整篇重写语义（翻过去的页被取代不是被追加）
     assert "重写" in instruction
@@ -680,7 +680,8 @@ def test_reflect_instruction_pins_attention_posture():
     对表之外的第二职：看今天底料带回了什么（眼睛带着旧关注去看的结果就在底料里），
     决定接下来还想看什么。必须含：① update_attention 工具语义；② 整篇重写「当前
     仍想看的」；③ 清空版——不再想看也要重写一版说明（append-only 链没有删除态，
-    不写这一版旧关注会被眼睛永远读下去）；④ 与长弧分界（关注写想看哪、长弧写走到哪）。
+    不写这一版旧关注会被眼睛永远读下去）；④ 与世界阶段分界（关注写想看哪、世界阶段
+    写走到哪）。
     """
     instruction = reflection_mod.reflect_instruction()
     # ① 工具语义
@@ -690,8 +691,8 @@ def test_reflect_instruction_pins_attention_posture():
     assert "想看" in instruction
     # ③ 清空版：没有要看的也要写一版说明
     assert "没有特别要看的" in instruction
-    # ④ 与长弧分界
-    assert "长弧" in instruction
+    # ④ 与世界阶段分界
+    assert "世界阶段" in instruction
 
 
 @pytest.mark.asyncio
