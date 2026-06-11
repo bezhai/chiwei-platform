@@ -7,12 +7,6 @@ Tables:
   - common_bot_presence (raw SQL, managed by channel-server)
   - model_provider, model_mappings
   - bot_persona
-  - akao_schedule
-  - reply_style_log
-
-（v4 记忆的 model 已随旧记忆机器整体删除：fragment / abstract_memory /
-memory_edge / notes / memory_entity / schedule_revision。它们都是
-SQLAlchemy Base（create_all 语义），删 model 不动库表；表的 DROP 走运维。）
 """
 
 from datetime import datetime
@@ -27,7 +21,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -209,66 +202,3 @@ class BotPersona(Base):
     )
 
 
-# ---------------------------------------------------------------------------
-# Schedule
-# ---------------------------------------------------------------------------
-
-
-class AkaoSchedule(Base):
-    """赤尾日程条目 — 支持 monthly / weekly / daily 三层时间维度"""
-
-    __tablename__ = "akao_schedule"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    plan_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    period_start: Mapped[str] = mapped_column(String(10), nullable=False)
-    period_end: Mapped[str] = mapped_column(String(10), nullable=False)
-    time_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
-    time_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    mood: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    energy_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    response_style_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    proactive_action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    target_chats: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "persona_id",
-            "plan_type",
-            "period_start",
-            "period_end",
-            "time_start",
-        ),
-    )
-
-
-
-
-# ---------------------------------------------------------------------------
-# Identity & relationship
-# ---------------------------------------------------------------------------
-
-
-class ReplyStyleLog(Base):
-    """Reply Style 审计日志 — append-only"""
-
-    __tablename__ = "reply_style_log"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    style_text: Mapped[str] = mapped_column(Text, nullable=False)
-    observation: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
