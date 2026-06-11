@@ -57,6 +57,7 @@ from app.agent.neutral import Message, Role
 from app.agent.session import load_session
 from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
+from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import (
@@ -667,7 +668,20 @@ async def _run_life_round(
     # 开头印一行本轮标记（round_id）：写回 transcript 后，下次同 round_id 重投能从
     # session 历史里查到这行 → turn 幂等跳过（对称 world 把标记印进 USER stimulus）。
     # 机读用，对模型无害（它只当是一行元信息）。
-    parts = [_round_marker(round_id), f"现在是 {cst_time.to_cst_hm(observed_at)}。"]
+    parts = [_round_marker(round_id)]
+
+    # 世界阶段透传（事故修复）：世界阶段（「跨周月公共进展」）翻页后她必须知道——
+    # 否则她照 persona 出厂设定过日子穿帮。每轮按本轮唤醒的 lane 读最新一版，渲染成
+    # 给"活在里面的人"看的第一人称段（框架文案在 arc_awareness 单一处，无剧情事实）；
+    # 空链 / 读失败返回 "" → 整段缺席、不塞占位。位置在机读标记之后、每轮都变的
+    # 时刻行与当轮感知之前（稳定前缀区：世界阶段天/周级才变）。信息差不破：世界阶段
+    # 写作纪律只写在场所有人都知道的公共进展，全 persona 同享，她读到的是"我本来就
+    # 知道的事"——绝不是 WorldState 全局快照（那条命门不动）。
+    arc_awareness = await render_arc_awareness(lane=lane)
+    if arc_awareness:
+        parts.append(arc_awareness)
+
+    parts.append(f"现在是 {cst_time.to_cst_hm(observed_at)}。")
 
     # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
     # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript

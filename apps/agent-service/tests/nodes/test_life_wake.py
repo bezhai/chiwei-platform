@@ -138,7 +138,12 @@ def patched(monkeypatch):
 
     工具是 build_life_tools 造出来的真 Tool，但底下的 save_life_state /
     perform_act handler 在 life_tools 模块里被打桩成记录副作用。
+
+    世界阶段透传走 ``app.domain.arc_awareness``（render 真跑，底下的
+    ``read_world_arc`` 打桩）：默认 ``arc=None``（空链 → 整段缺席），测试可设
+    ``state["arc"]`` 注入一版世界阶段；``arc_lanes`` 记录按哪个 lane 读的。
     """
+    import app.domain.arc_awareness as arc_mod
     import app.nodes.life_tools as lt
 
     state = {
@@ -148,7 +153,15 @@ def patched(monkeypatch):
         "marked": [],  # mark_events_read 收到的 event_ids
         "acts": [],  # perform_act 收到的
         "transcript": [],  # load_session 探测返回（空=冷启）
+        "arc": None,  # read_world_arc 返回（None=空链）
+        "arc_lanes": [],  # read_world_arc 收到的 lane
     }
+
+    async def fake_read_world_arc(*, lane):
+        state["arc_lanes"].append(lane)
+        return state["arc"]
+
+    monkeypatch.setattr(arc_mod, "read_world_arc", fake_read_world_arc)
 
     async def fake_find(*, lane, persona_id):
         return state["snapshot"]
@@ -2328,3 +2341,114 @@ async def test_life_cost_record_failure_does_not_fail_round(
 
     # 收口正常完成：标已读照常（成本失败不影响真实思考收口）。
     assert patched["marked"] == [["e1"]]
+
+
+# ---------------------------------------------------------------------------
+# 世界阶段透传：life 每轮 stimulus 带「你们一家所处的现实阶段」段
+# （事故：世界阶段已翻页，她的 life 不读世界文档 → 照 persona 旧设定过日子穿帮。
+#  机制：每轮唤醒读 read_world_arc(lane)，有则渲染进 stimulus、空链整段缺席。）
+# ---------------------------------------------------------------------------
+
+_ARC_HEADER_MARK = "【你们一家所处的现实阶段】"
+
+
+def _world_arc(narrative, lane="coe-t3"):
+    from app.world.arc import WorldArc
+
+    return WorldArc(
+        lane=lane, narrative=narrative, turned_at="2026-06-09T18:00:00+08:00"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stimulus_carries_arc_awareness_when_arc_exists(patched, monkeypatch):
+    """有世界阶段 → 这一轮 USER stimulus 带阶段段（框架标头 + 阶段全文）。"""
+    narrative = "一家人刚搬过来，老二换了新学校，眼下是初夏。"
+    patched["arc"] = _world_arc(narrative)
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _ARC_HEADER_MARK in msg_blob, "有世界阶段时 stimulus 必须带阶段段"
+    assert narrative in msg_blob, "阶段全文必须原样进 stimulus"
+
+
+@pytest.mark.asyncio
+async def test_arc_awareness_sits_before_per_round_dynamic_content(
+    patched, monkeypatch
+):
+    """阶段段在稳定前缀区：排在每轮都变的「现在几点」与周遭感知之前（缓存前缀原则）。"""
+    patched["arc"] = _world_arc("一家人安顿下来了。")
+    patched["unread"] = [
+        _envelope("s1", "你在房间里，窗外有蝉鸣", kind=EVENT_KIND_SURROUNDINGS),
+        _envelope("e1", "楼下传来碗筷声"),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    arc_pos = stimulus.index(_ARC_HEADER_MARK)
+    assert arc_pos < stimulus.index("现在是"), (
+        "阶段段（天/周级才变）必须排在每轮都变的时刻行之前"
+    )
+    assert arc_pos < stimulus.index("【此刻你周遭】"), (
+        "阶段段必须排在当轮感知（周遭切片）之前"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cold_arc_chain_renders_no_section_no_placeholder(patched, monkeypatch):
+    """空链（还没人写过世界阶段）→ 整段缺席，绝不塞占位文案。"""
+    patched["arc"] = None
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _ARC_HEADER_MARK not in msg_blob
+    assert "现实阶段" not in msg_blob, "空链时不许出现任何阶段占位文案"
+
+
+@pytest.mark.asyncio
+async def test_arc_read_uses_wake_event_lane(patched, monkeypatch):
+    """lane 口径与本轮唤醒一致：按 EventArrived.lane 读世界阶段（不发明新口径）。"""
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert patched["arc_lanes"] == ["coe-t3"]
+
+
+@pytest.mark.asyncio
+async def test_self_wake_empty_inbox_also_carries_arc_awareness(patched, monkeypatch):
+    """self 自排空信箱轮同样带阶段段——透传点在 _run_life_round，两条唤醒路都覆盖。"""
+    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
+
+    narrative = "这个家的日子翻到了新的一页。"
+    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
+    _stub_life_state(
+        patched,
+        LifeState(
+            lane="coe-t3", persona_id="akao",
+            current_state="在写作业", response_mood="专注", activity_type="study",
+            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
+        ),
+    )
+    patched["arc"] = _world_arc(narrative)
+    patched["unread"] = []
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await life_self_wake_node(
+        LifeWakeTick(
+            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
+        )
+    )
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _ARC_HEADER_MARK in msg_blob
+    assert narrative in msg_blob

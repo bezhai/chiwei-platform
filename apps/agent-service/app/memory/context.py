@@ -1,20 +1,28 @@
 """Inner-context builder — what chat feeds 赤尾 each turn.
 
-Two sections only, in order:
-  1. Scene (p2p / group / proactive) — who she's talking to, why.
-  2. Life snapshot — where she is, what she's doing, how she feels *right now*,
+Sections, in order:
+  1. World-arc awareness (only when the arc exists) — the public life stage
+     this family has reached (WorldArc), rendered first-person by
+     ``render_arc_awareness``. Leads the block because it changes on a
+     day/week clock — stable-prefix before the per-message scene and the
+     hour-level life snapshot (prompt-cache friendly). Cold chain / read
+     failure → the section is simply absent, no placeholder.
+  2. Scene (p2p / group / proactive) — who she's talking to, why.
+  3. Life snapshot — where she is, what she's doing, how she feels *right now*,
      read straight from the life engine's LifeState. This is the main subject:
      the 赤尾 talking to a real person is the 赤尾 living this moment.
 
 There is no RAG recall here. She speaks from what her life already knows
-(current_state + mood), nothing more — this keeps her information boundary
-(she isn't omniscient just because someone messaged her).
+(the shared world stage + current_state + mood), nothing more — this keeps
+her information boundary (the arc is by writing discipline the progress
+everyone present already knows, so reading it adds nothing she wouldn't know).
 """
 
 from __future__ import annotations
 
 import logging
 
+from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
 from app.runtime.lane_policy import current_deployment_lane
 
@@ -91,9 +99,18 @@ async def build_inner_context(
     is_proactive: bool = False,
     proactive_stimulus: str = "",
 ) -> str:
-    """Assemble inner_context: scene + life snapshot, nothing else."""
+    """Assemble inner_context: arc awareness (when present) + scene + life snapshot."""
 
     sections: list[str] = []
+
+    # 世界阶段透传：对话里她也必须知道自己人生走到哪页（世界阶段翻页后 persona
+    # 出厂设定可能已过时）。lane 口径与 _build_life_state 一致（进程级泳道，prod
+    # 归一 "prod"）；render 空链 / 读失败返回 "" → 整段缺席、不塞占位。
+    arc_awareness = await render_arc_awareness(
+        lane=current_deployment_lane() or "prod"
+    )
+    if arc_awareness:
+        sections.append(arc_awareness)
 
     scene = _scene_section(
         chat_type, chat_name, trigger_username, is_proactive, proactive_stimulus
