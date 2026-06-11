@@ -45,9 +45,6 @@ class TestSettingsDefaults:
             assert s.postgres_port == 5432
             assert s.qdrant_service_port == 6333
             assert s.main_server_timeout == 10
-            assert s.identity_drift_debounce_seconds == 120
-            assert s.identity_drift_max_buffer == 10
-            assert s.identity_drift_ttl_seconds == 86400
 
     def test_redis_port_defaults_to_6379(self):
         """REDIS_PORT defaults to 6379 so prod (port 6379) is unaffected."""
@@ -65,7 +62,6 @@ class TestSettingsDefaults:
             s = Settings()
             assert s.siliconflow_base_url == "https://api.siliconflow.cn/v1"
             assert s.life_engine_model == "offline-model"
-            assert s.identity_drift_model == "offline-model"
 
 
 class TestSettingsFromEnv:
@@ -116,7 +112,8 @@ class TestFieldNames:
         names = s.field_names()
         assert "redis_host" in names
         assert "lane" in names
-        assert "identity_drift_ttl_seconds" in names
+        # voice 子系统拆除：drift（voice 再生成）配置不得残留。
+        assert not any(n.startswith("identity_drift") for n in names)
         assert len(names) > 20  # sanity check
 
 

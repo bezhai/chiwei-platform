@@ -1,4 +1,4 @@
-"""Memory pipeline @node consumers (drift / afterthought).
+"""Memory pipeline @node consumers (afterthought).
 
 Single-flight per (chat, persona) via the runtime ``single_flight`` capability
 (SETNX uuid token + Lua compare-and-delete; if LLM stalls past TTL and a new
@@ -9,6 +9,8 @@ Lock contention raises ``DebounceReschedule(SameTrigger)`` — the runtime
 debounce handler catches it and runs ``_do_reschedule`` with its own
 trigger_id, so a fresh delayed fire takes phase2's place after the lock
 releases.
+
+drift（上下文变化 → voice 再生成）管线随 voice 子系统拆除删除。
 """
 
 from __future__ import annotations
@@ -18,18 +20,16 @@ from datetime import datetime, timedelta, timezone
 
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
-from app.chat.content_parser import parse_content
 from app.data.ids import new_id
 from app.data.queries import (
     find_group_name,
     find_messages_in_range,
     find_username,
     insert_fragment,
-    resolve_bot_name_for_persona,
 )
 from app.domain.agent_tool_events import AbstractMemoryCommitted
 from app.domain.memory_request import MemoryAbstractRequest, MemoryFragmentRequest
-from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
+from app.domain.memory_triggers import AfterthoughtTrigger
 from app.memory._persona import load_persona
 from app.memory._timeline import format_timeline
 from app.runtime.db import emit_tx, tx
@@ -45,78 +45,6 @@ _LOOKBACK_HOURS = 2
 _AFTERTHOUGHT_CFG = AgentConfig(
     "afterthought_conversation", "offline-model", "afterthought"
 )
-
-
-# ---------------------------------------------------------------------------
-# Drift helpers
-# ---------------------------------------------------------------------------
-
-
-async def _run_drift(chat_id: str, persona_id: str) -> None:
-    """Event-driven drift — call unified voice generation with recent context."""
-    pc = await load_persona(persona_id)
-    recent_messages = await _recent_timeline(chat_id, persona_name=pc.display_name)
-    recent_replies = await _recent_persona_replies(chat_id, persona_id)
-
-    if not recent_messages:
-        logger.info("[%s] No recent messages for %s, skip drift", persona_id, chat_id)
-        return
-
-    parts: list[str] = []
-    if recent_messages:
-        parts.append(f"群里刚才发生的事：\n{recent_messages}")
-    if recent_replies:
-        parts.append(f"你最近的回复：\n{recent_replies}")
-    recent_context = "\n\n".join(parts)
-
-    from app.memory.voice import generate_voice
-
-    await generate_voice(persona_id, recent_context=recent_context, source="drift")
-
-
-async def _recent_timeline(
-    chat_id: str, persona_name: str = "bot", max_messages: int = 50
-) -> str:
-    """Last 1 hour of messages formatted as timeline."""
-    start_dt = datetime.now(_CST) - timedelta(hours=1)
-    start_ts = int(start_dt.timestamp() * 1000)
-    end_ts = int(datetime.now(_CST).timestamp() * 1000)
-
-    messages = await find_messages_in_range(chat_id, start_ts, end_ts)
-    if not messages:
-        return ""
-
-    return await format_timeline(
-        messages, persona_name, tz=_CST, max_messages=max_messages
-    )
-
-
-async def _recent_persona_replies(
-    chat_id: str, persona_id: str, max_replies: int = 10
-) -> str:
-    """Recent bot replies for drift diagnosis (matched by bot_name)."""
-    now = datetime.now(_CST)
-    start_ts = int((now - timedelta(hours=2)).timestamp() * 1000)
-    end_ts = int(now.timestamp() * 1000)
-
-    async with tx():
-        messages = await find_messages_in_range(chat_id, start_ts, end_ts)
-        if not messages:
-            return ""
-        bot_name = await resolve_bot_name_for_persona(persona_id, chat_id)
-
-    persona_msgs = [
-        m for m in messages if m.role == "assistant" and m.bot_name == bot_name
-    ]
-    persona_msgs = persona_msgs[-max_replies:]
-
-    lines: list[str] = []
-    for i, msg in enumerate(persona_msgs, 1):
-        rendered = parse_content(msg.content).render()
-        if rendered and rendered.strip():
-            lines.append(f"{i}. {rendered[:200]}")
-
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -217,31 +145,13 @@ async def _build_scene(chat_id: str, chat_type: str, messages: list) -> str:
 
 
 @node
-async def drift_check(trigger: DriftTrigger) -> None:
-    """Single-flight drift detection per (chat, persona).
+async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
+    """Single-flight conversation fragment generation per (chat, persona).
 
     Lock contention raises DebounceReschedule(SameTrigger) — the debounce
     handler catches and runs _do_reschedule with its own trigger_id, so a
     fresh delayed fire takes phase2's place after the lock releases.
     """
-    try:
-        async with single_flight(
-            f"phase2:drift:{trigger.chat_id}:{trigger.persona_id}", ttl=600
-        ):
-            await _run_drift(trigger.chat_id, trigger.persona_id)
-    except SingleFlightConflict:
-        logger.info(
-            "drift_check: phase2 in flight for chat_id=%s persona=%s, raise DebounceReschedule",
-            trigger.chat_id, trigger.persona_id,
-        )
-        raise DebounceReschedule(DriftTrigger(
-            chat_id=trigger.chat_id, persona_id=trigger.persona_id,
-        )) from None
-
-
-@node
-async def afterthought_check(trigger: AfterthoughtTrigger) -> None:
-    """Single-flight conversation fragment generation per (chat, persona)."""
     try:
         async with single_flight(
             f"phase2:afterthought:{trigger.chat_id}:{trigger.persona_id}", ttl=900

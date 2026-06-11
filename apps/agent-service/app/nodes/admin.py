@@ -5,7 +5,8 @@ Return types are left un-annotated so the @node decorator skips Data-only
 validation — these nodes return dict / list[dict] for sync HTTP RPC.
 
 旧 life-tick / glimpse / schedule 触发 + schedule CRUD 的 admin 节点已随
-world/life 重写删除（那套活法不再存在）。剩 voice 触发 + search。
+world/life 重写删除（那套活法不再存在）；voice 触发随 voice 子系统拆除删除。
+剩 search。
 """
 from __future__ import annotations
 
@@ -13,23 +14,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.domain.admin import (
-    AdminSearchRequest,
-    AdminVoiceRequest,
-)
+from app.domain.admin import AdminSearchRequest
 from app.runtime import node
-
-
-@node
-async def admin_trigger_voice_node(r: AdminVoiceRequest):
-    from app.memory.voice import generate_voice
-
-    result = await generate_voice(r.persona_id, source="manual")
-    return {
-        "ok": True,
-        "persona_id": r.persona_id,
-        "result": result[:200] if result else None,
-    }
 
 
 @node

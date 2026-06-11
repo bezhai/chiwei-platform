@@ -6,20 +6,11 @@ auto-registers FastAPI routes via register_http_sources(app).
 All endpoints use response=True (RPC mode) to preserve the old synchronous
 response shapes — clients depend on getting a JSON body back, not a 202.
 """
-from app.domain.admin import (
-    AdminSearchRequest,
-    AdminVoiceRequest,
-)
-from app.nodes.admin import (
-    admin_search_node,
-    admin_trigger_voice_node,
-)
+from app.domain.admin import AdminSearchRequest
+from app.nodes.admin import admin_search_node
 from app.runtime import Source, wire
 
 # Admin trigger endpoints — all RPC mode (preserve old sync response shape).
-wire(AdminVoiceRequest).from_(
-    Source.http("/admin/trigger-voice", response=True)
-).to(admin_trigger_voice_node)
 wire(AdminSearchRequest).from_(
     Source.http("/admin/search", response=True)
 ).to(admin_search_node)

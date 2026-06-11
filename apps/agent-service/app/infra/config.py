@@ -136,20 +136,6 @@ class Settings:
         default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
     )
 
-    # -- Identity drift --
-    identity_drift_model: str = field(
-        default_factory=lambda: _env("IDENTITY_DRIFT_MODEL", "offline-model")
-    )
-    identity_drift_debounce_seconds: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_DEBOUNCE_SECONDS", 120)
-    )
-    identity_drift_max_buffer: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_MAX_BUFFER", 10)
-    )
-    identity_drift_ttl_seconds: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_TTL_SECONDS", 86400)
-    )
-
     # -- Utility --
 
     def field_names(self) -> list[str]:

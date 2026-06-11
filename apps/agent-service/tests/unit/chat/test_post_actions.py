@@ -64,14 +64,14 @@ async def test_emit_memory_trigger_swallows_exception(monkeypatch, caplog):
     caplog.set_level(logging.ERROR, logger="app.chat.post_actions")
 
     from app.chat.post_actions import _emit_memory_trigger
-    from app.domain.memory_triggers import DriftTrigger
+    from app.domain.memory_triggers import AfterthoughtTrigger
     from unittest.mock import AsyncMock
 
     fake_emit = AsyncMock(side_effect=RuntimeError("redis down"))
     monkeypatch.setattr("app.chat.post_actions.emit", fake_emit)
 
     # 不应该 raise
-    await _emit_memory_trigger(DriftTrigger(chat_id="c1", persona_id="p1"))
+    await _emit_memory_trigger(AfterthoughtTrigger(chat_id="c1", persona_id="p1"))
 
     # 异常被 logger.exception 吃掉
     assert any("failed to emit memory trigger" in r.message
@@ -81,13 +81,37 @@ async def test_emit_memory_trigger_swallows_exception(monkeypatch, caplog):
 @pytest.mark.asyncio
 async def test_emit_memory_trigger_calls_emit_on_success(monkeypatch):
     from app.chat.post_actions import _emit_memory_trigger
-    from app.domain.memory_triggers import DriftTrigger
+    from app.domain.memory_triggers import AfterthoughtTrigger
     from unittest.mock import AsyncMock
 
     fake_emit = AsyncMock(return_value=None)
     monkeypatch.setattr("app.chat.post_actions.emit", fake_emit)
 
-    t = DriftTrigger(chat_id="c1", persona_id="p1")
+    t = AfterthoughtTrigger(chat_id="c1", persona_id="p1")
     await _emit_memory_trigger(t)
 
     fake_emit.assert_awaited_once_with(t)
+
+
+@pytest.mark.asyncio
+async def test_schedule_post_actions_emits_only_afterthought(monkeypatch):
+    """voice 子系统拆除：post_actions 不再发 DriftTrigger（voice 再生成），
+    只剩 afterthought 这一个 memory trigger（session_id=None 跳过 post safety）。"""
+    from unittest.mock import AsyncMock
+
+    from app.chat import post_actions
+
+    fake_emit = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.chat.post_actions.emit", fake_emit)
+
+    await post_actions.schedule_post_actions(
+        full_content="hello",
+        session_id=None,
+        channel="lark",
+        chat_id="c1",
+        message_id="m1",
+        persona_id="p1",
+    )
+
+    emitted = [type(c.args[0]).__name__ for c in fake_emit.await_args_list]
+    assert emitted == ["AfterthoughtTrigger"]

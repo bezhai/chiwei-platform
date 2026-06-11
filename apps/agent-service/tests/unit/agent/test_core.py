@@ -304,7 +304,7 @@ class TestTurnTraceUnifiedName:
 
     def test_outside_turn_keeps_span_name_as_trace_name(self):
         """No turn → unchanged: update_trace=True still names the trace after the
-        span (afterthought / voice / post-safety-without-turn become their own
+        span (afterthought / post-safety-without-turn become their own
         traces named after themselves)."""
         from app.agent import core
 

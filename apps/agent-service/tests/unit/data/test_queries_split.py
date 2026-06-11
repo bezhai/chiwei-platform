@@ -1,7 +1,8 @@
 """Phase 6 第三刀验收：queries package 拆分完整性 + 无重名。
 
 memory.py 在 spec §3.6 预估超 300 行后细拆为 memory.py / memory_edges.py /
-memory_search.py，所以本测试覆盖 8 个 domain 模块（schedule 模块已删除）。
+memory_search.py，所以本测试覆盖 7 个 domain 模块（schedule 模块已删除；
+life 模块随 voice 子系统拆除删除——它只剩 reply_style 读写那一对）。
 """
 from __future__ import annotations
 
@@ -27,10 +28,8 @@ EXPECTED_FUNCTIONS = {
     # agent_response (5)
     "create_pending_agent_response", "set_agent_response_bot",
     "is_chat_request_completed", "get_safety_status", "set_safety_status",
-    # life → reply-style only (2): 旧 life_engine_state / glimpse_state 查询已随
-    # world/life 重写删除；她此刻状态读新 LifeState Data。只剩 voice 写 / chat 读
-    # 的 reply_style 这一对。
-    "insert_reply_style", "find_latest_reply_style",
+    # life 模块已删：旧 life_engine_state / glimpse_state 查询随 world/life 重写
+    # 删除；reply_style 读写那一对随 voice 子系统拆除删除。
     # memory (13) — fragments + abstracts CRUD
     "get_fragment_by_id", "get_abstract_by_id", "insert_fragment", "touch_fragment",
     "get_fragments_by_ids", "touch_fragments_bulk", "insert_abstract_memory",
@@ -40,8 +39,9 @@ EXPECTED_FUNCTIONS = {
     "insert_memory_edge", "delete_edge", "list_edges_to", "list_edges_from",
     "upsert_note", "delete_note", "list_active_notes", "select_notes_for_context",
     "resolve_note",
-    # memory_search (9) — read helpers
-    "list_today_fragments", "find_fragments_since", "list_fragments_window",
+    # memory_search (8) — read helpers（list_today_fragments 随 voice 拆除删除，
+    # 它唯一的读取方是 generate_voice）
+    "find_fragments_since", "list_fragments_window",
     "list_abstracts_window", "get_abstracts_by_subject", "get_abstracts_by_subjects",
     "get_recent_abstract_titles", "count_abstracts_per_subject_prefix",
     "get_recent_fragments_for_injection",
@@ -60,7 +60,7 @@ def test_queries_all_complete():
 
 
 def test_queries_no_duplicate_names():
-    """9 个 domain 文件的 __all__ 两两交集为空。
+    """7 个 domain 文件的 __all__ 两两交集为空。
 
     `from X import *` 重名时后者覆盖、不报错；ruff/mypy 也不一定能捕获。
     必须有测试兜底，否则一个 domain 漏写 __all__ 一项可能让 caller 拿到错误
@@ -68,7 +68,6 @@ def test_queries_no_duplicate_names():
     """
     from app.data.queries import (
         agent_response,
-        life,
         memory,
         memory_edges,
         memory_search,
@@ -79,7 +78,6 @@ def test_queries_no_duplicate_names():
 
     modules = {
         "agent_response": agent_response,
-        "life": life,
         "memory": memory,
         "memory_edges": memory_edges,
         "memory_search": memory_search,

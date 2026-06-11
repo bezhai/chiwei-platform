@@ -4,7 +4,7 @@ Operates on tables: ``Fragment``, ``AbstractMemory``.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.future import select
@@ -12,11 +12,7 @@ from sqlalchemy.future import select
 from app.data.models import AbstractMemory, Fragment
 from app.runtime.db import auto_tx, current_session
 
-# CST timezone for date boundary calculations (CST 00:00 day boundary).
-_CST = timezone(timedelta(hours=8))
-
 __all__ = [
-    "list_today_fragments",
     "find_fragments_since",
     "list_fragments_window",
     "list_abstracts_window",
@@ -26,27 +22,6 @@ __all__ = [
     "count_abstracts_per_subject_prefix",
     "get_recent_fragments_for_injection",
 ]
-
-
-async def list_today_fragments(
-    persona_id: str,
-    *,
-    sources: list[str] | None = None,
-) -> list[Fragment]:
-    """Fetch v4 Fragments created today (CST 00:00+, ascending). Skips forgotten rows."""
-    today_cst = datetime.now(_CST).replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = (
-        select(Fragment)
-        .where(Fragment.persona_id == persona_id)
-        .where(Fragment.created_at >= today_cst)
-        .where(Fragment.clarity != "forgotten")
-    )
-    if sources:
-        stmt = stmt.where(Fragment.source.in_(sources))
-    stmt = stmt.order_by(Fragment.created_at.asc())
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        return list(result.scalars().all())
 
 
 async def find_fragments_since(

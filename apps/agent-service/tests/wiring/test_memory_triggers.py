@@ -1,9 +1,8 @@
 """wiring/memory_triggers.py registration contract.
 
-Confirms the Phase 3 debounce wires are declared and that compile_graph()
-accepts them — DriftTrigger / AfterthoughtTrigger both reach the consumer
-side of WIRING_REGISTRY after a fresh wiring import, and CompiledGraph
-exposes them via .data_types.
+Confirms the afterthought debounce wire is declared and that compile_graph()
+accepts it. drift（voice 再生成）那条 wire 随 voice 子系统拆除一并删除，这里
+负向断言它不再注册。
 """
 from __future__ import annotations
 
@@ -39,31 +38,25 @@ def test_wiring_memory_triggers_compiles():
     """Importing app.wiring.memory_triggers must not break compile_graph()."""
     _fresh_import()
 
-    from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
+    from app.domain.memory_triggers import AfterthoughtTrigger
     from app.runtime.graph import compile_graph
 
     g = compile_graph()
-    assert DriftTrigger in g.data_types
     assert AfterthoughtTrigger in g.data_types
 
 
-def test_drift_trigger_debounce_wire_registered():
+def test_drift_trigger_wire_gone():
+    """voice 子系统拆除：DriftTrigger 类与它的 debounce wire 都不得残留。"""
     _fresh_import()
 
-    from app.domain.memory_triggers import DriftTrigger
-    from app.nodes.memory_pipelines import drift_check
+    import app.domain.memory_triggers as mt
     from app.runtime.wire import WIRING_REGISTRY
 
-    wires = [w for w in WIRING_REGISTRY if w.data_type is DriftTrigger]
-    assert len(wires) == 1
-    w = wires[0]
-    assert w.consumers == [drift_check]
-    assert w.debounce is not None
-    assert w.debounce_key_by is not None
-    # Sanity: key formula contains the chat_id + persona_id and the
-    # ``drift:`` prefix that distinguishes from afterthought.
-    sample = DriftTrigger(chat_id="oc_x", persona_id="p1")
-    assert w.debounce_key_by(sample) == "drift:oc_x:p1"
+    assert not hasattr(mt, "DriftTrigger")
+    leftover = [
+        w for w in WIRING_REGISTRY if w.data_type.__name__ == "DriftTrigger"
+    ]
+    assert leftover == []
 
 
 def test_afterthought_trigger_debounce_wire_registered():

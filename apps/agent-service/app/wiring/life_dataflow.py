@@ -1,8 +1,7 @@
-"""Wiring: voice + reviewer cron ticks + world/life event 闭环.
+"""Wiring: reviewer cron ticks + world/life event 闭环.
 
 Graph topology:
 
-  cron */1       -> MinuteTick     -> fan_out_voice
   cron 0,30 8-21 -> LightDayTick   -> fan_out_light_day
   cron 0 22-7 except 3 -> LightNightTick -> fan_out_light_night
   cron 0 3       -> HeavyReviewTick -> fan_out_heavy
@@ -15,8 +14,8 @@ pull 范式：act 不再唤醒 world。life 做完一件事直接 insert_idempot
 落 PG，world 醒来按游标批量 pull——所以 ActPerformed 没有任何 wire。
 
 旧 life tick / glimpse / schedule 生成的 wire 已在 world/life 重写中删除
-（life_tick / glimpse / daily_plan / sync_life_state）。voice 与 light/heavy
-reviewer 的 cron 保留，只是读状态口换成新 LifeState 主观快照。
+（life_tick / glimpse / daily_plan / sync_life_state）；voice 的整条 cron 链
+随 voice 子系统拆除删除。light/heavy reviewer 的 cron 保留。
 """
 from __future__ import annotations
 
@@ -26,8 +25,6 @@ from app.domain.life_dataflow import (
     LightDayTick,
     LightNightTick,
     LightReviewRequest,
-    MinuteTick,
-    VoiceRequest,
 )
 from app.domain.world_events import EventArrived, event_knock_key
 from app.nodes.life_dataflow import (
@@ -35,10 +32,8 @@ from app.nodes.life_dataflow import (
     fan_out_heavy,
     fan_out_light_day,
     fan_out_light_night,
-    fan_out_voice,
     heavy_review_node,
     light_review_node,
-    voice_node,
 )
 from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
 from app.runtime import Source, wire
@@ -63,7 +58,6 @@ LIFE_WAKE_DEBOUNCE_MAX_BUFFER = 20
 # template Request; the wire from that Request to the business node
 # declares ``.fan_out_per(_persona_dicts)`` to expand it per persona
 # with built-in failure isolation between personas.
-wire(MinuteTick).from_(Source.cron("* * * * *", tz=TZ)).to(fan_out_voice)
 wire(LightDayTick).from_(Source.cron("0,30 8-21 * * *", tz=TZ)).to(fan_out_light_day)
 wire(LightNightTick).from_(Source.cron("0 22,23,0,1,2,4,5,6,7 * * *", tz=TZ)).to(fan_out_light_night)
 wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
@@ -72,7 +66,6 @@ wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
 # ``_fan_out_per_persona`` loops; one persona failing does not abort
 # the others — guaranteed by emit._dispatch_fan_out's
 # asyncio.gather(return_exceptions=True)).
-wire(VoiceRequest).fan_out_per(_persona_dicts).to(voice_node)
 wire(LightReviewRequest).fan_out_per(_persona_dicts).to(light_review_node)
 wire(HeavyReviewRequest).fan_out_per(_persona_dicts).to(heavy_review_node)
 

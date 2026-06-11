@@ -1,4 +1,4 @@
-"""End-to-end: emit -> publish_debounce -> handler -> consumer for drift / afterthought.
+"""End-to-end: emit -> publish_debounce -> handler -> consumer (debounce 机制 e2e).
 
 Uses fake redis + fake mq stubs. Covers spec §5.5 cases:
 - single emit -> single fire after debounce_seconds
@@ -8,15 +8,30 @@ Uses fake redis + fake mq stubs. Covers spec §5.5 cases:
 - per-(chat, persona) isolation
 """
 import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock
+from typing import Annotated
+from unittest.mock import AsyncMock
 
-from app.domain.memory_triggers import DriftTrigger
+import pytest
+
+from app.runtime.data import Data, Key
 from app.runtime.debounce import (
-    DebounceReschedule, _build_handler, publish_debounce,
+    DebounceReschedule,
+    _build_handler,
+    publish_debounce,
 )
-from app.runtime.node import NODE_REGISTRY, _NODE_META, node
+from app.runtime.node import _NODE_META, NODE_REGISTRY, node
 from app.runtime.wire import WireSpec
+
+
+class SampleTrigger(Data):
+    """本测试的样例 transient Data（原 DriftTrigger 已随 voice 子系统拆除，
+    这里只测 debounce 机制 e2e，与业务无关）。"""
+
+    chat_id: Annotated[str, Key]
+    persona_id: str
+
+    class Meta:
+        transient = True
 
 
 @pytest.fixture(autouse=True)
@@ -155,20 +170,20 @@ async def test_e2e_single_emit_one_fire(monkeypatch):
     mq_fake = _FakeMq()
     _patch_runtime(monkeypatch, redis_fake, mq_fake)
 
-    fired: list[DriftTrigger] = []
+    fired: list[SampleTrigger] = []
 
     @node
-    async def consumer(t: DriftTrigger) -> None:
+    async def consumer(t: SampleTrigger) -> None:
         fired.append(t)
 
     w = WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 5},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
     )
 
-    await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
     assert len(mq_fake.published) == 1
     assert mq_fake.published[0][3] == 60_000
 
@@ -189,21 +204,21 @@ async def test_e2e_multiple_emits_one_fire(monkeypatch):
     mq_fake = _FakeMq()
     _patch_runtime(monkeypatch, redis_fake, mq_fake)
 
-    fired: list[DriftTrigger] = []
+    fired: list[SampleTrigger] = []
 
     @node
-    async def consumer(t: DriftTrigger) -> None:
+    async def consumer(t: SampleTrigger) -> None:
         fired.append(t)
 
     w = WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 100},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
     )
 
     for _ in range(3):
-        await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
+        await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
 
     handler = _build_handler(w, consumer)
 
@@ -229,25 +244,25 @@ async def test_e2e_max_buffer_immediate_fire(monkeypatch):
     _patch_runtime(monkeypatch, redis_fake, mq_fake)
 
     @node
-    async def consumer(t: DriftTrigger) -> None:
+    async def consumer(t: SampleTrigger) -> None:
         return None
 
     w = WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 3},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
     )
 
     for _ in range(3):
-        await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
+        await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
 
     last = mq_fake.published[-1]
     assert last[1]["fire_now"] is True
     assert last[3] == 0
 
     # 后续再 publish：count 从 0 重新累计，不再 fire_now
-    await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
     assert mq_fake.published[-1][1]["fire_now"] is False
     assert mq_fake.published[-1][3] == 60_000
 
@@ -264,15 +279,15 @@ async def test_e2e_phase2_contention_via_debounce_reschedule(monkeypatch):
     call_log: list[str] = []
 
     @node
-    async def consumer(t: DriftTrigger) -> None:
+    async def consumer(t: SampleTrigger) -> None:
         call_log.append(t.chat_id)
         if len(call_log) == 1:
             raise DebounceReschedule(
-                DriftTrigger(chat_id=t.chat_id, persona_id=t.persona_id)
+                SampleTrigger(chat_id=t.chat_id, persona_id=t.persona_id)
             )
 
     w = WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 100},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
@@ -282,7 +297,7 @@ async def test_e2e_phase2_contention_via_debounce_reschedule(monkeypatch):
 
     # publish 1 → handler 1：consumer raise Reschedule → _do_reschedule
     # → CAS swap + publish 2
-    await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
     msg1 = _FakeMessage(mq_fake.published[0][1], mq_fake.published[0][2] or {})
     await handler(msg1)
 
@@ -307,18 +322,18 @@ async def test_e2e_per_key_isolation(monkeypatch):
     fired: list[tuple[str, str]] = []
 
     @node
-    async def consumer(t: DriftTrigger) -> None:
+    async def consumer(t: SampleTrigger) -> None:
         fired.append((t.chat_id, t.persona_id))
 
     w = WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 100},
         debounce_key_by=lambda e: f"k:{e.chat_id}:{e.persona_id}",
     )
 
-    await publish_debounce(w, consumer, DriftTrigger(chat_id="c1", persona_id="p1"))
-    await publish_debounce(w, consumer, DriftTrigger(chat_id="c2", persona_id="p2"))
+    await publish_debounce(w, consumer, SampleTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, consumer, SampleTrigger(chat_id="c2", persona_id="p2"))
 
     handler = _build_handler(w, consumer)
     for _route, body, headers, _delay in mq_fake.published:

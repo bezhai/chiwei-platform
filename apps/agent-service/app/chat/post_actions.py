@@ -2,15 +2,14 @@
 
 Triggers:
   1. Post safety check — publish to RabbitMQ audit queue
-  2. Identity drift — voice regeneration (debounced)
-  3. Afterthought — conversation fragment generation (debounced)
+  2. Afterthought — conversation fragment generation (debounced)
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
+from app.domain.memory_triggers import AfterthoughtTrigger
 from app.domain.safety import PostSafetyRequest
 from app.memory._persona import load_persona
 from app.runtime.data import Data
@@ -94,12 +93,7 @@ async def schedule_post_actions(
     if session_id:
         await _publish_post_check(session_id, channel, full_content, chat_id, message_id)
 
-    # 2. Identity drift (debounced voice regeneration via dataflow)
-    await _emit_memory_trigger(
-        DriftTrigger(chat_id=chat_id, persona_id=persona_id)
-    )
-
-    # 3. Afterthought (conversation fragment generation via dataflow)
+    # 2. Afterthought (conversation fragment generation via dataflow)
     await _emit_memory_trigger(
         AfterthoughtTrigger(chat_id=chat_id, persona_id=persona_id)
     )

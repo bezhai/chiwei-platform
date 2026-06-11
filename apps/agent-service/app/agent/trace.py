@@ -51,7 +51,7 @@ _client: Langfuse | None = None
 #
 # This is OPT-IN: only per-turn @nodes (run_pre_safety, chat_node) enter
 # ``turn_trace`` from their request's (message_id, persona_id). Debounced
-# post-actions (afterthought / voice) deliberately do NOT — they are
+# post-actions (afterthought) deliberately do NOT — they are
 # (chat, persona) aggregations, not a turn, and must stay separate traces. A
 # debounce-propagated runtime trace_id would have leaked them into a turn trace,
 # which is exactly why we don't seed from the runtime trace_id.

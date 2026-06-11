@@ -164,7 +164,7 @@ class WorldHeartbeatTick(Data):
 
     框架硬约定（runtime ``_build_payload``）：cron / interval 时间源每 tick 只
     用 ``data_type(ts=<iso>)`` 构造 payload，所以时间源的 Data 必须是带
-    ``ts: str`` 的单字段 tick（正例 :class:`app.domain.life_dataflow.MinuteTick`）。
+    ``ts: str`` 的单字段 tick（正例 :class:`app.domain.life_dataflow.LightDayTick`）。
     心跳只决定"何时醒"、不进世界内容决策，也不需要 lane（lane 在翻译节点
     :func:`heartbeat_to_world_tick` 按进程级泳道填），所以它干净地只有 ts。
     """

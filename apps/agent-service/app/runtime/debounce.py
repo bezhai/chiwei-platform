@@ -20,7 +20,7 @@ Pipeline shape:
         atomic-claim: stale-check (latest == trigger_id?) +
                       clear count = 0 in one Lua script
         |
-    consumer (e.g. drift_check) runs
+    consumer (e.g. afterthought_check) runs
         |
         either returns normally (handler conditional-DELs latest+count)
         or raises DebounceReschedule(SameTrigger)

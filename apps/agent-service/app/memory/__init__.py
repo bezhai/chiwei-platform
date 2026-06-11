@@ -1,1 +1,1 @@
-"""Memory & identity — afterthought, drift, voice, relationships, context."""
+"""Memory & identity — afterthought, relationships, context."""

@@ -1,7 +1,8 @@
 """Admin wiring acceptance.
 
 旧 life-tick / glimpse / schedule 触发 + schedule CRUD 路由已随 world/life
-重写删除。剩 voice 触发 + search（DLQ admin 在 test_dlq_admin 覆盖）。
+重写删除；voice 触发随 voice 子系统拆除一并删除。剩 search（DLQ admin 在
+test_dlq_admin 覆盖）。
 """
 from __future__ import annotations
 
@@ -41,14 +42,14 @@ def test_admin_wiring_registers_all_paths():
             paths_methods.add((r.path, m))
 
     expected = {
-        ("/admin/trigger-voice", "POST"),
         ("/admin/search", "POST"),
     }
     missing = expected - paths_methods
     assert not missing, f"missing wires: {missing}"
 
-    # 旧 life / glimpse / schedule 路由必须已删干净。
+    # 旧 life / glimpse / schedule / voice 路由必须已删干净。
     deleted = {
+        ("/admin/trigger-voice", "POST"),
         ("/admin/trigger-life-engine-tick", "POST"),
         ("/admin/trigger-glimpse", "POST"),
         ("/admin/debug-glimpse", "POST"),
