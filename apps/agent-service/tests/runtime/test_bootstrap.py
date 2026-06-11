@@ -43,20 +43,20 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     import importlib
 
     import app.deployment as d
-    import app.wiring.memory_vectorize as mv
+    import app.wiring.chat as cw
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(mv)
+    importlib.reload(cw)
     importlib.reload(d)
 
     g = load_dataflow_graph()
-    # v4 memory vectorize nodes are bound to vectorize-worker
+    # chat ingress nodes ride the production wiring
     assert {n.__name__ for n in g.nodes} >= {
-        "vectorize_memory_fragment",
-        "vectorize_memory_abstract",
+        "route_chat_node",
+        "chat_node",
     }
 
 
@@ -161,7 +161,7 @@ async def test_prepare_for_run_skips_trigger_wire_for_unknown_app():
 
 @pytest.mark.asyncio
 async def test_prepare_for_run_declares_topology_when_requested():
-    """The FastAPI lifespan is a producer (proactive -> vectorize-worker),
+    """The FastAPI lifespan is a producer (proactive -> a downstream worker),
     so it must pre-declare durable routes before publishing. Worker
     entries already declare their own consumer routes via
     start_consumers and don't need this. Flag controls it.

@@ -13,8 +13,6 @@ from app.infra.rabbitmq import (
     DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
     EXCHANGE_NAME,
-    MEMORY_ABSTRACT_VECTORIZE,
-    MEMORY_FRAGMENT_VECTORIZE,
     RECALL,
     Route,
     _LANE_FALLBACK_TTL_MS,
@@ -183,20 +181,28 @@ class TestRouteConstants:
         assert CHAT_REQUEST.rk == "chat.request"
 
     def test_all_routes_complete(self):
+        # v4 vectorize 队列（memory_fragment_vectorize / memory_abstract_vectorize）
+        # 随 v4 记忆整机删除。
         expected = {
             CHAT_REQUEST,
             CHAT_RESPONSE,
             RECALL,
-            MEMORY_FRAGMENT_VECTORIZE,
-            MEMORY_ABSTRACT_VECTORIZE,
             *DELAYED_TRIGGER_ROUTES,
         }
         assert set(ALL_ROUTES) == expected
 
     def test_all_routes_match_business_plus_delayed_trigger(self):
-        # 5 business routes + one runtime_delayed_trigger route per
+        # 3 business routes + one runtime_delayed_trigger route per
         # KNOWN_APPS_FOR_DELAYED_TRIGGER entry (Phase 7a Gap 9.1.2).
-        assert len(ALL_ROUTES) == 5 + len(DELAYED_TRIGGER_ROUTES)
+        assert len(ALL_ROUTES) == 3 + len(DELAYED_TRIGGER_ROUTES)
+
+    def test_delayed_trigger_only_for_agent_service(self):
+        # vectorize-worker 已无任何节点，runtime_delayed_trigger 队列只剩
+        # agent-service 一条。
+        from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
+
+        assert KNOWN_APPS_FOR_DELAYED_TRIGGER == ["agent-service"]
+        assert len(DELAYED_TRIGGER_ROUTES) == 1
 
     def test_each_route_has_queue_and_rk(self):
         for route in ALL_ROUTES:

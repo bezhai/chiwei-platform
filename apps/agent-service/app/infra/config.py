@@ -48,17 +48,6 @@ class Settings:
     )
     postgres_db: str | None = field(default_factory=lambda: _env_or_none("POSTGRES_DB"))
 
-    # -- Qdrant --
-    qdrant_service_host: str | None = field(
-        default_factory=lambda: _env_or_none("QDRANT_SERVICE_HOST")
-    )
-    qdrant_service_port: int = field(
-        default_factory=lambda: _env_int("QDRANT_SERVICE_PORT", 6333)
-    )
-    qdrant_service_api_key: str | None = field(
-        default_factory=lambda: _env_or_none("QDRANT_SERVICE_API_KEY")
-    )
-
     # -- Search (You Search is the primary provider) --
     you_search_host: str | None = field(
         default_factory=lambda: _env_or_none("YOU_SEARCH_HOST")

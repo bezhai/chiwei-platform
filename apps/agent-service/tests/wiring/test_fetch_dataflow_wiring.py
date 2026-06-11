@@ -76,12 +76,9 @@ def test_fetch_dataflow_compiles_into_production_graph():
     clear_bindings()
     for sub in (
         "admin",
-        "agent_tool_events",
         "chat",
         "fetch_dataflow",
         "life_dataflow",
-        "memory_triggers",
-        "memory_vectorize",
         "safety",
     ):
         importlib.reload(importlib.import_module(f"app.wiring.{sub}"))

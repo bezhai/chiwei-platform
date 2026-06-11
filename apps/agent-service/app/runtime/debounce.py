@@ -20,7 +20,7 @@ Pipeline shape:
         atomic-claim: stale-check (latest == trigger_id?) +
                       clear count = 0 in one Lua script
         |
-    consumer (e.g. afterthought_check) runs
+    consumer (e.g. life_wake_node) runs
         |
         either returns normally (handler conditional-DELs latest+count)
         or raises DebounceReschedule(SameTrigger)
@@ -164,8 +164,8 @@ def _route_for(w: WireSpec, consumer: Callable) -> Route:
     debounce wire.
 
     debounce route ALWAYS sets lane_fallback=False — long delays
-    (300s afterthought) cannot be short-circuited to prod by the lane
-    queue's x-message-ttl=10000.
+    cannot be short-circuited to prod by the lane queue's
+    x-message-ttl=10000.
     """
     data_snake = to_snake(w.data_type.__name__)
     return Route(

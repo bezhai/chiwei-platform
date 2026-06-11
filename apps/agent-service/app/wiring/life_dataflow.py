@@ -1,40 +1,23 @@
-"""Wiring: reviewer cron ticks + world/life event 闭环.
+"""Wiring: world/life event 闭环.
 
 Graph topology:
-
-  cron 0,30 8-21 -> LightDayTick   -> fan_out_light_day
-  cron 0 22-7 except 3 -> LightNightTick -> fan_out_light_night
-  cron 0 3       -> HeavyReviewTick -> fan_out_heavy
 
   interval 10min -> WorldHeartbeatTick -> heartbeat_to_world_tick -> WorldTick -> world_tick
   WorldTick (in-process: heartbeat / self-schedule) -> world_tick
   EventArrived .debounce() -> life_wake_node
+  LifeWakeTick (in-process: life 自排回环) -> life_self_wake_node
 
 pull 范式：act 不再唤醒 world。life 做完一件事直接 insert_idempotent(ActPerformed)
 落 PG，world 醒来按游标批量 pull——所以 ActPerformed 没有任何 wire。
 
 旧 life tick / glimpse / schedule 生成的 wire 已在 world/life 重写中删除
 （life_tick / glimpse / daily_plan / sync_life_state）；voice 的整条 cron 链
-随 voice 子系统拆除删除。light/heavy reviewer 的 cron 保留。
+随 voice 子系统拆除删除；v4 记忆的 light/heavy review cron 线随旧记忆机器
+整体删除。
 """
 from __future__ import annotations
 
-from app.domain.life_dataflow import (
-    HeavyReviewRequest,
-    HeavyReviewTick,
-    LightDayTick,
-    LightNightTick,
-    LightReviewRequest,
-)
 from app.domain.world_events import EventArrived, event_knock_key
-from app.nodes.life_dataflow import (
-    _persona_dicts,
-    fan_out_heavy,
-    fan_out_light_day,
-    fan_out_light_night,
-    heavy_review_node,
-    light_review_node,
-)
 from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
 from app.runtime import Source, wire
 from app.world.engine import (
@@ -45,33 +28,12 @@ from app.world.engine import (
     world_tick,
 )
 
-TZ = "Asia/Shanghai"
-
 # world/life event 闭环攒批窗口：EventArrived 走 debounce 攒批唤醒 life，多条
 # 积压只醒一次。窗口决定"何时醒 / 攒多久"，绝不进世界内容决策（spec key
 # decision 2 的原语边界）。几秒窗口让同一轮里挤进来的多条 event 打成一批；
 # max_buffer 只是防积压溢出的安全阀（攒够这么多条立即触发一次，不无限等）。
 LIFE_WAKE_DEBOUNCE_SECONDS = 5
 LIFE_WAKE_DEBOUNCE_MAX_BUFFER = 20
-
-# Cron tick entry points — fan_out_xxx @node emits a per-persona-less
-# template Request; the wire from that Request to the business node
-# declares ``.fan_out_per(_persona_dicts)`` to expand it per persona
-# with built-in failure isolation between personas.
-wire(LightDayTick).from_(Source.cron("0,30 8-21 * * *", tz=TZ)).to(fan_out_light_day)
-wire(LightNightTick).from_(Source.cron("0 22,23,0,1,2,4,5,6,7 * * *", tz=TZ)).to(fan_out_light_night)
-wire(HeavyReviewTick).from_(Source.cron("0 3 * * *", tz=TZ)).to(fan_out_heavy)
-
-# Per-persona business (declarative fan-out replaces hand-rolled
-# ``_fan_out_per_persona`` loops; one persona failing does not abort
-# the others — guaranteed by emit._dispatch_fan_out's
-# asyncio.gather(return_exceptions=True)).
-wire(LightReviewRequest).fan_out_per(_persona_dicts).to(light_review_node)
-wire(HeavyReviewRequest).fan_out_per(_persona_dicts).to(heavy_review_node)
-
-# ---------------------------------------------------------------------------
-# world/life event 闭环 wiring。
-# ---------------------------------------------------------------------------
 
 # world 发动机两源同一入口（world_tick），但时间源不直接喂 WorldTick：
 #   1) 保底心跳：interval 每 10 分钟喂一条单字段 WorldHeartbeatTick（满足框架

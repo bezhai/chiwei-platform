@@ -24,9 +24,7 @@ from app.runtime.db import auto_tx, current_session
 __all__ = [
     "find_cross_chat_messages",
     "find_message_content",
-    "find_messages_in_range",
     "find_username",
-    "find_group_name",
     "find_group_download_permission",
     "find_message_by_id",
     "find_last_bot_reply_time",
@@ -176,27 +174,6 @@ async def find_message_content(message_id: str) -> str | None:
         return _content_json(row) if row else None
 
 
-async def find_messages_in_range(
-    chat_id: str,
-    start_time: int,
-    end_time: int,
-    limit: int = 2000,
-) -> list[CommonMessageRecord]:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return []
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonMessage)
-            .where(CommonMessage.common_conversation_id == chat_uuid)
-            .where(CommonMessage.event_time >= start_time)
-            .where(CommonMessage.event_time < end_time)
-            .order_by(CommonMessage.event_time.asc())
-            .limit(limit)
-        )
-        return [_record(row) for row in result.scalars().all()]
-
-
 async def find_username(user_id: str) -> str | None:
     user_uuid = _uuid(user_id)
     if user_uuid is None:
@@ -204,19 +181,6 @@ async def find_username(user_id: str) -> str | None:
     async with auto_tx():
         result = await current_session().execute(
             select(CommonUser.display_name).where(CommonUser.common_user_id == user_uuid)
-        )
-        return result.scalar_one_or_none()
-
-
-async def find_group_name(chat_id: str) -> str | None:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return None
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonConversation.display_name).where(
-                CommonConversation.common_conversation_id == chat_uuid
-            )
         )
         return result.scalar_one_or_none()
 

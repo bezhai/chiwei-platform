@@ -15,7 +15,7 @@ migrator does not own their schema and emits no DDL (no CREATE, no ALTER,
 no drop-check) regardless of what the existing schema looks like.
 
 Data classes with ``Meta.transient = True`` are never persisted to pg
-(they flow in-process to a non-durable Sink, e.g. a VectorStore). The
+(they flow in-process to a non-durable Sink). The
 migrator skips them entirely: no CREATE, no ALTER, no drop-check.
 """
 
@@ -146,8 +146,8 @@ def plan_migration(
         meta = getattr(cls, "Meta", None)
 
         # Transient Data never reaches pg — it flows in-process to a
-        # non-durable Sink (e.g. VectorStore). No CREATE, no ALTER, no
-        # drop-check; the class is invisible to the migrator.
+        # non-durable Sink. No CREATE, no ALTER, no drop-check; the
+        # class is invisible to the migrator.
         if meta and getattr(meta, "transient", False):
             continue
 

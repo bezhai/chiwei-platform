@@ -17,9 +17,9 @@
   1. **单飞锁**：整段「早退检查 → 眼睛 → 落库」包在 ``single_flight``
      （Redis SETNX，跨进程）里，key 按 (lane, date)。幂等 claim 必须在 LLM
      之前——``insert_idempotent`` 只保最终只有一份数据、保不了只烧一次眼睛：
-     同一钟点 tick 被 MQ 重复投递、或 agent-service 与 vectorize-worker 两个
-     进程都挂了该 dataflow 时，锁外的早退检查会让两个并发执行都读到「今天还
-     没有底料」、各烧一遍 agent token。锁冲突 = 持有方正在干活，静默 return
+     同一钟点 tick 被 MQ 重复投递、或多个进程都挂了该 dataflow 时，锁外的
+     早退检查会让两个并发执行都读到「今天还没有底料」、各烧一遍 agent
+     token。锁冲突 = 持有方正在干活，静默 return
      （若持有方失败，下一钟点 cron 自然重试，不在这里 raise / 重试循环）。
   2. **早退（锁内）**：跑眼睛之前先查当天底料（:func:`find_daily_materials`）——已
      存在直接 return，不烧 agent token。检查必须在锁内：锁外检查仍有并发窗口。

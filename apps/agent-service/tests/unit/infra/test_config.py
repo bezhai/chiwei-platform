@@ -33,8 +33,15 @@ class TestSettingsDefaults:
             assert s.postgres_host is None
             assert s.rabbitmq_url is None
             assert s.langfuse_public_key is None
-            assert s.qdrant_service_api_key is None
             assert s.lane is None
+
+    def test_qdrant_fields_removed(self):
+        """qdrant 已随 v4 记忆整机删除：settings 不再有任何 qdrant 字段。"""
+        from app.infra.config import Settings
+
+        names = Settings().field_names()
+        leftovers = [n for n in names if "qdrant" in n]
+        assert leftovers == []
 
     def test_default_int_fields(self):
         """Integer fields have correct defaults."""
@@ -43,7 +50,6 @@ class TestSettingsDefaults:
 
             s = Settings()
             assert s.postgres_port == 5432
-            assert s.qdrant_service_port == 6333
             assert s.main_server_timeout == 10
 
     def test_redis_port_defaults_to_6379(self):

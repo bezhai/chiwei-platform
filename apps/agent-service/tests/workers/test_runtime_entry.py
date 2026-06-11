@@ -34,7 +34,7 @@ def test_runtime_entry_main_calls_ensure_business_schema_before_runtime_run(monk
     """
     call_order = []
 
-    monkeypatch.setenv("APP_NAME", "vectorize-worker")
+    monkeypatch.setenv("APP_NAME", "sample-worker")
 
     async def track_ensure_calls():
         call_order.append("ensure_business_schema")

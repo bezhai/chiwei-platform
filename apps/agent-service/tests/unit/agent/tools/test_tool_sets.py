@@ -26,6 +26,17 @@ def test_chat_toolsets_drop_legacy_rag_tools():
     assert "commit_abstract_memory" not in names_all
 
 
+def test_notes_tools_removed_from_toolsets():
+    """v4 notes 工具链随整机删除：upsert/list/resolve/delete_note 不再注册。"""
+    from app.agent.tools import ALL_TOOLS, BASE_TOOLS
+
+    names = {t.definition.name for t in BASE_TOOLS} | {
+        t.definition.name for t in ALL_TOOLS
+    }
+    for tool_name in ("upsert_note", "list_note", "resolve_note", "delete_note"):
+        assert tool_name not in names, f"{tool_name} 应已随 v4 notes 删除"
+
+
 def test_world_tools_unaffected_by_chat_rag_removal():
     """world 工具集独立、不含两个旧 RAG 工具——删 chat 工具不应波及它。"""
     from app.world.tools import WORLD_TOOLS

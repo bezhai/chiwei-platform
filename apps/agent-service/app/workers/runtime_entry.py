@@ -43,8 +43,8 @@ def main() -> None:
     # APP_NAME picks the node subset this process serves. It MUST be
     # injected by PaaS per-Deployment — without it, ``Runtime`` would
     # fall back to ``DEFAULT_APP`` ("agent-service") and the worker
-    # would silently come up as the wrong runtime (e.g. a vectorize-
-    # worker pod running agent-service's node subset). Fail loud here.
+    # would silently come up as the wrong runtime (a worker pod running
+    # agent-service's node subset). Fail loud here.
     app_name = os.getenv("APP_NAME")
     if not app_name:
         raise RuntimeError(

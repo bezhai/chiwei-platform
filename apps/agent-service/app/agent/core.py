@@ -29,7 +29,7 @@ Usage::
     from app.agent.core import Agent, AgentConfig
     from app.agent.neutral import Message, Role
 
-    CFG = AgentConfig("afterthought_conversation", "offline-model", "afterthought")
+    CFG = AgentConfig("world_engine", "offline-model", "world-engine")
 
     result = await Agent(CFG).run(messages=[Message(role=Role.USER, content="hi")])
     text = result.text()

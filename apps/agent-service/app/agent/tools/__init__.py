@@ -9,7 +9,6 @@ Exports two tool lists:
 from app.agent.tools.delegation import deep_research
 from app.agent.tools.image import generate_image, read_images
 from app.agent.tools.image_search import search_images
-from app.agent.tools.notes import delete_note, list_note, resolve_note, upsert_note
 from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
 from app.agent.tools.skill import load_skill
@@ -20,10 +19,6 @@ BASE_TOOLS = [
     search_images,
     generate_image,
     read_images,
-    upsert_note,
-    list_note,
-    resolve_note,
-    delete_note,
 ]
 
 # All tools: only for the main agent.
@@ -42,10 +37,6 @@ __all__ = [
     "search_images",
     "generate_image",
     "read_images",
-    "upsert_note",
-    "list_note",
-    "resolve_note",
-    "delete_note",
     "deep_research",
     "load_skill",
     "sandbox_bash",

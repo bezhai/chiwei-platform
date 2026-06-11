@@ -304,16 +304,16 @@ class TestTurnTraceUnifiedName:
 
     def test_outside_turn_keeps_span_name_as_trace_name(self):
         """No turn → unchanged: update_trace=True still names the trace after the
-        span (afterthought / post-safety-without-turn become their own
+        span (world-engine / post-safety-without-turn become their own
         traces named after themselves)."""
         from app.agent import core
 
         client = MagicMock()
         with patch.object(core, "_get_trace_client", return_value=client):
-            with core._root_span(name="afterthought", input=[1], update_trace=True):
+            with core._root_span(name="world-engine", input=[1], update_trace=True):
                 pass
         kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == "afterthought"
+        assert kw["name"] == "world-engine"
         assert kw["input"] == [1]
 
     def test_outside_turn_no_update_when_update_trace_false(self):
@@ -395,10 +395,10 @@ class TestRootSpanSession:
 
         client = MagicMock()
         with patch.object(core, "_get_trace_client", return_value=client):
-            with core._root_span(name="afterthought", input=[1], update_trace=True):
+            with core._root_span(name="world-engine", input=[1], update_trace=True):
                 pass
         kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == "afterthought"
+        assert kw["name"] == "world-engine"
         assert kw["input"] == [1]
         assert kw.get("session_id") is None
 

@@ -1,7 +1,7 @@
 """LifeState — 某姐妹"此刻"的主观快照 (Task 3, life engine 三姐妹).
 
 赤尾世界里三姐妹（akao / chinagi / ayana）各自有一份主观快照：她现在在干嘛、
-什么情绪、活动类型 + 这份快照是何时观测到的。这是 chat / 整点语音 / reviewer
+什么情绪、活动类型 + 这份快照是何时观测到的。这是 chat / world / life
 读"她当前状态"的唯一来源。
 
 设计上钉死的两条：

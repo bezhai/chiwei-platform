@@ -170,7 +170,6 @@ async def _build_and_stream(
             channel=channel,
             chat_id=ctx.chat_id,
             message_id=message_id,
-            persona_id=bot_ctx.persona_id,
         )
 
     except Exception as e:
