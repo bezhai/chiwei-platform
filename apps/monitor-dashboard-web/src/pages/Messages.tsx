@@ -241,7 +241,7 @@ function renderMessageContent(content: unknown): string {
   return String(parsed);
 }
 
-function normalizeMessageContent(row: MessageRow) {
+function normalizeMessageContent(row: MessageRow): { displayText: string; structureData: unknown | null } {
   const parsed = parseMaybeJson(row.content);
   const displayText = nonEmptyString(row.content_text) || renderMessageContent(parsed);
 
@@ -411,7 +411,7 @@ export default function Messages() {
             <Button
               type="link"
               size="small"
-              style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: '#0f172a', fontWeight: 500 }}
+              style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: 'var(--ink)', fontWeight: 600 }}
               onClick={() => handleUserClick(record.user_id)}
             >
               {text}
@@ -450,7 +450,7 @@ export default function Messages() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div><strong>会话名称:</strong> {text}</div>
               <div>
-                <strong>会话 ID:</strong> <Text code style={{ background: '#f8fafc', border: 'none' }}>{record.chat_id}</Text>
+                <strong>会话 ID:</strong> <Text code>{record.chat_id}</Text>
                 <Button 
                   type="text" 
                   size="small" 
@@ -466,7 +466,7 @@ export default function Messages() {
               <Button 
                 type="link" 
                 size="small"
-                style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: '#0f172a', fontWeight: 500 }}
+                style={{ padding: 0, fontSize: 'inherit', height: 'auto', lineHeight: 'inherit', color: 'var(--ink)', fontWeight: 600 }}
                 onClick={() => handleChatClick(record.chat_id)}
               >
                 {text}
@@ -513,7 +513,7 @@ export default function Messages() {
           const popoverContent = (
             <div style={{ maxWidth: 400, maxHeight: 300, overflow: 'auto' }}>
               <div style={{ marginBottom: 8, whiteSpace: 'pre-wrap' }}>{displayText}</div>
-              {structureData && (
+              {Boolean(structureData) && (
                 <Button size="small" icon={<CopyOutlined />} onClick={handleCopyStructure}>
                   复制内容结构
                 </Button>
@@ -736,7 +736,7 @@ export default function Messages() {
           </Checkbox>
         ))}
       </Checkbox.Group>
-      <div style={{ marginTop: 12, borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
+      <div style={{ marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
         <Button type="link" size="small" onClick={handleResetColumns} style={{ padding: 0 }}>
           恢复默认
         </Button>
@@ -746,7 +746,6 @@ export default function Messages() {
 
   return (
     <div className="page-container">
-      {/* Reduced margin-bottom from default 24px to 16px to decrease gap */}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
           <h1 className="page-title" style={{ margin: 0 }}>消息记录</h1>
@@ -877,7 +876,7 @@ export default function Messages() {
         </Row>
       </div>
 
-      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="content-card ops-table-shell" style={{ padding: 0, overflow: 'hidden' }}>
         <Table
           rowKey="message_id"
           columns={columns}

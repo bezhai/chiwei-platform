@@ -102,7 +102,7 @@ export default function Providers() {
   };
 
   const columns: ColumnsType<Provider> = [
-    { title: '名称', dataIndex: 'name', width: 180, fixed: 'left', render: (text) => <Text strong style={{ color: '#0f172a' }}>{text}</Text> },
+    { title: '名称', dataIndex: 'name', width: 180, fixed: 'left', render: (text) => <Text strong style={{ color: 'var(--ink)' }}>{text}</Text> },
     { 
       title: '客户端类型', 
       dataIndex: 'client_type', 
@@ -161,7 +161,7 @@ export default function Providers() {
         </Button>
       </div>
       
-      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="content-card ops-table-shell" style={{ padding: 0, overflow: 'hidden' }}>
         <Table
           rowKey="provider_id"
           columns={columns}
@@ -174,13 +174,13 @@ export default function Providers() {
       </div>
       
       <Modal
-        title={<div style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}>{editing ? '编辑服务商' : '新建服务商'}</div>}
+        title={<div style={{ fontSize: 18, fontWeight: 600, color: 'var(--ink)' }}>{editing ? '编辑服务商' : '新建服务商'}</div>}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={handleOk}
         okText={editing ? '更新' : '创建'}
         cancelText="取消"
-        styles={{ content: { borderRadius: 16, padding: 24 } }}
+        styles={{ content: { borderRadius: 6, padding: 24 } }}
       >
         <Form layout="vertical" form={form} style={{ marginTop: 24 }}>
           <Form.Item

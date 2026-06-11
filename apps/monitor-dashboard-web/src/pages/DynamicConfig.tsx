@@ -178,8 +178,20 @@ export default function DynamicConfig() {
   ];
 
   return (
-    <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">动态配置</h1>
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
+            按泳道查看和覆盖运行时参数
+          </Text>
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+          新增配置
+        </Button>
+      </div>
+
+      <div className="filter-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Space>
           <Text strong>泳道：</Text>
           <Select
@@ -189,19 +201,18 @@ export default function DynamicConfig() {
             options={lanes.map((l) => ({ label: l, value: l }))}
           />
         </Space>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-          新增配置
-        </Button>
       </div>
 
-      <Table
-        dataSource={dataSource}
-        columns={columns}
-        loading={loading}
-        pagination={false}
-        size="middle"
-        rowKey="key"
-      />
+      <div className="content-card ops-table-shell" style={{ padding: 0, overflow: 'hidden' }}>
+        <Table
+          dataSource={dataSource}
+          columns={columns}
+          loading={loading}
+          pagination={false}
+          size="middle"
+          rowKey="key"
+        />
+      </div>
 
       <Modal
         title={editingKey ? `编辑 ${editingKey}` : '新增配置'}

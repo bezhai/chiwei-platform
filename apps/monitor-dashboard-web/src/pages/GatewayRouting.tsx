@@ -792,12 +792,12 @@ export default function GatewayRouting() {
 
       <Row gutter={[16, 16]} className="gateway-stats">
         <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
+          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
             <Statistic title="当前快照" value={`v${snapshot.version || 0}`} prefix={<HistoryOutlined />} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
+          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
             <Text type="secondary" className="gateway-stat-title">规则状态（总数 / 停用 / 启用）</Text>
             <div className="gateway-rule-status-counts">
               <span className="total">{rules.length}</span>
@@ -809,7 +809,7 @@ export default function GatewayRouting() {
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '18px 20px' }}>
+          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
             <Statistic title="最近变更" value={latestSnapshot ? formatTime(latestSnapshot.created_at) : '-'} />
           </Card>
         </Col>

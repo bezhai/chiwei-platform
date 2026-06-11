@@ -185,25 +185,9 @@ export default function DbMutations() {
           </Text>
         </div>
         <Tooltip title="刷新">
-          <div
-            onClick={fetchData}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '8px 16px',
-              background: '#fff',
-              borderRadius: 8,
-              cursor: 'pointer',
-              border: '1px solid #e2e8f0',
-              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-              transition: 'all 0.2s',
-            }}
-            className="hover-card"
-          >
-            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
-            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
-          </div>
+          <Button icon={<ReloadOutlined spin={loading} />} onClick={fetchData}>
+            刷新
+          </Button>
         </Tooltip>
       </div>
 
@@ -219,7 +203,7 @@ export default function DbMutations() {
         style={{ marginBottom: 16 }}
       />
 
-      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
+      <Card bordered={false} className="content-card ops-table-shell" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={data}
           columns={columns}
@@ -261,9 +245,9 @@ export default function DbMutations() {
               </Tag>
             </div>
             <pre style={{
-              background: '#f8fafc',
-              border: '1px solid #e2e8f0',
-              borderRadius: 8,
+              background: 'var(--panel-soft)',
+              border: '1px solid var(--line)',
+              borderRadius: 4,
               padding: 16,
               fontSize: 13,
               fontFamily: 'var(--font-mono)',

@@ -98,16 +98,16 @@ export default function ModelMappings() {
   };
 
   const columns: ColumnsType<ModelMapping> = [
-    { title: '别名', dataIndex: 'alias', width: 200, fixed: 'left', render: (text) => <Text strong style={{ color: '#0f172a' }}>{text}</Text> },
+    { title: '别名', dataIndex: 'alias', width: 200, fixed: 'left', render: (text) => <Text strong style={{ color: 'var(--ink)' }}>{text}</Text> },
     { title: '服务商', dataIndex: 'provider_name', width: 180, render: (text) => <Text type="secondary">{text}</Text> },
-    { title: '真实模型', dataIndex: 'real_model_name', width: 220, render: (text) => <Text code style={{ background: '#f8fafc', border: 'none' }}>{text}</Text> },
+    { title: '真实模型', dataIndex: 'real_model_name', width: 220, render: (text) => <Text code>{text}</Text> },
     { title: '描述', dataIndex: 'description', width: 200, ellipsis: true, render: (text) => <Text type="secondary">{text || '-'}</Text> },
     {
       title: '配置',
       dataIndex: 'model_config',
       width: 250,
       render: (value: Record<string, unknown>) =>
-        value ? <div style={{ maxHeight: 100, overflow: 'auto', fontSize: 12, fontFamily: 'var(--font-mono)', background: '#f8fafc', padding: 8, borderRadius: 6, border: '1px solid #e2e8f0' }}>{JSON.stringify(value, null, 2)}</div> : <Text type="secondary">-</Text>,
+        value ? <div style={{ maxHeight: 100, overflow: 'auto', fontSize: 12, fontFamily: 'var(--font-mono)', background: 'var(--panel-soft)', padding: 8, borderRadius: 4, border: '1px solid var(--line)' }}>{JSON.stringify(value, null, 2)}</div> : <Text type="secondary">-</Text>,
     },
     {
       title: '操作',
@@ -140,7 +140,7 @@ export default function ModelMappings() {
         </Button>
       </div>
 
-      <div className="content-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="content-card ops-table-shell" style={{ padding: 0, overflow: 'hidden' }}>
         <Table 
           rowKey="id" 
           columns={columns} 
@@ -153,14 +153,14 @@ export default function ModelMappings() {
       </div>
 
       <Modal
-        title={<div style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}>{editing ? '编辑映射' : '新建映射'}</div>}
+        title={<div style={{ fontSize: 18, fontWeight: 600, color: 'var(--ink)' }}>{editing ? '编辑映射' : '新建映射'}</div>}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={handleOk}
         okText={editing ? '更新' : '创建'}
         cancelText="取消"
         width={680}
-        styles={{ content: { borderRadius: 16, padding: 24 } }}
+        styles={{ content: { borderRadius: 6, padding: 24 } }}
       >
         <Form layout="vertical" form={form} style={{ marginTop: 24 }}>
           <Form.Item
@@ -188,12 +188,12 @@ export default function ModelMappings() {
             <Input placeholder="例如: gpt-4o-mini-2024-07-18" size="large" />
           </Form.Item>
           <Form.Item name="description" label={<Text strong>描述</Text>}>
-            <Input.TextArea rows={3} placeholder="备注说明" style={{ background: '#f8fafc', borderColor: '#e2e8f0' }} />
+            <Input.TextArea rows={3} placeholder="备注说明" style={{ background: 'var(--panel-soft)', borderColor: 'var(--line)' }} />
           </Form.Item>
           <Form.Item name="model_config" label={<Text strong>模型配置 (JSON)</Text>} tooltip="覆盖模型默认参数">
             <Input.TextArea
               rows={6}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 13, background: '#f8fafc', borderColor: '#e2e8f0' }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 13, background: 'var(--panel-soft)', borderColor: 'var(--line)' }}
               placeholder={`{
   "temperature": 0.7,
   "max_tokens": 1000

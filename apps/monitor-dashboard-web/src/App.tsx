@@ -133,7 +133,6 @@ export default function App() {
   const currentPath = location.pathname;
   // @ts-ignore
   const pageTitle = menuItems.find(item => item.key === currentPath)?.label || 'Dashboard';
-  const primaryColor = themeConfig.token?.colorPrimary as string;
   const siderWidth = collapsed ? 80 : 240;
   const pageLoadingFallback = (
     <div className="route-loading-shell">
@@ -147,67 +146,49 @@ export default function App() {
   const navigationMenu = (
     <Menu
       mode="inline"
+      theme="dark"
       selectedKeys={[currentPath]}
       // @ts-ignore
       items={menuItems}
       onClick={({ key }) => {
         navigateWithLane(String(key));
       }}
-      style={{ borderRight: 0, padding: '16px 0', background: 'transparent' }}
+      style={{ borderRight: 0, background: 'transparent' }}
     />
   );
 
   const brand = (
     <div
-      className="app-logo"
-      style={{
-        height: 64,
-        display: 'flex',
-        alignItems: 'center',
-        padding: '0 24px',
-        justifyContent: collapsed && !isMobile ? 'center' : 'flex-start',
-        borderBottom: '1px solid #f1f5f9'
-      }}
+      className={`app-logo ${collapsed && !isMobile ? 'collapsed' : ''}`}
     >
-      <div style={{
-        width: 32,
-        height: 32,
-        background: `linear-gradient(135deg, #38bdf8, ${primaryColor})`,
-        borderRadius: 8,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginRight: collapsed && !isMobile ? 0 : 12,
-        color: '#fff',
-        fontWeight: 'bold',
-        fontSize: 20,
-        flexShrink: 0,
-        boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.3)'
-      }}>🔭</div>
+      <div className="brand-mark">CW</div>
       {(!collapsed || isMobile) && (
-        <Text strong style={{ fontSize: 18, color: '#0f172a' }}>赤尾观测中心</Text>
+        <div className="brand-copy">
+          <span className="brand-name">赤尾观测</span>
+          <span className="brand-scope">ops console</span>
+        </div>
       )}
     </div>
   );
 
   return (
     <ConfigProvider theme={themeConfig} locale={zhCN}>
-      <Layout className="app-shell" style={{ minHeight: '100vh' }}>
+      <Layout className="app-shell">
         {!isMobile && (
           <Sider
             width={240}
-            theme="light"
+            theme="dark"
             className="app-sider"
             collapsible
             collapsed={collapsed}
             trigger={null}
             style={{
-              borderRight: '1px solid #e2e8f0',
               position: 'fixed',
               left: 0,
               top: 0,
               bottom: 0,
               zIndex: 10,
+              borderRight: '1px solid #0e130f',
             }}
           >
             {brand}
@@ -221,7 +202,7 @@ export default function App() {
             closable={false}
             open={mobileNavOpen}
             onClose={() => setMobileNavOpen(false)}
-            bodyStyle={{ padding: 0 }}
+            bodyStyle={{ padding: 0, background: '#151b17' }}
             width={280}
           >
             {brand}
@@ -229,21 +210,8 @@ export default function App() {
           </Drawer>
         )}
         <Layout style={{ marginLeft: isMobile ? 0 : siderWidth, transition: 'all 0.2s' }}>
-          <Header style={{
-            padding: isMobile ? '0 16px' : '0 24px',
-            height: isMobile ? 64 : 72,
-            lineHeight: 'normal',
-            background: 'rgba(255, 255, 255, 0.8)',
-            backdropFilter: 'blur(8px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            borderBottom: '1px solid #f1f5f9',
-            position: 'sticky',
-            top: 0,
-            zIndex: 9
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center' }}>
+          <Header className="app-header">
+            <div className="app-header-left">
               <Button
                 type="text"
                 icon={isMobile || collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
@@ -254,31 +222,30 @@ export default function App() {
                   }
                   setCollapsed(!collapsed);
                 }}
-                style={{ fontSize: '16px', width: 32, height: 32, marginRight: 16 }}
+                className="nav-toggle"
               />
               <div>
-                <Text strong style={{ fontSize: 18, color: '#0f172a', display: 'block', lineHeight: 1.2, marginBottom: isMobile ? 0 : 2 }}>
-                  {pageTitle}
-                </Text>
+                {!isMobile && <span className="header-kicker">dashboard / {currentPath === '/' ? 'service-status' : currentPath.slice(1)}</span>}
+                <span className="header-title">{pageTitle}</span>
                 {!isMobile && (
                   <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.2, display: 'block' }}>
-                    统一监控、检索与运维操作台
+                    {getLane() ? `lane context: ${getLane()}` : 'prod context'}
                   </Text>
                 )}
               </div>
             </div>
 
             <Space size={isMobile ? 8 : 16}>
-              {getLane() && <Tag color="blue" style={{ marginInlineEnd: 0 }}>{getLane()}</Tag>}
+              {getLane() && <Tag className="lane-tag">{getLane()}</Tag>}
               <Dropdown menu={userMenu} placement="bottomRight">
-                <Space style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: 6 }} className="user-dropdown">
-                  <Avatar icon={<UserOutlined />} style={{ backgroundColor: primaryColor }} size="small" />
+                <Space className="user-dropdown">
+                  <Avatar icon={<UserOutlined />} style={{ backgroundColor: 'var(--primary)' }} size="small" />
                   {!isMobile && <Text strong style={{ fontSize: 14 }}>Admin</Text>}
                 </Space>
               </Dropdown>
             </Space>
           </Header>
-          <Content style={{ padding: isMobile ? '16px' : '24px', minHeight: 280, maxWidth: 1600, margin: '0 auto', width: '100%' }}>
+          <Content className="app-content">
             <AuthGuard>
               <Suspense fallback={pageLoadingFallback}>
                 <Routes>

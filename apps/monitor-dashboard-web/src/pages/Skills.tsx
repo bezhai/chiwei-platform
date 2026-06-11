@@ -215,12 +215,7 @@ export default function Skills() {
             dataSource={skills}
             renderItem={(skill) => (
               <List.Item
-                style={{
-                  padding: '10px 16px',
-                  cursor: 'pointer',
-                  background: selectedSkill?.name === skill.name ? '#f0f7ff' : undefined,
-                  borderLeft: selectedSkill?.name === skill.name ? '3px solid #2563eb' : '3px solid transparent',
-                }}
+                className={`skill-list-item ${selectedSkill?.name === skill.name ? 'active' : ''}`}
                 onClick={() => selectSkill(skill)}
                 actions={[
                   <Popconfirm

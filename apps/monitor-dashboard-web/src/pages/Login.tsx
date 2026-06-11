@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Button, Form, Input, message, Typography, Space } from 'antd';
+import { Button, Form, Input, message, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
-import { LockOutlined, ArrowRightOutlined, CheckCircleFilled } from '@ant-design/icons';
+import { LockOutlined, ArrowRightOutlined } from '@ant-design/icons';
 import { api, setToken } from '../api/client';
 
 const { Text } = Typography;
@@ -29,45 +29,47 @@ export default function Login() {
       <div className="login-left">
         <div className="brand-section">
           <div className="brand-logo">
-            <div className="brand-icon">
-              <span style={{ fontSize: 24 }}>🔭</span>
-            </div>
-            <span className="brand-text">赤尾观测中心</span>
+            <div className="brand-icon">CW</div>
+            <span className="brand-text">赤尾观测</span>
           </div>
 
           <div className="hero-text-container">
             <div className="hero-title">
-              全域观测<br />
-              尽在掌握
+              Operator<br />
+              Console
             </div>
             <div className="hero-subtitle">
-              针对 Inner Bot 基础设施的综合监控、实时分析与高级控制中心。
+              dashboard-web / protected control surface
             </div>
           </div>
         </div>
 
         <div className="testimonial">
-          <Space align="start" size={16}>
-            <CheckCircleFilled style={{ color: '#10b981', fontSize: 24, marginTop: 4 }} />
-            <div>
-              <div style={{ fontWeight: 600, color: '#0f172a', marginBottom: 4, fontSize: 15 }}>
-                系统运转正常
-              </div>
-              <div style={{ color: '#64748b', fontSize: 13, lineHeight: 1.5 }}>
-                所有服务节点状态良好
-                <br />
-                最近检查: 刚刚
-              </div>
+          <div className="ops-status-grid">
+            <div className="ops-status-row">
+              <span className="ops-status-label">scope</span>
+              <span className="ops-status-value">monitor-dashboard</span>
+              <span className="ops-status-pill">guarded</span>
             </div>
-          </Space>
+            <div className="ops-status-row">
+              <span className="ops-status-label">route</span>
+              <span className="ops-status-value">/dashboard/api</span>
+              <span className="ops-status-pill">jwt</span>
+            </div>
+            <div className="ops-status-row">
+              <span className="ops-status-label">surface</span>
+              <span className="ops-status-value">ops / audit / config / gateway</span>
+              <span className="ops-status-pill">admin</span>
+            </div>
+          </div>
         </div>
       </div>
 
       <div className="login-right">
         <div className="login-form-wrapper">
           <div className="form-header">
-            <div className="form-title">欢迎回来</div>
-            <div className="form-subtitle">请输入管理员密码以继续访问控制台。</div>
+            <div className="form-title">管理员认证</div>
+            <div className="form-subtitle">Chiwei Observation Console</div>
           </div>
 
           <Form
@@ -78,11 +80,11 @@ export default function Login() {
           >
             <Form.Item
               name="password"
-              label={<span style={{ fontWeight: 600, fontSize: 13, color: '#334155' }}>管理密码</span>}
+              label={<span style={{ fontWeight: 600, fontSize: 13, color: 'var(--ink-soft)' }}>管理密码</span>}
               rules={[{ required: true, message: '请输入密码' }]}
             >
               <Input.Password
-                prefix={<LockOutlined style={{ color: '#94a3b8', fontSize: 16 }} />}
+                prefix={<LockOutlined style={{ color: 'var(--muted)', fontSize: 16 }} />}
                 placeholder="请输入密码"
                 className="custom-input"
               />
@@ -103,7 +105,7 @@ export default function Login() {
 
           <div style={{ marginTop: 40, textAlign: 'center' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              &copy; {new Date().getFullYear()} Chiwei Observation Center. All rights reserved.
+              dashboard-web / {new Date().getFullYear()}
             </Text>
           </div>
         </div>
