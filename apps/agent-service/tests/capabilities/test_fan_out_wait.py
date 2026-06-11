@@ -6,7 +6,6 @@ hand-rolled ``asyncio.gather(... return_exceptions=True)`` +
 ``asyncio.wait_for(...)`` patterns in:
 
 * ``app/chat/_context_images.py`` (homogeneous list, no timeout)
-* ``app/life/schedule.py`` (heterogeneous list, no timeout)
 * ``app/nodes/safety.py`` (3 LLM checks, 20s total timeout)
 
 Behaviour contract pinned here:
@@ -31,7 +30,6 @@ from typing import Any
 import pytest
 
 from app.capabilities.concurrency import fan_out_wait
-
 
 # ---------------------------------------------------------------------------
 # Helpers

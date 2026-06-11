@@ -8,26 +8,12 @@ Public surface:
 """
 
 from app.agent.core import Agent, AgentConfig
-from app.agent.embedding import (
-    HybridEmbedding,
-    InstructionBuilder,
-    Modality,
-    SparseVector,
-    embed_dense,
-    embed_hybrid,
-)
 from app.agent.image_gen import generate_image
 from app.agent.prompts import get_prompt
 
 __all__ = [
     "Agent",
     "AgentConfig",
-    "HybridEmbedding",
-    "InstructionBuilder",
-    "Modality",
-    "SparseVector",
-    "embed_dense",
-    "embed_hybrid",
     "generate_image",
     "get_prompt",
 ]

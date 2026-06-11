@@ -6,7 +6,7 @@ Capabilities sit above the runtime — having the runtime depend on a
 capability would invert the dependency direction.
 
 Idiom:
-    async with single_flight(f"drift:{chat}:{persona}", ttl=600):
+    async with single_flight(f"daily_fetch:{lane}:{date}", ttl=900):
         await _do_work()
 
 **语义**：ttl 时间窗内 single-flight，**不是任务存活期严格互斥**。

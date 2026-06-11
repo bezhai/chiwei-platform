@@ -25,7 +25,6 @@ dependencies = [
     "platformdirs>=4.3.8",
     "pydantic-settings>=2.10.1",
     "python-json-logger>=3.3.0",
-    "qdrant-client>=1.14.3",
     "redis>=6.2.0",
     "requests>=2.32.4",
     "setuptools>=80.9.0",
@@ -42,6 +41,7 @@ dependencies = [
     "prometheus-client>=0.21.0",
     "croniter>=6.2.2",
     "uuid6>=2025.0.1",
+    "cnlunar>=0.2.4",
 ]
 
 [project.optional-dependencies]

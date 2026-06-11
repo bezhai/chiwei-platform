@@ -7,8 +7,8 @@ Model:
 
 Usage::
 
-    bind(worker_node).to_app("vectorize-worker")
-    nodes_for_app("vectorize-worker")  # -> {worker_node}
+    bind(worker_node).to_app("some-worker")
+    nodes_for_app("some-worker")       # -> {worker_node}
     nodes_for_app("agent-service")     # -> every unbound @node + any bound to "agent-service"
 """
 

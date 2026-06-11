@@ -26,13 +26,101 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import cache
 from typing import Any
 
+from pydantic import TypeAdapter
 from sqlalchemy import text
 
 from app.data.session import get_session
 from app.runtime.data import Data, dedup_fields, key_fields, version_field
 from app.runtime.migrator import _table_name
+from app.runtime.schema_types import is_jsonb_column
+
+
+def _jsonb_columns(cls: type[Data]) -> frozenset[str]:
+    """Names of fields whose declared annotation maps to a JSONB column.
+
+    Reuses the runtime's annotation→pg-type judgement (:func:`is_jsonb_column`,
+    which unwraps ``Optional[X]`` and recognizes ``dict`` / ``list`` /
+    structured origins as ``JSONB``) so the write side and the table-creation
+    side (``migrator``) agree on which columns are JSONB by construction.
+    Decided on the *declared* type, never the runtime value — an
+    ``Optional[dict]=None``, a nested pydantic model, or a dict subclass must
+    still take the JSONB path the column was built for.
+    """
+    return frozenset(
+        name
+        for name, fi in cls.model_fields.items()
+        if is_jsonb_column(fi)
+    )
+
+
+@cache
+def _field_adapter(cls: type[Data], col: str) -> TypeAdapter[Any]:
+    """Per-field ``TypeAdapter`` built from the field's declared annotation.
+
+    Serializing each JSONB column through its *own* annotation (rather than
+    the whole object) keeps scalar fields out of serialization entirely and
+    makes nested pydantic models / datetimes inside the JSONB value follow
+    pydantic's rules. Cached on ``(cls, col)`` because TypeAdapter construction
+    compiles a serializer and is not free to build per write.
+    """
+    return TypeAdapter(cls.model_fields[col].annotation)
+
+
+def _bind_value_sql(col: str, jsonb_cols: frozenset[str]) -> str:
+    """The VALUES fragment for ``col``: ``CAST(:col AS jsonb)`` for JSONB,
+    else a bare ``:col`` placeholder.
+
+    asyncpg binds ``text()`` params without column-type context, so a dict /
+    list bound at a JSONB column raises ``DataError``. The explicit ``CAST``
+    tells postgres the target type and lets us bind the json *text* produced
+    below in :func:`_encode_params`.
+    """
+    return f"CAST(:{col} AS jsonb)" if col in jsonb_cols else f":{col}"
+
+
+def _encode_params(
+    obj: Data,
+    cols_map: dict[str, Any],
+    jsonb_cols: frozenset[str],
+) -> dict[str, Any]:
+    """Return a params map where JSONB columns carry json *text*.
+
+    Each JSONB column is serialized **on its own**, through a TypeAdapter
+    built from that field's declared annotation
+    (:func:`_field_adapter`), so nested pydantic models / datetimes inside
+    the value follow pydantic's json rules. The result is bound at
+    ``CAST(:col AS jsonb)``.
+
+    Scalar columns (incl. ``datetime`` / ``date`` / ``bytes`` / the
+    runtime-managed ``dedup_hash``) never touch serialization at all — their
+    native Python value asyncpg already maps correctly. We deliberately do
+    **not** dump the whole object: a blanket ``model_dump`` would (a) stringify
+    scalar datetimes / bytes and break their bindings, and (b) raise on a
+    non-JSON-safe scalar (e.g. non-UTF-8 ``bytes``) even when no JSONB field is
+    at fault.
+
+    Serialization is fail-fast and per-field: a non-JSON-safe value in a JSONB
+    field raises here, naming the Data class and the specific field, with no
+    fallback or placeholder.
+    """
+    if not jsonb_cols:
+        return cols_map
+    cls = type(obj)
+    out = dict(cols_map)
+    for col in jsonb_cols:
+        if col not in out:
+            continue
+        try:
+            out[col] = _field_adapter(cls, col).dump_json(out[col]).decode()
+        except Exception as exc:
+            raise ValueError(
+                f"{cls.__name__}.{col}: value is not JSON-serializable "
+                f"for the JSONB column ({exc})"
+            ) from exc
+    return out
 
 
 def _dedup_hash(obj: Data) -> str:
@@ -104,13 +192,14 @@ async def insert_append(obj: Data) -> int:
         hashed = cls.model_construct(**cols_map)
         cols_map["dedup_hash"] = _dedup_hash(hashed)
 
+        jsonb_cols = _jsonb_columns(cls)
         cols = list(cols_map.keys())
-        placeholders = ", ".join(f":{c}" for c in cols)
+        placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
         sql = (
             f"INSERT INTO {table} ({', '.join(cols)}) "
             f"VALUES ({placeholders})"
         )
-        await s.execute(text(sql), cols_map)
+        await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
     return 1
 
 
@@ -139,15 +228,16 @@ async def insert_idempotent(obj: Data) -> int:
     if not dedup_col:
         cols_map["dedup_hash"] = _dedup_hash(obj)
 
+    jsonb_cols = _jsonb_columns(cls)
     cols = list(cols_map.keys())
-    placeholders = ", ".join(f":{c}" for c in cols)
+    placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
     conflict_target = dedup_col or "dedup_hash"
     sql = (
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT ({conflict_target}) DO NOTHING RETURNING 1"
     )
     async with get_session() as s:
-        r = await s.execute(text(sql), cols_map)
+        r = await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
         return len(r.fetchall())
 
 

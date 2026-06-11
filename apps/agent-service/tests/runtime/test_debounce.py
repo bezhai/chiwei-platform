@@ -1,10 +1,11 @@
 import json
 from contextlib import asynccontextmanager
+from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.domain.memory_triggers import DriftTrigger
+from app.runtime.data import Data, Key
 from app.runtime.debounce import (
     _DEFAULT_TTL_SECONDS,
     DebounceReschedule,
@@ -15,6 +16,17 @@ from app.runtime.debounce import (
 )
 from app.runtime.node import _NODE_META, NODE_REGISTRY, node
 from app.runtime.wire import WireSpec
+
+
+class SampleTrigger(Data):
+    """本测试的样例 transient Data（原 DriftTrigger 已随 voice 子系统拆除，
+    这里只测 debounce 机制本身，与业务无关）。"""
+
+    chat_id: Annotated[str, Key]
+    persona_id: str
+
+    class Meta:
+        transient = True
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +43,7 @@ def _node_registry_isolation():
     _NODE_META.update(meta_snapshot)
 
 
-async def _drift_check_stub(t: DriftTrigger) -> None:
+async def _sample_check_stub(t: SampleTrigger) -> None:
     return None
 
 
@@ -41,23 +53,23 @@ def test_default_ttl_is_24h():
 
 def test_route_for_uses_lane_fallback_false():
     spec = WireSpec(
-        data_type=DriftTrigger,
-        consumers=[_drift_check_stub],
+        data_type=SampleTrigger,
+        consumers=[_sample_check_stub],
         debounce={"seconds": 60, "max_buffer": 5},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
     )
-    route = _route_for(spec, _drift_check_stub)
-    assert route.queue == "debounce_drift_trigger__drift_check_stub"
-    assert route.rk == "debounce.drift_trigger.__drift_check_stub" or \
-           route.rk == "debounce.drift_trigger._drift_check_stub"
+    route = _route_for(spec, _sample_check_stub)
+    assert route.queue == "debounce_sample_trigger__sample_check_stub"
+    assert route.rk == "debounce.sample_trigger.__sample_check_stub" or \
+           route.rk == "debounce.sample_trigger._sample_check_stub"
     assert route.lane_fallback is False
 
 
 def test_debounce_reschedule_carries_data():
-    t = DriftTrigger(chat_id="c1", persona_id="p1")
+    t = SampleTrigger(chat_id="c1", persona_id="p1")
     exc = DebounceReschedule(t)
     assert exc.data == t
-    assert "DriftTrigger" in str(exc)
+    assert "SampleTrigger" in str(exc)
 
 
 def test_no_module_level_reschedule_function():
@@ -69,10 +81,10 @@ def test_no_module_level_reschedule_function():
 
 def _make_wire():
     return WireSpec(
-        data_type=DriftTrigger,
-        consumers=[_drift_check_stub],
+        data_type=SampleTrigger,
+        consumers=[_sample_check_stub],
         debounce={"seconds": 60, "max_buffer": 3},
-        debounce_key_by=lambda e: f"drift:{e.chat_id}:{e.persona_id}",
+        debounce_key_by=lambda e: f"sample:{e.chat_id}:{e.persona_id}",
     )
 
 
@@ -89,13 +101,13 @@ async def test_publish_debounce_single_event(monkeypatch):
                         MagicMock(publish=fake_publish))
 
     w = _make_wire()
-    await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, _sample_check_stub, SampleTrigger(chat_id="c1", persona_id="p1"))
 
     fake_redis.eval.assert_awaited_once()
     args = fake_redis.eval.call_args
     assert args.args[1] == 2  # numkeys
-    assert "debounce:latest:DriftTrigger:drift:c1:p1" in args.args
-    assert "debounce:count:DriftTrigger:drift:c1:p1" in args.args
+    assert "debounce:latest:SampleTrigger:sample:c1:p1" in args.args
+    assert "debounce:count:SampleTrigger:sample:c1:p1" in args.args
     assert 86400 in args.args
     assert 3 in args.args
 
@@ -104,7 +116,7 @@ async def test_publish_debounce_single_event(monkeypatch):
     body = pub_args.args[1]
     assert body["fire_now"] is False
     assert body["data"] == {"chat_id": "c1", "persona_id": "p1"}
-    assert body["key"] == "drift:c1:p1"
+    assert body["key"] == "sample:c1:p1"
     assert pub_args.kwargs["delay_ms"] == 60_000
 
 
@@ -122,7 +134,7 @@ async def test_publish_debounce_max_buffer_triggers_fire_now(monkeypatch):
                         MagicMock(publish=fake_publish))
 
     w = _make_wire()
-    await publish_debounce(w, _drift_check_stub, DriftTrigger(chat_id="c1", persona_id="p1"))
+    await publish_debounce(w, _sample_check_stub, SampleTrigger(chat_id="c1", persona_id="p1"))
 
     pub_args = fake_publish.call_args
     body = pub_args.args[1]
@@ -143,8 +155,8 @@ async def test_do_reschedule_cas_swap_success(monkeypatch):
                         MagicMock(publish=fake_publish))
 
     w = _make_wire()
-    data = DriftTrigger(chat_id="c1", persona_id="p1")
-    await _do_reschedule(w, _drift_check_stub, data, trigger_id_orig="orig-123")
+    data = SampleTrigger(chat_id="c1", persona_id="p1")
+    await _do_reschedule(w, _sample_check_stub, data, trigger_id_orig="orig-123")
 
     fake_redis.eval.assert_awaited_once()
     fake_publish.assert_awaited_once()
@@ -166,8 +178,8 @@ async def test_do_reschedule_cas_swap_failure_noop(monkeypatch):
                         MagicMock(publish=fake_publish))
 
     w = _make_wire()
-    data = DriftTrigger(chat_id="c1", persona_id="p1")
-    await _do_reschedule(w, _drift_check_stub, data, trigger_id_orig="orig-123")
+    data = SampleTrigger(chat_id="c1", persona_id="p1")
+    await _do_reschedule(w, _sample_check_stub, data, trigger_id_orig="orig-123")
 
     fake_redis.eval.assert_awaited_once()
     fake_publish.assert_not_awaited()
@@ -206,13 +218,13 @@ def _make_message(trigger_id, data, key, fire_now=False, headers=None):
     }
     return _FakeMessage(
         body=json.dumps(body).encode("utf-8"),
-        headers=headers or {"trace_id": "tr-1", "lane": "", "data_type": "DriftTrigger"},
+        headers=headers or {"trace_id": "tr-1", "lane": "", "data_type": "SampleTrigger"},
     )
 
 
 def _make_handler_wire(consumer):
     return WireSpec(
-        data_type=DriftTrigger,
+        data_type=SampleTrigger,
         consumers=[consumer],
         debounce={"seconds": 60, "max_buffer": 3},
         debounce_key_by=lambda e: f"k:{e.chat_id}",
@@ -230,7 +242,7 @@ async def test_handler_atomic_claim_success_runs_consumer_then_conditional_del(m
     consumer_called: list = []
 
     @node
-    async def consumer(trigger: DriftTrigger) -> None:
+    async def consumer(trigger: SampleTrigger) -> None:
         consumer_called.append(trigger)
 
     w = _make_handler_wire(consumer)
@@ -256,7 +268,7 @@ async def test_handler_stale_trigger_id_drops(monkeypatch):
     consumer_called: list = []
 
     @node
-    async def consumer(trigger: DriftTrigger) -> None:
+    async def consumer(trigger: SampleTrigger) -> None:
         consumer_called.append(trigger)
 
     w = _make_handler_wire(consumer)
@@ -282,7 +294,7 @@ async def test_handler_fire_now_still_runs_atomic_claim(monkeypatch):
     consumer_called: list = []
 
     @node
-    async def consumer(trigger: DriftTrigger) -> None:
+    async def consumer(trigger: SampleTrigger) -> None:
         consumer_called.append(trigger)
 
     w = _make_handler_wire(consumer)
@@ -306,7 +318,7 @@ async def test_handler_consumer_raises_skips_conditional_del(monkeypatch):
                         AsyncMock(return_value=fake_redis))
 
     @node
-    async def consumer(trigger: DriftTrigger) -> None:
+    async def consumer(trigger: SampleTrigger) -> None:
         raise RuntimeError("boom")
 
     w = _make_handler_wire(consumer)
@@ -335,10 +347,10 @@ async def test_handler_consumer_raises_debounce_reschedule_runs_do_reschedule(mo
     monkeypatch.setattr("app.runtime.debounce.mq",
                         MagicMock(publish=fake_publish))
 
-    new_data = DriftTrigger(chat_id="c1", persona_id="p1")
+    new_data = SampleTrigger(chat_id="c1", persona_id="p1")
 
     @node
-    async def consumer(trigger: DriftTrigger) -> None:
+    async def consumer(trigger: SampleTrigger) -> None:
         raise DebounceReschedule(new_data)
 
     w = _make_handler_wire(consumer)
@@ -375,13 +387,13 @@ async def test_start_debounce_consumers_filters_by_app_name(monkeypatch):
     clear_bindings()
 
     @node
-    async def my_drift_check(t: DriftTrigger) -> None:
+    async def my_sample_check(t: SampleTrigger) -> None:
         return None
 
-    wire(DriftTrigger).debounce(
+    wire(SampleTrigger).debounce(
         seconds=60, max_buffer=5,
         key_by=lambda e: f"k:{e.chat_id}",
-    ).to(my_drift_check)
+    ).to(my_sample_check)
 
     fake_mq = MagicMock()
     fake_mq.connect = AsyncMock()

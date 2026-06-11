@@ -1,7 +1,7 @@
 """Agent execution helpers used by the chat dataflow node.
 
 ``_build_and_stream`` builds the agent context (history, persona, inner
-context, voice) and drives ``Agent.stream`` for a single chat request,
+context) and drives ``Agent.stream`` for a single chat request,
 yielding decoded text fragments and split markers.
 
 Extracted from the deleted ``app.chat.pipeline`` module during Phase 5a
@@ -36,7 +36,7 @@ from app.chat.stream import (
     is_content_filter,
     is_length_truncated,
 )
-from app.data.queries import find_latest_reply_style, resolve_persona_id
+from app.data.queries import resolve_persona_id
 from app.memory._persona import load_persona
 from app.memory.context import build_inner_context
 
@@ -114,9 +114,6 @@ async def _build_and_stream(
     except Exception as e:
         logger.error("Failed to build inner context: %s", e)
 
-    # Voice
-    prompt_vars["voice_content"] = bot_ctx.voice_content
-
     # Create agent and stream
     from dataclasses import replace as _replace
 
@@ -173,7 +170,6 @@ async def _build_and_stream(
             channel=channel,
             chat_id=ctx.chat_id,
             message_id=message_id,
-            persona_id=bot_ctx.persona_id,
         )
 
     except Exception as e:
@@ -193,20 +189,18 @@ async def _build_and_stream(
 class _BotCtx:
     """Lightweight bot context container (no class hierarchy, just data)."""
 
-    __slots__ = ("persona_id", "identity", "appearance", "voice_content", "_persona")
+    __slots__ = ("persona_id", "identity", "appearance", "_persona")
 
     def __init__(
         self,
         persona_id: str,
         identity: str,
         appearance: str,
-        voice_content: str,
         persona: object | None,
     ) -> None:
         self.persona_id = persona_id
         self.identity = identity
         self.appearance = appearance
-        self.voice_content = voice_content
         self._persona = persona
 
     def error_message(self, kind: str) -> str:
@@ -224,7 +218,7 @@ async def _load_bot_context(
     chat_id: str,
     chat_type: str,
 ) -> _BotCtx:
-    """Load persona data and voice content, return a lightweight context."""
+    """Load persona data, return a lightweight context."""
     if persona_id:
         pid = persona_id
     else:
@@ -232,12 +226,9 @@ async def _load_bot_context(
 
     pc = await load_persona(pid)
 
-    voice_content = await find_latest_reply_style(pid) or ""
-
     return _BotCtx(
         persona_id=pid,
         identity=pc.persona_lite,
         appearance=pc.appearance_detail,
-        voice_content=voice_content,
         persona=pc,
     )

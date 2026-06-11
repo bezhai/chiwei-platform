@@ -42,7 +42,7 @@ in the dataflow runtime:
          they leave this off.
 
     What it does **not** do: ``ensure_business_schema``,
-    ``init_collections`` (Qdrant), ``migrate_schema``, ``start_consumers``,
+    ``migrate_schema``, ``start_consumers``,
     ``start_source_loops``. Those depend on resources / Runtime state
     that the entrypoint owns. ``prepare_for_run`` is only the part
     that's identical in both entries — keeping the rest at the call

@@ -1,72 +1,139 @@
-"""Memory context builder v4 — assemble always-on + conditional sections.
+"""Inner-context builder — what chat feeds 赤尾 each turn.
 
-Sections (order matters for prompt flow):
-  1. Scene (p2p/group/proactive)
-  2. Life state (current activity + mood)
-  3. Today schedule
-  4. Self abstracts (subject='self')
-  5. User abstracts (subject='user:<id>' / 和 X 的关系)  — skipped if no trigger_user
-  6. Active notes
-  7. Cross-chat (user-centric raw msgs)  — skipped if no trigger_user
-  8. Short-term fragments (§2.8)
-  9. Recall index (counts + recent titles)
+Sections, in order:
+  1. World-arc awareness (only when the arc exists) — the public life stage
+     this family has reached (WorldArc), rendered first-person by
+     ``render_arc_awareness``. Leads the block because it changes on a
+     day/week clock — stable-prefix before the per-message scene and the
+     hour-level life snapshot (prompt-cache friendly). Cold chain / read
+     failure → the section is simply absent, no placeholder.
+  2. Scene (p2p / group / proactive) — who she's talking to, why.
+  3. Relationship page (only when it exists) — her own bedtime-review page
+     about the person she's talking to (trigger_user_id, p2p and group
+     alike). No trigger user / no page / read failure → absent, no
+     placeholder (spec decision 6).
+  4. Latest day page (only when it exists) — the most recent "yesterday"
+     she wrote at bedtime review, whatever life-day it covers. The
+     written_at stamp goes into the frame so she knows how old the memory
+     is. No page / read failure → absent.
+  5. Life snapshot — where she is, what she's doing, how she feels *right now*,
+     read straight from the life engine's LifeState. This is the main subject:
+     the 赤尾 talking to a real person is the 赤尾 living this moment.
+
+The thread of the order: who you're talking to → what they are to you →
+what your yesterday left you → who you are right now.
+
+There is no RAG recall here. She speaks from what her life already knows
+(the shared world stage + her own pages + current_state + mood), nothing
+more — the pages are her own writing, not retrieval.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
-from app.data.queries import find_latest_life_state
-from app.memory.sections.active_notes import build_active_notes_section
-from app.memory.sections.recall_index import build_recall_index_section
-from app.memory.sections.schedule import build_schedule_section
-from app.memory.sections.self_abstracts import build_self_abstracts_section
-from app.memory.sections.short_term_fragments import build_short_term_fragments_section
-from app.memory.sections.user_abstracts import build_user_abstracts_section
+from app.domain.arc_awareness import render_arc_awareness
+from app.domain.life_state import find_life_state
+from app.life.pages import read_latest_day_page, read_relationship_page
+from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
-_CST = timezone(timedelta(hours=8))
-
-
-def _as_cst(value: datetime) -> datetime:
-    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-        return value.replace(tzinfo=_CST)
-    return value.astimezone(_CST)
-
-
-def _is_life_state_expired(row, now: datetime) -> bool:
-    state_end_at = getattr(row, "state_end_at", None)
-    if not state_end_at:
-        return False
-    return _as_cst(state_end_at) <= now
+# Cold start / thin state / read error all land here so inner_context never
+# collapses and chat can still hold a normal conversation.
+_LIFE_FALLBACK = "你此刻的状态暂时拿不到，就照你平时的样子自然聊吧。"
 
 
 async def _build_life_state(persona_id: str) -> str:
+    """她此刻的真实快照 (LifeState)，作为 inner_context 的主角。
+
+    lane 口径与 world/life 写入端一致：``current_deployment_lane() or "prod"``
+    （进程级泳道，prod 归一到 "prod"）。
+
+    失败兜底（spec decision 6）：读不到快照（冷启 / 她还没活过一轮）、
+    current_state 稀薄、或读取报错时，返回一句简洁兜底而非空串——
+    inner_context 不能塌，chat 仍要能正常对话。
+    """
     try:
-        row = await find_latest_life_state(persona_id)
-        if not row:
-            return ""
-        now = datetime.now(_CST)
-        if _is_life_state_expired(row, now):
-            logger.debug(
-                "[%s] Ignoring expired life state id=%s state_end_at=%s",
-                persona_id,
-                getattr(row, "id", None),
-                getattr(row, "state_end_at", None),
-            )
-            return ""
-        current = row.current_state
-        mood = row.response_mood
-        if current:
-            return (
-                f"你此刻的状态：{current}\n你的心情：{mood}"
-                if mood else f"你此刻的状态：{current}"
-            )
+        lane = current_deployment_lane() or "prod"
+        snap = await find_life_state(lane=lane, persona_id=persona_id)
     except Exception as e:
         logger.warning("[%s] Failed to read life state: %s", persona_id, e)
-    return ""
+        return _LIFE_FALLBACK
+
+    if not snap:
+        return _LIFE_FALLBACK
+
+    current = (snap.current_state or "").strip()
+    if not current:
+        return _LIFE_FALLBACK
+
+    mood = (snap.response_mood or "").strip()
+    if mood:
+        return f"你此刻正在：{current}\n你的心情：{mood}"
+    return f"你此刻正在：{current}"
+
+
+# 平直的第一人称框架标头（机制层，零剧情事实——角色名 / 日期 / 数字不进模板，
+# 宪法同 arc 透传）。「这页写于 X」让她知道这份记忆的新旧。
+_RELATIONSHIP_HEADER = (
+    "【你们的关系】这是你睡前回顾时写下的、关于正在和你说话的这个人的一页"
+)
+_DAY_HEADER = "【你的昨天】这是你睡前回顾时给自己写下的最近一页"
+
+
+async def _build_relationship_section(
+    persona_id: str, trigger_user_id: str | None
+) -> str:
+    """触发人的关系页段：p2p / 群聊都按 trigger_user_id 注（spec 决策 6）。
+
+    无触发人（proactive 可能缺位）/ 无页（第一次聊）/ narrative 空白 / 读失败
+    → 返回 ""，整段缺席不补占位。读失败只 log：页注入是上下文增强，绝不能
+    塌掉 chat（照 render_arc_awareness 的姿势）。
+    """
+    if not trigger_user_id:
+        return ""
+    try:
+        lane = current_deployment_lane() or "prod"
+        page = await read_relationship_page(
+            lane=lane, persona_id=persona_id, other_user_id=trigger_user_id
+        )
+    except Exception as e:
+        logger.warning(
+            "[%s] Failed to read relationship page for %s: %s",
+            persona_id,
+            trigger_user_id,
+            e,
+        )
+        return ""
+
+    if page is None:
+        return ""
+    narrative = page.narrative.strip()
+    if not narrative:
+        return ""
+    return f"{_RELATIONSHIP_HEADER}（这页写于 {page.written_at}）：\n{narrative}"
+
+
+async def _build_yesterday_section(persona_id: str) -> str:
+    """她最近一页昨天：跨日期取最新（哪个生活日不重要，最近写下的那页才是）。
+
+    无页（冷启动：她还没有昨天可忆）/ narrative 空白 / 读失败 → 返回 ""，
+    整段缺席不补占位，失败兜底同 _build_relationship_section。
+    """
+    try:
+        lane = current_deployment_lane() or "prod"
+        page = await read_latest_day_page(lane=lane, persona_id=persona_id)
+    except Exception as e:
+        logger.warning("[%s] Failed to read latest day page: %s", persona_id, e)
+        return ""
+
+    if page is None:
+        return ""
+    narrative = page.narrative.strip()
+    if not narrative:
+        return ""
+    return f"{_DAY_HEADER}（这页写于 {page.written_at}）：\n{narrative}"
 
 
 def _scene_section(
@@ -105,13 +172,19 @@ async def build_inner_context(
     is_proactive: bool = False,
     proactive_stimulus: str = "",
 ) -> str:
-    """Assemble the full inner context string for chat injection (v4)."""
-
-    effective_user_id = (
-        None if (trigger_user_id in (None, "__proactive__")) else trigger_user_id
-    )
+    """Assemble inner_context: arc (when present) + scene + her pages (when
+    present) + life snapshot."""
 
     sections: list[str] = []
+
+    # 世界阶段透传：对话里她也必须知道自己人生走到哪页（世界阶段翻页后 persona
+    # 出厂设定可能已过时）。lane 口径与 _build_life_state 一致（进程级泳道，prod
+    # 归一 "prod"）；render 空链 / 读失败返回 "" → 整段缺席、不塞占位。
+    arc_awareness = await render_arc_awareness(
+        lane=current_deployment_lane() or "prod"
+    )
+    if arc_awareness:
+        sections.append(arc_awareness)
 
     scene = _scene_section(
         chat_type, chat_name, trigger_username, is_proactive, proactive_stimulus
@@ -119,54 +192,16 @@ async def build_inner_context(
     if scene:
         sections.append(scene)
 
-    life = await _build_life_state(persona_id)
-    if life:
-        sections.append(life)
+    # 睡前回顾两页：场景之后、人生快照之前——你在和谁聊 → 你们的关系 →
+    # 你的昨天 → 你此刻状态。无页 / 无触发人 / 读失败 → 整段缺席不补占位。
+    relationship = await _build_relationship_section(persona_id, trigger_user_id)
+    if relationship:
+        sections.append(relationship)
 
-    sched = await build_schedule_section(persona_id=persona_id)
-    if sched:
-        sections.append(sched)
+    yesterday = await _build_yesterday_section(persona_id)
+    if yesterday:
+        sections.append(yesterday)
 
-    self_abs = await build_self_abstracts_section(persona_id=persona_id)
-    if self_abs:
-        sections.append(self_abs)
-
-    user_abs = await build_user_abstracts_section(
-        persona_id=persona_id,
-        trigger_user_id=effective_user_id,
-        trigger_username=trigger_username,
-    )
-    if user_abs:
-        sections.append(user_abs)
-
-    notes = await build_active_notes_section(persona_id=persona_id)
-    if notes:
-        sections.append(notes)
-
-    if effective_user_id:
-        from app.memory.cross_chat import (
-            build_cross_chat_context,  # lazy: avoids circular import
-        )
-
-        cross = await build_cross_chat_context(
-            persona_id=persona_id,
-            trigger_user_id=effective_user_id,
-            trigger_username=trigger_username or "",
-            current_chat_id=chat_id,
-        )
-        if cross:
-            sections.append(cross)
-
-    frag = await build_short_term_fragments_section(
-        persona_id=persona_id,
-        chat_id=chat_id,
-        trigger_user_id=effective_user_id,
-    )
-    if frag:
-        sections.append(frag)
-
-    recall_idx = await build_recall_index_section(persona_id=persona_id)
-    if recall_idx:
-        sections.append(recall_idx)
+    sections.append(await _build_life_state(persona_id))
 
     return "\n\n".join(sections)

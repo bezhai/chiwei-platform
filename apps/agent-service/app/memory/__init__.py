@@ -1,1 +1,1 @@
-"""Memory & identity — afterthought, drift, voice, relationships, context."""
+"""Memory & identity — persona loading + chat inner context."""

@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.data.queries.messages import (
-    find_context_messages_for_anchors,
     find_username,
 )
 
@@ -108,44 +107,3 @@ async def test_find_username_returns_none_when_no_row():
             p.stop()
 
 
-@pytest.mark.asyncio
-async def test_find_context_messages_returns_message_and_username_string():
-    """返回 (CommonMessageRecord, username_str)，SQL 不 JOIN lark/private 表。"""
-
-    fake_rows = [
-        _FakeMsg(message_id=MSG_ID, sender_display_name="Bob"),
-        _FakeMsg(
-            message_id="00000000-0000-7000-8000-000000000004",
-            sender_display_name=None,
-        ),
-    ]
-    session = AsyncMock()
-    session.execute = AsyncMock(
-        return_value=_ScalarResult(None, rows=fake_rows)
-    )
-
-    patches = _patch_session(session)
-    for p in patches:
-        p.start()
-    try:
-        out = await find_context_messages_for_anchors(
-            chat_id=CHAT_ID,
-            anchor_message_ids=[MSG_ID],
-            anchor_timestamps=[1000],
-            anchor_root_ids=set(),
-        )
-
-        assert len(out) == 2
-        msg0, name0 = out[0]
-        msg1, name1 = out[1]
-        assert name0 == "Bob"
-        assert name1 is None
-        assert msg0.message_id == MSG_ID
-
-        sql_text = str(session.execute.await_args.args[0]).lower()
-        assert "common_message" in sql_text
-        assert "lark_" not in sql_text
-        assert "union_id" not in sql_text
-    finally:
-        for p in patches:
-            p.stop()

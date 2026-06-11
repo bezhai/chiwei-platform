@@ -8,15 +8,27 @@ compile_graph 已经保证 .debounce() 不能跟 .durable() / .as_latest() /
 
 from __future__ import annotations
 
+from typing import Annotated
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.domain.memory_triggers import DriftTrigger
+from app.runtime.data import Data, Key
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.node import _NODE_META, NODE_REGISTRY, node
 from app.runtime.placement import clear_bindings
 from app.runtime.wire import clear_wiring, wire
+
+
+class SampleTrigger(Data):
+    """本测试的样例 transient Data（原 DriftTrigger 已随 voice 子系统拆除，
+    这里只测 emit 的 debounce 路由机制，与业务无关）。"""
+
+    chat_id: Annotated[str, Key]
+    persona_id: str
+
+    class Meta:
+        transient = True
 
 
 @pytest.fixture(autouse=True)
@@ -42,11 +54,11 @@ def _isolation():
 
 @pytest.mark.asyncio
 async def test_emit_debounce_wire_calls_publish_debounce(monkeypatch):
-    """emit(DriftTrigger) 在 debounce wire 上必须路由到 publish_debounce，
+    """emit(SampleTrigger) 在 debounce wire 上必须路由到 publish_debounce，
     consumer 本身不能被 in-process 直接 await。"""
 
     @node
-    async def my_drift_check(t: DriftTrigger) -> None:
+    async def my_sample_check(t: SampleTrigger) -> None:
         # 如果 emit 错误地走了 in-process 分支，这里会被直接调用 —
         # mock publish_debounce 检测不到，但下面的 consumer_called
         # 会暴露这个 bug。
@@ -54,24 +66,24 @@ async def test_emit_debounce_wire_calls_publish_debounce(monkeypatch):
 
     consumer_called: list = []
 
-    wire(DriftTrigger).debounce(
+    wire(SampleTrigger).debounce(
         seconds=60,
         max_buffer=5,
         key_by=lambda e: f"k:{e.chat_id}",
-    ).to(my_drift_check)
+    ).to(my_sample_check)
 
     fake_publish_debounce = AsyncMock()
     monkeypatch.setattr(
         "app.runtime.debounce.publish_debounce", fake_publish_debounce
     )
 
-    t = DriftTrigger(chat_id="c1", persona_id="p1")
+    t = SampleTrigger(chat_id="c1", persona_id="p1")
     await emit(t)
 
     fake_publish_debounce.assert_awaited_once()
     args = fake_publish_debounce.call_args.args
     # publish_debounce(w, consumer, data)
-    assert args[1] is my_drift_check
+    assert args[1] is my_sample_check
     assert args[2] is t
     # in-process consumer 必须没被直接调用
     assert consumer_called == []

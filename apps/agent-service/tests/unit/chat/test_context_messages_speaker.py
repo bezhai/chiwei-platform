@@ -3,8 +3,7 @@
 身份全局化后删了 lark_user JOIN：assistant 行本就无 username，
 历史 user 行迁移前也全空。group 上下文不能对所有 role 都
 `username or 占位`——否则机器人（赤尾）历史发言会被渲染成占位词喂给
-模型，误导上下文。assistant 行必须按 role 派生固定说话人（与
-history.py 的 search_group_history / check_chat_history 一致：用 "我"），
+模型，误导上下文。assistant 行必须按 role 派生固定说话人（用 "我"），
 只有 user 行才 `username or 占位`。
 """
 

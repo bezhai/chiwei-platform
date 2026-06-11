@@ -173,6 +173,42 @@ class RedisCapability:
         ) as e:
             raise _wrap_error(e, op="smembers", key=key) from e
 
+    # -- String value with TTL (agent session续接) ---------------------------
+
+    async def get(self, key: str) -> Any:
+        """``GET key`` — returns ``None`` if missing."""
+        try:
+            return await self._client.get(key)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="get", key=key) from e
+
+    async def set_with_ttl(self, key: str, value: str, *, ttl_seconds: int) -> None:
+        """``SET key value EX ttl_seconds`` — value + expiry set atomically.
+
+        Resets the key's TTL on every write (the session store relies on this
+        to refresh the 24h window each round).
+        """
+        try:
+            await self._client.set(key, value, ex=ttl_seconds)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="set_with_ttl", key=key) from e
+
+    async def expire(self, key: str, seconds: int) -> None:
+        """``EXPIRE key seconds`` — refresh a key's TTL without rewriting it."""
+        try:
+            await self._client.expire(key, seconds)
+        except (
+            asyncio.TimeoutError,
+            redis.exceptions.RedisError,
+        ) as e:
+            raise _wrap_error(e, op="expire", key=key) from e
+
     # -- Lua scripts ---------------------------------------------------------
 
     async def eval(

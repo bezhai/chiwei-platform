@@ -37,30 +37,26 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     """load_dataflow_graph() picks up the production wires + bindings,
     not an empty graph.
 
-    Same import / clear / reload idiom as ``tests/wiring/test_memory``:
-    first import triggers each module body once (which would otherwise
-    leave the registries pre-populated and fight the fixture's clear);
-    the second clear + reload then repopulates from a clean slate.
+    Uses clear + reload idiom to get a clean slate before checking that
+    real production wires are present.
     """
     import importlib
 
     import app.deployment as d
-    import app.wiring.memory as m
+    import app.wiring.chat as cw
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(m)
+    importlib.reload(cw)
     importlib.reload(d)
 
     g = load_dataflow_graph()
-    assert any(w.data_type.__name__ == "Message" for w in g.wires)
-    # hydrate_message + vectorize + save_fragment are all bound
+    # chat ingress nodes ride the production wiring
     assert {n.__name__ for n in g.nodes} >= {
-        "hydrate_message",
-        "vectorize",
-        "save_fragment",
+        "route_chat_node",
+        "chat_node",
     }
 
 
@@ -165,7 +161,7 @@ async def test_prepare_for_run_skips_trigger_wire_for_unknown_app():
 
 @pytest.mark.asyncio
 async def test_prepare_for_run_declares_topology_when_requested():
-    """The FastAPI lifespan is a producer (proactive -> vectorize-worker),
+    """The FastAPI lifespan is a producer (proactive -> a downstream worker),
     so it must pre-declare durable routes before publishing. Worker
     entries already declare their own consumer routes via
     start_consumers and don't need this. Flag controls it.

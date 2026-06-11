@@ -30,6 +30,7 @@ class Settings:
 
     # -- Redis --
     redis_host: str | None = field(default_factory=lambda: _env_or_none("REDIS_HOST"))
+    redis_port: int = field(default_factory=lambda: _env_int("REDIS_PORT", 6379))
     redis_password: str | None = field(
         default_factory=lambda: _env_or_none("REDIS_PASSWORD")
     )
@@ -46,17 +47,6 @@ class Settings:
         default_factory=lambda: _env_or_none("POSTGRES_PASSWORD")
     )
     postgres_db: str | None = field(default_factory=lambda: _env_or_none("POSTGRES_DB"))
-
-    # -- Qdrant --
-    qdrant_service_host: str | None = field(
-        default_factory=lambda: _env_or_none("QDRANT_SERVICE_HOST")
-    )
-    qdrant_service_port: int = field(
-        default_factory=lambda: _env_int("QDRANT_SERVICE_PORT", 6333)
-    )
-    qdrant_service_api_key: str | None = field(
-        default_factory=lambda: _env_or_none("QDRANT_SERVICE_API_KEY")
-    )
 
     # -- Search (You Search is the primary provider) --
     you_search_host: str | None = field(
@@ -78,6 +68,14 @@ class Settings:
     )
 
     # -- Misc --
+    qweather_api_key: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_KEY")
+    )
+    # 和风 2024 改版后每个账号分配专属 API Host（统一 devapi/api 域名对新 key 返
+    # Invalid Host 403）。host 是账号级敏感信息，走 env 注入、不入代码。
+    qweather_api_host: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_HOST")
+    )
     bangumi_access_token: str | None = field(
         default_factory=lambda: _env_or_none("BANGUMI_ACCESS_TOKEN")
     )
@@ -125,23 +123,6 @@ class Settings:
     # -- Life Engine --
     life_engine_model: str = field(
         default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
-    )
-    glimpse_target_chat_ids: list[str] = field(
-        default_factory=lambda: _env_list("GLIMPSE_TARGET_CHAT_IDS")
-    )
-
-    # -- Identity drift --
-    identity_drift_model: str = field(
-        default_factory=lambda: _env("IDENTITY_DRIFT_MODEL", "offline-model")
-    )
-    identity_drift_debounce_seconds: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_DEBOUNCE_SECONDS", 120)
-    )
-    identity_drift_max_buffer: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_MAX_BUFFER", 10)
-    )
-    identity_drift_ttl_seconds: int = field(
-        default_factory=lambda: _env_int("IDENTITY_DRIFT_TTL_SECONDS", 86400)
     )
 
     # -- Utility --

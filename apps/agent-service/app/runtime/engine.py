@@ -584,8 +584,8 @@ class Runtime:
 
         try:
             # Passive fetch: the queue is owned by whoever publishes to
-            # it (channel-server for ``vectorize``, ``declare_topology`` for
-            # the static ALL_ROUTES set). Trying to re-declare with our
+            # it (channel-server for ``chat_request``, ``declare_topology``
+            # for the static ALL_ROUTES set). Trying to re-declare with our
             # own args would clash on DLX / TTL settings — see
             # ``_build_queue_args`` in ``app/infra/rabbitmq.py``. Mirror
             # ``mq.consume``'s ``get_queue`` for exactly that reason.

@@ -27,14 +27,19 @@ from app.data.queries import (
     create_pending_agent_response,
     find_gray_config,
     find_message_content,
+    find_username,
     is_chat_request_completed,
     resolve_bot_name_for_persona,
     set_agent_response_bot,
 )
+from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
+from app.domain.world_events import EVENT_KIND_EXTERNAL
+from app.infra.cst_time import now_cst_iso
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
 from app.runtime.emit import emit
+from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
@@ -325,3 +330,79 @@ async def chat_node(req: ChatRequest) -> None:
             "parts": part_index + 1,
         },
     )
+
+    # 对话回灌：聊完一次，作为一条 external event 进这个 persona 的信箱（她事后
+    # 知道"刚跟谁聊了啥"），不让"聊天里的她"和"世界里的她"分叉。快路径回复已经
+    # emit 完，回灌在这之后、不挡回复；回灌失败只 log、不拖垮 chat。summary 直接
+    # 用用户原话——这是她自己经历过的对话回灌进自己脑子（聊的时候就经历了、chat
+    # 入口也过了 pre-safety），不是隐私泄露，不需要 LLM 概括脱敏；原话本身就是最
+    # 真实的"聊了啥"，概括成二手货反而失真、每轮跑一次 offline LLM 纯浪费。
+    # event_id 用 session_id 让重投幂等。
+    user_message = parsed.render() if parsed else ""
+    await _replay_conversation_to_mailbox(req, user_message=user_message)
+
+
+# 防御性上限：纯防极端长文落进 durable 信箱,正常聊天消息根本到不了 200 字。
+_REPLAY_MAX_CHARS = 200
+
+
+async def _replay_conversation_to_mailbox(
+    req: ChatRequest, *, user_message: str,
+) -> None:
+    """把"刚跟某用户聊了啥"投进 req.persona_id 的信箱。
+
+    summary = "跟谁 + 聊了啥"：谁取真实用户名（解析不到退回 user_id），聊了啥
+    **直接用用户原话**（``user_message``）——不概括、不上 LLM。这是她自己经历过的
+    对话回灌进自己脑子，给 agent 的应该是真实输入，不是工程化概括过的二手货。只留
+    一个宽松上限（``_REPLAY_MAX_CHARS``）纯防极端长文，超了截断加省略号；正常消息
+    根本到不了。``user_message`` 为空（纯图片 / 表情渲染为空）时退回 ``刚和{谁}聊
+    过一次``。
+
+    ``session_id`` 缺失时**跳过回灌**：event_id 按 ``chat:{session_id}`` 去重，
+    None 会塌成 ``chat:None`` 把不同的无关回灌错误合并成一条。宁可不写，也不错合并。
+
+    lane 取**进程级部署泳道**（``current_deployment_lane() or "prod"``），与
+    world / life 写读、取用端读全链路统一（必改 3）。不能用 ``req.lane``：prod
+    下 ``req.lane`` 常为空 → external event 进 ``lane=""`` 信箱，而 life 在
+    ``"prod"`` 唤醒读不到 → 对话回灌闭环分叉。失败吞掉只 log —— 这是对话之后的
+    事后回灌，绝不能影响已经回完的即时回复。
+    """
+    if not req.persona_id:
+        return
+    if not req.session_id:
+        logger.info(
+            "skip conversation replay: session_id missing (persona=%s, user=%s)",
+            req.persona_id, req.user_id,
+        )
+        return
+    lane = current_deployment_lane() or "prod"
+    # 跟谁：优先真实用户名，解析不到退回 user_id（始终带 user_id 兜底，让信息可定位）。
+    who = f"用户 {req.user_id}"
+    try:
+        name = await find_username(req.user_id) if req.user_id else None
+        if name:
+            who = f"{name}（用户 {req.user_id}）"
+    except Exception as e:  # noqa: BLE001 — 名字解析失败退回 user_id，不挡回灌
+        logger.warning("resolve username for replay failed: %s: %s", req.user_id, e)
+    # 聊了啥：直接用用户原话（防御性截断极端长文），空时退回兜底文案。
+    spoke = user_message.strip()
+    if len(spoke) > _REPLAY_MAX_CHARS:
+        spoke = spoke[:_REPLAY_MAX_CHARS] + "…"
+    summary = f"刚和{who}聊了：{spoke}" if spoke else f"刚和{who}聊过一次"
+    try:
+        await deliver_event(
+            lane=lane,
+            persona_id=req.persona_id,
+            event_id=f"chat:{req.session_id}",
+            kind=EVENT_KIND_EXTERNAL,
+            source=f"user:{req.user_id}",
+            summary=summary,
+            # CST aware ISO（含 +08:00），与 world/life 写入端同一个"现在"——
+            # 旧的 Unix 毫秒会跟 ISO 同框混着喂给 agent、时间窗口比较差 8 小时。
+            occurred_at=now_cst_iso(),
+        )
+    except Exception as e:  # noqa: BLE001 — 事后回灌失败不拖垮 chat 快路径
+        logger.warning(
+            "conversation replay to mailbox failed: persona=%s session=%s: %s",
+            req.persona_id, req.session_id, e,
+        )

@@ -45,36 +45,14 @@ class Route(NamedTuple):
 CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 RECALL = Route("recall", "action.recall")
-# ``vectorize`` is published by channel-server (TS, identical
-# ``buildQueueArgs``/``DLX_NAME``/``EXCHANGE_NAME`` constants) and
-# consumed by the dataflow runtime via ``Source.mq("vectorize")``. We
-# co-declare it from agent-service's ``ALL_ROUTES`` so a lane that
-# only deploys agent-service + vectorize-worker (no channel-server in the
-# lane) can still create the lane queue ``vectorize_<lane>`` —
-# otherwise vectorize-worker's MQ source loop hits NOT_FOUND on
-# passive ``get_queue`` and the runtime crashes. Re-declare on the
-# prod-side queue is a no-op because both publishers compute identical
-# queue args.
-VECTORIZE = Route("vectorize", "task.vectorize")
-
-# Memory v4 vectorize: split into per-row queues so each one maps 1:1
-# onto a typed Data on the dataflow side (Source.mq today only decodes
-# a single Data type per queue). Bodies:
-#   memory_fragment_vectorize <- {"fragment_id": "f_xxx"}
-#   memory_abstract_vectorize <- {"abstract_id": "a_xxx"}
-MEMORY_FRAGMENT_VECTORIZE = Route(
-    "memory_fragment_vectorize", "task.memory_fragment_vectorize"
-)
-MEMORY_ABSTRACT_VECTORIZE = Route(
-    "memory_abstract_vectorize", "task.memory_abstract_vectorize"
-)
 
 # runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
 # APP_NAME so an envelope published from agent-service is consumed only
 # by an agent-service runtime (preserving emit()'s in-process / cross-
 # process fan-out decisions which depend on APP_NAME). Lane queues use
 # lane_fallback=False so a feat-x lane envelope never spills into prod.
-KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service", "vectorize-worker"]
+# （vectorize-worker 随 v4 记忆整机删除，已无任何节点，不再注册。）
+KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service"]
 DELAYED_TRIGGER_ROUTES = [
     Route(
         queue=f"runtime_delayed_trigger_{app}",
@@ -107,9 +85,6 @@ ALL_ROUTES = [
     CHAT_REQUEST,
     CHAT_RESPONSE,
     RECALL,
-    VECTORIZE,
-    MEMORY_FRAGMENT_VECTORIZE,
-    MEMORY_ABSTRACT_VECTORIZE,
     *DELAYED_TRIGGER_ROUTES,
 ]
 
@@ -157,7 +132,7 @@ def _build_queue_args(prod_rk: str, lane: str | None,
       routing-key (fallback), plus auto-expire after 24 h idle
     - lane queues with lane_fallback=False: keep DLX (异常 nack 仍要进
       dead_letters), but no ttl-back-to-prod (long-delay messages 留在
-      自己 lane 上等到期；reviewer round-1 M5 + round-5 H1)
+      自己 lane 上等到期；codex review round-1 M5 + round-5 H1)
     """
     extra: dict[str, Any] = {}
     if lane:
@@ -258,7 +233,7 @@ class _RabbitMQ:
         Reads ``route.lane_fallback`` (default True for prod compatibility) to
         decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
         debounce routes set ``lane_fallback=False`` so 300s delays don't get
-        short-circuited to prod (spec §3.4.4 / reviewer round-5 H1).
+        short-circuited to prod (spec §3.4.4 / codex review round-5 H1).
         """
         if self._channel is None or self._exchange is None:
             raise RuntimeError("must call connect() + declare_topology() first")

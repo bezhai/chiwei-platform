@@ -28,7 +28,7 @@ endef
 
 # 一镜像多服务映射：deploy/release 时自动连同 sibling 服务一起处理。
 # 镜像 → 同步服务清单（不含主 APP 自身）。映射表单一来源，见 CLAUDE.md 镜像与服务映射表。
-SIBLINGS_agent-service := vectorize-worker
+# （vectorize-worker 随 v4 记忆整机删除，agent-service 不再有 sibling。）
 SIBLINGS_channel-server := recall-worker chat-response-worker
 # `$(SIBLINGS_$(APP))` 在 make 解析阶段展开，未匹配的 APP 得空串（无 sibling，安静跳过 for）。
 
@@ -145,7 +145,7 @@ self-deploy:
 
 ## 仅发布（不构建），用于切换泳道/回滚
 ## 用法: make release APP=xxx LANE=yyy VERSION=1.0.0.5
-## 注：agent-service / channel-server 类多服务镜像会同步 release sibling（vectorize-worker / recall-worker / chat-response-worker）。
+## 注：channel-server 类多服务镜像会同步 release sibling（recall-worker / chat-response-worker）。
 release:
 	@$(call require_app)
 	$(if $(VERSION),,$(error VERSION 未指定。用法: make release APP=<app> LANE=<lane> VERSION=<version>))

@@ -34,7 +34,6 @@ async def test_lifespan_migrates_then_starts_sources():
          patch("app.runtime.durable.start_consumers", AsyncMock(side_effect=_start_consumers)), \
          patch("app.runtime.engine.Runtime.start_source_loops", _start_source_loops), \
          patch("app.runtime.engine.Runtime.stop_source_loops", _stop_source_loops), \
-         patch("app.infra.qdrant.init_collections", AsyncMock()), \
          patch("app.runtime.bootstrap.declare_durable_topology", AsyncMock()), \
          patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
          patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \

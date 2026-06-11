@@ -44,7 +44,6 @@ mock.module('./rabbitmq', () => ({
     CHAT_REQUEST: { queue: 'chat_request', rk: 'chat.request' },
     CHAT_RESPONSE: { queue: 'chat_response', rk: 'chat.response' },
     RECALL: { queue: 'recall', rk: 'action.recall' },
-    VECTORIZE: { queue: 'vectorize', rk: 'task.vectorize' },
     PROACTIVE_EVAL: { queue: 'proactive_eval', rk: 'proactive.eval' },
     getLane: () => undefined,
     laneQueue: (base: string, lane?: string) => (lane ? `${base}_${lane}` : base),

@@ -9,7 +9,6 @@ import { LarkBaseChatInfo } from '@entities/lark-base-chat-info';
 import { LarkMessage } from '@entities/lark-message';
 import { LarkUserOpenId } from '@entities/lark-user-open-id';
 import { context } from '@middleware/context';
-import { rabbitmqClient, VECTORIZE } from '@integrations/rabbitmq';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { evalScript, setNx } from '@cache/redis-client';
 import type { LarkMention, LarkReceiveMessage } from 'types/lark';
@@ -432,16 +431,6 @@ export async function storeLarkInboundMessage(
         }
     });
 
-    if (inserted && projection.contentText) {
-        const lane = context.getLane() || undefined;
-        await rabbitmqClient.publish(
-            VECTORIZE,
-            { message_id: projection.commonMessageId, lane },
-            undefined,
-            undefined,
-            lane,
-        );
-    }
 }
 
 export async function claimLarkInboundMessageForBot(input: {
@@ -529,17 +518,6 @@ export async function storeLarkOutboundMessage(
             .orIgnore()
             .execute();
     });
-
-    if (inserted && input.contentText.trim().length > 0) {
-        const lane = context.getLane() || undefined;
-        await rabbitmqClient.publish(
-            VECTORIZE,
-            { message_id: commonMessageId, lane },
-            undefined,
-            undefined,
-            lane,
-        );
-    }
 
     return commonMessageId;
 }

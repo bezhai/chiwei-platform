@@ -8,10 +8,11 @@ Tables:
   - model_provider, model_mappings
   - bot_persona
   - akao_schedule
-  - life_engine_state, glimpse_state
-  - memory_entity, reply_style_log
-  # Memory v4
-  - fragment, abstract_memory, memory_edge, notes, schedule_revision
+  - reply_style_log
+
+（v4 记忆的 model 已随旧记忆机器整体删除：fragment / abstract_memory /
+memory_edge / notes / memory_entity / schedule_revision。它们都是
+SQLAlchemy Base（create_all 语义），删 model 不动库表；表的 DROP 走运维。）
 """
 
 from datetime import datetime
@@ -251,59 +252,6 @@ class AkaoSchedule(Base):
     )
 
 
-# ---------------------------------------------------------------------------
-# Memory — experience fragments, glimpse, life engine
-# ---------------------------------------------------------------------------
-
-
-class LifeEngineState(Base):
-    """Life Engine 状态 — append-only"""
-
-    __tablename__ = "life_engine_state"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    current_state: Mapped[str] = mapped_column(Text, nullable=False)
-    activity_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    response_mood: Mapped[str] = mapped_column(Text, nullable=False)
-    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
-    skip_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    state_end_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class GlimpseState(Base):
-    """Glimpse 观察状态 — append-only"""
-
-    __tablename__ = "glimpse_state"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    persona_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    last_seen_msg_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    observation: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class MemoryEntity(Base):
-    """飞书长 ID -> 短自增 ID 映射，用于碎片内容中消歧"""
-
-    __tablename__ = "memory_entity"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)
-    external_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-
-    __table_args__ = (UniqueConstraint("entity_type", "external_id"),)
 
 
 # ---------------------------------------------------------------------------
@@ -321,107 +269,6 @@ class ReplyStyleLog(Base):
     style_text: Mapped[str] = mapped_column(Text, nullable=False)
     observation: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-# ---------------------------------------------------------------------------
-# Memory v4
-# ---------------------------------------------------------------------------
-
-
-class Fragment(Base):
-    """事实碎片 — v4 短期/长期记忆中的原子事实。"""
-
-    __tablename__ = "fragment"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    persona_id: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    chat_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    clarity: Mapped[str] = mapped_column(Text, nullable=False, server_default="clear")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    last_touched_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class AbstractMemory(Base):
-    """抽象记忆 — v4 subject + content 模型（不分类型）。"""
-
-    __tablename__ = "abstract_memory"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    persona_id: Mapped[str] = mapped_column(Text, nullable=False)
-    subject: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by: Mapped[str] = mapped_column(Text, nullable=False)
-    clarity: Mapped[str] = mapped_column(Text, nullable=False, server_default="clear")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    last_touched_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class MemoryEdge(Base):
-    """统一边表 — 连接 fragment / abstract_memory 节点。"""
-
-    __tablename__ = "memory_edge"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    persona_id: Mapped[str] = mapped_column(Text, nullable=False)
-    from_id: Mapped[str] = mapped_column(Text, nullable=False)
-    from_type: Mapped[str] = mapped_column(Text, nullable=False)
-    to_id: Mapped[str] = mapped_column(Text, nullable=False)
-    to_type: Mapped[str] = mapped_column(Text, nullable=False)
-    edge_type: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by: Mapped[str] = mapped_column(Text, nullable=False)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class Note(Base):
-    """赤尾主动清单 — 她自己决定记下来的事。"""
-
-    __tablename__ = "notes"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    persona_id: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    when_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    resolved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    delete_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class ScheduleRevision(Base):
-    """today_schedule 的 append-only 历史版本。"""
-
-    __tablename__ = "schedule_revision"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    persona_id: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

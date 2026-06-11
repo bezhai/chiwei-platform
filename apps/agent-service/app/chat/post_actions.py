@@ -2,18 +2,16 @@
 
 Triggers:
   1. Post safety check — publish to RabbitMQ audit queue
-  2. Identity drift — voice regeneration (debounced)
-  3. Afterthought — conversation fragment generation (debounced)
+
+（v4 记忆的对话碎片触发链已随旧记忆机器整体删除。）
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.domain.memory_triggers import AfterthoughtTrigger, DriftTrigger
 from app.domain.safety import PostSafetyRequest
 from app.memory._persona import load_persona
-from app.runtime.data import Data
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
@@ -56,50 +54,23 @@ async def _publish_post_check(
         logger.error("Failed to emit PostSafetyRequest: %s", e)
 
 
-async def _emit_memory_trigger(trigger: Data) -> None:
-    """Fire-and-forget memory trigger emit. Failures are logged, not raised
-    (post_actions 调用方语义就是 fire-and-forget；emit 内部任何异常都不该
-    污染聊天主链路；reviewer round-1 M6)."""
-    try:
-        await emit(trigger)
-    except Exception:
-        logger.exception(
-            "failed to emit memory trigger %s: chat_id=%s persona_id=%s",
-            type(trigger).__name__,
-            getattr(trigger, "chat_id", None),
-            getattr(trigger, "persona_id", None),
-        )
-
-
 async def schedule_post_actions(
     full_content: str,
     session_id: str | None,
     channel: str,
     chat_id: str,
     message_id: str,
-    persona_id: str,
 ) -> None:
     """Run all fire-and-forget post-processing tasks via dataflow emit.
 
     Called after the main stream completes; the chat stream chunks have
     already been yielded by this point, so the few-ms cost of awaiting
     the emits sequentially is invisible to the user. Each helper still
-    swallows its own exceptions to preserve fire-and-forget semantics
-    (Phase 6 v4 Gap 5: replaced asyncio.create_task with await emit).
+    swallows its own exceptions to preserve fire-and-forget semantics.
     """
     if not full_content:
         return
 
-    # 1. Post safety check (durable wire -> run_post_safety)
+    # Post safety check (durable wire -> run_post_safety)
     if session_id:
         await _publish_post_check(session_id, channel, full_content, chat_id, message_id)
-
-    # 2. Identity drift (debounced voice regeneration via dataflow)
-    await _emit_memory_trigger(
-        DriftTrigger(chat_id=chat_id, persona_id=persona_id)
-    )
-
-    # 3. Afterthought (conversation fragment generation via dataflow)
-    await _emit_memory_trigger(
-        AfterthoughtTrigger(chat_id=chat_id, persona_id=persona_id)
-    )

@@ -69,13 +69,19 @@ class FakeModelClient(ModelClient):
         self.complete_calls: list[tuple[list[Message], list[ToolDef] | None]] = []
         self.stream_calls: list[tuple[list[Message], list[ToolDef] | None]] = []
         self.structured_calls: list[tuple[list[Message], dict]] = []
+        # per-call kwargs so passthrough (e.g. session_id for the prompt-cache
+        # key) can be asserted.
+        self.complete_kwargs: list[dict] = []
+        self.stream_kwargs: list[dict] = []
 
     async def complete(self, messages, *, tools=None, **kwargs):
         self.complete_calls.append((list(messages), tools))
+        self.complete_kwargs.append(dict(kwargs))
         return self._complete.pop(0)
 
     async def stream(self, messages, *, tools=None, **kwargs) -> AsyncIterator[StreamChunk]:
         self.stream_calls.append((list(messages), tools))
+        self.stream_kwargs.append(dict(kwargs))
         chunks = self._stream.pop(0)
         for c in chunks:
             yield c
@@ -614,3 +620,81 @@ class TestToolSpanOutput:
             pass
         assert len(spans) == 1
         spans[0].update.assert_called_once_with(output="echoed:x")
+
+
+# ---------------------------------------------------------------------------
+# session_id passthrough — the loop forwards session_id to model.complete /
+# model.stream so the adapter can use it as the prompt-cache key. Default (no
+# session_id) forwards None, which the adapter no-ops on.
+# ---------------------------------------------------------------------------
+
+
+class TestSessionIdPassthrough:
+    async def test_run_loop_forwards_session_id_to_complete(self):
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            session_id="coe-world-life2:world:2026-06-06",
+        )
+        assert (
+            fake.complete_kwargs[0]["session_id"]
+            == "coe-world-life2:world:2026-06-06"
+        )
+
+    async def test_run_loop_default_session_id_is_none(self):
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert fake.complete_kwargs[0].get("session_id") is None
+
+    async def test_stream_loop_forwards_session_id_to_stream(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(text="hi"), StreamChunk(finish_reason="stop")]
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hi")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            session_id="sess-1",
+        ):
+            pass
+        assert fake.stream_kwargs[0]["session_id"] == "sess-1"
+
+    async def test_run_loop_session_id_survives_model_kwargs_collision(self):
+        """A session_id in model_kwargs must not TypeError-clash with the loop's
+        explicit session_id; the loop's trace session_id wins, others survive."""
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            session_id="real",
+            model_kwargs={"session_id": "stale", "reasoning_effort": "low"},
+        )
+        assert fake.complete_kwargs[0]["session_id"] == "real"
+        assert fake.complete_kwargs[0]["reasoning_effort"] == "low"

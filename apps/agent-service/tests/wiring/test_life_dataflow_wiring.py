@@ -29,33 +29,65 @@ def test_life_dataflow_wiring_compiles():
     assert graph is not None
 
 
-def test_life_dataflow_wire_count_is_16():
+def test_life_dataflow_wire_count_is_4():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
-    # 5 cron Tick + GlimpseTick + SharedDailyContext + DailyPlanRequest +
-    # 4 PersonaXxxRequest + GlimpseTickRequest + LifeStateChanged + GlimpseRequest +
-    # ScheduleRevisionCreated (Phase 6 v4 Gap 4) = 6 + 1 + 1 + 4 + 1 + 1 + 1 + 1 = 16
+    # v4 reviewer cron 线全拆（LightDayTick / LightNightTick / HeavyReviewTick
+    # 三条 cron 入口 + LightReviewRequest / HeavyReviewRequest 两条 per-persona
+    # 业务线），只剩 world/life 活线：
+    #   world/life event 闭环：WorldHeartbeatTick、WorldTick、EventArrived（3）
+    #   阶段 1B Task 2：LifeWakeTick（life 自排 in-process 回环那条边，1）
+    #   = 3 + 1 = 4。
+    #
+    # pull 范式：ActPerformed 不再有 wire（act 落 PG 不唤醒 world）、ActWorldTick 已删
+    # （act→world 60s 合并闸整条链拆掉）。
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
-        "MinuteTick", "LightDayTick", "LightNightTick", "HeavyReviewTick",
-        "DailyPlanTick", "GlimpseTick",
-        "SharedDailyContext", "DailyPlanRequest",
-        "LifeTickRequest", "VoiceRequest", "LightReviewRequest",
-        "HeavyReviewRequest", "GlimpseTickRequest",
-        "LifeStateChanged", "GlimpseRequest",
-        "ScheduleRevisionCreated",
+        "WorldHeartbeatTick", "WorldTick", "EventArrived",
+        "LifeWakeTick",
     }
     assert types == expected
-    assert len(WIRING_REGISTRY) == 16
+    assert len(WIRING_REGISTRY) == 4
 
 
-def test_glimpse_request_wire_is_durable():
+def test_reviewer_wires_gone():
+    """v4 reviewer 已删：cron tick 与 per-persona review 请求不得再有 wire。"""
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
-    glimpse_req_wires = [w for w in WIRING_REGISTRY if w.data_type.__name__ == "GlimpseRequest"]
-    assert len(glimpse_req_wires) == 1
-    assert glimpse_req_wires[0].durable is True
+    leftover = [
+        w.data_type.__name__
+        for w in WIRING_REGISTRY
+        if w.data_type.__name__ in (
+            "LightDayTick", "LightNightTick", "HeavyReviewTick",
+            "LightReviewRequest", "HeavyReviewRequest",
+        )
+    ]
+    assert leftover == [], f"reviewer wires still registered: {leftover}"
+
+
+def test_voice_wires_gone():
+    """voice 子系统已拆除：MinuteTick cron 与 VoiceRequest fan-out 不得再有 wire。"""
+    _fresh_import()
+
+    from app.runtime.wire import WIRING_REGISTRY
+
+    leftover = [
+        w.data_type.__name__
+        for w in WIRING_REGISTRY
+        if w.data_type.__name__ in ("MinuteTick", "VoiceRequest")
+    ]
+    assert leftover == [], f"voice wires still registered: {leftover}"
+
+
+def test_act_performed_has_no_wire():
+    """pull 范式：ActPerformed 不再有 wire（act 落 PG 不唤醒 world）。"""
+    _fresh_import()
+
+    from app.runtime.wire import WIRING_REGISTRY
+
+    act_wires = [w for w in WIRING_REGISTRY if w.data_type.__name__ == "ActPerformed"]
+    assert act_wires == []

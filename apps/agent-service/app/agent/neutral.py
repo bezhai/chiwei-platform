@@ -18,6 +18,7 @@ loss:
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -143,6 +144,34 @@ class ToolCall:
             id=d["id"], name=d["name"], arguments=d.get("arguments") or {}
         )
 
+    def to_replay_dict(self) -> dict[str, Any]:
+        """JSON-safe dict that survives a *lossless* round-trip for replay.
+
+        Unlike ``to_dict`` (which serves langfuse and deliberately drops the
+        opaque ``signature``), this keeps the provider-private blob so a stored
+        transcript can be fed back to the model verbatim. ``signature`` is raw
+        bytes — not JSON-serialisable — so it is base64-encoded under a
+        ``signature_b64`` key. Used by the session store (decision 4).
+        """
+        out: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "arguments": self.arguments,
+        }
+        if self.signature is not None:
+            out["signature_b64"] = base64.b64encode(self.signature).decode("ascii")
+        return out
+
+    @classmethod
+    def from_replay_dict(cls, d: dict[str, Any]) -> ToolCall:
+        sig_b64 = d.get("signature_b64")
+        return cls(
+            id=d["id"],
+            name=d["name"],
+            arguments=d.get("arguments") or {},
+            signature=base64.b64decode(sig_b64) if sig_b64 is not None else None,
+        )
+
 
 @dataclass(slots=True)
 class ToolResult:
@@ -212,6 +241,44 @@ class Message:
             reasoning_content=d.get("reasoning_content"),
             tool_calls=[
                 ToolCall.from_dict(tc) for tc in d.get("tool_calls", [])
+            ],
+            tool_call_id=d.get("tool_call_id"),
+        )
+
+    def to_replay_dict(self) -> dict[str, Any]:
+        """Lossless JSON-safe dict for storing a replay-able transcript.
+
+        Same shape as ``to_dict`` except tool calls use the lossless
+        ``ToolCall.to_replay_dict`` so provider-private blobs (gemini
+        ``thought_signature``) survive serialise → Redis → deserialise → model.
+        """
+        if isinstance(self.content, list):
+            content: Any = [b.to_dict() for b in self.content]
+        else:
+            content = self.content
+        out: dict[str, Any] = {"role": str(self.role), "content": content}
+        if self.reasoning_content is not None:
+            out["reasoning_content"] = self.reasoning_content
+        if self.tool_calls:
+            out["tool_calls"] = [tc.to_replay_dict() for tc in self.tool_calls]
+        if self.tool_call_id is not None:
+            out["tool_call_id"] = self.tool_call_id
+        return out
+
+    @classmethod
+    def from_replay_dict(cls, d: dict[str, Any]) -> Message:
+        raw_content = d.get("content", "")
+        content: str | list[ContentBlock]
+        if isinstance(raw_content, list):
+            content = [ContentBlock.from_dict(b) for b in raw_content]
+        else:
+            content = raw_content
+        return cls(
+            role=Role(d["role"]),
+            content=content,
+            reasoning_content=d.get("reasoning_content"),
+            tool_calls=[
+                ToolCall.from_replay_dict(tc) for tc in d.get("tool_calls", [])
             ],
             tool_call_id=d.get("tool_call_id"),
         )

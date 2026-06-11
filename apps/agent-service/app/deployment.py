@@ -4,37 +4,11 @@ Every ``@node`` not bound here defaults to the main ``agent-service`` app.
 App names must already exist in PaaS (create via ``/api/paas/apps/``
 before binding, otherwise the deploy step has nowhere to land).
 
-The whole message pipeline lives on the ``vectorize-worker`` Deployment —
-``hydrate_message`` consumes the MQ entry, ``vectorize`` does embedding,
-``save_fragment`` writes qdrant. Keeping them co-located avoids an extra
-RabbitMQ hop between vectorize and save_fragment.
-
-Memory v4 vectorize @nodes (``vectorize_memory_fragment`` /
-``vectorize_memory_abstract``) also live on ``vectorize-worker`` — they
-read from pg + write to qdrant, same I/O profile as ``vectorize`` and
-``save_fragment``, so co-locating avoids spinning up another worker
-deployment just for this lane.
+（v4 记忆向量化的 vectorize-worker 绑定随旧记忆机器整体删除；该 app 已无
+任何节点，Deployment 下线属运维动作。）
 """
-from app.nodes.hydrate_message import hydrate_message
-from app.nodes.memory_vectorize import (
-    vectorize_memory_abstract,
-    vectorize_memory_fragment,
-)
 from app.nodes.persist_tos_files import persist_tos_files_node
-from app.nodes.save_fragment import save_fragment
-from app.nodes.sync_life_state import sync_life_state_node
-from app.nodes.vectorize import vectorize
 from app.runtime import bind
-
-bind(hydrate_message).to_app("vectorize-worker")
-bind(vectorize).to_app("vectorize-worker")
-bind(save_fragment).to_app("vectorize-worker")
-bind(vectorize_memory_fragment).to_app("vectorize-worker")
-bind(vectorize_memory_abstract).to_app("vectorize-worker")
-
-# Phase 6 v4 Gap 4: durable consumer for ScheduleRevisionCreated runs in
-# agent-service main process. Replaces arq state_sync_worker (Task 8).
-bind(sync_life_state_node).to_app("agent-service")
 
 # Phase 6 v4 Gap 5: durable consumer for CommonMessageContentSynced runs
 # in the agent-service main process — matches the old asyncio.create_task

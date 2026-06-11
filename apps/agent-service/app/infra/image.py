@@ -92,8 +92,8 @@ class _ImageClient:
         Returns ``data`` dict on success, ``None`` on any failure.
 
         contract-allowed None (§4.8) for legacy-pinned reason: this client
-        has 4 call-sites in ``infra.image`` plus 3 external callers
-        (``_context_images.py``, ``vectorize.py``, ``agent/tools/_common.py``)
+        has 4 call-sites in ``infra.image`` plus external callers
+        (``_context_images.py``, ``agent/tools/_common.py``)
         that all branch on ``if data:`` / ``return_exceptions=True``. Migrating
         to ``raise CapabilityTimeout/CallFailed`` is correct per the contract
         but is a deliberate behavior change; tracked as backlog L1 follow-up
@@ -198,11 +198,10 @@ class _ImageClient:
     ) -> str | None:
         """Download an image and return it as a data URI.
 
-        contract-allowed None (§4.8): same legacy pin as ``_post`` — the
-        ``vectorize.py`` call site uses ``gather(return_exceptions=True)``
-        and filters by ``isinstance(r, str)``, so flipping to raise is
-        safe but is deferred to the dedicated image-client migration
-        (backlog L1)."""
+        contract-allowed None (§4.8): same legacy pin as ``_post`` — callers
+        branch on the falsy return (``gather(return_exceptions=True)`` /
+        ``isinstance(r, str)`` filtering), so flipping to raise is safe but
+        is deferred to the dedicated image-client migration (backlog L1)."""
         try:
             result = await self.process_image(file_key, message_id, bot_name)
             if not result:

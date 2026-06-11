@@ -6,7 +6,7 @@ Responsibilities:
 
 Construction of the actual client lives in ``app.agent.client`` (the neutral
 ``ModelClient`` + per-provider adapters). This module is the shared resolution
-seam: ``client`` / ``embedding`` / ``image_gen`` all call ``resolve_model_info``.
+seam: ``client`` / ``image_gen`` both call ``resolve_model_info``.
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ async def resolve_model_info(
 ) -> dict[str, Any]:
     """Resolve model_id to validated provider info.
 
-    Shared by the model client and embedding/image_gen modules.
+    Shared by the model client and image_gen modules.
     Raises ModelBuildError on missing / inactive / incomplete config.
     """
     try:
