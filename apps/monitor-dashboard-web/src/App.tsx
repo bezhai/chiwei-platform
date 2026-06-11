@@ -227,11 +227,6 @@ export default function App() {
               <div>
                 {!isMobile && <span className="header-kicker">dashboard / {currentPath === '/' ? 'service-status' : currentPath.slice(1)}</span>}
                 <span className="header-title">{pageTitle}</span>
-                {!isMobile && (
-                  <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.2, display: 'block' }}>
-                    {getLane() ? `lane context: ${getLane()}` : 'prod context'}
-                  </Text>
-                )}
               </div>
             </div>
 
