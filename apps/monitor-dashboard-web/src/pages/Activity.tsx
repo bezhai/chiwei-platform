@@ -1,9 +1,6 @@
 import { useEffect, useState, useCallback, type ReactNode } from 'react';
-import { Card, Col, Row, Statistic, Table, Typography, Space, Tag, Button, Modal, Tooltip } from 'antd';
+import { Card, Table, Typography, Space, Tag, Button, Modal, Tooltip } from 'antd';
 import {
-  MessageOutlined,
-  RobotOutlined,
-  TeamOutlined,
   ReloadOutlined,
   BookOutlined,
   FileTextOutlined,
@@ -418,38 +415,20 @@ export default function Activity() {
         </Tooltip>
       </div>
 
-      <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>今日消息总数</Text>}
-              value={Number(summary.today_total) || 0}
-              prefix={<MessageOutlined style={{ color: 'var(--muted)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>赤尾回复数</Text>}
-              value={Number(summary.today_bot_replies) || 0}
-              prefix={<RobotOutlined style={{ color: 'var(--primary)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>今日活跃群数</Text>}
-              value={Number(summary.today_active_groups) || 0}
-              prefix={<TeamOutlined style={{ color: 'var(--muted)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="ops-summary-strip">
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">今日消息</span>
+          <strong className="ops-summary-value">{Number(summary.today_total) || 0}</strong>
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">赤尾回复</span>
+          <strong className="ops-summary-value">{Number(summary.today_bot_replies) || 0}</strong>
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">活跃群</span>
+          <strong className="ops-summary-value">{Number(summary.today_active_groups) || 0}</strong>
+        </div>
+      </div>
 
       <Card bordered={false} className="content-card ops-table-shell" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table

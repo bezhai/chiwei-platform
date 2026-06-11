@@ -1,13 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Button, Card, Col, Row, Statistic, Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
+import { Button, Card, Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ClockCircleOutlined,
-  CloudServerOutlined,
-  DeploymentUnitOutlined,
   ReloadOutlined,
   DownOutlined,
   RightOutlined,
@@ -16,7 +14,7 @@ import { api } from '../api/client';
 
 dayjs.extend(relativeTime);
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 interface App {
   name: string;
@@ -248,39 +246,21 @@ export default function ServiceStatus() {
         </Tooltip>
       </div>
 
-      <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>总服务数</Text>}
-              value={apps.length}
-              prefix={<CloudServerOutlined style={{ color: 'var(--muted)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>运行中</Text>}
-              value={runningCount}
-              prefix={<CheckCircleOutlined style={{ color: 'var(--success)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 500, marginLeft: 8 }}>/ {failedCount} 异常</Text> : undefined}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>活跃泳道</Text>}
-              value={lanes.length}
-              prefix={<DeploymentUnitOutlined style={{ color: 'var(--accent)' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 30, color: 'var(--ink)', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="ops-summary-strip">
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">服务总数</span>
+          <strong className="ops-summary-value">{apps.length}</strong>
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">运行中</span>
+          <strong className="ops-summary-value">{runningCount}</strong>
+          {failedCount > 0 && <span className="ops-summary-meta danger">{failedCount} 异常</span>}
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">活跃泳道</span>
+          <strong className="ops-summary-value">{lanes.length}</strong>
+        </div>
+      </div>
 
       {laneBindings.length > 0 && (
         <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>

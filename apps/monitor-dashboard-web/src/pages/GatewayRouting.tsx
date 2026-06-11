@@ -17,7 +17,6 @@ import {
   Row,
   Select,
   Space,
-  Statistic,
   Switch,
   Table,
   Tag,
@@ -32,7 +31,6 @@ import {
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
-  HistoryOutlined,
   MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -790,30 +788,23 @@ export default function GatewayRouting() {
         </Space>
       </div>
 
-      <Row gutter={[16, 16]} className="gateway-stats">
-        <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="当前快照" value={`v${snapshot.version || 0}`} prefix={<HistoryOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Text type="secondary" className="gateway-stat-title">规则状态（总数 / 停用 / 启用）</Text>
-            <div className="gateway-rule-status-counts">
-              <span className="total">{rules.length}</span>
-              <span className="separator">/</span>
-              <span className="disabled">{disabledCount}</span>
-              <span className="separator">/</span>
-              <span className="enabled">{enabledCount}</span>
-            </div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={8}>
-          <Card bordered={false} className="content-card metric-card" bodyStyle={{ padding: '18px 20px' }}>
-            <Statistic title="最近变更" value={latestSnapshot ? formatTime(latestSnapshot.created_at) : '-'} />
-          </Card>
-        </Col>
-      </Row>
+      <div className="ops-summary-strip gateway-stats">
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">快照</span>
+          <strong className="ops-summary-value">v{snapshot.version || 0}</strong>
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">规则</span>
+          <strong className="ops-summary-value">{rules.length}</strong>
+          <span className="ops-summary-meta">
+            {disabledCount} 停用 / {enabledCount} 启用
+          </span>
+        </div>
+        <div className="ops-summary-item wide">
+          <span className="ops-summary-label">最近变更</span>
+          <strong className="ops-summary-value compact">{latestSnapshot ? formatTime(latestSnapshot.created_at) : '-'}</strong>
+        </div>
+      </div>
 
       <div className="gateway-workbench">
         <section className="gateway-panel gateway-rule-list-panel">
