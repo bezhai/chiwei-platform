@@ -79,6 +79,7 @@ def test_fetch_dataflow_compiles_into_production_graph():
         "chat",
         "fetch_dataflow",
         "life_dataflow",
+        "review_dataflow",
         "safety",
     ):
         importlib.reload(importlib.import_module(f"app.wiring.{sub}"))

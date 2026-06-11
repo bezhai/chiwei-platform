@@ -34,6 +34,7 @@ __all__ = [
     "insert_proactive_message",
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
+    "find_persona_spoken_chats_in_window",
     "update_messages_tos_files",
 ]
 
@@ -398,6 +399,83 @@ async def find_messages_with_user_chat_persona_in_chat(
             record = _record(msg)
             rows.append((record, record.username, chat_name, persona_id))
         return rows
+
+
+async def find_persona_spoken_chats_in_window(
+    *,
+    persona_id: str,
+    since_ms: int,
+    until_ms: int,
+    per_chat_limit: int,
+) -> list[tuple[str, str | None, list[tuple[CommonMessageRecord, str | None]]]]:
+    """她在窗口内**发过言**的 chat → 这些 chat 在窗口内的消息（睡前回顾的聊天证据）。
+
+    参与边界合同（spec 决策 2b）：她在 ``[since_ms, until_ms]`` 闭区间内发过言的
+    chat 才算她的经历——被动在场没吭声的群不算（chat 是被动唤起模型，她没被唤起
+    就没看见）。「她发过言」按 common 口径判：assistant 消息经
+    ``response_id == common_agent_response.session_id`` join 出 ``persona_id``。
+
+    每个够格的 chat 取窗口内消息（user + assistant，剔除 ``proactive_trigger``
+    伪消息），**条目数量控制不截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按
+    发生先后升序。每条消息带发言 persona（None = 用户消息 / 无归属），让回顾分
+    得清"她说的"和"别的 bot 说的"；身份字段（user_id / username / chat_type）
+    在 ``CommonMessageRecord`` 里。返回按 chat 维度分组：
+    ``[(chat_id, chat 显示名, [(record, 发言 persona), ...]), ...]``。
+    """
+    spoke_stmt = (
+        select(CommonMessage.common_conversation_id)
+        .join(
+            CommonAgentResponse,
+            CommonMessage.response_id == CommonAgentResponse.session_id,
+        )
+        .where(
+            CommonAgentResponse.persona_id == persona_id,
+            CommonMessage.role == "assistant",
+            CommonMessage.event_time >= since_ms,
+            CommonMessage.event_time <= until_ms,
+        )
+        .distinct()
+    )
+
+    out: list[tuple[str, str | None, list[tuple[CommonMessageRecord, str | None]]]] = []
+    async with auto_tx():
+        chat_ids = [row[0] for row in (await current_session().execute(spoke_stmt)).all()]
+        for chat_uuid in chat_ids:
+            name_row = await current_session().execute(
+                select(CommonConversation.display_name).where(
+                    CommonConversation.common_conversation_id == chat_uuid
+                )
+            )
+            chat_name = name_row.scalar_one_or_none()
+
+            # 窗口内消息按时间**降序取最近 N 条**（条目上限是"保最近"的语义），
+            # 再反转回升序——回顾按发生先后读一段对话。
+            msg_stmt = (
+                select(
+                    CommonMessage,
+                    CommonAgentResponse.persona_id.label("persona_id"),
+                )
+                .outerjoin(
+                    CommonAgentResponse,
+                    CommonMessage.response_id == CommonAgentResponse.session_id,
+                )
+                .where(
+                    CommonMessage.common_conversation_id == chat_uuid,
+                    CommonMessage.event_time >= since_ms,
+                    CommonMessage.event_time <= until_ms,
+                    or_(
+                        CommonMessage.message_type.is_(None),
+                        CommonMessage.message_type != "proactive_trigger",
+                    ),
+                )
+                .order_by(CommonMessage.event_time.desc())
+                .limit(per_chat_limit)
+            )
+            rows = (await current_session().execute(msg_stmt)).all()
+            entries = [(_record(msg), msg_persona) for msg, msg_persona in rows]
+            entries.reverse()
+            out.append((str(chat_uuid), chat_name, entries))
+    return out
 
 
 async def update_messages_tos_files(

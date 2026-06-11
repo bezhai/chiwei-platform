@@ -8,14 +8,24 @@ Sections, in order:
      hour-level life snapshot (prompt-cache friendly). Cold chain / read
      failure → the section is simply absent, no placeholder.
   2. Scene (p2p / group / proactive) — who she's talking to, why.
-  3. Life snapshot — where she is, what she's doing, how she feels *right now*,
+  3. Relationship page (only when it exists) — her own bedtime-review page
+     about the person she's talking to (trigger_user_id, p2p and group
+     alike). No trigger user / no page / read failure → absent, no
+     placeholder (spec decision 6).
+  4. Latest day page (only when it exists) — the most recent "yesterday"
+     she wrote at bedtime review, whatever life-day it covers. The
+     written_at stamp goes into the frame so she knows how old the memory
+     is. No page / read failure → absent.
+  5. Life snapshot — where she is, what she's doing, how she feels *right now*,
      read straight from the life engine's LifeState. This is the main subject:
      the 赤尾 talking to a real person is the 赤尾 living this moment.
 
+The thread of the order: who you're talking to → what they are to you →
+what your yesterday left you → who you are right now.
+
 There is no RAG recall here. She speaks from what her life already knows
-(the shared world stage + current_state + mood), nothing more — this keeps
-her information boundary (the arc is by writing discipline the progress
-everyone present already knows, so reading it adds nothing she wouldn't know).
+(the shared world stage + her own pages + current_state + mood), nothing
+more — the pages are her own writing, not retrieval.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ import logging
 
 from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
+from app.life.pages import read_latest_day_page, read_relationship_page
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
@@ -63,6 +74,68 @@ async def _build_life_state(persona_id: str) -> str:
     return f"你此刻正在：{current}"
 
 
+# 平直的第一人称框架标头（机制层，零剧情事实——角色名 / 日期 / 数字不进模板，
+# 宪法同 arc 透传）。「这页写于 X」让她知道这份记忆的新旧。
+_RELATIONSHIP_HEADER = (
+    "【你们的关系】这是你睡前回顾时写下的、关于正在和你说话的这个人的一页"
+)
+_DAY_HEADER = "【你的昨天】这是你睡前回顾时给自己写下的最近一页"
+
+
+async def _build_relationship_section(
+    persona_id: str, trigger_user_id: str | None
+) -> str:
+    """触发人的关系页段：p2p / 群聊都按 trigger_user_id 注（spec 决策 6）。
+
+    无触发人（proactive 可能缺位）/ 无页（第一次聊）/ narrative 空白 / 读失败
+    → 返回 ""，整段缺席不补占位。读失败只 log：页注入是上下文增强，绝不能
+    塌掉 chat（照 render_arc_awareness 的姿势）。
+    """
+    if not trigger_user_id:
+        return ""
+    try:
+        lane = current_deployment_lane() or "prod"
+        page = await read_relationship_page(
+            lane=lane, persona_id=persona_id, other_user_id=trigger_user_id
+        )
+    except Exception as e:
+        logger.warning(
+            "[%s] Failed to read relationship page for %s: %s",
+            persona_id,
+            trigger_user_id,
+            e,
+        )
+        return ""
+
+    if page is None:
+        return ""
+    narrative = page.narrative.strip()
+    if not narrative:
+        return ""
+    return f"{_RELATIONSHIP_HEADER}（这页写于 {page.written_at}）：\n{narrative}"
+
+
+async def _build_yesterday_section(persona_id: str) -> str:
+    """她最近一页昨天：跨日期取最新（哪个生活日不重要，最近写下的那页才是）。
+
+    无页（冷启动：她还没有昨天可忆）/ narrative 空白 / 读失败 → 返回 ""，
+    整段缺席不补占位，失败兜底同 _build_relationship_section。
+    """
+    try:
+        lane = current_deployment_lane() or "prod"
+        page = await read_latest_day_page(lane=lane, persona_id=persona_id)
+    except Exception as e:
+        logger.warning("[%s] Failed to read latest day page: %s", persona_id, e)
+        return ""
+
+    if page is None:
+        return ""
+    narrative = page.narrative.strip()
+    if not narrative:
+        return ""
+    return f"{_DAY_HEADER}（这页写于 {page.written_at}）：\n{narrative}"
+
+
 def _scene_section(
     chat_type: str,
     chat_name: str,
@@ -99,7 +172,8 @@ async def build_inner_context(
     is_proactive: bool = False,
     proactive_stimulus: str = "",
 ) -> str:
-    """Assemble inner_context: arc awareness (when present) + scene + life snapshot."""
+    """Assemble inner_context: arc (when present) + scene + her pages (when
+    present) + life snapshot."""
 
     sections: list[str] = []
 
@@ -117,6 +191,16 @@ async def build_inner_context(
     )
     if scene:
         sections.append(scene)
+
+    # 睡前回顾两页：场景之后、人生快照之前——你在和谁聊 → 你们的关系 →
+    # 你的昨天 → 你此刻状态。无页 / 无触发人 / 读失败 → 整段缺席不补占位。
+    relationship = await _build_relationship_section(persona_id, trigger_user_id)
+    if relationship:
+        sections.append(relationship)
+
+    yesterday = await _build_yesterday_section(persona_id)
+    if yesterday:
+        sections.append(yesterday)
 
     sections.append(await _build_life_state(persona_id))
 

@@ -68,6 +68,9 @@ from app.domain.world_events import (
 )
 from app.infra import cst_time
 from app.infra.redis import get_redis
+from app.life.living_day import living_day
+from app.life.pages import read_day_page  # module-level so tests can monkeypatch
+from app.life.review import run_day_review  # module-level so tests can monkeypatch
 from app.memory._persona import load_persona
 from app.nodes.life_tools import build_life_tools, fire_life_self_wake
 from app.runtime import node
@@ -681,6 +684,34 @@ async def _run_life_round(
     if arc_awareness:
         parts.append(arc_awareness)
 
+    # 她最近一页昨天（睡前回顾的产出，life 侧注入）：marker（day_reviewed_date）
+    # 记着最近回顾过的生活日，按它取那天的昨天页——"她记得昨天"。没回顾过
+    # （marker None）/ 页缺失 → 整段缺席不补占位（诚实的真空）。位置在世界阶段
+    # 之后、每轮都变的时刻行之前（稳定前缀区：页天级才变，不打散前缀缓存）。
+    # 信息差不破：页是她自己睡前写下的第一人称回顾，本来就是她的记忆。
+    # 读页失败绝不杀整个 life 轮（照 render_arc_awareness 的姿势）：注入是上下文
+    # 增强，失败只 log warning、整段缺席，本轮照常往下跑。
+    if snapshot is not None and snapshot.day_reviewed_date:
+        try:
+            day_page = await read_day_page(
+                lane=lane, persona_id=persona_id, date=snapshot.day_reviewed_date
+            )
+        except Exception as e:
+            logger.warning(
+                "[life_wake] %s/%s failed to read day page %s, section absent: %s",
+                lane,
+                persona_id,
+                snapshot.day_reviewed_date,
+                e,
+            )
+            day_page = None
+        if day_page is not None:
+            parts.append(
+                f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
+                f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
+                f"{day_page.narrative}"
+            )
+
     parts.append(f"现在是 {cst_time.to_cst_hm(observed_at)}。")
 
     # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
@@ -787,3 +818,25 @@ async def _run_life_round(
         lane, persona_id, wake_kind, len(read_ids),
         "yes" if self_wake.get("delay_ms") else "no", _LIFE_CD_SECONDS,
     )
+
+    # 快班睡前回顾（spec 决策 2 快班；主保证仍是凌晨对账 cron）：本轮收口后她
+    # **最新**的主观快照（本轮可能 update 过，所以现读）若标了 sleep、且这个
+    # 生活日（[04:00, 次日 04:00) 标签，23:30 入睡=当日、熬夜 01:30=前一日）还没
+    # 回顾过 → 就地跑一次睡前回顾，当晚就出页、次日凌晨聊天已可用。放在全部
+    # durable 收口（标已读 / 排下次醒 / cd）之后：回顾慢 / 失败都不影响本轮收口。
+    # run_day_review 自身 fail-open + single_flight + 锁内 marker 对账（绝不向上
+    # 抛、绝不杀 life 轮）；这里的 marker 预检查只是省一次锁。
+    latest = await find_life_state(lane=lane, persona_id=persona_id)
+    target_date = living_day(now)
+    if (
+        latest is not None
+        and latest.activity_type == "sleep"
+        and latest.day_reviewed_date != target_date
+    ):
+        await run_day_review(
+            lane=lane,
+            persona_id=persona_id,
+            target_date=target_date,
+            now=now,
+            trace_session_id=session_id,
+        )

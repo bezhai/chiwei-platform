@@ -345,3 +345,122 @@ async def test_event_round_reschedule_makes_old_self_stale_new_self_valid(life_s
     assert _life_self_wake_gate_passes(
         new_tick, next_wake_at=snap.next_wake_at, now=now
     ) is True, "重 schedule 后新 self wake 有效"
+
+
+# ---------------------------------------------------------------------------
+# day_reviewed_date —— 睡前回顾的当日 marker（additive 列，arc_reflected_date 同款）。
+#
+# 命门：LifeState 是 append-only、每个写点都整行重写——任何一个写点不沿用
+# day_reviewed_date，marker 就被静默清掉 → 同生活日重跑回顾（快班写完、收口一
+# update 就丢标 → 凌晨补班再跑一遍）。所以三个写点全测：save_life_state /
+# set_life_next_wake_at 沿用，mark_day_reviewed 落标且保留其余字段。
+# ---------------------------------------------------------------------------
+
+
+def test_lifestate_has_nullable_day_reviewed_date():
+    """LifeState 多一个 ``day_reviewed_date`` 字段，nullable（默认 None=从没回顾过）。"""
+    assert "day_reviewed_date" in LifeState.model_fields
+    snap = LifeState(
+        lane="x",
+        persona_id="akao",
+        current_state="c",
+        response_mood="m",
+        activity_type="a",
+        observed_at="t",
+    )
+    assert snap.day_reviewed_date is None
+
+
+@pytest.mark.integration
+async def test_mark_day_reviewed_sets_marker_preserving_all_fields(life_state_db):
+    """mark_day_reviewed 落生活日标签，沿用其余全部字段（主观快照 + next_wake_at 都不丢）。"""
+    from app.domain.life_state import mark_day_reviewed
+
+    await save_life_state(
+        lane="coe-t3", persona_id="akao",
+        current_state="躺下睡了", response_mood="平静", activity_type="sleep",
+        observed_at="2026-06-10T23:30:00+08:00",
+    )
+    target = "2026-06-11T07:00:00+08:00"
+    await set_life_next_wake_at(lane="coe-t3", persona_id="akao", next_wake_at=target)
+
+    await mark_day_reviewed(lane="coe-t3", persona_id="akao", date="2026-06-10")
+
+    snap = await find_life_state(lane="coe-t3", persona_id="akao")
+    assert snap is not None
+    assert snap.day_reviewed_date == "2026-06-10"
+    # 其余字段全保留（arc_reflected_date 同款教训：落标绝不毁别的状态）
+    assert snap.current_state == "躺下睡了"
+    assert snap.response_mood == "平静"
+    assert snap.activity_type == "sleep"
+    assert snap.observed_at == "2026-06-10T23:30:00+08:00"
+    assert snap.next_wake_at == target, "落 marker 不能丢自排意愿"
+
+
+@pytest.mark.integration
+async def test_save_life_state_carries_forward_day_reviewed_date(life_state_db):
+    """save_life_state（update 工具写点）append 新版时沿用 day_reviewed_date（不清）。
+
+    场景：快班 23:30 回顾成功落标 → 起夜 03:50 她又醒一轮、update 状态再睡——
+    若 save 把 marker 清掉，快班的"同生活日已回顾"失守、起夜那轮再触发一次回顾。
+    """
+    from app.domain.life_state import mark_day_reviewed
+
+    await save_life_state(
+        lane="coe-t3", persona_id="akao",
+        current_state="睡了", response_mood="平静", activity_type="sleep",
+        observed_at="2026-06-10T23:30:00+08:00",
+    )
+    await mark_day_reviewed(lane="coe-t3", persona_id="akao", date="2026-06-10")
+
+    # 起夜：update 换状态（没有回顾动作）
+    await save_life_state(
+        lane="coe-t3", persona_id="akao",
+        current_state="起夜喝了口水又躺回去", response_mood="迷糊", activity_type="sleep",
+        observed_at="2026-06-11T03:50:00+08:00",
+    )
+
+    snap = await find_life_state(lane="coe-t3", persona_id="akao")
+    assert snap.day_reviewed_date == "2026-06-10", (
+        "save_life_state 不该清 day_reviewed_date（否则起夜再睡会同生活日重跑回顾）"
+    )
+
+
+@pytest.mark.integration
+async def test_set_life_next_wake_at_carries_forward_day_reviewed_date(life_state_db):
+    """set_life_next_wake_at（schedule 收口写点）沿用 day_reviewed_date（不清）。"""
+    from app.domain.life_state import mark_day_reviewed
+
+    await save_life_state(
+        lane="coe-t3", persona_id="akao",
+        current_state="睡了", response_mood="平静", activity_type="sleep",
+        observed_at="2026-06-10T23:30:00+08:00",
+    )
+    await mark_day_reviewed(lane="coe-t3", persona_id="akao", date="2026-06-10")
+
+    await set_life_next_wake_at(
+        lane="coe-t3", persona_id="akao", next_wake_at="2026-06-11T07:00:00+08:00"
+    )
+
+    snap = await find_life_state(lane="coe-t3", persona_id="akao")
+    assert snap.day_reviewed_date == "2026-06-10", (
+        "set_life_next_wake_at 不该清 day_reviewed_date"
+    )
+
+
+@pytest.mark.integration
+async def test_mark_day_reviewed_cold_start_no_snapshot_is_safe(life_state_db):
+    """从没活过一轮（无 LifeState）时 mark_day_reviewed 安全跳过：不抛、不造占位假状态。
+
+    与 mark_arc_reflected 的冷启占位不同：life 的回顾对同一 target_date 只有两班
+    （快班要求 LifeState 存在才可能触发；主班 cron 每个 target_date 只对账一次），
+    无快照时没有第二班会重跑同一 target，跳过不丢语义；造空字符串占位快照反而会
+    被 life 轮的冷启恢复段当成"上次记得自己在做："喂出怪话。
+    """
+    from app.domain.life_state import mark_day_reviewed
+
+    await mark_day_reviewed(lane="coe-t3", persona_id="never", date="2026-06-10")
+
+    assert await find_life_state(lane="coe-t3", persona_id="never") is None, (
+        "无快照时不造占位假状态"
+    )

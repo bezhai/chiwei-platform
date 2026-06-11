@@ -50,6 +50,7 @@ from app.domain.world_events import (
     EventRead,
 )
 from app.fetch.materials import DailyMaterials
+from app.life.pages import DayPage, RelationshipPage
 from app.runtime.persist import insert_idempotent
 from app.world.arc import WorldArc
 from app.world.attention import WorldAttention
@@ -138,6 +139,10 @@ async def world_db(test_db):
     # world 每轮按 (lane, 今天) 查当天外部底料（engine 的 find_daily_materials 真打
     # 这张表）——不建它，闭环里每个 world_tick 都死在 UndefinedTableError。
     await migrate(DailyMaterials, test_db)
+    # 睡前回顾的两张页（昨天页 + 关系页）。当前闭环还没接回顾触发（Task 2 接线），
+    # 先把表建齐——接上后 life 轮收口会真打它们，缺表同样死 UndefinedTableError。
+    await migrate(DayPage, test_db)
+    await migrate(RelationshipPage, test_db)
     yield test_db
 
 

@@ -13,8 +13,9 @@ EXPECTED_FUNCTIONS = {
     # persona (5)
     "find_persona", "list_all_persona_ids", "resolve_persona_id",
     "resolve_bot_name_for_persona", "find_bot_names_for_persona",
-    # messages (13 — find_context_messages_for_anchors 随旧 RAG 管线删除；
-    # find_messages_in_range / find_group_name 随 v4 afterthought 删除)
+    # messages (14 — find_context_messages_for_anchors 随旧 RAG 管线删除；
+    # find_messages_in_range / find_group_name 随 v4 afterthought 删除；
+    # find_persona_spoken_chats_in_window 随睡前回顾新增)
     "find_cross_chat_messages", "find_message_content",
     "find_username", "find_group_download_permission",
     "find_message_by_id", "find_last_bot_reply_time",
@@ -23,6 +24,7 @@ EXPECTED_FUNCTIONS = {
     "insert_proactive_message",
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
+    "find_persona_spoken_chats_in_window",
     "update_messages_tos_files",
     # agent_response (5)
     "create_pending_agent_response", "set_agent_response_bot",

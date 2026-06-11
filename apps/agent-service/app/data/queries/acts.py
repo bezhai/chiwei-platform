@@ -102,3 +102,45 @@ async def list_recent_acts(
             )
             for row in rows
         ]
+
+
+async def list_persona_acts_between(
+    *,
+    lane: str,
+    persona_id: str,
+    start_iso: str,
+    end_iso: str,
+) -> list[ActPerformed]:
+    """读某 persona 在 ``[start_iso, end_iso]`` 闭区间内做过的 act（睡前回顾的证据查询）。
+
+    与 :func:`list_recent_acts`（world 的消费游标 pull）语义相反：回顾看的是
+    「这个生活日**她**经历了什么」，所以按 ``occurred_at``（她做事的时刻）过滤、
+    按它升序讲一天的先后——不用落库时刻（落库序是消费游标的事，两个口径互不混用）。
+
+    窗口两端 ISO 文本在 SQL 侧 ``::text::timestamptz`` cast 后按真实时刻比较
+    （occurred_at 历史上有 CST / UTC 两种 aware ISO，cast 后同一口径，不漏熬夜
+    写成 UTC 的行；cast 写法的 asyncpg bind 类型坑同 list_recent_acts）。
+    lane + persona 双过滤：只读她自己的、泳道隔离。
+    """
+    sql = (
+        f"SELECT * FROM {_ACT_TABLE} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"AND occurred_at::timestamptz >= (:start_iso)::text::timestamptz "
+        f"AND occurred_at::timestamptz <= (:end_iso)::text::timestamptz "
+        f"ORDER BY occurred_at::timestamptz ASC, act_id ASC"
+    )
+    async with get_session() as s:
+        result = await s.execute(
+            text(sql),
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+            },
+        )
+        rows = result.mappings().all()
+        return [
+            ActPerformed(**{k: row[k] for k in ActPerformed.model_fields})
+            for row in rows
+        ]
