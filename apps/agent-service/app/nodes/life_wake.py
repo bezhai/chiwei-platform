@@ -54,7 +54,9 @@ from typing import Annotated
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
+from app.agent.sediment import build_life_fold_policy
 from app.agent.session import load_session
+from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.mailbox import list_unread_events, mark_events_read
 from app.domain.arc_awareness import render_arc_awareness
@@ -800,6 +802,25 @@ async def _run_life_round(
     # 一次 update 都没调也照常标已读——她看了但没改状态，正常。self 唤醒空信箱时
     # read_ids 为空，mark_events_read([]) 无副作用、安全。
     await mark_events_read(lane=lane, persona_id=persona_id, event_ids=read_ids)
+
+    # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里
+    # durable 落定（两阶段解耦），这里在同一串行窗口（仍在单飞锁内）做其后的独立
+    # 折叠步骤——达到阈值就把整卷压成她自己口吻的沉淀段 + marker 保全行。位置在
+    # 标已读之后、**排下次醒之前**（codex T3 必改 1）：沉淀是一次离线 LLM 调用
+    # （最长 120s，硬超时见 app.agent.sediment），全程占着单飞锁——若先排
+    # self-wake，短延迟的自排会在折叠期间到达撞锁，而 self tick 撞锁是直接被吞
+    # 的（不像事件唤醒有 reschedule 保底）；fold 完成后才开始给下一轮自排计时，
+    # 撞锁窗口消失。fold_session 整段 fail-open（绝不抛），失败本版不折、下轮
+    # 再试。也在睡前回顾之前：回顾读到的就是折叠后形态（沉淀段+近期原文，spec
+    # 钉为设计行为）。成本入账在沉淀回调内自带独立 collect_usage 作用域
+    # （actor = f"{persona_id}:sediment"），在上面本轮 collect_usage 之外调用
+    # ——绝不混进已落账的本体 usage。
+    await fold_session(
+        session_id,
+        build_life_fold_policy(
+            lane=lane, persona_id=persona_id, session_id=session_id, round_id=round_id
+        ),
+    )
 
     # 收口排下次醒（阶段 1B Task 2）：本轮若调过 schedule，self_wake 里有 delay_ms ——
     # fire 算目标时刻、写进 LifeState.next_wake_at、emit 至多一条 self LifeWakeTick

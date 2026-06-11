@@ -76,19 +76,34 @@ async def load_session(session_id: str) -> list[Message]:
     value (should not happen — we write it) is treated the same way, logged,
     rather than crashing the run.
     """
+    messages, _ver = await load_session_versioned(session_id)
+    return messages
+
+
+async def load_session_versioned(session_id: str) -> tuple[list[Message], int]:
+    """Like :func:`load_session`, but also return the stored version it read.
+
+    The version is the optimistic-concurrency token for
+    :func:`replace_session`'s ``expected_ver``: a fold loads ``(messages,
+    ver)``, spends a long LLM call, then replaces only if the transcript is
+    still at that ver (nobody appended meanwhile). Missing row → ``([], 0)``
+    (cold start; ver 0 matches ``insert_append``'s ``COALESCE(MAX(ver), 0)``
+    base). A corrupt value still reports the row's real ver — the caller is
+    looking at *that* version, however unreadable its payload.
+    """
     row = await select_latest(SessionTranscript, {"session_id": session_id})
     if row is None:
-        return []
+        return [], 0
     try:
         payload = json.loads(row.transcript_json)
-        return [Message.from_replay_dict(d) for d in payload]
+        return [Message.from_replay_dict(d) for d in payload], row.ver
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning(
             "agent session %s transcript unreadable, cold-starting: %s",
             session_id,
             exc,
         )
-        return []
+        return [], row.ver
 
 
 async def append_session(session_id: str, new_messages: list[Message]) -> None:
@@ -102,13 +117,57 @@ async def append_session(session_id: str, new_messages: list[Message]) -> None:
     if not new_messages:
         return
     existing = await load_session(session_id)
-    combined = _cap_transcript(existing + new_messages, session_id)
+    await _store_transcript(session_id, existing + new_messages)
+
+
+async def replace_session(
+    session_id: str,
+    messages: list[Message],
+    *,
+    expected_ver: int | None = None,
+) -> bool:
+    """Overwrite the transcript wholesale as a new version (折叠写回用).
+
+    Unlike ``append_session`` this does NOT read-modify-write: the caller
+    (``app.agent.session_fold``) has already computed the full replacement.
+    A wholesale overwrite computed from a *stale* read would silently swallow
+    whatever was appended in between, so the caller passes ``expected_ver`` —
+    the version it loaded the transcript at (:func:`load_session_versioned`).
+    The write only lands if the stored version is still exactly that
+    (``insert_append``'s atomic check-and-insert); returns whether it landed.
+    ``False`` = somebody appended meanwhile (e.g. the serialisation lock
+    expired mid-LLM and a new round slipped in) — nothing was written, the
+    caller decides what losing the race means. ``expected_ver=None`` keeps
+    the unconditional overwrite (still under the caller's serialisation
+    guarantee). Old versions stay as durable history. Empty ``messages`` is
+    a no-op (never wipe a transcript by accident) and reports ``False`` —
+    nothing was written.
+    """
+    if not messages:
+        return False
+    return await _store_transcript(session_id, messages, expected_ver=expected_ver)
+
+
+async def _store_transcript(
+    session_id: str,
+    messages: list[Message],
+    *,
+    expected_ver: int | None = None,
+) -> bool:
+    """Cap, serialise losslessly, and write one new ``SessionTranscript`` version.
+
+    With ``expected_ver`` the write is the CAS variant (see
+    :func:`replace_session`); returns whether a row was actually written.
+    """
+    combined = _cap_transcript(messages, session_id)
     transcript_json = json.dumps(
         [m.to_replay_dict() for m in combined], ensure_ascii=False
     )
-    await insert_append(
-        SessionTranscript(session_id=session_id, transcript_json=transcript_json)
+    written = await insert_append(
+        SessionTranscript(session_id=session_id, transcript_json=transcript_json),
+        expected_current_ver=expected_ver,
     )
+    return written == 1
 
 
 def _replay_bytes(messages: list[Message]) -> int:

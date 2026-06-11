@@ -82,7 +82,9 @@ from typing import Annotated
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
+from app.agent.sediment import build_world_fold_policy
 from app.agent.session import load_session
+from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.acts import list_recent_acts
 from app.data.queries.mailbox import renotify_unread
@@ -989,6 +991,23 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         lane=lane,
         advance_cursor_to=advance_cursor_to,
         materials_ingested_date=mark_ingested_date,
+    )
+
+    # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里
+    # durable 落定（两阶段解耦），这里在同一串行窗口（仍在 actor 锁内）做其后的独立
+    # 折叠步骤——达到阈值就把整卷压成推演者口吻的当天梗概 + marker 保全行（终点
+    # 游标随 marker 原样保全，游标补推不受折叠影响）。位置在收口（推进游标 / 标
+    # 底料）之后、**排下次醒之前**（codex T3 必改 1）：沉淀是一次离线 LLM 调用
+    # （最长 120s，硬超时见 app.agent.sediment），全程占着 actor 单飞锁——若先排
+    # self-wake，短 sleep（最短 60s）的自排会在折叠期间到达撞锁被吞（world 的
+    # 锁冲突一律吞掉、无 reschedule 保底）；fold 完成后才开始给下一轮自排计时，
+    # 撞锁窗口消失。fold_session 整段 fail-open（绝不抛），失败本版不折、下轮
+    # 再试。成本入账在沉淀回调内自带独立 collect_usage 作用域（actor =
+    # "world:sediment"），在上面本轮 collect_usage 之外调用——绝不混进 world 本体
+    # 已落账的 usage。
+    await fold_session(
+        session_id,
+        build_world_fold_policy(lane=lane, session_id=session_id, round_id=round_id),
     )
 
     # 循环收口后 emit 至多一条 self WorldTick（唤醒风暴命门）：sleep 工具把"下次几时
