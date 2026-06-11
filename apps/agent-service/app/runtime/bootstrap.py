@@ -107,12 +107,23 @@ async def prepare_for_run(
 ) -> None:
     """Unified startup helper for FastAPI + worker entries. See module docstring.
 
-    Phase order is load-graph -> register-trigger-wire -> (opt)
-    declare-durable-topology. Reversing any of these would either let
-    compile_graph snapshot a registry without the trigger wire (durable
+    Phase order is config-wiring -> load-graph -> register-trigger-wire ->
+    (opt) declare-durable-topology. Reversing the graph phases would either
+    let compile_graph snapshot a registry without the trigger wire (durable
     consumers then drop trigger envelopes) or let a producer publish
     before its consumer's queue exists (broker silently drops).
     """
+    # Phase 0: process-level config wiring. Dynamic Config resolves
+    # per-lane; both entries (FastAPI lifespan / worker runtime_entry) go
+    # through here, so the provider is set no matter which process boots —
+    # wiring it in only one entry would leave the other reading prod
+    # config on coe/ppe lanes (the classic dual-entry footgun).
+    from inner_shared.dynamic_config import dynamic_config
+
+    from app.runtime.lane_policy import current_deployment_lane
+
+    dynamic_config.set_lane_provider(current_deployment_lane)
+
     # Phase 1+2: register all @node / wire() / bind() side-effects, then
     # compile_graph to validate the topology.
     load_dataflow_graph()

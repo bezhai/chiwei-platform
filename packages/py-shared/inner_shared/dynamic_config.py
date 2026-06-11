@@ -43,6 +43,16 @@ class DynamicConfig:
         self._cache: dict[str, tuple[dict[str, dict[str, str]], float]] = {}
         self._lock = threading.Lock()
 
+    def set_lane_provider(
+        self, lane_provider: Callable[[], str | None]
+    ) -> None:
+        """设置 lane provider（进程启动时调用一次）。
+
+        provider 返回 None / 空串时退回 "prod"——与各 app 的
+        ``current_deployment_lane()``（prod 部署返回 None）口径天然对齐。
+        """
+        self._lane_provider = lane_provider
+
     def _get_lane(self) -> str:
         if self._lane_provider:
             lane = self._lane_provider()

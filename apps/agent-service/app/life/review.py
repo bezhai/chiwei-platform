@@ -44,6 +44,11 @@ from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.session import load_session  # module-level so tests can monkeypatch
+from app.agent.session_fold import (
+    is_fold_message,
+    split_fold_message,
+    strip_round_markers,
+)
 from app.agent.trace import collect_usage, make_session_id
 from app.data.message_record import CommonMessageRecord
 from app.data.queries.acts import (  # module-level so tests can monkeypatch
@@ -135,13 +140,25 @@ def _transcript_evidence(day_sessions: list[tuple[str, list[Message]]]) -> str:
 
     工具结果（TOOL role）是机械确认文本（"状态已更新"），不进证据；空文本条目跳过。
     两个自然日都空 → 如实说没有记录。条目级取舍、绝不字符截断。
+
+    机制载荷过滤（折叠铁律③）：round marker 是 turn 幂等的机器标记、不是她的感知，
+    绝不能喂给回顾——折叠消息只取沉淀正文（那是她的记忆固化，载荷段整段丢）；
+    普通 stimulus 里的 marker 行摘掉后正文照常进证据。
     """
     sections: list[str] = []
     for date, history in day_sessions:
         lines = []
         for m in history:
-            text = m.text().strip()
-            if not text or m.role not in (Role.USER, Role.ASSISTANT):
+            if m.role not in (Role.USER, Role.ASSISTANT):
+                continue
+            if is_fold_message(m):
+                sediment, _markers = split_fold_message(m)
+                sediment = sediment.strip()
+                if sediment:
+                    lines.append(f"〔这之前的经历，你记得〕{sediment}")
+                continue
+            text = strip_round_markers(m.text()).strip()
+            if not text:
                 continue
             prefix = "你当时感知到" if m.role == Role.USER else "你当时想着 / 说做了"
             lines.append(f"〔{prefix}〕{text}")

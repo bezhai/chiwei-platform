@@ -36,6 +36,7 @@ from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.domain.world_events import EVENT_KIND_EXTERNAL
 from app.infra.cst_time import now_cst_iso
+from app.life.feed_whitelist import should_feed_chat_to_life
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
 from app.runtime.emit import emit
@@ -373,6 +374,16 @@ async def _replay_conversation_to_mailbox(
         logger.info(
             "skip conversation replay: session_id missing (persona=%s, user=%s)",
             req.persona_id, req.user_id,
+        )
+        return
+    # life 感知白名单（spec Task 5 成本止血）：只有白名单内的群的对话回灌进
+    # life；白名单外/空配置（fail-closed）的群聊跳过。p2p 不过滤。这里只挡
+    # deliver_event 这一处回灌——chat 回复和安全链早已走完，不受影响。
+    if not await should_feed_chat_to_life(chat_id=req.chat_id, is_p2p=req.is_p2p):
+        logger.info(
+            "skip life feed: chat %s not in life_feed_chat_whitelist "
+            "(persona=%s)",
+            req.chat_id, req.persona_id,
         )
         return
     lane = current_deployment_lane() or "prod"

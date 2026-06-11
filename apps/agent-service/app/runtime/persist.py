@@ -4,7 +4,9 @@ Four operations, deliberately minimal:
 
   - :func:`insert_append` — durable write with runtime-maintained ``Version``
     auto-increment. Concurrency-safe via ``pg_advisory_xact_lock`` keyed on
-    the natural-key tuple.
+    the natural-key tuple. Optional ``expected_current_ver`` turns the append
+    into an optimistic CAS (write only if ``MAX(ver)`` is still the version
+    the caller loaded; the check rides inside the INSERT statement itself).
   - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (<target>) DO
     NOTHING RETURNING 1``. Conflict target is ``Meta.dedup_column`` when
     the Data class specifies one (adoption mode for pre-existing tables
@@ -144,7 +146,9 @@ def _dedup_hash(obj: Data) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-async def insert_append(obj: Data) -> int:
+async def insert_append(
+    obj: Data, *, expected_current_ver: int | None = None
+) -> int:
     """Append ``obj`` as a new row; auto-assign ``Version`` if declared.
 
     Holds a per-key ``pg_advisory_xact_lock`` during ``MAX(ver)`` read and
@@ -155,15 +159,29 @@ async def insert_append(obj: Data) -> int:
     unrelated keys are benign (they serialize more than strictly necessary,
     never miss a lock).
 
-    Always returns ``1`` on success. A ``UniqueViolation`` on
-    ``dedup_hash`` is raised (not swallowed): because the version column
-    is folded into the hash, a collision means two writers slipped past
-    the advisory lock — an upstream bug worth surfacing loudly.
+    ``expected_current_ver`` (optimistic concurrency, requires a ``Version``
+    column): append only if the key's current ``MAX(ver)`` still equals this
+    value, i.e. nobody appended since the caller read that version. The check
+    rides **inside the INSERT itself** (``INSERT ... SELECT ... WHERE (SELECT
+    MAX(ver) ...) = :expected``) so check and write are one atomic statement —
+    no TOCTOU window even against a writer that bypassed the advisory lock.
+    Returns ``1`` when written, ``0`` when stale (someone advanced the
+    version); the caller decides what a lost race means.
+
+    Without ``expected_current_ver`` the behavior is unchanged: always
+    returns ``1`` on success. A ``UniqueViolation`` on ``dedup_hash`` is
+    raised (not swallowed): because the version column is folded into the
+    hash, a collision means two writers slipped past the advisory lock — an
+    upstream bug worth surfacing loudly.
     """
     cls = type(obj)
     table = _table_name(cls)
     ver_col = version_field(cls)
     keys = key_fields(cls)
+    if expected_current_ver is not None and not ver_col:
+        raise ValueError(
+            f"{cls.__name__}: expected_current_ver requires a Version column"
+        )
 
     cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
     key_tuple = tuple(getattr(obj, k) for k in keys)
@@ -174,8 +192,12 @@ async def insert_append(obj: Data) -> int:
             text("SELECT pg_advisory_xact_lock(:k)"),
             {"k": lock_key},
         )
-        if ver_col:
-            where = " AND ".join(f"{k} = :{k}" for k in keys)
+        where = " AND ".join(f"{k} = :{k}" for k in keys)
+        if expected_current_ver is not None:
+            # CAS path: the version to write is pinned to expected+1; whether
+            # expected still holds is judged by the INSERT's own WHERE below.
+            cols_map[ver_col] = expected_current_ver + 1
+        elif ver_col:
             r = await s.execute(
                 text(
                     f"SELECT COALESCE(MAX({ver_col}), 0) FROM {table} "
@@ -195,6 +217,19 @@ async def insert_append(obj: Data) -> int:
         jsonb_cols = _jsonb_columns(cls)
         cols = list(cols_map.keys())
         placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
+        if expected_current_ver is not None:
+            # Atomic check-and-insert: key columns are part of cols_map, so the
+            # subquery's :{k} binds reuse the same params (same values).
+            sql = (
+                f"INSERT INTO {table} ({', '.join(cols)}) "
+                f"SELECT {placeholders} "
+                f"WHERE (SELECT COALESCE(MAX({ver_col}), 0) FROM {table} "
+                f"WHERE {where}) = :_expected_ver RETURNING 1"
+            )
+            params = _encode_params(obj, cols_map, jsonb_cols)
+            params["_expected_ver"] = expected_current_ver
+            r = await s.execute(text(sql), params)
+            return len(r.fetchall())
         sql = (
             f"INSERT INTO {table} ({', '.join(cols)}) "
             f"VALUES ({placeholders})"
