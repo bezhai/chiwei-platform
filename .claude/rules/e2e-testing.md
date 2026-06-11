@@ -8,7 +8,7 @@
 
 飞书 dev bot 测试可走 `ppe-<name>` 或 `coe-<name>`，由你的改动会写什么决定：
 
-- **`ppe-<name>`（共用 prod 组件）**：表 / 历史 / 种子配置都用线上的，开箱即用。代价：dev bot 触发的所有写入（消息记录、recall、vectorize、新表新字段）直接落 prod，schema 变更或脏数据会污染线上历史。**适合**：纯读路径、prompt 调优、不动 DB 的逻辑。
+- **`ppe-<name>`（共用 prod 组件）**：表 / 历史 / 种子配置都用线上的，开箱即用。代价：dev bot 触发的所有写入（消息记录、recall、新表新字段）直接落 prod，schema 变更或脏数据会污染线上历史。**适合**：纯读路径、prompt 调优、不动 DB 的逻辑。
 - **`coe-<name>`（独立 chiwei-test 容器）**：写入只影响 chiwei-test，破坏不外溢。代价是要**提前准备 chiwei-test 数据**：
   - **schema**：`ensure_business_schema()` 在 coe-* 启动时自动建，但只覆盖 framework 注册过的 Data；新加的表 / 字段没注册就建不出来，要先在 framework 里注册
   - **种子数据**：dev bot 跑通必须读到的 user / persona / bot 配置等，要从 prod dump 一份到 chiwei-test 对应库
@@ -31,8 +31,8 @@
   → channel-proxy-prod  (/webhook/{bot}/event, lane_routing 查询)
   → channel-server-{lane}  (/api/internal/lark-event, x-lane 注入 context)
   → agent-service-{lane} (POST /chat/sse, LaneRouter 根据 context lane 路由)
-  → safety_check_{lane} 队列 → vectorize_{lane} 队列 → recall_{lane} 队列
-  → chat-response-worker → channel-server → 飞书回复
+  → chat_response_{lane} 队列
+  → chat-response-worker → 飞书回复
 ```
 
 ## channel-proxy 自身测试（特殊流程）
