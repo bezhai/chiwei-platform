@@ -25,7 +25,9 @@ import pytest
 from app.life.pages import (
     DayPage,
     RelationshipPage,
+    day_page_exists,
     read_day_page,
+    read_day_page_before,
     read_latest_day_page,
     read_relationship_page,
     read_relationship_pages,
@@ -179,6 +181,62 @@ async def test_day_page_lane_isolation(pages_db):
 
 
 # ---------------------------------------------------------------------------
+# 按确切生活日查存在性：对账班「那天回顾过没有」的权威口径（事故修复）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_day_page_exists_for_exact_date(pages_db):
+    """该 (lane, persona, date) 有页（任何版本）→ True；没写过的日期 → False。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-10",
+        narrative="六月十日的几笔。",
+        written_at="2026-06-10T23:40:00+08:00",
+    )
+
+    assert await day_page_exists(lane="coe-t1", persona_id="akao", date="2026-06-10")
+    assert not await day_page_exists(
+        lane="coe-t1", persona_id="akao", date="2026-06-09"
+    )
+
+
+@pytest.mark.integration
+async def test_day_page_exists_checks_exact_date_not_latest(pages_db):
+    """别的生活日有页（哪怕更新的）不影响目标日的判定——按确切 date 查，不是
+    跨日取最新（对账班误判的修复口径就在这条）。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-12",
+        narrative="回笼觉那张两小时的小页。",
+        written_at="2026-06-12T06:06:00+08:00",
+    )
+
+    assert not await day_page_exists(
+        lane="coe-t1", persona_id="akao", date="2026-06-11"
+    )
+
+
+@pytest.mark.integration
+async def test_day_page_exists_lane_and_persona_isolation(pages_db):
+    """泳道与 persona 隔离：别的泳道 / 别的姐妹的页不算这条链的存在。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-10",
+        narrative="赤尾的页。",
+        written_at="2026-06-10T23:40:00+08:00",
+    )
+
+    assert not await day_page_exists(lane="prod", persona_id="akao", date="2026-06-10")
+    assert not await day_page_exists(
+        lane="coe-t1", persona_id="ayana", date="2026-06-10"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 最近一页昨天：跨日期取最新（chat / life 注入的读口）
 # ---------------------------------------------------------------------------
 
@@ -255,6 +313,126 @@ async def test_read_latest_day_page_lane_and_persona_isolation(pages_db):
 
     assert await read_latest_day_page(lane="prod", persona_id="akao") is None
     assert await read_latest_day_page(lane="coe-t1", persona_id="ayana") is None
+
+
+# ---------------------------------------------------------------------------
+# 严格早于某生活日的最近一页：life 注入「她最近一页昨天」的读口（事故修复）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_read_day_page_before_skips_current_living_day(pages_db):
+    """今天凌晨的短页（回笼觉快班写的）和昨天的完整页同时存在 → 取昨天那页：
+    口径是 date **严格早于**上界，当天的页绝不混进「上一页日子」。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-11",
+        narrative="六月十一日完整的一页。",
+        written_at="2026-06-11T23:40:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-12",
+        narrative="回笼觉那张两小时的小页。",
+        written_at="2026-06-12T06:06:00+08:00",
+    )
+
+    page = await read_day_page_before(
+        lane="coe-t1", persona_id="akao", before_date="2026-06-12"
+    )
+    assert page is not None
+    assert page.date == "2026-06-11", "上界当天的页不算「昨天」（严格早于）"
+    assert page.narrative == "六月十一日完整的一页。"
+
+
+@pytest.mark.integration
+async def test_read_day_page_before_only_current_day_returns_none(pages_db):
+    """只有今天（上界当日）的页 → None：没有更早的页可当「昨天」，缺席不补占位。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-12",
+        narrative="今天凌晨的小页。",
+        written_at="2026-06-12T06:06:00+08:00",
+    )
+
+    assert (
+        await read_day_page_before(
+            lane="coe-t1", persona_id="akao", before_date="2026-06-12"
+        )
+        is None
+    )
+
+
+@pytest.mark.integration
+async def test_read_day_page_before_cold_start_returns_none(pages_db):
+    """一页都没有（冷启动：她还没有昨天可忆）→ None，行为与现状「无页」一致。"""
+    assert (
+        await read_day_page_before(
+            lane="coe-t1", persona_id="akao", before_date="2026-06-12"
+        )
+        is None
+    )
+
+
+@pytest.mark.integration
+async def test_read_day_page_before_takes_latest_version_of_newest_earlier_date(
+    pages_db,
+):
+    """更早日期里取 date 最大那天、且取该天版本最新的一版（快班写过、对账班重写）。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-10",
+        narrative="六月十日的页。",
+        written_at="2026-06-10T23:40:00+08:00",
+    )
+    keys = {"lane": "coe-t1", "persona_id": "akao", "date": "2026-06-11"}
+    await write_day_page(
+        **keys,
+        narrative="第一版：快班写的。",
+        written_at="2026-06-11T23:40:00+08:00",
+    )
+    await write_day_page(
+        **keys,
+        narrative="第二版：对账班重写的。",
+        written_at="2026-06-12T05:00:00+08:00",
+    )
+
+    page = await read_day_page_before(
+        lane="coe-t1", persona_id="akao", before_date="2026-06-12"
+    )
+    assert page is not None
+    assert page.date == "2026-06-11"
+    assert page.version == 2
+    assert page.narrative == "第二版：对账班重写的。"
+
+
+@pytest.mark.integration
+async def test_read_day_page_before_lane_and_persona_isolation(pages_db):
+    """泳道与 persona 隔离：别的泳道 / 别的姐妹的页绝不串读。"""
+    await write_day_page(
+        lane="coe-t1",
+        persona_id="akao",
+        date="2026-06-11",
+        narrative="赤尾的页。",
+        written_at="2026-06-11T23:40:00+08:00",
+    )
+
+    assert (
+        await read_day_page_before(
+            lane="prod", persona_id="akao", before_date="2026-06-12"
+        )
+        is None
+    )
+    assert (
+        await read_day_page_before(
+            lane="coe-t1", persona_id="ayana", before_date="2026-06-12"
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

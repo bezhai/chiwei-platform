@@ -190,11 +190,17 @@ def patched(monkeypatch):
             persona_lite=f"{persona_id} 的人设",
         )
 
+    # 「她最近一页昨天」注入读口：每轮都会读（不再依赖 marker），打桩成无页
+    # ——本文件不测注入形态（那在 test_life_wake_day_review.py），只防真连 PG。
+    async def fake_read_day_page_before(*, lane, persona_id, before_date):
+        return None
+
     monkeypatch.setattr(lw, "find_life_state", fake_find)
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
     monkeypatch.setattr(lw, "load_persona", fake_load_persona)
     monkeypatch.setattr(lw, "load_session", fake_load_session)
+    monkeypatch.setattr(lw, "read_day_page_before", fake_read_day_page_before)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
     monkeypatch.setattr(lt, "perform_act", fake_act)
