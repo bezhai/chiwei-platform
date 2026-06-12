@@ -13,9 +13,11 @@ Sections, in order:
      alike). No trigger user / no page / read failure → absent, no
      placeholder (spec decision 6).
   4. Latest day page (only when it exists) — the most recent "yesterday"
-     she wrote at bedtime review, whatever life-day it covers. The
-     written_at stamp goes into the frame so she knows how old the memory
-     is. No page / read failure → absent.
+     she wrote at bedtime review, dated strictly before the current living
+     day (an early-morning nap review writes a stub page for *today*; that
+     stub must not pose as yesterday — same boundary as the life-side
+     injection). The written_at stamp goes into the frame so she knows how
+     old the memory is. No page / read failure → absent.
   5. Life snapshot — where she is, what she's doing, how she feels *right now*,
      read straight from the life engine's LifeState. This is the main subject:
      the 赤尾 talking to a real person is the 赤尾 living this moment.
@@ -34,7 +36,9 @@ import logging
 
 from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
-from app.life.pages import read_latest_day_page, read_relationship_page
+from app.infra.cst_time import now_cst
+from app.life.living_day import living_day
+from app.life.pages import read_day_page_before, read_relationship_page
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
@@ -116,14 +120,22 @@ async def _build_relationship_section(
 
 
 async def _build_yesterday_section(persona_id: str) -> str:
-    """她最近一页昨天：跨日期取最新（哪个生活日不重要，最近写下的那页才是）。
+    """她最近一页昨天：日期**严格早于当前生活日**的最新一版（与 life 侧同口径）。
+
+    跨日取最新不行：清晨回笼觉的快班会给**当前生活日**写下凌晨短页，下午聊天
+    会把它错当「你的昨天」注进来（2026-06-12 真实群聊 trace 实证）。上界按
+    生活日（04:00 晨界）算——熬夜聊到凌晨两点，「昨天」仍是前一个生活日之前。
 
     无页（冷启动：她还没有昨天可忆）/ narrative 空白 / 读失败 → 返回 ""，
     整段缺席不补占位，失败兜底同 _build_relationship_section。
     """
     try:
         lane = current_deployment_lane() or "prod"
-        page = await read_latest_day_page(lane=lane, persona_id=persona_id)
+        page = await read_day_page_before(
+            lane=lane,
+            persona_id=persona_id,
+            before_date=living_day(now_cst()),
+        )
     except Exception as e:
         logger.warning("[%s] Failed to read latest day page: %s", persona_id, e)
         return ""
