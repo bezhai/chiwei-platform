@@ -42,9 +42,9 @@ def _no_relationship_page():
 
 
 def _no_day_page():
-    """Stub the latest-day-page read to None so unit tests stay DB-free."""
+    """Stub the day-page read to None so unit tests stay DB-free."""
     return patch(
-        "app.memory.context.read_latest_day_page",
+        "app.memory.context.read_day_page_before",
         new=AsyncMock(return_value=None),
     )
 
@@ -425,7 +425,7 @@ def _rel_read(page):
 
 def _day_read(page):
     return patch(
-        "app.memory.context.read_latest_day_page",
+        "app.memory.context.read_day_page_before",
         new=AsyncMock(return_value=page),
     )
 
@@ -541,7 +541,16 @@ async def test_relationship_section_absent_when_no_page():
 
 @pytest.mark.asyncio
 async def test_latest_day_page_injected():
-    """有最近一页昨天 → 注入【你的昨天】段：页全文 + written_at 时间标注。"""
+    """有最近一页昨天 → 注入【你的昨天】段：页全文 + written_at 时间标注。
+
+    读口必须是 read_day_page_before（严格早于当前生活日，与 life 侧 #260 同
+    口径）：清晨回笼觉的快班会给**当前生活日**写下凌晨短页，跨日取最新会把它
+    错当「昨天」注进下午的聊天（2026-06-12 真实群聊 trace 实证过）。
+    """
+    from datetime import datetime
+
+    from app.infra.cst_time import CST
+
     narrative = "考完最后一门，走出考场的时候腿是软的。"
     read = AsyncMock(return_value=_day_page(narrative))
     with (
@@ -550,9 +559,13 @@ async def test_latest_day_page_injected():
             new=AsyncMock(return_value="你此刻在散步"),
         ),
         patch("app.memory.context.current_deployment_lane", return_value=None),
+        patch(
+            "app.memory.context.now_cst",
+            return_value=datetime(2026, 6, 12, 17, 0, tzinfo=CST),
+        ),
         _no_arc(),
         _no_relationship_page(),
-        patch("app.memory.context.read_latest_day_page", new=read),
+        patch("app.memory.context.read_day_page_before", new=read),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
@@ -564,8 +577,44 @@ async def test_latest_day_page_injected():
     assert narrative in out, "昨天页全文必须原样进 inner_context"
     assert "这页写于" in out
     assert "2026-06-10T23:40:00+08:00" in out
-    assert read.await_args.kwargs == {"lane": "prod", "persona_id": "chiwei"}, (
-        "最近一页昨天按 (lane, persona) 跨日期取最新，lane 口径 prod 归一"
+    assert read.await_args.kwargs == {
+        "lane": "prod",
+        "persona_id": "chiwei",
+        "before_date": "2026-06-12",
+    }, "昨天页只认日期严格早于当前生活日的最新一版，lane 口径 prod 归一"
+
+
+@pytest.mark.asyncio
+async def test_day_page_boundary_follows_living_day_not_calendar_day():
+    """凌晨 02:00 聊天：当前生活日还是前一天（04:00 边界），before_date 必须
+    跟生活日口径走——熬夜聊天时「昨天」不能被日历日切走。"""
+    from datetime import datetime
+
+    from app.infra.cst_time import CST
+
+    read = AsyncMock(return_value=None)
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+        patch(
+            "app.memory.context.now_cst",
+            return_value=datetime(2026, 6, 13, 2, 0, tzinfo=CST),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        patch("app.memory.context.read_day_page_before", new=read),
+    ):
+        await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert read.await_args.kwargs["before_date"] == "2026-06-12", (
+        "06-13 凌晨 2 点仍属生活日 06-12，「昨天」的上界应是 06-12 而非 06-13"
     )
 
 
@@ -692,7 +741,7 @@ async def test_page_read_errors_do_not_collapse_inner_context():
             new=AsyncMock(side_effect=RuntimeError("db down")),
         ),
         patch(
-            "app.memory.context.read_latest_day_page",
+            "app.memory.context.read_day_page_before",
             new=AsyncMock(side_effect=RuntimeError("db down")),
         ),
     ):
