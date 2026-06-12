@@ -14,6 +14,64 @@
 import type { OutboundCapabilities, MessageRef, RenderContext } from '@core/ports/channel-plugin';
 import type { ContentItem } from '@core/channels/contracts';
 
+// ---------------------------------------------------------------------------
+// 出站反查策略（平台无关）：哪些 common id 需要翻成渠道裸 id。
+//
+// proactive 且无 root 的消息没有 inbound 锚点 —— message_id 是上游自造的合成
+// 全局 id（如 agent-service persona review diff 推送的
+// `persona-review:{lane}:{persona}:v{n}`），渠道映射表里没有这行，message 维度
+// 反查必炸；而它的出站动作（dispatchChatResponseOutbound 同条件分支）只会是
+// sendText(会话)，根本用不到消息锚点。所以这条路径只反查 conversation 维度
+// （解析失败照样 fail-loud，绝不发进未知会话），channelMessageId 恒为 ''（仅
+// reply 路径用得到，而该路径此时不可达；cap.reply 的空锚点 fail-loud 兜底）。
+// 其余路径（非 proactive / proactive 有 root）维持全量反查，行为零变化。
+// ---------------------------------------------------------------------------
+
+export interface ChatResponseTargetInput {
+    messageId: string; // common_message_id（proactive 无 root 时可能是合成 id，不入反查）
+    conversationId: string; // common_conversation_id
+    rootMessageId: string | undefined; // common root message id（proactive 的回复锚点）
+    isProactive: boolean;
+}
+
+export interface ChatResponseResolvedTarget {
+    channelMessageId: string;
+    channelConversationId: string;
+    channelRootMessageId: string | undefined;
+}
+
+export async function resolveChatResponseTarget(
+    cap: OutboundCapabilities,
+    input: ChatResponseTargetInput,
+): Promise<ChatResponseResolvedTarget> {
+    if (input.isProactive && !input.rootMessageId) {
+        if (!cap.resolveConversationRef) {
+            throw new Error(
+                'channel capabilities missing resolveConversationRef; cannot resolve ' +
+                    'the conversation for a proactive no-root outbound message',
+            );
+        }
+        const conv = await cap.resolveConversationRef({
+            commonConversationId: input.conversationId,
+        });
+        return {
+            channelMessageId: '',
+            channelConversationId: conv.channelId,
+            channelRootMessageId: undefined,
+        };
+    }
+    const refs = await cap.resolveOutboundTarget({
+        commonMessageId: input.messageId,
+        commonConversationId: input.conversationId,
+        commonRootMessageId: input.rootMessageId,
+    });
+    return {
+        channelMessageId: refs.message.channelId,
+        channelConversationId: refs.conversation.channelId,
+        channelRootMessageId: refs.rootMessage?.channelId,
+    };
+}
+
 export interface ChatResponseOutboundInput {
     content: string; // AI 原始 markdown 文本（平台化由能力端口内部做）
     channelMessageId: string; // 触发消息渠道裸 id

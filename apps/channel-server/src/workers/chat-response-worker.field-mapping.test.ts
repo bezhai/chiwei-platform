@@ -37,7 +37,9 @@ mock.module('ormconfig', () => ({
     },
 }));
 
-const { reverseResolveOutbound } = await import('../plugins/lark/outbound-reverse-resolve');
+const { reverseResolveOutbound, resolveLarkChatId } = await import(
+    '../plugins/lark/outbound-reverse-resolve'
+);
 
 // 字段语义契约（钉死 publish ↔ consume 双侧字段口径）：
 //
@@ -147,6 +149,30 @@ describe('chat-response 字段映射契约：payload 三个 id 字段必须是 c
             ),
         ).rejects.toThrow(
             /root common_message_id=om_x100b6fecc8a838a4c3643c45e7a98db/,
+        );
+    });
+});
+
+describe('conversation 维度单独反查（proactive 合成消息路径）', () => {
+    beforeEach(() => {
+        larkMessages.clear();
+        larkChats.clear();
+    });
+
+    it('合成 message_id 不在 lark_message 也能把 chat_id 解析成飞书裸 id（不碰 message 反查）', async () => {
+        // 注意：larkMessages 故意留空 —— 合成消息（如 persona-review:{lane}:{p}:v{n}）
+        // 没有 inbound 行，conversation-only 反查绝不能依赖 lark_message。
+        larkChats.set('018f-common-chat', {
+            common_conversation_id: '018f-common-chat',
+            chat_id: 'oc_real_chat',
+        });
+
+        expect(await resolveLarkChatId('018f-common-chat')).toBe('oc_real_chat');
+    });
+
+    it('conversation 反查不到 → fail-loud（绝不静默把消息发进未知会话）', async () => {
+        await expect(resolveLarkChatId('018f-unknown-chat')).rejects.toThrow(
+            /common_conversation_id=018f-unknown-chat/,
         );
     });
 });

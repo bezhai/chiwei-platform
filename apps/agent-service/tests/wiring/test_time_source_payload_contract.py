@@ -42,6 +42,7 @@ def _rebuild_production_graph():
         "chat",
         "fetch_dataflow",
         "life_dataflow",
+        "persona_review_dataflow",
         "review_dataflow",
         "safety",
     ):

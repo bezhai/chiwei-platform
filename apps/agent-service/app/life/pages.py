@@ -30,6 +30,7 @@ from typing import Annotated
 from sqlalchemy import text
 
 from app.data.session import get_session
+from app.infra import cst_time
 from app.runtime.data import Data, Key, Version
 from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_append, select_latest
@@ -152,6 +153,45 @@ async def read_day_page_before(
         return DayPage(**{k: row[k] for k in DayPage.model_fields})
 
 
+async def read_day_pages_written_after(
+    *, lane: str, persona_id: str, written_after: str | None
+) -> list[DayPage]:
+    """取每个生活日的最新一版昨天页，过滤出 ``written_at`` **严格晚于**游标的页。
+
+    persona review（周级慢钟）的证据窗口读口（spec 决策 4）：游标 = 上一条
+    review 版本的落版时点，``None``（首跑）= 全部现存页。每个生活日只取最新
+    一版（DISTINCT ON，同 read_day_page_before 的「同日多版取重写后的最新版」
+    口径）；被对账班重写过的旧日页 written_at 更新会重新入窗——整篇重写语义下
+    重新消化是对的。按 date 升序返回（时间线顺序喂证据）。
+
+    比较用 :func:`app.infra.cst_time.parse` 解析后的真实时刻（不做文本字典序
+    比较——微秒位 / 时区表示的差异会让字典序撒谎）。游标解析失败按 None（取
+    全部）、页的 written_at 解析失败按入窗算——两个方向都宁可多消化一页、绝不
+    静默丢证据（与 has_review_version_this_week 的 fail-open 方向一致；实际
+    written_at 全部由 now_cst_iso 写出，解析不会失败）。
+    """
+    sql = (
+        f"SELECT DISTINCT ON (date) * FROM {_table_name(DayPage)} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"ORDER BY date ASC, version DESC"
+    )
+    async with get_session() as s:
+        r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
+        pages = [
+            DayPage(**{k: row[k] for k in DayPage.model_fields})
+            for row in r.mappings()
+        ]
+    cutoff = cst_time.parse(written_after) if written_after else None
+    if cutoff is None:
+        return pages
+    out: list[DayPage] = []
+    for page in pages:
+        written = cst_time.parse(page.written_at)
+        if written is None or written > cutoff:
+            out.append(page)
+    return out
+
+
 async def write_relationship_page(
     *,
     lane: str,
@@ -184,6 +224,31 @@ async def read_relationship_page(
         RelationshipPage,
         {"lane": lane, "persona_id": persona_id, "other_user_id": other_user_id},
     )
+
+
+async def list_relationship_pages(
+    *, lane: str, persona_id: str
+) -> list[RelationshipPage]:
+    """取她当前**全部**关系页（每个真人只取最新一版），没写过任何页返回空表。
+
+    persona review（周级慢钟）喂证据用——慢漂回读的是「她心里现在的全部关系」，
+    不像睡前回顾只看当天聊过的人，所以是全量读口而不是按 user_id 列表逐个取
+    （:func:`read_relationship_pages`）。照 day_page_exists 的先例在 framework
+    持久化写好的真实表上做只读 SELECT（DISTINCT ON 每人取最新一版）；写入仍走
+    ``insert_append``，不绕开 framework 持久化原语。
+    """
+    sql = (
+        f"SELECT DISTINCT ON (other_user_id) * "
+        f"FROM {_table_name(RelationshipPage)} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"ORDER BY other_user_id ASC, version DESC"
+    )
+    async with get_session() as s:
+        r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
+        return [
+            RelationshipPage(**{k: row[k] for k in RelationshipPage.model_fields})
+            for row in r.mappings()
+        ]
 
 
 async def read_relationship_pages(

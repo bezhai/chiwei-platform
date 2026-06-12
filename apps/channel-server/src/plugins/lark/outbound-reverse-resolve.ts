@@ -30,19 +30,26 @@ export async function resolveLarkMessageRef(commonMessageId: string): Promise<st
     return msg.om_id;
 }
 
+// 仅会话维度的反查：proactive 合成消息（message_id 是上游自造的全局 id、
+// lark_message 没有行）只需要把 common_conversation_id 翻成飞书裸 chat_id。
+// 反查不到照样 fail-loud——绝不静默把消息发进未知会话。
+export async function resolveLarkChatId(commonConversationId: string): Promise<string> {
+    const chat = await AppDataSource.getRepository(LarkBaseChatInfo).findOne({
+        where: { common_conversation_id: commonConversationId },
+    });
+    if (!chat) {
+        throw new Error(
+            `lark outbound cannot resolve common_conversation_id=${commonConversationId}`,
+        );
+    }
+    return chat.chat_id;
+}
+
 export async function reverseResolveOutbound(
     input: ReverseResolveOutboundInput,
 ): Promise<OutboundChannelRefs> {
     const channelMessageId = await resolveLarkMessageRef(input.commonMessageId);
-
-    const chat = await AppDataSource.getRepository(LarkBaseChatInfo).findOne({
-        where: { common_conversation_id: input.commonConversationId },
-    });
-    if (!chat) {
-        throw new Error(
-            `lark outbound cannot resolve common_conversation_id=${input.commonConversationId}`,
-        );
-    }
+    const channelChatId = await resolveLarkChatId(input.commonConversationId);
 
     let channelRootId: string | undefined;
     if (input.commonRootMessageId) {
@@ -57,7 +64,7 @@ export async function reverseResolveOutbound(
 
     return {
         channelMessageId,
-        channelChatId: chat.chat_id,
+        channelChatId,
         channelRootId,
     };
 }

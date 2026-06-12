@@ -461,3 +461,138 @@ async def test_relationship_page_persona_isolation(pages_db):
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# persona review 的两个只读查询：按游标取日页 / 取全部关系页（真 PG 端到端）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_read_day_pages_written_after_none_returns_all_latest(pages_db):
+    """游标 None（首跑）：取全部生活日、每日只取最新一版、按 date 升序。"""
+    from app.life.pages import read_day_pages_written_after
+
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-08",
+        narrative="第一天：旧版。", written_at="2026-06-08T23:00:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-08",
+        narrative="第一天：重写版。", written_at="2026-06-09T05:00:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-09",
+        narrative="第二天。", written_at="2026-06-09T23:00:00+08:00",
+    )
+
+    pages = await read_day_pages_written_after(
+        lane="coe-t1", persona_id="akao", written_after=None
+    )
+    assert [p.date for p in pages] == ["2026-06-08", "2026-06-09"]
+    assert pages[0].narrative == "第一天：重写版。", "每个生活日只取最新一版"
+
+
+@pytest.mark.integration
+async def test_read_day_pages_written_after_filters_strictly_after_cursor(pages_db):
+    """游标过滤：只取 written_at **严格晚于**游标的页（等于游标的不重复消化）。"""
+    from app.life.pages import read_day_pages_written_after
+
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-08",
+        narrative="游标之前的页。", written_at="2026-06-08T23:00:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-09",
+        narrative="恰在游标时刻的页。", written_at="2026-06-09T11:00:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-10",
+        narrative="游标之后的页。", written_at="2026-06-10T05:00:00+08:00",
+    )
+
+    pages = await read_day_pages_written_after(
+        lane="coe-t1", persona_id="akao",
+        written_after="2026-06-09T11:00:00+08:00",
+    )
+    assert [p.date for p in pages] == ["2026-06-10"]
+
+
+@pytest.mark.integration
+async def test_read_day_pages_rewritten_page_reenters_window(pages_db):
+    """被对账班重写过的旧日页 written_at 更新 → 重新入窗（整篇重写语义下重新
+    消化是对的，spec 决策 4）。"""
+    from app.life.pages import read_day_pages_written_after
+
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-05",
+        narrative="老页：游标前写的。", written_at="2026-06-06T05:00:00+08:00",
+    )
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-05",
+        narrative="老页：游标后被重写的版。", written_at="2026-06-10T05:00:00+08:00",
+    )
+
+    pages = await read_day_pages_written_after(
+        lane="coe-t1", persona_id="akao",
+        written_after="2026-06-08T11:00:00+08:00",
+    )
+    assert [p.date for p in pages] == ["2026-06-05"]
+    assert pages[0].narrative == "老页：游标后被重写的版。"
+
+
+@pytest.mark.integration
+async def test_read_day_pages_written_after_lane_isolation(pages_db):
+    """泳道隔离：coe 的日页绝不漏进 prod 的窗口。"""
+    from app.life.pages import read_day_pages_written_after
+
+    await write_day_page(
+        lane="coe-t1", persona_id="akao", date="2026-06-09",
+        narrative="coe 里的一页。", written_at="2026-06-09T23:00:00+08:00",
+    )
+
+    assert (
+        await read_day_pages_written_after(
+            lane="prod", persona_id="akao", written_after=None
+        )
+        == []
+    )
+
+
+@pytest.mark.integration
+async def test_list_relationship_pages_returns_latest_per_user(pages_db):
+    """取她当前全部关系页：每个真人只取最新一版；没写过任何页返回空表。"""
+    from app.life.pages import list_relationship_pages
+
+    assert await list_relationship_pages(lane="coe-t1", persona_id="akao") == []
+
+    await write_relationship_page(
+        lane="coe-t1", persona_id="akao", other_user_id="ou_bezhai",
+        narrative="他与我：旧版。", written_at="2026-06-08T23:45:00+08:00",
+    )
+    await write_relationship_page(
+        lane="coe-t1", persona_id="akao", other_user_id="ou_bezhai",
+        narrative="他与我：新版。", written_at="2026-06-09T23:45:00+08:00",
+    )
+    await write_relationship_page(
+        lane="coe-t1", persona_id="akao", other_user_id="ou_passerby",
+        narrative="路人与我。", written_at="2026-06-09T23:50:00+08:00",
+    )
+
+    pages = await list_relationship_pages(lane="coe-t1", persona_id="akao")
+    by_user = {p.other_user_id: p for p in pages}
+    assert set(by_user) == {"ou_bezhai", "ou_passerby"}
+    assert by_user["ou_bezhai"].narrative == "他与我：新版。", "每人只取最新一版"
+
+
+@pytest.mark.integration
+async def test_list_relationship_pages_persona_isolation(pages_db):
+    """persona 隔离：姐妹之间的关系页互不可见。"""
+    from app.life.pages import list_relationship_pages
+
+    await write_relationship_page(
+        lane="coe-t1", persona_id="akao", other_user_id="ou_bezhai",
+        narrative="赤尾眼里的他。", written_at="2026-06-09T23:45:00+08:00",
+    )
+
+    assert await list_relationship_pages(lane="coe-t1", persona_id="ayana") == []
