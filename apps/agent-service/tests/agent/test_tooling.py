@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import pytest
 from pydantic import Field
 
 from app.agent.neutral import ToolCall, ToolResult
@@ -394,3 +395,114 @@ async def test_dispatch_tool_failure_returns_error_dict_as_content():
     assert isinstance(result, ToolResult)
     assert isinstance(result.content, dict)
     assert result.content["kind"] == "tool_error"
+
+
+# ---------------------------------------------------------------------------
+# dispatch 参数绑定预检（LLM 幻觉参数不再炸整轮 Agent.run）
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_unexpected_kwarg_feeds_error_back_not_raise():
+    # 2026-06-12 prod 事故：睡前回顾 agent 调 update_day_page 时幻觉串入了
+    # update_relationship_page 的 other_user_id 参数，invoke 的 **arguments
+    # 直接抛 TypeError 炸掉整轮 Agent.run。绑定失败必须作为 tool result 回喂
+    # 模型（同 @tool_error 的 ToolOutcomeError 形态），让模型在同一轮循环里
+    # 看到错误、修正参数后重调。
+    calls: list[str] = []
+
+    @tool
+    async def update_day(narrative: str) -> str:
+        """整篇重写昨天页。"""
+        calls.append(narrative)
+        return "ok"
+
+    call = ToolCall(
+        id="c_bind1",
+        name="update_day",
+        arguments={"narrative": "x", "other_user_id": "u1"},
+    )
+    result = await dispatch([update_day], call)  # 必须不抛
+    assert isinstance(result, ToolResult)
+    assert result.tool_call_id == "c_bind1"
+    assert isinstance(result.content, dict)
+    assert result.content["kind"] == "invalid_args"
+    # 错误文本：工具名 + 绑定失败原因（点名多余参数）+ 重调提示
+    assert "update_day" in result.content["message"]
+    assert "other_user_id" in result.content["message"]
+    assert "重新调用" in result.content["message"]
+    # 预检挡在调用之前：函数体一次都不能执行
+    assert calls == []
+
+
+async def test_dispatch_missing_required_arg_feeds_error_back_not_raise():
+    # 缺必填参数同属绑定失败：回喂模型，不上抛。
+    calls: list[str] = []
+
+    @tool
+    async def update_day(narrative: str) -> str:
+        """整篇重写昨天页。"""
+        calls.append(narrative)
+        return "ok"
+
+    call = ToolCall(id="c_bind2", name="update_day", arguments={})
+    result = await dispatch([update_day], call)
+    assert isinstance(result.content, dict)
+    assert result.content["kind"] == "invalid_args"
+    assert "update_day" in result.content["message"]
+    assert "narrative" in result.content["message"]
+    assert calls == []
+
+
+async def test_dispatch_body_typeerror_still_propagates():
+    # 铁律：durable 写工具（不包 @tool_error）的失败绝不能被吞。预检只拦
+    # "调用前"的参数绑定错误；函数体内部抛出的任何异常——包括 TypeError——
+    # 照旧原样上抛，由上游 fail-open / 重试机制处理。
+    @tool
+    async def durable_write(narrative: str) -> str:
+        """Durable write."""
+        raise TypeError("body boom")
+
+    call = ToolCall(id="c_bind3", name="durable_write", arguments={"narrative": "x"})
+    with pytest.raises(TypeError, match="body boom"):
+        await dispatch([durable_write], call)
+
+
+async def test_dispatch_bind_precheck_sees_through_tool_error_wrapper():
+    # @tool_error 的 wrapper 是 (*args, **kwargs) 签名，预检必须穿透
+    # functools.wraps 链对"原始签名"做绑定：幻觉参数同样回喂 invalid_args，
+    # 而不是漏进 wrapper 内被包成 kind="tool_error"（错误形态要统一）。
+    @tool
+    @tool_error("wrapped boom")
+    async def wrapped(x: str) -> str:
+        """Wrapped."""
+        return x
+
+    call = ToolCall(id="c_bind4", name="wrapped", arguments={"x": "v", "bogus": 1})
+    result = await dispatch([wrapped], call)
+    assert isinstance(result.content, dict)
+    assert result.content["kind"] == "invalid_args"
+    assert "bogus" in result.content["message"]
+
+
+async def test_dispatch_var_keyword_tool_extra_kwarg_binds_fine():
+    # **kwargs 形态的工具：多余参数本来就绑得上，预检不许误伤。
+    @tool
+    async def flexible(x: str, **extra: Any) -> dict:
+        """Flexible."""
+        return {"x": x, **extra}
+
+    call = ToolCall(id="c_bind5", name="flexible", arguments={"x": "a", "free": "b"})
+    result = await dispatch([flexible], call)
+    assert result.content == {"x": "a", "free": "b"}
+
+
+async def test_dispatch_normal_call_unchanged_by_precheck():
+    # 预检通过后行为字节级不变：正常调用的返回值原样进 ToolResult.content。
+    @tool
+    async def echo2(text: str, n: int = 1) -> str:
+        """Echo."""
+        return text * n
+
+    call = ToolCall(id="c_bind6", name="echo2", arguments={"text": "hi"})
+    result = await dispatch([echo2], call)
+    assert result.content == "hi"

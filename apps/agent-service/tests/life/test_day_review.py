@@ -9,13 +9,18 @@
   * 无会话：``Agent.run`` 不传 session_id（langfuse 归组走 context.session_id）；
   * ambient 三绑定：context.features 带 lane / persona / target_date 三个 key；
   * 落标核验：run 返回后现读昨天页，**页存在（本次或更早班写的）才落 marker**
-    （mark_day_reviewed）；run 抛 / 返回了但没写页都算失败 → 不落、下一班重试；
-    成本无论成败都记（token 真烧了）；
+    （mark_day_reviewed，已降级为观测留痕、不再当闸读）；run 抛 / 返回了但没写
+    页都算失败 → 不落、对账班按页缺失自动补；成本无论成败都记（token 真烧了）；
   * 整段回顾有硬超时（< single_flight TTL），超时走既有 fail-open；
   * durable 写失败 = 整次回顾失败（工具不包 @tool_error，写库失败穿透炸 run）；
   * single_flight 按 (lane, persona, target_date) 包整段——快班与补班撞车时
     冲突方静默让位；
-  * 同生活日已回顾（锁内对账 marker == target）不重跑、不烧模型；
+  * 触发源语义（事故修复，2026-06-12 prod）：快班（trigger="sleep"）**无闸、
+    每次入睡都跑**，同日后一次整篇盖前一次（版本叠加）；对账班
+    （trigger="sweep"）锁内权威复查**按页存在性**——目标日已有页绝不重跑，
+    marker 被回笼觉推前也误导不了它；
+  * 成本 round_id 从 (lane, persona, target_date, 触发时刻) 派生：同一天多次
+    合法回顾各自入账、不被幂等去重吞掉；
   * 证据三态：意识流 / act / 聊天各自有、无两态都如实说，全带时间标注；
   * 空证据护栏：三样证据全空不烧模型（同空信箱 early-return 的机制安全阀）；
   * instruction / 模板零剧情事实（宪法）。
@@ -36,7 +41,6 @@ import app.life.review as review_mod
 from app.agent.neutral import Message, Role
 from app.agent.trace import make_session_id
 from app.data.message_record import CommonMessageRecord
-from app.domain.life_state import LifeState
 from app.domain.world_events import ActPerformed
 from app.life.pages import DayPage, RelationshipPage
 from app.life.review import run_day_review
@@ -64,19 +68,6 @@ def fake_redis(monkeypatch):
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_mod, "_redis", fake)
     return fake
-
-
-def _life_state(**kwargs) -> LifeState:
-    base = {
-        "lane": _LANE,
-        "persona_id": _PERSONA,
-        "current_state": "躺下睡了",
-        "response_mood": "平静",
-        "activity_type": "sleep",
-        "observed_at": "2026-06-10T23:30:00+08:00",
-    }
-    base.update(kwargs)
-    return LifeState(**base)
 
 
 def _act(description="我把书桌收拾了一遍", occurred_at="2026-06-10T20:15:00+08:00"):
@@ -127,7 +118,6 @@ def _chat_block(
 def stub_io(monkeypatch):
     """stub 回顾本体的全部 IO，专测编排机制，不碰真库。"""
     state = {
-        "snapshot": _life_state(day_reviewed_date=None),
         "sessions": {
             make_session_id(_LANE, _PERSONA, "2026-06-10"): [
                 Message(role=Role.USER, content="现在是 20:00 CST。窗外有蝉鸣。"),
@@ -146,9 +136,6 @@ def stub_io(monkeypatch):
         "session_loads": [],
         "page_lookups": [],
     }
-
-    async def fake_find_life_state(*, lane, persona_id):
-        return state["snapshot"]
 
     async def fake_load_session(session_id):
         state["session_loads"].append(session_id)
@@ -178,6 +165,10 @@ def stub_io(monkeypatch):
     async def fake_day_page(*, lane, persona_id, date):
         return state["day_page"]
 
+    async def fake_day_page_exists(*, lane, persona_id, date):
+        # 与 fake_day_page 同一份状态：页存在 = day_page 非 None（对账班闸口径）。
+        return state["day_page"] is not None
+
     async def fake_mark(*, lane, persona_id, date):
         state["marks"].append({"lane": lane, "persona_id": persona_id, "date": date})
 
@@ -193,12 +184,12 @@ def stub_io(monkeypatch):
             persona_lite="一段人设",
         )
 
-    monkeypatch.setattr(review_mod, "find_life_state", fake_find_life_state)
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
     monkeypatch.setattr(review_mod, "read_relationship_pages", fake_rel_pages)
     monkeypatch.setattr(review_mod, "read_day_page", fake_day_page)
+    monkeypatch.setattr(review_mod, "day_page_exists", fake_day_page_exists)
     monkeypatch.setattr(review_mod, "mark_day_reviewed", fake_mark)
     monkeypatch.setattr(review_mod, "record_round_cost", fake_cost)
     monkeypatch.setattr(review_mod, "load_persona", fake_load_persona)
@@ -248,6 +239,7 @@ async def _review(**overrides):
         "target_date": _TARGET,
         "now": _NOW,
         "trace_session_id": "sess-1",
+        "trigger": "sleep",
     }
     kwargs.update(overrides)
     await run_day_review(**kwargs)
@@ -446,8 +438,10 @@ async def test_review_failure_skips_cost_record(stub_io, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_review_success_records_cost_with_day_review_actor(stub_io, monkeypatch):
-    """成本落 durable PG：actor 与 life 本体区分（persona:day_review），round_id 幂等派生。"""
+async def test_review_cost_records_each_trigger_moment_separately(stub_io, monkeypatch):
+    """成本落 durable PG：actor 与 life 本体区分（persona:day_review）；round_id 从
+    (lane, persona, target_date, 触发时刻) 派生——同一天多次合法回顾各自入账，
+    不被幂等去重吞掉（事故里补班那次成本被吞的修复）。"""
     _mock_run(monkeypatch, stub_io)
 
     await _review()
@@ -455,34 +449,73 @@ async def test_review_success_records_cost_with_day_review_actor(stub_io, monkey
     assert first["lane"] == _LANE
     assert first["actor"] == f"{_PERSONA}:day_review"
 
-    # round_id 从 (lane, persona, target_date) 派生：同参再跑 → 同 round_id。
-    stub_io["snapshot"] = _life_state(day_reviewed_date=None)
+    # 同 (lane, persona, target, 触发时刻) → 同 round_id（确定性派生、不漂移）。
     await _review()
     second = stub_io["costs"][1]
-    assert second["round_id"] == first["round_id"], "同 (lane,persona,target) 必须同 round_id"
+    assert second["round_id"] == first["round_id"]
+
+    # 同一天、不同触发时刻（清晨回笼觉再睡）→ 不同 round_id：两次都入账。
+    await _review(now=datetime(2026, 6, 11, 6, 6, tzinfo=_CST))
+    third = stub_io["costs"][2]
+    assert third["round_id"] != first["round_id"], "同日两次合法回顾必须各自入账"
 
     # 不同 target_date → 不同 round_id。
     await _review(target_date="2026-06-11")
-    third = stub_io["costs"][2]
-    assert third["round_id"] != first["round_id"]
+    fourth = stub_io["costs"][3]
+    assert fourth["round_id"] not in {first["round_id"], third["round_id"]}
+
+
+# ---------------------------------------------------------------------------
+# 触发源语义（事故修复）：快班无闸、对账班按页存在性
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_same_living_day_already_reviewed_skips(stub_io, monkeypatch):
-    """锁内对账：marker == 目标生活日（起夜再睡 / 补班撞快班）→ 不烧模型、不重落标。"""
-    stub_io["snapshot"] = _life_state(day_reviewed_date=_TARGET)
+async def test_sleep_trigger_runs_even_when_day_already_reviewed(stub_io, monkeypatch):
+    """快班无闸：同日已有上一班写的页（起夜 / 回笼觉再睡）→ 仍然跑——后一次回顾
+    整篇盖前一次（页版本叠加、读侧取最新版），中间版是设计行为。"""
+    stub_io["day_page"] = _written_page()
     captured = _mock_run(monkeypatch, stub_io)
 
-    await _review()
+    await _review(trigger="sleep")
 
-    assert "messages" not in captured, "同生活日已回顾绝不再 run"
+    assert "messages" in captured, "快班每次入睡都跑，不被已有页 / marker 挡住"
+    assert stub_io["marks"] == [
+        {"lane": _LANE, "persona_id": _PERSONA, "date": _TARGET}
+    ]
+    assert len(stub_io["costs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_trigger_skips_when_page_exists(stub_io, monkeypatch):
+    """对账班锁内权威复查按页存在性（prod 事故复现）：目标日页已存在 → 绝不重跑
+    （不烧模型、不重落标、不记账）——marker 被回笼觉推前也误导不了它。"""
+    stub_io["day_page"] = _written_page()
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review(trigger="sweep")
+
+    assert "messages" not in captured, "已有页的日期对账班绝不重跑"
     assert stub_io["marks"] == []
     assert stub_io["costs"] == []
 
 
 @pytest.mark.asyncio
+async def test_sweep_trigger_runs_when_page_missing(stub_io, monkeypatch):
+    """对账班：目标日没有页（昨晚快班没跑成）→ 照常补跑、写页落标。"""
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review(trigger="sweep")
+
+    assert "messages" in captured
+    assert stub_io["marks"] == [
+        {"lane": _LANE, "persona_id": _PERSONA, "date": _TARGET}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_failed_shift_retries_on_next_shift_then_marks(stub_io, monkeypatch):
-    """失败不落标的完整故事：快班失败（无标）→ 下一班（补班）重试成功落标。"""
+    """失败不落页的完整故事：快班失败（无页）→ 对账班按页缺失重试成功、写页落标。"""
     calls = {"n": 0}
 
     async def flaky_run(self, messages, **kwargs):
@@ -497,8 +530,8 @@ async def test_failed_shift_retries_on_next_shift_then_marks(stub_io, monkeypatc
     await _review()  # 快班：失败
     assert stub_io["marks"] == []
 
-    # 凌晨补班：marker 仍是 None → 再跑，这次成功 → 落标。
-    await _review(now=datetime(2026, 6, 11, 5, 0, tzinfo=_CST))
+    # 凌晨对账班：页仍缺失 → 再跑，这次成功 → 落标。
+    await _review(now=datetime(2026, 6, 11, 5, 0, tzinfo=_CST), trigger="sweep")
     assert stub_io["marks"] == [
         {"lane": _LANE, "persona_id": _PERSONA, "date": _TARGET}
     ]
@@ -770,7 +803,7 @@ async def test_evidence_includes_existing_day_page_on_rerun(stub_io, monkeypatch
         narrative="入睡前写过的那版：今天最挂心的是没回完的消息。",
         written_at="2026-06-10T23:31:00+08:00",
     )
-    # 同日重跑：marker 没落成功（比如上一班写完页但标失败），仍会再跑
+    # 同日重跑（快班无闸：起夜 / 回笼觉再睡照样跑），旧版进证据、新版整篇盖写
     captured = _mock_run(monkeypatch, stub_io)
 
     await _review()

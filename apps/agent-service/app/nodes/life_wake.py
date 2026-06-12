@@ -71,7 +71,7 @@ from app.domain.world_events import (
 from app.infra import cst_time
 from app.infra.redis import get_redis
 from app.life.living_day import living_day
-from app.life.pages import read_day_page  # module-level so tests can monkeypatch
+from app.life.pages import read_day_page_before  # module-level so tests can monkeypatch
 from app.life.review import run_day_review  # module-level so tests can monkeypatch
 from app.memory._persona import load_persona
 from app.nodes.life_tools import build_life_tools, fire_life_self_wake
@@ -686,33 +686,33 @@ async def _run_life_round(
     if arc_awareness:
         parts.append(arc_awareness)
 
-    # 她最近一页昨天（睡前回顾的产出，life 侧注入）：marker（day_reviewed_date）
-    # 记着最近回顾过的生活日，按它取那天的昨天页——"她记得昨天"。没回顾过
-    # （marker None）/ 页缺失 → 整段缺席不补占位（诚实的真空）。位置在世界阶段
-    # 之后、每轮都变的时刻行之前（稳定前缀区：页天级才变，不打散前缀缓存）。
+    # 她最近一页昨天（睡前回顾的产出，life 侧注入）：取日期**严格早于**当前
+    # 生活日的最新一版日页——"她记得昨天"。不读 marker（day_reviewed_date 已
+    # 降级为观测留痕：清晨回笼觉的快班会把它推前到「今天」、按它取页会把当天
+    # 凌晨刚写的短页错当「上一页日子」；对账班补旧日还会把它回拨）。没有更早
+    # 的页 → 整段缺席不补占位（诚实的真空）。位置在世界阶段之后、每轮都变的
+    # 时刻行之前（稳定前缀区：页天级才变，不打散前缀缓存）。
     # 信息差不破：页是她自己睡前写下的第一人称回顾，本来就是她的记忆。
     # 读页失败绝不杀整个 life 轮（照 render_arc_awareness 的姿势）：注入是上下文
     # 增强，失败只 log warning、整段缺席，本轮照常往下跑。
-    if snapshot is not None and snapshot.day_reviewed_date:
-        try:
-            day_page = await read_day_page(
-                lane=lane, persona_id=persona_id, date=snapshot.day_reviewed_date
-            )
-        except Exception as e:
-            logger.warning(
-                "[life_wake] %s/%s failed to read day page %s, section absent: %s",
-                lane,
-                persona_id,
-                snapshot.day_reviewed_date,
-                e,
-            )
-            day_page = None
-        if day_page is not None:
-            parts.append(
-                f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
-                f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
-                f"{day_page.narrative}"
-            )
+    try:
+        day_page = await read_day_page_before(
+            lane=lane, persona_id=persona_id, before_date=living_day(now)
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to read previous day page, section absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        day_page = None
+    if day_page is not None:
+        parts.append(
+            f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
+            f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
+            f"{day_page.narrative}"
+        )
 
     parts.append(f"现在是 {cst_time.to_cst_hm(observed_at)}。")
 
@@ -840,24 +840,29 @@ async def _run_life_round(
         "yes" if self_wake.get("delay_ms") else "no", _LIFE_CD_SECONDS,
     )
 
-    # 快班睡前回顾（spec 决策 2 快班；主保证仍是凌晨对账 cron）：本轮收口后她
-    # **最新**的主观快照（本轮可能 update 过，所以现读）若标了 sleep、且这个
-    # 生活日（[04:00, 次日 04:00) 标签，23:30 入睡=当日、熬夜 01:30=前一日）还没
-    # 回顾过 → 就地跑一次睡前回顾，当晚就出页、次日凌晨聊天已可用。放在全部
-    # durable 收口（标已读 / 排下次醒 / cd）之后：回顾慢 / 失败都不影响本轮收口。
-    # run_day_review 自身 fail-open + single_flight + 锁内 marker 对账（绝不向上
-    # 抛、绝不杀 life 轮）；这里的 marker 预检查只是省一次锁。
+    # 快班睡前回顾（spec 决策 2 快班；主保证仍是凌晨对账 cron）：只在本轮发生
+    # 「**进入睡眠**」的转变时触发（边沿，不是电平）——轮开始读到的快照（gate 段
+    # 的 snapshot）不是 sleep、收口后她**最新**的主观快照（本轮可能 update 过，
+    # 所以现读）是 sleep。她睡着时夜里被群消息 / self-wake 吵醒跑的轮（轮始轮末
+    # 都是 sleep）不再各跑一次回顾——电平触发会让成本随夜间打扰线性放大（旧
+    # marker 闸一天一次顺带压住了这个，闸拆掉后暴露）。真正的「再入睡」（醒来→
+    # 活动→又睡）是合法转变、照常触发（target = living_day(now)：23:30 入睡=
+    # 当日、熬夜 01:30=前一日），当晚就出页、次日凌晨聊天已可用。**无 marker
+    # 预检查**（2026-06-12 事故修复）：每次入睡都回顾当前生活日，午睡 / 回笼觉
+    # 自然产生中间版、后一次整篇盖前一次（页版本叠加、读侧取最新版是设计行为）
+    # ——旧 marker 闸不仅挡掉合法的回笼觉重顾，还让快班把单字段 marker 推前、
+    # 坑了对账班。放在全部 durable 收口（标已读 / 排下次醒 / cd）之后：回顾慢 /
+    # 失败都不影响本轮收口。run_day_review 自身 fail-open + single_flight 防并发
+    # 撞车（绝不向上抛、绝不杀 life 轮）。
     latest = await find_life_state(lane=lane, persona_id=persona_id)
     target_date = living_day(now)
-    if (
-        latest is not None
-        and latest.activity_type == "sleep"
-        and latest.day_reviewed_date != target_date
-    ):
+    was_asleep = snapshot is not None and snapshot.activity_type == "sleep"
+    if latest is not None and latest.activity_type == "sleep" and not was_asleep:
         await run_day_review(
             lane=lane,
             persona_id=persona_id,
             target_date=target_date,
             now=now,
             trace_session_id=session_id,
+            trigger="sleep",
         )

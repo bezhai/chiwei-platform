@@ -52,13 +52,18 @@ class LifeState(Data):
     # None。framework migrate 对已有数据的表加 nullable 列是 additive、不阻塞。比较一律用
     # 现实时间，对称 world WorldState.next_wake_at。
     next_wake_at: str | None = None
-    # 「睡前回顾已完成」的那个**生活日**标签（[04:00, 次日 04:00) 的 YYYY-MM-DD，
-    # 见 app/life/living_day.py）。回顾**成功**才由 mark_day_reviewed 落进来——快班
-    # （她宣布入睡）与凌晨对账主班写同一个标记：== 目标生活日就不重跑、失败不落 →
-    # 下一班重试。nullable additive migrate（对齐 next_wake_at）；默认 None 不撞
-    # migrator 保留列。命门同 arc_reflected_date 教训：LifeState 的**每个写点**都要
-    # 沿用它（save_life_state / set_life_next_wake_at），否则起夜一轮 update 就把
-    # 快班的标静默清掉、凌晨补班重跑。
+    # 「最近一次睡前回顾的目标生活日」标签（[04:00, 次日 04:00) 的 YYYY-MM-DD，
+    # 见 app/life/living_day.py）。回顾**成功**才由 mark_day_reviewed 落进来。
+    # **已降级为观测留痕、绝不当闸读**（2026-06-12 prod 事故：单字段回答不了
+    # 「某一天回顾过没有」——清晨回笼觉的快班把它推前到新生活日，对账班比对它
+    # 误判前一日未回顾、重跑出重复页）：「那天回顾过没有」的权威口径是
+    # data_day_page 该 (lane, persona, date) 的页是否存在（app/life/pages.py 的
+    # day_page_exists）。列保留照写——framework Data migrate 是 fail-closed，
+    # 删列会让 pod crash loop；life_wake 注入「她最近一页昨天」仍把它当指针用
+    # （指最近回顾过的生活日，不是闸）。nullable additive migrate（对齐
+    # next_wake_at）；默认 None 不撞 migrator 保留列。命门同 arc_reflected_date
+    # 教训：LifeState 的**每个写点**都要沿用它（save_life_state /
+    # set_life_next_wake_at），否则一轮 update 就把留痕静默清掉。
     day_reviewed_date: str | None = None
 
 
@@ -139,21 +144,20 @@ async def set_life_next_wake_at(
 
 
 async def mark_day_reviewed(*, lane: str, persona_id: str, date: str) -> None:
-    """睡前回顾**成功**后把「该生活日已回顾」标记落成 ``date``（生活日 YYYY-MM-DD）。
+    """睡前回顾**成功**后把「最近回顾的生活日」留痕落成 ``date``（生活日 YYYY-MM-DD）。
 
-    挂载条件的另一半在两班触发处：快班（life 轮收口，她最新 activity_type 是
-    sleep）与凌晨对账主班都先比 ``day_reviewed_date != 目标生活日`` 才跑回顾；
-    本函数只在回顾 Agent 调用成功后被调——失败不落、下一班自动重试（与
-    mark_arc_reflected 同语义：成功才落、保留其余字段）。
+    **观测留痕、不是闸**（2026-06-12 事故后降级）：两班判「那天回顾过没有」一律
+    看 data_day_page 该日页的存在性（day_page_exists），绝不比对这个单字段——
+    它只剩两个用途：排查时看一眼最近回顾到哪天、life_wake 注入「她最近一页
+    昨天」时当指针。本函数只在回顾 Agent 调用成功（昨天页核验存在）后被调，
+    保持「成功才落、保留其余字段」的写法（与 mark_arc_reflected 同构）。
 
     LifeState 是 append-only：读最新一版、沿用其余全部字段（主观快照 +
     next_wake_at 都不丢），只换 ``day_reviewed_date``，append 一版。
 
     冷启容错：还没有任何 LifeState 快照（她从没活过一轮）时安全跳过、不造占位
-    假状态——与 mark_arc_reflected 的冷启占位不同，life 的同一 target_date 只有
-    两班且互不重复（快班要求 LifeState 存在才可能触发；主班 cron 对每个 target
-    只对账一次），跳过不会让同日重跑；而空字符串占位快照会被 life 轮的冷启恢复
-    段当成"上次记得自己在做："喂出怪话。
+    假状态——空字符串占位快照会被 life 轮的冷启恢复段当成"上次记得自己在做："
+    喂出怪话；留痕缺席无害（重跑防护本就不靠它）。
     """
     snapshot = await find_life_state(lane=lane, persona_id=persona_id)
     if snapshot is None:

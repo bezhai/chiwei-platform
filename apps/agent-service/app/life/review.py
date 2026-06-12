@@ -11,22 +11,28 @@
     对话（参与边界 = 她发过言，被动在场不算——spec 决策 2b）、当天聊过各人的
     旧关系页、目标生活日已有的昨天页（同日重跑场景）。
   * **fail-open**：任何一步抛错只记 error 日志、绝不向上抛——快班在 life 轮收口
-    处调它，绝不杀 life 轮；marker 不落、下一班（凌晨对账）自动重试。
+    处调它，绝不杀 life 轮；页不落、清晨对账班按页缺失自动补跑。
   * **max_retries=1**：update_day_page / update_relationship_page 是 durable 写，
-    整轮重放会重放它们。工具故意不包 @tool_error（写库失败穿透炸 run → 不落
-    marker，见 review_tools 模块 docstring）。
-  * **昨天页真写了才落 marker**（:func:`app.domain.life_state.mark_day_reviewed`）：
-    run 正常返回 ≠ 成功——模型可能一个工具都没调。run 返回后**现读**昨天页，
-    页存在（本次写的、或更早班写的——同日重跑场景算）才落标；页不存在 = 本次
-    回顾失败，不落标、error 留痕、下一班重试。关系页不核验（没聊过天就不动
-    关系页是合法的）。成本落 durable PG（actor = ``{persona}:day_review``，
-    round_id 从 (lane, persona, target_date) 派生幂等），**无论成败都记**
+    整轮重放会重放它们。工具故意不包 @tool_error（写库失败穿透炸 run → 页不落、
+    对账班补，见 review_tools 模块 docstring）。
+  * **触发源语义**（2026-06-12 prod 事故修复：单字段 marker 回答不了「某一天
+    回顾过没有」）：快班（``trigger="sleep"``）**无闸、每次入睡都回顾当前生活
+    日**——午睡 / 回笼觉自然产生中间版，后一次整篇盖前一次（页本就版本叠加、
+    读侧取最新版）；对账班（``trigger="sweep"``）锁内权威复查**按页存在性**
+    （:func:`app.life.pages.day_page_exists`）——目标日已有页绝不重跑。
+  * **昨天页真写了才落 marker**（:func:`app.domain.life_state.mark_day_reviewed`，
+    marker 已降级为观测留痕、不再当闸读）：run 正常返回 ≠ 成功——模型可能一个
+    工具都没调。run 返回后**现读**昨天页，页存在（本次写的、或更早班写的）才
+    落标；页不存在 = 本次回顾失败，不落标、error 留痕、对账班按页缺失自动补。
+    关系页不核验（没聊过天就不动关系页是合法的）。成本落 durable PG（actor =
+    ``{persona}:day_review``，round_id 从 (lane, persona, target_date, 触发时刻)
+    派生——同一天多次合法回顾各自入账、不被幂等去重吞掉），**无论成败都记**
     （token 真烧了）。
   * **整段硬超时**（:data:`DAY_REVIEW_TIMEOUT_SECONDS`，< 单飞锁 TTL）：证据
     收集 / run / 落页核验任何一步挂死都被掐掉，走既有 fail-open。
   * **single_flight 包整段**（key 含 lane / persona / target_date）：快班与
-    凌晨补班撞车时冲突方静默让位（正在跑的那班会落 marker）；锁内再对账一次
-    marker——起夜再睡 / 班次接力的同生活日重跑被它挡住。
+    凌晨补班撞车时冲突方静默让位——锁只防并发撞车，不兼任同日防重跑（快班
+    同日重跑是设计行为）。
 
 写什么、给谁重写关系页由她自己判断（写作纪律在 prompt 层：instruction 钉姿态、
 langfuse system prompt 载人设）；这里没有内容检测器（赤尾宪法）。
@@ -39,6 +45,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
@@ -58,7 +65,6 @@ from app.data.queries.messages import (  # module-level so tests can monkeypatch
     find_persona_spoken_chats_in_window,
 )
 from app.domain.life_state import (  # module-level so tests can monkeypatch
-    find_life_state,
     mark_day_reviewed,
 )
 from app.domain.thinking_cost import record_round_cost
@@ -68,6 +74,7 @@ from app.life.living_day import evidence_window, window_session_dates
 from app.life.pages import (  # module-level so tests can monkeypatch
     DayPage,
     RelationshipPage,
+    day_page_exists,
     read_day_page,
     read_relationship_pages,
 )
@@ -298,14 +305,22 @@ async def run_day_review(
     target_date: str,
     now: datetime,
     trace_session_id: str | None,
+    trigger: Literal["sleep", "sweep"],
 ) -> None:
     """跑一次睡前回顾。**fail-open：本函数绝不向上抛**（绝不杀 life 轮 / cron 班）。
 
-    两班都调本函数（快班 = life 轮收口她标了 sleep；主班 = 凌晨对账 cron）。
+    两班都调本函数，由 ``trigger`` 亮明触发源（语义钉死，2026-06-12 事故修复）：
+
+      * ``"sleep"``（快班 = life 轮收口她标了 sleep）：**无闸、永远跑**——同一
+        生活日后一次回顾整篇盖前一次（页版本叠加、读侧取最新版），午睡 / 回笼觉
+        产生中间版是设计行为。
+      * ``"sweep"``（对账班 = 清晨对账 cron）：锁内权威复查**按页存在性**——
+        目标日已有页（任何班写的）绝不重跑，页缺失才补（调用方的预检查只是
+        省一次锁）。
+
     整段包 single_flight（key 含 lane / persona / target_date）：撞锁 = 另一班正在
-    回顾同一生活日，静默让位（info 留痕）；锁内先对账 marker（权威检查——调用方的
-    预检查只是省一次锁），已 == target_date 直接早退。其余任何异常只记 error 日志：
-    marker 不落、下一班自动重试。
+    回顾同一生活日，静默让位（info 留痕）——锁只防并发撞车，不兼任同日防重跑。
+    其余任何异常只记 error 日志：页不落、对账班按页缺失自动补。
     """
     lock_key = f"life_day_review:{lane}:{persona_id}:{target_date}"
     try:
@@ -320,12 +335,13 @@ async def run_day_review(
                     target_date=target_date,
                     now=now,
                     trace_session_id=trace_session_id,
+                    trigger=trigger,
                 ),
                 timeout=DAY_REVIEW_TIMEOUT_SECONDS,
             )
     except SingleFlightConflict:
-        # 快班与补班撞车：另一班正在回顾，静默让位（它成功会落 marker；它失败
-        # 不落，下一班照 marker 重试）。
+        # 快班与补班撞车：另一班正在回顾，静默让位（它成功会写页；它失败不写，
+        # 对账班照页缺失重试）。
         logger.info(
             "[day_review] %s/%s %s another shift in flight, yield",
             lane,
@@ -334,8 +350,8 @@ async def run_day_review(
         )
     except Exception:
         logger.error(
-            "[day_review] %s/%s %s 睡前回顾失败，fail-open：marker 不落、"
-            "下一班自动重试",
+            "[day_review] %s/%s %s 睡前回顾失败，fail-open：页不落、"
+            "对账班按页缺失自动补跑",
             lane,
             persona_id,
             target_date,
@@ -350,13 +366,19 @@ async def _run_day_review(
     target_date: str,
     now: datetime,
     trace_session_id: str | None,
+    trigger: Literal["sleep", "sweep"],
 ) -> None:
-    """锁内的一次回顾编排：marker 对账 → 取证据 → 无会话 run → 记成本 → 落页核验 → 落 marker。"""
-    # marker 对账（锁内，权威）：起夜再睡 / 班次接力的同生活日重跑在这里被挡住。
-    snapshot = await find_life_state(lane=lane, persona_id=persona_id)
-    if snapshot is not None and snapshot.day_reviewed_date == target_date:
+    """锁内的一次回顾编排：对账班页存在性复查 → 取证据 → 无会话 run → 记成本 → 落页核验 → 落 marker。"""
+    # 对账班锁内权威复查（调用方的预检查只是省一次锁）：「那天回顾过没有」看
+    # data_day_page 该 (lane, persona, target_date) 的页是否存在——绝不比对
+    # LifeState.day_reviewed_date（单字段 marker 会被清晨回笼觉的快班推前到新
+    # 生活日，误导对账班重跑出重复页，2026-06-12 prod 事故根因）。快班无闸：
+    # 每次入睡都回顾当前生活日，新版整篇盖旧版（版本链留痕、读侧取最新版）。
+    if trigger == "sweep" and await day_page_exists(
+        lane=lane, persona_id=persona_id, date=target_date
+    ):
         logger.info(
-            "[day_review] %s/%s %s already reviewed, skip",
+            "[day_review] %s/%s %s already has a day page, sweep skip",
             lane,
             persona_id,
             target_date,
@@ -442,10 +464,13 @@ async def _run_day_review(
         )
 
     # 成本无论成败都记（token 真烧了）：先于落页核验，"返回了但没写页"的失败班
-    # 也要记账。round_id 从 (lane, persona, target_date) 派生幂等：快班 / 补班 /
-    # 同日重试落同一 round_id（同一生活日的回顾是同一件事）。
+    # 也要记账。round_id 从 (lane, persona, target_date, 触发时刻) 派生：同一天
+    # 多次合法回顾（入睡快班 / 回笼觉快班 / 对账补班）各落各的账，不被幂等去重
+    # 吞掉（事故里补班那次成本被去重吞的修复）；同参同刻派生确定、不漂移。
     round_id = uuid.uuid5(
-        uuid.NAMESPACE_OID, f"{lane}\x1f{_ROUND_SEED}\x1f{persona_id}\x1f{target_date}"
+        uuid.NAMESPACE_OID,
+        f"{lane}\x1f{_ROUND_SEED}\x1f{persona_id}\x1f{target_date}"
+        f"\x1f{now.isoformat()}",
     ).hex
     await record_round_cost(
         lane=lane,
@@ -457,13 +482,14 @@ async def _run_day_review(
 
     # 落标核验：run 正常返回 ≠ 回顾成功——模型可能一个工具都没调。现读昨天页：
     # 页存在（本次写的、或更早班写的——同日重跑场景算）才说明这个生活日真有了
-    # 页、才落 marker；页不存在 = 本次回顾失败，不落标、error 留痕、fail-open
-    # （下一班重试）。关系页不核验：没聊过天就不动关系页是合法的。
+    # 页、才落 marker（marker 已降级为观测留痕，不再当闸读——对账口径看页）；
+    # 页不存在 = 本次回顾失败，不落标、error 留痕、fail-open（对账班按页缺失
+    # 自动补）。关系页不核验：没聊过天就不动关系页是合法的。
     written = await read_day_page(lane=lane, persona_id=persona_id, date=target_date)
     if written is None:
         logger.error(
             "[day_review] %s/%s %s run returned but no day page was written, "
-            "treat as failure: marker 不落、下一班自动重试",
+            "treat as failure: 页不落、对账班按页缺失自动补跑",
             lane,
             persona_id,
             target_date,

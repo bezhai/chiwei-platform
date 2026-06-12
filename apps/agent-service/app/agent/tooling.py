@@ -38,12 +38,15 @@ signature/docstring.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import create_model
 
 from app.agent.neutral import ToolCall, ToolDef, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 class Tool:
@@ -174,6 +177,11 @@ async def dispatch(tools: list[Tool], call: ToolCall) -> ToolResult:
     ``ToolResult`` (not a raised exception) so the agent turn stays alive — same
     philosophy as ``@tool_error``: a single bad tool call shouldn't kill the
     whole reply.
+
+    调用前先做**参数绑定预检**（``_check_binding``）：LLM 幻觉出的参数错误
+    （多参数 / 缺必填 / 参数名错）同样以 ``ToolResult`` 回喂模型修正重调，
+    不向上抛。预检通过后照常调用——函数体内部抛出的任何异常仍原样传播
+    （durable 写工具不包 @tool_error 的设计语义不受影响）。
     """
     by_name = {t.name: t for t in tools}
     target = by_name.get(call.name)
@@ -183,5 +191,48 @@ async def dispatch(tools: list[Tool], call: ToolCall) -> ToolResult:
             tool_call_id=call.id,
             content=f"unknown tool {call.name!r}; available: {known}",
         )
+    binding_outcome = _check_binding(target, call)
+    if binding_outcome is not None:
+        return ToolResult(tool_call_id=call.id, content=binding_outcome)
     result = await target.invoke(call.arguments)
     return ToolResult(tool_call_id=call.id, content=result)
+
+
+def _check_binding(target: Tool, call: ToolCall) -> dict[str, Any] | None:
+    """绑定预检：把 LLM 幻觉出的参数错误拦在工具函数体之外。
+
+    2026-06-12 prod 事故：睡前回顾 agent 调 update_day_page 时幻觉串入了
+    update_relationship_page 的 ``other_user_id`` 参数，``invoke`` 的
+    ``**arguments`` 直接抛 TypeError 炸掉整轮 Agent.run。绑定失败属于模型
+    的调用错误，应当像 ``@tool_error`` 一样以 ``ToolOutcomeError`` 形态回喂
+    模型，让它在同一轮循环里看到错误、修正参数后重调。
+
+    ``inspect.signature`` 会穿透 ``functools.wraps`` 链（如 @tool_error 的
+    wrapper）拿到原始签名，对 ``functools.partial`` 也原生支持；**kwargs
+    形态的工具天然绑得上多余参数，不会误伤。只有"绑定本身"抛 TypeError
+    才回喂——函数体内部的异常与本函数无关，照旧传播。
+
+    绑定失败返回 outcome dict，可绑定返回 ``None``。
+    """
+    try:
+        inspect.signature(target._func).bind(**call.arguments)
+    except TypeError as exc:
+        # 局部 import 断循环：app.agent.tools 包 __init__ 会拉起各工具模块，
+        # 而工具模块都 ``from app.agent.tooling import tool``。
+        from app.agent.tools.outcome import ToolOutcomeError
+
+        logger.warning(
+            "dispatch: %s 参数绑定失败 — %s (arguments=%s)",
+            call.name,
+            exc,
+            sorted(call.arguments),
+        )
+        return ToolOutcomeError(
+            kind="invalid_args",
+            message=(
+                f"工具 {call.name} 参数绑定失败：{exc}。"
+                "请检查该工具的参数定义，修正参数后重新调用。"
+            ),
+            detail={"original_error_type": type(exc).__name__},
+        ).model_dump()
+    return None

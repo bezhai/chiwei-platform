@@ -133,7 +133,7 @@ def patched(monkeypatch):
     async def fake_review(**kwargs):
         pass
 
-    async def fake_read_day_page(*, lane, persona_id, date):
+    async def fake_read_day_page_before(*, lane, persona_id, before_date):
         return None
 
     async def fake_arc(*, lane):
@@ -151,7 +151,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(lw, "load_persona", fake_load_persona)
     monkeypatch.setattr(lw, "load_session", fake_load_session)
     monkeypatch.setattr(lw, "run_day_review", fake_review)
-    monkeypatch.setattr(lw, "read_day_page", fake_read_day_page)
+    monkeypatch.setattr(lw, "read_day_page_before", fake_read_day_page_before)
     monkeypatch.setattr(lw, "record_round_cost", fake_record_round_cost)
     monkeypatch.setattr(sediment_mod, "record_round_cost", fake_record_round_cost)
     monkeypatch.setattr(sediment_mod, "load_persona", fake_load_persona)
@@ -303,7 +303,17 @@ async def test_fold_runs_after_mark_read_before_self_wake_and_review(
     monkeypatch.setattr(lw, "fold_session", fake_fold)
     monkeypatch.setattr(lw, "fire_life_self_wake", fake_self_wake)
     monkeypatch.setattr(lw, "run_day_review", fake_review)
-    patched["snapshot"] = _snapshot(activity_type="sleep", day_reviewed_date=None)
+    # 边沿触发铺设：轮始醒着（第一次读）、收口最新快照是 sleep（第二次读）——
+    # 本轮发生「进入睡眠」的转变，review 才会跑（快班是边沿触发不是电平）。
+    find_calls = {"n": 0}
+
+    async def fake_find(*, lane, persona_id):
+        find_calls["n"] += 1
+        if find_calls["n"] == 1:
+            return _snapshot(activity_type="study", day_reviewed_date=None)
+        return _snapshot(activity_type="sleep", day_reviewed_date=None)
+
+    monkeypatch.setattr(lw, "find_life_state", fake_find)
     _install_life_agent(monkeypatch)
 
     await _wake()

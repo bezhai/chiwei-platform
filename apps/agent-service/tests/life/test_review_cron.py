@@ -2,15 +2,17 @@
 
 主保证是钟（spec 决策 2）：sleep 声明可能整晚不发生（部署丢自排且 life 无心跳），
 所以清晨 05:00–10:00 cron 逐小时对账「刚结束的生活日」（窗口内每班 target 都是
-前一日标签）：marker 未落则跑回顾、已落由 marker 幂等挡住。persona 清单从现成的
-``list_all_persona_ids`` 取（bot_persona 表），**不硬编三姐妹名字**（宪法）；
-只对**该 lane 有 LifeState 记录**的 persona 跑——bot_persona 全表里可能有没有
-life 的 persona，对它们逐小时对账是空转、语义不对。
+前一日标签）。「那天回顾过没有」**看 data_day_page 该 (lane, persona, date) 的页
+是否存在**，不比对 marker（事故修复，2026-06-12 prod：清晨回笼觉的快班把单字段
+marker 推前到当前生活日，对账班误判前一日未回顾、重跑出重复页）——页缺失才补跑、
+已有页跳过。persona 清单从现成的 ``list_all_persona_ids`` 取（bot_persona 表），
+**不硬编三姐妹名字**（宪法）；只对**该 lane 有 LifeState 记录**的 persona 跑——
+bot_persona 全表里可能有没有 life 的 persona，对它们逐小时对账是空转、语义不对。
 
 照 fetch_dataflow 的三层翻译：cron 喂单字段 ``LifeDayReviewTick``（时间源硬约束），
 翻译节点补进程级 lane 后 emit ``LifeDayReviewSweep``，in-process 接回对账节点。
-run_day_review 自身 fail-open + single_flight + 锁内 marker 对账——一个 persona
-失败绝不影响下一个。
+run_day_review 自身 fail-open + single_flight + 锁内按页存在性权威复查（仅对账班
+trigger="sweep" 生效）——一个 persona 失败绝不影响下一个。
 """
 
 from __future__ import annotations
@@ -55,6 +57,8 @@ def patched(monkeypatch):
         # persona_id -> LifeState | None。默认三人都有 LifeState（活过）——
         # 没有 LifeState 的 persona 会被对账节点过滤（专门的用例钉这条）。
         "snapshots": {p: _snapshot(p) for p in ["akao", "chinagi", "ayana"]},
+        # (persona_id, date) 集合：data_day_page 里已存在页的生活日（对账班的闸）。
+        "pages": set(),
         "reviews": [],
     }
 
@@ -64,11 +68,15 @@ def patched(monkeypatch):
     async def fake_find(*, lane, persona_id):
         return state["snapshots"].get(persona_id)
 
+    async def fake_page_exists(*, lane, persona_id, date):
+        return (persona_id, date) in state["pages"]
+
     async def fake_review(**kwargs):
         state["reviews"].append(kwargs)
 
     monkeypatch.setattr(rc, "list_all_persona_ids", fake_list_personas)
     monkeypatch.setattr(rc, "find_life_state", fake_find)
+    monkeypatch.setattr(rc, "day_page_exists", fake_page_exists)
     monkeypatch.setattr(rc, "run_day_review", fake_review)
     monkeypatch.setattr(rc.cst_time, "now_cst", lambda: _FIVE_AM)
     return state
@@ -117,7 +125,7 @@ async def test_tick_translation_defaults_lane_to_prod(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sweep_reviews_every_persona_for_just_ended_living_day(patched):
-    """marker 都未落 → 每个 persona 各跑一次，target = 刚结束的生活日（前一日标签）。"""
+    """页都缺失 → 每个 persona 各跑一次（trigger="sweep"），target = 刚结束的生活日。"""
     await day_review_sweep_node(LifeDayReviewSweep(lane="coe-t2"))
 
     assert [r["persona_id"] for r in patched["reviews"]] == ["akao", "chinagi", "ayana"]
@@ -125,6 +133,7 @@ async def test_sweep_reviews_every_persona_for_just_ended_living_day(patched):
         assert call["lane"] == "coe-t2"
         assert call["target_date"] == "2026-06-10", "05:00 对账的是前一日标签的生活日"
         assert call["now"] == _FIVE_AM
+        assert call["trigger"] == "sweep", "对账班必须亮明触发源（页存在则绝不重跑）"
         # trace 归组：persona 当天（自然日）的意识流 session id
         assert call["trace_session_id"] == make_session_id(
             "coe-t2", call["persona_id"], "2026-06-11"
@@ -132,11 +141,9 @@ async def test_sweep_reviews_every_persona_for_just_ended_living_day(patched):
 
 
 @pytest.mark.asyncio
-async def test_sweep_skips_persona_already_reviewed(patched):
-    """快班昨晚已回顾的 persona（marker == target）跳过，其余照跑（对账语义）。"""
-    patched["snapshots"]["chinagi"] = _snapshot(
-        "chinagi", day_reviewed_date="2026-06-10"
-    )
+async def test_sweep_skips_persona_whose_page_exists(patched):
+    """快班昨晚已写出页的 persona（目标日页存在）跳过，其余照跑（对账语义）。"""
+    patched["pages"].add(("chinagi", "2026-06-10"))
 
     await day_review_sweep_node(LifeDayReviewSweep(lane="coe-t2"))
 
@@ -144,8 +151,32 @@ async def test_sweep_skips_persona_already_reviewed(patched):
 
 
 @pytest.mark.asyncio
-async def test_sweep_runs_when_marker_is_stale(patched):
-    """marker 是更早的生活日（昨晚没标上）→ 照跑（补班把昨天补出来）。"""
+async def test_sweep_not_fooled_by_marker_pushed_forward(patched):
+    """prod 事故复现（2026-06-12 akao）：前晚快班回顾了 06-10（页已写），清晨回笼觉
+    的快班又把 marker 推前到 06-11——对账班按页存在性判定、照样跳过 06-10，绝不
+    重跑出一张重复的 v2 页。"""
+    patched["snapshots"]["akao"] = _snapshot("akao", day_reviewed_date="2026-06-11")
+    patched["pages"].add(("akao", "2026-06-10"))
+
+    await day_review_sweep_node(LifeDayReviewSweep(lane="coe-t2"))
+
+    assert "akao" not in [r["persona_id"] for r in patched["reviews"]]
+
+
+@pytest.mark.asyncio
+async def test_sweep_ignores_marker_when_page_missing(patched):
+    """marker == target 但页不存在 → 照跑：「那天回顾过没有」只看页，不看 marker
+    （marker 已降级为观测留痕，单字段回答不了按天的问题）。"""
+    patched["snapshots"]["akao"] = _snapshot("akao", day_reviewed_date="2026-06-10")
+
+    await day_review_sweep_node(LifeDayReviewSweep(lane="coe-t2"))
+
+    assert "akao" in [r["persona_id"] for r in patched["reviews"]]
+
+
+@pytest.mark.asyncio
+async def test_sweep_runs_when_page_missing_and_marker_stale(patched):
+    """marker 是更早的生活日、目标日页缺失（昨晚没跑成）→ 照跑（补班把昨天补出来）。"""
     patched["snapshots"]["akao"] = _snapshot("akao", day_reviewed_date="2026-06-09")
 
     await day_review_sweep_node(LifeDayReviewSweep(lane="coe-t2"))

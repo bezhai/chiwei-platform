@@ -100,6 +100,28 @@ async def read_day_page(
     )
 
 
+async def day_page_exists(*, lane: str, persona_id: str, date: str) -> bool:
+    """某人某**确切生活日**是否已有昨天页（任何版本算有），没有返回 False。
+
+    清晨对账班「那天回顾过没有」的权威口径（2026-06-12 prod 事故修复）：单字段
+    marker（LifeState.day_reviewed_date）会被清晨回笼觉的快班推前到新生活日，
+    回答不了按天的问题——按天的事实只在这张表里。框架 ``select_latest`` 取的是
+    整行页全文，这里只要存在性，照 :func:`read_latest_day_page` 的先例在
+    framework 持久化写好的真实表上做一个只读 EXISTS 查询；写入仍走
+    ``insert_append``，不绕开 framework 持久化原语。
+    """
+    sql = (
+        f"SELECT 1 FROM {_table_name(DayPage)} "
+        f"WHERE lane = :lane AND persona_id = :persona_id AND date = :date "
+        f"LIMIT 1"
+    )
+    async with get_session() as s:
+        r = await s.execute(
+            text(sql), {"lane": lane, "persona_id": persona_id, "date": date}
+        )
+        return r.first() is not None
+
+
 async def read_latest_day_page(*, lane: str, persona_id: str) -> DayPage | None:
     """跨日期取她最近写下的一页昨天：date 最大那条链的最新一版，没有返回 None。
 
@@ -118,6 +140,36 @@ async def read_latest_day_page(*, lane: str, persona_id: str) -> DayPage | None:
     )
     async with get_session() as s:
         r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
+        row = r.mappings().first()
+        if not row:
+            return None
+        return DayPage(**{k: row[k] for k in DayPage.model_fields})
+
+
+async def read_day_page_before(
+    *, lane: str, persona_id: str, before_date: str
+) -> DayPage | None:
+    """取日期**严格早于** ``before_date`` 的最新一版昨天页，没有返回 None。
+
+    life 注入「她最近一页昨天」的读口（2026-06-12 事故修复的配套口径）：清晨
+    回笼觉的快班会给**当前生活日**写下凌晨的短页，跨日取最新
+    （:func:`read_latest_day_page`）会把它错当「上一页日子」；按单字段 marker
+    （LifeState.day_reviewed_date）取又会被回笼觉推前 / 对账班回拨。这里只认
+    日期：严格早于当前生活日（``before_date`` 由调用方按 living_day 口径算好
+    传入）的最新一版才是「昨天」。照 :func:`read_latest_day_page` 的先例做
+    framework 没提供的只读查询；``date`` 是 YYYY-MM-DD 文本、字典序即时间序，
+    按 date 降序、version 降序取第一行（同日多版取重写后的最新一版）。
+    """
+    sql = (
+        f"SELECT * FROM {_table_name(DayPage)} "
+        f"WHERE lane = :lane AND persona_id = :persona_id AND date < :before_date "
+        f"ORDER BY date DESC, version DESC LIMIT 1"
+    )
+    async with get_session() as s:
+        r = await s.execute(
+            text(sql),
+            {"lane": lane, "persona_id": persona_id, "before_date": before_date},
+        )
         row = r.mappings().first()
         if not row:
             return None
