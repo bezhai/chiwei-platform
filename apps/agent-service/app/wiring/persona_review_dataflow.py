@@ -36,7 +36,7 @@ TZ = "Asia/Shanghai"
 # 每天 11:00 一班的补班（钟挂 wiring 层，节拍器不进业务）。cron 喂单字段
 # PersonaReviewTick，翻译节点补上进程级泳道后 emit PersonaReviewSweep 接回
 # sweep 节点。本周已成功的班由周级幂等挡住，失败的班次日自动补。
-wire(PersonaReviewTick).from_(Source.cron("*/5 * * * *", tz=TZ)).to(
+wire(PersonaReviewTick).from_(Source.cron("0 11 * * *", tz=TZ)).to(
     persona_review_to_sweep_tick
 )
 # PersonaReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
