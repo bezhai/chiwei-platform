@@ -39,10 +39,6 @@ export interface CommonMessageResolveInput {
     commonMessageId: string;
 }
 
-export interface ConversationResolveInput {
-    commonConversationId: string;
-}
-
 export interface OutboundMessageRecordInput {
     channelMessageId: string;
     channelConversationId: string;
@@ -92,11 +88,6 @@ export interface OutboundCapabilities {
     // channel 插件把 common id 反查成渠道内 ref。反查失败必须 fail-loud。
     resolveOutboundTarget(input: OutboundTargetResolveInput): Promise<OutboundResolvedTarget>;
     resolveMessageRef(input: CommonMessageResolveInput): Promise<MessageRef>;
-    // 仅会话维度的反查：proactive 合成消息（无 inbound 锚点，message_id 是上游
-    // 自造的全局 id、不在渠道映射表）只需要把 common_conversation_id 翻成渠道裸
-    // 会话 id 就能 sendText。可选——未实现的 channel 在「proactive 无 root」出站
-    // 路径上 fail-loud（见 resolveChatResponseTarget），其余路径不受影响。
-    resolveConversationRef?(input: ConversationResolveInput): Promise<ConversationRef>;
     // 每条助手出站消息发送成功后，仍由当前 channel 插件记录 common_message +
     // channel 私有映射。worker 只提交中性字段，不能直接写 lark_message / qq_message。
     recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string>;

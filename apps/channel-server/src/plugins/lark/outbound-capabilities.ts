@@ -15,7 +15,6 @@
 import type {
     CommonMessageResolveInput,
     ConversationRef,
-    ConversationResolveInput,
     MessageRef,
     OutboundMessageRecordInput,
     OutboundCapabilities,
@@ -27,11 +26,7 @@ import type { PostContent } from 'types/content-types';
 import { markdownToPostContent } from './post-content-processor';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { storeLarkOutboundMessage } from './common-projector';
-import {
-    resolveLarkChatId,
-    resolveLarkMessageRef,
-    reverseResolveOutbound,
-} from './outbound-reverse-resolve';
+import { resolveLarkMessageRef, reverseResolveOutbound } from './outbound-reverse-resolve';
 import { getLarkDisplayNameByAppId, larkCredentials } from './bot-identity';
 
 // markdown 里的 @N.png 图片占位引用（与现状 chat-response-worker 同一正则）。
@@ -194,12 +189,6 @@ export function createLarkOutboundCapabilities(deps: LarkOutboundDeps): Outbound
 
         async resolveMessageRef(input: CommonMessageResolveInput): Promise<MessageRef> {
             return { channelId: await resolveLarkMessageRef(input.commonMessageId) };
-        },
-
-        async resolveConversationRef(
-            input: ConversationResolveInput,
-        ): Promise<ConversationRef> {
-            return { channelId: await resolveLarkChatId(input.commonConversationId) };
         },
 
         async recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string> {

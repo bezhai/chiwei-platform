@@ -31,10 +31,7 @@ import { getChannelRegistry } from '@core/registry/channel-registry';
 import '@plugins/index';
 import { initializeChannelPlugins } from '@plugins/initialize';
 import { imageRegistryLookupId } from './image-registry-key';
-import {
-    dispatchChatResponseOutbound,
-    resolveChatResponseTarget,
-} from './chat-response-outbound';
+import { dispatchChatResponseOutbound } from './chat-response-outbound';
 import dayjs from 'dayjs';
 import { Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import type { ConsumeMessage } from 'amqplib';
@@ -128,11 +125,9 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
 
     const repo = AppDataSource.getRepository(CommonAgentResponse);
 
-    // 查询 agent_response 获取 bot_name。session_id 为空时跳过：proactive 合成
-    // 消息可能没有 agent_response 行；且 TypeORM findOneBy 会把 undefined 条件
-    // 静默丢掉、捞回任意一行——绝不能拿空 session_id 去查。
+    // 查询 agent_response 获取 bot_name
     const tDbQuery0 = Date.now();
-    const agentResponse = session_id ? await repo.findOneBy({ session_id }) : null;
+    const agentResponse = await repo.findOneBy({ session_id });
     const dbQueryMs = Date.now() - tDbQuery0;
     chatResponseDuration.labels({ stage: 'db_query' }).observe(dbQueryMs / 1000);
 
@@ -171,16 +166,14 @@ async function handleChatResponse(msg: ConsumeMessage): Promise<void> {
             // ChatTrigger/ChatResponseSegment 只携带 common_*_id。这里经当前 channel
             // 插件读取自己的私有映射，构造能力端口要的渠道内 ref。反查不到明确
             // 抛错（落入下方 catch），绝不静默把回复发到错地方。
-            // proactive 且无 root 的合成消息（message_id 不在渠道映射表，如
-            // persona review diff 推送）只反查 conversation 维度——策略与理由见
-            // resolveChatResponseTarget；其余路径全量反查不变。
-            const { channelMessageId, channelConversationId, channelRootMessageId } =
-                await resolveChatResponseTarget(capabilities, {
-                    messageId: message_id,
-                    conversationId: chat_id,
-                    rootMessageId: root_id || undefined,
-                    isProactive: is_proactive,
-                });
+            const refs = await capabilities.resolveOutboundTarget({
+                commonMessageId: message_id,
+                commonConversationId: chat_id,
+                commonRootMessageId: root_id || undefined,
+            });
+            const channelMessageId = refs.message.channelId;
+            const channelConversationId = refs.conversation.channelId;
+            const channelRootMessageId = refs.rootMessage?.channelId;
 
             // part > 0 续段：发送前节流（与现状一致，worker 侧出站节奏，非渲染）。
             if (part_index > 0) {
