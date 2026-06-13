@@ -1,13 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Card, Col, Row, Statistic, Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
+import { Button, Card, Table, Tag, Typography, Tooltip, Space, Spin } from 'antd';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ClockCircleOutlined,
-  CloudServerOutlined,
-  DeploymentUnitOutlined,
   ReloadOutlined,
   DownOutlined,
   RightOutlined,
@@ -16,7 +14,7 @@ import { api } from '../api/client';
 
 dayjs.extend(relativeTime);
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 interface App {
   name: string;
@@ -93,7 +91,7 @@ function PodDetail({ app, lane }: { app: string; lane: string }) {
   if (!data) return <Text type="secondary">无法获取 Pod 信息</Text>;
 
   return (
-    <div style={{ padding: '8px 12px', background: '#f8fafc', borderRadius: 8, marginTop: 8, border: '1px solid #e2e8f0' }}>
+    <div style={{ padding: '8px 12px', background: 'var(--panel-soft)', borderRadius: 4, marginTop: 8, border: '1px solid var(--line)' }}>
       <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8, fontWeight: 500 }}>
         预期: {data.desired} / 就绪: {data.ready} / 可用: {data.available}
       </Text>
@@ -160,7 +158,7 @@ export default function ServiceStatus() {
       title: '服务名',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Text strong style={{ color: '#0f172a' }}>{name}</Text>,
+      render: (name: string) => <Text strong style={{ color: 'var(--ink)' }}>{name}</Text>,
     },
     {
       title: '描述',
@@ -239,61 +237,30 @@ export default function ServiceStatus() {
           <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>实时监控所有服务的部署状态与资源情况</Text>
         </div>
         <Tooltip title="每 30 秒自动刷新">
-          <div 
+          <Button
+            icon={<ReloadOutlined spin={loading} />}
             onClick={() => { setLoading(true); fetchData(); }}
-            style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: 8, 
-              padding: '8px 16px', 
-              background: '#fff', 
-              borderRadius: 8, 
-              cursor: 'pointer',
-              border: '1px solid #e2e8f0',
-              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-              transition: 'all 0.2s'
-            }}
-            className="hover-card"
           >
-            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
-            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
-          </div>
+            刷新
+          </Button>
         </Tooltip>
       </div>
 
-      <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>总服务数</Text>}
-              value={apps.length}
-              prefix={<CloudServerOutlined style={{ color: '#64748b' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>运行中</Text>}
-              value={runningCount}
-              prefix={<CheckCircleOutlined style={{ color: '#10b981' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
-              suffix={failedCount > 0 ? <Text type="danger" style={{ fontSize: 14, fontWeight: 500, marginLeft: 8 }}>/ {failedCount} 异常</Text> : undefined}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={8}>
-          <Card bordered={false} className="content-card" bodyStyle={{ padding: '20px 24px' }}>
-            <Statistic
-              title={<Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>活跃泳道</Text>}
-              value={lanes.length}
-              prefix={<DeploymentUnitOutlined style={{ color: '#8b5cf6' }} />}
-              valueStyle={{ fontWeight: 700, fontSize: 32, color: '#0f172a', marginTop: 8 }}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="ops-summary-strip">
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">服务总数</span>
+          <strong className="ops-summary-value">{apps.length}</strong>
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">运行中</span>
+          <strong className="ops-summary-value">{runningCount}</strong>
+          {failedCount > 0 && <span className="ops-summary-meta danger">{failedCount} 异常</span>}
+        </div>
+        <div className="ops-summary-item">
+          <span className="ops-summary-label">活跃泳道</span>
+          <strong className="ops-summary-value">{lanes.length}</strong>
+        </div>
+      </div>
 
       {laneBindings.length > 0 && (
         <Card bordered={false} className="content-card" style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
@@ -310,7 +277,7 @@ export default function ServiceStatus() {
         </Card>
       )}
 
-      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
+      <Card bordered={false} className="content-card ops-table-shell" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={dataSource}
           columns={columns}
@@ -325,13 +292,13 @@ export default function ServiceStatus() {
             expandIcon: ({ expanded, onExpand, record }) =>
               record.releases.length > 0 ? (
                 expanded
-                  ? <DownOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: '#64748b' }} onClick={(e) => onExpand(record, e)} />
-                  : <RightOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: '#64748b' }} onClick={(e) => onExpand(record, e)} />
+                  ? <DownOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: 'var(--muted)' }} onClick={(e) => onExpand(record, e)} />
+                  : <RightOutlined style={{ cursor: 'pointer', fontSize: 12, marginRight: 8, color: 'var(--muted)' }} onClick={(e) => onExpand(record, e)} />
               ) : <span style={{ width: 20, display: 'inline-block' }} />,
             expandedRowRender: (record) => (
-              <div style={{ padding: '16px 32px', background: '#fafafa', borderTop: '1px solid #f1f5f9' }}>
+              <div style={{ padding: '16px 32px', background: 'var(--panel-soft)', borderTop: '1px solid var(--line)' }}>
                 {record.releases.map((rel) => (
-                  <div key={rel.id} style={{ marginBottom: 16, background: '#fff', padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.02)' }}>
+                  <div key={rel.id} style={{ marginBottom: 16, background: 'var(--panel)', padding: 16, borderRadius: 4, border: '1px solid var(--line)' }}>
                     <Space size={12} style={{ marginBottom: 8 }}>
                       <Tag bordered={false} color={statusConfig[rel.status]?.color || 'default'} style={{ fontWeight: 500 }}>{rel.lane}</Tag>
                       <Text code style={{ fontSize: 12, border: 'none', background: '#f1f5f9' }}>{getImageTag(rel.image)}</Text>

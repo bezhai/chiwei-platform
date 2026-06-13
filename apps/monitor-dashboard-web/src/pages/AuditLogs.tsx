@@ -38,7 +38,7 @@ export default function AuditLogs() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [caller, setCaller] = useState<string>();
-  const [action, setAction] = useState<string>(() => searchParams.get('action') || undefined);
+  const [action, setAction] = useState<string | undefined>(() => searchParams.get('action') || undefined);
   const [result, setResult] = useState<string>();
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null]>();
 
@@ -100,7 +100,7 @@ export default function AuditLogs() {
       dataIndex: 'action',
       key: 'action',
       width: 220,
-      render: (v: string) => <Text code style={{ fontSize: 12, background: '#f8fafc', border: 'none' }}>{v}</Text>,
+      render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
     },
     {
       title: '参数',
@@ -149,25 +149,9 @@ export default function AuditLogs() {
           <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>所有 API 操作的完整安全审计记录</Text>
         </div>
         <Tooltip title="刷新">
-          <div 
-            onClick={fetchData}
-            style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: 8, 
-              padding: '8px 16px', 
-              background: '#fff', 
-              borderRadius: 8, 
-              cursor: 'pointer',
-              border: '1px solid #e2e8f0',
-              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-              transition: 'all 0.2s'
-            }}
-            className="hover-card"
-          >
-            <ReloadOutlined spin={loading} style={{ color: '#64748b' }} />
-            <Text type="secondary" style={{ fontSize: 13, fontWeight: 500 }}>刷新</Text>
-          </div>
+          <Button icon={<ReloadOutlined spin={loading} />} onClick={fetchData}>
+            刷新
+          </Button>
         </Tooltip>
       </div>
 
@@ -214,7 +198,7 @@ export default function AuditLogs() {
         </Space>
       </div>
 
-      <Card bordered={false} className="content-card" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
+      <Card bordered={false} className="content-card ops-table-shell" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
         <Table
           dataSource={data}
           columns={columns}

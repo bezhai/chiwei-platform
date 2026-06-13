@@ -1,25 +1,29 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo, type Key } from 'react';
 import {
   Button,
-  Card,
+  Empty,
   Form,
   Input,
-  List,
   Modal,
   Popconfirm,
+  Spin,
   Tag,
+  Tooltip,
   Tree,
   Typography,
   message,
 } from 'antd';
 import {
-  PlusOutlined,
   DeleteOutlined,
+  PlusOutlined,
   SaveOutlined,
   FileMarkdownOutlined,
   PythonOutlined,
   FileOutlined,
   FolderOutlined,
+  FolderOpenOutlined,
+  CodeOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import type { TreeDataNode } from 'antd';
 import Editor from '@monaco-editor/react';
@@ -33,12 +37,17 @@ interface Skill {
   files: string[];
 }
 
+const WORKSPACE_KEY = 'workspace:skills';
+
 function languageForFile(filename: string): string {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.md')) return 'markdown';
   if (lower.endsWith('.py')) return 'python';
   if (lower.endsWith('.sh')) return 'shell';
   if (lower.endsWith('.json')) return 'json';
+  if (lower.endsWith('.ts') || lower.endsWith('.tsx')) return 'typescript';
+  if (lower.endsWith('.js') || lower.endsWith('.jsx')) return 'javascript';
+  if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml';
   return 'plaintext';
 }
 
@@ -48,64 +57,143 @@ function fileIcon(filename: string) {
   return <FileOutlined />;
 }
 
-/** 将扁平文件路径列表构建成 Ant Design Tree 数据 */
-function buildTreeData(files: string[] | undefined): TreeDataNode[] {
-  if (!files?.length) return [];
+function skillNodeKey(skillName: string) {
+  return `skill:${skillName}`;
+}
+
+function dirNodeKey(skillName: string, dirPath: string) {
+  return `dir:${skillName}:${dirPath}`;
+}
+
+function fileNodeKey(skillName: string, filePath: string) {
+  return `file:${skillName}:${filePath}`;
+}
+
+function parseFileNodeKey(key: string): { skillName: string; filePath: string } | null {
+  const parts = key.split(':');
+  if (parts[0] !== 'file' || parts.length < 3) return null;
+  return {
+    skillName: parts[1],
+    filePath: parts.slice(2).join(':'),
+  };
+}
+
+function parentDirectoryKeys(skillName: string, filePath: string): Key[] {
+  const parts = filePath.split('/');
+  const keys: Key[] = [WORKSPACE_KEY, skillNodeKey(skillName)];
+  for (let index = 0; index < parts.length - 1; index++) {
+    keys.push(dirNodeKey(skillName, parts.slice(0, index + 1).join('/')));
+  }
+  return keys;
+}
+
+function sortTreeNodes(nodes: TreeDataNode[]) {
+  nodes.sort((a, b) => {
+    const aIsFile = a.isLeaf === true;
+    const bIsFile = b.isLeaf === true;
+    if (aIsFile !== bIsFile) return aIsFile ? 1 : -1;
+    return String(a.title).localeCompare(String(b.title));
+  });
+
+  for (const node of nodes) {
+    if (node.children) sortTreeNodes(node.children);
+  }
+}
+
+function buildSkillFileTree(skill: Skill): TreeDataNode[] {
   const root: TreeDataNode[] = [];
   const dirMap = new Map<string, TreeDataNode>();
 
-  const sorted = [...files].sort((a, b) => {
-    // 文件夹排前面，同级按字母序
-    const aDepth = a.split('/').length;
-    const bDepth = b.split('/').length;
-    if (aDepth !== bDepth) return aDepth - bDepth;
-    return a.localeCompare(b);
-  });
-
-  for (const filePath of sorted) {
+  for (const filePath of skill.files || []) {
     const parts = filePath.split('/');
     let parentChildren = root;
 
-    // 逐层创建目录节点
-    for (let i = 0; i < parts.length - 1; i++) {
-      const dirKey = parts.slice(0, i + 1).join('/');
-      if (!dirMap.has(dirKey)) {
+    for (let index = 0; index < parts.length - 1; index++) {
+      const dirPath = parts.slice(0, index + 1).join('/');
+      const key = dirNodeKey(skill.name, dirPath);
+      if (!dirMap.has(key)) {
         const dirNode: TreeDataNode = {
-          key: dirKey,
-          title: parts[i],
+          key,
+          title: parts[index],
           icon: <FolderOutlined />,
           children: [],
           selectable: false,
         };
         parentChildren.push(dirNode);
-        dirMap.set(dirKey, dirNode);
+        dirMap.set(key, dirNode);
       }
-      parentChildren = dirMap.get(dirKey)!.children as TreeDataNode[];
+      parentChildren = dirMap.get(key)!.children as TreeDataNode[];
     }
 
-    // 叶子节点（文件）
     const fileName = parts[parts.length - 1];
     parentChildren.push({
-      key: filePath,
+      key: fileNodeKey(skill.name, filePath),
       title: fileName,
       icon: fileIcon(fileName),
       isLeaf: true,
     });
   }
 
+  sortTreeNodes(root);
   return root;
+}
+
+function skillDirectoryTitle(skill: Skill, onDelete: (name: string) => void) {
+  return (
+    <span className="skill-editor-skill-title">
+      <span className="skill-editor-skill-name">{skill.name}</span>
+      <span className="skill-editor-directory-actions">
+        <span className="skill-editor-file-count">{skill.files?.length || 0}</span>
+        <Popconfirm
+          title={`确认删除 "${skill.name}"?`}
+          onConfirm={(event) => {
+            event?.stopPropagation();
+            onDelete(skill.name);
+          }}
+          onCancel={(event) => event?.stopPropagation()}
+        >
+          <Button
+            type="text"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </Popconfirm>
+      </span>
+    </span>
+  );
+}
+
+function buildWorkspaceTree(skills: Skill[], onDelete: (name: string) => void): TreeDataNode[] {
+  return [
+    {
+      key: WORKSPACE_KEY,
+      title: 'skills',
+      icon: <FolderOpenOutlined />,
+      selectable: false,
+      children: skills.map((skill) => ({
+        key: skillNodeKey(skill.name),
+        title: skillDirectoryTitle(skill, onDelete),
+        icon: <FolderOutlined />,
+        selectable: false,
+        children: buildSkillFileTree(skill),
+      })),
+    },
+  ];
 }
 
 export default function Skills() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string>('');
-  const [fileContent, setFileContent] = useState<string>('');
-  const [originalContent, setOriginalContent] = useState<string>('');
+  const [selectedFile, setSelectedFile] = useState('');
+  const [fileContent, setFileContent] = useState('');
+  const [originalContent, setOriginalContent] = useState('');
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [expandedKeys, setExpandedKeys] = useState<Key[]>([WORKSPACE_KEY]);
   const [form] = Form.useForm();
 
   const fetchSkills = useCallback(async () => {
@@ -123,28 +211,32 @@ export default function Skills() {
   }, [fetchSkills]);
 
   const loadFile = useCallback(async (skillName: string, filename: string) => {
+    const skill = skills.find((item) => item.name === skillName) || null;
+    setSelectedSkill(skill);
+    setSelectedFile(filename);
+    setExpandedKeys((current) => Array.from(new Set([...current, ...parentDirectoryKeys(skillName, filename)])));
     setLoadingFile(true);
     try {
       const { data } = await api.get(`/skills/${skillName}/files/${filename}`);
       const content = data?.content ?? '';
       setFileContent(content);
       setOriginalContent(content);
-      setSelectedFile(filename);
     } catch {
       setFileContent('');
       setOriginalContent('');
     } finally {
       setLoadingFile(false);
     }
-  }, []);
+  }, [skills]);
 
-  const selectSkill = useCallback(async (skill: Skill) => {
-    setSelectedSkill(skill);
-    const firstFile = skill.files?.find(f => f === 'SKILL.md') || skill.files?.[0] || '';
+  useEffect(() => {
+    if (selectedSkill || !skills.length) return;
+    const firstSkill = skills[0];
+    const firstFile = firstSkill.files?.find((file) => file === 'SKILL.md') || firstSkill.files?.[0];
     if (firstFile) {
-      await loadFile(skill.name, firstFile);
+      loadFile(firstSkill.name, firstFile);
     }
-  }, [loadFile]);
+  }, [skills, selectedSkill, loadFile]);
 
   const handleSave = async () => {
     if (!selectedSkill || !selectedFile) return;
@@ -164,19 +256,20 @@ export default function Skills() {
     try {
       const values = await form.validateFields();
       await api.post('/skills', values);
-      message.success('已创建');
+      message.success('已创建文件夹');
       setCreateOpen(false);
       form.resetFields();
       await fetchSkills();
+      setExpandedKeys((current) => Array.from(new Set([...current, WORKSPACE_KEY, skillNodeKey(values.name)])));
     } catch (err) {
       if ((err as { name?: string }).name !== 'Error') return;
       message.error('创建失败');
     }
   };
 
-  const handleDelete = async (name: string) => {
+  const handleDelete = useCallback(async (name: string) => {
     await api.delete(`/skills/${name}`);
-    message.success('已删除');
+    message.success('已删除文件夹');
     if (selectedSkill?.name === name) {
       setSelectedSkill(null);
       setSelectedFile('');
@@ -184,157 +277,155 @@ export default function Skills() {
       setOriginalContent('');
     }
     await fetchSkills();
+  }, [fetchSkills, selectedSkill?.name]);
+
+  const handleTreeSelect = (keys: Key[]) => {
+    const key = keys[0];
+    if (!key) return;
+    const fileNode = parseFileNodeKey(String(key));
+    if (fileNode) {
+      loadFile(fileNode.skillName, fileNode.filePath);
+    }
   };
 
+  const workspaceTree = useMemo(() => buildWorkspaceTree(skills, handleDelete), [skills, handleDelete]);
   const isDirty = fileContent !== originalContent;
-  const treeData = selectedSkill ? buildTreeData(selectedSkill.files) : [];
+  const selectedTreeKey = selectedSkill && selectedFile ? fileNodeKey(selectedSkill.name, selectedFile) : undefined;
+  const currentPath = selectedSkill && selectedFile ? `skills/${selectedSkill.name}/${selectedFile}` : 'skills/';
+  const currentLanguage = selectedFile ? languageForFile(selectedFile) : 'plaintext';
 
   return (
-    <div className="page-container">
-      <div className="page-header" style={{ marginBottom: 24 }}>
+    <div className="page-container skills-page">
+      <div className="page-header skill-editor-page-header">
         <div>
           <h1 className="page-title">技能管理</h1>
           <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
-            管理 Agent 技能定义文件（SKILL.md + 脚本）
+            workspace / skills
           </Text>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)} size="large">
-          新建技能
-        </Button>
       </div>
 
-      <div style={{ display: 'flex', gap: 12, height: 'calc(100vh - 180px)', overflow: 'hidden' }}>
-        {/* Left: skill list */}
-        <Card
-          style={{ width: 240, flexShrink: 0, overflow: 'auto', height: '100%' }}
-          bodyStyle={{ padding: 0 }}
-          title={<Text strong>技能列表</Text>}
-        >
-          <List
-            loading={loadingList}
-            dataSource={skills}
-            renderItem={(skill) => (
-              <List.Item
-                style={{
-                  padding: '10px 16px',
-                  cursor: 'pointer',
-                  background: selectedSkill?.name === skill.name ? '#f0f7ff' : undefined,
-                  borderLeft: selectedSkill?.name === skill.name ? '3px solid #2563eb' : '3px solid transparent',
-                }}
-                onClick={() => selectSkill(skill)}
-                actions={[
-                  <Popconfirm
-                    key="delete"
-                    title={`确认删除 "${skill.name}"?`}
-                    onConfirm={(e) => { e?.stopPropagation(); handleDelete(skill.name); }}
-                    onCancel={(e) => e?.stopPropagation()}
-                  >
-                    <Button
-                      type="text" danger size="small"
-                      icon={<DeleteOutlined />}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </Popconfirm>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={<Text strong style={{ fontSize: 13 }}>{skill.name}</Text>}
-                  description={
-                    <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
-                      {skill.description || '暂无描述'}
-                    </Text>
-                  }
-                />
-              </List.Item>
-            )}
-          />
-        </Card>
+      <div className="skill-editor-shell">
+        <aside className="skill-editor-activitybar">
+          <Tooltip title="Explorer" placement="right">
+            <div className="skill-editor-activity active">
+              <FolderOpenOutlined />
+            </div>
+          </Tooltip>
+        </aside>
 
-        {/* Middle: file tree */}
-        {selectedSkill && (
-          <Card
-            style={{ width: 200, flexShrink: 0, overflow: 'auto', height: '100%' }}
-            bodyStyle={{ padding: '8px 4px' }}
-            title={<Text strong style={{ fontSize: 13 }}>{selectedSkill.name}</Text>}
-          >
+        <aside className="skill-editor-explorer">
+          <div className="skill-editor-panel-title">
+            <span>EXPLORER</span>
+            <div className="skill-editor-panel-actions">
+              <Tooltip title="新建文件夹">
+                <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)} />
+              </Tooltip>
+              <Tooltip title="刷新">
+                <Button type="text" size="small" icon={<ReloadOutlined />} onClick={fetchSkills} loading={loadingList} />
+              </Tooltip>
+            </div>
+          </div>
+
+          <div className="skill-editor-workspace-row">
+            <span>workspace</span>
+            <Tag bordered={false}>{skills.length}</Tag>
+          </div>
+
+          <Spin spinning={loadingList}>
             <Tree
+              className="skill-editor-tree"
               showIcon
-              defaultExpandAll
-              treeData={treeData}
-              selectedKeys={selectedFile ? [selectedFile] : []}
-              onSelect={(keys) => {
-                const key = keys[0] as string;
-                if (key && selectedSkill) {
-                  loadFile(selectedSkill.name, key);
-                }
-              }}
-              style={{ fontSize: 13 }}
+              blockNode
+              treeData={workspaceTree}
+              expandedKeys={expandedKeys}
+              selectedKeys={selectedTreeKey ? [selectedTreeKey] : []}
+              onExpand={(keys) => setExpandedKeys(keys)}
+              onSelect={handleTreeSelect}
             />
-          </Card>
-        )}
+          </Spin>
+        </aside>
 
-        {/* Right: editor */}
-        <Card
-          style={{ flex: 1, overflow: 'hidden', height: '100%', display: 'flex', flexDirection: 'column' }}
-          bodyStyle={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}
-          title={
-            selectedFile ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Text code style={{ fontSize: 13 }}>{selectedFile}</Text>
-                {isDirty && <Tag color="orange">未保存</Tag>}
+        <main className="skill-editor-main">
+          <div className="skill-editor-tabbar">
+            {selectedSkill && selectedFile ? (
+              <div className={`skill-editor-tab ${isDirty ? 'dirty' : ''}`}>
+                {fileIcon(selectedFile)}
+                <span>{selectedFile.split('/').pop()}</span>
+                {isDirty && <span className="skill-editor-dirty-dot" />}
               </div>
             ) : (
-              <Text type="secondary">选择文件开始编辑</Text>
-            )
-          }
-          extra={
-            selectedSkill && selectedFile ? (
-              <Button
-                type="primary"
-                icon={<SaveOutlined />}
-                onClick={handleSave}
-                loading={saving}
-                disabled={!isDirty}
-              >
-                保存
-              </Button>
-            ) : null
-          }
-        >
-          {selectedSkill && selectedFile ? (
-            <div style={{ flex: 1, overflow: 'hidden', height: '100%' }}>
-              {loadingFile ? (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                  <Text type="secondary">加载中...</Text>
+              <div className="skill-editor-tab muted">untitled</div>
+            )}
+
+            <div className="skill-editor-save-area">
+              {selectedSkill && selectedFile && (
+                <>
+                  {isDirty && <Tag color="warning">未保存</Tag>}
+                  <Button
+                    type="primary"
+                    icon={<SaveOutlined />}
+                    onClick={handleSave}
+                    loading={saving}
+                    disabled={!isDirty}
+                  >
+                    保存
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="skill-editor-pathbar">
+            <CodeOutlined />
+            <span>{currentPath}</span>
+          </div>
+
+          <div className="skill-editor-canvas">
+            {selectedSkill && selectedFile ? (
+              loadingFile ? (
+                <div className="skill-editor-empty">
+                  <Spin />
+                  <Text type="secondary">Loading file</Text>
                 </div>
               ) : (
                 <Editor
                   height="100%"
-                  language={languageForFile(selectedFile)}
+                  language={currentLanguage}
                   value={fileContent}
-                  onChange={(val) => setFileContent(val ?? '')}
+                  onChange={(value) => setFileContent(value ?? '')}
                   options={{
                     minimap: { enabled: false },
                     wordWrap: 'on',
-                    fontSize: 14,
+                    fontSize: 13,
                     lineNumbers: 'on',
                     scrollBeyondLastLine: false,
                     automaticLayout: true,
+                    fontFamily: 'IBM Plex Mono, JetBrains Mono, Menlo, Monaco, monospace',
+                    lineHeight: 21,
+                    padding: { top: 14, bottom: 14 },
+                    renderLineHighlight: 'line',
                   }}
                 />
-              )}
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <Text type="secondary">请在左侧选择技能，然后点击文件编辑</Text>
-            </div>
-          )}
-        </Card>
+              )
+            ) : (
+              <div className="skill-editor-empty">
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有打开的文件" />
+              </div>
+            )}
+          </div>
+
+          <div className="skill-editor-statusbar">
+            <span>{currentLanguage}</span>
+            <span>{selectedFile || 'no file selected'}</span>
+            <span>{isDirty ? 'modified' : 'saved'}</span>
+          </div>
+        </main>
+
       </div>
 
-      {/* Create modal */}
       <Modal
-        title="新建技能"
+        title="新建文件夹"
         open={createOpen}
         onCancel={() => setCreateOpen(false)}
         onOk={handleCreate}
@@ -344,16 +435,16 @@ export default function Skills() {
         <Form layout="vertical" form={form} style={{ marginTop: 16 }}>
           <Form.Item
             name="name"
-            label="技能名称"
+            label="文件夹名称"
             rules={[
-              { required: true, message: '请输入技能名称' },
+              { required: true, message: '请输入文件夹名称' },
               { pattern: /^[a-z0-9_-]+$/, message: '只允许小写字母、数字、下划线和连字符' },
             ]}
           >
-            <Input placeholder="例如: web_search" />
+            <Input placeholder="例如: web-search" />
           </Form.Item>
           <Form.Item name="description" label="描述">
-            <Input.TextArea rows={3} placeholder="技能的功能说明" />
+            <Input.TextArea rows={3} placeholder="这个技能文件夹的用途" />
           </Form.Item>
         </Form>
       </Modal>
