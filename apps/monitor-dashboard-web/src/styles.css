@@ -562,8 +562,8 @@ a {
   line-height: 34px !important;
 }
 
-.filter-card .ant-select-single .ant-select-selection-search {
-  inset-inline-start: 11px;
+.filter-card .ant-select-show-search.ant-select-single .ant-select-selection-search {
+  inset-inline-start: 0;
   inset-inline-end: 32px;
 }
 
