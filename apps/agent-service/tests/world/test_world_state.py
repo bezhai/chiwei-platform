@@ -742,3 +742,209 @@ async def test_record_world_round_close_preserves_arc_materials_reflected_date(w
         "record_world_round_close 不该冲掉 arc_materials_reflected_date（否则每轮"
         "收口都把第二班标记打回 None、当天反复重跑带底料反思）"
     )
+
+
+# ---------------------------------------------------------------------------
+# roster_ingested_date —— NPC 层第一刀：world「当天第一次醒纳入 NPC 名册一次」的收口标记
+#
+# world 当天第一次醒把「世界的固定人物」名册拼进意识流一次（照 DailyMaterials 套路），
+# 收口时把 roster_ingested_date 标成今天；之后当天后续轮次从 transcript 自然记得、不
+# 重喂。名册与底料是两件独立的事（名册 seed 后总在、底料某天可能没有），所以是**独立
+# 的游标**（不复用 materials_ingested_date）。同 materials_ingested_date 的教训：所有
+# 其他 WorldState 写入点都必须保留这个新字段，否则任何一轮收口都把它冲回 None、当天
+# 反复重喂名册。
+# ---------------------------------------------------------------------------
+
+
+def test_worldstate_has_nullable_roster_ingested_date():
+    """WorldState 多一个 roster_ingested_date 字段，nullable，默认 None（从没纳入过）。"""
+    assert "roster_ingested_date" in WorldState.model_fields
+    snap = WorldState(lane="x", world_time="t", detail="d")
+    assert snap.roster_ingested_date is None
+
+
+@pytest.mark.integration
+async def test_roster_ingested_date_defaults_null_and_insert_roundtrips(world_db):
+    """write_world_state 不带 roster_ingested_date → 列存 NULL（additive nullable 列）。"""
+    await write_world_state(
+        lane="coe-t2",
+        world_time="2026-06-08T06:30:00+08:00",
+        detail="清晨。",
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.roster_ingested_date is None, "从没纳入过名册时该字段为 None"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_marks_roster_and_advances_cursor(world_db):
+    """收口：同一次 append 既推进游标、又标记名册已纳入今天（原子、一版）。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-08T08:05:00+08:00", "a5"),
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at == "2026-06-08T08:05:00+08:00"
+    assert snap.roster_ingested_date == "2026-06-08"
+    assert snap.detail == "d0"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_marks_roster_on_empty_batch(world_db):
+    """空批次（没新 act 但当天首醒纳入了名册）→ 不推游标、但标记名册已纳入。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-08T07:00:00+08:00", act_id="prev"
+    )
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_created_at == "2026-06-08T07:00:00+08:00"
+    assert snap.roster_ingested_date == "2026-06-08"
+
+
+@pytest.mark.integration
+async def test_record_world_round_close_roster_none_preserves_existing(world_db):
+    """当天已纳入过名册 → roster_ingested_date 传 None：不改它、绝不清回 None。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=("2026-06-08T09:00:00+08:00", "a9"),
+        materials_ingested_date=None,
+        roster_ingested_date=None,
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap is not None
+    assert snap.act_cursor_act_id == "a9"
+    assert snap.roster_ingested_date == "2026-06-08", (
+        "roster_ingested_date 传 None 时该保留已有值，不能被清回 None"
+    )
+
+
+@pytest.mark.integration
+async def test_roster_and_materials_ingested_dates_are_independent(world_db):
+    """名册游标与底料游标互不打架：能各标各的（名册标了、底料没标，反之亦然）。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+
+    # 这轮只纳入了名册（今天没底料）。
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.roster_ingested_date == "2026-06-08"
+    assert snap.materials_ingested_date is None, "名册纳入不该误标底料"
+
+    # 之后底料落地、这轮纳入底料（名册当天已纳入、不重标）。
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date="2026-06-08",
+        roster_ingested_date=None,
+    )
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.materials_ingested_date == "2026-06-08"
+    assert snap.roster_ingested_date == "2026-06-08", "底料纳入不该冲掉名册标记"
+
+
+@pytest.mark.integration
+async def test_write_world_state_preserves_roster_ingested_date(world_db):
+    """update_world 改叙述不冲掉名册纳入标记。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    await write_world_state(lane="coe-t2", world_time="t1", detail="新叙述")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.roster_ingested_date == "2026-06-08", (
+        "update_world 不该冲掉 roster_ingested_date（否则当天反复重喂名册）"
+    )
+
+
+@pytest.mark.integration
+async def test_set_next_wake_at_preserves_roster_ingested_date(world_db):
+    """排下次醒（set_next_wake_at）不冲掉名册纳入标记。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    await set_next_wake_at(lane="coe-t2", next_wake_at="2026-06-08T11:00:00+08:00")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.roster_ingested_date == "2026-06-08", (
+        "set_next_wake_at 不该冲掉 roster_ingested_date"
+    )
+
+
+@pytest.mark.integration
+async def test_advance_act_cursor_preserves_roster_ingested_date(world_db):
+    """推进 act 游标不冲掉名册纳入标记。"""
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    await advance_act_cursor(
+        lane="coe-t2", created_at="2026-06-08T09:00:00+08:00", act_id="a9"
+    )
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.roster_ingested_date == "2026-06-08", (
+        "advance_act_cursor 不该冲掉 roster_ingested_date"
+    )
+
+
+@pytest.mark.integration
+async def test_mark_arc_reflected_preserves_roster_ingested_date(world_db):
+    """反思落标（mark_arc_reflected）不冲掉名册纳入标记。"""
+    from app.world.state import mark_arc_reflected
+
+    await write_world_state(lane="coe-t2", world_time="t0", detail="d0")
+    await record_world_round_close(
+        lane="coe-t2",
+        advance_cursor_to=None,
+        materials_ingested_date=None,
+        roster_ingested_date="2026-06-08",
+    )
+
+    await mark_arc_reflected(lane="coe-t2", date="2026-06-08")
+
+    snap = await read_world_state(lane="coe-t2")
+    assert snap.roster_ingested_date == "2026-06-08", (
+        "mark_arc_reflected 不该冲掉 roster_ingested_date"
+    )

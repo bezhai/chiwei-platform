@@ -70,6 +70,31 @@ EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
 
 
+# event ``source`` 协议里 NPC 来访的机读前缀（单一定义处，宪法「禁止重复定义」）。
+# NPC 来访以 kind=speech、``source`` = ``npc:名字`` 投递（:func:`app.world.tools.
+# npc_visit`），关系页 other_user_id 也用同形态——把 NPC 跟真人（``user:xxx``）、
+# 姐妹（裸 ``persona_id``）在 source 命名空间里区分开。这是 event source 契约的一
+# 部分，放在协议模块里：write 端（world.tools 投递）、render 端（life_wake 剥前缀
+# 呈现）、抽取端（review 从信箱抽 NPC 互动）都从这里取，互不依赖各自的层（life 不
+# 准 import world——信息差命门）。
+NPC_SOURCE_PREFIX = "npc:"
+
+
+def npc_source(npc_name: str) -> str:
+    """把 NPC 名字拼成机读 event source / 关系页 other_user_id（``npc:名字``）。"""
+    return f"{NPC_SOURCE_PREFIX}{npc_name}"
+
+
+def is_npc_source(source: str) -> bool:
+    """这个 event source / other_user_id 是不是一个 NPC（``npc:`` 起头）。"""
+    return source.startswith(NPC_SOURCE_PREFIX)
+
+
+def strip_npc_prefix(source: str) -> str:
+    """剥掉机读 ``npc:`` 前缀拿干净 NPC 名字（非 NPC source 原样返回）。"""
+    return source.removeprefix(NPC_SOURCE_PREFIX)
+
+
 class EventEnvelope(Data):
     """durable 信箱条目：一条投递给某 persona 的 event。
 

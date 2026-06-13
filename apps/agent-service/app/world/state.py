@@ -77,6 +77,15 @@ class WorldState(Data):
     # 只落 arc_reflected_date、不碰本字段。同样成功才落、失败同日重试。nullable +
     # additive migrate（对齐 arc_reflected_date），默认 None 不撞 migrator 保留列。
     arc_materials_reflected_date: str | None = None
+    # 已纳入「世界的固定人物」名册的那一天（CST `YYYY-MM-DD`，NPC 层第一刀）。world
+    # 当天第一次醒、名册非空且这个字段 != 今天时，把整份 NPCRoster 名册（按所属姐妹
+    # 归类的速写）当公共背景纳入一次、进意识流 transcript；纳入那轮收口把这个字段标成
+    # 今天，当天后续轮次（== 今天）不再重喂；跨到第二天（!= 今天）再重新纳入一次。
+    # 与 materials_ingested_date **独立**（名册 seed 后总在、底料某天可能没有——两件
+    # 不相干的事，各用各的游标）。nullable：从没纳入过（首轮 / 冷启）时为 None，与
+    # "任何今天"都不相等、首醒就纳入。additive nullable migrate（对齐
+    # materials_ingested_date），默认 None 不撞 migrator 保留列。
+    roster_ingested_date: str | None = None
     version: Annotated[int, Version] = 0
 
 
@@ -106,6 +115,9 @@ async def write_world_state(*, lane: str, world_time: str, detail: str) -> None:
             ),
             arc_materials_reflected_date=(
                 prev.arc_materials_reflected_date if prev is not None else None
+            ),
+            roster_ingested_date=(
+                prev.roster_ingested_date if prev is not None else None
             ),
         )
     )
@@ -142,6 +154,7 @@ async def set_next_wake_at(*, lane: str, next_wake_at: str) -> None:
             materials_ingested_date=snapshot.materials_ingested_date,
             arc_reflected_date=snapshot.arc_reflected_date,
             arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
+            roster_ingested_date=snapshot.roster_ingested_date,
         )
     )
 
@@ -173,6 +186,7 @@ async def advance_act_cursor(*, lane: str, created_at: str, act_id: str) -> None
             materials_ingested_date=snapshot.materials_ingested_date,
             arc_reflected_date=snapshot.arc_reflected_date,
             arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
+            roster_ingested_date=snapshot.roster_ingested_date,
         )
     )
 
@@ -182,25 +196,30 @@ async def record_world_round_close(
     lane: str,
     advance_cursor_to: tuple[str, str] | None,
     materials_ingested_date: str | None,
+    roster_ingested_date: str | None = None,
 ) -> None:
     """world 一轮成功推演收口：在**同一次** WorldState append 里推进 act 游标 + 标记
-    底料已纳入今天。
+    底料已纳入今天 + 标记名册已纳入今天。
 
-    一轮收口本有两件互不相干的调度状态要落：act 消费游标推进、以及「今天的外部底料」
-    是否在这轮被纳入（纳入了就把日期标成今天，当天后续轮不再重喂）。它们都改 WorldState，
-    若各写一版会多出冗余快照、还可能彼此覆盖（后写的读到前写之前的快照、把对方的改动
-    丢掉）。所以并进一次 append：读最新一版，按入参选择性地改这两块、其余字段（world_time
-    / detail / next_wake_at / 另一块没改的）原样沿用，append 一版，原子、幂等。
+    一轮收口本有几件互不相干的调度状态要落：act 消费游标推进、「今天的外部底料」是否
+    在这轮被纳入、「世界的固定人物」名册是否在这轮被纳入（纳入了就把对应日期标成今天，
+    当天后续轮不再重喂）。它们都改 WorldState，若各写一版会多出冗余快照、还可能彼此
+    覆盖（后写的读到前写之前的快照、把对方的改动丢掉）。所以并进一次 append：读最新一版，
+    按入参选择性地改这几块、其余字段（world_time / detail / next_wake_at / 没改的标记）
+    原样沿用，append 一版，原子、幂等。
 
       * ``advance_cursor_to``：``(created_at, act_id)`` —— 本批末尾游标。非空批传它、把
         游标推进过去；**空批次传 None** —— 没读到 act 没什么可推进，游标沿用上一版。
       * ``materials_ingested_date``：今天的日期串 —— 这轮纳入了底料就传它，标成今天；
         **没纳入（已纳入过 / 今天没底料）传 None** —— 不改，沿用上一版已有标记（绝不把
         已纳入标记清回 None，否则当天会反复重喂）。
+      * ``roster_ingested_date``：今天的日期串 —— 这轮纳入了 NPC 名册就传它，标成今天；
+        **没纳入（已纳入过 / 名册为空）传 None** —— 不改，沿用上一版（同 materials 的
+        语义；名册与底料各用各的游标、互不打架）。
 
     崩溃语义命门：本函数只在 ``Agent.run`` 成功返回后（engine 收口）才调。run 中途抛
-    时它根本不会被调到，游标不推进、materials_ingested_date 不被误标记——下轮重醒重读
-    这批 act、重新纳入底料（act 与底料都不丢）。
+    时它根本不会被调到，游标不推进、materials_ingested_date / roster_ingested_date 不被
+    误标记——下轮重醒重读这批 act、重新纳入底料 + 名册（act / 底料 / 名册都不丢）。
 
     冷启容错（对齐 :func:`advance_act_cursor`）：还没有任何 WorldState 快照时无可承载
     收口状态的快照，安全跳过——这种情形本就没消费到 act、世界叙述统一由 update_world
@@ -229,6 +248,11 @@ async def record_world_round_close(
             ),
             arc_reflected_date=snapshot.arc_reflected_date,
             arc_materials_reflected_date=snapshot.arc_materials_reflected_date,
+            roster_ingested_date=(
+                roster_ingested_date
+                if roster_ingested_date is not None
+                else snapshot.roster_ingested_date
+            ),
         )
     )
 
@@ -288,5 +312,6 @@ async def mark_arc_reflected(
                 if materials_date is not None
                 else snapshot.arc_materials_reflected_date
             ),
+            roster_ingested_date=snapshot.roster_ingested_date,
         )
     )

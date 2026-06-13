@@ -67,12 +67,21 @@ from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.data.queries.mailbox import deliver_event
-from app.domain.world_events import EVENT_KIND_AMBIENT, EVENT_KIND_SURROUNDINGS
+from app.domain.world_events import (
+    EVENT_KIND_AMBIENT,
+    EVENT_KIND_SPEECH,
+    EVENT_KIND_SURROUNDINGS,
+    npc_source,
+)
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
 from app.world.arc import write_world_arc
 from app.world.attention import write_world_attention
-from app.world.state import set_next_wake_at, write_world_state
+from app.world.state import (
+    read_world_state,
+    set_next_wake_at,
+    write_world_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +109,19 @@ _EVENT_ID_NS = uuid.UUID("6f1c8b2a-5e7d-4c3a-9f0b-1d2e3a4b5c6d")
 # （两类是不同语义的 event）。
 _SURROUNDINGS_EVENT_ID_NS = uuid.UUID("9a3d7c1e-2b4f-4e6a-8c0d-7f1a2b3c4d5e")
 
+# NPC 来访（npc_visit）的 event_id 派生命名空间：与 notify / sense 都分开，让同样文字
+# 的「NPC 对你说的话」「动静」「周遭切片」派生出不同 id、不在 deliver_event 幂等里互相
+# 吞掉（三类是不同语义的 event）。
+_NPC_EVENT_ID_NS = uuid.UUID("3c5b8e1d-4a2f-4d6c-9e7b-0a1f2c3d4e5f")
+
 WORLD_NOTIFY_EVENTS = get_or_create_counter(
     "world_notify_events_total", "world notify 投递的 event 计数", ["status"]
 )
 WORLD_SENSE_EVENTS = get_or_create_counter(
     "world_sense_events_total", "world sense 投递的周遭切片计数", ["status"]
+)
+WORLD_NPC_VISIT_EVENTS = get_or_create_counter(
+    "world_npc_visit_events_total", "world npc_visit 投递的 NPC 来访 event 计数", ["status"]
 )
 WORLD_SLEEP_REJECTED = get_or_create_counter(
     "world_sleep_rejected_total", "world sleep 超出 60s~1h 上下限被拒次数", []
@@ -143,6 +160,42 @@ def derive_surroundings_event_id(
     return uuid.uuid5(
         _SURROUNDINGS_EVENT_ID_NS,
         f"{lane}\x1f{recipient}\x1f{surroundings}\x1f{round_id}",
+    ).hex
+
+
+def derive_npc_event_id(
+    *,
+    lane: str,
+    npc_name: str,
+    sister: str,
+    what_npc_says: str,
+    world_fact: str,
+    round_id: str,
+) -> str:
+    """确定性派生一件 NPC 来访的 id：同 (lane, npc, sister, 话, world_fact, round_id) 同 id。
+
+    NPC event 是 durable 写（投信箱），整轮 ``Agent.run`` retry 会重放它。派生源绑
+    触发源（轮 id + 哪个 NPC + 指向哪个姐妹 + 说的话 + 这件事的世界事实），让重放投
+    同一条 event，``deliver_event`` 按 (lane, persona, event_id) 幂等去重、不重复投
+    ——与 notify / sense 的 round_id 幂等做法同一套（不另搞）。
+
+    派生源里四个命门各自防一类误吞：
+
+      * ``npc_name``：同一轮林小满找绫奈、顾舟找绫奈是两件独立 event（不同 NPC）。
+      * ``sister``：林小满分别找绫奈和找赤尾也是两件（不同收件人，理论上 world
+        可一轮推多件）。
+      * ``what_npc_says``：她说的不一样自然是两件事。
+      * ``world_fact``（codex 必改 3）：同一姐妹、同一 NPC、同一轮、同一句话但
+        **不同 world_fact** 是两件客观上不一样的来访（先发消息约、过一会儿又来
+        电话敲定，恰好那句话措辞相同）——不纳入它，第二件会撞同一 id 被幂等当
+        重放吞掉。纳入它让不同事不撞、同事（整轮重放：四样全同）仍幂等。
+
+    独立命名空间（``_NPC_EVENT_ID_NS``）让同文字的 NPC 话 / 动静 / 周遭切片不撞。
+    """
+    return uuid.uuid5(
+        _NPC_EVENT_ID_NS,
+        f"{lane}\x1f{npc_name}\x1f{sister}\x1f{what_npc_says}"
+        f"\x1f{world_fact}\x1f{round_id}",
     ).hex
 
 
@@ -386,6 +439,114 @@ async def sense(recipient: str, surroundings: str) -> str:
 
 
 @tool
+@tool_error("投递 NPC 来访失败")
+async def npc_visit(
+    npc_name: str, sister: str, what_npc_says: str, world_fact: str
+) -> str:
+    """让一个有名有姓的固定 NPC（同学 / 同事 / 闺蜜）来找某个姐妹一次。
+
+    世界里那些有名有姓的人（名册里那几位）各自有自己的生活，平时不在画面里，但会因为
+    自己的事来跟三姐妹中的某一个发生联系——同桌约绫奈周末、同事找千凪吐槽。当你推演到
+    此刻某个 NPC 真会来找某个姐妹时，用这条工具把这件事落下来。它一次做两件事，保证
+    「收件人收到」和「世界记得」不分叉：
+
+      * ``what_npc_says`` 直接送进**那一个姐妹**的耳朵里——她下次醒来会读到「{npc_name}
+        对你说：……」，据此自然反应。这是这个 NPC 直接对她说的话、原话原样。
+      * ``world_fact`` 同步写进世界此刻的叙述里（追加在你记得的上一版世界叙述之后），
+        让世界记住「这件事发生过」——你下一轮还记得、别的姐妹也可能从客观面感知到
+        （比如绫奈在客厅接了个电话，旁边的人听得到这通电话）。
+
+    分两段写的道理：``what_npc_says`` 是只有收件人听得到的那句话（私人的、冲她来的），
+    ``world_fact`` 是这件事**客观可感**的那一面（手机响了、她接起电话、她出门赴约）——
+    后者绝不写情绪 / 主观解读，只写客观发生了什么（和 update_world 的 detail 同口吻）。
+
+    NPC 该不该来、来做什么，全由你按世界此刻推演决定——没人催你每轮造个 NPC 出来，
+    世界大部分时刻她们都在各自的生活里、不来打扰。即兴的路人（名册里没有的）你也可以
+    用这条工具让他来一次，路人不建档、只这一下。
+
+    **一致性语义（codex 必改 2，给维护者看，不给模型看）：** 留世界（write_world_state）
+    与投信箱（deliver_event）是两次独立 durable 写、**非事务**——framework 持久化原语
+    （insert_append / insert_idempotent）各自开自己的 ``get_session``、各自提交，不接受
+    注入 session，要把两写拢进一个事务得改 framework 持久化 API 的契约（牵动所有 Data
+    写入方），代价远大于收益，故不做。退而求其次按「先写世界、后投信箱」排序：world
+    detail 是世界权威，崩在两写之间的残留是收件人**偶发漏收一次来访**，危害小于反过来
+    「收件人反应了但世界不记得」（世界状态与别的姐妹的感知会分叉）。这是 best-effort 残
+    留：deliver 失败会 **log error（绝不静默吞）**、并把异常交给 @tool_error 路由给模型，
+    世界层那段叙述已落、下次不补投（不重要到值得补偿）。
+
+    整轮重放安全：world 的 ``Agent.run`` 用 ``max_retries=1``（engine 收口处关掉整轮
+    重放），所以这条 write_world_state 的 append **不会**被整轮 retry 重放成重复追加；
+    模型在同一轮里手动重复调本工具，则靠 ``derive_npc_event_id`` 的确定性 id + deliver
+    幂等去重（投信箱不重，世界叙述的重复追加靠 world 自己 prompt 守，不上机制强制——
+    一轮里怎么写 detail 是 world 自己的事，赤尾哲学不在代码里强制 world 的决策；这条
+    靠 world_loop_instruction 守则②的 prompt 引导）。
+
+    Args:
+        npc_name: 来访的 NPC 名字（如「林小满」；名册里的固定人物或你即兴的路人）。
+        sister: 这件事指向哪个姐妹（persona_id：akao / chinagi / ayana）。
+        what_npc_says: 这个 NPC 直接对她说的话（原话，进她耳朵里）。
+        world_fact: 这件事客观可感的那一面（追加进世界叙述，让世界记得；只写客观）。
+
+    Returns:
+        一句确认文本。
+    """
+    lane, round_id = _world_round()
+
+    event_id = derive_npc_event_id(
+        lane=lane,
+        npc_name=npc_name,
+        sister=sister,
+        what_npc_says=what_npc_says,
+        world_fact=world_fact,
+        round_id=round_id,
+    )
+    # occurred_at 跟现实走，由代码填（客观时间不让模型编，同 notify / sense）。
+    now = cst_time.now_cst_iso()
+
+    # 世界留痕（codex 必改：收件人信箱 + 世界层不分叉）。投信箱**之前**先把这件事
+    # 同步写进世界叙述：读上一版 detail、把 world_fact 追加进去 append 一版。这一步
+    # 由工具自己做、不靠模型另调 update_world 自觉——机制层保证「世界记得这件事」。
+    # 冷启动（还没有上一版世界叙述）时 world_fact 直接作为新 detail。
+    prev = await read_world_state(lane=lane)
+    if prev is not None and prev.detail:
+        new_detail = f"{prev.detail}\n{world_fact}"
+    else:
+        new_detail = world_fact
+    await write_world_state(lane=lane, world_time=now, detail=new_detail)
+
+    # 投进那一个姐妹的信箱：kind=speech（有具名说话人、原话直投，对齐 chat 直投的
+    # speech 语义）、source=`npc:名字`（机器约定，对齐第一刀 npc_name + 关系页 npc:xxx；
+    # 区别于真人的 user:xxx / kind=external、也区别于 world 环境动静的 ambient）。
+    # 非事务的 best-effort 残留（codex 必改 2）：世界叙述上面已落，这步投信箱失败要
+    # **log error（绝不静默）**、记下哪个 NPC 投给谁失败，再把异常交给 @tool_error
+    # 路由给模型——世界层那段已落、收件人偶发漏收一次，危害小于反过来（详见 docstring）。
+    try:
+        await deliver_event(
+            lane=lane,
+            persona_id=sister,
+            event_id=event_id,
+            summary=what_npc_says,
+            occurred_at=now,
+            kind=EVENT_KIND_SPEECH,
+            source=npc_source(npc_name),
+        )
+    except Exception:
+        WORLD_NPC_VISIT_EVENTS.labels(status="deliver_failed").inc()
+        logger.error(
+            "[npc_visit] %s 来访 %s 已写进世界叙述、但投信箱失败（best-effort 残留："
+            "世界记得这事、收件人这次漏收）lane=%s event_id=%s",
+            npc_name,
+            sister,
+            lane,
+            event_id,
+            exc_info=True,
+        )
+        raise
+    WORLD_NPC_VISIT_EVENTS.labels(status="delivered").inc()
+    return f"{npc_name} 来找了 {sister}，已送到她耳朵里、也记进了世界"
+
+
+@tool
 @tool_error("安排下次醒来失败")
 async def sleep(
     seconds: Annotated[
@@ -465,9 +626,11 @@ async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
     return True
 
 
-# 续写工具集（四件）：顺着流往前推。update_arc **不在这里**——翻页归反思环节独占
-# （工具集物理隔离：续写无手碰世界阶段）。
-WORLD_TOOLS = [notify, update_world, sense, sleep]
+# 续写工具集（五件）：顺着流往前推。npc_visit 让 world 以具名 NPC 身份投一件指向某
+# 姐妹的 event（speech、source=npc:名字）、同步把这件事追加进世界叙述（收件人信箱 +
+# 世界层不分叉）。update_arc **不在这里**——翻页归反思环节独占（工具集物理隔离：续写
+# 无手碰世界阶段）。
+WORLD_TOOLS = [notify, update_world, sense, npc_visit, sleep]
 
 # 反思工具集（两件）：对表翻页 + 留关注。反思环节（app.world.reflection）每日一次、
 # 无会话，工具只有 update_arc / update_attention——反思无手碰 detail / notify /

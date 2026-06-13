@@ -101,6 +101,11 @@ from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.runtime.single_flight import SingleFlightConflict, single_flight
 from app.world.arc import read_world_arc  # module-level so tests can monkeypatch
+from app.world.npc_roster import (  # module-level so tests can monkeypatch
+    NPCRoster,
+    list_npc_roster,
+    seed_npc_roster,
+)
 from app.world.reflection import (  # module-level so tests can monkeypatch
     run_arc_reflection,
 )
@@ -209,19 +214,20 @@ def world_loop_instruction() -> str:
     不是加 if 分支强制（赤尾宪法：不用规则替 agent 决策）；配合连续记忆她也会知道
     "刚才已经够热闹了"。
 
-    工具枚举必须跟住 WORLD_TOOLS（四件：update_world / sense / notify / sleep）
-    ——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）若不在这段指令里
-    枚举，真实模型就不知道有它、根本不会调，「world 当五官投周遭」形同虚设（必改
-    命门）。反过来 ``update_arc``（翻页）已归反思环节独占（Task 2b：续写姿态发现
-    不了「页翻了」，工具集物理隔离）——这里**不得**再枚举它，否则模型会去调一个
-    不存在的工具。世界阶段仍是续写的输入（【世界阶段】段每轮拼），只是续写无手碰它。
+    工具枚举必须跟住 WORLD_TOOLS（五件：update_world / sense / notify / npc_visit /
+    sleep）——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）、NPC 层加的
+    ``npc_visit``（让一个有名有姓的固定 NPC 来找某个姐妹）若不在这段指令里枚举，真实
+    模型就不知道有它、根本不会调，对应能力形同虚设（必改命门）。反过来 ``update_arc``
+    （翻页）已归反思环节独占（Task 2b：续写姿态发现不了「页翻了」，工具集物理隔离）
+    ——这里**不得**再枚举它，否则模型会去调一个不存在的工具。世界阶段仍是续写的输入
+    （【世界阶段】段每轮拼），只是续写无手碰它。
     """
     return (
         "你是这个世界的推演层（world）。你不是导演、不是裁判——你不替任何角色决定"
         "她想做什么、怎么想、什么情绪（那是各角色自己的事）；你对角色做的事只推演"
         "客观上发生了什么，绝不批准或拒绝她想不想做（她几乎总能做到，除非客观世界"
         "里有硬冲突）。情绪和主观解读不是你的事。\n\n"
-        "你不是填一张表，而是一个会持续推演世界的脑子。你有四个工具，看一眼世界后"
+        "你不是填一张表，而是一个会持续推演世界的脑子。你有五个工具，看一眼世界后"
         "想清楚再调，直到这一轮没有别的要做了就停：\n\n"
         "- update_world(detail)：写下世界此刻的客观叙述。看你记得的上一版世界叙述"
         "+ 现在几点，推演世界此刻什么样：谁大概在哪、在干嘛、什么氛围（位置就融在"
@@ -245,6 +251,21 @@ def world_loop_instruction() -> str:
         "（sense 与 notify 分工：sense 是给**一个**角色投她此刻所处的周遭底框——她在哪、"
         "身边有谁；notify 是把**一条**新出现的客观动静广播给够得着它的人。角色刚醒来 / "
         "周遭变了，先用 sense 让她知道自己此刻所处；环境里冒出一个新动静，用 notify。）\n"
+        "- npc_visit(npc_name, sister, what_npc_says, world_fact)：让世界里一个有名有姓"
+        "的固定 NPC（就是【世界的固定人物】名册里的那些人）来找某一个姐妹一下——同学"
+        "约她、同事找她、闺蜜叫她出去那种。npc_name 是来的人、sister 是这件事指向哪个"
+        "姐妹（用她的 persona_id）。它一次落两面、互不混：\n"
+        "  · what_npc_says 是这个 NPC 对那个姐妹说的话 / 做的事的具体内容，**私密**——"
+        "只送进她一个人那里，别人听不到。\n"
+        "  · world_fact 是这件事**客观可感**的那一面（手机响了、她接起电话、她出门赴约），"
+        "它会进世界叙述、让世界下一轮还记得这事，别的姐妹也能从这客观面感知到「她有人"
+        "来找」。world_fact **绝不写情绪、绝不写 what_npc_says 的私密原话**，只写客观"
+        "发生了什么（和 update_world 的 detail 一个口吻）。\n"
+        "  守则：①谁来、来不来、来干嘛，由你按世界此刻自然推演——这不是排好的班，"
+        "不定时、不机械；安静的时刻就别硬造 NPC 来访（跟「不要为了让世界别太安静硬造"
+        "动静」一个精神）。②npc_visit 已经把 world_fact 写进世界叙述了，你随后若再 "
+        "update_world，要延续这件事、别把它覆盖丢了。③名册之外的临时路人也可以用它来"
+        "一下（名册只是几个固定的人，路人不建档、只这一回）。\n"
         "- sleep(seconds)：看完这一轮，定多久后再来看一眼世界（必须在 60～3600 秒"
         "之间，也就是最短 1 分钟、最长 1 小时）。这是你唯一的自排手段。\n\n"
         "世界大部分时刻是安静流动的，不是每次醒来都要制造点动静。先看一眼你之前"
@@ -404,6 +425,46 @@ def _materials_section(materials: DailyMaterials) -> str:
     )
 
 
+def _roster_section(roster: list[NPCRoster]) -> str:
+    """把 NPC 名册渲染成喂给 world 的一段「世界的固定人物」文本，按所属姐妹归类。
+
+    名册是世界里有名有姓的固定 NPC（绫奈 / 赤尾 / 千凪 各自的同学 / 同事 / 闺蜜），
+    world **当天第一次醒**把整份名册当**世界里客观存在的人**纳入一次（拼进这轮 user
+    消息、进意识流），当天后续轮不再重喂（参考 DailyMaterials 的纳入节奏）。
+
+    按 NPC 的 ``relates_to``（主要关联哪个姐妹的 persona_id）归类——同一姐妹名下的
+    NPC 归在一起，每人一行「名字：速写」。归类小标题用 persona_id 本身（akao /
+    chinagi / ayana）：哪个 id 对应哪个姐妹由 world 的 system prompt 一处承载（世界
+    设定底座），这里不在 scaffolding 文案里硬编任何角色中文名 / 剧情事实（赤尾宪法：
+    代码里一个剧情字都不许写，世界谁是谁由 world 从底座读）。NPC 的内容（名字 / 速写
+    / 关联谁）全是数据驱动（NPCRoster 表），不是硬编。
+
+    调用方（:func:`_run_world_round`）只在「名册非空且本轮要纳入」时调本函数，所以
+    ``roster`` 必非空 —— 「名册为空（还没 seed）」由调用方判定后**整段不拼**，不进这里。
+
+    呈现顺序：``relates_to`` 升序分组、组内按 ``npc_name`` 升序（稳定可读，不靠
+    list_npc_roster 的返回序），让同一份名册每次渲染出同一段文本。
+    """
+    by_sister: dict[str, list[NPCRoster]] = {}
+    for npc in roster:
+        by_sister.setdefault(npc.relates_to, []).append(npc)
+
+    blocks: list[str] = []
+    for sister in sorted(by_sister):
+        npcs = sorted(by_sister[sister], key=lambda n: n.npc_name)
+        lines = "\n".join(f"  - {n.npc_name}：{n.sketch}" for n in npcs)
+        blocks.append(f"与 {sister} 相关的人：\n{lines}")
+    body = "\n".join(blocks)
+
+    return (
+        "下面是这个世界里有名有姓的固定人物，作为世界里**客观存在的人**——她们各自"
+        "有自己的生活，平时不在画面里，但确实存在、随时可能因为自己的事来跟三姐妹中"
+        "的某一个发生联系。按主要关联的姐妹归类，每人一句性格底色 + 平时会冒什么事的"
+        "速写（你只把她们当世界里客观存在的人，绝不暗示谁此刻一定要出场或行动）：\n"
+        f"{body}"
+    )
+
+
 # 印在 stimulus 里的本轮标记前缀（turn 幂等查重靠它）：写回 transcript 后，下次
 # 同 round_id 重投能从 session 历史里查到这行 → 跳过、不重复追加同一轮、不重复
 # 推演（turn 幂等）。机读用，对模型无害（它只当是一行元信息）。
@@ -446,6 +507,7 @@ def _world_loop_messages(
     round_id: str,
     arc_narrative: str | None,
     materials_text: str = "",
+    roster_text: str = "",
     act_batch_text: str = "",
     end_created_at: str | None = None,
     end_act_id: str | None = None,
@@ -482,6 +544,13 @@ def _world_loop_messages(
     （:func:`_run_world_round`）传非空文本插这段（进意识流一次）；今天没底料 / 当天已
     纳入过时传空串、不插这段（后续轮从 transcript 自然记得，不重喂）。
 
+    ``roster_text``：NPC 名册渲染出的「世界的固定人物」段（:func:`_roster_section`
+    渲染、按所属姐妹归类）。它是世界里有名有姓的固定 NPC（同学 / 同事 / 闺蜜），作为
+    **世界里客观存在的人**喂给 world。纳入节奏同 materials：**只在 world 当天第一次醒、
+    名册非空且本轮要纳入时**传非空文本插这段（进意识流一次）；名册为空 / 当天已纳入过
+    时传空串、不插这段（后续轮从 transcript 自然记得，不重喂）。名册与底料是两件独立的
+    事、各用各的游标（名册 seed 后总在、底料某天可能没有）。
+
     ``act_batch_text``：这一批从游标 pull 到的所有人的动作清单（对称 life 读
     mailbox）。非空才插入「这一批动作」段——让 world 看到这段时间攒下的所有动作。
     这段时间没有新 act（纯 self / 心跳推进世界）时留空、不插这段。
@@ -491,6 +560,9 @@ def _world_loop_messages(
     """
     materials_section = (
         f"【今天的外部底料】\n{materials_text}\n\n" if materials_text else ""
+    )
+    roster_section = (
+        f"【世界的固定人物】\n{roster_text}\n\n" if roster_text else ""
     )
     # act 批的框架文案：一次拉完后这一批可能横跨几个小时，明示 world 把这段时间
     # 的账一笔收进世界流到此刻的样子、叙述落在【现实此刻】——不按各条旧时间戳
@@ -518,6 +590,7 @@ def _world_loop_messages(
         f"【世界阶段】\n{_arc_section(arc_narrative)}\n\n"
         f"{detail_header}\n{detail}\n\n"
         f"{materials_section}"
+        f"{roster_section}"
         f"【这次醒来的缘由】{wake_reason}\n\n"
         f"{act_section}"
         "看一眼这个世界，推演此刻它什么样，用 update_world 写下来；该让谁感知到的"
@@ -869,6 +942,39 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     # None 不改 materials_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
     mark_ingested_date = today if ingest_materials_this_round else None
 
+    # NPC 名册（「世界的固定人物」）：**当天第一次醒纳入一次、进意识流，之后当天不再
+    # 重喂**（照 DailyMaterials 套路）。名册是世界里有名有姓的固定 NPC（同学 / 同事 /
+    # 闺蜜），world 当天首醒把整份名册按所属姐妹归类拼进 user 消息一次，当天后续轮从
+    # transcript 自然记得、不重喂。判断纳入与否：
+    #
+    #   * 按当前 lane list 名册（list_npc_roster，每个 NPC 取最新一版）。
+    #   * 名册非空 **且** snapshot.roster_ingested_date != 今天（当天还没纳入过）→ 这轮
+    #     纳入：渲染名册段拼进 user 消息，收口标记 roster_ingested_date=今天。
+    #   * 名册为空（还没 seed）或当天已纳入过（== 今天）→ 不拼这段、不标记。
+    #
+    # 与底料**独立**（各用各的游标、各判各的纳入）：名册 seed 后总在、底料某天可能没
+    # 有，两件不相干的事不能共用一个游标互相连累。today 同上（now CST %Y-%m-%d）。
+    prev_roster_ingested_date = (
+        snapshot.roster_ingested_date if snapshot is not None else None
+    )
+    # 种子名册的生产自动入口（必改 1）：seed_npc_roster 没有别的生产调用方，不接它
+    # 表永远空、首醒 list 永远得空名册、NPC 永不出场。照 persona_chain seed 的「首次
+    # 需要时 ensure 一次」先例，把它接在 **world 当天第一次醒、list 之前**——只在
+    # 「当天还没纳入过名册」这个首醒分支跑（roster_ingested_date != 今天），当天后续轮
+    # 不重 seed（CAS 幂等本就重跑无害，但也别白打一次 DB）。seed 是 CAS 幂等
+    # （expected_current_ver=0：只灌一版都没有的 NPC、链非空即已被演化层动过的绝不
+    # 盖回出厂速写），先 seed 再 list 保证首醒读得到名册。
+    if prev_roster_ingested_date != today:
+        await seed_npc_roster(lane=lane)
+    roster = await list_npc_roster(lane=lane)
+    ingest_roster_this_round = (
+        bool(roster) and prev_roster_ingested_date != today
+    )
+    roster_text = _roster_section(roster) if ingest_roster_this_round else ""
+    # 收口要标记的名册纳入日期：这轮纳入了就标今天，否则 None（record_world_round_close
+    # 收到 None 不改 roster_ingested_date、沿用上一版——绝不把已纳入标记清回 None）。
+    mark_roster_date = today if ingest_roster_this_round else None
+
     # 反思环节（Task 2b，翻页归它独占）：**续写之前**跑一次无会话的对表反思
     # （独立 AgentConfig、工具只有 update_arc / update_attention、max_retries=1）。
     # 双触发（眼睛闭环）：world 24×7，每天 00:0X 首轮就触发第一班——那时眼睛还没
@@ -923,6 +1029,7 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         round_id=round_id,
         arc_narrative=arc_narrative,
         materials_text=materials_text,
+        roster_text=roster_text,
         act_batch_text=act_batch_text,
         end_created_at=batch_end_created_at,
         end_act_id=batch_end_act_id,
@@ -971,17 +1078,20 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         observed_at=now_iso,
     )
 
-    # 推演成功收口：在**同一次** WorldState append 里推进游标 + 标记底料已纳入今天
-    # （record_world_round_close）。失败时上面的 run 已抛、不会走到这里，游标不推进、
-    # materials_ingested_date 不被误标记，下轮重读这批 act + 重新纳入底料（都不丢）。
+    # 推演成功收口：在**同一次** WorldState append 里推进游标 + 标记底料 / 名册已纳入
+    # 今天（record_world_round_close）。失败时上面的 run 已抛、不会走到这里，游标不推进、
+    # materials_ingested_date / roster_ingested_date 不被误标记，下轮重读这批 act + 重新
+    # 纳入底料 + 名册（都不丢）。
     #
     #   * 游标：非空批传本批末尾 ``(created_at, act_id)``；空批次传 None（没读到 act 没什么
     #     可推进，游标沿用上一版）。游标用 created_at（落库序）不漏。
     #   * 底料：这轮纳入了传今天日期（标成今天）；没纳入（已纳入过 / 今天没底料）传 None
     #     （不改、沿用上一版已有标记，绝不清回 None）。
+    #   * 名册：这轮纳入了传今天日期；没纳入（已纳入过 / 名册为空）传 None（同底料语义，
+    #     名册与底料各用各的游标、互不打架）。
     #
-    # 两块并进一次 append：空批次但当天首醒纳入了底料时，游标传 None 不推进、但
-    # materials_ingested_date 仍能标成今天（一轮一版、不冲突、原子）。
+    # 几块并进一次 append：空批次但当天首醒纳入了底料 / 名册时，游标传 None 不推进、但
+    # materials_ingested_date / roster_ingested_date 仍能各标成今天（一轮一版、不冲突、原子）。
     advance_cursor_to = (
         (batch_end_created_at, batch_end_act_id)
         if batch_end_created_at is not None and batch_end_act_id is not None
@@ -991,6 +1101,7 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         lane=lane,
         advance_cursor_to=advance_cursor_to,
         materials_ingested_date=mark_ingested_date,
+        roster_ingested_date=mark_roster_date,
     )
 
     # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里

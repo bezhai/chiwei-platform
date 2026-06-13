@@ -127,12 +127,14 @@ def stub_io(monkeypatch):
         },
         "acts": [_act()],
         "chats": [_chat_block()],
+        "npc_events": [],
         "rel_pages": {},
         "day_page": None,
         "marks": [],
         "costs": [],
         "act_windows": [],
         "chat_windows": [],
+        "npc_windows": [],
         "session_loads": [],
         "page_lookups": [],
     }
@@ -157,6 +159,12 @@ def stub_io(monkeypatch):
             }
         )
         return list(state["chats"])
+
+    async def fake_npc_speech(*, lane, persona_id, start_iso, end_iso):
+        state["npc_windows"].append(
+            {"lane": lane, "persona_id": persona_id, "start": start_iso, "end": end_iso}
+        )
+        return list(state["npc_events"])
 
     async def fake_rel_pages(*, lane, persona_id, other_user_ids):
         state["page_lookups"].append(list(other_user_ids))
@@ -187,6 +195,9 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
+    monkeypatch.setattr(
+        review_mod, "list_persona_npc_speech_in_window", fake_npc_speech
+    )
     monkeypatch.setattr(review_mod, "read_relationship_pages", fake_rel_pages)
     monkeypatch.setattr(review_mod, "read_day_page", fake_day_page)
     monkeypatch.setattr(review_mod, "day_page_exists", fake_day_page_exists)
@@ -897,6 +908,31 @@ def test_review_instruction_has_no_hardcoded_plot_facts():
     for name in ("千凪", "赤尾", "绫奈", "chinagi", "akao", "ayana"):
         assert name not in instruction
     assert not any(ch.isdigit() for ch in instruction)
+
+
+def test_review_instruction_covers_npc_relationship_pages():
+    """第三刀 prompt 收口：关系页那句要从「只认真人」扩到也涵盖来访过的 NPC。
+
+    第四刀（代码层）已让回顾把 NPC 来访摆进证据、给出 ``npc:名字`` 机读键并读回旧
+    NPC 关系页。但任务指令那句若还只说「真正聊过天的每个真人」，模型可能只给真人
+    写关系页、把证据里的 NPC 互动晾着——NPC 关系跨天长不起来。所以 instruction 必须：
+
+      * 提到来找过她的 NPC（证据里【这一天来找过你的人】那节）也照样写 / 更新关系页；
+      * 明确 NPC 那页的 other_user_id 就用证据里给出的 ``npc:名字`` 键；
+      * 保持现有克制：没来往过的人（真人或 NPC）一律不动关系页。
+    """
+    instruction = review_mod.review_instruction()
+    # NPC 也要写关系页（指令不能只认真人）
+    assert "NPC" in instruction, "关系页指令应扩到涵盖来访过的 NPC"
+    assert "来找过" in instruction, (
+        "应引用证据里【这一天来找过你的人】那节的来访 NPC"
+    )
+    # NPC 那页的 other_user_id 用 npc:名字 机读键
+    assert "npc:" in instruction, "NPC 关系页的 other_user_id 应用 npc:名字 机读键"
+    # 仍守克制：没来往就不动（真人或 NPC 一律）
+    assert "没" in instruction and ("来往" in instruction or "聊" in instruction), (
+        "应保持「没来往过就不动关系页」的克制（真人或 NPC 一律）"
+    )
 
 
 @pytest.mark.asyncio

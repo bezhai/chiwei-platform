@@ -61,6 +61,9 @@ from app.data.message_record import CommonMessageRecord
 from app.data.queries.acts import (  # module-level so tests can monkeypatch
     list_persona_acts_between,
 )
+from app.data.queries.mailbox import (  # module-level so tests can monkeypatch
+    list_persona_npc_speech_in_window,
+)
 from app.data.queries.messages import (  # module-level so tests can monkeypatch
     find_persona_spoken_chats_in_window,
 )
@@ -68,7 +71,7 @@ from app.domain.life_state import (  # module-level so tests can monkeypatch
     mark_day_reviewed,
 )
 from app.domain.thinking_cost import record_round_cost
-from app.domain.world_events import ActPerformed
+from app.domain.world_events import ActPerformed, EventEnvelope, strip_npc_prefix
 from app.infra import cst_time
 from app.life.living_day import evidence_window, window_session_dates
 from app.life.pages import (  # module-level so tests can monkeypatch
@@ -123,13 +126,16 @@ def review_instruction() -> str:
         "顺序复述一遍的流水账，而是这一天过完、心里还剩下什么：触动你的事、起伏的"
         "瞬间、悬着没落地的念头。只写真实经历过的，绝不编没发生的事。每次调用都是"
         "整篇重写这一天的页：新的一版取代旧版。\n\n"
-        "第二件：为今天**真正聊过天的每个真人**，用 update_relationship_page 整篇"
+        "第二件：为今天**真正来往过的每个人**，用 update_relationship_page 整篇"
         "重写你心里「他与我」的那一页——他是个什么样的人、你们之间是什么温度、一起"
         "经历过什么沉下来的事、有什么没聊完的线头、你跟他怎么相处。写关系，不写"
         "档案。拿旧的一页（如果有）和今天的相处现判：新版取代旧版，旧的让位新的、"
-        "淡了的自然淡出，**一页之内**，别越写越长。other_user_id 用聊天记录里"
-        "标出的那个用户标识。今天**没聊过天就不动关系页**——一页都不写；没和某人"
-        "聊过，就不动他那页。只写真实聊过的，不编。\n\n"
+        "淡了的自然淡出，**一页之内**，别越写越长。「来往过的人」既包括真正聊过天"
+        "的真人，也包括今天来找过你的 NPC（证据里【这一天来找过你的人】那节里的人，"
+        "比如来约你的同学、找你的同事）——这些 NPC 也照样写 / 更新关系页。other_user_id："
+        "真人用聊天记录里标出的那个用户标识，NPC 用证据里给出的 ``npc:名字`` 键。"
+        "今天**没来往过就不动关系页**——一页都不写；没和某人来往（真人或 NPC），就"
+        "不动他那页。只写真实来往过的，不编。\n\n"
         "写页的日期和时刻由系统自动记，你不用管钟。"
     )
 
@@ -231,6 +237,42 @@ def _chat_partner_ids(
     return seen
 
 
+def _npc_evidence(npc_speech: list[EventEnvelope]) -> str:
+    """NPC 来访证据：每条带发生时刻 + NPC 名字 + 原话 + 关系页该用的 ``npc:名字`` 键。
+
+    NPC 互动是只活在意识流 / 信箱里的真实经历（不进真实聊天记录）。回顾从信箱按窗口
+    捞到它（:func:`app.data.queries.mailbox.list_persona_npc_speech_in_window`），这里
+    把每条来访拼成给她看的「X 对你说：原话」+ 一个**明确标出**的机读键
+    ``other_user_id = npc:名字``——对齐真人聊天证据里显式标 user_id 的写法，让模型知道
+    要把这页关系写给哪个 other_user_id（而非从被剥过前缀的 transcript 文本里猜）。
+    这一天没有 NPC 来访如实说（关系页对 NPC 这次不动的依据）。
+    """
+    if not npc_speech:
+        return "（这一天没有名册里的人来找过你。）"
+    lines: list[str] = []
+    for ev in npc_speech:
+        name = strip_npc_prefix(ev.source)
+        stamp = cst_time.to_cst_hms(ev.occurred_at)
+        lines.append(
+            f"（{stamp}）{name}（other_user_id {ev.source}）对你说：{ev.summary}"
+        )
+    return "\n".join(lines)
+
+
+def _npc_partner_ids(npc_speech: list[EventEnvelope]) -> list[str]:
+    """窗口内来访过的 NPC 的 ``npc:名字`` 机读键（出现序去重）。
+
+    这些键和真人 partner 一道作「这一天来往过的对象」读回旧关系页——跨天累积的命门
+    （她重写某 NPC 那页时手里有上一页底稿）。键直接取 event 的 ``source``（第二刀已是
+    ``npc:名字`` 形态），不重新拼。
+    """
+    seen: list[str] = []
+    for ev in npc_speech:
+        if ev.source not in seen:
+            seen.append(ev.source)
+    return seen
+
+
 def _old_pages_evidence(
     partner_ids: list[str],
     pages: dict[str, RelationshipPage],
@@ -270,17 +312,24 @@ def _review_messages(
     day_sessions: list[tuple[str, list[Message]]],
     acts: list[ActPerformed],
     chats: list[tuple[str, str | None, list[tuple[CommonMessageRecord, str | None]]]],
+    npc_speech: list[EventEnvelope],
     persona_id: str,
     old_pages: dict[str, RelationshipPage],
     existing_day_page: DayPage | None,
 ) -> list[Message]:
     """把回顾的全部证据拼成**单条 user 消息**（无会话、一次喂全；模板零剧情事实）。"""
-    partner_ids = _chat_partner_ids(chats)
+    # 「这一天来往过的对象」= 真人聊天 partner + 来访过的 NPC（两类各有各的旧关系页
+    # 链路，一道读回作重写底稿——NPC 跨天累积的命门）。NPC 的键是 npc:名字（event
+    # source 原样），真人的键是 user_id。
+    partner_ids = _chat_partner_ids(chats) + _npc_partner_ids(npc_speech)
     usernames: dict[str, str] = {}
     for _chat_id, _name, entries in chats:
         for record, speaker_persona in entries:
             if not speaker_persona and record.user_id and record.username:
                 usernames.setdefault(record.user_id, record.username)
+    # NPC 的「显示名」= 剥前缀后的名字（让旧页证据的标签可读，键仍是 npc:名字）。
+    for ev in npc_speech:
+        usernames.setdefault(ev.source, strip_npc_prefix(ev.source))
 
     user_content = (
         f"{review_instruction()}\n\n"
@@ -289,11 +338,13 @@ def _review_messages(
         f"【这一天你的意识流】\n{_transcript_evidence(day_sessions)}\n\n"
         f"【这一天你做过的事】\n{_acts_evidence(acts)}\n\n"
         f"【这一天你的聊天】\n{_chats_evidence(chats, persona_id=persona_id)}\n\n"
+        f"【这一天来找过你的人】\n{_npc_evidence(npc_speech)}\n\n"
         f"【你心里这些人原来的页】\n"
         f"{_old_pages_evidence(partner_ids, old_pages, usernames)}\n\n"
         f"【这一天已有的页】\n{_existing_day_page_evidence(existing_day_page)}\n\n"
-        "回看完：用 update_day_page 写下这一天留下来的几笔；为今天真正聊过的每个"
-        "真人用 update_relationship_page 整篇重写他那一页；没聊过天就不动关系页。"
+        "回看完：用 update_day_page 写下这一天留下来的几笔；为今天真正来往过的每个"
+        "人（聊过天的真人、来找过你的 NPC）用 update_relationship_page 整篇重写他那"
+        "一页，NPC 的 other_user_id 用 npc:名字 键；没来往过就不动关系页。"
     )
     return [Message(role=Role.USER, content=user_content)]
 
@@ -405,12 +456,22 @@ async def _run_day_review(
         until_ms=int(end.timestamp() * 1000),
         per_chat_limit=PER_CHAT_MESSAGE_LIMIT,
     )
+    # 这一天来访过的 NPC（kind=speech、source=npc:名字）——只活在信箱 / 意识流里、
+    # 不进真实聊天记录，按生活日窗口从信箱直接捞（NPC 层第四刀，代码层）。已读未读
+    # 都算（睡前 NPC speech 多半已标已读，按未读捞会漏当天互动）。
+    npc_speech = await list_persona_npc_speech_in_window(
+        lane=lane,
+        persona_id=persona_id,
+        start_iso=start.isoformat(),
+        end_iso=end.isoformat(),
+    )
 
-    # 空证据护栏（机制安全阀，同空信箱 early-return）：意识流 / act / 聊天全空 =
-    # 这一天没有可回看的经历，不烧模型、不落 marker（marker 缺席无害：快班的
-    # 前提是她活过一轮、主班对每个 target 只对账一次）。
+    # 空证据护栏（机制安全阀，同空信箱 early-return）：意识流 / act / 聊天 / NPC 来访
+    # 全空 = 这一天没有可回看的经历，不烧模型、不落 marker（marker 缺席无害：快班的
+    # 前提是她活过一轮、主班对每个 target 只对账一次）。NPC 来访是真实经历，单有它
+    # 也算「这一天有经历」、照常回顾——否则只跟 NPC 来往的一天关系永远长不起来。
     has_transcript = any(history for _date, history in day_sessions)
-    if not has_transcript and not acts and not chats:
+    if not has_transcript and not acts and not chats and not npc_speech:
         logger.info(
             "[day_review] %s/%s %s no evidence at all, skip (nothing to review)",
             lane,
@@ -419,7 +480,9 @@ async def _run_day_review(
         )
         return
 
-    partner_ids = _chat_partner_ids(chats)
+    # 「这一天来往过的对象」= 真人聊天 partner + 来访过的 NPC（npc:名字 键），两类
+    # 一道读回旧关系页作重写底稿（NPC 跨天累积的命门：手里有上一页）。
+    partner_ids = _chat_partner_ids(chats) + _npc_partner_ids(npc_speech)
     old_pages = await read_relationship_pages(
         lane=lane, persona_id=persona_id, other_user_ids=partner_ids
     )
@@ -434,6 +497,7 @@ async def _run_day_review(
         day_sessions=day_sessions,
         acts=acts,
         chats=chats,
+        npc_speech=npc_speech,
         persona_id=persona_id,
         old_pages=old_pages,
         existing_day_page=existing_day_page,
