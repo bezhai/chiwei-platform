@@ -2,6 +2,9 @@ import { useEffect, useState, useCallback, useMemo, type Key } from 'react';
 import {
   Button,
   Empty,
+  Form,
+  Input,
+  Modal,
   Popconfirm,
   Spin,
   Tag,
@@ -12,6 +15,7 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  PlusOutlined,
   SaveOutlined,
   FileMarkdownOutlined,
   PythonOutlined,
@@ -134,16 +138,34 @@ function buildSkillFileTree(skill: Skill): TreeDataNode[] {
   return root;
 }
 
-function skillDirectoryTitle(skill: Skill) {
+function skillDirectoryTitle(skill: Skill, onDelete: (name: string) => void) {
   return (
     <span className="skill-editor-skill-title">
       <span className="skill-editor-skill-name">{skill.name}</span>
-      <span className="skill-editor-file-count">{skill.files?.length || 0}</span>
+      <span className="skill-editor-directory-actions">
+        <span className="skill-editor-file-count">{skill.files?.length || 0}</span>
+        <Popconfirm
+          title={`确认删除 "${skill.name}"?`}
+          onConfirm={(event) => {
+            event?.stopPropagation();
+            onDelete(skill.name);
+          }}
+          onCancel={(event) => event?.stopPropagation()}
+        >
+          <Button
+            type="text"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </Popconfirm>
+      </span>
     </span>
   );
 }
 
-function buildWorkspaceTree(skills: Skill[]): TreeDataNode[] {
+function buildWorkspaceTree(skills: Skill[], onDelete: (name: string) => void): TreeDataNode[] {
   return [
     {
       key: WORKSPACE_KEY,
@@ -152,7 +174,7 @@ function buildWorkspaceTree(skills: Skill[]): TreeDataNode[] {
       selectable: false,
       children: skills.map((skill) => ({
         key: skillNodeKey(skill.name),
-        title: skillDirectoryTitle(skill),
+        title: skillDirectoryTitle(skill, onDelete),
         icon: <FolderOutlined />,
         selectable: false,
         children: buildSkillFileTree(skill),
@@ -170,7 +192,9 @@ export default function Skills() {
   const [originalContent, setOriginalContent] = useState('');
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Key[]>([WORKSPACE_KEY]);
+  const [form] = Form.useForm();
 
   const fetchSkills = useCallback(async () => {
     setLoadingList(true);
@@ -228,9 +252,24 @@ export default function Skills() {
     }
   };
 
-  const handleDelete = async (name: string) => {
+  const handleCreate = async () => {
+    try {
+      const values = await form.validateFields();
+      await api.post('/skills', values);
+      message.success('已创建文件夹');
+      setCreateOpen(false);
+      form.resetFields();
+      await fetchSkills();
+      setExpandedKeys((current) => Array.from(new Set([...current, WORKSPACE_KEY, skillNodeKey(values.name)])));
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'Error') return;
+      message.error('创建失败');
+    }
+  };
+
+  const handleDelete = useCallback(async (name: string) => {
     await api.delete(`/skills/${name}`);
-    message.success('已删除');
+    message.success('已删除文件夹');
     if (selectedSkill?.name === name) {
       setSelectedSkill(null);
       setSelectedFile('');
@@ -238,7 +277,7 @@ export default function Skills() {
       setOriginalContent('');
     }
     await fetchSkills();
-  };
+  }, [fetchSkills, selectedSkill?.name]);
 
   const handleTreeSelect = (keys: Key[]) => {
     const key = keys[0];
@@ -249,7 +288,7 @@ export default function Skills() {
     }
   };
 
-  const workspaceTree = useMemo(() => buildWorkspaceTree(skills), [skills]);
+  const workspaceTree = useMemo(() => buildWorkspaceTree(skills, handleDelete), [skills, handleDelete]);
   const isDirty = fileContent !== originalContent;
   const selectedTreeKey = selectedSkill && selectedFile ? fileNodeKey(selectedSkill.name, selectedFile) : undefined;
   const currentPath = selectedSkill && selectedFile ? `skills/${selectedSkill.name}/${selectedFile}` : 'skills/';
@@ -279,6 +318,9 @@ export default function Skills() {
           <div className="skill-editor-panel-title">
             <span>EXPLORER</span>
             <div className="skill-editor-panel-actions">
+              <Tooltip title="新建文件夹">
+                <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)} />
+              </Tooltip>
               <Tooltip title="刷新">
                 <Button type="text" size="small" icon={<ReloadOutlined />} onClick={fetchSkills} loading={loadingList} />
               </Tooltip>
@@ -380,44 +422,32 @@ export default function Skills() {
           </div>
         </main>
 
-        <aside className="skill-editor-inspector">
-          <div className="skill-editor-panel-title">
-            <span>DETAILS</span>
-          </div>
-          {selectedSkill ? (
-            <div className="skill-editor-details">
-              <div>
-                <span className="skill-editor-detail-label">name</span>
-                <strong>{selectedSkill.name}</strong>
-              </div>
-              <div>
-                <span className="skill-editor-detail-label">description</span>
-                <p>{selectedSkill.description || '暂无描述'}</p>
-              </div>
-              <div className="skill-editor-detail-grid">
-                <div>
-                  <span className="skill-editor-detail-label">files</span>
-                  <strong>{selectedSkill.files?.length || 0}</strong>
-                </div>
-                <div>
-                  <span className="skill-editor-detail-label">open</span>
-                  <strong>{selectedFile ? selectedFile.split('/').pop() : '-'}</strong>
-                </div>
-              </div>
-              <Popconfirm
-                title={`确认删除 "${selectedSkill.name}"?`}
-                onConfirm={() => handleDelete(selectedSkill.name)}
-              >
-                <Button danger icon={<DeleteOutlined />}>
-                  删除技能
-                </Button>
-              </Popconfirm>
-            </div>
-          ) : (
-            <div className="skill-editor-details muted">No skill selected</div>
-          )}
-        </aside>
       </div>
+
+      <Modal
+        title="新建文件夹"
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={handleCreate}
+        okText="创建"
+        cancelText="取消"
+      >
+        <Form layout="vertical" form={form} style={{ marginTop: 16 }}>
+          <Form.Item
+            name="name"
+            label="文件夹名称"
+            rules={[
+              { required: true, message: '请输入文件夹名称' },
+              { pattern: /^[a-z0-9_-]+$/, message: '只允许小写字母、数字、下划线和连字符' },
+            ]}
+          >
+            <Input placeholder="例如: web-search" />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={3} placeholder="这个技能文件夹的用途" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }

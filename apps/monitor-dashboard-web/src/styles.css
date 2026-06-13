@@ -1095,7 +1095,7 @@ a {
   height: calc(100vh - 190px);
   min-height: 520px;
   display: grid;
-  grid-template-columns: 46px minmax(260px, 320px) minmax(420px, 1fr) 260px;
+  grid-template-columns: 46px minmax(280px, 360px) minmax(520px, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1130,18 +1130,11 @@ a {
   box-shadow: inset 2px 0 0 var(--primary-soft);
 }
 
-.skill-editor-explorer,
-.skill-editor-inspector {
+.skill-editor-explorer {
   min-width: 0;
   overflow: hidden;
   background: #edf1ec;
   border-right: 1px solid var(--line);
-}
-
-.skill-editor-inspector {
-  border-right: 0;
-  border-left: 1px solid var(--line);
-  background: #f7f8f4;
 }
 
 .skill-editor-panel-title {
@@ -1210,8 +1203,15 @@ a {
   min-height: 26px;
   display: inline-flex;
   align-items: center;
+  flex: 1;
+  min-width: 0;
   border-radius: 4px;
   color: var(--ink-soft);
+}
+
+.skill-editor-tree .ant-tree-title {
+  width: 100%;
+  min-width: 0;
 }
 
 .skill-editor-tree .ant-tree-node-content-wrapper:hover {
@@ -1238,8 +1238,28 @@ a {
 }
 
 .skill-editor-skill-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.skill-editor-directory-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  opacity: 0.72;
+}
+
+.skill-editor-directory-actions .ant-btn {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+}
+
+.skill-editor-skill-title:hover .skill-editor-directory-actions .ant-btn,
+.skill-editor-tree .ant-tree-node-selected .skill-editor-directory-actions .ant-btn {
+  opacity: 1;
 }
 
 .skill-editor-file-count {
@@ -1345,50 +1365,6 @@ a {
   color: #e9f1ec;
   font-family: var(--font-mono);
   font-size: 11px;
-}
-
-.skill-editor-details {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 14px;
-  color: var(--ink-soft);
-}
-
-.skill-editor-details.muted {
-  color: var(--faint);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.skill-editor-details strong {
-  display: block;
-  margin-top: 4px;
-  color: var(--ink);
-  font-size: 13px;
-}
-
-.skill-editor-details p {
-  margin: 6px 0 0;
-  color: var(--ink-soft);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.skill-editor-detail-label {
-  display: block;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.skill-editor-detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line-soft);
 }
 
 .audit-row-error > td {
