@@ -29,6 +29,10 @@ import { api } from '../api/client';
 
 const { Text } = Typography;
 
+const filterSelectSuffixIcon = (
+  <CaretDownOutlined className="filter-select-arrow" />
+);
+
 interface MessageRow {
   message_id: string;
   user_id: string;
@@ -760,7 +764,7 @@ export default function Messages() {
         <Row gutter={[12, 12]}>
           <Col xs={12} sm={8} md={6} lg={4}>
             <Select
-              placeholder="搜索会话名称"
+              placeholder="会话"
               showSearch
               filterOption={false}
               value={filters.chatId || undefined}
@@ -769,13 +773,14 @@ export default function Messages() {
               onFocus={() => searchChats('')}
               allowClear
               style={{ width: '100%' }}
+              suffixIcon={filterSelectSuffixIcon}
               options={chatOptions}
               notFoundContent={null}
             />
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
             <Select
-              placeholder="搜索用户名称"
+              placeholder="用户"
               showSearch
               filterOption={false}
               value={filters.userId || undefined}
@@ -784,6 +789,7 @@ export default function Messages() {
               onFocus={() => searchUsers('')}
               allowClear
               style={{ width: '100%' }}
+              suffixIcon={filterSelectSuffixIcon}
               options={userOptions}
               notFoundContent={null}
             />
@@ -795,7 +801,7 @@ export default function Messages() {
               onChange={(value) => setFilters((prev) => ({ ...prev, role: value }))}
               allowClear
               style={{ width: '100%' }}
-              suffixIcon={<CaretDownOutlined style={{ pointerEvents: 'none', fontSize: 12, color: '#aaa' }} />}
+              suffixIcon={filterSelectSuffixIcon}
               options={[
                 { value: 'user', label: '用户' },
                 { value: 'assistant', label: '助手' },
@@ -836,7 +842,7 @@ export default function Messages() {
               onChange={(value) => setFilters((prev) => ({ ...prev, messageType: value }))}
               allowClear
               style={{ width: '100%' }}
-              suffixIcon={<CaretDownOutlined style={{ pointerEvents: 'none', fontSize: 12, color: '#aaa' }} />}
+              suffixIcon={filterSelectSuffixIcon}
               options={messageTypeFilterOptions}
             />
           </Col>
