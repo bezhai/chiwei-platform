@@ -115,17 +115,18 @@ def _stub_state(monkeypatch):
     close_calls: list[dict] = []
 
     async def fake_record_world_round_close(
-        *, lane, advance_cursor_to, materials_ingested_date
+        *, lane, advance_cursor_to, materials_ingested_date, roster_ingested_date=None
     ):
         # 正常成功收口走这个统一收口：既推游标（advance_cursor_to 非 None 时）又标记
-        # 底料已纳入（materials_ingested_date 非 None 时），一次 append。这里只记录调用，
-        # 同时把"推进游标"那部分镜像进 _test_cursor_calls，保持旧用例（断言游标推进）
+        # 底料 / 名册已纳入（对应日期非 None 时），一次 append。这里只记录调用，同时
+        # 把"推进游标"那部分镜像进 _test_cursor_calls，保持旧用例（断言游标推进）
         # 不动——它们仍能断言"游标推到本批末尾"。
         close_calls.append(
             {
                 "lane": lane,
                 "advance_cursor_to": advance_cursor_to,
                 "materials_ingested_date": materials_ingested_date,
+                "roster_ingested_date": roster_ingested_date,
             }
         )
         if advance_cursor_to is not None:
@@ -153,6 +154,24 @@ def _stub_state(monkeypatch):
         arc_reads.append(lane)
         return None
 
+    roster_reads: list[str] = []
+
+    async def fake_list_npc_roster(*, lane):
+        # 默认名册为空（[] = 还没 seed）：需要断言名册段的用例自己覆写这个桩
+        # （monkeypatch.setattr engine_mod.list_npc_roster）。
+        roster_reads.append(lane)
+        return []
+
+    seed_calls: list[str] = []
+
+    async def fake_seed_npc_roster(*, lane):
+        # 种子名册的生产自动入口（必改 1）每天首醒会调一次 seed（默认快照
+        # roster_ingested_date=None → 视作首醒），真打 PG 的 CAS insert。专测引擎机制
+        # 的用例不关心 seed 本身，统一打成 no-op，让单测无库也安静。需要断言 seed
+        # 行为的用例自己覆写这个桩（monkeypatch.setattr engine_mod.seed_npc_roster）。
+        seed_calls.append(lane)
+        return 0
+
     reflect_calls: list[dict] = []
 
     async def fake_run_arc_reflection(**kwargs):
@@ -161,7 +180,25 @@ def _stub_state(monkeypatch):
         # 自己覆写这个桩（monkeypatch.setattr engine_mod.run_arc_reflection）。
         reflect_calls.append(kwargs)
 
+    # 收口后两步旁路（记成本 + transcript 沉淀折叠）都会真打 PG（record_round_cost
+    # 落 thinking token、fold_session 读 session transcript），它们各自 fail-open（只
+    # log warning 不抛），所以**不打桩也不会让用例 fail**——但每轮都对真库发一次连接
+    # 尝试（无库环境徒增噪声 + 慢）。专测引擎机制的用例不关心成本 / 折叠，统一在这里
+    # 打成 no-op，让单测边界干净、无库也安静（codex 建议 2）。需要断言成本 / 折叠行为
+    # 的用例自己覆写这两个桩。
+    cost_calls: list[dict] = []
+
+    async def fake_record_round_cost(**kwargs):
+        cost_calls.append(kwargs)
+
+    fold_calls: list[str] = []
+
+    async def fake_fold_session(session_id, policy):
+        fold_calls.append(session_id)
+
     monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_run_arc_reflection)
+    monkeypatch.setattr(engine_mod, "record_round_cost", fake_record_round_cost)
+    monkeypatch.setattr(engine_mod, "fold_session", fake_fold_session)
     monkeypatch.setattr(engine_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
@@ -173,10 +210,16 @@ def _stub_state(monkeypatch):
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
 
     engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
     engine_mod._test_arc_reads = arc_reads  # type: ignore[attr-defined]
+    engine_mod._test_roster_reads = roster_reads  # type: ignore[attr-defined]
     engine_mod._test_reflect_calls = reflect_calls  # type: ignore[attr-defined]
+    engine_mod._test_cost_calls = cost_calls  # type: ignore[attr-defined]
+    engine_mod._test_fold_calls = fold_calls  # type: ignore[attr-defined]
+    engine_mod._test_seed_calls = seed_calls  # type: ignore[attr-defined]
 
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
@@ -1448,16 +1491,16 @@ async def test_placeholder_snapshot_gate_behaves_like_cold_start(monkeypatch):
 async def test_world_instruction_does_not_enumerate_update_arc():
     """续写指令**不再**枚举 update_arc——翻页归反思独占（工具集物理隔离的 prompt 面）。
 
-    续写工具回到四个（notify / update_world / sense / sleep）。世界阶段仍是续写的输入
-    （【世界阶段】段保留），但续写无手碰世界阶段：指令里不能再有 update_arc 的使用
-    指令，否则模型会去调一个不存在的工具。
+    续写工具是五个（notify / update_world / sense / npc_visit / sleep）。世界阶段仍是
+    续写的输入（【世界阶段】段保留），但续写无手碰世界阶段：指令里不能再有 update_arc
+    的使用指令，否则模型会去调一个不存在的工具。
     """
     instruction = engine_mod.world_loop_instruction()
     assert "update_arc" not in instruction, (
         "续写指令不得枚举 update_arc（翻页已归反思环节独占）"
     )
-    assert "五个工具" not in instruction, "续写工具已回到四个，指令不能再写「五个工具」"
-    assert "四个工具" in instruction, "工具清单应明确是四个（update_arc 已移出）"
+    assert "六个工具" not in instruction, "续写工具是五个，指令不能再写「六个工具」"
+    assert "五个工具" in instruction, "工具清单应明确是五个（update_arc 已移出，含 npc_visit）"
 
 
 # ---------------------------------------------------------------------------
@@ -2100,8 +2143,8 @@ async def test_world_instruction_enumerates_sense_tool():
     instruction = engine_mod.world_loop_instruction()
     assert "sense" in instruction, "循环指令必须枚举 sense 工具（否则模型不会调它）"
     assert "三个工具" not in instruction, "工具早已不止三个，指令不能再写「三个工具」"
-    assert "四个工具" in instruction, (
-        "工具清单应明确是四个（含 sense；update_arc 已归反思环节）"
+    assert "五个工具" in instruction, (
+        "工具清单应明确是五个（含 sense / npc_visit；update_arc 已归反思环节）"
     )
     # sense 是逐角色（per-person）投周遭客观切片：引导逐角色 + 信息差
     assert ("逐角色" in instruction) or ("每个角色" in instruction) or ("单个" in instruction), (
@@ -2114,6 +2157,37 @@ async def test_world_instruction_enumerates_sense_tool():
     assert ("周遭" in instruction) or ("身边" in instruction), (
         "sense 引导应说明投的是她此刻的周遭客观切片"
     )
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_enumerates_npc_visit_tool():
+    """必改：world_loop_instruction 必须把 NPC 层的 npc_visit 枚举进工具清单。
+
+    npc_visit 让 world 以具名 NPC 身份投一件指向某姐妹的 event（同学约她、同事找她
+    那种）。但循环指令若不枚举它，真实模型就不知道有这个工具、根本不会调 —— NPC 层
+    「world 推具名 NPC 来撞姐妹」形同虚设。所以指令必须：
+
+      * 明确枚举 npc_visit 工具（按名字）+ 它的两个内容参数 what_npc_says / world_fact；
+      * 钉死 world_fact 是客观可感那一面、**绝不写情绪 / 绝不写 what_npc_says 的私密
+        原话**（与 sense / notify 的客观投影口吻一致）；
+      * 守「引导而非强制」的口吻：谁来 / 来不来 / 来干嘛由 world 按世界此刻自然推演、
+        不定时不机械，安静时不硬造 NPC 来访；
+      * 提醒 npc_visit 已把 world_fact 写进世界叙述，随后 update_world 要延续别覆盖丢；
+      * 说明名册之外的临时路人也可以用它来一下。
+    """
+    instruction = engine_mod.world_loop_instruction()
+    assert "npc_visit" in instruction, "循环指令必须枚举 npc_visit 工具（否则模型不会调它）"
+    assert "what_npc_says" in instruction, "npc_visit 段应枚举 what_npc_says 参数"
+    assert "world_fact" in instruction, "npc_visit 段应枚举 world_fact 参数"
+    # world_fact 客观、绝不写情绪、绝不写私密原话
+    assert ("情绪" in instruction), "world_fact 守则应钉死绝不写情绪"
+    # 引导而非强制：自然推演、不定时不机械、安静别硬造
+    assert ("自然" in instruction) or ("推演" in instruction), (
+        "npc_visit 守则应是「由 world 自然推演」的引导口吻"
+    )
+    assert ("硬造" in instruction), "npc_visit 守则应说安静时别硬造 NPC 来访"
+    # 路人也能用它来一下（名册只是固定的几个人）
+    assert ("路人" in instruction), "npc_visit 段应说明名册之外的临时路人也可以用它"
 
 
 @pytest.mark.asyncio
@@ -2140,6 +2214,11 @@ async def test_world_loop_messages_carry_no_household_rhythm():
     ``household_rhythm()`` 就是重复的两处真相。撤掉后喂给循环的 user 消息里既不该有
     「作息节律」这个段标题，也不该出现节律里写死的客观坐标（千凪早起 / 赤尾睡到
     下午 / 绫奈上学）。
+
+    npc_visit 段同理：它讲「让一个固定 NPC 来找某个姐妹」这个工具的用法，``sister``
+    参数指向哪个姐妹用 persona_id，但**具体哪个 id 对应谁由 system prompt 一处承载**
+    —— 续写指令里不得硬编 akao / chinagi / ayana 这些 id 或三姐妹中文名（否则又成
+    两处真相）。
     """
     from app.world.engine import _world_loop_messages
 
@@ -2215,10 +2294,11 @@ async def test_world_instruction_has_no_world_setting():
             f"USER 层指令不该描述世界设定（谁是谁）：{setting!r}"
         )
     assert "作息" not in instruction, "USER 层指令不该描述作息（归 system 一处）"
-    # 仍是四工具行动指令（含 1C 新增的 sense 五官；update_arc 归反思）
+    # 仍是五工具行动指令（含 1C 新增的 sense 五官 + NPC 层的 npc_visit；update_arc 归反思）
     assert ("notify" in instruction) and ("update_world" in instruction)
     assert "update_arc" not in instruction
     assert "sense" in instruction
+    assert "npc_visit" in instruction
     assert "sleep" in instruction
 
 
@@ -2384,3 +2464,357 @@ async def test_world_cost_record_failure_does_not_fail_round(monkeypatch):
     assert engine_mod._test_cursor_calls == [
         {"lane": "coe-t2", "created_at": "c1", "act_id": "a1"}
     ], "记成本失败不该阻断游标推进"
+
+
+# ---------------------------------------------------------------------------
+# NPC 名册（NPC 层第一刀）：world 当天第一次醒把「世界的固定人物」名册纳入一次、
+# 进意识流，之后当天不再重喂（照 DailyMaterials 套路，但用独立的 roster 游标）。
+#
+# 今天名册非空 **且** WorldState.roster_ingested_date != 今天 → 纳入一次（拼进这轮
+# user 消息，按 relates_to 归到对应姐妹），收口标记 roster_ingested_date=今天；当天
+# 后续轮次（已纳入）不再重喂；名册为空（还没 seed）→ 不拼这段、不标记；纳入那轮崩溃
+# → 不误标记。
+# ---------------------------------------------------------------------------
+
+
+def _npc(*, lane="coe-t2", npc_name, relates_to, sketch, version=1):
+    """构造一条 NPCRoster（world list 出来的名册一行）。"""
+    from app.world.npc_roster import NPCRoster
+
+    return NPCRoster(
+        lane=lane,
+        npc_name=npc_name,
+        relates_to=relates_to,
+        sketch=sketch,
+        version=version,
+    )
+
+
+def _seed_roster(lane="coe-t2"):
+    """构造一份小名册（覆盖三姐妹各至少一个，验证按 relates_to 归类）。"""
+    return [
+        _npc(lane=lane, npc_name="林小满", relates_to="ayana", sketch="同桌兼死党。"),
+        _npc(lane=lane, npc_name="陈鹿", relates_to="akao", sketch="高中闺蜜。"),
+        _npc(lane=lane, npc_name="许念", relates_to="chinagi", sketch="同部门同事。"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_first_wake_today_with_roster_ingests_and_marks(monkeypatch):
+    """① 当天第一次醒、名册非空、未纳入 → 名册速写进 user 消息，且收口标记 roster_ingested_date=今天。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    async def roster(*, lane):
+        return _seed_roster(lane)
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "同桌兼死党。" in blob, "当天首醒名册非空应把速写纳入 world 的 USER 消息"
+    assert "高中闺蜜。" in blob
+    assert "同部门同事。" in blob
+
+    # 收口把 roster_ingested_date 标成今天（并进统一收口的同一次 append）。
+    assert engine_mod._test_close_calls, "纳入那轮收口必须走 record_world_round_close"
+    last = engine_mod._test_close_calls[-1]
+    assert last["roster_ingested_date"] == today, (
+        f"纳入那轮收口必须把 roster_ingested_date 标成今天 {today}，实际 {last}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_roster_section_groups_by_relates_to(monkeypatch):
+    """名册段按 relates_to 归到对应姐妹（同一姐妹的 NPC 归在她名下）。"""
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    async def roster(*, lane):
+        return [
+            _npc(lane=lane, npc_name="林小满", relates_to="ayana", sketch="绫奈的同桌。"),
+            _npc(lane=lane, npc_name="顾舟", relates_to="ayana", sketch="绫奈的班长。"),
+            _npc(lane=lane, npc_name="许念", relates_to="chinagi", sketch="千凪的同事。"),
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 名字 + 速写都出现（归类是 by relates_to，呈现里至少要能看到这些人）。
+    for name in ("林小满", "顾舟", "许念"):
+        assert name in blob, f"名册段必须含 NPC 名字 {name}"
+    # 归类锚点：三姐妹的名字/标识出现在名册段（按 relates_to 分组的小标题）。
+    assert ("绫奈" in blob) or ("ayana" in blob), "名册段应按所属姐妹归类（绫奈/ayana）"
+    assert ("千凪" in blob) or ("chinagi" in blob), "名册段应按所属姐妹归类（千凪/chinagi）"
+
+
+@pytest.mark.asyncio
+async def test_first_wake_queries_roster_for_current_lane(monkeypatch):
+    """未纳入时按当前 lane list 名册（泳道隔离）。"""
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    calls: list[str] = []
+
+    async def roster(*, lane):
+        calls.append(lane)
+        return _seed_roster(lane)
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert calls == ["coe-t2"], f"未纳入时必须按当前 lane list 名册，实际 {calls}"
+
+
+@pytest.mark.asyncio
+async def test_second_wake_same_day_does_not_refeed_roster(monkeypatch):
+    """② 同一天第二次醒（已纳入）→ 名册不再进 user 消息（不重喂）。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, roster_ingested_date=today)
+
+    secret_sketch = "这串只在名册速写里出现的死党标记"
+
+    async def roster(*, lane):
+        return [
+            _npc(lane=lane, npc_name="林小满", relates_to="ayana", sketch=secret_sketch),
+        ]
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert secret_sketch not in blob, "当天已纳入过名册，第二次醒不该再把速写重喂"
+    # 不能用「【世界的固定人物】」这个段标题判定——它也出现在 npc_visit 工具指令里
+    # （讲「名册里的那些人」）。改判**纳入段的引导句**（_roster_section 渲染的那句、
+    # 只在喂入的名册段里出现、不在指令里）：没拼名册段它就不在 blob。
+    assert "下面是这个世界里有名有姓的固定人物" not in blob, (
+        "已纳入当天不再拼名册段（不重喂）"
+    )
+    # 收口不再标记（传 None，不重标）。
+    assert engine_mod._test_close_calls, "收口仍应走 record_world_round_close"
+    assert engine_mod._test_close_calls[-1]["roster_ingested_date"] is None, (
+        "已纳入当天收口不再标记 roster_ingested_date（传 None）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_day_reingests_roster(monkeypatch):
+    """③ 跨到第二天（roster_ingested_date 是昨天）→ 重新纳入一次。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, roster_ingested_date="2000-01-01")
+
+    async def roster(*, lane):
+        return _seed_roster(lane)
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "同桌兼死党。" in blob, "跨天应重新纳入名册一次"
+    assert engine_mod._test_close_calls[-1]["roster_ingested_date"] == today, (
+        "跨天重新纳入那轮收口应把 roster_ingested_date 标成今天（不是昨天）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_roster_does_not_feed_or_mark(monkeypatch):
+    """④ 名册为空（还没 seed）→ 不拼名册段、不标记。"""
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    async def empty_roster(*, lane):
+        return []
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", empty_roster)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 同上：判纳入段的引导句（只在喂入的名册段里、不在 npc_visit 指令里），不判段标题。
+    assert "下面是这个世界里有名有姓的固定人物" not in blob, "名册为空时不该拼名册段"
+    assert engine_mod._test_close_calls[-1]["roster_ingested_date"] is None, (
+        "名册为空时收口不该标记 roster_ingested_date"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ingest_round_crash_does_not_mark_roster(monkeypatch):
+    """⑤ 纳入那轮崩溃（run 抛）→ 收口不执行，roster_ingested_date 不被误标记成已纳入。"""
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    async def roster(*, lane):
+        return _seed_roster(lane)
+
+    async def boom_run(self, messages, *, prompt_vars=None, context=None,
+                       session_id=None, max_retries=2):
+        raise RuntimeError("model boom during roster ingest round")
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    monkeypatch.setattr(engine_mod.Agent, "run", boom_run)
+
+    with pytest.raises(RuntimeError):
+        await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert engine_mod._test_close_calls == [], (
+        "纳入那轮崩溃时收口绝不该执行（roster_ingested_date 不被误标记）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_roster_independent_of_materials_ingest(monkeypatch):
+    """名册与底料独立：今天没底料但名册非空 → 仍纳入名册（不被「无底料」连累）。"""
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, roster_ingested_date=None, materials_ingested_date=None)
+
+    async def roster(*, lane):
+        return _seed_roster(lane)
+
+    async def no_materials(*, lane, date):
+        return None
+
+    monkeypatch.setattr(engine_mod, "list_npc_roster", roster)
+    monkeypatch.setattr(engine_mod, "find_daily_materials", no_materials)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "同桌兼死党。" in blob, "今天没底料不该影响名册纳入（两件独立的事）"
+    assert "【今天的外部底料】" not in blob, "今天没底料不拼底料段"
+    last = engine_mod._test_close_calls[-1]
+    assert last["roster_ingested_date"] == today, "名册纳入照常标记"
+    assert last["materials_ingested_date"] is None, "没底料不标记底料"
+
+
+@pytest.mark.asyncio
+async def test_first_wake_today_seeds_roster_before_listing(monkeypatch):
+    """必改 1：当天第一次醒，纳入名册**之前**先 ensure seed 一次（生产自动入口）。
+
+    seed_npc_roster 原本只在测试里被手动调用、没有任何生产入口——表会一直空、首醒
+    list 永远得空名册、NPC 永不出场。这里给它接的自动入口是「world 当天第一次醒、
+    list 名册之前 ensure seed」（CAS 幂等、链非空不覆盖）。本测试钉：① 首醒那轮 seed
+    被调（按当前 lane）；② seed 在 list 之前发生（先灌再读，否则读到空表）。
+    """
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    order: list[str] = []
+    seed_calls: list[str] = []
+
+    async def fake_seed(*, lane):
+        seed_calls.append(lane)
+        order.append("seed")
+        return 7
+
+    async def fake_list(*, lane):
+        order.append("list")
+        return _seed_roster(lane)
+
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed)
+    monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert seed_calls == ["coe-t2"], (
+        f"当天首醒必须按当前 lane ensure seed 一次，实际 {seed_calls}"
+    )
+    assert order.index("seed") < order.index("list"), (
+        "seed 必须在 list 之前（先灌名册再读，否则首醒读到空表、NPC 永不出场）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_wake_empty_lane_seeds_then_npcs_show_up(monkeypatch):
+    """必改 1 端到端意图：首醒前 seed 让原本空的名册有了人、当轮就纳入推演。
+
+    用真实 seed_npc_roster（不打桩），但 list 在 seed 后返回种子名册——证「seed 接进
+    首醒分支」让首醒读得到名册、拼进 user 消息。这是「seed 没接入生产路径」这条致命
+    缺陷修复后的正向证据：不再依赖测试手动 seed。
+    """
+    _snapshot_with(monkeypatch, roster_ingested_date=None)
+
+    seeded: dict = {"done": False}
+
+    async def fake_seed(*, lane):
+        seeded["done"] = True
+        return 7
+
+    async def fake_list(*, lane):
+        # seed 跑过后名册才有人（模拟 CAS seed 把 7 个种子灌进空表）。
+        return _seed_roster(lane) if seeded["done"] else []
+
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed)
+    monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "下面是这个世界里有名有姓的固定人物" in blob, (
+        "首醒 seed 后名册有人、当轮就该纳入推演（修复前永远空、NPC 不出场）"
+    )
+    assert "同桌兼死党。" in blob
+
+
+@pytest.mark.asyncio
+async def test_second_wake_same_day_does_not_reseed_roster(monkeypatch):
+    """必改 1：当天已纳入过（第二次醒）→ 不再 seed（seed 不进每轮热路径）。
+
+    seed 只该在「首醒纳入名册」那个分支跑一次，不能每轮都调（哪怕 CAS 幂等也别白打
+    一次 DB）。当天已纳入（roster_ingested_date == 今天）时既不纳入名册、也不 seed。
+    """
+    from app.infra import cst_time
+
+    today = cst_time.now_cst().strftime("%Y-%m-%d")
+    _snapshot_with(monkeypatch, roster_ingested_date=today)
+
+    seed_calls: list[str] = []
+
+    async def fake_seed(*, lane):
+        seed_calls.append(lane)
+        return 0
+
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert seed_calls == [], (
+        f"当天已纳入过名册（第二次醒）不该再 seed（不进每轮热路径），实际 {seed_calls}"
+    )
+
+
+def test_render_roster_section_groups_by_sister():
+    """渲染器：把名册按 relates_to 归到对应姐妹、拼成「世界的固定人物」一段。"""
+    from app.world.engine import _roster_section
+
+    roster = [
+        _npc(npc_name="林小满", relates_to="ayana", sketch="绫奈的同桌。"),
+        _npc(npc_name="顾舟", relates_to="ayana", sketch="绫奈的班长。"),
+        _npc(npc_name="陈鹿", relates_to="akao", sketch="赤尾的闺蜜。"),
+    ]
+    section = _roster_section(roster)
+    # 名字 + 速写都在
+    for s in ("林小满", "绫奈的同桌。", "顾舟", "陈鹿", "赤尾的闺蜜。"):
+        assert s in section, f"名册段必须含 {s}"
+    # 同一姐妹的 NPC 归在一起（绫奈名下两人在赤尾名下那人之前/之后成块出现）。
+    # 至少验证按姐妹分组（出现姐妹的归类锚点）。
+    assert ("绫奈" in section) or ("ayana" in section)
+    assert ("赤尾" in section) or ("akao" in section)

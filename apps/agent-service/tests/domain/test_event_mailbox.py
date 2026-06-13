@@ -21,6 +21,7 @@ import pytest
 
 from app.data.queries.mailbox import (
     deliver_event,
+    list_persona_npc_speech_in_window,
     list_personas_with_unread,
     list_unread_events,
     mark_events_read,
@@ -316,6 +317,100 @@ async def test_unread_mixed_format_ordered_by_real_instant(mailbox_db):
     assert [e.event_id for e in unread] == ["iso_early", "unix_mid", "iso_late"], (
         "混格式必须按真实时刻排序——Unix 毫秒不能因字符串以 1 开头就被排到 ISO 前面"
     )
+
+
+@pytest.mark.integration
+async def test_npc_speech_in_window_reads_only_npc_speech(mailbox_db):
+    """睡前回顾的 NPC 互动证据查询：只捞本生活日窗口内、投给她的 NPC speech event。
+
+    NPC 层第四刀（代码层）的命门——回顾要从信箱里拿到权威的 ``npc:名字`` 机读键
+    （而非从被剥过前缀的 transcript 文本里猜）。所以这条查询按窗口 + kind=speech +
+    source 以 ``npc:`` 起头三重过滤，**只**返回 NPC 来访：
+
+      * world 环境动静（kind=ambient / surroundings、source=world）排除；
+      * 姐妹直投（kind=speech、source=persona_id 如 akao）排除——那是真姐妹，不是 NPC；
+      * 真人外部消息（source=user:xxx）排除。
+
+    已读 / 未读都要捞回：回顾在睡前跑，当天的 NPC speech 多半已被 life 标已读了，
+    按未读捞会漏掉今天的互动（这是与 list_unread_events 的关键区别——它是窗口读、
+    不看 read 表）。
+    """
+    # 窗口：2026-06-10 全天（CST）
+    start_iso = "2026-06-10T04:00:00+08:00"
+    end_iso = "2026-06-10T23:30:00+08:00"
+
+    # 1) 窗口内的 NPC 来访（要捞回）——且已被标已读，验证窗口读不看 read 表
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="npc-1",
+        kind="speech", source="npc:林小满",
+        summary="绫奈周末一起去图书馆复习好不好？",
+        occurred_at="2026-06-10T16:30:00+08:00",
+    )
+    await mark_events_read(lane="coe-t1", persona_id="ayana", event_ids=["npc-1"])
+
+    # 2) 姐妹直投 speech（source=persona_id）——不是 NPC，排除
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="sis-1",
+        kind="speech", source="akao",
+        summary="绫奈在写作业吗",
+        occurred_at="2026-06-10T17:00:00+08:00",
+    )
+    # 3) world 环境动静——排除
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="amb-1",
+        kind="ambient", source="world",
+        summary="窗外开始下雨",
+        occurred_at="2026-06-10T18:00:00+08:00",
+    )
+    # 4) 窗口外的 NPC 来访（前一天）——排除
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="npc-old",
+        kind="speech", source="npc:林小满",
+        summary="昨天的事",
+        occurred_at="2026-06-09T16:30:00+08:00",
+    )
+    # 5) 投给别的姐妹的 NPC 来访——persona 隔离，排除
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="npc-other",
+        kind="speech", source="npc:陈鹿",
+        summary="给赤尾的",
+        occurred_at="2026-06-10T16:30:00+08:00",
+    )
+
+    events = await list_persona_npc_speech_in_window(
+        lane="coe-t1", persona_id="ayana", start_iso=start_iso, end_iso=end_iso
+    )
+
+    assert [e.event_id for e in events] == ["npc-1"], (
+        "只捞窗口内、投给 ayana 的 NPC speech（已读也算）；姐妹直投 / 环境动静 / "
+        "窗口外 / 别人的都排除"
+    )
+    assert events[0].source == "npc:林小满", "source 原样保留，回顾据它取 npc:名字 键"
+    assert events[0].summary == "绫奈周末一起去图书馆复习好不好？"
+
+
+@pytest.mark.integration
+async def test_npc_speech_in_window_ordered_by_real_instant(mailbox_db):
+    """多次 NPC 来访按真实时刻升序（与意识流证据时间序对齐）。"""
+    start_iso = "2026-06-10T04:00:00+08:00"
+    end_iso = "2026-06-10T23:30:00+08:00"
+
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="late",
+        kind="speech", source="npc:林小满", summary="后说的",
+        occurred_at="2026-06-10T18:00:00+08:00",
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="early",
+        kind="speech", source="npc:沈乐", summary="先说的",
+        occurred_at="2026-06-10T10:00:00+08:00",
+    )
+
+    events = await list_persona_npc_speech_in_window(
+        lane="coe-t1", persona_id="ayana", start_iso=start_iso, end_iso=end_iso
+    )
+
+    assert [e.event_id for e in events] == ["early", "late"]
 
 
 @pytest.mark.integration

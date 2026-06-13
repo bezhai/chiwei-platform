@@ -67,6 +67,7 @@ from app.domain.world_events import (
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
     EventEnvelope,
+    strip_npc_prefix,
 )
 from app.infra import cst_time
 from app.infra.redis import get_redis
@@ -338,18 +339,38 @@ def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
     )
 
 
+def _speaker_display(source: str) -> str:
+    """把 speech event 的 ``source`` 翻成喂给模型的说话人名字（去机读前缀）。
+
+    speech 的 ``source`` 有两类写法：
+      * 姐妹直投（chat）：``source`` = 说话者 persona_id（如 ``akao``）——原样呈现。
+      * NPC 来访（npc_visit，NPC 层第二刀）：``source`` = ``npc:名字``（机器约定，对齐
+        第一刀 npc_name + 关系页 npc:xxx keying）——呈现时**去掉 ``npc:`` 前缀**，只把
+        干净的人名「林小满」喂给模型。前缀是机读用的（关系页 keying、与真人 user:xxx /
+        姐妹 persona_id 区分），不该漏给模型看；她读到的就是「林小满 对你说」、自然识别
+        是这个 NPC 来找她（不被当真人、不被当 world 环境动静——后两类不走 speech 段）。
+        前缀常量与剥前缀逻辑在 :mod:`app.domain.world_events` 单一处定义（event source
+        协议层；禁止重复定义，且 life 不准 import world——信息差命门）。
+    """
+    return strip_npc_prefix(source)
+
+
 def _format_speech(speech: list[EventEnvelope]) -> str:
     """把别人直接对她说的话（kind=speech）拼成「X 对你说：原话」，按发生先后（1C Task 3）。
 
-    speech 是另一角色调 chat 把原话**直投**进她信箱的（``source`` = 说话者 persona_id、
-    ``summary`` = 原话），不经 world、原话原样。呈现成「X 对你说：原话」让她看清是谁
-    对她说了什么——区别于周遭底框（surroundings）和离散动静（ambient）：这是直接冲她
-    来的话、有明确说话人。``source`` 是说话者 id；``occurred_at`` 过 ``cst_time`` 归一
-    到 CST（同其它两类）。对话连贯靠双方各自 transcript 天然承载，这里只如实呈现收到
-    的每句。
+    speech 有两类直投来源，都呈现成「X 对你说：原话」让她看清是谁对她说了什么——区别于
+    周遭底框（surroundings）和离散动静（ambient）：这是直接冲她来的话、有明确说话人。
+
+      * 姐妹直投：另一角色调 chat 把原话直投进她信箱（``source`` = 说话者 persona_id）。
+      * NPC 来访：world 调 npc_visit 以具名 NPC 身份投（``source`` = ``npc:名字``，NPC 层
+        第二刀）。说话人名字过 :func:`_speaker_display` 去掉 ``npc:`` 机读前缀再呈现。
+
+    ``occurred_at`` 过 ``cst_time`` 归一到 CST（同其它两类）。对话连贯靠双方各自
+    transcript 天然承载，这里只如实呈现收到的每句。
     """
     return "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.source} 对你说：{ev.summary}"
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）"
+        f"{_speaker_display(ev.source)} 对你说：{ev.summary}"
         for ev in speech
     )
 

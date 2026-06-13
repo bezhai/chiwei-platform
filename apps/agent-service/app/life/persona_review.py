@@ -51,6 +51,7 @@ from app.data.queries import find_persona  # module-level so tests can monkeypat
 from app.domain.thinking_cost import (  # module-level so tests can monkeypatch
     record_round_cost,
 )
+from app.domain.world_events import is_npc_source, strip_npc_prefix
 from app.infra.cst_time import CST
 from app.life.pages import (  # module-level so tests can monkeypatch
     DayPage,
@@ -132,12 +133,29 @@ def _day_pages_evidence(pages: list[DayPage]) -> str:
     )
 
 
+def _relationship_page_tag(other_user_id: str) -> str:
+    """关系页证据里这一页的标签：``npc:*`` 显式标注是 NPC（建议 3），真人原样。
+
+    persona review 全量读关系页，会读到 NPC 层写下的 ``npc:名字`` 页。证据里把这类
+    页显式标成 NPC（不是真人用户标识），避免身份慢漂把这个机读键当真人写进身份正文。
+    NPC 判定 / 剥前缀用 :mod:`app.domain.world_events` 的单一处定义（event source
+    协议层；禁止重复定义）。真人 user_id 原样、不加任何标注。
+    """
+    if is_npc_source(other_user_id):
+        return f"{other_user_id}（NPC：{strip_npc_prefix(other_user_id)}，不是真人用户）"
+    return other_user_id
+
+
 def _relationship_pages_evidence(pages: list[RelationshipPage]) -> str:
-    """关系页证据：她心里现在的每一页「他与我」，带对方标识 + written_at。"""
+    """关系页证据：她心里现在的每一页「他与我」，带对方标识 + written_at。
+
+    ``npc:*`` 的页在标签里显式标注是 NPC（建议 3，:func:`_relationship_page_tag`）。
+    """
     if not pages:
         return "（她心里还没有写下任何关系页。）"
     return "\n\n".join(
-        f"〔{p.other_user_id}，这页写于 {p.written_at}〕\n{p.narrative}"
+        f"〔{_relationship_page_tag(p.other_user_id)}，这页写于 {p.written_at}〕\n"
+        f"{p.narrative}"
         for p in pages
     )
 

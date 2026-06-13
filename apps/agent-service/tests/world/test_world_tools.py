@@ -29,8 +29,10 @@ from app.world.tools import (
     WORLD_SLEEP_MAX_SECONDS,
     WORLD_SLEEP_MIN_SECONDS,
     derive_event_id,
+    derive_npc_event_id,
     derive_surroundings_event_id,
     notify,
+    npc_visit,
     sense,
     sleep,
     update_arc,
@@ -71,6 +73,20 @@ def _stub_handlers(monkeypatch):
     async def fake_write_world_state(*, lane, world_time, detail):
         world_writes.append({"lane": lane, "world_time": world_time, "detail": detail})
 
+    # npc_visit 把 NPC 这件事同步留进世界层时，先 read_world_state 读上一版叙述、再
+    # 把这件事追加进去——所以测试要桩一个 prev 叙述供它读。默认给一版非空叙述，个别
+    # 用例自行覆盖（如冷启动无快照场景）。
+    world_snapshot: dict = {"detail": "午后客厅很安静，赤尾在房间，绫奈在客厅写作业。"}
+
+    class _FakeSnapshot:
+        def __init__(self, detail: str):
+            self.detail = detail
+
+    async def fake_read_world_state(*, lane):
+        if world_snapshot.get("detail") is None:
+            return None
+        return _FakeSnapshot(world_snapshot["detail"])
+
     arc_writes: list[dict] = []
 
     async def fake_write_world_arc(*, lane, narrative, turned_at):
@@ -80,10 +96,12 @@ def _stub_handlers(monkeypatch):
 
     monkeypatch.setattr(tools_mod, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(tools_mod, "write_world_state", fake_write_world_state)
+    monkeypatch.setattr(tools_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(tools_mod, "write_world_arc", fake_write_world_arc)
 
     tools_mod._test_delivered = delivered  # type: ignore[attr-defined]
     tools_mod._test_world_writes = world_writes  # type: ignore[attr-defined]
+    tools_mod._test_world_snapshot = world_snapshot  # type: ignore[attr-defined]
     tools_mod._test_arc_writes = arc_writes  # type: ignore[attr-defined]
     # sleep 不直接 emit_delayed（它把待办 self-wake 记进 round state、由 engine
     # 收口后 emit），这个空列表只用来断言"tool 层没有任何直接 self-wake 发生"。
@@ -445,6 +463,232 @@ async def test_sense_in_world_tools():
 
 
 # ---------------------------------------------------------------------------
+# npc_visit — NPC 层第二刀：world 以具名 NPC 身份投一件指向某姐妹的 event
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_delivers_speech_to_sister_with_npc_source(_ctx):
+    """① 投进对应姐妹信箱：source 是 `npc:名字`、kind=speech、summary 是 NPC 说的话。
+
+    NPC（林小满）来找绫奈这件事，把 NPC 说的话投进绫奈信箱。机制层硬约束：
+      * source = ``npc:林小满``（对齐第一刀 npc_name + 关系页 npc:xxx 约定）——
+        既不是真实用户（真人是 user:xxx / kind=external）、也不是 world 环境动静
+        （ambient）。
+      * kind = speech（有具名说话人、原话直投），life 侧 _format_speech 据此识别。
+      * summary = NPC 对她说的话（绫奈醒来读到的就是这句）。
+    """
+    with agent_context(_ctx):
+        await npc_visit.invoke(
+            {
+                "npc_name": "林小满",
+                "sister": "ayana",
+                "what_npc_says": "绫奈周末有空吗？一起去图书馆吧。",
+                "world_fact": "绫奈的手机响了，是林小满发来的消息。",
+            }
+        )
+
+    assert len(tools_mod._test_delivered) == 1
+    d = tools_mod._test_delivered[0]
+    assert d["persona_id"] == "ayana"
+    assert d["source"] == "npc:林小满"
+    assert d["kind"] == "speech"
+    assert d["summary"] == "绫奈周末有空吗？一起去图书馆吧。"
+    assert d["lane"] == "coe-t2"
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_writes_same_fact_to_world_layer(_ctx):
+    """② 同一件事同步留在世界层（codex 必改）：world detail 含这件 NPC 事实。
+
+    NPC event 不能只投进收件人信箱——同一件事必须同步写进 world detail，否则 world
+    下一轮不记得、别的姐妹感知不到、世界状态与收件人感知分叉。机制层保证：投递工具
+    **自己**在同一次调用里 write_world_state 把 world_fact 追加进世界叙述（不靠模型
+    另调 update_world 自觉）。
+    """
+    with agent_context(_ctx):
+        await npc_visit.invoke(
+            {
+                "npc_name": "林小满",
+                "sister": "ayana",
+                "what_npc_says": "绫奈周末有空吗？",
+                "world_fact": "绫奈的手机响了，是林小满发来的消息。",
+            }
+        )
+
+    # 工具自己落了一版世界叙述（不依赖模型另调 update_world）
+    assert len(tools_mod._test_world_writes) == 1
+    w = tools_mod._test_world_writes[0]
+    assert w["lane"] == "coe-t2"
+    # 这件 NPC 事实进了 detail
+    assert "林小满" in w["detail"]
+    assert "绫奈的手机响了，是林小满发来的消息。" in w["detail"]
+    # 不丢上一版叙述（在它基础上追加，世界不被这条 NPC 事实覆盖掉）
+    assert "午后客厅很安静" in w["detail"]
+    # world_time 由工具体自填现实 CST（不让模型编）
+    assert "+08:00" in w["world_time"]
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_cold_start_no_prior_detail(_ctx):
+    """冷启动（还没有上一版世界叙述）也能投：detail 就是这件 NPC 事实本身。
+
+    read_world_state 返回 None（首版还没快照）时，world_fact 直接作为新 detail 落，
+    不拼 None、不炸。投递照常发生。
+    """
+    tools_mod._test_world_snapshot["detail"] = None  # type: ignore[attr-defined]
+
+    with agent_context(_ctx):
+        await npc_visit.invoke(
+            {
+                "npc_name": "许念",
+                "sister": "chinagi",
+                "what_npc_says": "下班一起吃饭？",
+                "world_fact": "千凪的手机震了一下，是许念约饭。",
+            }
+        )
+
+    assert len(tools_mod._test_delivered) == 1
+    assert tools_mod._test_delivered[0]["source"] == "npc:许念"
+    assert len(tools_mod._test_world_writes) == 1
+    assert (
+        tools_mod._test_world_writes[0]["detail"]
+        == "千凪的手机震了一下，是许念约饭。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_logs_error_when_deliver_fails_after_world_write(
+    _ctx, monkeypatch, caplog
+):
+    """deliver 失败（世界已写、信箱没投）→ log error（no silent）+ 世界写仍在（codex 必改 2）。
+
+    npc_visit 非事务：先写世界（world detail 是世界权威）、后投信箱。崩在中间的残留
+    是收件人偶发漏收一次来访，危害小于反过来。但 deliver 失败绝不能静默吞掉——必须
+    log error 留痕，运维能看到「世界记了这事但收件人没收到」。这里桩 deliver_event
+    抛错、走真实工具入口（@tool_error 把异常路由成给模型的 ToolOutcomeError），断言：
+    ① 世界层那段叙述已落（先写世界）；② npc_visit 在投递失败时 log 了 error。
+    """
+
+    async def boom_deliver(**kwargs):
+        raise RuntimeError("mailbox down")
+
+    monkeypatch.setattr(tools_mod, "deliver_event", boom_deliver)
+
+    with caplog.at_level("ERROR"):
+        with agent_context(_ctx):
+            await npc_visit.invoke(
+                {
+                    "npc_name": "林小满",
+                    "sister": "ayana",
+                    "what_npc_says": "周末一起去图书馆吧。",
+                    "world_fact": "绫奈的手机响了，是林小满发来的消息。",
+                }
+            )
+
+    # ① 世界层已写（先写世界、后投信箱）
+    assert len(tools_mod._test_world_writes) == 1
+    assert "林小满" in tools_mod._test_world_writes[0]["detail"]
+    # ② npc_visit 自己在投递失败处 log 了 error（no silent）——来自 npc_visit 模块、
+    #    含哪个 NPC 投给谁（区别于 @tool_error 的通用兜底日志）。
+    assert any(
+        rec.levelname == "ERROR"
+        and rec.name == tools_mod.logger.name
+        and "林小满" in rec.getMessage()
+        and "ayana" in rec.getMessage()
+        for rec in caplog.records
+    ), "deliver 失败必须由 npc_visit log error（记下哪个 NPC 投给谁失败）"
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_event_id_idempotent_per_round(_ctx):
+    """同一 (lane, npc, sister, 话, round_id) 派生同一 event_id —— 整轮重放幂等命门。
+
+    Agent.run 整轮 retry 会重放 durable 工具，NPC event 是 durable 写——派生 id 绑
+    触发源（轮 + NPC + 收件人 + 话），重放投同一条 event，deliver_event 按
+    (lane, persona, event_id) 幂等去重，不重复投。
+    """
+    args = {
+        "npc_name": "林小满",
+        "sister": "ayana",
+        "what_npc_says": "周末一起去图书馆吧。",
+        "world_fact": "绫奈的手机响了。",
+    }
+    with agent_context(_ctx):
+        await npc_visit.invoke(args)
+    first = tools_mod._test_delivered[0]["event_id"]
+
+    tools_mod._test_delivered.clear()
+    with agent_context(_ctx):
+        await npc_visit.invoke(args)
+    second = tools_mod._test_delivered[0]["event_id"]
+    assert second == first, "同输入重放应派生同一 event_id（deliver_event 幂等去重）"
+
+
+def test_npc_visit_event_id_differs_per_npc_and_sister():
+    """不同 NPC / 不同收件人 → 不同 event_id（两件独立的 NPC 来访不互相吞掉）。"""
+    base = {
+        "lane": "coe-t2",
+        "what_npc_says": "一样的话",
+        "world_fact": "一样的世界事实",
+        "round_id": "r",
+    }
+    id_a = derive_npc_event_id(npc_name="林小满", sister="ayana", **base)
+    id_diff_npc = derive_npc_event_id(npc_name="顾舟", sister="ayana", **base)
+    id_diff_sister = derive_npc_event_id(npc_name="林小满", sister="akao", **base)
+    assert id_a != id_diff_npc
+    assert id_a != id_diff_sister
+
+
+def test_npc_visit_event_id_differs_per_world_fact():
+    """同 NPC / 同姐妹 / 同话、但 world_fact 不同 → 不同 event_id（codex 必改 3）。
+
+    幂等区分太窄会误吞：同一姐妹、同一 NPC、同一轮、同一句 what_npc_says 但是
+    **不同 world_fact**（同桌先发消息约图书馆、过一会儿又来电话敲定时间，两件客观
+    上不一样的来访恰好那句话措辞相同），若派生源不含 world_fact 会撞同一 id、被
+    deliver_event 幂等当重放吞掉第二件。把 world_fact 纳入派生源让不同事不撞。
+    """
+    base = {
+        "lane": "coe-t2",
+        "npc_name": "林小满",
+        "sister": "ayana",
+        "what_npc_says": "一样的话",
+        "round_id": "r",
+    }
+    id_msg = derive_npc_event_id(world_fact="绫奈的手机响了，是林小满的消息。", **base)
+    id_call = derive_npc_event_id(world_fact="绫奈接起电话，是林小满打来的。", **base)
+    assert id_msg != id_call, (
+        "同话不同 world_fact 是两件独立来访，不能派生同一 id 被幂等吞掉"
+    )
+
+
+def test_npc_visit_event_id_distinct_from_notify_and_sense():
+    """NPC speech 的 event_id 命名空间与 notify / sense 不撞（同文字也不互相幂等吞）。
+
+    NPC 来访（speech）、动静（ambient）、周遭切片（surroundings）是三类不同 event，
+    即便文字偶然相同也不能因派生命名空间重叠在 deliver_event 幂等里互相覆盖。
+    """
+    npc_id = derive_npc_event_id(
+        lane="coe-t2", npc_name="林小满", sister="ayana",
+        what_npc_says="同一句话", world_fact="同一句话", round_id="r",
+    )
+    notify_id = derive_event_id(lane="coe-t2", observation="同一句话", round_id="r")
+    sense_id = derive_surroundings_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="同一句话", round_id="r"
+    )
+    assert npc_id != notify_id
+    assert npc_id != sense_id
+
+
+@pytest.mark.asyncio
+async def test_npc_visit_in_world_tools():
+    """npc_visit 是 world 续写工具集的一员（WORLD_TOOLS 含 npc_visit）。"""
+    from app.world.tools import WORLD_TOOLS
+
+    assert npc_visit in WORLD_TOOLS
+
+
+# ---------------------------------------------------------------------------
 # sleep — 1A 完全不动（保留原行为）
 # ---------------------------------------------------------------------------
 
@@ -522,14 +766,15 @@ async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
 # ---------------------------------------------------------------------------
 
 
-def test_world_tools_are_notify_update_world_sense_sleep():
-    """WORLD_TOOLS = [notify, update_world, sense, sleep]（续写四工具）。
+def test_world_tools_are_notify_update_world_sense_npc_visit_sleep():
+    """WORLD_TOOLS = [notify, update_world, sense, npc_visit, sleep]（续写五工具）。
 
     没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
     给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
-    update_arc（世界阶段的「翻页」工具）**不在这里**——翻页归独立的反思环节独占
-    （WORLD_REFLECT_TOOLS），续写与反思靠工具集物理隔离互不干扰。
+    npc_visit 是 NPC 层第二刀加的「以具名 NPC 身份投一件指向某姐妹的 event + 同步留
+    世界层」的工具。update_arc（世界阶段的「翻页」工具）**不在这里**——翻页归独立的
+    反思环节独占（WORLD_REFLECT_TOOLS），续写与反思靠工具集物理隔离互不干扰。
     """
     from app.world.tools import WORLD_TOOLS
 
-    assert WORLD_TOOLS == [notify, update_world, sense, sleep]
+    assert WORLD_TOOLS == [notify, update_world, sense, npc_visit, sleep]

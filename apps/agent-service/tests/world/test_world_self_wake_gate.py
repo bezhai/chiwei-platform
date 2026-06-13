@@ -87,9 +87,9 @@ def _stub_io(monkeypatch):
         return None
 
     async def fake_record_world_round_close(
-        *, lane, advance_cursor_to, materials_ingested_date
+        *, lane, advance_cursor_to, materials_ingested_date, roster_ingested_date=None
     ):
-        # gate 放行的轮收口走统一收口（推游标 + 标记底料）；stub 成 no-op（不碰真库）。
+        # gate 放行的轮收口走统一收口（推游标 + 标记底料 / 名册）；stub 成 no-op（不碰真库）。
         return None
 
     async def fake_find_daily_materials(*, lane, date):
@@ -99,6 +99,15 @@ def _stub_io(monkeypatch):
     async def fake_read_world_arc(*, lane):
         # gate 放行的轮会读最新世界阶段；这里 stub 成 None（阶段空白，不碰真库）。
         return None
+
+    async def fake_list_npc_roster(*, lane):
+        # gate 放行的轮会 list NPC 名册；这里 stub 成空表（还没 seed，不碰真库）。
+        return []
+
+    async def fake_seed_npc_roster(*, lane):
+        # gate 放行的轮当天首醒会 ensure seed 名册（必改 1 的生产自动入口），真打
+        # PG 的 CAS insert；这里 stub 成 no-op（不碰真库）。
+        return 0
 
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
@@ -110,6 +119,8 @@ def _stub_io(monkeypatch):
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
 
 
 def _stub_state(monkeypatch, snapshot: WorldState | None):
