@@ -101,6 +101,7 @@ def stub_io(monkeypatch):
         "npc_events": [],
         "rel_pages": {},
         "day_page": None,
+        "notebook_entries": [],
         "marks": [],
         "costs": [],
         "page_lookups": [],
@@ -147,6 +148,9 @@ def stub_io(monkeypatch):
             persona_id=persona_id, display_name="她自己", persona_lite="一段人设"
         )
 
+    async def fake_notebook(*, lane, persona_id, active_only):
+        return list(state["notebook_entries"])
+
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
@@ -159,6 +163,7 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(review_mod, "mark_day_reviewed", fake_mark)
     monkeypatch.setattr(review_mod, "record_round_cost", fake_cost)
     monkeypatch.setattr(review_mod, "load_persona", fake_load_persona)
+    monkeypatch.setattr(review_mod, "list_notebook_entries", fake_notebook)
     return state
 
 

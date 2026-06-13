@@ -130,11 +130,13 @@ def stub_io(monkeypatch):
         "npc_events": [],
         "rel_pages": {},
         "day_page": None,
+        "notebook_entries": [],
         "marks": [],
         "costs": [],
         "act_windows": [],
         "chat_windows": [],
         "npc_windows": [],
+        "notebook_queries": [],
         "session_loads": [],
         "page_lookups": [],
     }
@@ -192,6 +194,12 @@ def stub_io(monkeypatch):
             persona_lite="一段人设",
         )
 
+    async def fake_notebook(*, lane, persona_id, active_only):
+        state["notebook_queries"].append(
+            {"lane": lane, "persona_id": persona_id, "active_only": active_only}
+        )
+        return list(state["notebook_entries"])
+
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
@@ -204,6 +212,7 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(review_mod, "mark_day_reviewed", fake_mark)
     monkeypatch.setattr(review_mod, "record_round_cost", fake_cost)
     monkeypatch.setattr(review_mod, "load_persona", fake_load_persona)
+    monkeypatch.setattr(review_mod, "list_notebook_entries", fake_notebook)
     return state
 
 
@@ -833,6 +842,200 @@ async def test_evidence_no_existing_day_page_says_first_write(stub_io, monkeypat
     await _review()
 
     assert "还没写过" in _blob(captured)
+
+
+# ---------------------------------------------------------------------------
+# 翻本子 + 清理 + 沉淀（Block 4）：读全部条目进证据、清理工具、instruction 收口
+# ---------------------------------------------------------------------------
+
+
+def _entry(
+    *, entry_id, content, status="active", remind_at=None, noted_at="2026-06-10T09:00:00+08:00"
+):
+    from app.domain.notebook import NotebookEntry
+
+    return NotebookEntry(
+        lane=_LANE,
+        persona_id=_PERSONA,
+        entry_id=entry_id,
+        content=content,
+        status=status,
+        remind_at=remind_at,
+        noted_at=noted_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_reads_full_notebook_including_done_and_dropped(
+    stub_io, monkeypatch
+):
+    """睡前翻本子读**全部**条目（active_only=False）：含做过 / 划掉 / 陈年过期的，
+    她才能在回顾里看到本子全貌、自己处理（不是代码按年龄 / 过期筛）。"""
+    _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert stub_io["notebook_queries"] == [
+        {"lane": _LANE, "persona_id": _PERSONA, "active_only": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_review_evidence_renders_all_notebook_entries(stub_io, monkeypatch):
+    """本子全貌进回顾证据：还惦记的、做过的、过期没处理的都摆在她面前（复用
+    render_notebook 渲染，状态标签含派生的「到点了」）。"""
+    stub_io["notebook_entries"] = [
+        _entry(entry_id="e-active", content="想看那部新动画"),
+        _entry(
+            entry_id="e-overdue",
+            content="下午三点陪我妹去琴行",
+            remind_at="2026-06-10T15:00:00+08:00",
+        ),
+        _entry(entry_id="e-done", content="把欠的练习补完", status="done"),
+        _entry(entry_id="e-dropped", content="本来想去逛街", status="dropped"),
+    ]
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    blob = _blob(captured)
+    assert "想看那部新动画" in blob
+    assert "下午三点陪我妹去琴行" in blob
+    assert "到点了" in blob, "过期没处理的日程要标「到点了」让她一眼看出"
+    assert "把欠的练习补完" in blob and "做了" in blob
+    assert "本来想去逛街" in blob and "划了" in blob
+    # 条目 id 进证据：她清理 / 改期得指到 id
+    assert "e-overdue" in blob
+
+
+@pytest.mark.asyncio
+async def test_review_empty_notebook_says_so(stub_io, monkeypatch):
+    """本子空 → 如实说，不冒充（与其它证据三态同口径）。"""
+    stub_io["notebook_entries"] = []
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert "本子是空的" in _blob(captured)
+
+
+@pytest.mark.asyncio
+async def test_review_tools_include_tidy_notebook(stub_io, monkeypatch):
+    """回顾工具集带上清本子的手：她睡前能把做过的标 done、过时的 dropped、还惦记的
+    改时间——都落到复用的 update_entry，不重写清理逻辑。"""
+    from app.life.review_tools import tidy_notebook_entry
+
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    tool_names = {t.name for t in captured["tools"]}
+    assert "tidy_notebook_entry" in tool_names
+    assert tidy_notebook_entry in captured["tools"]
+
+
+def test_review_instruction_covers_notebook_tidy_and_sediment():
+    """instruction 收口翻本子那一件：回看本子全貌、做过 / 过时 / 不想做的自己清、
+    做过的事顺势沉淀进当天的页。零确定性清理规则（清什么全是她判断、宪法）。"""
+    instruction = review_mod.review_instruction()
+    assert "tidy_notebook_entry" in instruction
+    # 清理动作（标 done / dropped / 改时间）由她自己判断
+    assert "本子" in instruction
+    assert "done" in instruction and "dropped" in instruction
+    # 做过的事沉淀进当天的页（复用 update_day_page，不另起一处）
+    assert "写一笔" in instruction or "沉淀" in instruction or "写进" in instruction
+
+
+# ---------------------------------------------------------------------------
+# bug 1（跨块交互）：回顾里改期 → 新 tick 真挂上了（不只断言 update_entry 入参）.
+#
+# 活轮 edit_note 改期会把新提醒记进容器、收口 fire_schedule_reminders 挂新 tick；
+# 回顾的 tidy_notebook_entry 之前只调 update_entry、不挂 tick → 她睡前改期后旧 tick
+# 被 stale gate 判废、新时刻没有新 tick → 这条日程再也不会提醒。修法：回顾本体也建
+# round-scoped 容器、tidy 改期往里记、收口复用 fire_schedule_reminders。
+# ---------------------------------------------------------------------------
+
+
+def _mock_run_invoking_tidy(monkeypatch, stub_io, *, entry_id, remind_at):
+    """把 Agent.run 换成「真调一次 tidy_notebook_entry 改期」的桩（绑当轮 context）。
+
+    模拟模型在回顾工具循环里调 tidy_notebook_entry 把某条日程改到一个未来时刻。
+    真调工具（在当轮 AgentContext 下）让它真往 round-scoped 容器里记待挂提醒——
+    这样收口 fire_schedule_reminders 拿到的就是工具真写下的料，端到端证明新 tick
+    会被挂上（不是只断言 update_entry 入参）。底层 update_entry 被 stub 掉（不碰真库）。
+    """
+    import app.life.review_tools as review_tools_mod
+    from app.agent.runtime_context import agent_context
+    from app.life.review_tools import tidy_notebook_entry
+
+    async def fake_update_entry(**kwargs):
+        pass
+
+    monkeypatch.setattr(review_tools_mod, "update_entry", fake_update_entry)
+
+    async def fake_run(
+        self, messages, *, prompt_vars=None, context=None, session_id=None,
+        max_retries=2,
+    ):
+        with agent_context(context):
+            await tidy_notebook_entry.invoke(
+                {"entry_id": entry_id, "remind_at": remind_at}
+            )
+        stub_io["day_page"] = _written_page()
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(review_mod.Agent, "run", fake_run)
+
+
+@pytest.mark.asyncio
+async def test_review_reschedule_hangs_new_tick(stub_io, monkeypatch):
+    """bug 1：回顾里把一条日程改到未来时刻 → 收口 fire_schedule_reminders 真给它挂新 tick。
+
+    端到端证明（codex 专门点名）：不是只看 update_entry 入参，而是看回顾本体收口时
+    真把这条改期的日程交给 fire_schedule_reminders 挂新 tick——否则旧 tick 被判废、
+    新时刻没有新 tick、这条日程静默再不提醒。
+    """
+    fired: list[dict] = []
+
+    async def fake_fire(*, lane, persona_id, schedule_reminders):
+        fired.append(
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "schedule_reminders": dict(schedule_reminders),
+            }
+        )
+
+    monkeypatch.setattr(review_mod, "fire_schedule_reminders", fake_fire)
+    _mock_run_invoking_tidy(
+        monkeypatch, stub_io,
+        entry_id="e-reschedule", remind_at="2026-06-15T09:00:00+08:00",
+    )
+
+    await _review()
+
+    assert len(fired) == 1, "回顾本体收口必须调一次 fire_schedule_reminders"
+    f = fired[0]
+    assert f["lane"] == _LANE and f["persona_id"] == _PERSONA
+    assert f["schedule_reminders"] == {
+        "e-reschedule": "2026-06-15T09:00:00+08:00"
+    }, "改期的那条日程要被交给收口挂新 tick"
+
+
+@pytest.mark.asyncio
+async def test_review_no_reschedule_fires_empty(stub_io, monkeypatch):
+    """回顾里没改任何日程时间（只标 done / 写页）→ 收口容器为空、不挂任何 tick。"""
+    fired: list[dict] = []
+
+    async def fake_fire(*, lane, persona_id, schedule_reminders):
+        fired.append(dict(schedule_reminders))
+
+    monkeypatch.setattr(review_mod, "fire_schedule_reminders", fake_fire)
+    _mock_run(monkeypatch, stub_io)  # 不调 tidy 改期
+
+    await _review()
+
+    assert fired == [{}], "没改期 → 收口容器空、不挂 tick"
 
 
 @pytest.mark.asyncio

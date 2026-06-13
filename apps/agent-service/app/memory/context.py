@@ -36,6 +36,7 @@ import logging
 
 from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
+from app.domain.notebook import list_notebook_entries, render_notebook
 from app.infra.cst_time import now_cst
 from app.life.living_day import living_day
 from app.life.pages import read_day_page_before, read_relationship_page
@@ -148,6 +149,38 @@ async def _build_yesterday_section(persona_id: str) -> str:
     return f"{_DAY_HEADER}（这页写于 {page.written_at}）：\n{narrative}"
 
 
+# 平直的第一人称框架标头（机制层，零剧情事实，宪法同其它段）。
+_NOTEBOOK_HEADER = "【你本子里还没了结的事】"
+
+
+async def _build_notebook_section(persona_id: str) -> str:
+    """她本子里还没了结的事段（备忘录 & 日程 第二块 · chat 侧）.
+
+    chat 概念上是 life 的快照，但工程上 inner_context 是显式拼几段——本子得**显式接
+    进去**才会出现在聊天里。读她**还活着**的条目（active_only=True：她自己没标 done /
+    dropped 的），原样渲染（复用 render_notebook，与 read_notebook 工具 / life 唤醒同
+    一份）。**只读、不改状态、不删**；**绝不**按年龄 / 条数 / 过期筛——那是代码替她决
+    定忘掉什么、违宪。lane 口径与 _build_life_state 一致（进程级泳道，prod 归一 "prod"）。
+    now 用现实此刻（派生「到点了」标签）。
+
+    空本子 / 读失败 → 返回 ""，整段缺席不补占位。读失败只 log：本子注入是上下文增强，
+    绝不能塌掉 chat（照 _build_yesterday_section 的姿势）。
+    """
+    try:
+        lane = current_deployment_lane() or "prod"
+        entries = await list_notebook_entries(
+            lane=lane, persona_id=persona_id, active_only=True
+        )
+    except Exception as e:
+        logger.warning("[%s] Failed to read notebook: %s", persona_id, e)
+        return ""
+
+    if not entries:
+        return ""
+    body = render_notebook(entries, now=now_cst().isoformat())
+    return f"{_NOTEBOOK_HEADER}（你自己记下、还没标做了 / 划掉的）：\n{body}"
+
+
 def _scene_section(
     chat_type: str,
     chat_name: str,
@@ -213,6 +246,13 @@ async def build_inner_context(
     yesterday = await _build_yesterday_section(persona_id)
     if yesterday:
         sections.append(yesterday)
+
+    # 她本子里还没了结的事：显式接进 chat（工程上 inner_context 是显式拼的，本子不接
+    # 就不会出现在聊天里）。位置在昨天页之后、人生快照之前——你的昨天 → 你还惦记着的
+    # 事 → 你此刻状态。无条目 / 读失败 → 整段缺席不补占位。
+    notebook = await _build_notebook_section(persona_id)
+    if notebook:
+        sections.append(notebook)
 
     sections.append(await _build_life_state(persona_id))
 

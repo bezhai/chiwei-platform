@@ -155,6 +155,9 @@ def patched(monkeypatch):
         "transcript": [],  # load_session 探测返回（空=冷启）
         "arc": None,  # read_world_arc 返回（None=空链）
         "arc_lanes": [],  # read_world_arc 收到的 lane
+        "notebook": [],  # list_notebook_entries 返回（[]=空本子）
+        "notebook_calls": [],  # list_notebook_entries 收到的 kwargs
+        "notebook_raises": None,  # 非 None → list_notebook_entries 抛它（读失败）
     }
 
     async def fake_read_world_arc(*, lane):
@@ -199,11 +202,36 @@ def patched(monkeypatch):
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
     monkeypatch.setattr(lw, "load_persona", fake_load_persona)
+    # 「她本子里还没了结的事」注入读口：每轮按 active_only=True 读还活着的条目。
+    # 打桩成可注入 entries / 记录调用 / 可抛错（读失败 → 整段缺席不炸轮）。
+    async def fake_list_notebook_entries(*, lane, persona_id, active_only):
+        state["notebook_calls"].append(
+            {"lane": lane, "persona_id": persona_id, "active_only": active_only}
+        )
+        if state["notebook_raises"] is not None:
+            raise state["notebook_raises"]
+        return list(state["notebook"])
+
     monkeypatch.setattr(lw, "load_session", fake_load_session)
     monkeypatch.setattr(lw, "read_day_page_before", fake_read_day_page_before)
+    monkeypatch.setattr(lw, "list_notebook_entries", fake_list_notebook_entries)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
     monkeypatch.setattr(lt, "perform_act", fake_act)
+
+    # note / edit_note 底下的 durable handler 也打桩（第三块：note 工具落库成功后才把
+    # 待挂日程提醒记进 round-scoped 容器，所以引擎侧测 fire_schedule_reminders 时这两个
+    # handler 必须成功、不真连 PG）。
+    async def fake_note_entry(**kwargs):
+        state["noted"].append(kwargs)
+
+    async def fake_update_entry(**kwargs):
+        state["edited"].append(kwargs)
+
+    state.setdefault("noted", [])
+    state.setdefault("edited", [])
+    monkeypatch.setattr(lt, "note_entry", fake_note_entry)
+    monkeypatch.setattr(lt, "update_entry", fake_update_entry)
     return state
 
 
@@ -2297,6 +2325,79 @@ async def test_act_tool_derived_id_lands_and_dedups_end_to_end(test_db):
     assert [r.description for r in rows1] == ["我去厨房煮咖啡"]
 
 
+@pytest.mark.integration
+async def test_note_tool_derived_id_lands_and_dedups_end_to_end(test_db):
+    """端到端串起 note 工具派生 entry_id → 真实 note_entry/NotebookEntry 落库 + 去重。
+
+    对称 act 的端到端去重测试：note 工具自己从 base act_id 派生的 entry_id 真落进 PG，
+    整轮重投（重建工具集、重做同序的 note）经真实 insert_idempotent 去重、每件仍只一条。
+    这是「记一条」幂等（durable mutation、整轮重试不重复记）的端到端证据。
+    """
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.domain.notebook import NotebookEntry, list_notebook_entries
+    from app.nodes.life_tools import build_life_tools
+    from tests.runtime.conftest import migrate
+
+    await migrate(NotebookEntry, test_db)
+
+    lane = "coe-t3"
+    base_act_id = "round-derived-base-id"
+    observed_at = "2026-06-13T12:30:00+08:00"
+
+    def _expected_id(seq: int) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base_act_id}:note:{seq}"))
+
+    async def _row_count() -> int:
+        async with test_db.connect() as conn:
+            r = await conn.execute(
+                text("SELECT count(*) FROM data_notebook_entry WHERE lane = :lane"),
+                {"lane": lane},
+            )
+            return r.scalar_one()
+
+    def _note_tool():
+        tools = {
+            t.name: t
+            for t in build_life_tools(
+                lane=lane, persona_id="akao",
+                act_id=base_act_id, observed_at=observed_at,
+            )
+        }
+        return tools["note"]
+
+    # 第一轮：同一 base act_id 下真记两条（一备忘 + 一日程，走真实 insert_idempotent）。
+    note_a = _note_tool()
+    out1 = await note_a.invoke({"content": "想看那部动画"})
+    out2 = await note_a.invoke(
+        {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
+    )
+    # 出参带各自的 id（spec：记一条出参 = id + 确认）
+    assert _expected_id(1) in out1
+    assert _expected_id(2) in out2
+    assert await _row_count() == 2, "同轮两条 note 应各自落一条（不同序号 → 不同 id）"
+
+    # 落库内容核对：第 2 条带 remind_at（日程）、第 1 条 None（备忘）。
+    entries = {
+        e.entry_id: e
+        for e in await list_notebook_entries(
+            lane=lane, persona_id="akao", active_only=False
+        )
+    }
+    assert entries[_expected_id(1)].remind_at is None
+    assert entries[_expected_id(2)].remind_at == "2026-06-13T15:00:00+08:00"
+
+    # 重投整轮：重建工具集（同 base act_id）、重做同序两条 → 同 entry_id → durable 去重。
+    note_b = _note_tool()
+    await note_b.invoke({"content": "想看那部动画"})
+    await note_b.invoke(
+        {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
+    )
+    assert await _row_count() == 2, "重投同序两条应被 (lane, persona, entry_id) 去重、不新增"
+
+
 # ---------------------------------------------------------------------------
 # 观测刀：每轮 life 思考的 token 落 durable PG（不依赖会丢的 langfuse）。
 #
@@ -2492,3 +2593,463 @@ async def test_self_wake_empty_inbox_also_carries_arc_awareness(patched, monkeyp
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
     assert _ARC_HEADER_MARK in msg_blob
     assert narrative in msg_blob
+
+
+# ---------------------------------------------------------------------------
+# 备忘录 & 日程 第二块（进她脑子 · life 唤醒侧）：每轮 stimulus 带「她本子里还没
+# 了结的事」一段。
+#
+# 她在 life 里自己记下的还活着（active）的条目要进她每轮的输入，让她带着自己惦记的
+# 事过日子。只读渲染：进输入的就是她自己没标 done / dropped 的（active_only=True），
+# **绝不**按年龄 / 条数 / 过期去筛（那是代码替她决定忘掉什么、违宪）。复用第一块的
+# 渲染（render_notebook，单一定义处）。空本子 / 读失败 → 整段缺席不补占位、不炸轮。
+# ---------------------------------------------------------------------------
+
+_NOTEBOOK_HEADER_MARK = "【你本子里还没了结的事】"
+
+
+def _notebook_entry(entry_id, content, *, remind_at=None, status="active"):
+    from app.domain.notebook import NotebookEntry
+
+    return NotebookEntry(
+        lane="coe-t3",
+        persona_id="akao",
+        entry_id=entry_id,
+        content=content,
+        remind_at=remind_at,
+        status=status,
+        noted_at="2026-06-13T10:00:00+08:00",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stimulus_carries_notebook_when_active_entries_exist(patched, monkeypatch):
+    """她本子里有还活着的条目 → 这一轮 USER stimulus 带「还没了结的事」段（含条目内容）。"""
+    patched["notebook"] = [
+        _notebook_entry("n1", "想看那部新动画"),
+        _notebook_entry("n2", "下午三点陪我妹去琴行", remind_at="2026-06-13T15:00:00+08:00"),
+    ]
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _NOTEBOOK_HEADER_MARK in msg_blob, "有还活着的条目时必须带本子段"
+    assert "想看那部新动画" in msg_blob, "备忘内容必须进 stimulus"
+    assert "下午三点陪我妹去琴行" in msg_blob, "日程内容必须进 stimulus"
+
+
+@pytest.mark.asyncio
+async def test_notebook_read_with_active_only_true(patched, monkeypatch):
+    """进她输入的是 active_only=True（她自己没标 done/dropped 的），不按年龄/条数/过期筛。"""
+    patched["notebook"] = [_notebook_entry("n1", "惦记的事")]
+    patched["unread"] = [_envelope("e1", "动静")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert patched["notebook_calls"], "必须读过本子"
+    call = patched["notebook_calls"][-1]
+    assert call["active_only"] is True, "进她输入的只能是她自己没了结的（active_only=True）"
+    assert call["lane"] == "coe-t3"
+    assert call["persona_id"] == "akao"
+
+
+@pytest.mark.asyncio
+async def test_empty_notebook_section_absent_no_placeholder(patched, monkeypatch):
+    """空本子（没活着的条目）→ 整段缺席、绝不塞占位文案。"""
+    patched["notebook"] = []
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _NOTEBOOK_HEADER_MARK not in msg_blob
+    assert "本子" not in msg_blob, "空本子时不许出现任何本子占位文案"
+
+
+@pytest.mark.asyncio
+async def test_notebook_read_failure_section_absent_round_still_runs(patched, monkeypatch):
+    """本子读失败 → 整段缺席但这一轮照常跑（注入是上下文增强、绝不炸唤醒）。"""
+    patched["notebook_raises"] = RuntimeError("db down reading notebook")
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="去开门"))
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _NOTEBOOK_HEADER_MARK not in msg_blob, "读失败时本子段缺席"
+    assert "门铃响了" in msg_blob, "当轮感知照常"
+    # 这一轮照常收口（读失败不影响唤醒主流程）
+    assert patched["marked"] == [["e1"]]
+    assert [s["current_state"] for s in patched["saved"]] == ["去开门"]
+
+
+@pytest.mark.asyncio
+async def test_self_wake_empty_inbox_also_carries_notebook(patched, monkeypatch):
+    """self 自排空信箱轮同样带本子段——注入点在 _run_life_round，两条唤醒路都覆盖。"""
+    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
+
+    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
+    _stub_life_state(
+        patched,
+        LifeState(
+            lane="coe-t3", persona_id="akao",
+            current_state="在写作业", response_mood="专注", activity_type="study",
+            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
+        ),
+    )
+    patched["notebook"] = [_notebook_entry("n1", "记得给绫奈姐姐回消息")]
+    patched["unread"] = []
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await life_self_wake_node(
+        LifeWakeTick(
+            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
+        )
+    )
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert _NOTEBOOK_HEADER_MARK in msg_blob
+    assert "记得给绫奈姐姐回消息" in msg_blob
+
+
+# ---------------------------------------------------------------------------
+# 备忘录 & 日程 第三块（日程到点提醒）：ScheduleReminderTick 独立信号 + 到点 gate +
+# 到点把她叫醒的 life_schedule_reminder_node。
+#
+# 调度契约（这块最难，先定死）：**每条日程各挂各的提醒**（像 act / world self-wake
+# 各投各的），不动她现有 self-wake（next_wake_at）那套语义——日程是在它旁边新加的
+# 一路独立唤醒。每条 note/edit 带 remind_at 时各 emit_delayed 一条携带
+# (entry_id, remind_at) 的 ScheduleReminderTick；到期走 gate 读这条 entry 的最新一版：
+# 仍 active、仍有 remind_at、且 remind_at == tick 携带值才作数（改期 / 划掉 / 撤时间
+# 后旧 tick 携带值对不上 → 判废、不误触发）。放行后 deliver_event 把这条日程投进她
+# 自己的信箱（kind=ambient、source=notebook），复用 deliver_event 的 EventArrived
+# 敲门把她叫醒（到点把她叫醒的地基），她在常规唤醒里看到这条、自己处理。
+# ---------------------------------------------------------------------------
+
+
+def _due_entry(
+    entry_id="n1",
+    content="三点陪我妹去琴行",
+    *,
+    remind_at="2026-06-13T15:00:00+08:00",
+    status="active",
+    lane="coe-t3",
+    persona_id="akao",
+):
+    from app.domain.notebook import NotebookEntry
+
+    return NotebookEntry(
+        lane=lane, persona_id=persona_id, entry_id=entry_id,
+        content=content, remind_at=remind_at, status=status,
+        noted_at="2026-06-13T12:00:00+08:00",
+    )
+
+
+@pytest.fixture
+def reminder_patched(monkeypatch):
+    """把 reminder 节点的 IO 依赖换成可观测 fake（读单条 entry + 投信箱）。"""
+    state = {
+        "entry": None,        # find_notebook_entry 返回（None=不存在）
+        "delivered": [],      # deliver_event 收到的 kwargs
+        "find_calls": [],     # find_notebook_entry 收到的 kwargs
+    }
+
+    async def fake_find(*, lane, persona_id, entry_id):
+        state["find_calls"].append(
+            {"lane": lane, "persona_id": persona_id, "entry_id": entry_id}
+        )
+        return state["entry"]
+
+    async def fake_deliver(**kwargs):
+        state["delivered"].append(kwargs)
+        return 1
+
+    monkeypatch.setattr(lw, "find_notebook_entry", fake_find)
+    monkeypatch.setattr(lw, "deliver_event", fake_deliver)
+    return state
+
+
+def test_schedule_reminder_tick_shape():
+    """ScheduleReminderTick：lane / persona_id / entry_id 三键 + remind_at；transient。"""
+    from app.nodes.life_wake import ScheduleReminderTick
+    from app.runtime.data import key_fields
+
+    keys = key_fields(ScheduleReminderTick)
+    assert {"lane", "persona_id", "entry_id"} <= set(keys), (
+        "ScheduleReminderTick 至少含 (lane, persona_id, entry_id) 键（每条日程各挂各的）"
+    )
+    tick = ScheduleReminderTick(
+        lane="coe-t3", persona_id="akao", entry_id="n1",
+        remind_at="2026-06-13T15:00:00+08:00",
+    )
+    assert tick.remind_at == "2026-06-13T15:00:00+08:00"
+    assert getattr(ScheduleReminderTick.Meta, "transient", False) is True
+
+
+@pytest.mark.asyncio
+async def test_reminder_due_active_matching_fires_into_inbox(reminder_patched):
+    """到点：entry 仍 active、remind_at 与 tick 携带值一致 → 投进她信箱（把她叫醒）。"""
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = _due_entry(remind_at="2026-06-13T15:00:00+08:00")
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert len(reminder_patched["delivered"]) == 1, "到点应投一条进她信箱（复用敲门叫醒）"
+    d = reminder_patched["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "akao", "投进她**自己**的信箱"
+    assert "三点陪我妹去琴行" in d["summary"], "递到她面前的是这条日程的内容（当场知道是哪条）"
+
+
+@pytest.mark.asyncio
+async def test_reminder_dropped_entry_does_not_fire(reminder_patched):
+    """划掉之后（status=dropped）原来那个提醒到达 → 判废，不投、不误触发。"""
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = _due_entry(status="dropped")
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert reminder_patched["delivered"] == [], "划掉的日程到点不该再提醒"
+
+
+@pytest.mark.asyncio
+async def test_reminder_done_entry_does_not_fire(reminder_patched):
+    """已做掉（status=done）→ 判废，不投。"""
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = _due_entry(status="done")
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert reminder_patched["delivered"] == []
+
+
+@pytest.mark.asyncio
+async def test_reminder_rescheduled_stale_tick_does_not_fire(reminder_patched):
+    """改期之后：entry 现在的 remind_at 与旧 tick 携带值对不上 → 判废 stale，不误触发。
+
+    照现有 self-wake 的 stale gate 先例（tick 带的时刻 vs 当前条目对不上判废）：她
+    把日程从 15:00 改到 16:00，旧那条 15:00 的提醒到达时 entry.remind_at 已是 16:00，
+    旧 tick 携带 15:00 ≠ 16:00 → 判废。16:00 的提醒由 edit 时新挂的那条 tick 负责。
+    """
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    # entry 现在挂的是改后的 16:00
+    reminder_patched["entry"] = _due_entry(remind_at="2026-06-13T16:00:00+08:00")
+
+    # 旧 tick 携带的是改前的 15:00
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert reminder_patched["delivered"] == [], "改期后旧提醒携带的时刻对不上、不该误触发"
+
+
+@pytest.mark.asyncio
+async def test_reminder_cleared_time_stale_tick_does_not_fire(reminder_patched):
+    """撤掉时间（日程变回备忘，remind_at=None）→ 旧 tick 到达判废，不误触发。"""
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = _due_entry(remind_at=None)  # 时间被撤了
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert reminder_patched["delivered"] == [], "撤掉时间后旧提醒不该触发"
+
+
+@pytest.mark.asyncio
+async def test_reminder_missing_entry_does_not_fire(reminder_patched):
+    """entry 不存在（理论上不该发生）→ 判废，不投、不炸。"""
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = None
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="ghost",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert reminder_patched["delivered"] == []
+
+
+@pytest.mark.asyncio
+async def test_reminder_event_id_deterministic_dedups_on_replay(reminder_patched):
+    """edge 5（不破幂等）：同一条 reminder 重投，deliver 的 event_id 确定 → 信箱去重。
+
+    durable delayed trigger 重投 / 整轮重试会重放同一条 ScheduleReminderTick；投信箱的
+    event_id 从 (lane, persona, entry_id, remind_at) 确定派生，两次重投得同一 id，
+    deliver_event 按 (lane, persona, event_id) 幂等去重，不重复叫醒。
+    """
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    reminder_patched["entry"] = _due_entry(remind_at="2026-06-13T15:00:00+08:00")
+    tick = ScheduleReminderTick(
+        lane="coe-t3", persona_id="akao", entry_id="n1",
+        remind_at="2026-06-13T15:00:00+08:00",
+    )
+
+    await life_schedule_reminder_node(tick)
+    await life_schedule_reminder_node(tick)
+
+    assert len(reminder_patched["delivered"]) == 2, "节点跑两次（去重在 deliver_event 层）"
+    ids = {d["event_id"] for d in reminder_patched["delivered"]}
+    assert len(ids) == 1, "同一条 reminder 重投必须派生同一 event_id（信箱据此幂等去重）"
+
+
+@pytest.mark.asyncio
+async def test_reminder_two_near_simultaneous_both_fire(monkeypatch):
+    """edge 1（多条几乎同时到点）：两条不同日程各自的 tick 各自投递、互不覆盖。
+
+    每条日程各挂各的提醒（独立 tick、独立 event_id），两条几乎同时到点各走一遍节点、
+    各投一条进她信箱 —— 她下一轮一次能看到全部到点的，不互相覆盖、不漏。
+    """
+    from app.nodes.life_wake import ScheduleReminderTick, life_schedule_reminder_node
+
+    delivered: list[dict] = []
+
+    async def fake_find(*, lane, persona_id, entry_id):
+        # 每条 entry 都到点、active、remind_at 匹配。
+        return _due_entry(
+            entry_id=entry_id,
+            content=f"日程-{entry_id}",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(lw, "find_notebook_entry", fake_find)
+    monkeypatch.setattr(lw, "deliver_event", fake_deliver)
+
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n1",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+    await life_schedule_reminder_node(
+        ScheduleReminderTick(
+            lane="coe-t3", persona_id="akao", entry_id="n2",
+            remind_at="2026-06-13T15:00:00+08:00",
+        )
+    )
+
+    assert len(delivered) == 2, "两条同时到点各投一条、不互相覆盖"
+    contents = " ".join(d["summary"] for d in delivered)
+    assert "日程-n1" in contents and "日程-n2" in contents, "两条到点的她都能看到"
+    ids = {d["event_id"] for d in delivered}
+    assert len(ids) == 2, "两条不同日程派生不同 event_id（不被去重吞掉一条）"
+
+
+# --- engine 收口：一轮跑完把本轮 note/edit 排的日程提醒各挂各的（fire_schedule_reminders）---
+
+
+@pytest.mark.asyncio
+async def test_life_round_fires_schedule_reminders_for_noted_schedule(patched, monkeypatch):
+    """event 唤醒一轮里她 note 了一条带时间的日程 → 收口 fire_schedule_reminders 带这条。
+
+    note 工具把待挂提醒记进 round-scoped 容器，engine 收口调 fire_schedule_reminders
+    （对称 fire_life_self_wake）一次性把本轮排的日程各挂各的。这条验证收口真的把容器
+    交给了 fire（容器里有那条带 remind_at 的）。
+    """
+    import uuid
+
+    patched["unread"] = [_envelope("e1", "想起来要陪我妹")]
+
+    fired: list[dict] = []
+
+    async def fake_fire_reminders(*, lane, persona_id, schedule_reminders):
+        fired.append(
+            {"lane": lane, "persona_id": persona_id,
+             "schedule_reminders": dict(schedule_reminders)}
+        )
+
+    monkeypatch.setattr(lw, "fire_schedule_reminders", fake_fire_reminders)
+
+    def _script_note():
+        async def _run(tools):
+            by_name = {t.name: t for t in tools}
+            await by_name["note"].invoke(
+                {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
+            )
+
+        return _run
+
+    _FakeAgent.install(monkeypatch, script=_script_note())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(fired) == 1, "一轮收口必须调 fire_schedule_reminders"
+    assert fired[0]["lane"] == "coe-t3"
+    assert fired[0]["persona_id"] == "akao"
+    # 本轮第一件 note 的 entry_id（base act_id 从 event_ids 派生 + note:1 序号）
+    base = str(uuid.uuid5(uuid.NAMESPACE_DNS, "coe-t3:akao:e1"))
+    entry_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:note:1"))
+    assert fired[0]["schedule_reminders"] == {entry_id: "2026-06-13T15:00:00+08:00"}, (
+        "收口要把本轮排的日程（entry_id → remind_at）交给 fire"
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_wake_round_also_fires_schedule_reminders(patched, monkeypatch):
+    """self 自排空信箱轮也走收口 fire_schedule_reminders（两条唤醒路都覆盖）。"""
+    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
+
+    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
+    _stub_life_state(
+        patched,
+        LifeState(
+            lane="coe-t3", persona_id="akao",
+            current_state="在写作业", response_mood="专注", activity_type="study",
+            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
+        ),
+    )
+    patched["unread"] = []
+
+    fired: list = []
+
+    async def fake_fire_reminders(*, lane, persona_id, schedule_reminders):
+        fired.append(dict(schedule_reminders))
+
+    monkeypatch.setattr(lw, "fire_schedule_reminders", fake_fire_reminders)
+    _FakeAgent.install(monkeypatch, script=None)  # 什么都不排
+
+    await life_self_wake_node(
+        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target)
+    )
+
+    assert len(fired) == 1, "self 自排轮收口也要调 fire_schedule_reminders（即使本轮没排）"
+    assert fired[0] == {}, "本轮没排日程 → 空容器交给 fire（fire 据空容器不 emit）"

@@ -26,6 +26,19 @@ from app.memory.context import _build_life_state, build_inner_context
 CST = timezone(timedelta(hours=8))
 
 
+@pytest.fixture(autouse=True)
+def _notebook_empty_by_default():
+    """Default the notebook read to an empty book for every build_inner_context
+    test so they stay DB-free; tests that need a non-empty book / to assert the
+    read args patch ``list_notebook_entries`` explicitly inside their own block
+    (an inner patch wins over this autouse default)."""
+    with patch(
+        "app.memory.context.list_notebook_entries",
+        new=AsyncMock(return_value=[]),
+    ):
+        yield
+
+
 def _no_arc():
     """Stub the arc read to a cold chain (None) so unit tests stay DB-free."""
     return patch(
@@ -46,6 +59,14 @@ def _no_day_page():
     return patch(
         "app.memory.context.read_day_page_before",
         new=AsyncMock(return_value=None),
+    )
+
+
+def _empty_notebook():
+    """Stub the notebook read to an empty book so unit tests stay DB-free."""
+    return patch(
+        "app.memory.context.list_notebook_entries",
+        new=AsyncMock(return_value=[]),
     )
 
 
@@ -753,5 +774,174 @@ async def test_page_read_errors_do_not_collapse_inner_context():
 
     assert _REL_HEADER_MARK not in out
     assert _DAY_HEADER_MARK not in out
+    assert "浩南" in out  # scene 照常
+    assert "散步" in out  # life 快照照常
+
+
+# ---------------------------------------------------------------------------
+# 备忘录 & 日程 第二块（进她脑子 · chat 侧）：inner_context 显式接上「她本子里还没
+# 了结的事」一段。
+#
+# chat 概念上是 life 的快照，但工程上 inner_context 是显式拼几段——本子得**显式接进
+# 去**才会出现在聊天里。同 life 唤醒侧：只读还活着（active_only=True）的条目，原样渲染
+# （复用 render_notebook），绝不按年龄/条数/过期筛。无条目/读失败 → 整段缺席不补占位、
+# inner_context 不塌。
+# ---------------------------------------------------------------------------
+
+_NOTEBOOK_HEADER_MARK = "【你本子里还没了结的事】"
+
+
+def _notebook_entry(entry_id, content, *, remind_at=None, status="active"):
+    from app.domain.notebook import NotebookEntry
+
+    return NotebookEntry(
+        lane="prod",
+        persona_id="chiwei",
+        entry_id=entry_id,
+        content=content,
+        remind_at=remind_at,
+        status=status,
+        noted_at="2026-06-13T10:00:00+08:00",
+    )
+
+
+def _notebook_read(entries):
+    return patch(
+        "app.memory.context.list_notebook_entries",
+        new=AsyncMock(return_value=entries),
+    )
+
+
+@pytest.mark.asyncio
+async def test_notebook_section_injected_when_active_entries_exist():
+    """她本子里有还活着的条目 → inner_context 带「还没了结的事」段（含条目内容）。"""
+    entries = [
+        _notebook_entry("n1", "周末想陪我妹去琴行"),
+        _notebook_entry("n2", "三点要去拿快递", remind_at="2026-06-13T15:00:00+08:00"),
+    ]
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _notebook_read(entries),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert _NOTEBOOK_HEADER_MARK in out, "有还活着的条目时必须接上本子段"
+    assert "周末想陪我妹去琴行" in out, "备忘内容必须进 inner_context（聊天能自然提到）"
+    assert "三点要去拿快递" in out, "日程内容必须进 inner_context"
+
+
+@pytest.mark.asyncio
+async def test_notebook_read_with_active_only_true_correct_lane_persona():
+    """接进 chat 的是 active_only=True、lane 与 persona 口径正确（不按年龄/条数/过期筛）。"""
+    read = AsyncMock(return_value=[_notebook_entry("n1", "惦记的事")])
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        patch("app.memory.context.current_deployment_lane", return_value="ppe-x"),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        patch("app.memory.context.list_notebook_entries", new=read),
+    ):
+        await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert read.await_args.kwargs == {
+        "lane": "ppe-x",
+        "persona_id": "chiwei",
+        "active_only": True,
+    }, "chat 接进的只能是她没了结的（active_only=True），lane 走 current_deployment_lane()"
+
+
+@pytest.mark.asyncio
+async def test_notebook_lane_falls_back_to_prod():
+    """LANE 未设（prod → None）归一到 'prod'，与本子写入端同口径。"""
+    read = AsyncMock(return_value=[])
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        patch("app.memory.context.current_deployment_lane", return_value=None),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        patch("app.memory.context.list_notebook_entries", new=read),
+    ):
+        await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert read.await_args.kwargs == {
+        "lane": "prod",
+        "persona_id": "chiwei",
+        "active_only": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_empty_notebook_section_absent_no_placeholder():
+    """空本子（没活着的条目）→ 整段缺席、绝不塞占位文案，inner_context 不塌。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _notebook_read([]),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert _NOTEBOOK_HEADER_MARK not in out
+    assert "本子" not in out, "空本子时不许出现任何本子占位文案"
+    assert "散步" in out  # life 快照照常
+
+
+@pytest.mark.asyncio
+async def test_notebook_read_failure_section_absent_context_still_builds():
+    """本子读失败 → 整段缺席但 inner_context 不塌（上下文增强不能塌掉 chat）。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        patch(
+            "app.memory.context.list_notebook_entries",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert _NOTEBOOK_HEADER_MARK not in out
     assert "浩南" in out  # scene 照常
     assert "散步" in out  # life 快照照常
