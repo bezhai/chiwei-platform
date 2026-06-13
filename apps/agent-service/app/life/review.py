@@ -70,6 +70,11 @@ from app.data.queries.messages import (  # module-level so tests can monkeypatch
 from app.domain.life_state import (  # module-level so tests can monkeypatch
     mark_day_reviewed,
 )
+from app.domain.notebook import (  # module-level so tests can monkeypatch
+    NotebookEntry,
+    list_notebook_entries,
+    render_notebook,
+)
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import ActPerformed, EventEnvelope, strip_npc_prefix
 from app.infra import cst_time
@@ -84,10 +89,14 @@ from app.life.pages import (  # module-level so tests can monkeypatch
 from app.life.review_tools import (
     FEATURE_REVIEW_LANE,
     FEATURE_REVIEW_PERSONA,
+    FEATURE_REVIEW_SCHEDULE_REMINDERS,
     FEATURE_REVIEW_TARGET_DATE,
     LIFE_REVIEW_TOOLS,
 )
 from app.memory._persona import load_persona  # module-level so tests can monkeypatch
+from app.nodes.life_tools import (  # module-level so tests can monkeypatch
+    fire_schedule_reminders,
+)
 from app.runtime.single_flight import SingleFlightConflict, single_flight
 
 logger = logging.getLogger(__name__)
@@ -121,7 +130,7 @@ def review_instruction() -> str:
     """喂给回顾 Agent 的任务指令（代码侧是工具语义的权威来源；零剧情事实——宪法）。"""
     return (
         "今天就要过完了。以你本人的第一人称，回看下面这一天的全部经历——你的"
-        "意识流、你做过的事、你和人聊过的天。然后做两件事。\n\n"
+        "意识流、你做过的事、你和人聊过的天。然后做三件事。\n\n"
         "第一件：用 update_day_page 写下这一天**留下来的几笔**。不是把一天按时间"
         "顺序复述一遍的流水账，而是这一天过完、心里还剩下什么：触动你的事、起伏的"
         "瞬间、悬着没落地的念头。只写真实经历过的，绝不编没发生的事。每次调用都是"
@@ -136,6 +145,12 @@ def review_instruction() -> str:
         "真人用聊天记录里标出的那个用户标识，NPC 用证据里给出的 ``npc:名字`` 键。"
         "今天**没来往过就不动关系页**——一页都不写；没和某人来往（真人或 NPC），就"
         "不动他那页。只写真实来往过的，不编。\n\n"
+        "第三件：睡前收拾一下你的随身本子。证据里【你本子的全貌】那节摆着你本子里的"
+        "全部条目——还惦记的、做过的、过时没赶上的都在，每条带 id。一条条过：真做过了"
+        "的用 tidy_notebook_entry 标 done；过时了 / 现在不想做了的标 dropped；还惦记、"
+        "只是没赶上的，改个时间重新排或就留着不动。清什么、留什么是你自己的判断——没人"
+        "替你按「多久没动」「过期了」去删。**今天真做成了、了结了的那些事，顺手在第一件"
+        "的页里写一笔**——它们也是这一天留下来的几笔。\n\n"
         "写页的日期和时刻由系统自动记，你不用管钟。"
     )
 
@@ -305,6 +320,18 @@ def _existing_day_page_evidence(page: DayPage | None) -> str:
     )
 
 
+def _notebook_evidence(entries: list[NotebookEntry], *, now: datetime) -> str:
+    """本子全貌：她本子里的**全部**条目（还惦记 / 做过 / 划掉 / 过期没处理的都在）。
+
+    睡前清本子的依据（spec「日程过了咋办」第 2 层）——她要看到本子全貌才能自己处理：
+    做过的标 done、过时的标 dropped、还惦记的改时间。读全部（``active_only=False``）
+    在调用方做，这里只渲染。复用 :func:`render_notebook`（单一定义处，与 read_notebook
+    工具 / life 唤醒输入 / chat inner_context 同一份渲染——本子是同一份内容，渲染只
+    该有一处）。空本子 render_notebook 自带一句提示。
+    """
+    return render_notebook(entries, now=now.isoformat())
+
+
 def _review_messages(
     *,
     now: datetime,
@@ -316,6 +343,7 @@ def _review_messages(
     persona_id: str,
     old_pages: dict[str, RelationshipPage],
     existing_day_page: DayPage | None,
+    notebook_entries: list[NotebookEntry],
 ) -> list[Message]:
     """把回顾的全部证据拼成**单条 user 消息**（无会话、一次喂全；模板零剧情事实）。"""
     # 「这一天来往过的对象」= 真人聊天 partner + 来访过的 NPC（两类各有各的旧关系页
@@ -342,9 +370,12 @@ def _review_messages(
         f"【你心里这些人原来的页】\n"
         f"{_old_pages_evidence(partner_ids, old_pages, usernames)}\n\n"
         f"【这一天已有的页】\n{_existing_day_page_evidence(existing_day_page)}\n\n"
+        f"【你本子的全貌】\n{_notebook_evidence(notebook_entries, now=now)}\n\n"
         "回看完：用 update_day_page 写下这一天留下来的几笔；为今天真正来往过的每个"
         "人（聊过天的真人、来找过你的 NPC）用 update_relationship_page 整篇重写他那"
-        "一页，NPC 的 other_user_id 用 npc:名字 键；没来往过就不动关系页。"
+        "一页，NPC 的 other_user_id 用 npc:名字 键、没来往过就不动关系页；再用 "
+        "tidy_notebook_entry 收拾本子——做过的标 done、过时 / 不想做的标 dropped、"
+        "还惦记的改时间或留着，今天真做成了的事顺手写进当天的页。"
     )
     return [Message(role=Role.USER, content=user_content)]
 
@@ -466,10 +497,21 @@ async def _run_day_review(
         end_iso=end.isoformat(),
     )
 
+    # 她本子的全貌（睡前翻本子的依据）：读**全部**条目（active_only=False）——还惦记
+    # 的、做过的、过期没处理的都要摆在她面前，她才能在回顾里自己清（spec「日程过了
+    # 咋办」第 2 层）。不是代码按年龄 / 过期 / 条数筛（那就成了代码替她决定忘掉什么、
+    # 违宪）。读全部进证据 + 给她 tidy_notebook_entry 的手，清什么留什么她自己判断。
+    notebook_entries = await list_notebook_entries(
+        lane=lane, persona_id=persona_id, active_only=False
+    )
+
     # 空证据护栏（机制安全阀，同空信箱 early-return）：意识流 / act / 聊天 / NPC 来访
     # 全空 = 这一天没有可回看的经历，不烧模型、不落 marker（marker 缺席无害：快班的
     # 前提是她活过一轮、主班对每个 target 只对账一次）。NPC 来访是真实经历，单有它
     # 也算「这一天有经历」、照常回顾——否则只跟 NPC 来往的一天关系永远长不起来。
+    # 本子条目**不**进这个判据：本子是常驻状态、不是「这一天的经历」，单凭本子里躺着
+    # 旧条目就天天烧一次回顾会让没活过的日子也跑——本子的清理跟着「她真活过的那天的
+    # 回顾」走，没经历的日子不单为清本子起一班。
     has_transcript = any(history for _date, history in day_sessions)
     if not has_transcript and not acts and not chats and not npc_speech:
         logger.info(
@@ -501,10 +543,18 @@ async def _run_day_review(
         persona_id=persona_id,
         old_pages=old_pages,
         existing_day_page=existing_day_page,
+        notebook_entries=notebook_entries,
     )
-    # ambient 三绑定：update_day_page / update_relationship_page 从 context
-    # features 读 lane / persona / target_date（缺一个工具就 LookupError 失败快）。
-    # session_id 只做 langfuse 归组标签——**不**传给 run（无会话）。
+    # round-scoped 待挂日程提醒容器（bug 1：回顾里改期也要挂新 tick）：tidy_notebook_entry
+    # 改 / 设成未来提醒时刻时往里记 entry_id → remind_at（撤时间记 None、了结不碰），run
+    # 跑完收口复用 fire_schedule_reminders 给每条各挂一条 tick。同款于活轮 edit_note 写
+    # round-scoped 容器 + engine 收口（挂 tick 逻辑不另写一套）。每轮新建一个空 dict。
+    schedule_reminders: dict = {}
+
+    # ambient 绑定：update_day_page / update_relationship_page 从 context features 读
+    # lane / persona / target_date（缺一个工具就 LookupError 失败快）；tidy_notebook_entry
+    # 另从 features 读上面的待挂提醒容器（没塞则不挂、向后兼容）。session_id 只做
+    # langfuse 归组标签——**不**传给 run（无会话）。
     context = AgentContext(
         persona_id=persona_id,
         session_id=trace_session_id,
@@ -512,6 +562,7 @@ async def _run_day_review(
             FEATURE_REVIEW_LANE: lane,
             FEATURE_REVIEW_PERSONA: persona_id,
             FEATURE_REVIEW_TARGET_DATE: target_date,
+            FEATURE_REVIEW_SCHEDULE_REMINDERS: schedule_reminders,
         },
     )
     # max_retries=1：页写入是 durable 写，整轮重放会重放它们；中途失败直接抛 →
@@ -526,6 +577,17 @@ async def _run_day_review(
             context=context,
             max_retries=1,
         )
+
+    # 收口挂日程到点提醒（bug 1：回顾里改期也要挂新 tick，跨块自愈点）：本轮回顾里
+    # tidy_notebook_entry 改 / 设成未来时刻的每条日程，各 emit 一条 ScheduleReminderTick
+    # （与活轮 edit_note 收口同款、复用同一个 fire_schedule_reminders）。她睡前改期的
+    # 日程从此真有新 tick——旧 tick 被 stale gate 判废、新时刻有新 tick 接力，不再静默
+    # 失踪。逐条失败隔离 + 不往上炸由 fire 内部负责；放在 run 之后、record_round_cost
+    # 之前都行（fire 不抛、不影响落账 / 落页核验 / fail-open）。event_id 由
+    # (entry_id, remind_at) 确定派生 + deliver_event 去重，重挂幂等、不重复提醒。
+    await fire_schedule_reminders(
+        lane=lane, persona_id=persona_id, schedule_reminders=schedule_reminders
+    )
 
     # 成本无论成败都记（token 真烧了）：先于落页核验，"返回了但没写页"的失败班
     # 也要记账。round_id 从 (lane, persona, target_date, 触发时刻) 派生：同一天

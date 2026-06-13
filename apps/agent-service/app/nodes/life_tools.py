@@ -45,6 +45,14 @@ from app.agent.tools._common import tool_error
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
 from app.domain.life_state import save_life_state, set_life_next_wake_at
+from app.domain.notebook import (
+    STATUS_DONE,
+    STATUS_DROPPED,
+    list_notebook_entries,
+    note_entry,
+    render_notebook,
+    update_entry,
+)
 from app.domain.world_events import EVENT_KIND_SPEECH, perform_act
 from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
@@ -77,6 +85,7 @@ def build_life_tools(
     act_id: str,
     observed_at: str,
     self_wake: dict | None = None,
+    schedule_reminders: dict | None = None,
 ) -> list[Tool]:
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
 
@@ -89,6 +98,14 @@ def build_life_tools(
         engine 每轮新建）。给了它工具集就多一件 ``schedule``（自排下次醒），照搬 world
         sleep 的 round-scoped 覆盖：一轮内多次 schedule 覆盖而非追加、收口只 emit 一条。
         不给（旧调用方 / 工具契约测试）就只有 update_life_state + act 两件。
+    ``schedule_reminders`` —— 本轮 round-scoped 的「待挂日程提醒」容器
+        （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note`` / ``edit_note``
+        每带一个 remind_at 就往里记一条 ``entry_id → remind_at``（撤时间记 ``None``）；engine
+        收口 :func:`fire_schedule_reminders` 给每条有 remind_at 的日程**各 emit 一条**
+        ``ScheduleReminderTick``（每条日程各挂各的到点提醒，不动 self-wake 的 next_wake_at
+        语义——日程是在它旁边新加的一路独立唤醒）。同轮多次动同一 entry_id 覆盖而非追加
+        （最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则 note / edit_note
+        照常落库、只是不挂到点提醒（向后兼容）。
     """
 
     # 本轮已**确认成功落库**的 act 件数（round-scoped 序号，随这一轮的闭包活着）。
@@ -117,6 +134,15 @@ def build_life_tools(
     # 分开计数 + 前缀让 chat 的键空间与 act 的键空间天然不相交。命门同 act_seq：只在
     # 落库成功后才推进（失败重试用同一序号 → 同一对键 → 下游 durable 去重只落一条）。
     chat_seq = 0
+
+    # 本轮已**确认成功落库**的 note 件数（round-scoped 序号，对称 act_seq / chat_seq）。
+    # 「记一条」是 durable mutation：per-entry id 从 (base act_id, "note:N" 序号) 派生
+    # —— 整轮重投 / 失败重试用同一序号得同一 entry_id，note_entry 底层 insert_idempotent
+    # 按 (lane, persona, entry_id) 去重只落一条（对称 act 的 per_act_id 幂等）。**带
+    # "note:" 前缀**让它与 act 的 "{act_id}:{N}" / chat 的 "{act_id}:chat:{N}" seed 空间
+    # 天然不相交（三者共用同一 base act_id）。命门同 act_seq / chat_seq：只在落库成功后
+    # 才推进（失败重试用同一序号 → 同一 entry_id → 去重只落一条）。
+    note_seq = 0
 
     @tool_error("更新此刻状态失败")
     async def update_life_state(
@@ -308,6 +334,190 @@ def build_life_tools(
         chat_seq = next_seq
         return "说了"
 
+    @tool_error("记到本子里失败")
+    async def note(
+        content: str,
+        remind_at: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "可选的提醒时刻（ISO8601，按你输入里的「现在几点」算出来）。"
+                    "挂上 = 这条变成到点提醒你的日程；留空 = 只是躺在本子里的备忘。"
+                ),
+            ),
+        ] = None,
+    ) -> str:
+        """往你随身的小本子记一件事（备忘录 / 日程）。
+
+        你自己决定记什么——惦记的事、想做的、突然的念头、要陪谁、几点干嘛。本子是
+        你私人的内心，不给别人看。记什么、记不记，你自己定，没人替你从对话里抠。
+
+        两种条目，差别只在挂没挂提醒时间：
+
+          * 没时间（remind_at 留空）：备忘录，就躺在本子里，平时会进你脑子提醒你
+            还惦记着它。
+          * 有时间（remind_at 填一个时刻）：日程，到点会把你叫醒、把这条递到你面前，
+            你当场自己处理。
+
+        写法就一句大白话——别填什么优先级 / 标签 / 分类，本子里只有你自己写的话。
+
+        Args:
+            content: 这件事，一句大白话（如"想看那部新动画""下午三点陪我妹去琴行"）。
+            remind_at: 可选的提醒时刻（ISO8601）。挂上变日程、留空是备忘。
+
+        Returns:
+            一句确认，**带上这条的 id**（以后你要改它 / 划掉它得指到这个 id）。
+        """
+        nonlocal note_seq
+        # next_seq 模式（命门同 act_seq）：用 note_seq+1 算这件 note 的 entry_id，但
+        # **先不推进 note_seq** —— note_entry 成功落库后才推进。@tool_error 会吞掉
+        # note_entry 抛的错让模型重试；失败（写成功但 ack 丢 / 纯写失败）重试用**同一个**
+        # next_seq → 同一 entry_id → insert_idempotent 按 (lane, persona, entry_id) 去重
+        # 只落一条。
+        next_seq = note_seq + 1
+        # per-entry id：base act_id + "note:N" 序号经 uuid5 派生。带 "note:" 前缀与 act /
+        # chat 的 seed 空间不相交。整轮重投得同一 id（去重）；同轮不同件序号不同 → 各自
+        # 唯一。uuid5 输出只含 hex + "-"，保 UUID 形（不引入怪字符）。
+        entry_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{act_id}:note:{next_seq}"))
+        await note_entry(
+            lane=lane,
+            persona_id=persona_id,
+            entry_id=entry_id,
+            content=content,
+            remind_at=remind_at,
+            noted_at=observed_at,
+        )
+        # 落库确认成功后才推进序号 —— 序号绑定"已确认落库的 note slot"。
+        note_seq = next_seq
+        # 排了日程（带 remind_at）→ 把待挂提醒记进 round-scoped 容器，engine 收口
+        # fire_schedule_reminders 给它挂一条到点提醒（每条日程各挂各的）。纯备忘
+        # （无 remind_at）不挂。容器没给（旧调用方）就跳过。落库成功后才记，与序号
+        # 推进同点：失败重试不会留下指向未落库 entry 的待挂提醒。
+        if schedule_reminders is not None and remind_at:
+            schedule_reminders[entry_id] = remind_at
+        kind = "记到日程，到点会叫你" if remind_at else "记进备忘"
+        return f"好，{kind}（这条的 id 是 {entry_id}）"
+
+    @tool_error("改本子里这条失败")
+    async def edit_note(
+        entry_id: str,
+        content: Annotated[
+            str | None,
+            Field(default=None, description="改成的新内容（不改就留空）"),
+        ] = None,
+        remind_at: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "改提醒时刻（ISO8601）：给没时间的补一个 = 变成日程、改一个时刻 = "
+                    "改期。**想把时间撤了**（日程变回备忘）传一个空字符串 ''。不动时间就"
+                    "留空（不填）。"
+                ),
+            ),
+        ] = None,
+        status: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "改状态：'done' = 做了 / 'dropped' = 不做了划掉。不改状态就留空。"
+                ),
+            ),
+        ] = None,
+    ) -> str:
+        """改 / 划本子里已有的某一条（用它的 id 指到那条）。
+
+        翻本子（read_notebook）能拿到每条的 id。可以改内容、补 / 改 / 撤提醒时间、或
+        把它标成做了 / 划掉。只动你要动的，没传的字段保持原样。
+
+        做了就标 done、不想做了就 dropped——划掉的不会再进你脑子常驻，但翻本子看全部
+        时还在（不是真删，留个痕）。
+
+        Args:
+            entry_id: 要动的那条的 id（翻本子拿到）。
+            content: 改成的新内容（不改留空）。
+            remind_at: 改提醒时刻；空字符串 '' = 撤掉时间（变回备忘）；不填 = 不动。
+            status: 'done' 做了 / 'dropped' 划掉；不填 = 不动状态。
+
+        Returns:
+            一句确认改了什么。
+        """
+        # remind_at 三态翻译（None 无法同时表达「没传」与「撤」）：
+        #   * None（没填）         → 不动时间（clear_remind_at=False、remind_at=None）。
+        #   * "" 空串（撤的信号）  → 撤时间（clear_remind_at=True）。
+        #   * 非空时刻             → 设 / 改时间。
+        # 空串当撤时间信号，是因为模型只能填字符串、None 是「没填」的天然默认；用显式空
+        # 串承载「撤」让底层 update_entry 能区分两者（底层用独立布尔 clear_remind_at）。
+        clear_remind_at = remind_at == ""
+        set_remind_at = remind_at if (remind_at not in (None, "")) else None
+        await update_entry(
+            lane=lane,
+            persona_id=persona_id,
+            entry_id=entry_id,
+            content=content,
+            remind_at=set_remind_at,
+            clear_remind_at=clear_remind_at,
+            status=status,
+        )
+        # 待挂日程提醒（落库成功后才记）：补 / 改时间 → 给这条记一条待挂提醒（变日程 /
+        # 改期）；撤时间 → 记 None（变回备忘、不挂）。只改状态 / 内容、没动时间 → 不碰
+        # 容器（时间没变、原来挂的那条提醒仍由它自己的 tick 负责，gate 据 entry 当前
+        # 状态判废已划掉的）。同轮多次动同一 entry_id 覆盖而非追加（最后一次为准）。
+        if schedule_reminders is not None:
+            if clear_remind_at:
+                schedule_reminders[entry_id] = None
+            elif set_remind_at is not None:
+                schedule_reminders[entry_id] = set_remind_at
+        changed = []
+        if content is not None:
+            changed.append("内容")
+        if clear_remind_at:
+            changed.append("撤掉了提醒时间")
+        elif set_remind_at is not None:
+            changed.append("提醒时间")
+        if status == STATUS_DONE:
+            changed.append("标成做了")
+        elif status == STATUS_DROPPED:
+            changed.append("划掉了")
+        elif status is not None:
+            changed.append("状态")
+        return f"好，改了：{'、'.join(changed) if changed else '（没动什么）'}"
+
+    @tool_error("翻本子失败")
+    async def read_notebook(
+        include_all: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "默认 False 只看还惦记着的（active）；True 看全部（含做过、划掉的，"
+                    "找旧条目 / 睡前清理时用）。"
+                ),
+            ),
+        ] = False,
+    ) -> str:
+        """完整翻一遍你的本子（找一条旧的、睡前清理时用）。
+
+        平时还没了结的条目每轮自动进你脑子、不用主动翻。这个工具是你拿回「看全部」的
+        出口：找一条记过的旧事、睡前回顾时把陈年的 / 做过的 / 不想做的清掉，都靠它把
+        本子翻出来看。
+
+        默认只列还惦记着的（你没标做了 / 没划掉的）；include_all=True 连做过、划掉的
+        一起列。每条带它的 id、内容、提醒时间（有的话）、状态。
+
+        Args:
+            include_all: False 只看还活着的（默认）；True 看全部（含 done / dropped）。
+
+        Returns:
+            本子条目列表的文字呈现（每条带 id / 内容 / 时间 / 状态），空本子给一句提示。
+        """
+        entries = await list_notebook_entries(
+            lane=lane, persona_id=persona_id, active_only=not include_all
+        )
+        return render_notebook(entries, now=observed_at)
+
     @tool_error("安排下次醒来失败")
     async def schedule(
         seconds: Annotated[
@@ -360,8 +570,16 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    # chat（说话）是基础工具、不依赖 self_wake，与 update / act 并列常驻。
-    tools = [update_tool, act_tool_obj, Tool(chat)]
+    # chat（说话）+ 本子三件（note / edit_note / read_notebook）都是基础工具、不依赖
+    # self_wake，与 update / act 并列常驻。
+    tools = [
+        update_tool,
+        act_tool_obj,
+        Tool(chat),
+        Tool(note),
+        Tool(edit_note),
+        Tool(read_notebook),
+    ]
     # self_wake 容器给了才挂 schedule（自排工具）。旧调用方 / 工具契约测试不给，
     # 就没有 schedule（向后兼容）。
     if self_wake is not None:
@@ -436,3 +654,78 @@ async def fire_life_self_wake(
         )
         return False
     return True
+
+
+async def fire_schedule_reminders(
+    *, lane: str, persona_id: str, schedule_reminders: dict
+) -> int:
+    """循环收口后给本轮排 / 改的每条日程**各 emit 一条** ``ScheduleReminderTick``（日程到点提醒）。
+
+    engine 在 agent 循环跑完后调本函数（与 :func:`fire_life_self_wake` 并列、互不干扰：
+    self-wake 是「她自排下一轮节奏」走 next_wake_at 单槽覆盖；日程到点提醒是**每条日程
+    各挂各的**独立一路，绝不挤进 next_wake_at）。``schedule_reminders`` 是本轮 round-scoped
+    待办容器（note / edit_note 写的 ``{entry_id: remind_at | None}``，覆盖而非追加）：
+
+      * 值为 ``remind_at`` 字符串 → emit 一条携带 ``(entry_id, remind_at)`` 的
+        ``ScheduleReminderTick``，``delay_ms = max(0, remind_at - 现实 now)``。到期经
+        in-process 边接回 :func:`app.nodes.life_wake.life_schedule_reminder_node`，那里读
+        这条 entry 的最新一版走到点 gate（仍 active、remind_at 仍 == 携带值才作数 ——
+        改期 / 划掉 / 撤时间后旧 tick 携带值对不上 → 判废）。
+      * 值为 ``None``（撤了时间）→ 不挂提醒（这条日程变回备忘）。
+
+    **过去时刻（spec edge 3）**：``remind_at`` 已早于现实 now → delay 夹到 0、立即 emit
+    （下一轮就提醒，不负、不炸、不漏）。``remind_at`` 脏串解析不出 → 同样夹到 0（不静默
+    把这条日程吞掉），gate 那头读 entry 当前状态对账兜底。
+
+    **逐条失败隔离（对称 fire_life_self_wake 的可观测）**：某条 emit 失败 log warning
+    （带 lane/persona/entry/target）、不往上炸、不拖垮其余条目——本轮的 durable 收口
+    （记本子）已落定，不该被一条可选的到点提醒漏挂把整轮拖成失败重投（重投会重放
+    durable 工具）。完整漏投恢复（watchdog）同 self-wake 是 Non-goal、后置。
+
+    返回成功 emit 的条数。``ScheduleReminderTick`` 在 life_wake engine 里 import，避免
+    tools ↔ engine 循环 import。
+    """
+    if not schedule_reminders:
+        return 0
+
+    from app.nodes.life_wake import ScheduleReminderTick
+
+    now = cst_time.now_cst()
+    emitted = 0
+    for entry_id, remind_at in schedule_reminders.items():
+        if remind_at is None:
+            # 撤了时间（这条变回备忘）→ 不挂提醒。
+            continue
+        target = cst_time.parse(remind_at)
+        if target is None:
+            # 脏 remind_at 解析不出真实时刻：不静默吞这条日程，夹到立即提醒，由 gate
+            # 那头读 entry 当前状态对账兜底（spec edge 3 的脏数据分支）。
+            delay_ms = 0
+        else:
+            # delay = remind_at - 现实 now，过去时刻夹到 0（立即提醒、不负）。
+            delay_ms = max(0, int((target - now).total_seconds() * 1000))
+        try:
+            await emit_delayed(
+                ScheduleReminderTick(
+                    lane=lane,
+                    persona_id=persona_id,
+                    entry_id=entry_id,
+                    remind_at=remind_at,
+                ),
+                delay_ms=delay_ms,
+            )
+            emitted += 1
+        except Exception:
+            # 逐条隔离：这条挂失败不拖垮其余，log warning（不静默吞），不往上炸。
+            logger.warning(
+                "[life_tools] %s/%s schedule reminder emit_delayed failed "
+                "(entry=%s, remind_at=%s, delay_ms=%d): this reminder NOT "
+                "scheduled (others unaffected; no watchdog fallback)",
+                lane,
+                persona_id,
+                entry_id,
+                remind_at,
+                delay_ms,
+                exc_info=True,
+            )
+    return emitted

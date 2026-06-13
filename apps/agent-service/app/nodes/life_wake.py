@@ -58,11 +58,23 @@ from app.agent.sediment import build_life_fold_policy
 from app.agent.session import load_session
 from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
-from app.data.queries.mailbox import list_unread_events, mark_events_read
+from app.data.queries.mailbox import (
+    deliver_event,  # module-level so tests can monkeypatch
+    list_unread_events,
+    mark_events_read,
+)
 from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
+from app.domain.notebook import (
+    ACTIVE_STATUSES,
+    NotebookEntry,
+    find_notebook_entry,  # module-level so tests can monkeypatch
+    list_notebook_entries,
+    render_notebook,
+)
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import (
+    EVENT_KIND_AMBIENT,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -75,7 +87,11 @@ from app.life.living_day import living_day
 from app.life.pages import read_day_page_before  # module-level so tests can monkeypatch
 from app.life.review import run_day_review  # module-level so tests can monkeypatch
 from app.memory._persona import load_persona
-from app.nodes.life_tools import build_life_tools, fire_life_self_wake
+from app.nodes.life_tools import (
+    build_life_tools,
+    fire_life_self_wake,
+    fire_schedule_reminders,
+)
 from app.runtime import node
 from app.runtime.data import Data, Key
 from app.runtime.debounce import DebounceReschedule
@@ -114,6 +130,92 @@ class LifeWakeTick(Data):
 
     class Meta:
         transient = True
+
+
+class ScheduleReminderTick(Data):
+    """日程到点提醒信号（备忘录 & 日程 第三块）—— **每条日程各挂各的**独立一路唤醒。
+
+    她 note / edit_note 排了一条带 ``remind_at`` 的日程，收口
+    :func:`app.nodes.life_tools.fire_schedule_reminders` 给**每条**各 ``emit_delayed`` 一条
+    这个信号（携带 ``entry_id`` + 被排时的 ``remind_at``），到期经 in-process 边接回
+    :func:`life_schedule_reminder_node`。
+
+    **为什么是每条各挂各的、不挤进 self-wake 的 next_wake_at**（调度契约命门）：self-wake
+    （``LifeWakeTick``）是「她自排下一轮节奏」——单槽 next_wake_at、一排就覆盖、只带时间
+    不带「为什么醒」，撑不住「好几条各自独立、能改期能取消、可能同时到点」的真日程。日程
+    到点是在 self-wake **旁边新加的一路**：每条日程独立一条 tick（独立 entry_id + remind_at），
+    互不覆盖、各自能改期 / 取消、同时到点各走各的——**绝不动 self-wake 的 next_wake_at 语义**
+    （她现在靠它醒来过日子）。
+
+    transient —— 只当唤醒信号（日程内容在 durable 的 NotebookEntry 里）。三键
+    ``(lane, persona_id, entry_id)``：泳道隔离 + 每人 + 每条日程一路。``remind_at`` 是被排时
+    的目标时刻：到期时与 entry 最新一版的 remind_at 比对判 stale（改期 / 撤时间后旧 tick
+    携带值对不上即作废，照 self-wake 的 stale gate 先例）。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+    entry_id: Annotated[str, Key]
+    # 这条提醒被排时携带的目标提醒时刻（现实 CST aware ISO）。到期时与 entry 最新一版的
+    # remind_at 比对判 stale —— 不一致（改期 / 撤时间）说明这条提醒已过期、判废。
+    remind_at: str = ""
+
+    class Meta:
+        transient = True
+
+
+# 日程到点提醒投信箱的 event_id 派生命名空间：固定 UUID，让同一条 reminder
+# （lane, persona, entry_id, remind_at）重投派生同一 event_id，deliver_event 按
+# (lane, persona, event_id) 幂等去重不重复叫醒（edge 5 不破幂等）。与别处的 event
+# 派生空间分开，免得同文字撞 id。
+_SCHEDULE_REMINDER_EVENT_NS = uuid.UUID("b7e2c4a1-9d3f-4e8b-a6c5-0f1e2d3c4b5a")
+# 投进她信箱的日程到点提醒 event 的 source 标识（机读用，区别于 world / 姐妹 /
+# 真人 / NPC 的 source 命名空间）：这是她**自己本子**到点的内部提醒，不是别人来的话。
+SCHEDULE_REMINDER_SOURCE = "notebook"
+
+
+def derive_schedule_reminder_event_id(
+    *, lane: str, persona_id: str, entry_id: str, remind_at: str
+) -> str:
+    """确定性派生一条日程到点提醒投信箱的 event_id（重投幂等命门，edge 5）。
+
+    durable delayed trigger 重投 / 整轮重试会重放同一条 ``ScheduleReminderTick``；投信箱
+    的 event_id 从 ``(lane, persona, entry_id, remind_at)`` 确定派生，重投得同一 id、
+    ``deliver_event`` 按 (lane, persona, event_id) 幂等去重，不重复叫醒。``remind_at`` 纳入
+    派生源让「同一条日程改期后再到点」派生不同 id（不被旧那次去重吞掉）。
+    """
+    return uuid.uuid5(
+        _SCHEDULE_REMINDER_EVENT_NS,
+        f"{lane}\x1f{persona_id}\x1f{entry_id}\x1f{remind_at}",
+    ).hex
+
+
+def _schedule_reminder_gate_passes(
+    tick: ScheduleReminderTick, entry: NotebookEntry | None
+) -> bool:
+    """日程到点提醒的到点 gate（照 self-wake 的 stale gate 先例，判这条提醒此刻作不作数）。
+
+    读这条 entry 的最新一版（``find_notebook_entry``），判三件事——任一不满足即判废：
+
+      1. **entry 还在**：``entry is None``（理论上不该发生：日程不物理删、只 append
+         done/dropped）→ 判废。
+      2. **仍是日程、未划掉 / 未做掉**：``status`` 仍在 :data:`ACTIVE_STATUSES`（她没标
+         done / dropped）→ 划掉 / 做掉的日程到点不该再提醒（spec edge 2）。
+      3. **remind_at 没被改期 / 撤掉**：entry 当前 ``remind_at`` 仍 == tick 携带的
+         ``remind_at`` —— 改期（值变了）/ 撤时间（变 None）后旧 tick 携带值对不上 → 判废，
+         新时刻由 edit 时新挂的那条 tick 负责（spec edge 2，stale gate 命门）。
+
+    这是「让她的改期 / 取消真生效、旧提醒不误触发」的机制护栏，不替她决定要不要做这件事
+    （到点只把这条推到她面前、她自己处理——赤尾宪法）。
+    """
+    if entry is None:
+        return False
+    if entry.status not in ACTIVE_STATUSES:
+        return False
+    # entry 当前 remind_at 必须 == tick 携带的（改期 / 撤时间后对不上 → stale）。比的是
+    # 字符串原值（写时是同一份 ISO，相等即未改期；撤时间后 entry.remind_at 为 None、
+    # 与非空携带值天然不等）。
+    return entry.remind_at == tick.remind_at
 
 
 # 走到点 gate 的唤醒缘由：self（life 自排）。外部刺激（EventArrived 信箱敲门 / 补敲，
@@ -468,6 +570,79 @@ async def life_self_wake_node(tick: LifeWakeTick) -> None:
         return
 
 
+@node
+async def life_schedule_reminder_node(tick: ScheduleReminderTick) -> None:
+    """她某条日程**到点了**：走到点 gate，放行就把这条递到她面前、复用敲门把她叫醒。
+
+    这是日程到点提醒的独立一路（spec 第三块），与 self-wake / event 唤醒并列、互不干扰：
+    它**不动** self-wake 的 next_wake_at、不跑 life 工具循环、不直接改 LifeState ——
+    只做「到点把这条日程推到她面前」这一件事，她随后在常规唤醒里看到它、自己处理
+    （去做 / 改期 / 划掉），系统不替她判完成、不强制执行（赤尾宪法）。
+
+    流程：
+      1. **到点 gate**（:func:`_schedule_reminder_gate_passes`）：读这条 entry 最新一版，
+         判仍 active、remind_at 仍 == tick 携带值（未改期 / 未撤）。判废就早返不投——
+         覆盖 spec edge 2（改期 / 划掉后旧提醒不误触发）、entry 不存在（不该发生）兜底。
+      2. **复用「到点把她叫醒」的地基**：放行后 ``deliver_event`` 把这条日程投进**她自己**
+         的信箱（kind=ambient、source=notebook），event_id 从
+         :func:`derive_schedule_reminder_event_id` 确定派生（重投幂等、edge 5）。
+         ``deliver_event`` 投成功后会 emit ``EventArrived`` 敲门——她经常规 life_wake 路径
+         被唤醒（到点遇 sleep 时，外部刺激敲门能立刻打断长睡，照现有 self-wake 语义：
+         EventArrived 永远放行不走 gate）。这条日程也已在她每轮唤醒输入的本子段里
+         （第二块）以「到点了」呈现，她当场看得到是哪条。
+
+    **edge 1（多条几乎同时到点）**：每条日程各一条 tick、各派生不同 event_id，各走一遍
+    本节点、各投一条进信箱——她下一轮一次看到全部到点的，互不覆盖、不漏。
+    **edge 5（单飞 / 整轮重试不破幂等）**：本节点不抢 life 单飞锁、不跑工具循环（无
+    durable mutation），唯一的副作用 ``deliver_event`` 靠确定性 event_id 幂等去重；被它
+    敲醒的常规 life 轮自带单飞锁 + round marker，幂等不受影响。
+    """
+    entry = await find_notebook_entry(
+        lane=tick.lane, persona_id=tick.persona_id, entry_id=tick.entry_id
+    )
+    if not _schedule_reminder_gate_passes(tick, entry):
+        logger.info(
+            "[schedule_reminder] %s/%s entry=%s gated out "
+            "(remind_at=%s, entry_status=%s, entry_remind_at=%s): "
+            "rescheduled / dropped / cleared / missing, skip",
+            tick.lane,
+            tick.persona_id,
+            tick.entry_id,
+            tick.remind_at,
+            entry.status if entry is not None else "-",
+            entry.remind_at if entry is not None else "-",
+        )
+        return
+
+    assert entry is not None  # gate passed → entry 非空
+    event_id = derive_schedule_reminder_event_id(
+        lane=tick.lane,
+        persona_id=tick.persona_id,
+        entry_id=tick.entry_id,
+        remind_at=tick.remind_at,
+    )
+    # occurred_at 跟现实走（客观提醒时刻）。投进她自己信箱：deliver_event 投成功会
+    # emit EventArrived 敲门把她叫醒（复用到点叫醒地基）。summary 点出是哪条日程，
+    # 让她当场知道（本子段也以「到点了」呈现这条，两处对得上）。
+    await deliver_event(
+        lane=tick.lane,
+        persona_id=tick.persona_id,
+        event_id=event_id,
+        summary=f"（提醒）你之前记的日程到点了：{entry.content}",
+        occurred_at=cst_time.now_cst_iso(),
+        kind=EVENT_KIND_AMBIENT,
+        source=SCHEDULE_REMINDER_SOURCE,
+    )
+    logger.info(
+        "[schedule_reminder] %s/%s entry=%s due, delivered to her inbox "
+        "(remind_at=%s)",
+        tick.lane,
+        tick.persona_id,
+        tick.entry_id,
+        tick.remind_at,
+    )
+
+
 async def _run_life_round(
     wake: EventArrived | LifeWakeTick,
     *,
@@ -629,12 +804,19 @@ async def _run_life_round(
     # 一轮内最后一次为准），engine 收口后读它 emit 至多一条 self LifeWakeTick。
     self_wake: dict = {}
 
+    # round-scoped 待挂日程提醒容器（备忘录 & 日程 第三块）：note / edit_note 每带一个
+    # remind_at 就往里记 entry_id → remind_at（撤时间记 None，覆盖而非追加 → 同 entry
+    # 一轮内最后一次为准），engine 收口 fire_schedule_reminders 给每条有 remind_at 的
+    # 日程各 emit 一条 ScheduleReminderTick（每条日程各挂各的，不动 self-wake 语义）。
+    schedule_reminders: dict = {}
+
     tools = build_life_tools(
         lane=lane,
         persona_id=persona_id,
         act_id=act_id,
         observed_at=observed_at,
         self_wake=self_wake,
+        schedule_reminders=schedule_reminders,
     )
 
     # session 按 (lane, persona, 今天) 派生：她当天所有唤醒的 LLM 调用归进同一条
@@ -733,6 +915,33 @@ async def _run_life_round(
             f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
             f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
             f"{day_page.narrative}"
+        )
+
+    # 她本子里还没了结的事（备忘录 & 日程 第二块）：每轮唤醒读她**还活着**的条目
+    # （active_only=True：她自己没标 done / dropped 的），渲成一段塞进她的输入，让她
+    # 带着自己记下惦记的事过日子。**只读、绝不改状态、不删任何东西**（spec 必改点）；
+    # **绝不**按年龄 / 条数 / 过期去筛——那是代码替她决定忘掉什么、违宪，进输入的就是
+    # 她自己没了结的全部。渲染复用 render_notebook（单一定义处，与 read_notebook 工具
+    # / chat inner_context 同一份）。位置在稳定前缀区（时刻行之前：本子按她记 / 改的
+    # 频率才变，不打散前缀缓存）。读失败 / 空本子绝不杀整个 life 轮（照 day_page 的
+    # 姿势 fail-soft）：空本子 / 读失败 → 整段缺席不补占位，本轮照常往下跑。
+    try:
+        notebook_entries = await list_notebook_entries(
+            lane=lane, persona_id=persona_id, active_only=True
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to read notebook, section absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        notebook_entries = []
+    if notebook_entries:
+        parts.append(
+            "【你本子里还没了结的事】（你自己记下、还没标做了 / 划掉的，"
+            "带着它们过你这一刻）：\n"
+            f"{render_notebook(notebook_entries, now=observed_at)}"
         )
 
     parts.append(f"现在是 {cst_time.to_cst_hm(observed_at)}。")
@@ -849,6 +1058,15 @@ async def _run_life_round(
     # 接力时不会自己醒，靠 world 下一次 notify 起头。event / self 两条路都走这收口，
     # 所以被 world 起头唤醒一次后，她就能用 schedule 自排接力往下过日子（spec 目标）。
     await fire_life_self_wake(lane=lane, persona_id=persona_id, self_wake=self_wake)
+
+    # 收口挂日程到点提醒（备忘录 & 日程 第三块）：本轮 note / edit_note 排 / 改的每条带
+    # remind_at 的日程，各 emit 一条 ScheduleReminderTick（每条各挂各的、不动上面
+    # self-wake 的 next_wake_at）。空容器（本轮没排 / 改日程）不 emit。与 self-wake 收口
+    # 并列、互不干扰：一个管「她下一轮节奏」、一个管「这些日程到点叫她」。逐条失败隔离 +
+    # 不往上炸（已 durable 落库的本子不被一条漏挂的提醒拖成失败重投）由 fire 内部负责。
+    await fire_schedule_reminders(
+        lane=lane, persona_id=persona_id, schedule_reminders=schedule_reminders
+    )
 
     # cd 降频（spec 决策 5 第三层）：成功收口后开启一段冷却。落一个带 TTL 的 cd key，
     # cd 内再被唤醒就 reschedule 攒着（见本函数开头）。只在成功跑完才落——撞锁 /

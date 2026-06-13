@@ -26,7 +26,14 @@ from app.agent.tooling import Tool
 @pytest.fixture
 def stub_handlers(monkeypatch):
     """把工具底下的 durable handler 换成可观测 fake。"""
-    state: dict = {"saved": [], "acts": [], "delivered": []}
+    state: dict = {
+        "saved": [],
+        "acts": [],
+        "delivered": [],
+        "noted": [],
+        "edited": [],
+        "listed": [],
+    }
 
     async def fake_save_life_state(**kwargs):
         state["saved"].append(kwargs)
@@ -38,9 +45,23 @@ def stub_handlers(monkeypatch):
         state["delivered"].append(kwargs)
         return 1
 
+    async def fake_note_entry(**kwargs):
+        state["noted"].append(kwargs)
+
+    async def fake_update_entry(**kwargs):
+        state["edited"].append(kwargs)
+
+    async def fake_list_notebook_entries(**kwargs):
+        state["listed"].append(kwargs)
+        # 返回测试预置的本子条目（默认空本子）。
+        return state.get("notebook_rows", [])
+
     monkeypatch.setattr(lt, "save_life_state", fake_save_life_state)
     monkeypatch.setattr(lt, "perform_act", fake_perform_act)
     monkeypatch.setattr(lt, "deliver_event", fake_deliver_event)
+    monkeypatch.setattr(lt, "note_entry", fake_note_entry)
+    monkeypatch.setattr(lt, "update_entry", fake_update_entry)
+    monkeypatch.setattr(lt, "list_notebook_entries", fake_list_notebook_entries)
     return state
 
 
@@ -49,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat（chat 是 1C 常驻基础工具）。"""
+    """不给 self_wake 时工具集是 update_life_state + act + chat + 本子三件（都是常驻基础工具）。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -57,7 +78,14 @@ def test_build_life_tools_returns_base_tools():
         observed_at="2026-06-03T12:30:00+00:00",
     )
     by_name = _tools_by_name(tools)
-    assert set(by_name) == {"update_life_state", "act", "chat"}
+    assert set(by_name) == {
+        "update_life_state",
+        "act",
+        "chat",
+        "note",
+        "edit_note",
+        "read_notebook",
+    }
     for t in tools:
         assert isinstance(t, Tool)
 
@@ -399,7 +427,7 @@ def test_act_description_guides_toward_low_action():
 
 
 def test_build_life_tools_includes_schedule_when_slot_given():
-    """传 self_wake 容器时多一件 schedule（共 update_life_state + act + chat + schedule）。"""
+    """传 self_wake 容器时多一件 schedule（base 工具 + 本子三件 + schedule）。"""
     slot: dict = {}
     tools = lt.build_life_tools(
         lane="coe-t3",
@@ -409,7 +437,15 @@ def test_build_life_tools_includes_schedule_when_slot_given():
         self_wake=slot,
     )
     by_name = _tools_by_name(tools)
-    assert set(by_name) == {"update_life_state", "act", "chat", "schedule"}
+    assert set(by_name) == {
+        "update_life_state",
+        "act",
+        "chat",
+        "note",
+        "edit_note",
+        "read_notebook",
+        "schedule",
+    }
 
 
 def test_schedule_tool_hides_mechanism_only_seconds_exposed():
@@ -531,6 +567,70 @@ def test_schedule_ceiling_allows_full_night_sleep():
     assert lt.LIFE_SCHEDULE_MIN_SECONDS >= 60
 
 
+# ---------------------------------------------------------------------------
+# bug 2 / 3：领域层校验经活轮工具喂回模型（不用 stub_handlers，走真 update_entry /
+# note_entry 的 fail-fast 校验——脏 status / 脏 remind_at 在 DB 之前就抛 ValueError，
+# @tool_error 把它兜成结构化 outcome 喂回模型重填，绝不静默写脏 / 不挂提醒）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_note_invalid_status_returns_tool_error_no_pending():
+    """bug 2：edit_note 传拼错的 status（complete）→ @tool_error 兜成 outcome 喂回模型，
+    不静默写脏、不挂提醒（校验在 DB 之前 fail-fast，所以无需真 PG）。"""
+    reminders: dict = {}
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-13T12:30:00+08:00",
+            schedule_reminders=reminders,
+        )
+    )
+    out = await tools["edit_note"].invoke(
+        {"entry_id": "n1", "status": "complete"}  # 拼错：合法是 done
+    )
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert reminders == {}, "校验失败不该留待挂提醒"
+
+
+@pytest.mark.asyncio
+async def test_edit_note_invalid_remind_at_returns_tool_error_no_pending():
+    """bug 3：edit_note 传脏 remind_at（解析不出 ISO）→ @tool_error 兜成 outcome 喂回
+    模型，不静默写脏、不挂提醒（脏串挂上会被夹成立即错误提醒）。"""
+    reminders: dict = {}
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-13T12:30:00+08:00",
+            schedule_reminders=reminders,
+        )
+    )
+    out = await tools["edit_note"].invoke(
+        {"entry_id": "n1", "remind_at": "下午三点"}  # 脏串
+    )
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert reminders == {}, "脏 remind_at 校验失败不该留待挂提醒"
+
+
+@pytest.mark.asyncio
+async def test_note_invalid_remind_at_returns_tool_error_no_pending():
+    """bug 3（首写）：note 带脏 remind_at → @tool_error 兜成 outcome 喂回模型，不静默
+    落库、不挂提醒。"""
+    reminders: dict = {}
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-13T12:30:00+08:00",
+            schedule_reminders=reminders,
+        )
+    )
+    out = await tools["note"].invoke(
+        {"content": "排个日程", "remind_at": "明天早上"}  # 脏串
+    )
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert reminders == {}, "脏 remind_at 校验失败不该留待挂提醒"
+
+
 def test_schedule_description_mentions_self_wake():
     """schedule docstring 说清"排过多久再醒来继续过日子"（给模型的语义）。"""
     slot: dict = {}
@@ -648,6 +748,268 @@ async def test_fire_life_self_wake_no_pending_does_not_write_or_emit(monkeypatch
     assert fired is False
     assert delayed == []
     assert set_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 日程到点提醒（备忘录 & 日程 第三块）—— note / edit_note 带 remind_at 时把「待挂的
+# 日程提醒」记进 round-scoped 容器，engine 收口 fire_schedule_reminders 每条各 emit
+# 一条 ScheduleReminderTick（每条日程各挂各的、不动 self-wake 的 next_wake_at 语义）。
+# ---------------------------------------------------------------------------
+
+
+def _tools_with_reminders(reminders, stub_handlers):
+    """造带 schedule_reminders 容器的工具集（同时给 self_wake 让 schedule 也在）。"""
+    return _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="base-act-id",
+            observed_at="2026-06-13T12:30:00+08:00",
+            self_wake={},
+            schedule_reminders=reminders,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_note_with_remind_at_records_pending_reminder(stub_handlers):
+    """note 带 remind_at（排了日程）→ 把待挂提醒记进 round-scoped 容器（按 entry_id）。"""
+    import uuid
+
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["note"].invoke(
+        {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
+    )
+
+    # 第一件 note 的 entry_id（next_seq=1，note: 前缀派生）
+    entry_id = str(uuid.uuid5(uuid.NAMESPACE_OID, "base-act-id:note:1"))
+    assert reminders == {entry_id: "2026-06-13T15:00:00+08:00"}, (
+        "排了日程要记一条待挂提醒（entry_id → remind_at）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_note_without_remind_at_records_no_reminder(stub_handlers):
+    """note 不带时间（纯备忘）→ 不记任何待挂提醒（备忘不到点提醒）。"""
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["note"].invoke({"content": "想看那部动画"})
+
+    assert reminders == {}, "纯备忘不挂日程提醒"
+
+
+@pytest.mark.asyncio
+async def test_edit_set_remind_at_records_pending_reminder(stub_handlers):
+    """edit_note 给条目补 / 改时间 → 记一条该 entry 的待挂提醒（备忘补成日程 / 改期）。"""
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["edit_note"].invoke(
+        {"entry_id": "n-existing", "remind_at": "2026-06-13T16:00:00+08:00"}
+    )
+
+    assert reminders == {"n-existing": "2026-06-13T16:00:00+08:00"}, (
+        "补 / 改时间要给这条记一条待挂提醒"
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_clear_remind_at_records_no_pending(stub_handlers):
+    """edit_note 撤掉时间（日程变回备忘）→ 记成「这条不挂提醒」（None），不留旧提醒。"""
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["edit_note"].invoke({"entry_id": "n-existing", "remind_at": ""})
+
+    # 容器里这条记成 None（覆盖同轮可能先 set 过的），fire 时不为它挂提醒。
+    assert reminders.get("n-existing") is None, "撤时间后这条不该挂新提醒"
+
+
+@pytest.mark.asyncio
+async def test_edit_set_then_clear_same_entry_in_round_last_wins(stub_handlers):
+    """同轮先补时间再撤掉同一条 → 容器最后一次为准（None），不挂提醒（覆盖而非追加）。"""
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["edit_note"].invoke(
+        {"entry_id": "n1", "remind_at": "2026-06-13T15:00:00+08:00"}
+    )
+    await tools["edit_note"].invoke({"entry_id": "n1", "remind_at": ""})
+
+    assert reminders.get("n1") is None, "同轮先 set 再 clear，最后一次为准（不挂）"
+
+
+@pytest.mark.asyncio
+async def test_edit_status_only_does_not_touch_reminders(stub_handlers):
+    """edit_note 只改状态（划掉 / 标做了）不动时间 → 不记待挂提醒（时间没变）。"""
+    reminders: dict = {}
+    tools = _tools_with_reminders(reminders, stub_handlers)
+
+    await tools["edit_note"].invoke({"entry_id": "n1", "status": "dropped"})
+
+    assert reminders == {}, "只改状态、没动时间，不该新挂提醒"
+
+
+def test_build_life_tools_without_reminders_slot_unchanged(stub_handlers):
+    """不给 schedule_reminders 容器（旧调用方 / 契约测试）→ 工具集与行为向后兼容。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-13T12:30:00+08:00",
+        )
+    )
+    assert "note" in tools and "edit_note" in tools, "本子工具常驻、不依赖 reminders 容器"
+
+
+# --- fire_schedule_reminders —— 收口每条各 emit 一条 ScheduleReminderTick ---
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_emits_one_tick_per_entry(monkeypatch):
+    """收口：容器里每条有 remind_at 的日程各 emit 一条携带 (entry_id, remind_at) 的 tick。"""
+    from app.infra import cst_time
+    from app.nodes.life_wake import ScheduleReminderTick
+
+    emitted: list[dict] = []
+
+    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
+        emitted.append({"data": data, "delay_ms": delay_ms})
+
+    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+
+    future_a = (cst_time.now_cst() + __import__("datetime").timedelta(minutes=30)).isoformat()
+    future_b = (cst_time.now_cst() + __import__("datetime").timedelta(hours=2)).isoformat()
+
+    await lt.fire_schedule_reminders(
+        lane="coe-t3",
+        persona_id="akao",
+        schedule_reminders={"n1": future_a, "n2": future_b},
+    )
+
+    assert len(emitted) == 2, "两条日程各 emit 一条 tick（每条各挂各的）"
+    by_entry = {e["data"].entry_id: e for e in emitted}
+    assert set(by_entry) == {"n1", "n2"}
+    for entry_id, want in (("n1", future_a), ("n2", future_b)):
+        tick = by_entry[entry_id]["data"]
+        assert isinstance(tick, ScheduleReminderTick)
+        assert tick.lane == "coe-t3"
+        assert tick.persona_id == "akao"
+        assert tick.remind_at == want, "tick 携带这条日程的 remind_at（gate 据它判 stale）"
+        # delay_ms ≈ (remind_at - now)；future_a 约 30min、future_b 约 2h
+        assert by_entry[entry_id]["delay_ms"] > 0
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_skips_cleared_entries(monkeypatch):
+    """容器里值为 None 的条目（撤了时间）不 emit tick（不挂提醒）。"""
+    emitted: list = []
+
+    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
+        emitted.append(data)
+
+    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+
+    future = (
+        __import__("app.infra.cst_time", fromlist=["now_cst"]).now_cst()
+        + __import__("datetime").timedelta(minutes=30)
+    ).isoformat()
+    await lt.fire_schedule_reminders(
+        lane="coe-t3", persona_id="akao",
+        schedule_reminders={"n1": future, "n2": None},
+    )
+
+    entry_ids = {d.entry_id for d in emitted}
+    assert entry_ids == {"n1"}, "撤了时间（None）的条目不挂提醒"
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_past_time_fires_promptly(monkeypatch):
+    """edge 3（排了已过去的时刻）：delay 夹到 0（立即），下一轮就提醒——不炸、不漏。"""
+    from app.infra import cst_time
+
+    emitted: list[dict] = []
+
+    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
+        emitted.append({"data": data, "delay_ms": delay_ms})
+
+    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+
+    past = (cst_time.now_cst() - __import__("datetime").timedelta(hours=1)).isoformat()
+    await lt.fire_schedule_reminders(
+        lane="coe-t3", persona_id="akao", schedule_reminders={"n1": past}
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0]["delay_ms"] == 0, "已过去的时刻 → delay 夹到 0、立即提醒（不负、不炸）"
+    assert emitted[0]["data"].remind_at == past, "携带原 remind_at（gate 仍据它对账）"
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_unparseable_remind_at_fires_promptly(monkeypatch):
+    """remind_at 脏串解析不出 → 不炸，夹到立即提醒（不静默吞这条日程）。"""
+    emitted: list[dict] = []
+
+    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
+        emitted.append({"data": data, "delay_ms": delay_ms})
+
+    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+
+    await lt.fire_schedule_reminders(
+        lane="coe-t3", persona_id="akao", schedule_reminders={"n1": "不是时间的脏串"}
+    )
+
+    assert len(emitted) == 1, "脏 remind_at 不该把这条日程静默吞掉"
+    assert emitted[0]["delay_ms"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_empty_no_emit(monkeypatch):
+    """空容器（这一轮没排 / 改任何日程）→ 不 emit 任何 tick。"""
+    emitted: list = []
+
+    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
+        emitted.append(data)
+
+    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+
+    await lt.fire_schedule_reminders(
+        lane="coe-t3", persona_id="akao", schedule_reminders={}
+    )
+    assert emitted == []
+
+
+@pytest.mark.asyncio
+async def test_fire_schedule_reminders_emit_failure_does_not_raise(monkeypatch, caplog):
+    """某条 emit 失败 → log warning、不往上炸、不拖垮其余条目（本轮 durable 收口已落定）。"""
+    import logging
+
+    emitted: list = []
+
+    async def flaky_emit(data, *, delay_ms, durability="durable"):
+        if data.entry_id == "n1":
+            raise RuntimeError("broker down")
+        emitted.append(data.entry_id)
+
+    monkeypatch.setattr(lt, "emit_delayed", flaky_emit)
+
+    future = (
+        __import__("app.infra.cst_time", fromlist=["now_cst"]).now_cst()
+        + __import__("datetime").timedelta(minutes=30)
+    ).isoformat()
+
+    with caplog.at_level(logging.WARNING):
+        # 不该往上炸
+        await lt.fire_schedule_reminders(
+            lane="coe-t3", persona_id="akao",
+            schedule_reminders={"n1": future, "n2": future},
+        )
+
+    assert "n2" in emitted, "一条挂失败不该拖垮其余条目"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "挂失败必须 log warning（不静默吞）"
 
 
 @pytest.mark.asyncio
@@ -1086,3 +1448,312 @@ def test_act_description_no_longer_carries_speech():
 def lt_speech_kind() -> str:
     """speech event 的 kind 常量（让测试与实现共用同一来源，不硬编码字面量）。"""
     return lt.EVENT_KIND_SPEECH
+
+
+# ---------------------------------------------------------------------------
+# 本子工具 —— 备忘录 & 日程 app 第一块（她对本子能用的 note / edit_note /
+# read_notebook 三件）。常驻基础工具，与 update / act / chat 并列（不依赖 self_wake）。
+# ---------------------------------------------------------------------------
+
+from app.domain.notebook import (  # noqa: E402
+    STATUS_DONE,
+    STATUS_DROPPED,
+    NotebookEntry,
+)
+
+
+def test_build_life_tools_includes_notebook_tools():
+    """工具集常驻三件本子工具：note / edit_note / read_notebook。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert {"note", "edit_note", "read_notebook"} <= set(tools)
+
+
+def test_notebook_tools_hide_mechanism_bindings():
+    """本子工具只对模型暴露业务参数，不暴露 lane / persona_id / entry_id 派生口径。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    note_props = set(tools["note"].definition.parameters["properties"])
+    assert note_props == {"content", "remind_at"}
+
+    edit_props = set(tools["edit_note"].definition.parameters["properties"])
+    assert edit_props == {"entry_id", "content", "remind_at", "status"}
+
+    read_props = set(tools["read_notebook"].definition.parameters["properties"])
+    assert read_props == {"include_all"}
+
+
+@pytest.mark.asyncio
+async def test_note_memo_records_handler_call(stub_handlers):
+    """记一条没时间的 → note_entry 收到本轮绑定 + content，remind_at 为 None。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["note"].invoke({"content": "想看那部动画"})
+    assert isinstance(out, str) and out
+    assert len(stub_handlers["noted"]) == 1
+    call = stub_handlers["noted"][0]
+    assert call["lane"] == "coe-t3"
+    assert call["persona_id"] == "akao"
+    assert call["content"] == "想看那部动画"
+    assert call["remind_at"] is None
+    assert call["noted_at"] == "2026-06-03T12:30:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_note_schedule_carries_remind_at(stub_handlers):
+    """排一条带时间的 → remind_at 透传给 note_entry（备忘 vs 日程只差这个）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["note"].invoke(
+        {"content": "三点陪我妹", "remind_at": "2026-06-03T15:00:00+00:00"}
+    )
+    call = stub_handlers["noted"][0]
+    assert call["remind_at"] == "2026-06-03T15:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_note_returns_entry_id(stub_handlers):
+    """记一条的出参带这条的 id（以后改 / 划得指到它）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["note"].invoke({"content": "买猫粮"})
+    entry_id = stub_handlers["noted"][0]["entry_id"]
+    # id 必须出现在返回给模型的确认里（spec：出参 = id + 一句确认）
+    assert entry_id in out
+
+
+@pytest.mark.asyncio
+async def test_note_entry_id_derived_from_base_id(stub_handlers):
+    """entry_id 从 base act_id 派生（本轮第 N 件），不让模型生成 —— 同 act 幂等口径。"""
+    import uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["note"].invoke({"content": "第一件"})
+    await tools["note"].invoke({"content": "第二件"})
+    ids = [c["entry_id"] for c in stub_handlers["noted"]]
+    # 各自唯一（不同序号）
+    assert ids[0] != ids[1]
+    # 派生口径钉死：uuid5(NAMESPACE_OID, "round-base:note:N")
+    assert ids[0] == str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:note:1"))
+    assert ids[1] == str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:note:2"))
+
+
+@pytest.mark.asyncio
+async def test_note_entry_id_is_uuid_shaped(stub_handlers):
+    """派生 entry_id 为合法 UUID 形（与 act id 同口径，不引入怪字符）。"""
+    import uuid as _uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["note"].invoke({"content": "x"})
+    eid = stub_handlers["noted"][0]["entry_id"]
+    assert str(_uuid.UUID(eid)) == eid
+
+
+@pytest.mark.asyncio
+async def test_note_id_stable_under_round_replay(stub_handlers):
+    """整轮重投同一 base id → 同序号 note 得同一 entry_id（durable 去重靠它只落一条）。"""
+    tools_a = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_a["note"].invoke({"content": "第一件"})
+    await tools_a["note"].invoke({"content": "第二件"})
+    first_ids = [c["entry_id"] for c in stub_handlers["noted"]]
+
+    stub_handlers["noted"].clear()
+
+    tools_b = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_b["note"].invoke({"content": "第一件"})
+    await tools_b["note"].invoke({"content": "第二件"})
+    replay_ids = [c["entry_id"] for c in stub_handlers["noted"]]
+
+    assert replay_ids == first_ids
+
+
+@pytest.mark.asyncio
+async def test_note_seq_advances_only_after_success(monkeypatch):
+    """note 序号只在 note_entry 成功后才推进 —— 失败重试用同一 entry_id（对称 act_seq P6）。
+
+    note_entry 写库成功但返回链路抛错（ack 丢）时，@tool_error 吞错让模型重试；序号
+    若在成功前 +1，重试会用新序号派生新 id → 同一件记两条。修法：成功后才推进。
+    """
+    seen: list[str] = []
+    calls = {"n": 0}
+
+    async def flaky_note(**kwargs):
+        seen.append(kwargs["entry_id"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("ack lost after commit")
+
+    monkeypatch.setattr(lt, "note_entry", flaky_note)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out1 = await tools["note"].invoke({"content": "买猫粮"})
+    assert isinstance(out1, dict) and out1["kind"] == "tool_error"
+    out2 = await tools["note"].invoke({"content": "买猫粮"})
+    assert isinstance(out2, str)
+
+    assert len(seen) == 2
+    assert seen[0] == seen[1], f"失败重试必须用同一 entry_id，实得 {seen}"
+
+
+@pytest.mark.asyncio
+async def test_edit_note_passes_through_fields(stub_handlers):
+    """改 / 划一条 → entry_id + 改的字段透传给 update_entry。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["edit_note"].invoke(
+        {"entry_id": "e-1", "content": "改后的内容", "status": STATUS_DONE}
+    )
+    assert isinstance(out, str) and out
+    assert len(stub_handlers["edited"]) == 1
+    call = stub_handlers["edited"][0]
+    assert call["lane"] == "coe-t3"
+    assert call["persona_id"] == "akao"
+    assert call["entry_id"] == "e-1"
+    assert call["content"] == "改后的内容"
+    assert call["status"] == STATUS_DONE
+
+
+@pytest.mark.asyncio
+async def test_edit_note_clear_remind_at_signaled_explicitly(stub_handlers):
+    """撤时间：模型给 remind_at 空串 → update_entry 收到 clear_remind_at=True。
+
+    remind_at=None 在工具入参里是「没传、别动」；模型要表达「把时间撤了」用显式空串，
+    工具翻成 clear_remind_at=True 透给底层（None 无法区分「没传」与「撤」）。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["edit_note"].invoke({"entry_id": "e-1", "remind_at": ""})
+    call = stub_handlers["edited"][0]
+    assert call.get("clear_remind_at") is True
+
+
+@pytest.mark.asyncio
+async def test_edit_note_set_remind_at(stub_handlers):
+    """改期 / 补时间：给 remind_at 时刻 → 透传，且不当成撤时间。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["edit_note"].invoke(
+        {"entry_id": "e-1", "remind_at": "2026-06-03T18:00:00+00:00"}
+    )
+    call = stub_handlers["edited"][0]
+    assert call["remind_at"] == "2026-06-03T18:00:00+00:00"
+    assert not call.get("clear_remind_at")
+
+
+@pytest.mark.asyncio
+async def test_read_notebook_default_active_only(stub_handlers):
+    """翻本子默认只看还活着的（active_only=True）。"""
+    stub_handlers["notebook_rows"] = [
+        NotebookEntry(
+            lane="coe-t3", persona_id="akao", entry_id="e-1",
+            content="还惦记的", remind_at=None, noted_at="2026-06-03T10:00:00+00:00",
+        )
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["read_notebook"].invoke({})
+    assert stub_handlers["listed"][0]["active_only"] is True
+    # 出参带每条的 id / 内容（spec：列表每条带 id、内容、时间、状态）
+    assert "e-1" in out
+    assert "还惦记的" in out
+
+
+@pytest.mark.asyncio
+async def test_read_notebook_include_all(stub_handlers):
+    """include_all=True → 看全部（含做过 / 划掉的），active_only=False 透给底层。"""
+    stub_handlers["notebook_rows"] = [
+        NotebookEntry(
+            lane="coe-t3", persona_id="akao", entry_id="e-2",
+            content="做过的", status=STATUS_DONE,
+            remind_at=None, noted_at="2026-06-03T10:00:00+00:00",
+        ),
+        NotebookEntry(
+            lane="coe-t3", persona_id="akao", entry_id="e-3",
+            content="划掉的", status=STATUS_DROPPED,
+            remind_at=None, noted_at="2026-06-03T10:00:00+00:00",
+        ),
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["read_notebook"].invoke({"include_all": True})
+    assert stub_handlers["listed"][0]["active_only"] is False
+    assert "做过的" in out and "划掉的" in out
+
+
+@pytest.mark.asyncio
+async def test_read_notebook_empty(stub_handlers):
+    """空本子 → 返回一句「本子是空的」之类的确认，不报错。"""
+    stub_handlers["notebook_rows"] = []
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["read_notebook"].invoke({})
+    assert isinstance(out, str) and out

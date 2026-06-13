@@ -18,7 +18,13 @@ pull 范式：act 不再唤醒 world。life 做完一件事直接 insert_idempot
 from __future__ import annotations
 
 from app.domain.world_events import EventArrived, event_knock_key
-from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
+from app.nodes.life_wake import (
+    LifeWakeTick,
+    ScheduleReminderTick,
+    life_schedule_reminder_node,
+    life_self_wake_node,
+    life_wake_node,
+)
 from app.runtime import Source, wire
 from app.world.engine import (
     WORLD_HEARTBEAT_SECONDS,
@@ -71,3 +77,12 @@ wire(EventArrived).debounce(
 # gate + 空信箱也跑一轮，与信箱敲门的 life_wake_node 是两条独立路径。LifeWakeTick
 # 是 transient，不挂时间源（life 没有独立保底心跳），只承载自排回环这一种来源。
 wire(LifeWakeTick).to(life_self_wake_node)
+
+# 日程到点提醒（备忘录 & 日程 第三块）：她 note / edit_note 排了带 remind_at 的日程 →
+# 收口 fire_schedule_reminders 给每条各 emit_delayed(ScheduleReminderTick)，到期 emit
+# 经这条纯 in-process 边接回 life_schedule_reminder_node（每条日程各挂各的、独立一路，
+# **不动** self-wake 的 next_wake_at 语义）。节点走到点 gate（读 entry 最新一版判仍 active
+# 且 remind_at 未改期 / 未撤）后 deliver_event 把这条投进她信箱、复用敲门把她叫醒。
+# ScheduleReminderTick 是 transient（日程内容在 durable NotebookEntry 里），不挂时间源，
+# 只承载到点提醒回环这一种来源。
+wire(ScheduleReminderTick).to(life_schedule_reminder_node)
