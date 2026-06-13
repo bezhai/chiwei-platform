@@ -73,7 +73,7 @@ def _stub_engine_io(monkeypatch):
         return []
 
     async def fake_record_world_round_close(
-        *, lane, advance_cursor_to, materials_ingested_date
+        *, lane, advance_cursor_to, materials_ingested_date, roster_ingested_date=None
     ):
         state["close_calls"].append(
             {"lane": lane, "advance_cursor_to": advance_cursor_to}
@@ -84,6 +84,13 @@ def _stub_engine_io(monkeypatch):
 
     async def fake_read_world_arc(*, lane):
         return None
+
+    async def fake_list_npc_roster(*, lane):
+        return []
+
+    async def fake_seed_npc_roster(*, lane):
+        # 当天首醒会 ensure seed 名册（必改 1 的生产自动入口）；stub no-op 不碰真库。
+        return 0
 
     async def fake_run_arc_reflection(**kwargs):
         pass
@@ -102,6 +109,8 @@ def _stub_engine_io(monkeypatch):
     )
     monkeypatch.setattr(engine_mod, "find_daily_materials", fake_find_daily_materials)
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
+    monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
     monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_run_arc_reflection)
     monkeypatch.setattr(engine_mod, "load_session", fake_load_session)
     monkeypatch.setattr(engine_mod, "record_round_cost", fake_record_round_cost)
@@ -236,7 +245,9 @@ async def test_fold_runs_after_round_close_before_self_wake(
     async def fake_cost(**kwargs):
         order.append("round_cost")
 
-    async def fake_close(*, lane, advance_cursor_to, materials_ingested_date):
+    async def fake_close(
+        *, lane, advance_cursor_to, materials_ingested_date, roster_ingested_date=None
+    ):
         order.append("round_close")
 
     async def fake_fold(session_id, policy):

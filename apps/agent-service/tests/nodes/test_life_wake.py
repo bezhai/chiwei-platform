@@ -861,6 +861,40 @@ async def test_speech_rendered_separately_from_surroundings_and_dynamics(
 
 
 @pytest.mark.asyncio
+async def test_npc_speech_rendered_with_clean_name_not_machine_prefix(
+    patched, monkeypatch
+):
+    """NPC 来访（source=npc:名字、kind=speech）→ stimulus 呈现「林小满 对你说：原话」。
+
+    NPC 层第二刀：world 以具名 NPC 身份投的 event，source 在信箱里是机器约定
+    ``npc:林小满``（对齐第一刀 npc_name + 关系页 npc:xxx），但喂给模型时要呈现成干净
+    的人名「林小满 对你说：…」——``npc:`` 是机读前缀（关系页 keying 用），不该漏给模型
+    看。她据此识别「是 NPC 林小满来找我」：不被当真人（真人是 user:xxx / kind=external、
+    走离散动静段）、也不被当 world 环境动静（ambient）。
+    """
+    patched["unread"] = [
+        _envelope(
+            "npc1",
+            "绫奈周末有空吗？一起去图书馆吧。",
+            kind=EVENT_KIND_SPEECH,
+            source="npc:林小满",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 原话原样进 stimulus
+    assert "绫奈周末有空吗？一起去图书馆吧。" in msg_blob
+    # 呈现成「林小满 对你说」（speech 段，不混进离散动静 / 周遭底框）
+    assert "林小满 对你说" in msg_blob
+    # 机读前缀 npc: 不漏给模型
+    assert "npc:林小满" not in msg_blob, "npc: 机读前缀不该出现在喂给模型的 stimulus 里"
+
+
+@pytest.mark.asyncio
 async def test_acts_when_model_calls_it(patched, monkeypatch):
     """模型在循环里调 act → 落 ActPerformed，per-act id 从本轮 base act_id 派生。"""
     patched["unread"] = [_envelope("e1", "天亮了")]

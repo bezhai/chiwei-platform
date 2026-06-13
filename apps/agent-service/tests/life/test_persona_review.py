@@ -846,6 +846,36 @@ async def test_evidence_includes_relationship_pages(stub_io, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_evidence_marks_npc_relationship_pages(stub_io, monkeypatch):
+    """关系页里 ``npc:*`` 的页要在证据里**显式标注是 NPC**（codex 建议 3）。
+
+    persona review 全量读关系页（list_relationship_pages），会读到 NPC 层写下的
+    ``npc:名字`` 关系页。喂给模型的证据若把 ``npc:林小满`` 和真人 user_id 一视同仁，
+    模型可能把这个 NPC 标识慢慢漂当成真人写进身份正文（身份慢漂误当真人）。所以
+    NPC 页的证据要带一个明确「这是 NPC、不是真人用户」的标注。
+    """
+    stub_io["rel_pages"] = [
+        _rel_page(
+            other_user_id="npc:林小满",
+            narrative="她是绫奈的同桌，总在她慌的时候稳住她。",
+        ),
+        _rel_page(other_user_id="user-1", narrative="哥哥常来群里找我。"),
+    ]
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    blob = _blob(captured)
+    # NPC 页内容仍在
+    assert "她是绫奈的同桌" in blob
+    assert "npc:林小满" in blob
+    # 且明确标了「NPC」，让模型知道这不是真人标识
+    assert "NPC" in blob, "npc:* 关系页的证据必须显式标注是 NPC（不是真人用户标识）"
+    # 真人页不受影响、不被误标 NPC
+    assert "哥哥常来群里找我。" in blob
+
+
+@pytest.mark.asyncio
 async def test_evidence_no_relationship_pages_says_so(stub_io, monkeypatch):
     """还没有任何关系页 → 如实说，不冒充。"""
     stub_io["rel_pages"] = []

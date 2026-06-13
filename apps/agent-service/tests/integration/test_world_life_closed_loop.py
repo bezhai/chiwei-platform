@@ -59,6 +59,7 @@ from app.world.engine import (
     WorldTick,
     world_tick,
 )
+from app.world.npc_roster import NPCRoster
 from app.world.state import WorldState, read_world_state
 from tests.runtime.conftest import migrate
 
@@ -77,6 +78,20 @@ def _notify(recipients: list[str], observation: str) -> tuple[str, dict]:
 
 def _sense(recipient: str, surroundings: str) -> tuple[str, dict]:
     return ("sense", {"recipient": recipient, "surroundings": surroundings})
+
+
+def _npc_visit(
+    npc_name: str, sister: str, what_npc_says: str, world_fact: str
+) -> tuple[str, dict]:
+    return (
+        "npc_visit",
+        {
+            "npc_name": npc_name,
+            "sister": sister,
+            "what_npc_says": what_npc_says,
+            "world_fact": world_fact,
+        },
+    )
 
 
 def _sleep(seconds: int) -> tuple[str, dict]:
@@ -139,6 +154,10 @@ async def world_db(test_db):
     # world 每轮按 (lane, 今天) 查当天外部底料（engine 的 find_daily_materials 真打
     # 这张表）——不建它，闭环里每个 world_tick 都死在 UndefinedTableError。
     await migrate(DailyMaterials, test_db)
+    # world 每轮 list NPC 名册（engine 的 list_npc_roster 真打这张表，NPC 层第一刀）
+    # ——不建它，闭环里每个 world_tick 都死在 UndefinedTableError（即便名册为空也要
+    # 表存在才能 SELECT 出空表）。
+    await migrate(NPCRoster, test_db)
     # 睡前回顾的两张页（昨天页 + 关系页）。当前闭环还没接回顾触发（Task 2 接线），
     # 先把表建齐——接上后 life 轮收口会真打它们，缺表同样死 UndefinedTableError。
     await migrate(DayPage, test_db)
@@ -437,6 +456,73 @@ async def test_info_gap_notify_only_reaches_recipients(world_db, _agent_run, mon
     akao_unread = await list_unread_events(lane=lane, persona_id="akao")
     assert [e.summary for e in chinagi_unread] == ["厨房飘来煎蛋的香味"]
     assert akao_unread == []
+
+
+@pytest.mark.integration
+async def test_npc_visit_end_to_end_mailbox_and_world_layer(
+    world_db, _stub_persona, _agent_run, monkeypatch
+):
+    """NPC 层第二刀机制层端到端（真 PG，不靠模型自发）：world 调 npc_visit 一次，断言三条.
+
+    构造一轮 world 推演里调一次 ``npc_visit``（林小满来找绫奈），全程走真实工具 + 真实
+    持久化，验证 spec Task 2 的三条机制：
+
+      ① 投进对应姐妹信箱、带 NPC 来源标识：绫奈信箱里这条 event 的 ``source`` 是
+         ``npc:林小满``、``kind`` 是 speech —— 既不是真人（user:xxx / external）、也不是
+         world 环境动静（ambient）。
+      ② 对应姐妹 list_unread_events 拿得到、且 life 侧能识别出 NPC 来源（speech 段
+         「林小满 对你说」、机读前缀 npc: 不漏给模型）。
+      ③ 同一件事同步留在世界层：同轮 world detail 含这件 NPC 事实（收件人感知 + 世界
+         状态不分叉）。
+
+    全程没有让模型「自发」决定投——脚本里直接编排 npc_visit 这一步，证的是机制能力
+    （Task 2 不负责让 world 愿意投，那是第三刀 prompt 的事）。
+    """
+    lane = "coe-npc"
+    _world_llm(
+        _agent_run,
+        [
+            [
+                _update_world("午后。ayana 在客厅写作业，akao 在房间，chinagi 在厨房。"),
+                _npc_visit(
+                    npc_name="林小满",
+                    sister="ayana",
+                    what_npc_says="绫奈周末有空吗？一起去图书馆复习吧。",
+                    world_fact="ayana 的手机响了，是林小满发来的消息。",
+                ),
+                _sleep(600),
+            ],
+        ],
+    )
+
+    await world_tick(WorldTick(lane=lane, reason="heartbeat"))
+
+    # ① + ② 投进绫奈信箱、带 NPC 来源标识，list_unread 拿得到
+    ayana_unread = await list_unread_events(lane=lane, persona_id="ayana")
+    assert len(ayana_unread) == 1
+    npc_ev = ayana_unread[0]
+    assert npc_ev.source == "npc:林小满", "NPC event 来源必须是 npc:名字（不是真人 / 不是 world）"
+    assert npc_ev.kind == "speech", "NPC event 是 speech（有具名说话人）、不是 ambient 环境动静"
+    assert npc_ev.summary == "绫奈周末有空吗？一起去图书馆复习吧。"
+    # NPC event 没误投给别的姐妹（指向单个收件人）
+    assert await list_unread_events(lane=lane, persona_id="akao") == []
+    assert await list_unread_events(lane=lane, persona_id="chinagi") == []
+
+    # ② life 侧识别 NPC 来源：绫奈被唤醒，stimulus 呈现「林小满 对你说」、不漏 npc: 前缀
+    _agent_run.life_round = []  # 看一眼即可，不需要她做什么
+    await lw.life_wake_node(EventArrived(lane=lane, persona_id="ayana"))
+    life_blob = _agent_run.life_calls[-1]["messages_text"]
+    assert "林小满 对你说" in life_blob, "life 应把 NPC speech 呈现成「林小满 对你说」"
+    assert "绫奈周末有空吗？一起去图书馆复习吧。" in life_blob
+    assert "npc:林小满" not in life_blob, "npc: 机读前缀不该漏进喂给模型的 stimulus"
+
+    # ③ 同一件事同步留世界层：同轮 world detail 含这件 NPC 事实（不分叉）
+    snap = await read_world_state(lane=lane)
+    assert snap is not None
+    assert "林小满" in snap.detail
+    assert "ayana 的手机响了，是林小满发来的消息。" in snap.detail
+    # 不丢同轮 update_world 写的上一段叙述（追加而非覆盖）
+    assert "ayana 在客厅写作业" in snap.detail
 
 
 @pytest.mark.integration

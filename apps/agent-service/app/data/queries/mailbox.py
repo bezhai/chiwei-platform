@@ -25,6 +25,8 @@ from sqlalchemy import text
 from app.data.session import get_session
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
+    EVENT_KIND_SPEECH,
+    NPC_SOURCE_PREFIX,
     EventArrived,
     EventEnvelope,
     EventRead,
@@ -120,6 +122,63 @@ async def list_unread_events(
     async with get_session() as s:
         result = await s.execute(
             text(sql), {"lane": lane, "persona_id": persona_id}
+        )
+        rows = result.mappings().all()
+        return [
+            EventEnvelope(**{k: row[k] for k in EventEnvelope.model_fields})
+            for row in rows
+        ]
+
+
+async def list_persona_npc_speech_in_window(
+    *, lane: str, persona_id: str, start_iso: str, end_iso: str
+) -> list[EventEnvelope]:
+    """读某 persona 在 ``[start_iso, end_iso]`` 闭区间内收到的 NPC 来访 speech event。
+
+    睡前回顾把姐妹跟 NPC 的来往写进关系页的证据查询（NPC 层第四刀，代码层）。NPC
+    互动只活在意识流 / 信箱里、不进真实聊天记录（``find_persona_spoken_chats_in_
+    window`` 读的是 ``CommonMessage``），回顾抽不到——所以这里直接从信箱按窗口捞她
+    收到的 NPC speech，拿到权威的 ``npc:名字`` 机读键（不靠从被剥过前缀的 transcript
+    文本里猜人名）。三重过滤只留 NPC 来访（第二刀的投递形态，:func:`app.world.tools.
+    npc_visit`）：
+
+      * ``kind = 'speech'`` —— 直接冲她来的具名话语（排除 world 环境动静
+        ambient / surroundings）；
+      * ``source LIKE 'npc:%'`` —— NPC 来访（排除姐妹直投的 ``source=persona_id``、
+        真人外部消息 ``source=user:xxx``）。NPC 前缀约定见
+        :data:`app.world.npc_roster.NPC_SOURCE_PREFIX`。
+
+    **不看 read 表**（与 :func:`list_unread_events` 的关键区别）：回顾在睡前跑，当天的
+    NPC speech 多半已被 life 标已读，按未读捞会漏掉今天的互动。窗口语义就是「这一天她
+    收到过哪些 NPC 来访」，已读未读都算。
+
+    窗口两端按真实时刻比较（``occurred_at`` 历史混 Unix 毫秒 / ISO，:func:`_occurred_
+    at_real_instant` 归一），照 :func:`app.data.queries.acts.list_persona_acts_between`
+    的先例在 framework 持久化写好的真实表上做只读查询（framework 没提供窗口读），按真实
+    时刻升序（与意识流证据时间序对齐）；不绕开 framework 持久化原语。lane + persona
+    双过滤：只读她自己的、泳道隔离。
+    """
+    occurred_real = _occurred_at_real_instant("e.occurred_at")
+    sql = (
+        f"SELECT e.* FROM {_ENVELOPE_TABLE} e "
+        f"WHERE e.lane = :lane AND e.persona_id = :persona_id "
+        f"  AND e.kind = :speech_kind "
+        f"  AND e.source LIKE :npc_like "
+        f"  AND {occurred_real} >= (:start_iso)::text::timestamptz "
+        f"  AND {occurred_real} <= (:end_iso)::text::timestamptz "
+        f"ORDER BY {occurred_real} ASC"
+    )
+    async with get_session() as s:
+        result = await s.execute(
+            text(sql),
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "speech_kind": EVENT_KIND_SPEECH,
+                "npc_like": f"{NPC_SOURCE_PREFIX}%",
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+            },
         )
         rows = result.mappings().all()
         return [
