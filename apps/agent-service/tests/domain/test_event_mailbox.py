@@ -556,3 +556,169 @@ async def test_stranded_event_recovered_by_renotify(mailbox_db, monkeypatch):
     assert len(emitted) == 1 and isinstance(emitted[0], EventArrived)
     assert emitted[0].lane == "coe-t1"
     assert emitted[0].persona_id == "akao"
+
+
+# ---------------------------------------------------------------------------
+# 被动 kind 不补敲（权宜修复 v2：codex 发现 wake=False 没挡补敲、修复被绕过）
+#
+# 背景：world 每推演一轮就用 sense 给三姐妹各投一条周遭切片（kind=surroundings）。
+# 上一版给 deliver_event 加 wake=False 只挡了**即时敲门**，没挡 world engine 每轮在
+# 到点 gate 之前调的 renotify_unread **补敲**——它通过 list_personas_with_unread 查
+# 出"有未读的 persona"挨个补敲。纯 surroundings 入信箱后就是"未读"，于是每轮 world
+# tick 的补敲照样把自排睡着的姐妹叫醒，修复被绕过。
+#
+# 根因：被动语义只在投递瞬间用（wake 参数）、没进入信箱的持久语义。修复把被动语义落
+# 在已持久化的 kind 上（PASSIVE_EVENT_KINDS），即时敲门和补敲对账两条路径都读同一处。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_pure_surroundings_unread_not_renotified(mailbox_db, monkeypatch):
+    """承重断言（复现 codex 发现的 bug）：纯 surroundings 未读的 persona **不**被补敲。
+
+    ayana 信箱里只有一条 surroundings（被动周遭切片，sense 投的）、没有真动静。
+    renotify_unread（world engine 每轮 tick 在到点 gate 之前调的对账自愈）查"有未读
+    的 persona"时**必须**把纯 surroundings 的 ayana 排除——否则每轮 world tick 的补敲
+    照样把自排睡着的姐妹叫醒，自排睡眠系统性睡不满（即时敲门改 wake=False 后仍被这条
+    补敲路径绕过的真 bug）。
+
+    对比 akao：有一条真动静（ambient notify）未读 → 照常被补敲（真有人找她该唤醒）。
+    """
+    # ayana：只有一条 surroundings（被动周遭切片，不该被补敲叫醒）
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="s1",
+        kind="surroundings", source="world",
+        summary="你在客厅写作业，午后的光斜照进来。",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+    # akao：有一条真动静（ambient notify）未读 → 照常该被补敲
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="n1",
+        kind="ambient", source="world", summary="玄关传来开关门的声音",
+        occurred_at="2026-06-03T14:00:01+08:00",
+    )
+
+    emitted: list = []
+
+    async def fake_emit(data):
+        emitted.append(data)
+
+    import app.data.queries.mailbox as mailbox_mod
+
+    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
+
+    count = await renotify_unread(lane="coe-t1")
+
+    assert count == 1, (
+        f"只有 akao（真动静）该被补敲，纯 surroundings 的 ayana 不该叫醒，实际补敲 {count}"
+    )
+    assert [a.persona_id for a in emitted] == ["akao"], (
+        f"补敲只该发给真动静的 akao，实际 {[a.persona_id for a in emitted]}"
+    )
+
+
+@pytest.mark.integration
+async def test_list_personas_with_unread_excludes_pure_passive(mailbox_db):
+    """list_personas_with_unread（补敲对账读侧）：纯被动未读的 persona 不算"有未读"。
+
+    ayana 只有 surroundings 未读 → 不在补敲名单；akao 有真动静 ambient 未读 → 在名单。
+    这是上面补敲行为的底层查询断言：补敲对账那条查询排除被动 kind。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="s1",
+        kind="surroundings", source="world", summary="周遭切片",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="n1",
+        kind="ambient", source="world", summary="真动静",
+        occurred_at="2026-06-03T14:00:01+08:00",
+    )
+
+    personas = await list_personas_with_unread(lane="coe-t1")
+
+    assert personas == ["akao"], (
+        f"补敲对账只该返回有真动静未读的 akao，排除纯 surroundings 的 ayana，实际 {personas}"
+    )
+
+
+@pytest.mark.integration
+async def test_mixed_passive_and_real_unread_persona_is_renotified(mailbox_db):
+    """同一 persona 既有 surroundings 又有真动静未读 → 仍被补敲（有真动静就该唤醒）。
+
+    补敲对账只排除"纯被动"未读的 persona——有真动静（哪怕同时混着 surroundings）的
+    照常补敲。守住"排除被动"不能误伤"有真动静"这条边界。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="s1",
+        kind="surroundings", source="world", summary="周遭切片",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="n1",
+        kind="ambient", source="world", summary="厨房有动静",
+        occurred_at="2026-06-03T14:00:01+08:00",
+    )
+
+    personas = await list_personas_with_unread(lane="coe-t1")
+
+    assert personas == ["ayana"], (
+        f"混着真动静的 persona 仍该被补敲，实际 {personas}"
+    )
+
+
+@pytest.mark.integration
+async def test_she_wakes_still_reads_surroundings(mailbox_db):
+    """她自己醒来读未读（list_unread_events）**仍读得到** surroundings —— 不能断这条。
+
+    补敲对账（list_personas_with_unread）排除被动 kind 是为了不主动叫醒她；但她下次
+    自己醒来（self-wake 到点）时仍要在 stimulus 里读到全部未读、含周遭切片。
+    list_unread_events 绝不排除 surroundings——和补敲那条查询是分开的两条。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="s1",
+        kind="surroundings", source="world",
+        summary="你在客厅写作业，午后的光斜照进来。",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="ayana")
+
+    assert [e.event_id for e in unread] == ["s1"]
+    assert unread[0].kind == "surroundings"
+
+
+@pytest.mark.integration
+async def test_long_sleep_surroundings_backlog_can_crowd_out_real_events(mailbox_db):
+    """codex 隐患（积压挤占）暴露测试：长睡攒的旧 surroundings 排在真动静之前。
+
+    她长睡期间 world 每轮投一条 surroundings，醒来时 list_unread_events 按发生时间
+    升序返回（旧的在前）。下游 life_wake 取数有 cap（_LIFE_INBOX_MAX=50，取最旧 N
+    条），积压的旧 surroundings 比后来的真 chat / notify 早发生、排在前面，超 cap 时会
+    把真动静挤出本轮处理批（真动静留未读、下轮再处理 → 对真人消息的响应延迟）。
+
+    本测试**只暴露排序事实**（旧 surroundings 在真动静之前），不在 mailbox 层硬修——
+    修复（真动静优先 / 被动只留最新一条）超出这次权宜范围、且要小心别引入确定性打分。
+    见交回说明，列为待办（memory project_world_sense_wake_tradeoff）。
+    """
+    # 长睡期间攒的多条 surroundings（早发生）
+    for i in range(3):
+        await deliver_event(
+            lane="coe-t1", persona_id="ayana", event_id=f"s{i}",
+            kind="surroundings", source="world", summary=f"周遭{i}",
+            occurred_at=f"2026-06-03T0{i}:00:00+08:00",
+        )
+    # 后来才到的真动静（晚发生 → 升序排在 surroundings 之后）
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="real",
+        kind="ambient", source="world", summary="真有人找她",
+        occurred_at="2026-06-03T20:00:00+08:00",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="ayana")
+    ids = [e.event_id for e in unread]
+
+    # 暴露隐患：旧 surroundings 全排在真动静之前（cap 截最旧 N 条会先吃掉 surroundings）
+    assert ids == ["s0", "s1", "s2", "real"], (
+        f"积压隐患：旧 surroundings 排在真动静之前，cap 时会先被取到，实际 {ids}"
+    )

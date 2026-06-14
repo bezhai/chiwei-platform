@@ -27,6 +27,7 @@ from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
     EVENT_KIND_SPEECH,
     NPC_SOURCE_PREFIX,
+    PASSIVE_EVENT_KINDS,
     EventArrived,
     EventEnvelope,
     EventRead,
@@ -72,13 +73,32 @@ async def deliver_event(
     kind: str = EVENT_KIND_AMBIENT,
     source: str = "world",
 ) -> int:
-    """往 ``(lane, persona_id)`` 的信箱投一条 event,投成功后敲门唤醒 life。
+    """往 ``(lane, persona_id)`` 的信箱投一条 event,新投递的**非被动** event 敲门唤醒 life。
 
     幂等：同一 ``(lane, persona_id, event_id)`` 重复投递只进一行（mq
-    redelivery / 双投安全）。**只有新投递（真的有新东西进信箱）才 emit
-    ``EventArrived`` 敲门信号**——去重命中不敲门,免得空唤醒。敲门走 debounce
-    攒批，多条积压只唤醒 life 一次（wire 见 ``event_knock_key`` + Task 3 的
-    life-wake 节点）。返回实际插入的行数（0=去重命中, 1=新投递）。
+    redelivery / 双投安全）。**只有新投递（真的有新东西进信箱）的非被动 event 才 emit
+    ``EventArrived`` 敲门信号**——去重命中不敲门（没有新东西，免得空唤醒）；被动 kind
+    （:data:`~app.domain.world_events.PASSIVE_EVENT_KINDS`）也不敲门。敲门走 debounce
+    攒批，多条积压只唤醒 life 一次（wire 见 ``event_knock_key`` + Task 3 的 life-wake
+    节点）。返回实际插入的行数（0=去重命中, 1=新投递）。
+
+    **被动 kind 不敲门（通道分离的权宜修复 v2，prod 节奏失控）：** 真动静（notify
+    ambient / npc_visit speech / 真人 chat external / 日程到点 reminder）走唤醒通道——
+    真有人找她该立刻响应，新投递成功就 emit ``EventArrived`` 把她叫醒（哪怕在长睡里）。
+    被动 kind（当前只有 world ``sense`` 投的 surroundings 周遭切片）只落信箱当**被动
+    上下文**、不 emit 唤醒：world 每推演一轮就给三姐妹各投一条周遭切片，若走唤醒通道
+    （设计上永远放行、不走"到点才醒"的 gate）会把自排睡着的姐妹全敲醒、自排睡眠系统性
+    睡不满。她下次自己醒来（self-wake 到点）时通过 ``list_unread_events`` 自然读到最新
+    周遭。
+
+    被动语义**落在已持久化的 kind 上**（不是投递瞬间的临时参数）：上一版用一个
+    ``wake`` 参数只能覆盖这条即时敲门路径、没挡住 ``renotify_unread`` 的补敲对账
+    （surroundings 入信箱就是"未读"，补敲照样叫醒），修复被绕过。现在即时敲门和补敲
+    对账（:func:`list_personas_with_unread`）都读同一处 ``PASSIVE_EVENT_KINDS``。
+
+    **这是已知权宜修复、非完美方案**，二分粗、感知延迟等取舍详见
+    :data:`~app.domain.world_events.PASSIVE_EVENT_KINDS` 注释 + memory
+    ``project_world_sense_wake_tradeoff``。
     """
     inserted = await insert_idempotent(
         EventEnvelope(
@@ -91,7 +111,7 @@ async def deliver_event(
             occurred_at=occurred_at,
         )
     )
-    if inserted:
+    if inserted and kind not in PASSIVE_EVENT_KINDS:
         await emit(EventArrived(lane=lane, persona_id=persona_id))
     return inserted
 
@@ -188,12 +208,28 @@ async def list_persona_npc_speech_in_window(
 
 
 async def list_personas_with_unread(*, lane: str) -> list[str]:
-    """该 lane 下还有未读 event 的 distinct persona_id —— 信箱对账的读侧。
+    """该 lane 下有**非被动**未读 event 的 distinct persona_id —— 补敲对账的读侧。
 
     复用 :func:`list_unread_events` 同一条 LEFT JOIN 反连接（envelope 有、read
-    表无对应行 = 未读），只是聚到 persona 维度：``SELECT DISTINCT e.persona_id``。
-    给唤醒自愈回路用——查出"信箱里有东西、却没人来读"的人，挨个补敲。
+    表无对应行 = 未读），聚到 persona 维度：``SELECT DISTINCT e.persona_id``。
+    给唤醒自愈回路（:func:`renotify_unread`）用——查出"信箱里有真动静、却没人来读"
+    的人，挨个补敲。
+
+    **排除被动 kind**（:data:`~app.domain.world_events.PASSIVE_EVENT_KINDS`，通道分离
+    权宜修复 v2）：world 每轮 tick 在到点 gate 之前调本查询补敲，纯 surroundings 未读
+    的 persona 若被算进来，每轮 tick 的补敲就把自排睡着的姐妹叫醒（即时敲门改按 kind
+    跳过被动后仍被这条补敲路径绕过的真 bug）。所以这里只算"有**非被动**未读"的人：纯
+    被动未读不补敲、不打断长睡；有真动静（哪怕同时混着 surroundings）的照常补敲。
+
+    与 :func:`list_unread_events`（她**自己醒来**读未读用的）的关键区别：那条**绝不**
+    排除 surroundings——她醒来时仍要读到全部未读含周遭切片。只有**这条补敲对账**排除
+    被动。两条是分开的查询，别改错。
     """
+    # 被动 kind 占位：frozenset 无序，sort 后派生确定性命名占位（``:passive_0`` …）。
+    # 当前只有 surroundings 一项；多于一项时下面 NOT IN 自动覆盖全部。
+    passive_kinds = sorted(PASSIVE_EVENT_KINDS)
+    passive_params = {f"passive_{i}": k for i, k in enumerate(passive_kinds)}
+    passive_placeholders = ", ".join(f":{name}" for name in passive_params)
     sql = (
         f"SELECT DISTINCT e.persona_id FROM {_ENVELOPE_TABLE} e "
         f"LEFT JOIN {_READ_TABLE} r "
@@ -202,10 +238,11 @@ async def list_personas_with_unread(*, lane: str) -> list[str]:
         f" AND e.event_id = r.event_id "
         f"WHERE e.lane = :lane "
         f"  AND r.event_id IS NULL "
+        f"  AND e.kind NOT IN ({passive_placeholders}) "
         f"ORDER BY e.persona_id ASC"
     )
     async with get_session() as s:
-        result = await s.execute(text(sql), {"lane": lane})
+        result = await s.execute(text(sql), {"lane": lane, **passive_params})
         return [row["persona_id"] for row in result.mappings().all()]
 
 

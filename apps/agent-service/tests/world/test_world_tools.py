@@ -287,6 +287,11 @@ async def test_notify_delivers_observation_to_each_recipient(_ctx):
         assert d["kind"] == "ambient"
         assert d["source"] == "world"
         assert d["lane"] == "coe-t2"
+        # notify 是"真动静"——kind=ambient 不在 PASSIVE_EVENT_KINDS 里，deliver_event
+        # 据此照常敲门唤醒。权宜修复 v2 把被动语义落在 kind 上、删了 wake 参数，所以
+        # notify 不再传 wake（敲门与否由 deliver_event 按 kind 判断）。
+        assert "wake" not in d, "wake 参数已删，notify 不该再传它（唤醒由 kind 决定）"
+        assert d["kind"] == "ambient"
 
 
 @pytest.mark.asyncio
@@ -407,6 +412,35 @@ async def test_sense_delivers_surroundings_to_single_recipient(_ctx):
 
 
 @pytest.mark.asyncio
+async def test_sense_delivers_passive_kind_without_wake_param(_ctx):
+    """权宜修复 v2（被动语义落在 kind 上）：sense 投 kind=surroundings、**不再传 wake 参数**。
+
+    prod 节奏失控的根因：world ~30 分钟推一轮、每轮用 sense 给三姐妹各投一条周遭
+    切片，若走唤醒通道（永远放行、不走到点 gate）会把自排睡着的姐妹全敲醒，自排睡眠
+    系统性睡不满。修复把被动语义落在已持久化的 kind 上（PASSIVE_EVENT_KINDS 含
+    surroundings）：deliver_event 按 kind 判断敲不敲门。sense 投的就是 kind=surroundings、
+    本就被动，所以**不再传 wake**（wake 参数已删——它只挡即时敲门、没挡 renotify 补敲、
+    是不完整抽象）。被动上下文她下次自己醒来时 list_unread 自然读到。这是权宜解（粗在
+    "唤醒 vs 不唤醒"二分），更优方案待探索（见 memory project_world_sense_wake_tradeoff）。
+    """
+    with agent_context(_ctx):
+        await sense.invoke(
+            {
+                "recipient": "ayana",
+                "surroundings": "你在客厅写作业，午后的光斜照进来。",
+            }
+        )
+
+    assert len(tools_mod._test_delivered) == 1
+    d = tools_mod._test_delivered[0]
+    # 被动语义由 kind 表达（不再有 wake 参数）：sense 投 kind=surroundings
+    assert d["kind"] == "surroundings", "sense 必须投被动 kind=surroundings"
+    assert "wake" not in d, (
+        "wake 参数已删，sense 不该再传它（被动语义统一由 kind=surroundings 表达）"
+    )
+
+
+@pytest.mark.asyncio
 async def test_sense_event_id_idempotent_per_round(_ctx):
     """同一 (lane, recipient, surroundings, round_id) 派生同一 event_id（整轮重放幂等）。"""
     args = {
@@ -495,6 +529,10 @@ async def test_npc_visit_delivers_speech_to_sister_with_npc_source(_ctx):
     assert d["kind"] == "speech"
     assert d["summary"] == "绫奈周末有空吗？一起去图书馆吧。"
     assert d["lane"] == "coe-t2"
+    # NPC 直接对她说话是"真动静"——kind=speech 不在 PASSIVE_EVENT_KINDS 里，
+    # deliver_event 据此照常敲门唤醒。权宜修复 v2 删了 wake 参数，所以 npc_visit 不再
+    # 传 wake（唤醒与否由 deliver_event 按 kind 判断）。
+    assert "wake" not in d, "wake 参数已删，npc_visit 不该再传它（唤醒由 kind 决定）"
 
 
 @pytest.mark.asyncio
