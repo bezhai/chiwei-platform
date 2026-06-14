@@ -1449,6 +1449,29 @@ def test_act_description_no_longer_carries_speech():
     assert "chat" in desc, "act 文案应把说话引导到 chat 工具"
 
 
+def test_act_description_steers_online_to_real_hands():
+    """act 文案点破：上网看东西不走 act —— 用 act 假装上网是自己编的（假的），引向 look_up / browse_feed 两只真手。
+
+    coe 实测根因：life_wake prompt 的「能用几件事」清单没把两只手算进去 + act 是万能
+    「做事」，她想上网时抓 act 凑一个假的、不切真工具。act 文案这一刀对称「说话不走
+    act」补「上网不走 act」：点破编的是假的、把想查 / 想刷引向 look_up / browse_feed。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    # 把「想查个答案 / 想刷刷」引向两只真手（不让她用万能 act 凑一个假的）
+    assert "look_up" in desc, "act 文案应把想查答案引向 look_up"
+    assert "browse_feed" in desc, "act 文案应把想刷刷引向 browse_feed"
+    # 点破：用 act 假装上网 = 自己编 = 假的
+    assert ("编" in desc) or ("假" in desc), "act 文案要点破用 act 假装上网是自己编的"
+
+
 def lt_speech_kind() -> str:
     """speech event 的 kind 常量（让测试与实现共用同一来源，不硬编码字面量）。"""
     return lt.EVENT_KIND_SPEECH
@@ -1608,6 +1631,22 @@ def test_look_up_description_guides_question_driven_lookup():
     assert "查" in desc, "文案要让模型知道这是去查东西"
     # 引导她带着自己想好的具体问题（不是无 query 的浏览）
     assert "问题" in desc or "想知道" in desc
+
+
+def test_look_up_description_contrasts_with_fake_act():
+    """look_up 文案补反向对比：别用 act 假装「我查了下」（那是自己编的假货）—— 真想知道用这只真手。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["look_up"].definition.description
+    # 反向对比到 act：别用 act 假装查（避免被万能 act 惯性吸走）
+    assert "act" in desc, "look_up 文案要反向对比：别用 act 假装查"
+    assert ("编" in desc) or ("假" in desc), "look_up 文案要点破用 act 假装查是自己编的"
 
 
 # ---------------------------------------------------------------------------
@@ -1784,6 +1823,22 @@ def test_browse_feed_description_guides_aimless_browsing_distinct_from_look_up()
     assert "方向" in desc, "文案要让她知道带的是一个方向（不是必填检索词）"
     # 明确「有具体问题求答案那是另一只手（look_up）、不走这里」
     assert "look_up" in desc, "文案要把「有具体问题求答案」引向 look_up（两只手分清）"
+
+
+def test_browse_feed_description_contrasts_with_fake_act():
+    """browse_feed 文案补反向对比：别用 act 假装「我刷了刷手机」（那是自己编的）—— 真想刷用这只真手。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["browse_feed"].definition.description
+    # 反向对比到 act：别用 act 假装刷（避免被万能 act 惯性吸走）
+    assert "act" in desc, "browse_feed 文案要反向对比：别用 act 假装刷"
+    assert ("编" in desc) or ("假" in desc), "browse_feed 文案要点破用 act 假装刷是自己编的"
 
 
 def test_browse_feed_does_not_hardcode_interest_rules():
