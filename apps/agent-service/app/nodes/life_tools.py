@@ -42,6 +42,11 @@ from pydantic import Field
 from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
 
+# module-level 引用 search_web Tool，让 look_up 复用它（也让测试能 monkeypatch，与
+# deliver_event / perform_act 同款）。look_up 在工具体内调 ``search_web.invoke``，
+# 拿 search_web 已经带源组织好的文本（每条 [i] 标题 / 出处链接 / 关键摘录）。
+from app.agent.tools.search import search_web
+
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
 from app.domain.life_state import save_life_state, set_life_next_wake_at
@@ -76,6 +81,53 @@ LIFE_SCHEDULE_MIN_SECONDS = 60
 # （夜里一觉到天亮）—— 具体睡多久由她自己看钟点定，真有事 world 的 notify（外部刺激
 # 不走 gate）会把她从长睡叫醒。12h 覆盖整夜睡眠。超限报错喂回模型重调，绝不静默夹。
 LIFE_SCHEDULE_MAX_SECONDS = 12 * 3600
+
+# search_web 在「没配 / 没搜到 / 搜出来没相关结果」时返回的两条**精确**失败文案（见
+# app/agent/tools/search.py:232 / :257）。look_up / browse_feed 命中这些就如实说没查 /
+# 没刷到、不把它当成给她的内容顶上去——拿不到真东西就不假装拿到了（spec 决策 4：不编
+# 一个顶上）。
+_SEARCH_WEB_EMPTY_RESULTS = frozenset(
+    {
+        "搜索服务未配置或未搜索到结果",
+        "未搜索到相关结果",
+    }
+)
+
+# search_web 第三种失败信号：底层 _web_search_capability 抛异常时它内部 catch 返回
+# ``f"网页搜索失败: {exc}"``（见 app/agent/tools/search.py:241）。**前缀固定、后缀带变长
+# 异常文本**，所以只能按前缀认、不能精确匹配。漏认它会把"网页搜索失败: xxx"当真内容
+# 顶上去（违 spec 决策 4：把失败当内容、又一眼假）。
+_SEARCH_WEB_FAILURE_PREFIX = "网页搜索失败"
+
+
+def _search_web_failed_or_empty(result: object) -> bool:
+    """判断 search_web 这次是不是"没拿到真东西"（失败 / 空），命中就如实说没查 / 没刷到。
+
+    search_web 的"没拿到"有四种形态，look_up / browse_feed 都要稳健识别（spec 决策 4：
+    拿不到真东西就如实说，绝不把失败 / 空当内容顶上去）：
+
+      1. **非 str**：search_web 叠 ``@tool_error``，意外异常时返回结构化 outcome dict
+         而非字符串（app/agent/tools/search.py:202-203 之外的异常路径）。
+      2. ``"搜索服务未配置或未搜索到结果"``（精确，search.py:232）。
+      3. ``"未搜索到相关结果"``（精确，search.py:257）。
+      4. ``f"网页搜索失败: {exc}"``（**前缀** ``网页搜索失败``、后缀变长，search.py:241）——
+         用 ``startswith`` 认前缀，不能精确匹配（带变长异常文本）。
+
+    两只手共用这一个判断，避免各自只认一部分信号导致漂移。
+    """
+    if not isinstance(result, str):
+        return True
+    stripped = result.strip()
+    return (
+        stripped in _SEARCH_WEB_EMPTY_RESULTS
+        or stripped.startswith(_SEARCH_WEB_FAILURE_PREFIX)
+    )
+
+# 刷手机（browse_feed）一次捞回的条数：比 look_up「带问题求一个答案」的聚焦默认（5）多，
+# 让结果像一条 feed 的一批供她浏览挑选。取 search_web 的上限 10（它内部夹到 1～10）。
+# 这是「逛一圈看一批」的机制口径（决策 2 的「刷=逛一圈、返回一批」），不是兴趣规则
+# ——刷什么仍由她带进来的方向决定，这里只决定「一次看几条」。
+_BROWSE_FEED_BATCH = 10
 
 
 def build_life_tools(
@@ -518,6 +570,98 @@ def build_life_tools(
         )
         return render_notebook(entries, now=observed_at)
 
+    @tool_error("查这件事失败")
+    async def look_up(query: str) -> str:
+        """心里有件具体的事、想知道某个真答案时，带着你想好的问题去网上查一查。
+
+        这是「带着问题去查」的手：你这一刻为某件具体的事需要知道一个信息——明天广州
+        下不下雨该不该带伞、那家餐厅几点关门、某件事到底是怎么回事——就把你**自己想好
+        的那个具体问题**给它，它去网上替你查回来。
+
+        查回来的是带着出处的真东西（每条有标题、来源链接、关键摘录），不是替你嚼碎的
+        一句话——你看着这些真材料自己反应，知道的就基于它说，别凭空编。要是没查到，
+        它会如实告诉你没查到，那就当真没查到、别硬凑一个答案。
+
+        想长期记住的（比如查到约会那天会下雨、决定带伞），自己记进本子；只是想知道
+        一下、用过就算的，看完反应过就好，不必都记。
+
+        这只手是「带着具体问题求答案」用的；只是没事想随便逛逛、看看有啥新鲜的，那是
+        另一回事，不走这里。
+
+        Args:
+            query: 你想好的那个具体问题（自然语言，如"广州明天会下雨吗"）。
+
+        Returns:
+            带着来源的搜索结果文本（标题 / 出处 / 关键摘录）；没查到时一句如实说明。
+        """
+        result = await search_web.invoke({"query": query})
+        # search_web 没拿到真东西（四种形态：非 str / 两条精确空文案 / "网页搜索失败: ..."
+        # 前缀失败串，见 _search_web_failed_or_empty）→ 如实说没查到，绝不把失败 / 空当
+        # 内容顶上去（spec 决策 4：拿不到真东西就不假装拿到了、不编一个顶上）。承重点：
+        # "网页搜索失败: xxx" 这条变长失败串旧实现漏认会被当真内容包装成"查到这些"。
+        if _search_web_failed_or_empty(result):
+            return f"网上没查到「{query}」的结果，这事就先当查不到、别硬凑答案。"
+        # 拿到带源结果：原样把 search_web 的带源文本（标题 / 出处 / 摘录）送进她当轮
+        # 上下文，**不**再过一道 LLM 把它消化成一段话（承重红线：消化掉就丢了真来源、
+        # 反应又变「一眼假」）。只在前面挂一句她问的问题，让上下文里清楚这批材料是为
+        # 哪个问题查的。
+        return f"为「{query}」查到这些（带出处，自己看真材料）：\n\n{result}"
+
+    @tool_error("刷手机失败")
+    async def browse_feed(direction: str) -> str:
+        """没事想随便逛逛、看看有啥新鲜的时候，掏出手机刷一刷。
+
+        这是「漫无目的逛一圈」的手：你这一刻没有什么非搞清楚不可的具体问题，就是想
+        刷刷看——惦记的那部番更没更、喜欢的那个游戏 / 领域出新消息没、有点无聊想看点
+        搞笑的。把你这会儿**想看的方向**给它就行：方向是你读自己此刻状态 / 心情后自然涌出来的、
+        想往哪边逛的念头（一句大白话，可以很泛，比如"想看点搞笑的""那部番更新没"），
+        不是一个标准检索词、更不用憋出精确关键词。它会拿你这个方向去刷回**一批**带着
+        出处的真东西（多条，像刷出来的一屏 feed），供你一条条往下翻，翻到感兴趣的才停。
+
+        刷你自己感兴趣圈子里的东西——你喜欢的那些、惦记的那些、当下心情想看的那些。
+        时政、社会突发、灾害预警那种世界级大事不归你刷（那是世界自己会让你感知到的），
+        你只管刷你自己的圈子。
+
+        和"带着具体问题去查一个答案"是两回事：心里有件具体的事、想知道某个真答案
+        （明天下不下雨、餐厅几点关），那是另一只手 look_up，不走这里。这只手是没目的
+        地逛、看有啥；那只手是带着问题求答案。
+
+        刷回来的是带着出处的真材料（每条有标题、来源链接、关键摘录），不是替你嚼碎的
+        一段话——你自己一条条翻、看到感兴趣的就基于它真实反应。要是这会儿没刷到什么
+        新鲜的，它会如实说没刷到，那就当真没啥可看、别硬编一批顶上。
+
+        刷到想长期留住的（某部番、某个话题），自己记进本子；只是顺手刷过、看完就算的，
+        反应过就好、不必都记。
+
+        Args:
+            direction: 你这会儿想看的方向（自然语言、可以很泛，如"想看点搞笑的"）。
+
+        Returns:
+            一批带着来源的真内容（多条，标题 / 出处 / 摘录）供你浏览；没刷到时一句如实说明。
+        """
+        # 拿她带进来的方向当检索方向去 search_web 捞一批（num 比 look_up 聚焦多，像一条
+        # feed）。**承重红线**：方向原样作 query 传入——工具不替她改写、不写死兴趣标签
+        # 规则、不另起一个 agent 替她猜该看啥（她 life 本身就是懂她的 agent，方向是她读
+        # 自己状态后自然涌出的）。刷什么完全由她带的 direction 决定。
+        result = await search_web.invoke(
+            {"query": direction, "num": _BROWSE_FEED_BATCH}
+        )
+        # search_web 没拿到真东西（四种形态：非 str / 两条精确空文案 / "网页搜索失败: ..."
+        # 前缀失败串，见 _search_web_failed_or_empty）→ 如实说没刷到，绝不把失败 / 空当
+        # 内容编一批顶上（spec 决策 4）。承重点同 look_up："网页搜索失败: xxx" 这条变长
+        # 失败串旧实现漏认会被当真内容包装成"刷到这些"。
+        if _search_web_failed_or_empty(result):
+            return (
+                f"这会儿没刷到「{direction}」方向的新鲜内容，"
+                "就当暂时没啥可看、别硬编一批。"
+            )
+        # 拿到一批带源结果：原样把 search_web 的整批带源文本（每条标题 / 出处 / 摘录）
+        # 送进她当轮上下文供她浏览，**不**再过一道 LLM 把一批消化成一段话（承重红线：
+        # 消化掉就丢了真来源、反应又变「一眼假」，也丢了「一批供她挑选」的味儿）。
+        # 边界（Non-goal）只靠上面 docstring 引导，这里**绝不**对结果做关键词过滤 /
+        # 黑名单拦截（过滤就是工具内替她决策、违宪）。只在前面挂一句她想看的方向。
+        return f"刷「{direction}」刷到这些（带出处，自己往下翻）：\n\n{result}"
+
     @tool_error("安排下次醒来失败")
     async def schedule(
         seconds: Annotated[
@@ -570,8 +714,8 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    # chat（说话）+ 本子三件（note / edit_note / read_notebook）都是基础工具、不依赖
-    # self_wake，与 update / act 并列常驻。
+    # chat（说话）+ 本子三件（note / edit_note / read_notebook）+ look_up（带问题查）+
+    # browse_feed（没事刷手机）都是基础工具、不依赖 self_wake，与 update / act 并列常驻。
     tools = [
         update_tool,
         act_tool_obj,
@@ -579,6 +723,8 @@ def build_life_tools(
         Tool(note),
         Tool(edit_note),
         Tool(read_notebook),
+        Tool(look_up),
+        Tool(browse_feed),
     ]
     # self_wake 容器给了才挂 schedule（自排工具）。旧调用方 / 工具契约测试不给，
     # 就没有 schedule（向后兼容）。

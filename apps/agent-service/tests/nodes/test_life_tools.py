@@ -70,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat + 本子三件（都是常驻基础工具）。"""
+    """不给 self_wake 时工具集是 update_life_state + act + chat + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -85,6 +85,8 @@ def test_build_life_tools_returns_base_tools():
         "note",
         "edit_note",
         "read_notebook",
+        "look_up",
+        "browse_feed",
     }
     for t in tools:
         assert isinstance(t, Tool)
@@ -444,6 +446,8 @@ def test_build_life_tools_includes_schedule_when_slot_given():
         "note",
         "edit_note",
         "read_notebook",
+        "look_up",
+        "browse_feed",
         "schedule",
     }
 
@@ -1451,6 +1455,379 @@ def lt_speech_kind() -> str:
 
 
 # ---------------------------------------------------------------------------
+# look_up —— 「带问题查」的手（life web access Task 1）。
+#
+# 她生活里冒出具体目的时，自己想好一个具体问题（query 必填）去网上查、当场拿到真
+# 答案，基于真数据反应。底层走现有 search_web —— search_web 返回的就是带源的文本
+# （每条 [i] 标题 / 出处链接 / 关键摘录），look_up 原样把它送进她当轮上下文，**不**
+# 用第二次 LLM 把结果消化成一段话（否则她的反应就不挂在真东西上、又「一眼假」）。
+# 拿不到结果时如实说没查到，绝不编一个顶上。
+# ---------------------------------------------------------------------------
+
+
+class _FakeSearchWeb:
+    """假的 search_web Tool：记录被调入参、返回预置文本（模拟 search_web 的带源输出）。"""
+
+    def __init__(self, return_value: str):
+        self.return_value = return_value
+        self.calls: list[dict] = []
+
+    async def invoke(self, arguments: dict) -> str:
+        self.calls.append(arguments)
+        return self.return_value
+
+
+# search_web 真实输出形如：每条 "[i] 标题\n    链接\n    摘录"，多条以空行分隔。
+_SEARCH_WEB_SOURCED_RESULT = (
+    "[1] 广州明天天气预报 - 中国天气网\n"
+    "    https://weather.example.com/guangzhou\n"
+    "    广州明日多云转小雨，最高28度，建议带伞。\n\n"
+    "[2] 周末广州天气 - 某气象站\n"
+    "    https://qx.example.com/gz\n"
+    "    明日午后有阵雨概率60%。"
+)
+
+
+def test_build_life_tools_includes_look_up():
+    """工具集常驻 look_up（「带问题查」的手），与 chat / 本子三件并列、不依赖 self_wake。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "look_up" in tools
+    assert isinstance(tools["look_up"], Tool)
+
+
+def test_look_up_schema_hides_mechanism_only_query_exposed():
+    """模型只看见 query 业务参数，看不见 lane / persona_id / act_id；query 必填。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    params = tools["look_up"].definition.parameters
+    assert set(params["properties"]) == {"query"}
+    # query 必填 —— 「查」是带着具体问题去（决策 2），不像「刷」那样无 query。
+    assert params.get("required") == ["query"]
+
+
+@pytest.mark.asyncio
+async def test_look_up_passes_query_to_search_web(monkeypatch):
+    """带 query 调 look_up → 走到 search_web，且把她想好的问题原样传进去。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_SOURCED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert len(fake.calls) == 1, "look_up 必须走到 search_web"
+    assert fake.calls[0].get("query") == "广州明天会下雨吗", (
+        "她自己想好的问题要原样传给 search_web"
+    )
+
+
+@pytest.mark.asyncio
+async def test_look_up_returns_sources_into_context(monkeypatch):
+    """返回带源（标题 / 出处链接 / 摘录）进她当轮上下文 —— 不被消化成一段话（承重红线）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_SOURCED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert isinstance(out, str)
+    # search_web 的带源原文必须原样在返回里：标题、出处链接、关键摘录都在。
+    assert "广州明天天气预报 - 中国天气网" in out, "标题要进上下文"
+    assert "https://weather.example.com/guangzhou" in out, "出处链接要进上下文"
+    assert "多云转小雨" in out, "关键摘录要进上下文"
+    # 不是只剩一句消化后的话 —— 第二条来源也得在（没被压成单段总结）。
+    assert "https://qx.example.com/gz" in out, "多条来源都要带进上下文、不被压成一句"
+
+
+@pytest.mark.asyncio
+async def test_look_up_no_results_says_so_no_fabrication(monkeypatch):
+    """search_web 没查到（返回未配置 / 无结果文案）→ 如实说没查到，不编一个顶上。"""
+    fake = _FakeSearchWeb("搜索服务未配置或未搜索到结果")
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "某个查不到的冷门问题"})
+
+    assert isinstance(out, str)
+    assert "没查到" in out, "拿不到结果要如实说没查到（兜底），不编内容"
+
+
+@pytest.mark.asyncio
+async def test_look_up_tool_failure_returns_outcome_not_raise(monkeypatch):
+    """search_web 抛错 → @tool_error 兜成结构化 outcome 喂回模型，不炸整轮（spec 决策 3）。"""
+
+    class _BoomSearch:
+        async def invoke(self, arguments):
+            raise RuntimeError("search backend down")
+
+    monkeypatch.setattr(lt, "search_web", _BoomSearch())
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error"
+
+
+def test_look_up_description_guides_question_driven_lookup():
+    """look_up 文案引导「带着具体问题去查、拿真答案」，不是漫无目的浏览（区别于刷手机）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["look_up"].definition.description
+    assert "查" in desc, "文案要让模型知道这是去查东西"
+    # 引导她带着自己想好的具体问题（不是无 query 的浏览）
+    assert "问题" in desc or "想知道" in desc
+
+
+# ---------------------------------------------------------------------------
+# browse_feed —— 「刷手机」的手（life web access Task 2）。
+#
+# 她没具体目的、就想随便逛逛时用：带一个从自己当下状态/心情里自然涌出的「方向」
+# （自然语言、可以很泛），工具拿这个方向去 search_web 捞一**批**（多条、像一条 feed）
+# 带源真内容回来供她浏览，翻到感兴趣的才停。与 look_up 的真区别：look_up 带一个具体
+# 问题求一个答案、返回聚焦；browse_feed 带一个泛方向逛一圈、返回一批供她挑选。
+#
+# 违宪红线（必守）：工具内不写死兴趣标签 / 规则、不替她猜该看啥、不另起 agent；她看
+# 啥全由她自己带进来的方向决定。边界（Non-goal）：刷的是她兴趣圈的东西、不是时政社会
+# 要闻（那归 world）——但只靠 docstring 引导，绝不用规则 / 黑名单 / 关键词过滤拦
+# （过滤就是工具内替她决策、违宪）。
+# ---------------------------------------------------------------------------
+
+
+# search_web 真实输出形如「一批」带源条目：每条 "[i] 标题\n    链接\n    摘录"，
+# 多条以空行分隔（像一条 feed 的多条）。
+_SEARCH_WEB_FEED_RESULT = (
+    "[1] 本季新番补全！这几部口碑爆了 - 某番剧站\n"
+    "    https://anime.example.com/season\n"
+    "    本季多部新番更新，讨论度最高的是……\n\n"
+    "[2] 大家都在聊的搞笑名场面合集 - 某社区\n"
+    "    https://bbs.example.com/funny\n"
+    "    最近刷屏的几个梗，评论区笑疯了。\n\n"
+    "[3] 那部你惦记的番更新了吗 - 某资讯号\n"
+    "    https://news.example.com/update\n"
+    "    第8话已更，本周讨论热度回升。"
+)
+
+
+def test_build_life_tools_includes_browse_feed():
+    """工具集常驻 browse_feed（「刷手机」的手），与 look_up / chat / 本子三件并列、不依赖 self_wake。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "browse_feed" in tools
+    assert isinstance(tools["browse_feed"], Tool)
+
+
+def test_browse_feed_and_look_up_are_two_distinct_hands_both_in_toolset():
+    """browse_feed 和 look_up 是两只**不同**的手、都在工具集里（语义不同、不是马甲）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    # 两只手都在
+    assert "look_up" in tools and "browse_feed" in tools
+    # 它们是不同的工具对象、不同的 name
+    assert tools["look_up"].name != tools["browse_feed"].name
+    # 业务参数也不同：look_up 带「问题」、browse_feed 带「方向」（参数名不同 = 用法不同）
+    look_up_props = set(tools["look_up"].definition.parameters["properties"])
+    feed_props = set(tools["browse_feed"].definition.parameters["properties"])
+    assert look_up_props == {"query"}
+    assert feed_props == {"direction"}
+    assert look_up_props != feed_props
+
+
+def test_browse_feed_schema_hides_mechanism_only_direction_exposed():
+    """模型只看见 direction 业务参数，看不见 lane / persona_id / act_id / num 等机制。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    params = tools["browse_feed"].definition.parameters
+    assert set(params["properties"]) == {"direction"}
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_passes_direction_and_asks_for_a_batch(monkeypatch):
+    """带 direction 调 browse_feed → 走到 search_web，方向原样作 query 传入、且要一批（num > 默认聚焦）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_FEED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["browse_feed"].invoke({"direction": "想看点搞笑的，还有那部番更没更"})
+
+    assert len(fake.calls) == 1, "browse_feed 必须走到 search_web"
+    call = fake.calls[0]
+    # 她涌出的方向原样作检索方向传给 search_web（工具不替她改写、不猜兴趣）
+    assert call.get("query") == "想看点搞笑的，还有那部番更没更"
+    # 刷手机是「逛一圈看有啥」—— 要一批（num 比 look_up 聚焦的默认多），像一条 feed
+    assert call.get("num", 0) > 5, "刷手机要捞一批（num > 默认聚焦的 5），像一条 feed"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_returns_batch_of_sources_into_context(monkeypatch):
+    """返回**一批**带源（标题 / 出处链接 / 摘录）进她当轮上下文 —— 不被压成一段话（承重红线）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_FEED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "刷刷新番和搞笑的"})
+
+    assert isinstance(out, str)
+    # 一批里每一条的标题 / 出处链接 / 摘录都原样在返回里（没被压成单段总结）。
+    assert "本季新番补全" in out, "第1条标题要进上下文"
+    assert "https://anime.example.com/season" in out, "第1条出处要进上下文"
+    assert "搞笑名场面合集" in out, "第2条标题要进上下文"
+    assert "https://bbs.example.com/funny" in out, "第2条出处要进上下文"
+    assert "https://news.example.com/update" in out, "第3条出处要进上下文"
+    # 多条来源都在 = 是「一批」、不是被消化成一句（与 look_up 聚焦不同）。
+    assert out.count("https://") >= 3, "刷手机返回的是一批带源内容、不被压成一段"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_nothing_new_says_so_no_fabrication(monkeypatch):
+    """search_web 没刷到（返回未配置 / 无结果文案）→ 如实说没刷到新鲜的，不编一批顶上。"""
+    fake = _FakeSearchWeb("搜索服务未配置或未搜索到结果")
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便看看"})
+
+    assert isinstance(out, str)
+    assert "没" in out, "没刷到要如实说（兜底），不编一批内容顶上"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_tool_failure_returns_outcome_not_raise(monkeypatch):
+    """search_web 抛错 → @tool_error 兜成结构化 outcome 喂回模型，不炸整轮（spec 决策 3）。"""
+
+    class _BoomSearch:
+        async def invoke(self, arguments):
+            raise RuntimeError("search backend down")
+
+    monkeypatch.setattr(lt, "search_web", _BoomSearch())
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便逛逛"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error"
+
+
+def test_browse_feed_description_guides_aimless_browsing_distinct_from_look_up():
+    """browse_feed 文案引导「漫无目的逛一圈、带泛方向看一批」，并明确「有具体问题求答案走 look_up」。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["browse_feed"].definition.description
+    # 漫无目的逛 / 看有啥新鲜的（不是带问题求答案）
+    assert ("随便" in desc) or ("逛" in desc) or ("刷" in desc)
+    assert "方向" in desc, "文案要让她知道带的是一个方向（不是必填检索词）"
+    # 明确「有具体问题求答案那是另一只手（look_up）、不走这里」
+    assert "look_up" in desc, "文案要把「有具体问题求答案」引向 look_up（两只手分清）"
+
+
+def test_browse_feed_does_not_hardcode_interest_rules():
+    """违宪红线：工具的**可执行代码**里不写死兴趣标签枚举 / 黑名单关键词过滤（看啥由她带的方向决定）。
+
+    源码层面钉死：browse_feed 的可执行代码（剔除 docstring + 注释后）里不出现硬编的
+    兴趣枚举（anime / career / gaokao 之类）当作分类规则，也不出现「时政 / 社会 / 灾害」
+    这类用于过滤拦截 result 的黑名单关键词——边界只靠 docstring 软引导，不靠规则拦
+    （过滤就是工具内替她决策、违宪）。剔注释 / docstring 是因为引导文字（"不写死兴趣
+    标签""不刷时政"）出现在说明里是允许的、甚至是该有的，违宪的是把它写成可执行逻辑。
+    """
+    import inspect
+
+    src = inspect.getsource(lt.build_life_tools)
+    # 截出 browse_feed 函数体那一段（到下一个 @tool_error 装饰的工具为止），只查它内部。
+    start = src.index("async def browse_feed")
+    rest = src[start:]
+    nxt = rest.find("@tool_error", 1)
+    body = rest if nxt == -1 else rest[:nxt]
+
+    # 只看可执行代码：去掉 docstring（三引号块）和 # 行注释——引导 / 说明文字允许出现，
+    # 违宪的是把兴趣规则 / 过滤写成可执行逻辑。
+    import re as _re
+
+    code = _re.sub(r'""".*?"""', "", body, flags=_re.DOTALL)
+    code_lines = []
+    for line in code.splitlines():
+        stripped = line.split("#", 1)[0]
+        if stripped.strip():
+            code_lines.append(stripped)
+    code_only = "\n".join(code_lines)
+
+    # 可执行代码里不写死兴趣标签枚举（这些 token 只可能作为硬编分类规则出现）
+    for banned in ("anime", "career", "gaokao", "时政", "灾害", "黑名单"):
+        assert banned not in code_only, (
+            f"browse_feed 可执行代码不该写死兴趣规则 / 过滤关键词：{banned!r}"
+        )
+    # 不对 search_web 结果做任何过滤 / 改写（原样进上下文）：可执行代码里不该出现
+    # 把 result 切片 / 替换 / 按关键词筛的操作。
+    assert "filter(" not in code_only, "browse_feed 不该过滤 search_web 结果"
+    assert ".replace(" not in code_only, "browse_feed 不该改写 search_web 结果"
+
+
+# ---------------------------------------------------------------------------
 # 本子工具 —— 备忘录 & 日程 app 第一块（她对本子能用的 note / edit_note /
 # read_notebook 三件）。常驻基础工具，与 update / act / chat 并列（不依赖 self_wake）。
 # ---------------------------------------------------------------------------
@@ -1757,3 +2134,124 @@ async def test_read_notebook_empty(stub_handlers):
     )
     out = await tools["read_notebook"].invoke({})
     assert isinstance(out, str) and out
+
+
+# ---------------------------------------------------------------------------
+# look_up / browse_feed × 真实 search_web 契约（集成测试，建议②）。
+#
+# 上面的单测都 monkeypatch 了 lt.search_web，拦不住 life↔search_web 之间的**真实契约
+# 漂移**：search_web 的失败 / 空文案变了、或 look_up / browse_feed 漏认某种失败信号，
+# 单测全绿但线上把失败当内容顶上去（违 spec 决策 4：拿不到真东西就如实说没查到、绝不
+# 编一个顶上）。这一组用**真实的 search_web Tool**（不 patch lt.search_web），只 patch
+# 它底层依赖的 capability（app/agent/tools/search.py 里的 _web_search_capability /
+# _rerank_capability），让 search_web 真实跑出它自己的失败 / 空文案，再断言 look_up /
+# browse_feed 把它如实收成「没查到 / 没刷到」、不当内容。将来 search_web 改了失败表达
+# 这组会挂、提醒同步 life 侧识别。
+# ---------------------------------------------------------------------------
+
+import app.agent.tools.search as search_mod  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_look_up_treats_real_search_web_failure_as_not_found(monkeypatch):
+    """必改① 回归守护：底层 capability 抛异常 → 真实 search_web 返回「网页搜索失败: ...」
+    → look_up 必须把它如实收成「没查到」、绝不当内容包装成「查到这些」。
+
+    走真实 search_web Tool（不 patch lt.search_web），只 patch 它底层的
+    _web_search_capability 抛异常 —— search_web 内部 catch 后真实返回前缀固定、后缀
+    变长的 ``f"网页搜索失败: {exc}"``。旧实现只精确匹配两条空文案 + 非 str，漏了这条
+    变长失败串 → 会被当真内容顶上去（红）。
+    """
+
+    async def boom_capability(*args, **kwargs):
+        raise RuntimeError("search backend exploded")
+
+    # 只 patch 底层 capability —— search_web 本身是真的（不动 lt.search_web）。
+    monkeypatch.setattr(search_mod, "_web_search_capability", boom_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert isinstance(out, str)
+    # 真实失败串必须被识别成「没查到」，绝不当内容包装。
+    assert "没查到" in out, "网页搜索失败串要如实收成『没查到』（必改①）"
+    assert "查到这些" not in out, "失败串绝不能被包装成『查到这些』顶上去"
+    # 底层异常文本不该原样泄进她的上下文（那就是把技术失败当内容了）。
+    assert "网页搜索失败" not in out
+    assert "search backend exploded" not in out
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_treats_real_search_web_failure_as_not_found(monkeypatch):
+    """必改① 回归守护（browse_feed 侧）：底层 capability 抛异常 → 真实 search_web 返回
+    「网页搜索失败: ...」→ browse_feed 必须如实收成「没刷到」、不当内容编一批顶上。"""
+
+    async def boom_capability(*args, **kwargs):
+        raise RuntimeError("search backend exploded")
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", boom_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便逛逛"})
+
+    assert isinstance(out, str)
+    assert "没刷到" in out, "网页搜索失败串要如实收成『没刷到』（必改①）"
+    assert "刷到这些" not in out, "失败串绝不能被包装成『刷到这些』顶上去"
+    assert "网页搜索失败" not in out
+    assert "search backend exploded" not in out
+
+
+@pytest.mark.asyncio
+async def test_look_up_treats_real_search_web_empty_as_not_found(monkeypatch):
+    """底层返回空（[]）→ 真实 search_web 返回「搜索服务未配置或未搜索到结果」→
+    look_up 把它识别成「没查到」（守护现有空文案契约）。"""
+
+    async def empty_capability(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", empty_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "某个查不到的冷门问题"})
+
+    assert isinstance(out, str)
+    assert "没查到" in out, "空结果要如实收成『没查到』"
+    assert "查到这些" not in out
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_treats_real_search_web_empty_as_not_found(monkeypatch):
+    """底层返回空（[]）→ 真实 search_web 返回「搜索服务未配置或未搜索到结果」→
+    browse_feed 把它识别成「没刷到」（守护现有空文案契约）。"""
+
+    async def empty_capability(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", empty_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便看看"})
+
+    assert isinstance(out, str)
+    assert "没刷到" in out, "空结果要如实收成『没刷到』"
+    assert "刷到这些" not in out
