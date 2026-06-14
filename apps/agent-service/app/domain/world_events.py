@@ -70,6 +70,25 @@ EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
 
 
+# 被动 event kind（**通道分离的权宜修复 v2**，prod 节奏失控）——单一定义处，写 / 读
+# 两端都从这里取（宪法「禁止重复定义」）。语义：这些 kind 是**被动上下文**、不主动
+# 唤醒她。她下次自己醒来（self-wake 到点）时通过 list_unread_events 自然读到，但它
+# 们的到来本身不敲门、不补敲、不打断长睡。
+#
+# 当前只有 surroundings（world 五官每轮给三姐妹各投一条周遭切片）。world ~30 分钟推
+# 一轮、每轮投一条，若走唤醒通道会把自排睡着的姐妹全敲醒、自排睡眠系统性睡不满——这是
+# prod 节奏失控的根因。把被动语义落在**已持久化的 kind** 上（而非投递瞬间的 wake 参数），
+# 让**即时敲门**（deliver_event）和**补敲对账**（list_personas_with_unread → renotify_
+# unread）两条路径都读同一处跳过被动——上一版只给即时敲门加 wake=False，没挡住 world
+# engine 每轮调的补敲（surroundings 入信箱就是"未读"、补敲照样叫醒），修复被绕过。
+#
+# **这是已知权宜修复、非完美方案。** 粗在"唤醒 vs 不唤醒"二分——被动 kind 完全不唤醒
+# 会让她对"该早点注意、但还没到 notify 级"的周遭变化有感知延迟（最坏延到她下次自排
+# 醒来）。更优方案（按变化显著度分级、或让 world 显式判这条切片要不要打断长睡）待探索，
+# 详见 memory ``project_world_sense_wake_tradeoff``。
+PASSIVE_EVENT_KINDS = frozenset({EVENT_KIND_SURROUNDINGS})
+
+
 # event ``source`` 协议里 NPC 来访的机读前缀（单一定义处，宪法「禁止重复定义」）。
 # NPC 来访以 kind=speech、``source`` = ``npc:名字`` 投递（:func:`app.world.tools.
 # npc_visit`），关系页 other_user_id 也用同形态——把 NPC 跟真人（``user:xxx``）、
