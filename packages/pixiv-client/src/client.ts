@@ -5,6 +5,7 @@ import {
     createDefaultPixivConfig,
     PixivGenericResponse,
     PixivProxyRequestBody,
+    PixivAuth,
     BaseResponse,
     PaginationResponse,
     ImageForLark,
@@ -49,6 +50,11 @@ export class PixivClient {
             url: baseUrl,
             referer: referer,
         };
+
+        const auth = await this.config.authProvider?.();
+        if (auth) {
+            reqBody.pixiv_auth = auth;
+        }
 
         return await sendAuthenticatedRequest<T>(
             `${this.config.proxyHost}/api/v2/proxy`,
@@ -210,7 +216,12 @@ export class PixivClient {
      * 下载 Pixiv 图片内容
      */
     async downloadContent(pixivUrl: string): Promise<void> {
-        const reqBody = { pixiv_url: pixivUrl };
+        const reqBody: { pixiv_url: string; pixiv_auth?: PixivAuth } = { pixiv_url: pixivUrl };
+
+        const auth = await this.config.authProvider?.();
+        if (auth) {
+            reqBody.pixiv_auth = auth;
+        }
 
         const response = await sendAuthenticatedRequest<BaseResponse<void>>(
             `${this.config.proxyHost}/api/v2/image-store/download`,
