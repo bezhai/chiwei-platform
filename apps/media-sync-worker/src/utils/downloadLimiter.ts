@@ -42,26 +42,29 @@ class DownloadLimiter {
 }
 
 async function limitConcurrency<T>(limit: number, tasks: (() => Promise<T>)[]): Promise<T[]> {
-    const results: T[] = [];
-    const executing: Promise<void>[] = [];
-  
-    for (const task of tasks) {
-      const p = task().then((result) => {
-        results.push(result);  // 将结果添加到结果数组中
-      });
-  
-      // 将执行中的任务推入执行队列
-      executing.push(p.then(() => undefined));  // 确保 Promise<void> 类型
-  
-      // 控制并发数量
-      if (executing.length >= limit) {
-        await Promise.race(executing);  // 等待队列中的某个任务完成
-        // 移除已完成的任务
-        executing.splice(executing.findIndex((e) => e === p), 1);
+    if (limit <= 0) {
+      throw new Error("limit must be greater than 0");
+    }
+    if (tasks.length === 0) {
+      return [];
+    }
+
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(limit, tasks.length);
+
+    async function worker(): Promise<void> {
+      while (true) {
+        const index = nextIndex;
+        nextIndex++;
+        if (index >= tasks.length) {
+          return;
+        }
+        results[index] = await tasks[index]();
       }
     }
-  
-    await Promise.all(executing);  // 等待所有剩余的任务完成
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
   }
 
