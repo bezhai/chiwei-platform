@@ -2,6 +2,7 @@ import { PixivClient, createPixivClient, FollowerInfo, IllustrationPageDetail } 
 import redisClient from "../redis/redisClient";
 import { GetIllustInfoBody } from "../service/types";
 import { cacheProxy } from "../utils/cache";
+import { getPixivAuth } from "./auth";
 
 // 创建 Pixiv 客户端实例
 const pixivClient = createPixivClient({
@@ -9,6 +10,7 @@ const pixivClient = createPixivClient({
   httpSecret: process.env.HTTP_SECRET || process.env.PROXY_HTTP_SECRET || '',
   defaultUserId: '35384654',
   getVersion: async () => redisClient.get("version"),
+  authProvider: getPixivAuth,
 });
 
 /**

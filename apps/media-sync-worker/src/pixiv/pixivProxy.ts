@@ -1,10 +1,12 @@
 // Re-export from @inner/pixiv-client for backward compatibility
 import { createPixivClient } from "@inner/pixiv-client";
+import { getPixivAuth } from "./auth";
 
 // 创建 Pixiv 客户端实例
 const pixivClient = createPixivClient({
   proxyHost: process.env.PIXIV_PROXY_HOST || 'http://www.yuanzhi.xyz',
   httpSecret: process.env.HTTP_SECRET || process.env.PROXY_HTTP_SECRET || '',
+  authProvider: getPixivAuth,
 });
 
 /**

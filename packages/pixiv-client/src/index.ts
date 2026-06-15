@@ -11,6 +11,7 @@ export type {
     // Pixiv API types
     PixivGenericResponse,
     PixivProxyRequestBody,
+    PixivAuth,
     FollowerInfo,
     FollowerBody,
     AuthorArtworkResponseBody,

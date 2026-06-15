@@ -158,12 +158,23 @@ export interface UploadLarkResp {
 }
 
 /**
+ * pixiv 鉴权头：随 proxy / 下载请求带给 server，由 server 转发给 pixiv.net。
+ * 字段缺失或为空时，server 端逐字段回退读自己的 Redis（过渡期兼容）。
+ */
+export interface PixivAuth {
+    cookie?: string;
+    user_agent?: string;
+    sec_ch_ua?: string;
+}
+
+/**
  * Pixiv 代理请求体
  */
 export interface PixivProxyRequestBody {
     url: string;
     referer: string;
     debug?: boolean;
+    pixiv_auth?: PixivAuth;
 }
 
 /**
@@ -178,6 +189,11 @@ export interface PixivClientConfig {
     defaultUserId?: string;
     /** 获取版本号的函数（用于 API 请求） */
     getVersion?: () => Promise<string | null>;
+    /**
+     * 运行时提供 pixiv 鉴权头（cookie/user-agent/sec-ch-ua），随 proxy / 下载请求
+     * 带给 server 转发给 pixiv.net。返回 undefined 时不带 pixiv_auth，server 回退读 Redis。
+     */
+    authProvider?: () => Promise<PixivAuth | undefined>;
 }
 
 /**
