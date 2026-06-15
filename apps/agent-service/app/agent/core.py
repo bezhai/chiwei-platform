@@ -66,6 +66,7 @@ from app.agent.neutral import (
     Message,
     Role,
     StreamChunk,
+    ToolCall,
     ToolDef,
     ToolResult,
 )
@@ -307,6 +308,8 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
 
+_TERMINAL_TOOL_NAMES = {"no_reply"}
+
 
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
@@ -342,6 +345,11 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
     # dict (incl. tool_error outcome) or any other JSON-able value → string
     text = json.dumps(content, ensure_ascii=False, default=str)
     return ToolResult(tool_call_id=result.tool_call_id, content=text)
+
+
+def _is_terminal_tool_call(call: ToolCall) -> bool:
+    """Whether a tool call intentionally ends the current agent turn."""
+    return call.name in _TERMINAL_TOOL_NAMES
 
 
 async def _run_loop(
@@ -405,6 +413,11 @@ async def _run_loop(
             convo.append(tool_msg)
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
+            if _is_terminal_tool_call(call):
+                final = Message(role=Role.ASSISTANT, content="")
+                if transcript_sink is not None:
+                    transcript_sink.append(final)
+                return final
 
     # recursion limit hit: return the last assistant message we have.
     return last if last is not None else Message(role=Role.ASSISTANT, content="")
@@ -496,6 +509,10 @@ async def _stream_loop(
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
             yield StreamChunk(tool_result=result)
+            if _is_terminal_tool_call(call):
+                if transcript_sink is not None:
+                    transcript_sink.append(Message(role=Role.ASSISTANT, content=""))
+                return
 
 
 @contextmanager

@@ -23,8 +23,6 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
-from openai import APITimeoutError
-from pydantic import BaseModel
 
 from app.agent.client import ModelClient
 from app.agent.context import AgentContext
@@ -140,6 +138,12 @@ async def blocks_tool(x: str) -> list:
     ]
 
 
+@tool
+async def no_reply() -> str:
+    """End the turn without sending any reply."""
+    return "ok"
+
+
 # ---------------------------------------------------------------------------
 # Helpers to import the loop functions under test
 # ---------------------------------------------------------------------------
@@ -198,6 +202,25 @@ class TestRunLoop:
         tool_msg = next(m for m in second_msgs if m.role == Role.TOOL)
         assert tool_msg.tool_call_id == "c1"
         assert tool_msg.text() == "echoed:x"
+
+    async def test_no_reply_tool_ends_without_second_model_call(self):
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="no_reply", arguments={})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="should not run"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == ""
+        assert len(fake.complete_calls) == 1
 
     async def test_parallel_tool_calls_all_dispatched(self):
         _run_loop, _ = _import_loops()
@@ -399,6 +422,29 @@ class TestStreamLoop:
         assert any(c.tool_call is not None for c in out)
         assert any(c.tool_result is not None for c in out)
         assert "".join(c.text or "" for c in out) == "final"
+
+    async def test_no_reply_tool_stream_ends_without_text_or_second_model_call(self):
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="no_reply", arguments={})
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(tool_call=call), StreamChunk(finish_reason="tool_calls")],
+                [StreamChunk(text="should not stream"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = []
+        async for chunk in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+        ):
+            out.append(chunk)
+        assert len(fake.stream_calls) == 1
+        assert any(c.tool_call is not None for c in out)
+        assert any(c.tool_result is not None for c in out)
+        assert "".join(c.text or "" for c in out) == ""
 
     async def test_no_tool_calls_does_not_loop(self):
         _, _stream_loop = _import_loops()
