@@ -37,6 +37,11 @@ Tagger 结果存储例外：打标结果写入本地 Mongo，复用 channel-serv
 ## 可选环境变量
 
 - `DOWNLOAD_CRON`：Pixiv 下载任务 cron 表达式，默认 `12 10 * * *`（每天 10:12）。
+- `DOWNLOAD_AFTER_ILLUST_INFO_DELAY_MS`：取作品信息后的等待时间，默认 `1500`（旧值减半）。
+- `DOWNLOAD_BEFORE_PAGE_DOWNLOAD_DELAY_MS`：单页图片代理下载前等待时间，默认 `1000`（旧值减半）。
+- `DOWNLOAD_AFTER_TASK_DELAY_MS`：每个下载任务完成后的等待时间，默认 `2500`（旧值减半）。
+- `DOWNLOAD_AFTER_AUTHOR_DELAY_MS`：作者发现阶段处理完一个作者后的等待时间，默认 `1500`（旧值减半）。
+- `DOWNLOAD_LIMITER_COOLDOWN_MS`：每 60 个下载任务后的冷却时间，默认 `120000`（旧值减半）。
 - `MINIO_SYNC_ENABLED`：开启 OSS→MinIO per-page 同步，默认关闭。
 - `MINIO_SYNC_TIMEOUT_MS`：单张 OSS→MinIO 同步硬超时，默认 `30000`。
 - `TAGGER_RESULT_MONGO_ENABLED`：开启本地 Mongo 结果库连接，默认关闭。

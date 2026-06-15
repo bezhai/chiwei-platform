@@ -7,6 +7,7 @@ import {
 } from "../pixiv/pixiv";
 import { FollowerInfo } from "../pixiv/types";
 import redisClient from "../redis/redisClient";
+import { loadDownloadDelayConfig, waitMs } from "./downloadRuntime";
 
 const RedisDownloadUserDictKey = "download_user_dict";
 
@@ -17,6 +18,7 @@ const getRandomDays = (): number => {
 // 异步下载服务
 export const startDownload = async (): Promise<void> => {
   console.log("Download service started...");
+  const delayConfig = loadDownloadDelayConfig();
 
   try {
     // 获取 "已上传" 标签下的关注者
@@ -28,7 +30,7 @@ export const startDownload = async (): Promise<void> => {
       // 这里放置你的下载逻辑
       // 假设你需要对每个作者执行下载操作
       for (const author of authorArr) {
-        await downloadEachUser(author);
+        await downloadEachUser(author, delayConfig);
       }
     } else {
       // 如果没有关注者，发送消息
@@ -41,7 +43,10 @@ export const startDownload = async (): Promise<void> => {
   }
 };
 
-const downloadEachUser = async (author: FollowerInfo): Promise<void> => {
+const downloadEachUser = async (
+  author: FollowerInfo,
+  delayConfig = loadDownloadDelayConfig()
+): Promise<void> => {
   console.log(`Downloading images for author: ${author.userName}`);
   // 执行下载逻辑...
   const authorId = author.userId;
@@ -88,8 +93,7 @@ const downloadEachUser = async (author: FollowerInfo): Promise<void> => {
 
     const result = await DownloadIllusts(downloadRequest);
 
-    // 模拟下载延迟
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await waitMs(delayConfig.afterAuthorMs);
 
     if (result) {
       console.log(`Download successful for author: ${authorId}`);
