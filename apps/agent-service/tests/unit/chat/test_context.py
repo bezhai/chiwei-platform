@@ -1,4 +1,11 @@
-"""Tests for app.chat.context proactive trigger handling."""
+"""Tests for app.chat.context trigger-info assembly.
+
+旧的 proactive 外部判断器旁路已删除：``build_chat_context`` 不再检测合成的
+``__proactive__`` 触发、不再有 ``is_proactive_var`` / ``proactive_stimulus_var``。
+历史 ``proactive_trigger`` 伪消息的排除已下沉到 DB 查询层（quick_search 用的
+``find_messages_with_user_chat_persona_*``），见 tests/data/
+test_quick_search_proactive_filter.py。这里只锁普通触发的上下文装配。
+"""
 
 from __future__ import annotations
 
@@ -8,12 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.chat.context import (
-    PROACTIVE_USER_ID,
-    build_chat_context,
-    is_proactive_var,
-    proactive_stimulus_var,
-)
+from app.chat.context import build_chat_context
 from app.chat.quick_search import QuickSearchResult
 
 
@@ -52,7 +54,8 @@ def _msg(
 
 
 @pytest.mark.asyncio
-async def test_build_chat_context_ignores_historical_proactive_for_normal_trigger():
+async def test_build_chat_context_uses_last_message_as_trigger():
+    """普通群聊触发：trigger 信息取最后一条，chain_user_ids 去重保序。"""
     history = [
         _msg(
             "m_target",
@@ -60,14 +63,6 @@ async def test_build_chat_context_ignores_historical_proactive_for_normal_trigge
             user_id="u_target",
             username="田泽鑫",
             minute=0,
-        ),
-        _msg(
-            "pro_old",
-            text="聊一下 AI 写需求后的测试思路",
-            user_id=PROACTIVE_USER_ID,
-            username=None,
-            minute=10,
-            reply_message_id="m_target",
         ),
         _msg(
             "m_current",
@@ -93,8 +88,6 @@ async def test_build_chat_context_ignores_historical_proactive_for_normal_trigge
     assert ctx.trigger_user_id == "u_current"
     assert ctx.chat_name == "测试群"
     assert ctx.chain_user_ids == ["u_target", "u_current"]
-    assert is_proactive_var.get(False) is False
-    assert proactive_stimulus_var.get("") == ""
 
     passed_messages, trigger_id, *_ = build_group_mock.call_args.args
     assert [msg.message_id for msg in passed_messages] == ["m_target", "m_current"]
@@ -102,58 +95,14 @@ async def test_build_chat_context_ignores_historical_proactive_for_normal_trigge
 
 
 @pytest.mark.asyncio
-async def test_build_chat_context_uses_current_proactive_trigger_only():
-    history = [
-        _msg(
-            "m_target",
-            text="我觉得这才是最大的卡点",
-            user_id="u_target",
-            username="田泽鑫",
-            minute=0,
-        ),
-        _msg(
-            "pro_old",
-            text="旧 proactive",
-            user_id=PROACTIVE_USER_ID,
-            username=None,
-            minute=5,
-            reply_message_id="m_old_target",
-        ),
-        _msg(
-            "m_recent",
-            text="@千凪 那我们吃啥",
-            user_id="u_recent",
-            username="冯宇林",
-            minute=22,
-            reply_message_id="m_target",
-        ),
-        _msg(
-            "pro_now",
-            text="聊一下 AI 写需求后的测试思路",
-            user_id=PROACTIVE_USER_ID,
-            username=None,
-            minute=34,
-            reply_message_id="m_target",
-        ),
-    ]
-    build_group_mock = MagicMock(return_value=["built"])
-
+async def test_build_chat_context_empty_history_returns_empty():
+    """quick_search 无结果 -> 空 ChatContext（不抛）。"""
     with (
-        patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
-        patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
-        patch("app.chat.context.ImageRegistry", new=MagicMock(return_value="registry")),
-        patch("app.chat.context.build_group_messages", new=build_group_mock),
+        patch("app.chat.context.quick_search", new=AsyncMock(return_value=[])),
     ):
-        ctx = await build_chat_context("pro_now")
+        ctx = await build_chat_context("m_missing")
 
-    assert ctx.messages == ["built"]
+    assert ctx.messages == []
     assert ctx.trigger_username == ""
     assert ctx.trigger_user_id == ""
-    assert ctx.chat_name == "测试群"
-    assert ctx.chain_user_ids == ["u_target", "u_recent"]
-    assert is_proactive_var.get(False) is True
-    assert proactive_stimulus_var.get("") == "聊一下 AI 写需求后的测试思路"
-
-    passed_messages, trigger_id, *_ = build_group_mock.call_args.args
-    assert [msg.message_id for msg in passed_messages] == ["m_target", "m_recent"]
-    assert trigger_id == "m_target"
+    assert ctx.chain_user_ids == []

@@ -30,8 +30,6 @@ __all__ = [
     "find_last_bot_reply_time",
     "find_gray_config",
     "find_user_messages_after",
-    "find_proactive_messages_in_chat",
-    "insert_proactive_message",
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
     "find_persona_spoken_chats_in_window",
@@ -282,37 +280,6 @@ async def find_user_messages_after(
         return [_record(row) for row in result.scalars().all()]
 
 
-async def find_proactive_messages_in_chat(
-    chat_id: str,
-    *,
-    bot_name: str,
-    proactive_user_id: str,
-    since_ms: int,
-) -> list[CommonMessageRecord]:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return []
-
-    stmt = (
-        select(CommonMessage)
-        .where(
-            CommonMessage.common_conversation_id == chat_uuid,
-            CommonMessage.message_type == "proactive_trigger",
-            CommonMessage.bot_name == bot_name,
-            CommonMessage.event_time >= since_ms,
-        )
-        .order_by(CommonMessage.event_time.desc())
-    )
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        return [_record(row) for row in result.scalars().all()]
-
-
-async def insert_proactive_message(message: CommonMessage) -> None:
-    async with auto_tx():
-        current_session().add(message)
-
-
 async def find_messages_with_user_chat_persona_by_root(
     *,
     root_message_id: str,
@@ -339,6 +306,15 @@ async def find_messages_with_user_chat_persona_by_root(
         )
         .where(CommonMessage.common_root_message_id == root_uuid)
         .where(CommonMessage.event_time <= until_create_time)
+        # 历史 proactive_trigger 伪消息（旧外部判断器旁路遗留，已删）剔除：它是
+        # 触发器记录、不是真实对话，绝不能混进可见聊天上下文。NULL-safe（正常
+        # 消息 message_type 多为 NULL，裸 != 会把 NULL 行一并丢掉）。
+        .where(
+            or_(
+                CommonMessage.message_type.is_(None),
+                CommonMessage.message_type != "proactive_trigger",
+            )
+        )
         .order_by(CommonMessage.event_time.asc())
     )
     async with auto_tx():
@@ -385,6 +361,11 @@ async def find_messages_with_user_chat_persona_in_chat(
             CommonMessage.common_root_message_id != root_uuid,
             CommonMessage.event_time >= after_create_time,
             CommonMessage.event_time < before_create_time,
+            # 历史 proactive_trigger 伪消息剔除（NULL-safe，同 _by_root）。
+            or_(
+                CommonMessage.message_type.is_(None),
+                CommonMessage.message_type != "proactive_trigger",
+            ),
         )
         .order_by(CommonMessage.event_time.desc())
         .limit(limit)

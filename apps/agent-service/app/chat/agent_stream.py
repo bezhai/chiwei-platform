@@ -24,11 +24,7 @@ from app.agent.context import AgentContext
 from app.agent.core import Agent, AgentConfig
 from app.agent.tools import ALL_TOOLS
 from app.api.middleware import CHAT_PIPELINE_DURATION, CHAT_TOKENS
-from app.chat.context import (
-    build_chat_context,
-    is_proactive_var,
-    proactive_stimulus_var,
-)
+from app.chat.context import build_chat_context
 from app.chat.post_actions import schedule_post_actions
 from app.chat.stream import (
     StreamState,
@@ -107,8 +103,6 @@ async def _build_and_stream(
             trigger_user_id=ctx.trigger_user_id,
             trigger_username=ctx.trigger_username,
             chat_name=ctx.chat_name,
-            is_proactive=is_proactive_var.get(False),
-            proactive_stimulus=proactive_stimulus_var.get(""),
             persona_id=bot_ctx.persona_id,
         )
     except Exception as e:

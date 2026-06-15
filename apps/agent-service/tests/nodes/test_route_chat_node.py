@@ -23,11 +23,10 @@ async def test_route_chat_node_short_circuits_when_completed(monkeypatch):
 
     reset_emit_runtime()
     seen = []
-    captured_kwargs = {}
+    captured = {}
 
-    async def fake_completed(session_id, *, is_proactive=False):
-        captured_kwargs["session_id"] = session_id
-        captured_kwargs["is_proactive"] = is_proactive
+    async def fake_completed(session_id):
+        captured["session_id"] = session_id
         return True
 
     async def fake_emit(*a, **k):
@@ -36,10 +35,10 @@ async def test_route_chat_node_short_circuits_when_completed(monkeypatch):
     monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
     monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
 
-    t = ChatTrigger(message_id="m1", session_id="s1", is_proactive=True)
+    t = ChatTrigger(message_id="m1", session_id="s1")
     await chat_node_mod.route_chat_node(t)
 
-    assert captured_kwargs == {"session_id": "s1", "is_proactive": True}
+    assert captured == {"session_id": "s1"}
     assert seen == []  # 被 short-circuit
 
 
@@ -48,7 +47,7 @@ async def test_route_chat_node_runs_router_when_not_completed(monkeypatch):
     """is_chat_request_completed 返 False -> 继续往下跑（验证至少不抛）。"""
     from app.nodes import chat_node as chat_node_mod
 
-    async def fake_completed(session_id, *, is_proactive=False):
+    async def fake_completed(session_id):
         return False
 
     async def fake_emit(*a, **k):

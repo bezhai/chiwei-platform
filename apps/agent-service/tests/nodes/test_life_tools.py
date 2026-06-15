@@ -70,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
+    """不给 self_wake 时工具集是 update_life_state + act + chat + look_up_contact + send_message + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -82,6 +82,8 @@ def test_build_life_tools_returns_base_tools():
         "update_life_state",
         "act",
         "chat",
+        "look_up_contact",
+        "send_message",
         "note",
         "edit_note",
         "read_notebook",
@@ -443,6 +445,8 @@ def test_build_life_tools_includes_schedule_when_slot_given():
         "update_life_state",
         "act",
         "chat",
+        "look_up_contact",
+        "send_message",
         "note",
         "edit_note",
         "read_notebook",
@@ -2310,3 +2314,463 @@ async def test_browse_feed_treats_real_search_web_empty_as_not_found(monkeypatch
     assert isinstance(out, str)
     assert "没刷到" in out, "空结果要如实收成『没刷到』"
     assert "刷到这些" not in out
+
+
+# ===========================================================================
+# 隔手机发消息（life proactive messaging, task 3）。
+#
+# 「当面说话」(chat) 与「隔手机发消息」(send_message) 是两个**模态**、两只手 ——
+# 模态由 life 自己选（用哪只手），代码不替她判该当面还是手机（spec 决策 4）。
+#
+#   * look_up_contact —— 报名字模糊查候选（uid + 简介）给她挑，只返回不取第一个
+#     （spec 决策 3：选谁是她的决定）。
+#   * send_message —— 按她选的 uid 隔空发：
+#       - 姐妹（MailboxTarget）：走信箱、但用**手机消息 kind**（EVENT_KIND_MESSAGE），
+#         和当面 speech（EVENT_KIND_SPEECH）在收件人侧可区分（spec 决策 5）。
+#       - 真人（LarkP2PTarget）：emit 出站 ChatResponseSegment（is_proactive=True、
+#         真实 chat_id，不靠伪来源 id）。
+#       - 不可投递（UndeliverableRecipient）：作为 tool error 喂回 life（spec 决策 6）。
+# ===========================================================================
+
+
+@pytest.fixture
+def stub_directory(monkeypatch):
+    """把目录解析层（search_recipients / resolve_delivery）和出站 emit 换成可观测 fake。"""
+    from app.domain.recipient_directory import (
+        LarkP2PTarget,
+        MailboxTarget,
+        RecipientCandidate,
+        UndeliverableRecipient,
+    )
+
+    state: dict = {
+        "search_calls": [],
+        "resolve_calls": [],
+        "emitted": [],
+        # 测试按需预置：search_recipients 返回的候选 / resolve_delivery 的解析结果。
+        "candidates": [],
+        "resolve_result": None,
+        "resolve_raises": None,
+    }
+
+    async def fake_search_recipients(query):
+        state["search_calls"].append(query)
+        return state["candidates"]
+
+    async def fake_resolve_delivery(uid):
+        state["resolve_calls"].append(uid)
+        if state["resolve_raises"] is not None:
+            raise state["resolve_raises"]
+        return state["resolve_result"]
+
+    async def fake_emit(data):
+        state["emitted"].append(data)
+
+    monkeypatch.setattr(lt, "search_recipients", fake_search_recipients)
+    monkeypatch.setattr(lt, "resolve_delivery", fake_resolve_delivery)
+    monkeypatch.setattr(lt, "emit", fake_emit)
+
+    state["_RecipientCandidate"] = RecipientCandidate
+    state["_MailboxTarget"] = MailboxTarget
+    state["_LarkP2PTarget"] = LarkP2PTarget
+    state["_UndeliverableRecipient"] = UndeliverableRecipient
+    return state
+
+
+# --- 新 event kind：手机/隔空消息 ≠ 当面 speech ----------------------------
+
+
+def test_message_kind_is_distinct_from_speech():
+    """手机消息 kind（EVENT_KIND_MESSAGE）必须 ≠ 当面 speech kind（收件人侧可区分，决策 5）。"""
+    from app.domain.world_events import EVENT_KIND_MESSAGE, EVENT_KIND_SPEECH
+
+    assert EVENT_KIND_MESSAGE != EVENT_KIND_SPEECH
+
+
+def test_message_kind_is_not_passive_wakes_recipient():
+    """手机消息是发给对方让 ta 看到的 → 不是被动 kind（投递要敲门唤醒收件人，对称 speech）。"""
+    from app.domain.world_events import (
+        EVENT_KIND_MESSAGE,
+        EVENT_KIND_SPEECH,
+        PASSIVE_EVENT_KINDS,
+    )
+
+    assert EVENT_KIND_MESSAGE not in PASSIVE_EVENT_KINDS, (
+        "手机消息发给对方让 ta 看到，必须唤醒收件人（与 speech 一样不被动）"
+    )
+    # speech 现状也非被动（守护：两者唤醒语义一致）。
+    assert EVENT_KIND_SPEECH not in PASSIVE_EVENT_KINDS
+
+
+# --- look_up_contact：查名字拿候选（只返回、不替她选） ----------------------
+
+
+def test_build_life_tools_includes_contact_and_send_tools():
+    """工具集常驻 look_up_contact（查名字）+ send_message（隔空发），与 chat 并列。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "look_up_contact" in tools
+    assert "send_message" in tools
+    assert isinstance(tools["look_up_contact"], Tool)
+    assert isinstance(tools["send_message"], Tool)
+
+
+def test_send_tools_schema_hides_mechanism():
+    """模型只看见业务参数：look_up_contact(query)、send_message(uid, content)。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert set(tools["look_up_contact"].definition.parameters["properties"]) == {"query"}
+    assert set(tools["send_message"].definition.parameters["properties"]) == {
+        "uid",
+        "content",
+    }
+
+
+@pytest.mark.asyncio
+async def test_look_up_contact_returns_all_candidates_with_uid_and_intro(stub_directory):
+    """报名字 → search_recipients → 候选（uid + 简介）原样列给她，不排序不取第一个（决策 3）。"""
+    RC = stub_directory["_RecipientCandidate"]
+    stub_directory["candidates"] = [
+        RC(uid="persona:akao", display_name="赤尾", intro="赤尾（你的姐妹）：高三的妹妹"),
+        RC(uid="user:u-1", display_name="赤尾", intro="赤尾（真人）"),
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="chinagi", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up_contact"].invoke({"query": "赤尾"})
+
+    assert stub_directory["search_calls"] == ["赤尾"]
+    assert isinstance(out, str)
+    # 两个重名候选都列出来交给她挑（不替她取第一个）。
+    assert "persona:akao" in out and "user:u-1" in out
+    assert "你的姐妹" in out and "真人" in out
+
+
+@pytest.mark.asyncio
+async def test_look_up_contact_no_candidates_says_so(stub_directory):
+    """查不到任何候选 → 如实说没找到（喂回 life 让她换名字 / 算了），不静默给空。"""
+    stub_directory["candidates"] = []
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up_contact"].invoke({"query": "查无此人"})
+    assert isinstance(out, str)
+    assert "没找到" in out or "查不到" in out
+
+
+# --- send_message → 姐妹：手机消息进信箱（新 kind） ------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_delivers_with_message_kind(
+    stub_handlers, stub_directory
+):
+    """uid 解析成 MailboxTarget（姐妹）→ 走信箱投递、kind=EVENT_KIND_MESSAGE（手机消息）。
+
+    关键区分（决策 5）：和当面 chat 的 speech kind 不同 —— 收件人侧能看出这是「手机
+    发来的消息」而非「当面说的话」。source 是发送者 persona_id。
+    """
+    from app.domain.world_events import EVENT_KIND_MESSAGE
+
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="ayana"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "persona:ayana", "content": "姐姐我到学校了"}
+    )
+
+    assert isinstance(out, str) and out
+    assert stub_directory["resolve_calls"] == ["persona:ayana"]
+    assert len(stub_handlers["delivered"]) == 1
+    d = stub_handlers["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "ayana", "手机消息直投收件人姐妹信箱"
+    assert d["summary"] == "姐姐我到学校了"
+    assert d["kind"] == EVENT_KIND_MESSAGE, "手机消息用新 kind，和当面 speech 区分"
+    assert d["kind"] != lt.EVENT_KIND_SPEECH
+    assert d["source"] == "akao", "source 是发送者 persona_id"
+    assert d["occurred_at"] == "2026-06-03T12:30:00+00:00"
+    # 姐妹手机消息不走出站队列（那是真人飞书私聊的事）。
+    assert stub_directory["emitted"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_does_not_emit_outbound(
+    stub_handlers, stub_directory
+):
+    """姐妹手机消息只进信箱、不 emit ChatResponseSegment（出站只给真人飞书）。"""
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="chinagi"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke({"uid": "persona:chinagi", "content": "在吗"})
+    assert stub_directory["emitted"] == []
+    assert len(stub_handlers["delivered"]) == 1
+
+
+# --- send_message → 真人：emit 出站段（is_proactive、真实 chat_id、不靠伪 id） ---
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_emits_outbound_segment(
+    stub_handlers, stub_directory
+):
+    """uid 解析成 LarkP2PTarget（真人）→ emit ChatResponseSegment 到 chat_response 出站。
+
+    出站段（task 4 接力送达飞书）字段：is_proactive=True、is_p2p=True、
+    chat_id=真实 common_conversation_id、bot_name、channel、persona_id=发送者、
+    content=内容、lane 显式带。绝不投信箱（真人没有 life 信箱）。
+    """
+    from app.domain.chat_dataflow import ChatResponseSegment
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗，方便聊两句吗"}
+    )
+
+    assert isinstance(out, str) and out
+    assert stub_directory["resolve_calls"] == ["user:u-real-1"]
+    # 真人不进信箱（真人没有 life 信箱）。
+    assert stub_handlers["delivered"] == []
+    # 恰好 emit 一条出站段。
+    assert len(stub_directory["emitted"]) == 1
+    seg = stub_directory["emitted"][0]
+    assert isinstance(seg, ChatResponseSegment)
+    assert seg.is_proactive is True, "主动发：is_proactive 标识复用 worker 出站分支"
+    assert seg.is_p2p is True, "真人投递走飞书私聊"
+    assert seg.chat_id == "cc-direct-1", "用真实 p2p 会话 id 当 chat_id（worker 反查渠道）"
+    assert seg.bot_name == "chiwei", "用 resolver 给的发送 bot"
+    assert seg.channel == "lark"
+    assert seg.user_id == "u-real-1"
+    assert seg.persona_id == "akao", "persona_id 是发送者（worker 据它选 bot 身份兜底）"
+    assert seg.content == "在忙吗，方便聊两句吗"
+    assert seg.lane == "coe-t3", "lane 必须显式带（sink 不注入 header lane）"
+    assert seg.is_last is True, "主动发是一段完整消息（worker 据 is_last 收口）"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_return_is_honest_async_not_guaranteed(
+    stub_handlers, stub_directory
+):
+    """真人分支诚实返回（codex 必改 2，bezhai 决策）：给真人发是异步的（emit 到 MQ →
+    另一进程 worker 发飞书），emit 成功只是「入队成功」、不等于「送达成功」。返回措辞
+    不能说「发到了 / 对方收到了」，要说「已发出（异步送达、不保证送到）」这类，让 life
+    知道是发出去了、最终送达异步、可能失败。
+
+    **本刀不做异步失败回流**——只把入队当入队、诚实说出去。同步可知的失败
+    （UndeliverableRecipient）继续 fail-loud 喂回不变（见 undeliverable 测试）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert isinstance(out, str) and out
+    # 入队成功才返回（emit 一条出站段），但措辞诚实「已发出、异步、不保证送达」。
+    assert len(stub_directory["emitted"]) == 1
+    assert "已发出" in out, f"真人分支应说「已发出」（入队成功），实得 {out!r}"
+    assert ("不保证" in out) or ("不一定" in out), (
+        f"真人分支要点明最终送达不保证（异步可能失败），实得 {out!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_return_unchanged_synchronous_delivered(
+    stub_handlers, stub_directory
+):
+    """姐妹分支（信箱、同步落库）返回保持原样、不染上「异步不保证」措辞（codex 必改 2）。
+
+    姐妹走信箱是同步落库的：deliver_event 成功就是真送到她信箱了，和真人异步 emit 不同。
+    所以姐妹分支返回的是确定送达语义，**不能**说「不保证送达」。承重断言：姐妹返回 ≠
+    真人那条「不保证」措辞。
+    """
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="ayana"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "persona:ayana", "content": "姐姐我到学校了"}
+    )
+
+    assert isinstance(out, str) and out
+    assert len(stub_handlers["delivered"]) == 1, "姐妹同步落库（deliver_event）"
+    assert "不保证" not in out and "不一定" not in out, (
+        f"姐妹是同步落库、确定送达，不该染上「不保证送达」措辞，实得 {out!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_does_not_carry_fake_source_id(
+    stub_handlers, stub_directory
+):
+    """主动发没有来源消息 → 出站段绝不带伪造的来源 message_id / root_id（codex 红线）。
+
+    worker 旧路径靠 message_id 反查 LarkMessage 渠道地址；主动发没有来源消息，若塞一个
+    伪 message_id 会让 worker 反查炸。这里保证 message_id / root_id 不是伪造的来源 id ——
+    要么为空、要么是不指向任何 LarkMessage 的本地派生键。承重断言：它**不等于**任何真实
+    来源消息 id，task 4 的 worker 主动发分支据此走「不反查来源、直接用 chat_id」的路径。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    seg = stub_directory["emitted"][0]
+    # 主动发没有来源消息：root_id 必须为空（不伪造一条「被回复的消息」）。
+    assert not seg.root_id, "主动发没有来源消息，root_id 不能伪造"
+    # message_id 不能是指向某条真实来源 LarkMessage 的 id。它要么空、要么是带主动发
+    # 命名空间前缀的本地派生键（明显不是渠道来源消息 id），让 worker 能识别「这是主动发、
+    # 别反查来源」。
+    assert (not seg.message_id) or seg.message_id.startswith("proactive:"), (
+        f"message_id 不能是伪造的来源消息 id，实得 {seg.message_id!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_idempotent_segment_key_stable_under_replay(
+    stub_directory,
+):
+    """整轮重投同序 send_message（同 base act_id）→ 出站段 (message_id, part_index) 稳定。
+
+    出站段是 transient（不落 agent-service 表），但 message_id 仍是 Key —— 主动发的
+    段键从 (base act_id, send 序号) 纯函数派生，重投同序得同一键，便于下游按键去重 /
+    对齐（对称 chat 的 per-chat 键）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+
+    def _run_round():
+        return _tools_by_name(
+            lt.build_life_tools(
+                lane="coe-t3", persona_id="akao", act_id="same-base",
+                observed_at="2026-06-03T12:30:00+00:00",
+            )
+        )
+
+    tools_a = _run_round()
+    await tools_a["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    first_key = (
+        stub_directory["emitted"][0].message_id,
+        stub_directory["emitted"][0].part_index,
+    )
+
+    stub_directory["emitted"].clear()
+    tools_b = _run_round()
+    await tools_b["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    replay_key = (
+        stub_directory["emitted"][0].message_id,
+        stub_directory["emitted"][0].part_index,
+    )
+    assert replay_key == first_key, "重投同序主动发段键必须稳定（幂等）"
+
+
+# --- send_message → 不可投递：tool error 喂回 life ------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_message_undeliverable_uid_becomes_tool_error(
+    stub_handlers, stub_directory
+):
+    """uid 不可投递（resolver 抛 UndeliverableRecipient）→ tool error 喂回 life（决策 6）。
+
+    不静默降级、不代她另找目标 —— 把「发不了 + 原因」作为工具错误反馈，让她自己处置
+    （换个人 / 重试 / 算了）。原因文本（str(exc)）要带进 tool error message。
+    """
+    reason = "user:u-x 没有可投递的飞书私聊会话，发不了——这边只能发已经私聊过的人。"
+    stub_directory["resolve_raises"] = stub_directory["_UndeliverableRecipient"](reason)
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke({"uid": "user:u-x", "content": "在吗"})
+
+    assert isinstance(out, dict), "不可投递应被 @tool_error 收成结构化 outcome 喂回模型"
+    assert out["kind"] == "tool_error"
+    assert reason in out["message"], "原因文本要带给 life（她自己处置）"
+    # 既没投信箱、也没 emit 出站（不静默降级、不另找目标）。
+    assert stub_handlers["delivered"] == []
+    assert stub_directory["emitted"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_message_unknown_target_type_is_tool_error(
+    stub_handlers, stub_directory
+):
+    """resolver 返回的不是 Mailbox/LarkP2P（理论不该发生）→ 报错喂回，不静默吞。"""
+    stub_directory["resolve_result"] = object()  # 非已知投递目标类型
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke({"uid": "weird:1", "content": "hi"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert stub_handlers["delivered"] == []
+    assert stub_directory["emitted"] == []

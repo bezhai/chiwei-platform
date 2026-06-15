@@ -49,6 +49,10 @@ from app.agent.tools.search import search_web
 
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
+from app.domain.chat_dataflow import (
+    PROACTIVE_MESSAGE_ID_PREFIX,
+    ChatResponseSegment,
+)
 from app.domain.life_state import save_life_state, set_life_next_wake_at
 from app.domain.notebook import (
     STATUS_DONE,
@@ -58,9 +62,22 @@ from app.domain.notebook import (
     render_notebook,
     update_entry,
 )
-from app.domain.world_events import EVENT_KIND_SPEECH, perform_act
+
+# module-level 引用目录解析层 + 投递目标类型，让 send_message 按 uid 解析投递目标，
+# 也让测试能 monkeypatch（与 deliver_event / perform_act 同款）。
+from app.domain.recipient_directory import (
+    LarkP2PTarget,
+    MailboxTarget,
+    resolve_delivery,
+    search_recipients,
+)
+from app.domain.world_events import (
+    EVENT_KIND_MESSAGE,
+    EVENT_KIND_SPEECH,
+    perform_act,
+)
 from app.infra import cst_time
-from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
+from app.runtime.emit import emit, emit_delayed  # module-level so tests can monkeypatch
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +212,13 @@ def build_life_tools(
     # 天然不相交（三者共用同一 base act_id）。命门同 act_seq / chat_seq：只在落库成功后
     # 才推进（失败重试用同一序号 → 同一 entry_id → 去重只落一条）。
     note_seq = 0
+
+    # 本轮已**确认成功发出**的 send_message 件数（round-scoped 序号，对称 chat_seq）。
+    # 隔空发同样整轮重投幂等、一轮多次各自独立 —— 投递键（姐妹手机消息 event_id /
+    # 真人出站段 message_id）从 (base act_id, "send:N" 序号) 派生。**带 "send:" 前缀**让
+    # 它与 act / chat / note 的 seed 空间天然不相交（四者共用同一 base act_id）。命门同
+    # 其余 *_seq：只在成功发出后才推进（失败重试用同一序号 → 同一键 → 下游去重只落一条）。
+    send_seq = 0
 
     @tool_error("更新此刻状态失败")
     async def update_life_state(
@@ -391,6 +415,145 @@ def build_life_tools(
         # 一序号 → 同一对键 → 去重只各落一条）。
         chat_seq = next_seq
         return "说了"
+
+    @tool_error("查联系人失败")
+    async def look_up_contact(query: str) -> str:
+        """报一个名字，查出可以隔空发消息的人有哪些（候选给你挑，不替你选）。
+
+        想给谁隔空发消息（send_message）、但手里只有一个名字时，先用它查一下：把名字
+        给它，它返回所有名字对得上的候选——每个候选带一个**稳定 id（uid）**和一段简介
+        （帮你认人、区分重名）。挑哪一个是你自己的决定，它绝不替你排序、不替你取第一个。
+
+        查到一个或多个候选 → 你看简介认出要发的那个人，记下 ta 的 uid，再用 send_message
+        按那个 uid 发。查不到任何人 → 它如实说没找到，那就当真没这个人（换个名字、或算了）。
+
+        这只手只**查名字拿 uid**，不发消息；发用 send_message。给三姐妹**当面**说话不走
+        这里（那是 chat）——这只手是为「隔空发消息给某个人、先把 ta 是谁查清楚」用的。
+
+        Args:
+            query: 你要找的人的名字（自然语言，可模糊，如"赤尾""妈妈"）。
+
+        Returns:
+            候选列表文本（每个候选带 uid + 简介）；查不到时一句如实说明。
+        """
+        candidates = await search_recipients(query)
+        if not candidates:
+            return f"没找到叫「{query}」的人——换个名字再查，或者就算了。"
+        # 原样把候选（uid + 简介）列给她挑，**不排序、不取第一个、不替她筛**（spec
+        # 决策 3：选谁是她的决定）。每条标出 uid（她用它调 send_message）+ 简介（认人）。
+        lines = [f"叫「{query}」的有这些，看简介认出要发的那个，记下 ta 的 uid 再发："]
+        for c in candidates:
+            lines.append(f"- uid={c.uid}：{c.intro}")
+        return "\n".join(lines)
+
+    @tool_error("发消息失败")
+    async def send_message(uid: str, content: str) -> str:
+        """隔着手机给某个人发一条消息（不在一起时用，给三姐妹或真人都行）。
+
+        这是「隔空发消息」的手，和**当面说话**（chat）是两件事、两只手：你们不在
+        一起时（ta 在学校、出了门、或本就是手机另一头的真人），想说的话发到 ta 那里
+        就用它。当面就在你身边的姐妹，用 chat 当面说，不用这个。该当面还是该发消息，
+        你自己读懂此刻的情形决定。
+
+        uid 是要发的那个人的稳定 id——你心里有数就直接给（三姐妹的 uid 是
+        ``persona:akao`` / ``persona:chinagi`` / ``persona:ayana``）；只记得名字、
+        不确定 uid，先用 look_up_contact 报名字查出 uid 再发。
+
+        发给姐妹 → 像手机消息一样进她那边，她下次回过神 / 醒来读到「你给她发的消息」。
+        发给真人 → 消息会发往 ta 的手机，但**这是异步的**：你这边只是把消息发了出去，
+        它最终能不能送到 ta 手机上、ta 看没看到，你当场都不知道、也不保证一定送到
+        （网络、对方状态都可能让它没送达）。所以发完它只会告诉你「已发出」，不会说
+        「对方收到了」——别把「已发出」当成「ta 已经看到 / 会回你」。**对方可能一时没看、
+        或这个人这边根本发不出去**（比如从没和你私聊过的人），这都正常：当场就发不出去时
+        它会告诉你发不了和原因，你自己定怎么办（换个人、待会儿再说、或算了），它绝不
+        偷偷替你改发给别人。
+
+        Args:
+            uid: 收件人的稳定 id（``persona:<姐妹>`` 或真人的 ``user:<id>``）。
+            content: 你要发的话（你自己的原话，原样发出去）。
+
+        Returns:
+            一句确认；发不出去时一句说明原因（喂回你自己处置）。
+        """
+        nonlocal send_seq
+        # 解析投递目标：resolver 查不到 / 不可投递时抛 UndeliverableRecipient，
+        # @tool_error 把它收成结构化 outcome（str(exc) 进 message）喂回 life 让她处置
+        # （换个人 / 重试 / 算了）——不在这里 catch、不静默降级、不替她另找目标（决策 6）。
+        target = await resolve_delivery(uid)
+
+        # next_seq 模式（命门同 chat_seq / act_seq）：用 send_seq+1 算这件 send 的投递键，
+        # 但**先不推进 send_seq** —— 成功发出后才推进。@tool_error 会吞掉发送抛的错让模型
+        # 重试；失败重试用**同一个** next_seq → 同一投递键 → 下游 durable 去重只落一条。
+        next_seq = send_seq + 1
+        # per-send 基键：base act_id + "send:N" 序号。**带 "send:" 前缀**让它与 act /
+        # chat / note 的 seed 空间天然不相交（共用同一 base act_id）。
+        send_base = f"{act_id}:send:{next_seq}"
+
+        if isinstance(target, MailboxTarget):
+            # 姐妹（手机消息）→ 走信箱投递，但用**手机消息 kind**（EVENT_KIND_MESSAGE），
+            # 和当面 chat 的 speech kind 区分（spec 决策 5：收件人侧能看出是手机发来的、
+            # 不是当面说的）。source = 发送者 persona_id；不经 world、不给 world 元信息
+            # （隔空发不在物理场景里、没有「这里有人在交谈」的氛围可言）。
+            event_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{send_base}:msg"))
+            await deliver_event(
+                lane=lane,
+                persona_id=target.persona_id,
+                event_id=event_id,
+                summary=content,
+                occurred_at=observed_at,
+                kind=EVENT_KIND_MESSAGE,
+                source=persona_id,
+            )
+            send_seq = next_seq
+            return "发出去了"
+
+        if isinstance(target, LarkP2PTarget):
+            # 真人（飞书私聊）→ emit 一条主动发出站段到 chat_response 队列，task 4 的
+            # chat-response-worker is_proactive 分支接力送达飞书（不靠伪 id）。
+            #
+            # 主动发**没有来源消息**：message_id 不能是指向真实来源消息的 id（worker 反查
+            # 会炸）—— 用 proactive: 前缀 + 本轮派生键明确「这是主动发、非来源消息 id」，
+            # root_id 留空（不伪造一条「被回复的消息」）。worker 据 is_proactive 走不反查
+            # 来源、直接用 chat_id（= 真实 p2p common_conversation_id）+ bot_name 的路径。
+            proactive_message_id = (
+                f"{PROACTIVE_MESSAGE_ID_PREFIX}"
+                f"{uuid.uuid5(uuid.NAMESPACE_OID, f'{send_base}:p2p')}"
+            )
+            await emit(
+                ChatResponseSegment(
+                    channel=target.channel,
+                    message_id=proactive_message_id,
+                    persona_id=persona_id,  # 发送者（worker 据它兜底选 bot 身份）
+                    part_index=0,
+                    session_id=None,        # 主动发没有 chat session
+                    chat_id=target.common_conversation_id,  # 真实 p2p 会话地址
+                    is_p2p=True,
+                    root_id=None,           # 主动发没有来源消息，不伪造 root
+                    user_id=target.user_id,
+                    is_proactive=True,      # 复用 worker 既有 is_proactive 出站分支
+                    bot_name=target.bot_name,
+                    lane=lane,              # 必须显式带：sink 不注入 header lane
+                    content=content,
+                    status="success",
+                    is_last=True,           # 主动发是一段完整消息
+                    full_content=content,
+                )
+            )
+            send_seq = next_seq
+            # 诚实返回（codex 必改 2，bezhai 决策）：给真人发是异步的 —— emit 只是把
+            # 出站段入了 chat_response 队列，真正发到飞书是另一进程的 worker 干的。
+            # 入队成功 ≠ 送达成功（worker 可能失败、对方可能没看到）。本刀不做异步
+            # 失败回流，但措辞要诚实：说「已发出（异步送达、不保证送到）」，不说「发到
+            # 了 / 对方收到了」，让 life 知道是发出去了、最终送达异步、可能失败。同步
+            # 可知的失败（UndeliverableRecipient）已在上面 resolve_delivery 处 fail-loud。
+            return "已发出（消息发往 ta 的手机，异步送达、不保证一定送到）"
+
+        # resolver 理论上只返回 MailboxTarget / LarkP2PTarget（其余都 fail-loud 抛
+        # UndeliverableRecipient），走到这里说明出现了未知投递目标类型——不静默吞，
+        # 抛错由 @tool_error 收成 outcome 喂回 life。
+        raise RuntimeError(
+            f"uid={uid!r} 解析出未知的投递目标类型 {type(target).__name__}，发不了。"
+        )
 
     @tool_error("记到本子里失败")
     async def note(
@@ -722,12 +885,15 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    # chat（说话）+ 本子三件（note / edit_note / read_notebook）+ look_up（带问题查）+
-    # browse_feed（没事刷手机）都是基础工具、不依赖 self_wake，与 update / act 并列常驻。
+    # chat（当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+
+    # 本子三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed
+    # （没事刷手机）都是基础工具、不依赖 self_wake，与 update / act 并列常驻。
     tools = [
         update_tool,
         act_tool_obj,
         Tool(chat),
+        Tool(look_up_contact),
+        Tool(send_message),
         Tool(note),
         Tool(edit_note),
         Tool(read_notebook),

@@ -31,6 +31,7 @@ from app.domain.life_state import LifeState
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
     EVENT_KIND_EXTERNAL,
+    EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -920,6 +921,126 @@ async def test_npc_speech_rendered_with_clean_name_not_machine_prefix(
     assert "林小满 对你说" in msg_blob
     # 机读前缀 npc: 不漏给模型
     assert "npc:林小满" not in msg_blob, "npc: 机读前缀不该出现在喂给模型的 stimulus 里"
+
+
+# ---------------------------------------------------------------------------
+# task 5（通信介质维度，life 侧）：kind=message 的手机消息 → stimulus 呈现
+# 「X 给你发消息：内容」，与当面 speech 的「X 对你说：原话」**收件人侧可区分**
+# （spec 决策 5 / 7：否则又把「当面还是手机」混为一谈，task 5 白做）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_message_event_rendered_as_someone_messaged_you(patched, monkeypatch):
+    """信箱里 kind=message 的手机消息 → stimulus 呈现「X 给你发消息：内容」。
+
+    另一姐妹不在一起时用 send_message 隔空发来的消息（kind=message、source=发送者
+    persona_id，task 3），她醒来在 stimulus 里读到「赤尾给你发消息：内容」——明确是
+    隔着手机/飞书发来的，不是当面说的（区别于 speech 的「X 对你说」）。
+    """
+    patched["unread"] = [
+        _envelope(
+            "msg1",
+            "绫奈我到广州啦，晚点视频",
+            kind=EVENT_KIND_MESSAGE,
+            source="akao",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 内容原样进 stimulus
+    assert "绫奈我到广州啦，晚点视频" in msg_blob
+    # 呈现成「X 给你发消息」（通信介质 = 隔空发的消息），带发送者身份
+    assert "给你发消息" in msg_blob, "message 应呈现成「X 给你发消息：内容」"
+    assert "akao" in msg_blob, "message 要带发送者身份"
+    # 通信介质维度要标清「隔着手机 / 不在一起」（区别于当面），让她不把消息当当面
+    assert "手机" in msg_blob, "message 段要标明这是隔着手机发来的消息（通信介质维度）"
+
+
+@pytest.mark.asyncio
+async def test_message_distinct_from_speech_face_to_face(patched, monkeypatch):
+    """同一轮里手机消息（message）与当面话（speech）必须呈现成**两种**形态。
+
+    spec 决策 5 / 7 命门：手机消息「X 给你发消息」与当面话「X 对你说」是收件人侧
+    两个正交模态，绝不混成一句。否则又把「当面还是手机」混为一谈。
+    """
+    patched["unread"] = [
+        _envelope(
+            "sp1", "绫奈你看这个", kind=EVENT_KIND_SPEECH,
+            source="chinagi", persona_id="ayana",
+        ),
+        _envelope(
+            "msg1", "绫奈我到广州啦", kind=EVENT_KIND_MESSAGE,
+            source="akao", persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 当面话用「对你说」、手机消息用「给你发消息」，两种形态都在、可区分
+    assert "对你说" in msg_blob, "speech 仍呈现成「X 对你说」（当面）"
+    assert "给你发消息" in msg_blob, "message 呈现成「X 给你发消息」（隔空）"
+    # 手机消息的内容不该被「对你说」框住（不混进当面话那一句）
+    speech_idx = msg_blob.index("对你说")
+    speech_line = msg_blob[speech_idx:msg_blob.index("绫奈你看这个") + len("绫奈你看这个")]
+    assert "绫奈我到广州啦" not in speech_line, "手机消息内容不该混进当面话「对你说」一句里"
+    # 两条都标已读
+    assert patched["marked"] == [["sp1", "msg1"]]
+
+
+@pytest.mark.asyncio
+async def test_message_not_lumped_into_ambient_dynamics(patched, monkeypatch):
+    """kind=message 不该被误归进离散动静（ambient）桶（task 5 必改 ①）。
+
+    旧 _split_perception 把「非 surroundings/speech」一律归 dynamics，新 message
+    kind 会被误塞进「[message] ...」离散动静清单。message 是直接冲她来的消息、有
+    明确发送人，必须独立成段，不混进环境动静。
+    """
+    patched["unread"] = [
+        _envelope(
+            "a1", "玄关传来开关门的声音", kind=EVENT_KIND_AMBIENT, persona_id="ayana",
+        ),
+        _envelope(
+            "msg1", "绫奈我到广州啦", kind=EVENT_KIND_MESSAGE,
+            source="akao", persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # message 内容绝不带 [message] 机读 kind 前缀（那是离散动静清单的形态）
+    assert "[message]" not in msg_blob, "message 不该呈现成离散动静的「[message] ...」清单项"
+    # message 内容也不该出现在「[ambient]」那种离散动静行里
+    assert "[ambient] " in msg_blob or "玄关传来开关门的声音" in msg_blob
+    # message 仍以「给你发消息」独立形态呈现
+    assert "给你发消息" in msg_blob
+
+
+def test_split_perception_four_way_message_separate_from_dynamics():
+    """_split_perception 把未读四分：周遭 / 当面话 / 手机消息 / 离散动静（task 5 必改 ①）。
+
+    message kind 必须单独成一桶、绝不和 ambient 混进 dynamics —— 否则 _format_dynamics
+    会把手机消息当离散动静渲染（「[message] ...」），又制造一遍当面/手机混淆。
+    """
+    unread = [
+        _envelope("s1", "你在客厅", kind=EVENT_KIND_SURROUNDINGS),
+        _envelope("sp1", "当面说的话", kind=EVENT_KIND_SPEECH, source="akao"),
+        _envelope("msg1", "手机发来的", kind=EVENT_KIND_MESSAGE, source="chinagi"),
+        _envelope("a1", "开关门声", kind=EVENT_KIND_AMBIENT),
+    ]
+    surroundings, speech, messages, dynamics = lw._split_perception(unread)
+    assert [e.event_id for e in surroundings] == ["s1"]
+    assert [e.event_id for e in speech] == ["sp1"]
+    assert [e.event_id for e in messages] == ["msg1"], "message 必须单独成一桶"
+    assert [e.event_id for e in dynamics] == ["a1"], "dynamics 只剩 ambient，不含 message"
 
 
 @pytest.mark.asyncio

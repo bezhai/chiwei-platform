@@ -35,6 +35,9 @@ function makeCap(): {
         async resolveMessageRef() {
             throw new Error('not used');
         },
+        async resolveConversationRef() {
+            throw new Error('not used');
+        },
         async recordOutboundMessage() {
             throw new Error('not used');
         },

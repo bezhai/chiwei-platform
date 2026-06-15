@@ -75,6 +75,7 @@ from app.domain.notebook import (
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
+    EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -477,28 +478,58 @@ def _format_speech(speech: list[EventEnvelope]) -> str:
     )
 
 
+def _format_messages(messages: list[EventEnvelope]) -> str:
+    """把别人隔手机发来的消息（kind=message）拼成「X 给你发消息：内容」，按发生先后（task 5）。
+
+    通信介质维度（spec 决策 5 / 7）：这是**隔着手机/飞书**发来的消息——不在一起时发的，
+    不是当面说的。必须与当面 speech 的「X 对你说：原话」收件人侧可区分：一个是手机发的、
+    一个是当面说的，混成一句正是「把飞书当当面」的根。
+
+    source 是发送者 persona_id（姐妹互发手机消息，task 3 的 send_message），过
+    :func:`_speaker_display` 去机读前缀再呈现（与 speech 同口径）。``occurred_at`` 过
+    ``cst_time`` 归一到 CST（同其它各类）。
+    """
+    return "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）"
+        f"{_speaker_display(ev.source)} 给你发消息：{ev.summary}"
+        for ev in messages
+    )
+
+
 def _split_perception(
     unread: list[EventEnvelope],
-) -> tuple[list[EventEnvelope], list[EventEnvelope], list[EventEnvelope]]:
-    """把未读分成（周遭切片, 对话, 离散动静），各保持原始（按发生先后）顺序。
+) -> tuple[
+    list[EventEnvelope],
+    list[EventEnvelope],
+    list[EventEnvelope],
+    list[EventEnvelope],
+]:
+    """把未读分成（周遭切片, 当面话, 手机消息, 离散动静），各保持原始（按发生先后）顺序。
 
-    三类语义不同、stimulus 里分层呈现：
+    四类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7）：
 
-      * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框。
-      * 对话（kind=speech）—— 另一角色调 chat 直投进她信箱的原话「X 对你说：原话」
-        （1C Task 3）。有明确说话人、原话原样，独立成一层、不混进周遭底框或离散动静。
+      * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框（物理在场维度）。
+      * 当面话（kind=speech）—— 另一角色调 chat 直投的原话「X 对你说：原话」（1C Task 3）。
+        当面说的、有明确说话人，独立成层。
+      * 手机消息（kind=message）—— 另一角色不在一起时 send_message 隔空发来的消息
+        「X 给你发消息：内容」（task 3 / 5）。**通信介质维度**：隔着手机/飞书发的，与当面
+        speech 收件人侧必须可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
       * 离散动静（其余 ambient / external）—— 环境里出现的新声响光线气味、刚聊过等。
 
-    按 kind 三分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。
+    按 kind 四分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
+    必须从 dynamics 桶排除（必改 ①）——否则会被 :func:`_format_dynamics` 当离散动静渲染
+    成「[message] ...」，与当面话混淆。
     """
     surroundings = [e for e in unread if e.kind == EVENT_KIND_SURROUNDINGS]
     speech = [e for e in unread if e.kind == EVENT_KIND_SPEECH]
+    messages = [e for e in unread if e.kind == EVENT_KIND_MESSAGE]
     dynamics = [
         e
         for e in unread
-        if e.kind not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH)
+        if e.kind
+        not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH, EVENT_KIND_MESSAGE)
     ]
-    return surroundings, speech, dynamics
+    return surroundings, speech, messages, dynamics
 
 
 @node
@@ -957,17 +988,24 @@ async def _run_life_round(
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 
-    # 五官分层呈现（1C Task 2 + Task 3）：她信箱里有三类——「周遭切片」（surroundings，
-    # world 五官为她逐角色推演的此刻所处环境，作底框）、「别人对你说的话」（speech，
-    # 另一角色调 chat 直投的原话「X 对你说：原话」，Task 3）、「离散动静」（ambient /
-    # external，环境里出现的新声响 / 刚聊过这类事件）。分层呈现让她既感知到自己周遭
-    # 什么样、又看清是谁直接对她说了话、还知道刚发生了什么动静（三类不互相混淆）。
-    # 三类都只取自她自己信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给
-    # 她的、她够得着的），绝不含 world 全局快照——信息差命门由 world 逐角色推演产出每人
-    # 切片守住，不在这里。speech 是直投（不经 world），它的原话只在收件人这条流里出现、
-    # world 那条流绝不含原话（承重红线，由 chat 工具双轨守住）。
+    # 五官分层呈现（1C Task 2 + Task 3 + task 5）：她信箱里有四类，分层呈现两个正交
+    # 维度（spec 决策 7）——
+    #   * 「周遭切片」（surroundings，world 五官逐角色推演的此刻所处环境，作底框）——
+    #     **物理在场维度**（她此刻在哪、身边有谁）。
+    #   * 「别人当面对你说的话」（speech，另一角色调 chat 直投的原话「X 对你说：原话」，
+    #     Task 3）—— 当面、在身边。
+    #   * 「别人隔着手机给你发的消息」（message，另一角色不在一起时 send_message 隔空发的
+    #     「X 给你发消息：内容」，task 3 / 5）—— **通信介质维度**：隔着手机/飞书，不是当面。
+    #     与当面 speech 收件人侧明确可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
+    #   * 「离散动静」（ambient / external，环境里出现的新声响 / 刚聊过这类事件）。
+    # 分层呈现让她既感知到自己周遭什么样（物理在场）、又看清谁当面说了话 / 谁隔手机发了
+    # 消息（通信介质两态）、还知道刚发生了什么动静（四类不互相混淆）。四类都只取自她自己
+    # 信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给她的、她够得着的），绝不
+    # 含 world 全局快照——信息差命门由 world 逐角色推演产出每人切片守住，不在这里。speech /
+    # message 都是直投（不经 world），原话/内容只在收件人这条流里出现、world 那条流绝不含
+    # （承重红线，由 chat / send_message 工具双轨守住）。
     if unread:
-        surroundings, speech, dynamics = _split_perception(unread)
+        surroundings, speech, messages, dynamics = _split_perception(unread)
         if surroundings:
             parts.append(
                 "【此刻你周遭】（你此刻所处的环境、身边有谁，由你的感官投射给你）：\n"
@@ -975,8 +1013,17 @@ async def _run_life_round(
             )
         if speech:
             parts.append(
-                "【有人对你说话】（直接冲你来的话，按发生先后）：\n"
+                "【有人当面对你说话】（就在你身边、直接冲你来的话，按发生先后）：\n"
                 f"{_format_speech(speech)}"
+            )
+        if messages:
+            # 通信介质维度（spec 决策 5 / 7）：隔着手机/飞书发来的消息，**不是当面**。
+            # 单列自己的段、与当面话「有人当面对你说话」收件人侧明确可区分——治
+            # 「把隔空消息当当面」的混淆。
+            parts.append(
+                "【有人隔着手机给你发消息】（你们这会儿不在一起、隔着手机/飞书发来的，"
+                "不是当面说的，按发生先后）：\n"
+                f"{_format_messages(messages)}"
             )
         if dynamics:
             parts.append(

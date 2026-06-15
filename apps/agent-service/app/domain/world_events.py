@@ -64,10 +64,19 @@ from app.runtime.persist import insert_idempotent
 #                      直接对她说的话、原话原样、双方各自 transcript 天然承载对话连贯。
 #                      world 绝不读 speech 原话——它只从 chat 另一轨的低成本元信息（复用
 #                      act 流）知道「有人在交谈」、反映氛围（承重红线，见 chat 工具）。
+#   * ``message``      隔手机发来的消息（life proactive messaging / send_message 工具）：
+#                      某角色不在一起时给收件人**手机发消息**（``source`` = 发送者
+#                      persona_id），直投收件人信箱、**不经 world**。和 ``speech``（当面
+#                      说话）是收件人侧必须可区分的两个模态（spec 决策 5：否则又把「当面
+#                      还是手机」混为一谈）——life context 应把它呈现成「X 给你发消息：内容」
+#                      区别于 speech 的「X 对你说：原话」（呈现是 task 5 的职责）。和 speech
+#                      同样唤醒收件人（手机消息发给对方就是让 ta 看到的，非被动 kind）。
+#                      只用于角色↔角色的手机消息；给真人发飞书私聊不落信箱、走出站段。
 EVENT_KIND_AMBIENT = "ambient"
 EVENT_KIND_EXTERNAL = "external"
 EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
+EVENT_KIND_MESSAGE = "message"
 
 
 # 被动 event kind（**通道分离的权宜修复 v2**，prod 节奏失控）——单一定义处，写 / 读

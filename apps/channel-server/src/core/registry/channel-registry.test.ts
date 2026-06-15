@@ -20,6 +20,7 @@ function fakePlugin(channel: string, withRecall = true): ChannelPlugin {
                 conversation: { channelId: 'c1' },
             }),
             resolveMessageRef: async () => ({ channelId: 'm1' }),
+            resolveConversationRef: async () => ({ channelId: 'c1' }),
             recordOutboundMessage: async () => 'cm1',
             sendText: async () => ({ channelId: 'm1' }),
             reply: async () => ({ channelId: 'm1' }),

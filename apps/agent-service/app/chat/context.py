@@ -2,7 +2,6 @@
 
 Responsibilities (orchestrator):
   - Fetch recent history via quick_search
-  - Detect proactive scan messages and extract stimulus
   - Delegate image collection to _context_images.collect_images
   - Delegate message-shape construction to _context_messages.build_*
   - Emit CommonMessageContentSynced for any new TOS files
@@ -19,32 +18,18 @@ Sub-modules (private to chat/):
 
 from __future__ import annotations
 
-import contextvars
 import logging
 from dataclasses import dataclass
 
 from app.agent.neutral import Message
 from app.chat._context_images import collect_images
 from app.chat._context_messages import build_group_messages, build_p2p_messages
-from app.chat.content_parser import parse_content
-from app.chat.quick_search import PROACTIVE_USER_ID, quick_search
+from app.chat.quick_search import quick_search
 from app.domain.chat_events import CommonMessageContentSynced
 from app.infra.image import ImageRegistry
 from app.runtime import emit
 
 logger = logging.getLogger(__name__)
-
-# PROACTIVE_USER_ID re-exported from quick_search (its leaf home) — callers
-# and tests still do ``from app.chat.context import PROACTIVE_USER_ID``.
-_ = PROACTIVE_USER_ID
-
-# ContextVars for proactive scan state (read by pipeline.py)
-is_proactive_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "is_proactive", default=False
-)
-proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "proactive_stimulus", default=""
-)
 
 
 @dataclass
@@ -75,10 +60,6 @@ async def build_chat_context(
 
     Returns a ``ChatContext`` dataclass with all fields the pipeline needs.
     """
-    # Reset ContextVars before any early return to prevent stale values
-    is_proactive_var.set(False)
-    proactive_stimulus_var.set("")
-
     l1_results = await quick_search(message_id=message_id, limit=limit)
 
     if not l1_results:
@@ -86,28 +67,6 @@ async def build_chat_context(
         return ChatContext([], None, "", "", "p2p", "", "", [])
 
     chat_type = l1_results[-1].chat_type or "p2p"
-
-    current_msg = next((m for m in l1_results if m.message_id == message_id), None)
-    is_proactive = bool(current_msg and current_msg.user_id == PROACTIVE_USER_ID)
-    proactive_stimulus = ""
-    proactive_target_id = ""
-
-    # Synthetic proactive triggers are internal bookkeeping and should never
-    # appear in the visible chat history, regardless of the current trigger type.
-    l1_results = [m for m in l1_results if m.user_id != PROACTIVE_USER_ID]
-
-    if is_proactive:
-        if not current_msg:
-            logger.warning("proactive trigger missing from quick_search: %s", message_id)
-            return ChatContext([], None, "", "", "group", "", "", [])
-        proactive_stimulus = parse_content(current_msg.content).render()
-        proactive_target_id = current_msg.reply_message_id or ""
-        if not l1_results:
-            logger.warning("proactive scan: no real messages after filtering")
-            return ChatContext([], None, "", "", "group", "", "", [])
-
-    is_proactive_var.set(is_proactive)
-    proactive_stimulus_var.set(proactive_stimulus)
 
     # --- Image processing ---
     image_key_to_url, image_key_to_file = await collect_images(l1_results, chat_type)
@@ -134,18 +93,10 @@ async def build_chat_context(
             image_key_to_filename[key] = filename
 
     # Trigger info
-    if is_proactive:
-        trigger_username = ""
-        trigger_user_id = ""
-        chat_name = l1_results[-1].chat_name or "" if l1_results else ""
-        effective_trigger_id = proactive_target_id or (
-            l1_results[-1].message_id if l1_results else message_id
-        )
-    else:
-        trigger_username = l1_results[-1].username or ""
-        trigger_user_id = l1_results[-1].user_id or ""
-        chat_name = l1_results[-1].chat_name or ""
-        effective_trigger_id = message_id
+    trigger_username = l1_results[-1].username or ""
+    trigger_user_id = l1_results[-1].user_id or ""
+    chat_name = l1_results[-1].chat_name or ""
+    effective_trigger_id = message_id
 
     # Build messages
     if chat_type == "group":

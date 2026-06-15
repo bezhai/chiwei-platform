@@ -66,9 +66,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
         t.bot_name,
     )
 
-    already_done = await is_chat_request_completed(
-        t.session_id, is_proactive=t.is_proactive
-    )
+    already_done = await is_chat_request_completed(t.session_id)
     if already_done:
         logger.warning(
             "skip redelivered chat_request: session_id=%s, message_id=%s",
@@ -83,7 +81,6 @@ async def route_chat_node(t: ChatTrigger) -> None:
         persona_ids=list(t.persona_ids),
         bot_name=t.bot_name or "",
         is_p2p=t.is_p2p,
-        is_proactive=t.is_proactive,
     )
     if not persona_ids:
         logger.info("no persona to reply: message_id=%s", t.message_id)
@@ -99,7 +96,7 @@ async def route_chat_node(t: ChatTrigger) -> None:
 
     for i, pid in enumerate(persona_ids):
         session_for_persona = t.session_id if i == 0 else str(uuid4())
-        if i > 0 and not t.is_proactive:
+        if i > 0:
             if not session_for_persona or not t.chat_id:
                 raise ValueError(
                     "multi-persona ChatTrigger requires session_id and chat_id "
