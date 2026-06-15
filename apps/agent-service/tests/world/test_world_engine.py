@@ -3086,3 +3086,42 @@ def test_world_instruction_has_wake_guidance():
     assert ("排短" in instruction) or ("早点回来" in instruction) or (
         "早回来" in instruction
     ), "叫醒引导应提到看到谁快到点就把 sleep 排短点早回来接她"
+
+
+# ---------------------------------------------------------------------------
+# 硬超时：整轮推演挂死 → wait_for 掐死、走 fail-open（堵 world 唯一的永久睡死口）
+#
+# world_tick 被 time source loop 同步 await：没有硬超时时，一轮 LLM（或冷启路径里
+# 任何一步）挂死会让 world_tick 永不返回 → source loop 永等 → world 永久睡死（真机
+# coe 清库冷启零 emit 就是它）。对照组 day_review / persona_review 早有 wait_for，所以
+# 同样被同步 await 也从不永久死。这两条测试把同样的硬超时模式补到 world_tick。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_world_tick_hard_timeout_fails_open(monkeypatch, caplog):
+    """整轮推演挂死（run 不返回）→ 硬超时掐死：不向上抛、error 留痕、绝不真等。"""
+    import asyncio
+
+    async def hanging_run(self, messages, **kwargs):
+        await asyncio.sleep(5)  # 远超（被调小的）超时
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", hanging_run)
+    monkeypatch.setattr(engine_mod, "WORLD_TICK_TIMEOUT_SECONDS", 0.05)
+
+    with caplog.at_level("ERROR"):
+        await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))  # 不抛、不真等 5s
+
+    assert any(r.levelname == "ERROR" for r in caplog.records), (
+        "超时的一轮必须 error 留痕，不能静默吞"
+    )
+
+
+def test_world_tick_timeout_below_single_flight_ttl():
+    """硬超时必须 < 单飞锁 TTL（600s）：锁 TTL 到期后下一拍能进，挂死的旧轮必须先被
+    掐死、释放锁，否则两轮并发写同一 world transcript（确定性 session_id 读改写竞态）。"""
+    assert (
+        engine_mod.WORLD_TICK_TIMEOUT_SECONDS
+        < engine_mod.WORLD_TICK_LOCK_TTL_SECONDS
+    )

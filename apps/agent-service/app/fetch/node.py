@@ -39,6 +39,7 @@ DailyMaterialsFetch 纯 in-process 接回本节点）在 ``app/wiring/fetch_data
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated
 
@@ -62,6 +63,12 @@ logger = logging.getLogger(__name__)
 # 自然过期，不吃掉同日重试。TTL 到期后哪怕原 holder 还在跑、新 holder 也能进，
 # token-CAS 释放保证不误删别人的锁（语义见 app/runtime/single_flight.py）。
 WORLD_EYES_LOCK_TTL_SECONDS = 1800
+
+# 眼睛单轮硬超时（< 锁 TTL）：眼睛挂死时在锁 TTL 到期前被 wait_for 掐断、fail-open——
+# 旧轮先死、锁先释放，下一钟点 cron 才不会和它并发烧同一天的眼睛；更关键的是不让挂死
+# 的一轮把同步 await daily_fetch_node 的 cron source loop 永久堵死。对齐 world_tick /
+# day_review / persona_review 的 TIMEOUT < TTL 模式。
+WORLD_EYES_TIMEOUT_SECONDS = 1440
 
 
 class DailyMaterialsTick(Data):
@@ -140,7 +147,13 @@ async def daily_fetch_node(signal: DailyMaterialsFetch) -> None:
         async with single_flight(
             f"world_eyes:{lane}:{date}", ttl=WORLD_EYES_LOCK_TTL_SECONDS
         ):
-            await _run_daily_fetch(lane=lane, date=date, fetched_at=fetched_at)
+            # 硬超时包整段（早退检查 → 眼睛 → 落库 → 记成本）：眼睛挂死（抓取卡死 /
+            # 模型不返回）在锁 TTL 之前被掐断、走下面的 fail-open，绝不留挂死的轮占锁到
+            # TTL 被下一钟点并发——更绝不让它把同步 await 的 cron source loop 永久堵死。
+            await asyncio.wait_for(
+                _run_daily_fetch(lane=lane, date=date, fetched_at=fetched_at),
+                timeout=WORLD_EYES_TIMEOUT_SECONDS,
+            )
     except SingleFlightConflict:
         # 持有方正在烧这一天的眼睛；冗余唤醒静默让位（log 留痕、不抛）。若持有方
         # 失败不落库，下一钟点 cron 自然重试——不在这里 raise / 重试循环。
@@ -148,6 +161,16 @@ async def daily_fetch_node(signal: DailyMaterialsFetch) -> None:
             "[daily_fetch] %s %s 锁被持有（并发钟点 / 重复投递），让位给持有方",
             lane,
             date,
+        )
+        return
+    except TimeoutError:
+        # 整轮挂死被硬超时掐断：底料 / 成本都不落，下一钟点 cron 自然重试（fail-open），
+        # 绝不向上抛把 cron source loop 拖垮。
+        logger.error(
+            "[daily_fetch] %s %s 整轮硬超时（>%ss），本轮放弃（fail-open，下一钟点重试）",
+            lane,
+            date,
+            WORLD_EYES_TIMEOUT_SECONDS,
         )
         return
 
