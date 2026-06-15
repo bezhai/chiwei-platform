@@ -46,9 +46,10 @@ class LifeState(Data):
     response_mood: str       # 此刻的情绪 / 回应基调
     activity_type: str       # 活动类型（sleep / study / rest / move ...）
     observed_at: str         # 这份主观快照观测到的时刻 (ISO8601)
-    # 下次该醒的**现实**时刻（CST aware ISO，阶段 1B Task 2 到点 gate）。她调 schedule
-    # 自排后由收口 fire_life_self_wake 写进来；她的自排唤醒入口（LifeWakeTick reason=self）
-    # 走 gate 时读它判到点 + stale。nullable：从没自排过（首轮 / 只被 notify 起头）时为
+    # 她想几点醒的**现实**时刻（CST aware ISO）—— 她的自排意愿。她调 schedule 后由收口
+    # fire_life_self_wake 写进来。world-driven wake：「到点真把她叫起来」交给永远醒着的
+    # 世界 —— world 每轮读这个 next_wake_at 推演谁过点了、用 notify 把她唤回来（角色自己
+    # 不再到点自醒，自排执行腿已拆）。nullable：从没自排过（首轮 / 只被 notify 起头）时为
     # None。framework migrate 对已有数据的表加 nullable 列是 additive、不阻塞。比较一律用
     # 现实时间，对称 world WorldState.next_wake_at。
     next_wake_at: str | None = None

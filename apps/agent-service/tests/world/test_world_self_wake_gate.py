@@ -109,6 +109,14 @@ def _stub_io(monkeypatch):
         # PG 的 CAS insert；这里 stub 成 no-op（不碰真库）。
         return 0
 
+    async def fake_list_all_persona_ids():
+        # gate 放行的轮会读三姐妹此刻状态（world-driven wake）；这里 stub 成空名单
+        # （不拼三姐妹段、不碰真库）。
+        return []
+
+    async def fake_find_life_state(*, lane, persona_id):
+        return None
+
     monkeypatch.setattr(engine_mod, "renotify_unread", fake_renotify_unread)
     monkeypatch.setattr(engine_mod, "list_recent_acts", fake_list_recent_acts)
     monkeypatch.setattr(engine_mod, "advance_act_cursor", fake_advance_act_cursor)
@@ -121,6 +129,10 @@ def _stub_io(monkeypatch):
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
+    monkeypatch.setattr(
+        engine_mod, "list_all_persona_ids", fake_list_all_persona_ids
+    )
+    monkeypatch.setattr(engine_mod, "find_life_state", fake_find_life_state)
 
 
 def _stub_state(monkeypatch, snapshot: WorldState | None):

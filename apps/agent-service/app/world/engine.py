@@ -88,6 +88,13 @@ from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
 from app.data.queries.acts import list_recent_acts
 from app.data.queries.mailbox import renotify_unread
+from app.data.queries.persona import (  # module-level so tests can monkeypatch
+    list_all_persona_ids,
+)
+from app.domain.life_state import (  # module-level so tests can monkeypatch
+    LifeState,
+    find_life_state,
+)
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import ActPerformed
 from app.fetch.materials import (  # module-level so tests can monkeypatch
@@ -277,6 +284,17 @@ def world_loop_instruction() -> str:
         "（环境里出现了新的声响光线气味、有人进出了某个空间），才用 notify 把够得着"
         "的人推演出来、投这条动静。\n"
         "也不要为了'让世界别太安静'硬造动静——安静本身就是工作日午后真实的样子。\n\n"
+        "推演的时候，顺手看一眼【三姐妹此刻各自的样子】，对着【现实此刻】比一比：每个人"
+        "此刻是什么状态、这状态是什么时候记下的、她原本想几点醒。如果谁的状态已经很久"
+        "没有更新、在此刻这个世界里不像一个活人该有的样子（最典型的是过了她自己想醒的"
+        "点、却还停在昨晚睡着的状态），那多半是她那边其实早该有动静了——这种时候就在你"
+        "的推演里把她那边此刻该出现的客观动静想出来，用 notify 投一条够得着她的动静"
+        "（晨光照进房间、楼下传来动静、闹钟还在响），把她自然唤回这个世界。这不是按"
+        "分钟数卡的硬规则，多久算太久、对不对劲、该不该叫，都由你顺着此刻这个世界自己"
+        "判断；她过了想醒的点还没动静，只是「不对劲」里最常见的一种，没排过下次醒、却"
+        "明显该醒了的人同样该被你看见。\n"
+        "反过来，要是看到谁马上就快到她想醒的点了，就把这次 sleep 排短一点、早点回来"
+        "接着看她那边的动静；没有谁临近要醒，就放心睡长一点。\n\n"
         "看完、推演完这一轮后，用 sleep 定下次多久再看。"
     )
 
@@ -465,6 +483,50 @@ def _roster_section(roster: list[NPCRoster]) -> str:
     )
 
 
+def _sisters_section(states: list[tuple[str, LifeState | None]]) -> str:
+    """把三姐妹此刻各自的样子渲染成喂给 world 的一段文本——每人带上当前状态、这状态
+    记于何时（observed_at）、她想几点醒（next_wake_at）。
+
+    这是 world-driven wake 的输入面：world 每轮看到每个角色此刻在干嘛、这状态多久没
+    更新（observed_at 对着【现实此刻】一比就知道）、她想几点醒（next_wake_at），然后
+    **由它自己推演**"她这么久没动静、在此刻这个世界里对不对劲"。代码只负责把这几个
+    客观事实喂进去，绝不在这里算"超过 X 分钟就叫"——多久算太久、对不对劲、该不该叫
+    全交给 world 这个 LLM（赤尾宪法：不用阈值 / if 分支替 agent 决策）。
+
+    每条时刻都过 :func:`cst_time.to_cst_hms` 归一到 CST 显示，与【现实此刻】同一个
+    时间口径，让 world 对着现在几点直接比对。读不到某角色的 LifeState（``None``：她
+    还没活过一轮）时如实写"还没有状态记录"——不漏拼、不报错。``next_wake_at`` 为
+    None（从没排过下次醒）时如实说"她还没排下次醒"，绝不冒充一个时刻。
+
+    ``states`` 是 ``(persona_id, LifeState | None)`` 列表（调用方按 persona 顺序读好
+    传进来）。归类锚点用 persona_id 本身（哪个 id 对应哪个姐妹由 world 的 system
+    prompt 一处承载），这里不在 scaffolding 文案里硬编任何角色中文名（赤尾宪法）。
+    """
+    lines: list[str] = []
+    for persona_id, state in states:
+        if state is None:
+            lines.append(f"- {persona_id}：还没有状态记录（她还没活过一轮）。")
+            continue
+        observed = cst_time.to_cst_hms(state.observed_at)
+        if state.next_wake_at:
+            wake = cst_time.to_cst_hms(state.next_wake_at)
+            wake_text = f"她想 {wake} 醒"
+        else:
+            wake_text = "她还没排下次醒"
+        lines.append(
+            f"- {persona_id}：此刻「{state.current_state}」"
+            f"（这状态记于 {observed}，{wake_text}）。"
+        )
+    body = "\n".join(lines)
+    return (
+        "下面是三姐妹此刻各自的样子——每人此刻在干嘛、这状态是什么时候记下的、她想"
+        "几点醒。对着上面的【现实此刻】比一比：谁的状态已经很久没更新、在此刻这个"
+        "世界里不像一个活人该有的样子（典型如过了她想醒的点还停在睡着），就在你的"
+        "推演里把她那边此刻该有的动静想出来。\n"
+        f"{body}"
+    )
+
+
 # 印在 stimulus 里的本轮标记前缀（turn 幂等查重靠它）：写回 transcript 后，下次
 # 同 round_id 重投能从 session 历史里查到这行 → 跳过、不重复追加同一轮、不重复
 # 推演（turn 幂等）。机读用，对模型无害（它只当是一行元信息）。
@@ -506,6 +568,7 @@ def _world_loop_messages(
     wake_reason: str,
     round_id: str,
     arc_narrative: str | None,
+    sisters_text: str,
     materials_text: str = "",
     roster_text: str = "",
     act_batch_text: str = "",
@@ -551,6 +614,11 @@ def _world_loop_messages(
     时传空串、不插这段（后续轮从 transcript 自然记得，不重喂）。名册与底料是两件独立的
     事、各用各的游标（名册 seed 后总在、底料某天可能没有）。
 
+    ``sisters_text``：三姐妹此刻各自的样子（:func:`_sisters_section` 渲染：每人的当前
+    状态 + 状态记于何时 + 想几点醒）。**必传、无默认值**：拼在【现实此刻】之后，让
+    world 对着现在几点直接比对谁的状态停滞太久、推演该不该把她叫醒（world-driven
+    wake 的输入面）。
+
     ``act_batch_text``：这一批从游标 pull 到的所有人的动作清单（对称 life 读
     mailbox）。非空才插入「这一批动作」段——让 world 看到这段时间攒下的所有动作。
     这段时间没有新 act（纯 self / 心跳推进世界）时留空、不插这段。
@@ -587,6 +655,7 @@ def _world_loop_messages(
         f"{_round_marker(round_id, end_created_at=end_created_at, end_act_id=end_act_id)}\n"
         f"{world_loop_instruction()}\n\n"
         f"【现实此刻】{now_iso}\n"
+        f"【三姐妹此刻各自的样子】\n{sisters_text}\n\n"
         f"【世界阶段】\n{_arc_section(arc_narrative)}\n\n"
         f"{detail_header}\n{detail}\n\n"
         f"{materials_section}"
@@ -1021,6 +1090,21 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     arc = await read_world_arc(lane=lane)
     arc_narrative = arc.narrative if arc is not None else None
 
+    # 三姐妹此刻各自的样子（world-driven wake 的输入面）：每轮读每个 persona 的
+    # LifeState 快照（current_state + observed_at + next_wake_at），喂进 USER 消息让
+    # world 对着【现实此刻】比对谁状态停滞太久、推演该不该把她叫醒。**用本轮 tick 的
+    # lane**（不是进程默认 lane）：泳道隔离命门同 WorldState / WorldArc，coe / ppe 绝
+    # 不能读到别的泳道的"她此刻状态"。直读 domain 层 find_life_state（拿全 observed_at
+    # / next_wake_at 字段），不复用只读进程 lane、会丢字段的 memory.context 内部组装
+    # （spec 决策 3）。读不到某 persona 的快照（None：她还没活过一轮）由 _sisters_section
+    # 如实降级（不漏拼、不报错）。
+    persona_ids = await list_all_persona_ids()
+    sister_states = [
+        (pid, await find_life_state(lane=lane, persona_id=pid))
+        for pid in persona_ids
+    ]
+    sisters_text = _sisters_section(sister_states)
+
     messages = _world_loop_messages(
         detail=detail,
         detail_written_at=detail_written_at,
@@ -1028,6 +1112,7 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         wake_reason=wake_reason,
         round_id=round_id,
         arc_narrative=arc_narrative,
+        sisters_text=sisters_text,
         materials_text=materials_text,
         roster_text=roster_text,
         act_batch_text=act_batch_text,

@@ -845,18 +845,20 @@ def build_life_tools(
             ),
         ],
     ) -> str:
-        """排一下过多久再醒来、接着过你自己的日子。
+        """告诉世界你想过多久再醒来、接着过你自己的日子。
 
-        被起头叫醒后，没有新动静时世界不会再来敲你 —— 想接着往下过（写完这题接着写下
-        一题、收拾完挪去客厅、困了睡一觉到天亮），就用它排好过多久再醒来继续。
+        被起头叫醒后，想接着往下过（写完这题接着写下一题、收拾完挪去客厅、困了睡一觉
+        到天亮），就用它把「我想过多久再醒」告诉世界。这是给世界一个**意愿信号**：到点
+        真把你叫起来的是世界——它一直醒着、看着你这边的动静，到了你想醒的点会把你自然
+        唤回来。所以这不是你给自己上的闹钟、也不保证分秒不差，会有几分钟的出入，正常。
 
         seconds 必须在 60～43200 之间（最短约 1 分钟、防排得太密；最长 12 小时、够你
         夜里睡一整觉到天亮）。具体睡多久你自己看现在几点定 —— 夜里可以睡久、白天睡短；
         真有要紧的动静，世界还是会立刻来敲你、把你从长睡里叫醒。超出范围会报错，请改填
-        一个范围内的值重调。不排也行（那就等下一次有动静来敲你）。
+        一个范围内的值重调。不排也行（那世界就靠看你这边的动静、到了该醒的时候叫你）。
 
         Args:
-            seconds: 多少秒后再醒来继续（60 ≤ seconds ≤ 43200）。
+            seconds: 你想过多久再醒来继续（60 ≤ seconds ≤ 43200）。
 
         Returns:
             一句确认文本。
@@ -871,12 +873,11 @@ def build_life_tools(
                 f"schedule 的 seconds={seconds} 低于下限 {LIFE_SCHEDULE_MIN_SECONDS} 秒。"
                 f"请改填一个 ≥ {LIFE_SCHEDULE_MIN_SECONDS} 的值重调。"
             )
-        # 不直接 emit_delayed：一轮内多次 schedule / 多轮 schedule 会各排一条未来 self
-        # 唤醒 → 叠加唤醒风暴。改为只把待办 self-wake 记进 round-scoped slot（覆盖而非
-        # 追加 → 一轮内最后一次为准），由 engine 在循环收口后 emit 至多一条 self
-        # LifeWakeTick（照搬 world sleep 的唤醒风暴命门解）。
+        # 把「想几点醒」的意愿记进 round-scoped slot（覆盖而非追加 → 一轮内最后一次为
+        # 准），由 engine 收口 fire_life_self_wake 落进 next_wake_at。world-driven wake：
+        # 这里只表达意愿，不 emit 任何延时唤醒——到点叫她交给世界（自排执行腿已拆）。
         self_wake["delay_ms"] = seconds * 1000
-        return f"好，{seconds} 秒后再醒来接着过"
+        return f"好，{seconds} 秒后想再醒来接着过（到点世界会叫你）"
 
     # act_tool 的函数名带 _tool 后缀避免遮蔽导入的 handler；工具对模型暴露的 name
     # 要是 "act"，所以显式覆写 Tool.name 与 definition.name。
@@ -910,69 +911,36 @@ def build_life_tools(
 async def fire_life_self_wake(
     *, lane: str, persona_id: str, self_wake: dict
 ) -> bool:
-    """循环收口后 emit 至多一条 self ``LifeWakeTick`` + 落下次该醒时刻（唤醒风暴 + 到点 gate 命门）。
+    """循环收口后把「她想几点醒」的意愿落进 ``LifeState.next_wake_at`` —— **只写意愿、不再 emit**。
 
-    engine 在 agent 循环跑完后调本函数（对称 world :func:`app.world.tools.fire_self_wake`）。
-    ``self_wake`` 是本轮 round-scoped 待办容器（schedule 写的 ``{"delay_ms": int}``，
-    覆盖而非追加 → 一轮内最后一次为准）。有待办时一次性收口三件事：
+    engine 在 agent 循环跑完后调本函数（life round 的固定收口）。``self_wake`` 是本轮
+    round-scoped 待办容器（schedule 写的 ``{"delay_ms": int}``，覆盖而非追加 → 一轮内
+    最后一次为准）。有待办时：
 
-      1. 算目标唤醒时刻 = 现实 now + delay（现实 CST aware 时间，不用会因 gate 停滞的
-         任何 world 时钟）。
-      2. 把目标时刻写进 ``LifeState.next_wake_at``（:func:`set_life_next_wake_at`）——
-         她的自排唤醒入口走 gate 时读它判到点。
-      3. emit 唯一一条 self ``LifeWakeTick``，**携带这个目标时刻**（``target_wake_at``）：
-         到期时与 state 当前 next_wake_at 比对判 stale（被新自排 / 外部覆盖即作废）。
+      1. 算目标唤醒时刻 = 现实 now + delay（现实 CST aware 时间）。
+      2. 把目标时刻写进 ``LifeState.next_wake_at``（:func:`set_life_next_wake_at`）。
 
-    写 state 与 emit 携带同一个 target_iso（相等是 stale 判定的命门）。没调过 schedule
-    （空容器）就不写、不 emit —— 她不自排接力时不会自己醒，靠 world 下一次 notify 起头。
-    返回是否 emit。
+    **world-driven wake：角色的自排执行腿已拆掉**。以前这里还会 emit 一条 self
+    ``LifeWakeTick`` 让她自己到点醒来；现在「到点真把她叫起来」交给永远醒着的世界——
+    world 每轮读 ``next_wake_at`` 推演谁过点了、用 notify 把她唤回来。所以本函数只保留
+    「写下她想几点醒的意愿」这半，**绝不再 emit 任何延时唤醒**（自排执行腿那根一断就死
+    的 MQ 延时消息正是死锁起点，整套拆掉）。
 
-    LifeWakeTick 在 life_wake engine 里 import，避免 tools ↔ engine 循环 import。
+    没调过 schedule（空容器）就不写 —— 她没表达意愿时 next_wake_at 不动，world 仍能靠
+    「状态停滞太久不对劲」把她捞起来。返回是否写了意愿。
     """
     delay_ms = (self_wake or {}).get("delay_ms")
     if delay_ms is None:
         return False
 
-    # 目标唤醒时刻 = 现实 now + delay（现实 CST aware ISO，gate 比较的口径）。
+    # 目标唤醒时刻 = 现实 now + delay（现实 CST aware ISO）。
     target = cst_time.now_cst() + timedelta(milliseconds=delay_ms)
     target_iso = target.isoformat()
 
-    # 落 next_wake_at（gate 到点判定读它）。写 state 与 emit 携带同一 target_iso：
-    # 相等是 stale 判定命门 —— self 到期时只有携带的目标 == state 当前值才作数。
+    # 落 next_wake_at（她想几点醒的意愿）。world 每轮读它推演谁该叫。
     await set_life_next_wake_at(
         lane=lane, persona_id=persona_id, next_wake_at=target_iso
     )
-
-    # 延迟唤醒信号在 engine 里 import，避免 tools ↔ engine 循环 import。
-    from app.nodes.life_wake import LifeWakeTick
-
-    # emit_delayed 失败的可观测（必改 4）：life 没保底心跳，publish 失败会留一个未来 wake
-    # state（next_wake_at 已写）但没实际唤醒（机械漏投 → 她不自排醒、链断）。完整恢复
-    # （watchdog）是 Non-goal、后置；这里至少不静默——失败 log warning 带 lane/persona/
-    # target 让 coe 能看到漏投，且不把异常往上炸：本轮的 durable 收口（标已读 / 写快照）
-    # 已落地，不该被一条可选的自排漏投把整轮拖成失败重投（重投会重放 durable 工具）。
-    try:
-        await emit_delayed(
-            LifeWakeTick(
-                lane=lane,
-                persona_id=persona_id,
-                reason="self",
-                target_wake_at=target_iso,
-            ),
-            delay_ms=delay_ms,
-        )
-    except Exception:
-        logger.warning(
-            "[life_tools] %s/%s fire self wake emit_delayed failed "
-            "(target=%s, delay_ms=%d): self wake NOT scheduled this round "
-            "(no heartbeat fallback; relies on world notify to restart)",
-            lane,
-            persona_id,
-            target_iso,
-            delay_ms,
-            exc_info=True,
-        )
-        return False
     return True
 
 

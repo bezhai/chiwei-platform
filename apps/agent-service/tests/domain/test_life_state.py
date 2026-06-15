@@ -254,19 +254,18 @@ async def test_save_life_state_carries_forward_next_wake_at(life_state_db):
 
 
 @pytest.mark.integration
-async def test_event_interrupt_without_reschedule_keeps_self_wake_valid(life_state_db):
-    """event 打断（update 不 schedule）后，旧 self wake 到期仍放行（carried target 仍 == 保留值）。
+async def test_event_interrupt_without_reschedule_keeps_will(life_state_db):
+    """event 打断（update 不 schedule）后，她想几点醒的意愿（next_wake_at）不被清。
 
     模拟："她自排好 21:30 醒 → 21:10 来个 event 把她唤醒、她 update 状态但没 reschedule"。
-    旧 bug：update 把 next_wake_at 清 None → 21:30 那条 self wake 到期 gate 判 stale
-    （carried=21:30 != None）作废、不再自排。修后：next_wake_at 沿用 = 21:30，self wake
-    携带的 21:30 == state 当前值 → gate 放行（自排链不被 event 打断毁掉）。
+    旧 bug：update 把 next_wake_at 清 None → 她的自排意愿被打断毁掉。修后：next_wake_at
+    沿用 = 21:30，意愿不被 event 打断毁掉。world-driven wake：世界每轮读这个意愿推演谁
+    该叫，所以意愿必须在 update 后存活（只有 schedule/set 能改它）。
     """
-    from app.nodes.life_wake import LifeWakeTick, _life_self_wake_gate_passes
-    from app.infra import cst_time
     from datetime import timedelta
 
-    # 用相对现实时刻，让 gate 的"到点"判定可控（target 设在过去 1s = 已到点）
+    from app.infra import cst_time
+
     target = (cst_time.now_cst() - timedelta(seconds=1)).isoformat()
 
     await save_life_state(
@@ -284,29 +283,23 @@ async def test_event_interrupt_without_reschedule_keeps_self_wake_valid(life_sta
     )
 
     snap = await find_life_state(lane="coe-t3", persona_id="akao")
-    assert snap.next_wake_at == target, "event 打断 update 后 next_wake_at 不被清"
-
-    # 旧 self wake 到期：carried target == 保留的 next_wake_at → gate 放行
-    tick = LifeWakeTick(
-        lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
+    assert snap.next_wake_at == target, (
+        "event 打断 update 后 next_wake_at 不被清（她的自排意愿存活、world 才看得见）"
     )
-    assert _life_self_wake_gate_passes(
-        tick, next_wake_at=snap.next_wake_at, now=cst_time.now_cst()
-    ) is True, "event 打断未 reschedule 时，旧 self wake 到期仍应放行（自排不被毁）"
 
 
 @pytest.mark.integration
-async def test_event_round_reschedule_makes_old_self_stale_new_self_valid(life_state_db):
-    """event 轮重新 schedule：旧 self stale、新 self 有效；收口顺序最终落新 target。
+async def test_event_round_reschedule_lands_new_will(life_state_db):
+    """event 轮重新 schedule：收口顺序最终落新 target（意愿被更新成新值）。
 
     一轮 event 唤醒里收口顺序是 update（save，沿用旧 next_wake_at）→ schedule
-    （set，写新 target）。最终 state.next_wake_at 必须是新 target：旧 self wake 携带旧
-    target 到期判 stale（!= 新值），新 self wake 携带新 target 放行。验收口顺序正确：
-    一轮 update + schedule 收口 set 最终是新 target。
+    （set，写新 target）。最终 state.next_wake_at 必须是新 target：update 沿用旧意愿、
+    schedule 把它改成新意愿。验收口顺序正确：一轮 update + schedule 收口 set 最终是新
+    target（只有 schedule/set 能改意愿，update/save 沿用）。
     """
-    from app.nodes.life_wake import LifeWakeTick, _life_self_wake_gate_passes
-    from app.infra import cst_time
     from datetime import timedelta
+
+    from app.infra import cst_time
 
     old_target = (cst_time.now_cst() - timedelta(seconds=2)).isoformat()
     new_target = (cst_time.now_cst() - timedelta(seconds=1)).isoformat()
@@ -329,22 +322,6 @@ async def test_event_round_reschedule_makes_old_self_stale_new_self_valid(life_s
 
     snap = await find_life_state(lane="coe-t3", persona_id="akao")
     assert snap.next_wake_at == new_target, "收口顺序：update 后再 schedule，最终落新 target"
-
-    now = cst_time.now_cst()
-    old_tick = LifeWakeTick(
-        lane="coe-t3", persona_id="akao", reason="self", target_wake_at=old_target
-    )
-    new_tick = LifeWakeTick(
-        lane="coe-t3", persona_id="akao", reason="self", target_wake_at=new_target
-    )
-    # 旧 self wake 携带 old_target != 当前 new_target → 判 stale 作废
-    assert _life_self_wake_gate_passes(
-        old_tick, next_wake_at=snap.next_wake_at, now=now
-    ) is False, "重 schedule 后旧 self wake 必须判 stale"
-    # 新 self wake 携带 new_target == 当前值 → 放行
-    assert _life_self_wake_gate_passes(
-        new_tick, next_wake_at=snap.next_wake_at, now=now
-    ) is True, "重 schedule 后新 self wake 有效"
 
 
 # ---------------------------------------------------------------------------

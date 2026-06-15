@@ -239,6 +239,21 @@ def _agent_run(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_persona_roster(monkeypatch):
+    """world 每轮读三姐妹此刻状态（world-driven wake）会先 list_all_persona_ids —— 它
+    查 SQLAlchemy 的 bot_persona 表，闭环 world_db 没建这张表（它是 Base 模型、不走
+    runtime migrate）。这里 stub 成三姐妹名单（akao / chinagi / ayana），让 world 真去
+    读她们各自插进真库的 LifeState（find_life_state 不打桩、走真库），闭环里世界看见
+    意愿这条路真生效。"""
+    async def fake_list_all_persona_ids():
+        return ["akao", "chinagi", "ayana"]
+
+    monkeypatch.setattr(
+        engine_mod, "list_all_persona_ids", fake_list_all_persona_ids
+    )
+
+
+@pytest.fixture(autouse=True)
 def _capture_act_to_pg(monkeypatch):
     """life 的 ``act`` → ``perform_act`` 这条动作：落进 PG（真原语）+ 捕获供断言.
 

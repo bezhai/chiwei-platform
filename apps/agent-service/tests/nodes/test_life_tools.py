@@ -639,8 +639,13 @@ async def test_note_invalid_remind_at_returns_tool_error_no_pending():
     assert reminders == {}, "脏 remind_at 校验失败不该留待挂提醒"
 
 
-def test_schedule_description_mentions_self_wake():
-    """schedule docstring 说清"排过多久再醒来继续过日子"（给模型的语义）。"""
+def test_schedule_description_signals_will_not_self_wake():
+    """schedule docstring 表达「给世界一个我想几点醒的信号」（意愿），不承诺到点精确自醒。
+
+    world-driven wake：自排执行腿已拆，schedule 只是写下她想几点醒的意愿、交给世界
+    每轮读它推演谁该叫。文案要让模型知道这是「告诉世界我想几点醒」，而不是「我到点
+    会自己醒」——后者的承诺随自排执行腿一起拆掉了。
+    """
     slot: dict = {}
     tools = _tools_by_name(
         lt.build_life_tools(
@@ -649,35 +654,45 @@ def test_schedule_description_mentions_self_wake():
         )
     )
     desc = tools["schedule"].definition.description
-    assert "醒" in desc, "schedule 文案要让模型知道这是排下次醒来"
+    assert "醒" in desc, "schedule 文案要让模型知道这关乎下次醒来"
+    assert "世界" in desc, (
+        "文案要让模型知道这是给世界一个「我想几点醒」的信号（意愿），"
+        "由世界负责到点叫她"
+    )
 
 
 # ---------------------------------------------------------------------------
-# fire_life_self_wake —— 收口 emit + 落 next_wake_at（对称 world fire_self_wake）。
+# fire_life_self_wake —— 只落 next_wake_at 意愿，**绝不再 emit 任何 self 延时 tick**.
+#
+# world-driven wake：角色的自排执行腿（emit_delayed self LifeWakeTick）已拆掉，
+# 唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。fire_life_self_wake
+# 仍是 life round 的固定收口，但只保留「写下她想几点醒」这半（set_life_next_wake_at），
+# 让 world 每轮读 next_wake_at 推演谁该叫。它绝不再 emit_delayed —— 自排执行归 world。
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_fire_life_self_wake_writes_next_wake_at_and_carries_target(monkeypatch):
-    """fire_life_self_wake：目标时刻 = 现实 now + delay，写进 LifeState.next_wake_at，
-    且 emit 的 self LifeWakeTick 携带这个目标时刻（target_wake_at）。"""
+async def test_fire_life_self_wake_writes_next_wake_at_no_emit(monkeypatch):
+    """fire_life_self_wake：目标时刻 = 现实 now + delay 写进 next_wake_at，**绝不 emit**。"""
     from datetime import datetime, timedelta
 
     from app.infra import cst_time
 
-    delayed: list[dict] = []
     set_calls: list[dict] = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        delayed.append({"data": data, "delay_ms": delay_ms})
 
     async def fake_set(*, lane, persona_id, next_wake_at):
         set_calls.append(
             {"lane": lane, "persona_id": persona_id, "next_wake_at": next_wake_at}
         )
 
-    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
     monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
+    # emit_delayed 不该被调到：换成会炸的桩，被调到就 fail（断自排执行腿已拆）。
+    async def boom_emit_delayed(*args, **kwargs):
+        raise AssertionError(
+            "fire_life_self_wake 绝不该再 emit_delayed —— 自排执行腿已拆，唤醒归 world"
+        )
+
+    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
 
     before = cst_time.now_cst()
     fired = await lt.fire_life_self_wake(
@@ -685,76 +700,32 @@ async def test_fire_life_self_wake_writes_next_wake_at_and_carries_target(monkey
     )
     after = cst_time.now_cst()
 
+    # 写了意愿（fired=True 表示这轮写下了 next_wake_at）
     assert fired is True
-    assert len(delayed) == 1
-    tick = delayed[0]["data"]
-    assert tick.reason == "self"
-    assert tick.lane == "coe-t3"
-    assert tick.persona_id == "akao"
-    assert tick.target_wake_at, "self LifeWakeTick 必须携带目标唤醒时刻"
-    target = datetime.fromisoformat(tick.target_wake_at)
-    assert before + timedelta(seconds=1800) <= target <= after + timedelta(seconds=1800)
-    # 写进 state 的 next_wake_at 与 tick 携带目标一致（stale 判定靠相等）
     assert len(set_calls) == 1
     assert set_calls[0]["lane"] == "coe-t3"
     assert set_calls[0]["persona_id"] == "akao"
-    assert set_calls[0]["next_wake_at"] == tick.target_wake_at
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_emit_failure_logs_warning_not_silent(
-    monkeypatch, caplog
-):
-    """必改 4（可观测）：emit_delayed 抛错时 log warning（带 lane/persona/target），别静默吞。
-
-    life 没保底心跳，emit_delayed 失败会留一个未来 wake state（next_wake_at 已写）但没
-    实际唤醒（机械漏投）。完整恢复（watchdog）是 Non-goal，但至少不静默：失败要 log
-    warning 带 lane/persona/target。本测：set 已成功写、emit_delayed 抛错 → 有 warning
-    log（不静默吞），且不把异常往上炸（已 durable 落地的这一轮不该被漏投拖垮）。
-    """
-    import logging
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        return None
-
-    async def boom_emit_delayed(data, *, delay_ms, durability="durable"):
-        raise RuntimeError("broker down")
-
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
-
-    with caplog.at_level(logging.WARNING):
-        # emit_delayed 抛错不该往上炸（已 durable 落地的这一轮收口不被漏投拖垮）
-        await lt.fire_life_self_wake(
-            lane="coe-t3", persona_id="akao", self_wake={"delay_ms": 1800_000}
-        )
-
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings, "emit_delayed 失败必须 log warning（不静默吞）"
-    blob = " ".join(r.getMessage() for r in warnings)
-    assert "coe-t3" in blob, "warning 要带 lane"
-    assert "akao" in blob, "warning 要带 persona"
+    target = datetime.fromisoformat(set_calls[0]["next_wake_at"])
+    assert before + timedelta(seconds=1800) <= target <= after + timedelta(seconds=1800)
 
 
 @pytest.mark.asyncio
 async def test_fire_life_self_wake_no_pending_does_not_write_or_emit(monkeypatch):
     """没调 schedule（空待办）→ 不写 next_wake_at、不 emit（靠 world notify 起头兜底）。"""
-    delayed: list = []
     set_calls: list = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        delayed.append(data)
 
     async def fake_set(*, lane, persona_id, next_wake_at):
         set_calls.append(next_wake_at)
 
-    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
+    async def boom_emit_delayed(*args, **kwargs):
+        raise AssertionError("fire_life_self_wake 绝不该再 emit_delayed")
+
+    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
     monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
 
     fired = await lt.fire_life_self_wake(lane="coe-t3", persona_id="akao", self_wake={})
 
     assert fired is False
-    assert delayed == []
     assert set_calls == []
 
 

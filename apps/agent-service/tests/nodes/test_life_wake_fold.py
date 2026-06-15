@@ -223,7 +223,6 @@ def _expected_round_id() -> str:
     return lw._derive_life_round_id(
         lane=_LANE,
         persona_id=_PERSONA,
-        wake=EventArrived(lane=_LANE, persona_id=_PERSONA),
         read_ids=["e1"],
     )
 

@@ -1377,134 +1377,28 @@ async def test_cd_not_set_on_single_flight_conflict(
     assert await fake_redis.get(lw._cd_key("coe-t3", "akao")) is not None
 
 
-# ---------------------------------------------------------------------------
-# 必改 1（codex T3）：self wake 命中 cd 不能 raise DebounceReschedule（会丢自排）。
-#
-# DebounceReschedule 哨兵只对 EventArrived 的 debounce wire 有意义；self wake
-# （LifeWakeTick）走 emit_delayed → 普通 delayed-trigger MQ source，raise
-# DebounceReschedule 会冒泡出 _runtime_trigger_consumer 的 emit → 被 process(
-# requeue=False) drop（这条 self 自排丢失、她不再自排醒、链断）。修：self 命中
-# cd 时改为重新 emit_delayed 一条携带原 target 的 LifeWakeTick（延到 cd 剩余时间
-# 后），把这次自排攒到 cd 后再醒、不丢；event 命中 cd 仍 raise（debounce wire 懂）。
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_self_wake_in_cd_reemits_delayed_tick_not_raise(
-    patched, fake_redis, monkeypatch
-):
-    """必改 1：self wake 命中 cd → 不 raise，而是重 emit 一条延迟 LifeWakeTick（携带原 target）。
-
-    红：现状 cd 命中无条件 raise DebounceReschedule —— self wake 走 delayed-trigger
-    普通 MQ source，这个哨兵没人接 → 被 drop、自排丢失、链断。绿：self 命中 cd 改成
-    emit_delayed 一条 LifeWakeTick（reason=self，携带原 target_wake_at），延到 cd 剩余
-    时间后再醒；绝不 raise（不进 DLQ）、绝不跑这一轮（不烧模型）。
-    """
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = []
-    _FakeAgent.install(monkeypatch, script=_script_update())
-
-    # 预置 cd key（模拟上一轮刚跑完、还在冷却里）
-    await fake_redis.set(lw._cd_key("coe-t3", "akao"), "1", ex=lw._LIFE_CD_SECONDS)
-
-    reemitted: list[dict] = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        reemitted.append({"data": data, "delay_ms": delay_ms})
-
-    monkeypatch.setattr(lw, "emit_delayed", fake_emit_delayed)
-
-    tick = LifeWakeTick(
-        lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
-    )
-
-    # 绝不 raise（红：现状会 raise DebounceReschedule）
-    await life_self_wake_node(tick)
-
-    # cd 内绝不跑这一轮（不烧模型、不写、不标已读、不做事）
-    assert _FakeAgent.instances == [], "self wake 命中 cd 不该烧模型"
-    assert patched["saved"] == []
-    assert patched["marked"] == []
-    assert patched["acts"] == []
-
-    # 重 emit 一条 self LifeWakeTick，携带原 target，延到 cd 剩余时间后
-    assert len(reemitted) == 1, "self 命中 cd 必须重 emit 一条延迟 LifeWakeTick（不丢自排）"
-    new_tick = reemitted[0]["data"]
-    assert isinstance(new_tick, LifeWakeTick)
-    assert new_tick.reason == "self"
-    assert new_tick.lane == "coe-t3"
-    assert new_tick.persona_id == "akao"
-    assert new_tick.target_wake_at == target, "重排的 tick 必须携带原 target（不毁 stale 判定）"
-    # 延到 cd 剩余时间后（> 0，且 ≤ cd 全长 ms）
-    assert 0 < reemitted[0]["delay_ms"] <= lw._LIFE_CD_SECONDS * 1000
-
-
-@pytest.mark.asyncio
-async def test_self_wake_in_cd_does_not_raise_debounce_reschedule(
-    patched, fake_redis, monkeypatch
-):
-    """必改 1 命门复述：self wake 命中 cd 绝不抛 DebounceReschedule（哨兵会被 drop）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = []
-    _FakeAgent.install(monkeypatch, script=_script_update())
-    await fake_redis.set(lw._cd_key("coe-t3", "akao"), "1", ex=lw._LIFE_CD_SECONDS)
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        return None
-
-    monkeypatch.setattr(lw, "emit_delayed", fake_emit_delayed)
-
-    # 不能抛 DebounceReschedule（也不能抛别的）
-    await life_self_wake_node(
-        LifeWakeTick(
-            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
-        )
-    )
-
-
 @pytest.mark.asyncio
 async def test_event_wake_in_cd_still_raises_debounce_reschedule(
     patched, fake_redis, monkeypatch
 ):
-    """必改 1 不退化：event wake 命中 cd 仍 raise DebounceReschedule（debounce wire 懂）。"""
+    """event wake 命中 cd → raise DebounceReschedule，让 debounce handler 把这批 event 攒到 cd 后。
+
+    cd 内不烧模型、不写、不标已读，但绝不 drop 这批 event：走 debounce wire 的 raise
+    DebounceReschedule 把它推到 cd 后再醒一次（攒着、不丢）。
+    """
     arrived = EventArrived(lane="coe-t3", persona_id="akao")
     await fake_redis.set(lw._cd_key("coe-t3", "akao"), "1", ex=lw._LIFE_CD_SECONDS)
     patched["unread"] = [_envelope("e1", "cd 内来的动静")]
     _FakeAgent.install(monkeypatch, script=_script_update())
 
-    reemitted: list = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        reemitted.append(data)
-
-    monkeypatch.setattr(lw, "emit_delayed", fake_emit_delayed)
-
     with pytest.raises(DebounceReschedule) as ei:
         await lw.life_wake_node(arrived)
 
     assert ei.value.data is arrived
-    # event 命中 cd 走 raise 那条路，不该改成 emit_delayed 重排
-    assert reemitted == [], "event 命中 cd 仍走 DebounceReschedule，不走 self 那条 emit 重排"
+    # cd 内不烧模型、不写、不标已读（攒着、不丢）
+    assert _FakeAgent.instances == []
+    assert patched["saved"] == []
+    assert patched["marked"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1756,11 +1650,12 @@ async def test_cold_start_probe_uses_round_session_id(patched, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 阶段 1B Task 2 —— life 自排（独立 self wake + 工具 + 空信箱语义 + life gate）。
+# world-driven wake —— 唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。
 #
-# 照搬 world Task 1 的样板：LifeWakeTick(reason=self, target_wake_at) 独立信号、
-# 到点 gate（self 到点 + stale via target == LifeState 当前 next_wake_at）、外部刺激
-# （EventArrived）永远放行、self wake 即使信箱空也跑一轮、act/幂等种子对 self 也成立。
+# 角色的自排执行腿（LifeWakeTick → life_self_wake_node + 到点 gate）和被否的 fan-out
+# 定时心跳整套已拆掉，只保留 schedule 写下 next_wake_at 意愿这半（world 每轮读它推演谁
+# 该叫）。这里钉死：EventArrived 永远放行（即使排了未来 next_wake_at）、event 唤醒一轮
+# 收口仍写 next_wake_at（自排意愿落库）、被叫醒入口（EventArrived）行为不退化。
 # ---------------------------------------------------------------------------
 
 
@@ -1771,35 +1666,20 @@ def _now_cst():
 
 
 def _stub_life_state(patched, snapshot):
-    """覆盖 patched fixture 的 find_life_state 返回值（gate 读 next_wake_at 用）。"""
+    """覆盖 patched fixture 的 find_life_state 返回值。"""
     patched["snapshot"] = snapshot
 
 
-# --- LifeWakeTick Data 形态 ---
-
-
-def test_life_wake_tick_has_self_wake_fields():
-    """LifeWakeTick：lane / persona_id（双键）+ reason + target_wake_at（照搬 WorldTick）。"""
-    from app.nodes.life_wake import LifeWakeTick
-    from app.runtime.data import key_fields
-
-    keys = key_fields(LifeWakeTick)
-    assert "lane" in keys and "persona_id" in keys, "LifeWakeTick 双键 lane+persona_id"
-    tick = LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at="t")
-    assert tick.reason == "self"
-    assert tick.target_wake_at == "t"
-    # transient（只当唤醒信号，不落 pg）
-    assert getattr(LifeWakeTick.Meta, "transient", False) is True
-
-
-# --- gate：self 到点 + stale + 外部刺激放行 ---
+# --- EventArrived 永远放行（外部刺激不走任何到点 gate） ---
 
 
 @pytest.mark.asyncio
 async def test_event_wake_always_passes_even_with_future_next_wake(patched, monkeypatch):
-    """EventArrived（外部刺激）永远放行 —— 哪怕 LifeState 排了一个未来才到的 next_wake_at。"""
-    from app.nodes.life_wake import LifeWakeTick  # noqa: F401  (import sanity)
+    """EventArrived（world notify 入口）永远放行 —— 哪怕 LifeState 排了一个未来才到的 next_wake_at。
 
+    world-driven wake：角色被叫醒只剩 EventArrived 这一条入口（world notify 走它）。
+    它不走任何到点 gate、永远立刻醒——这是新架构里角色唯一的醒来路径，必须不退化。
+    """
     future = (_now_cst() + __import__("datetime").timedelta(minutes=30)).isoformat()
     _stub_life_state(
         patched,
@@ -1817,142 +1697,7 @@ async def test_event_wake_always_passes_even_with_future_next_wake(patched, monk
     assert _FakeAgent.instances, "EventArrived 外部刺激必须永远放行（即使排了未来 next_wake_at）"
 
 
-@pytest.mark.asyncio
-async def test_self_wake_on_time_matching_target_runs(patched, monkeypatch):
-    """self wake 到点（now ≥ next_wake_at）且携带目标 == state 当前值 → 放行跑一轮。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = [_envelope("e1", "窗外的光")]
-    _FakeAgent.install(monkeypatch, script=_script_update())
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target)
-    )
-
-    assert _FakeAgent.instances, "到点且目标匹配的 self wake 应放行跑一轮"
-
-
-@pytest.mark.asyncio
-async def test_self_wake_before_time_gated_out(patched, monkeypatch):
-    """self wake 没到点（now < next_wake_at）→ 判废，不跑。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    future = (_now_cst() + __import__("datetime").timedelta(minutes=10)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=future,
-        ),
-    )
-    patched["unread"] = [_envelope("e1", "动静")]
-    _FakeAgent.install(monkeypatch, script=_script_update())
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=future)
-    )
-
-    assert _FakeAgent.instances == [], "没到点的 self wake 必须判废、不跑"
-    assert patched["saved"] == []
-    assert patched["marked"] == []
-
-
-@pytest.mark.asyncio
-async def test_self_wake_stale_target_gated_out(patched, monkeypatch):
-    """self wake 携带的旧目标被 state 当前值覆盖（被新自排 / 外部打断）→ 判废 stale。
-
-    哪怕这条旧 self wake 携带的目标已过（到点了），只要 LifeState.next_wake_at 已被
-    更新成另一个值，就必须判废、不误触发推演。
-    """
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    td = __import__("datetime").timedelta
-    stale_target = (_now_cst() - td(minutes=5)).isoformat()
-    current = (_now_cst() - td(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=current,
-        ),
-    )
-    patched["unread"] = [_envelope("e1", "动静")]
-    _FakeAgent.install(monkeypatch, script=_script_update())
-
-    await life_self_wake_node(
-        LifeWakeTick(
-            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=stale_target
-        )
-    )
-
-    assert _FakeAgent.instances == [], (
-        "self 携带目标与 state 当前 next_wake_at 不符（被覆盖）必须判废 stale"
-    )
-
-
-@pytest.mark.asyncio
-async def test_self_wake_none_next_wake_is_gated_out(patched, monkeypatch):
-    """self wake 但 LifeState.next_wake_at 为 None（从没自排过）→ 判废（无合法目标可比对）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在看书", response_mood="平静", activity_type="rest",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=None,
-        ),
-    )
-    patched["unread"] = [_envelope("e1", "动静")]
-    _FakeAgent.install(monkeypatch, script=_script_update())
-
-    await life_self_wake_node(
-        LifeWakeTick(
-            lane="coe-t3", persona_id="akao", reason="self",
-            target_wake_at=(_now_cst()).isoformat(),
-        )
-    )
-
-    assert _FakeAgent.instances == [], "next_wake_at=None 时 self wake 判废（无合法目标）"
-
-
-# --- 空信箱语义：self wake 即使信箱空也跑一轮；event 空信箱仍 early return ---
-
-
-@pytest.mark.asyncio
-async def test_self_wake_runs_even_with_empty_inbox(patched, monkeypatch):
-    """关键（decision 6）：self wake 到点放行后即使信箱空也跑一轮（"你自排的时间到了"）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = []  # 空信箱
-    _FakeAgent.install(monkeypatch, script=_script_update(current_state="接着写下一题"))
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target)
-    )
-
-    assert _FakeAgent.instances, "self wake 即使信箱空也必须跑一轮（自排时间到了）"
-    assert [s["current_state"] for s in patched["saved"]] == ["接着写下一题"]
+# --- 空信箱语义：event 空信箱仍 early return（没新动静不用跑） ---
 
 
 @pytest.mark.asyncio
@@ -1968,60 +1713,7 @@ async def test_event_wake_empty_inbox_still_early_returns(patched, monkeypatch):
     assert patched["marked"] == []
 
 
-# --- act / 幂等种子：self wake 没 event_ids 也要稳定且各轮独立 ---
-
-
-@pytest.mark.asyncio
-async def test_self_wake_act_id_independent_of_event_ids(patched, monkeypatch):
-    """self wake 没 event_ids，act 仍能做且 act_id 不是空种子（不与别的 self 轮误去重）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    td = __import__("datetime").timedelta
-    target_a = (_now_cst() - td(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target_a,
-        ),
-    )
-    patched["unread"] = []
-    _FakeAgent.install(monkeypatch, script=_script_update_then_act(description="端水出去"))
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target_a)
-    )
-
-    assert len(patched["acts"]) == 1, "self wake 空信箱也能 act"
-    act_id_a = patched["acts"][0]["act_id"]
-    assert act_id_a, "act_id 不能是空"
-
-    # 第二个 self 轮（不同 target，仍是可解析的过去时刻）→ 不同 act_id（不误去重）
-    patched["acts"].clear()
-    target_b = (_now_cst() - td(seconds=2)).isoformat()
-    assert target_b != target_a, "两轮 target 必须不同才能验证种子独立"
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target_b,
-        ),
-    )
-    _FakeAgent.install(monkeypatch, script=_script_update_then_act(description="再端一杯"))
-    # 删 cd key 避免冷却挡住第二轮
-    import app.infra.redis as redis_mod
-
-    await redis_mod._redis.delete(lw._cd_key("coe-t3", "akao"))
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target_b)
-    )
-
-    assert len(patched["acts"]) == 1
-    act_id_b = patched["acts"][0]["act_id"]
-    assert act_id_b != act_id_a, "不同 self 自排轮必须派生不同 act_id（不误去重）"
+# --- act / 幂等种子：event 唤醒 base act_id 按本轮 event_ids 派生（重放幂等） ---
 
 
 @pytest.mark.asyncio
@@ -2050,53 +1742,16 @@ async def test_event_wake_act_id_seed_unchanged(patched, monkeypatch):
     )
 
 
-# --- 收口：self wake 跑完也排下次醒（自排接力） ---
-
-
-@pytest.mark.asyncio
-async def test_self_wake_round_fires_next_self_wake(patched, monkeypatch):
-    """self wake 一轮跑完，若模型调了 schedule → 收口 emit 下一条 self LifeWakeTick（接力）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = []
-
-    fired: list = []
-
-    async def fake_fire(*, lane, persona_id, self_wake):
-        fired.append({"lane": lane, "persona_id": persona_id, "self_wake": dict(self_wake)})
-        return bool(self_wake)
-
-    monkeypatch.setattr(lw, "fire_life_self_wake", fake_fire)
-
-    def _script_schedule(tools):
-        async def _run(_tools):
-            by_name = {t.name: t for t in _tools}
-            await by_name["schedule"].invoke({"seconds": 1800})
-
-        return _run
-
-    _FakeAgent.install(monkeypatch, script=_script_schedule(None))
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target)
-    )
-
-    assert len(fired) == 1, "self wake 一轮收口必须调 fire_life_self_wake"
-    assert fired[0]["self_wake"].get("delay_ms") == 1_800_000, "收口要读到本轮 schedule 的待办"
+# --- 收口：event 唤醒跑完写下她想几点醒的意愿（next_wake_at），交给 world ---
 
 
 @pytest.mark.asyncio
 async def test_event_wake_round_also_fires_self_wake(patched, monkeypatch):
-    """event 唤醒一轮跑完也走收口 fire（被起头唤醒后能自排接力，spec 目标）。"""
+    """event 唤醒一轮跑完走收口 fire 写下 next_wake_at 意愿（world 每轮读它推演谁该叫）。
+
+    world-driven wake：被 world notify 起头叫醒后，她用 schedule 写下「想几点醒」的意愿，
+    收口 fire_life_self_wake 把它落进 next_wake_at（只写意愿、不再 emit 任何自排 tick）。
+    """
     patched["unread"] = [_envelope("e1", "饭点的香味")]
 
     fired: list = []
@@ -2185,9 +1840,7 @@ async def test_stimulus_carries_round_marker(patched, monkeypatch):
 
     call = _FakeAgent.last_run()
     round_id = lw._derive_life_round_id(
-        lane="coe-t3", persona_id="akao",
-        wake=EventArrived(lane="coe-t3", persona_id="akao"),
-        read_ids=["e1", "e2"],
+        lane="coe-t3", persona_id="akao", read_ids=["e1", "e2"],
     )
     blob = "".join(m.text() for m in call["messages"])
     assert lw._round_marker(round_id) in blob, (
@@ -2253,7 +1906,7 @@ async def test_dual_source_replay_runs_only_one_round(patched, fake_redis, monke
 
     # transcript 不重复一轮：本轮 round marker 只出现一次。
     round_id = lw._derive_life_round_id(
-        lane="coe-t3", persona_id="akao", wake=arrived, read_ids=["e1", "e2"]
+        lane="coe-t3", persona_id="akao", read_ids=["e1", "e2"]
     )
     marker = lw._round_marker(round_id)
     marker_count = sum(1 for m in store if marker in m.text())
@@ -2686,36 +2339,6 @@ async def test_arc_read_uses_wake_event_lane(patched, monkeypatch):
     assert patched["arc_lanes"] == ["coe-t3"]
 
 
-@pytest.mark.asyncio
-async def test_self_wake_empty_inbox_also_carries_arc_awareness(patched, monkeypatch):
-    """self 自排空信箱轮同样带阶段段——透传点在 _run_life_round，两条唤醒路都覆盖。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    narrative = "这个家的日子翻到了新的一页。"
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["arc"] = _world_arc(narrative)
-    patched["unread"] = []
-    _FakeAgent.install(monkeypatch, script=None)
-
-    await life_self_wake_node(
-        LifeWakeTick(
-            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
-        )
-    )
-
-    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
-    assert _ARC_HEADER_MARK in msg_blob
-    assert narrative in msg_blob
-
-
 # ---------------------------------------------------------------------------
 # 备忘录 & 日程 第二块（进她脑子 · life 唤醒侧）：每轮 stimulus 带「她本子里还没
 # 了结的事」一段。
@@ -2807,35 +2430,6 @@ async def test_notebook_read_failure_section_absent_round_still_runs(patched, mo
     # 这一轮照常收口（读失败不影响唤醒主流程）
     assert patched["marked"] == [["e1"]]
     assert [s["current_state"] for s in patched["saved"]] == ["去开门"]
-
-
-@pytest.mark.asyncio
-async def test_self_wake_empty_inbox_also_carries_notebook(patched, monkeypatch):
-    """self 自排空信箱轮同样带本子段——注入点在 _run_life_round，两条唤醒路都覆盖。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["notebook"] = [_notebook_entry("n1", "记得给绫奈姐姐回消息")]
-    patched["unread"] = []
-    _FakeAgent.install(monkeypatch, script=None)
-
-    await life_self_wake_node(
-        LifeWakeTick(
-            lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target
-        )
-    )
-
-    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
-    assert _NOTEBOOK_HEADER_MARK in msg_blob
-    assert "记得给绫奈姐姐回消息" in msg_blob
 
 
 # ---------------------------------------------------------------------------
@@ -3142,35 +2736,3 @@ async def test_life_round_fires_schedule_reminders_for_noted_schedule(patched, m
     assert fired[0]["schedule_reminders"] == {entry_id: "2026-06-13T15:00:00+08:00"}, (
         "收口要把本轮排的日程（entry_id → remind_at）交给 fire"
     )
-
-
-@pytest.mark.asyncio
-async def test_self_wake_round_also_fires_schedule_reminders(patched, monkeypatch):
-    """self 自排空信箱轮也走收口 fire_schedule_reminders（两条唤醒路都覆盖）。"""
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node
-
-    target = (_now_cst() - __import__("datetime").timedelta(seconds=1)).isoformat()
-    _stub_life_state(
-        patched,
-        LifeState(
-            lane="coe-t3", persona_id="akao",
-            current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=target,
-        ),
-    )
-    patched["unread"] = []
-
-    fired: list = []
-
-    async def fake_fire_reminders(*, lane, persona_id, schedule_reminders):
-        fired.append(dict(schedule_reminders))
-
-    monkeypatch.setattr(lw, "fire_schedule_reminders", fake_fire_reminders)
-    _FakeAgent.install(monkeypatch, script=None)  # 什么都不排
-
-    await life_self_wake_node(
-        LifeWakeTick(lane="coe-t3", persona_id="akao", reason="self", target_wake_at=target)
-    )
-
-    assert len(fired) == 1, "self 自排轮收口也要调 fire_schedule_reminders（即使本轮没排）"
-    assert fired[0] == {}, "本轮没排日程 → 空容器交给 fire（fire 据空容器不 emit）"

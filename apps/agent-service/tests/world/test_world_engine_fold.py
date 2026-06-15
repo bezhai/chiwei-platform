@@ -95,6 +95,13 @@ def _stub_engine_io(monkeypatch):
     async def fake_run_arc_reflection(**kwargs):
         pass
 
+    async def fake_list_all_persona_ids():
+        # gate 放行的轮会读三姐妹此刻状态（world-driven wake）；stub 空名单不碰真库。
+        return []
+
+    async def fake_find_life_state(*, lane, persona_id):
+        return None
+
     async def fake_load_session(session_id):
         return []
 
@@ -112,6 +119,10 @@ def _stub_engine_io(monkeypatch):
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
     monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_run_arc_reflection)
+    monkeypatch.setattr(
+        engine_mod, "list_all_persona_ids", fake_list_all_persona_ids
+    )
+    monkeypatch.setattr(engine_mod, "find_life_state", fake_find_life_state)
     monkeypatch.setattr(engine_mod, "load_session", fake_load_session)
     monkeypatch.setattr(engine_mod, "record_round_cost", fake_record_round_cost)
     monkeypatch.setattr(sediment_mod, "record_round_cost", fake_record_round_cost)
