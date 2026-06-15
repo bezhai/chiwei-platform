@@ -4,12 +4,21 @@
 def test_main_agent_keeps_supported_main_tools():
     from app.agent.tools import ALL_TOOLS
     from app.agent.tools.delegation import deep_research
+    from app.agent.tools.no_reply import no_reply
     from app.agent.tools.sandbox import sandbox_bash
     from app.agent.tools.skill import load_skill
 
     assert deep_research in ALL_TOOLS
     assert load_skill in ALL_TOOLS
     assert sandbox_bash in ALL_TOOLS
+    assert no_reply in ALL_TOOLS
+
+
+def test_no_reply_is_main_only_tool():
+    from app.agent.tools import ALL_TOOLS, BASE_TOOLS
+
+    assert "no_reply" not in {t.definition.name for t in BASE_TOOLS}
+    assert "no_reply" in {t.definition.name for t in ALL_TOOLS}
 
 
 def test_chat_toolsets_drop_legacy_rag_tools():

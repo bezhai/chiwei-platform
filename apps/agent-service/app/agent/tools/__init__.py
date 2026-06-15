@@ -9,6 +9,7 @@ Exports two tool lists:
 from app.agent.tools.delegation import deep_research
 from app.agent.tools.image import generate_image, read_images
 from app.agent.tools.image_search import search_images
+from app.agent.tools.no_reply import no_reply
 from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
 from app.agent.tools.skill import load_skill
@@ -27,6 +28,7 @@ ALL_TOOLS = [
     deep_research,
     load_skill,
     sandbox_bash,
+    no_reply,
 ]
 
 __all__ = [
@@ -40,4 +42,5 @@ __all__ = [
     "deep_research",
     "load_skill",
     "sandbox_bash",
+    "no_reply",
 ]
