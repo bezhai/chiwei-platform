@@ -3281,6 +3281,88 @@ def test_world_instruction_advances_world_by_real_time():
         )
 
 
+def test_world_instruction_does_not_author_sisters_autonomous_action():
+    """第二轮调优 A：world 推进世界**不替三姐妹编她们自己的自主行动**。
+
+    coe 实证：world 推进世界时写了「赤尾从餐桌边起身到厨房收拢碗筷」——但她（life）
+    还没醒、没决定起身。world 是客观推演者，不替角色决定她做什么。已对齐的边界：
+
+      * world 推的是客观环境随时间的进程（饭凉了、天黑了）+ 外部 / NPC 的客观动静；
+      * world **可以**反映三姐妹**已经做了**的 act 的客观结果（她去厨房 → 厨房有动静），
+        这是反映既成事实；
+      * world **绝不预先替她编她还没做的行动**（她还在吃饭 / 还没醒，就不能写「她起身
+        收拾了」）——那是她 life 醒来后自己决定的。
+
+    这条钉死指令在 prompt 层明确这层「反映已做 ✓ / 预编没做 ✗」的区分。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① 明确「不替三姐妹决定她们自己做什么」（她起不起身 / 去不去做某事是她自己的事）。
+    assert ("不替" in instruction), "指令必须明确 world 不替角色决定她做什么"
+    assert ("她自己" in instruction) or ("自己决定" in instruction) or (
+        "自己的事" in instruction
+    ), "指令必须说明她做不做某事是她自己（life 醒来后）决定的"
+
+    # ② 反映已做的 act ✓ —— 把她已经做了的事的客观结果体现进世界（既成事实）。
+    assert ("已经做" in instruction) or ("已做" in instruction) or (
+        "既成事实" in instruction
+    ), "指令必须允许 world 反映三姐妹已经做了的 act 的客观结果（既成事实）"
+
+    # ③ 预编没做的行动 ✗ —— 绝不预先替她编她还没做 / 还没醒时的自主行动。
+    assert ("还没做" in instruction) or ("没做的行动" in instruction) or (
+        "预编" in instruction
+    ) or ("预先" in instruction), (
+        "指令必须钉死 world 绝不预先替角色编她还没做的自主行动"
+    )
+
+    # 红线复核：这条边界绝不能重新引入「判唤醒」语义（Task 1 已收口）。
+    for wake_phrase in ("状态停滞", "太久没更新", "该不该叫醒", "明显该醒"):
+        assert wake_phrase not in instruction, (
+            f"职责边界 ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
+def test_world_instruction_notifies_objective_changes_from_advance():
+    """第二轮调优 B：真实时间推进让世界冒出在场的人够得着的客观动静，就要 notify 投出去。
+
+    coe 实证：world 推进了世界（出了碗盘声、水流声），却没 notify 投给在场的人，life
+    仍没被卷起来；它甚至推进完世界后还自相矛盾地写「没有出现可见的新变化」。已对齐的
+    边界：notify 是把「世界推进」转成「life 被卷」的唯一通道——真实时间推进让世界冒出
+    在场的人够得着的客观动静（环境到了新节点：饭凉了、天黑该开灯了；或外部 / NPC 动静：
+    家人喊吃饭、电话响、玄关有动静），就要 notify 投出去、标客观作用域，让在场的人感知到。
+    不能推进了世界却判「没有新变化」而不发。
+
+    这条钉死指令在 prompt 层强化 notify：推进出的客观动静要投出去、别推进了却判没变化。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① notify 是把「世界推进」转成「life 被卷 / 感知」的唯一通道。
+    assert "notify" in instruction, "指令必须枚举 notify 工具"
+    assert ("唯一" in instruction), (
+        "指令必须点出 notify 是世界推进传到角色那里的唯一通道"
+    )
+
+    # ② 推进冒出的客观动静（环境到了新节点 / 外部 / NPC 动静）就要 notify 投出去。
+    assert ("推进" in instruction) and ("动静" in instruction), (
+        "指令必须引导：推进世界冒出的客观动静要 notify 投出去"
+    )
+
+    # ③ 别推进了世界却判「没有新变化」而不发（这是 coe 实证的自相矛盾）。
+    assert ("没有新变化" in instruction) or ("没有变化" in instruction) or (
+        "没新变化" in instruction
+    ), "指令必须钉死：别推进了世界却判「没有新变化」而不发"
+
+    # 红线复核：强化 notify ≠ 硬造戏剧（自然冒出的动静才投，不为卷人硬造）。
+    assert "硬造" in instruction, (
+        "强化 notify 必须同时守住「别为卷人硬造动静」（自然冒出才投）"
+    )
+    # 红线复核：绝不重新引入「判唤醒」语义（notify 投客观动静、不挑谁该醒）。
+    for wake_phrase in ("状态停滞", "太久没更新", "该不该叫醒", "明显该醒"):
+        assert wake_phrase not in instruction, (
+            f"强化 notify ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 硬超时：整轮推演挂死 → wait_for 掐死、走 fail-open（堵 world 唯一的永久睡死口）
 #
