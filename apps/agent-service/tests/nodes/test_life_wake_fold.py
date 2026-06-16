@@ -268,15 +268,14 @@ async def test_round_close_folds_with_life_policy(patched, monkeypatch):
     ]
 
 
-async def test_fold_runs_after_mark_read_before_self_wake_and_review(
+async def test_fold_runs_after_mark_read_before_reminders_and_review(
     patched, monkeypatch
 ):
-    """折叠在成本入账 + 标已读之后、**排下次醒之前**、睡前回顾之前。
+    """折叠在成本入账 + 标已读之后、挂日程到点提醒之前、睡前回顾之前。
 
-    fold 必须先于 fire_life_self_wake（codex T3 必改 1）：沉淀 LLM 最长 120s 仍
-    占着单飞锁，若先排 self-wake，短延迟的自排会在折叠期间到达撞锁——self tick
-    撞锁是直接被吞的（不像事件唤醒有 reschedule 保底）。fold 完成后才开始给
-    下一轮自排计时，窗口消失。
+    收口顺序（Task 2 删自设闹钟后）：round_cost → mark_read → fold →
+    fire_schedule_reminders → review。沉淀 LLM 最长 120s 仍占着单飞锁，先把这一步做完
+    再挂日程提醒，收口顺序稳定。
     """
     order: list[str] = []
 
@@ -290,9 +289,9 @@ async def test_fold_runs_after_mark_read_before_self_wake_and_review(
         order.append("fold")
         return False
 
-    async def fake_self_wake(*, lane, persona_id, self_wake):
-        order.append("self_wake")
-        return False
+    async def fake_fire_reminders(*, lane, persona_id, schedule_reminders):
+        order.append("reminders")
+        return 0
 
     async def fake_review(**kwargs):
         order.append("review")
@@ -300,7 +299,7 @@ async def test_fold_runs_after_mark_read_before_self_wake_and_review(
     monkeypatch.setattr(lw, "record_round_cost", fake_cost)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
     monkeypatch.setattr(lw, "fold_session", fake_fold)
-    monkeypatch.setattr(lw, "fire_life_self_wake", fake_self_wake)
+    monkeypatch.setattr(lw, "fire_schedule_reminders", fake_fire_reminders)
     monkeypatch.setattr(lw, "run_day_review", fake_review)
     # 边沿触发铺设：轮始醒着（第一次读）、收口最新快照是 sleep（第二次读）——
     # 本轮发生「进入睡眠」的转变，review 才会跑（快班是边沿触发不是电平）。
@@ -317,7 +316,7 @@ async def test_fold_runs_after_mark_read_before_self_wake_and_review(
 
     await _wake()
 
-    assert order == ["round_cost", "mark_read", "fold", "self_wake", "review"]
+    assert order == ["round_cost", "mark_read", "fold", "reminders", "review"]
 
 
 async def test_turn_idempotent_skip_does_not_fold(patched, monkeypatch):

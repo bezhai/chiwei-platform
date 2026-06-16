@@ -968,6 +968,45 @@ class TestExtract:
         assert sent[1].role == Role.USER
         assert sent[2].text() == "more"
 
+    async def test_extract_threads_session_id_to_root_span(self):
+        """``extract(session_id=...)`` tags the langfuse trace's session.
+
+        async-internal structured judgments (e.g. world 在场匹配) want their trace
+        grouped into an actor's day session, exactly like ``run`` / ``stream``.
+        ``_root_span`` already supports ``session_id``; ``extract`` must thread it
+        through (None by default keeps the status quo — no session tag).
+        """
+        from contextlib import contextmanager
+
+        class Out(BaseModel):
+            v: str
+
+        model = AsyncMock()
+        model.structured = AsyncMock(return_value={"v": "ok"})
+
+        captured: dict = {}
+
+        @contextmanager
+        def _capturing_span(**kwargs):
+            captured.update(kwargs)
+            yield MagicMock()
+
+        with (
+            patch(
+                "app.agent.core.build_model_client",
+                new_callable=AsyncMock,
+                return_value=model,
+            ),
+            patch("app.agent.core._root_span", _capturing_span),
+        ):
+            await Agent(_NO_PROMPT_CFG).extract(
+                Out,
+                messages=[Message(role=Role.USER, content="t")],
+                session_id="coe-t2:world:2026-06-16",
+            )
+
+        assert captured.get("session_id") == "coe-t2:world:2026-06-16"
+
 
 # ---------------------------------------------------------------------------
 # session续接 — stateful continuation across runs via a session_id

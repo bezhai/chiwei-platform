@@ -55,8 +55,14 @@ def _round_features() -> dict:
 
 @pytest.fixture
 def _ctx():
-    """world 本轮的 ambient context：lane + 确定性 round_id + 待办 self-wake 容器。"""
-    return AgentContext(features=_round_features())
+    """world 本轮的 ambient context：lane + 确定性 round_id + 待办 self-wake 容器。
+
+    带 session_id：notify 的在场匹配把它当 langfuse 归组标签（trace 归到 world 当天
+    那条 session）。
+    """
+    return AgentContext(
+        session_id="coe-t2:world:2026-06-16", features=_round_features()
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -94,15 +100,62 @@ def _stub_handlers(monkeypatch):
             {"lane": lane, "narrative": narrative, "turned_at": turned_at}
         )
 
+    # notify 不再由 world 主观挑 recipients——它标客观作用域，调一道在场匹配 LLM
+    # 拿在场角色。这里桩：① 全部三姐妹（list_all_persona_ids）；② 各角色 current_state
+    # 位置（find_life_state，persona_locations 缺某人 = 她还没活过一轮、无 LifeState）；
+    # ③ 在场匹配（match_present_personas）回放本用例设定的在场列表 + 记录每次调用的输入
+    # （断言喂的是作用域 + 各角色位置）。默认三姐妹都有位置、匹配返全员，个别用例覆盖。
+    all_persona_ids = ["chinagi", "ayana", "akao"]
+    persona_locations: dict[str, str] = {
+        "chinagi": "在公司工位改方案",
+        "ayana": "在学校教室上课",
+        "akao": "在家厨房做饭",
+    }
+
+    async def fake_list_all_persona_ids():
+        return list(all_persona_ids)
+
+    class _FakeLifeState:
+        def __init__(self, current_state: str):
+            self.current_state = current_state
+
+    async def fake_find_life_state(*, lane, persona_id):
+        cs = persona_locations.get(persona_id)
+        return _FakeLifeState(cs) if cs is not None else None
+
+    presence_calls: list[dict] = []
+    presence_result: dict = {"present": list(persona_locations)}
+
+    async def fake_match_present_personas(
+        *, scope, persona_locations, trace_session_id=None
+    ):
+        presence_calls.append(
+            {
+                "scope": scope,
+                "persona_locations": dict(persona_locations),
+                "trace_session_id": trace_session_id,
+            }
+        )
+        # 只返真候选里的人（对齐真实 match_present_personas 的候选过滤）。
+        return [p for p in presence_result["present"] if p in persona_locations]
+
     monkeypatch.setattr(tools_mod, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(tools_mod, "write_world_state", fake_write_world_state)
     monkeypatch.setattr(tools_mod, "read_world_state", fake_read_world_state)
     monkeypatch.setattr(tools_mod, "write_world_arc", fake_write_world_arc)
+    monkeypatch.setattr(tools_mod, "list_all_persona_ids", fake_list_all_persona_ids)
+    monkeypatch.setattr(tools_mod, "find_life_state", fake_find_life_state)
+    monkeypatch.setattr(
+        tools_mod, "match_present_personas", fake_match_present_personas
+    )
 
     tools_mod._test_delivered = delivered  # type: ignore[attr-defined]
     tools_mod._test_world_writes = world_writes  # type: ignore[attr-defined]
     tools_mod._test_world_snapshot = world_snapshot  # type: ignore[attr-defined]
     tools_mod._test_arc_writes = arc_writes  # type: ignore[attr-defined]
+    tools_mod._test_persona_locations = persona_locations  # type: ignore[attr-defined]
+    tools_mod._test_presence_calls = presence_calls  # type: ignore[attr-defined]
+    tools_mod._test_presence_result = presence_result  # type: ignore[attr-defined]
     # sleep 不直接 emit_delayed（它把待办 self-wake 记进 round state、由 engine
     # 收口后 emit），这个空列表只用来断言"tool 层没有任何直接 self-wake 发生"。
     tools_mod._test_self_wakes = []  # type: ignore[attr-defined]
@@ -264,17 +317,23 @@ def test_update_arc_docstring_pins_arc_vs_detail_boundary():
 
 
 # ---------------------------------------------------------------------------
-# notify
+# notify — Task 3：world 标客观作用域，在场匹配决定投给谁（不再 world 主观挑 recipients）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_notify_delivers_observation_to_each_recipient(_ctx):
-    """notify 把 observation 投给 world 推演指定的每个 recipient（落 summary 字段）。"""
+async def test_notify_delivers_to_present_personas_from_presence_match(_ctx):
+    """notify 标作用域 → 在场匹配返在场角色 → 只投这些人（落 summary 字段）。
+
+    新范式：world 不再传 recipients，而是传 scope（客观作用域）；谁收到由在场匹配
+    （match_present_personas，这里 mock）按角色客观位置判定。本用例匹配返
+    chinagi / ayana，断言只投给这两人。
+    """
+    tools_mod._test_presence_result["present"] = ["chinagi", "ayana"]
     with agent_context(_ctx):
         await notify.invoke(
             {
-                "recipients": ["chinagi", "ayana"],
+                "scope": "厨房飘来煎蛋和咖啡的香味——在屋里厨房附近的人闻得到。",
                 "observation": "厨房飘来煎蛋和咖啡的香味",
             }
         )
@@ -291,26 +350,73 @@ async def test_notify_delivers_observation_to_each_recipient(_ctx):
         # 据此照常敲门唤醒。权宜修复 v2 把被动语义落在 kind 上、删了 wake 参数，所以
         # notify 不再传 wake（敲门与否由 deliver_event 按 kind 判断）。
         assert "wake" not in d, "wake 参数已删，notify 不该再传它（唤醒由 kind 决定）"
-        assert d["kind"] == "ambient"
 
 
 @pytest.mark.asyncio
-async def test_notify_no_recipients_delivers_to_nobody(_ctx):
-    """空 recipients → 不投给任何人（world 推演没人够得着这条动静）。"""
+async def test_notify_no_recipients_argument(_ctx):
+    """notify 的工具签名不再有 recipients——world 不主观挑收件人（彻底替换命门）。
+
+    Task 3 的核心：收件人从 world 主观挑（recipients）改成客观作用域 + 在场匹配。
+    工具签名里绝不能再有 recipients，否则 world 又能直接给收件人列表、旁路在场匹配。
+    """
+    params = notify.definition.parameters
+    props = params.get("properties", params)
+    assert "recipients" not in props, "notify 不得再有 recipients 参数（已改为标作用域）"
+    assert "scope" in props, "notify 必须有 scope 参数（world 标客观作用域）"
+    assert "observation" in props
+
+
+@pytest.mark.asyncio
+async def test_notify_passes_scope_and_locations_to_presence_match(_ctx):
+    """notify 喂给在场匹配的是「作用域 + 各角色此刻客观位置」，不是它自己挑的人。
+
+    在场匹配的输入由 notify 组装：scope 原样传、persona_locations 来自每个角色的
+    current_state（find_life_state 读）。断言匹配真的被调到（模型判断）、且喂的就是
+    这两样。
+    """
     with agent_context(_ctx):
         await notify.invoke(
-            {"recipients": [], "observation": "巷子里有只猫走过"}
+            {
+                "scope": "客厅传来开关门的声音——在屋里的人听得到。",
+                "observation": "玄关传来开关门的声音",
+            }
+        )
+
+    assert len(tools_mod._test_presence_calls) == 1, "notify 必须调一次在场匹配"
+    call = tools_mod._test_presence_calls[0]
+    assert call["scope"] == "客厅传来开关门的声音——在屋里的人听得到。"
+    # 各角色位置来自 current_state（find_life_state）
+    assert call["persona_locations"] == {
+        "chinagi": "在公司工位改方案",
+        "ayana": "在学校教室上课",
+        "akao": "在家厨房做饭",
+    }
+    # trace 归到 world 当天 session（context.session_id）
+    assert call["trace_session_id"] == _ctx.session_id
+
+
+@pytest.mark.asyncio
+async def test_notify_nobody_present_delivers_to_nobody(_ctx):
+    """在场匹配返空（没人够得着这条动静）→ 不投给任何人。"""
+    tools_mod._test_presence_result["present"] = []
+    with agent_context(_ctx):
+        await notify.invoke(
+            {
+                "scope": "巷子里有只猫走过——只有在巷子里的人看得到。",
+                "observation": "巷子里有只猫走过",
+            }
         )
     assert tools_mod._test_delivered == []
 
 
 @pytest.mark.asyncio
 async def test_notify_same_observation_same_event_id_across_recipients(_ctx):
-    """同一 observation 投多个 recipient 用同一 event_id（一条动静一个 id）。"""
+    """同一 observation 投多个在场角色用同一 event_id（一条动静一个 id）。"""
+    tools_mod._test_presence_result["present"] = ["chinagi", "ayana", "akao"]
     with agent_context(_ctx):
         await notify.invoke(
             {
-                "recipients": ["chinagi", "ayana", "akao"],
+                "scope": "玄关传来开关门的声音，全屋都听得到。",
                 "observation": "玄关传来开关门的声音",
             }
         )
@@ -321,16 +427,17 @@ async def test_notify_same_observation_same_event_id_across_recipients(_ctx):
 @pytest.mark.asyncio
 async def test_notify_event_id_idempotent_per_round(_ctx):
     """同一 (lane, observation, round_id) 派生同一 event_id —— 整轮重放幂等命门。"""
+    tools_mod._test_presence_result["present"] = ["chinagi"]
     with agent_context(_ctx):
         await notify.invoke(
-            {"recipients": ["chinagi"], "observation": "厨房飘来煎蛋香味"}
+            {"scope": "厨房有动静。", "observation": "厨房飘来煎蛋香味"}
         )
     first = {d["event_id"] for d in tools_mod._test_delivered}
 
     tools_mod._test_delivered.clear()
     with agent_context(_ctx):
         await notify.invoke(
-            {"recipients": ["chinagi"], "observation": "厨房飘来煎蛋香味"}
+            {"scope": "厨房有动静。", "observation": "厨房飘来煎蛋香味"}
         )
     second = {d["event_id"] for d in tools_mod._test_delivered}
     assert second == first, "同输入重放应派生同一 event_id（deliver_event 幂等去重）"
@@ -346,9 +453,10 @@ async def test_notify_event_id_differs_per_observation(_ctx):
 
 @pytest.mark.asyncio
 async def test_notify_one_recipient_failure_does_not_strand_others(_ctx, caplog):
-    """notify 对 recipients 逐个独立投递：中途一人失败不影响其他人 + log 失败的 persona。"""
+    """notify 对在场角色逐个独立投递：中途一人失败不影响其他人 + log 失败的 persona。"""
     import logging
 
+    tools_mod._test_presence_result["present"] = ["chinagi", "akao", "ayana"]
     delivered: list[dict] = []
 
     async def flaky_deliver(**kwargs):
@@ -364,7 +472,7 @@ async def test_notify_one_recipient_failure_does_not_strand_others(_ctx, caplog)
         with agent_context(_ctx), caplog.at_level(logging.WARNING):
             result = await notify.invoke(
                 {
-                    "recipients": ["chinagi", "akao", "ayana"],
+                    "scope": "厨房水声，全屋听得到。",
                     "observation": "厨房水声",
                 }
             )
@@ -378,6 +486,41 @@ async def test_notify_one_recipient_failure_does_not_strand_others(_ctx, caplog)
     assert any("akao" in rec.message for rec in caplog.records)
     # 整条 notify 不抛、不被 @tool_error 包成错误
     assert not (isinstance(result, dict) and result.get("kind"))
+
+
+@pytest.mark.asyncio
+async def test_notify_includes_personas_without_life_state_with_placeholder(_ctx):
+    """读不到某角色 current_state（她还没活过一轮）→ 仍进候选、喂位置占位、由模型判。
+
+    绝不在代码里把无状态的角色排除掉——冷启动谁都还没活过一轮，排除了第一条客观
+    动静就永远到不了任何人、世界起不来（自锁）。无状态角色喂一句「还不知道她此刻在
+    哪」占位，把「在不在场」交给模型判（赤尾宪法：不确定性留给模型，不加规则消除）。
+    """
+    tools_mod._test_persona_locations.pop("akao")  # akao 还没活过一轮
+    tools_mod._test_presence_result["present"] = ["ayana"]
+    with agent_context(_ctx):
+        await notify.invoke(
+            {"scope": "教室下课铃。", "observation": "下课铃响了"}
+        )
+    call = tools_mod._test_presence_calls[0]
+    # akao 仍进候选（不排除），位置是占位文本而非 current_state
+    assert "akao" in call["persona_locations"], "无状态的角色不能被排除（否则冷启动自锁）"
+    assert "还不知道她此刻在哪" in call["persona_locations"]["akao"]
+    assert set(call["persona_locations"]) == {"chinagi", "ayana", "akao"}
+
+
+def test_notify_docstring_pins_scope_not_recipients(_ctx):
+    """notify 的 docstring（喂给 LLM 的工具说明）必须钉死「标作用域」而非「挑收件人」。
+
+    赤尾范式：world 标这事的客观作用域（发生在哪、广播还是指向谁），不替它决定推给谁。
+    工具说明里必须讲清 scope 是客观作用域、谁收到由在场匹配决定；绝不能再出现「你推演
+    谁够得着」「recipients」这类让 world 主观挑收件人的措辞。
+    """
+    doc = notify.definition.description
+    assert "作用域" in doc, "notify 说明必须讲 scope 是客观作用域"
+    assert "recipients" not in doc.lower()
+    # observation 仍必须是客观可感、不写情绪（宪法）
+    assert "情绪" in doc or "客观" in doc
 
 
 # ---------------------------------------------------------------------------

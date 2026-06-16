@@ -426,156 +426,6 @@ def test_act_description_guides_toward_low_action():
 
 
 # ---------------------------------------------------------------------------
-# schedule —— life 自排工具（阶段 1B Task 2，照搬 world sleep 的 round-scoped 覆盖）。
-# ---------------------------------------------------------------------------
-
-
-def test_build_life_tools_includes_schedule_when_slot_given():
-    """传 self_wake 容器时多一件 schedule（base 工具 + 本子三件 + schedule）。"""
-    slot: dict = {}
-    tools = lt.build_life_tools(
-        lane="coe-t3",
-        persona_id="akao",
-        act_id="a-1",
-        observed_at="2026-06-03T12:30:00+00:00",
-        self_wake=slot,
-    )
-    by_name = _tools_by_name(tools)
-    assert set(by_name) == {
-        "update_life_state",
-        "act",
-        "chat",
-        "look_up_contact",
-        "send_message",
-        "note",
-        "edit_note",
-        "read_notebook",
-        "look_up",
-        "browse_feed",
-        "schedule",
-    }
-
-
-def test_schedule_tool_hides_mechanism_only_seconds_exposed():
-    """schedule 只对模型暴露 seconds 业务参数，不暴露 lane / persona_id。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    props = set(tools["schedule"].definition.parameters["properties"])
-    assert props == {"seconds"}
-
-
-@pytest.mark.asyncio
-async def test_schedule_within_limit_records_pending_self_wake():
-    """schedule 合法 → 把待办 self-wake 记进 round-scoped slot（不直接 emit）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": 1800})
-    assert slot["delay_ms"] == 1_800_000
-
-
-@pytest.mark.asyncio
-async def test_schedule_multi_in_round_last_wins_no_accumulate():
-    """一轮内多次 schedule 不累积 —— 最后一次为准（唤醒风暴命门，照搬 world sleep）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": 300})
-    await tools["schedule"].invoke({"seconds": 600})
-    await tools["schedule"].invoke({"seconds": 900})
-    assert slot == {"delay_ms": 900_000}, "只留最后一次（覆盖而非追加）"
-
-
-@pytest.mark.asyncio
-async def test_schedule_at_min_floor_allowed():
-    """schedule == 下限 → 合法（边界含下限）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MIN_SECONDS})
-    assert slot["delay_ms"] == lt.LIFE_SCHEDULE_MIN_SECONDS * 1000
-
-
-@pytest.mark.asyncio
-async def test_schedule_at_max_ceiling_allowed():
-    """schedule == 上限 → 合法（边界含上限，上限放宽到能睡整觉）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MAX_SECONDS})
-    assert slot["delay_ms"] == lt.LIFE_SCHEDULE_MAX_SECONDS * 1000
-
-
-@pytest.mark.asyncio
-async def test_schedule_under_floor_errors_no_pending():
-    """schedule < 下限 → 返回错误喂回模型重调（不静默夹）、不留待办。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    out = await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MIN_SECONDS - 1})
-    assert isinstance(out, dict)
-    assert out["kind"] == "tool_error"
-    assert slot == {}, "超下限不该留待办 self-wake"
-
-
-@pytest.mark.asyncio
-async def test_schedule_over_ceiling_errors_no_pending():
-    """schedule > 上限 → 返回错误喂回模型重调（不静默夹）、不留待办。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    out = await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MAX_SECONDS + 1})
-    assert isinstance(out, dict)
-    assert out["kind"] == "tool_error"
-    assert slot == {}
-
-
-def test_schedule_ceiling_allows_full_night_sleep():
-    """上限放宽到能睡整觉（≥ 8h）——夜里一觉到天亮（spec 决策 3）。"""
-    assert lt.LIFE_SCHEDULE_MAX_SECONDS >= 8 * 3600
-    # 下限防排太密，但不至于神经质每分钟一轮
-    assert lt.LIFE_SCHEDULE_MIN_SECONDS >= 60
-
-
-# ---------------------------------------------------------------------------
 # bug 2 / 3：领域层校验经活轮工具喂回模型（不用 stub_handlers，走真 update_entry /
 # note_entry 的 fail-fast 校验——脏 status / 脏 remind_at 在 DB 之前就抛 ValueError，
 # @tool_error 把它兜成结构化 outcome 喂回模型重填，绝不静默写脏 / 不挂提醒）。
@@ -639,112 +489,22 @@ async def test_note_invalid_remind_at_returns_tool_error_no_pending():
     assert reminders == {}, "脏 remind_at 校验失败不该留待挂提醒"
 
 
-def test_schedule_description_signals_will_not_self_wake():
-    """schedule docstring 表达「给世界一个我想几点醒的信号」（意愿），不承诺到点精确自醒。
-
-    world-driven wake：自排执行腿已拆，schedule 只是写下她想几点醒的意愿、交给世界
-    每轮读它推演谁该叫。文案要让模型知道这是「告诉世界我想几点醒」，而不是「我到点
-    会自己醒」——后者的承诺随自排执行腿一起拆掉了。
-    """
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    desc = tools["schedule"].definition.description
-    assert "醒" in desc, "schedule 文案要让模型知道这关乎下次醒来"
-    assert "世界" in desc, (
-        "文案要让模型知道这是给世界一个「我想几点醒」的信号（意愿），"
-        "由世界负责到点叫她"
-    )
-
-
-# ---------------------------------------------------------------------------
-# fire_life_self_wake —— 只落 next_wake_at 意愿，**绝不再 emit 任何 self 延时 tick**.
-#
-# world-driven wake：角色的自排执行腿（emit_delayed self LifeWakeTick）已拆掉，
-# 唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。fire_life_self_wake
-# 仍是 life round 的固定收口，但只保留「写下她想几点醒」这半（set_life_next_wake_at），
-# 让 world 每轮读 next_wake_at 推演谁该叫。它绝不再 emit_delayed —— 自排执行归 world。
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_writes_next_wake_at_no_emit(monkeypatch):
-    """fire_life_self_wake：目标时刻 = 现实 now + delay 写进 next_wake_at，**绝不 emit**。"""
-    from datetime import datetime, timedelta
-
-    from app.infra import cst_time
-
-    set_calls: list[dict] = []
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        set_calls.append(
-            {"lane": lane, "persona_id": persona_id, "next_wake_at": next_wake_at}
-        )
-
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-    # emit_delayed 不该被调到：换成会炸的桩，被调到就 fail（断自排执行腿已拆）。
-    async def boom_emit_delayed(*args, **kwargs):
-        raise AssertionError(
-            "fire_life_self_wake 绝不该再 emit_delayed —— 自排执行腿已拆，唤醒归 world"
-        )
-
-    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
-
-    before = cst_time.now_cst()
-    fired = await lt.fire_life_self_wake(
-        lane="coe-t3", persona_id="akao", self_wake={"delay_ms": 1800_000}
-    )
-    after = cst_time.now_cst()
-
-    # 写了意愿（fired=True 表示这轮写下了 next_wake_at）
-    assert fired is True
-    assert len(set_calls) == 1
-    assert set_calls[0]["lane"] == "coe-t3"
-    assert set_calls[0]["persona_id"] == "akao"
-    target = datetime.fromisoformat(set_calls[0]["next_wake_at"])
-    assert before + timedelta(seconds=1800) <= target <= after + timedelta(seconds=1800)
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_no_pending_does_not_write_or_emit(monkeypatch):
-    """没调 schedule（空待办）→ 不写 next_wake_at、不 emit（靠 world notify 起头兜底）。"""
-    set_calls: list = []
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        set_calls.append(next_wake_at)
-
-    async def boom_emit_delayed(*args, **kwargs):
-        raise AssertionError("fire_life_self_wake 绝不该再 emit_delayed")
-
-    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-
-    fired = await lt.fire_life_self_wake(lane="coe-t3", persona_id="akao", self_wake={})
-
-    assert fired is False
-    assert set_calls == []
-
-
 # ---------------------------------------------------------------------------
 # 日程到点提醒（备忘录 & 日程 第三块）—— note / edit_note 带 remind_at 时把「待挂的
 # 日程提醒」记进 round-scoped 容器，engine 收口 fire_schedule_reminders 每条各 emit
-# 一条 ScheduleReminderTick（每条日程各挂各的、不动 self-wake 的 next_wake_at 语义）。
+# 一条 ScheduleReminderTick（每条日程各挂各的）。这是日程那条（保留），区别于已删的
+# 自设闹钟（next_wake_at / schedule）。
 # ---------------------------------------------------------------------------
 
 
 def _tools_with_reminders(reminders, stub_handlers):
-    """造带 schedule_reminders 容器的工具集（同时给 self_wake 让 schedule 也在）。"""
+    """造带 schedule_reminders 容器的工具集（日程那条，自设闹钟已删、无 self_wake）。"""
     return _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3",
             persona_id="akao",
             act_id="base-act-id",
             observed_at="2026-06-13T12:30:00+08:00",
-            self_wake={},
             schedule_reminders=reminders,
         )
     )
@@ -1027,15 +787,13 @@ async def test_tool_failure_returns_outcome_not_raise(monkeypatch):
 
 
 def test_build_life_tools_includes_chat():
-    """工具集多一件 chat（与 update_life_state / act / schedule 并列）。"""
-    slot: dict = {}
+    """工具集多一件 chat（与 update_life_state / act 并列，常驻基础工具）。"""
     tools = _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3",
             persona_id="akao",
             act_id="a-1",
             observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
         )
     )
     assert "chat" in tools
@@ -2745,3 +2503,52 @@ async def test_send_message_unknown_target_type_is_tool_error(
     assert isinstance(out, dict) and out["kind"] == "tool_error"
     assert stub_handlers["delivered"] == []
     assert stub_directory["emitted"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2（纯客观事件驱动范式）：删 life 自设闹钟整条。
+#
+# 闹钟 = 空的时间点（next_wake_at / schedule / fire_life_self_wake），目的只是
+# 「维持她运转」，设错 / 丢失就睡死——存活不该压在她自己手上。life 退成纯事件反应者：
+# 只被事件激活、跑完不排下次。她的主动计划走日程（notebook + 到点提醒），那条保留。
+#
+# 这里钉死「自设闹钟已删」：build_life_tools 不再接 self_wake、绝不产 schedule 工具；
+# fire_life_self_wake 不存在。日程那条（note / edit_note / fire_schedule_reminders /
+# schedule_reminders 容器）在上面 / 下面的 section 仍全绿，证明没误删日程。
+# ---------------------------------------------------------------------------
+
+
+def test_build_life_tools_never_produces_schedule_tool():
+    """删自设闹钟：工具集里绝不再有 schedule（不管以前怎么传都不该有）。"""
+    tools = lt.build_life_tools(
+        lane="coe-t3",
+        persona_id="akao",
+        act_id="a-1",
+        observed_at="2026-06-03T12:30:00+00:00",
+    )
+    by_name = _tools_by_name(tools)
+    assert "schedule" not in by_name, "自设闹钟已删：绝不再产 schedule 工具"
+
+
+def test_build_life_tools_rejects_self_wake_kwarg():
+    """删自设闹钟：build_life_tools 不再接 self_wake 参数（self-wake 容器整条拆掉）。"""
+    import inspect
+
+    sig = inspect.signature(lt.build_life_tools)
+    assert "self_wake" not in sig.parameters, (
+        "self-wake 容器整条拆掉：build_life_tools 不再有 self_wake 参数"
+    )
+
+
+def test_fire_life_self_wake_is_gone():
+    """删自设闹钟：fire_life_self_wake 收口函数不复存在（写 next_wake_at 那条腿拆掉）。"""
+    assert not hasattr(lt, "fire_life_self_wake"), (
+        "fire_life_self_wake（写 next_wake_at 的闹钟收口）必须删掉"
+    )
+
+
+def test_set_life_next_wake_at_no_longer_imported_in_life_tools():
+    """删自设闹钟：life_tools 不再 import / 引用 set_life_next_wake_at（没有写入方）。"""
+    assert not hasattr(lt, "set_life_next_wake_at"), (
+        "set_life_next_wake_at 不再有调用方，life_tools 不该再引用它"
+    )

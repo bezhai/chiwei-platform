@@ -1650,12 +1650,10 @@ async def test_cold_start_probe_uses_round_session_id(patched, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# world-driven wake —— 唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。
-#
-# 角色的自排执行腿（LifeWakeTick → life_self_wake_node + 到点 gate）和被否的 fan-out
-# 定时心跳整套已拆掉，只保留 schedule 写下 next_wake_at 意愿这半（world 每轮读它推演谁
-# 该叫）。这里钉死：EventArrived 永远放行（即使排了未来 next_wake_at）、event 唤醒一轮
-# 收口仍写 next_wake_at（自排意愿落库）、被叫醒入口（EventArrived）行为不退化。
+# 纯事件反应者 —— 唤醒只剩 EventArrived 一条腿（world notify / 日程到点 / 真人聊天都投
+# 信箱敲门走它）。Task 2 删自设闹钟整条：角色跑完一轮就等下一个事件、自己绝不排下次醒。
+# 这里钉死：EventArrived 永远放行（不走任何到点 gate）、被叫醒入口行为不退化。
+# （「跑完一轮绝不写 next_wake_at / 没有 schedule 工具」在文件末 Task 2 section 钉死。）
 # ---------------------------------------------------------------------------
 
 
@@ -1674,19 +1672,19 @@ def _stub_life_state(patched, snapshot):
 
 
 @pytest.mark.asyncio
-async def test_event_wake_always_passes_even_with_future_next_wake(patched, monkeypatch):
-    """EventArrived（world notify 入口）永远放行 —— 哪怕 LifeState 排了一个未来才到的 next_wake_at。
+async def test_event_wake_always_passes_no_gate(patched, monkeypatch):
+    """EventArrived（角色唯一醒来入口）永远放行 —— 不走任何到点 gate、外部刺激立刻醒。
 
-    world-driven wake：角色被叫醒只剩 EventArrived 这一条入口（world notify 走它）。
-    它不走任何到点 gate、永远立刻醒——这是新架构里角色唯一的醒来路径，必须不退化。
+    纯事件反应者：角色被叫醒只剩 EventArrived 这一条入口（world notify / 日程到点 /
+    真人聊天都投信箱敲门走它）。它不走任何到点 gate、永远立刻醒——这是角色唯一的醒来
+    路径，必须不退化。
     """
-    future = (_now_cst() + __import__("datetime").timedelta(minutes=30)).isoformat()
     _stub_life_state(
         patched,
         LifeState(
             lane="coe-t3", persona_id="akao",
             current_state="在写作业", response_mood="专注", activity_type="study",
-            observed_at="2026-06-03T08:00:00Z", next_wake_at=future,
+            observed_at="2026-06-03T08:00:00Z",
         ),
     )
     patched["unread"] = [_envelope("e1", "门铃响了")]
@@ -1694,7 +1692,7 @@ async def test_event_wake_always_passes_even_with_future_next_wake(patched, monk
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert _FakeAgent.instances, "EventArrived 外部刺激必须永远放行（即使排了未来 next_wake_at）"
+    assert _FakeAgent.instances, "EventArrived 外部刺激必须永远放行（不走到点 gate）"
 
 
 # --- 空信箱语义：event 空信箱仍 early return（没新动静不用跑） ---
@@ -1740,44 +1738,6 @@ async def test_event_wake_act_id_seed_unchanged(patched, monkeypatch):
     assert patched["acts"][0]["act_id"] == expected, (
         "event 唤醒的 base act_id 种子必须仍按本轮 event_ids 派生（重放幂等不退化）"
     )
-
-
-# --- 收口：event 唤醒跑完写下她想几点醒的意愿（next_wake_at），交给 world ---
-
-
-@pytest.mark.asyncio
-async def test_event_wake_round_also_fires_self_wake(patched, monkeypatch):
-    """event 唤醒一轮跑完走收口 fire 写下 next_wake_at 意愿（world 每轮读它推演谁该叫）。
-
-    world-driven wake：被 world notify 起头叫醒后，她用 schedule 写下「想几点醒」的意愿，
-    收口 fire_life_self_wake 把它落进 next_wake_at（只写意愿、不再 emit 任何自排 tick）。
-    """
-    patched["unread"] = [_envelope("e1", "饭点的香味")]
-
-    fired: list = []
-
-    async def fake_fire(*, lane, persona_id, self_wake):
-        fired.append({"self_wake": dict(self_wake)})
-        return bool(self_wake)
-
-    monkeypatch.setattr(lw, "fire_life_self_wake", fake_fire)
-
-    def _script_schedule():
-        async def _run(tools):
-            by_name = {t.name: t for t in tools}
-            await by_name["update_life_state"].invoke(
-                {"current_state": "起来了", "response_mood": "迷糊", "activity_type": "move"}
-            )
-            await by_name["schedule"].invoke({"seconds": 600})
-
-        return _run
-
-    _FakeAgent.install(monkeypatch, script=_script_schedule())
-
-    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
-
-    assert len(fired) == 1, "event 唤醒一轮收口也要 fire（被起头后自排接力）"
-    assert fired[0]["self_wake"].get("delay_ms") == 600_000
 
 
 # ---------------------------------------------------------------------------
@@ -2697,8 +2657,8 @@ async def test_life_round_fires_schedule_reminders_for_noted_schedule(patched, m
     """event 唤醒一轮里她 note 了一条带时间的日程 → 收口 fire_schedule_reminders 带这条。
 
     note 工具把待挂提醒记进 round-scoped 容器，engine 收口调 fire_schedule_reminders
-    （对称 fire_life_self_wake）一次性把本轮排的日程各挂各的。这条验证收口真的把容器
-    交给了 fire（容器里有那条带 remind_at 的）。
+    一次性把本轮排的日程各挂各的。这条验证收口真的把容器交给了 fire（容器里有那条带
+    remind_at 的）。日程那条保留，区别于已删的自设闹钟。
     """
     import uuid
 
@@ -2735,4 +2695,80 @@ async def test_life_round_fires_schedule_reminders_for_noted_schedule(patched, m
     entry_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{base}:note:1"))
     assert fired[0]["schedule_reminders"] == {entry_id: "2026-06-13T15:00:00+08:00"}, (
         "收口要把本轮排的日程（entry_id → remind_at）交给 fire"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 2（纯客观事件驱动范式）：删 life 自设闹钟整条。
+#
+# life 退成纯事件反应者：被事件激活、跑完这一轮，**自己绝不排下次醒**。一轮收口里
+# 绝不写任何 next_wake_at、绝不调 fire_life_self_wake / set_life_next_wake_at——那条
+# 「她自己设闹钟维持运转」的腿整条拆掉，存活由世界客观事件流兜底。
+#
+# 区分：日程（note + 到点提醒）保留 —— 上面 test_life_round_fires_schedule_reminders
+# 仍绿证明没误删。这里钉死「闹钟没了」：跑完一轮，next_wake_at 写入方一次都没被调。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_life_round_never_self_schedules(patched, monkeypatch):
+    """删自设闹钟：life 被事件激活、跑完一轮，绝不写 next_wake_at、绝不排自醒。
+
+    红：现状一轮收口会调 fire_life_self_wake 把 schedule 意愿落进 next_wake_at。绿：
+    自设闹钟整条删掉后，跑完一轮 next_wake_at 写入方（set_life_next_wake_at）一次都
+    不被调，life 跑完就等下一个事件，自己绝不排下次。
+    """
+    import app.nodes.life_tools as lt
+
+    patched["unread"] = [_envelope("e1", "饭点的香味")]
+
+    set_calls: list = []
+
+    async def boom_set(*args, **kwargs):
+        set_calls.append(kwargs or args)
+        raise AssertionError(
+            "life 跑完一轮绝不该写 next_wake_at —— 自设闹钟整条已删，存活靠世界兜底"
+        )
+
+    # next_wake_at 的唯一写入方是 fire_life_self_wake → lt.set_life_next_wake_at。
+    # 闹钟还没删时它是真写入方、被调到就 fail（红）；删掉后这个 setattr 创建的属性
+    # 不会被任何代码调到（raising=False 兜符号已删的情形），boom 永不触发（绿）。
+    monkeypatch.setattr(lt, "set_life_next_wake_at", boom_set, raising=False)
+
+    # 模型在这一轮里行动（update + act），但不该有任何「排下次醒」的工具可调。
+    _FakeAgent.install(monkeypatch, script=_script_update_then_act())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 这一轮确实跑了（被激活、行动了）
+    assert _FakeAgent.instances, "事件激活后这一轮必须真的跑（life 是事件反应者）"
+    assert patched["marked"] == [["e1"]], "跑完照常标已读"
+    # 但绝不自排下次醒
+    assert set_calls == [], "跑完一轮绝不写 next_wake_at（自设闹钟已删）"
+
+
+@pytest.mark.asyncio
+async def test_life_round_has_no_schedule_tool_to_call(patched, monkeypatch):
+    """删自设闹钟：本轮工具集里没有 schedule 工具（她想排下次醒也无从排起）。
+
+    自主性靠 prompt 给（引导她主动决定做什么），主动计划走日程（note + 到点提醒），
+    绝不再有一个「排空时间点维持运转」的 schedule 工具。
+    """
+    patched["unread"] = [_envelope("e1", "在看书")]
+
+    seen_tools: list[set] = []
+
+    def _script_inspect():
+        async def _run(tools):
+            seen_tools.append({t.name for t in tools})
+
+        return _run
+
+    _FakeAgent.install(monkeypatch, script=_script_inspect())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert seen_tools, "这一轮必须真的跑、把工具集交给模型"
+    assert "schedule" not in seen_tools[0], (
+        "本轮工具集绝不再含 schedule（自设闹钟已删）"
     )

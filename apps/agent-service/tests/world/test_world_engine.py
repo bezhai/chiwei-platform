@@ -2844,17 +2844,130 @@ def test_render_roster_section_groups_by_sister():
 
 
 # ---------------------------------------------------------------------------
-# 三姐妹此刻各自的样子（world-driven wake，Task 1）：
+# 三姐妹此刻各自的样子（纯客观叙述对齐，Task 1 收口后）：
 #
-# world 每轮读三姐妹的 LifeState，在 USER 消息里拼一段「她们此刻的样子」——每人带上
-# 当前状态、这状态记于何时（observed_at）、她想几点醒（next_wake_at），摆在能和
-# 【现实此刻】直接比对的位置。world_loop_instruction 里多一段叫醒软引导：看到谁状态
-# 太久没更新、在此刻这个世界里不对劲（典型如过了她想醒的点还停在睡着）就主动用
-# notify 把她唤回来；读不到状态的角色如实写「还没有状态记录」、不漏拼不报错。
+# world 是纯客观世界推演者。它读三姐妹的 LifeState **只为一个用途**——让自己的客观
+# 叙述跟她们此刻所处对得上（她在上课就别说她在街上）。所以 USER 消息里那段「她们此刻
+# 的样子」只拼每个人的**当前状态**（她此刻在哪、在干嘛），摆在能和【现实此刻】对照的
+# 位置；读不到状态的角色如实写「还没有状态记录」、不漏拼不报错。
 #
-# 代码只负责把「状态 + 记于何时 + 想几点醒 + 现在几点」喂进 context；多久算太久、
-# 对不对劲、该不该叫，全交给 world 这个 LLM 推演（赤尾宪法：绝不写到点阈值 / if 分支）。
+# Task 1 收口删掉的是「判唤醒」那一支：world 不再读 ``next_wake_at``（她想几点醒）/
+# 状态新旧（observed_at 停了多久）去判断「谁很久没动、该醒了」再 notify 叫醒——这是
+# 自锁源头（life 一静止就不产 act，world 看世界没动静就判「没必要叫」，越静越不叫）。
+# 收口后 world 是否产事件只取决于客观世界进程（时间到了下课就会发生），跟 life 活不
+# 活跃无关；life 全静止时 world 仍按客观节奏持续产出事件。
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_world_produces_events_when_all_life_static(monkeypatch):
+    """Task 1 核心：life 全静止（状态老旧、next_wake_at 已过期）→ world 仍正常推演一轮。
+
+    构造三姐妹都很久没动（observed_at 是几小时前）、且都「想醒的点」早已过去
+    （next_wake_at 已过期）的死局——这正是旧自锁会卡住的场景。收口后 world 不再
+    用这些做唤醒决策，所以照常跑完一轮 agent 循环（产出客观事件），不被 life 的
+    静止拽进自锁。
+    """
+    from datetime import timedelta
+
+    from app.world.engine import _CST
+
+    long_ago = (datetime.now(_CST) - timedelta(hours=4)).isoformat()
+    expired_wake = (datetime.now(_CST) - timedelta(hours=2)).isoformat()
+
+    async def personas():
+        return ["akao", "chinagi", "ayana"]
+
+    async def find_state(*, lane, persona_id):
+        # 三个人都很久没更新、且想醒的点都早过了（旧自锁的死局场景）。
+        return _life_state(
+            persona_id=persona_id,
+            current_state="还睡着，趴在被子里",
+            observed_at=long_ago,
+            next_wake_at=expired_wake,
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    # 不卡死、正常跑完一轮（life 全静止不影响 world 是否推演）。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # world 照常把客观推演 context 喂进 agent 循环、产出这一轮。
+    assert "messages" in captured, "life 全静止时 world 仍应跑一轮 agent 循环（不自锁）"
+    assert captured["tools"] == WORLD_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_world_still_reads_life_state_for_narration_alignment(monkeypatch):
+    """删的是「判唤醒」、留的是「客观叙述对齐」：world 仍读 life 状态、把当前状态喂进 context。
+
+    这条钉死「客观叙述对齐」这个用途没被误删——world 仍要知道每个姐妹此刻在哪 / 在
+    干嘛，才能让客观叙述跟她对得上（她在上课就别说她在街上）。
+    """
+
+    async def personas():
+        return ["chinagi"]
+
+    reads: list[dict] = []
+
+    async def find_state(*, lane, persona_id):
+        reads.append({"lane": lane, "persona_id": persona_id})
+        return _life_state(
+            persona_id="chinagi",
+            current_state="在厨房煮咖啡",
+            observed_at="2026-06-15T07:00:00+08:00",
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # 仍然读了 life 状态（客观叙述对齐的用途保留）。
+    assert reads == [{"lane": "coe-t2", "persona_id": "chinagi"}], (
+        "world 仍应读 life 状态用于客观叙述对齐（这个用途不能被误删）"
+    )
+    # 当前状态喂进了 context（让客观叙述对得上她此刻所处）。
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "在厨房煮咖啡" in blob, "当前状态应喂进 context（客观叙述对齐）"
+
+
+@pytest.mark.asyncio
+async def test_sisters_section_drops_next_wake_at(monkeypatch):
+    """Task 1 收口：三姐妹此刻段**不再**拼「她想几点醒」（next_wake_at 是判唤醒输入、删）。
+
+    next_wake_at 是 world 旧的唤醒决策输入（拿她想醒的点和现实比、判该不该叫）。
+    收口后 world 不再判唤醒，这个字段不该再出现在喂给 world 的客观叙述对齐段里。
+    """
+
+    async def personas():
+        return ["akao"]
+
+    async def find_state(*, lane, persona_id):
+        return _life_state(
+            persona_id="akao",
+            current_state="还睡着",
+            observed_at="2026-06-15T03:10:00+08:00",
+            # 一个独一无二的时刻串，只要它出现在 prompt 里就说明 next_wake_at 被拼了。
+            next_wake_at="2026-06-15T06:34:17+08:00",
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "06:34:17" not in blob, (
+        "三姐妹此刻段不该再拼 next_wake_at（她想几点醒）——这是被删的判唤醒输入"
+    )
+    assert "想" not in blob.split("【三姐妹此刻各自的样子】")[-1].split("\n\n")[0], (
+        "三姐妹此刻段不该出现「她想几点醒」这类唤醒意愿表述"
+    )
 
 
 def _life_state(
@@ -2882,8 +2995,12 @@ def _life_state(
 
 
 @pytest.mark.asyncio
-async def test_sisters_section_has_each_persona_state_observed_and_next_wake(monkeypatch):
-    """每轮 USER 消息拼出的三姐妹此刻段含每个角色的当前状态 / 状态记于何时 / 想几点醒。"""
+async def test_sisters_section_has_each_persona_current_state(monkeypatch):
+    """每轮 USER 消息拼出的三姐妹此刻段含每个角色的**当前状态**（客观叙述对齐的依据）。
+
+    Task 1 收口后只拼当前状态（她此刻在哪 / 在干嘛）——它是客观叙述对齐的依据；
+    不再拼 next_wake_at（她想几点醒），那是被删的判唤醒输入。
+    """
 
     async def personas():
         return ["akao", "chinagi", "ayana"]
@@ -2921,16 +3038,13 @@ async def test_sisters_section_has_each_persona_state_observed_and_next_wake(mon
     blob = "".join(m.text() for m in captured["messages"])
     # 段标题在
     assert "【三姐妹此刻各自的样子】" in blob, "USER 消息必须拼出三姐妹此刻段"
-    # 每个角色的当前状态都在
+    # 每个角色的当前状态都在（客观叙述对齐的依据）
     assert "还睡着，趴在被子里" in blob
     assert "在厨房煮咖啡" in blob
     assert "在书桌前写作业" in blob
-    # 状态记于何时（observed_at 归一到 CST 显示）
-    assert "03:10:00 CST" in blob, "必须带上 akao 这份状态记于何时（observed_at）"
-    assert "07:00:00 CST" in blob, "必须带上 chinagi 这份状态记于何时（observed_at）"
-    # 想几点醒（next_wake_at 归一到 CST 显示）
-    assert "06:30:00 CST" in blob, "必须带上 akao 想几点醒（next_wake_at）"
-    assert "12:00:00 CST" in blob, "必须带上 chinagi 想几点醒（next_wake_at）"
+    # 不再拼 next_wake_at（她想几点醒）——判唤醒输入已删。
+    assert "06:30:00 CST" not in blob, "Task 1 收口后不该再拼 akao 想几点醒（next_wake_at）"
+    assert "12:00:00 CST" not in blob, "Task 1 收口后不该再拼 chinagi 想几点醒（next_wake_at）"
 
 
 @pytest.mark.asyncio
@@ -3021,8 +3135,12 @@ async def test_sisters_section_placed_near_now(monkeypatch):
     assert sisters_idx > now_idx, "三姐妹此刻段应在【现实此刻】之后（能直接比对现在几点）"
 
 
-def test_render_sisters_section_includes_all_fields():
-    """渲染器单测：把每个角色的当前状态 / 状态记于何时 / 想几点醒拼进段；None 降级。"""
+def test_render_sisters_section_only_current_state():
+    """渲染器单测：只把每个角色的**当前状态**拼进段（客观叙述对齐），None 降级。
+
+    Task 1 收口后渲染器只承担「客观叙述对齐」——拼当前状态（她此刻在哪 / 在干嘛）；
+    不再拼 next_wake_at（她想几点醒）/ 状态新旧那些判唤醒输入。
+    """
     from app.world.engine import _sisters_section
 
     states = [
@@ -3039,14 +3157,18 @@ def test_render_sisters_section_includes_all_fields():
     ]
     section = _sisters_section(states)
     assert "akao" in section and "ayana" in section
-    assert "还睡着" in section
-    assert "03:10:00 CST" in section, "渲染器应带状态记于何时（observed_at → CST）"
-    assert "06:30:00 CST" in section, "渲染器应带想几点醒（next_wake_at → CST）"
+    assert "还睡着" in section, "渲染器应带当前状态（客观叙述对齐的依据）"
     assert "还没有状态记录" in section, "None 状态应如实降级"
+    # 不再拼 next_wake_at（她想几点醒）
+    assert "06:30:00 CST" not in section, "渲染器不该再拼 next_wake_at（判唤醒输入已删）"
 
 
-def test_render_sisters_section_no_next_wake_says_not_scheduled():
-    """渲染器：角色没排过下次醒（next_wake_at=None）时如实说明，不冒充时刻。"""
+def test_render_sisters_section_does_not_carry_wake_decision_inputs():
+    """渲染器：不带任何「她想几点醒 / 状态停滞太久该叫」的判唤醒输入与引导（已删）。
+
+    断言针对旧的判唤醒**短语 / 字段**（不是裸字 "醒"——客观叙述对齐段措辞里可能出现
+    "她在上课就别说她在街上" 这类否定式说明里的字，那是 load-bearing 的、不能误伤）。
+    """
     from app.world.engine import _sisters_section
 
     section = _sisters_section(
@@ -3057,35 +3179,54 @@ def test_render_sisters_section_no_next_wake_says_not_scheduled():
                     persona_id="akao",
                     current_state="在写作业",
                     observed_at="2026-06-15T07:20:00+08:00",
-                    next_wake_at=None,
+                    next_wake_at="2026-06-15T22:00:00+08:00",
                 ),
             )
         ]
     )
-    assert "在写作业" in section
-    assert "07:20:00 CST" in section
-    # next_wake_at 为 None 不能凭空冒充一个时刻
-    assert "没排" in section or "还没" in section, (
-        "next_wake_at 为 None 时应如实说明她还没排下次醒、不冒充时刻"
-    )
+    assert "在写作业" in section, "当前状态仍要拼（客观叙述对齐）"
+    assert "22:00:00 CST" not in section, "不该拼 next_wake_at（她想几点醒）"
+    # 段里不该出现旧的判唤醒引导短语（不是裸字）。
+    for wake_phrase in (
+        "她想几点醒",
+        "想醒的点",
+        "停滞",
+        "不对劲",
+        "该有的动静",
+        "把她那边",
+    ):
+        assert wake_phrase not in section, (
+            f"客观叙述对齐段不该出现判唤醒引导 {wake_phrase!r}（判唤醒已删）"
+        )
 
 
-def test_world_instruction_has_wake_guidance():
-    """world_loop_instruction 末尾有叫醒软引导：状态停滞不对劲就用 notify 唤回；
-    引导是客观叙述口吻、不是按时间阈值的硬规则。"""
+def test_world_instruction_has_no_wake_guidance():
+    """Task 1 收口：world_loop_instruction 不再有「判唤醒」软引导。
+
+    旧引导让 world「顺手看一眼三姐妹、谁状态停滞太久 / 不对劲就 notify 把她唤回」——
+    这是自锁源头（life 静止 → world 判没必要叫 → 越静越不叫）。收口后 world 是纯客观
+    推演者，绝不读角色状态做唤醒决策，所以这段引导整段删除。
+    """
     instruction = engine_mod.world_loop_instruction()
-    # 引导提到「状态太久没更新 / 停滞」「不对劲」「用 notify 唤回」
-    assert "notify" in instruction
-    assert ("太久没更新" in instruction) or ("状态停滞" in instruction) or (
-        "停在" in instruction
-    ), "叫醒引导应提到状态太久没更新 / 停滞"
-    assert "不对劲" in instruction, "叫醒引导应提到在此刻这个世界里不对劲"
-    # 是软引导，不是硬阈值规则
-    assert "必须叫" not in instruction, "叫醒引导不能是「必须叫 X」的硬规则"
-    # 临近到点把 sleep 排短、没人临近放心睡长
-    assert ("排短" in instruction) or ("早点回来" in instruction) or (
-        "早回来" in instruction
-    ), "叫醒引导应提到看到谁快到点就把 sleep 排短点早回来接她"
+    # 不再有判唤醒的**正向引导短语**：把她唤回 / 状态停滞太久该叫 / 临近到点排短 sleep
+    # 接她 这类一律不该出现（针对旧引导的实际措辞，不是裸字——"不替任何角色判断该不该
+    # 醒" 这类否定式 load-bearing 说明里出现的字不算违规）。
+    for wake_phrase in (
+        "唤回这个世界",
+        "把她自然唤回",
+        "想醒的点",
+        "状态停滞",
+        "太久没更新",
+        "把她那边此刻该出现的客观动静想出来",
+        "把她那边此刻该有的动静想出来",
+        "早点回来接着看她那边",
+        "明显该醒了的人同样该被你看见",
+    ):
+        assert wake_phrase not in instruction, (
+            f"world 指令不该再有判唤醒引导 {wake_phrase!r}（Task 1 收口删除）"
+        )
+    # notify 仍在（它的客观投递语义保留，只是不再为「叫醒谁」服务）。
+    assert "notify" in instruction, "notify 工具说明仍应在（客观投递语义保留）"
 
 
 # ---------------------------------------------------------------------------

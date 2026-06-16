@@ -90,7 +90,6 @@ from app.life.review import run_day_review  # module-level so tests can monkeypa
 from app.memory._persona import load_persona
 from app.nodes.life_tools import (
     build_life_tools,
-    fire_life_self_wake,
     fire_schedule_reminders,
 )
 from app.runtime import node
@@ -109,12 +108,11 @@ class ScheduleReminderTick(Data):
     这个信号（携带 ``entry_id`` + 被排时的 ``remind_at``），到期经 in-process 边接回
     :func:`life_schedule_reminder_node`。
 
-    **为什么是每条各挂各的、不挤进 next_wake_at 意愿**（调度契约命门）：``next_wake_at``
-    是「她想几点醒的下一轮节奏」——单槽、一排就覆盖、只带时间不带「为什么醒」，撑不住
-    「好几条各自独立、能改期能取消、可能同时到点」的真日程。日程到点是在 next_wake_at
-    **旁边新加的一路**：每条日程独立一条 tick（独立 entry_id + remind_at），互不覆盖、
-    各自能改期 / 取消、同时到点各走各的——**绝不动 next_wake_at 意愿语义**（她想几点醒、
-    world 据它推演何时叫她）。
+    **为什么是每条各挂各的、独立一路**（调度契约命门）：每条日程有内容（答应明天交作业、
+    打算今晚复习），各自能改期 / 取消、可能同时到点，所以每条独立一条 tick（独立
+    entry_id + remind_at），互不覆盖、同时到点各走各的。这跟 Task 2 删掉的自设闹钟
+    （空时间点、单槽 next_wake_at、丢了就睡死）是两回事：日程丢了顶多「她忘了做某事」
+    （真实、可接受的生活后果），所以日程保留、自设闹钟删。
 
     transient —— 只当唤醒信号（日程内容在 durable 的 NotebookEntry 里）。三键
     ``(lane, persona_id, entry_id)``：泳道隔离 + 每人 + 每条日程一路。``remind_at`` 是被排时
@@ -220,7 +218,7 @@ def _round_marker(round_id: str) -> str:
 def _round_already_processed(history: list[Message], round_id: str) -> bool:
     """这轮（round_id）是否已在 session 历史里出现过（turn 幂等查重，对称 world）。
 
-    同一批唤醒重投得同一 round_id（event 用 sorted event_ids、self 用 target_wake_at
+    同一批唤醒重投得同一 round_id（唤醒只剩 EventArrived 一条入口，按 sorted event_ids
     派生）；第一次 run 把带本轮标记的 USER 消息写进 transcript，重投时这里从已读到的
     历史里查这行标记，命中即已处理过 → 跳过（不再 run、不重做 durable 工具）。
     """
@@ -549,9 +547,11 @@ async def _run_life_round(
 ) -> None:
     """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → 读未读 → 冷启探测 → 跑工具循环 → 收口。
 
-    world-driven wake：角色被叫醒只剩 EventArrived 这一条入口（world notify / 日程到点
-    提醒 / 真人聊天都投信箱敲门走它）。它是外部刺激、**不走任何到点 gate、永远跑**——
-    能立刻打断长睡。没有自排执行腿（self LifeWakeTick）、没有 fan-out 心跳，这些都拆了。
+    纯事件反应者：角色被叫醒只剩 EventArrived 这一条入口（world notify / 日程到点提醒 /
+    真人聊天都投信箱敲门走它）。它是外部刺激、**不走任何到点 gate、永远跑**——能立刻
+    打断长睡。她跑完这一轮就等下一个事件、**自己绝不排下次醒**（Task 2 删自设闹钟整条：
+    没有 self LifeWakeTick 执行腿、没有 next_wake_at 意愿写入、没有 fan-out 心跳）。
+    存活由世界持续的客观事件流兜底，主动计划走日程（note + 到点提醒）。
 
     **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）没新动静，不烧
     模型、不写、不标已读。
@@ -560,7 +560,8 @@ async def _run_life_round(
     ``raise DebounceReschedule(wake)`` 让 debounce handler CAS 重排这批 event 推迟到 cd
     后（延迟 + 合并、绝不 drop）。cd 内不烧模型、不写、不标已读。
 
-    一轮成功收口（标完已读 + 写下次醒意愿）后落一个 cd key（TTL=cd 秒）开启下一段冷却。
+    一轮成功收口（标完已读 + 挂本轮排的日程到点提醒）后落一个 cd key（TTL=cd 秒）开启
+    下一段冷却。
     """
     redis = await get_redis()
     cd_key = _cd_key(lane, persona_id)
@@ -627,15 +628,11 @@ async def _run_life_round(
     act_seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
     act_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, act_seed))
 
-    # round-scoped 待办 self-wake 容器：schedule 工具往里写 delay_ms（覆盖而非追加 →
-    # 一轮内最后一次为准），engine 收口 fire_life_self_wake 把它落进 next_wake_at 意愿
-    # （world-driven wake：只写意愿、不 emit 任何延时唤醒）。
-    self_wake: dict = {}
-
     # round-scoped 待挂日程提醒容器（备忘录 & 日程 第三块）：note / edit_note 每带一个
     # remind_at 就往里记 entry_id → remind_at（撤时间记 None，覆盖而非追加 → 同 entry
     # 一轮内最后一次为准），engine 收口 fire_schedule_reminders 给每条有 remind_at 的
-    # 日程各 emit 一条 ScheduleReminderTick（每条日程各挂各的，不动 self-wake 语义）。
+    # 日程各 emit 一条 ScheduleReminderTick（每条日程各挂各的）。日程是她真实生活里有
+    # 内容的安排，保留；自设闹钟（next_wake_at / schedule）是空时间点维持运转，Task 2 删了。
     schedule_reminders: dict = {}
 
     tools = build_life_tools(
@@ -643,7 +640,6 @@ async def _run_life_round(
         persona_id=persona_id,
         act_id=act_id,
         observed_at=observed_at,
-        self_wake=self_wake,
         schedule_reminders=schedule_reminders,
     )
 
@@ -864,22 +860,19 @@ async def _run_life_round(
     )
 
     # 收口：标已读，只标本轮实际读到的那批 event_id（绝不按 persona 全标）。即使
-    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。self 唤醒空信箱时
-    # read_ids 为空，mark_events_read([]) 无副作用、安全。
+    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。空信箱已在前面 early
+    # return，走到这里 read_ids 必非空。
     await mark_events_read(lane=lane, persona_id=persona_id, event_ids=read_ids)
 
     # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里
     # durable 落定（两阶段解耦），这里在同一串行窗口（仍在单飞锁内）做其后的独立
     # 折叠步骤——达到阈值就把整卷压成她自己口吻的沉淀段 + marker 保全行。位置在
-    # 标已读之后、**排下次醒之前**（codex T3 必改 1）：沉淀是一次离线 LLM 调用
-    # （最长 120s，硬超时见 app.agent.sediment），全程占着单飞锁——若先排
-    # self-wake，短延迟的自排会在折叠期间到达撞锁，而 self tick 撞锁是直接被吞
-    # 的（不像事件唤醒有 reschedule 保底）；fold 完成后才开始给下一轮自排计时，
-    # 撞锁窗口消失。fold_session 整段 fail-open（绝不抛），失败本版不折、下轮
-    # 再试。也在睡前回顾之前：回顾读到的就是折叠后形态（沉淀段+近期原文，spec
-    # 钉为设计行为）。成本入账在沉淀回调内自带独立 collect_usage 作用域
-    # （actor = f"{persona_id}:sediment"），在上面本轮 collect_usage 之外调用
-    # ——绝不混进已落账的本体 usage。
+    # 标已读之后、挂日程到点提醒之前：沉淀是一次离线 LLM 调用（最长 120s，硬超时见
+    # app.agent.sediment），全程占着单飞锁——先把这一步做完再挂提醒，收口顺序稳定。
+    # fold_session 整段 fail-open（绝不抛），失败本版不折、下轮再试。也在睡前回顾之前：
+    # 回顾读到的就是折叠后形态（沉淀段+近期原文，spec 钉为设计行为）。成本入账在沉淀
+    # 回调内自带独立 collect_usage 作用域（actor = f"{persona_id}:sediment"），在上面
+    # 本轮 collect_usage 之外调用——绝不混进已落账的本体 usage。
     await fold_session(
         session_id,
         build_life_fold_policy(
@@ -887,17 +880,12 @@ async def _run_life_round(
         ),
     )
 
-    # 收口写下次醒意愿（world-driven wake）：本轮若调过 schedule，self_wake 里有 delay_ms
-    # —— fire_life_self_wake 算目标时刻、写进 LifeState.next_wake_at（**只写意愿、不 emit
-    # 任何延时唤醒**）。world 每轮读这个意愿推演谁过点了、用 notify 把她唤回来。没调过
-    # schedule（空容器）就不写 —— world 仍能靠「状态停滞太久不对劲」把她捞起来。
-    await fire_life_self_wake(lane=lane, persona_id=persona_id, self_wake=self_wake)
-
     # 收口挂日程到点提醒（备忘录 & 日程 第三块）：本轮 note / edit_note 排 / 改的每条带
-    # remind_at 的日程，各 emit 一条 ScheduleReminderTick（每条各挂各的、不动上面
-    # next_wake_at 意愿）。空容器（本轮没排 / 改日程）不 emit。与 next_wake_at 收口并列、
-    # 互不干扰：一个管「她想几点醒的意愿」、一个管「这些日程到点叫她」。逐条失败隔离 +
-    # 不往上炸（已 durable 落库的本子不被一条漏挂的提醒拖成失败重投）由 fire 内部负责。
+    # remind_at 的日程，各 emit 一条 ScheduleReminderTick（每条各挂各的）。空容器（本轮
+    # 没排 / 改日程）不 emit。**Task 2 删自设闹钟后这是 life 唯一的收口排程**——日程是她
+    # 真实生活里有内容的安排（到点提醒她去做），区别于已删的自设闹钟（空时间点维持运转）。
+    # 逐条失败隔离 + 不往上炸（已 durable 落库的本子不被一条漏挂的提醒拖成失败重投）由
+    # fire 内部负责。
     await fire_schedule_reminders(
         lane=lane, persona_id=persona_id, schedule_reminders=schedule_reminders
     )
@@ -908,9 +896,8 @@ async def _run_life_round(
     await redis.set(_cd_key(lane, persona_id), "1", ex=_LIFE_CD_SECONDS)
 
     logger.info(
-        "[life_wake] %s/%s ran a round, marked %d read, self_wake=%s, cd %ds",
-        lane, persona_id, len(read_ids),
-        "yes" if self_wake.get("delay_ms") else "no", _LIFE_CD_SECONDS,
+        "[life_wake] %s/%s ran a round, marked %d read, cd %ds",
+        lane, persona_id, len(read_ids), _LIFE_CD_SECONDS,
     )
 
     # 快班睡前回顾（spec 决策 2 快班；主保证仍是凌晨对账 cron）：只在本轮发生

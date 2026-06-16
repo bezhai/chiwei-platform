@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
 from typing import Annotated
 
 from pydantic import Field
@@ -53,7 +52,7 @@ from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
-from app.domain.life_state import save_life_state, set_life_next_wake_at
+from app.domain.life_state import save_life_state
 from app.domain.notebook import (
     STATUS_DONE,
     STATUS_DROPPED,
@@ -88,16 +87,6 @@ logger = logging.getLogger(__name__)
 # 不投递。三姐妹是稳定阵容，先用模块常量承载（不为未来扩成动态联系人表预先抽象——
 # 真有第四个角色再说，业务代码不是 SDK）。
 SISTERS_CONTACTS = frozenset({"akao", "chinagi", "ayana"})
-
-# schedule 下限：她自排最短间隔（秒）。低于下限报错喂回模型重调（跟上限超限处理对称、
-# 不静默夹），防她排得太密（像神经质每分钟醒一次想一轮）。这是机制护栏（决定何时
-# 醒），不替她决定睡多久 / 做什么（赤尾宪法）。对称 world WORLD_SLEEP_MIN_SECONDS。
-LIFE_SCHEDULE_MIN_SECONDS = 60
-
-# schedule 上限：她一次自排最长睡多久（秒）。比 world sleep 的 1h 放宽到能睡一整觉
-# （夜里一觉到天亮）—— 具体睡多久由她自己看钟点定，真有事 world 的 notify（外部刺激
-# 不走 gate）会把她从长睡叫醒。12h 覆盖整夜睡眠。超限报错喂回模型重调，绝不静默夹。
-LIFE_SCHEDULE_MAX_SECONDS = 12 * 3600
 
 # search_web 在「没配 / 没搜到 / 搜出来没相关结果」时返回的两条**精确**失败文案（见
 # app/agent/tools/search.py:232 / :257）。look_up / browse_feed 命中这些就如实说没查 /
@@ -153,7 +142,6 @@ def build_life_tools(
     persona_id: str,
     act_id: str,
     observed_at: str,
-    self_wake: dict | None = None,
     schedule_reminders: dict | None = None,
 ) -> list[Tool]:
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
@@ -163,18 +151,18 @@ def build_life_tools(
         工具内给每件 act 派 ``per_act_id = uuid5(act_id, 本轮第 N 件序号)``，一轮多件
         各自唯一、同件重投幂等。
     ``observed_at`` —— 本轮观测时刻（ISO8601），快照 / 动作都用它，使重放一致。
-    ``self_wake`` —— 本轮 round-scoped 的待办 self-wake 容器（``{} | {"delay_ms": int}``，
-        engine 每轮新建）。给了它工具集就多一件 ``schedule``（自排下次醒），照搬 world
-        sleep 的 round-scoped 覆盖：一轮内多次 schedule 覆盖而非追加、收口只 emit 一条。
-        不给（旧调用方 / 工具契约测试）就只有 update_life_state + act 两件。
     ``schedule_reminders`` —— 本轮 round-scoped 的「待挂日程提醒」容器
         （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note`` / ``edit_note``
         每带一个 remind_at 就往里记一条 ``entry_id → remind_at``（撤时间记 ``None``）；engine
         收口 :func:`fire_schedule_reminders` 给每条有 remind_at 的日程**各 emit 一条**
-        ``ScheduleReminderTick``（每条日程各挂各的到点提醒，不动 self-wake 的 next_wake_at
-        语义——日程是在它旁边新加的一路独立唤醒）。同轮多次动同一 entry_id 覆盖而非追加
-        （最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则 note / edit_note
-        照常落库、只是不挂到点提醒（向后兼容）。
+        ``ScheduleReminderTick``（每条日程各挂各的到点提醒）。同轮多次动同一 entry_id
+        覆盖而非追加（最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则
+        note / edit_note 照常落库、只是不挂到点提醒（向后兼容）。
+
+    **Task 2 删自设闹钟**：以前这里还有一个 ``self_wake`` 容器 + ``schedule`` 工具，让她
+    自己排「多久后再醒」（写进 ``LifeState.next_wake_at``）。纯客观事件驱动范式把 life
+    自设闹钟整条删了——她退成纯事件反应者，被事件激活才动、跑完不排下次，自主性靠
+    prompt 给、主动计划走日程（上面的 notebook + 到点提醒）。所以不再有 self_wake / schedule。
     """
 
     # 本轮已**确认成功落库**的 act 件数（round-scoped 序号，随这一轮的闭包活着）。
@@ -833,52 +821,6 @@ def build_life_tools(
         # 黑名单拦截（过滤就是工具内替她决策、违宪）。只在前面挂一句她想看的方向。
         return f"刷「{direction}」刷到这些（带出处，自己往下翻）：\n\n{result}"
 
-    @tool_error("安排下次醒来失败")
-    async def schedule(
-        seconds: Annotated[
-            int,
-            Field(
-                description=(
-                    "多少秒后再醒来过你自己的下一刻，必须在 "
-                    "60～43200 之间（约 1 分钟到 12 小时）"
-                )
-            ),
-        ],
-    ) -> str:
-        """告诉世界你想过多久再醒来、接着过你自己的日子。
-
-        被起头叫醒后，想接着往下过（写完这题接着写下一题、收拾完挪去客厅、困了睡一觉
-        到天亮），就用它把「我想过多久再醒」告诉世界。这是给世界一个**意愿信号**：到点
-        真把你叫起来的是世界——它一直醒着、看着你这边的动静，到了你想醒的点会把你自然
-        唤回来。所以这不是你给自己上的闹钟、也不保证分秒不差，会有几分钟的出入，正常。
-
-        seconds 必须在 60～43200 之间（最短约 1 分钟、防排得太密；最长 12 小时、够你
-        夜里睡一整觉到天亮）。具体睡多久你自己看现在几点定 —— 夜里可以睡久、白天睡短；
-        真有要紧的动静，世界还是会立刻来敲你、把你从长睡里叫醒。超出范围会报错，请改填
-        一个范围内的值重调。不排也行（那世界就靠看你这边的动静、到了该醒的时候叫你）。
-
-        Args:
-            seconds: 你想过多久再醒来继续（60 ≤ seconds ≤ 43200）。
-
-        Returns:
-            一句确认文本。
-        """
-        if seconds > LIFE_SCHEDULE_MAX_SECONDS:
-            raise ValueError(
-                f"schedule 的 seconds={seconds} 超过上限 {LIFE_SCHEDULE_MAX_SECONDS} 秒。"
-                f"请改填一个 ≤ {LIFE_SCHEDULE_MAX_SECONDS} 的值重调。"
-            )
-        if seconds < LIFE_SCHEDULE_MIN_SECONDS:
-            raise ValueError(
-                f"schedule 的 seconds={seconds} 低于下限 {LIFE_SCHEDULE_MIN_SECONDS} 秒。"
-                f"请改填一个 ≥ {LIFE_SCHEDULE_MIN_SECONDS} 的值重调。"
-            )
-        # 把「想几点醒」的意愿记进 round-scoped slot（覆盖而非追加 → 一轮内最后一次为
-        # 准），由 engine 收口 fire_life_self_wake 落进 next_wake_at。world-driven wake：
-        # 这里只表达意愿，不 emit 任何延时唤醒——到点叫她交给世界（自排执行腿已拆）。
-        self_wake["delay_ms"] = seconds * 1000
-        return f"好，{seconds} 秒后想再醒来接着过（到点世界会叫你）"
-
     # act_tool 的函数名带 _tool 后缀避免遮蔽导入的 handler；工具对模型暴露的 name
     # 要是 "act"，所以显式覆写 Tool.name 与 definition.name。
     update_tool = Tool(update_life_state)
@@ -886,10 +828,12 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    # chat（当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+
-    # 本子三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed
-    # （没事刷手机）都是基础工具、不依赖 self_wake，与 update / act 并列常驻。
-    tools = [
+    # 全部基础工具常驻：update（更新此刻状态）+ act（做一件影响外部世界的事）+ chat
+    # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 本子
+    # 三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed（没事
+    # 刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**——她退成纯事件反应者、不自排
+    # 下次醒；主动计划走本子里的日程（note 带 remind_at + 到点提醒），不靠空闹钟维持运转。
+    return [
         update_tool,
         act_tool_obj,
         Tool(chat),
@@ -901,47 +845,6 @@ def build_life_tools(
         Tool(look_up),
         Tool(browse_feed),
     ]
-    # self_wake 容器给了才挂 schedule（自排工具）。旧调用方 / 工具契约测试不给，
-    # 就没有 schedule（向后兼容）。
-    if self_wake is not None:
-        tools.append(Tool(schedule))
-    return tools
-
-
-async def fire_life_self_wake(
-    *, lane: str, persona_id: str, self_wake: dict
-) -> bool:
-    """循环收口后把「她想几点醒」的意愿落进 ``LifeState.next_wake_at`` —— **只写意愿、不再 emit**。
-
-    engine 在 agent 循环跑完后调本函数（life round 的固定收口）。``self_wake`` 是本轮
-    round-scoped 待办容器（schedule 写的 ``{"delay_ms": int}``，覆盖而非追加 → 一轮内
-    最后一次为准）。有待办时：
-
-      1. 算目标唤醒时刻 = 现实 now + delay（现实 CST aware 时间）。
-      2. 把目标时刻写进 ``LifeState.next_wake_at``（:func:`set_life_next_wake_at`）。
-
-    **world-driven wake：角色的自排执行腿已拆掉**。以前这里还会 emit 一条 self
-    ``LifeWakeTick`` 让她自己到点醒来；现在「到点真把她叫起来」交给永远醒着的世界——
-    world 每轮读 ``next_wake_at`` 推演谁过点了、用 notify 把她唤回来。所以本函数只保留
-    「写下她想几点醒的意愿」这半，**绝不再 emit 任何延时唤醒**（自排执行腿那根一断就死
-    的 MQ 延时消息正是死锁起点，整套拆掉）。
-
-    没调过 schedule（空容器）就不写 —— 她没表达意愿时 next_wake_at 不动，world 仍能靠
-    「状态停滞太久不对劲」把她捞起来。返回是否写了意愿。
-    """
-    delay_ms = (self_wake or {}).get("delay_ms")
-    if delay_ms is None:
-        return False
-
-    # 目标唤醒时刻 = 现实 now + delay（现实 CST aware ISO）。
-    target = cst_time.now_cst() + timedelta(milliseconds=delay_ms)
-    target_iso = target.isoformat()
-
-    # 落 next_wake_at（她想几点醒的意愿）。world 每轮读它推演谁该叫。
-    await set_life_next_wake_at(
-        lane=lane, persona_id=persona_id, next_wake_at=target_iso
-    )
-    return True
 
 
 async def fire_schedule_reminders(
@@ -949,9 +852,11 @@ async def fire_schedule_reminders(
 ) -> int:
     """循环收口后给本轮排 / 改的每条日程**各 emit 一条** ``ScheduleReminderTick``（日程到点提醒）。
 
-    engine 在 agent 循环跑完后调本函数（与 :func:`fire_life_self_wake` 并列、互不干扰：
-    self-wake 是「她自排下一轮节奏」走 next_wake_at 单槽覆盖；日程到点提醒是**每条日程
-    各挂各的**独立一路，绝不挤进 next_wake_at）。``schedule_reminders`` 是本轮 round-scoped
+    engine 在 agent 循环跑完后调本函数。日程到点提醒是**每条日程各挂各的**独立一路：
+    每条带 remind_at 的日程独立一条 tick、独立 entry_id，互不覆盖、各自能改期 / 取消。
+    日程是她真实生活里有内容的安排（答应明天交作业、打算今晚复习），到点提醒她去做，
+    丢了顶多「她忘了做某事」（真实、可接受的生活后果）——这跟 Task 2 删掉的自设闹钟
+    （空时间点、丢了就睡死）是两回事，日程保留。``schedule_reminders`` 是本轮 round-scoped
     待办容器（note / edit_note 写的 ``{entry_id: remind_at | None}``，覆盖而非追加）：
 
       * 值为 ``remind_at`` 字符串 → emit 一条携带 ``(entry_id, remind_at)`` 的
@@ -965,10 +870,10 @@ async def fire_schedule_reminders(
     （下一轮就提醒，不负、不炸、不漏）。``remind_at`` 脏串解析不出 → 同样夹到 0（不静默
     把这条日程吞掉），gate 那头读 entry 当前状态对账兜底。
 
-    **逐条失败隔离（对称 fire_life_self_wake 的可观测）**：某条 emit 失败 log warning
-    （带 lane/persona/entry/target）、不往上炸、不拖垮其余条目——本轮的 durable 收口
-    （记本子）已落定，不该被一条可选的到点提醒漏挂把整轮拖成失败重投（重投会重放
-    durable 工具）。完整漏投恢复（watchdog）同 self-wake 是 Non-goal、后置。
+    **逐条失败隔离**：某条 emit 失败 log warning（带 lane/persona/entry/target）、不往上
+    炸、不拖垮其余条目——本轮的 durable 收口（记本子）已落定，不该被一条可选的到点提醒
+    漏挂把整轮拖成失败重投（重投会重放 durable 工具）。完整漏投恢复（watchdog）是
+    Non-goal、后置。
 
     返回成功 emit 的条数。``ScheduleReminderTick`` 在 life_wake engine 里 import，避免
     tools ↔ engine 循环 import。

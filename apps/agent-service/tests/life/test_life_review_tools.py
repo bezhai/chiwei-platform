@@ -90,10 +90,10 @@ def test_life_review_tools_is_exactly_the_three_review_tools():
 def test_life_review_tools_disjoint_from_live_life_tools():
     """与 life 活工具物理隔离：两个工具集的名字零交集（靠隔离不靠嘱咐）。
 
-    活轮的工具（update_life_state / act / chat / schedule / note / edit_note /
-    read_notebook）拿不到页的手、回顾的工具拿不到活轮的手——她睡前回看一天用的是另
-    一双手。回顾里清本子的 ``tidy_notebook_entry`` 与活轮的 ``edit_note`` 名字不同
-    （隔离的工具集各有各的本子动作，底层都落到同一个 ``update_entry``、不重复定义逻辑）。
+    活轮的工具（update_life_state / act / chat / note / edit_note / read_notebook）
+    拿不到页的手、回顾的工具拿不到活轮的手——她睡前回看一天用的是另一双手。回顾里清
+    本子的 ``tidy_notebook_entry`` 与活轮的 ``edit_note`` 名字不同（隔离的工具集各有各的
+    本子动作，底层都落到同一个 ``update_entry``、不重复定义逻辑）。
     """
     from app.nodes.life_tools import build_life_tools
 
@@ -102,7 +102,6 @@ def test_life_review_tools_disjoint_from_live_life_tools():
         persona_id="akao",
         act_id="00000000-0000-0000-0000-000000000000",
         observed_at="2026-06-09T23:40:00+08:00",
-        self_wake={},
     )
     live_names = {t.name for t in live_tools}
     review_names = {t.name for t in LIFE_REVIEW_TOOLS}
