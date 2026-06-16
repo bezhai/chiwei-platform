@@ -1,6 +1,9 @@
 import { syncPixivToMinioForTagger, type MinioSyncForTaggerResult } from '../storage/syncPage';
 import type { TaggerSubmitClient } from './submitClient';
-import { triggerTaggerForPixivAddr, type TriggerTaggerResult } from './trigger';
+import {
+    triggerTaggerForPixivAddrs,
+    type TriggerSkippedItem,
+} from './trigger';
 import type { TaggerTriggerConfig } from './config';
 import type { TaggerResultRepository } from './resultRepository';
 import type { TaggerImageResultDocument } from './types';
@@ -56,13 +59,23 @@ export async function processTaggerTriggerBatch(deps: TaggerTriggerWorkerDeps): 
         limit: deps.config.batchSize,
         processingTimeoutMs: deps.config.processingTimeoutMs,
     });
+    const claimedDocs: TaggerImageResultDocument[] = [];
     for (const doc of docs) {
-        await processOne(doc, deps);
+        const claimedDoc = await claimOne(doc, deps);
+        if (claimedDoc) {
+            claimedDocs.push(claimedDoc);
+        }
+    }
+    if (claimedDocs.length > 0) {
+        await processClaimedBatch(claimedDocs, deps);
     }
     return docs.length;
 }
 
-async function processOne(doc: TaggerImageResultDocument, deps: TaggerTriggerWorkerDeps): Promise<void> {
+async function claimOne(
+    doc: TaggerImageResultDocument,
+    deps: TaggerTriggerWorkerDeps
+): Promise<TaggerImageResultDocument | null> {
     const path = doc.pixiv_addr;
     const claimedDoc = await deps.repository.claimDueTriggerImage({
         path,
@@ -70,10 +83,16 @@ async function processOne(doc: TaggerImageResultDocument, deps: TaggerTriggerWor
     });
     if (!claimedDoc) {
         console.log(`Tagger trigger claim skipped: pixiv_addr=${path}`);
-        return;
+        return null;
     }
+    return claimedDoc;
+}
 
-    const result = await triggerTaggerForPixivAddr(path, {
+async function processClaimedBatch(
+    docs: TaggerImageResultDocument[],
+    deps: TaggerTriggerWorkerDeps
+): Promise<void> {
+    const result = await triggerTaggerForPixivAddrs(docs.map((doc) => doc.pixiv_addr), {
         syncPixivToMinio: deps.syncPixivToMinio ?? syncPixivToMinioForTagger,
         submitClient: deps.submitClient,
         repository: deps.repository,
@@ -81,13 +100,35 @@ async function processOne(doc: TaggerImageResultDocument, deps: TaggerTriggerWor
     });
 
     if (result.status === 'submitted') {
-        console.log(`Tagger trigger submitted: pixiv_addr=${path} object_name=${result.objectName} task_id=${result.taskId}`);
-        return;
+        for (const item of result.items) {
+            console.log(
+                `Tagger trigger submitted: pixiv_addr=${item.pixivAddr} object_name=${item.objectName} task_id=${result.taskId} batch_size=${result.items.length}`
+            );
+        }
+    } else if (result.status === 'submit_failed') {
+        console.warn(
+            `Tagger trigger submit failed: paths=${result.items.map((item) => item.objectName).join(',')} error=${result.error}`
+        );
     }
 
-    const attempts = (claimedDoc.attempts ?? 0) + 1;
-    const error = formatTriggerError(result);
-    if (attempts >= deps.config.maxAttempts || (result.status === 'skipped' && result.reason === 'disabled')) {
+    for (const skipped of result.skipped) {
+        const doc = docs.find((item) => item.pixiv_addr === skipped.pixivAddr);
+        if (!doc) {
+            continue;
+        }
+        await handleSkipped(doc, skipped, deps);
+    }
+}
+
+async function handleSkipped(
+    doc: TaggerImageResultDocument,
+    skipped: TriggerSkippedItem,
+    deps: TaggerTriggerWorkerDeps
+): Promise<void> {
+    const path = doc.pixiv_addr;
+    const attempts = (doc.attempts ?? 0) + 1;
+    const error = formatSkippedError(skipped);
+    if (attempts >= deps.config.maxAttempts || skipped.reason === 'disabled') {
         await deps.repository.markSubmitFailed({ paths: [path], error });
         console.warn(`Tagger trigger exhausted: pixiv_addr=${path} attempts=${attempts} error=${error}`);
         return;
@@ -105,10 +146,7 @@ async function processOne(doc: TaggerImageResultDocument, deps: TaggerTriggerWor
     );
 }
 
-function formatTriggerError(result: Exclude<TriggerTaggerResult, { status: 'submitted' }>): string {
-    if (result.status === 'submit_failed') {
-        return result.error;
-    }
+function formatSkippedError(result: TriggerSkippedItem): string {
     const details = [
         `reason=${result.reason}`,
         result.objectName ? `object_name=${result.objectName}` : '',
