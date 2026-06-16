@@ -75,29 +75,29 @@ function doc(pixivAddr: string, attempts = 0): TaggerImageResultDocument {
 }
 
 describe('processTaggerTriggerBatch', () => {
-    it('submits due queued images from the background worker', async () => {
+    it('submits due queued images as one tagger batch from the background worker', async () => {
         const repository = new FakeRepository();
         const submitClient = new FakeSubmitClient();
-        repository.docs = [doc('a.jpg')];
+        repository.docs = [doc('a.jpg'), doc('b.jpg')];
 
         const processed = await processTaggerTriggerBatch({
             repository: repository as any,
             submitClient: submitClient as any,
             config,
-            syncPixivToMinio: async (): Promise<MinioSyncForTaggerResult> => ({
+            syncPixivToMinio: async (pixivAddr): Promise<MinioSyncForTaggerResult> => ({
                 status: 'synced',
-                pixivAddr: 'a.jpg',
-                ossKey: 'pixiv_img_v2/20260605/a.jpg',
-                objectName: 'a.jpg',
+                pixivAddr,
+                ossKey: `pixiv_img_v2/20260605/${pixivAddr}`,
+                objectName: pixivAddr,
             }),
         });
 
-        expect(processed).toBe(1);
-        expect(repository.claimed).toEqual(['a.jpg']);
+        expect(processed).toBe(2);
+        expect(repository.claimed).toEqual(['a.jpg', 'b.jpg']);
         expect(submitClient.calls).toEqual([
-            { paths: ['a.jpg'], callbackUrl: 'http://media-sync-worker/internal/tagger/callback' },
+            { paths: ['a.jpg', 'b.jpg'], callbackUrl: 'http://media-sync-worker/internal/tagger/callback' },
         ]);
-        expect(repository.submitted).toEqual([{ taskId: 'task-1', paths: ['a.jpg'] }]);
+        expect(repository.submitted).toEqual([{ taskId: 'task-1', paths: ['a.jpg', 'b.jpg'] }]);
         expect(repository.retries).toEqual([]);
     });
 
@@ -124,6 +124,43 @@ describe('processTaggerTriggerBatch', () => {
         expect(repository.retries[0].path).toBe('a.jpg');
         expect(repository.retries[0].attempts).toBe(2);
         expect(repository.retries[0].error).toContain('reason=timeout');
+    });
+
+    it('submits synced images while retrying skipped images in the same batch', async () => {
+        const repository = new FakeRepository();
+        const submitClient = new FakeSubmitClient();
+        repository.docs = [doc('a.jpg'), doc('b.jpg', 1)];
+
+        await processTaggerTriggerBatch({
+            repository: repository as any,
+            submitClient: submitClient as any,
+            config,
+            syncPixivToMinio: async (pixivAddr): Promise<MinioSyncForTaggerResult> => {
+                if (pixivAddr === 'b.jpg') {
+                    return {
+                        status: 'timeout',
+                        pixivAddr,
+                        ossKey: 'pixiv_img_v2/20260605/b.jpg',
+                        objectName: 'b.jpg',
+                        timeoutMs: 30000,
+                    };
+                }
+                return {
+                    status: 'synced',
+                    pixivAddr,
+                    ossKey: 'pixiv_img_v2/20260605/a.jpg',
+                    objectName: 'a.jpg',
+                };
+            },
+        });
+
+        expect(submitClient.calls).toEqual([
+            { paths: ['a.jpg'], callbackUrl: 'http://media-sync-worker/internal/tagger/callback' },
+        ]);
+        expect(repository.submitted).toEqual([{ taskId: 'task-1', paths: ['a.jpg'] }]);
+        expect(repository.retries).toHaveLength(1);
+        expect(repository.retries[0].path).toBe('b.jpg');
+        expect(repository.retries[0].attempts).toBe(2);
     });
 
     it('does not submit when another worker has already claimed the image', async () => {
