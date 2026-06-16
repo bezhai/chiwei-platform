@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { schedulePostDownloadSync } from './postDownloadSync';
+import { runPostDownloadSync, schedulePostDownloadSync } from './postDownloadSync';
 
 describe('schedulePostDownloadSync', () => {
     it('returns immediately and logs after the background sync resolves', async () => {
@@ -55,5 +55,41 @@ describe('schedulePostDownloadSync', () => {
         expect(logger.warn).toHaveBeenCalledTimes(1);
         expect(logger.warn.mock.calls[0][0]).toContain('download_post_sync_failed');
         expect(logger.warn.mock.calls[0][0]).toContain('a.jpg');
+    });
+
+    it('adds mirror result metadata without changing the tagger result', async () => {
+        const result = await runPostDownloadSync('a.jpg', {
+            syncMinioAndMaybeSubmitTagger: mock(async () => ({ status: 'queued' as const })),
+            syncPixivImageToLocal: mock(async () => ({ status: 'synced' as const, count: 2 })),
+        });
+
+        expect(result).toEqual({
+            status: 'queued',
+            pixiv_image_mirror_status: 'synced',
+            pixiv_image_mirror_count: 2,
+        });
+    });
+
+    it('does not fail the tagger path when mirror sync fails', async () => {
+        const logger = {
+            info: mock((_message: string) => {}),
+            warn: mock((_message: string) => {}),
+        };
+
+        const result = await runPostDownloadSync('a.jpg', {
+            syncMinioAndMaybeSubmitTagger: mock(async () => ({ status: 'tagger_disabled' as const })),
+            syncPixivImageToLocal: mock(async () => {
+                throw new Error('mongo down');
+            }),
+            logger,
+        });
+
+        expect(result).toEqual({
+            status: 'tagger_disabled',
+            pixiv_image_mirror_status: 'failed',
+            pixiv_image_mirror_error: 'mongo down',
+        });
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+        expect(logger.warn.mock.calls[0][0]).toContain('pixiv_image_mirror_sync_failed');
     });
 });
