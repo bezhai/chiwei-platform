@@ -18,6 +18,8 @@
 
 Tagger 结果存储例外：打标结果写入本地 Mongo，复用 channel-server 已在使用的本地 Mongo 基础设施，并通过 `TAGGER_RESULT_MONGO_*` 单独配置。不要把 tagger 结果写回旧 `img_map`。
 
+Pixiv 图片元数据本地镜像例外：下载成功后，worker 会在 `PIXIV_IMAGE_MIRROR_MONGO_ENABLED=true` 时把旧 Mongo 中同 `pixiv_addr` 的源文档旁路 upsert 到本地 `chiwei_pixiv.pixiv_images`。这是下载链路的增量镜像，不改变旧 `MONGO_*` 的源库职责。
+
 ## 必需环境变量
 
 - `MONGO_HOST`（可包含端口；包含端口时不再读取 `MONGO_PORT`）
@@ -44,6 +46,8 @@ Tagger 结果存储例外：打标结果写入本地 Mongo，复用 channel-serv
 - `DOWNLOAD_LIMITER_COOLDOWN_MS`：每 60 个下载任务后的冷却时间，默认 `120000`（旧值减半）。
 - `MINIO_SYNC_ENABLED`：开启 OSS→MinIO per-page 同步，默认关闭。
 - `MINIO_SYNC_TIMEOUT_MS`：单张 OSS→MinIO 同步硬超时，默认 `30000`。
+- `PIXIV_IMAGE_MIRROR_MONGO_ENABLED`：开启下载后本地 `pixiv_images` 镜像同步，默认关闭。
+- `PIXIV_IMAGE_MIRROR_MONGO_*`：本地 Pixiv 图片元数据镜像 Mongo 配置，必须和旧 `MONGO_*` 分开。
 - `TAGGER_RESULT_MONGO_ENABLED`：开启本地 Mongo 结果库连接，默认关闭。
 - `TAGGER_RESULT_MONGO_*`：本地 tagger 结果 Mongo 配置，必须和旧 `MONGO_*` 分开。
 - `TAGGER_TRIGGER_ENABLED`：开启下载后写入 tagger outbox，由后台 worker 自动提交 tagger，默认关闭。
