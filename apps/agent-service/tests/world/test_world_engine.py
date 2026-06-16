@@ -3229,6 +3229,58 @@ def test_world_instruction_has_no_wake_guidance():
     assert "notify" in instruction, "notify 工具说明仍应在（客观投递语义保留）"
 
 
+def test_world_instruction_advances_world_by_real_time():
+    """world 指令引导「客观时间独立推进世界」——别把 life 静止当成世界冻结。
+
+    coe 实证：world 推演基于「上一版世界叙述 + 三姐妹此刻状态」，三姐妹 life 状态停
+    在某一刻（都「在吃晚饭」）后，45 分钟后 world 还在叙述「她们仍在餐桌吃饭」——它把
+    life 的静止当成了世界的冻结点（晚饭本该吃完、有人起身收拾、天该更黑，这些客观进程
+    没推演出来）。设计意图：world 应基于真实流逝的时间主动推动客观世界前进，跟 life
+    动没动无关。这条钉死指令在 prompt 层有这层引导：
+
+      * 真实时间在流逝、上一版是过去某一刻的快照、现在世界客观上已经不一样——推演这段
+        时间世界自然推进成了什么样，别照搬复述上一版；
+      * 三姐妹的状态是她**上次被观测到**的过去快照、不是此刻一定还那样——让客观时间把
+        场景往前带，而不是把她冻在那一刻复述；
+      * 区分「硬造戏剧性事件」（不要）vs「客观时间推进的自然变化」（要：一顿饭会吃完、
+        天会黑、人会从这个场景挪到下一个）——安静 ≠ 冻结。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① 真实时间独立推进世界、上一版是过去快照、别照搬复述。
+    assert ("时间" in instruction) and ("流逝" in instruction or "过去" in instruction), (
+        "指令必须点出真实时间在流逝 / 上一版是过去某一刻的"
+    )
+    assert ("照搬" in instruction) or ("复述" in instruction), (
+        "指令必须提醒别照搬复述上一版世界叙述"
+    )
+    # ② 三姐妹状态是上次被观测到的过去快照、不是此刻一定还那样。
+    assert "快照" in instruction, (
+        "指令必须说明三姐妹此刻的样子是上次被观测到的过去快照"
+    )
+    assert ("把场景往前带" in instruction) or ("场景往前" in instruction), (
+        "指令必须引导让客观时间把场景往前带、而不是把人冻在那一刻"
+    )
+    # ③ 区分硬造戏剧 vs 客观时间推进的自然变化（安静 ≠ 冻结）。
+    assert "冻结" in instruction, (
+        "指令必须区分『安静』和『冻结』（安静不等于把世界冻在那一刻）"
+    )
+    assert ("吃完" in instruction) or ("结束" in instruction) or ("天会黑" in instruction), (
+        "指令必须举例客观时间推进的自然变化（一顿饭会吃完 / 天会黑 / 人会挪到下一个场景）"
+    )
+
+    # 红线复核：这条新引导绝不能重新引入「判唤醒」语义（Task 1 已收口）。
+    for wake_phrase in (
+        "状态停滞",
+        "太久没更新",
+        "该不该叫醒",
+        "明显该醒",
+    ):
+        assert wake_phrase not in instruction, (
+            f"推进世界 ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 硬超时：整轮推演挂死 → wait_for 掐死、走 fail-open（堵 world 唯一的永久睡死口）
 #
