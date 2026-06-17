@@ -88,7 +88,10 @@ async def test_by_root_reads_sender_display_name_no_lark_join():
         assert "sender_display_name" in sql_text
         assert "lark_" not in sql_text
         assert "union_id" not in sql_text
-        assert "coalesce" not in sql_text
+        # persona 经 COALESCE(agent_response, bot_config 兜底) 取（proactive 行 persona
+        # 兜底）；coalesce 必须存在、且其唯一来源是 bot_config 子查询，不是 lark join。
+        assert "coalesce" in sql_text
+        assert "bot_config" in sql_text
     finally:
         for p in patches:
             p.stop()
@@ -123,7 +126,10 @@ async def test_in_chat_reads_sender_display_name_no_lark_join():
         assert "sender_display_name" in sql_text
         assert "lark_" not in sql_text
         assert "union_id" not in sql_text
-        assert "coalesce" not in sql_text
+        # persona 经 COALESCE(agent_response, bot_config 兜底) 取（proactive 行 persona
+        # 兜底）；coalesce 必须存在、且其唯一来源是 bot_config 子查询，不是 lark join。
+        assert "coalesce" in sql_text
+        assert "bot_config" in sql_text
     finally:
         for p in patches:
             p.stop()
