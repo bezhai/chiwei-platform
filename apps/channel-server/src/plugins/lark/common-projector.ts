@@ -9,6 +9,7 @@ import { LarkBaseChatInfo } from '@entities/lark-base-chat-info';
 import { LarkMessage } from '@entities/lark-message';
 import { LarkUserOpenId } from '@entities/lark-user-open-id';
 import { context } from '@middleware/context';
+import logger from '@logger/index';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { evalScript, setNx } from '@cache/redis-client';
 import type { LarkMention, LarkReceiveMessage } from 'types/lark';
@@ -278,20 +279,34 @@ async function findCommonMessageIdByOmId(omId: string): Promise<string | undefin
 
 async function resolveReferencedMessage(
     omId: string | undefined,
+    referenceKind: 'root' | 'parent',
     selfOmId: string,
     selfCommonMessageId: string,
-    which: string,
 ): Promise<string | undefined> {
     if (!omId) return undefined;
     if (omId === selfOmId) return selfCommonMessageId;
-    const existing = await findCommonMessageIdByOmId(omId);
-    if (!existing) {
-        throw new Error(
-            `lark ${which} message ${omId} has no common mapping; ` +
-                'historical backfill must run before runtime cutover',
+    // The referenced message may never have been projected into lark_message
+    // (e.g. a group message that was not processed at the time). Tolerate the
+    // missing mapping: drop the reply/root link instead of failing the whole
+    // inbound projection, so the current message still gets stored.
+    const resolved = await findCommonMessageIdByOmId(omId);
+    if (!resolved) {
+        // The link is silently dropped (we keep storing the message). Emit a
+        // warning so the data loss is observable: the reply/root chain for this
+        // message will be incomplete because the referenced om_id has no
+        // lark_message -> common_message mapping.
+        logger.warn(
+            `[lark common projector] dropping ${referenceKind} reply link: ` +
+                `referenced om_id=${omId} has no common_message mapping ` +
+                `(message om_id=${selfOmId})`,
+            {
+                referenceKind,
+                referencedOmId: omId,
+                selfOmId,
+            },
         );
     }
-    return existing;
+    return resolved;
 }
 
 export async function prepareLarkInboundProjection(
@@ -333,15 +348,15 @@ export async function prepareLarkInboundProjection(
     const commonRootMessageId =
         (await resolveReferencedMessage(
             event.message.root_id,
+            'root',
             event.message.message_id,
             commonMessageId,
-            'root',
         )) ?? commonMessageId;
     const commonReplyMessageId = await resolveReferencedMessage(
         event.message.parent_id,
+        'parent',
         event.message.message_id,
         commonMessageId,
-        'parent',
     );
 
     return {
