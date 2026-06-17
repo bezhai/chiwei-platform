@@ -38,6 +38,44 @@ __all__ = [
 ]
 
 
+def _bot_config_persona():
+    """assistant 行经 ``bot_config(bot_name → persona_id)`` 兜底取发言 persona。
+
+    proactive 出站行真实落库形态是 ``response_id=NULL`` 且**没有**
+    ``common_agent_response`` 行（worker 口径：proactive session_id=null → responseId
+    不挂、不写 agent_response），所以单靠 ``response_id → common_agent_response.session_id``
+    join 必拿 None —— 那会让 proactive 行被判成 persona=None，下游误判为真人输入（串味）。
+    bot_name → persona 是它在真实链路里唯一能拿到的归属来源。
+
+    ``bot_config`` 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里
+    （见 ``models.py`` 顶注、``resolve_persona_id`` 同样裸表读它），用相关标量子查询读
+    裸表：``bot_name = common_message.bot_name`` 与外层 ``common_message`` 关联，只取
+    ``is_active`` 的映射。
+
+    **承重红线（codex 必改 1）**：子查询额外 correlate 外层 ``role = 'assistant'``。
+    channel-server 给真人 ``role='user'`` 行**也写 bot_name``（storeLarkInboundMessage
+    给 inbound user 行落 bot_name=botName、claim 时再写），裸 ``bot_name`` 子查询会对
+    user 行也命中、把真人话错归成某 persona——查询合同被串脏。human-chat 路径下游
+    ``is_self`` 第一个条件就是 ``role == 'assistant'`` 遮住不炸，但睡前回顾路径
+    （``find_persona_spoken_chats_in_window`` → ``review``）**直接用 persona 分"她说的
+    vs 用户说的"、没有 role gate**，会把真人话当成她自己说的。加 role 限定让外层非
+    assistant 行（user / 其它）→ 子查询无命中 → 返回 NULL。assistant proactive 出站行
+    （``response_id=NULL``、无 agent_response）仍经 bot_name → persona 兜底拿到归属。
+    """
+    return (
+        select(text("persona_id"))
+        .select_from(text("bot_config"))
+        .where(
+            text(
+                "bot_name = common_message.bot_name AND is_active = true "
+                "AND common_message.role = 'assistant'"
+            )
+        )
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
 def _uuid(value: str | UUID | None) -> UUID | None:
     if value is None:
         return None
@@ -319,24 +357,11 @@ async def find_recent_chat_messages(
     if chat_uuid is None:
         return []
 
-    # bot_config 兜底：assistant 行 response_id 取不到 persona 时（proactive 出站行
-    # response_id=NULL），按它的 bot_name 在 bot_config 里查 persona。bot_config 不是
-    # agent-service 的映射模型（channel-server 管），用相关标量子查询读裸表（同
-    # resolve_persona_id）。只对有 bot_name 的行有意义；user 行 bot_name=NULL → 子查询
-    # 拿不到、整体仍 NULL。
-    bot_config_persona = (
-        select(text("persona_id"))
-        .select_from(text("bot_config"))
-        .where(text("bot_name = common_message.bot_name AND is_active = true"))
-        .limit(1)
-        .scalar_subquery()
-    )
-
     stmt = (
         select(
             CommonMessage,
             func.coalesce(
-                CommonAgentResponse.persona_id, bot_config_persona
+                CommonAgentResponse.persona_id, _bot_config_persona()
             ).label("persona_id"),
         )
         .outerjoin(
@@ -374,7 +399,9 @@ async def find_messages_with_user_chat_persona_by_root(
         select(
             CommonMessage,
             CommonConversation.display_name.label("chat_name"),
-            CommonAgentResponse.persona_id.label("persona_id"),
+            func.coalesce(
+                CommonAgentResponse.persona_id, _bot_config_persona()
+            ).label("persona_id"),
         )
         .outerjoin(
             CommonConversation,
@@ -426,7 +453,9 @@ async def find_messages_with_user_chat_persona_in_chat(
         select(
             CommonMessage,
             CommonConversation.display_name.label("chat_name"),
-            CommonAgentResponse.persona_id.label("persona_id"),
+            func.coalesce(
+                CommonAgentResponse.persona_id, _bot_config_persona()
+            ).label("persona_id"),
         )
         .outerjoin(
             CommonConversation,
@@ -474,24 +503,31 @@ async def find_persona_spoken_chats_in_window(
 
     参与边界合同（spec 决策 2b）：她在 ``[since_ms, until_ms]`` 闭区间内发过言的
     chat 才算她的经历——被动在场没吭声的群不算（chat 是被动唤起模型，她没被唤起
-    就没看见）。「她发过言」按 common 口径判：assistant 消息经
-    ``response_id == common_agent_response.session_id`` join 出 ``persona_id``。
+    就没看见）。「她发过言」按 common 口径判：assistant 消息的发言 persona ==
+    ``persona_id``，发言 persona 经 ``COALESCE(common_agent_response.persona_id,
+    bot_config(bot_name→persona_id))`` 取——**普通回复**经 ``response_id →
+    agent_response`` join 拿，**proactive 出站行**（``response_id=NULL``、无
+    agent_response）经 ``bot_config`` 兜底拿（承重 2：只认 response join 会把她只发过
+    proactive 的 chat 整个漏出回顾）。
 
     每个够格的 chat 取窗口内消息（user + assistant，剔除 ``proactive_trigger``
     伪消息），**条目数量控制不截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按
-    发生先后升序。每条消息带发言 persona（None = 用户消息 / 无归属），让回顾分
-    得清"她说的"和"别的 bot 说的"；身份字段（user_id / username / chat_type）
-    在 ``CommonMessageRecord`` 里。返回按 chat 维度分组：
+    发生先后升序。每条消息带发言 persona（None = 用户消息 / 无归属），发言 persona
+    同样经 ``COALESCE(agent_response.persona_id, bot_config 兜底)`` 取（proactive 出站
+    行 persona 归属不丢；``_bot_config_persona`` 已加 role 限定，真人 user 行仍是
+    None、归属正确），让回顾分得清"她说的"和"别的 bot 说的"；身份字段（user_id /
+    username / chat_type）在 ``CommonMessageRecord`` 里。返回按 chat 维度分组：
     ``[(chat_id, chat 显示名, [(record, 发言 persona), ...]), ...]``。
     """
     spoke_stmt = (
         select(CommonMessage.common_conversation_id)
-        .join(
+        .outerjoin(
             CommonAgentResponse,
             CommonMessage.response_id == CommonAgentResponse.session_id,
         )
         .where(
-            CommonAgentResponse.persona_id == persona_id,
+            func.coalesce(CommonAgentResponse.persona_id, _bot_config_persona())
+            == persona_id,
             CommonMessage.role == "assistant",
             CommonMessage.event_time >= since_ms,
             CommonMessage.event_time <= until_ms,
@@ -515,7 +551,9 @@ async def find_persona_spoken_chats_in_window(
             msg_stmt = (
                 select(
                     CommonMessage,
-                    CommonAgentResponse.persona_id.label("persona_id"),
+                    func.coalesce(
+                        CommonAgentResponse.persona_id, _bot_config_persona()
+                    ).label("persona_id"),
                 )
                 .outerjoin(
                     CommonAgentResponse,

@@ -31,6 +31,10 @@ from app.data.queries.messages import find_recent_chat_messages
 
 _CHAT = uuid.uuid5(uuid.NAMESPACE_OID, "recent-chat")
 _USER = uuid.uuid5(uuid.NAMESPACE_OID, "recent-user")
+# bot 在 common_user 里的身份。proactive 出站行真实落库时 common_user_id 是 bot 自己
+# 的 common_user_id（channel-server storeLarkOutboundMessage 写 botCommonUserId），
+# 不是 NULL —— 真实形态复现要带上它。
+_BOT_USER = uuid.uuid5(uuid.NAMESPACE_OID, "recent-bot-user")
 
 # bot_config 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里。
 # proactive 出站落库的 assistant 行只带 bot_name（response_id=NULL），发言 persona
@@ -72,11 +76,14 @@ async def _seed_bot_config(bot_name, persona_id, *, is_active=True):
 
 
 async def _seed_proactive_bot_message(
-    chat_id, *, event_time, msg_text, bot_name, scope="direct"
+    chat_id, *, event_time, msg_text, bot_name, scope="direct", common_user_id=None
 ):
     """造一条**真实形态**的 proactive 出站 assistant 行：role=assistant、带 bot_name、
     **response_id=NULL**、**没有** CommonAgentResponse 行（worker 真实落库口径，见
     channel-server storeLarkOutboundMessage：proactive session_id=null → responseId 不挂）。
+
+    ``common_user_id`` 默认 None；真实落库口径里它是 bot 自己的 common_user_id（非
+    NULL），传进来即可复现完整形态。
     """
     async with session_mod.get_session() as s:
         s.add(
@@ -84,7 +91,7 @@ async def _seed_proactive_bot_message(
                 common_message_id=uuid.uuid4(),
                 channel="lark",
                 common_conversation_id=chat_id,
-                common_user_id=None,
+                common_user_id=common_user_id,
                 sender_display_name=None,
                 role="assistant",
                 content=[{"kind": "text", "text": msg_text}],
@@ -111,7 +118,7 @@ async def _seed_conversation(chat_id, *, scope="direct", name=None):
 
 
 async def _seed_user_message(
-    chat_id, *, event_time, text, message_type=None, scope="direct"
+    chat_id, *, event_time, text, message_type=None, scope="direct", bot_name=None
 ):
     async with session_mod.get_session() as s:
         s.add(
@@ -126,6 +133,7 @@ async def _seed_user_message(
                 content_text=text,
                 scope=scope,
                 message_type=message_type,
+                bot_name=bot_name,
                 event_time=event_time,
             )
         )
@@ -262,6 +270,56 @@ async def test_proactive_assistant_row_attributes_persona_via_bot_name(chat_db):
     assert got[1][1] == "akao", (
         "proactive 出站行 response_id=NULL，必须经 bot_config(bot_name→persona) "
         f"认出是赤尾自己说的，实得 {got[1][1]!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_proactive_row_with_bot_common_user_id_attributes_persona(chat_db):
+    """真实落库形态复现：proactive 出站行 **common_user_id = bot 自己的 id**（非 NULL，
+    channel-server storeLarkOutboundMessage 写 botCommonUserId）、response_id=NULL、
+    无 agent_response 行。仍必须经 bot_config(bot_name→persona) 认出是赤尾自己说的。
+
+    这是与 ``test_proactive_assistant_row_attributes_persona_via_bot_name`` 唯一的差别
+    （那条 common_user_id=None）—— 坐实「bot 身份 id 在场是否影响 persona 兜底」。
+    """
+    await _seed_conversation(_CHAT)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_user_message(_CHAT, event_time=1000, text="在吗")
+    await _seed_proactive_bot_message(
+        _CHAT,
+        event_time=2000,
+        msg_text="我刚在想你",
+        bot_name="chiwei",
+        common_user_id=_BOT_USER,
+    )
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=10)
+
+    assert len(got) == 2
+    assert got[0][1] is None, "真人那条无 persona"
+    assert got[1][1] == "akao", (
+        "proactive 出站行（带 bot common_user_id、response_id=NULL）必须经 "
+        f"bot_config(bot_name→persona) 认出是赤尾自己说的，实得 {got[1][1]!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_user_row_with_bot_name_is_not_attributed_persona(chat_db):
+    """承重红线（codex 必改 1）：真人 user 行也带 bot_name（channel-server
+    storeLarkInboundMessage 给 user 行写 bot_name），它指向 active 的
+    bot_config(bot_name→persona)。helper 必须只对 role='assistant' 行兜底——真人 user
+    行的发言 persona 仍是 None，否则会被误判为某 persona 自己说的（串味）。
+    """
+    await _seed_conversation(_CHAT)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_user_message(_CHAT, event_time=1000, text="在吗", bot_name="chiwei")
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=10)
+
+    assert len(got) == 1
+    assert got[0][1] is None, (
+        "真人 user 行即便带 bot_name，也不能经 bot_config 兜底成 persona，"
+        f"实得 {got[0][1]!r}"
     )
 
 

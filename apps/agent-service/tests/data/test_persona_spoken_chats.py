@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 import app.data.session as session_mod
 from app.data.models import (
@@ -33,11 +34,24 @@ _CHAT_A = uuid.uuid5(uuid.NAMESPACE_OID, "chat-a")
 _CHAT_B = uuid.uuid5(uuid.NAMESPACE_OID, "chat-b")
 _USER_1 = uuid.uuid5(uuid.NAMESPACE_OID, "user-1")
 _USER_2 = uuid.uuid5(uuid.NAMESPACE_OID, "user-2")
+# proactive 出站行真实落库时 common_user_id = bot 自己的 common_user_id（非 NULL）。
+_BOT_USER = uuid.uuid5(uuid.NAMESPACE_OID, "spoken-bot-user")
+
+# bot_config 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里。proactive
+# 出站行只带 bot_name（response_id=NULL、无 agent_response），发言 persona 必须经
+# bot_config(bot_name → persona_id) 兜底拿到，所以集成测试要手动建这张表 + 灌一行。
+_BOT_CONFIG_DDL = (
+    "CREATE TABLE bot_config ("
+    "  bot_name VARCHAR(50) PRIMARY KEY,"
+    "  persona_id VARCHAR(50),"
+    "  is_active BOOLEAN NOT NULL DEFAULT TRUE"
+    ")"
+)
 
 
 @pytest.fixture
 async def chat_db(test_db):
-    """Build the common_* tables the query joins on."""
+    """Build the common_* tables the query joins on (+ bot_config for proactive)."""
     tables = [
         CommonMessage.__table__,
         CommonAgentResponse.__table__,
@@ -47,7 +61,44 @@ async def chat_db(test_db):
         await conn.run_sync(
             lambda sync_conn: Base.metadata.create_all(sync_conn, tables=tables)
         )
+        await conn.execute(text(_BOT_CONFIG_DDL))
     yield test_db
+
+
+async def _seed_bot_config(bot_name, persona_id, *, is_active=True):
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO bot_config (bot_name, persona_id, is_active) "
+                "VALUES (:bn, :pid, :active)"
+            ),
+            {"bn": bot_name, "pid": persona_id, "active": is_active},
+        )
+
+
+async def _seed_proactive_bot_message(
+    chat_id, *, event_time, text_, bot_name, scope="direct"
+):
+    """proactive 出站 assistant 行真实形态：role=assistant、带 bot_name、
+    **response_id=NULL**、**无** CommonAgentResponse 行（worker 落库口径）。"""
+    async with session_mod.get_session() as s:
+        s.add(
+            CommonMessage(
+                common_message_id=uuid.uuid4(),
+                channel="lark",
+                common_conversation_id=chat_id,
+                common_user_id=_BOT_USER,
+                sender_display_name=None,
+                role="assistant",
+                content=[{"kind": "text", "text": text_}],
+                content_text=text_,
+                scope=scope,
+                message_type="post",
+                bot_name=bot_name,
+                response_id=None,
+                event_time=event_time,
+            )
+        )
 
 
 async def _seed_conversation(chat_id, *, scope="group", name="测试群"):
@@ -64,7 +115,7 @@ async def _seed_conversation(chat_id, *, scope="group", name="测试群"):
 
 async def _seed_user_message(
     chat_id, *, event_time, text, user_id=_USER_1, username="贝壳",
-    scope="group", message_type=None,
+    scope="group", message_type=None, bot_name=None,
 ):
     async with session_mod.get_session() as s:
         s.add(
@@ -79,6 +130,7 @@ async def _seed_user_message(
                 content_text=text,
                 scope=scope,
                 message_type=message_type,
+                bot_name=bot_name,
                 event_time=event_time,
             )
         )
@@ -272,3 +324,75 @@ async def test_proactive_trigger_pseudo_messages_excluded(chat_db):
     _cid, _name, entries = got[0]
     texts = [r.content for r, _p in entries]
     assert not any("伪消息" in t for t in texts)
+
+
+@pytest.mark.integration
+async def test_proactive_only_chat_qualifies_as_spoken(chat_db):
+    """承重（codex 必改 2）：她在窗口内**只发过 proactive**（response_id=NULL、无
+    agent_response、bot_name 指向她的 active bot_config）的 chat 也算「她发过言」。
+
+    旧 spoke_stmt inner join agent_response + persona_id 比对，proactive 行 join 不上 →
+    这种 chat 被整个漏出回顾。改成 outerjoin + COALESCE(persona_id, bot_config 兜底) 后
+    才纳入。且该 proactive 行在回顾里 persona 要正确归属到她（akao）。
+    """
+    await _seed_conversation(_CHAT_A, scope="direct", name=None)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_user_message(
+        _CHAT_A, event_time=1000, text="在吗", scope="direct"
+    )
+    await _seed_proactive_bot_message(
+        _CHAT_A, event_time=2000, text_="我刚在想你", bot_name="chiwei"
+    )
+
+    got = await find_persona_spoken_chats_in_window(
+        persona_id="akao", since_ms=0, until_ms=10_000, per_chat_limit=50
+    )
+
+    assert len(got) == 1, (
+        "她只发过 proactive 的 chat 也必须算她发过言（spoke_stmt 要兜底 bot_config）"
+    )
+    _cid, _name, entries = got[0]
+    by_text = {r.content: p for r, p in entries}
+    proactive_persona = next(
+        p for t, p in by_text.items() if "我刚在想你" in t
+    )
+    assert proactive_persona == "akao", (
+        "proactive 出站行在回顾证据里要经 bot_config 归属到她（akao），"
+        f"实得 {proactive_persona!r}"
+    )
+    user_persona = next(p for t, p in by_text.items() if "在吗" in t)
+    assert user_persona is None, "真人那条无 persona 归属"
+
+
+@pytest.mark.integration
+async def test_user_row_with_bot_name_not_attributed_persona_in_review(chat_db):
+    """承重红线（codex 必改 1）：睡前回顾路径**直接用 persona 分"她说的 vs 用户说的"、
+    没有 role gate**。真人 user 行也带 bot_name（channel-server 给 user 行写 bot_name），
+    helper 必须只对 role='assistant' 行兜底——否则真人话会被错归成某 persona、回顾里
+    把真人的话当成她自己说的。
+
+    构造：一个她发过 proactive 的 chat（让 chat 够格进回顾），里头有一条带 bot_name 的
+    真人 user 行；该 user 行在 msg_stmt 里 persona 必须是 None。
+    """
+    await _seed_conversation(_CHAT_A, scope="direct", name=None)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_proactive_bot_message(
+        _CHAT_A, event_time=1000, text_="我刚在想你", bot_name="chiwei"
+    )
+    await _seed_user_message(
+        _CHAT_A, event_time=2000, text="真人带 bot_name 的话", scope="direct",
+        bot_name="chiwei",
+    )
+
+    got = await find_persona_spoken_chats_in_window(
+        persona_id="akao", since_ms=0, until_ms=10_000, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    _cid, _name, entries = got[0]
+    by_text = {r.content: p for r, p in entries}
+    user_persona = next(p for t, p in by_text.items() if "真人带 bot_name 的话" in t)
+    assert user_persona is None, (
+        "真人 user 行即便带 bot_name，回顾里也不能被兜底成 persona（否则真人话被认成"
+        f"她自己说的），实得 {user_persona!r}"
+    )
