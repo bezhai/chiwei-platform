@@ -752,12 +752,20 @@ class Agent:
         *,
         prompt_vars: dict[str, Any] | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        session_id: str | None = None,
     ) -> BaseModel:
         """Structured output — return a validated Pydantic model instance.
 
         One ``model.structured`` call against ``response_model``'s JSON schema;
         the returned dict is validated back into the model. Guard agents (empty
         prompt_id) skip prompt compilation.
+
+        ``session_id`` (when given) tags this trace's langfuse session, so an
+        async-internal structured judgment (e.g. world 在场匹配) groups into its
+        actor's day session like ``run`` / ``stream`` do. ``None`` keeps the
+        status quo — the trace's session is left untouched. ``extract`` stays
+        stateless either way (no transcript read/write): session_id is a trace
+        tag only, not a continuation.
         """
         model = await build_model_client(self._cfg.model_id)
         schema = response_model.model_json_schema()
@@ -782,6 +790,7 @@ class Agent:
                 name=self._cfg.trace_name,
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
+                session_id=session_id,
             ):
                 data = await model.structured(
                     full_messages, schema=schema, **self._model_kwargs

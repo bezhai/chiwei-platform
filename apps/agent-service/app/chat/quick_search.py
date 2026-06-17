@@ -10,10 +10,6 @@ from app.data.queries import (
     find_messages_with_user_chat_persona_in_chat,
 )
 
-# 主动触发消息的合成 user_id 标记。归属在这条 chat 路径的叶子模块，
-# context.py 再 import 它（避免 context ↔ quick_search 循环 import）。
-PROACTIVE_USER_ID = "__proactive__"
-
 
 class QuickSearchResult:
     """搜索结果项"""
@@ -88,7 +84,7 @@ async def quick_search(
             exclude_root_message_id=current_msg.root_message_id,
             after_create_time=time_threshold,
             before_create_time=current_msg.create_time,
-            exclude_user_id=PROACTIVE_USER_ID,
+            exclude_user_id="",
             limit=needed,
         )
 

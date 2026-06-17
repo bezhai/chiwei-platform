@@ -1,7 +1,7 @@
 """Image collection + download permission cache (private to chat/).
 
-Extracted from chat/context.py per Phase 6 v4 §3.1: keep build_chat_context
-orchestrator slim by moving the image processing pipeline into a focused module.
+Extracted from chat/context.py per Phase 6 v4 §3.1: keep the human-chat context
+builder slim by moving the image processing pipeline into a focused module.
 """
 from __future__ import annotations
 

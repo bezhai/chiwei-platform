@@ -75,6 +75,7 @@ from app.domain.notebook import (
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
+    EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -89,47 +90,14 @@ from app.life.review import run_day_review  # module-level so tests can monkeypa
 from app.memory._persona import load_persona
 from app.nodes.life_tools import (
     build_life_tools,
-    fire_life_self_wake,
     fire_schedule_reminders,
 )
 from app.runtime import node
 from app.runtime.data import Data, Key
 from app.runtime.debounce import DebounceReschedule
-from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
 from app.runtime.single_flight import SingleFlightConflict, single_flight
 
 logger = logging.getLogger(__name__)
-
-# round-scoped 待办 self-wake 容器的 features key（engine 每轮新建、schedule 工具
-# 跨调用写、engine 收口后读）。让一轮内多次 schedule 覆盖而非累积（唤醒风暴命门，
-# 最后一次为准），对称 world 的 FEATURE_SELF_WAKE。
-FEATURE_LIFE_SELF_WAKE = "life_self_wake"
-
-
-class LifeWakeTick(Data):
-    """life 的自排唤醒信号（阶段 1B Task 2，对称 world 的 self ``WorldTick``）。
-
-    她调 schedule 自排下次醒后，收口 :func:`app.nodes.life_tools.fire_life_self_wake`
-    ``emit_delayed`` 一条这个信号，到期经 in-process 边接回 :func:`life_self_wake_node`。
-    **独立信号、绝不复用 ``EventArrived`` 通道**（spec decision 6）：她自排醒来时信箱
-    往往是空的（不是被新动静叫醒、是自己排的时间到了），复用 event 通道会因空信箱
-    early return、或多次自排共用空种子误去重。所以自排是独立唤醒形态。
-
-    transient —— 只当唤醒信号（不落 pg）；双键 (lane, persona_id) 对应某个 persona。
-    ``reason``（目前只有 self）+ ``target_wake_at``（被排时的目标时刻，到期判 stale，
-    照搬 :class:`app.world.engine.WorldTick` 同名字段）。
-    """
-
-    lane: Annotated[str, Key]
-    persona_id: Annotated[str, Key]
-    reason: str = "self"
-    # reason==self 时：这条 self 唤醒被排时的目标唤醒时刻（现实 CST aware ISO）。到期时
-    # 与 LifeState 当前 next_wake_at 比对判 stale —— 不一致说明已被新自排 / 外部刺激
-    # 覆盖、作废（阶段 1B 到点 gate）。照搬 WorldTick.target_wake_at。
-    target_wake_at: str = ""
-
-    class Meta:
-        transient = True
 
 
 class ScheduleReminderTick(Data):
@@ -140,17 +108,16 @@ class ScheduleReminderTick(Data):
     这个信号（携带 ``entry_id`` + 被排时的 ``remind_at``），到期经 in-process 边接回
     :func:`life_schedule_reminder_node`。
 
-    **为什么是每条各挂各的、不挤进 self-wake 的 next_wake_at**（调度契约命门）：self-wake
-    （``LifeWakeTick``）是「她自排下一轮节奏」——单槽 next_wake_at、一排就覆盖、只带时间
-    不带「为什么醒」，撑不住「好几条各自独立、能改期能取消、可能同时到点」的真日程。日程
-    到点是在 self-wake **旁边新加的一路**：每条日程独立一条 tick（独立 entry_id + remind_at），
-    互不覆盖、各自能改期 / 取消、同时到点各走各的——**绝不动 self-wake 的 next_wake_at 语义**
-    （她现在靠它醒来过日子）。
+    **为什么是每条各挂各的、独立一路**（调度契约命门）：每条日程有内容（答应明天交作业、
+    打算今晚复习），各自能改期 / 取消、可能同时到点，所以每条独立一条 tick（独立
+    entry_id + remind_at），互不覆盖、同时到点各走各的。这跟 Task 2 删掉的自设闹钟
+    （空时间点、单槽 next_wake_at、丢了就睡死）是两回事：日程丢了顶多「她忘了做某事」
+    （真实、可接受的生活后果），所以日程保留、自设闹钟删。
 
     transient —— 只当唤醒信号（日程内容在 durable 的 NotebookEntry 里）。三键
     ``(lane, persona_id, entry_id)``：泳道隔离 + 每人 + 每条日程一路。``remind_at`` 是被排时
     的目标时刻：到期时与 entry 最新一版的 remind_at 比对判 stale（改期 / 撤时间后旧 tick
-    携带值对不上即作废，照 self-wake 的 stale gate 先例）。
+    携带值对不上即作废）。
     """
 
     lane: Annotated[str, Key]
@@ -218,88 +185,23 @@ def _schedule_reminder_gate_passes(
     return entry.remind_at == tick.remind_at
 
 
-# 走到点 gate 的唤醒缘由：self（life 自排）。外部刺激（EventArrived 信箱敲门 / 补敲，
-# 以及未来真人聊天）永远放行、不走 gate —— 能立刻打断长睡。对称 world 的 _GATED_REASONS
-# （life 没有独立保底心跳，所以只有 self 走 gate）。
-_GATED_REASONS = frozenset({"self"})
-
-
-def _life_self_wake_gate_passes(
-    tick: LifeWakeTick,
-    *,
-    next_wake_at: str | None,
-    now: datetime,
-) -> bool:
-    """到点 gate（阶段 1B Task 2，照搬 world ``_self_wake_gate_passes`` 同构逻辑）。
-
-    判这次自排唤醒此刻作不作数：
-
-      * **外部刺激**（``reason`` 不在 :data:`_GATED_REASONS` 里）：永远放行。life 的
-        EventArrived 走的是另一个节点不进这里；这条分支是对称兜底，保证未来若有别的
-        非 self 缘由从这条路进来也能放行。
-      * **self**：走 gate，判两件事——
-          1. **到点没到**：现实 ``now`` ≥ ``next_wake_at`` 才作数（比较一律用现实
-             aware 时间）。
-          2. **这条唤醒还作不作数**：self 携带它被排时的目标时刻 ``tick.target_wake_at``，
-             到期时与 state 当前 ``next_wake_at`` 比对，不一致说明已被新自排 / 外部刺激
-             覆盖、判废（旧 self 到期不能误触发推演）。
-
-    ``next_wake_at`` 为 None（从没自排过：只被 world notify 起头过）时 self 判废 ——
-    没有合法目标可比对，且 life 没有保底心跳兜底，None 时不该有 self 来。``next_wake_at``
-    脏 / 无法解析时同样判废（不该发生，写时是 aware ISO）。
-
-    这是"让自排意愿真生效"的机制护栏，不替她决定推演内容（赤尾宪法）。
-    """
-    if tick.reason not in _GATED_REASONS:
-        return True
-
-    if next_wake_at is None:
-        # 从没自排过：life 没有保底心跳，self 没有合法目标可比对 → 判废。
-        return False
-
-    target = cst_time.parse(next_wake_at)
-    if target is None:
-        # next_wake_at 脏 / 无法解析（不该发生，写时是 aware ISO）：无可信目标 → 判废。
-        return False
-
-    # 到点没到（用现实时间比）。
-    if now < target:
-        return False
-
-    # self：携带的目标时刻必须 == state 当前 next_wake_at，否则这条已被覆盖（stale）。
-    carried = cst_time.parse(tick.target_wake_at)
-    if carried is None or carried != target:
-        return False
-
-    return True
-
-
 def _derive_life_round_id(
     *,
     lane: str,
     persona_id: str,
-    wake: EventArrived | LifeWakeTick,
     read_ids: list[str],
 ) -> str:
-    """本轮确定性标识，按**唤醒源**稳定派生（act_id 靠它，spec decision 6 命门）。
+    """本轮确定性标识，按本轮读到的 event_ids 稳定派生（act_id + turn 幂等靠它）。
 
     act_id 从 round_id 派生；durable 重投 / 整轮重试要落同一 round_id 才能靠
     (lane, act_id) 自然键幂等去重，所以 round_id 不能从 ``now`` 派生（重投取新时刻 →
-    新 act_id → 去重失效）。按唤醒源分：
+    新 act_id → 去重失效）。world-driven wake 下角色只有 EventArrived 一条醒来入口，
+    用本轮读到的 event_ids（排序）派生 —— 同一批唤醒重投得同一 round_id → 同 act_id
+    （重放幂等不退化），下次同 round_id 重投从 transcript 查到 marker 跳过（turn 幂等）。
 
-      * **event 唤醒**：用本轮读到的 event_ids（排序）派生 —— 同一批唤醒重投得同一
-        round_id → 同 act_id（重放幂等不退化，对称旧 ``sorted(read_ids)`` 种子语义）。
-      * **self 唤醒**：没有 event_ids（信箱往往空），用携带的 ``target_wake_at`` 派生 ——
-        每个自排轮的 target 各不相同 → round_id 各轮独立稳定，不会因空种子误去重；
-        同一条 self 唤醒重投时 target 不变 → round_id 稳定、仍幂等。target 缺失（不该
-        发生，self 必带）时退回 reason，至少不空种子。
-
-    Task 3 的 life round marker（turn 幂等）将复用这个 round_id。
+    Task 3 的 life round marker（turn 幂等）复用这个 round_id。
     """
-    if isinstance(wake, LifeWakeTick):
-        seed = f"{lane}\x1fself\x1f{wake.target_wake_at or wake.reason}"
-    else:
-        seed = f"{lane}\x1fevent\x1f" + ",".join(sorted(read_ids))
+    seed = f"{lane}\x1fevent\x1f" + ",".join(sorted(read_ids))
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 
@@ -316,7 +218,7 @@ def _round_marker(round_id: str) -> str:
 def _round_already_processed(history: list[Message], round_id: str) -> bool:
     """这轮（round_id）是否已在 session 历史里出现过（turn 幂等查重，对称 world）。
 
-    同一批唤醒重投得同一 round_id（event 用 sorted event_ids、self 用 target_wake_at
+    同一批唤醒重投得同一 round_id（唤醒只剩 EventArrived 一条入口，按 sorted event_ids
     派生）；第一次 run 把带本轮标记的 USER 消息写进 transcript，重投时这里从已读到的
     历史里查这行标记，命中即已处理过 → 跳过（不再 run、不重做 durable 工具）。
     """
@@ -477,28 +379,58 @@ def _format_speech(speech: list[EventEnvelope]) -> str:
     )
 
 
+def _format_messages(messages: list[EventEnvelope]) -> str:
+    """把别人隔手机发来的消息（kind=message）拼成「X 给你发消息：内容」，按发生先后（task 5）。
+
+    通信介质维度（spec 决策 5 / 7）：这是**隔着手机/飞书**发来的消息——不在一起时发的，
+    不是当面说的。必须与当面 speech 的「X 对你说：原话」收件人侧可区分：一个是手机发的、
+    一个是当面说的，混成一句正是「把飞书当当面」的根。
+
+    source 是发送者 persona_id（姐妹互发手机消息，task 3 的 send_message），过
+    :func:`_speaker_display` 去机读前缀再呈现（与 speech 同口径）。``occurred_at`` 过
+    ``cst_time`` 归一到 CST（同其它各类）。
+    """
+    return "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）"
+        f"{_speaker_display(ev.source)} 给你发消息：{ev.summary}"
+        for ev in messages
+    )
+
+
 def _split_perception(
     unread: list[EventEnvelope],
-) -> tuple[list[EventEnvelope], list[EventEnvelope], list[EventEnvelope]]:
-    """把未读分成（周遭切片, 对话, 离散动静），各保持原始（按发生先后）顺序。
+) -> tuple[
+    list[EventEnvelope],
+    list[EventEnvelope],
+    list[EventEnvelope],
+    list[EventEnvelope],
+]:
+    """把未读分成（周遭切片, 当面话, 手机消息, 离散动静），各保持原始（按发生先后）顺序。
 
-    三类语义不同、stimulus 里分层呈现：
+    四类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7）：
 
-      * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框。
-      * 对话（kind=speech）—— 另一角色调 chat 直投进她信箱的原话「X 对你说：原话」
-        （1C Task 3）。有明确说话人、原话原样，独立成一层、不混进周遭底框或离散动静。
+      * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框（物理在场维度）。
+      * 当面话（kind=speech）—— 另一角色调 chat 直投的原话「X 对你说：原话」（1C Task 3）。
+        当面说的、有明确说话人，独立成层。
+      * 手机消息（kind=message）—— 另一角色不在一起时 send_message 隔空发来的消息
+        「X 给你发消息：内容」（task 3 / 5）。**通信介质维度**：隔着手机/飞书发的，与当面
+        speech 收件人侧必须可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
       * 离散动静（其余 ambient / external）—— 环境里出现的新声响光线气味、刚聊过等。
 
-    按 kind 三分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。
+    按 kind 四分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
+    必须从 dynamics 桶排除（必改 ①）——否则会被 :func:`_format_dynamics` 当离散动静渲染
+    成「[message] ...」，与当面话混淆。
     """
     surroundings = [e for e in unread if e.kind == EVENT_KIND_SURROUNDINGS]
     speech = [e for e in unread if e.kind == EVENT_KIND_SPEECH]
+    messages = [e for e in unread if e.kind == EVENT_KIND_MESSAGE]
     dynamics = [
         e
         for e in unread
-        if e.kind not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH)
+        if e.kind
+        not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH, EVENT_KIND_MESSAGE)
     ]
-    return surroundings, speech, dynamics
+    return surroundings, speech, messages, dynamics
 
 
 @node
@@ -524,7 +456,6 @@ async def life_wake_node(arrived: EventArrived) -> None:
                 arrived,
                 lane=lane,
                 persona_id=persona_id,
-                wake_kind="event",
             )
     except SingleFlightConflict:
         # 同 (lane,persona) 已有一轮在跑：不并发跑、不写快照、不标已读。交回
@@ -536,48 +467,13 @@ async def life_wake_node(arrived: EventArrived) -> None:
 
 
 @node
-async def life_self_wake_node(tick: LifeWakeTick) -> None:
-    """某姐妹**自排**的时间到了，跑一轮 life 工具循环（阶段 1B Task 2）。
-
-    这是**自排**入口（独立信号 LifeWakeTick，绝不复用 EventArrived 通道）：走到点
-    gate —— 未到 next_wake_at、或携带目标被 state 当前值覆盖（stale）一律判废早返。
-    放行后**即使信箱空也跑一轮**（输入语义是"你自排的时间到了，过这一刻"）。
-
-    单飞 / cd 与 event 入口同一套锁（同 lock_key / cd_key 按 (lane, persona)）：自排
-    轮和信箱轮串行化、共享冷却，不并发覆盖。撞锁吞掉（self 是她自己排的冗余唤醒，
-    丢这一次无害，下次自排 / world notify 再来），不像 act 那样必须重排。
-    """
-    lane = tick.lane
-    persona_id = tick.persona_id
-
-    lock_key = f"life_wake:{lane}:{persona_id}"
-    try:
-        async with single_flight(lock_key, ttl=_LIFE_WAKE_LOCK_TTL_SECONDS):
-            await _run_life_round(
-                tick,
-                lane=lane,
-                persona_id=persona_id,
-                wake_kind="self",
-            )
-    except SingleFlightConflict:
-        # 同 (lane,persona) 已有一轮在跑：self 是冗余自排唤醒，吞掉（log 留痕、不抛）。
-        # 正在跑的那轮收口时会重排自己的下次醒，丢这一次无害。
-        logger.info(
-            "[life_self_wake] %s/%s another round in flight, drop (redundant self wake)",
-            lane,
-            persona_id,
-        )
-        return
-
-
-@node
 async def life_schedule_reminder_node(tick: ScheduleReminderTick) -> None:
     """她某条日程**到点了**：走到点 gate，放行就把这条递到她面前、复用敲门把她叫醒。
 
-    这是日程到点提醒的独立一路（spec 第三块），与 self-wake / event 唤醒并列、互不干扰：
-    它**不动** self-wake 的 next_wake_at、不跑 life 工具循环、不直接改 LifeState ——
-    只做「到点把这条日程推到她面前」这一件事，她随后在常规唤醒里看到它、自己处理
-    （去做 / 改期 / 划掉），系统不替她判完成、不强制执行（赤尾宪法）。
+    这是日程到点提醒的独立一路（spec 第三块），与 event 唤醒并列、互不干扰：它不跑
+    life 工具循环、不直接改 LifeState —— 只做「到点把这条日程推到她面前」这一件事，
+    她随后在常规唤醒里看到它、自己处理（去做 / 改期 / 划掉），系统不替她判完成、不强制
+    执行（赤尾宪法）。
 
     流程：
       1. **到点 gate**（:func:`_schedule_reminder_gate_passes`）：读这条 entry 最新一版，
@@ -587,8 +483,8 @@ async def life_schedule_reminder_node(tick: ScheduleReminderTick) -> None:
          的信箱（kind=ambient、source=notebook），event_id 从
          :func:`derive_schedule_reminder_event_id` 确定派生（重投幂等、edge 5）。
          ``deliver_event`` 投成功后会 emit ``EventArrived`` 敲门——她经常规 life_wake 路径
-         被唤醒（到点遇 sleep 时，外部刺激敲门能立刻打断长睡，照现有 self-wake 语义：
-         EventArrived 永远放行不走 gate）。这条日程也已在她每轮唤醒输入的本子段里
+         被唤醒（到点遇 sleep 时，外部刺激敲门能立刻打断长睡：EventArrived 是角色唯一的
+         醒来入口、永远放行不走 gate）。这条日程也已在她每轮唤醒输入的本子段里
          （第二块）以「到点了」呈现，她当场看得到是哪条。
 
     **edge 1（多条几乎同时到点）**：每条日程各一条 tick、各派生不同 event_id，各走一遍
@@ -644,77 +540,35 @@ async def life_schedule_reminder_node(tick: ScheduleReminderTick) -> None:
 
 
 async def _run_life_round(
-    wake: EventArrived | LifeWakeTick,
+    wake: EventArrived,
     *,
     lane: str,
     persona_id: str,
-    wake_kind: str,
 ) -> None:
-    """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → gate → 读未读 → 冷启探测 → 跑工具循环 → 收口。
+    """一轮 life 的实际编排（已在单飞锁内）：cd 检查 → 读未读 → 冷启探测 → 跑工具循环 → 收口。
 
-    ``wake_kind``：``"event"``（信箱敲门 / 补敲，外部刺激）或 ``"self"``（自排）。两条
-    路径同构跑一轮，差别在三处（spec decision 1 / 6）：
+    纯事件反应者：角色被叫醒只剩 EventArrived 这一条入口（world notify / 日程到点提醒 /
+    真人聊天都投信箱敲门走它）。它是外部刺激、**不走任何到点 gate、永远跑**——能立刻
+    打断长睡。她跑完这一轮就等下一个事件、**自己绝不排下次醒**（Task 2 删自设闹钟整条：
+    没有 self LifeWakeTick 执行腿、没有 next_wake_at 意愿写入、没有 fan-out 心跳）。
+    存活由世界持续的客观事件流兜底，主动计划走日程（note + 到点提醒）。
 
-      * **到点 gate**：self 走 gate（读 LifeState.next_wake_at 判到点 + stale，未到 /
-        stale 判废早返）；event 是外部刺激、不走 gate、永远跑。
-      * **空信箱语义**：event 空信箱 early return（没新动静不用跑）；self 即使信箱空
-        也跑一轮（"你自排的时间到了，过这一刻"）。
-      * **act / 幂等种子**：见 round_id 派生 —— event 用 event_ids（重放幂等），self
-        没 event_ids、用 target_wake_at 派生（每个自排轮独立稳定、不误去重）。
+    **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）没新动静，不烧
+    模型、不写、不标已读。
 
-    **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，就把
-    这次唤醒推迟到 cd 后（延迟 + 合并、绝不 drop），但**按唤醒源用不同机制**（必改 1）：
-    event 走 debounce wire、``raise DebounceReschedule(wake)``（哨兵只对 debounce wire
-    有意义）；self 走普通 delayed-trigger、**绝不 raise**（哨兵会被 _runtime_trigger_consumer
-    当失败 drop、自排丢失），改为 emit_delayed 重排一条携带原 target 的 LifeWakeTick 延到
-    cd 剩余时间后再醒。两条都 cd 内不烧模型、不写、不标已读。
+    **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，就
+    ``raise DebounceReschedule(wake)`` 让 debounce handler CAS 重排这批 event 推迟到 cd
+    后（延迟 + 合并、绝不 drop）。cd 内不烧模型、不写、不标已读。
 
-    一轮成功收口（标完已读 + 排下次醒）后落一个 cd key（TTL=cd 秒）开启下一段冷却。
+    一轮成功收口（标完已读 + 挂本轮排的日程到点提醒）后落一个 cd key（TTL=cd 秒）开启
+    下一段冷却。
     """
-    is_self = wake_kind == "self"
-
     redis = await get_redis()
     cd_key = _cd_key(lane, persona_id)
     if await redis.get(cd_key):
-        # 还在上一轮的 cd 内：把这次唤醒推迟到 cd 后，绝不 drop（攒着、不丢）。**按唤醒源
-        # 分两条路（必改 1 命门）**——两者都"延到 cd 后再醒"，但用的机制不同：
-        #
-        #   * event（EventArrived）：走 debounce wire，raise DebounceReschedule 让 debounce
-        #     handler CAS 重排这批 event —— 哨兵只对 debounce wire 有意义。
-        #   * self（LifeWakeTick）：走 emit_delayed → 普通 delayed-trigger MQ source，**绝不**
-        #     raise DebounceReschedule —— 这个哨兵会冒泡出 _runtime_trigger_consumer 的
-        #     emit，被 process(requeue=False) 当普通失败 drop（这条自排丢失、她不再自排醒、
-        #     链断）。改为重新 emit_delayed 一条携带原 target 的 LifeWakeTick，延到 cd 剩余
-        #     时间后再醒：把这次自排攒到 cd 后、不丢。只重排一条（防唤醒风暴）。
-        if is_self:
-            assert isinstance(wake, LifeWakeTick)
-            # cd 剩余毫秒（pttl）：让重排的 self 正好排到 cd 结束后再醒。pttl 在极少数
-            # 竞态下可能返回 -1（无 TTL）/ -2（key 刚过期）；夹到至少 1ms，保证 emit_delayed
-            # 走延迟路径而非立即 emit（立即 emit 会再次命中 cd 自激）。上限是 cd 全长。
-            remaining_ms = await redis.pttl(cd_key)
-            delay_ms = min(
-                max(int(remaining_ms), 1) if remaining_ms and remaining_ms > 0 else 1,
-                _LIFE_CD_SECONDS * 1000,
-            )
-            logger.info(
-                "[life_wake] %s/%s self wake still in cd, re-emit delayed self wake "
-                "in %dms (carry target=%s, kept not dropped)",
-                lane,
-                persona_id,
-                delay_ms,
-                wake.target_wake_at or "-",
-            )
-            await emit_delayed(
-                LifeWakeTick(
-                    lane=lane,
-                    persona_id=persona_id,
-                    reason="self",
-                    target_wake_at=wake.target_wake_at,
-                ),
-                delay_ms=delay_ms,
-            )
-            return
-        # event：debounce wire 懂 DebounceReschedule，重排这批 EventArrived。
+        # 还在上一轮的 cd 内：把这批 event 推迟到 cd 后，绝不 drop（攒着、不丢）。走
+        # debounce wire、raise DebounceReschedule 让 debounce handler CAS 重排——哨兵只对
+        # debounce wire 有意义（EventArrived 的唯一来源就是 debounce wire）。
         logger.info(
             "[life_wake] %s/%s event wake still in cd, reschedule (kept, not dropped)",
             lane,
@@ -722,35 +576,15 @@ async def _run_life_round(
         )
         raise DebounceReschedule(wake)
 
-    # 现实此刻时间（CST）：gate 到点判定 + 喂 prompt 都用它（gate 比较一律用现实时间）。
+    # 现实此刻时间（CST）：喂 prompt 用它。
     now = cst_time.now_cst()
 
-    # 到点 gate（self 自排走 gate，event 外部刺激放行）：未到 next_wake_at、或携带目标
-    # 被 state 当前值覆盖（stale）一律判废、早返（不烧模型、不写、不标已读）。读
-    # LifeState 拿当前 next_wake_at 判 gate；放行的 event 轮也会用到 snapshot（状态恢复），
-    # 这里读一次复用。
+    # 读 LifeState 拿当前快照（冷启状态恢复段用），这里读一次复用。
     snapshot = await find_life_state(lane=lane, persona_id=persona_id)
-    if is_self:
-        next_wake_at = snapshot.next_wake_at if snapshot is not None else None
-        assert isinstance(wake, LifeWakeTick)
-        if not _life_self_wake_gate_passes(
-            wake, next_wake_at=next_wake_at, now=now
-        ):
-            logger.info(
-                "[life_self_wake] %s/%s self wake gated out (now=%s next_wake_at=%s "
-                "carried_target=%s): not due / stale, skip",
-                lane,
-                persona_id,
-                now.isoformat(),
-                next_wake_at,
-                wake.target_wake_at or "-",
-            )
-            return
 
     unread = await list_unread_events(lane=lane, persona_id=persona_id)
-    if not unread and not is_self:
+    if not unread:
         # event 唤醒空信箱（去重命中后的残留信号等）：没新动静，不烧模型、不写、不标。
-        # self 唤醒空信箱**不** early return —— 她自排的时间到了，照样过这一刻（decision 6）。
         logger.info("[life_wake] %s/%s event wake empty inbox, skip", lane, persona_id)
         return
 
@@ -779,35 +613,26 @@ async def _run_life_round(
 
     read_ids = [ev.event_id for ev in unread]
 
-    # 本轮确定性标识，按**唤醒源**稳定派生（Task 3 的 turn 幂等 round marker 复用它）：
-    #   * event 唤醒：用本轮读到的 event_ids（排序），重投得同一 round_id（重放幂等）。
-    #   * self 唤醒：没有 event_ids（信箱往往空），用携带的目标时刻 target_wake_at 派生
-    #     —— 每个自排轮 target 各不相同 → round_id 各轮独立稳定，不因空种子误去重。
+    # 本轮确定性标识，按本轮读到的 event_ids（排序）稳定派生（Task 3 的 turn 幂等 round
+    # marker 复用它）：同一批唤醒重投得同一 round_id（重放幂等）。world-driven wake 下
+    # 角色只有 EventArrived 一条醒来入口，所以只按 event_ids 派生。
     round_id = _derive_life_round_id(
-        lane=lane, persona_id=persona_id, wake=wake, read_ids=read_ids
+        lane=lane,
+        persona_id=persona_id,
+        read_ids=read_ids,
     )
 
-    # act_id 派生（spec decision 6 命门：对自排也成立的稳定派生，不依赖 event_ids）：
-    #   * event 唤醒：保持原种子 (lane:persona:sorted(event_ids)) 不变 —— durable 边
-    #     重投 / 重试同一批唤醒产同一 act_id，world 按 act_id 幂等消化（重放幂等语义
-    #     **绝不退化**）。
-    #   * self 唤醒：event_ids 为空，原种子 (lane:persona:) 多个自排轮共用 → 误去重。
-    #     改用 round_id 派生 —— 每个自排轮独立稳定的种子，同一条 self 重投仍同 act_id。
+    # act_id 派生：按本轮 event_ids 种子 (lane:persona:sorted(event_ids))——durable 边
+    # 重投 / 重试同一批唤醒产同一 act_id，world 按 act_id 幂等消化（重放幂等绝不退化）。
     # capture 进工具闭包，不让模型生成。
-    if is_self:
-        act_seed = f"{lane}:{persona_id}:self:{round_id}"
-    else:
-        act_seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
+    act_seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
     act_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, act_seed))
-
-    # round-scoped 待办 self-wake 容器：schedule 工具往里写 delay_ms（覆盖而非追加 →
-    # 一轮内最后一次为准），engine 收口后读它 emit 至多一条 self LifeWakeTick。
-    self_wake: dict = {}
 
     # round-scoped 待挂日程提醒容器（备忘录 & 日程 第三块）：note / edit_note 每带一个
     # remind_at 就往里记 entry_id → remind_at（撤时间记 None，覆盖而非追加 → 同 entry
     # 一轮内最后一次为准），engine 收口 fire_schedule_reminders 给每条有 remind_at 的
-    # 日程各 emit 一条 ScheduleReminderTick（每条日程各挂各的，不动 self-wake 语义）。
+    # 日程各 emit 一条 ScheduleReminderTick（每条日程各挂各的）。日程是她真实生活里有
+    # 内容的安排，保留；自设闹钟（next_wake_at / schedule）是空时间点维持运转，Task 2 删了。
     schedule_reminders: dict = {}
 
     tools = build_life_tools(
@@ -815,7 +640,6 @@ async def _run_life_round(
         persona_id=persona_id,
         act_id=act_id,
         observed_at=observed_at,
-        self_wake=self_wake,
         schedule_reminders=schedule_reminders,
     )
 
@@ -957,17 +781,24 @@ async def _run_life_round(
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 
-    # 五官分层呈现（1C Task 2 + Task 3）：她信箱里有三类——「周遭切片」（surroundings，
-    # world 五官为她逐角色推演的此刻所处环境，作底框）、「别人对你说的话」（speech，
-    # 另一角色调 chat 直投的原话「X 对你说：原话」，Task 3）、「离散动静」（ambient /
-    # external，环境里出现的新声响 / 刚聊过这类事件）。分层呈现让她既感知到自己周遭
-    # 什么样、又看清是谁直接对她说了话、还知道刚发生了什么动静（三类不互相混淆）。
-    # 三类都只取自她自己信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给
-    # 她的、她够得着的），绝不含 world 全局快照——信息差命门由 world 逐角色推演产出每人
-    # 切片守住，不在这里。speech 是直投（不经 world），它的原话只在收件人这条流里出现、
-    # world 那条流绝不含原话（承重红线，由 chat 工具双轨守住）。
+    # 五官分层呈现（1C Task 2 + Task 3 + task 5）：她信箱里有四类，分层呈现两个正交
+    # 维度（spec 决策 7）——
+    #   * 「周遭切片」（surroundings，world 五官逐角色推演的此刻所处环境，作底框）——
+    #     **物理在场维度**（她此刻在哪、身边有谁）。
+    #   * 「别人当面对你说的话」（speech，另一角色调 chat 直投的原话「X 对你说：原话」，
+    #     Task 3）—— 当面、在身边。
+    #   * 「别人隔着手机给你发的消息」（message，另一角色不在一起时 send_message 隔空发的
+    #     「X 给你发消息：内容」，task 3 / 5）—— **通信介质维度**：隔着手机/飞书，不是当面。
+    #     与当面 speech 收件人侧明确可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
+    #   * 「离散动静」（ambient / external，环境里出现的新声响 / 刚聊过这类事件）。
+    # 分层呈现让她既感知到自己周遭什么样（物理在场）、又看清谁当面说了话 / 谁隔手机发了
+    # 消息（通信介质两态）、还知道刚发生了什么动静（四类不互相混淆）。四类都只取自她自己
+    # 信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给她的、她够得着的），绝不
+    # 含 world 全局快照——信息差命门由 world 逐角色推演产出每人切片守住，不在这里。speech /
+    # message 都是直投（不经 world），原话/内容只在收件人这条流里出现、world 那条流绝不含
+    # （承重红线，由 chat / send_message 工具双轨守住）。
     if unread:
-        surroundings, speech, dynamics = _split_perception(unread)
+        surroundings, speech, messages, dynamics = _split_perception(unread)
         if surroundings:
             parts.append(
                 "【此刻你周遭】（你此刻所处的环境、身边有谁，由你的感官投射给你）：\n"
@@ -975,8 +806,17 @@ async def _run_life_round(
             )
         if speech:
             parts.append(
-                "【有人对你说话】（直接冲你来的话，按发生先后）：\n"
+                "【有人当面对你说话】（就在你身边、直接冲你来的话，按发生先后）：\n"
                 f"{_format_speech(speech)}"
+            )
+        if messages:
+            # 通信介质维度（spec 决策 5 / 7）：隔着手机/飞书发来的消息，**不是当面**。
+            # 单列自己的段、与当面话「有人当面对你说话」收件人侧明确可区分——治
+            # 「把隔空消息当当面」的混淆。
+            parts.append(
+                "【有人隔着手机给你发消息】（你们这会儿不在一起、隔着手机/飞书发来的，"
+                "不是当面说的，按发生先后）：\n"
+                f"{_format_messages(messages)}"
             )
         if dynamics:
             parts.append(
@@ -984,15 +824,6 @@ async def _run_life_round(
                 f"{_format_dynamics(dynamics)}"
             )
         parts.append("读懂此刻你周遭，过你自己的这一刻。")
-    elif is_self:
-        # self 唤醒且信箱空（decision 6）：不是被新动静叫醒、是自己排的时间到了。输入
-        # 语义就是"你自排的时间到了，接着过下一刻"——没有外部新动静，照样往下过日子
-        # （写完这题接着写下一题、收拾完挪去客厅）。她可以接着用 schedule 排下次醒、
-        # 续上自排接力。
-        parts.append(
-            "没有新的外部动静——是你之前自己排的时间到了。接着过你自己的下一刻吧"
-            "（接着做手上的事、或换个状态），需要的话再用 schedule 排下次醒。"
-        )
     stimulus = "\n".join(parts)
 
     # max_retries=1：关掉整轮重放。run 把整个 ReAct 循环包在 retry 里，一次 model
@@ -1029,22 +860,19 @@ async def _run_life_round(
     )
 
     # 收口：标已读，只标本轮实际读到的那批 event_id（绝不按 persona 全标）。即使
-    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。self 唤醒空信箱时
-    # read_ids 为空，mark_events_read([]) 无副作用、安全。
+    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。空信箱已在前面 early
+    # return，走到这里 read_ids 必非空。
     await mark_events_read(lane=lane, persona_id=persona_id, event_ids=read_ids)
 
     # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里
     # durable 落定（两阶段解耦），这里在同一串行窗口（仍在单飞锁内）做其后的独立
     # 折叠步骤——达到阈值就把整卷压成她自己口吻的沉淀段 + marker 保全行。位置在
-    # 标已读之后、**排下次醒之前**（codex T3 必改 1）：沉淀是一次离线 LLM 调用
-    # （最长 120s，硬超时见 app.agent.sediment），全程占着单飞锁——若先排
-    # self-wake，短延迟的自排会在折叠期间到达撞锁，而 self tick 撞锁是直接被吞
-    # 的（不像事件唤醒有 reschedule 保底）；fold 完成后才开始给下一轮自排计时，
-    # 撞锁窗口消失。fold_session 整段 fail-open（绝不抛），失败本版不折、下轮
-    # 再试。也在睡前回顾之前：回顾读到的就是折叠后形态（沉淀段+近期原文，spec
-    # 钉为设计行为）。成本入账在沉淀回调内自带独立 collect_usage 作用域
-    # （actor = f"{persona_id}:sediment"），在上面本轮 collect_usage 之外调用
-    # ——绝不混进已落账的本体 usage。
+    # 标已读之后、挂日程到点提醒之前：沉淀是一次离线 LLM 调用（最长 120s，硬超时见
+    # app.agent.sediment），全程占着单飞锁——先把这一步做完再挂提醒，收口顺序稳定。
+    # fold_session 整段 fail-open（绝不抛），失败本版不折、下轮再试。也在睡前回顾之前：
+    # 回顾读到的就是折叠后形态（沉淀段+近期原文，spec 钉为设计行为）。成本入账在沉淀
+    # 回调内自带独立 collect_usage 作用域（actor = f"{persona_id}:sediment"），在上面
+    # 本轮 collect_usage 之外调用——绝不混进已落账的本体 usage。
     await fold_session(
         session_id,
         build_life_fold_policy(
@@ -1052,18 +880,12 @@ async def _run_life_round(
         ),
     )
 
-    # 收口排下次醒（阶段 1B Task 2）：本轮若调过 schedule，self_wake 里有 delay_ms ——
-    # fire 算目标时刻、写进 LifeState.next_wake_at、emit 至多一条 self LifeWakeTick
-    # （携带目标时刻供 stale 判定）。没调过 schedule（空容器）就不 emit —— 她不自排
-    # 接力时不会自己醒，靠 world 下一次 notify 起头。event / self 两条路都走这收口，
-    # 所以被 world 起头唤醒一次后，她就能用 schedule 自排接力往下过日子（spec 目标）。
-    await fire_life_self_wake(lane=lane, persona_id=persona_id, self_wake=self_wake)
-
     # 收口挂日程到点提醒（备忘录 & 日程 第三块）：本轮 note / edit_note 排 / 改的每条带
-    # remind_at 的日程，各 emit 一条 ScheduleReminderTick（每条各挂各的、不动上面
-    # self-wake 的 next_wake_at）。空容器（本轮没排 / 改日程）不 emit。与 self-wake 收口
-    # 并列、互不干扰：一个管「她下一轮节奏」、一个管「这些日程到点叫她」。逐条失败隔离 +
-    # 不往上炸（已 durable 落库的本子不被一条漏挂的提醒拖成失败重投）由 fire 内部负责。
+    # remind_at 的日程，各 emit 一条 ScheduleReminderTick（每条各挂各的）。空容器（本轮
+    # 没排 / 改日程）不 emit。**Task 2 删自设闹钟后这是 life 唯一的收口排程**——日程是她
+    # 真实生活里有内容的安排（到点提醒她去做），区别于已删的自设闹钟（空时间点维持运转）。
+    # 逐条失败隔离 + 不往上炸（已 durable 落库的本子不被一条漏挂的提醒拖成失败重投）由
+    # fire 内部负责。
     await fire_schedule_reminders(
         lane=lane, persona_id=persona_id, schedule_reminders=schedule_reminders
     )
@@ -1074,15 +896,14 @@ async def _run_life_round(
     await redis.set(_cd_key(lane, persona_id), "1", ex=_LIFE_CD_SECONDS)
 
     logger.info(
-        "[life_wake] %s/%s ran a %s round, marked %d read, self_wake=%s, cd %ds",
-        lane, persona_id, wake_kind, len(read_ids),
-        "yes" if self_wake.get("delay_ms") else "no", _LIFE_CD_SECONDS,
+        "[life_wake] %s/%s ran a round, marked %d read, cd %ds",
+        lane, persona_id, len(read_ids), _LIFE_CD_SECONDS,
     )
 
     # 快班睡前回顾（spec 决策 2 快班；主保证仍是凌晨对账 cron）：只在本轮发生
-    # 「**进入睡眠**」的转变时触发（边沿，不是电平）——轮开始读到的快照（gate 段
-    # 的 snapshot）不是 sleep、收口后她**最新**的主观快照（本轮可能 update 过，
-    # 所以现读）是 sleep。她睡着时夜里被群消息 / self-wake 吵醒跑的轮（轮始轮末
+    # 「**进入睡眠**」的转变时触发（边沿，不是电平）——轮开始读到的快照
+    # （函数开头的 snapshot）不是 sleep、收口后她**最新**的主观快照（本轮可能 update
+    # 过，所以现读）是 sleep。她睡着时夜里被群消息吵醒跑的轮（轮始轮末
     # 都是 sleep）不再各跑一次回顾——电平触发会让成本随夜间打扰线性放大（旧
     # marker 闸一天一次顺带压住了这个，闸拆掉后暴露）。真正的「再入睡」（醒来→
     # 活动→又睡）是合法转变、照常触发（target = living_day(now)：23:30 入睡=

@@ -1,9 +1,33 @@
-"""chat_node 单元测试（Task 7-11 累积）。"""
+"""chat_node 单元测试（Task 7-11 累积）。
+
+剥离 + 渲染层抽取后:chat_node 不再调单一 ``_build_and_stream``,而是
+``build_human_chat_context``(真人 context 构建)→ ``render_chat_turn``(共享渲染层)。
+这些测试锁的是 chat_node 的 segmentation / pre-safety / 出站逻辑,所以把 context
+构建打桩成返回一个 stub ChatTurnContext、把渲染层打桩成喂入预设的 token 流。
+"""
 import asyncio
 
 import pytest
 
 from app.domain.chat_dataflow import ChatRequest
+
+
+def _stub_turn_ctx():
+    """chat_node segmentation 测试不关心 context 内容,给个最小 stub。"""
+    from app.chat.render import ChatTurnContext
+
+    return ChatTurnContext(
+        messages=[], image_registry=None, chat_id="c1", persona_id="p1",
+        identity="", appearance="", inner_context="", persona=None,
+    )
+
+
+def _patch_context(monkeypatch, cn):
+    """把真人 context 构建打桩成返回 stub(非 None,让 chat_node 走渲染分支)。"""
+    async def fake_build_ctx(message_id, *, persona_id, **k):
+        return _stub_turn_ctx()
+
+    monkeypatch.setattr(cn, "build_human_chat_context", fake_build_ctx, raising=False)
 
 
 @pytest.fixture
@@ -42,8 +66,8 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
             pre_request_id="x", message_id=message_id, is_blocked=False,
         )
 
-    async def fake_build_and_stream(*a, **k):
-        calls.append(("build_and_stream_channel", k.get("channel")))
+    async def fake_render(*a, **k):
+        calls.append(("render_channel", k.get("channel")))
         if False:
             yield ""
 
@@ -70,8 +94,9 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
     monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre_safety)
     monkeypatch.setattr(cn, "parse_content", parse_content_fn)
+    _patch_context(monkeypatch, cn)
     monkeypatch.setattr(
-        cn, "_build_and_stream", fake_build_and_stream, raising=False
+        cn, "render_chat_turn", fake_render, raising=False
     )
     monkeypatch.setattr(
         cn, "resolve_bot_name_for_persona", fake_resolve_bot, raising=False
@@ -91,7 +116,7 @@ async def test_chat_node_prep_block_calls_dependencies(monkeypatch, base_request
     assert "find_gray_config" in names
     assert "fetch_guard_message" in names
     assert "run_pre_safety_check" in names
-    assert ("build_and_stream_channel", "qq") in calls
+    assert ("render_channel", "qq") in calls
     assert names.index("find_message_content") < names.index("parse_content")
     assert names.index("parse_content") < names.index("run_pre_safety_check")
 
@@ -138,7 +163,7 @@ async def test_chat_node_resolves_bot_name_and_updates_agent_response(monkeypatc
     async def fake_pre(*a, **k):
         from app.domain.safety import PreSafetyVerdict
         return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
-    async def fake_build_and_stream(*a, **k):
+    async def fake_render(*a, **k):
         if False:
             yield ""
 
@@ -156,7 +181,8 @@ async def test_chat_node_resolves_bot_name_and_updates_agent_response(monkeypatc
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_build_and_stream, raising=False)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_render, raising=False)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)
@@ -195,7 +221,8 @@ async def test_chat_node_split_two_segments_then_final(monkeypatch, base_request
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)
@@ -245,7 +272,8 @@ async def test_chat_node_pre_safety_block_at_first_boundary(monkeypatch, base_re
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)
@@ -284,7 +312,8 @@ async def test_chat_node_pre_safety_block_at_final(monkeypatch, base_request):
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)
@@ -322,7 +351,8 @@ async def test_chat_node_caps_mid_segments_at_max_messages_minus_one(monkeypatch
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)
@@ -364,7 +394,8 @@ async def test_chat_node_no_split_emits_single_final_segment(monkeypatch, base_r
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
 
     emitted = []
     async def fake_emit(d): emitted.append(d)

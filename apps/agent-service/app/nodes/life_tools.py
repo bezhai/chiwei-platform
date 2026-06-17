@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
 from typing import Annotated
 
 from pydantic import Field
@@ -42,9 +41,25 @@ from pydantic import Field
 from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
 
+# module-level 引用 search_web Tool，让 look_up 复用它（也让测试能 monkeypatch，与
+# deliver_event / perform_act 同款）。look_up 在工具体内调 ``search_web.invoke``，
+# 拿 search_web 已经带源组织好的文本（每条 [i] 标题 / 出处链接 / 关键摘录）。
+from app.agent.tools.search import search_web
+
+# module-level 引用 proactive 渲染链（让 send_message 真人分支「life 给意图 → proactive
+# context 构建 → 共享渲染层渲染 → 出站」，也让测试能 monkeypatch）。proactive context
+# 是和真人聊天那套并列的、单独一套（不复用 build_human_chat_context、不碰源消息）；
+# render_chat_turn 是真人聊天复用的共享渲染层（只读、不改）。
+from app.chat.proactive_context import build_proactive_chat_context
+from app.chat.render import render_chat_turn
+
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
-from app.domain.life_state import save_life_state, set_life_next_wake_at
+from app.domain.chat_dataflow import (
+    PROACTIVE_MESSAGE_ID_PREFIX,
+    ChatResponseSegment,
+)
+from app.domain.life_state import save_life_state
 from app.domain.notebook import (
     STATUS_DONE,
     STATUS_DROPPED,
@@ -53,9 +68,22 @@ from app.domain.notebook import (
     render_notebook,
     update_entry,
 )
-from app.domain.world_events import EVENT_KIND_SPEECH, perform_act
+
+# module-level 引用目录解析层 + 投递目标类型，让 send_message 按 uid 解析投递目标，
+# 也让测试能 monkeypatch（与 deliver_event / perform_act 同款）。
+from app.domain.recipient_directory import (
+    LarkP2PTarget,
+    MailboxTarget,
+    resolve_delivery,
+    search_recipients,
+)
+from app.domain.world_events import (
+    EVENT_KIND_MESSAGE,
+    EVENT_KIND_SPEECH,
+    perform_act,
+)
 from app.infra import cst_time
-from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
+from app.runtime.emit import emit, emit_delayed  # module-level so tests can monkeypatch
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +95,52 @@ logger = logging.getLogger(__name__)
 # 真有第四个角色再说，业务代码不是 SDK）。
 SISTERS_CONTACTS = frozenset({"akao", "chinagi", "ayana"})
 
-# schedule 下限：她自排最短间隔（秒）。低于下限报错喂回模型重调（跟上限超限处理对称、
-# 不静默夹），防她排得太密（像神经质每分钟醒一次想一轮）。这是机制护栏（决定何时
-# 醒），不替她决定睡多久 / 做什么（赤尾宪法）。对称 world WORLD_SLEEP_MIN_SECONDS。
-LIFE_SCHEDULE_MIN_SECONDS = 60
+# search_web 在「没配 / 没搜到 / 搜出来没相关结果」时返回的两条**精确**失败文案（见
+# app/agent/tools/search.py:232 / :257）。look_up / browse_feed 命中这些就如实说没查 /
+# 没刷到、不把它当成给她的内容顶上去——拿不到真东西就不假装拿到了（spec 决策 4：不编
+# 一个顶上）。
+_SEARCH_WEB_EMPTY_RESULTS = frozenset(
+    {
+        "搜索服务未配置或未搜索到结果",
+        "未搜索到相关结果",
+    }
+)
 
-# schedule 上限：她一次自排最长睡多久（秒）。比 world sleep 的 1h 放宽到能睡一整觉
-# （夜里一觉到天亮）—— 具体睡多久由她自己看钟点定，真有事 world 的 notify（外部刺激
-# 不走 gate）会把她从长睡叫醒。12h 覆盖整夜睡眠。超限报错喂回模型重调，绝不静默夹。
-LIFE_SCHEDULE_MAX_SECONDS = 12 * 3600
+# search_web 第三种失败信号：底层 _web_search_capability 抛异常时它内部 catch 返回
+# ``f"网页搜索失败: {exc}"``（见 app/agent/tools/search.py:241）。**前缀固定、后缀带变长
+# 异常文本**，所以只能按前缀认、不能精确匹配。漏认它会把"网页搜索失败: xxx"当真内容
+# 顶上去（违 spec 决策 4：把失败当内容、又一眼假）。
+_SEARCH_WEB_FAILURE_PREFIX = "网页搜索失败"
+
+
+def _search_web_failed_or_empty(result: object) -> bool:
+    """判断 search_web 这次是不是"没拿到真东西"（失败 / 空），命中就如实说没查 / 没刷到。
+
+    search_web 的"没拿到"有四种形态，look_up / browse_feed 都要稳健识别（spec 决策 4：
+    拿不到真东西就如实说，绝不把失败 / 空当内容顶上去）：
+
+      1. **非 str**：search_web 叠 ``@tool_error``，意外异常时返回结构化 outcome dict
+         而非字符串（app/agent/tools/search.py:202-203 之外的异常路径）。
+      2. ``"搜索服务未配置或未搜索到结果"``（精确，search.py:232）。
+      3. ``"未搜索到相关结果"``（精确，search.py:257）。
+      4. ``f"网页搜索失败: {exc}"``（**前缀** ``网页搜索失败``、后缀变长，search.py:241）——
+         用 ``startswith`` 认前缀，不能精确匹配（带变长异常文本）。
+
+    两只手共用这一个判断，避免各自只认一部分信号导致漂移。
+    """
+    if not isinstance(result, str):
+        return True
+    stripped = result.strip()
+    return (
+        stripped in _SEARCH_WEB_EMPTY_RESULTS
+        or stripped.startswith(_SEARCH_WEB_FAILURE_PREFIX)
+    )
+
+# 刷手机（browse_feed）一次捞回的条数：比 look_up「带问题求一个答案」的聚焦默认（5）多，
+# 让结果像一条 feed 的一批供她浏览挑选。取 search_web 的上限 10（它内部夹到 1～10）。
+# 这是「逛一圈看一批」的机制口径（决策 2 的「刷=逛一圈、返回一批」），不是兴趣规则
+# ——刷什么仍由她带进来的方向决定，这里只决定「一次看几条」。
+_BROWSE_FEED_BATCH = 10
 
 
 def build_life_tools(
@@ -84,7 +149,6 @@ def build_life_tools(
     persona_id: str,
     act_id: str,
     observed_at: str,
-    self_wake: dict | None = None,
     schedule_reminders: dict | None = None,
 ) -> list[Tool]:
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
@@ -94,18 +158,18 @@ def build_life_tools(
         工具内给每件 act 派 ``per_act_id = uuid5(act_id, 本轮第 N 件序号)``，一轮多件
         各自唯一、同件重投幂等。
     ``observed_at`` —— 本轮观测时刻（ISO8601），快照 / 动作都用它，使重放一致。
-    ``self_wake`` —— 本轮 round-scoped 的待办 self-wake 容器（``{} | {"delay_ms": int}``，
-        engine 每轮新建）。给了它工具集就多一件 ``schedule``（自排下次醒），照搬 world
-        sleep 的 round-scoped 覆盖：一轮内多次 schedule 覆盖而非追加、收口只 emit 一条。
-        不给（旧调用方 / 工具契约测试）就只有 update_life_state + act 两件。
     ``schedule_reminders`` —— 本轮 round-scoped 的「待挂日程提醒」容器
         （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note`` / ``edit_note``
         每带一个 remind_at 就往里记一条 ``entry_id → remind_at``（撤时间记 ``None``）；engine
         收口 :func:`fire_schedule_reminders` 给每条有 remind_at 的日程**各 emit 一条**
-        ``ScheduleReminderTick``（每条日程各挂各的到点提醒，不动 self-wake 的 next_wake_at
-        语义——日程是在它旁边新加的一路独立唤醒）。同轮多次动同一 entry_id 覆盖而非追加
-        （最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则 note / edit_note
-        照常落库、只是不挂到点提醒（向后兼容）。
+        ``ScheduleReminderTick``（每条日程各挂各的到点提醒）。同轮多次动同一 entry_id
+        覆盖而非追加（最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则
+        note / edit_note 照常落库、只是不挂到点提醒（向后兼容）。
+
+    **Task 2 删自设闹钟**：以前这里还有一个 ``self_wake`` 容器 + ``schedule`` 工具，让她
+    自己排「多久后再醒」（写进 ``LifeState.next_wake_at``）。纯客观事件驱动范式把 life
+    自设闹钟整条删了——她退成纯事件反应者，被事件激活才动、跑完不排下次，自主性靠
+    prompt 给、主动计划走日程（上面的 notebook + 到点提醒）。所以不再有 self_wake / schedule。
     """
 
     # 本轮已**确认成功落库**的 act 件数（round-scoped 序号，随这一轮的闭包活着）。
@@ -144,6 +208,13 @@ def build_life_tools(
     # 才推进（失败重试用同一序号 → 同一 entry_id → 去重只落一条）。
     note_seq = 0
 
+    # 本轮已**确认成功发出**的 send_message 件数（round-scoped 序号，对称 chat_seq）。
+    # 隔空发同样整轮重投幂等、一轮多次各自独立 —— 投递键（姐妹手机消息 event_id /
+    # 真人出站段 message_id）从 (base act_id, "send:N" 序号) 派生。**带 "send:" 前缀**让
+    # 它与 act / chat / note 的 seed 空间天然不相交（四者共用同一 base act_id）。命门同
+    # 其余 *_seq：只在成功发出后才推进（失败重试用同一序号 → 同一键 → 下游去重只落一条）。
+    send_seq = 0
+
     @tool_error("更新此刻状态失败")
     async def update_life_state(
         current_state: str,
@@ -180,6 +251,12 @@ def build_life_tools(
 
         说话用 chat，不用 act：想对谁说话（当面或发消息）一律走 chat 工具。act
         只管「做了一件事」——去厨房、端饭菜出去摆上桌、出门、走到谁面前、弄出动静。
+
+        上网看东西也不用 act：想查个真答案、想刷刷手机看点啥，act 给不了你任何真
+        东西——你 act 一句「我查了下天气」「我刷了刷手机」只是留下一个动作的痕迹，
+        你心里那些「查到的」「刷到的」全是你自己编的、是假的。真想知道，用 look_up
+        带着你的问题去查；没事想随便刷刷，用 browse_feed。它们才把网上的真东西放到
+        你面前。
 
         多数时候你只是经历这一刻——感知到周遭的动静、心里有点波澜，更新一下此刻
         状态（update_life_state）就够了，不用 act。只有当你做的事会在你之外留下
@@ -333,6 +410,197 @@ def build_life_tools(
         # 一序号 → 同一对键 → 去重只各落一条）。
         chat_seq = next_seq
         return "说了"
+
+    @tool_error("查联系人失败")
+    async def look_up_contact(query: str) -> str:
+        """报一个名字，查出可以隔空发消息的人有哪些（候选给你挑，不替你选）。
+
+        想给谁隔空发消息（send_message）、但手里只有一个名字时，先用它查一下：把名字
+        给它，它返回所有名字对得上的候选——每个候选带一个**稳定 id（uid）**和一段简介
+        （帮你认人、区分重名）。挑哪一个是你自己的决定，它绝不替你排序、不替你取第一个。
+
+        查到一个或多个候选 → 你看简介认出要发的那个人，记下 ta 的 uid，再用 send_message
+        按那个 uid 发。查不到任何人 → 它如实说没找到，那就当真没这个人（换个名字、或算了）。
+
+        这只手只**查名字拿 uid**，不发消息；发用 send_message。给三姐妹**当面**说话不走
+        这里（那是 chat）——这只手是为「隔空发消息给某个人、先把 ta 是谁查清楚」用的。
+
+        Args:
+            query: 你要找的人的名字（自然语言，可模糊，如"赤尾""妈妈"）。
+
+        Returns:
+            候选列表文本（每个候选带 uid + 简介）；查不到时一句如实说明。
+        """
+        candidates = await search_recipients(query)
+        if not candidates:
+            return f"没找到叫「{query}」的人——换个名字再查，或者就算了。"
+        # 原样把候选（uid + 简介）列给她挑，**不排序、不取第一个、不替她筛**（spec
+        # 决策 3：选谁是她的决定）。每条标出 uid（她用它调 send_message）+ 简介（认人）。
+        lines = [f"叫「{query}」的有这些，看简介认出要发的那个，记下 ta 的 uid 再发："]
+        for c in candidates:
+            lines.append(f"- uid={c.uid}：{c.intro}")
+        return "\n".join(lines)
+
+    @tool_error("发消息失败")
+    async def send_message(uid: str, content: str) -> str:
+        """隔着手机给某个人发一条消息（不在一起时用，给三姐妹或真人都行）。
+
+        这是「隔空发消息」的手，和**当面说话**（chat）是两件事、两只手：你们不在
+        一起时（ta 在学校、出了门、或本就是手机另一头的真人），想说的话发到 ta 那里
+        就用它。当面就在你身边的姐妹，用 chat 当面说，不用这个。该当面还是该发消息，
+        你自己读懂此刻的情形决定。
+
+        uid 是要发的那个人的稳定 id——你心里有数就直接给（三姐妹的 uid 是
+        ``persona:akao`` / ``persona:chinagi`` / ``persona:ayana``）；只记得名字、
+        不确定 uid，先用 look_up_contact 报名字查出 uid 再发。
+
+        发给姐妹 → 像手机消息一样进她那边，她下次回过神 / 醒来读到「你给她发的消息」。
+        发给真人 → 消息会发往 ta 的手机，但**这是异步的**：你这边只是把消息发了出去，
+        它最终能不能送到 ta 手机上、ta 看没看到，你当场都不知道、也不保证一定送到
+        （网络、对方状态都可能让它没送达）。所以发完它只会告诉你「已发出」，不会说
+        「对方收到了」——别把「已发出」当成「ta 已经看到 / 会回你」。**对方可能一时没看、
+        或这个人这边根本发不出去**（比如从没和你私聊过的人），这都正常：当场就发不出去时
+        它会告诉你发不了和原因，你自己定怎么办（换个人、待会儿再说、或算了），它绝不
+        偷偷替你改发给别人。
+
+        Args:
+            uid: 收件人的稳定 id（``persona:<姐妹>`` 或真人的 ``user:<id>``）。
+            content: 你要发的话（你自己的原话，原样发出去）。
+
+        Returns:
+            一句确认；发不出去时一句说明原因（喂回你自己处置）。
+        """
+        nonlocal send_seq
+        # 解析投递目标：resolver 查不到 / 不可投递时抛 UndeliverableRecipient，
+        # @tool_error 把它收成结构化 outcome（str(exc) 进 message）喂回 life 让她处置
+        # （换个人 / 重试 / 算了）——不在这里 catch、不静默降级、不替她另找目标（决策 6）。
+        target = await resolve_delivery(uid)
+
+        # next_seq 模式（命门同 chat_seq / act_seq）：用 send_seq+1 算这件 send 的投递键，
+        # 但**先不推进 send_seq** —— 成功发出后才推进。@tool_error 会吞掉发送抛的错让模型
+        # 重试；失败重试用**同一个** next_seq → 同一投递键 → 下游 durable 去重只落一条。
+        next_seq = send_seq + 1
+        # per-send 基键：base act_id + "send:N" 序号。**带 "send:" 前缀**让它与 act /
+        # chat / note 的 seed 空间天然不相交（共用同一 base act_id）。
+        send_base = f"{act_id}:send:{next_seq}"
+
+        if isinstance(target, MailboxTarget):
+            # 姐妹（手机消息）→ 走信箱投递，但用**手机消息 kind**（EVENT_KIND_MESSAGE），
+            # 和当面 chat 的 speech kind 区分（spec 决策 5：收件人侧能看出是手机发来的、
+            # 不是当面说的）。source = 发送者 persona_id；不经 world、不给 world 元信息
+            # （隔空发不在物理场景里、没有「这里有人在交谈」的氛围可言）。
+            event_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{send_base}:msg"))
+            await deliver_event(
+                lane=lane,
+                persona_id=target.persona_id,
+                event_id=event_id,
+                summary=content,
+                occurred_at=observed_at,
+                kind=EVENT_KIND_MESSAGE,
+                source=persona_id,
+            )
+            send_seq = next_seq
+            return "发出去了"
+
+        if isinstance(target, LarkP2PTarget):
+            # 真人（飞书私聊）→ life 只给**意图**（content 是她想说的要点 / 意图），
+            # 措辞交给**共享渲染层**（主模型 + 人设）产出，**不再**由 life 的 offline
+            # gpt 直出原文（直出口径不一致、堆黑话、叫「主人」，正是本刀要治的根）。
+            # 流程：life 给意图 → proactive context 构建（带 chat_id 历史、接得上上次聊）
+            # → render_chat_turn 渲染 → 出站。proactive **不穿** chat 队列（route_chat
+            # _node→chat_node 那套是真人回复专属）、**不写** agent_response，出站契约保持。
+            #
+            # 主动发**没有来源消息**：message_id 不能是指向真实来源消息的 id（worker 反查
+            # 会炸）—— 用 proactive: 前缀 + 本轮派生键明确「这是主动发、非来源消息 id」，
+            # root_id 留空（不伪造一条「被回复的消息」）。worker 据 is_proactive 走不反查
+            # 来源、直接用 chat_id（= 真实 p2p common_conversation_id）+ bot_name 的路径。
+            proactive_message_id = (
+                f"{PROACTIVE_MESSAGE_ID_PREFIX}"
+                f"{uuid.uuid5(uuid.NAMESPACE_OID, f'{send_base}:p2p')}"
+            )
+
+            # proactive context 构建（单独一套，不碰源消息）：意图 + chat_id 历史 →
+            # ChatTurnContext。history 把赤尾自己发过的（含上一条 proactive）认作她自己
+            # 说的（ASSISTANT）、真人认作 USER（见 proactive_context）。
+            turn_ctx = await build_proactive_chat_context(
+                intent=content,
+                persona_id=persona_id,
+                chat_id=target.common_conversation_id,
+                user_id=target.user_id,
+            )
+
+            # 渲染：累出整段文本（render_chat_turn 是 async generator，吐文本片段 +
+            # split marker；主动发是一段完整消息，把片段拼成整段、去掉 split marker）。
+            # **渲染失败 / 超时不回退发 life 原文**（否则原问题复发）。**承重红线（codex
+            # 必改 2）**：真人回复路径下 render 会**吞掉** stream 异常 / content_filter /
+            # length，改 yield persona error / 截断文案（用户在等回复，给一句话比静默
+            # 好）；proactive 复用同一渲染层，但绝不能把「ERR / 遇到了问题 / 截断」当成功
+            # 内容主动发给真人。所以 proactive 显式传 ``on_error="raise"`` —— render 在
+            # 这三种失败下改**抛 RenderFailed** 而非 yield 错误文案，下面 try 兜住、走
+            # 「没发出去」喂回 life。产出为空（极端情况没吐有效内容）也当没发出去，不
+            # 出站一条空消息。
+            try:
+                rendered = ""
+                async for piece in render_chat_turn(
+                    turn_ctx,
+                    outbound_message_id=proactive_message_id,
+                    session_id=None,  # 主动发没有 chat session（不穿 chat 队列）
+                    channel=target.channel,
+                    on_error="raise",  # proactive：渲染失败抛而非 yield 错误文案
+                ):
+                    if piece:
+                        rendered += piece
+            except Exception as exc:  # noqa: BLE001 — 渲染失败不回退发原文
+                logger.warning(
+                    "[life_tools] %s proactive render failed (uid=%s): %s",
+                    persona_id, uid, exc, exc_info=True,
+                )
+                rendered = ""
+
+            rendered = rendered.replace("---split---", "\n\n").strip()
+            if not rendered:
+                # 渲染没产出有效内容 → 不出站（绝不发空消息、更不回退发 life 原文），
+                # 把「没发出去」作为工具结果喂回 life，让她自己处置（重试 / 算了）。
+                raise RuntimeError(
+                    "这条想主动发的消息没能成形（渲染没出内容），没发出去——"
+                    "你可以待会儿再试，或者换个说法。"
+                )
+
+            await emit(
+                ChatResponseSegment(
+                    channel=target.channel,
+                    message_id=proactive_message_id,
+                    persona_id=persona_id,  # 发送者（worker 据它兜底选 bot 身份）
+                    part_index=0,
+                    session_id=None,        # 主动发没有 chat session
+                    chat_id=target.common_conversation_id,  # 真实 p2p 会话地址
+                    is_p2p=True,
+                    root_id=None,           # 主动发没有来源消息，不伪造 root
+                    user_id=target.user_id,
+                    is_proactive=True,      # 复用 worker 既有 is_proactive 出站分支
+                    bot_name=target.bot_name,
+                    lane=lane,              # 必须显式带：sink 不注入 header lane
+                    content=rendered,       # 出站的是**渲染后的人设口径话**，不是意图原文
+                    status="success",
+                    is_last=True,           # 主动发是一段完整消息
+                    full_content=rendered,
+                )
+            )
+            send_seq = next_seq
+            # 诚实返回（codex 必改 2，bezhai 决策）：给真人发是异步的 —— emit 只是把
+            # 出站段入了 chat_response 队列，真正发到飞书是另一进程的 worker 干的。
+            # 入队成功 ≠ 送达成功（worker 可能失败、对方可能没看到）。本刀不做异步
+            # 失败回流，但措辞要诚实：说「已发出（异步送达、不保证送到）」，不说「发到
+            # 了 / 对方收到了」，让 life 知道是发出去了、最终送达异步、可能失败。同步
+            # 可知的失败（UndeliverableRecipient）已在上面 resolve_delivery 处 fail-loud。
+            return "已发出（消息发往 ta 的手机，异步送达、不保证一定送到）"
+
+        # resolver 理论上只返回 MailboxTarget / LarkP2PTarget（其余都 fail-loud 抛
+        # UndeliverableRecipient），走到这里说明出现了未知投递目标类型——不静默吞，
+        # 抛错由 @tool_error 收成 outcome 喂回 life。
+        raise RuntimeError(
+            f"uid={uid!r} 解析出未知的投递目标类型 {type(target).__name__}，发不了。"
+        )
 
     @tool_error("记到本子里失败")
     async def note(
@@ -518,50 +786,99 @@ def build_life_tools(
         )
         return render_notebook(entries, now=observed_at)
 
-    @tool_error("安排下次醒来失败")
-    async def schedule(
-        seconds: Annotated[
-            int,
-            Field(
-                description=(
-                    "多少秒后再醒来过你自己的下一刻，必须在 "
-                    "60～43200 之间（约 1 分钟到 12 小时）"
-                )
-            ),
-        ],
-    ) -> str:
-        """排一下过多久再醒来、接着过你自己的日子。
+    @tool_error("查这件事失败")
+    async def look_up(query: str) -> str:
+        """心里有件具体的事、想知道某个真答案时，带着你想好的问题去网上查一查。
 
-        被起头叫醒后，没有新动静时世界不会再来敲你 —— 想接着往下过（写完这题接着写下
-        一题、收拾完挪去客厅、困了睡一觉到天亮），就用它排好过多久再醒来继续。
+        这是「带着问题去查」的手：你这一刻为某件具体的事需要知道一个信息——明天广州
+        下不下雨该不该带伞、那家餐厅几点关门、某件事到底是怎么回事——就把你**自己想好
+        的那个具体问题**给它，它去网上替你查回来。
 
-        seconds 必须在 60～43200 之间（最短约 1 分钟、防排得太密；最长 12 小时、够你
-        夜里睡一整觉到天亮）。具体睡多久你自己看现在几点定 —— 夜里可以睡久、白天睡短；
-        真有要紧的动静，世界还是会立刻来敲你、把你从长睡里叫醒。超出范围会报错，请改填
-        一个范围内的值重调。不排也行（那就等下一次有动静来敲你）。
+        查回来的是带着出处的真东西（每条有标题、来源链接、关键摘录），不是替你嚼碎的
+        一句话——你看着这些真材料自己反应，知道的就基于它说，别凭空编。要是没查到，
+        它会如实告诉你没查到，那就当真没查到、别硬凑一个答案。
+
+        想长期记住的（比如查到约会那天会下雨、决定带伞），自己记进本子；只是想知道
+        一下、用过就算的，看完反应过就好，不必都记。
+
+        这只手是「带着具体问题求答案」用的；只是没事想随便逛逛、看看有啥新鲜的，那是
+        另一回事（browse_feed），不走这里。也别用 act 假装「我查了下」——act 给不了你
+        真东西，那样「查到的」是你自己编的；真想知道就用这只手，它拿回来的才是真的。
 
         Args:
-            seconds: 多少秒后再醒来继续（60 ≤ seconds ≤ 43200）。
+            query: 你想好的那个具体问题（自然语言，如"广州明天会下雨吗"）。
 
         Returns:
-            一句确认文本。
+            带着来源的搜索结果文本（标题 / 出处 / 关键摘录）；没查到时一句如实说明。
         """
-        if seconds > LIFE_SCHEDULE_MAX_SECONDS:
-            raise ValueError(
-                f"schedule 的 seconds={seconds} 超过上限 {LIFE_SCHEDULE_MAX_SECONDS} 秒。"
-                f"请改填一个 ≤ {LIFE_SCHEDULE_MAX_SECONDS} 的值重调。"
+        result = await search_web.invoke({"query": query})
+        # search_web 没拿到真东西（四种形态：非 str / 两条精确空文案 / "网页搜索失败: ..."
+        # 前缀失败串，见 _search_web_failed_or_empty）→ 如实说没查到，绝不把失败 / 空当
+        # 内容顶上去（spec 决策 4：拿不到真东西就不假装拿到了、不编一个顶上）。承重点：
+        # "网页搜索失败: xxx" 这条变长失败串旧实现漏认会被当真内容包装成"查到这些"。
+        if _search_web_failed_or_empty(result):
+            return f"网上没查到「{query}」的结果，这事就先当查不到、别硬凑答案。"
+        # 拿到带源结果：原样把 search_web 的带源文本（标题 / 出处 / 摘录）送进她当轮
+        # 上下文，**不**再过一道 LLM 把它消化成一段话（承重红线：消化掉就丢了真来源、
+        # 反应又变「一眼假」）。只在前面挂一句她问的问题，让上下文里清楚这批材料是为
+        # 哪个问题查的。
+        return f"为「{query}」查到这些（带出处，自己看真材料）：\n\n{result}"
+
+    @tool_error("刷手机失败")
+    async def browse_feed(direction: str) -> str:
+        """没事想随便逛逛、看看有啥新鲜的时候，掏出手机刷一刷。
+
+        这是「漫无目的逛一圈」的手：你这一刻没有什么非搞清楚不可的具体问题，就是想
+        刷刷看——惦记的那部番更没更、喜欢的那个游戏 / 领域出新消息没、有点无聊想看点
+        搞笑的。把你这会儿**想看的方向**给它就行：方向是你读自己此刻状态 / 心情后自然涌出来的、
+        想往哪边逛的念头（一句大白话，可以很泛，比如"想看点搞笑的""那部番更新没"），
+        不是一个标准检索词、更不用憋出精确关键词。它会拿你这个方向去刷回**一批**带着
+        出处的真东西（多条，像刷出来的一屏 feed），供你一条条往下翻，翻到感兴趣的才停。
+
+        刷你自己感兴趣圈子里的东西——你喜欢的那些、惦记的那些、当下心情想看的那些。
+        时政、社会突发、灾害预警那种世界级大事不归你刷（那是世界自己会让你感知到的），
+        你只管刷你自己的圈子。
+
+        和"带着具体问题去查一个答案"是两回事：心里有件具体的事、想知道某个真答案
+        （明天下不下雨、餐厅几点关），那是另一只手 look_up，不走这里。这只手是没目的
+        地逛、看有啥；那只手是带着问题求答案。也别用 act 假装「我刷了刷手机」——act
+        给不了你真东西，那样「刷到的」是你自己编的；真想刷就用这只手，它给你的才是真的。
+
+        刷回来的是带着出处的真材料（每条有标题、来源链接、关键摘录），不是替你嚼碎的
+        一段话——你自己一条条翻、看到感兴趣的就基于它真实反应。要是这会儿没刷到什么
+        新鲜的，它会如实说没刷到，那就当真没啥可看、别硬编一批顶上。
+
+        刷到想长期留住的（某部番、某个话题），自己记进本子；只是顺手刷过、看完就算的，
+        反应过就好、不必都记。
+
+        Args:
+            direction: 你这会儿想看的方向（自然语言、可以很泛，如"想看点搞笑的"）。
+
+        Returns:
+            一批带着来源的真内容（多条，标题 / 出处 / 摘录）供你浏览；没刷到时一句如实说明。
+        """
+        # 拿她带进来的方向当检索方向去 search_web 捞一批（num 比 look_up 聚焦多，像一条
+        # feed）。**承重红线**：方向原样作 query 传入——工具不替她改写、不写死兴趣标签
+        # 规则、不另起一个 agent 替她猜该看啥（她 life 本身就是懂她的 agent，方向是她读
+        # 自己状态后自然涌出的）。刷什么完全由她带的 direction 决定。
+        result = await search_web.invoke(
+            {"query": direction, "num": _BROWSE_FEED_BATCH}
+        )
+        # search_web 没拿到真东西（四种形态：非 str / 两条精确空文案 / "网页搜索失败: ..."
+        # 前缀失败串，见 _search_web_failed_or_empty）→ 如实说没刷到，绝不把失败 / 空当
+        # 内容编一批顶上（spec 决策 4）。承重点同 look_up："网页搜索失败: xxx" 这条变长
+        # 失败串旧实现漏认会被当真内容包装成"刷到这些"。
+        if _search_web_failed_or_empty(result):
+            return (
+                f"这会儿没刷到「{direction}」方向的新鲜内容，"
+                "就当暂时没啥可看、别硬编一批。"
             )
-        if seconds < LIFE_SCHEDULE_MIN_SECONDS:
-            raise ValueError(
-                f"schedule 的 seconds={seconds} 低于下限 {LIFE_SCHEDULE_MIN_SECONDS} 秒。"
-                f"请改填一个 ≥ {LIFE_SCHEDULE_MIN_SECONDS} 的值重调。"
-            )
-        # 不直接 emit_delayed：一轮内多次 schedule / 多轮 schedule 会各排一条未来 self
-        # 唤醒 → 叠加唤醒风暴。改为只把待办 self-wake 记进 round-scoped slot（覆盖而非
-        # 追加 → 一轮内最后一次为准），由 engine 在循环收口后 emit 至多一条 self
-        # LifeWakeTick（照搬 world sleep 的唤醒风暴命门解）。
-        self_wake["delay_ms"] = seconds * 1000
-        return f"好，{seconds} 秒后再醒来接着过"
+        # 拿到一批带源结果：原样把 search_web 的整批带源文本（每条标题 / 出处 / 摘录）
+        # 送进她当轮上下文供她浏览，**不**再过一道 LLM 把一批消化成一段话（承重红线：
+        # 消化掉就丢了真来源、反应又变「一眼假」，也丢了「一批供她挑选」的味儿）。
+        # 边界（Non-goal）只靠上面 docstring 引导，这里**绝不**对结果做关键词过滤 /
+        # 黑名单拦截（过滤就是工具内替她决策、违宪）。只在前面挂一句她想看的方向。
+        return f"刷「{direction}」刷到这些（带出处，自己往下翻）：\n\n{result}"
 
     # act_tool 的函数名带 _tool 后缀避免遮蔽导入的 handler；工具对模型暴露的 name
     # 要是 "act"，所以显式覆写 Tool.name 与 definition.name。
@@ -570,90 +887,23 @@ def build_life_tools(
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
 
-    # chat（说话）+ 本子三件（note / edit_note / read_notebook）都是基础工具、不依赖
-    # self_wake，与 update / act 并列常驻。
-    tools = [
+    # 全部基础工具常驻：update（更新此刻状态）+ act（做一件影响外部世界的事）+ chat
+    # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 本子
+    # 三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed（没事
+    # 刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**——她退成纯事件反应者、不自排
+    # 下次醒；主动计划走本子里的日程（note 带 remind_at + 到点提醒），不靠空闹钟维持运转。
+    return [
         update_tool,
         act_tool_obj,
         Tool(chat),
+        Tool(look_up_contact),
+        Tool(send_message),
         Tool(note),
         Tool(edit_note),
         Tool(read_notebook),
+        Tool(look_up),
+        Tool(browse_feed),
     ]
-    # self_wake 容器给了才挂 schedule（自排工具）。旧调用方 / 工具契约测试不给，
-    # 就没有 schedule（向后兼容）。
-    if self_wake is not None:
-        tools.append(Tool(schedule))
-    return tools
-
-
-async def fire_life_self_wake(
-    *, lane: str, persona_id: str, self_wake: dict
-) -> bool:
-    """循环收口后 emit 至多一条 self ``LifeWakeTick`` + 落下次该醒时刻（唤醒风暴 + 到点 gate 命门）。
-
-    engine 在 agent 循环跑完后调本函数（对称 world :func:`app.world.tools.fire_self_wake`）。
-    ``self_wake`` 是本轮 round-scoped 待办容器（schedule 写的 ``{"delay_ms": int}``，
-    覆盖而非追加 → 一轮内最后一次为准）。有待办时一次性收口三件事：
-
-      1. 算目标唤醒时刻 = 现实 now + delay（现实 CST aware 时间，不用会因 gate 停滞的
-         任何 world 时钟）。
-      2. 把目标时刻写进 ``LifeState.next_wake_at``（:func:`set_life_next_wake_at`）——
-         她的自排唤醒入口走 gate 时读它判到点。
-      3. emit 唯一一条 self ``LifeWakeTick``，**携带这个目标时刻**（``target_wake_at``）：
-         到期时与 state 当前 next_wake_at 比对判 stale（被新自排 / 外部覆盖即作废）。
-
-    写 state 与 emit 携带同一个 target_iso（相等是 stale 判定的命门）。没调过 schedule
-    （空容器）就不写、不 emit —— 她不自排接力时不会自己醒，靠 world 下一次 notify 起头。
-    返回是否 emit。
-
-    LifeWakeTick 在 life_wake engine 里 import，避免 tools ↔ engine 循环 import。
-    """
-    delay_ms = (self_wake or {}).get("delay_ms")
-    if delay_ms is None:
-        return False
-
-    # 目标唤醒时刻 = 现实 now + delay（现实 CST aware ISO，gate 比较的口径）。
-    target = cst_time.now_cst() + timedelta(milliseconds=delay_ms)
-    target_iso = target.isoformat()
-
-    # 落 next_wake_at（gate 到点判定读它）。写 state 与 emit 携带同一 target_iso：
-    # 相等是 stale 判定命门 —— self 到期时只有携带的目标 == state 当前值才作数。
-    await set_life_next_wake_at(
-        lane=lane, persona_id=persona_id, next_wake_at=target_iso
-    )
-
-    # 延迟唤醒信号在 engine 里 import，避免 tools ↔ engine 循环 import。
-    from app.nodes.life_wake import LifeWakeTick
-
-    # emit_delayed 失败的可观测（必改 4）：life 没保底心跳，publish 失败会留一个未来 wake
-    # state（next_wake_at 已写）但没实际唤醒（机械漏投 → 她不自排醒、链断）。完整恢复
-    # （watchdog）是 Non-goal、后置；这里至少不静默——失败 log warning 带 lane/persona/
-    # target 让 coe 能看到漏投，且不把异常往上炸：本轮的 durable 收口（标已读 / 写快照）
-    # 已落地，不该被一条可选的自排漏投把整轮拖成失败重投（重投会重放 durable 工具）。
-    try:
-        await emit_delayed(
-            LifeWakeTick(
-                lane=lane,
-                persona_id=persona_id,
-                reason="self",
-                target_wake_at=target_iso,
-            ),
-            delay_ms=delay_ms,
-        )
-    except Exception:
-        logger.warning(
-            "[life_tools] %s/%s fire self wake emit_delayed failed "
-            "(target=%s, delay_ms=%d): self wake NOT scheduled this round "
-            "(no heartbeat fallback; relies on world notify to restart)",
-            lane,
-            persona_id,
-            target_iso,
-            delay_ms,
-            exc_info=True,
-        )
-        return False
-    return True
 
 
 async def fire_schedule_reminders(
@@ -661,9 +911,11 @@ async def fire_schedule_reminders(
 ) -> int:
     """循环收口后给本轮排 / 改的每条日程**各 emit 一条** ``ScheduleReminderTick``（日程到点提醒）。
 
-    engine 在 agent 循环跑完后调本函数（与 :func:`fire_life_self_wake` 并列、互不干扰：
-    self-wake 是「她自排下一轮节奏」走 next_wake_at 单槽覆盖；日程到点提醒是**每条日程
-    各挂各的**独立一路，绝不挤进 next_wake_at）。``schedule_reminders`` 是本轮 round-scoped
+    engine 在 agent 循环跑完后调本函数。日程到点提醒是**每条日程各挂各的**独立一路：
+    每条带 remind_at 的日程独立一条 tick、独立 entry_id，互不覆盖、各自能改期 / 取消。
+    日程是她真实生活里有内容的安排（答应明天交作业、打算今晚复习），到点提醒她去做，
+    丢了顶多「她忘了做某事」（真实、可接受的生活后果）——这跟 Task 2 删掉的自设闹钟
+    （空时间点、丢了就睡死）是两回事，日程保留。``schedule_reminders`` 是本轮 round-scoped
     待办容器（note / edit_note 写的 ``{entry_id: remind_at | None}``，覆盖而非追加）：
 
       * 值为 ``remind_at`` 字符串 → emit 一条携带 ``(entry_id, remind_at)`` 的
@@ -677,10 +929,10 @@ async def fire_schedule_reminders(
     （下一轮就提醒，不负、不炸、不漏）。``remind_at`` 脏串解析不出 → 同样夹到 0（不静默
     把这条日程吞掉），gate 那头读 entry 当前状态对账兜底。
 
-    **逐条失败隔离（对称 fire_life_self_wake 的可观测）**：某条 emit 失败 log warning
-    （带 lane/persona/entry/target）、不往上炸、不拖垮其余条目——本轮的 durable 收口
-    （记本子）已落定，不该被一条可选的到点提醒漏挂把整轮拖成失败重投（重投会重放
-    durable 工具）。完整漏投恢复（watchdog）同 self-wake 是 Non-goal、后置。
+    **逐条失败隔离**：某条 emit 失败 log warning（带 lane/persona/entry/target）、不往上
+    炸、不拖垮其余条目——本轮的 durable 收口（记本子）已落定，不该被一条可选的到点提醒
+    漏挂把整轮拖成失败重投（重投会重放 durable 工具）。完整漏投恢复（watchdog）是
+    Non-goal、后置。
 
     返回成功 emit 的条数。``ScheduleReminderTick`` 在 life_wake engine 里 import，避免
     tools ↔ engine 循环 import。

@@ -29,32 +29,47 @@ def test_life_dataflow_wiring_compiles():
     assert graph is not None
 
 
-def test_life_dataflow_wire_count_is_5():
+def test_life_dataflow_wire_count_is_4():
     _fresh_import()
 
     from app.runtime.wire import WIRING_REGISTRY
 
-    # v4 reviewer cron 线全拆（LightDayTick / LightNightTick / HeavyReviewTick
-    # 三条 cron 入口 + LightReviewRequest / HeavyReviewRequest 两条 per-persona
-    # 业务线），只剩 world/life 活线：
+    # world-driven wake：角色的自排执行腿（LifeWakeTick → life_self_wake_node）和
+    # 被否的 life fan-out 定时心跳（LifeHeartbeatTick / LifeHeartbeatSweep）整套拆掉，
+    # 唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。剩下的活线：
     #   world/life event 闭环：WorldHeartbeatTick、WorldTick、EventArrived（3）
-    #   阶段 1B Task 2：LifeWakeTick（life 自排 in-process 回环那条边，1）
     #   备忘录 & 日程 第三块：ScheduleReminderTick（日程到点提醒 in-process 回环，1）
-    #   = 3 + 1 + 1 = 5。
+    #   = 3 + 1 = 4。
     #
-    # ScheduleReminderTick 是日程到点的独立唤醒一路（在 self-wake next_wake_at 旁边新加，
-    # 不动它现有语义）：每条日程各挂各的提醒，到期经这条 in-process 边接回
-    # life_schedule_reminder_node。
+    # ScheduleReminderTick 是日程到点的独立唤醒一路（与本次拆除的 self-wake / 心跳
+    # 无关，notebook 精确日程路径保留）：每条日程各挂各的提醒，到期经这条 in-process
+    # 边接回 life_schedule_reminder_node。
     #
     # pull 范式：ActPerformed 不再有 wire（act 落 PG 不唤醒 world）、ActWorldTick 已删
     # （act→world 60s 合并闸整条链拆掉）。
     types = {w.data_type.__name__ for w in WIRING_REGISTRY}
     expected = {
         "WorldHeartbeatTick", "WorldTick", "EventArrived",
-        "LifeWakeTick", "ScheduleReminderTick",
+        "ScheduleReminderTick",
     }
     assert types == expected
-    assert len(WIRING_REGISTRY) == 5
+    assert len(WIRING_REGISTRY) == 4
+
+
+def test_self_wake_and_heartbeat_wires_gone():
+    """world-driven wake：self 自排腿 + fan-out 心跳整套 wire 不得再有残留。"""
+    _fresh_import()
+
+    from app.runtime.wire import WIRING_REGISTRY
+
+    leftover = [
+        w.data_type.__name__
+        for w in WIRING_REGISTRY
+        if w.data_type.__name__ in (
+            "LifeWakeTick", "LifeHeartbeatTick", "LifeHeartbeatSweep",
+        )
+    ]
+    assert leftover == [], f"self-wake / heartbeat wires still registered: {leftover}"
 
 
 def test_reviewer_wires_gone():

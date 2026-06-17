@@ -118,31 +118,6 @@ async def test_chat_request_not_completed_without_session_id():
             p.stop()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("reply_count", "expected"), [(0, False), (1, True)])
-async def test_proactive_request_completed_by_existing_assistant_reply(
-    reply_count,
-    expected,
-):
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=_ScalarResult(reply_count))
-
-    patches = _patch_session(session)
-    for p in patches:
-        p.start()
-    try:
-        assert (
-            await is_chat_request_completed(
-                "session-1",
-                is_proactive=True,
-            )
-            is expected
-        )
-    finally:
-        for p in patches:
-            p.stop()
-
-
 # === get_safety_status ===
 
 

@@ -4,13 +4,14 @@ event 骨架、world engine（推演者）、life 三姐妹（自主做事）各
 起来世界是死的。这个文件证明拼起来**世界真能动**，且走的是 pull 范式的完整自主循环：
 
   1. world 冷启醒来 → ``update_world(detail)`` 写第一版世界叙述 →
-     ``notify(recipients, observation)`` 把客观动静投给推演指定的角色 → ``sleep``。
+     ``notify(scope, observation)`` 产一条客观动静、标它的客观作用域，由在场匹配
+     （Task 3）按角色客观位置定谁收到 → ``sleep``。
   2. 被 notify 的角色（life）被唤醒 → 读到信箱里的 observation → ``act(description)``
      自主做事 → 收口。``act`` 直接 ``insert_idempotent(ActPerformed)`` 落 PG，**不唤醒
      world**（pull 范式）。
   3. world 按自己 sleep 的节奏（self / 心跳）下次醒来 → 从游标批量 pull 这段时间攒下
      的 act（``list_recent_acts``）→ 在推演里消化、``update_world`` 更新世界叙述 +
-     ``notify`` 该感知到的人 → 收口推进游标到本批末尾。
+     ``notify`` 标作用域、在场匹配投给在场的人 → 收口推进游标到本批末尾。
 
 真 Postgres（testcontainers），只 mock 一处 LLM：``Agent.run``——按 ``cfg.prompt_id``
 把 world / life 两条循环分流，各自在真实 ``agent_context`` 下回放脚本里的工具调用
@@ -21,7 +22,7 @@ world 的 sleep 自排打桩成记录 delay，不连 RabbitMQ。
 pull 范式的命门：
   * 完整自主循环每一棒交接成功；
   * detail 落 durable 且读回续上（world 续接认得上一版世界叙述）；
-  * notify 的 observation 投进推演指定 recipient 的信箱、没投给够不着的人（信息差）；
+  * notify 的 observation 经在场匹配投进在场角色的信箱、没投给够不着的人（信息差）；
   * act 落 PG 不唤醒 world；world 下次自排醒来从游标 pull 到该 act、推完推进游标；
   * 同一批失败重读不重复推演 / 不重复投递（round_id 从本批集合稳定派生 + turn 幂等）；
   * 不卡死：life 处在大状态、新 observation 进信箱、被唤醒能读到并换状态；
@@ -30,6 +31,7 @@ pull 范式的命门：
 
 from __future__ import annotations
 
+import json as _json
 from datetime import UTC, datetime, timedelta
 
 import fakeredis.aioredis
@@ -72,8 +74,18 @@ def _update_world(detail: str) -> tuple[str, dict]:
     return ("update_world", {"detail": detail})
 
 
+# Task 3：notify 不再由 world 主观挑 recipients——它标客观作用域、由在场匹配（一道
+# LLM 判断）按角色客观位置决定谁收到。集成测试里 LLM 不可用，所以 ``_stub_presence_
+# match`` 把 ``match_present_personas`` 打桩成「从 scope 里读出本测试想要的收件人」。
+# ``_notify`` 仍以 recipients 为作者便利入参，但把它编进 scope 字符串（JSON，测试约定），
+# 由打桩的在场匹配解出来——这样既走真实的「标作用域 + 调在场匹配 + 按结果投递」路径，
+# 又让每个测试能确定性控制「这条动静该到谁手里」。
+_PRESENCE_SCOPE_PREFIX = "[present:"
+
+
 def _notify(recipients: list[str], observation: str) -> tuple[str, dict]:
-    return ("notify", {"recipients": recipients, "observation": observation})
+    scope = f"{_PRESENCE_SCOPE_PREFIX}{_json.dumps(recipients)}]{observation}"
+    return ("notify", {"scope": scope, "observation": observation})
 
 
 def _sense(recipient: str, surroundings: str) -> tuple[str, dict]:
@@ -236,6 +248,55 @@ def _agent_run(monkeypatch):
 
     monkeypatch.setattr(engine_mod.Agent, "run", fake_run)
     return ctl
+
+
+@pytest.fixture(autouse=True)
+def _stub_persona_roster(monkeypatch):
+    """world 每轮读三姐妹此刻状态（world-driven wake）会先 list_all_persona_ids —— 它
+    查 SQLAlchemy 的 bot_persona 表，闭环 world_db 没建这张表（它是 Base 模型、不走
+    runtime migrate）。这里 stub 成三姐妹名单（akao / chinagi / ayana），让 world 真去
+    读她们各自插进真库的 LifeState（find_life_state 不打桩、走真库），闭环里世界看见
+    意愿这条路真生效。"""
+    async def fake_list_all_persona_ids():
+        return ["akao", "chinagi", "ayana"]
+
+    monkeypatch.setattr(
+        engine_mod, "list_all_persona_ids", fake_list_all_persona_ids
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_presence_match(monkeypatch):
+    """notify 的在场匹配（Task 3）打桩：从 scope 里读出本测试想要的收件人.
+
+    真实 notify 走「读各角色 current_state → match_present_personas（LLM）→ 投在场角色」。
+    集成里 LLM 不可用，所以：
+
+      * ``tools_mod.list_all_persona_ids``：notify 的 ``_current_persona_locations``
+        用它列候选——查 SQLAlchemy bot_persona 表（闭环没建），桩成三姐妹。
+      * ``tools_mod.match_present_personas``：从 scope 的 ``[present:[...]]`` 前缀解出
+        ``_notify`` 编进去的收件人；只返真候选里的（对齐真实候选过滤）。直接用真实
+        world 工具投递的测试（scope 不带前缀）则默认返全部有位置的候选。
+
+    这样测试照旧用 recipients 控制「谁收到」，但代码真的走了在场匹配那条路径。
+    """
+    async def fake_list_all_persona_ids():
+        return ["akao", "chinagi", "ayana"]
+
+    async def fake_match_present_personas(
+        *, scope, persona_locations, trace_session_id=None
+    ):
+        if scope.startswith(_PRESENCE_SCOPE_PREFIX):
+            encoded = scope[len(_PRESENCE_SCOPE_PREFIX):].split("]", 1)[0]
+            wanted = _json.loads(encoded)
+            return [p for p in wanted if p in persona_locations]
+        # 无前缀（直接 invoke 真实 notify 的测试）：默认全部有位置的候选在场。
+        return list(persona_locations)
+
+    monkeypatch.setattr(tools_mod, "list_all_persona_ids", fake_list_all_persona_ids)
+    monkeypatch.setattr(
+        tools_mod, "match_present_personas", fake_match_present_personas
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -435,8 +496,10 @@ async def test_full_closed_loop_world_to_life_to_world(
 
 
 @pytest.mark.integration
-async def test_info_gap_notify_only_reaches_recipients(world_db, _agent_run, monkeypatch):
-    """信息差：notify 只投给 world 推演指定的 recipients；够不着的姐妹信箱空."""
+async def test_info_gap_notify_only_reaches_present_personas(
+    world_db, _agent_run, monkeypatch
+):
+    """信息差：notify 标作用域、在场匹配只投给在场的角色；够不着的姐妹信箱空."""
     lane = "coe-gap"
     _world_llm(
         _agent_run,
@@ -451,7 +514,7 @@ async def test_info_gap_notify_only_reaches_recipients(world_db, _agent_run, mon
 
     await world_tick(WorldTick(lane=lane, reason="heartbeat"))
 
-    # chinagi 被推演为够得着 → 收到；akao 没在 recipients 里 → 收不到
+    # chinagi 被在场匹配判为够得着 → 收到；akao 不在场 → 收不到
     chinagi_unread = await list_unread_events(lane=lane, persona_id="chinagi")
     akao_unread = await list_unread_events(lane=lane, persona_id="akao")
     assert [e.summary for e in chinagi_unread] == ["厨房飘来煎蛋的香味"]
@@ -621,7 +684,10 @@ async def test_world_never_reads_chat_original_speech_end_to_end(
             }
         )
         with agent_context(wctx):
-            await notify.invoke({"recipients": ["akao"], "observation": observation})
+            # Task 3：notify 标作用域、由在场匹配定收件人；scope 的 [present:[...]] 前缀
+            # 被 _stub_presence_match 解成想要的收件人（这里 akao）。
+            scope = f"{_PRESENCE_SCOPE_PREFIX}{_json.dumps(['akao'])}]{observation}"
+            await notify.invoke({"scope": scope, "observation": observation})
 
     await _notify_akao("厨房飘来做饭的香味")
 
@@ -1050,7 +1116,10 @@ async def test_life_session_continuation_second_round_carries_history(
             }
         )
         with agent_context(wctx):
-            await notify.invoke({"recipients": [persona], "observation": observation})
+            # Task 3：notify 标作用域、由在场匹配定收件人；scope 的 [present:[...]] 前缀
+            # 被 _stub_presence_match 解成想要的收件人（这里 persona）。
+            scope = f"{_PRESENCE_SCOPE_PREFIX}{_json.dumps([persona])}]{observation}"
+            await notify.invoke({"scope": scope, "observation": observation})
 
     await _notify_akao("第一轮的动静")
 
@@ -1117,7 +1186,10 @@ async def test_life_cd_delays_without_dropping_observations(
             }
         )
         with agent_context(wctx):
-            await notify.invoke({"recipients": [persona], "observation": observation})
+            # Task 3：notify 标作用域、由在场匹配定收件人；scope 的 [present:[...]] 前缀
+            # 被 _stub_presence_match 解成想要的收件人（这里 persona）。
+            scope = f"{_PRESENCE_SCOPE_PREFIX}{_json.dumps([persona])}]{observation}"
+            await notify.invoke({"scope": scope, "observation": observation})
 
     # 第一轮：跑完落 cd key
     await _notify_akao("第一波动静")

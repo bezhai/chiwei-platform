@@ -7,7 +7,13 @@ Sections, in order:
      day/week clock — stable-prefix before the per-message scene and the
      hour-level life snapshot (prompt-cache friendly). Cold chain / read
      failure → the section is simply absent, no placeholder.
-  2. Scene (p2p / group / proactive) — who she's talking to, why.
+  2. Scene — two orthogonal dimensions, each labeled (spec decision 7):
+     communication medium (Feishu p2p / group — she is typing over Feishu,
+     never face-to-face) and physical presence (her real here-and-now scene
+     is carried by the life snapshot below; the chat peer is on the other
+     end of Feishu, not beside her). Never collapsed into one "current
+     occasion" label — collapsing them is the root of "treating Feishu as
+     face-to-face".
   3. Relationship page (only when it exists) — her own bedtime-review page
      about the person she's talking to (trigger_user_id, p2p and group
      alike). No trigger user / no page / read failure → absent, no
@@ -181,28 +187,56 @@ async def _build_notebook_section(persona_id: str) -> str:
     return f"{_NOTEBOOK_HEADER}（你自己记下、还没标做了 / 划掉的）：\n{body}"
 
 
+# 两个正交维度的段标头（spec 决策 7：物理在场 / 通信介质各自标清，绝不压成一个
+# 「当前场合」标签——混成一个字段正是「把飞书当当面」的根）。机制层框架文案、零剧情
+# 事实（同 arc / 页透传的宪法）。
+_MEDIUM_HEADER = "【通信介质】"
+_PRESENCE_HEADER = "【物理在场】"
+
+# 物理在场维度的固定提示：聊天对象隔着飞书在另一端、**不在她身边**，她此刻真正所处
+# 的物理场景由下面的人生快照（LifeState）承载。这条治「把聊天对象当成在身边」的混淆。
+_PRESENCE_HINT = (
+    f"{_PRESENCE_HEADER}你此刻真正所处的场景、身边有谁，看下面你自己的此刻状态。"
+    "正在和你打字的人隔着飞书在另一端，不在你身边。"
+)
+
+
 def _scene_section(
     chat_type: str,
     chat_name: str,
     trigger_username: str | None,
-    is_proactive: bool,
-    proactive_stimulus: str,
 ) -> str:
-    if is_proactive:
-        scene = f"你在群聊「{chat_name}」中。" if chat_name else ""
-        scene += "\n你刚刷到了群里的对话。如果你想说点什么就说，不想说也可以不说。"
-        scene += "\n不要刻意解释为什么突然说话，像朋友在群里自然接话就好。"
-        if proactive_stimulus:
-            scene += f"\n（你注意到的：{proactive_stimulus}）"
-        return scene
+    """把这次交流的两个正交维度分别标清（spec 决策 7）：通信介质 + 物理在场。
+
+    **通信介质**：她正通过什么跟谁打字——飞书私聊 / 飞书群聊。chat 触发永远是隔着
+    飞书打字、**不是当面**，这条标清治「把飞书群聊 / 私聊当成当面」的混淆。
+    **物理在场**：她此刻真正所处的物理场景由人生快照（下面的 LifeState）承载，聊天
+    对象在飞书另一端、不在她身边——两维度不压成一个「当前场合」标签。
+    """
+    medium_parts: list[str] = []
     if chat_type == "p2p":
-        return f"你正在和 {trigger_username} 私聊。" if trigger_username else ""
-    parts = []
-    if chat_name:
-        parts.append(f"你在群聊「{chat_name}」中。")
-    if trigger_username:
-        parts.append(f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。")
-    return "\n".join(parts)
+        if trigger_username:
+            medium_parts.append(
+                f"{_MEDIUM_HEADER}你正通过飞书私聊和 {trigger_username} 打字"
+                "（隔着飞书，不是当面）。"
+            )
+    else:
+        if chat_name:
+            medium_parts.append(
+                f"{_MEDIUM_HEADER}你正在飞书群聊「{chat_name}」里打字"
+                "（隔着飞书，不是当面）。"
+            )
+        if trigger_username:
+            medium_parts.append(
+                f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
+            )
+
+    # 没有可标的通信介质（无对方名 / 无群名）时整段缺席——不硬塞物理在场提示
+    # （它依附于「有一次交流」这个前提）。
+    if not medium_parts:
+        return ""
+
+    return "\n".join(medium_parts) + "\n" + _PRESENCE_HINT
 
 
 async def build_inner_context(
@@ -213,12 +247,14 @@ async def build_inner_context(
     trigger_username: str | None,
     persona_id: str,
     chat_name: str = "",
-    *,
-    is_proactive: bool = False,
-    proactive_stimulus: str = "",
 ) -> str:
     """Assemble inner_context: arc (when present) + scene + her pages (when
-    present) + life snapshot."""
+    present) + life snapshot.
+
+    The scene now spells out two orthogonal dimensions (spec decision 7):
+    communication medium (Feishu p2p / group — never face-to-face) and
+    physical presence (carried by the life snapshot below), so chat stops
+    conflating "typing over Feishu" with "being in the same room"."""
 
     sections: list[str] = []
 
@@ -231,9 +267,9 @@ async def build_inner_context(
     if arc_awareness:
         sections.append(arc_awareness)
 
-    scene = _scene_section(
-        chat_type, chat_name, trigger_username, is_proactive, proactive_stimulus
-    )
+    # 场景段标清两个正交维度（通信介质 + 物理在场，spec 决策 7）：物理在场指向下面的
+    # 人生快照（她此刻真正在哪），通信介质标明这次是隔着飞书私聊 / 群聊打字、不是当面。
+    scene = _scene_section(chat_type, chat_name, trigger_username)
     if scene:
         sections.append(scene)
 

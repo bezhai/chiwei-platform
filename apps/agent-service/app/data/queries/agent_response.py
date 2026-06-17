@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import func, text
-from sqlalchemy.future import select
+from sqlalchemy import text
 from uuid6 import uuid7
 
-from app.data.models import CommonMessage
 from app.runtime.db import auto_tx, current_session
 
 __all__ = [
@@ -68,25 +66,12 @@ async def set_agent_response_bot(
         )
 
 
-async def is_chat_request_completed(
-    session_id: str | None,
-    *,
-    is_proactive: bool = False,
-) -> bool:
+async def is_chat_request_completed(session_id: str | None) -> bool:
     """Return whether a chat_request redelivery should be treated as done."""
     if not session_id:
         return False
 
     async with auto_tx():
-        if is_proactive:
-            result = await current_session().execute(
-                select(func.count())
-                .select_from(CommonMessage)
-                .where(CommonMessage.response_id == session_id)
-                .where(CommonMessage.role == "assistant")
-            )
-            return (result.scalar_one() or 0) > 0
-
         result = await current_session().execute(
             text("SELECT status FROM common_agent_response WHERE session_id = :sid"),
             {"sid": session_id},

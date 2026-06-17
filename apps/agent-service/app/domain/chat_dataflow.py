@@ -12,6 +12,14 @@ from pydantic import Field
 
 from app.runtime import Data, Key
 
+# 主动发（life send_message → 真人飞书私聊）出站段 message_id 的命名空间前缀。
+# 主动发没有来源消息，message_id 不能是指向真实来源消息的 id（worker 会反查炸）。
+# 用这个前缀派生一个本地键，标记「这是主动发、worker 别反查来源消息」；worker 的
+# is_proactive 分支据 is_proactive 走不反查的路径，这个前缀只是让 message_id 在语义
+# 上明确「非来源消息 id」。单一定义处（宪法「禁止重复定义」），write 端（life_tools
+# 派生）与读端（本模块 Data 契约文档 / 测试）都从这里取。
+PROACTIVE_MESSAGE_ID_PREFIX = "proactive:"
+
 
 class ChatTrigger(Data):
     """mq(chat_request) 入口原始 body。
@@ -74,6 +82,18 @@ class ChatResponseSegment(Data):
     lane 必须显式带在 body —— sink dispatch 不注入 header lane，
     chat-response-worker 直接读 payload.lane 路由飞书回复。
     transient=True：段是事件流，不落 agent-service 自己的表。
+
+    两类来源对 ``message_id`` 的契约不同：
+
+      * **被动回复**（chat_node 回飞书来的消息）：``message_id`` 是触发这次回复的
+        真实来源 ``common_message_id``，worker 据它反查渠道裸消息地址做 reply。
+      * **主动发**（life ``send_message`` 给真人飞书私聊，``is_proactive=True``）：
+        **没有来源消息**，所以 ``message_id`` **绝不是**指向任何真实来源消息的 id ——
+        它是带 ``proactive:`` 命名空间前缀的本地派生键（:data:`PROACTIVE_MESSAGE_ID_PREFIX`，
+        从发送者本轮 act_id + 序号派生、整轮重投稳定），``root_id`` 留空。worker 的
+        主动发分支据 ``is_proactive`` **不反查来源消息**、直接用 ``chat_id``
+        （= 真实 p2p ``common_conversation_id``）+ ``bot_name`` 投递（不靠伪 id，
+        见 chat-response-worker 的 is_proactive 出站路径 / task 4）。
     """
     channel: str = "lark"
     message_id: Annotated[str, Key] = ""

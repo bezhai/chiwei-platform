@@ -1,7 +1,7 @@
 """LLM message list builders for chat (private to chat/).
 
-Extracted from chat/context.py per Phase 6 v4 §3.1: keep build_chat_context
-orchestrator slim by moving message-shape construction into a focused module.
+Extracted from chat/context.py per Phase 6 v4 §3.1: keep the human-chat context
+builder slim by moving message-shape construction into a focused module.
 """
 from __future__ import annotations
 

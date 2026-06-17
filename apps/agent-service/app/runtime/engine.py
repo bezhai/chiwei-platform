@@ -80,6 +80,12 @@ class Runtime:
         self._source_error: BaseException | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._outbox_dispatcher_task: asyncio.Task | None = None
+        # Fire-and-forget emit tasks spawned by cron / interval source loops.
+        # The time-advancing loop投出心跳即进下一拍、绝不同步等下游——下游一轮挂
+        # 死不能堵停后续心跳（world 永睡的真机机制）。每条 emit 跑在独立后台
+        # task 里，自带 try-except 记录异常（不静默吞、不留 "Task exception was
+        # never retrieved"），并被 stop_source_loops 取消、防止跨 Runtime 重启泄漏。
+        self._fire_and_forget_emits: set[asyncio.Task] = set()
 
     async def migrate_schema(self) -> None:
         """Read live schema from PostgreSQL, diff against ``DATA_REGISTRY``,
@@ -243,6 +249,51 @@ class Runtime:
         if self._stop_event is not None:
             self._stop_event.set()
 
+    def _spawn_fire_and_forget_emit(self, name: str, make_coro) -> None:
+        """Run one tick's ``emit()`` as a tracked background task.
+
+        ``make_coro`` is a zero-arg factory returning the ``emit`` coroutine
+        (not the coroutine itself). The coroutine is only instantiated inside
+        ``_runner`` right before it's awaited — so a tick that races a
+        cancellation never leaves a created-but-unawaited coroutine ("coroutine
+        was never awaited" warning).
+
+        This is the存活地基: the time-advancing source loop must投出心跳即返回、
+        绝不同步 ``await`` 下游。一轮下游（world 推演）挂死 / 超时不能堵停后续
+        心跳——这正是真机 coe 实测世界睡死的机制（同步 ``await emit`` 被一轮卡
+        死的 LLM 永久堵住）。所以每拍把 emit 甩进独立后台 task 立刻进下一拍。
+
+        正确性两点（不是裸 ``create_task(emit(...))``）：
+          1. **异常不丢**：runner 包 try-except，下游抛异常时 ``log.exception``
+             记录而非静默丢失（裸 task 会触发 "Task exception was never
+             retrieved" 警告且异常被 GC 吞）。下游 emit 异常不是 fatal——单拍失
+             败下一拍照常（对齐旧同步路径 §4.1 "emit 抛 Exception = log + 继续
+             下一 tick"）。
+          2. **不泄漏**：task 登记进 ``_fire_and_forget_emits``，``stop_source_
+             loops`` 取消所有未完成的，避免挂死的 emit 跨 Runtime 重启 / 测试
+             泄漏成 "Task was destroyed but it is pending"。
+        防重入（同 key 下游并发叠加烧钱）由下游节点自身的 single-flight 锁挡
+        （world_tick 的 ``single_flight(f"world:{lane}")``）——fire-and-forget 不
+        改这层：第二拍的 emit 仍流经下游、仍撞锁、仍丢弃，不会真的并发推演。
+        """
+
+        async def _runner() -> None:
+            try:
+                await make_coro()
+            except asyncio.CancelledError:
+                raise
+            except Exception as emit_exc:
+                logger.exception(
+                    "runtime: source %s fire-and-forget emit() raised %r; "
+                    "dropping this tick's downstream and continuing",
+                    name,
+                    emit_exc,
+                )
+
+        task = asyncio.ensure_future(_runner())
+        self._fire_and_forget_emits.add(task)
+        task.add_done_callback(self._fire_and_forget_emits.discard)
+
     async def start_source_loops(self) -> None:
         """Start cron / interval / mq source loops for nodes bound to this app.
 
@@ -339,7 +390,15 @@ class Runtime:
             t.cancel()
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
-        for t in [*self._source_tasks, self._watchdog_task]:
+        # Cancel any in-flight fire-and-forget emit tasks too. A downstream
+        # round that's still hung (the whole reason we don't await it) would
+        # otherwise leak into the next process instance / test as a "Task was
+        # destroyed but it is pending" warning. Snapshot first because each
+        # task's done-callback mutates the set.
+        fire_and_forget = list(self._fire_and_forget_emits)
+        for t in fire_and_forget:
+            t.cancel()
+        for t in [*self._source_tasks, self._watchdog_task, *fire_and_forget]:
             if t is None:
                 continue
             try:
@@ -352,6 +411,7 @@ class Runtime:
                 # 单个任务退出态报错不影响后续任务清理，记一条 warning 即可.
                 logger.warning("runtime: task %s exited with %r", t.get_name(), e)
         self._source_tasks.clear()
+        self._fire_and_forget_emits.clear()
         self._watchdog_task = None
         self._stop_event = None
         cancel_all_scheduled()
@@ -413,24 +473,20 @@ class Runtime:
                     await asyncio.sleep(delay)
                 payload = self._build_payload(w, next_ts)
                 trace_id = f"cron:{expr_slug}:{uuid.uuid4().hex[:8]}"
-                # contract §4.1: emit() 抛 Exception = log + 继续下一 tick.
-                # 错过一次 tick 不应该是 fatal——业务/wire/consumer 的故障由
-                # wire on_error / durable retry 等下游策略决定，不在 source loop
-                # 抬给 watchdog。infra 故障（croniter 配置 / 时钟 setup / payload
-                # build 等非 emit 路径）仍传播到外层 try → _record_source_error。
-                try:
+                # fire-and-forget（同 interval 心跳）：cron 也是时间推进循环，投出
+                # 本 tick 即算下一个 cron 时刻、绝不同步等下游。一轮下游挂死 / 超
+                # 时（如 day_review LLM 不返回）不能堵停后续 cron tick。emit 在后
+                # 台 task 里跑、自带异常记录（见 _spawn_fire_and_forget_emit）。
+                # 非 emit 路径（croniter 配置 / payload build / 时钟 setup）仍走外
+                # 层 try → _record_source_error → watchdog kill pod。
+
+                async def _emit_with_context(
+                    payload=payload, trace_id=trace_id
+                ) -> None:
                     async with bind_context(Context(trace_id=trace_id, lane=None)):
                         await emit(payload)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as emit_exc:
-                    logger.exception(
-                        "runtime: cron source %s emit() raised %r; "
-                        "skipping this tick and continuing",
-                        name,
-                        emit_exc,
-                    )
-                    continue
+
+                self._spawn_fire_and_forget_emit(name, _emit_with_context)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -472,22 +528,19 @@ class Runtime:
                 next_fire += seconds
                 payload = self._build_payload(w, ts)
                 trace_id = f"interval:{seconds}s:{uuid.uuid4().hex[:8]}"
-                # contract §4.1: emit() 抛 Exception = log + 继续下一 tick.
-                # 见 _source_loop_cron 同段注释。next_fire 已在 emit 前 += seconds,
-                # 即使本 tick emit 失败，下一 tick 的调度时间不会因失败被打乱。
-                try:
+                # 保底心跳 = fire-and-forget：投出本拍即进下一拍循环、绝不同步
+                # 等下游。一轮下游（world 推演）挂死 / 超时都不堵停后续心跳
+                # （world 永睡的真机机制）。next_fire 已在 emit 前 += seconds，
+                # 下一拍调度时刻不受本拍下游耗时影响。emit 在后台 task 里跑、
+                # 自带异常记录（见 _spawn_fire_and_forget_emit）。
+
+                async def _emit_with_context(
+                    payload=payload, trace_id=trace_id
+                ) -> None:
                     async with bind_context(Context(trace_id=trace_id, lane=None)):
                         await emit(payload)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as emit_exc:
-                    logger.exception(
-                        "runtime: interval source %s emit() raised %r; "
-                        "skipping this tick and continuing",
-                        name,
-                        emit_exc,
-                    )
-                    continue
+
+                self._spawn_fire_and_forget_emit(name, _emit_with_context)
         except asyncio.CancelledError:
             raise
         except Exception as e:

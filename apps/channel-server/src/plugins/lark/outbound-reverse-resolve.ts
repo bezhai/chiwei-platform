@@ -30,6 +30,24 @@ export async function resolveLarkMessageRef(commonMessageId: string): Promise<st
     return msg.om_id;
 }
 
+// 会话独立反查：common_conversation_id → 飞书裸 chat_id，绝不碰 lark_message。
+// 主动发（is_proactive）没有来源消息，只能拿真实会话 id 解析投递地址；用完整
+// reverseResolveOutbound 会去查 lark_message（伪 proactive: id 必 miss、抛错）。
+// 查不到 fail-loud，绝不静默把主动发的消息送到错地方。
+export async function resolveLarkConversationRef(
+    commonConversationId: string,
+): Promise<{ channelId: string }> {
+    const chat = await AppDataSource.getRepository(LarkBaseChatInfo).findOne({
+        where: { common_conversation_id: commonConversationId },
+    });
+    if (!chat) {
+        throw new Error(
+            `lark outbound cannot resolve common_conversation_id=${commonConversationId}`,
+        );
+    }
+    return { channelId: chat.chat_id };
+}
+
 export async function reverseResolveOutbound(
     input: ReverseResolveOutboundInput,
 ): Promise<OutboundChannelRefs> {

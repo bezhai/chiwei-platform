@@ -1,11 +1,21 @@
-"""Chat context builder — assemble LLM messages from DB history.
+"""Human-chat context builder — the source-message half of a real-person turn.
 
-Responsibilities (orchestrator):
-  - Fetch recent history via quick_search
-  - Detect proactive scan messages and extract stimulus
-  - Delegate image collection to _context_images.collect_images
-  - Delegate message-shape construction to _context_messages.build_*
-  - Emit CommonMessageContentSynced for any new TOS files
+This is the **what** half of a real-person chat turn (decision 2 in the
+proactive-chat spec): given a source ``message_id``, assemble everything the
+shared render layer needs and pack it into a :class:`~app.chat.render.ChatTurnContext`.
+
+It **owns all source-message-dependent work**, and only that:
+  - fetch recent history via ``quick_search`` (keyed on the source message_id)
+  - collect images, persist new TOS files, register them
+  - derive trigger info (who / which chat) from the history tail
+  - build the group / p2p LLM message shapes
+  - resolve the persona bundle (identity / appearance / persona object)
+  - assemble ``inner_context`` (scene + life state + pages) for this turn
+
+The render layer (``app.chat.render.render_chat_turn``) takes the result and
+never touches a source message. The life/proactive path (task 2) is a *separate*
+context builder producing the same ``ChatTurnContext`` shape — it does not reuse
+this one (its inputs are a life intent + chat_id history, no source message).
 
 Image pipeline:
   1. feishu image_key -> process_image -> TOS URL
@@ -19,95 +29,45 @@ Sub-modules (private to chat/):
 
 from __future__ import annotations
 
-import contextvars
 import logging
-from dataclasses import dataclass
+import time
 
-from app.agent.neutral import Message
+from app.api.middleware import CHAT_PIPELINE_DURATION
 from app.chat._context_images import collect_images
 from app.chat._context_messages import build_group_messages, build_p2p_messages
-from app.chat.content_parser import parse_content
-from app.chat.quick_search import PROACTIVE_USER_ID, quick_search
+from app.chat.quick_search import quick_search
+from app.chat.render import ChatTurnContext
 from app.domain.chat_events import CommonMessageContentSynced
 from app.infra.image import ImageRegistry
+from app.memory._persona import load_persona
+from app.memory.context import build_inner_context
 from app.runtime import emit
 
 logger = logging.getLogger(__name__)
 
-# PROACTIVE_USER_ID re-exported from quick_search (its leaf home) — callers
-# and tests still do ``from app.chat.context import PROACTIVE_USER_ID``.
-_ = PROACTIVE_USER_ID
 
-# ContextVars for proactive scan state (read by pipeline.py)
-is_proactive_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "is_proactive", default=False
-)
-proactive_stimulus_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "proactive_stimulus", default=""
-)
-
-
-@dataclass
-class ChatContext:
-    """Assembled chat context returned by ``build_chat_context``."""
-
-    messages: list[Message]
-    image_registry: ImageRegistry | None
-    chat_id: str
-    trigger_username: str
-    chat_type: str
-    trigger_user_id: str
-    chat_name: str
-    chain_user_ids: list[str]
-
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-
-async def build_chat_context(
+async def build_human_chat_context(
     message_id: str,
-    current_persona_id: str = "",
+    *,
+    persona_id: str,
     limit: int = 10,
-) -> ChatContext:
-    """Build full chat context for the main agent.
+) -> ChatTurnContext | None:
+    """Build a render-ready context for a real-person chat turn.
 
-    Returns a ``ChatContext`` dataclass with all fields the pipeline needs.
+    Returns a :class:`ChatTurnContext` packed with the LLM messages, image
+    registry, chat address, resolved persona bundle, and assembled inner_context.
+    Returns ``None`` when the source message resolves to no history — the caller
+    treats that as "message not found" and emits the not-found segment.
     """
-    # Reset ContextVars before any early return to prevent stale values
-    is_proactive_var.set(False)
-    proactive_stimulus_var.set("")
-
+    t_build_start = time.monotonic()
     l1_results = await quick_search(message_id=message_id, limit=limit)
 
     if not l1_results:
         logger.warning("No results found for message_id: %s", message_id)
-        return ChatContext([], None, "", "", "p2p", "", "", [])
+        return None
 
     chat_type = l1_results[-1].chat_type or "p2p"
-
-    current_msg = next((m for m in l1_results if m.message_id == message_id), None)
-    is_proactive = bool(current_msg and current_msg.user_id == PROACTIVE_USER_ID)
-    proactive_stimulus = ""
-    proactive_target_id = ""
-
-    # Synthetic proactive triggers are internal bookkeeping and should never
-    # appear in the visible chat history, regardless of the current trigger type.
-    l1_results = [m for m in l1_results if m.user_id != PROACTIVE_USER_ID]
-
-    if is_proactive:
-        if not current_msg:
-            logger.warning("proactive trigger missing from quick_search: %s", message_id)
-            return ChatContext([], None, "", "", "group", "", "", [])
-        proactive_stimulus = parse_content(current_msg.content).render()
-        proactive_target_id = current_msg.reply_message_id or ""
-        if not l1_results:
-            logger.warning("proactive scan: no real messages after filtering")
-            return ChatContext([], None, "", "", "group", "", "", [])
-
-    is_proactive_var.set(is_proactive)
-    proactive_stimulus_var.set(proactive_stimulus)
+    chat_id = l1_results[0].chat_id or ""
 
     # --- Image processing ---
     image_key_to_url, image_key_to_file = await collect_images(l1_results, chat_type)
@@ -134,30 +94,21 @@ async def build_chat_context(
             image_key_to_filename[key] = filename
 
     # Trigger info
-    if is_proactive:
-        trigger_username = ""
-        trigger_user_id = ""
-        chat_name = l1_results[-1].chat_name or "" if l1_results else ""
-        effective_trigger_id = proactive_target_id or (
-            l1_results[-1].message_id if l1_results else message_id
-        )
-    else:
-        trigger_username = l1_results[-1].username or ""
-        trigger_user_id = l1_results[-1].user_id or ""
-        chat_name = l1_results[-1].chat_name or ""
-        effective_trigger_id = message_id
+    trigger_username = l1_results[-1].username or ""
+    trigger_user_id = l1_results[-1].user_id or ""
+    chat_name = l1_results[-1].chat_name or ""
 
     # Build messages
     if chat_type == "group":
         messages = build_group_messages(
-            l1_results, effective_trigger_id, image_key_to_url, image_key_to_filename
+            l1_results, message_id, image_key_to_url, image_key_to_filename
         )
     else:
         messages = build_p2p_messages(
             l1_results,
             image_key_to_url,
             image_key_to_filename,
-            current_persona_id=current_persona_id,
+            current_persona_id=persona_id,
         )
 
     chain_user_ids = list(
@@ -166,13 +117,39 @@ async def build_chat_context(
         )
     )
 
-    return ChatContext(
+    # Resolve persona bundle (identity + appearance + the persona object for
+    # error messages). chat_node always supplies a non-empty persona_id, so this
+    # is a direct load — the render layer never re-loads persona.
+    persona = await load_persona(persona_id)
+
+    # Assemble inner_context (scene + life state + relationship/day pages +
+    # notebook). A failure here must not collapse the turn — fall back to "" and
+    # let the render layer run with a thinner prompt.
+    inner_context = ""
+    try:
+        inner_context = await build_inner_context(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_ids=chain_user_ids,
+            trigger_user_id=trigger_user_id,
+            trigger_username=trigger_username,
+            chat_name=chat_name,
+            persona_id=persona_id,
+        )
+    except Exception as e:
+        logger.error("Failed to build inner context: %s", e)
+
+    CHAT_PIPELINE_DURATION.labels(stage="context_build").observe(
+        time.monotonic() - t_build_start
+    )
+
+    return ChatTurnContext(
         messages=messages,
         image_registry=registry,
-        chat_id=l1_results[0].chat_id or "",
-        trigger_username=trigger_username,
-        chat_type=chat_type,
-        trigger_user_id=trigger_user_id,
-        chat_name=chat_name,
-        chain_user_ids=chain_user_ids,
+        chat_id=chat_id,
+        persona_id=persona_id,
+        identity=persona.persona_lite,
+        appearance=persona.appearance_detail,
+        inner_context=inner_context,
+        persona=persona,
     )

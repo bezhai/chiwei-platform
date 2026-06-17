@@ -70,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat + 本子三件（都是常驻基础工具）。"""
+    """不给 self_wake 时工具集是 update_life_state + act + chat + look_up_contact + send_message + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -82,9 +82,13 @@ def test_build_life_tools_returns_base_tools():
         "update_life_state",
         "act",
         "chat",
+        "look_up_contact",
+        "send_message",
         "note",
         "edit_note",
         "read_notebook",
+        "look_up",
+        "browse_feed",
     }
     for t in tools:
         assert isinstance(t, Tool)
@@ -422,152 +426,6 @@ def test_act_description_guides_toward_low_action():
 
 
 # ---------------------------------------------------------------------------
-# schedule —— life 自排工具（阶段 1B Task 2，照搬 world sleep 的 round-scoped 覆盖）。
-# ---------------------------------------------------------------------------
-
-
-def test_build_life_tools_includes_schedule_when_slot_given():
-    """传 self_wake 容器时多一件 schedule（base 工具 + 本子三件 + schedule）。"""
-    slot: dict = {}
-    tools = lt.build_life_tools(
-        lane="coe-t3",
-        persona_id="akao",
-        act_id="a-1",
-        observed_at="2026-06-03T12:30:00+00:00",
-        self_wake=slot,
-    )
-    by_name = _tools_by_name(tools)
-    assert set(by_name) == {
-        "update_life_state",
-        "act",
-        "chat",
-        "note",
-        "edit_note",
-        "read_notebook",
-        "schedule",
-    }
-
-
-def test_schedule_tool_hides_mechanism_only_seconds_exposed():
-    """schedule 只对模型暴露 seconds 业务参数，不暴露 lane / persona_id。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    props = set(tools["schedule"].definition.parameters["properties"])
-    assert props == {"seconds"}
-
-
-@pytest.mark.asyncio
-async def test_schedule_within_limit_records_pending_self_wake():
-    """schedule 合法 → 把待办 self-wake 记进 round-scoped slot（不直接 emit）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": 1800})
-    assert slot["delay_ms"] == 1_800_000
-
-
-@pytest.mark.asyncio
-async def test_schedule_multi_in_round_last_wins_no_accumulate():
-    """一轮内多次 schedule 不累积 —— 最后一次为准（唤醒风暴命门，照搬 world sleep）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3",
-            persona_id="akao",
-            act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": 300})
-    await tools["schedule"].invoke({"seconds": 600})
-    await tools["schedule"].invoke({"seconds": 900})
-    assert slot == {"delay_ms": 900_000}, "只留最后一次（覆盖而非追加）"
-
-
-@pytest.mark.asyncio
-async def test_schedule_at_min_floor_allowed():
-    """schedule == 下限 → 合法（边界含下限）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MIN_SECONDS})
-    assert slot["delay_ms"] == lt.LIFE_SCHEDULE_MIN_SECONDS * 1000
-
-
-@pytest.mark.asyncio
-async def test_schedule_at_max_ceiling_allowed():
-    """schedule == 上限 → 合法（边界含上限，上限放宽到能睡整觉）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MAX_SECONDS})
-    assert slot["delay_ms"] == lt.LIFE_SCHEDULE_MAX_SECONDS * 1000
-
-
-@pytest.mark.asyncio
-async def test_schedule_under_floor_errors_no_pending():
-    """schedule < 下限 → 返回错误喂回模型重调（不静默夹）、不留待办。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    out = await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MIN_SECONDS - 1})
-    assert isinstance(out, dict)
-    assert out["kind"] == "tool_error"
-    assert slot == {}, "超下限不该留待办 self-wake"
-
-
-@pytest.mark.asyncio
-async def test_schedule_over_ceiling_errors_no_pending():
-    """schedule > 上限 → 返回错误喂回模型重调（不静默夹）、不留待办。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    out = await tools["schedule"].invoke({"seconds": lt.LIFE_SCHEDULE_MAX_SECONDS + 1})
-    assert isinstance(out, dict)
-    assert out["kind"] == "tool_error"
-    assert slot == {}
-
-
-def test_schedule_ceiling_allows_full_night_sleep():
-    """上限放宽到能睡整觉（≥ 8h）——夜里一觉到天亮（spec 决策 3）。"""
-    assert lt.LIFE_SCHEDULE_MAX_SECONDS >= 8 * 3600
-    # 下限防排太密，但不至于神经质每分钟一轮
-    assert lt.LIFE_SCHEDULE_MIN_SECONDS >= 60
-
-
-# ---------------------------------------------------------------------------
 # bug 2 / 3：领域层校验经活轮工具喂回模型（不用 stub_handlers，走真 update_entry /
 # note_entry 的 fail-fast 校验——脏 status / 脏 remind_at 在 DB 之前就抛 ValueError，
 # @tool_error 把它兜成结构化 outcome 喂回模型重填，绝不静默写脏 / 不挂提醒）。
@@ -631,141 +489,22 @@ async def test_note_invalid_remind_at_returns_tool_error_no_pending():
     assert reminders == {}, "脏 remind_at 校验失败不该留待挂提醒"
 
 
-def test_schedule_description_mentions_self_wake():
-    """schedule docstring 说清"排过多久再醒来继续过日子"（给模型的语义）。"""
-    slot: dict = {}
-    tools = _tools_by_name(
-        lt.build_life_tools(
-            lane="coe-t3", persona_id="akao", act_id="a-1",
-            observed_at="2026-06-03T12:30:00+00:00", self_wake=slot,
-        )
-    )
-    desc = tools["schedule"].definition.description
-    assert "醒" in desc, "schedule 文案要让模型知道这是排下次醒来"
-
-
-# ---------------------------------------------------------------------------
-# fire_life_self_wake —— 收口 emit + 落 next_wake_at（对称 world fire_self_wake）。
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_writes_next_wake_at_and_carries_target(monkeypatch):
-    """fire_life_self_wake：目标时刻 = 现实 now + delay，写进 LifeState.next_wake_at，
-    且 emit 的 self LifeWakeTick 携带这个目标时刻（target_wake_at）。"""
-    from datetime import datetime, timedelta
-
-    from app.infra import cst_time
-
-    delayed: list[dict] = []
-    set_calls: list[dict] = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        delayed.append({"data": data, "delay_ms": delay_ms})
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        set_calls.append(
-            {"lane": lane, "persona_id": persona_id, "next_wake_at": next_wake_at}
-        )
-
-    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-
-    before = cst_time.now_cst()
-    fired = await lt.fire_life_self_wake(
-        lane="coe-t3", persona_id="akao", self_wake={"delay_ms": 1800_000}
-    )
-    after = cst_time.now_cst()
-
-    assert fired is True
-    assert len(delayed) == 1
-    tick = delayed[0]["data"]
-    assert tick.reason == "self"
-    assert tick.lane == "coe-t3"
-    assert tick.persona_id == "akao"
-    assert tick.target_wake_at, "self LifeWakeTick 必须携带目标唤醒时刻"
-    target = datetime.fromisoformat(tick.target_wake_at)
-    assert before + timedelta(seconds=1800) <= target <= after + timedelta(seconds=1800)
-    # 写进 state 的 next_wake_at 与 tick 携带目标一致（stale 判定靠相等）
-    assert len(set_calls) == 1
-    assert set_calls[0]["lane"] == "coe-t3"
-    assert set_calls[0]["persona_id"] == "akao"
-    assert set_calls[0]["next_wake_at"] == tick.target_wake_at
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_emit_failure_logs_warning_not_silent(
-    monkeypatch, caplog
-):
-    """必改 4（可观测）：emit_delayed 抛错时 log warning（带 lane/persona/target），别静默吞。
-
-    life 没保底心跳，emit_delayed 失败会留一个未来 wake state（next_wake_at 已写）但没
-    实际唤醒（机械漏投）。完整恢复（watchdog）是 Non-goal，但至少不静默：失败要 log
-    warning 带 lane/persona/target。本测：set 已成功写、emit_delayed 抛错 → 有 warning
-    log（不静默吞），且不把异常往上炸（已 durable 落地的这一轮不该被漏投拖垮）。
-    """
-    import logging
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        return None
-
-    async def boom_emit_delayed(data, *, delay_ms, durability="durable"):
-        raise RuntimeError("broker down")
-
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-    monkeypatch.setattr(lt, "emit_delayed", boom_emit_delayed)
-
-    with caplog.at_level(logging.WARNING):
-        # emit_delayed 抛错不该往上炸（已 durable 落地的这一轮收口不被漏投拖垮）
-        await lt.fire_life_self_wake(
-            lane="coe-t3", persona_id="akao", self_wake={"delay_ms": 1800_000}
-        )
-
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings, "emit_delayed 失败必须 log warning（不静默吞）"
-    blob = " ".join(r.getMessage() for r in warnings)
-    assert "coe-t3" in blob, "warning 要带 lane"
-    assert "akao" in blob, "warning 要带 persona"
-
-
-@pytest.mark.asyncio
-async def test_fire_life_self_wake_no_pending_does_not_write_or_emit(monkeypatch):
-    """没调 schedule（空待办）→ 不写 next_wake_at、不 emit（靠 world notify 起头兜底）。"""
-    delayed: list = []
-    set_calls: list = []
-
-    async def fake_emit_delayed(data, *, delay_ms, durability="durable"):
-        delayed.append(data)
-
-    async def fake_set(*, lane, persona_id, next_wake_at):
-        set_calls.append(next_wake_at)
-
-    monkeypatch.setattr(lt, "emit_delayed", fake_emit_delayed)
-    monkeypatch.setattr(lt, "set_life_next_wake_at", fake_set)
-
-    fired = await lt.fire_life_self_wake(lane="coe-t3", persona_id="akao", self_wake={})
-
-    assert fired is False
-    assert delayed == []
-    assert set_calls == []
-
-
 # ---------------------------------------------------------------------------
 # 日程到点提醒（备忘录 & 日程 第三块）—— note / edit_note 带 remind_at 时把「待挂的
 # 日程提醒」记进 round-scoped 容器，engine 收口 fire_schedule_reminders 每条各 emit
-# 一条 ScheduleReminderTick（每条日程各挂各的、不动 self-wake 的 next_wake_at 语义）。
+# 一条 ScheduleReminderTick（每条日程各挂各的）。这是日程那条（保留），区别于已删的
+# 自设闹钟（next_wake_at / schedule）。
 # ---------------------------------------------------------------------------
 
 
 def _tools_with_reminders(reminders, stub_handlers):
-    """造带 schedule_reminders 容器的工具集（同时给 self_wake 让 schedule 也在）。"""
+    """造带 schedule_reminders 容器的工具集（日程那条，自设闹钟已删、无 self_wake）。"""
     return _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3",
             persona_id="akao",
             act_id="base-act-id",
             observed_at="2026-06-13T12:30:00+08:00",
-            self_wake={},
             schedule_reminders=reminders,
         )
     )
@@ -1048,15 +787,13 @@ async def test_tool_failure_returns_outcome_not_raise(monkeypatch):
 
 
 def test_build_life_tools_includes_chat():
-    """工具集多一件 chat（与 update_life_state / act / schedule 并列）。"""
-    slot: dict = {}
+    """工具集多一件 chat（与 update_life_state / act 并列，常驻基础工具）。"""
     tools = _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3",
             persona_id="akao",
             act_id="a-1",
             observed_at="2026-06-03T12:30:00+00:00",
-            self_wake=slot,
         )
     )
     assert "chat" in tools
@@ -1445,9 +1182,437 @@ def test_act_description_no_longer_carries_speech():
     assert "chat" in desc, "act 文案应把说话引导到 chat 工具"
 
 
+def test_act_description_steers_online_to_real_hands():
+    """act 文案点破：上网看东西不走 act —— 用 act 假装上网是自己编的（假的），引向 look_up / browse_feed 两只真手。
+
+    coe 实测根因：life_wake prompt 的「能用几件事」清单没把两只手算进去 + act 是万能
+    「做事」，她想上网时抓 act 凑一个假的、不切真工具。act 文案这一刀对称「说话不走
+    act」补「上网不走 act」：点破编的是假的、把想查 / 想刷引向 look_up / browse_feed。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    # 把「想查个答案 / 想刷刷」引向两只真手（不让她用万能 act 凑一个假的）
+    assert "look_up" in desc, "act 文案应把想查答案引向 look_up"
+    assert "browse_feed" in desc, "act 文案应把想刷刷引向 browse_feed"
+    # 点破：用 act 假装上网 = 自己编 = 假的
+    assert ("编" in desc) or ("假" in desc), "act 文案要点破用 act 假装上网是自己编的"
+
+
 def lt_speech_kind() -> str:
     """speech event 的 kind 常量（让测试与实现共用同一来源，不硬编码字面量）。"""
     return lt.EVENT_KIND_SPEECH
+
+
+# ---------------------------------------------------------------------------
+# look_up —— 「带问题查」的手（life web access Task 1）。
+#
+# 她生活里冒出具体目的时，自己想好一个具体问题（query 必填）去网上查、当场拿到真
+# 答案，基于真数据反应。底层走现有 search_web —— search_web 返回的就是带源的文本
+# （每条 [i] 标题 / 出处链接 / 关键摘录），look_up 原样把它送进她当轮上下文，**不**
+# 用第二次 LLM 把结果消化成一段话（否则她的反应就不挂在真东西上、又「一眼假」）。
+# 拿不到结果时如实说没查到，绝不编一个顶上。
+# ---------------------------------------------------------------------------
+
+
+class _FakeSearchWeb:
+    """假的 search_web Tool：记录被调入参、返回预置文本（模拟 search_web 的带源输出）。"""
+
+    def __init__(self, return_value: str):
+        self.return_value = return_value
+        self.calls: list[dict] = []
+
+    async def invoke(self, arguments: dict) -> str:
+        self.calls.append(arguments)
+        return self.return_value
+
+
+# search_web 真实输出形如：每条 "[i] 标题\n    链接\n    摘录"，多条以空行分隔。
+_SEARCH_WEB_SOURCED_RESULT = (
+    "[1] 广州明天天气预报 - 中国天气网\n"
+    "    https://weather.example.com/guangzhou\n"
+    "    广州明日多云转小雨，最高28度，建议带伞。\n\n"
+    "[2] 周末广州天气 - 某气象站\n"
+    "    https://qx.example.com/gz\n"
+    "    明日午后有阵雨概率60%。"
+)
+
+
+def test_build_life_tools_includes_look_up():
+    """工具集常驻 look_up（「带问题查」的手），与 chat / 本子三件并列、不依赖 self_wake。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "look_up" in tools
+    assert isinstance(tools["look_up"], Tool)
+
+
+def test_look_up_schema_hides_mechanism_only_query_exposed():
+    """模型只看见 query 业务参数，看不见 lane / persona_id / act_id；query 必填。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    params = tools["look_up"].definition.parameters
+    assert set(params["properties"]) == {"query"}
+    # query 必填 —— 「查」是带着具体问题去（决策 2），不像「刷」那样无 query。
+    assert params.get("required") == ["query"]
+
+
+@pytest.mark.asyncio
+async def test_look_up_passes_query_to_search_web(monkeypatch):
+    """带 query 调 look_up → 走到 search_web，且把她想好的问题原样传进去。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_SOURCED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert len(fake.calls) == 1, "look_up 必须走到 search_web"
+    assert fake.calls[0].get("query") == "广州明天会下雨吗", (
+        "她自己想好的问题要原样传给 search_web"
+    )
+
+
+@pytest.mark.asyncio
+async def test_look_up_returns_sources_into_context(monkeypatch):
+    """返回带源（标题 / 出处链接 / 摘录）进她当轮上下文 —— 不被消化成一段话（承重红线）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_SOURCED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert isinstance(out, str)
+    # search_web 的带源原文必须原样在返回里：标题、出处链接、关键摘录都在。
+    assert "广州明天天气预报 - 中国天气网" in out, "标题要进上下文"
+    assert "https://weather.example.com/guangzhou" in out, "出处链接要进上下文"
+    assert "多云转小雨" in out, "关键摘录要进上下文"
+    # 不是只剩一句消化后的话 —— 第二条来源也得在（没被压成单段总结）。
+    assert "https://qx.example.com/gz" in out, "多条来源都要带进上下文、不被压成一句"
+
+
+@pytest.mark.asyncio
+async def test_look_up_no_results_says_so_no_fabrication(monkeypatch):
+    """search_web 没查到（返回未配置 / 无结果文案）→ 如实说没查到，不编一个顶上。"""
+    fake = _FakeSearchWeb("搜索服务未配置或未搜索到结果")
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "某个查不到的冷门问题"})
+
+    assert isinstance(out, str)
+    assert "没查到" in out, "拿不到结果要如实说没查到（兜底），不编内容"
+
+
+@pytest.mark.asyncio
+async def test_look_up_tool_failure_returns_outcome_not_raise(monkeypatch):
+    """search_web 抛错 → @tool_error 兜成结构化 outcome 喂回模型，不炸整轮（spec 决策 3）。"""
+
+    class _BoomSearch:
+        async def invoke(self, arguments):
+            raise RuntimeError("search backend down")
+
+    monkeypatch.setattr(lt, "search_web", _BoomSearch())
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error"
+
+
+def test_look_up_description_guides_question_driven_lookup():
+    """look_up 文案引导「带着具体问题去查、拿真答案」，不是漫无目的浏览（区别于刷手机）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["look_up"].definition.description
+    assert "查" in desc, "文案要让模型知道这是去查东西"
+    # 引导她带着自己想好的具体问题（不是无 query 的浏览）
+    assert "问题" in desc or "想知道" in desc
+
+
+def test_look_up_description_contrasts_with_fake_act():
+    """look_up 文案补反向对比：别用 act 假装「我查了下」（那是自己编的假货）—— 真想知道用这只真手。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["look_up"].definition.description
+    # 反向对比到 act：别用 act 假装查（避免被万能 act 惯性吸走）
+    assert "act" in desc, "look_up 文案要反向对比：别用 act 假装查"
+    assert ("编" in desc) or ("假" in desc), "look_up 文案要点破用 act 假装查是自己编的"
+
+
+# ---------------------------------------------------------------------------
+# browse_feed —— 「刷手机」的手（life web access Task 2）。
+#
+# 她没具体目的、就想随便逛逛时用：带一个从自己当下状态/心情里自然涌出的「方向」
+# （自然语言、可以很泛），工具拿这个方向去 search_web 捞一**批**（多条、像一条 feed）
+# 带源真内容回来供她浏览，翻到感兴趣的才停。与 look_up 的真区别：look_up 带一个具体
+# 问题求一个答案、返回聚焦；browse_feed 带一个泛方向逛一圈、返回一批供她挑选。
+#
+# 违宪红线（必守）：工具内不写死兴趣标签 / 规则、不替她猜该看啥、不另起 agent；她看
+# 啥全由她自己带进来的方向决定。边界（Non-goal）：刷的是她兴趣圈的东西、不是时政社会
+# 要闻（那归 world）——但只靠 docstring 引导，绝不用规则 / 黑名单 / 关键词过滤拦
+# （过滤就是工具内替她决策、违宪）。
+# ---------------------------------------------------------------------------
+
+
+# search_web 真实输出形如「一批」带源条目：每条 "[i] 标题\n    链接\n    摘录"，
+# 多条以空行分隔（像一条 feed 的多条）。
+_SEARCH_WEB_FEED_RESULT = (
+    "[1] 本季新番补全！这几部口碑爆了 - 某番剧站\n"
+    "    https://anime.example.com/season\n"
+    "    本季多部新番更新，讨论度最高的是……\n\n"
+    "[2] 大家都在聊的搞笑名场面合集 - 某社区\n"
+    "    https://bbs.example.com/funny\n"
+    "    最近刷屏的几个梗，评论区笑疯了。\n\n"
+    "[3] 那部你惦记的番更新了吗 - 某资讯号\n"
+    "    https://news.example.com/update\n"
+    "    第8话已更，本周讨论热度回升。"
+)
+
+
+def test_build_life_tools_includes_browse_feed():
+    """工具集常驻 browse_feed（「刷手机」的手），与 look_up / chat / 本子三件并列、不依赖 self_wake。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "browse_feed" in tools
+    assert isinstance(tools["browse_feed"], Tool)
+
+
+def test_browse_feed_and_look_up_are_two_distinct_hands_both_in_toolset():
+    """browse_feed 和 look_up 是两只**不同**的手、都在工具集里（语义不同、不是马甲）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    # 两只手都在
+    assert "look_up" in tools and "browse_feed" in tools
+    # 它们是不同的工具对象、不同的 name
+    assert tools["look_up"].name != tools["browse_feed"].name
+    # 业务参数也不同：look_up 带「问题」、browse_feed 带「方向」（参数名不同 = 用法不同）
+    look_up_props = set(tools["look_up"].definition.parameters["properties"])
+    feed_props = set(tools["browse_feed"].definition.parameters["properties"])
+    assert look_up_props == {"query"}
+    assert feed_props == {"direction"}
+    assert look_up_props != feed_props
+
+
+def test_browse_feed_schema_hides_mechanism_only_direction_exposed():
+    """模型只看见 direction 业务参数，看不见 lane / persona_id / act_id / num 等机制。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    params = tools["browse_feed"].definition.parameters
+    assert set(params["properties"]) == {"direction"}
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_passes_direction_and_asks_for_a_batch(monkeypatch):
+    """带 direction 调 browse_feed → 走到 search_web，方向原样作 query 传入、且要一批（num > 默认聚焦）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_FEED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["browse_feed"].invoke({"direction": "想看点搞笑的，还有那部番更没更"})
+
+    assert len(fake.calls) == 1, "browse_feed 必须走到 search_web"
+    call = fake.calls[0]
+    # 她涌出的方向原样作检索方向传给 search_web（工具不替她改写、不猜兴趣）
+    assert call.get("query") == "想看点搞笑的，还有那部番更没更"
+    # 刷手机是「逛一圈看有啥」—— 要一批（num 比 look_up 聚焦的默认多），像一条 feed
+    assert call.get("num", 0) > 5, "刷手机要捞一批（num > 默认聚焦的 5），像一条 feed"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_returns_batch_of_sources_into_context(monkeypatch):
+    """返回**一批**带源（标题 / 出处链接 / 摘录）进她当轮上下文 —— 不被压成一段话（承重红线）。"""
+    fake = _FakeSearchWeb(_SEARCH_WEB_FEED_RESULT)
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "刷刷新番和搞笑的"})
+
+    assert isinstance(out, str)
+    # 一批里每一条的标题 / 出处链接 / 摘录都原样在返回里（没被压成单段总结）。
+    assert "本季新番补全" in out, "第1条标题要进上下文"
+    assert "https://anime.example.com/season" in out, "第1条出处要进上下文"
+    assert "搞笑名场面合集" in out, "第2条标题要进上下文"
+    assert "https://bbs.example.com/funny" in out, "第2条出处要进上下文"
+    assert "https://news.example.com/update" in out, "第3条出处要进上下文"
+    # 多条来源都在 = 是「一批」、不是被消化成一句（与 look_up 聚焦不同）。
+    assert out.count("https://") >= 3, "刷手机返回的是一批带源内容、不被压成一段"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_nothing_new_says_so_no_fabrication(monkeypatch):
+    """search_web 没刷到（返回未配置 / 无结果文案）→ 如实说没刷到新鲜的，不编一批顶上。"""
+    fake = _FakeSearchWeb("搜索服务未配置或未搜索到结果")
+    monkeypatch.setattr(lt, "search_web", fake)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便看看"})
+
+    assert isinstance(out, str)
+    assert "没" in out, "没刷到要如实说（兜底），不编一批内容顶上"
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_tool_failure_returns_outcome_not_raise(monkeypatch):
+    """search_web 抛错 → @tool_error 兜成结构化 outcome 喂回模型，不炸整轮（spec 决策 3）。"""
+
+    class _BoomSearch:
+        async def invoke(self, arguments):
+            raise RuntimeError("search backend down")
+
+    monkeypatch.setattr(lt, "search_web", _BoomSearch())
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便逛逛"})
+    assert isinstance(out, dict)
+    assert out["kind"] == "tool_error"
+
+
+def test_browse_feed_description_guides_aimless_browsing_distinct_from_look_up():
+    """browse_feed 文案引导「漫无目的逛一圈、带泛方向看一批」，并明确「有具体问题求答案走 look_up」。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["browse_feed"].definition.description
+    # 漫无目的逛 / 看有啥新鲜的（不是带问题求答案）
+    assert ("随便" in desc) or ("逛" in desc) or ("刷" in desc)
+    assert "方向" in desc, "文案要让她知道带的是一个方向（不是必填检索词）"
+    # 明确「有具体问题求答案那是另一只手（look_up）、不走这里」
+    assert "look_up" in desc, "文案要把「有具体问题求答案」引向 look_up（两只手分清）"
+
+
+def test_browse_feed_description_contrasts_with_fake_act():
+    """browse_feed 文案补反向对比：别用 act 假装「我刷了刷手机」（那是自己编的）—— 真想刷用这只真手。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["browse_feed"].definition.description
+    # 反向对比到 act：别用 act 假装刷（避免被万能 act 惯性吸走）
+    assert "act" in desc, "browse_feed 文案要反向对比：别用 act 假装刷"
+    assert ("编" in desc) or ("假" in desc), "browse_feed 文案要点破用 act 假装刷是自己编的"
+
+
+def test_browse_feed_does_not_hardcode_interest_rules():
+    """违宪红线：工具的**可执行代码**里不写死兴趣标签枚举 / 黑名单关键词过滤（看啥由她带的方向决定）。
+
+    源码层面钉死：browse_feed 的可执行代码（剔除 docstring + 注释后）里不出现硬编的
+    兴趣枚举（anime / career / gaokao 之类）当作分类规则，也不出现「时政 / 社会 / 灾害」
+    这类用于过滤拦截 result 的黑名单关键词——边界只靠 docstring 软引导，不靠规则拦
+    （过滤就是工具内替她决策、违宪）。剔注释 / docstring 是因为引导文字（"不写死兴趣
+    标签""不刷时政"）出现在说明里是允许的、甚至是该有的，违宪的是把它写成可执行逻辑。
+    """
+    import inspect
+
+    src = inspect.getsource(lt.build_life_tools)
+    # 截出 browse_feed 函数体那一段（到下一个 @tool_error 装饰的工具为止），只查它内部。
+    start = src.index("async def browse_feed")
+    rest = src[start:]
+    nxt = rest.find("@tool_error", 1)
+    body = rest if nxt == -1 else rest[:nxt]
+
+    # 只看可执行代码：去掉 docstring（三引号块）和 # 行注释——引导 / 说明文字允许出现，
+    # 违宪的是把兴趣规则 / 过滤写成可执行逻辑。
+    import re as _re
+
+    code = _re.sub(r'""".*?"""', "", body, flags=_re.DOTALL)
+    code_lines = []
+    for line in code.splitlines():
+        stripped = line.split("#", 1)[0]
+        if stripped.strip():
+            code_lines.append(stripped)
+    code_only = "\n".join(code_lines)
+
+    # 可执行代码里不写死兴趣标签枚举（这些 token 只可能作为硬编分类规则出现）
+    for banned in ("anime", "career", "gaokao", "时政", "灾害", "黑名单"):
+        assert banned not in code_only, (
+            f"browse_feed 可执行代码不该写死兴趣规则 / 过滤关键词：{banned!r}"
+        )
+    # 不对 search_web 结果做任何过滤 / 改写（原样进上下文）：可执行代码里不该出现
+    # 把 result 切片 / 替换 / 按关键词筛的操作。
+    assert "filter(" not in code_only, "browse_feed 不该过滤 search_web 结果"
+    assert ".replace(" not in code_only, "browse_feed 不该改写 search_web 结果"
 
 
 # ---------------------------------------------------------------------------
@@ -1757,3 +1922,858 @@ async def test_read_notebook_empty(stub_handlers):
     )
     out = await tools["read_notebook"].invoke({})
     assert isinstance(out, str) and out
+
+
+# ---------------------------------------------------------------------------
+# look_up / browse_feed × 真实 search_web 契约（集成测试，建议②）。
+#
+# 上面的单测都 monkeypatch 了 lt.search_web，拦不住 life↔search_web 之间的**真实契约
+# 漂移**：search_web 的失败 / 空文案变了、或 look_up / browse_feed 漏认某种失败信号，
+# 单测全绿但线上把失败当内容顶上去（违 spec 决策 4：拿不到真东西就如实说没查到、绝不
+# 编一个顶上）。这一组用**真实的 search_web Tool**（不 patch lt.search_web），只 patch
+# 它底层依赖的 capability（app/agent/tools/search.py 里的 _web_search_capability /
+# _rerank_capability），让 search_web 真实跑出它自己的失败 / 空文案，再断言 look_up /
+# browse_feed 把它如实收成「没查到 / 没刷到」、不当内容。将来 search_web 改了失败表达
+# 这组会挂、提醒同步 life 侧识别。
+# ---------------------------------------------------------------------------
+
+import app.agent.tools.search as search_mod  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_look_up_treats_real_search_web_failure_as_not_found(monkeypatch):
+    """必改① 回归守护：底层 capability 抛异常 → 真实 search_web 返回「网页搜索失败: ...」
+    → look_up 必须把它如实收成「没查到」、绝不当内容包装成「查到这些」。
+
+    走真实 search_web Tool（不 patch lt.search_web），只 patch 它底层的
+    _web_search_capability 抛异常 —— search_web 内部 catch 后真实返回前缀固定、后缀
+    变长的 ``f"网页搜索失败: {exc}"``。旧实现只精确匹配两条空文案 + 非 str，漏了这条
+    变长失败串 → 会被当真内容顶上去（红）。
+    """
+
+    async def boom_capability(*args, **kwargs):
+        raise RuntimeError("search backend exploded")
+
+    # 只 patch 底层 capability —— search_web 本身是真的（不动 lt.search_web）。
+    monkeypatch.setattr(search_mod, "_web_search_capability", boom_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "广州明天会下雨吗"})
+
+    assert isinstance(out, str)
+    # 真实失败串必须被识别成「没查到」，绝不当内容包装。
+    assert "没查到" in out, "网页搜索失败串要如实收成『没查到』（必改①）"
+    assert "查到这些" not in out, "失败串绝不能被包装成『查到这些』顶上去"
+    # 底层异常文本不该原样泄进她的上下文（那就是把技术失败当内容了）。
+    assert "网页搜索失败" not in out
+    assert "search backend exploded" not in out
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_treats_real_search_web_failure_as_not_found(monkeypatch):
+    """必改① 回归守护（browse_feed 侧）：底层 capability 抛异常 → 真实 search_web 返回
+    「网页搜索失败: ...」→ browse_feed 必须如实收成「没刷到」、不当内容编一批顶上。"""
+
+    async def boom_capability(*args, **kwargs):
+        raise RuntimeError("search backend exploded")
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", boom_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便逛逛"})
+
+    assert isinstance(out, str)
+    assert "没刷到" in out, "网页搜索失败串要如实收成『没刷到』（必改①）"
+    assert "刷到这些" not in out, "失败串绝不能被包装成『刷到这些』顶上去"
+    assert "网页搜索失败" not in out
+    assert "search backend exploded" not in out
+
+
+@pytest.mark.asyncio
+async def test_look_up_treats_real_search_web_empty_as_not_found(monkeypatch):
+    """底层返回空（[]）→ 真实 search_web 返回「搜索服务未配置或未搜索到结果」→
+    look_up 把它识别成「没查到」（守护现有空文案契约）。"""
+
+    async def empty_capability(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", empty_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up"].invoke({"query": "某个查不到的冷门问题"})
+
+    assert isinstance(out, str)
+    assert "没查到" in out, "空结果要如实收成『没查到』"
+    assert "查到这些" not in out
+
+
+@pytest.mark.asyncio
+async def test_browse_feed_treats_real_search_web_empty_as_not_found(monkeypatch):
+    """底层返回空（[]）→ 真实 search_web 返回「搜索服务未配置或未搜索到结果」→
+    browse_feed 把它识别成「没刷到」（守护现有空文案契约）。"""
+
+    async def empty_capability(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_mod, "_web_search_capability", empty_capability)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["browse_feed"].invoke({"direction": "随便看看"})
+
+    assert isinstance(out, str)
+    assert "没刷到" in out, "空结果要如实收成『没刷到』"
+    assert "刷到这些" not in out
+
+
+# ===========================================================================
+# 隔手机发消息（life proactive messaging, task 3）。
+#
+# 「当面说话」(chat) 与「隔手机发消息」(send_message) 是两个**模态**、两只手 ——
+# 模态由 life 自己选（用哪只手），代码不替她判该当面还是手机（spec 决策 4）。
+#
+#   * look_up_contact —— 报名字模糊查候选（uid + 简介）给她挑，只返回不取第一个
+#     （spec 决策 3：选谁是她的决定）。
+#   * send_message —— 按她选的 uid 隔空发：
+#       - 姐妹（MailboxTarget）：走信箱、但用**手机消息 kind**（EVENT_KIND_MESSAGE），
+#         和当面 speech（EVENT_KIND_SPEECH）在收件人侧可区分（spec 决策 5）。
+#       - 真人（LarkP2PTarget）：emit 出站 ChatResponseSegment（is_proactive=True、
+#         真实 chat_id，不靠伪来源 id）。
+#       - 不可投递（UndeliverableRecipient）：作为 tool error 喂回 life（spec 决策 6）。
+# ===========================================================================
+
+
+@pytest.fixture
+def stub_directory(monkeypatch):
+    """把目录解析层（search_recipients / resolve_delivery）、出站 emit、以及真人主动发的
+    渲染链（build_proactive_chat_context + render_chat_turn）换成可观测 fake。
+
+    真人分支改造后不再直出 life 原文，而是「life 给意图 → proactive context 构建 →
+    共享渲染层渲染 → 出站」。默认 fake 渲染成功、产出区别于 life 原文的文本，让出站段
+    断言渲染后的话；render-fail-no-emit 的测试各自覆写 ``render_raises`` / ``render_text``。
+    """
+    from app.domain.recipient_directory import (
+        LarkP2PTarget,
+        MailboxTarget,
+        RecipientCandidate,
+        UndeliverableRecipient,
+    )
+
+    state: dict = {
+        "search_calls": [],
+        "resolve_calls": [],
+        "emitted": [],
+        # 测试按需预置：search_recipients 返回的候选 / resolve_delivery 的解析结果。
+        "candidates": [],
+        "resolve_result": None,
+        "resolve_raises": None,
+        # 真人渲染链：context 构建被调时记下入参；渲染产出 / 失败可覆写。
+        "context_calls": [],
+        "context_result": object(),  # 哑 ChatTurnContext（fake render 不读它）
+        "render_text": "渲染后的人设口径出站话",  # 默认渲染产出（≠ life 原文意图）
+        "render_raises": None,  # 设成异常类型 → render_chat_turn 抛错（不出站）
+        "render_args": [],
+    }
+
+    async def fake_search_recipients(query):
+        state["search_calls"].append(query)
+        return state["candidates"]
+
+    async def fake_resolve_delivery(uid):
+        state["resolve_calls"].append(uid)
+        if state["resolve_raises"] is not None:
+            raise state["resolve_raises"]
+        return state["resolve_result"]
+
+    async def fake_emit(data):
+        state["emitted"].append(data)
+
+    async def fake_build_proactive_chat_context(**kwargs):
+        state["context_calls"].append(kwargs)
+        return state["context_result"]
+
+    def fake_render_chat_turn(turn_ctx, **kwargs):
+        # render_chat_turn 是 async generator：返回一个吐文本片段的异步生成器。
+        state["render_args"].append({"turn_ctx": turn_ctx, **kwargs})
+
+        async def _gen():
+            if state["render_raises"] is not None:
+                raise state["render_raises"]
+            text = state["render_text"]
+            if text:
+                yield text
+
+        return _gen()
+
+    monkeypatch.setattr(lt, "search_recipients", fake_search_recipients)
+    monkeypatch.setattr(lt, "resolve_delivery", fake_resolve_delivery)
+    monkeypatch.setattr(lt, "emit", fake_emit)
+    monkeypatch.setattr(
+        lt, "build_proactive_chat_context", fake_build_proactive_chat_context
+    )
+    monkeypatch.setattr(lt, "render_chat_turn", fake_render_chat_turn)
+
+    state["_RecipientCandidate"] = RecipientCandidate
+    state["_MailboxTarget"] = MailboxTarget
+    state["_LarkP2PTarget"] = LarkP2PTarget
+    state["_UndeliverableRecipient"] = UndeliverableRecipient
+    return state
+
+
+# --- 新 event kind：手机/隔空消息 ≠ 当面 speech ----------------------------
+
+
+def test_message_kind_is_distinct_from_speech():
+    """手机消息 kind（EVENT_KIND_MESSAGE）必须 ≠ 当面 speech kind（收件人侧可区分，决策 5）。"""
+    from app.domain.world_events import EVENT_KIND_MESSAGE, EVENT_KIND_SPEECH
+
+    assert EVENT_KIND_MESSAGE != EVENT_KIND_SPEECH
+
+
+def test_message_kind_is_not_passive_wakes_recipient():
+    """手机消息是发给对方让 ta 看到的 → 不是被动 kind（投递要敲门唤醒收件人，对称 speech）。"""
+    from app.domain.world_events import (
+        EVENT_KIND_MESSAGE,
+        EVENT_KIND_SPEECH,
+        PASSIVE_EVENT_KINDS,
+    )
+
+    assert EVENT_KIND_MESSAGE not in PASSIVE_EVENT_KINDS, (
+        "手机消息发给对方让 ta 看到，必须唤醒收件人（与 speech 一样不被动）"
+    )
+    # speech 现状也非被动（守护：两者唤醒语义一致）。
+    assert EVENT_KIND_SPEECH not in PASSIVE_EVENT_KINDS
+
+
+# --- look_up_contact：查名字拿候选（只返回、不替她选） ----------------------
+
+
+def test_build_life_tools_includes_contact_and_send_tools():
+    """工具集常驻 look_up_contact（查名字）+ send_message（隔空发），与 chat 并列。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert "look_up_contact" in tools
+    assert "send_message" in tools
+    assert isinstance(tools["look_up_contact"], Tool)
+    assert isinstance(tools["send_message"], Tool)
+
+
+def test_send_tools_schema_hides_mechanism():
+    """模型只看见业务参数：look_up_contact(query)、send_message(uid, content)。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    assert set(tools["look_up_contact"].definition.parameters["properties"]) == {"query"}
+    assert set(tools["send_message"].definition.parameters["properties"]) == {
+        "uid",
+        "content",
+    }
+
+
+@pytest.mark.asyncio
+async def test_look_up_contact_returns_all_candidates_with_uid_and_intro(stub_directory):
+    """报名字 → search_recipients → 候选（uid + 简介）原样列给她，不排序不取第一个（决策 3）。"""
+    RC = stub_directory["_RecipientCandidate"]
+    stub_directory["candidates"] = [
+        RC(uid="persona:akao", display_name="赤尾", intro="赤尾（你的姐妹）：高三的妹妹"),
+        RC(uid="user:u-1", display_name="赤尾", intro="赤尾（真人）"),
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="chinagi", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up_contact"].invoke({"query": "赤尾"})
+
+    assert stub_directory["search_calls"] == ["赤尾"]
+    assert isinstance(out, str)
+    # 两个重名候选都列出来交给她挑（不替她取第一个）。
+    assert "persona:akao" in out and "user:u-1" in out
+    assert "你的姐妹" in out and "真人" in out
+
+
+@pytest.mark.asyncio
+async def test_look_up_contact_no_candidates_says_so(stub_directory):
+    """查不到任何候选 → 如实说没找到（喂回 life 让她换名字 / 算了），不静默给空。"""
+    stub_directory["candidates"] = []
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["look_up_contact"].invoke({"query": "查无此人"})
+    assert isinstance(out, str)
+    assert "没找到" in out or "查不到" in out
+
+
+# --- send_message → 姐妹：手机消息进信箱（新 kind） ------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_delivers_with_message_kind(
+    stub_handlers, stub_directory
+):
+    """uid 解析成 MailboxTarget（姐妹）→ 走信箱投递、kind=EVENT_KIND_MESSAGE（手机消息）。
+
+    关键区分（决策 5）：和当面 chat 的 speech kind 不同 —— 收件人侧能看出这是「手机
+    发来的消息」而非「当面说的话」。source 是发送者 persona_id。
+    """
+    from app.domain.world_events import EVENT_KIND_MESSAGE
+
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="ayana"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "persona:ayana", "content": "姐姐我到学校了"}
+    )
+
+    assert isinstance(out, str) and out
+    assert stub_directory["resolve_calls"] == ["persona:ayana"]
+    assert len(stub_handlers["delivered"]) == 1
+    d = stub_handlers["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "ayana", "手机消息直投收件人姐妹信箱"
+    assert d["summary"] == "姐姐我到学校了"
+    assert d["kind"] == EVENT_KIND_MESSAGE, "手机消息用新 kind，和当面 speech 区分"
+    assert d["kind"] != lt.EVENT_KIND_SPEECH
+    assert d["source"] == "akao", "source 是发送者 persona_id"
+    assert d["occurred_at"] == "2026-06-03T12:30:00+00:00"
+    # 姐妹手机消息不走出站队列（那是真人飞书私聊的事）。
+    assert stub_directory["emitted"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_does_not_emit_outbound(
+    stub_handlers, stub_directory
+):
+    """姐妹手机消息只进信箱、不 emit ChatResponseSegment（出站只给真人飞书）。"""
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="chinagi"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke({"uid": "persona:chinagi", "content": "在吗"})
+    assert stub_directory["emitted"] == []
+    assert len(stub_handlers["delivered"]) == 1
+
+
+# --- send_message → 真人：emit 出站段（is_proactive、真实 chat_id、不靠伪 id） ---
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_renders_through_chat_turn_then_emits(
+    stub_handlers, stub_directory
+):
+    """真人分支改造：life 给意图 → proactive context 构建 → render_chat_turn 渲染 → 出站。
+
+    life 只管 what（给意图/要点），措辞由共享渲染层（主模型 + 人设）产出，不再直出
+    life 原文。出站段 content 是**渲染后的话**（≠ life 给的意图原文），其余出站契约字段
+    （is_proactive=True、is_p2p=True、真实 chat_id、bot_name、channel、persona_id=发送者、
+    lane 显式带、is_last=True）保持。绝不投信箱（真人没有 life 信箱）。
+    """
+    from app.domain.chat_dataflow import ChatResponseSegment
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想问他周末有没有空一起吃饭"}
+    )
+
+    assert isinstance(out, str) and out
+    assert stub_directory["resolve_calls"] == ["user:u-real-1"]
+    # life 的意图喂给 proactive context 构建（带 chat_id 历史、发送者 persona、真人 user）。
+    assert len(stub_directory["context_calls"]) == 1
+    cc = stub_directory["context_calls"][0]
+    assert cc["intent"] == "想问他周末有没有空一起吃饭", "life 给的是意图/要点"
+    assert cc["persona_id"] == "akao"
+    assert cc["chat_id"] == "cc-direct-1", "带 chat_id 历史（接得上上次聊）"
+    assert cc["user_id"] == "u-real-1"
+    # 渲染层被调（喂渲染后出站）。
+    assert len(stub_directory["render_args"]) == 1
+    # 真人不进信箱（真人没有 life 信箱）。
+    assert stub_handlers["delivered"] == []
+    # 恰好 emit 一条出站段。
+    assert len(stub_directory["emitted"]) == 1
+    seg = stub_directory["emitted"][0]
+    assert isinstance(seg, ChatResponseSegment)
+    assert seg.content == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～", (
+        "出站的是渲染后的人设口径话，不是 life 给的意图原文"
+    )
+    assert "想问他周末有没有空一起吃饭" not in seg.content, "意图原文不直接出站"
+    assert seg.is_proactive is True, "主动发：is_proactive 标识复用 worker 出站分支"
+    assert seg.is_p2p is True, "真人投递走飞书私聊"
+    assert seg.chat_id == "cc-direct-1", "用真实 p2p 会话 id 当 chat_id（worker 反查渠道）"
+    assert seg.bot_name == "chiwei", "用 resolver 给的发送 bot"
+    assert seg.channel == "lark"
+    assert seg.user_id == "u-real-1"
+    assert seg.persona_id == "akao", "persona_id 是发送者（worker 据它选 bot 身份兜底）"
+    assert seg.lane == "coe-t3", "lane 必须显式带（sink 不注入 header lane）"
+    assert seg.is_last is True, "主动发是一段完整消息（worker 据 is_last 收口）"
+    # full_content 是渲染后完整文本（worker 据它收口）。
+    assert seg.full_content == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_render_failure_no_emit_feeds_back(
+    stub_handlers, stub_directory
+):
+    """渲染失败/超时**不回退发 life 原文**：不出站，把「没发出去」作为工具结果喂回 life。
+
+    承重红线（spec 决策 / 原问题复发防线）：渲染挂了绝不把 life 的意图原文直接出站
+    （否则又退回干巴巴堆黑话的老问题）。改成：不 emit 任何出站段，返回一个清楚的工具
+    结果告诉 life「这条没发出去」，让她自己决定怎么办（重试 / 算了）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_raises"] = RuntimeError("model timeout")
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想跟他说点什么"}
+    )
+
+    # 渲染失败 → 绝不出站（既不发渲染半成品、更不回退发 life 原文）。
+    assert stub_directory["emitted"] == [], "渲染失败绝不出站"
+    assert stub_handlers["delivered"] == []
+    # 把「没发出去」喂回 life（@tool_error 结构化 outcome），让她自己处置。
+    assert isinstance(out, dict), "渲染失败应作为工具结果喂回 life"
+    assert out["kind"] == "tool_error"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_passes_raise_mode_to_render(
+    stub_handlers, stub_directory
+):
+    """proactive 渲染必须以 on_error='raise' 调 render —— 否则 render 默认 yield 错误
+    文案、proactive 把 'ERR' 当成功内容主动发给真人（codex 必改 2 的真实链路 bug）。"""
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["render_args"]) == 1
+    assert stub_directory["render_args"][0].get("on_error") == "raise", (
+        "proactive 必须用 on_error='raise'，让 render 失败时抛而不是 yield 错误文案"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_real_render_failure_no_error_text_emitted(
+    stub_handlers, stub_directory, monkeypatch
+):
+    """**真实渲染层语义**（不 mock render 直接抛）：render 内部 Agent.stream 抛异常时，
+    真人回复路径会吞异常 yield persona error 文案；proactive 用 on_error='raise' 让它
+    改抛 RenderFailed → 不出站、喂回 life。
+
+    承重（codex 必改 2 的核心）：旧测试 mock render_chat_turn 直接抛，漏掉了「真实 render
+    会吞异常 yield 'ERR'」这条真路径。这里让**真实 render_chat_turn** 跑（只换掉它内部
+    的 Agent + post-actions），构造真实 ChatTurnContext（persona error_message='ERR'），
+    验证 proactive **绝不**把 'ERR' 出站、且喂回 life「没发出去」。
+    """
+    from app.chat import render as render_mod
+    from app.chat.render import ChatTurnContext
+
+    # 让真实 render_chat_turn 跑：只换掉它内部的 Agent（stream 抛异常）+ post-actions。
+    class _BoomAgent:
+        def __init__(self, cfg, tools=None):
+            pass
+
+        async def stream(self, messages, *, context, prompt_vars):
+            yield_done = False  # noqa: F841
+            raise RuntimeError("model down")
+            yield  # pragma: no cover — 使其成为 async generator
+
+    async def _noop_post(**kwargs):
+        return None
+
+    monkeypatch.setattr(render_mod, "Agent", _BoomAgent)
+    monkeypatch.setattr(render_mod, "schedule_post_actions", _noop_post)
+    # 用真实 render_chat_turn（撤掉 stub_directory 对它的 fake）。
+    monkeypatch.setattr(lt, "render_chat_turn", render_mod.render_chat_turn)
+
+    class _FakePersona:
+        display_name = "赤尾"
+        error_messages = {"error": "ERR", "content_filter": "CF"}
+
+    # 让 proactive context 构建返回**真实** ChatTurnContext（render 会读它的 persona
+    # 出错误文案、读 messages 喂 Agent）。
+    async def fake_build_ctx(**kwargs):
+        return ChatTurnContext(
+            messages=[],
+            image_registry=None,
+            chat_id=kwargs["chat_id"],
+            persona_id=kwargs["persona_id"],
+            identity="lite",
+            appearance="looks",
+            inner_context="",
+            persona=_FakePersona(),
+        )
+
+    monkeypatch.setattr(lt, "build_proactive_chat_context", fake_build_ctx)
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想跟他说点什么"}
+    )
+
+    # 真实 render 失败（Agent.stream 抛）→ raise 模式抛 RenderFailed → 不出站。
+    assert stub_directory["emitted"] == [], "真实渲染失败绝不出站"
+    # 绝不把 persona error 文案 'ERR' 当内容发出去。
+    for seg in stub_directory["emitted"]:
+        assert "ERR" not in getattr(seg, "content", ""), "绝不主动发 persona error 文案"
+    # 喂回 life「没发出去」。
+    assert isinstance(out, dict) and out["kind"] == "tool_error", (
+        "真实渲染失败应作为工具结果喂回 life"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_empty_render_no_emit_feeds_back(
+    stub_handlers, stub_directory
+):
+    """渲染产出空文本（被内容过滤吞光 / 没产出）→ 同样不出站、喂回 life「没发出去」。
+
+    渲染层在 content_filter / length 等分支可能只吐占位 / 不吐有效内容；空出站段送到
+    飞书是一条空消息（出戏）。把空产出也当「没发出去」，不 emit、喂回 life。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = ""  # 渲染没吐有效内容
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想说点什么"}
+    )
+
+    assert stub_directory["emitted"] == [], "空渲染产出不出站（不发空消息）"
+    assert isinstance(out, dict) and out["kind"] == "tool_error", (
+        "空产出也当没发出去、喂回 life"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_return_is_honest_async_not_guaranteed(
+    stub_handlers, stub_directory
+):
+    """真人分支诚实返回（codex 必改 2，bezhai 决策）：给真人发是异步的（emit 到 MQ →
+    另一进程 worker 发飞书），emit 成功只是「入队成功」、不等于「送达成功」。返回措辞
+    不能说「发到了 / 对方收到了」，要说「已发出（异步送达、不保证送到）」这类，让 life
+    知道是发出去了、最终送达异步、可能失败。
+
+    **本刀不做异步失败回流**——只把入队当入队、诚实说出去。同步可知的失败
+    （UndeliverableRecipient）继续 fail-loud 喂回不变（见 undeliverable 测试）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert isinstance(out, str) and out
+    # 入队成功才返回（emit 一条出站段），但措辞诚实「已发出、异步、不保证送达」。
+    assert len(stub_directory["emitted"]) == 1
+    assert "已发出" in out, f"真人分支应说「已发出」（入队成功），实得 {out!r}"
+    assert ("不保证" in out) or ("不一定" in out), (
+        f"真人分支要点明最终送达不保证（异步可能失败），实得 {out!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_sister_return_unchanged_synchronous_delivered(
+    stub_handlers, stub_directory
+):
+    """姐妹分支（信箱、同步落库）返回保持原样、不染上「异步不保证」措辞（codex 必改 2）。
+
+    姐妹走信箱是同步落库的：deliver_event 成功就是真送到她信箱了，和真人异步 emit 不同。
+    所以姐妹分支返回的是确定送达语义，**不能**说「不保证送达」。承重断言：姐妹返回 ≠
+    真人那条「不保证」措辞。
+    """
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="ayana"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "persona:ayana", "content": "姐姐我到学校了"}
+    )
+
+    assert isinstance(out, str) and out
+    assert len(stub_handlers["delivered"]) == 1, "姐妹同步落库（deliver_event）"
+    assert "不保证" not in out and "不一定" not in out, (
+        f"姐妹是同步落库、确定送达，不该染上「不保证送达」措辞，实得 {out!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_does_not_carry_fake_source_id(
+    stub_handlers, stub_directory
+):
+    """主动发没有来源消息 → 出站段绝不带伪造的来源 message_id / root_id（codex 红线）。
+
+    worker 旧路径靠 message_id 反查 LarkMessage 渠道地址；主动发没有来源消息，若塞一个
+    伪 message_id 会让 worker 反查炸。这里保证 message_id / root_id 不是伪造的来源 id ——
+    要么为空、要么是不指向任何 LarkMessage 的本地派生键。承重断言：它**不等于**任何真实
+    来源消息 id，task 4 的 worker 主动发分支据此走「不反查来源、直接用 chat_id」的路径。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    seg = stub_directory["emitted"][0]
+    # 主动发没有来源消息：root_id 必须为空（不伪造一条「被回复的消息」）。
+    assert not seg.root_id, "主动发没有来源消息，root_id 不能伪造"
+    # message_id 不能是指向某条真实来源 LarkMessage 的 id。它要么空、要么是带主动发
+    # 命名空间前缀的本地派生键（明显不是渠道来源消息 id），让 worker 能识别「这是主动发、
+    # 别反查来源」。
+    assert (not seg.message_id) or seg.message_id.startswith("proactive:"), (
+        f"message_id 不能是伪造的来源消息 id，实得 {seg.message_id!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_idempotent_segment_key_stable_under_replay(
+    stub_directory,
+):
+    """整轮重投同序 send_message（同 base act_id）→ 出站段 (message_id, part_index) 稳定。
+
+    出站段是 transient（不落 agent-service 表），但 message_id 仍是 Key —— 主动发的
+    段键从 (base act_id, send 序号) 纯函数派生，重投同序得同一键，便于下游按键去重 /
+    对齐（对称 chat 的 per-chat 键）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+
+    def _run_round():
+        return _tools_by_name(
+            lt.build_life_tools(
+                lane="coe-t3", persona_id="akao", act_id="same-base",
+                observed_at="2026-06-03T12:30:00+00:00",
+            )
+        )
+
+    tools_a = _run_round()
+    await tools_a["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    first_key = (
+        stub_directory["emitted"][0].message_id,
+        stub_directory["emitted"][0].part_index,
+    )
+
+    stub_directory["emitted"].clear()
+    tools_b = _run_round()
+    await tools_b["send_message"].invoke({"uid": "user:u-real-1", "content": "你好"})
+    replay_key = (
+        stub_directory["emitted"][0].message_id,
+        stub_directory["emitted"][0].part_index,
+    )
+    assert replay_key == first_key, "重投同序主动发段键必须稳定（幂等）"
+
+
+# --- send_message → 不可投递：tool error 喂回 life ------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_message_undeliverable_uid_becomes_tool_error(
+    stub_handlers, stub_directory
+):
+    """uid 不可投递（resolver 抛 UndeliverableRecipient）→ tool error 喂回 life（决策 6）。
+
+    不静默降级、不代她另找目标 —— 把「发不了 + 原因」作为工具错误反馈，让她自己处置
+    （换个人 / 重试 / 算了）。原因文本（str(exc)）要带进 tool error message。
+    """
+    reason = "user:u-x 没有可投递的飞书私聊会话，发不了——这边只能发已经私聊过的人。"
+    stub_directory["resolve_raises"] = stub_directory["_UndeliverableRecipient"](reason)
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke({"uid": "user:u-x", "content": "在吗"})
+
+    assert isinstance(out, dict), "不可投递应被 @tool_error 收成结构化 outcome 喂回模型"
+    assert out["kind"] == "tool_error"
+    assert reason in out["message"], "原因文本要带给 life（她自己处置）"
+    # 既没投信箱、也没 emit 出站（不静默降级、不另找目标）。
+    assert stub_handlers["delivered"] == []
+    assert stub_directory["emitted"] == []
+
+
+@pytest.mark.asyncio
+async def test_send_message_unknown_target_type_is_tool_error(
+    stub_handlers, stub_directory
+):
+    """resolver 返回的不是 Mailbox/LarkP2P（理论不该发生）→ 报错喂回，不静默吞。"""
+    stub_directory["resolve_result"] = object()  # 非已知投递目标类型
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke({"uid": "weird:1", "content": "hi"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert stub_handlers["delivered"] == []
+    assert stub_directory["emitted"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2（纯客观事件驱动范式）：删 life 自设闹钟整条。
+#
+# 闹钟 = 空的时间点（next_wake_at / schedule / fire_life_self_wake），目的只是
+# 「维持她运转」，设错 / 丢失就睡死——存活不该压在她自己手上。life 退成纯事件反应者：
+# 只被事件激活、跑完不排下次。她的主动计划走日程（notebook + 到点提醒），那条保留。
+#
+# 这里钉死「自设闹钟已删」：build_life_tools 不再接 self_wake、绝不产 schedule 工具；
+# fire_life_self_wake 不存在。日程那条（note / edit_note / fire_schedule_reminders /
+# schedule_reminders 容器）在上面 / 下面的 section 仍全绿，证明没误删日程。
+# ---------------------------------------------------------------------------
+
+
+def test_build_life_tools_never_produces_schedule_tool():
+    """删自设闹钟：工具集里绝不再有 schedule（不管以前怎么传都不该有）。"""
+    tools = lt.build_life_tools(
+        lane="coe-t3",
+        persona_id="akao",
+        act_id="a-1",
+        observed_at="2026-06-03T12:30:00+00:00",
+    )
+    by_name = _tools_by_name(tools)
+    assert "schedule" not in by_name, "自设闹钟已删：绝不再产 schedule 工具"
+
+
+def test_build_life_tools_rejects_self_wake_kwarg():
+    """删自设闹钟：build_life_tools 不再接 self_wake 参数（self-wake 容器整条拆掉）。"""
+    import inspect
+
+    sig = inspect.signature(lt.build_life_tools)
+    assert "self_wake" not in sig.parameters, (
+        "self-wake 容器整条拆掉：build_life_tools 不再有 self_wake 参数"
+    )
+
+
+def test_fire_life_self_wake_is_gone():
+    """删自设闹钟：fire_life_self_wake 收口函数不复存在（写 next_wake_at 那条腿拆掉）。"""
+    assert not hasattr(lt, "fire_life_self_wake"), (
+        "fire_life_self_wake（写 next_wake_at 的闹钟收口）必须删掉"
+    )
+
+
+def test_set_life_next_wake_at_no_longer_imported_in_life_tools():
+    """删自设闹钟：life_tools 不再 import / 引用 set_life_next_wake_at（没有写入方）。"""
+    assert not hasattr(lt, "set_life_next_wake_at"), (
+        "set_life_next_wake_at 不再有调用方，life_tools 不该再引用它"
+    )

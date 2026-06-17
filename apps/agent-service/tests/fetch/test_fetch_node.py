@@ -359,3 +359,38 @@ async def test_cost_record_failure_does_not_fail_round(monkeypatch):
     # 底料照常落库（成本失败不影响真实的看收口）。
     assert len(saved) == 1
     assert saved[0]["briefing"]
+
+
+# ---------------------------------------------------------------------------
+# 硬超时：眼睛挂死 → wait_for 掐死、走 fail-open（同步 await 它的 cron source loop
+# 不被永久堵死，对齐 world_tick / day_review / persona_review 的 TIMEOUT < TTL 模式）
+# ---------------------------------------------------------------------------
+
+
+async def test_daily_fetch_hard_timeout_fails_open(monkeypatch, caplog):
+    """眼睛挂死（run_world_eyes 不返回）→ 硬超时掐死：不向上抛、error 留痕、不落库、
+    绝不真等。world_eyes 也被 cron source loop 同步 await，没有硬超时一样会永久堵死。"""
+    import asyncio
+
+    _fixed_now(monkeypatch)
+    existing_materials(monkeypatch, None)
+    saved = saved_rows(monkeypatch)
+
+    async def hanging_eyes(**kwargs):
+        await asyncio.sleep(5)  # 远超（被调小的）超时
+        return "never"
+
+    monkeypatch.setattr(fn, "run_world_eyes", hanging_eyes)
+    monkeypatch.setattr(fn, "WORLD_EYES_TIMEOUT_SECONDS", 0.05)
+
+    with caplog.at_level("ERROR"):
+        await fn.daily_fetch_node(fn.DailyMaterialsFetch(lane="coe-t3"))  # 不抛、不真等 5s
+
+    assert saved == [], "超时的一轮绝不落库"
+    assert any(r.levelname == "ERROR" for r in caplog.records), "超时必须 error 留痕"
+
+
+def test_world_eyes_timeout_below_single_flight_ttl():
+    """硬超时必须 < 单飞锁 TTL（1800s）：挂死的旧轮在锁 TTL 到期前被掐死、释放锁，
+    否则下一钟点 cron 会与挂死的旧轮并发烧同一天的眼睛。"""
+    assert fn.WORLD_EYES_TIMEOUT_SECONDS < fn.WORLD_EYES_LOCK_TTL_SECONDS

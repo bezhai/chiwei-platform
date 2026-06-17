@@ -88,6 +88,10 @@ export interface OutboundCapabilities {
     // channel 插件把 common id 反查成渠道内 ref。反查失败必须 fail-loud。
     resolveOutboundTarget(input: OutboundTargetResolveInput): Promise<OutboundResolvedTarget>;
     resolveMessageRef(input: CommonMessageResolveInput): Promise<MessageRef>;
+    // 只解析会话、不反查任何来源消息。主动发（is_proactive）没有来源消息，只能
+    // 拿真实 common_conversation_id 解析出渠道裸会话 id、往这个会话新发一条。
+    // 反查失败必须 fail-loud（resolver 说送不到就送不到，不静默）。
+    resolveConversationRef(commonConversationId: string): Promise<ConversationRef>;
     // 每条助手出站消息发送成功后，仍由当前 channel 插件记录 common_message +
     // channel 私有映射。worker 只提交中性字段，不能直接写 lark_message / qq_message。
     recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string>;

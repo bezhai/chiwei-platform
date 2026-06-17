@@ -21,7 +21,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.memory.context import _build_life_state, build_inner_context
+from app.memory.context import (
+    _build_life_state,
+    _scene_section,
+    build_inner_context,
+)
 
 CST = timezone(timedelta(hours=8))
 
@@ -529,8 +533,7 @@ async def test_relationship_section_absent_when_no_trigger_user():
             chat_id="oc_g", chat_type="group",
             user_ids=["u1"], trigger_user_id=None,
             trigger_username=None, persona_id="chiwei",
-            chat_name="小群", is_proactive=True,
-            proactive_stimulus="群里在聊晚饭",
+            chat_name="小群",
         )
 
     assert _REL_HEADER_MARK not in out
@@ -945,3 +948,109 @@ async def test_notebook_read_failure_section_absent_context_still_builds():
     assert _NOTEBOOK_HEADER_MARK not in out
     assert "浩南" in out  # scene 照常
     assert "散步" in out  # life 快照照常
+
+
+# ---------------------------------------------------------------------------
+# task 5（chat 侧两正交维度）：scene 段把「通信介质」（飞书私聊 / 飞书群聊）和
+# 「物理在场」分别标清，不压成一个「当前场合」标签（spec 决策 7：把它们压成一个
+# 字段正是「把飞书当当面」的根）。chat 触发永远是隔着飞书打字、不是当面。
+# ---------------------------------------------------------------------------
+
+_MEDIUM_HEADER_MARK = "【通信介质】"
+_PRESENCE_HEADER_MARK = "【物理在场】"
+
+
+def test_scene_p2p_labels_medium_as_feishu_p2p():
+    """p2p：通信介质标成「飞书私聊」+ 明确是隔着飞书打字（不是当面）。"""
+    scene = _scene_section("p2p", "", "浩南")
+    assert _MEDIUM_HEADER_MARK in scene, "scene 必须带【通信介质】维度标注"
+    assert "飞书私聊" in scene, "p2p 通信介质要标成飞书私聊"
+    assert "浩南" in scene, "要带对方名字"
+    # 隔着飞书打字的措辞（与「当面」区分开，治混淆的根）
+    assert "当面" not in scene or "不是当面" in scene
+
+
+def test_scene_group_labels_medium_as_feishu_group():
+    """群聊：通信介质标成「飞书群聊」+ 群名，仍带需回复谁的指示。"""
+    scene = _scene_section("group", "高三家长群", "浩南")
+    assert _MEDIUM_HEADER_MARK in scene, "scene 必须带【通信介质】维度标注"
+    assert "飞书群聊" in scene, "group 通信介质要标成飞书群聊"
+    assert "高三家长群" in scene, "要带群名"
+    assert "浩南" in scene, "群聊要标明回复谁"
+
+
+def test_scene_two_dimensions_not_collapsed_into_one_label():
+    """两个维度各自成段：通信介质 + 物理在场分开标，不压成一个「当前场合」。
+
+    spec 决策 7 命门：物理在场（她此刻在哪、跟谁面对面）和通信介质（隔着飞书打字）
+    是两个正交维度，混成一个字段就是「把飞书当当面」的根。
+    """
+    scene = _scene_section("p2p", "", "浩南")
+    assert _MEDIUM_HEADER_MARK in scene
+    assert _PRESENCE_HEADER_MARK in scene
+    # 两个标头分处不同位置（确实是两段、不是一个标签）
+    assert scene.index(_MEDIUM_HEADER_MARK) != scene.index(_PRESENCE_HEADER_MARK)
+
+
+def test_scene_presence_points_to_life_snapshot_not_chat_peer():
+    """物理在场维度指向她的生活快照（她此刻在哪），不是把聊天对象当在身边。
+
+    治混淆：聊天对象在飞书另一端、不在她身边。物理在场要她去看自己的生活状态，
+    绝不暗示「浩南在你身边」。
+    """
+    scene = _scene_section("p2p", "", "浩南")
+    presence_idx = scene.index(_PRESENCE_HEADER_MARK)
+    presence_part = scene[presence_idx:]
+    # 物理在场段不把聊天对象说成在她身边
+    assert "浩南" not in presence_part, "物理在场段不该把聊天对象当成在她身边"
+
+
+@pytest.mark.asyncio
+async def test_inner_context_carries_both_dimensions_in_p2p():
+    """端到端 p2p：inner_context 同时带【通信介质】(飞书私聊) 和【物理在场】两维度。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在房间里写作业"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert _MEDIUM_HEADER_MARK in out
+    assert "飞书私聊" in out
+    assert _PRESENCE_HEADER_MARK in out
+    # 物理在场维度由她的生活快照承载（她此刻在哪）
+    assert "写作业" in out
+
+
+@pytest.mark.asyncio
+async def test_inner_context_carries_both_dimensions_in_group():
+    """端到端 group：inner_context 带【通信介质】(飞书群聊 + 群名) 和【物理在场】。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在客厅看电视"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_g", chat_type="group",
+            user_ids=["u1", "u2"], trigger_user_id="u2",
+            trigger_username="浩南", persona_id="chiwei",
+            chat_name="高三家长群",
+        )
+
+    assert _MEDIUM_HEADER_MARK in out
+    assert "飞书群聊" in out
+    assert "高三家长群" in out
+    assert _PRESENCE_HEADER_MARK in out
+    assert "看电视" in out

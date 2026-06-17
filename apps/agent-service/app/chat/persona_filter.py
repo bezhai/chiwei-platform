@@ -24,7 +24,6 @@ class MessageRouter:
         persona_ids: list[str],
         bot_name: str,
         is_p2p: bool,
-        is_proactive: bool = False,
     ) -> list[str]:
         """Return persona_id list for responders.
 
@@ -33,15 +32,13 @@ class MessageRouter:
             persona_ids: channel-resolved persona IDs
             bot_name: the bot that grabbed the MQ lock
             is_p2p: whether this is a private chat
-            is_proactive: whether this is a proactive trigger message
 
         Returns:
             persona_id list; empty means "don't reply"
         """
-        if is_p2p or is_proactive:
+        if is_p2p:
             pid = await resolve_persona_id(bot_name)
-            label = "Proactive" if is_proactive else "P2P"
-            logger.info("%s route: bot_name=%s -> persona_id=%s", label, bot_name, pid)
+            logger.info("P2P route: bot_name=%s -> persona_id=%s", bot_name, pid)
             return [pid]
 
         if persona_ids:

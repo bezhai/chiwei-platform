@@ -83,13 +83,15 @@ async def deliver_event(
     节点）。返回实际插入的行数（0=去重命中, 1=新投递）。
 
     **被动 kind 不敲门（通道分离的权宜修复 v2，prod 节奏失控）：** 真动静（notify
-    ambient / npc_visit speech / 真人 chat external / 日程到点 reminder）走唤醒通道——
-    真有人找她该立刻响应，新投递成功就 emit ``EventArrived`` 把她叫醒（哪怕在长睡里）。
-    被动 kind（当前只有 world ``sense`` 投的 surroundings 周遭切片）只落信箱当**被动
-    上下文**、不 emit 唤醒：world 每推演一轮就给三姐妹各投一条周遭切片，若走唤醒通道
-    （设计上永远放行、不走"到点才醒"的 gate）会把自排睡着的姐妹全敲醒、自排睡眠系统性
-    睡不满。她下次自己醒来（self-wake 到点）时通过 ``list_unread_events`` 自然读到最新
-    周遭。
+    ambient / npc_visit speech / 白名单**群** chat external / 日程到点 reminder）走唤醒
+    通道——真有人找她该立刻响应，新投递成功就 emit ``EventArrived`` 把她叫醒（哪怕在长
+    睡里）。被动 kind（``PASSIVE_EVENT_KINDS``：world ``sense`` 投的 surroundings 周遭
+    切片、真人**私聊** chat 回灌的 external_passive）只落信箱当**被动上下文**、不 emit
+    唤醒。surroundings：world 每推演一轮就给三姐妹各投一条周遭切片，若走唤醒通道（设计
+    上永远放行、不走"到点才醒"的 gate）会把自排睡着的姐妹全敲醒、自排睡眠系统性睡不满。
+    external_passive：真人私聊她已经在 chat 回合里回应过了，再额外唤醒一轮 life 用 gpt
+    单独跑纯属重复反应、浪费。两类都在她下次被一条 ambient 客观动静唤醒时，通过
+    ``list_unread_events`` 一并读到（self-wake 自设闹钟已随范式重构删除，无"到点自醒"路）。
 
     被动语义**落在已持久化的 kind 上**（不是投递瞬间的临时参数）：上一版用一个
     ``wake`` 参数只能覆盖这条即时敲门路径、没挡住 ``renotify_unread`` 的补敲对账

@@ -172,6 +172,22 @@ def _stub_state(monkeypatch):
         seed_calls.append(lane)
         return 0
 
+    persona_id_calls: list[str] = []
+
+    async def fake_list_all_persona_ids():
+        # 默认没有任何 persona（空名单）：专测引擎机制的用例不碰真库、不拼三姐妹段。
+        # 需要断言三姐妹此刻段的用例自己覆写这个桩 + find_life_state 桩。
+        persona_id_calls.append("called")
+        return []
+
+    life_state_reads: list[dict] = []
+
+    async def fake_find_life_state(*, lane, persona_id):
+        # 默认读不到任何 LifeState（None）：无库环境下安静降级。需要断言三姐妹此刻
+        # 状态内容的用例自己覆写这个桩。
+        life_state_reads.append({"lane": lane, "persona_id": persona_id})
+        return None
+
     reflect_calls: list[dict] = []
 
     async def fake_run_arc_reflection(**kwargs):
@@ -212,6 +228,10 @@ def _stub_state(monkeypatch):
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
+    monkeypatch.setattr(
+        engine_mod, "list_all_persona_ids", fake_list_all_persona_ids
+    )
+    monkeypatch.setattr(engine_mod, "find_life_state", fake_find_life_state)
 
     engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
     engine_mod._test_arc_reads = arc_reads  # type: ignore[attr-defined]
@@ -224,6 +244,8 @@ def _stub_state(monkeypatch):
     engine_mod._test_renotify_calls = renotify_calls  # type: ignore[attr-defined]
     engine_mod._test_cursor_calls = cursor_calls  # type: ignore[attr-defined]
     engine_mod._test_close_calls = close_calls  # type: ignore[attr-defined]
+    engine_mod._test_persona_id_calls = persona_id_calls  # type: ignore[attr-defined]
+    engine_mod._test_life_state_reads = life_state_reads  # type: ignore[attr-defined]
     yield
 
 
@@ -2220,7 +2242,7 @@ async def test_world_loop_messages_carry_no_household_rhythm():
     —— 续写指令里不得硬编 akao / chinagi / ayana 这些 id 或三姐妹中文名（否则又成
     两处真相）。
     """
-    from app.world.engine import _world_loop_messages
+    from app.world.engine import _sisters_section, _world_loop_messages
 
     messages = _world_loop_messages(
         detail="清晨厨房有了动静。",
@@ -2229,6 +2251,7 @@ async def test_world_loop_messages_carry_no_household_rhythm():
         wake_reason="例行看一眼世界。",
         round_id="r1",
         arc_narrative=None,  # 必传：None 是"还没翻过页"的显式语义，不允许靠默认值
+        sisters_text=_sisters_section([]),  # 必传；空名单不引入任何角色坐标
     )
     blob = "".join(m.text() for m in messages)
     assert "作息节律" not in blob, "USER 层不该再拼作息节律段（世界设定归 system 一处）"
@@ -2818,3 +2841,562 @@ def test_render_roster_section_groups_by_sister():
     # 至少验证按姐妹分组（出现姐妹的归类锚点）。
     assert ("绫奈" in section) or ("ayana" in section)
     assert ("赤尾" in section) or ("akao" in section)
+
+
+# ---------------------------------------------------------------------------
+# 三姐妹此刻各自的样子（纯客观叙述对齐，Task 1 收口后）：
+#
+# world 是纯客观世界推演者。它读三姐妹的 LifeState **只为一个用途**——让自己的客观
+# 叙述跟她们此刻所处对得上（她在上课就别说她在街上）。所以 USER 消息里那段「她们此刻
+# 的样子」只拼每个人的**当前状态**（她此刻在哪、在干嘛），摆在能和【现实此刻】对照的
+# 位置；读不到状态的角色如实写「还没有状态记录」、不漏拼不报错。
+#
+# Task 1 收口删掉的是「判唤醒」那一支：world 不再读 ``next_wake_at``（她想几点醒）/
+# 状态新旧（observed_at 停了多久）去判断「谁很久没动、该醒了」再 notify 叫醒——这是
+# 自锁源头（life 一静止就不产 act，world 看世界没动静就判「没必要叫」，越静越不叫）。
+# 收口后 world 是否产事件只取决于客观世界进程（时间到了下课就会发生），跟 life 活不
+# 活跃无关；life 全静止时 world 仍按客观节奏持续产出事件。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_world_produces_events_when_all_life_static(monkeypatch):
+    """Task 1 核心：life 全静止（状态老旧、next_wake_at 已过期）→ world 仍正常推演一轮。
+
+    构造三姐妹都很久没动（observed_at 是几小时前）、且都「想醒的点」早已过去
+    （next_wake_at 已过期）的死局——这正是旧自锁会卡住的场景。收口后 world 不再
+    用这些做唤醒决策，所以照常跑完一轮 agent 循环（产出客观事件），不被 life 的
+    静止拽进自锁。
+    """
+    from datetime import timedelta
+
+    from app.world.engine import _CST
+
+    long_ago = (datetime.now(_CST) - timedelta(hours=4)).isoformat()
+    expired_wake = (datetime.now(_CST) - timedelta(hours=2)).isoformat()
+
+    async def personas():
+        return ["akao", "chinagi", "ayana"]
+
+    async def find_state(*, lane, persona_id):
+        # 三个人都很久没更新、且想醒的点都早过了（旧自锁的死局场景）。
+        return _life_state(
+            persona_id=persona_id,
+            current_state="还睡着，趴在被子里",
+            observed_at=long_ago,
+            next_wake_at=expired_wake,
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    # 不卡死、正常跑完一轮（life 全静止不影响 world 是否推演）。
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # world 照常把客观推演 context 喂进 agent 循环、产出这一轮。
+    assert "messages" in captured, "life 全静止时 world 仍应跑一轮 agent 循环（不自锁）"
+    assert captured["tools"] == WORLD_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_world_still_reads_life_state_for_narration_alignment(monkeypatch):
+    """删的是「判唤醒」、留的是「客观叙述对齐」：world 仍读 life 状态、把当前状态喂进 context。
+
+    这条钉死「客观叙述对齐」这个用途没被误删——world 仍要知道每个姐妹此刻在哪 / 在
+    干嘛，才能让客观叙述跟她对得上（她在上课就别说她在街上）。
+    """
+
+    async def personas():
+        return ["chinagi"]
+
+    reads: list[dict] = []
+
+    async def find_state(*, lane, persona_id):
+        reads.append({"lane": lane, "persona_id": persona_id})
+        return _life_state(
+            persona_id="chinagi",
+            current_state="在厨房煮咖啡",
+            observed_at="2026-06-15T07:00:00+08:00",
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    # 仍然读了 life 状态（客观叙述对齐的用途保留）。
+    assert reads == [{"lane": "coe-t2", "persona_id": "chinagi"}], (
+        "world 仍应读 life 状态用于客观叙述对齐（这个用途不能被误删）"
+    )
+    # 当前状态喂进了 context（让客观叙述对得上她此刻所处）。
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "在厨房煮咖啡" in blob, "当前状态应喂进 context（客观叙述对齐）"
+
+
+@pytest.mark.asyncio
+async def test_sisters_section_drops_next_wake_at(monkeypatch):
+    """Task 1 收口：三姐妹此刻段**不再**拼「她想几点醒」（next_wake_at 是判唤醒输入、删）。
+
+    next_wake_at 是 world 旧的唤醒决策输入（拿她想醒的点和现实比、判该不该叫）。
+    收口后 world 不再判唤醒，这个字段不该再出现在喂给 world 的客观叙述对齐段里。
+    """
+
+    async def personas():
+        return ["akao"]
+
+    async def find_state(*, lane, persona_id):
+        return _life_state(
+            persona_id="akao",
+            current_state="还睡着",
+            observed_at="2026-06-15T03:10:00+08:00",
+            # 一个独一无二的时刻串，只要它出现在 prompt 里就说明 next_wake_at 被拼了。
+            next_wake_at="2026-06-15T06:34:17+08:00",
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "06:34:17" not in blob, (
+        "三姐妹此刻段不该再拼 next_wake_at（她想几点醒）——这是被删的判唤醒输入"
+    )
+    assert "想" not in blob.split("【三姐妹此刻各自的样子】")[-1].split("\n\n")[0], (
+        "三姐妹此刻段不该出现「她想几点醒」这类唤醒意愿表述"
+    )
+
+
+def _life_state(
+    *,
+    lane="coe-t2",
+    persona_id,
+    current_state,
+    observed_at,
+    next_wake_at=None,
+    response_mood="平静",
+    activity_type="rest",
+):
+    """构造一条 LifeState（world 读到的某姐妹此刻主观快照）。"""
+    from app.domain.life_state import LifeState
+
+    return LifeState(
+        lane=lane,
+        persona_id=persona_id,
+        current_state=current_state,
+        response_mood=response_mood,
+        activity_type=activity_type,
+        observed_at=observed_at,
+        next_wake_at=next_wake_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sisters_section_has_each_persona_current_state(monkeypatch):
+    """每轮 USER 消息拼出的三姐妹此刻段含每个角色的**当前状态**（客观叙述对齐的依据）。
+
+    Task 1 收口后只拼当前状态（她此刻在哪 / 在干嘛）——它是客观叙述对齐的依据；
+    不再拼 next_wake_at（她想几点醒），那是被删的判唤醒输入。
+    """
+
+    async def personas():
+        return ["akao", "chinagi", "ayana"]
+
+    states = {
+        "akao": _life_state(
+            persona_id="akao",
+            current_state="还睡着，趴在被子里",
+            observed_at="2026-06-15T03:10:00+08:00",
+            next_wake_at="2026-06-15T06:30:00+08:00",
+        ),
+        "chinagi": _life_state(
+            persona_id="chinagi",
+            current_state="在厨房煮咖啡",
+            observed_at="2026-06-15T07:00:00+08:00",
+            next_wake_at="2026-06-15T12:00:00+08:00",
+        ),
+        "ayana": _life_state(
+            persona_id="ayana",
+            current_state="在书桌前写作业",
+            observed_at="2026-06-15T07:20:00+08:00",
+            next_wake_at=None,
+        ),
+    }
+
+    async def find_state(*, lane, persona_id):
+        return states.get(persona_id)
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 段标题在
+    assert "【三姐妹此刻各自的样子】" in blob, "USER 消息必须拼出三姐妹此刻段"
+    # 每个角色的当前状态都在（客观叙述对齐的依据）
+    assert "还睡着，趴在被子里" in blob
+    assert "在厨房煮咖啡" in blob
+    assert "在书桌前写作业" in blob
+    # 不再拼 next_wake_at（她想几点醒）——判唤醒输入已删。
+    assert "06:30:00 CST" not in blob, "Task 1 收口后不该再拼 akao 想几点醒（next_wake_at）"
+    assert "12:00:00 CST" not in blob, "Task 1 收口后不该再拼 chinagi 想几点醒（next_wake_at）"
+
+
+@pytest.mark.asyncio
+async def test_sister_without_life_state_degrades_gracefully(monkeypatch):
+    """某角色 LifeState 为 None（还没活过一轮）→ 如实写「还没有状态记录」、不漏拼不报错。"""
+
+    async def personas():
+        return ["akao", "chinagi", "ayana"]
+
+    async def find_state(*, lane, persona_id):
+        # 只有 chinagi 有状态，akao / ayana 读不到（None）。
+        if persona_id == "chinagi":
+            return _life_state(
+                persona_id="chinagi",
+                current_state="在厨房煮咖啡",
+                observed_at="2026-06-15T07:00:00+08:00",
+            )
+        return None
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    # 不报错跑通整轮
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "【三姐妹此刻各自的样子】" in blob
+    # 有状态的照常拼
+    assert "在厨房煮咖啡" in blob
+    # 无状态的如实降级（不漏拼这两个 persona）
+    assert blob.count("还没有状态记录") == 2, (
+        "akao / ayana 读不到状态都应如实写「还没有状态记录」，不漏拼"
+    )
+    assert "akao" in blob and "ayana" in blob, "无状态角色仍要出现在段里（不漏拼）"
+
+
+@pytest.mark.asyncio
+async def test_sisters_section_uses_tick_lane(monkeypatch):
+    """读 LifeState 用本轮 tick 的 lane（不是进程默认 lane）。"""
+
+    async def personas():
+        return ["akao"]
+
+    reads: list[dict] = []
+
+    async def find_state(*, lane, persona_id):
+        reads.append({"lane": lane, "persona_id": persona_id})
+        return None
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert reads == [{"lane": "coe-t2", "persona_id": "akao"}], (
+        f"读 LifeState 必须用本轮 tick 的 lane（coe-t2），实际 {reads}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sisters_section_placed_near_now(monkeypatch):
+    """三姐妹此刻段拼在能和【现实此刻】直接比对的位置（紧随其后）。"""
+
+    async def personas():
+        return ["akao"]
+
+    async def find_state(*, lane, persona_id):
+        return _life_state(
+            persona_id="akao",
+            current_state="还睡着",
+            observed_at="2026-06-15T03:10:00+08:00",
+        )
+
+    monkeypatch.setattr(engine_mod, "list_all_persona_ids", personas)
+    monkeypatch.setattr(engine_mod, "find_life_state", find_state)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    # 锚在结构化 section 的实际内容上（标题字样在指令文案里也会出现，用内容定位才稳）：
+    # 【现实此刻】行带的真实时刻锚 now、三姐妹段带的状态文字锚 sisters。两者都只在
+    # 结构化 section 里出现一次。
+    now_idx = blob.rindex("【现实此刻】")  # 结构化那行（指令里那处在更前）
+    sisters_idx = blob.index("还睡着")  # 三姐妹段渲染出的状态内容
+    assert sisters_idx > now_idx, "三姐妹此刻段应在【现实此刻】之后（能直接比对现在几点）"
+
+
+def test_render_sisters_section_only_current_state():
+    """渲染器单测：只把每个角色的**当前状态**拼进段（客观叙述对齐），None 降级。
+
+    Task 1 收口后渲染器只承担「客观叙述对齐」——拼当前状态（她此刻在哪 / 在干嘛）；
+    不再拼 next_wake_at（她想几点醒）/ 状态新旧那些判唤醒输入。
+    """
+    from app.world.engine import _sisters_section
+
+    states = [
+        (
+            "akao",
+            _life_state(
+                persona_id="akao",
+                current_state="还睡着",
+                observed_at="2026-06-15T03:10:00+08:00",
+                next_wake_at="2026-06-15T06:30:00+08:00",
+            ),
+        ),
+        ("ayana", None),
+    ]
+    section = _sisters_section(states)
+    assert "akao" in section and "ayana" in section
+    assert "还睡着" in section, "渲染器应带当前状态（客观叙述对齐的依据）"
+    assert "还没有状态记录" in section, "None 状态应如实降级"
+    # 不再拼 next_wake_at（她想几点醒）
+    assert "06:30:00 CST" not in section, "渲染器不该再拼 next_wake_at（判唤醒输入已删）"
+
+
+def test_render_sisters_section_does_not_carry_wake_decision_inputs():
+    """渲染器：不带任何「她想几点醒 / 状态停滞太久该叫」的判唤醒输入与引导（已删）。
+
+    断言针对旧的判唤醒**短语 / 字段**（不是裸字 "醒"——客观叙述对齐段措辞里可能出现
+    "她在上课就别说她在街上" 这类否定式说明里的字，那是 load-bearing 的、不能误伤）。
+    """
+    from app.world.engine import _sisters_section
+
+    section = _sisters_section(
+        [
+            (
+                "akao",
+                _life_state(
+                    persona_id="akao",
+                    current_state="在写作业",
+                    observed_at="2026-06-15T07:20:00+08:00",
+                    next_wake_at="2026-06-15T22:00:00+08:00",
+                ),
+            )
+        ]
+    )
+    assert "在写作业" in section, "当前状态仍要拼（客观叙述对齐）"
+    assert "22:00:00 CST" not in section, "不该拼 next_wake_at（她想几点醒）"
+    # 段里不该出现旧的判唤醒引导短语（不是裸字）。
+    for wake_phrase in (
+        "她想几点醒",
+        "想醒的点",
+        "停滞",
+        "不对劲",
+        "该有的动静",
+        "把她那边",
+    ):
+        assert wake_phrase not in section, (
+            f"客观叙述对齐段不该出现判唤醒引导 {wake_phrase!r}（判唤醒已删）"
+        )
+
+
+def test_world_instruction_has_no_wake_guidance():
+    """Task 1 收口：world_loop_instruction 不再有「判唤醒」软引导。
+
+    旧引导让 world「顺手看一眼三姐妹、谁状态停滞太久 / 不对劲就 notify 把她唤回」——
+    这是自锁源头（life 静止 → world 判没必要叫 → 越静越不叫）。收口后 world 是纯客观
+    推演者，绝不读角色状态做唤醒决策，所以这段引导整段删除。
+    """
+    instruction = engine_mod.world_loop_instruction()
+    # 不再有判唤醒的**正向引导短语**：把她唤回 / 状态停滞太久该叫 / 临近到点排短 sleep
+    # 接她 这类一律不该出现（针对旧引导的实际措辞，不是裸字——"不替任何角色判断该不该
+    # 醒" 这类否定式 load-bearing 说明里出现的字不算违规）。
+    for wake_phrase in (
+        "唤回这个世界",
+        "把她自然唤回",
+        "想醒的点",
+        "状态停滞",
+        "太久没更新",
+        "把她那边此刻该出现的客观动静想出来",
+        "把她那边此刻该有的动静想出来",
+        "早点回来接着看她那边",
+        "明显该醒了的人同样该被你看见",
+    ):
+        assert wake_phrase not in instruction, (
+            f"world 指令不该再有判唤醒引导 {wake_phrase!r}（Task 1 收口删除）"
+        )
+    # notify 仍在（它的客观投递语义保留，只是不再为「叫醒谁」服务）。
+    assert "notify" in instruction, "notify 工具说明仍应在（客观投递语义保留）"
+
+
+def test_world_instruction_advances_world_by_real_time():
+    """world 指令引导「客观时间独立推进世界」——别把 life 静止当成世界冻结。
+
+    coe 实证：world 推演基于「上一版世界叙述 + 三姐妹此刻状态」，三姐妹 life 状态停
+    在某一刻（都「在吃晚饭」）后，45 分钟后 world 还在叙述「她们仍在餐桌吃饭」——它把
+    life 的静止当成了世界的冻结点（晚饭本该吃完、有人起身收拾、天该更黑，这些客观进程
+    没推演出来）。设计意图：world 应基于真实流逝的时间主动推动客观世界前进，跟 life
+    动没动无关。这条钉死指令在 prompt 层有这层引导：
+
+      * 真实时间在流逝、上一版是过去某一刻的快照、现在世界客观上已经不一样——推演这段
+        时间世界自然推进成了什么样，别照搬复述上一版；
+      * 三姐妹的状态是她**上次被观测到**的过去快照、不是此刻一定还那样——让客观时间把
+        场景往前带，而不是把她冻在那一刻复述；
+      * 区分「硬造戏剧性事件」（不要）vs「客观时间推进的自然变化」（要：一顿饭会吃完、
+        天会黑、人会从这个场景挪到下一个）——安静 ≠ 冻结。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① 真实时间独立推进世界、上一版是过去快照、别照搬复述。
+    assert ("时间" in instruction) and ("流逝" in instruction or "过去" in instruction), (
+        "指令必须点出真实时间在流逝 / 上一版是过去某一刻的"
+    )
+    assert ("照搬" in instruction) or ("复述" in instruction), (
+        "指令必须提醒别照搬复述上一版世界叙述"
+    )
+    # ② 三姐妹状态是上次被观测到的过去快照、不是此刻一定还那样。
+    assert "快照" in instruction, (
+        "指令必须说明三姐妹此刻的样子是上次被观测到的过去快照"
+    )
+    assert ("把场景往前带" in instruction) or ("场景往前" in instruction), (
+        "指令必须引导让客观时间把场景往前带、而不是把人冻在那一刻"
+    )
+    # ③ 区分硬造戏剧 vs 客观时间推进的自然变化（安静 ≠ 冻结）。
+    assert "冻结" in instruction, (
+        "指令必须区分『安静』和『冻结』（安静不等于把世界冻在那一刻）"
+    )
+    assert ("吃完" in instruction) or ("结束" in instruction) or ("天会黑" in instruction), (
+        "指令必须举例客观时间推进的自然变化（一顿饭会吃完 / 天会黑 / 人会挪到下一个场景）"
+    )
+
+    # 红线复核：这条新引导绝不能重新引入「判唤醒」语义（Task 1 已收口）。
+    for wake_phrase in (
+        "状态停滞",
+        "太久没更新",
+        "该不该叫醒",
+        "明显该醒",
+    ):
+        assert wake_phrase not in instruction, (
+            f"推进世界 ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
+def test_world_instruction_does_not_author_sisters_autonomous_action():
+    """第二轮调优 A：world 推进世界**不替三姐妹编她们自己的自主行动**。
+
+    coe 实证：world 推进世界时写了「赤尾从餐桌边起身到厨房收拢碗筷」——但她（life）
+    还没醒、没决定起身。world 是客观推演者，不替角色决定她做什么。已对齐的边界：
+
+      * world 推的是客观环境随时间的进程（饭凉了、天黑了）+ 外部 / NPC 的客观动静；
+      * world **可以**反映三姐妹**已经做了**的 act 的客观结果（她去厨房 → 厨房有动静），
+        这是反映既成事实；
+      * world **绝不预先替她编她还没做的行动**（她还在吃饭 / 还没醒，就不能写「她起身
+        收拾了」）——那是她 life 醒来后自己决定的。
+
+    这条钉死指令在 prompt 层明确这层「反映已做 ✓ / 预编没做 ✗」的区分。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① 明确「不替三姐妹决定她们自己做什么」（她起不起身 / 去不去做某事是她自己的事）。
+    assert ("不替" in instruction), "指令必须明确 world 不替角色决定她做什么"
+    assert ("她自己" in instruction) or ("自己决定" in instruction) or (
+        "自己的事" in instruction
+    ), "指令必须说明她做不做某事是她自己（life 醒来后）决定的"
+
+    # ② 反映已做的 act ✓ —— 把她已经做了的事的客观结果体现进世界（既成事实）。
+    assert ("已经做" in instruction) or ("已做" in instruction) or (
+        "既成事实" in instruction
+    ), "指令必须允许 world 反映三姐妹已经做了的 act 的客观结果（既成事实）"
+
+    # ③ 预编没做的行动 ✗ —— 绝不预先替她编她还没做 / 还没醒时的自主行动。
+    assert ("还没做" in instruction) or ("没做的行动" in instruction) or (
+        "预编" in instruction
+    ) or ("预先" in instruction), (
+        "指令必须钉死 world 绝不预先替角色编她还没做的自主行动"
+    )
+
+    # 红线复核：这条边界绝不能重新引入「判唤醒」语义（Task 1 已收口）。
+    for wake_phrase in ("状态停滞", "太久没更新", "该不该叫醒", "明显该醒"):
+        assert wake_phrase not in instruction, (
+            f"职责边界 ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
+def test_world_instruction_notifies_objective_changes_from_advance():
+    """第二轮调优 B：真实时间推进让世界冒出在场的人够得着的客观动静，就要 notify 投出去。
+
+    coe 实证：world 推进了世界（出了碗盘声、水流声），却没 notify 投给在场的人，life
+    仍没被卷起来；它甚至推进完世界后还自相矛盾地写「没有出现可见的新变化」。已对齐的
+    边界：notify 是把「世界推进」转成「life 被卷」的唯一通道——真实时间推进让世界冒出
+    在场的人够得着的客观动静（环境到了新节点：饭凉了、天黑该开灯了；或外部 / NPC 动静：
+    家人喊吃饭、电话响、玄关有动静），就要 notify 投出去、标客观作用域，让在场的人感知到。
+    不能推进了世界却判「没有新变化」而不发。
+
+    这条钉死指令在 prompt 层强化 notify：推进出的客观动静要投出去、别推进了却判没变化。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① notify 是把「世界推进」转成「life 被卷 / 感知」的唯一通道。
+    assert "notify" in instruction, "指令必须枚举 notify 工具"
+    assert ("唯一" in instruction), (
+        "指令必须点出 notify 是世界推进传到角色那里的唯一通道"
+    )
+
+    # ② 推进冒出的客观动静（环境到了新节点 / 外部 / NPC 动静）就要 notify 投出去。
+    assert ("推进" in instruction) and ("动静" in instruction), (
+        "指令必须引导：推进世界冒出的客观动静要 notify 投出去"
+    )
+
+    # ③ 别推进了世界却判「没有新变化」而不发（这是 coe 实证的自相矛盾）。
+    assert ("没有新变化" in instruction) or ("没有变化" in instruction) or (
+        "没新变化" in instruction
+    ), "指令必须钉死：别推进了世界却判「没有新变化」而不发"
+
+    # 红线复核：强化 notify ≠ 硬造戏剧（自然冒出的动静才投，不为卷人硬造）。
+    assert "硬造" in instruction, (
+        "强化 notify 必须同时守住「别为卷人硬造动静」（自然冒出才投）"
+    )
+    # 红线复核：绝不重新引入「判唤醒」语义（notify 投客观动静、不挑谁该醒）。
+    for wake_phrase in ("状态停滞", "太久没更新", "该不该叫醒", "明显该醒"):
+        assert wake_phrase not in instruction, (
+            f"强化 notify ≠ 判唤醒：指令不该出现 {wake_phrase!r}（绝不重新引入判唤醒）"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 硬超时：整轮推演挂死 → wait_for 掐死、走 fail-open（堵 world 唯一的永久睡死口）
+#
+# world_tick 被 time source loop 同步 await：没有硬超时时，一轮 LLM（或冷启路径里
+# 任何一步）挂死会让 world_tick 永不返回 → source loop 永等 → world 永久睡死（真机
+# coe 清库冷启零 emit 就是它）。对照组 day_review / persona_review 早有 wait_for，所以
+# 同样被同步 await 也从不永久死。这两条测试把同样的硬超时模式补到 world_tick。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_world_tick_hard_timeout_fails_open(monkeypatch, caplog):
+    """整轮推演挂死（run 不返回）→ 硬超时掐死：不向上抛、error 留痕、绝不真等。"""
+    import asyncio
+
+    async def hanging_run(self, messages, **kwargs):
+        await asyncio.sleep(5)  # 远超（被调小的）超时
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(engine_mod.Agent, "run", hanging_run)
+    monkeypatch.setattr(engine_mod, "WORLD_TICK_TIMEOUT_SECONDS", 0.05)
+
+    with caplog.at_level("ERROR"):
+        await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))  # 不抛、不真等 5s
+
+    assert any(r.levelname == "ERROR" for r in caplog.records), (
+        "超时的一轮必须 error 留痕，不能静默吞"
+    )
+
+
+def test_world_tick_timeout_below_single_flight_ttl():
+    """硬超时必须 < 单飞锁 TTL（600s）：锁 TTL 到期后下一拍能进，挂死的旧轮必须先被
+    掐死、释放锁，否则两轮并发写同一 world transcript（确定性 session_id 读改写竞态）。"""
+    assert (
+        engine_mod.WORLD_TICK_TIMEOUT_SECONDS
+        < engine_mod.WORLD_TICK_LOCK_TTL_SECONDS
+    )

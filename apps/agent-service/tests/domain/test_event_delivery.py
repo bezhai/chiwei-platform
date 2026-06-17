@@ -106,9 +106,10 @@ async def test_passive_kind_delivery_lands_in_inbox_without_knock(mailbox_db, mo
 async def test_active_kind_delivery_still_knocks(mailbox_db, monkeypatch):
     """真动静（非被动 kind：ambient / speech / external）**仍**敲门唤醒——通道分离只改被动 kind。
 
-    所有非 PASSIVE_EVENT_KINDS 的 event（notify ambient / npc_visit speech / 真人 chat
-    external / 日程到点 reminder）行为不变，照常 emit EventArrived 唤醒——"真有人找她 /
-    真有动静"该立刻响应，不能被这次权宜修复动到。
+    所有非 PASSIVE_EVENT_KINDS 的 event（notify ambient / npc_visit speech / 白名单**群**
+    chat external / 日程到点 reminder）行为不变，照常 emit EventArrived 唤醒——"真有人找她 /
+    真有动静"该立刻响应，不能被这次权宜修复动到。（真人**私聊** chat 回灌已改被动
+    external_passive、不在此列——见 task 3 / PASSIVE_EVENT_KINDS。）
     """
     fake_emit = AsyncMock()
     monkeypatch.setattr(mailbox_mod, "emit", fake_emit)

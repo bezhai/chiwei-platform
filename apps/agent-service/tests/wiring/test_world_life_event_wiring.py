@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 
 def _fresh_import():
     """重新加载 wiring，让 wire(...) 语句重跑、WIRING_REGISTRY 从头填。"""
@@ -142,41 +144,35 @@ def test_event_arrived_debounced_to_life_wake():
 
 
 # ---------------------------------------------------------------------------
-# 阶段 1B Task 2 —— life 自排唤醒：独立 LifeWakeTick 信号接回 life_self_wake_node。
-# self wake 绝不复用 EventArrived 通道（spec decision 6）。
+# world-driven wake —— life 自排执行腿（LifeWakeTick → life_self_wake_node）和被否的
+# fan-out 心跳整套拆掉，唤醒只剩 world notify 一条腿（EventArrived → life_wake_node）。
 # ---------------------------------------------------------------------------
 
 
-def test_life_wake_tick_routes_in_process_to_life_self_wake():
-    """LifeWakeTick → life_self_wake_node，in-process（自排回环，对称 world self WorldTick）。
-
-    life schedule 收口 emit_delayed(LifeWakeTick(reason=self)) 到期 emit，必须有一条
-    in-process（非 durable）wire 把它接回 life_self_wake_node，否则自排空转。
-    """
+def test_self_wake_and_heartbeat_signals_have_no_wire():
+    """self 自排腿 + fan-out 心跳的信号在 wiring 里零残留（唤醒只剩 world notify）。"""
     _fresh_import()
-    from app.nodes.life_wake import life_self_wake_node
 
-    wires = _wires_for("LifeWakeTick")
-    consumer_wires = [w for w in wires if life_self_wake_node in w.consumers]
-    assert consumer_wires, "LifeWakeTick 没有接到 life_self_wake_node"
-    assert any(not w.durable for w in consumer_wires), (
-        "LifeWakeTick → life_self_wake_node 没有 in-process 边，自排回环会空转"
-    )
+    for name in ("LifeWakeTick", "LifeHeartbeatTick", "LifeHeartbeatSweep"):
+        assert _wires_for(name) == [], (
+            f"world-driven wake 下 {name} 不该有任何 wire（自排腿 / 心跳已拆）"
+        )
 
 
-def test_life_self_wake_does_not_reuse_event_arrived_channel():
-    """self wake 是独立信号：LifeWakeTick 与 EventArrived 是两个不同 Data，互不复用。"""
+def test_life_wake_machinery_deleted_from_module():
+    """life_wake 模块不再导出 self 自排腿的任何符号（彻底删除、无死引用）。"""
     _fresh_import()
-    from app.domain.world_events import EventArrived
-    from app.nodes.life_wake import LifeWakeTick, life_self_wake_node, life_wake_node
+    import app.nodes.life_wake as lw
 
-    # LifeWakeTick 不接到 event 的 life_wake_node；EventArrived 不接到 self 的节点
-    lifewake_wires = _wires_for("LifeWakeTick")
-    assert all(life_wake_node not in w.consumers for w in lifewake_wires), (
-        "self wake（LifeWakeTick）绝不复用 EventArrived 的 life_wake_node 通道"
-    )
-    arrived_wires = _wires_for("EventArrived")
-    assert all(life_self_wake_node not in w.consumers for w in arrived_wires), (
-        "EventArrived 不该接到 self wake 节点（两条独立通道）"
-    )
-    assert LifeWakeTick is not EventArrived
+    for name in ("LifeWakeTick", "life_self_wake_node", "_life_self_wake_gate_passes"):
+        assert not hasattr(lw, name), (
+            f"world-driven wake 下 {name} 应已从 life_wake 删除"
+        )
+
+
+def test_life_heartbeat_module_deleted():
+    """被否的 life fan-out 心跳模块整套删除（import 应失败）。"""
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("app.life.life_heartbeat")

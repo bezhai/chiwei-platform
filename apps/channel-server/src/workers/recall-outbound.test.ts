@@ -25,6 +25,9 @@ function makeCap(failFor: Set<string> = new Set()): {
             }
             return { channelId };
         },
+        async resolveConversationRef(): Promise<MessageRef> {
+            throw new Error('not used');
+        },
         async recordOutboundMessage() {
             throw new Error('not used');
         },
@@ -103,6 +106,9 @@ describe('recallReplies', () => {
             },
             async resolveMessageRef() {
                 return { channelId: 'om_a' };
+            },
+            async resolveConversationRef(): Promise<MessageRef> {
+                throw new Error('not used');
             },
             async recordOutboundMessage() {
                 throw new Error('not used');

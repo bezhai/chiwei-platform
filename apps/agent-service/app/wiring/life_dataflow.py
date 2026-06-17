@@ -5,7 +5,13 @@ Graph topology:
   interval 10min -> WorldHeartbeatTick -> heartbeat_to_world_tick -> WorldTick -> world_tick
   WorldTick (in-process: heartbeat / self-schedule) -> world_tick
   EventArrived .debounce() -> life_wake_node
-  LifeWakeTick (in-process: life 自排回环) -> life_self_wake_node
+  ScheduleReminderTick (in-process: 日程到点提醒回环) -> life_schedule_reminder_node
+
+纯事件反应者：角色被叫醒只剩 EventArrived 一条腿（world notify / 日程到点提醒 /
+真人聊天都投信箱敲门走它）。角色的自排闹钟整条已拆（Task 2，纯客观事件驱动范式）——
+自排执行腿（LifeWakeTick -> life_self_wake_node）、next_wake_at 意愿写入、被否的 fan-out
+定时心跳（LifeHeartbeatTick / LifeHeartbeatSweep）全删。她跑完一轮就等下一个事件、自己
+绝不排下次，存活由世界持续的客观事件流兜底，主动计划走日程（notebook + 到点提醒）。
 
 pull 范式：act 不再唤醒 world。life 做完一件事直接 insert_idempotent(ActPerformed)
 落 PG，world 醒来按游标批量 pull——所以 ActPerformed 没有任何 wire。
@@ -19,10 +25,8 @@ from __future__ import annotations
 
 from app.domain.world_events import EventArrived, event_knock_key
 from app.nodes.life_wake import (
-    LifeWakeTick,
     ScheduleReminderTick,
     life_schedule_reminder_node,
-    life_self_wake_node,
     life_wake_node,
 )
 from app.runtime import Source, wire
@@ -70,18 +74,16 @@ wire(EventArrived).debounce(
     key_by=event_knock_key,
 ).to(life_wake_node)
 
-# life 自排唤醒（阶段 1B Task 2）：她调 schedule 自排 → 收口
-# emit_delayed(LifeWakeTick(reason="self"))，到期 emit(LifeWakeTick) 经这条纯
-# in-process 边接回 life_self_wake_node（对称 world 的 self WorldTick 回环）。
-# **独立信号、不复用 EventArrived 通道**（spec decision 6）：self 唤醒入口走到点
-# gate + 空信箱也跑一轮，与信箱敲门的 life_wake_node 是两条独立路径。LifeWakeTick
-# 是 transient，不挂时间源（life 没有独立保底心跳），只承载自排回环这一种来源。
-wire(LifeWakeTick).to(life_self_wake_node)
+# 纯事件反应者（Task 2 删自设闹钟）：角色的自排执行腿（LifeWakeTick → life_self_wake_node）、
+# next_wake_at 意愿写入、被否的 fan-out 定时心跳（LifeHeartbeatTick / LifeHeartbeatSweep）
+# 整套已拆掉——唤醒只剩 world notify 一条腿（走上面的 EventArrived → life_wake_node）。
+# 她跑完一轮就等下一个事件、自己绝不排下次醒，没有自排回环 wire。
 
 # 日程到点提醒（备忘录 & 日程 第三块）：她 note / edit_note 排了带 remind_at 的日程 →
 # 收口 fire_schedule_reminders 给每条各 emit_delayed(ScheduleReminderTick)，到期 emit
-# 经这条纯 in-process 边接回 life_schedule_reminder_node（每条日程各挂各的、独立一路，
-# **不动** self-wake 的 next_wake_at 语义）。节点走到点 gate（读 entry 最新一版判仍 active
+# 经这条纯 in-process 边接回 life_schedule_reminder_node（每条日程各挂各的、独立一路）。
+# 日程是她真实生活里有内容的安排（到点提醒她去做），区别于已删的自设闹钟（空时间点维持
+# 运转）。节点走到点 gate（读 entry 最新一版判仍 active
 # 且 remind_at 未改期 / 未撤）后 deliver_event 把这条投进她信箱、复用敲门把她叫醒。
 # ScheduleReminderTick 是 transient（日程内容在 durable NotebookEntry 里），不挂时间源，
 # 只承载到点提醒回环这一种来源。
