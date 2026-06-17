@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, text, update
 from sqlalchemy.future import select
 
 from app.data.message_record import CommonMessageRecord
@@ -30,6 +30,7 @@ __all__ = [
     "find_last_bot_reply_time",
     "find_gray_config",
     "find_user_messages_after",
+    "find_recent_chat_messages",
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
     "find_persona_spoken_chats_in_window",
@@ -278,6 +279,86 @@ async def find_user_messages_after(
     async with auto_tx():
         result = await current_session().execute(stmt)
         return [_record(row) for row in result.scalars().all()]
+
+
+async def find_recent_chat_messages(
+    *,
+    chat_id: str,
+    limit: int,
+) -> list[tuple[CommonMessageRecord, str | None]]:
+    """按 chat_id 捞这个会话最近 ``limit`` 条消息（proactive 渲染的历史上下文）。
+
+    proactive（赤尾主动给真人发消息）**没有源消息**，渲染历史不能走
+    ``quick_search``（它从 message_id 反查），只能靠 chat_id 取。这里给一个
+    ``chat_id``，捞这个会话最近 ``limit`` 条消息：
+
+      * **user + assistant 都取**（区别于 ``find_user_messages_after`` 只取 user）——
+        proactive context 要把赤尾自己发过的（含上一条 proactive）认作她自己说的，
+        所以 assistant 行也得在历史里。
+      * assistant 行的发言 persona 经
+        ``COALESCE(common_agent_response.persona_id, bot_config.persona_id)`` 取：
+          - 普通回复行带 ``response_id`` → join ``common_agent_response.session_id``
+            拿到 persona（**优先**，同 ``find_persona_spoken_chats_in_window`` 的 join）。
+          - **proactive 出站行 ``response_id=NULL`` 且没有 agent_response 行**（worker
+            真实落库口径：proactive session_id=null → responseId 不挂、不写
+            agent_response），此 join 必拿 None；改经 ``bot_config(bot_name →
+            persona_id)`` 兜底（channel-server 落 proactive 时写了 bot_name）。
+            **承重红线（codex 必改 1）**：只靠 response_id 会把 proactive 行判成
+            persona=None → proactive context 误判为真人输入（串味）；bot_name → persona
+            是它在真实链路里唯一能拿到的归属来源。
+        user 行两路都拿 None（无 persona）。``bot_config`` 由 channel-server 管理、不在
+        agent-service 的 SQLAlchemy 模型里，用相关标量子查询读裸表（同
+        ``resolve_persona_id`` 用裸表名读它），只取 ``is_active`` 的映射。
+      * 超 ``limit`` 只保**最近 N 条**、仍按发生先后升序（条目数量控制、不字符截断）：
+        SQL 先按 event_time 降序取最近 N 条，再在 Python 反转回升序。
+      * ``proactive_trigger`` 伪消息剔除（NULL-safe，同 ``_by_root``）。
+
+    返回 ``[(record, 发言 persona), ...]``。``chat_id`` 解析不出 uuid → 返回 ``[]``。
+    """
+    chat_uuid = _uuid(chat_id)
+    if chat_uuid is None:
+        return []
+
+    # bot_config 兜底：assistant 行 response_id 取不到 persona 时（proactive 出站行
+    # response_id=NULL），按它的 bot_name 在 bot_config 里查 persona。bot_config 不是
+    # agent-service 的映射模型（channel-server 管），用相关标量子查询读裸表（同
+    # resolve_persona_id）。只对有 bot_name 的行有意义；user 行 bot_name=NULL → 子查询
+    # 拿不到、整体仍 NULL。
+    bot_config_persona = (
+        select(text("persona_id"))
+        .select_from(text("bot_config"))
+        .where(text("bot_name = common_message.bot_name AND is_active = true"))
+        .limit(1)
+        .scalar_subquery()
+    )
+
+    stmt = (
+        select(
+            CommonMessage,
+            func.coalesce(
+                CommonAgentResponse.persona_id, bot_config_persona
+            ).label("persona_id"),
+        )
+        .outerjoin(
+            CommonAgentResponse,
+            CommonMessage.response_id == CommonAgentResponse.session_id,
+        )
+        .where(
+            CommonMessage.common_conversation_id == chat_uuid,
+            or_(
+                CommonMessage.message_type.is_(None),
+                CommonMessage.message_type != "proactive_trigger",
+            ),
+        )
+        .order_by(CommonMessage.event_time.desc())
+        .limit(limit)
+    )
+
+    async with auto_tx():
+        result = await current_session().execute(stmt)
+        rows = [(_record(msg), msg_persona) for msg, msg_persona in result.all()]
+    rows.reverse()
+    return rows
 
 
 async def find_messages_with_user_chat_persona_by_root(

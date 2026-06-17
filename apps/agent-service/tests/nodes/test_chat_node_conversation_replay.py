@@ -18,13 +18,17 @@ from __future__ import annotations
 import pytest
 
 from app.domain.chat_dataflow import ChatRequest
+from app.domain.world_events import (
+    EVENT_KIND_EXTERNAL,
+    EVENT_KIND_EXTERNAL_PASSIVE,
+)
 
 
 def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
     """装上 chat_node happy-path 跑通所需的最小 mock。
 
     ``user_msg``    本轮用户消息（find_message_content 返回，喂给 parse_content）。
-    ``reply_parts`` 赤尾本轮回复的流式分片（_build_and_stream yield 出来的）。
+    ``reply_parts`` 赤尾本轮回复的流式分片（共享渲染层 render_chat_turn yield 出来的）。
     """
     if reply_parts is None:
         reply_parts = ["hello ", "world"]
@@ -37,6 +41,16 @@ def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
         from app.domain.safety import PreSafetyVerdict
         return PreSafetyVerdict(
             pre_request_id="x", message_id="m1", is_blocked=False
+        )
+
+    # 真人聊天两层:context 构建打桩成返回 stub(非 None),渲染层打桩成喂入分片。
+    from app.chat.render import ChatTurnContext
+
+    async def fake_build_ctx(message_id, *, persona_id, **k):
+        return ChatTurnContext(
+            messages=[], image_registry=None, chat_id="c1",
+            persona_id=persona_id, identity="", appearance="",
+            inner_context="", persona=None,
         )
 
     async def fake_stream(*a, **k):
@@ -53,7 +67,8 @@ def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
     monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
     monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
     monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
-    monkeypatch.setattr(cn, "_build_and_stream", fake_stream)
+    monkeypatch.setattr(cn, "build_human_chat_context", fake_build_ctx)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
     monkeypatch.setattr(cn, "find_username", fake_find_username)
 
     async def fake_emit(d): pass
@@ -62,7 +77,7 @@ def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
 
 @pytest.mark.asyncio
 async def test_chat_completion_delivers_external_event_to_persona(monkeypatch):
-    """聊完一次,对应 persona 信箱多一条 external "刚聊过" event。"""
+    """聊完一次,对应 persona 信箱多一条"刚聊过" event（p2p 真人私聊 → 被动 kind）。"""
     from app.nodes import chat_node as cn
 
     _happy_path_mocks(cn, monkeypatch)
@@ -85,11 +100,12 @@ async def test_chat_completion_delivers_external_event_to_persona(monkeypatch):
     )
     await cn.chat_node(req)
 
-    assert len(delivered) == 1, "聊完一次应回灌恰好一条 external event"
+    assert len(delivered) == 1, "聊完一次应回灌恰好一条 event"
     d = delivered[0]
     assert d["lane"] == "coe-t1"          # lane 隔离：进对应泳道的信箱（进程级部署泳道）
     assert d["persona_id"] == "akao"      # 进的是这个 persona 的信箱
-    assert d["kind"] == "external"        # 外部消息类
+    # p2p 真人私聊回灌是被动 kind（感知但不唤醒 life，task 3）。
+    assert d["kind"] == EVENT_KIND_EXTERNAL_PASSIVE
     assert "u1" in d["source"] or "u1" in d.get("summary", "")  # 知道和谁聊的
     assert d["event_id"]                  # 有去重键
 
@@ -343,7 +359,8 @@ async def test_replay_event_contract_unchanged(monkeypatch):
     assert len(delivered) == 1
     d = delivered[0]
     assert d["event_id"] == "chat:s1", "event_id 仍按 session 幂等去重"
-    assert d["kind"] == "external"
+    # p2p 真人私聊回灌是被动 kind（task 3）；event_id / source 契约不变。
+    assert d["kind"] == EVENT_KIND_EXTERNAL_PASSIVE
     assert d["source"] == "user:u1"
 
 
@@ -573,3 +590,79 @@ async def test_no_replay_when_no_persona(monkeypatch):
     await cn.chat_node(req)
 
     assert delivered == [], "没真正完成对话的分支不该回灌信箱"
+
+
+# ---------------------------------------------------------------------------
+# 真人私聊（p2p）回灌 = 被动 kind（感知不唤醒）；白名单内的群回灌 = external（照常唤醒）。
+# 被动落在 kind 上，由 mailbox 的 PASSIVE_EVENT_KINDS 决定唤醒/不唤醒——chat_node 只负责
+# 给真人私聊回灌打上被动 kind、给群回灌打上 external（task 3）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_p2p_replay_uses_passive_kind(monkeypatch):
+    """真人私聊回灌打被动 kind（EVENT_KIND_EXTERNAL_PASSIVE）—— 感知但不唤醒 life。"""
+    from app.nodes import chat_node as cn
+
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id="c1", is_p2p=True, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    assert delivered[0]["kind"] == EVENT_KIND_EXTERNAL_PASSIVE, (
+        "真人私聊回灌必须是被动 kind（task 3：感知不唤醒）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_replay_keeps_waking_external_kind(monkeypatch):
+    """白名单内的群回灌仍用 external（非被动）—— 被选中要听的群照常唤醒 life。
+
+    被动只落在 p2p 真人私聊这条回灌上，绝不波及白名单群——群是显式选来要听的，
+    保持 external（waking）。
+    """
+    from app.life import feed_whitelist as fw
+    from app.nodes import chat_node as cn
+
+    wl_chat = "wl-group-1"
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+
+    # 把这个群放进白名单（真解析逻辑照走），群回灌才会真的发生。
+    def fake_get(key: str, *, default: str = "") -> str:
+        assert key == fw.LIFE_FEED_CHAT_WHITELIST_KEY
+        return wl_chat
+
+    monkeypatch.setattr(fw.dynamic_config, "get", fake_get)
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id=wl_chat, is_p2p=False, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    assert delivered[0]["kind"] == EVENT_KIND_EXTERNAL, (
+        "白名单内的群回灌应保持 external（waking），被动只落 p2p 真人私聊"
+    )

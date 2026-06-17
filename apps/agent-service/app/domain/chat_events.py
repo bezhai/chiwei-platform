@@ -18,7 +18,7 @@ class CommonMessageContentSynced(Data):
     """Trigger background sync of common message content tos_file mappings.
 
     Carries the (message_id, content) tuples from quick_search plus the
-    image_key -> tos_file mapping discovered during ``build_chat_context``.
+    image_key -> tos_file mapping discovered during ``build_human_chat_context``.
     The ``persist_tos_files_node`` rewrites ``common_message.content`` rows so
     subsequent reads find tos_file references inline.
 

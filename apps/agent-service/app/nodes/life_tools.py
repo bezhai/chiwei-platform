@@ -46,6 +46,13 @@ from app.agent.tools._common import tool_error
 # 拿 search_web 已经带源组织好的文本（每条 [i] 标题 / 出处链接 / 关键摘录）。
 from app.agent.tools.search import search_web
 
+# module-level 引用 proactive 渲染链（让 send_message 真人分支「life 给意图 → proactive
+# context 构建 → 共享渲染层渲染 → 出站」，也让测试能 monkeypatch）。proactive context
+# 是和真人聊天那套并列的、单独一套（不复用 build_human_chat_context、不碰源消息）；
+# render_chat_turn 是真人聊天复用的共享渲染层（只读、不改）。
+from app.chat.proactive_context import build_proactive_chat_context
+from app.chat.render import render_chat_turn
+
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import (
@@ -496,8 +503,12 @@ def build_life_tools(
             return "发出去了"
 
         if isinstance(target, LarkP2PTarget):
-            # 真人（飞书私聊）→ emit 一条主动发出站段到 chat_response 队列，task 4 的
-            # chat-response-worker is_proactive 分支接力送达飞书（不靠伪 id）。
+            # 真人（飞书私聊）→ life 只给**意图**（content 是她想说的要点 / 意图），
+            # 措辞交给**共享渲染层**（主模型 + 人设）产出，**不再**由 life 的 offline
+            # gpt 直出原文（直出口径不一致、堆黑话、叫「主人」，正是本刀要治的根）。
+            # 流程：life 给意图 → proactive context 构建（带 chat_id 历史、接得上上次聊）
+            # → render_chat_turn 渲染 → 出站。proactive **不穿** chat 队列（route_chat
+            # _node→chat_node 那套是真人回复专属）、**不写** agent_response，出站契约保持。
             #
             # 主动发**没有来源消息**：message_id 不能是指向真实来源消息的 id（worker 反查
             # 会炸）—— 用 proactive: 前缀 + 本轮派生键明确「这是主动发、非来源消息 id」，
@@ -507,6 +518,54 @@ def build_life_tools(
                 f"{PROACTIVE_MESSAGE_ID_PREFIX}"
                 f"{uuid.uuid5(uuid.NAMESPACE_OID, f'{send_base}:p2p')}"
             )
+
+            # proactive context 构建（单独一套，不碰源消息）：意图 + chat_id 历史 →
+            # ChatTurnContext。history 把赤尾自己发过的（含上一条 proactive）认作她自己
+            # 说的（ASSISTANT）、真人认作 USER（见 proactive_context）。
+            turn_ctx = await build_proactive_chat_context(
+                intent=content,
+                persona_id=persona_id,
+                chat_id=target.common_conversation_id,
+                user_id=target.user_id,
+            )
+
+            # 渲染：累出整段文本（render_chat_turn 是 async generator，吐文本片段 +
+            # split marker；主动发是一段完整消息，把片段拼成整段、去掉 split marker）。
+            # **渲染失败 / 超时不回退发 life 原文**（否则原问题复发）。**承重红线（codex
+            # 必改 2）**：真人回复路径下 render 会**吞掉** stream 异常 / content_filter /
+            # length，改 yield persona error / 截断文案（用户在等回复，给一句话比静默
+            # 好）；proactive 复用同一渲染层，但绝不能把「ERR / 遇到了问题 / 截断」当成功
+            # 内容主动发给真人。所以 proactive 显式传 ``on_error="raise"`` —— render 在
+            # 这三种失败下改**抛 RenderFailed** 而非 yield 错误文案，下面 try 兜住、走
+            # 「没发出去」喂回 life。产出为空（极端情况没吐有效内容）也当没发出去，不
+            # 出站一条空消息。
+            try:
+                rendered = ""
+                async for piece in render_chat_turn(
+                    turn_ctx,
+                    outbound_message_id=proactive_message_id,
+                    session_id=None,  # 主动发没有 chat session（不穿 chat 队列）
+                    channel=target.channel,
+                    on_error="raise",  # proactive：渲染失败抛而非 yield 错误文案
+                ):
+                    if piece:
+                        rendered += piece
+            except Exception as exc:  # noqa: BLE001 — 渲染失败不回退发原文
+                logger.warning(
+                    "[life_tools] %s proactive render failed (uid=%s): %s",
+                    persona_id, uid, exc, exc_info=True,
+                )
+                rendered = ""
+
+            rendered = rendered.replace("---split---", "\n\n").strip()
+            if not rendered:
+                # 渲染没产出有效内容 → 不出站（绝不发空消息、更不回退发 life 原文），
+                # 把「没发出去」作为工具结果喂回 life，让她自己处置（重试 / 算了）。
+                raise RuntimeError(
+                    "这条想主动发的消息没能成形（渲染没出内容），没发出去——"
+                    "你可以待会儿再试，或者换个说法。"
+                )
+
             await emit(
                 ChatResponseSegment(
                     channel=target.channel,
@@ -521,10 +580,10 @@ def build_life_tools(
                     is_proactive=True,      # 复用 worker 既有 is_proactive 出站分支
                     bot_name=target.bot_name,
                     lane=lane,              # 必须显式带：sink 不注入 header lane
-                    content=content,
+                    content=rendered,       # 出站的是**渲染后的人设口径话**，不是意图原文
                     status="success",
                     is_last=True,           # 主动发是一段完整消息
-                    full_content=content,
+                    full_content=rendered,
                 )
             )
             send_seq = next_seq

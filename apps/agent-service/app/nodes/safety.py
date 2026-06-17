@@ -351,9 +351,9 @@ async def run_pre_safety(req: PreSafetyRequest) -> PreSafetyVerdict:
     内部调 ``_run_pre_audit`` 复用 banned word + 3 个 LLM 检查；
     fail-open 已在 audit 内部处理（超时 / 异常 → 通过 verdict）。
     """
-    # Same turn seed as the main stream (agent_stream._build_and_stream) so the
-    # 3 pre-check guard spans land in this turn's langfuse trace, not 3 separate
-    # top-level traces.
+    # Same turn seed as the main stream (chat_node's turn_trace around
+    # render_chat_turn) so the 3 pre-check guard spans land in this turn's
+    # langfuse trace, not 3 separate top-level traces.
     with turn_trace(f"{req.message_id}:{req.persona_id}"):
         outcome = await _run_pre_audit(req.message_content, req.persona_id)
     return PreSafetyVerdict(

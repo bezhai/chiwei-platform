@@ -18,11 +18,12 @@ from uuid import uuid4
 # 用 monkeypatch.setattr(chat_node_mod, ...) 替换，节点内直接复用同名引用。
 from app.agent.trace import turn_trace
 from app.api.middleware import CHAT_FIRST_TOKEN, CHAT_PIPELINE_DURATION
-from app.chat.agent_stream import _build_and_stream
 from app.chat.content_parser import parse_content
+from app.chat.context import build_human_chat_context
 from app.chat.persona_filter import MessageRouter
 from app.chat.post_actions import fetch_guard_message
 from app.chat.pre_safety import run_pre_safety_check
+from app.chat.render import render_chat_turn
 from app.data.queries import (
     create_pending_agent_response,
     find_gray_config,
@@ -34,7 +35,10 @@ from app.data.queries import (
 )
 from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
-from app.domain.world_events import EVENT_KIND_EXTERNAL
+from app.domain.world_events import (
+    EVENT_KIND_EXTERNAL,
+    EVENT_KIND_EXTERNAL_PASSIVE,
+)
 from app.infra.cst_time import now_cst_iso
 from app.life.feed_whitelist import should_feed_chat_to_life
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
@@ -43,6 +47,15 @@ from app.runtime.emit import emit
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
+
+
+async def _yield_not_found():
+    """空 context(源消息反查无历史)退回的单段"未找到"流。
+
+    与剥离前 ``_build_and_stream`` 的空 ctx 分支同一文案、同一形态(yield 一段文本
+    后结束),让下游 segmentation 照常把它收成一条 final 段。
+    """
+    yield "抱歉，未找到相关消息记录"
 
 
 @node
@@ -244,13 +257,24 @@ async def chat_node(req: ChatRequest) -> None:
     # chat_node (a coroutine, not an async generator) the contextvar set/reset
     # never straddles a yield-to-caller, so the token always resets in-context.
     with turn_trace(f"{req.message_id}:{effective_persona}"):
-        async for text in _build_and_stream(
-            req.message_id,
-            gray_config,
-            session_id=req.session_id,
-            persona_id=req.persona_id,
-            channel=req.channel,
-        ):
+        # 真人聊天两层:先剥离出来的真人 context 构建(用 message_id 反查源消息、捞
+        # 历史、解析人设、拼生活状态),再交给共享渲染层(人设 prompt + 主模型 stream)。
+        # context 反查为空(源消息无历史)→ 退回"未找到"文本,与旧 _build_and_stream
+        # 的空 ctx 分支行为一致。
+        turn_ctx = await build_human_chat_context(
+            req.message_id, persona_id=req.persona_id or ""
+        )
+        if turn_ctx is None:
+            stream = _yield_not_found()
+        else:
+            stream = render_chat_turn(
+                turn_ctx,
+                outbound_message_id=req.message_id,
+                session_id=req.session_id,
+                channel=req.channel,
+                features=gray_config,
+            )
+        async for text in stream:
             if not text:
                 continue
             if t_first_token is None:
@@ -329,9 +353,11 @@ async def chat_node(req: ChatRequest) -> None:
         },
     )
 
-    # 对话回灌：聊完一次，作为一条 external event 进这个 persona 的信箱（她事后
-    # 知道"刚跟谁聊了啥"），不让"聊天里的她"和"世界里的她"分叉。快路径回复已经
-    # emit 完，回灌在这之后、不挡回复；回灌失败只 log、不拖垮 chat。summary 直接
+    # 对话回灌：聊完一次，作为一条 event 进这个 persona 的信箱（她事后知道"刚跟谁
+    # 聊了啥"），不让"聊天里的她"和"世界里的她"分叉。真人私聊（p2p）回灌打被动 kind
+    # （感知不唤醒，task 3）、白名单群回灌打 external（waking），kind 选择见
+    # _replay_conversation_to_mailbox。快路径回复已经 emit 完，回灌在这之后、不挡
+    # 回复；回灌失败只 log、不拖垮 chat。summary 直接
     # 用用户原话——这是她自己经历过的对话回灌进自己脑子（聊的时候就经历了、chat
     # 入口也过了 pre-safety），不是隐私泄露，不需要 LLM 概括脱敏；原话本身就是最
     # 真实的"聊了啥"，概括成二手货反而失真、每轮跑一次 offline LLM 纯浪费。
@@ -355,6 +381,13 @@ async def _replay_conversation_to_mailbox(
     一个宽松上限（``_REPLAY_MAX_CHARS``）纯防极端长文，超了截断加省略号；正常消息
     根本到不了。``user_message`` 为空（纯图片 / 表情渲染为空）时退回 ``刚和{谁}聊
     过一次``。
+
+    **kind 按 ``is_p2p`` 分（task 3：真人私聊感知不唤醒）**：真人**私聊**回灌打被动
+    ``EVENT_KIND_EXTERNAL_PASSIVE``——她已经在 chat 回合里回应过这个真人了，再额外
+    唤醒一轮 life 用 gpt 单独跑纯属重复反应、浪费；被动 kind 只落信箱当被动上下文，她
+    下次自然醒时（``list_unread_events``）读到、知道「刚跟某真人聊过」。白名单内的**群**
+    回灌打 ``EVENT_KIND_EXTERNAL``（waking）——群是显式选来要听的、照常唤醒。被动 vs
+    唤醒由 mailbox 的 ``PASSIVE_EVENT_KINDS`` 凭 kind 在即时敲门和补敲对账两处统一决定。
 
     ``session_id`` 缺失时**跳过回灌**：event_id 按 ``chat:{session_id}`` 去重，
     None 会塌成 ``chat:None`` 把不同的无关回灌错误合并成一条。宁可不写，也不错合并。
@@ -397,12 +430,18 @@ async def _replay_conversation_to_mailbox(
     if len(spoke) > _REPLAY_MAX_CHARS:
         spoke = spoke[:_REPLAY_MAX_CHARS] + "…"
     summary = f"刚和{who}聊了：{spoke}" if spoke else f"刚和{who}聊过一次"
+    # 真人**私聊**（p2p）回灌打被动 kind（感知不唤醒，task 3）：她已经在 chat 回合里
+    # 回应过这个真人了，再额外唤醒一轮 life 用 gpt 单独跑纯属重复反应、浪费——只落信箱
+    # 当被动上下文，她下次自然醒时读到「刚跟某真人聊过」。白名单内的**群**回灌保持
+    # external（waking）：群是显式选来要听的、照常唤醒。被动 vs 唤醒由 mailbox 的
+    # PASSIVE_EVENT_KINDS 凭 kind 决定，chat 这里只负责按 is_p2p 选对 kind。
+    kind = EVENT_KIND_EXTERNAL_PASSIVE if req.is_p2p else EVENT_KIND_EXTERNAL
     try:
         await deliver_event(
             lane=lane,
             persona_id=req.persona_id,
             event_id=f"chat:{req.session_id}",
-            kind=EVENT_KIND_EXTERNAL,
+            kind=kind,
             source=f"user:{req.user_id}",
             summary=summary,
             # CST aware ISO（含 +08:00），与 world/life 写入端同一个"现在"——

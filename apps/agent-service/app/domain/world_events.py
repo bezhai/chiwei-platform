@@ -72,32 +72,47 @@ from app.runtime.persist import insert_idempotent
 #                      区别于 speech 的「X 对你说：原话」（呈现是 task 5 的职责）。和 speech
 #                      同样唤醒收件人（手机消息发给对方就是让 ta 看到的，非被动 kind）。
 #                      只用于角色↔角色的手机消息；给真人发飞书私聊不落信箱、走出站段。
+#   * ``external_passive`` 真人私聊回灌（task 3 / 感知不唤醒）：真人**私聊**赤尾、chat
+#                      回复完后，「刚跟真人聊过」回灌进她信箱。语义同 ``external``（外部
+#                      消息、刚聊过），但**被动**——不额外唤醒一轮 life（她已经在 chat
+#                      回合里回应过这个真人了，再用 gpt 单独跑一轮纯属重复反应、浪费）。
+#                      她下次被别的客观动静自然唤醒时，通过 ``list_unread_events`` 一并读
+#                      到，知道「刚跟某真人聊过」。区别于白名单内的**群** external（被显式
+#                      选来要听的群、照常唤醒）：被动只落在 p2p 真人私聊这条回灌上。
 EVENT_KIND_AMBIENT = "ambient"
 EVENT_KIND_EXTERNAL = "external"
+EVENT_KIND_EXTERNAL_PASSIVE = "external_passive"
 EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
 EVENT_KIND_MESSAGE = "message"
 
 
-# 被动 event kind（**通道分离的权宜修复 v2**，prod 节奏失控）——单一定义处，写 / 读
-# 两端都从这里取（宪法「禁止重复定义」）。语义：这些 kind 是**被动上下文**、本身不
-# 唤醒她。它的到来本身不敲门、不补敲、不打断长睡；它会在她**下次被一条客观动静
-# （ambient 事件，走 EventArrived 敲门）唤醒**时，一并被读进 stimulus 里的未读项
-# （list_unread_events 把信箱里所有未读项都带出来，被动的 surroundings 跟着这次
-# 主动唤醒一起被读到）。
+# 被动 event kind——单一定义处，写 / 读两端都从这里取（宪法「禁止重复定义」）。语义：
+# 这些 kind 是**被动上下文**、本身不唤醒她。它的到来本身不敲门、不补敲、不打断长睡；它
+# 会在她**下次被一条客观动静（走 EventArrived 敲门）唤醒**时，一并被读进 stimulus 里的
+# 未读项（list_unread_events 把信箱里所有未读项都带出来，被动项跟着这次主动唤醒一起被
+# 读到）。两类被动 kind：
 #
-# 当前只有 surroundings（world 五官每轮给三姐妹各投一条周遭切片）。world ~30 分钟推
-# 一轮、每轮投一条，若走唤醒通道会把自排睡着的姐妹全敲醒、自排睡眠系统性睡不满——这是
-# prod 节奏失控的根因。把被动语义落在**已持久化的 kind** 上（而非投递瞬间的 wake 参数），
-# 让**即时敲门**（deliver_event）和**补敲对账**（list_personas_with_unread → renotify_
-# unread）两条路径都读同一处跳过被动——上一版只给即时敲门加 wake=False，没挡住 world
-# engine 每轮调的补敲（surroundings 入信箱就是"未读"、补敲照样叫醒），修复被绕过。
+#   * ``surroundings``（**通道分离的权宜修复 v2**，prod 节奏失控）：world 五官每轮给三姐妹
+#     各投一条周遭切片。world ~30 分钟推一轮、每轮投一条，若走唤醒通道会把自排睡着的姐妹
+#     全敲醒、自排睡眠系统性睡不满——prod 节奏失控的根因。
+#   * ``external_passive``（task 3 / 真人私聊感知不唤醒）：真人私聊赤尾、chat 回复完后回灌
+#     的「刚跟真人聊过」。她已经在 chat 回合里回应过这个真人了，再额外唤醒一轮 life 用 gpt
+#     单独跑纯属重复反应、浪费——所以回灌只落信箱当被动上下文、不再叫醒她。她下次自然醒时
+#     读到、知道「刚跟某真人聊过」。区别于白名单内的群 external（显式选来要听的群、照常唤醒）。
 #
-# **这是已知权宜修复、非完美方案。** 粗在"唤醒 vs 不唤醒"二分——被动 kind 完全不唤醒
-# 会让她对"该早点注意、但还没到 notify 级"的周遭变化有感知延迟（最坏延到她下次被一条
-# ambient 动静唤醒时才读到）。更优方案（按变化显著度分级、或让 world 显式判这条切片要不要
-# 打断长睡）待探索，详见 memory ``project_world_sense_wake_tradeoff``。
-PASSIVE_EVENT_KINDS = frozenset({EVENT_KIND_SURROUNDINGS})
+# 把被动语义落在**已持久化的 kind** 上（而非投递瞬间的 wake 参数），让**即时敲门**
+# （deliver_event）和**补敲对账**（list_personas_with_unread → renotify_unread）两条
+# 路径都读同一处跳过被动——上一版只给即时敲门加 wake=False，没挡住 world engine 每轮调
+# 的补敲（被动项入信箱就是"未读"、补敲照样叫醒），修复被绕过。
+#
+# **surroundings 那条是已知权宜修复、非完美方案。** 粗在"唤醒 vs 不唤醒"二分——被动 kind
+# 完全不唤醒会让她对"该早点注意、但还没到 notify 级"的周遭变化有感知延迟（最坏延到她下次
+# 被一条 ambient 动静唤醒时才读到）。更优方案（按变化显著度分级、或让 world 显式判这条切片
+# 要不要打断长睡）待探索，详见 memory ``project_world_sense_wake_tradeoff``。
+PASSIVE_EVENT_KINDS = frozenset(
+    {EVENT_KIND_SURROUNDINGS, EVENT_KIND_EXTERNAL_PASSIVE}
+)
 
 
 # event ``source`` 协议里 NPC 来访的机读前缀（单一定义处，宪法「禁止重复定义」）。
@@ -135,7 +150,7 @@ class EventEnvelope(Data):
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
     event_id: Annotated[str, Key]
-    kind: str            # ambient | external | surroundings
+    kind: str            # ambient | external | external_passive | surroundings | speech | message
     source: str          # 产出方：world / 说话者 persona_id / chat ...
     summary: str         # 客观可感形态的文字描述（或 surroundings 的周遭客观切片）
     occurred_at: str     # event 发生时间 (ISO8601)

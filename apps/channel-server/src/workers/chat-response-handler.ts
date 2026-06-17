@@ -189,6 +189,22 @@ export async function handleChatResponse(
             // 插件做。imageRegistryId 必须用【全局 message_id】（见 image-registry-key.ts）。
             // dispatch 据 part_index/proactive 选 reply(回复触发/root) 还是
             // sendText(新发)，返回新消息的渠道裸 id。
+            //
+            // 【已知残留 — MQ redeliver 不做发送级去重（codex 必改 3 worker 层）】
+            // 主动发的 message_id（payload.message_id = 'proactive:<uuid5>'）在
+            // agent-service 侧已是**整轮重投稳定**的派生键（life send_message 从本轮
+            // act_id + 序号 uuid5 派生、life_wake 用 max_retries=1 关整轮重放 → 同一件
+            // 主动发重投得同一段、(message_id, part_index) 稳定）。但本 worker 对 MQ
+            // **redeliver** 不按这个稳定键做发送前去重：消息落库以飞书返回的新 om_id 为
+            // 主键（storeLarkOutboundMessage 的 orIgnore 只挡同 om_id 的重复），发送本身
+            // 没有「这个 proactive: 键我已发过吗」的前置查重。handleChatResponse 末尾
+            // **无条件 ack**（连出站失败也 ack），所以唯一的 redeliver 窗口是 worker 在
+            // sendText 之后、ack 之前**崩溃**——重启重投会再 sendText 一次、真人收到两条。
+            // 这是 chat_response 链路**系统级**的 at-least-once 属性，**真人回复路径同样
+            // 存在**（不是主动发独有、不是本次改动引入）。本刀**不修**它：要修需引入发送级
+            // 幂等（从 proactive uuid5 派生确定性 common_message_id + 发送前存在性查重 +
+            // 强制该 id 落库），跨服务、动共享写路径、有 cutover 风险，留作后续。这里如实
+            // 标注为已知残留，不假装做了。
             const tSend0 = Date.now();
             const sentRef = await dispatchChatResponseOutbound(capabilities, {
                 content,

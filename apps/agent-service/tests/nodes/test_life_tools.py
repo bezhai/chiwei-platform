@@ -2064,7 +2064,13 @@ async def test_browse_feed_treats_real_search_web_empty_as_not_found(monkeypatch
 
 @pytest.fixture
 def stub_directory(monkeypatch):
-    """把目录解析层（search_recipients / resolve_delivery）和出站 emit 换成可观测 fake。"""
+    """把目录解析层（search_recipients / resolve_delivery）、出站 emit、以及真人主动发的
+    渲染链（build_proactive_chat_context + render_chat_turn）换成可观测 fake。
+
+    真人分支改造后不再直出 life 原文，而是「life 给意图 → proactive context 构建 →
+    共享渲染层渲染 → 出站」。默认 fake 渲染成功、产出区别于 life 原文的文本，让出站段
+    断言渲染后的话；render-fail-no-emit 的测试各自覆写 ``render_raises`` / ``render_text``。
+    """
     from app.domain.recipient_directory import (
         LarkP2PTarget,
         MailboxTarget,
@@ -2080,6 +2086,12 @@ def stub_directory(monkeypatch):
         "candidates": [],
         "resolve_result": None,
         "resolve_raises": None,
+        # 真人渲染链：context 构建被调时记下入参；渲染产出 / 失败可覆写。
+        "context_calls": [],
+        "context_result": object(),  # 哑 ChatTurnContext（fake render 不读它）
+        "render_text": "渲染后的人设口径出站话",  # 默认渲染产出（≠ life 原文意图）
+        "render_raises": None,  # 设成异常类型 → render_chat_turn 抛错（不出站）
+        "render_args": [],
     }
 
     async def fake_search_recipients(query):
@@ -2095,9 +2107,30 @@ def stub_directory(monkeypatch):
     async def fake_emit(data):
         state["emitted"].append(data)
 
+    async def fake_build_proactive_chat_context(**kwargs):
+        state["context_calls"].append(kwargs)
+        return state["context_result"]
+
+    def fake_render_chat_turn(turn_ctx, **kwargs):
+        # render_chat_turn 是 async generator：返回一个吐文本片段的异步生成器。
+        state["render_args"].append({"turn_ctx": turn_ctx, **kwargs})
+
+        async def _gen():
+            if state["render_raises"] is not None:
+                raise state["render_raises"]
+            text = state["render_text"]
+            if text:
+                yield text
+
+        return _gen()
+
     monkeypatch.setattr(lt, "search_recipients", fake_search_recipients)
     monkeypatch.setattr(lt, "resolve_delivery", fake_resolve_delivery)
     monkeypatch.setattr(lt, "emit", fake_emit)
+    monkeypatch.setattr(
+        lt, "build_proactive_chat_context", fake_build_proactive_chat_context
+    )
+    monkeypatch.setattr(lt, "render_chat_turn", fake_render_chat_turn)
 
     state["_RecipientCandidate"] = RecipientCandidate
     state["_MailboxTarget"] = MailboxTarget
@@ -2266,16 +2299,185 @@ async def test_send_message_to_sister_does_not_emit_outbound(
 
 
 @pytest.mark.asyncio
-async def test_send_message_to_person_emits_outbound_segment(
+async def test_send_message_to_person_renders_through_chat_turn_then_emits(
     stub_handlers, stub_directory
 ):
-    """uid 解析成 LarkP2PTarget（真人）→ emit ChatResponseSegment 到 chat_response 出站。
+    """真人分支改造：life 给意图 → proactive context 构建 → render_chat_turn 渲染 → 出站。
 
-    出站段（task 4 接力送达飞书）字段：is_proactive=True、is_p2p=True、
-    chat_id=真实 common_conversation_id、bot_name、channel、persona_id=发送者、
-    content=内容、lane 显式带。绝不投信箱（真人没有 life 信箱）。
+    life 只管 what（给意图/要点），措辞由共享渲染层（主模型 + 人设）产出，不再直出
+    life 原文。出站段 content 是**渲染后的话**（≠ life 给的意图原文），其余出站契约字段
+    （is_proactive=True、is_p2p=True、真实 chat_id、bot_name、channel、persona_id=发送者、
+    lane 显式带、is_last=True）保持。绝不投信箱（真人没有 life 信箱）。
     """
     from app.domain.chat_dataflow import ChatResponseSegment
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想问他周末有没有空一起吃饭"}
+    )
+
+    assert isinstance(out, str) and out
+    assert stub_directory["resolve_calls"] == ["user:u-real-1"]
+    # life 的意图喂给 proactive context 构建（带 chat_id 历史、发送者 persona、真人 user）。
+    assert len(stub_directory["context_calls"]) == 1
+    cc = stub_directory["context_calls"][0]
+    assert cc["intent"] == "想问他周末有没有空一起吃饭", "life 给的是意图/要点"
+    assert cc["persona_id"] == "akao"
+    assert cc["chat_id"] == "cc-direct-1", "带 chat_id 历史（接得上上次聊）"
+    assert cc["user_id"] == "u-real-1"
+    # 渲染层被调（喂渲染后出站）。
+    assert len(stub_directory["render_args"]) == 1
+    # 真人不进信箱（真人没有 life 信箱）。
+    assert stub_handlers["delivered"] == []
+    # 恰好 emit 一条出站段。
+    assert len(stub_directory["emitted"]) == 1
+    seg = stub_directory["emitted"][0]
+    assert isinstance(seg, ChatResponseSegment)
+    assert seg.content == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～", (
+        "出站的是渲染后的人设口径话，不是 life 给的意图原文"
+    )
+    assert "想问他周末有没有空一起吃饭" not in seg.content, "意图原文不直接出站"
+    assert seg.is_proactive is True, "主动发：is_proactive 标识复用 worker 出站分支"
+    assert seg.is_p2p is True, "真人投递走飞书私聊"
+    assert seg.chat_id == "cc-direct-1", "用真实 p2p 会话 id 当 chat_id（worker 反查渠道）"
+    assert seg.bot_name == "chiwei", "用 resolver 给的发送 bot"
+    assert seg.channel == "lark"
+    assert seg.user_id == "u-real-1"
+    assert seg.persona_id == "akao", "persona_id 是发送者（worker 据它选 bot 身份兜底）"
+    assert seg.lane == "coe-t3", "lane 必须显式带（sink 不注入 header lane）"
+    assert seg.is_last is True, "主动发是一段完整消息（worker 据 is_last 收口）"
+    # full_content 是渲染后完整文本（worker 据它收口）。
+    assert seg.full_content == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_render_failure_no_emit_feeds_back(
+    stub_handlers, stub_directory
+):
+    """渲染失败/超时**不回退发 life 原文**：不出站，把「没发出去」作为工具结果喂回 life。
+
+    承重红线（spec 决策 / 原问题复发防线）：渲染挂了绝不把 life 的意图原文直接出站
+    （否则又退回干巴巴堆黑话的老问题）。改成：不 emit 任何出站段，返回一个清楚的工具
+    结果告诉 life「这条没发出去」，让她自己决定怎么办（重试 / 算了）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_raises"] = RuntimeError("model timeout")
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想跟他说点什么"}
+    )
+
+    # 渲染失败 → 绝不出站（既不发渲染半成品、更不回退发 life 原文）。
+    assert stub_directory["emitted"] == [], "渲染失败绝不出站"
+    assert stub_handlers["delivered"] == []
+    # 把「没发出去」喂回 life（@tool_error 结构化 outcome），让她自己处置。
+    assert isinstance(out, dict), "渲染失败应作为工具结果喂回 life"
+    assert out["kind"] == "tool_error"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_passes_raise_mode_to_render(
+    stub_handlers, stub_directory
+):
+    """proactive 渲染必须以 on_error='raise' 调 render —— 否则 render 默认 yield 错误
+    文案、proactive 把 'ERR' 当成功内容主动发给真人（codex 必改 2 的真实链路 bug）。"""
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["render_args"]) == 1
+    assert stub_directory["render_args"][0].get("on_error") == "raise", (
+        "proactive 必须用 on_error='raise'，让 render 失败时抛而不是 yield 错误文案"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_real_render_failure_no_error_text_emitted(
+    stub_handlers, stub_directory, monkeypatch
+):
+    """**真实渲染层语义**（不 mock render 直接抛）：render 内部 Agent.stream 抛异常时，
+    真人回复路径会吞异常 yield persona error 文案；proactive 用 on_error='raise' 让它
+    改抛 RenderFailed → 不出站、喂回 life。
+
+    承重（codex 必改 2 的核心）：旧测试 mock render_chat_turn 直接抛，漏掉了「真实 render
+    会吞异常 yield 'ERR'」这条真路径。这里让**真实 render_chat_turn** 跑（只换掉它内部
+    的 Agent + post-actions），构造真实 ChatTurnContext（persona error_message='ERR'），
+    验证 proactive **绝不**把 'ERR' 出站、且喂回 life「没发出去」。
+    """
+    from app.chat import render as render_mod
+    from app.chat.render import ChatTurnContext
+
+    # 让真实 render_chat_turn 跑：只换掉它内部的 Agent（stream 抛异常）+ post-actions。
+    class _BoomAgent:
+        def __init__(self, cfg, tools=None):
+            pass
+
+        async def stream(self, messages, *, context, prompt_vars):
+            yield_done = False  # noqa: F841
+            raise RuntimeError("model down")
+            yield  # pragma: no cover — 使其成为 async generator
+
+    async def _noop_post(**kwargs):
+        return None
+
+    monkeypatch.setattr(render_mod, "Agent", _BoomAgent)
+    monkeypatch.setattr(render_mod, "schedule_post_actions", _noop_post)
+    # 用真实 render_chat_turn（撤掉 stub_directory 对它的 fake）。
+    monkeypatch.setattr(lt, "render_chat_turn", render_mod.render_chat_turn)
+
+    class _FakePersona:
+        display_name = "赤尾"
+        error_messages = {"error": "ERR", "content_filter": "CF"}
+
+    # 让 proactive context 构建返回**真实** ChatTurnContext（render 会读它的 persona
+    # 出错误文案、读 messages 喂 Agent）。
+    async def fake_build_ctx(**kwargs):
+        return ChatTurnContext(
+            messages=[],
+            image_registry=None,
+            chat_id=kwargs["chat_id"],
+            persona_id=kwargs["persona_id"],
+            identity="lite",
+            appearance="looks",
+            inner_context="",
+            persona=_FakePersona(),
+        )
+
+    monkeypatch.setattr(lt, "build_proactive_chat_context", fake_build_ctx)
 
     stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
         common_conversation_id="cc-direct-1",
@@ -2290,27 +2492,50 @@ async def test_send_message_to_person_emits_outbound_segment(
         )
     )
     out = await tools["send_message"].invoke(
-        {"uid": "user:u-real-1", "content": "在忙吗，方便聊两句吗"}
+        {"uid": "user:u-real-1", "content": "想跟他说点什么"}
     )
 
-    assert isinstance(out, str) and out
-    assert stub_directory["resolve_calls"] == ["user:u-real-1"]
-    # 真人不进信箱（真人没有 life 信箱）。
-    assert stub_handlers["delivered"] == []
-    # 恰好 emit 一条出站段。
-    assert len(stub_directory["emitted"]) == 1
-    seg = stub_directory["emitted"][0]
-    assert isinstance(seg, ChatResponseSegment)
-    assert seg.is_proactive is True, "主动发：is_proactive 标识复用 worker 出站分支"
-    assert seg.is_p2p is True, "真人投递走飞书私聊"
-    assert seg.chat_id == "cc-direct-1", "用真实 p2p 会话 id 当 chat_id（worker 反查渠道）"
-    assert seg.bot_name == "chiwei", "用 resolver 给的发送 bot"
-    assert seg.channel == "lark"
-    assert seg.user_id == "u-real-1"
-    assert seg.persona_id == "akao", "persona_id 是发送者（worker 据它选 bot 身份兜底）"
-    assert seg.content == "在忙吗，方便聊两句吗"
-    assert seg.lane == "coe-t3", "lane 必须显式带（sink 不注入 header lane）"
-    assert seg.is_last is True, "主动发是一段完整消息（worker 据 is_last 收口）"
+    # 真实 render 失败（Agent.stream 抛）→ raise 模式抛 RenderFailed → 不出站。
+    assert stub_directory["emitted"] == [], "真实渲染失败绝不出站"
+    # 绝不把 persona error 文案 'ERR' 当内容发出去。
+    for seg in stub_directory["emitted"]:
+        assert "ERR" not in getattr(seg, "content", ""), "绝不主动发 persona error 文案"
+    # 喂回 life「没发出去」。
+    assert isinstance(out, dict) and out["kind"] == "tool_error", (
+        "真实渲染失败应作为工具结果喂回 life"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_empty_render_no_emit_feeds_back(
+    stub_handlers, stub_directory
+):
+    """渲染产出空文本（被内容过滤吞光 / 没产出）→ 同样不出站、喂回 life「没发出去」。
+
+    渲染层在 content_filter / length 等分支可能只吐占位 / 不吐有效内容；空出站段送到
+    飞书是一条空消息（出戏）。把空产出也当「没发出去」，不 emit、喂回 life。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = ""  # 渲染没吐有效内容
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想说点什么"}
+    )
+
+    assert stub_directory["emitted"] == [], "空渲染产出不出站（不发空消息）"
+    assert isinstance(out, dict) and out["kind"] == "tool_error", (
+        "空产出也当没发出去、喂回 life"
+    )
 
 
 @pytest.mark.asyncio
