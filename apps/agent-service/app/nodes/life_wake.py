@@ -328,6 +328,27 @@ def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> st
     )
 
 
+def _group_handle_suffix(ev: EventEnvelope) -> str:
+    """来自群的离散动静追加「来自群聊『群名』，群句柄 group:<chat_id>」（task 3）。
+
+    她被白名单**群**消息唤醒时，光有 summary 不够——还要知道这条来自哪个群、并拿到群的
+    稳定句柄（``group:<chat_id>``）才能接着在同一个群继续主动说，而不是转头私聊。判群靠
+    回灌时落进 event 的 ``chat_scope == 'group'`` + ``chat_id`` 非空（结构化补传，不从
+    summary 文本猜）。**群名缺失也兜底展示 ``group:<chat_id>``**（spec 决策 3）：群名只是
+    给她认人的，句柄才是她回发到同群的抓手，任何时候都得拿得到。
+
+    群 uid 格式按共享约定直接拼 ``"group:" + common_conversation_id``（不 import 投递目标
+    解析层的 group_uid 函数，避免跨 task 代码依赖）。非群 event（旧条目 chat_scope=None /
+    p2p）返回空串、照常呈现，不冒群句柄。
+    """
+    if ev.chat_scope != "group" or not ev.chat_id:
+        return ""
+    handle = f"group:{ev.chat_id}"
+    if ev.chat_name:
+        return f"（来自群聊「{ev.chat_name}」，群句柄 {handle}）"
+    return f"（来自群聊，群句柄 {handle}）"
+
+
 def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
     """把离散动静（kind=ambient / external）拼成她"刚感知到的几件事"，按发生先后。
 
@@ -336,9 +357,14 @@ def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
     过」这类离散动静，区别于 :func:`_format_surroundings` 的周遭底框。event 的
     ``occurred_at`` 在信箱里混着历史格式（chat 写 Unix 毫秒、world 写 CST、life 写
     UTC），显示时一律过 ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
+
+    **来自群的动静（task 3）**追加群标注 + 句柄（见 :func:`_group_handle_suffix`）：白名单
+    群消息回灌进来时带了会话身份（chat_scope='group' + chat_id），这里把「来自群聊『群名』，
+    群句柄 group:<chat_id>」缀在那条后面，让她知道来自哪个群、拿到回发到同群的句柄。
     """
     return "\n".join(
-        f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} {ev.summary}"
+        f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} "
+        f"{ev.summary}{_group_handle_suffix(ev)}"
         for ev in dynamics
     )
 
@@ -641,6 +667,13 @@ async def _run_life_round(
         act_id=act_id,
         observed_at=observed_at,
         schedule_reminders=schedule_reminders,
+        # proactive 主动发的历史增量水位：用**本轮进入时**（Agent.run 之前、第 609 行）
+        # 读到的快照 observed_at，capture 进工具闭包给 send_message 当 since——只取上一次
+        # life 轮之后真人新发的话，治她对着早就说过的旧话反复主动开口。**承重命门**：必须
+        # 用进入时的 snapshot 值，不能让工具现读 LifeState——本轮她可能先调 update_life_state
+        # 把 observed_at 刷成本轮时刻，现读会让水位被本轮污染、增量永远算空。snapshot 为
+        # None（冷启、从没活过一轮）→ 水位 None → since=None → 退回原全量最近 limit 行为。
+        proactive_history_since=snapshot.observed_at if snapshot is not None else None,
     )
 
     # session 按 (lane, persona, 今天) 派生：她当天所有唤醒的 LLM 调用归进同一条

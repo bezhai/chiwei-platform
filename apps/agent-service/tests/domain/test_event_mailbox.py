@@ -18,6 +18,7 @@ think round get silently swallowed and the life loops on stale state.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
 from app.data.queries.mailbox import (
     deliver_event,
@@ -837,3 +838,232 @@ async def test_external_passive_still_readable_on_self_wake(mailbox_db):
     assert [e.event_id for e in unread] == ["chat:p2p1"]
     assert unread[0].kind == EVENT_KIND_EXTERNAL_PASSIVE
     assert unread[0].summary == "刚和小明聊了：周末一起爬山吗"
+
+
+# ---------------------------------------------------------------------------
+# 会话身份字段（task 3）：EventEnvelope 加 chat_id / chat_scope / chat_name，回灌时带上，
+# 让 life 知道「这条动静来自哪个群」并拿到群句柄。三个字段都 nullable（旧条目读写不炸）。
+# ---------------------------------------------------------------------------
+
+
+def test_event_envelope_has_chat_identity_fields():
+    """EventEnvelope 声明了会话身份三字段 chat_id / chat_scope / chat_name（task 3）。"""
+    assert "chat_id" in EventEnvelope.model_fields
+    assert "chat_scope" in EventEnvelope.model_fields
+    assert "chat_name" in EventEnvelope.model_fields
+
+
+def test_chat_identity_fields_are_nullable_with_none_default():
+    """会话身份三字段是 nullable、默认 None —— 旧条目（不带这三列）读写不炸。
+
+    durable schema 变更钉死为 forward-only 加 nullable 列：必须 ``str | None``、默认
+    ``None``，migrator 才会 emit 不带 NOT NULL 的 ADD COLUMN，旧行这三列为 NULL 仍能读回。
+    """
+    fields = EventEnvelope.model_fields
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert fields[name].default is None, f"{name} 默认必须是 None"
+    # 不带这三个字段也能构造（默认 None）—— 等价于旧条目的形态
+    ev = EventEnvelope(
+        lane="coe-t1", persona_id="akao", event_id="e0",
+        kind="ambient", source="world", summary="s",
+        occurred_at="2026-06-03T08:00:00Z",
+    )
+    assert ev.chat_id is None
+    assert ev.chat_scope is None
+    assert ev.chat_name is None
+
+
+def test_chat_identity_columns_are_additive_nullable_in_migration():
+    """migrator 把会话身份三字段建成 nullable TEXT 列（forward-only additive）。
+
+    durable schema 变更命门：新增列必须是不带 NOT NULL 的 ADD COLUMN，回滚旧镜像才不会
+    被 fail-closed 当成「字段被删」（spec Data & deployment impact）。这条直接断言生成的
+    DDL：CREATE 里这三列是 TEXT 且不带 NOT NULL。
+    """
+    from app.runtime.migrator import plan_migration
+
+    plan = plan_migration([EventEnvelope], existing_schema={})
+    create_sql = next(s.sql for s in plan.stmts if s.sql.startswith("CREATE TABLE"))
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert f'"{name}" TEXT' in create_sql, f"{name} 应是 TEXT 列，DDL={create_sql!r}"
+        assert f'"{name}" TEXT NOT NULL' not in create_sql, (
+            f"{name} 必须 nullable（不带 NOT NULL），否则破坏 forward-only 回滚安全"
+        )
+
+    # 对已有旧表（不含这三列）做迁移 → 三条 additive ADD COLUMN，不抛 MigrationError
+    old_table = {
+        "data_event_envelope": {
+            "lane": "TEXT", "persona_id": "TEXT", "event_id": "TEXT",
+            "kind": "TEXT", "source": "TEXT", "summary": "TEXT",
+            "occurred_at": "TEXT", "dedup_hash": "TEXT",
+            "created_at": "TIMESTAMPTZ",
+        }
+    }
+    plan2 = plan_migration([EventEnvelope], existing_schema=old_table)
+    added = [s.sql for s in plan2.stmts if "ADD COLUMN" in s.sql]
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert any(f'"{name}" TEXT' in sql for sql in added), (
+            f"旧表迁移应 additive 加 {name} 列，实际 {added!r}"
+        )
+
+
+@pytest.mark.integration
+async def test_deliver_with_group_identity_round_trips(mailbox_db):
+    """承重断言：deliver_event 带群身份写入 → list_unread_events 读出三字段（task 3）。
+
+    白名单群回灌时把 chat_id（common_conversation_id）/ chat_scope='group' /
+    chat_name（群名）随条目落库；life 读未读时这三字段随 EventEnvelope 返回，她据此
+    知道「来自哪个群」并拿群句柄 group:<chat_id>。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="chat:grp-sess-1",
+        kind="external", source="user:u1",
+        summary="群里有人聊了：今晚一起吃饭吗",
+        occurred_at="2026-06-03T14:00:00+08:00",
+        chat_id="11111111-1111-1111-1111-111111111111",
+        chat_scope="group",
+        chat_name="🐢🐢群(飞书版)",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id == "11111111-1111-1111-1111-111111111111"
+    assert ev.chat_scope == "group"
+    assert ev.chat_name == "🐢🐢群(飞书版)"
+
+
+@pytest.mark.integration
+async def test_deliver_with_direct_identity_round_trips(mailbox_db):
+    """p2p 回灌带 chat_scope='direct'、chat_name 可为 None（私聊无群名），读回如实保留。"""
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="chat:p2p-sess-1",
+        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
+        summary="刚和小明聊了：周末爬山吗",
+        occurred_at="2026-06-03T14:00:00+08:00",
+        chat_id="22222222-2222-2222-2222-222222222222",
+        chat_scope="direct",
+        chat_name=None,
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id == "22222222-2222-2222-2222-222222222222"
+    assert ev.chat_scope == "direct"
+    assert ev.chat_name is None
+
+
+@pytest.mark.integration
+async def test_deliver_without_identity_leaves_fields_none(mailbox_db):
+    """不传会话身份的旧调用方（world / 日程提醒等）：三字段为 None，读回不炸。
+
+    deliver_event 的 chat_id / chat_scope / chat_name 是可选参数（默认 None），7 处旧
+    调用方不传时向后兼容——条目照常落库，三字段为 NULL，list_unread_events 读回为 None。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="amb-1",
+        kind="ambient", source="world", summary="水壶在响",
+        occurred_at="2026-06-03T08:00:00Z",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id is None
+    assert ev.chat_scope is None
+    assert ev.chat_name is None
+
+
+@pytest.mark.integration
+async def test_deliver_with_identity_still_idempotent(mailbox_db):
+    """带会话身份字段不破坏幂等：同 (lane, persona, event_id) 重投仍只一条。
+
+    新增三字段不进 dedup_hash（只 lane/persona/event_id 是 Key），所以重投去重行为不变。
+    """
+    for _ in range(3):
+        await deliver_event(
+            lane="coe-t1", persona_id="akao", event_id="chat:grp-1",
+            kind="external", source="user:u1", summary="群消息",
+            occurred_at="2026-06-03T14:00:00+08:00",
+            chat_id="33333333-3333-3333-3333-333333333333",
+            chat_scope="group", chat_name="某群",
+        )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+    assert len(unread) == 1
+    assert unread[0].chat_name == "某群"
+
+
+# ---------------------------------------------------------------------------
+# find_conversation_display_name：chat 群回灌时按 common_conversation_id 查群名（task 3）。
+# 放在 mailbox 查询层（chat_node 不直接写 SQL、也不 import recipient_directory）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def conversation_db(test_db):
+    """在测试库上建 common_conversation 表（CommonConversation 是 SQLAlchemy Base 模型）。"""
+    from app.data.models import CommonConversation
+
+    async with test_db.begin() as conn:
+        await conn.run_sync(CommonConversation.__table__.create)
+    yield test_db
+
+
+@pytest.mark.integration
+async def test_find_conversation_display_name_returns_group_name(conversation_db):
+    """按 common_conversation_id 查到群的 display_name（群名）。"""
+    import uuid
+
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    cid = str(uuid.uuid4())
+    async with conversation_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO common_conversation "
+                "(common_conversation_id, channel, scope, display_name, is_active) "
+                "VALUES (:cid, 'lark', 'group', :name, true)"
+            ),
+            {"cid": cid, "name": "🐢🐢群(飞书版)"},
+        )
+
+    name = await find_conversation_display_name(cid)
+    assert name == "🐢🐢群(飞书版)"
+
+
+@pytest.mark.integration
+async def test_find_conversation_display_name_missing_returns_none(conversation_db):
+    """查不到会话（或 display_name 为 NULL）兜底返回 None —— 群名缺失不炸。"""
+    import uuid
+
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    # 不存在的 chat_id
+    assert await find_conversation_display_name(str(uuid.uuid4())) is None
+
+    # 存在但 display_name 为 NULL（罕见，私聊或未命名群）
+    cid = str(uuid.uuid4())
+    async with conversation_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO common_conversation "
+                "(common_conversation_id, channel, scope, display_name, is_active) "
+                "VALUES (:cid, 'lark', 'group', NULL, true)"
+            ),
+            {"cid": cid},
+        )
+    assert await find_conversation_display_name(cid) is None
+
+
+async def test_find_conversation_display_name_invalid_uuid_returns_none():
+    """非法 chat_id（非 uuid / None）兜底返回 None，不查库、不抛。"""
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    assert await find_conversation_display_name(None) is None
+    assert await find_conversation_display_name("") is None
+    assert await find_conversation_display_name("not-a-uuid") is None

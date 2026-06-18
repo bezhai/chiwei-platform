@@ -338,3 +338,111 @@ async def test_response_id_persona_still_wins_over_bot_name(chat_db):
     assert got[0][1] == "akao", (
         "有 response_id 的回复行 persona 以 agent_response 为准，不被 bot_config 覆盖"
     )
+
+
+# ---------------------------------------------------------------------------
+# proactive 增量水位（``since``）：只取「上一次 life 轮之后真人新发的」。
+#
+# proactive 主动发原本每轮全量拉最近 limit 条历史 → 她对着早就说过的旧话反复主动
+# 开口。``since`` 是「上次 life 处理水位」（= 本轮进入时 ``LifeState.observed_at``）：
+# 给了它就只取 ``event_time > since`` 的消息（仍保留 limit 上限防爆）；``since=None``
+# 退回原全量最近 limit 行为（冷启兜底，向后兼容）。``since`` 是 ISO8601 串（life 写
+# ``observed_at``），DB ``event_time`` 是毫秒整数 —— 过滤要先把 ISO since 折成毫秒
+# （经 cst_time）再比。
+# ---------------------------------------------------------------------------
+
+# 真实毫秒时刻：用真实 ms-epoch 让 ISO since → ms 的折算是真桥（不是小整数糊弄）。
+# 2026-06-03T12:00:00+08:00 起，每条 +1 分钟。
+_T0_MS = 1780459200000  # 2026-06-03T12:00:00+08:00 的毫秒
+_MIN_MS = 60_000
+
+
+def _iso_at(ms: int) -> str:
+    """把毫秒时刻折成 CST ISO8601 串（life 写 observed_at 的形态），当 since 用。"""
+    from datetime import datetime
+
+    from app.infra.cst_time import CST
+
+    return datetime.fromtimestamp(ms / 1000, tz=CST).isoformat()
+
+
+@pytest.mark.integration
+async def test_since_only_returns_messages_after_watermark(chat_db):
+    """给 since（ISO8601）→ 只取 event_time 严格大于 since 的消息（增量），旧话不再拉进来。"""
+    await _seed_conversation(_CHAT)
+    # 水位之前：她上一轮处理过的旧话（不该再进 proactive 历史）。
+    await _seed_user_message(_CHAT, event_time=_T0_MS, text="开门开门")
+    await _seed_user_message(_CHAT, event_time=_T0_MS + _MIN_MS, text="准备端午了")
+    # 水位 = 第 2 条之后、第 3 条之前。
+    watermark = _iso_at(_T0_MS + _MIN_MS + 1)
+    # 水位之后：真人新发的（该进）。
+    await _seed_user_message(_CHAT, event_time=_T0_MS + 2 * _MIN_MS, text="在干嘛呀")
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=10, since=watermark)
+
+    texts = [r.content for r, _p in got]
+    assert len(got) == 1, f"只取水位之后的 1 条，实得 {texts}"
+    assert "在干嘛呀" in texts[0]
+    assert not any("开门开门" in t for t in texts), "水位前的旧话不该再拉进来"
+    assert not any("准备端午了" in t for t in texts)
+
+
+@pytest.mark.integration
+async def test_since_with_no_new_messages_returns_empty(chat_db):
+    """水位之后没有任何消息 → 返回空（proactive 这次纯凭意图发、不揪旧对话）。"""
+    await _seed_conversation(_CHAT)
+    await _seed_user_message(_CHAT, event_time=_T0_MS, text="开门开门")
+    await _seed_user_message(_CHAT, event_time=_T0_MS + _MIN_MS, text="准备端午了")
+    # 水位 = 最后一条之后 → 之后没有新消息。
+    watermark = _iso_at(_T0_MS + _MIN_MS + 1)
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=10, since=watermark)
+
+    assert got == [], "水位后无新消息 → 空 history"
+
+
+@pytest.mark.integration
+async def test_since_none_falls_back_to_full_recent(chat_db):
+    """since=None（默认）→ 行为完全不变：退回全量最近 limit 条（冷启兜底）。"""
+    await _seed_conversation(_CHAT)
+    await _seed_user_message(_CHAT, event_time=_T0_MS, text="开门开门")
+    await _seed_user_message(_CHAT, event_time=_T0_MS + _MIN_MS, text="准备端午了")
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=10, since=None)
+
+    texts = [r.content for r, _p in got]
+    assert len(got) == 2, "since=None 退回全量最近 limit（向后兼容）"
+    assert "开门开门" in texts[0] and "准备端午了" in texts[1]
+
+
+@pytest.mark.integration
+async def test_since_still_respects_limit_cap(chat_db):
+    """水位后消息很多时仍保 limit 上限（取水位后最近 limit 条、升序），防爆。"""
+    await _seed_conversation(_CHAT)
+    watermark = _iso_at(_T0_MS - 1)  # 水位在所有消息之前 → 全是「水位后」
+    for i in range(5):
+        await _seed_user_message(_CHAT, event_time=_T0_MS + i * _MIN_MS, text=f"第{i}条")
+
+    got = await find_recent_chat_messages(chat_id=str(_CHAT), limit=3, since=watermark)
+
+    texts = [r.content for r, _p in got]
+    assert len(got) == 3, "水位后多条仍夹到 limit 上限（防爆）"
+    assert "第2" in texts[0] and "第3" in texts[1] and "第4" in texts[2], (
+        f"取水位后最近 3 条、升序，实得 {texts}"
+    )
+
+
+@pytest.mark.integration
+async def test_since_unparseable_falls_back_to_full_recent(chat_db):
+    """脏 since（解析不出真实时刻）→ 退回全量最近 limit（不静默吞成空、不炸）。"""
+    await _seed_conversation(_CHAT)
+    await _seed_user_message(_CHAT, event_time=_T0_MS, text="开门开门")
+    await _seed_user_message(_CHAT, event_time=_T0_MS + _MIN_MS, text="准备端午了")
+
+    got = await find_recent_chat_messages(
+        chat_id=str(_CHAT), limit=10, since="not-a-timestamp"
+    )
+
+    texts = [r.content for r, _p in got]
+    assert len(got) == 2, "脏 since 退回全量（不当成空 history）"
+    assert "开门开门" in texts[0] and "准备端午了" in texts[1]

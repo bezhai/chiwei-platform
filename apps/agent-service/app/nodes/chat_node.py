@@ -33,7 +33,10 @@ from app.data.queries import (
     resolve_bot_name_for_persona,
     set_agent_response_bot,
 )
-from app.data.queries.mailbox import deliver_event
+from app.data.queries.mailbox import (
+    deliver_event,
+    find_conversation_display_name,
+)
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
 from app.domain.world_events import (
     EVENT_KIND_EXTERNAL,
@@ -436,6 +439,20 @@ async def _replay_conversation_to_mailbox(
     # external（waking）：群是显式选来要听的、照常唤醒。被动 vs 唤醒由 mailbox 的
     # PASSIVE_EVENT_KINDS 凭 kind 决定，chat 这里只负责按 is_p2p 选对 kind。
     kind = EVENT_KIND_EXTERNAL_PASSIVE if req.is_p2p else EVENT_KIND_EXTERNAL
+    # 会话身份补传（task 3）：把源会话身份一并落进信箱条目，让 life 醒来知道「这条来自
+    # 哪个群」、拿到群句柄 group:<chat_id> 接着在同群继续说。chat_id 取 req.chat_id（=
+    # common_conversation_id）；chat_scope 取 DB 原值（群 group / 私聊 direct）。群回灌
+    # 才查群名（display_name，查不到兜底 None——life 侧会展示 group:<id> 句柄）；p2p 没有
+    # 群名概念、不查。chat_scope 用 is_p2p 判：p2p → direct，群 → group（与回灌 kind 同源）。
+    chat_scope = "direct" if req.is_p2p else "group"
+    chat_name = None
+    if not req.is_p2p:
+        try:
+            chat_name = await find_conversation_display_name(req.chat_id)
+        except Exception as e:  # noqa: BLE001 — 群名查失败退回 None，不挡回灌
+            logger.warning(
+                "resolve group display_name for replay failed: %s: %s", req.chat_id, e
+            )
     try:
         await deliver_event(
             lane=lane,
@@ -447,6 +464,9 @@ async def _replay_conversation_to_mailbox(
             # CST aware ISO（含 +08:00），与 world/life 写入端同一个"现在"——
             # 旧的 Unix 毫秒会跟 ISO 同框混着喂给 agent、时间窗口比较差 8 小时。
             occurred_at=now_cst_iso(),
+            chat_id=req.chat_id,
+            chat_scope=chat_scope,
+            chat_name=chat_name,
         )
     except Exception as e:  # noqa: BLE001 — 事后回灌失败不拖垮 chat 快路径
         logger.warning(

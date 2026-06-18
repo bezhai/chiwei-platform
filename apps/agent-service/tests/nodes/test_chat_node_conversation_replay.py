@@ -71,6 +71,11 @@ def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
     monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
     monkeypatch.setattr(cn, "find_username", fake_find_username)
 
+    # 群名查询：默认返回 None（私聊路径不查 / 群路径查不到都退 None）。群回灌测试各自
+    # 覆盖成返回真实群名。
+    async def fake_find_conv_name(chat_id): return None
+    monkeypatch.setattr(cn, "find_conversation_display_name", fake_find_conv_name)
+
     async def fake_emit(d): pass
     monkeypatch.setattr(cn, "emit", fake_emit)
 
@@ -666,3 +671,132 @@ async def test_group_replay_keeps_waking_external_kind(monkeypatch):
     assert delivered[0]["kind"] == EVENT_KIND_EXTERNAL, (
         "白名单内的群回灌应保持 external（waking），被动只落 p2p 真人私聊"
     )
+
+
+# ---------------------------------------------------------------------------
+# 会话身份补传（task 3）：回灌时把源会话的 chat_id / chat_scope / chat_name 一并落进
+# 信箱条目，让 life 醒来知道「这条来自哪个群」并拿到群句柄。
+#   * 群回灌（is_p2p=False）：chat_id=req.chat_id、chat_scope='group'、chat_name=群名
+#     （用 req.chat_id 查 common_conversation.display_name，查不到兜底 None）。
+#   * p2p 回灌：对称带 chat_id=req.chat_id、chat_scope='direct'、chat_name=None。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_group_replay_carries_chat_identity_with_name(monkeypatch):
+    """群回灌补传 chat_id / chat_scope='group' / chat_name（用 chat_id 查到的群名）。"""
+    from app.life import feed_whitelist as fw
+    from app.nodes import chat_node as cn
+
+    wl_chat = "wl-group-1"
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+
+    def fake_get(key: str, *, default: str = "") -> str:
+        return wl_chat
+
+    monkeypatch.setattr(fw.dynamic_config, "get", fake_get)
+
+    # 群名查询命中：返回真实群名
+    seen_lookup: list = []
+
+    async def fake_find_conv_name(chat_id):
+        seen_lookup.append(chat_id)
+        return "🐢🐢群(飞书版)"
+
+    monkeypatch.setattr(cn, "find_conversation_display_name", fake_find_conv_name)
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id=wl_chat, is_p2p=False, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    d = delivered[0]
+    assert d["chat_id"] == wl_chat, "群回灌补传源群的 chat_id（common_conversation_id）"
+    assert d["chat_scope"] == "group", "群回灌 chat_scope 取 'group'"
+    assert d["chat_name"] == "🐢🐢群(飞书版)", "群回灌带查到的群名"
+    assert seen_lookup == [wl_chat], "群名按 req.chat_id 查"
+
+
+@pytest.mark.asyncio
+async def test_group_replay_falls_back_to_none_name_when_lookup_misses(monkeypatch):
+    """群名查不到（display_name 为 NULL / 会话缺失）→ chat_name 兜底 None，仍带 chat_id/scope。
+
+    句柄（chat_id + scope='group'）始终带上——life 侧群名缺失会兜底展示 group:<id>，
+    所以这里 chat_name=None 不影响她拿到句柄。
+    """
+    from app.life import feed_whitelist as fw
+    from app.nodes import chat_node as cn
+
+    wl_chat = "wl-group-2"
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+    monkeypatch.setattr(fw.dynamic_config, "get", lambda key, *, default="": wl_chat)
+
+    async def fake_find_conv_name(chat_id): return None
+    monkeypatch.setattr(cn, "find_conversation_display_name", fake_find_conv_name)
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id=wl_chat, is_p2p=False, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    d = delivered[0]
+    assert d["chat_id"] == wl_chat
+    assert d["chat_scope"] == "group"
+    assert d["chat_name"] is None, "查不到群名兜底 None（句柄仍由 chat_id + scope 带上）"
+
+
+@pytest.mark.asyncio
+async def test_p2p_replay_carries_direct_identity_no_name(monkeypatch):
+    """p2p 回灌对称带 chat_id / chat_scope='direct' / chat_name=None（私聊无群名，不查群名）。"""
+    from app.nodes import chat_node as cn
+
+    _happy_path_mocks(cn, monkeypatch)
+    monkeypatch.setenv("LANE", "coe-t1")
+
+    # p2p 不该查群名（私聊没有群名概念）—— 探针：被调到就爆
+    async def boom_conv_name(chat_id):
+        raise AssertionError("p2p 回灌不该查群名")
+
+    monkeypatch.setattr(cn, "find_conversation_display_name", boom_conv_name)
+
+    delivered: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver)
+
+    req = ChatRequest(
+        message_id="m1", persona_id="akao", session_id="s1",
+        chat_id="c-p2p", is_p2p=True, user_id="u1", lane="coe-t1",
+    )
+    await cn.chat_node(req)
+
+    assert len(delivered) == 1
+    d = delivered[0]
+    assert d["chat_id"] == "c-p2p", "p2p 回灌也带源会话 chat_id"
+    assert d["chat_scope"] == "direct", "p2p 回灌 chat_scope 取 'direct'"
+    assert d["chat_name"] is None, "私聊无群名，chat_name=None"

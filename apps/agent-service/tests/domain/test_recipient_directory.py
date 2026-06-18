@@ -28,19 +28,24 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 import app.data.session as session_mod
+import app.domain.recipient_directory as rd
 from app.data.models import (
     Base,
     BotPersona,
+    CommonAgentResponse,
     CommonConversation,
     CommonMessage,
     CommonUser,
 )
 from app.domain.recipient_directory import (
+    GroupTarget,
     LarkP2PTarget,
     MailboxTarget,
     UndeliverableRecipient,
+    group_uid,
     persona_uid,
     resolve_delivery,
     search_recipients,
@@ -56,20 +61,130 @@ _OTHER_P2P = uuid.uuid5(uuid.NAMESPACE_OID, "conv-other-p2p")
 _SOME_GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group")
 
 
+# bot_config 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里。群里
+# 解析「赤尾该 persona 的 active bot_name」走 COALESCE(common_agent_response.persona_id,
+# bot_config.persona_id)（与 find_recent_chat_messages 同口径）；集成测试要手动建这张
+# 裸表，让 COALESCE 的 bot_config 兜底分支能解析。
+_BOT_CONFIG_DDL = (
+    "CREATE TABLE bot_config ("
+    "  bot_name VARCHAR(50) PRIMARY KEY,"
+    "  persona_id VARCHAR(50),"
+    "  is_active BOOLEAN NOT NULL DEFAULT TRUE"
+    ")"
+)
+
+# common_bot_presence 同样由 channel-server 管理（裸表，无 SQLAlchemy 模型）。群投递
+# 解析出的 bot 必须**当前还在这个群且 active**——口径对齐 persona.py 的
+# resolve_bot_name_for_persona（JOIN common_bot_presence bp ON bc.bot_name = bp.bot_name
+# WHERE bp.common_conversation_id = :cid AND bp.is_active = true）。bot 被移出群后历史
+# 回复还在、但 presence.is_active 翻 false，解析必须 fail-loud（不投递）。复合主键
+# (common_conversation_id, bot_name) 与 channel-server 实体一致。
+_BOT_PRESENCE_DDL = (
+    "CREATE TABLE common_bot_presence ("
+    "  common_conversation_id UUID NOT NULL,"
+    "  bot_name VARCHAR(50) NOT NULL,"
+    "  is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+    "  PRIMARY KEY (common_conversation_id, bot_name)"
+    ")"
+)
+
+
 @pytest.fixture
 async def directory_db(test_db):
-    """建 recipient_directory 查询要 join 的表（bot_persona + common_*）。"""
+    """建 recipient_directory 查询要 join 的表（bot_persona + common_* + bot_config
+    + common_bot_presence）。"""
     tables = [
         BotPersona.__table__,
         CommonUser.__table__,
         CommonConversation.__table__,
         CommonMessage.__table__,
+        CommonAgentResponse.__table__,
     ]
     async with test_db.begin() as conn:
         await conn.run_sync(
             lambda sync_conn: Base.metadata.create_all(sync_conn, tables=tables)
         )
+        await conn.execute(text(_BOT_CONFIG_DDL))
+        await conn.execute(text(_BOT_PRESENCE_DDL))
     yield test_db
+
+
+def _patch_whitelist(monkeypatch, value: str) -> None:
+    """把 life 感知白名单的 Dynamic Config 读取换成固定串（同 should_feed_chat_to_life
+    的来源），让群解析 / 群模糊查的白名单闸在测试里可控。"""
+    from app.life import feed_whitelist as fw
+
+    def fake_get(key: str, *, default: str = "") -> str:
+        return value if key == fw.LIFE_FEED_CHAT_WHITELIST_KEY else default
+
+    monkeypatch.setattr(fw.dynamic_config, "get", fake_get)
+
+
+async def _seed_bot_presence(conv_id, bot_name, *, is_active=True):
+    """造一条 common_bot_presence：bot 在这个群、active 与否可控（presence 闸的输入）。"""
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_bot_presence "
+                "(common_conversation_id, bot_name, is_active) "
+                "VALUES (CAST(:cid AS uuid), :bn, :active)"
+            ),
+            {"cid": str(conv_id), "bn": bot_name, "active": is_active},
+        )
+
+
+async def _seed_bot_config(bot_name, persona_id, *, is_active=True):
+    """造一条 bot_config（bot_name → persona_id 映射）：proactive-only 群无 agent_response
+    行时，群解析的 persona 归属靠这张表兜底（COALESCE 第二支）。"""
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO bot_config (bot_name, persona_id, is_active) "
+                "VALUES (:bn, :pid, :active)"
+            ),
+            {"bn": bot_name, "pid": persona_id, "active": is_active},
+        )
+
+
+async def _seed_group_assistant_response(
+    conv_id, *, persona_id, bot_name, event_time, seed_presence=True
+):
+    """造一条群里赤尾该 persona 的 active 回复：assistant 消息 + common_agent_response
+    行（persona_id + bot_name），让群解析能拿到「该 persona 在这个群用哪个 bot」。
+
+    默认顺手播一条 common_bot_presence（active）——发过言的 bot 正常就在群里。要测
+    presence 闸（bot 已被移出群）时传 ``seed_presence=False`` 单独 seed inactive presence。
+    """
+    session_id = f"sess-{uuid.uuid4()}"
+    async with session_mod.get_session() as s:
+        s.add(
+            CommonMessage(
+                common_message_id=uuid.uuid4(),
+                channel="lark",
+                common_conversation_id=conv_id,
+                common_user_id=None,
+                sender_display_name=None,
+                role="assistant",
+                content=[{"kind": "text", "text": "hi"}],
+                content_text="hi",
+                scope="group",
+                bot_name=bot_name,
+                response_id=session_id,
+                event_time=event_time,
+            )
+        )
+        s.add(
+            CommonAgentResponse(
+                response_id=uuid.uuid4(),
+                session_id=session_id,
+                trigger_common_message_id=uuid.uuid4(),
+                common_conversation_id=conv_id,
+                bot_name=bot_name,
+                persona_id=persona_id,
+            )
+        )
+    if seed_presence:
+        await _seed_bot_presence(conv_id, bot_name, is_active=True)
 
 
 async def _seed_persona(persona_id, display_name, lite):
@@ -354,7 +469,283 @@ async def test_resolve_malformed_user_id_fails_loud():
 
 
 async def test_resolve_malformed_uid_fails_loud():
-    """没有 type 前缀 / 未知 type / 空 → fail-loud，不静默当某种。"""
-    for bad in ["akao", "group:xx", "", "persona:", "user:"]:
+    """没有 type 前缀 / 未知 type / 空 → fail-loud，不静默当某种。
+
+    ``group:`` 现在是合法前缀（走群分支），不再在「未知 type」里——它的不可投递由
+    群分支的白名单 / scope / channel / active 闸负责（见群解析测试）。
+    """
+    for bad in ["akao", "wechat:xx", "", "persona:", "user:"]:
         with pytest.raises(UndeliverableRecipient):
             await resolve_delivery(bad)
+
+
+# ---------------------------------------------------------------------------
+# group uid 体系（Task 1）：群成为一等可投递对象 + 安全闸 + 模糊查
+# ---------------------------------------------------------------------------
+
+
+def test_group_uid_format():
+    assert group_uid(_SOME_GROUP) == f"group:{_SOME_GROUP}"
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_in_whitelist_to_group_target(directory_db, monkeypatch):
+    """白名单内 + scope=group + channel=lark + active 的群 → GroupTarget，带正确 bot_name。
+
+    bot_name 是「赤尾该 persona 在这个群用的 active bot」，从群里 akao 的回复
+    （common_agent_response.persona_id=akao → bot_name）解析钉死，出站身份确定。
+    """
+    await _seed_conversation(_SOME_GROUP, scope="group", name="🐢🐢群（飞书版）")
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000
+    )
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    target = await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+    assert isinstance(target, GroupTarget)
+    assert target.common_conversation_id == str(_SOME_GROUP)
+    assert target.bot_name == "chiwei"
+    assert target.channel == "lark"
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_not_in_whitelist_fails_loud(directory_db, monkeypatch):
+    """白名单外的 group:<id> → fail-loud（安全闸，绝不返回伪地址）。
+
+    这是真正的闸：send_message(group:<id>) 模型可能从别处拿到 / 编出非白名单群 id
+    绕过 look_up，所以投递最后一关硬挡。
+    """
+    await _seed_conversation(_SOME_GROUP, scope="group", name="某业务群")
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000
+    )
+    # 白名单里是另一个群，本群不在内。
+    _patch_whitelist(monkeypatch, str(uuid.uuid4()))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_empty_whitelist_fails_loud(directory_db, monkeypatch):
+    """白名单为空（配置缺失 / 误删）→ fail-closed：任何群都不可投递（对称感知侧）。"""
+    await _seed_conversation(_SOME_GROUP, scope="group", name="群")
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000
+    )
+    _patch_whitelist(monkeypatch, "")
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_direct_scope_fails_loud(directory_db, monkeypatch):
+    """uid 形如 group: 但那个会话其实是 direct（scope 不符）→ fail-loud。"""
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-is-actually-direct")
+    await _seed_conversation(conv, scope="direct", name="其实是私聊")
+    _patch_whitelist(monkeypatch, str(conv))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(conv), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_non_lark_fails_loud(directory_db, monkeypatch):
+    """白名单内 + scope=group 但 channel 非 lark → fail-loud（这一刀只接飞书群）。"""
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-wecom")
+    await _seed_conversation(conv, scope="group", name="企微群", channel="wecom")
+    _patch_whitelist(monkeypatch, str(conv))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(conv), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_inactive_fails_loud(directory_db, monkeypatch):
+    """白名单内 + scope=group + lark 但会话 is_active=False（已解散 / 退群）→ fail-loud。"""
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-inactive")
+    async with session_mod.get_session() as s:
+        s.add(
+            CommonConversation(
+                common_conversation_id=conv,
+                channel="lark",
+                scope="group",
+                display_name="解散的群",
+                is_active=False,
+            )
+        )
+    await _seed_group_assistant_response(
+        conv, persona_id="akao", bot_name="chiwei", event_time=1000
+    )
+    _patch_whitelist(monkeypatch, str(conv))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(conv), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_no_active_bot_for_persona_fails_loud(
+    directory_db, monkeypatch
+):
+    """群合法（白名单 + group + lark + active），但解析不到该 persona 的 active bot_name
+    → fail-loud（出站身份缺失绝不返回伪地址，proactive 不写 agent_response、worker
+    没别处推断 bot）。"""
+    await _seed_conversation(_SOME_GROUP, scope="group", name="没赤尾发过言的群")
+    # 群里只有别的 persona 回复过（chinagi），没有 akao 的归属 → 解析不出 akao 的 bot。
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="chinagi", bot_name="other-bot", event_time=1000
+    )
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_picks_persona_specific_bot(directory_db, monkeypatch):
+    """同群多 persona 发过言 → 解析出**调用方 persona 自己**的 active bot，不串到别人。"""
+    await _seed_conversation(_SOME_GROUP, scope="group", name="三姐妹都在的群")
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="chinagi", bot_name="chinagi-bot", event_time=900
+    )
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000
+    )
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    target = await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+    assert isinstance(target, GroupTarget)
+    assert target.bot_name == "chiwei", "解析出 akao 自己的 bot，不串到 chinagi 的"
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_bot_not_in_presence_fails_loud(
+    directory_db, monkeypatch
+):
+    """群合法、该 persona 历史发过言，但解析出的 bot 已被移出群（无 active presence 行）
+    → fail-loud（codex 必改 2）。
+
+    只看历史 assistant 回复 + bot_config.is_active 不够：bot 被踢出群后历史回复还在、
+    bot_config 也可能仍 active，但它已不在这个群、发不出去。presence 闸（对齐 persona.py
+    的 resolve_bot_name_for_persona）必须把这种解析判成不可投递、投递前 fail-loud，而不是
+    成功解析后让 worker 异步发失败。
+    """
+    await _seed_conversation(_SOME_GROUP, scope="group", name="bot 已被移出的群")
+    # akao 历史在群里发过言（agent_response + assistant 消息），但**不播 presence**，
+    # 单独播一条 is_active=False 的 presence（bot 被移出群、presence 翻 false）。
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000,
+        seed_presence=False,
+    )
+    await _seed_bot_presence(_SOME_GROUP, "chiwei", is_active=False)
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_bot_presence_row_missing_fails_loud(
+    directory_db, monkeypatch
+):
+    """连 presence 行都没有（bot 从未被记录在这个群）→ 同样 fail-loud（presence 闸的
+    缺行分支，对称 inactive 分支）。"""
+    await _seed_conversation(_SOME_GROUP, scope="group", name="无 presence 行的群")
+    await _seed_group_assistant_response(
+        _SOME_GROUP, persona_id="akao", bot_name="chiwei", event_time=1000,
+        seed_presence=False,
+    )
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    with pytest.raises(UndeliverableRecipient):
+        await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_resolve_group_uid_proactive_only_resolves_via_bot_config(
+    directory_db, monkeypatch
+):
+    """群里该 persona 只发过 proactive（无 common_agent_response 行、response_id=NULL）
+    → 靠 bot_config 把 bot_name 归属到 persona，仍解析出正确 bot（codex 建议 1）。
+
+    proactive 出站不写 common_agent_response，所以 LEFT JOIN car 这一支为空、persona
+    归属落到 COALESCE 的 bot_config 兜底支。这条专门覆盖那个 fallback：删掉 bot_config
+    分支会让本例解析不出 bot → fail-loud（红），保护到 fallback。
+    """
+    await _seed_conversation(_SOME_GROUP, scope="group", name="只发过 proactive 的群")
+    # 群里只有一条 proactive assistant 消息：bot_name 有，但 response_id=NULL（没有
+    # 对应的 common_agent_response 行），persona 归属只能靠 bot_config。
+    async with session_mod.get_session() as s:
+        s.add(
+            CommonMessage(
+                common_message_id=uuid.uuid4(),
+                channel="lark",
+                common_conversation_id=_SOME_GROUP,
+                common_user_id=None,
+                sender_display_name=None,
+                role="assistant",
+                content=[{"kind": "text", "text": "主动说一句"}],
+                content_text="主动说一句",
+                scope="group",
+                bot_name="chiwei",
+                response_id=None,  # proactive：不写 agent_response
+                event_time=1000,
+            )
+        )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+    await _seed_bot_presence(_SOME_GROUP, "chiwei", is_active=True)
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    target = await rd.resolve_delivery(group_uid(_SOME_GROUP), persona_id="akao")
+
+    assert isinstance(target, GroupTarget)
+    assert target.bot_name == "chiwei", "proactive-only 群靠 bot_config 解析出正确 bot"
+    assert target.common_conversation_id == str(_SOME_GROUP)
+
+
+@pytest.mark.integration
+async def test_search_recipients_includes_whitelisted_group(directory_db, monkeypatch):
+    """模糊查群名命中白名单内的群 → 候选带 group:<id> uid 混进结果。"""
+    await _seed_three_sisters()
+    await _seed_conversation(_SOME_GROUP, scope="group", name="🐢🐢群（飞书版）")
+    _patch_whitelist(monkeypatch, str(_SOME_GROUP))
+
+    got = await search_recipients("🐢🐢群")
+
+    uids = {c.uid for c in got}
+    assert group_uid(_SOME_GROUP) in uids, "白名单群应作为候选混进来"
+
+
+@pytest.mark.integration
+async def test_search_recipients_excludes_non_whitelisted_group(
+    directory_db, monkeypatch
+):
+    """模糊查只返白名单内的群 —— 名字对得上但不在白名单的群绝不出现在候选里。"""
+    in_wl = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-in-wl")
+    out_wl = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-out-wl")
+    await _seed_conversation(in_wl, scope="group", name="海龟群A")
+    await _seed_conversation(out_wl, scope="group", name="海龟群B")
+    _patch_whitelist(monkeypatch, str(in_wl))
+
+    got = await search_recipients("海龟群")
+
+    uids = {c.uid for c in got}
+    assert group_uid(in_wl) in uids
+    assert group_uid(out_wl) not in uids, "非白名单群绝不出现在候选里"
+
+
+@pytest.mark.integration
+async def test_search_recipients_excludes_direct_conversation_as_group(
+    directory_db, monkeypatch
+):
+    """群模糊查只匹配 scope=group：白名单里即便混进一个 direct 会话也不当群候选返回。"""
+    direct_conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-direct-named-like-group")
+    await _seed_conversation(direct_conv, scope="direct", name="像群名的私聊")
+    _patch_whitelist(monkeypatch, str(direct_conv))
+
+    got = await search_recipients("像群名的私聊")
+
+    uids = {c.uid for c in got}
+    assert group_uid(direct_conv) not in uids, "direct 会话不作群候选"

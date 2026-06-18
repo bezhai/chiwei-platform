@@ -19,6 +19,7 @@ from app.data.models import (
     CommonMessage,
     CommonUser,
 )
+from app.infra import cst_time
 from app.runtime.db import auto_tx, current_session
 
 __all__ = [
@@ -323,13 +324,21 @@ async def find_recent_chat_messages(
     *,
     chat_id: str,
     limit: int,
+    since: str | None = None,
 ) -> list[tuple[CommonMessageRecord, str | None]]:
-    """按 chat_id 捞这个会话最近 ``limit`` 条消息（proactive 渲染的历史上下文）。
+    """按 chat_id 捞这个会话的消息（proactive 渲染的历史上下文）。
 
     proactive（赤尾主动给真人发消息）**没有源消息**，渲染历史不能走
     ``quick_search``（它从 message_id 反查），只能靠 chat_id 取。这里给一个
-    ``chat_id``，捞这个会话最近 ``limit`` 条消息：
+    ``chat_id``，捞这个会话的消息：
 
+      * **``since`` 增量水位（治她对着旧话反复主动开口）**：``since`` 非空时只取
+        ``event_time`` **严格大于** ``since`` 的消息——即「上一次 life 轮之后真人新发
+        的」增量，她这次主动发不再把早就说过的旧话拉进来。``since`` 是 ISO8601 串
+        （life 写的 ``LifeState.observed_at`` 形态）、DB ``event_time`` 是毫秒整数，
+        过滤前经 ``cst_time.parse`` 把 ISO 折成毫秒时刻再比。``since=None``（默认、也是
+        冷启兜底）时**行为完全不变**：退回全量最近 ``limit`` 条。``since`` 解析不出真实
+        时刻（脏串）时同样退回全量（不静默把这次主动发的历史吞成空，由水位语义兜底）。
       * **user + assistant 都取**（区别于 ``find_user_messages_after`` 只取 user）——
         proactive context 要把赤尾自己发过的（含上一条 proactive）认作她自己说的，
         所以 assistant 行也得在历史里。
@@ -348,7 +357,8 @@ async def find_recent_chat_messages(
         agent-service 的 SQLAlchemy 模型里，用相关标量子查询读裸表（同
         ``resolve_persona_id`` 用裸表名读它），只取 ``is_active`` 的映射。
       * 超 ``limit`` 只保**最近 N 条**、仍按发生先后升序（条目数量控制、不字符截断）：
-        SQL 先按 event_time 降序取最近 N 条，再在 Python 反转回升序。
+        SQL 先按 event_time 降序取最近 N 条，再在 Python 反转回升序。``since`` 过滤后
+        仍保这个上限（水位后消息很多时取最近 limit 条防爆）。
       * ``proactive_trigger`` 伪消息剔除（NULL-safe，同 ``_by_root``）。
 
     返回 ``[(record, 发言 persona), ...]``。``chat_id`` 解析不出 uuid → 返回 ``[]``。
@@ -378,6 +388,15 @@ async def find_recent_chat_messages(
         .order_by(CommonMessage.event_time.desc())
         .limit(limit)
     )
+
+    # ``since`` 增量水位：把 ISO8601 串折成毫秒时刻（DB event_time 口径），只取严格大于
+    # 它的消息。脏串（cst_time.parse 解析不出真实时刻）退回全量——不加这个过滤即可，
+    # 不静默把历史吞成空（向后兼容 + 冷启兜底语义一致）。
+    if since is not None:
+        since_dt = cst_time.parse(since)
+        if since_dt is not None:
+            since_ms = int(since_dt.timestamp() * 1000)
+            stmt = stmt.where(CommonMessage.event_time > since_ms)
 
     async with auto_tx():
         result = await current_session().execute(stmt)

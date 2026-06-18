@@ -154,6 +154,20 @@ class EventEnvelope(Data):
     source: str          # 产出方：world / 说话者 persona_id / chat ...
     summary: str         # 客观可感形态的文字描述（或 surroundings 的周遭客观切片）
     occurred_at: str     # event 发生时间 (ISO8601)
+    # 会话身份（task 3 / 群成为一等可投递对象）：这条 event 来自哪个会话。让 life 被
+    # 白名单**群**消息唤醒时知道「来自哪个群」、拿到群的稳定句柄（``group:<chat_id>``），
+    # 从而能接着在同一个群继续主动说，而不是转头私聊。语义钉死：
+    #   * ``chat_id``    = ``common_conversation_id``（群 uid = ``"group:" + chat_id``）。
+    #   * ``chat_scope`` = DB 原值 ``direct`` / ``group``（不映射成 p2p/group，读侧据它判群）。
+    #   * ``chat_name``  = 群名（``common_conversation.display_name``），私聊 / 查不到为 None。
+    # 三字段都 **nullable、默认 None**：只有 chat 群 / p2p 回灌处（chat_node）补传，world /
+    # 日程提醒等旧投递处不带——它们的 event 没有「源会话」概念。durable schema 变更是
+    # **forward-only**（加 nullable 列对上线安全：migrator additive ``ADD COLUMN`` 不带
+    # NOT NULL、不触发 fail-closed；旧条目这三列为 NULL 读写不炸）。回滚预案是后续 task，
+    # 这里只管正确加 nullable 列（对齐 LifeState.next_wake_at / day_reviewed_date 的先例）。
+    chat_id: str | None = None
+    chat_scope: str | None = None
+    chat_name: str | None = None
 
 
 class EventRead(Data):
