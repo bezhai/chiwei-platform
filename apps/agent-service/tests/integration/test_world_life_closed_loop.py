@@ -287,8 +287,14 @@ def _stub_presence_match(monkeypatch):
         *, scope, persona_locations, trace_session_id=None
     ):
         if scope.startswith(_PRESENCE_SCOPE_PREFIX):
-            encoded = scope[len(_PRESENCE_SCOPE_PREFIX):].split("]", 1)[0]
-            wanted = _json.loads(encoded)
+            # ``_notify`` 把收件人编成 ``[present:<json array>]<observation>``。json
+            # array 本身带 ``]``（``["akao","ayana"]``），所以不能用 ``split("]")`` 截
+            # ——那会停在 array 自己的 ``]`` 上、截出缺闭合括号的残片。用 ``raw_decode``
+            # 从 prefix 之后直接吃掉一个完整的 json 值（它返回解析结束的偏移量），天然
+            # 只消费那个 array、不被 array 内部或 observation 里的 ``]`` 干扰。
+            wanted, _end = _json.JSONDecoder().raw_decode(
+                scope[len(_PRESENCE_SCOPE_PREFIX):]
+            )
             return [p for p in wanted if p in persona_locations]
         # 无前缀（直接 invoke 真实 notify 的测试）：默认全部有位置的候选在场。
         return list(persona_locations)
