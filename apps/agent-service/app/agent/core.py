@@ -79,9 +79,15 @@ from app.agent.trace import (
     current_generation_context,
     current_turn_trace_id,
 )
+from app.api.middleware import get_lane
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra import cst_time
 from app.infra.config import settings
+from app.runtime.lane_policy import (
+    classify_deployment_lane,
+    current_deployment_lane,
+    normalize_deployment_lane,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,20 +159,58 @@ class _NoOpRootSpan:
         pass
 
 
+def _trace_lane_attributes() -> tuple[dict[str, str], list[str]]:
+    """Return Langfuse trace attributes that make lane lookup cheap.
+
+    ``tags`` are the primary query surface (``list-traces`` supports tags
+    directly); metadata carries the same lane fields for the trace detail page
+    and later analytics.
+    """
+    raw_request_lane = get_lane()
+    if raw_request_lane:
+        lane = normalize_deployment_lane(raw_request_lane) or "prod"
+        source = "request"
+    else:
+        deployment_lane = current_deployment_lane()
+        lane = deployment_lane or "prod"
+        source = "deployment" if deployment_lane else "default"
+
+    lane_class = classify_deployment_lane(lane)
+    metadata = {
+        "app": "agent-service",
+        "lane": lane,
+        "laneClass": lane_class,
+        "laneSource": source,
+    }
+    tags = [
+        "app:agent-service",
+        f"lane:{lane}",
+        f"lane_class:{lane_class}",
+    ]
+    return metadata, tags
+
+
 def _set_current_trace(
     *, name: str | None = None, input: Any = None, session_id: str | None = None
 ) -> None:
-    """Set the current trace's name / input / session, swallowing langfuse errors.
+    """Set current trace attributes, swallowing langfuse errors.
 
     ``None`` fields are skipped by the SDK, so passing only ``name`` updates the
     trace name and leaves its input untouched. ``session_id`` is a *trace*
     attribute (the langfuse v3 way to group related traces — it is NOT part of a
     span's ``trace_context``); passing it groups this trace into that session.
-    Tracing must never break the call.
+    Lane tags/metadata are always written so every root trace is queryable by
+    ``tags=["lane:<lane>"]`` even when ``update_trace=False``. Tracing must never
+    break the call.
     """
     try:
+        metadata, tags = _trace_lane_attributes()
         _get_trace_client().update_current_trace(
-            name=name, input=input, session_id=session_id
+            name=name,
+            input=input,
+            session_id=session_id,
+            metadata=metadata,
+            tags=tags,
         )
     except Exception as exc:  # pragma: no cover - tracing must not break the call
         logger.warning("langfuse update_current_trace failed: %s", exc)
@@ -248,11 +292,8 @@ def _root_span(
     tid = current_turn_trace_id()
     trace_context = {"trace_id": tid} if tid else None
     with _safe_current_span(span_name, input, trace_context) as span:
-        if session_id is not None:
-            # Session grouping is orthogonal to the name/input ownership below:
-            # set it whenever provided so even a guard (update_trace=False) on a
-            # session-bound run tags the trace's session.
-            _set_current_trace(session_id=session_id)
+        trace_name: str | None = None
+        trace_input: Any = None
         if tid is not None:
             # Inside a turn the guards / main / post-safety are separate root
             # spans on one trace; langfuse would name the whole trace after the
@@ -261,11 +302,12 @@ def _root_span(
             # name only, each span keeps its own observation name. Only the main
             # path (``update_trace``) owns the trace input, so the trace top
             # reads the chat turn, not a guard's safety prompt.
-            _set_current_trace(
-                name=TURN_TRACE_NAME, input=input if update_trace else None
-            )
+            trace_name = TURN_TRACE_NAME
+            trace_input = input if update_trace else None
         elif update_trace:
-            _set_current_trace(name=span_name, input=input)
+            trace_name = span_name
+            trace_input = input
+        _set_current_trace(name=trace_name, input=trace_input, session_id=session_id)
         yield span
 
 
