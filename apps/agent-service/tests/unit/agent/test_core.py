@@ -323,7 +323,10 @@ class TestTurnTraceUnifiedName:
         with patch.object(core, "_get_trace_client", return_value=client):
             with core._root_span(name="guard", input=[], update_trace=False):
                 pass
-        client.update_current_trace.assert_not_called()
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw.get("name") is None
+        assert kw.get("input") is None
+        assert kw["tags"] == ["app:agent-service", "lane:prod", "lane_class:prod"]
 
 
 class TestRootSpanSession:
@@ -377,19 +380,20 @@ class TestRootSpanSession:
 
     def test_no_session_id_does_not_touch_trace_session(self):
         """Backward compat: without a session_id the run behaves exactly as
-        before — no update_current_trace call carries a session_id, and an
-        update_trace=False/no-turn run still makes no update_current_trace call
-        at all (this is the chat / guard status quo)."""
+        before re: session — no update_current_trace call carries a session_id,
+        while lane tags/metadata are still written for trace lookup."""
         from app.agent import core
 
         client = MagicMock()
         with patch.object(core, "_get_trace_client", return_value=client):
             with core._root_span(name="guard", input=[], update_trace=False):
                 pass
-        client.update_current_trace.assert_not_called()
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw.get("session_id") is None
+        assert kw["metadata"]["lane"] == "prod"
 
     def test_no_session_id_with_update_trace_keeps_status_quo(self):
-        """update_trace=True without a session: still only name+input, no
+        """update_trace=True without a session: name+input are set and no
         session_id leaks into the call."""
         from app.agent import core
 
@@ -401,6 +405,67 @@ class TestRootSpanSession:
         assert kw["name"] == "world-engine"
         assert kw["input"] == [1]
         assert kw.get("session_id") is None
+
+
+class TestRootSpanLaneAttributes:
+    """Lane must be written as trace tags because list-traces filters tags
+    directly; metadata mirrors the same fields for trace detail inspection."""
+
+    def test_request_lane_writes_queryable_tags_and_metadata(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "get_lane", return_value="ppe-lf"),
+            patch.object(core, "current_deployment_lane", return_value=None),
+        ):
+            with core._root_span(name="main", input=[], update_trace=True):
+                pass
+        kw = client.update_current_trace.call_args.kwargs
+        assert kw["tags"] == [
+            "app:agent-service",
+            "lane:ppe-lf",
+            "lane_class:ppe",
+        ]
+        assert kw["metadata"] == {
+            "app": "agent-service",
+            "lane": "ppe-lf",
+            "laneClass": "ppe",
+            "laneSource": "request",
+        }
+
+    def test_deployment_lane_used_when_request_lane_absent(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "get_lane", return_value=None),
+            patch.object(core, "current_deployment_lane", return_value="coe-lf"),
+        ):
+            with core._root_span(name="world", input=[], update_trace=True):
+                pass
+        kw = client.update_current_trace.call_args.kwargs
+        assert "lane:coe-lf" in kw["tags"]
+        assert "lane_class:coe" in kw["tags"]
+        assert kw["metadata"]["laneSource"] == "deployment"
+
+    def test_prod_default_when_no_lane_context(self):
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "get_lane", return_value=None),
+            patch.object(core, "current_deployment_lane", return_value=None),
+        ):
+            with core._root_span(name="main", input=[], update_trace=False):
+                pass
+        kw = client.update_current_trace.call_args.kwargs
+        assert "lane:prod" in kw["tags"]
+        assert kw["metadata"]["lane"] == "prod"
+        assert kw["metadata"]["laneSource"] == "default"
 
 
 class TestRunSessionPlumbing:
