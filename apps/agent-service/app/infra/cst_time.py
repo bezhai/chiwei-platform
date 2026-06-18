@@ -9,6 +9,9 @@ ISO（``...+08:00``）、life 写 UTC aware ISO（``...+00:00``）、chat 回灌
   * :func:`to_cst_hm` / :func:`to_cst_hms` —— aware ``datetime`` 或原始 raw →
     CST 的 ``HH:MM`` / ``HH:MM:SS`` 显示串（带 ``CST`` 标识，让模型看得出是
     北京时间）。
+  * :func:`to_cst_full` —— 多给「年月日 + 星期」的完整口径
+    （``YYYY-MM-DD 周X HH:MM CST``），喂 agent 当「现在是几点」的时间锚用：她算
+    ``remind_at`` 这类绝对时间要知道今天是几号、星期几，只给时分会瞎填日期。
   * :func:`now_cst_iso` —— 当前 CST aware ISO（``...+08:00``）供新写。
 
 刻意**只认这三种实际格式**，不做"任意表示"的万能解析（spec 决策 1 / non-goal）：
@@ -90,6 +93,28 @@ def to_cst_hms(raw: str | None) -> str:
     if dt is None:
         return f"{raw}" if raw else ""
     return f"{dt.strftime('%H:%M:%S')} CST"
+
+
+# 中文星期（周一=0 … 周日=6，对齐 ``datetime.weekday()``），给完整时间口径用。
+_WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def to_cst_full(raw: str | None) -> str:
+    """显示成 CST 的完整口径 ``YYYY-MM-DD 周X HH:MM CST``；无法解析则原样回显。
+
+    比 :func:`to_cst_hm` 多给「年月日 + 星期」。喂给 agent 当「现在是几点」的时间锚
+    要用它，而不是只给时分的 ``to_cst_hm`` —— 她记日程 / 算 ``remind_at`` 时要把
+    「5 分钟后」「周五」这类相对时间换算成绝对 ISO，必须知道今天是几号、星期几；只给
+    时分她只能瞎填日期分量，提醒会被排到错误（甚至已过去）的日期、永远不在该响的那
+    一刻触发。
+    """
+    dt = to_cst(raw)
+    if dt is None:
+        return f"{raw}" if raw else ""
+    return (
+        f"{dt.strftime('%Y-%m-%d')} {_WEEKDAYS_CN[dt.weekday()]} "
+        f"{dt.strftime('%H:%M')} CST"
+    )
 
 
 def now_cst() -> datetime:

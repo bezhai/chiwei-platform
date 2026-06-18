@@ -801,7 +801,10 @@ async def _run_life_round(
             f"{render_notebook(notebook_entries, now=observed_at)}"
         )
 
-    parts.append(f"现在是 {cst_time.to_cst_hm(observed_at)}。")
+    # 完整日期口径（年月日 + 星期 + 时分），不是只给时分：她记日程 / 算 remind_at
+    # 时要把「5 分钟后」「周五」这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填
+    # 日期分量（线上 bug：remind_at 被填到过去，提醒永远不在该响的那一刻触发）。
+    parts.append(f"现在是 {cst_time.to_cst_full(observed_at)}。")
 
     # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
     # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript

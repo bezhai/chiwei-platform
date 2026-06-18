@@ -532,6 +532,12 @@ async def test_current_time_shows_cst_in_user_stimulus(patched, monkeypatch):
         f"当轮几点该显示 CST 钟点并进 USER（UTC 12:30 → CST 20:30），实际 {msg_blob!r}"
     )
     assert "CST" in msg_blob
+    # 「现在」不光给时分，还要给年月日：她记日程 / 算 remind_at 时要把「5 分钟后」
+    # 这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填日期分量（线上 bug：
+    # remind_at 被填到过去，提醒永远不在你等的那一刻触发）。
+    assert "2026-06-03" in msg_blob, (
+        f"当轮「现在」要带年月日（她算 remind_at 靠它），实际 {msg_blob!r}"
+    )
 
 
 def _utc_millis(y, mo, d, h, mi, s):
