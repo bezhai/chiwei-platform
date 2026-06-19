@@ -61,6 +61,7 @@ class _FakePersona:
     display_name = "赤尾"
     persona_lite = "lite-body"
     appearance_detail = "looks"
+    default_reply_style = "few-shot 口吻样例"
     error_messages = {"error": "ERR"}
 
 
@@ -98,6 +99,8 @@ async def test_build_human_chat_context_packs_render_ready_context(monkeypatch):
     assert turn.identity == "lite-body"
     assert turn.appearance == "looks"
     assert turn.inner_context == "INNER[oc_test/akao]"
+    # per-persona 说话风格 default_reply_style 进 ChatTurnContext.reply_style
+    assert turn.reply_style == "few-shot 口吻样例"
     # persona 对象随 context 走,渲染层据它出 persona error 文案
     assert turn.error_message("error") == "ERR"
 

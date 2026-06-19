@@ -85,6 +85,7 @@ class ChatTurnContext:
     identity: str
     appearance: str
     inner_context: str
+    reply_style: str = ""
     persona: object | None = None
 
     def error_message(self, kind: str) -> str:
@@ -141,6 +142,7 @@ async def render_chat_turn(
         "available_skills": SkillRegistry.list_descriptions(),
         "identity": turn_ctx.identity,
         "appearance": turn_ctx.appearance,
+        "reply_style": turn_ctx.reply_style,
     }
 
     model_id = "main-chat-model"

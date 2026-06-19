@@ -151,5 +151,6 @@ async def build_human_chat_context(
         identity=persona.persona_lite,
         appearance=persona.appearance_detail,
         inner_context=inner_context,
+        reply_style=persona.default_reply_style,
         persona=persona,
     )

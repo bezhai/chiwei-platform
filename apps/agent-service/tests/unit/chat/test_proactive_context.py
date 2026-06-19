@@ -58,6 +58,7 @@ class _FakePersona:
     display_name = "赤尾"
     persona_lite = "lite-body"
     appearance_detail = "looks"
+    default_reply_style = "few-shot 口吻样例"
     error_messages = {"error": "ERR"}
 
 
@@ -114,6 +115,8 @@ async def test_packs_render_ready_context_with_intent(stub_proactive):
     assert turn.identity == "lite-body"
     assert turn.appearance == "looks"
     assert turn.inner_context == "INNER[cc-direct-1/akao]"
+    # per-persona 说话风格 default_reply_style 进 ChatTurnContext.reply_style
+    assert turn.reply_style == "few-shot 口吻样例"
     assert turn.error_message("error") == "ERR"
     # 历史只靠 chat_id 取，不反查源消息
     assert stub_proactive["recent_calls"][0]["chat_id"] == "cc-direct-1"
