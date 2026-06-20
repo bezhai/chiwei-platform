@@ -56,31 +56,114 @@ data:
 
     PROMETHEUS="${PROMETHEUS_URL:-http://kube-prometheus-stack-prometheus.monitoring:9090}"
     FEISHU_URL="${FEISHU_WEBHOOK_URL:?FEISHU_WEBHOOK_URL is required}"
+    NL=$(printf '\n_')
+    NL=${NL%_}
 
     now_cst() {
       TZ=Asia/Shanghai date '+%m-%d %H:%M:%S'
     }
 
-    prom_query() {
-      val=$(curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
-        | jq -r '.data.result[0].value[1] // empty')
-      if [ -z "$val" ]; then echo ""; else echo "$val"; fi
+    prom_response() {
+      curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" 2>/dev/null || true
     }
 
-    fmt_pct() {
-      val=$(prom_query "$1")
-      if [ -z "$val" ]; then echo "N/A"; else printf '%.0f' "$val"; fi
+    prom_query() {
+      response=$(prom_response "$1")
+      if [ -z "$response" ]; then
+        echo ""
+        return
+      fi
+      val=$(printf '%s' "$response" | jq -r '.data.result[0].value[1] // empty' 2>/dev/null || true)
+      if [ -z "$val" ]; then echo ""; else echo "$val"; fi
     }
 
     fmt_int() {
       val=$(prom_query "$1")
-      if [ -z "$val" ]; then echo "0"; else printf '%.0f' "$val"; fi
+      if [ -z "$val" ]; then echo "N/A"; else printf '%.0f' "$val" 2>/dev/null || echo "N/A"; fi
     }
 
-    # --- 1. Service Health ---
-    health_table="| 服务 | 状态 |\n| --- | --- |"
-    healthy=0
-    total=0
+    fmt_metric() {
+      raw="$1"
+      if [ -z "$raw" ]; then echo "N/A"; else printf '%.0f' "$raw" 2>/dev/null || echo "N/A"; fi
+    }
+
+    lookup_metric_file() {
+      key="$1"
+      file="$2"
+      awk -F= -v key="$key" '$1 == key { print $2; exit }' "$file" 2>/dev/null || true
+    }
+
+    prom_query_deployments() {
+      response=$(prom_response "$1")
+      if [ -z "$response" ]; then
+        return 1
+      fi
+      lines=$(printf '%s' "$response" | jq -r '.data.result[] | select(.metric.deployment != null) | "\(.metric.deployment)=\(.value[1])"' 2>/dev/null || true)
+      [ -n "$lines" ] || return 1
+      printf '%s\n' "$lines" | sort
+    }
+
+    prom_query_nodes() {
+      response=$(prom_response "$1")
+      if [ -z "$response" ]; then
+        return 1
+      fi
+      lines=$(printf '%s' "$response" | jq -r '.data.result[] | select(.metric.instance != null) | "\(.metric.instance)=\(.value[1])"' 2>/dev/null || true)
+      [ -n "$lines" ] || return 1
+      printf '%s\n' "$lines" | sort
+    }
+
+    monitoring_degraded=0
+
+    # --- 1. App Deployment Health (prod lane, dynamic from current K8s state) ---
+    deployment_table="| 应用 | Ready | 状态 |${NL}| --- | --- | --- |"
+    deployment_healthy=0
+    deployment_total=0
+    deployment_unhealthy=0
+
+    if prom_query_deployments 'kube_deployment_spec_replicas{namespace="prod",deployment=~".*-prod"}' > /tmp/deploy_desired.txt; then
+      if ! prom_query_deployments 'kube_deployment_status_replicas_available{namespace="prod",deployment=~".*-prod"}' > /tmp/deploy_available.txt; then
+        : > /tmp/deploy_available.txt
+        monitoring_degraded=1
+      fi
+
+      while IFS='=' read -r deploy desired_raw; do
+        [ -n "$deploy" ] || continue
+        app="${deploy%-prod}"
+        desired=$(fmt_metric "$desired_raw")
+        available_raw=$(lookup_metric_file "$deploy" /tmp/deploy_available.txt)
+        available=$(fmt_metric "$available_raw")
+        deployment_total=$((deployment_total + 1))
+
+        if [ "$desired" != "N/A" ] && [ "$available" != "N/A" ] && [ "$available" -ge "$desired" ]; then
+          deployment_healthy=$((deployment_healthy + 1))
+          status="✅ 正常"
+        elif [ "$available" = "N/A" ]; then
+          deployment_unhealthy=$((deployment_unhealthy + 1))
+          status="⚠️ 缺少 available 指标"
+          monitoring_degraded=1
+        else
+          deployment_unhealthy=$((deployment_unhealthy + 1))
+          status="❌ 异常"
+        fi
+
+        deployment_table="${deployment_table}${NL}| ${app} | ${available}/${desired} | ${status} |"
+      done < /tmp/deploy_desired.txt
+
+      if [ "$deployment_total" -eq 0 ]; then
+        deployment_table="${deployment_table}${NL}| 指标查询 | N/A | ⚠️ 未发现 prod Deployment |"
+        monitoring_degraded=1
+      fi
+    else
+      deployment_table="${deployment_table}${NL}| 指标查询 | N/A | ⚠️ Prometheus 查询失败 |"
+      monitoring_degraded=1
+    fi
+
+    # --- 2. HTTP Health Probes (best-effort endpoints, deployment table above is the app inventory source) ---
+    probe_table="| 服务 | 状态 |${NL}| --- | --- |"
+    probe_healthy=0
+    probe_total=0
+    probe_unhealthy=0
 
     for entry in \
       "api-gateway|http://api-gateway.prod:8080/healthz" \
@@ -88,49 +171,71 @@ data:
       "lite-registry|http://lite-registry.prod:8080/healthz" \
       "channel-server|http://channel-server.prod:3000/api/health" \
       "agent-service|http://agent-service.prod:8000/health" \
+      "sandbox-worker|http://sandbox-worker.prod:8000/health" \
       "tool-service|http://tool-service.prod:8000/health"
     do
       name="${entry%%|*}"
       url="${entry##*|}"
-      total=$((total + 1))
+      probe_total=$((probe_total + 1))
       if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
-        healthy=$((healthy + 1))
-        health_table="${health_table}\n| ${name} | ✅ 正常 |"
+        probe_healthy=$((probe_healthy + 1))
+        probe_table="${probe_table}${NL}| ${name} | ✅ 正常 |"
       else
-        health_table="${health_table}\n| ${name} | ❌ 异常 |"
+        probe_unhealthy=$((probe_unhealthy + 1))
+        probe_table="${probe_table}${NL}| ${name} | ❌ 异常 |"
       fi
     done
 
-    # --- 2. Node Resources (per node) ---
-    prom_query_nodes() {
-      curl -sf --max-time 10 "${PROMETHEUS}/api/v1/query" --data-urlencode "query=$1" \
-        | jq -r '.data.result[] | "\(.metric.instance)=\(.value[1])"'
-    }
+    # --- 3. Node Resources (per node) ---
+    node_table="| 节点 | CPU | 内存 | 系统盘 | 应用盘 |${NL}| --- | --- | --- | --- | --- |"
+    node_metrics_ok=1
 
-    node_table="| 节点 | CPU | 内存 | 磁盘 |\n| --- | --- | --- | --- |"
-    # Collect per-node metrics into associative temp files
-    prom_query_nodes '100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' > /tmp/cpu.txt
-    prom_query_nodes '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100' > /tmp/mem.txt
-    prom_query_nodes '100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100' > /tmp/disk.txt
+    if ! prom_query_nodes '100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100' > /tmp/cpu.txt; then
+      : > /tmp/cpu.txt
+      node_metrics_ok=0
+    fi
+    if ! prom_query_nodes '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100' > /tmp/mem.txt; then
+      : > /tmp/mem.txt
+      node_metrics_ok=0
+    fi
+    if ! prom_query_nodes '100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100' > /tmp/system_disk.txt; then
+      : > /tmp/system_disk.txt
+      node_metrics_ok=0
+    fi
+    if ! prom_query_nodes '100 - (node_filesystem_avail_bytes{mountpoint="/data00"} / node_filesystem_size_bytes{mountpoint="/data00"}) * 100' > /tmp/app_disk.txt; then
+      : > /tmp/app_disk.txt
+      node_metrics_ok=0
+    fi
 
-    # Build node resource table
-    while IFS='=' read -r inst cpu_raw; do
-      cpu=$(printf '%.0f' "$cpu_raw" 2>/dev/null || echo "N/A")
-      mem_raw=$(grep "^${inst}=" /tmp/mem.txt | cut -d= -f2)
-      mem=$(printf '%.0f' "$mem_raw" 2>/dev/null || echo "N/A")
-      disk_raw=$(grep "^${inst}=" /tmp/disk.txt | cut -d= -f2)
-      disk=$(printf '%.0f' "$disk_raw" 2>/dev/null || echo "N/A")
-      node_table="${node_table}\n| ${inst%:*} | ${cpu}% | ${mem}% | ${disk}% |"
-    done < /tmp/cpu.txt
+    if [ ! -s /tmp/cpu.txt ]; then
+      node_table="${node_table}${NL}| 指标查询 | N/A | N/A | N/A | N/A |"
+      monitoring_degraded=1
+    else
+      while IFS='=' read -r inst cpu_raw; do
+        [ -n "$inst" ] || continue
+        cpu=$(fmt_metric "$cpu_raw")
+        mem_raw=$(lookup_metric_file "$inst" /tmp/mem.txt)
+        mem=$(fmt_metric "$mem_raw")
+        system_disk_raw=$(lookup_metric_file "$inst" /tmp/system_disk.txt)
+        system_disk=$(fmt_metric "$system_disk_raw")
+        app_disk_raw=$(lookup_metric_file "$inst" /tmp/app_disk.txt)
+        app_disk=$(fmt_metric "$app_disk_raw")
+        node_table="${node_table}${NL}| ${inst%:*} | ${cpu}% | ${mem}% | ${system_disk}% | ${app_disk}% |"
+      done < /tmp/cpu.txt
+    fi
 
-    # --- 3. Pod Status (prod namespace, only count pods actually in that phase: value=1) ---
+    if [ "$node_metrics_ok" -ne 1 ]; then
+      monitoring_degraded=1
+    fi
+
+    # --- 4. Pod Status (prod namespace, only count pods actually in that phase: value=1) ---
     not_running=$(fmt_int 'count(kube_pod_status_phase{namespace="prod",phase=~"Pending|Failed|Unknown"} == 1) or vector(0)')
 
-    # --- 4. Active Alerts (exclude internal watchdog/inhibitor) ---
+    # --- 5. Active Alerts (exclude internal watchdog/inhibitor) ---
     alerts_count=$(fmt_int 'count(ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"}) or vector(0)')
 
     # --- Status ---
-    if [ "$healthy" -lt "$total" ] || [ "$not_running" != "0" ] || [ "$alerts_count" != "0" ]; then
+    if [ "$deployment_unhealthy" != "0" ] || [ "$probe_unhealthy" != "0" ] || [ "$not_running" != "0" ] || [ "$alerts_count" != "0" ] || [ "$monitoring_degraded" != "0" ]; then
       color="red"
       title="📋 每日系统巡检报告（有异常）"
     else
@@ -140,58 +245,66 @@ data:
 
     report_time=$(now_cst)
 
+    deployment_content="**🧩 应用部署状态** (${deployment_healthy}/${deployment_total} 正常)${NL}${deployment_table}"
+    probe_content="**🟢 HTTP 探活** (${probe_healthy}/${probe_total} 正常)${NL}${probe_table}"
+    node_content="**📊 节点资源**${NL}${node_table}"
+    alerts_content="**🔔 活跃告警**${NL}${alerts_count} 条"
+    pods_content="**⚠️ 异常 Pod**${NL}${not_running} 个"
+    time_content="⏰ ${report_time}"
+
     # --- Send Feishu Card (v2 schema with markdown tables) ---
-    cat <<ENDJSON | curl -sf --max-time 10 -X POST "$FEISHU_URL" -H 'Content-Type: application/json' -d @-
-    {
-      "msg_type": "interactive",
-      "card": {
-        "schema": "2.0",
-        "header": {
-          "title": {"tag": "plain_text", "content": "${title}"},
-          "template": "${color}"
-        },
-        "body": {
-          "elements": [
-            {
-              "tag": "markdown",
-              "content": "**🟢 服务状态** (${healthy}/${total} 正常)\n${health_table}"
-            },
-            {"tag": "hr"},
-            {
-              "tag": "markdown",
-              "content": "**📊 节点资源**\n${node_table}"
-            },
-            {"tag": "hr"},
-            {
-              "tag": "column_set",
-              "flex_mode": "bisect",
-              "background_style": "default",
-              "columns": [
-                {
-                  "tag": "column",
-                  "width": "weighted",
-                  "weight": 1,
-                  "elements": [{"tag": "markdown", "content": "**🔔 活跃告警**\n${alerts_count} 条"}]
-                },
-                {
-                  "tag": "column",
-                  "width": "weighted",
-                  "weight": 1,
-                  "elements": [{"tag": "markdown", "content": "**⚠️ 异常 Pod**\n${not_running} 个"}]
-                }
-              ]
-            },
-            {"tag": "hr"},
-            {
-              "tag": "markdown",
-              "content": "⏰ ${report_time}",
-              "text_size": "notation"
-            }
-          ]
+    payload=$(jq -n \
+      --arg title "$title" \
+      --arg color "$color" \
+      --arg deployment_content "$deployment_content" \
+      --arg probe_content "$probe_content" \
+      --arg node_content "$node_content" \
+      --arg alerts_content "$alerts_content" \
+      --arg pods_content "$pods_content" \
+      --arg time_content "$time_content" \
+      '{
+        msg_type: "interactive",
+        card: {
+          schema: "2.0",
+          header: {
+            title: {tag: "plain_text", content: $title},
+            template: $color
+          },
+          body: {
+            elements: [
+              {tag: "markdown", content: $deployment_content},
+              {tag: "hr"},
+              {tag: "markdown", content: $probe_content},
+              {tag: "hr"},
+              {tag: "markdown", content: $node_content},
+              {tag: "hr"},
+              {
+                tag: "column_set",
+                flex_mode: "bisect",
+                background_style: "default",
+                columns: [
+                  {
+                    tag: "column",
+                    width: "weighted",
+                    weight: 1,
+                    elements: [{tag: "markdown", content: $alerts_content}]
+                  },
+                  {
+                    tag: "column",
+                    width: "weighted",
+                    weight: 1,
+                    elements: [{tag: "markdown", content: $pods_content}]
+                  }
+                ]
+              },
+              {tag: "hr"},
+              {tag: "markdown", content: $time_content, text_size: "notation"}
+            ]
+          }
         }
-      }
-    }
-    ENDJSON
+      }')
+
+    printf '%s' "$payload" | curl -sf --max-time 10 -X POST "$FEISHU_URL" -H 'Content-Type: application/json' -d @-
 
     echo ""
     echo "Report sent at ${report_time}"
