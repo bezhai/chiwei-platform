@@ -1623,11 +1623,12 @@ async def test_perceived_events_replayable_in_second_round(
 
 
 @pytest.mark.asyncio
-async def test_prompt_vars_only_static_identity(patched, monkeypatch):
-    """prompt_vars 收敛成纯静态身份：只剩 persona_name / persona_lite。
+async def test_prompt_vars_static_identity_plus_stable_segments(patched, monkeypatch):
+    """prompt_vars = 纯静态身份（persona_name / persona_lite）+ 天级稳定段（world_arc / day_page）。
 
     决策 4：current_time / prev_state / prev_mood / prev_activity 这些每轮都变的
-    动态值全出 prompt_vars（→ system prompt），不再钉死在身份层。
+    动态值全出 prompt_vars（→ USER stimulus），不再钉死在身份层。world_arc / day_page
+    是天级才变的稳定段，进 system prompt_vars（不靠会被 fold 压掉的 transcript 继承）。
     """
     patched["snapshot"] = LifeState(
         lane="coe-t3",
@@ -1643,9 +1644,12 @@ async def test_prompt_vars_only_static_identity(patched, monkeypatch):
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
     pv = _FakeAgent.last_run()["prompt_vars"]
-    assert set(pv.keys()) == {"persona_name", "persona_lite"}, (
-        f"prompt_vars 应只剩纯静态身份，实际键 {set(pv.keys())}"
-    )
+    assert set(pv.keys()) == {
+        "persona_name",
+        "persona_lite",
+        "world_arc",
+        "day_page",
+    }, f"prompt_vars 键集合应是身份 + 天级稳定段，实际键 {set(pv.keys())}"
     for dynamic in ("current_time", "prev_state", "prev_mood", "prev_activity"):
         assert dynamic not in pv, f"{dynamic} 不该再在 prompt_vars 里（决策 4）"
 
@@ -2346,9 +2350,11 @@ async def test_life_cost_record_failure_does_not_fail_round(
 
 
 # ---------------------------------------------------------------------------
-# 世界阶段透传：life 每轮 stimulus 带「你们一家所处的现实阶段」段
+# 世界阶段透传：life 每轮把「你们一家所处的现实阶段」段注入 system prompt（prompt_vars）
 # （事故：世界阶段已翻页，她的 life 不读世界文档 → 照 persona 旧设定过日子穿帮。
-#  机制：每轮唤醒读 read_world_arc(lane)，有则渲染进 stimulus、空链整段缺席。）
+#  机制：每轮唤醒读 render_arc_awareness(lane)，结果放 prompt_vars[world_arc]、空链 ""。
+#  改放 system 而非 USER 的根因：当天 transcript 会被 fold 压掉这段、不能靠继承——
+#  详见上方 test_arc_and_day_page_go_to_prompt_vars_* 的注释。）
 # ---------------------------------------------------------------------------
 
 _ARC_HEADER_MARK = "【你们一家所处的现实阶段】"
@@ -2363,8 +2369,8 @@ def _world_arc(narrative, lane="coe-t3"):
 
 
 @pytest.mark.asyncio
-async def test_stimulus_carries_arc_awareness_when_arc_exists(patched, monkeypatch):
-    """有世界阶段 → 这一轮 USER stimulus 带阶段段（框架标头 + 阶段全文）。"""
+async def test_arc_awareness_goes_to_prompt_vars_when_arc_exists(patched, monkeypatch):
+    """有世界阶段 → 进 prompt_vars[world_arc]（框架标头 + 阶段全文），不进 USER。"""
     narrative = "一家人刚搬过来，老二换了新学校，眼下是初夏。"
     patched["arc"] = _world_arc(narrative)
     patched["unread"] = [_envelope("e1", "水壶在响")]
@@ -2372,45 +2378,29 @@ async def test_stimulus_carries_arc_awareness_when_arc_exists(patched, monkeypat
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
-    assert _ARC_HEADER_MARK in msg_blob, "有世界阶段时 stimulus 必须带阶段段"
-    assert narrative in msg_blob, "阶段全文必须原样进 stimulus"
+    call = _FakeAgent.last_run()
+    assert _ARC_HEADER_MARK in call["prompt_vars"]["world_arc"], (
+        "有世界阶段时 prompt_vars[world_arc] 必须带阶段段"
+    )
+    assert narrative in call["prompt_vars"]["world_arc"], "阶段全文必须原样进 world_arc"
+    # 不再进 USER stimulus
+    msg_blob = "".join(m.text() for m in call["messages"])
+    assert _ARC_HEADER_MARK not in msg_blob, "世界阶段不再进 USER stimulus"
 
 
 @pytest.mark.asyncio
-async def test_arc_awareness_sits_before_per_round_dynamic_content(
-    patched, monkeypatch
-):
-    """阶段段在稳定前缀区：排在每轮都变的「现在几点」与周遭感知之前（缓存前缀原则）。"""
-    patched["arc"] = _world_arc("一家人安顿下来了。")
-    patched["unread"] = [
-        _envelope("s1", "你在房间里，窗外有蝉鸣", kind=EVENT_KIND_SURROUNDINGS),
-        _envelope("e1", "楼下传来碗筷声"),
-    ]
-    _FakeAgent.install(monkeypatch, script=None)
-
-    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
-
-    stimulus = _FakeAgent.last_run()["messages"][0].text()
-    arc_pos = stimulus.index(_ARC_HEADER_MARK)
-    assert arc_pos < stimulus.index("现在是"), (
-        "阶段段（天/周级才变）必须排在每轮都变的时刻行之前"
-    )
-    assert arc_pos < stimulus.index("【此刻你周遭】"), (
-        "阶段段必须排在当轮感知（周遭切片）之前"
-    )
-
-
-@pytest.mark.asyncio
-async def test_cold_arc_chain_renders_no_section_no_placeholder(patched, monkeypatch):
-    """空链（还没人写过世界阶段）→ 整段缺席，绝不塞占位文案。"""
+async def test_empty_arc_chain_renders_empty_string_no_placeholder(patched, monkeypatch):
+    """空链（还没人写过世界阶段）→ prompt_vars[world_arc] 是空字符串，绝不塞占位文案。"""
     patched["arc"] = None
     patched["unread"] = [_envelope("e1", "水壶在响")]
     _FakeAgent.install(monkeypatch, script=None)
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    call = _FakeAgent.last_run()
+    assert call["prompt_vars"]["world_arc"] == "", "空链时 world_arc 是空字符串"
+    # USER stimulus 里也没有阶段占位
+    msg_blob = "".join(m.text() for m in call["messages"])
     assert _ARC_HEADER_MARK not in msg_blob
     assert "现实阶段" not in msg_blob, "空链时不许出现任何阶段占位文案"
 
@@ -2996,3 +2986,176 @@ async def test_non_group_external_event_has_no_group_handle(patched, monkeypatch
     assert "刚和某人聊过" in msg_blob
     assert "group:" not in msg_blob, "非群 external 不该冒出群句柄"
     assert "来自群聊" not in msg_blob, "非群 external 不该被标成来自群聊"
+
+
+# ---------------------------------------------------------------------------
+# 世界阶段 + 昨天那页改走 system prompt（prompt_vars 每轮注入），不进 USER stimulus。
+#
+# 修正方向（推翻上一轮的 cold_start 方案）：当天 life 轮数远超 100 条 → transcript 必
+# 然被 fold 压成第一人称沉淀，而沉淀只写「今天经历了啥」、世界阶段（人生阶段背景）和
+# 昨天页**不是经历**、fold 时会被概括掉。fold 后 cold_start=False 不重拼、沉淀里又没
+# 有 → 她重新穿帮回 persona 出厂设定。所以「靠 transcript 继承」不成立。改放 system
+# prompt：每轮 prompt_vars 注入（langfuse 模板 {{world_arc}} / {{day_page}}），不进
+# transcript、不怕 fold、每轮确定可见、稳定走 prompt cache。冷启 / 非冷启都注入。
+# ---------------------------------------------------------------------------
+
+
+def _day_page(date="2026-06-02"):
+    """构造一页「昨天」用于注入断言（read_day_page_before 返回它）。"""
+    import types
+
+    return types.SimpleNamespace(
+        date=date,
+        written_at="2026-06-02T23:40:00+08:00",
+        narrative="昨天最挂心的是那道没解出来的题。",
+    )
+
+
+def _ret(value):
+    """把一个值包成 async 函数（给 monkeypatch 替 read_day_page_before 用）。"""
+
+    async def _f(**kwargs):
+        return value
+
+    return _f
+
+
+@pytest.mark.asyncio
+async def test_arc_and_day_page_go_to_prompt_vars_cold_start(patched, monkeypatch):
+    """冷启（transcript 空 = 当天首轮）：世界阶段 + 昨天那页进 prompt_vars、不进 USER。
+
+    新语义（修正 cold_start 方案）：这两段进 system prompt（prompt_vars），不进 USER
+    stimulus、不进 transcript、不怕 fold。冷启这一轮也照样注入到 prompt_vars。
+    """
+    arc_narrative = "一家人安顿下来，眼下是冲刺阶段。"
+    patched["transcript"] = []  # 冷启
+    patched["arc"] = _world_arc(arc_narrative)
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    monkeypatch.setattr(lw, "read_day_page_before", _ret(_day_page()))
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    pv = call["prompt_vars"]
+    # 世界阶段 / 昨天页在 prompt_vars 里有值
+    assert _ARC_HEADER_MARK in pv["world_arc"], "冷启世界阶段该进 prompt_vars[world_arc]"
+    assert arc_narrative in pv["world_arc"], "world_arc 该含阶段全文"
+    assert "昨天最挂心的是那道没解出来的题。" in pv["day_page"], (
+        "冷启昨天页该进 prompt_vars[day_page]"
+    )
+    # 都不在 USER stimulus 文本里
+    msg_blob = "".join(m.text() for m in call["messages"])
+    assert _ARC_HEADER_MARK not in msg_blob, "世界阶段不再进 USER stimulus"
+    assert arc_narrative not in msg_blob, "世界阶段全文不再进 USER stimulus"
+    assert "昨天最挂心的是那道没解出来的题。" not in msg_blob, "昨天页不再进 USER stimulus"
+
+
+@pytest.mark.asyncio
+async def test_arc_and_day_page_go_to_prompt_vars_non_cold_start(patched, monkeypatch):
+    """非冷启（transcript 非空）：世界阶段 + 昨天那页**仍然**进 prompt_vars、不进 USER。
+
+    新语义命门：不再分 cold_start——每轮都注入到 prompt_vars（因为 transcript 会被 fold
+    压掉这两段、不能靠继承）。这里 transcript 那条旧 Message 是 USER 但**不含本轮 round
+    marker**（否则整轮被 turn 幂等 skip），用一条无关旧文本。
+    """
+    from app.agent.neutral import Message, Role
+
+    arc_narrative = "一家人安顿下来，眼下是冲刺阶段。"
+    # 非冷启：transcript 有一条无关的旧 USER message（不含本轮 marker → 不触发 turn 幂等）
+    patched["transcript"] = [
+        Message(role=Role.USER, content="[life-round:some-other-round]\n之前某一轮的旧内容")
+    ]
+    patched["arc"] = _world_arc(arc_narrative)
+    patched["notebook"] = []
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    monkeypatch.setattr(lw, "read_day_page_before", _ret(_day_page()))
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    call = _FakeAgent.last_run()
+    pv = call["prompt_vars"]
+    # 非冷启也注入 prompt_vars（不靠 transcript 继承，因为会被 fold 压掉）
+    assert _ARC_HEADER_MARK in pv["world_arc"], "非冷启世界阶段仍进 prompt_vars[world_arc]"
+    assert arc_narrative in pv["world_arc"], "world_arc 该含阶段全文"
+    assert "昨天最挂心的是那道没解出来的题。" in pv["day_page"], (
+        "非冷启昨天页仍进 prompt_vars[day_page]"
+    )
+    # 都不在 USER stimulus 文本里
+    msg_blob = "".join(m.text() for m in call["messages"])
+    assert _ARC_HEADER_MARK not in msg_blob, "世界阶段不再进 USER stimulus"
+    assert arc_narrative not in msg_blob, "世界阶段全文不再进 USER stimulus"
+    assert "昨天最挂心的是那道没解出来的题。" not in msg_blob, "昨天页不再进 USER stimulus"
+    # 每轮会变的段仍在 USER：时间 + 感知
+    assert "现在是" in msg_blob, "时间段每轮都进 USER"
+    assert "水壶在响" in msg_blob, "本轮感知每轮都进 USER"
+
+
+@pytest.mark.asyncio
+async def test_empty_arc_and_no_day_page_are_empty_strings_in_prompt_vars(
+    patched, monkeypatch
+):
+    """空 arc（空链）/ 无 day_page → prompt_vars 对应值是空字符串 ""，不报错、不塞占位。"""
+    patched["transcript"] = []
+    patched["arc"] = None  # 空链 → render_arc_awareness 返回 ""
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    monkeypatch.setattr(lw, "read_day_page_before", _ret(None))  # 无更早的页
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    pv = _FakeAgent.last_run()["prompt_vars"]
+    assert pv["world_arc"] == "", "空链时 world_arc 是空字符串"
+    assert pv["day_page"] == "", "无更早页时 day_page 是空字符串"
+
+
+@pytest.mark.asyncio
+async def test_round_marker_at_end_of_stimulus(patched, monkeypatch):
+    """round marker 在 stimulus **末尾**（不再在开头）。
+
+    挪到末尾后，stimulus 最后一行是 [life-round:...]。turn 幂等靠扫 transcript 文本里
+    的 marker 字符串查重，位置无关——但拼接结构上它该在所有内容段之后。
+    """
+    patched["transcript"] = []
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    last_line = stimulus.rstrip().splitlines()[-1]
+    assert last_line.startswith(lw._ROUND_MARKER_PREFIX), (
+        f"round marker 该在 stimulus 末尾，实际最后一行 {last_line!r}"
+    )
+    # 不再在开头：第一行不是 marker
+    first_line = stimulus.lstrip().splitlines()[0]
+    assert not first_line.startswith(lw._ROUND_MARKER_PREFIX), (
+        f"round marker 不该再在 stimulus 开头，实际第一行 {first_line!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_idempotent_still_skips_when_marker_in_transcript(patched, monkeypatch):
+    """turn 幂等仍工作：transcript 里有**本轮** round marker → 整轮 skip（run 不被调）。
+
+    marker 挪到末尾不破坏 turn 幂等（_round_already_processed 按子串匹配，位置无关）。
+    本轮 round_id 由本轮读到的 event_ids 派生，构造一条含本轮 marker 的 USER message 放进
+    transcript，本轮应被收口跳过：Agent.run 没被调（instances 为空）、不重复标已读。
+    """
+    from app.agent.neutral import Message, Role
+
+    round_id = lw._derive_life_round_id(
+        lane="coe-t3", persona_id="akao", read_ids=["e1"]
+    )
+    marker = lw._round_marker(round_id)
+    patched["transcript"] = [
+        Message(role=Role.USER, content=f"之前某一轮已处理过\n{marker}")
+    ]
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert _FakeAgent.instances == [], "本轮 marker 已在 transcript → 整轮 skip，run 不该被调"
+    assert patched["marked"] == [], "skip 的轮不重复标已读"

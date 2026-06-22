@@ -258,7 +258,7 @@ def _cd_key(lane: str, persona_id: str) -> str:
 # gemini。recursion_limit 给够（让她在一轮里连续调多次工具，不被默认 6 卡住）。
 # trace_name 让这一轮 life 思考接进 langfuse。
 _LIFE_WAKE_CFG = AgentConfig(
-    "life_wake", "offline-model", "life-wake", recursion_limit=12
+    "life_wake", "offline-model", "life-wake", recursion_limit=30
 )
 
 def _humanize_elapsed(occurred_at: str, now: datetime) -> str | None:
@@ -629,12 +629,56 @@ async def _run_life_round(
 
     observed_at = now.isoformat()
 
+    # 世界阶段（人生阶段背景）+ 昨天那页改走 **system prompt**（prompt_vars 每轮注入，
+    # langfuse 模板 {{world_arc}} / {{day_page}}），不进 USER stimulus、不进 transcript。
+    # 根因（推翻"只冷启拼进 USER、后续靠 transcript 继承"的旧方案）：当天 life 轮数远超
+    # 100 条 → transcript 必然被 fold 压成第一人称沉淀（session_fold + sediment），而沉淀
+    # 只写"今天经历了啥"（发生的事、触动的瞬间、悬着的念头）；世界阶段（"2026 高考后、
+    # 广州小区的家"这种人生阶段背景）和昨天页**不是经历**、fold 时会被概括掉。fold 后
+    # cold_start=False 不重拼、沉淀里又没有 → 她重新穿帮回 persona 出厂设定。所以"靠
+    # transcript 继承"不成立。改放 system：每轮 prompt_vars 注入，不进 transcript、不怕
+    # fold、每轮确定可见，当天稳定走 prompt cache（世界阶段 / 昨天页天级才变）。
+    #
+    # 信息差不破：世界阶段写作纪律只写在场所有人都知道的公共进展、全 persona 同享，昨天
+    # 页是她自己睡前写下的第一人称回顾——都是她"本来就知道的事"，绝不是 WorldState 全局
+    # 快照（那条命门不动）。空链 / 读失败 → render_arc_awareness 返回 "" → world_arc 空串。
+    arc_awareness = await render_arc_awareness(lane=lane)
+
+    # 她最近一页昨天（睡前回顾的产出）：取日期**严格早于**当前生活日的最新一版日页
+    # ——"她记得昨天"。不读 marker（day_reviewed_date 已降级为观测留痕：清晨回笼觉的快
+    # 班会把它推前到「今天」、按它取页会把当天凌晨刚写的短页错当「上一页日子」；对账班
+    # 补旧日还会把它回拨）。没有更早的页 → day_page 空串（诚实的真空、不补占位）。读页
+    # 失败绝不杀整个 life 轮（照 render_arc_awareness 的姿势 fail-soft）：注入是上下文
+    # 增强，失败只 log warning、当作没有，本轮照常往下跑。
+    try:
+        day_page = await read_day_page_before(
+            lane=lane, persona_id=persona_id, before_date=living_day(now)
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to read previous day page, section absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        day_page = None
+    day_page_text = (
+        f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
+        f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
+        f"{day_page.narrative}"
+        if day_page is not None
+        else ""
+    )
+
     # system prompt 收敛成纯静态身份（spec 决策 4）：每轮都变的动态值（几点 / 上一刻
-    # 状态）全出 prompt_vars——它们进 system 会让前缀缓存每轮失效、且把"会变的东西"
-    # 钉死在本该恒定的身份层是语义错位。动态值改走当轮 USER message（见下方 stimulus）。
+    # 状态）走 USER message（见下方 stimulus）。world_arc / day_page 是天级才变的稳定段，
+    # 进 system prompt_vars 既不打散当天前缀缓存、又每轮确定可见（不靠会被 fold 压掉的
+    # transcript 继承）。falsy（空链 / 无页 / 读失败）→ 空字符串，langfuse 模板自然渲染成空。
     prompt_vars = {
         "persona_name": pc.display_name,
         "persona_lite": pc.persona_lite,
+        "world_arc": arc_awareness or "",
+        "day_page": day_page_text,
     }
 
     read_ids = [ev.event_id for ev in unread]
@@ -730,49 +774,14 @@ async def _run_life_round(
     # 信息差命门不破：进 transcript 的只是当下时刻 + 她自己信箱里的未读 event
     # （_format_surroundings / _format_dynamics 只取 summary/kind/时间，全是投给她的、
     # 她够得着的），绝不含 world 全局快照。
-    # 开头印一行本轮标记（round_id）：写回 transcript 后，下次同 round_id 重投能从
-    # session 历史里查到这行 → turn 幂等跳过（对称 world 把标记印进 USER stimulus）。
-    # 机读用，对模型无害（它只当是一行元信息）。
-    parts = [_round_marker(round_id)]
-
-    # 世界阶段透传（事故修复）：世界阶段（「跨周月公共进展」）翻页后她必须知道——
-    # 否则她照 persona 出厂设定过日子穿帮。每轮按本轮唤醒的 lane 读最新一版，渲染成
-    # 给"活在里面的人"看的第一人称段（框架文案在 arc_awareness 单一处，无剧情事实）；
-    # 空链 / 读失败返回 "" → 整段缺席、不塞占位。位置在机读标记之后、每轮都变的
-    # 时刻行与当轮感知之前（稳定前缀区：世界阶段天/周级才变）。信息差不破：世界阶段
-    # 写作纪律只写在场所有人都知道的公共进展，全 persona 同享，她读到的是"我本来就
-    # 知道的事"——绝不是 WorldState 全局快照（那条命门不动）。
-    arc_awareness = await render_arc_awareness(lane=lane)
-    if arc_awareness:
-        parts.append(arc_awareness)
-
-    # 她最近一页昨天（睡前回顾的产出，life 侧注入）：取日期**严格早于**当前
-    # 生活日的最新一版日页——"她记得昨天"。不读 marker（day_reviewed_date 已
-    # 降级为观测留痕：清晨回笼觉的快班会把它推前到「今天」、按它取页会把当天
-    # 凌晨刚写的短页错当「上一页日子」；对账班补旧日还会把它回拨）。没有更早
-    # 的页 → 整段缺席不补占位（诚实的真空）。位置在世界阶段之后、每轮都变的
-    # 时刻行之前（稳定前缀区：页天级才变，不打散前缀缓存）。
-    # 信息差不破：页是她自己睡前写下的第一人称回顾，本来就是她的记忆。
-    # 读页失败绝不杀整个 life 轮（照 render_arc_awareness 的姿势）：注入是上下文
-    # 增强，失败只 log warning、整段缺席，本轮照常往下跑。
-    try:
-        day_page = await read_day_page_before(
-            lane=lane, persona_id=persona_id, before_date=living_day(now)
-        )
-    except Exception as e:
-        logger.warning(
-            "[life_wake] %s/%s failed to read previous day page, section absent: %s",
-            lane,
-            persona_id,
-            e,
-        )
-        day_page = None
-    if day_page is not None:
-        parts.append(
-            f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
-            f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
-            f"{day_page.narrative}"
-        )
+    # 本轮标记（round_id）印在 stimulus **末尾**（见末段拼接）：写回 transcript 后，
+    # 下次同 round_id 重投能从 session 历史里查到这行 → turn 幂等跳过（_round_already_processed
+    # 按子串匹配，marker 在 stimulus 哪个位置都命中，所以挪到末尾不破坏幂等）。机读用，对
+    # 模型无害（它只当是一行元信息）。
+    # 世界阶段 + 昨天那页已在上方读好、走 prompt_vars 进 system prompt（不进 USER /
+    # transcript，免被 fold 压掉、每轮确定可见）。这里 USER stimulus 只拼每轮会变的段：
+    # 本子（当天会变）/ 现在时间 / 四类感知 / 冷启状态恢复段，末尾印本轮 round marker。
+    parts: list[str] = []
 
     # 她本子里还没了结的事（备忘录 & 日程 第二块）：每轮唤醒读她**还活着**的条目
     # （active_only=True：她自己没标 done / dropped 的），渲成一段塞进她的输入，让她
@@ -860,6 +869,12 @@ async def _run_life_round(
                 f"{_format_dynamics(dynamics)}"
             )
         parts.append("读懂此刻你周遭，过你自己的这一刻。")
+
+    # 本轮机读标记印在 stimulus **末尾**（所有内容段之后）：写回 transcript 后，下次
+    # 同 round_id 重投能从 session 历史里查到这行 → turn 幂等跳过。每轮都印（不挂
+    # cold_start）。_round_already_processed 按子串匹配，marker 在末尾照样命中——挪到
+    # 末尾不破坏 turn 幂等。
+    parts.append(_round_marker(round_id))
     stimulus = "\n".join(parts)
 
     # max_retries=1：关掉整轮重放。run 把整个 ReAct 循环包在 retry 里，一次 model
