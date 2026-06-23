@@ -44,7 +44,7 @@ from app.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
-_MAIN_CFG = AgentConfig("main", "main-chat-model", "main")
+_MAIN_CFG = AgentConfig("main", "main-chat-model", "main", native_web_search=True)
 
 
 class RenderFailed(Exception):

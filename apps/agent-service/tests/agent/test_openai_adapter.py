@@ -1146,3 +1146,41 @@ async def test_azure_cache_params_merge_into_existing_extra(mock_sdk):
     assert sent["extra_body"]["prompt_cache_retention"] == "24h"
     assert sent["extra_headers"]["X-Trace"] == "t"
     assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "s"}
+
+
+# ---------------------------------------------------------------------------
+# native_web_search is a Gemini-only control signal (it lets a Gemini-3 request
+# co-host native google search). The runtime decides per model whether to send
+# it, so OpenAI never sees True — but the adapter still defensively drops the
+# kwarg so it can never leak into the chat.completions request as an unknown
+# field (which the SDK / gateway would reject).
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_discards_native_web_search_signal(mock_sdk):
+    adapter = OpenAIAdapter(
+        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
+    )
+    mock_sdk.instance.set_result(_completion(content="ok"))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="hi")], native_web_search=True
+    )
+
+    sent = mock_sdk.instance.last_create_kwargs
+    assert "native_web_search" not in sent
+
+
+async def test_stream_discards_native_web_search_signal(mock_sdk):
+    adapter = OpenAIAdapter(
+        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
+    )
+    mock_sdk.instance.set_stream([_chunk(content="ok", finish_reason="stop")])
+
+    async for _ in adapter.stream(
+        [Message(role=Role.USER, content="hi")], native_web_search=True
+    ):
+        pass
+
+    sent = mock_sdk.instance.last_create_kwargs
+    assert "native_web_search" not in sent

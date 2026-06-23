@@ -151,6 +151,8 @@ class OpenAIAdapter(ModelClient):
         **kwargs: Any,
     ) -> Message:
         session_id = kwargs.pop("session_id", None)
+        # Gemini-only native-search control signal; never an OpenAI request field.
+        kwargs.pop("native_web_search", None)
         wire_messages = self._to_wire_messages(messages)
         request: dict[str, Any] = {
             "model": self._model,
@@ -187,6 +189,8 @@ class OpenAIAdapter(ModelClient):
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
         session_id = kwargs.pop("session_id", None)
+        # Gemini-only native-search control signal; never an OpenAI request field.
+        kwargs.pop("native_web_search", None)
         wire_messages = self._to_wire_messages(messages)
         request: dict[str, Any] = {
             "model": self._model,

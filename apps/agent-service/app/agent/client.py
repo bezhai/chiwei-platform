@@ -88,6 +88,17 @@ class ModelClient(ABC):
     ) -> dict[str, Any]:
         """Single structured output → dict the caller validates (``extract``)."""
 
+    @property
+    def supports_native_web_search(self) -> bool:
+        """Whether this model can run native web search alongside custom tools.
+
+        Default ``False`` (fail-closed): only providers whose native grounding
+        co-exists with custom function declarations override this. OpenAI and
+        every other adapter inherit the default — the agent layer reads it to
+        decide whether to swap the ``search_web`` tool for native search.
+        """
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Adapter registry (client_type → factory)

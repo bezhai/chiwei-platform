@@ -73,6 +73,22 @@ def test_render_chat_turn_signature_has_no_source_message_lookup():
     assert "message_id" not in params
 
 
+def test_main_cfg_opts_into_native_web_search():
+    """main chat 是唯一声明启用 Gemini 原生谷歌搜索的 config。"""
+    from app.chat.render import _MAIN_CFG
+
+    assert _MAIN_CFG.native_web_search is True
+
+
+def test_other_configs_do_not_opt_into_native_web_search():
+    """world / life 等其它 config 不声明,默认关,天然进不来新路径。"""
+    from app.life.review import _REVIEW_CFG
+    from app.world.engine import _WORLD_CFG
+
+    assert _WORLD_CFG.native_web_search is False
+    assert _REVIEW_CFG.native_web_search is False
+
+
 @pytest.mark.asyncio
 async def test_render_chat_turn_streams_text_and_builds_prompt_vars(monkeypatch):
     """正常路径:用 persona bundle + inner_context + 渲染期变量拼 prompt_vars,
