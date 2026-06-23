@@ -256,7 +256,9 @@ async def chat_node(req: ChatRequest) -> None:
         # context 反查为空(源消息无历史)→ 退回"未找到"文本,与旧 _build_and_stream
         # 的空 ctx 分支行为一致。
         turn_ctx = await build_human_chat_context(
-            req.message_id, persona_id=req.persona_id or ""
+            req.message_id,
+            persona_id=req.persona_id or "",
+            bot_name=req.bot_name or "",
         )
         if turn_ctx is None:
             stream = _yield_not_found()

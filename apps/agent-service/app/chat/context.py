@@ -50,6 +50,7 @@ async def build_human_chat_context(
     message_id: str,
     *,
     persona_id: str,
+    bot_name: str = "",
     limit: int = 10,
 ) -> ChatTurnContext | None:
     """Build a render-ready context for a real-person chat turn.
@@ -58,6 +59,10 @@ async def build_human_chat_context(
     registry, chat address, resolved persona bundle, and assembled inner_context.
     Returns ``None`` when the source message resolves to no history — the caller
     treats that as "message not found" and emits the not-found segment.
+
+    ``bot_name`` is the bot that received this turn's message; it flows down to
+    ``collect_images`` → ``process_image`` so inbound Lark images download with
+    the right bot credential (see ``collect_images`` for why it matters).
     """
     t_build_start = time.monotonic()
     l1_results = await quick_search(message_id=message_id, limit=limit)
@@ -70,7 +75,9 @@ async def build_human_chat_context(
     chat_id = l1_results[0].chat_id or ""
 
     # --- Image processing ---
-    image_key_to_url, image_key_to_file = await collect_images(l1_results, chat_type)
+    image_key_to_url, image_key_to_file = await collect_images(
+        l1_results, chat_type, bot_name=bot_name
+    )
 
     # Persist new TOS files in background via dataflow (Phase 6 v4 Gap 5).
     if image_key_to_file:

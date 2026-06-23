@@ -47,10 +47,17 @@ async def allows_download(chat_id: str, chat_type: str) -> bool:
 async def collect_images(
     results: list[QuickSearchResult],
     chat_type: str,
+    bot_name: str = "",
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Collect image URLs from message history.
 
     Returns (image_key -> url, image_key -> tos_file_name).
+
+    ``bot_name`` is the bot that received the current turn's messages; it is
+    forwarded to ``process_image`` so tool-service gets the ``X-App-Name`` it
+    needs to download Lark images with the right bot credential. Without it the
+    download is rejected with HTTP 422 and the user's image silently vanishes
+    from the LLM context (trace dbde982e146840cc00610c393fc5820e).
     """
     cached_keys: list[tuple[str, str]] = []  # (image_key, tos_file)
     uncached_keys: list[tuple[str, str, str]] = []  # (image_key, message_id, role)
@@ -96,9 +103,18 @@ async def collect_images(
 
     # Uncached: full pipeline (Lark download -> compress -> TOS)
     if uncached_keys:
+        if not bot_name:
+            logger.warning(
+                "collect_images missing bot_name: %d inbound image(s) cannot "
+                "download (X-App-Name absent -> tool-service 422). Likely a stale "
+                "payload / MQ replay where ChatRequest.bot_name was empty.",
+                len(uncached_keys),
+            )
         process_results = await fan_out_wait(
             [
-                image_client.process_image(key, msg_id if role == "user" else None)
+                image_client.process_image(
+                    key, msg_id if role == "user" else None, bot_name=bot_name
+                )
                 for key, msg_id, role in uncached_keys
             ]
         )

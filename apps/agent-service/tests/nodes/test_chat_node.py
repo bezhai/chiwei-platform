@@ -198,6 +198,55 @@ async def test_chat_node_resolves_bot_name_and_updates_agent_response(monkeypatc
     assert set_calls == [("s1", "resolved-bot-x", "p1")]
 
 
+@pytest.mark.asyncio
+async def test_chat_node_passes_req_bot_name_to_build_context(monkeypatch):
+    """chat_node 用 req.bot_name（接收消息的 bot）调 build_human_chat_context，
+    让入站图下载拿到正确 X-App-Name。修复前不传 → build_ctx 收到默认空 →
+    process_image 422、用户图丢失（trace dbde982e146840cc00610c393fc5820e）。"""
+    from app.nodes import chat_node as cn
+
+    req = ChatRequest(
+        message_id="m1", persona_id="p1", session_id="s1", channel="qq",
+        chat_id="c1", is_p2p=True, user_id="u1", lane="dev", bot_name="bot-recv",
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_build_ctx(message_id, *, persona_id, bot_name="", **k):
+        captured["bot_name"] = bot_name
+        return _stub_turn_ctx()
+
+    async def fake_find_msg(mid): return "hi"
+    async def fake_find_gray(mid): return {}
+    async def fake_guard(p): return "guard"
+    async def fake_pre(*a, **k):
+        from app.domain.safety import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+    async def fake_render(*a, **k):
+        if False:
+            yield ""
+    async def fake_resolve(p, c): return "bot-x"
+    async def fake_set(sid, bn, pid): pass
+    async def fake_emit(d): pass
+
+    monkeypatch.setattr(cn, "build_human_chat_context", fake_build_ctx, raising=False)
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_render, raising=False)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(req)
+
+    assert captured.get("bot_name") == "bot-recv", (
+        f"chat_node 必须用 req.bot_name 调 build_human_chat_context，"
+        f"实得 {captured.get('bot_name')!r}"
+    )
+
+
 SPLIT = "---split---"
 
 
