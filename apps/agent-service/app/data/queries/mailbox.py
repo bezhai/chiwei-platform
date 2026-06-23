@@ -1,6 +1,6 @@
 """Durable event 信箱读写 — Task 1 (event 流转骨架).
 
-三个对外动作，构成 world/对话 → life 的投递面：
+三个对外动作，构成 world/life 事件 → life 的投递面：
 
   * :func:`deliver_event` —— 往某 persona 的信箱投一条 event（幂等去重）。
   * :func:`list_unread_events` —— 读某 persona 本轮未读的那批 event。
@@ -88,15 +88,14 @@ async def deliver_event(
     节点）。返回实际插入的行数（0=去重命中, 1=新投递）。
 
     **被动 kind 不敲门（通道分离的权宜修复 v2，prod 节奏失控）：** 真动静（notify
-    ambient / npc_visit speech / 白名单**群** chat external / 日程到点 reminder）走唤醒
+    ambient / npc_visit speech / 手机消息 message / 日程到点 reminder）走唤醒
     通道——真有人找她该立刻响应，新投递成功就 emit ``EventArrived`` 把她叫醒（哪怕在长
     睡里）。被动 kind（``PASSIVE_EVENT_KINDS``：world ``sense`` 投的 surroundings 周遭
-    切片、真人**私聊** chat 回灌的 external_passive）只落信箱当**被动上下文**、不 emit
-    唤醒。surroundings：world 每推演一轮就给三姐妹各投一条周遭切片，若走唤醒通道（设计
-    上永远放行、不走"到点才醒"的 gate）会把自排睡着的姐妹全敲醒、自排睡眠系统性睡不满。
-    external_passive：真人私聊她已经在 chat 回合里回应过了，再额外唤醒一轮 life 用 gpt
-    单独跑纯属重复反应、浪费。两类都在她下次被一条 ambient 客观动静唤醒时，通过
-    ``list_unread_events`` 一并读到（self-wake 自设闹钟已随范式重构删除，无"到点自醒"路）。
+    切片）只落信箱当**被动上下文**、不 emit 唤醒。surroundings：world 每推演一轮就给三
+    姐妹各投一条周遭切片，若走唤醒通道（设计上永远放行、不走"到点才醒"的 gate）会把自
+    排睡着的姐妹全敲醒、自排睡眠系统性睡不满。它会在她下次被一条 ambient 客观动静唤醒
+    时，通过 ``list_unread_events`` 一并读到（self-wake 自设闹钟已随范式重构删除，无
+    "到点自醒"路）。
 
     被动语义**落在已持久化的 kind 上**（不是投递瞬间的临时参数）：上一版用一个
     ``wake`` 参数只能覆盖这条即时敲门路径、没挡住 ``renotify_unread`` 的补敲对账
@@ -107,10 +106,9 @@ async def deliver_event(
     :data:`~app.domain.world_events.PASSIVE_EVENT_KINDS` 注释 + memory
     ``project_world_sense_wake_tradeoff``。
 
-    **会话身份（task 3）**：``chat_id`` / ``chat_scope`` / ``chat_name`` 可选（默认
-    None），只有 chat 群 / p2p 回灌处补传——让 life 醒来知道「这条来自哪个群」、拿到群
-    句柄（``group:<chat_id>``）接着在同群继续说。world / 日程提醒等旧投递处不传，三字段
-    落 NULL（向后兼容）。语义钉死见 :class:`~app.domain.world_events.EventEnvelope`。
+    **会话身份**：``chat_id`` / ``chat_scope`` / ``chat_name`` 是历史 chat 回灌设计留下的
+    nullable 字段。字段保留是 forward-only schema 约束；当前 chat→life 对话感知改为醒来时
+    实时读取 ``common_message``，新 chat 路径不再通过 ``deliver_event`` 写这些字段。
     """
     inserted = await insert_idempotent(
         EventEnvelope(
@@ -168,10 +166,8 @@ async def list_unread_events(
 async def find_conversation_display_name(chat_id: str | None) -> str | None:
     """按 ``common_conversation_id`` 查会话的 ``display_name``（群名），查不到返回 None。
 
-    chat 群回灌（task 3）把源会话身份（chat_id / scope / 群名）一并落进信箱条目，让 life
-    醒来知道「来自哪个群」。群名取 ``common_conversation.display_name``（线上已有，如
-    「🐢🐢群(飞书版)」）。放在 mailbox 查询层是为了让 chat_node 不直接写 SQL、也不
-    import 投递目标解析（``recipient_directory``，群 uid 解析归它）——这里只读群名一列。
+    历史会话身份字段曾需要按 chat_id 补群名。当前 chat→life 对话感知已改成实时读取
+    ``common_message``，这条 helper 只保留为兼容旧测试/旧代码路径；这里只读群名一列。
 
     非法 / 缺失 ``chat_id``（None / 空 / 非 uuid）→ 直接返回 None，不查库、不抛
     （照 :func:`app.data.queries.messages.find_username` 的 uuid 守门先例）。会话不存在、

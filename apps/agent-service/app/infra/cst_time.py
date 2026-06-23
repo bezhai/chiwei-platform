@@ -1,7 +1,7 @@
 """时间归一到 CST —— 喂给 agent 的时间统一一个口径（阶段 0 Task 1）。
 
 赤尾这套系统里时间出口曾经三种格式混着喂给同一个 agent：world 写 CST aware
-ISO（``...+08:00``）、life 写 UTC aware ISO（``...+00:00``）、chat 回灌写 Unix
+ISO（``...+08:00``）、life 写 UTC aware ISO（``...+00:00``）、历史 chat 数据写 Unix
 毫秒字符串。模型在一条 prompt 里看到两个"现在"、时间窗口比较差 8 小时。这个
 模块把这三种**当前代码实际产生的**格式归一到 CST 一个口径：
 
@@ -37,7 +37,7 @@ def parse(raw: str | None) -> datetime | None:
     认得三种格式（都对应一个明确的真实时刻）：
       * CST aware ISO（``2026-06-03T20:30:00+08:00``，world 写）
       * UTC aware ISO（``...+00:00`` 或 ``...Z``，life 写）
-      * Unix 毫秒字符串（``"1717..."``，chat 历史写）
+      * Unix 毫秒字符串（``"1717..."``，历史 chat 数据写）
 
     解析失败 / 空 / naive（无时区，老脏数据）一律返回 ``None``——调用方据此走
     各自的兜底语义（比较侧退回 now-based fallback、显示侧原样回显）。不在这里

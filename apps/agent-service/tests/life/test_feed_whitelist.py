@@ -1,12 +1,12 @@
-"""life 感知白名单：哪些会话的聊天回灌进 life engine（spec Task 5）。
+"""life 感知白名单：哪些群聊会触发 life 读取实时对话上下文（spec Task 5）。
 
-成本止血：现在每条群消息都会唤醒一轮 life。收窄为只有 Dynamic Config
+成本止血：现在每条白名单群消息才会额外唤醒一轮 life。收窄为只有 Dynamic Config
 ``life_feed_chat_whitelist``（逗号分隔 common_conversation_id 列表）白名单内
-的群的消息进 life 成为她的经历；其他群只走 chat 被动回复路径。
+的群进入 life 感知范围；其他群只走 chat 被动回复路径。
 
 口径：
 - p2p 私聊不过滤（用户口径只针对"群"），且 p2p 短路时不消费配置
-- fail-closed：配置缺失/为空 → 所有群聊回灌全部跳过。配置系统挂了宁可她
+- fail-closed：配置缺失/为空 → 所有群聊 life 唤醒全部跳过。配置系统挂了宁可她
   暂时听不见群聊，也不能成本失控。
 """
 
@@ -75,7 +75,7 @@ async def test_group_not_in_whitelist_skipped(monkeypatch, caplog):
 async def test_empty_config_fail_closed_logs_warning(monkeypatch, caplog):
     """配置缺失/为空 -> 所有群聊一律跳过（fail-closed），且必须 warning 可感知。
 
-    空白名单挡下回灌时升 warning（codex T3 小改）：fail-closed 把"配置丢失"和
+    空白名单挡下群聊 life 唤醒时升 warning（codex T3 小改）：fail-closed 把"配置丢失"和
     "正常名单外"挡成同一个结果，配置系统挂了 / key 被误删若只有 info，止血会
     无声变成"她永远听不见群聊"。
     """

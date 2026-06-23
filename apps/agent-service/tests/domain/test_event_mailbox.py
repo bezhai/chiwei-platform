@@ -29,7 +29,6 @@ from app.data.queries.mailbox import (
     renotify_unread,
 )
 from app.domain.world_events import (
-    EVENT_KIND_EXTERNAL_PASSIVE,
     PASSIVE_EVENT_KINDS,
     EventArrived,
     EventEnvelope,
@@ -310,7 +309,7 @@ async def test_unread_mixed_format_ordered_by_real_instant(mailbox_db):
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="unix_mid",
-        kind="external", source="user:u1", summary="中间-Unix毫秒",
+        kind="ambient", source="world", summary="中间-Unix毫秒",
         occurred_at=str(unix_mid_ms),
     )
     await deliver_event(
@@ -732,117 +731,8 @@ async def test_long_sleep_surroundings_backlog_can_crowd_out_real_events(mailbox
 
 
 # ---------------------------------------------------------------------------
-# 真人私聊回灌：被动事件（task 3）—— 感知但不唤醒
-#
-# 真人私聊赤尾、chat 回复完后，「刚跟真人聊过」作为一条回灌进她的信箱。它不该额外
-# 唤醒一轮 life（她又用 gpt 跑一轮、重复反应、浪费）。所以这条回灌用一个**被动 kind**
-# （EVENT_KIND_EXTERNAL_PASSIVE，进 PASSIVE_EVENT_KINDS）：即时投递不敲门、补敲对账
-# 也不敲门，但 list_unread_events 下次自然醒时仍读得到——她下次醒来知道「跟真人聊过」。
-#
-# 区别于白名单内的群（kind=external，照常唤醒——那是被选中要听的群）：被动只落在 p2p
-# 真人私聊这条回灌上。两端都读同一处 PASSIVE_EVENT_KINDS（宪法「禁止重复定义」）。
-# ---------------------------------------------------------------------------
-
-
-def test_external_passive_kind_is_in_passive_set():
-    """真人私聊回灌的被动 kind 必须进 PASSIVE_EVENT_KINDS（即时敲门 + 补敲都读它）。"""
-    assert EVENT_KIND_EXTERNAL_PASSIVE in PASSIVE_EVENT_KINDS
-
-
-@pytest.mark.integration
-async def test_external_passive_deliver_does_not_knock(mailbox_db, monkeypatch):
-    """承重断言①：真人私聊被动回灌即时投递**不** emit EventArrived（不唤醒 life）。
-
-    对比真动静（kind=external 群回灌 / ambient notify）新投递成功会敲门——被动 kind
-    新投递成功也不敲门，只悄悄落信箱当被动上下文。
-    """
-    import app.data.queries.mailbox as mailbox_mod
-
-    emitted: list = []
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
-
-    inserted = await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:s1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小明聊了：周末一起爬山吗",
-        occurred_at="2026-06-03T14:00:00+08:00",
-    )
-
-    assert inserted == 1, "新投递应真的落库一行"
-    assert emitted == [], (
-        f"被动 kind 即时投递不该 emit EventArrived（不唤醒 life），实际 {emitted!r}"
-    )
-
-
-@pytest.mark.integration
-async def test_external_passive_unread_not_renotified(mailbox_db, monkeypatch):
-    """承重断言②：纯被动回灌未读的 persona **不**被 renotify_unread 补敲（补敲也不唤醒）。
-
-    上一版只挡即时敲门、没挡 world engine 每轮调的补敲（surroundings 被这条绕过的真
-    bug）。真人私聊被动回灌走同一处 PASSIVE_EVENT_KINDS，补敲对账也排除它。
-
-    对比 akao：有一条真动静（external 群回灌）未读 → 照常被补敲。
-    """
-    # ayana：只有一条被动私聊回灌（不该被补敲叫醒）
-    await deliver_event(
-        lane="coe-t1", persona_id="ayana", event_id="chat:p2p1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小红聊了：在干嘛",
-        occurred_at="2026-06-03T14:00:00+08:00",
-    )
-    # akao：有一条真动静（external 群回灌）未读 → 照常该被补敲
-    await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:grp1",
-        kind="external", source="user:u2", summary="群里有人聊了：今晚聚餐",
-        occurred_at="2026-06-03T14:00:01+08:00",
-    )
-
-    emitted: list = []
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    import app.data.queries.mailbox as mailbox_mod
-
-    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
-
-    count = await renotify_unread(lane="coe-t1")
-
-    assert count == 1, (
-        f"只有 akao（群 external 真动静）该被补敲，纯被动私聊回灌的 ayana 不该叫醒，"
-        f"实际补敲 {count}"
-    )
-    assert [a.persona_id for a in emitted] == ["akao"]
-
-
-@pytest.mark.integration
-async def test_external_passive_still_readable_on_self_wake(mailbox_db):
-    """承重断言③：她下次自然醒读未读（list_unread_events）**仍读得到**被动私聊回灌。
-
-    补敲对账排除被动是为了不主动叫醒她；但她下次自己醒来时仍要在未读里读到「跟真人聊过」。
-    list_unread_events 绝不按 kind 过滤——和补敲那条查询是分开的两条。
-    """
-    await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:p2p1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小明聊了：周末一起爬山吗",
-        occurred_at="2026-06-03T14:00:00+08:00",
-    )
-
-    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
-
-    assert [e.event_id for e in unread] == ["chat:p2p1"]
-    assert unread[0].kind == EVENT_KIND_EXTERNAL_PASSIVE
-    assert unread[0].summary == "刚和小明聊了：周末一起爬山吗"
-
-
-# ---------------------------------------------------------------------------
-# 会话身份字段（task 3）：EventEnvelope 加 chat_id / chat_scope / chat_name，回灌时带上，
-# 让 life 知道「这条动静来自哪个群」并拿到群句柄。三个字段都 nullable（旧条目读写不炸）。
+# 会话身份字段：EventEnvelope 曾加 chat_id / chat_scope / chat_name。当前 chat→life
+# 对话感知已改成实时读取 common_message，但字段不能删（durable schema forward-only）。
 # ---------------------------------------------------------------------------
 
 
@@ -909,16 +799,11 @@ def test_chat_identity_columns_are_additive_nullable_in_migration():
 
 @pytest.mark.integration
 async def test_deliver_with_group_identity_round_trips(mailbox_db):
-    """承重断言：deliver_event 带群身份写入 → list_unread_events 读出三字段（task 3）。
-
-    白名单群回灌时把 chat_id（common_conversation_id）/ chat_scope='group' /
-    chat_name（群名）随条目落库；life 读未读时这三字段随 EventEnvelope 返回，她据此
-    知道「来自哪个群」并拿群句柄 group:<chat_id>。
-    """
+    """deliver_event 带群身份写入 → list_unread_events 读出三字段。"""
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="chat:grp-sess-1",
-        kind="external", source="user:u1",
-        summary="群里有人聊了：今晚一起吃饭吗",
+        kind="ambient", source="world",
+        summary="群里出现一条历史动静",
         occurred_at="2026-06-03T14:00:00+08:00",
         chat_id="11111111-1111-1111-1111-111111111111",
         chat_scope="group",
@@ -936,11 +821,11 @@ async def test_deliver_with_group_identity_round_trips(mailbox_db):
 
 @pytest.mark.integration
 async def test_deliver_with_direct_identity_round_trips(mailbox_db):
-    """p2p 回灌带 chat_scope='direct'、chat_name 可为 None（私聊无群名），读回如实保留。"""
+    """direct 会话身份字段可为 None，读回如实保留。"""
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="chat:p2p-sess-1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小明聊了：周末爬山吗",
+        kind="ambient", source="world",
+        summary="一条带 direct 会话身份的历史动静",
         occurred_at="2026-06-03T14:00:00+08:00",
         chat_id="22222222-2222-2222-2222-222222222222",
         chat_scope="direct",
@@ -987,7 +872,7 @@ async def test_deliver_with_identity_still_idempotent(mailbox_db):
     for _ in range(3):
         await deliver_event(
             lane="coe-t1", persona_id="akao", event_id="chat:grp-1",
-            kind="external", source="user:u1", summary="群消息",
+            kind="ambient", source="world", summary="群消息",
             occurred_at="2026-06-03T14:00:00+08:00",
             chat_id="33333333-3333-3333-3333-333333333333",
             chat_scope="group", chat_name="某群",
@@ -999,8 +884,7 @@ async def test_deliver_with_identity_still_idempotent(mailbox_db):
 
 
 # ---------------------------------------------------------------------------
-# find_conversation_display_name：chat 群回灌时按 common_conversation_id 查群名（task 3）。
-# 放在 mailbox 查询层（chat_node 不直接写 SQL、也不 import recipient_directory）。
+# find_conversation_display_name：历史会话身份字段的辅助查询，保留以兼容旧代码路径。
 # ---------------------------------------------------------------------------
 
 

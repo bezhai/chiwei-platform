@@ -1,15 +1,15 @@
-"""life 感知白名单：哪些会话的聊天回灌进 life engine。
+"""life 感知白名单：哪些群聊会触发 life 读取实时对话上下文。
 
-成本止血（spec Task 5）：现在每条群消息都在唤醒 life 轮。收窄为只有白名单内
-的群的消息进 life 成为她的经历；其他群只走 chat 被动回复路径（回复不受影响，
-只是这段对话不再回灌进她的信箱）。
+成本止血（spec Task 5）：只有白名单内的群聊会在 chat 回复后额外唤醒 life；
+其他群只走 chat 被动回复路径。life 醒来后会实时从 common_message 拉最近聊过的
+对话，聊天内容不再写入 EventEnvelope 信箱。
 
 配置形态：Dynamic Config key ``life_feed_chat_whitelist``，值=逗号分隔的
 common_conversation_id 列表，由运维侧配置——群 id 不硬编码进代码。
 
 口径（bezhai 拍板）：
 - p2p 私聊不过滤（用户口径只针对"群"），p2p 短路时不消费配置
-- fail-closed：配置缺失/为空 → 所有群聊回灌全部跳过。配置系统挂了宁可她
+- fail-closed：配置缺失/为空 → 所有群聊 life 唤醒全部跳过。配置系统挂了宁可她
   暂时听不见群聊，也不能成本失控。
 """
 
@@ -31,7 +31,7 @@ def parse_whitelist(raw: str) -> frozenset[str]:
 
 
 async def should_feed_chat_to_life(*, chat_id: str | None, is_p2p: bool) -> bool:
-    """这次对话是否回灌进 life（成为她的经历 / 唤醒 life 轮）。
+    """这次对话是否进入 life 感知范围（p2p 放行、群按白名单）。
 
     Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread``
     避免缓存刷新那一次阻塞事件循环。

@@ -58,11 +58,13 @@ from app.agent.sediment import build_life_fold_policy
 from app.agent.session import load_session
 from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
+from app.data.message_record import LifeChatConversation
 from app.data.queries.mailbox import (
     deliver_event,  # module-level so tests can monkeypatch
     list_unread_events,
     mark_events_read,
 )
+from app.data.queries.messages import find_persona_related_chats_recent
 from app.domain.arc_awareness import render_arc_awareness
 from app.domain.life_state import find_life_state
 from app.domain.notebook import (
@@ -329,13 +331,11 @@ def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> st
 
 
 def _group_handle_suffix(ev: EventEnvelope) -> str:
-    """来自群的离散动静追加「来自群聊『群名』，群句柄 group:<chat_id>」（task 3）。
+    """带群会话身份的历史动静追加「来自群聊『群名』，群句柄 group:<chat_id>」。
 
-    她被白名单**群**消息唤醒时，光有 summary 不够——还要知道这条来自哪个群、并拿到群的
-    稳定句柄（``group:<chat_id>``）才能接着在同一个群继续主动说，而不是转头私聊。判群靠
-    回灌时落进 event 的 ``chat_scope == 'group'`` + ``chat_id`` 非空（结构化补传，不从
-    summary 文本猜）。**群名缺失也兜底展示 ``group:<chat_id>``**（spec 决策 3）：群名只是
-    给她认人的，句柄才是她回发到同群的抓手，任何时候都得拿得到。
+    早期群 chat 回灌会把 ``chat_scope == 'group'`` + ``chat_id`` 落进 event。当前新路径
+    已改成 life 醒来实时读取 ``common_message``，但历史未读 event 仍应可读。群名缺失也
+    兜底展示 ``group:<chat_id>``，不从 summary 文本猜。
 
     群 uid 格式按共享约定直接拼 ``"group:" + common_conversation_id``（不 import 投递目标
     解析层的 group_uid 函数，避免跨 task 代码依赖）。非群 event（旧条目 chat_scope=None /
@@ -350,17 +350,13 @@ def _group_handle_suffix(ev: EventEnvelope) -> str:
 
 
 def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
-    """把离散动静（kind=ambient / external）拼成她"刚感知到的几件事"，按发生先后。
+    """把离散动静拼成她"刚感知到的几件事"，按发生先后。
 
     放 event 的客观可感形态（summary）+ 类型 + 发生时间——都是投进她信箱的、她够得着
-    的信息，不含任何 world 全局视角。这些是「环境里出现的新声响光线气味」「刚和谁聊
-    过」这类离散动静，区别于 :func:`_format_surroundings` 的周遭底框。event 的
+    的信息，不含任何 world 全局视角。这些是「环境里出现的新声响光线气味」这类离散动静，
+    区别于 :func:`_format_surroundings` 的周遭底框。event 的
     ``occurred_at`` 在信箱里混着历史格式（chat 写 Unix 毫秒、world 写 CST、life 写
     UTC），显示时一律过 ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
-
-    **来自群的动静（task 3）**追加群标注 + 句柄（见 :func:`_group_handle_suffix`）：白名单
-    群消息回灌进来时带了会话身份（chat_scope='group' + chat_id），这里把「来自群聊『群名』，
-    群句柄 group:<chat_id>」缀在那条后面，让她知道来自哪个群、拿到回发到同群的句柄。
     """
     return "\n".join(
         f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} "
@@ -441,7 +437,7 @@ def _split_perception(
       * 手机消息（kind=message）—— 另一角色不在一起时 send_message 隔空发来的消息
         「X 给你发消息：内容」（task 3 / 5）。**通信介质维度**：隔着手机/飞书发的，与当面
         speech 收件人侧必须可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
-      * 离散动静（其余 ambient / external）—— 环境里出现的新声响光线气味、刚聊过等。
+      * 离散动静（其余 kind）—— 环境里出现的新声响光线气味等。
 
     按 kind 四分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
     必须从 dynamics 桶排除（必改 ①）——否则会被 :func:`_format_dynamics` 当离散动静渲染
@@ -457,6 +453,50 @@ def _split_perception(
         not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH, EVENT_KIND_MESSAGE)
     ]
     return surroundings, speech, messages, dynamics
+
+
+# 「最近聊过的对话」段的拉取上限（条目数量控制规模、不字符截断——见 no_context_truncation）：
+#   * since 窗口：往回看 6 小时（醒来时她记得的「最近一段」聊天，再久就归沉淀 / 回顾）。
+#   * 最多 5 个会话：积压再多也只铺最近活跃的几个，挡住一次塞几十个会话。
+#   * 每会话最多 10 条：每个会话只铺最近一段、不把整卷历史拉进来。
+# 这三个都是机制层的规模闸（同 inbox 上限那类），不替她判断哪些重要（赤尾宪法）。
+_RECENT_CHAT_SINCE_MS = 6 * 60 * 60 * 1000
+_RECENT_CHAT_MAX_CONVERSATIONS = 5
+_RECENT_CHAT_PER_CHAT_LIMIT = 10
+
+
+def _format_recent_chats(conversations: list[LifeChatConversation]) -> str:
+    """把她相关会话的最近一段消息渲成「最近聊过的对话」段，按会话分组忠实呈现。
+
+    T1 已把「她相关会话」捞成 ``LifeChatConversation`` 列表（私聊 + 白名单内的群、每个带
+    最近一段消息、已判明每条「谁说的」）。这里只做渲染——按会话分块：
+
+      * 群（``scope == "group"``）标群名「· 群「群名」里：」；群名缺失（查不到）兜底
+        「· 一个群里：」，**绝不把 None 拼进文案**（spec 决策 3 同口径）。
+      * 私聊（其余）标「· 一段私聊里：」。
+      * 组内每条 ``（时间）发言人：内容``——``m.is_self`` 为真（她自己的回复）显示「我」、
+        否则用 ``m.speaker_display_name``（真人昵称 / 别的 persona）。
+
+    **忠实呈现、不加工**（spec 命门）：不改写成「某人对你说 X / 你回了 Y」这类叙述体、
+    不截断单条 ``m.text``——她读到的就是对话原貌。规模由上面三个条目上限在拉取侧控住，
+    不在渲染层做字符截断（no_context_truncation）。
+    """
+    blocks: list[str] = ["【最近聊过的对话】（这一阵你和谁聊过的，按会话分开）："]
+    for conv in conversations:
+        if conv.scope == "group":
+            header = (
+                f"· 群「{conv.display_name}」里："
+                if conv.display_name
+                else "· 一个群里："
+            )
+        else:
+            header = "· 一段私聊里："
+        lines = [header]
+        for m in conv.messages:
+            speaker = "我" if m.is_self else m.speaker_display_name
+            lines.append(f"  （{m.cst_time}）{speaker}：{m.text}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
 
 
 @node
@@ -810,6 +850,31 @@ async def _run_life_round(
             f"{render_notebook(notebook_entries, now=observed_at)}"
         )
 
+    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：醒来时往回看 6 小时内她相关
+    # 会话（真人私聊 + 白名单内的群，由 find_persona_related_chats_recent 按「她发过言」
+    # 口径选并过白名单）的最近一段消息，渲成「最近聊过的对话」段塞进她的输入——让她带着
+    # 「这一阵跟谁聊过什么」过这一刻。规模由三个条目上限（since 窗口 / 会话数 / 每会话条
+    # 数）在拉取侧控住、不字符截断（no_context_truncation）。位置在本子之后、时刻行之前
+    # （它跟着她的聊天活跃度变，不进稳定前缀）。读失败绝不杀整个 life 轮（照 notebook /
+    # day_page 的姿势 fail-soft）：失败只 log warning、当作没有，本轮照常往下跑。
+    try:
+        recent_chats = await find_persona_related_chats_recent(
+            persona_id=persona_id,
+            since_ms=int(now.timestamp() * 1000) - _RECENT_CHAT_SINCE_MS,
+            max_conversations=_RECENT_CHAT_MAX_CONVERSATIONS,
+            per_chat_limit=_RECENT_CHAT_PER_CHAT_LIMIT,
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to read recent chats, section absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        recent_chats = []
+    if recent_chats:
+        parts.append(_format_recent_chats(recent_chats))
+
     # 完整日期口径（年月日 + 星期 + 时分），不是只给时分：她记日程 / 算 remind_at
     # 时要把「5 分钟后」「周五」这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填
     # 日期分量（线上 bug：remind_at 被填到过去，提醒永远不在该响的那一刻触发）。
@@ -835,7 +900,7 @@ async def _run_life_round(
     #   * 「别人隔着手机给你发的消息」（message，另一角色不在一起时 send_message 隔空发的
     #     「X 给你发消息：内容」，task 3 / 5）—— **通信介质维度**：隔着手机/飞书，不是当面。
     #     与当面 speech 收件人侧明确可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
-    #   * 「离散动静」（ambient / external，环境里出现的新声响 / 刚聊过这类事件）。
+    #   * 「离散动静」（ambient 等，环境里出现的新声响这类事件）。
     # 分层呈现让她既感知到自己周遭什么样（物理在场）、又看清谁当面说了话 / 谁隔手机发了
     # 消息（通信介质两态）、还知道刚发生了什么动静（四类不互相混淆）。四类都只取自她自己
     # 信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给她的、她够得着的），绝不

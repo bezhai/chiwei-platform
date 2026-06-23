@@ -30,7 +30,6 @@ import app.nodes.life_wake as lw
 from app.domain.life_state import LifeState
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
-    EVENT_KIND_EXTERNAL,
     EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
@@ -660,18 +659,18 @@ async def test_no_self_alarm_scheduled(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_digests_external_message_event(patched, monkeypatch):
-    """消化外部消息：信箱里有 kind=external（刚和用户聊过）的 event，她能读到。"""
+async def test_digests_dynamic_event(patched, monkeypatch):
+    """消化普通动静：信箱里有 kind=ambient 的 event，她能读到。"""
     patched["unread"] = [
-        _envelope("ex1", "刚和原智鸿聊了几句", kind=EVENT_KIND_EXTERNAL),
+        _envelope("ex1", "玄关传来开门声", kind=EVENT_KIND_AMBIENT),
     ]
     _FakeAgent.install(monkeypatch, script=None)
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    # 感知到的 external event 进 USER messages（→进 transcript→第二轮可 replay）
+    # 感知到的普通动静进 USER messages（→进 transcript→第二轮可 replay）
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
-    assert "刚和原智鸿聊了几句" in msg_blob
+    assert "玄关传来开门声" in msg_blob
     assert patched["marked"] == [["ex1"]]
 
 
@@ -1025,8 +1024,7 @@ async def test_npc_speech_rendered_with_clean_name_not_machine_prefix(
     NPC 层第二刀：world 以具名 NPC 身份投的 event，source 在信箱里是机器约定
     ``npc:林小满``（对齐第一刀 npc_name + 关系页 npc:xxx），但喂给模型时要呈现成干净
     的人名「林小满 对你说：…」——``npc:`` 是机读前缀（关系页 keying 用），不该漏给模型
-    看。她据此识别「是 NPC 林小满来找我」：不被当真人（真人是 user:xxx / kind=external、
-    走离散动静段）、也不被当 world 环境动静（ambient）。
+    看。她据此识别「是 NPC 林小满来找我」：不被当普通离散动静（ambient）。
     """
     patched["unread"] = [
         _envelope(
@@ -2892,8 +2890,7 @@ async def test_life_round_has_no_schedule_tool_to_call(patched, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# task 3（单元 B）：life 知道「这条动静来自哪个群」。
-# 信箱里 kind=external 且 chat_scope='group' 的群消息 → stimulus 里标注「来自群聊『群名』」
+# 历史会话身份字段：带 chat_scope='group' 的未读动静 → stimulus 里标注「来自群聊『群名』」
 # 并把群句柄 group:<chat_id> 摆给她（群名缺失也兜底展示 group:<chat_id>，保证拿得到句柄）。
 # 群 uid 格式 = "group:" + common_conversation_id（共享约定，直接按此拼字符串、不 import
 # 另一子 agent 的 group_uid 函数）。
@@ -2901,18 +2898,14 @@ async def test_life_round_has_no_schedule_tool_to_call(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_group_external_event_annotates_group_name_and_handle(patched, monkeypatch):
-    """群 external 消息 → stimulus 标「来自群聊『群名』」并摆出群句柄 group:<chat_id>。
-
-    她被白名单群消息唤醒时，stimulus 里不仅有「刚和谁聊了啥」，还能看到这条来自哪个群、
-    并拿到群的稳定句柄 group:<chat_id>，从而能接着在同一个群继续主动说。
-    """
+async def test_group_identity_event_annotates_group_name_and_handle(patched, monkeypatch):
+    """带群身份的历史动静 → stimulus 标「来自群聊『群名』」并摆出群句柄。"""
     cid = "11111111-1111-1111-1111-111111111111"
     patched["unread"] = [
         _envelope(
             "chat:grp1",
-            "刚和原智鸿聊了：今晚一起吃饭吗",
-            kind=EVENT_KIND_EXTERNAL,
+            "群里出现一条历史动静",
+            kind=EVENT_KIND_AMBIENT,
             source="user:u1",
             chat_id=cid,
             chat_scope="group",
@@ -2925,7 +2918,7 @@ async def test_group_external_event_annotates_group_name_and_handle(patched, mon
 
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
     # 原文照常进 stimulus
-    assert "刚和原智鸿聊了：今晚一起吃饭吗" in msg_blob
+    assert "群里出现一条历史动静" in msg_blob
     # 标注来自哪个群（群名）
     assert "🐢🐢群(飞书版)" in msg_blob, "群消息应标注来自哪个群（群名）"
     # 摆出稳定群句柄 group:<chat_id>，让她能接着发回同一个群
@@ -2934,7 +2927,7 @@ async def test_group_external_event_annotates_group_name_and_handle(patched, mon
 
 
 @pytest.mark.asyncio
-async def test_group_external_event_handle_fallback_when_name_missing(patched, monkeypatch):
+async def test_group_identity_event_handle_fallback_when_name_missing(patched, monkeypatch):
     """群名缺失（chat_name=None）也兜底展示 group:<chat_id> —— 保证她任何时候拿得到句柄。
 
     chat_name 可能没查到（display_name 为 NULL / 会话缺失）。即便没群名，stimulus 也必须
@@ -2944,8 +2937,8 @@ async def test_group_external_event_handle_fallback_when_name_missing(patched, m
     patched["unread"] = [
         _envelope(
             "chat:grp2",
-            "刚和小红聊了：在干嘛",
-            kind=EVENT_KIND_EXTERNAL,
+            "群里出现另一条历史动静",
+            kind=EVENT_KIND_AMBIENT,
             source="user:u2",
             chat_id=cid,
             chat_scope="group",
@@ -2957,23 +2950,22 @@ async def test_group_external_event_handle_fallback_when_name_missing(patched, m
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
-    assert "刚和小红聊了：在干嘛" in msg_blob
+    assert "群里出现另一条历史动静" in msg_blob
     # 群名缺失也必须能拿到句柄
     assert f"group:{cid}" in msg_blob, "群名缺失也要兜底展示 group:<chat_id> 句柄"
 
 
 @pytest.mark.asyncio
-async def test_non_group_external_event_has_no_group_handle(patched, monkeypatch):
-    """非群 external（旧条目 chat_scope=None / 没群身份）不冒出群句柄，照常呈现动静。
+async def test_non_group_dynamic_event_has_no_group_handle(patched, monkeypatch):
+    """非群动静（chat_scope=None / 没群身份）不冒出群句柄，照常呈现动静。
 
-    旧条目（task 3 之前落库的，三字段为 None）或 p2p 被动回灌不该被误标成群、也不该
-    冒出 group:<...> 句柄。守住「只有真群消息才摆群句柄」这条边界。
+    三字段为 None 的旧条目不该被误标成群、也不该冒出 group:<...> 句柄。
     """
     patched["unread"] = [
         _envelope(
             "chat:old",
             "刚和某人聊过",
-            kind=EVENT_KIND_EXTERNAL,
+            kind=EVENT_KIND_AMBIENT,
             source="user:u1",
             # 三字段全 None（旧条目形态）
         ),
@@ -2984,8 +2976,8 @@ async def test_non_group_external_event_has_no_group_handle(patched, monkeypatch
 
     msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
     assert "刚和某人聊过" in msg_blob
-    assert "group:" not in msg_blob, "非群 external 不该冒出群句柄"
-    assert "来自群聊" not in msg_blob, "非群 external 不该被标成来自群聊"
+    assert "group:" not in msg_blob, "非群动静不该冒出群句柄"
+    assert "来自群聊" not in msg_blob, "非群动静不该被标成来自群聊"
 
 
 # ---------------------------------------------------------------------------

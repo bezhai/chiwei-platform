@@ -359,6 +359,128 @@ def _life_unread_text(captured: dict) -> str:
     return str(captured.get("messages_text", ""))
 
 
+@pytest.mark.integration
+async def test_life_wake_includes_realtime_recent_chat_context(
+    world_db, _stub_persona, _agent_run
+):
+    """life 真醒来时实时拉 common_message，把最近聊过的对话放进 stimulus。
+
+    旧 chat→mailbox 回灌只写用户原话，且写入时赤尾自己的回复可能还没由
+    chat-response-worker 落库。新路径不再信箱回灌内容，而是在 life 醒来时实时查
+    common_message：这时库里已有真人话 + 赤尾回复，stimulus 应按会话分组并把她自己的
+    回复显示成「我」。
+    """
+    import uuid
+
+    from sqlalchemy import text
+
+    import app.data.session as session_mod
+    from app.data.models import (
+        Base,
+        CommonAgentResponse,
+        CommonConversation,
+        CommonMessage,
+    )
+
+    tables = [
+        CommonMessage.__table__,
+        CommonAgentResponse.__table__,
+        CommonConversation.__table__,
+    ]
+    async with world_db.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(sync_conn, tables=tables)
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE bot_config ("
+                "  bot_name VARCHAR(50) PRIMARY KEY,"
+                "  persona_id VARCHAR(50),"
+                "  is_active BOOLEAN NOT NULL DEFAULT TRUE"
+                ")"
+            )
+        )
+
+    lane = "coe-recent-chat"
+    persona = "akao"
+    chat_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    user_msg_id = uuid.uuid4()
+    bot_msg_id = uuid.uuid4()
+    response_session_id = f"recent-chat-{uuid.uuid4().hex}"
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+
+    async with session_mod.get_session() as s:
+        s.add(
+            CommonConversation(
+                common_conversation_id=chat_id,
+                channel="lark",
+                scope="direct",
+                display_name=None,
+            )
+        )
+        s.add(
+            CommonAgentResponse(
+                response_id=uuid.uuid4(),
+                session_id=response_session_id,
+                trigger_common_message_id=user_msg_id,
+                common_conversation_id=chat_id,
+                persona_id=persona,
+            )
+        )
+        s.add(
+            CommonMessage(
+                common_message_id=user_msg_id,
+                channel="lark",
+                common_conversation_id=chat_id,
+                common_user_id=user_id,
+                sender_display_name="贝壳",
+                role="user",
+                content=[{"kind": "text", "text": "赤尾刚才还记得我吗"}],
+                content_text="赤尾刚才还记得我吗",
+                scope="direct",
+                event_time=now_ms - 1_000,
+            )
+        )
+        s.add(
+            CommonMessage(
+                common_message_id=bot_msg_id,
+                channel="lark",
+                common_conversation_id=chat_id,
+                common_user_id=None,
+                sender_display_name=None,
+                role="assistant",
+                content=[{"kind": "text", "text": "当然记得，刚刚才聊过。"}],
+                content_text="当然记得，刚刚才聊过。",
+                scope="direct",
+                response_id=response_session_id,
+                event_time=now_ms,
+            )
+        )
+
+    await insert_idempotent(
+        EventEnvelope(
+            lane=lane,
+            persona_id=persona,
+            event_id="wake:recent-chat",
+            kind="ambient",
+            source="world",
+            summary="窗边有风吹进来",
+            occurred_at=datetime.now(UTC).isoformat(),
+        )
+    )
+
+    _agent_run.life_round = []
+    await lw.life_wake_node(EventArrived(lane=lane, persona_id=persona))
+
+    stimulus = _agent_run.life_calls[-1]["messages_text"]
+    assert "最近聊过的对话" in stimulus
+    assert "一段私聊" in stimulus
+    assert "贝壳：赤尾刚才还记得我吗" in stimulus
+    assert "我：当然记得，刚刚才聊过。" in stimulus
+    assert "窗边有风吹进来" in stimulus
+
+
 @pytest.fixture(autouse=True)
 def _stub_self_wake(monkeypatch):
     """world sleep 自排打桩成记录 delay（不连 RabbitMQ）.

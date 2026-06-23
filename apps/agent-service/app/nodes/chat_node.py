@@ -28,21 +28,12 @@ from app.data.queries import (
     create_pending_agent_response,
     find_gray_config,
     find_message_content,
-    find_username,
     is_chat_request_completed,
     resolve_bot_name_for_persona,
     set_agent_response_bot,
 )
-from app.data.queries.mailbox import (
-    deliver_event,
-    find_conversation_display_name,
-)
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment, ChatTrigger
-from app.domain.world_events import (
-    EVENT_KIND_EXTERNAL,
-    EVENT_KIND_EXTERNAL_PASSIVE,
-)
-from app.infra.cst_time import now_cst_iso
+from app.domain.world_events import EventArrived
 from app.life.feed_whitelist import should_feed_chat_to_life
 from app.nodes._chat_pre_safety import _resolve_pre_safety_for_part
 from app.runtime import node
@@ -356,120 +347,36 @@ async def chat_node(req: ChatRequest) -> None:
         },
     )
 
-    # 对话回灌：聊完一次，作为一条 event 进这个 persona 的信箱（她事后知道"刚跟谁
-    # 聊了啥"），不让"聊天里的她"和"世界里的她"分叉。真人私聊（p2p）回灌打被动 kind
-    # （感知不唤醒，task 3）、白名单群回灌打 external（waking），kind 选择见
-    # _replay_conversation_to_mailbox。快路径回复已经 emit 完，回灌在这之后、不挡
-    # 回复；回灌失败只 log、不拖垮 chat。summary 直接
-    # 用用户原话——这是她自己经历过的对话回灌进自己脑子（聊的时候就经历了、chat
-    # 入口也过了 pre-safety），不是隐私泄露，不需要 LLM 概括脱敏；原话本身就是最
-    # 真实的"聊了啥"，概括成二手货反而失真、每轮跑一次 offline LLM 纯浪费。
-    # event_id 用 session_id 让重投幂等。
-    user_message = parsed.render() if parsed else ""
-    await _replay_conversation_to_mailbox(req, user_message=user_message)
+    await _wake_life_for_group_chat(req)
 
 
-# 防御性上限：纯防极端长文落进 durable 信箱,正常聊天消息根本到不了 200 字。
-_REPLAY_MAX_CHARS = 200
+async def _wake_life_for_group_chat(req: ChatRequest) -> None:
+    """群聊 chat 完成后只做纯唤醒，不再把对话内容写进 life 信箱。
 
-
-async def _replay_conversation_to_mailbox(
-    req: ChatRequest, *, user_message: str,
-) -> None:
-    """把"刚跟某用户聊了啥"投进 req.persona_id 的信箱。
-
-    summary = "跟谁 + 聊了啥"：谁取真实用户名（解析不到退回 user_id），聊了啥
-    **直接用用户原话**（``user_message``）——不概括、不上 LLM。这是她自己经历过的
-    对话回灌进自己脑子，给 agent 的应该是真实输入，不是工程化概括过的二手货。只留
-    一个宽松上限（``_REPLAY_MAX_CHARS``）纯防极端长文，超了截断加省略号；正常消息
-    根本到不了。``user_message`` 为空（纯图片 / 表情渲染为空）时退回 ``刚和{谁}聊
-    过一次``。
-
-    **kind 按 ``is_p2p`` 分（task 3：真人私聊感知不唤醒）**：真人**私聊**回灌打被动
-    ``EVENT_KIND_EXTERNAL_PASSIVE``——她已经在 chat 回合里回应过这个真人了，再额外
-    唤醒一轮 life 用 gpt 单独跑纯属重复反应、浪费；被动 kind 只落信箱当被动上下文，她
-    下次自然醒时（``list_unread_events``）读到、知道「刚跟某真人聊过」。白名单内的**群**
-    回灌打 ``EVENT_KIND_EXTERNAL``（waking）——群是显式选来要听的、照常唤醒。被动 vs
-    唤醒由 mailbox 的 ``PASSIVE_EVENT_KINDS`` 凭 kind 在即时敲门和补敲对账两处统一决定。
-
-    ``session_id`` 缺失时**跳过回灌**：event_id 按 ``chat:{session_id}`` 去重，
-    None 会塌成 ``chat:None`` 把不同的无关回灌错误合并成一条。宁可不写，也不错合并。
-
-    lane 取**进程级部署泳道**（``current_deployment_lane() or "prod"``），与
-    world / life 写读、取用端读全链路统一（必改 3）。不能用 ``req.lane``：prod
-    下 ``req.lane`` 常为空 → external event 进 ``lane=""`` 信箱，而 life 在
-    ``"prod"`` 唤醒读不到 → 对话回灌闭环分叉。失败吞掉只 log —— 这是对话之后的
-    事后回灌，绝不能影响已经回完的即时回复。
+    对话内容是持续状态，life 醒来时会实时从 ``common_message`` 拉「最近聊过的对话」。
+    这里的副作用只解决一件事：白名单群里刚发生过一次 chat，敲一下对应 persona，让她
+    有机会立刻读取实时对话上下文。真人私聊不唤醒；白名单外群不唤醒。唤醒失败只记
+    warning，不影响已经 emit 出去的即时回复。
     """
-    if not req.persona_id:
+    if req.is_p2p or not req.persona_id:
         return
-    if not req.session_id:
+    if not await should_feed_chat_to_life(chat_id=req.chat_id, is_p2p=False):
         logger.info(
-            "skip conversation replay: session_id missing (persona=%s, user=%s)",
-            req.persona_id, req.user_id,
-        )
-        return
-    # life 感知白名单（spec Task 5 成本止血）：只有白名单内的群的对话回灌进
-    # life；白名单外/空配置（fail-closed）的群聊跳过。p2p 不过滤。这里只挡
-    # deliver_event 这一处回灌——chat 回复和安全链早已走完，不受影响。
-    if not await should_feed_chat_to_life(chat_id=req.chat_id, is_p2p=req.is_p2p):
-        logger.info(
-            "skip life feed: chat %s not in life_feed_chat_whitelist "
+            "skip group chat life wake: chat %s not in life_feed_chat_whitelist "
             "(persona=%s)",
-            req.chat_id, req.persona_id,
+            req.chat_id,
+            req.persona_id,
         )
         return
+
     lane = current_deployment_lane() or "prod"
-    # 跟谁：优先真实用户名，解析不到退回 user_id（始终带 user_id 兜底，让信息可定位）。
-    who = f"用户 {req.user_id}"
     try:
-        name = await find_username(req.user_id) if req.user_id else None
-        if name:
-            who = f"{name}（用户 {req.user_id}）"
-    except Exception as e:  # noqa: BLE001 — 名字解析失败退回 user_id，不挡回灌
-        logger.warning("resolve username for replay failed: %s: %s", req.user_id, e)
-    # 聊了啥：直接用用户原话（防御性截断极端长文），空时退回兜底文案。
-    spoke = user_message.strip()
-    if len(spoke) > _REPLAY_MAX_CHARS:
-        spoke = spoke[:_REPLAY_MAX_CHARS] + "…"
-    summary = f"刚和{who}聊了：{spoke}" if spoke else f"刚和{who}聊过一次"
-    # 真人**私聊**（p2p）回灌打被动 kind（感知不唤醒，task 3）：她已经在 chat 回合里
-    # 回应过这个真人了，再额外唤醒一轮 life 用 gpt 单独跑纯属重复反应、浪费——只落信箱
-    # 当被动上下文，她下次自然醒时读到「刚跟某真人聊过」。白名单内的**群**回灌保持
-    # external（waking）：群是显式选来要听的、照常唤醒。被动 vs 唤醒由 mailbox 的
-    # PASSIVE_EVENT_KINDS 凭 kind 决定，chat 这里只负责按 is_p2p 选对 kind。
-    kind = EVENT_KIND_EXTERNAL_PASSIVE if req.is_p2p else EVENT_KIND_EXTERNAL
-    # 会话身份补传（task 3）：把源会话身份一并落进信箱条目，让 life 醒来知道「这条来自
-    # 哪个群」、拿到群句柄 group:<chat_id> 接着在同群继续说。chat_id 取 req.chat_id（=
-    # common_conversation_id）；chat_scope 取 DB 原值（群 group / 私聊 direct）。群回灌
-    # 才查群名（display_name，查不到兜底 None——life 侧会展示 group:<id> 句柄）；p2p 没有
-    # 群名概念、不查。chat_scope 用 is_p2p 判：p2p → direct，群 → group（与回灌 kind 同源）。
-    chat_scope = "direct" if req.is_p2p else "group"
-    chat_name = None
-    if not req.is_p2p:
-        try:
-            chat_name = await find_conversation_display_name(req.chat_id)
-        except Exception as e:  # noqa: BLE001 — 群名查失败退回 None，不挡回灌
-            logger.warning(
-                "resolve group display_name for replay failed: %s: %s", req.chat_id, e
-            )
-    try:
-        await deliver_event(
-            lane=lane,
-            persona_id=req.persona_id,
-            event_id=f"chat:{req.session_id}",
-            kind=kind,
-            source=f"user:{req.user_id}",
-            summary=summary,
-            # CST aware ISO（含 +08:00），与 world/life 写入端同一个"现在"——
-            # 旧的 Unix 毫秒会跟 ISO 同框混着喂给 agent、时间窗口比较差 8 小时。
-            occurred_at=now_cst_iso(),
-            chat_id=req.chat_id,
-            chat_scope=chat_scope,
-            chat_name=chat_name,
-        )
-    except Exception as e:  # noqa: BLE001 — 事后回灌失败不拖垮 chat 快路径
+        await emit(EventArrived(lane=lane, persona_id=req.persona_id))
+    except Exception as e:  # noqa: BLE001 — chat 回复已发出，唤醒副作用失败不拖垮回复
         logger.warning(
-            "conversation replay to mailbox failed: persona=%s session=%s: %s",
-            req.persona_id, req.session_id, e,
+            "group chat life wake failed: lane=%s persona=%s chat=%s: %s",
+            lane,
+            req.persona_id,
+            req.chat_id,
+            e,
         )

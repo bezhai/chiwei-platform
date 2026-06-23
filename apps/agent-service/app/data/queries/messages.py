@@ -12,7 +12,11 @@ from uuid import UUID
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.future import select
 
-from app.data.message_record import CommonMessageRecord
+from app.data.message_record import (
+    CommonMessageRecord,
+    LifeChatConversation,
+    LifeChatMessage,
+)
 from app.data.models import (
     CommonAgentResponse,
     CommonConversation,
@@ -20,6 +24,7 @@ from app.data.models import (
     CommonUser,
 )
 from app.infra import cst_time
+from app.life.feed_whitelist import should_feed_chat_to_life
 from app.runtime.db import auto_tx, current_session
 
 __all__ = [
@@ -35,8 +40,11 @@ __all__ = [
     "find_messages_with_user_chat_persona_by_root",
     "find_messages_with_user_chat_persona_in_chat",
     "find_persona_spoken_chats_in_window",
+    "find_persona_related_chats_recent",
     "update_messages_tos_files",
 ]
+
+_UNKNOWN_SPEAKER = "（不知名）"
 
 
 def _bot_config_persona():
@@ -594,6 +602,150 @@ async def find_persona_spoken_chats_in_window(
             entries = [(_record(msg), msg_persona) for msg, msg_persona in rows]
             entries.reverse()
             out.append((str(chat_uuid), chat_name, entries))
+    return out
+
+
+def _life_chat_message(
+    record: CommonMessageRecord, msg_persona: str | None, persona_id: str
+) -> LifeChatMessage:
+    """把一条 common 消息 + 它的发言 persona 折成 life 读对话用的可读形态。
+
+    ``is_self`` = role=assistant 且发言 persona == 当前 persona（同
+    ``review._chats_evidence`` 的"她说的"判定，发言 persona 已经过
+    ``COALESCE(agent_response, bot_config 兜底)`` 取、含 proactive 出站行归属）。
+    展示名：她自己用 persona_id；别的 persona 用它的 persona_id；真人用
+    ``sender_display_name`` 兜底（不暴露 raw user_id）。CST 时间走项目 cst_time 归一
+    （``event_time`` 毫秒整数 → ``str`` 喂 ``to_cst_hm``，与历史毫秒口径一致）。
+    """
+    is_self = record.role == "assistant" and msg_persona == persona_id
+    if is_self:
+        speaker = persona_id
+    elif msg_persona:
+        speaker = msg_persona
+    else:
+        speaker = record.username or _UNKNOWN_SPEAKER
+    return LifeChatMessage(
+        speaker_display_name=speaker,
+        is_self=is_self,
+        text=json.loads(record.content).get("text", "") if record.content else "",
+        cst_time=cst_time.to_cst_hm(str(record.create_time)),
+    )
+
+
+async def find_persona_related_chats_recent(
+    *,
+    persona_id: str,
+    since_ms: int,
+    max_conversations: int,
+    per_chat_limit: int,
+) -> list[LifeChatConversation]:
+    """她相关会话（真人私聊 + 白名单内的群）的最近一段消息 —— life 醒来实时拉对话。
+
+    「她相关会话」= 她在 ``since_ms`` 之后**发过言**的会话（同 chat 被动唤起模型口径：
+    她没发言就没被唤起、就没看见），按最近活跃降序取前 ``max_conversations`` 个。她发
+    过言按 common 口径判：assistant 行的发言 persona ==``persona_id``，发言 persona 经
+    ``COALESCE(common_agent_response.persona_id, bot_config(bot_name→persona_id))`` 取
+    （普通回复经 ``response_id`` join 拿、proactive 出站行经 ``bot_config`` 兜底拿，
+    ``_bot_config_persona`` 已加 role 限定，真人 user 行仍是 None）。
+
+    白名单挪到拉取侧（spec 决策）：私聊（scope=direct）放行；群（scope=group）必须过
+    ``should_feed_chat_to_life``（Dynamic Config ``life_feed_chat_whitelist``，配置缺失
+    fail-closed 不拉）。这一层在查询里做掉、不依赖调用方先过滤。
+
+    每个会话取最近消息（user + assistant，剔除 ``proactive_trigger`` 伪消息），**条目数
+    量控制不字符截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按发生先后升序。每条折成
+    ``LifeChatMessage``（发言者展示名 / 是否她自己 / 文本 / CST 时间），返回
+    ``LifeChatConversation`` 列表（chat_id + scope + 群名 + 消息列表）。
+    """
+    # 她在 since_ms 之后发过言的会话，按各会话她发言的最近时刻降序，连会话元数据
+    # 一把取出（scope / 群名）。白名单读 Dynamic Config 是同步 httpx（网络 IO），
+    # 不放进 tx——db.tx 明确警告 tx 内外部 IO；先在一个 tx 里把候选会话 + 元数据捞齐
+    # 退出 tx，再过白名单（网络），最后逐个会话进新 tx 拉消息。
+    spoke_stmt = (
+        select(
+            CommonMessage.common_conversation_id,
+            CommonConversation.scope,
+            CommonConversation.display_name,
+        )
+        .outerjoin(
+            CommonAgentResponse,
+            CommonMessage.response_id == CommonAgentResponse.session_id,
+        )
+        .outerjoin(
+            CommonConversation,
+            CommonMessage.common_conversation_id
+            == CommonConversation.common_conversation_id,
+        )
+        .where(
+            func.coalesce(CommonAgentResponse.persona_id, _bot_config_persona())
+            == persona_id,
+            CommonMessage.role == "assistant",
+            CommonMessage.event_time >= since_ms,
+        )
+        .group_by(
+            CommonMessage.common_conversation_id,
+            CommonConversation.scope,
+            CommonConversation.display_name,
+        )
+        .order_by(func.max(CommonMessage.event_time).desc())
+    )
+
+    async with auto_tx():
+        candidates = (await current_session().execute(spoke_stmt)).all()
+
+    # 白名单（网络 IO，tx 外）：私聊放行，群必须过 life_feed_chat_whitelist。取够
+    # max_conversations 个就停（避免对名单外的群也白白读配置 / 拉消息）。
+    selected: list[tuple[str, str, str | None]] = []
+    for chat_uuid, raw_scope, display_name in candidates:
+        scope = raw_scope or "group"
+        if await should_feed_chat_to_life(
+            chat_id=str(chat_uuid), is_p2p=(scope == "direct")
+        ):
+            selected.append((str(chat_uuid), scope, display_name))
+        if len(selected) >= max_conversations:
+            break
+
+    out: list[LifeChatConversation] = []
+    for chat_id, scope, display_name in selected:
+        chat_uuid = _uuid(chat_id)
+        # 会话内最近消息：降序取最近 N 条再反转回升序（条目数量控制、不字符截断）。
+        msg_stmt = (
+            select(
+                CommonMessage,
+                func.coalesce(
+                    CommonAgentResponse.persona_id, _bot_config_persona()
+                ).label("persona_id"),
+            )
+            .outerjoin(
+                CommonAgentResponse,
+                CommonMessage.response_id == CommonAgentResponse.session_id,
+            )
+            .where(
+                CommonMessage.common_conversation_id == chat_uuid,
+                CommonMessage.event_time >= since_ms,
+                or_(
+                    CommonMessage.message_type.is_(None),
+                    CommonMessage.message_type != "proactive_trigger",
+                ),
+            )
+            .order_by(CommonMessage.event_time.desc())
+            .limit(per_chat_limit)
+        )
+        async with auto_tx():
+            rows = (await current_session().execute(msg_stmt)).all()
+        messages = [
+            _life_chat_message(_record(msg), msg_persona, persona_id)
+            for msg, msg_persona in rows
+        ]
+        messages.reverse()
+        out.append(
+            LifeChatConversation(
+                chat_id=chat_id,
+                scope=scope,
+                display_name=display_name,
+                messages=messages,
+            )
+        )
     return out
 
 
