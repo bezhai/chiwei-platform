@@ -29,11 +29,13 @@ from __future__ import annotations
 import logging
 
 from app.agent.neutral import ContentBlock, Message, Role
+from app.chat._context_messages import format_message_tag
 from app.chat.content_parser import parse_content
 from app.chat.render import ChatTurnContext
 from app.data.queries import find_recent_chat_messages, find_username
 from app.memory._persona import load_persona
 from app.memory.context import build_inner_context
+from app.memory.identity_registry import get_relation
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ _INTENT_FOOTER = (
 )
 
 
-def _history_messages(
+async def _history_messages(
     history: list[tuple[object, str | None]],
     *,
     persona_id: str,
@@ -61,6 +63,12 @@ def _history_messages(
     "assistant"`` 且发言 persona == 当前 persona_id → ASSISTANT；其余 → USER。每条
     取纯文本（proactive 历史不带图——主动发是文字消息，省掉收图链路）。空文本的条目
     （纯图 / 表情渲染为空）跳过。
+
+    Task 3：真人发言（USER 行）渲染成结构化标签，rel 只来自 ``get_relation``
+    （按 ``record.user_id`` = common_user_id，命中主人 → owner），用户字串全转义；
+    赤尾自己的话（ASSISTANT）认作她自己说的、不盖 rel、文本原样。fail-closed：拿不到
+    common_user_id / 非主人 → rel 空，绝不回退显示名当身份。``persona_id`` 仅用于判定
+    哪条历史是赤尾自己说的（``is_self``），与身份 rel 无关。
     """
     result: list[Message] = []
     for record, msg_persona in history:
@@ -72,8 +80,18 @@ def _history_messages(
             and bool(msg_persona)
             and msg_persona == persona_id
         )
-        role = Role.ASSISTANT if is_self else Role.USER
-        result.append(Message(role=role, content=[ContentBlock.from_text(text)]))
+        if is_self:
+            # 赤尾自己的话：ASSISTANT 角色已表明是她说的，文本原样、不套对方署名标签。
+            result.append(
+                Message(role=Role.ASSISTANT, content=[ContentBlock.from_text(text)])
+            )
+            continue
+        # 真人发言：结构化署名。rel 按 common_user_id 盖章，拿不到 id → fail-closed None。
+        common_user_id = getattr(record, "user_id", None)
+        rel = await get_relation(common_user_id) if common_user_id else None
+        speaker = getattr(record, "username", None) or "未知用户"
+        tag = format_message_tag(speaker=speaker, rel=rel, time_str="", body=text)
+        result.append(Message(role=Role.USER, content=[ContentBlock.from_text(tag)]))
     return result
 
 
@@ -92,6 +110,7 @@ async def build_proactive_chat_context(
     user_id: str | None,
     chat_scope: str = "direct",
     chat_name: str = "",
+    channel: str | None = None,
     limit: int = 10,
     since: str | None = None,
 ) -> ChatTurnContext:
@@ -118,7 +137,7 @@ async def build_proactive_chat_context(
     """
     history = await find_recent_chat_messages(chat_id=chat_id, limit=limit, since=since)
 
-    messages = _history_messages(history, persona_id=persona_id)
+    messages = await _history_messages(history, persona_id=persona_id)
     # 意图作为最后一条 user 框架消息：它是这次主动开口的触发，驱动渲染产出她的出站话。
     messages.append(
         Message(
@@ -157,6 +176,7 @@ async def build_proactive_chat_context(
             trigger_username=trigger_username,
             persona_id=persona_id,
             chat_name=chat_name,
+            channel=channel,
         )
     except Exception as e:  # noqa: BLE001 — inner 拼装失败退回空串，不挡 context
         logger.error("proactive: failed to build inner context: %s", e)

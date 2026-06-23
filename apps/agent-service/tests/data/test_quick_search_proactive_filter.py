@@ -225,7 +225,8 @@ async def test_human_chat_user_words_with_bot_name_stay_user_role_e2e(chat_db):
     )
 
     # 渲染层：build_p2p_messages 据 persona 判 is_self，真人话必须是 USER role。
-    msgs = build_p2p_messages(
+    # Task 3 后 build_p2p_messages 是 async（按 common_user_id 查可信身份盖 rel）。
+    msgs = await build_p2p_messages(
         results, image_key_to_url={}, image_key_to_filename={},
         current_persona_id="akao",
     )

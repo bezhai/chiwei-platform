@@ -86,7 +86,7 @@ async def test_build_human_chat_context_packs_render_ready_context(monkeypatch):
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
         patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.build_p2p_messages",
-              new=MagicMock(return_value=["built-p2p"])),
+              new=AsyncMock(return_value=["built-p2p"])),
         patch("app.chat.context.load_persona", new=fake_load_persona),
         patch("app.chat.context.build_inner_context", new=fake_inner),
     ):
@@ -130,7 +130,7 @@ async def test_build_human_chat_context_forwards_bot_name_to_collect_images(monk
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
         patch("app.chat.context.collect_images", new=fake_collect),
         patch("app.chat.context.build_p2p_messages",
-              new=MagicMock(return_value=["built"])),
+              new=AsyncMock(return_value=["built"])),
         patch("app.chat.context.load_persona", new=fake_load_persona),
         patch("app.chat.context.build_inner_context", new=fake_inner),
     ):
@@ -172,7 +172,7 @@ async def test_build_human_chat_context_inner_failure_does_not_crash(monkeypatch
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
         patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.build_p2p_messages",
-              new=MagicMock(return_value=["built"])),
+              new=AsyncMock(return_value=["built"])),
         patch("app.chat.context.load_persona", new=fake_load_persona),
         patch("app.chat.context.build_inner_context", new=boom),
     ):
@@ -230,7 +230,7 @@ async def test_human_p2p_attributes_self_messages_as_assistant(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_human_group_builds_reply_chain_with_trigger_marker(monkeypatch):
-    """群聊真实消息构建：reply chain 串起来、触发那条带 ⭐ 标记（不打桩 build_group_messages）。"""
+    """群聊真实消息构建：reply chain 串起来、触发那条带 reply_target 标记（不打桩 build_group_messages）。"""
     from app.chat import context as ctx_mod
 
     # m_trigger reply 到 m_root；m_other 是同群另一条不在链上的消息。
@@ -277,7 +277,8 @@ async def test_human_group_builds_reply_chain_with_trigger_marker(monkeypatch):
     assert len(turn.messages) == 1
     body = turn.messages[0].text()
     assert "今天去哪玩" in body and "去爬山吧" in body, "reply chain 串起触发与被回复"
-    assert "⭐" in body, "触发那条带 ⭐ 标记"
+    assert 'reply_target="true"' in body, "触发那条带 reply_target 标记"
+    assert body.count('reply_target="true"') == 1, "只触发那条带 reply_target，其他消息不带"
     assert "路过看看" in body, "同群其他消息也进上下文"
 
 

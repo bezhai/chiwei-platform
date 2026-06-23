@@ -569,6 +569,9 @@ def build_life_tools(
                 user_id=user_id,
                 chat_scope=chat_scope,
                 chat_name=chat_name,
+                # 平台名由真实 channel 决定（spec 决策 3）：主动发也按 channel 渲染场景，
+                # 不写死飞书——接 QQ 时主动发的场景文本同样跟着 channel 走。
+                channel=channel,
                 # 本轮进入时捕获的 proactive 历史水位（capture 进闭包，不现读 LifeState
                 # 避免被本轮 update_life_state 污染）：只取水位之后真人新发的增量历史。
                 since=proactive_history_since,
