@@ -86,7 +86,7 @@ async def test_build_human_chat_context_packs_render_ready_context(monkeypatch):
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
         patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.build_p2p_messages",
-              new=MagicMock(return_value=["built-p2p"])),
+              new=AsyncMock(return_value=["built-p2p"])),
         patch("app.chat.context.load_persona", new=fake_load_persona),
         patch("app.chat.context.build_inner_context", new=fake_inner),
     ):
@@ -172,7 +172,7 @@ async def test_build_human_chat_context_inner_failure_does_not_crash(monkeypatch
         patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
         patch("app.chat.context.collect_images", new=AsyncMock(return_value=({}, {}))),
         patch("app.chat.context.build_p2p_messages",
-              new=MagicMock(return_value=["built"])),
+              new=AsyncMock(return_value=["built"])),
         patch("app.chat.context.load_persona", new=fake_load_persona),
         patch("app.chat.context.build_inner_context", new=boom),
     ):

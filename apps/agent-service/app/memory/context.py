@@ -38,6 +38,7 @@ more — the pages are her own writing, not retrieval.
 
 from __future__ import annotations
 
+import html
 import logging
 
 from app.domain.arc_awareness import render_arc_awareness
@@ -193,42 +194,79 @@ async def _build_notebook_section(persona_id: str) -> str:
 _MEDIUM_HEADER = "【通信介质】"
 _PRESENCE_HEADER = "【物理在场】"
 
-# 物理在场维度的固定提示：聊天对象隔着飞书在另一端、**不在她身边**，她此刻真正所处
+# channel → 平台展示名（spec 决策 3：环境标识一处治理）。场景描述里的平台名由真实
+# channel 决定、不再写死「飞书」——四个对话场景共用这一处映射，接 QQ 时换 channel 即
+# 正确。漏配 / 未知 channel 走中性降级（_PLATFORM_NEUTRAL），**绝不**默认回飞书
+# （否则接新渠道照样穿帮）。
+_CHANNEL_PLATFORM_NAMES: dict[str, str] = {
+    "lark": "飞书",
+    "qq": "QQ",
+}
+_PLATFORM_NEUTRAL = "网络"
+
+
+def _platform_name(channel: str | None) -> str:
+    """channel → 平台展示名，未知 / 漏配中性降级（绝不回飞书）。
+
+    spec 决策 3：平台名参数化、prompt 里不再写死飞书。``lark`` → 飞书，其余已登记
+    channel → 对应平台名；登记缺失 / channel 为空 → 中性「网络」，让接新渠道时哪怕
+    忘配展示名也只是退化成中性措辞、不会冒出错误的「飞书」当场穿帮。
+    """
+    if not channel:
+        return _PLATFORM_NEUTRAL
+    return _CHANNEL_PLATFORM_NAMES.get(channel, _PLATFORM_NEUTRAL)
+
+# 物理在场维度的固定提示：聊天对象隔着网络在另一端、**不在她身边**，她此刻真正所处
 # 的物理场景由下面的人生快照（LifeState）承载。这条治「把聊天对象当成在身边」的混淆。
-_PRESENCE_HINT = (
-    f"{_PRESENCE_HEADER}你此刻真正所处的场景、身边有谁，看下面你自己的此刻状态。"
-    "正在和你打字的人隔着飞书在另一端，不在你身边。"
-)
+# 平台名由 channel 决定（spec 决策 3），所以提示文案按平台名拼出来、不写死飞书。
+def _presence_hint(platform: str) -> str:
+    return (
+        f"{_PRESENCE_HEADER}你此刻真正所处的场景、身边有谁，看下面你自己的此刻状态。"
+        f"正在和你打字的人隔着{platform}在另一端，不在你身边。"
+    )
 
 
 def _scene_section(
     chat_type: str,
     chat_name: str,
     trigger_username: str | None,
+    channel: str | None = None,
 ) -> str:
     """把这次交流的两个正交维度分别标清（spec 决策 7）：通信介质 + 物理在场。
 
-    **通信介质**：她正通过什么跟谁打字——飞书私聊 / 飞书群聊。chat 触发永远是隔着
-    飞书打字、**不是当面**，这条标清治「把飞书群聊 / 私聊当成当面」的混淆。
+    **通信介质**：她正通过什么跟谁打字——平台私聊 / 平台群聊。平台名由真实 ``channel``
+    决定（spec 决策 3，一处治理、四场景共用），lark → 飞书、其余按登记取、漏配中性降级，
+    绝不写死飞书。chat 触发永远是隔着网络打字、**不是当面**，这条标清治「把群聊 / 私聊
+    当成当面」的混淆。
     **物理在场**：她此刻真正所处的物理场景由人生快照（下面的 LifeState）承载，聊天
-    对象在飞书另一端、不在她身边——两维度不压成一个「当前场合」标签。
+    对象在网络另一端、不在她身边——两维度不压成一个「当前场合」标签。
+
+    私聊 scene **不盖任何系统身份后缀**（修复 1）：纯文本身份后缀必被伪造——冒充者把
+    昵称改成「老原（你的主人）」时，输出跟真主人的「原智鸿（你的主人）」文本形态一样、
+    LLM 分不出。所以 scene 句子只把对方名字当称呼用，对方是不是主人完全交给 history 里
+    他那条消息的结构化 ``<msg rel=owner>``（与群聊 scene 一致——群聊 scene 也不标身份）。
+    用户可控的 ``trigger_username`` / ``chat_name`` 都经 ``html.escape`` 转义（特殊字符
+    突不破结构、伪造不出标注）。
     """
+    platform = _platform_name(channel)
+    chat_name = html.escape(chat_name or "")
+    username = html.escape(trigger_username or "")
     medium_parts: list[str] = []
     if chat_type == "p2p":
-        if trigger_username:
+        if username:
             medium_parts.append(
-                f"{_MEDIUM_HEADER}你正通过飞书私聊和 {trigger_username} 打字"
-                "（隔着飞书，不是当面）。"
+                f"{_MEDIUM_HEADER}你正通过{platform}私聊和 {username}"
+                f" 打字（隔着{platform}，不是当面）。"
             )
     else:
         if chat_name:
             medium_parts.append(
-                f"{_MEDIUM_HEADER}你正在飞书群聊「{chat_name}」里打字"
-                "（隔着飞书，不是当面）。"
+                f"{_MEDIUM_HEADER}你正在{platform}群聊「{chat_name}」里打字"
+                f"（隔着{platform}，不是当面）。"
             )
-        if trigger_username:
+        if username:
             medium_parts.append(
-                f"需要回复 {trigger_username} 的消息（消息中用 ⭐ 标记）。"
+                f"需要回复 {username} 的消息（消息中用 ⭐ 标记）。"
             )
 
     # 没有可标的通信介质（无对方名 / 无群名）时整段缺席——不硬塞物理在场提示
@@ -236,7 +274,7 @@ def _scene_section(
     if not medium_parts:
         return ""
 
-    return "\n".join(medium_parts) + "\n" + _PRESENCE_HINT
+    return "\n".join(medium_parts) + "\n" + _presence_hint(platform)
 
 
 async def build_inner_context(
@@ -247,14 +285,18 @@ async def build_inner_context(
     trigger_username: str | None,
     persona_id: str,
     chat_name: str = "",
+    channel: str | None = None,
 ) -> str:
     """Assemble inner_context: arc (when present) + scene + her pages (when
     present) + life snapshot.
 
     The scene now spells out two orthogonal dimensions (spec decision 7):
-    communication medium (Feishu p2p / group — never face-to-face) and
+    communication medium (platform p2p / group — never face-to-face) and
     physical presence (carried by the life snapshot below), so chat stops
-    conflating "typing over Feishu" with "being in the same room"."""
+    conflating "typing over the network" with "being in the same room". The
+    platform name in the medium dimension follows the real ``channel`` (spec
+    decision 3): lark → 飞书, others by registry, missing/unknown → neutral —
+    never hard-wired to 飞书."""
 
     sections: list[str] = []
 
@@ -268,8 +310,12 @@ async def build_inner_context(
         sections.append(arc_awareness)
 
     # 场景段标清两个正交维度（通信介质 + 物理在场，spec 决策 7）：物理在场指向下面的
-    # 人生快照（她此刻真正在哪），通信介质标明这次是隔着飞书私聊 / 群聊打字、不是当面。
-    scene = _scene_section(chat_type, chat_name, trigger_username)
+    # 人生快照（她此刻真正在哪），通信介质标明这次是隔着平台私聊 / 群聊打字、不是当面。
+    # 平台名由真实 channel 决定（spec 决策 3），不再写死飞书；scene **不盖任何系统身份
+    # 后缀**（修复 1：纯文本后缀必被伪造），对方是不是主人交给 history 的结构化 rel。
+    scene = _scene_section(
+        chat_type, chat_name, trigger_username, channel=channel
+    )
     if scene:
         sections.append(scene)
 

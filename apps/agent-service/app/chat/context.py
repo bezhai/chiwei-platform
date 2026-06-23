@@ -51,6 +51,7 @@ async def build_human_chat_context(
     *,
     persona_id: str,
     bot_name: str = "",
+    channel: str | None = None,
     limit: int = 10,
 ) -> ChatTurnContext | None:
     """Build a render-ready context for a real-person chat turn.
@@ -105,13 +106,15 @@ async def build_human_chat_context(
     trigger_user_id = l1_results[-1].user_id or ""
     chat_name = l1_results[-1].chat_name or ""
 
-    # Build messages
+    # Build messages. 群 / 私聊历史每条都结构化署名（rel 按 common_user_id 盖章，
+    # 命中主人 → owner），所以两个 builder 都是 async。p2p 还要 current_persona_id
+    # 判定哪条是赤尾自己说的（is_self），与身份 rel 无关。
     if chat_type == "group":
-        messages = build_group_messages(
-            l1_results, message_id, image_key_to_url, image_key_to_filename
+        messages = await build_group_messages(
+            l1_results, message_id, image_key_to_url, image_key_to_filename,
         )
     else:
-        messages = build_p2p_messages(
+        messages = await build_p2p_messages(
             l1_results,
             image_key_to_url,
             image_key_to_filename,
@@ -142,6 +145,7 @@ async def build_human_chat_context(
             trigger_username=trigger_username,
             chat_name=chat_name,
             persona_id=persona_id,
+            channel=channel,
         )
     except Exception as e:
         logger.error("Failed to build inner context: %s", e)

@@ -259,6 +259,7 @@ async def chat_node(req: ChatRequest) -> None:
             req.message_id,
             persona_id=req.persona_id or "",
             bot_name=req.bot_name or "",
+            channel=req.channel,
         )
         if turn_ctx is None:
             stream = _yield_not_found()
