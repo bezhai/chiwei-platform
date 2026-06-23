@@ -1062,6 +1062,11 @@ async def test_complete_native_web_search_appends_google_search_tool(mock_sdk):
     assert func_tools[0].function_declarations[0].name == "draw"
     # native google search co-hosted
     assert len(search_tools) == 1
+    # Gemini 3 requires include_server_side_tool_invocations to combine a built-in
+    # tool (google search) with function declarations — without it the API 400s
+    # ("Please enable tool_config.include_server_side_tool_invocations ...").
+    assert cfg.tool_config is not None
+    assert cfg.tool_config.include_server_side_tool_invocations is True
 
 
 async def test_stream_native_web_search_appends_google_search_tool(mock_sdk):
@@ -1098,6 +1103,8 @@ async def test_complete_without_native_web_search_has_no_google_search_tool(mock
     func_tools, search_tools = _split_tools(cfg)
     assert len(func_tools) == 1
     assert search_tools == []
+    # no native search → no server-side-tool toggle (non-native path unchanged)
+    assert cfg.tool_config is None
 
 
 async def test_complete_native_web_search_false_has_no_google_search_tool(mock_sdk):

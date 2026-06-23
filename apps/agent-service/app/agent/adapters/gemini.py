@@ -312,6 +312,14 @@ class GeminiAdapter(ModelClient):
             )
         if native_web_search:
             tool_list.append(types.Tool(google_search=types.GoogleSearch()))
+            # Gemini 3 rejects a built-in tool (google search) combined with
+            # function declarations unless server-side tool invocations are
+            # explicitly enabled, 400-ing otherwise ("Please enable
+            # tool_config.include_server_side_tool_invocations ..."). Set it only
+            # on the native-search path so every other request is unchanged.
+            cfg["tool_config"] = types.ToolConfig(
+                include_server_side_tool_invocations=True
+            )
         if tool_list:
             cfg["tools"] = tool_list
         if response_mime_type is not None:
