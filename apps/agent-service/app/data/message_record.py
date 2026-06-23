@@ -30,11 +30,13 @@ class CommonMessageRecord:
 class LifeChatMessage:
     """life 醒来读对话时的一条消息 —— 已经判明「谁说的」的可读形态。
 
+    ``message_id`` = ``common_message_id``，供 life 纯聊天唤醒时派生本轮幂等种子；
     ``is_self`` = 这条是不是赤尾自己说的（role=assistant 且发言 persona == 当前
     persona）；``speaker_display_name`` 是发言者展示名（真人私聊用昵称兜底、不暴露
     raw user_id）；``cst_time`` 是 CST 显示串（``HH:MM CST``），不是裸毫秒。
     """
 
+    message_id: str
     speaker_display_name: str
     is_self: bool
     text: str

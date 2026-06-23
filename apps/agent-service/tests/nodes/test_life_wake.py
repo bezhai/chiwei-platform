@@ -10,7 +10,7 @@ LifeDecision 表。
 
   * **信息差命门**：一轮的输入 = 她自己的 LifeState + 她自己信箱未读 event，
     绝不含 WorldState 全局快照。本模块绝不 import / 读 world 快照。
-  * **空信箱 early-return**：信箱没未读就不烧模型、不建工具、不写、不标已读。
+  * **空信箱 early-return**：信箱没未读且没有增量聊天才不烧模型、不建工具、不写、不标已读。
   * **single_flight 锁**：同 (lane,persona) 两轮并发，第二轮拿不到锁 →
     DebounceReschedule（不覆盖、不静默吞 event）。
   * **收口标已读只标本轮**：传给 mark_events_read 的就是本轮实际读到的那批
@@ -27,6 +27,7 @@ import fakeredis.aioredis
 import pytest
 
 import app.nodes.life_wake as lw
+from app.data.message_record import LifeChatConversation, LifeChatMessage
 from app.domain.life_state import LifeState
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
@@ -78,6 +79,34 @@ def _envelope(
         chat_id=chat_id,
         chat_scope=chat_scope,
         chat_name=chat_name,
+    )
+
+
+def _life_chat_message(
+    message_id: str = "m-chat-1",
+    *,
+    speaker: str = "贝壳",
+    is_self: bool = False,
+    text: str = "5 分钟后提醒我吃饭",
+    cst_time: str = "12:30 CST",
+) -> LifeChatMessage:
+    return LifeChatMessage(
+        message_id=message_id,
+        speaker_display_name=speaker,
+        is_self=is_self,
+        text=text,
+        cst_time=cst_time,
+    )
+
+
+def _life_chat_conversation(
+    *, chat_id: str = "chat-1", messages: list[LifeChatMessage] | None = None
+) -> LifeChatConversation:
+    return LifeChatConversation(
+        chat_id=chat_id,
+        scope="direct",
+        display_name=None,
+        messages=messages or [_life_chat_message()],
     )
 
 
@@ -164,6 +193,9 @@ def patched(monkeypatch):
         "notebook": [],  # list_notebook_entries 返回（[]=空本子）
         "notebook_calls": [],  # list_notebook_entries 收到的 kwargs
         "notebook_raises": None,  # 非 None → list_notebook_entries 抛它（读失败）
+        "recent_chats": [],  # find_persona_related_chats_recent 返回
+        "recent_chat_calls": [],  # find_persona_related_chats_recent 收到的 kwargs
+        "recent_chat_raises": None,  # 非 None → recent chat 查询抛它（读失败）
     }
 
     async def fake_read_world_arc(*, lane):
@@ -218,9 +250,25 @@ def patched(monkeypatch):
             raise state["notebook_raises"]
         return list(state["notebook"])
 
+    async def fake_find_recent_chats(
+        *, persona_id, since_ms, max_conversations, per_chat_limit
+    ):
+        state["recent_chat_calls"].append(
+            {
+                "persona_id": persona_id,
+                "since_ms": since_ms,
+                "max_conversations": max_conversations,
+                "per_chat_limit": per_chat_limit,
+            }
+        )
+        if state["recent_chat_raises"] is not None:
+            raise state["recent_chat_raises"]
+        return list(state["recent_chats"])
+
     monkeypatch.setattr(lw, "load_session", fake_load_session)
     monkeypatch.setattr(lw, "read_day_page_before", fake_read_day_page_before)
     monkeypatch.setattr(lw, "list_notebook_entries", fake_list_notebook_entries)
+    monkeypatch.setattr(lw, "find_persona_related_chats_recent", fake_find_recent_chats)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
     monkeypatch.setattr(lt, "perform_act", fake_act)
@@ -1249,7 +1297,7 @@ async def test_no_act_when_model_doesnt_call_it(patched, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_unread_is_noop(patched, monkeypatch):
-    """信箱没未读（空唤醒）：不烧模型（不建 Agent）、不写、不标已读。"""
+    """信箱没未读且没有增量聊天：不烧模型（不建 Agent）、不写、不标已读。"""
     patched["unread"] = []
     _FakeAgent.install(monkeypatch, script=_script_update())
 
@@ -1258,6 +1306,89 @@ async def test_no_unread_is_noop(patched, monkeypatch):
     assert _FakeAgent.instances == []  # Agent 从没被构造（模型没被烧）
     assert patched["saved"] == []
     assert patched["marked"] == []
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_query_uses_snapshot_observed_at_watermark(
+    patched, monkeypatch
+):
+    """最近聊天按上一轮 LifeState.observed_at 做增量水位，避免重复看旧聊天。"""
+    observed_at = "2026-06-03T11:00:00+08:00"
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在客厅",
+        response_mood="平静",
+        activity_type="idle",
+        observed_at=observed_at,
+    )
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    expected = int(lw.cst_time.parse(observed_at).timestamp() * 1000)
+    assert patched["recent_chat_calls"][0]["since_ms"] == expected
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_query_cold_start_falls_back_to_six_hours(
+    patched, monkeypatch
+):
+    """没有 LifeState 水位时，最近聊天只冷启回退到 6 小时窗口。"""
+    from datetime import datetime
+
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    patched["snapshot"] = None
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    expected = int(now.timestamp() * 1000) - lw._RECENT_CHAT_SINCE_MS
+    assert patched["recent_chat_calls"][0]["since_ms"] == expected
+
+
+@pytest.mark.asyncio
+async def test_empty_inbox_with_recent_chat_still_runs(patched, monkeypatch):
+    """纯聊天唤醒没有 EventEnvelope；只要有增量聊天，也要跑 life 工具循环。"""
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在客厅",
+        response_mood="平静",
+        activity_type="idle",
+        observed_at="2026-06-03T11:00:00+08:00",
+    )
+    patched["unread"] = []
+    patched["recent_chats"] = [
+        _life_chat_conversation(
+            messages=[
+                _life_chat_message(
+                    "m-chat-user-1",
+                    speaker="贝壳",
+                    is_self=False,
+                    text="5 分钟后提醒我吃饭",
+                ),
+                _life_chat_message(
+                    "m-chat-bot-1",
+                    speaker="akao",
+                    is_self=True,
+                    text="我记着",
+                ),
+            ]
+        )
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "最近聊过的对话" in stimulus
+    assert "5 分钟后提醒我吃饭" in stimulus
+    assert "我：我记着" in stimulus
+    assert patched["marked"] == [[]], "纯聊天轮没有 event_id，标已读应为空操作"
 
 
 @pytest.mark.asyncio
@@ -1824,18 +1955,18 @@ async def test_event_wake_always_passes_no_gate(patched, monkeypatch):
     assert _FakeAgent.instances, "EventArrived 外部刺激必须永远放行（不走到点 gate）"
 
 
-# --- 空信箱语义：event 空信箱仍 early return（没新动静不用跑） ---
+# --- 空信箱语义：event 空信箱且无增量聊天仍 early return（没新动静不用跑） ---
 
 
 @pytest.mark.asyncio
 async def test_event_wake_empty_inbox_still_early_returns(patched, monkeypatch):
-    """event 唤醒空信箱仍 early return（没新动静不用跑）—— 现有行为不退化。"""
+    """event 唤醒空信箱且无增量聊天仍 early return（没新动静不用跑）。"""
     patched["unread"] = []
     _FakeAgent.install(monkeypatch, script=_script_update())
 
     await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
 
-    assert _FakeAgent.instances == [], "event 唤醒空信箱仍不烧模型（early return 不变）"
+    assert _FakeAgent.instances == [], "空信箱且无增量聊天不烧模型（early return 不变）"
     assert patched["saved"] == []
     assert patched["marked"] == []
 
@@ -1935,6 +2066,18 @@ async def test_stimulus_carries_round_marker(patched, monkeypatch):
     assert lw._round_marker(round_id) in blob, (
         "stimulus 必须带本轮 round marker（turn 幂等查重靠它）"
     )
+
+
+def test_chat_only_round_id_depends_on_recent_chat_message_ids():
+    """纯聊天唤醒没有 event_id 时，round_id 必须随聊天消息 id 变化。"""
+    round_1 = lw._derive_life_round_id(
+        lane="coe-t3", persona_id="akao", read_ids=[], recent_chat_ids=["m-chat-1"]
+    )
+    round_2 = lw._derive_life_round_id(
+        lane="coe-t3", persona_id="akao", read_ids=[], recent_chat_ids=["m-chat-2"]
+    )
+
+    assert round_1 != round_2
 
 
 @pytest.mark.asyncio

@@ -347,20 +347,22 @@ async def chat_node(req: ChatRequest) -> None:
         },
     )
 
-    await _wake_life_for_group_chat(req)
+    await _wake_life_after_chat(req)
 
 
-async def _wake_life_for_group_chat(req: ChatRequest) -> None:
-    """群聊 chat 完成后只做纯唤醒，不再把对话内容写进 life 信箱。
+async def _wake_life_after_chat(req: ChatRequest) -> None:
+    """chat 完成后只做纯唤醒，不再把对话内容写进 life 信箱。
 
     对话内容是持续状态，life 醒来时会实时从 ``common_message`` 拉「最近聊过的对话」。
-    这里的副作用只解决一件事：白名单群里刚发生过一次 chat，敲一下对应 persona，让她
-    有机会立刻读取实时对话上下文。真人私聊不唤醒；白名单外群不唤醒。唤醒失败只记
+    这里的副作用只解决一件事：刚发生过一次 chat，敲一下对应 persona，让她有机会立刻
+    读取实时对话上下文。真人私聊直接唤醒；群聊必须在白名单内才唤醒。唤醒失败只记
     warning，不影响已经 emit 出去的即时回复。
     """
-    if req.is_p2p or not req.persona_id:
+    if not req.persona_id:
         return
-    if not await should_feed_chat_to_life(chat_id=req.chat_id, is_p2p=False):
+    if not req.is_p2p and not await should_feed_chat_to_life(
+        chat_id=req.chat_id, is_p2p=False
+    ):
         logger.info(
             "skip group chat life wake: chat %s not in life_feed_chat_whitelist "
             "(persona=%s)",
@@ -374,9 +376,10 @@ async def _wake_life_for_group_chat(req: ChatRequest) -> None:
         await emit(EventArrived(lane=lane, persona_id=req.persona_id))
     except Exception as e:  # noqa: BLE001 — chat 回复已发出，唤醒副作用失败不拖垮回复
         logger.warning(
-            "group chat life wake failed: lane=%s persona=%s chat=%s: %s",
+            "chat life wake failed: lane=%s persona=%s chat=%s is_p2p=%s: %s",
             lane,
             req.persona_id,
             req.chat_id,
+            req.is_p2p,
             e,
         )

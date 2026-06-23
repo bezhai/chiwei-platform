@@ -11,9 +11,15 @@ from app.data.message_record import LifeChatConversation, LifeChatMessage
 from app.nodes.life_wake import _format_recent_chats
 
 
-def _msg(speaker: str, is_self: bool, text: str, t: str) -> LifeChatMessage:
+def _msg(
+    speaker: str, is_self: bool, text: str, t: str, *, mid: str | None = None
+) -> LifeChatMessage:
     return LifeChatMessage(
-        speaker_display_name=speaker, is_self=is_self, text=text, cst_time=t
+        message_id=mid or f"m-{abs(hash((speaker, is_self, text, t)))}",
+        speaker_display_name=speaker,
+        is_self=is_self,
+        text=text,
+        cst_time=t,
     )
 
 

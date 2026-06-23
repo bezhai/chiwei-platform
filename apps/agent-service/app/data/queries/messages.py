@@ -625,6 +625,7 @@ def _life_chat_message(
     else:
         speaker = record.username or _UNKNOWN_SPEAKER
     return LifeChatMessage(
+        message_id=record.message_id,
         speaker_display_name=speaker,
         is_self=is_self,
         text=json.loads(record.content).get("text", "") if record.content else "",

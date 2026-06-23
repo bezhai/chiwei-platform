@@ -1,8 +1,8 @@
 """chat 完成后的 life 唤醒契约。
 
 chat 内容不再回灌进 EventEnvelope 信箱。life 醒来时会实时从 common_message 拉
-「最近聊过的对话」。chat_node 的事后副作用只剩：白名单群聊完成后纯 emit
-EventArrived 叫醒对应 persona；私聊不唤醒；白名单外群不唤醒。
+「最近聊过的对话」。chat_node 的事后副作用只剩：私聊完成后纯 emit EventArrived
+叫醒对应 persona；群聊必须过白名单；白名单外群不唤醒。
 """
 
 from __future__ import annotations
@@ -81,8 +81,8 @@ def _request(*, is_p2p: bool, chat_id="chat-1") -> ChatRequest:
 
 
 @pytest.mark.asyncio
-async def test_p2p_chat_does_not_wake_life(monkeypatch):
-    """真人私聊已经即时回复，不再额外叫醒 life。"""
+async def test_p2p_chat_wakes_life_without_whitelist(monkeypatch):
+    """真人私聊完成后纯唤醒 life，且不查群白名单。"""
     from app.nodes import chat_node as cn
 
     _happy_path_mocks(cn, monkeypatch)
@@ -101,7 +101,9 @@ async def test_p2p_chat_does_not_wake_life(monkeypatch):
     await cn.chat_node(_request(is_p2p=True))
 
     assert any(isinstance(e, ChatResponseSegment) for e in emitted)
-    assert not any(isinstance(e, EventArrived) for e in emitted)
+    knocks = [e for e in emitted if isinstance(e, EventArrived)]
+    assert len(knocks) == 1
+    assert knocks[0].persona_id == "akao"
 
 
 @pytest.mark.asyncio

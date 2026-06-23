@@ -19,7 +19,7 @@
     本模块**绝不 import / 读 WorldState 全局快照**——全局真相一旦漏进她上下文，
     她就全知了，信息差崩塌。结构上保证：这里没有任何读 world 快照的代码。
 
-  * **空信箱 early-return**：信箱没未读就不烧模型、不建工具、不写、不标已读。
+  * **空信箱 early-return**：信箱没未读且没有增量聊天才不烧模型、不建工具、不写、不标已读。
 
   * **single_flight 锁**：一轮思考几十秒 > debounce 窗口，期间来新 event 会 fire
     第二轮并发；开头按 ``(lane, persona)`` 拿单飞锁，拿不到就 raise
@@ -37,9 +37,9 @@
     判断。本模块不用阈值 / 计数器 / 随机池 / if 分支替她决策——只做 IO 编排 +
     机制安全阀（单飞锁、空信箱、inbox 上限）。
 
-act_id 从 ``(lane, persona, 本轮读到的 event_ids)`` 派生（durable 边重投 / 重试
-同一批唤醒产同一个 act_id，world 按 act_id 幂等消化），在本节点算好后
-capture 进 ``build_life_tools`` 的闭包，不让模型生成。
+act_id 从 ``(lane, persona, 本轮读到的 event_ids + chat message ids)`` 派生
+（durable 边重投 / 重试同一批唤醒产同一个 act_id，world 按 act_id 幂等消化），在本
+节点算好后 capture 进 ``build_life_tools`` 的闭包，不让模型生成。
 
 wiring 见 ``app/wiring/life_dataflow.py``，本模块只提供 ``@node`` 函数 + 依赖。
 """
@@ -66,7 +66,7 @@ from app.data.queries.mailbox import (
 )
 from app.data.queries.messages import find_persona_related_chats_recent
 from app.domain.arc_awareness import render_arc_awareness
-from app.domain.life_state import find_life_state
+from app.domain.life_state import LifeState, find_life_state
 from app.domain.notebook import (
     ACTIVE_STATUSES,
     NotebookEntry,
@@ -192,19 +192,59 @@ def _derive_life_round_id(
     lane: str,
     persona_id: str,
     read_ids: list[str],
+    recent_chat_ids: list[str] | None = None,
 ) -> str:
-    """本轮确定性标识，按本轮读到的 event_ids 稳定派生（act_id + turn 幂等靠它）。
+    """本轮确定性标识，按本轮读到的 event_ids / chat message ids 稳定派生。
 
-    act_id 从 round_id 派生；durable 重投 / 整轮重试要落同一 round_id 才能靠
-    (lane, act_id) 自然键幂等去重，所以 round_id 不能从 ``now`` 派生（重投取新时刻 →
-    新 act_id → 去重失效）。world-driven wake 下角色只有 EventArrived 一条醒来入口，
-    用本轮读到的 event_ids（排序）派生 —— 同一批唤醒重投得同一 round_id → 同 act_id
-    （重放幂等不退化），下次同 round_id 重投从 transcript 查到 marker 跳过（turn 幂等）。
+    round_id 与 act_id 都不能从 ``now`` 派生（重投取新时刻 → 幂等失效）。event wake
+    用本轮读到的 event_ids（排序）派生；纯聊天唤醒可能没有 event_ids，必须把本轮读到
+    的 common_message_id 也纳入种子，否则所有空信箱聊天唤醒都会撞成同一个 round_id，
+    后续新聊天会被旧 marker 错挡。
 
     Task 3 的 life round marker（turn 幂等）复用这个 round_id。
     """
-    seed = f"{lane}\x1fevent\x1f" + ",".join(sorted(read_ids))
+    chat_part = ",".join(sorted(recent_chat_ids or []))
+    if chat_part:
+        seed = (
+            f"{lane}\x1f{persona_id}\x1fevent\x1f"
+            f"{','.join(sorted(read_ids))}\x1fchat\x1f{chat_part}"
+        )
+    else:
+        # 保持 event-only 历史种子不变，避免部署期间同一批未读 event 的 marker 失配。
+        seed = f"{lane}\x1fevent\x1f" + ",".join(sorted(read_ids))
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
+
+
+def _recent_chat_since_ms(*, now: datetime, snapshot: LifeState | None) -> int:
+    """最近聊天增量水位：优先从上一轮 observed_at 往后看，冷启退回固定窗口。"""
+    if snapshot is not None:
+        observed = cst_time.parse(snapshot.observed_at)
+        if observed is not None:
+            return int(observed.timestamp() * 1000)
+    return int(now.timestamp() * 1000) - _RECENT_CHAT_SINCE_MS
+
+
+def _recent_chat_message_ids(conversations: list[LifeChatConversation]) -> list[str]:
+    """把本轮实际塞进 stimulus 的聊天消息 id 摊平，供 round/act 幂等种子使用。"""
+    return [
+        msg.message_id
+        for conversation in conversations
+        for msg in conversation.messages
+    ]
+
+
+def _derive_life_act_seed(
+    *,
+    lane: str,
+    persona_id: str,
+    read_ids: list[str],
+    recent_chat_ids: list[str],
+) -> str:
+    """act_id base seed；event-only 场景保持旧格式，聊天轮额外纳入消息 id。"""
+    seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
+    if recent_chat_ids:
+        seed += ":chat:" + ",".join(sorted(recent_chat_ids))
+    return seed
 
 
 # 印在 stimulus 里的本轮标记前缀（turn 幂等查重靠它，对称 world 的 ``[world-round:``）：
@@ -456,7 +496,7 @@ def _split_perception(
 
 
 # 「最近聊过的对话」段的拉取上限（条目数量控制规模、不字符截断——见 no_context_truncation）：
-#   * since 窗口：往回看 6 小时（醒来时她记得的「最近一段」聊天，再久就归沉淀 / 回顾）。
+#   * since 窗口：优先从上一轮 LifeState.observed_at 往后读；冷启 / 脏时间才回退 6 小时。
 #   * 最多 5 个会话：积压再多也只铺最近活跃的几个，挡住一次塞几十个会话。
 #   * 每会话最多 10 条：每个会话只铺最近一段、不把整卷历史拉进来。
 # 这三个都是机制层的规模闸（同 inbox 上限那类），不替她判断哪些重要（赤尾宪法）。
@@ -504,7 +544,7 @@ async def life_wake_node(arrived: EventArrived) -> None:
     """某姐妹被信箱敲门攒批唤醒，跑一轮 life 工具循环。persona 由 ``arrived`` 决定。
 
     这是**外部刺激**入口（信箱来新 event / 补敲未读）：永远跑、不走到点 gate（外部
-    刺激能立刻打断长睡）。空信箱 early return（没新动静不用跑）。
+    刺激能立刻打断长睡）。空信箱 + 无增量聊天才 early return（没新动静不用跑）。
 
     **单飞命门**：一轮 life 跑几十秒 > debounce 窗口（5s），期间来新 event 会 fire
     第二轮并发。两轮并发会互相覆盖 LifeState、把 event 静默标已读丢掉。所以开头按
@@ -619,8 +659,8 @@ async def _run_life_round(
     没有 self LifeWakeTick 执行腿、没有 next_wake_at 意愿写入、没有 fan-out 心跳）。
     存活由世界持续的客观事件流兜底，主动计划走日程（note + 到点提醒）。
 
-    **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）没新动静，不烧
-    模型、不写、不标已读。
+    **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）且没有增量聊天
+    时，没新动静，不烧模型、不写、不标已读。
 
     **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，就
     ``raise DebounceReschedule(wake)`` 让 debounce handler CAS 重排这批 event 推迟到 cd
@@ -649,10 +689,6 @@ async def _run_life_round(
     snapshot = await find_life_state(lane=lane, persona_id=persona_id)
 
     unread = await list_unread_events(lane=lane, persona_id=persona_id)
-    if not unread:
-        # event 唤醒空信箱（去重命中后的残留信号等）：没新动静，不烧模型、不写、不标。
-        logger.info("[life_wake] %s/%s event wake empty inbox, skip", lane, persona_id)
-        return
 
     # 安全阀：一轮 inbox 上限。积压超限只读这批 + 只标这批已读，剩下留未读、下轮
     # 再处理（不静默吞）。触顶要 log（不静默截断）。
@@ -663,6 +699,37 @@ async def _run_life_round(
             lane, persona_id, len(unread), _LIFE_INBOX_MAX, _LIFE_INBOX_MAX,
         )
         unread = unread[:_LIFE_INBOX_MAX]
+
+    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：用上一轮 LifeState.observed_at
+    # 做增量水位，只看上一轮 life 之后的新聊天；冷启 / 脏时间才退回 6 小时窗口。这个读取
+    # 必须发生在空信箱判断之前——chat 完后的纯唤醒没有 EventEnvelope，只靠这段增量聊天
+    # 决定是否需要跑一轮 life。
+    recent_chat_since_ms = _recent_chat_since_ms(now=now, snapshot=snapshot)
+    try:
+        recent_chats = await find_persona_related_chats_recent(
+            persona_id=persona_id,
+            since_ms=recent_chat_since_ms,
+            max_conversations=_RECENT_CHAT_MAX_CONVERSATIONS,
+            per_chat_limit=_RECENT_CHAT_PER_CHAT_LIMIT,
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to read recent chats, section absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        recent_chats = []
+
+    if not unread and not recent_chats:
+        # event 唤醒空信箱（去重命中后的残留信号等）且没有增量聊天：没新动静，不烧模型、
+        # 不写、不标。
+        logger.info(
+            "[life_wake] %s/%s event wake empty inbox and no recent chat, skip",
+            lane,
+            persona_id,
+        )
+        return
 
     # snapshot / now 已在 gate 段读过，这里直接复用（同一锁内、无并发改）。
     pc = await load_persona(persona_id)
@@ -722,20 +789,27 @@ async def _run_life_round(
     }
 
     read_ids = [ev.event_id for ev in unread]
+    recent_chat_ids = _recent_chat_message_ids(recent_chats)
 
-    # 本轮确定性标识，按本轮读到的 event_ids（排序）稳定派生（Task 3 的 turn 幂等 round
-    # marker 复用它）：同一批唤醒重投得同一 round_id（重放幂等）。world-driven wake 下
-    # 角色只有 EventArrived 一条醒来入口，所以只按 event_ids 派生。
+    # 本轮确定性标识，按本轮读到的 event_ids + recent chat message ids（排序）稳定派生
+    # （Task 3 的 turn 幂等 round marker 复用它）：同一批唤醒重投得同一 round_id
+    # （重放幂等）；纯聊天唤醒没有 event_ids，所以 recent_chat_ids 也要入种子。
     round_id = _derive_life_round_id(
         lane=lane,
         persona_id=persona_id,
         read_ids=read_ids,
+        recent_chat_ids=recent_chat_ids,
     )
 
-    # act_id 派生：按本轮 event_ids 种子 (lane:persona:sorted(event_ids))——durable 边
-    # 重投 / 重试同一批唤醒产同一 act_id，world 按 act_id 幂等消化（重放幂等绝不退化）。
-    # capture 进工具闭包，不让模型生成。
-    act_seed = f"{lane}:{persona_id}:" + ",".join(sorted(read_ids))
+    # act_id 派生：event-only 保持旧种子 (lane:persona:sorted(event_ids))；纯聊天轮额外
+    # 纳入 recent_chat_ids，避免多次空信箱聊天轮共用同一个 act_id。capture 进工具闭包，
+    # 不让模型生成。
+    act_seed = _derive_life_act_seed(
+        lane=lane,
+        persona_id=persona_id,
+        read_ids=read_ids,
+        recent_chat_ids=recent_chat_ids,
+    )
     act_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, act_seed))
 
     # round-scoped 待挂日程提醒容器（备忘录 & 日程 第三块）：note / edit_note 每带一个
@@ -850,28 +924,9 @@ async def _run_life_round(
             f"{render_notebook(notebook_entries, now=observed_at)}"
         )
 
-    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：醒来时往回看 6 小时内她相关
-    # 会话（真人私聊 + 白名单内的群，由 find_persona_related_chats_recent 按「她发过言」
-    # 口径选并过白名单）的最近一段消息，渲成「最近聊过的对话」段塞进她的输入——让她带着
-    # 「这一阵跟谁聊过什么」过这一刻。规模由三个条目上限（since 窗口 / 会话数 / 每会话条
-    # 数）在拉取侧控住、不字符截断（no_context_truncation）。位置在本子之后、时刻行之前
-    # （它跟着她的聊天活跃度变，不进稳定前缀）。读失败绝不杀整个 life 轮（照 notebook /
-    # day_page 的姿势 fail-soft）：失败只 log warning、当作没有，本轮照常往下跑。
-    try:
-        recent_chats = await find_persona_related_chats_recent(
-            persona_id=persona_id,
-            since_ms=int(now.timestamp() * 1000) - _RECENT_CHAT_SINCE_MS,
-            max_conversations=_RECENT_CHAT_MAX_CONVERSATIONS,
-            per_chat_limit=_RECENT_CHAT_PER_CHAT_LIMIT,
-        )
-    except Exception as e:
-        logger.warning(
-            "[life_wake] %s/%s failed to read recent chats, section absent: %s",
-            lane,
-            persona_id,
-            e,
-        )
-        recent_chats = []
+    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：前面已按 observed_at 增量水位
+    # 读好，这里只负责渲染进 stimulus。位置在本子之后、时刻行之前（它跟着她的聊天活跃度
+    # 变，不进稳定前缀）。
     if recent_chats:
         parts.append(_format_recent_chats(recent_chats))
 
@@ -976,8 +1031,8 @@ async def _run_life_round(
     )
 
     # 收口：标已读，只标本轮实际读到的那批 event_id（绝不按 persona 全标）。即使
-    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。空信箱已在前面 early
-    # return，走到这里 read_ids 必非空。
+    # 一次 update 都没调也照常标已读——她看了但没改状态，正常。纯聊天唤醒时 read_ids
+    # 允许为空，mark_events_read([]) 是空操作。
     await mark_events_read(lane=lane, persona_id=persona_id, event_ids=read_ids)
 
     # transcript 沉淀折叠（沉淀 Task 2，spec 决策 4/5）：本轮写回已在 Agent.run 里
