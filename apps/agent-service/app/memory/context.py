@@ -266,7 +266,7 @@ def _scene_section(
             )
         if username:
             medium_parts.append(
-                f"需要回复 {username} 的消息（消息中用 ⭐ 标记）。"
+                f"需要回复 {username} 的消息。"
             )
 
     # 没有可标的通信介质（无对方名 / 无群名）时整段缺席——不硬塞物理在场提示

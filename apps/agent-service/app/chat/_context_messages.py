@@ -39,21 +39,22 @@ def format_message_tag(
     rel: str | None,
     time_str: str,
     body: str,
-    marker: str = "",
+    reply_target: bool = False,
 ) -> str:
-    """把一条消息渲染成结构化标签：``<msg from=.. rel=.. time=..>正文</msg>``。
+    """把一条消息渲染成结构化标签：``<msg from=.. rel=.. reply_target=.. time=..>正文</msg>``。
 
     ``rel`` 是系统按 common_user_id 算出的关系标签（owner / None），是唯一身份权威——
     None 时整个 ``rel`` 属性缺席（spec fail-closed：拿不到 / 未登记 → 无身份，绝不回退
     显示名当身份）。``from`` 装显示名、标签体装正文，两者都已转义（控制属性只装系统按
-    id 算出的值，用户字串只待在被转义的属性值 / 标签体里、突不破结构）。``marker``
-    （如群聊触发的 ⭐）作为标识属性透传。
+    id 算出的值，用户字串只待在被转义的属性值 / 标签体里、突不破结构）。``reply_target``
+    标群聊里需要赤尾回复的那条触发消息，渲染成系统固定值 ``reply_target="true"``——
+    结构化标识、不带 emoji、不经用户输入。
     """
     attrs = [f'from="{_esc(speaker)}"']
     if rel:
         attrs.append(f'rel="{_esc(rel)}"')
-    if marker:
-        attrs.append(f'marker="{_esc(marker)}"')
+    if reply_target:
+        attrs.append('reply_target="true"')
     if time_str:
         attrs.append(f'time="{_esc(time_str)}"')
     return f"<msg {' '.join(attrs)}>{_esc(body)}</msg>"
@@ -140,10 +141,10 @@ async def build_group_messages(
         speaker = _speaker_of(msg)
         rel = await _rel_of(msg)
         text = parse_content(msg.content).render(image_fn=img_fn)
-        marker = "⭐" if msg.message_id == trigger_id else ""
         chain_lines.append(
             format_message_tag(
-                speaker=speaker, rel=rel, time_str=time_str, body=text, marker=marker
+                speaker=speaker, rel=rel, time_str=time_str, body=text,
+                reply_target=(msg.message_id == trigger_id),
             )
         )
 
