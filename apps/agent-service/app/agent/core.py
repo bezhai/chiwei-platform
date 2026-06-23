@@ -50,6 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from inner_shared.dynamic_config import dynamic_config
 from langfuse import Langfuse
 from openai import (
     APIConnectionError,
@@ -134,6 +135,10 @@ class AgentConfig:
     model_id: str
     trace_name: str | None = None
     recursion_limit: int = _DEFAULT_RECURSION_LIMIT
+    # Opt-in: this agent wants Gemini's native google search to replace the
+    # ``search_web`` tool when the resolved model actually supports it. Only
+    # main chat declares it; every other config keeps the default (off).
+    native_web_search: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +357,16 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 
 _TERMINAL_TOOL_NAMES = {"no_reply"}
 
+# The self-written web-search tool. When an agent that opted into native search
+# runs on a model that supports it (and the flag is on), this tool is dropped
+# from the model's tool list and replaced by the provider's native grounding.
+_SEARCH_WEB_TOOL_NAME = "search_web"
+
+# Dynamic Config kill-switch for the native-search swap. Default off so the
+# swap stays dark until explicitly enabled per lane; flipping it back off
+# restores ``search_web`` at runtime with no redeploy.
+_NATIVE_WEB_SEARCH_FLAG = "main_chat_native_web_search"
+
 
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
@@ -402,6 +417,7 @@ async def _run_loop(
     context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
+    native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> Message:
@@ -431,12 +447,16 @@ async def _run_loop(
     convo = list(messages)
     tool_defs = _tooldefs(tools)
     extra = model_kwargs or {}
+    # Only forward native_web_search when enabled: a False would hand existing
+    # adapters (which don't know the kwarg) a parameter they never received,
+    # so the non-native path stays byte-for-byte unchanged.
+    call_kwargs = {**extra, "session_id": session_id}
+    if native_web_search:
+        call_kwargs["native_web_search"] = True
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
-        last = await model.complete(
-            convo, tools=tool_defs, **{**extra, "session_id": session_id}
-        )
+        last = await model.complete(convo, tools=tool_defs, **call_kwargs)
         if not last.tool_calls:
             if transcript_sink is not None:
                 transcript_sink.append(last)
@@ -473,6 +493,7 @@ async def _stream_loop(
     context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
+    native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -497,15 +518,18 @@ async def _stream_loop(
     convo = list(messages)
     tool_defs = _tooldefs(tools)
     extra = model_kwargs or {}
+    # Same rule as _run_loop: only forward native_web_search when enabled, so a
+    # non-native stream call carries exactly the kwargs it always did.
+    call_kwargs = {**extra, "session_id": session_id}
+    if native_web_search:
+        call_kwargs["native_web_search"] = True
 
     for _ in range(max(1, recursion_limit)):
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         turn_calls = []
 
-        async for chunk in model.stream(
-            convo, tools=tool_defs, **{**extra, "session_id": session_id}
-        ):
+        async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
             if chunk.text:
                 text_parts.append(chunk.text)
             if chunk.reasoning:
@@ -643,6 +667,40 @@ class Agent:
         )
         return model, prompt_messages
 
+    async def _resolve_native_web_search(
+        self, model: ModelClient
+    ) -> tuple[list[Tool], bool]:
+        """Decide this run's tool list and whether to enable native web search.
+
+        The swap fires only when all three conditions hold — this agent opted in
+        (``cfg.native_web_search``, only main chat does), the resolved model can
+        run native grounding alongside custom tools (Gemini 3), and the runtime
+        flag is on — AND ``search_web`` is actually mounted. When it fires the
+        ``search_web`` tool is dropped (the model uses native search instead) and
+        the signal is returned. Otherwise the tool list is returned unchanged and
+        the signal is False, so every other agent (world / life / guard, never
+        opted in) calls the model byte-for-byte as before.
+
+        The two cheap in-memory predicates are checked first so every non-opted
+        agent short-circuits *before* touching Dynamic Config — the flag read is
+        the only blocking bit, wrapped in ``asyncio.to_thread`` because the SDK's
+        cache-miss refresh is sync httpx that would otherwise stall the shared
+        event loop (mirrors ``app.life.feed_whitelist``).
+
+        Computed once per run (the model is fixed across retry attempts) so the
+        loops stay free of this business judgment.
+        """
+        tools = self._tools
+        if not (self._cfg.native_web_search and model.supports_native_web_search):
+            return tools, False
+        flag_on = await asyncio.to_thread(
+            dynamic_config.get_bool, _NATIVE_WEB_SEARCH_FLAG, default=False
+        )
+        if flag_on and any(t.name == _SEARCH_WEB_TOOL_NAME for t in tools):
+            tools = [t for t in tools if t.name != _SEARCH_WEB_TOOL_NAME]
+            return tools, True
+        return tools, False
+
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
@@ -667,6 +725,7 @@ class Agent:
         decision 3).
         """
         model, prompt_messages = await self._prepare(prompt_vars or {})
+        tools, native_web_search = await self._resolve_native_web_search(model)
 
         # Read the stored history ONCE (before retry) so a retried attempt
         # replays the same prefix and never double-reads. None → stateless.
@@ -691,10 +750,11 @@ class Agent:
                 result = await _run_loop(
                     model,
                     messages=full_messages,
-                    tools=self._tools,
+                    tools=tools,
                     context=context,
                     recursion_limit=self._cfg.recursion_limit,
                     session_id=trace_session_id,
+                    native_web_search=native_web_search,
                     model_kwargs=self._model_kwargs,
                     transcript_sink=sink,
                 )
@@ -737,6 +797,7 @@ class Agent:
         Redis untouched, behaviour byte-for-byte as before.
         """
         model, prompt_messages = await self._prepare(prompt_vars or {})
+        tools, native_web_search = await self._resolve_native_web_search(model)
 
         history = await load_session(session_id) if session_id else []
         full_messages = [*prompt_messages, *history, *messages]
@@ -755,10 +816,11 @@ class Agent:
                     async for chunk in _stream_loop(
                         model,
                         messages=full_messages,
-                        tools=self._tools,
+                        tools=tools,
                         context=context,
                         recursion_limit=self._cfg.recursion_limit,
                         session_id=trace_session_id,
+                        native_web_search=native_web_search,
                         model_kwargs=self._model_kwargs,
                         transcript_sink=sink,
                     ):

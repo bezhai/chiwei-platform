@@ -110,6 +110,26 @@ class GeminiAdapter(ModelClient):
         self._client = genai.Client(api_key=api_key, http_options=http_options)
 
     # ------------------------------------------------------------------
+    # native web search capability
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_native_web_search(self) -> bool:
+        """Only Gemini 3 can co-host native google search with custom tools.
+
+        Gemini 2.5's native grounding and custom function declarations can't
+        live in the same request, and main chat always carries custom tools, so
+        2.5 (and non-Gemini) report ``False``. The model name is normalised
+        (drop a ``models/`` prefix, lower-case) before the ``gemini-3`` check;
+        anything unrecognised stays ``False`` (fail-closed — better to fall back
+        to ``search_web`` than send a request the provider would reject).
+        """
+        name = self._model.strip().lower()
+        if name.startswith("models/"):
+            name = name[len("models/") :]
+        return name.startswith("gemini-3")
+
+    # ------------------------------------------------------------------
     # construction helpers
     # ------------------------------------------------------------------
 
@@ -140,9 +160,13 @@ class GeminiAdapter(ModelClient):
         **kwargs: Any,
     ) -> Message:
         kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
+        native_search = kwargs.pop("native_web_search", False)
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
-            system_instruction=system_instruction, tools=tools, **kwargs
+            system_instruction=system_instruction,
+            tools=tools,
+            native_web_search=native_search,
+            **kwargs,
         )
 
         with generation_span(
@@ -173,9 +197,13 @@ class GeminiAdapter(ModelClient):
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
         kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
+        native_search = kwargs.pop("native_web_search", False)
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
-            system_instruction=system_instruction, tools=tools, **kwargs
+            system_instruction=system_instruction,
+            tools=tools,
+            native_web_search=native_search,
+            **kwargs,
         )
 
         with generation_span(
@@ -257,6 +285,7 @@ class GeminiAdapter(ModelClient):
         *,
         system_instruction: str | None,
         tools: list[ToolDef] | None,
+        native_web_search: bool = False,
         response_mime_type: str | None = None,
         response_schema: dict[str, Any] | None = None,
         **kwargs: Any,
@@ -271,12 +300,28 @@ class GeminiAdapter(ModelClient):
         }
         if system_instruction is not None:
             cfg["system_instruction"] = system_instruction
+        # Custom function tools and Gemini's native google search co-exist as two
+        # separate Tool entries (Gemini 3 supports both in one request). Only the
+        # runtime turns native_web_search on, and only for main chat on Gemini 3.
+        tool_list: list[types.Tool] = []
         if tools:
-            cfg["tools"] = [
+            tool_list.append(
                 types.Tool(
                     function_declarations=[_tool_to_declaration(t) for t in tools]
                 )
-            ]
+            )
+        if native_web_search:
+            tool_list.append(types.Tool(google_search=types.GoogleSearch()))
+            # Gemini 3 rejects a built-in tool (google search) combined with
+            # function declarations unless server-side tool invocations are
+            # explicitly enabled, 400-ing otherwise ("Please enable
+            # tool_config.include_server_side_tool_invocations ..."). Set it only
+            # on the native-search path so every other request is unchanged.
+            cfg["tool_config"] = types.ToolConfig(
+                include_server_side_tool_invocations=True
+            )
+        if tool_list:
+            cfg["tools"] = tool_list
         if response_mime_type is not None:
             cfg["response_mime_type"] = response_mime_type
         if response_schema is not None:

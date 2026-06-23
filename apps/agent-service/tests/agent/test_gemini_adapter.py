@@ -984,3 +984,256 @@ async def test_registration_dispatches_google(monkeypatch):
 
     client = await build_model_client("whatever")
     assert isinstance(client, GeminiAdapter)
+
+
+# ---------------------------------------------------------------------------
+# supports_native_web_search — only Gemini 3 can co-host native google search
+# with custom function declarations; Gemini 2.5 can't, so it stays False.
+# Model-name normalisation strips a "models/" prefix and is case-insensitive;
+# anything we can't recognise is treated as unsupported (fail-closed).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gemini-3.5-flash",  # main chat
+        "gemini-3-flash-preview",  # diary
+        "models/gemini-3.5-flash",  # SDK-style "models/" prefix
+        "Gemini-3.5-Flash",  # mixed case
+        "MODELS/Gemini-3-Pro",  # prefix + case
+    ],
+)
+def test_supports_native_web_search_true_for_gemini_3(mock_sdk, model_name):
+    adapter = GeminiAdapter(model_name=model_name, api_key="k", base_url="https://g")
+    assert adapter.supports_native_web_search is True
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gemini-2.5-flash",  # Gemini 2.5 can't co-host grounding + tools
+        "models/gemini-2.5-pro",
+        "Gemini-2.5-Flash",
+        "gemini-2.0-flash",
+        "gpt-4o",  # not Gemini at all
+        "",  # unknown → fail-closed
+    ],
+)
+def test_supports_native_web_search_false_for_non_gemini_3(mock_sdk, model_name):
+    adapter = GeminiAdapter(model_name=model_name, api_key="k", base_url="https://g")
+    assert adapter.supports_native_web_search is False
+
+
+# ---------------------------------------------------------------------------
+# native_web_search signal → request carries native google search tool
+# (④). When the loop hands native_web_search=True, the adapter appends a
+# Tool(google_search=GoogleSearch()) ALONGSIDE the custom function-declaration
+# tool (Gemini 3 co-hosts both). Default (no signal) leaves only the function
+# tool — non-Gemini-3 paths and the switch-off case are byte-for-byte unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _split_tools(cfg: Any) -> tuple[list[Any], list[Any]]:
+    """Partition a config's tools into (function-declaration tools, search tools)."""
+    tools = cfg.tools or []
+    func_tools = [t for t in tools if t.function_declarations]
+    search_tools = [t for t in tools if getattr(t, "google_search", None) is not None]
+    return func_tools, search_tools
+
+
+async def test_complete_native_web_search_appends_google_search_tool(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
+    await adapter.complete(
+        [Message(role=Role.USER, content="weather?")],
+        tools=tools,
+        native_web_search=True,
+    )
+
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    func_tools, search_tools = _split_tools(cfg)
+    # custom function tool still present
+    assert len(func_tools) == 1
+    assert func_tools[0].function_declarations[0].name == "draw"
+    # native google search co-hosted
+    assert len(search_tools) == 1
+    # Gemini 3 requires include_server_side_tool_invocations to combine a built-in
+    # tool (google search) with function declarations — without it the API 400s
+    # ("Please enable tool_config.include_server_side_tool_invocations ...").
+    assert cfg.tool_config is not None
+    assert cfg.tool_config.include_server_side_tool_invocations is True
+
+
+async def test_stream_native_web_search_appends_google_search_tool(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_stream([_response(parts=[_part(text="ok")])])
+
+    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
+    async for _ in adapter.stream(
+        [Message(role=Role.USER, content="weather?")],
+        tools=tools,
+        native_web_search=True,
+    ):
+        pass
+
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    func_tools, search_tools = _split_tools(cfg)
+    assert len(func_tools) == 1
+    assert len(search_tools) == 1
+
+
+async def test_complete_without_native_web_search_has_no_google_search_tool(mock_sdk):
+    """Default (no signal): only the custom function tool, no google_search."""
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
+    await adapter.complete([Message(role=Role.USER, content="q")], tools=tools)
+
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    func_tools, search_tools = _split_tools(cfg)
+    assert len(func_tools) == 1
+    assert search_tools == []
+    # no native search → no server-side-tool toggle (non-native path unchanged)
+    assert cfg.tool_config is None
+
+
+async def test_complete_native_web_search_false_has_no_google_search_tool(mock_sdk):
+    """Explicit native_web_search=False is the same as no signal: no search tool."""
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
+    await adapter.complete(
+        [Message(role=Role.USER, content="q")],
+        tools=tools,
+        native_web_search=False,
+    )
+
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    _, search_tools = _split_tools(cfg)
+    assert search_tools == []
+
+
+async def test_native_web_search_signal_not_leaked_into_config_fields(mock_sdk):
+    """native_web_search is a control param, never a GenerateContentConfig field
+    or a trace model_parameter — it's consumed, not passed through."""
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="q")],
+        native_web_search=True,
+    )
+
+    assert "native_web_search" not in _span_calls[0]["model_parameters"]
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    assert not hasattr(cfg, "native_web_search")
+
+
+async def test_native_web_search_with_no_tools_still_appends_google_search(mock_sdk):
+    """Even with no custom tools, the native search signal yields a search tool.
+
+    (In practice main chat always carries tools, but _build_config must not gate
+    the search tool on the function tool existing.)
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    await adapter.complete(
+        [Message(role=Role.USER, content="q")],
+        native_web_search=True,
+    )
+
+    cfg = mock_sdk.instance.last_generate_kwargs["config"]
+    func_tools, search_tools = _split_tools(cfg)
+    assert func_tools == []
+    assert len(search_tools) == 1
+
+
+# ---------------------------------------------------------------------------
+# ⑤ grounding sources must not leak into赤尾's visible reply. The wire→neutral
+# helpers only read part.text (skipping thoughts) and never touch
+# candidate.grounding_metadata / search_entry_point. These fixtures attach
+# grounding metadata (source urls / chunks / search-entry html) and assert the
+# neutral content is the visible prose ONLY.
+# ---------------------------------------------------------------------------
+
+_SOURCE_URL = "https://example.com/grounded-source"
+_SEARCH_ENTRY_HTML = '<div class="search-entry">google search suggestions</div>'
+
+
+def _grounding_metadata() -> SimpleNamespace:
+    """A canned grounding_metadata bundle with source urls + search entry point."""
+    chunk = SimpleNamespace(
+        web=SimpleNamespace(uri=_SOURCE_URL, title="Grounded Source")
+    )
+    return SimpleNamespace(
+        grounding_chunks=[chunk],
+        web_search_queries=["today's weather"],
+        search_entry_point=SimpleNamespace(rendered_content=_SEARCH_ENTRY_HTML),
+    )
+
+
+def _grounded_response(visible_text: str) -> SimpleNamespace:
+    """A response whose candidate carries grounding_metadata + visible prose."""
+    candidate = SimpleNamespace(
+        content=_content([_part(text=visible_text)]),
+        finish_reason="STOP",
+        index=0,
+        grounding_metadata=_grounding_metadata(),
+    )
+    return SimpleNamespace(candidates=[candidate], usage_metadata=_usage())
+
+
+async def test_complete_drops_grounding_metadata_from_visible_content(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _grounded_response("今天广州多云转晴，气温 28 度。")
+    )
+
+    out = await adapter.complete([Message(role=Role.USER, content="天气?")])
+
+    assert out.content == "今天广州多云转晴，气温 28 度。"
+    assert _SOURCE_URL not in out.content
+    assert "example.com" not in out.content
+    assert _SEARCH_ENTRY_HTML not in out.content
+    assert "search-entry" not in out.content
+    assert "web_search_queries" not in out.content
+
+
+async def test_stream_drops_grounding_metadata_from_visible_content(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_stream(
+        [_grounded_response("今天广州多云转晴，气温 28 度。")]
+    )
+
+    chunks = [
+        c async for c in adapter.stream([Message(role=Role.USER, content="天气?")])
+    ]
+    text = "".join(c.text for c in chunks if c.text)
+
+    assert text == "今天广州多云转晴，气温 28 度。"
+    assert _SOURCE_URL not in text
+    assert "example.com" not in text
+    assert _SEARCH_ENTRY_HTML not in text
+    assert "search-entry" not in text

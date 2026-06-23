@@ -590,6 +590,14 @@ class TestAgentConfig:
     def test_defaults(self):
         assert AgentConfig("p", "m").trace_name is None
 
+    def test_native_web_search_defaults_false(self):
+        """New opt-in field defaults off, so every existing config is unaffected."""
+        assert AgentConfig("p", "m").native_web_search is False
+
+    def test_native_web_search_opt_in(self):
+        """A config may declare it wants native web search."""
+        assert AgentConfig("p", "m", native_web_search=True).native_web_search is True
+
     def test_replace(self):
         from dataclasses import replace
 
@@ -830,6 +838,205 @@ class TestStream:
 
         assert call_count == 2  # first attempt failed, second succeeded
         assert "".join(c.text or "" for c in collected) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# native web search — runtime decision: when main chat runs on a Gemini-3
+# model and the dynamic flag is on, drop the ``search_web`` tool and signal the
+# model to use its native google search instead. Any condition false → the tool
+# list and the model call are byte-for-byte unchanged (no native signal).
+# ---------------------------------------------------------------------------
+
+_NATIVE_CFG = AgentConfig("main", "main-chat-model", "main", native_web_search=True)
+
+
+def _search_web_tool():
+    from app.agent.tooling import tool
+
+    @tool
+    async def search_web(query: str) -> str:
+        """Search the web.
+
+        Args:
+            query: the query.
+        """
+        return "results"
+
+    return search_web
+
+
+def _other_tool():
+    from app.agent.tooling import tool
+
+    @tool
+    async def draw_picture(prompt: str) -> str:
+        """Draw a picture.
+
+        Args:
+            prompt: the prompt.
+        """
+        return "drawn"
+
+    return draw_picture
+
+
+@pytest.fixture()
+def flag_on():
+    """Patch the dynamic flag ``main_chat_native_web_search`` → True."""
+    with patch("app.agent.core.dynamic_config") as dc:
+        dc.get_bool.return_value = True
+        yield dc
+
+
+@pytest.fixture()
+def flag_off():
+    with patch("app.agent.core.dynamic_config") as dc:
+        dc.get_bool.return_value = False
+        yield dc
+
+
+class TestNativeWebSearchDecision:
+    """The three conditions (cfg opt-in AND model supports AND flag on) plus a
+    'search_web is actually present' guard gate the swap. The swap drops
+    search_web from the tools the model sees and forwards native_web_search=True;
+    otherwise the tools and the model call are unchanged and no signal leaks."""
+
+    async def test_run_all_conditions_true_drops_search_web_and_signals(
+        self, mock_deps, flag_on
+    ):
+        mock_deps["model"].supports_native_web_search = True
+        search_web, other = _search_web_tool(), _other_tool()
+        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
+            messages=[Message(role=Role.USER, content="今天天气")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        tool_names = [t.name for t in (kw["tools"] or [])]
+        assert "search_web" not in tool_names
+        assert "draw_picture" in tool_names
+        assert kw.get("native_web_search") is True
+        # the flag was consulted with the documented key + safe default
+        flag_on.get_bool.assert_called_once_with(
+            "main_chat_native_web_search", default=False
+        )
+
+    async def test_run_model_unsupported_keeps_search_web_no_signal(
+        self, mock_deps, flag_on
+    ):
+        mock_deps["model"].supports_native_web_search = False
+        search_web, other = _search_web_tool(), _other_tool()
+        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
+            messages=[Message(role=Role.USER, content="今天天气")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        tool_names = [t.name for t in (kw["tools"] or [])]
+        assert "search_web" in tool_names
+        assert "native_web_search" not in kw
+        # short-circuit: an unsupported model never reaches the (blocking) flag read
+        flag_on.get_bool.assert_not_called()
+
+    async def test_run_flag_off_keeps_search_web_no_signal(
+        self, mock_deps, flag_off
+    ):
+        mock_deps["model"].supports_native_web_search = True
+        search_web, other = _search_web_tool(), _other_tool()
+        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
+            messages=[Message(role=Role.USER, content="今天天气")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        tool_names = [t.name for t in (kw["tools"] or [])]
+        assert "search_web" in tool_names
+        assert "native_web_search" not in kw
+
+    async def test_run_cfg_not_opted_in_keeps_search_web_no_signal(
+        self, mock_deps, flag_on
+    ):
+        # world/life/guard configs never declare native_web_search → even a
+        # Gemini-3 model with the flag on must not trigger the swap.
+        mock_deps["model"].supports_native_web_search = True
+        search_web, other = _search_web_tool(), _other_tool()
+        await Agent(_CFG, tools=[search_web, other]).run(
+            messages=[Message(role=Role.USER, content="hi")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        tool_names = [t.name for t in (kw["tools"] or [])]
+        assert "search_web" in tool_names
+        assert "native_web_search" not in kw
+        # short-circuit: a non-opted agent never reaches the (blocking) flag read
+        flag_on.get_bool.assert_not_called()
+
+    async def test_run_no_search_web_present_does_not_signal(
+        self, mock_deps, flag_on
+    ):
+        # opted in, model supports, flag on — but the agent never mounted
+        # search_web → must NOT enable native search for free (cost guard).
+        mock_deps["model"].supports_native_web_search = True
+        other = _other_tool()
+        await Agent(_NATIVE_CFG, tools=[other]).run(
+            messages=[Message(role=Role.USER, content="hi")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        tool_names = [t.name for t in (kw["tools"] or [])]
+        assert tool_names == ["draw_picture"]
+        assert "native_web_search" not in kw
+
+    async def test_non_native_agent_with_flag_present_is_byte_for_byte(
+        self, mock_deps, flag_on
+    ):
+        # A world/life-style agent (not opted in) on this path must call the
+        # model exactly as before: tools unchanged, no native signal, even when
+        # the global flag happens to be on.
+        mock_deps["model"].supports_native_web_search = True
+        search_web = _search_web_tool()
+        await Agent(_CFG, tools=[search_web]).run(
+            messages=[Message(role=Role.USER, content="hi")]
+        )
+        kw = mock_deps["model"].complete.await_args.kwargs
+        assert [t.name for t in (kw["tools"] or [])] == ["search_web"]
+        assert "native_web_search" not in kw
+
+    async def test_stream_all_conditions_true_drops_search_web_and_signals(
+        self, mock_deps, flag_on
+    ):
+        captured: dict = {}
+
+        async def fake_stream(messages, *, tools=None, **kwargs):
+            captured["tools"] = tools
+            captured["kwargs"] = kwargs
+            yield StreamChunk(text="hi")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = fake_stream
+        mock_deps["model"].supports_native_web_search = True
+        search_web, other = _search_web_tool(), _other_tool()
+        async for _ in Agent(_NATIVE_CFG, tools=[search_web, other]).stream(
+            messages=[Message(role=Role.USER, content="今天天气")]
+        ):
+            pass
+        tool_names = [t.name for t in (captured["tools"] or [])]
+        assert "search_web" not in tool_names
+        assert "draw_picture" in tool_names
+        assert captured["kwargs"].get("native_web_search") is True
+
+    async def test_stream_flag_off_keeps_search_web_no_signal(
+        self, mock_deps, flag_off
+    ):
+        captured: dict = {}
+
+        async def fake_stream(messages, *, tools=None, **kwargs):
+            captured["tools"] = tools
+            captured["kwargs"] = kwargs
+            yield StreamChunk(text="hi")
+            yield StreamChunk(finish_reason="stop")
+
+        mock_deps["model"].stream = fake_stream
+        mock_deps["model"].supports_native_web_search = True
+        search_web = _search_web_tool()
+        async for _ in Agent(_NATIVE_CFG, tools=[search_web]).stream(
+            messages=[Message(role=Role.USER, content="今天天气")]
+        ):
+            pass
+        assert [t.name for t in (captured["tools"] or [])] == ["search_web"]
+        assert "native_web_search" not in captured["kwargs"]
 
 
 # ---------------------------------------------------------------------------

@@ -744,3 +744,94 @@ class TestSessionIdPassthrough:
         )
         assert fake.complete_kwargs[0]["session_id"] == "real"
         assert fake.complete_kwargs[0]["reasoning_effort"] == "low"
+
+
+# ---------------------------------------------------------------------------
+# native_web_search passthrough — the loop forwards the signal to the model
+# ONLY when it is True, so every existing (non-native) call is byte-for-byte
+# unchanged: a model never sees an unknown ``native_web_search`` kwarg unless
+# the agent layer decided to enable native search this run.
+# ---------------------------------------------------------------------------
+
+
+class TestNativeWebSearchPassthrough:
+    async def test_run_loop_forwards_native_web_search_when_true(self):
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            native_web_search=True,
+        )
+        assert fake.complete_kwargs[0]["native_web_search"] is True
+
+    async def test_run_loop_omits_native_web_search_by_default(self):
+        # The default (False) must NOT appear in the kwargs at all, so existing
+        # adapters that don't know the kwarg are never handed it.
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert "native_web_search" not in fake.complete_kwargs[0]
+
+    async def test_run_loop_omits_native_web_search_when_false(self):
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi")]
+        )
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hello")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            native_web_search=False,
+        )
+        assert "native_web_search" not in fake.complete_kwargs[0]
+
+    async def test_stream_loop_forwards_native_web_search_when_true(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(text="hi"), StreamChunk(finish_reason="stop")]
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hi")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            native_web_search=True,
+        ):
+            pass
+        assert fake.stream_kwargs[0]["native_web_search"] is True
+
+    async def test_stream_loop_omits_native_web_search_by_default(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(text="hi"), StreamChunk(finish_reason="stop")]
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="hi")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        ):
+            pass
+        assert "native_web_search" not in fake.stream_kwargs[0]
