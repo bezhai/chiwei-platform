@@ -18,6 +18,7 @@ think round get silently swallowed and the life loops on stale state.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
 from app.data.queries.mailbox import (
     deliver_event,
@@ -28,7 +29,6 @@ from app.data.queries.mailbox import (
     renotify_unread,
 )
 from app.domain.world_events import (
-    EVENT_KIND_EXTERNAL_PASSIVE,
     PASSIVE_EVENT_KINDS,
     EventArrived,
     EventEnvelope,
@@ -309,7 +309,7 @@ async def test_unread_mixed_format_ordered_by_real_instant(mailbox_db):
     )
     await deliver_event(
         lane="coe-t1", persona_id="akao", event_id="unix_mid",
-        kind="external", source="user:u1", summary="中间-Unix毫秒",
+        kind="ambient", source="world", summary="中间-Unix毫秒",
         occurred_at=str(unix_mid_ms),
     )
     await deliver_event(
@@ -731,109 +731,223 @@ async def test_long_sleep_surroundings_backlog_can_crowd_out_real_events(mailbox
 
 
 # ---------------------------------------------------------------------------
-# 真人私聊回灌：被动事件（task 3）—— 感知但不唤醒
-#
-# 真人私聊赤尾、chat 回复完后，「刚跟真人聊过」作为一条回灌进她的信箱。它不该额外
-# 唤醒一轮 life（她又用 gpt 跑一轮、重复反应、浪费）。所以这条回灌用一个**被动 kind**
-# （EVENT_KIND_EXTERNAL_PASSIVE，进 PASSIVE_EVENT_KINDS）：即时投递不敲门、补敲对账
-# 也不敲门，但 list_unread_events 下次自然醒时仍读得到——她下次醒来知道「跟真人聊过」。
-#
-# 区别于白名单内的群（kind=external，照常唤醒——那是被选中要听的群）：被动只落在 p2p
-# 真人私聊这条回灌上。两端都读同一处 PASSIVE_EVENT_KINDS（宪法「禁止重复定义」）。
+# 会话身份字段：EventEnvelope 曾加 chat_id / chat_scope / chat_name。当前 chat→life
+# 对话感知已改成实时读取 common_message，但字段不能删（durable schema forward-only）。
 # ---------------------------------------------------------------------------
 
 
-def test_external_passive_kind_is_in_passive_set():
-    """真人私聊回灌的被动 kind 必须进 PASSIVE_EVENT_KINDS（即时敲门 + 补敲都读它）。"""
-    assert EVENT_KIND_EXTERNAL_PASSIVE in PASSIVE_EVENT_KINDS
+def test_event_envelope_has_chat_identity_fields():
+    """EventEnvelope 声明了会话身份三字段 chat_id / chat_scope / chat_name（task 3）。"""
+    assert "chat_id" in EventEnvelope.model_fields
+    assert "chat_scope" in EventEnvelope.model_fields
+    assert "chat_name" in EventEnvelope.model_fields
+
+
+def test_chat_identity_fields_are_nullable_with_none_default():
+    """会话身份三字段是 nullable、默认 None —— 旧条目（不带这三列）读写不炸。
+
+    durable schema 变更钉死为 forward-only 加 nullable 列：必须 ``str | None``、默认
+    ``None``，migrator 才会 emit 不带 NOT NULL 的 ADD COLUMN，旧行这三列为 NULL 仍能读回。
+    """
+    fields = EventEnvelope.model_fields
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert fields[name].default is None, f"{name} 默认必须是 None"
+    # 不带这三个字段也能构造（默认 None）—— 等价于旧条目的形态
+    ev = EventEnvelope(
+        lane="coe-t1", persona_id="akao", event_id="e0",
+        kind="ambient", source="world", summary="s",
+        occurred_at="2026-06-03T08:00:00Z",
+    )
+    assert ev.chat_id is None
+    assert ev.chat_scope is None
+    assert ev.chat_name is None
+
+
+def test_chat_identity_columns_are_additive_nullable_in_migration():
+    """migrator 把会话身份三字段建成 nullable TEXT 列（forward-only additive）。
+
+    durable schema 变更命门：新增列必须是不带 NOT NULL 的 ADD COLUMN，回滚旧镜像才不会
+    被 fail-closed 当成「字段被删」（spec Data & deployment impact）。这条直接断言生成的
+    DDL：CREATE 里这三列是 TEXT 且不带 NOT NULL。
+    """
+    from app.runtime.migrator import plan_migration
+
+    plan = plan_migration([EventEnvelope], existing_schema={})
+    create_sql = next(s.sql for s in plan.stmts if s.sql.startswith("CREATE TABLE"))
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert f'"{name}" TEXT' in create_sql, f"{name} 应是 TEXT 列，DDL={create_sql!r}"
+        assert f'"{name}" TEXT NOT NULL' not in create_sql, (
+            f"{name} 必须 nullable（不带 NOT NULL），否则破坏 forward-only 回滚安全"
+        )
+
+    # 对已有旧表（不含这三列）做迁移 → 三条 additive ADD COLUMN，不抛 MigrationError
+    old_table = {
+        "data_event_envelope": {
+            "lane": "TEXT", "persona_id": "TEXT", "event_id": "TEXT",
+            "kind": "TEXT", "source": "TEXT", "summary": "TEXT",
+            "occurred_at": "TEXT", "dedup_hash": "TEXT",
+            "created_at": "TIMESTAMPTZ",
+        }
+    }
+    plan2 = plan_migration([EventEnvelope], existing_schema=old_table)
+    added = [s.sql for s in plan2.stmts if "ADD COLUMN" in s.sql]
+    for name in ("chat_id", "chat_scope", "chat_name"):
+        assert any(f'"{name}" TEXT' in sql for sql in added), (
+            f"旧表迁移应 additive 加 {name} 列，实际 {added!r}"
+        )
 
 
 @pytest.mark.integration
-async def test_external_passive_deliver_does_not_knock(mailbox_db, monkeypatch):
-    """承重断言①：真人私聊被动回灌即时投递**不** emit EventArrived（不唤醒 life）。
-
-    对比真动静（kind=external 群回灌 / ambient notify）新投递成功会敲门——被动 kind
-    新投递成功也不敲门，只悄悄落信箱当被动上下文。
-    """
-    import app.data.queries.mailbox as mailbox_mod
-
-    emitted: list = []
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
-
-    inserted = await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:s1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小明聊了：周末一起爬山吗",
-        occurred_at="2026-06-03T14:00:00+08:00",
-    )
-
-    assert inserted == 1, "新投递应真的落库一行"
-    assert emitted == [], (
-        f"被动 kind 即时投递不该 emit EventArrived（不唤醒 life），实际 {emitted!r}"
-    )
-
-
-@pytest.mark.integration
-async def test_external_passive_unread_not_renotified(mailbox_db, monkeypatch):
-    """承重断言②：纯被动回灌未读的 persona **不**被 renotify_unread 补敲（补敲也不唤醒）。
-
-    上一版只挡即时敲门、没挡 world engine 每轮调的补敲（surroundings 被这条绕过的真
-    bug）。真人私聊被动回灌走同一处 PASSIVE_EVENT_KINDS，补敲对账也排除它。
-
-    对比 akao：有一条真动静（external 群回灌）未读 → 照常被补敲。
-    """
-    # ayana：只有一条被动私聊回灌（不该被补敲叫醒）
+async def test_deliver_with_group_identity_round_trips(mailbox_db):
+    """deliver_event 带群身份写入 → list_unread_events 读出三字段。"""
     await deliver_event(
-        lane="coe-t1", persona_id="ayana", event_id="chat:p2p1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小红聊了：在干嘛",
+        lane="coe-t1", persona_id="akao", event_id="chat:grp-sess-1",
+        kind="ambient", source="world",
+        summary="群里出现一条历史动静",
         occurred_at="2026-06-03T14:00:00+08:00",
-    )
-    # akao：有一条真动静（external 群回灌）未读 → 照常该被补敲
-    await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:grp1",
-        kind="external", source="user:u2", summary="群里有人聊了：今晚聚餐",
-        occurred_at="2026-06-03T14:00:01+08:00",
-    )
-
-    emitted: list = []
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    import app.data.queries.mailbox as mailbox_mod
-
-    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
-
-    count = await renotify_unread(lane="coe-t1")
-
-    assert count == 1, (
-        f"只有 akao（群 external 真动静）该被补敲，纯被动私聊回灌的 ayana 不该叫醒，"
-        f"实际补敲 {count}"
-    )
-    assert [a.persona_id for a in emitted] == ["akao"]
-
-
-@pytest.mark.integration
-async def test_external_passive_still_readable_on_self_wake(mailbox_db):
-    """承重断言③：她下次自然醒读未读（list_unread_events）**仍读得到**被动私聊回灌。
-
-    补敲对账排除被动是为了不主动叫醒她；但她下次自己醒来时仍要在未读里读到「跟真人聊过」。
-    list_unread_events 绝不按 kind 过滤——和补敲那条查询是分开的两条。
-    """
-    await deliver_event(
-        lane="coe-t1", persona_id="akao", event_id="chat:p2p1",
-        kind=EVENT_KIND_EXTERNAL_PASSIVE, source="user:u1",
-        summary="刚和小明聊了：周末一起爬山吗",
-        occurred_at="2026-06-03T14:00:00+08:00",
+        chat_id="11111111-1111-1111-1111-111111111111",
+        chat_scope="group",
+        chat_name="🐢🐢群(飞书版)",
     )
 
     unread = await list_unread_events(lane="coe-t1", persona_id="akao")
 
-    assert [e.event_id for e in unread] == ["chat:p2p1"]
-    assert unread[0].kind == EVENT_KIND_EXTERNAL_PASSIVE
-    assert unread[0].summary == "刚和小明聊了：周末一起爬山吗"
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id == "11111111-1111-1111-1111-111111111111"
+    assert ev.chat_scope == "group"
+    assert ev.chat_name == "🐢🐢群(飞书版)"
+
+
+@pytest.mark.integration
+async def test_deliver_with_direct_identity_round_trips(mailbox_db):
+    """direct 会话身份字段可为 None，读回如实保留。"""
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="chat:p2p-sess-1",
+        kind="ambient", source="world",
+        summary="一条带 direct 会话身份的历史动静",
+        occurred_at="2026-06-03T14:00:00+08:00",
+        chat_id="22222222-2222-2222-2222-222222222222",
+        chat_scope="direct",
+        chat_name=None,
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id == "22222222-2222-2222-2222-222222222222"
+    assert ev.chat_scope == "direct"
+    assert ev.chat_name is None
+
+
+@pytest.mark.integration
+async def test_deliver_without_identity_leaves_fields_none(mailbox_db):
+    """不传会话身份的旧调用方（world / 日程提醒等）：三字段为 None，读回不炸。
+
+    deliver_event 的 chat_id / chat_scope / chat_name 是可选参数（默认 None），7 处旧
+    调用方不传时向后兼容——条目照常落库，三字段为 NULL，list_unread_events 读回为 None。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="akao", event_id="amb-1",
+        kind="ambient", source="world", summary="水壶在响",
+        occurred_at="2026-06-03T08:00:00Z",
+    )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+
+    assert len(unread) == 1
+    ev = unread[0]
+    assert ev.chat_id is None
+    assert ev.chat_scope is None
+    assert ev.chat_name is None
+
+
+@pytest.mark.integration
+async def test_deliver_with_identity_still_idempotent(mailbox_db):
+    """带会话身份字段不破坏幂等：同 (lane, persona, event_id) 重投仍只一条。
+
+    新增三字段不进 dedup_hash（只 lane/persona/event_id 是 Key），所以重投去重行为不变。
+    """
+    for _ in range(3):
+        await deliver_event(
+            lane="coe-t1", persona_id="akao", event_id="chat:grp-1",
+            kind="ambient", source="world", summary="群消息",
+            occurred_at="2026-06-03T14:00:00+08:00",
+            chat_id="33333333-3333-3333-3333-333333333333",
+            chat_scope="group", chat_name="某群",
+        )
+
+    unread = await list_unread_events(lane="coe-t1", persona_id="akao")
+    assert len(unread) == 1
+    assert unread[0].chat_name == "某群"
+
+
+# ---------------------------------------------------------------------------
+# find_conversation_display_name：历史会话身份字段的辅助查询，保留以兼容旧代码路径。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def conversation_db(test_db):
+    """在测试库上建 common_conversation 表（CommonConversation 是 SQLAlchemy Base 模型）。"""
+    from app.data.models import CommonConversation
+
+    async with test_db.begin() as conn:
+        await conn.run_sync(CommonConversation.__table__.create)
+    yield test_db
+
+
+@pytest.mark.integration
+async def test_find_conversation_display_name_returns_group_name(conversation_db):
+    """按 common_conversation_id 查到群的 display_name（群名）。"""
+    import uuid
+
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    cid = str(uuid.uuid4())
+    async with conversation_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO common_conversation "
+                "(common_conversation_id, channel, scope, display_name, is_active) "
+                "VALUES (:cid, 'lark', 'group', :name, true)"
+            ),
+            {"cid": cid, "name": "🐢🐢群(飞书版)"},
+        )
+
+    name = await find_conversation_display_name(cid)
+    assert name == "🐢🐢群(飞书版)"
+
+
+@pytest.mark.integration
+async def test_find_conversation_display_name_missing_returns_none(conversation_db):
+    """查不到会话（或 display_name 为 NULL）兜底返回 None —— 群名缺失不炸。"""
+    import uuid
+
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    # 不存在的 chat_id
+    assert await find_conversation_display_name(str(uuid.uuid4())) is None
+
+    # 存在但 display_name 为 NULL（罕见，私聊或未命名群）
+    cid = str(uuid.uuid4())
+    async with conversation_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO common_conversation "
+                "(common_conversation_id, channel, scope, display_name, is_active) "
+                "VALUES (:cid, 'lark', 'group', NULL, true)"
+            ),
+            {"cid": cid},
+        )
+    assert await find_conversation_display_name(cid) is None
+
+
+async def test_find_conversation_display_name_invalid_uuid_returns_none():
+    """非法 chat_id（非 uuid / None）兜底返回 None，不查库、不抛。"""
+    from app.data.queries.mailbox import find_conversation_display_name
+
+    assert await find_conversation_display_name(None) is None
+    assert await find_conversation_display_name("") is None
+    assert await find_conversation_display_name("not-a-uuid") is None

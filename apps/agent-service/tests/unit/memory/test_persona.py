@@ -80,7 +80,34 @@ async def test_chain_empty_falls_back_byte_identical(stub_reads):
         persona_core="核心正文（遗留未用）",
         appearance_detail="红发",
         error_messages={"rate_limit": "稍等一下嘛"},
+        default_reply_style="自然",
     )
+
+
+async def test_default_reply_style_from_main_table(stub_reads):
+    """default_reply_style 从主表 bot_persona 读进 PersonaContext（per-persona 说话风格）。"""
+    ctx = await load_persona("akao")
+    assert ctx.default_reply_style == "自然"
+
+
+async def test_default_reply_style_null_falls_back_to_empty(stub_reads):
+    """主表 default_reply_style 为 None → 退回 ""（注入绝不传 None）。"""
+    find_mock, _ = stub_reads
+    row = _bot_persona_row()
+    row.default_reply_style = None
+    find_mock.return_value = row
+
+    ctx = await load_persona("akao")
+    assert ctx.default_reply_style == ""
+
+
+async def test_missing_persona_default_reply_style_empty(stub_reads):
+    """主表没这行 → fallback PersonaContext 的 default_reply_style 保持默认 ""。"""
+    find_mock, _ = stub_reads
+    find_mock.return_value = None
+
+    ctx = await load_persona("ghost")
+    assert ctx.default_reply_style == ""
 
 
 async def test_chain_latest_overrides_persona_lite_only(stub_reads):

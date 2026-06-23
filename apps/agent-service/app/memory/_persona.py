@@ -35,6 +35,7 @@ class PersonaContext:
     appearance_detail: str = ""
     error_messages: dict = field(default_factory=dict)
     bot_name: str | None = None
+    default_reply_style: str = ""
 
 
 _persona_cache: dict[str, tuple[PersonaContext, float]] = {}
@@ -96,6 +97,7 @@ async def load_persona(persona_id: str) -> PersonaContext:
             persona_core=persona.persona_core or "",
             appearance_detail=persona.appearance_detail or "",
             error_messages=persona.error_messages or {},
+            default_reply_style=persona.default_reply_style or "",
         )
     else:
         ctx = PersonaContext(

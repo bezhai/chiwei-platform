@@ -72,6 +72,7 @@ from app.domain.notebook import (
 # module-level 引用目录解析层 + 投递目标类型，让 send_message 按 uid 解析投递目标，
 # 也让测试能 monkeypatch（与 deliver_event / perform_act 同款）。
 from app.domain.recipient_directory import (
+    GroupTarget,
     LarkP2PTarget,
     MailboxTarget,
     resolve_delivery,
@@ -150,6 +151,7 @@ def build_life_tools(
     act_id: str,
     observed_at: str,
     schedule_reminders: dict | None = None,
+    proactive_history_since: str | None = None,
 ) -> list[Tool]:
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
 
@@ -158,6 +160,14 @@ def build_life_tools(
         工具内给每件 act 派 ``per_act_id = uuid5(act_id, 本轮第 N 件序号)``，一轮多件
         各自唯一、同件重投幂等。
     ``observed_at`` —— 本轮观测时刻（ISO8601），快照 / 动作都用它，使重放一致。
+    ``proactive_history_since`` —— 本轮 proactive 主动发的**历史增量水位**（= 本轮 life
+        进入时读到的 ``LifeState.observed_at``，冷启 snapshot 为 None 时为 None）。capture
+        进闭包，``send_message`` 飞书分支把它作为 ``since`` 传给
+        ``build_proactive_chat_context``：只取「上一次 life 轮之后真人新发的」增量历史，
+        治她每轮全量拉旧话、对着早就说过的反复主动开口。**承重命门**：必须用本轮**进入
+        时**捕获的值、capture 进闭包——本轮工具循环里她可能先调 ``update_life_state`` 把
+        ``observed_at`` 刷成本轮时刻，若 ``send_message`` 现读 ``LifeState`` 取水位会被本轮
+        污染、增量永远算空。None（冷启）→ ``since=None`` → 退回原全量最近 limit 行为。
     ``schedule_reminders`` —— 本轮 round-scoped 的「待挂日程提醒」容器
         （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note`` / ``edit_note``
         每带一个 remind_at 就往里记一条 ``entry_id → remind_at``（撤时间记 ``None``）；engine
@@ -413,20 +423,25 @@ def build_life_tools(
 
     @tool_error("查联系人失败")
     async def look_up_contact(query: str) -> str:
-        """报一个名字，查出可以隔空发消息的人有哪些（候选给你挑，不替你选）。
+        """报一个名字，查出可以隔空发消息的人 / 群有哪些（候选给你挑，不替你选）。
 
         想给谁隔空发消息（send_message）、但手里只有一个名字时，先用它查一下：把名字
         给它，它返回所有名字对得上的候选——每个候选带一个**稳定 id（uid）**和一段简介
         （帮你认人、区分重名）。挑哪一个是你自己的决定，它绝不替你排序、不替你取第一个。
 
-        查到一个或多个候选 → 你看简介认出要发的那个人，记下 ta 的 uid，再用 send_message
-        按那个 uid 发。查不到任何人 → 它如实说没找到，那就当真没这个人（换个名字、或算了）。
+        候选不止是人：你聊得来、平时在听的**群**也会按群名查出来（uid 形如
+        ``group:<id>``）——想接着在某个群里说话、但只记得群名时，一样在这里查出群的 uid，
+        再用 send_message 发到那个群里。
+
+        查到一个或多个候选 → 你看简介认出要发的那个人 / 群，记下它的 uid，再用
+        send_message 按那个 uid 发。查不到 → 它如实说没找到，那就当真没有（换个名字、
+        或算了）。
 
         这只手只**查名字拿 uid**，不发消息；发用 send_message。给三姐妹**当面**说话不走
-        这里（那是 chat）——这只手是为「隔空发消息给某个人、先把 ta 是谁查清楚」用的。
+        这里（那是 chat）——这只手是为「隔空发消息给某个人 / 某个群、先把它查清楚」用的。
 
         Args:
-            query: 你要找的人的名字（自然语言，可模糊，如"赤尾""妈妈"）。
+            query: 你要找的人 / 群的名字（自然语言，可模糊，如"赤尾""妈妈""🐢🐢群"）。
 
         Returns:
             候选列表文本（每个候选带 uid + 简介）；查不到时一句如实说明。
@@ -443,28 +458,32 @@ def build_life_tools(
 
     @tool_error("发消息失败")
     async def send_message(uid: str, content: str) -> str:
-        """隔着手机给某个人发一条消息（不在一起时用，给三姐妹或真人都行）。
+        """隔着手机发一条消息（不在一起时用）——可以发给某个人，也可以发到一个群里。
 
         这是「隔空发消息」的手，和**当面说话**（chat）是两件事、两只手：你们不在
         一起时（ta 在学校、出了门、或本就是手机另一头的真人），想说的话发到 ta 那里
         就用它。当面就在你身边的姐妹，用 chat 当面说，不用这个。该当面还是该发消息，
         你自己读懂此刻的情形决定。
 
-        uid 是要发的那个人的稳定 id——你心里有数就直接给（三姐妹的 uid 是
-        ``persona:akao`` / ``persona:chinagi`` / ``persona:ayana``）；只记得名字、
-        不确定 uid，先用 look_up_contact 报名字查出 uid 再发。
+        给谁发，由 uid 说了算——uid 是收件方的稳定 id，你心里有数就直接给：
+        三姐妹的 uid 是 ``persona:akao`` / ``persona:chinagi`` / ``persona:ayana``。
+        除了发给某个人，你也能**发到一个群里**——群的 uid 形如 ``group:<一串 id>``，
+        从 look_up_contact 报群名查出来，或者就是你被叫醒时眼前那条消息所在的那个群
+        （唤醒的来由里带着它）。只记得名字、不确定 uid，都先用 look_up_contact 查出
+        uid 再发。
 
         发给姐妹 → 像手机消息一样进她那边，她下次回过神 / 醒来读到「你给她发的消息」。
-        发给真人 → 消息会发往 ta 的手机，但**这是异步的**：你这边只是把消息发了出去，
-        它最终能不能送到 ta 手机上、ta 看没看到，你当场都不知道、也不保证一定送到
-        （网络、对方状态都可能让它没送达）。所以发完它只会告诉你「已发出」，不会说
-        「对方收到了」——别把「已发出」当成「ta 已经看到 / 会回你」。**对方可能一时没看、
-        或这个人这边根本发不出去**（比如从没和你私聊过的人），这都正常：当场就发不出去时
-        它会告诉你发不了和原因，你自己定怎么办（换个人、待会儿再说、或算了），它绝不
-        偷偷替你改发给别人。
+        发给真人、或发到群里 → 消息会发出去到对方手机 / 那个群，但**这是异步的**：你
+        这边只是把消息发了出去，它最终能不能送到、对方看没看到，你当场都不知道、也不
+        保证一定送到（网络、对方状态都可能让它没送达）。所以发完它只会告诉你「已发出」，
+        不会说「对方收到了」——别把「已发出」当成「ta 已经看到 / 会回你」。**对方可能一时
+        没看、或这边根本发不出去**（比如从没和你私聊过的人、或那个群你发不进去），这都
+        正常：当场就发不出去时它会告诉你发不了和原因，你自己定怎么办（换个对象、待会儿
+        再说、或算了），它绝不偷偷替你改发给别人 / 别的群。
 
         Args:
-            uid: 收件人的稳定 id（``persona:<姐妹>`` 或真人的 ``user:<id>``）。
+            uid: 收件方的稳定 id（``persona:<姐妹>`` / 真人的 ``user:<id>`` / 群的
+                ``group:<id>``）。
             content: 你要发的话（你自己的原话，原样发出去）。
 
         Returns:
@@ -474,7 +493,9 @@ def build_life_tools(
         # 解析投递目标：resolver 查不到 / 不可投递时抛 UndeliverableRecipient，
         # @tool_error 把它收成结构化 outcome（str(exc) 进 message）喂回 life 让她处置
         # （换个人 / 重试 / 算了）——不在这里 catch、不静默降级、不替她另找目标（决策 6）。
-        target = await resolve_delivery(uid)
+        # 带上发送者 persona_id：群分支据它解析「该 persona 在这个群的 active bot」（出站
+        # 身份钉死）；persona / user 分支不消费它（resolver 只在 group 分支用）。
+        target = await resolve_delivery(uid, persona_id=persona_id)
 
         # next_seq 模式（命门同 chat_seq / act_seq）：用 send_seq+1 算这件 send 的投递键，
         # 但**先不推进 send_seq** —— 成功发出后才推进。@tool_error 会吞掉发送抛的错让模型
@@ -502,50 +523,64 @@ def build_life_tools(
             send_seq = next_seq
             return "发出去了"
 
-        if isinstance(target, LarkP2PTarget):
-            # 真人（飞书私聊）→ life 只给**意图**（content 是她想说的要点 / 意图），
-            # 措辞交给**共享渲染层**（主模型 + 人设）产出，**不再**由 life 的 offline
-            # gpt 直出原文（直出口径不一致、堆黑话、叫「主人」，正是本刀要治的根）。
-            # 流程：life 给意图 → proactive context 构建（带 chat_id 历史、接得上上次聊）
-            # → render_chat_turn 渲染 → 出站。proactive **不穿** chat 队列（route_chat
-            # _node→chat_node 那套是真人回复专属）、**不写** agent_response，出站契约保持。
-            #
-            # 主动发**没有来源消息**：message_id 不能是指向真实来源消息的 id（worker 反查
-            # 会炸）—— 用 proactive: 前缀 + 本轮派生键明确「这是主动发、非来源消息 id」，
-            # root_id 留空（不伪造一条「被回复的消息」）。worker 据 is_proactive 走不反查
-            # 来源、直接用 chat_id（= 真实 p2p common_conversation_id）+ bot_name 的路径。
+        async def _render_and_emit_proactive(
+            *,
+            key_suffix: str,
+            chat_id: str,
+            chat_scope: str,
+            chat_name: str,
+            is_p2p: bool,
+            user_id: str | None,
+            bot_name: str,
+            channel: str,
+        ) -> None:
+            """飞书主动发（真人私聊 / 群）共享的「意图 → proactive 渲染 → emit 出站段」。
+
+            真人和群只在几处不同（message_id seed 后缀、chat_scope、chat_name、is_p2p、
+            user_id），渲染 + 出站契约完全一样，抽成一只手只写一次（不复制 60 行）。
+
+            流程：life 只给**意图**（content 是要点），措辞交给**共享渲染层**（主模型 +
+            人设）产出，**不再**由 life 的 offline gpt 直出原文（直出堆黑话、叫「主人」，
+            正是本刀要治的根）。proactive **不穿** chat 队列、**不写** agent_response，
+            出站契约保持。
+
+            主动发**没有来源消息**：message_id 用 proactive: 前缀 + 本轮派生键明确「这是
+            主动发、非来源消息 id」，root_id 留空（不伪造一条「被回复的消息」）。worker 据
+            is_proactive 走不反查来源、直接用 chat_id（真实会话 id）+ bot_name 的路径。
+
+            渲染失败 / 超时 / 空产出**不回退发 life 原文**（否则原问题复发）。proactive
+            显式传 ``on_error="raise"`` 让 render 在 stream 异常 / content_filter / length
+            下抛 RenderFailed 而非 yield 错误文案；下面 try 兜住、把「没发出去」喂回 life。
+            """
             proactive_message_id = (
                 f"{PROACTIVE_MESSAGE_ID_PREFIX}"
-                f"{uuid.uuid5(uuid.NAMESPACE_OID, f'{send_base}:p2p')}"
+                f"{uuid.uuid5(uuid.NAMESPACE_OID, f'{send_base}:{key_suffix}')}"
             )
 
             # proactive context 构建（单独一套，不碰源消息）：意图 + chat_id 历史 →
             # ChatTurnContext。history 把赤尾自己发过的（含上一条 proactive）认作她自己
-            # 说的（ASSISTANT）、真人认作 USER（见 proactive_context）。
+            # 说的（ASSISTANT）、对方认作 USER（见 proactive_context）。群场景按
+            # chat_scope='group' + 群名渲染成「在群聊『X』里说话」（_scene_section 群分支），
+            # 私聊按 chat_scope='direct'。
             turn_ctx = await build_proactive_chat_context(
                 intent=content,
                 persona_id=persona_id,
-                chat_id=target.common_conversation_id,
-                user_id=target.user_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                chat_scope=chat_scope,
+                chat_name=chat_name,
+                # 本轮进入时捕获的 proactive 历史水位（capture 进闭包，不现读 LifeState
+                # 避免被本轮 update_life_state 污染）：只取水位之后真人新发的增量历史。
+                since=proactive_history_since,
             )
 
-            # 渲染：累出整段文本（render_chat_turn 是 async generator，吐文本片段 +
-            # split marker；主动发是一段完整消息，把片段拼成整段、去掉 split marker）。
-            # **渲染失败 / 超时不回退发 life 原文**（否则原问题复发）。**承重红线（codex
-            # 必改 2）**：真人回复路径下 render 会**吞掉** stream 异常 / content_filter /
-            # length，改 yield persona error / 截断文案（用户在等回复，给一句话比静默
-            # 好）；proactive 复用同一渲染层，但绝不能把「ERR / 遇到了问题 / 截断」当成功
-            # 内容主动发给真人。所以 proactive 显式传 ``on_error="raise"`` —— render 在
-            # 这三种失败下改**抛 RenderFailed** 而非 yield 错误文案，下面 try 兜住、走
-            # 「没发出去」喂回 life。产出为空（极端情况没吐有效内容）也当没发出去，不
-            # 出站一条空消息。
             try:
                 rendered = ""
                 async for piece in render_chat_turn(
                     turn_ctx,
                     outbound_message_id=proactive_message_id,
                     session_id=None,  # 主动发没有 chat session（不穿 chat 队列）
-                    channel=target.channel,
+                    channel=channel,
                     on_error="raise",  # proactive：渲染失败抛而非 yield 错误文案
                 ):
                     if piece:
@@ -568,23 +603,36 @@ def build_life_tools(
 
             await emit(
                 ChatResponseSegment(
-                    channel=target.channel,
+                    channel=channel,
                     message_id=proactive_message_id,
                     persona_id=persona_id,  # 发送者（worker 据它兜底选 bot 身份）
                     part_index=0,
                     session_id=None,        # 主动发没有 chat session
-                    chat_id=target.common_conversation_id,  # 真实 p2p 会话地址
-                    is_p2p=True,
+                    chat_id=chat_id,        # 真实会话地址（p2p / 群）
+                    is_p2p=is_p2p,
                     root_id=None,           # 主动发没有来源消息，不伪造 root
-                    user_id=target.user_id,
+                    user_id=user_id,
                     is_proactive=True,      # 复用 worker 既有 is_proactive 出站分支
-                    bot_name=target.bot_name,
+                    bot_name=bot_name,
                     lane=lane,              # 必须显式带：sink 不注入 header lane
                     content=rendered,       # 出站的是**渲染后的人设口径话**，不是意图原文
                     status="success",
                     is_last=True,           # 主动发是一段完整消息
                     full_content=rendered,
                 )
+            )
+
+        if isinstance(target, LarkP2PTarget):
+            # 真人（飞书私聊）→ 共享渲染 + 出站；is_p2p=True、chat_id=真实 p2p 会话 id。
+            await _render_and_emit_proactive(
+                key_suffix="p2p",
+                chat_id=target.common_conversation_id,
+                chat_scope="direct",  # 真人私聊场景（_scene_section p2p 分支）
+                chat_name="",
+                is_p2p=True,
+                user_id=target.user_id,
+                bot_name=target.bot_name,
+                channel=target.channel,
             )
             send_seq = next_seq
             # 诚实返回（codex 必改 2，bezhai 决策）：给真人发是异步的 —— emit 只是把
@@ -595,9 +643,27 @@ def build_life_tools(
             # 可知的失败（UndeliverableRecipient）已在上面 resolve_delivery 处 fail-loud。
             return "已发出（消息发往 ta 的手机，异步送达、不保证一定送到）"
 
-        # resolver 理论上只返回 MailboxTarget / LarkP2PTarget（其余都 fail-loud 抛
-        # UndeliverableRecipient），走到这里说明出现了未知投递目标类型——不静默吞，
-        # 抛错由 @tool_error 收成 outcome 喂回 life。
+        if isinstance(target, GroupTarget):
+            # 群（飞书群）→ 共享渲染 + 出站；is_p2p=False、chat_id=群 conversation_id、
+            # bot_name=该 persona 在群里的 active bot（resolver 钉死）。chat_scope='group'
+            # + 群名让她的渲染上下文是「在群聊『X』里说话」而不是私聊（spec Task 2）。
+            await _render_and_emit_proactive(
+                key_suffix="group",
+                chat_id=target.common_conversation_id,
+                chat_scope="group",
+                chat_name=target.display_name,
+                is_p2p=False,
+                user_id=None,  # 群主动发不指向某个真人
+                bot_name=target.bot_name,
+                channel=target.channel,
+            )
+            send_seq = next_seq
+            # 群同 p2p 是异步出站（emit 到 chat_response 队列 → worker 发飞书），措辞诚实。
+            return "已发出（消息发到那个群里，异步送达、不保证一定送到）"
+
+        # resolver 理论上只返回 MailboxTarget / LarkP2PTarget / GroupTarget（其余都
+        # fail-loud 抛 UndeliverableRecipient），走到这里说明出现了未知投递目标类型——
+        # 不静默吞，抛错由 @tool_error 收成 outcome 喂回 life。
         raise RuntimeError(
             f"uid={uid!r} 解析出未知的投递目标类型 {type(target).__name__}，发不了。"
         )

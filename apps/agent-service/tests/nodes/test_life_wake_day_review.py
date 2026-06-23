@@ -97,13 +97,18 @@ class _FakeAgent:
 
     async def run(self, messages, *, prompt_vars=None, context=None,
                   session_id=None, max_retries=None):
-        self.run_calls.append({"messages": messages})
+        self.run_calls.append({"messages": messages, "prompt_vars": prompt_vars})
         return Message(role=Role.ASSISTANT, content="ok")
 
     @classmethod
     def last_stimulus(cls) -> str:
         assert cls.instances and cls.instances[-1].run_calls
         return cls.instances[-1].run_calls[-1]["messages"][0].text()
+
+    @classmethod
+    def last_prompt_vars(cls) -> dict:
+        assert cls.instances and cls.instances[-1].run_calls
+        return cls.instances[-1].run_calls[-1]["prompt_vars"]
 
 
 # latest 未单独铺设时的哨兵：收口现读与轮始快照相同（本轮没 update 过状态）。
@@ -329,17 +334,20 @@ async def test_review_runs_after_round_closure(patched, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# life 侧注入：她最近一页昨天进 stimulus（取严格早于当前生活日的页，不读 marker）
+# life 侧注入：她最近一页昨天进 **prompt_vars[day_page]**（system prompt，每轮注入），
+# 不进 USER stimulus。取严格早于当前生活日的页，不读 marker。改放 system 而非 USER 的
+# 根因：当天 transcript 会被 fold 压掉这段（昨天页不是「今天经历」、fold 会概括掉它）、
+# 不能靠继承——所以每轮注入到 prompt_vars，不怕 fold、确定可见、稳定走 prompt cache。
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stimulus_injects_page_strictly_before_current_living_day(
+async def test_day_page_strictly_before_current_living_day_to_prompt_vars(
     patched, monkeypatch
 ):
-    """注入读口按「日期严格早于当前生活日」取页、完全不看 marker。铺设清晨回笼觉
-    后的坑场景：marker 已被快班推前到「今天」——旧读法会把当天凌晨刚写的短页错
-    当「上一页日子」；新读法按当前生活日做上界，拿到的是昨天那页。"""
+    """注入读口按「日期严格早于当前生活日」取页、完全不看 marker，结果进 prompt_vars[day_page]、
+    不进 USER stimulus。铺设清晨回笼觉后的坑场景：marker 已被快班推前到「今天」——旧读法
+    会把当天凌晨刚写的短页错当「上一页日子」；新读法按当前生活日做上界，拿到的是昨天那页。"""
     patched["snapshot"] = _snapshot(
         activity_type="study", day_reviewed_date="2026-06-10"  # marker 指着今天
     )
@@ -354,13 +362,11 @@ async def test_stimulus_injects_page_strictly_before_current_living_day(
 
     await _wake()
 
-    stimulus = _FakeAgent.last_stimulus()
-    assert "昨天最挂心的是那道没解出来的题。" in stimulus
-    assert "2026-06-09" in stimulus, "注入段要标明这页写的是哪一天"
-    # 位置：稳定前缀区（每轮都变的时刻行之前）
-    assert stimulus.index("昨天最挂心") < stimulus.index("现在是"), (
-        "昨天页该在时刻行之前（稳定前缀区，页天级才变）"
-    )
+    day_page = _FakeAgent.last_prompt_vars()["day_page"]
+    assert "昨天最挂心的是那道没解出来的题。" in day_page
+    assert "2026-06-09" in day_page, "注入段要标明这页写的是哪一天"
+    # 不进 USER stimulus
+    assert "昨天最挂心" not in _FakeAgent.last_stimulus(), "昨天页不再进 USER stimulus"
     # 读口收到的是「当前生活日」上界（now=2026-06-10 23:30 → 生活日 2026-06-10），
     # 而不是 marker 指着的日期。
     assert patched["page_reads"] == [
@@ -369,8 +375,8 @@ async def test_stimulus_injects_page_strictly_before_current_living_day(
 
 
 @pytest.mark.asyncio
-async def test_stimulus_injects_even_when_marker_absent(patched, monkeypatch):
-    """marker None（她自己没回顾过）但库里有更早的页（对账班补的）→ 照常注入：
+async def test_day_page_to_prompt_vars_even_when_marker_absent(patched, monkeypatch):
+    """marker None（她自己没回顾过）但库里有更早的页（对账班补的）→ 照常注入 prompt_vars：
     读口只认页的存在，marker 已降级为观测留痕、不再是指针。"""
     patched["snapshot"] = _snapshot(activity_type="study", day_reviewed_date=None)
     patched["day_page"] = DayPage(
@@ -384,12 +390,12 @@ async def test_stimulus_injects_even_when_marker_absent(patched, monkeypatch):
 
     await _wake()
 
-    assert "昨天最挂心的是那道没解出来的题。" in _FakeAgent.last_stimulus()
+    assert "昨天最挂心的是那道没解出来的题。" in _FakeAgent.last_prompt_vars()["day_page"]
 
 
 @pytest.mark.asyncio
-async def test_stimulus_injects_even_without_snapshot(patched, monkeypatch):
-    """没有 LifeState（首轮）也照常走读口——注入只依赖页、不依赖快照 / marker。"""
+async def test_day_page_to_prompt_vars_even_without_snapshot(patched, monkeypatch):
+    """没有 LifeState（首轮）也照常走读口 → 注入 prompt_vars——注入只依赖页、不依赖快照 / marker。"""
     patched["snapshot"] = None
     patched["day_page"] = DayPage(
         lane=_LANE,
@@ -402,16 +408,16 @@ async def test_stimulus_injects_even_without_snapshot(patched, monkeypatch):
 
     await _wake()
 
-    assert "昨天最挂心的是那道没解出来的题。" in _FakeAgent.last_stimulus()
+    assert "昨天最挂心的是那道没解出来的题。" in _FakeAgent.last_prompt_vars()["day_page"]
     assert patched["page_reads"] == [
         {"lane": _LANE, "persona_id": _PERSONA, "before_date": "2026-06-10"}
     ]
 
 
 @pytest.mark.asyncio
-async def test_stimulus_no_day_page_when_none_earlier(patched, monkeypatch):
-    """没有更早的页（只有今天凌晨的短页 / 完全无页，读口都返回 None）→ 整段
-    缺席、不补占位（诚实的真空，与现状「无页」路径同行为）。"""
+async def test_day_page_empty_string_when_none_earlier(patched, monkeypatch):
+    """没有更早的页（只有今天凌晨的短页 / 完全无页，读口都返回 None）→ prompt_vars[day_page]
+    是空字符串、不补占位（诚实的真空，与现状「无页」路径同行为）。"""
     patched["snapshot"] = _snapshot(
         activity_type="study", day_reviewed_date="2026-06-10"
     )
@@ -420,15 +426,16 @@ async def test_stimulus_no_day_page_when_none_earlier(patched, monkeypatch):
 
     await _wake()
 
+    assert _FakeAgent.last_prompt_vars()["day_page"] == "", "无更早页时 day_page 是空字符串"
     assert "上一页" not in _FakeAgent.last_stimulus()
 
 
 @pytest.mark.asyncio
-async def test_stimulus_day_page_read_failure_does_not_kill_round(
+async def test_day_page_read_failure_does_not_kill_round(
     patched, monkeypatch, caplog
 ):
-    """读页抛错 → 绝不杀 life 轮：本轮照常 run + 收口，注入段缺席、warning 留痕
-    （照 render_arc_awareness 的姿势：注入是上下文增强，失败只 log）。"""
+    """读页抛错 → 绝不杀 life 轮：本轮照常 run + 收口，prompt_vars[day_page] 空字符串、
+    warning 留痕（注入是上下文增强，失败只 log）。"""
     patched["snapshot"] = _snapshot(activity_type="study", day_reviewed_date=None)
 
     async def boom_read_day_page_before(*, lane, persona_id, before_date):
@@ -443,7 +450,7 @@ async def test_stimulus_day_page_read_failure_does_not_kill_round(
     assert _FakeAgent.instances and _FakeAgent.instances[-1].run_calls, (
         "读页失败本轮必须照常跑"
     )
-    assert "上一页" not in _FakeAgent.last_stimulus(), "失败时注入段整段缺席"
+    assert _FakeAgent.last_prompt_vars()["day_page"] == "", "失败时 day_page 是空字符串"
     assert patched["marked"] == [["e1"]], "本轮照常收口标已读"
     assert any(r.levelname == "WARNING" for r in caplog.records)
 

@@ -9,7 +9,11 @@ import asyncio
 
 import pytest
 
-from app.domain.chat_dataflow import ChatRequest
+from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment
+
+
+def _chat_segments(emitted):
+    return [item for item in emitted if isinstance(item, ChatResponseSegment)]
 
 
 def _stub_turn_ctx():
@@ -230,19 +234,20 @@ async def test_chat_node_split_two_segments_then_final(monkeypatch, base_request
 
     await cn.chat_node(base_request)
 
-    assert len(emitted) == 3
-    assert emitted[0].part_index == 0
-    assert emitted[0].content == "hello"
-    assert emitted[0].is_last is False
-    assert emitted[1].part_index == 1
-    assert emitted[1].content == "world"
-    assert emitted[1].is_last is False
-    assert emitted[2].part_index == 2
-    assert emitted[2].is_last is True
-    assert "foo" in emitted[2].content
-    assert emitted[2].full_content is not None
-    assert SPLIT not in emitted[2].full_content
-    for s in emitted:
+    segments = _chat_segments(emitted)
+    assert len(segments) == 3
+    assert segments[0].part_index == 0
+    assert segments[0].content == "hello"
+    assert segments[0].is_last is False
+    assert segments[1].part_index == 1
+    assert segments[1].content == "world"
+    assert segments[1].is_last is False
+    assert segments[2].part_index == 2
+    assert segments[2].is_last is True
+    assert "foo" in segments[2].content
+    assert segments[2].full_content is not None
+    assert SPLIT not in segments[2].full_content
+    for s in segments:
         assert s.lane == "dev"
         assert s.bot_name == "bot-x"
 
@@ -360,13 +365,14 @@ async def test_chat_node_caps_mid_segments_at_max_messages_minus_one(monkeypatch
 
     await cn.chat_node(base_request)
 
-    assert len(emitted) == 4
-    assert emitted[0].is_last is False
-    assert emitted[1].is_last is False
-    assert emitted[2].is_last is False
-    assert emitted[3].is_last is True
-    assert "p3" in emitted[3].full_content
-    assert "p4" in emitted[3].full_content
+    segments = _chat_segments(emitted)
+    assert len(segments) == 4
+    assert segments[0].is_last is False
+    assert segments[1].is_last is False
+    assert segments[2].is_last is False
+    assert segments[3].is_last is True
+    assert "p3" in segments[3].full_content
+    assert "p4" in segments[3].full_content
 
 
 @pytest.mark.asyncio
@@ -403,11 +409,12 @@ async def test_chat_node_no_split_emits_single_final_segment(monkeypatch, base_r
 
     await cn.chat_node(base_request)
 
-    assert len(emitted) == 1
-    assert emitted[0].part_index == 0
-    assert emitted[0].is_last is True
-    assert "only one piece" in emitted[0].content
-    assert emitted[0].full_content == "only one piece"
+    segments = _chat_segments(emitted)
+    assert len(segments) == 1
+    assert segments[0].part_index == 0
+    assert segments[0].is_last is True
+    assert "only one piece" in segments[0].content
+    assert segments[0].full_content == "only one piece"
 
 
 @pytest.mark.asyncio

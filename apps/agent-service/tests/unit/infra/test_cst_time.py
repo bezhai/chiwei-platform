@@ -132,6 +132,36 @@ def test_to_cst_display_passthrough_on_unparseable():
 
 
 # ---------------------------------------------------------------------------
+# to_cst_full —— 完整日期口径（年月日 + 星期 + 时分），喂 life 的「现在」时间锚
+# ---------------------------------------------------------------------------
+
+
+def test_to_cst_full_includes_date_weekday_and_time():
+    """to_cst_full 给完整口径：年月日 + 星期 + 时分 + CST。
+
+    life 的「现在是 X」时间锚要用它，而非只给时分的 to_cst_hm —— 她记日程 / 算
+    remind_at 时必须知道「今天是几号、星期几」才能把「5 分钟后」「周五」这类相对
+    时间换算成正确的绝对 ISO；只给时分她只能瞎填日期分量（线上 bug：remind_at
+    日期被填到过去，提醒永远不在你等的那一刻触发）。
+    """
+    # 真实 UTC 12:30 → CST 20:30，日期同为 2026-06-03（+8 后仍在当天）。
+    s = cst_time.to_cst_full("2026-06-03T12:30:00+00:00")
+    assert "2026-06-03" in s, f"必须含年月日（她算 remind_at 靠它），实际 {s!r}"
+    assert "20:30" in s
+    assert "CST" in s
+    # 星期从 datetime 推导（不手写，避免算错）：周一=0 … 周日=6。weekday 只看年月日、
+    # 与时区无关，2026-06-03 不跨天，naive 即可。
+    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    expected_wd = weekdays[datetime(2026, 6, 3).weekday()]
+    assert expected_wd in s, f"必须含星期 {expected_wd}，实际 {s!r}"
+
+
+def test_to_cst_full_passthrough_on_unparseable():
+    """无法解析的脏串：原样回显（同 to_cst_hm 的兜底，不静默吞）。"""
+    assert "这不是时间" in cst_time.to_cst_full("这不是时间")
+
+
+# ---------------------------------------------------------------------------
 # now_cst_iso —— 新写时间一律 CST aware ISO
 # ---------------------------------------------------------------------------
 

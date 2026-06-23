@@ -77,15 +77,25 @@ def _history_messages(
     return result
 
 
+# 会话 scope（DB 原值）→ build_inner_context 要的 chat_type 的映射。direct 私聊渲染成
+# 飞书 p2p 场景、group 群聊渲染成飞书群场景（_scene_section 群分支）。scope 是 DB 原值
+# （common_conversation.scope），chat_type 是 inner_context 的内部口径，两者钉死映射、
+# 不让上游直接传 chat_type（上游只知道 scope）。
+_SCOPE_TO_CHAT_TYPE = {"direct": "p2p", "group": "group"}
+
+
 async def build_proactive_chat_context(
     *,
     intent: str,
     persona_id: str,
     chat_id: str,
     user_id: str | None,
+    chat_scope: str = "direct",
+    chat_name: str = "",
     limit: int = 10,
+    since: str | None = None,
 ) -> ChatTurnContext:
-    """Build a render-ready context for a *proactive* (life → 真人) chat turn.
+    """Build a render-ready context for a *proactive* (life → 真人 / 群) chat turn.
 
     ``intent`` is what life decided to reach out about (the *what*); the render
     layer turns it into her actual outbound wording (the *how*). History is
@@ -94,8 +104,19 @@ async def build_proactive_chat_context(
     framing message), the resolved persona bundle, and the assembled
     inner_context. There is no "not found" None case: even a first-ever proactive
     (no history) still builds a context carrying just the intent framing message.
+
+    ``chat_scope`` 是会话的 DB 原值（``direct`` 私聊 / ``group`` 群聊），内部映射成
+    ``build_inner_context`` 要的 ``chat_type``（direct→p2p、group→group）；群场景把
+    ``chat_name`` 群名传下去，让她的渲染上下文是「在群聊『X』里说话」而不是私聊
+    （_scene_section 群分支）。默认 ``direct`` 让私聊路径行为不变。
+
+    ``since`` 是 proactive 历史增量水位（= 本轮 life 进入时的 ``LifeState.observed_at``，
+    可能 None）：透传给 ``find_recent_chat_messages``，只取水位之后真人新发的消息——治
+    她每轮全量拉旧话、对着早就说过的反复主动开口。``since`` 之后没有任何消息 → history
+    为空 → ``messages`` 只剩下面那条 intent 框架消息（她这次纯凭意图 + life 状态主动发，
+    不揪旧对话）。``since=None``（冷启 / 不带水位）退回原全量最近 ``limit`` 行为。
     """
-    history = await find_recent_chat_messages(chat_id=chat_id, limit=limit)
+    history = await find_recent_chat_messages(chat_id=chat_id, limit=limit, since=since)
 
     messages = _history_messages(history, persona_id=persona_id)
     # 意图作为最后一条 user 框架消息：它是这次主动开口的触发，驱动渲染产出她的出站话。
@@ -120,19 +141,22 @@ async def build_proactive_chat_context(
             logger.warning("[%s] proactive: resolve username %s failed: %s",
                            persona_id, user_id, e)
 
-    # 拼 inner_context（场景 + 生活状态 + 关系/昨天页 + 本子）。proactive 永远是飞书
-    # 私聊主动发 → chat_type="p2p"，trigger_user/username 指向这个真人。拼装失败只
-    # log、退回空串——inner_context 不能塌，渲染仍要能用更薄的 prompt 跑（对称
-    # build_human_chat_context）。
+    # 拼 inner_context（场景 + 生活状态 + 关系/昨天页 + 本子）。chat_type 由 chat_scope
+    # 映射（direct→p2p 私聊场景 / group→group 群场景）；群场景把群名传下去（_scene_section
+    # 群分支呈现「在群聊『X』里打字」）。未知 scope 兜底成 p2p（私聊是最保守的场景，不会
+    # 误把私聊渲染成群）。拼装失败只 log、退回空串——inner_context 不能塌，渲染仍要能用
+    # 更薄的 prompt 跑（对称 build_human_chat_context）。
+    chat_type = _SCOPE_TO_CHAT_TYPE.get(chat_scope, "p2p")
     inner_context = ""
     try:
         inner_context = await build_inner_context(
             chat_id=chat_id,
-            chat_type="p2p",
+            chat_type=chat_type,
             user_ids=[user_id] if user_id else [],
             trigger_user_id=user_id,
             trigger_username=trigger_username,
             persona_id=persona_id,
+            chat_name=chat_name,
         )
     except Exception as e:  # noqa: BLE001 — inner 拼装失败退回空串，不挡 context
         logger.error("proactive: failed to build inner context: %s", e)
@@ -145,5 +169,6 @@ async def build_proactive_chat_context(
         identity=persona.persona_lite,
         appearance=persona.appearance_detail,
         inner_context=inner_context,
+        reply_style=persona.default_reply_style,
         persona=persona,
     )

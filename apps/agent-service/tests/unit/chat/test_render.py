@@ -38,6 +38,7 @@ def _ctx(**overrides):
         "identity": "lite-body",
         "appearance": "looks",
         "inner_context": "inner-ctx",
+        "reply_style": "few-shot 口吻样例",
         "persona": _FakePersona(),
     }
     defaults.update(overrides)
@@ -143,6 +144,8 @@ async def test_render_chat_turn_streams_text_and_builds_prompt_vars(monkeypatch)
     assert pv["inner_context"] == "inner-ctx"
     assert pv["available_skills"] == "SKILLS"
     assert "complexity_hint" in pv
+    # per-persona 说话风格 {{reply_style}} 来自 context，原样进 prompt_vars
+    assert pv["reply_style"] == "few-shot 口吻样例"
     # features 决定模型覆盖
     assert captured["cfg"].model_id == "override-model"
     # AgentContext 透传 outbound id + chat_id,不反查源消息

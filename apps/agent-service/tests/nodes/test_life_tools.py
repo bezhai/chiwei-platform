@@ -2072,6 +2072,7 @@ def stub_directory(monkeypatch):
     断言渲染后的话；render-fail-no-emit 的测试各自覆写 ``render_raises`` / ``render_text``。
     """
     from app.domain.recipient_directory import (
+        GroupTarget,
         LarkP2PTarget,
         MailboxTarget,
         RecipientCandidate,
@@ -2081,6 +2082,7 @@ def stub_directory(monkeypatch):
     state: dict = {
         "search_calls": [],
         "resolve_calls": [],
+        "resolve_kwargs": [],
         "emitted": [],
         # 测试按需预置：search_recipients 返回的候选 / resolve_delivery 的解析结果。
         "candidates": [],
@@ -2098,8 +2100,9 @@ def stub_directory(monkeypatch):
         state["search_calls"].append(query)
         return state["candidates"]
 
-    async def fake_resolve_delivery(uid):
+    async def fake_resolve_delivery(uid, *, persona_id=None):
         state["resolve_calls"].append(uid)
+        state["resolve_kwargs"].append({"uid": uid, "persona_id": persona_id})
         if state["resolve_raises"] is not None:
             raise state["resolve_raises"]
         return state["resolve_result"]
@@ -2135,6 +2138,7 @@ def stub_directory(monkeypatch):
     state["_RecipientCandidate"] = RecipientCandidate
     state["_MailboxTarget"] = MailboxTarget
     state["_LarkP2PTarget"] = LarkP2PTarget
+    state["_GroupTarget"] = GroupTarget
     state["_UndeliverableRecipient"] = UndeliverableRecipient
     return state
 
@@ -2680,6 +2684,332 @@ async def test_send_message_to_person_idempotent_segment_key_stable_under_replay
         stub_directory["emitted"][0].part_index,
     )
     assert replay_key == first_key, "重投同序主动发段键必须稳定（幂等）"
+
+
+# --- send_message：解析投递目标时带上发送者 persona_id（群分支必需） ----------
+
+
+@pytest.mark.asyncio
+async def test_send_message_resolves_with_sender_persona_id(
+    stub_handlers, stub_directory
+):
+    """send_message 解析投递目标要把**发送者 persona_id** 透给 resolve_delivery。
+
+    群分支解析「该 persona 在这个群的 active bot」必须知道是哪个 persona 在发；persona/
+    user 分支不用它但带着也无害（resolver 只在 group 分支消费）。承重：resolve_delivery
+    收到的 persona_id == 本轮闭包绑定的 persona（akao），不是 None。
+    """
+    stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
+        persona_id="ayana"
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke({"uid": "persona:ayana", "content": "在吗"})
+
+    assert len(stub_directory["resolve_kwargs"]) == 1
+    assert stub_directory["resolve_kwargs"][0]["persona_id"] == "akao", (
+        "resolve_delivery 必须收到发送者 persona_id（群分支解析 bot 身份要用）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_passes_direct_scope_to_context(
+    stub_handlers, stub_directory
+):
+    """真人（p2p）分支构建 proactive context 传 chat_scope='direct'（私聊场景，不变）。"""
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    assert stub_directory["context_calls"][0].get("chat_scope") == "direct", (
+        "真人 p2p 分支传 chat_scope='direct'（私聊场景）"
+    )
+
+
+# --- proactive 增量水位：build_life_tools capture 本轮进入时水位 → 下传 since ---
+#
+# proactive 主动发原本每轮全量拉最近 limit 条历史 → 她对着早就说过的旧话反复主动开口。
+# 修复：build_life_tools 接「本轮进入时的 proactive 历史水位」（= 本轮进入时
+# snapshot.observed_at，可能 None），capture 进闭包；send_message 把它作为 since 传给
+# build_proactive_chat_context。**承重命门**：水位是「本轮进入时」捕获的值、capture 进
+# 闭包 —— 本轮工具循环里她可能先调 update_life_state 把 observed_at 刷成本轮时刻，若
+# send_message 现读 LifeState 取水位会被本轮污染、增量永远算空。下面用闭包 capture 的值
+# 验证它**不随本轮 observed_at 变**（即使 build_life_tools 的 observed_at 是本轮时刻、
+# 水位是上一轮的旧时刻，传下去的 since 仍是那个旧水位）。
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_forwards_round_entry_watermark_as_since(
+    stub_handlers, stub_directory
+):
+    """真人分支把「本轮进入时水位」作为 since 传给 proactive context（只取水位后新话）。"""
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    # observed_at 是本轮时刻；proactive_history_since 是上一轮想完的旧时刻（进入时水位）。
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+08:00",
+            proactive_history_since="2026-06-03T11:00:00+08:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    assert stub_directory["context_calls"][0].get("since") == "2026-06-03T11:00:00+08:00", (
+        "水位（本轮进入时 observed_at）要作为 since 传给 proactive context"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_group_forwards_round_entry_watermark_as_since(
+    stub_handlers, stub_directory
+):
+    """群分支同样把本轮进入时水位作为 since 传下去（对称 p2p）。"""
+    stub_directory["resolve_result"] = stub_directory["_GroupTarget"](
+        common_conversation_id="cc-group-1",
+        bot_name="chiwei",
+        display_name="🐢🐢群",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+08:00",
+            proactive_history_since="2026-06-03T11:00:00+08:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "group:cc-group-1", "content": "群里说一句"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    assert stub_directory["context_calls"][0].get("since") == "2026-06-03T11:00:00+08:00", (
+        "群分支也把本轮进入时水位作为 since 传给 proactive context"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_watermark_defaults_none_when_not_given(
+    stub_handlers, stub_directory
+):
+    """不给水位（冷启：snapshot 为 None）→ since=None（退回全量最近 limit、向后兼容）。"""
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    # 不传 proactive_history_since（默认 None，模拟冷启 snapshot 为 None）。
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+08:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    assert stub_directory["context_calls"][0].get("since") is None, (
+        "没给水位（冷启）→ since=None，退回原全量最近 limit 行为"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_since_not_polluted_by_round_update_life_state(
+    stub_handlers, stub_directory, monkeypatch
+):
+    """**承重红线**：本轮先调 update_life_state（刷 LifeState.observed_at 到本轮时刻）
+    再 send_message —— 传下去的 since 仍是「本轮进入时」capture 的旧水位，**不被本轮
+    update_life_state 污染**。
+
+    若 send_message 现读 LifeState 取水位，update_life_state 调过后 observed_at 已是本轮
+    时刻、增量永远算空（她什么旧话都揪不到、又或者全量复发）。这里让 update_life_state
+    的底层 save_life_state 把「当前 LifeState」改成本轮时刻，再 send_message，验证 since
+    仍是闭包 capture 的进入时旧水位（与本轮 observed_at 不同）。
+    """
+    entry_watermark = "2026-06-03T11:00:00+08:00"
+    round_observed_at = "2026-06-03T12:30:00+08:00"
+
+    # 模拟「本轮她调了 update_life_state 把 LifeState 刷到本轮时刻」：直接 monkeypatch
+    # save_life_state 为 no-op（它真实会 append 一版 observed_at=本轮时刻的新快照）；
+    # 关键是 send_message 取 since 不能去读 LifeState，只能用闭包 capture 的进入时水位。
+    async def fake_save_life_state(**kwargs):
+        return None
+
+    monkeypatch.setattr(lt, "save_life_state", fake_save_life_state)
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at=round_observed_at,
+            proactive_history_since=entry_watermark,
+        )
+    )
+    # 本轮工具循环：她先更新此刻状态（这会把 LifeState.observed_at 推到本轮时刻），
+    # 再主动发消息。
+    await tools["update_life_state"].invoke(
+        {"current_state": "在写作业", "response_mood": "专注", "activity_type": "study"}
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "在忙吗"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    since = stub_directory["context_calls"][0].get("since")
+    assert since == entry_watermark, (
+        f"since 必须是本轮进入时 capture 的旧水位 {entry_watermark!r}，"
+        f"不能被本轮 update_life_state 刷成本轮时刻 {round_observed_at!r}，实得 {since!r}"
+    )
+    assert since != round_observed_at, "水位被本轮污染就是这个 bug 的复现"
+
+
+# --- send_message → 群：emit 出站段（is_p2p=False、群 chat_id、群 bot_name） ----
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_group_renders_and_emits_group_segment(
+    stub_handlers, stub_directory
+):
+    """uid 解析成 GroupTarget（白名单群）→ life 给意图 → proactive 渲染 → emit 群出站段。
+
+    群分支参照 p2p 分支，但 is_p2p=False、chat_id=群 conversation_id、bot_name=群 bot；
+    proactive 契约不变（is_proactive=True、root_id 空、bot_name 必带、lane 显式带）。
+    """
+    from app.domain.chat_dataflow import ChatResponseSegment
+
+    stub_directory["resolve_result"] = stub_directory["_GroupTarget"](
+        common_conversation_id="cc-group-1",
+        bot_name="chiwei",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "刚那个话题我也想接一句～"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "group:cc-group-1", "content": "想接着群里的话题说一句"}
+    )
+
+    assert isinstance(out, str) and out
+    # 群不进信箱（群没有 life 信箱）。
+    assert stub_handlers["delivered"] == []
+    # 恰好 emit 一条群出站段。
+    assert len(stub_directory["emitted"]) == 1
+    seg = stub_directory["emitted"][0]
+    assert isinstance(seg, ChatResponseSegment)
+    assert seg.content == "刚那个话题我也想接一句～", "出站的是渲染后的话，不是意图原文"
+    assert "想接着群里的话题说一句" not in seg.content, "意图原文不直接出站"
+    assert seg.is_proactive is True, "主动发：复用 worker is_proactive 出站分支"
+    assert seg.is_p2p is False, "群投递不是私聊（承重断言：is_p2p=False）"
+    assert seg.chat_id == "cc-group-1", "用群 conversation_id 当 chat_id"
+    assert seg.bot_name == "chiwei", "群出站身份用 resolver 钉死的 bot_name"
+    assert seg.channel == "lark"
+    assert seg.persona_id == "akao", "persona_id 是发送者"
+    assert seg.lane == "coe-t3", "lane 必须显式带"
+    assert seg.is_last is True
+    assert not seg.root_id, "群主动发没有来源消息，root_id 不伪造"
+    assert seg.full_content == "刚那个话题我也想接一句～"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_group_passes_group_scope_and_name_to_context(
+    stub_handlers, stub_directory, monkeypatch
+):
+    """群分支构建 proactive context 传 chat_scope='group' + 群名（渲染成群场景，不是私聊）。
+
+    群名取 GroupTarget.display_name（resolver 解析时从群会话顺手带出的群名）；这里
+    stub build_proactive_chat_context 时记下入参，断言 chat_scope='group'、chat_id=群 id、
+    且 **chat_name 等于群名真传下去了**（codex 建议 2：之前 GroupTarget 没设群名、也没
+    断言 chat_name，display_name → chat_name 的接线没被任何测试守住）。
+    """
+    stub_directory["resolve_result"] = stub_directory["_GroupTarget"](
+        common_conversation_id="cc-group-1",
+        bot_name="chiwei",
+        display_name="🐢🐢群（飞书版）",
+        channel="lark",
+    )
+
+    # 让 fake context 构建也能拿到群名（send_message 群分支自己取群名传下去）。
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "group:cc-group-1", "content": "群里说一句"}
+    )
+
+    assert len(stub_directory["context_calls"]) == 1
+    cc = stub_directory["context_calls"][0]
+    assert cc["intent"] == "群里说一句"
+    assert cc["persona_id"] == "akao"
+    assert cc["chat_id"] == "cc-group-1", "群 conversation_id 当 chat_id（带群历史）"
+    assert cc.get("chat_scope") == "group", "群分支传 chat_scope='group'（渲染成群场景）"
+    assert cc.get("chat_name") == "🐢🐢群（飞书版）", (
+        "GroupTarget.display_name（群名）必须真传给 build_proactive_chat_context 的 "
+        "chat_name —— 渲染上下文才是「在群聊『🐢🐢群（飞书版）』里说话」，不是无名群"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_group_render_failure_no_emit_feeds_back(
+    stub_handlers, stub_directory
+):
+    """群分支渲染失败 → 不出站、喂回 life「没发出去」（对称 p2p，不回退发意图原文）。"""
+    stub_directory["resolve_result"] = stub_directory["_GroupTarget"](
+        common_conversation_id="cc-group-1",
+        bot_name="chiwei",
+        channel="lark",
+    )
+    stub_directory["render_raises"] = RuntimeError("model timeout")
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "group:cc-group-1", "content": "想说点什么"}
+    )
+
+    assert stub_directory["emitted"] == [], "群渲染失败绝不出站"
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
 
 
 # --- send_message → 不可投递：tool error 喂回 life ------------------------
