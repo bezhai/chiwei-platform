@@ -55,6 +55,9 @@ from app.chat.render import render_chat_turn
 
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
+# module-level 引用书的模糊查找，让 read_book 模糊解析她报的书名、也让测试能 monkeypatch
+# （与 deliver_event / perform_act 同款）。
+from app.domain.book import find_books_by_title
 from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
@@ -852,6 +855,73 @@ def build_life_tools(
         )
         return render_notebook(entries, now=observed_at)
 
+    @tool_error("翻开这本书失败")
+    async def read_book(title: str) -> str:
+        """翻开一本你想读的书，读上一程（你自己想读了才调，读读停停都行）。
+
+        你心里想读哪本书（推荐你的人提过、或你自己本子记着），就把**书名**给它。它在你
+        手头的书里按书名找：
+
+          * 正好找到一本 → 你就拿起这本书读上一程（之后这本书会慢慢在你心里、你想聊
+            就聊；读读停停、甚至读不下去想放下，都随你）。
+          * 一本都没找到 / 一个书名对上好几本 → 它会如实告诉你、让你把书名说清一点再来
+            （它**绝不替你随便挑一本**——读哪本是你自己的事）。
+
+        这只手只管「翻开你指认的那一本、读一程」；你读了什么、读出什么感受，是你自己
+        读出来的，不在这里替你写。
+
+        Args:
+            title: 你想读的那本书的书名（你记得的说法就行，不必一字不差）。
+
+        Returns:
+            翻开了哪本书的一句中性确认；没找到 / 对上多本时一句如实说明（喂回你重报书名）。
+        """
+        # 模糊解析到她手头（(lane, persona) 隔离）书名对得上的候选。**工具据候选数判**、
+        # 绝不替她排序 / 取第一个 / 取最新（代码替她决策违宪）：
+        candidates = await find_books_by_title(
+            lane=lane, persona_id=persona_id, title=title
+        )
+        if not candidates:
+            # 0 命中：没这本书 → 报错喂回模型让她重报书名（不 emit、不乱选）。
+            raise ValueError(
+                f"你手头没有书名对得上「{title}」的书——换个说法、或确认下书名再来。"
+            )
+        if len(candidates) > 1:
+            # 多命中：认不准是哪本 → 把候选书名列出来喂回模型让她说清，**绝不替她选一本**
+            # （对称 look_up_contact 多候选不替她选）。
+            names = "、".join(f"《{c.title}》" for c in candidates)
+            raise ValueError(
+                f"「{title}」对上了好几本：{names}。你想读哪一本？把书名说清一点再来——"
+                "我不会替你随便挑一本。"
+            )
+
+        # 认准恰一本 → emit 一个 durable ReadingTriggered 开读（立即 emit、非定时器，仿
+        # act 的 durable 范式）。request_id 从本轮 base act_id + 这本书的 book_id 派生
+        # （keyed on book_id）：同一轮重复想读同一本（失败重试 / 整轮重投）得**同一**
+        # request_id → ReadingTriggered 按 (lane, request_id) 去重不重复消费、阅读 @node
+        # 也据它 turn 幂等查重；同轮读不同本 book_id 不同 → 各自唯一 request_id。带
+        # "read:" 前缀让它与 act / chat / note / send 的 seed 空间天然不相交（共用 base
+        # act_id）。uuid5 输出只含 hex + "-"。
+        book = candidates[0]
+        request_id = str(
+            uuid.uuid5(uuid.NAMESPACE_OID, f"{act_id}:read:{book.book_id}")
+        )
+        from app.nodes.reading import ReadingTriggered
+
+        await emit(
+            ReadingTriggered(
+                lane=lane,
+                request_id=request_id,
+                persona_id=persona_id,
+                book_id=book.book_id,
+                book_title=book.title,
+                occurred_at=observed_at,
+            )
+        )
+        # 中性确认（不替她编读后感受）：只陈述「你拿起这本书读了起来」这件客观事，
+        # 她读出什么感受是阅读任务揉成的印象、不在这里编。
+        return f"你拿起《{book.title}》读了起来。"
+
     @tool_error("查这件事失败")
     async def look_up(query: str) -> str:
         """心里有件具体的事、想知道某个真答案时，带着你想好的问题去网上查一查。
@@ -955,9 +1025,11 @@ def build_life_tools(
 
     # 全部基础工具常驻：update（更新此刻状态）+ act（做一件影响外部世界的事）+ chat
     # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 本子
-    # 三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed（没事
-    # 刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**——她退成纯事件反应者、不自排
-    # 下次醒；主动计划走本子里的日程（note 带 remind_at + 到点提醒），不靠空闹钟维持运转。
+    # 三件（note / edit_note / read_notebook）+ read_book（翻开一本书读一程）+ look_up
+    # （带问题查）+ browse_feed（没事刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**
+    # ——她退成纯事件反应者、不自排下次醒；主动计划走本子里的日程（note 带 remind_at +
+    # 到点提醒），不靠空闹钟维持运转。read_book 是读小说 Task 2：她指认一本书、emit 一个
+    # durable 触发让异步阅读 @node 读一程、揉印象（认不准就回问，不替她选书）。
     return [
         update_tool,
         act_tool_obj,
@@ -967,6 +1039,7 @@ def build_life_tools(
         Tool(note),
         Tool(edit_note),
         Tool(read_notebook),
+        Tool(read_book),
         Tool(look_up),
         Tool(browse_feed),
     ]

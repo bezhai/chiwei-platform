@@ -2,6 +2,7 @@
 
 from app.wiring import (  # noqa: F401
     admin,
+    book,
     chat,
     fetch_dataflow,
     life_dataflow,

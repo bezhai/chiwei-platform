@@ -52,6 +52,7 @@ import {
     storeLarkInboundMessage,
     withLarkInboundProjectionLock,
 } from '@plugins/lark/common-projector';
+import { selectBookFile, forwardBookFile, makeBookForwardDeps } from '@plugins/lark/book-ingest';
 
 async function upsertCommonBotPresence(
     commonConversationId: string,
@@ -171,6 +172,27 @@ export class LarkEventHandlers {
                     // 已投到目标 lane 的 inbound_lane 队列，本进程不再入库/发 MQ
                     // （目标 lane channel-server 消费后走入站后半段）。此处尚未
                     // buildLarkRuleMessage、还没写 lark store entry，无需 clear。
+                    return;
+                }
+
+                // ---- 书接入分流（读小说 Task 1）----
+                // 真人私聊发来的 txt/epub 文件不走文本 chat 链路，走专门的书接入路径：
+                // 下载 → base64 → POST agent-service 解析入库（只存书、不投信箱——她靠跟你
+                // 的真实对话知道这本书）。命中即在此 return（不派 RuleMessage / 不入 chat 库 /
+                // 不发 ChatTrigger）。非书文件（pdf / 视频 / 群文件）selectBookFile 返回 null、
+                // 照常走现状链路。
+                const bookFile = selectBookFile(inbound.content, inbound.conversation_scope);
+                if (bookFile) {
+                    await forwardBookFile(
+                        {
+                            lane: getLane() ?? 'prod',
+                            botName: botName ?? '',
+                            messageId: params.message.message_id,
+                            fileKey: bookFile.fileKey,
+                            fileName: bookFile.fileName,
+                        },
+                        makeBookForwardDeps(params.message.message_id),
+                    );
                     return;
                 }
 

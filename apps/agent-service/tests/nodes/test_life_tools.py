@@ -70,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat + look_up_contact + send_message + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
+    """常驻工具集：update_life_state + act + chat + look_up_contact + send_message + 本子三件 + read_book + look_up + browse_feed。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -87,6 +87,7 @@ def test_build_life_tools_returns_base_tools():
         "note",
         "edit_note",
         "read_notebook",
+        "read_book",
         "look_up",
         "browse_feed",
     }
@@ -3107,3 +3108,148 @@ def test_set_life_next_wake_at_no_longer_imported_in_life_tools():
     assert not hasattr(lt, "set_life_next_wake_at"), (
         "set_life_next_wake_at 不再有调用方，life_tools 不该再引用它"
     )
+
+
+# ---------------------------------------------------------------------------
+# read_book —— 她在 life 轮里指认一本书读（读小说 Task 2）
+# ---------------------------------------------------------------------------
+#
+# 入参是她**报的书名**（自然语言）。工具模糊解析到 BookMeta：
+#   * 认准恰一本 → emit 一个 durable ReadingTriggered 开读，返回中性确认（不替她编读后感）。
+#   * 没有 / 认不准（0 本 / 多本）→ @tool_error 喂回模型让她重报，**绝不自动选最新 / 最近一本**
+#     （代码替她决策违宪）。
+# request_id 从本轮 base act_id 派生（仿 note/act 的 per-seq 幂等），durable 重投幂等。
+
+
+import app.nodes.reading as reading_mod  # noqa: E402
+from app.domain.book import BookMeta  # noqa: E402
+
+
+def _book_meta(title: str, book_id: str, persona_id: str = "akao") -> BookMeta:
+    return BookMeta(
+        lane="coe-t3", book_id=book_id, persona_id=persona_id, title=title,
+        total_pages=10, content_hash="h", ingested_at="t",
+    )
+
+
+@pytest.fixture
+def stub_book_lookup(monkeypatch):
+    """find_books_by_title 打桩 + 捕获 emit 的 ReadingTriggered。"""
+    state: dict = {"hits": [], "emitted": [], "queried": []}
+
+    async def fake_find_books_by_title(*, lane, persona_id, title):
+        state["queried"].append({"lane": lane, "persona_id": persona_id, "title": title})
+        return state["hits"]
+
+    async def fake_emit(data, *, durability="durable"):
+        state["emitted"].append(data)
+
+    monkeypatch.setattr(lt, "find_books_by_title", fake_find_books_by_title)
+    monkeypatch.setattr(lt, "emit", fake_emit)
+    return state
+
+
+def test_read_book_tool_present_and_hides_bindings():
+    """read_book 是常驻工具，模型只看见 title（看不见 lane / persona / act_id）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    assert "read_book" in tools
+    params = tools["read_book"].definition.parameters["properties"]
+    assert set(params) == {"title"}, "模型只填书名，机制绑定不暴露"
+
+
+@pytest.mark.asyncio
+async def test_read_book_one_match_emits_trigger(stub_book_lookup):
+    """认准恰一本 → emit 一个 durable ReadingTriggered 开读，返回中性确认。"""
+    stub_book_lookup["hits"] = [_book_meta("人间失格", "book-ningen")]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    out = await tools["read_book"].invoke({"title": "人间失格"})
+    assert isinstance(out, str), "成功返回一句话（不是 @tool_error dict）"
+    # 中性确认：像「你拿起《X》读了起来」，不替她编读后感受
+    assert "人间失格" in out
+    assert len(stub_book_lookup["emitted"]) == 1
+    trig = stub_book_lookup["emitted"][0]
+    assert isinstance(trig, reading_mod.ReadingTriggered)
+    assert trig.lane == "coe-t3"
+    assert trig.persona_id == "akao"
+    assert trig.book_id == "book-ningen"
+    assert trig.book_title == "人间失格"
+    assert trig.request_id, "携带从本轮派生的 request_id（durable 重投幂等）"
+
+
+@pytest.mark.asyncio
+async def test_read_book_no_match_reasks_no_emit(stub_book_lookup):
+    """没有这本书（0 命中）→ @tool_error 喂回模型让她重报，不 emit、不乱选。"""
+    stub_book_lookup["hits"] = []
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    out = await tools["read_book"].invoke({"title": "不存在的书"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error", "回问喂回模型"
+    assert stub_book_lookup["emitted"] == [], "没认准就绝不开读"
+
+
+@pytest.mark.asyncio
+async def test_read_book_multiple_matches_reasks_no_autoselect(stub_book_lookup):
+    """模糊命中多本 → @tool_error 回问让她说清是哪本，**绝不自动选最新 / 最近一本**（违宪）。"""
+    stub_book_lookup["hits"] = [
+        _book_meta("夏天的故事 上", "book-up"),
+        _book_meta("夏天的故事 下", "book-down"),
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    out = await tools["read_book"].invoke({"title": "夏天的故事"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error", "多本回问、不替她选"
+    assert stub_book_lookup["emitted"] == [], "认不准就绝不替她选一本开读"
+
+
+@pytest.mark.asyncio
+async def test_read_book_queries_within_persona_lane(stub_book_lookup):
+    """模糊解析按 (lane, persona) 隔离查（只在她自己的书里找）。"""
+    stub_book_lookup["hits"] = [_book_meta("斜阳", "book-x")]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    await tools["read_book"].invoke({"title": "斜阳"})
+    q = stub_book_lookup["queried"][0]
+    assert q["lane"] == "coe-t3" and q["persona_id"] == "akao"
+
+
+@pytest.mark.asyncio
+async def test_read_book_request_id_idempotent_per_round(stub_book_lookup):
+    """同一轮同一本书重复调（失败重试）→ 派生同一 request_id（durable 重投幂等去重）。
+
+    base act_id 整轮重投稳定 + 同书序号稳定 → 同一件读书重投得同一 request_id，
+    ReadingTriggered 按 (lane, request_id) 去重不重复消费。
+    """
+    stub_book_lookup["hits"] = [_book_meta("人间失格", "book-ningen")]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="stable-round",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    await tools["read_book"].invoke({"title": "人间失格"})
+    await tools["read_book"].invoke({"title": "人间失格"})
+    ids = [t.request_id for t in stub_book_lookup["emitted"]]
+    assert len(ids) == 2
+    assert ids[0] == ids[1], "同轮同书重投得同一 request_id（durable 去重靠它）"
