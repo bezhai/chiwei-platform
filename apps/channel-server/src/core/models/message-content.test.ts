@@ -116,6 +116,21 @@ describe('MessageContentUtils filter methods with new types', () => {
         expect(MessageContentUtils.imageKeys(content)).toEqual(['img1', 'img2']);
     });
 
+    it('fileKeys() should only return file items (not media/video, not image)', () => {
+        const content = makeContent([
+            { type: ContentType.File, value: 'file1', meta: { file_name: 'a.txt' } },
+            { type: ContentType.Media, value: 'video1', meta: { file_name: 'v.mp4' } },
+            { type: ContentType.Image, value: 'img1' },
+            { type: ContentType.File, value: 'file2', meta: { file_name: 'b.epub' } },
+        ]);
+        expect(MessageContentUtils.fileKeys(content)).toEqual(['file1', 'file2']);
+    });
+
+    it('fileKeys() returns empty when there are no file items', () => {
+        const content = makeContent([{ type: ContentType.Text, value: 'hi' }]);
+        expect(MessageContentUtils.fileKeys(content)).toEqual([]);
+    });
+
     it('isTextOnly() should return false for non-text types', () => {
         const content = makeContent([
             { type: ContentType.Text, value: 'hello' },

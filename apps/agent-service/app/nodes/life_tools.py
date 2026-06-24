@@ -53,6 +53,11 @@ from app.agent.tools.search import search_web
 from app.chat.proactive_context import build_proactive_chat_context
 from app.chat.render import render_chat_turn
 
+# read_book 在她可见上下文边界内的文件里按名字认（决策 6）：可读文件候选由 life 轮把本轮
+# 已塞进 stimulus 的那批对话（冻结）里的文件项抽出、capture 进闭包（见 build_life_tools 的
+# readable_files 入参）—— 不重跑查询、不加遗忘阈值，真同一边界。
+from app.data.message_record import ReadableFile
+
 # module-level 引用 handler，让测试能 monkeypatch（与 mailbox / world_events 同款）。
 from app.data.queries.mailbox import deliver_event
 from app.domain.chat_dataflow import (
@@ -152,6 +157,7 @@ def build_life_tools(
     observed_at: str,
     schedule_reminders: dict | None = None,
     proactive_history_since: str | None = None,
+    readable_files: list[ReadableFile] | None = None,
 ) -> list[Tool]:
     """造这一轮 life 的工具集，把本轮机制绑定 capture 进闭包。
 
@@ -160,6 +166,11 @@ def build_life_tools(
         工具内给每件 act 派 ``per_act_id = uuid5(act_id, 本轮第 N 件序号)``，一轮多件
         各自唯一、同件重投幂等。
     ``observed_at`` —— 本轮观测时刻（ISO8601），快照 / 动作都用它，使重放一致。
+    ``readable_files`` —— 本轮她可见上下文边界内的可读文件候选（读小说 Task 2，决策 6）。
+        由 life 轮把**本轮已塞进 stimulus 的那批对话**（冻结的 recent_chats）里的文件项摊平、
+        capture 进闭包给 ``read_book`` 用：她在**这一轮看得见的同一批消息**里按文件名认要读
+        的文件，**不重跑查询**（避免可见边界漂移）、**不加"最近 N 天/条"遗忘阈值**（注册表
+        已没了、阈值替她遗忘违宪）。None / 空（没可见文件）→ read_book 一律回问。
     ``proactive_history_since`` —— 本轮 proactive 主动发的**历史增量水位**（= 本轮 life
         进入时读到的 ``LifeState.observed_at``，冷启 snapshot 为 None 时为 None）。capture
         进闭包，``send_message`` 飞书分支把它作为 ``since`` 传给
@@ -181,6 +192,10 @@ def build_life_tools(
     自设闹钟整条删了——她退成纯事件反应者，被事件激活才动、跑完不排下次，自主性靠
     prompt 给、主动计划走日程（上面的 notebook + 到点提醒）。所以不再有 self_wake / schedule。
     """
+
+    # 本轮她可见上下文边界内的可读文件候选（读小说 Task 2，决策 6）：capture 进闭包给
+    # read_book 用，None 归一成空列表（没可见文件 → read_book 一律回问）。
+    _readable_files = readable_files or []
 
     # 本轮已**确认成功落库**的 act 件数（round-scoped 序号，随这一轮的闭包活着）。
     # 它是**纯机制 seed**：只标识"这是本轮第几件已落库的 act"，绝不参与"她能不能做 /
@@ -855,6 +870,83 @@ def build_life_tools(
         )
         return render_notebook(entries, now=observed_at)
 
+    @tool_error("翻开这本书失败")
+    async def read_book(title: str) -> str:
+        """翻开一本你想读的书，读上一程（你自己想读了才调，读读停停都行）。
+
+        你心里想读哪本书（推荐你的人发过来、你在对话里看到过的那个文件），就把**书名**
+        给它。它在**你这阵子看得见的那些文件**里按书名找：
+
+          * 正好找到一个 → 你就拿起这个文件读上一程（之后它会慢慢在你心里、你想聊就聊；
+            读读停停、甚至读不下去想放下，都随你）。
+          * 一个都没找到 / 一个书名对上好几个 → 它会如实告诉你、让你把书名说清一点再来
+            （它**绝不替你随便挑一个**——读哪个是你自己的事）。
+
+        这只手只管「翻开你指认的那一个、读一程」；你读了什么、读出什么感受，是你自己
+        读出来的，不在这里替你写。
+
+        Args:
+            title: 你想读的那本书的书名（你记得的说法就行，不必一字不差）。
+
+        Returns:
+            翻开了哪个文件的一句中性确认；没找到 / 对上多个时一句如实说明（喂回你重报书名）。
+        """
+        # 在她可见上下文边界内的文件（冻结候选、不重跑查询、不加遗忘阈值——决策 6）里按
+        # file_name 大小写无关子串认。**工具据命中数判**、绝不替她排序 / 取第一个（违宪）：
+        needle = title.strip().casefold()
+        if not needle:
+            raise ValueError("你没说要读哪本——把书名说一下再来。")
+        candidates = [
+            f for f in _readable_files if needle in f.file_name.casefold()
+        ]
+        if not candidates:
+            # 0 命中：你看得见的文件里没有对得上的 → 报错喂回模型让她重报（不 emit、不乱选）。
+            raise ValueError(
+                f"你这阵子收到的文件里没有书名对得上「{title}」的——换个说法、"
+                "或确认下书名再来。"
+            )
+        if len(candidates) > 1:
+            # 多命中：认不准是哪个 → 把候选书名列出来喂回模型让她说清，**绝不替她选一个**
+            # （对称 look_up_contact 多候选不替她选）。
+            names = "、".join(f"《{c.file_name}》" for c in candidates)
+            raise ValueError(
+                f"「{title}」对上了好几个：{names}。你想读哪一个？把书名说清一点再来——"
+                "我不会替你随便挑一个。"
+            )
+
+        book = candidates[0]
+        # 认准恰一个 → emit 一个 durable ReadingTriggered 开读（立即 emit、非定时器，仿
+        # act 的 durable 范式）。候选的 tos_file 由 file_key 确定性派生（恒非空，见
+        # reading_source.derive_tos_file），所以这里不再因"tos_file 空"回问——取不到字节的
+        # fail-soft 移回阅读 agent 那一程（get-url None / fetch 失败 → 整程 fail-soft、印象
+        # 不动，正是 spec 验收口径"未入对象存储 → 整程 fail-soft"；codex T3 ①）。
+        # request_id 从本轮 base act_id + 这个**附件实例
+        # 身份** 派生（keyed on attachment_id）：同一轮重复想读同一个（失败重试 / 整轮重投）
+        # 得**同一** request_id → ReadingTriggered 按 (lane, request_id) 去重不重复消费、
+        # 阅读 @node 也据它 turn 幂等查重；同轮读不同附件 attachment_id 不同 → 各自唯一
+        # request_id。带 "read:" 前缀让它与 act / chat / note / send 的 seed 空间天然不相交
+        # （共用 base act_id）。uuid5 输出只含 hex + "-"。
+        request_id = str(
+            uuid.uuid5(uuid.NAMESPACE_OID, f"{act_id}:read:{book.attachment_id}")
+        )
+        from app.nodes.reading import ReadingTriggered
+
+        await emit(
+            ReadingTriggered(
+                lane=lane,
+                request_id=request_id,
+                persona_id=persona_id,
+                attachment_id=book.attachment_id,
+                book_title=book.file_name,  # 书名 = 原始文件名（随印象自带）
+                tos_file=book.tos_file,     # 对象存储引用，阅读 agent 读时按它取字节
+                file_name=book.file_name,   # 原始文件名，解码分流靠它
+                occurred_at=observed_at,
+            )
+        )
+        # 中性确认（不替她编读后感受）：只陈述「你拿起这个文件读了起来」这件客观事，
+        # 她读出什么感受是阅读任务揉成的印象、不在这里编。
+        return f"你拿起《{book.file_name}》读了起来。"
+
     @tool_error("查这件事失败")
     async def look_up(query: str) -> str:
         """心里有件具体的事、想知道某个真答案时，带着你想好的问题去网上查一查。
@@ -958,9 +1050,11 @@ def build_life_tools(
 
     # 全部基础工具常驻：update（更新此刻状态）+ act（做一件影响外部世界的事）+ chat
     # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 本子
-    # 三件（note / edit_note / read_notebook）+ look_up（带问题查）+ browse_feed（没事
-    # 刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**——她退成纯事件反应者、不自排
-    # 下次醒；主动计划走本子里的日程（note 带 remind_at + 到点提醒），不靠空闹钟维持运转。
+    # 三件（note / edit_note / read_notebook）+ read_book（翻开一本书读一程）+ look_up
+    # （带问题查）+ browse_feed（没事刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**
+    # ——她退成纯事件反应者、不自排下次醒；主动计划走本子里的日程（note 带 remind_at +
+    # 到点提醒），不靠空闹钟维持运转。read_book 是读小说 Task 2：她指认一本书、emit 一个
+    # durable 触发让异步阅读 @node 读一程、揉印象（认不准就回问，不替她选书）。
     return [
         update_tool,
         act_tool_obj,
@@ -970,6 +1064,7 @@ def build_life_tools(
         Tool(note),
         Tool(edit_note),
         Tool(read_notebook),
+        Tool(read_book),
         Tool(look_up),
         Tool(browse_feed),
     ]

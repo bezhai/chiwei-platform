@@ -16,6 +16,7 @@ from app.data.message_record import (
     CommonMessageRecord,
     LifeChatConversation,
     LifeChatMessage,
+    ReadableFile,
 )
 from app.data.models import (
     CommonAgentResponse,
@@ -734,19 +735,67 @@ async def find_persona_related_chats_recent(
         )
         async with auto_tx():
             rows = (await current_session().execute(msg_stmt)).all()
+        # 一批 (record, 发言 persona)：消息渲染与文件候选都从这同一批派生（同一边界）。
+        record_pairs = [(_record(msg), msg_persona) for msg, msg_persona in rows]
         messages = [
-            _life_chat_message(_record(msg), msg_persona, persona_id)
-            for msg, msg_persona in rows
+            _life_chat_message(record, msg_persona, persona_id)
+            for record, msg_persona in record_pairs
         ]
         messages.reverse()
+        # 文件候选（读小说 Task 2）：从**同一批已取出的消息 rows** 解析可读文件项 —— 零额外
+        # 查询、真同一边界（read_book 在她这一轮看得见的同一批消息里认文件，不重跑 recent
+        # 查询避免边界漂移）。每条消息每个 file 项一个 ReadableFile（attachment_id =
+        # 收到该文件那次派生、file_name 原始文件名、tos_file 对象存储引用可能为空=还没回填）。
+        file_candidates = _extract_file_candidates(
+            [record for record, _ in record_pairs]
+        )
         out.append(
             LifeChatConversation(
                 chat_id=chat_id,
                 scope=scope,
                 display_name=display_name,
                 messages=messages,
+                file_candidates=file_candidates,
             )
         )
+    return out
+
+
+def _extract_file_candidates(records: list[CommonMessageRecord]) -> list[ReadableFile]:
+    """从一批消息里解析出可读文件项 → ``ReadableFile`` 列表（读小说 Task 2）。
+
+    每条消息 content 过 ``parse_content`` 拿 ``.file_keys``（**只含 type=="file" 的真文件**，
+    media / 视频天然排除——codex T3 ④）/ ``.items``：每个文件项派一个 ``ReadableFile``——
+    ``attachment_id`` 由「收到该文件那次」派生（消息 id + file_key，决策 3 身份命门），
+    ``file_name`` 取该项 meta 的原始文件名（解码分流靠它），``tos_file`` 由 file_key
+    **确定性派生** ``files/<file_key>``（codex T3 ①：与 tool-service 存储命名契约，不依赖那条
+    image-only、对文件根本不跑的回填——否则文件 tos_file 恒空、read_book 永远开不了读）。
+    """
+    from app.chat.content_parser import parse_content
+    from app.domain.reading_source import derive_attachment_id, derive_tos_file
+
+    out: list[ReadableFile] = []
+    for record in records:
+        parsed = parse_content(record.content)
+        if not parsed.file_keys:
+            continue
+        # file_key → 该项 meta.file_name（同条消息里多个文件按各自项取名，按位置对齐）。
+        names: dict[str, str] = {}
+        for item in parsed.items:
+            if item.get("type") == "file":
+                key = item.get("value", "")
+                if key:
+                    names[key] = (item.get("meta") or {}).get("file_name") or ""
+        for file_key in parsed.file_keys:
+            out.append(
+                ReadableFile(
+                    attachment_id=derive_attachment_id(
+                        common_message_id=record.message_id, file_key=file_key
+                    ),
+                    file_name=names.get(file_key, ""),
+                    tos_file=derive_tos_file(file_key),
+                )
+            )
     return out
 
 

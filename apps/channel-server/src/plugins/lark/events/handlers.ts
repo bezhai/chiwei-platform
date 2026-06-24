@@ -44,6 +44,7 @@ import { enforceDecision } from '@core/channels/contracts';
 import { getCurrentLarkBotAppId, getCurrentLarkBotUnionId } from '@plugins/lark/bot-identity';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
+import { enqueueLarkFilePipeline } from '@plugins/lark/file-pipeline';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
 import {
     claimLarkInboundMessageForBot,
@@ -177,7 +178,7 @@ export class LarkEventHandlers {
                 // ---- 飞书 native 渠道专属副作用（仅在实际处理 lane 执行）----
                 // prod 入口若已分流到 inbound_lane.{lane}，不能先触发识图管线或
                 // common_bot_presence 写入；目标 lane 消费信封后会在本分支执行。
-                // 识图管线仍按飞书裸 message/file id 走飞书自己的管线；bot presence
+                // 识图 / 文件管线仍按飞书裸 message/file id 走自己的管线；bot presence
                 // 等 common projector 产出 common_conversation_id 后写 common 表，
                 // 不能把 oc_* 暴露给 agent-service。
                 upsertCommonBotPresence(
@@ -185,7 +186,11 @@ export class LarkEventHandlers {
                     context.getBotName(),
                     true,
                 ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
+                // 媒体轨：图片走识图管线、文件走文件管线。两者都是 best-effort 字节缓存
+                // （fire-and-forget、缓存失败不影响这条消息已无条件落进 common_message.content、
+                // 绝不 gate 入站、绝不替赤尾说话）。文件不再有专用书侧通道——文件就是文件。
                 enqueueLarkImagePipeline(message, botName);
+                enqueueLarkFilePipeline(message, botName);
 
                 // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
                 // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage

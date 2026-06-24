@@ -43,6 +43,20 @@ def _notebook_empty_by_default():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_current_book_by_default():
+    """Default the in-reading-book read to "no current book" (None) for every
+    build_inner_context test so they stay DB-free and the reading-impression
+    section never spuriously appears; tests that need a current book patch
+    ``find_current_book_impression`` inside their own block (an inner patch wins
+    over this autouse default). 书名由印象自带（book_title），注入不再 find_book_meta。"""
+    with patch(
+        "app.memory.context.find_current_book_impression",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
+
 def _no_arc():
     """Stub the arc read to a cold chain (None) so unit tests stay DB-free."""
     return patch(
@@ -946,6 +960,175 @@ async def test_notebook_read_failure_section_absent_context_still_builds():
         )
 
     assert _NOTEBOOK_HEADER_MARK not in out
+    assert "浩南" in out  # scene 照常
+    assert "散步" in out  # life 快照照常
+
+
+# ---------------------------------------------------------------------------
+# 读小说 Task 3（在读的书的印象进她脑子 · chat 侧）：inner_context 在 notebook 段
+# 之后、人生快照之前接上「她正在读的那本书」一段。
+#
+# 她在读那本书的印象（find_current_book_impression 取最近读过一程、状态仍「在读」那
+# 一本）每轮从 PG 重渲进她的 inner_context，让她聊天时书自然在心里。只渲染一本当前书
+# （读完/放下的 find_current_book_impression 已排除）；无在读书 / 读失败 → 整段缺席不
+# 补占位、inner_context 不塌（照 notebook 段的 fail-soft 姿势）。渲染复用
+# render_reading_impression（单一定义处，与 life 唤醒侧同一份）。
+# ---------------------------------------------------------------------------
+
+
+def _book_impression(impression, *, book_title="挪威的森林", attachment_id="msg-1:fk1",
+                     status="reading"):
+    from app.domain.book_impression import BookImpression
+
+    return BookImpression(
+        lane="prod",
+        persona_id="chiwei",
+        attachment_id=attachment_id,
+        book_title=book_title,
+        impression=impression,
+        pages_read=5,
+        status=status,
+        observed_at="2026-06-23T15:00:00+08:00",
+    )
+
+
+def _reading_read(impression):
+    # 书名由印象自带（book_title）—— 注入不再 find_book_meta。
+    return patch(
+        "app.memory.context.find_current_book_impression",
+        new=AsyncMock(return_value=impression),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reading_section_injected_when_reading_a_book():
+    """她在读一本书 → inner_context 接上「在读的书」段（含书名 + 印象正文，书名印象自带）。"""
+    imp = _book_impression("那个少年总让我想起小时候的自己。", book_title="挪威的森林")
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _reading_read(imp),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert "挪威的森林" in out, "在读时书名（印象自带）必须进 inner_context"
+    assert "那个少年总让我想起小时候的自己。" in out, "她的印象正文必须进 inner_context"
+
+
+@pytest.mark.asyncio
+async def test_reading_section_only_one_book():
+    """注入只渲染一本当前书：find_current_book_impression 已保证只返回一本，inner_context 只含这本。"""
+    imp = _book_impression("读到一半，停不下来。", book_title="百年孤独")
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _reading_read(imp),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert out.count("百年孤独") == 1, "inner_context 里只出现这一本当前书"
+
+
+@pytest.mark.asyncio
+async def test_reading_section_no_find_book_meta():
+    """书名从印象自带 book_title 渲、不查任何书注册表（注入去 find_book_meta，Task 3）。"""
+    import app.memory.context as ctx
+
+    assert not hasattr(ctx, "find_book_meta"), (
+        "注入点不再 import / 依赖 find_book_meta（书注册表已删）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reading_read_with_correct_lane_persona():
+    """接进 chat 的在读印象读口 lane / persona 口径正确（lane 走 current_deployment_lane()）。"""
+    cur = AsyncMock(return_value=None)
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        patch("app.memory.context.current_deployment_lane", return_value="ppe-x"),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        patch("app.memory.context.find_current_book_impression", new=cur),
+    ):
+        await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert cur.await_args.kwargs == {
+        "lane": "ppe-x",
+        "persona_id": "chiwei",
+    }, "在读印象读口 lane 走 current_deployment_lane()、persona 正确"
+
+
+@pytest.mark.asyncio
+async def test_no_current_book_section_absent_no_placeholder():
+    """无在读书（None）→ 整段缺席、绝不塞占位文案，inner_context 不塌。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _reading_read(None),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert "在读" not in out, "无当前书时不许出现任何在读书占位文案"
+    assert "散步" in out  # life 快照照常
+
+
+@pytest.mark.asyncio
+async def test_reading_read_failure_section_absent_context_still_builds():
+    """在读印象读失败 → 整段缺席但 inner_context 不塌（上下文增强不能塌掉 chat）。"""
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        patch(
+            "app.memory.context.find_current_book_impression",
+            new=AsyncMock(side_effect=RuntimeError("db down reading impression")),
+        ),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
     assert "浩南" in out  # scene 照常
     assert "散步" in out  # life 快照照常
 

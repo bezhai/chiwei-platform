@@ -451,6 +451,43 @@ async def test_watermark_captured_before_run_not_polluted_by_round_update(
 
 
 @pytest.mark.asyncio
+async def test_readable_files_threaded_from_recent_chats(patched, monkeypatch):
+    """本轮可见对话里的文件候选摊平 → 作为 readable_files 传给 build_life_tools（读小说 Task 2）.
+
+    read_book 在她**这一轮看得见的同一批消息**里认文件（冻结边界、不重跑查询）：life 轮把
+    recent_chats 各会话的 file_candidates 摊平成一个 list 传下去。
+    """
+    from app.data.message_record import (
+        LifeChatConversation,
+        ReadableFile,
+    )
+
+    f1 = ReadableFile(attachment_id="msg-1:fk1", file_name="斜阳.txt", tos_file="files/fk1")
+    f2 = ReadableFile(attachment_id="msg-2:fk2", file_name="人间失格.epub", tos_file="files/fk2")
+    patched["recent_chats"] = [
+        LifeChatConversation(
+            chat_id="c1", scope="direct", display_name=None, messages=[],
+            file_candidates=[f1],
+        ),
+        LifeChatConversation(
+            chat_id="c2", scope="group", display_name="家族群", messages=[],
+            file_candidates=[f2],
+        ),
+    ]
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    build_calls = _spy_build_life_tools(monkeypatch)
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(build_calls) == 1
+    threaded = build_calls[0].get("readable_files")
+    assert threaded is not None, "可见文件候选必须传给 build_life_tools（read_book 用它）"
+    ids = {f.attachment_id for f in threaded}
+    assert ids == {"msg-1:fk1", "msg-2:fk2"}, "各会话的文件候选摊平进一个 list"
+
+
+@pytest.mark.asyncio
 async def test_zero_update_still_marks_read(patched, monkeypatch):
     """0 次 update 也照常标已读（她看了但没改状态，正常 —— spec 决策 2）。"""
     patched["unread"] = [_envelope("e1", "外面在下雨")]
@@ -2648,6 +2685,127 @@ async def test_notebook_read_failure_section_absent_round_still_runs(patched, mo
     # 这一轮照常收口（读失败不影响唤醒主流程）
     assert patched["marked"] == [["e1"]]
     assert [s["current_state"] for s in patched["saved"]] == ["去开门"]
+
+
+# ---------------------------------------------------------------------------
+# 读小说 Task 3（在读的书的印象进她脑子 · life 唤醒侧）：每轮 stimulus 在 notebook
+# 段之后、「现在是 X」时刻行之前带「你正在读的那本书」一段。
+#
+# 她在 life 里在读那本书的印象（find_current_book_impression 取最近读过一程、状态仍
+# 「在读」那一本）每轮从 PG 重渲进她的输入，让她自然醒着时书就在心里。只渲染一本当前
+# 书（读完/放下的 find_current_book_impression 已排除）；无在读书 / 读失败 → 整段缺席
+# 不补占位、不炸轮（照 notebook / day_page 的 fail-soft 姿势）。渲染复用
+# render_reading_impression（单一定义处，与 chat inner_context 同一份）。
+# ---------------------------------------------------------------------------
+
+
+def _book_impression(impression, *, book_title="挪威的森林", attachment_id="msg-1:fk1",
+                     status="reading"):
+    from app.domain.book_impression import BookImpression
+
+    return BookImpression(
+        lane="coe-t3",
+        persona_id="akao",
+        attachment_id=attachment_id,
+        book_title=book_title,
+        impression=impression,
+        pages_read=5,
+        status=status,
+        observed_at="2026-06-23T15:00:00+08:00",
+    )
+
+
+@pytest.fixture
+def reading_patched(patched, monkeypatch):
+    """在 patched 之上打桩在读印象读口（find_current_book_impression）。
+
+    默认无在读书（None）—— 其它测试的 stimulus 里不该冒出读书段。需要在读书的测试在
+    自己 block 里设 state["reading_impression"]（书名由印象自带 book_title，不再 find_book_meta）。
+    可注入读失败（state["reading_raises"]）验 fail-soft。
+    """
+    patched.setdefault("reading_impression", None)
+    patched.setdefault("reading_raises", None)
+    patched.setdefault("reading_calls", [])
+
+    async def fake_find_current(*, lane, persona_id):
+        patched["reading_calls"].append({"lane": lane, "persona_id": persona_id})
+        if patched["reading_raises"] is not None:
+            raise patched["reading_raises"]
+        return patched["reading_impression"]
+
+    monkeypatch.setattr(lw, "find_current_book_impression", fake_find_current)
+    return patched
+
+
+@pytest.mark.asyncio
+async def test_stimulus_carries_reading_impression_when_reading(reading_patched, monkeypatch):
+    """她在读一本书 → 这一轮 USER stimulus 带「在读的书」段（含书名 + 印象正文，书名印象自带）。"""
+    reading_patched["reading_impression"] = _book_impression(
+        "那个少年总让我想起小时候的自己。", book_title="挪威的森林"
+    )
+    reading_patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "挪威的森林" in msg_blob, "在读时书名（印象自带）必须进 stimulus"
+    assert "那个少年总让我想起小时候的自己。" in msg_blob, "她的印象正文必须进 stimulus"
+
+
+@pytest.mark.asyncio
+async def test_stimulus_reading_section_only_one_book(reading_patched, monkeypatch):
+    """注入只渲染一本当前书：find_current_book_impression 已保证只返回一本，stimulus 只含这本。"""
+    reading_patched["reading_impression"] = _book_impression(
+        "读到一半，停不下来。", book_title="百年孤独", attachment_id="msg-2:fkc"
+    )
+    reading_patched["unread"] = [_envelope("e1", "动静")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    # 只调一次「当前在读那本」读口、只渲一本（不自己捞全部书）
+    assert len(reading_patched["reading_calls"]) == 1, "每轮只读一次当前在读那本"
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert msg_blob.count("百年孤独") == 1, "stimulus 里只出现这一本当前书"
+
+
+@pytest.mark.asyncio
+async def test_no_current_book_reading_section_absent(reading_patched, monkeypatch):
+    """无在读书（读完/放下/没开读 → find_current_book_impression 返回 None）→ 整段缺席。"""
+    reading_patched["reading_impression"] = None
+    reading_patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "在读" not in msg_blob, "无当前书时不许出现任何在读书占位文案"
+
+
+@pytest.mark.asyncio
+async def test_reading_injection_no_find_book_meta():
+    """life 注入点书名从印象自带 book_title 渲、不查任何书注册表（Task 3 去 find_book_meta）。"""
+    assert not hasattr(lw, "find_book_meta"), (
+        "life 注入点不再 import / 依赖 find_book_meta（书注册表已删）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reading_read_failure_section_absent_round_still_runs(reading_patched, monkeypatch):
+    """在读印象读失败 → 整段缺席但这一轮照常跑（注入是上下文增强、绝不炸唤醒）。"""
+    reading_patched["reading_raises"] = RuntimeError("db down reading impression")
+    reading_patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="去开门"))
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "门铃响了" in msg_blob, "当轮感知照常"
+    # 这一轮照常收口（读失败不影响唤醒主流程）
+    assert reading_patched["marked"] == [["e1"]]
+    assert [s["current_state"] for s in reading_patched["saved"]] == ["去开门"]
 
 
 # ---------------------------------------------------------------------------

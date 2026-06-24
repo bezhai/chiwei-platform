@@ -29,6 +29,7 @@ from app.nodes.life_wake import (
     life_schedule_reminder_node,
     life_wake_node,
 )
+from app.nodes.reading import ReadingTriggered, reading_node
 from app.runtime import Source, wire
 from app.world.engine import (
     WORLD_HEARTBEAT_SECONDS,
@@ -88,3 +89,12 @@ wire(EventArrived).debounce(
 # ScheduleReminderTick 是 transient（日程内容在 durable NotebookEntry 里），不挂时间源，
 # 只承载到点提醒回环这一种来源。
 wire(ScheduleReminderTick).to(life_schedule_reminder_node)
+
+# 异步读小说（读小说 Task 2）：她在 life 轮调 read_book 工具认准一本书 → emit 一个
+# durable ReadingTriggered（立即 emit、非定时器，仿 act 的 durable 范式）→ 这条 durable
+# wire 把它接到 reading_node，让异步阅读任务在 worker 进程消费（life 进程 emit、阅读
+# @node 进程跑昂贵的阅读 agent、读一程揉印象）。durable 让触发跨进程可达不丢（life 与
+# 阅读 @node 不在同一调用栈）。区别于 act 的 pull（ActPerformed 无 wire、world 自排 pull）：
+# 读书是她明确发起的一程任务、push 触发、有 wire。reading_node 内部走 turn 幂等查重 +
+# CAS 提交保证 durable 重投 / 整轮重试不重复跑 agent、不双推进页号（见 app/nodes/reading.py）。
+wire(ReadingTriggered).durable().to(reading_node)

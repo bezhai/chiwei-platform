@@ -79,6 +79,14 @@ export class MessageContentUtils {
             .map((item) => item.value);
     }
 
+    static fileKeys(content: MessageContent): string[] {
+        // Real files only (ContentType.File); videos are ContentType.Media and
+        // images ContentType.Image — neither belongs on the file media track.
+        return content.items
+            .filter((item) => item.type === ContentType.File)
+            .map((item) => item.value);
+    }
+
     static stickerKey(content: MessageContent): string {
         const stickerItem = content.items.find((item) => item.type === ContentType.Sticker);
         return stickerItem?.value ?? '';

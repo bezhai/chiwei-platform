@@ -42,6 +42,7 @@ dependencies = [
     "croniter>=6.2.2",
     "uuid6>=2025.0.1",
     "cnlunar>=0.2.4",
+    "ebooklib>=0.18",
 ]
 
 [project.optional-dependencies]

@@ -70,7 +70,7 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """不给 self_wake 时工具集是 update_life_state + act + chat + look_up_contact + send_message + 本子三件 + look_up + browse_feed（都是常驻基础工具）。"""
+    """常驻工具集：update_life_state + act + chat + look_up_contact + send_message + 本子三件 + read_book + look_up + browse_feed。"""
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -87,6 +87,7 @@ def test_build_life_tools_returns_base_tools():
         "note",
         "edit_note",
         "read_notebook",
+        "read_book",
         "look_up",
         "browse_feed",
     }
@@ -3107,3 +3108,170 @@ def test_set_life_next_wake_at_no_longer_imported_in_life_tools():
     assert not hasattr(lt, "set_life_next_wake_at"), (
         "set_life_next_wake_at 不再有调用方，life_tools 不该再引用它"
     )
+
+
+# ---------------------------------------------------------------------------
+# read_book —— 她在 life 轮里指认一个文件读（读小说 Task 2）
+# ---------------------------------------------------------------------------
+#
+# 入参是她**报的书名**（自然语言）。工具在**她这一轮可见上下文边界内的文件**（冻结的
+# readable_files，capture 进闭包、不重跑查询、不加遗忘阈值——决策 6）里按 file_name 子串认：
+#   * 认准恰一个、且字节已缓存进对象存储（tos_file 非空）→ emit 一个 durable ReadingTriggered
+#     开读，返回中性确认（不替她编读后感）。
+#   * 命中的文件还没缓存好（tos_file 空）→ @tool_error 回问「文件还没准备好」，不 emit
+#     （codex 必改 2：不能让她确认"拿起读了"、后台却啥也不发生）。
+#   * 没有 / 认不准（0 个 / 多个）→ @tool_error 喂回模型让她重报，**绝不自动选一个**（违宪）。
+# 触发携带附件实例身份 + tos_file + file_name；request_id 从本轮 base act_id + attachment_id
+# 派生（仿 note/act 的 per-seq 幂等），durable 重投幂等。
+
+
+import app.nodes.reading as reading_mod  # noqa: E402
+from app.data.message_record import ReadableFile  # noqa: E402
+
+
+def _readable(file_name: str, attachment_id: str, tos_file: str = "files/k"):
+    return ReadableFile(
+        attachment_id=attachment_id, file_name=file_name, tos_file=tos_file
+    )
+
+
+@pytest.fixture
+def capture_emit(monkeypatch):
+    """捕获 emit 的 ReadingTriggered。"""
+    state: dict = {"emitted": []}
+
+    async def fake_emit(data, *, durability="durable"):
+        state["emitted"].append(data)
+
+    monkeypatch.setattr(lt, "emit", fake_emit)
+    return state
+
+
+def _read_book_tools(readable_files):
+    return _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+            readable_files=readable_files,
+        )
+    )
+
+
+def test_read_book_tool_present_and_hides_bindings():
+    """read_book 是常驻工具，模型只看见 title（看不见 lane / persona / act_id / 文件候选）。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-23T12:30:00+08:00",
+        )
+    )
+    assert "read_book" in tools
+    params = tools["read_book"].definition.parameters["properties"]
+    assert set(params) == {"title"}, "模型只填书名，机制绑定不暴露"
+
+
+@pytest.mark.asyncio
+async def test_read_book_one_match_emits_trigger(capture_emit):
+    """在她可见文件里认准恰一个 → emit ReadingTriggered（附件实例身份 + tos_file + 文件名）。"""
+    tools = _read_book_tools(
+        [_readable("人间失格.txt", "msg-1:fk-ningen", tos_file="files/fk-ningen")]
+    )
+    out = await tools["read_book"].invoke({"title": "人间失格"})
+    assert isinstance(out, str), "成功返回一句话（不是 @tool_error dict）"
+    assert "人间失格" in out  # 中性确认：不替她编读后感受
+    assert len(capture_emit["emitted"]) == 1
+    trig = capture_emit["emitted"][0]
+    assert isinstance(trig, reading_mod.ReadingTriggered)
+    assert trig.lane == "coe-t3"
+    assert trig.persona_id == "akao"
+    assert trig.attachment_id == "msg-1:fk-ningen", "携带附件实例身份（不是注册 book_id）"
+    assert trig.tos_file == "files/fk-ningen", "携带对象存储引用，读时按它取字节"
+    assert trig.file_name == "人间失格.txt", "携带原始文件名（解码分流靠它）"
+    assert trig.book_title == "人间失格.txt", "书名 = 原始文件名（随印象自带）"
+    assert trig.request_id, "携带从本轮派生的 request_id（durable 重投幂等）"
+
+
+@pytest.mark.asyncio
+async def test_read_book_matches_by_filename_substring(capture_emit):
+    """按 file_name 大小写无关子串认（她报的书名不必和文件名一字不差）。"""
+    tools = _read_book_tools(
+        [_readable("斜阳.txt", "msg-2:fk-x", tos_file="files/fk-x")]
+    )
+    await tools["read_book"].invoke({"title": "斜阳"})
+    assert len(capture_emit["emitted"]) == 1
+    assert capture_emit["emitted"][0].attachment_id == "msg-2:fk-x"
+
+
+@pytest.mark.asyncio
+async def test_read_book_emits_even_without_backfill(capture_emit):
+    """codex T3 ①：候选的 tos 引用由 file_key 派生（恒非空）→ read_book 直接 emit、不卡死。
+
+    回填机制对文件根本不跑，文件项永远没回填过 tos_file —— 但 ReadableFile.tos_file 由
+    file_key 确定性派生（files/<file_key>），所以候选总能开读。取不到字节的 fail-soft 移回
+    阅读 agent 那一程（get-url None / fetch 失败 → 整程 fail-soft），read_book 不再因
+    "tos_file 空"回问不 emit（那条建立在错误前提上、已删）。
+    """
+    tools = _read_book_tools(
+        [_readable("斜阳.txt", "msg-1:fk-x", tos_file="files/fk-x")]
+    )
+    out = await tools["read_book"].invoke({"title": "斜阳"})
+    assert isinstance(out, str), "派生引用恒非空 → 直接开读，不回问"
+    assert len(capture_emit["emitted"]) == 1
+    assert capture_emit["emitted"][0].tos_file == "files/fk-x"
+
+
+@pytest.mark.asyncio
+async def test_read_book_no_match_reasks_no_emit(capture_emit):
+    """她可见文件里没有对得上的（0 命中）→ @tool_error 喂回模型让她重报，不 emit、不乱选。"""
+    tools = _read_book_tools(
+        [_readable("斜阳.txt", "msg-1:fk-x", tos_file="files/fk-x")]
+    )
+    out = await tools["read_book"].invoke({"title": "不存在的书"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error", "回问喂回模型"
+    assert capture_emit["emitted"] == [], "没认准就绝不开读"
+
+
+@pytest.mark.asyncio
+async def test_read_book_empty_visible_files_reasks(capture_emit):
+    """她可见上下文里压根没有文件（空候选）→ 回问、不 emit。"""
+    tools = _read_book_tools([])
+    out = await tools["read_book"].invoke({"title": "随便什么书"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error"
+    assert capture_emit["emitted"] == []
+
+
+@pytest.mark.asyncio
+async def test_read_book_multiple_matches_reasks_no_autoselect(capture_emit):
+    """模糊命中多个文件 → @tool_error 回问让她说清，**绝不自动选一个**（违宪）。"""
+    tools = _read_book_tools(
+        [
+            _readable("夏天的故事 上.txt", "msg-1:fk-up", tos_file="files/fk-up"),
+            _readable("夏天的故事 下.txt", "msg-1:fk-down", tos_file="files/fk-down"),
+        ]
+    )
+    out = await tools["read_book"].invoke({"title": "夏天的故事"})
+    assert isinstance(out, dict) and out["kind"] == "tool_error", "多个回问、不替她选"
+    assert capture_emit["emitted"] == [], "认不准就绝不替她选一个开读"
+
+
+@pytest.mark.asyncio
+async def test_read_book_request_id_idempotent_per_round(capture_emit):
+    """同一轮同一文件重复调（失败重试）→ 派生同一 request_id（durable 重投幂等去重）。
+
+    base act_id 整轮重投稳定 + 同附件实例身份稳定 → 同一件读书重投得同一 request_id，
+    ReadingTriggered 按 (lane, request_id) 去重不重复消费。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="stable-round",
+            observed_at="2026-06-23T12:30:00+08:00",
+            readable_files=[
+                _readable("人间失格.txt", "msg-1:fk-ningen", tos_file="files/fk-ningen")
+            ],
+        )
+    )
+    await tools["read_book"].invoke({"title": "人间失格"})
+    await tools["read_book"].invoke({"title": "人间失格"})
+    ids = [t.request_id for t in capture_emit["emitted"]]
+    assert len(ids) == 2
+    assert ids[0] == ids[1], "同轮同附件重投得同一 request_id（durable 去重靠它）"
