@@ -21,6 +21,7 @@ describe('enqueueFilePipelinePosts', () => {
             fileKeys: ['file_a', 'file_b'],
             botName: 'chiwei',
             innerSecret: 'sek',
+            lane: undefined,
             post: poster,
         });
 
@@ -33,6 +34,37 @@ describe('enqueueFilePipelinePosts', () => {
         expect(calls[0].headers['X-App-Name']).toBe('chiwei');
     });
 
+    it('injects x-ctx-lane from the pod lane so the fire-and-forget routes to the lane tool-service (not prod)', async () => {
+        // Root cause of "file never cached on coe": the dev-bot webhook reaches the
+        // coe channel-server without an x-ctx-lane header, so the request-scoped
+        // context lane is empty and the laneRouter routes this background call to
+        // prod tool-service (which lacks /api/file-pipeline/process -> 404). The
+        // reliable lane is the pod's static LANE, threaded here explicitly.
+        const { poster, calls } = makePoster();
+        await enqueueFilePipelinePosts({
+            messageId: 'om_1',
+            fileKeys: ['file_a'],
+            botName: 'chiwei',
+            innerSecret: 'sek',
+            lane: 'coe-world-life2',
+            post: poster,
+        });
+        expect(calls[0].headers['x-ctx-lane']).toBe('coe-world-life2');
+    });
+
+    it('omits x-ctx-lane on prod (no lane) so the call stays laneless', async () => {
+        const { poster, calls } = makePoster();
+        await enqueueFilePipelinePosts({
+            messageId: 'om_1',
+            fileKeys: ['file_a'],
+            botName: 'chiwei',
+            innerSecret: 'sek',
+            lane: undefined,
+            post: poster,
+        });
+        expect(calls[0].headers['x-ctx-lane']).toBeUndefined();
+    });
+
     it('does nothing when there are no file keys', async () => {
         const { poster, calls } = makePoster();
         await enqueueFilePipelinePosts({
@@ -40,6 +72,7 @@ describe('enqueueFilePipelinePosts', () => {
             fileKeys: [],
             botName: 'chiwei',
             innerSecret: 'sek',
+            lane: undefined,
             post: poster,
         });
         expect(calls.length).toBe(0);
@@ -57,6 +90,7 @@ describe('enqueueFilePipelinePosts', () => {
             fileKeys: ['bad', 'good'],
             botName: 'chiwei',
             innerSecret: 'sek',
+            lane: undefined,
             post: poster,
         });
         expect(calls).toEqual(['bad', 'good']);

@@ -12,6 +12,7 @@
 
 import type { Message } from 'core/models/message';
 import { laneRouter } from '@infrastructure/lane-router';
+import { getLane } from '@infrastructure/integrations/rabbitmq';
 
 type Poster = (
     path: string,
@@ -22,15 +23,22 @@ type Poster = (
 /**
  * 可单测核心：对每个 file key fire-and-forget 一条 POST，逐条吞错（best-effort，
  * 绝不把异常冒泡进入站流程）。注入 post 便于单测。
+ *
+ * ``lane`` 显式注入 ``x-ctx-lane``：这是 fire-and-forget 后台调用，**不能**靠
+ * laneRouter 从请求作用域 context 取 lane —— dev-bot webhook 经 gateway 打到本泳道
+ * channel-server 时不带 x-ctx-lane 头，请求 context 里的 lane 是空的，于是后台调用会
+ * 被 sidecar 路由到 prod tool-service（prod 没有 /api/file-pipeline/process → 404、
+ * 文件永远缓存不进对象存储）。pod 静态 LANE（getLane()）才是可靠的本泳道标识。
  */
 export async function enqueueFilePipelinePosts(args: {
     messageId: string;
     fileKeys: string[];
     botName: string | undefined;
     innerSecret: string | undefined;
+    lane: string | undefined;
     post: Poster;
 }): Promise<void> {
-    const { messageId, fileKeys, botName, innerSecret, post } = args;
+    const { messageId, fileKeys, botName, innerSecret, lane, post } = args;
     for (const fileKey of fileKeys) {
         try {
             await post(
@@ -40,6 +48,7 @@ export async function enqueueFilePipelinePosts(args: {
                     headers: {
                         Authorization: `Bearer ${innerSecret}`,
                         'X-App-Name': botName,
+                        ...(lane ? { 'x-ctx-lane': lane } : {}),
                     },
                 },
             );
@@ -64,6 +73,7 @@ export function enqueueLarkFilePipeline(message: Message, botName: string | unde
         fileKeys,
         botName,
         innerSecret: process.env.INNER_HTTP_SECRET,
+        lane: getLane(),
         post: (path, body, opts) =>
             toolClient.post(path, body, { headers: opts.headers as Record<string, string> }),
     });
