@@ -1,13 +1,17 @@
-"""BookImpression — 赤尾对一本书的滚动印象（读小说 Task 2 的记忆底子）.
+"""BookImpression — 赤尾对一个文件的滚动印象（读小说 Task 3 的记忆底子）.
 
 模拟一个**会读书的人**对一本书的记忆，不是做一个会读书的 agent：她对一本书的记忆是
 **单条、滚动、覆盖式重写**的第一人称有损印象（靠 reactions、不靠 plot summary），读得
 越多旧的越糊、近的越清。选它而不是「章节梗概 + 人物表」那种结构化档案——后者会把她变成
 读取机器，丢掉「她是个读书的人」（spec key decision 1）。
 
-一份印象 = 第一人称印象正文 + 读到第几页 + 开读后状态（在读 / 读完 / 放下）。印象 Data
-只承载**开读后**的生命周期；「推荐未开读」不落任何状态（就是信箱里那条推荐消息 + 她
-爱记不记的本子，见 book_ingest）。
+印象挂在**附件实例身份**上（决策 3：收到该文件的那条消息 + 内容项，即 attachment_id =
+`(common_message_id, file_key)` 派生，**不是**注册的 book_id、**不是**对象存储 key）。书名
+随印象自带（``book_title``）——注入渲染不再查任何书注册表。
+
+一份印象 = 第一人称印象正文 + 书名 + 读到第几页 + 开读后状态（在读 / 读完 / 放下）。印象
+Data 只承载**开读后**的生命周期；她还没读的文件就只是对话里收到过的一个文件项，不落任何
+印象状态（系统不替她记一个"待读书架"——没有书注册表）。
 
 设计上钉死的几条：
 
@@ -21,15 +25,15 @@
     —— 并发 / 过期任务 / durable 重投用过时 ver 写入会被拒，不覆盖更新的印象、不双推进
     页号。读小说一程是异步任务，重投 / 部署中断重放都不双推进，靠这条 CAS 守住。
 
-  * **进度从机制派生、不从 LLM 文字抠**（项目红线）：``pages_read`` = 本次实际调用过
-    ``read(page_num)`` 的最大页号 +1（= 下次从第几页接着读），由阅读任务的外壳 / 工具
-    机制记录，**绝不靠阅读 agent 的文字自报页号**。读到 ``read_page`` 返回 None 即到
-    书尾，状态置「读完」、页号不越界。
+  * **进度从机制派生、不从 LLM 文字抠**（项目红线）：``pages_read`` = 本次实际连续读到
+    的前沿页号（= 下次从第几页接着读），由阅读任务的外壳 / 工具机制记录，**绝不靠阅读
+    agent 的文字自报页号**。读到越界页（现切返回 None 且页号已达 total_pages）即到书尾，
+    状态置「读完」、页号不越界。
 
   * **一次一本「当前书」**（spec key decision「印象靠每轮注入 context」）：Task 3 注入只
-    渲染**一本当前书** = 她最近读过一程、状态仍「在读」那一本（:func:`find_current_book_
-    impression`）。她开读另一本，旧的自然不再最近、淡出注入，**不靠「N 天没读就丢」这种
-    阈值替她遗忘**。
+    渲染**一本当前书** = 她最近读过一程、状态仍「在读」那一个附件实例（:func:`find_
+    current_book_impression`）。她开读另一个，旧的自然不再最近、淡出注入，**不靠「N 天没读
+    就丢」这种阈值替她遗忘**。
 
 ``observed_at`` 而非 ``updated_at``：``updated_at`` / ``created_at`` 是 migrator 自动加
 的保留列，不能拿来当业务字段名（同 LifeState.observed_at / NotebookEntry.noted_at 教训）。
@@ -55,17 +59,19 @@ CURRENT_STATUSES = frozenset({STATUS_READING})
 
 
 class BookImpression(Data):
-    """赤尾对一本书的滚动印象。as_latest（带 Version），Key = (lane, persona_id, book_id)。
+    """赤尾对一个文件的滚动印象。as_latest（带 Version），Key = (lane, persona_id, attachment_id)。
 
-    一份印象 = 第一人称印象正文 + 读到第几页（下次从这接着读）+ 开读后状态。每读一程
-    整篇覆盖重写（append 新版），读取取最新一版。Key 三键 = 泳道隔离 + 每人 + 每本书一条
-    版本链。
+    一份印象 = 第一人称印象正文 + 书名 + 读到第几页（下次从这接着读）+ 开读后状态。每读
+    一程整篇覆盖重写（append 新版），读取取最新一版。Key 三键 = 泳道隔离 + 每人 + 每个
+    **附件实例**一条版本链。``attachment_id`` 是收到该文件那次派生的 opaque 身份（决策 3）：
+    重发（新 common_message_id）= 新 attachment_id = 另一条版本链，两份独立印象不合并。
     """
 
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
-    book_id: Annotated[str, Key]
+    attachment_id: Annotated[str, Key]   # 附件实例身份（收到该文件那次派生），opaque 不反解
     ver: Annotated[int, Version] = 0
+    book_title: str       # 书名（= 收到时的原始 file_name），随印象自带、注入渲染不查注册表
     impression: str       # 第一人称滚动印象正文（reactions、有损、揉进旧印象）
     pages_read: int       # 读到第几页：下次从这一页接着读（= 实际 read 过的最大页号 +1）
     status: str           # 开读后生命周期：reading / finished / abandoned
@@ -81,7 +87,8 @@ async def save_impression(
     *,
     lane: str,
     persona_id: str,
-    book_id: str,
+    attachment_id: str,
+    book_title: str,
     impression: str,
     pages_read: int,
     status: str,
@@ -109,7 +116,8 @@ async def save_impression(
         BookImpression(
             lane=lane,
             persona_id=persona_id,
-            book_id=book_id,
+            attachment_id=attachment_id,
+            book_title=book_title,
             impression=impression,
             pages_read=pages_read,
             status=status,
@@ -122,9 +130,9 @@ async def save_impression(
 
 
 async def find_book_impression(
-    *, lane: str, persona_id: str, book_id: str
+    *, lane: str, persona_id: str, attachment_id: str
 ) -> BookImpression | None:
-    """读某 persona 对某本书的最新一版印象，没有则 ``None``（她还没开读这本）。
+    """读某 persona 对某个附件实例的最新一版印象，没有则 ``None``（她还没读这个文件）。
 
     照 notebook ``find_notebook_entry`` 的姿势薄封 ``select_latest`` 取最新一版。阅读任务
     的外壳读它拿「当前印象 + 从第几页接着读」喂给阅读 agent；CAS 提交也读它拿
@@ -132,7 +140,7 @@ async def find_book_impression(
     """
     return await select_latest(
         BookImpression,
-        {"lane": lane, "persona_id": persona_id, "book_id": book_id},
+        {"lane": lane, "persona_id": persona_id, "attachment_id": attachment_id},
     )
 
 
@@ -156,12 +164,12 @@ async def find_current_book_impression(
     from app.data.session import get_session
     from app.runtime.migrator import _table_name
 
-    # DISTINCT ON 每本书取最新一版（ver 最大），再在 Python 侧筛在读 + 取 observed_at
-    # 最近那本。只读、不改任何状态。
+    # DISTINCT ON 每个附件实例取最新一版（ver 最大），再在 Python 侧筛在读 + 取
+    # observed_at 最近那本。只读、不改任何状态。
     sql = (
-        f"SELECT DISTINCT ON (book_id) * FROM {_table_name(BookImpression)} "
+        f"SELECT DISTINCT ON (attachment_id) * FROM {_table_name(BookImpression)} "
         f"WHERE lane = :lane AND persona_id = :persona_id "
-        f"ORDER BY book_id ASC, ver DESC"
+        f"ORDER BY attachment_id ASC, ver DESC"
     )
     async with get_session() as s:
         r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
@@ -180,8 +188,10 @@ async def find_current_book_impression(
 _READING_HEADER = "【你正在读的那本书】"
 
 
-def render_reading_impression(impression: BookImpression, *, title: str) -> str:
+def render_reading_impression(impression: BookImpression) -> str:
     """把当前在读那本书渲成给模型看的一段文字 = 书名 + 这本书此刻在她心里的印象正文。
+
+    书名从印象自带的 ``book_title`` 取（Task 3：注入不再查任何书注册表 / find_book_meta）。
 
     **单一定义处**（宪法「禁止重复定义」）：Task 3 注入两处（life 唤醒 stimulus + chat
     inner_context）共用这一份渲染——在读的书是同一份内容，渲染只该有一处（照
@@ -191,4 +201,4 @@ def render_reading_impression(impression: BookImpression, *, title: str) -> str:
     框架腔的评判（她对这本书是什么感受由印象正文自己说，渲染不替她下结论）。**无书时
     的处理交给调用方**（返回空段、整段缺席），本函数只在有当前书时被调、必产非空文字。
     """
-    return f"{_READING_HEADER}《{title}》\n{impression.impression}"
+    return f"{_READING_HEADER}《{impression.book_title}》\n{impression.impression}"

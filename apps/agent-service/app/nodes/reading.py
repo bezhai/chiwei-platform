@@ -1,8 +1,9 @@
 """异步阅读 @node + durable 触发信号 — 读小说 Task 2.
 
-她在 life 轮里调读书工具认准一本书 → emit 一个 durable :class:`ReadingTriggered`
+她在 life 轮里调读书工具认准一个文件 → emit 一个 durable :class:`ReadingTriggered`
 （**立即 emit、非定时器**，仿 :class:`app.domain.world_events.ActPerformed` 的 durable
-范式：落 PG 跨进程可达、不丢）→ 这个 @node 消费它跑一程阅读任务。
+范式：落 PG 跨进程可达、不丢）→ 这个 @node 消费它跑一程阅读任务。触发携带的是**附件
+实例身份**（收到该文件那次）+ 对象存储引用 + 文件名，不再是注册的 book_id。
 
 @node 外壳负责 spec key decision 2 的 durable 幂等三条（最承重）：
 
@@ -49,23 +50,30 @@ logger = logging.getLogger(__name__)
 
 
 class ReadingTriggered(Data):
-    """durable 触发信号：某 persona 在 life 轮里决定读某本书一程（仿 ActPerformed）。
+    """durable 触发信号：某 persona 在 life 轮里决定读某个文件一程（仿 ActPerformed）。
 
-    life 读书工具认准一本书后直接 ``emit(ReadingTriggered(...))``——**立即 emit、非
+    life 读书工具认准一个文件后直接 ``emit(ReadingTriggered(...))``——**立即 emit、非
     定时器**（读读停停由她每次自己决定，不是起头后自走读完）。durable（非 transient）
     让它落 PG 跨进程可达（life 进程 emit、阅读 @node 进程消费）且不丢。
 
     自然键 ``(lane, request_id)``：``request_id`` 从 life 触发轮派生（仿 act_id 从 round
-    event_ids 派生），durable 重投 / 整轮重试用同一 ``(lane, request_id)`` 再 emit 一次靠
-    框架去重不重复消费；@node 内再用 request_id 做 turn 幂等查重（已提交过就跳过）。
-    lane 进 Key 是泳道隔离硬约束（同其它 durable Data）。
+    event_ids 派生，本任务从 ``act_id + "read:" + attachment_id`` 派生），durable 重投 /
+    整轮重试用同一 ``(lane, request_id)`` 再 emit 一次靠框架去重不重复消费；@node 内再用
+    request_id 做 turn 幂等查重（已提交过就跳过）。lane 进 Key 是泳道隔离硬约束。
+
+    载荷换成**读她收到的一个文件**所需的三样（不再是注册的 book_id）：
+      * ``attachment_id``：附件实例身份（收到该文件那次派生），印象按它 key（决策 3）。
+      * ``tos_file``：对象存储引用（``files/<file_key>``），阅读 agent 读时按它取字节。
+      * ``file_name``：原始文件名，解码分流靠它（file_key 不保证带后缀）+ 当书名。
     """
 
     lane: Annotated[str, Key]
     request_id: Annotated[str, Key]
     persona_id: str       # 谁要读
-    book_id: str          # 读哪本（工具已模糊解析到确定的 book_id）
-    book_title: str       # 书名（喂阅读 agent 的外壳用）
+    attachment_id: str    # 附件实例身份（收到该文件那次派生），印象按它 key
+    book_title: str       # 书名（= 原始 file_name，随印象自带、喂阅读 agent 的外壳用）
+    tos_file: str         # 对象存储引用（files/<file_key>），读时按它取字节
+    file_name: str        # 原始文件名（解码分流靠它）
     occurred_at: str      # 她决定读这一程的时刻 (ISO8601)
 
 
@@ -82,19 +90,19 @@ async def reading_node(trigger: ReadingTriggered) -> None:
     """
     lane = trigger.lane
     persona_id = trigger.persona_id
-    book_id = trigger.book_id
+    attachment_id = trigger.attachment_id
 
     current = await find_book_impression(
-        lane=lane, persona_id=persona_id, book_id=book_id
+        lane=lane, persona_id=persona_id, attachment_id=attachment_id
     )
 
     # turn 幂等查重（spec 三条之一）：这一程已经提交过了 → 跳过、绝不重复跑昂贵的阅读
     # agent（durable 重投 / 整轮重试会重复递这条触发）。仿 life_wake round marker 查重。
     if current is not None and current.last_request_id == trigger.request_id:
         logger.info(
-            "[reading] %s/%s book=%s request=%s already committed, skip "
+            "[reading] %s/%s attachment=%s request=%s already committed, skip "
             "(turn idempotent)",
-            lane, persona_id, book_id, trigger.request_id,
+            lane, persona_id, attachment_id, trigger.request_id,
         )
         return
 
@@ -103,24 +111,27 @@ async def reading_node(trigger: ReadingTriggered) -> None:
     # CAS 基线 ver：首次开读为 0（对齐 insert_append 的 COALESCE(MAX(ver),0) base）。
     expected_ver = current.ver if current is not None else 0
 
-    # 跑阅读 agent（昂贵）：它往后读一程、揉出新印象。read 工具只读、无 durable mutation，
-    # 整轮重放只重读、不写脏（重试安全的根）。失败 fail-soft 返回 None。
+    # 跑阅读 agent（昂贵）：它读时取这个附件实例的字节、现解码现分页、往后读一程、揉出
+    # 新印象。read 工具只读、无 durable mutation，整轮重放只重读、不写脏（重试安全的根）。
+    # 取不到字节 / 解码失败 / 超时 / 空产出都 fail-soft 返回 None。
     result = await run_reading_round(
         lane=lane,
         persona_id=persona_id,
-        book_id=book_id,
+        attachment_id=attachment_id,
         book_title=trigger.book_title,
+        tos_file=trigger.tos_file,
+        file_name=trigger.file_name,
         prior_impression=prior_impression,
         start_page=start_page,
         round_id=trigger.request_id,
     )
     if result is None:
-        # fail-soft：阅读 agent 失败（超时 / 抛错 / 空产出）→ 印象 / 页号都不动、不提交。
-        # 这一程不算，她下次自己想读时再触发一次重读（绝不写半截脏印象）。
+        # fail-soft：阅读 agent 失败（取不到字节 / 解码失败 / 超时 / 抛错 / 空产出）→
+        # 印象 / 页号都不动、不提交。这一程不算，她下次自己想读时再触发一次重读。
         logger.info(
-            "[reading] %s/%s book=%s request=%s reading round failed, "
+            "[reading] %s/%s attachment=%s request=%s reading round failed, "
             "impression/progress untouched (she can reread)",
-            lane, persona_id, book_id, trigger.request_id,
+            lane, persona_id, attachment_id, trigger.request_id,
         )
         return
 
@@ -130,11 +141,13 @@ async def reading_node(trigger: ReadingTriggered) -> None:
     # CAS 提交（spec 三条之二/之三）：真正的 durable mutation 在这里、在 agent 返回之后
     # 做一次。expected_ver 是上面读到的当前 ver——并发 / 过期任务（拿着过时印象的重放）
     # 写入会被拒（save 返回 False）、不覆盖更新的印象、不双推进页号。request_id 落进
-    # last_request_id 列，下次同一触发重投靠它 turn 幂等查重跳过。
+    # last_request_id 列，下次同一触发重投靠它 turn 幂等查重跳过。书名随印象自带（自带
+    # book_title，注入渲染不查注册表）。
     committed = await save_impression(
         lane=lane,
         persona_id=persona_id,
-        book_id=book_id,
+        attachment_id=attachment_id,
+        book_title=trigger.book_title,
         impression=result.impression,
         pages_read=result.pages_read,
         status=status,
@@ -146,14 +159,14 @@ async def reading_node(trigger: ReadingTriggered) -> None:
         # CAS 落败 = 期间有人 append（并发 / 过期任务抢先到更新的一版）：本程作废、
         # 不炸（这正是 CAS 要保护的「过期任务不覆盖更新印象」路径）。她可重读。
         logger.info(
-            "[reading] %s/%s book=%s request=%s CAS lost race "
+            "[reading] %s/%s attachment=%s request=%s CAS lost race "
             "(expected_ver=%d advanced), round abandoned (she can reread)",
-            lane, persona_id, book_id, trigger.request_id, expected_ver,
+            lane, persona_id, attachment_id, trigger.request_id, expected_ver,
         )
         return
 
     logger.info(
-        "[reading] %s/%s book=%s request=%s committed impression, "
+        "[reading] %s/%s attachment=%s request=%s committed impression, "
         "pages_read=%d status=%s",
-        lane, persona_id, book_id, trigger.request_id, result.pages_read, status,
+        lane, persona_id, attachment_id, trigger.request_id, result.pages_read, status,
     )

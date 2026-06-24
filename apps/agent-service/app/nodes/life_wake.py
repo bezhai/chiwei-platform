@@ -66,7 +66,6 @@ from app.data.queries.mailbox import (
 )
 from app.data.queries.messages import find_persona_related_chats_recent
 from app.domain.arc_awareness import render_arc_awareness
-from app.domain.book import find_book_meta  # module-level so tests can monkeypatch
 from app.domain.book_impression import (
     find_current_book_impression,  # module-level so tests can monkeypatch
     render_reading_impression,
@@ -824,6 +823,14 @@ async def _run_life_round(
     # 内容的安排，保留；自设闹钟（next_wake_at / schedule）是空时间点维持运转，Task 2 删了。
     schedule_reminders: dict = {}
 
+    # 她可见上下文边界内的可读文件候选（读小说 Task 2，决策 6）：把**本轮已塞进 stimulus
+    # 的那批对话**（上面读好的 recent_chats，冻结）里各会话的 file_candidates 摊平成一个
+    # list，capture 进工具闭包给 read_book 用——她在**这一轮看得见的同一批消息**里按文件名
+    # 认要读的文件，**不重跑查询**（避免可见边界漂移）、**不加遗忘阈值**（决策 6）。空 → []。
+    readable_files = [
+        f for conv in recent_chats for f in conv.file_candidates
+    ]
+
     tools = build_life_tools(
         lane=lane,
         persona_id=persona_id,
@@ -837,6 +844,8 @@ async def _run_life_round(
         # 把 observed_at 刷成本轮时刻，现读会让水位被本轮污染、增量永远算空。snapshot 为
         # None（冷启、从没活过一轮）→ 水位 None → since=None → 退回原全量最近 limit 行为。
         proactive_history_since=snapshot.observed_at if snapshot is not None else None,
+        # 她可见上下文里的可读文件候选（冻结本轮 recent_chats、不重跑查询——决策 6）。
+        readable_files=readable_files,
     )
 
     # session 按 (lane, persona, 今天) 派生：她当天所有唤醒的 LLM 调用归进同一条
@@ -931,9 +940,10 @@ async def _run_life_round(
 
     # 她正在读的那本书的印象（读小说 Task 3，life 侧注入）：每轮从 PG 重新读 + 渲染
     # 「当前在读那一本」（find_current_book_impression 取她最近读过一程、状态仍「在读」
-    # 那本——读完 / 放下的已排除，只渲一本当前书），让她自然醒着时书就在心里。这正是
-    # 印象不被 transcript 折叠吃掉的原因（每轮重读重渲，不靠 transcript 继承）。渲染复用
-    # render_reading_impression（单一定义处，与 chat inner_context 同一份）。位置在本子段
+    # 那个附件实例——读完 / 放下的已排除，只渲一本当前书），让她自然醒着时书就在心里。
+    # 这正是印象不被 transcript 折叠吃掉的原因（每轮重读重渲，不靠 transcript 继承）。
+    # 书名由印象自带（book_title），**不再 find_book_meta**（书注册表已删，Task 3）。渲染
+    # 复用 render_reading_impression（单一定义处，与 chat inner_context 同一份）。位置在本子段
     # 之后、recent_chats / 时刻行之前（稳定前缀区：在读印象按她读书的频率才变，比 recent_chats
     # 稳，排在它前面少打散前缀缓存）。信息差不破：只读她自己的 BookImpression（她的私人印象），
     # 绝不碰 world 全局快照。读失败 / 无当前书绝不杀整个 life 轮（照 notebook / day_page 的
@@ -942,17 +952,8 @@ async def _run_life_round(
         reading = await find_current_book_impression(lane=lane, persona_id=persona_id)
         reading_section = ""
         if reading is not None:
-            meta = await find_book_meta(lane=lane, book_id=reading.book_id)
-            if meta is None:
-                # orphan 印象（修复 C）：有在读印象、但书 meta 查不到（书被删 / 入库回滚、
-                # 印象残留）。绝不渲染裸 book_id 给她看——当作没有当前书、整段缺席。
-                logger.warning(
-                    "[life_wake] %s/%s reading impression book_id=%s has no meta "
-                    "(orphan), section absent",
-                    lane, persona_id, reading.book_id,
-                )
-            else:
-                reading_section = render_reading_impression(reading, title=meta.title)
+            # 书名由印象自带（book_title）—— 注入不再 find_book_meta（书注册表已删，Task 3）。
+            reading_section = render_reading_impression(reading)
     except Exception as e:
         logger.warning(
             "[life_wake] %s/%s failed to read current book impression, "

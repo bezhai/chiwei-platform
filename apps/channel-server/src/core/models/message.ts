@@ -101,6 +101,10 @@ export class Message {
         return MessageContentUtils.imageKeys(this.content);
     }
 
+    fileKeys(): string[] {
+        return MessageContentUtils.fileKeys(this.content);
+    }
+
     stickerKey(): string {
         return MessageContentUtils.stickerKey(this.content);
     }

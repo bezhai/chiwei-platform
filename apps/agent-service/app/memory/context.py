@@ -41,7 +41,6 @@ from __future__ import annotations
 import logging
 
 from app.domain.arc_awareness import render_arc_awareness
-from app.domain.book import find_book_meta
 from app.domain.book_impression import (
     find_current_book_impression,
     render_reading_impression,
@@ -197,11 +196,12 @@ async def _build_reading_impression_section(persona_id: str) -> str:
 
     chat 概念上是 life 的快照，但工程上 inner_context 是显式拼几段——在读的书得**显式
     接进去**才会出现在聊天里。读她**当前在读那一本**（find_current_book_impression 取她
-    最近读过一程、状态仍「在读」那本——读完 / 放下的已排除，只渲一本当前书），渲染复用
-    render_reading_impression（单一定义处，与 life 唤醒侧同一份）。每轮从 PG 重读重渲，
-    所以聊天时书自然在她心里。lane 口径与 _build_life_state 一致（进程级泳道，prod 归一
-    "prod"）。信息差不破：只读她自己的 BookImpression（她的私人印象），绝不碰 world 全局
-    快照。
+    最近读过一程、状态仍「在读」那个附件实例——读完 / 放下的已排除，只渲一本当前书），
+    渲染复用 render_reading_impression（单一定义处，与 life 唤醒侧同一份）。书名由印象
+    自带（book_title），**不再 find_book_meta**（书注册表已删，Task 3）。每轮从 PG 重读
+    重渲，所以聊天时书自然在她心里。lane 口径与 _build_life_state 一致（进程级泳道，prod
+    归一 "prod"）。信息差不破：只读她自己的 BookImpression（她的私人印象），绝不碰 world
+    全局快照。
 
     无当前书（None：读完 / 放下 / 没开读）/ 读失败 → 返回 ""，整段缺席不补占位。读失败
     只 log：在读印象注入是上下文增强，绝不能塌掉 chat（照 _build_notebook_section 的姿势）。
@@ -211,25 +211,15 @@ async def _build_reading_impression_section(persona_id: str) -> str:
         impression = await find_current_book_impression(
             lane=lane, persona_id=persona_id
         )
-        if impression is None:
-            return ""
-        meta = await find_book_meta(lane=lane, book_id=impression.book_id)
     except Exception as e:
         logger.warning(
             "[%s] Failed to read current book impression: %s", persona_id, e
         )
         return ""
 
-    if meta is None:
-        # orphan 印象（修复 C）：有在读印象、但书 meta 查不到（书被删 / 入库回滚、印象
-        # 残留）。绝不渲染裸 book_id 给她看（她长期盯着一个读不了的书 ID）——当作没有当前
-        # 书、整段缺席。
-        logger.warning(
-            "[%s] reading impression book_id=%s has no meta (orphan), section absent",
-            persona_id, impression.book_id,
-        )
+    if impression is None:
         return ""
-    return render_reading_impression(impression, title=meta.title)
+    return render_reading_impression(impression)
 
 
 # 两个正交维度的段标头（spec 决策 7：物理在场 / 通信介质各自标清，绝不压成一个

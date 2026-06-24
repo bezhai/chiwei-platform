@@ -48,17 +48,11 @@ def _no_current_book_by_default():
     """Default the in-reading-book read to "no current book" (None) for every
     build_inner_context test so they stay DB-free and the reading-impression
     section never spuriously appears; tests that need a current book patch
-    ``find_current_book_impression`` / ``find_book_meta`` inside their own block
-    (an inner patch wins over this autouse default)."""
-    with (
-        patch(
-            "app.memory.context.find_current_book_impression",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.memory.context.find_book_meta",
-            new=AsyncMock(return_value=None),
-        ),
+    ``find_current_book_impression`` inside their own block (an inner patch wins
+    over this autouse default). 书名由印象自带（book_title），注入不再 find_book_meta。"""
+    with patch(
+        "app.memory.context.find_current_book_impression",
+        new=AsyncMock(return_value=None),
     ):
         yield
 
@@ -982,13 +976,15 @@ async def test_notebook_read_failure_section_absent_context_still_builds():
 # ---------------------------------------------------------------------------
 
 
-def _book_impression(impression, *, book_id="bk1", status="reading"):
+def _book_impression(impression, *, book_title="挪威的森林", attachment_id="msg-1:fk1",
+                     status="reading"):
     from app.domain.book_impression import BookImpression
 
     return BookImpression(
         lane="prod",
         persona_id="chiwei",
-        book_id=book_id,
+        attachment_id=attachment_id,
+        book_title=book_title,
         impression=impression,
         pages_read=5,
         status=status,
@@ -996,39 +992,18 @@ def _book_impression(impression, *, book_id="bk1", status="reading"):
     )
 
 
-def _book_meta(book_id="bk1", title="挪威的森林"):
-    from app.domain.book import BookMeta
-
-    return BookMeta(
-        lane="prod",
-        book_id=book_id,
-        persona_id="chiwei",
-        title=title,
-        total_pages=20,
-        content_hash="h",
-        ingested_at="2026-06-23T09:00:00+08:00",
-    )
-
-
-def _reading_read(impression, meta):
-    return (
-        patch(
-            "app.memory.context.find_current_book_impression",
-            new=AsyncMock(return_value=impression),
-        ),
-        patch(
-            "app.memory.context.find_book_meta",
-            new=AsyncMock(return_value=meta),
-        ),
+def _reading_read(impression):
+    # 书名由印象自带（book_title）—— 注入不再 find_book_meta。
+    return patch(
+        "app.memory.context.find_current_book_impression",
+        new=AsyncMock(return_value=impression),
     )
 
 
 @pytest.mark.asyncio
 async def test_reading_section_injected_when_reading_a_book():
-    """她在读一本书 → inner_context 接上「在读的书」段（含书名 + 印象正文）。"""
-    imp = _book_impression("那个少年总让我想起小时候的自己。", book_id="bk-a")
-    meta = _book_meta(book_id="bk-a", title="挪威的森林")
-    cur, meta_patch = _reading_read(imp, meta)
+    """她在读一本书 → inner_context 接上「在读的书」段（含书名 + 印象正文，书名印象自带）。"""
+    imp = _book_impression("那个少年总让我想起小时候的自己。", book_title="挪威的森林")
     with (
         patch(
             "app.memory.context._build_life_state",
@@ -1037,8 +1012,7 @@ async def test_reading_section_injected_when_reading_a_book():
         _no_arc(),
         _no_relationship_page(),
         _no_day_page(),
-        cur,
-        meta_patch,
+        _reading_read(imp),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
@@ -1046,16 +1020,14 @@ async def test_reading_section_injected_when_reading_a_book():
             trigger_username="浩南", persona_id="chiwei",
         )
 
-    assert "挪威的森林" in out, "在读时书名必须进 inner_context（聊天能自然提到）"
+    assert "挪威的森林" in out, "在读时书名（印象自带）必须进 inner_context"
     assert "那个少年总让我想起小时候的自己。" in out, "她的印象正文必须进 inner_context"
 
 
 @pytest.mark.asyncio
 async def test_reading_section_only_one_book():
     """注入只渲染一本当前书：find_current_book_impression 已保证只返回一本，inner_context 只含这本。"""
-    imp = _book_impression("读到一半，停不下来。", book_id="bk-current")
-    meta = _book_meta(book_id="bk-current", title="百年孤独")
-    cur, meta_patch = _reading_read(imp, meta)
+    imp = _book_impression("读到一半，停不下来。", book_title="百年孤独")
     with (
         patch(
             "app.memory.context._build_life_state",
@@ -1064,8 +1036,7 @@ async def test_reading_section_only_one_book():
         _no_arc(),
         _no_relationship_page(),
         _no_day_page(),
-        cur,
-        meta_patch,
+        _reading_read(imp),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
@@ -1074,6 +1045,16 @@ async def test_reading_section_only_one_book():
         )
 
     assert out.count("百年孤独") == 1, "inner_context 里只出现这一本当前书"
+
+
+@pytest.mark.asyncio
+async def test_reading_section_no_find_book_meta():
+    """书名从印象自带 book_title 渲、不查任何书注册表（注入去 find_book_meta，Task 3）。"""
+    import app.memory.context as ctx
+
+    assert not hasattr(ctx, "find_book_meta"), (
+        "注入点不再 import / 依赖 find_book_meta（书注册表已删）"
+    )
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1071,6 @@ async def test_reading_read_with_correct_lane_persona():
         _no_relationship_page(),
         _no_day_page(),
         patch("app.memory.context.find_current_book_impression", new=cur),
-        patch("app.memory.context.find_book_meta", new=AsyncMock(return_value=None)),
     ):
         await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
@@ -1107,7 +1087,6 @@ async def test_reading_read_with_correct_lane_persona():
 @pytest.mark.asyncio
 async def test_no_current_book_section_absent_no_placeholder():
     """无在读书（None）→ 整段缺席、绝不塞占位文案，inner_context 不塌。"""
-    cur, meta_patch = _reading_read(None, None)
     with (
         patch(
             "app.memory.context._build_life_state",
@@ -1116,8 +1095,7 @@ async def test_no_current_book_section_absent_no_placeholder():
         _no_arc(),
         _no_relationship_page(),
         _no_day_page(),
-        cur,
-        meta_patch,
+        _reading_read(None),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",
@@ -1127,38 +1105,6 @@ async def test_no_current_book_section_absent_no_placeholder():
 
     assert "在读" not in out, "无当前书时不许出现任何在读书占位文案"
     assert "散步" in out  # life 快照照常
-
-
-@pytest.mark.asyncio
-async def test_orphan_impression_meta_missing_section_absent():
-    """修复 C：有在读印象但书 meta 查不到（书被删 / 入库回滚、印象残留）→ 整段缺席。
-
-    绝不渲染裸 book_id 给她看（她长期盯着一个读不了的书 ID）；当作没有当前书、该段缺席、
-    inner_context 不塌。
-    """
-    imp = _book_impression("读到一半的印象。", book_id="bk-orphan")
-    cur, meta_patch = _reading_read(imp, None)  # 有在读印象、但 meta=None
-    with (
-        patch(
-            "app.memory.context._build_life_state",
-            new=AsyncMock(return_value="你此刻在散步"),
-        ),
-        _no_arc(),
-        _no_relationship_page(),
-        _no_day_page(),
-        cur,
-        meta_patch,
-    ):
-        out = await build_inner_context(
-            chat_id="oc_a", chat_type="p2p",
-            user_ids=["u1"], trigger_user_id="u1",
-            trigger_username="浩南", persona_id="chiwei",
-        )
-
-    assert "bk-orphan" not in out, "meta 查不到时绝不渲染裸 book_id 给她看"
-    assert "在读" not in out, "orphan 印象当作没有当前书、整段缺席"
-    assert "读到一半的印象。" not in out, "读不了的孤儿印象正文也不该注入"
-    assert "散步" in out  # life 快照照常、inner_context 不塌
 
 
 @pytest.mark.asyncio
@@ -1176,7 +1122,6 @@ async def test_reading_read_failure_section_absent_context_still_builds():
             "app.memory.context.find_current_book_impression",
             new=AsyncMock(side_effect=RuntimeError("db down reading impression")),
         ),
-        patch("app.memory.context.find_book_meta", new=AsyncMock(return_value=None)),
     ):
         out = await build_inner_context(
             chat_id="oc_a", chat_type="p2p",

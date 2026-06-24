@@ -2,7 +2,7 @@
 
 import json
 
-from app.chat.content_parser import parse_content
+from app.chat.content_parser import parse_content, update_tos_files
 
 
 class TestParseContentV2:
@@ -390,3 +390,110 @@ class TestRender:
         """非 v2 输入，render() 返回原始文本"""
         result = parse_content("plain text")
         assert result.render() == "plain text"
+
+
+class TestFileAttachmentReference:
+    """文件内容项携带对象存储引用（读小说 Task 1 契约）。
+
+    文件项的"附件实例身份"是隐式的：它就是这条消息里那个位置上的文件项。对象存储
+    引用是挂在该文件项上的 ``tos_file`` 字段（和图片同款），承载这次实例的字节载荷。
+    """
+
+    def test_parse_exposes_file_keys(self):
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "[文件: 斜阳.txt]",
+                "items": [
+                    {
+                        "type": "file",
+                        "value": "file_k1",
+                        "meta": {"file_name": "斜阳.txt"},
+                    }
+                ],
+            }
+        )
+        result = parse_content(raw)
+        assert result.file_keys == ["file_k1"]
+
+    def test_parse_exposes_file_tos_reference(self):
+        """已回填的文件项 tos_file 进 tos_files 映射（按 file_key）。"""
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "[文件: 斜阳.txt]",
+                "items": [
+                    {
+                        "type": "file",
+                        "value": "file_k1",
+                        "meta": {"file_name": "斜阳.txt"},
+                        "tos_file": "files/file_k1",
+                    }
+                ],
+            }
+        )
+        result = parse_content(raw)
+        assert result.file_keys == ["file_k1"]
+        assert result.tos_files.get("file_k1") == "files/file_k1"
+
+    def test_update_tos_files_enriches_file_item(self):
+        """update_tos_files 把对象存储引用写进文件项（先有项、后回填引用）。"""
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "[文件: 斜阳.txt]",
+                "items": [
+                    {
+                        "type": "file",
+                        "value": "file_k1",
+                        "meta": {"file_name": "斜阳.txt"},
+                    }
+                ],
+            }
+        )
+        updated = update_tos_files(raw, {"file_k1": "files/file_k1"})
+        assert updated is not None
+        data = json.loads(updated)
+        file_item = data["items"][0]
+        assert file_item["type"] == "file"
+        assert file_item["tos_file"] == "files/file_k1"
+        # identity payload untouched: still the same file_key + name
+        assert file_item["value"] == "file_k1"
+        assert file_item["meta"]["file_name"] == "斜阳.txt"
+
+    def test_update_tos_files_noop_when_already_set(self):
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "[文件: 斜阳.txt]",
+                "items": [
+                    {
+                        "type": "file",
+                        "value": "file_k1",
+                        "meta": {"file_name": "斜阳.txt"},
+                        "tos_file": "files/file_k1",
+                    }
+                ],
+            }
+        )
+        assert update_tos_files(raw, {"file_k1": "files/file_k1"}) is None
+
+    def test_image_and_file_both_enriched_independently(self):
+        """同一条消息里图片项和文件项各自按自己的 key 回填，互不串。"""
+        raw = json.dumps(
+            {
+                "v": 2,
+                "text": "![image](img_k) [文件: a.txt]",
+                "items": [
+                    {"type": "image", "value": "img_k"},
+                    {"type": "file", "value": "file_k", "meta": {"file_name": "a.txt"}},
+                ],
+            }
+        )
+        updated = update_tos_files(
+            raw, {"img_k": "temp/img_k.jpg", "file_k": "files/file_k"}
+        )
+        assert updated is not None
+        data = json.loads(updated)
+        assert data["items"][0]["tos_file"] == "temp/img_k.jpg"
+        assert data["items"][1]["tos_file"] == "files/file_k"

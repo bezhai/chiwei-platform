@@ -44,6 +44,7 @@ import { enforceDecision } from '@core/channels/contracts';
 import { getCurrentLarkBotAppId, getCurrentLarkBotUnionId } from '@plugins/lark/bot-identity';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
+import { enqueueLarkFilePipeline } from '@plugins/lark/file-pipeline';
 import { larkContextStore } from '@plugins/lark/lark-context-store';
 import {
     claimLarkInboundMessageForBot,
@@ -52,7 +53,6 @@ import {
     storeLarkInboundMessage,
     withLarkInboundProjectionLock,
 } from '@plugins/lark/common-projector';
-import { selectBookFile, forwardBookFile, makeBookForwardDeps } from '@plugins/lark/book-ingest';
 
 async function upsertCommonBotPresence(
     commonConversationId: string,
@@ -175,31 +175,10 @@ export class LarkEventHandlers {
                     return;
                 }
 
-                // ---- 书接入分流（读小说 Task 1）----
-                // 真人私聊发来的 txt/epub 文件不走文本 chat 链路，走专门的书接入路径：
-                // 下载 → base64 → POST agent-service 解析入库（只存书、不投信箱——她靠跟你
-                // 的真实对话知道这本书）。命中即在此 return（不派 RuleMessage / 不入 chat 库 /
-                // 不发 ChatTrigger）。非书文件（pdf / 视频 / 群文件）selectBookFile 返回 null、
-                // 照常走现状链路。
-                const bookFile = selectBookFile(inbound.content, inbound.conversation_scope);
-                if (bookFile) {
-                    await forwardBookFile(
-                        {
-                            lane: getLane() ?? 'prod',
-                            botName: botName ?? '',
-                            messageId: params.message.message_id,
-                            fileKey: bookFile.fileKey,
-                            fileName: bookFile.fileName,
-                        },
-                        makeBookForwardDeps(params.message.message_id),
-                    );
-                    return;
-                }
-
                 // ---- 飞书 native 渠道专属副作用（仅在实际处理 lane 执行）----
                 // prod 入口若已分流到 inbound_lane.{lane}，不能先触发识图管线或
                 // common_bot_presence 写入；目标 lane 消费信封后会在本分支执行。
-                // 识图管线仍按飞书裸 message/file id 走飞书自己的管线；bot presence
+                // 识图 / 文件管线仍按飞书裸 message/file id 走自己的管线；bot presence
                 // 等 common projector 产出 common_conversation_id 后写 common 表，
                 // 不能把 oc_* 暴露给 agent-service。
                 upsertCommonBotPresence(
@@ -207,7 +186,11 @@ export class LarkEventHandlers {
                     context.getBotName(),
                     true,
                 ).catch((err) => console.warn('[CommonBotPresence] upsert failed:', err));
+                // 媒体轨：图片走识图管线、文件走文件管线。两者都是 best-effort 字节缓存
+                // （fire-and-forget、缓存失败不影响这条消息已无条件落进 common_message.content、
+                // 绝不 gate 入站、绝不替赤尾说话）。文件不再有专用书侧通道——文件就是文件。
                 enqueueLarkImagePipeline(message, botName);
+                enqueueLarkFilePipeline(message, botName);
 
                 // 全局 ID 就绪。派生平台无关 RuleMessage。飞书强绑能力（admin/群
                 // 信息/原始 message_id 等）不再旁挂在 RuleMessage 上：buildLarkRuleMessage

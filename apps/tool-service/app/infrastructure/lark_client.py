@@ -98,15 +98,22 @@ def get_client(bot_name: str) -> lark.Client:
     return client
 
 
-async def download_message_resource(bot_name: str, message_id: str, file_key: str) -> bytes:
-    """Download a resource (image/file) attached to a message, with retry."""
+async def download_message_resource(
+    bot_name: str, message_id: str, file_key: str, resource_type: str = "image"
+) -> bytes:
+    """Download a resource attached to a message, with retry.
+
+    ``resource_type`` is the Lark message-resource ``type`` ("image" | "file").
+    Images and files share this endpoint but the SDK request requires the matching
+    type — a file fetched as "image" fails. Defaults to "image" for legacy callers.
+    """
     client = get_client(bot_name)
     last_error = None
     for attempt in range(_MAX_RETRIES):
         request = GetMessageResourceRequest.builder() \
             .message_id(message_id) \
             .file_key(file_key) \
-            .type("image") \
+            .type(resource_type) \
             .build()
         response = await client.im.v1.message_resource.aget(request)
         if response.success():

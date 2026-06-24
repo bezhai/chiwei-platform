@@ -6,7 +6,7 @@ and ``chat_id`` means ``common_conversation_id``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
@@ -44,14 +44,32 @@ class LifeChatMessage:
 
 
 @dataclass(slots=True)
+class ReadableFile:
+    """她可见上下文里一个可读的文件项 —— read_book 在她看得见的文件里按名字认（读小说 Task 2）。
+
+    ``attachment_id`` 是这个附件实例的身份（收到该文件那次派生 = common_message_id + file_key，
+    见 reading_source.derive_attachment_id），印象按它 key（决策 3）。``file_name`` 原始文件名
+    （read_book 按它匹配 + 解码分流）。``tos_file`` 对象存储引用（``files/<file_key>``）——为空
+    表示字节还没缓存进对象存储（read_book 据此回问"文件还没准备好"、不开读）。
+    """
+
+    attachment_id: str
+    file_name: str
+    tos_file: str
+
+
+@dataclass(slots=True)
 class LifeChatConversation:
-    """life 醒来读对话时的一个会话分组 —— 一个会话 + 它最近一段消息。
+    """life 醒来读对话时的一个会话分组 —— 一个会话 + 它最近一段消息 + 可读文件候选。
 
     ``scope`` = ``"direct"``（私聊）/ ``"group"``（群）；``display_name`` 是群名，
-    私聊为 ``None``；``messages`` 按发生先后升序。
+    私聊为 ``None``；``messages`` 按发生先后升序。``file_candidates`` 是这批同一段消息里
+    解析出的可读文件项（读小说 Task 2：read_book 在**她这一轮看得见的同一批消息**里认文件，
+    零额外查询、真同一边界——不重跑 recent 查询避免边界漂移）。
     """
 
     chat_id: str
     scope: str
     display_name: str | None
     messages: list[LifeChatMessage]
+    file_candidates: list[ReadableFile] = field(default_factory=list)

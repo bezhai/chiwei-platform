@@ -33,7 +33,8 @@ class ParsedContent:
     )  # @提及的用户列表 [{user_id, name}]
     tos_files: dict[str, str] = field(
         default_factory=dict
-    )  # image_key → TOS file_name (已处理过的图片)
+    )  # image_key / file_key → TOS file_name (已缓存进对象存储的附件)
+    file_keys: list[str] = field(default_factory=list)  # 文件 key 列表（真文件，非图片/视频）
 
     def render(self, image_fn: ImageRenderFn | None = None) -> str:
         """从 items 结构化渲染文本
@@ -99,10 +100,14 @@ def parse_content(raw: str) -> ParsedContent:
             image_keys = [
                 item["value"] for item in items if item.get("type") == "image"
             ]
+            file_keys = [
+                item["value"] for item in items if item.get("type") == "file"
+            ]
+            # 图片与文件项都可携带对象存储引用 tos_file（同款附件缓存）；按各自 key 收集。
             tos_files = {
                 item["value"]: item["tos_file"]
                 for item in items
-                if item.get("type") == "image" and item.get("tos_file")
+                if item.get("type") in ("image", "file") and item.get("tos_file")
             }
             mentions = data.get("mentions", [])
             return ParsedContent(
@@ -111,6 +116,7 @@ def parse_content(raw: str) -> ParsedContent:
                 items=items,
                 mentions=mentions,
                 tos_files=tos_files,
+                file_keys=file_keys,
             )
     except (json.JSONDecodeError, TypeError):
         pass
@@ -121,9 +127,10 @@ def parse_content(raw: str) -> ParsedContent:
 
 
 def update_tos_files(raw: str, mapping: dict[str, str]) -> str | None:
-    """将 tos_file 写入 v2 content 的 image items，返回更新后的 JSON 字符串。
+    """将 tos_file 写入 v2 content 的 image / file items，返回更新后的 JSON 字符串。
 
-    如果没有需要更新的 item 或非 v2 格式，返回 None（无需更新）。
+    mapping 按附件 key（image_key 或 file_key）回填对象存储引用；图片和文件各按自己的
+    key 命中、互不串。如果没有需要更新的 item 或非 v2 格式，返回 None（无需更新）。
     """
     try:
         data = json.loads(raw)
@@ -134,7 +141,7 @@ def update_tos_files(raw: str, mapping: dict[str, str]) -> str | None:
 
     updated = False
     for item in data.get("items", []):
-        if item.get("type") == "image":
+        if item.get("type") in ("image", "file"):
             key = item.get("value")
             if key in mapping and item.get("tos_file") != mapping[key]:
                 item["tos_file"] = mapping[key]
