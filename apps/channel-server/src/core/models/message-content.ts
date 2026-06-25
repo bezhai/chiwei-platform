@@ -97,7 +97,12 @@ export class MessageContentUtils {
     }
 
     static clearText(content: MessageContent): string {
-        return TextUtils.clearText(this.fullText(content));
+        const text = content.items
+            .filter((item) => item.type === ContentType.Text)
+            .map((item) => item.value)
+            .join('');
+
+        return TextUtils.clearText(text);
     }
 
     static withoutEmojiText(content: MessageContent): string {

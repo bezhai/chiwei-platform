@@ -90,6 +90,30 @@ describe('MessageContentUtils.toMarkdown', () => {
     });
 });
 
+describe('MessageContentUtils.clearText', () => {
+    it('should remove structured mention items before command matching', () => {
+        const content: MessageContent = {
+            items: [
+                { type: ContentType.Mention, value: '赤尾工具人' },
+                { type: ContentType.Text, value: ' 发图 刻晴' },
+            ],
+            mentions: [{ id: 'on_bot', displayName: '赤尾工具人', botCommonUserId: 'bot-common' }],
+        };
+
+        expect(MessageContentUtils.fullText(content)).toBe('@赤尾工具人 发图 刻晴');
+        expect(MessageContentUtils.clearText(content)).toBe('发图 刻晴');
+    });
+
+    it('should still clean raw Lark mention tokens in text items', () => {
+        const content: MessageContent = {
+            items: [{ type: ContentType.Text, value: '@_user_1 发图 刻晴' }],
+            mentions: [],
+        };
+
+        expect(MessageContentUtils.clearText(content)).toBe('发图 刻晴');
+    });
+});
+
 describe('MessageContentUtils filter methods with new types', () => {
     const makeContent = (
         items: { type: ContentType; value: string; meta?: Record<string, unknown> }[],
