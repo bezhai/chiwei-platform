@@ -1,32 +1,9 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 
 import { StatusMode } from 'types/pixiv';
-import {
-    buildLocalPixivImageFilter,
-    mapLocalPixivImageDoc,
-    minioObjectName,
-    shouldUseLocalPixivImageSource,
-} from './local-source';
+import { buildLocalPixivImageFilter, mapLocalPixivImageDoc, minioObjectName } from './local-source';
 
 describe('local pixiv image source', () => {
-    const originalSource = process.env.PIXIV_IMAGE_SOURCE;
-
-    afterEach(() => {
-        if (originalSource === undefined) {
-            delete process.env.PIXIV_IMAGE_SOURCE;
-        } else {
-            process.env.PIXIV_IMAGE_SOURCE = originalSource;
-        }
-    });
-
-    it('is enabled only by PIXIV_IMAGE_SOURCE=local', () => {
-        process.env.PIXIV_IMAGE_SOURCE = 'local';
-        expect(shouldUseLocalPixivImageSource()).toBe(true);
-
-        process.env.PIXIV_IMAGE_SOURCE = 'remote';
-        expect(shouldUseLocalPixivImageSource()).toBe(false);
-    });
-
     it('builds a visible AND tag_or_author Mongo filter for 发图 tags', () => {
         const filter = buildLocalPixivImageFilter({
             status: StatusMode.VISIBLE,

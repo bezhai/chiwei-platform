@@ -17,10 +17,6 @@ let mongoClient: MongoClient | null = null;
 let mongoCollection: Collection<Document> | null = null;
 let minioClient: Minio.Client | null = null;
 
-export function shouldUseLocalPixivImageSource(): boolean {
-    return process.env.PIXIV_IMAGE_SOURCE === 'local';
-}
-
 export async function getLocalPixivImages(params: ListPixivImageDto): Promise<ImageForLark[]> {
     const collection = await getPixivImageCollection();
     const filter = buildLocalPixivImageFilter(params);
@@ -230,7 +226,7 @@ function env(key: string): string | undefined {
 function requireEnv(key: string): string {
     const value = env(key);
     if (!value) {
-        throw new Error(`${key} is required when PIXIV_IMAGE_SOURCE=local`);
+        throw new Error(`${key} is required for local pixiv image source`);
     }
     return value;
 }

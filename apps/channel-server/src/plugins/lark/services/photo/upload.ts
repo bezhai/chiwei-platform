@@ -1,20 +1,14 @@
-import { getOss } from '@aliyun/oss';
 import { resizeImage } from './image-resize';
 import { uploadImage } from '@lark-client';
-import { getPixivImages, reportLarkUpload } from 'infrastructure/integrations/aliyun/proxy';
 import { ImageForLark, ListPixivImageDto } from 'types/pixiv';
 import {
     getLocalPixivImageContent,
     getLocalPixivImages,
     reportLocalLarkUpload,
-    shouldUseLocalPixivImageSource,
 } from './local-source';
 
 export async function fetchUploadedImages(params: ListPixivImageDto): Promise<ImageForLark[]> {
-    const useLocalSource = shouldUseLocalPixivImageSource();
-    const images = useLocalSource
-        ? await getLocalPixivImages(params)
-        : await getPixivImages(params);
+    const images = await getLocalPixivImages(params);
 
     for (const image of images) {
         if (!image.image_key) {
@@ -24,9 +18,7 @@ export async function fetchUploadedImages(params: ListPixivImageDto): Promise<Im
                     continue;
                 }
 
-                const imageContent = useLocalSource
-                    ? await getLocalPixivImageContent(image.tos_file_name)
-                    : (await getOss().getFile(image.tos_file_name))?.content;
+                const imageContent = await getLocalPixivImageContent(image.tos_file_name);
                 if (!imageContent) {
                     console.error(`Failed to retrieve file for image: ${image.tos_file_name}`);
                     continue;
@@ -45,8 +37,7 @@ export async function fetchUploadedImages(params: ListPixivImageDto): Promise<Im
                 image.width = imgWidth;
                 image.height = imgHeight;
 
-                const report = useLocalSource ? reportLocalLarkUpload : reportLarkUpload;
-                await report({
+                await reportLocalLarkUpload({
                     pixiv_addr: image.pixiv_addr,
                     image_key: image.image_key,
                     width: imgWidth,
