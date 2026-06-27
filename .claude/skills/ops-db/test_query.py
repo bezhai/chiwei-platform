@@ -75,6 +75,46 @@ def test_unknown_db_still_rejected(captured):
         query.cmd_query(["@chiwei-prod", "SELECT", "1"])
 
 
+def test_curl_post_non_2xx_surfaces_server_error(monkeypatch, capsys):
+    def fake_run(cmd, capture_output, text):
+        return query.subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"error":"pq: relation \\"missing\\" does not exist"}\n500',
+            stderr="",
+        )
+
+    monkeypatch.setattr(query.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        query.curl_post("http://fake", {"sql": "SELECT * FROM missing"}, "tok")
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "HTTP 500" in err
+    assert 'pq: relation "missing" does not exist' in err
+
+
+def test_curl_get_non_2xx_surfaces_server_error(monkeypatch, capsys):
+    def fake_run(cmd, capture_output, text):
+        return query.subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"error":"mutation not found"}\n404',
+            stderr="",
+        )
+
+    monkeypatch.setattr(query.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        query.curl_get("http://fake/mutations/999", "tok")
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "HTTP 404" in err
+    assert "mutation not found" in err
+
+
 def test_available_list_includes_chiwei_test(capsys):
     with pytest.raises(SystemExit):
         query.cmd_query(["@nope", "SELECT", "1"])
