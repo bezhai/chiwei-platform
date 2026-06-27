@@ -36,34 +36,60 @@ def get_env():
     return paas_api, cc_token
 
 
-def curl_post(url, payload, token):
+def _curl_json(args):
     result = subprocess.run(
+        args + ["-w", "\n%{http_code}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        print(f"ERROR: API 调用失败: {detail}", file=sys.stderr)
+        sys.exit(1)
+
+    body, sep, status_text = result.stdout.rpartition("\n")
+    if not sep or not status_text.strip().isdigit():
+        print("ERROR: API 调用失败: 响应缺少 HTTP 状态码", file=sys.stderr)
+        sys.exit(1)
+
+    status = int(status_text.strip())
+    try:
+        data = json.loads(body) if body.strip() else {}
+    except json.JSONDecodeError as e:
+        if status < 200 or status >= 300:
+            message = body.strip() or e.msg
+            print(f"ERROR: API 调用失败 (HTTP {status}): {message}", file=sys.stderr)
+            sys.exit(1)
+        print(f"ERROR: API 返回非 JSON 响应: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if status < 200 or status >= 300:
+        message = data.get("error") if isinstance(data, dict) else None
+        if not message:
+            message = body.strip() or "empty response body"
+        print(f"ERROR: API 调用失败 (HTTP {status}): {message}", file=sys.stderr)
+        sys.exit(1)
+
+    return data
+
+
+def curl_post(url, payload, token):
+    return _curl_json(
         [
-            "curl", "-sfS", "-X", "POST", url,
+            "curl", "-sS", "-X", "POST", url,
             "-H", "Content-Type: application/json",
             "-H", f"X-API-Key: {token}",
             "-d", json.dumps(payload),
-        ],
-        capture_output=True, text=True,
+        ]
     )
-    if result.returncode != 0:
-        print(f"ERROR: API 调用失败: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
 
 
 def curl_get(url, token):
-    result = subprocess.run(
+    return _curl_json(
         [
-            "curl", "-sfS", url,
+            "curl", "-sS", url,
             "-H", f"X-API-Key: {token}",
-        ],
-        capture_output=True, text=True,
+        ]
     )
-    if result.returncode != 0:
-        print(f"ERROR: API 调用失败: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
 
 
 def cmd_query(args):
