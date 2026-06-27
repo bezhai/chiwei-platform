@@ -1,15 +1,16 @@
 /**
- * qq-gateway 入口：装配各模块并起 HTTP 服务。
+ * qq-gateway 入口：装配各模块。入站走 WebSocket 主动长连接，出站走 HTTP。
  *
  * 数据流：
- *   QQ → POST {webhookPath} → 验签/握手 → 归一化 → LaneRouter POST channel-server /api/internal/qq/inbound
- *   channel-server → POST /qq/outbound → 被动窗口 reserve → QQ api 发文本
+ *   入站：QQ gateway --ws--> QQGatewayClient → 归一化 → LaneRouter POST channel-server /api/internal/qq/inbound
+ *   出站：channel-server → POST /qq/outbound → 被动窗口 reserve → QQ api 发文本
  */
 
 import Redis from 'ioredis';
 import { LaneRouter } from '@inner/shared/lane-router';
 import { loadConfig } from './config';
 import { QQClient, type QQLogger } from './qq/api';
+import { QQGatewayClient, type GatewayWebSocket } from './qq/gateway-client';
 import { PassiveWindowManager } from './passive-window/manager';
 import { RedisPassiveWindowStore, type MinimalRedis } from './passive-window/redis-store';
 import { createInboundForwarder } from './server/inbound-forwarder';
@@ -49,19 +50,28 @@ function main(): void {
         log,
     });
 
+    // ── 入站：WebSocket 主动长连接 ──
+    const gatewayClient = new QQGatewayClient({
+        botName: cfg.botName,
+        getAccessToken: () => qqClient.getAccessToken(),
+        getGatewayUrl: () => qqClient.getGatewayUrl(),
+        wsFactory: (url) => new WebSocket(url) as unknown as GatewayWebSocket,
+        forwardInbound,
+        log,
+    });
+    gatewayClient.start();
+
+    // ── 出站：HTTP /qq/outbound ──
     const { app } = createQQGatewayApp({
         botName: cfg.botName,
-        botSecret: cfg.botSecret,
-        webhookPath: cfg.webhookPath,
         innerSecret: cfg.innerSecret,
         windowManager,
         qqClient,
-        forwardInbound,
         log,
     });
 
     Bun.serve({ port: cfg.port, fetch: app.fetch });
-    log.info(`[qq-gateway] bot=${cfg.botName} listening on :${cfg.port}, webhook=${cfg.webhookPath}`);
+    log.info(`[qq-gateway] bot=${cfg.botName} ws inbound connecting, outbound listening on :${cfg.port}`);
 }
 
 main();

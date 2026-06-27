@@ -1,8 +1,7 @@
 /**
  * 网关配置：全部从 env 读，必填项缺失 fail-fast。
  *
- * QQ 凭据：appId / appSecret 用于刷 access_token；botSecret 用于 webhook Ed25519 验签。
- * QQ 实际中 botSecret == appSecret，故 QQ_BOT_SECRET 缺省回退到 QQ_APP_SECRET。
+ * QQ 凭据：appId / appSecret 用于刷 access_token，并据此取 WebSocket gateway 地址主动建长连接。
  */
 
 export interface RedisConfig {
@@ -16,8 +15,6 @@ export interface QQGatewayConfig {
     botName: string;
     appId: string;
     appSecret: string;
-    botSecret: string;
-    webhookPath: string;
     innerSecret: string;
     registryUrl: string;
     channelServerService: string;
@@ -50,8 +47,6 @@ export function loadConfig(env: Env = process.env): QQGatewayConfig {
         botName: required(env, 'QQ_BOT_NAME'),
         appId: required(env, 'QQ_APP_ID'),
         appSecret,
-        botSecret: env.QQ_BOT_SECRET || appSecret,
-        webhookPath: env.QQ_WEBHOOK_PATH || '/qq/webhook',
         innerSecret: required(env, 'INNER_HTTP_SECRET'),
         registryUrl: env.REGISTRY_URL || 'http://lite-registry:8080',
         channelServerService: env.CHANNEL_SERVER_SERVICE || 'channel-server',

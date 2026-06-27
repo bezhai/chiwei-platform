@@ -119,6 +119,32 @@ export class QQClient {
         this.cache = null;
     }
 
+    /**
+     * 取 WebSocket gateway 地址：GET {apiBase}/gateway，鉴权 Authorization: QQBot {token}，
+     * 返回体 { url: string }（wss 地址）。bot 用此地址主动建长连接收事件。
+     */
+    async getGatewayUrl(): Promise<string> {
+        const token = await this.getAccessToken();
+        const res = await this.fetchImpl(`${this.apiBase}/gateway`, {
+            method: 'GET',
+            headers: { Authorization: `QQBot ${token}` },
+        });
+        const raw = await res.text();
+        if (!res.ok) {
+            throw new Error(`getGatewayUrl failed (HTTP ${res.status}): ${raw.slice(0, 200)}`);
+        }
+        let data: { url?: string };
+        try {
+            data = JSON.parse(raw);
+        } catch {
+            throw new Error(`getGatewayUrl: failed to parse gateway response: ${raw.slice(0, 200)}`);
+        }
+        if (!data.url) {
+            throw new Error(`getGatewayUrl: missing url in response: ${raw.slice(0, 200)}`);
+        }
+        return data.url;
+    }
+
     async sendC2CMessage(openid: string, content: string, opts: SendOptions): Promise<SendResult> {
         return this.send(`/v2/users/${openid}/messages`, content, opts);
     }

@@ -79,6 +79,34 @@ describe('QQClient.getAccessToken', () => {
     });
 });
 
+describe('QQClient.getGatewayUrl', () => {
+    const tokenOk = (call: FetchCall): Response | null =>
+        call.url.includes('getAppAccessToken') ? jsonResponse({ access_token: 'TOK', expires_in: 7200 }) : null;
+
+    it('GETs /gateway with QQBot auth and returns the wss url', async () => {
+        const { client, calls } = makeClient({
+            onFetch: (call) => tokenOk(call) ?? jsonResponse({ url: 'wss://api.sgroup.qq.com/websocket' }),
+        });
+        const url = await client.getGatewayUrl();
+        expect(url).toBe('wss://api.sgroup.qq.com/websocket');
+
+        const gw = calls.find((c) => c.url.endsWith('/gateway'))!;
+        expect(gw.url).toBe('https://api.sgroup.qq.com/gateway');
+        expect(gw.init.method).toBe('GET');
+        expect((gw.init.headers as Record<string, string>)['Authorization']).toBe('QQBot TOK');
+    });
+
+    it('throws when the gateway endpoint returns no url', async () => {
+        const { client } = makeClient({ onFetch: (call) => tokenOk(call) ?? jsonResponse({}, 200) });
+        await expect(client.getGatewayUrl()).rejects.toThrow();
+    });
+
+    it('throws on a non-2xx gateway response', async () => {
+        const { client } = makeClient({ onFetch: (call) => tokenOk(call) ?? jsonResponse({ message: 'no' }, 500) });
+        await expect(client.getGatewayUrl()).rejects.toThrow();
+    });
+});
+
 describe('QQClient passive send', () => {
     const tokenOk = (call: FetchCall): Response | null =>
         call.url.includes('getAppAccessToken') ? jsonResponse({ access_token: 'TOK', expires_in: 7200 }) : null;

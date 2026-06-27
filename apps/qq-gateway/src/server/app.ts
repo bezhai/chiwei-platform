@@ -1,31 +1,16 @@
 /**
- * QQ 网关 HTTP 应用（hono）。两条路由：
+ * QQ 网关 HTTP 应用（hono）。入站走 WebSocket 主动长连接（见 qq/gateway-client.ts），不在 HTTP 层；
+ * 本 app 只剩出站一条路由：
  *
- *  1. POST {webhookPath}  — QQ webhook 入口
- *       op:13 → 用 botSecret 签 `event_ts + plain_token`，回 {plain_token, signature}（握手，无需验签）
- *       op:0  → 验 Ed25519 签名（`timestamp + body`），通过则立即 200 ack，异步归一化+转发给 channel-server
- *  2. POST /qq/outbound   — 收 channel-server 的 CustomOutboundMessage（Bearer 内网鉴权）
- *       validate → 被动窗口 reserve → 调 QQ api 发文本；丢弃情形 200 返回 {sent:false, reason}
- *
- * webhook 收发流程移植自 openclaw-qqbot/src/transport/webhook-transport.ts，去掉 openclaw plugin-sdk，
- * 改写为 hono 路由。op:13 先于验签处理、op:0 立即 ack 后异步分发，均与原实现一致。
+ *  POST /qq/outbound   — 收 channel-server 的 CustomOutboundMessage（Bearer 内网鉴权）
+ *      validate → 被动窗口 reserve → 调 QQ api 发文本；丢弃情形 200 返回 {sent:false, reason}
  */
 
 import { Hono } from 'hono';
 import { createBearerAuthMiddleware } from '@inner/shared/middleware';
-import {
-    validateCustomOutboundMessage,
-    type CustomInboundMessage,
-    type CustomOutboundResult,
-} from '@inner/shared/protocols';
-import { verifyWebhookSignature, signValidationResponse } from '../qq/webhook-verify';
-import { normalizeQQEvent } from '../qq/normalize';
+import { validateCustomOutboundMessage, type CustomOutboundResult } from '@inner/shared/protocols';
 import type { PassiveWindowManager } from '../passive-window/manager';
 import type { QQLogger, SendOptions, SendResult } from '../qq/api';
-
-const OP_DISPATCH = 0;
-const OP_VALIDATION = 13;
-const OP_HTTP_CALLBACK_ACK = 12;
 
 /** 网关只用到 QQClient 的这两个发送方法，按接口注入便于测试。 */
 export interface QQSender {
@@ -35,72 +20,16 @@ export interface QQSender {
 
 export interface QQGatewayDeps {
     botName: string;
-    botSecret: string;
-    webhookPath: string;
     innerSecret: string;
     windowManager: PassiveWindowManager;
     qqClient: QQSender;
-    /** 把归一化后的入站消息推给 channel-server。 */
-    forwardInbound: (msg: CustomInboundMessage) => Promise<void>;
     log: QQLogger;
 }
 
-export function createQQGatewayApp(deps: QQGatewayDeps): { app: Hono; flush: () => Promise<void> } {
+export function createQQGatewayApp(deps: QQGatewayDeps): { app: Hono } {
     const app = new Hono();
-    const pending = new Set<Promise<void>>();
-
-    const track = (p: Promise<void>): void => {
-        pending.add(p);
-        void p.finally(() => pending.delete(p));
-    };
 
     app.get('/health', (c) => c.json({ ok: true, service: 'qq-gateway', bot: deps.botName }));
-
-    // ── webhook 入口 ──
-    app.post(deps.webhookPath, async (c) => {
-        const rawBody = await c.req.text();
-        let payload: { op?: number; t?: string; d?: unknown; s?: number };
-        try {
-            payload = JSON.parse(rawBody);
-        } catch {
-            deps.log.error(`[qq-gateway] webhook body not JSON: ${rawBody.slice(0, 200)}`);
-            return c.json({ error: 'invalid json' }, 400);
-        }
-
-        // op:13 回调地址校验（先于验签）
-        if (payload.op === OP_VALIDATION) {
-            const d = payload.d as { plain_token?: string; event_ts?: string } | undefined;
-            if (!d?.plain_token || !d?.event_ts) {
-                return c.json({ error: 'invalid validation payload' }, 400);
-            }
-            return c.json(
-                signValidationResponse({ plainToken: d.plain_token, eventTs: d.event_ts, botSecret: deps.botSecret }),
-            );
-        }
-
-        // 验签
-        const timestamp = c.req.header('x-signature-timestamp') ?? '';
-        const signature = c.req.header('x-signature-ed25519') ?? '';
-        if (!timestamp || !signature) {
-            return c.json({ error: 'missing signature headers' }, 401);
-        }
-        const valid = verifyWebhookSignature({
-            body: Buffer.from(rawBody, 'utf-8'),
-            timestamp,
-            signature,
-            botSecret: deps.botSecret,
-        });
-        if (!valid) {
-            deps.log.warn(`[qq-gateway] webhook signature verification failed`);
-            return c.json({ error: 'invalid signature' }, 401);
-        }
-
-        // op:0 立即 ack，异步分发
-        if (payload.op === OP_DISPATCH) {
-            track(dispatchEvent(deps, payload.t ?? '', payload.d));
-        }
-        return c.json({ op: OP_HTTP_CALLBACK_ACK, d: 0 });
-    });
 
     // ── 出站入口（内网 Bearer 鉴权）──
     app.use('/qq/outbound', createBearerAuthMiddleware({ getExpectedToken: () => deps.innerSecret }));
@@ -157,19 +86,5 @@ export function createQQGatewayApp(deps: QQGatewayDeps): { app: Hono; flush: () 
         }
     });
 
-    const flush = async (): Promise<void> => {
-        await Promise.allSettled([...pending]);
-    };
-
-    return { app, flush };
-}
-
-async function dispatchEvent(deps: QQGatewayDeps, eventType: string, d: unknown): Promise<void> {
-    try {
-        const msg = normalizeQQEvent(eventType, d, { botName: deps.botName });
-        if (!msg) return; // 系统事件 / 未支持类型，不转发
-        await deps.forwardInbound(msg);
-    } catch (err) {
-        deps.log.error(`[qq-gateway] dispatch ${eventType} failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    return { app };
 }
