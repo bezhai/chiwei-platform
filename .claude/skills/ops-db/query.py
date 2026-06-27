@@ -105,23 +105,37 @@ def cmd_query(args):
     ))
 
 
+def _args_text(args):
+    if isinstance(args, str):
+        return args.strip()
+    return " ".join(args).strip()
+
+
+def _split_first_word(raw):
+    m = re.match(r"^(\S+)(?:\s+([\s\S]*))?$", raw.strip())
+    if not m:
+        return "", ""
+    return m.group(1), m.group(2) or ""
+
+
 def cmd_submit(args):
     """submit @<db> <SQL> [-- reason: <说明>]
     提交 DDL/DML 申请，等待人工在 Dashboard 审批。
     """
-    if not args:
+    raw = _args_text(args)
+    if not raw:
         print("用法: submit @<db> <SQL>", file=sys.stderr)
         sys.exit(1)
 
     dbname = DEFAULT_DB
-    if args[0].startswith("@"):
-        alias = args.pop(0)[1:]
+    first_word, rest = _split_first_word(raw)
+    if first_word.startswith("@"):
+        alias = first_word[1:]
         if alias not in DB_ALIASES:
             print(f"ERROR: 未知数据库 '{alias}'", file=sys.stderr)
             sys.exit(1)
         dbname = DB_ALIASES[alias]
-
-    raw = " ".join(args).strip()
+        raw = rest.strip()
 
     # 提取 reason：支持 "-- reason: xxx" 出现在任意位置
     reason = ""
@@ -257,15 +271,15 @@ def main():
     # skill 预处理以 "$ARGUMENTS" 传入，所有参数合为单个字符串。
     # 先拼回完整文本，再按首词分派。
     raw = " ".join(sys.argv[1:]).strip()
-    words = raw.split()
-    first_word = words[0].lower() if words else ""
+    first_word, rest = _split_first_word(raw)
+    first_word = first_word.lower()
 
     if first_word == "submit":
-        cmd_submit(words[1:])
+        cmd_submit(rest)
     elif first_word == "status":
-        cmd_status(words[1:])
+        cmd_status(rest.split())
     else:
-        cmd_query(words)
+        cmd_query(raw.split())
 
 
 if __name__ == "__main__":
