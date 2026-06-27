@@ -45,6 +45,24 @@ def test_submit_normalizes_chiwei_test_to_canonical(captured, user_input):
     assert captured["payload"]["db"] == "chiwei_test"
 
 
+def test_submit_via_main_preserves_multiline_sql_comments(captured, monkeypatch):
+    sql = (
+        "ALTER TABLE bot_persona ADD COLUMN x INT;\n"
+        "-- keep this line comment scoped to one line\n"
+        "UPDATE bot_persona SET x = 1;"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["query.py", f"submit @chiwei {sql}\n-- reason: backfill x"],
+    )
+
+    query.main()
+
+    assert captured["payload"]["sql"] == sql
+    assert captured["payload"]["reason"] == "backfill x"
+
+
 def test_existing_aliases_unchanged(captured):
     query.cmd_query(["@chiwei", "SELECT", "1"])
     assert captured["payload"]["db"] == "chiwei"
