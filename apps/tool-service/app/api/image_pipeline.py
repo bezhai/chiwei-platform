@@ -20,6 +20,10 @@ router = APIRouter(dependencies=[Depends(verify_bearer_token)])
 class ProcessRequest(BaseModel):
     message_id: str | None = None
     file_key: str
+    # QQ inbound images arrive as public http urls (file_key == url). When set,
+    # the pipeline downloads over HTTP instead of via the Lark SDK. Absent for
+    # Lark (file_key download), keeping the original behavior.
+    url: str | None = None
 
 
 class GetUrlRequest(BaseModel):
@@ -42,6 +46,7 @@ async def process(request: ProcessRequest, x_app_name: str = Header(alias="X-App
             file_key=request.file_key,
             message_id=request.message_id,
             bot_name=x_app_name,
+            url=request.url,
         )
         return {"success": True, "data": result, "message": "ok"}
     except ValueError as e:

@@ -17,6 +17,9 @@ import {
     CommonBotPresence,
     LarkMessage,
     LaneRouting,
+    QqUserOpenId,
+    QqMessage,
+    QqGroupChatInfo,
 } from './infrastructure/dal/entities';
 
 const AppDataSource = new DataSource({
@@ -46,6 +49,9 @@ const AppDataSource = new DataSource({
         CommonBotPresence,
         LarkMessage,
         LaneRouting,
+        QqUserOpenId,
+        QqMessage,
+        QqGroupChatInfo,
     ],
 });
 

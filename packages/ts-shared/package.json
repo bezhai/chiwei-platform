@@ -12,7 +12,8 @@
     "./mongo": "./src/mongo/index.ts",
     "./entities": "./src/entities/index.ts",
     "./middleware": "./src/middleware/index.ts",
-    "./lane-router": "./src/lane-router/index.ts"
+    "./lane-router": "./src/lane-router/index.ts",
+    "./protocols": "./src/protocols/index.ts"
   },
   "scripts": {
     "build": "tsc",

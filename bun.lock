@@ -125,6 +125,20 @@
         "vite": "^5.4.3",
       },
     },
+    "apps/qq-gateway": {
+      "name": "qq-gateway",
+      "version": "1.0.0",
+      "dependencies": {
+        "@inner/shared": "workspace:*",
+        "async-mutex": "^0.5.0",
+        "hono": "^4.7.0",
+        "ioredis": "^5.3.2",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.6.3",
+      },
+    },
     "packages/lark-utils": {
       "name": "@inner/lark-utils",
       "version": "1.0.0",
@@ -1176,6 +1190,8 @@
 
     "punycode": ["punycode@2.3.1", "https://bnpm.byted.org/punycode/-/punycode-2.3.1.tgz", {}, "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg=="],
 
+    "qq-gateway": ["qq-gateway@workspace:apps/qq-gateway"],
+
     "qs": ["qs@6.15.0", "https://bnpm.byted.org/qs/-/qs-6.15.0.tgz", { "dependencies": { "side-channel": "^1.1.0" } }, "sha512-mAZTtNCeetKMH+pSjrb76NAM8V9a05I9aBZOHztWy/UqcJdQYNsf59vrRKWnojAT9Y+GbIvoTBC++CPHqpDBhQ=="],
 
     "query-string": ["query-string@7.1.3", "https://bnpm.byted.org/query-string/-/query-string-7.1.3.tgz", { "dependencies": { "decode-uri-component": "^0.2.2", "filter-obj": "^1.1.0", "split-on-first": "^1.0.0", "strict-uri-encode": "^2.0.0" } }, "sha512-hh2WYhq4fi8+b+/2Kg9CEge4fDPvHS534aOOvOZeQ3+Vf2mCFsaFBYj0i+iXcAq6I9Vzp5fjMFBlONvayDC1qg=="],
@@ -1554,6 +1570,8 @@
 
     "path-scurry/lru-cache": ["lru-cache@10.4.3", "https://bnpm.byted.org/lru-cache/-/lru-cache-10.4.3.tgz", {}, "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ=="],
 
+    "qq-gateway/@types/bun": ["@types/bun@1.3.14", "https://bnpm.byted.org/@types/bun/-/bun-1.3.14.tgz", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+
     "restore-cursor/onetime": ["onetime@7.0.0", "https://bnpm.byted.org/onetime/-/onetime-7.0.0.tgz", { "dependencies": { "mimic-function": "^5.0.0" } }, "sha512-VXJjc87FScF88uafS3JllDgvAm+c/Slfz06lorj2uAY34rlUu0Nt+v8wreiImcrgAjjIHp1rXpTDlLOGw29WwQ=="],
 
     "slice-ansi/ansi-styles": ["ansi-styles@6.2.3", "https://bnpm.byted.org/ansi-styles/-/ansi-styles-6.2.3.tgz", {}, "sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg=="],
@@ -1616,6 +1634,8 @@
 
     "media-sync-worker/node-cron/uuid": ["uuid@8.3.2", "https://bnpm.byted.org/uuid/-/uuid-8.3.2.tgz", { "bin": { "uuid": "dist/bin/uuid" } }, "sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg=="],
 
+    "qq-gateway/@types/bun/bun-types": ["bun-types@1.3.14", "https://bnpm.byted.org/bun-types/-/bun-types-1.3.14.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+
     "stream-http/readable-stream/safe-buffer": ["safe-buffer@5.1.2", "https://bnpm.byted.org/safe-buffer/-/safe-buffer-5.1.2.tgz", {}, "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g=="],
 
     "stream-http/readable-stream/string_decoder": ["string_decoder@1.1.1", "https://bnpm.byted.org/string_decoder/-/string_decoder-1.1.1.tgz", { "dependencies": { "safe-buffer": "~5.1.0" } }, "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg=="],
@@ -1636,6 +1656,10 @@
 
     "glob/minimatch/brace-expansion/balanced-match": ["balanced-match@4.0.4", "https://bnpm.byted.org/balanced-match/-/balanced-match-4.0.4.tgz", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
 
+    "qq-gateway/@types/bun/bun-types/@types/node": ["@types/node@22.19.19", "https://bnpm.byted.org/@types/node/-/node-22.19.19.tgz", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew=="],
+
     "channel-server/mongodb/mongodb-connection-string-url/whatwg-url/tr46": ["tr46@3.0.0", "https://bnpm.byted.org/tr46/-/tr46-3.0.0.tgz", { "dependencies": { "punycode": "^2.1.1" } }, "sha512-l7FvfAHlcmulp8kr+flpQZmVwtu7nfRV7NZujtN0OqES8EL4O4e0qqzL0DC5gAvx/ZC/9lk6rhcUwYvkBnBnYA=="],
+
+    "qq-gateway/@types/bun/bun-types/@types/node/undici-types": ["undici-types@6.21.0", "https://bnpm.byted.org/undici-types/-/undici-types-6.21.0.tgz", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
   }
 }

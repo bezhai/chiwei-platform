@@ -77,7 +77,7 @@ async def build_human_chat_context(
 
     # --- Image processing ---
     image_key_to_url, image_key_to_file = await collect_images(
-        l1_results, chat_type, bot_name=bot_name
+        l1_results, chat_type, bot_name=bot_name, channel=channel
     )
 
     # Persist new TOS files in background via dataflow (Phase 6 v4 Gap 5).

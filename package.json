@@ -6,6 +6,7 @@
     "apps/monitor-dashboard",
     "apps/monitor-dashboard-web",
     "apps/media-sync-worker",
+    "apps/qq-gateway",
     "packages/ts-shared",
     "packages/pixiv-client",
     "packages/lark-utils"

@@ -51,7 +51,7 @@ async def test_collect_images_passes_bot_name_to_process(monkeypatch):
 
     calls: list[tuple] = []
 
-    async def fake_process(file_key, message_id, bot_name=None):
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
         calls.append((file_key, message_id, bot_name))
         return {"url": "https://tos/x.png", "file_name": "1.png"}
 
@@ -82,7 +82,7 @@ async def test_collect_images_warns_when_bot_name_missing(monkeypatch, caplog):
 
     received: list[object] = []
 
-    async def fake_process(file_key, message_id, bot_name=None):
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
         received.append(bot_name)
         return None  # 缺凭证 → tool-service 422 → None
 
@@ -104,4 +104,115 @@ async def test_collect_images_warns_when_bot_name_missing(monkeypatch, caplog):
     assert warn_recs, (
         "bot_name 缺失时应有一条 WARNING 级、指向 bot_name 的日志，"
         f"实得 warnings: {[r.message for r in caplog.records]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_images_passes_url_for_http_key(monkeypatch):
+    """QQ 入站：image_key 是公网 http url（channel=qq）→ collect_images 把它当 url
+    下载，process_image 收到 url=key（tool-service 走 HTTP 下载，不走飞书 SDK）。"""
+    from app.chat import _context_images as ci
+
+    qq_url = "https://qq.cdn.example/a.png"
+    results = [_img_msg("m1", qq_url)]
+
+    calls: list[dict] = []
+
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
+        calls.append(
+            {"file_key": file_key, "message_id": message_id, "bot_name": bot_name, "url": url}
+        )
+        return {"url": "https://tos/x.jpg", "file_name": "temp/x.jpg"}
+
+    monkeypatch.setattr(ci.image_client, "process_image", fake_process)
+
+    url_map, _file_map = await ci.collect_images(
+        results, "p2p", bot_name="bot-x", channel="qq"
+    )
+
+    assert calls, "url 形态的 image_key 必须触发 process_image 下载"
+    assert calls[0]["url"] == qq_url, (
+        f"url 形态的 key 必须以 url={qq_url!r} 传给 process_image，实得 {calls[0]['url']!r}"
+    )
+    assert calls[0]["file_key"] == qq_url
+    assert url_map[qq_url] == "https://tos/x.jpg"
+
+
+@pytest.mark.asyncio
+async def test_collect_images_no_url_for_feishu_file_key(monkeypatch):
+    """飞书回归：image_key 是 file_key（非 url 形态）→ process_image 收到 url=None，
+    飞书 SDK 下载分支不变。"""
+    from app.chat import _context_images as ci
+
+    file_key = "img_v3_0212u_25501191"
+    results = [_img_msg("m1", file_key)]
+
+    calls: list[dict] = []
+
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
+        calls.append({"file_key": file_key, "url": url})
+        return {"url": "https://tos/x.png", "file_name": "1.png"}
+
+    monkeypatch.setattr(ci.image_client, "process_image", fake_process)
+
+    await ci.collect_images(results, "p2p", bot_name="bot-x", channel="lark")
+
+    assert calls and calls[0]["file_key"] == file_key
+    assert calls[0]["url"] is None, (
+        f"飞书 file_key 不是 url 形态，url 必须为 None，实得 {calls[0]['url']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_images_qq_url_dispatch_ignores_key_form(monkeypatch):
+    """渠道判定优于 key 前缀启发式：QQ 入站图即使 url scheme 大小写不规整
+    （如 ``HTTPS://``），channel=qq 也必须当 url 下载（url=key）。旧的
+    ``key.startswith(("http://","https://"))`` 启发式大小写敏感会漏判 → url=None →
+    误走飞书 SDK 分支。codex T3 fix 4：用 channel 判定替掉前缀启发式。"""
+    from app.chat import _context_images as ci
+
+    qq_url = "HTTPS://qq.cdn.example/UP.png"  # 大小写不规整，前缀启发式会漏判
+    results = [_img_msg("m1", qq_url)]
+
+    calls: list[dict] = []
+
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
+        calls.append({"file_key": file_key, "url": url})
+        return {"url": "https://tos/x.jpg", "file_name": "temp/x.jpg"}
+
+    monkeypatch.setattr(ci.image_client, "process_image", fake_process)
+
+    await ci.collect_images(results, "p2p", bot_name="bot-x", channel="qq")
+
+    assert calls, "url 形态的 image_key 必须触发 process_image 下载"
+    assert calls[0]["url"] == qq_url, (
+        f"channel=qq 必须以 url={qq_url!r} 传给 process_image（不看 key 前缀大小写），"
+        f"实得 {calls[0]['url']!r}"
+    )
+    assert calls[0]["file_key"] == qq_url
+
+
+@pytest.mark.asyncio
+async def test_collect_images_lark_dispatch_ignores_http_like_key(monkeypatch):
+    """飞书回归（反向）：channel=lark 时即使 image_key 长得像 http url，也必须当
+    file_key 走飞书 SDK（url=None），不能因为 key 前缀像 url 就误走 HTTP 下载。
+    锁死 channel 判定优先于 key 前缀启发式。"""
+    from app.chat import _context_images as ci
+
+    http_like_key = "https://looks-like-url-but-is-lark-key"
+    results = [_img_msg("m1", http_like_key)]
+
+    calls: list[dict] = []
+
+    async def fake_process(file_key, message_id, bot_name=None, url=None):
+        calls.append({"file_key": file_key, "url": url})
+        return {"url": "https://tos/x.png", "file_name": "1.png"}
+
+    monkeypatch.setattr(ci.image_client, "process_image", fake_process)
+
+    await ci.collect_images(results, "p2p", bot_name="bot-x", channel="lark")
+
+    assert calls and calls[0]["file_key"] == http_like_key
+    assert calls[0]["url"] is None, (
+        f"channel=lark 必须 url=None（不看 key 前缀），实得 {calls[0]['url']!r}"
     )

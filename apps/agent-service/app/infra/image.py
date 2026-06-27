@@ -142,12 +142,17 @@ class _ImageClient:
         file_key: str,
         message_id: str | None,
         bot_name: str | None = None,
+        url: str | None = None,
     ) -> dict[str, str] | None:
-        """Process an image, returns ``{"url": ..., "file_name": ...}``."""
+        """Process an image, returns ``{"url": ..., "file_name": ...}``.
+
+        ``url``: QQ inbound images are public http urls (no Lark SDK download).
+        When set it is forwarded so tool-service downloads over HTTP. Absent for
+        Lark images (downloaded by ``file_key``)."""
         app_name = bot_name or get_app_name() or ""
         data = await self._post(
             "/api/image-pipeline/process",
-            {"message_id": message_id, "file_key": file_key},
+            {"message_id": message_id, "file_key": file_key, "url": url},
             app_name=app_name,
         )
         if data:

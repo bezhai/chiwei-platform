@@ -18,3 +18,7 @@ export * from './common-agent-response';
 export * from './common-bot-presence';
 export * from './lark-message';
 export * from './lane-routing';
+
+export * from './qq-user-open-id';
+export * from './qq-message';
+export * from './qq-group-chat-info';
