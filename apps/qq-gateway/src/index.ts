@@ -47,6 +47,8 @@ function main(): void {
         service: cfg.channelServerService,
         path: cfg.channelServerInboundPath,
         innerSecret: cfg.innerSecret,
+        // 自身 lane（PaaS 注入），WS 回调里 forward 无 context，需手动注入才能泳道路由。
+        selfLane: process.env.LANE,
         log,
     });
 

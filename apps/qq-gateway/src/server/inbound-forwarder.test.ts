@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import type { CustomInboundMessage } from '@inner/shared/protocols';
+import { context } from '@inner/shared/middleware';
 import { createInboundForwarder, type InboundFetcher } from './inbound-forwarder';
 
 const NOOP_LOG = { info: () => {}, warn: () => {}, error: () => {} };
@@ -63,6 +64,49 @@ describe('createInboundForwarder', () => {
         const bad = { ...validMsg(), senderId: 123 } as unknown as CustomInboundMessage;
         await expect(forward(bad)).rejects.toThrow(/senderId/);
         expect(hit).toBe(false);
+    });
+
+    it('runs the fetch within a context carrying selfLane (so LaneRouter injects x-ctx-lane)', async () => {
+        let observedLane: string | undefined = 'NOT_OBSERVED';
+        const fetcher: InboundFetcher = {
+            fetch: async () => {
+                // LaneRouter.fetch reads context.get('lane') to inject x-ctx-lane.
+                observedLane = context.get<string>('lane');
+                return new Response('{"ok":true}', { status: 200 });
+            },
+        };
+        const forward = createInboundForwarder({
+            fetcher,
+            service: 'channel-server',
+            path: '/api/internal/qq/inbound',
+            innerSecret: 'inner-1',
+            log: NOOP_LOG,
+            selfLane: 'coe-qq',
+        });
+
+        await forward(validMsg());
+        expect(observedLane).toBe('coe-qq');
+    });
+
+    it('leaves lane unset in context when selfLane is empty (prod fallback)', async () => {
+        let observedLane: string | undefined = 'NOT_OBSERVED';
+        const fetcher: InboundFetcher = {
+            fetch: async () => {
+                observedLane = context.get<string>('lane');
+                return new Response('{"ok":true}', { status: 200 });
+            },
+        };
+        const forward = createInboundForwarder({
+            fetcher,
+            service: 'channel-server',
+            path: '/api/internal/qq/inbound',
+            innerSecret: 'inner-1',
+            log: NOOP_LOG,
+            // selfLane omitted → prod: no x-ctx-lane, fallback to prod target
+        });
+
+        await forward(validMsg());
+        expect(observedLane).toBeUndefined();
     });
 
     it('throws when channel-server responds non-2xx', async () => {
