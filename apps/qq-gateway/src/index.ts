@@ -7,9 +7,11 @@
  */
 
 import Redis from 'ioredis';
+import { SQL } from 'bun';
 import { LaneRouter } from '@inner/shared/lane-router';
 import { loadConfig } from './config';
 import { QQClient, type QQLogger } from './qq/api';
+import { loadQQCredentials, type CredentialsQuery } from './qq/credentials';
 import { QQGatewayClient, type GatewayWebSocket } from './qq/gateway-client';
 import { PassiveWindowManager } from './passive-window/manager';
 import { RedisPassiveWindowStore, type MinimalRedis } from './passive-window/redis-store';
@@ -22,7 +24,7 @@ const log: QQLogger = {
     error: (msg) => console.error(msg),
 };
 
-function main(): void {
+async function main(): Promise<void> {
     const cfg = loadConfig();
 
     const redis = new Redis({
@@ -39,7 +41,18 @@ function main(): void {
         maxReplies: cfg.maxReplies,
     });
 
-    const qqClient = new QQClient({ appId: cfg.appId, clientSecret: cfg.appSecret, log });
+    // QQ 凭据从 bot_config.credentials 读，不再走 env。把 Bun 内置 SQL 客户端包成注入的查询执行器。
+    const sql = new SQL({
+        hostname: cfg.postgres.host,
+        port: cfg.postgres.port,
+        username: cfg.postgres.user,
+        password: cfg.postgres.password,
+        database: cfg.postgres.db,
+    });
+    const query: CredentialsQuery = (text, params) => sql.unsafe(text, params);
+    const { appId, appSecret } = await loadQQCredentials(cfg.botName, { query });
+
+    const qqClient = new QQClient({ appId, clientSecret: appSecret, log });
 
     const laneRouter = new LaneRouter(cfg.registryUrl);
     const forwardInbound = createInboundForwarder({
@@ -76,4 +89,7 @@ function main(): void {
     log.info(`[qq-gateway] bot=${cfg.botName} ws inbound connecting, outbound listening on :${cfg.port}`);
 }
 
-main();
+main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+});
