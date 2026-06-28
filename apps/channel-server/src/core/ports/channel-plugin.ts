@@ -66,12 +66,16 @@ export interface OutboundMessageRecordInput {
 //                        名——端口契约里不出现任何平台名。非群/不支持 mention 的
 //                        channel 不读它即可,字段是可选的纯字符串、不含任何平台结构。
 //   resolveMentions  是否做群 mention 解析(私聊场景关掉,与现状 is_p2p 跳过一致)。
+//   partIndex        多段回复的段序(0 起)。出站幂等键派生需要它来区分「同一源消息、
+//                    文本恰好相同」的不同续段——否则两段合法续段会被网关误判 duplicate。
+//                    不支持多段/不读它的 channel(如 lark)忽略即可,字段可选。
 // 单个字段可选——非富内容场景 / 不支持的 channel 不读对应字段即可;但 ctx 对象本身
 // 在出站调用里必填(见 OutboundCapabilities),无渲染数据时传空对象、绝不传 undefined。
 export interface RenderContext {
     imageRegistryId?: string;
     groupConversationId?: string;
     resolveMentions?: boolean;
+    partIndex?: number;
 }
 
 // 平台能力端口。指令通过它操作平台,绝不碰平台原始对象 / SDK。

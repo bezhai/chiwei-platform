@@ -48,6 +48,7 @@ async def collect_images(
     results: list[QuickSearchResult],
     chat_type: str,
     bot_name: str = "",
+    channel: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Collect image URLs from message history.
 
@@ -58,6 +59,11 @@ async def collect_images(
     needs to download Lark images with the right bot credential. Without it the
     download is rejected with HTTP 422 and the user's image silently vanishes
     from the LLM context (trace dbde982e146840cc00610c393fc5820e).
+
+    ``channel`` is the originating channel, forwarded for context. The image_key
+    form is the actual discriminator for how tool-service downloads: QQ inbound
+    images are public http urls (passed as ``url=key`` → HTTP download), Lark
+    images are file_keys (downloaded via the Lark SDK, ``url=None``).
     """
     cached_keys: list[tuple[str, str]] = []  # (image_key, tos_file)
     uncached_keys: list[tuple[str, str, str]] = []  # (image_key, message_id, role)
@@ -113,7 +119,10 @@ async def collect_images(
         process_results = await fan_out_wait(
             [
                 image_client.process_image(
-                    key, msg_id if role == "user" else None, bot_name=bot_name
+                    key,
+                    msg_id if role == "user" else None,
+                    bot_name=bot_name,
+                    url=key if channel == "qq" else None,
                 )
                 for key, msg_id, role in uncached_keys
             ]

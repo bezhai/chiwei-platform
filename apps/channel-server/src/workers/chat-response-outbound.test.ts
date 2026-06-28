@@ -77,11 +77,13 @@ describe('dispatchChatResponseOutbound', () => {
         expect(calls.reply[0].thread.inThread).toBeUndefined();
         // content = AI 原始 markdown（飞书化由能力端口内部做）
         expect(calls.reply[0].content).toEqual([{ kind: 'text', text: '赤尾的回复 ![p](1.png)' }]);
-        // ctx：registry 用全局 id；groupConversationId 渠道裸；群聊 resolveMentions=true
+        // ctx：registry 用全局 id；groupConversationId 渠道裸；群聊 resolveMentions=true；
+        // partIndex 透传（出站幂等键据它区分相同文本的不同续段）。
         expect(calls.reply[0].ctx).toEqual({
             imageRegistryId: 'global_msg_ulid',
             groupConversationId: 'oc_chat',
             resolveMentions: true,
+            partIndex: 0,
         });
         expect(ref.channelId).toBe('new_reply_id');
     });
@@ -114,7 +116,7 @@ describe('dispatchChatResponseOutbound', () => {
         expect(calls.reply.length).toBe(0);
     });
 
-    it('part >0 → sendText(chat)', async () => {
+    it('part >0 → sendText(chat) + ctx.partIndex 透传', async () => {
         const { cap, calls } = makeCap();
         await dispatchChatResponseOutbound(cap, {
             ...baseInput,
@@ -124,6 +126,7 @@ describe('dispatchChatResponseOutbound', () => {
 
         expect(calls.sendText.length).toBe(1);
         expect(calls.sendText[0].conv.channelId).toBe('oc_chat');
+        expect(calls.sendText[0].ctx.partIndex).toBe(2);
         expect(calls.reply.length).toBe(0);
     });
 

@@ -36,6 +36,8 @@ export async function dispatchChatResponseOutbound(
         groupConversationId: input.channelConversationId,
         // 群聊解析 @用户名 mention；私聊跳过（与现状 is_p2p ? content : resolve 一致）。
         resolveMentions: !input.isP2p,
+        // 段序透传：出站幂等键据它区分相同文本的不同续段（lark 不读、安全）。
+        partIndex: input.partIndex,
     };
 
     if (input.partIndex === 0) {

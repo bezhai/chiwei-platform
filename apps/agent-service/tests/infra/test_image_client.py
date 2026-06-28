@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _client_with_stub_router(monkeypatch):
     from app.infra import image as image_mod
@@ -33,3 +35,49 @@ def test_auth_headers_omits_x_app_name_when_empty(monkeypatch):
     client = _client_with_stub_router(monkeypatch)
     headers = client._auth_headers(app_name="")
     assert "X-App-Name" not in headers
+
+
+@pytest.mark.asyncio
+async def test_process_image_forwards_url_in_payload(monkeypatch):
+    """QQ 入站图：process_image 收到 url 时，把它放进 /process 的 payload，
+    tool-service 据此走 HTTP 下载分支。"""
+    from app.infra import image as image_mod
+
+    client = image_mod._ImageClient()
+    captured: dict[str, object] = {}
+
+    async def fake_post(path, payload, **kwargs):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"url": "https://tos/x.jpg", "file_name": "temp/x.jpg"}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    qq_url = "https://qq.cdn.example/a.png"
+    await client.process_image(
+        file_key=qq_url, message_id="cm_1", bot_name="bot-x", url=qq_url
+    )
+
+    assert captured["path"] == "/api/image-pipeline/process"
+    assert captured["payload"]["url"] == qq_url
+    assert captured["payload"]["file_key"] == qq_url
+
+
+@pytest.mark.asyncio
+async def test_process_image_url_none_for_lark(monkeypatch):
+    """飞书路径不传 url → payload 里 url 为 None，飞书 SDK 下载分支不变。"""
+    from app.infra import image as image_mod
+
+    client = image_mod._ImageClient()
+    captured: dict[str, object] = {}
+
+    async def fake_post(path, payload, **kwargs):
+        captured["payload"] = payload
+        return {"url": "https://tos/x.jpg", "file_name": "temp/x.jpg"}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    await client.process_image(file_key="img_k", message_id="om_1", bot_name="bot-x")
+
+    assert captured["payload"]["file_key"] == "img_k"
+    assert captured["payload"]["url"] is None

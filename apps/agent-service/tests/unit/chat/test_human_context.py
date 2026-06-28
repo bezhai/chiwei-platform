@@ -116,7 +116,7 @@ async def test_build_human_chat_context_forwards_bot_name_to_collect_images(monk
 
     captured: dict[str, object] = {}
 
-    async def fake_collect(results, chat_type, bot_name=""):
+    async def fake_collect(results, chat_type, bot_name="", channel=None):
         captured["bot_name"] = bot_name
         return ({}, {})
 
@@ -141,6 +141,44 @@ async def test_build_human_chat_context_forwards_bot_name_to_collect_images(monk
     assert captured.get("bot_name") == "bot-x", (
         f"build_human_chat_context 必须把 bot_name 透传给 collect_images，"
         f"实得 {captured.get('bot_name')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_human_chat_context_forwards_channel_to_collect_images(monkeypatch):
+    """channel 透传：build_human_chat_context 把 channel 传给 collect_images，
+    后者据此（结合 key 形态）区分 QQ 的公网 url 图与飞书的 file_key。"""
+    from app.chat import context as ctx_mod
+
+    history = [_msg("m1", text="你看这个", user_id="u1", username="原智鸿", minute=0)]
+
+    captured: dict[str, object] = {}
+
+    async def fake_collect(results, chat_type, bot_name="", channel=None):
+        captured["channel"] = channel
+        return ({}, {})
+
+    async def fake_load_persona(pid):
+        return _FakePersona()
+
+    async def fake_inner(**kwargs):
+        return "INNER"
+
+    with (
+        patch("app.chat.context.quick_search", new=AsyncMock(return_value=history)),
+        patch("app.chat.context.collect_images", new=fake_collect),
+        patch("app.chat.context.build_p2p_messages",
+              new=AsyncMock(return_value=["built"])),
+        patch("app.chat.context.load_persona", new=fake_load_persona),
+        patch("app.chat.context.build_inner_context", new=fake_inner),
+    ):
+        await ctx_mod.build_human_chat_context(
+            "m1", persona_id="akao", bot_name="bot-x", channel="qq"
+        )
+
+    assert captured.get("channel") == "qq", (
+        f"build_human_chat_context 必须把 channel 透传给 collect_images，"
+        f"实得 {captured.get('channel')!r}"
     )
 
 

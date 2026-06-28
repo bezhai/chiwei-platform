@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import logging
+from urllib.parse import urlsplit
 
+import httpx
 from prometheus_client import Counter, Histogram
 
 from app.infrastructure import lark_client, redis_client, tos_client
@@ -38,6 +40,7 @@ IMAGE_PIPELINE_TOTAL = Counter(
 
 _UPLOAD_CACHE_TTL = 7 * 24 * 60 * 60  # 7 days
 _URL_CACHE_TTL = 10 * 60  # 10 minutes
+_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024  # 10MB cap on inbound image url bodies
 
 
 def _compress_image(image_bytes: bytes) -> bytes:
@@ -48,19 +51,83 @@ def _compress_image(image_bytes: bytes) -> bytes:
     return compressed
 
 
+async def _download_image_from_url(url: str) -> bytes:
+    """HTTP GET an image from a public url (QQ inbound images arrive as urls).
+
+    Shared by the url branch of ``process_image_pipeline`` and ``upload_to_tos``
+    so the one download (forward proxy, timeout, upstream error mapping) lives in
+    a single place. Raises ``UpstreamTimeoutError`` / ``UpstreamError`` on
+    upstream failure.
+    """
+    from app.config.config import settings as _settings
+
+    # Scheme allowlist: only http/https. Blocks file://, ftp://, gopher:// etc.
+    # 私网拦截依赖上游 webhook 验签 + forward proxy 出口；多租户/更高安全要求时
+    # 再加 DNS 解析后私网/metadata IP 段拦截。
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise UpstreamError(
+            f"URL download rejected: unsupported scheme {scheme!r}, expected http/https",
+            status_code=400,
+        )
+
+    proxy = _settings.forward_proxy_url
+    try:
+        async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                # Double safeguard against an oversize body.
+                # 1) Content-Length precheck (when the header is present + honest).
+                declared = resp.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > _MAX_DOWNLOAD_BYTES:
+                            raise UpstreamError(
+                                f"URL download too large: {declared} bytes > "
+                                f"{_MAX_DOWNLOAD_BYTES} cap",
+                                status_code=413,
+                            )
+                    except ValueError:
+                        pass  # malformed header → rely on the streaming counter
+                # 2) Streaming byte counter (catches absent/lying Content-Length).
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_BYTES:
+                        raise UpstreamError(
+                            f"URL download exceeded {_MAX_DOWNLOAD_BYTES} byte cap",
+                            status_code=413,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+    except httpx.TimeoutException:
+        raise UpstreamTimeoutError(f"URL download timed out: {url[:200]}")
+    except httpx.HTTPStatusError as e:
+        raise UpstreamError(
+            f"URL download failed: {e.response.status_code}",
+            status_code=e.response.status_code,
+        )
+
+
 async def process_image_pipeline(
-    file_key: str, message_id: str | None, bot_name: str
+    file_key: str, message_id: str | None, bot_name: str, url: str | None = None
 ) -> dict:
     """
-    Image caller of the shared attachment pipeline: download from Lark -> compress
+    Image caller of the shared attachment pipeline: download -> compress
     -> upload to TOS -> return URL. Two-layer cache (``image_*`` prefix, preserved
     for prod cache continuity): upload cache (7d) + URL cache (10min).
 
-    Image quirk owned here: with a message_id download the message resource (type
-    image); without one fall back to ``download_image`` by image_key.
+    Download source by origin (only the source switches; compress + TOS upload
+    are unchanged):
+      * ``url`` set (QQ inbound, public http url) -> HTTP GET, no Lark SDK.
+      * else with a message_id -> Lark message resource (type image).
+      * else -> Lark ``download_image`` by image_key.
     """
 
     async def _download() -> bytes:
+        if url:
+            return await _download_image_from_url(url)
         if message_id:
             return await lark_client.download_message_resource(
                 bot_name, message_id, file_key, "image"
@@ -114,22 +181,7 @@ async def upload_to_tos(source_type: str, data: str) -> dict:
         t_download = time.monotonic() - t_start
         IMAGE_PIPELINE_DURATION.labels(step="decode_base64").observe(t_download)
     elif source_type == "url":
-        import httpx
-        from app.config.config import settings as _settings
-
-        proxy = _settings.forward_proxy_url
-        try:
-            async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
-                resp = await client.get(data)
-                resp.raise_for_status()
-                image_bytes = resp.content
-        except httpx.TimeoutException:
-            raise UpstreamTimeoutError(f"URL download timed out: {data[:200]}")
-        except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"URL download failed: {e.response.status_code}",
-                status_code=e.response.status_code,
-            )
+        image_bytes = await _download_image_from_url(data)
         t_download = time.monotonic() - t_start
         IMAGE_PIPELINE_DURATION.labels(step="download_url").observe(t_download)
         file_id = hashlib.md5(image_bytes).hexdigest()[:16]

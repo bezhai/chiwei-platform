@@ -114,3 +114,70 @@ async def test_image_without_message_uses_download_image(fakes):
 
     assert lark.image_calls == [("chiwei", "img_k2")]
     assert lark.resource_calls == []
+
+
+class _FakeUrlResp:
+    """Response yielded by ``async with client.stream("GET", url)``."""
+
+    def __init__(self, content: bytes):
+        self._content = content
+        self.headers: dict[str, str] = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_e):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_bytes(self):
+        yield self._content
+
+
+class _FakeUrlClient:
+    """Stand-in for ``httpx.AsyncClient`` that records the streamed GET url and
+    returns fixed image bytes — proves the url branch downloads over HTTP, not
+    Lark."""
+
+    last_url: str | None = None
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_e):
+        return False
+
+    def stream(self, method, url):
+        _FakeUrlClient.last_url = url
+        return _FakeUrlResp(_png(2000, 2000))
+
+
+@pytest.mark.asyncio
+async def test_image_with_url_downloads_via_http_not_lark(fakes, monkeypatch):
+    """QQ inbound: a public http url goes through HTTP GET (reusing the url
+    download flow) and NEVER touches the Lark SDK, then reuses the same
+    compress + TOS upload core (stored bytes are compressed JPEG)."""
+    import httpx
+
+    lark, tos, _redis = fakes
+    _FakeUrlClient.last_url = None
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeUrlClient)
+
+    qq_url = "https://qq.cdn.example/abc.png"
+    result = await image_pipeline.process_image_pipeline(
+        file_key=qq_url, message_id="cm_1", bot_name="chiwei", url=qq_url
+    )
+
+    # downloaded by HTTP GET of the url, not via Lark SDK at all
+    assert _FakeUrlClient.last_url == qq_url
+    assert lark.resource_calls == []
+    assert lark.image_calls == []
+    # reuses compress + TOS upload: stored bytes are compressed JPEG
+    _name, data = tos.uploads[0]
+    assert Image.open(io.BytesIO(data)).format == "JPEG"
+    assert result["url"].startswith("https://tos/")
