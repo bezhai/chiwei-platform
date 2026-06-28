@@ -70,6 +70,18 @@ describe('qqInbound.parse', () => {
         expect(msg.channel_user_id).toBe('member_open_1');
     });
 
+    it('carries the sender display name from a group custom message', () => {
+        const msg = qqInbound.parse(groupMsg({ senderName: '群友' })) as InboundMessage;
+        assertValidInboundMessage(msg);
+        expect(msg.senderName).toBe('群友');
+    });
+
+    it('leaves senderName undefined when the gateway gives none (e.g. direct chat)', () => {
+        const msg = qqInbound.parse(directText({ senderName: undefined })) as InboundMessage;
+        assertValidInboundMessage(msg);
+        expect(msg.senderName).toBeUndefined();
+    });
+
     it('maps isSelf mention to the self addressing-hint sentinel; non-self mentions kept by id', () => {
         const msg = qqInbound.parse(
             groupMsg({
