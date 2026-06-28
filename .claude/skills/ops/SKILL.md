@@ -23,12 +23,12 @@ user_invocable: true
 所有请求通过 `http.sh` 发送，公共参数：
 
 - **Base URL**: `$PAAS_API/dashboard/api`
-- **认证 Header**: `X-API-Key: $DASHBOARD_CC_TOKEN`
+- **认证 Header**: `X-API-Key: $PAAS_TOKEN`（对内对外同一把钥匙，dashboard 也认 PAAS_TOKEN）
 
 ```bash
 HTTP=".claude/skills/api-test/scripts/http.sh"
 BASE="$PAAS_API/dashboard/api"
-AUTH="X-API-Key: $DASHBOARD_CC_TOKEN"
+AUTH="X-API-Key: $PAAS_TOKEN"
 ```
 
 ## 子命令
