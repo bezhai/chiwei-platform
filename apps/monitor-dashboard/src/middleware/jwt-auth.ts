@@ -15,9 +15,14 @@ export const jwtAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
 
   // --- API Key auth (Claude Code) ---
+  // Accept either the dedicated CC token or the paas token the dashboard
+  // already holds (DASHBOARD_PAAS_TOKEN == paas-engine's API_TOKEN). This lets
+  // the operator drive both the dashboard and the direct /api/paas/* surface
+  // with a single secret, and it stays in sync when that token is rotated.
   const apiKey = c.req.header('x-api-key');
   const ccToken = process.env.DASHBOARD_CC_TOKEN;
-  if (apiKey && ccToken && apiKey === ccToken) {
+  const paasToken = process.env.DASHBOARD_PAAS_TOKEN;
+  if (apiKey && ((ccToken && apiKey === ccToken) || (paasToken && apiKey === paasToken))) {
     c.set('caller', 'claude-code');
     return next();
   }

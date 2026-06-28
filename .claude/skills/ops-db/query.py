@@ -28,12 +28,14 @@ DEFAULT_DB = "paas_engine"
 
 
 def get_env():
+    # One secret for everything: the dashboard accepts PAAS_TOKEN, so ops-db
+    # authenticates the audited db-query endpoint with it.
     paas_api = os.environ.get("PAAS_API", "")
-    cc_token = os.environ.get("DASHBOARD_CC_TOKEN", "")
+    token = os.environ.get("PAAS_TOKEN", "")
     if not paas_api:
         print("ERROR: PAAS_API 环境变量未设置", file=sys.stderr)
         sys.exit(1)
-    return paas_api, cc_token
+    return paas_api, token
 
 
 def _curl_json(args):

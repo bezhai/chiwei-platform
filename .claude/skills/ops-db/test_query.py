@@ -33,6 +33,17 @@ def captured(monkeypatch):
     return box
 
 
+def test_get_env_reads_single_paas_token(monkeypatch):
+    """One secret: the dashboard now accepts PAAS_TOKEN, so ops-db authenticates
+    with it — DASHBOARD_CC_TOKEN is no longer consulted."""
+    monkeypatch.setenv("PAAS_API", "http://x")
+    monkeypatch.setenv("PAAS_TOKEN", "Y")
+    monkeypatch.delenv("DASHBOARD_CC_TOKEN", raising=False)
+    api, token = query.get_env()
+    assert api == "http://x"
+    assert token == "Y"
+
+
 @pytest.mark.parametrize("user_input", ["chiwei-test", "chiwei_test"])
 def test_query_normalizes_chiwei_test_to_canonical(captured, user_input):
     query.cmd_query([f"@{user_input}", "SELECT", "1"])
