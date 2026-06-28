@@ -288,26 +288,35 @@ def _scene_section(
     username = html.escape(trigger_username or "")
     medium_parts: list[str] = []
     if chat_type == "p2p":
+        # 平台 + 私聊场景不依赖有没有对方名字（QQ 私聊事件平台不给昵称、username
+        # 为空）——有名字当称呼带上，没名字也照样标清「在哪个平台、是私聊」。
         if username:
             medium_parts.append(
                 f"{_MEDIUM_HEADER}你正通过{platform}私聊和 {username}"
                 f" 打字（隔着{platform}，不是当面）。"
             )
+        else:
+            medium_parts.append(
+                f"{_MEDIUM_HEADER}你正通过{platform}私聊打字"
+                f"（隔着{platform}，不是当面）。"
+            )
     else:
+        # 平台 + 群聊场景同样不依赖有没有群名——有群名带上当称呼，没群名也照样
+        # 标清「在哪个平台、是群聊」。
         if chat_name:
             medium_parts.append(
                 f"{_MEDIUM_HEADER}你正在{platform}群聊「{chat_name}」里打字"
+                f"（隔着{platform}，不是当面）。"
+            )
+        else:
+            medium_parts.append(
+                f"{_MEDIUM_HEADER}你正在{platform}群聊里打字"
                 f"（隔着{platform}，不是当面）。"
             )
         if username:
             medium_parts.append(
                 f"需要回复 {username} 的消息。"
             )
-
-    # 没有可标的通信介质（无对方名 / 无群名）时整段缺席——不硬塞物理在场提示
-    # （它依附于「有一次交流」这个前提）。
-    if not medium_parts:
-        return ""
 
     return "\n".join(medium_parts) + "\n" + _presence_hint(platform)
 

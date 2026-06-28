@@ -64,6 +64,9 @@ export interface InboundMessage {
     // 会话作用域。常见 "direct"/"group"，但不是强制二元；非 IM channel 可定义
     // 自己的取值，adapter 负责把它映射到下游需要的 is_direct。
     conversation_scope: string;
+    // 发言人在该 channel 上的展示名（群里"谁在说话"）。通用语义：任何 channel 都能
+    // 讲得通"这条是谁发的"。可选——channel 不提供时（如 QQ 私聊不给昵称）留空，不造假名。
+    senderName?: string;
     thread_ref: ThreadRef | null;
     addressing_hints: AddressingHint[];
     content: ContentItem[];

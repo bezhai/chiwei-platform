@@ -269,6 +269,7 @@ mock.module('@core/services/bot/multi-bot-manager', () => ({
 const {
     ensureQqCommonUser,
     ensureQqCommonConversation,
+    prepareQqInboundProjection,
     storeQqInboundMessage,
     storeQqOutboundMessage,
 } = await import('./common-projector');
@@ -342,6 +343,30 @@ describe('ensureQqCommonUser', () => {
             displayName: 'M',
         });
         expect(g1).not.toBe(g2);
+    });
+
+    it('writes the display name into qq_user_open_id.name and common_user.display_name', async () => {
+        const id = await ensureQqCommonUser({
+            botName: 'chiwei-qq',
+            scope: 'group',
+            conversationId: 'group_name',
+            openId: 'm_name',
+            displayName: '群友',
+        });
+        expect(qqUsers.get('chiwei-qq|group:group_name|m_name')!.name).toBe('群友');
+        expect(commonUsers.get(id)!.display_name).toBe('群友');
+    });
+
+    it('leaves the name empty without faking when no display name (e.g. direct chat)', async () => {
+        const id = await ensureQqCommonUser({
+            botName: 'chiwei-qq',
+            scope: 'direct',
+            conversationId: 'c2c_noname',
+            openId: 'u_noname',
+            displayName: undefined,
+        });
+        expect(qqUsers.get('chiwei-qq|direct|u_noname')!.name).toBe('');
+        expect(commonUsers.get(id)!.display_name).toBeUndefined();
     });
 
     it('concurrent first projection converges to the first writer (no overwrite, no orphan)', async () => {
@@ -448,6 +473,51 @@ describe('ensureQqCommonConversation', () => {
     });
 });
 
+describe('prepareQqInboundProjection', () => {
+    function inboundWith(senderName: string | undefined, over: Record<string, unknown> = {}) {
+        return {
+            channel: 'qq',
+            bot_name: 'chiwei-qq',
+            channel_message_id: 'qq_prep',
+            channel_chat_id: 'group_prep',
+            channel_user_id: 'm_prep',
+            conversation_scope: 'group',
+            senderName,
+            thread_ref: null,
+            addressing_hints: [],
+            content: [{ kind: 'text' as const, text: 'hi' }],
+            received_at: 1780000000000,
+            ...over,
+        } as any;
+    }
+
+    it('wires inbound.senderName into the projection and the qq_user_open_id name', async () => {
+        const projection = await prepareQqInboundProjection(
+            inboundWith('群友'),
+            'chiwei-qq',
+            'bot-common-user',
+        );
+        expect(projection.senderDisplayName).toBe('群友');
+        expect(qqUsers.get('chiwei-qq|group:group_prep|m_prep')!.name).toBe('群友');
+        expect(commonUsers.get(projection.commonUserId)!.display_name).toBe('群友');
+    });
+
+    it('leaves senderDisplayName undefined when inbound carries no senderName (no fake)', async () => {
+        const projection = await prepareQqInboundProjection(
+            inboundWith(undefined, {
+                channel_chat_id: 'c2c_prep',
+                channel_user_id: 'u_prep',
+                conversation_scope: 'direct',
+            }),
+            'chiwei-qq',
+            'bot-common-user',
+        );
+        expect(projection.senderDisplayName).toBeUndefined();
+        expect(qqUsers.get('chiwei-qq|direct|u_prep')!.name).toBe('');
+        expect(commonUsers.get(projection.commonUserId)!.display_name).toBeUndefined();
+    });
+});
+
 describe('storeQqInboundMessage', () => {
     const projection = {
         commonUserId: 'cu-1',
@@ -455,6 +525,7 @@ describe('storeQqInboundMessage', () => {
         commonMessageId: 'cm-1',
         commonRootMessageId: 'cm-1',
         commonReplyMessageId: undefined,
+        senderDisplayName: '群友',
         mentionedUserIds: [],
         content: [{ kind: 'text' as const, text: 'hi' }],
         contentText: 'hi',
@@ -480,6 +551,16 @@ describe('storeQqInboundMessage', () => {
         await storeQqInboundMessage(inbound(), projection);
         expect(qqMessages.get('qq_1')?.common_message_id).toBe('cm-1');
         expect(commonInsertCalls.length).toBe(1);
+    });
+
+    it('writes the sender display name onto the common_message', async () => {
+        await storeQqInboundMessage(inbound(), projection);
+        expect(commonInsertCalls[0].sender_display_name).toBe('群友');
+    });
+
+    it('writes no sender_display_name when projection carries none (no fake)', async () => {
+        await storeQqInboundMessage(inbound(), { ...projection, senderDisplayName: undefined });
+        expect(commonInsertCalls[0].sender_display_name).toBeUndefined();
     });
 
     it('fails loud when a qq message id already maps to a different common id', async () => {

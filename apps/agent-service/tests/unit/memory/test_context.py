@@ -1232,6 +1232,75 @@ def test_scene_empty_channel_neutral_degrade_never_feishu():
 
 
 # ---------------------------------------------------------------------------
+# 场景标识不依赖对方名字（QQ 私聊事件平台不给昵称、username 为空）。没名字也要
+# 输出平台 + 私聊/群聊场景——绝不能因为拿不到对方名字就把整段场景信息吞掉，否则
+# LLM 完全不知道当前在哪个平台、是私聊还是群聊。
+# ---------------------------------------------------------------------------
+
+
+def test_scene_p2p_no_username_still_renders_platform_and_private():
+    """QQ 私聊 username 为空 → 仍输出平台 + 私聊场景（不塌成空、不带名字）。"""
+    scene = _scene_section("p2p", "", "", channel="qq")
+    assert scene != "", "username 为空也必须渲染场景，不能整段吞掉"
+    assert _MEDIUM_HEADER_MARK in scene, "通信介质维度仍要在"
+    assert "QQ" in scene, "平台名必须在"
+    assert "私聊" in scene, "私聊场景必须在"
+    assert _PRESENCE_HEADER_MARK in scene, "物理在场维度仍要在"
+    assert "飞书" not in scene, "qq channel 绝不能冒出飞书"
+
+
+def test_scene_group_no_username_still_renders_platform_and_group():
+    """QQ 群聊 username 为空（有群名）→ 仍输出平台 + 群聊场景。"""
+    scene = _scene_section("group", "某群", "", channel="qq")
+    assert scene != "", "username 为空也必须渲染群聊场景"
+    assert _MEDIUM_HEADER_MARK in scene
+    assert "QQ群聊" in scene, "群聊平台场景必须在"
+    assert "某群" in scene, "有群名时仍带群名"
+    assert "飞书" not in scene
+
+
+def test_scene_group_no_chat_name_no_username_still_renders():
+    """QQ 群聊既无群名也无 username → 仍输出平台 + 群聊场景（不塌成空）。"""
+    scene = _scene_section("group", "", "", channel="qq")
+    assert scene != "", "群名 / username 都空也必须渲染群聊场景"
+    assert _MEDIUM_HEADER_MARK in scene
+    assert "QQ" in scene, "平台名必须在"
+    assert "群" in scene, "群聊场景必须在"
+
+
+def test_scene_group_no_chat_name_with_username_still_renders():
+    """QQ 群聊无群名但有 username → 群聊场景 + 回复谁的指示都在。"""
+    scene = _scene_section("group", "", "浩南", channel="qq")
+    assert scene != ""
+    assert "QQ群聊" in scene
+    assert "浩南" in scene, "有 username 时仍标明回复谁"
+
+
+def test_scene_none_channel_no_username_does_not_crash():
+    """channel=None 且 username 为空 → 中性降级、不崩、不出现飞书。"""
+    scene = _scene_section("p2p", "", "", channel=None)
+    assert scene != "", "channel=None + username 空也要渲染场景"
+    assert _MEDIUM_HEADER_MARK in scene
+    assert "私聊" in scene
+    assert "飞书" not in scene, "None channel 绝不能默认回飞书"
+
+
+# 飞书私聊 username 非空的渲染：放宽「username 空也渲染」绝不能改动飞书既有路径的
+# 字节输出。这条把改动前的完整字符串钉死，任何对飞书有名字路径的回归立刻报红。
+_LARK_P2P_WITH_NAME_EXPECTED = (
+    "【通信介质】你正通过飞书私聊和 浩南 打字（隔着飞书，不是当面）。\n"
+    "【物理在场】你此刻真正所处的场景、身边有谁，看下面你自己的此刻状态。"
+    "正在和你打字的人隔着飞书在另一端，不在你身边。"
+)
+
+
+def test_scene_lark_p2p_with_username_byte_for_byte_regression():
+    """飞书私聊 username 非空 → 与改动前输出字节级一致（回归保护）。"""
+    scene = _scene_section("p2p", "", "浩南", channel="lark")
+    assert scene == _LARK_P2P_WITH_NAME_EXPECTED, "飞书有名字私聊路径不许有任何字节变化"
+
+
+# ---------------------------------------------------------------------------
 # 修复 1（私聊 scene 防冒充）：私聊 scene **不盖任何系统身份后缀**。对方是不是主人
 # 完全交给 history 里他那条消息的结构化 ``<msg rel=owner>``（与群聊 scene 一致——群聊
 # scene 也不在 scene 里标身份）。私聊句子只把对方名字当称呼用，且 trigger_username /

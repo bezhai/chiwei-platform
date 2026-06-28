@@ -226,6 +226,7 @@ export interface QqInboundProjection {
     commonMessageId: string;
     commonRootMessageId: string | undefined;
     commonReplyMessageId: string | undefined;
+    senderDisplayName: string | undefined;
     mentionedUserIds: string[];
     content: ContentItem[];
     contentText: string | undefined;
@@ -242,7 +243,7 @@ export async function prepareQqInboundProjection(
         scope: inbound.conversation_scope,
         conversationId: inbound.channel_chat_id,
         openId: inbound.channel_user_id,
-        displayName: undefined,
+        displayName: inbound.senderName,
     });
 
     const commonConversationId = await ensureQqCommonConversation({
@@ -275,6 +276,7 @@ export async function prepareQqInboundProjection(
         commonMessageId,
         commonRootMessageId,
         commonReplyMessageId,
+        senderDisplayName: inbound.senderName,
         mentionedUserIds,
         content: inbound.content,
         contentText: textProjection(inbound.content),
@@ -312,6 +314,7 @@ export async function storeQqInboundMessage(
                 channel: 'qq',
                 common_conversation_id: projection.commonConversationId,
                 common_user_id: projection.commonUserId,
+                sender_display_name: projection.senderDisplayName,
                 role: 'user',
                 content: projection.content,
                 content_text: projection.contentText,

@@ -103,6 +103,9 @@ function parse(raw: CustomInboundMessage): InboundMessage | null {
         channel_chat_id: raw.conversationId,
         channel_user_id: raw.senderId,
         conversation_scope: conversationScope,
+        // 群里发言人昵称（网关从 d.author.username 取）。私聊 QQ 不给昵称、senderName
+        // 为 undefined，原样透传、不兜底假名。
+        senderName: raw.senderName,
         thread_ref: threadRef,
         addressing_hints: addressingHints,
         content,
