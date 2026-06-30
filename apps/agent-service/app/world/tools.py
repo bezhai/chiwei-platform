@@ -92,6 +92,7 @@ from app.infra import cst_time
 from app.runtime.emit import emit_delayed  # module-level so tests can monkeypatch
 from app.world.arc import write_world_arc
 from app.world.attention import write_world_attention
+from app.world.outline import write_world_outline
 from app.world.presence_match import (  # module-level so tests can monkeypatch
     match_present_personas,
 )
@@ -289,6 +290,44 @@ async def update_world(detail: str) -> str:
     world_time = cst_time.now_cst_iso()
     await write_world_state(lane=lane, world_time=world_time, detail=detail)
     return "已记下世界此刻的样子"
+
+
+@tool
+@tool_error("更新世界大纲失败")
+async def update_outline(narrative: str) -> str:
+    """整篇重写你的「大纲」——你自己的工作记忆，记着世界此刻正在走的几条客观线。
+
+    大纲不是别人替你写的、也不是每轮都重写：它就像你手头那份活的 spec——开工照着它
+    把世界往前推，发现现实跟某条线对不上了，才回头把那条线改对。少写多读、低频维护。
+
+    每条线只写四样**客观**信息：① 这条未完成的客观线是什么；② 它现在走到哪（当前
+    客观状态）；③ 客观上接下来大致怎么走（客观规律下的预期，不是写死的剧本，活的、
+    可边走边改）；④ 这条线的改写 / 结束条件（什么情况下它算办完、或者该重写）。线
+    办完了（出了结果）就把它从大纲里结掉。
+
+    边界（别让大纲往别处漂）：
+      * 不写现场描写（谁此刻在哪、什么氛围、世界此刻什么样）——那是 detail 的事。
+      * 不写主观感受（多难受、什么心情、硬撑还是去医院）——那是角色自己的事，你只
+        确立客观、绝不替角色决定她怎么应对。
+      * 不写跨周月的世界底色（换季、搬家、考完这种翻页级阶段）——那是 arc 的事。
+
+    每次调用都是**整篇重写当前仍在走的几条线**：办完的线被新版取代、不是排成历史
+    流水账。
+
+    梳理这版大纲的时刻由系统按现实当前时刻自动记下（你不用、也不能编时间）。
+
+    Args:
+        narrative: 当前仍在走的几条客观线全文（整篇重写的自然语言）。
+
+    Returns:
+        一句确认文本。
+    """
+    lane, _round_id = _world_round()
+    # outlined_at 跟现实走，由代码填现实当前 CST（客观时间不让模型编，对称
+    # update_world 的 world_time）。
+    outlined_at = cst_time.now_cst_iso()
+    await write_world_outline(lane=lane, narrative=narrative, outlined_at=outlined_at)
+    return "已记下世界此刻在走的几条客观线"
 
 
 @tool
@@ -696,11 +735,12 @@ async def fire_self_wake(*, lane: str, self_wake: dict) -> bool:
     return True
 
 
-# 续写工具集（五件）：顺着流往前推。npc_visit 让 world 以具名 NPC 身份投一件指向某
-# 姐妹的 event（speech、source=npc:名字）、同步把这件事追加进世界叙述（收件人信箱 +
-# 世界层不分叉）。update_arc **不在这里**——翻页归反思环节独占（工具集物理隔离：续写
-# 无手碰世界阶段）。
-WORLD_TOOLS = [notify, update_world, sense, npc_visit, sleep]
+# 续写工具集（六件）：顺着流往前推。update_outline 让续写把「世界此刻在走哪几条客观
+# 线」当工作记忆自维护（与 update_world 同族——一个写此刻快照、一个写在跑的线，都是
+# 续写自己的脑子）。npc_visit 让 world 以具名 NPC 身份投一件指向某姐妹的 event
+# （speech、source=npc:名字）、同步把这件事追加进世界叙述（收件人信箱 + 世界层不分叉）。
+# update_arc **不在这里**——翻页归反思环节独占（工具集物理隔离：续写无手碰世界阶段）。
+WORLD_TOOLS = [notify, update_world, update_outline, sense, npc_visit, sleep]
 
 # 反思工具集（两件）：对表翻页 + 留关注。反思环节（app.world.reflection）每日一次、
 # 无会话，工具只有 update_arc / update_attention——反思无手碰 detail / notify /

@@ -947,15 +947,24 @@ async def test_sleep_under_floor_returns_error_no_pending_wake(_ctx):
 # ---------------------------------------------------------------------------
 
 
-def test_world_tools_are_notify_update_world_sense_npc_visit_sleep():
-    """WORLD_TOOLS = [notify, update_world, sense, npc_visit, sleep]（续写五工具）。
+def test_world_tools_are_notify_update_world_update_outline_sense_npc_visit_sleep():
+    """WORLD_TOOLS = [notify, update_world, update_outline, sense, npc_visit, sleep]（续写六工具）。
 
-    没有 move_persona / emit_event（旧导演范式）。sense 是 1C 加的「投周遭客观切片
-    给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
+    没有 move_persona / emit_event（旧导演范式）。update_outline 是「世界客观大纲」加
+    的工作记忆工具：续写把「世界此刻在走哪几条客观线」当工作记忆自维护（与 update_world
+    同族——一个写此刻快照、一个写在跑的线，都是续写自己的脑子）。sense 是 1C 加的「投
+    周遭客观切片给单个角色」的五官工具，与 notify（广播一条动静给够得着的多人）分工不同。
     npc_visit 是 NPC 层第二刀加的「以具名 NPC 身份投一件指向某姐妹的 event + 同步留
     世界层」的工具。update_arc（世界阶段的「翻页」工具）**不在这里**——翻页归独立的
     反思环节独占（WORLD_REFLECT_TOOLS），续写与反思靠工具集物理隔离互不干扰。
     """
-    from app.world.tools import WORLD_TOOLS
+    from app.world.tools import WORLD_TOOLS, update_outline
 
-    assert WORLD_TOOLS == [notify, update_world, sense, npc_visit, sleep]
+    assert WORLD_TOOLS == [
+        notify,
+        update_world,
+        update_outline,
+        sense,
+        npc_visit,
+        sleep,
+    ]

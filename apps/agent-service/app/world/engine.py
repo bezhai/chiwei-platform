@@ -120,6 +120,9 @@ from app.world.npc_roster import (  # module-level so tests can monkeypatch
     list_npc_roster,
     seed_npc_roster,
 )
+from app.world.outline import (  # module-level so tests can monkeypatch
+    read_world_outline,
+)
 from app.world.reflection import (  # module-level so tests can monkeypatch
     run_arc_reflection,
 )
@@ -177,6 +180,23 @@ WORLD_TICK_TIMEOUT_SECONDS = 480
 # 不截断丢弃；缘由文本告诉 world"还有积压"，由 world **自己排短 sleep** 来尽快
 # 消化——决策仍在 world 手里（频率主权交给 world 自己的 sleep）。
 WORLD_ACT_PULL_LIMIT = 200
+
+# 大纲软 reminder（spec 决策 3）：大纲是 world 续写自维护的低频工作记忆（少写多读），
+# 风险是 world 一直顾着推进、忘了回头看大纲已经旧了。所以白天（world 活跃时段）若大纲
+# 很久没更新，就在续写 context 里递一句「该回看了」的软提醒——看不看、改不改、改成什么
+# 全是 world 自己用 update_outline 决定（机制只碰「何时递纸条」、不进大纲内容决策）。
+# 两个初值都标「可调」：留给 coe 真机跟节奏对齐，不是写死的判据。
+#
+# OUTLINE_STALE_HOURS：大纲多久没更新算「旧」。world ~10min 醒一轮，但大纲不该每轮改
+# （像写 spec 的人 plan 还准就照着干）；4 小时是「活跃白天里隔了好一阵、该回头核对一下」
+# 的量级——活跃段 ~19h，4h 阈值一天至多触发几次、不会每轮唠叨。可调。
+OUTLINE_STALE_HOURS = 4.0
+
+# 白天（world 活跃时段）小时窗口 [start, end)：对齐眼睛 cron 的活跃段
+# （``0 4-23 * * *``，即 04:00–23:00 一带）。深夜（窗口外）大纲哪怕旧也不打扰——夜里本
+# 就低活动、没必要催。两端可调。
+OUTLINE_DAYTIME_START_HOUR = 4
+OUTLINE_DAYTIME_END_HOUR = 23
 
 _WORLD_CFG = AgentConfig(
     "world_deliberate",
@@ -254,20 +274,30 @@ def world_loop_instruction() -> str:
          出碗盘声水流声却不 notify、life 卷不进来的洞。仍守"自然冒出才投、不为卷人
          硬造动静"（与降频软引导一致：真没动静才只 update_world + sleep）。
 
-    工具枚举必须跟住 WORLD_TOOLS（五件：update_world / sense / notify / npc_visit /
-    sleep）——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）、NPC 层加的
-    ``npc_visit``（让一个有名有姓的固定 NPC 来找某个姐妹）若不在这段指令里枚举，真实
-    模型就不知道有它、根本不会调，对应能力形同虚设（必改命门）。反过来 ``update_arc``
-    （翻页）已归反思环节独占（Task 2b：续写姿态发现不了「页翻了」，工具集物理隔离）
-    ——这里**不得**再枚举它，否则模型会去调一个不存在的工具。世界阶段仍是续写的输入
-    （【世界阶段】段每轮拼），只是续写无手碰它。
+    工具枚举必须跟住 WORLD_TOOLS（六件：update_world / update_outline / sense / notify /
+    npc_visit / sleep）——1C Task2 加的 ``sense``（五官，per-person 投周遭客观切片）、
+    NPC 层加的 ``npc_visit``（让一个有名有姓的固定 NPC 来找某个姐妹）、task2 加的
+    ``update_outline``（续写自维护的大纲工作记忆）若不在这段指令里枚举，真实模型就不知道
+    有它、根本不会调，对应能力形同虚设（必改命门）。反过来 ``update_arc``（翻页）已归
+    反思环节独占（Task 2b：续写姿态发现不了「页翻了」，工具集物理隔离）——这里**不得**
+    再枚举它，否则模型会去调一个不存在的工具。世界阶段仍是续写的输入（【世界阶段】段
+    每轮拼），只是续写无手碰它。
+
+    task2 收口（续写自维护大纲 + 沿线推进 + 职责重划，spec 决策 1/3/4 + 事实优先级）：
+    续写多了一份**自己的大纲**（``update_outline`` 维护的工作记忆，记世界此刻在走的几条
+    未完成客观线），所以这段指令在原五工具推演者范式上增写——① 枚举 ``update_outline``；
+    ② 一段大纲纪律：硬不变量（未完成线本轮出结果或入账、不蒸发）、整篇改大纲低频但新线
+    立刻入账、事实优先级（act 最硬 / 此刻推进 > 大纲预期 / 大纲只盯在跑没出结果的线 /
+    世界阶段是慢层底色）、从大纲的线上克制地长出客观事件、全程只确立客观不碰主观、轻量
+    工作顺序、软 reminder 读完可以不改。原有的「不替角色编自主行动 / 强化 notify / 安静
+    不等于冻结」全部保留——大纲是叠加的朝向，不替换续写既有的客观推演行为。
     """
     return (
         "你是这个世界的推演层（world）。你不是导演、不是裁判——你不替任何角色决定"
         "她想做什么、怎么想、什么情绪（那是各角色自己的事）；你对角色做的事只推演"
         "客观上发生了什么，绝不批准或拒绝她想不想做（她几乎总能做到，除非客观世界"
         "里有硬冲突）。情绪和主观解读不是你的事。\n\n"
-        "你不是填一张表，而是一个会持续推演世界的脑子。你有五个工具，看一眼世界后"
+        "你不是填一张表，而是一个会持续推演世界的脑子。你有六个工具，看一眼世界后"
         "想清楚再调，直到这一轮没有别的要做了就停：\n\n"
         "- update_world(detail)：写下世界此刻的客观叙述。看你记得的上一版世界叙述"
         "+ 现在几点，推演世界此刻什么样：谁大概在哪、在干嘛、什么氛围（位置就融在"
@@ -291,6 +321,14 @@ def world_loop_instruction() -> str:
         "把上一版当出发点、让客观时间把**环境**往前带到现实此刻，别把世界冻在那一帧。"
         "只写客观发生了什么，绝不写谁的情绪"
         "/ 心情 / 主观解读。世界时间由系统按现实时刻自动记，你不用编。\n"
+        "- update_outline(narrative)：你有一份**自己的大纲**——它是你的工作记忆，记着这"
+        "个世界此刻正在走的几条**还没办完的客观线**，每条写清「这条线是什么 + 现在客观上"
+        "走到哪 + 客观规律下接下来大致怎么走 + 这条线的改写 / 结束条件」。它就像你手头那"
+        "份**活的 spec**：每轮开工先读它当朝向、沿着每条线把在跑的客观进程往前推到出结果；"
+        "发现现实跟某条线对不上了，就用它把那条线改对。narrative 是你**整篇重写**的大纲"
+        "全文（办完、出了结果的线就从里面结掉，不排成历史流水账）。大纲只写在跑的客观线"
+        "——不写现场描写（那归 update_world 的 detail）、不写谁的情绪心情（那是角色自己的"
+        "事）、不写跨周月的世界阶段底色（那归世界阶段）。\n"
         "- sense(recipient, surroundings)：你是每个角色的五官。你有全局视角，但每个"
         "角色只能感知到她够得着的那一份，所以这条工具是**逐角色**的——为**单个** "
         "recipient 推演「此刻她在哪、谁在她身边、周围环境怎样」，把这份客观周遭切片"
@@ -362,6 +400,30 @@ def world_loop_instruction() -> str:
         "她在这环境里要不要动、做什么，留给她自己。你不替任何角色判断该不该醒、该不该做"
         "什么：时间到了、下课了、天黑了这些客观进程照常发生，谁在场谁就被卷进去（用 notify "
         "把这些动静投出去就是把人卷进去的方式），这由世界本身推动，不靠你去挑谁该动。\n\n"
+        "**关于你的大纲，有几条纪律要守住**：\n"
+        "① **硬不变量（最要紧的一条）**：你每轮识别出的、还没办完的客观进程，要么**本轮"
+        "就把它推到出结果**，要么用 update_outline **入账**进大纲（新冒出来的线写进去、"
+        "已经在跑的线更新「现在走到哪」）——绝不允许一条没办完的线既没出结果、又没入账，"
+        "就这么从世界里**蒸发**掉。\n"
+        "② **什么时候整篇回头改大纲，你自己判断**：像写 spec 的人那样——plan 还准就照着"
+        "干、不重写，发现现实跑偏了才回头改，所以整篇梳理大纲是低频的、少写多读。但「新"
+        "冒出来的未完成线立刻入账」是随时的纪律、不吃这个低频豁免（否则就违反①）。\n"
+        "③ **事实之间有优先级**：你收到的 act（角色已经做出的主张 / 行动）最硬，你不能"
+        "否认它、只**推演**它带来的客观后果；「这轮 / detail 体现的现实」高于「大纲里那"
+        "条线的预期走法」——大纲写的「接下来怎么走」只是客观**预期**，跟现实冲突时让步于"
+        "现实、顺手把大纲那条线改对；大纲只盯「在跑、还没出结果」的线（detail 是此刻全图"
+        "快照，大纲只是其中没办完那几条的台账）；世界阶段是更慢、更权威的底色。\n"
+        "④ **从大纲的线上克制地长出客观事件**：客观规律下顺着某条线自然会发生的下一步，"
+        "可以给（淋了大雨没换衣服这条线 → 接下来着凉、发烧，给）；没有任何线铺着、凭空硬"
+        "造的遭遇，不给（好端端在家突然重病，不给）。别为了热闹即兴硬造。\n"
+        "⑤ **全程只确立客观**（包括落到身体上的生理客观，比如她烧到了 39 度），**绝不碰"
+        "角色的主观承受与应对**（多难受、什么心情、硬撑还是去医院——那是角色自己的事）。\n"
+        "⑥ **轻量的工作顺序**（软引导、不是死流程）：先读事实（这批 act + 上一版 detail + "
+        "世界阶段 + 你的大纲）→ 推进并落地客观事实（update_world 写新的 detail）→ 回头看"
+        "看大纲要不要改（update_outline）→ 再决定要不要 notify / 让谁来访 / 睡多久。\n"
+        "⑦ 如果你在输入里看到一句**「大纲该回看了」的提醒**——那只是一张提醒纸条，提醒你"
+        "这份大纲已经有一阵没动、可能跟现实对不上了。读完你**可以照样不改**，改不改、改成"
+        "什么，全由你自己判断。\n\n"
         "看完、推演完这一轮后，用 sleep 定下次多久再看。"
     )
 
@@ -483,6 +545,64 @@ def _arc_section(arc_narrative: str | None) -> str:
             "此刻往前推演（世界阶段这一层由独立的反思环节负责书写，不归你动手）。"
         )
     return arc_narrative
+
+
+def _outline_section(outline_narrative: str | None) -> str:
+    """渲染【大纲】段的正文：有大纲给最新一版全文，空白时引导续写起头记。
+
+    大纲是 world 续写**自己维护**的工作记忆——记着世界此刻正在走的几条未完成客观线
+    （spec 决策 1/4）。每轮推演都把最新一版喂回去当朝向，让 world 沿每条线把在跑的
+    客观进程往前推到出结果、不再走一步看一步即兴推演。
+
+    与 :func:`_arc_section` 的关键差别：世界阶段（arc）由独立反思环节书写、续写**只读
+    不碰**，所以空白时只如实说明、绝不引导续写动手；大纲不一样——它就挂在续写自己的
+    工具集里（``update_outline``），续写就是沿着它推进世界、写和用是同一个脑子，所以
+    空白时**应**引导 world 用 ``update_outline`` 起头把识别出的未完成客观线记进来
+    （硬不变量 决策 4：未完成线要么本轮出结果、要么入账，不蒸发）。文案绝不硬编任何
+    剧情事实（宪法）。
+    """
+    if outline_narrative is None:
+        return (
+            "大纲还是空白——你还没有把世界此刻在走的几条客观线记下来。从这轮起，把你"
+            "识别出的、还没办完的客观线用 update_outline 记进来（每条写清现在客观上走到"
+            "哪、接下来大致怎么走），让世界往前走有脉络、别再走一步看一步。"
+        )
+    return outline_narrative
+
+
+def _outline_reminder_text(outlined_at: str | None, world_time_iso: str) -> str:
+    """白天 + 大纲很久没更新时返回一句软提醒；否则返回 ``""``（spec 决策 3）。
+
+    纯函数（不碰 PG / agent），只据「大纲上次梳理时刻 ``outlined_at``」与「当前世界
+    时刻 ``world_time_iso``」算时间差 + 判此刻是不是 world 活跃时段（白天）：
+
+      * 大纲不旧（差 < :data:`OUTLINE_STALE_HOURS`）→ ``""``（没必要催）。
+      * 此刻是深夜（不在 ``[START, END)`` 白天窗口）→ ``""``（夜里不打扰）。
+      * 大纲旧 **且** 白天 → 一句「你这份大纲是 X 小时前梳理的、回头看看还准不准、要不要
+        用 update_outline 更新」的软提醒文本。
+
+    边界（spec 决策 3 命门）：这**只**算「该不该把提醒纸条递过去」、只控 context 注入；
+    world 读完**照样可以不改**——改不改、改成什么全由 world 自决，机制绝不强制它改大纲
+    （强制就把刚推翻的「独立环节」换皮请回来了）。``outlined_at`` 为 None（还没有大纲）
+    或任一时刻解析不出 → ``""``（无从判旧、保守不催）。
+    """
+    if outlined_at is None:
+        return ""
+    outlined = cst_time.parse(outlined_at)
+    now = cst_time.parse(world_time_iso)
+    if outlined is None or now is None:
+        return ""
+    elapsed_hours = (now - outlined).total_seconds() / 3600.0
+    if elapsed_hours < OUTLINE_STALE_HOURS:
+        return ""
+    hour = now.astimezone(_CST).hour
+    if not (OUTLINE_DAYTIME_START_HOUR <= hour < OUTLINE_DAYTIME_END_HOUR):
+        return ""
+    return (
+        f"（提醒：你这份大纲是大约 {int(elapsed_hours)} 小时前梳理的了，世界这段时间"
+        "又往前走了——回头看一眼它还准不准、有没有哪条线该更新「走到哪」或该结掉了。"
+        "要不要用 update_outline 改，你自己判断，不改也行。）"
+    )
 
 
 def _materials_section(materials: DailyMaterials) -> str:
@@ -622,7 +742,9 @@ def _world_loop_messages(
     wake_reason: str,
     round_id: str,
     arc_narrative: str | None,
+    outline_narrative: str | None,
     sisters_text: str,
+    reminder_text: str = "",
     materials_text: str = "",
     roster_text: str = "",
     act_batch_text: str = "",
@@ -654,6 +776,19 @@ def _world_loop_messages(
     第一版由反思写、不引导续写动手）。**必传、无默认值**：None 是"还没翻过页"的
     显式语义，调用方必须显式给——漏传应当在测试里炸出来（TypeError），而不是静默
     退化成空白说明。
+
+    ``outline_narrative``：最新一版大纲的全文（world 续写自维护的工作记忆——世界此刻
+    在走的几条未完成客观线，:func:`_run_world_round` 每轮 ``read_world_outline`` 现读
+    传进来）。【大纲】段**每轮都拼**（同世界阶段，是续写沿线推进的朝向）、插在【世界
+    阶段】之后、上一版叙述之前：有大纲给全文，None（冷启动还没记过线）由
+    :func:`_outline_section` 引导续写用 ``update_outline`` 起头记（区别于世界阶段空白
+    时的「不归你动手」——大纲就归续写自己维护）。**必传、无默认值**：None 是"还没有
+    大纲"的显式语义，调用方必须显式给（同 ``arc_narrative`` 的哲学）。
+
+    ``reminder_text``：大纲软 reminder 段（spec 决策 3）。由 :func:`_run_world_round`
+    据 :func:`_outline_reminder_text` 算出——白天 + 大纲很久没更新时是一句「该回看大纲
+    了」的软提醒，否则空串。**非空才插这段**、插在「这一批动作」之前；这只是递一张提
+    醒纸条，world 读完照样可以不改（决策 3 命门：只控注入、不强制改大纲）。
 
     ``materials_text``：当天外部底料渲染出的「今天的外部底料」段（:func:`_materials_section`
     渲染的 briefing）。它是世界今天的真实节律（下雨 / 放假 / 番剧更新），作为**公共
@@ -698,6 +833,9 @@ def _world_loop_messages(
         if act_batch_text
         else ""
     )
+    # 大纲软 reminder 段（spec 决策 3）：非空才插（白天 + 大纲旧时才有），插在「这一批
+    # 动作」之前。只控 context 注入、world 读完照样可以不改。
+    reminder_section = f"{reminder_text}\n\n" if reminder_text else ""
     # 上一版叙述段带写入时刻标注（spec 决策 5b）；冷启动占位文本无真实写入时刻，
     # 不标注。
     detail_header = (
@@ -711,10 +849,12 @@ def _world_loop_messages(
         f"【现实此刻】{now_iso}\n"
         f"【三姐妹此刻各自的样子】\n{sisters_text}\n\n"
         f"【世界阶段】\n{_arc_section(arc_narrative)}\n\n"
+        f"【你的大纲（世界此刻在走的客观线）】\n{_outline_section(outline_narrative)}\n\n"
         f"{detail_header}\n{detail}\n\n"
         f"{materials_section}"
         f"{roster_section}"
         f"【这次醒来的缘由】{wake_reason}\n\n"
+        f"{reminder_section}"
         f"{act_section}"
         "看一眼这个世界，推演此刻它什么样，用 update_world 写下来；出现了值得被感知的"
         "客观动静就用 notify 投出去、标清它的客观作用域（谁够得着由在场匹配判，不归你"
@@ -1162,6 +1302,22 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
     arc = await read_world_arc(lane=lane)
     arc_narrative = arc.narrative if arc is not None else None
 
+    # 大纲（world 续写自维护的工作记忆，spec task2）：每轮读最新一版当朝向喂进推演——
+    # world 沿着每条客观线把在跑的进程往前推到出结果（绫奈急诊→候诊→出结果），不再
+    # 走一步看一步失忆推演。**用本轮 tick 的 lane**（泳道隔离命门同 WorldState / WorldArc，
+    # coe / ppe 绝不读到别的泳道的大纲）。还没记过线（None=冷启动）由 _outline_section
+    # 引导续写用 update_outline 起头记。
+    #
+    # 大纲软 reminder（spec 决策 3）：据大纲上次梳理时刻 outlined_at 与现实此刻 now_iso
+    # （world_time 跟现实走、由 update_outline 自填现实 CST）算时间差 + 判白天，白天 +
+    # 大纲很久没更新时算出一句软提醒注入 context。没有大纲（None）→ outlined_at 传 None
+    # → 不催（_outline_reminder_text 内部判 None 即返 ""）。这只控注入、不强制 world 改。
+    outline = await read_world_outline(lane=lane)
+    outline_narrative = outline.narrative if outline is not None else None
+    reminder_text = _outline_reminder_text(
+        outline.outlined_at if outline is not None else None, now_iso
+    )
+
     # 三姐妹此刻各自的样子（客观叙述对齐的输入面，Task 1 收口后唯一用途）：每轮读每个
     # persona 的 LifeState 快照，把**当前状态**喂进 USER 消息，让 world 的客观叙述跟
     # 她们此刻所处对得上（她在上课就别说她在街上）。**不再**读它判「谁状态停滞太久、
@@ -1184,7 +1340,9 @@ async def _run_world_round(tick: WorldTick, *, lane: str) -> None:
         wake_reason=wake_reason,
         round_id=round_id,
         arc_narrative=arc_narrative,
+        outline_narrative=outline_narrative,
         sisters_text=sisters_text,
+        reminder_text=reminder_text,
         materials_text=materials_text,
         roster_text=roster_text,
         act_batch_text=act_batch_text,

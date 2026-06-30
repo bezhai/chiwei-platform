@@ -85,6 +85,10 @@ def _stub_engine_io(monkeypatch):
     async def fake_read_world_arc(*, lane):
         return None
 
+    async def fake_read_world_outline(*, lane):
+        # task2 续写每轮读大纲（自维护工作记忆）；stub None（大纲空白）不碰真库。
+        return None
+
     async def fake_list_npc_roster(*, lane):
         return []
 
@@ -116,6 +120,7 @@ def _stub_engine_io(monkeypatch):
     )
     monkeypatch.setattr(engine_mod, "find_daily_materials", fake_find_daily_materials)
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
     monkeypatch.setattr(engine_mod, "run_arc_reflection", fake_run_arc_reflection)
