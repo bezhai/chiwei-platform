@@ -100,6 +100,11 @@ def _stub_io(monkeypatch):
         # gate 放行的轮会读最新世界阶段；这里 stub 成 None（阶段空白，不碰真库）。
         return None
 
+    async def fake_read_world_outline(*, lane):
+        # gate 放行的轮会读最新大纲（task2 续写自维护工作记忆）；这里 stub 成 None
+        # （大纲空白，不碰真库）。
+        return None
+
     async def fake_list_npc_roster(*, lane):
         # gate 放行的轮会 list NPC 名册；这里 stub 成空表（还没 seed，不碰真库）。
         return []
@@ -127,6 +132,7 @@ def _stub_io(monkeypatch):
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
     monkeypatch.setattr(

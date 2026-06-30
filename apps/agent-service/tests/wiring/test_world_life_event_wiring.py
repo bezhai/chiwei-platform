@@ -176,3 +176,41 @@ def test_life_heartbeat_module_deleted():
 
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("app.life.life_heartbeat")
+
+
+def test_world_outline_registered_and_migratable_via_production_graph_load():
+    """WorldOutline 通过【生产 graph load 路径】进 DATA_REGISTRY 且被 migrator 建表
+    （codex T3 建议 3）——不靠测试里显式 migrate(WorldOutline)。
+
+    线上建表口径：``load_dataflow_graph()`` 跑 ``app.wiring`` 的 side-effect import 链
+    （→ world 节点 ``app.world.engine`` / ``app.world.tools`` → ``app.world.outline`` 的
+    Data 注册），migrator 再从 ``DATA_REGISTRY`` 算 CREATE TABLE。所以「WorldOutline 进没
+    进 DATA_REGISTRY」直接决定 ``data_world_outline`` 线上建不建。
+
+    防回归：以后若把 outline 的生产 import 全拆了，整合测试里显式 ``migrate(WorldOutline)``
+    仍会绿（它自己建表），但线上从 DATA_REGISTRY 算迁移时就漏了 ``data_world_outline`` →
+    续写读大纲炸 ``UndefinedTableError``。这里走真生产 graph load + **按 class 名**断言
+    （不 ``from app.world.outline import WorldOutline``，那样会绕过生产 import 自己把它注册
+    进去、遮住回归），把这个口径钉死。不用 ``sys.modules.pop`` reimport hack。
+    """
+    from app.runtime.bootstrap import load_dataflow_graph
+    from app.runtime.data import DATA_REGISTRY
+    from app.runtime.migrator import plan_migration
+
+    load_dataflow_graph()  # 生产 graph 构建：跑 app.wiring 的 side-effect import 链
+
+    outline_cls = next(
+        (c for c in DATA_REGISTRY if c.__name__ == "WorldOutline"), None
+    )
+    assert outline_cls is not None, (
+        "WorldOutline 必须通过生产 graph load 注册进 DATA_REGISTRY，"
+        "否则线上 migrate 不建 data_world_outline 表（显式 migrate 测试遮不住这个回归）"
+    )
+
+    # durable（非 transient）：migrator 必须为它产 CREATE TABLE data_world_outline，
+    # 否则注册了也不建表（口径同 chat_wiring 的 table-in-migrator 断言）。
+    plan = plan_migration([outline_cls], {})
+    sql_blob = "\n".join(s.sql for s in plan.stmts)
+    assert "data_world_outline" in sql_blob, (
+        "WorldOutline 必须被 migrator 建表（data_world_outline），否则注册了线上也不建表"
+    )

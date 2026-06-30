@@ -62,6 +62,7 @@ from app.world.engine import (
     world_tick,
 )
 from app.world.npc_roster import NPCRoster
+from app.world.outline import WorldOutline
 from app.world.state import WorldState, read_world_state
 from tests.runtime.conftest import migrate
 
@@ -157,6 +158,9 @@ async def world_db(test_db):
     """
     await migrate(WorldState, test_db)
     await migrate(WorldArc, test_db)
+    # world 续写每轮 read_world_outline 读自维护的大纲（task2 工作记忆）——不建它，
+    # 闭环里每个放行轮都死在 UndefinedTableError（即便大纲为空也要表存在才能 SELECT）。
+    await migrate(WorldOutline, test_db)
     await migrate(WorldAttention, test_db)
     await migrate(EventEnvelope, test_db)
     await migrate(EventRead, test_db)

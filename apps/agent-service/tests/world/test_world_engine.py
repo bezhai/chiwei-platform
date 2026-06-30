@@ -154,6 +154,14 @@ def _stub_state(monkeypatch):
         arc_reads.append(lane)
         return None
 
+    outline_reads: list[str] = []
+
+    async def fake_read_world_outline(*, lane):
+        # 默认大纲还是空白（None = 冷启动还没记过线）：需要断言大纲内容 / reminder 的用例
+        # 自己覆写这个桩（monkeypatch.setattr engine_mod.read_world_outline）。
+        outline_reads.append(lane)
+        return None
+
     roster_reads: list[str] = []
 
     async def fake_list_npc_roster(*, lane):
@@ -226,6 +234,7 @@ def _stub_state(monkeypatch):
         engine_mod, "find_daily_materials", fake_find_daily_materials
     )
     monkeypatch.setattr(engine_mod, "read_world_arc", fake_read_world_arc)
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
     monkeypatch.setattr(engine_mod, "list_npc_roster", fake_list_npc_roster)
     monkeypatch.setattr(engine_mod, "seed_npc_roster", fake_seed_npc_roster)
     monkeypatch.setattr(
@@ -235,6 +244,7 @@ def _stub_state(monkeypatch):
 
     engine_mod._test_materials_calls = materials_calls  # type: ignore[attr-defined]
     engine_mod._test_arc_reads = arc_reads  # type: ignore[attr-defined]
+    engine_mod._test_outline_reads = outline_reads  # type: ignore[attr-defined]
     engine_mod._test_roster_reads = roster_reads  # type: ignore[attr-defined]
     engine_mod._test_reflect_calls = reflect_calls  # type: ignore[attr-defined]
     engine_mod._test_cost_calls = cost_calls  # type: ignore[attr-defined]
@@ -1513,16 +1523,19 @@ async def test_placeholder_snapshot_gate_behaves_like_cold_start(monkeypatch):
 async def test_world_instruction_does_not_enumerate_update_arc():
     """续写指令**不再**枚举 update_arc——翻页归反思独占（工具集物理隔离的 prompt 面）。
 
-    续写工具是五个（notify / update_world / sense / npc_visit / sleep）。世界阶段仍是
-    续写的输入（【世界阶段】段保留），但续写无手碰世界阶段：指令里不能再有 update_arc
-    的使用指令，否则模型会去调一个不存在的工具。
+    续写工具是六个（notify / update_world / update_outline / sense / npc_visit / sleep）。
+    世界阶段仍是续写的输入（【世界阶段】段保留），但续写无手碰世界阶段：指令里不能再有
+    update_arc 的使用指令，否则模型会去调一个不存在的工具（区别于 task2 加进续写工具集、
+    续写自己维护的 update_outline——后者**必须**枚举）。
     """
     instruction = engine_mod.world_loop_instruction()
     assert "update_arc" not in instruction, (
         "续写指令不得枚举 update_arc（翻页已归反思环节独占）"
     )
-    assert "六个工具" not in instruction, "续写工具是五个，指令不能再写「六个工具」"
-    assert "五个工具" in instruction, "工具清单应明确是五个（update_arc 已移出，含 npc_visit）"
+    assert "五个工具" not in instruction, "续写工具已是六个（含 update_outline），不能再写「五个工具」"
+    assert "六个工具" in instruction, (
+        "工具清单应明确是六个（update_arc 已移出、含 npc_visit / update_outline）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2165,8 +2178,8 @@ async def test_world_instruction_enumerates_sense_tool():
     instruction = engine_mod.world_loop_instruction()
     assert "sense" in instruction, "循环指令必须枚举 sense 工具（否则模型不会调它）"
     assert "三个工具" not in instruction, "工具早已不止三个，指令不能再写「三个工具」"
-    assert "五个工具" in instruction, (
-        "工具清单应明确是五个（含 sense / npc_visit；update_arc 已归反思环节）"
+    assert "六个工具" in instruction, (
+        "工具清单应明确是六个（含 sense / npc_visit / update_outline；update_arc 已归反思环节）"
     )
     # sense 是逐角色（per-person）投周遭客观切片：引导逐角色 + 信息差
     assert ("逐角色" in instruction) or ("每个角色" in instruction) or ("单个" in instruction), (
@@ -2251,6 +2264,7 @@ async def test_world_loop_messages_carry_no_household_rhythm():
         wake_reason="例行看一眼世界。",
         round_id="r1",
         arc_narrative=None,  # 必传：None 是"还没翻过页"的显式语义，不允许靠默认值
+        outline_narrative=None,  # 必传：None 是"还没有大纲"的显式语义，不允许靠默认值
         sisters_text=_sisters_section([]),  # 必传；空名单不引入任何角色坐标
     )
     blob = "".join(m.text() for m in messages)
@@ -3400,3 +3414,334 @@ def test_world_tick_timeout_below_single_flight_ttl():
         engine_mod.WORLD_TICK_TIMEOUT_SECONDS
         < engine_mod.WORLD_TICK_LOCK_TTL_SECONDS
     )
+
+
+# ---------------------------------------------------------------------------
+# task2：续写自维护大纲 + 沿线推进世界（spec 决策 1/3/4 + 事实优先级时序）
+#   * 大纲软 reminder 纯函数（_outline_reminder_text）：白天 + 大纲旧 → 提醒；
+#     大纲新 / 夜里 → 空（只控 context 注入、绝不验「提醒后大纲必须被改」）。
+#   * _world_loop_messages：大纲段插在【世界阶段】之后、上一版叙述之前；reminder 段
+#     插在这批动作之前。
+#   * _run_world_round：每轮读大纲当朝向注入、按大纲时间 + 现实此刻算 reminder。
+#   * world_loop_instruction：枚举 update_outline、写入大纲纪律（硬不变量 / 事实优先级）。
+# ---------------------------------------------------------------------------
+
+
+def test_outline_reminder_text_stale_in_daytime_nudges():
+    """大纲很久没更新 + 当前是白天（world 活跃时段）→ 注入一句软提醒（spec 决策 3）。"""
+    from app.world.engine import OUTLINE_STALE_HOURS, _outline_reminder_text
+
+    outlined = "2026-06-10T08:00:00+08:00"
+    # 白天 14:00，距 08:00 已 6 小时 > 阈值（OUTLINE_STALE_HOURS 初值 4）。
+    now = "2026-06-10T14:00:00+08:00"
+    assert 6 > OUTLINE_STALE_HOURS, "本用例前提：6h 跨过 stale 阈值"
+    text = _outline_reminder_text(outlined, now)
+    assert text != "", "白天 + 大纲旧 → 应注入软提醒"
+    assert "update_outline" in text, "提醒应点名 update_outline（引导 world 回看大纲）"
+    # 软引导口径（spec 决策 3 命门）：world 读完可以不改、改不改自决，绝不强制。
+    assert ("自己判断" in text) or ("不改" in text), (
+        "提醒必须是软引导（world 自决、可以不改），不能写成强制改"
+    )
+
+
+def test_outline_reminder_text_fresh_no_nudge():
+    """大纲刚更新过（不旧）→ 不注入提醒。"""
+    from app.world.engine import _outline_reminder_text
+
+    outlined = "2026-06-10T13:30:00+08:00"
+    now = "2026-06-10T14:00:00+08:00"  # 才半小时，远未到 stale 阈值
+    assert _outline_reminder_text(outlined, now) == "", "大纲新 → 不该注入提醒"
+
+
+def test_outline_reminder_text_night_no_nudge():
+    """深夜（world 非活跃时段）即便大纲旧也不打扰 → 不注入提醒。"""
+    from app.world.engine import _outline_reminder_text
+
+    outlined = "2026-06-10T20:00:00+08:00"
+    now = "2026-06-11T02:00:00+08:00"  # 凌晨 2 点（深夜），距 20:00 已 6h（够旧）
+    assert _outline_reminder_text(outlined, now) == "", "夜里即便大纲旧也不打扰"
+
+
+def test_outline_reminder_text_no_outline_no_nudge():
+    """还没有大纲（outlined_at=None）→ 无从判旧，不注入提醒。"""
+    from app.world.engine import _outline_reminder_text
+
+    assert _outline_reminder_text(None, "2026-06-10T14:00:00+08:00") == "", (
+        "还没有大纲时不该催（没有可回看的大纲）"
+    )
+
+
+# --- _outline_reminder_text 边界用例（codex T3 建议 2）：白天窗口两端 / 阈值边界 /
+#     解析失败 / 跨时区，把"差一点点就翻车"的边界行为逐条钉死 ---
+
+
+def test_outline_reminder_hour_4_is_daytime_nudges():
+    """白天窗口下边界 hour=4（含）→ 大纲旧时算白天、给提醒。"""
+    from app.world.engine import _outline_reminder_text
+
+    outlined = "2026-06-09T20:00:00+08:00"  # 距 8h、够旧
+    now = "2026-06-10T04:00:00+08:00"  # hour=4，[4,23) 的下边界（含）
+    assert _outline_reminder_text(outlined, now) != "", (
+        "hour=4 是白天窗口下边界（含），大纲旧应提醒"
+    )
+
+
+def test_outline_reminder_hour_23_is_night_no_nudge():
+    """白天窗口上边界 hour=23（不含）→ 算夜里、不提醒。"""
+    from app.world.engine import _outline_reminder_text
+
+    outlined = "2026-06-10T15:00:00+08:00"  # 距 8h、够旧
+    now = "2026-06-10T23:00:00+08:00"  # hour=23，[4,23) 的上边界（不含）
+    assert _outline_reminder_text(outlined, now) == "", (
+        "hour=23 落在白天窗口 [4,23) 之外，算夜里、不提醒"
+    )
+
+
+def test_outline_reminder_elapsed_exactly_threshold_is_stale():
+    """elapsed 正好等于阈值（4.0h）→ 按 `< 阈值才算新` 的实现算「旧」→ 提醒（边界钉死）。"""
+    from app.world.engine import OUTLINE_STALE_HOURS, _outline_reminder_text
+
+    assert OUTLINE_STALE_HOURS == 4.0, "本用例前提：阈值初值 4.0h"
+    outlined = "2026-06-10T10:00:00+08:00"
+    now = "2026-06-10T14:00:00+08:00"  # 正好 4h、白天
+    assert _outline_reminder_text(outlined, now) != "", (
+        "elapsed 正好等于阈值算「旧」（实现是 `< 阈值` 才算「新」），把这个边界行为钉死——"
+        "若改成 `<= 阈值` 算新，正好 4h 会被判新、漏提醒"
+    )
+
+
+def test_outline_reminder_unparseable_outlined_at_no_nudge():
+    """outlined_at 解析失败（脏串）→ 无从判旧、保守不催。"""
+    from app.world.engine import _outline_reminder_text
+
+    assert _outline_reminder_text("garbage-not-a-time", "2026-06-10T14:00:00+08:00") == "", (
+        "outlined_at 解析失败时保守不催（不拿解析不出的时刻乱算时间差）"
+    )
+
+
+def test_outline_reminder_handles_mixed_timezone_offsets():
+    """outlined_at 与 world_time 带不同 tz offset → 时间差按真实时刻算、hour 按 CST 取。
+
+    构造：world_time 用 UTC offset，CST 看是白天但 UTC 看是夜里——若实现取 hour 时忘了
+    astimezone(CST)、直接 .hour，会按 UTC 2 点误判夜里、漏提醒。
+    """
+    from app.world.engine import _outline_reminder_text
+
+    outlined = "2026-06-10T20:00:00+00:00"  # = CST 2026-06-11 04:00
+    now = "2026-06-11T02:00:00+00:00"  # = CST 2026-06-11 10:00（白天）；真实差 6h（够旧）
+    assert _outline_reminder_text(outlined, now) != "", (
+        "跨时区：时间差按真实时刻算（6h 够旧）、hour 按 CST 取（10 白天）→ 应提醒；"
+        "忘了 astimezone(CST) 取 hour 会按 UTC 2 点判夜里、漏提醒"
+    )
+
+
+def test_world_loop_messages_inject_outline_after_arc_before_detail():
+    """传了 outline_narrative → 大纲段出现，且在【世界阶段】之后、上一版叙述之前。"""
+    from app.world.engine import _sisters_section, _world_loop_messages
+
+    # 锚点用各段**独有内容 / 独有段标题**，避开 world_loop_instruction 正文里出现的
+    # 相似措辞（指令里也提「上一版世界叙述」「大纲」，纯按这些词 index 会落到指令上）。
+    arc_text = "眼下初夏，一家四口刚搬进新小区。"
+    narrative = "线A：邻居家在装修，这两天白天会有电钻声，预计周末完工。"
+    messages = _world_loop_messages(
+        detail="清晨厨房有了动静。",
+        detail_written_at="2026-06-10T08:00:00+08:00",
+        now_iso="2026-06-10T14:00:00+08:00",
+        wake_reason="例行看一眼世界。",
+        round_id="r1",
+        arc_narrative=arc_text,
+        sisters_text=_sisters_section([]),
+        outline_narrative=narrative,
+    )
+    blob = "".join(m.text() for m in messages)
+    assert narrative in blob, "传了 outline_narrative 时大纲全文必须进续写 context"
+    i_arc = blob.index(arc_text)  # 世界阶段段的独有内容
+    i_outline_header = blob.index("【你的大纲")  # 大纲段独有段标题（指令里不出现）
+    i_outline = blob.index(narrative)
+    i_detail_header = blob.index("【你记得的上一版世界叙述】")  # 带【】的段标题独有
+    assert i_arc < i_outline_header <= i_outline < i_detail_header, (
+        "大纲段必须插在【世界阶段】之后、上一版世界叙述段之前"
+    )
+
+
+def test_world_loop_messages_empty_outline_guides_recording():
+    """大纲为 None（冷启动还没记过线）→ 大纲段如实说明空白、引导用 update_outline 起头记。"""
+    from app.world.engine import _outline_section
+
+    guidance = _outline_section(None)
+    assert "空白" in guidance, "大纲空白时要如实说明还没记过线"
+    assert "update_outline" in guidance, (
+        "大纲由续写自维护，空白时应引导 world 用 update_outline 起头记（区别于 arc 的「不归你动手」）"
+    )
+    # 引导文案绝不硬编剧情事实（宪法）。
+    assert not any(ch.isdigit() for ch in guidance), "大纲空白引导不得硬编数字事实"
+    for name in ("千凪", "赤尾", "绫奈", "chinagi", "akao", "ayana"):
+        assert name not in guidance, f"大纲空白引导不得硬编角色 {name!r}"
+
+
+def test_world_loop_messages_inject_reminder_before_acts():
+    """传了 reminder_text → 软提醒段出现，且插在这批动作之前。"""
+    from app.world.engine import _sisters_section, _world_loop_messages
+
+    reminder = "<<<OUTLINE-REMINDER-SENTINEL>>>"
+    acts = "- akao：在厨房煮咖啡。"
+    messages = _world_loop_messages(
+        detail="清晨。",
+        detail_written_at="2026-06-10T08:00:00+08:00",
+        now_iso="2026-06-10T14:00:00+08:00",
+        wake_reason="例行看一眼世界。",
+        round_id="r1",
+        arc_narrative=None,
+        sisters_text=_sisters_section([]),
+        outline_narrative=None,
+        reminder_text=reminder,
+        act_batch_text=acts,
+    )
+    blob = "".join(m.text() for m in messages)
+    assert reminder in blob, "传了 reminder_text 时软提醒段必须进续写 context"
+    assert blob.index(reminder) < blob.index(acts), "reminder 段必须插在这批动作之前"
+
+
+def test_world_loop_messages_omit_reminder_section_when_empty():
+    """reminder_text 为空（默认）→ 不插 reminder 段（条件注入，不凭空出现）。"""
+    from app.world.engine import _sisters_section, _world_loop_messages
+
+    sentinel = "<<<OUTLINE-REMINDER-SENTINEL>>>"
+    common = {
+        "detail": "清晨。",
+        "detail_written_at": None,
+        "now_iso": "2026-06-10T14:00:00+08:00",
+        "wake_reason": "例行看一眼世界。",
+        "round_id": "r1",
+        "arc_narrative": None,
+        "sisters_text": _sisters_section([]),
+        "outline_narrative": None,
+    }
+    with_reminder = "".join(
+        m.text() for m in _world_loop_messages(**common, reminder_text=sentinel)
+    )
+    without = "".join(m.text() for m in _world_loop_messages(**common))
+    assert sentinel in with_reminder, "传了 reminder_text 时应注入"
+    assert sentinel not in without, "没传 reminder_text 时不该凭空出现 reminder 段"
+
+
+@pytest.mark.asyncio
+async def test_round_feeds_outline_into_messages(monkeypatch):
+    """每轮推演输入带大纲段，内容是最新一版大纲 narrative（_run_world_round 读它当朝向）。"""
+    from app.world.outline import WorldOutline
+
+    narrative = "线A：等的快递今天会到、需要有人在家签收；线B：阳台的花该浇水了。"
+
+    async def fake_read_world_outline(*, lane):
+        return WorldOutline(
+            lane=lane, narrative=narrative, outlined_at="2026-06-03T06:00:00+08:00"
+        )
+
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert narrative in blob, "每轮推演输入必须带最新一版大纲 narrative"
+
+
+@pytest.mark.asyncio
+async def test_outline_read_uses_current_lane(monkeypatch):
+    """大纲按当前 lane 读（泳道隔离命门同 WorldState / WorldArc）。"""
+    reads: list[str] = []
+
+    async def fake_read_world_outline(*, lane):
+        reads.append(lane)
+        return None
+
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
+    _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    assert reads == ["coe-t2"], "每轮必须 read_world_outline(lane=当前 lane)，绝不读别的泳道"
+
+
+@pytest.mark.asyncio
+async def test_run_world_round_feeds_computed_reminder_into_messages(monkeypatch):
+    """接线（codex T3 建议 1，最关键）：_run_world_round 把 _outline_reminder_text 算出的
+    reminder 真传进喂 agent 的 messages。
+
+    纯函数（_outline_reminder_text）+ 注入（_world_loop_messages 收到 reminder_text 会插段）
+    各自已测，但「前者的输出真的流到了后者」这段**接线**之前没测。这里用 spy 替
+    _outline_reminder_text（返回哨兵 + 录入参），脱开 wall-clock 的「白天」判定、确定性地钉死：
+      ① _run_world_round 用 outline.outlined_at + now_iso 调它；
+      ② 它的返回值流进了 messages。
+    回归验证：把 _run_world_round 里传给 _world_loop_messages 的 reminder_text=reminder_text
+    改成 reminder_text="" → 哨兵不再出现 → 本测试 fail。
+    """
+    from app.infra import cst_time
+    from app.world.outline import WorldOutline
+
+    sentinel = "<<<WIRED-REMINDER-SENTINEL>>>"
+    outlined_at = "2026-06-03T06:00:00+08:00"
+    calls: list[tuple[str | None, str]] = []
+
+    async def fake_read_world_outline(*, lane):
+        return WorldOutline(
+            lane=lane, narrative="线A：绫奈在医院等检查结果。", outlined_at=outlined_at
+        )
+
+    def spy_reminder(outlined, world_time_iso):
+        calls.append((outlined, world_time_iso))
+        return sentinel
+
+    monkeypatch.setattr(engine_mod, "read_world_outline", fake_read_world_outline)
+    monkeypatch.setattr(engine_mod, "_outline_reminder_text", spy_reminder)
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert sentinel in blob, (
+        "_run_world_round 必须把 _outline_reminder_text 的返回值传进 messages"
+        "（接线断了 / 传了空串 → 哨兵不出现）"
+    )
+    assert len(calls) == 1, "_run_world_round 每轮应调一次 _outline_reminder_text"
+    got_outlined, got_now = calls[0]
+    assert got_outlined == outlined_at, (
+        "必须用 outline.outlined_at 调 reminder（读错字段会让白天 / 旧判定失真）"
+    )
+    # now_iso 是 _run_world_round 现算的现实 CST，无法预测精确值，验它是可解析的 CST 时刻。
+    assert cst_time.parse(got_now) is not None, (
+        "必须把现实此刻 now_iso（可解析的 CST 时刻）传给 reminder"
+    )
+
+
+def test_world_instruction_enumerates_update_outline_tool():
+    """world_loop_instruction 必须枚举 update_outline + 写入大纲纪律（spec task2 part C）。
+
+    update_outline 是 task1 加进 WORLD_TOOLS 的第六件工具。续写指令若不枚举它、不写
+    大纲纪律，真实模型就不知道有大纲这份工作记忆、不会沿线推进、不会入账未完成线——
+    绫奈急诊那条线又会被漏掉。所以指令必须按 spec 加入这些点（措辞留给 coe 精修，这里
+    只钉死结构性内容在场）。
+    """
+    instruction = engine_mod.world_loop_instruction()
+    # 工具枚举：第六件工具 update_outline 必须按名出现，工具数从五改成六。
+    assert "update_outline" in instruction, "指令必须枚举 update_outline（否则模型不会调它）"
+    assert "六个工具" in instruction, "工具清单已是六件（含 update_outline）"
+    assert "五个工具" not in instruction, "工具数已改成六、不能再写「五个工具」"
+    # 大纲是 world 自己的工作记忆 / 活的 spec。
+    assert "大纲" in instruction, "指令必须说明 world 有一份自己的大纲"
+    assert ("工作记忆" in instruction) or ("spec" in instruction), (
+        "大纲应被点明是 world 的工作记忆（像活的 spec）"
+    )
+    # 硬不变量（决策 4 命门）：未完成线本轮出结果或 update_outline 入账，不蒸发。
+    assert ("入账" in instruction) and ("蒸发" in instruction), (
+        "必须写硬不变量：未完成线要么出结果、要么入账进大纲，绝不蒸发"
+    )
+    # 事实优先级：act 最硬 / 此刻推进 > 大纲预期。
+    assert "act" in instruction, "事实优先级里必须提 act（life 已做出的角色主张、最硬）"
+    assert ("预期" in instruction) or ("让步" in instruction), (
+        "必须写「此刻推进 > 大纲预期」（大纲那条线的接下来怎么走只是预期、冲突时让步现实）"
+    )
+    # 从大纲的线上克制地长出客观事件、不即兴硬造。
+    assert "克制" in instruction, "必须写「从大纲的线上克制地长出客观事件」"
+    # reminder 是软提醒：读完可以不改（决策 3 命门、与 _outline_reminder_text 呼应）。
+    assert "提醒" in instruction, "必须说明会有「大纲该回看了」的软提醒"
