@@ -6,10 +6,15 @@ from app.agent.tooling import tool
 
 
 @tool
-async def no_reply() -> str:
+async def no_reply(reason: str) -> str:
     """不回复用户，直接结束本轮对话。
 
     当你不想回复、不喜欢这个话题、想拒绝接话，或遇到骚扰、无意义刷屏、
     钓鱼式逼回应、政治敏感话题时，调用这个工具。调用前后都不要输出任何文字。
+
+    调用时必须带上 reason，用自己的话简短说明这次触发的理由。
+
+    Args:
+        reason: 简短说明这次触发 no_reply 的理由。
     """
     return "本轮不回复。"

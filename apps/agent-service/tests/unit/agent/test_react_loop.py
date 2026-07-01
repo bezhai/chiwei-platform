@@ -222,6 +222,54 @@ class TestRunLoop:
         assert result.text() == ""
         assert len(fake.complete_calls) == 1
 
+    async def test_real_no_reply_tool_with_reason_ends_the_turn(self):
+        """Wires the real ``app.agent.tools.no_reply`` (required ``reason``
+        param) through the real ``_run_loop`` end to end, not just the local
+        zero-arg stub above — this is what production actually dispatches."""
+        from app.agent.tools.no_reply import no_reply as real_no_reply
+
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="no_reply", arguments={"reason": "对方在钓鱼式逼回应"})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="should not run"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[real_no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == ""
+        assert len(fake.complete_calls) == 1
+
+    async def test_real_no_reply_tool_missing_reason_still_ends_without_crash(self):
+        """Same real tool, but the model omits ``reason`` — the binding
+        pre-check must turn this into a graceful termination, not a raised
+        TypeError that would kill the whole turn."""
+        from app.agent.tools.no_reply import no_reply as real_no_reply
+
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="no_reply", arguments={})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="should not run"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[real_no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == ""
+        assert len(fake.complete_calls) == 1
+
     async def test_parallel_tool_calls_all_dispatched(self):
         _run_loop, _ = _import_loops()
         calls = [
