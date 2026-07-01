@@ -982,10 +982,23 @@ async def _run_life_round(
     # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript
     # 空）时，才从 PG 的 LifeState 兜底恢复，作"醒来记得之前在做什么"喂进当前 USER。
     # 只判 transcript 空不空、不判 observed_at 是哪天（bezhai 决策：跨天先记得、不翻篇）。
-    # snapshot 为 None（从没活过一轮）就不加恢复段——没有可恢复的状态，硬塞假状态反而误导。
+    # snapshot 为 None（从没活过一轮）就不加恢复段——没有可恢复的状态，硬塞假状态反而
+    # 误导。
+    #
+    # 时间锚 + 非断言框架：断言式「你上次记得自己在做：X」把兜底恢复的旧快照当此刻既成
+    # 事实喂给她，容易让她顺着旧调子（困倦 / 低电量）机械延续，而不是重新观察当下。改成
+    # 呈现"一份带时间标注的旧记录"、邀请她带着它重新感受此刻，不预设"应该已经恢复了"
+    # 这类方向性结论；时间锚复用 `_format_surroundings` 同款的 `_humanize_elapsed`——纯
+    # 格式化，不做任何决策。状态三字段（current_state / response_mood / activity_type）
+    # 完整保留，只改呈现方式；`observed_at` 解析失败 / 缺失时 `_humanize_elapsed` 返回
+    # None，降级成不带具体数字的中性措辞，不报错、不丢状态内容。
     if cold_start and snapshot is not None:
+        anchor = _humanize_elapsed(snapshot.observed_at, now)
+        recorded_when = anchor if anchor is not None else "隔了一段时间"
         parts.append(
-            f"你上次记得自己在做：{snapshot.current_state}"
+            f"（这是你{recorded_when}记下的一份状态，只是那一刻的观察，"
+            "未必还是此刻的你——带着它，重新感受一下此刻真实的自己）\n"
+            f"那时你记得自己在做：{snapshot.current_state}"
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 

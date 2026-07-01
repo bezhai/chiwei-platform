@@ -1927,6 +1927,128 @@ async def test_transcript_empty_injects_recovery_segment(patched, monkeypatch):
     assert "新的一天的光" in msg_blob
 
 
+def _extract_recovery_segment(msg_blob: str) -> str:
+    """从整段消息里切出冷启恢复段本身，避免断言误伤其他上下文段落。
+
+    恢复段固定以"这是你"起笔、以状态三字段收尾的"）。"结束，用这两个锚点定位，
+    不对整段 msg_blob 做全局字符串排除。
+    """
+    start = msg_blob.index("这是你")
+    end = msg_blob.index("）。", start) + len("）。")
+    return msg_blob[start:end]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_recovery_segment_carries_time_anchor_and_full_state(
+    patched, monkeypatch
+):
+    """冷启恢复段必须带时间锚（复用 _humanize_elapsed）、非断言框架，且状态三字段完整。
+
+    旧措辞「你上次记得自己在做：X」把 PG 兜底恢复的旧快照当此刻既成事实断言，容易让
+    她顺着旧调子（困倦 / 低电量）机械延续。新措辞必须：(1) 带时间锚（复用
+    _humanize_elapsed，同 _format_surroundings 先例）；(2) 不是断言式措辞、不预设
+    "应该已经恢复了"这类方向性结论；(3) current_state / response_mood / activity_type
+    三字段完整保留，不丢信息。
+    """
+    from datetime import datetime
+
+    now = datetime(2026, 6, 3, 20, 30, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+
+    # 快照感知于 25 分钟前（CST 20:05）。
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="窝在沙发上犯困",
+        response_mood="低落",
+        activity_type="rest",
+        observed_at="2026-06-03T20:05:00+08:00",
+    )
+    patched["transcript"] = []  # 冷启：意识流断了
+    patched["unread"] = [_envelope("e1", "窗外有鸟叫")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 非断言框架：整段消息里不能再出现「你上次记得自己在做：X」——旧措辞出现在
+    # 任何地方都是回归，这一条故意扫全文。
+    assert "你上次记得自己在做：" not in msg_blob, (
+        "冷启恢复段不能再是断言式措辞（把旧状态当此刻既成事实）"
+    )
+
+    recovery_segment = _extract_recovery_segment(msg_blob)
+    # 状态三字段完整保留，不丢信息（只是呈现方式变了）
+    assert "窝在沙发上犯困" in recovery_segment
+    assert "低落" in recovery_segment
+    assert "rest" in recovery_segment
+    # 时间锚（复用 _humanize_elapsed，同 _format_surroundings 手法）
+    assert "25 分钟前" in recovery_segment, (
+        f"冷启恢复段必须带时间锚（复用 _humanize_elapsed），实际 {recovery_segment!r}"
+    )
+    # 不能预设方向性结论（比如"应该已经恢复了"）——只查恢复段本身的措辞，不扫
+    # 全文（其他上下文段落里出现"应该"是它们自己的事，跟这次改动无关）。
+    assert "应该" not in recovery_segment
+
+
+@pytest.mark.asyncio
+async def test_cold_start_recovery_segment_degrades_gracefully_on_bad_observed_at(
+    patched, monkeypatch
+):
+    """observed_at 脏数据时冷启恢复段优雅降级：不报错、不丢状态，只是不带具体数字锚。"""
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在写作业",
+        response_mood="平静",
+        activity_type="study",
+        observed_at="不是时间的脏串",
+    )
+    patched["transcript"] = []
+    patched["unread"] = [_envelope("e1", "有人敲门")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    recovery_segment = _extract_recovery_segment(msg_blob)
+    # 状态内容完整保留，不因时间解析失败丢信息
+    assert "在写作业" in recovery_segment
+    assert "平静" in recovery_segment
+    assert "study" in recovery_segment
+    # 降级为不带具体数字的中性时间措辞
+    assert "隔了一段时间" in recovery_segment
+    assert "分钟前" not in recovery_segment
+    assert "小时前" not in recovery_segment
+
+
+@pytest.mark.asyncio
+async def test_cold_start_recovery_segment_degrades_gracefully_on_missing_observed_at(
+    patched, monkeypatch
+):
+    """observed_at 缺失（空串）时同样优雅降级：不报错、不丢状态内容。"""
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在看剧",
+        response_mood="放松",
+        activity_type="rest",
+        observed_at="",
+    )
+    patched["transcript"] = []
+    patched["unread"] = [_envelope("e1", "手机震动")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    recovery_segment = _extract_recovery_segment(msg_blob)
+    assert "在看剧" in recovery_segment
+    assert "放松" in recovery_segment
+    assert "隔了一段时间" in recovery_segment
+
+
 @pytest.mark.asyncio
 async def test_transcript_empty_no_snapshot_no_crash(patched, monkeypatch):
     """transcript 空且从没有过 LifeState（snapshot=None）→ 不崩、不硬塞假状态。"""
