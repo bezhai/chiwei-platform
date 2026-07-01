@@ -788,6 +788,7 @@ async def _run_life_round(
     prompt_vars = {
         "persona_name": pc.display_name,
         "persona_lite": pc.persona_lite,
+        "reply_style": pc.default_reply_style,
         "world_arc": arc_awareness or "",
         "day_page": day_page_text,
     }

@@ -196,6 +196,7 @@ def patched(monkeypatch):
         "recent_chats": [],  # find_persona_related_chats_recent 返回
         "recent_chat_calls": [],  # find_persona_related_chats_recent 收到的 kwargs
         "recent_chat_raises": None,  # 非 None → recent chat 查询抛它（读失败）
+        "default_reply_style": "",  # load_persona 返回的 PersonaContext.default_reply_style
     }
 
     async def fake_read_world_arc(*, lane):
@@ -229,6 +230,7 @@ def patched(monkeypatch):
             persona_id=persona_id,
             display_name=persona_id,
             persona_lite=f"{persona_id} 的人设",
+            default_reply_style=state["default_reply_style"],
         )
 
     # 「她最近一页昨天」注入读口：每轮都会读（不再依赖 marker），打桩成无页
@@ -333,6 +335,26 @@ async def test_wake_runs_loop_updates_state_marks_read(patched, monkeypatch):
     assert saved["response_mood"] == "迷糊"
     # 只标本轮实际读到的那批 event_id
     assert patched["marked"] == [["e1", "e2"]]
+
+
+@pytest.mark.asyncio
+async def test_prompt_vars_carries_persona_reply_style(patched, monkeypatch):
+    """system prompt_vars 必须带 reply_style（取自 pc.default_reply_style）。
+
+    根因（记忆 project_chiwei_character_behavior_tone）：chat 链路已经靠
+    ChatTurnContext.reply_style 注入 per-persona 口吻 few-shot，但 life 自己攒的
+    prompt_vars（不经过那套渲染层）漏了这个字段，三姐妹在 life 里的自述 / 姐妹间对话
+    因此机械腔、口吻趋同。修法是 life_wake 直接从已经 load 出来的 pc 上取
+    default_reply_style 塞进它自己的 prompt_vars。
+    """
+    patched["default_reply_style"] = "才、才没有很开心好吗 >///<"
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    pv = _FakeAgent.last_run()["prompt_vars"]
+    assert pv.get("reply_style") == "才、才没有很开心好吗 >///<"
 
 
 # --- proactive 增量水位：本轮进入时 snapshot.observed_at → build_life_tools ----
@@ -1790,11 +1812,12 @@ async def test_perceived_events_replayable_in_second_round(
 
 @pytest.mark.asyncio
 async def test_prompt_vars_static_identity_plus_stable_segments(patched, monkeypatch):
-    """prompt_vars = 纯静态身份（persona_name / persona_lite）+ 天级稳定段（world_arc / day_page）。
+    """prompt_vars = 纯静态身份（persona_name / persona_lite / reply_style）+ 天级稳定段（world_arc / day_page）。
 
     决策 4：current_time / prev_state / prev_mood / prev_activity 这些每轮都变的
     动态值全出 prompt_vars（→ USER stimulus），不再钉死在身份层。world_arc / day_page
     是天级才变的稳定段，进 system prompt_vars（不靠会被 fold 压掉的 transcript 继承）。
+    reply_style 同 persona_name / persona_lite 一样是纯静态身份（口吻 few-shot）。
     """
     patched["snapshot"] = LifeState(
         lane="coe-t3",
@@ -1813,6 +1836,7 @@ async def test_prompt_vars_static_identity_plus_stable_segments(patched, monkeyp
     assert set(pv.keys()) == {
         "persona_name",
         "persona_lite",
+        "reply_style",
         "world_arc",
         "day_page",
     }, f"prompt_vars 键集合应是身份 + 天级稳定段，实际键 {set(pv.keys())}"
