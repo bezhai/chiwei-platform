@@ -165,7 +165,13 @@ _NOTEBOOK_HEADER = "【你本子里还没了结的事】"
 
 
 async def _build_notebook_section(persona_id: str) -> str:
-    """她本子里还没了结的事段（备忘录 & 日程 第二块 · chat 侧）.
+    """她待办本子里还没了结的事段（备忘 & 日程 · chat 侧，**只注入待办**）.
+
+    notebook 拆分（待办 / 随笔两条通道）后 chat 侧语义收窄为**只注入待办**：
+    NotebookEntry 只承载要办的事（备忘 / 日程），存量条目全按待办对待、照旧注入。
+    随笔（Jotting）**绝不进 chat**——正文不注入、连"记了几笔"的存在提示也不给
+    （spec 决策 4：聊天场景翻随笔的需求未出现，不预先做），所以本模块没有任何
+    随笔读口。
 
     chat 概念上是 life 的快照，但工程上 inner_context 是显式拼几段——本子得**显式接
     进去**才会出现在聊天里。读她**还活着**的条目（active_only=True：她自己没标 done /
