@@ -151,6 +151,14 @@ def stub_io(monkeypatch):
     async def fake_notebook(*, lane, persona_id, active_only):
         return list(state["notebook_entries"])
 
+    async def fake_read_jottings(*, lane, persona_id):
+        from app.domain.jotting import JottingWindow
+
+        return JottingWindow(jottings=[], cursor=None)
+
+    async def fake_turn_jotting_page(*, lane, persona_id, cursor, turned_at):
+        pass
+
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
@@ -164,6 +172,8 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(review_mod, "record_round_cost", fake_cost)
     monkeypatch.setattr(review_mod, "load_persona", fake_load_persona)
     monkeypatch.setattr(review_mod, "list_notebook_entries", fake_notebook)
+    monkeypatch.setattr(review_mod, "read_unabsorbed_jottings", fake_read_jottings)
+    monkeypatch.setattr(review_mod, "turn_jotting_page", fake_turn_jotting_page)
     return state
 
 

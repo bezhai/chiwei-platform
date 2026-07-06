@@ -70,6 +70,12 @@ from app.domain.book_impression import (
     find_current_book_impression,  # module-level so tests can monkeypatch
     render_reading_impression,
 )
+
+# 随笔存在提示的唯一读口（notebook 拆分）：每轮只 COUNT 未吸收随笔拼一行提示，
+# **绝不 import 正文读口 / 渲染口**（read_unabsorbed_jottings / render_jottings）——
+# 随笔正文不进任何常驻输入（spec 决策 4），她想看用翻随笔工具自己翻。
+# module-level so tests can monkeypatch.
+from app.domain.jotting import count_unabsorbed_jottings
 from app.domain.life_state import LifeState, find_life_state
 from app.domain.notebook import (
     ACTIVE_STATUSES,
@@ -937,6 +943,30 @@ async def _run_life_round(
             "【你本子里还没了结的事】（你自己记下、还没标做了 / 划掉的，"
             "带着它们过你这一刻）：\n"
             f"{render_notebook(notebook_entries, now=observed_at)}"
+        )
+
+    # 她随手记的存在提示（notebook 拆分，spec 决策 4）：随笔正文**不进任何常驻输入**
+    # ——这里只 COUNT 未吸收的给一行"记了几笔"，让她知道草稿纸上有东西、想看自己翻
+    # （翻随笔工具），睡前回顾会自然吸收。没有未吸收随笔 → 整行缺席不补占位。读失败
+    # 绝不杀整个 life 轮（照本子段的 fail-soft 姿势）：提示是上下文增强，失败只 log、
+    # 行缺席，本轮照常往下跑。位置在本子段之后（同属稳定前缀区：条数按她记的频率才变）。
+    try:
+        jotting_count = await count_unabsorbed_jottings(
+            lane=lane, persona_id=persona_id
+        )
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to count unabsorbed jottings, "
+            "hint line absent: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        jotting_count = 0
+    if jotting_count > 0:
+        parts.append(
+            f"（你随手记了 {jotting_count} 笔还没翻篇——想回看就翻翻；"
+            "不翻也没事，睡前回顾时会自然翻到它们。）"
         )
 
     # 她正在读的那本书的印象（读小说 Task 3，life 侧注入）：每轮从 PG 重新读 + 渲染

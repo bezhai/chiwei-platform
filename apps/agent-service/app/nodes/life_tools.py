@@ -64,6 +64,17 @@ from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
+
+# module-level 引用随笔领域层（notebook 拆分：待办走 note_entry、随手记走 jot_down），
+# 让测试能 monkeypatch（与 note_entry / perform_act 同款）。随笔是纯 append 草稿纸：
+# 正文不进任何常驻输入，活轮只能翻"还没被日结吸收的"窗口（read_unabsorbed_jottings，
+# 只读不动水位）；render_jottings 是随笔渲染的单一定义处（与 review「今天的随笔」
+# 证据段共用）。
+from app.domain.jotting import (
+    jot_down,
+    read_unabsorbed_jottings,
+    render_jottings,
+)
 from app.domain.life_state import save_life_state
 from app.domain.notebook import (
     STATUS_DONE,
@@ -180,12 +191,12 @@ def build_life_tools(
         ``observed_at`` 刷成本轮时刻，若 ``send_message`` 现读 ``LifeState`` 取水位会被本轮
         污染、增量永远算空。None（冷启）→ ``since=None`` → 退回原全量最近 limit 行为。
     ``schedule_reminders`` —— 本轮 round-scoped 的「待挂日程提醒」容器
-        （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note`` / ``edit_note``
+        （``{entry_id: remind_at | None}``，engine 每轮新建）。给了它，``note_todo`` / ``edit_note``
         每带一个 remind_at 就往里记一条 ``entry_id → remind_at``（撤时间记 ``None``）；engine
         收口 :func:`fire_schedule_reminders` 给每条有 remind_at 的日程**各 emit 一条**
         ``ScheduleReminderTick``（每条日程各挂各的到点提醒）。同轮多次动同一 entry_id
         覆盖而非追加（最后一次为准）：先补时间再撤，最终 None、不挂。不给（旧调用方）则
-        note / edit_note 照常落库、只是不挂到点提醒（向后兼容）。
+        note_todo / edit_note 照常落库、只是不挂到点提醒（向后兼容）。
 
     **Task 2 删自设闹钟**：以前这里还有一个 ``self_wake`` 容器 + ``schedule`` 工具，让她
     自己排「多久后再醒」（写进 ``LifeState.next_wake_at``）。纯客观事件驱动范式把 life
@@ -232,6 +243,15 @@ def build_life_tools(
     # 天然不相交（三者共用同一 base act_id）。命门同 act_seq / chat_seq：只在落库成功后
     # 才推进（失败重试用同一序号 → 同一 entry_id → 去重只落一条）。
     note_seq = 0
+
+    # 本轮已**确认成功落库**的随笔件数（round-scoped 序号，对称 note_seq）。「随手记
+    # 一笔」同样是 durable mutation：jot_id 从 (base act_id, "jot:N" 序号) 经 uuid5 派生
+    # —— 整轮重投 / 失败重试用同一序号得同一 jot_id，jot_down 底层 insert_idempotent
+    # 按 (lane, persona, jot_id) 去重只落一条。**带 "jot:" 前缀**让它与 note 的 "note:"
+    # seed 空间天然不相交——随笔和待办各自独立序号空间（共用同一 base act_id、互不
+    # 占号）。命门同 note_seq：只在落库成功后才推进（失败重试用同一序号 → 同一
+    # jot_id → 去重只落一条）。
+    jot_seq = 0
 
     # 本轮已**确认成功发出**的 send_message 件数（round-scoped 序号，对称 chat_seq）。
     # 隔空发同样整轮重投幂等、一轮多次各自独立 —— 投递键（姐妹手机消息 event_id /
@@ -686,8 +706,8 @@ def build_life_tools(
             f"uid={uid!r} 解析出未知的投递目标类型 {type(target).__name__}，发不了。"
         )
 
-    @tool_error("记到本子里失败")
-    async def note(
+    @tool_error("记到待办本子里失败")
+    async def note_todo(
         content: str,
         remind_at: Annotated[
             str | None,
@@ -700,14 +720,17 @@ def build_life_tools(
             ),
         ] = None,
     ) -> str:
-        """往你随身的小本子记一件事（备忘录 / 日程）。
+        """往你随身的待办本子记一件要办的事（备忘 / 日程）。
 
-        你自己决定记什么——惦记的事、想做的、突然的念头、要陪谁、几点干嘛。本子是
-        你私人的内心，不给别人看。记什么、记不记，你自己定，没人替你从对话里抠。
+        本子只放**要办的事**——备忘和日程，可挂提醒时间。惦记着要做的、答应了谁的、
+        几点要去哪，记进来它就会一直进你脑子提醒你，直到你办完标 done 或划掉。
+
+        刚发生的事、现场此刻的状态、谁说了什么——那些不是要办的事，不记这里；
+        想留一笔就用随手记（jot_down），写了不占你脑子。
 
         两种条目，差别只在挂没挂提醒时间：
 
-          * 没时间（remind_at 留空）：备忘录，就躺在本子里，平时会进你脑子提醒你
+          * 没时间（remind_at 留空）：备忘，躺在本子里，平时会进你脑子提醒你
             还惦记着它。
           * 有时间（remind_at 填一个时刻）：日程，到点会把你叫醒、把这条递到你面前，
             你当场自己处理。
@@ -715,7 +738,7 @@ def build_life_tools(
         写法就一句大白话——别填什么优先级 / 标签 / 分类，本子里只有你自己写的话。
 
         Args:
-            content: 这件事，一句大白话（如"想看那部新动画""下午三点陪我妹去琴行"）。
+            content: 要办的这件事，一句大白话（如"想看那部新动画""下午三点陪我妹去琴行"）。
             remind_at: 可选的提醒时刻（ISO8601）。挂上变日程、留空是备忘。
 
         Returns:
@@ -751,6 +774,62 @@ def build_life_tools(
         kind = "记到日程，到点会叫你" if remind_at else "记进备忘"
         return f"好，{kind}（这条的 id 是 {entry_id}）"
 
+    @tool_error("随手记一笔失败")
+    async def jot_down_tool(content: str) -> str:
+        """随手记一笔——当下的念头、看到的、想留一句的感想。
+
+        这是你的草稿纸：这一刻看到了什么、心里闪过什么、想给自己留一句什么，随手
+        写下来就好。写了不占你脑子——它不会每轮都来提醒你，睡前回顾时会自然翻出来
+        看一遍，之后就翻篇了。想写就写、想写多少写多少。
+
+        要办的事不记这里——惦记着要做的、答应了谁的、几点要去哪，那些记进待办本子
+        （note_todo），本子会一直提醒你直到你了结它。随手记的没有"办完"一说，写了
+        就是写了。
+
+        Args:
+            content: 你随手写的这一笔，一句大白话（如"阳台的风好舒服"
+                "妹妹刚才笑得很开心"）。
+
+        Returns:
+            一句确认。
+        """
+        nonlocal jot_seq
+        # next_seq 模式（命门同 note_seq）：用 jot_seq+1 算这一笔的 jot_id，但**先不
+        # 推进 jot_seq** —— jot_down 成功落库后才推进。@tool_error 会吞掉 jot_down 抛
+        # 的错让模型重试；失败（写成功但 ack 丢 / 纯写失败）重试用**同一个** next_seq
+        # → 同一 jot_id → insert_idempotent 按 (lane, persona, jot_id) 去重只落一条。
+        next_seq = jot_seq + 1
+        # jot_id：base act_id + "jot:N" 序号经 uuid5 派生。带 "jot:" 前缀与 note / act /
+        # chat / send 的 seed 空间不相交（随笔和待办各自独立序号空间）。整轮重投得同一
+        # id（去重）；同轮不同笔序号不同 → 各自唯一。uuid5 输出只含 hex + "-"。
+        jot_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{act_id}:jot:{next_seq}"))
+        await jot_down(
+            lane=lane,
+            persona_id=persona_id,
+            jot_id=jot_id,
+            content=content,
+            noted_at=observed_at,
+        )
+        # 落库确认成功后才推进序号 —— 序号绑定"已确认落库的随笔 slot"。
+        jot_seq = next_seq
+        return "记下了"
+
+    @tool_error("翻随手记失败")
+    async def read_jottings() -> str:
+        """翻翻这几天随手记的（还没被日结翻篇的那些）。
+
+        想回看自己最近随手写了什么，就翻一下。只能翻到还没被睡前回顾吸收的那些
+        ——随笔在日结时会自然翻篇，翻篇之后就留在过去的日子里、不再翻得到。翻只
+        是看看，不会把它们翻篇。
+
+        Returns:
+            还没翻篇的随笔（每条一行：内容 + 写下的时刻）；一条都没有时一句如实说明。
+        """
+        # 窗口读只读不动水位（吸收只发生在睡前日结的收口处）；空窗口 render_jottings
+        # 自带一句如实提示，不在这里另编占位。
+        window = await read_unabsorbed_jottings(lane=lane, persona_id=persona_id)
+        return render_jottings(window.jottings)
+
     @tool_error("改本子里这条失败")
     async def edit_note(
         entry_id: str,
@@ -779,10 +858,14 @@ def build_life_tools(
             ),
         ] = None,
     ) -> str:
-        """改 / 划本子里已有的某一条（用它的 id 指到那条）。
+        """改 / 划待办本子里已有的某一条（用它的 id 指到那条）。
 
         翻本子（read_notebook）能拿到每条的 id。可以改内容、补 / 改 / 撤提醒时间、或
         把它标成做了 / 划掉。只动你要动的，没传的字段保持原样。
+
+        改一条是让这件事更准（改期、内容变了），不是拿它当状态板——进展不用每轮
+        写回来，办完标 done 就行。这一刻的观察和感想用随手记（jot_down）另记，别
+        往待办条目上滚。
 
         做了就标 done、不想做了就 dropped——划掉的不会再进你脑子常驻，但翻本子看全部
         时还在（不是真删，留个痕）。
@@ -850,11 +933,12 @@ def build_life_tools(
             ),
         ] = False,
     ) -> str:
-        """完整翻一遍你的本子（找一条旧的、睡前清理时用）。
+        """完整翻一遍你的待办本子（找一条旧的、睡前清理时用）。
 
-        平时还没了结的条目每轮自动进你脑子、不用主动翻。这个工具是你拿回「看全部」的
-        出口：找一条记过的旧事、睡前回顾时把陈年的 / 做过的 / 不想做的清掉，都靠它把
-        本子翻出来看。
+        这本翻出来的只有待办（备忘和日程）——平时还没了结的条目每轮自动进你脑子、
+        不用主动翻。这个工具是你拿回「看全部」的出口：找一条记过的旧事、睡前回顾时
+        把陈年的 / 做过的 / 不想做的清掉，都靠它把本子翻出来看。随手记的那些不在这
+        本里，想回看用 read_jottings 翻。
 
         默认只列还惦记着的（你没标做了 / 没划掉的）；include_all=True 连做过、划掉的
         一起列。每条带它的 id、内容、提醒时间（有的话）、状态。
@@ -959,8 +1043,9 @@ def build_life_tools(
         一句话——你看着这些真材料自己反应，知道的就基于它说，别凭空编。要是没查到，
         它会如实告诉你没查到，那就当真没查到、别硬凑一个答案。
 
-        想长期记住的（比如查到约会那天会下雨、决定带伞），自己记进本子；只是想知道
-        一下、用过就算的，看完反应过就好，不必都记。
+        查到想留一笔的（结果本身、或它勾起的念头），随手记一笔（jot_down）；真变成
+        要办的事（比如查到那天会下雨、决定要带伞），记进待办本子（note_todo）。只是
+        想知道一下、用过就算的，看完反应过就好，不必都记。
 
         这只手是「带着具体问题求答案」用的；只是没事想随便逛逛、看看有啥新鲜的，那是
         另一回事（browse_feed），不走这里。也别用 act 假装「我查了下」——act 给不了你
@@ -1009,8 +1094,8 @@ def build_life_tools(
         一段话——你自己一条条翻、看到感兴趣的就基于它真实反应。要是这会儿没刷到什么
         新鲜的，它会如实说没刷到，那就当真没啥可看、别硬编一批顶上。
 
-        刷到想长期留住的（某部番、某个话题），自己记进本子；只是顺手刷过、看完就算的，
-        反应过就好、不必都记。
+        刷到想留一笔的（某部番、某个话题、一点感想），随手记一笔（jot_down）就好；
+        只是顺手刷过、看完就算的，反应过就好、不必都记。
 
         Args:
             direction: 你这会儿想看的方向（自然语言、可以很泛，如"想看点搞笑的"）。
@@ -1041,29 +1126,37 @@ def build_life_tools(
         # 黑名单拦截（过滤就是工具内替她决策、违宪）。只在前面挂一句她想看的方向。
         return f"刷「{direction}」刷到这些（带出处，自己往下翻）：\n\n{result}"
 
-    # act_tool 的函数名带 _tool 后缀避免遮蔽导入的 handler；工具对模型暴露的 name
-    # 要是 "act"，所以显式覆写 Tool.name 与 definition.name。
+    # act_tool / jot_down_tool 的函数名带 _tool 后缀避免遮蔽导入的 handler；工具对模型
+    # 暴露的 name 要是 "act" / "jot_down"，所以显式覆写 Tool.name 与 definition.name。
     update_tool = Tool(update_life_state)
     act_tool_obj = Tool(act_tool)
     act_tool_obj.name = "act"
     act_tool_obj.definition.name = "act"
+    jot_tool_obj = Tool(jot_down_tool)
+    jot_tool_obj.name = "jot_down"
+    jot_tool_obj.definition.name = "jot_down"
 
     # 全部基础工具常驻：update（更新此刻状态）+ act（做一件影响外部世界的事）+ chat
-    # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 本子
-    # 三件（note / edit_note / read_notebook）+ read_book（翻开一本书读一程）+ look_up
-    # （带问题查）+ browse_feed（没事刷手机）。**Task 2 删自设闹钟后没有 schedule 工具**
-    # ——她退成纯事件反应者、不自排下次醒；主动计划走本子里的日程（note 带 remind_at +
-    # 到点提醒），不靠空闹钟维持运转。read_book 是读小说 Task 2：她指认一本书、emit 一个
-    # durable 触发让异步阅读 @node 读一程、揉印象（认不准就回问，不替她选书）。
+    # （当面说话）+ look_up_contact（查名字拿 uid）+ send_message（隔空发消息）+ 待办
+    # 三件（note_todo / edit_note / read_notebook）+ 随手记两件（jot_down / read_jottings）
+    # + read_book（翻开一本书读一程）+ look_up（带问题查）+ browse_feed（没事刷手机）。
+    # notebook 拆分（spec 决策 3）：泛化的 note 不复存在——"要办的事"进待办本子常驻
+    # 她脑子、"记录当下"走随手记不占常驻输入，选哪个工具就是定性，不做代码自动分类。
+    # **Task 2 删自设闹钟后没有 schedule 工具**——她退成纯事件反应者、不自排下次醒；
+    # 主动计划走本子里的日程（note_todo 带 remind_at + 到点提醒），不靠空闹钟维持运转。
+    # read_book 是读小说 Task 2：她指认一本书、emit 一个 durable 触发让异步阅读 @node
+    # 读一程、揉印象（认不准就回问，不替她选书）。
     return [
         update_tool,
         act_tool_obj,
         Tool(chat),
         Tool(look_up_contact),
         Tool(send_message),
-        Tool(note),
+        Tool(note_todo),
         Tool(edit_note),
         Tool(read_notebook),
+        jot_tool_obj,
+        Tool(read_jottings),
         Tool(read_book),
         Tool(look_up),
         Tool(browse_feed),
@@ -1080,7 +1173,7 @@ async def fire_schedule_reminders(
     日程是她真实生活里有内容的安排（答应明天交作业、打算今晚复习），到点提醒她去做，
     丢了顶多「她忘了做某事」（真实、可接受的生活后果）——这跟 Task 2 删掉的自设闹钟
     （空时间点、丢了就睡死）是两回事，日程保留。``schedule_reminders`` 是本轮 round-scoped
-    待办容器（note / edit_note 写的 ``{entry_id: remind_at | None}``，覆盖而非追加）：
+    待办容器（note_todo / edit_note 写的 ``{entry_id: remind_at | None}``，覆盖而非追加）：
 
       * 值为 ``remind_at`` 字符串 → emit 一条携带 ``(entry_id, remind_at)`` 的
         ``ScheduleReminderTick``，``delay_ms = max(0, remind_at - 现实 now)``。到期经

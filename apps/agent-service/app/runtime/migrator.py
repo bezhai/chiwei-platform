@@ -17,6 +17,16 @@ no drop-check) regardless of what the existing schema looks like.
 Data classes with ``Meta.transient = True`` are never persisted to pg
 (they flow in-process to a non-durable Sink). The
 migrator skips them entirely: no CREATE, no ALTER, no drop-check.
+
+Data classes may declare ``Meta.indexes`` — a tuple of column-name tuples —
+to get plain secondary indexes (``CREATE INDEX IF NOT EXISTS``, idempotent)
+supporting their read shapes (e.g. cursor-window scans over ``created_at``).
+Declared indexes are emitted for **both** new and already-existing tables,
+so a table created by an earlier deploy gets backfilled on the next migrate.
+Index columns must be declared fields or the runtime columns the migrator
+itself creates (``created_at`` / ``dedup_hash``); anything else fails the
+plan fast (a typo surfacing only at DDL time points far away from the
+declaration).
 """
 
 from __future__ import annotations
@@ -117,6 +127,43 @@ def _pg_type_equivalent(declared: str, actual: str) -> bool:
     return False
 
 
+def _declared_index_stmts(
+    cls: type[Data], table: str, desired_cols: dict[str, str]
+) -> list[Stmt]:
+    """DDL for the class's ``Meta.indexes`` declarations (idempotent).
+
+    One plain ``CREATE INDEX IF NOT EXISTS ix_{table}_{cols}`` per declared
+    column tuple, column order preserved (order is the read shape — a
+    cursor-window scan wants keys first, then the cursor columns). Emitted
+    unconditionally by :func:`plan_migration` for new *and* existing tables:
+    ``IF NOT EXISTS`` makes re-runs free, and existing tables created by an
+    earlier deploy must be backfilled — the CREATE-branch-only treatment of
+    the dedup/ver indexes would leave them unindexed forever.
+
+    Columns are validated against ``desired_cols`` (declared fields plus the
+    runtime columns the migrator actually creates: ``created_at`` /
+    ``dedup_hash``). An unknown column raises :class:`MigrationError` at
+    plan time, naming class and column — not at DDL time, far from the
+    declaration.
+    """
+    meta = getattr(cls, "Meta", None)
+    indexes = getattr(meta, "indexes", ()) if meta else ()
+    stmts: list[Stmt] = []
+    for cols in indexes:
+        for col in cols:
+            if col not in desired_cols:
+                raise MigrationError(
+                    f"{cls.__name__}: Meta.indexes column {col!r} is neither "
+                    f"a declared field nor a migrator-managed runtime column"
+                )
+        name = f"ix_{table}_{'_'.join(cols)}"
+        col_sql = ", ".join(f'"{c}"' for c in cols)
+        stmts.append(
+            Stmt(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({col_sql})")
+        )
+    return stmts
+
+
 def plan_migration(
     data_classes: list[type[Data]],
     existing_schema: dict[str, dict[str, str]],
@@ -205,6 +252,9 @@ def plan_migration(
                             f'"{col}" {desired_typ}'
                         )
                     )
+            # Declared secondary indexes are backfilled on existing tables
+            # too (IF NOT EXISTS — no-op when already present).
+            stmts.extend(_declared_index_stmts(cls, table, desired_cols))
             continue
 
         # Quote column names so reserved words (e.g. ``limit``) compile.
@@ -228,6 +278,7 @@ def plan_migration(
                     f"CREATE INDEX IF NOT EXISTS ix_{table}_key_ver ON {table}({cols})"
                 )
             )
+        stmts.extend(_declared_index_stmts(cls, table, desired_cols))
 
     return Plan(stmts=stmts)
 

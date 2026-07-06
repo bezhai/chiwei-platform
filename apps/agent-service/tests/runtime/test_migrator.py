@@ -137,6 +137,73 @@ def test_plan_rejects_type_change():
         plan_migration([Msg], existing_schema=existing)
 
 
+class Windowed(Data):
+    """Meta.indexes 声明式二级索引的测试 Data（游标窗口查询形态）。"""
+
+    wlane: Annotated[str, Key]
+    wid: Annotated[str, Key]
+    body: str
+
+    class Meta:
+        indexes = (("wlane", "created_at", "wid"),)
+
+
+def test_meta_indexes_emits_create_index_for_new_table():
+    """Meta.indexes 声明 → 建表计划里带幂等的复合索引 DDL（列序保序、列名带引号）。
+
+    游标窗口类查询（WHERE key 列 + created_at 增量过滤）没有支撑索引会随
+    append-only 历史线性退化——声明式索引让 Data 自己把查询形态说出来，
+    migrator 统一建，业务不 ad-hoc 发 DDL。
+    """
+    plan = plan_migration([Windowed], existing_schema={})
+    stmts = [s.sql for s in plan.stmts]
+    assert any(
+        'CREATE INDEX IF NOT EXISTS ix_data_windowed_wlane_created_at_wid '
+        'ON data_windowed("wlane", "created_at", "wid")' == s
+        for s in stmts
+    ), f"未生成声明的复合索引，实得: {stmts}"
+
+
+def test_meta_indexes_backfills_on_existing_table():
+    """表已存在（coe/prod 早前部署建过）→ 声明的索引仍要补建（IF NOT EXISTS 幂等）。
+
+    现状 migrator 对已存在的表只发 ALTER ADD COLUMN、索引只在新建分支发——
+    那样先上过一版的表永远补不上索引。声明式索引必须两个分支都发。
+    """
+    existing = {
+        "data_windowed": {
+            "wlane": "text",
+            "wid": "text",
+            "body": "text",
+            "dedup_hash": "text",
+            "created_at": "timestamptz",
+        }
+    }
+    plan = plan_migration([Windowed], existing_schema=existing)
+    stmts = [s.sql for s in plan.stmts]
+    assert any(
+        "CREATE INDEX IF NOT EXISTS ix_data_windowed_wlane_created_at_wid" in s
+        for s in stmts
+    ), f"已存在的表未补建声明索引，实得: {stmts}"
+
+
+def test_meta_indexes_rejects_unknown_column():
+    """索引列既不是声明字段、也不是 migrator 实际建的 runtime 列 → fail-fast。
+
+    拼错列名若放行到 DDL 才炸，报错离声明处太远；在 plan 阶段带类名/列名
+    清晰拒绝（同 destructive change 的 MigrationError 姿势）。
+    """
+
+    class BadIndex(Data):
+        bid2: Annotated[str, Key]
+
+        class Meta:
+            indexes = (("bid2", "no_such_col"),)
+
+    with pytest.raises(MigrationError, match="no_such_col"):
+        plan_migration([BadIndex], existing_schema={})
+
+
 def test_plan_migration_skips_transient():
     """Data classes with Meta.transient=True must produce zero DDL.
 

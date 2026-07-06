@@ -964,6 +964,66 @@ async def test_notebook_read_failure_section_absent_context_still_builds():
     assert "散步" in out  # life 快照照常
 
 
+@pytest.mark.asyncio
+async def test_chat_injects_todos_only_jottings_never_appear():
+    """notebook 拆分后 chat 侧只注入待办：存量 active NotebookEntry 照旧进
+    inner_context（收窄是语义收窄、行为面零变化），随笔绝不进 chat——正文不注入、
+    连"记了几笔"的存在提示也不给（spec 决策 4：聊天场景翻随笔的需求未出现）。
+
+    黑盒法（codex T3 建议）：把领域层随笔读口（正文读 + 计数）打成"一读就吐带
+    独特标记正文 / 非零条数"的数据源，跑 build_inner_context，断言最终输出里既无
+    标记正文、也无任何随笔提示痕迹，而待办照旧。只断言输出、不测内部形状
+    （不 hasattr）——将来合法引入某个符号做别的事不会误伤。
+    """
+    import app.domain.jotting as jotting_mod
+    from app.domain.jotting import Jotting, JottingWindow
+
+    marker = "JOT-BODY-MARKER-b7f2"
+    window = JottingWindow(
+        jottings=[
+            Jotting(
+                lane="prod", persona_id="chiwei", jot_id="j1",
+                content=f"{marker} 阳台的风好舒服",
+                noted_at="2026-06-13T10:00:00+08:00",
+            )
+        ],
+        cursor=None,
+    )
+
+    async def leaky_read(**kwargs):
+        return window
+
+    async def leaky_count(**kwargs):
+        return 3
+
+    # 存量 active 待办（拆分前记的 NotebookEntry）仍照旧注入。
+    entries = [_notebook_entry("n-legacy", "周末想陪我妹去琴行")]
+    with (
+        patch(
+            "app.memory.context._build_life_state",
+            new=AsyncMock(return_value="你此刻在散步"),
+        ),
+        _no_arc(),
+        _no_relationship_page(),
+        _no_day_page(),
+        _notebook_read(entries),
+        # 领域层随笔读口全部接到吐标记 / 非零条数的源——若 chat 拼装路径上有任何
+        # 地方读了随笔，标记正文或提示行必然漏进最终输出。
+        patch.object(jotting_mod, "read_unabsorbed_jottings", new=leaky_read),
+        patch.object(jotting_mod, "count_unabsorbed_jottings", new=leaky_count),
+    ):
+        out = await build_inner_context(
+            chat_id="oc_a", chat_type="p2p",
+            user_ids=["u1"], trigger_user_id="u1",
+            trigger_username="浩南", persona_id="chiwei",
+        )
+
+    assert _NOTEBOOK_HEADER_MARK in out, "存量 active 待办仍要进 chat（行为面零变化）"
+    assert "周末想陪我妹去琴行" in out
+    assert marker not in out, "随笔正文绝不进 chat"
+    assert "随手记" not in out, "chat 侧连随笔存在提示都不给（spec 决策 4）"
+
+
 # ---------------------------------------------------------------------------
 # 读小说 Task 3（在读的书的印象进她脑子 · chat 侧）：inner_context 在 notebook 段
 # 之后、人生快照之前接上「她正在读的那本书」一段。

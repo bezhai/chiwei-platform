@@ -41,6 +41,7 @@ import app.life.review as review_mod
 from app.agent.neutral import Message, Role
 from app.agent.trace import make_session_id
 from app.data.message_record import CommonMessageRecord
+from app.domain.jotting import Jotting, JottingCursor, JottingWindow
 from app.domain.world_events import ActPerformed
 from app.life.pages import DayPage, RelationshipPage
 from app.life.review import run_day_review
@@ -131,6 +132,8 @@ def stub_io(monkeypatch):
         "rel_pages": {},
         "day_page": None,
         "notebook_entries": [],
+        "jottings": [],
+        "jotting_cursor": None,
         "marks": [],
         "costs": [],
         "act_windows": [],
@@ -139,6 +142,8 @@ def stub_io(monkeypatch):
         "notebook_queries": [],
         "session_loads": [],
         "page_lookups": [],
+        "jotting_reads": [],
+        "jotting_turns": [],
     }
 
     async def fake_load_session(session_id):
@@ -200,6 +205,22 @@ def stub_io(monkeypatch):
         )
         return list(state["notebook_entries"])
 
+    async def fake_read_jottings(*, lane, persona_id):
+        state["jotting_reads"].append({"lane": lane, "persona_id": persona_id})
+        return JottingWindow(
+            jottings=list(state["jottings"]), cursor=state["jotting_cursor"]
+        )
+
+    async def fake_turn_jotting_page(*, lane, persona_id, cursor, turned_at):
+        state["jotting_turns"].append(
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "cursor": cursor,
+                "turned_at": turned_at,
+            }
+        )
+
     monkeypatch.setattr(review_mod, "load_session", fake_load_session)
     monkeypatch.setattr(review_mod, "list_persona_acts_between", fake_acts)
     monkeypatch.setattr(review_mod, "find_persona_spoken_chats_in_window", fake_chats)
@@ -213,16 +234,31 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(review_mod, "record_round_cost", fake_cost)
     monkeypatch.setattr(review_mod, "load_persona", fake_load_persona)
     monkeypatch.setattr(review_mod, "list_notebook_entries", fake_notebook)
+    monkeypatch.setattr(review_mod, "read_unabsorbed_jottings", fake_read_jottings)
+    monkeypatch.setattr(review_mod, "turn_jotting_page", fake_turn_jotting_page)
     return state
 
 
-def _written_page(date=_TARGET) -> DayPage:
+def _written_page(date=_TARGET, version=0) -> DayPage:
     return DayPage(
         lane=_LANE,
         persona_id=_PERSONA,
         date=date,
         narrative="这一天留下来的几笔。",
         written_at=_NOW.isoformat(),
+        version=version,
+    )
+
+
+def _write_page_into(stub_io) -> None:
+    """模拟一次真实的 write_day_page：版本链 append、version 单调前进。
+
+    真实 ``insert_append`` 对已有页 append 新版本（version 前进）——stub 也照
+    这个合同走，随笔翻页的成功判据（「**本轮**产出了新的日页版本」）才测得真。
+    """
+    prev = stub_io["day_page"]
+    stub_io["day_page"] = _written_page(
+        version=prev.version + 1 if prev is not None else 0
     )
 
 
@@ -230,8 +266,8 @@ def _mock_run(monkeypatch, stub_io):
     """把 ``Agent.run`` 换成记录参数的桩（模拟成功跑完**且真写了昨天页**），返回 captured。
 
     落标核验语义：run 返回后回顾本体会现读昨天页，页存在才算成功。这个桩模拟
-    模型在工具循环里调了 update_day_page（把页写进 stub 状态），让"成功路径"
-    的测试走真实的核验流程。
+    模型在工具循环里调了 update_day_page（把页写进 stub 状态、版本链前进），让
+    "成功路径"的测试走真实的核验流程。
     """
     captured: dict = {}
 
@@ -245,7 +281,7 @@ def _mock_run(monkeypatch, stub_io):
         captured["session_id"] = session_id
         captured["max_retries"] = max_retries
         captured["tools"] = self._tools
-        stub_io["day_page"] = _written_page()
+        _write_page_into(stub_io)
         return Message(role=Role.ASSISTANT, content="")
 
     monkeypatch.setattr(review_mod.Agent, "run", fake_run)
@@ -947,6 +983,268 @@ def test_review_instruction_covers_notebook_tidy_and_sediment():
 
 
 # ---------------------------------------------------------------------------
+# 随笔吸收（notebook 拆分 Task 3）：窗口进证据、日页落笔成功才翻页
+#
+# 契约（Task 1 领域层钉死，review 不自行发明判据）：证据用 read_unabsorbed_jottings
+# 拿窗口 + 游标（同一次 read）；日页落笔成功之后把 window.cursor **原样**传给
+# turn_jotting_page；失败 / 重试路径不调翻页——水位自然不动、随笔留在窗口内。
+# 多日累积一次全吸收，不按自然日切分（spec 决策 2）。
+# ---------------------------------------------------------------------------
+
+
+def _jot(*, jot_id, content, noted_at="2026-06-10T14:00:00+08:00"):
+    return Jotting(
+        lane=_LANE,
+        persona_id=_PERSONA,
+        jot_id=jot_id,
+        content=content,
+        noted_at=noted_at,
+    )
+
+
+_JOT_CURSOR = JottingCursor(
+    created_at="2026-06-10T08:30:00.000000+00:00", jot_id="j-2"
+)
+
+
+def _stub_jottings(stub_io):
+    stub_io["jottings"] = [
+        _jot(jot_id="j-1", content="阳台的花开了一朵，比想象里早"),
+        _jot(
+            jot_id="j-2",
+            content="下午的雨声听着很舒服",
+            noted_at="2026-06-10T16:30:00+08:00",
+        ),
+    ]
+    stub_io["jotting_cursor"] = _JOT_CURSOR
+
+
+@pytest.mark.asyncio
+async def test_evidence_includes_unabsorbed_jottings(stub_io, monkeypatch):
+    """随笔证据段：窗口内（未被日页吸收的）随笔全文 + 她写下的时刻进证据——
+    她写日页时的参考素材。"""
+    _stub_jottings(stub_io)
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    blob = _blob(captured)
+    assert "阳台的花开了一朵" in blob
+    assert "下午的雨声听着很舒服" in blob
+    assert "2026-06-10T16:30:00+08:00" in blob, "随笔要带她写下的时刻"
+    assert "随手记" in blob, "证据里要有随手记的段（她知道这是草稿纸不是待办）"
+
+
+@pytest.mark.asyncio
+async def test_evidence_empty_jotting_window_says_so(stub_io, monkeypatch):
+    """空窗口如实说（render_jottings 单一定义处自带提示），不冒充。"""
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert "没有未翻页的随笔" in _blob(captured)
+
+
+@pytest.mark.asyncio
+async def test_jotting_window_read_exactly_once(stub_io, monkeypatch):
+    """窗口只读一次：证据与翻页用同一次 read 的 cursor——读两次会把 review 中途
+    新写的随笔翻过去（丢证据）。"""
+    _stub_jottings(stub_io)
+    _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert stub_io["jotting_reads"] == [{"lane": _LANE, "persona_id": _PERSONA}]
+
+
+@pytest.mark.asyncio
+async def test_success_turns_jotting_page_with_read_cursor(stub_io, monkeypatch):
+    """日页落笔成功（现读到页）→ 收口翻页：cursor 是读窗口那次给的**原样**、
+    turned_at 是触发时刻。"""
+    _stub_jottings(stub_io)
+    _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert stub_io["jotting_turns"] == [
+        {
+            "lane": _LANE,
+            "persona_id": _PERSONA,
+            "cursor": _JOT_CURSOR,
+            "turned_at": _NOW.isoformat(),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_page_written_does_not_turn_jotting_page(stub_io, monkeypatch):
+    """run 返回但日页没落笔（模型一个工具没调）→ 不翻页：水位不动、随笔留在
+    窗口内、下一班照常吸收。"""
+    _stub_jottings(stub_io)
+
+    async def lazy_run(self, messages, **kwargs):
+        return Message(role=Role.ASSISTANT, content="")
+
+    monkeypatch.setattr(review_mod.Agent, "run", lazy_run)
+
+    await _review()
+
+    assert stub_io["jotting_turns"] == [], "页没写出来绝不翻随笔"
+
+
+@pytest.mark.asyncio
+async def test_review_failure_does_not_turn_jotting_page(stub_io, monkeypatch):
+    """run 抛（回顾失败）→ 不翻页：失败 / 重试路径水位自然不动、证据不丢。"""
+    _stub_jottings(stub_io)
+
+    async def boom_run(self, messages, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(review_mod.Agent, "run", boom_run)
+
+    await _review()
+
+    assert stub_io["jotting_turns"] == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_absorbs_accumulated_jottings_and_turns_page(
+    stub_io, monkeypatch
+):
+    """对账班补跑：多日累积的未吸收随笔一次全部入证据、成功后同样翻页——
+    不按自然日切分（宁可一篇日页多消化几天草稿）。"""
+    stub_io["jottings"] = [
+        _jot(
+            jot_id="j-old",
+            content="前天忘了写的一个念头",
+            noted_at="2026-06-08T21:00:00+08:00",
+        ),
+        _jot(jot_id="j-new", content="今天路边的猫冲我叫了一声"),
+    ]
+    cursor = JottingCursor(
+        created_at="2026-06-10T06:00:00.000000+00:00", jot_id="j-new"
+    )
+    stub_io["jotting_cursor"] = cursor
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review(now=datetime(2026, 6, 11, 5, 0, tzinfo=_CST), trigger="sweep")
+
+    blob = _blob(captured)
+    assert "前天忘了写的一个念头" in blob
+    assert "今天路边的猫冲我叫了一声" in blob
+    assert [t["cursor"] for t in stub_io["jotting_turns"]] == [cursor]
+
+
+@pytest.mark.asyncio
+async def test_sweep_skip_does_not_read_or_turn_jottings(stub_io, monkeypatch):
+    """对账班跳过（目标日已有页）→ 不读窗口、更不翻页：跳过的班不碰草稿纸。"""
+    stub_io["day_page"] = _written_page()
+    _stub_jottings(stub_io)
+    _mock_run(monkeypatch, stub_io)
+
+    await _review(trigger="sweep")
+
+    assert stub_io["jotting_reads"] == []
+    assert stub_io["jotting_turns"] == []
+
+
+def test_review_instruction_covers_todo_scope_and_jottings():
+    """本子清点口径 = 待办（tidy_notebook_entry 只管待办）；随笔的定位一句话说清：
+    随手记的翻一遍、该进日页的写进去、之后翻篇——不是要她收拾的第二本待办。"""
+    instruction = review_mod.review_instruction()
+    assert "待办" in instruction
+    assert "随手记" in instruction
+    assert "翻篇" in instruction
+
+
+@pytest.mark.asyncio
+async def test_preexisting_page_without_new_version_does_not_turn(
+    stub_io, monkeypatch
+):
+    """成功判据必须是「**本轮**产出了新的日页版本」，不是「页存在」（codex T3 必改）。
+
+    真实场景：一晚两次入睡，第一班写了页；第二班的 run 一个工具没调——
+    read_day_page 仍读到第一班的旧页。若按页存在翻页，第二段随笔会被翻掉而
+    没进任何页（丢随笔、违反一次性消费口径）。版本没前进 → 不翻页、随笔留窗口；
+    marker 语义不变（页存在即这个生活日有页，照落）。"""
+    stub_io["day_page"] = _written_page()  # 第一班留下的旧页（版本快照）
+    _stub_jottings(stub_io)
+
+    async def lazy_run(self, messages, **kwargs):
+        return Message(role=Role.ASSISTANT, content="")  # 本轮什么都没写
+
+    monkeypatch.setattr(review_mod.Agent, "run", lazy_run)
+
+    await _review()
+
+    assert stub_io["jotting_turns"] == [], "本轮没产新版本绝不翻随笔"
+    assert stub_io["marks"] == [
+        {"lane": _LANE, "persona_id": _PERSONA, "date": _TARGET}
+    ], "marker 口径不变：页存在（更早班写的）照落"
+
+
+@pytest.mark.asyncio
+async def test_preexisting_page_with_new_version_turns(stub_io, monkeypatch):
+    """对照组：已有旧页、本轮 run 真写了新版本（版本前进）→ 照常翻页。
+    防把判据做成「有旧页就永不翻」。"""
+    stub_io["day_page"] = _written_page()
+    _stub_jottings(stub_io)
+    _mock_run(monkeypatch, stub_io)  # 桩会推进版本链
+
+    await _review()
+
+    assert [t["cursor"] for t in stub_io["jotting_turns"]] == [_JOT_CURSOR]
+
+
+@pytest.mark.asyncio
+async def test_turn_failure_fails_open_and_next_review_reabsorbs(
+    stub_io, monkeypatch, caplog
+):
+    """翻页本身抛错（codex T3 点名的收敛路径）：本轮其余收口照常（marker 照落、
+    不向上抛、error 留痕）、水位不动；下一晚回顾窗口未动 → 同批随笔再次入证据、
+    这次翻页成功——最坏后果是同批随笔多进一次日页证据，不丢、不永久卡死。"""
+    _stub_jottings(stub_io)
+    captured = _mock_run(monkeypatch, stub_io)
+
+    calls = {"n": 0}
+
+    async def flaky_turn(*, lane, persona_id, cursor, turned_at):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("pg hiccup during jotting page turn")
+        stub_io["jotting_turns"].append(
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "cursor": cursor,
+                "turned_at": turned_at,
+            }
+        )
+
+    monkeypatch.setattr(review_mod, "turn_jotting_page", flaky_turn)
+
+    # 第一晚：日页写成、翻页失败 → 水位不动、marker 照落、不抛、error 留痕。
+    with caplog.at_level("ERROR"):
+        await _review()
+
+    assert stub_io["jotting_turns"] == [], "翻页失败水位绝不动"
+    assert stub_io["marks"] == [
+        {"lane": _LANE, "persona_id": _PERSONA, "date": _TARGET}
+    ], "翻页失败不拖垮回顾其余收口（fail-open）"
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    # 第二晚：水位没动 → 同批随笔再次入窗（证据里还有）、这次翻页成功。
+    next_night = datetime(2026, 6, 11, 23, 30, tzinfo=_CST)
+    await _review(now=next_night, target_date="2026-06-11")
+
+    assert len(stub_io["jotting_reads"]) == 2, "下一晚照常重读窗口"
+    assert "阳台的花开了一朵" in _blob(captured), "同批随笔再次进证据（多进一次、不丢）"
+    assert [t["cursor"] for t in stub_io["jotting_turns"]] == [
+        _JOT_CURSOR
+    ], "下一晚翻页收敛成功"
+
+
+# ---------------------------------------------------------------------------
 # bug 1（跨块交互）：回顾里改期 → 新 tick 真挂上了（不只断言 update_entry 入参）.
 #
 # 活轮 edit_note 改期会把新提醒记进容器、收口 fire_schedule_reminders 挂新 tick；
@@ -981,7 +1279,7 @@ def _mock_run_invoking_tidy(monkeypatch, stub_io, *, entry_id, remind_at):
             await tidy_notebook_entry.invoke(
                 {"entry_id": entry_id, "remind_at": remind_at}
             )
-        stub_io["day_page"] = _written_page()
+        _write_page_into(stub_io)
         return Message(role=Role.ASSISTANT, content="")
 
     monkeypatch.setattr(review_mod.Agent, "run", fake_run)

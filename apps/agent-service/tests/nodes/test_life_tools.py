@@ -33,6 +33,9 @@ def stub_handlers(monkeypatch):
         "noted": [],
         "edited": [],
         "listed": [],
+        "jotted": [],  # jot_down 收到的 kwargs（随手记落库）
+        "jotting_window_rows": [],  # read_unabsorbed_jottings 返回的窗口内随笔
+        "jotting_reads": [],  # read_unabsorbed_jottings 收到的 kwargs
     }
 
     async def fake_save_life_state(**kwargs):
@@ -56,12 +59,25 @@ def stub_handlers(monkeypatch):
         # 返回测试预置的本子条目（默认空本子）。
         return state.get("notebook_rows", [])
 
+    async def fake_jot_down(**kwargs):
+        state["jotted"].append(kwargs)
+
+    async def fake_read_unabsorbed_jottings(**kwargs):
+        from app.domain.jotting import JottingWindow
+
+        state["jotting_reads"].append(kwargs)
+        # 返回测试预置的窗口内随笔（默认空窗口、游标 None）。
+        rows = state.get("jotting_window_rows", [])
+        return JottingWindow(jottings=list(rows), cursor=None)
+
     monkeypatch.setattr(lt, "save_life_state", fake_save_life_state)
     monkeypatch.setattr(lt, "perform_act", fake_perform_act)
     monkeypatch.setattr(lt, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(lt, "note_entry", fake_note_entry)
     monkeypatch.setattr(lt, "update_entry", fake_update_entry)
     monkeypatch.setattr(lt, "list_notebook_entries", fake_list_notebook_entries)
+    monkeypatch.setattr(lt, "jot_down", fake_jot_down)
+    monkeypatch.setattr(lt, "read_unabsorbed_jottings", fake_read_unabsorbed_jottings)
     return state
 
 
@@ -70,7 +86,13 @@ def _tools_by_name(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def test_build_life_tools_returns_base_tools():
-    """常驻工具集：update_life_state + act + chat + look_up_contact + send_message + 本子三件 + read_book + look_up + browse_feed。"""
+    """常驻工具集：update_life_state + act + chat + look_up_contact + send_message +
+    待办三件（note_todo / edit_note / read_notebook）+ 随手记两件（jot_down /
+    read_jottings）+ read_book + look_up + browse_feed。
+
+    notebook 拆分（spec 决策 3）：泛化的 ``note`` 不复存在——"记录当下"与"要办的
+    事"各有其门，选哪个工具就是定性。
+    """
     tools = lt.build_life_tools(
         lane="coe-t3",
         persona_id="akao",
@@ -84,9 +106,11 @@ def test_build_life_tools_returns_base_tools():
         "chat",
         "look_up_contact",
         "send_message",
-        "note",
+        "note_todo",
         "edit_note",
         "read_notebook",
+        "jot_down",
+        "read_jottings",
         "read_book",
         "look_up",
         "browse_feed",
@@ -483,7 +507,7 @@ async def test_note_invalid_remind_at_returns_tool_error_no_pending():
             schedule_reminders=reminders,
         )
     )
-    out = await tools["note"].invoke(
+    out = await tools["note_todo"].invoke(
         {"content": "排个日程", "remind_at": "明天早上"}  # 脏串
     )
     assert isinstance(out, dict) and out["kind"] == "tool_error"
@@ -519,7 +543,7 @@ async def test_note_with_remind_at_records_pending_reminder(stub_handlers):
     reminders: dict = {}
     tools = _tools_with_reminders(reminders, stub_handlers)
 
-    await tools["note"].invoke(
+    await tools["note_todo"].invoke(
         {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
     )
 
@@ -536,7 +560,7 @@ async def test_note_without_remind_at_records_no_reminder(stub_handlers):
     reminders: dict = {}
     tools = _tools_with_reminders(reminders, stub_handlers)
 
-    await tools["note"].invoke({"content": "想看那部动画"})
+    await tools["note_todo"].invoke({"content": "想看那部动画"})
 
     assert reminders == {}, "纯备忘不挂日程提醒"
 
@@ -601,7 +625,9 @@ def test_build_life_tools_without_reminders_slot_unchanged(stub_handlers):
             observed_at="2026-06-13T12:30:00+08:00",
         )
     )
-    assert "note" in tools and "edit_note" in tools, "本子工具常驻、不依赖 reminders 容器"
+    assert "note_todo" in tools and "edit_note" in tools, (
+        "待办工具常驻、不依赖 reminders 容器"
+    )
 
 
 # --- fire_schedule_reminders —— 收口每条各 emit 一条 ScheduleReminderTick ---
@@ -1629,25 +1655,25 @@ from app.domain.notebook import (  # noqa: E402
 
 
 def test_build_life_tools_includes_notebook_tools():
-    """工具集常驻三件本子工具：note / edit_note / read_notebook。"""
+    """工具集常驻三件待办工具：note_todo / edit_note / read_notebook。"""
     tools = _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3", persona_id="akao", act_id="a-1",
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    assert {"note", "edit_note", "read_notebook"} <= set(tools)
+    assert {"note_todo", "edit_note", "read_notebook"} <= set(tools)
 
 
 def test_notebook_tools_hide_mechanism_bindings():
-    """本子工具只对模型暴露业务参数，不暴露 lane / persona_id / entry_id 派生口径。"""
+    """待办工具只对模型暴露业务参数，不暴露 lane / persona_id / entry_id 派生口径。"""
     tools = _tools_by_name(
         lt.build_life_tools(
             lane="coe-t3", persona_id="akao", act_id="a-1",
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    note_props = set(tools["note"].definition.parameters["properties"])
+    note_props = set(tools["note_todo"].definition.parameters["properties"])
     assert note_props == {"content", "remind_at"}
 
     edit_props = set(tools["edit_note"].definition.parameters["properties"])
@@ -1666,7 +1692,7 @@ async def test_note_memo_records_handler_call(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    out = await tools["note"].invoke({"content": "想看那部动画"})
+    out = await tools["note_todo"].invoke({"content": "想看那部动画"})
     assert isinstance(out, str) and out
     assert len(stub_handlers["noted"]) == 1
     call = stub_handlers["noted"][0]
@@ -1686,7 +1712,7 @@ async def test_note_schedule_carries_remind_at(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    await tools["note"].invoke(
+    await tools["note_todo"].invoke(
         {"content": "三点陪我妹", "remind_at": "2026-06-03T15:00:00+00:00"}
     )
     call = stub_handlers["noted"][0]
@@ -1702,7 +1728,7 @@ async def test_note_returns_entry_id(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    out = await tools["note"].invoke({"content": "买猫粮"})
+    out = await tools["note_todo"].invoke({"content": "买猫粮"})
     entry_id = stub_handlers["noted"][0]["entry_id"]
     # id 必须出现在返回给模型的确认里（spec：出参 = id + 一句确认）
     assert entry_id in out
@@ -1719,8 +1745,8 @@ async def test_note_entry_id_derived_from_base_id(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    await tools["note"].invoke({"content": "第一件"})
-    await tools["note"].invoke({"content": "第二件"})
+    await tools["note_todo"].invoke({"content": "第一件"})
+    await tools["note_todo"].invoke({"content": "第二件"})
     ids = [c["entry_id"] for c in stub_handlers["noted"]]
     # 各自唯一（不同序号）
     assert ids[0] != ids[1]
@@ -1740,7 +1766,7 @@ async def test_note_entry_id_is_uuid_shaped(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    await tools["note"].invoke({"content": "x"})
+    await tools["note_todo"].invoke({"content": "x"})
     eid = stub_handlers["noted"][0]["entry_id"]
     assert str(_uuid.UUID(eid)) == eid
 
@@ -1754,8 +1780,8 @@ async def test_note_id_stable_under_round_replay(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    await tools_a["note"].invoke({"content": "第一件"})
-    await tools_a["note"].invoke({"content": "第二件"})
+    await tools_a["note_todo"].invoke({"content": "第一件"})
+    await tools_a["note_todo"].invoke({"content": "第二件"})
     first_ids = [c["entry_id"] for c in stub_handlers["noted"]]
 
     stub_handlers["noted"].clear()
@@ -1766,8 +1792,8 @@ async def test_note_id_stable_under_round_replay(stub_handlers):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    await tools_b["note"].invoke({"content": "第一件"})
-    await tools_b["note"].invoke({"content": "第二件"})
+    await tools_b["note_todo"].invoke({"content": "第一件"})
+    await tools_b["note_todo"].invoke({"content": "第二件"})
     replay_ids = [c["entry_id"] for c in stub_handlers["noted"]]
 
     assert replay_ids == first_ids
@@ -1797,9 +1823,9 @@ async def test_note_seq_advances_only_after_success(monkeypatch):
             observed_at="2026-06-03T12:30:00+00:00",
         )
     )
-    out1 = await tools["note"].invoke({"content": "买猫粮"})
+    out1 = await tools["note_todo"].invoke({"content": "买猫粮"})
     assert isinstance(out1, dict) and out1["kind"] == "tool_error"
-    out2 = await tools["note"].invoke({"content": "买猫粮"})
+    out2 = await tools["note_todo"].invoke({"content": "买猫粮"})
     assert isinstance(out2, str)
 
     assert len(seen) == 2
@@ -1923,6 +1949,294 @@ async def test_read_notebook_empty(stub_handlers):
     )
     out = await tools["read_notebook"].invoke({})
     assert isinstance(out, str) and out
+
+
+# ---------------------------------------------------------------------------
+# notebook 拆分（治本子被当观察日志用）：随手记两件 —— jot_down / read_jottings。
+#
+# 她"记录当下"的冲动（念头 / 观察 / 感想）从此有自己的门：jot_down 落 Jotting
+# （纯 append 草稿纸、不占常驻输入），read_jottings 翻还没被日结吸收的窗口。
+# jot_id 派生照抄 note 的幂等命门（base act_id + round-scoped 序号 + uuid5，成功
+# 后才推进序号），且与待办各自独立序号空间（seed 前缀 jot:/note: 不相交）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_jot_down_records_handler_call(stub_handlers):
+    """随手记一笔 → jot_down 收到本轮绑定（lane/persona/noted_at）+ 她写的 content。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["jot_down"].invoke({"content": "阳台的风好舒服"})
+    assert isinstance(out, str) and out
+    assert len(stub_handlers["jotted"]) == 1
+    call = stub_handlers["jotted"][0]
+    assert call["lane"] == "coe-t3"
+    assert call["persona_id"] == "akao"
+    assert call["content"] == "阳台的风好舒服"
+    assert call["noted_at"] == "2026-06-03T12:30:00+00:00"
+
+
+def test_jot_down_schema_hides_mechanism_only_content():
+    """随手记只对模型暴露 content —— lane / persona / jot_id 派生口径全是机制绑定。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    jot_props = set(tools["jot_down"].definition.parameters["properties"])
+    assert jot_props == {"content"}
+
+    read_props = set(tools["read_jottings"].definition.parameters["properties"])
+    assert read_props == set()
+
+
+@pytest.mark.asyncio
+async def test_jot_id_derived_from_base_id(stub_handlers):
+    """jot_id 从 base act_id 派生（jot: 前缀 + 本轮序号），不让模型生成 —— 同 note 幂等口径。"""
+    import uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["jot_down"].invoke({"content": "第一笔"})
+    await tools["jot_down"].invoke({"content": "第二笔"})
+    ids = [c["jot_id"] for c in stub_handlers["jotted"]]
+    # 各自唯一（不同序号）
+    assert ids[0] != ids[1]
+    # 派生口径钉死：uuid5(NAMESPACE_OID, "round-base:jot:N")
+    assert ids[0] == str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:jot:1"))
+    assert ids[1] == str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:jot:2"))
+
+
+@pytest.mark.asyncio
+async def test_jot_id_is_uuid_shaped(stub_handlers):
+    """派生 jot_id 为合法 UUID 形（与 act / note id 同口径，不引入怪字符）。"""
+    import uuid as _uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["jot_down"].invoke({"content": "x"})
+    jid = stub_handlers["jotted"][0]["jot_id"]
+    assert str(_uuid.UUID(jid)) == jid
+
+
+@pytest.mark.asyncio
+async def test_jot_id_stable_under_round_replay(stub_handlers):
+    """整轮重投同一 base id → 同序号随笔得同一 jot_id（durable 去重靠它只落一条）。"""
+    tools_a = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_a["jot_down"].invoke({"content": "第一笔"})
+    await tools_a["jot_down"].invoke({"content": "第二笔"})
+    first_ids = [c["jot_id"] for c in stub_handlers["jotted"]]
+
+    stub_handlers["jotted"].clear()
+
+    tools_b = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="same-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools_b["jot_down"].invoke({"content": "第一笔"})
+    await tools_b["jot_down"].invoke({"content": "第二笔"})
+    replay_ids = [c["jot_id"] for c in stub_handlers["jotted"]]
+
+    assert replay_ids == first_ids
+
+
+@pytest.mark.asyncio
+async def test_jot_seq_advances_only_after_success(monkeypatch):
+    """jot 序号只在 jot_down 成功后才推进 —— 失败重试用同一 jot_id（对称 note_seq 命门）。
+
+    jot_down 写库成功但返回链路抛错（ack 丢）时，@tool_error 吞错让模型重试；序号
+    若在成功前 +1，重试会用新序号派生新 id → 同一笔记两条。修法：成功后才推进。
+    """
+    seen: list[str] = []
+    calls = {"n": 0}
+
+    async def flaky_jot(**kwargs):
+        seen.append(kwargs["jot_id"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("ack lost after commit")
+
+    monkeypatch.setattr(lt, "jot_down", flaky_jot)
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out1 = await tools["jot_down"].invoke({"content": "妹妹刚才笑得很开心"})
+    assert isinstance(out1, dict) and out1["kind"] == "tool_error"
+    out2 = await tools["jot_down"].invoke({"content": "妹妹刚才笑得很开心"})
+    assert isinstance(out2, str)
+
+    assert len(seen) == 2
+    assert seen[0] == seen[1], f"失败重试必须用同一 jot_id，实得 {seen}"
+
+
+@pytest.mark.asyncio
+async def test_jot_and_note_todo_sequences_independent(stub_handlers):
+    """随笔和待办各自独立序号空间：交错记不互相占号（seed 前缀 jot:/note: 不相交）。"""
+    import uuid
+
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="round-base",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["note_todo"].invoke({"content": "下午三点陪我妹去琴行"})
+    await tools["jot_down"].invoke({"content": "客厅的钟慢了五分钟"})
+    await tools["jot_down"].invoke({"content": "今天的云像棉花糖"})
+    await tools["note_todo"].invoke({"content": "想看那部新动画"})
+
+    noted_ids = [c["entry_id"] for c in stub_handlers["noted"]]
+    jotted_ids = [c["jot_id"] for c in stub_handlers["jotted"]]
+    assert noted_ids == [
+        str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:note:1")),
+        str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:note:2")),
+    ]
+    assert jotted_ids == [
+        str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:jot:1")),
+        str(uuid.uuid5(uuid.NAMESPACE_OID, "round-base:jot:2")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_jottings_reads_window_and_renders(stub_handlers):
+    """翻随笔 → 按本轮绑定读未吸收窗口，渲出的正文（内容 + 时刻）原样给她。"""
+    from app.domain.jotting import Jotting
+
+    stub_handlers["jotting_window_rows"] = [
+        Jotting(
+            lane="coe-t3", persona_id="akao", jot_id="j1",
+            content="阳台的风好舒服", noted_at="2026-06-03T10:00:00+00:00",
+        ),
+        Jotting(
+            lane="coe-t3", persona_id="akao", jot_id="j2",
+            content="妹妹刚才笑得很开心", noted_at="2026-06-03T11:00:00+00:00",
+        ),
+    ]
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["read_jottings"].invoke({})
+    assert stub_handlers["jotting_reads"] == [
+        {"lane": "coe-t3", "persona_id": "akao"}
+    ]
+    assert "阳台的风好舒服" in out
+    assert "妹妹刚才笑得很开心" in out
+
+
+@pytest.mark.asyncio
+async def test_read_jottings_empty_window_says_so(stub_handlers):
+    """空窗口（没随笔 / 都被日结翻篇了）→ 一句如实说明，不报错、不编占位内容。"""
+    stub_handlers["jotting_window_rows"] = []
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="base-id",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["read_jottings"].invoke({})
+    assert isinstance(out, str) and out
+
+
+# ---------------------------------------------------------------------------
+# 拆分后的工具描述口径（工具名 + 描述本身承担"这是要办的事还是随手一记"的引导，
+# spec 决策 3）。描述是软引导（赤尾宪法：不加 if 强制），只能断言引导文本已到位、
+# 旧口径不残留。
+# ---------------------------------------------------------------------------
+
+
+def _built_tools():
+    return _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+
+
+def test_note_todo_description_only_actionables_steers_moments_to_jot():
+    """记待办的口径：本子只放要办的事；刚发生的 / 现场状态 / 谁说了什么指去随手记。"""
+    desc = _built_tools()["note_todo"].definition.description
+    assert "要办的事" in desc
+    # 观察流水账的三种典型形态被明确挡在门外、指去随手记
+    assert "刚发生的事" in desc
+    assert "随手记" in desc
+    assert "jot_down" in desc
+
+
+def test_jot_down_description_free_writing_absorbed_at_day_review():
+    """随手记的口径：想写就写、不占脑子、睡前回顾自然翻出来、之后翻篇。"""
+    desc = _built_tools()["jot_down"].definition.description
+    assert "随手记" in desc
+    assert "不占你脑子" in desc
+    assert "睡前" in desc
+    assert "想写就写" in desc
+    # 要办的事指回待办门
+    assert "note_todo" in desc
+
+
+def test_edit_note_description_not_a_status_board():
+    """edit_note 治状态板用法：改一条是让事更准，进展不每轮写回来、办完标 done。"""
+    desc = _built_tools()["edit_note"].definition.description
+    assert "状态板" in desc
+    assert "办完标 done" in desc
+    # 口径收窄成待办的本子
+    assert "待办" in desc
+
+
+def test_read_notebook_description_todos_only():
+    """read_notebook 收窄口径：翻的是待办的本子（不再是万物皆可记的那本）。"""
+    desc = _built_tools()["read_notebook"].definition.description
+    assert "待办" in desc
+
+
+def test_read_jottings_description_window_semantics():
+    """翻随笔的口径：翻这几天随手记的、只有还没被日结翻篇的那些。"""
+    desc = _built_tools()["read_jottings"].definition.description
+    assert "随手记" in desc
+    assert "翻篇" in desc
+
+
+def test_look_up_description_points_note_taking_to_jot():
+    """look_up 的"想留住就记"口径改指随手记，旧的"记进本子"不残留。"""
+    desc = _built_tools()["look_up"].definition.description
+    assert "随手记" in desc
+    assert "自己记进本子" not in desc
+    assert "想长期记住的" not in desc
+
+
+def test_browse_feed_description_points_note_taking_to_jot():
+    """browse_feed 的"想留住就记"口径改指随手记，旧的"记进本子"不残留。"""
+    desc = _built_tools()["browse_feed"].definition.description
+    assert "随手记" in desc
+    assert "自己记进本子" not in desc
+    assert "想长期留住的" not in desc
 
 
 # ---------------------------------------------------------------------------

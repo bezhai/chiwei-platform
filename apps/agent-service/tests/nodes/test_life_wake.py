@@ -193,6 +193,9 @@ def patched(monkeypatch):
         "notebook": [],  # list_notebook_entries 返回（[]=空本子）
         "notebook_calls": [],  # list_notebook_entries 收到的 kwargs
         "notebook_raises": None,  # 非 None → list_notebook_entries 抛它（读失败）
+        "jotting_count": 0,  # count_unabsorbed_jottings 返回（0=没未吸收随笔）
+        "jotting_count_calls": [],  # count_unabsorbed_jottings 收到的 kwargs
+        "jotting_count_raises": None,  # 非 None → count 抛它（读失败）
         "recent_chats": [],  # find_persona_related_chats_recent 返回
         "recent_chat_calls": [],  # find_persona_related_chats_recent 收到的 kwargs
         "recent_chat_raises": None,  # 非 None → recent chat 查询抛它（读失败）
@@ -267,9 +270,20 @@ def patched(monkeypatch):
             raise state["recent_chat_raises"]
         return list(state["recent_chats"])
 
+    # 随笔存在提示读口：每轮只 COUNT 未吸收随笔（正文绝不进 stimulus）。打桩成可注入
+    # 条数 / 记录调用 / 可抛错（读失败 → 提示行缺席不炸轮）。
+    async def fake_count_unabsorbed_jottings(*, lane, persona_id):
+        state["jotting_count_calls"].append({"lane": lane, "persona_id": persona_id})
+        if state["jotting_count_raises"] is not None:
+            raise state["jotting_count_raises"]
+        return state["jotting_count"]
+
     monkeypatch.setattr(lw, "load_session", fake_load_session)
     monkeypatch.setattr(lw, "read_day_page_before", fake_read_day_page_before)
     monkeypatch.setattr(lw, "list_notebook_entries", fake_list_notebook_entries)
+    monkeypatch.setattr(
+        lw, "count_unabsorbed_jottings", fake_count_unabsorbed_jottings
+    )
     monkeypatch.setattr(lw, "find_persona_related_chats_recent", fake_find_recent_chats)
     # 工具底下的 durable handler：在 life_tools 模块里打桩。
     monkeypatch.setattr(lt, "save_life_state", fake_save)
@@ -2555,7 +2569,7 @@ async def test_note_tool_derived_id_lands_and_dedups_end_to_end(test_db):
                 act_id=base_act_id, observed_at=observed_at,
             )
         }
-        return tools["note"]
+        return tools["note_todo"]
 
     # 第一轮：同一 base act_id 下真记两条（一备忘 + 一日程，走真实 insert_idempotent）。
     note_a = _note_tool()
@@ -2831,6 +2845,106 @@ async def test_notebook_read_failure_section_absent_round_still_runs(patched, mo
     # 这一轮照常收口（读失败不影响唤醒主流程）
     assert patched["marked"] == [["e1"]]
     assert [s["current_state"] for s in patched["saved"]] == ["去开门"]
+
+
+# ---------------------------------------------------------------------------
+# notebook 拆分（随笔进 stimulus 的唯一形态 = 一行存在提示）：有未吸收随笔时只给
+# 一行「随手记了 N 笔」，**正文绝不进 stimulus**（spec 决策 4：随笔不注入任何常驻
+# 输入）。没有随笔 → 整行缺席不补占位；count 读失败 → 行缺席、本轮照常跑
+# （fail-soft，同本子段姿势）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stimulus_jotting_hint_line_when_unabsorbed_exist(patched, monkeypatch):
+    """有未吸收随笔 → stimulus 带一行存在提示（条数），正文绝不进 stimulus（黑盒）。
+
+    黑盒法（codex T3 建议）：把领域层随笔正文读口打成"一读就吐带独特标记正文"的
+    数据源——若 stimulus 拼装路径上有任何地方读了正文，标记必然漏进最终 messages。
+    只断言最终输出（提示行在、标记正文不在），不测内部形状（不 hasattr）——将来
+    合法引入某个符号做别的事不会误伤。
+    """
+    import app.domain.jotting as jotting_mod
+    from app.domain.jotting import Jotting, JottingWindow
+
+    marker = "JOT-BODY-MARKER-b7f2"
+    window = JottingWindow(
+        jottings=[
+            Jotting(
+                lane="coe-t3", persona_id="akao", jot_id="j1",
+                content=f"{marker} 阳台的风好舒服",
+                noted_at="2026-06-13T10:00:00+08:00",
+            )
+        ],
+        cursor=None,
+    )
+
+    async def leaky_read(**kwargs):
+        return window
+
+    # 领域层正文读口打成带标记的源；lw 命名空间也接到同一个源（raising=False：现状
+    # lw 没有这个符号，这只是把"将来有人 module-level import 同名读口"的路径同样
+    # 接上标记源）。仍是黑盒——只看最终输出有没有标记。
+    monkeypatch.setattr(jotting_mod, "read_unabsorbed_jottings", leaky_read)
+    monkeypatch.setattr(lw, "read_unabsorbed_jottings", leaky_read, raising=False)
+
+    patched["jotting_count"] = 3
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "随手记了 3 笔" in msg_blob, "有未吸收随笔时必须有一行存在提示（带条数）"
+    assert marker not in msg_blob, "随笔正文绝不进 stimulus（只给一行存在提示）"
+
+
+@pytest.mark.asyncio
+async def test_stimulus_no_jotting_hint_when_none(patched, monkeypatch):
+    """没有未吸收随笔（count=0）→ 提示行整行缺席、不补占位。"""
+    patched["jotting_count"] = 0
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "随手记" not in msg_blob, "没随笔时不许出现任何随手记占位文案"
+
+
+@pytest.mark.asyncio
+async def test_jotting_count_reads_wake_lane_persona(patched, monkeypatch):
+    """count 读口按本轮唤醒的 lane / persona 读（泳道隔离口径与本子段一致）。"""
+    patched["jotting_count"] = 1
+    patched["unread"] = [_envelope("e1", "动静")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert patched["jotting_count_calls"], "必须数过未吸收随笔"
+    assert patched["jotting_count_calls"][-1] == {
+        "lane": "coe-t3",
+        "persona_id": "akao",
+    }
+
+
+@pytest.mark.asyncio
+async def test_jotting_count_read_failure_hint_absent_round_still_runs(
+    patched, monkeypatch
+):
+    """count 读失败 → 提示行缺席但这一轮照常跑（存在提示是上下文增强、绝不炸唤醒）。"""
+    patched["jotting_count_raises"] = RuntimeError("db down counting jottings")
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=_script_update(current_state="去开门"))
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "随手记" not in msg_blob, "count 读失败时提示行缺席"
+    assert "门铃响了" in msg_blob, "当轮感知照常"
+    # 这一轮照常收口（读失败不影响唤醒主流程）
+    assert patched["marked"] == [["e1"]]
 
 
 # ---------------------------------------------------------------------------
@@ -3239,7 +3353,7 @@ async def test_life_round_fires_schedule_reminders_for_noted_schedule(patched, m
     def _script_note():
         async def _run(tools):
             by_name = {t.name: t for t in tools}
-            await by_name["note"].invoke(
+            await by_name["note_todo"].invoke(
                 {"content": "三点陪我妹", "remind_at": "2026-06-13T15:00:00+08:00"}
             )
 

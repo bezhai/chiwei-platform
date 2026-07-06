@@ -33,6 +33,15 @@
   * **single_flight 包整段**（key 含 lane / persona / target_date）：快班与
     凌晨补班撞车时冲突方静默让位——锁只防并发撞车，不兼任同日防重跑（快班
     同日重跑是设计行为）。
+  * **随笔吸收**（notebook 拆分待办与随笔）：证据带【这几天你随手记的】一段
+    （:func:`app.domain.jotting.read_unabsorbed_jottings` 的未吸收窗口，多日累积
+    一次全吸收、不按自然日切分）；翻页判据 = **本轮产出了新的日页版本**（对比
+    run 前快照：页从无到有、或 DayPage.version 前进）——「页存在」不够，一晚
+    两次入睡的第二班没写页时读到的仍是第一班旧页，按存在翻页会丢随笔。判据
+    过了才调 :func:`app.domain.jotting.turn_jotting_page`（cursor 用读窗口那一次
+    的、原样传）；review 失败 / 本轮没写页不翻页，水位自然不动、随笔不丢；
+    翻页本身抛错单独 fail-open（不拖垮 marker 等其余收口），下一晚回顾重新吸收
+    ——最坏同批随笔多进一次证据，不丢、不永久卡死。
 
 写什么、给谁重写关系页由她自己判断（写作纪律在 prompt 层：instruction 钉姿态、
 langfuse system prompt 载人设）；这里没有内容检测器（赤尾宪法）。
@@ -66,6 +75,12 @@ from app.data.queries.mailbox import (  # module-level so tests can monkeypatch
 )
 from app.data.queries.messages import (  # module-level so tests can monkeypatch
     find_persona_spoken_chats_in_window,
+)
+from app.domain.jotting import (  # module-level so tests can monkeypatch
+    Jotting,
+    read_unabsorbed_jottings,
+    render_jottings,
+    turn_jotting_page,
 )
 from app.domain.life_state import (  # module-level so tests can monkeypatch
     mark_day_reviewed,
@@ -145,12 +160,15 @@ def review_instruction() -> str:
         "真人用聊天记录里标出的那个用户标识，NPC 用证据里给出的 ``npc:名字`` 键。"
         "今天**没来往过就不动关系页**——一页都不写；没和某人来往（真人或 NPC），就"
         "不动他那页。只写真实来往过的，不编。\n\n"
-        "第三件：睡前收拾一下你的随身本子。证据里【你本子的全貌】那节摆着你本子里的"
-        "全部条目——还惦记的、做过的、过时没赶上的都在，每条带 id。一条条过：真做过了"
-        "的用 tidy_notebook_entry 标 done；过时了 / 现在不想做了的标 dropped；还惦记、"
-        "只是没赶上的，改个时间重新排或就留着不动。清什么、留什么是你自己的判断——没人"
-        "替你按「多久没动」「过期了」去删。**今天真做成了、了结了的那些事，顺手在第一件"
-        "的页里写一笔**——它们也是这一天留下来的几笔。\n\n"
+        "第三件：睡前收拾一下你的随身本子。本子上记的是你的**待办**——要办的事。"
+        "证据里【你本子的全貌】那节摆着全部待办——还惦记的、办过的、过时没赶上的"
+        "都在，每条带 id。一条条过：真办过了的用 tidy_notebook_entry 标 done；过时"
+        "了 / 现在不想做了的标 dropped；还惦记、只是没赶上的，改个时间重新排或就留"
+        "着不动。清什么、留什么是你自己的判断——没人替你按「多久没动」「过期了」去"
+        "删。另外，证据里【这几天你随手记的】那节是你随手记下的念头、观察、感想——"
+        "写页前翻一遍，该留进这一天的页的就写进去；写完页这些随笔就翻篇了，不用你"
+        "收拾。**今天真做成了、了结了的那些事，顺手在第一件的页里写一笔**——它们也"
+        "是这一天留下来的几笔。\n\n"
         "写页的日期和时刻由系统自动记，你不用管钟。"
     )
 
@@ -332,6 +350,16 @@ def _notebook_evidence(entries: list[NotebookEntry], *, now: datetime) -> str:
     return render_notebook(entries, now=now.isoformat())
 
 
+def _jottings_evidence(jottings: list[Jotting]) -> str:
+    """随笔证据：她今天 / 这几天随手记的（还没被日页吸收的窗口），写日页的参考素材。
+
+    渲染复用 :func:`render_jottings`（单一定义处，与 life 翻随笔工具同一份），空窗口
+    它自带一句提示。多日未回顾的累积随笔一次全部入窗、不按自然日切分（spec 决策 2）；
+    吸收动作不在这——窗口翻页只在日页落笔成功后的收口处发生。
+    """
+    return render_jottings(jottings)
+
+
 def _review_messages(
     *,
     now: datetime,
@@ -344,6 +372,7 @@ def _review_messages(
     old_pages: dict[str, RelationshipPage],
     existing_day_page: DayPage | None,
     notebook_entries: list[NotebookEntry],
+    jottings: list[Jotting],
 ) -> list[Message]:
     """把回顾的全部证据拼成**单条 user 消息**（无会话、一次喂全；模板零剧情事实）。"""
     # 「这一天来往过的对象」= 真人聊天 partner + 来访过的 NPC（两类各有各的旧关系页
@@ -371,11 +400,13 @@ def _review_messages(
         f"{_old_pages_evidence(partner_ids, old_pages, usernames)}\n\n"
         f"【这一天已有的页】\n{_existing_day_page_evidence(existing_day_page)}\n\n"
         f"【你本子的全貌】\n{_notebook_evidence(notebook_entries, now=now)}\n\n"
+        f"【这几天你随手记的】\n{_jottings_evidence(jottings)}\n\n"
         "回看完：用 update_day_page 写下这一天留下来的几笔；为今天真正来往过的每个"
         "人（聊过天的真人、来找过你的 NPC）用 update_relationship_page 整篇重写他那"
-        "一页，NPC 的 other_user_id 用 npc:名字 键、没来往过就不动关系页；再用 "
-        "tidy_notebook_entry 收拾本子——做过的标 done、过时 / 不想做的标 dropped、"
-        "还惦记的改时间或留着，今天真做成了的事顺手写进当天的页。"
+        "一页，NPC 的 other_user_id 用 npc:名字 键、没来往过就不动关系页；随手记的"
+        "那些翻一遍、该进这一天的页的写进去（写完页就翻篇）；再用 tidy_notebook_entry "
+        "收拾本子上的待办——办过的标 done、过时 / 不想做的标 dropped、还惦记的改时间"
+        "或留着，今天真做成了的事顺手写进当天的页。"
     )
     return [Message(role=Role.USER, content=user_content)]
 
@@ -505,6 +536,12 @@ async def _run_day_review(
         lane=lane, persona_id=persona_id, active_only=False
     )
 
+    # 她随手记的随笔（还没被日页吸收的窗口）：**只读这一次**，证据与收口翻页用
+    # 同一个 window（同一次 read 的 cursor）——读两次会把 review 中途新写的随笔
+    # 翻过去（丢证据）。窗口读不动水位；吸收只发生在日页落笔成功后的收口翻页
+    # （jotting 领域层合同，review 不自行发明判据）。
+    jotting_window = await read_unabsorbed_jottings(lane=lane, persona_id=persona_id)
+
     # 空证据护栏（机制安全阀，同空信箱 early-return）：意识流 / act / 聊天 / NPC 来访
     # 全空 = 这一天没有可回看的经历，不烧模型、不落 marker（marker 缺席无害：快班的
     # 前提是她活过一轮、主班对每个 target 只对账一次）。NPC 来访是真实经历，单有它
@@ -544,6 +581,7 @@ async def _run_day_review(
         old_pages=old_pages,
         existing_day_page=existing_day_page,
         notebook_entries=notebook_entries,
+        jottings=jotting_window.jottings,
     )
     # round-scoped 待挂日程提醒容器（bug 1：回顾里改期也要挂新 tick）：tidy_notebook_entry
     # 改 / 设成未来提醒时刻时往里记 entry_id → remind_at（撤时间记 None、了结不碰），run
@@ -621,6 +659,38 @@ async def _run_day_review(
             target_date,
         )
         return
+    # 随笔翻页（吸收收口）的成功判据 = 「**本轮**产出了新的日页版本」，不是
+    # 「页存在」：一晚两次入睡的第二班可能一个工具没调，read_day_page 读到的
+    # 仍是第一班的旧页——那时翻页会把第二段随笔翻掉而它们没进任何页（丢随笔、
+    # 违反一次性消费口径）。对比 run 前快照（existing_day_page，喂证据那次读的
+    # 同一份）：页从无到有、或版本链前进（DayPage.version append-only 单调自增，
+    # 不用墙上时钟猜）才算本轮真的落笔。否则不翻页——水位不动、随笔留窗口给
+    # 下一晚（marker 口径不受影响：页存在即这个生活日有页，照落）。
+    wrote_new_version = existing_day_page is None or (
+        written.version > existing_day_page.version
+    )
+    if wrote_new_version:
+        # cursor **原样**是读窗口那一刻的（幂等、单调不回退、cursor=None no-op
+        # 都由领域层保证，这里不自行发明判据）；review 中途新写的随笔在 cursor
+        # 之后、天然留给下一次日结。翻页失败单独 fail-open（不拖垮 marker 等
+        # 其余收口）：水位不动、随笔留在窗口内，下一晚入睡回顾窗口未动、重新
+        # 吸收并再次翻页——最坏后果是同批随笔多进一次日页证据，不丢、不永久卡死。
+        try:
+            await turn_jotting_page(
+                lane=lane,
+                persona_id=persona_id,
+                cursor=jotting_window.cursor,
+                turned_at=now.isoformat(),
+            )
+        except Exception:
+            logger.error(
+                "[day_review] %s/%s %s jotting page turn failed, fail-open: "
+                "水位不动、随笔留在窗口内，下一晚回顾重新吸收（多进一次证据、不丢）",
+                lane,
+                persona_id,
+                target_date,
+                exc_info=True,
+            )
     await mark_day_reviewed(lane=lane, persona_id=persona_id, date=target_date)
     logger.info(
         "[day_review] %s/%s reviewed living day %s", lane, persona_id, target_date
