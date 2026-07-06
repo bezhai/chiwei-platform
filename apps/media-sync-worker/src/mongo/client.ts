@@ -1,5 +1,6 @@
 import { Collection } from "mongodb";
 import { MongoService, MongoCollection, getMongoService } from "@inner/shared/mongo";
+import { loadMongoConfigFromEnv } from "./config";
 import { DownloadTask, PixivImageInfo, TranslateWord } from "./types";
 
 // MongoDB 服务实例
@@ -19,19 +20,6 @@ export let BangumiSubjectCharacterCollection: Collection;
 export let BangumiSubjectPersonCollection: Collection;
 export let BangumiPersonCharacterCollection: Collection;
 export let BangumiSubjectRelationCollection: Collection;
-
-function parseEnvInt(name: string, defaultValue: number): number {
-  const raw = process.env[name];
-  if (!raw) {
-    return defaultValue;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
-}
-
-function hostHasPort(host: string): boolean {
-  return host.includes(':');
-}
 
 /**
  * 创建 Bangumi Archive 相关的索引
@@ -77,18 +65,8 @@ async function createBangumiIndexes(): Promise<void> {
 
 export const mongoInitPromise = (async () => {
   try {
-    const mongoHost = process.env.MONGO_HOST || 'mongo';
-
     // 使用共享的 MongoService
-    mongoService = getMongoService({
-      host: mongoHost,
-      port: hostHasPort(mongoHost) ? undefined : parseEnvInt('MONGO_PORT', 27017),
-      username: process.env.MONGO_INITDB_ROOT_USERNAME,
-      password: process.env.MONGO_INITDB_ROOT_PASSWORD,
-      database: 'chiwei',
-      authSource: 'admin',
-      connectTimeoutMS: parseEnvInt('MONGO_CONNECT_TIMEOUT_MS', 10000),
-    });
+    mongoService = getMongoService(loadMongoConfigFromEnv());
 
     await mongoService.initialize();
 

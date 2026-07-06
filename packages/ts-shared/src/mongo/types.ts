@@ -18,6 +18,8 @@ export interface MongoConfig {
     authSource?: string;
     /** 连接超时时间（毫秒） */
     connectTimeoutMS?: number;
+    /** socket 不活动超时（毫秒）。不设或为 0 时用 driver 默认（无限等待），半开连接上的命令会永久挂起 */
+    socketTimeoutMS?: number;
     /** 额外的连接选项 */
     options?: Record<string, string | number | boolean>;
 }
@@ -41,7 +43,8 @@ export function createDefaultMongoConfig(database: string = 'chiwei'): MongoConf
  * 根据配置生成 MongoDB 连接 URL
  */
 export function buildMongoUrl(config: MongoConfig): string {
-    const { host, port, username, password, database, authSource, connectTimeoutMS, options } = config;
+    const { host, port, username, password, database, authSource, connectTimeoutMS, socketTimeoutMS, options } =
+        config;
 
     let url = 'mongodb://';
 
@@ -64,6 +67,10 @@ export function buildMongoUrl(config: MongoConfig): string {
 
     if (connectTimeoutMS) {
         params.push(`connectTimeoutMS=${connectTimeoutMS}`);
+    }
+
+    if (socketTimeoutMS) {
+        params.push(`socketTimeoutMS=${socketTimeoutMS}`);
     }
 
     if (authSource) {
