@@ -1,5 +1,6 @@
 import {
   Filter,
+  MatchKeysAndValues,
   MongoError,
   SortDirection,
   UpdateFilter,
@@ -16,6 +17,7 @@ import {
     UploadImgV2Req,
 } from "./types";
 import { DownloadTaskMap, ImgCollection, TranslateWordMap } from "./client";
+import { loadConsumerGuardConfig } from "../service/downloadRuntime";
 
 /**
  * 获取给定 illustIds 中最大值的 illust_id
@@ -80,38 +82,145 @@ export async function insertDownloadTask(illustId: string): Promise<boolean> {
 }
 
 /**
- * 查找一个未下载的任务
- * @returns 返回一个 Promise，表示找到的任务；如果没有任务返回 null
- * @throws 如果在数据库操作中发生错误，将抛出错误
+ * 构建「可领取任务」的查询条件。
+ *
+ * 语义：Pending / Fail 无条件可领取；Running 仅当 last_run_time 早于回收阈值时可领取
+ * （consumer 卡死或部署杀 pod 后滞留的任务由此被重新捞回）。Success / Dead 永不匹配。
+ *
+ * @param now - 当前时间（由调用方传入以保证可单测）
+ * @param reclaimMs - Running 任务回收阈值（毫秒）
  */
-export async function SearchUnDownloadTask(): Promise<DownloadTask | null> {
-  // 1. 从数据库中查询 status 为 Pending 或 Fail 的任务，限制为 1 个任务
-  const filter: Filter<DownloadTask> = {
-    status: { $in: [DownloadTaskStatus.Pending, DownloadTaskStatus.Fail] },
+export function buildClaimableTaskFilter(
+  now: Date,
+  reclaimMs: number
+): Filter<DownloadTask> {
+  return {
+    $or: [
+      { status: { $in: [DownloadTaskStatus.Pending, DownloadTaskStatus.Fail] } },
+      {
+        status: DownloadTaskStatus.Running,
+        last_run_time: { $lt: new Date(now.getTime() - reclaimMs) },
+      },
+    ],
   };
-
-  // 使用封装的 find 方法查找未下载的任务
-  const existingTasks = await DownloadTaskMap.find(filter, { limit: 1 });
-
-  // 如果没有找到任何任务，返回 null
-  if (existingTasks.length === 0) {
-    return null;
-  }
-
-  const task = new DownloadTask(existingTasks[0]); // 获取第一个任务
-
-  // 2. 更新任务状态为“开始下载”
-  const updateFilter: Filter<DownloadTask> = { illust_id: task.illust_id };
-
-  // 执行任务状态更新
-  await DownloadTaskMap.updateOne(updateFilter, task.startToDownload());
-
-  // 3. 返回找到的任务
-  return task;
 }
 
 /**
- * 更新任务状态为失败，并记录失败原因
+ * 构建「领取任务」的原子更新操作（配合 findOneAndUpdate 使用）。
+ *
+ * last_run_time 同时充当领取代次：收尾更新以它为条件（见 buildCompletionFilter），
+ * 旧轮次迟到的收尾因代次不中而被静默丢弃。retry_time 由 $inc 服务端自增——回收重领
+ * 同样消耗重试预算，连续多次 consumer 死亡会把任务推进 Dead 留痕，而不是无限重试。
+ *
+ * @param now - 领取时间，写入 last_run_time / update_time
+ */
+export function buildClaimUpdate(now: Date): UpdateFilter<DownloadTask> {
+  return {
+    $set: {
+      status: DownloadTaskStatus.Running,
+      last_run_time: now,
+      update_time: now,
+      last_run_error: "",
+    },
+    $inc: { retry_time: 1 },
+  };
+}
+
+/**
+ * 构建「回收预算耗尽」的死信清扫条件。
+ *
+ * 毒任务（每次领取都把 consumer 拖到挂死/超时）永远走不到 fail() 的收尾路径,
+ * 只靠领取 $inc 涨 retry_time——不清扫就会每隔回收阈值被无限重领。领取前把
+ * 超阈值 Running 且预算耗尽（retry_time >= MaxRetryTime）的任务批量标 Dead 留痕。
+ *
+ * @param now - 当前时间（由调用方传入以保证可单测）
+ * @param reclaimMs - Running 任务回收阈值（毫秒），与领取条件同一阈值
+ */
+export function buildExhaustedReclaimFilter(
+  now: Date,
+  reclaimMs: number
+): Filter<DownloadTask> {
+  return {
+    status: DownloadTaskStatus.Running,
+    last_run_time: { $lt: new Date(now.getTime() - reclaimMs) },
+    retry_time: { $gte: DownloadTask.MaxRetryTime },
+  };
+}
+
+/**
+ * 构建「死信化」更新字段。last_run_error 写明来自回收清扫,
+ * 便于运维区分「下载失败进 Dead」和「反复拖死 consumer 进 Dead」。
+ *
+ * 返回裸字段而非 {$set:...}:MongoCollection.updateMany 会自己包一层 $set,
+ * 预包裹会变成 {$set:{$set:...}} 在运行时报错。
+ */
+export function buildDeadLetterUpdate(now: Date): MatchKeysAndValues<DownloadTask> {
+  return {
+    status: DownloadTaskStatus.Dead,
+    update_time: now,
+    last_run_error:
+      "dead-lettered by reclaim sweep: retry budget exhausted without completion",
+  };
+}
+
+/**
+ * 构建「收尾更新（Success/Fail）」的查询条件。
+ *
+ * 除 illust_id 外把 last_run_time 钉在本次领取的代次上：若任务已被回收重领
+ * （last_run_time 被改写），旧轮次迟到的收尾条件不中、不会覆盖新领取。
+ *
+ * @param illustId - 任务 ID
+ * @param claimedRunTime - 领取时写入的 last_run_time；undefined 时匹配 null/缺失
+ *   （原子领取后必有值，此分支仅为类型完备，永远匹配不到已领取的文档）
+ */
+export function buildCompletionFilter(
+  illustId: string,
+  claimedRunTime: Date | undefined
+): Filter<DownloadTask> {
+  return {
+    illust_id: illustId,
+    last_run_time: (claimedRunTime ??
+      null) as Filter<DownloadTask>["last_run_time"],
+  };
+}
+
+/**
+ * 原子领取一个可执行的下载任务（Pending / Fail / 超过回收阈值的 Running）
+ * @returns 返回一个 Promise，表示领取到的任务；如果没有任务返回 null
+ * @throws 如果在数据库操作中发生错误，将抛出错误
+ */
+export async function SearchUnDownloadTask(): Promise<DownloadTask | null> {
+  const now = new Date();
+  const { runningTaskReclaimMs } = loadConsumerGuardConfig();
+
+  // 领取前先死信化清扫预算耗尽的滞留任务，否则它们会被无限回收重领
+  const swept = await DownloadTaskMap.updateMany(
+    buildExhaustedReclaimFilter(now, runningTaskReclaimMs),
+    buildDeadLetterUpdate(now)
+  );
+  if (swept.modifiedCount > 0) {
+    console.warn(
+      `Dead-lettered ${swept.modifiedCount} stale Running task(s) with exhausted retry budget`
+    );
+  }
+
+  // findOneAndUpdate 原子领取，杜绝 find+update 之间被其他协程抢占的窗口
+  const claimed = await DownloadTaskMap.findOneAndUpdate(
+    buildClaimableTaskFilter(now, runningTaskReclaimMs),
+    buildClaimUpdate(now),
+    { returnDocument: "after" }
+  );
+
+  if (!claimed) {
+    return null;
+  }
+
+  return new DownloadTask(claimed);
+}
+
+/**
+ * 更新任务状态为失败，并记录失败原因。
+ * 仅当任务仍属于本次领取代次时生效；已被回收重领的任务收尾静默丢弃。
  * @param task - 任务对象
  * @param createErr - 任务失败时的错误信息
  * @returns 返回一个 Promise，表示是否成功更新任务状态
@@ -121,8 +230,8 @@ export async function Fail(
   task: DownloadTask,
   createErr: Error
 ): Promise<void> {
-  // 构建查询条件
-  const filter: Filter<DownloadTask> = { illust_id: task.illust_id };
+  // 先取领取代次构建条件，再生成更新操作
+  const filter = buildCompletionFilter(task.illust_id, task.last_run_time);
 
   // 调用任务对象的 fail 方法，生成更新操作
   const update = task.fail(createErr);
@@ -132,14 +241,15 @@ export async function Fail(
 }
 
 /**
- * 更新任务状态为成功
+ * 更新任务状态为成功。
+ * 仅当任务仍属于本次领取代次时生效；已被回收重领的任务收尾静默丢弃。
  * @param task - 任务对象
  * @returns 返回一个 Promise，表示是否成功更新任务状态
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
 export async function Success(task: DownloadTask): Promise<void> {
-  // 构建查询条件
-  const filter: Filter<DownloadTask> = { illust_id: task.illust_id };
+  // 先取领取代次构建条件，再生成更新操作
+  const filter = buildCompletionFilter(task.illust_id, task.last_run_time);
 
   // 调用任务对象的 success 方法，生成更新操作
   const update = task.success();

@@ -76,15 +76,8 @@ export class DownloadTask {
     });
   }
 
-  // 开始下载
-  startToDownload(): DownloadTask {
-    this.last_run_error = "";
-    this.last_run_time = new Date();
-    this.update_time = new Date();
-    this.retry_time++;
-    this.status = DownloadTaskStatus.Running;
-    return this;
-  }
+  // 领取（开始下载）语义已移到 mongo/service.ts 的 buildClaimUpdate：
+  // 领取必须与查询同一条 findOneAndUpdate 原子完成，无法用实例方法表达。
 
   // 下载成功
   success(): DownloadTask {
