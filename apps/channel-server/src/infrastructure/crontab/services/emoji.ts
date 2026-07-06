@@ -1,6 +1,7 @@
 import http from '@http/client';
-import { LarkEmoji } from '@entities/lark-emoji';
 import { larkEmojiRepository } from '@repositories/lark-emoji-repository';
+import type { LarkEmoji } from '@entities/lark-emoji';
+import type { LarkEmojiRepository, LarkEmojiRow } from '@repositories/lark-emoji-repository';
 import { Crontab, registerCrontabService } from '@crontab/decorators';
 
 export interface EmojiDataResponse {
@@ -25,6 +26,8 @@ export interface EmojiDataResponse {
 export class EmojiService {
     private static readonly EMOJI_API_URL = 'https://ywh-emoji-bot.fn-boe.bytedance.net/api/emojis';
 
+    constructor(private readonly repository: LarkEmojiRepository = larkEmojiRepository) {}
+
     /**
      * 从远程API获取emoji数据
      */
@@ -41,8 +44,8 @@ export class EmojiService {
     /**
      * 提取有效的emoji数据（isDeleted=false）
      */
-    private extractValidEmojis(emojiDataResponse: EmojiDataResponse): Partial<LarkEmoji>[] {
-        const validEmojis: Partial<LarkEmoji>[] = [];
+    private extractValidEmojis(emojiDataResponse: EmojiDataResponse): LarkEmojiRow[] {
+        const validEmojis: LarkEmojiRow[] = [];
 
         Object.values(emojiDataResponse.emojiData).forEach((emojiData) => {
             if (!emojiData.isDeleted) {
@@ -80,12 +83,8 @@ export class EmojiService {
                 return;
             }
 
-            // 3. 清空现有数据
-            await larkEmojiRepository.clearAllEmojis();
-            console.info('Cleared existing emoji data');
-
-            // 4. 批量插入新数据
-            await larkEmojiRepository.upsertEmojis(validEmojis);
+            // 3. 原子替换本地集合
+            await this.repository.replaceAllEmojis(validEmojis);
             console.info(`Successfully synced ${validEmojis.length} emojis to database`);
         } catch (error) {
             console.error('Failed to sync emoji data:', error);
@@ -97,21 +96,21 @@ export class EmojiService {
      * 获取所有emoji数据
      */
     async getAllEmojis(): Promise<LarkEmoji[]> {
-        return larkEmojiRepository.getAllEmojis();
+        return this.repository.getAllEmojis();
     }
 
     /**
      * 根据key获取emoji
      */
     async getEmojiByKey(key: string): Promise<LarkEmoji | null> {
-        return larkEmojiRepository.getEmojiByKey(key);
+        return this.repository.getEmojiByKey(key);
     }
 
     /**
      * 根据name获取emoji
      */
     async getEmojiByText(texts: string[]): Promise<LarkEmoji[]> {
-        return larkEmojiRepository.getEmojiByText(texts);
+        return this.repository.getEmojiByText(texts);
     }
 }
 
@@ -119,4 +118,3 @@ export const emojiService = new EmojiService();
 
 // 注册定时任务
 registerCrontabService(emojiService);
-
