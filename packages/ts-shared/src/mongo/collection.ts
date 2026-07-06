@@ -11,6 +11,7 @@ import {
     OptionalUnlessRequiredId,
     MatchKeysAndValues,
     UpdateFilter,
+    UpdateResult,
     BulkWriteOptions,
     AnyBulkWriteOperation,
     IndexSpecification,
@@ -90,8 +91,8 @@ export class MongoCollection<T extends Document> {
         filter: Filter<T>,
         update: MatchKeysAndValues<T>,
         options?: UpdateOptions
-    ): Promise<void> {
-        await this.collection.updateMany(filter, { $set: update }, options);
+    ): Promise<UpdateResult> {
+        return this.collection.updateMany(filter, { $set: update }, options);
     }
 
     /**

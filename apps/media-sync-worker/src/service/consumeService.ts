@@ -15,11 +15,17 @@ import { MultiTag } from "../mongo/types";
 import { getContent } from "../pixiv/pixivProxy";
 import {
   elapsedMs,
+  loadConsumerGuardConfig,
   loadDownloadDelayConfig,
   nowMs,
   waitMs,
   type DownloadDelayConfig,
 } from "./downloadRuntime";
+import {
+  ConsecutiveTimeoutGuard,
+  CycleTimeoutError,
+  runWithTimeout,
+} from "./consumerWatchdog";
 import { schedulePostDownloadSync } from "./postDownloadSync";
 
 type DownloadIllustStatus =
@@ -59,6 +65,12 @@ interface PageDownloadMetrics {
   error?: string;
 }
 
+// 连续超时退出阈值：约 3 × 循环上限（默认 3 小时）不消费即判定系统性故障。
+// 计数只统计"连续"——空轮次/普通错误轮次会清零，所以单个毒任务（每次领取都拖到
+// 超时、但轮次间隔着正常任务）不靠这里终结：它每次领取消耗重试预算，最多
+// MaxRetryTime 次后被 SearchUnDownloadTask 的死信化清扫标 Dead。
+const CONSECUTIVE_CYCLE_TIMEOUT_EXIT_THRESHOLD = 3;
+
 // 异步消费下载任务的函数
 export async function consumeDownloadTaskAsync() {
   console.log("Starting async download task consumer...");
@@ -66,53 +78,82 @@ export async function consumeDownloadTaskAsync() {
   const delayConfig = loadDownloadDelayConfig();
   console.log(`Download delay config: ${JSON.stringify(delayConfig)}`);
 
+  const guardConfig = loadConsumerGuardConfig();
+  console.log(`Consumer guard config: ${JSON.stringify(guardConfig)}`);
+
   // 创建下载限制器，限制每 60 次下载后进入可配置冷却期（默认 2 分钟）
   const downloadLimiter = new DownloadLimiter(60, delayConfig.limiterCooldownMs);
 
+  const timeoutGuard = new ConsecutiveTimeoutGuard(
+    CONSECUTIVE_CYCLE_TIMEOUT_EXIT_THRESHOLD,
+    () => {
+      console.error(
+        `Consumer hit ${CONSECUTIVE_CYCLE_TIMEOUT_EXIT_THRESHOLD} consecutive cycle timeouts; ` +
+          `exiting so K8s restarts the pod.`
+      );
+      process.exit(1);
+    }
+  );
+
   let sleepTime = 1;
+
+  // 单轮循环体（被 watchdog 包裹；watchdog 放弃后本轮仍在后台继续，
+  // 其迟到的 Success/Fail 收尾由领取代次条件化静默丢弃）
+  const runOneCycle = async () => {
+    // 1. 获取未下载的任务
+    const task = await SearchUnDownloadTask();
+
+    if (!task) {
+      sleepTime = sleepTime >= 60 ? sleepTime : sleepTime * 2;
+      console.log(
+        `No pending tasks found. Waiting for ${sleepTime} seconds...`
+      );
+      await setTimeout(sleepTime * 1000);
+      return;
+    }
+
+    sleepTime = 1;
+
+    // 2. 尝试获取下载许可
+    await downloadLimiter.tryDownload(); // 等待限流器允许下载
+
+    try {
+      // 3. 下载任务
+      await downloadIllust(task.illust_id, delayConfig);
+      console.log(`Download successful for task: ${task.illust_id}`);
+
+      // 4. 标记任务成功
+      await Success(task);
+      console.log(`Task ${task.illust_id} marked as success.`);
+    } catch (downloadError) {
+      console.warn(
+        `Download failed for task ${task.illust_id}, error: `,
+        downloadError
+      );
+
+      // 5. 标记任务失败
+      await Fail(task, downloadError as Error);
+      console.warn(`Task ${task.illust_id} marked as failed.`);
+    }
+
+    // 6. 每个任务处理完后按配置休眠（默认已从旧值 5s 降到 2.5s）
+    await waitMs(delayConfig.afterTaskMs);
+  };
+
   // 无限循环处理任务
   while (true) {
     try {
-      // 1. 获取未下载的任务
-      const task = await SearchUnDownloadTask();
-
-      if (!task) {
-        sleepTime = sleepTime >= 60 ? sleepTime : sleepTime * 2;
-        console.log(
-          `No pending tasks found. Waiting for ${sleepTime} seconds...`
-        );
-        await setTimeout(sleepTime * 1000);
-        continue;
-      }
-
-      sleepTime = 1;
-
-      // 2. 尝试获取下载许可
-      await downloadLimiter.tryDownload(); // 等待限流器允许下载
-
-      try {
-        // 3. 下载任务
-        await downloadIllust(task.illust_id, delayConfig);
-        console.log(`Download successful for task: ${task.illust_id}`);
-
-        // 4. 标记任务成功
-        await Success(task);
-        console.log(`Task ${task.illust_id} marked as success.`);
-      } catch (downloadError) {
-        console.warn(
-          `Download failed for task ${task.illust_id}, error: `,
-          downloadError
-        );
-
-        // 5. 标记任务失败
-        await Fail(task, downloadError as Error);
-        console.warn(`Task ${task.illust_id} marked as failed.`);
-      }
-
-      // 6. 每个任务处理完后按配置休眠（默认已从旧值 5s 降到 2.5s）
-      await waitMs(delayConfig.afterTaskMs);
+      await runWithTimeout(runOneCycle(), guardConfig.cycleTimeoutMs);
+      timeoutGuard.recordSettled();
     } catch (err) {
-      console.warn(`Error in consumeDownloadTaskAsync:`, err);
+      if (err instanceof CycleTimeoutError) {
+        console.error(`Consumer cycle watchdog fired:`, err);
+        timeoutGuard.recordTimeout();
+      } else {
+        // 普通错误说明本轮已 settle，不属于连续超时
+        timeoutGuard.recordSettled();
+        console.warn(`Error in consumeDownloadTaskAsync:`, err);
+      }
     }
   }
 }
