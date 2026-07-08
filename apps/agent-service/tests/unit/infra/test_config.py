@@ -67,7 +67,6 @@ class TestSettingsDefaults:
 
             s = Settings()
             assert s.siliconflow_base_url == "https://api.siliconflow.cn/v1"
-            assert s.life_engine_model == "offline-model"
 
 
 class TestSettingsFromEnv:

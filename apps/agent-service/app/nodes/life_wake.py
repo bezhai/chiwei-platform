@@ -306,11 +306,15 @@ _LIFE_CD_SECONDS = 45
 def _cd_key(lane: str, persona_id: str) -> str:
     return f"life_cd:{lane}:{persona_id}"
 
-# offline-model：异步后台思考用离线模型（见 feedback_model_selection），主对话才用
-# gemini。recursion_limit 给够（让她在一轮里连续调多次工具，不被默认 6 卡住）。
+# life-model：life_wake 产出她的独白、三姐妹互聊、以及主动消息的内容意图（最终
+# 对真人/群的出站措辞由 chat 渲染层的 main-chat-model 生成）。说话场景的模型走
+# 独立别名，与 world 推演等其他离线任务（offline-model）解耦，可按场景单独切换；
+# 两个别名指向谁由 DB model_mappings 决定（别名缺失会 fallback 到不存在的
+# 302.ai 模型并失败，部署前必须先在目标库种好 life-model 记录）。
+# recursion_limit 给够（让她在一轮里连续调多次工具，不被默认 6 卡住）。
 # trace_name 让这一轮 life 思考接进 langfuse。
 _LIFE_WAKE_CFG = AgentConfig(
-    "life_wake", "offline-model", "life-wake", recursion_limit=30
+    "life_wake", "life-model", "life-wake", recursion_limit=30
 )
 
 def _humanize_elapsed(occurred_at: str, now: datetime) -> str | None:

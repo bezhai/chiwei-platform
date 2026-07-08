@@ -3712,3 +3712,17 @@ async def test_turn_idempotent_still_skips_when_marker_in_transcript(patched, mo
 
     assert _FakeAgent.instances == [], "本轮 marker 已在 transcript → 整轮 skip，run 不该被调"
     assert patched["marked"] == [], "skip 的轮不重复标已读"
+
+
+def test_life_wake_cfg_uses_life_model_alias():
+    """AgentConfig：life_wake 走独立的 life-model 别名，与 offline-model 解耦。
+
+    life_wake 产出独白、三姐妹互聊、主动消息的内容意图（对真人/群的最终出站措辞
+    由 chat 渲染层 main-chat-model 另行生成）。说话场景的模型要能独立于 world
+    推演和其他离线任务单独切换（按场景选模型，不一刀切）。别名解析在 DB
+    model_mappings，prod / coe 两库各自决定 life-model 指向谁；别名缺失会
+    fallback 到不存在的 302.ai 模型并失败，所以部署前必须先种 DB 记录。
+    """
+    assert lw._LIFE_WAKE_CFG.prompt_id == "life_wake"
+    assert lw._LIFE_WAKE_CFG.model_id == "life-model"
+    assert lw._LIFE_WAKE_CFG.trace_name == "life-wake"
