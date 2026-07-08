@@ -34,9 +34,9 @@ const FORBIDDEN = [
 // 改造前已知违规(相对 src/core 的路径,与本测试同逻辑实测得出)。
 // B 阶段把这些搬进 plugins/lark 或改走能力端口后,逐个从这里删,直至归零。
 //
-// B2 已清空的：engine.ts（utility-redirect 改走中性 responder 注入点，飞书发法
-// 进 plugins/lark）、callback/* + media/meme + media/photo/*（飞书专属服务整体
-// 搬进 plugins/lark/services）。它们都已从 core 移除或脱离飞书 SDK。
+// B2 已清空的：engine.ts（utility 指令按 botRole 跳过，不再发工具人 redirect）、
+// callback/* + media/meme + media/photo/*（飞书专属服务整体搬进
+// plugins/lark/services）。它们都已从 core 移除或脱离飞书 SDK。
 //
 // B3 已清空：message-builder.ts 迁入 plugins/lark/message-factory.ts，core 下
 // 不再允许任何平台 SDK / plugins import baseline。
