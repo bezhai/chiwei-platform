@@ -120,11 +120,6 @@ class Settings:
     # -- Lane (fallback for workers without HTTP context) --
     lane: str | None = field(default_factory=lambda: _env_or_none("LANE"))
 
-    # -- Life Engine --
-    life_engine_model: str = field(
-        default_factory=lambda: _env("LIFE_ENGINE_MODEL", "offline-model")
-    )
-
     # -- Utility --
 
     def field_names(self) -> list[str]:
