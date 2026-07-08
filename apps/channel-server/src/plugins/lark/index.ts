@@ -8,10 +8,8 @@ import { registerPlugin } from '@core/registry/channel-registry';
 import { larkInbound } from './inbound';
 import { larkAddressing } from './addressing';
 import { getCommandRegistry } from '@core/registry/command-registry';
-import { registerUtilityRedirectResponder } from '@core/rules/engine';
 import { registerChatRequestEnricher } from '@core/services/ai/reply';
 import { larkCommands } from './commands';
-import { sendLarkUtilityRedirect } from './utility-redirect';
 import { enrichLarkChatRequest } from './chat-request-enricher';
 import { createLarkOutboundCapabilities } from './outbound-capabilities';
 import { defaultLarkOutboundDeps } from './default-outbound-deps';
@@ -39,11 +37,9 @@ export const larkPlugin: ChannelPlugin = {
 };
 
 // import 期自注册副作用：插件进 ChannelRegistry、指令进 CommandRegistry、
-// utility-redirect 引导提示的飞书实现注入 engine 的中性 responder 注入点
-// （engine 不认识飞书 SDK，发法由本插件提供）。plugins/index.ts import 本
-// 模块即触发。重复注册由各注册表 fail-closed 兜底。
+// chat.request 富化器进 core 的中性注入点。plugins/index.ts import 本模块即触发。
+// 重复注册由各注册表 fail-closed 兜底。
 registerPlugin(larkPlugin);
 registerChannelRuntime(larkRuntime);
 getCommandRegistry().register(larkPlugin.channel, larkPlugin.commands);
-registerUtilityRedirectResponder(larkPlugin.channel, sendLarkUtilityRedirect);
 registerChatRequestEnricher(larkPlugin.channel, enrichLarkChatRequest);
