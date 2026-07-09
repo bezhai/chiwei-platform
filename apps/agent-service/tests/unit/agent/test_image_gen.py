@@ -18,6 +18,8 @@ import pytest
 
 from app.agent import image_gen as mod
 from app.agent.image_gen import (
+    _normalize_ark_image_size,
+    _normalize_openai_image_size,
     _parse_gemini_size,
     generate_image,
 )
@@ -68,6 +70,23 @@ class TestParseGeminiSize:
         ar, sz = _parse_gemini_size("1920x1080")
         assert ar == "16:9"
         assert sz == "2K"
+
+
+class TestNormalizeImageSize:
+    def test_ark_lowercases_k_size(self):
+        assert _normalize_ark_image_size("2K") == "2k"
+
+    def test_ark_preserves_pixel_size(self):
+        assert _normalize_ark_image_size("1920x1080") == "1920x1080"
+
+    def test_openai_maps_landscape_pixels_to_supported_size(self):
+        assert _normalize_openai_image_size("1920x1080") == "1536x1024"
+
+    def test_openai_maps_portrait_pixels_to_supported_size(self):
+        assert _normalize_openai_image_size("1080x1920") == "1024x1536"
+
+    def test_openai_maps_k_size_to_square(self):
+        assert _normalize_openai_image_size("2K") == "1024x1024"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +204,7 @@ class TestGenerateImageArk:
         assert result == ["data:image/jpeg;base64,abc123"]
         call_kwargs = mock_client.images.generate.call_args.kwargs
         assert call_kwargs["prompt"] == "a cat"
+        assert call_kwargs["size"] == "1024x1024"
         assert call_kwargs["image"] is None
         assert "sequential_image_generation" not in call_kwargs
         mock_client.close.assert_called_once()
@@ -236,6 +256,7 @@ class TestGenerateImageOpenai:
         assert result == ["data:image/jpeg;base64,oai_result"]
         call_kwargs = mock_client_instance.images.generate.call_args.kwargs
         assert call_kwargs["extra_body"] == {"watermark": False}
+        assert call_kwargs["size"] == "1024x1024"
         assert mock_cls.call_args.kwargs["timeout"] == 60.0
         assert mock_cls.call_args.kwargs["max_retries"] == 3
         mock_client_instance.close.assert_called_once()

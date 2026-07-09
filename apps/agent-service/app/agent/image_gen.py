@@ -36,7 +36,7 @@ async def generate_image(
     Dispatches to Ark, OpenAI, or Gemini based on provider's ``client_type``.
 
     Args:
-        model_id: Internal model alias (e.g. ``"default-generate-image-model"``).
+        model_id: Internal model alias (e.g. ``"generate-image-high-model"``).
         prompt: Generation prompt.
         size: Size spec (e.g. ``"2048x2048"``, ``"1K"``, ``"2K"``, ``"4K"``).
         reference_images: Optional list of reference image URLs for img2img.
@@ -72,6 +72,47 @@ def _create_ark_client(info: dict[str, Any]) -> Any:
     )
 
 
+def _parse_pixel_size(size: str) -> tuple[int, int] | None:
+    s = size.strip().lower()
+    if "x" not in s:
+        return None
+    try:
+        w_str, h_str = s.split("x", 1)
+        w, h = int(w_str), int(h_str)
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def _normalize_ark_image_size(size: str) -> str:
+    """Normalize public tool size to Ark image-generation size syntax."""
+    s = size.strip().lower()
+    if s in {"1k", "2k", "4k"}:
+        return s
+    pixels = _parse_pixel_size(s)
+    if pixels is None:
+        return "2048x2048"
+    w, h = pixels
+    return f"{w}x{h}"
+
+
+def _normalize_openai_image_size(size: str) -> str:
+    """Normalize public tool size to OpenAI-compatible image size syntax."""
+    pixels = _parse_pixel_size(size)
+    if pixels is None:
+        return "1024x1024"
+
+    w, h = pixels
+    ratio = w / h
+    if ratio >= 1.2:
+        return "1536x1024"
+    if ratio <= 1 / 1.2:
+        return "1024x1536"
+    return "1024x1024"
+
+
 async def _generate_image_ark(
     info: dict[str, Any],
     prompt: str,
@@ -84,7 +125,7 @@ async def _generate_image_ark(
         resp = await client.images.generate(
             model=info["model_name"],
             prompt=prompt,
-            size=size,
+            size=_normalize_ark_image_size(size),
             image=reference_images or None,
             response_format="b64_json",
             watermark=False,
@@ -131,7 +172,7 @@ async def _generate_image_openai(
             model=info["model_name"],
             response_format="b64_json",
             prompt=prompt,
-            size=size,  # type: ignore[arg-type]
+            size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
             n=1,
             extra_body=extra_body,
         )
