@@ -15,6 +15,9 @@ from app.agent.models import resolve_model_info
 
 logger = logging.getLogger(__name__)
 
+ARK_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
+ARK_IMAGE_GENERATION_MAX_RETRIES = 0
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -64,8 +67,8 @@ def _create_ark_client(info: dict[str, Any]) -> Any:
     return AsyncArk(
         api_key=info["api_key"],
         base_url=info["base_url"],
-        timeout=60.0,
-        max_retries=3,
+        timeout=ARK_IMAGE_GENERATION_TIMEOUT_SECONDS,
+        max_retries=ARK_IMAGE_GENERATION_MAX_RETRIES,
     )
 
 

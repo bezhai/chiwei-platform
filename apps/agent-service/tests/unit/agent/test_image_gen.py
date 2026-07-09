@@ -159,6 +159,13 @@ class TestGenerateImageDispatch:
 
 
 class TestGenerateImageArk:
+    def test_create_client_uses_image_timeout(self):
+        with patch("volcenginesdkarkruntime.AsyncArk") as mock_cls:
+            mod._create_ark_client(_fake_info(client_type="ark"))
+
+        assert mock_cls.call_args.kwargs["timeout"] == mod.ARK_IMAGE_GENERATION_TIMEOUT_SECONDS
+        assert mock_cls.call_args.kwargs["max_retries"] == mod.ARK_IMAGE_GENERATION_MAX_RETRIES
+
     async def test_basic_generation(self):
         mock_client = AsyncMock()
         mock_img = SimpleNamespace(b64_json="abc123")
@@ -218,7 +225,7 @@ class TestGenerateImageOpenai:
         mock_client_instance.images.generate = AsyncMock(return_value=mock_resp)
         mock_client_instance.close = AsyncMock()
 
-        with patch("openai.AsyncOpenAI", return_value=mock_client_instance):
+        with patch("openai.AsyncOpenAI", return_value=mock_client_instance) as mock_cls:
             result = await mod._generate_image_openai(
                 _fake_info(),
                 "a dog",
@@ -229,6 +236,8 @@ class TestGenerateImageOpenai:
         assert result == ["data:image/jpeg;base64,oai_result"]
         call_kwargs = mock_client_instance.images.generate.call_args.kwargs
         assert call_kwargs["extra_body"] == {"watermark": False}
+        assert mock_cls.call_args.kwargs["timeout"] == 60.0
+        assert mock_cls.call_args.kwargs["max_retries"] == 3
         mock_client_instance.close.assert_called_once()
 
     async def test_with_reference_images(self):
