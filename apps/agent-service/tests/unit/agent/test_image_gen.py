@@ -179,6 +179,7 @@ class TestGenerateImageArk:
         call_kwargs = mock_client.images.generate.call_args.kwargs
         assert call_kwargs["prompt"] == "a cat"
         assert call_kwargs["image"] is None
+        assert "sequential_image_generation" not in call_kwargs
         mock_client.close.assert_called_once()
 
     async def test_with_reference_images(self):
@@ -226,6 +227,30 @@ class TestGenerateImageOpenai:
             )
 
         assert result == ["data:image/jpeg;base64,oai_result"]
+        call_kwargs = mock_client_instance.images.generate.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"watermark": False}
+        mock_client_instance.close.assert_called_once()
+
+    async def test_with_reference_images(self):
+        mock_img = SimpleNamespace(b64_json="oai_ref_result")
+        mock_resp = SimpleNamespace(data=[mock_img])
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.images.generate = AsyncMock(return_value=mock_resp)
+        mock_client_instance.close = AsyncMock()
+
+        refs = ["https://example.com/ref1.jpg", "https://example.com/ref2.jpg"]
+        with patch("openai.AsyncOpenAI", return_value=mock_client_instance):
+            result = await mod._generate_image_openai(
+                _fake_info(),
+                "a dog like this",
+                "1024x1024",
+                refs,
+            )
+
+        assert result == ["data:image/jpeg;base64,oai_ref_result"]
+        call_kwargs = mock_client_instance.images.generate.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"watermark": False, "image": refs}
         mock_client_instance.close.assert_called_once()
 
     async def test_proxy_handling(self):
