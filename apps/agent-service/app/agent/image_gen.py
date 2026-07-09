@@ -85,7 +85,6 @@ async def _generate_image_ark(
             image=reference_images or None,
             response_format="b64_json",
             watermark=False,
-            sequential_image_generation="disabled",
         )
         return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
     finally:
@@ -121,7 +120,6 @@ async def _generate_image_openai(
     try:
         extra_body: dict[str, Any] = {
             "watermark": False,
-            "sequential_image_generation": "disabled",
         }
         if reference_images:
             extra_body["image"] = reference_images
