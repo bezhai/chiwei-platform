@@ -117,6 +117,20 @@ _BACKOFF_MAX = 8  # seconds (clamp)
 # stays equivalent to the langchain path.
 _DEFAULT_RECURSION_LIMIT = 6
 
+# Max attempts (including the first) for ONE ReAct turn when the model returns
+# an empty result — no text, no tool_calls (trace 82323210372fe067ec2a60abd8e9
+# fdb3: a gemini-3.5-flash generate_image closure turn came back as
+# ``{"text": "", "tool_calls": []}``, silently passed through as the final
+# reply). 3 gives the model two independent extra samples to recover from what
+# looks like a decoding glitch rather than a deterministic refusal, while
+# staying inside the "2-3 attempts" a one-off empty turn should reasonably
+# cost. This budget is spent entirely INSIDE one turn (same transcript, no new
+# messages, no tool re-dispatch) and is independent of ``recursion_limit``
+# (which counts ReAct turns, not raw model calls) — the normal, non-empty path
+# still costs exactly one model call, so this never adds latency/cost to the
+# common case.
+_EMPTY_TURN_MAX_ATTEMPTS = 3
+
 
 # ---------------------------------------------------------------------------
 # Agent configuration
@@ -409,6 +423,72 @@ def _is_terminal_tool_call(call: ToolCall) -> bool:
     return call.name in _TERMINAL_TOOL_NAMES
 
 
+def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
+    """Whether one model turn produced nothing usable: no tool_calls AND no
+    non-whitespace text.
+
+    ``text`` should be the turn's plain-text view (``Message.text()`` for
+    ``_run_loop``, the joined streamed text parts for ``_stream_loop``) —
+    reasoning is deliberately excluded from both: a turn that only "thought"
+    (``reasoning_content`` set, or streamed ``reasoning`` chunks) without
+    producing text or a tool_call is still empty, because reasoning is never
+    surfaced to the user.
+    """
+    return not tool_calls and not text.strip()
+
+
+def _model_label(model: ModelClient) -> str:
+    """Best-effort model identifier for the empty-turn warning log.
+
+    ``ModelClient`` has no public "which model" accessor; both real adapters
+    (openai, gemini) stash the resolved model name on the private ``_model``
+    attribute. Falling back to the class name keeps this purely diagnostic —
+    never load-bearing — so a fake/test client or a future adapter without
+    that attribute still logs something useful instead of raising.
+    """
+    return getattr(model, "_model", None) or type(model).__name__
+
+
+async def _complete_turn(
+    model: ModelClient,
+    convo: list[Message],
+    tool_defs: list[ToolDef] | None,
+    call_kwargs: dict[str, Any],
+) -> Message:
+    """Call ``model.complete`` for one ReAct turn, transparently retrying THIS
+    SAME turn (identical ``convo``, nothing appended, no tools dispatched) up
+    to ``_EMPTY_TURN_MAX_ATTEMPTS`` times when the model returns an empty
+    result (see ``_is_empty_turn``).
+
+    Exhausting the budget changes nothing about the return value or control
+    flow below this call — the caller gets whatever ``Message`` the last
+    attempt produced (possibly still empty), exactly as it always has. Only a
+    warning log marks the exhaustion, so this never introduces a new exception
+    type or return shape: raising here would let the exception escape into
+    ``app.chat.render.render_chat_turn``'s broad ``except Exception`` (default
+    ``on_error="yield_text"``), which turns ANY non-``RenderFailed`` exception
+    into user-facing error text — exactly the "send something anyway" outcome
+    this fix exists to prevent.
+    """
+    last = await model.complete(convo, tools=tool_defs, **call_kwargs)
+    attempts = 1
+    while (
+        _is_empty_turn(last.text(), last.tool_calls)
+        and attempts < _EMPTY_TURN_MAX_ATTEMPTS
+    ):
+        attempts += 1
+        last = await model.complete(convo, tools=tool_defs, **call_kwargs)
+    if _is_empty_turn(last.text(), last.tool_calls):
+        logger.warning(
+            "agent turn empty (no text, no tool_calls) after %d/%d attempts; "
+            "model=%s",
+            attempts,
+            _EMPTY_TURN_MAX_ATTEMPTS,
+            _model_label(model),
+        )
+    return last
+
+
 async def _run_loop(
     model: ModelClient,
     *,
@@ -456,7 +536,7 @@ async def _run_loop(
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
-        last = await model.complete(convo, tools=tool_defs, **call_kwargs)
+        last = await _complete_turn(model, convo, tool_defs, call_kwargs)
         if not last.tool_calls:
             if transcript_sink is not None:
                 transcript_sink.append(last)
@@ -527,16 +607,48 @@ async def _stream_loop(
     for _ in range(max(1, recursion_limit)):
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
-        turn_calls = []
+        turn_calls: list[ToolCall] = []
+        attempts = 0
 
-        async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
-            if chunk.text:
-                text_parts.append(chunk.text)
-            if chunk.reasoning:
-                reasoning_parts.append(chunk.reasoning)
-            if chunk.tool_call is not None:
-                turn_calls.append(chunk.tool_call)
-            yield chunk
+        # Transparent single-turn retry, mirroring _complete_turn: an empty
+        # attempt (no text, no tool_calls — see _is_empty_turn) re-issues
+        # model.stream for the SAME turn (identical convo, nothing appended,
+        # no tools dispatched) instead of being accepted as the final turn.
+        # Chunks are still forwarded live as they arrive (yield below) so a
+        # normal turn keeps true token-by-token streaming — only once this
+        # attempt's stream is fully drained do we know whether it was empty.
+        # An empty attempt only ever carried reasoning / a bare finish_reason
+        # (never non-whitespace text or a tool_call, by definition), so
+        # nothing user-visible needs to be undone when we loop for another
+        # attempt. Exhausting the budget changes nothing about what happens
+        # below — same control flow, same shape — only a log marks it (see
+        # _complete_turn's docstring for why this must never raise instead).
+        while True:
+            attempts += 1
+            text_parts = []
+            reasoning_parts = []
+            turn_calls = []
+
+            async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
+                if chunk.text:
+                    text_parts.append(chunk.text)
+                if chunk.reasoning:
+                    reasoning_parts.append(chunk.reasoning)
+                if chunk.tool_call is not None:
+                    turn_calls.append(chunk.tool_call)
+                yield chunk
+
+            empty_turn = _is_empty_turn("".join(text_parts), turn_calls)
+            if not empty_turn or attempts >= _EMPTY_TURN_MAX_ATTEMPTS:
+                if empty_turn:
+                    logger.warning(
+                        "agent stream turn empty (no text, no tool_calls) after "
+                        "%d/%d attempts; model=%s",
+                        attempts,
+                        _EMPTY_TURN_MAX_ATTEMPTS,
+                        _model_label(model),
+                    )
+                break
 
         if not turn_calls:
             # final assistant turn — never appended to convo, so capture it for

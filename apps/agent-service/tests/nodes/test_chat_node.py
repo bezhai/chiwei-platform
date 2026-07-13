@@ -467,6 +467,103 @@ async def test_chat_node_no_split_emits_single_final_segment(monkeypatch, base_r
 
 
 @pytest.mark.asyncio
+async def test_chat_node_skips_fully_empty_final_segment(monkeypatch, base_request):
+    """LLM 单轮返回空文本+空 tool_calls 时(trace 82323210372fe067ec2a60abd8e9fdb3
+    的收尾轮场景),render_chat_turn 的 stream 从头到尾不产出任何 token。
+    channel-server 侧(chat-response-handler.ts)本来就有"content 为空 +
+    is_last=True → 不发送给用户但标记 completed"的分支,所以 chat_node 仍要
+    emit 这条收尾消息(不能整段跳过,否则 common_agent_response.status 永远卡
+    在 pending、拿不到完成标记),只是 content 必须是真正的空字符串,不能带任何
+    空气泡文案。"""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.domain.safety import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    async def fake_stream(*a, **k):
+        return
+        yield  # pragma: no cover - 让函数保持 async generator 形态，但从不 yield
+
+    async def fake_resolve(p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(mid): return "input"
+    async def fake_find_gray(mid): return {}
+    async def fake_guard(p): return "guard"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    segments = _chat_segments(emitted)
+    assert len(segments) == 1, "仍要 emit 一条收尾消息,让 channel-server 能标记完成"
+    assert segments[0].content == "", "content 必须是真正的空字符串,不能带空气泡文案"
+    assert segments[0].is_last is True
+    assert segments[0].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_chat_node_skips_whitespace_only_final_segment(monkeypatch, base_request):
+    """LLM 只吐出空白字符(非严格空串)时,emit 出去的 content 必须被 strip 干净。
+
+    复现原 final_content 兜底分支的坑：``remaining`` strip 后为空、
+    ``part_index == 0`` 时会退回**未 strip** 的 ``full_content``——若
+    ``full_content`` 本身只是空白（如模型吐了几个空格 / 换行 token），未 strip
+    的空白字符串在 Python 侧是 truthy。channel-server 侧用 JS 的 ``!content``
+    判断是否要发送,非空白字符串(比如一个空格)在 JS 里同样是 truthy,会绕过
+    channel-server 已有的空内容分支被当"非空"内容真的发出去——这正是用户偶发
+    看到"空气泡"的根因。这里必须确保 emit 出去的 content 是 strip 后的空字符
+    串,而不是原始空白。"""
+    from app.nodes import chat_node as cn
+
+    async def fake_pre(*a, **k):
+        from app.domain.safety import PreSafetyVerdict
+        return PreSafetyVerdict(pre_request_id="x", message_id="m1", is_blocked=False)
+
+    async def fake_stream(*a, **k):
+        for p in ["  ", "\n", " "]:
+            yield p
+
+    async def fake_resolve(p, c): return "bot-x"
+    async def fake_set(*a, **k): pass
+    async def fake_find_msg(mid): return "input"
+    async def fake_find_gray(mid): return {}
+    async def fake_guard(p): return "guard"
+
+    monkeypatch.setattr(cn, "find_message_content", fake_find_msg)
+    monkeypatch.setattr(cn, "find_gray_config", fake_find_gray)
+    monkeypatch.setattr(cn, "fetch_guard_message", fake_guard)
+    monkeypatch.setattr(cn, "run_pre_safety_check", fake_pre)
+    monkeypatch.setattr(cn, "resolve_bot_name_for_persona", fake_resolve)
+    monkeypatch.setattr(cn, "set_agent_response_bot", fake_set)
+    _patch_context(monkeypatch, cn)
+    monkeypatch.setattr(cn, "render_chat_turn", fake_stream)
+
+    emitted = []
+    async def fake_emit(d): emitted.append(d)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(base_request)
+
+    segments = _chat_segments(emitted)
+    assert len(segments) == 1
+    assert segments[0].content == "", "空白字符不能绕过 strip 被当成非空内容发出去"
+    assert segments[0].is_last is True
+    assert segments[0].status == "success"
+
+
+@pytest.mark.asyncio
 async def test_resolve_pre_safety_for_part_fail_open_on_timeout():
     """Helper should return ALLOW with original content when pre_task times out."""
     from app.nodes.chat_node import _resolve_pre_safety_for_part

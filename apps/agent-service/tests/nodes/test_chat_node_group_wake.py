@@ -1,16 +1,26 @@
-"""chat 完成后的 life 唤醒契约。
+"""chat 完成后的 life 唤醒契约（chat/life 并发重复回复修复）。
 
-chat 内容不再回灌进 EventEnvelope 信箱。life 醒来时会实时从 common_message 拉
-「最近聊过的对话」。chat_node 的事后副作用只剩：私聊完成后纯 emit EventArrived
-叫醒对应 persona；群聊必须过白名单；白名单外群不唤醒。
+chat 完成一轮回复后,不再只 emit 一条不带内容的 ``EventArrived`` 敲门信号——
+那条信号本身走 debounce,同一 5 秒窗口内多条到达时只有最后发布的一条会被消费,
+更早的连同其字段一起被当 stale 丢弃(参见 app/runtime/debounce.py),把回复内容
+塞进这个会被折叠丢弃的信号里,在并发唤醒场景下会静默丢内容。
+
+改用项目里已有的 durable 信箱投递机制 ``deliver_event``(world notify / npc_visit
+等既有场景在用同一套):内容落 durable 表,不受 debounce 折叠影响；``deliver_event``
+内部本身会在新投递的非被动 event 上 emit ``EventArrived`` 触发唤醒,chat_node 不必
+(也不应该)再自己额外 emit 一次,否则会重复唤醒。
+
+真人私聊直接唤醒(不查白名单)；群聊必须在白名单内才唤醒。唤醒失败只记 warning,
+不影响已经 emit 出去的即时回复。
 """
 
 from __future__ import annotations
 
 import pytest
 
+from app.data.queries.mailbox import deliver_event as real_deliver_event
 from app.domain.chat_dataflow import ChatRequest, ChatResponseSegment
-from app.domain.world_events import EventArrived
+from app.domain.world_events import EVENT_KIND_OWN_CHAT_REPLY, EventArrived
 
 
 def _happy_path_mocks(cn, monkeypatch, *, user_msg="input", reply_parts=None):
@@ -81,14 +91,20 @@ def _request(*, is_p2p: bool, chat_id="chat-1") -> ChatRequest:
 
 
 @pytest.mark.asyncio
-async def test_p2p_chat_wakes_life_without_whitelist(monkeypatch):
-    """真人私聊完成后纯唤醒 life，且不查群白名单。"""
+async def test_p2p_chat_delivers_reply_content_without_whitelist(monkeypatch):
+    """真人私聊完成后把回复内容投进信箱(deliver_event),且不查群白名单。"""
     from app.nodes import chat_node as cn
 
-    _happy_path_mocks(cn, monkeypatch)
+    _happy_path_mocks(cn, monkeypatch, reply_parts=["hello there"])
 
     async def should_not_be_called(**kwargs):
         raise AssertionError("p2p path must not consult group whitelist")
+
+    delivered = []
+
+    async def fake_deliver_event(**kwargs):
+        delivered.append(kwargs)
+        return 1
 
     emitted = []
 
@@ -96,72 +112,98 @@ async def test_p2p_chat_wakes_life_without_whitelist(monkeypatch):
         emitted.append(data)
 
     monkeypatch.setattr(cn, "should_feed_chat_to_life", should_not_be_called)
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(cn, "emit", fake_emit)
 
     await cn.chat_node(_request(is_p2p=True))
 
     assert any(isinstance(e, ChatResponseSegment) for e in emitted)
-    knocks = [e for e in emitted if isinstance(e, EventArrived)]
-    assert len(knocks) == 1
-    assert knocks[0].persona_id == "akao"
+    # chat_node 自己绝不再直接 emit EventArrived —— deliver_event 内部会做这件事,
+    # 这里若还出现 EventArrived 说明重复唤醒了一次。
+    assert not any(isinstance(e, EventArrived) for e in emitted), (
+        "chat_node 不应再自己直接 emit(EventArrived(...))，"
+        "deliver_event 内部已经会做这件事，否则重复唤醒"
+    )
+    assert len(delivered) == 1
+    call = delivered[0]
+    assert call["persona_id"] == "akao"
+    assert call["kind"] == EVENT_KIND_OWN_CHAT_REPLY
+    assert "hello there" in call["summary"], "投递的内容必须是实际发给用户的回复原文"
+    assert call["event_id"], "event 必须带稳定标识以应对重投/重复消费"
 
 
 @pytest.mark.asyncio
-async def test_whitelisted_group_chat_wakes_life_after_reply(monkeypatch):
-    """白名单群聊完成后纯 emit EventArrived，lane 取进程部署泳道。"""
+async def test_whitelisted_group_chat_delivers_reply_after_reply(monkeypatch):
+    """白名单群聊完成后投递回复内容进信箱，lane 取进程部署泳道。"""
     from app.nodes import chat_node as cn
 
-    _happy_path_mocks(cn, monkeypatch)
+    _happy_path_mocks(cn, monkeypatch, reply_parts=["group hello"])
     monkeypatch.setenv("LANE", "coe-t1")
     whitelist_calls = []
+    delivered = []
     emitted = []
 
     async def fake_should_feed(*, chat_id, is_p2p):
         whitelist_calls.append((chat_id, is_p2p))
         return True
 
+    async def fake_deliver_event(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
     async def fake_emit(data):
         emitted.append(data)
 
     monkeypatch.setattr(cn, "should_feed_chat_to_life", fake_should_feed)
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(cn, "emit", fake_emit)
 
     await cn.chat_node(_request(is_p2p=False, chat_id="group-1"))
 
     assert whitelist_calls == [("group-1", False)]
-    knocks = [e for e in emitted if isinstance(e, EventArrived)]
-    assert len(knocks) == 1
-    assert knocks[0].lane == "coe-t1"
-    assert knocks[0].persona_id == "akao"
-    assert any(isinstance(e, ChatResponseSegment) for e in emitted)
-
-
-@pytest.mark.asyncio
-async def test_non_whitelisted_group_chat_does_not_wake_life(monkeypatch):
-    """白名单外群聊只回复，不叫醒 life。"""
-    from app.nodes import chat_node as cn
-
-    _happy_path_mocks(cn, monkeypatch)
-    emitted = []
-
-    async def fake_should_feed(*, chat_id, is_p2p):
-        return False
-
-    async def fake_emit(data):
-        emitted.append(data)
-
-    monkeypatch.setattr(cn, "should_feed_chat_to_life", fake_should_feed)
-    monkeypatch.setattr(cn, "emit", fake_emit)
-
-    await cn.chat_node(_request(is_p2p=False, chat_id="group-2"))
-
+    assert len(delivered) == 1
+    call = delivered[0]
+    assert call["lane"] == "coe-t1"
+    assert call["persona_id"] == "akao"
+    assert call["kind"] == EVENT_KIND_OWN_CHAT_REPLY
+    assert "group hello" in call["summary"]
     assert any(isinstance(e, ChatResponseSegment) for e in emitted)
     assert not any(isinstance(e, EventArrived) for e in emitted)
 
 
 @pytest.mark.asyncio
+async def test_non_whitelisted_group_chat_does_not_deliver(monkeypatch):
+    """白名单外群聊只回复，不投递信箱、不唤醒 life。"""
+    from app.nodes import chat_node as cn
+
+    _happy_path_mocks(cn, monkeypatch)
+    emitted = []
+    delivered = []
+
+    async def fake_should_feed(*, chat_id, is_p2p):
+        return False
+
+    async def fake_deliver_event(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    async def fake_emit(data):
+        emitted.append(data)
+
+    monkeypatch.setattr(cn, "should_feed_chat_to_life", fake_should_feed)
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver_event)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(_request(is_p2p=False, chat_id="group-2"))
+
+    assert any(isinstance(e, ChatResponseSegment) for e in emitted)
+    assert not delivered
+    assert not any(isinstance(e, EventArrived) for e in emitted)
+
+
+@pytest.mark.asyncio
 async def test_group_wake_failure_does_not_fail_chat(monkeypatch):
-    """群聊纯唤醒失败只记 warning，不拖垮已经发出的 chat 回复。"""
+    """群聊投递信箱失败只记 warning，不拖垮已经发出的 chat 回复。"""
     from app.nodes import chat_node as cn
 
     _happy_path_mocks(cn, monkeypatch)
@@ -170,14 +212,63 @@ async def test_group_wake_failure_does_not_fail_chat(monkeypatch):
     async def fake_should_feed(*, chat_id, is_p2p):
         return True
 
+    async def fake_deliver_event(**kwargs):
+        raise RuntimeError("pg unavailable")
+
     async def fake_emit(data):
-        if isinstance(data, EventArrived):
-            raise RuntimeError("redis unavailable")
         emitted_segments.append(data)
 
     monkeypatch.setattr(cn, "should_feed_chat_to_life", fake_should_feed)
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver_event)
     monkeypatch.setattr(cn, "emit", fake_emit)
 
     await cn.chat_node(_request(is_p2p=False, chat_id="group-3"))
 
     assert any(isinstance(e, ChatResponseSegment) for e in emitted_segments)
+
+
+@pytest.mark.asyncio
+async def test_empty_final_reply_does_not_wake_life(monkeypatch):
+    """回复整轮只有空白字符时,chat_node 仍要 emit 一条 content="" 的收尾消息
+    (让 channel-server 标记 completed,见 chat-response-handler.ts 的既有空内容
+    分支),但不应该投递信箱告诉 life「我刚回复了」——Task 1 与 Task 3 的顺序命门:
+    没有实际发出去的内容,就不告诉 life 已经回复过。
+    """
+    from app.nodes import chat_node as cn
+
+    _happy_path_mocks(cn, monkeypatch, reply_parts=["   ", "\n"])
+    delivered = []
+
+    async def fake_should_feed(*, chat_id, is_p2p):
+        return True
+
+    async def fake_deliver_event(**kwargs):
+        delivered.append(kwargs)
+        return 1
+
+    emitted = []
+
+    async def fake_emit(data):
+        emitted.append(data)
+
+    monkeypatch.setattr(cn, "should_feed_chat_to_life", fake_should_feed)
+    monkeypatch.setattr(cn, "deliver_event", fake_deliver_event)
+    monkeypatch.setattr(cn, "emit", fake_emit)
+
+    await cn.chat_node(_request(is_p2p=True))
+
+    segments = [e for e in emitted if isinstance(e, ChatResponseSegment)]
+    assert len(segments) == 1, "仍要 emit 收尾消息,让 channel-server 能标记完成"
+    assert segments[0].content == "", "空白回复的 content 必须被 strip 成空字符串"
+    assert not delivered, "没有实际发出去的内容时不该投递信箱告诉 life 已经回复过"
+
+
+@pytest.mark.asyncio
+async def test_wake_life_after_chat_calls_real_deliver_event_with_own_chat_reply_kind(
+    monkeypatch,
+):
+    """契约测试:确认 chat_node 模块引用的确实是 app.data.queries.mailbox.deliver_event
+    这一个真实实现(而不是随便一个同名 stub),且默认走 kind=own_chat_reply、非被动。"""
+    from app.nodes import chat_node as cn
+
+    assert cn.deliver_event is real_deliver_event
