@@ -2,9 +2,10 @@
 
 Covers:
   - _parse_gemini_size: pixel sizes, shorthand, fallback
-  - generate_image dispatch: ark, openai, google
+  - generate_image dispatch: ark, openai, azure-http, google
   - _generate_image_ark: mock AsyncArk, verify params including reference_images
   - _generate_image_openai: mock AsyncOpenAI, verify proxy handling
+  - _generate_image_azure: mock AsyncOpenAI, verify ModelHub image API contract
   - _generate_image_gemini: mock genai.Client, verify empty response raises RuntimeError
 """
 
@@ -18,6 +19,8 @@ import pytest
 
 from app.agent import image_gen as mod
 from app.agent.image_gen import (
+    _normalize_ark_image_size,
+    _normalize_openai_image_size,
     _parse_gemini_size,
     generate_image,
 )
@@ -70,6 +73,23 @@ class TestParseGeminiSize:
         assert sz == "2K"
 
 
+class TestNormalizeImageSize:
+    def test_ark_lowercases_k_size(self):
+        assert _normalize_ark_image_size("2K") == "2k"
+
+    def test_ark_preserves_pixel_size(self):
+        assert _normalize_ark_image_size("1920x1080") == "1920x1080"
+
+    def test_openai_maps_landscape_pixels_to_supported_size(self):
+        assert _normalize_openai_image_size("1920x1080") == "1536x1024"
+
+    def test_openai_maps_portrait_pixels_to_supported_size(self):
+        assert _normalize_openai_image_size("1080x1920") == "1024x1536"
+
+    def test_openai_maps_k_size_to_square(self):
+        assert _normalize_openai_image_size("2K") == "1024x1024"
+
+
 # ---------------------------------------------------------------------------
 # generate_image dispatch
 # ---------------------------------------------------------------------------
@@ -113,6 +133,27 @@ class TestGenerateImageDispatch:
 
         assert result == ["data:image/jpeg;base64,def"]
         mock_openai.assert_called_once()
+
+    async def test_dispatch_azure_http(self):
+        with (
+            patch(
+                "app.agent.image_gen.resolve_model_info",
+                new_callable=AsyncMock,
+                return_value=_fake_info(client_type="azure-http"),
+            ),
+            patch.object(
+                mod,
+                "_generate_image_azure",
+                new_callable=AsyncMock,
+                return_value=["data:image/jpeg;base64,azure"],
+            ) as mock_azure,
+        ):
+            result = await generate_image(
+                "img-model", prompt="a dog", size="1536x2048"
+            )
+
+        assert result == ["data:image/jpeg;base64,azure"]
+        mock_azure.assert_called_once()
 
     async def test_dispatch_google(self):
         with (
@@ -185,6 +226,7 @@ class TestGenerateImageArk:
         assert result == ["data:image/jpeg;base64,abc123"]
         call_kwargs = mock_client.images.generate.call_args.kwargs
         assert call_kwargs["prompt"] == "a cat"
+        assert call_kwargs["size"] == "1024x1024"
         assert call_kwargs["image"] is None
         assert "sequential_image_generation" not in call_kwargs
         mock_client.close.assert_called_once()
@@ -225,7 +267,9 @@ class TestGenerateImageOpenai:
         mock_client_instance.images.generate = AsyncMock(return_value=mock_resp)
         mock_client_instance.close = AsyncMock()
 
-        with patch("openai.AsyncOpenAI", return_value=mock_client_instance) as mock_cls:
+        with patch(
+            "openai.AsyncOpenAI", return_value=mock_client_instance
+        ) as mock_cls:
             result = await mod._generate_image_openai(
                 _fake_info(),
                 "a dog",
@@ -236,6 +280,7 @@ class TestGenerateImageOpenai:
         assert result == ["data:image/jpeg;base64,oai_result"]
         call_kwargs = mock_client_instance.images.generate.call_args.kwargs
         assert call_kwargs["extra_body"] == {"watermark": False}
+        assert call_kwargs["size"] == "1024x1024"
         assert mock_cls.call_args.kwargs["timeout"] == 60.0
         assert mock_cls.call_args.kwargs["max_retries"] == 3
         mock_client_instance.close.assert_called_once()
@@ -296,6 +341,67 @@ class TestGenerateImageOpenai:
         # Both clients closed
         mock_client_instance.close.assert_called_once()
         mock_http_client.aclose.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _generate_image_azure
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageAzure:
+    async def test_basic_generation_uses_modelhub_openai_image_api(self):
+        mock_img = SimpleNamespace(b64_json="azure_result", url=None)
+        mock_resp = SimpleNamespace(data=[mock_img])
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.images.generate = AsyncMock(return_value=mock_resp)
+        mock_client_instance.close = AsyncMock()
+
+        info = _fake_info(
+            model_name="gpt-image-2",
+            base_url="https://modelhub.test/v2/crawl",
+            client_type="azure-http",
+        )
+        with patch("openai.AsyncOpenAI", return_value=mock_client_instance) as mock_cls:
+            result = await mod._generate_image_azure(
+                info,
+                "a dog",
+                "1536x2048",
+                None,
+            )
+
+        assert result == ["data:image/png;base64,azure_result"]
+        init_kwargs = mock_cls.call_args.kwargs
+        assert init_kwargs["base_url"] == (
+            "https://aidp.bytedance.net/api/modelhub/online/v2/crawl/openai"
+        )
+        assert init_kwargs["max_retries"] == 0
+
+        call_kwargs = mock_client_instance.images.generate.call_args.kwargs
+        assert call_kwargs == {
+            "model": "gpt-image-2",
+            "prompt": "a dog",
+            "size": "1024x1536",
+            "n": 1,
+            "extra_headers": {"api-key": "sk-test"},
+        }
+        mock_client_instance.close.assert_called_once()
+
+    async def test_reference_urls_fail_before_request(self):
+        mock_client_instance = AsyncMock()
+
+        with (
+            patch("openai.AsyncOpenAI", return_value=mock_client_instance),
+            pytest.raises(ValueError, match="reference image URLs"),
+        ):
+            await mod._generate_image_azure(
+                _fake_info(client_type="azure-http"),
+                "edit this",
+                "1024x1024",
+                ["https://example.com/ref.jpg"],
+            )
+
+        mock_client_instance.images.generate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

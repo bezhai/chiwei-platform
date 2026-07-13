@@ -1,4 +1,4 @@
-"""Image generation — text-to-image / image-to-image via Ark, OpenAI, or Gemini.
+"""Image generation — text-to-image / image-to-image via provider-native APIs.
 
 Public API:
   - generate_image() — dispatch to the correct backend based on provider config
@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 ARK_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
 ARK_IMAGE_GENERATION_MAX_RETRIES = 0
+AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
+AZURE_IMAGE_GENERATION_MAX_RETRIES = 0
+_MODELHUB_IMAGE_BASE_URL = (
+    "https://aidp.bytedance.net/api/modelhub/online/v2/crawl/openai"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +38,11 @@ async def generate_image(
 ) -> list[str]:
     """Generate images from a text prompt (and optional reference images).
 
-    Dispatches to Ark, OpenAI, or Gemini based on provider's ``client_type``.
+    Dispatches to Ark, OpenAI, Azure, or Gemini based on provider's
+    ``client_type``.
 
     Args:
-        model_id: Internal model alias (e.g. ``"default-generate-image-model"``).
+        model_id: Internal model alias (e.g. ``"generate-image-high-model"``).
         prompt: Generation prompt.
         size: Size spec (e.g. ``"2048x2048"``, ``"1K"``, ``"2K"``, ``"4K"``).
         reference_images: Optional list of reference image URLs for img2img.
@@ -49,6 +55,8 @@ async def generate_image(
 
     if client_type == "ark":
         return await _generate_image_ark(info, prompt, size, reference_images)
+    if client_type == "azure-http":
+        return await _generate_image_azure(info, prompt, size, reference_images)
     if client_type == "google":
         return await _generate_image_gemini(info, prompt, size, reference_images)
     # Default: OpenAI-compatible
@@ -72,6 +80,47 @@ def _create_ark_client(info: dict[str, Any]) -> Any:
     )
 
 
+def _parse_pixel_size(size: str) -> tuple[int, int] | None:
+    s = size.strip().lower()
+    if "x" not in s:
+        return None
+    try:
+        w_str, h_str = s.split("x", 1)
+        w, h = int(w_str), int(h_str)
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def _normalize_ark_image_size(size: str) -> str:
+    """Normalize public tool size to Ark image-generation size syntax."""
+    s = size.strip().lower()
+    if s in {"1k", "2k", "4k"}:
+        return s
+    pixels = _parse_pixel_size(s)
+    if pixels is None:
+        return "2048x2048"
+    w, h = pixels
+    return f"{w}x{h}"
+
+
+def _normalize_openai_image_size(size: str) -> str:
+    """Normalize public tool size to OpenAI-compatible image size syntax."""
+    pixels = _parse_pixel_size(size)
+    if pixels is None:
+        return "1024x1024"
+
+    w, h = pixels
+    ratio = w / h
+    if ratio >= 1.2:
+        return "1536x1024"
+    if ratio <= 1 / 1.2:
+        return "1024x1536"
+    return "1024x1024"
+
+
 async def _generate_image_ark(
     info: dict[str, Any],
     prompt: str,
@@ -84,7 +133,7 @@ async def _generate_image_ark(
         resp = await client.images.generate(
             model=info["model_name"],
             prompt=prompt,
-            size=size,
+            size=_normalize_ark_image_size(size),
             image=reference_images or None,
             response_format="b64_json",
             watermark=False,
@@ -131,11 +180,57 @@ async def _generate_image_openai(
             model=info["model_name"],
             response_format="b64_json",
             prompt=prompt,
-            size=size,  # type: ignore[arg-type]
+            size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
             n=1,
             extra_body=extra_body,
         )
         return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
+    finally:
+        await client.close()
+        if http_client:
+            await http_client.aclose()
+
+
+async def _generate_image_azure(
+    info: dict[str, Any],
+    prompt: str,
+    size: str,
+    reference_images: list[str] | None,
+) -> list[str]:
+    """Generate an image through the ModelHub Azure-compatible endpoint."""
+    if reference_images:
+        raise ValueError(
+            "ModelHub image generation does not accept reference image URLs"
+        )
+
+    from openai import AsyncOpenAI
+
+    kwargs: dict[str, Any] = {
+        "api_key": info["api_key"],
+        "base_url": _MODELHUB_IMAGE_BASE_URL,
+        "timeout": AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS,
+        "max_retries": AZURE_IMAGE_GENERATION_MAX_RETRIES,
+    }
+    http_client = None
+    if info.get("use_proxy"):
+        from app.infra.config import settings
+
+        if settings.forward_proxy_url:
+            from app.capabilities.image_gen import proxy_http_client
+
+            http_client = proxy_http_client(settings.forward_proxy_url)
+            kwargs["http_client"] = http_client
+
+    client = AsyncOpenAI(**kwargs)
+    try:
+        resp = await client.images.generate(
+            model=info["model_name"],
+            prompt=prompt,
+            size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
+            n=1,
+            extra_headers={"api-key": info["api_key"]},
+        )
+        return [f"data:image/png;base64,{img.b64_json}" for img in resp.data or []]
     finally:
         await client.close()
         if http_client:

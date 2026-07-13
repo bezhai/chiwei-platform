@@ -6,7 +6,7 @@ Merges the old image/read.py, image/generate.py, and image/processor.py.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
@@ -15,6 +15,14 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_and_register
 
 logger = logging.getLogger(__name__)
+
+ImageQuality = Literal["high", "normal"]
+
+_DEFAULT_IMAGE_QUALITY: ImageQuality = "high"
+_IMAGE_MODEL_BY_QUALITY: dict[ImageQuality, str] = {
+    "high": "generate-image-high-model",
+    "normal": "generate-image-normal-model",
+}
 
 
 # =========================================================================
@@ -71,18 +79,27 @@ async def read_images(
 async def generate_image(
     query: Annotated[
         str,
-        Field(description="英文生成图片提示词。按 drawing skill 指南撰写。"),
+        Field(description="英文生成图片提示词。具体描述主体、画面、环境和风格。"),
     ],
     size: Annotated[
         str,
-        Field(description="图片尺寸。可选值：1K、2K、4K 或像素值如 2048x2048"),
+        Field(
+            description=(
+                "目标画幅，使用像素格式，如 2048x2048、1536x2048、2048x1152；"
+                "后端会映射到模型支持的最近尺寸。"
+            )
+        ),
     ] = "2048x2048",
     image_list: Annotated[
         list[str] | None,
         Field(description='参考图片列表，使用 @N.png 文件名，如 ["4.png", "5.png"]'),
     ] = None,
+    quality: Annotated[
+        ImageQuality,
+        Field(description="生成质量。high 更精细；normal 更快更稳定。不要询问或提及具体模型。"),
+    ] = _DEFAULT_IMAGE_QUALITY,
 ) -> str | list[dict[str, Any]]:
-    """生成图片。调用前必须先 load_skill("drawing") 加载画图指南并遵循其流程。"""
+    """生成图片。普通明确画图请求可直接调用；涉及三姐妹或 Cosplay 时，先 load_skill("drawing") 加载人物画图指南。"""
     context = get_context()
     registry = context.image_registry
 
@@ -101,19 +118,32 @@ async def generate_image(
 
     logger.info("Image generation request: %s", query)
 
-    model_name = "default-generate-image-model"
-    if context.get_feature("image_model"):
-        model_name = context.get_feature("image_model")
-        logger.info("Feature flag overrides image model to: %s", model_name)
-
     from app.agent.image_gen import generate_image as _gen_image
 
-    base64_images = await _gen_image(
-        model_name,
-        prompt=query,
-        size=size,
-        reference_images=reference_urls if reference_urls else None,
-    )
+    base64_images: list[str] = []
+    last_error: Exception | None = None
+    for candidate_label, model_name in _model_candidates(
+        quality,
+        image_model_override=context.get_feature("image_model"),
+    ):
+        try:
+            base64_images = await _gen_image(
+                model_name,
+                prompt=query,
+                size=size,
+                reference_images=reference_urls if reference_urls else None,
+            )
+            if base64_images:
+                if candidate_label not in {quality, "override"}:
+                    logger.info("Image generation fell back to %s quality", candidate_label)
+                break
+            last_error = RuntimeError("image generation returned no images")
+            logger.warning("Image generation returned no images for %s", candidate_label)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Image generation failed for %s: %s", candidate_label, exc)
+    else:
+        raise RuntimeError("图片生成服务暂时不可用") from last_error
 
     content_blocks: list[dict[str, Any]] = []
     filenames: list[str] = []
@@ -144,3 +174,24 @@ async def generate_image(
     )
 
     return content_blocks
+
+
+def _quality_candidates(quality: str) -> list[ImageQuality]:
+    if quality == "high":
+        return ["high", "normal"]
+    if quality == "normal":
+        return ["normal"]
+    raise ValueError("quality must be high or normal")
+
+
+def _model_candidates(
+    quality: str,
+    *,
+    image_model_override: Any = None,
+) -> list[tuple[str, str]]:
+    if image_model_override:
+        return [("override", str(image_model_override))]
+    return [
+        (candidate, _IMAGE_MODEL_BY_QUALITY[candidate])
+        for candidate in _quality_candidates(quality)
+    ]
