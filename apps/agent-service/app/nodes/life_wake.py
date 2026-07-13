@@ -87,6 +87,7 @@ from app.domain.notebook import (
 from app.domain.thinking_cost import record_round_cost
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
+    EVENT_KIND_IDLE_SENSE,
     EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
@@ -384,6 +385,37 @@ def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> st
     )
 
 
+def _format_idle_sense(idle_sense: list[EventEnvelope], now: datetime) -> str:
+    """把闲时刻主动周遭切片（kind=idle_sense）拼成带诚实时间锚的「唤醒理由」。
+
+    idle_sense 是 world 判断她此刻处于天然闲时刻（刚起床 / 睡前 / 饭后窝着这类，
+    life-idle-wake-via-sense Task 1）时用 sense(idle=True) 投的周遭切片——内容形态
+    与被动 :data:`~app.domain.world_events.EVENT_KIND_SURROUNDINGS` 完全一样（同一份
+    客观周遭叙事），是这一轮唤醒她的理由。
+
+    **不能无条件断言"此刻确实是这样"（T3 code review 必改）**：这条投递走的是跟
+    ambient / notify 同款的唤醒通道，但从唤醒到她真正读到这条内容之间仍可能因为
+    信箱积压（超过 ``_LIFE_INBOX_MAX`` 的一轮上限、这条被挤到批次之后）、45s cd 重排、
+    或补敲对账延迟到达——中间这段时间场景未必还是原样，不能无条件宣称"此刻确实是
+    这样"。所以这里复用 :func:`_humanize_elapsed` 同款的诚实时间锚（跟
+    :func:`_format_surroundings` 一样的算法），如实告诉她这份场景是多久前被感知到
+    的，而不是一个不打折扣的"绝对是当下"的断言。
+
+    但也不必完全照抄 :func:`_format_surroundings` 那种给**被动**积压旧快照用的
+    「上一次感知到的周遭……别人此刻的位置可能已经变了」怀疑框——这条终归是真正
+    唤醒她的理由，不是她自己沉默期间被动攒起来的旧背景，语气只如实报时间、不主动
+    替她怀疑这份场景是否已经变化。
+    """
+    anchor = _humanize_elapsed(idle_sense[-1].occurred_at, now) if idle_sense else None
+    body = "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.summary}"
+        for ev in idle_sense
+    )
+    if anchor is None:
+        return f"（这是让你醒来的这份场景，具体感知时刻算不出来）\n{body}"
+    return f"（这是让你醒来的这份场景，是{anchor}感知到的）\n{body}"
+
+
 def _group_handle_suffix(ev: EventEnvelope) -> str:
     """带群会话身份的历史动静追加「来自群聊『群名』，群句柄 group:<chat_id>」。
 
@@ -480,11 +512,17 @@ def _split_perception(
     list[EventEnvelope],
     list[EventEnvelope],
     list[EventEnvelope],
+    list[EventEnvelope],
 ]:
-    """把未读分成（周遭切片, 当面话, 手机消息, 离散动静），各保持原始（按发生先后）顺序。
+    """把未读分成（闲时主动切片, 周遭切片, 当面话, 手机消息, 离散动静），各保持原始
+    （按发生先后）顺序。
 
-    四类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7）：
+    五类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7；闲时主动切片
+    是 life-idle-wake-via-sense Task 1 新增的第五类）：
 
+      * 闲时主动切片（kind=idle_sense）—— world 判断她此刻处于天然闲时刻时用
+        sense(idle=True) 投的周遭切片，内容形态同 surroundings、但它是这一轮唤醒她的
+        当下理由（渲染框架不同，见 :func:`_format_idle_sense`）。
       * 周遭切片（kind=surroundings）—— world 五官投的「此刻你周遭」底框（物理在场维度）。
       * 当面话（kind=speech）—— 另一角色调 chat 直投的原话「X 对你说：原话」（1C Task 3）。
         当面说的、有明确说话人，独立成层。
@@ -493,10 +531,13 @@ def _split_perception(
         speech 收件人侧必须可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
       * 离散动静（其余 kind）—— 环境里出现的新声响光线气味等。
 
-    按 kind 四分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
+    按 kind 五分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
     必须从 dynamics 桶排除（必改 ①）——否则会被 :func:`_format_dynamics` 当离散动静渲染
-    成「[message] ...」，与当面话混淆。
+    成「[message] ...」，与当面话混淆。idle_sense 同理必须从 surroundings / dynamics
+    两个桶都排除——混进 surroundings 会套上不适合它的"上一次感知到的周遭...可能已经变了"
+    旧快照框，混进 dynamics 会失去它作为"此刻"的叙事形态、被压成一行机读列表项。
     """
+    idle_sense = [e for e in unread if e.kind == EVENT_KIND_IDLE_SENSE]
     surroundings = [e for e in unread if e.kind == EVENT_KIND_SURROUNDINGS]
     speech = [e for e in unread if e.kind == EVENT_KIND_SPEECH]
     messages = [e for e in unread if e.kind == EVENT_KIND_MESSAGE]
@@ -504,9 +545,14 @@ def _split_perception(
         e
         for e in unread
         if e.kind
-        not in (EVENT_KIND_SURROUNDINGS, EVENT_KIND_SPEECH, EVENT_KIND_MESSAGE)
+        not in (
+            EVENT_KIND_IDLE_SENSE,
+            EVENT_KIND_SURROUNDINGS,
+            EVENT_KIND_SPEECH,
+            EVENT_KIND_MESSAGE,
+        )
     ]
-    return surroundings, speech, messages, dynamics
+    return idle_sense, surroundings, speech, messages, dynamics
 
 
 # 「最近聊过的对话」段的拉取上限（条目数量控制规模、不字符截断——见 no_context_truncation）：
@@ -919,7 +965,7 @@ async def _run_life_round(
     # 模型无害（它只当是一行元信息）。
     # 世界阶段 + 昨天那页已在上方读好、走 prompt_vars 进 system prompt（不进 USER /
     # transcript，免被 fold 压掉、每轮确定可见）。这里 USER stimulus 只拼每轮会变的段：
-    # 本子（当天会变）/ 现在时间 / 四类感知 / 冷启状态恢复段，末尾印本轮 round marker。
+    # 本子（当天会变）/ 现在时间 / 五类感知 / 冷启状态恢复段，末尾印本轮 round marker。
     parts: list[str] = []
 
     # 她本子里还没了结的事（备忘录 & 日程 第二块）：每轮唤醒读她**还活着**的条目
@@ -1036,8 +1082,12 @@ async def _run_life_round(
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 
-    # 五官分层呈现（1C Task 2 + Task 3 + task 5）：她信箱里有四类，分层呈现两个正交
-    # 维度（spec 决策 7）——
+    # 五官分层呈现（1C Task 2 + Task 3 + task 5 + life-idle-wake-via-sense Task 1）：
+    # 她信箱里有五类，分层呈现两个正交维度（spec 决策 7）——
+    #   * 「这一刻」（idle_sense，world 判断她此刻处于天然闲时刻时主动投的周遭切片）——
+    #     这一轮唤醒她的理由，不套被动周遭切片那种"可能已经变了"的怀疑框，但也不能
+    #     无条件断言"此刻确实是这样"（信箱积压 / cd 重排可能延迟送达）——带诚实的
+    #     感知时刻时间锚（见 _format_idle_sense）。
     #   * 「周遭切片」（surroundings，world 五官逐角色推演的此刻所处环境，作底框）——
     #     **物理在场维度**（她此刻在哪、身边有谁）。
     #   * 「别人当面对你说的话」（speech，另一角色调 chat 直投的原话「X 对你说：原话」，
@@ -1046,14 +1096,19 @@ async def _run_life_round(
     #     「X 给你发消息：内容」，task 3 / 5）—— **通信介质维度**：隔着手机/飞书，不是当面。
     #     与当面 speech 收件人侧明确可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
     #   * 「离散动静」（ambient 等，环境里出现的新声响这类事件）。
-    # 分层呈现让她既感知到自己周遭什么样（物理在场）、又看清谁当面说了话 / 谁隔手机发了
-    # 消息（通信介质两态）、还知道刚发生了什么动静（四类不互相混淆）。四类都只取自她自己
-    # 信箱的未读（_format_* 只取 summary/source/kind/时间，全是投给她的、她够得着的），绝不
-    # 含 world 全局快照——信息差命门由 world 逐角色推演产出每人切片守住，不在这里。speech /
-    # message 都是直投（不经 world），原话/内容只在收件人这条流里出现、world 那条流绝不含
-    # （承重红线，由 chat / send_message 工具双轨守住）。
+    # 分层呈现让她既感知到这一刻是不是被主动唤醒、自己周遭什么样（物理在场）、又看清谁
+    # 当面说了话 / 谁隔手机发了消息（通信介质两态）、还知道刚发生了什么动静（五类不互相
+    # 混淆）。五类都只取自她自己信箱的未读（_format_* 只取 summary/source/kind/时间，全是
+    # 投给她的、她够得着的），绝不含 world 全局快照——信息差命门由 world 逐角色推演产出
+    # 每人切片守住，不在这里。speech / message 都是直投（不经 world），原话/内容只在收件人
+    # 这条流里出现、world 那条流绝不含（承重红线，由 chat / send_message 工具双轨守住）。
     if unread:
-        surroundings, speech, messages, dynamics = _split_perception(unread)
+        idle_sense, surroundings, speech, messages, dynamics = _split_perception(unread)
+        if idle_sense:
+            parts.append(
+                "【这一刻】（这份场景是这一轮真正唤醒你的理由，见下方它的感知时刻）：\n"
+                f"{_format_idle_sense(idle_sense, now)}"
+            )
         if surroundings:
             parts.append(
                 "【此刻你周遭】（你此刻所处的环境、身边有谁，由你的感官投射给你）：\n"

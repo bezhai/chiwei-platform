@@ -69,10 +69,30 @@ from app.runtime.persist import insert_idempotent
 #                      区别于 speech 的「X 对你说：原话」（呈现是 task 5 的职责）。和 speech
 #                      同样唤醒收件人（手机消息发给对方就是让 ta 看到的，非被动 kind）。
 #                      只用于角色↔角色的手机消息；给真人发飞书私聊不落信箱、走出站段。
+#   * ``idle_sense``   闲时刻主动周遭切片（life-idle-wake-via-sense Task 1）：world 用
+#                      sense 逐角色推演周遭时，若判断 recipient 此刻处于天然的闲时刻
+#                      （刚起床 / 睡前 / 饭后窝着这类——对她上次已知状态做时间外推，
+#                      不是等她先产生一个新动作），就把 ``idle=True`` 传给 sense。判断
+#                      准则里明确划了两条边界（见 world_loop_instruction 的 sense 段）：
+#                      正在安睡不算天然的闲、同一个没怎么变的静止场景不逐轮机械重复
+#                      判——这堵的是历史事故的复现（world 每轮都判"仍是天然闲时刻"、
+#                      每 30 分钟真敲一次门，把自排睡着的姐妹吵醒睡不满，当初就是因为
+#                      这个才把 sense 整体改成被动通道）。内容形态与被动 ``surroundings``
+#                      完全一样（同一份客观周遭叙事），唯一区别是这次投递**真正唤醒她**
+#                      ——kind 不同让即时敲门（``deliver_event``）与补敲对账
+#                      （``list_personas_with_unread``）两条路径天然读到同一个"这是
+#                      主动"的信号，不需要额外的 wake 参数（历史教训：独立 wake 参数
+#                      只挡即时敲门、挡不住补敲，见 :data:`PASSIVE_EVENT_KINDS` 的注释）。
+#                      渲染时不能套用 ``surroundings`` 的"上一次感知到的周遭...可能
+#                      已经变了"旧快照框（这条是唤醒她的理由，不是被动积压的旧背景），
+#                      但也不能无条件断言"此刻正在发生"——信箱积压 / cd 重排 / 补敲对账
+#                      都可能让送达延迟，渲染侧要带诚实的感知时刻时间锚（见 life_wake
+#                      的 ``_format_idle_sense``），态度介于两者之间。
 EVENT_KIND_AMBIENT = "ambient"
 EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
 EVENT_KIND_MESSAGE = "message"
+EVENT_KIND_IDLE_SENSE = "idle_sense"
 
 
 # 被动 event kind——单一定义处，写 / 读两端都从这里取（宪法「禁止重复定义」）。语义：
@@ -94,6 +114,12 @@ EVENT_KIND_MESSAGE = "message"
 # 完全不唤醒会让她对"该早点注意、但还没到 notify 级"的周遭变化有感知延迟（最坏延到她下次
 # 被一条 ambient 动静唤醒时才读到）。更优方案（按变化显著度分级、或让 world 显式判这条切片
 # 要不要打断长睡）待探索，详见 memory ``project_world_sense_wake_tradeoff``。
+#
+# ``idle_sense`` **有意不在这个集合里**（life-idle-wake-via-sense Task 1）：它是
+# sense 的主动变体——world 判断 recipient 此刻天然闲着时投的周遭切片，就该像
+# ambient / speech / message 一样走唤醒通道。把它排除在 ``PASSIVE_EVENT_KINDS`` 之外，
+# 就让即时敲门和补敲对账两条路径**不需要任何新代码**就天然一致地把它当"真动静"处理
+# ——这正是"wake 判定统一走 kind 归属"设计决策的落点。
 PASSIVE_EVENT_KINDS = frozenset({EVENT_KIND_SURROUNDINGS})
 
 
@@ -132,7 +158,7 @@ class EventEnvelope(Data):
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
     event_id: Annotated[str, Key]
-    kind: str            # ambient | surroundings | speech | message | future extension
+    kind: str            # ambient | surroundings | speech | message | idle_sense | future extension
     source: str          # 产出方：world / 说话者 persona_id / chat ...
     summary: str         # 客观可感形态的文字描述（或 surroundings 的周遭客观切片）
     occurred_at: str     # event 发生时间 (ISO8601)

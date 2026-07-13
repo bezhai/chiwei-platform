@@ -2195,6 +2195,109 @@ async def test_world_instruction_enumerates_sense_tool():
 
 
 @pytest.mark.asyncio
+async def test_world_instruction_guides_idle_sense_wake_judgment():
+    """life-idle-wake-via-sense Task 1：world_loop_instruction 必须补三处引导缺口——
+
+      ① sense 新增的 ``idle`` 参数说明，用刚起床 / 睡前 / 饭后窝着这类具体场景举例
+         （不是抽象的「闲」概念）；
+      ② 场景持续静止不变的时候也该规律性地评估要不要再投一次 sense（原指令只在
+         「角色刚醒来 / 周遭变了」这类反应式场景引导调用 sense，静止期从没被引导过，
+         这正是本次要覆盖的最典型场景——她已经在沙发上待了一阵、什么都没变）；
+      ③ 判断准则是对她上次已知状态的时间外推（跟 update_world 推演用的是同一种
+         功夫），不能等她先产生一个新的 life act 来"证明"她闲——这是结构性避免
+         重现旧自锁（life 不动 → world 判无需唤醒 → life 更不会动）的关键。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    assert "idle" in instruction, "sense 段必须枚举新增的 idle 参数"
+    for example in ("刚起床", "睡前", "饭后"):
+        assert example in instruction, f"idle 判断引导应举例具体的闲场景 {example!r}"
+
+    assert ("静" in instruction) and (
+        "顺手看一眼" in instruction or "规律性" in instruction
+    ), "指令必须补上「场景静止不变时也该规律性评估要不要 sense」的引导"
+
+    assert ("时间" in instruction) and ("外推" in instruction), (
+        "指令必须给出时间外推的判断准则（对她上次已知状态 + 流逝的真实时间推断）"
+    )
+    assert ("新动作" in instruction) or ("先做点什么" in instruction), (
+        "指令必须明确闲判断不能靠等她先产生一个新动作来证明，否则会重现旧自锁"
+    )
+
+    # 红线复核：不能带回 Task 1 收口时删掉的旧「判唤醒」措辞（那是自锁根因的表述，
+    # 这次新增的是完全不同的机制——per-recipient 时间外推，不是扫描三姐妹状态停滞）。
+    for wake_phrase in ("状态停滞", "太久没更新", "该不该叫醒", "明显该醒"):
+        assert wake_phrase not in instruction, (
+            f"不该带回旧「判唤醒」措辞 {wake_phrase!r}（新机制是时间外推，不是这套）"
+        )
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_idle_excludes_sleep_and_forbids_repeat():
+    """T3 code review 必改 1（唤醒风暴风险，复现历史事故）：world 大约每 30 分钟推
+    一轮，若只靠"天然闲时刻"这一条标准，某个角色持续处于同一个静止场景（比如她一直
+    窝在沙发上没变化、甚至正在睡觉）会导致 world 每轮都重新判"这仍是天然闲时刻"、
+    每轮都传 idle=True——这正是当年"world 每轮 sense 把自排睡着的姐妹敲醒、睡不满"
+    那次事故的根因。指令必须补两条边界：① 正在安睡不算天然的闲；② 同一个没怎么变
+    的静止场景不逐轮机械重复判 True。禁止用数字阈值/计数器堵这个口子，只能是
+    prompt 层的引导让 world 自己判断、自己记得。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    # ① 睡眠期间不触发：明确说安睡不算天然的闲。
+    assert "安睡不算天然的闲" in instruction, (
+        "指令必须明确「正在安睡不算天然的闲」，否则 idle 判断会在她该睡满时把她吵醒"
+    )
+    assert "notify" in instruction.split("安睡不算天然的闲")[-1].split("\n")[0] or (
+        "notify" in instruction
+    ), "真有必须惊动睡着的人的理由，应指向 notify 而不是 idle"
+
+    # ② 同一静止场景不逐轮重复触发。
+    assert "不逐轮" in instruction and "机械重复判" in instruction, (
+        "指令必须明确「同一个没怎么变的静止场景不逐轮机械重复判 idle=True」"
+    )
+    assert "上一轮" in instruction, (
+        "指令必须引导 world 记得自己上一轮是否已经因为同一场景判过 idle=True"
+    )
+
+    # 历史事故复核：必须点名"每 30 分钟"和事故根因，让这条引导有具体的失败场景锚定
+    # （不是抽象的"别重复"）。
+    assert "30 分钟" in instruction
+    assert "被动通道" in instruction or "自排睡着的姐妹" in instruction, (
+        "指令应锚定历史事故（sense 整体改被动通道的根因），让 world 理解为什么这条"
+        "边界不能踩"
+    )
+
+    # 代码侧不引入任何数字阈值/计数器：判断权仍完全在 idle 判断的语义引导里，不是
+    # 靠一个「超过 N 次 / N 分钟」的机械规则堵口子。
+    for forbidden in ("超过 3 次", "超过 2 次", "冷却 30 分钟", "最多 1 次"):
+        assert forbidden not in instruction, (
+            f"不该引入数字阈值/计数器 {forbidden!r}——闲不闲、该不该重复由 world 自己判断"
+        )
+
+
+@pytest.mark.asyncio
+async def test_world_instruction_idle_is_sole_exception_to_no_wake_judgment_rule():
+    """T3 code review 必改 3：新加的 idle 判断本质是一种"该不该叫醒"的判断，跟既有的
+    "你不替任何角色判断该不该醒"护栏字面冲突——模型读到前后矛盾的指令会不知道该信
+    哪句。指令必须明确承认 idle 判断是这条规则唯一的例外，而不是让读的人自己去猜。
+    """
+    instruction = engine_mod.world_loop_instruction()
+
+    assert "你不替任何角色判断该不该醒" in instruction, "既有护栏措辞应保留（没有被误删）"
+    assert "这条规则只有一个例外" in instruction, (
+        "必须明确承认 sense 的 idle 判断是「不替任何角色判断该不该醒」这条规则的例外，"
+        "否则前后矛盾"
+    )
+    # 例外的落点紧跟在护栏措辞之后，读的人不用去猜。
+    guard_idx = instruction.index("你不替任何角色判断该不该醒")
+    exception_idx = instruction.index("这条规则只有一个例外")
+    assert 0 <= exception_idx - guard_idx < 200, (
+        "例外说明应紧跟在「不替任何角色判断该不该醒」护栏之后，不能离得太远让人读不到"
+    )
+
+
+@pytest.mark.asyncio
 async def test_world_instruction_enumerates_npc_visit_tool():
     """必改：world_loop_instruction 必须把 NPC 层的 npc_visit 枚举进工具清单。
 
@@ -3212,6 +3315,61 @@ def test_render_sisters_section_does_not_carry_wake_decision_inputs():
         assert wake_phrase not in section, (
             f"客观叙述对齐段不该出现判唤醒引导 {wake_phrase!r}（判唤醒已删）"
         )
+
+
+def test_render_sisters_section_carries_observed_at_for_idle_extrapolation():
+    """T3 code review 必改 3：sense 新加的 idle 判断要求对"她上次已知状态"做时间外推，
+    但 Task 1 收口后 ``_sisters_section`` 只拼 ``current_state``、没有任何时间戳，
+    world 根本没有数据可以算"流逝了多久"，只能瞎猜。
+
+    这里窄范围地加回 ``observed_at``（不是 ``next_wake_at``——那个"她自己排的下次
+    想醒的时间"概念已经整个删除、不该复活），专门给 idle 判断补一个可外推的时间锚。
+    """
+    from app.infra import cst_time
+    from app.world.engine import _sisters_section
+
+    observed_at = "2026-06-15T03:10:00+08:00"
+    section = _sisters_section(
+        [
+            (
+                "akao",
+                _life_state(
+                    persona_id="akao",
+                    current_state="还睡着",
+                    observed_at=observed_at,
+                ),
+            )
+        ]
+    )
+    assert cst_time.to_cst_full(observed_at) in section, (
+        "渲染器必须把 observed_at（格式化成完整 CST 口径）拼进段里，否则 idle 判断"
+        f"没有时间戳可以外推。实际渲染：{section!r}"
+    )
+
+
+def test_render_sisters_section_acknowledges_idle_exception_not_blanket_ban():
+    """T3 code review 必改 3：旧渲染文案是"不是让你判断该不该叫醒谁"的一刀切说法，
+    跟 sense 新加的 idle 判断（本质就是一种"该不该叫醒"判断）正面冲突。渲染器必须
+    改成明确承认这一个划定清楚的例外，而不是让模型自己去猜哪句更权威。
+    """
+    from app.world.engine import _sisters_section
+
+    section = _sisters_section(
+        [
+            (
+                "akao",
+                _life_state(
+                    persona_id="akao",
+                    current_state="还睡着",
+                    observed_at="2026-06-15T03:10:00+08:00",
+                ),
+            )
+        ]
+    )
+    assert "idle 判断" in section, "渲染器必须点名 observed_at 服务于 sense 的 idle 判断"
+    assert "这一个例外" in section, (
+        "渲染器必须明确承认 idle 判断是这条「不判该不该醒」规则的例外，不是一刀切禁止"
+    )
 
 
 def test_world_instruction_has_no_wake_guidance():

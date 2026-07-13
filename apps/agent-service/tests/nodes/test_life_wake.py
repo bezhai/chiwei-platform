@@ -31,6 +31,7 @@ from app.data.message_record import LifeChatConversation, LifeChatMessage
 from app.domain.life_state import LifeState
 from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
+    EVENT_KIND_IDLE_SENSE,
     EVENT_KIND_MESSAGE,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
@@ -1270,23 +1271,277 @@ async def test_message_not_lumped_into_ambient_dynamics(patched, monkeypatch):
     assert "给你发消息" in msg_blob
 
 
-def test_split_perception_four_way_message_separate_from_dynamics():
-    """_split_perception 把未读四分：周遭 / 当面话 / 手机消息 / 离散动静（task 5 必改 ①）。
+def test_split_perception_five_way_idle_sense_and_message_separate_buckets():
+    """_split_perception 把未读五分：闲时主动切片 / 周遭 / 当面话 / 手机消息 / 离散动静
+    （task 5 必改 ① + life-idle-wake-via-sense Task 1）。
 
     message kind 必须单独成一桶、绝不和 ambient 混进 dynamics —— 否则 _format_dynamics
     会把手机消息当离散动静渲染（「[message] ...」），又制造一遍当面/手机混淆。
+    idle_sense（world 判断为闲时刻的主动周遭切片）同理必须独立成桶、不能被塞进被动
+    surroundings 桶——否则会套上不适合它的"上一次感知到的周遭...可能已经变了"旧快照
+    框（那是唤醒她的当下理由，被框成旧快照会自相矛盾）。
     """
     unread = [
+        _envelope("i1", "你窝在沙发上", kind=EVENT_KIND_IDLE_SENSE),
         _envelope("s1", "你在客厅", kind=EVENT_KIND_SURROUNDINGS),
         _envelope("sp1", "当面说的话", kind=EVENT_KIND_SPEECH, source="akao"),
         _envelope("msg1", "手机发来的", kind=EVENT_KIND_MESSAGE, source="chinagi"),
         _envelope("a1", "开关门声", kind=EVENT_KIND_AMBIENT),
     ]
-    surroundings, speech, messages, dynamics = lw._split_perception(unread)
+    idle_sense, surroundings, speech, messages, dynamics = lw._split_perception(unread)
+    assert [e.event_id for e in idle_sense] == ["i1"], "idle_sense 必须单独成一桶"
     assert [e.event_id for e in surroundings] == ["s1"]
     assert [e.event_id for e in speech] == ["sp1"]
     assert [e.event_id for e in messages] == ["msg1"], "message 必须单独成一桶"
-    assert [e.event_id for e in dynamics] == ["a1"], "dynamics 只剩 ambient，不含 message"
+    assert [e.event_id for e in dynamics] == ["a1"], (
+        "dynamics 只剩 ambient，不含 message / idle_sense"
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_sense_rendered_as_current_moment_not_stale_snapshot(
+    patched, monkeypatch
+):
+    """life-idle-wake-via-sense Task 1，T3 review 必改 2：kind=idle_sense 是这一轮唤醒她
+    的理由，不能套用被动 surroundings 的"上一次感知到的周遭...可能已经变了"旧快照框
+    ——那句框架文案是给被动积压的旧切片用的，套在唤醒她的这条内容上会自相矛盾。但
+    它也不能是一个不打折扣的"此刻确实是这样"断言（信箱积压 / cd 重排可能延迟送达），
+    见 :func:`test_idle_sense_carries_honest_time_anchor` 对诚实时间锚的验证。
+    """
+    patched["unread"] = [
+        _envelope(
+            "i1", "你窝在沙发上，电视开着，屋里很安静。",
+            kind=EVENT_KIND_IDLE_SENSE, persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "你窝在沙发上，电视开着，屋里很安静。" in stimulus
+    assert "上一次感知到的周遭" not in stimulus, (
+        "idle_sense 不该套用被动周遭切片的旧快照框（自相矛盾：唤醒她的当下理由不能被"
+        "框成可能已过时的旧快照）"
+    )
+    assert "可能已经变了" not in stimulus
+    # 仍标已读（她读了这条真正唤醒她的内容）
+    assert patched["marked"] == [["i1"]]
+
+
+@pytest.mark.asyncio
+async def test_idle_sense_and_passive_surroundings_render_in_separate_sections(
+    patched, monkeypatch
+):
+    """同一轮里既有旧的被动周遭切片、又有触发这轮唤醒的主动 idle_sense —— 两段分开
+    呈现，各自框架不串味：被动的仍带"上一次感知到的周遭"时间锚，主动的不带。
+    """
+    patched["unread"] = [
+        _envelope(
+            "s1", "你在客厅写作业。", kind=EVENT_KIND_SURROUNDINGS,
+            occurred_at="2026-06-03T12:00:00Z", persona_id="ayana",
+        ),
+        _envelope(
+            "i1", "你窝在沙发上，屋里很安静。", kind=EVENT_KIND_IDLE_SENSE,
+            occurred_at="2026-06-03T12:30:00Z", persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "你在客厅写作业。" in stimulus
+    assert "你窝在沙发上，屋里很安静。" in stimulus
+    assert "上一次感知到的周遭" in stimulus  # 被动那段仍带旧快照框
+
+
+@pytest.mark.asyncio
+async def test_idle_sense_carries_honest_time_anchor(patched, monkeypatch):
+    """T3 review 必改 2：idle_sense 段不能无条件断言"此刻确实是这样"——``idle_sense``
+    可能因信箱积压（超过 ``_LIFE_INBOX_MAX``）、45s cd 重排、补敲对账延迟到达，真正被
+    她读到时场景未必还是原样。改法：复用 ``_humanize_elapsed`` 同款的诚实时间锚，如实
+    告诉她这份唤醒她的场景是多久前感知到的。
+
+    钉死 now，让"12 分钟前"可断言（同 test_surroundings_section_carries_perceived_
+    time_anchor 的手法）。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    # idle_sense 感知于 12 分钟前（UTC 12:18 → now 是 UTC 12:30）。
+    patched["unread"] = [
+        _envelope(
+            "i1", "你窝在沙发上，屋里很安静。",
+            kind=EVENT_KIND_IDLE_SENSE, occurred_at="2026-06-03T12:18:00Z",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "你窝在沙发上，屋里很安静。" in stimulus
+    assert "12 分钟前" in stimulus, (
+        f"idle_sense 必须带诚实时间锚（感知于 X 分钟前），实际 {stimulus!r}"
+    )
+    assert "此刻确实是这样" not in stimulus, (
+        "不能无条件断言此刻确实是这样——idle_sense 可能因积压 / cd 重排延迟送达"
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_sense_anchor_just_now_when_fresh(patched, monkeypatch):
+    """idle_sense 刚感知到（occurred_at ≈ now）时说「刚刚」，不硬塞「0 分钟前」这类噪声
+    （同 surroundings 段 just-now 措辞先例，_humanize_elapsed 同款算法）。
+    """
+    import datetime as _dt
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = cls(2026, 6, 3, 12, 30, tzinfo=_dt.timezone.utc)
+            return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+    monkeypatch.setattr(lw.cst_time, "datetime", _FixedDateTime)
+
+    patched["unread"] = [
+        _envelope(
+            "i1", "你窝在沙发上，屋里很安静。",
+            kind=EVENT_KIND_IDLE_SENSE, occurred_at="2026-06-03T12:30:00Z",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    # 断言具体锚点短语（不是裸「刚刚」二字）：旧的硬编码 wrapper 文案本身就含「刚刚」
+    # 二字（"这是刚刚真正唤醒你的当下切片"），裸字断言在旧实现下也会碰巧为真、测不出
+    # 真正的时间锚逻辑有没有生效。
+    assert "是刚刚感知到的" in stimulus, (
+        f"刚感知到的 idle_sense 应带具体的时间锚短语「是刚刚感知到的」，实际 {stimulus!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_sense_unparseable_occurred_at_no_crash(patched, monkeypatch):
+    """idle_sense occurred_at 脏 / 无法解析时不崩、不硬编时间锚（兜底降级，同
+    surroundings 段先例 test_surroundings_anchor_unparseable_occurred_at_no_crash）。
+    """
+    patched["unread"] = [
+        _envelope(
+            "i1", "你窝在沙发上，屋里很安静。",
+            kind=EVENT_KIND_IDLE_SENSE, occurred_at="不是时间的脏串",
+            persona_id="ayana",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    # 不该抛
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="ayana"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    # 场景原文照常铺出（兜底不吞）
+    assert "你窝在沙发上，屋里很安静。" in stimulus
+    # 不硬编一个算不出的时间锚，也不崩
+    assert "此刻确实是这样" not in stimulus
+
+
+@pytest.mark.integration
+async def test_idle_sense_pushed_past_inbox_cap_reaches_her_in_next_real_round(
+    patched, fake_redis, test_db, monkeypatch
+):
+    """T3 code review 建议：验证"信箱积压超过 cap、真正唤醒这一轮的 idle_sense 被挤到
+    下一轮"这条组合链路，真的跑两轮 ``life_wake_node``（只 fake Agent 那一层，其余
+    ——mailbox 的 deliver_event / list_unread_events / mark_events_read——走真实
+    Postgres），不是把 cap 截断 / mark_events_read / idle 查询 / renotify 这几个已经
+    分别测过的机制手工拼起来断言（那样测不出这几个机制组合在一起、经过 life_wake_node
+    真实的截断 + 收口逻辑后，这个具体的 idle_sense 事件是否真的到达了她面前）。
+
+    构造：cap 条更早的被动 surroundings（占满这一轮上限）+ 1 条排在 cap 截断线之后、
+    真正把这一轮唤醒的 idle_sense。第一轮 ``life_wake_node`` 真实读未读、真实截断到
+    cap、真实标已读那 cap 条——idle_sense 留在信箱里、这一轮的 stimulus 里读不到它。
+    第二轮（模拟 renotify 补敲触发的下一次 EventArrived）真实读到唯一剩下的
+    idle_sense，喂进这一轮的 stimulus——这才是它最终到达她面前的证据。
+    """
+    from unittest.mock import AsyncMock
+
+    import app.data.queries.mailbox as mailbox_mod
+    from app.data.queries.mailbox import (
+        deliver_event,
+        list_unread_events as real_list_unread_events,
+        mark_events_read as real_mark_events_read,
+    )
+    from app.domain.world_events import EventRead
+    from tests.runtime.conftest import migrate
+
+    await migrate(EventEnvelope, test_db)
+    await migrate(EventRead, test_db)
+
+    lane, persona_id = "coe-t3", "ayana"
+    cap = lw._LIFE_INBOX_MAX
+
+    # deliver_event 对非被动 kind（这里的 idle_sense）会 emit EventArrived 敲门——这条
+    # 测试自己直接调用 life_wake_node 模拟两次唤醒，不需要真走 debounce/wire，敲门
+    # emit 打桩成 no-op（同 test_event_delivery.py 的先例）。
+    monkeypatch.setattr(mailbox_mod, "emit", AsyncMock())
+
+    # 攒 cap 条更早发生的被动 surroundings（排在前面）+ 1 条更晚才到的主动 idle_sense
+    # （排在 cap 截断线之后）——这正是"触发唤醒的主动 sense 被积压挤到下一轮"的构造。
+    for i in range(cap):
+        await deliver_event(
+            lane=lane, persona_id=persona_id, event_id=f"s{i}",
+            kind=EVENT_KIND_SURROUNDINGS, source="world", summary=f"被动周遭{i}",
+            occurred_at=f"2026-06-03T{i % 24:02d}:00:00+08:00",
+        )
+    await deliver_event(
+        lane=lane, persona_id=persona_id, event_id="idle1",
+        kind=EVENT_KIND_IDLE_SENSE, source="world",
+        summary="你窝在沙发上，屋里很安静。",
+        occurred_at="2026-06-03T23:59:00+08:00",
+    )
+
+    # 让 life_wake_node 的信箱读写走真实 mailbox（其余 IO 仍是 patched fixture 的 fake，
+    # 只 Agent 走 fake、不烧真 LLM）。
+    monkeypatch.setattr(lw, "list_unread_events", real_list_unread_events)
+    monkeypatch.setattr(lw, "mark_events_read", real_mark_events_read)
+
+    _FakeAgent.install(monkeypatch, script=None)
+    arrived = EventArrived(lane=lane, persona_id=persona_id)
+
+    # 第一轮：真实读到 cap+1 条未读，节点真实截断到 cap、真实标已读那 cap 条。
+    await lw.life_wake_node(arrived)
+    round1_stimulus = _FakeAgent.instances[0].run_calls[-1]["messages"][0].text()
+    assert "你窝在沙发上，屋里很安静。" not in round1_stimulus, (
+        "idle_sense 排在 cap 截断线之后，第一轮真实截断后不该读到它"
+    )
+
+    # 中间态：mailbox 里真实只剩 idle_sense 未读（cap 那批被真实标已读了）。
+    remaining = await real_list_unread_events(lane=lane, persona_id=persona_id)
+    assert [e.event_id for e in remaining] == ["idle1"], (
+        f"第一轮真实收口后信箱应只剩 idle_sense 未读，实际 {[e.event_id for e in remaining]}"
+    )
+
+    # 清掉 cd key，模拟补敲对账触发的下一次 EventArrived（不是同一轮内的并发重投）。
+    await fake_redis.delete(lw._cd_key(lane, persona_id))
+
+    # 第二轮：真实读到唯一剩下的 idle_sense，喂进这一轮 stimulus —— 这才是它最终到达
+    # 她面前的证据（不是分别测过的机制拼起来的推断）。
+    await lw.life_wake_node(arrived)
+    round2_stimulus = _FakeAgent.instances[-1].run_calls[-1]["messages"][0].text()
+    assert "你窝在沙发上，屋里很安静。" in round2_stimulus, (
+        "第二轮必须真的读到被 cap 截断线挤掉的 idle_sense"
+    )
 
 
 @pytest.mark.asyncio
