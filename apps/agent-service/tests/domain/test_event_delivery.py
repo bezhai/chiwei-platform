@@ -15,7 +15,12 @@ import pytest
 
 import app.data.queries.mailbox as mailbox_mod
 from app.data.queries.mailbox import deliver_event, list_unread_events
-from app.domain.world_events import EventArrived, EventEnvelope, EventRead
+from app.domain.world_events import (
+    EVENT_KIND_IDLE_SENSE,
+    EventArrived,
+    EventEnvelope,
+    EventRead,
+)
 from tests.runtime.conftest import migrate
 
 
@@ -100,6 +105,30 @@ async def test_passive_kind_delivery_lands_in_inbox_without_knock(mailbox_db, mo
     assert unread[0].event_id == "s1"
     assert unread[0].kind == "surroundings"
     assert unread[0].summary == "你在客厅写作业，厨房飘来香味。"
+
+
+@pytest.mark.integration
+async def test_idle_sense_kind_delivery_knocks(mailbox_db, monkeypatch):
+    """life-idle-wake-via-sense Task 1，spec 决策 4：新 kind（``idle_sense``，world
+    判断为闲时刻的主动周遭切片）**不在** ``PASSIVE_EVENT_KINDS`` 里——照真动静一样
+    敲门唤醒。wake 判定统一走 kind 归属，这里不需要给 ``deliver_event`` 加任何新逻辑，
+    新 kind 天然被现有判断覆盖（这正是"两条路径口径一致"的落点）。
+    """
+    fake_emit = AsyncMock()
+    monkeypatch.setattr(mailbox_mod, "emit", fake_emit)
+
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="i1",
+        kind=EVENT_KIND_IDLE_SENSE, source="world",
+        summary="你窝在沙发上，电视开着，屋里很安静。",
+        occurred_at="2026-06-03T21:00:00+08:00",
+    )
+
+    fake_emit.assert_awaited_once()
+    knock = fake_emit.await_args.args[0]
+    assert isinstance(knock, EventArrived)
+    assert knock.lane == "coe-t1"
+    assert knock.persona_id == "ayana"
 
 
 @pytest.mark.integration

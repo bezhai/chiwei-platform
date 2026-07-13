@@ -29,6 +29,7 @@ from app.data.queries.mailbox import (
     renotify_unread,
 )
 from app.domain.world_events import (
+    EVENT_KIND_IDLE_SENSE,
     PASSIVE_EVENT_KINDS,
     EventArrived,
     EventEnvelope,
@@ -671,6 +672,44 @@ async def test_mixed_passive_and_real_unread_persona_is_renotified(mailbox_db):
     assert personas == ["ayana"], (
         f"混着真动静的 persona 仍该被补敲，实际 {personas}"
     )
+
+
+@pytest.mark.integration
+async def test_list_personas_with_unread_includes_idle_sense(mailbox_db):
+    """life-idle-wake-via-sense Task 1：``idle_sense``（world 判断为闲时刻的主动周遭
+    切片）跟 ambient / speech / message 一样是"真动静"——补敲对账
+    （``list_personas_with_unread``）必须把它算进"有未读"，不能被误当被动排除。
+
+    对比纯被动 surroundings（``test_list_personas_with_unread_excludes_pure_passive``）：
+    唯一的差别只在 kind 是否落在 ``PASSIVE_EVENT_KINDS`` 里——``idle_sense`` 不在，
+    所以两条判断口径（即时敲门 :func:`test_idle_sense_kind_delivery_knocks` + 这里的
+    补敲对账）天然一致，不需要给这条查询加任何新的 if 分支。
+    """
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="s1",
+        kind="surroundings", source="world", summary="被动周遭切片",
+        occurred_at="2026-06-03T14:00:00+08:00",
+    )
+    await deliver_event(
+        lane="coe-t1", persona_id="ayana", event_id="i1",
+        kind=EVENT_KIND_IDLE_SENSE, source="world", summary="闲时主动周遭切片",
+        occurred_at="2026-06-03T14:00:01+08:00",
+    )
+
+    personas = await list_personas_with_unread(lane="coe-t1")
+
+    assert personas == ["ayana"], (
+        f"idle_sense 是真动静，应把 ayana 算进补敲名单，实际 {personas}"
+    )
+
+
+# 信箱积压超过 cap 时"被挤到下一轮"的 idle_sense 最终是否真的到达她面前，这条链路
+# 的验证已挪到 tests/nodes/test_life_wake.py 的
+# test_idle_sense_pushed_past_inbox_cap_reaches_her_in_next_real_round（T3 code
+# review 建议）：原先这里的版本手工模拟 unread[:cap] + mark_events_read、没有真的走
+# life_wake_node，只是把 cap / mark / idle 查询 / renotify 这几个已分别测过的机制
+# 拼起来断言，测不出这几个机制组合在一起是否真的把这个 idle_sense 事件送到她面前。
+# 挪过去后改成真的跑两轮 life_wake_node（只 fake Agent，其余走真实 mailbox DB）。
 
 
 @pytest.mark.integration

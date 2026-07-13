@@ -24,11 +24,13 @@ import pytest
 import app.world.tools as tools_mod
 from app.agent.context import AgentContext
 from app.agent.runtime_context import agent_context
+from app.domain.world_events import EVENT_KIND_IDLE_SENSE, PASSIVE_EVENT_KINDS
 from app.world.tools import (
     FEATURE_SELF_WAKE,
     WORLD_SLEEP_MAX_SECONDS,
     WORLD_SLEEP_MIN_SECONDS,
     derive_event_id,
+    derive_idle_sense_event_id,
     derive_npc_event_id,
     derive_surroundings_event_id,
     notify,
@@ -581,6 +583,110 @@ async def test_sense_delivers_passive_kind_without_wake_param(_ctx):
     assert "wake" not in d, (
         "wake 参数已删，sense 不该再传它（被动语义统一由 kind=surroundings 表达）"
     )
+
+
+@pytest.mark.asyncio
+async def test_sense_idle_true_delivers_active_kind_that_knocks(_ctx):
+    """life-idle-wake-via-sense Task 1，spec 决策 4：world 判断这一刻是天然闲时刻
+    （刚起床 / 睡前 / 饭后窝着这类）时，``sense(idle=True)`` 必须投一个与被动
+    ``surroundings`` 不同的新 kind（``EVENT_KIND_IDLE_SENSE``），且这个新 kind
+    **不在** ``PASSIVE_EVENT_KINDS`` 里——wake 判定统一走 kind 归属，不引入独立的
+    wake 参数，即时敲门与补敲对账两条路径因此天然口径一致（见 mailbox 测试）。
+    """
+    with agent_context(_ctx):
+        await sense.invoke(
+            {
+                "recipient": "ayana",
+                "surroundings": "你窝在沙发上，电视开着，屋里很安静。",
+                "idle": True,
+            }
+        )
+
+    assert len(tools_mod._test_delivered) == 1
+    d = tools_mod._test_delivered[0]
+    assert d["kind"] == EVENT_KIND_IDLE_SENSE
+    assert d["kind"] != tools_mod.EVENT_KIND_SURROUNDINGS
+    assert d["kind"] not in PASSIVE_EVENT_KINDS, (
+        "新 kind 必须不在 PASSIVE_EVENT_KINDS 里，否则这次唤醒仍会被判成被动、不敲门"
+    )
+    assert d["summary"] == "你窝在沙发上，电视开着，屋里很安静。"
+    assert d["persona_id"] == "ayana"
+    assert d["lane"] == "coe-t2"
+
+
+@pytest.mark.asyncio
+async def test_sense_idle_default_false_keeps_passive_kind_unchanged(_ctx):
+    """``idle`` 默认 False：不传这个新参数时行为必须与改动前完全一致（不破坏既有
+    被动周遭切片语义、不影响老调用方）。
+    """
+    with agent_context(_ctx):
+        await sense.invoke(
+            {"recipient": "ayana", "surroundings": "你在客厅写作业。"}
+        )
+    assert tools_mod._test_delivered[0]["kind"] == tools_mod.EVENT_KIND_SURROUNDINGS
+
+
+@pytest.mark.asyncio
+async def test_sense_idle_false_explicit_also_keeps_passive_kind(_ctx):
+    """显式传 ``idle=False`` 与不传等价——都投被动 surroundings。"""
+    with agent_context(_ctx):
+        await sense.invoke(
+            {
+                "recipient": "ayana",
+                "surroundings": "你在客厅写作业。",
+                "idle": False,
+            }
+        )
+    assert tools_mod._test_delivered[0]["kind"] == tools_mod.EVENT_KIND_SURROUNDINGS
+
+
+def test_idle_sense_event_id_distinct_from_passive_and_notify():
+    """同样文字，主动 idle_sense 与被动 surroundings、notify 的动静必须派生出不同
+    event_id——三类是不同语义的 event，不能在 ``deliver_event`` 幂等里互相吞掉。
+    """
+    id_active = derive_idle_sense_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="一样的文字", round_id="r"
+    )
+    id_passive = derive_surroundings_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="一样的文字", round_id="r"
+    )
+    id_notify = derive_event_id(lane="coe-t2", observation="一样的文字", round_id="r")
+    assert len({id_active, id_passive, id_notify}) == 3
+
+
+@pytest.mark.asyncio
+async def test_sense_idle_event_id_idempotent_per_round(_ctx):
+    """同一 (lane, recipient, surroundings, round_id) 主动投递重放派生同一 event_id
+    （整轮重放幂等命门，与被动 sense / notify 同一套道理）。
+    """
+    args = {
+        "recipient": "ayana",
+        "surroundings": "你窝在沙发上。",
+        "idle": True,
+    }
+    with agent_context(_ctx):
+        await sense.invoke(args)
+    first = tools_mod._test_delivered[0]["event_id"]
+
+    tools_mod._test_delivered.clear()
+    with agent_context(_ctx):
+        await sense.invoke(args)
+    second = tools_mod._test_delivered[0]["event_id"]
+    assert second == first
+
+
+@pytest.mark.asyncio
+async def test_sense_idle_event_id_differs_per_recipient(_ctx):
+    """同一轮里给不同角色投主动 idle_sense → 不同 event_id（per-person 不互相覆盖，
+    同 :func:`derive_surroundings_event_id` 的既有先例）。
+    """
+    id_ayana = derive_idle_sense_event_id(
+        lane="coe-t2", recipient="ayana", surroundings="一样的文字", round_id="r"
+    )
+    id_akao = derive_idle_sense_event_id(
+        lane="coe-t2", recipient="akao", surroundings="一样的文字", round_id="r"
+    )
+    assert id_ayana != id_akao
 
 
 @pytest.mark.asyncio
