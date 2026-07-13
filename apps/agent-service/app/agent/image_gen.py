@@ -1,4 +1,4 @@
-"""Image generation — text-to-image / image-to-image via Ark, OpenAI, or Gemini.
+"""Image generation — text-to-image / image-to-image via provider-native APIs.
 
 Public API:
   - generate_image() — dispatch to the correct backend based on provider config
@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 ARK_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
 ARK_IMAGE_GENERATION_MAX_RETRIES = 0
+AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
+AZURE_IMAGE_GENERATION_MAX_RETRIES = 0
+_AZURE_API_VERSION = "2024-08-01-preview"
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +36,8 @@ async def generate_image(
 ) -> list[str]:
     """Generate images from a text prompt (and optional reference images).
 
-    Dispatches to Ark, OpenAI, or Gemini based on provider's ``client_type``.
+    Dispatches to Ark, OpenAI, Azure, or Gemini based on provider's
+    ``client_type``.
 
     Args:
         model_id: Internal model alias (e.g. ``"generate-image-high-model"``).
@@ -49,6 +53,8 @@ async def generate_image(
 
     if client_type == "ark":
         return await _generate_image_ark(info, prompt, size, reference_images)
+    if client_type == "azure-http":
+        return await _generate_image_azure(info, prompt, size, reference_images)
     if client_type == "google":
         return await _generate_image_gemini(info, prompt, size, reference_images)
     # Default: OpenAI-compatible
@@ -175,6 +181,54 @@ async def _generate_image_openai(
             size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
             n=1,
             extra_body=extra_body,
+        )
+        return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
+    finally:
+        await client.close()
+        if http_client:
+            await http_client.aclose()
+
+
+async def _generate_image_azure(
+    info: dict[str, Any],
+    prompt: str,
+    size: str,
+    reference_images: list[str] | None,
+) -> list[str]:
+    """Generate an image through the ModelHub Azure-compatible endpoint."""
+    if reference_images:
+        raise ValueError(
+            "ModelHub image generation does not accept reference image URLs"
+        )
+
+    from openai import AsyncAzureOpenAI
+
+    kwargs: dict[str, Any] = {
+        "azure_endpoint": info["base_url"],
+        "azure_deployment": info["model_name"],
+        "api_key": info["api_key"],
+        "api_version": _AZURE_API_VERSION,
+        "timeout": AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS,
+        "max_retries": AZURE_IMAGE_GENERATION_MAX_RETRIES,
+    }
+    http_client = None
+    if info.get("use_proxy"):
+        from app.infra.config import settings
+
+        if settings.forward_proxy_url:
+            from app.capabilities.image_gen import proxy_http_client
+
+            http_client = proxy_http_client(settings.forward_proxy_url)
+            kwargs["http_client"] = http_client
+
+    client = AsyncAzureOpenAI(**kwargs)
+    try:
+        resp = await client.images.generate(
+            model=info["model_name"],
+            response_format="b64_json",
+            prompt=prompt,
+            size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
+            n=1,
         )
         return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
     finally:
