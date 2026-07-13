@@ -33,6 +33,7 @@ from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
     EVENT_KIND_IDLE_SENSE,
     EVENT_KIND_MESSAGE,
+    EVENT_KIND_OWN_CHAT_REPLY,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -1271,30 +1272,38 @@ async def test_message_not_lumped_into_ambient_dynamics(patched, monkeypatch):
     assert "给你发消息" in msg_blob
 
 
-def test_split_perception_five_way_idle_sense_and_message_separate_buckets():
-    """_split_perception 把未读五分：闲时主动切片 / 周遭 / 当面话 / 手机消息 / 离散动静
-    （task 5 必改 ① + life-idle-wake-via-sense Task 1）。
+def test_split_perception_six_way_idle_sense_and_own_chat_reply_separate_buckets():
+    """_split_perception 把未读六分：闲时主动切片 / 周遭 / 当面话 / 手机消息 /
+    自己刚回复过 / 离散动静（task 5 必改 ① + life-idle-wake-via-sense Task 1 +
+    chat/life 并发重复回复修复）。
 
     message kind 必须单独成一桶、绝不和 ambient 混进 dynamics —— 否则 _format_dynamics
     会把手机消息当离散动静渲染（「[message] ...」），又制造一遍当面/手机混淆。
     idle_sense（world 判断为闲时刻的主动周遭切片）同理必须独立成桶、不能被塞进被动
     surroundings 桶——否则会套上不适合它的"上一次感知到的周遭...可能已经变了"旧快照
-    框（那是唤醒她的当下理由，被框成旧快照会自相矛盾）。
+    框（那是唤醒她的当下理由，被框成旧快照会自相矛盾）。``own_chat_reply``（chat/life
+    并发重复回复修复新增 kind）同理必须单独成一桶、绝不和 ambient 混进 dynamics ——
+    否则 ``_format_dynamics`` 会把"我刚回复了什么"当离散动静渲染
+    （「[own_chat_reply] ...」），模型读不出"这是我自己说的话"。
     """
     unread = [
         _envelope("i1", "你窝在沙发上", kind=EVENT_KIND_IDLE_SENSE),
         _envelope("s1", "你在客厅", kind=EVENT_KIND_SURROUNDINGS),
         _envelope("sp1", "当面说的话", kind=EVENT_KIND_SPEECH, source="akao"),
         _envelope("msg1", "手机发来的", kind=EVENT_KIND_MESSAGE, source="chinagi"),
+        _envelope("r1", "你刚回复的内容", kind=EVENT_KIND_OWN_CHAT_REPLY, source="chat"),
         _envelope("a1", "开关门声", kind=EVENT_KIND_AMBIENT),
     ]
-    idle_sense, surroundings, speech, messages, dynamics = lw._split_perception(unread)
+    idle_sense, surroundings, speech, messages, own_replies, dynamics = (
+        lw._split_perception(unread)
+    )
     assert [e.event_id for e in idle_sense] == ["i1"], "idle_sense 必须单独成一桶"
     assert [e.event_id for e in surroundings] == ["s1"]
     assert [e.event_id for e in speech] == ["sp1"]
     assert [e.event_id for e in messages] == ["msg1"], "message 必须单独成一桶"
+    assert [e.event_id for e in own_replies] == ["r1"], "own_chat_reply 必须单独成一桶"
     assert [e.event_id for e in dynamics] == ["a1"], (
-        "dynamics 只剩 ambient，不含 message / idle_sense"
+        "dynamics 只剩 ambient，不含 message / idle_sense / own_chat_reply"
     )
 
 
@@ -1542,6 +1551,112 @@ async def test_idle_sense_pushed_past_inbox_cap_reaches_her_in_next_real_round(
     assert "你窝在沙发上，屋里很安静。" in round2_stimulus, (
         "第二轮必须真的读到被 cap 截断线挤掉的 idle_sense"
     )
+
+
+# ---------------------------------------------------------------------------
+# chat/life 并发重复回复修复：kind=own_chat_reply 承载"chat 刚对这次交互回复了
+# 什么"，取代不带内容的 EventArrived + 实时查 common_message 的时序竞态方案。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_own_chat_reply_event_rendered_as_already_replied(
+    patched, monkeypatch
+):
+    """信箱里 kind=own_chat_reply 的事件 → stimulus 明确呈现"这是我自己刚回复的话"。
+
+    这条内容的存在意义只有一个：让被并发唤醒的 life 可靠知道"这次交互我已经回复过
+    了、回复的是什么"，不用再靠对 ``common_message`` 的实时查询猜。呈现上必须强调
+    这是"她自己发出去的"，而不是被误当成外部动静又生成一次相近回复。
+    """
+    patched["unread"] = [
+        _envelope(
+            "r1",
+            "早点睡哦，明天还要上班呢",
+            kind=EVENT_KIND_OWN_CHAT_REPLY,
+            source="chat",
+            persona_id="akao",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    # 回复原文进 stimulus
+    assert "早点睡哦，明天还要上班呢" in msg_blob
+    # 明确框出"这是我自己刚发出去的话"，不用再回一遍
+    assert "你刚" in msg_blob and "回复" in msg_blob
+    # 标已读（同其它 kind 一样，只标本轮实际读到的）
+    assert patched["marked"] == [["r1"]]
+
+
+@pytest.mark.asyncio
+async def test_own_chat_reply_not_lumped_into_ambient_dynamics(
+    patched, monkeypatch
+):
+    """kind=own_chat_reply 不该被误归进离散动静（ambient）桶。
+
+    旧 _split_perception 只认 surroundings/speech/message 三类，新 kind 若不显式
+    加分支会被塞进「[own_chat_reply] ...」离散动静清单，模型读到时会当成一件"发生在
+    她身上的客观动静"而非"我自己刚说的话"，达不到"不用再回一遍"的效果。
+    """
+    patched["unread"] = [
+        _envelope(
+            "a1", "玄关传来开关门的声音", kind=EVENT_KIND_AMBIENT, persona_id="akao",
+        ),
+        _envelope(
+            "r1", "早点睡哦", kind=EVENT_KIND_OWN_CHAT_REPLY,
+            source="chat", persona_id="akao",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "[own_chat_reply]" not in msg_blob, (
+        "own_chat_reply 不该呈现成离散动静的「[own_chat_reply] ...」清单项"
+    )
+    assert "早点睡哦" in msg_blob
+    assert "你刚" in msg_blob and "回复" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_own_chat_reply_survives_concurrent_ambient_wake(
+    patched, monkeypatch
+):
+    """并发唤醒场景：chat 已回复的内容与另一条几乎同时到达的唤醒事件同一轮读到。
+
+    这是修复"chat/life 并发重复回复"的核心不变量:不管这一轮是被哪一条
+    ``EventArrived`` 触发的（debounce 只保证至少唤醒一次、不保证是哪一条），
+    ``list_unread_events`` 扫描的是整个信箱，chat 回复内容只要durable 落库了
+    就一定会跟着这一轮一起被读到、不会因为"来了另一条唤醒事件"而丢失——不像旧
+    方案里内容依赖对 common_message 的实时查询，可能因为 channel-server 异步
+    落库慢于 debounce 窗口而查不到。
+    """
+    patched["unread"] = [
+        _envelope(
+            "r1", "这个我已经帮你查好啦", kind=EVENT_KIND_OWN_CHAT_REPLY,
+            source="chat", persona_id="akao",
+        ),
+        _envelope(
+            "a1", "世界那边几乎同时来了一条动静", kind=EVENT_KIND_AMBIENT,
+            persona_id="akao",
+        ),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    # 唤醒信号本身是 debounce 折叠后的最后一条（谁触发的不重要），信箱里已经
+    # durable 落库了两条未读——模拟"chat 回复几乎同时有其它唤醒事件到达"。
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "这个我已经帮你查好啦" in msg_blob, (
+        "chat 已回复的内容不该因为同轮还有其它唤醒事件到达而丢失"
+    )
+    assert "世界那边几乎同时来了一条动静" in msg_blob
+    assert patched["marked"] == [["r1", "a1"]]
 
 
 @pytest.mark.asyncio

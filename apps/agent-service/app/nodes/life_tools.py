@@ -96,6 +96,7 @@ from app.domain.recipient_directory import (
 )
 from app.domain.world_events import (
     EVENT_KIND_MESSAGE,
+    EVENT_KIND_OWN_CHAT_REPLY,
     EVENT_KIND_SPEECH,
     perform_act,
 )
@@ -659,6 +660,41 @@ def build_life_tools(
                     full_content=rendered,
                 )
             )
+
+            # chat/life 并发重复回复同款修复：emit 出站成功（这句话确实要发出去）之后，
+            # 把渲染后的原话投进**发送者自己**（persona_id）的信箱——不是收件人的（真人/
+            # 群没有 life 信箱）。这条主动发和 chat_node._wake_life_after_chat 面对的是
+            # 同一个根因：都是先 emit(ChatResponseSegment(...)) 走 chat-response-worker
+            # 异步落库，如果这次发送之后、common_message 真正落库之前又有新的事件触发了
+            # 下一轮 life_wake，下一轮同样会在 find_persona_related_chats_recent 里查不到
+            # 这句话，可能对同一话题又主动开口一次、且措辞和这次不一致（prod 已用 ops-db
+            # 查库 + Langfuse trace 实锤复现过：两条 response_id 均为 null 的主动发消息，
+            # 相隔 3 分钟对同一件事说法前后矛盾）。kind 复用同一个 EVENT_KIND_OWN_CHAT_
+            # REPLY，life_wake 侧 _format_own_chat_reply 不区分 chat 回复还是主动发，都
+            # 呈现成"你刚回复了/说了：xxx"。失败只记 warning，不拖垮已经发出的消息——
+            # 消息已经入队，这里失败只是下一轮 life 少了一次"及时"的机会。
+            try:
+                await deliver_event(
+                    lane=lane,
+                    persona_id=persona_id,
+                    event_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_OID, f"{proactive_message_id}:own_reply"
+                        )
+                    ),
+                    summary=rendered,
+                    occurred_at=observed_at,
+                    kind=EVENT_KIND_OWN_CHAT_REPLY,
+                    source="life",
+                    chat_id=chat_id,
+                    chat_scope=chat_scope,
+                )
+            except Exception as e:  # noqa: BLE001 — 消息已发出，投信箱失败不拖垮发送
+                logger.warning(
+                    "[life_tools] %s proactive own-reply mailbox delivery failed "
+                    "(uid=%s): %s",
+                    persona_id, uid, e, exc_info=True,
+                )
 
         if isinstance(target, LarkP2PTarget):
             # 真人（飞书私聊）→ 共享渲染 + 出站；is_p2p=True、chat_id=真实 p2p 会话 id。

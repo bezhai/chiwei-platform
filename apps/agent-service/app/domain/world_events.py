@@ -88,11 +88,25 @@ from app.runtime.persist import insert_idempotent
 #                      但也不能无条件断言"此刻正在发生"——信箱积压 / cd 重排 / 补敲对账
 #                      都可能让送达延迟，渲染侧要带诚实的感知时刻时间锚（见 life_wake
 #                      的 ``_format_idle_sense``），态度介于两者之间。
+#   * ``own_chat_reply`` chat 对真人的回复已经发出去了（chat/life 并发重复回复修复）：
+#                      chat_node 确认一段回复内容确实要发给真人后，把这段回复原文
+#                      ``deliver_event`` 进对应 persona **自己**的信箱，让并发被别的
+#                      event 唤醒的 life 也能在 ``list_unread_events`` 里可靠读到「我刚
+#                      对这次交互回复了什么」，不再依赖对 ``common_message`` 异步落库
+#                      时序的假设（旧路径：chat 只 emit 不带内容的 ``EventArrived``，
+#                      life 醒来时实时查 ``common_message`` 猜"有没有回过"，channel-server
+#                      落库慢于 5s debounce 触发时会误判、重复生成一次相近回复）。不是
+#                      "不主动唤醒、下次自然醒来才读到"的被动 kind——**仍然主动唤醒**
+#                      life（不在 ``PASSIVE_EVENT_KINDS`` 里），只是内容来源从"猜"变成
+#                      "确定收到"，所以不复用 #279 删除的被动 ``EVENT_KIND_EXTERNAL_
+#                      PASSIVE``，另起一个语义清晰的新 kind。``source`` 固定为
+#                      ``"chat"``（区别于姐妹直投 speech/message 的 persona_id 来源）。
 EVENT_KIND_AMBIENT = "ambient"
 EVENT_KIND_SURROUNDINGS = "surroundings"
 EVENT_KIND_SPEECH = "speech"
 EVENT_KIND_MESSAGE = "message"
 EVENT_KIND_IDLE_SENSE = "idle_sense"
+EVENT_KIND_OWN_CHAT_REPLY = "own_chat_reply"
 
 
 # 被动 event kind——单一定义处，写 / 读两端都从这里取（宪法「禁止重复定义」）。语义：

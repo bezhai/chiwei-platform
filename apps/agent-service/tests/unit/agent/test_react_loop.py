@@ -883,3 +883,324 @@ class TestNativeWebSearchPassthrough:
         ):
             pass
         assert "native_web_search" not in fake.stream_kwargs[0]
+
+
+# ---------------------------------------------------------------------------
+# empty-turn retry — a turn that comes back with no text AND no tool_calls
+# (e.g. the collapsed ``{"text": "", "tool_calls": []}`` observed after a
+# generate_image tool call in trace 82323210372fe067ec2a60abd8e9fdb3) is
+# transparently retried in place — same ``convo``, no new messages appended,
+# no tools re-dispatched — up to a bounded number of attempts for that ONE
+# turn. Exhausting retries never raises a new exception or changes the return
+# shape: the loop falls back to exactly the pre-retry behaviour (return /
+# end the generator with whatever the last attempt produced), just logging the
+# exhaustion so it is observable. A normal non-empty result must never trigger
+# a second request.
+# ---------------------------------------------------------------------------
+
+
+class TestRunLoopEmptyTurnRetry:
+    async def test_empty_completion_is_retried_then_succeeds(self):
+        _run_loop, _ = _import_loops()
+        empty = Message(role=Role.ASSISTANT, content="")
+        fake = FakeModelClient(
+            complete_script=[empty, Message(role=Role.ASSISTANT, content="real reply")]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == "real reply"
+        assert len(fake.complete_calls) == 2
+
+    async def test_reasoning_only_completion_counts_as_empty_and_is_retried(self):
+        # text blank, no tool_calls, but reasoning_content set — reasoning is
+        # never surfaced to the user, so a "thought but didn't answer" turn
+        # must still count as empty and get retried.
+        _run_loop, _ = _import_loops()
+        reasoning_only = Message(
+            role=Role.ASSISTANT, content="", reasoning_content="thinking..."
+        )
+        fake = FakeModelClient(
+            complete_script=[
+                reasoning_only,
+                Message(role=Role.ASSISTANT, content="ok"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == "ok"
+        assert len(fake.complete_calls) == 2
+
+    async def test_whitespace_only_text_counts_as_empty_and_is_retried(self):
+        _run_loop, _ = _import_loops()
+        whitespace_only = Message(role=Role.ASSISTANT, content="   \n\t  ")
+        fake = FakeModelClient(
+            complete_script=[
+                whitespace_only,
+                Message(role=Role.ASSISTANT, content="ok"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == "ok"
+        assert len(fake.complete_calls) == 2
+
+    async def test_empty_completion_exhausts_retries_and_returns_empty_message(
+        self, caplog
+    ):
+        # every attempt comes back empty — the loop must give up after a
+        # bounded number of tries, return the SAME shape it always has (a
+        # Message, never an exception), and log the exhaustion so the
+        # occurrence rate can be observed in prod.
+        import logging
+
+        _run_loop, _ = _import_loops()
+        empty = Message(role=Role.ASSISTANT, content="")
+        fake = FakeModelClient(complete_script=[empty, empty, empty])
+        with caplog.at_level(logging.WARNING):
+            result = await _run_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[],
+                context=None,
+                recursion_limit=12,
+            )
+        assert isinstance(result, Message)
+        assert result.text() == ""
+        assert not result.tool_calls
+        assert len(fake.complete_calls) == 3  # 3 tries total, then give up
+        assert any("empty" in r.message.lower() for r in caplog.records)
+
+    async def test_tool_call_turn_with_blank_text_is_not_retried(self):
+        # tool_calls present -> not "empty" even though text is blank; a real
+        # tool-call turn must never trigger the empty-retry path.
+        _run_loop, _ = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+                Message(role=Role.ASSISTANT, content="done"),
+            ]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == "done"
+        # exactly 2 calls: the tool-call turn + the final turn, no extra retry
+        assert len(fake.complete_calls) == 2
+
+    async def test_normal_non_empty_result_is_not_retried(self):
+        # the common case: a single model call, zero added request cost.
+        _run_loop, _ = _import_loops()
+        fake = FakeModelClient(
+            complete_script=[Message(role=Role.ASSISTANT, content="hi there")]
+        )
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        assert result.text() == "hi there"
+        assert len(fake.complete_calls) == 1
+
+
+class TestStreamLoopEmptyTurnRetry:
+    async def test_empty_turn_is_retried_then_succeeds(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(finish_reason="stop")],  # empty: no text, no tool_calls
+                [StreamChunk(text="real reply"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[],
+                context=None,
+                recursion_limit=12,
+            )
+        ]
+        assert "".join(c.text or "" for c in out) == "real reply"
+        assert len(fake.stream_calls) == 2
+
+    async def test_reasoning_only_turn_counts_as_empty_and_is_retried(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [
+                    StreamChunk(reasoning="thinking..."),
+                    StreamChunk(finish_reason="stop"),
+                ],
+                [StreamChunk(text="ok"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[],
+                context=None,
+                recursion_limit=12,
+            )
+        ]
+        assert "".join(c.text or "" for c in out) == "ok"
+        assert len(fake.stream_calls) == 2
+
+    async def test_empty_turn_exhausts_retries_and_ends_generator(self, caplog):
+        import logging
+
+        _, _stream_loop = _import_loops()
+        empty_turn = [StreamChunk(finish_reason="stop")]
+        fake = FakeModelClient(stream_script=[empty_turn, empty_turn, empty_turn])
+        with caplog.at_level(logging.WARNING):
+            out = [
+                c
+                async for c in _stream_loop(
+                    fake,
+                    messages=[Message(role=Role.USER, content="go")],
+                    tools=[],
+                    context=None,
+                    recursion_limit=12,
+                )
+            ]
+        assert "".join(c.text or "" for c in out) == ""
+        assert len(fake.stream_calls) == 3  # 3 tries total, then give up
+        assert any("empty" in r.message.lower() for r in caplog.records)
+
+    async def test_tool_call_turn_with_blank_text_is_not_retried(self):
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(tool_call=call), StreamChunk(finish_reason="tool_calls")],
+                [StreamChunk(text="done"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[echo_tool],
+                context=None,
+                recursion_limit=12,
+            )
+        ]
+        assert "".join(c.text or "" for c in out) == "done"
+        assert len(fake.stream_calls) == 2
+
+    async def test_normal_non_empty_turn_is_not_retried(self):
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(text="hello"), StreamChunk(finish_reason="stop")]
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[],
+                context=None,
+                recursion_limit=12,
+            )
+        ]
+        assert "".join(c.text or "" for c in out) == "hello"
+        assert len(fake.stream_calls) == 1
+
+    async def test_content_filter_only_turn_is_empty_per_is_empty_turn(self):
+        """``_is_empty_turn`` only looks at text/tool_calls — it has no
+        opinion on ``finish_reason``. A turn whose only chunk is
+        ``finish_reason="content_filter"`` (no text, no tool_calls) therefore
+        DOES match the retry condition if something keeps draining
+        ``_stream_loop`` to exhaustion, as this test does directly. This is
+        not a correctness bug for the real chat path: ``render_chat_turn``
+        (``app/chat/render.py``) reacts to a content_filter chunk the instant
+        it sees one — it yields the persona content_filter message and
+        ``return``s, which abandons (never resumes) this same generator
+        *before* it would reach the retry-decision point below the inner
+        ``async for``. See the next test for that production-safety property.
+        This test exists so that fact is asserted, not just reasoned about in
+        a docstring — if ``_is_empty_turn`` ever grows a
+        content_filter/length exclusion, this test's expected call count
+        must change too."""
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(finish_reason="content_filter")],
+                [StreamChunk(text="ignored if reached"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[],
+                context=None,
+                recursion_limit=12,
+            )
+        ]
+        assert len(fake.stream_calls) == 2, (
+            "_stream_loop in isolation has no content_filter awareness, so a "
+            "fully-drained consumer does retry this turn once — this is the "
+            "documented, acceptable behavior, not the production path"
+        )
+        assert out[0].finish_reason == "content_filter"
+
+    async def test_early_abandonment_on_content_filter_prevents_retry(self):
+        """The actual safety net for the case above: render_chat_turn's real
+        consumption pattern is "see a content_filter/length chunk, stop
+        pulling more chunks immediately" (app/chat/render.py's
+        ``is_content_filter``/``is_length_truncated`` checks, which return
+        without ever calling ``.__anext__()`` again). This test reproduces
+        that exact consumption pattern directly against ``_stream_loop``
+        (without going through the full render_chat_turn + Agent + model
+        registry machinery) and proves ``model.stream()`` is called exactly
+        once — the retry-decision code below the inner ``async for`` in
+        ``_stream_loop`` is never reached because nothing ever asks this
+        generator for its next chunk after the content_filter one."""
+        _, _stream_loop = _import_loops()
+        fake = FakeModelClient(
+            stream_script=[
+                [StreamChunk(finish_reason="content_filter")],
+                [StreamChunk(text="should never be requested"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        gen = _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+        )
+        first = await gen.__anext__()
+        assert first.finish_reason == "content_filter"
+        # render_chat_turn stops here — it never calls __anext__() again.
+        await gen.aclose()
+        assert len(fake.stream_calls) == 1

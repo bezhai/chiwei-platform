@@ -89,6 +89,7 @@ from app.domain.world_events import (
     EVENT_KIND_AMBIENT,
     EVENT_KIND_IDLE_SENSE,
     EVENT_KIND_MESSAGE,
+    EVENT_KIND_OWN_CHAT_REPLY,
     EVENT_KIND_SPEECH,
     EVENT_KIND_SURROUNDINGS,
     EventArrived,
@@ -505,6 +506,26 @@ def _format_messages(messages: list[EventEnvelope]) -> str:
     )
 
 
+def _format_own_chat_reply(own_replies: list[EventEnvelope]) -> str:
+    """把 chat 已发出的回复（kind=own_chat_reply）拼成"你自己刚说的话"，按发生先后。
+
+    这是 chat/life 并发重复回复修复的核心呈现：chat_node 确认一段回复内容确实发给
+    了真人后，把回复原文 ``deliver_event`` 进这个 persona 自己的信箱（见
+    ``app.nodes.chat_node._wake_life_after_chat``）。这条内容存在的唯一目的是让
+    被并发唤醒的 life 明确知道"这次交互我已经回复过了、回复的是什么"——不再依赖对
+    ``common_message`` 的实时查询去猜"我是否已经回复过这句话"（那条路径与
+    channel-server 异步落库存在时序竞态，是重复回复的根因）。
+
+    呈现上刻意强调"这是你自己刚发出去的话"、"不用再回一遍"，与当面话（speech，
+    别人对她说的）、离散动静（dynamics，环境里发生的客观事）明确区分——绝不能让
+    模型把自己刚发的回复误当成"外部发生的一件事"又去回应一次。
+    """
+    return "\n".join(
+        f"（{cst_time.to_cst_hms(ev.occurred_at)}）你刚回复了：{ev.summary}"
+        for ev in own_replies
+    )
+
+
 def _split_perception(
     unread: list[EventEnvelope],
 ) -> tuple[
@@ -513,12 +534,14 @@ def _split_perception(
     list[EventEnvelope],
     list[EventEnvelope],
     list[EventEnvelope],
+    list[EventEnvelope],
 ]:
-    """把未读分成（闲时主动切片, 周遭切片, 当面话, 手机消息, 离散动静），各保持原始
-    （按发生先后）顺序。
+    """把未读分成（闲时主动切片, 周遭切片, 当面话, 手机消息, 你刚回复的话, 离散动静），
+    各保持原始（按发生先后）顺序。
 
-    五类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7；闲时主动切片
-    是 life-idle-wake-via-sense Task 1 新增的第五类）：
+    六类语义不同、stimulus 里分层呈现（两个正交维度各自标清，spec 决策 7；闲时主动切片
+    是 life-idle-wake-via-sense Task 1 新增，你刚回复的话是 chat/life 并发重复回复修复
+    新增）：
 
       * 闲时主动切片（kind=idle_sense）—— world 判断她此刻处于天然闲时刻时用
         sense(idle=True) 投的周遭切片，内容形态同 surroundings、但它是这一轮唤醒她的
@@ -529,18 +552,24 @@ def _split_perception(
       * 手机消息（kind=message）—— 另一角色不在一起时 send_message 隔空发来的消息
         「X 给你发消息：内容」（task 3 / 5）。**通信介质维度**：隔着手机/飞书发的，与当面
         speech 收件人侧必须可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
+      * 你刚回复的话（kind=own_chat_reply）—— chat 已经确认发给真人的回复原文，让 life
+        知道"这次交互我已经回复过了"，不用再靠猜（chat/life 并发重复回复修复）。这是她
+        **自己**发的话，绝不能混进离散动静或当面话——否则会被误当成"发生在她身上的一件
+        客观动静 / 别人对她说的话"，反而诱发她再回应一次，恰好与修复目的相反。
       * 离散动静（其余 kind）—— 环境里出现的新声响光线气味等。
 
-    按 kind 五分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message
-    必须从 dynamics 桶排除（必改 ①）——否则会被 :func:`_format_dynamics` 当离散动静渲染
-    成「[message] ...」，与当面话混淆。idle_sense 同理必须从 surroundings / dynamics
-    两个桶都排除——混进 surroundings 会套上不适合它的"上一次感知到的周遭...可能已经变了"
-    旧快照框，混进 dynamics 会失去它作为"此刻"的叙事形态、被压成一行机读列表项。
+    按 kind 六分（不改各自内部顺序——``list_unread_events`` 已按真实时刻升序）。message /
+    own_chat_reply 都必须从 dynamics 桶排除——否则会被 :func:`_format_dynamics` 当离散
+    动静渲染成「[message] ...」/「[own_chat_reply] ...」，与当面话 / "这是我自己刚说的
+    话" 的语义混淆。idle_sense 同理必须从 surroundings / dynamics 两个桶都排除——混进
+    surroundings 会套上不适合它的"上一次感知到的周遭...可能已经变了"旧快照框，混进
+    dynamics 会失去它作为"此刻"的叙事形态、被压成一行机读列表项。
     """
     idle_sense = [e for e in unread if e.kind == EVENT_KIND_IDLE_SENSE]
     surroundings = [e for e in unread if e.kind == EVENT_KIND_SURROUNDINGS]
     speech = [e for e in unread if e.kind == EVENT_KIND_SPEECH]
     messages = [e for e in unread if e.kind == EVENT_KIND_MESSAGE]
+    own_replies = [e for e in unread if e.kind == EVENT_KIND_OWN_CHAT_REPLY]
     dynamics = [
         e
         for e in unread
@@ -550,9 +579,10 @@ def _split_perception(
             EVENT_KIND_SURROUNDINGS,
             EVENT_KIND_SPEECH,
             EVENT_KIND_MESSAGE,
+            EVENT_KIND_OWN_CHAT_REPLY,
         )
     ]
-    return idle_sense, surroundings, speech, messages, dynamics
+    return idle_sense, surroundings, speech, messages, own_replies, dynamics
 
 
 # 「最近聊过的对话」段的拉取上限（条目数量控制规模、不字符截断——见 no_context_truncation）：
@@ -1082,8 +1112,8 @@ async def _run_life_round(
             f"（心情 {snapshot.response_mood}、活动 {snapshot.activity_type}）。"
         )
 
-    # 五官分层呈现（1C Task 2 + Task 3 + task 5 + life-idle-wake-via-sense Task 1）：
-    # 她信箱里有五类，分层呈现两个正交维度（spec 决策 7）——
+    # 五官分层呈现（1C Task 2 + Task 3 + task 5 + life-idle-wake-via-sense Task 1 +
+    # chat/life 并发重复回复修复）：她信箱里有六类，分层呈现两个正交维度（spec 决策 7）——
     #   * 「这一刻」（idle_sense，world 判断她此刻处于天然闲时刻时主动投的周遭切片）——
     #     这一轮唤醒她的理由，不套被动周遭切片那种"可能已经变了"的怀疑框，但也不能
     #     无条件断言"此刻确实是这样"（信箱积压 / cd 重排可能延迟送达）——带诚实的
@@ -1095,15 +1125,22 @@ async def _run_life_round(
     #   * 「别人隔着手机给你发的消息」（message，另一角色不在一起时 send_message 隔空发的
     #     「X 给你发消息：内容」，task 3 / 5）—— **通信介质维度**：隔着手机/飞书，不是当面。
     #     与当面 speech 收件人侧明确可区分（spec 决策 5：否则又把「当面还是手机」混为一谈）。
+    #   * 「你刚回复的话」（own_chat_reply，chat_node 确认发给真人的回复原文
+    #     ``deliver_event`` 进信箱，见 chat/life 并发重复回复修复）—— 让她可靠知道
+    #     "这次交互我已经回复过了、回复的是什么"，不用再靠对 common_message 的实时查询猜
+    #     （那条路径与 channel-server 异步落库存在时序竞态，是重复回复的根因）。
     #   * 「离散动静」（ambient 等，环境里出现的新声响这类事件）。
     # 分层呈现让她既感知到这一刻是不是被主动唤醒、自己周遭什么样（物理在场）、又看清谁
-    # 当面说了话 / 谁隔手机发了消息（通信介质两态）、还知道刚发生了什么动静（五类不互相
-    # 混淆）。五类都只取自她自己信箱的未读（_format_* 只取 summary/source/kind/时间，全是
-    # 投给她的、她够得着的），绝不含 world 全局快照——信息差命门由 world 逐角色推演产出
-    # 每人切片守住，不在这里。speech / message 都是直投（不经 world），原话/内容只在收件人
-    # 这条流里出现、world 那条流绝不含（承重红线，由 chat / send_message 工具双轨守住）。
+    # 当面说了话 / 谁隔手机发了消息（通信介质两态）、还记得自己刚回复过什么、还知道刚
+    # 发生了什么动静（六类不互相混淆）。六类都只取自她自己信箱的未读（_format_* 只取
+    # summary/source/kind/时间，全是投给她的、她够得着的），绝不含 world 全局快照——
+    # 信息差命门由 world 逐角色推演产出每人切片守住，不在这里。speech / message /
+    # own_chat_reply 都是直投（不经 world），原话/内容只在收件人这条流里出现、world 那条
+    # 流绝不含（承重红线，由 chat / send_message 工具三轨守住）。
     if unread:
-        idle_sense, surroundings, speech, messages, dynamics = _split_perception(unread)
+        idle_sense, surroundings, speech, messages, own_replies, dynamics = (
+            _split_perception(unread)
+        )
         if idle_sense:
             parts.append(
                 "【这一刻】（这份场景是这一轮真正唤醒你的理由，见下方它的感知时刻）：\n"
@@ -1127,6 +1164,15 @@ async def _run_life_round(
                 "【有人隔着手机给你发消息】（你们这会儿不在一起、隔着手机/飞书发来的，"
                 "不是当面说的，按发生先后）：\n"
                 f"{_format_messages(messages)}"
+            )
+        if own_replies:
+            # chat/life 并发重复回复修复：这是她**自己**刚发出去的话，绝不能和「别人
+            # 对你说话」/「离散动静」混在一起——混进去会被误当成"外部又来了一件事"，
+            # 诱发她再回应一次，与修复目的相反。
+            parts.append(
+                "【你刚对这次交流的回复】（这是你自己刚发出去的话，不是别人对你说的，"
+                "已经发过了、不用再回一遍）：\n"
+                f"{_format_own_chat_reply(own_replies)}"
             )
         if dynamics:
             parts.append(
