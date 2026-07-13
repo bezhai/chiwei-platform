@@ -20,6 +20,21 @@ async def test_generate_image_exposes_quality_levels_without_model_names():
     assert "gpt-image" not in str(schema).lower()
 
 
+async def test_generate_image_allows_general_requests_without_loading_drawing_skill():
+    definition = image_tool.generate_image.definition
+    query_description = definition.parameters["properties"]["query"]["description"]
+    size_description = definition.parameters["properties"]["size"]["description"]
+
+    assert "普通明确画图请求可直接调用" in definition.description
+    assert "涉及三姐妹或 Cosplay" in definition.description
+    assert "必须先 load_skill" not in definition.description
+    assert "drawing skill" not in query_description
+    assert "像素格式" in size_description
+    assert "1K" not in size_description
+    assert "2K" not in size_description
+    assert "4K" not in size_description
+
+
 async def test_generate_image_defaults_to_high_and_falls_back_to_normal():
     generated = AsyncMock(
         side_effect=[

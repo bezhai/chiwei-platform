@@ -79,11 +79,16 @@ async def read_images(
 async def generate_image(
     query: Annotated[
         str,
-        Field(description="英文生成图片提示词。按 drawing skill 指南撰写。"),
+        Field(description="英文生成图片提示词。具体描述主体、画面、环境和风格。"),
     ],
     size: Annotated[
         str,
-        Field(description="图片尺寸。可选值：1K、2K、4K 或像素值如 2048x2048"),
+        Field(
+            description=(
+                "目标画幅，使用像素格式，如 2048x2048、1536x2048、2048x1152；"
+                "后端会映射到模型支持的最近尺寸。"
+            )
+        ),
     ] = "2048x2048",
     image_list: Annotated[
         list[str] | None,
@@ -94,7 +99,7 @@ async def generate_image(
         Field(description="生成质量。high 更精细；normal 更快更稳定。不要询问或提及具体模型。"),
     ] = _DEFAULT_IMAGE_QUALITY,
 ) -> str | list[dict[str, Any]]:
-    """生成图片。调用前必须先 load_skill("drawing") 加载画图指南并遵循其流程。"""
+    """生成图片。普通明确画图请求可直接调用；涉及三姐妹或 Cosplay 时，先 load_skill("drawing") 加载人物画图指南。"""
     context = get_context()
     registry = context.image_registry
 
