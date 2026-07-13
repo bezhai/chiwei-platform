@@ -5,7 +5,7 @@ Covers:
   - generate_image dispatch: ark, openai, azure-http, google
   - _generate_image_ark: mock AsyncArk, verify params including reference_images
   - _generate_image_openai: mock AsyncOpenAI, verify proxy handling
-  - _generate_image_azure: mock AsyncAzureOpenAI, verify ModelHub-safe params
+  - _generate_image_azure: mock AsyncOpenAI, verify ModelHub image API contract
   - _generate_image_gemini: mock genai.Client, verify empty response raises RuntimeError
 """
 
@@ -267,7 +267,9 @@ class TestGenerateImageOpenai:
         mock_client_instance.images.generate = AsyncMock(return_value=mock_resp)
         mock_client_instance.close = AsyncMock()
 
-        with patch("openai.AsyncOpenAI", return_value=mock_client_instance) as mock_cls:
+        with patch(
+            "openai.AsyncOpenAI", return_value=mock_client_instance
+        ) as mock_cls:
             result = await mod._generate_image_openai(
                 _fake_info(),
                 "a dog",
@@ -347,7 +349,7 @@ class TestGenerateImageOpenai:
 
 
 class TestGenerateImageAzure:
-    async def test_basic_generation_uses_azure_protocol_and_supported_params(self):
+    async def test_basic_generation_uses_modelhub_openai_image_api(self):
         mock_img = SimpleNamespace(b64_json="azure_result", url=None)
         mock_resp = SimpleNamespace(data=[mock_img])
 
@@ -360,9 +362,7 @@ class TestGenerateImageAzure:
             base_url="https://modelhub.test/v2/crawl",
             client_type="azure-http",
         )
-        with patch(
-            "openai.AsyncAzureOpenAI", return_value=mock_client_instance
-        ) as mock_cls:
+        with patch("openai.AsyncOpenAI", return_value=mock_client_instance) as mock_cls:
             result = await mod._generate_image_azure(
                 info,
                 "a dog",
@@ -370,19 +370,20 @@ class TestGenerateImageAzure:
                 None,
             )
 
-        assert result == ["data:image/jpeg;base64,azure_result"]
+        assert result == ["data:image/png;base64,azure_result"]
         init_kwargs = mock_cls.call_args.kwargs
-        assert init_kwargs["azure_endpoint"] == "https://modelhub.test/v2/crawl"
-        assert init_kwargs["azure_deployment"] == "gpt-image-2"
+        assert init_kwargs["base_url"] == (
+            "https://aidp.bytedance.net/api/modelhub/online/v2/crawl/openai"
+        )
         assert init_kwargs["max_retries"] == 0
 
         call_kwargs = mock_client_instance.images.generate.call_args.kwargs
         assert call_kwargs == {
             "model": "gpt-image-2",
-            "response_format": "b64_json",
             "prompt": "a dog",
             "size": "1024x1536",
             "n": 1,
+            "extra_headers": {"api-key": "sk-test"},
         }
         mock_client_instance.close.assert_called_once()
 
@@ -390,7 +391,7 @@ class TestGenerateImageAzure:
         mock_client_instance = AsyncMock()
 
         with (
-            patch("openai.AsyncAzureOpenAI", return_value=mock_client_instance),
+            patch("openai.AsyncOpenAI", return_value=mock_client_instance),
             pytest.raises(ValueError, match="reference image URLs"),
         ):
             await mod._generate_image_azure(

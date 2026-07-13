@@ -19,7 +19,9 @@ ARK_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
 ARK_IMAGE_GENERATION_MAX_RETRIES = 0
 AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS = 240.0
 AZURE_IMAGE_GENERATION_MAX_RETRIES = 0
-_AZURE_API_VERSION = "2024-08-01-preview"
+_MODELHUB_IMAGE_BASE_URL = (
+    "https://aidp.bytedance.net/api/modelhub/online/v2/crawl/openai"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -201,13 +203,11 @@ async def _generate_image_azure(
             "ModelHub image generation does not accept reference image URLs"
         )
 
-    from openai import AsyncAzureOpenAI
+    from openai import AsyncOpenAI
 
     kwargs: dict[str, Any] = {
-        "azure_endpoint": info["base_url"],
-        "azure_deployment": info["model_name"],
         "api_key": info["api_key"],
-        "api_version": _AZURE_API_VERSION,
+        "base_url": _MODELHUB_IMAGE_BASE_URL,
         "timeout": AZURE_IMAGE_GENERATION_TIMEOUT_SECONDS,
         "max_retries": AZURE_IMAGE_GENERATION_MAX_RETRIES,
     }
@@ -221,16 +221,16 @@ async def _generate_image_azure(
             http_client = proxy_http_client(settings.forward_proxy_url)
             kwargs["http_client"] = http_client
 
-    client = AsyncAzureOpenAI(**kwargs)
+    client = AsyncOpenAI(**kwargs)
     try:
         resp = await client.images.generate(
             model=info["model_name"],
-            response_format="b64_json",
             prompt=prompt,
             size=_normalize_openai_image_size(size),  # type: ignore[arg-type]
             n=1,
+            extra_headers={"api-key": info["api_key"]},
         )
-        return [f"data:image/jpeg;base64,{img.b64_json}" for img in resp.data or []]
+        return [f"data:image/png;base64,{img.b64_json}" for img in resp.data or []]
     finally:
         await client.close()
         if http_client:
