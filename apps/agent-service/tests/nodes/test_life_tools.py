@@ -2658,8 +2658,10 @@ async def test_send_message_to_person_renders_through_chat_turn_then_emits(
     assert cc["user_id"] == "u-real-1"
     # 渲染层被调（喂渲染后出站）。
     assert len(stub_directory["render_args"]) == 1
-    # 真人不进信箱（真人没有 life 信箱）。
-    assert stub_handlers["delivered"] == []
+    # 真人自己不进信箱（真人没有 life 信箱），但发送者（akao 自己）的信箱要收到一条
+    # "我刚回复了什么"（chat/life 并发重复回复修复同款机制，详见
+    # test_send_message_to_person_delivers_own_reply_to_sender_mailbox）。
+    assert len(stub_handlers["delivered"]) == 1
     # 恰好 emit 一条出站段。
     assert len(stub_directory["emitted"]) == 1
     seg = stub_directory["emitted"][0]
@@ -2679,6 +2681,50 @@ async def test_send_message_to_person_renders_through_chat_turn_then_emits(
     assert seg.is_last is True, "主动发是一段完整消息（worker 据 is_last 收口）"
     # full_content 是渲染后完整文本（worker 据它收口）。
     assert seg.full_content == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_person_delivers_own_reply_to_sender_mailbox(
+    stub_handlers, stub_directory
+):
+    """真人分支 emit 出站成功后，把渲染后的原话投进**发送者自己**（persona_id）的信箱，
+    kind=EVENT_KIND_OWN_CHAT_REPLY —— 和 chat_node._wake_life_after_chat 同一套机制、
+    同一个 kind。
+
+    根因（prod 已用 ops-db + Langfuse trace 实锤复现）：主动发消息和 chat 回复一样，都
+    是先 emit(ChatResponseSegment(...)) 走 chat-response-worker 异步落库，同样存在时序
+    竞态——如果这次主动发之后、common_message 真正落库之前又有新的 life_wake 被触发，
+    下一轮同样会看不到"我刚主动说过这句话"，导致连续主动开口两次、且措辞可能前后不
+    一致。这里补的信箱投递就是让下一轮 life_wake 不再依赖那次异步落库。
+    """
+    from app.domain.world_events import EVENT_KIND_OWN_CHAT_REPLY
+
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想问他周末有没有空一起吃饭"}
+    )
+
+    assert len(stub_handlers["delivered"]) == 1
+    d = stub_handlers["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "akao", "投给发送者自己，不是收件的真人（真人没有信箱）"
+    assert d["summary"] == "嘿，在忙吗？想问问你周末有没有空一起吃个饭呀～", (
+        "投递的是渲染后真正发出去的话，不是 life 给的意图原文"
+    )
+    assert d["kind"] == EVENT_KIND_OWN_CHAT_REPLY
+    assert d["occurred_at"] == "2026-06-03T12:30:00+00:00"
 
 
 @pytest.mark.asyncio
@@ -3241,8 +3287,10 @@ async def test_send_message_to_group_renders_and_emits_group_segment(
     )
 
     assert isinstance(out, str) and out
-    # 群不进信箱（群没有 life 信箱）。
-    assert stub_handlers["delivered"] == []
+    # 群本身不进信箱（群没有 life 信箱），但发送者（akao 自己）的信箱要收到一条
+    # "我刚回复了什么"（同 p2p 分支，详见
+    # test_send_message_to_group_delivers_own_reply_to_sender_mailbox）。
+    assert len(stub_handlers["delivered"]) == 1
     # 恰好 emit 一条群出站段。
     assert len(stub_directory["emitted"]) == 1
     seg = stub_directory["emitted"][0]
@@ -3259,6 +3307,41 @@ async def test_send_message_to_group_renders_and_emits_group_segment(
     assert seg.is_last is True
     assert not seg.root_id, "群主动发没有来源消息，root_id 不伪造"
     assert seg.full_content == "刚那个话题我也想接一句～"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_group_delivers_own_reply_to_sender_mailbox(
+    stub_handlers, stub_directory
+):
+    """群分支 emit 出站成功后，同样把渲染后的原话投进发送者自己（persona_id）的信箱，
+    kind=EVENT_KIND_OWN_CHAT_REPLY —— 对称 p2p 分支（同一根因：群主动发一样先 emit 走
+    chat-response-worker 异步落库，一样存在时序竞态）。
+    """
+    from app.domain.world_events import EVENT_KIND_OWN_CHAT_REPLY
+
+    stub_directory["resolve_result"] = stub_directory["_GroupTarget"](
+        common_conversation_id="cc-group-1",
+        bot_name="chiwei",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "刚那个话题我也想接一句～"
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    await tools["send_message"].invoke(
+        {"uid": "group:cc-group-1", "content": "想接着群里的话题说一句"}
+    )
+
+    assert len(stub_handlers["delivered"]) == 1
+    d = stub_handlers["delivered"][0]
+    assert d["lane"] == "coe-t3"
+    assert d["persona_id"] == "akao", "投给发送者自己，不是群（群没有信箱）"
+    assert d["summary"] == "刚那个话题我也想接一句～", "投递的是渲染后真正发出去的话"
+    assert d["kind"] == EVENT_KIND_OWN_CHAT_REPLY
+    assert d["occurred_at"] == "2026-06-03T12:30:00+00:00"
 
 
 @pytest.mark.asyncio
