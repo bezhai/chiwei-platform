@@ -71,7 +71,7 @@ from app.runtime.persist import insert_idempotent
 #                      只用于角色↔角色的手机消息；给真人发飞书私聊不落信箱、走出站段。
 #   * ``idle_sense``   闲时刻主动周遭切片（life-idle-wake-via-sense Task 1）：world 用
 #                      sense 逐角色推演周遭时，若判断 recipient 此刻处于天然的闲时刻
-#                      （刚起床 / 睡前 / 饭后窝着这类——对她上次已知状态做时间外推，
+#                      （刚起床 / 刚做完一件事 / 饭后窝着这类——对她上次已知状态做时间外推，
 #                      不是等她先产生一个新动作），就把 ``idle=True`` 传给 sense。判断
 #                      准则里明确划了两条边界（见 world_loop_instruction 的 sense 段）：
 #                      正在安睡不算天然的闲、同一个没怎么变的静止场景不逐轮机械重复

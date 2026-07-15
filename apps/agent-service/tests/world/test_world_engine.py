@@ -2198,7 +2198,8 @@ async def test_world_instruction_enumerates_sense_tool():
 async def test_world_instruction_guides_idle_sense_wake_judgment():
     """life-idle-wake-via-sense Task 1：world_loop_instruction 必须补三处引导缺口——
 
-      ① sense 新增的 ``idle`` 参数说明，用刚起床 / 睡前 / 饭后窝着这类具体场景举例
+      ① sense 新增的 ``idle`` 参数说明，用刚起床 / 刚做完一件事 / 饭后窝着这类
+         仍有行动余地的具体场景举例
          （不是抽象的「闲」概念）；
       ② 场景持续静止不变的时候也该规律性地评估要不要再投一次 sense（原指令只在
          「角色刚醒来 / 周遭变了」这类反应式场景引导调用 sense，静止期从没被引导过，
@@ -2210,8 +2211,12 @@ async def test_world_instruction_guides_idle_sense_wake_judgment():
     instruction = engine_mod.world_loop_instruction()
 
     assert "idle" in instruction, "sense 段必须枚举新增的 idle 参数"
-    for example in ("刚起床", "睡前", "饭后"):
+    for example in ("刚起床", "刚做完一件事", "饭后"):
         assert example in instruction, f"idle 判断引导应举例具体的闲场景 {example!r}"
+    assert "睡前" not in instruction, "idle 不应再把睡前当作 canonical 主动唤醒场景"
+    assert "夜晚" in instruction and "安静" in instruction and "不足以" in instruction, (
+        "指令必须明确夜晚 / 安静本身不足以判 idle，避免主动投递睡眠暗示"
+    )
 
     assert ("静" in instruction) and (
         "顺手看一眼" in instruction or "规律性" in instruction

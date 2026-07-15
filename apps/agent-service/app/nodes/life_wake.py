@@ -319,6 +319,44 @@ _LIFE_WAKE_CFG = AgentConfig(
     "life_wake", "life-model", "life-wake", recursion_limit=30
 )
 
+
+_PERSONA_RHYTHM_HEADING = "## 你的节律"
+
+
+def _life_persona_lite(persona_lite: str, persona_core: str) -> str:
+    """把 ``persona_core`` 现有的精确节律段并入 Life 身份输入。
+
+    ``persona_lite`` 是周级慢漂后的当前身份，``persona_core`` 则保留了三姐妹稳定的
+    身体节律。这里只认当前明确合同里的 ``## 你的节律``，读到下一个二级标题就停；
+    不猜别名、不把整份 core 灌进 Life，也不另建字段或第二份角色作息映射。
+
+    节律只是长期底色，不是今天必须照表执行的日程，所以包装文案把决定权继续留给
+    角色。段缺失 / 为空时原样返回 ``persona_lite``。
+    """
+    lines = persona_core.splitlines()
+    try:
+        start = lines.index(_PERSONA_RHYTHM_HEADING)
+    except ValueError:
+        return persona_lite
+
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            break
+        body.append(line)
+    rhythm = "\n".join(body).strip()
+    if not rhythm:
+        return persona_lite
+
+    section = (
+        "【你自己的日常节律】（这是你长期自然形成的身体节律，不是今天必须照表执行"
+        "的安排；这一刻怎么过，仍由你结合真实时间和眼前的事自己决定。）\n"
+        f"{rhythm}"
+    )
+    base = persona_lite.rstrip()
+    return f"{base}\n\n{section}" if base else section
+
+
 def _humanize_elapsed(occurred_at: str, now: datetime) -> str | None:
     """把「感知时刻 → now 已过去多久」拼成自然语言时间锚（认知留白维度，刀 3 Task 4）。
 
@@ -389,7 +427,7 @@ def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> st
 def _format_idle_sense(idle_sense: list[EventEnvelope], now: datetime) -> str:
     """把闲时刻主动周遭切片（kind=idle_sense）拼成带诚实时间锚的「唤醒理由」。
 
-    idle_sense 是 world 判断她此刻处于天然闲时刻（刚起床 / 睡前 / 饭后窝着这类，
+    idle_sense 是 world 判断她此刻处于天然闲时刻（刚起床 / 刚做完一件事 / 饭后窝着这类，
     life-idle-wake-via-sense Task 1）时用 sense(idle=True) 投的周遭切片——内容形态
     与被动 :data:`~app.domain.world_events.EVENT_KIND_SURROUNDINGS` 完全一样（同一份
     客观周遭叙事），是这一轮唤醒她的理由。
@@ -873,7 +911,9 @@ async def _run_life_round(
     # transcript 继承）。falsy（空链 / 无页 / 读失败）→ 空字符串，langfuse 模板自然渲染成空。
     prompt_vars = {
         "persona_name": pc.display_name,
-        "persona_lite": pc.persona_lite,
+        # 不新增字段 / prompt var：从 persona_core 现有精确节律段读取，并入 Life 自己
+        # 这一份 persona_lite。chat / review 等其它读取方仍拿原 pc.persona_lite。
+        "persona_lite": _life_persona_lite(pc.persona_lite, pc.persona_core),
         "reply_style": pc.default_reply_style,
         "world_arc": arc_awareness or "",
         "day_page": day_page_text,
@@ -1087,6 +1127,23 @@ async def _run_life_round(
     # 时要把「5 分钟后」「周五」这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填
     # 日期分量（线上 bug：remind_at 被填到过去，提醒永远不在该响的那一刻触发）。
     parts.append(f"现在是 {cst_time.to_cst_full(observed_at)}。")
+
+    # 连续意识流里的真实时间桥：暖会话仍靠 transcript 记得上一刻做过什么，不重复灌
+    # snapshot 正文（尤其不重灌「困 / 睡」制造黏性）；但每轮都要看见从上一版状态到
+    # 现实此刻究竟只过了多久。否则密集聊天 / event 会让模型把“又醒一轮”误当成生活
+    # 已经自然跨过一段时间，在两三分钟里把休息逐轮推进成困倦、入睡。
+    #
+    # 这里只优化输入、不替她决策：新事实确实足以改变状态时照样能改；没有变化时也可
+    # 延续。冷启已有下方带同款时间锚的完整恢复段，不重复插第二份桥。
+    if not cold_start and snapshot is not None:
+        anchor = _humanize_elapsed(snapshot.observed_at, now)
+        recorded_when = anchor if anchor is not None else "隔了一段时间"
+        parts.append(
+            "【现实时间的间隔】\n"
+            f"你上一次记下状态是在{recorded_when}。这一轮出现了新的消息或动静，只是"
+            "多了一份此刻的信息，不等于你的生活、身体或困意自动跨过了一段时间。把"
+            "真实经过的时间和新事实一起感受：状态确实变了再更新，没变也可以自然延续。"
+        )
 
     # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
     # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript

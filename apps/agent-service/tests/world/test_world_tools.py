@@ -588,7 +588,7 @@ async def test_sense_delivers_passive_kind_without_wake_param(_ctx):
 @pytest.mark.asyncio
 async def test_sense_idle_true_delivers_active_kind_that_knocks(_ctx):
     """life-idle-wake-via-sense Task 1，spec 决策 4：world 判断这一刻是天然闲时刻
-    （刚起床 / 睡前 / 饭后窝着这类）时，``sense(idle=True)`` 必须投一个与被动
+    （刚起床 / 刚做完一件事 / 饭后窝着这类）时，``sense(idle=True)`` 必须投一个与被动
     ``surroundings`` 不同的新 kind（``EVENT_KIND_IDLE_SENSE``），且这个新 kind
     **不在** ``PASSIVE_EVENT_KINDS`` 里——wake 判定统一走 kind 归属，不引入独立的
     wake 参数，即时敲门与补敲对账两条路径因此天然口径一致（见 mailbox 测试）。
@@ -612,6 +612,15 @@ async def test_sense_idle_true_delivers_active_kind_that_knocks(_ctx):
     assert d["summary"] == "你窝在沙发上，电视开着，屋里很安静。"
     assert d["persona_id"] == "ayana"
     assert d["lane"] == "coe-t2"
+
+
+def test_sense_idle_description_does_not_prime_bedtime():
+    """工具 schema 与 world 循环指令使用同一套 idle 语义，不能在工具侧残留旧暗示。"""
+    doc = sense.definition.description
+    assert "刚做完一件事" in doc
+    assert "睡前" not in doc
+    assert "夜晚" in doc and "安静" in doc and "不足以" in doc
+    assert "休息" in doc and "入睡" in doc and "提示" in doc
 
 
 @pytest.mark.asyncio

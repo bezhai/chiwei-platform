@@ -202,6 +202,7 @@ def patched(monkeypatch):
         "recent_chat_calls": [],  # find_persona_related_chats_recent 收到的 kwargs
         "recent_chat_raises": None,  # 非 None → recent chat 查询抛它（读失败）
         "default_reply_style": "",  # load_persona 返回的 PersonaContext.default_reply_style
+        "persona_core": "",  # load_persona 返回的稳定 persona_core（含可选「你的节律」段）
     }
 
     async def fake_read_world_arc(*, lane):
@@ -235,6 +236,7 @@ def patched(monkeypatch):
             persona_id=persona_id,
             display_name=persona_id,
             persona_lite=f"{persona_id} 的人设",
+            persona_core=state["persona_core"],
             default_reply_style=state["default_reply_style"],
         )
 
@@ -371,6 +373,54 @@ async def test_prompt_vars_carries_persona_reply_style(patched, monkeypatch):
 
     pv = _FakeAgent.last_run()["prompt_vars"]
     assert pv.get("reply_style") == "才、才没有很开心好吗 >///<"
+
+
+@pytest.mark.asyncio
+async def test_life_persona_reuses_existing_rhythm_section_without_new_prompt_var(
+    patched, monkeypatch
+):
+    """Life 复用 persona_core 已有「你的节律」，并入既有 persona_lite 契约。
+
+    不新增 DB 字段 / Prompt 变量，也不把 persona_core 全文灌进 Life。精确节律段之后的
+    「你的家」必须被截断，避免稳定身份输入突然膨胀成整份遗留 core。
+    """
+    patched["persona_core"] = (
+        "## 性格底色\n好奇。\n\n"
+        "## 你的节律\n起床困难，下午精力最好。\n深夜会安静下来，但仍会看感兴趣的东西。\n\n"
+        "## 你的家\n这里不该进入 Life 的节律段。"
+    )
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    pv = _FakeAgent.last_run()["prompt_vars"]
+    assert set(pv) == {
+        "persona_name",
+        "persona_lite",
+        "reply_style",
+        "world_arc",
+        "day_page",
+    }, "节律必须复用既有 persona_lite，不新增 Prompt 变量"
+    assert "akao 的人设" in pv["persona_lite"]
+    assert "【你自己的日常节律】" in pv["persona_lite"]
+    assert "下午精力最好" in pv["persona_lite"]
+    assert "深夜会安静下来" in pv["persona_lite"]
+    assert "这里不该进入" not in pv["persona_lite"]
+
+
+@pytest.mark.asyncio
+async def test_life_persona_without_exact_rhythm_section_stays_unchanged(
+    patched, monkeypatch
+):
+    """没有精确「## 你的节律」段就不猜别名、不补占位，persona_lite 原样进入。"""
+    patched["persona_core"] = "## 日常作息\n这是另一个标题，不做兼容猜测。"
+    patched["unread"] = [_envelope("e1", "水壶在响")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert _FakeAgent.last_run()["prompt_vars"]["persona_lite"] == "akao 的人设"
 
 
 # --- proactive 增量水位：本轮进入时 snapshot.observed_at → build_life_tools ----
@@ -2280,6 +2330,46 @@ async def test_transcript_non_empty_no_recovery_segment(patched, monkeypatch):
     )
     # 但当轮新感知照常在 USER
     assert "门铃响了" in msg_blob
+
+
+@pytest.mark.asyncio
+async def test_warm_round_shows_real_elapsed_time_without_reinjecting_old_state(
+    patched, monkeypatch
+):
+    """连续意识流每轮都看见现实间隔，但旧状态正文仍不重复灌入。
+
+    这条拦截密集事件把每次唤醒误当剧情时间步：现实只过两分钟时，模型能看见这个
+    事实；同时不再把「窝着犯困」重复一次，避免用修时间问题的输入制造新的睡意黏性。
+    """
+    from datetime import datetime
+
+    from app.agent.neutral import Message, Role
+
+    now = datetime(2026, 6, 3, 20, 30, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="窝在沙发上有点犯困",
+        response_mood="懒洋洋",
+        activity_type="rest",
+        observed_at="2026-06-03T20:28:00+08:00",
+    )
+    patched["transcript"] = [
+        Message(role=Role.USER, content="上一轮的感知"),
+        Message(role=Role.ASSISTANT, content="上一轮她的回应"),
+    ]
+    patched["unread"] = [_envelope("e1", "群里又来了一条消息")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    msg_blob = "".join(m.text() for m in _FakeAgent.last_run()["messages"])
+    assert "2 分钟前" in msg_blob
+    assert "现实时间" in msg_blob
+    assert "不等于" in msg_blob and "自动" in msg_blob
+    assert "窝在沙发上有点犯困" not in msg_blob, "暖会话不能重复注入旧状态正文"
+    assert "群里又来了一条消息" in msg_blob
 
 
 @pytest.mark.asyncio
