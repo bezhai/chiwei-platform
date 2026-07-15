@@ -3056,9 +3056,10 @@ async def test_send_message_resolves_with_sender_persona_id(
 ):
     """send_message 解析投递目标要把**发送者 persona_id** 透给 resolve_delivery。
 
-    群分支解析「该 persona 在这个群的 active bot」必须知道是哪个 persona 在发；persona/
-    user 分支不用它但带着也无害（resolver 只在 group 分支消费）。承重：resolve_delivery
-    收到的 persona_id == 本轮闭包绑定的 persona（akao），不是 None。
+    群分支解析「该 persona 在这个群的 active bot」必须知道是哪个 persona 在发；user
+    分支同样必须知道（按 persona 过滤私聊线，避免真人跟不止一个姐妹私聊过时串到别人
+    的 bot）；persona 分支不用它但带着也无害。承重：resolve_delivery 收到的
+    persona_id == 本轮闭包绑定的 persona（akao），不是 None。
     """
     stub_directory["resolve_result"] = stub_directory["_MailboxTarget"](
         persona_id="ayana"

@@ -262,6 +262,7 @@ async def _seed_bezhai_with_p2p():
         scope="direct",
         event_time=1000,
     )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +398,7 @@ async def test_resolve_unknown_persona_uid_fails_loud(directory_db):
 async def test_resolve_user_uid_with_p2p_to_lark_target(directory_db):
     await _seed_bezhai_with_p2p()
 
-    target = await resolve_delivery(f"user:{_BEZHAI}")
+    target = await resolve_delivery(f"user:{_BEZHAI}", persona_id="akao")
 
     assert isinstance(target, LarkP2PTarget)
     assert target.common_conversation_id == str(_BEZHAI_P2P)
@@ -420,7 +421,7 @@ async def test_resolve_user_uid_no_p2p_fails_loud(directory_db):
     )
 
     with pytest.raises(UndeliverableRecipient) as exc:
-        await resolve_delivery(f"user:{_STRANGER}")
+        await resolve_delivery(f"user:{_STRANGER}", persona_id="akao")
     msg = str(exc.value)
     assert "私聊" in msg or "p2p" in msg.lower()
 
@@ -430,7 +431,7 @@ async def test_resolve_unknown_user_uid_fails_loud(directory_db):
     await _seed_bezhai_with_p2p()
 
     with pytest.raises(UndeliverableRecipient):
-        await resolve_delivery(f"user:{uuid.uuid4()}")
+        await resolve_delivery(f"user:{uuid.uuid4()}", persona_id="akao")
 
 
 @pytest.mark.integration
@@ -449,11 +450,117 @@ async def test_resolve_user_uid_non_lark_direct_fails_loud(directory_db):
     await _seed_message(
         conv, user_id=user, bot_name="chiwei", scope="direct", event_time=1, channel="wecom"
     )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
 
     with pytest.raises(UndeliverableRecipient) as exc:
-        await resolve_delivery(f"user:{user}")
+        await resolve_delivery(f"user:{user}", persona_id="akao")
     msg = str(exc.value)
     assert "私聊" in msg or "p2p" in msg.lower()
+
+
+@pytest.mark.integration
+async def test_resolve_user_uid_picks_persona_specific_bot(directory_db):
+    """真人同时跟不止一个姐妹的 bot 私聊过 → 解析出**当前发送 persona 自己**的私聊线，
+    不管哪条线最近活跃过（这是本次要修的 bug：之前只取全局最近一条，跟发送者是谁无关，
+    会把千凪的话用赤尾的 bot 发出去，人设串味）。
+
+    这里 chinagi 的私聊线更晚活跃（event_time 更大），但调用方是 akao → 必须解析出
+    akao 自己那条更早的私聊线 + chiwei bot，绝不因为 chinagi 的线最近就选错。
+    """
+    conv_chinagi = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bezhai-chinagi-p2p")
+    await _seed_user(_BEZHAI, "原智鸿")
+    await _seed_conversation(_BEZHAI_P2P, scope="direct", name="原智鸿-akao线")
+    await _seed_message(
+        _BEZHAI_P2P, user_id=_BEZHAI, bot_name="chiwei", scope="direct", event_time=1000,
+    )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+
+    await _seed_conversation(conv_chinagi, scope="direct", name="原智鸿-chinagi线")
+    await _seed_message(
+        conv_chinagi, user_id=_BEZHAI, bot_name="chinagi-bot", scope="direct", event_time=2000,
+    )
+    await _seed_bot_config("chinagi-bot", "chinagi", is_active=True)
+
+    target = await resolve_delivery(f"user:{_BEZHAI}", persona_id="akao")
+
+    assert isinstance(target, LarkP2PTarget)
+    assert target.bot_name == "chiwei", "解析出 akao 自己的 bot，不串到 chinagi 的"
+    assert target.common_conversation_id == str(_BEZHAI_P2P)
+
+
+@pytest.mark.integration
+async def test_resolve_user_uid_no_persona_specific_p2p_fails_loud(directory_db):
+    """真人只跟**别的 persona** 的 bot 私聊过、没跟当前发送 persona 私聊过 → 不可投递，
+    绝不因为别的 persona 那条线存在就误当可投递（fail-loud，不代选）。
+    """
+    conv_chinagi = uuid.uuid5(uuid.NAMESPACE_OID, "conv-only-chinagi-p2p")
+    await _seed_user(_OTHER, "只跟千凪聊过的人")
+    await _seed_conversation(conv_chinagi, scope="direct", name="千凪线")
+    await _seed_message(
+        conv_chinagi, user_id=_OTHER, bot_name="chinagi-bot", scope="direct", event_time=1000,
+    )
+    await _seed_bot_config("chinagi-bot", "chinagi", is_active=True)
+
+    with pytest.raises(UndeliverableRecipient) as exc:
+        await resolve_delivery(f"user:{_OTHER}", persona_id="akao")
+    msg = str(exc.value)
+    assert "私聊" in msg or "p2p" in msg.lower()
+
+
+@pytest.mark.integration
+async def test_resolve_user_uid_picks_most_recent_among_persona_own_bots(directory_db):
+    """同一 persona 名下有不止一个 bot（各自一条私聊线）→ 在**自己名下**的线里选最近
+    活跃的那条，不是随便一条（过滤到 persona 名下之后，"选最近"这条既有行为要保留）。
+    """
+    conv_old = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bezhai-akao-old-bot")
+    conv_new = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bezhai-akao-new-bot")
+    await _seed_user(_BEZHAI, "原智鸿")
+    await _seed_conversation(conv_old, scope="direct", name="旧线")
+    await _seed_message(
+        conv_old, user_id=_BEZHAI, bot_name="chiwei-old", scope="direct", event_time=1000,
+    )
+    await _seed_bot_config("chiwei-old", "akao", is_active=True)
+
+    await _seed_conversation(conv_new, scope="direct", name="新线")
+    await _seed_message(
+        conv_new, user_id=_BEZHAI, bot_name="chiwei-new", scope="direct", event_time=2000,
+    )
+    await _seed_bot_config("chiwei-new", "akao", is_active=True)
+
+    target = await resolve_delivery(f"user:{_BEZHAI}", persona_id="akao")
+
+    assert target.bot_name == "chiwei-new", "同名下多个 bot 时选最近活跃那条"
+    assert target.common_conversation_id == str(conv_new)
+
+
+@pytest.mark.integration
+async def test_resolve_user_uid_falls_back_to_active_bot_when_latest_inactive(
+    directory_db,
+):
+    """最近活跃的那条私聊线所属 bot 已经 inactive（下线 / 停用）→ 不当它可投递，回退
+    到同 persona 名下仍 active 的那条旧线，而不是直接 fail-loud（还有一条能发就该发）。
+    """
+    conv_old_active = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bezhai-akao-still-active")
+    conv_new_inactive = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bezhai-akao-retired-bot")
+    await _seed_user(_BEZHAI, "原智鸿")
+    await _seed_conversation(conv_old_active, scope="direct", name="仍在用的线")
+    await _seed_message(
+        conv_old_active, user_id=_BEZHAI, bot_name="chiwei-active", scope="direct",
+        event_time=1000,
+    )
+    await _seed_bot_config("chiwei-active", "akao", is_active=True)
+
+    await _seed_conversation(conv_new_inactive, scope="direct", name="bot 已下线的线")
+    await _seed_message(
+        conv_new_inactive, user_id=_BEZHAI, bot_name="chiwei-retired", scope="direct",
+        event_time=2000,
+    )
+    await _seed_bot_config("chiwei-retired", "akao", is_active=False)
+
+    target = await resolve_delivery(f"user:{_BEZHAI}", persona_id="akao")
+
+    assert target.bot_name == "chiwei-active", "最近那条的 bot 已下线，回退到仍 active 的旧线"
+    assert target.common_conversation_id == str(conv_old_active)
 
 
 async def test_resolve_malformed_user_id_fails_loud():
