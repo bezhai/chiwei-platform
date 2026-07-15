@@ -530,7 +530,8 @@ def build_life_tools(
         # @tool_error 把它收成结构化 outcome（str(exc) 进 message）喂回 life 让她处置
         # （换个人 / 重试 / 算了）——不在这里 catch、不静默降级、不替她另找目标（决策 6）。
         # 带上发送者 persona_id：群分支据它解析「该 persona 在这个群的 active bot」（出站
-        # 身份钉死）；persona / user 分支不消费它（resolver 只在 group 分支用）。
+        # 身份钉死）；user 分支同样据它把私聊线限定在这个 persona 自己名下的 bot（避免
+        # 真人跟不止一个姐妹私聊过时串到别人的 bot）；persona 分支不消费它。
         target = await resolve_delivery(uid, persona_id=persona_id)
 
         # next_seq 模式（命门同 chat_seq / act_seq）：用 send_seq+1 算这件 send 的投递键，
