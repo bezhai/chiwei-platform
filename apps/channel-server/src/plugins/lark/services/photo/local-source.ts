@@ -13,38 +13,204 @@ interface LocalPixivMongoConfig {
     connectTimeoutMS: number;
 }
 
+interface LocalPixivCandidateCollection {
+    aggregate(
+        pipeline: Document[],
+        options?: { allowDiskUse?: boolean },
+    ): { toArray(): Promise<Document[]> };
+}
+
+export type LocalPixivCandidateCursor =
+    | {
+          mode: 'ordered';
+          updateTime: unknown;
+          id: unknown;
+      }
+    | {
+          mode: 'explicit';
+          offset: number;
+      };
+
+export interface LocalPixivCandidateRequest {
+    params: ListPixivImageDto;
+    limit: number;
+    cursor?: LocalPixivCandidateCursor;
+    excludedPixivAddrs?: readonly string[];
+}
+
+export interface LocalPixivCandidatePage {
+    images: ImageForLark[];
+    cursor?: LocalPixivCandidateCursor;
+    exhausted: boolean;
+}
+
+interface LocalPixivCandidateDependencies {
+    collection?: LocalPixivCandidateCollection;
+}
+
 let mongoClient: MongoClient | null = null;
 let mongoCollection: Collection<Document> | null = null;
 let minioClient: Minio.Client | null = null;
 
 export async function getLocalPixivImages(params: ListPixivImageDto): Promise<ImageForLark[]> {
-    const collection = await getPixivImageCollection();
-    const filter = buildLocalPixivImageFilter(params);
     const limit = Math.max(1, params.page_size || 6);
-    const skip = Math.max(0, ((params.page || 1) - 1) * limit);
+    return (await getLocalPixivImageCandidates({ params, limit })).images;
+}
 
-    let docs: Document[];
-    if (params.random_mode) {
-        docs = await collection
-            .aggregate([{ $match: filter }, { $sample: { size: limit } }])
-            .toArray();
-    } else {
-        docs = await collection
-            .find(filter)
-            .sort({ update_time: -1, illust_id: -1, _id: -1 })
-            .skip(skip)
-            .limit(limit)
-            .toArray();
+export async function getLocalPixivImageCandidates(
+    request: LocalPixivCandidateRequest,
+    dependencies: LocalPixivCandidateDependencies = {},
+): Promise<LocalPixivCandidatePage> {
+    const limit = Math.max(1, request.limit);
+    const explicitWindow = getExplicitWindow(request, limit);
+    if (explicitWindow && explicitWindow.addresses.length === 0) {
+        return {
+            images: [],
+            cursor: { mode: 'explicit', offset: explicitWindow.nextOffset },
+            exhausted: true,
+        };
     }
 
-    const images = docs
-        .map(mapLocalPixivImageDoc)
-        .filter((image): image is ImageForLark => !!image);
-    if (params.pixiv_addrs?.length) {
-        const order = new Map(params.pixiv_addrs.map((addr, index) => [addr, index]));
-        images.sort((a, b) => (order.get(a.pixiv_addr) ?? 0) - (order.get(b.pixiv_addr) ?? 0));
+    const collection = dependencies.collection ?? (await getPixivImageCollection());
+    const docs = await collection
+        .aggregate(buildLocalPixivCandidatePipeline({ ...request, limit }), {
+            allowDiskUse: true,
+        })
+        .toArray();
+
+    if (explicitWindow) {
+        const allowed = new Set(explicitWindow.addresses);
+        const byAddress = new Map<string, ImageForLark>();
+        for (const doc of docs) {
+            const image = mapLocalPixivImageDoc(doc);
+            if (image && allowed.has(image.pixiv_addr) && !byAddress.has(image.pixiv_addr)) {
+                byAddress.set(image.pixiv_addr, image);
+            }
+        }
+        const images = explicitWindow.addresses
+            .map((pixivAddr) => byAddress.get(pixivAddr))
+            .filter((image): image is ImageForLark => !!image);
+        return {
+            images,
+            cursor: { mode: 'explicit', offset: explicitWindow.nextOffset },
+            exhausted: explicitWindow.exhausted,
+        };
     }
-    return images;
+
+    const images: ImageForLark[] = [];
+    const seen = new Set<string>();
+    for (const doc of docs) {
+        const image = mapLocalPixivImageDoc(doc);
+        if (image && !seen.has(image.pixiv_addr)) {
+            seen.add(image.pixiv_addr);
+            images.push(image);
+        }
+    }
+
+    if (request.params.random_mode) {
+        return {
+            images,
+            exhausted: docs.length < limit,
+        };
+    }
+
+    const lastDoc = docs.at(-1);
+    return {
+        images,
+        cursor: lastDoc
+            ? {
+                  mode: 'ordered',
+                  updateTime: lastDoc.__candidate_update_time ?? lastDoc.update_time ?? new Date(0),
+                  id: lastDoc._id,
+              }
+            : request.cursor,
+        exhausted: docs.length < limit,
+    };
+}
+
+export function buildLocalPixivCandidatePipeline(request: LocalPixivCandidateRequest): Document[] {
+    const limit = Math.max(1, request.limit);
+    const explicitWindow = getExplicitWindow(request, limit);
+    const params = explicitWindow
+        ? { ...request.params, pixiv_addrs: explicitWindow.addresses }
+        : request.params;
+    const filter = addExcludedPixivAddrs(
+        buildLocalPixivImageFilter(params),
+        request.excludedPixivAddrs,
+    );
+    const pipeline: Document[] = [
+        { $match: filter },
+        {
+            $set: {
+                __has_image_key: {
+                    $cond: [
+                        {
+                            $and: [
+                                { $eq: [{ $type: '$image_key' }, 'string'] },
+                                { $ne: ['$image_key', ''] },
+                            ],
+                        },
+                        1,
+                        0,
+                    ],
+                },
+            },
+        },
+        {
+            $sort: {
+                pixiv_addr: 1,
+                __has_image_key: -1,
+                update_time: -1,
+                _id: -1,
+            },
+        },
+        { $group: { _id: '$pixiv_addr', __candidate: { $first: '$$ROOT' } } },
+        { $replaceWith: '$__candidate' },
+        {
+            $set: {
+                __candidate_update_time: { $ifNull: ['$update_time', new Date(0)] },
+            },
+        },
+    ];
+
+    if (explicitWindow) {
+        pipeline.push({ $limit: Math.max(1, explicitWindow.addresses.length) });
+        return pipeline;
+    }
+
+    if (request.params.random_mode) {
+        pipeline.push({ $sample: { size: limit } });
+        return pipeline;
+    }
+
+    if (request.cursor) {
+        if (request.cursor.mode !== 'ordered') {
+            throw new Error('ordered pixiv candidate query requires an ordered cursor');
+        }
+        pipeline.push({
+            $match: {
+                $or: [
+                    { __candidate_update_time: { $lt: request.cursor.updateTime } },
+                    {
+                        __candidate_update_time: request.cursor.updateTime,
+                        _id: { $lt: request.cursor.id },
+                    },
+                ],
+            },
+        });
+    }
+
+    pipeline.push({ $sort: { __candidate_update_time: -1, _id: -1 } });
+    if (!request.cursor) {
+        const skip = Math.max(
+            0,
+            (Math.max(1, request.params.page || 1) - 1) *
+                Math.max(1, request.params.page_size || 6),
+        );
+        if (skip > 0) pipeline.push({ $skip: skip });
+    }
+    pipeline.push({ $limit: limit });
+    return pipeline;
 }
 
 export async function getLocalPixivImageContent(tosFileName: string): Promise<Buffer> {
@@ -68,15 +234,23 @@ export async function reportLocalLarkUpload(params: ReportLarkUploadDto): Promis
 }
 
 export function buildLocalPixivImageFilter(params: ListPixivImageDto): Filter<Document> {
-    const and: Filter<Document>[] = [];
+    const and: Filter<Document>[] = [
+        {
+            pixiv_addr: { $type: 'string', $ne: '' },
+            $or: [
+                { image_key: { $type: 'string', $ne: '' } },
+                { tos_file_name: { $type: 'string', $ne: '' } },
+            ],
+        },
+    ];
 
     const statusFilter = buildStatusFilter(params.status);
     if (statusFilter) {
         and.push(statusFilter);
     }
 
-    if (params.pixiv_addrs?.length) {
-        and.push({ pixiv_addr: { $in: params.pixiv_addrs } });
+    if (params.pixiv_addrs !== undefined) {
+        and.push({ pixiv_addr: { $in: dedupePixivAddrs(params.pixiv_addrs) } });
     }
 
     if (params.start_time !== undefined) {
@@ -92,11 +266,60 @@ export function buildLocalPixivImageFilter(params: ListPixivImageDto): Filter<Do
                 { title: pattern },
                 { 'multi_tags.name': pattern },
                 { 'multi_tags.translation': pattern },
+                { tagger_search_terms: pattern },
             ],
         });
     }
 
-    return and.length === 0 ? {} : { $and: and };
+    return { $and: and };
+}
+
+export function dedupePixivAddrs(pixivAddrs: readonly string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const pixivAddr of pixivAddrs) {
+        if (pixivAddr.length === 0 || seen.has(pixivAddr)) continue;
+        seen.add(pixivAddr);
+        result.push(pixivAddr);
+    }
+    return result;
+}
+
+function getExplicitWindow(
+    request: LocalPixivCandidateRequest,
+    limit: number,
+): {
+    addresses: string[];
+    nextOffset: number;
+    exhausted: boolean;
+} | null {
+    if (request.params.pixiv_addrs === undefined) return null;
+    if (request.cursor && request.cursor.mode !== 'explicit') {
+        throw new Error('explicit pixiv candidate query requires an explicit cursor');
+    }
+
+    const pixivAddrs = dedupePixivAddrs(request.params.pixiv_addrs);
+    const offset = request.cursor
+        ? request.cursor.offset
+        : Math.max(0, Math.max(1, request.params.page || 1) - 1) *
+          Math.max(1, request.params.page_size || 6);
+    const nextOffset = Math.min(pixivAddrs.length, offset + limit);
+    return {
+        addresses: pixivAddrs.slice(offset, nextOffset),
+        nextOffset,
+        exhausted: nextOffset >= pixivAddrs.length,
+    };
+}
+
+function addExcludedPixivAddrs(
+    filter: Filter<Document>,
+    excludedPixivAddrs: readonly string[] | undefined,
+): Filter<Document> {
+    const excluded = dedupePixivAddrs(excludedPixivAddrs ?? []);
+    if (excluded.length === 0) return filter;
+    const and = Array.isArray(filter.$and) ? [...filter.$and] : [filter];
+    and.push({ pixiv_addr: { $nin: excluded } });
+    return { $and: and };
 }
 
 export function mapLocalPixivImageDoc(doc: Document): ImageForLark | null {

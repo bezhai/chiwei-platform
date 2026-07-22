@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { syncPixivToMinioForTagger, type MinioSyncForTaggerResult } from '../storage/syncPage';
 import type { TaggerSubmitClient } from './submitClient';
 import {
@@ -17,6 +18,7 @@ export interface TaggerTriggerWorkerDeps {
     submitClient: TaggerSubmitClient;
     config: TaggerTriggerConfig;
     syncPixivToMinio?: (pixivAddr: string) => Promise<MinioSyncForTaggerResult>;
+    leaseToken?: () => string;
     sleep?: (ms: number) => Promise<void>;
 }
 
@@ -69,7 +71,7 @@ export async function processTaggerTriggerBatch(deps: TaggerTriggerWorkerDeps): 
     if (claimedDocs.length > 0) {
         await processClaimedBatch(claimedDocs, deps);
     }
-    return docs.length;
+    return claimedDocs.length;
 }
 
 async function claimOne(
@@ -79,6 +81,7 @@ async function claimOne(
     const path = doc.pixiv_addr;
     const claimedDoc = await deps.repository.claimDueTriggerImage({
         path,
+        leaseToken: (deps.leaseToken ?? randomUUID)(),
         processingTimeoutMs: deps.config.processingTimeoutMs,
     });
     if (!claimedDoc) {
@@ -95,11 +98,12 @@ async function processClaimedBatch(
     const result = await triggerTaggerForPixivAddrs(docs.map((doc) => doc.pixiv_addr), {
         syncPixivToMinio: deps.syncPixivToMinio ?? syncPixivToMinioForTagger,
         submitClient: deps.submitClient,
-        repository: deps.repository,
         callbackUrl: deps.config.callbackUrl,
     });
 
     if (result.status === 'submitted') {
+        const claims = result.items.map((item) => processingClaimFor(item.pixivAddr, docs));
+        await deps.repository.markSubmitted({ taskId: result.taskId, claims });
         for (const item of result.items) {
             console.log(
                 `Tagger trigger submitted: pixiv_addr=${item.pixivAddr} object_name=${item.objectName} task_id=${result.taskId} batch_size=${result.items.length}`
@@ -109,6 +113,12 @@ async function processClaimedBatch(
         console.warn(
             `Tagger trigger submit failed: paths=${result.items.map((item) => item.objectName).join(',')} error=${result.error}`
         );
+        for (const item of result.items) {
+            const doc = docs.find((candidate) => candidate.pixiv_addr === item.pixivAddr);
+            if (doc) {
+                await handleSubmitFailure(doc, result.error, result.retryable, deps);
+            }
+        }
     }
 
     for (const skipped of result.skipped) {
@@ -120,6 +130,28 @@ async function processClaimedBatch(
     }
 }
 
+async function handleSubmitFailure(
+    doc: TaggerImageResultDocument,
+    error: string,
+    retryable: boolean,
+    deps: TaggerTriggerWorkerDeps
+): Promise<void> {
+    const attempts = (doc.attempts ?? 0) + 1;
+    if (!retryable || attempts >= deps.config.maxAttempts) {
+        await deps.repository.markSubmitFailed({ claims: [processingClaim(doc)], error });
+        return;
+    }
+
+    await deps.repository.markRetry({
+        path: doc.pixiv_addr,
+        generation: requireGeneration(doc),
+        leaseToken: requireProcessingLease(doc),
+        error,
+        attempts,
+        nextAttemptAt: new Date(Date.now() + deps.config.retryDelayMs),
+    });
+}
+
 async function handleSkipped(
     doc: TaggerImageResultDocument,
     skipped: TriggerSkippedItem,
@@ -129,7 +161,7 @@ async function handleSkipped(
     const attempts = (doc.attempts ?? 0) + 1;
     const error = formatSkippedError(skipped);
     if (attempts >= deps.config.maxAttempts || skipped.reason === 'disabled') {
-        await deps.repository.markSubmitFailed({ paths: [path], error });
+        await deps.repository.markSubmitFailed({ claims: [processingClaim(doc)], error });
         console.warn(`Tagger trigger exhausted: pixiv_addr=${path} attempts=${attempts} error=${error}`);
         return;
     }
@@ -137,6 +169,8 @@ async function handleSkipped(
     const nextAttemptAt = new Date(Date.now() + deps.config.retryDelayMs);
     await deps.repository.markRetry({
         path,
+        generation: requireGeneration(doc),
+        leaseToken: requireProcessingLease(doc),
         error,
         attempts,
         nextAttemptAt,
@@ -144,6 +178,39 @@ async function handleSkipped(
     console.warn(
         `Tagger trigger will retry: pixiv_addr=${path} attempts=${attempts}/${deps.config.maxAttempts} next_attempt_at=${nextAttemptAt.toISOString()} error=${error}`
     );
+}
+
+function processingClaimFor(
+    pixivAddr: string,
+    docs: TaggerImageResultDocument[]
+): { path: string; generation: number; leaseToken: string } {
+    const doc = docs.find((candidate) => candidate.pixiv_addr === pixivAddr);
+    if (!doc) throw new Error(`missing claimed tagger image: ${pixivAddr}`);
+    return processingClaim(doc);
+}
+
+function processingClaim(
+    doc: TaggerImageResultDocument
+): { path: string; generation: number; leaseToken: string } {
+    return {
+        path: doc.pixiv_addr,
+        generation: requireGeneration(doc),
+        leaseToken: requireProcessingLease(doc),
+    };
+}
+
+function requireGeneration(doc: TaggerImageResultDocument): number {
+    if (doc.generation === undefined) {
+        throw new Error(`claimed tagger image is missing generation: ${doc.pixiv_addr}`);
+    }
+    return doc.generation;
+}
+
+function requireProcessingLease(doc: TaggerImageResultDocument): string {
+    if (!doc.processing_lease_token) {
+        throw new Error(`claimed tagger image is missing processing lease: ${doc.pixiv_addr}`);
+    }
+    return doc.processing_lease_token;
 }
 
 function formatSkippedError(result: TriggerSkippedItem): string {

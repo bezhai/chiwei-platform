@@ -14,6 +14,58 @@ function makeMockHttp() {
 
 const AUTH = { cookie: 'ck', user_agent: 'ua', sec_ch_ua: 'sec' };
 
+async function withoutFollowerDelay<T>(run: () => Promise<T>): Promise<T> {
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((callback: (...args: any[]) => void, _delay?: number, ...args: any[]) => {
+        callback(...args);
+        return 0 as any;
+    }) as typeof globalThis.setTimeout;
+
+    try {
+        return await run();
+    } finally {
+        globalThis.setTimeout = originalSetTimeout;
+    }
+}
+
+describe('PixivClient 关注列表分页', () => {
+    it('请求所有包含尾页的 offset，并按页序聚合结果', async () => {
+        for (const total of [24, 25, 48, 457]) {
+            const offsets: number[] = [];
+            const client = new PixivClient();
+
+            (client as any).pixivProxy = mock(async (
+                _baseUrl: string,
+                _referer: string,
+                params: { offset: number; limit: number },
+            ) => {
+                offsets.push(params.offset);
+                const pageLength = Math.min(params.limit, total - params.offset);
+                const users = Array.from({ length: pageLength }, (_, index) => {
+                    const userId = String(params.offset + index);
+                    return { userId, userName: `user-${userId}` };
+                });
+
+                return {
+                    error: false,
+                    message: '',
+                    body: { total, users },
+                };
+            });
+
+            const followers = await withoutFollowerDelay(() => client.getFollowersByTag('tag', '42'));
+            const expectedOffsets = Array.from(
+                { length: Math.ceil(total / 24) },
+                (_, index) => index * 24,
+            );
+            const expectedUserIds = Array.from({ length: total }, (_, index) => String(index));
+
+            expect(offsets).toEqual(expectedOffsets);
+            expect(followers.map(({ userId }) => userId)).toEqual(expectedUserIds);
+        }
+    });
+});
+
 describe('PixivClient 鉴权头注入（pixiv_auth）', () => {
     it('pixivProxy：authProvider 有值时把 pixiv_auth 放进请求体', async () => {
         const http = makeMockHttp();

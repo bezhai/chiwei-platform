@@ -1,7 +1,8 @@
-import type { AnyBulkWriteOperation, Collection, Document } from 'mongodb';
+import type { Collection, Document } from 'mongodb';
 import { MongoService } from '@inner/shared/mongo';
 import { ImgCollection } from './client';
 import { loadPixivImageMirrorMongoConfig } from './imageMirrorConfig';
+import { buildPixivImageMirrorOperations } from './imageMirrorOperations';
 
 export type PixivImageMirrorResult =
     | { status: 'disabled' }
@@ -23,6 +24,14 @@ async function getMirrorState(): Promise<MirrorState | null> {
         });
     }
     return mirrorStatePromise;
+}
+
+export async function getPixivImageMirrorCollection(): Promise<Collection<Document> | null> {
+    return (await getMirrorState())?.collection ?? null;
+}
+
+export async function getPixivImageMirrorMongoService(): Promise<MongoService | null> {
+    return (await getMirrorState())?.service ?? null;
 }
 
 async function createMirrorState(): Promise<MirrorState | null> {
@@ -64,13 +73,7 @@ export async function syncPixivImageToLocal(pixivAddr: string): Promise<PixivIma
         return { status: 'missing_source' };
     }
 
-    const operations = docs.map((doc): AnyBulkWriteOperation<Document> => ({
-        replaceOne: {
-            filter: { _id: doc._id },
-            replacement: doc,
-            upsert: true,
-        },
-    }));
+    const operations = buildPixivImageMirrorOperations(docs);
     await state.collection.bulkWrite(operations, { ordered: false });
     return { status: 'synced', count: docs.length };
 }

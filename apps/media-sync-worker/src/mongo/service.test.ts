@@ -5,6 +5,7 @@ import {
     buildCompletionFilter,
     buildExhaustedReclaimFilter,
     buildDeadLetterUpdate,
+    buildCompletedPixivImageFilter,
     buildImageByPixivAddrFilter,
 } from './service';
 import { DownloadTask, DownloadTaskStatus } from './types';
@@ -26,6 +27,22 @@ describe('buildImageByPixivAddrFilter', () => {
         // a doc whose tos_file_name is missing or empty must NOT match this filter,
         // so the $nin guard against null/'' must be present
         expect(filter!.tos_file_name).toEqual({ $nin: [null, ''] } as any);
+    });
+});
+
+describe('buildCompletedPixivImageFilter', () => {
+    it('requires addImage metadata markers as well as a durable OSS key', () => {
+        expect(buildCompletedPixivImageFilter('123_p0.png')).toEqual({
+            pixiv_addr: '123_p0.png',
+            tos_file_name: { $nin: [null, ''] },
+            illust_id: { $gt: 0 },
+            multi_tags: { $type: 'array' },
+            create_time: { $type: 'date' },
+        } as any);
+    });
+
+    it('rejects an empty address before querying Mongo', () => {
+        expect(buildCompletedPixivImageFilter('')).toBeNull();
     });
 });
 

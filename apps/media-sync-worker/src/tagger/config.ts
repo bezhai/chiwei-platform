@@ -13,6 +13,17 @@ export interface TaggerTriggerConfig {
     retryDelayMs: number;
     processingTimeoutMs: number;
     maxAttempts: number;
+    reconcileAfterMs: number;
+    reconcileLeaseMs: number;
+    reconcileRetryDelayMs: number;
+}
+
+export interface TaggerProjectionConfig {
+    batchSize: number;
+    workerIdleDelayMs: number;
+    retryDelayMs: number;
+    processingTimeoutMs: number;
+    includeHistorical: boolean;
 }
 
 export interface TaggerCallbackServerConfig {
@@ -96,6 +107,25 @@ export function loadTaggerTriggerConfig(env: Env = process.env): TaggerTriggerCo
         retryDelayMs: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_RETRY_DELAY_MS') ?? 60000,
         processingTimeoutMs: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS') ?? 600000,
         maxAttempts: parseOptionalPositiveInt(env, 'TAGGER_TRIGGER_MAX_ATTEMPTS') ?? 5,
+        reconcileAfterMs: parseOptionalPositiveInt(env, 'TAGGER_SUBMITTED_RECONCILE_AFTER_MS') ?? 600000,
+        reconcileLeaseMs: parseOptionalPositiveInt(env, 'TAGGER_SUBMITTED_RECONCILE_LEASE_MS') ?? 60000,
+        reconcileRetryDelayMs:
+            parseOptionalPositiveInt(env, 'TAGGER_SUBMITTED_RECONCILE_RETRY_DELAY_MS') ?? 60000,
+    };
+}
+
+export function loadTaggerProjectionConfig(env: Env = process.env): TaggerProjectionConfig | null {
+    if (!isEnabled(env.TAGGER_PROJECTION_ENABLED)) {
+        return null;
+    }
+    return {
+        batchSize: parseOptionalPositiveInt(env, 'TAGGER_PROJECTION_BATCH_SIZE') ?? 4,
+        workerIdleDelayMs:
+            parseOptionalPositiveInt(env, 'TAGGER_PROJECTION_WORKER_IDLE_DELAY_MS') ?? 5000,
+        retryDelayMs: parseOptionalPositiveInt(env, 'TAGGER_PROJECTION_RETRY_DELAY_MS') ?? 60000,
+        processingTimeoutMs:
+            parseOptionalPositiveInt(env, 'TAGGER_PROJECTION_PROCESSING_TIMEOUT_MS') ?? 600000,
+        includeHistorical: isEnabled(env.TAGGER_PROJECTION_BACKFILL_ENABLED),
     };
 }
 

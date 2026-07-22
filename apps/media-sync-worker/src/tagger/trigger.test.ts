@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import { triggerTaggerForPixivAddr, triggerTaggerForPixivAddrs, type TriggerTaggerDeps } from './trigger';
 import type { MinioSyncForTaggerResult } from '../storage/syncPage';
+import { TaggerSubmitError, type TaggerSubmitResult } from './submitClient';
 
 class FakeSubmitClient {
     calls: Array<{ paths: string[]; callbackUrl: string }> = [];
-    nextResult = { taskId: 'task-1', status: 'accepted' };
+    nextResult: TaggerSubmitResult = { taskId: 'task-1', status: 'accepted' };
     nextError: Error | null = null;
 
     async submit(req: { paths: string[]; callbackUrl: string }) {
@@ -16,26 +17,11 @@ class FakeSubmitClient {
     }
 }
 
-class FakeRepo {
-    submitted: Array<{ taskId: string; paths: string[] }> = [];
-    failed: Array<{ paths: string[]; error: string }> = [];
-
-    async markSubmitted(params: { taskId: string; paths: string[] }) {
-        this.submitted.push(params);
-    }
-
-    async markSubmitFailed(params: { paths: string[]; error: string }) {
-        this.failed.push(params);
-    }
-}
-
 function deps(syncResult: MinioSyncForTaggerResult): TriggerTaggerDeps {
     const submitClient = new FakeSubmitClient();
-    const repository = new FakeRepo();
     return {
         syncPixivToMinio: async () => syncResult,
         submitClient,
-        repository,
         callbackUrl: 'http://media-sync-worker/internal/tagger/callback',
     };
 }
@@ -48,7 +34,6 @@ describe('triggerTaggerForPixivAddr', () => {
 
         expect(result).toEqual({ status: 'skipped', reason: 'missing_key' });
         expect((d.submitClient as FakeSubmitClient).calls).toEqual([]);
-        expect((d.repository as FakeRepo).submitted).toEqual([]);
     });
 
     it('keeps MinIO timeout details when submit is skipped', async () => {
@@ -102,10 +87,9 @@ describe('triggerTaggerForPixivAddr', () => {
                 callbackUrl: 'http://media-sync-worker/internal/tagger/callback',
             },
         ]);
-        expect((d.repository as FakeRepo).submitted).toEqual([{ taskId: 'task-1', paths: ['a.jpg'] }]);
     });
 
-    it('records submit failures locally and does not throw', async () => {
+    it('returns a retryable submit failure without making it terminal inside the HTTP boundary', async () => {
         const d = deps({
             status: 'synced',
             pixivAddr: 'a.jpg',
@@ -116,15 +100,32 @@ describe('triggerTaggerForPixivAddr', () => {
 
         const result = await triggerTaggerForPixivAddr('a.jpg', d);
 
-        expect(result).toEqual({ status: 'submit_failed', objectName: 'a.jpg', error: 'entry busy' });
-        expect((d.repository as FakeRepo).failed).toEqual([{ paths: ['a.jpg'], error: 'entry busy' }]);
+        expect(result).toEqual({
+            status: 'submit_failed',
+            objectName: 'a.jpg',
+            error: 'entry busy',
+            retryable: true,
+        });
+    });
+
+    it('classifies caller errors as non-retryable without writing repository state', async () => {
+        const d = deps({
+            status: 'synced',
+            pixivAddr: 'a.jpg',
+            ossKey: 'pixiv_img_v2/20260605/a.jpg',
+            objectName: 'a.jpg',
+        });
+        (d.submitClient as FakeSubmitClient).nextError = new TaggerSubmitError('bad callback', 400);
+
+        const result = await triggerTaggerForPixivAddr('a.jpg', d);
+
+        expect(result).toMatchObject({ status: 'submit_failed', retryable: false });
     });
 });
 
 describe('triggerTaggerForPixivAddrs', () => {
     it('submits all synced MinIO basenames as one tagger task', async () => {
         const submitClient = new FakeSubmitClient();
-        const repository = new FakeRepo();
         const syncResults: Record<string, MinioSyncForTaggerResult> = {
             'a.jpg': {
                 status: 'synced',
@@ -143,7 +144,6 @@ describe('triggerTaggerForPixivAddrs', () => {
         const result = await triggerTaggerForPixivAddrs(['a.jpg', 'b.jpg'], {
             syncPixivToMinio: async (pixivAddr) => syncResults[pixivAddr],
             submitClient,
-            repository,
             callbackUrl: 'http://media-sync-worker/internal/tagger/callback',
         });
 
@@ -162,12 +162,10 @@ describe('triggerTaggerForPixivAddrs', () => {
                 callbackUrl: 'http://media-sync-worker/internal/tagger/callback',
             },
         ]);
-        expect(repository.submitted).toEqual([{ taskId: 'task-1', paths: ['a.jpg', 'b.jpg'] }]);
     });
 
     it('submits ready images and returns skipped images for retry handling', async () => {
         const submitClient = new FakeSubmitClient();
-        const repository = new FakeRepo();
         const syncResults: Record<string, MinioSyncForTaggerResult> = {
             'a.jpg': {
                 status: 'synced',
@@ -187,7 +185,6 @@ describe('triggerTaggerForPixivAddrs', () => {
         const result = await triggerTaggerForPixivAddrs(['a.jpg', 'b.jpg'], {
             syncPixivToMinio: async (pixivAddr) => syncResults[pixivAddr],
             submitClient,
-            repository,
             callbackUrl: 'http://media-sync-worker/internal/tagger/callback',
         });
 

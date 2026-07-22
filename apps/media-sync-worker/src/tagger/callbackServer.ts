@@ -36,7 +36,7 @@ export function createTaggerCallbackHandler(
 
         let payload: TaggerCallbackPayload;
         try {
-            payload = validateCallbackPayload(await request.json());
+            payload = validateTaggerCallbackPayload(await request.json());
         } catch (err) {
             console.warn(`Tagger callback rejected: reason=invalid_payload error=${formatError(err)}`);
             return json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -78,15 +78,15 @@ export function startTaggerCallbackServer(
     };
 }
 
-function validateCallbackPayload(value: unknown): TaggerCallbackPayload {
+export function validateTaggerCallbackPayload(value: unknown): TaggerCallbackPayload {
     if (!isRecord(value)) {
         throw new Error('callback payload must be an object');
     }
     if (typeof value.task_id !== 'string' || value.task_id === '') {
         throw new Error('callback payload task_id must be a non-empty string');
     }
-    if (typeof value.status !== 'string' || value.status === '') {
-        throw new Error('callback payload status must be a non-empty string');
+    if (value.status !== 'completed') {
+        throw new Error('callback payload status must be completed');
     }
     if (!Array.isArray(value.rows)) {
         throw new Error('callback payload rows must be an array');

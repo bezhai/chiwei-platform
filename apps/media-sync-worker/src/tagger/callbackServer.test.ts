@@ -60,6 +60,22 @@ describe('createTaggerCallbackHandler', () => {
         expect(repo.payloads).toEqual([]);
     });
 
+    it('rejects callback status aliases outside the current contract', async () => {
+        const repo = new FakeRepo();
+        const handler = createTaggerCallbackHandler(repo, { authToken: 'callback-token' });
+
+        const res = await handler(
+            request('/internal/tagger/callback', {
+                method: 'POST',
+                headers: { authorization: 'Bearer callback-token' },
+                body: JSON.stringify({ task_id: 'task-1', status: 'done', rows: [] }),
+            })
+        );
+
+        expect(res.status).toBe(400);
+        expect(repo.payloads).toEqual([]);
+    });
+
     it('stores valid callback payloads', async () => {
         const repo = new FakeRepo();
         const handler = createTaggerCallbackHandler(repo, { authToken: 'callback-token' });

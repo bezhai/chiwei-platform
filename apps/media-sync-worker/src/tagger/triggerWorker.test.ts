@@ -3,6 +3,7 @@ import { processTaggerTriggerBatch } from './triggerWorker';
 import type { TaggerTriggerConfig } from './config';
 import type { TaggerImageResultDocument } from './types';
 import type { MinioSyncForTaggerResult } from '../storage/syncPage';
+import { TaggerSubmitError } from './submitClient';
 
 class FakeRepository {
     docs: TaggerImageResultDocument[] = [];
@@ -16,24 +17,45 @@ class FakeRepository {
         return this.docs;
     }
 
-    async claimDueTriggerImage(params: { path: string }) {
+    async claimDueTriggerImage(params: { path: string; leaseToken: string }) {
         this.claimed.push(params.path);
         if (this.claimResult !== undefined) {
-            return this.claimResult;
+            return this.claimResult
+                ? {
+                    ...this.claimResult,
+                    generation: this.claimResult.generation ?? 1,
+                    status: 'processing',
+                    processing_lease_token: params.leaseToken,
+                }
+                : null;
         }
-        return this.docs.find((doc) => doc.pixiv_addr === params.path) ?? null;
+        const found = this.docs.find((doc) => doc.pixiv_addr === params.path);
+        return found
+            ? {
+                ...found,
+                generation: found.generation ?? 1,
+                status: 'processing',
+                processing_lease_token: params.leaseToken,
+            }
+            : null;
     }
 
-    async markSubmitted(params: { taskId: string; paths: string[] }) {
-        this.submitted.push(params);
+    async markSubmitted(params: {
+        taskId: string;
+        claims: Array<{ path: string; generation: number; leaseToken: string }>;
+    }) {
+        this.submitted.push({ taskId: params.taskId, paths: params.claims.map((claim) => claim.path) });
     }
 
     async markRetry(params: { path: string; error: string; attempts: number; nextAttemptAt: Date }) {
         this.retries.push(params);
     }
 
-    async markSubmitFailed(params: { paths: string[]; error: string }) {
-        this.failed.push(params);
+    async markSubmitFailed(params: {
+        claims: Array<{ path: string; generation: number; leaseToken: string }>;
+        error: string;
+    }) {
+        this.failed.push({ paths: params.claims.map((claim) => claim.path), error: params.error });
     }
 }
 
@@ -61,6 +83,9 @@ const config: TaggerTriggerConfig = {
     retryDelayMs: 60000,
     processingTimeoutMs: 600000,
     maxAttempts: 3,
+    reconcileAfterMs: 600000,
+    reconcileLeaseMs: 60000,
+    reconcileRetryDelayMs: 60000,
 };
 
 function doc(pixivAddr: string, attempts = 0): TaggerImageResultDocument {
@@ -181,9 +206,72 @@ describe('processTaggerTriggerBatch', () => {
             }),
         });
 
-        expect(processed).toBe(1);
+        expect(processed).toBe(0);
         expect(repository.claimed).toEqual(['a.jpg']);
         expect(submitClient.calls).toEqual([]);
         expect(repository.submitted).toEqual([]);
+    });
+
+    it('moves transient submit failures back to retry with the shared attempt budget', async () => {
+        const repository = new FakeRepository();
+        const submitClient = new FakeSubmitClient();
+        repository.docs = [doc('a.jpg', 0), doc('b.jpg', 1)];
+        submitClient.error = new Error('entry unavailable');
+
+        await processTaggerTriggerBatch({
+            repository: repository as any,
+            submitClient: submitClient as any,
+            config,
+            syncPixivToMinio: async (pixivAddr): Promise<MinioSyncForTaggerResult> => ({
+                status: 'synced',
+                pixivAddr,
+                ossKey: `pixiv/${pixivAddr}`,
+                objectName: pixivAddr,
+            }),
+        });
+
+        expect(repository.retries.map(({ path, attempts }) => ({ path, attempts }))).toEqual([
+            { path: 'a.jpg', attempts: 1 },
+            { path: 'b.jpg', attempts: 2 },
+        ]);
+        expect(repository.failed).toEqual([]);
+    });
+
+    it('makes a non-retryable 4xx submit failure terminal immediately', async () => {
+        const repository = new FakeRepository();
+        const submitClient = new FakeSubmitClient();
+        repository.docs = [doc('a.jpg')];
+        submitClient.error = new TaggerSubmitError('bad callback URL', 400);
+
+        await processTaggerTriggerBatch({
+            repository: repository as any,
+            submitClient: submitClient as any,
+            config,
+            syncPixivToMinio: async (pixivAddr): Promise<MinioSyncForTaggerResult> => ({
+                status: 'synced', pixivAddr, ossKey: pixivAddr, objectName: pixivAddr,
+            }),
+        });
+
+        expect(repository.retries).toEqual([]);
+        expect(repository.failed).toEqual([{ paths: ['a.jpg'], error: 'bad callback URL' }]);
+    });
+
+    it('makes a transient submit failure terminal only after max attempts', async () => {
+        const repository = new FakeRepository();
+        const submitClient = new FakeSubmitClient();
+        repository.docs = [doc('a.jpg', 2)];
+        submitClient.error = new Error('still unavailable');
+
+        await processTaggerTriggerBatch({
+            repository: repository as any,
+            submitClient: submitClient as any,
+            config,
+            syncPixivToMinio: async (pixivAddr): Promise<MinioSyncForTaggerResult> => ({
+                status: 'synced', pixivAddr, ossKey: pixivAddr, objectName: pixivAddr,
+            }),
+        });
+
+        expect(repository.retries).toEqual([]);
+        expect(repository.failed).toEqual([{ paths: ['a.jpg'], error: 'still unavailable' }]);
     });
 });

@@ -1,52 +1,141 @@
 import { resizeImage } from './image-resize';
 import { uploadImage } from '@lark-client';
-import { ImageForLark, ListPixivImageDto } from 'types/pixiv';
+import type { Readable } from 'stream';
+import type { ImageForLark, ListPixivImageDto, ReportLarkUploadDto } from 'types/pixiv';
 import {
+    dedupePixivAddrs,
     getLocalPixivImageContent,
-    getLocalPixivImages,
+    getLocalPixivImageCandidates,
     reportLocalLarkUpload,
+    type LocalPixivCandidateCursor,
+    type LocalPixivCandidatePage,
+    type LocalPixivCandidateRequest,
 } from './local-source';
 
-export async function fetchUploadedImages(params: ListPixivImageDto): Promise<ImageForLark[]> {
-    const images = await getLocalPixivImages(params);
+export interface FetchUploadedImagesDependencies {
+    loadCandidates(request: LocalPixivCandidateRequest): Promise<LocalPixivCandidatePage>;
+    readContent(tosFileName: string): Promise<Buffer>;
+    resize(fileBuffer: Buffer): Promise<{ outFile: Readable; imgWidth: number; imgHeight: number }>;
+    upload(file: Readable): Promise<{ image_key?: string } | null | undefined>;
+    reportUpload(params: ReportLarkUploadDto): Promise<void>;
+}
 
-    for (const image of images) {
-        if (!image.image_key) {
-            try {
-                if (!image.tos_file_name) {
-                    console.error(`Missing tos_file_name for image: ${image.pixiv_addr}`);
-                    continue;
-                }
+const defaultDependencies: FetchUploadedImagesDependencies = {
+    loadCandidates: getLocalPixivImageCandidates,
+    readContent: getLocalPixivImageContent,
+    resize: resizeImage,
+    upload: uploadImage,
+    reportUpload: reportLocalLarkUpload,
+};
 
-                const imageContent = await getLocalPixivImageContent(image.tos_file_name);
-                if (!imageContent) {
-                    console.error(`Failed to retrieve file for image: ${image.tos_file_name}`);
-                    continue;
-                }
+export async function fetchUploadedImages(
+    params: ListPixivImageDto,
+    dependencies: FetchUploadedImagesDependencies = defaultDependencies,
+): Promise<ImageForLark[]> {
+    const target = Math.max(1, params.page_size || 6);
+    const attempted = new Set<string>();
+    const uploaded: ImageForLark[] = [];
+    const explicitOrder = params.pixiv_addrs
+        ? new Map(
+              dedupePixivAddrs(params.pixiv_addrs).map((pixivAddr, index) => [pixivAddr, index]),
+          )
+        : null;
+    let cursor: LocalPixivCandidateCursor | undefined;
 
-                const { outFile, imgWidth, imgHeight } = await resizeImage(imageContent);
+    while (uploaded.length < target) {
+        const previousCursorKey = candidateCursorKey(cursor);
+        const previousAttemptCount = attempted.size;
+        const page = await dependencies.loadCandidates({
+            params,
+            limit: target - uploaded.length,
+            cursor,
+            excludedPixivAddrs: [...attempted],
+        });
+        cursor = page.cursor;
 
-                const uploadRes = await uploadImage(outFile);
-                if (!uploadRes?.image_key) {
-                    console.error(`Failed to upload image to Lark: ${image.pixiv_addr}`);
-                    continue;
-                }
-
-                // Update image object with new key and dimensions
-                image.image_key = uploadRes.image_key;
-                image.width = imgWidth;
-                image.height = imgHeight;
-
-                await reportLocalLarkUpload({
-                    pixiv_addr: image.pixiv_addr,
-                    image_key: image.image_key,
-                    width: imgWidth,
-                    height: imgHeight,
-                });
-            } catch (e) {
-                console.error(`Failed to process image ${image.pixiv_addr}:`, e);
+        for (const image of page.images) {
+            if (
+                attempted.has(image.pixiv_addr) ||
+                (explicitOrder && !explicitOrder.has(image.pixiv_addr))
+            ) {
+                continue;
             }
+            attempted.add(image.pixiv_addr);
+            const readyImage = await ensureUploadedImage(image, dependencies);
+            if (readyImage) uploaded.push(readyImage);
+            if (uploaded.length >= target) break;
+        }
+
+        if (uploaded.length >= target || page.exhausted) break;
+        const cursorAdvanced = candidateCursorKey(cursor) !== previousCursorKey;
+        if (attempted.size === previousAttemptCount && !cursorAdvanced) {
+            console.error('Local pixiv candidate source made no progress; stopping refill');
+            break;
         }
     }
-    return images.filter((image) => image.image_key);
+
+    if (explicitOrder) {
+        uploaded.sort(
+            (left, right) =>
+                (explicitOrder.get(left.pixiv_addr) ?? Number.MAX_SAFE_INTEGER) -
+                (explicitOrder.get(right.pixiv_addr) ?? Number.MAX_SAFE_INTEGER),
+        );
+    }
+    return uploaded;
+}
+
+async function ensureUploadedImage(
+    image: ImageForLark,
+    dependencies: FetchUploadedImagesDependencies,
+): Promise<ImageForLark | null> {
+    if (image.image_key) return image;
+
+    try {
+        if (!image.tos_file_name) {
+            console.error(`Missing tos_file_name for image: ${image.pixiv_addr}`);
+            return null;
+        }
+
+        const imageContent = await dependencies.readContent(image.tos_file_name);
+        if (imageContent.length === 0) {
+            console.error(`Failed to retrieve file for image: ${image.tos_file_name}`);
+            return null;
+        }
+
+        const { outFile, imgWidth, imgHeight } = await dependencies.resize(imageContent);
+
+        const uploadRes = await dependencies.upload(outFile);
+        if (!uploadRes?.image_key) {
+            console.error(`Failed to upload image to Lark: ${image.pixiv_addr}`);
+            return null;
+        }
+
+        const readyImage = {
+            ...image,
+            image_key: uploadRes.image_key,
+            width: imgWidth,
+            height: imgHeight,
+        };
+
+        await dependencies.reportUpload({
+            pixiv_addr: image.pixiv_addr,
+            image_key: readyImage.image_key,
+            width: imgWidth,
+            height: imgHeight,
+        });
+        return readyImage;
+    } catch (error) {
+        console.error(`Failed to process image ${image.pixiv_addr}:`, error);
+        return null;
+    }
+}
+
+function candidateCursorKey(cursor: LocalPixivCandidateCursor | undefined): string {
+    if (!cursor) return '';
+    if (cursor.mode === 'explicit') return `explicit:${cursor.offset}`;
+    const updateTime =
+        cursor.updateTime instanceof Date
+            ? cursor.updateTime.toISOString()
+            : String(cursor.updateTime);
+    return `ordered:${updateTime}:${String(cursor.id)}`;
 }

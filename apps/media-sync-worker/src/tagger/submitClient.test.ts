@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test';
-import { TaggerSubmitClient, TaggerSubmitError, type FetchLike } from './submitClient';
+import {
+    TaggerSubmitClient,
+    TaggerSubmitError,
+    TaggerTaskNotFoundError,
+    type FetchLike,
+} from './submitClient';
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
     return new Response(JSON.stringify(body), {
@@ -92,5 +97,107 @@ describe('TaggerSubmitClient', () => {
         await expect(
             client.submit({ paths: ['a.jpg'], callbackUrl: 'http://callback' })
         ).rejects.toThrow('tagger submit response task_id must be a string');
+    });
+
+    it('rejects a submit status outside the current accepted contract', async () => {
+        const client = new TaggerSubmitClient(
+            { entryUrl: 'http://tagger-entry:8000', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+            async () => jsonResponse({ task_id: 'task-1', status: 'queued' }),
+        );
+
+        await expect(
+            client.submit({ paths: ['a.jpg'], callbackUrl: 'http://callback' })
+        ).rejects.toThrow('tagger submit response status must be accepted');
+    });
+
+    it('gets the current remote task with bearer auth and preserves its result payload', async () => {
+        const calls: Array<{ url: string; init: RequestInit }> = [];
+        const resultPayload = {
+            task_id: 'task-1',
+            status: 'completed',
+            rows: [{ id: 'a.jpg', schema_version: 1, future_capability: { value: 'kept' } }],
+            dups: [],
+        };
+        const fetchImpl: FetchLike = async (url, init = {}) => {
+            calls.push({ url: String(url), init });
+            return jsonResponse({
+                task_id: 'task-1',
+                status: 'completed',
+                paths: ['a.jpg'],
+                result: resultPayload,
+                attempts: 0,
+                error: null,
+            });
+        };
+        const client = new TaggerSubmitClient(
+            { entryUrl: 'http://tagger-entry:8000/', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+            fetchImpl,
+        );
+
+        const result = await client.getTask('task-1');
+
+        expect(result).toEqual({
+            taskId: 'task-1',
+            status: 'completed',
+            paths: ['a.jpg'],
+            result: resultPayload,
+            error: null,
+        });
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe('http://tagger-entry:8000/api/v1/tagger/tasks/task-1');
+        expect(calls[0].init.method).toBe('GET');
+        expect(calls[0].init.headers).toEqual({ authorization: 'Bearer token' });
+    });
+
+    it.each(['accepted', 'running', 'pending_callback', 'completed', 'failed'] as const)(
+        'accepts the explicit remote task status %s',
+        async (status) => {
+            const client = new TaggerSubmitClient(
+                { entryUrl: 'http://tagger-entry:8000', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+                async () => jsonResponse({ task_id: 'task-1', status, paths: ['a.jpg'], result: null, error: null }),
+            );
+
+            expect((await client.getTask('task-1')).status).toBe(status);
+        },
+    );
+
+    it('maps a 404 task lookup to an explicit not-found error', async () => {
+        const client = new TaggerSubmitClient(
+            { entryUrl: 'http://tagger-entry:8000', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+            async () => jsonResponse({ detail: 'task not found' }, { status: 404 }),
+        );
+
+        await expect(client.getTask('missing')).rejects.toBeInstanceOf(TaggerTaskNotFoundError);
+    });
+
+    it('rejects unknown remote task status instead of guessing an alias', async () => {
+        const client = new TaggerSubmitClient(
+            { entryUrl: 'http://tagger-entry:8000', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+            async () => jsonResponse({ task_id: 'task-1', status: 'DONE', paths: ['a.jpg'], result: null }),
+        );
+
+        await expect(client.getTask('task-1')).rejects.toThrow('unknown tagger task status: DONE');
+    });
+
+    it.each([
+        {
+            body: { task_id: 'task-1', status: 'running', paths: [], result: null, error: null },
+            error: 'paths must be a non-empty array',
+        },
+        {
+            body: { task_id: 'task-1', status: 'running', paths: ['a.jpg'], error: null },
+            error: 'result must be an object or null',
+        },
+        {
+            body: { task_id: 'task-1', status: 'running', paths: ['a.jpg'], result: null },
+            error: 'error must be a string or null',
+        },
+    ])('rejects malformed current task responses: $error', async ({ body, error }) => {
+        const client = new TaggerSubmitClient(
+            { entryUrl: 'http://tagger-entry:8000', apiToken: 'token', timeoutMs: 10000, retries: 0 },
+            async () => jsonResponse(body),
+        );
+
+        await expect(client.getTask('task-1')).rejects.toThrow(error);
     });
 });

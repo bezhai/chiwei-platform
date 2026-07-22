@@ -14,7 +14,22 @@ export interface TaggerSubmitRequest {
 
 export interface TaggerSubmitResult {
     taskId: string;
-    status: string;
+    status: 'accepted';
+}
+
+export type RemoteTaggerTaskStatus =
+    | 'accepted'
+    | 'running'
+    | 'pending_callback'
+    | 'completed'
+    | 'failed';
+
+export interface RemoteTaggerTask {
+    taskId: string;
+    status: RemoteTaggerTaskStatus;
+    paths: string[];
+    result: Record<string, unknown> | null;
+    error: string | null;
 }
 
 export class TaggerSubmitError extends Error {
@@ -27,6 +42,21 @@ export class TaggerSubmitError extends Error {
         this.name = 'TaggerSubmitError';
     }
 }
+
+export class TaggerTaskNotFoundError extends Error {
+    constructor(readonly taskId: string) {
+        super(`tagger task not found: ${taskId}`);
+        this.name = 'TaggerTaskNotFoundError';
+    }
+}
+
+const REMOTE_TASK_STATUSES = new Set<RemoteTaggerTaskStatus>([
+    'accepted',
+    'running',
+    'pending_callback',
+    'completed',
+    'failed',
+]);
 
 export class TaggerSubmitClient {
     constructor(
@@ -52,6 +82,37 @@ export class TaggerSubmitClient {
         }
 
         throw lastError;
+    }
+
+    async getTask(taskId: string): Promise<RemoteTaggerTask> {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+
+        try {
+            const response = await this.fetchImpl(
+                `${this.config.entryUrl.replace(/\/+$/, '')}/api/v1/tagger/tasks/${encodeURIComponent(taskId)}`,
+                {
+                    method: 'GET',
+                    headers: { authorization: `Bearer ${this.config.apiToken}` },
+                    signal: controller.signal,
+                },
+            );
+            if (response.status === 404) {
+                throw new TaggerTaskNotFoundError(taskId);
+            }
+            if (!response.ok) {
+                const body = await response.text();
+                throw new TaggerSubmitError(
+                    `tagger task lookup failed with HTTP ${response.status}`,
+                    response.status,
+                    body,
+                );
+            }
+
+            return parseRemoteTask(await response.json(), taskId);
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     private async submitOnce(req: TaggerSubmitRequest): Promise<TaggerSubmitResult> {
@@ -85,9 +146,12 @@ export class TaggerSubmitClient {
             if (typeof data.task_id !== 'string' || data.task_id === '') {
                 throw new Error('tagger submit response task_id must be a string');
             }
+            if (data.status !== 'accepted') {
+                throw new Error(`tagger submit response status must be accepted: ${String(data.status)}`);
+            }
             return {
                 taskId: data.task_id,
-                status: typeof data.status === 'string' ? data.status : 'accepted',
+                status: 'accepted',
             };
         } finally {
             clearTimeout(timer);
@@ -107,6 +171,43 @@ export class TaggerSubmitClient {
         }
         return true;
     }
+}
+
+function parseRemoteTask(value: unknown, expectedTaskId: string): RemoteTaggerTask {
+    if (!isRecord(value)) {
+        throw new Error('tagger task response must be an object');
+    }
+    if (value.task_id !== expectedTaskId) {
+        throw new Error('tagger task response task_id mismatch');
+    }
+    if (typeof value.status !== 'string' || !REMOTE_TASK_STATUSES.has(value.status as RemoteTaggerTaskStatus)) {
+        throw new Error(`unknown tagger task status: ${String(value.status)}`);
+    }
+    if (
+        !Array.isArray(value.paths)
+        || value.paths.length === 0
+        || value.paths.some((path) => typeof path !== 'string' || path === '')
+    ) {
+        throw new Error('tagger task response paths must be a non-empty array of non-empty strings');
+    }
+    if (!Object.hasOwn(value, 'result') || (value.result !== null && !isRecord(value.result))) {
+        throw new Error('tagger task response result must be an object or null');
+    }
+    if (!Object.hasOwn(value, 'error') || (value.error !== null && typeof value.error !== 'string')) {
+        throw new Error('tagger task response error must be a string or null');
+    }
+
+    return {
+        taskId: expectedTaskId,
+        status: value.status as RemoteTaggerTaskStatus,
+        paths: value.paths,
+        result: value.result as Record<string, unknown> | null,
+        error: value.error as string | null,
+    };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function formatError(err: unknown): string {
