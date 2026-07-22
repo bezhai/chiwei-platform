@@ -878,7 +878,9 @@ async with get_session() as s:
         await emitter.append(NoteCreated(...))
 ```
 
-详见 §3-bis。CI grep gate `Gap 8` 卡 `await emit(` 在业务区的总数（当前 14：12 个 category-B 合法 + 2 个 docstring）；新加 mutation function 必须用 `transactional_emit`，否则 CI 红。
+详见 §3-bis。CI grep gate `Gap 8` 用 Python 语法树核对业务区的人工 emit
+白名单（当前 9 个真实调用，按文件 + 所在函数登记，不计 docstring / comment）；
+新加 mutation function 必须遵守当前 `tx()` + `emit_tx()` outbox 契约，否则 CI 红。
 
 ### #13 durable consumer 内 try/except 包整个 body
 

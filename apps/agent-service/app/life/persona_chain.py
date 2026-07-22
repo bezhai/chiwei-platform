@@ -29,14 +29,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated
 
-from sqlalchemy import text
-
-from app.data.queries import find_persona
-from app.data.session import get_session
+from app.data.queries import find_latest_persona_review_written_at, find_persona
 from app.infra.cst_time import CST, now_cst, now_cst_iso
 from app.infra.cst_time import parse as parse_time
 from app.runtime.data import Data, Key, Version
-from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_append, select_latest
 
 
@@ -98,16 +94,11 @@ async def read_latest_review_written_at(
     绝不入选：bezhai 人工盖版不能把证据窗口推走（spec 决策 2）。首跑（链上
     还没有 review 版）返回 None = 窗口取全部现存页。
     """
-    sql = (
-        f"SELECT written_at FROM {_table_name(PersonaVersion)} "
-        f"WHERE lane = :lane AND persona_id = :persona_id "
-        f"AND source = 'review' ORDER BY version DESC LIMIT 1"
+    return await find_latest_persona_review_written_at(
+        PersonaVersion,
+        lane=lane,
+        persona_id=persona_id,
     )
-    async with get_session() as s:
-        r = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id}
-        )
-        return r.scalar_one_or_none()
 
 
 def week_start_cst(now: datetime) -> datetime:

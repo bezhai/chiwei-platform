@@ -27,12 +27,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from sqlalchemy import text
-
-from app.data.session import get_session
+from app.data.queries import (
+    day_page_exists_for_date,
+    find_day_page_before,
+    find_latest_day_pages,
+    find_latest_relationship_pages,
+)
 from app.infra import cst_time
 from app.runtime.data import Data, Key, Version
-from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_append, select_latest
 
 
@@ -111,16 +113,12 @@ async def day_page_exists(*, lane: str, persona_id: str, date: str) -> bool:
     真实表上做一个只读 EXISTS 查询；写入仍走 ``insert_append``，不绕开
     framework 持久化原语。
     """
-    sql = (
-        f"SELECT 1 FROM {_table_name(DayPage)} "
-        f"WHERE lane = :lane AND persona_id = :persona_id AND date = :date "
-        f"LIMIT 1"
+    return await day_page_exists_for_date(
+        DayPage,
+        lane=lane,
+        persona_id=persona_id,
+        date=date,
     )
-    async with get_session() as s:
-        r = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id, "date": date}
-        )
-        return r.first() is not None
 
 
 async def read_day_page_before(
@@ -137,20 +135,12 @@ async def read_day_page_before(
     YYYY-MM-DD 文本、字典序即时间序，按 date 降序、version 降序取第一行
     （同日多版取重写后的最新一版）。
     """
-    sql = (
-        f"SELECT * FROM {_table_name(DayPage)} "
-        f"WHERE lane = :lane AND persona_id = :persona_id AND date < :before_date "
-        f"ORDER BY date DESC, version DESC LIMIT 1"
+    return await find_day_page_before(
+        DayPage,
+        lane=lane,
+        persona_id=persona_id,
+        before_date=before_date,
     )
-    async with get_session() as s:
-        r = await s.execute(
-            text(sql),
-            {"lane": lane, "persona_id": persona_id, "before_date": before_date},
-        )
-        row = r.mappings().first()
-        if not row:
-            return None
-        return DayPage(**{k: row[k] for k in DayPage.model_fields})
 
 
 async def read_day_pages_written_after(
@@ -170,17 +160,11 @@ async def read_day_pages_written_after(
     静默丢证据（与 has_review_version_this_week 的 fail-open 方向一致；实际
     written_at 全部由 now_cst_iso 写出，解析不会失败）。
     """
-    sql = (
-        f"SELECT DISTINCT ON (date) * FROM {_table_name(DayPage)} "
-        f"WHERE lane = :lane AND persona_id = :persona_id "
-        f"ORDER BY date ASC, version DESC"
+    pages = await find_latest_day_pages(
+        DayPage,
+        lane=lane,
+        persona_id=persona_id,
     )
-    async with get_session() as s:
-        r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        pages = [
-            DayPage(**{k: row[k] for k in DayPage.model_fields})
-            for row in r.mappings()
-        ]
     cutoff = cst_time.parse(written_after) if written_after else None
     if cutoff is None:
         return pages
@@ -237,18 +221,11 @@ async def list_relationship_pages(
     持久化写好的真实表上做只读 SELECT（DISTINCT ON 每人取最新一版）；写入仍走
     ``insert_append``，不绕开 framework 持久化原语。
     """
-    sql = (
-        f"SELECT DISTINCT ON (other_user_id) * "
-        f"FROM {_table_name(RelationshipPage)} "
-        f"WHERE lane = :lane AND persona_id = :persona_id "
-        f"ORDER BY other_user_id ASC, version DESC"
+    return await find_latest_relationship_pages(
+        RelationshipPage,
+        lane=lane,
+        persona_id=persona_id,
     )
-    async with get_session() as s:
-        r = await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        return [
-            RelationshipPage(**{k: row[k] for k in RelationshipPage.model_fields})
-            for row in r.mappings()
-        ]
 
 
 async def read_relationship_pages(

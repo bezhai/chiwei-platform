@@ -132,3 +132,17 @@ async def test_non_empty_load_is_cached(monkeypatch):
     assert await get_relation(OWNER) == "owner"
     assert await get_relation(OWNER) == "owner"
     assert calls["n"] == 1, "非空集合 load 一次后应缓存,不再重复 load"
+
+
+async def test_load_owner_ids_delegates_to_typed_query(monkeypatch):
+    """业务 loader 只保留 cache/fail-closed 语义，DB 读取交给 query 层。"""
+    calls = {"n": 0}
+
+    async def fake_find_owner_ids() -> set[str]:
+        calls["n"] += 1
+        return {OWNER, OWNER2}
+
+    monkeypatch.setattr(ir, "find_owner_common_user_ids", fake_find_owner_ids)
+
+    assert await ir._load_owner_ids() == {OWNER, OWNER2}
+    assert calls["n"] == 1

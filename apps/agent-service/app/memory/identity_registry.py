@@ -17,10 +17,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.future import select
-
-from app.data.models import CommonUser
-from app.runtime.db import auto_tx, current_session
+from app.data.queries import find_owner_common_user_ids
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +32,7 @@ async def _load_owner_ids() -> set[str]:
     返回 str 化的 UUID 集合。``is_owner`` 列还没加 / 查询异常会向上抛,由
     ``_owner_ids`` fail-closed 接住。
     """
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonUser.common_user_id).where(CommonUser.is_owner.is_(True))
-        )
-        return {str(cid) for cid in result.scalars().all()}
+    return await find_owner_common_user_ids()
 
 
 async def _owner_ids() -> set[str]:

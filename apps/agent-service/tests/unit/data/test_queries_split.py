@@ -1,8 +1,7 @@
 """queries package 拆分完整性 + 无重名。
 
-v4 记忆整机删除后剩 4 个 domain 模块：model_provider / persona / messages /
-agent_response（memory / memory_edges / memory_search 三个 v4 domain 已随
-旧记忆机器删除；schedule 模块更早删除；life 模块随 voice 子系统拆除删除）。
+现存 domain 模块：model_provider / persona / messages / agent_response，以及
+Gap 13 收口后的 life / identity typed query 模块。
 """
 from __future__ import annotations
 
@@ -33,6 +32,12 @@ EXPECTED_FUNCTIONS = {
     # agent_response (5)
     "create_pending_agent_response", "set_agent_response_bot",
     "is_chat_request_completed", "get_safety_status", "set_safety_status",
+    # life (5)
+    "day_page_exists_for_date", "find_day_page_before",
+    "find_latest_day_pages", "find_latest_relationship_pages",
+    "find_latest_persona_review_written_at",
+    # identity (1)
+    "find_owner_common_user_ids",
 }
 
 
@@ -48,7 +53,7 @@ def test_queries_all_complete():
 
 
 def test_queries_no_duplicate_names():
-    """4 个 domain 文件的 __all__ 两两交集为空。
+    """6 个 domain 文件的 __all__ 两两交集为空。
 
     `from X import *` 重名时后者覆盖、不报错；ruff/mypy 也不一定能捕获。
     必须有测试兜底，否则一个 domain 漏写 __all__ 一项可能让 caller 拿到错误
@@ -56,6 +61,8 @@ def test_queries_no_duplicate_names():
     """
     from app.data.queries import (
         agent_response,
+        identity,
+        life,
         messages,
         model_provider,
         persona,
@@ -63,6 +70,8 @@ def test_queries_no_duplicate_names():
 
     modules = {
         "agent_response": agent_response,
+        "identity": identity,
+        "life": life,
         "messages": messages,
         "model_provider": model_provider,
         "persona": persona,

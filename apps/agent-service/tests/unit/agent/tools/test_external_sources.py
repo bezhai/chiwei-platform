@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -32,10 +32,10 @@ import pytest
 def _stub_async_client(handler: Callable[[httpx.Request], httpx.Response]):
     """Patch httpx.AsyncClient so every instance uses a MockTransport handler.
 
-    The tools build their own ``httpx.AsyncClient(...)`` (possibly with a
-    ``proxy=`` kwarg). We intercept construction, drop transport-incompatible
-    kwargs, and inject the mock transport — this also lets a test assert that
-    the proxy kwarg was passed.
+    The typed external-facts capability builds ``httpx.AsyncClient(...)``
+    (possibly with a ``proxy=`` kwarg). We intercept construction, drop
+    transport-incompatible kwargs, and inject the mock transport — this also
+    lets a test assert that the proxy kwarg was passed.
     """
     captured: dict[str, object] = {}
 
@@ -48,7 +48,7 @@ def _stub_async_client(handler: Callable[[httpx.Request], httpx.Response]):
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     with patch(
-        "app.agent.tools.external_sources.httpx.AsyncClient", side_effect=_factory
+        "app.capabilities.external_facts.httpx.AsyncClient", side_effect=_factory
     ):
         yield captured
 
@@ -64,6 +64,112 @@ def _assert_no_key_anywhere(payload: dict, key: str) -> None:
     """No field value (including a ``reason``) ever carries the raw key."""
     for value in payload.values():
         assert key not in str(value), f"key leaked in {payload!r}"
+
+
+# ===========================================================================
+# Business tools delegate transport + response mapping to typed capabilities
+# ===========================================================================
+
+
+class TestCapabilityDelegation:
+    @pytest.mark.asyncio
+    async def test_weather_delegates_config_and_location(self):
+        from app.agent.tools import external_sources
+
+        payload = {"ok": True, "city": "广州", "temp": "24", "weather": "晴"}
+        fetch = AsyncMock(return_value=payload)
+        with (
+            patch.object(external_sources, "settings") as s,
+            patch.object(external_sources, "fetch_weather", fetch),
+        ):
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await external_sources.query_weather.invoke({})
+
+        assert result == payload
+        fetch.assert_awaited_once_with(
+            api_host="test-host.qweatherapi.com",
+            api_key="secret-key-123",
+            location="113.27,23.13",
+            city="广州",
+        )
+
+    @pytest.mark.asyncio
+    async def test_anime_delegates_today_and_proxy(self):
+        from app.agent.tools import external_sources
+
+        class _FakeNow:
+            @staticmethod
+            def isoweekday() -> int:
+                return 7
+
+        payload = {"ok": True, "weekday": "星期日", "anime": []}
+        fetch = AsyncMock(return_value=payload)
+        with (
+            patch.object(external_sources, "now_cst", return_value=_FakeNow()),
+            patch.object(external_sources, "settings") as s,
+            patch.object(external_sources, "fetch_anime_calendar", fetch),
+        ):
+            s.forward_proxy_url = "http://proxy:8080"
+            result = await external_sources.query_anime_calendar.invoke({})
+
+        assert result == payload
+        fetch.assert_awaited_once_with(
+            today_isoweekday=7,
+            proxy_url="http://proxy:8080",
+        )
+
+    @pytest.mark.asyncio
+    async def test_holiday_delegates_cst_date(self):
+        from app.agent.tools import external_sources
+
+        payload = {
+            "ok": True,
+            "date": "2026-06-08",
+            "weekday": "周一",
+            "kind": "法定节假日",
+            "holiday_name": "端午节",
+        }
+        fetch = AsyncMock(return_value=payload)
+        with (
+            patch.object(external_sources, "now_cst") as now,
+            patch.object(external_sources, "fetch_holiday", fetch),
+        ):
+            now.return_value.strftime.return_value = "2026-06-08"
+            result = await external_sources.query_holiday.invoke({})
+
+        assert result == payload
+        fetch.assert_awaited_once_with(today="2026-06-08")
+
+    @pytest.mark.asyncio
+    async def test_sun_times_delegates_config_location_and_cst_date(self):
+        from app.agent.tools import external_sources
+
+        payload = {
+            "ok": True,
+            "city": "广州",
+            "sunrise": "05:41",
+            "sunset": "19:12",
+        }
+        fetch = AsyncMock(return_value=payload)
+        with (
+            patch.object(external_sources, "now_cst") as now,
+            patch.object(external_sources, "settings") as s,
+            patch.object(external_sources, "fetch_sun_times", fetch),
+        ):
+            now.return_value.strftime.return_value = "20260608"
+            s.qweather_api_key = "secret-key-123"
+            s.qweather_api_host = "test-host.qweatherapi.com"
+            result = await external_sources.query_sun_times.invoke({})
+
+        assert result == payload
+        fetch.assert_awaited_once_with(
+            api_host="test-host.qweatherapi.com",
+            api_key="secret-key-123",
+            location="113.27,23.13",
+            city="广州",
+            date="20260608",
+        )
 
 
 # ===========================================================================
@@ -105,11 +211,12 @@ class TestQueryWeather:
 
         with patch(
             "app.agent.tools.external_sources.settings"
-        ) as s, _stub_async_client(handler):
+        ) as s, _stub_async_client(handler) as captured:
             s.qweather_api_key = "secret-key-123"
             s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_weather.invoke({})
 
+        assert captured["kwargs"].get("timeout") == 10.0
         assert isinstance(result, dict)
         assert result["ok"] is True
         assert result["city"] == "广州"
@@ -337,6 +444,7 @@ class TestQueryAnimeCalendar:
             await query_anime_calendar.invoke({})
 
         assert captured["kwargs"].get("proxy") == "http://proxy:8080"
+        assert captured["kwargs"].get("timeout") == 10.0
 
     @pytest.mark.asyncio
     async def test_network_failure_returns_ok_false(self):
@@ -385,10 +493,11 @@ class TestQueryHoliday:
 
         with patch.object(
             external_sources, "now_cst"
-        ) as now, _stub_async_client(handler):
+        ) as now, _stub_async_client(handler) as captured:
             now.return_value.strftime.return_value = "2026-06-07"
             result = await query_holiday.invoke({})
 
+        assert captured["kwargs"].get("timeout") == 10.0
         assert isinstance(result, dict)
         assert result["ok"] is True
         assert result["date"] == "2026-06-07"
@@ -544,12 +653,13 @@ class TestQuerySunTimes:
             external_sources, "now_cst"
         ) as now, patch.object(
             external_sources, "settings"
-        ) as s, _stub_async_client(handler):
+        ) as s, _stub_async_client(handler) as captured:
             now.return_value.strftime.return_value = "20260608"
             s.qweather_api_key = "secret-key-123"
             s.qweather_api_host = "test-host.qweatherapi.com"
             result = await query_sun_times.invoke({})
 
+        assert captured["kwargs"].get("timeout") == 10.0
         assert isinstance(result, dict)
         assert result["ok"] is True
         # Times reduced to clean CST HH:MM (the +08:00 offset is the local time).

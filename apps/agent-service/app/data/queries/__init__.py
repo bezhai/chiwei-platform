@@ -1,7 +1,7 @@
 """Data queries — split per domain. 调用方 import 不变 (`from app.data.queries import X`).
 
-4 个 domain 文件：
-  - model_provider / persona / messages / agent_response
+6 个 domain 文件：
+  - model_provider / persona / messages / agent_response / life / identity
 
 （v4 记忆的 memory / memory_edges / memory_search 三个 domain 已随旧记忆机器
 整体删除。）
@@ -14,6 +14,10 @@ from app.data.queries.agent_response import *  # noqa: F401,F403
 
 # Aggregate __all__ for downstream introspection (test_queries_split asserts on this).
 from app.data.queries.agent_response import __all__ as _ar
+from app.data.queries.identity import *  # noqa: F401,F403
+from app.data.queries.identity import __all__ as _identity
+from app.data.queries.life import *  # noqa: F401,F403
+from app.data.queries.life import __all__ as _life
 from app.data.queries.messages import *  # noqa: F401,F403
 from app.data.queries.messages import __all__ as _messages
 from app.data.queries.model_provider import *  # noqa: F401,F403
@@ -23,6 +27,8 @@ from app.data.queries.persona import __all__ as _persona
 
 __all__ = [
     *_ar,
+    *_identity,
+    *_life,
     *_messages,
     *_mp,
     *_persona,

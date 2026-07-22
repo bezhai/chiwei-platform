@@ -58,6 +58,7 @@ from app.agent.sediment import build_life_fold_policy
 from app.agent.session import load_session
 from app.agent.session_fold import fold_session
 from app.agent.trace import collect_usage, make_session_id
+from app.capabilities.redis import get_redis_capability
 from app.data.message_record import LifeChatConversation
 from app.data.queries.mailbox import (
     deliver_event,  # module-level so tests can monkeypatch
@@ -97,7 +98,6 @@ from app.domain.world_events import (
     strip_npc_prefix,
 )
 from app.infra import cst_time
-from app.infra.redis import get_redis
 from app.life.living_day import living_day
 from app.life.pages import read_day_page_before  # module-level so tests can monkeypatch
 from app.life.review import run_day_review  # module-level so tests can monkeypatch
@@ -774,7 +774,7 @@ async def _run_life_round(
     一轮成功收口（标完已读 + 挂本轮排的日程到点提醒）后落一个 cd key（TTL=cd 秒）开启
     下一段冷却。
     """
-    redis = await get_redis()
+    redis = await get_redis_capability()
     cd_key = _cd_key(lane, persona_id)
     if await redis.get(cd_key):
         # 还在上一轮的 cd 内：把这批 event 推迟到 cd 后，绝不 drop（攒着、不丢）。走
@@ -1270,7 +1270,7 @@ async def _run_life_round(
     # cd 降频（spec 决策 5 第三层）：成功收口后开启一段冷却。落一个带 TTL 的 cd key，
     # cd 内再被唤醒就 reschedule 攒着（见本函数开头）。只在成功跑完才落——撞锁 /
     # 中途失败的轮不落，避免用虚假 cd 卡住真正该跑的下一轮。
-    await redis.set(_cd_key(lane, persona_id), "1", ex=_LIFE_CD_SECONDS)
+    await redis.set_with_ttl(cd_key, "1", ttl_seconds=_LIFE_CD_SECONDS)
 
     logger.info(
         "[life_wake] %s/%s ran a round, marked %d read, cd %ds",
