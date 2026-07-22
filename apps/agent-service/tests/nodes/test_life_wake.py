@@ -26,6 +26,7 @@ import asyncio
 import fakeredis.aioredis
 import pytest
 
+import app.capabilities.redis as redis_capability
 import app.nodes.life_wake as lw
 from app.data.message_record import LifeChatConversation, LifeChatMessage
 from app.domain.life_state import LifeState
@@ -55,6 +56,10 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> fakeredis.aioredis.FakeRedis:
 
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_mod, "_redis", fake)
+    # RedisCapability 是进程级懒加载 singleton。每个测试都清空它，使本
+    # 用例首次 get_redis_capability() 必然包住当前的 fake，不会复用
+    # 其他用例留下的 client。monkeypatch 会在用例后恢复原 singleton。
+    monkeypatch.setattr(redis_capability, "_singleton", None)
     return fake
 
 
@@ -1975,6 +1980,92 @@ async def test_successful_round_sets_cd_key(patched, fake_redis, monkeypatch):
     assert await fake_redis.get(cd_key) is not None, "成功跑完应落 cd key"
     ttl = await fake_redis.ttl(cd_key)
     assert 0 < ttl <= lw._LIFE_CD_SECONDS, "cd key 必须带 TTL（不能永不过期）"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_uses_redis_capability_key_value_and_ttl(patched, monkeypatch):
+    """cooldown 只经 RedisCapability，且不改 key/value/TTL 合约。"""
+    calls = []
+
+    class SpyRedisCapability:
+        async def get(self, key):
+            calls.append(("get", key))
+            return None
+
+        async def set_with_ttl(self, key, value, *, ttl_seconds):
+            calls.append(("set_with_ttl", key, value, ttl_seconds))
+
+    async def fake_get_redis_capability():
+        return SpyRedisCapability()
+
+    monkeypatch.setattr(lw, "get_redis_capability", fake_get_redis_capability)
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    key = lw._cd_key("coe-t3", "akao")
+    assert calls == [
+        ("get", key),
+        ("set_with_ttl", key, "1", lw._LIFE_CD_SECONDS),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capability_cooldown_hit_preserves_debounce_reschedule(
+    patched, monkeypatch
+):
+    """capability GET 命中 cd 仍重排原 wake，不烧模型也不吞 event。"""
+    arrived = EventArrived(lane="coe-t3", persona_id="akao")
+
+    class CooldownHitCapability:
+        async def get(self, key):
+            assert key == lw._cd_key("coe-t3", "akao")
+            return "1"
+
+        async def set_with_ttl(self, key, value, *, ttl_seconds):
+            raise AssertionError("cd 命中的轮次不应写新 cooldown")
+
+    async def fake_get_redis_capability():
+        return CooldownHitCapability()
+
+    monkeypatch.setattr(lw, "get_redis_capability", fake_get_redis_capability)
+    patched["unread"] = [_envelope("e1", "cd 内来的动静")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    with pytest.raises(DebounceReschedule) as ei:
+        await lw.life_wake_node(arrived)
+
+    assert ei.value.data is arrived
+    assert _FakeAgent.instances == []
+    assert patched["marked"] == []
+
+
+@pytest.mark.asyncio
+async def test_cooldown_capability_read_failure_still_propagates(patched, monkeypatch):
+    """Redis 读失败不 fail-open：仍向上抛并在模型/业务副作用前终止。"""
+    failure = RuntimeError("cooldown redis unavailable")
+
+    class FailingCapability:
+        async def get(self, key):
+            raise failure
+
+        async def set_with_ttl(self, key, value, *, ttl_seconds):
+            raise AssertionError("GET 失败后不应写 cooldown")
+
+    async def fake_get_redis_capability():
+        return FailingCapability()
+
+    monkeypatch.setattr(lw, "get_redis_capability", fake_get_redis_capability)
+    patched["unread"] = [_envelope("e1", "天亮了")]
+    _FakeAgent.install(monkeypatch, script=_script_update())
+
+    with pytest.raises(RuntimeError, match="cooldown redis unavailable") as ei:
+        await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert ei.value is failure
+    assert _FakeAgent.instances == []
+    assert patched["marked"] == []
 
 
 @pytest.mark.asyncio

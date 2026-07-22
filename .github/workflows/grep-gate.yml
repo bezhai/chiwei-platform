@@ -4,8 +4,9 @@ name: dataflow grep gate
 #
 # Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 12 / 18 from
 # Phase 7b + Gap 15 from Phase 7c + Gap 13 / 14 / 16 from Phase 7d)
-# must stay at zero occurrences in business code; new violations
-# block the PR.
+# must stay at zero unreviewed occurrences in business code; the few
+# contract-approved manual emit and provider-adapter transport sites are
+# matched by exact source rosters. New violations block the PR.
 #
 # Open gaps (Gap 19 — slated for 7e) carry a baseline count in
 # .github/grep-baselines.json. PRs that increase the count block;
@@ -25,20 +26,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Gap 7 — no business retry loops, no insert_idempotent call sites
+        id: gap_7
+        continue-on-error: true
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
+                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" \
-              apps/agent-service/app/{chat,life,memory,nodes}/ \
-              2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
+              "${BUSINESS[@]}" \
+              2>/dev/null \
+              | grep -v "agent/adapters/\|__pycache__\|/test_" \
+              | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
           # business code must not call insert_idempotent — runtime owns dedup.
-          # Match call sites only (excludes docstrings + comments referring to it).
-          c=$(grep -rn -E '\binsert_idempotent\(' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/persist.py\|runtime/durable.py\|__pycache__\|/test_" | wc -l || true)
-          [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c insert_idempotent call sites"; exit 1; }
+          # Parse Python syntax so comments/docstrings and non-business data/domain/fetch
+          # persistence helpers are not misreported as business call sites.
+          python3 .github/scripts/dataflow_semantic_gate.py 7
       - name: Gap 11 — no direct contextvar / header reads in dataflow business code
+        id: gap_11
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -54,21 +63,18 @@ jobs:
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
               2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
-      - name: Gap 8 — business `await emit(` count == 10 reviewed call sites
+      - name: Gap 8 — business manual emit roster is exact
+        id: gap_8_emit
+        continue-on-error: true
         shell: bash
         run: |
-          set -e
-          # The 7 category-A mutation sites migrated to transactional_emit
-          # in Task 10. Anyone adding a new category-A site MUST register
-          # it (spec §4.5.1) and update this count; otherwise the gate
-          # catches the regression.
-          c=$(grep -rn '\bawait emit(' \
-              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ \
-              --include='*.py' 2>/dev/null | wc -l || true)
-          [ "$c" -eq 10 ] || { echo "Gap 8 violation: business await emit count=$c, expected 10"; exit 1; }
+          set -euo pipefail
+          # Match real await calls and their enclosing function. A plain total lets a
+          # reviewed deletion cancel out an unrelated new violation.
+          python3 .github/scripts/dataflow_semantic_gate.py 8
       - name: Gap 15 — no arq imports, no arq dependency
+        id: gap_15
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -84,6 +90,8 @@ jobs:
               exit 1
           fi
       - name: Gap 8 — no commit-then-emit comments
+        id: gap_8_comments
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -91,6 +99,8 @@ jobs:
               apps/agent-service/app/ 2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 8 violation: $c commit-then-emit comments"; exit 1; }
       - name: Gap 12 — Makefile DLQ targets and runbook present
+        id: gap_12
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -99,6 +109,8 @@ jobs:
           grep -q "^dlq-dry-run:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-dry-run target"; exit 1; }
           test -f docs/runbooks/dlq-replay.md || { echo "Gap 12 violation: docs/runbooks/dlq-replay.md missing"; exit 1; }
       - name: Gap 18 — no don't-catch comments / requeue=False / business nack
+        id: gap_18
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -121,6 +133,8 @@ jobs:
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
       - name: Gap 13 — no DB session leakage in business code
+        id: gap_13
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -159,6 +173,8 @@ jobs:
               | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c app.runtime.outbox imports in business"; exit 1; }
       - name: Gap 14 — no Redis primitives in business code
+        id: gap_14
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -171,7 +187,9 @@ jobs:
           c=$(grep -rnE "redis\.set\(.*nx=True|redis\.eval\(|redis\.smembers\(|redis\.sadd\(" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c SETNX/eval/smembers/sadd in business"; exit 1; }
-      - name: Gap 16 — no httpx or HTTPClient direct imports in business code
+      - name: Gap 16 — no unclassified httpx or direct HTTPClient in business code
+        id: gap_16
+        continue-on-error: true
         shell: bash
         run: |
           set -e
@@ -179,11 +197,44 @@ jobs:
                     apps/agent-service/app/chat/ apps/agent-service/app/life/ \
                     apps/agent-service/app/memory/ apps/agent-service/app/skills/)
           c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
+              | grep -v "__pycache__\|/test_" \
+              | grep -vE '^apps/agent-service/app/agent/adapters/(openai|gemini)\.py:' \
+              | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
+          # Business calls domain-shaped capabilities, not the generic transport client.
           c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c HTTPClient direct imports in business"; exit 1; }
+      - name: Summarize closed-gap results
+        if: always()
+        shell: bash
+        env:
+          GAP_7: ${{ steps.gap_7.outcome }}
+          GAP_11: ${{ steps.gap_11.outcome }}
+          GAP_8_EMIT: ${{ steps.gap_8_emit.outcome }}
+          GAP_15: ${{ steps.gap_15.outcome }}
+          GAP_8_COMMENTS: ${{ steps.gap_8_comments.outcome }}
+          GAP_12: ${{ steps.gap_12.outcome }}
+          GAP_18: ${{ steps.gap_18.outcome }}
+          GAP_13: ${{ steps.gap_13.outcome }}
+          GAP_14: ${{ steps.gap_14.outcome }}
+          GAP_16: ${{ steps.gap_16.outcome }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for check in \
+              GAP_7 GAP_11 GAP_8_EMIT GAP_15 GAP_8_COMMENTS \
+              GAP_12 GAP_18 GAP_13 GAP_14 GAP_16; do
+            outcome="${!check}"
+            printf '%-16s %s\n' "$check" "$outcome"
+            if [ "$outcome" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more closed-gap checks failed; inspect every failed step above."
+            exit 1
+          fi
 
   open-gap-baseline:
     name: Open-gap baseline no-new (Gap 19)

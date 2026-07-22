@@ -48,7 +48,6 @@ from app.life.living_day import previous_living_day
 from app.life.pages import day_page_exists  # module-level so tests can monkeypatch
 from app.life.review import run_day_review  # module-level so tests can monkeypatch
 from app.runtime.data import Data, Key
-from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 
@@ -69,7 +68,7 @@ class LifeDayReviewTick(Data):
 
 
 class LifeDayReviewSweep(Data):
-    """带 lane 的对账执行信号（翻译节点 emit、in-process 接回对账节点）。
+    """带 lane 的对账执行信号（翻译节点返回、in-process 接回对账节点）。
 
     transient——只当唤醒信号；回顾产出落在 DayPage / RelationshipPage 表里。
     ``lane`` 由翻译节点这一处种下（整条链路的泳道隔离从这里传下去）。
@@ -82,13 +81,13 @@ class LifeDayReviewSweep(Data):
 
 
 @node
-async def review_to_sweep_tick(_tick: LifeDayReviewTick) -> None:
+async def review_to_sweep_tick(_tick: LifeDayReviewTick) -> LifeDayReviewSweep:
     """把清晨 cron 的单字段 tick 翻成带 lane 的对账信号（时间源的"变速箱"）。
 
     lane 显式从进程级部署泳道取（cron 源循环的 context lane 是 None），prod
     （LANE 未设 → None）归一到 ``"prod"``——同 :func:`fetch_to_materials_tick`。
     """
-    await emit(LifeDayReviewSweep(lane=current_deployment_lane() or "prod"))
+    return LifeDayReviewSweep(lane=current_deployment_lane() or "prod")
 
 
 @node

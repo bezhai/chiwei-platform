@@ -30,13 +30,14 @@ import difflib
 import logging
 import os
 
-import httpx
+from app.capabilities.persona_notification import (
+    PersonaNotificationOutcome,
+    send_persona_notification,
+)
 
 logger = logging.getLogger(__name__)
 
 PERSONA_REVIEW_WEBHOOK_URL_ENV = "PERSONA_REVIEW_WEBHOOK_URL"
-
-_WEBHOOK_TIMEOUT_SECONDS = 10.0
 
 
 def _unified_diff_block(
@@ -119,32 +120,27 @@ async def push_persona_diff(
             new_narrative=new_narrative,
             version=version,
         )
-        async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                url,
-                json={"msg_type": "text", "content": {"text": text}},
-            )
-        if not resp.is_success:
+        result = await send_persona_notification(url=url, text=text)
+        if result.outcome is PersonaNotificationOutcome.HTTP_ERROR:
             logger.error(
                 "[persona_diff_push] %s/%s v%s webhook 返回 HTTP %d"
                 "（fail-open：版本已落，不影响慢漂本身）：%s",
                 lane,
                 persona_id,
                 version,
-                resp.status_code,
-                resp.text[:200],
+                result.status_code,
+                result.response_preview,
             )
             return
-        body = resp.json()
-        if body.get("code", 0) != 0:
+        if result.outcome is PersonaNotificationOutcome.PROVIDER_ERROR:
             logger.error(
                 "[persona_diff_push] %s/%s v%s 飞书返回错误码 %s"
                 "（fail-open：版本已落，不影响慢漂本身）：%s",
                 lane,
                 persona_id,
                 version,
-                body.get("code"),
-                body.get("msg"),
+                result.provider_code,
+                result.provider_message,
             )
             return
         logger.info(

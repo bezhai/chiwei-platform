@@ -21,6 +21,7 @@ import pytest
 
 import app.agent.sediment as sediment_mod
 import app.agent.session_fold as fold_mod
+import app.capabilities.redis as redis_capability
 import app.nodes.life_wake as lw
 from app.agent.neutral import Message, Role
 from app.agent.session_fold import (
@@ -45,6 +46,7 @@ def fake_redis(monkeypatch):
 
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_mod, "_redis", fake)
+    monkeypatch.setattr(redis_capability, "_singleton", None)
     return fake
 
 

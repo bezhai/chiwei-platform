@@ -21,23 +21,35 @@ Framework changes define what nodes, wires, sources, durable routing,
 startup, retries, error routing, and cross-process emit mean. They must not
 be hidden inside a business node as a local workaround.
 
-### [B] Capability Layer
+### [B] Data, Capability, and Transport Layer
 
-Owns typed access to external systems and shared primitives.
+Owns persistence access, typed access to external systems and shared
+primitives, and provider wire adapters.
 
+- `apps/agent-service/app/data/**`
 - `apps/agent-service/app/capabilities/**`
+- `apps/agent-service/app/agent/adapters/**`
+- Data persistence helpers under `apps/agent-service/app/domain/**` and
+  `apps/agent-service/app/fetch/**` may call the reviewed runtime persistence
+  primitives; they must not expose raw sessions to Business code.
 - stable public facades around infra/runtime internals
 
 Capabilities expose typed errors and domain-shaped methods. Business code can
 call capabilities, but should not reach through them to raw Redis, HTTP,
 RabbitMQ, DB sessions, or runtime-private modules.
 
+Provider adapters translate the neutral model-client contract to a provider's
+native SDK/wire protocol. They may own provider transport details such as
+`httpx`; the current raw-HTTP roster is exactly `agent/adapters/openai.py` and
+`agent/adapters/gemini.py`. Adding another transport site requires an explicit
+roster review and does not make raw HTTP a Business-layer API.
+
 ### [C] Business Layer
 
 Owns product behavior.
 
 - `apps/agent-service/app/nodes/**`
-- `apps/agent-service/app/agent/**`
+- `apps/agent-service/app/agent/**` except `agent/adapters/**`
 - `apps/agent-service/app/chat/**`
 - `apps/agent-service/app/life/**`
 - `apps/agent-service/app/memory/**`
@@ -76,15 +88,17 @@ queue consumption for normal verification.
 
 ## Current Manual Emit Roster
 
-The reviewed business baseline is 10 real `await emit(...)` call sites:
+The reviewed business roster is 9 real `await emit(...)` call sites:
 
-- `chat/context.py`: non-node image-content sync side effect.
-- `chat/post_actions.py`: post safety and memory trigger fire-and-forget
-  emits with local exception handling.
-- `nodes/chat_node.py`: router-driven persona fan-out and streaming response
-  segment emission.
-- `nodes/life_dataflow.py`: glimpse emits per target chat with per-chat
-  request ids and per-chat error isolation.
+- `chat/context.py` (1): non-node image-content sync side effect.
+- `chat/post_actions.py` (1): post-safety fire-and-forget emit with local
+  exception handling.
+- `nodes/chat_node.py` (5): router-driven persona fan-out and streaming
+  response segment emission.
+- `nodes/life_tools.py` (2): tool-driven proactive-send and reading side
+  effects with their own idempotency/error handling.
 
 New business `await emit(...)` sites should be treated as framework debt until
-the PR explains why one of the allowed cases applies.
+the PR explains why one of the allowed cases applies. The CI gate matches this
+roster by source file and enclosing function; it does not accept a replaceable
+repository-wide count.

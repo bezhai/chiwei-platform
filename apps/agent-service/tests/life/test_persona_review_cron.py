@@ -9,13 +9,15 @@ source='review' 的版本」（:func:`app.life.persona_chain.has_review_version_
 三姐妹名字（宪法）。
 
 照 fetch_dataflow 的三层翻译（时间源 Data 必须单字段 ts 的框架硬约束）：
-cron 喂单字段 ``PersonaReviewTick``，翻译节点补进程级 lane 后 emit
-``PersonaReviewSweep``，in-process 接回 sweep 节点。run_persona_review 自身
+cron 喂单字段 ``PersonaReviewTick``，翻译节点补进程级 lane 后返回
+``PersonaReviewSweep``，由 ``@node`` 自动 emit，in-process 接回 sweep 节点。
+run_persona_review 自身
 fail-open + single_flight + 锁内周级幂等复查——一个 persona 失败绝不影响下一个。
 """
 
 from __future__ import annotations
 
+import importlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -75,14 +77,18 @@ async def test_tick_translates_to_sweep_with_deployment_lane(monkeypatch):
     async def fake_emit(data):
         emitted.append(data)
 
-    monkeypatch.setattr(prc, "emit", fake_emit)
+    # @node wrapper 调 runtime.emit，且仍把 Sweep 返回给直接调用方。
+    runtime_emit = importlib.import_module("app.runtime.emit")
+    monkeypatch.setattr(runtime_emit, "emit", fake_emit)
     monkeypatch.setattr(prc, "current_deployment_lane", lambda: "coe-t2")
 
-    await persona_review_to_sweep_tick(
+    result = await persona_review_to_sweep_tick(
         PersonaReviewTick(ts="2026-06-10T11:00:00+08:00")
     )
 
-    assert emitted == [PersonaReviewSweep(lane="coe-t2")]
+    expected = PersonaReviewSweep(lane="coe-t2")
+    assert result == expected
+    assert emitted == [expected], "@node wrapper 应将单一返回值自动 emit 一次"
 
 
 @pytest.mark.asyncio
@@ -93,12 +99,15 @@ async def test_tick_translation_defaults_lane_to_prod(monkeypatch):
     async def fake_emit(data):
         emitted.append(data)
 
-    monkeypatch.setattr(prc, "emit", fake_emit)
+    runtime_emit = importlib.import_module("app.runtime.emit")
+    monkeypatch.setattr(runtime_emit, "emit", fake_emit)
     monkeypatch.setattr(prc, "current_deployment_lane", lambda: None)
 
-    await persona_review_to_sweep_tick(PersonaReviewTick(ts="t"))
+    result = await persona_review_to_sweep_tick(PersonaReviewTick(ts="t"))
 
-    assert emitted == [PersonaReviewSweep(lane="prod")]
+    expected = PersonaReviewSweep(lane="prod")
+    assert result == expected
+    assert emitted == [expected]
 
 
 # ---------------------------------------------------------------------------

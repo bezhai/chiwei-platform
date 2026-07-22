@@ -42,7 +42,6 @@ from app.life.persona_review import (  # module-level so tests can monkeypatch
     run_persona_review,
 )
 from app.runtime.data import Data, Key
-from app.runtime.emit import emit  # module-level so tests can monkeypatch
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 
@@ -63,7 +62,7 @@ class PersonaReviewTick(Data):
 
 
 class PersonaReviewSweep(Data):
-    """带 lane 的补班执行信号（翻译节点 emit、in-process 接回 sweep 节点）。
+    """带 lane 的补班执行信号（翻译节点返回、in-process 接回 sweep 节点）。
 
     transient——只当唤醒信号；review 产出落在 PersonaVersion 版本链里。
     ``lane`` 由翻译节点这一处种下（整条链路的泳道隔离从这里传下去）。
@@ -76,13 +75,15 @@ class PersonaReviewSweep(Data):
 
 
 @node
-async def persona_review_to_sweep_tick(_tick: PersonaReviewTick) -> None:
+async def persona_review_to_sweep_tick(
+    _tick: PersonaReviewTick,
+) -> PersonaReviewSweep:
     """把每日 cron 的单字段 tick 翻成带 lane 的补班信号（时间源的"变速箱"）。
 
     lane 显式从进程级部署泳道取（cron 源循环的 context lane 是 None），prod
     （LANE 未设 → None）归一到 ``"prod"``——同 :func:`review_to_sweep_tick`。
     """
-    await emit(PersonaReviewSweep(lane=current_deployment_lane() or "prod"))
+    return PersonaReviewSweep(lane=current_deployment_lane() or "prod")
 
 
 @node

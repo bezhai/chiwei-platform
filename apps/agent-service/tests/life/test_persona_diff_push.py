@@ -24,7 +24,7 @@ import json
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -67,7 +67,8 @@ def _stub_webhook(handler: Callable[[httpx.Request], httpx.Response] = _ok_handl
         return real_client(transport=httpx.MockTransport(_recording), **kwargs)
 
     with patch(
-        "app.life.persona_diff_push.httpx.AsyncClient", side_effect=_factory
+        "app.capabilities.persona_notification.httpx.AsyncClient",
+        side_effect=_factory,
     ):
         yield seen
 
@@ -151,6 +152,25 @@ async def test_configured_push_posts_feishu_text_payload(monkeypatch):
     assert any(
         kw.get("timeout") == 10.0 for kw in seen["client_kwargs"]
     ), "webhook POST 要带 10s 超时（同 alert-webhook 姿势）"
+
+
+@pytest.mark.asyncio
+async def test_configured_push_delegates_url_and_rendered_text(monkeypatch):
+    """业务层只组装 diff 文本；webhook 传输与响应解释委托 typed capability。"""
+    from app.capabilities.persona_notification import PersonaNotificationResult
+
+    monkeypatch.setenv(_ENV, _URL)
+    send = AsyncMock(return_value=PersonaNotificationResult.success(status_code=200))
+
+    with patch.object(pdp, "send_persona_notification", send):
+        await _push()
+
+    send.assert_awaited_once()
+    assert send.await_args.kwargs["url"] == _URL
+    text = send.await_args.kwargs["text"]
+    assert _NEW in text
+    assert _PERSONA in text
+    assert _LANE in text
 
 
 @pytest.mark.asyncio
@@ -247,6 +267,21 @@ async def test_feishu_error_code_logs_error_not_raise(monkeypatch, caplog):
         return httpx.Response(200, json={"code": 19001, "msg": "param invalid"})
 
     with _stub_webhook(_feishu_reject) as seen, caplog.at_level(logging.ERROR):
+        await _push()  # 不抛
+
+    assert len(seen["requests"]) == 1
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_malformed_success_body_logs_error_not_raise(monkeypatch, caplog):
+    """HTTP 2xx 但 body 不是 JSON → capability 解析失败，业务仍 fail-open。"""
+    monkeypatch.setenv(_ENV, _URL)
+
+    def _malformed(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    with _stub_webhook(_malformed) as seen, caplog.at_level(logging.ERROR):
         await _push()  # 不抛
 
     assert len(seen["requests"]) == 1
