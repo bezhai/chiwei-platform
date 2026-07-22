@@ -48,12 +48,18 @@ Pixiv 图片元数据本地镜像例外：下载成功后，worker 会在 `PIXIV
 - `MINIO_SYNC_TIMEOUT_MS`：单张 OSS→MinIO 同步硬超时，默认 `30000`。
 - `PIXIV_IMAGE_MIRROR_MONGO_ENABLED`：开启下载后本地 `pixiv_images` 镜像同步，默认关闭。
 - `PIXIV_IMAGE_MIRROR_MONGO_*`：本地 Pixiv 图片元数据镜像 Mongo 配置，必须和旧 `MONGO_*` 分开。
+- `POST_DOWNLOAD_RECONCILE_ENABLED`：开启历史图片后处理对账，默认关闭。开启后按源 `_id` 分 epoch 有界扫描，并以持久 cursor、lease 和独立 retry 补齐镜像、MinIO 与 Tagger outbox。
+- `POST_DOWNLOAD_RECONCILE_*`：历史对账的 batch、retry batch、轮询、重试、lease 与 epoch 间隔；首次开启前必须评估存量与 Tagger 容量。
 - `TAGGER_RESULT_MONGO_ENABLED`：开启本地 Mongo 结果库连接，默认关闭。
 - `TAGGER_RESULT_MONGO_*`：本地 tagger 结果 Mongo 配置，必须和旧 `MONGO_*` 分开。
 - `TAGGER_TRIGGER_ENABLED`：开启下载后写入 tagger outbox，由后台 worker 自动提交 tagger，默认关闭。
 - `TAGGER_ENTRY_URL` / `TAGGER_API_TOKEN`：tagger entry 调用地址和 caller token。
 - `TAGGER_SUBMIT_BATCH_SIZE`：每个 tagger task 合并提交的图片数，默认 `1`；线上可设为 `4` 让 tagger-entry 对多图做一次 batch 推理。
 - `TAGGER_TRIGGER_WORKER_IDLE_DELAY_MS` / `TAGGER_TRIGGER_RETRY_DELAY_MS` / `TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS` / `TAGGER_TRIGGER_MAX_ATTEMPTS`：tagger outbox worker 轮询、重试和 processing 超时配置。
+- `TAGGER_SUBMITTED_RECONCILE_*`：submitted 任务主动查询 tagger-service 的等待、lease 和重试间隔，用于补偿丢失 callback。
+- `TAGGER_PROJECTION_ENABLED`：开启当前 callback 结果向本地 `pixiv_images` 的 durable 投影；要求本地图片镜像已开启。
+- `TAGGER_PROJECTION_BACKFILL_ENABLED`：允许识别并投影历史 completed 结果，默认关闭，必须与当前结果投影分开授权。
+- `TAGGER_PROJECTION_*`：结果投影的 batch、轮询、重试和 processing 超时配置。
 - `TAGGER_CALLBACK_URL` / `TAGGER_CALLBACK_AUTH_TOKEN`：tagger-service 回调地址和回调鉴权 token。
 - `TAGGER_CALLBACK_SERVER_ENABLED` / `TAGGER_CALLBACK_PORT`：开启 worker 内部 HTTP callback 入口及端口。
 

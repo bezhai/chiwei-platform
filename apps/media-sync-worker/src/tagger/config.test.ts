@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
     loadTaggerCallbackServerConfig,
     loadTaggerResultMongoConfig,
+    loadTaggerProjectionConfig,
     loadTaggerTriggerConfig,
 } from './config';
 
@@ -101,6 +102,9 @@ describe('loadTaggerTriggerConfig', () => {
             retryDelayMs: 60000,
             processingTimeoutMs: 600000,
             maxAttempts: 5,
+            reconcileAfterMs: 600000,
+            reconcileLeaseMs: 60000,
+            reconcileRetryDelayMs: 60000,
         });
     });
 
@@ -117,6 +121,9 @@ describe('loadTaggerTriggerConfig', () => {
             TAGGER_TRIGGER_RETRY_DELAY_MS: '15000',
             TAGGER_TRIGGER_PROCESSING_TIMEOUT_MS: '120000',
             TAGGER_TRIGGER_MAX_ATTEMPTS: '9',
+            TAGGER_SUBMITTED_RECONCILE_AFTER_MS: '180000',
+            TAGGER_SUBMITTED_RECONCILE_LEASE_MS: '45000',
+            TAGGER_SUBMITTED_RECONCILE_RETRY_DELAY_MS: '30000',
         });
 
         expect(config?.batchSize).toBe(4);
@@ -126,6 +133,44 @@ describe('loadTaggerTriggerConfig', () => {
         expect(config?.retryDelayMs).toBe(15000);
         expect(config?.processingTimeoutMs).toBe(120000);
         expect(config?.maxAttempts).toBe(9);
+        expect(config?.reconcileAfterMs).toBe(180000);
+        expect(config?.reconcileLeaseMs).toBe(45000);
+        expect(config?.reconcileRetryDelayMs).toBe(30000);
+    });
+});
+
+describe('loadTaggerProjectionConfig', () => {
+    it('is explicitly disabled by default even when result Mongo exists', () => {
+        expect(loadTaggerProjectionConfig({ TAGGER_RESULT_MONGO_ENABLED: 'true' })).toBeNull();
+    });
+
+    it('parses online projection defaults while historical backfill remains off', () => {
+        expect(loadTaggerProjectionConfig({ TAGGER_PROJECTION_ENABLED: 'true' })).toEqual({
+            batchSize: 4,
+            workerIdleDelayMs: 5000,
+            retryDelayMs: 60000,
+            processingTimeoutMs: 600000,
+            includeHistorical: false,
+        });
+    });
+
+    it('enables historical result backfill only through its independent flag', () => {
+        const config = loadTaggerProjectionConfig({
+            TAGGER_PROJECTION_ENABLED: '1',
+            TAGGER_PROJECTION_BACKFILL_ENABLED: 'true',
+            TAGGER_PROJECTION_BATCH_SIZE: '8',
+            TAGGER_PROJECTION_WORKER_IDLE_DELAY_MS: '1000',
+            TAGGER_PROJECTION_RETRY_DELAY_MS: '20000',
+            TAGGER_PROJECTION_PROCESSING_TIMEOUT_MS: '120000',
+        });
+
+        expect(config).toEqual({
+            batchSize: 8,
+            workerIdleDelayMs: 1000,
+            retryDelayMs: 20000,
+            processingTimeoutMs: 120000,
+            includeHistorical: true,
+        });
     });
 });
 

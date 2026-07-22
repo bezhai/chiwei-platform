@@ -26,7 +26,11 @@ import {
   CycleTimeoutError,
   runWithTimeout,
 } from "./consumerWatchdog";
-import { schedulePostDownloadSync } from "./postDownloadSync";
+import { runPostDownloadSync } from "./postDownloadSync";
+import {
+  assertPageDownloadsSucceeded,
+  type PageDownloadOutcome,
+} from "./pageDownloadResult";
 
 type DownloadIllustStatus =
   | "completed"
@@ -47,22 +51,15 @@ interface DownloadIllustTiming {
   translate_ms: number;
   proxy_download_ms: number;
   add_image_ms: number;
-  post_sync_schedule_ms: number;
+  post_sync_ms: number;
   total_ms: number;
   error?: string;
 }
 
-interface PageDownloadMetrics {
-  status:
-    | "downloaded"
-    | "missing_url"
-    | "exists"
-    | "download_failed"
-    | "add_image_failed";
+interface PageDownloadMetrics extends PageDownloadOutcome {
   proxyDownloadMs: number;
   addImageMs: number;
-  postSyncScheduleMs: number;
-  error?: string;
+  postSyncMs: number;
 }
 
 // 连续超时退出阈值：约 3 × 循环上限（默认 3 小时）不消费即判定系统性故障。
@@ -180,7 +177,7 @@ async function downloadIllust(
     translate_ms: 0,
     proxy_download_ms: 0,
     add_image_ms: 0,
-    post_sync_schedule_ms: 0,
+    post_sync_ms: 0,
     total_ms: 0,
   };
 
@@ -280,8 +277,22 @@ async function downloadIllust(
 
       // 检查图片是否已存在
       if (await checkExistPixivImg(pixivAddr)) {
-        metrics.status = "exists";
-        console.info(`插画 ${illustId} 第 ${index + 1} 页图片已上传`);
+        const postSyncStartedAt = nowMs();
+        try {
+          await runPostDownloadSync(pixivAddr);
+          metrics.postSyncMs = elapsedMs(postSyncStartedAt);
+          metrics.status = "exists";
+          console.info(
+            `插画 ${illustId} 第 ${index + 1} 页图片已上传，后处理已重放`
+          );
+        } catch (postSyncError) {
+          metrics.postSyncMs = elapsedMs(postSyncStartedAt);
+          metrics.status = "post_sync_failed";
+          metrics.error = formatError(postSyncError);
+          console.error(
+            `重放插画 ${illustId} 第 ${index + 1} 页后处理失败: ${postSyncError}`
+          );
+        }
         return metrics;
       }
 
@@ -323,9 +334,18 @@ async function downloadIllust(
       }
 
       const postSyncStartedAt = nowMs();
-      schedulePostDownloadSync(pixivAddr);
-      metrics.postSyncScheduleMs = elapsedMs(postSyncStartedAt);
-      metrics.status = "downloaded";
+      try {
+        await runPostDownloadSync(pixivAddr);
+        metrics.postSyncMs = elapsedMs(postSyncStartedAt);
+        metrics.status = "downloaded";
+      } catch (postSyncError) {
+        metrics.postSyncMs = elapsedMs(postSyncStartedAt);
+        metrics.status = "post_sync_failed";
+        metrics.error = formatError(postSyncError);
+        console.error(
+          `插画 ${illustId} 第 ${index + 1} 页后处理失败: ${postSyncError}`
+        );
+      }
       return metrics;
     });
 
@@ -334,21 +354,23 @@ async function downloadIllust(
     for (const metrics of pageMetrics) {
       timing.proxy_download_ms += metrics.proxyDownloadMs;
       timing.add_image_ms += metrics.addImageMs;
-      timing.post_sync_schedule_ms += metrics.postSyncScheduleMs;
+      timing.post_sync_ms += metrics.postSyncMs;
       switch (metrics.status) {
         case "downloaded":
           timing.downloaded_page_count++;
           break;
-        case "missing_url":
         case "exists":
           timing.skipped_page_count++;
           break;
+        case "missing_url":
         case "download_failed":
         case "add_image_failed":
+        case "post_sync_failed":
           timing.failed_page_count++;
           break;
       }
     }
+    assertPageDownloadsSucceeded(illustId, pageMetrics);
   } catch (err) {
     timing.status = "failed";
     timing.error = formatError(err);
@@ -364,7 +386,7 @@ function createPageMetrics(): PageDownloadMetrics {
     status: "downloaded",
     proxyDownloadMs: 0,
     addImageMs: 0,
-    postSyncScheduleMs: 0,
+    postSyncMs: 0,
   };
 }
 

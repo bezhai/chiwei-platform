@@ -104,7 +104,7 @@ export class PixivClient {
 
             // 等待2秒以避免频繁请求
             await new Promise((resolve) => setTimeout(resolve, 2000));
-        } while (page * pageSize <= total);
+        } while ((page - 1) * pageSize < total);
 
         return followers;
     }

@@ -352,18 +352,10 @@ export async function searchAndAddTranslate(
  * @returns 如果图片存在则返回 true，否则返回 false
  */
 export async function checkExistPixivImg(imgName: string): Promise<boolean> {
-  if (imgName === "") {
-    return false;
-  }
+  const filter = buildCompletedPixivImageFilter(imgName);
+  if (!filter) return false;
 
   try {
-    // 查询条件
-    const filter: Filter<any> = {
-      pixiv_addr: imgName,
-      tos_file_name: { $ne: "" },
-      illust_id: { $ne: 0 },
-    };
-
     // 计数符合条件的文档
     const count = await ImgCollection.countDocuments(filter);
     return count > 0;
@@ -371,6 +363,24 @@ export async function checkExistPixivImg(imgName: string): Promise<boolean> {
     console.error("Failed to count documents:", err);
     return false;
   }
+}
+
+/**
+ * A page is reusable by the download state machine only after both the OSS key
+ * and the metadata written by addImage exist. This prevents a retry after an
+ * addImage failure from treating a storage-only partial row as completed.
+ */
+export function buildCompletedPixivImageFilter(
+  pixivAddr: string
+): Filter<PixivImageInfo> | null {
+  const storageFilter = buildImageByPixivAddrFilter(pixivAddr);
+  if (!storageFilter) return null;
+  return {
+    ...storageFilter,
+    illust_id: { $gt: 0 },
+    multi_tags: { $type: "array" } as Filter<PixivImageInfo>["multi_tags"],
+    create_time: { $type: "date" } as Filter<PixivImageInfo>["create_time"],
+  };
 }
 
 /**

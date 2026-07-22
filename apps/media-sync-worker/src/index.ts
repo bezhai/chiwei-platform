@@ -4,6 +4,7 @@ dotenv.config();
 import cron from 'node-cron';  // 导入 node-cron
 import { loadDownloadCron } from './config/cron';
 import { initTaggerRuntime } from './tagger/runtime';
+import { initPostDownloadReconcileRuntime } from './service/postDownloadReconcileRuntime';
 
 // 重试配置
 const RETRY_DELAYS = [1000, 5000, 15000]; // 重试延迟时间（毫秒）
@@ -55,8 +56,23 @@ const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<
 const disableSchedules = isEnabled(process.env.DISABLE_SCHEDULES);
 const disableConsumer = isEnabled(process.env.DISABLE_CONSUMER);
 const runConnectivityCheck = isEnabled(process.env.RUN_CONNECTIVITY_CHECK);
-const taggerRuntimeInitPromise = initTaggerRuntime().catch((err) => {
-  console.error('Tagger runtime initialization failed:', err);
+const needsSourceMongoAtStartup = !disableConsumer
+  || isEnabled(process.env.TAGGER_TRIGGER_ENABLED)
+  || isEnabled(process.env.POST_DOWNLOAD_RECONCILE_ENABLED);
+
+async function initBackgroundRuntime(): Promise<void> {
+  // Trigger/reconcile workers can call ImgCollection immediately. Source Mongo must
+  // therefore be ready before either worker loop is allowed to start.
+  if (needsSourceMongoAtStartup) {
+    const { mongoInitPromise } = await import('./mongo/client');
+    await mongoInitPromise;
+  }
+  await initTaggerRuntime();
+  await initPostDownloadReconcileRuntime();
+}
+
+const backgroundRuntimeInitPromise = initBackgroundRuntime().catch((err) => {
+  console.error('Background runtime initialization failed:', err);
   process.exit(1);
 });
 
@@ -115,14 +131,13 @@ if (disableSchedules) {
   }
 
   try {
-    const [{ mongoInitPromise }, { consumeDownloadTaskAsync }] = await Promise.all([
-      import('./mongo/client'),
-      import('./service/consumeService'),
-    ]);
-    await taggerRuntimeInitPromise;
-    await mongoInitPromise;  // 等待 MongoDB 初始化完成
+    const { consumeDownloadTaskAsync } = await import('./service/consumeService');
+    await backgroundRuntimeInitPromise;
     await consumeDownloadTaskAsync();  // 启动异步任务的消费逻辑
   } catch (err) {
     console.error('Error in the consume download task:', err);
+    // A worker with a dead consumer but live cron/Tagger timers looks healthy to
+    // Kubernetes and never recovers. Exit so the original supervisor restarts it.
+    process.exit(1);
   }
 })();
