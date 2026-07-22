@@ -59,13 +59,29 @@ class ReadableFile:
 
 
 @dataclass(slots=True)
+class LifeChatCounterpart:
+    """私聊里对面那个真人是谁 —— 让渲染层能把私聊段具名（主动私聊具名化 Task 1）。
+
+    ``user_id`` = 对方的 ``common_user_id``（str 形态，渲染层内联拼 ``user:<uuid>``
+    句柄用）；``display_name`` 是对方展示名（数据层已做兜底，永远非空——全历史都
+    没写过 sender_display_name 时落「（不知名）」，同 ``LifeChatMessage`` 的展示名
+    口径：不暴露 raw user_id、不把 None 漏给渲染层）。
+    """
+
+    user_id: str
+    display_name: str
+
+
+@dataclass(slots=True)
 class LifeChatConversation:
     """life 醒来读对话时的一个会话分组 —— 一个会话 + 它最近一段消息 + 可读文件候选。
 
     ``scope`` = ``"direct"``（私聊）/ ``"group"``（群）；``display_name`` 是群名，
     私聊为 ``None``；``messages`` 按发生先后升序。``file_candidates`` 是这批同一段消息里
     解析出的可读文件项（读小说 Task 2：read_book 在**她这一轮看得见的同一批消息**里认文件，
-    零额外查询、真同一边界——不重跑 recent 查询避免边界漂移）。
+    零额外查询、真同一边界——不重跑 recent 查询避免边界漂移）。``counterparts`` 是私聊
+    对面的真人（主动私聊具名化 Task 1：按会话**全历史**的 role='user' 行解析、与 since
+    窗口解耦，正常 p2p 恰好 1 个、脏数据多人如实全列）；群会话恒为空。
     """
 
     chat_id: str
@@ -73,3 +89,4 @@ class LifeChatConversation:
     display_name: str | None
     messages: list[LifeChatMessage]
     file_candidates: list[ReadableFile] = field(default_factory=list)
+    counterparts: list[LifeChatCounterpart] = field(default_factory=list)

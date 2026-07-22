@@ -3,8 +3,10 @@
 这一层只做「解析」：把名字 / typed uid 翻成「该怎么把消息送到 ta」。它**不发送**
 （发送是 task 3 的事），只回答两个问题：
 
-  * ``search_recipients(query)`` —— 按名字模糊查到候选（typed uid + 一段简介帮认人 /
-    区分重名）。**只返回候选，绝不排序、不按亲密度 / 活跃度 / 兴趣筛、不自动取第一个**
+  * ``search_recipients(query, persona_id=...)`` —— 按名字模糊查到候选（typed uid +
+    一段简介帮认人 / 区分重名）。persona 感知：真人候选的简介附「调用 persona 此刻
+    有没有能直接发过去的私聊线 + 最近一次时间」的事实（帮她区分重名，别编 uid）。
+    **只返回候选，绝不排序、不按亲密度 / 活跃度 / 兴趣筛、不自动取第一个**
     （赤尾设计宪法：选谁是 life 自己的决定，代码不替她决定跟谁说话）。
   * ``resolve_delivery(uid)`` —— 把一个 typed uid 解析成投递目标：
       - ``persona:<id>`` → 信箱投递目标（对接 mailbox.deliver_event）；
@@ -26,6 +28,7 @@ Postgres 集成测试（``test_db`` fixture，对齐 test_persona_spoken_chats.p
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import text
@@ -287,7 +290,7 @@ def test_user_uid_format():
 async def test_search_sister_by_name_returns_uid_and_intro(directory_db):
     await _seed_three_sisters()
 
-    got = await search_recipients("千凪")
+    got = await search_recipients("千凪", persona_id="akao")
 
     assert len(got) == 1
     cand = got[0]
@@ -300,7 +303,7 @@ async def test_search_sister_by_name_returns_uid_and_intro(directory_db):
 async def test_search_real_person_by_name_returns_user_uid_and_intro(directory_db):
     await _seed_bezhai_with_p2p()
 
-    got = await search_recipients("原智鸿")
+    got = await search_recipients("原智鸿", persona_id="akao")
 
     assert len(got) == 1
     cand = got[0]
@@ -313,7 +316,7 @@ async def test_search_partial_name_matches_substring(directory_db):
     await _seed_three_sisters()
     await _seed_bezhai_with_p2p()
 
-    got = await search_recipients("智鸿")
+    got = await search_recipients("智鸿", persona_id="akao")
 
     uids = {c.uid for c in got}
     assert f"user:{_BEZHAI}" in uids
@@ -329,7 +332,7 @@ async def test_search_returns_all_candidates_for_ambiguous_name(directory_db):
         _OTHER_P2P, user_id=_OTHER, bot_name="chiwei", scope="direct", event_time=1
     )
 
-    got = await search_recipients("小尾")
+    got = await search_recipients("小尾", persona_id="akao")
 
     uids = {c.uid for c in got}
     assert "persona:akao" in uids
@@ -341,7 +344,7 @@ async def test_search_returns_all_candidates_for_ambiguous_name(directory_db):
 async def test_search_no_match_returns_empty(directory_db):
     await _seed_three_sisters()
 
-    got = await search_recipients("查无此人")
+    got = await search_recipients("查无此人", persona_id="akao")
 
     assert got == []
 
@@ -357,12 +360,239 @@ async def test_search_does_not_rank_by_activity_or_intimacy(directory_db):
     await _seed_persona("akao", "赤尾同学", "二姐。")
     await _seed_persona("ayana", "绫奈同学", "小妹。")
 
-    got = await search_recipients("同学")
+    got = await search_recipients("同学", persona_id="akao")
 
     ids = [c.uid for c in got if c.uid.startswith("persona:")]
     assert ids == ["persona:akao", "persona:ayana", "persona:chinagi"], (
         f"同类候选按 persona_id 稳定升序，不按播种序 / 亲密度 / 活跃度，实际 {ids}"
     )
+
+
+# ---------------------------------------------------------------------------
+# search_recipients — persona 感知的私聊线事实（Task 3）
+#
+# 真人候选 intro 附「调用 persona 此刻有没有能直接发过去的私聊线 + 最近一次时间」，
+# 口径复用 _resolve_user 的可投递判定（direct + lark + bot_config(persona_id,
+# is_active)）。**措辞只陈述"此刻有没有能发过去的线"**，不做"历史上从没私聊过"的
+# 断言（spec 决策 5：线不存在可能是 bot 下线 / 归属别的姐妹，不代表没聊过）。
+# ---------------------------------------------------------------------------
+
+# 一个确定的私聊最近活跃时刻：UTC 2026-06-03 16:30 = CST 2026-06-04 00:30 ——
+# 故意选跨日的时刻，钉死「日期按 CST 显示」（按 UTC 算日期会错报成 6 月 3 日）。
+_LAST_DM_MS = int(datetime(2026, 6, 3, 16, 30, tzinfo=UTC).timestamp() * 1000)
+
+# 更早的一个时刻（UTC 2026-06-01 02:00 = CST 10:00 → 2026年6月1日），给「入站旧、
+# 出站新」的双向时间测试当旧端。
+_OLD_DM_MS = int(datetime(2026, 6, 1, 2, 0, tzinfo=UTC).timestamp() * 1000)
+
+
+@pytest.mark.integration
+async def test_search_same_name_users_intro_distinguishes_dm_line(directory_db):
+    """同名两真人一个有私聊线一个没有 → intro 可区分且日期正确（CST 自然中文日期）。"""
+    with_line = uuid.uuid5(uuid.NAMESPACE_OID, "user-samename-with-line")
+    without_line = uuid.uuid5(uuid.NAMESPACE_OID, "user-samename-without-line")
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-samename-with-line")
+    await _seed_user(with_line, "原智鸿")
+    await _seed_user(without_line, "原智鸿")
+    await _seed_conversation(conv, scope="direct", name="原智鸿")
+    await _seed_message(
+        conv, user_id=with_line, bot_name="chiwei", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+
+    got = await search_recipients("原智鸿", persona_id="akao")
+
+    by_uid = {c.uid: c for c in got}
+    has = by_uid[f"user:{with_line}"]
+    lacks = by_uid[f"user:{without_line}"]
+    assert has.intro != lacks.intro, "同名两真人的 intro 必须可区分"
+    assert "能直接发过去的私聊" in has.intro
+    assert "2026年6月4日" in has.intro, f"日期按 CST 显示，实际 intro：{has.intro}"
+    assert "没有能直接发过去的私聊线" in lacks.intro
+    for cand in (has, lacks):
+        # 措辞红线（spec 决策 5）：只陈述"此刻有没有线"，不做历史断言。
+        assert "从没" not in cand.intro
+        assert "没私聊过" not in cand.intro
+
+
+@pytest.mark.integration
+async def test_search_user_with_inactive_bot_line_not_claimed_sendable(directory_db):
+    """历史聊过、但那条线的 bot 已 inactive → intro 不得声称可发（此刻没有能发的线）。"""
+    user = uuid.uuid5(uuid.NAMESPACE_OID, "user-retired-bot-line")
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-retired-bot-line")
+    await _seed_user(user, "退役线的人")
+    await _seed_conversation(conv, scope="direct", name="退役线")
+    await _seed_message(
+        conv, user_id=user, bot_name="chiwei-retired", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chiwei-retired", "akao", is_active=False)
+
+    got = await search_recipients("退役线的人", persona_id="akao")
+
+    assert len(got) == 1
+    intro = got[0].intro
+    assert "没有能直接发过去的私聊线" in intro
+    assert "最近一次" not in intro, "bot 已下线的线不得带'最近一次'的可发陈述"
+
+
+@pytest.mark.integration
+async def test_search_user_with_other_persona_line_not_claimed_sendable(directory_db):
+    """只跟**别的 persona** 的 bot 私聊过 → 对调用 persona 而言没有能发的线（persona 感知）。"""
+    user = uuid.uuid5(uuid.NAMESPACE_OID, "user-only-chinagi-line")
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-only-chinagi-line-search")
+    await _seed_user(user, "只跟千凪聊过的人")
+    await _seed_conversation(conv, scope="direct", name="千凪线")
+    await _seed_message(
+        conv, user_id=user, bot_name="chinagi-bot", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chinagi-bot", "chinagi", is_active=True)
+
+    got = await search_recipients("只跟千凪聊过的人", persona_id="akao")
+
+    assert len(got) == 1
+    assert "没有能直接发过去的私聊线" in got[0].intro
+
+
+@pytest.mark.integration
+async def test_search_order_not_changed_by_dm_line_facts(directory_db):
+    """候选顺序仍是纯机制序（common_user_id 升序）——私聊线活跃度不影响排序。
+
+    把私聊线（且最近活跃）给排序靠**后**的那个 user：若实现偷偷按活跃度排，顺序会
+    翻转，本测试即红。
+    """
+    ua = uuid.uuid5(uuid.NAMESPACE_OID, "user-order-a")
+    ub = uuid.uuid5(uuid.NAMESPACE_OID, "user-order-b")
+    first, second = sorted([ua, ub])
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-order-second-line")
+    await _seed_user(ua, "重名排序人")
+    await _seed_user(ub, "重名排序人")
+    # 私聊线给排序靠后的 second。
+    await _seed_conversation(conv, scope="direct", name="排序线")
+    await _seed_message(
+        conv, user_id=second, bot_name="chiwei", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+
+    got = await search_recipients("重名排序人", persona_id="akao")
+
+    user_uids = [c.uid for c in got if c.uid.startswith("user:")]
+    assert user_uids == [f"user:{first}", f"user:{second}"], (
+        f"顺序必须仍按 common_user_id 升序、与私聊活跃无关，实际 {user_uids}"
+    )
+
+
+@pytest.mark.integration
+async def test_search_dm_line_date_counts_bot_outbound_rows(directory_db):
+    """「最近一次」取可投递会话内最近一条消息——**双向、不限 role**（codex T3 必改 1）。
+
+    proactive 出站 assistant 行的 common_user_id 是 bot **自己**的（prod 查实口径），
+    只按「该真人自己的发言行」聚合会漏掉它：赤尾昨天刚主动私聊过 ta、ta 没回时，
+    intro 日期停在 ta 上次发言——恰好在主动私聊场景失真。必须算上 bot 出站行。
+    """
+    user = uuid.uuid5(uuid.NAMESPACE_OID, "user-bot-outbound-newer")
+    bot_user = uuid.uuid5(uuid.NAMESPACE_OID, "user-of-bot-itself")
+    conv = uuid.uuid5(uuid.NAMESPACE_OID, "conv-bot-outbound-newer")
+    await _seed_user(user, "被主动私聊的人")
+    await _seed_conversation(conv, scope="direct", name="主动线")
+    # 真人入站行（旧时间）。
+    await _seed_message(
+        conv, user_id=user, bot_name="chiwei", scope="direct", event_time=_OLD_DM_MS
+    )
+    # bot proactive 出站行（新时间）：role=assistant、common_user_id 写 bot **自己的**
+    # user id（不是收件真人的）——模拟 prod 出站行口径。
+    await _seed_message(
+        conv, user_id=bot_user, bot_name="chiwei", scope="direct", role="assistant",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+
+    got = await search_recipients("被主动私聊的人", persona_id="akao")
+
+    assert len(got) == 1
+    intro = got[0].intro
+    assert "2026年6月4日" in intro, (
+        f"最近一次要算会话内双向消息（含 bot 出站行），实际 intro：{intro}"
+    )
+    assert "2026年6月1日" not in intro
+
+
+@pytest.mark.integration
+async def test_search_intro_claim_consistent_with_resolve_delivery(directory_db):
+    """不变量守卫（codex T3 建议）：intro 的"可发"声称必须与投递口径同源。
+
+    同一份 seed 下，凡 intro 声称「有能直接发过去的私聊」的 user uid，对同 persona
+    调 resolve_delivery 必须成功返回目标；声称「没有线」的必须抛
+    UndeliverableRecipient——防止未来 _resolve_user 加安全闸时 intro 仍声称可发
+    （口径漂移在这里红）。
+    """
+    u_ok = uuid.uuid5(uuid.NAMESPACE_OID, "user-invariant-ok")
+    u_inactive = uuid.uuid5(uuid.NAMESPACE_OID, "user-invariant-inactive")
+    u_other = uuid.uuid5(uuid.NAMESPACE_OID, "user-invariant-other-persona")
+    u_none = uuid.uuid5(uuid.NAMESPACE_OID, "user-invariant-no-line")
+    conv_ok = uuid.uuid5(uuid.NAMESPACE_OID, "conv-invariant-ok")
+    conv_inactive = uuid.uuid5(uuid.NAMESPACE_OID, "conv-invariant-inactive")
+    conv_other = uuid.uuid5(uuid.NAMESPACE_OID, "conv-invariant-other")
+    # 同名四账号覆盖四种线况：有 active 线 / bot 已 inactive / 线归属别的 persona / 全无线。
+    for u in (u_ok, u_inactive, u_other, u_none):
+        await _seed_user(u, "口径守卫人")
+    await _seed_conversation(conv_ok, scope="direct", name="active 线")
+    await _seed_message(
+        conv_ok, user_id=u_ok, bot_name="chiwei", scope="direct", event_time=_LAST_DM_MS
+    )
+    await _seed_bot_config("chiwei", "akao", is_active=True)
+    await _seed_conversation(conv_inactive, scope="direct", name="退役线")
+    await _seed_message(
+        conv_inactive, user_id=u_inactive, bot_name="chiwei-retired", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chiwei-retired", "akao", is_active=False)
+    await _seed_conversation(conv_other, scope="direct", name="千凪线")
+    await _seed_message(
+        conv_other, user_id=u_other, bot_name="chinagi-bot", scope="direct",
+        event_time=_LAST_DM_MS,
+    )
+    await _seed_bot_config("chinagi-bot", "chinagi", is_active=True)
+
+    got = await search_recipients("口径守卫人", persona_id="akao")
+    user_cands = [c for c in got if c.uid.startswith("user:")]
+    assert len(user_cands) == 4
+
+    claimers = {
+        c.uid for c in user_cands if "没有能直接发过去的私聊线" not in c.intro
+    }
+    assert claimers == {f"user:{u_ok}"}, "只有 active 线的账号可声称能发"
+
+    for cand in user_cands:
+        if cand.uid in claimers:
+            assert "有能直接发过去的私聊" in cand.intro
+            target = await resolve_delivery(cand.uid, persona_id="akao")
+            assert isinstance(target, LarkP2PTarget), (
+                f"intro 声称可发的 uid 必须真的可投递：{cand.uid}"
+            )
+        else:
+            with pytest.raises(UndeliverableRecipient):
+                await resolve_delivery(cand.uid, persona_id="akao")
+
+
+@pytest.mark.integration
+async def test_search_sister_and_group_intro_carry_no_dm_line_fact(
+    directory_db, monkeypatch
+):
+    """姐妹 / 群候选的 intro 不受私聊线事实影响（事实只加在真人候选上）。"""
+    group = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-intro-unaffected")
+    await _seed_persona("akao", "小尾", "你是赤尾（小尾），18 岁。")
+    await _seed_conversation(group, scope="group", name="小尾粉丝群")
+    _patch_whitelist(monkeypatch, str(group))
+
+    got = await search_recipients("小尾", persona_id="akao")
+
+    by_uid = {c.uid: c for c in got}
+    assert "私聊" not in by_uid["persona:akao"].intro, "姐妹 intro 不带私聊线事实"
+    assert "私聊" not in by_uid[group_uid(group)].intro, "群 intro 不带私聊线事实"
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +1049,7 @@ async def test_search_recipients_includes_whitelisted_group(directory_db, monkey
     await _seed_conversation(_SOME_GROUP, scope="group", name="🐢🐢群（飞书版）")
     _patch_whitelist(monkeypatch, str(_SOME_GROUP))
 
-    got = await search_recipients("🐢🐢群")
+    got = await search_recipients("🐢🐢群", persona_id="akao")
 
     uids = {c.uid for c in got}
     assert group_uid(_SOME_GROUP) in uids, "白名单群应作为候选混进来"
@@ -836,7 +1066,7 @@ async def test_search_recipients_excludes_non_whitelisted_group(
     await _seed_conversation(out_wl, scope="group", name="海龟群B")
     _patch_whitelist(monkeypatch, str(in_wl))
 
-    got = await search_recipients("海龟群")
+    got = await search_recipients("海龟群", persona_id="akao")
 
     uids = {c.uid for c in got}
     assert group_uid(in_wl) in uids
@@ -852,7 +1082,7 @@ async def test_search_recipients_excludes_direct_conversation_as_group(
     await _seed_conversation(direct_conv, scope="direct", name="像群名的私聊")
     _patch_whitelist(monkeypatch, str(direct_conv))
 
-    got = await search_recipients("像群名的私聊")
+    got = await search_recipients("像群名的私聊", persona_id="akao")
 
     uids = {c.uid for c in got}
     assert group_uid(direct_conv) not in uids, "direct 会话不作群候选"

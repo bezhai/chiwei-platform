@@ -15,6 +15,7 @@ from sqlalchemy.future import select
 from app.data.message_record import (
     CommonMessageRecord,
     LifeChatConversation,
+    LifeChatCounterpart,
     LifeChatMessage,
     ReadableFile,
 )
@@ -634,6 +635,81 @@ def _life_chat_message(
     )
 
 
+async def _direct_counterparts_by_chat(
+    chat_ids: list[str],
+) -> dict[str, list[LifeChatCounterpart]]:
+    """私聊会话 → 对面真人列表（id + 展示名），对一批会话**一次查**（不逐会话 N+1）。
+
+    锚定 ``role='user'`` 行取对方——已查实的两个陷阱决定了不能取会话内任意 distinct
+    common_user_id：真人 user 行**也写 bot_name**（不能拿 bot_name 排除真人）、proactive
+    出站 assistant 行的 ``common_user_id`` 非空但是 **bot 自己的**（拿它当对方就把她自己
+    认成聊天对象）。role='user' 是「这行是真人说的」唯一干净锚。
+
+    **全历史、不带 since 窗口**（spec 决策 3）：会话对面是谁是稳定事实，不随内容增量
+    窗口变化——对方最后发言早于窗口、窗口内只剩她自己独白时（她刚主动发过话、对方还
+    没回，正是最需要具名的场景）也必须具名。仅全历史都无真人行才返回空（渲染层匿名
+    兜底）。``proactive_trigger`` 伪消息剔除（触发器记录不是真人发言，同各消息查询口径）。
+
+    每个真人一行：``DISTINCT ON (会话, 真人)`` 取**有名字的最近一行**（sender_display_name
+    为空的行排后——最新一行恰好没写展示名时不把名字弄丢），展示名兜底
+    ``_UNKNOWN_SPEAKER``（同 ``_life_chat_message`` 口径：不暴露 raw user_id）。正常 p2p
+    恰好 1 个；>1 个是约定外脏数据，如实全列、按最近发言在前排序（忠实呈现，不替她挑
+    「主对象」）。
+    """
+    chat_uuids = _uuid_list(chat_ids)
+    if not chat_uuids:
+        return {}
+    unnamed = or_(
+        CommonMessage.sender_display_name.is_(None),
+        CommonMessage.sender_display_name == "",
+    )
+    stmt = (
+        select(
+            CommonMessage.common_conversation_id,
+            CommonMessage.common_user_id,
+            CommonMessage.sender_display_name,
+            CommonMessage.event_time,
+        )
+        .where(
+            CommonMessage.common_conversation_id.in_(chat_uuids),
+            CommonMessage.role == "user",
+            CommonMessage.common_user_id.is_not(None),
+            or_(
+                CommonMessage.message_type.is_(None),
+                CommonMessage.message_type != "proactive_trigger",
+            ),
+        )
+        .distinct(
+            CommonMessage.common_conversation_id,
+            CommonMessage.common_user_id,
+        )
+        .order_by(
+            CommonMessage.common_conversation_id,
+            CommonMessage.common_user_id,
+            unnamed,
+            CommonMessage.event_time.desc(),
+        )
+    )
+    async with auto_tx():
+        rows = (await current_session().execute(stmt)).all()
+
+    grouped: dict[str, list[tuple[int, LifeChatCounterpart]]] = {}
+    for chat_uuid, user_uuid, display_name, event_time in rows:
+        grouped.setdefault(str(chat_uuid), []).append(
+            (
+                event_time,
+                LifeChatCounterpart(
+                    user_id=str(user_uuid),
+                    display_name=display_name or _UNKNOWN_SPEAKER,
+                ),
+            )
+        )
+    return {
+        chat_id: [cp for _, cp in sorted(pairs, key=lambda p: p[0], reverse=True)]
+        for chat_id, pairs in grouped.items()
+    }
+
+
 async def find_persona_related_chats_recent(
     *,
     persona_id: str,
@@ -657,7 +733,11 @@ async def find_persona_related_chats_recent(
     每个会话取最近消息（user + assistant，剔除 ``proactive_trigger`` 伪消息），**条目数
     量控制不字符截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按发生先后升序。每条折成
     ``LifeChatMessage``（发言者展示名 / 是否她自己 / 文本 / CST 时间），返回
-    ``LifeChatConversation`` 列表（chat_id + scope + 群名 + 消息列表）。
+    ``LifeChatConversation`` 列表（chat_id + scope + 群名 + 消息列表 + 私聊对面真人）。
+
+    私聊会话额外聚合「对面是谁」（主动私聊具名化 Task 1）：对选中的私聊**批量一次**
+    经 :func:`_direct_counterparts_by_chat` 解析对方真人（口径见该函数——按全历史
+    role='user' 行锚定、与 since 窗口解耦），让渲染层能把私聊段具名；群会话恒为空。
     """
     # 她在 since_ms 之后发过言的会话，按各会话她发言的最近时刻降序，连会话元数据
     # 一把取出（scope / 群名）。白名单读 Dynamic Config 是同步 httpx（网络 IO），
@@ -706,6 +786,12 @@ async def find_persona_related_chats_recent(
             selected.append((str(chat_uuid), scope, display_name))
         if len(selected) >= max_conversations:
             break
+
+    # 私聊对面真人：对选中的私聊批量一次查（不逐会话 N+1），身份按全历史解析、
+    # 与 since 窗口解耦（spec 决策 3——窗口内只剩她自己独白时也要能具名）。
+    counterparts_by_chat = await _direct_counterparts_by_chat(
+        [chat_id for chat_id, scope, _ in selected if scope == "direct"]
+    )
 
     out: list[LifeChatConversation] = []
     for chat_id, scope, display_name in selected:
@@ -756,6 +842,7 @@ async def find_persona_related_chats_recent(
                 display_name=display_name,
                 messages=messages,
                 file_candidates=file_candidates,
+                counterparts=counterparts_by_chat.get(chat_id, []),
             )
         )
     return out

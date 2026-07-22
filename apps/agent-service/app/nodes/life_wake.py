@@ -599,13 +599,22 @@ def _format_recent_chats(conversations: list[LifeChatConversation]) -> str:
     """把她相关会话的最近一段消息渲成「最近聊过的对话」段，按会话分组忠实呈现。
 
     T1 已把「她相关会话」捞成 ``LifeChatConversation`` 列表（私聊 + 白名单内的群、每个带
-    最近一段消息、已判明每条「谁说的」）。这里只做渲染——按会话分块：
+    最近一段消息、已判明每条「谁说的」、私聊带对面真人身份）。这里只做渲染——按会话分块：
 
-      * 群（``scope == "group"``）标群名「· 群「群名」里：」；群名缺失（查不到）兜底
-        「· 一个群里：」，**绝不把 None 拼进文案**（spec 决策 3 同口径）。
-      * 私聊（其余）标「· 一段私聊里：」。
+      * 群（``scope == "group"``）标群名 + 群句柄「· 群「群名」里（群句柄 group:<id>）：」；
+        群名缺失（查不到）兜底「· 一个群里（群句柄 group:<id>）：」，**绝不把 None 拼进
+        文案**（spec 决策 3 同口径）。
+      * 私聊（其余）具名「· 和 田申（user:<id>）的私聊里：」（主动私聊具名化 Task 2：
+        让她主动发消息时首发 uid 即合法、不用编）；多对象（约定外脏数据）如实全列、
+        不替她挑「主对象」；``counterparts`` 为空（全历史无真人行）保持匿名兜底
+        「· 一段私聊里：」，不硬造名字。
       * 组内每条 ``（时间）发言人：内容``——``m.is_self`` 为真（她自己的回复）显示「我」、
-        否则用 ``m.speaker_display_name``（真人昵称 / 别的 persona）。
+        否则用 ``m.speaker_display_name``（真人昵称 / 别的 persona）。句柄只标在会话头部、
+        不进 speaker 名。
+
+    uid 句柄在这里内联拼 ``user:`` / ``group:`` 前缀（同 :func:`_group_handle_suffix`
+    先例：life_wake 刻意不 import 投递目标解析层，口径一致但不共享代码）。句柄只做身份
+    grounding、不承诺可投递——发不出去仍由 resolve_delivery fail-loud 喂回她处置。
 
     **忠实呈现、不加工**（spec 命门）：不改写成「某人对你说 X / 你回了 Y」这类叙述体、
     不截断单条 ``m.text``——她读到的就是对话原貌。规模由上面三个条目上限在拉取侧控住，
@@ -614,11 +623,17 @@ def _format_recent_chats(conversations: list[LifeChatConversation]) -> str:
     blocks: list[str] = ["【最近聊过的对话】（这一阵你和谁聊过的，按会话分开）："]
     for conv in conversations:
         if conv.scope == "group":
+            group_handle = f"group:{conv.chat_id}"
             header = (
-                f"· 群「{conv.display_name}」里："
+                f"· 群「{conv.display_name}」里（群句柄 {group_handle}）："
                 if conv.display_name
-                else "· 一个群里："
+                else f"· 一个群里（群句柄 {group_handle}）："
             )
+        elif conv.counterparts:
+            named = "、".join(
+                f"{cp.display_name}（user:{cp.user_id}）" for cp in conv.counterparts
+            )
+            header = f"· 和 {named}的私聊里："
         else:
             header = "· 一段私聊里："
         lines = [header]

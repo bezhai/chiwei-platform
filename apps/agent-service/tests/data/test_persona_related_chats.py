@@ -518,6 +518,252 @@ async def test_no_file_messages_means_empty_candidates(chat_db, allow_all_groups
     assert got[0].file_candidates == []
 
 
+# ---------------------------------------------------------------------------
+# 私聊对方真人身份（主动私聊具名化 Task 1）：私聊会话聚合出「对面是谁」
+# （common_user_id + 展示名），挂到 LifeChatConversation.counterparts 上，让渲染层
+# 能把私聊段具名成「和 田申（user:<uuid>）的私聊里」。口径（spec 决策 2 / 3）：
+# - 锚定 role='user' 行取对方（真人行也写 bot_name、proactive 出站 assistant 行的
+#   common_user_id 是 bot 自己的——都不能当锚）。
+# - 身份按会话**全历史**解析、与 since 窗口解耦：对方最后发言早于窗口、窗口内只剩
+#   她自己独白时也要能具名；仅全历史无真人行才为空（匿名兜底）。
+# - 对选中会话批量一次查，不逐会话 N+1。
+# ---------------------------------------------------------------------------
+
+_CHAT_DIRECT_2 = uuid.uuid5(uuid.NAMESPACE_OID, "rel-chat-direct-2")
+_CHAT_DIRECT_3 = uuid.uuid5(uuid.NAMESPACE_OID, "rel-chat-direct-3")
+
+
+@pytest.mark.integration
+async def test_direct_counterpart_named_with_id(chat_db, allow_all_groups):
+    """正常私聊：对方恰好 1 个，id / 展示名都对（渠道约定 p2p 一对一）。"""
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=1000, text="赤尾在吗", scope="direct",
+        user_id=_USER_1, username="田申",
+    )
+    await _seed_bot_message(
+        _CHAT_DIRECT, event_time=2000, text="在的", persona_id="akao", scope="direct"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    cps = got[0].counterparts
+    assert len(cps) == 1, "正常 p2p 私聊对方恰好 1 个"
+    assert cps[0].user_id == str(_USER_1)
+    assert cps[0].display_name == "田申"
+
+
+@pytest.mark.integration
+async def test_counterpart_resolved_from_full_history_outside_window(
+    chat_db, allow_all_groups
+):
+    """对方最后发言早于 since 窗口（窗口内只剩她自己独白）也要能具名（spec 决策 3）。
+
+    身份是会话的稳定事实、与内容增量窗口解耦——正是"她刚主动发过话、对方还没回"
+    这种最需要知道对面是谁的场景。
+    """
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    # 对方在窗口前说过话；窗口内只有她自己的消息
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=100, text="早安", scope="direct",
+        user_id=_USER_1, username="田申",
+    )
+    await _seed_bot_message(
+        _CHAT_DIRECT, event_time=2000, text="在想你", persona_id="akao", scope="direct"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=1000, max_conversations=10, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    convo = got[0]
+    assert [m.is_self for m in convo.messages] == [True], "窗口内只剩她自己的独白"
+    assert len(convo.counterparts) == 1, "对方身份按全历史解析、不受窗口影响"
+    assert convo.counterparts[0].user_id == str(_USER_1)
+    assert convo.counterparts[0].display_name == "田申"
+
+
+@pytest.mark.integration
+async def test_proactive_outbound_row_not_mistaken_as_counterpart(chat_db, monkeypatch):
+    """proactive 出站 assistant 行的 common_user_id 是 bot 自己的（非 NULL）——
+    绝不能被误认成对方；对方只按 role='user' 行锚定。"""
+    _patch_whitelist(monkeypatch)
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=1000, text="在吗", scope="direct",
+        user_id=_USER_1, username="田申",
+    )
+    await _seed_proactive_bot_message(
+        _CHAT_DIRECT, event_time=2000, text_="我刚在想你", bot_name="chiwei"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    cps = got[0].counterparts
+    assert [c.user_id for c in cps] == [str(_USER_1)], (
+        "proactive 出站行（bot 自己的 common_user_id）不进对方列表"
+    )
+
+
+@pytest.mark.integration
+async def test_no_human_row_in_full_history_means_no_counterpart(chat_db, monkeypatch):
+    """全历史都没有真人 user 行（她只发过 proactive、对方从没回）→ 对象为空，
+    渲染层保持匿名兜底。"""
+    _patch_whitelist(monkeypatch)
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_bot_config("chiwei", "akao")
+    await _seed_proactive_bot_message(
+        _CHAT_DIRECT, event_time=2000, text_="我刚在想你", bot_name="chiwei"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    assert got[0].counterparts == []
+
+
+@pytest.mark.integration
+async def test_group_conversation_counterparts_empty(chat_db, allow_all_groups):
+    """群会话不聚合对象：counterparts 恒为空（具名化只针对私聊段）。"""
+    await _seed_conversation(_CHAT_GROUP, scope="group", name="一家人")
+    await _seed_bot_message(_CHAT_GROUP, event_time=1000, text="我在", persona_id="akao")
+    await _seed_user_message(_CHAT_GROUP, event_time=2000, text="哈喽")
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    assert len(got) == 1
+    assert got[0].counterparts == []
+
+
+@pytest.mark.integration
+async def test_dirty_direct_chat_lists_all_humans(chat_db, allow_all_groups):
+    """约定外脏数据：一个 direct 会话里出现 >1 个真人 → 如实全列（忠实呈现，
+    不替她挑"主对象"），最近发言的在前（稳定输出）。"""
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=1000, text="我先说", scope="direct",
+        user_id=_USER_1, username="田申",
+    )
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=2000, text="我后说", scope="direct",
+        user_id=_USER_2, username="原智鸿",
+    )
+    await _seed_bot_message(
+        _CHAT_DIRECT, event_time=3000, text="都在啊", persona_id="akao", scope="direct"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    cps = got[0].counterparts
+    assert [(c.user_id, c.display_name) for c in cps] == [
+        (str(_USER_2), "原智鸿"),
+        (str(_USER_1), "田申"),
+    ], "多真人如实全列、最近发言的在前"
+
+
+@pytest.mark.integration
+async def test_counterpart_display_name_prefers_named_row(chat_db, allow_all_groups):
+    """展示名取该真人**有名字**的最近一行：最新一行 sender_display_name 为空时
+    不把名字弄丢；全部行都没名字才落展示名兜底（不暴露 raw user_id、不拼 None）。"""
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=1000, text="有名字的行", scope="direct",
+        user_id=_USER_1, username="田申",
+    )
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=2000, text="没名字的行", scope="direct",
+        user_id=_USER_1, username=None,
+    )
+    # 另一个真人：全历史都没写过展示名
+    await _seed_user_message(
+        _CHAT_DIRECT, event_time=1500, text="无名氏", scope="direct",
+        user_id=_USER_2, username=None,
+    )
+    await _seed_bot_message(
+        _CHAT_DIRECT, event_time=3000, text="嗯", persona_id="akao", scope="direct"
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+    )
+
+    by_id = {c.user_id: c for c in got[0].counterparts}
+    assert by_id[str(_USER_1)].display_name == "田申", "有名字的行优先，不被空名行盖掉"
+    no_name = by_id[str(_USER_2)]
+    assert no_name.display_name, "全无名也给非空兜底展示名"
+    assert str(_USER_2) not in no_name.display_name, "兜底不暴露 raw user_id"
+    assert "None" not in no_name.display_name
+
+
+@pytest.mark.integration
+async def test_counterpart_aggregation_batched_not_per_chat(chat_db, allow_all_groups):
+    """身份聚合对选中会话批量一次查：**身份聚合的查询次数不随会话数增长**
+    （spec Task 1 验收）。只约束这一个不变式——消息查询自身的次数走向（比如
+    未来也批量化）不归这个测试管，不钉总查询量常数（codex T3 建议）。"""
+    from sqlalchemy import event as sa_event
+
+    captured: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            captured.append(statement)
+
+    async def _identity_query_count() -> int:
+        """跑一次查询，数可归类为**身份聚合**的 SELECT 条数。
+
+        归类特征：这条查询路径里只有身份聚合用 ``DISTINCT ON``（每 (会话, 真人)
+        取最近有名行）——候选查询走 GROUP BY、消息查询是普通 SELECT，都不含。
+        """
+        captured.clear()
+        sa_event.listen(chat_db.sync_engine, "before_cursor_execute", _capture)
+        try:
+            await find_persona_related_chats_recent(
+                persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+            )
+        finally:
+            sa_event.remove(chat_db.sync_engine, "before_cursor_execute", _capture)
+        return sum("DISTINCT ON" in stmt for stmt in captured)
+
+    async def _seed_direct(chat_id, *, t):
+        await _seed_conversation(chat_id, scope="direct", name=None)
+        await _seed_user_message(
+            chat_id, event_time=t, text="hi", scope="direct", username="田申"
+        )
+        await _seed_bot_message(
+            chat_id, event_time=t + 1, text="在", persona_id="akao", scope="direct"
+        )
+
+    await _seed_direct(_CHAT_DIRECT, t=1000)
+    n_with_1 = await _identity_query_count()
+
+    await _seed_direct(_CHAT_DIRECT_2, t=2000)
+    await _seed_direct(_CHAT_DIRECT_3, t=3000)
+    n_with_3 = await _identity_query_count()
+
+    assert n_with_1 == 1, (
+        "归类器必须真逮到那条身份聚合查询（不许空转绿）；"
+        f"实际 1 会话时归类到 {n_with_1} 条"
+    )
+    assert n_with_3 == 1, (
+        "3 个会话仍只有 1 条身份聚合查询——身份聚合不随会话数 N+1；"
+        f"实际 3 会话时归类到 {n_with_3} 条"
+    )
+
+
 @pytest.mark.integration
 async def test_proactive_trigger_pseudo_messages_excluded(chat_db, allow_all_groups):
     """proactive_trigger 伪消息不进结果（它是触发器记录、不是真实对话）。"""
