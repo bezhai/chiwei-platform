@@ -2396,6 +2396,7 @@ def stub_directory(monkeypatch):
 
     state: dict = {
         "search_calls": [],
+        "search_kwargs": [],
         "resolve_calls": [],
         "resolve_kwargs": [],
         "emitted": [],
@@ -2411,8 +2412,11 @@ def stub_directory(monkeypatch):
         "render_args": [],
     }
 
-    async def fake_search_recipients(query):
+    async def fake_search_recipients(query, *, persona_id=None):
+        # persona 感知（Task 3）：look_up_contact 必须把调用 persona 透传进来（真人
+        # 候选的私聊线事实按它算）；记下 kwargs 供断言透传正确。
         state["search_calls"].append(query)
+        state["search_kwargs"].append({"query": query, "persona_id": persona_id})
         return state["candidates"]
 
     async def fake_resolve_delivery(uid, *, persona_id=None):
@@ -2532,6 +2536,11 @@ async def test_look_up_contact_returns_all_candidates_with_uid_and_intro(stub_di
     out = await tools["look_up_contact"].invoke({"query": "赤尾"})
 
     assert stub_directory["search_calls"] == ["赤尾"]
+    # persona 透传（Task 3）：真人候选的私聊线事实按**调用 persona**算，look_up_contact
+    # 必须把闭包里的 persona_id 传给 search_recipients。
+    assert stub_directory["search_kwargs"] == [
+        {"query": "赤尾", "persona_id": "chinagi"}
+    ]
     assert isinstance(out, str)
     # 两个重名候选都列出来交给她挑（不替她取第一个）。
     assert "persona:akao" in out and "user:u-1" in out

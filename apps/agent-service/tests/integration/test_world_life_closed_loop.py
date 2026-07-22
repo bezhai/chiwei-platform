@@ -479,7 +479,9 @@ async def test_life_wake_includes_realtime_recent_chat_context(
 
     stimulus = _agent_run.life_calls[-1]["messages_text"]
     assert "最近聊过的对话" in stimulus
-    assert "一段私聊" in stimulus
+    # 主动私聊具名化 Task 2：私聊段头部具名 + user:<uuid> 句柄（不再是匿名「一段私聊」），
+    # 让她主动发消息时首发 uid 即合法。
+    assert f"和 贝壳（user:{user_id}）的私聊里" in stimulus
     assert "贝壳：赤尾刚才还记得我吗" in stimulus
     assert "我：当然记得，刚刚才聊过。" in stimulus
     assert "窗边有风吹进来" in stimulus

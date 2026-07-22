@@ -482,7 +482,9 @@ def build_life_tools(
         Returns:
             候选列表文本（每个候选带 uid + 简介）；查不到时一句如实说明。
         """
-        candidates = await search_recipients(query)
+        # 带上调用方 persona_id（Task 3）：真人候选的简介按它附「你这边此刻有没有能
+        # 直接发过去的私聊线 + 最近一次时间」的事实——重名真人靠这个区分，别盲选。
+        candidates = await search_recipients(query, persona_id=persona_id)
         if not candidates:
             return f"没找到叫「{query}」的人——换个名字再查，或者就算了。"
         # 原样把候选（uid + 简介）列给她挑，**不排序、不取第一个、不替她筛**（spec

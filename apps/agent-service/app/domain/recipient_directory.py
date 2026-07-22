@@ -64,6 +64,7 @@ from sqlalchemy import text
 
 from app.data.queries.persona import find_persona
 from app.data.session import get_session
+from app.infra.cst_time import to_cst
 from app.life.feed_whitelist import (
     LIFE_FEED_CHAT_WHITELIST_KEY,
     parse_whitelist,
@@ -193,14 +194,32 @@ def _persona_intro(display_name: str, persona_lite: str) -> str:
     return f"{display_name}（你的姐妹）：{head}" if head else f"{display_name}（你的姐妹）"
 
 
-def _user_intro(display_name: str) -> str:
-    """真人简介：目前只有显示名可用（common_user 没有更多资料）。
+def _user_intro(display_name: str, *, last_dm_ms: int | None) -> str:
+    """真人简介：显示名 + 与调用 persona 的私聊线事实（帮 life 区分重名、别编 uid）。
 
-    common_user 只存 display_name —— 真人没有像 persona_lite 那样的身份正文。重名
-    真人当前只能靠显示名区分；要更强的区分信息（最近聊天上下文等）是后续增量，本
-    task 不补存储（spec：先不建表）。
+    common_user 只存 display_name —— 真人没有像 persona_lite 那样的身份正文，重名
+    区分靠**私聊线事实**：``last_dm_ms`` 是「此刻调用 persona 名下 active bot 与 ta
+    之间可投递的 direct + lark 私聊线」（存在判定同 :func:`_resolve_user` 的可投递
+    口径）里**最近一条消息的毫秒时刻——双向、不限 role**（含 bot 主动出站行；只算
+    ta 自己的发言会在"刚主动私聊过、ta 没回"时报旧日期，codex T3 必改 1），None =
+    此刻没有这样的线。
+
+    **措辞只陈述"此刻有没有能发过去的线"，不做"历史上从没私聊过"的断言**（spec
+    决策 5）：线不存在可能是 bot 下线 / 那条线归属别的姐妹，不代表历史上没聊过——
+    查询口径查的就是可投递现状，文案不能越过口径去说历史。日期按 CST 显示成自然
+    中文（event_time 是 Unix 毫秒，经 :func:`app.infra.cst_time.to_cst` 归一）。
     """
-    return f"{display_name}（真人）"
+    if last_dm_ms is None:
+        return f"{display_name}（真人）——你这边没有能直接发过去的私聊线"
+    dt = to_cst(str(last_dm_ms))
+    if dt is None:
+        # event_time 理论上总是合法毫秒；万一解析不出就退回不带日期的事实陈述
+        # （不编日期、不静默吞掉"有线"这个事实）。
+        return f"{display_name}（真人）——你这边有能直接发过去的私聊"
+    return (
+        f"{display_name}（真人）——你这边有能直接发过去的私聊，"
+        f"最近一次是{dt.year}年{dt.month}月{dt.day}日"
+    )
 
 
 def _group_intro(display_name: str) -> str:
@@ -225,17 +244,25 @@ async def _load_chat_whitelist() -> frozenset[str]:
     return parse_whitelist(raw)
 
 
-async def search_recipients(query: str) -> list[RecipientCandidate]:
+async def search_recipients(
+    query: str, *, persona_id: str
+) -> list[RecipientCandidate]:
     """按名字模糊查可发送对象，返回候选列表（typed uid + 简介）。
 
     匹配口径：对显示名做大小写无关的子串匹配（``ILIKE %query%``），姐妹查
     ``bot_persona.display_name``、真人查 ``common_user.display_name``。空 / 全空白
     query 直接返回空（没给名字就没有候选）。
 
+    ``persona_id`` 是**调用方 persona**（谁在查）：真人候选的简介按它附「此刻你名下
+    有没有能直接发过去的私聊线 + 最近一次时间」的事实（帮 life 区分重名、别盲选），
+    口径复用 :func:`_resolve_user` 的可投递判定（direct + lark + bot_config 归属该
+    persona 且 active）。姐妹 / 群候选不消费它。
+
     **只返回候选，不做任何替 life 决策的事**（赤尾设计宪法）：不按亲密度 / 活跃度 /
     兴趣排序、不筛、不自动取第一个。返回顺序是稳定的纯机制序（姐妹在前按
     persona_id 升序，真人在后按 common_user_id 升序），只为输出确定性，不含「谁更
-    该被选」的语义——重名 / 多候选时全列出来交给 life 自己挑。
+    该被选」的语义——重名 / 多候选时全列出来交给 life 自己挑。私聊线事实只进 intro
+    文案，**绝不影响候选顺序**。
     """
     q = (query or "").strip()
     if not q:
@@ -278,13 +305,67 @@ async def search_recipients(query: str) -> list[RecipientCandidate]:
                 {"like": like},
             )
         ).mappings().all()
+
+        # 真人候选的私聊线事实（persona 感知）：对整批命中真人**一次批量查**「该真人 ×
+        # 调用 persona 名下 active bot 之间有没有 direct + lark 私聊线 + 最近一次消息时间」，
+        # 不逐候选 N+1。两层结构：
+        #
+        #   1. 内层 pair：线的**存在判定**逐字对齐 _resolve_user 的可投递口径
+        #      （scope='direct' + channel='lark' + bot_config(persona_id, is_active)），
+        #      定位 (真人, 可投递会话) 对——查的是「此刻能不能发过去」，不是「历史上
+        #      聊没聊过」，intro 措辞按前者陈述（spec 决策 5）。
+        #   2. 外层对会话**全消息**聚合 MAX(event_time)——「最近一次」必须**双向、不限
+        #      role**（codex T3 必改 1）：proactive 出站 assistant 行的 common_user_id
+        #      是 bot 自己的，只按真人自己的发言行聚合会漏掉它，「赤尾昨天刚主动私聊
+        #      过、ta 没回」时日期停在 ta 上次发言，恰好在主动私聊场景失真。
+        #
+        # 参数形态（codex T3 必改 2）：common_message.common_user_id 是带索引的 uuid
+        # 列，**列侧裸用、参数侧给 uuid 列表**（PG 从 `= ANY($n)` 推出 uuid[]，asyncpg
+        # 直接编码 UUID 对象）——列侧 CAST 成 text 会绕开索引走全表扫。上面群白名单的
+        # `CAST(... AS text) = ANY(:wl)` 是小表（common_conversation）先例，别学到大表上。
+        last_dm_by_user: dict[str, int] = {}
+        if user_rows:
+            dm_rows = (
+                await s.execute(
+                    text(
+                        "SELECT pair.common_user_id AS uid, "
+                        "       MAX(m.event_time) AS last_event "
+                        "FROM ("
+                        "  SELECT DISTINCT cm.common_user_id, "
+                        "         cm.common_conversation_id "
+                        "  FROM common_message cm "
+                        "  JOIN common_conversation cc "
+                        "    ON cc.common_conversation_id = cm.common_conversation_id "
+                        "   AND cc.scope = 'direct' "
+                        "   AND cc.channel = 'lark' "
+                        "  JOIN bot_config bc "
+                        "    ON bc.bot_name = cm.bot_name "
+                        "   AND bc.persona_id = :pid "
+                        "   AND bc.is_active = true "
+                        "  WHERE cm.common_user_id = ANY(:uids) "
+                        ") pair "
+                        "JOIN common_message m "
+                        "  ON m.common_conversation_id = pair.common_conversation_id "
+                        "GROUP BY pair.common_user_id"
+                    ),
+                    {
+                        "pid": persona_id,
+                        "uids": [r["common_user_id"] for r in user_rows],
+                    },
+                )
+            ).mappings().all()
+            last_dm_by_user = {str(r["uid"]): r["last_event"] for r in dm_rows}
+
         for row in user_rows:
             name = row["display_name"] or ""
             candidates.append(
                 RecipientCandidate(
                     uid=user_uid(row["common_user_id"]),
                     display_name=name,
-                    intro=_user_intro(name),
+                    intro=_user_intro(
+                        name,
+                        last_dm_ms=last_dm_by_user.get(str(row["common_user_id"])),
+                    ),
                 )
             )
 
