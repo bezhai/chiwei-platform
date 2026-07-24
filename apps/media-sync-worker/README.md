@@ -39,6 +39,8 @@ Pixiv 图片元数据本地镜像例外：下载成功后，worker 会在 `PIXIV
 ## 可选环境变量
 
 - `DOWNLOAD_CRON`：Pixiv 下载任务 cron 表达式，默认 `12 10 * * *`（每天 10:12）。
+- `DOWNLOAD_AUTHOR_TIMEOUT_MS`：单个关注作者发现与入队的硬超时，默认 `600000`；超时后发出协作中止信号、记录失败并继续下一个作者。冷却时间戳在 watchdog 清除后才提交。
+- `REDIS_COMMAND_TIMEOUT_MS`：media-sync-worker 单条 Redis 命令硬超时，默认 `30000`。
 - `DOWNLOAD_AFTER_ILLUST_INFO_DELAY_MS`：取作品信息后的等待时间，默认 `1500`（旧值减半）。
 - `DOWNLOAD_BEFORE_PAGE_DOWNLOAD_DELAY_MS`：单页图片代理下载前等待时间，默认 `1000`（旧值减半）。
 - `DOWNLOAD_AFTER_TASK_DELAY_MS`：每个下载任务完成后的等待时间，默认 `2500`（旧值减半）。
@@ -62,6 +64,10 @@ Pixiv 图片元数据本地镜像例外：下载成功后，worker 会在 `PIXIV
 - `TAGGER_PROJECTION_*`：结果投影的 batch、轮询、重试和 processing 超时配置。
 - `TAGGER_CALLBACK_URL` / `TAGGER_CALLBACK_AUTH_TOKEN`：tagger-service 回调地址和回调鉴权 token。
 - `TAGGER_CALLBACK_SERVER_ENABLED` / `TAGGER_CALLBACK_PORT`：开启 worker 内部 HTTP callback 入口及端口。
+
+每日作者发现启动前会验证源 Mongo 的 `download_task.illust_id` 唯一索引，并使用原子 upsert 入队。若存量存在重复 `illust_id`，索引创建会失败并终止本轮发现；上线前必须先只读检查重复数据，不能由应用自动删除。作者失败或超时会让整批以错误结束并交给 cron 的现有重试，而不是只打印成功。
+
+本链路的飞书状态通知另有固定 30 秒等待上限，避免 Lark SDK 的无界请求卡住每日任务。
 
 ## 部署验证开关
 
