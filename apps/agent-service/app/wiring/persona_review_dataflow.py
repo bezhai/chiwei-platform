@@ -36,23 +36,7 @@ TZ = "Asia/Shanghai"
 # 每天 11:00 一班的补班（钟挂 wiring 层，节拍器不进业务）。cron 喂单字段
 # PersonaReviewTick，翻译节点补上进程级泳道后 emit PersonaReviewSweep 接回
 # sweep 节点。本周已成功的班由周级幂等挡住，失败的班次日自动补。
-#
-# ############################################################################
-# TEMP: 泳道验证脚手架，**验证完必须 revert，禁止合进 main**。
-#
-# 生产值是 "0 11 * * *"（每天 11:00 CST 一班）。这里临时提频到每 5 分钟一班，
-# 只为在 coe 泳道当天已过 11:00 的情况下不等自然触发就能跑到 persona_review
-# 的真实调用（本批要验的是 prompt_vars 新增 persona_core 的契约）。
-#
-# 周级幂等（has_review_version_this_week，只认 source='review'，周界 = 自然周一
-# 00:00 CST）没动，所以提频后在该 lane 上依然只会真正跑一次：版本链为空 →
-# seed v0 → review v1 → 本周后续班全部被幂等挡住空转。这正是我们要的（一次
-# 真实调用），不要为了多跑几次去动幂等——那会掩盖真实行为。
-#
-# 同步改了 tests/wiring/test_persona_review_dataflow_wiring.py 的断言值（那里
-# 也有对应的 TEMP 注释），revert 时两处一起回来。
-# ############################################################################
-wire(PersonaReviewTick).from_(Source.cron("*/5 * * * *", tz=TZ)).to(
+wire(PersonaReviewTick).from_(Source.cron("0 11 * * *", tz=TZ)).to(
     persona_review_to_sweep_tick
 )
 # PersonaReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
