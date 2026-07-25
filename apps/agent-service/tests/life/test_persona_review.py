@@ -17,6 +17,9 @@ actor、durable 写工具不包 @tool_error。这些测试钉死机制层硬约�
     触发时刻) 派生（同刻确定、不同刻各自入账）；
   * durable 写失败穿透炸 run（工具不包 @tool_error）→ fail-open 下一班补；
   * single_flight 按 (lane, persona) 包整段；整段硬超时 < 锁 TTL；
+  * 人设正文锚：``bot_persona.persona_core`` 走 **SYSTEM 层 prompt 变量**
+    ``{{persona_core}}``（权威顺序由 langfuse 的写作纪律定义，不在代码里），
+    USER 层不再重复它的全文；为空时传一句如实缺省文案而不是空串，且不报错；
   * instruction / 模板零剧情事实（宪法）。
 
 写什么、改不改由她的传记作者自己判断（纪律在 prompt 层），这里没有内容检测器。
@@ -94,7 +97,9 @@ def stub_io(monkeypatch):
         "rel_pages": [_rel_page()],
         "arc": SimpleNamespace(narrative="一家人刚搬进新的城市，各自适应着。"),
         "persona_row": SimpleNamespace(
-            display_name="她自己", persona_lite="出厂身份正文：她是她。"
+            display_name="她自己",
+            persona_lite="出厂身份正文：她是她。",
+            persona_core="出厂人设正文：她的底色是她的底色。",
         ),
         "costs": [],
         "window_calls": [],  # read_day_pages_written_after 收到的游标
@@ -289,14 +294,17 @@ async def test_review_tags_trace_session_without_transcript(stub_io, monkeypatch
 
 @pytest.mark.asyncio
 async def test_review_prompt_vars_contract(stub_io, monkeypatch):
-    """prompt_vars 契约 = {persona_name, current_persona}；current_persona 是链上
-    最新一版正文（seed 后链非空，注入的是链文本不是主表快照）。"""
+    """prompt_vars 契约 = {persona_name, persona_core, current_persona}：
+    persona_core 是人写的那份不随日子变的人设正文（SYSTEM 层判断「她是谁」的
+    依据），current_persona 是链上最新一版身份正文（seed 后链非空，注入的是链
+    文本不是主表快照）。"""
     captured = _mock_run(monkeypatch, stub_io)
 
     await _review()
 
     assert captured["prompt_vars"] == {
         "persona_name": "她自己",
+        "persona_core": "出厂人设正文：她的底色是她的底色。",
         "current_persona": "出厂身份正文：她是她。",
     }
 
@@ -908,6 +916,97 @@ async def test_evidence_missing_world_arc_says_so(stub_io, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 人设正文锚（bot_persona.persona_core）：走 SYSTEM 变量、USER 不重复、缺省如实说
+# ---------------------------------------------------------------------------
+#
+# 慢漂此前只看得见「她自己行为的回声」——上一版身份正文 + 她自己写的日页 + 她自己
+# 对人的印象（关系页）。每周拿回声重写身份，人格只会越写越窄（实证：正文被压成四个
+# 标签，人写的那份里「不会主动当别人的心理咨询师」这类恰好防当前症状的底色全丢）。
+#
+# 把 core 拼进 USER 证据 + 一段权威顺序措辞压不住：langfuse 上的 persona_review
+# system prompt 自称「每一条都是硬约束」，第一条就是「绝大部分原文逐字原样保留、
+# 读完新旧两版的人应该要找一会儿才找得到改动」。USER 层新加的只是「本轮材料」，
+# 与自称硬约束的 SYSTEM 冲突时模型服从后者。所以锚提到 SYSTEM 层，与
+# {{current_persona}} 并列，权威顺序写进 SYSTEM 的写作纪律（那些措辞在 langfuse
+# prompt 里，不在代码里 —— 代码断言不到、也不该断言）。
+#
+# 代码这一侧剩下的契约只有一件事：**变量传对**。传错 / 传空 = 线上 SYSTEM 渲染出
+# 一个空洞，纪律里「以那份人设正文为准」就没有可指的东西了。下面钉的就是这件事。
+
+
+@pytest.mark.asyncio
+async def test_persona_core_goes_to_system_var_verbatim(stub_io, monkeypatch):
+    """人写的那份人设正文原文进 SYSTEM 变量 {{persona_core}}（代码不加工措辞）。"""
+    core = "她不会主动当别人的心理咨询师；起床对她是难事，午后才是她的黄金时间。"
+    stub_io["persona_row"].persona_core = core
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    assert captured["prompt_vars"]["persona_core"] == core
+
+
+@pytest.mark.asyncio
+async def test_user_blob_does_not_repeat_persona_core(stub_io, monkeypatch):
+    """core 提到 SYSTEM 后 USER 层不再拼一遍：同一份（人均约三千字）正文注入两遍
+    是纯浪费，还给模型两个「她是谁」的入口。USER 只留这段日子的证据 + 本轮姿态。"""
+    core = "她不会主动当别人的心理咨询师；起床对她是难事，午后才是她的黄金时间。"
+    stub_io["persona_row"].persona_core = core
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()
+
+    blob = _blob(captured)
+    assert core not in blob, "core 全文已在 SYSTEM，USER 不能再注入一遍"
+    assert "先认准那个不随日子变的「她是谁」" in blob, (
+        "本轮姿态句保留：它说的是这次怎么读，不是重复 core 的内容"
+    )
+
+
+@pytest.mark.asyncio
+async def test_blank_persona_core_degrades_truthfully_in_system_var(
+    stub_io, monkeypatch
+):
+    """persona_core 为空（列 NOT NULL，但可能是空串）→ 绝不给 SYSTEM 塞空白：
+    传一句如实的话（没有这份正文 + 越是这样越不要拿近期变化改写底色），
+    review 照常跑完、照常落版（同 arc / 关系页空白的既有口径）。"""
+    stub_io["persona_row"].persona_core = ""
+    captured = _mock_run(monkeypatch, stub_io)
+
+    await _review()  # 不抛
+
+    got = captured["prompt_vars"]["persona_core"]
+    assert got.strip(), "空 core 绝不能让 SYSTEM 渲染出一个空洞"
+    assert "没有可对照的底色" in got, "缺省要如实说，不冒充一份出来"
+    assert _sources(stub_io) == ["seed", "review"], "core 缺失绝不让这班 review 失败"
+
+
+def test_persona_core_var_blank_forms_all_degrade_truthfully():
+    """None / 空串 / 纯空白三态都走同一条如实缺省分支（不抛、不冒充底色）。"""
+    for blank in (None, "", "   \n\t "):
+        got = pr_mod._persona_core_var(blank)
+        assert "没有可对照的底色" in got
+        assert "不要拿" in got, "越是没有底色可对照，越要提醒别拿近期变化改写它"
+
+
+def test_persona_core_var_passes_written_core_through():
+    """有 core 时代码不裹任何模板措辞——原文直传（权威顺序的措辞在 SYSTEM prompt
+    里；代码再包一层就是第二个权威声明，冲突时谁说了算又说不清）。"""
+    assert pr_mod._persona_core_var("  底色正文：她就是这样一个人。  ") == (
+        "底色正文：她就是这样一个人。"
+    )
+
+
+def test_persona_core_var_blank_template_has_no_plot_facts():
+    """缺省那句静态措辞零剧情事实（宪法）——人设内容全部从数据来。"""
+    text = pr_mod._persona_core_var(None)
+    assert "高考" not in text
+    assert "广州" not in text
+    for name in ("千凪", "赤尾", "绫奈", "chinagi", "akao", "ayana"):
+        assert name not in text
+
+
+# ---------------------------------------------------------------------------
 # 著作权纪律在 prompt 层：instruction 钉姿态、零剧情事实
 # ---------------------------------------------------------------------------
 
@@ -920,6 +1019,22 @@ def test_instruction_pins_writing_discipline():
     assert "重写" in instruction
     assert "底色" in instruction
     assert "证据" in instruction or "出处" in instruction
+
+
+def test_instruction_points_both_texts_to_system_prompt():
+    """instruction 对「什么在哪」的说明必须与真实注入一致：那份不随日子变的人设
+    正文和她现在的身份正文都在系统提示里，USER 里只有这段日子的日页 / 关系页 /
+    现实阶段。说错了模型会去 USER 找一份根本不在那儿的正文。"""
+    instruction = pr_mod.persona_review_instruction()
+    assert "系统提示" in instruction
+    assert "人设正文" in instruction and "身份正文" in instruction
+
+    assert "下面是" in instruction, "USER 证据的枚举句"
+    listed_below = instruction.split("下面是", 1)[1].split("。", 1)[0]
+    assert "日页" in listed_below and "关系页" in listed_below
+    assert "人设正文" not in listed_below, (
+        "人设正文已在系统提示里，USER 的枚举不能还说它在下面"
+    )
 
 
 def test_instruction_has_no_hardcoded_plot_facts():

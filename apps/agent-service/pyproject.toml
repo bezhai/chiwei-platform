@@ -43,6 +43,7 @@ dependencies = [
     "uuid6>=2025.0.1",
     "cnlunar>=0.2.4",
     "ebooklib>=0.18",
+    "astral>=3.2",
 ]
 
 [project.optional-dependencies]

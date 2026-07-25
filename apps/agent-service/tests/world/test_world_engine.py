@@ -2233,39 +2233,98 @@ async def test_world_instruction_guides_idle_sense_wake_judgment():
 
 
 @pytest.mark.asyncio
-async def test_world_instruction_idle_excludes_sleep_and_forbids_repeat():
-    """T3 code review 必改 1（唤醒风暴风险，复现历史事故）：world 大约每 30 分钟推
-    一轮，若只靠"天然闲时刻"这一条标准，某个角色持续处于同一个静止场景（比如她一直
-    窝在沙发上没变化、甚至正在睡觉）会导致 world 每轮都重新判"这仍是天然闲时刻"、
-    每轮都传 idle=True——这正是当年"world 每轮 sense 把自排睡着的姐妹敲醒、睡不满"
-    那次事故的根因。指令必须补两条边界：① 正在安睡不算天然的闲；② 同一个没怎么变
-    的静止场景不逐轮机械重复判 True。禁止用数字阈值/计数器堵这个口子，只能是
-    prompt 层的引导让 world 自己判断、自己记得。
+async def test_world_instruction_idle_wakes_overdue_sleeper_but_not_repeatedly():
+    """idle-deadlock Task 1：idle 的两条边界重写——解开死锁、拿掉「睡更久换叫醒许可」。
+
+    prod 实证（2026-07-25 对近 5 天的核验）：``idle_sense`` 在 20:00–06:00 之间**零条**、
+    07-24 22:16→07-25 05:23 七小时里三个角色信箱零投递；world 平均 sleep 从 19.4 分钟
+    单调涨到 44.9 分钟、上午连续多轮顶格 3600s。三个根因都长在这段措辞里：
+
+      * 边界①旧判据「（时间外推）推断出来就是在睡 → idle 绝不能填 True」是**闭环
+        死锁**：``LifeState`` 只在她被唤醒时才更新 → 上次观测在睡 → 外推还是在睡 →
+        禁止叫 → 永不唤醒 → 状态永不更新。不需要模型犯任何错就会发生。判据必须从
+        「她此刻是不是睡着」换成「这一刻她**本来该不该**还睡着」：落在她本该睡着的
+        时段 → 别碰；过了她该起来的时候还没醒 → 可以叫。这个判断 world 做得了——
+        每个角色一天大致怎么过写在它的 system prompt 里，加上 ``observed_at`` 和
+        【现实此刻】就够（设定本身仍归 system 一处，这里只引用、不重述）。
+      * 「或者隔了足够久这又成了一次新的、值得单独感知的闲时刻」把**把 sleep 排长**
+        明码标价成重新解锁 idle 许可的手段——模型想 idle 却被边界挡住时，最直接的
+        合法解就是睡更久。sleep 时长的单调上涨就是被这句奖励出来的。
+      * 「世界大约每 30 分钟推一轮……这正是当年不得不把 sense 整体改成被动通道的那次
+        事故根源」是错误自述：代码里没有 30 分钟这个数（心跳常量 600s、sleep 60–3600s
+        全由模型自定），它既把尺度讲错、又把 30 分钟标成事故量级（于是安全解自然是
+        排 >30 分钟，实测均值 45 分钟正好跨过去）；它引用的那次事故里的自排睡眠机制
+        早已整体删除，事故标签同样过时。「别机械地每轮都判一次」这层意思保留，但不
+        能再给错误的量化尺度和事故标签。
+
+    边界②**不删只温和化**：``derive_idle_sense_event_id`` 带 ``round_id``（每轮是不同
+    事件、不会被幂等吞掉）、``idle`` 默认 False 拦不住模型每轮显式传 True、
+    ``PASSIVE_EVENT_KINDS`` 只含 surroundings 不管 idle_sense——它是当前**唯一**拦住
+    「每轮把三个人都叫醒」的东西，删掉会直接复现事故。温和化 = 判据从「这个场景跟
+    上轮比变没变」换成「她这一刻该不该被打扰」，保留抑制力，但不再要求她必须先换个
+    状态才配被叫。
+
+    禁止用数字阈值 / 计数器堵口子（赤尾宪法）：判断权全在语义引导里。
     """
     instruction = engine_mod.world_loop_instruction()
 
-    # ① 睡眠期间不触发：明确说安睡不算天然的闲。
-    assert "安睡不算天然的闲" in instruction, (
-        "指令必须明确「正在安睡不算天然的闲」，否则 idle 判断会在她该睡满时把她吵醒"
+    # ---- 反向：造成死锁 / 反向激励 / 错误尺度的旧措辞必须消失 ----
+    assert "或者隔了足够久" not in instruction, (
+        "「或者隔了足够久」把「把 sleep 排长」明码标价成重新解锁 idle 的手段，必须删"
     )
-    assert "notify" in instruction.split("安睡不算天然的闲")[-1].split("\n")[0] or (
-        "notify" in instruction
-    ), "真有必须惊动睡着的人的理由，应指向 notify 而不是 idle"
+    assert "世界大约每 30 分钟推一轮" not in instruction, (
+        "代码里没有「每 30 分钟推一轮」这回事（心跳 600s、sleep 60–3600s 由模型自定）"
+    )
+    assert "30 分钟" not in instruction, (
+        "指令不得再给任何错误的量化推演尺度——它会被当成安全解的标尺"
+    )
+    assert "被动通道" not in instruction, (
+        "那次事故里的自排睡眠机制早已整体删除，事故标签已过时、不该再当护栏的理由"
+    )
 
-    # ② 同一静止场景不逐轮重复触发。
+    # ---- 正向 ①：真落在她本该睡着的时段，仍然别碰她（原则保留，不是把边界删了了事）----
+    assert "该睡的时候在睡" in instruction, (
+        "「她该睡的时候在睡就别吵」这条原则必须保留（解死锁不等于取消睡眠保护）"
+    )
+    assert "idle 绝不能填 True" in instruction, (
+        "落在她本该睡着的时段这一支，必须仍然明确禁止 idle=True"
+    )
+
+    # ---- 正向 ②：过了她该起的时刻仍在睡 → 允许唤醒（这一支就是死锁的解）----
+    assert "早该醒了" in instruction, (
+        "边界①的判据必须区分「该睡的时候在睡」和「该起的时候还在睡」两种情况"
+    )
+    overdue_idx = instruction.index("早已过了她该起来的时候")
+    assert "idle=True" in instruction[overdue_idx : overdue_idx + 160], (
+        "「过了她该起来的时候她却还没醒」这一支必须明确**允许** idle=True 叫醒她，"
+        "否则死锁没解开"
+    )
+
+    # ---- 正向 ③：点破自锁本身（判据不能是「上次观测到她在睡」这个自我封闭的循环）----
+    assert "只有在她醒着的时候才会更新" in instruction, (
+        "必须点破 LifeState 只在被唤醒时更新，拿它当「她该继续睡」的证据就是自锁"
+    )
+    assert "自锁" in instruction
+
+    # ---- 正向 ④：同一场景没翻页时不重复主动唤醒（边界②的抑制力保留）----
     assert "不逐轮" in instruction and "机械重复判" in instruction, (
-        "指令必须明确「同一个没怎么变的静止场景不逐轮机械重复判 idle=True」"
+        "边界②必须保留：同一份没翻页的场景不逐轮机械重复判 idle=True"
     )
     assert "上一轮" in instruction, (
         "指令必须引导 world 记得自己上一轮是否已经因为同一场景判过 idle=True"
     )
 
-    # 历史事故复核：必须点名"每 30 分钟"和事故根因，让这条引导有具体的失败场景锚定
-    # （不是抽象的"别重复"）。
-    assert "30 分钟" in instruction
-    assert "被动通道" in instruction or "自排睡着的姐妹" in instruction, (
-        "指令应锚定历史事故（sense 整体改被动通道的根因），让 world 理解为什么这条"
-        "边界不能踩"
+    # ---- 正向 ⑤：边界②判据温和化——问「她该不该被打扰」，不再要求她先换状态 ----
+    assert "该不该被打扰" in instruction, (
+        "边界②的判据应是「她这一刻该不该被打扰」，不是「这个场景跟上轮比变没变」"
+    )
+    assert "不必等她先换个状态" in instruction, (
+        "温和化后不得再要求她必须先换个状态才配被叫（那是另一种形式的自锁）"
+    )
+
+    # ---- 睡着的人真有必须惊动的理由，仍指向 notify 而不是 idle ----
+    assert "不归 idle 插手" in instruction, (
+        "必须惊动睡着的人的真动静（失火、地震）归 notify，不归 idle"
     )
 
     # 代码侧不引入任何数字阈值/计数器：判断权仍完全在 idle 判断的语义引导里，不是
@@ -3250,6 +3309,66 @@ async def test_sisters_section_placed_near_now(monkeypatch):
     now_idx = blob.rindex("【现实此刻】")  # 结构化那行（指令里那处在更前）
     sisters_idx = blob.index("还睡着")  # 三姐妹段渲染出的状态内容
     assert sisters_idx > now_idx, "三姐妹此刻段应在【现实此刻】之后（能直接比对现在几点）"
+
+
+@pytest.mark.asyncio
+async def test_world_round_carries_today_daylight_anchor(monkeypatch):
+    """idle-deadlock Task 2：world 每轮的时刻段带上今天的日出 / 日落。
+
+    prod 实证 07-24：广州真实日落约 19:13，world 17:01 就写「傍晚前段」、18:30 写
+    「更深的蓝灰」——把天黑提前了 1.5–2 小时，三姐妹从 17:00 起读到的就是夜晚的家。
+    根因是【现实此刻】只喂裸时刻，而循环指令反复拿「天色暗下来」当时间推进的范例，
+    模型只能用通用先验渲染黄昏。补当天的客观日照事实，紧挨着【现实此刻】给。
+
+    从 Dynamic Config 的坐标一路走到 prompt（不桩中间的渲染函数）：坐标配上 → 时刻
+    段里出现**当天真实**的日出 / 日落。期望值用同一个纯函数算（它本身由
+    ``tests/world/test_world_daylight.py`` 对着 prod 那天的真实日落钉死）。
+    """
+    from app.world import daylight as daylight_mod
+
+    monkeypatch.setattr(
+        daylight_mod.dynamic_config,
+        "get",
+        lambda key, *, default="": "23.1291,113.2644",  # 广州
+    )
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    today = datetime.now(engine_mod._CST).date()
+    expected = daylight_mod.compute_daylight(
+        today, latitude=23.1291, longitude=113.2644
+    )
+    assert expected is not None
+    anchor = (
+        f"今天日出 {expected.sunrise.strftime('%H:%M')}、"
+        f"日落 {expected.sunset.strftime('%H:%M')}"
+    )
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert anchor in blob, f"时刻段必须带今天真实的日照锚点 {anchor!r}"
+    now_idx = blob.rindex("【现实此刻】")
+    daylight_idx = blob.index(anchor)
+    assert daylight_idx > now_idx, "日照锚点应拼在【现实此刻】那一段里"
+    assert daylight_idx - now_idx < 120, (
+        "日照锚点应紧挨着【现实此刻】（同一段时刻信息），不是散落在别处"
+    )
+
+
+@pytest.mark.asyncio
+async def test_world_round_omits_daylight_when_coords_unconfigured(monkeypatch):
+    """坐标没配 → 时刻段如实只有裸时刻，绝不编一个日落时刻出来。
+
+    坐标由 conftest 的 ``_no_daylight_coords`` 桩成「没配」（= 生产上还没配的状态）。
+    """
+    captured = _mock_run(monkeypatch)
+
+    await world_tick(WorldTick(lane="coe-t2", reason="heartbeat"))
+
+    blob = "".join(m.text() for m in captured["messages"])
+    assert "日落" not in blob, "算不出日照时不得出现任何日落字样（绝不编造）"
+    assert "日出" not in blob
+    assert "【现实此刻】" in blob, "降级只去掉日照锚点，时刻本身照常给"
 
 
 def test_render_sisters_section_only_current_state():
