@@ -2,9 +2,18 @@
 
 照睡前回顾（:func:`app.life.review.run_day_review`）同构的无会话 agent，但钟更慢
 （周级）、视角不同：睡前回顾是**她自己**回看一天，persona review 是**她的传记
-作者**回读一段日子（自上次慢漂以来的日页 + 当前全部关系页 + 世界阶段 + 她现在
-的身份正文），把真实留下的痕迹轻轻写进身份正文，落 persona 版本链一版
-（source='review'，即刻进读路径——`_persona.py` 链最新版优先）。
+作者**回读一段日子（那份不随日子变的人设正文 + 自上次慢漂以来的日页 + 当前全部
+关系页 + 世界阶段 + 她现在的身份正文），把真实留下的痕迹轻轻写进身份正文，落
+persona 版本链一版（source='review'，即刻进读路径——`_persona.py` 链最新版优先）。
+
+USER 层的证据全是**她自己行为的回声**——日页她自己写、关系页是她自己对人的印象、
+底稿是上一版她自己漂过的正文。只拿回声每周重写身份，人格必然越写越窄。人写的那份
+人设正文（``bot_persona.persona_core``）是这条自我压缩回路上唯一的外部参照，走
+**SYSTEM 层 prompt 变量** ``{{persona_core}}``（:func:`_persona_core_var`），与
+``{{current_persona}}`` 并列：它必须和写作纪律同层，才管得住「绝大部分原文逐字
+原样保留」这条自称硬约束的纪律——同一句话放进 USER 只是「本轮材料」，冲突时压不过
+SYSTEM。谁高于谁的措辞写在 langfuse 的写作纪律里；代码这侧只负责把变量传对（传空
+= SYSTEM 渲染出空洞，纪律就没有可指的那份正文了）。
 
 机制层硬约束（纪律在 prompt 层，这里只有机制护栏——赤尾宪法）：
 
@@ -79,9 +88,10 @@ from app.world.arc import read_world_arc  # module-level so tests can monkeypatc
 logger = logging.getLogger(__name__)
 
 # review 的独立 AgentConfig：prompt id 钉为 "persona_review"（langfuse 上由主会话
-# 发布、prompt_vars 契约 = {persona_name, current_persona}）。prompt 缺失 = review
-# 失败 = fail-open（下一班重试），与睡前回顾同语义。工具循环只有一件工具、一次
-# 调用，recursion_limit 留小幅余量即可。
+# 发布、prompt_vars 契约 = {persona_name, persona_core, current_persona}——
+# persona_core 是人写的那份不随日子变的人设正文、current_persona 是待重写的身份
+# 正文底稿）。prompt 缺失 = review 失败 = fail-open（下一班重试），与睡前回顾同
+# 语义。工具循环只有一件工具、一次调用，recursion_limit 留小幅余量即可。
 _PERSONA_REVIEW_CFG = AgentConfig(
     "persona_review", "offline-model", "persona-review", recursion_limit=6
 )
@@ -103,15 +113,17 @@ _ROUND_SEED = "persona_review"
 def persona_review_instruction() -> str:
     """喂给 review Agent 的任务指令（代码侧是工具语义的权威来源；零剧情事实——宪法）。"""
     return (
-        "又过了一段日子。下面是她这段日子写下的日页、她心里现在的关系页、她们"
-        "一家所处的现实阶段。她现在的身份正文在系统提示里——那是你这次要轻轻"
-        "重写的底稿。读完这些，把这段日子**真实留在她身上的痕迹**写进身份正文，"
+        "又过了一段日子。那份不随日子变的人设正文、和她现在的身份正文，都在系统"
+        "提示里——人设正文是判断她是谁的最终依据，身份正文是你这次要轻轻重写的"
+        "底稿。下面是她这段日子写下的日页、她心里现在的关系页、她们一家所处的"
+        "现实阶段。读完这些，把这段日子**真实留在她身上的痕迹**写进身份正文，"
         "用 update_persona 把重写后的全文整篇交回。\n\n"
         "怎么改：慢而小——一次只让真实经历留下一两笔痕迹，绝大部分原文原样保留；"
         "每一处改动都必须能从下面的证据里指出出处，证据里没有的事一个字都不写；"
         "这段日子没有留下值得写进身份的变化，就把原文原样交回，绝不为改而改；"
-        "她的底色不让渡——经历改变的是人生阶段、关系的厚度、新的在意，不是她"
-        "性格的内核；口吻与格式与原文同族，改完读起来仍是同一篇文章。\n\n"
+        "她的底色不让渡，且底色以系统提示里那份人设正文为准——经历改变的是人生"
+        "阶段、关系的厚度、新的在意，不是她性格的内核；口吻与格式与原文同族，"
+        "改完读起来仍是同一篇文章。\n\n"
         "每次调用 update_persona 都是整篇重写：新的一版取代旧版。写下的时刻由"
         "系统自动记，你不用管钟。"
     )
@@ -160,6 +172,28 @@ def _relationship_pages_evidence(pages: list[RelationshipPage]) -> str:
     )
 
 
+def _persona_core_var(core: str | None) -> str:
+    """SYSTEM 变量 ``{{persona_core}}`` 的值：人写的那份人设正文；空白如实说。
+
+    有 core 就**原文直传、不裹任何措辞**：谁高于谁（人设正文 > 身份正文底稿 >
+    日页 / 关系页）由 SYSTEM 的写作纪律定义，代码再包一层就是第二个权威声明，
+    两处措辞一旦对不上，冲突时谁说了算又说不清。
+
+    空白（列 NOT NULL，但可能是空串）绝不能让 SYSTEM 渲染出一个空洞——纪律里
+    「以那份人设正文为准」会指向一片空白。这时如实说没有这份正文，并且越是没有
+    可对照的底色，越要提醒别拿这段日子的新变化去改写它。
+
+    缺省措辞零剧情事实（宪法）——人设内容全部从数据来。
+    """
+    if not core or not core.strip():
+        return (
+            "（还没有为她写下这份不随日子变的人设正文——这次没有可对照的底色，"
+            "只能以下面那份身份正文为底稿；越是这样，越不要拿这段日子的新变化去"
+            "改写她的底色。）"
+        )
+    return core.strip()
+
+
 def _arc_evidence(narrative: str | None) -> str:
     """世界阶段证据：最新一版 arc 的公共进展；空白如实说。"""
     if not narrative or not narrative.strip():
@@ -175,7 +209,14 @@ def _review_messages(
     rel_pages: list[RelationshipPage],
     arc_narrative: str | None,
 ) -> list[Message]:
-    """把 review 的全部证据拼成**单条 user 消息**（无会话、一次喂全；模板零剧情事实）。"""
+    """把 review 的全部证据拼成**单条 user 消息**（无会话、一次喂全；模板零剧情事实）。
+
+    这里只有**这段日子的证据**：两份正文（不随日子变的人设正文、待重写的身份
+    正文底稿）都在 SYSTEM 层，USER 不重复它们的全文——同一份（人均约三千字）
+    正文注入两遍是纯浪费，还给模型两个「她是谁」的入口。instruction 首句负责
+    说清哪份在哪、谁是判断依据；结尾那句是本轮读法（先认准她是谁再读经历），
+    说的是姿态不是内容。
+    """
     user_content = (
         f"{persona_review_instruction()}\n\n"
         f"【现实此刻】{now.isoformat()}\n"
@@ -183,8 +224,9 @@ def _review_messages(
         f"【这段日子她写下的日页】\n{_day_pages_evidence(day_pages)}\n\n"
         f"【她心里现在的关系页】\n{_relationship_pages_evidence(rel_pages)}\n\n"
         f"【她们一家所处的现实阶段】\n{_arc_evidence(arc_narrative)}\n\n"
-        "读完：把这段日子真实留在她身上的痕迹轻轻写进身份正文，用 update_persona "
-        "整篇交回；没有值得写进身份的变化就原样交回。"
+        "读完：先认准那个不随日子变的「她是谁」，再把这段日子真实留在她身上的"
+        "痕迹轻轻写进身份正文，用 update_persona 整篇交回；没有值得写进身份的"
+        "变化就原样交回。"
     )
     return [Message(role=Role.USER, content=user_content)]
 
@@ -307,6 +349,10 @@ async def _run_persona_review(*, lane: str, persona_id: str, now: datetime) -> N
                 messages,
                 prompt_vars={
                     "persona_name": persona.display_name,
+                    # 人设正文锚取主表原文（不走版本链——版本链存的是会漂的身份
+                    # 正文，主表这份是人写的、不随日子变的那份），进 SYSTEM 与
+                    # 写作纪律同层；空白走如实缺省，绝不给 SYSTEM 塞空洞。
+                    "persona_core": _persona_core_var(persona.persona_core),
                     "current_persona": current_persona,
                 },
                 context=context,
