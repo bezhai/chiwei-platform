@@ -44,7 +44,14 @@ def test_persona_review_cron_drives_translation_node():
     assert len(w.sources) == 1
     src = w.sources[0]
     assert src.kind == "cron"
-    assert src.params["expr"] == "0 11 * * *"
+    # ########################################################################
+    # TEMP: 跟随 app/wiring/persona_review_dataflow.py 的泳道验证脚手架，
+    # **验证完必须 revert，禁止合进 main**。
+    # 生产断言值是 "0 11 * * *"；临时提频到每 5 分钟只为在 coe 泳道立刻跑到
+    # persona_review 的一次真实调用（周级幂等未动，仍只会真跑一次）。
+    # revert 时跟 wiring 那处一起回来。
+    # ########################################################################
+    assert src.params["expr"] == "*/5 * * * *"
     assert src.params["tz"] == "Asia/Shanghai"
 
 
