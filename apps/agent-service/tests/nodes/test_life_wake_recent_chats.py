@@ -214,3 +214,86 @@ def test_content_not_truncated_or_rewritten():
     assert long in out
     assert "对你说" not in out
     assert "你回了" not in out
+
+
+# --- 段头口径：标「我」的是她自己已发出的话 + 没人新开口就是真没人说话 -----------
+#
+# 2026-07-25 事故（她在群里连发 7 条跟不存在的对话争吵）的第二个落点：每行只用一个字
+# 「我」区分自他，而并列的【你刚对这次交流的回复】段有整句框架（「这是你自己刚发出去
+# 的话，不是别人对你说的，已经发过了、不用再回一遍」）。两段口径不一致，她把自己刚发
+# 的话读回来当成别人在跟她说话。段头补上两层意思，**只改段头、不动每行渲染**（忠实
+# 呈现红线仍在：不许改写成「某人对你说 X / 你回了 Y」的叙述体）。
+
+
+def test_header_says_my_lines_are_already_sent():
+    """段头点明：标「我」的都是她自己已经发出去的话，不用再说一遍。"""
+    convs = [
+        LifeChatConversation(
+            chat_id="c1",
+            scope="direct",
+            display_name=None,
+            messages=[
+                _msg("贝壳", False, "赤尾在吗", "08:30 CST"),
+                _msg("akao", True, "在的在的", "08:31 CST"),
+            ],
+        )
+    ]
+    out = _format_recent_chats(convs)
+    header = out.splitlines()[0]
+    assert "标「我」的" in header, "段头要点出标「我」的那些行是谁说的"
+    assert "不必再说一遍" in header, "段头要点明她自己已发出的话不用再说一遍"
+
+
+def test_header_says_silence_is_real_silence():
+    """段头点明：没有新的人开口，就是真的没人在跟她说话（读得出「沉默」这个事实）。"""
+    convs = [
+        LifeChatConversation(
+            chat_id="g1",
+            scope="group",
+            display_name="赤尾应援团",
+            messages=[_msg("akao", True, "八点见", "09:02 CST")],
+        )
+    ]
+    out = _format_recent_chats(convs)
+    header = out.splitlines()[0]
+    assert "没有新的人开口" in header
+    assert "真的没人在跟你说话" in header
+
+
+def test_new_header_keeps_faithful_rendering_red_line():
+    """新段头不许把对话改写成叙述体：「对你说」/「你回了」仍然一个字都不许出现。"""
+    convs = [
+        LifeChatConversation(
+            chat_id="c1",
+            scope="direct",
+            display_name=None,
+            messages=[
+                _msg("贝壳", False, "赤尾在吗", "08:30 CST"),
+                _msg("akao", True, "在的在的", "08:31 CST"),
+            ],
+        )
+    ]
+    out = _format_recent_chats(convs)
+    assert "对你说" not in out
+    assert "你回了" not in out
+    # 段头是提醒她怎么读这些行，不是系统腔的元信息说明
+    assert "系统" not in out
+    assert "上下文" not in out
+
+
+def test_header_only_changed_line_format_untouched():
+    """改法限定在段头：每行仍是「（时间）发言人：内容」，「我：」前缀不动。"""
+    convs = [
+        LifeChatConversation(
+            chat_id="c1",
+            scope="direct",
+            display_name=None,
+            messages=[
+                _msg("贝壳", False, "赤尾在吗", "08:30 CST"),
+                _msg("akao", True, "在的在的", "08:31 CST"),
+            ],
+        )
+    ]
+    out = _format_recent_chats(convs)
+    assert "  （08:30 CST）贝壳：赤尾在吗" in out
+    assert "  （08:31 CST）我：在的在的" in out

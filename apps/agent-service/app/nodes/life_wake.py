@@ -19,7 +19,8 @@
     本模块**绝不 import / 读 WorldState 全局快照**——全局真相一旦漏进她上下文，
     她就全知了，信息差崩塌。结构上保证：这里没有任何读 world 快照的代码。
 
-  * **空信箱 early-return**：信箱没未读且没有增量聊天才不烧模型、不建工具、不写、不标已读。
+  * **空信箱 early-return**：信箱没未读、且固定回看窗口里一句对话都没有，才不烧模型、
+    不建工具、不写、不标已读。
 
   * **single_flight 锁**：一轮思考几十秒 > debounce 窗口，期间来新 event 会 fire
     第二轮并发；开头按 ``(lane, persona)`` 拿单飞锁，拿不到就 raise
@@ -76,7 +77,7 @@ from app.domain.book_impression import (
 # 随笔正文不进任何常驻输入（spec 决策 4），她想看用翻随笔工具自己翻。
 # module-level so tests can monkeypatch.
 from app.domain.jotting import count_unabsorbed_jottings
-from app.domain.life_state import LifeState, find_life_state
+from app.domain.life_state import find_life_state
 from app.domain.notebook import (
     ACTIVE_STATUSES,
     NotebookEntry,
@@ -227,12 +228,29 @@ def _derive_life_round_id(
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 
-def _recent_chat_since_ms(*, now: datetime, snapshot: LifeState | None) -> int:
-    """最近聊天增量水位：优先从上一轮 observed_at 往后看，冷启退回固定窗口。"""
-    if snapshot is not None:
-        observed = cst_time.parse(snapshot.observed_at)
-        if observed is not None:
-            return int(observed.timestamp() * 1000)
+def _recent_chat_since_ms(*, now: datetime) -> int:
+    """最近聊天的**固定回看窗口**起点：恒定 ``now - _RECENT_CHAT_SINCE_MS``。
+
+    2026-07-25 事故（她在一个 42 分钟无人发言的群里连发 7 条，跟一个根本不存在的对话
+    争吵——脑补出有人让她充值、有人发红包）的根因：这里原本拿上一轮
+    ``LifeState.observed_at`` 当**增量水位**、只拉水位之后的新聊天。她第一轮看到的群聊
+    上下文是对的（含真人消息），但她一开口 ``observed_at`` 就推进到当前时刻，**第二轮
+    只看得到自己刚发的那几条**——她把自己的输出读回来当成别人在跟她说话，于是继续编。
+
+    「增量水位」这个概念本身是错的：真人拿起手机看到的是**屏幕上现在有什么**，不是
+    「上次之后的新增」。看过的消息还留在屏幕上，正是"看过的就消失"让她那块屏幕在第二轮
+    变成只有自己声音的空白。所以这里不再读任何快照、只认时钟：一律回看固定窗口。
+
+    规模不靠这个窗口控，靠每会话条数上限 :data:`_RECENT_CHAT_PER_CHAT_LIMIT`——那才是
+    「屏幕能显示多少条」的闸（条目数量控制、不字符截断）。
+
+    「这一轮到底有没有新东西」也不再靠时间水位判：round_id 从
+    ``(本轮 event_ids + 本轮可见的 chat message ids)`` **内容寻址**派生（见
+    :func:`_derive_life_round_id`），可见内容一模一样的下一轮派生同一个 round_id、被
+    transcript 里的 round marker 查重挡掉（:func:`_round_already_processed`，Agent 根本
+    不构造）。内容寻址比时间水位准：它按「她看到的是否真的变了」判，而不是按「时钟走了
+    多久」判。
+    """
     return int(now.timestamp() * 1000) - _RECENT_CHAT_SINCE_MS
 
 
@@ -586,9 +604,11 @@ def _split_perception(
 
 
 # 「最近聊过的对话」段的拉取上限（条目数量控制规模、不字符截断——见 no_context_truncation）：
-#   * since 窗口：优先从上一轮 LifeState.observed_at 往后读；冷启 / 脏时间才回退 6 小时。
+#   * since 窗口：**恒定回看 6 小时**（不是增量水位——见 _recent_chat_since_ms 里
+#     2026-07-25 事故的根因）。看过的消息还在屏幕上，她读到的是「此刻屏幕上有什么」。
 #   * 最多 5 个会话：积压再多也只铺最近活跃的几个，挡住一次塞几十个会话。
-#   * 每会话最多 10 条：每个会话只铺最近一段、不把整卷历史拉进来。
+#   * 每会话最多 10 条：每个会话只铺最近一段、不把整卷历史拉进来。这条才是「屏幕能显示
+#     多少条」的闸——窗口变宽之后规模全靠它控（保持不变）。
 # 这三个都是机制层的规模闸（同 inbox 上限那类），不替她判断哪些重要（赤尾宪法）。
 _RECENT_CHAT_SINCE_MS = 6 * 60 * 60 * 1000
 _RECENT_CHAT_MAX_CONVERSATIONS = 5
@@ -619,8 +639,20 @@ def _format_recent_chats(conversations: list[LifeChatConversation]) -> str:
     **忠实呈现、不加工**（spec 命门）：不改写成「某人对你说 X / 你回了 Y」这类叙述体、
     不截断单条 ``m.text``——她读到的就是对话原貌。规模由上面三个条目上限在拉取侧控住，
     不在渲染层做字符截断（no_context_truncation）。
+
+    **段头两层意思**（2026-07-25 事故的第二个落点）：每行区分自他只靠一个字「我」，而
+    并列的【你刚对这次交流的回复】段有整句框架（「这是你自己刚发出去的话，不是别人对你
+    说的，已经发过了、不用再回一遍」）——两段口径不一致，实测就是在这儿混淆的：她把自己
+    刚发的话读回来当成别人在跟她说话，接着跟一个不存在的对话往下编。段头因此补上①标
+    「我」的都是她自己已经发出去的话、不必再说一遍；②**没有新的人开口就是真的没人说
+    话**——她需要能读出「沉默」这个事实（事故当时群里已 42 分钟无人发言）。
+    改动只在段头这一句，每行的渲染格式一个字不动（忠实呈现红线仍在）。
     """
-    blocks: list[str] = ["【最近聊过的对话】（这一阵你和谁聊过的，按会话分开）："]
+    blocks: list[str] = [
+        "【最近聊过的对话】（这一阵你和谁聊过的，按会话分开。标「我」的都是你自己已经"
+        "说出口、发出去了的话，不必再说一遍；这里写着的就是这会儿的全部——没有新的人"
+        "开口，那就是真的没人在跟你说话，那份安静也是真的。）："
+    ]
     for conv in conversations:
         if conv.scope == "group":
             group_handle = f"group:{conv.chat_id}"
@@ -649,7 +681,8 @@ async def life_wake_node(arrived: EventArrived) -> None:
     """某姐妹被信箱敲门攒批唤醒，跑一轮 life 工具循环。persona 由 ``arrived`` 决定。
 
     这是**外部刺激**入口（信箱来新 event / 补敲未读）：永远跑、不走到点 gate（外部
-    刺激能立刻打断长睡）。空信箱 + 无增量聊天才 early return（没新动静不用跑）。
+    刺激能立刻打断长睡）。空信箱 + 回看窗口里没有任何对话才 early return（她这会儿什么
+    都感知不到、不用跑）。
 
     **单飞命门**：一轮 life 跑几十秒 > debounce 窗口（5s），期间来新 event 会 fire
     第二轮并发。两轮并发会互相覆盖 LifeState、把 event 静默标已读丢掉。所以开头按
@@ -764,8 +797,9 @@ async def _run_life_round(
     没有 self LifeWakeTick 执行腿、没有 next_wake_at 意愿写入、没有 fan-out 心跳）。
     存活由世界持续的客观事件流兜底，主动计划走日程（note + 到点提醒）。
 
-    **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）且没有增量聊天
-    时，没新动静，不烧模型、不写、不标已读。
+    **空信箱 early return**：event 唤醒空信箱（去重命中后的残留信号等）且固定回看窗口里
+    一句对话都没有时，她什么都感知不到，不烧模型、不写、不标已读。「窗口里有对话但跟上
+    一轮完全一样」那种不靠这条兜，靠 round marker 内容寻址挡（同样不烧模型）。
 
     **cd 降频（spec 决策 5 第三层）**：开头查 cd key——若上一轮刚跑完、还在 cd 内，就
     ``raise DebounceReschedule(wake)`` 让 debounce handler CAS 重排这批 event 推迟到 cd
@@ -805,11 +839,12 @@ async def _run_life_round(
         )
         unread = unread[:_LIFE_INBOX_MAX]
 
-    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：用上一轮 LifeState.observed_at
-    # 做增量水位，只看上一轮 life 之后的新聊天；冷启 / 脏时间才退回 6 小时窗口。这个读取
-    # 必须发生在空信箱判断之前——chat 完后的纯唤醒没有 EventEnvelope，只靠这段增量聊天
-    # 决定是否需要跑一轮 life。
-    recent_chat_since_ms = _recent_chat_since_ms(now=now, snapshot=snapshot)
+    # 她最近聊过的对话（实时拉对话，T1 查询 + T2 渲染）：**固定回看窗口**，看的是
+    # 「屏幕上现在有什么」而不是「上次之后的新增」（2026-07-25 事故止血，见
+    # _recent_chat_since_ms——增量水位会让她第二轮只剩自己的声音、把自己的输出读回来
+    # 当别人在跟她说话）。这个读取必须发生在空信箱判断之前——chat 完后的纯唤醒可能没有
+    # EventEnvelope，只靠这段对话决定是否需要跑一轮 life。
+    recent_chat_since_ms = _recent_chat_since_ms(now=now)
     try:
         recent_chats = await find_persona_related_chats_recent(
             persona_id=persona_id,
@@ -827,8 +862,13 @@ async def _run_life_round(
         recent_chats = []
 
     if not unread and not recent_chats:
-        # event 唤醒空信箱（去重命中后的残留信号等）且没有增量聊天：没新动静，不烧模型、
-        # 不写、不标。
+        # event 唤醒空信箱（去重命中后的残留信号等）且回看窗口里一句对话都没有：她这会儿
+        # 什么都感知不到，不烧模型、不写、不标。
+        #
+        # 固定回看窗口之后这条只兜「窗口里真的空白」这一种；「窗口里有对话但跟上一轮
+        # 一模一样」由 round marker 内容寻址挡（见下方 _round_already_processed，同样
+        # 在构造 Agent 之前返回、不烧模型）。**故意不为此把时间水位加回来**——水位正是
+        # 事故根因，而 marker 判的是「她看到的是否真的变了」，比水位准。
         logger.info(
             "[life_wake] %s/%s event wake empty inbox and no recent chat, skip",
             lane,
@@ -939,12 +979,20 @@ async def _run_life_round(
         act_id=act_id,
         observed_at=observed_at,
         schedule_reminders=schedule_reminders,
-        # proactive 主动发的历史增量水位：用**本轮进入时**（Agent.run 之前、第 609 行）
-        # 读到的快照 observed_at，capture 进工具闭包给 send_message 当 since——只取上一次
-        # life 轮之后真人新发的话，治她对着早就说过的旧话反复主动开口。**承重命门**：必须
-        # 用进入时的 snapshot 值，不能让工具现读 LifeState——本轮她可能先调 update_life_state
-        # 把 observed_at 刷成本轮时刻，现读会让水位被本轮污染、增量永远算空。snapshot 为
+        # proactive 主动发的历史增量水位：用**本轮进入时**（Agent.run 之前）读到的快照
+        # observed_at，capture 进工具闭包给 send_message 当 since——只取上一次 life 轮之后
+        # 真人新发的话，治她对着早就说过的旧话反复主动开口。**承重命门**：必须用进入时的
+        # snapshot 值，不能让工具现读 LifeState——本轮她可能先调 update_life_state 把
+        # observed_at 刷成本轮时刻，现读会让水位被本轮污染、增量永远算空。snapshot 为
         # None（冷启、从没活过一轮）→ 水位 None → since=None → 退回原全量最近 limit 行为。
+        #
+        # **这条水位跟上面那条被拆掉的「最近聊过的对话」水位不是同一个病，故意保留**：
+        # 上面那条决定她**看得见什么**（水位一推进，她那块屏幕就只剩自己的声音，于是把
+        # 自己的输出读回来当别人在说话——2026-07-25 事故）；这条只决定她**已经决定要开
+        # 口之后**，渲染层拿多少条历史当上下文，水位越过去顶多是这次措辞不引用旧对话
+        # （降级成"凭意图 + 生活状态说话"），不会凭空造出一个对话。反过来把它也放宽成固定
+        # 窗口，等于把渲染层的 message 列表重新灌满旧的真人发言——最后一条 USER 又变成一句
+        # 早就聊完的旧话，她会去回它，正是这条水位当初治的那个 bug。
         proactive_history_since=snapshot.observed_at if snapshot is not None else None,
         # 她可见上下文里的可读文件候选（冻结本轮 recent_chats、不重跑查询——决策 6）。
         readable_files=readable_files,
@@ -1092,8 +1140,8 @@ async def _run_life_round(
     if reading_section:
         parts.append(reading_section)
 
-    # 她最近聊过的对话（#279，实时拉对话，T1 查询 + T2 渲染）：前面已按 observed_at 增量水位
-    # 读好，这里只负责渲染进 stimulus。位置在本子 / 读书印象之后、时刻行之前（它跟着她的聊天
+    # 她最近聊过的对话（#279，实时拉对话，T1 查询 + T2 渲染）：前面已按固定回看窗口读好，
+    # 这里只负责渲染进 stimulus。位置在本子 / 读书印象之后、时刻行之前（它跟着她的聊天
     # 活跃度变，不进稳定前缀）。
     if recent_chats:
         parts.append(_format_recent_chats(recent_chats))

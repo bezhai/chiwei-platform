@@ -1752,33 +1752,16 @@ async def test_no_unread_is_noop(patched, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recent_chat_query_uses_snapshot_observed_at_watermark(
+async def test_recent_chat_query_without_snapshot_uses_same_fixed_window(
     patched, monkeypatch
 ):
-    """最近聊天按上一轮 LifeState.observed_at 做增量水位，避免重复看旧聊天。"""
-    observed_at = "2026-06-03T11:00:00+08:00"
-    patched["snapshot"] = LifeState(
-        lane="coe-t3",
-        persona_id="akao",
-        current_state="在客厅",
-        response_mood="平静",
-        activity_type="idle",
-        observed_at=observed_at,
-    )
-    patched["unread"] = [_envelope("e1", "门铃响了")]
-    _FakeAgent.install(monkeypatch, script=None)
+    """从没活过一轮（snapshot=None）也是同一个固定回看窗口，不特殊、不崩。
 
-    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
-
-    expected = int(lw.cst_time.parse(observed_at).timestamp() * 1000)
-    assert patched["recent_chat_calls"][0]["since_ms"] == expected
-
-
-@pytest.mark.asyncio
-async def test_recent_chat_query_cold_start_falls_back_to_six_hours(
-    patched, monkeypatch
-):
-    """没有 LifeState 水位时，最近聊天只冷启回退到 6 小时窗口。"""
+    历史上这里是「冷启才回退 6 小时」的分支（有 snapshot 时走 observed_at 增量水位）。
+    水位那条路已被拆掉（2026-07-25 事故根因，见
+    ``test_recent_chat_query_always_uses_fixed_lookback_window``），这个用例只剩「没有
+    snapshot 时窗口算得对、不去碰 snapshot」这一条覆盖。
+    """
     from datetime import datetime
 
     now = datetime(2026, 6, 3, 12, 0, tzinfo=lw.cst_time.CST)
@@ -1791,6 +1774,269 @@ async def test_recent_chat_query_cold_start_falls_back_to_six_hours(
 
     expected = int(now.timestamp() * 1000) - lw._RECENT_CHAT_SINCE_MS
     assert patched["recent_chat_calls"][0]["since_ms"] == expected
+
+
+# --- 固定回看窗口（2026-07-25 事故止血）--------------------------------------
+#
+# 事故：她在群里连发 7 条消息，跟一个根本不存在的对话争吵（脑补出有人让她充值、有人
+# 发红包），当时群里已 42 分钟无人发言。根因是「最近聊过的对话」用上一轮
+# ``LifeState.observed_at`` 当**增量水位**：第一轮她看到的群聊上下文是对的（含真人
+# 消息），但她一开口 observed_at 就推进到当前时刻，**第二轮只看得到自己刚发的那几
+# 条** —— 她把自己的输出读回来当成别人在跟她说话，于是继续往下编。
+#
+# 「增量水位」这个概念本身是错的：真人拿起手机看到的是屏幕上现在有什么，不是「上次
+# 之后的新增」。看过的消息还在屏幕上。所以回看窗口恒定 = ``now - 6h``，规模由每会话
+# 条数上限（``_RECENT_CHAT_PER_CHAT_LIMIT``）这个「屏幕能显示多少条」的闸控住。
+
+
+def _install_chat_log(patched, monkeypatch, *, log, chat_id="chat-1"):
+    """把 recent chat 查询换成真按 ``since_ms`` 过滤一份带时刻的内存消息流的 fake。
+
+    ``patched`` 默认那只 fake 无脑回放 ``patched["recent_chats"]``、不看 ``since_ms``，
+    测不出「水位把真人消息切掉」这件事。这只 fake 按 ``[(event_time_ms, 消息)]`` 存一份
+    消息流、收到 ``since_ms`` 就真过滤（并按 ``per_chat_limit`` 保最近 N 条，同真查询
+    口径），事故复现与窗口边界都靠它。窗口内一条不剩 → 返回空列表（同真查询：她窗口内
+    没发过言的会话不出现）。
+    """
+
+    async def fake_find_recent_chats(
+        *, persona_id, since_ms, max_conversations, per_chat_limit
+    ):
+        patched["recent_chat_calls"].append(
+            {
+                "persona_id": persona_id,
+                "since_ms": since_ms,
+                "max_conversations": max_conversations,
+                "per_chat_limit": per_chat_limit,
+            }
+        )
+        visible = [m for ts, m in log if ts >= since_ms][-per_chat_limit:]
+        if not visible:
+            return []
+        return [_life_chat_conversation(chat_id=chat_id, messages=visible)]
+
+    monkeypatch.setattr(lw, "find_persona_related_chats_recent", fake_find_recent_chats)
+
+
+def _cst_ms(hh: int, mm: int, *, day: int = 25) -> int:
+    from datetime import datetime
+
+    return int(
+        datetime(2026, 7, day, hh, mm, tzinfo=lw.cst_time.CST).timestamp() * 1000
+    )
+
+
+def _cst_now(hh: int, mm: int, *, day: int = 25):
+    from datetime import datetime
+
+    return datetime(2026, 7, day, hh, mm, tzinfo=lw.cst_time.CST)
+
+
+@pytest.mark.asyncio
+async def test_second_round_still_sees_human_message_after_her_own_replies(
+    patched, monkeypatch
+):
+    """事故复现：她开口、observed_at 推进之后，第二轮**仍然**看得见那条真人消息。
+
+    T1 她看到真人那句「赤尾今晚直播吗」+ 自己的回复，接着自己又发了几条，
+    ``observed_at`` 被推进到 T2（越过了那条真人消息）。T2 这一轮如果只拉水位之后的
+    新增，她那块屏幕上就只剩自己的声音 —— 这正是她跟不存在的对话争吵的根因。
+    """
+    now = _cst_now(21, 50)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+
+    log = [
+        (
+            _cst_ms(21, 30),
+            _life_chat_message(
+                "m-human-1",
+                speaker="贝壳",
+                is_self=False,
+                text="赤尾今晚直播吗",
+                cst_time="21:30 CST",
+            ),
+        ),
+        (
+            _cst_ms(21, 31),
+            _life_chat_message(
+                "m-self-1",
+                speaker="akao",
+                is_self=True,
+                text="八点见",
+                cst_time="21:31 CST",
+            ),
+        ),
+        (
+            _cst_ms(21, 41),
+            _life_chat_message(
+                "m-self-2",
+                speaker="akao",
+                is_self=True,
+                text="谁说要我充值了",
+                cst_time="21:41 CST",
+            ),
+        ),
+        (
+            _cst_ms(21, 45),
+            _life_chat_message(
+                "m-self-3",
+                speaker="akao",
+                is_self=True,
+                text="红包我不要",
+                cst_time="21:45 CST",
+            ),
+        ),
+    ]
+    _install_chat_log(patched, monkeypatch, log=log)
+
+    # 她已经开过口，上一轮收口把 observed_at 推进到 21:45（越过那条真人消息）。
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在手机上打字",
+        response_mood="有点急",
+        activity_type="chat",
+        observed_at="2026-07-25T21:45:00+08:00",
+    )
+    patched["unread"] = [_envelope("e-quiet", "屋里很安静")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "贝壳：赤尾今晚直播吗" in stimulus, (
+        "第二轮必须仍看得见那条真人消息 —— 看过的消息还在屏幕上；"
+        "增量水位把真人切掉、屏幕上只剩她自己的声音，正是 2026-07-25 事故的根因"
+    )
+    assert "我：八点见" in stimulus
+    assert "我：红包我不要" in stimulus
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_query_always_uses_fixed_lookback_window(
+    patched, monkeypatch
+):
+    """有 snapshot 也照样用固定回看窗口 —— 不再读 ``LifeState.observed_at`` 当水位。"""
+    now = _cst_now(21, 50)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在客厅",
+        response_mood="平静",
+        activity_type="idle",
+        observed_at="2026-07-25T21:45:00+08:00",
+    )
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    expected = int(now.timestamp() * 1000) - lw._RECENT_CHAT_SINCE_MS
+    assert patched["recent_chat_calls"][0]["since_ms"] == expected, (
+        "回看窗口必须恒定 = now - 固定窗口，与上一轮 observed_at 无关"
+    )
+
+
+def test_recent_chat_since_ms_is_a_pure_fixed_window():
+    """``_recent_chat_since_ms`` 只吃 ``now``：恒定返回 ``now - _RECENT_CHAT_SINCE_MS``。
+
+    snapshot 形参一起去掉（不留不用的形参）—— 它的存在就是「增量水位」这个错概念的载体。
+    """
+    now = _cst_now(21, 50)
+    assert lw._recent_chat_since_ms(now=now) == (
+        int(now.timestamp() * 1000) - lw._RECENT_CHAT_SINCE_MS
+    )
+
+
+@pytest.mark.asyncio
+async def test_fixed_window_boundary_lets_in_recent_keeps_out_stale(
+    patched, monkeypatch
+):
+    """固定窗口的边界：窗口内的消息进得来，窗口外的不进（规模不是靠水位控的）。"""
+    now = _cst_now(21, 50)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+
+    log = [
+        (
+            _cst_ms(14, 0),  # now - 7h50m，落在 6 小时窗口之外
+            _life_chat_message(
+                "m-stale",
+                speaker="贝壳",
+                is_self=False,
+                text="下午那句早就翻篇的话",
+                cst_time="14:00 CST",
+            ),
+        ),
+        (
+            _cst_ms(20, 50),  # now - 1h，落在窗口之内
+            _life_chat_message(
+                "m-fresh",
+                speaker="贝壳",
+                is_self=False,
+                text="一小时前那句还在屏幕上",
+                cst_time="20:50 CST",
+            ),
+        ),
+    ]
+    _install_chat_log(patched, monkeypatch, log=log)
+    patched["snapshot"] = None
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][0].text()
+    assert "一小时前那句还在屏幕上" in stimulus
+    assert "下午那句早就翻篇的话" not in stimulus
+
+
+@pytest.mark.asyncio
+async def test_identical_visible_content_second_round_skipped_by_round_marker(
+    patched, monkeypatch, fake_redis
+):
+    """固定窗口下「没新动静」不再靠水位早返，靠 round marker 内容寻址跳过（不烧模型）。
+
+    水位没了之后，只要 6 小时内聊过，``recent_chats`` 就一直非空 → ``if not unread
+    and not recent_chats`` 这条空信箱早返在纯聊天轮不再兜住「什么都没变的第二轮」。
+    兜底不是把水位加回来，而是**已经在的** round marker：round_id 从
+    ``(event_ids + 本轮可见的 chat message ids)`` 内容寻址派生、不含 ``now``，所以可见
+    内容一模一样的第二轮派生同一个 round_id，marker 查重命中 → 直接返回、Agent 根本不
+    构造（比时间水位更准：它按「看到的是否真的变了」判，而不是按「时钟走了多久」判）。
+    """
+    now = _cst_now(21, 50)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+
+    log = [
+        (
+            _cst_ms(21, 30),
+            _life_chat_message(
+                "m-human-1",
+                speaker="贝壳",
+                is_self=False,
+                text="赤尾今晚直播吗",
+                cst_time="21:30 CST",
+            ),
+        )
+    ]
+    _install_chat_log(patched, monkeypatch, log=log)
+    patched["snapshot"] = None
+    patched["unread"] = []  # 纯聊天轮：信箱空（那条 own_chat_reply 已标已读）
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+    assert len(_FakeAgent.instances) == 1, "第一轮该正常跑"
+
+    # 模拟 Agent.run 把本轮 USER stimulus 写回 transcript（真实现在 run 里做）。
+    patched["transcript"] = [_FakeAgent.last_run()["messages"][0]]
+    # 清掉上一轮收口落的 45s cd key，否则第二轮会先撞 cd 重排、测不到 marker 那条路。
+    await fake_redis.delete(lw._cd_key("coe-t3", "akao"))
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert len(_FakeAgent.instances) == 1, (
+        "可见内容一模一样的第二轮必须被 round marker 跳过，不再烧一次模型"
+    )
 
 
 @pytest.mark.asyncio
