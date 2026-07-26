@@ -225,8 +225,12 @@ def test_content_not_truncated_or_rewritten():
 # 呈现红线仍在：不许改写成「某人对你说 X / 你回了 Y」的叙述体）。
 
 
-def test_header_says_my_lines_are_already_sent():
-    """段头点明：标「我」的都是她自己已经发出去的话，不用再说一遍。"""
+def test_header_marks_her_own_lines_as_hers():
+    """段头只做一件事：点出标「我」的那些行是她自己发出去的话（输入溯源）。
+
+    2026-07-25 事故里她把自己的回声当成别人在跟她说话，根因是这一段区分自他只靠一个
+    字「我」，而并列的【你刚对这次交流的回复】段有整句框架。补的是**溯源**，不是别的。
+    """
     convs = [
         LifeChatConversation(
             chat_id="c1",
@@ -241,11 +245,19 @@ def test_header_says_my_lines_are_already_sent():
     out = _format_recent_chats(convs)
     header = out.splitlines()[0]
     assert "标「我」的" in header, "段头要点出标「我」的那些行是谁说的"
-    assert "不必再说一遍" in header, "段头要点明她自己已发出的话不用再说一遍"
 
 
-def test_header_says_silence_is_real_silence():
-    """段头点明：没有新的人开口，就是真的没人在跟她说话（读得出「沉默」这个事实）。"""
+def test_header_neither_claims_completeness_nor_directs_behavior():
+    """**承重红线**：段头不许宣称全量、不许下行为指令、不许给情绪框架。
+
+    ① 不许宣称全量 —— 这一段真实上限是 :data:`_RECENT_CHAT_MAX_CONVERSATIONS` 个会话
+       × 每会话 :data:`_RECENT_CHAT_PER_CHAT_LIMIT` 条，还过白名单。说「这里就是全部」
+       是**假话**：真有第 6 个会话或第 11 条，她看到的就不是全部，而她会把**截断误当成
+       沉默**——比不提示更糟。
+    ② 不许下行为指令 / 给情绪框架 —— 「不必再说一遍」是指令，「那份安静也是真的」是
+       情绪暗示。沉默本来就是可见的（没人说话，那些行就不在），不需要谁替她解读。赤尾
+       宪法：不确定性来自她自己的判断，不是塞给她的暗示。
+    """
     convs = [
         LifeChatConversation(
             chat_id="g1",
@@ -256,8 +268,12 @@ def test_header_says_silence_is_real_silence():
     ]
     out = _format_recent_chats(convs)
     header = out.splitlines()[0]
-    assert "没有新的人开口" in header
-    assert "真的没人在跟你说话" in header
+    for claim in ("全部", "全都在", "所有"):
+        assert claim not in header, f"段头不许宣称全量（有 5×10 上限）：命中「{claim}」"
+    for directive in ("不必再说", "不用再说", "安静", "没人在跟你说话"):
+        assert directive not in header, (
+            f"段头只做输入溯源，不许下行为指令 / 给情绪框架：命中「{directive}」"
+        )
 
 
 def test_new_header_keeps_faithful_rendering_red_line():
