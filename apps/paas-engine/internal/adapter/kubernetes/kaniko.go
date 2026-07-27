@@ -61,6 +61,10 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	jobName := fmt.Sprintf("kaniko-%s", strings.ReplaceAll(sub.BuildID, "-", ""))
 	ttl := int32(3600)
 	backoff := int32(0)
+	// 从 Job 创建时刻起算，排不上队的时间也算在内 —— 这正是要的：
+	// 没有期限时，调度不上的构建会永远停在 running（build 记录在 Submit 成功即写 running），
+	// Makefile 的轮询只认终态，于是卡死。观测到最慢的真实构建 425s，给 4 倍余量。
+	deadline := int64(1800)
 
 	gitContext := "git://github.com/" + sub.GitRepo
 	gitRef := sub.GitRef
@@ -112,6 +116,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
+			ActiveDeadlineSeconds:   &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{labelBuildID: sub.BuildID},
@@ -130,6 +135,9 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 func (e *KanikoBuildExecutor) podSpec(args []string) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
+		// 构建需要外网（git clone + base 镜像），只有 app 节点有可用出口。
+		// 与 deployer.go 对齐，别让 Job 漂到 proxy 节点上去。
+		NodeSelector: map[string]string{"node-role": "app"},
 		Containers: []corev1.Container{
 			{
 				Name:  "kaniko",

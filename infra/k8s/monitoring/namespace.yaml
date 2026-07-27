@@ -1,0 +1,21 @@
+# monitoring namespace 的 Pod Security 例外。
+#
+# 集群默认（/etc/rancher/k3s/psa-config.yaml，2026-07-23 入侵后重建时加的硬化）是
+# enforce=baseline / audit=restricted / warn=restricted，只豁免 kube-system。
+#
+# node-exporter 在 baseline 下**装不上**，而且不是配置问题、绕不过去：它要
+# hostNetwork + hostPID + hostPath(/proc,/sys,/) + hostPort 9100，这几样 baseline 全禁。
+# 采集宿主机指标本身就需要看见宿主机，这是它的本职而不是过度授权。
+#
+# 所以只放宽 enforce，audit 和 warn 仍然钉在 restricted ——
+# 以后若有别的特权 Pod 混进这个 ns，enforce 不拦，但审计日志里跑不掉。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

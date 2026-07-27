@@ -1,3 +1,10 @@
 config:
   clients:
     - url: http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push
+
+# cpu1 (node-role: infra) 没有外网，所有镜像必须从内网 Harbor 拉。
+# Harbor 里镜像名被拍平成 library/<短名>，所以 registry 和 repository 都要覆盖。
+image:
+  registry: harbor.local:30002
+  repository: library/promtail
+  tag: "3.5.1"

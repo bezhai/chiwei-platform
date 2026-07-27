@@ -1,5 +1,23 @@
+# cpu1 (node-role: infra) 没有外网，所有镜像必须从内网 Harbor 拉。
+# Harbor 里镜像名被拍平成 library/<短名>，所以 registry 和 repository 都要覆盖。
+# 节点 containerd 已配 robot 拉取凭据，无需 imagePullSecrets。
+
 grafana:
   # adminPassword set via --set grafana.adminPassword=... at install time
+  image:
+    registry: harbor.local:30002
+    repository: library/grafana
+    tag: "12.4.0"
+  initChownData:
+    image:
+      registry: harbor.local:30002
+      repository: library/busybox
+      tag: "1.37.0"
+  sidecar:
+    image:
+      registry: harbor.local:30002
+      repository: library/k8s-sidecar
+      tag: "2.5.0"
   grafana.ini:
     security:
       allow_embedding: true
@@ -19,8 +37,33 @@ grafana:
       access: proxy
       isDefault: false
 
+prometheusOperator:
+  image:
+    registry: harbor.local:30002
+    repository: library/prometheus-operator
+    tag: "v0.89.0"
+  # 注入成 operator 的 --prometheus-config-reloader= 参数，
+  # operator 用它给每个 Prometheus/Alertmanager Pod 挂 config-reloader sidecar
+  prometheusConfigReloader:
+    image:
+      registry: harbor.local:30002
+      repository: library/prometheus-config-reloader
+      tag: "v0.89.0"
+  admissionWebhooks:
+    # 装 ValidatingWebhookConfiguration 证书的一次性 Job。
+    # 镜像目前还没镜像到 Harbor（原始出处 ghcr.io/jkroepke/kube-webhook-certgen:1.7.8）
+    patch:
+      image:
+        registry: harbor.local:30002
+        repository: library/kube-webhook-certgen
+        tag: "1.7.8"
+
 prometheus:
   prometheusSpec:
+    image:
+      registry: harbor.local:30002
+      repository: library/prometheus
+      tag: "v3.10.0"
     nodeSelector:
       node-role: infra
     securityContext:
@@ -55,12 +98,30 @@ defaultRules:
 nodeExporter:
   enabled: true
 
+# nodeExporter.enabled 的 subchart，镜像 key 在 subchart 命名空间下
+prometheus-node-exporter:
+  image:
+    registry: harbor.local:30002
+    repository: library/node-exporter
+    tag: "v1.10.2"
+
 kubeStateMetrics:
   enabled: true
+
+# kubeStateMetrics.enabled 的 subchart，镜像 key 在 subchart 命名空间下
+kube-state-metrics:
+  image:
+    registry: harbor.local:30002
+    repository: library/kube-state-metrics
+    tag: "v2.18.0"
 
 alertmanager:
   enabled: true
   alertmanagerSpec:
+    image:
+      registry: harbor.local:30002
+      repository: library/alertmanager
+      tag: "v0.31.1"
     nodeSelector:
       node-role: infra
     storage:
