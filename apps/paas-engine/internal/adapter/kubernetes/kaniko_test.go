@@ -135,6 +135,79 @@ func TestJobToStatus(t *testing.T) {
 	}
 }
 
+// 构建 Pod 必须落在 app 节点上：只有它有能拉 git 仓库和 base 镜像的外网出口。
+// proxy1（node-role=proxy）虽然直连外网，但到不了公司代理，落上去构建必失败。
+func TestSubmit_PinsBuildToAppNode(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	executor := NewKanikoBuildExecutor(client, KanikoBuildConfig{
+		Namespace:   "paas-builds",
+		KanikoImage: "gcr.io/kaniko-project/executor:latest",
+	})
+
+	_, err := executor.Submit(context.Background(), &port.BuildSubmission{
+		BuildID:  "test-build-id",
+		GitRepo:  "https://github.com/example/repo",
+		GitRef:   "main",
+		ImageTag: "registry.example.com/app:latest",
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	jobs, err := client.BatchV1().Jobs("paas-builds").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List jobs error = %v", err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs.Items))
+	}
+
+	got := jobs.Items[0].Spec.Template.Spec.NodeSelector
+	if got["node-role"] != "app" {
+		t.Errorf("NodeSelector = %v, want node-role=app", got)
+	}
+}
+
+// 构建必须有执行期限。没有的话，Job 排不上（app 节点被 cordon / label 改了 / 资源不够）
+// 就永远停在 Pending，而 build 记录在 Submit 成功那一刻就写成了 running
+// （build_service.go:120），Makefile 的轮询只认 succeeded/failed/cancelled，
+// 于是表现成「构建永远 running、日志为空」。activeDeadlineSeconds 从 Job 创建时刻起算、
+// 不管 Pod 有没有跑起来，所以排不上的 Job 也会到点变 Failed，轮询才有终点。
+func TestSubmit_HasExecutionDeadline(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	executor := NewKanikoBuildExecutor(client, KanikoBuildConfig{
+		Namespace:   "paas-builds",
+		KanikoImage: "gcr.io/kaniko-project/executor:latest",
+	})
+
+	_, err := executor.Submit(context.Background(), &port.BuildSubmission{
+		BuildID:  "test-build-id",
+		GitRepo:  "https://github.com/example/repo",
+		GitRef:   "main",
+		ImageTag: "registry.example.com/app:latest",
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	jobs, err := client.BatchV1().Jobs("paas-builds").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List jobs error = %v", err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs.Items))
+	}
+
+	got := jobs.Items[0].Spec.ActiveDeadlineSeconds
+	if got == nil {
+		t.Fatal("ActiveDeadlineSeconds is nil: 排不上的构建会永远停在 running")
+	}
+	// 观测到的最慢一次真实构建 425s，留 4 倍余量
+	if *got != 1800 {
+		t.Errorf("ActiveDeadlineSeconds = %d, want 1800", *got)
+	}
+}
+
 func containsArg(args []string, target string) bool {
 	for _, a := range args {
 		if a == target {
