@@ -23,7 +23,7 @@ spec:
         node-role: infra
       containers:
         - name: mongodb
-          image: mongo:8
+          image: harbor.local:30002/library/mongo:8
           ports:
             - containerPort: 27017
           env:
@@ -68,7 +68,7 @@ spec:
             - name: mongo-data
               mountPath: /data/db
         - name: mongodb-exporter
-          image: percona/mongodb_exporter:0.42.0
+          image: harbor.local:30002/library/mongodb_exporter:0.42.0
           ports:
             - name: metrics
               containerPort: 9216

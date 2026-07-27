@@ -28,7 +28,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: tinyproxy
-          image: alpine:3.21
+          image: harbor.local:30002/library/alpine:3.21
           command:
             - sh
             - -c
