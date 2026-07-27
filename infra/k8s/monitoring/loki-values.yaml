@@ -1,6 +1,14 @@
 deploymentMode: SingleBinary
 
+# cpu1 (node-role: infra) 没有外网，所有镜像必须从内网 Harbor 拉。
+# Harbor 里镜像名被拍平成 library/<短名>，所以 registry 和 repository 都要覆盖。
+# 节点 containerd 已配 robot 拉取凭据，无需 imagePullSecrets。
+
 loki:
+  image:
+    registry: harbor.local:30002
+    repository: library/loki
+    tag: "3.6.5"
   auth_enabled: false
   commonConfig:
     replication_factor: 1
@@ -23,14 +31,60 @@ loki:
         directory: /var/loki/rules
     enable_api: true
 
+# nginx 反代（loki-gateway），promtail / grafana 都走它
+gateway:
+  image:
+    registry: harbor.local:30002
+    repository: library/nginx-unprivileged
+    tag: "1.29-alpine"
+
+# k8s-sidecar，把 loki-alert-rules ConfigMap 同步进 singleBinary Pod
+sidecar:
+  image:
+    registry: harbor.local:30002
+    repository: library/k8s-sidecar
+    tag: "1.30.9"
+
+lokiCanary:
+  image:
+    registry: harbor.local:30002
+    repository: library/loki-canary
+    tag: "3.6.5"
+
+# chunks-cache / results-cache 的 memcached + exporter
+memcached:
+  image:
+    registry: harbor.local:30002
+    repository: library/memcached
+    tag: "1.6.39-alpine"
+
+memcachedExporter:
+  image:
+    registry: harbor.local:30002
+    repository: library/memcached-exporter
+    tag: "v0.15.4"
+
+# `helm test` 用的一次性 Pod，我们不跑 helm test。关掉而不是把镜像指向 Harbor——
+# loki-helm-test 没镜像进来，留着只会在渲染结果里留一条拉不动的悬空引用。
+test:
+  enabled: false
+
 singleBinary:
   replicas: 1
   nodeSelector:
     node-role: infra
   persistence:
     enabled: true
-    storageClass: ""
+    # 必须写 "-" 不能写 ""：chart 用 `{{- with .persistence.storageClass }}` 判断，
+    # 空字符串是 falsy，整个 storageClassName 键会被省掉，PVC 就落到默认 SC
+    # （local-path）走动态供给 —— 拿到一块空盘，pv-loki 里的历史日志白恢复。
+    # "-" 是 chart 约定的「显式无 class」写法，会渲染成 storageClassName: ""。
+    storageClass: "-"
     size: 10Gi
+    # 精确认领 pv-loki。pv-prometheus 同样是 10Gi/RWO/无 class，不用 selector 就是碰运气。
+    selector:
+      matchLabels:
+        chiwei.io/volume: loki
   extraVolumes:
     - name: loki-alert-rules
       configMap:

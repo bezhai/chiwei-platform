@@ -1,0 +1,110 @@
+# monitoring 栈的四个 hostPath PV。全部落在 infra 节点（cpu1）的 /data00/k8s-volumes/ 下。
+#
+# 为什么进仓库：2026-07-23 入侵后重建集群时，这四个 PV 只存在于集群里、仓库里没有定义，
+# 只能从 etcd 备份反推。hostPath PV 是集群拓扑的一部分，跟 values 一样该版本化。
+#
+# 为什么写 nodeAffinity：hostPath 本身不带节点约束。Pod 调度到别的节点时不会失败，
+# 而是挂上一个**空目录**——数据看起来"丢了"，实际是挂错了机器。nodeAffinity 让它响亮地失败。
+#
+# 为什么 type: Directory 而不是 DirectoryOrCreate：路径不存在时宁可 Pod 起不来，
+# 也不要静默创建一个空目录然后让 Loki/Prometheus 以为自己是新装的。
+#
+# 属主必须手工设好——kubelet 不会给 hostPath 卷应用 fsGroup：
+#   grafana      472:472      (grafana chart securityContext)
+#   loki         10001:10001  (loki chart podSecurityContext)
+#   prometheus   0:0          (kube-prometheus-stack-values.yaml 显式覆盖成 root)
+#   alertmanager 1000:2000    (kube-prometheus-stack alertmanagerSpec 默认值)
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-grafana
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data00/k8s-volumes/grafana
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role
+              operator: In
+              values: [infra]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-loki
+  # loki chart 的 volumeClaimTemplate 不支持 volumeName，只支持 selector，
+  # 所以靠这个标签让 storage-loki-0 精确认领这一个 PV。
+  # 不打标签而指望"刚好只剩它可选"是脆的：pv-prometheus 同样是 10Gi/RWO/sc=""，
+  # 谁先绑就看运气。
+  labels:
+    chiwei.io/volume: loki
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data00/k8s-volumes/loki
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role
+              operator: In
+              values: [infra]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-prometheus
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data00/k8s-volumes/prometheus
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role
+              operator: In
+              values: [infra]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-alertmanager
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data00/k8s-volumes/alertmanager
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role
+              operator: In
+              values: [infra]
