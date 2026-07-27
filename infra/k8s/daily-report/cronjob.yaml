@@ -20,7 +20,7 @@ spec:
             node-role: infra
           containers:
             - name: daily-report
-              image: harbor.local:30002/inner-bot/daily-report:1.0.0.1
+              image: harbor.local:30002/inner-bot/daily-report:1.0.0.2
               command: ["/bin/sh", "/scripts/script.sh"]
               env:
                 - name: FEISHU_WEBHOOK_URL

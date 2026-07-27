@@ -28,7 +28,7 @@ WORKDIR /repo/apps/media-sync-worker
 RUN bun build src/index.ts --compile --outfile=media-sync-worker --external @aws-sdk/client-s3
 
 # --- Runtime（复用内部 glibc 运行时，避免构建时访问外部 apt 源）---
-FROM harbor.local:30002/inner-bot/lark-server-runtime@sha256:e25a0e85ea61dba92b3df8acaff2e1c532bd2235463302d827ed6f1a4d6101cc
+FROM harbor.local:30002/inner-bot/lark-server-runtime:bookworm-slim
 
 ENV TZ=Asia/Shanghai
 

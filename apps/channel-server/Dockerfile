@@ -32,7 +32,7 @@ RUN bun build src/index.ts --compile --outfile=server & \
     test -f server && test -f recall-worker && test -f chat-response-worker
 
 # --- Runtime（同样基于 Debian/glibc，预装 ca-certificates/tzdata）---
-FROM harbor.local:30002/inner-bot/lark-server-runtime@sha256:e25a0e85ea61dba92b3df8acaff2e1c532bd2235463302d827ed6f1a4d6101cc
+FROM harbor.local:30002/inner-bot/lark-server-runtime:bookworm-slim
 
 ENV TZ=Asia/Shanghai
 

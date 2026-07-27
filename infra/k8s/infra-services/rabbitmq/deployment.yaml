@@ -27,7 +27,7 @@ spec:
         - name: harbor-secret
       containers:
         - name: rabbitmq
-          image: harbor.local:30002/inner-bot/rabbitmq@sha256:0639dc7fa60425f8d16a1ec2f6dadb42b25dda1f730525877f0c670be3f74879
+          image: harbor.local:30002/inner-bot/rabbitmq:4.0-management-delayed
           ports:
             - name: amqp
               containerPort: 5672

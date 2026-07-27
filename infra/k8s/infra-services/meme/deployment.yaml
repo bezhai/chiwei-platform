@@ -23,7 +23,7 @@ spec:
         node-role: infra
       containers:
         - name: meme
-          image: chiwiio/meme-generator:main
+          image: harbor.local:30002/library/meme-generator:main
           ports:
             - containerPort: 2233
           resources:

@@ -1,7 +1,7 @@
 version: "3.9"
 services:
   chiwei-test-postgres:
-    image: postgres:16-alpine
+    image: harbor.local:30002/library/postgres:16-alpine
     container_name: chiwei-test-postgres
     restart: unless-stopped
     environment:
@@ -19,7 +19,7 @@ services:
       retries: 5
 
   chiwei-test-rabbitmq:
-    image: harbor.local:30002/inner-bot/rabbitmq@sha256:879c8c73943ed7169df2f7d6062740fab1f247d03068721d84a9610dabd7fa70  # Phase 2 漏 commit 补：harbor 镜像含 rabbitmq_delayed_message_exchange plugin
+    image: harbor.local:30002/inner-bot/rabbitmq:4.0-management-delayed  # Phase 2 漏 commit 补：harbor 镜像含 rabbitmq_delayed_message_exchange plugin
     container_name: chiwei-test-rabbitmq
     restart: unless-stopped
     environment:
@@ -37,7 +37,7 @@ services:
       retries: 5
 
   chiwei-test-redis:
-    image: redis:7-alpine
+    image: harbor.local:30002/library/redis:7-alpine
     container_name: chiwei-test-redis
     restart: unless-stopped
     command:
@@ -59,7 +59,7 @@ services:
       retries: 5
 
   chiwei-test-qdrant:
-    image: qdrant/qdrant:v1.11.0
+    image: harbor.local:30002/library/qdrant:v1.11.0
     container_name: chiwei-test-qdrant
     restart: unless-stopped
     environment:
@@ -76,7 +76,7 @@ services:
       retries: 5
 
   chiwei-test-mongo:
-    image: mongo:7.0.14-jammy
+    image: harbor.local:30002/library/mongo:7.0.14-jammy
     container_name: chiwei-test-mongo
     restart: unless-stopped
     environment:

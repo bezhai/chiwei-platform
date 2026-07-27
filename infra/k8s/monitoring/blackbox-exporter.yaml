@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: blackbox-exporter
-          image: prom/blackbox-exporter:v0.25.0
+          image: harbor.local:30002/library/blackbox-exporter:v0.25.0
           args:
             - --config.file=/config/config.yml
           ports:

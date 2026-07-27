@@ -23,7 +23,7 @@ spec:
         node-role: infra
       containers:
         - name: redis
-          image: redis:8.4.2
+          image: harbor.local:30002/library/redis:8.4.2
           ports:
             - containerPort: 6379
           command:
@@ -71,7 +71,7 @@ spec:
             - name: redis-data
               mountPath: /data
         - name: redis-exporter
-          image: oliver006/redis_exporter:v1.66.0
+          image: harbor.local:30002/library/redis_exporter:v1.66.0
           ports:
             - name: metrics
               containerPort: 9121

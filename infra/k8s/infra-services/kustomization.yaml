@@ -7,7 +7,6 @@ resources:
   - postgres/
   - mongo/
   - redis/
-  - qdrant/
   - rabbitmq/
   - minio/
   - meme/
