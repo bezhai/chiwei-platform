@@ -18,7 +18,7 @@ from collections.abc import Callable
 from app.infra.rabbitmq import Route, mq
 from app.runtime.data import Data
 from app.runtime.naming import to_snake
-from app.runtime.propagation import inject_context
+from app.runtime.propagation import inject_context, outbound_context
 from app.runtime.wire import WireSpec
 
 logger = logging.getLogger(__name__)
@@ -63,12 +63,17 @@ async def publish_to_review_queue(
         "last_error": last_error,
         "attempts": attempts,
     }
-    headers = inject_context({"data_type": "manual_review_envelope"})
-    # lane defaults to ... sentinel which calls current_lane() internally.
+    # Resolve the lane once and pass it explicitly. Leaving it to the ...
+    # sentinel would have publish_with_confirm call current_lane() (contextvar
+    # → LANE env) while the header carried only the contextvar — an operator
+    # inspecting a lane's review queue would see prod-labelled envelopes.
+    ctx = outbound_context()
+    headers = inject_context({"data_type": "manual_review_envelope"}, ctx)
     confirmed = await mq.publish_with_confirm(
         route,
         body,
         headers=headers,
+        lane=ctx.lane,
     )
     if not confirmed:
         logger.warning(

@@ -164,10 +164,103 @@ async def test_mq_source_generates_fallback_trace_id_when_header_missing(
         ok = await _wait_until(lambda: len(received) >= 1, timeout=5.0)
         assert ok, "expected 1 message processed"
 
-        trace, _lane = seen_ctx[0]
+        trace, lane = seen_ctx[0]
         assert trace is not None, "trace_id must be auto-generated; node saw None"
         assert re.fullmatch(r"mq:mqsrc_no_trace:[0-9a-f]{8}", trace), (
             f"expected mq:<queue>:<uuid8> shape, got {trace!r}"
+        )
+        # No lane header at all -> no lane. The trace_id fallback must not
+        # invent one (env LANE fallback here would mislabel TTL'd-back lane
+        # messages as prod).
+        assert lane is None
+    finally:
+        await _stop_runtime(rt, task)
+
+
+@pytest.mark.integration
+async def test_mq_source_binds_lane_from_header(rabbitmq):
+    """A real (non-empty) ``lane`` header lands in ``lane_var`` for the node
+    call.
+
+    This is the case the suite never covered: the existing basic test only
+    publishes ``lane: ""`` (-> None), so a consumer that dropped the lane
+    entirely would still pass. Lane must survive the hop because
+    ``lane_router.get_headers()`` reads ``lane_var`` — a None there sends
+    every outbound HTTP call from this node to the prod service.
+
+    Note the publish itself goes to the *prod* queue (no LANE env in this
+    process): header lane and queue lane are independent on purpose. That is
+    exactly the shape of a lane message that TTL'd back to prod, which is why
+    the header — not env — is the authority.
+    """
+    from app.infra.rabbitmq import Route, mq
+
+    @node
+    async def ingest(req: _Req) -> None:
+        received.append(req)
+        seen_ctx.append((trace_id_var.get(), lane_var.get()))
+
+    wire(_Req).to(ingest).from_(Source.mq("mqsrc_lane_hdr"))
+
+    route = Route("mqsrc_lane_hdr", "mqsrc_lane_hdr.rk")
+    await mq.declare_route(route)
+
+    rt, task = await _run_runtime()
+    try:
+        await mq.publish(
+            route,
+            {"message_id": "l1"},
+            headers={"trace_id": "t-lane", "lane": "ppe-x"},
+        )
+
+        ok = await _wait_until(lambda: len(received) >= 1, timeout=5.0)
+        assert ok, "expected 1 message processed"
+
+        trace, lane = seen_ctx[0]
+        assert trace == "t-lane"
+        assert lane == "ppe-x", (
+            f"lane header must reach lane_var inside the node; got {lane!r}"
+        )
+    finally:
+        await _stop_runtime(rt, task)
+
+
+@pytest.mark.integration
+async def test_mq_source_keeps_lane_when_trace_id_header_missing(rabbitmq):
+    """The trace_id auto-generation fallback must not clobber the lane.
+
+    Rebuilding the Context to fill in a synthetic trace_id is the one place
+    where the extracted lane could silently be dropped, and a producer that
+    injects lane but no trace_id is a realistic shape (channel-server injects
+    lane per request; trace_id is optional).
+    """
+    import re
+
+    from app.infra.rabbitmq import Route, mq
+
+    @node
+    async def ingest(req: _Req) -> None:
+        received.append(req)
+        seen_ctx.append((trace_id_var.get(), lane_var.get()))
+
+    wire(_Req).to(ingest).from_(Source.mq("mqsrc_lane_no_trace"))
+
+    route = Route("mqsrc_lane_no_trace", "mqsrc_lane_no_trace.rk")
+    await mq.declare_route(route)
+
+    rt, task = await _run_runtime()
+    try:
+        await mq.publish(route, {"message_id": "l2"}, headers={"lane": "ppe-y"})
+
+        ok = await _wait_until(lambda: len(received) >= 1, timeout=5.0)
+        assert ok, "expected 1 message processed"
+
+        trace, lane = seen_ctx[0]
+        assert re.fullmatch(r"mq:mqsrc_lane_no_trace:[0-9a-f]{8}", trace or ""), (
+            f"expected mq:<queue>:<uuid8> shape, got {trace!r}"
+        )
+        assert lane == "ppe-y", (
+            f"lane must survive the trace_id fallback rebuild; got {lane!r}"
         )
     finally:
         await _stop_runtime(rt, task)

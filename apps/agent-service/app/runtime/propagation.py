@@ -4,11 +4,13 @@ The runtime moves messages across processes via RabbitMQ. Every transport hop
 reads inbound headers into contextvars before invoking business code, and
 writes contextvars back into outbound headers before publishing.
 
-Three primitives:
+Four primitives:
 
 * ``extract_context(headers)`` — defensive parse of inbound headers.
 * ``inject_context(headers, ctx=None)`` — write outbound headers (defaults to
   reading current contextvars).
+* ``outbound_context(fallback_lane=None)`` — the Context a *producer* should
+  inject, with the lane resolved the same way ``mq.publish`` picks the queue.
 * ``bind_context(ctx)`` — async context manager that sets contextvars on enter,
   restores on exit (works on success and exception paths).
 
@@ -70,6 +72,29 @@ def inject_context(
     out["trace_id"] = ctx.trace_id or ""
     out["lane"] = ctx.lane or ""
     return out
+
+
+def outbound_context(*, fallback_lane: str | None = None) -> Context:
+    """Build the Context for an outbound publish.
+
+    Lane resolution order: contextvar → ``fallback_lane`` (a lane the Data
+    itself carries, used by sink dispatch) → ``current_lane()``, which is the
+    ``LANE`` env of the running Deployment. That last step is the whole point:
+    ``mq.publish`` picks the queue with ``current_lane()``, so a producer that
+    injected the bare contextvar would stamp ``lane: ""`` on a message it just
+    routed to ``xxx_ppe-x``. Callers MUST feed ``ctx.lane`` back into
+    ``mq.publish(lane=...)`` so the two can never drift apart again.
+
+    The env fallback is producer-only. Consumers stay header-only on purpose:
+    a prod pod also drains messages that TTL'd back from a lane queue, so
+    reading its own ``LANE`` there would relabel foreign messages.
+    """
+    from app.infra.rabbitmq import current_lane
+
+    return Context(
+        trace_id=trace_id_var.get(),
+        lane=lane_var.get() or fallback_lane or current_lane(),
+    )
 
 
 @contextlib.asynccontextmanager

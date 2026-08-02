@@ -10,6 +10,7 @@ from app.runtime.propagation import (
     bind_context,
     extract_context,
     inject_context,
+    outbound_context,
 )
 
 
@@ -69,6 +70,58 @@ class TestInjectContext:
         # contextvars default to None when not set in this scope
         h = inject_context(None)
         assert h == {"trace_id": "", "lane": ""}
+
+
+class TestOutboundContext:
+    """Producer-side lane must be resolved the way ``mq.publish`` picks the
+    queue — ``current_lane()``: contextvar first, ``LANE`` env second.
+
+    This is deliberately NOT symmetric with the consuming side, which is
+    header-only: a prod pod drains lane messages that TTL'd back from a lane
+    queue, so consuming with an env fallback would relabel them as prod.
+    A producer has no such ambiguity — the process publishes to its own lane.
+    """
+
+    def test_contextvar_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("LANE", "ppe-env")
+        l_tok = lane_var.set("ppe-ctx")
+        t_tok = trace_id_var.set("t1")
+        try:
+            ctx = outbound_context()
+        finally:
+            lane_var.reset(l_tok)
+            trace_id_var.reset(t_tok)
+        assert ctx == Context(trace_id="t1", lane="ppe-ctx")
+
+    def test_falls_back_to_lane_env_when_contextvar_is_empty(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("LANE", "ppe-env")
+        ctx = outbound_context()
+        assert ctx.lane == "ppe-env"
+
+    def test_prod_and_missing_lane_are_none(self, monkeypatch) -> None:
+        monkeypatch.setenv("LANE", "prod")
+        assert outbound_context().lane is None
+        monkeypatch.delenv("LANE")
+        assert outbound_context().lane is None
+
+    def test_fallback_lane_beats_env_but_not_contextvar(
+        self, monkeypatch
+    ) -> None:
+        """``fallback_lane`` is the Data-carried lane used by sink dispatch;
+        it ranks between the contextvar and the process env."""
+        monkeypatch.setenv("LANE", "ppe-env")
+        assert outbound_context(fallback_lane="ppe-body").lane == "ppe-body"
+        l_tok = lane_var.set("ppe-ctx")
+        try:
+            assert outbound_context(fallback_lane="ppe-body").lane == "ppe-ctx"
+        finally:
+            lane_var.reset(l_tok)
+
+    def test_fallback_lane_used_when_nothing_else_set(self, monkeypatch) -> None:
+        monkeypatch.delenv("LANE", raising=False)
+        assert outbound_context(fallback_lane="ppe-body").lane == "ppe-body"
 
 
 class TestBindContext:

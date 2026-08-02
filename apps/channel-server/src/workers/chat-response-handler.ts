@@ -12,6 +12,7 @@ import type { ConsumeMessage } from 'amqplib';
 import dayjs from 'dayjs';
 
 import { context } from '@middleware/context';
+import { laneFromMessage } from '@integrations/amqp-context';
 import type { OutboundCapabilities } from '@core/ports/channel-plugin';
 import { imageRegistryLookupId } from './image-registry-key';
 import { dispatchChatResponseOutbound } from './chat-response-outbound';
@@ -37,6 +38,9 @@ export interface ChatResponsePayload {
     full_content?: string;
     status: 'success' | 'failed';
     error?: string;
+    // agent-service 仍在 body 里回填 lane（它自己按 body 字段做别的事），但
+    // **判 lane 不看这里**：lane 只认 AMQP header，口径见
+    // @integrations/amqp-context 的 laneFromMessage（连同「为什么不回落 body」）。
     lane?: string;
     part_index?: number;
     is_last?: boolean;
@@ -134,7 +138,11 @@ export async function handleChatResponse(
     }
 
     // 设置 bot context — ack 统一在 context.run 之后，callback 内部禁止 ack/nack
-    const contextData = context.createContext(botName || undefined, undefined, payload.lane);
+    const contextData = context.createContext(
+        botName || undefined,
+        undefined,
+        laneFromMessage(msg),
+    );
 
     await context.run(contextData, async () => {
         if (status === 'failed') {

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,6 +22,16 @@ def _isolate(monkeypatch):
 
 class _XReq(Data):
     x_id: Annotated[str, Key]
+
+    class Meta:
+        transient = True
+
+
+class _ChatReqProbe(Data):
+    """Uses a queue that really exists in ALL_ROUTES so the publish path
+    (``_mq_publish_for_source`` -> ``_route_by_queue``) resolves a Route."""
+
+    chat_id: Annotated[str, Key]
 
     class Meta:
         transient = True
@@ -110,3 +120,81 @@ async def test_emit_raises_when_no_mq_source_and_consumer_other_app(monkeypatch)
         await emit(_XReq(x_id="x3"))
 
     fake_publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_emit_mq_publish_injects_trace_and_lane_headers(monkeypatch):
+    """Cross-process emit over Source.mq must write trace/lane into the
+    message header.
+
+    The consumer end (``Runtime._source_loop_mq``) rebuilds contextvars from
+    headers *only* — there is deliberately no body / env fallback, because a
+    prod pod also drains lane messages that TTL'd back from a lane queue.
+    So a publish without headers means the consuming process runs the whole
+    downstream chain with ``lane=None`` and ``lane_router`` sends every
+    outbound HTTP call to the prod service.
+    """
+    from app.runtime.propagation import Context, bind_context
+
+    @node
+    async def chat_handler(r: _ChatReqProbe) -> None:
+        pass
+
+    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("chat_request"))
+    bind(chat_handler).to_app("vectorize-worker")
+
+    monkeypatch.setenv("APP_NAME", "agent-service")
+
+    import sys
+
+    emit_mod = sys.modules["app.runtime.emit"]
+    emit_mod.reset_emit_runtime()
+
+    fake_publish = AsyncMock()
+    with patch("app.infra.rabbitmq.mq.publish", fake_publish):
+        async with bind_context(Context(trace_id="t-emit", lane="ppe-emit")):
+            await emit(_ChatReqProbe(chat_id="c9"))
+
+    fake_publish.assert_awaited_once()
+    args, kwargs = fake_publish.await_args
+    assert args[0].queue == "chat_request"
+    assert args[1]["chat_id"] == "c9"
+    headers = kwargs.get("headers")
+    assert headers is not None, (
+        "emit() published to Source.mq without headers — trace/lane are lost "
+        "at the process boundary"
+    )
+    assert headers["lane"] == "ppe-emit"
+    assert headers["trace_id"] == "t-emit"
+
+
+@pytest.mark.asyncio
+async def test_emit_mq_publish_writes_empty_lane_header_outside_a_lane(monkeypatch):
+    """No lane in context -> header still present, written as "" (the
+    on-wire shape ``inject_context`` guarantees and ``extract_context``
+    coerces back to None)."""
+
+    @node
+    async def chat_handler(r: _ChatReqProbe) -> None:
+        pass
+
+    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("chat_request"))
+    bind(chat_handler).to_app("vectorize-worker")
+
+    monkeypatch.setenv("APP_NAME", "agent-service")
+
+    import sys
+
+    emit_mod = sys.modules["app.runtime.emit"]
+    emit_mod.reset_emit_runtime()
+
+    fake_publish = AsyncMock()
+    with patch("app.infra.rabbitmq.mq.publish", fake_publish):
+        await emit(_ChatReqProbe(chat_id="c10"))
+
+    fake_publish.assert_awaited_once()
+    _args, kwargs = fake_publish.await_args
+    headers = kwargs.get("headers")
+    assert headers is not None
+    assert headers["lane"] == ""
+    assert headers["data_type"] == "_ChatReqProbe"

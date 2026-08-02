@@ -276,9 +276,25 @@ async def _mq_publish_for_source(src, data: Data) -> None:
     Looks up the Route in ALL_ROUTES by queue name (queue must be a known
     route — compile_graph rejects unknown queues at startup). Body is
     ``data.model_dump(mode='json')`` to mirror Source.mq consumer-side
-    decoding. Lane resolution happens inside ``mq.publish``.
+    decoding.
+
+    trace_id / lane also ride the message *header* (``inject_context``),
+    same as every other publish in the runtime. The consuming end
+    (``Runtime._source_loop_mq``) rebuilds contextvars from headers only —
+    it deliberately has no env fallback, because a prod pod also drains
+    lane messages that TTL'd back from a lane queue. Publishing without
+    headers therefore drops the lane at the process boundary and every
+    outbound HTTP call in the consuming process goes to prod.
+
+    The lane is resolved ONCE via ``outbound_context`` and handed to both
+    the header and ``mq.publish(lane=...)``. Letting ``mq.publish`` resolve
+    the queue lane on its own would reintroduce the mismatch: it reads
+    ``current_lane()`` (contextvar → ``LANE`` env) while the header would
+    carry the bare contextvar, so a background emit on a lane pod would
+    land in ``xxx_ppe-x`` stamped ``lane: ""``.
     """
     from app.infra.rabbitmq import mq
+    from app.runtime.propagation import inject_context, outbound_context
     from app.runtime.sink_dispatch import _route_by_queue
 
     queue_name = src.params["queue"]
@@ -290,7 +306,9 @@ async def _mq_publish_for_source(src, data: Data) -> None:
             f"Add it to app/infra/rabbitmq.py."
         )
     body = data.model_dump(mode="json")
-    await mq.publish(route, body)
+    ctx = outbound_context()
+    headers = inject_context({"data_type": type(data).__name__}, ctx)
+    await mq.publish(route, body, headers=headers, lane=ctx.lane)
 
 
 # ---------------------------------------------------------------------------
