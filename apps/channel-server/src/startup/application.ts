@@ -2,6 +2,7 @@ import { DatabaseManager } from './database';
 import { HttpServerManager, ServerConfig } from './server';
 import { multiBotManager } from '@core/services/bot/multi-bot-manager';
 import { initializeCrontabs } from '@crontab/index';
+import { isProdDeployment } from '@infrastructure/lane-policy';
 import { rabbitmqClient, getLane } from '@integrations/rabbitmq';
 import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
 import '@plugins/index';
@@ -72,9 +73,15 @@ export class ApplicationManager {
         // 5.6 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
         await startChannelDirectIngresses(multiBotManager.getBotsByInitType('websocket'));
 
-        // 6. 启动所有定时任务
-        initializeCrontabs();
-        console.info('All crontab tasks initialized!');
+        // 6. 启动所有定时任务：仅 prod 部署。crontab 的副作用是全局的（daily-photo
+        // 往写死的真实飞书群发消息、emoji 每小时全量覆写共享表），没有按泳道隔离
+        // 的口径，泳道部署跑起来就是重复发群消息 + 写脏 prod 数据。
+        if (isProdDeployment()) {
+            initializeCrontabs();
+            console.info('All crontab tasks initialized!');
+        } else {
+            console.info(`[crontab] skipped on lane=${lane} (prod only)`);
+        }
 
         // 7. 显示当前加载的机器人配置
         this.logBotConfigurations();
