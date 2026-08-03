@@ -9,6 +9,7 @@ COPY apps/monitor-dashboard/package.json ./apps/monitor-dashboard/
 COPY apps/monitor-dashboard-web/package.json ./apps/monitor-dashboard-web/
 COPY apps/media-sync-worker/package.json ./apps/media-sync-worker/
 COPY apps/qq-gateway/package.json ./apps/qq-gateway/
+COPY apps/lark-service/package.json ./apps/lark-service/
 COPY packages/ts-shared/package.json ./packages/ts-shared/
 COPY packages/pixiv-client/package.json ./packages/pixiv-client/
 COPY packages/lark-utils/package.json ./packages/lark-utils/

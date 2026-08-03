@@ -54,6 +54,24 @@
         "typescript": "^5.6.3",
       },
     },
+    "apps/lark-service": {
+      "name": "lark-service",
+      "version": "1.0.0",
+      "dependencies": {
+        "@inner/shared": "workspace:*",
+        "amqplib": "^0.10.5",
+        "hono": "^4.7.0",
+        "ioredis": "^5.3.2",
+        "pg": "^8.11.3",
+        "prom-client": "^15.1.0",
+        "typeorm": "^0.3.17",
+      },
+      "devDependencies": {
+        "@types/amqplib": "^0.10.6",
+        "@types/bun": "latest",
+        "typescript": "^5.6.3",
+      },
+    },
     "apps/media-sync-worker": {
       "name": "media-sync-worker",
       "version": "1.0.0",
@@ -987,6 +1005,8 @@
     "keyv": ["keyv@4.5.4", "https://bnpm.byted.org/keyv/-/keyv-4.5.4.tgz", { "dependencies": { "json-buffer": "3.0.1" } }, "sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw=="],
 
     "kuler": ["kuler@2.0.0", "https://bnpm.byted.org/kuler/-/kuler-2.0.0.tgz", {}, "sha512-Xq9nH7KlWZmXAtodXDDRE7vs6DU1gTU8zYDHDiWLSip45Egwq3plLHzPn27NgvzL2r1LMPC1vdqh98sQxtqj4A=="],
+
+    "lark-service": ["lark-service@workspace:apps/lark-service"],
 
     "levn": ["levn@0.4.1", "https://bnpm.byted.org/levn/-/levn-0.4.1.tgz", { "dependencies": { "prelude-ls": "^1.2.1", "type-check": "~0.4.0" } }, "sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ=="],
 
