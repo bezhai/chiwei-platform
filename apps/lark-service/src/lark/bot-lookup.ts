@@ -47,3 +47,18 @@ export function createLarkBotLookup(
         byUnionId: (unionId) => find((credentials) => credentials.robot_union_id === unionId),
     };
 }
+
+/**
+ * 处理这条事件的 bot 跑在哪个飞书应用下。
+ *
+ * 用处只有一个：投影按 (app_id, open_id) 记用户身份，而事件里偶尔没带 app_id。这
+ * 时只能回答"接住它的是谁"。**认不出就抛**，不给缺省值 —— 猜一个 app_id 会把这个
+ * 人记到别的应用名下，同一个人从此在公共层有两份身份。
+ */
+export function larkAppIdOf(roster: LarkBotRoster, botName: string): string {
+    for (const bot of roster.getAllBotConfigs()) {
+        if (bot.channel !== LARK_CHANNEL) continue;
+        if (bot.bot_name === botName) return larkCredentials(bot).app_id;
+    }
+    throw new Error(`no lark bot named "${botName}" in this process; cannot resolve its app id`);
+}

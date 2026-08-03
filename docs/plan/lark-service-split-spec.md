@@ -103,7 +103,10 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 | | **recall worker** | **UPDATE `safety_status` / `safety_result`** | **撤回流程** | **飞书在 lark-service（⚠️ 见下）** |
 | | **agent-service** | **UPDATE `safety_status` / `safety_result`** | **安全判定** | **agent-service（⚠️ 与上一行同字段）** |
 | `common_bot_presence` | 飞书事件 | upsert `is_active` | bot 入群 / 退群 | lark-service |
+| | 飞书投影 | upsert `is_active=true` | **每条入站消息各刷一次**（见下） | lark-service |
 | | QQ 事件 | 同上 | QQ 对应事件 | channel-server |
+
+「每条入站消息刷一次 presence」不是冗余写入，是**自愈**：飞书不保证入群/退群事件必达，而 agent-service 拿这张表当群投递闸门，presence 因丢事件而不准会直接导致该投不投。一次幂等 upsert 换掉这个失效模式，划算。
 
 **三处必须被测试固化的重叠**：
 
@@ -111,13 +114,37 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 2. **`safety_status` 被 recall worker 和 agent-service 双向写**，且该表**没有 `channel` 列**——DB 层无法拒绝越界写入。拆分后飞书的 recall 移到 lark-service，隔离完全依赖 agent-service 的 routing key 分对了。这是决策二要求消费侧 fail-closed 的直接原因。
 3. **`common_message` 的 user 行与 `lark_message` 同事务写入**。共库让这个事务得以保留（决策一），但矩阵里它是唯一一处"common_* 与渠道私有表在同一事务"的写入，任何试图把 common_* 的写入上收到共享层的重构都会打破它。
 
+## 已知缺陷（本次不修，但要记在案上）
+
+这三条都是 codex 两轮 review 挖出来的，各有明确理由不在拆分这批里动。
+
+**一、同一个人在两个飞书应用下并发首次出现时，公共层身份不收敛。**
+
+`(app_id, open_id)` 上的 `ON CONFLICT` 保证了同一个飞书应用下"首写者成为 canonical"，但同一个人在每个应用下 open_id 不同，两条流认领的是两把不同的自然键，压根不会撞上同一个冲突。`lark_user_open_id.union_id` 上没有唯一约束（一个 union_id 天然对应多行），"union 维度的首写者"在 DB 层无从表达。
+
+现状是确定性收敛 + 自愈：`larkUserByUnionId` 按 `common_user_id ASC` 取最小值，两个进程算出来一样，`linkLarkUser` 会把指错的行拉回去。代价是收敛发生在**下一条消息**，而窗口期里落的 `common_message` 会永久挂在被淘汰的那个 id 上——事后改映射修不了历史。
+
+不修的理由：两条候选解法都超出拆分的范围，且需要 bezhai 拍板。一是按 union_id 批量 UPDATE 把同 union 的行拉到最小 id，但 memory 里记着"union_id 非全局唯一"，若成立这会把两个人合并，血本太大；二是把 `common_user_id` 改成由 union_id 派生的确定性 uuid，无竞态但换掉了全表的 id 语义（丢掉 v7 的时间有序性），是跨系统决策。
+
+**二、交接分支不落账，所以同一条飞书消息交接到泳道时会带上不同的 `global_message_id`。**
+
+多 bot 群里飞书把同一条消息推给每个 bot，每个 bot 都走一遍投影。判定要交接时函数直接返回、不写 `lark_message`，于是下一个 bot 进来仍然读不到 `existing`，又铸一个新 id。泳道侧的三元组去重 key 是 `event_type + global_message_id + lane`（不含 bot_name），认不出这几条是同一条消息。
+
+**拆分前的 channel-server 是逐字相同的形态**（`plugins/lark/events/handlers.ts` 里那个 `return` 前的注释自己写着"还没写 lark store entry"），所以这不是拆分引入的回归，是等价迁移过来的既有行为。不在这批修是因为改它要动"交接前是否落账"这个决策，而先分叉后落账正是为了避免 prod 落一笔它并不处理的账。Task E 泳道验证时要实际观察多 bot 群的交接行为，确认这个形态在拆分后的表现与线上一致。
+
+**三、飞书入口 ACK 之后，交接失败没有第二次机会。**
+
+飞书要求快速 ACK，从 ACK 那一刻起消息的可靠性就全靠我们自己。加了 publisher confirm 之后，"broker 没收到却按成功返回"这个静默窗口堵上了，但确认失败之后仍然只能记一条错误日志——本地不留账，飞书也不会再推。泳道消费那条路有 requeue 兜底（不丢），webhook 和 WS 两个直连入口没有。
+
+要真正堵住得引入本地 outbox（先落库再投递、后台补投），那是入口可靠性的独立议题，不该塞进拆分。
+
 ## Data & deployment impact
 
 - **无 schema 变更，无新表，无 DDL**。表的物理位置与结构完全不动，只换代码所有者。lark_* 七张表 + Mongo `lark_event` 归 lark-service 独占；common_* 五张表三方共写，写入矩阵见决策二。
 - **无 prompt 变更、无 Dynamic Config 变更**（flag 语义不变，读取方从 channel-server 变成 lark-service）。
 - **新服务要在 PaaS 注册**：ImageRepo、App envs、ConfigBundle `required_keys` 覆盖新 app、Deployment 与 Service。飞书凭据只下发给 lark-service。**`MONGO_HOST` 必须在首次部署前就位**——lark-service 用它写 `lark_event` 原始事件审计，配置缺失会按既有的 fail-closed 风格在启动时崩溃（这是刻意的，但要求配置先行）。
 - **注册新 workspace 成员会连坐所有镜像**：bun 对"已声明但不在构建上下文里"的 workspace 成员是退出码 1 的硬失败，所以每个跑 `bun install --frozen-lockfile` 的 Dockerfile 都要复制新 app 的 `package.json`。加 app 时这几处必须同一个 commit 落地，否则构建中断（好在是显式失败，不会产出坏镜像）。
-- **资源增量要核算**：多一个服务意味着多一份 DB / Redis / MQ 连接池和一组消费者。需要给出新增连接数、消费者 prefetch 与队列积压的观测口径，避免拆完打爆连接上限。
+- **资源增量要核算**：多一个服务意味着多一份 DB / Redis / MQ 连接池和一组消费者。需要给出新增连接数、消费者 prefetch 与队列积压的观测口径，避免拆完打爆连接上限。其中一个具体数字要盯：投影锁在持续争用下最坏等 75 秒（两个租约 + 余量，推导见 `message-lock.ts` 文件头）才放弃，泳道消费者 prefetch 期间会被占住这么久。观测口径里要能看见"等锁超时"这条错误的频次——它出现就说明有任务卡在锁里，而不是锁的参数配错了。
 - **跨服务部署顺序有约束**：agent-service 的 rk 分流必须先于 lark-service 开始消费（否则新队列无生产者），而 lark-service 必须先能消费再切入站（否则积压）。
 - **部署中断在途任务**：channel-server 部署杀在途 chat_response 处理；agent-service 部署杀 rebuild / afterthought / world / life。
 - **回滚路径分两段**：切换稳定前，回滚 = 入口切回 channel-server + 队列订阅切回 + agent-service rk 回退，三步都是配置级，因为两侧代码都在，可逆；清理完成后，回滚只能靠镜像版本回退，代价大得多。这正是清理必须在切换稳定之后的原因。
@@ -150,6 +177,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **Goal**: 证明拆分后飞书链路端到端行为与拆分前一致，并在不丢消息、不双跑的前提下完成生产切换。**此阶段 channel-server 的飞书代码仍在，回滚是配置级的。**
 - **前置铁律**：在 `inbound_lane` 完成按 channel 分区（见决策八）之前，**不得把 lark-service 部署到任何泳道**——它抢到的消息会被静默丢弃，没有任何错误信号。切流期间还须确认每个队列只有一个订阅者。
 - **切流判据是 `/api/ready` 返回 200，不是 `/api/health`**：飞书 SDK 的 `start()` 只是异步发起重连、**不等待首次连接成功**，所以"进程起来了"完全不代表它在接飞书事件。两个端点职责已分开——`/api/health` 恒 200（liveness，重连抖动不该触发重启），`/api/ready` 在 `connected !== expected` 时返回 503。用错端点会造成"旧的已停、新的没连上"且无告警的静默断流窗口。
+- **必须实际触发一次"首次认领"**：身份与会话的收敛靠两条手写 `ON CONFLICT ... COALESCE`（`lark_user_open_id` / `lark_base_chat_info`）。它们的 SQL 由真 TypeORM 生成并被断言，但开发机连不到库，**从未在真 PG 上执行过**。泳道验证必须包含一个此前没见过的用户或会话，让这两条语句真的跑一次。
 - **Deliverable**: 泳道验证记录（命令 + 实际输出）；四个入口/owner 的切换与回滚执行记录。
 - **Verification**: 泳道内走通完整飞书往返（收消息、AI 回复、指令、撤回），lane 跨服务不丢；切换过程中确认四个 owner 各自唯一——WS 长连只有一个持有者、webhook 只指向一个服务、`inbound_lane.{lane}` 只有一个订阅者、定时任务只有一个执行者；切换后旧路径零流量、新路径全量，且期间无消息丢失或重复发送的证据。
 

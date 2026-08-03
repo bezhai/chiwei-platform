@@ -9,13 +9,25 @@
 import type { Document } from 'mongodb';
 import { botDirectory } from '@inner/shared/bot';
 import { getRedisClient, resetRedisClient } from '@inner/shared/cache';
+import { getLaneBindingResolver } from '@inner/shared/lane-binding';
 import { getMongoService, resetMongoService } from '@inner/shared/mongo';
 import { getLane, rabbitmqClient } from '@inner/shared/mq';
 
 import { loadConfig } from './config';
+import { larkAppIdOf } from './lark/bot-lookup';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
+import {
+    handOffOverRabbit,
+    inboundLaneDispatchEnabled,
+} from './lark/ingress/lane-handoff';
 import { holdsLarkWebSockets, type LarkWebSockets } from './lark/ingress/websocket';
 import { loadLarkPersonaNames } from './lark/persona-names';
+import {
+    projectLarkInbound,
+    type LarkInboundDeps,
+} from './lark/projection/inbound-projection';
+import { larkMessageLock, redisMessageLockStore } from './lark/projection/message-lock';
+import { postgresLarkTables } from './lark/projection/postgres-tables';
 import { larkDataSource } from './ormconfig';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
@@ -39,6 +51,27 @@ function realBackends(): LarkBackends {
 }
 
 /**
+ * 投影的真实装配：库、Redis 锁、泳道绑定、MQ 全在这里接上，投影本身一个单例都不
+ * 认识（见 lark/projection/inbound-projection.ts 的 LarkInboundDeps）。
+ */
+function realProjection(): LarkInboundDeps {
+    return {
+        store: postgresLarkTables(larkDataSource()),
+        // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候来的"的排序依据。
+        newCommonId: () => Bun.randomUUIDv7(),
+        appIdOfBot: (botName) => larkAppIdOf(botDirectory, botName),
+        // 本进程所在泳道来自部署环境，不是消息上下文 —— 分叉判断问的是"这条消息该
+        // 不该留在我这儿"。
+        currentLane: getLane() ?? 'prod',
+        laneDispatchEnabled: inboundLaneDispatchEnabled,
+        laneOf: (channel, botGlobalId, commonConversationId) =>
+            getLaneBindingResolver().resolveLane(channel, botGlobalId, commonConversationId),
+        handOffToLane: handOffOverRabbit,
+        withMessageLock: larkMessageLock(redisMessageLockStore(getRedisClient)),
+    };
+}
+
+/**
  * 飞书入站的真实装配。必须在 bootLarkService 之后调用：人设名要查库，bot 目录也
  * 得先加载完。
  */
@@ -49,20 +82,24 @@ async function realInbound(): Promise<LarkInbound> {
         .filter((id): id is string => Boolean(id));
     const personaName = await loadLarkPersonaNames(larkDataSource(), personaIds);
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
+    const projection = realProjection();
 
     return createLarkInbound({
         roster: botDirectory,
         personaName,
         record: (payload) => eventLog.insertOne(payload as Document),
-        onMessage: async (reading) => {
-            // 本段到解析为止。common 投影、规则与指令、发 chat.request 由后续段接在
-            // 这里 —— 在那之前这条日志是"事件走通了哪个入口、解析成了什么"的唯一现场。
-            console.info(
-                `[lark-inbound] parsed ${reading.message.messageType} message ` +
-                    `${reading.message.messageId} in chat ${reading.message.chatId}: ` +
-                    `${reading.content.length} part(s), ` +
-                    `${reading.mentions.all.length} mention(s)`,
-            );
+        onMessage: async (reading, event) => {
+            const outcome = await projectLarkInbound(projection, reading, event);
+            // 本段到落账为止。规则与指令、发 chat.request 接在这里 —— 它们要的那组
+            // 公共层 id 就在 outcome.projection 里。交给泳道的那一支已经在投影内部
+            // 打过日志了。
+            if (outcome.kind === 'recorded') {
+                console.info(
+                    `[lark-inbound] recorded ${reading.message.messageType} message ` +
+                        `${reading.message.messageId} as ${outcome.projection.commonMessageId} ` +
+                        `in conversation ${outcome.projection.commonConversationId}`,
+                );
+            }
         },
     });
 }

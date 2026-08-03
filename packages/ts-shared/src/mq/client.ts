@@ -1,4 +1,4 @@
-import amqplib, { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+import amqplib, { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqplib';
 // traceId 属于 base context（@middleware/context 的 context 就是 spread 了它、共用同
 // 一个 AsyncLocalStorage），这里只需要 traceId，取基座这层即可。
 import { context } from '../middleware/context';
@@ -59,6 +59,8 @@ class RabbitMQClient {
     private static instance: RabbitMQClient;
     private conn: ChannelModel | null = null;
     private channel: Channel | null = null;
+    /** 建到一半的 confirm channel 也算数，理由见 getConfirmChannel。 */
+    private confirmChannel: Promise<ConfirmChannel> | null = null;
     private reconnecting = false;
     private consumers: Array<{ queue: string; handler: MessageHandler }> = [];
     private declaredLaneQueues = new Set<string>();
@@ -88,6 +90,9 @@ class RabbitMQClient {
         this.conn.on('close', () => {
             console.warn('[RabbitMQ] connection closed, will reconnect');
             this.channel = null;
+            // 连接没了，挂在它上面的 confirm channel 也没了。留着旧引用的话，下一次
+            // 发送会在一个已经死掉的 channel 上等一个永远不来的确认。
+            this.confirmChannel = null;
             this.conn = null;
             this.scheduleReconnect();
         });
@@ -224,13 +229,68 @@ class RabbitMQClient {
         return this.channel;
     }
 
+    /**
+     * 带发送确认的 channel。
+     *
+     * 普通 channel 的 publish / sendToQueue 是「写进本地缓冲就返回 true」——
+     * `persistent: true` 只约束 broker 收到之后要落盘，**不证明 broker 收到了**。
+     * 连接恰好在这时断掉，消息就静默没了。发出去之后本地不留账、丢了没法补的场景
+     * （跨泳道交接就是），必须用这个并等确认。
+     *
+     * 懒建：只有真的要发的进程才多一条 channel。channel 是连接上的多路复用流，
+     * 不是新连接，所以增量可以忽略。
+     *
+     * 缓存的是**建到一半的那个 promise**，不是建好的 channel。缓存写在 await 之后
+     * 的话，并发的首次调用会全部看到空、各建一条，最后只有一条被记住，其余的挂在
+     * 连接上直到断开（AMQP 的 channel 数有上限）。飞书交接正是这种形状：进程刚起来
+     * 时多条消息同时第一次调到这里。
+     *
+     * 缓存的失效有两条路：连接的 close（上面那个 handler）和 channel 自己的
+     * close / error。后者不能省 —— AMQP 里 broker 可以在连接仍然活着的时候单独关掉
+     * 一条 channel（协议错误、队列冲突等），死 channel 留在缓存里的话，之后每一次
+     * 交接投递都会在它上面等一个永远不来的确认。
+     */
+    getConfirmChannel(): Promise<ConfirmChannel> {
+        if (this.confirmChannel) return this.confirmChannel;
+        const conn = this.conn;
+        if (!conn) {
+            return Promise.reject(
+                new Error('RabbitMQ connection not available; call connect() first'),
+            );
+        }
+        // 只清"缓存里还是我这条"的时候。一条 channel 出事时 amqplib 会先 error 再
+        // close，事件还可能晚于我们重建的那条到 —— 无脑置空就把好端端的新 channel
+        // 也丢了，每次交接都白建一条。
+        const forget = (): void => {
+            if (this.confirmChannel === creating) this.confirmChannel = null;
+        };
+        const creating: Promise<ConfirmChannel> = conn
+            .createConfirmChannel()
+            .then((channel) => {
+                channel.on('close', forget);
+                channel.on('error', forget);
+                return channel;
+            })
+            // 建失败也要清掉，否则所有人永远拿到同一个 rejected promise，连接恢复
+            // 了也起不来。
+            .catch((error) => {
+                forget();
+                throw error;
+            });
+        this.confirmChannel = creating;
+        return creating;
+    }
+
     async close(): Promise<void> {
         try {
+            // 正在建的那条也要等出来再关，不然它会在连接关掉之后才建好、没人管。
+            await (await this.confirmChannel)?.close();
             await this.channel?.close();
             await this.conn?.close();
         } catch {
             // ignore close errors
         }
+        this.confirmChannel = null;
         this.channel = null;
         this.conn = null;
     }
@@ -262,4 +322,9 @@ export const rabbitmqClient = RabbitMQClient.getInstance();
 // 队列不能走 publish/consume 那套默认 lane 队列参数，必须自己 assertQueue）。
 export function getRabbitChannel(): Channel {
     return rabbitmqClient.getChannel();
+}
+
+// 需要「broker 确认收到了」而不只是「写进缓冲了」的发送走这个。见 getConfirmChannel。
+export function getRabbitConfirmChannel(): Promise<ConfirmChannel> {
+    return rabbitmqClient.getConfirmChannel();
 }

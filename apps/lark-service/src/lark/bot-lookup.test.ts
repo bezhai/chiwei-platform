@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { BotConfig } from '@inner/shared/entities';
 
-import { createLarkBotLookup, type LarkBotRoster } from './bot-lookup';
+import { createLarkBotLookup, larkAppIdOf, type LarkBotRoster } from './bot-lookup';
 
 function bot(overrides: Partial<BotConfig> = {}): BotConfig {
     return {
@@ -81,5 +81,18 @@ describe('createLarkBotLookup', () => {
         expect(lookup.byAppId('cli_chiwei')).toBeNull();
         bots.push(bot());
         expect(lookup.byAppId('cli_chiwei')).not.toBeNull();
+    });
+});
+
+// 投影按 (app_id, open_id) 记用户身份。app_id 通常就在事件里，缺了的话只能问
+// "接这条事件的是哪个 bot"。
+describe('larkAppIdOf', () => {
+    it('answers with the Lark app the bot runs as', () => {
+        expect(larkAppIdOf(roster([bot()]), 'chiwei')).toBe('cli_chiwei');
+    });
+
+    // 猜一个 app_id 会把这个人记到别的应用名下 —— 同一个人从此在公共层有两份身份。
+    it('refuses to guess when the bot is unknown', () => {
+        expect(() => larkAppIdOf(roster([bot()]), 'nobody')).toThrow(/nobody/);
     });
 });
