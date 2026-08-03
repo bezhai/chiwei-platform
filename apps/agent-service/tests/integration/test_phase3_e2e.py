@@ -117,13 +117,19 @@ class _FakeRedis:
 
 
 class _FakeMq:
-    """In-memory mq stub: stores published bodies in a list."""
+    """In-memory mq stub: stores published bodies in a list.
+
+    Signature mirrors the real ``_RabbitMQ.publish`` — including the ``lane``
+    sentinel — so a producer that resolves the lane itself (every runtime
+    publish does, to keep the header and the queue on one value) is exercised
+    here instead of blowing up on an unexpected kwarg.
+    """
 
     def __init__(self):
-        self.published: list[tuple] = []  # list of (route, body, headers, delay_ms)
+        self.published: list[tuple] = []  # (route, body, headers, delay_ms, lane)
 
-    async def publish(self, route, body, headers=None, delay_ms=None):
-        self.published.append((route, body, headers, delay_ms))
+    async def publish(self, route, body, delay_ms=None, headers=None, lane=...):
+        self.published.append((route, body, headers, delay_ms, lane))
 
 
 class _FakeMessage:
@@ -188,7 +194,7 @@ async def test_e2e_single_emit_one_fire(monkeypatch):
     assert mq_fake.published[0][3] == 60_000
 
     handler = _build_handler(w, consumer)
-    _route, body, headers, _delay = mq_fake.published[0]
+    _route, body, headers, _delay, _lane = mq_fake.published[0]
     msg = _FakeMessage(body, headers or {})
     await handler(msg)
 
@@ -223,13 +229,13 @@ async def test_e2e_multiple_emits_one_fire(monkeypatch):
     handler = _build_handler(w, consumer)
 
     # 前 2 条 message 被新 publish 作废，atomic claim fail → drop
-    for _route, body, headers, _delay in mq_fake.published[:2]:
+    for _route, body, headers, _delay, _lane in mq_fake.published[:2]:
         msg = _FakeMessage(body, headers or {})
         await handler(msg)
     assert len(fired) == 0
 
     # 最后一条 latest 匹配 → fire
-    _route, body, headers, _delay = mq_fake.published[2]
+    _route, body, headers, _delay, _lane = mq_fake.published[2]
     msg = _FakeMessage(body, headers or {})
     await handler(msg)
     assert len(fired) == 1
@@ -336,7 +342,7 @@ async def test_e2e_per_key_isolation(monkeypatch):
     await publish_debounce(w, consumer, SampleTrigger(chat_id="c2", persona_id="p2"))
 
     handler = _build_handler(w, consumer)
-    for _route, body, headers, _delay in mq_fake.published:
+    for _route, body, headers, _delay, _lane in mq_fake.published:
         await handler(_FakeMessage(body, headers or {}))
 
     assert sorted(fired) == [("c1", "p1"), ("c2", "p2")]

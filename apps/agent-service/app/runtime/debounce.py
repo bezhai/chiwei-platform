@@ -51,7 +51,12 @@ from app.runtime.data import Data
 from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
 from app.runtime.placement import nodes_for_app
-from app.runtime.propagation import bind_context, extract_context, inject_context
+from app.runtime.propagation import (
+    bind_context,
+    extract_context,
+    inject_context,
+    outbound_context,
+)
 from app.runtime.wire import WireSpec
 
 logger = logging.getLogger(__name__)
@@ -209,9 +214,17 @@ async def publish_debounce(w: WireSpec, consumer: Callable, data: Data) -> None:
         "key": key,
         "fire_now": bool(fire_now_flag),
     }
-    headers = inject_context({"data_type": type(data).__name__})
+    # One lane value for both the header and the queue: debounce routes are
+    # lane_fallback=False, so a message published to a lane queue is never
+    # seen by prod — but the handler restores context from the header alone,
+    # so a header/queue mismatch would run the fire under the wrong lane.
+    ctx = outbound_context()
+    headers = inject_context({"data_type": type(data).__name__}, ctx)
     delay_ms = 0 if body["fire_now"] else seconds * 1000
-    await mq.publish(_route_for(w, consumer), body, headers=headers, delay_ms=delay_ms)
+    await mq.publish(
+        _route_for(w, consumer), body,
+        headers=headers, delay_ms=delay_ms, lane=ctx.lane,
+    )
     logger.debug(
         "debounce publish: %s key=%s count=%d fire_now=%s",
         w.data_type.__name__, key, new_count, body["fire_now"],
@@ -256,9 +269,10 @@ async def _do_reschedule(
         "key": key,
         "fire_now": False,
     }
-    headers = inject_context({"data_type": type(data).__name__})
+    ctx = outbound_context()
+    headers = inject_context({"data_type": type(data).__name__}, ctx)
     await mq.publish(_route_for(w, consumer), body, headers=headers,
-                     delay_ms=seconds * 1000)
+                     delay_ms=seconds * 1000, lane=ctx.lane)
     logger.info(
         "debounce reschedule: %s key=%s new_trigger_id=%s",
         type(data).__name__, key, new_trigger_id,

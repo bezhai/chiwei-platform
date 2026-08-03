@@ -1,4 +1,7 @@
 import amqplib, { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+// traceId 属于 base context（@middleware/context 的 context 就是 spread 了它、共用同
+// 一个 AsyncLocalStorage），这里只需要 traceId，取基座这层即可。
+import { context } from '@inner/shared';
 
 const EXCHANGE_NAME = 'post_processing';
 const DLX_NAME = 'post_processing_dlx';
@@ -150,7 +153,21 @@ class RabbitMQClient {
 
         const actualRK = laneRK(route.rk, effectiveLane);
 
-        const msgHeaders: Record<string, unknown> = { ...headers };
+        // 泳道和 trace 必须落在 AMQP header 上：下游 agent-service 的
+        // runtime/propagation.py::extract_context 只认 header 的 "lane" / "trace_id"，
+        // 队列名和消息体里的泳道它读不到。空值写空串而不是省略 key，与 Python 侧
+        // inject_context 的线上格式一致。
+        //
+        // 调用方 header 先展开、lane / trace_id 后写：这两个是 publish 内部定的权威
+        // 值，调用方覆盖不了。lane 尤其不能让：routing key 用的就是上面这个
+        // effectiveLane，header 被改写就会出现「消息进 queue_Y、header 却写着 X」，
+        // 下游按 header 判 lane 直接判错。调用方自己的 header（x-retry-count 之类）
+        // 不在这两个 key 上，照常保留。
+        const msgHeaders: Record<string, unknown> = {
+            ...headers,
+            trace_id: context.getTraceId() || '',
+            lane: effectiveLane || '',
+        };
         if (delayMs !== undefined) {
             msgHeaders['x-delay'] = delayMs;
         }
@@ -158,7 +175,7 @@ class RabbitMQClient {
         ch.publish(EXCHANGE_NAME, actualRK, Buffer.from(JSON.stringify(body)), {
             persistent: true,
             contentType: 'application/json',
-            headers: Object.keys(msgHeaders).length > 0 ? msgHeaders : undefined,
+            headers: msgHeaders,
         });
     }
 
