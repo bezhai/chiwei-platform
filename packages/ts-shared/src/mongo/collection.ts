@@ -62,7 +62,10 @@ export class MongoCollection<T extends Document> {
     /**
      * 插入多个文档
      */
-    async insertMany(docs: OptionalUnlessRequiredId<T>[], options?: InsertOneOptions): Promise<void> {
+    async insertMany(
+        docs: OptionalUnlessRequiredId<T>[],
+        options?: InsertOneOptions,
+    ): Promise<void> {
         await this.collection.insertMany(docs, options);
     }
 
@@ -79,7 +82,7 @@ export class MongoCollection<T extends Document> {
     async updateOneRaw(
         filter: Filter<T>,
         update: Document[] | UpdateFilter<T>,
-        options?: UpdateOptions
+        options?: UpdateOptions,
     ): Promise<void> {
         await this.collection.updateOne(filter, update, options);
     }
@@ -90,7 +93,7 @@ export class MongoCollection<T extends Document> {
     async updateMany(
         filter: Filter<T>,
         update: MatchKeysAndValues<T>,
-        options?: UpdateOptions
+        options?: UpdateOptions,
     ): Promise<UpdateResult> {
         return this.collection.updateMany(filter, { $set: update }, options);
     }
@@ -121,7 +124,7 @@ export class MongoCollection<T extends Document> {
      */
     async bulkWrite(
         operations: AnyBulkWriteOperation<T>[],
-        options?: BulkWriteOptions
+        options?: BulkWriteOptions,
     ): Promise<BulkWriteResult> {
         const result = await this.collection.bulkWrite(operations, options);
         return {
@@ -138,7 +141,7 @@ export class MongoCollection<T extends Document> {
      */
     async createIndex(
         indexSpec: IndexSpecification,
-        options?: CreateIndexesOptions
+        options?: CreateIndexesOptions,
     ): Promise<string> {
         return this.collection.createIndex(indexSpec, options);
     }
@@ -182,7 +185,7 @@ export class MongoCollection<T extends Document> {
     async findOneAndUpdate(
         filter: Filter<T>,
         update: UpdateFilter<T>,
-        options?: { upsert?: boolean; returnDocument?: 'before' | 'after' }
+        options?: { upsert?: boolean; returnDocument?: 'before' | 'after' },
     ): Promise<WithId<T> | null> {
         const result = await this.collection.findOneAndUpdate(filter, update, {
             upsert: options?.upsert,
@@ -204,8 +207,10 @@ export class MongoCollection<T extends Document> {
      */
     async distinct<K extends keyof WithId<T>>(
         field: K,
-        filter?: Filter<T>
+        filter?: Filter<T>,
     ): Promise<Array<WithId<T>[K]>> {
-        return this.collection.distinct(field as string, filter || {}) as Promise<Array<WithId<T>[K]>>;
+        return this.collection.distinct(field as string, filter || {}) as Promise<
+            Array<WithId<T>[K]>
+        >;
     }
 }

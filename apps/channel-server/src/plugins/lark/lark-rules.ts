@@ -1,5 +1,5 @@
 import type { MessageBasicChatInfo } from '@core/models/message-metadata';
-import type { RuleMessage } from '@core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from './lark-context-store';
 
 // 飞书强绑谓词 —— B2 从 core/rules/rule.ts 搬进 plugins/lark（它们读飞书专属的

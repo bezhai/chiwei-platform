@@ -1,3 +1,7 @@
+// 本服务自己用的仓储入口。共享能力自己要读写的表（bot_config /
+// user_blacklist / common_agent_response）的仓储在 @inner/shared/persistence，
+// 不在这里重复一份。
+
 import AppDataSource from 'ormconfig';
 import {
     LarkEmoji,
@@ -6,13 +10,9 @@ import {
     LarkGroupMember,
     LarkUser,
     LarkUserOpenId,
-    UserBlacklist,
-    CommonUser,
-    CommonConversation,
-    CommonMessage,
-    CommonAgentResponse,
     LarkMessage,
 } from '@entities';
+import { CommonMessage } from '@inner/shared/entities';
 import { UserGroupBindingRepository as CustomUserGroupBindingRepository } from './user-group-binding-repository';
 
 export const LarkEmojiRepository = AppDataSource.getRepository(LarkEmoji);
@@ -24,9 +24,5 @@ export const LarkUserOpenIdRepository = AppDataSource.getRepository(LarkUserOpen
 
 export const UserGroupBindingRepository = new CustomUserGroupBindingRepository(AppDataSource);
 
-export const UserBlacklistRepository = AppDataSource.getRepository(UserBlacklist);
-export const CommonUserRepository = AppDataSource.getRepository(CommonUser);
-export const CommonConversationRepository = AppDataSource.getRepository(CommonConversation);
 export const CommonMessageRepository = AppDataSource.getRepository(CommonMessage);
-export const CommonAgentResponseRepository = AppDataSource.getRepository(CommonAgentResponse);
 export const LarkMessageRepository = AppDataSource.getRepository(LarkMessage);

@@ -18,15 +18,15 @@ LoggerFactory.createLogger({
 
 import { createServer } from 'http';
 import AppDataSource from 'ormconfig';
-import { CommonAgentResponse } from '@entities/common-agent-response';
+import { CommonAgentResponse } from '@inner/shared/entities';
 import {
     rabbitmqClient,
     CHAT_RESPONSE,
     getLane,
     laneQueue,
-} from '@integrations/rabbitmq';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { getChannelRegistry } from '@core/registry/channel-registry';
+} from '@inner/shared/mq';
+import { botDirectory } from '@inner/shared/bot';
+import { getChannelRegistry } from '@inner/shared/channel';
 import '@plugins/index';
 import { initializeChannelPlugins } from '@plugins/initialize';
 import {
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     console.info('[ChatResponseWorker] Database connected');
 
     // 2. 初始化 channel 插件客户端
-    await multiBotManager.initialize();
+    await botDirectory.load();
     await initializeChannelPlugins();
     console.info('[ChatResponseWorker] Channel plugins initialized');
 

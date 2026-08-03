@@ -5,7 +5,7 @@
 // 单条失败不中断后续（与现状 try/catch per reply 一致）：一条删不掉不该让其余
 // 回复留着不删。最终 recalled/failed 计数由 worker 决定标 recalled 还是 recall_failed。
 
-import type { OutboundCapabilities } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities } from '@inner/shared/channel';
 
 export interface RecallReplyRef {
     common_message_id: string;

@@ -10,8 +10,8 @@ import type {
     ConversationRef,
     MessageRef,
     RenderContext,
-} from '@core/ports/channel-plugin';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
+} from '@inner/shared/channel';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // 主动发（is_proactive）worker 端到端测试。

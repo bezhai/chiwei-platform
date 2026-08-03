@@ -3,7 +3,7 @@ import { describe, it, expect } from 'bun:test';
 import { handleRecall } from './recall-worker';
 import type { RecallHandlerDeps } from './recall-worker';
 import { context } from '@middleware/context';
-import type { OutboundCapabilities, MessageRef } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities, MessageRef } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // recall-worker 的 lane 恢复口径，与 chat-response-handler 同源（见那边的长注释）：

@@ -12,7 +12,7 @@
 
 import type { Message } from 'core/models/message';
 import { laneRouter } from '@infrastructure/lane-router';
-import { getLane } from '@infrastructure/integrations/rabbitmq';
+import { getLane } from '@inner/shared/mq';
 
 type Poster = (
     path: string,

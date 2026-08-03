@@ -138,11 +138,7 @@ export class LaneRouter {
     /**
      * fetch 封装 — 自动解析 URL + 注入 x-ctx-lane/trace headers
      */
-    async fetch(
-        service: string,
-        path: string,
-        init?: RequestInit,
-    ): Promise<Response> {
+    async fetch(service: string, path: string, init?: RequestInit): Promise<Response> {
         const url = this.resolveUrl(service, path);
         const contextHeaders = this.getContextHeaders();
 
@@ -198,7 +194,11 @@ export class LaneRouter {
                 if (start) {
                     const duration = (performance.now() - start) / 1000;
                     const method = (response.config.method || 'get').toUpperCase();
-                    outboundRequestsTotal?.inc({ target_service: service, method, status: String(response.status) });
+                    outboundRequestsTotal?.inc({
+                        target_service: service,
+                        method,
+                        status: String(response.status),
+                    });
                     outboundRequestDuration?.observe({ target_service: service, method }, duration);
                 }
                 return response;

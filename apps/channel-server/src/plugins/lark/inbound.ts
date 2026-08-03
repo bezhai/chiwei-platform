@@ -13,7 +13,7 @@ import type {
     InboundAdapter,
     InboundMessage,
     ThreadRef,
-} from '@core/channels/contracts';
+} from '@inner/shared/channel';
 import {
     getLarkBotConfigByAppId,
     getLarkBotConfigByUnionId,

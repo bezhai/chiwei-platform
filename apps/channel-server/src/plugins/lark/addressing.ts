@@ -12,7 +12,7 @@ import type {
     AddressingDecision,
     AddressingPolicy,
     InboundMessage,
-} from '@core/channels/contracts';
+} from '@inner/shared/channel';
 
 function decide(msg: InboundMessage, botMentionTarget: string): AddressingDecision {
     if (msg.conversation_scope === 'direct') {

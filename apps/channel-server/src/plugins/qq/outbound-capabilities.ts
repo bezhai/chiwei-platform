@@ -27,8 +27,8 @@ import type {
     OutboundMessageRecordInput,
     OutboundTargetResolveInput,
     RenderContext,
-} from '@core/ports/channel-plugin';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
+} from '@inner/shared/channel';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
 import type { CustomChatType, CustomOutboundMessage, CustomOutboundResult } from '@inner/shared/protocols';
 import { validateCustomOutboundMessage } from '@inner/shared/protocols';
 import { context } from '@middleware/context';

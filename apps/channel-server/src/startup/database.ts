@@ -24,9 +24,11 @@ export class DatabaseManager {
                 console.info('PostgreSQL connection closed');
             }
 
-            // 关闭 Redis 连接
-            const { close } = await import('@cache/redis-client');
-            await close();
+            // 关闭 Redis 连接：必须 await，resetRedisClient 要 quit 命令连接和订阅
+            // 连接两条。不等的话这行日志会先于连接断开打印，而 SIGTERM handler 紧接着
+            // 就 process.exit，订阅连接来不及收尾。
+            const { resetRedisClient } = await import('@inner/shared/cache');
+            await resetRedisClient();
             console.info('Redis connections closed');
         } catch (error) {
             console.warn('Error while closing database connections:', error);

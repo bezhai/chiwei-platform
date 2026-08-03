@@ -4,7 +4,10 @@ import type { Context, Next } from 'hono';
  * Validation error class
  */
 export class ValidationError extends Error {
-    constructor(message: string, public field: string) {
+    constructor(
+        message: string,
+        public field: string,
+    ) {
         super(message);
         this.name = 'ValidationError';
     }
@@ -73,13 +76,13 @@ function validateFields(data: Record<string, unknown>, rules: ValidationRules): 
             if (rule.minLength && strValue.length < rule.minLength) {
                 throw new ValidationError(
                     `${fieldName} must be at least ${rule.minLength} characters`,
-                    fieldName
+                    fieldName,
                 );
             }
             if (rule.maxLength && strValue.length > rule.maxLength) {
                 throw new ValidationError(
                     `${fieldName} must be at most ${rule.maxLength} characters`,
-                    fieldName
+                    fieldName,
                 );
             }
         }
@@ -93,7 +96,8 @@ function validateFields(data: Record<string, unknown>, rules: ValidationRules): 
         if (rule.custom) {
             const result = rule.custom(value);
             if (result !== true) {
-                const message = typeof result === 'string' ? result : `${fieldName} validation failed`;
+                const message =
+                    typeof result === 'string' ? result : `${fieldName} validation failed`;
                 throw new ValidationError(message, fieldName);
             }
         }

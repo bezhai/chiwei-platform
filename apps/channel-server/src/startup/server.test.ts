@@ -1,31 +1,23 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { Hono } from 'hono';
-import type { BotConfig } from '@entities/bot-config';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import type { BotConfig } from '@inner/shared/entities';
+import { botDirectory } from '@inner/shared/bot';
 
-mock.module('@dal/mongo/client', () => ({
-    insertEvent: async () => undefined,
-}));
-mock.module('@plugins/lark/events/event-registry', () => ({
-    EventHandler: () => () => undefined,
-    EventRegistry: {
-        getHandlerByEventType: () => undefined,
-    },
-    registerEventHandlerInstance: () => {},
-}));
-mock.module('@plugins/lark/events/handlers', () => ({
-    larkEventHandlers: {},
-}));
-
+// 本文件不装任何 mock.module。原来桩了 @dal/mongo/client /
+// @plugins/lark/events/event-registry / @plugins/lark/events/handlers 三个模块，
+// 但这两个用例只走「注册路由 + url_verification 握手」：SDK 在握手阶段就返回
+// challenge，根本到不了 dispatch，既不会 insertEvent 也不会查 EventRegistry。
+// 三个桩纯属多余，而 bun 的 mock.module 是整模块替换 + 进程级全局
+// （mock.restore() 撤不掉），留着只会让同一轮里后跑的文件拿到残缺模块。
 const { HttpServerManager } = await import('./server');
 
-type MutableMultiBotManager = {
+type MutableBotDirectory = {
     botConfigs: Map<string, BotConfig>;
 };
 
 const originalServe = Bun.serve;
 const originalBotConfigs = new Map(
-    (multiBotManager as unknown as MutableMultiBotManager).botConfigs,
+    (botDirectory as unknown as MutableBotDirectory).botConfigs,
 );
 
 function larkBot(botName: string): BotConfig {
@@ -88,7 +80,7 @@ describe('startup/server 集成烟雾测试', () => {
 
     afterEach(() => {
         (Bun as unknown as { serve: typeof Bun.serve }).serve = originalServe;
-        (multiBotManager as unknown as MutableMultiBotManager).botConfigs = new Map(
+        (botDirectory as unknown as MutableBotDirectory).botConfigs = new Map(
             originalBotConfigs,
         );
     });
@@ -107,7 +99,7 @@ describe('startup/server 集成烟雾测试', () => {
 
     test('start() always registers lark http webhook routes without LARK_DIRECT_INGRESS', async () => {
         const bots = [larkBot('lark-http'), nonLarkBot('qq-http')];
-        (multiBotManager as unknown as MutableMultiBotManager).botConfigs = new Map(
+        (botDirectory as unknown as MutableBotDirectory).botConfigs = new Map(
             bots.map((bot) => [bot.bot_name, bot]),
         );
 

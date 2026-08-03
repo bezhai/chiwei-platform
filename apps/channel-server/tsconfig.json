@@ -30,7 +30,6 @@
             "@entities": ["infrastructure/dal/entities"],
             "@entities/*": ["infrastructure/dal/entities/*"],
             "@repositories/*": ["infrastructure/dal/repositories/*"],
-            "@cache/*": ["infrastructure/cache/*"],
             "@logger/*": ["infrastructure/logger/*"],
             "@http/*": ["infrastructure/http/*"],
             "@integrations/*": ["infrastructure/integrations/*"],

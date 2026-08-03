@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'bun:test';
 
 import { dispatchChatResponseOutbound } from './chat-response-outbound';
-import type { OutboundCapabilities, RenderContext } from '@core/ports/channel-plugin';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
-import type { ConversationRef, MessageRef } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities, RenderContext } from '@inner/shared/channel';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
+import type { ConversationRef, MessageRef } from '@inner/shared/channel';
 
 // B3：chat-response-worker 出站走能力端口。worker 把「part_index / proactive →
 // 回复 vs 新发」的出站策略（平台无关，任何 channel 都有「回复某条 vs 新发」的

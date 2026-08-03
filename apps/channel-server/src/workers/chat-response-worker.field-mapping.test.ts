@@ -1,9 +1,14 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
 const larkChats = new Map<string, { chat_id: string; common_conversation_id: string }>();
 
+// bun 的 mock.module 是**整模块替换**且**进程级全局**（mock.restore() 不撤销）：
+// 不抓真身就会把 ormconfig 的其他导出顶掉，不在 afterAll 放回真身就会让后续
+// 加载的**生产代码**一直看到这个只有 findOne 的假 DataSource。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         createEntityManager: mock(() => ({})),
         getRepository: (entity: { name?: string }) => {
@@ -36,6 +41,10 @@ mock.module('ormconfig', () => ({
         },
     },
 }));
+
+afterAll(() => {
+    mock.module('ormconfig', () => realOrmconfig);
+});
 
 const { reverseResolveOutbound } = await import('../plugins/lark/outbound-reverse-resolve');
 

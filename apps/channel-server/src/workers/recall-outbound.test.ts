@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 
 import { recallReplies } from './recall-outbound';
-import type { OutboundCapabilities, MessageRef } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities, MessageRef } from '@inner/shared/channel';
 
 const channelMessages = new Map<string, string>();
 

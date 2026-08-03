@@ -4,14 +4,14 @@
 // 投给 dispatchLarkEvent → 本进程入站链路。
 //
 // 数据源用已加载的 BotConfig（凭据经 larkCredentials 从 credentials JSONB 取），
-// 不自己起 pg.Pool 查 bot_config（避免与 multi-bot-manager 重复一套 bot 加载）。
+// 不自己起 pg.Pool 查 bot_config（避免与共享的 bot 身份目录重复一套 bot 加载）。
 //
 // HTTP webhook 路由是被动入口，是否有流量由 api-gateway 规则决定。WSClient 是
 // 主动入口，仍由 LARK_DIRECT_INGRESS 控制。
 
 import * as Lark from '@larksuiteoapi/node-sdk';
 import type { Hono } from 'hono';
-import { BotConfig } from '@entities/bot-config';
+import { BotConfig } from '@inner/shared/entities';
 import { larkCredentials, type LarkCredentials } from '../bot-identity';
 import { adaptHono } from './lark-adapter';
 import { dispatchLarkEvent } from './dispatch';

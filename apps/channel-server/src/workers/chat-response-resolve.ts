@@ -10,7 +10,7 @@
 //       channelMessageId / channelRootMessageId 没有来源、留空；dispatch 据
 //       isProactive + 无 root → sendText 新发（见 chat-response-outbound.ts）。
 
-import type { OutboundCapabilities } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities } from '@inner/shared/channel';
 
 export interface ChatResponseResolveInput {
     isProactive: boolean;

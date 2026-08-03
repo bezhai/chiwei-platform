@@ -1,35 +1,35 @@
-import { describe, it, expect, afterEach, beforeEach, mock } from 'bun:test';
+import { describe, it, expect, afterAll, afterEach, beforeEach, mock } from 'bun:test';
 
 import { larkContextStore } from './lark-context-store';
 import type { Message } from '@core/models/message';
-import type { RuleMessage } from '@core/rules/rule-message';
-import type { BotConfig } from '@entities/bot-config';
+import type { RuleMessage } from '@inner/shared/rules';
+import type { BotConfig } from '@inner/shared/entities';
 
 // 飞书侧 chat.request 富化：从 lark 私有 store 读 is_canary，并把已投影的
 // common bot identity 收敛成 persona_id。agent-service 不碰 Lark app_id。
 
 let botConfigs: Partial<BotConfig>[] = [];
 
-mock.module('@core/services/bot/multi-bot-manager', () => ({
-    multiBotManager: {
+// 富化路径只读 botDirectory（经由 bot-identity 的 common_user_id 反查）。
+// bot-identity 里 ormconfig / @middleware/context 只在 loadLarkDisplayNames 和
+// getCurrentLarkBot* 上用得到，本文件一条都走不到，所以不 mock 它们 —— 真身
+// import 无副作用（ormconfig 只是构造 DataSource 并 bind，不连库）。
+//
+// botDirectory 这一个是真要控的：先抓真身铺底，跑完装回去，否则整模块替换会把
+// BotDirectory 类从同进程后续文件眼里抹掉。
+const realSharedBot = { ...(await import('@inner/shared/bot')) };
+
+mock.module('@inner/shared/bot', () => ({
+    ...realSharedBot,
+    botDirectory: {
         getAllBotConfigs: () => botConfigs,
         getBotConfig: () => null,
     },
 }));
 
-mock.module('@middleware/context', () => ({
-    context: {
-        getBotName: () => undefined,
-    },
-}));
-
-mock.module('ormconfig', () => ({
-    default: {
-        getRepository: () => ({
-            findBy: async () => [],
-        }),
-    },
-}));
+afterAll(() => {
+    mock.module('@inner/shared/bot', () => realSharedBot);
+});
 
 const { enrichLarkChatRequest } = await import('./chat-request-enricher');
 

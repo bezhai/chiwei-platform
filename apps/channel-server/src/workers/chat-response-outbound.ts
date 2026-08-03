@@ -11,8 +11,8 @@
 // message_id（图片注册表的 key），绝不是渠道裸 id —— 二者刻意分开，避免「用裸 id 查注册表
 // 必 miss、图片被吞」那类回归（见 image-registry-key.ts / 对应回归测试）。
 
-import type { OutboundCapabilities, MessageRef, RenderContext } from '@core/ports/channel-plugin';
-import type { ContentItem } from '@core/channels/contracts';
+import type { OutboundCapabilities, MessageRef, RenderContext } from '@inner/shared/channel';
+import type { ContentItem } from '@inner/shared/channel';
 
 export interface ChatResponseOutboundInput {
     content: string; // AI 原始 markdown 文本（平台化由能力端口内部做）

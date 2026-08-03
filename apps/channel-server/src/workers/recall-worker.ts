@@ -12,22 +12,22 @@
 
 import AppDataSource from 'ormconfig';
 import { LoggerFactory } from '@inner/shared';
-import { CommonAgentResponse } from '@entities/common-agent-response';
+import { CommonAgentResponse } from '@inner/shared/entities';
 import {
     rabbitmqClient,
     RECALL,
     getLane,
     laneQueue,
-} from '@integrations/rabbitmq';
-import { laneFromMessage, traceIdFromMessage } from '@integrations/amqp-context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+} from '@inner/shared/mq';
+import { laneFromMessage, traceIdFromMessage } from '@inner/shared/mq-context';
+import { botDirectory } from '@inner/shared/bot';
 import { context } from '@middleware/context';
-import { getChannelRegistry } from '@core/registry/channel-registry';
+import { getChannelRegistry } from '@inner/shared/channel';
 import '@plugins/index';
 import { initializeChannelPlugins } from '@plugins/initialize';
 import { recallReplies } from './recall-outbound';
 import type { Repository } from 'typeorm';
-import type { OutboundCapabilities } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // 撤回走渠道能力端口：worker 只按 payload.channel 取插件，common id 反查和
@@ -46,7 +46,7 @@ interface RecallPayload {
     reason: string;
     detail?: string;
     // 上游仍在 body 里带 lane，但**判 lane 不看这里**：lane 只认 AMQP header，
-    // 口径见 @integrations/amqp-context 的 laneFromMessage。
+    // 口径见 @inner/shared/mq-context 的 laneFromMessage。
     lane?: string;
 }
 
@@ -68,7 +68,7 @@ export interface RecallHandlerDeps {
 
 export async function handleRecall(deps: RecallHandlerDeps, msg: ConsumeMessage): Promise<void> {
     // 整条处理都跑在入站消息的上下文里：lane 和 trace_id 都从 AMQP header 恢复
-    // （口径见 @integrations/amqp-context）。
+    // （口径见 @inner/shared/mq-context）。
     //
     // 为什么必须是整条、而不是只包住撤回那一段：重投走 rabbitmq.ts::publish，而
     // publish 的 trace_id 取自 AsyncLocalStorage —— 重投分支跑在 context 之外时写进
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     console.info('[RecallWorker] Database connected');
 
     // 2. 初始化 channel 插件客户端
-    await multiBotManager.initialize();
+    await botDirectory.load();
     await initializeChannelPlugins();
     console.info('[RecallWorker] Channel plugins initialized');
 

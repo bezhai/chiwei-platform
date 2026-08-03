@@ -11,7 +11,7 @@ import type {
     LarkGroupChangeInfo,
 } from 'types/lark';
 import { EventHandler } from './event-registry';
-import { runRules } from 'core/rules/engine';
+import { runRules } from '@inner/shared/rules';
 import { MessageTransferer } from './factory';
 import { UpdatePhotoCard, FetchPhotoDetails, UpdateDailyPhotoCard } from 'types/lark';
 import { fetchAndSendPhotoDetail } from '@plugins/lark/services/callback/fetch-photo-detail';
@@ -29,18 +29,18 @@ import {
     GroupChatInfoRepository,
     UserGroupBindingRepository,
 } from 'infrastructure/dal/repositories/repositories';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { getChannelRegistry } from '@core/registry/channel-registry';
+import { botDirectory } from '@inner/shared/bot';
+import { getChannelRegistry } from '@inner/shared/channel';
 import { searchLarkChatInfo, searchLarkChatMember, addChatMember } from '@lark/basic/group';
 import type { LarkEnterChatEvent } from 'types/lark';
 import { LarkBaseChatInfo } from 'infrastructure/dal/entities';
 import AppDataSource from 'ormconfig';
 import { context } from '@middleware/context';
-import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
+import { rabbitmqClient, PROACTIVE_EVAL, CHAT_REQUEST, getLane } from '@inner/shared/mq';
 import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
-import { setNx } from '@cache/redis-client';
-import { CommonBotPresence } from 'infrastructure/dal/entities/common-bot-presence';
-import { enforceDecision } from '@core/channels/contracts';
+import { getRedisClient } from '@inner/shared/cache';
+import { CommonBotPresence } from '@inner/shared/entities';
+import { enforceDecision } from '@inner/shared/channel';
 import { getCurrentLarkBotAppId, getCurrentLarkBotUnionId } from '@plugins/lark/bot-identity';
 import { buildLarkRuleMessage } from '@plugins/lark/build-rule-message';
 import { enqueueLarkImagePipeline } from '@plugins/lark/image-pipeline';
@@ -104,7 +104,7 @@ export class LarkEventHandlers {
             // 按该 bot 的 channel 经 ChannelRegistry 取对应插件（决策 10：每个
             // bot 用其 channel 对应组件）。bot 配置/未注册插件 = fail-loud，不
             // 静默吞——getChannelRegistry().get() 对未注册 channel 抛错。
-            const botConfig = botName ? multiBotManager.getBotConfig(botName) : null;
+            const botConfig = botName ? botDirectory.getBotConfig(botName) : null;
             let plugin;
             let botCommonUserId: string;
             try {
@@ -261,7 +261,7 @@ export class LarkEventHandlers {
                     if (terminal.pendingChatTrigger) {
                         const { payload, lane, dedupeKey, savePending } =
                             terminal.pendingChatTrigger;
-                        const lock = await setNx(dedupeKey, '1', 60);
+                        const lock = await getRedisClient().setNx(dedupeKey, '1', 60);
                         if (lock === null) {
                             console.info(
                                 `[inbound] duplicate ChatTrigger skipped (lock held by ` +

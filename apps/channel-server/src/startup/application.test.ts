@@ -13,8 +13,11 @@ const initializeCrontabs = mock(() => {});
 const startInboundLaneConsumer = mock(async () => {});
 const startChannelDirectIngresses = mock(async () => {});
 
-// application.ts 独占的依赖：直接 mock，不必还原（也就不会真的连 PG / Mongo，
-// 不会把 crontab 的一堆服务模块拖进来）。
+// 下面两个是 application.ts 独占的模块（按解析路径查过：src/startup/database.ts
+// 和 src/infrastructure/crontab/index.ts 全仓只有 application.ts 一个 import 方，
+// crontab 的其他代码走 ./registry 和 @crontab/decorators），进程里没有第二个消费者
+// 会被残缺 namespace 打到，所以直接 mock、不还原。反过来说也不能还原：抓真身要
+// await import，那正好会把 crontab 的一堆服务模块和真实 DB 连接拖进来，等于白 mock。
 mock.module('./database', () => ({
     DatabaseManager: {
         initialize: async () => {},
@@ -23,8 +26,8 @@ mock.module('./database', () => ({
 }));
 mock.module('@crontab/index', () => ({ initializeCrontabs }));
 
-const realRabbitmq = { ...(await import('@integrations/rabbitmq')) };
-mock.module('@integrations/rabbitmq', () => ({
+const realRabbitmq = { ...(await import('@inner/shared/mq')) };
+mock.module('@inner/shared/mq', () => ({
     ...realRabbitmq,
     rabbitmqClient: {
         connect: async () => {},
@@ -47,15 +50,15 @@ mock.module('@plugins/runtime', () => ({
     startChannelDirectIngresses,
 }));
 
-const { multiBotManager } = await import('@core/services/bot/multi-bot-manager');
-const botManagerInitialize = multiBotManager.initialize;
-multiBotManager.initialize = async () => {};
+const { botDirectory } = await import('@inner/shared/bot');
+const botDirectoryLoad = botDirectory.load;
+botDirectory.load = async () => {};
 
 const { ApplicationManager, createDefaultConfig } = await import('./application');
 
 afterAll(() => {
-    multiBotManager.initialize = botManagerInitialize;
-    mock.module('@integrations/rabbitmq', () => realRabbitmq);
+    botDirectory.load = botDirectoryLoad;
+    mock.module('@inner/shared/mq', () => realRabbitmq);
     mock.module('@integrations/inbound-lane-consumer', () => realInboundLaneConsumer);
     mock.module('@plugins/runtime', () => realPluginRuntime);
 });

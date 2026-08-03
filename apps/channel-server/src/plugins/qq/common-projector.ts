@@ -10,16 +10,16 @@
 
 import { v7 as uuidv7 } from 'uuid';
 import AppDataSource from 'ormconfig';
-import type { ContentItem, InboundMessage } from '@core/channels/contracts';
-import { CommonConversation } from '@entities/common-conversation';
-import { CommonMessage } from '@entities/common-message';
-import { CommonUser } from '@entities/common-user';
+import type { ContentItem, InboundMessage } from '@inner/shared/channel';
+import { CommonConversation } from '@inner/shared/entities';
+import { CommonMessage } from '@inner/shared/entities';
+import { CommonUser } from '@inner/shared/entities';
 import { QqGroupChatInfo } from '@entities/qq-group-chat-info';
 import { QqMessage } from '@entities/qq-message';
 import { QqUserOpenId } from '@entities/qq-user-open-id';
 import { context } from '@middleware/context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { evalScript, setNx } from '@cache/redis-client';
+import { botDirectory } from '@inner/shared/bot';
+import { getRedisClient } from '@inner/shared/cache';
 import { QQ_SELF_MENTION_TARGET } from './inbound';
 
 const QQ_MESSAGE_PROJECTION_LOCK_TTL_SECONDS = 120;
@@ -47,7 +47,7 @@ export async function withQqInboundProjectionLock<T>(
     const deadline = Date.now() + QQ_MESSAGE_PROJECTION_LOCK_TIMEOUT_MS;
 
     for (;;) {
-        const acquired = await setNx(key, token, QQ_MESSAGE_PROJECTION_LOCK_TTL_SECONDS);
+        const acquired = await getRedisClient().setNx(key, token, QQ_MESSAGE_PROJECTION_LOCK_TTL_SECONDS);
         if (acquired === 'OK') break;
         if (Date.now() >= deadline) {
             throw new Error(`timeout acquiring qq message projection lock: ${qqMessageId}`);
@@ -59,7 +59,7 @@ export async function withQqInboundProjectionLock<T>(
         return await task();
     } finally {
         try {
-            await evalScript(RELEASE_LOCK_SCRIPT, 1, key, token);
+            await getRedisClient().evalScript(RELEASE_LOCK_SCRIPT, 1, key, token);
         } catch (err) {
             console.warn(
                 `[qq common projector] failed to release projection lock ` +
@@ -389,7 +389,7 @@ export interface StoreQqOutboundMessageInput {
 export async function storeQqOutboundMessage(input: StoreQqOutboundMessageInput): Promise<string> {
     const existing = await findCommonMessageIdByQqId(input.qqMessageId);
     const commonMessageId = existing ?? uuidv7();
-    const botCommonUserId = multiBotManager.getBotCommonUserId(input.botName);
+    const botCommonUserId = botDirectory.getBotCommonUserId(input.botName);
 
     await AppDataSource.transaction(async (manager) => {
         await manager

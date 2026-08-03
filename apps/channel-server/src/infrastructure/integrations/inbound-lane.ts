@@ -14,7 +14,7 @@
 // 队列不动，本模块只加 inbound_lane.{lane} 这一类「lane 间投递」队列。
 
 import type { Channel } from 'amqplib';
-import { getRabbitChannel } from './rabbitmq';
+import { getRabbitChannel } from '@inner/shared/mq';
 
 // 投到 inbound_lane.{lane} 的消息信封：平台无关，带分流三要素 + 原始事件 params。
 // lane 写进信封（不是 HTTP header，跨 lane 是 MQ），lane channel-server 消费时从

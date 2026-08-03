@@ -3,7 +3,7 @@ import { describe, it, expect } from 'bun:test';
 import { handleChatResponse } from './chat-response-handler';
 import type { ChatResponseHandlerDeps } from './chat-response-handler';
 import { context } from '@middleware/context';
-import type { OutboundCapabilities, MessageRef } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities, MessageRef } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // chat-response-worker 的 lane 恢复口径。

@@ -27,28 +27,25 @@ function errorToPlainObject(error: Error): Record<string, unknown> {
 
 function safeJsonStringify(value: unknown): string {
     const seen = new WeakSet<object>();
-    return JSON.stringify(
-        value,
-        (_key, val: unknown) => {
-            if (val instanceof Error) {
-                return errorToPlainObject(val);
-            }
+    return JSON.stringify(value, (_key, val: unknown) => {
+        if (val instanceof Error) {
+            return errorToPlainObject(val);
+        }
 
-            if (typeof val === 'bigint') {
-                return val.toString();
-            }
+        if (typeof val === 'bigint') {
+            return val.toString();
+        }
 
-            if (typeof val === 'object' && val !== null) {
-                const obj = val as object;
-                if (seen.has(obj)) {
-                    return '[Circular]';
-                }
-                seen.add(obj);
+        if (typeof val === 'object' && val !== null) {
+            const obj = val as object;
+            if (seen.has(obj)) {
+                return '[Circular]';
             }
+            seen.add(obj);
+        }
 
-            return val;
-        },
-    );
+        return val;
+    });
 }
 
 function formatConsoleArg(arg: unknown): string {
@@ -234,7 +231,7 @@ export class LoggerFactory {
      */
     private static overrideConsoleMethods(
         logger: winston.Logger,
-        contextProvider?: ContextProvider
+        contextProvider?: ContextProvider,
     ): void {
         // eslint-disable-next-line no-console
         console.log = (...args) => {

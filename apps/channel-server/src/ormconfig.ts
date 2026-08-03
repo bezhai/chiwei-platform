@@ -1,4 +1,21 @@
-import { DataSource } from 'typeorm';
+// 本服务的数据库组装根：连接怎么建由 @inner/shared 提供，**注册哪些表由这里
+// 决定**。共享包一条实体都不追加 —— 否则本服务会连带加载别的服务独占的表。
+//
+// 组装完立刻 bindDataSource：共享包里的通用能力（bot 身份目录、黑名单规则、
+// chat.request 的 pending 行落库）要读写库，但它们不能反向 import 本文件。
+// 由本组装根把 DataSource 递进去，共享包只从绑定处读。
+
+import { bindDataSource, createPostgresDataSource } from '@inner/shared/persistence';
+import {
+    BotConfig,
+    CommonAgentResponse,
+    CommonBotPresence,
+    CommonConversation,
+    CommonMessage,
+    CommonUser,
+    LaneRouting,
+    UserBlacklist,
+} from '@inner/shared/entities';
 import {
     LarkEmoji,
     LarkUser,
@@ -7,52 +24,40 @@ import {
     LarkGroupChatInfo,
     UserGroupBinding,
     LarkUserOpenId,
-    BotConfig,
     BotPersona,
-    UserBlacklist,
-    CommonUser,
-    CommonConversation,
-    CommonMessage,
-    CommonAgentResponse,
-    CommonBotPresence,
     LarkMessage,
-    LaneRouting,
     QqUserOpenId,
     QqMessage,
     QqGroupChatInfo,
 } from './infrastructure/dal/entities';
 
-const AppDataSource = new DataSource({
-    type: 'postgres',
-    host: process.env.POSTGRES_HOST!,
-    port: Number(process.env.POSTGRES_PORT) || 5432,
-    username: process.env.POSTGRES_USER!,
-    password: process.env.POSTGRES_PASSWORD!,
-    database: process.env.POSTGRES_DB!,
-    synchronize: false, // 禁止 ORM 在启动时 sync schema; DDL 走 /ops-db submit 或 migration
-    logging: ['error', 'schema', 'warn'], // 是否启用日志
+const AppDataSource = createPostgresDataSource({
     entities: [
+        // 渠道无关的公共层（定义在 @inner/shared，由本服务选择注册）
+        CommonUser,
+        CommonConversation,
+        CommonMessage,
+        CommonAgentResponse,
+        BotConfig,
+        UserBlacklist,
+        LaneRouting,
+        CommonBotPresence,
+        // 本服务自己的表
+        BotPersona,
+        UserGroupBinding,
         LarkEmoji,
         LarkUser,
         LarkGroupMember,
         LarkBaseChatInfo,
         LarkGroupChatInfo,
-        UserGroupBinding,
         LarkUserOpenId,
-        BotConfig,
-        BotPersona,
-        UserBlacklist,
-        CommonUser,
-        CommonConversation,
-        CommonMessage,
-        CommonAgentResponse,
-        CommonBotPresence,
         LarkMessage,
-        LaneRouting,
         QqUserOpenId,
         QqMessage,
         QqGroupChatInfo,
     ],
 });
+
+bindDataSource(AppDataSource);
 
 export default AppDataSource;

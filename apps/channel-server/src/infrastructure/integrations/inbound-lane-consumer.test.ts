@@ -1,15 +1,20 @@
 // 入站 lane 消费者去重单测（§4.4 point 5）。按 event_type + globalMessageId + lane
 // 三元组幂等：命中已处理直接跳过整条入站处理（MQ at-least-once 重投不重复）。
 
-import { describe, it, expect, mock } from 'bun:test';
+import { describe, it, expect, mock, afterAll } from 'bun:test';
 import type { InboundLaneEnvelope } from './inbound-lane';
 
 // consumeInboundLaneEnvelope 是纯函数（注入 acquire/process），但它与接线函数
 // startInboundLaneConsumer 同模块，后者静态 import 了真实 setNx/getRabbitChannel/
-// context。bun mock.module 是进程级全局：若本测试加载真实 @cache/redis-client，会
+// context。bun mock.module 是进程级全局：若本测试加载真实 @inner/shared/cache，会
 // 污染同进程其他测试的 redis mock（让它们误连真 redis → ECONNREFUSED）。故这里把
 // 这三个真实副作用依赖 mock 掉，再动态 import 纯函数。
-mock.module('@cache/redis-client', () => ({
+// Redis 收敛成 @inner/shared/cache 的 RedisClient 单例后，这里桩的是
+// getRedisClient()。bun 的 mock.module 是**整模块替换 + 进程级全局**，只写
+// getRedisClient 会把同模块的 cache / RedisClient 等导出一并抹掉，
+// 别的测试文件跟着遭殃；所以先抓真身、只覆盖这一个导出，afterAll 再注回去。
+const realSharedCache = { ...(await import('@inner/shared/cache')) };
+const redisStub = {
     incr: async () => 1,
     set: async () => 'OK',
     setWithExpire: async () => 'OK',
@@ -31,23 +36,31 @@ mock.module('@cache/redis-client', () => ({
     evalScript: async () => null,
     exists: async () => 0,
     hgetall: async () => ({}),
+};
+mock.module('@inner/shared/cache', () => ({
+    ...realSharedCache,
+    getRedisClient: () => redisStub,
 }));
-let rabbitChannel: {
-    assertQueue: (queue: string, opts: unknown) => Promise<void>;
-    prefetch: (count: number) => Promise<void>;
-    consume: (queue: string, cb: (msg: { content: Buffer } | null) => Promise<void>) => Promise<void>;
-    ack: (msg: unknown) => void;
-    nack: (msg: unknown, allUpTo: boolean, requeue: boolean) => void;
-} | undefined;
+let rabbitChannel:
+    | {
+          assertQueue: (queue: string, opts: unknown) => Promise<void>;
+          prefetch: (count: number) => Promise<void>;
+          consume: (
+              queue: string,
+              cb: (msg: { content: Buffer } | null) => Promise<void>,
+          ) => Promise<void>;
+          ack: (msg: unknown) => void;
+          nack: (msg: unknown, allUpTo: boolean, requeue: boolean) => void;
+      }
+    | undefined;
 const createdContexts: Array<{ botName?: string; traceId?: string; lane?: string }> = [];
-mock.module('./rabbitmq', () => ({
-    CHAT_REQUEST: { queue: 'chat_request', rk: 'chat.request' },
-    CHAT_RESPONSE: { queue: 'chat_response', rk: 'chat.response' },
-    RECALL: { queue: 'recall', rk: 'action.recall' },
-    PROACTIVE_EVAL: { queue: 'proactive_eval', rk: 'proactive.eval' },
+// 同 @inner/shared/cache 的道理：整模块替换会把 mq 模块里没列出的导出（连接管理、
+// 拓扑声明等）一并抹掉，而 @inner/shared/mq 是全服务共用的。抓真身、只覆盖本文件
+// 要控的那几个，afterAll 注回去。
+const realSharedMq = { ...(await import('@inner/shared/mq')) };
+mock.module('@inner/shared/mq', () => ({
+    ...realSharedMq,
     getLane: () => undefined,
-    laneQueue: (base: string, lane?: string) => (lane ? `${base}_${lane}` : base),
-    laneRK: (base: string, lane?: string) => (lane ? `${base}.${lane}` : base),
     rabbitmqClient: {
         connect: async () => {},
         declareTopology: async () => {},
@@ -65,26 +78,25 @@ mock.module('./rabbitmq', () => ({
         return rabbitChannel;
     },
 }));
+// 本文件只想窥探 createContext 的入参，不想改它的语义。整模块替换会抹掉
+// asyncLocalStorage 以及 context 上的 get/set/run/getBotName —— 后跑的测试文件
+// （bot-var、bot-identity 等）会拿到这个残缺桩。所以真身 spread + 只包一层记录，
+// afterAll 注回去。
+const realContextModule = { ...(await import('@middleware/context')) };
 mock.module('@middleware/context', () => ({
+    ...realContextModule,
     context: {
-        getBotName: () => 'chiwei',
-        getLane: () => undefined,
+        ...realContextModule.context,
         createContext: (botName?: string, traceId?: string, lane?: string) => {
-            const ctx = {
-                botName,
-                traceId: traceId ?? 't',
-                lane,
-            };
+            const ctx = realContextModule.context.createContext(botName, traceId, lane);
             createdContexts.push(ctx);
             return ctx;
         },
-        run: async (_ctx: unknown, cb: () => Promise<unknown>) => cb(),
     },
 }));
 
-const { consumeInboundLaneEnvelope, startInboundLaneConsumer } = await import(
-    './inbound-lane-consumer'
-);
+const { consumeInboundLaneEnvelope, startInboundLaneConsumer } =
+    await import('./inbound-lane-consumer');
 
 const env: InboundLaneEnvelope = {
     channel: 'lark',
@@ -193,9 +205,7 @@ describe('consumeInboundLaneEnvelope（三元组幂等）', () => {
 
 describe('startInboundLaneConsumer 失败重投', () => {
     it('消费信封时用 trace_id 重建 context', async () => {
-        let consumeCallback:
-            | ((msg: { content: Buffer } | null) => Promise<void>)
-            | undefined;
+        let consumeCallback: ((msg: { content: Buffer } | null) => Promise<void>) | undefined;
         rabbitChannel = {
             assertQueue: async () => {},
             prefetch: async () => {},
@@ -225,9 +235,7 @@ describe('startInboundLaneConsumer 失败重投', () => {
     });
 
     it('处理抛错时 nack requeue=true，避免消息永久吞掉', async () => {
-        let consumeCallback:
-            | ((msg: { content: Buffer } | null) => Promise<void>)
-            | undefined;
+        let consumeCallback: ((msg: { content: Buffer } | null) => Promise<void>) | undefined;
         const nacks: Array<{ allUpTo: boolean; requeue: boolean }> = [];
         rabbitChannel = {
             assertQueue: async () => {},
@@ -253,4 +261,13 @@ describe('startInboundLaneConsumer 失败重投', () => {
         expect(nacks).toEqual([{ allUpTo: false, requeue: true }]);
         rabbitChannel = undefined;
     });
+});
+
+// 本文件桩了三个多消费者模块，三个都要注回真身。漏掉任何一个，后加载的测试文件
+// 拿到的"真身"其实还是本文件的桩——包括那些自以为在 spread 真身的文件，它们
+// spread 到的会是这里留下的残缺版本，污染就这样一路传下去。
+afterAll(() => {
+    mock.module('@inner/shared/cache', () => realSharedCache);
+    mock.module('@inner/shared/mq', () => realSharedMq);
+    mock.module('@middleware/context', () => realContextModule);
 });

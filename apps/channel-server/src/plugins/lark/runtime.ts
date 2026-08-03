@@ -1,5 +1,5 @@
 import type { Hono } from 'hono';
-import type { BotConfig } from '@entities/bot-config';
+import type { BotConfig } from '@inner/shared/entities';
 import type { InboundLaneEnvelope } from '@integrations/inbound-lane';
 import type { ChannelRuntime } from '@plugins/runtime';
 import { initializeLarkClients } from '@integrations/lark-client';

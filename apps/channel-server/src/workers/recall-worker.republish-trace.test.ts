@@ -18,14 +18,14 @@ import type { ConsumeMessage } from 'amqplib';
 
 import { handleRecall } from './recall-worker';
 import type { RecallHandlerDeps } from './recall-worker';
-import type * as RabbitMQModule from '@integrations/rabbitmq';
+import type * as RabbitMQModule from '@inner/shared/mq';
 
-// 同 rabbitmq.test.ts：多个测试文件用 mock.module 把 @integrations/rabbitmq 整体换成
+// 同 rabbitmq.test.ts：多个测试文件用 mock.module 把 @inner/shared/mq 整体换成
 // 桩，而 bun 的 mock.module 是进程级全局。带 query 的 specifier 是另一个模块 key，
 // 拿得到未被替换的真实 publish 和一个干净的单例。
 const { rabbitmqClient, RECALL } = (await import(
     // @ts-expect-error 带 query 的 specifier 只有 bun 运行时认，tsc 解析不到；类型由下面的断言给出
-    '../infrastructure/integrations/rabbitmq.ts?real'
+    '@inner/shared/mq?real'
 )) as typeof RabbitMQModule;
 
 interface PublishCall {

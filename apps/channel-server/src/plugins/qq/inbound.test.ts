@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import {
     assertValidInboundMessage,
     type InboundMessage,
-} from '@core/channels/contracts';
+} from '@inner/shared/channel';
 import type { CustomInboundMessage } from '@inner/shared/protocols';
 import { qqInbound, QQ_CHANNEL, QQ_SELF_MENTION_TARGET } from './inbound';
 

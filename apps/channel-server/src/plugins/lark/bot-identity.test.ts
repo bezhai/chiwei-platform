@@ -1,34 +1,42 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from 'bun:test';
-import type { BotConfig } from '@entities/bot-config';
+import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from 'bun:test';
+import type { BotConfig } from '@inner/shared/entities';
 import type { ChannelCredentialed, LarkCredentials } from './bot-identity';
+// 真实的 context：本文件用 context.run 驱动 botName，不再 mock 掉整个
+// @middleware/context（那会把 createContext / asyncLocalStorage 从全进程抹掉）。
+import { context } from '@middleware/context';
 
-let currentBotName = 'chiwei';
 let allBots: Partial<BotConfig>[] = [];
 const personas = [
     { persona_id: 'persona-1', display_name: '赤尾' },
     { persona_id: 'persona-2', display_name: '工具' },
 ];
 
-mock.module('@core/services/bot/multi-bot-manager', () => ({
-    multiBotManager: {
+// bun 的 mock.module 是进程级全局的整模块替换，mock.restore() 不会撤销它。
+// 先把真身抓下来铺底，只覆盖本文件真正要控的导出，跑完再原样装回去。
+const realSharedBot = { ...(await import('@inner/shared/bot')) };
+const realOrmconfig = { ...(await import('ormconfig')) };
+
+mock.module('@inner/shared/bot', () => ({
+    ...realSharedBot,
+    botDirectory: {
         getBotConfig: (name: string) => allBots.find((bot) => bot.bot_name === name) ?? null,
         getAllBotConfigs: () => allBots,
     },
 }));
 
-mock.module('@middleware/context', () => ({
-    context: {
-        getBotName: () => currentBotName,
-    },
-}));
-
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: () => ({
             findBy: async () => personas,
         }),
     },
 }));
+
+afterAll(() => {
+    mock.module('@inner/shared/bot', () => realSharedBot);
+    mock.module('ormconfig', () => realOrmconfig);
+});
 
 const {
     getCurrentLarkBotAppId,
@@ -60,7 +68,6 @@ function larkBot(over: Partial<BotConfig> = {}): Partial<BotConfig> {
 }
 
 beforeEach(() => {
-    currentBotName = 'chiwei';
     allBots = [larkBot()];
 });
 
@@ -94,9 +101,11 @@ describe('lark bot identity: plugin-owned credentials and lookup', () => {
         expect(() => larkCredentials(broken)).toThrow();
     });
 
-    it('current bot app_id / union_id 只在 Lark 插件层读取', () => {
-        expect(getCurrentLarkBotAppId()).toBe('cli_app_123');
-        expect(getCurrentLarkBotUnionId()).toBe('on_union_def');
+    it('current bot app_id / union_id 只在 Lark 插件层读取', async () => {
+        await context.run(context.createContext('chiwei'), async () => {
+            expect(getCurrentLarkBotAppId()).toBe('cli_app_123');
+            expect(getCurrentLarkBotUnionId()).toBe('on_union_def');
+        });
     });
 
     it('can reverse lookup registered lark bots by app_id and union_id', () => {

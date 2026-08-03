@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { afterAll, describe, expect, it, mock } from 'bun:test';
 
 const membersByChat = new Map<string, Array<{ union_id: string; name: string }>>();
 let botAliases: Array<{ union_id: string; name: string }> = [];
@@ -25,7 +25,14 @@ function queryBuilder() {
     };
 }
 
+// mock.module 是进程级整模块替换、mock.restore() 撤不掉它。两个模块都要先抓
+// 真身铺底（bot-identity 在 ormconfig 被替换前抓，拿到的是真 DataSource），
+// 只覆盖本文件真正要控的导出，跑完再原样装回去。
+const realOrmconfig = { ...(await import('ormconfig')) };
+const realBotIdentity = { ...(await import('./bot-identity')) };
+
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: () => ({
             createQueryBuilder: () => queryBuilder(),
@@ -34,8 +41,14 @@ mock.module('ormconfig', () => ({
 }));
 
 mock.module('./bot-identity', () => ({
+    ...realBotIdentity,
     getLarkBotMentionAliases: () => botAliases,
 }));
+
+afterAll(() => {
+    mock.module('ormconfig', () => realOrmconfig);
+    mock.module('./bot-identity', () => realBotIdentity);
+});
 
 const { resolveLarkMentionsForGroup } = await import('./resolve-mentions');
 

@@ -9,14 +9,14 @@
 // 整条入站处理（MQ at-least-once 重投不重复处理 / 回复 / 触发副作用）。完成标记只在
 // 入站处理成功后写入，失败重投仍会重新处理。
 
-import { getRabbitChannel } from './rabbitmq';
+import { getRabbitChannel } from '@inner/shared/mq';
 import {
     inboundLaneQueueName,
     assertInboundLaneQueue,
     inboundDedupeKey,
     type InboundLaneEnvelope,
 } from './inbound-lane';
-import { exists, setNx } from '@cache/redis-client';
+import { getRedisClient } from '@inner/shared/cache';
 import { context } from '@middleware/context';
 
 // 三元组幂等标记 TTL：足够长以覆盖 MQ 重投窗口（远超现状 60s make_reply 锁，因为
@@ -64,9 +64,9 @@ export async function startInboundLaneConsumer(
         try {
             const env = JSON.parse(msg.content.toString()) as InboundLaneEnvelope;
             await consumeInboundLaneEnvelope(env, {
-                isProcessed: async (key) => (await exists(key)) > 0,
+                isProcessed: async (key) => (await getRedisClient().exists(key)) > 0,
                 markProcessed: async (key) => {
-                    await setNx(key, '1', DEDUPE_TTL_SECONDS);
+                    await getRedisClient().setNx(key, '1', DEDUPE_TTL_SECONDS);
                 },
                 process: async (e) => {
                     // 从信封读出 bot_name + lane 注入 context（§6：跨 lane 用信封不用

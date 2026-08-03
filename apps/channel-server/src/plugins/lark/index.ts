@@ -3,12 +3,12 @@
 // parse）/ addressing（寻址判定）/ capabilities（出站能力）/ commands / 凭据
 // 解释五件齐备，飞书入站出站控制流全部经此插件收口。
 
-import type { ChannelPlugin, OutboundCapabilities } from '@core/ports/channel-plugin';
-import { registerPlugin } from '@core/registry/channel-registry';
+import type { ChannelPlugin, OutboundCapabilities } from '@inner/shared/channel';
+import { registerPlugin } from '@inner/shared/channel';
 import { larkInbound } from './inbound';
 import { larkAddressing } from './addressing';
-import { getCommandRegistry } from '@core/registry/command-registry';
-import { registerChatRequestEnricher } from '@core/services/ai/reply';
+import { getCommandRegistry } from '@inner/shared/rules';
+import { registerChatRequestEnricher } from '@inner/shared/rules';
 import { larkCommands } from './commands';
 import { enrichLarkChatRequest } from './chat-request-enricher';
 import { createLarkOutboundCapabilities } from './outbound-capabilities';

@@ -3,7 +3,7 @@ import { describe, it, expect, afterEach } from 'bun:test';
 import { WhiteGroupCheck, IsAdmin } from './lark-rules';
 import { larkContextStore } from './lark-context-store';
 import type { Message } from '@core/models/message';
-import type { RuleMessage } from '@core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import type { MessageBasicChatInfo } from '@core/models/message-metadata';
 
 // B2：飞书强绑谓词 WhiteGroupCheck / IsAdmin 从 core/rules/rule.ts 搬进

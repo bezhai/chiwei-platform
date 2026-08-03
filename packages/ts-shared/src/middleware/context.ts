@@ -7,6 +7,11 @@ import { v4 as uuidv4 } from 'uuid';
  */
 export interface BaseRequestContext {
     traceId: string;
+    // 处理这条请求/消息的 bot，以及它属于哪个泳道。两者都与渠道无关（任何
+    // 渠道的入站都要回答"谁在处理"和"走哪条泳道"），且被共享的规则引擎与
+    // chat.request 组装直接消费，所以取值口径只在这里定义一次。
+    botName?: string;
+    lane?: string;
     [key: string]: unknown;
 }
 
@@ -25,6 +30,23 @@ export const context = {
     getTraceId: (): string => {
         const store = asyncLocalStorage.getStore();
         return store?.traceId || '';
+    },
+
+    /**
+     * 当前处理这条请求/消息的 bot。无上下文时返回空串（调用方一律
+     * `|| undefined` 转成"没有"），与 getTraceId 同口径。
+     */
+    getBotName: (): string => {
+        const store = asyncLocalStorage.getStore();
+        return store?.botName || '';
+    },
+
+    /**
+     * 当前上下文所属泳道。prod 或无上下文时为空串。
+     */
+    getLane: (): string => {
+        const store = asyncLocalStorage.getStore();
+        return store?.lane || '';
     },
 
     /**
@@ -61,7 +83,10 @@ export const context = {
     /**
      * Create a new context with traceId and optional additional fields
      */
-    createContext: (traceId?: string, additionalFields?: Record<string, unknown>): BaseRequestContext => {
+    createContext: (
+        traceId?: string,
+        additionalFields?: Record<string, unknown>,
+    ): BaseRequestContext => {
         return {
             traceId: traceId || uuidv4(),
             ...additionalFields,

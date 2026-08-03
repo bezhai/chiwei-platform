@@ -29,11 +29,7 @@ function genCacheKey(fnName: string, args: unknown[]): string {
 export function createCacheDecorator(options: CacheOptions, redisOps?: RedisCacheOperations) {
     const { type, ttl } = options;
 
-    return function (
-        target: unknown,
-        propertyKey: string,
-        descriptor: PropertyDescriptor,
-    ) {
+    return function (target: unknown, propertyKey: string, descriptor: PropertyDescriptor) {
         const originalMethod = descriptor.value;
 
         descriptor.value = async function (...args: unknown[]) {

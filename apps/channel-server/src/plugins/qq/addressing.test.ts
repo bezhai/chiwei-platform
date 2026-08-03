@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import type { InboundMessage } from '@core/channels/contracts';
+import type { InboundMessage } from '@inner/shared/channel';
 import { qqAddressing } from './addressing';
 import { QQ_SELF_MENTION_TARGET } from './inbound';
 

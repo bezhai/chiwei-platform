@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, mock } from 'bun:test';
+import { afterAll, describe, it, expect, beforeEach, mock } from 'bun:test';
 
 // dispatchInboundIfNeeded 是 handlers 决策点的组装函数：读 flag → 算 lane →
 // 非本进程 lane 投 inbound_lane.{lane} 并返回 true(已分流，handler 应 return)；
@@ -8,14 +8,21 @@ import { describe, it, expect, beforeEach, mock } from 'bun:test';
 // （flag off 完全不碰 resolveLane / publish）。
 
 const publishCalls: unknown[] = [];
+// 整模块替换会顶掉 inboundLaneQueueName / inboundDedupeKey / publishInboundLane 等
+// 导出（inbound-lane.test.ts、inbound-lane-consumer.ts 都在用），先抓真身。
+const realInboundLane = { ...(await import('./inbound-lane')) };
 mock.module('./inbound-lane', () => ({
+    ...realInboundLane,
     dispatchToInboundLane: async (env: unknown) => {
         publishCalls.push(env);
     },
 }));
 
 let flagValue = false;
+// 同理：inbound-lane-flag.test.ts 用的是同模块的 readInboundLaneDispatchFlag。
+const realInboundLaneFlag = { ...(await import('./inbound-lane-flag')) };
 mock.module('./inbound-lane-flag', () => ({
+    ...realInboundLaneFlag,
     isInboundLaneDispatchEnabled: async () => flagValue,
 }));
 
@@ -24,12 +31,23 @@ let resolveLaneImpl: (
     bot: string,
     commonConversationId: string | undefined,
 ) => Promise<string> = async () => 'prod';
-mock.module('./lane-router-runtime', () => ({
-    getLaneRouter: () => ({
+// 同 lane-bindings.route.test.ts：整模块替换会顶掉同模块其他导出，先抓真身。
+const realLaneBinding = { ...(await import('@inner/shared/lane-binding')) };
+mock.module('@inner/shared/lane-binding', () => ({
+    ...realLaneBinding,
+    getLaneBindingResolver: () => ({
         resolveLane: (channel: string, bot: string, commonConversationId: string | undefined) =>
             resolveLaneImpl(channel, bot, commonConversationId),
     }),
 }));
+
+// bun 的 mock.module 注册表进程级全局、mock.restore() 不撤销：三个 mock 都必须
+// 在本文件跑完后放回真身，否则后续文件里的生产代码会一直吃到这些桩。
+afterAll(() => {
+    mock.module('./inbound-lane', () => realInboundLane);
+    mock.module('./inbound-lane-flag', () => realInboundLaneFlag);
+    mock.module('@inner/shared/lane-binding', () => realLaneBinding);
+});
 
 const { dispatchInboundIfNeeded } = await import('./inbound-lane-dispatch');
 

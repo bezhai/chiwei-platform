@@ -6,14 +6,14 @@
 // 逻辑搬到这里后，可以喂接近真实 MQ 的 payload 跑整条链做端到端测试，不必拉起
 // 整个进程（chat-response-handler.proactive.test.ts）。
 
-import { CommonAgentResponse } from '@entities/common-agent-response';
+import { CommonAgentResponse } from '@inner/shared/entities';
 import type { Repository } from 'typeorm';
 import type { ConsumeMessage } from 'amqplib';
 import dayjs from 'dayjs';
 
 import { context } from '@middleware/context';
-import { laneFromMessage } from '@integrations/amqp-context';
-import type { OutboundCapabilities } from '@core/ports/channel-plugin';
+import { laneFromMessage } from '@inner/shared/mq-context';
+import type { OutboundCapabilities } from '@inner/shared/channel';
 import { imageRegistryLookupId } from './image-registry-key';
 import { dispatchChatResponseOutbound } from './chat-response-outbound';
 import { resolveChatResponseOutboundRefs } from './chat-response-resolve';
@@ -40,7 +40,7 @@ export interface ChatResponsePayload {
     error?: string;
     // agent-service 仍在 body 里回填 lane（它自己按 body 字段做别的事），但
     // **判 lane 不看这里**：lane 只认 AMQP header，口径见
-    // @integrations/amqp-context 的 laneFromMessage（连同「为什么不回落 body」）。
+    // @inner/shared/mq-context 的 laneFromMessage（连同「为什么不回落 body」）。
     lane?: string;
     part_index?: number;
     is_last?: boolean;

@@ -3,10 +3,10 @@
 // InboundMessage）/ addressing（私聊总响应、群看 @bot）/ capabilities（出站发回网关）/
 // commands=[] / 凭据解释（宽松）五件齐备，QQ 入站出站控制流全部经此插件收口。
 
-import type { ChannelPlugin, OutboundCapabilities } from '@core/ports/channel-plugin';
-import { registerPlugin } from '@core/registry/channel-registry';
-import { getCommandRegistry } from '@core/registry/command-registry';
-import { registerChatRequestEnricher } from '@core/services/ai/reply';
+import type { ChannelPlugin, OutboundCapabilities } from '@inner/shared/channel';
+import { registerPlugin } from '@inner/shared/channel';
+import { getCommandRegistry } from '@inner/shared/rules';
+import { registerChatRequestEnricher } from '@inner/shared/rules';
 import { registerChannelRuntime } from '@plugins/runtime';
 import { qqInbound } from './inbound';
 import { qqAddressing } from './addressing';

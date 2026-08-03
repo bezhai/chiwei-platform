@@ -1,5 +1,5 @@
 import { context } from '@middleware/context';
-import { multiBotManager } from './multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 
 function getBotConfigInternal() {
     const botName = context.getBotName();
@@ -7,7 +7,7 @@ function getBotConfigInternal() {
     if (!botName) {
         throw new Error('Bot name is not set in the context');
     }
-    const botConfig = multiBotManager.getBotConfig(botName);
+    const botConfig = botDirectory.getBotConfig(botName);
     if (botConfig) {
         return botConfig;
     }

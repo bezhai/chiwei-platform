@@ -5,9 +5,9 @@
 // 所以这里对 credentials 宽松解析：可能为空、可能只带 app_id，都不强制必填、不报错
 // （与飞书 larkCredentials 的 fail-loud 五字段刻意相反）。
 
-import type { BotConfig } from '@entities/bot-config';
+import type { BotConfig } from '@inner/shared/entities';
 import { context } from '@middleware/context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 
 export const QQ_CHANNEL = 'qq';
 
@@ -55,7 +55,7 @@ function getCurrentQqBotConfig(): BotConfig {
     if (!botName) {
         throw new Error('Bot name is not set in the context');
     }
-    const botConfig = multiBotManager.getBotConfig(botName);
+    const botConfig = botDirectory.getBotConfig(botName);
     if (!botConfig) {
         throw new Error(`Bot configuration not found for bot: ${botName}`);
     }
@@ -70,7 +70,7 @@ export function getCurrentQqBotName(): string {
 }
 
 export function getQqBotConfigByCommonUserId(commonUserId: string): BotConfig | null {
-    for (const bot of multiBotManager.getAllBotConfigs()) {
+    for (const bot of botDirectory.getAllBotConfigs()) {
         if (bot.channel !== QQ_CHANNEL) continue;
         if (bot.common_user_id === commonUserId) return bot;
     }

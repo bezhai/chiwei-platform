@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock, afterAll } from 'bun:test';
 import type { LarkInboundProjection } from './common-projector';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
@@ -59,7 +59,13 @@ function insertBuilder() {
     };
 }
 
+// bun 的 mock.module 是**整模块替换 + 进程级全局**，且 mock.restore() 不撤销它。
+// 先抓真身、只覆盖需要的导出，afterAll 再注回真身，否则同一个 bun test 进程里
+// 后面加载的文件（含被测生产代码）会看到残缺模块。ormconfig 只导出 default
+// （TypeORM DataSource）；import 真身只做 bindDataSource 存引用，不建连接。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         createEntityManager: mock(() => ({})),
         getRepository: (entity: { name?: string }) => {
@@ -137,40 +143,38 @@ mock.module('ormconfig', () => ({
     },
 }));
 
-mock.module('@cache/redis-client', () => ({
+// Redis 收敛成 @inner/shared/cache 的 RedisClient 单例后，这里桩的是
+// getRedisClient()。bun 的 mock.module 是**整模块替换 + 进程级全局**，只写
+// getRedisClient 会把同模块的 cache / RedisClient 等导出一并抹掉，
+// 别的测试文件跟着遭殃；所以先抓真身、只覆盖这一个导出，afterAll 再注回去。
+const realSharedCache = { ...(await import('@inner/shared/cache')) };
+const redisStub = {
     get: mock(async () => null),
     setWithExpire: mock(async () => 'OK'),
     hgetall: mock(async () => ({})),
     setNx: mock(async () => 'OK'),
     evalScript: mock(async () => 1),
     exists: mock(async () => 0),
+};
+mock.module('@inner/shared/cache', () => ({
+    ...realSharedCache,
+    getRedisClient: () => redisStub,
 }));
-mock.module('@middleware/context', () => ({
-    context: {
-        getBotName: () => 'chiwei',
-        getLane: () => undefined,
-    },
-}));
-mock.module('@integrations/rabbitmq', () => ({
-    PROACTIVE_EVAL: 'proactive_eval',
-    CHAT_REQUEST: 'chat_request',
-    getLane: () => undefined,
-    getRabbitChannel: () => ({
-        assertQueue: mock(async () => undefined),
-        sendToQueue: mock(() => true),
-    }),
-}));
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+// 这里不桩 @middleware/context / @inner/shared/mq：storeLarkInboundMessage 走的是
+// `context.getBotName() || 'chiwei'`，无请求上下文时真 context 返回空串、结果与
+// 桩一致（用例也不断言 bot_name）；common-projector 的 import 图里根本没有
+// @inner/shared/mq。
+import { botDirectory } from '@inner/shared/bot';
 
 const {
     claimLarkInboundMessageForBot,
     storeLarkInboundMessage,
     storeLarkOutboundMessage,
 } = await import('./common-projector');
-const originalGetBotCommonUserId = multiBotManager.getBotCommonUserId;
+const originalGetBotCommonUserId = botDirectory.getBotCommonUserId;
 
 afterEach(() => {
-    multiBotManager.getBotCommonUserId = originalGetBotCommonUserId;
+    botDirectory.getBotCommonUserId = originalGetBotCommonUserId;
 });
 
 function event(omId: string) {
@@ -287,8 +291,8 @@ describe('storeLarkOutboundMessage', () => {
         commonMessageRows.clear();
         commonInsertCalls.length = 0;
         larkInsertCalls.length = 0;
-        multiBotManager.getBotCommonUserId = (() =>
-            '018f-bot-common-user') as typeof multiBotManager.getBotCommonUserId;
+        botDirectory.getBotCommonUserId = (() =>
+            '018f-bot-common-user') as typeof botDirectory.getBotCommonUserId;
     });
 
     it('writes assistant common_message with the bot common user id', async () => {
@@ -310,4 +314,9 @@ describe('storeLarkOutboundMessage', () => {
         expect(commonInsertCalls[0].role).toBe('assistant');
         expect(commonInsertCalls[0].common_user_id).toBe('018f-bot-common-user');
     });
+});
+
+afterAll(() => {
+    mock.module('@inner/shared/cache', () => realSharedCache);
+    mock.module('ormconfig', () => realOrmconfig);
 });

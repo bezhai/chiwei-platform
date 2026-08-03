@@ -5,7 +5,7 @@
 // 没有飞书那种 SDK 长连 / webhook 握手；验签 / 握手都在网关侧做完。
 
 import type { Hono } from 'hono';
-import type { BotConfig } from '@entities/bot-config';
+import type { BotConfig } from '@inner/shared/entities';
 import type { InboundLaneEnvelope } from '@integrations/inbound-lane';
 import type { ChannelRuntime } from '@plugins/runtime';
 import { bearerAuthMiddleware } from '@inner/shared/middleware';

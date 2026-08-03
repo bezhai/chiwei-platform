@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock, afterAll } from 'bun:test';
 
 // ---- in-memory stores backing the mocked ormconfig ----
 const qqUsers = new Map<string, Record<string, unknown>>();
@@ -205,7 +205,13 @@ function insertBuilder() {
     };
 }
 
+// ormconfig 被全仓生产代码 import。bun 的 mock.module 是**整模块替换 + 进程级全局**
+// （mock.restore() 撤不掉），这个只认 QQ 几张表的假 DataSource 留着不撤，后续加载
+// 的文件一碰库就炸；所以先抓真身（import 只跑 bindDataSource 存引用、不连库），
+// afterAll 再注回去。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: (entity: { name?: string }) => {
             if (entity.name === 'QqUserOpenId') return userRepo();
@@ -255,15 +261,29 @@ mock.module('ormconfig', () => ({
     },
 }));
 
-mock.module('@cache/redis-client', () => ({
+// Redis 收敛成 @inner/shared/cache 的 RedisClient 单例后，这里桩的是
+// getRedisClient()。bun 的 mock.module 是**整模块替换 + 进程级全局**，只写
+// getRedisClient 会把同模块的 cache / RedisClient 等导出一并抹掉，
+// 别的测试文件跟着遭殃；所以先抓真身、只覆盖这一个导出，afterAll 再注回去。
+const realSharedCache = { ...(await import('@inner/shared/cache')) };
+const redisStub = {
     setNx: mock(async () => 'OK'),
     evalScript: mock(async () => 1),
+};
+mock.module('@inner/shared/cache', () => ({
+    ...realSharedCache,
+    getRedisClient: () => redisStub,
 }));
-mock.module('@middleware/context', () => ({
-    context: { getBotName: () => 'chiwei-qq', getLane: () => undefined },
-}));
-mock.module('@core/services/bot/multi-bot-manager', () => ({
-    multiBotManager: { getBotCommonUserId: () => 'bot-common-user' },
+// @middleware/context 不 mock：common-projector 只在 storeQqInboundMessage 里读
+// context.getBotName()，且立刻 `|| inbound.bot_name` 兜底，本文件的用例全部走
+// inbound.bot_name 这一支，桩掉纯属多余（还会把 createContext / asyncLocalStorage
+// 抹掉污染全进程）。
+// @inner/shared/bot 则必须桩（storeQqOutboundMessage 用 getBotCommonUserId），同样
+// 先抓真身、只覆盖 botDirectory、afterAll 注回去。
+const realSharedBot = { ...(await import('@inner/shared/bot')) };
+mock.module('@inner/shared/bot', () => ({
+    ...realSharedBot,
+    botDirectory: { getBotCommonUserId: () => 'bot-common-user' },
 }));
 
 const {
@@ -589,4 +609,10 @@ describe('storeQqOutboundMessage', () => {
         expect(commonInsertCalls[0].role).toBe('assistant');
         expect(commonInsertCalls[0].common_user_id).toBe('bot-common-user');
     });
+});
+
+afterAll(() => {
+    mock.module('@inner/shared/cache', () => realSharedCache);
+    mock.module('ormconfig', () => realOrmconfig);
+    mock.module('@inner/shared/bot', () => realSharedBot);
 });

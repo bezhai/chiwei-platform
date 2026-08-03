@@ -1,6 +1,6 @@
 import { Hono, type Context, type Next } from 'hono';
 import AppDataSource from '@ormconfig';
-import { getLaneRouter } from '@integrations/lane-router-runtime';
+import { getLaneBindingResolver, LANE_ROUTING_TABLE } from '@inner/shared/lane-binding';
 
 const app = new Hono();
 
@@ -23,7 +23,7 @@ app.use('/api/lane-bindings/*', requireApiKey);
 async function listBindings(c: Context) {
     const rows = await AppDataSource.query(
         `SELECT route_type, route_key, lane_name
-         FROM lane_routing
+         FROM ${LANE_ROUTING_TABLE}
          WHERE is_active = true
          ORDER BY route_type, route_key`,
     );
@@ -44,13 +44,13 @@ async function upsertBinding(c: Context) {
     }
 
     await AppDataSource.query(
-        `INSERT INTO lane_routing (route_type, route_key, lane_name, is_active)
+        `INSERT INTO ${LANE_ROUTING_TABLE} (route_type, route_key, lane_name, is_active)
          VALUES ($1, $2, $3, true)
          ON CONFLICT (route_type, route_key) WHERE is_active = true
          DO UPDATE SET lane_name = $3`,
         [routeType, routeKey, laneName],
     );
-    getLaneRouter().clearCache();
+    getLaneBindingResolver().clearCache();
     return c.json({ ok: true, route_type: routeType, route_key: routeKey, lane_name: laneName });
 }
 
@@ -62,10 +62,10 @@ async function deleteBinding(c: Context) {
     }
 
     await AppDataSource.query(
-        'UPDATE lane_routing SET is_active = false WHERE route_type = $1 AND route_key = $2',
+        `UPDATE ${LANE_ROUTING_TABLE} SET is_active = false WHERE route_type = $1 AND route_key = $2`,
         [routeType, routeKey],
     );
-    getLaneRouter().clearCache();
+    getLaneBindingResolver().clearCache();
     return c.json({ ok: true });
 }
 

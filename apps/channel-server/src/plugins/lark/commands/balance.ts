@@ -2,7 +2,7 @@ import { replyCard, replyMessage } from '@lark/basic/message';
 import { CardHeader, LarkCard, MarkdownComponent, TableColumn, TableComponent } from 'feishu-card';
 import { Message } from 'core/models/message';
 import { getAIKeyInfo, getBalance } from 'infrastructure/integrations/provider-admin';
-import type { RuleMessage } from 'core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from '../lark-context-store';
 
 // lark-only handler。入口适配平台无关 RuleMessage → 从 lark 私有 store 取回飞书

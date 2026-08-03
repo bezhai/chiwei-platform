@@ -1,9 +1,15 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
 const larkChats = new Map<string, { chat_id: string; common_conversation_id: string }>();
 
+// bun 的 mock.module 是**整模块替换 + 进程级全局**，且 mock.restore() 不撤销它。
+// 先抓真身、只覆盖需要的导出，afterAll 再注回真身，否则同一个 bun test 进程里
+// 后面加载的文件（含被测生产代码）会看到残缺模块。ormconfig 只导出 default
+// （TypeORM DataSource）；import 真身只做 bindDataSource 存引用，不建连接。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: (entity: { name?: string }) => {
             if (entity.name === 'LarkMessage') {
@@ -113,4 +119,8 @@ describe('reverseResolveOutbound', () => {
         });
         expect(out.channelRootId).toBeUndefined();
     });
+});
+
+afterAll(() => {
+    mock.module('ormconfig', () => realOrmconfig);
 });
