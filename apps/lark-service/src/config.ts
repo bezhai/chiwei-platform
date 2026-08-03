@@ -23,6 +23,9 @@ const REQUIRED_ENV = [
     'POSTGRES_DB',
     'REDIS_HOST',
     'RABBITMQ_URL',
+    // 飞书原始报文的审计集合（lark_event）落在 mongo。用户名密码是可选的（本地
+    // 无鉴权也能连），主机名不是。
+    'MONGO_HOST',
 ] as const;
 
 export function loadConfig(env: Env = process.env): LarkServiceConfig {

@@ -55,6 +55,10 @@ function backends(): RecordingBackends {
             declareTopology: async () => record('broker.declareTopology'),
             close: async () => record('broker.close'),
         },
+        eventLog: {
+            open: async () => record('eventLog.open'),
+            close: async () => record('eventLog.close'),
+        },
     };
 }
 
@@ -82,6 +86,8 @@ describe('bootLarkService', () => {
             'cache.ping',
             'broker.connect',
             'broker.declareTopology',
+            // 审计落库是入站的旁路，但连不上要在启动期就知道，不能等第一条消息
+            'eventLog.open',
         ]);
     });
 
@@ -114,12 +120,17 @@ describe('shutdownLarkService', () => {
         await bootLarkService(deps);
         deps.calls.length = 0;
         await shutdownLarkService(deps);
-        expect(deps.calls).toEqual(['broker.close', 'cache.close', 'database.destroy']);
+        expect(deps.calls).toEqual([
+            'broker.close',
+            'eventLog.close',
+            'cache.close',
+            'database.destroy',
+        ]);
     });
 
     it('skips postgres when it never came up', async () => {
         await shutdownLarkService(deps);
-        expect(deps.calls).toEqual(['broker.close', 'cache.close']);
+        expect(deps.calls).toEqual(['broker.close', 'eventLog.close', 'cache.close']);
     });
 
     // 关停路径上一个失败吞掉其余关闭，就会留下没 quit 的连接，进程 exit 之后在
@@ -129,6 +140,11 @@ describe('shutdownLarkService', () => {
         deps.calls.length = 0;
         deps.failing.add('broker.close');
         await shutdownLarkService(deps);
-        expect(deps.calls).toEqual(['broker.close', 'cache.close', 'database.destroy']);
+        expect(deps.calls).toEqual([
+            'broker.close',
+            'eventLog.close',
+            'cache.close',
+            'database.destroy',
+        ]);
     });
 });

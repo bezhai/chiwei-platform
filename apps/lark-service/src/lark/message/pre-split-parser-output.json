@@ -1,0 +1,2200 @@
+[
+    {
+        "name": "text/plain",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hello world\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hello world"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hello world"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/empty",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": ""
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": ""
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "not json"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[文本]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[文本]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/one-human-mention",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi @_user_1 there\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi "
+            },
+            {
+                "type": "mention",
+                "value": "张三",
+                "meta": {
+                    "channel_user_id": "on_a"
+                }
+            },
+            {
+                "type": "text",
+                "value": " there"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_a"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi @张三 there"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/two-adjacent-mentions",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1@_user_2 hi\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    },
+                    {
+                        "key": "@_user_2",
+                        "id": {
+                            "union_id": "on_b"
+                        },
+                        "name": "李四"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "张三",
+                "meta": {
+                    "channel_user_id": "on_a"
+                }
+            },
+            {
+                "type": "mention",
+                "value": "李四",
+                "meta": {
+                    "channel_user_id": "on_b"
+                }
+            },
+            {
+                "type": "text",
+                "value": " hi"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            },
+            {
+                "id": "on_b",
+                "displayName": "李四"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_a"
+                },
+                {
+                    "targetId": "on_b"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@张三@李四 hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/only-a-mention",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "张三",
+                "meta": {
+                    "channel_user_id": "on_a"
+                }
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_a"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@张三"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/token-with-no-mention-record",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"a @_user_7 b\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "a "
+            },
+            {
+                "type": "text",
+                "value": "@_user_7"
+            },
+            {
+                "type": "text",
+                "value": " b"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_a"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "a @_user_7 b"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/mention-list-out-of-order",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1 and @_user_2\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_2",
+                        "id": {
+                            "union_id": "on_b"
+                        },
+                        "name": "李四"
+                    },
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "李四",
+                "meta": {
+                    "channel_user_id": "on_b"
+                }
+            },
+            {
+                "type": "text",
+                "value": " and "
+            },
+            {
+                "type": "mention",
+                "value": "张三",
+                "meta": {
+                    "channel_user_id": "on_a"
+                }
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_b",
+                "displayName": "李四"
+            },
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_b"
+                },
+                {
+                    "targetId": "on_a"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@张三 and @李四"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/registered-bot-mention",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1 hi\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_registered_bot"
+                        },
+                        "name": "chiwei-raw",
+                        "mentioned_type": "bot",
+                        "bot_info": {
+                            "app_id": "cli_registered"
+                        }
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "chiwei-raw",
+                "meta": {
+                    "channel_user_id": "on_registered_bot",
+                    "bot_common_user_id": "cu_chiwei"
+                }
+            },
+            {
+                "type": "text",
+                "value": " hi"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_registered_bot",
+                "displayName": "chiwei-raw",
+                "botCommonUserId": "cu_chiwei"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_registered_bot"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@chiwei-raw hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/foreign-bot-mention",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1 hi\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_foreign"
+                        },
+                        "name": "别人家的bot",
+                        "mentioned_type": "bot",
+                        "bot_info": {
+                            "app_id": "cli_foreign"
+                        }
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "别人家的bot",
+                "meta": {
+                    "channel_user_id": "on_foreign"
+                }
+            },
+            {
+                "type": "text",
+                "value": " hi"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_foreign",
+                "displayName": "别人家的bot"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_foreign"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@别人家的bot hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "text/nameless-mention",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"@_user_1 hi\"}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_c"
+                        },
+                        "name": ""
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "mention",
+                "value": "",
+                "meta": {
+                    "channel_user_id": "on_c"
+                }
+            },
+            {
+                "type": "text",
+                "value": " hi"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_c",
+                "displayName": ""
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_c"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "@on_c hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "image/ok",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "image",
+                "content": "{\"image_key\":\"img_1\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "image",
+                "value": "img_1"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "image",
+                    "key": "img_1"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "image/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "image",
+                "content": "{bad}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[图片]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[图片]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "sticker/ok",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "sticker",
+                "content": "{\"file_key\":\"stk_1\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "sticker",
+                "value": "stk_1"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "sticker",
+                    "key": "stk_1"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "sticker/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "sticker",
+                "content": ""
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[表情包]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[表情包]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "post/mixed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "post",
+                "content": "{\"content\":[[{\"tag\":\"text\",\"text\":\"hello @_user_1 \"},{\"tag\":\"img\",\"image_key\":\"img_p1\"}],[{\"tag\":\"text\",\"text\":\"second line\"}],[{\"tag\":\"img\",\"image_key\":\"img_p2\"}]]}",
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "on_a"
+                        },
+                        "name": "张三"
+                    }
+                ]
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hello "
+            },
+            {
+                "type": "mention",
+                "value": "张三",
+                "meta": {
+                    "channel_user_id": "on_a"
+                }
+            },
+            {
+                "type": "text",
+                "value": " "
+            },
+            {
+                "type": "image",
+                "value": "img_p1"
+            },
+            {
+                "type": "text",
+                "value": "second line"
+            },
+            {
+                "type": "image",
+                "value": "img_p2"
+            }
+        ],
+        "larkMentions": [
+            {
+                "id": "on_a",
+                "displayName": "张三"
+            }
+        ],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [
+                {
+                    "targetId": "on_a"
+                }
+            ],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hello @张三 "
+                },
+                {
+                    "kind": "image",
+                    "key": "img_p1"
+                },
+                {
+                    "kind": "text",
+                    "text": "second line"
+                },
+                {
+                    "kind": "image",
+                    "key": "img_p2"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "post/empty-rows",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "post",
+                "content": "{\"content\":[[]]}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[富文本]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[富文本]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "post/unrenderable-nodes-only",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "post",
+                "content": "{\"content\":[[{\"tag\":\"at\",\"user_id\":\"ou_x\"}]]}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[富文本]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[富文本]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "post/two-text-nodes-in-a-row",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "post",
+                "content": "{\"content\":[[{\"tag\":\"text\",\"text\":\"a\"},{\"tag\":\"text\",\"text\":\"b\"}]]}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "a"
+            },
+            {
+                "type": "text",
+                "value": "b"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "a"
+                },
+                {
+                    "kind": "text",
+                    "text": "b"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "post/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "post",
+                "content": "invalid"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[富文本]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[富文本]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "media/ok",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "media",
+                "content": "{\"file_key\":\"f_v\",\"image_key\":\"i_v\",\"file_name\":\"clip.mp4\",\"duration\":30}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "media",
+                "value": "f_v",
+                "meta": {
+                    "image_key": "i_v",
+                    "file_name": "clip.mp4",
+                    "duration": 30
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "file",
+                    "key": "f_v",
+                    "meta": {
+                        "image_key": "i_v",
+                        "file_name": "clip.mp4",
+                        "duration": 30,
+                        "lark_type": "media"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "media/minimal",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "media",
+                "content": "{\"file_key\":\"f_v\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "media",
+                "value": "f_v",
+                "meta": {}
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "file",
+                    "key": "f_v",
+                    "meta": {
+                        "lark_type": "media"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "media/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "media",
+                "content": "x"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[视频]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[视频]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "file/ok",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "file",
+                "content": "{\"file_key\":\"f_1\",\"file_name\":\"a.pdf\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "file",
+                "value": "f_1",
+                "meta": {
+                    "file_name": "a.pdf"
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "file",
+                    "key": "f_1",
+                    "meta": {
+                        "file_name": "a.pdf",
+                        "lark_type": "file"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "file/minimal",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "file",
+                "content": "{\"file_key\":\"f_1\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "file",
+                "value": "f_1",
+                "meta": {}
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "file",
+                    "key": "f_1",
+                    "meta": {
+                        "lark_type": "file"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "file/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "file",
+                "content": "x"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[文件]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[文件]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "audio/ok",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "audio",
+                "content": "{\"file_key\":\"f_a\",\"duration\":5}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "audio",
+                "value": "f_a",
+                "meta": {
+                    "duration": 5
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "audio",
+                    "key": "f_a",
+                    "meta": {
+                        "duration": 5
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "audio/malformed",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "audio",
+                "content": "x"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "[语音]"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "[语音]"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "merge_forward",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "merge_forward",
+                "content": "{}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "unsupported",
+                "value": "[合并转发]",
+                "meta": {
+                    "original_type": "merge_forward"
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "unsupported",
+                    "text": "[合并转发]",
+                    "meta": {
+                        "original_type": "merge_forward"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "share_chat",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "share_chat",
+                "content": "{}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "unsupported",
+                "value": "[分享群名片]",
+                "meta": {
+                    "original_type": "share_chat"
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "unsupported",
+                    "text": "[分享群名片]",
+                    "meta": {
+                        "original_type": "share_chat"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "share_user",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "share_user",
+                "content": "{}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "unsupported",
+                "value": "[分享个人名片]",
+                "meta": {
+                    "original_type": "share_user"
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "unsupported",
+                    "text": "[分享个人名片]",
+                    "meta": {
+                        "original_type": "share_user"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "unknown-type/todo",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "todo",
+                "content": "{}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "unsupported",
+                "value": "[todo]",
+                "meta": {
+                    "original_type": "todo"
+                }
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "unsupported",
+                    "text": "[todo]",
+                    "meta": {
+                        "original_type": "todo"
+                    }
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "p2p/text",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "p2p",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "direct",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "reply/with-parent-and-root",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}",
+                "parent_id": "om_p",
+                "root_id": "om_r"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true,
+                "replyToChannelMessageId": "om_p",
+                "rootChannelMessageId": "om_r"
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "reply/root-only",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}",
+                "root_id": "om_r"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true,
+                "rootChannelMessageId": "om_r"
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "sender/no-open-id",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "unknown_sender",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "no-app-id",
+        "event": {
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "1700000000000",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 1700000000000
+        }
+    },
+    {
+        "name": "create-time/not-a-number",
+        "event": {
+            "app_id": "cli_app",
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {
+                    "union_id": "on_u",
+                    "open_id": "ou_u"
+                }
+            },
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_1",
+                "chat_type": "group",
+                "create_time": "nope",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            }
+        },
+        "larkParts": [
+            {
+                "type": "text",
+                "value": "hi"
+            }
+        ],
+        "larkMentions": [],
+        "contract": {
+            "channel": "lark",
+            "bot_name": "cli_app",
+            "channel_message_id": "om_1",
+            "channel_chat_id": "oc_1",
+            "channel_user_id": "ou_u",
+            "conversation_scope": "group",
+            "thread_ref": {
+                "selfChannelMessageId": "om_1",
+                "inThread": true
+            },
+            "addressing_hints": [],
+            "content": [
+                {
+                    "kind": "text",
+                    "text": "hi"
+                }
+            ],
+            "received_at": 0
+        }
+    }
+]

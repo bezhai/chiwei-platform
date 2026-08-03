@@ -53,6 +53,13 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 - **飞书入口在异步处理前就 ACK**（`dispatch.ts` fire-and-forget 后立刻 `return {}`），所以"靠平台重试兜空窗"不成立。切换必须做到入口连续，不能有"两边都不接"的窗口。
 - **channel-server 的飞书代码在切换稳定前不能删**。这是回滚能力的物理前提——代码删了就只能回滚镜像版本，而那会连带回滚 common 层的其他改动。因此清理是切换**之后**的独立 task，不是之前。这个窗口内两个服务都有飞书代码，是受控的 cutover 窗口而非长期兼容层，关闭条件在 Task F 的验收里写死。
 
+**八、队列的分区维度必须与消费者的所有权维度一致。** 这是决策三的一般形式，两处都要遵守：
+
+- 出站 `chat_response` / `recall`：拆分后 owner 按 channel 分，所以 routing key 按 channel 分。
+- 入站 `inbound_lane.{lane}`：**当前只按 lane 分区，但拆分后 owner 是 `channel + lane`**——同一个队列同时承载 QQ 和飞书的信封。RabbitMQ 是竞争消费，两个服务同时订阅会各拿一半；更糟的是拿错的一半不会报错——消费者查不到对应 channel 的 handler 时会按 no-op 成功返回并 ACK，消息静默消失。这不是 cutover 期的临时问题，是拆完之后的稳态缺陷。修法是让队列也按 `channel + lane` 分区，不同 owner 不共享队列，竞争消费自然不存在。
+
+在分区落地之前，消费侧必须校验信封的 channel 且**不属于自己的绝不 ACK**。这是即时防线，分区完成后它退化成一条防御性断言而不是被删掉——因为"队列里只会有我的消息"是个需要被持续保证的不变量，不是可以默认的事实。
+
 ## Caller coverage
 
 本次改的是模块归属而非函数签名，覆盖面按"谁依赖飞书代码"清点。
@@ -108,7 +115,8 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 
 - **无 schema 变更，无新表，无 DDL**。表的物理位置与结构完全不动，只换代码所有者。lark_* 七张表 + Mongo `lark_event` 归 lark-service 独占；common_* 五张表三方共写，写入矩阵见决策二。
 - **无 prompt 变更、无 Dynamic Config 变更**（flag 语义不变，读取方从 channel-server 变成 lark-service）。
-- **新服务要在 PaaS 注册**：ImageRepo、App envs、ConfigBundle `required_keys` 覆盖新 app、Deployment 与 Service。飞书凭据只下发给 lark-service。
+- **新服务要在 PaaS 注册**：ImageRepo、App envs、ConfigBundle `required_keys` 覆盖新 app、Deployment 与 Service。飞书凭据只下发给 lark-service。**`MONGO_HOST` 必须在首次部署前就位**——lark-service 用它写 `lark_event` 原始事件审计，配置缺失会按既有的 fail-closed 风格在启动时崩溃（这是刻意的，但要求配置先行）。
+- **注册新 workspace 成员会连坐所有镜像**：bun 对"已声明但不在构建上下文里"的 workspace 成员是退出码 1 的硬失败，所以每个跑 `bun install --frozen-lockfile` 的 Dockerfile 都要复制新 app 的 `package.json`。加 app 时这几处必须同一个 commit 落地，否则构建中断（好在是显式失败，不会产出坏镜像）。
 - **资源增量要核算**：多一个服务意味着多一份 DB / Redis / MQ 连接池和一组消费者。需要给出新增连接数、消费者 prefetch 与队列积压的观测口径，避免拆完打爆连接上限。
 - **跨服务部署顺序有约束**：agent-service 的 rk 分流必须先于 lark-service 开始消费（否则新队列无生产者），而 lark-service 必须先能消费再切入站（否则积压）。
 - **部署中断在途任务**：channel-server 部署杀在途 chat_response 处理；agent-service 部署杀 rebuild / afterthought / world / life。
@@ -140,6 +148,8 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 
 **Task E — 泳道验证与生产切换**
 - **Goal**: 证明拆分后飞书链路端到端行为与拆分前一致，并在不丢消息、不双跑的前提下完成生产切换。**此阶段 channel-server 的飞书代码仍在，回滚是配置级的。**
+- **前置铁律**：在 `inbound_lane` 完成按 channel 分区（见决策八）之前，**不得把 lark-service 部署到任何泳道**——它抢到的消息会被静默丢弃，没有任何错误信号。切流期间还须确认每个队列只有一个订阅者。
+- **切流判据是 `/api/ready` 返回 200，不是 `/api/health`**：飞书 SDK 的 `start()` 只是异步发起重连、**不等待首次连接成功**，所以"进程起来了"完全不代表它在接飞书事件。两个端点职责已分开——`/api/health` 恒 200（liveness，重连抖动不该触发重启），`/api/ready` 在 `connected !== expected` 时返回 503。用错端点会造成"旧的已停、新的没连上"且无告警的静默断流窗口。
 - **Deliverable**: 泳道验证记录（命令 + 实际输出）；四个入口/owner 的切换与回滚执行记录。
 - **Verification**: 泳道内走通完整飞书往返（收消息、AI 回复、指令、撤回），lane 跨服务不丢；切换过程中确认四个 owner 各自唯一——WS 长连只有一个持有者、webhook 只指向一个服务、`inbound_lane.{lane}` 只有一个订阅者、定时任务只有一个执行者；切换后旧路径零流量、新路径全量，且期间无消息丢失或重复发送的证据。
 

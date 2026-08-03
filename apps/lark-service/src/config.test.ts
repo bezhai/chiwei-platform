@@ -10,6 +10,7 @@ const COMPLETE_ENV = {
     POSTGRES_DB: 'chiwei',
     REDIS_HOST: 'redis.internal',
     RABBITMQ_URL: 'amqp://mq.internal',
+    MONGO_HOST: 'mongo.internal',
 };
 
 describe('loadConfig', () => {
@@ -39,6 +40,7 @@ describe('loadConfig', () => {
         expect(message).toContain('POSTGRES_DB');
         expect(message).toContain('REDIS_HOST');
         expect(message).toContain('RABBITMQ_URL');
+        expect(message).toContain('MONGO_HOST');
         expect(message).not.toContain('POSTGRES_HOST');
     });
 
