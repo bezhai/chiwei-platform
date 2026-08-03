@@ -49,6 +49,7 @@ export class DailyPhotoService {
             await sendCard('oc_a79ce7cc8cc4afdcfd519532d0a917f5', card);
         } catch (e) {
             console.error('daily send new photo error:', e);
+            throw e;
         }
     }
 }
@@ -58,4 +59,3 @@ export const dailyPhotoService = new DailyPhotoService();
 
 // 注册定时任务
 registerCrontabService(dailyPhotoService);
-
