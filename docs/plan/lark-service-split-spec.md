@@ -138,6 +138,14 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 
 要真正堵住得引入本地 outbox（先落库再投递、后台补投），那是入口可靠性的独立议题，不该塞进拆分。
 
+**四、`/config` 指令写的灰度配置，agent-service 读不到——这条链路目前是断的。**
+
+`/config` 写进 `lark_base_chat_info.gray_config`（`plugins/lark/commands/command-handler.ts:176-182`），而 agent-service 的 `find_gray_config` 读的是 `common_conversation.attachment_policy["gray_config"]`（`app/data/queries/messages.py:281-299`）。全仓 grep 确认：TS 侧所有 `gray_config` 命中都落在 `lark_base_chat_info` 那一列上，没有任何一处往 `attachment_policy` 里写它；Python 侧对 `attachment_policy` 只有一处列定义和两处 select，只读不写。
+
+雪上加霜的是飞书投影**每条消息**都整体覆写 `attachment_policy`，所以即便有谁手工往里塞过 `gray_config`，下一条消息就会把它抹掉。
+
+这与拆分无关，是既有状态。写在这里是因为 Task D 要迁 `/config` 指令，照搬会把断链原样搬过去。迁之前需要 bezhai 确认这个功能是否还要——要就得决定灰度配置的权威位置在哪（`lark_base_chat_info` 是飞书私有表，而读它的是渠道无关的 agent-service，所以大概率该往 common 侧走），不要就连指令一起删掉，别搬一个不通的东西过去。
+
 ## Data & deployment impact
 
 - **无 schema 变更，无新表，无 DDL**。表的物理位置与结构完全不动，只换代码所有者。lark_* 七张表 + Mongo `lark_event` 归 lark-service 独占；common_* 五张表三方共写，写入矩阵见决策二。
