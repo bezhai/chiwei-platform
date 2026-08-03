@@ -177,9 +177,11 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **Verification**: 测试断言 rk 分流后飞书消息只进飞书队列、QQ 只进 QQ 队列，lane 后缀与 header 语义沿用已上线的 header-only 口径；**故意投递错 channel 时消费者拒绝并告警**（不能只测 happy path）；出站写事务原子性有测试掩护。**`safety_status` 的 recall 侧终态更新需要直接断言**——写入矩阵里它是三处字段级重叠中唯一还没有测试正面覆盖的（现有测试只覆盖了 agent-service 侧的"不写 blocked"），而拆分后飞书 recall 移到 lark-service，正是这个字段跨服务写入的地方。
 
 **Task D — 飞书专属业务迁移**
-- **Goal**: 10 条飞书指令、photo/meme/callback、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
+- **Goal**: 10 条飞书指令、photo/meme/callback、**入站附件管线**、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
+- **入站附件管线不能漏**：`enqueueLarkImagePipeline` / `enqueueLarkFilePipeline`（`plugins/lark/image-pipeline.ts`、`file-pipeline.ts`）把飞书的 image_key / file_key 交给 tool-service 下载存进 TOS。这是入站链路的一部分、不是指令，最初的任务划分里两边都没写到它。漏掉的后果是切流之后附件静默不再入库，`read_book` 之类依赖 TOS 里 `files/<file_key>` 的能力会稳定读不到东西——而且入站本身照常работа，不会有任何错误信号。搬的时候注意它的 gate 是 `allowDownloadResource()`（群没开"所有人可下载"就整体跳过），在 lark-service 侧对应 `attachment_policy.download_allowed`；两个管线都是 fire-and-forget，失败只记日志、不阻塞入站。
+- **`repeatMessage` 的并发前提变了**：拆分前整个规则段跑在 om_id 锁里，所以复读功能那套 Redis get-modify-set 天然是同一条消息串行的。lark-service 的 om_id 锁只包投影（见 Task B 的行为差异），规则段在锁外，多个 bot 会并发跑到它。搬之前要么让它自身幂等，要么自己取一把锁——`make_reply` 那把去重锁覆盖不到它（那把锁只在有待发 chat.request 意图时才取）。
 - **Deliverable**: 上述业务在 lark-service 下的实现（按决策六，先有行为断言测试再实现）；`lark_emoji` 仓储随之迁移。
-- **Verification**: 指令与服务测试在新服务下全绿；定时任务的 lane gate 行为保持（非 prod 部署不启动）；与拆分前的行为差异逐项列出并解释。
+- **Verification**: 指令与服务测试在新服务下全绿；定时任务的 lane gate 行为保持（非 prod 部署不启动）；附件管线在"群允许下载"和"群不允许"两种情况下的行为各有测试；与拆分前的行为差异逐项列出并解释。
 
 **Task E — 泳道验证与生产切换**
 - **Goal**: 证明拆分后飞书链路端到端行为与拆分前一致，并在不丢消息、不双跑的前提下完成生产切换。**此阶段 channel-server 的飞书代码仍在，回滚是配置级的。**
