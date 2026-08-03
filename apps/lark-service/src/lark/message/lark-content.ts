@@ -8,6 +8,8 @@
 // unsupported）是**已经写进历史消息记录的值**，改一个字面量就等于让旧消息读不出
 // 来。领域里管视频叫 video，但落到这里必须仍是 media。
 
+import { TextUtils } from '@inner/shared';
+
 import type { LarkInboundMessage, LarkSegment, LarkTextRun } from './parse-message';
 import type { LarkMentionIndex } from './mentions';
 
@@ -87,4 +89,57 @@ export function larkContentOf(
     mentions: LarkMentionIndex,
 ): LarkContentPart[] {
     return message.segments.flatMap((segment) => renderSegment(segment, mentions));
+}
+
+// ---------------------------------------------------------------------------
+// 读这份正文
+// ---------------------------------------------------------------------------
+//
+// 规则判定（`EqualText('余额')`、`ContainKeyword`、"只收纯文本"……）问的都是这几个
+// 问题。**它们必须建在这份飞书原生片段上，不能建在通用契约的 content 上** ——
+// 后者把 @ 内联回了文本，clearText 会变成含 "@赤尾" 的一串字，每条指令从此失配。
+//
+// 口径照拆分前的 MessageContentUtils 逐条重写：clearText 只认 text 片段、text()
+// 把 mention 渲染成 "@显示名"、isTextOnly 用 every（所以空正文算纯文本 —— QQ 那侧
+// 另外要求非空，两个渠道本来就不一致，这里按飞书那份走）。
+
+/** 指令匹配用的正文：只取文字片段，去掉残留的 `@_user_N`，空白折成单空格。 */
+export function larkClearText(parts: LarkContentPart[]): string {
+    return TextUtils.clearText(
+        parts
+            .filter((part) => part.type === 'text')
+            .map((part) => part.value)
+            .join(''),
+    );
+}
+
+/** 人在群里看到的那一串：@ 渲染成 "@显示名"，空白原样保留。 */
+export function larkText(parts: LarkContentPart[]): string {
+    return parts
+        .filter((part) => part.type === 'text' || part.type === 'mention')
+        .map((part) => (part.type === 'mention' ? `@${part.value}` : part.value))
+        .join('');
+}
+
+/** clearText 再去掉 `[表情]` / `<标记>` 这类不是用户写的字的东西。 */
+export function larkWithoutEmojiText(parts: LarkContentPart[]): string {
+    return TextUtils.removeEmoji(larkClearText(parts));
+}
+
+export function larkIsTextOnly(parts: LarkContentPart[]): boolean {
+    return parts.every((part) => part.type === 'text' || part.type === 'mention');
+}
+
+export function larkIsStickerOnly(parts: LarkContentPart[]): boolean {
+    return parts.length === 1 && parts[0]!.type === 'sticker';
+}
+
+/** 没有表情包时是空串 —— 调用方按空串判断"这条没有"。 */
+export function larkStickerKey(parts: LarkContentPart[]): string {
+    return parts.find((part) => part.type === 'sticker')?.value ?? '';
+}
+
+/** 只有 image 片段算图片：视频的封面图在 media 片段的 meta 里，不是一张图。 */
+export function larkImageKeys(parts: LarkContentPart[]): string[] {
+    return parts.filter((part) => part.type === 'image').map((part) => part.value);
 }

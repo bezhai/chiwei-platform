@@ -19,6 +19,7 @@ import type { LarkMessageEvent } from '../message/wire';
 import { projectLarkInbound, type LarkInboundDeps, type LarkInboundOutcome } from './inbound-projection';
 import type {
     CommonConversationRow,
+    CommonMessageClaim,
     CommonMessageRow,
     CommonUserRow,
     LarkChatKey,
@@ -200,6 +201,17 @@ class MemoryLarkTables implements LarkStore {
             throw new Error('duplicate key value violates unique constraint "lark_message_pkey"');
         }
         this.larkMessages.set(row.om_id, { ...row });
+    }
+
+    // 投影不认领 —— 那是规则段抢到去重锁之后的事（见 rules/inbound-rules.ts）。
+    // 这里实现它只是为了让这份替身完整地满足端口。
+    async claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void> {
+        const row = this.commonMessages.get(claim.common_message_id);
+        if (!row || row.role !== 'user') {
+            throw new Error(`no user message ${claim.common_message_id} to claim`);
+        }
+        row.bot_name = claim.bot_name;
+        row.common_user_id = claim.common_user_id;
     }
 
     async markBotPresent(

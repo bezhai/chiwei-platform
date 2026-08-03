@@ -51,12 +51,41 @@ describe('resolveLarkMentions', () => {
         ]);
     });
 
-    // 人不是机器人，没必要问 bot 目录 —— 每条群消息都会走这里，多余的遍历是白花的。
-    it('does not consult the bot directory for a human mention', () => {
+    // 目录是唯一的判据：一个 mention 是不是我们的 bot，只有问过才知道。
+    it('asks the directory about every mention, including one that looks human', () => {
         const bots = lookup();
-        resolveLarkMentions([mention()], bots);
-        expect(bots.appIdCalls).toEqual([]);
-        expect(bots.unionIdCalls).toEqual([]);
+        const index = resolveLarkMentions([mention()], bots);
+        expect(bots.unionIdCalls).toEqual(['on_human']);
+        expect(index.all[0]!.botCommonUserId).toBeUndefined();
+    });
+
+    // 飞书把我们自己 bot 的 mention 标成 user（或者老格式事件根本不带这个字段）
+    // 时，认不出来的后果是双份的：botCommonUserId 为空 → NeedRobotMention 判定
+    // "没被 @" → 群里 @ 赤尾不回复；同时这个 bot 会掉进真人分支，被铸出一个"真人"
+    // common_user。所以判据只能是 app_id / union_id 命中目录，不能再加条件。
+    it('identifies one of our bots even when Lark labels the mention as a user', () => {
+        const index = resolveLarkMentions(
+            [
+                mention({
+                    mentioned_type: 'user',
+                    bot_info: { app_id: 'cli_a' },
+                    id: { union_id: 'on_bot' },
+                    name: 'chiwei-raw',
+                }),
+            ],
+            lookup({ byAppId: { cli_a: persona } }),
+        );
+        expect(index.all[0]!.displayName).toBe('赤尾');
+        expect(index.all[0]!.botCommonUserId).toBe('cu_chiwei');
+    });
+
+    it('identifies one of our bots when the event carries no mentioned_type at all', () => {
+        const index = resolveLarkMentions(
+            [mention({ id: { union_id: 'on_bot' }, name: 'chiwei-raw' })],
+            lookup({ byUnionId: { on_bot: persona } }),
+        );
+        expect(index.all[0]!.displayName).toBe('赤尾');
+        expect(index.all[0]!.botCommonUserId).toBe('cu_chiwei');
     });
 
     it('names a registered bot by its persona, not by the raw Lark name', () => {
@@ -73,6 +102,38 @@ describe('resolveLarkMentions', () => {
         );
         expect(index.all[0]!.displayName).toBe('赤尾');
         expect(index.all[0]!.botCommonUserId).toBe('cu_chiwei');
+    });
+
+    // app_id 认不出来**不等于**不是我们的 bot：新 bot 刚上线时目录里可能还没有它的
+    // app_id、但 union_id 已经在了。在这里短路的后果跟上面那条一样 —— 群里 @ 不回复，
+    // 外加给这个 bot 铸一个"真人"common_user。两个都问过才能说"不是我们的"。
+    it('falls back to the union id when the app id is not in the directory', () => {
+        const bots = lookup({ byUnionId: { on_bot: persona } });
+        const index = resolveLarkMentions(
+            [
+                mention({
+                    mentioned_type: 'bot',
+                    bot_info: { app_id: 'cli_not_yet_known' },
+                    id: { union_id: 'on_bot' },
+                    name: 'chiwei-raw',
+                }),
+            ],
+            bots,
+        );
+        expect(bots.appIdCalls).toEqual(['cli_not_yet_known']);
+        expect(bots.unionIdCalls).toEqual(['on_bot']);
+        expect(index.all[0]!.displayName).toBe('赤尾');
+        expect(index.all[0]!.botCommonUserId).toBe('cu_chiwei');
+    });
+
+    // 反过来：app_id 就能认出来时不必再问一遍 union_id。
+    it('stops at the app id when that already identifies one of our bots', () => {
+        const bots = lookup({ byAppId: { cli_a: persona } });
+        resolveLarkMentions(
+            [mention({ mentioned_type: 'bot', bot_info: { app_id: 'cli_a' }, id: { union_id: 'on_bot' } })],
+            bots,
+        );
+        expect(bots.unionIdCalls).toEqual([]);
     });
 
     it('finds a bot by union id when the event carries no app id', () => {

@@ -383,6 +383,37 @@ describe('认领：自然键首写者成为 canonical', () => {
         expect(update.params).toEqual(['cu_canonical', 'cli_a', 'ou_1']);
     });
 
+    // 认领：抢到去重锁的那个 bot 才把这条消息记成自己的（见 rules/inbound-rules.ts）。
+    it('认领消息时只改 bot_name 与发送者，且只认 user 那一行', async () => {
+        h.reply([{ affected: 1 }]);
+
+        await h.store.claimCommonMessageForBot({
+            common_message_id: 'cm_1',
+            bot_name: 'chiwei',
+            common_user_id: 'cu_sender',
+        });
+
+        const update = h.sqlOf('UPDATE "common_message"');
+        expect(update.sql).toContain('"bot_name" =');
+        expect(update.sql).toContain('"common_user_id" =');
+        expect(update.sql).toContain('"role" =');
+        expect(update.params).toEqual(['chiwei', 'cu_sender', 'cm_1', 'user']);
+    });
+
+    // 认领不到 = 这条消息根本没落进 common_message。继续往下发请求的话，下游按
+    // message_id 回查会读空、直接走"未找到消息记录"短路 —— 必须在这里炸。
+    it('认领不到任何一行时直接炸', async () => {
+        h.reply([]);
+
+        await expect(
+            h.store.claimCommonMessageForBot({
+                common_message_id: 'cm_missing',
+                bot_name: 'chiwei',
+                common_user_id: 'cu_sender',
+            }),
+        ).rejects.toThrow(/cm_missing/);
+    });
+
     // 重放的地基：同一条消息第二次进来时这条语句必须是静默的 no-op。
     it('common_message 是 insert-or-ignore', async () => {
         await h.store.insertCommonMessage({

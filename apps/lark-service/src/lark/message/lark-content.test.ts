@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'bun:test';
 
-import { larkContentOf } from './lark-content';
+import {
+    larkClearText,
+    larkContentOf,
+    larkImageKeys,
+    larkIsStickerOnly,
+    larkIsTextOnly,
+    larkStickerKey,
+    larkText,
+    larkWithoutEmojiText,
+    type LarkContentPart,
+} from './lark-content';
 import { resolveLarkMentions, type LarkBotLookup } from './mentions';
 import { parseLarkMessage } from './parse-message';
 import type { LarkMention, LarkMessageEvent } from './wire';
@@ -156,5 +166,118 @@ describe('larkContentOf', () => {
             { type: 'image', value: 'img_p' },
             { type: 'text', value: 'second' },
         ]);
+    });
+});
+
+// 规则判定读到的正文。**建在飞书原生片段上，不建在通用契约的 content 上** ——
+// 后者把 @ 内联回了文本（"@赤尾 余额"），clearText 会留下那个名字，`EqualText('余额')`
+// 这类指令从此全部失配。口径照拆分前的 MessageContentUtils 逐条重写。
+function parts(...items: LarkContentPart[]): LarkContentPart[] {
+    return items;
+}
+
+const text = (value: string): LarkContentPart => ({ type: 'text', value });
+const mention = (value: string): LarkContentPart => ({ type: 'mention', value, meta: {} });
+
+describe('larkClearText', () => {
+    // 指令匹配用的就是这一个。@ 片段整段不算数 —— 群里必须 @ 机器人才说得上话，
+    // 把名字混进正文的话每条指令都得先想办法把它摘掉。
+    it('keeps only the literal text, dropping mentions entirely', () => {
+        expect(larkClearText(parts(mention('赤尾'), text(' 余额')))).toBe('余额');
+    });
+
+    it('collapses runs of whitespace and trims the ends', () => {
+        expect(larkClearText(parts(text('  查   一下\n余额  ')))).toBe('查 一下 余额');
+    });
+
+    // 正文里没对上 mention 记录的占位符会原样留成文字（见 larkContentOf）。
+    // 它不是用户写的字，不能进指令匹配。
+    it('strips a mention token that stayed literal', () => {
+        expect(larkClearText(parts(text('@_user_7 余额')))).toBe('余额');
+    });
+
+    // 非文字片段整段不参与，被它隔开的两段文字直接相接（拆分前就是这样拼的）。
+    it('ignores images, stickers and every other non-text part', () => {
+        expect(
+            larkClearText(parts(text('看'), { type: 'image', value: 'img_1' }, text('这个'))),
+        ).toBe('看这个');
+    });
+
+    it('reads an empty content as an empty string', () => {
+        expect(larkClearText([])).toBe('');
+    });
+});
+
+describe('larkText', () => {
+    // 关键词匹配读的是这一个：@ 渲染成 "@显示名"，与人在群里看到的一致。
+    it('renders a mention inline as @display-name', () => {
+        expect(larkText(parts(mention('赤尾'), text(' 在吗')))).toBe('@赤尾 在吗');
+    });
+
+    it('leaves whitespace alone', () => {
+        expect(larkText(parts(text('  a  b  ')))).toBe('  a  b  ');
+    });
+
+    it('skips non-text parts', () => {
+        expect(larkText(parts(text('a'), { type: 'sticker', value: 'stk' }, text('b')))).toBe('ab');
+    });
+});
+
+describe('larkWithoutEmojiText', () => {
+    // [xxx] 和 <xxx> 是飞书的表情与富文本标记。它们不该参与文本匹配。
+    it('drops bracketed emoji markers from the cleared text', () => {
+        expect(larkWithoutEmojiText(parts(text('好的[微笑]<at>')))).toBe('好的');
+    });
+
+    it('clears the text first, so mentions never come back', () => {
+        expect(larkWithoutEmojiText(parts(mention('赤尾'), text(' 好 [笑]')))).toBe('好 ');
+    });
+});
+
+describe('larkIsTextOnly', () => {
+    it('is true when every part is text or a mention', () => {
+        expect(larkIsTextOnly(parts(mention('赤尾'), text(' hi')))).toBe(true);
+    });
+
+    it('is false as soon as one part is not', () => {
+        expect(larkIsTextOnly(parts(text('hi'), { type: 'image', value: 'img_1' }))).toBe(false);
+    });
+
+    // 空正文算"纯文本"。这是飞书拆分前的口径（`every` 对空数组为真），QQ 那侧另外
+    // 要求 length > 0 —— 两个渠道本来就不一致，这里按飞书那份走。
+    it('is true for an empty content, matching the pre-split Lark behaviour', () => {
+        expect(larkIsTextOnly([])).toBe(true);
+    });
+});
+
+describe('larkIsStickerOnly', () => {
+    it('is true only when the whole message is one sticker', () => {
+        expect(larkIsStickerOnly(parts({ type: 'sticker', value: 'stk' }))).toBe(true);
+    });
+
+    it('is false when the sticker comes with anything else', () => {
+        expect(larkIsStickerOnly(parts({ type: 'sticker', value: 'stk' }, text('哈')))).toBe(false);
+        expect(larkIsStickerOnly([])).toBe(false);
+    });
+});
+
+describe('larkStickerKey / larkImageKeys', () => {
+    it('answers with the first sticker key, or an empty string when there is none', () => {
+        expect(larkStickerKey(parts(text('a'), { type: 'sticker', value: 'stk_1' }))).toBe('stk_1');
+        expect(larkStickerKey(parts(text('a')))).toBe('');
+    });
+
+    it('answers with every image key, in order', () => {
+        expect(
+            larkImageKeys(
+                parts(
+                    { type: 'image', value: 'img_1' },
+                    text('a'),
+                    { type: 'image', value: 'img_2' },
+                    // 视频的封面图落在 media 片段的 meta 里，不是一张图片。
+                    { type: 'media', value: 'f_v', meta: { image_key: 'i_v' } },
+                ),
+            ),
+        ).toEqual(['img_1', 'img_2']);
     });
 });

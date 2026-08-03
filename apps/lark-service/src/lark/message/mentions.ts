@@ -38,14 +38,25 @@ export interface LarkMentionIndex {
 }
 
 /**
- * 只有 `mentioned_type === 'bot'` 才值得查目录。飞书优先给 bot_info.app_id，
- * 老一点的事件只有 union_id。
+ * 判据只有一条：app_id 或 union_id 命中我们的 bot 目录。飞书优先给
+ * bot_info.app_id，老一点的事件只有 union_id。
+ *
+ * **两个都要问过才能说"不是我们的"。** app_id 认不出来不等于不是自家 bot —— 新 bot
+ * 刚上线那段时间，目录里可能还没有它的 app_id，但 union_id 已经在了。在 app_id 这一步
+ * 短路会把它当成陌生人。
+ *
+ * **刻意不看 `mentioned_type`。** 它是飞书那侧的标注，不是我们的事实，而且事件格式
+ * 演进过（老事件连 bot_info 都没有）。
+ *
+ * 这两处放宽针对的是同一个失效模式，而且后果是双份的：认不出自家 bot →
+ * botCommonUserId 为空 → NeedRobotMention 判定"没被 @" → 群里 @ 赤尾不回复；同时这个
+ * bot 会掉进真人分支，被按 open_id 铸出一个"真人"common_user，往库里落脏数据。目录
+ * 命中本身就是充分判据，任何额外条件都只是更严格，换不来任何东西。
  */
 function findOurBot(mention: LarkMention, bots: LarkBotLookup): LarkBotIdentity | null {
-    if (mention.mentioned_type !== 'bot') return null;
-    if (mention.bot_info?.app_id) return bots.byAppId(mention.bot_info.app_id);
-    if (mention.id.union_id) return bots.byUnionId(mention.id.union_id);
-    return null;
+    const byAppId = mention.bot_info?.app_id ? bots.byAppId(mention.bot_info.app_id) : null;
+    if (byAppId) return byAppId;
+    return mention.id.union_id ? bots.byUnionId(mention.id.union_id) : null;
 }
 
 /**

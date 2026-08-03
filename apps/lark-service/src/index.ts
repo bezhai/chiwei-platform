@@ -12,6 +12,7 @@ import { getRedisClient, resetRedisClient } from '@inner/shared/cache';
 import { getLaneBindingResolver } from '@inner/shared/lane-binding';
 import { getMongoService, resetMongoService } from '@inner/shared/mongo';
 import { getLane, rabbitmqClient } from '@inner/shared/mq';
+import { NotBlocked } from '@inner/shared/rules';
 
 import { loadConfig } from './config';
 import { larkAppIdOf } from './lark/bot-lookup';
@@ -28,6 +29,13 @@ import {
 } from './lark/projection/inbound-projection';
 import { larkMessageLock, redisMessageLockStore } from './lark/projection/message-lock';
 import { postgresLarkTables } from './lark/projection/postgres-tables';
+import type { LarkStore } from './lark/projection/tables';
+import { receiveLarkMessage } from './lark/receive-message';
+import {
+    applyLarkRules,
+    assembleLarkRules,
+    type LarkRulesDeps,
+} from './lark/rules/inbound-rules';
 import { larkDataSource } from './ormconfig';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
@@ -54,9 +62,9 @@ function realBackends(): LarkBackends {
  * 投影的真实装配：库、Redis 锁、泳道绑定、MQ 全在这里接上，投影本身一个单例都不
  * 认识（见 lark/projection/inbound-projection.ts 的 LarkInboundDeps）。
  */
-function realProjection(): LarkInboundDeps {
+function realProjection(store: LarkStore): LarkInboundDeps {
     return {
-        store: postgresLarkTables(larkDataSource()),
+        store,
         // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候来的"的排序依据。
         newCommonId: () => Bun.randomUUIDv7(),
         appIdOfBot: (botName) => larkAppIdOf(botDirectory, botName),
@@ -72,6 +80,22 @@ function realProjection(): LarkInboundDeps {
 }
 
 /**
+ * 规则段的真实装配。接线本身在 lark/rules/inbound-rules.ts（那里能测），这里只负责
+ * 把本进程的那几个单例递进去。
+ *
+ * 去重标记与投影锁共用同一份 Redis 实现：比对持有者再删的那段 Lua 全仓只写一次。
+ */
+function realRules(store: LarkStore): LarkRulesDeps {
+    return assembleLarkRules({
+        bots: botDirectory,
+        store,
+        marker: redisMessageLockStore(getRedisClient),
+        broker: rabbitmqClient,
+        notBlocked: NotBlocked,
+    });
+}
+
+/**
  * 飞书入站的真实装配。必须在 bootLarkService 之后调用：人设名要查库，bot 目录也
  * 得先加载完。
  */
@@ -82,25 +106,25 @@ async function realInbound(): Promise<LarkInbound> {
         .filter((id): id is string => Boolean(id));
     const personaName = await loadLarkPersonaNames(larkDataSource(), personaIds);
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
-    const projection = realProjection();
+    const store = postgresLarkTables(larkDataSource());
+    const projection = realProjection(store);
+    const rules = realRules(store);
 
     return createLarkInbound({
         roster: botDirectory,
         personaName,
         record: (payload) => eventLog.insertOne(payload as Document),
-        onMessage: async (reading, event) => {
-            const outcome = await projectLarkInbound(projection, reading, event);
-            // 本段到落账为止。规则与指令、发 chat.request 接在这里 —— 它们要的那组
-            // 公共层 id 就在 outcome.projection 里。交给泳道的那一支已经在投影内部
-            // 打过日志了。
-            if (outcome.kind === 'recorded') {
-                console.info(
-                    `[lark-inbound] recorded ${reading.message.messageType} message ` +
-                        `${reading.message.messageId} as ${outcome.projection.commonMessageId} ` +
-                        `in conversation ${outcome.projection.commonConversationId}`,
-                );
-            }
-        },
+        onMessage: (reading, event) =>
+            receiveLarkMessage(
+                {
+                    project: (r, e) => projectLarkInbound(projection, r, e),
+                    applyRules: async (r, p, e) => {
+                        await applyLarkRules(rules, r, p, e);
+                    },
+                },
+                reading,
+                event,
+            ),
     });
 }
 
