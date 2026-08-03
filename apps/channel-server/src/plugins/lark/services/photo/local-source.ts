@@ -1,6 +1,5 @@
 import * as Minio from 'minio';
 import { MongoClient, type Collection, type Document, type Filter } from 'mongodb';
-import { getOss } from '@aliyun/oss';
 import { StatusMode } from 'types/pixiv';
 import type { ImageForLark, ListPixivImageDto, ReportLarkUploadDto } from 'types/pixiv';
 
@@ -47,11 +46,6 @@ export interface LocalPixivCandidatePage {
 
 interface LocalPixivCandidateDependencies {
     collection?: LocalPixivCandidateCollection;
-}
-
-interface LocalPixivImageContentDependencies {
-    readMinio(tosFileName: string): Promise<Buffer>;
-    readOss(tosFileName: string): Promise<Buffer>;
 }
 
 let mongoClient: MongoClient | null = null;
@@ -220,28 +214,8 @@ export function buildLocalPixivCandidatePipeline(request: LocalPixivCandidateReq
 }
 
 export async function getLocalPixivImageContent(tosFileName: string): Promise<Buffer> {
-    return getLocalPixivImageContentWith(tosFileName, {
-        async readMinio(key) {
-            const stream = await getMinioClient().getObject(getMinioBucket(), minioObjectName(key));
-            return streamToBuffer(stream);
-        },
-        async readOss(key) {
-            const object = await getOss().getFile(key);
-            return Buffer.isBuffer(object.content) ? object.content : Buffer.from(object.content);
-        },
-    });
-}
-
-export async function getLocalPixivImageContentWith(
-    tosFileName: string,
-    dependencies: LocalPixivImageContentDependencies,
-): Promise<Buffer> {
-    try {
-        return await dependencies.readMinio(tosFileName);
-    } catch {
-        console.warn(`MinIO image read failed; falling back to OSS: ${tosFileName}`);
-        return dependencies.readOss(tosFileName);
-    }
+    const stream = await getMinioClient().getObject(getMinioBucket(), minioObjectName(tosFileName));
+    return streamToBuffer(stream);
 }
 
 export async function reportLocalLarkUpload(params: ReportLarkUploadDto): Promise<void> {

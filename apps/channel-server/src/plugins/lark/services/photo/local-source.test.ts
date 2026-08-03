@@ -6,7 +6,6 @@ import {
     buildLocalPixivImageFilter,
     dedupePixivAddrs,
     getLocalPixivImageCandidates,
-    getLocalPixivImageContentWith,
     mapLocalPixivImageDoc,
     minioObjectName,
 } from './local-source';
@@ -152,22 +151,6 @@ describe('local pixiv image source', () => {
     it('uses basename as the local MinIO object name', () => {
         expect(minioObjectName('pixiv_img_v2/20260604/12345678_p0.png')).toBe('12345678_p0.png');
         expect(minioObjectName('12345678_p0.png')).toBe('12345678_p0.png');
-    });
-
-    it('falls back to the full OSS key when MinIO cannot read the image', async () => {
-        const readMinio = mock(async () => {
-            throw new Error('InvalidAccessKeyId');
-        });
-        const readOss = mock(async () => Buffer.from('image-from-oss'));
-
-        const content = await getLocalPixivImageContentWith(
-            'pixiv_img_v2/20260604/12345678_p0.png',
-            { readMinio, readOss },
-        );
-
-        expect(content.toString()).toBe('image-from-oss');
-        expect(readMinio).toHaveBeenCalledWith('pixiv_img_v2/20260604/12345678_p0.png');
-        expect(readOss).toHaveBeenCalledWith('pixiv_img_v2/20260604/12345678_p0.png');
     });
 
     it('maps local Mongo docs to ImageForLark fields', () => {
