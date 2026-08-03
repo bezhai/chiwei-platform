@@ -7,6 +7,7 @@ agent-service payload names, where ``message_id`` is the common message id.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, or_, text, update
@@ -608,7 +609,10 @@ async def find_persona_spoken_chats_in_window(
 
 
 def _life_chat_message(
-    record: CommonMessageRecord, msg_persona: str | None, persona_id: str
+    record: CommonMessageRecord,
+    msg_persona: str | None,
+    persona_id: str,
+    now: datetime,
 ) -> LifeChatMessage:
     """把一条 common 消息 + 它的发言 persona 折成 life 读对话用的可读形态。
 
@@ -617,7 +621,9 @@ def _life_chat_message(
     ``COALESCE(agent_response, bot_config 兜底)`` 取、含 proactive 出站行归属）。
     展示名：她自己用 persona_id；别的 persona 用它的 persona_id；真人用
     ``sender_display_name`` 兜底（不暴露 raw user_id）。CST 时间走项目 cst_time 归一
-    （``event_time`` 毫秒整数 → ``str`` 喂 ``to_cst_hm``，与历史毫秒口径一致）。
+    （``event_time`` 毫秒整数 → ``str`` 喂 ``to_cst_dated``，与历史毫秒口径一致）：
+    当天的只给时分，**跨天的补上 MM-DD**——回看窗口冷启时回退 6 小时、经常跨夜，
+    只给 ``23:41 CST`` 她分不清那是昨晚还是刚才（线上事故 2026-08-03）。
     """
     is_self = record.role == "assistant" and msg_persona == persona_id
     if is_self:
@@ -631,7 +637,9 @@ def _life_chat_message(
         speaker_display_name=speaker,
         is_self=is_self,
         text=json.loads(record.content).get("text", "") if record.content else "",
-        cst_time=cst_time.to_cst_hm(str(record.create_time)),
+        cst_time=cst_time.to_cst_dated(
+            str(record.create_time), now=now, seconds=False
+        ),
     )
 
 
@@ -716,6 +724,7 @@ async def find_persona_related_chats_recent(
     since_ms: int,
     max_conversations: int,
     per_chat_limit: int,
+    now: datetime,
 ) -> list[LifeChatConversation]:
     """她相关会话（真人私聊 + 白名单内的群）的最近一段消息 —— life 醒来实时拉对话。
 
@@ -734,6 +743,10 @@ async def find_persona_related_chats_recent(
     量控制不字符截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按发生先后升序。每条折成
     ``LifeChatMessage``（发言者展示名 / 是否她自己 / 文本 / CST 时间），返回
     ``LifeChatConversation`` 列表（chat_id + scope + 群名 + 消息列表 + 私聊对面真人）。
+
+    ``now`` 由调用方给、不在这里现取：消息时间戳「同一天省日期、跨天补 MM-DD」要拿
+    调用方那一轮的同一个「今天」去比。自己现取会和调用方的 now 差开——跨午夜那一瞬
+    两边落在不同日历日，同一屏 stimulus 里的日期口径就自相矛盾。
 
     私聊会话额外聚合「对面是谁」（主动私聊具名化 Task 1）：对选中的私聊**批量一次**
     经 :func:`_direct_counterparts_by_chat` 解析对方真人（口径见该函数——按全历史
@@ -824,7 +837,7 @@ async def find_persona_related_chats_recent(
         # 一批 (record, 发言 persona)：消息渲染与文件候选都从这同一批派生（同一边界）。
         record_pairs = [(_record(msg), msg_persona) for msg, msg_persona in rows]
         messages = [
-            _life_chat_message(record, msg_persona, persona_id)
+            _life_chat_message(record, msg_persona, persona_id, now)
             for record, msg_persona in record_pairs
         ]
         messages.reverse()

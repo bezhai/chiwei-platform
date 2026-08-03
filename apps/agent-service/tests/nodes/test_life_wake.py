@@ -243,6 +243,14 @@ def patched(monkeypatch):
     async def fake_read_day_page_before(*, lane, persona_id, before_date):
         return None
 
+    # 日照锚点默认桩成「算不出」（空串）：真实的 today_daylight_text 会读 Dynamic
+    # Config（缓存 miss 时是同步 httpx），节点测试不该碰网络、也不该被外部配置左右。
+    # 需要验日照的用例自己 monkeypatch 覆盖它。
+    async def fake_daylight(day):
+        return ""
+
+    monkeypatch.setattr(lw, "today_daylight_text", fake_daylight)
+
     monkeypatch.setattr(lw, "find_life_state", fake_find)
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
     monkeypatch.setattr(lw, "mark_events_read", fake_mark)
@@ -258,7 +266,7 @@ def patched(monkeypatch):
         return list(state["notebook"])
 
     async def fake_find_recent_chats(
-        *, persona_id, since_ms, max_conversations, per_chat_limit
+        *, persona_id, since_ms, max_conversations, per_chat_limit, now
     ):
         state["recent_chat_calls"].append(
             {
@@ -266,6 +274,7 @@ def patched(monkeypatch):
                 "since_ms": since_ms,
                 "max_conversations": max_conversations,
                 "per_chat_limit": per_chat_limit,
+                "now": now,
             }
         )
         if state["recent_chat_raises"] is not None:
@@ -4096,3 +4105,203 @@ def test_life_wake_cfg_uses_life_model_alias():
     assert lw._LIFE_WAKE_CFG.prompt_id == "life_wake"
     assert lw._LIFE_WAKE_CFG.model_id == "life-model"
     assert lw._LIFE_WAKE_CFG.trace_name == "life-wake"
+
+
+# ---------------------------------------------------------------------------
+# 时间锚加固（prod 事故 2026-08-03：akao 在中午 13:18 往群里发「大半夜的发什么疯、
+# 赶紧滚去睡觉」，并把「晚上八点」jot_down 进本子固化成记忆）。
+#
+# 事后从 langfuse trace 复盘出来的三条：
+#   1. SYSTEM 里一个时间字都没有，唯一的时钟夹在 USER stimulus 中段，后面还跟着
+#      一整片只有 HH:MM 没有日期的时间戳 —— 数字锚输给了「下班/回家/躺平」的语义氛围。
+#   2. world 在 #308 之后有两重锚（时刻置顶 + 当天日出日落），life 一重都没有。
+#   3. 群聊窗口用上一轮 observed_at 做水位，life 轮次越密窗口越窄，窄到只剩她自己
+#      刚说的那两句回声，她顺着自己的错误推断越滑越远。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_current_time_is_first_thing_in_user_stimulus(patched, monkeypatch):
+    """时刻行必须是 USER stimulus 的第一段，不能被本子 / 群聊挤到中段。
+
+    prod 事故根因之一：唯一的时钟夹在本子和群聊之后，模型先读到一屏「下班了」
+    「快点回家躺着」，再读到「现在是 ... 13:16」，语义氛围压过了数字锚。world
+    的 ``【现实此刻】`` 是置顶的，life 也必须置顶。
+    """
+    patched["notebook"] = [
+        _notebook_entry("n1", "田申耳鸣：看了四家医院都没用，记得请他喝奶茶")
+    ]
+    patched["recent_chats"] = [
+        _life_chat_conversation(
+            messages=[
+                _life_chat_message(is_self=False, text="下班了", cst_time="13:13 CST"),
+                _life_chat_message(is_self=True, text="快点回家躺着啦", cst_time="13:14 CST"),
+            ]
+        )
+    ]
+    patched["unread"] = [_envelope("e1", "雨还在下")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][-1].text()
+    assert stimulus.lstrip().startswith("现在是 "), (
+        f"时刻行必须是 stimulus 第一段（否则语义氛围会压过数字锚），实际开头 "
+        f"{stimulus[:120]!r}"
+    )
+    assert stimulus.index("现在是 ") < stimulus.index("下班了"), (
+        "时刻行必须排在群聊之前"
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_time_carries_daylight_anchor(patched, monkeypatch):
+    """时刻行后面贴当天日出日落，和 world 同一口径（#308 已在 world 验证有效）。
+
+    只给客观天文事实，不给「几点之后算晚上」的判断（赤尾宪法：不替她下结论）。
+    """
+    async def fake_daylight(day):
+        return "（今天日出 06:02、日落 19:13）"
+
+    monkeypatch.setattr(lw, "today_daylight_text", fake_daylight)
+    patched["unread"] = [_envelope("e1", "雨还在下")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][-1].text()
+    assert "日出 06:02" in stimulus and "日落 19:13" in stimulus, (
+        f"时刻行该带当天日照锚，实际 {stimulus[:200]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_daylight_failure_does_not_kill_the_round(patched, monkeypatch):
+    """日照算不出来（坐标没配 / 极昼极夜 / 抛错）只是少一个锚，绝不炸整轮。"""
+    async def boom(day):
+        raise RuntimeError("dynamic config 挂了")
+
+    monkeypatch.setattr(lw, "today_daylight_text", boom)
+    patched["unread"] = [_envelope("e1", "雨还在下")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][-1].text()
+    assert "现在是 " in stimulus, "日照失败不该带走时刻行本身"
+    assert patched["marked"], "日照失败不该让整轮 early-return / 不标已读"
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_window_has_minimum_lookback(patched, monkeypatch):
+    """群聊回看窗口有下限：life 轮次再密，也要看得到足够的外部对话。
+
+    prod 事故根因之三：水位 = 上一轮 observed_at，life 每 45s–2min 一轮，窗口就
+    只有一两分钟 —— 她读到的「群里正在发生什么」只剩自己刚说的两句回声，于是顺着
+    自己的错误推断自我加固。窗口下限保证外部上下文进得来（规模仍由每会话 10 条上限兜住）。
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    # 上一轮就在 90 秒前 —— 典型的密集轮次
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在沙发上",
+        response_mood="平静",
+        activity_type="rest",
+        observed_at=(now - timedelta(seconds=90)).isoformat(),
+    )
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    since_ms = patched["recent_chat_calls"][0]["since_ms"]
+    floor_ms = int(now.timestamp() * 1000) - lw._RECENT_CHAT_MIN_LOOKBACK_MS
+    assert since_ms <= floor_ms, (
+        f"上一轮才过 90 秒，窗口不能跟着收缩到 90 秒 —— 至少要回看 "
+        f"{lw._RECENT_CHAT_MIN_LOOKBACK_MS // 60000} 分钟，实际 since_ms={since_ms} "
+        f"(floor={floor_ms})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_window_never_shrinks_below_watermark(patched, monkeypatch):
+    """水位比下限更早时以水位为准（该看的旧聊天不能因为下限被砍掉）。"""
+    from datetime import datetime, timedelta
+
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    observed_at = (now - timedelta(hours=3)).isoformat()
+    patched["snapshot"] = LifeState(
+        lane="coe-t3",
+        persona_id="akao",
+        current_state="在沙发上",
+        response_mood="平静",
+        activity_type="rest",
+        observed_at=observed_at,
+    )
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    expected = int(lw.cst_time.parse(observed_at).timestamp() * 1000)
+    assert patched["recent_chat_calls"][0]["since_ms"] == expected, (
+        "水位早于下限时以水位为准，不能被下限往后推"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cross_day_event_timestamp_carries_date(patched, monkeypatch):
+    """不是今天发生的事件，时间戳要带日期 —— 否则昨晚 20:47 和今晚 20:47 长得一模一样。
+
+    信箱没有时间窗、也没有 TTL，昨晚积压的未读会原样进来。只给 ``20:47:12 CST``
+    她无从分辨那是几个小时前还是一天前。
+    """
+    from datetime import datetime
+
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    patched["unread"] = [
+        _envelope("e-old", "昨晚的动静", occurred_at="2026-06-02T20:47:12+08:00"),
+        _envelope("e-new", "刚才的动静", occurred_at="2026-06-03T13:15:00+08:00"),
+    ]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    stimulus = _FakeAgent.last_run()["messages"][-1].text()
+    old_line = next(l for l in stimulus.splitlines() if "昨晚的动静" in l)
+    new_line = next(l for l in stimulus.splitlines() if "刚才的动静" in l)
+    assert "06-02" in old_line, (
+        f"跨天事件必须带日期，实际 {old_line!r}"
+    )
+    assert "06-03" not in new_line, (
+        f"当天事件保持简洁不带日期（省 token、不干扰阅读），实际 {new_line!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_query_shares_the_round_now(patched, monkeypatch):
+    """聊天查询拿到的「现在」必须是本轮那一个 now，不能让查询层自己现取。
+
+    消息时间戳「同一天省日期、跨天补 MM-DD」要跟 stimulus 顶部那行时刻用同一个
+    「今天」去比。查询层自己 ``now_cst()`` 会和本轮的 now 差开，跨午夜那一瞬两边
+    落在不同日历日——同一屏 stimulus 里，顶部说今天是 6/4，聊天记录却把 00:10 的
+    消息标成「06-04」当跨天处理，日期口径自相矛盾。
+    """
+    from datetime import datetime
+
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=lw.cst_time.CST)
+    monkeypatch.setattr(lw.cst_time, "now_cst", lambda: now)
+    patched["unread"] = [_envelope("e1", "门铃响了")]
+    _FakeAgent.install(monkeypatch, script=None)
+
+    await lw.life_wake_node(EventArrived(lane="coe-t3", persona_id="akao"))
+
+    assert patched["recent_chat_calls"][0]["now"] == now, (
+        "聊天查询必须收到本轮的 now，不能自己现取"
+    )

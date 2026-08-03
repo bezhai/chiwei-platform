@@ -144,6 +144,14 @@ def patched(monkeypatch):
 
     import app.domain.arc_awareness as arc_mod
 
+    # 日照锚点默认桩成「算不出」（空串）：真实的 today_daylight_text 会读 Dynamic
+    # Config（缓存 miss 时是同步 httpx），节点测试不该碰网络、也不该被外部配置左右。
+    # 需要验日照的用例自己 monkeypatch 覆盖它。
+    async def fake_daylight(day):
+        return ""
+
+    monkeypatch.setattr(lw, "today_daylight_text", fake_daylight)
+
     monkeypatch.setattr(arc_mod, "read_world_arc", fake_arc)
     monkeypatch.setattr(lw, "find_life_state", fake_find)
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)

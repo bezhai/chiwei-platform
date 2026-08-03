@@ -23,7 +23,7 @@ from datetime import date
 import pytest
 
 from app.infra.cst_time import CST
-from app.world import daylight as daylight_mod
+from app.infra import daylight as daylight_mod
 
 # 广州（越秀区一带）——prod 实证用的坐标，只在测试里写死当样本，生产走 Dynamic Config。
 _GZ_LAT = 23.1291

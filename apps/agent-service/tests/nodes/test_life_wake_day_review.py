@@ -172,6 +172,14 @@ def patched(monkeypatch):
 
     import app.domain.arc_awareness as arc_mod
 
+    # 日照锚点默认桩成「算不出」（空串）：真实的 today_daylight_text 会读 Dynamic
+    # Config（缓存 miss 时是同步 httpx），节点测试不该碰网络、也不该被外部配置左右。
+    # 需要验日照的用例自己 monkeypatch 覆盖它。
+    async def fake_daylight(day):
+        return ""
+
+    monkeypatch.setattr(lw, "today_daylight_text", fake_daylight)
+
     monkeypatch.setattr(arc_mod, "read_world_arc", fake_arc)
     monkeypatch.setattr(lw, "find_life_state", fake_find)
     monkeypatch.setattr(lw, "list_unread_events", fake_unread)
@@ -471,3 +479,29 @@ def test_update_life_state_doc_guides_sleep_marking():
     desc = update.definition.description
     assert "sleep" in desc
     assert "去睡" in desc, "工具说明要轻补一句去睡标 sleep 的引导（prompt 姿态）"
+
+
+@pytest.mark.asyncio
+async def test_day_page_written_at_carries_date_not_bare_clock(patched, monkeypatch):
+    """「写于」要带日期，不能只给一个裸的 ``23:40 CST``。
+
+    这一段进 SYSTEM、每轮都在，是她读到的第一批文字之一。只给时分的话，一个昨晚
+    23:40 的时刻就这么悬在她眼前，和「现在几点」争夺注意力——线上事故 2026-08-03 里
+    她正是把一屏夜间时间戳读成了「现在是晚上」。日期跟前面「{date} 那天」呼应上，
+    这个时刻才落回昨天。
+    """
+    patched["day_page"] = DayPage(
+        lane=_LANE,
+        persona_id=_PERSONA,
+        date="2026-06-09",
+        narrative="昨天最挂心的是那道没解出来的题。",
+        written_at="2026-06-09T23:40:00+08:00",
+    )
+    _FakeAgent.install(monkeypatch)
+
+    await _wake()
+
+    day_page = _FakeAgent.last_prompt_vars()["day_page"]
+    assert "06-09 23:40" in day_page, (
+        f"「写于」要带日期，实际 {day_page!r}"
+    )

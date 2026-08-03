@@ -95,6 +95,32 @@ def to_cst_hms(raw: str | None) -> str:
     return f"{dt.strftime('%H:%M:%S')} CST"
 
 
+def to_cst_dated(raw: str | None, *, now: datetime, seconds: bool = True) -> str:
+    """同一个 CST 日历日给 ``HH:MM:SS CST``，跨天补上 ``MM-DD``；无法解析则原样回显。
+
+    喂给 agent 的历史条目（信箱未读、聊天记录）必须用它，不能用只给时分秒的
+    :func:`to_cst_hms`：信箱既没有时间窗也没有 TTL，昨晚积压的未读会原样进 stimulus，
+    而 ``20:47:12 CST`` 这个形状昨晚和今晚长得一模一样——她无从分辨那是几小时前还是
+    一整天前（线上事故 2026-08-03：中午 13:18 往群里发「大半夜的发什么疯、赶紧滚去
+    睡觉」）。
+
+    同一天的**刻意不带**日期：绝大多数条目都是当天的，全带上既费 token 又让她每读
+    一行都要过滤一次冗余信息，反而稀释掉「这条是昨天的」这个真正需要被注意到的信号。
+
+    跨天判定按 **CST 日历日**（不是 UTC，也不是「差了 24 小时」）：CST 次日 00:30 的
+    UTC 还停在前一天 16:30，按 UTC 比会把刚过午夜的事错标成昨天。
+
+    ``seconds=False`` 给到分钟就停（聊天记录用：秒对读对话没有意义）。
+    """
+    dt = to_cst(raw)
+    if dt is None:
+        return f"{raw}" if raw else ""
+    clock = dt.strftime("%H:%M:%S" if seconds else "%H:%M")
+    if dt.astimezone(CST).date() == now.astimezone(CST).date():
+        return f"{clock} CST"
+    return f"{dt.strftime('%m-%d')} {clock} CST"
+
+
 # 中文星期（周一=0 … 周日=6，对齐 ``datetime.weekday()``），给完整时间口径用。
 _WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 

@@ -1,4 +1,10 @@
-"""今天几点天亮、几点天黑——喂给 world 的日照锚点（idle-deadlock spec Task 2）。
+"""今天几点天亮、几点天黑——喂给 world 和三姐妹 life 的日照锚点。
+
+**为什么在 infra 而不在 world**：日出日落是客观天文事实，不是 world 的私有快照。
+最初（idle-deadlock spec Task 2）只有 world 用，就近放在了 ``app/world/``；后来
+life 也需要同一个锚（线上事故 2026-08-03，见下），而 ``life_wake`` 有「绝不 import
+app.world」的信息差命门。锚点本身两边都够得着，归属挪到中立的 infra，两边共用同一
+份定义（不复制、不留 re-export）。
 
 **为什么要有这个模块**：prod 实证 2026-07-24，广州当天真实日落约 19:13，但 world
 17:01 就写「傍晚前段」、17:56 写「傍晚后段的自然光继续退下去」、18:30 写「更深的
@@ -110,7 +116,7 @@ def compute_daylight(
 
 
 async def today_daylight_text(day: date) -> str:
-    """拼给 world 的日照锚点；坐标没配 / 配脏 / 算不出 → 空串（如实不拼）。
+    """拼给 world / life 的日照锚点；坐标没配 / 配脏 / 算不出 → 空串（如实不拼）。
 
     Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免
     缓存刷新那一次阻塞事件循环（与 :mod:`app.life.feed_whitelist` 同口径）。

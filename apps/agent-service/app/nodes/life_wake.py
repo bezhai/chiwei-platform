@@ -97,6 +97,9 @@ from app.domain.world_events import (
     strip_npc_prefix,
 )
 from app.infra import cst_time
+from app.infra.daylight import (  # module-level so tests can monkeypatch
+    today_daylight_text,
+)
 from app.infra.redis import get_redis
 from app.life.living_day import living_day
 from app.life.pages import read_day_page_before  # module-level so tests can monkeypatch
@@ -228,11 +231,26 @@ def _derive_life_round_id(
 
 
 def _recent_chat_since_ms(*, now: datetime, snapshot: LifeState | None) -> int:
-    """最近聊天增量水位：优先从上一轮 observed_at 往后看，冷启退回固定窗口。"""
+    """最近聊天回看窗口：从上一轮 observed_at 往后看，但**不短于**一个回看下限。
+
+    冷启（没有快照 / 快照时间脏）退回固定的 :data:`_RECENT_CHAT_SINCE_MS` 窗口。
+
+    为什么要有下限（线上事故 2026-08-03 根因之一）：水位原先就是上一轮 observed_at，
+    而 life 被事件唤醒时 45s–2min 就跑一轮，窗口于是跟着轮次频率一起收缩到一两分钟。
+    她越活跃、窗口越窄——窄到那一屏群聊里只剩她自己刚发的两句话（3 条里 2 条是「我：」），
+    唯一的外部输入是一句「啊啊啊啊啊」。她读着自己的回声当外部现实，顺着自己上一句的
+    错误推断越滑越远：中午 13:13 有人开玩笑说「下班了」，她回「快点回家躺着」，这句
+    回流成她的上下文，5 分钟后就变成「大半夜的发什么疯、明天不上班啦」。
+
+    下限只保证**外部上下文进得来**，不改「增量」的本意：水位比下限更早时以水位为准
+    （该看到的旧聊天不会被下限砍掉）。规模不靠这里控——仍由每会话 10 条上限兜住，
+    窗口放宽不等于喂更多条（no_context_truncation：控条目数，不截断内容）。
+    """
+    floor_ms = int(now.timestamp() * 1000) - _RECENT_CHAT_MIN_LOOKBACK_MS
     if snapshot is not None:
         observed = cst_time.parse(snapshot.observed_at)
         if observed is not None:
-            return int(observed.timestamp() * 1000)
+            return min(int(observed.timestamp() * 1000), floor_ms)
     return int(now.timestamp() * 1000) - _RECENT_CHAT_SINCE_MS
 
 
@@ -371,7 +389,7 @@ def _format_surroundings(surroundings: list[EventEnvelope], now: datetime) -> st
     时降级（不带数字时间锚），留白仍由「上一次感知到的周遭」的框兜住。
     """
     body = "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.summary}"
+        f"（{cst_time.to_cst_dated(ev.occurred_at, now=now)}）{ev.summary}"
         for ev in surroundings
     )
     # 时间锚按最新那版（末尾）切片的感知时刻算——她对周遭的最近一次认知有多新。
@@ -409,7 +427,7 @@ def _format_idle_sense(idle_sense: list[EventEnvelope], now: datetime) -> str:
     """
     anchor = _humanize_elapsed(idle_sense[-1].occurred_at, now) if idle_sense else None
     body = "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）{ev.summary}"
+        f"（{cst_time.to_cst_dated(ev.occurred_at, now=now)}）{ev.summary}"
         for ev in idle_sense
     )
     if anchor is None:
@@ -436,7 +454,7 @@ def _group_handle_suffix(ev: EventEnvelope) -> str:
     return f"（来自群聊，群句柄 {handle}）"
 
 
-def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
+def _format_dynamics(dynamics: list[EventEnvelope], now: datetime) -> str:
     """把离散动静拼成她"刚感知到的几件事"，按发生先后。
 
     放 event 的客观可感形态（summary）+ 类型 + 发生时间——都是投进她信箱的、她够得着
@@ -446,7 +464,7 @@ def _format_dynamics(dynamics: list[EventEnvelope]) -> str:
     UTC），显示时一律过 ``cst_time`` 归一到 CST，让她看到的所有时刻是同一个 CST 口径。
     """
     return "\n".join(
-        f"- [{ev.kind}] {cst_time.to_cst_hms(ev.occurred_at)} "
+        f"- [{ev.kind}] {cst_time.to_cst_dated(ev.occurred_at, now=now)} "
         f"{ev.summary}{_group_handle_suffix(ev)}"
         for ev in dynamics
     )
@@ -468,7 +486,7 @@ def _speaker_display(source: str) -> str:
     return strip_npc_prefix(source)
 
 
-def _format_speech(speech: list[EventEnvelope]) -> str:
+def _format_speech(speech: list[EventEnvelope], now: datetime) -> str:
     """把别人直接对她说的话（kind=speech）拼成「X 对你说：原话」，按发生先后（1C Task 3）。
 
     speech 有两类直投来源，都呈现成「X 对你说：原话」让她看清是谁对她说了什么——区别于
@@ -482,13 +500,13 @@ def _format_speech(speech: list[EventEnvelope]) -> str:
     transcript 天然承载，这里只如实呈现收到的每句。
     """
     return "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）"
+        f"（{cst_time.to_cst_dated(ev.occurred_at, now=now)}）"
         f"{_speaker_display(ev.source)} 对你说：{ev.summary}"
         for ev in speech
     )
 
 
-def _format_messages(messages: list[EventEnvelope]) -> str:
+def _format_messages(messages: list[EventEnvelope], now: datetime) -> str:
     """把别人隔手机发来的消息（kind=message）拼成「X 给你发消息：内容」，按发生先后（task 5）。
 
     通信介质维度（spec 决策 5 / 7）：这是**隔着手机/飞书**发来的消息——不在一起时发的，
@@ -500,13 +518,13 @@ def _format_messages(messages: list[EventEnvelope]) -> str:
     ``cst_time`` 归一到 CST（同其它各类）。
     """
     return "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）"
+        f"（{cst_time.to_cst_dated(ev.occurred_at, now=now)}）"
         f"{_speaker_display(ev.source)} 给你发消息：{ev.summary}"
         for ev in messages
     )
 
 
-def _format_own_chat_reply(own_replies: list[EventEnvelope]) -> str:
+def _format_own_chat_reply(own_replies: list[EventEnvelope], now: datetime) -> str:
     """把 chat 已发出的回复（kind=own_chat_reply）拼成"你自己刚说的话"，按发生先后。
 
     这是 chat/life 并发重复回复修复的核心呈现：chat_node 确认一段回复内容确实发给
@@ -521,7 +539,7 @@ def _format_own_chat_reply(own_replies: list[EventEnvelope]) -> str:
     模型把自己刚发的回复误当成"外部发生的一件事"又去回应一次。
     """
     return "\n".join(
-        f"（{cst_time.to_cst_hms(ev.occurred_at)}）你刚回复了：{ev.summary}"
+        f"（{cst_time.to_cst_dated(ev.occurred_at, now=now)}）你刚回复了：{ev.summary}"
         for ev in own_replies
     )
 
@@ -591,6 +609,10 @@ def _split_perception(
 #   * 每会话最多 10 条：每个会话只铺最近一段、不把整卷历史拉进来。
 # 这三个都是机制层的规模闸（同 inbox 上限那类），不替她判断哪些重要（赤尾宪法）。
 _RECENT_CHAT_SINCE_MS = 6 * 60 * 60 * 1000
+# 回看下限：她再活跃，群聊窗口也至少往回看这么久，保证读到的不只是自己刚说的话。
+# 30 分钟——够覆盖一段完整的群聊来回（谁挑的头、聊到哪了），又不至于把几小时前
+# 早已翻篇的话题重新拽回她眼前。见 :func:`_recent_chat_since_ms`。
+_RECENT_CHAT_MIN_LOOKBACK_MS = 30 * 60 * 1000
 _RECENT_CHAT_MAX_CONVERSATIONS = 5
 _RECENT_CHAT_PER_CHAT_LIMIT = 10
 
@@ -816,6 +838,9 @@ async def _run_life_round(
             since_ms=recent_chat_since_ms,
             max_conversations=_RECENT_CHAT_MAX_CONVERSATIONS,
             per_chat_limit=_RECENT_CHAT_PER_CHAT_LIMIT,
+            # 本轮的同一个 now：聊天时间戳的「今天」必须和 stimulus 顶部那行时刻、
+            # 以及事件时间戳用的是同一个快照，否则跨午夜时同一屏里日期口径打架。
+            now=now,
         )
     except Exception as e:
         logger.warning(
@@ -874,9 +899,13 @@ async def _run_life_round(
             e,
         )
         day_page = None
+    # 「写于」带日期（to_cst_dated 而不是只给时分的 to_cst_hm）：这段进 SYSTEM、每轮
+    # 都在，是她读到的第一批文字之一。一个裸的「23:40 CST」悬在那里会跟「现在几点」
+    # 争注意力（线上事故 2026-08-03：她把一屏夜间时间戳读成了「现在是晚上」）；带上
+    # 日期才跟前面的「{date} 那天」呼应上，这个时刻落回昨天。
     day_page_text = (
         f"【你睡前写下的上一页日子】（{day_page.date} 那天留下来的几笔，"
-        f"写于 {cst_time.to_cst_hm(day_page.written_at)}）：\n"
+        f"写于 {cst_time.to_cst_dated(day_page.written_at, now=now, seconds=False)}）：\n"
         f"{day_page.narrative}"
         if day_page is not None
         else ""
@@ -1013,6 +1042,37 @@ async def _run_life_round(
     # 本子（当天会变）/ 现在时间 / 五类感知 / 冷启状态恢复段，末尾印本轮 round marker。
     parts: list[str] = []
 
+    # 时刻行 + 当天日照锚，**必须是 stimulus 的第一段**（线上事故 2026-08-03 的直接修复）。
+    #
+    # 完整日期口径（#279：年月日 + 星期 + 时分），不是只给时分：她记日程 / 算 remind_at
+    # 时要把「5 分钟后」「周五」这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填
+    # 日期分量（线上 bug：remind_at 被填到过去，提醒永远不在该响的那一刻触发）。
+    #
+    # 位置为什么必须置顶：原先它排在本子 / 群聊之后，模型先读到一屏「下班了」「快点
+    # 回家躺着」，再读到「现在是 … 13:16」——语义氛围压过了数字锚，她在中午 13:18 往
+    # 群里发「大半夜的发什么疯、赶紧滚去睡觉」，还把「晚上八点」jot_down 进本子固化成
+    # 记忆。SYSTEM 里一个时间字都没有，这行是她唯一的时钟，不能埋在中段。
+    # （置顶不打散前缀缓存：整段 stimulus 是当轮追加到 messages 末尾的全新 token，
+    # 它之前的 system + 历史 turn 一字未动，缓存命中的是那一段。）
+    #
+    # 日照锚和 world 同一口径（#308 已在 world 验证有效：world 当时只看到一个裸时间戳，
+    # 就退回「傍晚≈天黑」的通用先验，把黄昏写早了 1.5–2 小时）。只给客观天文事实，不给
+    # 任何「几点之后算晚上」的判断——那是她自己看着现实此刻去推的事（赤尾宪法）。
+    # 算不出（坐标没配 / 配脏 / 极昼极夜）返回空串，如实不拼；抛错也只是少一个锚，
+    # 绝不带走时刻行本身、绝不炸整轮（照 notebook / day_page 的 fail-soft 姿势）。
+    try:
+        daylight_text = await today_daylight_text(now.date())
+    except Exception as e:
+        logger.warning(
+            "[life_wake] %s/%s failed to compute daylight anchor, "
+            "clock line keeps going without it: %s",
+            lane,
+            persona_id,
+            e,
+        )
+        daylight_text = ""
+    parts.append(f"现在是 {cst_time.to_cst_full(observed_at)}。{daylight_text}")
+
     # 她本子里还没了结的事（备忘录 & 日程 第二块）：每轮唤醒读她**还活着**的条目
     # （active_only=True：她自己没标 done / dropped 的），渲成一段塞进她的输入，让她
     # 带着自己记下惦记的事过日子。**只读、绝不改状态、不删任何东西**（spec 必改点）；
@@ -1098,11 +1158,6 @@ async def _run_life_round(
     if recent_chats:
         parts.append(_format_recent_chats(recent_chats))
 
-    # 完整日期口径（#279：年月日 + 星期 + 时分），不是只给时分：她记日程 / 算 remind_at
-    # 时要把「5 分钟后」「周五」这类相对时间换算成绝对 ISO，没有今天的日期她只能瞎填
-    # 日期分量（线上 bug：remind_at 被填到过去，提醒永远不在该响的那一刻触发）。
-    parts.append(f"现在是 {cst_time.to_cst_full(observed_at)}。")
-
     # 状态恢复段（spec 决策 5 核心）：上一刻状态正常靠当天连续意识流（transcript）延续，
     # 不每轮重塞。只有意识流断了（冷启 / Redis 24h 过期丢失 / 跨天新 session → transcript
     # 空）时，才从 PG 的 LifeState 兜底恢复，作"醒来记得之前在做什么"喂进当前 USER。
@@ -1169,7 +1224,7 @@ async def _run_life_round(
         if speech:
             parts.append(
                 "【有人当面对你说话】（就在你身边、直接冲你来的话，按发生先后）：\n"
-                f"{_format_speech(speech)}"
+                f"{_format_speech(speech, now)}"
             )
         if messages:
             # 通信介质维度（spec 决策 5 / 7）：隔着手机/飞书发来的消息，**不是当面**。
@@ -1178,7 +1233,7 @@ async def _run_life_round(
             parts.append(
                 "【有人隔着手机给你发消息】（你们这会儿不在一起、隔着手机/飞书发来的，"
                 "不是当面说的，按发生先后）：\n"
-                f"{_format_messages(messages)}"
+                f"{_format_messages(messages, now)}"
             )
         if own_replies:
             # chat/life 并发重复回复修复：这是她**自己**刚发出去的话，绝不能和「别人
@@ -1187,12 +1242,12 @@ async def _run_life_round(
             parts.append(
                 "【你刚对这次交流的回复】（这是你自己刚发出去的话，不是别人对你说的，"
                 "已经发过了、不用再回一遍）：\n"
-                f"{_format_own_chat_reply(own_replies)}"
+                f"{_format_own_chat_reply(own_replies, now)}"
             )
         if dynamics:
             parts.append(
                 "这会儿你还感知到这些客观动静（按发生先后）：\n"
-                f"{_format_dynamics(dynamics)}"
+                f"{_format_dynamics(dynamics, now)}"
             )
         parts.append("读懂此刻你周遭，过你自己的这一刻。")
 
