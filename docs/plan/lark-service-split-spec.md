@@ -181,6 +181,8 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 - **资源增量要核算**：多一个服务意味着多一份 DB / Redis / MQ 连接池和一组消费者。需要给出新增连接数、消费者 prefetch 与队列积压的观测口径，避免拆完打爆连接上限。其中一个具体数字要盯：投影锁在持续争用下最坏等 75 秒（两个租约 + 余量，推导见 `message-lock.ts` 文件头）才放弃，泳道消费者 prefetch 期间会被占住这么久。观测口径里要能看见"等锁超时"这条错误的频次——它出现就说明有任务卡在锁里，而不是锁的参数配错了。
 - **跨服务部署顺序有约束**，三条队列的换名协议见决策九。要点：消费侧的双订阅必须先上线，生产者才能切；移交给 lark-service 那一步必须走 drain 屏障（`basic.cancel` → 等 unacked 归零 → 起新消费者），不能靠"停旧让它堆一会儿"——泳道队列带 10s TTL，堆过 10 秒会 DLX 弹回 prod，泳道的回复就从 prod 实例发出去了。交接顺序是先 prod、再逐个泳道。
 - **顺序做反了的症状要认得出来**：如果 agent-service 先切了 rk 而消费侧还是旧版，新队列没有消费者，prod 的消息一直积压，泳道的消息 10 秒后回落到同 channel 的 prod 新队列继续积压。**不会双发，但赤尾整个不说话了**。这个失败是安静的——队列在涨，服务全部健康。所以"消费侧先上线"要当发布门禁执行，不能靠记性。
+- **切换用的几个 Dynamic Config 开关都是全局的，不是每泳道的旋钮**。判归属和决定订阅面都发生在请求上下文之外，`DynamicConfig` 拿不到 lane 就按 prod 解析——给它们设按泳道的 override 会**静默失效**。后果是收窄 channel-server 的入站所有权会让所有泳道一起不再认领飞书信封，只有部署了 lark-service 的那条泳道有人接。因为 `inbound_lane` 本来就只有泳道消费、而泳道是我们自己拉起又拆掉的临时环境，这个代价可以接受；但 Task E 排期时要按"所有泳道同时切"来安排，别指望逐条泳道灰度。
+- **所有权配置的记忆只活在进程里**。读不到配置时保持上次结论，但重启会丢掉这份记忆：如果重启那一刻恰好也读不到，就会退回"拥有全部"，并按这个结论决定启动时的订阅面。真正关掉这个窗口的是 Task F——把 lark 从两份 channel 清单里删掉之后，再宽也宽不到它身上。
 - **部署中断在途任务**：channel-server 部署杀在途 chat_response 处理；agent-service 部署杀 rebuild / afterthought / world / life。
 - **回滚路径分两段**：切换稳定前，回滚 = 入口切回 channel-server + 队列订阅切回 + agent-service rk 回退，三步都是配置级，因为两侧代码都在，可逆；清理完成后，回滚只能靠镜像版本回退，代价大得多。这正是清理必须在切换稳定之后的原因。
 
@@ -208,7 +210,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 **Task C2 — lark-service 的飞书出站发送闭环**
 - **Goal**: lark-service 能消费飞书的 `chat_response`，完成反查、富文本渲染、发送、落库与台账更新，行为与拆分前逐值一致。
 - **Deliverable**: 出站链路的完整实现（common id → 飞书坐标的反查、markdown 与 mention 与图片的渲染、飞书发送 API、`common_message` assistant 行与 `lark_message` 的同事务写入、`common_agent_response` 的 replies 追加与终态更新）；独立的出站进程入口（决策十）；默认关闭的消费开关。
-- **Verification**: 出站写事务的原子性有测试掩护（其中一条 insert 失败时另一条不留痕）；渲染管线的顺序不变量有测试钉住（mention 必须先于图片替换，否则 @名字 会落进图片 alt 被改坏）；分段发送、主动发送、回复原消息三种分支各有测试；平台返回空 message_id 时的落库行为与拆分前一致。
+- **Verification**: 出站写事务的原子性有测试掩护（其中一条 insert 失败时另一条不留痕）；渲染管线的顺序不变量有测试钉住（mention 必须先于图片替换，否则 @名字 会落进图片 alt 被改坏）；分段发送、主动发送、回复原消息三种分支各有测试；平台返回空 message_id 时的落库行为与拆分前一致；**lark-service 侧的队列名断言接到 C1 那份跨语言契约向量上**——现在只有 ts-shared 和 agent-service 读它，第三方还在写死字面量，跨语言契约就没有真正闭环。
 
 **Task C3 — lark-service 的撤回闭环**
 - **Goal**: lark-service 能消费飞书的 `recall`，逐条撤回并写下 safety 终态。
@@ -237,7 +239,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 
 **Task F — 清理与边界收口**
 - **Goal**: 在切换稳定后删除 channel-server 的飞书代码，关闭 cutover 窗口。
-- **Deliverable**: 残余飞书代码（plugins/lark、types/、lark_* 实体、mongo 飞书方法、infrastructure/integrations/lark*）删除；**recall-worker 整个 Deployment 下线**（QQ 不实现 recall，拆走飞书后它空转）；**出站老队列的双订阅删除**（决策九的窗口在此关闭）；`?? 'lark'` 兜底清除；`core/boundary.test.ts` 守卫范围按新边界更新。删 Deployment 连带要改 `Makefile` 的 sibling 声明和 `CLAUDE.md` / `README.md` / `docs/service-topology.md` 里的镜像与服务映射表。
+- **Deliverable**: 残余飞书代码（plugins/lark、types/、lark_* 实体、mongo 飞书方法、infrastructure/integrations/lark*）删除；**recall-worker 整个 Deployment 下线**（QQ 不实现 recall，拆走飞书后它空转）；**出站与入站老队列的双订阅删除**（决策九的窗口在此关闭）；**两份 channel 清单里的 `lark` 删除**（删掉之后所有权配置读不到时也不可能再宽到飞书，前面那个重启窗口才算真正关上）；**泳道信封的幂等占位协议收进共享包**（现在 channel-server 和 lark-service 各写了一份，靠两边断言同样的字面量对齐——删掉 channel-server 那份之后就该只剩一处定义）；`?? 'lark'` 兜底清除；`core/boundary.test.ts` 守卫范围按新边界更新。删 Deployment 连带要改 `Makefile` 的 sibling 声明和 `CLAUDE.md` / `README.md` / `docs/service-topology.md` 里的镜像与服务映射表。
 - **Verification**: 明确写出"切换已稳定"的判据并确认满足后才动手；`grep -ri lark apps/channel-server/src` 的每条命中都能解释为非飞书含义；channel-server 全量测试绿；边界守卫在故意违规时确实转红（变异验证，不能只看绿）。
 - **删老队列前，"队列深度为零"不是充分条件**：recall 的重试用的是延迟投递，在途的延迟消息压根不出现在队列深度里，最长能晚十几秒才落地。判据要三条同时成立——旧 Pod 全退、超过最大重投延迟的等待期已过、旧 rk 的入流速率与 unacked 都为零——之后才解绑删队列。
 - **这一步是回滚级别的分界线**，要在执行记录里写明：动手之前回滚是改配置，动手之后回滚要同时回镜像和队列拓扑。跨过去就没有便宜的退路了。
