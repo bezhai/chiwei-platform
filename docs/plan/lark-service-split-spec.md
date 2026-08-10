@@ -56,9 +56,35 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 **八、队列的分区维度必须与消费者的所有权维度一致。** 这是决策三的一般形式，两处都要遵守：
 
 - 出站 `chat_response` / `recall`：拆分后 owner 按 channel 分，所以 routing key 按 channel 分。
-- 入站 `inbound_lane.{lane}`：**当前只按 lane 分区，但拆分后 owner 是 `channel + lane`**——同一个队列同时承载 QQ 和飞书的信封。RabbitMQ 是竞争消费，两个服务同时订阅会各拿一半；更糟的是拿错的一半不会报错——消费者查不到对应 channel 的 handler 时会按 no-op 成功返回并 ACK，消息静默消失。这不是 cutover 期的临时问题，是拆完之后的稳态缺陷。修法是让队列也按 `channel + lane` 分区，不同 owner 不共享队列，竞争消费自然不存在。
+- 入站 `inbound_lane.{lane}`：**当前只按 lane 分区，但拆分后 owner 是 `channel + lane`**——同一个队列同时承载 QQ 和飞书的信封，而 RabbitMQ 是竞争消费。两个服务同时订阅会产生三个后果，一个比一个隐蔽：
+  1. **流量被随机劈成两半**。cutover 窗口内 channel-server 仍然注册着 lark runtime，所以它抢到的飞书信封会被**真的处理掉**，不报错也不留痕。切流因此永远做不干净——新旧两条路径各跑一半，行为差异无从观测。
+  2. **fail-closed 的那一侧只能把消息弹回去**。lark-service 抢到 QQ 信封时会 `nack(requeue)` 退回（`lane-queue.ts:246-255`），channel-server 抢到自己没有 runtime 的 channel 时是 `getChannelRuntime` 抛错、同样 requeue（`plugins/runtime.ts:29-31` → `inbound-lane-consumer.ts:89`）。而这条队列刻意不配 TTL 和 DLX，所以退回去的消息只能一直弹——两个服务互相推诿同一批信封，压成慢轮询活锁。
+  3. **两侧的幂等 key 格式不同**。channel-server 是 `inbound_lane:{event_type}:{global_message_id}:{lane}`（`inbound-lane.ts:49-51`），lark-service 多一段 channel（`lane-queue.ts:130-138`）。同一条消息重投时换了消费者，就认不出自己处理过。
+
+  这不是 cutover 期的临时问题，是拆完之后的稳态缺陷。修法是让队列也按 `channel + lane` 分区，不同 owner 不共享队列，竞争消费自然不存在。
 
 在分区落地之前，消费侧必须校验信封的 channel 且**不属于自己的绝不 ACK**。这是即时防线，分区完成后它退化成一条防御性断言而不是被删掉——因为"队列里只会有我的消息"是个需要被持续保证的不变量，不是可以默认的事实。
+
+**九、换队列的通用协议是"消费侧先双订阅 → 切生产者 → 旧队列排空 → drain 屏障移交"，四步都不能省。** 三条队列（`chat_response` / `recall` / `inbound_lane`）换名字时面对的是同一个问题：生产者和消费者在不同的 Deployment 里，不可能原子发布。先切生产者，旧消费者守着空队列；先切消费者，新队列没有生产者。所以消费侧必须有一段时间**同时订阅新旧两套队列**，把生产者的部署时刻从关键路径上摘掉。
+
+第三步"移交给 lark-service"是唯一真正危险的一步，而危险不在我起初以为的地方。**同一个队列上的两个消费者只会分摊消息，不会各发一遍**——RabbitMQ 轮询投递，一条消息只交给一个消费者。真正的双发窗口是**旧 worker 已经调完飞书 API、还没 ACK 的那一瞬间**被杀：消息 requeue，换个消费者再发一次，用户看到两条。这个窗口现在就存在（`chat-response-handler.ts` 发送后无条件 ACK，注释里认了这条 at-least-once 残留），交接只是把它从"进程偶然崩溃"变成"我们主动触发"。
+
+因此移交必须走 drain 屏障，而不是"停旧起新"：先对旧消费者发 `basic.cancel`（停止新投递，已投递的继续处理完）→ 等它的 unacked 归零 → 再启动新消费者。中间没有消息在飞，也没有队列堆积。
+
+**"先停旧、让消息堆一会儿"这条路对泳道队列根本不成立**：`chat_response_{lane}` 带 10s TTL + DLX 回落 prod rk，堆过 10 秒的消息会被弹到 prod 队列由 prod 实例处理——泳道的回复从 prod 发出去，比堆积严重得多。prod 队列没有 TTL 可以堆，泳道队列不行。所以交接顺序是**先 prod、再逐个泳道**，且泳道交接必须在 drain 屏障内完成，不能有堆积。
+
+`inbound_lane` 的迁移同理，别因为它是入站就以为可以"同一批部署"糊过去：消费者先同时订阅 `inbound_lane.{lane}` 和 `inbound_lane.{channel}.{lane}` → 投递侧切新队列名 → 旧队列排空 → 按 drain 屏障把新队列移交给 lark-service。
+
+**十、持长连的进程和出站消费必须是两个 Deployment，因为它们的部署策略天然冲突。** 飞书 WS 长连同 app_id 是随机投递，两个进程同时开着会静默分流（决策七），所以持长连的那个 Deployment 只能 `replicas=1` + `Recreate`——滚动更新会有一段两个 Pod 都连着的时间。而出站消费恰恰相反：它是竞争消费，天然可以多副本、可以滚动更新、崩一个不影响别的。
+
+把两者塞进一个进程，等于让出站也继承"单副本 + 停机式部署"这套约束：改一行渲染逻辑要停整个飞书入口，出站的一次 OOM 会带走长连。这不是资源账能抵消的，所以 lark-service 也是一镜像多服务：
+
+| 进程 | 职责 | 副本与发布策略 |
+|---|---|---|
+| `lark-service` | HTTP webhook + WS 长连 + 泳道信封消费 | `replicas=1`，`Recreate` |
+| `lark-outbound` | `chat_response` 与 `recall` 两条出站队列 | 可多副本，滚动更新 |
+
+出站只拆一个进程而不是照搬 channel-server 的两个：recall 的流量极低，且与发消息同属"把赤尾的动作送到飞书"这一件事，没有分开扩缩容的理由。真需要了再拆，那时加一个编译目标就行。
 
 ## Caller coverage
 
@@ -153,13 +179,13 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 - **新服务要在 PaaS 注册**：ImageRepo、App envs、ConfigBundle `required_keys` 覆盖新 app、Deployment 与 Service。飞书凭据只下发给 lark-service。**`MONGO_HOST` 必须在首次部署前就位**——lark-service 用它写 `lark_event` 原始事件审计，配置缺失会按既有的 fail-closed 风格在启动时崩溃（这是刻意的，但要求配置先行）。
 - **注册新 workspace 成员会连坐所有镜像**：bun 对"已声明但不在构建上下文里"的 workspace 成员是退出码 1 的硬失败，所以每个跑 `bun install --frozen-lockfile` 的 Dockerfile 都要复制新 app 的 `package.json`。加 app 时这几处必须同一个 commit 落地，否则构建中断（好在是显式失败，不会产出坏镜像）。
 - **资源增量要核算**：多一个服务意味着多一份 DB / Redis / MQ 连接池和一组消费者。需要给出新增连接数、消费者 prefetch 与队列积压的观测口径，避免拆完打爆连接上限。其中一个具体数字要盯：投影锁在持续争用下最坏等 75 秒（两个租约 + 余量，推导见 `message-lock.ts` 文件头）才放弃，泳道消费者 prefetch 期间会被占住这么久。观测口径里要能看见"等锁超时"这条错误的频次——它出现就说明有任务卡在锁里，而不是锁的参数配错了。
-- **跨服务部署顺序有约束**：agent-service 的 rk 分流必须先于 lark-service 开始消费（否则新队列无生产者），而 lark-service 必须先能消费再切入站（否则积压）。
+- **跨服务部署顺序有约束**，三条队列的换名协议见决策九。要点：消费侧的双订阅必须先上线，生产者才能切；移交给 lark-service 那一步必须走 drain 屏障（`basic.cancel` → 等 unacked 归零 → 起新消费者），不能靠"停旧让它堆一会儿"——泳道队列带 10s TTL，堆过 10 秒会 DLX 弹回 prod，泳道的回复就从 prod 实例发出去了。交接顺序是先 prod、再逐个泳道。
 - **部署中断在途任务**：channel-server 部署杀在途 chat_response 处理；agent-service 部署杀 rebuild / afterthought / world / life。
 - **回滚路径分两段**：切换稳定前，回滚 = 入口切回 channel-server + 队列订阅切回 + agent-service rk 回退，三步都是配置级，因为两侧代码都在，可逆；清理完成后，回滚只能靠镜像版本回退，代价大得多。这正是清理必须在切换稳定之后的原因。
 
 ## Tasks
 
-A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D。F 依赖 E 稳定运行。**B/C/D 不预先宣称文件不重叠——并行前需按实际触达文件重新分区。**
+A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D。F 依赖 E 稳定运行。C 内部：C1 是 C2/C3 的前置（它们要用新的路由口径），C2 与 C3 共用同一片出站代码因而串行，C4 与其余三条互不相干。**不预先宣称文件不重叠——并行前需按实际触达文件重新分区。**
 
 **Task A — 抽取渠道无关的共享能力**
 - **Goal**: 两服务共用的能力在 `packages/` 下有唯一定义，且共享包不认识任何具体渠道；channel-server 切过去后行为不变。
@@ -171,10 +197,27 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **Deliverable**: `apps/lark-service` 服务骨架（启动装配、配置、依赖注入）与完整入站链路；两套飞书解析合并为一套；EventRegistry 消化进渠道抽象；飞书私有模型从 `core/models` 归位。
 - **Verification**: 三个入口各自的完整入站路径有测试，断言投影写入的表与字段、`chat_request` payload 的 common id 与 lane header 与拆分前逐值一致；骨架产出的公共装配点足以让 C/D 挂载。**另需组装级断言固定各部署入口的 bot 加载范围**：lark-service 只加载 `channel='lark'`，channel-server 的三个入口（server / chat-response-worker / recall-worker）仍加载全部渠道——否则拆分时容易顺手把 channel-server 也收窄，QQ 静默失去 bot 配置。
 
-**Task C — 出站闭环与 channel 分流**
-- **Goal**: 飞书的 `chat_response` 与 `recall` 由 lark-service 消费并完成发送/撤回；agent-service 按 channel 分 rk；两侧消费者对不属于自己的 channel fail-closed。
-- **Deliverable**: lark-service 出站 worker（反查、渲染、飞书 API、common+lark_message 写入）；agent-service rk 分流；channel-server recall-worker 删除；两侧 fail-closed 校验。
-- **Verification**: 测试断言 rk 分流后飞书消息只进飞书队列、QQ 只进 QQ 队列，lane 后缀与 header 语义沿用已上线的 header-only 口径；**故意投递错 channel 时消费者拒绝并告警**（不能只测 happy path）；出站写事务原子性有测试掩护。**`safety_status` 的 recall 侧终态更新需要直接断言**——写入矩阵里它是三处字段级重叠中唯一还没有测试正面覆盖的（现有测试只覆盖了 agent-service 侧的"不写 blocked"），而拆分后飞书 recall 移到 lark-service，正是这个字段跨服务写入的地方。
+**Task C 拆成四条。** 一条 task 装不下"跨 TS/Python 两个语言、三个服务、三条队列，外加一整套飞书富文本出站的重写"。拆开之后每块都能单独测、单独部署、单独回滚。C2/C3/C4 的新消费者一律**带一个默认关闭的开关交付**——代码可以先上线、先部署、先观察，消费什么时候开是 Task E 的事，与代码发布解耦。
+
+**Task C1 — 队列拓扑的 channel 维度与双订阅兼容层**
+- **Goal**: `chat_response` / `recall` 的队列名与 routing key 带上 channel 维度，TS 与 Python 两侧同一套命名口径；agent-service 按消息的 channel 发对应 rk；channel-server 的两个 worker 同时订阅新旧两套队列，使生产者的部署时刻不再位于关键路径上（决策九）。
+- **Deliverable**: 两侧的路由命名（含泳道后缀与 DLX 回落的组合语义）；agent-service 的 rk 分流；channel-server 两个 worker 的双订阅与"订阅哪些 channel"的运行期开关。本 task 不含任何飞书业务逻辑。
+- **Verification**: 测试断言同一条出站消息在 channel 不同时落到不同队列、且泳道后缀与 header 语义沿用已上线的 header-only 口径；断言泳道队列的 TTL/DLX 回落目标在加了 channel 维度之后仍指向同 channel 的 prod 队列（弹错 channel 比不弹更糟）；双订阅在两套队列上各投一条都能被处理；**故意投递不属于自己的 channel 时消费者拒绝并告警**，不能只测 happy path。
+
+**Task C2 — lark-service 的飞书出站发送闭环**
+- **Goal**: lark-service 能消费飞书的 `chat_response`，完成反查、富文本渲染、发送、落库与台账更新，行为与拆分前逐值一致。
+- **Deliverable**: 出站链路的完整实现（common id → 飞书坐标的反查、markdown 与 mention 与图片的渲染、飞书发送 API、`common_message` assistant 行与 `lark_message` 的同事务写入、`common_agent_response` 的 replies 追加与终态更新）；独立的出站进程入口（决策十）；默认关闭的消费开关。
+- **Verification**: 出站写事务的原子性有测试掩护（其中一条 insert 失败时另一条不留痕）；渲染管线的顺序不变量有测试钉住（mention 必须先于图片替换，否则 @名字 会落进图片 alt 被改坏）；分段发送、主动发送、回复原消息三种分支各有测试；平台返回空 message_id 时的落库行为与拆分前一致。
+
+**Task C3 — lark-service 的撤回闭环**
+- **Goal**: lark-service 能消费飞书的 `recall`，逐条撤回并写下 safety 终态。
+- **Deliverable**: 撤回链路实现（台账反查、逐条撤回、部分失败的计数语义、终态与延迟重投）；默认关闭的消费开关。
+- **Verification**: **`safety_status` 与 `safety_result` 的终态更新需要直接断言**——写入矩阵里它是三处字段级重叠中唯一还没有测试正面覆盖的（现有测试只覆盖了 agent-service 侧的"不写 blocked"），而拆分后飞书 recall 移到 lark-service，正是这个字段跨服务写入的地方；部分撤回失败时的计数与终态、达到重投上限时的终态各有测试；终态短路（已是 recalled / recall_failed 时不重复撤）有测试。
+
+**Task C4 — `inbound_lane` 的分区迁移**
+- **Goal**: 泳道信封队列按 `channel + lane` 分区，两个服务不再共享队列；两侧的幂等 key 口径统一。
+- **Deliverable**: 队列命名的 channel 维度与两侧的双订阅；幂等 key 统一（现在两侧格式不同，换手重投会认不出自己处理过）；默认关闭的新队列消费开关。
+- **Verification**: 分区后两个服务的队列名与幂等 key 均不重叠；"分区后不该再收到别人的信封"这条不变量有断言钉住（决策八要求这段校验退化成断言而不是被删）；双订阅期间新旧两个队列各投一条都能被正确处理且不重复处理。
 
 **Task D — 飞书专属业务迁移**
 - **Goal**: 10 条飞书指令、photo/meme/callback、**入站附件管线**、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
@@ -185,7 +228,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 
 **Task E — 泳道验证与生产切换**
 - **Goal**: 证明拆分后飞书链路端到端行为与拆分前一致，并在不丢消息、不双跑的前提下完成生产切换。**此阶段 channel-server 的飞书代码仍在，回滚是配置级的。**
-- **前置铁律**：在 `inbound_lane` 完成按 channel 分区（见决策八）之前，**不得把 lark-service 部署到任何泳道**——它抢到的消息会被静默丢弃，没有任何错误信号。切流期间还须确认每个队列只有一个订阅者。
+- **前置铁律**：在 `inbound_lane` 完成按 channel 分区（见决策八）之前，**不得把 lark-service 部署到任何泳道**。它和该泳道的 channel-server 会竞争消费同一个队列：飞书信封被谁抢到全看运气（而 channel-server 此时仍有 lark runtime，抢到就真处理），QQ 信封被 lark-service 抢到则会一直 requeue 弹回来，两个服务互相推诿。切流期间还须确认每个队列只有一个订阅者。
 - **切流判据是 `/api/ready` 返回 200，不是 `/api/health`**：飞书 SDK 的 `start()` 只是异步发起重连、**不等待首次连接成功**，所以"进程起来了"完全不代表它在接飞书事件。两个端点职责已分开——`/api/health` 恒 200（liveness，重连抖动不该触发重启），`/api/ready` 在 `connected !== expected` 时返回 503。用错端点会造成"旧的已停、新的没连上"且无告警的静默断流窗口。
 - **必须实际触发一次"首次认领"**：身份与会话的收敛靠两条手写 `ON CONFLICT ... COALESCE`（`lark_user_open_id` / `lark_base_chat_info`）。它们的 SQL 由真 TypeORM 生成并被断言，但开发机连不到库，**从未在真 PG 上执行过**。泳道验证必须包含一个此前没见过的用户或会话，让这两条语句真的跑一次。
 - **Deliverable**: 泳道验证记录（命令 + 实际输出）；四个入口/owner 的切换与回滚执行记录。
@@ -193,5 +236,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 
 **Task F — 清理与边界收口**
 - **Goal**: 在切换稳定后删除 channel-server 的飞书代码，关闭 cutover 窗口。
-- **Deliverable**: 残余飞书代码（plugins/lark、types/、lark_* 实体、mongo 飞书方法、infrastructure/integrations/lark*）删除；`?? 'lark'` 兜底清除；`core/boundary.test.ts` 守卫范围按新边界更新。
+- **Deliverable**: 残余飞书代码（plugins/lark、types/、lark_* 实体、mongo 飞书方法、infrastructure/integrations/lark*）删除；**recall-worker 整个 Deployment 下线**（QQ 不实现 recall，拆走飞书后它空转）；**出站老队列的双订阅删除**（决策九的窗口在此关闭）；`?? 'lark'` 兜底清除；`core/boundary.test.ts` 守卫范围按新边界更新。删 Deployment 连带要改 `Makefile` 的 sibling 声明和 `CLAUDE.md` / `README.md` / `docs/service-topology.md` 里的镜像与服务映射表。
 - **Verification**: 明确写出"切换已稳定"的判据并确认满足后才动手；`grep -ri lark apps/channel-server/src` 的每条命中都能解释为非飞书含义；channel-server 全量测试绿；边界守卫在故意违规时确实转红（变异验证，不能只看绿）。
+- **删老队列前，"队列深度为零"不是充分条件**：recall 的重试用的是延迟投递，在途的延迟消息压根不出现在队列深度里，最长能晚十几秒才落地。判据要三条同时成立——旧 Pod 全退、超过最大重投延迟的等待期已过、旧 rk 的入流速率与 unacked 都为零——之后才解绑删队列。
+- **这一步是回滚级别的分界线**，要在执行记录里写明：动手之前回滚是改配置，动手之后回滚要同时回镜像和队列拓扑。跨过去就没有便宜的退路了。
