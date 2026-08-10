@@ -58,6 +58,7 @@
       "name": "lark-service",
       "version": "1.0.0",
       "dependencies": {
+        "@inner/lark-utils": "workspace:*",
         "@inner/shared": "workspace:*",
         "@larksuiteoapi/node-sdk": "^1.23.0",
         "amqplib": "^0.10.5",

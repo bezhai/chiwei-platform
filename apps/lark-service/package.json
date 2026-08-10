@@ -18,6 +18,7 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
+        "@inner/lark-utils": "workspace:*",
         "@inner/shared": "workspace:*",
         "@larksuiteoapi/node-sdk": "^1.23.0",
         "amqplib": "^0.10.5",

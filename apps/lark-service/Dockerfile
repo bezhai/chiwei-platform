@@ -19,8 +19,11 @@ COPY packages/lark-utils/package.json ./packages/lark-utils/
 # ② 安装依赖（只有 package.json / lockfile / bunfig 变动才重新执行）
 RUN bun install --frozen-lockfile
 
-# ③ 复制 workspace 包源码（lark-service 目前只依赖 @inner/shared）+ 本服务源码
+# ③ 复制 workspace 包源码 + 本服务源码。
+# 这两个包是 source-only（package.json 的 main 指向 src/*.ts），install 阶段只建了
+# 符号链接、没有把源码拷进来，漏一个的症状是 bun build 报模块找不到。
 COPY packages/ts-shared ./packages/ts-shared
+COPY packages/lark-utils ./packages/lark-utils
 COPY apps/lark-service/tsconfig.json ./apps/lark-service/
 COPY apps/lark-service/src ./apps/lark-service/src
 
