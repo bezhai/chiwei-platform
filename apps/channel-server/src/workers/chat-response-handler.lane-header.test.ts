@@ -88,6 +88,7 @@ function makeDeps(): { deps: ChatResponseHandlerDeps; observed: Array<string | u
         observed,
         deps: {
             repo,
+            ownsChannel: () => true,
             getCapabilities: () => {
                 observed.push(context.getAll().lane);
                 return cap;

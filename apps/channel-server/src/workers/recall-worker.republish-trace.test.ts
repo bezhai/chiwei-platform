@@ -23,7 +23,7 @@ import type * as RabbitMQModule from '@inner/shared/mq';
 // 同 rabbitmq.test.ts：多个测试文件用 mock.module 把 @inner/shared/mq 整体换成
 // 桩，而 bun 的 mock.module 是进程级全局。带 query 的 specifier 是另一个模块 key，
 // 拿得到未被替换的真实 publish 和一个干净的单例。
-const { rabbitmqClient, RECALL } = (await import(
+const { rabbitmqClient, RECALL, channelRoute } = (await import(
     // @ts-expect-error 带 query 的 specifier 只有 bun 运行时认，tsc 解析不到；类型由下面的断言给出
     '@inner/shared/mq?real'
 )) as typeof RabbitMQModule;
@@ -90,11 +90,13 @@ function makeDeps(): RecallHandlerDeps {
             findOneBy: async () => null,
             update: async () => ({ affected: 1 }),
         } as unknown as RecallHandlerDeps['repo'],
+        ownsChannel: () => true,
         getCapabilities: () => {
             throw new Error('重投分支不应该取 channel capabilities');
         },
-        republish: (payload, delayMs, headers, lane) =>
-            rabbitmqClient.publish(RECALL, payload, delayMs, headers, lane),
+        // 重投回**同 channel** 的队列：换队列之后投回旧的共享队列等于把消息倒退。
+        republish: (channel, payload, delayMs, headers, lane) =>
+            rabbitmqClient.publish(channelRoute(RECALL, channel), payload, delayMs, headers, lane),
         ack: () => {},
         nack: () => {},
     };
@@ -105,7 +107,7 @@ describe('handleRecall 重投：AMQP header 上的 trace_id / lane', () => {
         await handleRecall(makeDeps(), makeMsg({ lane: 'ppe-taskb', trace_id: 'trace-inbound-1' }));
 
         expect(published.length).toBe(1);
-        expect(published[0]!.rk).toBe('action.recall.ppe-taskb');
+        expect(published[0]!.rk).toBe('action.recall.lark.ppe-taskb');
         expect(published[0]!.headers).toEqual({
             trace_id: 'trace-inbound-1',
             lane: 'ppe-taskb',
@@ -118,7 +120,7 @@ describe('handleRecall 重投：AMQP header 上的 trace_id / lane', () => {
         await handleRecall(makeDeps(), makeMsg({ trace_id: 'trace-inbound-2' }));
 
         expect(published.length).toBe(1);
-        expect(published[0]!.rk).toBe('action.recall');
+        expect(published[0]!.rk).toBe('action.recall.lark');
         expect(published[0]!.headers).toEqual({
             trace_id: 'trace-inbound-2',
             lane: '',

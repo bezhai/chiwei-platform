@@ -17,6 +17,8 @@ from app.runtime.wire import clear_wiring
 class _RecallProbe(Data):
     session_id: Annotated[str, Key]
     chat_id: str
+    # recall 队列按 channel 分区，Data 必须自己说得出 channel（compile_graph 也校验）。
+    channel: str = "lark"
 
     class Meta:
         transient = True
@@ -24,6 +26,7 @@ class _RecallProbe(Data):
 
 class _MixData(Data):
     session_id: Annotated[str, Key]
+    channel: str = "lark"
 
     class Meta:
         transient = True
@@ -66,8 +69,9 @@ async def test_emit_dispatches_to_sink_mq_using_route_from_all_routes(monkeypatc
     assert fake_publish.await_count == 1
     args, _kwargs = fake_publish.await_args
     route, body = args[0], args[1]
-    assert route.queue == "recall"
-    assert route.rk == "action.recall"
+    # recall 按 channel 分区：payload 的 channel 决定落哪条队列。
+    assert route.queue == "recall_lark"
+    assert route.rk == "action.recall.lark"
     assert body["session_id"] == "s1"
     assert body["chat_id"] == "c1"
 

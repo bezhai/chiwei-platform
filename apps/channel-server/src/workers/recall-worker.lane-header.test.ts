@@ -100,8 +100,9 @@ function makeHarness(hasReplies: boolean): Harness {
         republishes,
         deps: {
             repo,
+            ownsChannel: () => true,
             getCapabilities: () => cap,
-            republish: async (payload, delayMs, headers, lane) => {
+            republish: async (_channel, payload, delayMs, headers, lane) => {
                 republishes.push({ payload, delayMs, headers, lane });
             },
             ack: () => {},

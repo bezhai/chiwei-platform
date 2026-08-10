@@ -42,6 +42,26 @@ export function laneRK(base: string, lane?: string): string {
     return lane ? `${base}.${lane}` : base;
 }
 
+/**
+ * 按 channel 分区的 Route：channel 揉进 base 名，泳道后缀继续加在最后。
+ *
+ *   chat_response  →  chat_response_lark  →  chat_response_lark_{lane}
+ *   chat.response  →  chat.response.lark  →  chat.response.lark.{lane}
+ *
+ * 队列的分区维度必须跟消费者的所有权维度一致 —— 出站 owner 按 channel 拆开之后
+ * 还共用一条队列的话，RabbitMQ 轮询投递会把流量随机劈给两个服务。
+ *
+ * 揉进 base 名（而不是另起一层）换来两件事：laneQueue / laneRK 原样套用；泳道队列的
+ * x-dead-letter-routing-key 取的就是 route.rk，于是 TTL 到期时自动弹回**同 channel**
+ * 的 prod rk。弹错 channel 意味着回复由别的渠道发出去，比不弹严重得多。
+ *
+ * 本函数只认 channel 参数，本包里不出现任何具体渠道名 —— 已知 channel 的清单由各
+ * 服务自己维护。
+ */
+export function channelRoute(base: Route, channel: string): Route {
+    return { queue: `${base.queue}_${channel}`, rk: `${base.rk}.${channel}` };
+}
+
 function buildQueueArgs(prodRK: string, lane?: string): Record<string, unknown> {
     const extra: Record<string, unknown> = lane ? { 'x-expires': NON_PROD_EXPIRES_MS } : {};
     if (!lane) {
@@ -55,6 +75,28 @@ function buildQueueArgs(prodRK: string, lane?: string): Record<string, unknown> 
     };
 }
 
+/**
+ * 一个队列上的订阅。
+ *
+ * tag 是 broker 给的 consumerTag，basic.cancel 要用它；重连后 broker 会发新的，所以
+ * 它是可变字段而不是身份。inFlight 是「handler 已经开始、还没跑完」的条数 —— 交接
+ * 屏障等的就是它归零。handler 内部负责 ack，所以它跑完即意味着 ack 已经发出。
+ */
+interface Subscription {
+    readonly queue: string;
+    readonly handler: MessageHandler;
+    tag?: string;
+    inFlight: number;
+    /** 已经 basic.cancel 过：重连不再复活它。 */
+    cancelled: boolean;
+}
+
+/** drainConsumer 的等待参数，测试用小值。 */
+export interface DrainOptions {
+    pollMs?: number;
+    timeoutMs?: number;
+}
+
 class RabbitMQClient {
     private static instance: RabbitMQClient;
     private conn: ChannelModel | null = null;
@@ -62,7 +104,7 @@ class RabbitMQClient {
     /** 建到一半的 confirm channel 也算数，理由见 getConfirmChannel。 */
     private confirmChannel: Promise<ConfirmChannel> | null = null;
     private reconnecting = false;
-    private consumers: Array<{ queue: string; handler: MessageHandler }> = [];
+    private consumers: Subscription[] = [];
     private declaredLaneQueues = new Set<string>();
 
     private constructor() {}
@@ -129,6 +171,20 @@ class RabbitMQClient {
         console.info(`[RabbitMQ] topology declared (lane=${lane || 'prod'})`);
     }
 
+    /**
+     * 声明单条路由的队列与绑定（泳道感知），declareTopology 的按需版本。
+     *
+     * ALL_ROUTES 仍然只放渠道无关的基础路由；按 channel 分区出来的队列由各服务
+     * 自己在启动时声明 —— 哪些 channel 归自己是服务的知识，不是本包的。
+     */
+    async declareRoute(route: Route): Promise<void> {
+        const ch = this.getChannel();
+        const lane = getLane();
+        const qName = laneQueue(route.queue, lane);
+        await ch.assertQueue(qName, { durable: true, arguments: buildQueueArgs(route.rk, lane) });
+        await ch.bindQueue(qName, EXCHANGE_NAME, laneRK(route.rk, lane));
+    }
+
     private async ensureLaneQueue(route: Route, lane: string): Promise<void> {
         const cacheKey = `${route.queue}_${lane}`;
         if (this.declaredLaneQueues.has(cacheKey)) return;
@@ -185,25 +241,76 @@ class RabbitMQClient {
     }
 
     async consume(queueName: string, handler: MessageHandler): Promise<void> {
-        // 记录 consumer 以便重连后恢复
-        if (!this.consumers.some((c) => c.queue === queueName)) {
-            this.consumers.push({ queue: queueName, handler });
+        // 记录 subscription 以便重连后恢复
+        let sub = this.consumers.find((c) => c.queue === queueName);
+        if (!sub) {
+            sub = { queue: queueName, handler, inFlight: 0, cancelled: false };
+            this.consumers.push(sub);
         }
-        await this.registerConsumer(queueName, handler);
+        sub.cancelled = false;
+        await this.registerConsumer(sub);
     }
 
-    private async registerConsumer(queueName: string, handler: MessageHandler): Promise<void> {
+    private async registerConsumer(sub: Subscription): Promise<void> {
         const ch = this.getChannel();
-        await ch.consume(queueName, async (msg) => {
+        const reply = await ch.consume(sub.queue, async (msg) => {
             if (!msg) return;
+            sub.inFlight += 1;
             try {
-                await handler(msg);
+                await sub.handler(msg);
             } catch (err) {
-                console.error(`[RabbitMQ] handler error on ${queueName}:`, err);
+                console.error(`[RabbitMQ] handler error on ${sub.queue}:`, err);
                 ch.nack(msg, false, false);
+            } finally {
+                sub.inFlight -= 1;
             }
         });
-        console.info(`[RabbitMQ] consuming queue: ${queueName}`);
+        sub.tag = reply?.consumerTag;
+        console.info(`[RabbitMQ] consuming queue: ${sub.queue}`);
+    }
+
+    /**
+     * 交接屏障：basic.cancel 停止新投递 → 等在途 handler 跑完 → 才返回。
+     *
+     * 换队列所有者时唯一安全的顺序是「停旧、排空、再起新」。直接杀进程会让已经调完
+     * 下游 API、还没 ACK 的那条消息 requeue，换个消费者再发一次 —— 用户看到两条。
+     * 「先停旧、让消息堆一会儿」对泳道队列也不成立：泳道队列带 10s TTL，堆过 10 秒
+     * 就被 DLX 弹回 prod，泳道的回复从 prod 实例发出去。
+     *
+     * 等的是本进程的 in-flight handler 数（handler 内部负责 ack，跑完即 ack 已发），
+     * 不是 broker 侧的 unacked 计数 —— 后者要另开管理端口查。prefetch 之下两者一致。
+     */
+    async drainConsumer(queueName: string, options: DrainOptions = {}): Promise<void> {
+        const pollMs = options.pollMs ?? 200;
+        const timeoutMs = options.timeoutMs ?? 60_000;
+        const sub = this.consumers.find((c) => c.queue === queueName);
+        if (!sub) return;
+
+        // 先摘掉重连恢复资格，再发 cancel：中间恰好断线重连的话，恢复循环不该把它
+        // 重新订阅回来。
+        sub.cancelled = true;
+        if (sub.tag) {
+            try {
+                await this.getChannel().cancel(sub.tag);
+            } catch (e) {
+                console.warn(
+                    `[RabbitMQ] cancel failed on ${queueName} (channel likely closed):`,
+                    (e as Error).message,
+                );
+            }
+        }
+
+        const deadline = Date.now() + timeoutMs;
+        while (sub.inFlight > 0) {
+            if (Date.now() >= deadline) {
+                throw new Error(
+                    `[RabbitMQ] drain timed out on ${queueName}: ${sub.inFlight} still in flight`,
+                );
+            }
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+        }
+        this.consumers = this.consumers.filter((c) => c !== sub);
+        console.info(`[RabbitMQ] drained consumer: ${queueName}`);
     }
 
     ack(msg: ConsumeMessage): void {
@@ -304,8 +411,9 @@ class RabbitMQClient {
             try {
                 await this.connect();
                 await this.declareTopology();
-                for (const { queue, handler } of this.consumers) {
-                    await this.registerConsumer(queue, handler);
+                for (const sub of this.consumers) {
+                    if (sub.cancelled) continue;
+                    await this.registerConsumer(sub);
                 }
                 console.info('[RabbitMQ] reconnected');
             } catch (err) {

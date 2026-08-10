@@ -62,6 +62,12 @@ export type ChatResponseStage =
 // handler 的可注入依赖。worker 入口灌真实实现，测试灌 spy。
 export interface ChatResponseHandlerDeps {
     repo: Repository<CommonAgentResponse>;
+    /**
+     * 这条 channel 归不归本进程管。共库方案下 common_agent_response 没有 channel 列，
+     * DB 层拦不住越界写入，隔离完全依赖「rk 分对了 + 消费侧不越界」。rk 配错是配置
+     * 问题，这道校验让它立刻暴露而不是静默写脏另一个服务的台账。
+     */
+    ownsChannel: (channel: string) => boolean;
     getCapabilities: (channel: string) => OutboundCapabilities;
     ack: (msg: ConsumeMessage) => void;
     nack: (msg: ConsumeMessage, requeue?: boolean) => void;
@@ -77,7 +83,8 @@ export async function handleChatResponse(
     deps: ChatResponseHandlerDeps,
     msg: ConsumeMessage,
 ): Promise<void> {
-    const { repo, getCapabilities, ack, nack, observeDuration, observeQueueDelay } = deps;
+    const { repo, ownsChannel, getCapabilities, ack, nack, observeDuration, observeQueueDelay } =
+        deps;
 
     const tStart = Date.now();
     let payload: ChatResponsePayload;
@@ -87,6 +94,24 @@ export async function handleChatResponse(
         console.error(
             '[ChatResponseWorker] Malformed message, sending to DLQ:',
             msg.content.toString().slice(0, 200),
+        );
+        nack(msg, false);
+        return;
+    }
+
+    // fail-closed 先于任何副作用：不属于自己的 channel 一行库都不查、一个插件都不取。
+    // 拒绝 = nack(requeue=false)，prod 队列挂着 DLX，消息进 dead_letters 可查可重放；
+    // requeue 会让两个服务互相把同一条消息推来推去，压成活锁。
+    const channel = payload.channel ?? DEFAULT_CHANNEL;
+    if (!ownsChannel(channel)) {
+        console.error(
+            JSON.stringify({
+                event: 'chat_response_foreign_channel',
+                channel,
+                session_id: payload.session_id ?? null,
+                message_id: payload.message_id ?? null,
+                consumer_tag: msg.fields?.consumerTag ?? null,
+            }),
         );
         nack(msg, false);
         return;
@@ -111,7 +136,6 @@ export async function handleChatResponse(
         part_index = 0,
         is_last = false,
         is_proactive = false,
-        channel = DEFAULT_CHANNEL,
         persona_id,
     } = payload;
 

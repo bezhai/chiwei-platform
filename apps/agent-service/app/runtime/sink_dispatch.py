@@ -16,7 +16,13 @@ queue 直接 raise GraphError，所以这里 ``_route_by_queue`` 返回 None
 """
 from __future__ import annotations
 
-from app.infra.rabbitmq import ALL_ROUTES, Route, mq
+from app.infra.rabbitmq import (
+    ALL_ROUTES,
+    CHANNEL_PARTITIONED_ROUTES,
+    Route,
+    channel_route_for,
+    mq,
+)
 from app.runtime.data import Data
 from app.runtime.propagation import inject_context, outbound_context
 from app.runtime.sink import SinkSpec
@@ -30,6 +36,10 @@ async def _dispatch_mq_sink(sink: SinkSpec, data: Data) -> None:
         f"reaching dispatch is a runtime invariant violation"
     )
     body = data.model_dump(mode="json")
+    # 出站队列按 channel 分区的那几条：rk 由消息自己的 channel 决定。agent-service
+    # 是唯一的生产者，rk 分对了是两个消费服务不互相抢消息的前提。
+    if queue_name in CHANNEL_PARTITIONED_ROUTES:
+        route = channel_route_for(queue_name, _channel_of(body, queue_name))
     # Lane source priority: contextvar > body.lane field (carried by some
     # Data classes for body-level routing, e.g. ChatResponseSegment) >
     # LANE env. ``outbound_context`` owns that order; passing ctx.lane back
@@ -43,6 +53,22 @@ async def _dispatch_mq_sink(sink: SinkSpec, data: Data) -> None:
     ctx = outbound_context(fallback_lane=body_lane)
     headers = inject_context({"data_type": type(data).__name__}, ctx)
     await mq.publish(route, body, headers=headers, lane=ctx.lane)
+
+
+def _channel_of(body: dict, queue_name: str) -> str:
+    """Read the outbound channel off the serialized Data.
+
+    compile_graph 已校验「wire 到 channel-partitioned sink 的 Data 必须有 channel
+    字段」，所以这里缺字段是不变量被破坏。仍然显式抛而不是默认某个渠道 —— 默认值
+    会把分流错误变成静默的错投。
+    """
+    channel = body.get("channel")
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(
+            f"Sink.mq({queue_name!r}) is channel-partitioned but the payload "
+            f"carries no channel ({channel!r}); refusing to guess a routing key."
+        )
+    return channel
 
 
 def _route_by_queue(queue_name: str) -> Route | None:

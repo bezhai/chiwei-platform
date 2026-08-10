@@ -183,18 +183,26 @@ class TestRouteConstants:
     def test_all_routes_complete(self):
         # v4 vectorize 队列（memory_fragment_vectorize / memory_abstract_vectorize）
         # 随 v4 记忆整机删除。
+        # chat_response / recall 的 channel 分区队列也在这里 —— declare_topology 只
+        # 遍历 ALL_ROUTES，漏掉就等于队列压根没被声明，而声明缺失是静默的。
+        from app.infra.rabbitmq import CHANNEL_ROUTES
+
         expected = {
             CHAT_REQUEST,
             CHAT_RESPONSE,
             RECALL,
+            *CHANNEL_ROUTES,
             *DELAYED_TRIGGER_ROUTES,
         }
         assert set(ALL_ROUTES) == expected
 
     def test_all_routes_match_business_plus_delayed_trigger(self):
-        # 3 business routes + one runtime_delayed_trigger route per
-        # KNOWN_APPS_FOR_DELAYED_TRIGGER entry (Phase 7a Gap 9.1.2).
-        assert len(ALL_ROUTES) == 3 + len(DELAYED_TRIGGER_ROUTES)
+        # 3 business routes + 每个 channel-partitioned base × 每个已知 channel
+        # + one runtime_delayed_trigger route per KNOWN_APPS_FOR_DELAYED_TRIGGER
+        # entry (Phase 7a Gap 9.1.2).
+        from app.infra.rabbitmq import CHANNEL_ROUTES
+
+        assert len(ALL_ROUTES) == 3 + len(CHANNEL_ROUTES) + len(DELAYED_TRIGGER_ROUTES)
 
     def test_delayed_trigger_only_for_agent_service(self):
         # vectorize-worker 已无任何节点，runtime_delayed_trigger 队列只剩

@@ -19,12 +19,9 @@ LoggerFactory.createLogger({
 import { createServer } from 'http';
 import AppDataSource from 'ormconfig';
 import { CommonAgentResponse } from '@inner/shared/entities';
-import {
-    rabbitmqClient,
-    CHAT_RESPONSE,
-    getLane,
-    laneQueue,
-} from '@inner/shared/mq';
+import { rabbitmqClient, CHAT_RESPONSE, getLane } from '@inner/shared/mq';
+import { loadOwnedChannels } from './outbound-channels';
+import { OutboundSubscriptions } from './outbound-subscriptions';
 import { botDirectory } from '@inner/shared/bot';
 import { getChannelRegistry } from '@inner/shared/channel';
 import '@plugins/index';
@@ -55,11 +52,16 @@ const chatResponseQueueDelay = new Histogram({
     registers: [metricsRegistry],
 });
 
+// 拥有集合变化的检查间隔。移交是人工触发的操作步骤，秒级足够；短了纯属白打
+// paas-engine（DynamicConfig 自己还有 10s 缓存）。
+const RECONCILE_INTERVAL_MS = 15_000;
+
 // 把进程级真实依赖（DB repo / MQ ack-nack / 渠道插件 / metrics）灌进 handler。
 // 消息处理的全部业务逻辑在 chat-response-handler.ts，本入口只做装配。
-function buildHandlerDeps(): ChatResponseHandlerDeps {
+function buildHandlerDeps(ownsChannel: (channel: string) => boolean): ChatResponseHandlerDeps {
     return {
         repo: AppDataSource.getRepository(CommonAgentResponse),
+        ownsChannel,
         getCapabilities: (channel) => getChannelRegistry().get(channel).capabilities,
         ack: (msg) => rabbitmqClient.ack(msg),
         nack: (msg, requeue) => rabbitmqClient.nack(msg, requeue),
@@ -86,14 +88,31 @@ async function main(): Promise<void> {
     await rabbitmqClient.declareTopology();
     console.info('[ChatResponseWorker] RabbitMQ connected');
 
-    // 4. 开始消费
-    const lane = getLane();
-    const queue = laneQueue(CHAT_RESPONSE.queue, lane);
-    const deps = buildHandlerDeps();
-    await rabbitmqClient.consume(queue, (msg) => handleChatResponse(deps, msg));
-    console.info(
-        `[ChatResponseWorker] Consuming queue: ${queue}, waiting for messages...`,
-    );
+    // 4. 开始消费：旧的 chat_response 和每个拥有渠道的 chat_response_{channel} 同时
+    //    订阅，agent-service 切 rk 的时刻因此不在关键路径上（决策九）。
+    const subscriptions = new OutboundSubscriptions({
+        base: CHAT_RESPONSE,
+        lane: getLane(),
+        port: {
+            declareRoute: (route) => rabbitmqClient.declareRoute(route),
+            consume: (queue, handler) => rabbitmqClient.consume(queue, handler),
+            drainConsumer: (queue) => rabbitmqClient.drainConsumer(queue),
+        },
+        handlerFor: (accepts) => {
+            const deps = buildHandlerDeps(accepts);
+            return (msg) => handleChatResponse(deps, msg);
+        },
+        loadChannels: loadOwnedChannels,
+    });
+    await subscriptions.start();
+
+    // 收窄 / 回滚在运行期生效：移交某个 channel 时不必重启进程，drain 屏障在
+    // reconcile 内部完成（basic.cancel → 等在途归零）。
+    setInterval(() => {
+        subscriptions.reconcile().catch((err) => {
+            console.error('[ChatResponseWorker] reconcile failed:', err);
+        });
+    }, RECONCILE_INTERVAL_MS).unref();
 
     // 5. 暴露 Prometheus metrics
     const metricsPort = parseInt(process.env.METRICS_PORT || '9091', 10);

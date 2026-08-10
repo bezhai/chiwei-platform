@@ -392,7 +392,7 @@ def compile_graph() -> CompiledGraph:
     # wouldn't know which routing key to use when publishing (lane
     # fan-out + queue->rk binding live there). Catching this at compile
     # time means a typo surfaces at boot, not at the first emit.
-    from app.infra.rabbitmq import ALL_ROUTES
+    from app.infra.rabbitmq import ALL_ROUTES, CHANNEL_PARTITIONED_ROUTES
     known_queues = {r.queue for r in ALL_ROUTES}
     sink_errors: list[str] = []
     for w in wires:
@@ -405,6 +405,20 @@ def compile_graph() -> CompiledGraph:
                         f"queue not in ALL_ROUTES; sink dispatch needs a "
                         f"registered route to know the routing key. "
                         f"Add Route({q!r}, ...) to ALL_ROUTES first."
+                    )
+                elif (
+                    q in CHANNEL_PARTITIONED_ROUTES
+                    and "channel" not in w.data_type.model_fields
+                ):
+                    # 这几条队列按 channel 分区（出站 owner 按渠道拆开），rk 只能
+                    # 由消息自己的 channel 决定。Data 说不出 channel 的话，错误
+                    # 要等到第一条真实消息 emit 时才在 dispatch 里炸。
+                    sink_errors.append(
+                        f"wire({w.data_type.__name__}).to(Sink.mq({q!r})): "
+                        f"{q} is channel-partitioned but "
+                        f"{w.data_type.__name__} has no 'channel' field, so "
+                        f"dispatch cannot pick a routing key. Add "
+                        f"'channel: str' to the Data."
                     )
     if sink_errors:
         raise GraphError(

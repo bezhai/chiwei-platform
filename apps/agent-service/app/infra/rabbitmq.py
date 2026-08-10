@@ -46,6 +46,74 @@ CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 RECALL = Route("recall", "action.recall")
 
+
+# ---------------------------------------------------------------------------
+# Channel-partitioned outbound routes
+# ---------------------------------------------------------------------------
+# 出站队列的分区维度必须跟消费者的所有权维度一致。chat_response / recall 的 owner
+# 按 channel 拆成两个服务之后，共用一条队列意味着 RabbitMQ 轮询把流量随机劈成两半
+# —— 不报错、不留痕，切流永远做不干净。
+#
+# 命名口径与 TS 侧 packages/ts-shared/src/mq/client.ts::channelRoute 逐字一致：
+# channel 揉进 base 名，泳道后缀继续加在最后。
+#
+#   chat_response  →  chat_response_lark  →  chat_response_lark_{lane}
+#   chat.response  →  chat.response.lark  →  chat.response.lark.{lane}
+#
+# 这样 lane_queue / _lane_rk 原样套用，而且泳道队列的 x-dead-letter-routing-key
+# 取的就是 route.rk —— TTL 到期自动弹回**同 channel** 的 prod rk。弹到别的 channel
+# 上意味着泳道的回复由另一个渠道发出去，比不弹严重得多。
+def channel_route(base: Route, channel: str) -> Route:
+    """Return ``base`` partitioned by ``channel``."""
+    return Route(
+        queue=f"{base.queue}_{channel}",
+        rk=f"{base.rk}.{channel}",
+        lane_fallback=base.lane_fallback,
+    )
+
+
+# 已知 channel 是一份显式清单，不动态发现：动态发现意味着队列可能压根没被声明，
+# 而声明缺失是静默的（topic exchange 上没有绑定的 rk，消息直接消失）。TS 侧各服务
+# 维护自己那一份，跨语言没法共享 —— 加新渠道时两边都要改。
+KNOWN_CHANNELS: tuple[str, ...] = ("lark", "qq")
+
+_CHANNEL_PARTITIONED_BASES = (CHAT_RESPONSE, RECALL)
+
+CHANNEL_PARTITIONED_ROUTES: dict[str, dict[str, Route]] = {
+    base.queue: {c: channel_route(base, c) for c in KNOWN_CHANNELS}
+    for base in _CHANNEL_PARTITIONED_BASES
+}
+
+CHANNEL_ROUTES: list[Route] = [
+    route
+    for by_channel in CHANNEL_PARTITIONED_ROUTES.values()
+    for route in by_channel.values()
+]
+
+
+def channel_route_for(base_queue: str, channel: str) -> Route:
+    """Resolve the channel-partitioned Route for ``base_queue``.
+
+    fail-closed on both axes: publishing to an unregistered channel would
+    hit a routing key nothing is bound to and the message would vanish
+    without an error.
+    """
+    by_channel = CHANNEL_PARTITIONED_ROUTES.get(base_queue)
+    if by_channel is None:
+        raise ValueError(
+            f"queue={base_queue!r} is not channel-partitioned "
+            f"({sorted(CHANNEL_PARTITIONED_ROUTES)}); it has a single Route."
+        )
+    route = by_channel.get(channel)
+    if route is None:
+        raise ValueError(
+            f"channel={channel!r} not in KNOWN_CHANNELS ({list(KNOWN_CHANNELS)}); "
+            f"queue {base_queue}_{channel} is never declared, so publishing "
+            f"there would silently drop the message. Register the channel in "
+            f"app/infra/rabbitmq.py (and in the TS side's owned-channel list)."
+        )
+    return route
+
 # runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
 # APP_NAME so an envelope published from agent-service is consumed only
 # by an agent-service runtime (preserving emit()'s in-process / cross-
@@ -83,8 +151,11 @@ def trigger_route_for(app: str) -> Route:
 
 ALL_ROUTES = [
     CHAT_REQUEST,
+    # base 的 chat_response / recall 在 cutover 窗口里仍要声明：消费侧双订阅新旧
+    # 两套队列，生产者切 rk 的那一刻才不在关键路径上。Task F 关闭窗口时删。
     CHAT_RESPONSE,
     RECALL,
+    *CHANNEL_ROUTES,
     *DELAYED_TRIGGER_ROUTES,
 ]
 

@@ -49,6 +49,8 @@ class _SourceMqProbe(Data):
 
 class _SinkProbe(Data):
     session_id: Annotated[str, Key]
+    # recall 按 channel 分区，dispatch 据它选 rk。
+    channel: str = "lark"
 
     class Meta:
         transient = True
@@ -189,14 +191,16 @@ async def test_emit_source_mq_header_lane_matches_queue_lane(broker, lane_env):
 
 @pytest.mark.asyncio
 async def test_sink_dispatch_header_lane_matches_queue_lane(broker, lane_env):
-    from app.infra.rabbitmq import RECALL
+    from app.infra.rabbitmq import RECALL, channel_route
 
     wire(_SinkProbe).to(Sink.mq("recall"))
 
     async with bind_context(Context(trace_id=None, lane=None)):
         await emit(_SinkProbe(session_id="s1"))
 
-    assert assert_header_lane_drives_the_queue(broker, RECALL) == LANE
+    # 加了 channel 维度之后泳道后缀仍然加在最后：recall_lark_{lane} / action.recall.lark.{lane}
+    expected = channel_route(RECALL, "lark")
+    assert assert_header_lane_drives_the_queue(broker, expected) == LANE
 
 
 # ---------------------------------------------------------------------------

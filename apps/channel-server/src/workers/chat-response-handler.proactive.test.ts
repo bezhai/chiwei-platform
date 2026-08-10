@@ -146,6 +146,7 @@ function makeDeps(over: {
 }): ChatResponseHandlerDeps {
     return {
         repo: over.repo ?? (makeRepoSpy().repo),
+        ownsChannel: () => true,
         getCapabilities: (_channel: string) => over.cap ?? makeCap().cap,
         ack: over.ack ?? (() => {}),
         nack: over.nack ?? (() => {}),
