@@ -309,6 +309,11 @@ export class LarkClient {
 
     /**
      * 上传图片
+     *
+     * **上传接口的返回值不是 { code, msg, data } 信封。** SDK 对 im.v1.image.create
+     * 直接给解包后的 `{ image_key } | null`（见 @larksuiteoapi/node-sdk 的类型声明），
+     * 所以这里不能再取一层 .data —— 取了就永远拿到 undefined，症状是每张图都
+     * "上传失败"，而且不抛错、日志里什么都没有。
      */
     async uploadImage(fileStream: Readable): Promise<{ image_key?: string }> {
         const result = await this.client.im.v1.image.create({
@@ -317,7 +322,7 @@ export class LarkClient {
                 image_type: 'message',
             },
         });
-        return (result as any)?.data || {};
+        return result ?? {};
     }
 
     // ==================== 通用请求 ====================
