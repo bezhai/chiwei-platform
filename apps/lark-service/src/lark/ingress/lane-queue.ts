@@ -11,27 +11,35 @@
 //   3. **失败要让 MQ 知道** —— 另外两个入口已经向飞书应答过了，只能记日志；这里还
 //      能把消息退回去。
 //
-// ## 队列的所有权是错的，本文件只是即时防线
+// ## 两条队列，因为所有权正在从 lane 迁到 channel + lane
 //
-// 队列**按 lane 分区**，但拆分后 owner 实际**按 channel + lane 分区**：QQ 的信封和
-// 飞书的信封躺在同一个 `inbound_lane.{lane}` 里，channel-server 和本服务竞争消费。
-// 抢到对方的信封时 ACK 就等于把它吃掉 —— 对面永远收不到，而且没有任何报错。
+// 分区前的 `inbound_lane.{lane}` 只按 lane 分，但 owner 实际按 **channel + lane** 分：
+// QQ 的信封和飞书的信封躺在同一条队列里，channel-server 和本服务竞争消费。抢到对方的
+// 信封时 ACK 就等于把它吃掉 —— 对面永远收不到，而且没有任何报错。
 //
-// 根治办法是队列按 channel + lane 分区（不同 owner 根本不共享队列），那要同时改投递
-// 侧，跟"出站按 channel 分 routing key"是同一件事，放在 Task C。**在那之前**本文件
-// 校验信封的 channel：不属于自己的绝不 ACK，退回队列等它真正的主人。分区做完之后这
-// 段校验会退化成一条断言（那时不该再有别人的信封进来），不要删掉。
+// 根治办法是队列也按 channel + lane 分：`inbound_lane.{channel}.{lane}`，不同 owner
+// 根本不共享队列，竞争消费自然不存在。换队列名不可能原子发布（生产者和消费者在不同的
+// Deployment 里），所以走"消费侧先双订阅 → 切生产者 → 旧队列排空 → 移交"，本文件承担
+// 头一步：默认只订阅共享队列，开关打开后同时订阅分区队列。
 //
-// 退回的代价要说清楚：RabbitMQ 竞争消费下 requeue 可能被随机分回自己。对面在线时一
-// 两次就交接完；对面不在线时会一直弹回来 —— 所以**只在消息是重投时才等一下**，把热
-// 循环压成慢轮询。消息始终留在队列里，不丢。
+// 于是同一段 channel 校验在两条队列上有两种结论：
 //
-// 队列声明是 fail-closed 的：**不配 TTL、不配死信**。装在里面的是"已经判定该在这条
-// 泳道处理"的消息，过期跑回 prod 就是拿泳道的改动去污染线上。
+//   共享队列    退回去（`nack(requeue)`），对面还在订阅这条队列，交接得掉
+//   分区队列    丢掉并吼（`nack(requeue=false)`），**这是一条断言**：分区之后不该
+//               再有别人的信封进来。这条队列没有第二个消费者，退回去只会永远弹，而
+//               prefetch=1 会让它把整条泳道堵死
+//
+// 共享队列上退回的代价要说清楚：RabbitMQ 竞争消费下 requeue 可能被随机分回自己。对面
+// 在线时一两次就交接完；对面不在线时会一直弹回来 —— 所以**只在消息是重投时才等一下**，
+// 把热循环压成慢轮询。消息始终留在队列里，不丢。
+//
+// 两条队列的声明都是 fail-closed 的：**不配 TTL、不配死信**。装在里面的是"已经判定该
+// 在这条泳道处理"的消息，过期跑回 prod 就是拿泳道的改动去污染线上。
 
-import { getRedisClient } from '@inner/shared/cache';
+import { DynamicConfig } from '@inner/shared';
 import { getRabbitChannel } from '@inner/shared/mq';
 
+import { laneClaimStore, type InboundLaneStore } from './lane-claim';
 import { UnprocessableLarkEvent, type LarkEvent } from './lark-event';
 
 /**
@@ -67,26 +75,6 @@ export interface LaneChannel {
     nack(msg: unknown, allUpTo: boolean, requeue: boolean): void;
 }
 
-/**
- * 认领一条消息的结果。
- *   claimed    占到了，可以开始处理
- *   in-flight  别人正在处理（或者上一个持有者崩了、租约还没到期）
- *   done       已经处理完了
- */
-export type LaneClaim = 'claimed' | 'in-flight' | 'done';
-
-/**
- * 幂等占位。**必须是原子的**：先查再写是两步，两个 Pod 能同时穿过查询、各执行一遍
- * 副作用。
- */
-export interface InboundLaneStore {
-    claim(key: string): Promise<LaneClaim>;
-    /** 处理成功，占位转成长期的完成标记。 */
-    complete(key: string): Promise<void>;
-    /** 处理失败，立刻释放占位，让重投能重来。 */
-    release(key: string): Promise<void>;
-}
-
 /** 本消费者负责的范围。信封落在范围外的一律不碰。 */
 export interface LaneConsumerScope {
     /** 本服务负责的渠道。 */
@@ -99,38 +87,46 @@ export interface LaneConsumerScope {
 
 const QUEUE_PREFIX = 'inbound_lane';
 
-/**
- * 占位租约。短，因为它回答的是"持有者崩了之后多久能被别人重新处理"；长了会让一条
- * 消息在持有者已经死掉的情况下白等。
- */
-const CLAIM_LEASE_SECONDS = 5 * 60;
-
-/** 完成标记的存活时间要盖住 MQ 的重投窗口。 */
-const COMPLETED_TTL_SECONDS = 24 * 60 * 60;
-
 /** 别人的信封弹回来之后等多久再退回去。压热循环用的，不是重试退避。 */
 const FOREIGN_RETRY_DELAY_MS = 1_000;
 
 /** 老信封没有 channel 字段，那个年代只有飞书在用这个队列。 */
 const LEGACY_ENVELOPE_CHANNEL = 'lark';
 
-const CLAIM_IN_FLIGHT = 'in-flight';
-const CLAIM_DONE = 'done';
+/** 信封的归属渠道。老信封没有这个字段，那个年代只有飞书在用这个队列。 */
+export function envelopeChannel(envelope: InboundLaneEnvelope): string {
+    return envelope.channel ?? LEGACY_ENVELOPE_CHANNEL;
+}
 
-export function inboundLaneQueueName(lane: string): string {
+/**
+ * 分区后的队列名。owner 是 channel + lane，队列也就按 channel + lane 分。
+ *
+ * ⚠️ 这个名字是**跨服务契约**：channel-server 那侧要拼出逐字相同的名字，否则两个服务
+ * 各守着一条对方不认识的队列。两个 app 是两个包，编译期对不上，只能两边各钉一条断言。
+ */
+export function inboundLaneQueueName(channel: string, lane: string): string {
+    return `${QUEUE_PREFIX}.${channel}.${lane}`;
+}
+
+/** 分区前的队列名。切换窗口内还得订阅它，把旧队列里的存量收干净。 */
+export function sharedInboundLaneQueueName(lane: string): string {
     return `${QUEUE_PREFIX}.${lane}`;
 }
 
 /**
  * 渠道 + 事件类型 + 全局消息 id + 泳道，唯一确定"这条事件在这条泳道上处理了一次"。
  *
- * channel 必须在 key 里：队列是共享的，两个渠道的同名事件不带 channel 会互相顶掉
- * 对方的完成标记。
+ * **不含队列名**，这是刻意的：双订阅期间同一条消息可能从旧队列来、也可能从新队列来，
+ * key 认队列的话两边各算一次，用户就会看到两条回复。
+ *
+ * channel 必须在 key 里：分区之前队列是共享的，两个渠道的同名事件不带 channel 会互相
+ * 顶掉对方的完成标记；分区之后它是两个服务的 key 不重叠的依据。channel-server 用的是
+ * 逐字相同的格式，换手重投才认得出自己处理过。
  */
 export function inboundLaneDedupeKey(envelope: InboundLaneEnvelope): string {
     return [
         QUEUE_PREFIX,
-        envelope.channel ?? LEGACY_ENVELOPE_CHANNEL,
+        envelopeChannel(envelope),
         envelope.event_type,
         envelope.global_message_id,
         envelope.lane,
@@ -189,27 +185,34 @@ function larkEventOf(envelope: InboundLaneEnvelope): LarkEvent {
     };
 }
 
-const redisStore: InboundLaneStore = {
-    claim: async (key) => {
-        // SET key value EX ttl NX —— 一次往返，原子。
-        const won = await getRedisClient().setNx(key, CLAIM_IN_FLIGHT, CLAIM_LEASE_SECONDS);
-        if (won !== null) return 'claimed';
-        // 没占到：要分清"已经做完了"和"有人正在做"。做完了可以安心 ACK；正在做的绝不
-        // 能 ACK —— 对方还没写完成标记，ACK 会把消息销毁。
-        const held = await getRedisClient().get(key);
-        return held === CLAIM_DONE ? 'done' : 'in-flight';
-    },
-    complete: async (key) => {
-        const redis = getRedisClient();
-        await redis.set(key, CLAIM_DONE);
-        await redis.expire(key, COMPLETED_TTL_SECONDS);
-    },
-    release: async (key) => {
-        await getRedisClient().del(key);
-    },
-};
-
 const realWait = (ms: number): Promise<void> => Bun.sleep(ms);
+
+/**
+ * "是否订阅按 channel 分区的新队列"。默认关 —— 镜像可以先上线、先部署，什么时候真
+ * 订阅是切换动作的一部分。
+ *
+ * 走 Dynamic Config 而不是 env：Release env 会被部署的 POST 清空，长期开关放在那里
+ * 会在某次部署之后悄悄失效。
+ *
+ * 只在启动时读一次，因为订阅本身是启动动作：开关翻过来之后要重启消费者才生效。这一
+ * 步是纯增量（多订一条队列，行为不变），重启无害。
+ *
+ * 启动时没有请求上下文，所以 Dynamic Config 按 **prod** 解析——它是一个全局的切换
+ * 开关，不是按泳道分别打开的旋钮。给某条泳道单独配这个 key 不会生效。
+ */
+export const INBOUND_LANE_CHANNEL_CONSUME_FLAG = 'enable_inbound_lane_channel_consume';
+
+const dynamicConfig = new DynamicConfig();
+
+export function inboundLaneChannelConsumeEnabled(): Promise<boolean> {
+    return dynamicConfig.getBool(INBOUND_LANE_CHANNEL_CONSUME_FLAG, false);
+}
+
+/** 一条订阅。`partitioned` 决定别人的信封是退回去还是丢掉（见文件头）。 */
+interface LaneSubscription {
+    queue: string;
+    partitioned: boolean;
+}
 
 export async function startInboundLaneConsumer(
     scope: LaneConsumerScope,
@@ -218,87 +221,115 @@ export async function startInboundLaneConsumer(
         amqp?: LaneChannel;
         store?: InboundLaneStore;
         wait?: (ms: number) => Promise<void>;
+        channelQueueEnabled?: () => Promise<boolean>;
     } = {},
 ): Promise<void> {
     const amqp = deps.amqp ?? (getRabbitChannel() as unknown as LaneChannel);
-    const store = deps.store ?? redisStore;
+    const store = deps.store ?? laneClaimStore;
     const wait = deps.wait ?? realWait;
-    const queue = inboundLaneQueueName(scope.lane);
+    const channelQueueEnabled = deps.channelQueueEnabled ?? inboundLaneChannelConsumeEnabled;
 
-    await amqp.assertQueue(queue, { durable: true });
+    const subscriptions: LaneSubscription[] = [
+        { queue: sharedInboundLaneQueueName(scope.lane), partitioned: false },
+    ];
+    if (await channelQueueEnabled()) {
+        subscriptions.push({
+            queue: inboundLaneQueueName(scope.channel, scope.lane),
+            partitioned: true,
+        });
+    }
+
+    // prefetch 是这条 amqp channel 的属性，不是队列的：声明一次，两个消费者共用。
     await amqp.prefetch(1);
-    await amqp.consume(queue, async (msg) => {
-        if (!msg) return;
-        const redelivered = msg.fields?.redelivered === true;
 
-        /** 退回队列。只有重投过的才等一下 —— 正常交接不该背延迟成本。 */
-        const giveBack = async (): Promise<void> => {
-            if (redelivered) await wait(FOREIGN_RETRY_DELAY_MS);
-            amqp.nack(msg, false, true);
-        };
+    for (const subscription of subscriptions) {
+        await subscribe(subscription);
+    }
 
-        let key: string | undefined;
-        try {
-            const envelope = readEnvelope(msg.content.toString());
+    async function subscribe({ queue, partitioned }: LaneSubscription): Promise<void> {
+        await amqp.assertQueue(queue, { durable: true });
+        await amqp.consume(queue, async (msg) => {
+            if (!msg) return;
+            const redelivered = msg.fields?.redelivered === true;
 
-            // ---- 所有权判断必须先于任何认领 ----
-            // 认领别人的消息 = 替对面写下"这条处理过了"，比 ACK 掉还糟。
-            const channel = envelope.channel ?? LEGACY_ENVELOPE_CHANNEL;
-            if (channel !== scope.channel) {
-                console.warn(
-                    `[lane-queue] ${queue} holds a "${channel}" envelope; this service owns ` +
-                        `"${scope.channel}" — handing it back ` +
-                        `(message=${envelope.global_message_id})`,
-                );
-                await giveBack();
-                return;
-            }
+            /** 退回队列。只有重投过的才等一下 —— 正常交接不该背延迟成本。 */
+            const giveBack = async (): Promise<void> => {
+                if (redelivered) await wait(FOREIGN_RETRY_DELAY_MS);
+                amqp.nack(msg, false, true);
+            };
 
-            checkScope(envelope, scope);
+            let key: string | undefined;
+            try {
+                const envelope = readEnvelope(msg.content.toString());
 
-            key = inboundLaneDedupeKey(envelope);
-            const claim = await store.claim(key);
-            if (claim === 'done') {
-                console.info(`[lane-queue] already handled, skipping: ${key}`);
+                // ---- 所有权判断必须先于任何认领 ----
+                // 认领别人的消息 = 替对面写下"这条处理过了"，比 ACK 掉还糟。
+                const channel = envelopeChannel(envelope);
+                if (channel !== scope.channel) {
+                    if (partitioned) {
+                        // 断言：分区队列里只会有自己的信封。破了说明投递侧发错了队列，
+                        // 而这条队列没有第二个消费者 —— 退回去只会永远弹。
+                        throw new Unprocessable(
+                            `the partitioned queue ${queue} must only ever hold ` +
+                                `"${scope.channel}" envelopes, but this one says "${channel}" ` +
+                                `(message=${envelope.global_message_id})`,
+                        );
+                    }
+                    console.warn(
+                        `[lane-queue] ${queue} holds a "${channel}" envelope; this service owns ` +
+                            `"${scope.channel}" — handing it back ` +
+                            `(message=${envelope.global_message_id})`,
+                    );
+                    await giveBack();
+                    return;
+                }
+
+                checkScope(envelope, scope);
+
+                key = inboundLaneDedupeKey(envelope);
+                const claim = await store.claim(key);
+                if (claim === 'done') {
+                    console.info(`[lane-queue] already handled, skipping: ${key}`);
+                    amqp.ack(msg);
+                    return;
+                }
+                if (claim === 'in-flight') {
+                    // 别人正拿着（或者上一个持有者崩了、租约还没到期）。ACK 会在对方写下
+                    // 完成标记之前把消息销毁，只能退回去等租约到期。
+                    console.info(`[lane-queue] someone else is handling it, backing off: ${key}`);
+                    await giveBack();
+                    return;
+                }
+
+                await deliver(larkEventOf(envelope));
+                await store.complete(key);
                 amqp.ack(msg);
-                return;
-            }
-            if (claim === 'in-flight') {
-                // 别人正拿着（或者上一个持有者崩了、租约还没到期）。ACK 会在对方写下
-                // 完成标记之前把消息销毁，只能退回去等租约到期。
-                console.info(`[lane-queue] someone else is handling it, backing off: ${key}`);
-                await giveBack();
-                return;
-            }
+            } catch (error) {
+                // 认领过就要还回去，否则重投的那一条会白等一个租约周期。
+                if (key) {
+                    await store.release(key).catch((releaseError) => {
+                        console.error(`[lane-queue] failed to release ${key}:`, releaseError);
+                    });
+                }
 
-            await deliver(larkEventOf(envelope));
-            await store.complete(key);
-            amqp.ack(msg);
-        } catch (error) {
-            // 认领过就要还回去，否则重投的那一条会白等一个租约周期。
-            if (key) {
-                await store.release(key).catch((releaseError) => {
-                    console.error(`[lane-queue] failed to release ${key}:`, releaseError);
-                });
+                const permanent =
+                    error instanceof Unprocessable || error instanceof UnprocessableLarkEvent;
+                if (permanent) {
+                    // prefetch 是 1：把一条永远处理不了的消息塞回队头，整条泳道就永远堵在
+                    // 它上面。只能丢，但要吼出来。
+                    console.error(
+                        `[lane-queue] dropping an unprocessable message from ${queue}: ` +
+                            `${(error as Error).message}`,
+                    );
+                    amqp.nack(msg, false, false);
+                    return;
+                }
+
+                console.error(`[lane-queue] ${queue} failed, requeueing:`, error);
+                amqp.nack(msg, false, true);
             }
+        });
 
-            const permanent =
-                error instanceof Unprocessable || error instanceof UnprocessableLarkEvent;
-            if (permanent) {
-                // prefetch 是 1：把一条永远处理不了的消息塞回队头，整条泳道就永远堵在
-                // 它上面。只能丢，但要吼出来。
-                console.error(
-                    `[lane-queue] dropping an unprocessable message from ${queue}: ` +
-                        `${(error as Error).message}`,
-                );
-                amqp.nack(msg, false, false);
-                return;
-            }
-
-            console.error(`[lane-queue] ${queue} failed, requeueing:`, error);
-            amqp.nack(msg, false, true);
-        }
-    });
-
-    console.info(`[lane-queue] consuming ${queue} for channel=${scope.channel}`);
+        console.info(`[lane-queue] consuming ${queue} for channel=${scope.channel}`);
+    }
 }

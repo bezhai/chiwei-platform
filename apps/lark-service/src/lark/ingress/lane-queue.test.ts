@@ -1,13 +1,22 @@
 import { describe, expect, it } from 'bun:test';
 
+import {
+    CLAIM_DONE,
+    CLAIM_IN_FLIGHT,
+    createLaneClaimStore,
+    type InboundLaneStore,
+    type LaneClaim,
+    type LaneRedis,
+} from './lane-claim';
 import { UnprocessableLarkEvent, type LarkEvent } from './lark-event';
 import {
+    INBOUND_LANE_CHANNEL_CONSUME_FLAG,
     inboundLaneDedupeKey,
     inboundLaneQueueName,
+    sharedInboundLaneQueueName,
     startInboundLaneConsumer,
     type InboundLaneEnvelope,
     type LaneChannel,
-    type LaneClaim,
     type LaneConsumerScope,
 } from './lane-queue';
 
@@ -16,6 +25,11 @@ const SCOPE: LaneConsumerScope = {
     lane: 'ppe-x',
     handles: (type) => type === 'im.message.receive_v1',
 };
+
+/** 分区前的队列：QQ 和飞书的信封混在一起。 */
+const SHARED_QUEUE = 'inbound_lane.ppe-x';
+/** 分区后的队列：只有飞书的信封。 */
+const CHANNEL_QUEUE = 'inbound_lane.lark.ppe-x';
 
 function envelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnvelope {
     return {
@@ -30,22 +44,25 @@ function envelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnve
     };
 }
 
+type LaneMessageHandler = (
+    msg: { content: Buffer; fields?: { redelivered?: boolean } } | null,
+) => Promise<void>;
+
 function fakeAmqp() {
     const asserted: Array<{ queue: string; options: unknown }> = [];
     const acked: string[] = [];
     const nacked: Array<{ id: string; requeue: boolean }> = [];
     let prefetched = 0;
-    let onMessage:
-        | ((msg: { content: Buffer; fields?: { redelivered?: boolean } } | null) => Promise<void>)
-        | null = null;
+    // 双订阅期间同一条 amqp channel 上挂着两个消费者，按队列名分开记，才能分别投递。
+    const consumers = new Map<string, LaneMessageHandler>();
 
     const amqp: LaneChannel = {
         assertQueue: async (queue, options) => void asserted.push({ queue, options }),
         prefetch: async (count) => {
             prefetched = count;
         },
-        consume: async (_queue, handler) => {
-            onMessage = handler;
+        consume: async (queue, handler) => {
+            consumers.set(queue, handler);
             return {};
         },
         ack: (msg) => void acked.push((msg as { id: string }).id),
@@ -53,8 +70,10 @@ function fakeAmqp() {
             void nacked.push({ id: (msg as { id: string }).id, requeue }),
     };
 
-    const push = async (id: string, env: unknown, redelivered = false) => {
-        await onMessage!({
+    const pushTo = async (queue: string, id: string, env: unknown, redelivered = false) => {
+        const handler = consumers.get(queue);
+        if (!handler) throw new Error(`nothing is consuming ${queue}`);
+        await handler({
             content: Buffer.from(JSON.stringify(env)),
             fields: { redelivered },
             id,
@@ -66,7 +85,10 @@ function fakeAmqp() {
         asserted,
         acked,
         nacked,
-        push,
+        pushTo,
+        push: (id: string, env: unknown, redelivered = false) =>
+            pushTo(SHARED_QUEUE, id, env, redelivered),
+        subscribed: () => [...consumers.keys()],
         get prefetched() {
             return prefetched;
         },
@@ -97,9 +119,37 @@ function fakeStore(initial: Record<string, 'in-flight' | 'done'> = {}) {
     };
 }
 
+/** 一条调用流水，用来断言"根本没去认领别人的消息"。 */
+type SpyStore = InboundLaneStore & { calls: string[] };
+
+/** 给真 store 套一层流水记录，行为不变。 */
+function spyOn(store: InboundLaneStore): SpyStore {
+    const calls: string[] = [];
+    return {
+        calls,
+        claim: async (key) => {
+            calls.push(`claim:${key}`);
+            return store.claim(key);
+        },
+        complete: async (key) => {
+            calls.push(`complete:${key}`);
+            return store.complete(key);
+        },
+        release: async (key) => {
+            calls.push(`release:${key}`);
+            return store.release(key);
+        },
+    };
+}
+
 async function start(
     deliver: (event: LarkEvent) => Promise<void>,
-    options: { store?: ReturnType<typeof fakeStore>; scope?: LaneConsumerScope } = {},
+    options: {
+        store?: SpyStore;
+        scope?: LaneConsumerScope;
+        /** 是否订阅按 channel 分区的新队列。生产默认关。 */
+        channelQueue?: boolean;
+    } = {},
 ) {
     const amqp = fakeAmqp();
     const store = options.store ?? fakeStore();
@@ -108,13 +158,135 @@ async function start(
         amqp: amqp.amqp,
         store,
         wait: async (ms) => void waits.push(ms),
+        ...(options.channelQueue === undefined
+            ? {}
+            : { channelQueueEnabled: async () => options.channelQueue! }),
     });
     return { amqp, store, waits };
 }
 
+/**
+ * 两个 Pod 共享的一份 redis。channel-server 和本服务在双订阅窗口里读写的就是这么一批
+ * key，所以这里的假 redis 要有值、NX 要原子、每条命令要让出一次微任务。
+ */
+function sharedRedis(initial: Record<string, string> = {}) {
+    const keys = new Map<string, string>(Object.entries(initial));
+    const redis: LaneRedis = {
+        setNx: async (key, value) => {
+            await Promise.resolve();
+            if (keys.has(key)) return null;
+            keys.set(key, value);
+            return 'OK';
+        },
+        get: async (key) => {
+            await Promise.resolve();
+            return keys.get(key) ?? null;
+        },
+        setWithExpire: async (key, value) => {
+            await Promise.resolve();
+            keys.set(key, value);
+            return 'OK';
+        },
+        del: async (...del) => {
+            await Promise.resolve();
+            return del.filter((key) => keys.delete(key)).length;
+        },
+    };
+    return { keys, store: spyOn(createLaneClaimStore(() => redis)) };
+}
+
+// 双订阅窗口里同一条信封可能被 channel-server 拿到、也可能被本服务拿到，两边共享的不
+// 只是队列，还有 redis 里那批幂等 key。所以统一 key 的格式不够，协议也得统一。
+describe('跨服务换手', () => {
+    const KEY = inboundLaneDedupeKey(envelope());
+
+    // 对面处理完了。这条消息不该再处理，但要 ACK —— 它是重复，不是失败，留在队列里
+    // 只会一直重投。
+    it('acknowledges a message the other service already finished', async () => {
+        const shared = sharedRedis({ [KEY]: CLAIM_DONE });
+        const delivered: LarkEvent[] = [];
+        const { amqp } = await start(async (e) => void delivered.push(e), { store: shared.store });
+
+        await amqp.push('m1', envelope());
+
+        expect(delivered).toEqual([]);
+        expect(amqp.acked).toEqual(['m1']);
+    });
+
+    // 对面正拿着（还没写完成标记）。ACK 会在那之前把消息销毁 —— 那是真丢，不是重复。
+    it('never acknowledges a message the other service is still holding', async () => {
+        const shared = sharedRedis({ [KEY]: CLAIM_IN_FLIGHT });
+        const delivered: LarkEvent[] = [];
+        const { amqp } = await start(async (e) => void delivered.push(e), { store: shared.store });
+
+        await amqp.push('m1', envelope());
+
+        expect(delivered).toEqual([]);
+        expect(amqp.acked).toEqual([]);
+        expect(amqp.nacked).toEqual([{ id: 'm1', requeue: true }]);
+    });
+
+    // 两个消费者同时拿到同一条信封（一条从共享队列来、一条从分区队列来，或者干脆是两
+    // 个 Pod）。"先查有没有处理过、再处理、再标记"是三步，两边能同时穿过第一步，各回
+    // 一条消息。
+    it('processes a message once even when two consumers get it at the same time', async () => {
+        const shared = sharedRedis();
+        const delivered: string[] = [];
+        const a = await start(
+            async () => {
+                await Promise.resolve();
+                delivered.push('a');
+            },
+            { store: shared.store },
+        );
+        const b = await start(
+            async () => {
+                await Promise.resolve();
+                delivered.push('b');
+            },
+            { store: shared.store },
+        );
+
+        await Promise.all([a.amqp.push('m1', envelope()), b.amqp.push('m2', envelope())]);
+
+        expect(delivered).toHaveLength(1);
+        // 赢家 ACK，输家退回队列等租约——绝不能 ACK。
+        expect([...a.amqp.acked, ...b.amqp.acked]).toHaveLength(1);
+        expect([...a.amqp.nacked, ...b.amqp.nacked]).toEqual([
+            { id: expect.any(String), requeue: true },
+        ]);
+    });
+});
+
 describe('inboundLaneQueueName', () => {
-    it('names one queue per lane', () => {
-        expect(inboundLaneQueueName('ppe-x')).toBe('inbound_lane.ppe-x');
+    // 队列的分区维度必须和消费者的所有权维度一致。owner 是 channel + lane，所以队列
+    // 名也是 —— 不然 QQ 的信封和飞书的信封躺在同一个队列里被两个服务竞争消费。
+    //
+    // ⚠️ 这个字面量是**跨服务契约**：channel-server 的 inbound-lane.ts 必须拼出逐字
+    // 相同的名字（那边有一条同样写死字面量的测试）。两个 app 是两个包，编译期对不上，
+    // 只能靠两边各钉一条。
+    it('names one queue per channel and lane', () => {
+        expect(inboundLaneQueueName('lark', 'ppe-x')).toBe('inbound_lane.lark.ppe-x');
+    });
+
+    it('tells two channels on the same lane apart', () => {
+        expect(inboundLaneQueueName('qq', 'ppe-x')).not.toBe(
+            inboundLaneQueueName('lark', 'ppe-x'),
+        );
+    });
+
+    // 分区前的名字还得留着：切换期间消费侧要同时订阅新旧两条队列（否则生产者切过去
+    // 之前的消息没人收，或者切过去之后旧队列里的存量没人收）。
+    it('keeps the pre-partition name for the cutover window', () => {
+        expect(sharedInboundLaneQueueName('ppe-x')).toBe('inbound_lane.ppe-x');
+    });
+});
+
+// ⚠️ 同样是跨服务契约：channel-server 的 inbound-lane-flag.ts 用同名 key（那边有一条
+// 同样写死字面量的断言）。改名只改一边的症状是切换期间一个服务订了新队列、另一个没订。
+describe('INBOUND_LANE_CHANNEL_CONSUME_FLAG', () => {
+    it('is the same dynamic config key channel-server reads', () => {
+        expect(INBOUND_LANE_CHANNEL_CONSUME_FLAG).toBe('enable_inbound_lane_channel_consume');
     });
 });
 
@@ -147,6 +319,86 @@ describe('startInboundLaneConsumer', () => {
         const { amqp } = await start(async () => {});
         expect(amqp.asserted).toEqual([{ queue: 'inbound_lane.ppe-x', options: { durable: true } }]);
         expect(amqp.prefetched).toBe(1);
+    });
+
+    describe('subscribing across the partition cutover', () => {
+        // 开关默认关：镜像可以先上线、先部署，什么时候真订阅新队列是切换动作的一部分。
+        it('only subscribes to the shared queue by default', async () => {
+            const { amqp } = await start(async () => {});
+            expect(amqp.subscribed()).toEqual([SHARED_QUEUE]);
+        });
+
+        // 决策九：消费侧先双订阅 → 切生产者 → 旧队列排空 → drain 屏障移交。少了双订阅
+        // 这一步，生产者的部署时刻就落在关键路径上：早切没人收，晚切旧队列里的没人收。
+        it('subscribes to both queues once the channel queue is turned on', async () => {
+            const { amqp } = await start(async () => {}, { channelQueue: true });
+            expect(amqp.subscribed()).toEqual([SHARED_QUEUE, CHANNEL_QUEUE]);
+        });
+
+        // 新队列同样不配 TTL / DLX：装在里面的是"已经判定该在这条泳道处理"的消息，
+        // 过期跑回 prod 就是拿泳道的改动污染线上。
+        it('declares the channel queue fail-closed, same as the shared one', async () => {
+            const { amqp } = await start(async () => {}, { channelQueue: true });
+            expect(amqp.asserted).toEqual([
+                { queue: SHARED_QUEUE, options: { durable: true } },
+                { queue: CHANNEL_QUEUE, options: { durable: true } },
+            ]);
+        });
+
+        it('handles a message that arrives on the channel queue', async () => {
+            const delivered: LarkEvent[] = [];
+            const { amqp } = await start(async (e) => void delivered.push(e), {
+                channelQueue: true,
+            });
+
+            await amqp.pushTo(CHANNEL_QUEUE, 'm1', envelope());
+
+            expect(delivered).toHaveLength(1);
+            expect(amqp.acked).toEqual(['m1']);
+        });
+
+        // 双订阅期间最要命的一条：去重认的是信封，不是它从哪条队列来的。认队列的话，
+        // 旧队列里的存量和新队列里的同一条消息会被处理两遍 —— 用户看到两条回复。
+        it('processes the same message once no matter which queue carried it', async () => {
+            const delivered: LarkEvent[] = [];
+            const { amqp } = await start(async (e) => void delivered.push(e), {
+                channelQueue: true,
+            });
+
+            await amqp.pushTo(SHARED_QUEUE, 'old', envelope());
+            await amqp.pushTo(CHANNEL_QUEUE, 'new', envelope());
+
+            expect(delivered).toHaveLength(1);
+            // 第二条也要 ACK：它是重复，不是失败，留在队列里只会一直重投。
+            expect(amqp.acked).toEqual(['old', 'new']);
+        });
+
+        // 决策八：分区做完之后"不是我的信封就退回"这条校验退化成断言，不是被删掉。
+        // 分区队列上出现别人的信封 = 投递侧发错了队列，而这条队列没有第二个消费者，
+        // 退回去只会永远弹；prefetch=1 会让它把整条泳道堵死。所以丢，但要吼出来。
+        it('refuses to requeue a foreign envelope on the partitioned queue', async () => {
+            const delivered: LarkEvent[] = [];
+            const { amqp, store } = await start(async (e) => void delivered.push(e), {
+                channelQueue: true,
+            });
+
+            await amqp.pushTo(CHANNEL_QUEUE, 'm1', envelope({ channel: 'qq' }));
+
+            expect(delivered).toEqual([]);
+            expect(amqp.acked).toEqual([]);
+            expect(amqp.nacked).toEqual([{ id: 'm1', requeue: false }]);
+            expect(store.calls).toEqual([]);
+        });
+
+        // 同一条信封，落在共享队列上就还是交接（对面还在订阅那条队列）。同一段校验，
+        // 两条队列上两种结论——差别在于"还有没有别人可能来收"。
+        it('still hands a foreign envelope back on the shared queue', async () => {
+            const { amqp } = await start(async () => {}, { channelQueue: true });
+
+            await amqp.pushTo(SHARED_QUEUE, 'm1', envelope({ channel: 'qq' }));
+
+            expect(amqp.nacked).toEqual([{ id: 'm1', requeue: true }]);
+        });
     });
 
     it('rebuilds the event from the envelope, lane and all', async () => {

@@ -2,7 +2,22 @@
 // 默认 off：缺失 / falsy 一律 false（零回归）。只有显式 true / 'true' 才 on。
 
 import { describe, it, expect } from 'bun:test';
-import { readInboundLaneDispatchFlag } from './inbound-lane-flag';
+import {
+    INBOUND_LANE_CHANNEL_CONSUME_FLAG,
+    INBOUND_LANE_CHANNEL_PUBLISH_FLAG,
+    readInboundLaneDispatchFlag,
+} from './inbound-lane-flag';
+
+// ⚠️ 跨服务契约：lark-service 用的是同名 key（lane-queue.ts / lane-handoff.ts 里各有
+// 一条同样写死字面量的断言）。改名只改一边的症状是切换期间一个服务投新队列、另一个
+// 还投旧队列——两条路各跑一半，而且不报错。
+describe('inbound_lane 按 channel 分区的切换开关', () => {
+    it('消费侧和生产侧是两个 key，不能合成一个', () => {
+        expect(INBOUND_LANE_CHANNEL_CONSUME_FLAG).toBe('enable_inbound_lane_channel_consume');
+        expect(INBOUND_LANE_CHANNEL_PUBLISH_FLAG).toBe('enable_inbound_lane_channel_publish');
+        expect(INBOUND_LANE_CHANNEL_CONSUME_FLAG).not.toBe(INBOUND_LANE_CHANNEL_PUBLISH_FLAG);
+    });
+});
 
 describe('readInboundLaneDispatchFlag（处理层分流开关）', () => {
     it('key 缺失 → off', () => {

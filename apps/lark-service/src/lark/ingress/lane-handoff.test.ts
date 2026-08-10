@@ -3,7 +3,11 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { chooseInboundLane, handOffToInboundLane } from './lane-handoff';
+import {
+    chooseInboundLane,
+    handOffToInboundLane,
+    INBOUND_LANE_CHANNEL_PUBLISH_FLAG,
+} from './lane-handoff';
 import type { InboundLaneEnvelope } from './lane-queue';
 
 function envelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnvelope {
@@ -73,6 +77,14 @@ describe('chooseInboundLane', () => {
     });
 });
 
+// ⚠️ 跨服务契约：channel-server 的 inbound-lane-flag.ts 用同名 key（那边有一条同样
+// 写死字面量的断言）。改名只改一边的症状是切换期间一个服务投新队列、另一个投旧队列。
+describe('INBOUND_LANE_CHANNEL_PUBLISH_FLAG', () => {
+    it('是 channel-server 读的那个同名 key', () => {
+        expect(INBOUND_LANE_CHANNEL_PUBLISH_FLAG).toBe('enable_inbound_lane_channel_publish');
+    });
+});
+
 describe('handOffToInboundLane', () => {
     /** 默认自动确认；传 'manual' 时由测试自己决定什么时候确认。 */
     function amqpDouble(mode: 'auto' | 'manual' = 'auto') {
@@ -106,11 +118,33 @@ describe('handOffToInboundLane', () => {
         const { amqp, sent } = amqpDouble();
         const env = envelope();
 
-        await handOffToInboundLane(amqp, env);
+        await handOffToInboundLane(amqp, env, false);
 
         expect(sent).toHaveLength(1);
         expect(sent[0]!.queue).toBe('inbound_lane.ppe-x');
         expect(sent[0]!.body).toEqual(env as unknown as Record<string, unknown>);
+    });
+
+    // 决策九的第二步：消费侧双订阅上线之后才切生产者。切过来之后信封进按 channel
+    // 分区的队列，对面服务再也不会抢到它。
+    it('开关打开后投进按 channel 分区的队列', async () => {
+        const { amqp, sent, declared } = amqpDouble();
+
+        await handOffToInboundLane(amqp, envelope(), true);
+
+        expect(sent[0]!.queue).toBe('inbound_lane.lark.ppe-x');
+        // 新队列同样 fail-closed：配了 TTL 就会过期跑回 prod。
+        expect(declared).toEqual([
+            { queue: 'inbound_lane.lark.ppe-x', options: { durable: true } },
+        ]);
+    });
+
+    it('按信封自己的 channel 分区，不是按写死的飞书', async () => {
+        const { amqp, sent } = amqpDouble();
+
+        await handOffToInboundLane(amqp, envelope({ channel: 'qq' }), true);
+
+        expect(sent[0]!.queue).toBe('inbound_lane.qq.ppe-x');
     });
 
     // 装在里面的是「已经判定该在这条泳道处理」的消息。配 TTL 就是让它过期跑回
@@ -118,7 +152,7 @@ describe('handOffToInboundLane', () => {
     it('队列是 durable 的，且不配 TTL、不配死信', async () => {
         const { amqp, declared } = amqpDouble();
 
-        await handOffToInboundLane(amqp, envelope());
+        await handOffToInboundLane(amqp, envelope(), false);
 
         expect(declared).toEqual([{ queue: 'inbound_lane.ppe-x', options: { durable: true } }]);
     });
@@ -126,7 +160,7 @@ describe('handOffToInboundLane', () => {
     it('消息本身是持久化的', async () => {
         const { amqp, sent } = amqpDouble();
 
-        await handOffToInboundLane(amqp, envelope());
+        await handOffToInboundLane(amqp, envelope(), false);
 
         expect(sent[0]!.options).toEqual({ persistent: true });
     });
@@ -139,7 +173,7 @@ describe('handOffToInboundLane', () => {
         const { amqp, confirm } = amqpDouble('manual');
         let done = false;
 
-        const handedOff = handOffToInboundLane(amqp, envelope()).then(() => {
+        const handedOff = handOffToInboundLane(amqp, envelope(), false).then(() => {
             done = true;
         });
         await Bun.sleep(1);
@@ -154,7 +188,7 @@ describe('handOffToInboundLane', () => {
     it('broker 拒收或连接断掉时抛错', async () => {
         const { amqp, confirm } = amqpDouble('manual');
 
-        const handedOff = handOffToInboundLane(amqp, envelope());
+        const handedOff = handOffToInboundLane(amqp, envelope(), false);
         // 队列声明先于发送，所以要等它落地才拿得到确认回调
         await Bun.sleep(1);
         confirm(new Error('channel closed'));
@@ -176,7 +210,9 @@ describe('handOffToInboundLane', () => {
             },
         };
 
-        await expect(handOffToInboundLane(amqp, envelope())).rejects.toThrow('channel closed');
+        await expect(handOffToInboundLane(amqp, envelope(), false)).rejects.toThrow(
+            'channel closed',
+        );
         expect(sent).toEqual([]);
     });
 });

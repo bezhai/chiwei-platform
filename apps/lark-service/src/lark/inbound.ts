@@ -22,11 +22,8 @@ import {
     type LarkEvent,
     type LarkEventHandlers,
 } from './ingress/lark-event';
-import {
-    startInboundLaneConsumer,
-    type InboundLaneStore,
-    type LaneChannel,
-} from './ingress/lane-queue';
+import { type InboundLaneStore } from './ingress/lane-claim';
+import { startInboundLaneConsumer, type LaneChannel } from './ingress/lane-queue';
 import { registerLarkWebhook } from './ingress/webhook';
 import {
     openLarkWebSockets,
@@ -61,13 +58,17 @@ export interface LarkInbound {
      * 当就绪判据，SDK 不等连上就返回。
      */
     openWebSockets(createClient?: LarkWebSocketClientFactory): Promise<LarkWebSockets>;
-    /** 入口三：消费本泳道的信封队列。 */
+    /**
+     * 入口三：消费本泳道的信封队列。切换期间是两条队列（分区前的共享队列 + 按 channel
+     * 分区的新队列），订阅哪些见 ingress/lane-queue.ts。
+     */
     consumeLane(
         lane: string,
         deps?: {
             amqp?: LaneChannel;
             store?: InboundLaneStore;
             wait?: (ms: number) => Promise<void>;
+            channelQueueEnabled?: () => Promise<boolean>;
         },
     ): Promise<void>;
 }
@@ -124,9 +125,9 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
         // 泳道信封不过 sinkFor：它是重放，审计在它第一次进来时就记过了，而且这条路上
         // 失败要让 MQ 知道，不能像飞书那两个入口一样吞掉。
         //
-        // scope 是这个队列的即时防线（见 lane-queue.ts 顶部）：队列按 lane 分区，但
-        // owner 实际按 channel + lane 分区，QQ 的信封也躺在里面。handles 直接取处理表
-        // 的键，所以"本服务认领了哪些事件"不会跟处理表脱节。
+        // scope 同时是分区维度和防线（见 lane-queue.ts 顶部）：channel + lane 决定订
+        // 阅哪条分区队列，也决定共享队列上哪些信封该退回去。handles 直接取处理表的键，
+        // 所以"本服务认领了哪些事件"不会跟处理表脱节。
         consumeLane(lane, deps) {
             return startInboundLaneConsumer(
                 {

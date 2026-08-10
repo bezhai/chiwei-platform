@@ -75,6 +75,7 @@ describe('ApplicationManager.initialize：crontab 只在 prod 部署起', () => 
     beforeEach(() => {
         initializeCrontabs.mockClear();
         startChannelDirectIngresses.mockClear();
+        startInboundLaneConsumer.mockClear();
     });
 
     afterAll(() => {
@@ -101,5 +102,29 @@ describe('ApplicationManager.initialize：crontab 只在 prod 部署起', () => 
     test('LANE=coe-y → 不起 crontab', async () => {
         await initializeWithLane('coe-y');
         expect(initializeCrontabs).not.toHaveBeenCalled();
+    });
+
+    // 装配层交出去的是"本进程**能**处理哪些 channel"（注册面），而不是"拥有哪些"。
+    // 两者在 cutover 窗口内必然不等：lark 的代码还在（能处理），入站流量已经移交给
+    // lark-service（不该处理）。装配层写死拥有集合的话，收窄就只能靠 Task F 删代码，
+    // 而整个窗口里两个服务都在抢同一条分区队列。
+    test('LANE=ppe-x → 消费者拿到的是已注册 runtime 的处理面', async () => {
+        await initializeWithLane('ppe-x');
+        expect(startInboundLaneConsumer).toHaveBeenCalledTimes(1);
+        const [lane, , options] = startInboundLaneConsumer.mock.calls[0] as unknown as [
+            string,
+            unknown,
+            { handles: string[]; loadOwnedChannels?: unknown },
+        ];
+        expect(lane).toBe('ppe-x');
+        expect([...options.handles].sort()).toEqual(['lark', 'qq']);
+        // 拥有集合留给消费者按 dynamic config 现读，装配层不许在这里钉死。
+        expect(options.loadOwnedChannels).toBeUndefined();
+    });
+
+    // prod 不消费入站信封队列，它是投递方（§4.2）。
+    test('LANE=prod → 不起入站信封消费者', async () => {
+        await initializeWithLane('prod');
+        expect(startInboundLaneConsumer).not.toHaveBeenCalled();
     });
 });

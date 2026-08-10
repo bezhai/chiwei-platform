@@ -15,7 +15,12 @@
 import { DynamicConfig } from '@inner/shared';
 import { getRabbitConfirmChannel } from '@inner/shared/mq';
 
-import { inboundLaneQueueName, type InboundLaneEnvelope } from './lane-queue';
+import {
+    envelopeChannel,
+    inboundLaneQueueName,
+    sharedInboundLaneQueueName,
+    type InboundLaneEnvelope,
+} from './lane-queue';
 
 // ---- 判断 ----
 
@@ -86,8 +91,15 @@ export interface LaneHandoffChannel {
 export async function handOffToInboundLane(
     amqp: LaneHandoffChannel,
     envelope: InboundLaneEnvelope,
+    /**
+     * 投进按 channel 分区的新队列还是分区前的共享队列。由调用方读开关决定 —— 决策九
+     * 要求消费侧的双订阅先上线、生产者后切，两个动作不能是同一个开关。
+     */
+    toChannelQueue: boolean,
 ): Promise<void> {
-    const queue = inboundLaneQueueName(envelope.lane);
+    const queue = toChannelQueue
+        ? inboundLaneQueueName(envelopeChannel(envelope), envelope.lane)
+        : sharedInboundLaneQueueName(envelope.lane);
     await amqp.assertQueue(queue, { durable: true });
 
     await new Promise<void>((resolve, reject) => {
@@ -109,10 +121,14 @@ export async function handOffToInboundLane(
     });
 }
 
-/** 生产装配：取带确认的共享 channel 后投递。 */
+/** 生产装配：取带确认的共享 channel 后投递，投哪条队列每次都现读开关。 */
 export async function handOffOverRabbit(envelope: InboundLaneEnvelope): Promise<void> {
     const amqp = await getRabbitConfirmChannel();
-    return handOffToInboundLane(amqp as unknown as LaneHandoffChannel, envelope);
+    return handOffToInboundLane(
+        amqp as unknown as LaneHandoffChannel,
+        envelope,
+        await inboundLaneChannelPublishEnabled(),
+    );
 }
 
 // ---- 开关 ----
@@ -128,4 +144,20 @@ const dynamicConfig = new DynamicConfig();
 
 export function inboundLaneDispatchEnabled(): Promise<boolean> {
     return dynamicConfig.getBool(INBOUND_LANE_DISPATCH_FLAG, false);
+}
+
+/**
+ * "交接投进按 channel 分区的新队列"。默认关。
+ *
+ * 跟消费侧那个开关（lane-queue.ts 的 INBOUND_LANE_CHANNEL_CONSUME_FLAG）必须是两个
+ * key：决策九的顺序是消费侧先双订阅、生产者后切。合成一个的话，翻开关的那一刻新队列
+ * 还没有消费者，消息只能干堆着。
+ *
+ * key 与 channel-server 用的是同一个：切换期间两个服务必须同进同出，不然会出现一边
+ * 投新队列、一边投旧队列的分裂。
+ */
+export const INBOUND_LANE_CHANNEL_PUBLISH_FLAG = 'enable_inbound_lane_channel_publish';
+
+export function inboundLaneChannelPublishEnabled(): Promise<boolean> {
+    return dynamicConfig.getBool(INBOUND_LANE_CHANNEL_PUBLISH_FLAG, false);
 }

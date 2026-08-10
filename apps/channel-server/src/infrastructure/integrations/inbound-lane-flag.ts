@@ -26,3 +26,31 @@ export function readInboundLaneDispatchFlag(cfg: Record<string, unknown>): boole
 export async function isInboundLaneDispatchEnabled(): Promise<boolean> {
     return dynamicConfig.getBool(INBOUND_LANE_DISPATCH_FLAG, false);
 }
+
+// ---- inbound_lane 按 channel 分区的切换开关 ----
+//
+// 换队列名不可能原子发布：生产者和消费者在不同的 Deployment 里。所以是两个 key、两个
+// 动作，顺序是「消费侧先双订阅 → 再切生产者」。合成一个的话，翻开关那一刻新队列还没有
+// 消费者，消息只能干堆着。
+//
+// 两个 key 都与 lark-service 用的同名：切换期间两个服务必须同进同出，不然会出现一边
+// 投新队列、一边投旧队列的分裂。
+//
+// 走 dynamic config 而不是 env：Release env 会被部署的 POST 清空，长期开关放在那里会
+// 在某次部署之后悄悄失效。
+
+// 消费侧：除共享队列外，是否再订阅 inbound_lane.{channel}.{lane}。
+// 订阅是启动动作，只在起消费者时读一次——翻开之后要重启消费者才生效。启动时没有请求
+// 上下文，所以按 prod 解析：这是一个全局切换开关，给某条泳道单独配不会生效。
+export const INBOUND_LANE_CHANNEL_CONSUME_FLAG = 'enable_inbound_lane_channel_consume';
+
+export async function isInboundLaneChannelConsumeEnabled(): Promise<boolean> {
+    return dynamicConfig.getBool(INBOUND_LANE_CHANNEL_CONSUME_FLAG, false);
+}
+
+// 生产侧：交接的信封投分区队列还是分区前的共享队列。每次投递现读（10s 缓存）。
+export const INBOUND_LANE_CHANNEL_PUBLISH_FLAG = 'enable_inbound_lane_channel_publish';
+
+export async function isInboundLaneChannelPublishEnabled(): Promise<boolean> {
+    return dynamicConfig.getBool(INBOUND_LANE_CHANNEL_PUBLISH_FLAG, false);
+}

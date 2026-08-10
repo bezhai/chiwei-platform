@@ -10,7 +10,8 @@ import type { EventDispatcher } from '@larksuiteoapi/node-sdk';
 
 import { createLarkInbound, type LarkInboundPorts } from './inbound';
 import type { LarkEvent } from './ingress/lark-event';
-import type { InboundLaneEnvelope, LaneChannel, LaneClaim } from './ingress/lane-queue';
+import type { LaneClaim } from './ingress/lane-claim';
+import type { InboundLaneEnvelope, LaneChannel } from './ingress/lane-queue';
 import type { LarkWebSocketClient } from './ingress/websocket';
 import type { LarkMessageReading } from './message/read-message-event';
 
@@ -184,16 +185,17 @@ async function throughWebSocket() {
 }
 
 function laneChannel() {
-    let onMessage:
-        | ((msg: { content: Buffer; fields?: { redelivered?: boolean } } | null) => Promise<void>)
-        | null = null;
+    const consumers = new Map<
+        string,
+        (msg: { content: Buffer; fields?: { redelivered?: boolean } } | null) => Promise<void>
+    >();
     const acked: unknown[] = [];
     const nacked: Array<{ requeue: boolean }> = [];
     const amqp: LaneChannel = {
         assertQueue: async () => {},
         prefetch: async () => {},
-        consume: async (_queue, handler) => {
-            onMessage = handler;
+        consume: async (queue, handler) => {
+            consumers.set(queue, handler);
             return {};
         },
         ack: (msg) => void acked.push(msg),
@@ -203,13 +205,17 @@ function laneChannel() {
         amqp,
         acked,
         nacked,
-        push: async (env: unknown) => {
-            await onMessage!({ content: Buffer.from(JSON.stringify(env)) });
+        subscribed: () => [...consumers.keys()],
+        push: async (env: unknown, queue = 'inbound_lane.ppe-x') => {
+            await consumers.get(queue)!({ content: Buffer.from(JSON.stringify(env)) });
         },
     };
 }
 
-async function throughLane(env: unknown = laneEnvelope()) {
+async function throughLane(
+    env: unknown = laneEnvelope(),
+    options: { channelQueue?: boolean; queue?: string } = {},
+) {
     const built = build();
     const mq = laneChannel();
     const keys = new Map<string, 'in-flight' | 'done'>();
@@ -226,9 +232,11 @@ async function throughLane(env: unknown = laneEnvelope()) {
             release: async (k) => void keys.delete(k),
         },
         wait: async () => {},
+        // 开关默认关，测试也显式注入：默认实现会去 paas-engine 拉一次动态配置。
+        channelQueueEnabled: async () => options.channelQueue === true,
     });
-    await mq.push(env);
-    return { ...built, acked: mq.acked, nacked: mq.nacked };
+    await mq.push(env, options.queue);
+    return { ...built, acked: mq.acked, nacked: mq.nacked, subscribed: mq.subscribed() };
 }
 
 describe('createLarkInbound', () => {
@@ -341,12 +349,28 @@ describe('createLarkInbound', () => {
         expect(nacked).toEqual([{ requeue: false }]);
     });
 
-    // 这个队列同时装着 QQ 和飞书的信封，两个服务竞争消费。抢到 QQ 的那一条时 ACK
+    // 分区前的队列同时装着 QQ 和飞书的信封，两个服务竞争消费。抢到 QQ 的那一条时 ACK
     // 就是把它吃掉 —— 对面永远收不到。
     it('hands a QQ envelope back instead of eating it', async () => {
         const { seen, acked, nacked } = await throughLane(laneEnvelope({ channel: 'qq' }));
         expect(seen).toEqual([]);
         expect(acked).toEqual([]);
         expect(nacked).toEqual([{ requeue: true }]);
+    });
+
+    // 分区之后队列名从本服务的 channel 拼出来，装配层不该另外配一个"我是谁"。
+    it('subscribes the partitioned queue under its own channel', async () => {
+        const { subscribed } = await throughLane(laneEnvelope(), { channelQueue: true });
+        expect(subscribed).toEqual(['inbound_lane.ppe-x', 'inbound_lane.lark.ppe-x']);
+    });
+
+    it('parses a lane envelope off the partitioned queue exactly the same way', async () => {
+        const { seen, acked } = await throughLane(laneEnvelope(), {
+            channelQueue: true,
+            queue: 'inbound_lane.lark.ppe-x',
+        });
+        expect(seen).toHaveLength(1);
+        expect(seen[0]!.reading.message.messageId).toBe('om_1');
+        expect(acked).toHaveLength(1);
     });
 });
