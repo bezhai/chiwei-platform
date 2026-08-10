@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { loadConfig } from './config';
+import { loadConfig, loadOutboundConfig } from './config';
 
 // 一份「全都配齐」的 env，各用例从它出发只删/改自己关心的那一项。
 const COMPLETE_ENV = {
@@ -52,5 +52,42 @@ describe('loadConfig', () => {
 
     it('treats an empty string as missing', () => {
         expect(() => loadConfig({ ...COMPLETE_ENV, RABBITMQ_URL: '' })).toThrow(/RABBITMQ_URL/);
+    });
+});
+
+// 出站进程要的 env 比入口少一项：它不写 lark_event 审计（原始报文在入口那一侧第一次
+// 进来时就记过了），所以不该因为 MONGO_HOST 没配就起不来。
+describe('loadOutboundConfig', () => {
+    const BACKENDS = {
+        POSTGRES_HOST: 'pg.internal',
+        POSTGRES_USER: 'chiwei',
+        POSTGRES_PASSWORD: 'secret',
+        POSTGRES_DB: 'chiwei',
+        REDIS_HOST: 'redis.internal',
+        RABBITMQ_URL: 'amqp://mq.internal',
+    };
+
+    it('does not require MONGO_HOST', () => {
+        expect(() => loadOutboundConfig(BACKENDS)).not.toThrow();
+    });
+
+    it.each(Object.keys(BACKENDS))('fails closed when %s is missing', (key) => {
+        const env: Record<string, string | undefined> = { ...BACKENDS };
+        delete env[key];
+        expect(() => loadOutboundConfig(env)).toThrow(new RegExp(key));
+    });
+
+    it('defaults the metrics port to 9091', () => {
+        expect(loadOutboundConfig(BACKENDS).metricsPort).toBe(9091);
+    });
+
+    it('honours METRICS_PORT', () => {
+        expect(loadOutboundConfig({ ...BACKENDS, METRICS_PORT: '9200' }).metricsPort).toBe(9200);
+    });
+
+    it('rejects a METRICS_PORT that is not a number', () => {
+        expect(() => loadOutboundConfig({ ...BACKENDS, METRICS_PORT: 'nine' })).toThrow(
+            /METRICS_PORT/,
+        );
     });
 });

@@ -30,6 +30,9 @@ endef
 # 镜像 → 同步服务清单（不含主 APP 自身）。映射表单一来源，见 CLAUDE.md 镜像与服务映射表。
 # （vectorize-worker 随 v4 记忆整机删除，agent-service 不再有 sibling。）
 SIBLINGS_channel-server := recall-worker chat-response-worker
+# lark-service 的入口进程持飞书 WS 长连（单副本 + Recreate），出站是竞争消费（可多副本、
+# 可滚动更新）—— 两种部署策略天然冲突，所以出站是自己的 Deployment。
+SIBLINGS_lark-service := lark-outbound
 # `$(SIBLINGS_$(APP))` 在 make 解析阶段展开，未匹配的 APP 得空串（无 sibling，安静跳过 for）。
 
 define require_pushed

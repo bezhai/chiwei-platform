@@ -1,0 +1,843 @@
+// 一段回复从队列里出来之后，飞书那边和库里应该发生什么。
+//
+// 这些用例是拆分前 channel-server chat-response-handler 那条链的行为基线：反查、
+// 渲染、发送、落库、记台账，逐个分支各一条。持久化和飞书 API 全部走端口，测试注入
+// 内存实现。
+//
+// 内存 store 的事务是**真的** —— 写入先落暂存、抛错整体丢弃 —— 所以「lark_message
+// 插失败 → common_message 不留」验的是生产代码把两条写入放进了同一个 atomically，
+// 而不是内存实现自己老实。事务本身老实不老实，由最后一个 describe 单独钉住。
+
+import { describe, expect, it } from 'bun:test';
+
+import type { LarkChatResponse } from './chat-response';
+import { deliverLarkChatResponse, type LarkDeliveryDeps } from './deliver';
+import type {
+    LarkAgentResponseRow,
+    LarkResponseLedger,
+    LarkResponseOutcome,
+} from './ledger';
+import type { LarkOutboundApi, LarkSentMessage } from './lark-api';
+import type { PostContent } from './post-content';
+import type { LarkRenderContext } from './render';
+import type {
+    LarkAssistantMessageRow,
+    LarkOutboundMapping,
+    LarkOutboundStore,
+    LarkOutboundTables,
+} from './tables';
+
+// ---------------------------------------------------------------------------
+// 内存实现
+// ---------------------------------------------------------------------------
+
+class MemoryOutboundTables implements LarkOutboundStore {
+    /** common_conversation_id → 飞书 chat_id */
+    chats = new Map<string, string>();
+    /** common_message_id → 飞书 om_id */
+    messages = new Map<string, string>();
+
+    commonMessages = new Map<string, LarkAssistantMessageRow>();
+    larkMessages = new Map<string, LarkOutboundMapping>();
+
+    reads: string[] = [];
+
+    /** 注入故障用。 */
+    failLarkMessageInsert?: Error;
+    failCommonMessageInsert?: Error;
+
+    async atomically<T>(run: (tables: LarkOutboundTables) => Promise<T>): Promise<T> {
+        const saved: Array<[Map<string, unknown>, Array<[string, unknown]>]> = [
+            [this.commonMessages as Map<string, unknown>, [...this.commonMessages]],
+            [this.larkMessages as Map<string, unknown>, [...this.larkMessages]],
+        ];
+        try {
+            return await run(this);
+        } catch (error) {
+            for (const [table, entries] of saved) {
+                table.clear();
+                for (const [key, row] of entries) table.set(key, row);
+            }
+            throw error;
+        }
+    }
+
+    async chatIdOf(commonConversationId: string): Promise<string | null> {
+        this.reads.push(`chatIdOf:${commonConversationId}`);
+        return this.chats.get(commonConversationId) ?? null;
+    }
+
+    async omIdOf(commonMessageId: string): Promise<string | null> {
+        this.reads.push(`omIdOf:${commonMessageId}`);
+        return this.messages.get(commonMessageId) ?? null;
+    }
+
+    async commonMessageIdOf(omId: string): Promise<string | null> {
+        this.reads.push(`commonMessageIdOf:${omId}`);
+        return this.larkMessages.get(omId)?.common_message_id ?? null;
+    }
+
+    async insertCommonMessage(row: LarkAssistantMessageRow): Promise<void> {
+        if (this.failCommonMessageInsert) throw this.failCommonMessageInsert;
+        if (this.commonMessages.has(row.common_message_id)) return; // or-ignore
+        this.commonMessages.set(row.common_message_id, { ...row });
+    }
+
+    async insertLarkMessage(row: LarkOutboundMapping): Promise<void> {
+        if (this.failLarkMessageInsert) throw this.failLarkMessageInsert;
+        if (this.larkMessages.has(row.om_id)) return; // or-ignore
+        this.larkMessages.set(row.om_id, { ...row });
+    }
+}
+
+class MemoryLedger implements LarkResponseLedger {
+    rows = new Map<string, LarkAgentResponseRow>();
+    appended: Array<{ sessionId: string; reply: unknown }> = [];
+    settled: Array<{ sessionId: string; outcome: LarkResponseOutcome }> = [];
+    failFind?: Error;
+    failSettle?: Error;
+
+    async find(sessionId: string): Promise<LarkAgentResponseRow | null> {
+        if (this.failFind) throw this.failFind;
+        return this.rows.get(sessionId) ?? null;
+    }
+
+    async appendReply(sessionId: string, reply: unknown): Promise<void> {
+        this.appended.push({ sessionId, reply });
+    }
+
+    async settle(sessionId: string, outcome: LarkResponseOutcome): Promise<void> {
+        if (this.failSettle) throw this.failSettle;
+        this.settled.push({ sessionId, outcome });
+    }
+}
+
+interface ApiSpy {
+    api: LarkOutboundApi;
+    sent: Array<{ chatId: string; content: PostContent }>;
+    replied: Array<{ messageId: string; content: PostContent; inThread: boolean }>;
+    /** 下一次发送飞书返回的 message_id。undefined = 平台没给。 */
+    nextMessageId: string | undefined;
+    fail?: Error;
+}
+
+function apiSpy(nextMessageId: string | undefined = 'om_sent'): ApiSpy {
+    const spy: ApiSpy = {
+        sent: [],
+        replied: [],
+        nextMessageId,
+        api: {
+            async sendPost(chatId, content): Promise<LarkSentMessage> {
+                if (spy.fail) throw spy.fail;
+                spy.sent.push({ chatId, content });
+                return { messageId: spy.nextMessageId };
+            },
+            async replyPost(messageId, content, inThread): Promise<LarkSentMessage> {
+                if (spy.fail) throw spy.fail;
+                spy.replied.push({ messageId, content, inThread });
+                return { messageId: spy.nextMessageId };
+            },
+            async recall(): Promise<void> {
+                throw new Error('recall is not part of the chat_response path');
+            },
+            async uploadImage(): Promise<string | null> {
+                throw new Error('uploadImage is reached through the renderer, not directly');
+            },
+        },
+    };
+    return spy;
+}
+
+interface Harness {
+    deps: LarkDeliveryDeps;
+    store: MemoryOutboundTables;
+    ledger: MemoryLedger;
+    api: ApiSpy;
+    rendered: Array<{ markdown: string; ctx: LarkRenderContext }>;
+    spoke: Array<{ botName: string; lane?: string }>;
+    waited: number[];
+    observed: Array<{ stage: string; seconds: number }>;
+    mintedIds: string[];
+}
+
+const NOW = 1_700_000_000_000;
+
+function harness(overrides: Partial<LarkDeliveryDeps> = {}): Harness {
+    const store = new MemoryOutboundTables();
+    const ledger = new MemoryLedger();
+    const api = apiSpy();
+    const rendered: Array<{ markdown: string; ctx: LarkRenderContext }> = [];
+    const spoke: Array<{ botName: string; lane?: string }> = [];
+    const waited: number[] = [];
+    const observed: Array<{ stage: string; seconds: number }> = [];
+    const mintedIds: string[] = [];
+    let seq = 0;
+
+    const deps: LarkDeliveryDeps = {
+        store,
+        ledger,
+        api: api.api,
+        render: async (markdown, ctx) => {
+            rendered.push({ markdown, ctx });
+            return [[{ tag: 'text', text: markdown }]] as unknown as PostContent;
+        },
+        botCommonUserId: (botName) => `cu_${botName}`,
+        botDisplayName: (botName) => `名字_${botName}`,
+        newCommonId: () => {
+            const id = `cm_new_${(seq += 1)}`;
+            mintedIds.push(id);
+            return id;
+        },
+        now: () => NOW,
+        wait: async (ms) => void waited.push(ms),
+        speakAs: async (who, say) => {
+            spoke.push(who);
+            await say();
+        },
+        observe: (stage, seconds) => void observed.push({ stage, seconds }),
+        ...overrides,
+    };
+
+    return { deps, store, ledger, api, rendered, spoke, waited, observed, mintedIds };
+}
+
+/** 被动回复的基线 payload：群聊、第一段、收尾。 */
+function reply(overrides: Partial<LarkChatResponse> = {}): LarkChatResponse {
+    return {
+        channel: 'lark',
+        session_id: 'sess-1',
+        message_id: 'cm_trigger',
+        chat_id: 'cc_group',
+        is_p2p: false,
+        root_id: null,
+        content: '在的',
+        full_content: '在的',
+        status: 'success',
+        part_index: 0,
+        is_last: true,
+        is_proactive: false,
+        bot_name: 'chiwei',
+        ...overrides,
+    };
+}
+
+function proactive(overrides: Partial<LarkChatResponse> = {}): LarkChatResponse {
+    return {
+        channel: 'lark',
+        session_id: null,
+        message_id: 'proactive:550e8400-e29b-41d4-a716-446655440000',
+        chat_id: 'cc_dm',
+        is_p2p: true,
+        root_id: null,
+        content: '刚做完饭',
+        status: 'success',
+        part_index: 0,
+        is_last: true,
+        is_proactive: true,
+        bot_name: 'chiwei',
+        ...overrides,
+    };
+}
+
+/** 反查要用到的映射：触发消息、会话。 */
+function seedRefs(store: MemoryOutboundTables): void {
+    store.messages.set('cm_trigger', 'om_trigger');
+    store.chats.set('cc_group', 'oc_group');
+    store.chats.set('cc_dm', 'oc_dm');
+}
+
+// ---------------------------------------------------------------------------
+// 三种发送分支
+// ---------------------------------------------------------------------------
+
+describe('发送分支 — part 0 的被动回复', () => {
+    it('回复触发消息本身，且不进话题串', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1', bot_name: 'chiwei' });
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.api.replied[0]!.messageId).toBe('om_trigger');
+        // inThread 必须显式 false：普通聊天的回复被挂进话题串，用户看到的是一个
+        // 折叠起来的分支，等于没回。
+        expect(h.api.replied[0]!.inThread).toBe(false);
+        expect(h.api.sent).toHaveLength(0);
+    });
+
+    it('群聊渲染带 mention 会话 id，私聊不带', async () => {
+        const group = harness();
+        seedRefs(group.store);
+        await deliverLarkChatResponse(group.deps, reply({ is_p2p: false }));
+        expect(group.rendered[0]!.ctx.mentionChatId).toBe('oc_group');
+
+        const dm = harness();
+        seedRefs(dm.store);
+        dm.store.messages.set('cm_trigger', 'om_trigger');
+        await deliverLarkChatResponse(dm.deps, reply({ is_p2p: true, chat_id: 'cc_dm' }));
+        // 私聊里没有第三个人，@ 谁都渲染不成 mention，查一次群成员纯属白花一次查询。
+        expect(dm.rendered[0]!.ctx.mentionChatId).toBeUndefined();
+    });
+
+    it('图片注册表用全局 message_id，不是反查出来的飞书裸 id', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        // 用裸 om_id 查注册表必 miss，图片被静默吞掉（全程无报错）。
+        expect(h.rendered[0]!.ctx.imageRegistryId).toBe('cm_trigger');
+        expect(h.rendered[0]!.ctx.imageRegistryId).not.toBe('om_trigger');
+    });
+
+    it('第一段之前不等待', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 0 }));
+        expect(h.waited).toEqual([]);
+    });
+});
+
+describe('发送分支 — part > 0 的续段', () => {
+    it('新发到会话而不是回复，且发之前先等一段固定间隔', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 1, is_last: false }));
+
+        expect(h.waited).toEqual([2_500]);
+        expect(h.api.sent).toHaveLength(1);
+        expect(h.api.sent[0]!.chatId).toBe('oc_group');
+        expect(h.api.replied).toHaveLength(0);
+    });
+
+    it('等待发生在发送之前，不是之后', async () => {
+        const order: string[] = [];
+        const h = harness();
+        seedRefs(h.store);
+        h.deps.wait = async () => void order.push('wait');
+        const original = h.deps.api.sendPost;
+        h.deps.api = {
+            ...h.deps.api,
+            sendPost: async (chatId, content) => {
+                order.push('send');
+                return original.call(h.deps.api, chatId, content);
+            },
+        };
+
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 2, is_last: false }));
+
+        expect(order).toEqual(['wait', 'send']);
+    });
+});
+
+describe('发送分支 — 主动发', () => {
+    it('新发到会话，且绝不拿伪 message_id 去反查来源消息', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        expect(h.api.sent).toHaveLength(1);
+        expect(h.api.sent[0]!.chatId).toBe('oc_dm');
+        expect(h.api.replied).toHaveLength(0);
+        // 伪 id 反查必 miss、必抛。主动发这条路一次都不该碰它。
+        expect(h.store.reads.filter((r) => r.startsWith('omIdOf:'))).toEqual([]);
+    });
+
+    it('带了 root_id 也照样新发 —— root 被刻意忽略', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.store.messages.set('cm_root', 'om_root');
+
+        await deliverLarkChatResponse(h.deps, proactive({ root_id: 'cm_root' }));
+
+        // 主动发是赤尾自己开口，本就该是一条新消息。root_id 偶然带了值也不该让它
+        // 退化成一条回复。
+        expect(h.api.sent).toHaveLength(1);
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.store.reads.filter((r) => r.startsWith('omIdOf:'))).toEqual([]);
+    });
+
+    it('台账一个字都不写 —— 主动发没有 session_id', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        expect(h.ledger.appended).toEqual([]);
+        expect(h.ledger.settled).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 反查
+// ---------------------------------------------------------------------------
+
+describe('反查 — 查不到就炸，绝不静默发到别处', () => {
+    it('触发消息没有飞书映射：不发、不落库', async () => {
+        const h = harness();
+        h.store.chats.set('cc_group', 'oc_group');
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.store.commonMessages.size).toBe(0);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'failed' } },
+        ]);
+    });
+
+    it('会话没有飞书映射：不发、不落库', async () => {
+        const h = harness();
+        h.store.messages.set('cm_trigger', 'om_trigger');
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.store.commonMessages.size).toBe(0);
+    });
+
+    it('主动发的会话没有映射：不发', async () => {
+        const h = harness();
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        expect(h.api.sent).toHaveLength(0);
+    });
+
+    it('root 有值但查不到映射：整条回复不发', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply({ root_id: 'cm_missing_root' }));
+
+        expect(h.api.replied).toHaveLength(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 落库
+// ---------------------------------------------------------------------------
+
+describe('落库 — assistant 行的字段口径', () => {
+    it('被动回复：root/reply 都挂在触发消息上', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row).toEqual({
+            common_message_id: 'cm_new_1',
+            channel: 'lark',
+            common_conversation_id: 'cc_group',
+            common_user_id: 'cu_chiwei',
+            sender_display_name: '名字_chiwei',
+            role: 'assistant',
+            content: [{ kind: 'text', text: '在的' }],
+            content_text: '在的',
+            common_root_message_id: 'cm_trigger',
+            common_reply_message_id: 'cm_trigger',
+            scope: 'group',
+            message_type: 'post',
+            bot_name: 'chiwei',
+            event_time: String(NOW),
+            response_id: 'sess-1',
+        });
+        expect(h.store.larkMessages.get('om_sent')).toEqual({
+            om_id: 'om_sent',
+            common_message_id: 'cm_new_1',
+            chat_id: 'oc_group',
+            message_type: 'post',
+        });
+    });
+
+    it('有 root_id 时 root 挂 root、reply 仍挂触发消息', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.store.messages.set('cm_root', 'om_root');
+
+        await deliverLarkChatResponse(h.deps, reply({ root_id: 'cm_root' }));
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.common_root_message_id).toBe('cm_root');
+        expect(row.common_reply_message_id).toBe('cm_trigger');
+    });
+
+    it('主动发：root 回落成自己、reply 留空 —— 伪 id 绝不进公共层引用链', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.common_root_message_id).toBe(row.common_message_id);
+        expect(row.common_reply_message_id).toBeUndefined();
+        // proactive: 伪 id 一次都不该出现在落库的行里。
+        expect(JSON.stringify(row)).not.toContain('proactive:');
+        // 没有台账行可挂。
+        expect(row.response_id).toBeUndefined();
+        expect(row.scope).toBe('direct');
+    });
+
+    it('同一个 om_id 已经落过库：复用旧的 common_message_id，不铸新的', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.store.larkMessages.set('om_sent', {
+            om_id: 'om_sent',
+            common_message_id: 'cm_already',
+            chat_id: 'oc_group',
+            message_type: 'post',
+        });
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.mintedIds).toEqual([]);
+        expect(h.ledger.appended[0]!.reply).toMatchObject({
+            common_message_id: 'cm_already',
+        });
+    });
+});
+
+describe('落库 — 平台没返回 message_id', () => {
+    it('被动回复：合成 `{触发消息 om_id}_part{段序}` 落库', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.api.nextMessageId = undefined;
+
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 0 }));
+
+        expect([...h.store.larkMessages.keys()]).toEqual(['om_trigger_part0']);
+    });
+
+    it('空串也算没返回', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.api.nextMessageId = '';
+
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 1, is_last: false }));
+
+        expect([...h.store.larkMessages.keys()]).toEqual(['om_trigger_part1']);
+    });
+
+    it('主动发合成出来的是 `_part0` —— 长得很怪，而且会撞', async () => {
+        // 主动发没有来源消息，反查出来的 om_id 是空串，于是合成结果里前半截也是空的。
+        // 两条都没拿到 message_id 的主动发会撞上同一个键 —— insertLarkMessage 的
+        // or-ignore 让第二条静默不落库。这是拆分前就有的形态，照搬并在此认掉：改它
+        // 要重新定义"没拿到 id 时用什么当主键"，是另一个议题。
+        const h = harness();
+        seedRefs(h.store);
+        h.api.nextMessageId = undefined;
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        expect([...h.store.larkMessages.keys()]).toEqual(['_part0']);
+    });
+});
+
+describe('落库 — 两条 insert 同生共死', () => {
+    it('lark_message 插失败时 common_message 不留痕', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.store.failLarkMessageInsert = new Error('mapping insert exploded');
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        // 只写了 common_message 就是一条公共层有、飞书侧无对应物的孤儿记录，
+        // 之后按 om_id 反查它的路径（撤回、引用回复）全部读空。
+        expect(h.store.commonMessages.size).toBe(0);
+        expect(h.store.larkMessages.size).toBe(0);
+    });
+
+    it('落库炸了不影响"消息已经发出去了"这个事实，但台账要记失败', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.store.failLarkMessageInsert = new Error('mapping insert exploded');
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'failed' } },
+        ]);
+        expect(h.ledger.appended).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 台账三处写
+// ---------------------------------------------------------------------------
+
+describe('台账 — replies 追加', () => {
+    it('每发出一段就追加一条，指向刚落库的 assistant 行', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 0, is_last: false }));
+
+        expect(h.ledger.appended).toEqual([
+            {
+                sessionId: 'sess-1',
+                reply: {
+                    common_message_id: 'cm_new_1',
+                    content_type: 'post',
+                    sent_at: new Date(NOW).toISOString(),
+                },
+            },
+        ]);
+    });
+
+    it('台账行不存在时不追加 —— 没有行可以拼', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        // session_id 有值但库里没这一行（agent-service 那侧还没 INSERT / 已被清理）。
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.ledger.appended).toEqual([]);
+        expect(h.ledger.settled).toEqual([]);
+        // 但消息照发、照落库：台账缺行不该让真人收不到回复。
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.store.commonMessages.size).toBe(1);
+    });
+});
+
+describe('台账 — 终态', () => {
+    it('收尾那一段写全文 + completed', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ is_last: true, content: '第二段', full_content: '第一段第二段' }),
+        );
+
+        expect(h.ledger.settled).toEqual([
+            {
+                sessionId: 'sess-1',
+                outcome: { status: 'completed', responseText: '第一段第二段' },
+            },
+        ]);
+    });
+
+    it('没有 full_content 时退回本段正文', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ is_last: true, content: '就这一段', full_content: undefined }),
+        );
+
+        expect(h.ledger.settled[0]!.outcome.responseText).toBe('就这一段');
+    });
+
+    it('不是收尾就不落终态', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(h.deps, reply({ is_last: false }));
+
+        expect(h.ledger.settled).toEqual([]);
+    });
+
+    it('agent 自己就报了失败：记 failed，一条都不发', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ status: 'failed', error: '模型超时' }),
+        );
+
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.api.sent).toHaveLength(0);
+        expect(h.store.commonMessages.size).toBe(0);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'failed' } },
+        ]);
+    });
+
+    it('内容为空且是收尾：只落 completed，**不碰 response_text**', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '', is_last: true, full_content: '前面几段的全文' }),
+        );
+
+        expect(h.api.replied).toHaveLength(0);
+        // 写 responseText 会把前面几段已经落好的全文抹掉。
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'completed' } },
+        ]);
+    });
+
+    it('内容为空且不是收尾：什么都不写', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(h.deps, reply({ content: '', is_last: false }));
+
+        expect(h.ledger.settled).toEqual([]);
+        expect(h.ledger.appended).toEqual([]);
+    });
+
+    it('发送失败：记 failed，且不落库', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.api.fail = new Error('feishu said no');
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(h.store.commonMessages.size).toBe(0);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'failed' } },
+        ]);
+    });
+
+    it('连记 failed 都失败时不再往外抛 —— 上游只会把它变成一条 DLQ', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.api.fail = new Error('feishu said no');
+        h.ledger.failSettle = new Error('db is down too');
+
+        await expect(deliverLarkChatResponse(h.deps, reply())).resolves.toBeUndefined();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 谁在说话
+// ---------------------------------------------------------------------------
+
+describe('谁在说话', () => {
+    it('payload 的 bot_name 优先于台账里那一列', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1', bot_name: '台账里的旧值' });
+
+        await deliverLarkChatResponse(h.deps, reply({ bot_name: 'chiwei' }));
+
+        expect(h.spoke).toEqual([{ botName: 'chiwei', lane: undefined }]);
+    });
+
+    it('payload 没带就用台账里的', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1', bot_name: '从台账来的' });
+
+        await deliverLarkChatResponse(h.deps, reply({ bot_name: undefined }));
+
+        expect(h.spoke).toEqual([{ botName: '从台账来的', lane: undefined }]);
+    });
+
+    it('两边都没有：一个字都不发 —— 发错 bot 比不发严重', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply({ bot_name: undefined }));
+
+        expect(h.spoke).toEqual([]);
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.store.commonMessages.size).toBe(0);
+    });
+
+    it('泳道随消息进上下文', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply(), 'ppe-x');
+
+        expect(h.spoke).toEqual([{ botName: 'chiwei', lane: 'ppe-x' }]);
+    });
+
+    it('发送与落库都在"这个 bot 在说话"的上下文里 —— 客户端池按它选 bot', async () => {
+        const inside: string[] = [];
+        const h = harness();
+        seedRefs(h.store);
+        h.deps.speakAs = async (who, say) => {
+            inside.push(`enter:${who.botName}`);
+            await say();
+            inside.push('leave');
+        };
+        const originalReply = h.deps.api.replyPost;
+        h.deps.api = {
+            ...h.deps.api,
+            replyPost: async (id, content, inThread) => {
+                inside.push('reply');
+                return originalReply.call(h.deps.api, id, content, inThread);
+            },
+        };
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        expect(inside).toEqual(['enter:chiwei', 'reply', 'leave']);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 台账那次读的失败要往外走
+// ---------------------------------------------------------------------------
+
+describe('台账那次读失败', () => {
+    it('往外抛 —— 由队列层决定怎么处置，这里不吞', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.failFind = new Error('pg is down');
+
+        await expect(deliverLarkChatResponse(h.deps, reply())).rejects.toThrow('pg is down');
+        expect(h.api.replied).toHaveLength(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 内存事务本身老不老实
+// ---------------------------------------------------------------------------
+
+describe('内存实现的事务语义（测试替身自检）', () => {
+    it('run 抛错时，事务里写进去的行全部回滚', async () => {
+        const store = new MemoryOutboundTables();
+        store.commonMessages.set('before', {
+            common_message_id: 'before',
+        } as LarkAssistantMessageRow);
+
+        await expect(
+            store.atomically(async (tables) => {
+                await tables.insertCommonMessage({
+                    common_message_id: 'during',
+                } as LarkAssistantMessageRow);
+                throw new Error('boom');
+            }),
+        ).rejects.toThrow('boom');
+
+        expect([...store.commonMessages.keys()]).toEqual(['before']);
+    });
+
+    it('run 正常返回时写入留下', async () => {
+        const store = new MemoryOutboundTables();
+        await store.atomically(async (tables) => {
+            await tables.insertLarkMessage({
+                om_id: 'om_1',
+                common_message_id: 'cm_1',
+                chat_id: 'oc_1',
+                message_type: 'post',
+            });
+        });
+        expect([...store.larkMessages.keys()]).toEqual(['om_1']);
+    });
+});

@@ -64,6 +64,29 @@ export function larkPersonaIdOf(roster: LarkBotRoster, commonUserId: string): st
 }
 
 /**
+ * 出站消息上署的名。
+ *
+ * 署的是**人设名**（"赤尾"），不是飞书后台那个应用名（"XX机器人"）—— 后者是运维
+ * 视角的标识，出现在聊天记录里很出戏。
+ *
+ * **查不到返回 undefined 而不是抛**：署名缺失只是消息上少一个名字，抛错会让整条
+ * 回复发不出去。跟 larkAppIdOf 的 fail-loud 不同，因为那个猜错会把人记到别的应用
+ * 名下、留下一份错的身份，这个不会。
+ */
+export function larkDisplayNameOf(
+    roster: LarkBotRoster,
+    personaName: LarkPersonaName,
+    botName: string,
+): string | undefined {
+    for (const bot of roster.getAllBotConfigs()) {
+        if (bot.channel !== LARK_CHANNEL) continue;
+        if (bot.bot_name !== botName) continue;
+        return (bot.persona_id ? personaName(bot.persona_id) : null) ?? undefined;
+    }
+    return undefined;
+}
+
+/**
  * 处理这条事件的 bot 跑在哪个飞书应用下。
  *
  * 用处只有一个：投影按 (app_id, open_id) 记用户身份，而事件里偶尔没带 app_id。这

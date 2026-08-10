@@ -107,6 +107,20 @@ describe('bootLarkService', () => {
         await expect(bootLarkService(deps)).rejects.toThrow('broker.connect exploded');
         expect(deps.calls).not.toContain('broker.declareTopology');
     });
+
+    // 出站进程不是飞书事件的入口：原始报文在入口那一侧第一次进来时就已经记过了，
+    // 它再连一次 mongo 只是多一份连接和多一个起不来的理由。
+    it('skips the event log when the process has none', async () => {
+        const { eventLog: _dropped, ...withoutEventLog } = deps;
+        await bootLarkService(withoutEventLog);
+        expect(deps.calls).toEqual([
+            'database.initialize',
+            'bots.load',
+            'cache.ping',
+            'broker.connect',
+            'broker.declareTopology',
+        ]);
+    });
 });
 
 describe('shutdownLarkService', () => {
@@ -131,6 +145,14 @@ describe('shutdownLarkService', () => {
     it('skips postgres when it never came up', async () => {
         await shutdownLarkService(deps);
         expect(deps.calls).toEqual(['broker.close', 'eventLog.close', 'cache.close']);
+    });
+
+    it('skips the event log when the process has none', async () => {
+        const { eventLog: _dropped, ...withoutEventLog } = deps;
+        await bootLarkService(withoutEventLog);
+        deps.calls.length = 0;
+        await shutdownLarkService(withoutEventLog);
+        expect(deps.calls).toEqual(['broker.close', 'cache.close', 'database.destroy']);
     });
 
     // 关停路径上一个失败吞掉其余关闭，就会留下没 quit 的连接，进程 exit 之后在

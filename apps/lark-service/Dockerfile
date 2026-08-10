@@ -27,9 +27,14 @@ COPY packages/lark-utils ./packages/lark-utils
 COPY apps/lark-service/tsconfig.json ./apps/lark-service/
 COPY apps/lark-service/src ./apps/lark-service/src
 
-# ④ 编译为独立二进制
+# ④ 并行编译为独立二进制。
+# 一个镜像两个 Deployment：入口进程持飞书 WS 长连（单副本 + Recreate），出站是竞争
+# 消费（可多副本、可滚动更新）。两种部署策略天然冲突，所以它们是两个进程。
 WORKDIR /repo/apps/lark-service
-RUN bun build src/index.ts --compile --outfile=server && test -f server
+RUN bun build src/index.ts --compile --outfile=server & \
+    bun build src/outbound.ts --compile --outfile=lark-outbound & \
+    wait && \
+    test -f server && test -f lark-outbound
 
 # --- Runtime（同样基于 Debian/glibc，预装 ca-certificates/tzdata）---
 FROM harbor.local:30002/inner-bot/lark-server-runtime:bookworm-slim
@@ -41,5 +46,8 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /app
 COPY --from=builder /repo/apps/lark-service/server ./server
+COPY --from=builder /repo/apps/lark-service/lark-outbound ./lark-outbound
 
+# 默认跑入口进程。出站那个 Deployment 由 PaaS 覆盖 command 成 ./lark-outbound
+# —— 同一个镜像、两个进程，跟 channel-server 那三个是同一套做法。
 CMD ["./server"]

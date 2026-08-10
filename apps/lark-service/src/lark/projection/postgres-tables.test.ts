@@ -2,99 +2,31 @@
 //
 // 投影的**逻辑**由 inbound-projection.test.ts 用内存实现验；那份实现再怎么正确，
 // 也说明不了真身有没有写错表、漏掉 ON CONFLICT、或者忘了 ORDER BY。开发机连不到
-// 数据库，所以这里换个办法：用真的 TypeORM + 真的实体元数据建一个**不连库**的
-// DataSource，把 query runner 换成录音机，跑一遍就能拿到真实的 SQL 与参数。
+// 数据库，所以换个办法：用真的 TypeORM + 真的实体元数据建一个**不连库**的
+// DataSource，把 query runner 换成录音机（见 ../recording-data-source.ts），跑一遍
+// 就能拿到真实的 SQL 与参数。
 //
 // 这样拿到的不是"我以为它会生成什么"，是 TypeORM 真的生成了什么。
 
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { DataSource } from 'typeorm';
-import { Broadcaster } from 'typeorm/subscriber/Broadcaster.js';
 
 import { LARK_SERVICE_ENTITIES } from '../../ormconfig';
+import { recordingDataSource, type RecordedStatement } from '../recording-data-source';
 import { postgresLarkTables } from './postgres-tables';
 import type { LarkStore } from './tables';
 
-interface Recorded {
-    sql?: string;
-    params?: unknown[];
-    tx?: 'begin' | 'commit' | 'rollback';
-}
-
 interface Harness {
     store: LarkStore;
-    recorded: Recorded[];
+    recorded: RecordedStatement[];
     /** 下一条 SELECT 返回什么（原始列名，形如 `Alias_column`）。 */
     reply(rows: Array<Record<string, unknown>>): void;
-    sqlOf(fragment: string): Recorded;
+    sqlOf(fragment: string): RecordedStatement;
     statements(): string[];
 }
 
 function harness(): Harness {
-    const dataSource = new DataSource({
-        type: 'postgres',
-        host: 'unused',
-        port: 5432,
-        username: 'unused',
-        password: 'unused',
-        database: 'unused',
-        synchronize: false,
-        entities: LARK_SERVICE_ENTITIES,
-    });
-    // 只解析元数据，不连库 —— initialize() 在建连接之前做的正是这一步。
-    (dataSource as unknown as { buildMetadatas(): void }).buildMetadatas();
-    (dataSource as unknown as { isInitialized: boolean }).isInitialized = true;
-
-    const recorded: Recorded[] = [];
-    let pending: Array<Record<string, unknown>> = [];
-    const runner: Record<string, unknown> = {
-        connection: dataSource,
-        isReleased: false,
-        isTransactionActive: false,
-        data: {},
-        connect: async () => {},
-        release: async () => {},
-        startTransaction: async () => {
-            recorded.push({ tx: 'begin' });
-            runner.isTransactionActive = true;
-        },
-        commitTransaction: async () => {
-            recorded.push({ tx: 'commit' });
-            runner.isTransactionActive = false;
-        },
-        rollbackTransaction: async () => {
-            recorded.push({ tx: 'rollback' });
-            runner.isTransactionActive = false;
-        },
-        query: async (sql: string, params: unknown[], structured?: boolean) => {
-            recorded.push({ sql, params });
-            const rows = pending;
-            pending = [];
-            return structured ? { records: rows, affected: rows.length, raw: rows } : rows;
-        },
-    };
-    runner.broadcaster = new Broadcaster(runner as never);
-    runner.manager = dataSource.createEntityManager(runner as never);
-    dataSource.createQueryRunner = () => runner as never;
-
-    return {
-        store: postgresLarkTables(dataSource),
-        recorded,
-        reply: (rows) => {
-            pending = rows;
-        },
-        sqlOf: (fragment) => {
-            const hit = recorded.find((r) => r.sql?.includes(fragment));
-            if (!hit) {
-                throw new Error(
-                    `no statement contains "${fragment}"; saw:\n` +
-                        recorded.map((r) => r.tx ?? r.sql).join('\n'),
-                );
-            }
-            return hit;
-        },
-        statements: () => recorded.map((r) => r.tx ?? r.sql!.split(' ').slice(0, 3).join(' ')),
-    };
+    const recorder = recordingDataSource([...LARK_SERVICE_ENTITIES]);
+    return { ...recorder, store: postgresLarkTables(recorder.dataSource) };
 }
 
 let h: Harness;

@@ -4,6 +4,7 @@ import type { BotConfig } from '@inner/shared/entities';
 import {
     createLarkBotLookup,
     larkAppIdOf,
+    larkDisplayNameOf,
     larkPersonaIdOf,
     type LarkBotRoster,
 } from './bot-lookup';
@@ -124,5 +125,38 @@ describe('larkPersonaIdOf', () => {
             bot(),
         ];
         expect(larkPersonaIdOf(roster(bots), 'cu_qq')).toBeUndefined();
+    });
+});
+
+// 出站消息上署的名。飞书后台那个应用名（"赤尾机器人"之类）不是给人看的。
+describe('larkDisplayNameOf', () => {
+    const personas = (personaId: string) => (personaId === 'p_chiwei' ? '赤尾' : null);
+
+    it('answers with the persona display name the bot wears', () => {
+        expect(larkDisplayNameOf(roster([bot()]), personas, 'chiwei')).toBe('赤尾');
+    });
+
+    it('says nothing for a bot that wears no persona', () => {
+        expect(
+            larkDisplayNameOf(roster([bot({ persona_id: undefined })]), personas, 'chiwei'),
+        ).toBeUndefined();
+    });
+
+    it('says nothing when the persona has no display name on record', () => {
+        expect(
+            larkDisplayNameOf(roster([bot({ persona_id: 'p_unknown' })]), personas, 'chiwei'),
+        ).toBeUndefined();
+    });
+
+    // 署名缺失只是消息上少一个名字；抛错会让整条回复发不出去。
+    it('says nothing about a bot this process never loaded', () => {
+        expect(larkDisplayNameOf(roster([bot()]), personas, 'nobody')).toBeUndefined();
+    });
+
+    it('ignores bots from other channels', () => {
+        const bots = [
+            { bot_name: 'chiwei', channel: 'qq', persona_id: 'p_chiwei' } as BotConfig,
+        ];
+        expect(larkDisplayNameOf(roster(bots), personas, 'chiwei')).toBeUndefined();
     });
 });

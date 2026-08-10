@@ -31,8 +31,13 @@ export interface LarkBackends {
         declareTopology(): Promise<void>;
         close(): Promise<void>;
     };
-    /** 飞书原始报文的审计落库。旁路，但连不上要在启动期就知道。 */
-    readonly eventLog: {
+    /**
+     * 飞书原始报文的审计落库。旁路，但连不上要在启动期就知道。
+     *
+     * **出站进程没有这一项。** 它不是飞书事件的入口 —— 原始报文在入口那一侧第一次
+     * 进来时就已经记过了，出站再连一次 mongo 只是多一份连接和多一个起不来的理由。
+     */
+    readonly eventLog?: {
         open(): Promise<void>;
         close(): Promise<void>;
     };
@@ -58,8 +63,10 @@ export async function bootLarkService(backends: LarkBackends): Promise<void> {
     console.info('[lark-service] rabbitmq topology declared');
     // 审计是入站的旁路（记不上不挡消息），但"连不上"要在这里暴露：等到第一条飞书
     // 消息进来才发现 mongo 配错了，那时每条事件都会刷一行错误日志。
-    await backends.eventLog.open();
-    console.info('[lark-service] event log ready');
+    if (backends.eventLog) {
+        await backends.eventLog.open();
+        console.info('[lark-service] event log ready');
+    }
 }
 
 /**
@@ -69,7 +76,8 @@ export async function bootLarkService(backends: LarkBackends): Promise<void> {
  */
 export async function shutdownLarkService(backends: LarkBackends): Promise<void> {
     await closeQuietly('rabbitmq', () => backends.broker.close());
-    await closeQuietly('event log', () => backends.eventLog.close());
+    const eventLog = backends.eventLog;
+    if (eventLog) await closeQuietly('event log', () => eventLog.close());
     await closeQuietly('redis', () => backends.cache.close());
     if (backends.database.isInitialized) {
         await closeQuietly('postgres', () => backends.database.destroy());
