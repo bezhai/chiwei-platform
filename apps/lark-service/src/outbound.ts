@@ -1,5 +1,9 @@
 /**
- * lark-outbound 进程入口：消费飞书的 `chat_response`，把赤尾说的话送出去。
+ * lark-outbound 进程入口：把赤尾的动作送到飞书。
+ *
+ * 两条队列 —— `chat_response`（说话）和 `recall`（把判违规的那几条删掉）。它们同属
+ * 这一件事，流量差着几个数量级，没有分开扩缩容的理由，所以共用一个进程、一个客户端
+ * 池、一把消费开关（见 lark/outbound/subscription.ts）。
  *
  * ## 为什么它不跟入口进程住在一起
  *
@@ -14,8 +18,8 @@
  * ## 这个文件只做装配
  *
  * 业务在 lark/outbound/ 下，一个单例都不认识（见 deliver.ts 的 LarkDeliveryDeps、
- * response-queue.ts 的 LarkResponseConsumerDeps）。所以整条出站链能在一台连不到
- * PG / Redis / MQ / 飞书的机器上跑完。
+ * recall.ts 的 LarkRecallDeps）。所以两条出站链都能在一台连不到 PG / Redis / MQ /
+ * 飞书的机器上跑完。
  */
 
 import { createServer } from 'node:http';
@@ -31,6 +35,8 @@ import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
 import { larkSpeakAs } from './lark/outbound/bot-context';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './lark/outbound/deliver';
+import { recallLarkResponse, type LarkRecallDeps } from './lark/outbound/recall';
+import { larkRecallBinding } from './lark/outbound/recall-queue';
 import { redisImageRegistry } from './lark/outbound/redis-image-registry';
 import { postgresLarkResponseLedger } from './lark/outbound/postgres-ledger';
 import { postgresLarkOutboundTables } from './lark/outbound/postgres-tables';
@@ -101,11 +107,17 @@ function backends(): LarkBackends {
     };
 }
 
+/** 两条出站链各自的依赖。共用的那几件（客户端池、台账、反查）只装配一次。 */
+interface LarkOutbound {
+    delivery: LarkDeliveryDeps;
+    recall: LarkRecallDeps;
+}
+
 /**
  * 出站的真实装配。必须在 bootLarkService 之后调用：人设名要查库，bot 目录也得先
  * 加载完，飞书客户端池要拿每个 bot 的凭据。
  */
-async function realDelivery(): Promise<LarkDeliveryDeps> {
+async function realOutbound(): Promise<LarkOutbound> {
     const dataSource = larkDataSource();
     const bots = botDirectory.getAllBotConfigs().filter((bot) => bot.channel === LARK_CHANNEL);
     const personaName: LarkPersonaName = await loadLarkPersonaNames(
@@ -113,6 +125,8 @@ async function realDelivery(): Promise<LarkDeliveryDeps> {
         bots.map((bot) => bot.persona_id).filter((id): id is string => Boolean(id)),
     );
 
+    // 发消息和撤回共用同一个客户端池：各建一个等于每个 bot 两个 SDK 客户端，
+    // tenant token 也各换各的。
     const api = createSdkLarkApi(
         larkClientPool(
             bots.map((bot) => ({ botName: bot.bot_name, credentials: larkCredentials(bot) })),
@@ -122,32 +136,45 @@ async function realDelivery(): Promise<LarkDeliveryDeps> {
     // 花名册缓存归装配根持有，不是模块级全局：谁在用一眼可见。
     const roster = withRosterCache(postgresLarkGroupRoster(dataSource), ROSTER_CACHE_MS);
 
+    const store = postgresLarkOutboundTables(dataSource);
+    const ledger = postgresLarkResponseLedger(dataSource);
+
     return {
-        store: postgresLarkOutboundTables(dataSource),
-        ledger: postgresLarkResponseLedger(dataSource),
-        api,
-        render: createLarkPostRenderer({
-            mentions: createLarkMentionResolver({
-                roster,
-                // 每次都重算：common_user_id 和人设名都是启动时回填的，缓存一份
-                // 快照会把回填之前的空值一直留着。目录规模是个位数。
-                aliases: () => larkBotAliases(botDirectory, personaName),
-            }),
-            images: {
-                registry: redisImageRegistry({
-                    hgetall: (key) => getRedisClient().hgetall(key),
+        delivery: {
+            store,
+            ledger,
+            api,
+            render: createLarkPostRenderer({
+                mentions: createLarkMentionResolver({
+                    roster,
+                    // 每次都重算：common_user_id 和人设名都是启动时回填的，缓存一份
+                    // 快照会把回填之前的空值一直留着。目录规模是个位数。
+                    aliases: () => larkBotAliases(botDirectory, personaName),
                 }),
-                uploader: api,
-            },
-        }),
-        botCommonUserId: (botName) => botDirectory.getBotCommonUserId(botName),
-        botDisplayName: (botName) => larkDisplayNameOf(botDirectory, personaName, botName),
-        // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候发的"的排序依据。
-        newCommonId: () => Bun.randomUUIDv7(),
-        now: () => Date.now(),
-        wait: (ms) => Bun.sleep(ms),
-        speakAs: larkSpeakAs,
-        observe: (stage, seconds) => deliveryDuration.labels({ stage }).observe(seconds),
+                images: {
+                    registry: redisImageRegistry({
+                        hgetall: (key) => getRedisClient().hgetall(key),
+                    }),
+                    uploader: api,
+                },
+            }),
+            botCommonUserId: (botName) => botDirectory.getBotCommonUserId(botName),
+            botDisplayName: (botName) => larkDisplayNameOf(botDirectory, personaName, botName),
+            // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候发的"的排序依据。
+            newCommonId: () => Bun.randomUUIDv7(),
+            now: () => Date.now(),
+            wait: (ms) => Bun.sleep(ms),
+            speakAs: larkSpeakAs,
+            observe: (stage, seconds) => deliveryDuration.labels({ stage }).observe(seconds),
+        },
+        // 撤回只用得上台账、反查和撤回那一个 API —— 渲染、图片、花名册一概不需要。
+        recall: {
+            ledger,
+            store,
+            api,
+            speakAs: larkSpeakAs,
+            now: () => Date.now(),
+        },
     };
 }
 
@@ -179,7 +206,7 @@ async function main(): Promise<void> {
     // 预热：DB / bot 目录 / 人设名 / 飞书客户端池全部就位。**在订阅之前**做完 ——
     // 交接窗口里"进程起来了但还没连上后端"的那段时延就是队列没人消费的空窗，而泳道
     // 队列带 10s TTL，堆过去就被 DLX 弹回 prod 由 prod 实例发出去。
-    const delivery = await realDelivery();
+    const outbound = await realOutbound();
 
     const amqp = {
         declareRoute: (route: Route) => rabbitmqClient.declareRoute(route),
@@ -188,6 +215,14 @@ async function main(): Promise<void> {
         drainConsumer: (name: string) => rabbitmqClient.drainConsumer(name),
         ack: (msg: ConsumeMessage) => rabbitmqClient.ack(msg),
         nack: (msg: ConsumeMessage, requeue: boolean) => rabbitmqClient.nack(msg, requeue),
+        // 撤回的延时重投。lane 与 trace_id 由 publish 内部注入，调用点不重复写。
+        publish: (
+            route: Route,
+            body: Record<string, unknown>,
+            delayMs?: number,
+            headers?: Record<string, unknown>,
+            lane?: string,
+        ) => rabbitmqClient.publish(route, body, delayMs, headers, lane),
     };
 
     // 声明用的泳道和订阅用的泳道必须同源：declareRoute 内部也读 env 的 LANE。
@@ -201,8 +236,13 @@ async function main(): Promise<void> {
         queues: [
             larkChatResponseBinding({
                 amqp,
-                deliver: (response, lane) => deliverLarkChatResponse(delivery, response, lane),
+                deliver: (response, lane) =>
+                    deliverLarkChatResponse(outbound.delivery, response, lane),
                 observeQueueDelay: (seconds) => queueDelay.observe(seconds),
+            }),
+            larkRecallBinding({
+                amqp,
+                recall: (request) => recallLarkResponse(outbound.recall, request),
             }),
         ],
         readConsumeSwitch: larkOutboundConsumeSwitch,
