@@ -7,6 +7,7 @@
  */
 
 import type { Document } from 'mongodb';
+import { LaneRouter } from '@inner/shared';
 import { botDirectory } from '@inner/shared/bot';
 import { getRedisClient, resetRedisClient } from '@inner/shared/cache';
 import { getLaneBindingResolver } from '@inner/shared/lane-binding';
@@ -15,6 +16,7 @@ import { getLane, rabbitmqClient } from '@inner/shared/mq';
 import { NotBlocked } from '@inner/shared/rules';
 
 import { loadConfig } from './config';
+import { assembleLarkAttachments, type LarkAttachmentCache } from './lark/attachments';
 import { larkAppIdOf } from './lark/bot-lookup';
 import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
@@ -48,6 +50,7 @@ import {
 } from './schedule';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
+import { register } from './server/metrics';
 
 const LARK_EVENT_COLLECTION = 'lark_event';
 
@@ -86,6 +89,29 @@ function realProjection(store: LarkStore): LarkInboundDeps {
         handOffToLane: handOffOverRabbit,
         withMessageLock: larkMessageLock(redisMessageLockStore(getRedisClient)),
     };
+}
+
+/**
+ * 入站附件缓存的真实装配：一个打 tool-service 的客户端，加两件本 pod 的事实。
+ *
+ * 客户端**建一次**：LaneRouter 自带 30s 的注册表轮询，每条消息新建一个就是每条消息多
+ * 一个永不停的定时器。走 laneRouter 而不是裸 axios，是为了拿到它按请求上下文注入
+ * `x-ctx-lane` 的那一层 —— 泳道信封进来的消息靠它路由到本泳道的 tool-service。
+ */
+function realAttachments(): LarkAttachmentCache {
+    const toolService = new LaneRouter(
+        process.env.REGISTRY_URL || 'http://lite-registry:8080',
+        30_000,
+        register,
+    ).createClient('tool-service');
+
+    return assembleLarkAttachments({
+        post: (path, body, headers) => toolService.post(path, body, { headers }),
+        innerSecret: process.env.INNER_HTTP_SECRET,
+        // pod 的静态泳道。webhook 直接打进泳道时请求上下文里没有 lane（gateway 不注
+        // 那个头），这才是可靠的本泳道标识 —— 文件轨用它，理由见 attachments.ts。
+        lane: getLane(),
+    });
 }
 
 /**
@@ -149,6 +175,7 @@ async function realInbound(): Promise<LarkInbound> {
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
     const store = postgresLarkTables(larkDataSource());
     const projection = realProjection(store);
+    const attachments = realAttachments();
     const rules = realRules(store);
 
     return createLarkInbound({
@@ -159,6 +186,7 @@ async function realInbound(): Promise<LarkInbound> {
             receiveLarkMessage(
                 {
                     project: (r, e) => projectLarkInbound(projection, r, e),
+                    cacheAttachments: attachments,
                     applyRules: async (r, recorded, e) => {
                         await applyLarkRules(rules, r, recorded, e);
                     },

@@ -60,6 +60,7 @@ import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkMessageReading } from '../message/read-message-event';
 import type { LarkInboundMessage } from '../message/parse-message';
 import type { LarkMention } from '../message/wire';
+import { larkDownloadAllowed } from './tables';
 import type {
     CommonConversationFacts,
     LarkChatPermission,
@@ -268,9 +269,8 @@ async function registerCommonIdentities(
             is_active: !groupChat?.is_leave,
             attachment_policy: {
                 // 群没开"所有人可下载"时，下游不该去取原图。私聊没有这个限制。
-                download_allowed: groupChat
-                    ? groupChat.download_has_permission_setting === 'all_members'
-                    : true,
+                // 判断本身在 tables.ts —— 入站附件缓存拿同一个函数当 gate。
+                download_allowed: larkDownloadAllowed(groupChat),
                 source: LARK_CHANNEL,
             },
         },

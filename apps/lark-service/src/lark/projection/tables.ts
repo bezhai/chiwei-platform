@@ -131,6 +131,21 @@ export interface LarkGroupChatFacts {
     download_has_permission_setting?: string;
 }
 
+/**
+ * 这个会话允不允许把消息里的附件取下来。**私聊没有群资料这一行，一律允许。**
+ *
+ * 只有 `all_members` 算允许 —— 飞书那一列还有 `not_anyone` / `only_manager` 之类的值，
+ * 写成"不等于 not_anyone"会让只有管理员能下载的群也放行。
+ *
+ * 两个读它的人必须是同一份判断：投影写进 `common_conversation.attachment_policy
+ * .download_allowed`（下游据此决定要不要去取原图），入站附件缓存拿它当 gate（见
+ * attachments.ts）。各写一遍的话，我们会按一套口径把附件存下来、下游按另一套口径以为
+ * 存不下来，而两边都不会报错。
+ */
+export function larkDownloadAllowed(groupChat: LarkGroupChatFacts | null): boolean {
+    return groupChat ? groupChat.download_has_permission_setting === 'all_members' : true;
+}
+
 /** lark_message：飞书消息与公共层消息的对应。 */
 export interface LarkMessageRow {
     om_id: string;

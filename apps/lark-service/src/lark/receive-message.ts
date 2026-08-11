@@ -2,9 +2,10 @@
 //
 //     解析（三个入口共用一份）
 //        └─▶ 投影：换成公共层 id、落账      ← 交给别的泳道就在这里到此为止
+//               ├─▶ 附件：把图片和文件交给 tool-service 存档（旁路，不等它）
 //               └─▶ 规则：要不要开口，要就把请求发给 agent-service
 //
-// 两步都是注入的：这个文件只负责**顺序**，以及"上一步没成，下一步就不跑"。
+// 三步都是注入的：这个文件只负责**顺序**，以及"上一步没成，下一步就不跑"。
 //
 // ## 这个顺序与拆分前不同（有意）
 //
@@ -23,6 +24,17 @@ import type { LarkInboundOutcome, LarkRecordedInbound } from './projection/inbou
 export interface LarkReceiveDeps {
     /** 换成公共层 id 并落账。这条该走别的泳道时交出去，返回 handed-off。 */
     project: (reading: LarkMessageReading, event: LarkEvent) => Promise<LarkInboundOutcome>;
+    /**
+     * 把这条消息带的图片和文件交给 tool-service 存档（见 attachments.ts）。
+     *
+     * **旁路，而且不等它。** 签名是 `void` 不是 `Promise`：入站绝不为一次 tool-service
+     * 往返等待。gate（群没开"所有人可下载"）在里面，因为它要投影顺路读到的群资料。
+     */
+    cacheAttachments: (
+        reading: LarkMessageReading,
+        recorded: LarkRecordedInbound,
+        event: LarkEvent,
+    ) => void;
     /**
      * 落账之后：跑规则，该发 chat.request 就发。
      *
@@ -50,5 +62,14 @@ export async function receiveLarkMessage(
             `${reading.message.messageId} as ${outcome.projection.commonMessageId} ` +
             `in conversation ${outcome.projection.commonConversationId}`,
     );
+
+    // 附件缓存是旁路：**它坏掉绝不能让一条消息处理不下去**。里面已经逐条吞错了，这里
+    // 再兜一层是因为契约由本文件持有 —— 换一份实现进来也不该有机会拖垮入站。
+    try {
+        deps.cacheAttachments(reading, outcome, event);
+    } catch (error) {
+        console.error('[lark-inbound] could not hand the attachments to tool-service:', error);
+    }
+
     await deps.applyRules(reading, outcome, event);
 }

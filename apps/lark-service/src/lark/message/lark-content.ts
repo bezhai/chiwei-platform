@@ -143,3 +143,14 @@ export function larkStickerKey(parts: LarkContentPart[]): string {
 export function larkImageKeys(parts: LarkContentPart[]): string[] {
     return parts.filter((part) => part.type === 'image').map((part) => part.value);
 }
+
+/**
+ * 只有 file 片段算文件。
+ *
+ * 视频（media）和语音（audio）在飞书那侧同样是 file_key，但**不进文件轨** —— 附件缓存
+ * 的两条轨按片段类型分流（见 attachments.ts），把视频塞进文件轨等于让「读小说」那类
+ * 调用方从对象存储里读到一段 mp4。
+ */
+export function larkFileKeys(parts: LarkContentPart[]): string[] {
+    return parts.filter((part) => part.type === 'file').map((part) => part.value);
+}

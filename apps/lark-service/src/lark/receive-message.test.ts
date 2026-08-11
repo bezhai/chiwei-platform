@@ -62,10 +62,15 @@ const recorded: LarkRecordedInbound = {
 function wire(overrides: Partial<LarkReceiveDeps> = {}) {
     const trace: string[] = [];
     const sawRecorded: LarkRecordedInbound[] = [];
+    const cached: LarkRecordedInbound[] = [];
     const deps: LarkReceiveDeps = {
         project: async () => {
             trace.push('project');
             return { kind: 'recorded', ...recorded };
+        },
+        cacheAttachments: (_reading, seen) => {
+            trace.push('attachments');
+            cached.push(seen);
         },
         applyRules: async (_reading, seen) => {
             trace.push('rules');
@@ -73,16 +78,43 @@ function wire(overrides: Partial<LarkReceiveDeps> = {}) {
         },
         ...overrides,
     };
-    return { deps, trace, sawRecorded };
+    return { deps, trace, sawRecorded, cached };
 }
 
 describe('receiveLarkMessage', () => {
-    it('先落账，再跑规则', async () => {
+    it('先落账，再缓存附件，再跑规则', async () => {
         const wired = wire();
 
         await receiveLarkMessage(wired.deps, reading(), event);
 
-        expect(wired.trace).toEqual(['project', 'rules']);
+        expect(wired.trace).toEqual(['project', 'attachments', 'rules']);
+    });
+
+    // 附件缓存整条被摘掉不会有任何症状：入站照常、赤尾照常回话，只是对象存储里再也
+    // 不落新附件，几天后才会有人发现读小说读不到东西。所以它在流程里的存在本身要有
+    // 断言钉住（上一条的 trace 顺序 + 这一条的入参）。
+    it('附件缓存拿到的是投影产出的那份事实（gate 要用群资料）', async () => {
+        const wired = wire();
+
+        await receiveLarkMessage(wired.deps, reading(), event);
+
+        expect(wired.cached.map((seen) => seen.projection)).toEqual([projection]);
+        expect(wired.cached.map((seen) => seen.commands)).toEqual([recorded.commands]);
+    });
+
+    // 旁路的硬约束：它绝不能让一条消息处理不下去。缓存这一步炸了，规则照跑、入站照常
+    // 返回 —— 反过来的话，tool-service 一挂，赤尾就在所有带图的消息上集体失声。
+    it('附件缓存抛错不影响规则，也不让入站失败', async () => {
+        const wired = wire({
+            cacheAttachments: () => {
+                wired.trace.push('attachments');
+                throw new Error('tool-service client is on fire');
+            },
+        });
+
+        await receiveLarkMessage(wired.deps, reading(), event);
+
+        expect(wired.trace).toEqual(['project', 'attachments', 'rules']);
     });
 
     it('规则拿到的是投影产出的那组公共层 id', async () => {
@@ -119,8 +151,10 @@ describe('receiveLarkMessage', () => {
         expect(wired.trace).toEqual([]);
     });
 
-    // 交给别的泳道的消息本进程不再处理：规则、指令、chat.request 全归目标泳道。
-    it('这条该走别的泳道时到此为止', async () => {
+    // 交给别的泳道的消息本进程不再处理：规则、指令、chat.request、**附件缓存**全归目标
+    // 泳道。附件在这里跑掉的话，prod 会替泳道把附件下载一遍写进 prod 的对象存储，而目标
+    // 泳道消费信封之后还会再下载一遍。
+    it('这条该走别的泳道时到此为止，附件也不缓存', async () => {
         const wired = wire({
             project: async () => {
                 wired.trace.push('project');

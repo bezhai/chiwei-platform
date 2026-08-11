@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import {
     larkClearText,
     larkContentOf,
+    larkFileKeys,
     larkImageKeys,
     larkIsStickerOnly,
     larkIsTextOnly,
@@ -279,5 +280,39 @@ describe('larkStickerKey / larkImageKeys', () => {
                 ),
             ),
         ).toEqual(['img_1', 'img_2']);
+    });
+});
+
+describe('larkFileKeys', () => {
+    it('answers with every file key, in order', () => {
+        expect(
+            larkFileKeys(
+                parts(
+                    { type: 'file', value: 'file_1', meta: { file_name: '一.txt' } },
+                    text('a'),
+                    { type: 'file', value: 'file_2', meta: { file_name: '二.epub' } },
+                ),
+            ),
+        ).toEqual(['file_1', 'file_2']);
+    });
+
+    // 附件缓存的两条轨按片段类型分流：视频（media）和图片（image）不进文件轨。
+    // 混进来的后果是文件管线拿着一个视频 file_key 去下载，存进对象存储的东西对不上
+    // 「读小说」那类调用方要的形状。
+    it('leaves videos and images to the other track', () => {
+        expect(
+            larkFileKeys(
+                parts(
+                    { type: 'image', value: 'img_1' },
+                    { type: 'media', value: 'f_v', meta: { image_key: 'i_v' } },
+                    { type: 'audio', value: 'f_a', meta: {} },
+                    { type: 'sticker', value: 'stk' },
+                ),
+            ),
+        ).toEqual([]);
+    });
+
+    it('is empty when the message carries no file at all', () => {
+        expect(larkFileKeys(parts(text('hi')))).toEqual([]);
     });
 });
