@@ -46,6 +46,14 @@ export interface LarkInboundPorts {
     record: (payload: unknown) => Promise<void>;
     /** 解析完成后的去处。 */
     onMessage: (reading: LarkMessageReading, event: LarkEvent) => Promise<void>;
+    /**
+     * 卡片上的按钮被按下。
+     *
+     * **不过解析层**：卡片回调根本不是一条消息（没有 message_id、没有正文、不进
+     * common_message），它带回来的只有按钮里那份 value。所以这里交出去的是原始报文，
+     * 由认领它的人自己解释（见 photo/callback.ts）。
+     */
+    onCardAction: (payload: unknown) => Promise<void>;
 }
 
 export interface LarkInbound {
@@ -89,6 +97,8 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
             }
             await ports.onMessage(reading, event);
         },
+        // 第二条入站路径，与消息那条完全不搭界：不过解析、不过规则、不看 @。
+        'card.action.trigger': (event) => ports.onCardAction(event.payload),
     };
 
     const deliver = (event: LarkEvent) => deliverLarkEvent(event, handlers);

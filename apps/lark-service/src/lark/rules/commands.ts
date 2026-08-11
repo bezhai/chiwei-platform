@@ -42,6 +42,8 @@ import type { DataSource } from 'typeorm';
 import type { RuleConfig, RuleMessage } from '@inner/shared/rules';
 
 import type { LarkOutboundApi } from '../outbound/lark-api';
+import type { LarkReadyPhotos } from '../photo/ready';
+import { sendPhotoCommand } from '../photo/send-photo';
 import type { LarkStore } from '../projection/tables';
 import type { LarkCommandContext } from './command-context';
 
@@ -88,6 +90,14 @@ export interface LarkCommandDeps {
     database: DataSource;
     /** Redis。 */
     cache: LarkCommandCache;
+    /**
+     * 取一批**飞书发得出去**的图（每张都保证有 image_key）。
+     *
+     * 背后是另一个 Mongo 实例 + 对象存储 + 一次 tool-service 缩图 + 一次飞书上传，
+     * 全部收在这一个函数后面 —— 指令层不该认识其中任何一样。卡片回调和定时任务用的
+     * 是同一个（它们跟指令同进程），所以口径只有一份。
+     */
+    photos: LarkReadyPhotos;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +159,7 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '开启复读', pendingIn: 'D3' },
     { name: '关闭复读', pendingIn: 'D3' },
     { name: '指令处理', pendingIn: 'D4' },
-    { name: '发送图片', pendingIn: 'D2' },
+    { name: '发送图片', command: sendPhotoCommand },
     { name: 'Meme', pendingIn: 'D4' },
 ];
 

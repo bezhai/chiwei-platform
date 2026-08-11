@@ -27,6 +27,10 @@ import {
 } from './lark/ingress/lane-handoff';
 import { holdsLarkWebSockets, type LarkWebSockets } from './lark/ingress/websocket';
 import { loadLarkPersonaNames } from './lark/persona-names';
+import { handleLarkCardAction } from './lark/photo/callback';
+import { localPixivMirror } from './lark/photo/pixiv-mirror';
+import { readyPhotos } from './lark/photo/ready';
+import { toolServiceResize } from './lark/photo/resize';
 import {
     projectLarkInbound,
     type LarkInboundDeps,
@@ -92,18 +96,25 @@ function realProjection(store: LarkStore): LarkInboundDeps {
 }
 
 /**
- * 入站附件缓存的真实装配：一个打 tool-service 的客户端，加两件本 pod 的事实。
+ * 打下游服务的那个路由器。**整个进程一个**：它自带 30s 的注册表轮询，每处各建一个
+ * 就是每处多一个永不停的定时器。
  *
- * 客户端**建一次**：LaneRouter 自带 30s 的注册表轮询，每条消息新建一个就是每条消息多
- * 一个永不停的定时器。走 laneRouter 而不是裸 axios，是为了拿到它按请求上下文注入
- * `x-ctx-lane` 的那一层 —— 泳道信封进来的消息靠它路由到本泳道的 tool-service。
+ * 走 LaneRouter 而不是裸 fetch/axios，是为了拿到它按请求上下文注入 `x-ctx-lane` 的
+ * 那一层 —— 泳道信封进来的消息靠它路由到本泳道的下游。
  */
-function realAttachments(): LarkAttachmentCache {
-    const toolService = new LaneRouter(
+let router: LaneRouter | undefined;
+function laneRouter(): LaneRouter {
+    router ??= new LaneRouter(
         process.env.REGISTRY_URL || 'http://lite-registry:8080',
         30_000,
         register,
-    ).createClient('tool-service');
+    );
+    return router;
+}
+
+/** 入站附件缓存的真实装配：一个打 tool-service 的客户端，加两件本 pod 的事实。 */
+function realAttachments(): LarkAttachmentCache {
+    const toolService = laneRouter().createClient('tool-service');
 
     return assembleLarkAttachments({
         post: (path, body, headers) => toolService.post(path, body, { headers }),
@@ -126,12 +137,13 @@ function realAttachments(): LarkAttachmentCache {
  */
 function realCommandDeps(store: LarkStore): LarkCommandDeps {
     const bots = botDirectory.getAllBotConfigs().filter((bot) => bot.channel === LARK_CHANNEL);
-    return {
-        api: createSdkLarkApi(
-            larkClientPool(
-                bots.map((bot) => ({ botName: bot.bot_name, credentials: larkCredentials(bot) })),
-            ),
+    const api = createSdkLarkApi(
+        larkClientPool(
+            bots.map((bot) => ({ botName: bot.bot_name, credentials: larkCredentials(bot) })),
         ),
+    );
+    return {
+        api,
         store,
         database: larkDataSource(),
         cache: {
@@ -140,6 +152,15 @@ function realCommandDeps(store: LarkStore): LarkCommandDeps {
                 await getRedisClient().setWithExpire(key, value, seconds);
             },
         },
+        // 图库（另一个 Mongo + MinIO）与缩图（tool-service）都在这后面。三个入口 ——
+        // 指令、卡片回调、定时任务 —— 共用这一份，所以口径只有一处。
+        photos: readyPhotos({
+            library: localPixivMirror(),
+            resize: toolServiceResize((path, init) =>
+                laneRouter().fetch('tool-service', path, init),
+            ),
+            upload: (bytes) => api.uploadImage(bytes),
+        }),
     };
 }
 
@@ -149,11 +170,11 @@ function realCommandDeps(store: LarkStore): LarkCommandDeps {
  *
  * 去重标记与投影锁共用同一份 Redis 实现：比对持有者再删的那段 Lua 全仓只写一次。
  */
-function realRules(store: LarkStore): LarkRulesDeps {
+function realRules(commands: LarkCommandDeps, store: LarkStore): LarkRulesDeps {
     return assembleLarkRules({
-        // 今天十个槽位全是空的，所以序列里只有人格聊天一条 —— 与拆分前一致（那些指令
-        // 此刻仍然由 channel-server 在跑）。填一个槽位不必改这一行。
-        commands: larkCommands(realCommandDeps(store)),
+        // 清单里填好的那些指令，依赖绑上。空槽位不产出规则，所以还欠着的那几批不影响
+        // 这一行（见 lark/rules/commands.ts）。
+        commands: larkCommands(commands),
         bots: botDirectory,
         store,
         marker: redisMessageLockStore(getRedisClient),
@@ -166,17 +187,16 @@ function realRules(store: LarkStore): LarkRulesDeps {
  * 飞书入站的真实装配。必须在 bootLarkService 之后调用：人设名要查库，bot 目录也
  * 得先加载完。
  */
-async function realInbound(): Promise<LarkInbound> {
+async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise<LarkInbound> {
     const personaIds = botDirectory
         .getAllBotConfigs()
         .map((bot) => bot.persona_id)
         .filter((id): id is string => Boolean(id));
     const personaName = await loadLarkPersonaNames(larkDataSource(), personaIds);
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
-    const store = postgresLarkTables(larkDataSource());
     const projection = realProjection(store);
     const attachments = realAttachments();
-    const rules = realRules(store);
+    const rules = realRules(commands, store);
 
     return createLarkInbound({
         roster: botDirectory,
@@ -194,6 +214,9 @@ async function realInbound(): Promise<LarkInbound> {
                 reading,
                 event,
             ),
+        // 卡片回调复用指令那份依赖：它要的飞书客户端、会话行、取图口径都在里面，
+        // 而且必须是**同一个**客户端池（拆两份就是每个 bot 两套 tenant token）。
+        onCardAction: (payload) => handleLarkCardAction(commands, payload),
     });
 }
 
@@ -230,7 +253,10 @@ async function main(): Promise<void> {
     const backends = realBackends();
 
     await bootLarkService(backends);
-    const inbound = await realInbound();
+    // 指令那份长命依赖建一次，规则段 / 卡片回调 / 定时任务三处共用（见 realCommandDeps）。
+    const store = postgresLarkTables(larkDataSource());
+    const commands = realCommandDeps(store);
+    const inbound = await realInbound(commands, store);
 
     // 入口二：长连。主动，而且**会跟别的进程抢** —— 飞书对同一 app_id 的多个长连是
     // 随机投递。gate 保证只有 prod 部署并显式打开时才连（见 websocket.ts）。

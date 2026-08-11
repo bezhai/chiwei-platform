@@ -200,6 +200,34 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
         expect(LARK_COMMANDS.map((slot) => slot.name)).toEqual(upstreamCommandNames());
     });
 
+    // 槽位填没填**在行为上看不出来**：空槽位不产出规则，人格聊天照样兜底，于是"把一条
+    // 已经搬好的指令悄悄改回 pendingIn"能让整套测试全绿，线上表现只是那条指令不再响应
+    // （而且人设 bot 本来就跳过 utility，连"没反应"都不新鲜）。所以填充状态本身要有断言。
+    // 每批搬完更新这张表。
+    it('账本的填充状态：哪些搬完了、哪些还欠着', () => {
+        expect(
+            LARK_COMMANDS.map((slot) => [slot.name, 'command' in slot ? 'migrated' : slot.pendingIn]),
+        ).toEqual([
+            ['复读功能', 'D3'],
+            ['发送余额信息', 'D4'],
+            ['给用户发送帮助信息', 'D4'],
+            ['撤回消息', 'D4'],
+            ['生成水群历史卡片', 'D4'],
+            ['开启复读', 'D3'],
+            ['关闭复读', 'D3'],
+            ['指令处理', 'D4'],
+            ['发送图片', 'migrated'],
+            ['Meme', 'D4'],
+        ]);
+    });
+
+    // 上一条只看账本，这一条看真的拼出来了什么 —— 槽位填了个别的东西同样是静默的。
+    it('真的拼出来的就是账本上那几条，先后也一样', () => {
+        expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
+            '发送图片',
+        ]);
+    });
+
     it('斜杠指令组：要迁的加上拍板删掉的，正好是对面那一组子指令', () => {
         expect(
             [...LARK_SLASH_COMMANDS.map((slot) => slot.key), ...DROPPED_SLASH_COMMANDS].sort(),

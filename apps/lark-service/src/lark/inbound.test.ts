@@ -79,8 +79,14 @@ interface Seen {
     botName: string;
 }
 
+interface Pressed {
+    payload: unknown;
+    botName: string;
+}
+
 function build(bots: BotConfig[] = [bot()]) {
     const seen: Seen[] = [];
+    const pressed: Pressed[] = [];
     const recorded: unknown[] = [];
     const ports: LarkInboundPorts = {
         roster: { getAllBotConfigs: () => bots },
@@ -94,8 +100,11 @@ function build(bots: BotConfig[] = [bot()]) {
                 botName: context.getBotName(),
             });
         },
+        onCardAction: async (payload) => {
+            pressed.push({ payload, botName: context.getBotName() });
+        },
     };
-    return { inbound: createLarkInbound(ports), seen, recorded };
+    return { inbound: createLarkInbound(ports), seen, pressed, recorded };
 }
 
 // 同一条飞书消息，三种信封各包一遍。
@@ -132,6 +141,28 @@ function webhookBody() {
         },
         event: LARK_MESSAGE,
     };
+}
+
+/** 一次卡片交互。走的是 /webhook/{bot}/card 那条路，报文里没有 event_type。 */
+const CARD_ACTION = {
+    action: { tag: 'button', value: { type: 'update-photo-card', tags: ['刻晴'] } },
+    context: { open_message_id: 'om_card', open_chat_id: 'oc_1' },
+    operator: { open_id: 'ou_presser', union_id: 'on_presser', user_id: 'u1' },
+    token: 'card-token',
+};
+
+async function throughCardWebhook() {
+    const built = build();
+    const app = new Hono();
+    built.inbound.registerWebhooks(app);
+    const request = asLarkSends(CARD_ACTION);
+    const res = await app.request('/webhook/chiwei/card', {
+        method: 'POST',
+        headers: request.headers,
+        body: request.body,
+    });
+    await Bun.sleep(2);
+    return { ...built, status: res.status };
 }
 
 function laneEnvelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnvelope {
@@ -329,8 +360,33 @@ describe('createLarkInbound', () => {
         expect(opened).toEqual([]);
     });
 
-    // 群成员变化、卡片回调这些还没人认领。ACK 掉就是静默丢失，所以队列那条路要
-    // 明着拒绝。
+    // 卡片回调是**第二条入站路径**：它不过解析层、不过规则引擎，报文里也没有
+    // event_type（类型由 /webhook/{bot}/card 这个入口本身决定）。它一度整条断着 ——
+    // 路由注册了、事件槽也标了类型，处理表里却没有它，于是回调进来只打一条
+    // "nobody handles" 的 warn 就没了。
+    it('hands a card action to whoever claims card actions', async () => {
+        const { pressed, seen, status } = await throughCardWebhook();
+
+        expect(status).toBe(200);
+        expect(seen).toEqual([]);
+        expect(pressed).toHaveLength(1);
+        expect(pressed[0]!.payload).toMatchObject({
+            token: 'card-token',
+            action: { value: { type: 'update-photo-card', tags: ['刻晴'] } },
+        });
+    });
+
+    // 卡片回调也要知道是替哪个 bot 接的：飞书客户端按它选池子，选错就是另一个人设
+    // 去更新这张卡片。
+    it('names the handling bot on the card route too', async () => {
+        expect((await throughCardWebhook()).pressed[0]!.botName).toBe('chiwei');
+    });
+
+    it('records the raw card payload for audit, same as any other event', async () => {
+        expect((await throughCardWebhook()).recorded).toHaveLength(1);
+    });
+
+    // 群成员变化这些还没人认领。ACK 掉就是静默丢失，所以队列那条路要明着拒绝。
     it('refuses to acknowledge an event type nobody claims yet', async () => {
         const { seen, acked, nacked } = await throughLane(
             laneEnvelope({ event_type: 'im.chat.updated_v1', params: { chat_id: 'oc_1' } }),
