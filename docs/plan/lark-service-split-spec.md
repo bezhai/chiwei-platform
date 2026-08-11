@@ -110,7 +110,9 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 | `packages/lark-utils` | 仅 media-sync-worker 使用 | 不变；lark-service 可复用而非复制 SDK 封装 | 无 |
 | `core/boundary.test.ts` | BASELINE 已空 | 守卫范围跟随新边界更新，且需变异验证 | 改 |
 
-**未被现有守卫覆盖、本次必须一并处理的飞书代码**：`core/models/message.ts` + `message-metadata.ts`（417）、`types/lark.ts`（241）、`types/mongo.ts` 的 `LarkMessageMetaInfo`、`types/content-types.ts` + `post-node-types.ts`（128）、`types/meme.ts`、`types/image-post.ts` + `types/pixiv.ts`、`types/send-message.ts`、Mongo `lark_event` 集合与 `dal/mongo/client.ts` 的 `insertLarkEvent`。
+**未被现有守卫覆盖、本次必须一并处理的飞书代码**：`core/models/message.ts` + `message-metadata.ts`（417）、`types/lark.ts`（241）、`types/mongo.ts` 的 `LarkMessageMetaInfo`、`types/content-types.ts` + `post-node-types.ts`（128）、`types/meme.ts`、`types/pixiv.ts`、`types/send-message.ts`、Mongo `lark_event` 集合与 `dal/mongo/client.ts` 的 `insertLarkEvent`。
+
+`types/image-post.ts` 曾列在这里，**但它是死代码**：三个导出类型全仓零引用。emoji 服务的 `getAllEmojis` / `getEmojiByKey` 同理，只有定义和自己的测试、没有生产调用方。这两处 Task D 不迁，Task F 直接删。
 
 ## common_* 写入矩阵
 
