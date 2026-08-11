@@ -66,7 +66,19 @@ export type LarkDeliveryStage = 'db_query' | 'channel_send' | 'db_write' | 'tota
  * 从错的人设发出去。所以它必须是一个真正的作用域，而不是一次赋值。
  */
 export type LarkSpeakAs = (
-    who: { botName: string; lane?: string },
+    who: {
+        botName: string;
+        lane?: string;
+        /**
+         * 这一段处理属于哪条 trace。**缺省表示铸一条新的。**
+         *
+         * 发消息这条链故意不传（照搬拆分前 chat-response-worker 的行为，见
+         * bot-context.ts）；撤回那条链传入站 header 上的那个，因为它自己还会往外发
+         * 一条延时重投，重投的 trace 取自上下文 —— 不接上就是每次重试换一条 trace，
+         * 而重试路径恰恰是最需要追的。
+         */
+        traceId?: string;
+    },
     say: () => Promise<void>,
 ) => Promise<void>;
 
