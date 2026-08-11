@@ -208,13 +208,23 @@ K8s 默认的滚动更新是先起新 Pod、Ready 之后才停旧 Pod。而飞�
 
 与 channel-server 逐字一致，登记在案。
 
+**十、共享 MQ 客户端对同一队列重复 `consume` 会留下一个再也摘不掉的消费者。**
+
+注册消费者时无条件覆写记下的 consumer tag，而排空只 cancel 当前那个 tag。于是第二次订阅同一队列会在 broker 上留下两个消费者，第一个的 tag 永久丢失——它能活过之后所有的排空和整个交接窗口，而两个消费者分享同一个队列正是决策八要避免的东西。
+
+订阅侧现在用「先排空再订阅」在应用层绕开它（订阅抛错通常意味着连接已死，客户端重连会把它恢复出来，此时直接重试就正好制造幽灵）。**端口级的修法是注册前先 cancel 掉还活着的 tag，本次不做**：应用层已经收敛且有测试钉住，而改共享客户端的 `consume` 语义会波及所有消费者，在即将依赖它做切流的分支上不值得。
+
+顺带两条同源的：channel-server 启动时对旧队列的那次订阅不在任何账本里，抛错是进程退出（不静默），但 reconcile 也永远不会补订它；四态簿记规则现在 lark-service 和 channel-server 各有一份，**不抽共享包**——channel-server 那份随双订阅一起在 Task F 删掉，重复是有期限的。
+
 **四、`/config` 指令写的灰度配置，agent-service 读不到——这条链路目前是断的。**
 
 `/config` 写进 `lark_base_chat_info.gray_config`（`plugins/lark/commands/command-handler.ts:176-182`），而 agent-service 的 `find_gray_config` 读的是 `common_conversation.attachment_policy["gray_config"]`（`app/data/queries/messages.py:281-299`）。全仓 grep 确认：TS 侧所有 `gray_config` 命中都落在 `lark_base_chat_info` 那一列上，没有任何一处往 `attachment_policy` 里写它；Python 侧对 `attachment_policy` 只有一处列定义和两处 select，只读不写。
 
 雪上加霜的是飞书投影**每条消息**都整体覆写 `attachment_policy`，所以即便有谁手工往里塞过 `gray_config`，下一条消息就会把它抹掉。
 
-这与拆分无关，是既有状态。写在这里是因为 Task D 要迁 `/config` 指令，照搬会把断链原样搬过去。迁之前需要 bezhai 确认这个功能是否还要——要就得决定灰度配置的权威位置在哪（`lark_base_chat_info` 是飞书私有表，而读它的是渠道无关的 agent-service，所以大概率该往 common 侧走），不要就连指令一起删掉，别搬一个不通的东西过去。
+这与拆分无关，是既有状态。写在这里是因为 Task D 本来要迁 `/config` 指令，照搬会把断链原样搬过去。
+
+**bezhai 已拍板（2026-08-11）：连指令一起删掉，不迁。** 它今天写进去的值没有任何读取方，删掉唯一可观测的变化是管理员敲它不再收到"已设置"的回复。按群灰度这个能力其实另有一个能用的实现——`permission_config.is_canary`，入站链路真的在读它。所以 D0 的投影读端口**不暴露 `gray_config`**，D4 的斜杠指令组少一条。`lark_base_chat_info.gray_config` 这一列本身留着不动（删列要走 schema 变更，且与拆分无关）。
 
 ## Data & deployment impact
 
@@ -274,7 +284,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **卡片回调现在会被静默丢弃。** lark-service 的 `/webhook/{bot}/card` 路由已经注册、事件槽也会把它标成 `card.action.trigger`，但入站的事件处理表里只有消息接收一项，于是回调进来只打一条"没人处理这个事件类型"的 warn 就扔掉。三种卡片交互（更新图卡、拉图片详情、更新日报卡）全在这条路上，且它们不经过规则引擎，是独立于指令系统的第二条入站路径。
 - **定时任务是三个不是两个**（发图日报、次日新图、emoji 同步），并且**归 `lark-service` 进程**，不归 `lark-outbound`。决策十那张进程表没写 cron 归谁：拆分前它跟 HTTP 服务同进程，照搬；更重要的是它必须待在单副本的那个进程里，否则往写死的真实飞书群发日报会发两遍。lane gate 沿用现有的"非 prod 部署不启动"。
 
-**Task D 的切分：一条前置 + 四条并行。** 直接四路并行会让四条 task 同时改飞书 API 端口、投影读端口、规则序列、配置清单和依赖清单这五处，所以先落 **D0（装配缝）**：把飞书出站 API 端口扩到指令需要的全部方法、把投影读端口扩到 `is_admin` / `permission_config` / `gray_config` / 群成员 / 用户组绑定、把规则序列改成从一份指令清单拼接（顺序契约不变：utility 在前、人格 catch-all 在后）、补 cron 注册器与 lane gate、补齐依赖与配置清单。D0 落地后，**D1 附件管线 / D2 发图与卡片回调与图片日报 / D3 emoji 与复读 / D4 其余指令**四条严格不相交，可以全并行——各自只往指令清单填一个槽、往组装根递一个依赖。
+**Task D 的切分：一条前置 + 四条并行。** 直接四路并行会让四条 task 同时改飞书 API 端口、投影读端口、规则序列、配置清单和依赖清单这五处，所以先落 **D0（装配缝）**：把飞书出站 API 端口扩到指令需要的全部方法、把投影读端口扩到 `is_admin` / `permission_config` / 群成员 / 用户组绑定（**不含 `gray_config`**，见已知缺陷四）、把规则序列改成从一份指令清单拼接（顺序契约不变：utility 在前、人格 catch-all 在后）、补 cron 注册器与 lane gate、补齐依赖与配置清单。D0 落地后，**D1 附件管线 / D2 发图与卡片回调与图片日报 / D3 emoji 与复读 / D4 其余指令**四条严格不相交，可以全并行——各自只往指令清单填一个槽、往组装根递一个依赖。
 
 三处不建议拆开：图片卡片的构建被指令、卡片回调、定时任务三个入口共用，拆开必然三方共改同一处；`lark_emoji` 的唯一读端就是复读功能，写端（同步任务）和读端放一起才有可测的闭环；发图与卡片回调共用同一套上传与渲染。
 
