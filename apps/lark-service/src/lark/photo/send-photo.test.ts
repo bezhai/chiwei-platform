@@ -249,6 +249,31 @@ describe('人数闸与两个开关', () => {
         expect(it_.said.text).toHaveLength(allowed ? 0 : 1);
     });
 
+    // 话题群（chat_type='topic'）也是群，人数闸照样管它。
+    //
+    // 上游是拿 `lark_base_chat_info.chat_mode === 'group'` 决定要不要查群资料的，看着
+    // 像是把话题群排除在外 —— 但那一列由投影 upsert，**每收到一条消息就重写成
+    // 'group'**（channel-server 的 common-projector.ts 那次 upsert 冲突键是 chat_id）。
+    // 线上 466 个 p2p / 437 个 group 之外只剩 2 行 'topic'，都是没有消息流过的死群。
+    // 也就是说：任何真的有人敲得出「发图」的话题群，上游读到的都是 'group'，人数闸生效。
+    // 按事件的 chat_type 去收窄会让这些群收到"人有点多"，这是功能退化不是等价迁移。
+    it('话题群同样吃人数闸，不是只看白名单', async () => {
+        const it_ = rig({ chatType: 'topic', groupChat: A_GROUP(5), permission: {} });
+
+        await it_.run();
+
+        expect(it_.said.text).toEqual([]);
+        expect(it_.said.cards).toHaveLength(1);
+    });
+
+    it('话题群人多了照样拦', async () => {
+        const it_ = rig({ chatType: 'topic', groupChat: A_GROUP(21), permission: {} });
+
+        await it_.run();
+
+        expect(it_.said.cards).toEqual([]);
+    });
+
     it('拦住的时候说的是那一句', async () => {
         const it_ = rig({ groupChat: A_GROUP(21) });
 
