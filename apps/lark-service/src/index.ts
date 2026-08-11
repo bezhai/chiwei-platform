@@ -37,6 +37,11 @@ import {
     type LarkRulesDeps,
 } from './lark/rules/inbound-rules';
 import { larkDataSource } from './ormconfig';
+import {
+    nodeCronScheduler,
+    startLarkSchedules,
+    type LarkSchedules,
+} from './schedule';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
 
@@ -131,11 +136,15 @@ async function realInbound(): Promise<LarkInbound> {
 /** 不持有长连的部署（webhook-only、泳道部署）没有连接要报，就绪判据里 expected=0。 */
 const NO_WEBSOCKETS = { expected: 0, connected: 0, bots: [] };
 
-function handleSignals(backends: LarkBackends, closeWebSockets: () => void): void {
+/**
+ * `quiesce` 停掉本进程自己产生工作的那几样（长连、定时任务），**在关后端连接之前** ——
+ * 反过来的话，正好在这一刻触发的定时任务会拿着一个正在关的 DB 连接去写库。
+ */
+function handleSignals(backends: LarkBackends, quiesce: () => void): void {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
         process.on(signal, async () => {
             console.info(`[lark-service] ${signal} received, shutting down`);
-            closeWebSockets();
+            quiesce();
             await shutdownLarkService(backends);
             process.exit(0);
         });
@@ -169,7 +178,11 @@ async function main(): Promise<void> {
     if (holdsLarkWebSockets()) {
         sockets = await inbound.openWebSockets();
     }
-    handleSignals(backends, () => sockets?.close());
+    let schedules: LarkSchedules | undefined;
+    handleSignals(backends, () => {
+        sockets?.close();
+        schedules?.stop();
+    });
 
     // 入口一：webhook。被动 —— 路由注册上了不代表有流量，实际指向哪个服务由
     // api-gateway 的规则决定。
@@ -187,6 +200,11 @@ async function main(): Promise<void> {
     if (lane) {
         await inbound.consumeLane(lane);
     }
+
+    // 定时任务归这个进程，不归 lark-outbound：出站可以多副本，每个副本各起一份 cron
+    // 就是往那个写死的飞书群发 N 遍日报（见 schedule.ts）。三个槽位现在都还欠着，
+    // 所以这里挂不上任何东西 —— D2 / D3 各自往 runs 里加一个同名的本体。
+    schedules = startLarkSchedules({ runs: {}, schedule: nodeCronScheduler });
 
     const bots = botDirectory.getAllBotConfigs();
     console.info(
