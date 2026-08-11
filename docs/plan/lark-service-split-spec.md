@@ -268,8 +268,17 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **Goal**: 10 条飞书指令、photo/meme/callback、**入站附件管线**、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
 - **入站附件管线不能漏**：`enqueueLarkImagePipeline` / `enqueueLarkFilePipeline`（`plugins/lark/image-pipeline.ts`、`file-pipeline.ts`）把飞书的 image_key / file_key 交给 tool-service 下载存进 TOS。这是入站链路的一部分、不是指令，最初的任务划分里两边都没写到它。漏掉的后果是切流之后附件静默不再入库，`read_book` 之类依赖 TOS 里 `files/<file_key>` 的能力会稳定读不到东西——而且入站本身照常工作，不会有任何错误信号。搬的时候注意它的 gate 是 `allowDownloadResource()`（群没开"所有人可下载"就整体跳过），在 lark-service 侧对应 `attachment_policy.download_allowed`；两个管线都是 fire-and-forget，失败只记日志、不阻塞入站。
 - **`repeatMessage` 的并发前提变了**：拆分前整个规则段跑在 om_id 锁里，所以复读功能那套 Redis get-modify-set 天然是同一条消息串行的。lark-service 的 om_id 锁只包投影（见 Task B 的行为差异），规则段在锁外，多个 bot 会并发跑到它。搬之前要么让它自身幂等，要么自己取一把锁——`make_reply` 那把去重锁覆盖不到它（那把锁只在有待发 chat.request 意图时才取）。
-- **Deliverable**: 上述业务在 lark-service 下的实现（按决策六，先有行为断言测试再实现）；`lark_emoji` 仓储随之迁移。
-- **Verification**: 指令与服务测试在新服务下全绿；定时任务的 lane gate 行为保持（非 prod 部署不启动）；附件管线在"群允许下载"和"群不允许"两种情况下的行为各有测试；与拆分前的行为差异逐项列出并解释。
+- **`user_group_binding` 也要一起搬，它是第八张飞书独占表。** 上面"飞书独占的七张表"那句少数了一张：`/bind`、`/unbind` 和退群自动拉回都读写它，全仓使用点没有一处不是飞书，而 lark-service 现在的实体清单里没有它。漏掉的后果是这三个功能切流后直接失效。
+- **卡片回调现在会被静默丢弃。** lark-service 的 `/webhook/{bot}/card` 路由已经注册、事件槽也会把它标成 `card.action.trigger`，但入站的事件处理表里只有消息接收一项，于是回调进来只打一条"没人处理这个事件类型"的 warn 就扔掉。三种卡片交互（更新图卡、拉图片详情、更新日报卡）全在这条路上，且它们不经过规则引擎，是独立于指令系统的第二条入站路径。
+- **定时任务是三个不是两个**（发图日报、次日新图、emoji 同步），并且**归 `lark-service` 进程**，不归 `lark-outbound`。决策十那张进程表没写 cron 归谁：拆分前它跟 HTTP 服务同进程，照搬；更重要的是它必须待在单副本的那个进程里，否则往写死的真实飞书群发日报会发两遍。lane gate 沿用现有的"非 prod 部署不启动"。
+
+**Task D 的切分：一条前置 + 四条并行。** 直接四路并行会让四条 task 同时改飞书 API 端口、投影读端口、规则序列、配置清单和依赖清单这五处，所以先落 **D0（装配缝）**：把飞书出站 API 端口扩到指令需要的全部方法、把投影读端口扩到 `is_admin` / `permission_config` / `gray_config` / 群成员 / 用户组绑定、把规则序列改成从一份指令清单拼接（顺序契约不变：utility 在前、人格 catch-all 在后）、补 cron 注册器与 lane gate、补齐依赖与配置清单。D0 落地后，**D1 附件管线 / D2 发图与卡片回调与图片日报 / D3 emoji 与复读 / D4 其余指令**四条严格不相交，可以全并行——各自只往指令清单填一个槽、往组装根递一个依赖。
+
+三处不建议拆开：图片卡片的构建被指令、卡片回调、定时任务三个入口共用，拆开必然三方共改同一处；`lark_emoji` 的唯一读端就是复读功能，写端（同步任务）和读端放一起才有可测的闭环；发图与卡片回调共用同一套上传与渲染。
+
+- **Deliverable**: 上述业务在 lark-service 下的实现（按决策六，先有行为断言测试再实现）；`lark_emoji` 与 `user_group_binding` 两个仓储随之迁移；卡片回调接进入站事件处理表。
+- **Verification**: 指令与服务测试在新服务下全绿；定时任务的 lane gate 行为保持（非 prod 部署不启动）；附件管线在"群允许下载"和"群不允许"两种情况下的行为各有测试；卡片回调三种 action 各有测试且不再落到"没人处理"分支；与拆分前的行为差异逐项列出并解释。
+- **注意大部分待迁代码没有测试**：指令、meme、卡片回调、图片卡片构建、图片日报这些现在是零覆盖，决策六要求的"先有断言现有行为的测试"在这批基本等于从零写，不是补几条。
 
 **Task E — 泳道验证与生产切换**
 - **Goal**: 证明拆分后飞书链路端到端行为与拆分前一致，并在不丢消息、不双跑的前提下完成生产切换。**此阶段 channel-server 的飞书代码仍在，回滚是配置级的。**
