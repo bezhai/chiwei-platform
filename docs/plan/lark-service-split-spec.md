@@ -86,11 +86,11 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 
 出站只拆一个进程而不是照搬 channel-server 的两个：recall 的流量极低，且与发消息同属"把赤尾的动作送到飞书"这一件事，没有分开扩缩容的理由。真需要了再拆，那时加一个编译目标就行。
 
-**但这张表现在一格都落不了地，Task E 之前必须先解决。** `Makefile` 的每次 release 都硬编码 `"replicas":1`（sibling 也一样），所以手工扩容会被下一次发布重置；`paas-engine` 的 deployer 里根本没有部署策略字段，`Strategy` / `RollingUpdate` / `Recreate` 全仓零命中，用的是 K8s 默认的滚动更新。于是想要的两件事都拿不到：`lark-service` 拿不到 `Recreate`，`lark-outbound` 拿不到多副本。
+**但这张表现在一格都落不了地。** `Makefile` 的每次 release 都硬编码 `"replicas":1`（sibling 也一样），所以手工扩容会被下一次发布重置；`paas-engine` 的 deployer 里根本没有部署策略字段，`Strategy` / `RollingUpdate` / `Recreate` 全仓零命中，用的是 K8s 默认的滚动更新。于是想要的两件事都拿不到：`lark-service` 拿不到 `Recreate`，`lark-outbound` 拿不到多副本。
 
-这不只是新服务的问题——channel-server 现在就持着飞书长连，滚动更新时"新旧两个 Pod 同时连着"的窗口**已经存在于线上**，只是没人把它写下来过。所以有两条路，**需要 bezhai 拍板**：扩 paas-engine 让 Release 能表达副本数与发布策略（独立工作量，但顺带修掉线上既有的双长连窗口），或者接受现状、把 `lark-outbound` 也按单副本运行并把双长连窗口登记为已知缺陷。
+这不只是新服务的问题——channel-server 现在就持着飞书长连，滚动更新时"新旧两个 Pod 同时连着"的窗口**已经存在于线上**，只是没人把它写下来过。
 
-在拍板之前，**`lark-outbound` 按单副本对待**。多副本会放大下面"已知缺陷"里那条跨段终态不单调的问题，而单副本至少和 channel-server 现状一致。
+**bezhai 已拍板（2026-08-11）：短期接受，只登记不修。** 拆分不会让这个窗口变差（新服务与 channel-server 现状同形），而改 paas-engine 是动所有服务共用的部署路径，风险大于此刻解决它的收益。于是这张表降级为**目标形态**，不是 Task E 的前置：`lark-service` 与 `lark-outbound` 都按单副本、默认滚动更新部署。单副本同时避开了下面"已知缺陷"里那条跨段终态不单调的问题被多副本放大。等 paas-engine 补上副本数与发布策略字段之后再回来落这张表。
 
 ## Caller coverage
 
@@ -184,6 +184,14 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 
 与拆分前逐字一致，登记在案。注意它是"两条 insert 同生共死"这个保证之外的东西：事务保证的是两条一起成功或一起回滚，保证不了第二条被 `DO NOTHING` 静默跳过。
 
+**七、每次发布持长连的服务，都有一段新旧两个 Pod 同时连着飞书的窗口。**
+
+K8s 默认的滚动更新是先起新 Pod、Ready 之后才停旧 Pod。而飞书对同 app_id 的多客户端是随机投递不是广播（决策七），所以那几十秒里事件被随机分给新旧两个进程——旧进程收到的那部分处理完就随 Pod 一起没了，两边都不报错，是静默丢消息。
+
+消除它需要 `strategy.type: Recreate`，而 `paas-engine` 的 deployer 没有部署策略字段（`Strategy` / `RollingUpdate` / `Recreate` 全仓零命中），`Makefile` 的每次 release 又硬编码 `"replicas":1`，两个旋钮都不存在（决策十）。
+
+**这是 channel-server 现在就有的线上缺陷，不是拆分引入的**，拆分后 lark-service 与它同形，不会更差。bezhai 2026-08-11 拍板短期接受，只登记不修：改 paas-engine 会动到所有服务共用的部署路径，风险大于此刻的收益。等拆分收尾后单独立项。
+
 **四、`/config` 指令写的灰度配置，agent-service 读不到——这条链路目前是断的。**
 
 `/config` 写进 `lark_base_chat_info.gray_config`（`plugins/lark/commands/command-handler.ts:176-182`），而 agent-service 的 `find_gray_config` 读的是 `common_conversation.attachment_policy["gray_config"]`（`app/data/queries/messages.py:281-299`）。全仓 grep 确认：TS 侧所有 `gray_config` 命中都落在 `lark_base_chat_info` 那一列上，没有任何一处往 `attachment_policy` 里写它；Python 侧对 `attachment_policy` 只有一处列定义和两处 select，只读不写。
@@ -254,7 +262,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **前置铁律**：在 `inbound_lane` 完成按 channel 分区（见决策八）之前，**不得把 lark-service 部署到任何泳道**。它和该泳道的 channel-server 会竞争消费同一个队列：飞书信封被谁抢到全看运气（而 channel-server 此时仍有 lark runtime，抢到就真处理），QQ 信封被 lark-service 抢到则会一直 requeue 弹回来，两个服务互相推诿。切流期间还须确认每个队列只有一个订阅者。
 - **切流判据是 `/api/ready` 返回 200，不是 `/api/health`**：飞书 SDK 的 `start()` 只是异步发起重连、**不等待首次连接成功**，所以"进程起来了"完全不代表它在接飞书事件。两个端点职责已分开——`/api/health` 恒 200（liveness，重连抖动不该触发重启），`/api/ready` 在 `connected !== expected` 时返回 503。用错端点会造成"旧的已停、新的没连上"且无告警的静默断流窗口。
 - **必须实际触发一次"首次认领"**：身份与会话的收敛靠两条手写 `ON CONFLICT ... COALESCE`（`lark_user_open_id` / `lark_base_chat_info`）。它们的 SQL 由真 TypeORM 生成并被断言，但开发机连不到库，**从未在真 PG 上执行过**。泳道验证必须包含一个此前没见过的用户或会话，让这两条语句真的跑一次。
-- **Deliverable**: 泳道验证记录（命令 + 实际输出）；四个入口/owner 的切换与回滚执行记录；**PaaS 侧的两个新 App 注册**（`lark-service` 与 `lark-outbound` 共用一个镜像，后者只是换 command；两者的副本与发布策略相反，见决策十）；**镜像与服务映射表登记**——`CLAUDE.md` / `README.md` / `docs/service-topology.md` 里那张表现在完全没有 lark-service，而它是"查日志该用哪个服务名"的单一来源，漏登记的后果是排查时对着错的 Deployment 捞日志。
+- **Deliverable**: 泳道验证记录（命令 + 实际输出）；四个入口/owner 的切换与回滚执行记录；**PaaS 侧的两个新 App 注册**（`lark-service` 与 `lark-outbound` 共用一个镜像，后者只是换 command；两者都按单副本 + PaaS 默认滚动更新部署，理由见决策十与已知缺陷七）；**镜像与服务映射表登记**——`CLAUDE.md` / `README.md` / `docs/service-topology.md` 里那张表现在完全没有 lark-service，而它是"查日志该用哪个服务名"的单一来源，漏登记的后果是排查时对着错的 Deployment 捞日志。
 - **Verification**: 泳道内走通完整飞书往返（收消息、AI 回复、指令、撤回），lane 跨服务不丢；切换过程中确认四个 owner 各自唯一——WS 长连只有一个持有者、webhook 只指向一个服务、`inbound_lane.{lane}` 只有一个订阅者、定时任务只有一个执行者；切换后旧路径零流量、新路径全量，且期间无消息丢失或重复发送的证据。
 
 **Task F — 清理与边界收口**
