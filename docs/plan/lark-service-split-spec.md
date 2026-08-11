@@ -100,7 +100,8 @@ channel-server 现在同时是三样东西：飞书渠道实现、QQ 渠道实�
 |---|---|---|---|
 | `infrastructure/integrations/lark-client.ts:3` | import `@plugins/lark/bot-identity` | 搬入 lark-service，依赖方向理顺 | 重组 |
 | `infrastructure/integrations/lark/basic/message.ts:6`、`basic/group.ts:4`、`utils/mention-utils.ts:8` | 同上，3 处反向边 | 同上 | 重组 |
-| `infrastructure/crontab/services/daily-photo.ts:8,11`、`emoji.ts` | import `@plugins/lark/services/photo/*` | 搬入 lark-service；channel-server crontab 无 service 剩余 | 迁移 |
+| `infrastructure/crontab/services/daily-photo.ts:8,11` | import `@plugins/lark/services/photo/*` | 搬入 lark-service；channel-server crontab 无 service 剩余 | 迁移 |
+| `infrastructure/crontab/services/emoji.ts` | 不碰 `@plugins/lark`，走 `@http/client` 与 `lark_emoji` 仓储 | 同上一起搬 | 迁移 |
 | `workers/chat-response-handler.ts:170`、`recall-worker.ts:178` | `getCapabilities(payload.channel ?? 'lark')` | lark 分支消失；默认值删除，channel 变必填且 fail-closed | 改 |
 | `workers/recall-worker.ts` 整体 | 消费 `recall_{lane}` | 删除（QQ 不实现 recall） | 删 |
 | `plugins/runtime.ts:76` | `getChannelRuntime(env.channel ?? 'lark')` | 默认值删除 | 改 |
@@ -284,7 +285,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 - **卡片回调现在会被静默丢弃。** lark-service 的 `/webhook/{bot}/card` 路由已经注册、事件槽也会把它标成 `card.action.trigger`，但入站的事件处理表里只有消息接收一项，于是回调进来只打一条"没人处理这个事件类型"的 warn 就扔掉。三种卡片交互（更新图卡、拉图片详情、更新日报卡）全在这条路上，且它们不经过规则引擎，是独立于指令系统的第二条入站路径。
 - **定时任务是三个不是两个**（发图日报、次日新图、emoji 同步），并且**归 `lark-service` 进程**，不归 `lark-outbound`。决策十那张进程表没写 cron 归谁：拆分前它跟 HTTP 服务同进程，照搬；更重要的是它必须待在单副本的那个进程里，否则往写死的真实飞书群发日报会发两遍。lane gate 沿用现有的"非 prod 部署不启动"。
 
-**Task D 的切分：一条前置 + 四条并行。** 直接四路并行会让四条 task 同时改飞书 API 端口、投影读端口、规则序列、配置清单和依赖清单这五处，所以先落 **D0（装配缝）**：把飞书出站 API 端口扩到指令需要的全部方法、把投影读端口扩到 `is_admin` / `permission_config` / 群成员 / 用户组绑定（**不含 `gray_config`**，见已知缺陷四）、把规则序列改成从一份指令清单拼接（顺序契约不变：utility 在前、人格 catch-all 在后）、补 cron 注册器与 lane gate、补齐依赖与配置清单。D0 落地后，**D1 附件管线 / D2 发图与卡片回调与图片日报 / D3 emoji 与复读 / D4 其余指令**四条严格不相交，可以全并行——各自只往指令清单填一个槽、往组装根递一个依赖。
+**Task D 的切分：一条前置 + 四条并行。** 直接四路并行会让四条 task 同时改飞书 API 端口、投影读端口、规则序列、配置清单和依赖清单这五处，所以先落 **D0（装配缝）**：把飞书出站 API 端口扩到指令需要的全部方法、把投影读端口扩到 `is_admin` / `permission_config` / 群成员 / 用户组绑定（**不含 `gray_config`**，见已知缺陷四）、把规则序列改成从一份指令清单拼接（顺序契约不变：utility 在前、人格 catch-all 在后）、补 cron 注册器与 lane gate、补齐依赖与配置清单。D0 落地后，**D1 附件管线 / D2 发图与卡片回调与图片日报 / D3 emoji 与复读 / D4 其余指令**四条可以全并行。严格说不是"零相交"：三份账本（指令清单、定时任务清单、组装根）是共用的，但每条任务在上面只加一行、删一行——填自己那个槽、递自己那个依赖。冲突是行级且语义无关的。
 
 三处不建议拆开：图片卡片的构建被指令、卡片回调、定时任务三个入口共用，拆开必然三方共改同一处；`lark_emoji` 的唯一读端就是复读功能，写端（同步任务）和读端放一起才有可测的闭环；发图与卡片回调共用同一套上传与渲染。
 
