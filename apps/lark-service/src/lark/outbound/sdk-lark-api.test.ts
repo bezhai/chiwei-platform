@@ -350,6 +350,29 @@ describe('查', () => {
         expect(await apiWith(fake.client).getMessage('om_gone')).toBeNull();
     });
 
+    // 端口只认两种答案：查不到返回 null、出错抛。平台回了一条却没带 message_id 时，
+    // 兜成 undefined 会让 `messageId: string` 撒谎 —— 拿它去比 app_id / 去撤回 / 去
+    // 拼卡片的调用方全部在运行期读到 undefined，而类型上完全合法。
+    it('平台回了一条却没带 message_id：抛，不返回 messageId 是 undefined 的对象', async () => {
+        const fake = fakeClient({
+            async getMessageInfo() {
+                return { items: [{ chat_id: 'oc_1', msg_type: 'text' }] };
+            },
+        });
+        await expect(apiWith(fake.client).getMessage('om_1')).rejects.toThrow(/message_id/);
+    });
+
+    it('查群历史里混进一条没有 message_id 的：同样抛', async () => {
+        const fake = fakeClient({
+            async getMessageList() {
+                return { items: [{ chat_id: 'oc_1', msg_type: 'text' }] };
+            },
+        });
+        await expect(apiWith(fake.client).listMessages({ chatId: 'oc_1' })).rejects.toThrow(
+            /message_id/,
+        );
+    });
+
     it('查群历史：一页一次，起止时间按秒传下去，翻页 token 原样带回', async () => {
         const fake = fakeClient();
         const page = await apiWith(fake.client).listMessages({

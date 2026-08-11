@@ -87,12 +87,24 @@ interface RawLarkMessage {
     mentions?: Array<{ key?: string; id?: string; name?: string }>;
 }
 
-/** 一条查回来的消息翻成端口的口径。飞书没给的字段如实留空，不兜默认值。 */
+/**
+ * 一条查回来的消息翻成端口的口径。飞书没给的字段如实留空，不兜默认值。
+ *
+ * **唯一一个不能留空的是 message_id**，所以它在这里校验而不是断言。端口对查询只认
+ * 两种答案：查不到返回 null、出错抛（见 lark-api.ts 的文件头）。平台回了一条却没带
+ * id 时，`raw.message_id!` 会造出第三种 —— 一个 `messageId` 在类型上是 string、运行
+ * 期是 undefined 的对象。拿它去跟 app_id 比「这条是不是我发的」、去撤回、去拼卡片的
+ * 调用方全都读到 undefined，而每一处都类型合法、没有任何报错。
+ */
 function messageInfoOf(raw: RawLarkMessage): LarkMessageInfo {
+    if (!raw.message_id) {
+        throw new Error(
+            'lark returned a message without a message_id; ' +
+                'the port cannot describe it (a message id is not optional here)',
+        );
+    }
     return {
-        // 按主键查回来的东西没有 message_id 是不可能的；真发生了也不该编一个出来，
-        // 空串会让「这条是不是我发的」之类的比较悄悄成立。
-        messageId: raw.message_id!,
+        messageId: raw.message_id,
         chatId: raw.chat_id,
         senderId: raw.sender?.id,
         senderIdType: raw.sender?.id_type,

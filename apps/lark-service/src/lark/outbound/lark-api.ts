@@ -73,6 +73,12 @@ export interface LarkMessageMention {
  * 矩阵逐字对上"那个约束（对比 projection/tables.ts 的列名口径）。
  */
 export interface LarkMessageInfo {
+    /**
+     * **必填，而且是真的必填。** 平台回了一条却没带 id 时适配器当场抛（见
+     * sdk-lark-api.ts 的 messageInfoOf），不兜一个 undefined 出来 —— 端口对查询只认
+     * 「查不到返回 null」和「出错抛」两种答案，兜底会造出类型上是 string、运行期是
+     * undefined 的第三种，而每个调用点都类型合法。
+     */
     messageId: string;
     chatId?: string;
     /**
