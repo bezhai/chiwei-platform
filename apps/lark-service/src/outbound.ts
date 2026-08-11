@@ -19,10 +19,11 @@
  */
 
 import { createServer } from 'node:http';
+import type { ConsumeMessage } from 'amqplib';
 import { Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import { botDirectory } from '@inner/shared/bot';
 import { getRedisClient, resetRedisClient } from '@inner/shared/cache';
-import { getLane, rabbitmqClient } from '@inner/shared/mq';
+import { getLane, rabbitmqClient, type Route } from '@inner/shared/mq';
 
 import { loadOutboundConfig } from './config';
 import { larkDisplayNameOf, type LarkPersonaName } from './lark/bot-lookup';
@@ -40,10 +41,11 @@ import {
     withRosterCache,
 } from './lark/outbound/mentions';
 import { createLarkPostRenderer } from './lark/outbound/render';
+import { larkChatResponseBinding } from './lark/outbound/response-queue';
 import {
     larkOutboundConsumeSwitch,
-    LarkResponseSubscription,
-} from './lark/outbound/response-queue';
+    LarkOutboundSubscriptions,
+} from './lark/outbound/subscription';
 import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
 import { loadLarkPersonaNames } from './lark/persona-names';
 import { larkDataSource } from './ormconfig';
@@ -179,20 +181,31 @@ async function main(): Promise<void> {
     // 队列带 10s TTL，堆过去就被 DLX 弹回 prod 由 prod 实例发出去。
     const delivery = await realDelivery();
 
+    const amqp = {
+        declareRoute: (route: Route) => rabbitmqClient.declareRoute(route),
+        consume: (name: string, handler: (msg: ConsumeMessage) => Promise<void>) =>
+            rabbitmqClient.consume(name, handler),
+        drainConsumer: (name: string) => rabbitmqClient.drainConsumer(name),
+        ack: (msg: ConsumeMessage) => rabbitmqClient.ack(msg),
+        nack: (msg: ConsumeMessage, requeue: boolean) => rabbitmqClient.nack(msg, requeue),
+    };
+
     // 声明用的泳道和订阅用的泳道必须同源：declareRoute 内部也读 env 的 LANE。
     // 声明的是 A、订阅的是 B 的话，两步都"成功"，就是一条消息都收不到。
-    const subscription = new LarkResponseSubscription({
-        amqp: {
-            declareRoute: (route) => rabbitmqClient.declareRoute(route),
-            consume: (name, handler) => rabbitmqClient.consume(name, handler),
-            drainConsumer: (name) => rabbitmqClient.drainConsumer(name),
-            ack: (msg) => rabbitmqClient.ack(msg),
-            nack: (msg, requeue) => rabbitmqClient.nack(msg, requeue),
-        },
+    //
+    // 两条队列一把开关：channel-server 那侧释放它们用的就是同一把 key，接管侧分成两把
+    // 就会出现「只翻了一把，另一条队列没有任何消费者」的窗口（见 subscription.ts）。
+    const subscription = new LarkOutboundSubscriptions({
+        amqp,
         lane: getLane(),
-        deliver: (response, lane) => deliverLarkChatResponse(delivery, response, lane),
+        queues: [
+            larkChatResponseBinding({
+                amqp,
+                deliver: (response, lane) => deliverLarkChatResponse(delivery, response, lane),
+                observeQueueDelay: (seconds) => queueDelay.observe(seconds),
+            }),
+        ],
         readConsumeSwitch: larkOutboundConsumeSwitch,
-        observeQueueDelay: (seconds) => queueDelay.observe(seconds),
     });
 
     // 判断这个 Deployment 活得好不好靠队列积压和处理时延，不靠健康检查接口 ——
@@ -206,7 +219,7 @@ async function main(): Promise<void> {
     });
 
     // 开关翻动在运行期生效，两个方向都不必重启：翻开就地增订，翻回去走 drain 屏障
-    // 把队列交还（见 LarkResponseSubscription）。
+    // 把队列交还（见 LarkOutboundSubscriptions）。
     await subscription.reconcile();
     setInterval(() => {
         subscription.reconcile().catch((error) => {
@@ -215,10 +228,12 @@ async function main(): Promise<void> {
     }, SWITCH_POLL_MS).unref();
 
     const names = botDirectory.getAllBotConfigs().map((bot) => bot.bot_name);
+    const queues = subscription.subscribedQueues();
     const consuming =
-        subscription.subscribedQueue() ??
-        `(nothing yet — the switch is off; re-read every ${SWITCH_POLL_MS / 1000}s, ` +
-            'no restart needed)';
+        queues.length > 0
+            ? queues.join(', ')
+            : `(nothing yet — the switch is off; re-read every ${SWITCH_POLL_MS / 1000}s, ` +
+              'no restart needed)';
     console.info(
         `[lark-outbound] up for ${names.length} lark bot(s): ${names.join(', ') || '(none)'}; ` +
             `consuming ${consuming}`,

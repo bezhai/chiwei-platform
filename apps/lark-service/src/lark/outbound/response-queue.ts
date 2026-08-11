@@ -1,7 +1,8 @@
 // 出站入口：飞书那条 `chat_response` 队列。
 //
-// 本文件只管四件事 —— 订不订、订哪条、这条消息归不归我、ACK 还是拒绝。真正把话
-// 送到飞书的是 deliver.ts，它不认识 RabbitMQ。
+// 本文件只管三件事 —— 订哪条队列、这条消息归不归我、ACK 还是拒绝。真正把话送到
+// 飞书的是 deliver.ts，它不认识 RabbitMQ；什么时候订、什么时候交还在 subscription.ts，
+// 那一层不认识飞书（`recall` 那条队列共用它，也共用同一把开关）。
 //
 // ## 只订分区队列，不订老队列
 //
@@ -36,12 +37,12 @@
 // error 日志（deliver.ts 的 chat_response_outbound_failed）。
 
 import type { ConsumeMessage } from 'amqplib';
-import { DynamicConfig } from '@inner/shared';
 import { CHAT_RESPONSE, channelRoute, laneQueue, type Route } from '@inner/shared/mq';
 import { laneFromMessage } from '@inner/shared/mq-context';
 
 import { LARK_CHANNEL } from '../channel';
 import type { LarkChatResponse } from './chat-response';
+import type { OutboundQueueBinding } from './subscription';
 
 /**
  * 飞书出站的 Route。
@@ -60,189 +61,31 @@ export function larkChatResponseQueue(lane?: string): string {
 }
 
 /**
- * "本服务是否消费飞书出站队列"。**默认关。**
+ * 消费这条队列要用到的 MQ 表面，就 ACK 这两件事。
  *
- * 镜像可以先上线、Deployment 可以先起来、日志可以先看着 —— 什么时候真的接管出站
- * 是切换动作的一部分（Task E），跟代码发布解耦。
- *
- * 走 Dynamic Config 而不是 env：Release env 会被部署的 POST 清空，长期开关放那里
- * 会在某次部署之后悄悄失效，而这个开关失效的表现是"回复被两个服务各发一半"。
- *
- * **运行期反复读，不是启动时读一次**：见 LarkResponseSubscription 的文件内注释 ——
- * 启动时读一次会让决策九的 drain 移交无法安全执行。
- *
- * 读的时候没有请求上下文，所以 Dynamic Config 按 **prod** 解析 —— 它是一个全局
- * 开关，不是按泳道分别打开的旋钮。给某条泳道单独配这个 key 不会生效。
+ * 订阅本身（declare / consume / drain）不在这里 —— 那是 subscription.ts 的
+ * OutboundSubscriptionPort，两条出站队列共用一份实现。
  */
-export const LARK_OUTBOUND_CONSUME_FLAG = 'enable_lark_outbound_consume';
-
-const dynamicConfig = new DynamicConfig();
-
-/**
- * 读开关的**原始值**，不在这一层兜底成 boolean。
- *
- * `DynamicConfig.getBool(key, false)` 会把三件不同的事压成同一个 false：明确配了
- * 关、压根没配、以及 fetch 失败（SDK 内部把它吞成默认值）。压平之后就没法区分
- * 「操作者说关」和「这次没拿到有效指令」——而这两者的处置必须不同，见
- * parseConsumeSwitch。
- */
-export function larkOutboundConsumeSwitch(): Promise<string> {
-    return dynamicConfig.get(LARK_OUTBOUND_CONSUME_FLAG, '');
-}
-
-/**
- * 开关的三种读数：明确开 / 明确关 / **没有有效指令**（null）。
- *
- * 第三种不是"关"：它可能是配置还没建，也可能是 paas-engine 不可达。这时候唯一安全
- * 的动作是不动 —— 既不擅自开（两个服务分摊同一条队列），也不擅自关（本服务已经
- * 接管的话，一次配置抖动就让飞书回复没人消费，泳道队列 10 秒后被 DLX 弹回 prod）。
- */
-export function parseConsumeSwitch(raw: string): boolean | null {
-    const value = raw.trim().toLowerCase();
-    if (['true', '1', 'yes'].includes(value)) return true;
-    if (['false', '0', 'no'].includes(value)) return false;
-    return null;
-}
-
-/** 消费者用到的 MQ 表面，就这五件事。 */
 export interface LarkResponseChannel {
-    /** 声明队列与绑定。订一条没声明的队列等于守着空气。 */
-    declareRoute(route: Route): Promise<void>;
-    consume(queue: string, handler: (msg: ConsumeMessage) => Promise<void>): Promise<void>;
-    /** 交接屏障：basic.cancel → 等在途归零 → 才算真的把队列交出去。 */
-    drainConsumer(queue: string): Promise<void>;
     ack(msg: ConsumeMessage): void;
     nack(msg: ConsumeMessage, requeue: boolean): void;
 }
 
 export interface LarkResponseConsumerDeps {
     amqp: LarkResponseChannel;
-    /**
-     * 本进程所在的泳道。
-     *
-     * **必须与 declareRoute 用的是同一个来源**（生产上两边都读 env 的 LANE）：
-     * 声明的是 A、订阅的是 B 的话，声明成功、订阅也成功，就是一条消息都收不到。
-     */
-    lane?: string;
     /** 把这一段送到飞书。见 deliver.ts。 */
     deliver(response: LarkChatResponse, lane?: string): Promise<void>;
-    /** 开关的原始值。见 larkOutboundConsumeSwitch。 */
-    readConsumeSwitch(): Promise<string>;
     observeQueueDelay(seconds: number): void;
     now?(): number;
 }
 
-/**
- * 出站队列的订阅，**开关翻动时原地生效，不重启进程**。
- *
- * ## 为什么不能在启动时读一次开关
- *
- * 决策九的交接是「旧消费者 drain → 新消费者接手」，中间既不许重叠也不许有空窗。
- * 如果订阅面由启动时机决定，两条路都走不通：
- *
- *   先起 lark-outbound   它立刻开始消费，和还没 drain 的 channel-server 抢同一条
- *                        队列，RabbitMQ 轮询把回复随机劈成两半
- *   先 drain 再起        drain 完成到新进程连上 PG / bot 目录 / Redis / MQ 并开始
- *                        消费之间是空窗。**泳道队列带 10s TTL**，这段初始化时延足够
- *                        让消息被 DLX 弹回 prod —— 泳道的回复从 prod 实例发出去
- *
- * 所以正确形态是进程先起来、依赖全部预热好、但**不订阅**；等开关翻开之后原地开始
- * 消费。回滚方向同理：翻回去时走 drain 屏障把队列交还，也不重启。
- *
- * 定时调 reconcile 的是进程入口（outbound.ts），这里只负责"读一次开关，按结果增订
- * 或移交"这一件事。
- */
-export class LarkResponseSubscription {
-    private readonly deps: LarkResponseConsumerDeps;
-    /** 当前订阅着的队列。null = 没在消费，同时也是"上次的结论"。 */
-    private queue: string | null = null;
-    /** reconcile 自己的互斥：drain 最坏要等 60 秒，比定时器间隔长。 */
-    private inFlight: Promise<void> | null = null;
+/** 飞书 `chat_response` 这条队列的订阅项。泳道后缀由 subscription.ts 统一加。 */
+export function larkChatResponseBinding(deps: LarkResponseConsumerDeps): OutboundQueueBinding {
+    const now = deps.now ?? Date.now;
 
-    constructor(deps: LarkResponseConsumerDeps) {
-        this.deps = deps;
-    }
-
-    subscribedQueue(): string | null {
-        return this.queue;
-    }
-
-    /** 再读一次开关，按结果增订或移交。 */
-    reconcile(): Promise<void> {
-        // 定时器的间隔比 drain 的最坏耗时短，两次 reconcile 重叠是常态。不挡住的话
-        // 第二次会看到"还没订上"的中间状态，把同一条队列再订一遍 —— 同一个进程里
-        // 两个消费者分摊消息，prefetch 也翻倍。
-        if (this.inFlight) return this.inFlight;
-        this.inFlight = this.settle().finally(() => {
-            this.inFlight = null;
-        });
-        return this.inFlight;
-    }
-
-    private async settle(): Promise<void> {
-        const wanted = await this.wanted();
-        if (wanted === (this.queue !== null)) return;
-        if (wanted) await this.subscribe();
-        else await this.handOff();
-    }
-
-    /**
-     * 这一刻该不该消费。**没拿到有效指令就保持上次的结论**。
-     *
-     * 初始结论是"不消费"，所以"读不到"在启动时等于关着 —— 绝不会自己变宽到跟
-     * channel-server 抢队列。而已经接管之后读不到，保持消费才是对的：擅自停下来
-     * 会造成一个没人告警的静默断流。
-     */
-    private async wanted(): Promise<boolean> {
-        let raw: string;
-        try {
-            raw = await this.deps.readConsumeSwitch();
-        } catch (error) {
-            console.error(
-                `[lark-outbound] lark_outbound_switch_unavailable: could not read ` +
-                    `${LARK_OUTBOUND_CONSUME_FLAG}; keeping ` +
-                    `${this.queue ? `consuming ${this.queue}` : 'off'}:`,
-                error,
-            );
-            return this.queue !== null;
-        }
-
-        const parsed = parseConsumeSwitch(raw);
-        if (parsed === null) {
-            console.warn(
-                `[lark-outbound] lark_outbound_switch_unavailable: ` +
-                    `${LARK_OUTBOUND_CONSUME_FLAG} is unset or unreadable ("${raw}"); keeping ` +
-                    `${this.queue ? `consuming ${this.queue}` : 'off'}`,
-            );
-            return this.queue !== null;
-        }
-        return parsed;
-    }
-
-    private async subscribe(): Promise<void> {
-        const route = larkChatResponseRoute();
-        await this.deps.amqp.declareRoute(route);
-        const queue = larkChatResponseQueue(this.deps.lane);
-        await this.deps.amqp.consume(queue, this.handler(queue));
-        // 订上之后才记账：declare / consume 抛错时下一次 reconcile 会重来。
-        this.queue = queue;
-        console.info(`[lark-outbound] consuming ${queue}`);
-    }
-
-    private async handOff(): Promise<void> {
-        const queue = this.queue!;
-        // 先 drain 再记账：drain 抛错说明队列还可能在投递，此时清掉记账等于自己
-        // 骗自己已经交出去了。
-        await this.deps.amqp.drainConsumer(queue);
-        this.queue = null;
-        console.info(`[lark-outbound] handed ${queue} back (switch is off)`);
-    }
-
-    private handler(queue: string): (msg: ConsumeMessage) => Promise<void> {
-        const deps = this.deps;
-        const now = deps.now ?? Date.now;
-
-        return async (msg) => {
+    return {
+        route: larkChatResponseRoute(),
+        handler: (queue) => async (msg) => {
             let response: LarkChatResponse;
             try {
                 response = JSON.parse(msg.content.toString()) as LarkChatResponse;
@@ -290,6 +133,6 @@ export class LarkResponseSubscription {
             }
 
             deps.amqp.ack(msg);
-        };
-    }
+        },
+    };
 }

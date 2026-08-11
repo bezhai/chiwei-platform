@@ -16,12 +16,13 @@ import type { LarkChatResponse } from './chat-response';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './deliver';
 import type { PostContent } from './post-content';
 import {
+    larkChatResponseBinding,
     larkChatResponseQueue,
     larkChatResponseRoute,
-    LarkResponseSubscription,
     type LarkResponseChannel,
     type LarkResponseConsumerDeps,
 } from './response-queue';
+import { LarkOutboundSubscriptions, type OutboundSubscriptionPort } from './subscription';
 
 // ---------------------------------------------------------------------------
 // 跨语言契约向量
@@ -79,7 +80,7 @@ describe('订阅哪条队列 — 接在跨语言契约向量上', () => {
 // ---------------------------------------------------------------------------
 
 interface Amqp {
-    channel: LarkResponseChannel;
+    channel: LarkResponseChannel & OutboundSubscriptionPort;
     declared: Route[];
     consuming: Map<string, (msg: ConsumeMessage) => Promise<void>>;
     /** 每一次 consume 都记一笔（consuming 是 Map，重复订阅会被它盖掉看不出来）。 */
@@ -161,7 +162,7 @@ interface Consumer {
     amqp: Amqp;
     delivered: Array<{ response: LarkChatResponse; lane?: string }>;
     queueDelays: number[];
-    subscription: LarkResponseSubscription;
+    subscriptions: LarkOutboundSubscriptions;
     /** 当前订阅的队列，没订阅时是 null。 */
     subscribed: string | null;
     /** 改这个值 = 在 Dynamic Config 里改这个 key 的值。 */
@@ -173,41 +174,57 @@ interface Consumer {
     push(msg: ConsumeMessage): Promise<void>;
 }
 
+/** 本文件关心的可调项。前三个属于队列这一头，后两个属于订阅那一头。 */
+interface ConsumerOptions {
+    deliver?: LarkResponseConsumerDeps['deliver'];
+    observeQueueDelay?: LarkResponseConsumerDeps['observeQueueDelay'];
+    now?: LarkResponseConsumerDeps['now'];
+    lane?: string;
+    readConsumeSwitch?: () => Promise<string>;
+    switchValue?: string;
+}
+
 /**
  * 起一个消费者并做**一次** reconcile。
  *
  * `switchValue` 缺省是 'true'，因为绝大多数用例关心的是"已经在消费之后怎么样"；
  * 开关本身的用例自己传值。
  */
-async function startConsumer(
-    overrides: Partial<LarkResponseConsumerDeps> & { switchValue?: string } = {},
-): Promise<Consumer> {
-    const { switchValue = 'true', ...depOverrides } = overrides;
+async function startConsumer(options: ConsumerOptions = {}): Promise<Consumer> {
+    const { switchValue = 'true' } = options;
     const amqp = fakeAmqp();
     const delivered: Array<{ response: LarkChatResponse; lane?: string }> = [];
     const queueDelays: number[] = [];
     let raw = switchValue;
     let broken: Error | null = null;
 
-    const subscription = new LarkResponseSubscription({
+    const binding = larkChatResponseBinding({
         amqp: amqp.channel,
-        deliver: async (response, lane) => void delivered.push({ response, lane }),
-        readConsumeSwitch: async () => {
-            if (broken) throw broken;
-            return raw;
-        },
-        observeQueueDelay: (seconds) => void queueDelays.push(seconds),
-        ...depOverrides,
+        deliver: options.deliver ?? (async (response, lane) => void delivered.push({ response, lane })),
+        observeQueueDelay: options.observeQueueDelay ?? ((seconds) => void queueDelays.push(seconds)),
+        now: options.now,
     });
-    await subscription.reconcile();
+
+    const subscriptions = new LarkOutboundSubscriptions({
+        amqp: amqp.channel,
+        lane: options.lane,
+        queues: [binding],
+        readConsumeSwitch:
+            options.readConsumeSwitch ??
+            (async () => {
+                if (broken) throw broken;
+                return raw;
+            }),
+    });
+    await subscriptions.reconcile();
 
     const consumer: Consumer = {
         amqp,
         delivered,
         queueDelays,
-        subscription,
+        subscriptions,
         get subscribed(): string | null {
-            return subscription.subscribedQueue();
+            return subscriptions.subscribedQueues()[0] ?? null;
         },
         setSwitch: (value) => {
             raw = value;
@@ -215,9 +232,9 @@ async function startConsumer(
         breakSwitch: (error) => {
             broken = error;
         },
-        reconcile: () => subscription.reconcile(),
+        reconcile: () => subscriptions.reconcile(),
         push: async (msg) => {
-            const handler = amqp.consuming.get(subscription.subscribedQueue() ?? '');
+            const handler = amqp.consuming.get(subscriptions.subscribedQueues()[0] ?? '');
             if (!handler) throw new Error('nothing is consuming');
             await handler(msg);
         },
