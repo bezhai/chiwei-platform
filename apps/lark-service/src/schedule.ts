@@ -55,15 +55,14 @@ export interface LarkScheduleSlot {
 /**
  * 飞书专属定时任务，三个。名字 / 表达式 / botName 与 channel-server 那份逐条相同。
  *
- * 今天三个槽位都还欠着，所以 prod 部署也一个任务都不挂 —— 与拆分前一致，因为它们
- * 此刻仍然由 channel-server 在跑。填一个槽位是两步：删掉这里的 `pendingIn`，往装配
- * 根的 `runs` 里加一个同名的本体。
+ * 填一个槽位是两步：删掉这里的 `pendingIn`，往装配根的 `runs` 里加一个同名的本体。
+ * 一存一无会在装配期抛（见 reconcile）。
  */
 export const LARK_SCHEDULES: readonly LarkScheduleSlot[] = [
     // 每天 18:00：随机取一张已上传的图，发到订阅群，再往另一个群补一条带卡片的回复。
-    { name: 'daily-photo', cron: '0 18 * * *', botName: 'tool', pendingIn: 'D2' },
+    { name: 'daily-photo', cron: '0 18 * * *', botName: 'tool' },
     // 每天 19:30：昨天入库的新图汇成一张卡片发给特定群。
-    { name: 'daily-new-photo', cron: '30 19 * * *', botName: 'tool', pendingIn: 'D2' },
+    { name: 'daily-new-photo', cron: '30 19 * * *', botName: 'tool' },
     // 每小时：拉远端 emoji 表，原子替换本地 lark_emoji（复读功能唯一的读端）。
     { name: 'emoji-sync', cron: '0 * * * *', botName: 'chiwei', pendingIn: 'D3' },
 ];

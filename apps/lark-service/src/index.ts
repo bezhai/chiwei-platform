@@ -28,6 +28,7 @@ import {
 import { holdsLarkWebSockets, type LarkWebSockets } from './lark/ingress/websocket';
 import { loadLarkPersonaNames } from './lark/persona-names';
 import { handleLarkCardAction } from './lark/photo/callback';
+import { dailyNewPhoto, dailyPhoto } from './lark/photo/daily';
 import { localPixivMirror } from './lark/photo/pixiv-mirror';
 import { readyPhotos } from './lark/photo/ready';
 import { toolServiceResize } from './lark/photo/resize';
@@ -292,9 +293,16 @@ async function main(): Promise<void> {
     }
 
     // 定时任务归这个进程，不归 lark-outbound：出站可以多副本，每个副本各起一份 cron
-    // 就是往那个写死的飞书群发 N 遍日报（见 schedule.ts）。三个槽位现在都还欠着，
-    // 所以这里挂不上任何东西 —— D2 / D3 各自往 runs 里加一个同名的本体。
-    schedules = startLarkSchedules({ runs: {}, schedule: nodeCronScheduler });
+    // 就是往那个写死的飞书群发 N 遍日报（见 schedule.ts）。key 必须与清单里的任务名
+    // 逐字对上，对不上装配期就抛。emoji-sync 还欠着（D3）。
+    const daily = { api: commands.api, photos: commands.photos, wait: Bun.sleep, now: () => new Date() };
+    schedules = startLarkSchedules({
+        runs: {
+            'daily-photo': dailyPhoto(daily),
+            'daily-new-photo': dailyNewPhoto(daily),
+        },
+        schedule: nodeCronScheduler,
+    });
 
     const bots = botDirectory.getAllBotConfigs();
     console.info(

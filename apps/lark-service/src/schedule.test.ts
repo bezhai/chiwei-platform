@@ -147,10 +147,10 @@ describe('清单对账：定时任务与 channel-server 那份逐条对上', () 
             .toEqual(byName(upstreamTasks()));
     });
 
-    it('三个槽位都还欠着，各自记着哪一批来填', () => {
+    it('两个图片日报已经搬过来了，emoji 同步还欠着', () => {
         expect(LARK_SCHEDULES.map((slot) => [slot.name, slot.pendingIn])).toEqual([
-            ['daily-photo', 'D2'],
-            ['daily-new-photo', 'D2'],
+            ['daily-photo', undefined],
+            ['daily-new-photo', undefined],
             ['emoji-sync', 'D3'],
         ]);
     });
@@ -331,6 +331,17 @@ describe('装配：注册器接在入口进程上，且只接在入口进程上'
         expect(entry).toContain("from './schedule'");
         expect(entry).toContain('startLarkSchedules(');
     });
+
+    // 账本对账（reconcile）只在真进程起来的那一刻才跑，而 index.ts 一 import 就要连
+    // PG / Redis / MQ，本套测试跑不到它。所以"已经填上的槽位在装配根真的有本体"这件
+    // 事只能从源码上钉：漏掉一个的症状是 prod 起不来（reconcile 抛），但那时已经是
+    // 线上问题了。
+    it.each(LARK_SCHEDULES.filter((slot) => !slot.pendingIn).map((slot) => slot.name))(
+        '%s 在装配根里真的接上了本体',
+        (name) => {
+            expect(code('index.ts')).toContain(`'${name}':`);
+        },
+    );
 
     // 决策十的那张进程表没写 cron 归谁。它必须待在单副本的那个进程里：出站可以多副本，
     // 每个副本各起一份 cron 就是往写死的真实飞书群发 N 遍日报。
