@@ -18,7 +18,7 @@ import type { PostContent } from './post-content';
 import {
     larkChatResponseQueue,
     larkChatResponseRoute,
-    startLarkResponseConsumer,
+    LarkResponseSubscription,
     type LarkResponseChannel,
     type LarkResponseConsumerDeps,
 } from './response-queue';
@@ -82,28 +82,46 @@ interface Amqp {
     channel: LarkResponseChannel;
     declared: Route[];
     consuming: Map<string, (msg: ConsumeMessage) => Promise<void>>;
+    /** 每一次 consume 都记一笔（consuming 是 Map，重复订阅会被它盖掉看不出来）。 */
+    subscribeLog: string[];
+    drained: string[];
     acked: string[];
     nacked: Array<{ id: string; requeue: boolean }>;
+    /** 注入慢订阅：用来观察 reconcile 重入。 */
+    beforeConsume?: () => Promise<void>;
 }
 
 function fakeAmqp(): Amqp {
     const declared: Route[] = [];
     const consuming = new Map<string, (msg: ConsumeMessage) => Promise<void>>();
+    const subscribeLog: string[] = [];
+    const drained: string[] = [];
     const acked: string[] = [];
     const nacked: Array<{ id: string; requeue: boolean }> = [];
 
-    return {
+    const amqp: Amqp = {
         declared,
         consuming,
+        subscribeLog,
+        drained,
         acked,
         nacked,
         channel: {
             declareRoute: async (route) => void declared.push(route),
-            consume: async (queue, handler) => void consuming.set(queue, handler),
+            consume: async (queue, handler) => {
+                await amqp.beforeConsume?.();
+                subscribeLog.push(queue);
+                consuming.set(queue, handler);
+            },
+            drainConsumer: async (queue) => {
+                drained.push(queue);
+                consuming.delete(queue);
+            },
             ack: (msg) => void acked.push(idOf(msg)),
             nack: (msg, requeue) => void nacked.push({ id: idOf(msg), requeue }),
         },
     };
+    return amqp;
 }
 
 function idOf(msg: ConsumeMessage): string {
@@ -143,37 +161,68 @@ interface Consumer {
     amqp: Amqp;
     delivered: Array<{ response: LarkChatResponse; lane?: string }>;
     queueDelays: number[];
-    /** 队列没被订阅时是 undefined。 */
-    push(msg: ConsumeMessage): Promise<void>;
+    subscription: LarkResponseSubscription;
+    /** 当前订阅的队列，没订阅时是 null。 */
     subscribed: string | null;
+    /** 改这个值 = 在 Dynamic Config 里改这个 key 的值。 */
+    setSwitch(raw: string): void;
+    /** 让下一次读开关直接抛。 */
+    breakSwitch(error: Error | null): void;
+    /** 再读一次开关并按结果增订 / 移交。 */
+    reconcile(): Promise<void>;
+    push(msg: ConsumeMessage): Promise<void>;
 }
 
+/**
+ * 起一个消费者并做**一次** reconcile。
+ *
+ * `switchValue` 缺省是 'true'，因为绝大多数用例关心的是"已经在消费之后怎么样"；
+ * 开关本身的用例自己传值。
+ */
 async function startConsumer(
-    overrides: Partial<LarkResponseConsumerDeps> = {},
+    overrides: Partial<LarkResponseConsumerDeps> & { switchValue?: string } = {},
 ): Promise<Consumer> {
+    const { switchValue = 'true', ...depOverrides } = overrides;
     const amqp = fakeAmqp();
     const delivered: Array<{ response: LarkChatResponse; lane?: string }> = [];
     const queueDelays: number[] = [];
+    let raw = switchValue;
+    let broken: Error | null = null;
 
-    const subscribed = await startLarkResponseConsumer({
+    const subscription = new LarkResponseSubscription({
         amqp: amqp.channel,
         deliver: async (response, lane) => void delivered.push({ response, lane }),
-        consumeEnabled: async () => true,
+        readConsumeSwitch: async () => {
+            if (broken) throw broken;
+            return raw;
+        },
         observeQueueDelay: (seconds) => void queueDelays.push(seconds),
-        ...overrides,
+        ...depOverrides,
     });
+    await subscription.reconcile();
 
-    return {
+    const consumer: Consumer = {
         amqp,
         delivered,
         queueDelays,
-        subscribed,
+        subscription,
+        get subscribed(): string | null {
+            return subscription.subscribedQueue();
+        },
+        setSwitch: (value) => {
+            raw = value;
+        },
+        breakSwitch: (error) => {
+            broken = error;
+        },
+        reconcile: () => subscription.reconcile(),
         push: async (msg) => {
-            const handler = amqp.consuming.get(subscribed ?? '');
+            const handler = amqp.consuming.get(subscription.subscribedQueue() ?? '');
             if (!handler) throw new Error('nothing is consuming');
             await handler(msg);
         },
     };
+    return consumer;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +231,7 @@ async function startConsumer(
 
 describe('消费开关 — 默认关，且读不到时不许自己变宽', () => {
     it('关着的时候一条队列都不订阅、一次声明都不发', async () => {
-        const c = await startConsumer({ consumeEnabled: async () => false });
+        const c = await startConsumer({ switchValue: 'false' });
 
         expect(c.subscribed).toBeNull();
         expect(c.amqp.declared).toEqual([]);
@@ -193,7 +242,7 @@ describe('消费开关 — 默认关，且读不到时不许自己变宽', () =>
         // 变宽的后果是静默的：cutover 窗口里 channel-server 仍然订阅着同一条飞书
         // 队列，两个消费者守着它，RabbitMQ 轮询把回复随机劈成两半。不报错、不留痕。
         const c = await startConsumer({
-            consumeEnabled: async () => {
+            readConsumeSwitch: async () => {
                 throw new Error('paas-engine unreachable');
             },
         });
@@ -202,8 +251,22 @@ describe('消费开关 — 默认关，且读不到时不许自己变宽', () =>
         expect([...c.amqp.consuming.keys()]).toEqual([]);
     });
 
+    it('配置压根没建（空串）时按关处理 —— 这跟 fetch 失败在 SDK 里是同一个信号', async () => {
+        // DynamicConfig.get 把 fetch 失败吞成默认值（空串），所以"读失败"和"没配这个
+        // key"在这一层长得一模一样。两者的处置也必须一样：没拿到有效指令就不动。
+        const c = await startConsumer({ switchValue: '' });
+
+        expect(c.subscribed).toBeNull();
+    });
+
+    it('填了看不懂的值：同样按"没有有效指令"处理', async () => {
+        const c = await startConsumer({ switchValue: '待定' });
+
+        expect(c.subscribed).toBeNull();
+    });
+
     it('打开时先声明队列再订阅 —— 订阅一条没声明的队列等于守着空气', async () => {
-        const c = await startConsumer({ consumeEnabled: async () => true });
+        const c = await startConsumer({ switchValue: 'true' });
 
         expect(c.subscribed).toBe(larkChatResponseQueue());
         expect(c.amqp.declared).toEqual([larkChatResponseRoute()]);
@@ -215,6 +278,85 @@ describe('消费开关 — 默认关，且读不到时不许自己变宽', () =>
         const c = await startConsumer({ lane: laneCase.lane! });
 
         expect(c.subscribed).toBe(laneCase.expect.queue);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 开关在运行期翻动：不重启进程
+// ---------------------------------------------------------------------------
+
+describe('开关翻动 — 原地增订 / 原地移交，不重启进程', () => {
+    it('从关翻到开：同一个进程当场开始消费，队列里的消息立刻被处理', async () => {
+        // 决策九的交接是「旧消费者 drain → 新消费者接手」，中间既不能重叠也不能有
+        // 空窗。启动时读一次开关的话两条路都走不通：先起新的会和还没 drain 的
+        // channel-server 抢同一条队列；先 drain 再起新的，则新进程连 PG / bot 目录 /
+        // Redis / MQ 的这段时延就是空窗 —— 泳道队列带 10s TTL，堆过去就被 DLX 弹回
+        // prod，泳道的回复从 prod 实例发出去。
+        const c = await startConsumer({ switchValue: 'false' });
+        expect(c.subscribed).toBeNull();
+
+        c.setSwitch('true');
+        await c.reconcile();
+
+        expect(c.subscribed).toBe(larkChatResponseQueue());
+        expect(c.amqp.declared).toEqual([larkChatResponseRoute()]);
+
+        await c.push(message('m-flip', larkResponse()));
+        expect(c.delivered).toHaveLength(1);
+        expect(c.amqp.acked).toEqual(['m-flip']);
+    });
+
+    it('从开翻到关：走 drain 屏障把队列交回去，之后不再消费', async () => {
+        // 回滚方向也不该要重启：basic.cancel → 等在途归零 → 才算真的交出去。
+        const c = await startConsumer({ switchValue: 'true' });
+
+        c.setSwitch('false');
+        await c.reconcile();
+
+        expect(c.amqp.drained).toEqual([larkChatResponseQueue()]);
+        expect(c.subscribed).toBeNull();
+    });
+
+    it('一直开着：重复 reconcile 不会再订阅一次', async () => {
+        // 同一个进程订两次等于自己跟自己分摊消息，prefetch 也翻倍。
+        const c = await startConsumer({ switchValue: 'true' });
+
+        await c.reconcile();
+        await c.reconcile();
+
+        expect(c.amqp.subscribeLog).toEqual([larkChatResponseQueue()]);
+        expect(c.amqp.declared).toHaveLength(1);
+    });
+
+    it('已经在消费之后配置读不到：保持消费，不自己把队列扔了', async () => {
+        // 这个方向的"变宽"是停止消费：一次 paas-engine 抖动就让飞书的回复没人消费，
+        // 泳道队列 10 秒后弹回 prod。没有有效指令时保持上次结论。
+        const c = await startConsumer({ switchValue: 'true' });
+
+        c.breakSwitch(new Error('paas-engine unreachable'));
+        await c.reconcile();
+
+        expect(c.subscribed).toBe(larkChatResponseQueue());
+        expect(c.amqp.drained).toEqual([]);
+    });
+
+    it('两次 reconcile 撞在一起：只订阅一次', async () => {
+        // 定时器的间隔比 drain 的最坏耗时短，两次 reconcile 重叠是常态而非意外。
+        const c = await startConsumer({ switchValue: 'false' });
+
+        let release!: () => void;
+        const slowSubscribe = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        c.amqp.beforeConsume = () => slowSubscribe;
+        c.setSwitch('true');
+
+        const first = c.reconcile();
+        const second = c.reconcile();
+        release();
+        await Promise.all([first, second]);
+
+        expect(c.amqp.subscribeLog).toEqual([larkChatResponseQueue()]);
     });
 });
 

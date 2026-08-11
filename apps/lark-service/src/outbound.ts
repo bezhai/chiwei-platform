@@ -41,8 +41,8 @@ import {
 } from './lark/outbound/mentions';
 import { createLarkPostRenderer } from './lark/outbound/render';
 import {
-    larkOutboundConsumeEnabled,
-    startLarkResponseConsumer,
+    larkOutboundConsumeSwitch,
+    LarkResponseSubscription,
 } from './lark/outbound/response-queue';
 import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
 import { loadLarkPersonaNames } from './lark/persona-names';
@@ -56,6 +56,15 @@ import { bootLarkService, shutdownLarkService, type LarkBackends } from './start
  * 短是刻意的：群成员变动之后最多迟一个周期就跟上，不需要失效通知。
  */
 const ROSTER_CACHE_MS = 30_000;
+
+/**
+ * 重读消费开关的间隔。
+ *
+ * 移交是人工触发的操作步骤，秒级足够；短了纯属白打 paas-engine（DynamicConfig 自己
+ * 还有 10s 缓存）。它决定的是"翻开关之后多久真的开始消费"，而 drain 屏障的另一侧
+ * （channel-server 那个 worker）用的是同一个数量级。
+ */
+const SWITCH_POLL_MS = 15_000;
 
 const metrics = new Registry();
 collectDefaultMetrics({ register: metrics });
@@ -165,25 +174,30 @@ async function main(): Promise<void> {
     await bootLarkService(backends());
     handleSignals();
 
+    // 预热：DB / bot 目录 / 人设名 / 飞书客户端池全部就位。**在订阅之前**做完 ——
+    // 交接窗口里"进程起来了但还没连上后端"的那段时延就是队列没人消费的空窗，而泳道
+    // 队列带 10s TTL，堆过去就被 DLX 弹回 prod 由 prod 实例发出去。
     const delivery = await realDelivery();
 
     // 声明用的泳道和订阅用的泳道必须同源：declareRoute 内部也读 env 的 LANE。
     // 声明的是 A、订阅的是 B 的话，两步都"成功"，就是一条消息都收不到。
-    const queue = await startLarkResponseConsumer({
+    const subscription = new LarkResponseSubscription({
         amqp: {
             declareRoute: (route) => rabbitmqClient.declareRoute(route),
             consume: (name, handler) => rabbitmqClient.consume(name, handler),
+            drainConsumer: (name) => rabbitmqClient.drainConsumer(name),
             ack: (msg) => rabbitmqClient.ack(msg),
             nack: (msg, requeue) => rabbitmqClient.nack(msg, requeue),
         },
         lane: getLane(),
         deliver: (response, lane) => deliverLarkChatResponse(delivery, response, lane),
-        consumeEnabled: larkOutboundConsumeEnabled,
+        readConsumeSwitch: larkOutboundConsumeSwitch,
         observeQueueDelay: (seconds) => queueDelay.observe(seconds),
     });
 
     // 判断这个 Deployment 活得好不好靠队列积压和处理时延，不靠健康检查接口 ——
-    // 出站是竞争消费，"进程还在"跟"消息在被处理"是两件事。
+    // 出站是竞争消费，"进程还在"跟"消息在被处理"是两件事。metrics 在订阅之前就起来：
+    // 开关还关着的时候它也该是可观测的。
     createServer(async (_req, res) => {
         res.setHeader('Content-Type', metrics.contentType);
         res.end(await metrics.metrics());
@@ -191,10 +205,23 @@ async function main(): Promise<void> {
         console.info(`[lark-outbound] metrics on :${config.metricsPort}`);
     });
 
+    // 开关翻动在运行期生效，两个方向都不必重启：翻开就地增订，翻回去走 drain 屏障
+    // 把队列交还（见 LarkResponseSubscription）。
+    await subscription.reconcile();
+    setInterval(() => {
+        subscription.reconcile().catch((error) => {
+            console.error('[lark-outbound] reconcile failed:', error);
+        });
+    }, SWITCH_POLL_MS).unref();
+
     const names = botDirectory.getAllBotConfigs().map((bot) => bot.bot_name);
+    const consuming =
+        subscription.subscribedQueue() ??
+        `(nothing yet — the switch is off; re-read every ${SWITCH_POLL_MS / 1000}s, ` +
+            'no restart needed)';
     console.info(
         `[lark-outbound] up for ${names.length} lark bot(s): ${names.join(', ') || '(none)'}; ` +
-            `consuming ${queue ?? '(nothing — the switch is off)'}`,
+            `consuming ${consuming}`,
     );
 }
 

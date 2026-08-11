@@ -722,6 +722,150 @@ describe('台账 — 终态', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 台账写失败的处置：分界线是「有没有调过飞书 API」
+// ---------------------------------------------------------------------------
+
+describe('台账写失败 — 还没调过飞书 API 的路径：往外抛', () => {
+    // 这三条路径上消息根本没发出去，重投是安全的。吞掉等于把一次数据库抖动变成
+    // 一条**永远停在 pending** 的台账 —— 而它本来能被重投救回来。
+
+    it('agent 自己报了失败，落 failed 时库挂了：抛出去', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.ledger.failSettle = new Error('pg is down');
+
+        await expect(
+            deliverLarkChatResponse(h.deps, reply({ status: 'failed', error: '模型超时' })),
+        ).rejects.toThrow('pg is down');
+        // 一个字都没发出去，所以重投不会让真人看到第二条。
+        expect(h.api.replied).toHaveLength(0);
+        expect(h.api.sent).toHaveLength(0);
+    });
+
+    it('空的收尾段，落 completed 时库挂了：抛出去', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.ledger.failSettle = new Error('pg is down');
+
+        await expect(
+            deliverLarkChatResponse(h.deps, reply({ content: '', is_last: true })),
+        ).rejects.toThrow('pg is down');
+        expect(h.api.replied).toHaveLength(0);
+    });
+
+    it('反查就失败（映射查不到），落 failed 时库也挂了：抛出去', async () => {
+        // 反查在发送**之前**，所以这条也在分界线的"还没调过飞书 API"那一侧 ——
+        // 它和上面两条走的是不同的代码分支，分界线必须由"调没调过 API"决定，
+        // 而不是由"在不在 try 块里"决定。
+        const h = harness();
+        h.store.chats.set('cc_group', 'oc_group'); // 缺 cm_trigger 的映射
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.ledger.failSettle = new Error('pg is down');
+
+        await expect(deliverLarkChatResponse(h.deps, reply())).rejects.toThrow('pg is down');
+        expect(h.api.replied).toHaveLength(0);
+    });
+});
+
+describe('台账写失败 — 已经调过飞书 API 的路径：吞掉', () => {
+    it('发出去之后落库失败、连记 failed 也失败：不抛，上游照常 ACK', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.store.failLarkMessageInsert = new Error('mapping insert exploded');
+        h.ledger.failSettle = new Error('pg is down');
+
+        await expect(deliverLarkChatResponse(h.deps, reply())).resolves.toBeUndefined();
+        // 消息**真的发出去了**：重投会让真人收到第二条，比台账停在 pending 严重。
+        expect(h.api.replied).toHaveLength(1);
+    });
+
+    it('发送本身抛错时也算调过 —— 请求可能已经到了飞书，只是响应没回来', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+        h.api.fail = new Error('socket hang up');
+        h.ledger.failSettle = new Error('pg is down');
+
+        await expect(deliverLarkChatResponse(h.deps, reply())).resolves.toBeUndefined();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 同一次回答的多段并发跑：**当前行为**，不是期望行为
+// ---------------------------------------------------------------------------
+
+/**
+ * 同一个 session 的几段回复会被并发处理 —— 单副本 prefetch=10 就已经会，多副本更甚。
+ * 下面两条把这种情况下的**现状**钉住，好让下次有人动这块时知道自己破坏了什么。
+ * 两条都不是我们想要的形态，也都不在这一批的范围里（改它们要给台账引入按段序的
+ * 追加语义和单调的终态，跨服务共写同一行，是独立议题）。
+ */
+describe('多段并发 — 当前行为存档（不是期望行为）', () => {
+    it('【现状】replies 的顺序是"谁先跑完谁在前"，不是 part_index 的顺序', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        // 第一段卡在飞书 API 上，第二段一路跑完 —— 真实世界里网络抖一下就是这样。
+        let releaseFirstPart!: () => void;
+        const firstPartInFlight = new Promise<void>((resolve) => {
+            releaseFirstPart = resolve;
+        });
+        h.deps.api = {
+            ...h.deps.api,
+            replyPost: async () => {
+                await firstPartInFlight;
+                return { messageId: 'om_part0' };
+            },
+            sendPost: async () => ({ messageId: 'om_part1' }),
+        };
+
+        const first = deliverLarkChatResponse(
+            h.deps,
+            reply({ part_index: 0, is_last: false, content: '第一段' }),
+        );
+        const second = deliverLarkChatResponse(
+            h.deps,
+            reply({ part_index: 1, is_last: false, content: '第二段' }),
+        );
+        await second;
+        releaseFirstPart();
+        await first;
+
+        const contentOf = (commonMessageId: unknown): string | undefined =>
+            h.store.commonMessages.get(String(commonMessageId))?.content_text;
+        expect(
+            h.ledger.appended.map((entry) =>
+                contentOf((entry.reply as { common_message_id: string }).common_message_id),
+            ),
+        ).toEqual(['第二段', '第一段']);
+        // 读台账的人（monitor-dashboard / rebuild）拿到的 replies 因此是乱序的。
+    });
+
+    it('【现状】终态不单调：先落的 failed 会被后落的 completed 盖掉', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        // 第一段真的没发出去。
+        h.api.fail = new Error('feishu said no');
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 0, is_last: false }));
+
+        // 收尾那一段发成功了，于是整轮被记成 completed —— 尽管中间少了一段。
+        h.api.fail = undefined;
+        await deliverLarkChatResponse(h.deps, reply({ part_index: 1, is_last: true }));
+
+        expect(h.ledger.settled.map((s) => s.outcome.status)).toEqual(['failed', 'completed']);
+        // settle 是一次无条件 UPDATE（postgres-ledger.ts），没有"failed 之后不许回到
+        // completed"这条守卫，所以库里最后留下的是 completed。
+        expect(h.ledger.settled.at(-1)!.outcome.status).toBe('completed');
+    });
+});
+
+// ---------------------------------------------------------------------------
 // 谁在说话
 // ---------------------------------------------------------------------------
 

@@ -28,7 +28,8 @@
 // ## ACK 策略：只有两种情况不 ACK
 //
 //   1. JSON 解析不了 —— 退回去也还是解析不了，丢进 DLQ
-//   2. deliver 往外抛 —— 只有台账那一次读会往外抛，它发生在任何副作用之前
+//   2. deliver 往外抛 —— 它只在**还没调过飞书 API** 时才抛（台账那次读、agent 报的
+//      失败、空的收尾段、反查失败；分界线见 deliver.ts 文件头）
 //
 // 其余一律 ACK，**包括发送失败和落库失败**。这是刻意的：重投会让"已经发出去一半
 // 的分段消息"再发一遍，用户看到两条。代价是发不出去的消息就真的没了，只剩一行
@@ -67,24 +68,49 @@ export function larkChatResponseQueue(lane?: string): string {
  * 走 Dynamic Config 而不是 env：Release env 会被部署的 POST 清空，长期开关放那里
  * 会在某次部署之后悄悄失效，而这个开关失效的表现是"回复被两个服务各发一半"。
  *
- * 只在启动时读一次，因为订阅本身是启动动作。翻开关之后要重启这个 Deployment。
+ * **运行期反复读，不是启动时读一次**：见 LarkResponseSubscription 的文件内注释 ——
+ * 启动时读一次会让决策九的 drain 移交无法安全执行。
  *
- * 启动时没有请求上下文，所以 Dynamic Config 按 **prod** 解析 —— 它是一个全局开关，
- * 不是按泳道分别打开的旋钮。给某条泳道单独配这个 key 不会生效。
+ * 读的时候没有请求上下文，所以 Dynamic Config 按 **prod** 解析 —— 它是一个全局
+ * 开关，不是按泳道分别打开的旋钮。给某条泳道单独配这个 key 不会生效。
  */
 export const LARK_OUTBOUND_CONSUME_FLAG = 'enable_lark_outbound_consume';
 
 const dynamicConfig = new DynamicConfig();
 
-export function larkOutboundConsumeEnabled(): Promise<boolean> {
-    return dynamicConfig.getBool(LARK_OUTBOUND_CONSUME_FLAG, false);
+/**
+ * 读开关的**原始值**，不在这一层兜底成 boolean。
+ *
+ * `DynamicConfig.getBool(key, false)` 会把三件不同的事压成同一个 false：明确配了
+ * 关、压根没配、以及 fetch 失败（SDK 内部把它吞成默认值）。压平之后就没法区分
+ * 「操作者说关」和「这次没拿到有效指令」——而这两者的处置必须不同，见
+ * parseConsumeSwitch。
+ */
+export function larkOutboundConsumeSwitch(): Promise<string> {
+    return dynamicConfig.get(LARK_OUTBOUND_CONSUME_FLAG, '');
 }
 
-/** 消费者用到的 MQ 表面，就这四件事。 */
+/**
+ * 开关的三种读数：明确开 / 明确关 / **没有有效指令**（null）。
+ *
+ * 第三种不是"关"：它可能是配置还没建，也可能是 paas-engine 不可达。这时候唯一安全
+ * 的动作是不动 —— 既不擅自开（两个服务分摊同一条队列），也不擅自关（本服务已经
+ * 接管的话，一次配置抖动就让飞书回复没人消费，泳道队列 10 秒后被 DLX 弹回 prod）。
+ */
+export function parseConsumeSwitch(raw: string): boolean | null {
+    const value = raw.trim().toLowerCase();
+    if (['true', '1', 'yes'].includes(value)) return true;
+    if (['false', '0', 'no'].includes(value)) return false;
+    return null;
+}
+
+/** 消费者用到的 MQ 表面，就这五件事。 */
 export interface LarkResponseChannel {
     /** 声明队列与绑定。订一条没声明的队列等于守着空气。 */
     declareRoute(route: Route): Promise<void>;
     consume(queue: string, handler: (msg: ConsumeMessage) => Promise<void>): Promise<void>;
+    /** 交接屏障：basic.cancel → 等在途归零 → 才算真的把队列交出去。 */
+    drainConsumer(queue: string): Promise<void>;
     ack(msg: ConsumeMessage): void;
     nack(msg: ConsumeMessage, requeue: boolean): void;
 }
@@ -100,99 +126,170 @@ export interface LarkResponseConsumerDeps {
     lane?: string;
     /** 把这一段送到飞书。见 deliver.ts。 */
     deliver(response: LarkChatResponse, lane?: string): Promise<void>;
-    consumeEnabled(): Promise<boolean>;
+    /** 开关的原始值。见 larkOutboundConsumeSwitch。 */
+    readConsumeSwitch(): Promise<string>;
     observeQueueDelay(seconds: number): void;
     now?(): number;
 }
 
-/** 订阅成功时返回队列名，开关关着时返回 null。 */
-export async function startLarkResponseConsumer(
-    deps: LarkResponseConsumerDeps,
-): Promise<string | null> {
-    if (!(await enabled(deps.consumeEnabled))) {
-        console.warn(
-            `[lark-outbound] ${LARK_OUTBOUND_CONSUME_FLAG} is off; not consuming ` +
-                `${larkChatResponseQueue(deps.lane)} — flip it in Dynamic Config and restart`,
-        );
-        return null;
+/**
+ * 出站队列的订阅，**开关翻动时原地生效，不重启进程**。
+ *
+ * ## 为什么不能在启动时读一次开关
+ *
+ * 决策九的交接是「旧消费者 drain → 新消费者接手」，中间既不许重叠也不许有空窗。
+ * 如果订阅面由启动时机决定，两条路都走不通：
+ *
+ *   先起 lark-outbound   它立刻开始消费，和还没 drain 的 channel-server 抢同一条
+ *                        队列，RabbitMQ 轮询把回复随机劈成两半
+ *   先 drain 再起        drain 完成到新进程连上 PG / bot 目录 / Redis / MQ 并开始
+ *                        消费之间是空窗。**泳道队列带 10s TTL**，这段初始化时延足够
+ *                        让消息被 DLX 弹回 prod —— 泳道的回复从 prod 实例发出去
+ *
+ * 所以正确形态是进程先起来、依赖全部预热好、但**不订阅**；等开关翻开之后原地开始
+ * 消费。回滚方向同理：翻回去时走 drain 屏障把队列交还，也不重启。
+ *
+ * 定时调 reconcile 的是进程入口（outbound.ts），这里只负责"读一次开关，按结果增订
+ * 或移交"这一件事。
+ */
+export class LarkResponseSubscription {
+    private readonly deps: LarkResponseConsumerDeps;
+    /** 当前订阅着的队列。null = 没在消费，同时也是"上次的结论"。 */
+    private queue: string | null = null;
+    /** reconcile 自己的互斥：drain 最坏要等 60 秒，比定时器间隔长。 */
+    private inFlight: Promise<void> | null = null;
+
+    constructor(deps: LarkResponseConsumerDeps) {
+        this.deps = deps;
     }
 
-    const route = larkChatResponseRoute();
-    await deps.amqp.declareRoute(route);
-    const queue = larkChatResponseQueue(deps.lane);
-    const now = deps.now ?? Date.now;
+    subscribedQueue(): string | null {
+        return this.queue;
+    }
 
-    await deps.amqp.consume(queue, async (msg) => {
-        let response: LarkChatResponse;
+    /** 再读一次开关，按结果增订或移交。 */
+    reconcile(): Promise<void> {
+        // 定时器的间隔比 drain 的最坏耗时短，两次 reconcile 重叠是常态。不挡住的话
+        // 第二次会看到"还没订上"的中间状态，把同一条队列再订一遍 —— 同一个进程里
+        // 两个消费者分摊消息，prefetch 也翻倍。
+        if (this.inFlight) return this.inFlight;
+        this.inFlight = this.settle().finally(() => {
+            this.inFlight = null;
+        });
+        return this.inFlight;
+    }
+
+    private async settle(): Promise<void> {
+        const wanted = await this.wanted();
+        if (wanted === (this.queue !== null)) return;
+        if (wanted) await this.subscribe();
+        else await this.handOff();
+    }
+
+    /**
+     * 这一刻该不该消费。**没拿到有效指令就保持上次的结论**。
+     *
+     * 初始结论是"不消费"，所以"读不到"在启动时等于关着 —— 绝不会自己变宽到跟
+     * channel-server 抢队列。而已经接管之后读不到，保持消费才是对的：擅自停下来
+     * 会造成一个没人告警的静默断流。
+     */
+    private async wanted(): Promise<boolean> {
+        let raw: string;
         try {
-            response = JSON.parse(msg.content.toString()) as LarkChatResponse;
-        } catch {
-            console.error(
-                `[lark-outbound] malformed message on ${queue}, sending to DLQ: ` +
-                    msg.content.toString().slice(0, 200),
-            );
-            deps.amqp.nack(msg, false);
-            return;
-        }
-
-        // 归属判断必须先于任何副作用：一行库不查、一个飞书 API 不调。
-        if (response.channel !== LARK_CHANNEL) {
-            // 稳定的 event 名，make logs KEYWORD=chat_response_foreign_channel 可捞。
-            console.error(
-                JSON.stringify({
-                    event: 'chat_response_foreign_channel',
-                    queue,
-                    channel: response.channel ?? null,
-                    session_id: response.session_id ?? null,
-                    message_id: response.message_id ?? null,
-                    consumer_tag: msg.fields?.consumerTag ?? null,
-                }),
-            );
-            deps.amqp.nack(msg, false);
-            return;
-        }
-
-        // 队列积压。没有 published_at 就不记 —— 补一个 0 会把曲线压平，
-        // 而"看不出积压"正是切流时最不该有的盲区。
-        if (response.published_at) {
-            const delayMs = now() - response.published_at;
-            if (delayMs > 0) deps.observeQueueDelay(delayMs / 1000);
-        }
-
-        try {
-            await deps.deliver(response, laneFromMessage(msg));
+            raw = await this.deps.readConsumeSwitch();
         } catch (error) {
-            // 走到这里只有一种可能：deliver 在做出任何副作用之前就失败了（台账那
-            // 次读）。此时消息还没发出去，丢进 DLQ 可查可重放。
-            console.error(`[lark-outbound] ${queue} failed before any side effect:`, error);
-            deps.amqp.nack(msg, false);
-            return;
+            console.error(
+                `[lark-outbound] lark_outbound_switch_unavailable: could not read ` +
+                    `${LARK_OUTBOUND_CONSUME_FLAG}; keeping ` +
+                    `${this.queue ? `consuming ${this.queue}` : 'off'}:`,
+                error,
+            );
+            return this.queue !== null;
         }
 
-        deps.amqp.ack(msg);
-    });
+        const parsed = parseConsumeSwitch(raw);
+        if (parsed === null) {
+            console.warn(
+                `[lark-outbound] lark_outbound_switch_unavailable: ` +
+                    `${LARK_OUTBOUND_CONSUME_FLAG} is unset or unreadable ("${raw}"); keeping ` +
+                    `${this.queue ? `consuming ${this.queue}` : 'off'}`,
+            );
+            return this.queue !== null;
+        }
+        return parsed;
+    }
 
-    console.info(`[lark-outbound] consuming ${queue}`);
-    return queue;
-}
+    private async subscribe(): Promise<void> {
+        const route = larkChatResponseRoute();
+        await this.deps.amqp.declareRoute(route);
+        const queue = larkChatResponseQueue(this.deps.lane);
+        await this.deps.amqp.consume(queue, this.handler(queue));
+        // 订上之后才记账：declare / consume 抛错时下一次 reconcile 会重来。
+        this.queue = queue;
+        console.info(`[lark-outbound] consuming ${queue}`);
+    }
 
-/**
- * 读开关，**读不到一律当关**。
- *
- * DynamicConfig 自己会把 fetch 失败吞成默认值，但读取方也可能因为别的原因抛。
- * 两种情况的处置完全一样：这次没拿到有效指令，就不许自己变宽。变宽的后果是静默的
- * ——cutover 窗口里 channel-server 仍然订阅着同一条飞书队列，两个消费者守着它，
- * RabbitMQ 轮询把回复随机劈成两半，不报错、不留痕。
- */
-async function enabled(read: () => Promise<boolean>): Promise<boolean> {
-    try {
-        return await read();
-    } catch (error) {
-        console.error(
-            `[lark-outbound] could not read ${LARK_OUTBOUND_CONSUME_FLAG}; ` +
-                'staying off (widening would make two services share one queue):',
-            error,
-        );
-        return false;
+    private async handOff(): Promise<void> {
+        const queue = this.queue!;
+        // 先 drain 再记账：drain 抛错说明队列还可能在投递，此时清掉记账等于自己
+        // 骗自己已经交出去了。
+        await this.deps.amqp.drainConsumer(queue);
+        this.queue = null;
+        console.info(`[lark-outbound] handed ${queue} back (switch is off)`);
+    }
+
+    private handler(queue: string): (msg: ConsumeMessage) => Promise<void> {
+        const deps = this.deps;
+        const now = deps.now ?? Date.now;
+
+        return async (msg) => {
+            let response: LarkChatResponse;
+            try {
+                response = JSON.parse(msg.content.toString()) as LarkChatResponse;
+            } catch {
+                console.error(
+                    `[lark-outbound] malformed message on ${queue}, sending to DLQ: ` +
+                        msg.content.toString().slice(0, 200),
+                );
+                deps.amqp.nack(msg, false);
+                return;
+            }
+
+            // 归属判断必须先于任何副作用：一行库不查、一个飞书 API 不调。
+            if (response.channel !== LARK_CHANNEL) {
+                // 稳定的 event 名，make logs KEYWORD=chat_response_foreign_channel 可捞。
+                console.error(
+                    JSON.stringify({
+                        event: 'chat_response_foreign_channel',
+                        queue,
+                        channel: response.channel ?? null,
+                        session_id: response.session_id ?? null,
+                        message_id: response.message_id ?? null,
+                        consumer_tag: msg.fields?.consumerTag ?? null,
+                    }),
+                );
+                deps.amqp.nack(msg, false);
+                return;
+            }
+
+            // 队列积压。没有 published_at 就不记 —— 补一个 0 会把曲线压平，
+            // 而"看不出积压"正是切流时最不该有的盲区。
+            if (response.published_at) {
+                const delayMs = now() - response.published_at;
+                if (delayMs > 0) deps.observeQueueDelay(delayMs / 1000);
+            }
+
+            try {
+                await deps.deliver(response, laneFromMessage(msg));
+            } catch (error) {
+                // deliver 只在**还没调过飞书 API** 时才往外抛（分界线见 deliver.ts
+                // 文件头）。此时消息没发出去，丢进 DLQ 可查可重放。
+                console.error(`[lark-outbound] ${queue} failed before any side effect:`, error);
+                deps.amqp.nack(msg, false);
+                return;
+            }
+
+            deps.amqp.ack(msg);
+        };
     }
 }

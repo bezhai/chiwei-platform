@@ -16,14 +16,18 @@
 // 4 和 5 之间没有事务保护是既有形态：把台账拉进同一个事务，会让事务横跨一次飞书
 // API 之后的两张表，锁的持有时间被拉长，而这条链路是并发消费的。
 //
-// ## 失败一律不往外抛（除了台账那一次读）
+// ## 失败往不往外抛，分界线是「这一刻飞书 API 调没调过」
 //
-// 发送失败、落库失败，本函数都**吃掉并返回**，只在台账上记一个 failed。上游因此
-// 会 ACK 这条消息。这是刻意的，不是遗漏 —— 重投会让"已经发出去一半的分段消息"
-// 再发一遍，用户看到两条。代价是发不出去的消息就真的没了，只剩一行错误日志。
+// **调过了**（包括调用本身抛错 —— 请求可能已经落到对面，只是响应没回来）：一律
+// 吃掉，只在台账上记 failed，上游因此 ACK。重投会让"已经发出去一半的分段消息"
+// 再发一遍，真人看到两条；代价是发不出去的消息就真的没了，只剩一行错误日志。
 //
-// 唯一往外抛的是**台账那一次读**：它发生在任何副作用之前，此时重投是安全的，
-// 而吃掉它等于把一次数据库抖动变成一条永远发不出去的回复。
+// **还没调过**（台账那一次读、agent 自己报的失败、空的收尾段、反查失败）：一律
+// 往外抛，交给队列层处置。此时消息一个字都没发出去，重投是安全的，而吃掉台账写
+// 失败等于把一次数据库抖动变成一条**永远停在 pending** 的回复 —— 它本来救得回来。
+//
+// 这条线跟"在不在 try 块里"不是一回事：反查失败落在 catch 里，但它发生在发送之前。
+// 所以分界线由一个显式的标志表达（spokeToLark），不由代码结构隐含。
 //
 // ## 已知残留：ACK 之前崩溃会重发
 //
@@ -124,7 +128,9 @@ export async function deliverLarkChatResponse(
             console.error(
                 `[lark-outbound] agent failed: session=${sessionId} error=${response.error}`,
             );
-            if (ledgerRow) await settleQuietly(deps, sessionId!, { status: 'failed' });
+            // 消息一个字都没发出去，所以这次写入**失败就抛**：重投安全，而吞掉会让
+            // 这一行台账永远停在 pending（见文件头「分界线」）。
+            if (ledgerRow) await deps.ledger.settle(sessionId!, { status: 'failed' });
             return;
         }
 
@@ -132,12 +138,15 @@ export async function deliverLarkChatResponse(
             console.warn(`[lark-outbound] empty content: session=${sessionId} part=${partIndex}`);
             // 收尾那一段是空的仍然要收口，否则这次回答永远停在 pending。
             // **不带 responseText** —— 写空会把前面几段落好的全文抹掉。
+            // 同样在发送之前，同样失败就抛。
             if (isLast && ledgerRow) {
-                await settleQuietly(deps, sessionId!, { status: 'completed' });
+                await deps.ledger.settle(sessionId!, { status: 'completed' });
             }
             return;
         }
 
+        // 分界线本身。飞书 API 抛错**不代表**请求没送到对面，所以它在调用之前置位。
+        let spokeToLark = false;
         try {
             const target = await resolveTarget(deps, response, isProactive);
 
@@ -145,6 +154,7 @@ export async function deliverLarkChatResponse(
             if (partIndex > 0) await deps.wait(SEGMENT_GAP_MS);
 
             const sendStartedAt = Date.now();
+            spokeToLark = true;
             const sentMessageId = await send(deps, response, target, partIndex, isProactive);
             const sendSeconds = (Date.now() - sendStartedAt) / 1000;
             deps.observe('channel_send', sendSeconds);
@@ -211,7 +221,7 @@ export async function deliverLarkChatResponse(
                 }),
                 error,
             );
-            if (ledgerRow) await settleQuietly(deps, sessionId!, { status: 'failed' });
+            if (ledgerRow) await settleFailed(deps, sessionId!, spokeToLark);
         }
     });
 }
@@ -366,18 +376,27 @@ async function record(
 }
 
 /**
- * 落终态，失败只记日志。
+ * 出错之后落一个 failed 终态。
  *
- * 走到这里说明前面已经出过一次错（或者 agent 自己报了失败），台账再写不进去也没有
- * 别的补救手段了。往外抛只会让上游把这条消息扔进 DLQ，而消息可能已经真的发出去了。
+ * 这次写入自己再失败的话，吞不吞取决于 **spokeToLark** —— 本文件唯一一处"同一个
+ * 动作两种失败处置"，所以分界线只在这里表达一次，别再散到各个分支上：
+ *
+ *   没调过飞书 API   往外抛。消息没发出去，重投安全；吞掉等于把一次数据库抖动
+ *                    变成一条永远停在 pending 的台账
+ *   调过（含调用抛错）吞掉。往外抛会让上游重投，真人收到第二条 —— 比台账停在
+ *                    pending 严重得多
  */
-async function settleQuietly(
+async function settleFailed(
     deps: LarkDeliveryDeps,
     sessionId: string,
-    outcome: { status: 'completed' | 'failed' },
+    spokeToLark: boolean,
 ): Promise<void> {
+    if (!spokeToLark) {
+        await deps.ledger.settle(sessionId, { status: 'failed' });
+        return;
+    }
     try {
-        await deps.ledger.settle(sessionId, outcome);
+        await deps.ledger.settle(sessionId, { status: 'failed' });
     } catch (error) {
         console.error(`[lark-outbound] failed to settle session=${sessionId}:`, error);
     }
