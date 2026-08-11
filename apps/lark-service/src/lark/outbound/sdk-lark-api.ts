@@ -19,18 +19,34 @@ import { context } from '@inner/shared/middleware';
 import { Readable } from 'node:stream';
 
 import type { LarkCredentials } from '../credentials';
-import type { LarkOutboundApi, LarkSentMessage } from './lark-api';
+import type {
+    LarkCard,
+    LarkMessageInfo,
+    LarkMessagePage,
+    LarkOutboundApi,
+    LarkSentMessage,
+    LarkUserInfo,
+} from './lark-api';
 import type { PostContent } from './post-content';
 
 /**
- * 出站用到的那四个 LarkClient 方法。
+ * 端口用到的那些 LarkClient 方法。
  *
  * 写成 Pick 而不是抄一遍签名：真的 LarkClient 天然满足它，测试的手写替身也满足它，
  * 而 lark-utils 那边改了签名这里会编译期报错。
  */
 export type LarkApiClient = Pick<
     LarkClient,
-    'send' | 'reply' | 'deleteMessage' | 'uploadImage'
+    | 'send'
+    | 'reply'
+    | 'deleteMessage'
+    | 'uploadImage'
+    | 'getMessageInfo'
+    | 'getMessageList'
+    | 'getUserInfo'
+    | 'downloadResource'
+    | 'addChatMember'
+    | 'request'
 >;
 
 /** 这次调用该用哪个 bot 的飞书客户端。 */
@@ -43,11 +59,54 @@ export interface LarkOutboundBot {
     credentials: LarkCredentials;
 }
 
-/** 飞书富文本消息的类型标记。 */
+/** 飞书的消息类型标记。 */
 const POST_MSG_TYPE = 'post';
+const TEXT_MSG_TYPE = 'text';
+const CARD_MSG_TYPE = 'interactive';
+const STICKER_MSG_TYPE = 'sticker';
+const IMAGE_MSG_TYPE = 'image';
 
 /** 富文本的语言键。只发中文 —— 赤尾不说别的语言，多列一个键飞书也只挑一个用。 */
 const wrapPost = (content: PostContent) => ({ zh_cn: content });
+
+/**
+ * 飞书查回来的那些形状。SDK 那边这些接口的返回类型是 any，所以在这里写一遍 ——
+ * 唯一一处知道"飞书的字段叫什么"的地方，端口以上一律是驼峰。
+ */
+interface RawLarkMessage {
+    message_id?: string;
+    chat_id?: string;
+    msg_type?: string;
+    create_time?: string;
+    root_id?: string;
+    parent_id?: string;
+    thread_id?: string;
+    deleted?: boolean;
+    sender?: { id?: string; id_type?: string; sender_type?: string };
+    body?: { content?: string };
+    mentions?: Array<{ key?: string; id?: string; name?: string }>;
+}
+
+/** 一条查回来的消息翻成端口的口径。飞书没给的字段如实留空，不兜默认值。 */
+function messageInfoOf(raw: RawLarkMessage): LarkMessageInfo {
+    return {
+        // 按主键查回来的东西没有 message_id 是不可能的；真发生了也不该编一个出来，
+        // 空串会让「这条是不是我发的」之类的比较悄悄成立。
+        messageId: raw.message_id!,
+        chatId: raw.chat_id,
+        senderId: raw.sender?.id,
+        senderIdType: raw.sender?.id_type,
+        senderType: raw.sender?.sender_type,
+        messageType: raw.msg_type,
+        createTime: raw.create_time,
+        content: raw.body?.content,
+        mentions: raw.mentions ?? [],
+        rootId: raw.root_id,
+        parentId: raw.parent_id,
+        threadId: raw.thread_id,
+        deleted: raw.deleted,
+    };
+}
 
 /**
  * 生产用的客户端池。
@@ -96,21 +155,142 @@ export function larkClientPool(
 }
 
 export function createSdkLarkApi(pool: LarkClientPool): LarkOutboundApi {
+    const sent = (resp: { message_id?: string } | undefined): LarkSentMessage => ({
+        messageId: resp?.message_id,
+    });
+
     return {
+        // ---- 发 ----
+
         async sendPost(chatId, content): Promise<LarkSentMessage> {
-            const resp = await pool.current().send(chatId, wrapPost(content), POST_MSG_TYPE);
-            return { messageId: resp?.message_id };
+            return sent(await pool.current().send(chatId, wrapPost(content), POST_MSG_TYPE));
         },
 
-        async replyPost(messageId, content, inThread): Promise<LarkSentMessage> {
-            const resp = await pool
-                .current()
-                .reply(messageId, wrapPost(content), POST_MSG_TYPE, inThread);
-            return { messageId: resp?.message_id };
+        async sendText(chatId, text): Promise<LarkSentMessage> {
+            return sent(await pool.current().send(chatId, { text }, TEXT_MSG_TYPE));
         },
+
+        async sendCard(chatId, card: LarkCard): Promise<LarkSentMessage> {
+            return sent(await pool.current().send(chatId, card, CARD_MSG_TYPE));
+        },
+
+        async sendSticker(chatId, fileKey): Promise<LarkSentMessage> {
+            return sent(
+                await pool.current().send(chatId, { file_key: fileKey }, STICKER_MSG_TYPE),
+            );
+        },
+
+        // ---- 回 ----
+
+        async replyPost(messageId, content, inThread): Promise<LarkSentMessage> {
+            return sent(
+                await pool.current().reply(messageId, wrapPost(content), POST_MSG_TYPE, inThread),
+            );
+        },
+
+        async replyText(messageId, text, inThread): Promise<LarkSentMessage> {
+            return sent(
+                await pool.current().reply(messageId, { text }, TEXT_MSG_TYPE, inThread),
+            );
+        },
+
+        async replyCard(messageId, card: LarkCard, inThread): Promise<LarkSentMessage> {
+            return sent(await pool.current().reply(messageId, card, CARD_MSG_TYPE, inThread));
+        },
+
+        async replyImage(messageId, imageKey): Promise<LarkSentMessage> {
+            return sent(
+                await pool.current().reply(messageId, { image_key: imageKey }, IMAGE_MSG_TYPE),
+            );
+        },
+
+        async replyTemplate(messageId, templateId, variables): Promise<LarkSentMessage> {
+            // 模板卡片是 interactive 里的一个子形状，包法定在这里 —— 每个调用点各包
+            // 一遍的话，包错的那一个要到用户敲「帮助」时才暴露。
+            return sent(
+                await pool.current().reply(
+                    messageId,
+                    {
+                        type: 'template',
+                        data: { template_id: templateId, template_variable: variables },
+                    },
+                    CARD_MSG_TYPE,
+                ),
+            );
+        },
+
+        // ---- 撤回 ----
 
         async recall(messageId): Promise<void> {
             await pool.current().deleteMessage(messageId);
+        },
+
+        // ---- 查 ----
+
+        async getMessage(messageId): Promise<LarkMessageInfo | null> {
+            const resp = (await pool.current().getMessageInfo(messageId)) as
+                | { items?: RawLarkMessage[] }
+                | undefined;
+            // 按主键查却返回列表，是这个接口为合并转发留的形状，不是语义。没有第一条
+            // 就是"这条消息不在了"，端口把它说成 null 而不是让调用方去解列表。
+            const first = resp?.items?.[0];
+            return first ? messageInfoOf(first) : null;
+        },
+
+        async listMessages(query): Promise<LarkMessagePage> {
+            const resp = (await pool.current().getMessageList({
+                chatId: query.chatId,
+                startTime: query.startTime,
+                endTime: query.endTime,
+                pageToken: query.pageToken,
+            })) as
+                | { items?: RawLarkMessage[]; has_more?: boolean; page_token?: string }
+                | undefined;
+            return {
+                items: (resp?.items ?? []).map(messageInfoOf),
+                // 平台没说就是没有下一页。undefined 交出去会让 `while (page.hasMore)`
+                // 这种写法退化成"永远只取一页"，而那看起来完全正常。
+                hasMore: resp?.has_more ?? false,
+                pageToken: resp?.page_token,
+            };
+        },
+
+        async getUser(unionId): Promise<LarkUserInfo | null> {
+            const resp = (await pool.current().getUserInfo(unionId, 'union_id')) as
+                | {
+                      user?: {
+                          union_id?: string;
+                          open_id?: string;
+                          name?: string;
+                          avatar?: { avatar_origin?: string };
+                      };
+                  }
+                | undefined;
+            const user = resp?.user;
+            if (!user) return null;
+            return {
+                unionId: user.union_id,
+                openId: user.open_id,
+                name: user.name,
+                avatarOrigin: user.avatar?.avatar_origin,
+            };
+        },
+
+        // ---- 改群 ----
+
+        async addChatMember(chatId, openId): Promise<void> {
+            await pool.current().addChatMember(chatId, openId, 'open_id');
+        },
+
+        // ---- 取字节 ----
+
+        async downloadResource(messageId, fileKey, type): Promise<Readable> {
+            // SDK 交回来的不是流本身，是一个能开流的句柄（它还能直接落盘、取文件名）。
+            // 端口只要字节，所以在这里就把流取出来。
+            const resp = (await pool.current().downloadResource(messageId, fileKey, type)) as {
+                getReadableStream(): Readable;
+            };
+            return resp.getReadableStream();
         },
 
         async uploadImage(image): Promise<string | null> {
@@ -118,6 +298,14 @@ export function createSdkLarkApi(pool: LarkClientPool): LarkOutboundApi {
             // 拆分这一批里顺手改。
             const resp = await pool.current().uploadImage(Readable.from(image));
             return resp?.image_key ?? null;
+        },
+
+        // ---- 逃生口 ----
+
+        request<T>(method: string, path: string, body: unknown): Promise<T> {
+            // 真身的位置参数是 (url, data, method) —— 跟这里的读法反着来。翻译只在这
+            // 一处做，接错了 SDK 会把 method 当 URL 打出去，报错跟卡片毫无关系。
+            return pool.current().request<T>(path, body, method);
         },
     };
 }

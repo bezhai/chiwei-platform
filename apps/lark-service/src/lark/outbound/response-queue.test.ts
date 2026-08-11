@@ -441,11 +441,6 @@ function tracedDelivery(): {
                 note('api:replyPost');
                 return { messageId: 'om_sent' };
             },
-            recall: async () => note('api:recall'),
-            uploadImage: async () => {
-                note('api:uploadImage');
-                return null;
-            },
         },
         render: async (markdown) => {
             note('render');

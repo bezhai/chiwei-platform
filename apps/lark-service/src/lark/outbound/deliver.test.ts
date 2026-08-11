@@ -17,7 +17,7 @@ import type {
     LarkResponseLedger,
     LarkResponseOutcome,
 } from './ledger';
-import type { LarkOutboundApi, LarkSentMessage } from './lark-api';
+import type { LarkSentMessage } from './lark-api';
 import type { PostContent } from './post-content';
 import type { LarkRenderContext } from './render';
 import type {
@@ -129,7 +129,9 @@ class MemoryLedger implements LarkResponseLedger {
 }
 
 interface ApiSpy {
-    api: LarkOutboundApi;
+    // 发消息那条链只声明它真的会打的两个方法（见 deliver.ts 的 LarkDeliveryDeps.api），
+    // 所以替身也只实现这两个 —— 端口再扩容也不会拖着这份测试一起改。
+    api: LarkDeliveryDeps['api'];
     sent: Array<{ chatId: string; content: PostContent }>;
     replied: Array<{ messageId: string; content: PostContent; inThread: boolean }>;
     /** 下一次发送飞书返回的 message_id。undefined = 平台没给。 */
@@ -152,12 +154,6 @@ function apiSpy(nextMessageId: string | undefined = 'om_sent'): ApiSpy {
                 if (spy.fail) throw spy.fail;
                 spy.replied.push({ messageId, content, inThread });
                 return { messageId: spy.nextMessageId };
-            },
-            async recall(): Promise<void> {
-                throw new Error('recall is not part of the chat_response path');
-            },
-            async uploadImage(): Promise<string | null> {
-                throw new Error('uploadImage is reached through the renderer, not directly');
             },
         },
     };

@@ -85,7 +85,14 @@ export type LarkSpeakAs = (
 export interface LarkDeliveryDeps {
     store: LarkOutboundStore;
     ledger: LarkResponseLedger;
-    api: LarkOutboundApi;
+    /**
+     * 发消息用的那两个方法，不是整个端口。
+     *
+     * 端口本身覆盖的是本服务对飞书的全部动作（指令要回卡片、定时任务要发日报、卡片
+     * 回调要打裸端点），而这条链只发富文本。声明成整个端口的后果不是权限问题，是
+     * 读的人无从知道这条链到底会打飞书的哪些接口。撤回那条链已经是这个写法。
+     */
+    api: Pick<LarkOutboundApi, 'sendPost' | 'replyPost'>;
     render: LarkPostRenderer;
     /** 这个 bot 在 common_user 里的身份。取不到**抛** —— 写空串等于写脏数据。 */
     botCommonUserId(botName: string): string;
