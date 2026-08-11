@@ -111,15 +111,40 @@ export interface LarkOutboundSubscriptionsDeps {
 }
 
 /**
+ * 一条队列在本进程眼里的状态。
+ *
+ * 两个 `mayBe*` 不是"中间态"，是操作抛错之后**唯一诚实的结论** —— 真实 MQ 端口的
+ * 两个入口都是「先产生副作用、再可能失败」，抛错既不证明副作用没发生，也不证明它
+ * 做完了。所以出错一律按**副作用已经发生**记：
+ *
+ *   mayBeConsuming  consume 抛错。订阅项已经躺在端口的重连恢复列表里且可恢复 ——
+ *                   断线重连会把它订回来。记成"没订上"的话，开关翻回去时看不出
+ *                   diff，那个消费者永远不会被 cancel，交接完成之后还在分摊消息。
+ *   mayBeReleased   drainConsumer 抛错。basic.cancel 早就发出去了，broker 侧已经
+ *                   不投递。记成"还订着"的话，开关翻回来时同样看不出 diff，这条
+ *                   队列从此没有任何消费者 —— 没有错误、没有告警，消息在里面堆着。
+ */
+type QueueState = 'consuming' | 'released' | 'mayBeConsuming' | 'mayBeReleased';
+
+/**
  * 出站队列的订阅，**开关翻动时原地生效，不重启进程**。
  */
 export class LarkOutboundSubscriptions {
     private readonly deps: LarkOutboundSubscriptionsDeps;
     /**
-     * 当前订着的队列名。**逐条记账**，不是一个"开着没开着"的布尔 —— 订一半失败时，
+     * 每条队列各记一笔。**逐条记账**，不是一个"开着没开着"的布尔 —— 订一半失败时，
      * 整体记账会让没订上的那条永远补不回来，而它的表现是"那条队列默默没人消费"。
+     *
+     * 这本账只记"队列上有没有消费者"，**不记"上次开关是什么结论"**（那是
+     * lastDecision）。两者混成一个状态的话，"首次翻开就订阅失败"会被读成"上次是
+     * 关的"，于是开关明明开着却再也不重试。
      */
-    private readonly subscribed = new Set<string>();
+    private readonly state = new Map<string, QueueState>();
+    /**
+     * 上一次**读到有效指令**时的结论。初始 false：冷启动等价于关，绝不会自己变宽
+     * 到跟 channel-server 抢队列。读不到时保持的就是它，跟订着几条无关。
+     */
+    private lastDecision = false;
     /** reconcile 自己的互斥：drain 最坏要等 60 秒，比定时器间隔长。 */
     private inFlight: Promise<void> | null = null;
 
@@ -127,8 +152,11 @@ export class LarkOutboundSubscriptions {
         this.deps = deps;
     }
 
+    /** 确认订上了的那些。`mayBe*` 不算 —— 对外只报有把握的。 */
     subscribedQueues(): string[] {
-        return [...this.subscribed];
+        return [...this.state]
+            .filter(([, state]) => state === 'consuming')
+            .map(([queue]) => queue);
     }
 
     /** 再读一次开关，按结果增订或移交。 */
@@ -143,13 +171,39 @@ export class LarkOutboundSubscriptions {
         return this.inFlight;
     }
 
+    /**
+     * 把每条队列推到开关要求的样子。**四种状态两个方向的行为表**：
+     *
+     * | 状态           | 开关开                        | 开关关 |
+     * |----------------|-------------------------------|--------|
+     * | consuming      | —                             | drain  |
+     * | released       | subscribe                     | —      |
+     * | mayBeConsuming | **先 drain 再 subscribe**     | drain  |
+     * | mayBeReleased  | subscribe                     | drain  |
+     *
+     * mayBeConsuming 的开方向是唯一一个复合动作，因为它是唯一一个"可能有一个我不
+     * 知道 tag 的消费者"的状态：端口的重连恢复会把它订回来并写上新 tag，此时直接
+     * 再 consume 一次就是 broker 上两个消费者，而旧那个的 tag 已经被覆盖、再也
+     * cancel 不掉。先 drain 一次把它摘干净，才谈得上"正好一个消费者"。
+     *
+     * 反过来 mayBeReleased 的开方向可以直接 subscribe：basic.cancel 已经发过了，
+     * 端口那一项复用之后重新注册，落地就是正好一个。这里**不能**也走 drain ——
+     * drain 抛错本来就多半是在途 handler 卡住，再 drain 一次只会继续卡着，而那时
+     * 开关已经要求恢复消费了。
+     */
     private async settle(): Promise<void> {
         const wanted = await this.wanted();
         for (const binding of this.deps.queues) {
             const queue = laneQueue(binding.route.queue, this.deps.lane);
-            if (wanted === this.subscribed.has(queue)) continue;
-            if (wanted) await this.subscribe(binding, queue);
-            else await this.handOff(queue);
+            const state = this.state.get(queue) ?? 'released';
+            if (wanted) {
+                if (state === 'consuming') continue;
+                if (state === 'mayBeConsuming') await this.handOff(queue);
+                await this.subscribe(binding, queue);
+            } else {
+                if (state === 'released') continue;
+                await this.handOff(queue);
+            }
         }
     }
 
@@ -161,8 +215,13 @@ export class LarkOutboundSubscriptions {
      * 会造成一个没人告警的静默断流。
      */
     private async wanted(): Promise<boolean> {
-        const keeping = (): string =>
-            this.subscribed.size > 0 ? `consuming ${this.subscribedQueues().join(', ')}` : 'off';
+        // 报的是"上次的结论"本身，不是"现在订着几条" —— 订阅失败之后这两者会分家，
+        // 而分家的那一刻正是最需要看懂这行日志的时候。
+        const keeping = (): string => {
+            if (!this.lastDecision) return 'off';
+            const queues = this.subscribedQueues();
+            return `on (consuming ${queues.join(', ') || 'nothing yet'})`;
+        };
 
         let raw: string;
         try {
@@ -173,7 +232,7 @@ export class LarkOutboundSubscriptions {
                     `${LARK_OUTBOUND_CONSUME_FLAG}; keeping ${keeping()}:`,
                 error,
             );
-            return this.subscribed.size > 0;
+            return this.lastDecision;
         }
 
         const parsed = parseConsumeSwitch(raw);
@@ -183,24 +242,28 @@ export class LarkOutboundSubscriptions {
                     `${LARK_OUTBOUND_CONSUME_FLAG} is unset or unreadable ("${raw}"); ` +
                     `keeping ${keeping()}`,
             );
-            return this.subscribed.size > 0;
+            return this.lastDecision;
         }
+        this.lastDecision = parsed;
         return parsed;
     }
 
     private async subscribe(binding: OutboundQueueBinding, queue: string): Promise<void> {
+        // 记账先于副作用：consume 抛错时订阅项已经在端口的重连恢复列表里了，抛完
+        // 再记就是记了个假账。
+        this.state.set(queue, 'mayBeConsuming');
         await this.deps.amqp.declareRoute(binding.route);
         await this.deps.amqp.consume(queue, binding.handler(queue));
-        // 订上之后才记账：declare / consume 抛错时下一次 reconcile 会重来。
-        this.subscribed.add(queue);
+        this.state.set(queue, 'consuming');
         console.info(`[lark-outbound] consuming ${queue}`);
     }
 
     private async handOff(queue: string): Promise<void> {
-        // 先 drain 再记账：drain 抛错说明队列还可能在投递，此时清掉记账等于自己
-        // 骗自己已经交出去了。
+        // 同理：drainConsumer 先发 basic.cancel 再等在途归零，超时抛错时 broker 侧
+        // 已经取消了。
+        this.state.set(queue, 'mayBeReleased');
         await this.deps.amqp.drainConsumer(queue);
-        this.subscribed.delete(queue);
-        console.info(`[lark-outbound] handed ${queue} back (switch is off)`);
+        this.state.set(queue, 'released');
+        console.info(`[lark-outbound] handed ${queue} back`);
     }
 }

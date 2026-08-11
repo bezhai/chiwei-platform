@@ -19,21 +19,55 @@ interface Subscribed {
     handler: MessageHandler;
 }
 
+/**
+ * 替身按**真实端口的副作用顺序**来：两个入口都是「先产生副作用、再可能失败」。
+ *
+ * `RabbitMQClient.consume` 先把订阅项 push 进重连恢复列表再去 broker 注册，注册抛错
+ * 时那一项已经在列表里且可恢复（断线重连会把它订回来）；`drainConsumer` 先摘掉重连
+ * 资格、先发 basic.cancel，再等在途归零，超时抛错时 broker 侧已经取消了。
+ *
+ * 「什么都没做就抛」的替身会把这两件事说成"失败=什么都没发生"，于是错误地证明
+ * 「下一次一定自愈」。
+ */
 class FakePort {
     readonly declared: Route[] = [];
+    /** broker 侧真的在投递的消费者。 */
     readonly subscribed: Subscribed[] = [];
+    /** 端口的重连恢复列表：断线重连会把这里面的订阅项重新注册。 */
+    private readonly recovering = new Map<string, MessageHandler>();
     readonly drained: string[] = [];
+    /** 订阅这条队列时抛错 —— 恢复列表已经登记，broker 侧没注册上。 */
+    failConsumeOn?: string;
+    /** drain 这条队列时抛错（在途没归零）—— basic.cancel 已经发出去了。 */
+    failDrainOn?: string;
 
     async declareRoute(route: Route): Promise<void> {
         this.declared.push(route);
     }
     async consume(queue: string, handler: MessageHandler): Promise<void> {
+        // 先进恢复列表、再去 broker 注册：注册抛错时那一项已经躺在列表里且可恢复。
+        this.recovering.set(queue, handler);
+        if (this.failConsumeOn === queue) throw new Error(`broker refused ${queue}`);
         this.subscribed.push({ queue, handler });
     }
     async drainConsumer(queue: string): Promise<void> {
+        // 先摘重连资格、先发 basic.cancel，再等在途归零：超时抛错时前两件已经做完。
+        this.recovering.delete(queue);
         this.drained.push(queue);
         const idx = this.subscribed.findIndex((s) => s.queue === queue);
         if (idx >= 0) this.subscribed.splice(idx, 1);
+        if (this.failDrainOn === queue) {
+            throw new Error(`[RabbitMQ] drain timed out on ${queue}`);
+        }
+    }
+
+    /** 断线重连：恢复列表里的订阅项被重新注册（真实端口 5 秒后就会做这件事）。 */
+    reconnect(): void {
+        for (const [queue, handler] of this.recovering) {
+            if (!this.subscribed.some((s) => s.queue === queue)) {
+                this.subscribed.push({ queue, handler });
+            }
+        }
     }
 
     queues(): string[] {
@@ -188,15 +222,118 @@ describe('reconcile — 运行期收窄', () => {
 
     it('drain 失败时拥有集合不回退（消息已经不该由我处理了），错误抛给调用方', async () => {
         const port = new FakePort();
-        port.drainConsumer = async () => {
-            throw new Error('broker gone');
-        };
+        port.failDrainOn = 'chat_response_lark';
         let owned = ['lark', 'qq'];
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
         owned = ['qq'];
-        await expect(subs.reconcile()).rejects.toThrow('broker gone');
+        await expect(subs.reconcile()).rejects.toThrow('drain timed out');
         expect(subs.owns('lark')).toBe(false);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 失败之后还能重试
+// ---------------------------------------------------------------------------
+
+describe('reconcile — 失败的那一步下次还会做', () => {
+    it('订阅抛错：下一次 reconcile 补上它，而不是把失败永久固化', async () => {
+        // 认领集合是 diff 的来源，也是旧队列 fail-closed 的依据。它要是在真的订上
+        // 之前就提交，失败之后算出来的 diff 就是空的 —— 这条 channel 的队列从此
+        // 没有消费者，而它已经被认领，没有任何一侧会再管它。
+        const port = new FakePort();
+        let owned = ['qq'];
+        const { subs } = makeSubs(port, async () => owned);
+        await subs.start();
+
+        port.failConsumeOn = 'chat_response_lark';
+        owned = ['qq', 'lark'];
+        await expect(subs.reconcile()).rejects.toThrow('broker refused chat_response_lark');
+
+        port.failConsumeOn = undefined;
+        await subs.reconcile();
+
+        expect(port.queues()).toContain('chat_response_lark');
+    });
+
+    it('订阅抛错、端口重连把它订回来：重订之前先摘干净，broker 上只留一个消费者', async () => {
+        // consume 抛错时订阅项已经在端口的重连恢复列表里，重连会把它订回来并写上新
+        // 的 consumerTag。直接再 consume 一次 = broker 上两个消费者，旧那个的 tag
+        // 已经被覆盖、再也 cancel 不掉 —— 它会活过下一次移交。
+        const port = new FakePort();
+        let owned = ['qq'];
+        const { subs } = makeSubs(port, async () => owned);
+        await subs.start();
+
+        port.failConsumeOn = 'chat_response_lark';
+        owned = ['qq', 'lark'];
+        await expect(subs.reconcile()).rejects.toThrow('broker refused');
+        expect(port.queues()).not.toContain('chat_response_lark');
+
+        port.reconnect();
+        port.failConsumeOn = undefined;
+        await subs.reconcile();
+
+        expect(port.drained).toEqual(['chat_response_lark']);
+        expect(port.queues().filter((q) => q === 'chat_response_lark')).toHaveLength(1);
+    });
+
+    it('订阅抛错之后那条 channel 又被移交：照样 drain 掉它', async () => {
+        // 抛错不代表没订上。记成"没订上"的话，移交时看不出 diff，重连恢复出来的
+        // 那个消费者永远不会被 cancel。
+        const port = new FakePort();
+        let owned = ['qq'];
+        const { subs } = makeSubs(port, async () => owned);
+        await subs.start();
+
+        port.failConsumeOn = 'chat_response_lark';
+        owned = ['qq', 'lark'];
+        await expect(subs.reconcile()).rejects.toThrow('broker refused');
+
+        port.failConsumeOn = undefined;
+        owned = ['qq'];
+        await subs.reconcile();
+
+        expect(port.drained).toEqual(['chat_response_lark']);
+    });
+
+    it('drain 抛错：下一次 reconcile 再排一次，不是就此认定交出去了', async () => {
+        // drain 超时抛错时 basic.cancel 已经发了，但在途 handler 还没跑完 —— 交接
+        // 屏障没有真正完成。下一次要继续等它归零，而不是当作已经交割。
+        const port = new FakePort();
+        port.failDrainOn = 'chat_response_lark';
+        let owned = ['lark', 'qq'];
+        const { subs } = makeSubs(port, async () => owned);
+        await subs.start();
+
+        owned = ['qq'];
+        await expect(subs.reconcile()).rejects.toThrow('drain timed out');
+
+        port.failDrainOn = undefined;
+        await subs.reconcile();
+
+        expect(port.drained).toEqual(['chat_response_lark', 'chat_response_lark']);
+        expect(subs.owns('lark')).toBe(false);
+    });
+
+    it('drain 抛错之后那条 channel 又被加回来：重新订上', async () => {
+        // basic.cancel 已经发出去了，broker 侧不再投递。记成"还订着"的话，回滚路径
+        // 上看不出 diff —— 这条队列从此没有任何消费者。
+        const port = new FakePort();
+        port.failDrainOn = 'chat_response_lark';
+        let owned = ['lark', 'qq'];
+        const { subs } = makeSubs(port, async () => owned);
+        await subs.start();
+
+        owned = ['qq'];
+        await expect(subs.reconcile()).rejects.toThrow('drain timed out');
+
+        port.failDrainOn = undefined;
+        owned = ['qq', 'lark'];
+        await subs.reconcile();
+
+        expect(port.queues()).toContain('chat_response_lark');
+        expect(subs.owns('lark')).toBe(true);
     });
 });

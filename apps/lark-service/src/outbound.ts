@@ -35,8 +35,8 @@ import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
 import { larkSpeakAs } from './lark/outbound/bot-context';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './lark/outbound/deliver';
+import { larkOutboundQueues } from './lark/outbound/queues';
 import { recallLarkResponse, type LarkRecallDeps } from './lark/outbound/recall';
-import { larkRecallBinding } from './lark/outbound/recall-queue';
 import { redisImageRegistry } from './lark/outbound/redis-image-registry';
 import { postgresLarkResponseLedger } from './lark/outbound/postgres-ledger';
 import { postgresLarkOutboundTables } from './lark/outbound/postgres-tables';
@@ -47,7 +47,6 @@ import {
     withRosterCache,
 } from './lark/outbound/mentions';
 import { createLarkPostRenderer } from './lark/outbound/render';
-import { larkChatResponseBinding } from './lark/outbound/response-queue';
 import {
     larkOutboundConsumeSwitch,
     LarkOutboundSubscriptions,
@@ -233,18 +232,13 @@ async function main(): Promise<void> {
     const subscription = new LarkOutboundSubscriptions({
         amqp,
         lane: getLane(),
-        queues: [
-            larkChatResponseBinding({
-                amqp,
-                deliver: (response, lane) =>
-                    deliverLarkChatResponse(outbound.delivery, response, lane),
-                observeQueueDelay: (seconds) => queueDelay.observe(seconds),
-            }),
-            larkRecallBinding({
-                amqp,
-                recall: (request) => recallLarkResponse(outbound.recall, request),
-            }),
-        ],
+        // 订哪几条队列在 lark/outbound/queues.ts —— 那份清单被测试钉着，少一条会红。
+        queues: larkOutboundQueues({
+            amqp,
+            deliver: (response, lane) => deliverLarkChatResponse(outbound.delivery, response, lane),
+            recall: (request) => recallLarkResponse(outbound.recall, request),
+            observeQueueDelay: (seconds) => queueDelay.observe(seconds),
+        }),
         readConsumeSwitch: larkOutboundConsumeSwitch,
     });
 
