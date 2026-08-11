@@ -24,7 +24,9 @@ import type {
     CommonUserRow,
     LarkChatKey,
     LarkChatRow,
+    LarkGroupBinding,
     LarkGroupChatFacts,
+    LarkGroupMemberRow,
     LarkMessageRow,
     LarkStore,
     LarkTables,
@@ -64,6 +66,8 @@ class MemoryLarkTables implements LarkStore {
     larkChats = new Map<string, Row>();
     larkGroupChats = new Map<string, LarkGroupChatFacts & { chat_id: string }>();
     larkMessages = new Map<string, Row>();
+    larkGroupMembers = new Map<string, LarkGroupMemberRow>();
+    larkGroupBindings = new Map<string, LarkGroupBinding>();
 
     /** 注入故障用。 */
     failLarkMessageInsert?: Error;
@@ -141,7 +145,38 @@ class MemoryLarkTables implements LarkStore {
         return (this.larkMessages.get(omId) as LarkMessageRow | undefined) ?? null;
     }
 
+    // 退群的人不从表里删，所以这里也不过滤 is_leave —— 真身怎么答，这里就怎么答。
+    async larkGroupMember(chatId: string, unionId: string): Promise<LarkGroupMemberRow | null> {
+        return this.larkGroupMembers.get(`${chatId}|${unionId}`) ?? null;
+    }
+
+    // 解绑是软删，所以 is_active 为假的行照样读得到。
+    async larkGroupBinding(chatId: string, unionId: string): Promise<LarkGroupBinding | null> {
+        return this.larkGroupBindings.get(`${chatId}|${unionId}`) ?? null;
+    }
+
     // ---- 写 ----
+
+    // (user_union_id, chat_id) 上没有唯一约束，所以真身那条是普通 insert：同一对
+    // 键写两次会留下两行。这里也不去重 —— 去重了，调用方"先读再写"的竞态就测不出来。
+    async insertLarkGroupBinding(chatId: string, unionId: string): Promise<void> {
+        this.larkGroupBindings.set(`${chatId}|${unionId}`, {
+            user_union_id: unionId,
+            chat_id: chatId,
+            is_active: true,
+        });
+    }
+
+    async setLarkGroupBindingActive(
+        chatId: string,
+        unionId: string,
+        isActive: boolean,
+    ): Promise<void> {
+        const at = `${chatId}|${unionId}`;
+        const row = this.larkGroupBindings.get(at);
+        // UPDATE 打不到行就是 no-op，不会凭空建一行出来。
+        if (row) this.larkGroupBindings.set(at, { ...row, is_active: isActive });
+    }
 
     async saveCommonUser(row: CommonUserRow): Promise<void> {
         if (this.failSaveCommonUser) throw this.failSaveCommonUser;
@@ -181,6 +216,9 @@ class MemoryLarkTables implements LarkStore {
         const existing = this.larkChats.get(chat.chat_id) as LarkChatRow | undefined;
         const winner = existing?.common_conversation_id ?? candidate;
         this.larkChats.set(chat.chat_id, {
+            // 冲突子句只写 common_conversation_id，同一行上的别的列（权限开关）原封
+            // 不动。整行覆盖会把它们抹掉，而真身不会。
+            ...existing,
             chat_id: chat.chat_id,
             // 已经有的行不改 chat_mode：那一行可能是别的代码路径按更准的信息建的。
             chat_mode: existing?.chat_mode ?? chat.chat_mode,

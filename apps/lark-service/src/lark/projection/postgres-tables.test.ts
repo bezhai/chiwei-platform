@@ -80,13 +80,32 @@ describe('读：找已有的对应关系', () => {
     });
 
     it('发送者档案查 lark_user（消息事件里没有名字）', async () => {
-        h.reply([{ LarkUser_union_id: 'on_1', LarkUser_name: '张三', LarkUser_avatar_origin: 'a' }]);
+        h.reply([
+            {
+                LarkUser_union_id: 'on_1',
+                LarkUser_name: '张三',
+                LarkUser_avatar_origin: 'a',
+                LarkUser_is_admin: true,
+            },
+        ]);
 
         expect(await h.store.larkUserProfile('on_1')).toEqual({
             name: '张三',
             avatar_origin: 'a',
+            is_admin: true,
         });
         expect(h.sqlOf('FROM "lark_user"').params).toEqual(['on_1']);
+    });
+
+    // 管理员标记跟名字在同一行上，多带一列不多一次查询。少带的话指令层要么再查一次
+    // lark_user，要么就只能不做管理员判定 —— 后者的表现是任何人都能敲「余额」。
+    it('管理员标记跟档案一起取回来，这一列是 nullable 的', async () => {
+        h.reply([{ LarkUser_union_id: 'on_1', LarkUser_name: '张三' }]);
+        expect(await h.store.larkUserProfile('on_1')).toEqual({
+            name: '张三',
+            avatar_origin: undefined,
+            is_admin: undefined,
+        });
     });
 
     it('会话对应查 lark_base_chat_info', async () => {
@@ -102,8 +121,43 @@ describe('读：找已有的对应关系', () => {
             chat_id: 'oc_1',
             chat_mode: 'group',
             common_conversation_id: 'cc_1',
+            permission_config: undefined,
         });
         expect(h.sqlOf('FROM "lark_base_chat_info"').params).toEqual(['oc_1']);
+    });
+
+    // 会话开了哪些开关跟会话对应在同一行上。指令层的白名单判定读它。
+    it('会话的权限开关跟着这一行一起回来', async () => {
+        h.reply([
+            {
+                LarkBaseChatInfo_chat_id: 'oc_1',
+                LarkBaseChatInfo_chat_mode: 'group',
+                LarkBaseChatInfo_permission_config: {
+                    open_repeat_message: true,
+                    allow_send_pixiv_image: false,
+                },
+            },
+        ]);
+
+        expect((await h.store.larkChat('oc_1'))!.permission_config).toEqual({
+            open_repeat_message: true,
+            allow_send_pixiv_image: false,
+        });
+    });
+
+    // gray_config 就在同一行上，端口刻意不暴露它：写它的 /config 指令已经删掉了
+    // （spec 已知缺陷四 —— 它写进去的值 agent-service 根本读不到）。留一个没人写的
+    // 读口，下一个人会以为那条链还活着。
+    it('端口不给 gray_config 留出口', async () => {
+        h.reply([
+            {
+                LarkBaseChatInfo_chat_id: 'oc_1',
+                LarkBaseChatInfo_chat_mode: 'group',
+                LarkBaseChatInfo_gray_config: { model: 'x' },
+            },
+        ]);
+
+        expect(Object.keys((await h.store.larkChat('oc_1'))!)).not.toContain('gray_config');
     });
 
     it('群资料查 lark_group_chat_info', async () => {
@@ -142,6 +196,129 @@ describe('读：找已有的对应关系', () => {
             common_message_id: 'cm_1',
         });
         expect(h.sqlOf('FROM "lark_message"').params).toEqual(['om_1']);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 指令层要读写的那几行（Task D0 扩的口）
+// ---------------------------------------------------------------------------
+
+describe('读：指令要问的那几行', () => {
+    it('按 (chat_id, union_id) 查一个人在这个群里的成员行', async () => {
+        h.reply([
+            {
+                LarkGroupMember_chat_id: 'oc_1',
+                LarkGroupMember_union_id: 'on_1',
+                LarkGroupMember_is_leave: false,
+                LarkGroupMember_is_manager: true,
+                LarkGroupMember_is_owner: false,
+            },
+        ]);
+
+        expect(await h.store.larkGroupMember('oc_1', 'on_1')).toEqual({
+            chat_id: 'oc_1',
+            union_id: 'on_1',
+            is_leave: false,
+            is_manager: true,
+            is_owner: false,
+        });
+        const select = h.sqlOf('FROM "lark_group_member"');
+        expect(select.params).toEqual(['oc_1', 'on_1']);
+    });
+
+    // 退群的人不会从表里删掉，只是把 is_leave 打上。所以"这个人在不在群里"是读
+    // 出来之后的判断，端口如实把这一位交出去 —— 在这里过滤掉，调用方就分不清
+    // "没这行"和"退群了"，而 /bind 对这两种情况要说的话不一样。
+    it('退群的人照样读得到，is_leave 如实带上', async () => {
+        h.reply([
+            {
+                LarkGroupMember_chat_id: 'oc_1',
+                LarkGroupMember_union_id: 'on_1',
+                LarkGroupMember_is_leave: true,
+            },
+        ]);
+
+        expect((await h.store.larkGroupMember('oc_1', 'on_1'))!.is_leave).toBe(true);
+    });
+
+    it('不在这个群里就是 null', async () => {
+        h.reply([]);
+        expect(await h.store.larkGroupMember('oc_1', 'on_1')).toBeNull();
+    });
+
+    it('按 (chat_id, union_id) 查绑定关系', async () => {
+        h.reply([
+            {
+                UserGroupBinding_id: 7,
+                UserGroupBinding_chat_id: 'oc_1',
+                UserGroupBinding_user_union_id: 'on_1',
+                UserGroupBinding_is_active: true,
+            },
+        ]);
+
+        expect(await h.store.larkGroupBinding('oc_1', 'on_1')).toEqual({
+            chat_id: 'oc_1',
+            user_union_id: 'on_1',
+            is_active: true,
+        });
+        const select = h.sqlOf('FROM "user_group_binding"');
+        expect(select.params).toEqual(['oc_1', 'on_1']);
+    });
+
+    // 解绑是软删，行留着。读回来的必须带上这一位，否则 /bind 会把一条已经解绑的
+    // 记录当成"已经绑过了"，然后什么也不做 —— 用户看到"已绑定"，退群时没人拉他。
+    it('解绑过的行照样读得到，is_active 是假', async () => {
+        h.reply([
+            {
+                UserGroupBinding_id: 7,
+                UserGroupBinding_chat_id: 'oc_1',
+                UserGroupBinding_user_union_id: 'on_1',
+                UserGroupBinding_is_active: false,
+            },
+        ]);
+
+        expect((await h.store.larkGroupBinding('oc_1', 'on_1'))!.is_active).toBe(false);
+    });
+
+    it('从来没绑过就是 null', async () => {
+        h.reply([]);
+        expect(await h.store.larkGroupBinding('oc_1', 'on_1')).toBeNull();
+    });
+});
+
+describe('写：绑定关系', () => {
+    it('新建一条绑定，建出来就是生效的', async () => {
+        await h.store.insertLarkGroupBinding('oc_1', 'on_1');
+
+        const insert = h.sqlOf('INSERT INTO "user_group_binding"');
+        expect(insert.sql).toContain('"user_union_id"');
+        expect(insert.sql).toContain('"chat_id"');
+        expect(insert.sql).toContain('"is_active"');
+        // 布尔在参数里是 1/0 而不是 true/false —— TypeORM 给 pg 驱动绑值时就这么转，
+        // 这是它真的发出去的东西，不是我们的口径。PG 那侧 '1'::boolean 就是 true。
+        expect(insert.params).toEqual(['on_1', 'oc_1', 1]);
+    });
+
+    // (user_union_id, chat_id) 上没有唯一约束，所以这里**不能**写 ON CONFLICT ——
+    // 写了 PG 会直接报"没有匹配的唯一索引"。判重靠调用方先读一次，那个竞态登记在
+    // 实体的注释里。
+    it('新建那条不带 ON CONFLICT（这张表上没有可用的唯一约束）', async () => {
+        await h.store.insertLarkGroupBinding('oc_1', 'on_1');
+        expect(h.sqlOf('INSERT INTO "user_group_binding"').sql).not.toContain('ON CONFLICT');
+    });
+
+    it('解绑是把 is_active 关掉，不是删行', async () => {
+        await h.store.setLarkGroupBindingActive('oc_1', 'on_1', false);
+
+        const update = h.sqlOf('UPDATE "user_group_binding"');
+        expect(update.sql).toContain('"is_active"');
+        expect(update.sql).not.toContain('DELETE');
+        expect(update.params).toEqual([0, 'on_1', 'oc_1']);
+    });
+
+    it('重新绑定是把同一行的 is_active 打开', async () => {
+        await h.store.setLarkGroupBindingActive('oc_1', 'on_1', true);
+        expect(h.sqlOf('UPDATE "user_group_binding"').params).toEqual([1, 'on_1', 'oc_1']);
     });
 });
 

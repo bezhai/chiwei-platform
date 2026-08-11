@@ -16,15 +16,19 @@ import {
 
 import { LarkBaseChatInfo } from '../../entities/lark-base-chat-info';
 import { LarkGroupChatInfo } from '../../entities/lark-group-chat-info';
+import { LarkGroupMember } from '../../entities/lark-group-member';
 import { LarkMessage } from '../../entities/lark-message';
 import { LarkUser } from '../../entities/lark-user';
 import { LarkUserOpenId } from '../../entities/lark-user-open-id';
+import { UserGroupBinding } from '../../entities/user-group-binding';
 import type {
     CommonConversationRow,
     CommonMessageRow,
     CommonUserRow,
     LarkChatRow,
+    LarkGroupBinding,
     LarkGroupChatFacts,
+    LarkGroupMemberRow,
     LarkMessageRow,
     LarkStore,
     LarkTables,
@@ -55,7 +59,13 @@ function tablesOn(manager: EntityManager): LarkTables {
             const row = await manager.getRepository(LarkUser).findOne({
                 where: { union_id: unionId },
             });
-            return row ? { name: row.name, avatar_origin: row.avatar_origin } : null;
+            return row
+                ? {
+                      name: row.name,
+                      avatar_origin: row.avatar_origin,
+                      is_admin: row.is_admin,
+                  }
+                : null;
         },
 
         async larkChat(chatId): Promise<LarkChatRow | null> {
@@ -67,6 +77,39 @@ function tablesOn(manager: EntityManager): LarkTables {
                       chat_id: row.chat_id,
                       chat_mode: row.chat_mode,
                       common_conversation_id: row.common_conversation_id,
+                      // gray_config 就在同一行上，**刻意不带出去**（见 tables.ts 的
+                      // LarkChatPermission）。
+                      permission_config: row.permission_config,
+                  }
+                : null;
+        },
+
+        async larkGroupMember(chatId, unionId): Promise<LarkGroupMemberRow | null> {
+            const row = await manager.getRepository(LarkGroupMember).findOne({
+                where: { chat_id: chatId, union_id: unionId },
+            });
+            return row
+                ? {
+                      chat_id: row.chat_id,
+                      union_id: row.union_id,
+                      // 退群的人不从表里删，只打这一位。判断留给调用方。
+                      is_leave: row.is_leave,
+                      is_manager: row.is_manager,
+                      is_owner: row.is_owner,
+                  }
+                : null;
+        },
+
+        async larkGroupBinding(chatId, unionId): Promise<LarkGroupBinding | null> {
+            const row = await manager.getRepository(UserGroupBinding).findOne({
+                where: { chatId, userUnionId: unionId },
+            });
+            return row
+                ? {
+                      user_union_id: row.userUnionId,
+                      chat_id: row.chatId,
+                      // 解绑是软删，这一位就是"还算不算数"。
+                      is_active: row.isActive,
                   }
                 : null;
         },
@@ -265,6 +308,23 @@ function tablesOn(manager: EntityManager): LarkTables {
                         `bot ${claim.bot_name}; it was never written to common_message`,
                 );
             }
+        },
+
+        async insertLarkGroupBinding(chatId, unionId): Promise<void> {
+            // 普通 insert，**不加 onConflict**：(user_union_id, chat_id) 上没有唯一
+            // 约束，PG 会直接拒绝一个指不到索引的冲突子句。判重靠调用方先读一次。
+            await manager
+                .createQueryBuilder()
+                .insert()
+                .into(UserGroupBinding)
+                .values({ userUnionId: unionId, chatId, isActive: true })
+                .execute();
+        },
+
+        async setLarkGroupBindingActive(chatId, unionId, isActive): Promise<void> {
+            await manager
+                .getRepository(UserGroupBinding)
+                .update({ userUnionId: unionId, chatId }, { isActive });
         },
 
         async markBotPresent(commonConversationId, botName, isActive): Promise<void> {

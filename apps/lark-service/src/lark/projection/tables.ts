@@ -57,13 +57,69 @@ export interface LarkChatKey {
 export interface LarkUserProfile {
     name: string;
     avatar_origin?: string;
+    /**
+     * 超级管理员。指令层的 IsAdmin 判定读它（「余额」、`/block` 那一类）。
+     *
+     * 这一列 nullable，而且**跟名字在同一行上** —— 投影为了拿名字本来就要读这一行，
+     * 多带一列不多一次查询。少带的话指令层只能再查一次 lark_user，或者干脆不做管理员
+     * 判定（表现是任何人都能敲「余额」）。
+     */
+    is_admin?: boolean;
 }
 
-/** lark_base_chat_info：会话与公共层会话的对应。 */
+/**
+ * 一个飞书会话上开了哪些开关（lark_base_chat_info.permission_config 这团 jsonb）。
+ *
+ * 全部可选：这一列本身 nullable，老会话上压根没有它，而"没配过"一律等于关。
+ *
+ * **不含 gray_config。** 那是同一行上的另一列，写它的 `/config` 指令已经删掉了 ——
+ * 它写进去的值 agent-service 根本读不到（spec 已知缺陷四）。留一个没人写的读口，
+ * 下一个人会以为那条链还活着。
+ */
+export interface LarkChatPermission {
+    allow_send_message?: boolean;
+    allow_send_pixiv_image?: boolean;
+    open_repeat_message?: boolean;
+    allow_send_limit_photo?: boolean;
+    /**
+     * 按群灰度。**当前没有读取方** —— 拆分前它进 chat.request 的 is_canary，而
+     * agent-service 的 ChatTrigger 上没有这个字段，在反序列化之前就被过滤掉了
+     * （见 rules/chat-request.ts 的注释）。列在这里是因为库里真的存着它。
+     */
+    is_canary?: boolean;
+}
+
+/** lark_base_chat_info：会话与公共层会话的对应，外加这个会话开了哪些开关。 */
 export interface LarkChatRow {
     chat_id: string;
     chat_mode: 'group' | 'topic' | 'p2p';
     common_conversation_id?: string;
+    permission_config?: LarkChatPermission;
+}
+
+/**
+ * lark_group_member：一个人在一个群里的成员身份。
+ *
+ * **退群不删行，只把 is_leave 打上**，所以"这个人在不在群里"是读回来之后的判断。
+ */
+export interface LarkGroupMemberRow {
+    chat_id: string;
+    union_id: string;
+    is_leave?: boolean;
+    is_manager?: boolean;
+    is_owner?: boolean;
+}
+
+/**
+ * user_group_binding：管理员用 `/bind` 把一个人绑在一个群上，他退群就自动拉回来。
+ *
+ * 解绑（`/unbind`）是软删 —— 行留着，只把 is_active 关掉。所以读回来必须带上这一位：
+ * 把解绑过的行当成"已经绑过了"，用户会看到"已绑定"而退群时没人拉他。
+ */
+export interface LarkGroupBinding {
+    user_union_id: string;
+    chat_id: string;
+    is_active: boolean;
 }
 
 /** lark_group_chat_info：群聊独有的资料。私聊没有这一行。 */
@@ -153,6 +209,17 @@ export interface LarkTables {
     larkMessage(omId: string): Promise<LarkMessageRow | null>;
 
     /**
+     * 一个人在一个群里的成员行。不在这个群里（从来没进过）就是 null。
+     *
+     * **退群的人照样读得到**，靠 is_leave 区分 —— 在这里过滤掉的话，调用方分不清
+     * "没这行"和"退群了"，而 `/bind` 对这两种情况要说的话不一样。
+     */
+    larkGroupMember(chatId: string, unionId: string): Promise<LarkGroupMemberRow | null>;
+
+    /** 这个人在这个群上的绑定关系。从来没绑过就是 null；解绑过的行照样读得到。 */
+    larkGroupBinding(chatId: string, unionId: string): Promise<LarkGroupBinding | null>;
+
+    /**
      * 认领这个飞书用户的公共层身份，**首写者成为 canonical**。
      *
      * 一条语句完成三件事：没有这一行就带着 candidate 插进去；已经有了就只刷可变列，
@@ -197,6 +264,23 @@ export interface LarkTables {
      * 短路。与其发一个注定失败的请求，不如在这里炸。
      */
     claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void>;
+
+    /**
+     * 建一条新的绑定，建出来就是生效的。
+     *
+     * **不是 upsert**：`(user_union_id, chat_id)` 上没有唯一约束，写 ON CONFLICT 会被
+     * PG 直接拒绝（"没有匹配的唯一索引"）。所以判重靠调用方先 larkGroupBinding 读一
+     * 次，两个管理员同时敲 `/bind` 会留下两行 —— 既有形态，登记在实体的注释里。
+     */
+    insertLarkGroupBinding(chatId: string, unionId: string): Promise<void>;
+
+    /**
+     * 把已有的绑定打开或关掉。
+     *
+     * `/unbind` 走这里而不是删行：历史上绑过谁是要留痕的，而且下次 `/bind` 同一个人
+     * 时复用这一行，不会越积越多。
+     */
+    setLarkGroupBindingActive(chatId: string, unionId: string, isActive: boolean): Promise<void>;
 
     /** upsert on (common_conversation_id, bot_name)。 */
     markBotPresent(

@@ -35,6 +35,8 @@ const EXPECTED_TABLES = [
     'lark_message',
     'lark_user',
     'lark_user_open_id',
+    // 表名里没有 lark 前缀，但只被 /bind、/unbind 和退群自动拉回读写。
+    'user_group_binding',
 ].sort();
 
 let probe: DataSource;

@@ -3,12 +3,12 @@ import { DataSource, type EntityMetadata } from 'typeorm';
 
 import { LARK_ENTITIES } from './index';
 
-// lark_* 七张表是**已经存在的物理表**，本服务只是换了个代码所有者。字段对不上
+// 飞书独占的这些表是**已经存在的物理表**，本服务只是换了个代码所有者。字段对不上
 // 的症状不是编译错误，是运行期 insert 报 column does not exist —— 而 cutover 窗口
 // 里 channel-server 还在写同样的表，一处写错就是两个服务对同一张表的理解分叉。
 //
 // 下面这份 EXPECTED 不是照着新实体抄的，是从**现有实现**解析出来的：用
-// apps/channel-server/src/infrastructure/dal/entities 的七个类喂给一次性 DataSource
+// apps/channel-server/src/infrastructure/dal/entities 的那几个类喂给一次性 DataSource
 // 跑 buildMetadatas()，把每列的 databaseName / type / length / nullable / array /
 // default 与索引、关系原样导出，再逐条写进这里。因此这份期望描述的是"今天生产上
 // 跑的映射"，本服务的实体必须长成它，而不是反过来。
@@ -202,6 +202,27 @@ const EXPECTED: ExpectedTable[] = [
         relations: [],
     },
     {
+        entity: 'UserGroupBinding',
+        table: 'user_group_binding',
+        primary: ['id'],
+        columns: [
+            column('chatId', 'chat_id', 'String'),
+            column('createdAt', 'created_at', 'timestamp', {
+                default: 'sql:now()',
+                createDate: true,
+            }),
+            column('id', 'id', 'Number'),
+            column('isActive', 'is_active', 'Boolean', { default: true }),
+            column('updatedAt', 'updated_at', 'timestamp', {
+                default: 'sql:now()',
+                updateDate: true,
+            }),
+            column('userUnionId', 'user_union_id', 'String'),
+        ],
+        indices: [],
+        relations: [],
+    },
+    {
         entity: 'LarkUserOpenId',
         table: 'lark_user_open_id',
         primary: ['app_id', 'open_id'],
@@ -283,7 +304,7 @@ beforeAll(async () => {
 });
 
 describe('lark_* entity mapping matches the physical schema', () => {
-    it('owns exactly the seven lark tables', () => {
+    it('owns exactly the eight Feishu-only tables', () => {
         expect(probe.entityMetadatas.map((m) => m.tableName).sort()).toEqual(
             EXPECTED.map((t) => t.table).sort(),
         );
