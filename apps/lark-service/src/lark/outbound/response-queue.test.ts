@@ -426,10 +426,11 @@ function tracedDelivery(): {
         ledger: {
             find: async (sessionId) => {
                 note(`db:ledger.find:${sessionId}`);
-                return { session_id: sessionId };
+                return { session_id: sessionId, replies: [], safety_status: 'pending' };
             },
             appendReply: async () => note('db:ledger.appendReply'),
             settle: async () => note('db:ledger.settle'),
+            settleSafety: async () => note('db:ledger.settleSafety'),
         },
         api: {
             sendPost: async () => {

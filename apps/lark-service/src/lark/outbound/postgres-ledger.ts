@@ -7,7 +7,12 @@
 import type { DataSource } from 'typeorm';
 import { CommonAgentResponse } from '@inner/shared/entities';
 
-import type { LarkAgentResponseRow, LarkResponseLedger, LarkResponseOutcome } from './ledger';
+import type {
+    LarkAgentResponseRow,
+    LarkResponseLedger,
+    LarkResponseOutcome,
+    LarkSafetyOutcome,
+} from './ledger';
 
 export function postgresLarkResponseLedger(dataSource: DataSource): LarkResponseLedger {
     const repo = () => dataSource.getRepository(CommonAgentResponse);
@@ -15,7 +20,14 @@ export function postgresLarkResponseLedger(dataSource: DataSource): LarkResponse
     return {
         async find(sessionId): Promise<LarkAgentResponseRow | null> {
             const row = await repo().findOneBy({ session_id: sessionId });
-            return row ? { session_id: row.session_id, bot_name: row.bot_name } : null;
+            return row
+                ? {
+                      session_id: row.session_id,
+                      bot_name: row.bot_name,
+                      replies: row.replies,
+                      safety_status: row.safety_status,
+                  }
+                : null;
         },
 
         async appendReply(sessionId, reply): Promise<void> {
@@ -41,6 +53,25 @@ export function postgresLarkResponseLedger(dataSource: DataSource): LarkResponse
                     ...(outcome.responseText === undefined
                         ? {}
                         : { response_text: outcome.responseText }),
+                },
+            );
+        },
+
+        async settleSafety(sessionId, outcome: LarkSafetyOutcome): Promise<void> {
+            // 只有 safety 这两列进 SET。replies 归出站、status / response_text 归出站
+            // 收尾、persona_id 归 agent-service —— 这条语句多带一列，DB 层拦不住。
+            await repo().update(
+                { session_id: sessionId },
+                {
+                    safety_status: outcome.status,
+                    safety_result: {
+                        reason: outcome.reason,
+                        detail: outcome.detail,
+                        recalled: outcome.recalled,
+                        failed: outcome.failed,
+                        // 物理列名口径：agent-service 读的就是这个 key。
+                        checked_at: outcome.checkedAt,
+                    },
                 },
             );
         },

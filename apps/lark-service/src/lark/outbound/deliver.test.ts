@@ -90,16 +90,28 @@ class MemoryOutboundTables implements LarkOutboundStore {
     }
 }
 
+/**
+ * 种进台账的行。
+ *
+ * 出站这条链只读 session_id 和 bot_name，撤回那两列（replies / safety_status）在
+ * 这里一律取默认值 —— 让每个用例只写自己关心的字段，别被跟它无关的列淹掉。
+ * 它们的行为由 recall.test.ts 覆盖。
+ */
+type LedgerSeed = Partial<LarkAgentResponseRow> & { session_id: string };
+
 class MemoryLedger implements LarkResponseLedger {
-    rows = new Map<string, LarkAgentResponseRow>();
+    rows = new Map<string, LedgerSeed>();
     appended: Array<{ sessionId: string; reply: unknown }> = [];
     settled: Array<{ sessionId: string; outcome: LarkResponseOutcome }> = [];
+    /** 出站一次都不该碰安全终态：碰了就等于覆盖掉安全判定的结论。 */
+    safetySettled: string[] = [];
     failFind?: Error;
     failSettle?: Error;
 
     async find(sessionId: string): Promise<LarkAgentResponseRow | null> {
         if (this.failFind) throw this.failFind;
-        return this.rows.get(sessionId) ?? null;
+        const row = this.rows.get(sessionId);
+        return row ? { replies: [], safety_status: 'pending', ...row } : null;
     }
 
     async appendReply(sessionId: string, reply: unknown): Promise<void> {
@@ -109,6 +121,10 @@ class MemoryLedger implements LarkResponseLedger {
     async settle(sessionId: string, outcome: LarkResponseOutcome): Promise<void> {
         if (this.failSettle) throw this.failSettle;
         this.settled.push({ sessionId, outcome });
+    }
+
+    async settleSafety(sessionId: string): Promise<void> {
+        this.safetySettled.push(sessionId);
     }
 }
 
@@ -638,6 +654,18 @@ describe('台账 — 终态', () => {
         );
 
         expect(h.ledger.settled[0]!.outcome.responseText).toBe('就这一段');
+    });
+
+    it('出站一次都不碰安全终态 —— 那两列归安全判定和撤回链路', async () => {
+        // 写入矩阵里 safety_status / safety_result 是 agent-service 与撤回链路双向写的
+        // 那一对，而这张表没有 channel 列。出站顺手写一次，覆盖掉的是别人的结论。
+        const h = harness();
+        seedRefs(h.store);
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1' });
+
+        await deliverLarkChatResponse(h.deps, reply({ is_last: true }));
+
+        expect(h.ledger.safetySettled).toEqual([]);
     });
 
     it('不是收尾就不落终态', async () => {

@@ -21,7 +21,7 @@
 
 import type { CommonAgentResponseReply } from '@inner/shared/entities';
 
-/** 台账里我们需要读的那一点点。C3（撤回）会在这里加 replies 与 safety 两列。 */
+/** 台账里我们需要读的那一点点：出站要前两列，撤回四列都要。 */
 export interface LarkAgentResponseRow {
     session_id: string;
     /**
@@ -31,6 +31,18 @@ export interface LarkAgentResponseRow {
      * 这里是它的回退来源。两个都没有就没人能发这条消息。
      */
     bot_name?: string;
+    /**
+     * 已经发出去的那几段。**撤回逐条撤的就是它**。
+     *
+     * 空数组不等于"这次回答没有回复"，更常见的是**出站还没落库** —— 撤回请求跑赢了
+     * 发送侧的台账写入。所以撤回读到空的时候走延时重投，不是判定无事可做。
+     */
+    replies: CommonAgentResponseReply[];
+    /**
+     * 安全判定的状态。撤回前要看它是不是已经落成终态（recalled / recall_failed），
+     * 落了就别再撤一次 —— 重复撤回会把 recalled 覆盖成 recall_failed。
+     */
+    safety_status: string;
 }
 
 /** 一次回答的终态。 */
@@ -43,6 +55,25 @@ export interface LarkResponseOutcome {
      * 写空会把前面几段已经落好的全文抹掉。
      */
     responseText?: string;
+}
+
+/**
+ * 撤回之后的安全终态。
+ *
+ * 跟 LarkResponseOutcome 是两回事，别合并：那个记的是"这次回答说完没有"，这个记的是
+ * "说出去的话被判违规之后处理成什么样了"。两者的写入方在拆分后也不同 —— 前者只有
+ * 出站，后者是 agent-service 和撤回链路双向写。
+ */
+export interface LarkSafetyOutcome {
+    status: 'recalled' | 'recall_failed';
+    /** 安全判定给的理由与细节，原样带回台账，撤回这一侧不解释也不改写。 */
+    reason?: string;
+    detail?: string;
+    /** 逐条撤回的结果计数。 */
+    recalled: number;
+    failed: number;
+    /** ISO 时间串。落进 safety_result 的 checked_at。 */
+    checkedAt: string;
 }
 
 export interface LarkResponseLedger {
@@ -59,4 +90,13 @@ export interface LarkResponseLedger {
 
     /** 落终态。 */
     settle(sessionId: string, outcome: LarkResponseOutcome): Promise<void>;
+
+    /**
+     * 落安全终态：safety_status + safety_result。
+     *
+     * 跟 settle 分开是因为写的是**另一对列、另一个写入方**：这两列 agent-service 也在
+     * 写（安全判定），而表上没有 channel 列，DB 层拦不住越界。合成一个方法就等于让
+     * 一次出站收尾有机会顺手覆盖掉安全判定的结论。
+     */
+    settleSafety(sessionId: string, outcome: LarkSafetyOutcome): Promise<void>;
 }
