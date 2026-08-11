@@ -74,10 +74,11 @@ import { larkPersonaIdOf, type LarkBotRoster } from '../bot-lookup';
 import { LARK_CHANNEL } from '../channel';
 import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkMessageReading } from '../message/read-message-event';
-import type { LarkInboundProjection } from '../projection/inbound-projection';
+import type { LarkRecordedInbound } from '../projection/inbound-projection';
 import type { CommonMessageClaim } from '../projection/tables';
 import { larkChatRequestEnricher } from './chat-request';
-import { LARK_COMMANDS, larkCommandRules } from './commands';
+import { larkCommandContext, type LarkCommandContext } from './command-context';
+import type { LarkCommand } from './commands';
 import { larkRuleMessage } from './rule-message';
 
 /**
@@ -92,21 +93,24 @@ const LARK_PERSONA_CHAT: RuleConfig = {
 };
 
 /**
- * 飞书指令 + 人格聊天，拼成本服务认的规则序列。
+ * 飞书指令 + 人格聊天，拼成本服务认的规则序列。**每条消息拼一次。**
+ *
+ * 为什么不是一个常量：指令的谓词和 handler 要读这条消息的飞书事实（会话开没开复读、
+ * 发送者是不是管理员、被 @ 的那个人是谁），而那些事实不能进渠道无关的 RuleMessage、也
+ * 不该退回进程级上下文（理由见 command-context.ts 的文件头）。于是指令是
+ * `(context) => RuleConfig`，序列跟着变成 `(context) => RuleConfig[]`。长命依赖不在这
+ * 一跳里 —— 它们在装配期就已经绑进 `commands` 了（见 commands.ts）。
  *
  * **人格聊天必须在最后**。它是 catch-all，排到指令前面的话所有 @bot 的消息都先落进聊天、
  * 指令永远轮不到；工具 bot 那条路更彻底 —— 引擎撞上 category 对不上且非 fallthrough 的
  * 规则会直接收敛成 no_match，于是工具 bot 连第一条指令都到不了。两种失效都没有运行期
  * 症状（赤尾照常回话、日志干净），所以这个顺序由 commands.test.ts 用真引擎钉住。
- *
- * 拼接是个函数而不是就地铺开的数组，就是为了让那条断言能拿一份真会命中的指令去跑。
  */
-export function larkChatRules(commands: RuleConfig[]): RuleConfig[] {
-    return [...commands, LARK_PERSONA_CHAT];
+export function larkChatRules(
+    commands: readonly LarkCommand[],
+): (context: LarkCommandContext) => RuleConfig[] {
+    return (context) => [...commands.map((command) => command(context)), LARK_PERSONA_CHAT];
 }
-
-/** 本服务认的规则序列。空槽位不产出规则，所以今天它仍然只有人格聊天一条（见 commands.ts）。 */
-export const LARK_CHAT_RULES: RuleConfig[] = larkChatRules(larkCommandRules(LARK_COMMANDS));
 
 /** 这条消息归谁处理的认领。 */
 export interface LarkMessageClaim {
@@ -116,8 +120,13 @@ export interface LarkMessageClaim {
 }
 
 export interface LarkRulesDeps {
-    /** 这个进程认哪些规则。装配期传入（见文件顶部）。 */
-    chatRules: RuleConfig[];
+    /**
+     * 这条消息要跑哪些规则。装配期定序、逐消息成型（见 larkChatRules）。
+     *
+     * 收的是**这一条消息**的指令上下文，所以指令拿到的必然是它自己那份事实 —— 不是
+     * 因为谁记得清 key，而是因为它压根没有别的来源。
+     */
+    chatRules: (context: LarkCommandContext) => RuleConfig[];
     /** 这个 bot 是人设还是工具。取不到就是不过滤。 */
     botRoleOf: (botName: string) => string | undefined;
     /** 这个 bot 在 common_user 里的身份。取不到直接抛 —— 群聊寻址全靠它。 */
@@ -149,16 +158,20 @@ export interface LarkRulesDeps {
 export async function applyLarkRules(
     deps: LarkRulesDeps,
     reading: LarkMessageReading,
-    projection: LarkInboundProjection,
+    recorded: LarkRecordedInbound,
     event: LarkEvent,
 ): Promise<RuleTerminalState> {
+    const projection = recorded.projection;
     const message = larkRuleMessage(reading, projection, {
         botName: event.botName,
         commonUserId: deps.botCommonUserId(event.botName),
     });
+    // 两份视图在同一步里现造，谁也不是谁的一部分：一份**擦掉**飞书痕迹交给渠道无关的
+    // 引擎，一份**保留**飞书痕迹交给飞书自己的指令（见 command-context.ts）。
+    const commandContext = larkCommandContext(reading, recorded, event.botName);
 
     const terminal = await runRulesWith(message, {
-        chatRules: deps.chatRules,
+        chatRules: deps.chatRules(commandContext),
         botRole: deps.botRoleOf(event.botName),
         notBlocked: deps.notBlocked,
     });
@@ -280,6 +293,11 @@ export interface LarkBotFacts extends LarkBotRoster {
 }
 
 export interface LarkRulesInfra {
+    /**
+     * 本进程认哪些指令，依赖已经绑上。组装根用 `larkCommands(deps)` 造它 —— 那一步
+     * 是长命依赖唯一的入口（见 commands.ts）。
+     */
+    commands: readonly LarkCommand[];
     bots: LarkBotFacts;
     store: { claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void> };
     marker: ChatTriggerMarkerStore;
@@ -307,7 +325,7 @@ export function assembleLarkRules(infra: LarkRulesInfra): LarkRulesDeps {
     );
 
     return {
-        chatRules: LARK_CHAT_RULES,
+        chatRules: larkChatRules(infra.commands),
         // 这两件事拆分前由共享包的 runRules 顺手装配，换成可注入内核之后归这里。
         botRoleOf: (botName) => infra.bots.getBotConfig(botName)?.bot_role,
         botCommonUserId: (botName) => infra.bots.getBotCommonUserId(botName),

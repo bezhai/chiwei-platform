@@ -18,15 +18,20 @@
 
 import type { LarkEvent } from './ingress/lark-event';
 import type { LarkMessageReading } from './message/read-message-event';
-import type { LarkInboundOutcome, LarkInboundProjection } from './projection/inbound-projection';
+import type { LarkInboundOutcome, LarkRecordedInbound } from './projection/inbound-projection';
 
 export interface LarkReceiveDeps {
     /** 换成公共层 id 并落账。这条该走别的泳道时交出去，返回 handed-off。 */
     project: (reading: LarkMessageReading, event: LarkEvent) => Promise<LarkInboundOutcome>;
-    /** 落账之后：跑规则，该发 chat.request 就发。 */
+    /**
+     * 落账之后：跑规则，该发 chat.request 就发。
+     *
+     * 收的是投影**整份**产出而不只是那组公共层 id —— 指令层要用的飞书事实（is_admin、
+     * 会话开关、群资料）是投影顺路读出来的，在这里被截掉的话，指令就只能各自再查一遍。
+     */
     applyRules: (
         reading: LarkMessageReading,
-        projection: LarkInboundProjection,
+        recorded: LarkRecordedInbound,
         event: LarkEvent,
     ) => Promise<void>;
 }
@@ -45,5 +50,5 @@ export async function receiveLarkMessage(
             `${reading.message.messageId} as ${outcome.projection.commonMessageId} ` +
             `in conversation ${outcome.projection.commonConversationId}`,
     );
-    await deps.applyRules(reading, outcome.projection, event);
+    await deps.applyRules(reading, outcome, event);
 }

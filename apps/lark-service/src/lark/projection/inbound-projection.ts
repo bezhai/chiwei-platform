@@ -62,6 +62,7 @@ import type { LarkInboundMessage } from '../message/parse-message';
 import type { LarkMention } from '../message/wire';
 import type {
     CommonConversationFacts,
+    LarkChatPermission,
     LarkGroupChatFacts,
     LarkStore,
     LarkTables,
@@ -81,9 +82,50 @@ export interface LarkInboundProjection {
     mentionedCommonUserIds: string[];
 }
 
+/**
+ * 投影**顺路读到**的、只有飞书指令层要用的那几件事。
+ *
+ * 为什么它跟着投影出来，而不是等指令自己去查：这三样都跟投影本来就要读的行在**同
+ * 一行**上 —— `is_admin` 跟发送者的名字（lark_user）、`permission_config` 跟会话映射
+ * （lark_base_chat_info）、`user_count` / `download_has_permission_setting` 跟
+ * attachment_policy（lark_group_chat_info）。多带一列不多一次查询；不带的话每条指令
+ * 各查一遍，而拆分前 channel-server 正是这么干的（sendPhoto 和 genMeme 各自又查了一
+ * 次 lark_group_chat_info，那一行明明已经在手上）。
+ *
+ * 这里的类型**不是**渠道无关的，所以它不进 RuleMessage（那份契约的文件头写死了这条）。
+ * 它的去处是 rules/command-context.ts —— 飞书私有、逐消息、随消息走。
+ */
+export interface LarkCommandFacts {
+    /**
+     * 收到这条消息的飞书应用。
+     *
+     * 事件里没带时按处理它的 bot 兜底，与建身份映射用的是**同一个值** —— 「撤回」拿它
+     * 跟被回复消息的 sender.id 比（bot 发的消息那里是 app_id 不是 union_id），两处算得
+     * 不一样就会去撤别人的消息。
+     */
+    appId: string;
+    /** 发送者是不是超级管理员（lark_user.is_admin）。这一列 nullable，读不到就是不是。 */
+    isAdmin: boolean;
+    /**
+     * 这个会话开了哪些开关。
+     *
+     * 读不到那一行、或者那一列是空，交出来的都是**空对象**而不是 undefined ——
+     * "没配过"一律等于关，让每个指令自己写 `?.` 兜底，迟早有人漏一处。
+     */
+    permission: LarkChatPermission;
+    /** 群资料。私聊没有这一行，如实给 null。 */
+    groupChat: LarkGroupChatFacts | null;
+}
+
 export type LarkInboundOutcome =
     | { kind: 'handed-off'; lane: string }
-    | { kind: 'recorded'; projection: LarkInboundProjection };
+    | ({ kind: 'recorded' } & LarkRecordedInbound);
+
+/** 落账之后交给规则段的东西：公共层那组 id，加上指令层要用的飞书事实。 */
+export interface LarkRecordedInbound {
+    projection: LarkInboundProjection;
+    commands: LarkCommandFacts;
+}
 
 export interface LarkInboundDeps {
     store: LarkStore;
@@ -115,7 +157,12 @@ export async function projectLarkInbound(
         // 飞书的消息事件里**没有发送者的名字**，也没有群名。两者都要回查飞书侧的
         // 档案表（它们由群成员事件和定时同步维护）。查一次，身份对应和落账都用它。
         const known = await lookUpKnownFacts(deps.store, reading.message);
-        const projection = await registerCommonIdentities(deps, reading, event, known);
+        const { projection, commands } = await registerCommonIdentities(
+            deps,
+            reading,
+            event,
+            known,
+        );
 
         const choice = await chooseInboundLane({
             dispatchEnabled: await deps.laneDispatchEnabled(),
@@ -159,7 +206,7 @@ export async function projectLarkInbound(
         }
 
         await recordInboundMessage(deps.store, reading, event, projection, known);
-        return { kind: 'recorded', projection };
+        return { kind: 'recorded', projection, commands };
     });
 }
 
@@ -189,7 +236,7 @@ async function registerCommonIdentities(
     reading: LarkMessageReading,
     event: LarkEvent,
     known: KnownLarkFacts,
-): Promise<LarkInboundProjection> {
+): Promise<LarkRecordedInbound> {
     const { store } = deps;
     const message = reading.message;
     const appId = message.appId || deps.appIdOfBot(event.botName);
@@ -211,7 +258,7 @@ async function registerCommonIdentities(
     const mentionedCommonUserIds = await registerMentionedCommonUsers(deps, appId, reading);
 
     const isDirect = message.chatType === 'p2p';
-    const commonConversationId = await registerCommonConversation(deps, {
+    const conversation = await registerCommonConversation(deps, {
         chatId: message.chatId,
         scope: reading.inbound.conversation_scope,
         facts: {
@@ -234,20 +281,28 @@ async function registerCommonIdentities(
     const commonMessageId = existing?.common_message_id ?? deps.newCommonId();
 
     return {
-        commonUserId,
-        commonConversationId,
-        commonMessageId,
-        commonRootMessageId:
-            (await resolveReference(store, message.rootId, 'root', message, commonMessageId)) ??
+        projection: {
+            commonUserId,
+            commonConversationId: conversation.commonConversationId,
             commonMessageId,
-        commonReplyMessageId: await resolveReference(
-            store,
-            message.parentId,
-            'parent',
-            message,
-            commonMessageId,
-        ),
-        mentionedCommonUserIds,
+            commonRootMessageId:
+                (await resolveReference(store, message.rootId, 'root', message, commonMessageId)) ??
+                commonMessageId,
+            commonReplyMessageId: await resolveReference(
+                store,
+                message.parentId,
+                'parent',
+                message,
+                commonMessageId,
+            ),
+            mentionedCommonUserIds,
+        },
+        commands: {
+            appId,
+            isAdmin: senderProfile?.is_admin === true,
+            permission: conversation.permission ?? {},
+            groupChat,
+        },
     };
 }
 
@@ -378,7 +433,7 @@ interface LarkConversationFacts {
 async function registerCommonConversation(
     deps: LarkInboundDeps,
     chat: LarkConversationFacts,
-): Promise<string> {
+): Promise<{ commonConversationId: string; permission?: LarkChatPermission }> {
     const { store } = deps;
     const existing = await store.larkChat(chat.chatId);
     const commonConversationId = await store.claimCommonConversationId(
@@ -395,7 +450,9 @@ async function registerCommonConversation(
         scope: chat.scope,
         ...chat.facts,
     });
-    return commonConversationId;
+    // 开关跟着这一次读一起交出去（见 LarkCommandFacts）。指令层再查一次 = 每条入站
+    // 消息多一条 SQL，而这一行此刻就在手上。
+    return { commonConversationId, permission: existing?.permission_config };
 }
 
 /**

@@ -9,7 +9,10 @@ import type { LarkEvent } from './ingress/lark-event';
 import type { LarkBotLookup } from './message/mentions';
 import { readLarkMessageEvent, type LarkMessageReading } from './message/read-message-event';
 import type { LarkMessageEvent } from './message/wire';
-import type { LarkInboundProjection } from './projection/inbound-projection';
+import type {
+    LarkInboundProjection,
+    LarkRecordedInbound,
+} from './projection/inbound-projection';
 import { receiveLarkMessage, type LarkReceiveDeps } from './receive-message';
 
 const bots: LarkBotLookup = { byAppId: () => null, byUnionId: () => null };
@@ -46,21 +49,31 @@ const projection: LarkInboundProjection = {
     mentionedCommonUserIds: [],
 };
 
+const recorded: LarkRecordedInbound = {
+    projection,
+    commands: {
+        appId: 'cli_chiwei',
+        isAdmin: true,
+        permission: { open_repeat_message: true },
+        groupChat: null,
+    },
+};
+
 function wire(overrides: Partial<LarkReceiveDeps> = {}) {
     const trace: string[] = [];
-    const sawProjection: LarkInboundProjection[] = [];
+    const sawRecorded: LarkRecordedInbound[] = [];
     const deps: LarkReceiveDeps = {
         project: async () => {
             trace.push('project');
-            return { kind: 'recorded', projection };
+            return { kind: 'recorded', ...recorded };
         },
         applyRules: async (_reading, seen) => {
             trace.push('rules');
-            sawProjection.push(seen);
+            sawRecorded.push(seen);
         },
         ...overrides,
     };
-    return { deps, trace, sawProjection };
+    return { deps, trace, sawRecorded };
 }
 
 describe('receiveLarkMessage', () => {
@@ -77,7 +90,17 @@ describe('receiveLarkMessage', () => {
 
         await receiveLarkMessage(wired.deps, reading(), event);
 
-        expect(wired.sawProjection).toEqual([projection]);
+        expect(wired.sawRecorded.map((seen) => seen.projection)).toEqual([projection]);
+    });
+
+    // 投影顺路读到的指令事实同样要往下带。在这里被截掉的症状是静默的：指令照样跑，
+    // 只是每条都得自己再查一遍库，而"搭车读省一次查询"那个设计就白做了。
+    it('规则也拿到投影顺路读到的指令事实', async () => {
+        const wired = wire();
+
+        await receiveLarkMessage(wired.deps, reading(), event);
+
+        expect(wired.sawRecorded.map((seen) => seen.commands)).toEqual([recorded.commands]);
     });
 
     // 与拆分前的差别（有意）：拆分前规则跑在落库之前，落库失败时用户已经看到了指令

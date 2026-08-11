@@ -30,9 +30,10 @@ import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkBotLookup } from '../message/mentions';
 import { readLarkMessageEvent, type LarkMessageReading } from '../message/read-message-event';
 import type { LarkMessageEvent } from '../message/wire';
-import type { LarkInboundProjection } from '../projection/inbound-projection';
+import type { LarkRecordedInbound } from '../projection/inbound-projection';
 import { larkChatRequestEnricher } from './chat-request';
-import { applyLarkRules, LARK_CHAT_RULES, type LarkRulesDeps } from './inbound-rules';
+import type { LarkCommandContext } from './command-context';
+import { applyLarkRules, larkChatRules, type LarkRulesDeps } from './inbound-rules';
 
 // ---------------------------------------------------------------------------
 // 固定装置
@@ -86,14 +87,26 @@ function atTheBot(): LarkMessageReading {
     });
 }
 
-function projectionOf(mentioned: string[] = []): LarkInboundProjection {
+function recordedOf(
+    mentioned: string[] = [],
+    commands: Partial<LarkRecordedInbound['commands']> = {},
+): LarkRecordedInbound {
     return {
-        commonUserId: 'cu_sender',
-        commonConversationId: 'cc_1',
-        commonMessageId: COMMON_MESSAGE_ID,
-        commonRootMessageId: 'cm_root',
-        commonReplyMessageId: undefined,
-        mentionedCommonUserIds: mentioned,
+        projection: {
+            commonUserId: 'cu_sender',
+            commonConversationId: 'cc_1',
+            commonMessageId: COMMON_MESSAGE_ID,
+            commonRootMessageId: 'cm_root',
+            commonReplyMessageId: undefined,
+            mentionedCommonUserIds: mentioned,
+        },
+        commands: {
+            appId: APP_ID,
+            isAdmin: false,
+            permission: {},
+            groupChat: null,
+            ...commands,
+        },
     };
 }
 
@@ -131,7 +144,7 @@ function wire(overrides: Partial<LarkRulesDeps> = {}, shared?: Partial<Wired>): 
         claimed,
         locks,
         deps: {
-            chatRules: LARK_CHAT_RULES,
+            chatRules: larkChatRules([]),
             botRoleOf: () => 'persona',
             botCommonUserId: () => BOT_COMMON_USER_ID,
             notBlocked: async () => true,
@@ -162,12 +175,12 @@ function wire(overrides: Partial<LarkRulesDeps> = {}, shared?: Partial<Wired>): 
 function run(
     wired: Wired,
     r: LarkMessageReading = atTheBot(),
-    projection: LarkInboundProjection = projectionOf([BOT_COMMON_USER_ID]),
+    recorded: LarkRecordedInbound = recordedOf([BOT_COMMON_USER_ID]),
     event: LarkEvent = larkEvent(),
 ) {
     return context.run(
         context.createContext('trace-1', { botName: event.botName, lane: undefined }),
-        () => applyLarkRules(wired.deps, r, projection, event),
+        () => applyLarkRules(wired.deps, r, recorded, event),
     );
 }
 
@@ -196,7 +209,7 @@ function spyRule(trace: string[], payload: Partial<ChatRequestPayload> = {}): Ru
 describe('装配：规则序列从参数进，不从进程级注册表取', () => {
     it('跑的是调用方给的那份规则', async () => {
         const wired = wire();
-        wired.deps.chatRules = [spyRule(wired.trace)];
+        wired.deps.chatRules = () => [spyRule(wired.trace)];
 
         const terminal = await run(wired);
 
@@ -205,7 +218,7 @@ describe('装配：规则序列从参数进，不从进程级注册表取', () =
     });
 
     it('规则序列为空时谁也不响应，也不发任何东西', async () => {
-        const wired = wire({ chatRules: [] });
+        const wired = wire({ chatRules: () => [] });
 
         const terminal = await run(wired);
 
@@ -260,7 +273,7 @@ describe('聊天主链路', () => {
     it('群里没 @ 赤尾就什么都不发', async () => {
         const wired = wire();
 
-        const terminal = await run(wired, reading(), projectionOf([]));
+        const terminal = await run(wired, reading(), recordedOf([]));
 
         expect(terminal.kind).toBe('no_match');
         expect(wired.published).toEqual([]);
@@ -271,7 +284,7 @@ describe('聊天主链路', () => {
     it('私聊不需要 @ 就直通', async () => {
         const wired = wire();
 
-        const terminal = await run(wired, reading({ chat_type: 'p2p' }), projectionOf([]));
+        const terminal = await run(wired, reading({ chat_type: 'p2p' }), recordedOf([]));
 
         expect(terminal.kind).toBe('responded');
         expect(wired.published[0]!.payload.is_p2p).toBe(true);
@@ -280,7 +293,7 @@ describe('聊天主链路', () => {
     // handler 抛错 = 没成功响应，绝不带着待发意图往下走。
     it('handler 抛错时不发请求', async () => {
         const wired = wire();
-        wired.deps.chatRules = [
+        wired.deps.chatRules = () => [
             {
                 rules: [],
                 comment: '会炸的规则',
@@ -301,7 +314,7 @@ describe('聊天主链路', () => {
 describe('接线顺序：去重锁 → 认领 bot → 落 pending 行 → publish', () => {
     it('四步紧邻，顺序不变', async () => {
         const wired = wire();
-        wired.deps.chatRules = [spyRule(wired.trace)];
+        wired.deps.chatRules = () => [spyRule(wired.trace)];
 
         await run(wired);
 
@@ -318,7 +331,7 @@ describe('接线顺序：去重锁 → 认领 bot → 落 pending 行 → publis
     // 孤儿行（真正会有回复的是抢到锁的那个 bot 的 session）。
     it('没抢到锁就地停住，不留任何痕迹', async () => {
         const wired = wire();
-        wired.deps.chatRules = [spyRule(wired.trace)];
+        wired.deps.chatRules = () => [spyRule(wired.trace)];
         // 别的 bot 先到了。
         wired.deps.claimChatTrigger = async (key) => {
             wired.trace.push(`lock:${key}`);
@@ -467,6 +480,62 @@ describe('半路失败：把锁还回去，让重投能重来', () => {
     });
 });
 
+describe('指令上下文：拿到的是这一条消息的事实', () => {
+    /** 一条把上下文记下来的假指令。 */
+    function spyContext(seen: LarkCommandContext[]): (context: LarkCommandContext) => RuleConfig {
+        return (context) => {
+            seen.push(context);
+            return { rules: [], comment: '探针', category: 'utility', handler: async () => {} };
+        };
+    }
+
+    it('飞书事实与公共层 id 一起进指令，不经由 RuleMessage', async () => {
+        const seen: LarkCommandContext[] = [];
+        const wired = wire();
+        wired.deps.chatRules = larkChatRules([spyContext(seen)]);
+
+        await run(
+            wired,
+            atTheBot(),
+            recordedOf([BOT_COMMON_USER_ID], {
+                isAdmin: true,
+                permission: { open_repeat_message: true },
+            }),
+        );
+
+        expect(seen).toHaveLength(1);
+        expect(seen[0]!.isAdmin).toBe(true);
+        expect(seen[0]!.permission).toEqual({ open_repeat_message: true });
+        expect(seen[0]!.message.messageId).toBe('om_1');
+        expect(seen[0]!.projection.commonMessageId).toBe(COMMON_MESSAGE_ID);
+        expect(seen[0]!.botName).toBe(BOT_NAME);
+    });
+
+    // 这一条是逐消息上下文存在的全部理由。进程级上下文（拆分前那个按 key 存 Message 的
+    // 模块级 Map）在这里会挂：两条流并发跑，谁后写谁赢，另一条就在**别人的会话**上判
+    // 开关、对着别人的 om_id 回复 —— 而且不报错。
+    it('两条消息并发跑时各拿各的事实，不串味', async () => {
+        const seen: LarkCommandContext[] = [];
+        const shared: Partial<Wired> = {
+            trace: [],
+            published: [],
+            claimed: [],
+            locks: new Map<string, string>(),
+        };
+        const admin = wire({}, shared);
+        const stranger = wire({}, shared);
+        admin.deps.chatRules = larkChatRules([spyContext(seen)]);
+        stranger.deps.chatRules = larkChatRules([spyContext(seen)]);
+
+        await Promise.all([
+            run(admin, atTheBot(), recordedOf([BOT_COMMON_USER_ID], { isAdmin: true })),
+            run(stranger, atTheBot(), recordedOf([BOT_COMMON_USER_ID], { isAdmin: false })),
+        ]);
+
+        expect(seen.map((context) => context.isAdmin).sort()).toEqual([false, true]);
+    });
+});
+
 describe('多个 bot，一条消息', () => {
     // 本批最重要的一条。
     //
@@ -483,11 +552,11 @@ describe('多个 bot，一条消息', () => {
         const first = wire(overrides, shared);
         const second = wire(overrides, shared);
         // 两条流拿到的是同一条消息的同一份投影（同一个 common_message_id）。
-        const projection = projectionOf([BOT_COMMON_USER_ID, 'cu_bot_second']);
+        const recorded = recordedOf([BOT_COMMON_USER_ID, 'cu_bot_second']);
 
         await Promise.all([
-            run(first, atTheBot(), projection, larkEvent('chiwei')),
-            run(second, atTheBot(), projection, larkEvent('chiwei-second')),
+            run(first, atTheBot(), recorded, larkEvent('chiwei')),
+            run(second, atTheBot(), recorded, larkEvent('chiwei-second')),
         ]);
         return first;
     }
@@ -518,13 +587,13 @@ describe('多个 bot，一条消息', () => {
         };
         const first = wire({}, shared);
         const second = wire({}, shared);
-        first.deps.chatRules = [spyRule(first.trace)];
-        second.deps.chatRules = [spyRule(second.trace)];
-        const projection = projectionOf([BOT_COMMON_USER_ID]);
+        first.deps.chatRules = () => [spyRule(first.trace)];
+        second.deps.chatRules = () => [spyRule(second.trace)];
+        const recorded = recordedOf([BOT_COMMON_USER_ID]);
 
         await Promise.all([
-            run(first, atTheBot(), projection, larkEvent('chiwei')),
-            run(second, atTheBot(), projection, larkEvent('chiwei-second')),
+            run(first, atTheBot(), recorded, larkEvent('chiwei')),
+            run(second, atTheBot(), recorded, larkEvent('chiwei-second')),
         ]);
 
         expect(first.trace.filter((step) => step === 'savePending')).toHaveLength(1);
@@ -544,7 +613,7 @@ describe('persona_ids 端到端', () => {
         );
         const wired = wire();
 
-        await run(wired, atTheBot(), projectionOf([BOT_COMMON_USER_ID, 'cu_human']));
+        await run(wired, atTheBot(), recordedOf([BOT_COMMON_USER_ID, 'cu_human']));
 
         expect(wired.published[0]!.payload.persona_ids).toEqual(['p_chiwei']);
         resetChatRequestEnrichers();
@@ -555,7 +624,7 @@ describe('persona_ids 端到端', () => {
         resetChatRequestEnrichers();
         const wired = wire();
 
-        await run(wired, atTheBot(), projectionOf([BOT_COMMON_USER_ID]));
+        await run(wired, atTheBot(), recordedOf([BOT_COMMON_USER_ID]));
 
         expect(wired.published[0]!.payload.persona_ids).toEqual([]);
     });

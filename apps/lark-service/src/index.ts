@@ -16,6 +16,8 @@ import { NotBlocked } from '@inner/shared/rules';
 
 import { loadConfig } from './config';
 import { larkAppIdOf } from './lark/bot-lookup';
+import { LARK_CHANNEL } from './lark/channel';
+import { larkCredentials } from './lark/credentials';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
 import {
     handOffOverRabbit,
@@ -30,7 +32,9 @@ import {
 import { larkMessageLock, redisMessageLockStore } from './lark/projection/message-lock';
 import { postgresLarkTables } from './lark/projection/postgres-tables';
 import type { LarkStore } from './lark/projection/tables';
+import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
 import { receiveLarkMessage } from './lark/receive-message';
+import { larkCommands, type LarkCommandDeps } from './lark/rules/commands';
 import {
     applyLarkRules,
     assembleLarkRules,
@@ -85,6 +89,35 @@ function realProjection(store: LarkStore): LarkInboundDeps {
 }
 
 /**
+ * 指令层的长命依赖，**整个进程一份**。
+ *
+ * 这是 Task D 那四批唯一的依赖入口：填一个指令槽位时在 LarkCommandDeps 上加一行、
+ * 在这里递一行，指令自己那份实现在自己的文件里（见 lark/rules/commands.ts 的文件头）。
+ * 没有这个入口的话，指令 handler 要的飞书客户端和存储就只能来自全局单例。
+ *
+ * 飞书客户端池按 bot 分，一直留着 —— SDK 客户端内部缓存 tenant access token，每次新建
+ * 等于每条消息都去飞书换一次 token。定时任务和卡片回调也从这里取（它们跟指令同进程）。
+ */
+function realCommandDeps(store: LarkStore): LarkCommandDeps {
+    const bots = botDirectory.getAllBotConfigs().filter((bot) => bot.channel === LARK_CHANNEL);
+    return {
+        api: createSdkLarkApi(
+            larkClientPool(
+                bots.map((bot) => ({ botName: bot.bot_name, credentials: larkCredentials(bot) })),
+            ),
+        ),
+        store,
+        database: larkDataSource(),
+        cache: {
+            get: (key) => getRedisClient().get(key),
+            setWithExpire: async (key, value, seconds) => {
+                await getRedisClient().setWithExpire(key, value, seconds);
+            },
+        },
+    };
+}
+
+/**
  * 规则段的真实装配。接线本身在 lark/rules/inbound-rules.ts（那里能测），这里只负责
  * 把本进程的那几个单例递进去。
  *
@@ -92,6 +125,9 @@ function realProjection(store: LarkStore): LarkInboundDeps {
  */
 function realRules(store: LarkStore): LarkRulesDeps {
     return assembleLarkRules({
+        // 今天十个槽位全是空的，所以序列里只有人格聊天一条 —— 与拆分前一致（那些指令
+        // 此刻仍然由 channel-server 在跑）。填一个槽位不必改这一行。
+        commands: larkCommands(realCommandDeps(store)),
         bots: botDirectory,
         store,
         marker: redisMessageLockStore(getRedisClient),
@@ -123,8 +159,8 @@ async function realInbound(): Promise<LarkInbound> {
             receiveLarkMessage(
                 {
                     project: (r, e) => projectLarkInbound(projection, r, e),
-                    applyRules: async (r, p, e) => {
-                        await applyLarkRules(rules, r, p, e);
+                    applyRules: async (r, recorded, e) => {
+                        await applyLarkRules(rules, r, recorded, e);
                     },
                 },
                 reading,

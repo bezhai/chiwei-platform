@@ -354,6 +354,14 @@ function recorded(outcome: LarkInboundOutcome) {
     return outcome.projection;
 }
 
+/** 投影顺路读到的、只有指令层要用的那几件事。 */
+function commandFacts(outcome: LarkInboundOutcome) {
+    if (outcome.kind !== 'recorded') {
+        throw new Error(`expected the message to be recorded here, got ${outcome.kind}`);
+    }
+    return outcome.commands;
+}
+
 /**
  * 让 n 条流都到齐了才继续。用来把"两个进程都读到了空"这个竞态窗口摆到确定的位置
  * —— 不这样的话，两条流会一前一后地跑，永远撞不上。
@@ -1205,5 +1213,86 @@ describe('同一条消息的串行化', () => {
         });
 
         expect(trace).toEqual(['enter:om_1', 'leave:om_1']);
+    });
+});
+
+describe('指令事实：投影顺路读到的、只有指令层要用的那几件', () => {
+    // is_admin 跟发送者的名字在同一行、permission_config 跟会话映射在同一行、群资料
+    // 里的 user_count 和 download_has_permission_setting 跟 attachment_policy 在同一行
+    // —— 投影为了别的事本来就要读这三行。不带出去的话，指令层只能各自再查一遍。
+    it('is_admin / permission_config / 群资料一并交给规则段', async () => {
+        const tables = new MemoryLarkTables();
+        tables.larkUsers.set('on_user', { union_id: 'on_user', name: '张三', is_admin: true });
+        tables.larkChats.set('oc_1', {
+            chat_id: 'oc_1',
+            chat_mode: 'group',
+            common_conversation_id: 'cc_1',
+            permission_config: { open_repeat_message: true, allow_send_pixiv_image: true },
+        });
+        tables.larkGroupChats.set('oc_1', {
+            chat_id: 'oc_1',
+            name: '水群',
+            user_count: 7,
+            download_has_permission_setting: 'all_members',
+        });
+
+        const { outcome } = await project(tables);
+
+        const facts = commandFacts(outcome);
+        expect(facts.appId).toBe(APP_ID);
+        expect(facts.isAdmin).toBe(true);
+        expect(facts.permission).toEqual({
+            open_repeat_message: true,
+            allow_send_pixiv_image: true,
+        });
+        // 拆分前 sendPhoto 读 user_count、genMeme 读 download_has_permission_setting，
+        // 各自又查了一次 lark_group_chat_info —— 那一行此刻就在手上。
+        expect(facts.groupChat).toMatchObject({
+            name: '水群',
+            user_count: 7,
+            download_has_permission_setting: 'all_members',
+        });
+    });
+
+    // 这两列都 nullable，老行上压根没有。"没配过"一律等于关，所以交出去的是 false 和
+    // 空对象 —— 让每个指令自己写 `?.` 兜底，迟早有人漏一处。
+    it('查不到那几行时：不是管理员、开关全空、没有群资料', async () => {
+        const tables = new MemoryLarkTables();
+
+        const { outcome } = await project(tables, larkMessageEvent({ chat_type: 'p2p' }));
+
+        expect(commandFacts(outcome)).toEqual({
+            appId: APP_ID,
+            isAdmin: false,
+            permission: {},
+            groupChat: null,
+        });
+    });
+
+    // 搭车读的全部意义就在这里：多带一列不多一次查询。permission_config 要是自己再查
+    // 一次 lark_base_chat_info，每条入站消息就多一条 SQL。
+    it('permission_config 与建会话行读的是同一次 lark_base_chat_info', async () => {
+        const tables = new MemoryLarkTables();
+        let reads = 0;
+        tables.onRead = async (table) => {
+            if (table === 'lark_base_chat_info') reads += 1;
+        };
+
+        await project(tables);
+
+        expect(reads).toBe(1);
+    });
+
+    // 事件里没带 app_id 时用处理这条事件的 bot 自己的应用兜底 —— 与建身份映射用的是
+    // 同一个值。「撤回」拿它跟消息的 sender.id 比，两处算得不一样就会去撤别人的消息。
+    it('appId 事件里没有时按 bot 兜底，与身份映射用的是同一个', async () => {
+        const tables = new MemoryLarkTables();
+        const event = larkMessageEvent();
+        delete (event as { app_id?: string }).app_id;
+
+        const { outcome } = await project(tables, event);
+
+        expect(commandFacts(outcome).appId).toBe(APP_ID);
+        expect(tables.larkUserOpenIds.has(`${APP_ID}|ou_user`)).toBe(true);
     });
 });

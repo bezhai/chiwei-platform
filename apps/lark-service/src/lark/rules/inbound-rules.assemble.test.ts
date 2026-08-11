@@ -23,7 +23,8 @@ import type { LarkBotLookup } from '../message/mentions';
 import { readLarkMessageEvent, type LarkMessageReading } from '../message/read-message-event';
 import type { LarkMessageEvent } from '../message/wire';
 import type { CommonMessageClaim } from '../projection/tables';
-import type { LarkInboundProjection } from '../projection/inbound-projection';
+import type { LarkRecordedInbound } from '../projection/inbound-projection';
+import { larkCommands, type LarkCommandDeps, type LarkCommandSlot } from './commands';
 import {
     applyLarkRules,
     assembleLarkRules,
@@ -100,6 +101,8 @@ function infrastructure(bots: BotConfig[] = [botConfig()]) {
         },
     };
     const infra: LarkRulesInfra = {
+        // 今天一个槽位都没填，所以序列里只有人格聊天 —— 与拆分前一致。
+        commands: [],
         bots: directory(bots),
         store: {
             claimCommonMessageForBot: async (claim) => {
@@ -147,13 +150,16 @@ function atTheBot(): LarkMessageReading {
     return readLarkMessageEvent(event, lookup)!;
 }
 
-const projection: LarkInboundProjection = {
-    commonUserId: 'cu_sender',
-    commonConversationId: 'cc_1',
-    commonMessageId: 'cm_1',
-    commonRootMessageId: 'cm_root',
-    commonReplyMessageId: undefined,
-    mentionedCommonUserIds: [BOT_COMMON_USER_ID],
+const recorded: LarkRecordedInbound = {
+    projection: {
+        commonUserId: 'cu_sender',
+        commonConversationId: 'cc_1',
+        commonMessageId: 'cm_1',
+        commonRootMessageId: 'cm_root',
+        commonReplyMessageId: undefined,
+        mentionedCommonUserIds: [BOT_COMMON_USER_ID],
+    },
+    commands: { appId: APP_ID, isAdmin: false, permission: {}, groupChat: null },
 };
 
 const event: LarkEvent = {
@@ -167,7 +173,7 @@ const event: LarkEvent = {
 function runAssembled(wired: ReturnType<typeof infrastructure>, lane?: string) {
     const deps = assembleLarkRules(wired.infra);
     return context.run(context.createContext('trace-1', { botName: BOT_NAME, lane }), () =>
-        applyLarkRules(deps, atTheBot(), projection, event),
+        applyLarkRules(deps, atTheBot(), recorded, event),
     );
 }
 
@@ -257,5 +263,57 @@ describe('装配出来的其余几根线', () => {
 
         expect(wired.markerCalls).toEqual(['acquire:make_reply:cm_1:60', 'release:make_reply:cm_1']);
         expect(wired.markers.size).toBe(0);
+    });
+});
+
+describe('装配出来的规则序列', () => {
+    // 装配根把 larkCommands(deps) 的产出递进来，这里验它真的排在人格聊天前面。漏了这根
+    // 线的症状与"顺序排反了"一模一样：赤尾照常回话，指令一条都不响应，日志干净。
+    it('指令清单从装配进来，排在人格聊天前面', async () => {
+        const ran: string[] = [];
+        const roster: LarkCommandSlot[] = [
+            {
+                name: '余额',
+                // 不声明 category —— 与 channel-server 的「撤回」同形，所以引擎不会因为
+                // 这个 bot 是 persona 就把它跳过（那条 botRole 过滤是共享引擎的既有语义）。
+                command: () => () => ({
+                    rules: [],
+                    comment: '余额',
+                    handler: async () => {
+                        ran.push('余额');
+                    },
+                }),
+            },
+        ];
+        const wired = infrastructure();
+        wired.infra.commands = larkCommands({} as unknown as LarkCommandDeps, roster);
+
+        const terminal = await runAssembled(wired);
+
+        expect(terminal.matchedRule).toBe('余额');
+        expect(ran).toEqual(['余额']);
+        expect(wired.sent).toEqual([]);
+    });
+
+    // 依赖在装配期绑一次。每条消息重绑一次的话，客户端池、缓存这些东西会跟着消息一起
+    // 被重建 —— 每条消息换一次 tenant token。
+    it('指令的依赖在装配期绑定，不随消息重绑', async () => {
+        const bound: LarkCommandDeps[] = [];
+        const deps = { theRealBundle: true } as unknown as LarkCommandDeps;
+        const wired = infrastructure();
+        wired.infra.commands = larkCommands(deps, [
+            {
+                name: '记依赖的',
+                command: (given) => {
+                    bound.push(given);
+                    return () => ({ rules: [], comment: '记依赖的', handler: async () => {} });
+                },
+            },
+        ]);
+
+        await runAssembled(wired);
+        await runAssembled(wired);
+
+        expect(bound).toEqual([deps]);
     });
 });
