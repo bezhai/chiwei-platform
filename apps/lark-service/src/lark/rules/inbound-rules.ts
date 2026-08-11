@@ -77,23 +77,36 @@ import type { LarkMessageReading } from '../message/read-message-event';
 import type { LarkInboundProjection } from '../projection/inbound-projection';
 import type { CommonMessageClaim } from '../projection/tables';
 import { larkChatRequestEnricher } from './chat-request';
+import { LARK_COMMANDS, larkCommandRules } from './commands';
 import { larkRuleMessage } from './rule-message';
 
 /**
- * 本服务认的规则序列。
- *
- * 现在只有共享包那条聊天主链路（真正渠道无关的那一条）。飞书自己的斜杠指令还在
- * channel-server 里，跟着 Task D 一起搬过来 —— 到时候加在**这条之前**，聊天主链路是
- * `NeedRobotMention` 的兜底。
+ * 共享包那条聊天主链路（真正渠道无关的那一条），也是整个序列的兜底：谓词只有
+ * `NeedRobotMention`，一条 @ 赤尾的消息它必然命中。
  */
-export const LARK_CHAT_RULES: RuleConfig[] = [
-    {
-        rules: [NeedRobotMention],
-        handler: makeTextReply,
-        comment: '聊天',
-        category: 'persona',
-    },
-];
+const LARK_PERSONA_CHAT: RuleConfig = {
+    rules: [NeedRobotMention],
+    handler: makeTextReply,
+    comment: '聊天',
+    category: 'persona',
+};
+
+/**
+ * 飞书指令 + 人格聊天，拼成本服务认的规则序列。
+ *
+ * **人格聊天必须在最后**。它是 catch-all，排到指令前面的话所有 @bot 的消息都先落进聊天、
+ * 指令永远轮不到；工具 bot 那条路更彻底 —— 引擎撞上 category 对不上且非 fallthrough 的
+ * 规则会直接收敛成 no_match，于是工具 bot 连第一条指令都到不了。两种失效都没有运行期
+ * 症状（赤尾照常回话、日志干净），所以这个顺序由 commands.test.ts 用真引擎钉住。
+ *
+ * 拼接是个函数而不是就地铺开的数组，就是为了让那条断言能拿一份真会命中的指令去跑。
+ */
+export function larkChatRules(commands: RuleConfig[]): RuleConfig[] {
+    return [...commands, LARK_PERSONA_CHAT];
+}
+
+/** 本服务认的规则序列。空槽位不产出规则，所以今天它仍然只有人格聊天一条（见 commands.ts）。 */
+export const LARK_CHAT_RULES: RuleConfig[] = larkChatRules(larkCommandRules(LARK_COMMANDS));
 
 /** 这条消息归谁处理的认领。 */
 export interface LarkMessageClaim {
