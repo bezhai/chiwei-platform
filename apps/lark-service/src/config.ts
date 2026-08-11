@@ -33,12 +33,43 @@ const BACKEND_ENV = [
 ] as const;
 
 /**
+ * 飞书专属业务（Task D 那四批）要的下游凭据与地址。**只有入口进程用得上** —— 指令、
+ * 入站附件管线、定时任务、卡片回调全挂在入站那一侧，出站进程一个都不碰。
+ *
+ * 之所以现在就列全、而不是等各自那批落地再补：**它们缺了都不报错**，症状是功能静默
+ * 消失，而新服务在 PaaS 上要重新配一遍 App envs 和 ConfigBundle，一份完整的清单比
+ * 分四次补更不容易漏。
+ *
+ *   - `INNER_HTTP_SECRET`（D1）附件管线调 tool-service 的内网口令。缺了发出的是
+ *     `Bearer undefined`，tool-service 401 —— 而管线是 fire-and-forget，入站照常
+ *     工作，只是 TOS 里再也不落新附件，`read_book` 之类稳定读不到东西。
+ *   - `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY`（D2）本地 pixiv 图源。
+ *     这三个是唯一自己会 fail-closed 的，但也要等到第一次发图才炸。
+ *   - `MEME_HOST` / `MEME_PORT`（D4）meme 服务。缺了请求打到
+ *     `undefined:undefined/memes/list`。
+ *   - `AI_PROVIDER_ADMIN_KEY`（D4）查余额用的管理密钥。缺了拿 401。
+ *
+ * 有默认值的那些**不列**，漏配不会静默出错：`REGISTRY_URL`（默认
+ * `http://lite-registry:8080`）、`MINIO_PORT` / `MINIO_BUCKET` / `MINIO_USE_SSL`、
+ * `PIXIV_IMAGE_MONGO_*` 一族（注意它连的是另一个 mongo 实例，不复用 `MONGO_HOST`）。
+ */
+const LARK_BUSINESS_ENV = [
+    'INNER_HTTP_SECRET',
+    'MINIO_ENDPOINT',
+    'MINIO_ACCESS_KEY',
+    'MINIO_SECRET_KEY',
+    'MEME_HOST',
+    'MEME_PORT',
+    'AI_PROVIDER_ADMIN_KEY',
+] as const;
+
+/**
  * 入口进程另外要的。
  *
  * 飞书原始报文的审计集合（lark_event）落在 mongo。用户名密码是可选的（本地无鉴权
  * 也能连），主机名不是。
  */
-const INGRESS_ENV = [...BACKEND_ENV, 'MONGO_HOST'] as const;
+const INGRESS_ENV = [...BACKEND_ENV, 'MONGO_HOST', ...LARK_BUSINESS_ENV] as const;
 
 function requireEnv(env: Env, keys: readonly string[]): void {
     const missing = keys.filter((key) => !env[key]);

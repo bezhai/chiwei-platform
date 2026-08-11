@@ -20,10 +20,11 @@ COPY packages/lark-utils/package.json ./packages/lark-utils/
 RUN bun install --frozen-lockfile
 
 # ③ 复制 workspace 包源码 + 本服务源码。
-# 这两个包是 source-only（package.json 的 main 指向 src/*.ts），install 阶段只建了
+# 这三个包是 source-only（package.json 的 main 指向 src/*.ts），install 阶段只建了
 # 符号链接、没有把源码拷进来，漏一个的症状是 bun build 报模块找不到。
 COPY packages/ts-shared ./packages/ts-shared
 COPY packages/lark-utils ./packages/lark-utils
+COPY packages/pixiv-client ./packages/pixiv-client
 COPY apps/lark-service/tsconfig.json ./apps/lark-service/
 COPY apps/lark-service/src ./apps/lark-service/src
 
