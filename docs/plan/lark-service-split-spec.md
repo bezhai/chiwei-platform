@@ -192,6 +192,20 @@ K8s 默认的滚动更新是先起新 Pod、Ready 之后才停旧 Pod。而飞�
 
 **这是 channel-server 现在就有的线上缺陷，不是拆分引入的**，拆分后 lark-service 与它同形，不会更差。bezhai 2026-08-11 拍板短期接受，只登记不修：改 paas-engine 会动到所有服务共用的部署路径，风险大于此刻的收益。等拆分收尾后单独立项。
 
+**八、撤回的终态短路挡不住并发，它只在终态已经落库之后才生效。**
+
+同一个 `session_id` 的两条撤回并发进来（prefetch 是 10），两条都读到 `pending`、都去删、都写终态。第二条的删除全部失败（消息已经没了），于是 `recalled` 被盖成 `recall_failed`。台账上看是撤回失败，实际撤干净了。
+
+这是缺陷五（跨段终态不单调）在 safety 两列上的孪生，成因一样：短路是读-改-写之间的检查，不是屏障。channel-server 的 recall-worker 逐字同形，Task C3 照搬。
+
+**九、撤回的延迟重投不是原子的，两个方向都会出错。**
+
+重投是「publish 一条延迟消息 → ack 原消息」两步。中间崩会重复投（下一次投递的 `x-retry-count` 还是旧值，等于白送一次重试额度）；`publish` 失败则抛出去进死信，撤回请求就此丢失而台账停在 `pending`——没有任何东西会再来撤这条违规内容。
+
+另外 `x-retry-count` 只活在 AMQP header 上，DB 里不留痕，所以从死信队列重放会让计数从 0 重新开始。
+
+与 channel-server 逐字一致，登记在案。
+
 **四、`/config` 指令写的灰度配置，agent-service 读不到——这条链路目前是断的。**
 
 `/config` 写进 `lark_base_chat_info.gray_config`（`plugins/lark/commands/command-handler.ts:176-182`），而 agent-service 的 `find_gray_config` 读的是 `common_conversation.attachment_policy["gray_config"]`（`app/data/queries/messages.py:281-299`）。全仓 grep 确认：TS 侧所有 `gray_config` 命中都落在 `lark_base_chat_info` 那一列上，没有任何一处往 `attachment_policy` 里写它；Python 侧对 `attachment_policy` 只有一处列定义和两处 select，只读不写。
@@ -252,7 +266,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 
 **Task D — 飞书专属业务迁移**
 - **Goal**: 10 条飞书指令、photo/meme/callback、**入站附件管线**、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
-- **入站附件管线不能漏**：`enqueueLarkImagePipeline` / `enqueueLarkFilePipeline`（`plugins/lark/image-pipeline.ts`、`file-pipeline.ts`）把飞书的 image_key / file_key 交给 tool-service 下载存进 TOS。这是入站链路的一部分、不是指令，最初的任务划分里两边都没写到它。漏掉的后果是切流之后附件静默不再入库，`read_book` 之类依赖 TOS 里 `files/<file_key>` 的能力会稳定读不到东西——而且入站本身照常работа，不会有任何错误信号。搬的时候注意它的 gate 是 `allowDownloadResource()`（群没开"所有人可下载"就整体跳过），在 lark-service 侧对应 `attachment_policy.download_allowed`；两个管线都是 fire-and-forget，失败只记日志、不阻塞入站。
+- **入站附件管线不能漏**：`enqueueLarkImagePipeline` / `enqueueLarkFilePipeline`（`plugins/lark/image-pipeline.ts`、`file-pipeline.ts`）把飞书的 image_key / file_key 交给 tool-service 下载存进 TOS。这是入站链路的一部分、不是指令，最初的任务划分里两边都没写到它。漏掉的后果是切流之后附件静默不再入库，`read_book` 之类依赖 TOS 里 `files/<file_key>` 的能力会稳定读不到东西——而且入站本身照常工作，不会有任何错误信号。搬的时候注意它的 gate 是 `allowDownloadResource()`（群没开"所有人可下载"就整体跳过），在 lark-service 侧对应 `attachment_policy.download_allowed`；两个管线都是 fire-and-forget，失败只记日志、不阻塞入站。
 - **`repeatMessage` 的并发前提变了**：拆分前整个规则段跑在 om_id 锁里，所以复读功能那套 Redis get-modify-set 天然是同一条消息串行的。lark-service 的 om_id 锁只包投影（见 Task B 的行为差异），规则段在锁外，多个 bot 会并发跑到它。搬之前要么让它自身幂等，要么自己取一把锁——`make_reply` 那把去重锁覆盖不到它（那把锁只在有待发 chat.request 意图时才取）。
 - **Deliverable**: 上述业务在 lark-service 下的实现（按决策六，先有行为断言测试再实现）；`lark_emoji` 仓储随之迁移。
 - **Verification**: 指令与服务测试在新服务下全绿；定时任务的 lane gate 行为保持（非 prod 部署不启动）；附件管线在"群允许下载"和"群不允许"两种情况下的行为各有测试；与拆分前的行为差异逐项列出并解释。
