@@ -18,6 +18,7 @@ import { NotBlocked } from '@inner/shared/rules';
 import { loadConfig } from './config';
 import { assembleLarkAttachments, type LarkAttachmentCache } from './lark/attachments';
 import { larkAppIdOf } from './lark/bot-lookup';
+import { httpAiProviderAccount } from './lark/commands/ai-provider';
 import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
 import { postgresEmojiCatalog, type LarkEmojiCatalog } from './lark/emoji/catalog';
@@ -160,6 +161,8 @@ function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog): LarkCommand
                 await getRedisClient().setWithExpire(key, value, seconds);
             },
         },
+        // 302.ai 是外部服务，走裸 fetch（LaneRouter 只认本集群内部的服务名）。
+        aiProvider: httpAiProviderAccount(process.env.AI_PROVIDER_ADMIN_KEY),
         // 图库（另一个 Mongo + MinIO）与缩图（tool-service）都在这后面。三个入口 ——
         // 指令、卡片回调、定时任务 —— 共用这一份，所以口径只有一处。
         photos: readyPhotos({

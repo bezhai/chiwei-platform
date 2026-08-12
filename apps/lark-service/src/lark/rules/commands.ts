@@ -41,6 +41,8 @@
 import type { DataSource } from 'typeorm';
 import type { RuleConfig, RuleMessage } from '@inner/shared/rules';
 
+import type { LarkAiProviderAccount } from '../commands/ai-provider';
+import { balanceCommand } from '../commands/balance';
 import { deleteBotMessageCommand } from '../commands/delete-bot-message';
 import { helpCommand } from '../commands/help';
 import type { LarkEmojiCatalog } from '../emoji/catalog';
@@ -85,10 +87,10 @@ export interface LarkCommandCache {
  *     而"读一个 + 写一个"在端口层面表达不了原子性（见 ../repeat/counter.ts）。
  *   - `database` 还没有专门端口的那些表从这里自建仓储。
  *   - `cache` meme 列表的缓存（D4）。
+ *   - `aiProvider` 「余额」问 302.ai 的账户情况。
  *
- * 还缺的（打 tool-service 改图 / 分词、打 meme 服务、打 302.ai 查余额）由需要它的那批
- * 自己加一行 —— 现在把没有调用方的 HTTP 客户端先建起来，是拿一个测不到的适配器换一个
- * 不存在的问题。
+ * 每一项都是**先有调用方再加的**：没有调用方的 HTTP 客户端先建起来，是拿一个测不到的
+ * 适配器换一个不存在的问题。
  */
 export interface LarkCommandDeps {
     /** 对飞书能做的全部动作。见 outbound/lark-api.ts —— 那是端口，不是那个 Deployment。 */
@@ -103,6 +105,8 @@ export interface LarkCommandDeps {
     database: DataSource;
     /** Redis。 */
     cache: LarkCommandCache;
+    /** 我们在 302.ai 上那个账户还剩多少钱。只有「余额」问它。 */
+    aiProvider: LarkAiProviderAccount;
     /**
      * 取一批**飞书发得出去**的图（每张都保证有 image_key）。
      *
@@ -165,7 +169,7 @@ export type LarkSlashSlot =
 /** 飞书专属指令，先后即优先级。 */
 export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '复读功能', command: repeatCommand },
-    { name: '发送余额信息', pendingIn: 'D4' },
+    { name: '发送余额信息', command: balanceCommand },
     { name: '给用户发送帮助信息', command: helpCommand },
     { name: '撤回消息', command: deleteBotMessageCommand },
     { name: '生成水群历史卡片', pendingIn: 'D4' },
