@@ -210,7 +210,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
         ).toEqual([
             ['复读功能', 'migrated'],
             ['发送余额信息', 'D4'],
-            ['给用户发送帮助信息', 'D4'],
+            ['给用户发送帮助信息', 'migrated'],
             ['撤回消息', 'D4'],
             ['生成水群历史卡片', 'D4'],
             ['开启复读', 'migrated'],
@@ -225,6 +225,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
     it('真的拼出来的就是账本上那几条，先后也一样', () => {
         expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
             '复读功能',
+            '给用户发送帮助信息',
             '开启复读',
             '关闭复读',
             '发送图片',

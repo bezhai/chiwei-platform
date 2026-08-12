@@ -41,6 +41,7 @@
 import type { DataSource } from 'typeorm';
 import type { RuleConfig, RuleMessage } from '@inner/shared/rules';
 
+import { helpCommand } from '../commands/help';
 import type { LarkEmojiCatalog } from '../emoji/catalog';
 import type { LarkOutboundApi } from '../outbound/lark-api';
 import type { LarkReadyPhotos } from '../photo/ready';
@@ -164,7 +165,7 @@ export type LarkSlashSlot =
 export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '复读功能', command: repeatCommand },
     { name: '发送余额信息', pendingIn: 'D4' },
-    { name: '给用户发送帮助信息', pendingIn: 'D4' },
+    { name: '给用户发送帮助信息', command: helpCommand },
     { name: '撤回消息', pendingIn: 'D4' },
     { name: '生成水群历史卡片', pendingIn: 'D4' },
     { name: '开启复读', command: openRepeatCommand },
