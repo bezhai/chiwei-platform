@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { resolveLarkMentions, type LarkBotIdentity, type LarkBotLookup } from './mentions';
+import {
+    firstMentionedHuman,
+    resolveLarkMentions,
+    type LarkBotIdentity,
+    type LarkBotLookup,
+} from './mentions';
 import type { LarkMention } from './wire';
 
 function lookup(bots: {
@@ -231,5 +236,54 @@ describe('resolveLarkMentions', () => {
         const index = resolveLarkMentions([], lookup());
         expect(index.all).toEqual([]);
         expect(index.byToken('@_user_1')).toBeUndefined();
+    });
+});
+
+// `/bind` `/unbind` `/block` `/unblock` `/union_id` 五条子指令要的都是「第一个被 @ 的
+// **真人**」。判据必须是"不是我们自己的 bot"而不是飞书那个 mentioned_type ——
+// resolveLarkMentions 已经刻意不看后者（理由见 mentions.ts 的文件头），这里跟着它走。
+describe('firstMentionedHuman', () => {
+    it('跳过我们自己的 bot，取第一个真人的 union_id', () => {
+        const index = resolveLarkMentions(
+            [
+                mention({
+                    key: '@_user_1',
+                    mentioned_type: 'bot',
+                    bot_info: { app_id: 'cli_a' },
+                    id: { union_id: 'on_bot' },
+                }),
+                mention({ key: '@_user_2', id: { union_id: 'on_zhangsan' } }),
+                mention({ key: '@_user_3', id: { union_id: 'on_lisi' } }),
+            ],
+            lookup({ byAppId: { cli_a: persona } }),
+        );
+
+        expect(firstMentionedHuman(index)).toBe('on_zhangsan');
+    });
+
+    it('一个真人都没 @ 时是 undefined', () => {
+        const index = resolveLarkMentions(
+            [
+                mention({
+                    mentioned_type: 'bot',
+                    bot_info: { app_id: 'cli_a' },
+                    id: { union_id: 'on_bot' },
+                }),
+            ],
+            lookup({ byAppId: { cli_a: persona } }),
+        );
+
+        expect(firstMentionedHuman(index)).toBeUndefined();
+    });
+
+    it('谁都没 @ 时是 undefined', () => {
+        expect(firstMentionedHuman(resolveLarkMentions([], lookup()))).toBeUndefined();
+    });
+
+    // 飞书偶尔给一个没有 union_id 的 mention（老事件、外部联系人）。上游那一句是
+    // `m.id.union_id!`，也就是拿到 undefined —— 调用方按"没 @ 人"处理。照搬。
+    it('真人但飞书没给 union_id 时同样是 undefined', () => {
+        const index = resolveLarkMentions([mention({ id: {} })], lookup());
+        expect(firstMentionedHuman(index)).toBeUndefined();
     });
 });

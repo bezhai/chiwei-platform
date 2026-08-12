@@ -107,3 +107,18 @@ export function resolveLarkMentions(
     const byToken = new Map(all.map((m) => [m.token, m]));
     return { all, byToken: (token) => byToken.get(token) };
 }
+
+/**
+ * 第一个被 @ 的**真人**的 union_id。一个真人都没 @ 就是 undefined。
+ *
+ * `/bind` `/unbind` `/block` `/unblock` `/union_id` 五条子指令共用这一条判断，而它的
+ * 判据是 **`botCommonUserId` 为空**，也就是"不是我们自己在跑的 bot"。刻意不看飞书那个
+ * `mentioned_type`：上面 findOurBot 已经解释过为什么不信它（事件格式演进过，老事件连
+ * bot_info 都没有），这里跟着同一套口径走，否则同一条消息里"谁是 bot"会有两个答案。
+ *
+ * 飞书没给 union_id 的真人（老事件、外部联系人）交出来的是 undefined —— 与拆分前一致
+ * （那边是 `m.id.union_id!`），调用方按"没 @ 到人"处理。
+ */
+export function firstMentionedHuman(mentions: LarkMentionIndex): string | undefined {
+    return mentions.all.find((mention) => !mention.botCommonUserId)?.unionId;
+}

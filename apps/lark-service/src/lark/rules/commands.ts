@@ -48,6 +48,19 @@ import { helpCommand } from '../commands/help';
 import { historyCardCommand } from '../commands/history-card';
 import { memeCommand } from '../commands/meme';
 import type { LarkMemes } from '../commands/memes';
+import { slashCommand } from '../commands/slash';
+import { bindCommand, unbindCommand } from '../commands/slash-bind';
+import {
+    blockCommand,
+    blocklistCommand,
+    unblockCommand,
+} from '../commands/slash-block';
+import {
+    chatIdCommand,
+    messageIdCommand,
+    unionIdCommand,
+} from '../commands/slash-ids';
+import { sessionCommand } from '../commands/slash-session';
 import type { LarkEmojiCatalog } from '../emoji/catalog';
 import type { LarkOutboundApi } from '../outbound/lark-api';
 import type { LarkReadyPhotos } from '../photo/ready';
@@ -185,7 +198,7 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '生成水群历史卡片', command: historyCardCommand },
     { name: '开启复读', command: openRepeatCommand },
     { name: '关闭复读', command: closeRepeatCommand },
-    { name: '指令处理', pendingIn: 'D4' },
+    { name: '指令处理', command: slashCommand },
     { name: '发送图片', command: sendPhotoCommand },
     { name: 'Meme', command: memeCommand },
 ];
@@ -198,15 +211,15 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
  * 没接上"没法混过去。
  */
 export const LARK_SLASH_COMMANDS: readonly LarkSlashSlot[] = [
-    { key: 'chat_id', pendingIn: 'D4' },
-    { key: 'message_id', pendingIn: 'D4' },
-    { key: 'bind', pendingIn: 'D4' },
-    { key: 'unbind', pendingIn: 'D4' },
-    { key: 'block', pendingIn: 'D4' },
-    { key: 'unblock', pendingIn: 'D4' },
-    { key: 'blocklist', pendingIn: 'D4' },
-    { key: 'session', pendingIn: 'D4' },
-    { key: 'union_id', pendingIn: 'D4' },
+    { key: 'chat_id', run: chatIdCommand },
+    { key: 'message_id', run: messageIdCommand },
+    { key: 'bind', run: bindCommand },
+    { key: 'unbind', run: unbindCommand },
+    { key: 'block', run: blockCommand },
+    { key: 'unblock', run: unblockCommand },
+    { key: 'blocklist', run: blocklistCommand },
+    { key: 'session', run: sessionCommand },
+    { key: 'union_id', run: unionIdCommand },
 ];
 
 /** 拍板删掉、不迁的子指令。理由见文件头。 */
