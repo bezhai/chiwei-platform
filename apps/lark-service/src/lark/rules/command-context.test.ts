@@ -113,6 +113,17 @@ describe('larkCommandContext', () => {
         expect(context.mentions.byToken('@_user_2')?.botCommonUserId).toBeUndefined();
     });
 
+    // 复读要把被 @ 的人重新写成飞书的 `<at user_id=…>` 标签，所以它要的是 @ **还没被
+    // 拍平成字**的那份正文 —— RuleMessage 上的 clearText / text 都已经拍平过了。
+    it('正文片段带过来，@ 仍是独立的一段', () => {
+        const parsed = reading();
+        const context = larkCommandContext(parsed, recorded, BOT_NAME);
+
+        // 同一份，不是又解析了一遍：解析层已经把 @ 切出来过了。
+        expect(context.content).toBe(parsed.content);
+        expect(context.content.some((part) => part.type === 'mention')).toBe(true);
+    });
+
     it('公共层那组 id 带过来（/session 一族要按它查台账）', () => {
         const context = larkCommandContext(reading(), recorded, BOT_NAME);
 

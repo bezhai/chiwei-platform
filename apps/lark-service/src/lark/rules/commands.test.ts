@@ -208,7 +208,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
         expect(
             LARK_COMMANDS.map((slot) => [slot.name, 'command' in slot ? 'migrated' : slot.pendingIn]),
         ).toEqual([
-            ['复读功能', 'D3'],
+            ['复读功能', 'migrated'],
             ['发送余额信息', 'D4'],
             ['给用户发送帮助信息', 'D4'],
             ['撤回消息', 'D4'],
@@ -224,6 +224,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
     // 上一条只看账本，这一条看真的拼出来了什么 —— 槽位填了个别的东西同样是静默的。
     it('真的拼出来的就是账本上那几条，先后也一样', () => {
         expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
+            '复读功能',
             '开启复读',
             '关闭复读',
             '发送图片',

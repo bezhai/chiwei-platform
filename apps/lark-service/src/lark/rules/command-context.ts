@@ -34,6 +34,7 @@
 // LarkCommandDeps。两者不要混：混了之后要么依赖被迫逐消息重建（丢掉客户端池），要么
 // 事实被迫进程级持有（回到上面那条被否决的路）。
 
+import type { LarkContentPart } from '../message/lark-content';
 import type { LarkMentionIndex } from '../message/mentions';
 import type { LarkInboundMessage } from '../message/parse-message';
 import type { LarkMessageReading } from '../message/read-message-event';
@@ -57,6 +58,15 @@ export interface LarkCommandContext {
      * 判断解析层已经做过（见 message/mentions.ts 那段"两个都要问过"），不该再做一遍。
      */
     mentions: LarkMentionIndex;
+
+    /**
+     * 正文片段，**@ 是独立的一段**（见 message/lark-content.ts）。
+     *
+     * RuleMessage 上那几个文本访问器（clearText / text）建在同一份片段上，但它们都已经
+     * 把 @ 拍平成字了。复读要的正相反：它得把被 @ 的人重新写成飞书认的 `<at user_id=…>`
+     * 标签，所以必须拿到 @ 还没被拍平的形态（见 ../repeat/echo.ts）。
+     */
+    content: LarkContentPart[];
 
     /** 这条消息在公共层的那组 id。`/session` 按它查台账，落库也按它。 */
     projection: LarkInboundProjection;
@@ -97,6 +107,7 @@ export function larkCommandContext(
     return {
         message: reading.message,
         mentions: reading.mentions,
+        content: reading.content,
         projection: recorded.projection,
         botName,
         ...recorded.commands,

@@ -147,11 +147,14 @@ describe('清单对账：定时任务与 channel-server 那份逐条对上', () 
             .toEqual(byName(upstreamTasks()));
     });
 
-    it('两个图片日报已经搬过来了，emoji 同步还欠着', () => {
+    // 槽位填没填**在行为上看不出来**：还欠着的槽位不挂任务，而"到点没跑"要等一整个
+    // cron 周期才有人察觉。所以填充状态本身要有断言。三个都填满之后，`pendingIn` 这套
+    // 脚手架在真清单上就没有用户了 —— 它连同跨服务对账一起在 Task F 删。
+    it('三个槽位都搬过来了，没有还欠着的', () => {
         expect(LARK_SCHEDULES.map((slot) => [slot.name, slot.pendingIn])).toEqual([
             ['daily-photo', undefined],
             ['daily-new-photo', undefined],
-            ['emoji-sync', 'D3'],
+            ['emoji-sync', undefined],
         ]);
     });
 });

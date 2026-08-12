@@ -41,10 +41,13 @@
 import type { DataSource } from 'typeorm';
 import type { RuleConfig, RuleMessage } from '@inner/shared/rules';
 
+import type { LarkEmojiCatalog } from '../emoji/catalog';
 import type { LarkOutboundApi } from '../outbound/lark-api';
 import type { LarkReadyPhotos } from '../photo/ready';
 import { sendPhotoCommand } from '../photo/send-photo';
 import type { LarkStore } from '../projection/tables';
+import type { LarkRepeatCounter } from '../repeat/counter';
+import { repeatCommand } from '../repeat/repeat';
 import { closeRepeatCommand, openRepeatCommand } from '../repeat/toggle';
 import type { LarkCommandContext } from './command-context';
 
@@ -53,11 +56,12 @@ import type { LarkCommandContext } from './command-context';
 // ---------------------------------------------------------------------------
 
 /**
- * Redis 上的一个键值对。
+ * Redis 上的一个键值对。**读一个、写一个带过期的**，仅此而已。
  *
- * **只有两个动作**，因为待迁的代码只用得上这两个：复读把 `repeat_msg:{chatId}` 读出来
- * 加一改回去，meme 把列表缓存十分钟。要更多能力的（Lua、pipeline）自己在这上面加一个
- * 方法，别把整个 Redis 客户端摊开 —— 那样端口就不再说明"我们对 Redis 做了什么"。
+ * 剩下的用户是 meme（把列表缓存十分钟，D4）。复读原本也打算走这里，后来没有 —— 它那
+ * 套读-改-写必须原子，而"读一个 + 写一个"这两个动作在端口层面就表达不了原子性（推导
+ * 见 ../repeat/counter.ts）。这正是这个端口该有的样子：装不下的东西自己另立一个说得清
+ * 自己在做什么的端口，而不是把整个 Redis 客户端摊开。
  */
 export interface LarkCommandCache {
     get(key: string): Promise<string | null>;
@@ -72,9 +76,13 @@ export interface LarkCommandCache {
  *   - `api` 十条指令里九条要回复用户，发图 / meme 还要传图取图，撤回要查消息和删消息。
  *   - `store` `/bind` `/unbind` 读写 user_group_binding 与 lark_group_member，`/session`
  *     按 om_id 查 lark_message 再查 common_message，开关复读写 permission_config。
-   - `database` 还没有专门端口的那些表从这里自建仓储 —— lark_emoji（复读唯一的读端）
- *     是 D3 的活。
- *   - `cache` 复读的计数器、meme 列表的缓存。
+ *   - `emoji` 复读要把用户原话里的 `[微笑]` 换回飞书的表情 key。它单独一个端口而不是
+ *     进 LarkStore：那是投影的端口，描述的是"一条消息进来要读写哪些行"，而 lark_emoji
+ *     的两个动作一个来自定时任务、一个来自指令，都不在那条链上（见 ../emoji/catalog.ts）。
+ *   - `repeatCounter` 复读的"连着第几次"。它也不进 `cache` —— 那套读-改-写必须原子，
+ *     而"读一个 + 写一个"在端口层面表达不了原子性（见 ../repeat/counter.ts）。
+ *   - `database` 还没有专门端口的那些表从这里自建仓储。
+ *   - `cache` meme 列表的缓存（D4）。
  *
  * 还缺的（打 tool-service 改图 / 分词、打 meme 服务、打 302.ai 查余额）由需要它的那批
  * 自己加一行 —— 现在把没有调用方的 HTTP 客户端先建起来，是拿一个测不到的适配器换一个
@@ -85,6 +93,10 @@ export interface LarkCommandDeps {
     api: LarkOutboundApi;
     /** 飞书那几张表 + common_* 的读写。 */
     store: LarkStore;
+    /** lark_emoji。写端是 emoji-sync 定时任务，读端只有复读。 */
+    emoji: LarkEmojiCatalog;
+    /** 复读的计数器。**必须原子** —— 理由见 ../repeat/counter.ts。 */
+    repeatCounter: LarkRepeatCounter;
     /** 还没有专门端口的表从这里自建仓储。 */
     database: DataSource;
     /** Redis。 */
@@ -150,7 +162,7 @@ export type LarkSlashSlot =
 
 /** 飞书专属指令，先后即优先级。 */
 export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
-    { name: '复读功能', pendingIn: 'D3' },
+    { name: '复读功能', command: repeatCommand },
     { name: '发送余额信息', pendingIn: 'D4' },
     { name: '给用户发送帮助信息', pendingIn: 'D4' },
     { name: '撤回消息', pendingIn: 'D4' },

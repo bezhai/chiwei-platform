@@ -1,12 +1,16 @@
 // 飞书富文本（post）的形状，以及从 markdown 到它的翻译。
 //
-// 这是渲染管线的**最后一步**，也是唯一知道飞书 post 长什么样的地方。前面两步
-// （mention、图片）产出的都还是 markdown 文本，到这里才变成飞书的数据结构。
+// 这是唯一知道飞书 post 长什么样的地方。产出它的有两条路，各自走到不同的节点：
 //
-// 只定义出站真正会产出的两种节点。飞书的 post 还支持 a / at / emotion / code_block
-// 等等，但出站一条都不产出：@ 在上一步就已经被写成 `<at user_id=...>` 标签留在文本
-// 里，飞书会在 md 节点内部把它渲染成真正的 mention，不需要独立的 at 节点。多列一种
-// 节点等于多留一条没人走的路。
+//   * **赤尾的回复**（markdownToPostContent，本文件下半段）走 md + img。@ 在渲染管线
+//     的上一步就已经被写成 `<at user_id=...>` 标签留在 markdown 里，飞书会在 md 节点
+//     内部把它渲染成真正的 mention，所以这条路不需要独立的 at 节点。
+//   * **复读**（../repeat/echo.ts）走 text + at + emotion。它不能用 md：复读的内容是
+//     用户原话，里面的 `*` `_` `#` 会被 md 节点当成格式吃掉，复读出来就跟原话不一样了。
+//     表情也一样 —— 飞书的表情在 post 里是独立的 emotion 节点，md 里塞不进去。
+//
+// 每种节点都有人真的产出，列在这里的不是"飞书还支持什么"（它还有 a / media /
+// code_block），是**本服务真的会发出去什么**。
 
 /** 一段 markdown。飞书自己解析里面的加粗、斜体、链接、`<at>`。 */
 export interface MdPostNode {
@@ -20,7 +24,30 @@ export interface ImgPostNode {
     image_key: string;
 }
 
-export type PostNode = MdPostNode | ImgPostNode;
+/** 一段**不解析格式**的纯文字。复读用它保住用户原话里的 markdown 符号。 */
+export interface TextPostNode {
+    tag: 'text';
+    text: string;
+}
+
+/** 一个 @。user_id 这里放的是飞书的 union_id。 */
+export interface AtPostNode {
+    tag: 'at';
+    user_id: string;
+}
+
+/** 一个飞书自带表情。emoji_type 是表情 key（`SMILE`），不是它显示的文本（`微笑`）。 */
+export interface EmotionPostNode {
+    tag: 'emotion';
+    emoji_type: string;
+}
+
+export type PostNode =
+    | MdPostNode
+    | ImgPostNode
+    | TextPostNode
+    | AtPostNode
+    | EmotionPostNode;
 
 /** content 是二维的：外层是行，内层是行内的节点。图片自成一行。 */
 export interface PostContent {

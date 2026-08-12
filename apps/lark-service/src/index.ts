@@ -20,6 +20,8 @@ import { assembleLarkAttachments, type LarkAttachmentCache } from './lark/attach
 import { larkAppIdOf } from './lark/bot-lookup';
 import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
+import { postgresEmojiCatalog, type LarkEmojiCatalog } from './lark/emoji/catalog';
+import { httpEmojiSource, syncLarkEmojis } from './lark/emoji/sync';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
 import {
     handOffOverRabbit,
@@ -41,6 +43,7 @@ import { postgresLarkTables } from './lark/projection/postgres-tables';
 import type { LarkStore } from './lark/projection/tables';
 import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
 import { receiveLarkMessage } from './lark/receive-message';
+import { redisRepeatCounter } from './lark/repeat/counter';
 import { larkCommands, type LarkCommandDeps } from './lark/rules/commands';
 import {
     applyLarkRules,
@@ -136,7 +139,7 @@ function realAttachments(): LarkAttachmentCache {
  * 飞书客户端池按 bot 分，一直留着 —— SDK 客户端内部缓存 tenant access token，每次新建
  * 等于每条消息都去飞书换一次 token。定时任务和卡片回调也从这里取（它们跟指令同进程）。
  */
-function realCommandDeps(store: LarkStore): LarkCommandDeps {
+function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog): LarkCommandDeps {
     const bots = botDirectory.getAllBotConfigs().filter((bot) => bot.channel === LARK_CHANNEL);
     const api = createSdkLarkApi(
         larkClientPool(
@@ -146,6 +149,10 @@ function realCommandDeps(store: LarkStore): LarkCommandDeps {
     return {
         api,
         store,
+        emoji,
+        // 复读的计数器。**不是**下面那个键值对端口的一个用法：它的读-改-写必须原子，
+        // 所以整段跑在 Redis 那边（见 lark/repeat/counter.ts）。
+        repeatCounter: redisRepeatCounter(getRedisClient),
         database: larkDataSource(),
         cache: {
             get: (key) => getRedisClient().get(key),
@@ -256,7 +263,10 @@ async function main(): Promise<void> {
     await bootLarkService(backends);
     // 指令那份长命依赖建一次，规则段 / 卡片回调 / 定时任务三处共用（见 realCommandDeps）。
     const store = postgresLarkTables(larkDataSource());
-    const commands = realCommandDeps(store);
+    // 表情目录**一份**：写端是下面那个每小时的同步任务，读端是复读指令。两处各建一个
+    // 也能跑，但那样"这张表有哪两个动作"就不再是一处能看全的事。
+    const emoji = postgresEmojiCatalog(larkDataSource());
+    const commands = realCommandDeps(store, emoji);
     const inbound = await realInbound(commands, store);
 
     // 入口二：长连。主动，而且**会跟别的进程抢** —— 飞书对同一 app_id 的多个长连是
@@ -293,13 +303,14 @@ async function main(): Promise<void> {
     }
 
     // 定时任务归这个进程，不归 lark-outbound：出站可以多副本，每个副本各起一份 cron
-    // 就是往那个写死的飞书群发 N 遍日报（见 schedule.ts）。key 必须与清单里的任务名
-    // 逐字对上，对不上装配期就抛。emoji-sync 还欠着（D3）。
+    // 就是往那个写死的飞书群发 N 遍日报、按小时重复覆写同一张共享表（见 schedule.ts）。
+    // key 必须与清单里的任务名逐字对上，对不上装配期就抛。
     const daily = { api: commands.api, photos: commands.photos, wait: Bun.sleep, now: () => new Date() };
     schedules = startLarkSchedules({
         runs: {
             'daily-photo': dailyPhoto(daily),
             'daily-new-photo': dailyNewPhoto(daily),
+            'emoji-sync': syncLarkEmojis({ source: httpEmojiSource(), catalog: emoji }),
         },
         schedule: nodeCronScheduler,
     });
