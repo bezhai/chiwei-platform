@@ -217,7 +217,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
             ['关闭复读', 'migrated'],
             ['指令处理', 'D4'],
             ['发送图片', 'migrated'],
-            ['Meme', 'D4'],
+            ['Meme', 'migrated'],
         ]);
     });
 
@@ -232,6 +232,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
             '开启复读',
             '关闭复读',
             '发送图片',
+            'Meme',
         ]);
     });
 
