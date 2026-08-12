@@ -45,10 +45,12 @@ import type { LarkAiProviderAccount } from '../commands/ai-provider';
 import { balanceCommand } from '../commands/balance';
 import { deleteBotMessageCommand } from '../commands/delete-bot-message';
 import { helpCommand } from '../commands/help';
+import { historyCardCommand } from '../commands/history-card';
 import type { LarkEmojiCatalog } from '../emoji/catalog';
 import type { LarkOutboundApi } from '../outbound/lark-api';
 import type { LarkReadyPhotos } from '../photo/ready';
 import { sendPhotoCommand } from '../photo/send-photo';
+import type { LarkKeywordExtractor } from '../commands/word-cloud';
 import type { LarkStore } from '../projection/tables';
 import type { LarkRepeatCounter } from '../repeat/counter';
 import { repeatCommand } from '../repeat/repeat';
@@ -88,6 +90,7 @@ export interface LarkCommandCache {
  *   - `database` 还没有专门端口的那些表从这里自建仓储。
  *   - `cache` meme 列表的缓存（D4）。
  *   - `aiProvider` 「余额」问 302.ai 的账户情况。
+ *   - `keywords` 「水群」的词云要 tool-service 分词。
  *
  * 每一项都是**先有调用方再加的**：没有调用方的 HTTP 客户端先建起来，是拿一个测不到的
  * 适配器换一个不存在的问题。
@@ -107,6 +110,8 @@ export interface LarkCommandDeps {
     cache: LarkCommandCache;
     /** 我们在 302.ai 上那个账户还剩多少钱。只有「余额」问它。 */
     aiProvider: LarkAiProviderAccount;
+    /** 打 tool-service 分词。只有「水群」那张卡片上的词云用它。 */
+    keywords: LarkKeywordExtractor;
     /**
      * 取一批**飞书发得出去**的图（每张都保证有 image_key）。
      *
@@ -172,7 +177,7 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '发送余额信息', command: balanceCommand },
     { name: '给用户发送帮助信息', command: helpCommand },
     { name: '撤回消息', command: deleteBotMessageCommand },
-    { name: '生成水群历史卡片', pendingIn: 'D4' },
+    { name: '生成水群历史卡片', command: historyCardCommand },
     { name: '开启复读', command: openRepeatCommand },
     { name: '关闭复读', command: closeRepeatCommand },
     { name: '指令处理', pendingIn: 'D4' },
