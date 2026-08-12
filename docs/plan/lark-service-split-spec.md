@@ -280,7 +280,7 @@ A 是全部前置。B 建骨架，C/D 依赖 B 的骨架产出。E 依赖 B/C/D�
 **Task D — 飞书专属业务迁移**
 - **Goal**: 10 条飞书指令、photo/meme/callback、**入站附件管线**、daily-photo 与 emoji 定时任务在 lark-service 内正常工作。
 - **入站附件管线不能漏**：`enqueueLarkImagePipeline` / `enqueueLarkFilePipeline`（`plugins/lark/image-pipeline.ts`、`file-pipeline.ts`）把飞书的 image_key / file_key 交给 tool-service 下载存进 TOS。这是入站链路的一部分、不是指令，最初的任务划分里两边都没写到它。漏掉的后果是切流之后附件静默不再入库，`read_book` 之类依赖 TOS 里 `files/<file_key>` 的能力会稳定读不到东西——而且入站本身照常工作，不会有任何错误信号。搬的时候注意它的 gate 是 `allowDownloadResource()`（群没开"所有人可下载"就整体跳过），在 lark-service 侧对应 `attachment_policy.download_allowed`；两个管线都是 fire-and-forget，失败只记日志、不阻塞入站。
-- **`repeatMessage` 的并发前提变了**：拆分前整个规则段跑在 om_id 锁里，所以复读功能那套 Redis get-modify-set 天然是同一条消息串行的。lark-service 的 om_id 锁只包投影（见 Task B 的行为差异），规则段在锁外，多个 bot 会并发跑到它。搬之前要么让它自身幂等，要么自己取一把锁——`make_reply` 那把去重锁覆盖不到它（那把锁只在有待发 chat.request 意图时才取）。
+- **`repeatMessage` 的并发前提变了**（下面这句原本写错了，D3 实作时纠正）：拆分前整个规则段跑在 om_id 锁里，但**那把锁的键是 om_id，而复读计数器的键是 chat_id**——两个粒度不一样。所以拆分前只有"同一条消息的几路"是串的，同群两条挨得近的消息本来就在并发读写同一个计数键。**不存在一个"拆分前的串行行为"可以照搬**，拆分只是加了一个并发维度（规则段出锁后，同一条消息的多个 bot 也开始并发）。lark-service 的 om_id 锁只包投影（见 Task B 的行为差异），规则段在锁外，多个 bot 会并发跑到它。搬之前要么让它自身幂等，要么自己取一把锁——`make_reply` 那把去重锁覆盖不到它（那把锁只在有待发 chat.request 意图时才取）。
 - **`user_group_binding` 也要一起搬，它是第八张飞书独占表。** 上面"飞书独占的七张表"那句少数了一张：`/bind`、`/unbind` 和退群自动拉回都读写它，全仓使用点没有一处不是飞书，而 lark-service 现在的实体清单里没有它。漏掉的后果是这三个功能切流后直接失效。
 - **卡片回调现在会被静默丢弃。** lark-service 的 `/webhook/{bot}/card` 路由已经注册、事件槽也会把它标成 `card.action.trigger`，但入站的事件处理表里只有消息接收一项，于是回调进来只打一条"没人处理这个事件类型"的 warn 就扔掉。三种卡片交互（更新图卡、拉图片详情、更新日报卡）全在这条路上，且它们不经过规则引擎，是独立于指令系统的第二条入站路径。
 - **定时任务是三个不是两个**（发图日报、次日新图、emoji 同步），并且**归 `lark-service` 进程**，不归 `lark-outbound`。决策十那张进程表没写 cron 归谁：拆分前它跟 HTTP 服务同进程，照搬；更重要的是它必须待在单副本的那个进程里，否则往写死的真实飞书群发日报会发两遍。lane gate 沿用现有的"非 prod 部署不启动"。
