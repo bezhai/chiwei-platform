@@ -211,7 +211,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
             ['复读功能', 'migrated'],
             ['发送余额信息', 'D4'],
             ['给用户发送帮助信息', 'migrated'],
-            ['撤回消息', 'D4'],
+            ['撤回消息', 'migrated'],
             ['生成水群历史卡片', 'D4'],
             ['开启复读', 'migrated'],
             ['关闭复读', 'migrated'],
@@ -226,6 +226,7 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
         expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
             '复读功能',
             '给用户发送帮助信息',
+            '撤回消息',
             '开启复读',
             '关闭复读',
             '发送图片',
