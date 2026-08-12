@@ -45,6 +45,7 @@ import type { LarkOutboundApi } from '../outbound/lark-api';
 import type { LarkReadyPhotos } from '../photo/ready';
 import { sendPhotoCommand } from '../photo/send-photo';
 import type { LarkStore } from '../projection/tables';
+import { closeRepeatCommand, openRepeatCommand } from '../repeat/toggle';
 import type { LarkCommandContext } from './command-context';
 
 // ---------------------------------------------------------------------------
@@ -55,9 +56,8 @@ import type { LarkCommandContext } from './command-context';
  * Redis 上的一个键值对。
  *
  * **只有两个动作**，因为待迁的代码只用得上这两个：复读把 `repeat_msg:{chatId}` 读出来
- * 加一改回去（channel-server 的 repeat-message.ts 就是 `get` + `setWithExpire`），meme
- * 把列表缓存十分钟。要更多能力的（Lua、pipeline）自己在这上面加一个方法，别把整个
- * Redis 客户端摊开 —— 那样端口就不再说明"我们对 Redis 做了什么"。
+ * 加一改回去，meme 把列表缓存十分钟。要更多能力的（Lua、pipeline）自己在这上面加一个
+ * 方法，别把整个 Redis 客户端摊开 —— 那样端口就不再说明"我们对 Redis 做了什么"。
  */
 export interface LarkCommandCache {
     get(key: string): Promise<string | null>;
@@ -72,9 +72,8 @@ export interface LarkCommandCache {
  *   - `api` 十条指令里九条要回复用户，发图 / meme 还要传图取图，撤回要查消息和删消息。
  *   - `store` `/bind` `/unbind` 读写 user_group_binding 与 lark_group_member，`/session`
  *     按 om_id 查 lark_message 再查 common_message，开关复读写 permission_config。
- *   - `database` 还没有专门端口的那些表从这里自建仓储 —— lark_emoji（复读唯一的读端）
- *     是 D3 的活，往 LarkStore 上加它并不合适（那是投影的端口，描述的是"一条消息进来
- *     要读写哪些行"）。
+   - `database` 还没有专门端口的那些表从这里自建仓储 —— lark_emoji（复读唯一的读端）
+ *     是 D3 的活。
  *   - `cache` 复读的计数器、meme 列表的缓存。
  *
  * 还缺的（打 tool-service 改图 / 分词、打 meme 服务、打 302.ai 查余额）由需要它的那批
@@ -156,8 +155,8 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
     { name: '给用户发送帮助信息', pendingIn: 'D4' },
     { name: '撤回消息', pendingIn: 'D4' },
     { name: '生成水群历史卡片', pendingIn: 'D4' },
-    { name: '开启复读', pendingIn: 'D3' },
-    { name: '关闭复读', pendingIn: 'D3' },
+    { name: '开启复读', command: openRepeatCommand },
+    { name: '关闭复读', command: closeRepeatCommand },
     { name: '指令处理', pendingIn: 'D4' },
     { name: '发送图片', command: sendPhotoCommand },
     { name: 'Meme', pendingIn: 'D4' },

@@ -23,6 +23,7 @@ import type {
     CommonMessageRow,
     CommonUserRow,
     LarkChatKey,
+    LarkChatPermission,
     LarkChatRow,
     LarkGroupBinding,
     LarkGroupChatFacts,
@@ -176,6 +177,20 @@ class MemoryLarkTables implements LarkStore {
         const row = this.larkGroupBindings.get(at);
         // UPDATE 打不到行就是 no-op，不会凭空建一行出来。
         if (row) this.larkGroupBindings.set(at, { ...row, is_active: isActive });
+    }
+
+    // 真身那条是 `jsonb ||`：合并，同一列上的其他开关留着。这里也合并 —— 整份覆盖的
+    // 假实现会让"开了复读、发图权限没了"这类回归在内存里完全看不出来。
+    async setLarkChatPermission(
+        chatId: string,
+        patch: Partial<LarkChatPermission>,
+    ): Promise<void> {
+        const row = this.larkChats.get(chatId) as LarkChatRow | undefined;
+        if (!row) return;
+        this.larkChats.set(chatId, {
+            ...row,
+            permission_config: { ...row.permission_config, ...patch },
+        } as unknown as Row);
     }
 
     async saveCommonUser(row: CommonUserRow): Promise<void> {

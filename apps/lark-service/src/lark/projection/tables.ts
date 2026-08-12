@@ -297,6 +297,18 @@ export interface LarkTables {
      */
     setLarkGroupBindingActive(chatId: string, unionId: string, isActive: boolean): Promise<void>;
 
+    /**
+     * 拨这个会话上的开关，**合并不覆盖**。
+     *
+     * 收的是一个 patch 而不是整份 permission_config：那一列是一团 jsonb，上面同时住着
+     * 好几个互不相干的开关（见 LarkChatPermission），整份写回去就是拿一个只知道自己那
+     * 一项的调用方去决定别人的值。合并语义（`jsonb ||`）定在真身里，只写一遍。
+     *
+     * **没有这一行时是静默的 no-op**，与拆分前一致：那条 UPDATE 匹配不到行就 0 行受
+     * 影响。实际上走不到 —— 能敲出这条指令说明这个会话的消息已经投影过、行早就建好了。
+     */
+    setLarkChatPermission(chatId: string, patch: Partial<LarkChatPermission>): Promise<void>;
+
     /** upsert on (common_conversation_id, bot_name)。 */
     markBotPresent(
         commonConversationId: string,

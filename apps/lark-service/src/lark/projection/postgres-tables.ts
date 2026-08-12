@@ -327,6 +327,27 @@ function tablesOn(manager: EntityManager): LarkTables {
                 .update({ userUnionId: unionId, chatId }, { isActive });
         },
 
+        async setLarkChatPermission(chatId, patch): Promise<void> {
+            // `jsonb ||` 是合并：同一列上的其他开关原样留着。整列覆写会把它们一起抹掉。
+            //
+            // COALESCE 不能省 —— 这一列 nullable，而 PG 里 `NULL || anything` 还是
+            // NULL。少了它，从来没配过开关的老会话第一次开复读会写进去一个 NULL，
+            // 语句成功、什么也没存下。
+            //
+            // patch 走绑定参数（`::jsonb` 的显式转型是给 PG 定类型用的，未定类型的
+            // 参数在 `jsonb || ?` 这个位置上解析不出来）。
+            await manager
+                .createQueryBuilder()
+                .update(LarkBaseChatInfo)
+                .set({
+                    permission_config: () =>
+                        `COALESCE("permission_config", '{}'::jsonb) || :patch::jsonb`,
+                })
+                .setParameter('patch', JSON.stringify(patch))
+                .where('chat_id = :chatId', { chatId })
+                .execute();
+        },
+
         async markBotPresent(commonConversationId, botName, isActive): Promise<void> {
             await manager.getRepository(CommonBotPresence).upsert(
                 {

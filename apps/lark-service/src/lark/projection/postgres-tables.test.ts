@@ -322,6 +322,38 @@ describe('写：绑定关系', () => {
     });
 });
 
+describe('写：会话开关', () => {
+    // 这一列是一团 jsonb，上面还住着 allow_send_pixiv_image 那几个别的开关。整列覆写
+    // 会把它们一起抹掉，而症状要过几天才有人对上（"开了一下复读，发图权限就没了"）。
+    // 所以这条语句的重点全在那个 `||`。
+    it('合并进 permission_config，同一列上的其他开关原样保留', async () => {
+        await h.store.setLarkChatPermission('oc_1', { open_repeat_message: true });
+
+        const update = h.sqlOf('UPDATE "lark_base_chat_info"');
+        expect(update.sql).toContain('"permission_config" = COALESCE("permission_config"');
+        expect(update.sql).toContain('||');
+        expect(update.params).toEqual(['{"open_repeat_message":true}', 'oc_1']);
+    });
+
+    // 这一列 nullable：从来没配过开关的老会话上它是 NULL，而 `NULL || anything` 在 PG
+    // 里还是 NULL —— 少了 COALESCE，第一次开复读会写进去一个 NULL，看上去成功、实际
+    // 什么也没存下。
+    it('这一列还是 NULL 时也写得进去', async () => {
+        await h.store.setLarkChatPermission('oc_1', { open_repeat_message: false });
+
+        expect(h.sqlOf('UPDATE "lark_base_chat_info"').sql).toContain("'{}'::jsonb");
+    });
+
+    // 值走绑定参数、不拼进 SQL 串。
+    it('开关的值是参数不是字面量', async () => {
+        await h.store.setLarkChatPermission('oc_1', { open_repeat_message: false });
+
+        const update = h.sqlOf('UPDATE "lark_base_chat_info"');
+        expect(update.sql).not.toContain('open_repeat_message');
+        expect(update.params).toEqual(['{"open_repeat_message":false}', 'oc_1']);
+    });
+});
+
 describe('写：每条语句的冲突语义', () => {
     it('common_user 按主键 upsert', async () => {
         await h.store.saveCommonUser({

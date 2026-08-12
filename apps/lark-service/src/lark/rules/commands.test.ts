@@ -213,8 +213,8 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
             ['给用户发送帮助信息', 'D4'],
             ['撤回消息', 'D4'],
             ['生成水群历史卡片', 'D4'],
-            ['开启复读', 'D3'],
-            ['关闭复读', 'D3'],
+            ['开启复读', 'migrated'],
+            ['关闭复读', 'migrated'],
             ['指令处理', 'D4'],
             ['发送图片', 'migrated'],
             ['Meme', 'D4'],
@@ -224,6 +224,8 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
     // 上一条只看账本，这一条看真的拼出来了什么 —— 槽位填了个别的东西同样是静默的。
     it('真的拼出来的就是账本上那几条，先后也一样', () => {
         expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
+            '开启复读',
+            '关闭复读',
             '发送图片',
         ]);
     });
