@@ -31,7 +31,8 @@ export function createDefaultRedisConfig(): RedisConfig {
 export class RedisClient {
     private redis: Redis;
     private redisSub: Redis;
-    private channelHandlers: Map<string, Set<(channel: string, message: string) => void>> = new Map();
+    private channelHandlers: Map<string, Set<(channel: string, message: string) => void>> =
+        new Map();
 
     constructor(config: RedisConfig = createDefaultRedisConfig()) {
         this.redis = new Redis(config);
@@ -60,7 +61,10 @@ export class RedisClient {
                     try {
                         handler(channel, message);
                     } catch (error) {
-                        console.error(`Error in Redis message handler for channel ${channel}:`, error);
+                        console.error(
+                            `Error in Redis message handler for channel ${channel}:`,
+                            error,
+                        );
                     }
                 }
             }
@@ -150,7 +154,9 @@ export class RedisClient {
         ...args: (string | number)[]
     ): Promise<Array<[string, Array<[string, string[]]>]> | null> {
         // @ts-ignore
-        return (await this.redis.xread(...args)) as Array<[string, Array<[string, string[]]>]> | null;
+        return (await this.redis.xread(...args)) as Array<
+            [string, Array<[string, string[]]>]
+        > | null;
     }
 
     async xdel(key: string, id: string): Promise<number> {
@@ -484,9 +490,17 @@ export function getRedisClient(config?: RedisConfig): RedisClient {
     return defaultInstance;
 }
 
-export function resetRedisClient(): void {
+/**
+ * 关闭单例并清掉引用。
+ *
+ * 必须是 async 并被调用方 await：`close()` 内部要 quit 命令连接和订阅连接两条，
+ * 丢掉这个 Promise 会让关停路径在连接真正断开前就往下走（进程随后 exit），
+ * 而且 close() 抛错也捕获不到，会变成 unhandled rejection。
+ */
+export async function resetRedisClient(): Promise<void> {
     if (defaultInstance) {
-        defaultInstance.close();
+        const instance = defaultInstance;
         defaultInstance = null;
+        await instance.close();
     }
 }

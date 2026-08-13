@@ -5,7 +5,7 @@
 //
 // 分叉决策本身是纯函数 resolveInboundDispatch（已测）；本函数只做装配：注入真实
 // flag（isInboundLaneDispatchEnabled，default off）+ 真实 resolveLane
-// （getLaneRouter）+ 真实投递（dispatchToInboundLane，fail-closed）。
+// （getLaneBindingResolver）+ 真实投递（dispatchToInboundLane，fail-closed）。
 //
 // 零回归红线：flag off 时 resolveInboundDispatch 直接返回 local 且不调 resolveLane，
 // 本函数 publish 一次都不发——行为与现状逐字节一致。
@@ -13,7 +13,7 @@
 import { resolveInboundDispatch } from './inbound-lane-decision';
 import { dispatchToInboundLane } from './inbound-lane';
 import { isInboundLaneDispatchEnabled } from './inbound-lane-flag';
-import { getLaneRouter } from './lane-router-runtime';
+import { getLaneBindingResolver } from '@inner/shared/lane-binding';
 
 export interface InboundDispatchContext {
     // 本进程所属 lane（prod channel-server = 'prod'，由 rabbitmq.getLane() 取，
@@ -39,7 +39,7 @@ export async function dispatchInboundIfNeeded(ctx: InboundDispatchContext): Prom
         botGlobalId: ctx.botGlobalId,
         commonConversationId: ctx.commonConversationId,
         resolveLane: (channel, botGlobalId, commonConversationId) =>
-            getLaneRouter().resolveLane(channel, botGlobalId, commonConversationId),
+            getLaneBindingResolver().resolveLane(channel, botGlobalId, commonConversationId),
     });
 
     if (decision.action === 'local') {

@@ -1,5 +1,5 @@
-import type { RuleMessage } from '@core/rules/rule-message';
-import type { ChatRequestEnrichment } from '@core/services/ai/reply';
+import type { RuleMessage } from '@inner/shared/rules';
+import type { ChatRequestEnrichment } from '@inner/shared/rules';
 import { larkContextStore } from './lark-context-store';
 import { getLarkBotConfigByCommonUserId } from './bot-identity';
 

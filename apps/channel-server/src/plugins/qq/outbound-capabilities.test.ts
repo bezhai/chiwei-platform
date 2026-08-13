@@ -1,8 +1,12 @@
-import { describe, it, expect, mock, beforeEach } from 'bun:test';
+import { describe, it, expect, mock, beforeEach, afterAll } from 'bun:test';
 import type { CustomOutboundMessage } from '@inner/shared/protocols';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
 
 // reverse-resolve is the plugin's private DB layer; mock it.
+// bun 的 mock.module 是**整模块替换 + 进程级全局**（mock.restore() 撤不掉）：这个
+// 模块也被 qq 插件本体（qq-plugin.test.ts 里 import 的 ./index）消费，桩留着不撤
+// 会污染后续文件；所以先抓真身、afterAll 注回去。
+const realReverseResolve = { ...(await import('./outbound-reverse-resolve')) };
 const reverse = {
     resolveQqMessageRef: mock(async (_id: string) => 'src_qq_msg'),
     resolveQqConversationRef: mock(async (_id: string) => ({ channelId: 'qq_conv' })),
@@ -12,10 +16,19 @@ const reverse = {
         channelRootId: undefined,
     })),
 };
-mock.module('./outbound-reverse-resolve', () => reverse);
+mock.module('./outbound-reverse-resolve', () => ({
+    ...realReverseResolve,
+    ...reverse,
+}));
 
+// @middleware/context 同理，而且更毒：它的 context 是基座 context 的展开，模块还
+// 导出 asyncLocalStorage；整体替换会让后续文件报 "Export named 'asyncLocalStorage'
+// not found"。出站装配只读 context.getBotName()，所以只替换这一个取值口径，其余
+// 照抄真身、afterAll 注回。
+const realCtx = { ...(await import('@middleware/context')) };
 mock.module('@middleware/context', () => ({
-    context: { getBotName: () => 'chiwei-qq' },
+    ...realCtx,
+    context: { ...realCtx.context, getBotName: () => 'chiwei-qq' },
 }));
 
 const { createQqOutboundCapabilities } = await import('./outbound-capabilities');
@@ -191,4 +204,9 @@ describe('qq OutboundCapabilities resolve + record delegation', () => {
         const conv = await cap.resolveConversationRef('cc');
         expect(conv.channelId).toBe('qq_conv');
     });
+});
+
+afterAll(() => {
+    mock.module('./outbound-reverse-resolve', () => realReverseResolve);
+    mock.module('@middleware/context', () => realCtx);
 });

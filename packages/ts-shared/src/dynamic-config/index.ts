@@ -42,7 +42,10 @@ export class DynamicConfig {
     private cache: Map<string, CacheEntry> = new Map();
 
     constructor(options: DynamicConfigOptions = {}) {
-        this.paasEngineUrl = (options.paasEngineUrl || 'http://paas-engine:8080').replace(/\/+$/, '');
+        this.paasEngineUrl = (options.paasEngineUrl || 'http://paas-engine:8080').replace(
+            /\/+$/,
+            '',
+        );
         this.laneProvider = options.laneProvider || (() => context.get<string>('lane'));
     }
 

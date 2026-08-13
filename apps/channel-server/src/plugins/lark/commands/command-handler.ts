@@ -2,13 +2,13 @@ import {
     UserGroupBindingRepository,
     GroupMemberRepository,
     BaseChatInfoRepository,
-    UserBlacklistRepository,
     CommonMessageRepository,
     LarkMessageRepository,
 } from '@infrastructure/dal/repositories/repositories';
+import { userBlacklistRepo } from '@inner/shared/persistence';
 import { Message } from '@core/models/message';
 import { replyMessage } from '@lark/basic/message';
-import type { RuleMessage } from 'core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from '../lark-context-store';
 import { getUserInfo } from '@lark-client';
 
@@ -201,7 +201,7 @@ const commandRules = [
             }
 
             // 检查是否已被拉黑
-            const existing = await UserBlacklistRepository.findOne({
+            const existing = await userBlacklistRepo().findOne({
                 where: { union_id: mentionUser },
             });
 
@@ -211,7 +211,7 @@ const commandRules = [
             }
 
             // 添加到黑名单
-            await UserBlacklistRepository.save({
+            await userBlacklistRepo().save({
                 union_id: mentionUser,
                 blocked_by: message.sender,
             });
@@ -236,7 +236,7 @@ const commandRules = [
             }
 
             // 检查是否在黑名单中
-            const existing = await UserBlacklistRepository.findOne({
+            const existing = await userBlacklistRepo().findOne({
                 where: { union_id: mentionUser },
             });
 
@@ -246,7 +246,7 @@ const commandRules = [
             }
 
             // 从黑名单移除
-            await UserBlacklistRepository.delete({ union_id: mentionUser });
+            await userBlacklistRepo().delete({ union_id: mentionUser });
 
             replyMessage(message.messageId, '解除拉黑成功', true);
         },
@@ -260,7 +260,7 @@ const commandRules = [
                 return;
             }
 
-            const list = await UserBlacklistRepository.find();
+            const list = await userBlacklistRepo().find();
 
             if (list.length === 0) {
                 replyMessage(message.messageId, '黑名单为空', true);

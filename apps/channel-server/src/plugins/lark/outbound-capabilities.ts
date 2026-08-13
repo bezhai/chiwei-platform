@@ -20,11 +20,11 @@ import type {
     OutboundCapabilities,
     OutboundTargetResolveInput,
     RenderContext,
-} from '@core/ports/channel-plugin';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
+} from '@inner/shared/channel';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
 import type { PostContent } from 'types/content-types';
 import { markdownToPostContent } from './post-content-processor';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 import { storeLarkOutboundMessage } from './common-projector';
 import {
     resolveLarkConversationRef,
@@ -200,7 +200,7 @@ export function createLarkOutboundCapabilities(deps: LarkOutboundDeps): Outbound
         },
 
         async recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string> {
-            const botConfig = multiBotManager.getBotConfig(input.botName);
+            const botConfig = botDirectory.getBotConfig(input.botName);
             const senderDisplayName =
                 botConfig?.channel === 'lark'
                     ? (getLarkDisplayNameByAppId(larkCredentials(botConfig).app_id) ?? undefined)

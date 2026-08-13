@@ -5,10 +5,14 @@ export { LarkClient, getLarkClient, resetLarkClient, createLarkClient } from './
 export { LarkClientManager, getLarkClientManager } from './manager';
 
 // Types
-export {
+//
+// 类型和值必须分开导出。合在一个 `export { ... }` 里的话，逐模块转译的运行时
+// （bun run / bun test）看不到 './types' 的类型声明，只会照字面去找同名的运行时导出，
+// 找不到就抛 "export 'X' not found"。打包器（bun build）能消掉这层，所以症状是
+// **编译出来的二进制正常、直接跑源码就崩**。
+export type {
     // Config
     LarkClientConfig,
-    createDefaultLarkConfig,
     // Response types
     LarkResponse,
     // Message types
@@ -22,6 +26,6 @@ export {
     ChatInfo,
     UserInfo,
     MessageInfo,
-    // Constants
-    ERROR_CODE_MAP,
 } from './types';
+
+export { createDefaultLarkConfig, ERROR_CODE_MAP } from './types';

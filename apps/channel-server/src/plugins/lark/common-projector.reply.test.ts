@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it, mock, afterAll } from 'bun:test';
 
 // Maps standing in for the lark_message / common_* tables.
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
@@ -7,7 +7,13 @@ const larkChats = new Map<string, { common_conversation_id: string }>();
 
 const warn = mock((_message: string, _meta?: Record<string, unknown>) => undefined);
 
+// bun 的 mock.module 是**整模块替换 + 进程级全局**，且 mock.restore() 不撤销它。
+// 每个被桩掉的模块都先抓真身、只覆盖需要的导出，afterAll 再注回真身，否则同一个
+// bun test 进程里后面加载的文件（含被测生产代码）会看到残缺模块。
+// @logger/index 还导出 LoggerFactory，只写 default 会把它抹掉。
+const realLogger = { ...(await import('@logger/index')) };
 mock.module('@logger/index', () => ({
+    ...realLogger,
     default: {
         warn,
         info: mock(() => undefined),
@@ -16,7 +22,11 @@ mock.module('@logger/index', () => ({
     },
 }));
 
+// ormconfig 只导出 default（TypeORM DataSource）；import 真身只做 bindDataSource
+// 存引用，不建连接。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: (entity: { name?: string }) => {
             if (entity.name === 'LarkMessage') {
@@ -84,40 +94,29 @@ mock.module('ormconfig', () => ({
     },
 }));
 
-mock.module('@cache/redis-client', () => ({
+// Redis 收敛成 @inner/shared/cache 的 RedisClient 单例后，这里桩的是
+// getRedisClient()。bun 的 mock.module 是**整模块替换 + 进程级全局**，只写
+// getRedisClient 会把同模块的 cache / RedisClient 等导出一并抹掉，
+// 别的测试文件跟着遭殃；所以先抓真身、只覆盖这一个导出，afterAll 再注回去。
+const realSharedCache = { ...(await import('@inner/shared/cache')) };
+const redisStub = {
     get: mock(async () => null),
     setWithExpire: mock(async () => 'OK'),
     hgetall: mock(async () => ({})),
     setNx: mock(async () => 'OK'),
     evalScript: mock(async () => 1),
     exists: mock(async () => 0),
+};
+mock.module('@inner/shared/cache', () => ({
+    ...realSharedCache,
+    getRedisClient: () => redisStub,
 }));
 
-mock.module('@middleware/context', () => ({
-    context: {
-        getBotName: () => 'chiwei',
-        getLane: () => undefined,
-    },
-}));
-
-mock.module('@integrations/rabbitmq', () => ({
-    CHAT_REQUEST: 'chat_request',
-    PROACTIVE_EVAL: 'proactive_eval',
-    getLane: () => undefined,
-    getRabbitChannel: () => ({
-        assertQueue: mock(async () => undefined),
-        sendToQueue: mock(() => true),
-    }),
-}));
-
-mock.module('@core/services/bot/multi-bot-manager', () => ({
-    multiBotManager: {
-        getAllBotConfigs: () => [],
-        getBotConfig: () => null,
-        getBotCommonUserId: () => '018f-bot-common-user',
-    },
-}));
-
+// 这里不桩 @middleware/context / @inner/shared/mq / @inner/shared/bot：
+// prepareLarkInboundProjection 全程不读 context（context.getBotName 只在
+// storeLarkInboundMessage 用）；common-projector 的 import 图里根本没有
+// @inner/shared/mq；botDirectory 也不会被碰到 —— 事件带 app_id（不走
+// getCurrentLarkBotAppId）、mentions 为空（不走 bot 提及投影）。
 const { prepareLarkInboundProjection } = await import('./common-projector');
 
 // A reply message whose parent_id/root_id point at an om_id that was never
@@ -259,4 +258,10 @@ describe('prepareLarkInboundProjection reply ingest', () => {
 
         expect(warn).not.toHaveBeenCalled();
     });
+});
+
+afterAll(() => {
+    mock.module('@inner/shared/cache', () => realSharedCache);
+    mock.module('@logger/index', () => realLogger);
+    mock.module('ormconfig', () => realOrmconfig);
 });

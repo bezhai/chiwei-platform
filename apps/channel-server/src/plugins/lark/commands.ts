@@ -23,7 +23,7 @@ import {
     RegexpMatch,
     RuleConfig,
     TextMessageLimit,
-} from '@core/rules/rule';
+} from '@inner/shared/rules';
 import { WhiteGroupCheck, IsAdmin } from './lark-rules';
 import { larkContextStore } from './lark-context-store';
 

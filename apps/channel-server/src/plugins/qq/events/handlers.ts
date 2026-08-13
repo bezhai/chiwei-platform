@@ -16,14 +16,14 @@ import '@plugins/index';
 import type { CustomInboundMessage } from '@inner/shared/protocols';
 import AppDataSource from 'ormconfig';
 import { context } from '@middleware/context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
-import { getChannelRegistry } from '@core/registry/channel-registry';
-import { enforceDecision } from '@core/channels/contracts';
-import { runRules } from '@core/rules/engine';
-import { rabbitmqClient, CHAT_REQUEST, getLane } from '@integrations/rabbitmq';
+import { botDirectory } from '@inner/shared/bot';
+import { getChannelRegistry } from '@inner/shared/channel';
+import { enforceDecision } from '@inner/shared/channel';
+import { runRules } from '@inner/shared/rules';
+import { rabbitmqClient, CHAT_REQUEST, getLane } from '@inner/shared/mq';
 import { dispatchInboundIfNeeded } from '@integrations/inbound-lane-dispatch';
-import { setNx } from '@cache/redis-client';
-import { CommonBotPresence } from '@entities/common-bot-presence';
+import { getRedisClient } from '@inner/shared/cache';
+import { CommonBotPresence } from '@inner/shared/entities';
 import { QQ_SELF_MENTION_TARGET } from '../inbound';
 import { buildQqRuleMessage } from '../build-rule-message';
 import { enqueueQqImagePipeline } from '../image-pipeline';
@@ -57,7 +57,7 @@ export class QqEventHandlers {
     async handleInbound(custom: CustomInboundMessage): Promise<void> {
         try {
             const botName = context.getBotName();
-            const botConfig = botName ? multiBotManager.getBotConfig(botName) : null;
+            const botConfig = botName ? botDirectory.getBotConfig(botName) : null;
             let plugin;
             let botCommonUserId: string;
             try {
@@ -160,7 +160,7 @@ export class QqEventHandlers {
 
                 if (terminal.pendingChatTrigger) {
                     const { payload, lane, dedupeKey, savePending } = terminal.pendingChatTrigger;
-                    const lock = await setNx(dedupeKey, '1', 60);
+                    const lock = await getRedisClient().setNx(dedupeKey, '1', 60);
                     if (lock === null) {
                         console.info(
                             `[qq inbound] duplicate ChatTrigger skipped (lock held): ` +

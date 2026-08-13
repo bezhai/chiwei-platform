@@ -1,15 +1,10 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { ContentType } from '@core/models/message-content';
 
-mock.module('@plugins/lark/bot-identity', () => ({
-    getLarkBotConfigByAppId: () => null,
-    getLarkBotConfigByUnionId: () => null,
-    getLarkDisplayNameByAppId: () => null,
-    larkCredentials: () => {
-        throw new Error('not used');
-    },
-}));
-
+// 这里刻意不 mock @plugins/lark/bot-identity：本文件只测 applyMentionTokens，它是
+// 纯字符串处理，运行时一次都不碰 bot-identity（只有 addMentions 会）。真身 import
+// 也只是建模块级 Map、绑 DataSource 引用，不连库。而 bun 的 mock.module 是进程级
+// 全局替换，多余的 mock 会把 bot-identity 顶掉污染后面的文件。
 const REAL_MENTION_UTILS = new URL('./mention-utils.ts', import.meta.url).href;
 const { MentionUtils } = await import(REAL_MENTION_UTILS);
 

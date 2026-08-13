@@ -1,14 +1,19 @@
-import { describe, test, expect, beforeEach, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, mock, afterAll } from 'bun:test';
 import { Hono } from 'hono';
 import { AppError } from '@inner/shared';
 
-// Mock logger to assert calls
+// Mock logger to assert calls.
+// bun 的 mock.module 是**整模块替换 + 进程级全局**（mock.restore() 也撤不掉），
+// 只写 default 会把 @logger/index 的 LoggerFactory 一并抹掉，后续加载的生产代码
+// 跟着遭殃；所以先抓真身、只覆盖 default，afterAll 再把真身注回去。
+const realLoggerModule = { ...(await import('@logger/index')) };
 const mockLogger = {
     warn: mock(),
     error: mock(),
     info: mock(),
 };
 mock.module('@logger/index', () => ({
+    ...realLoggerModule,
     default: mockLogger,
 }));
 
@@ -51,4 +56,8 @@ describe('middleware/error-handler', () => {
         expect(await res.json()).toEqual({ error: 'Internal server error', code: 500 });
         expect(mockLogger.error).toHaveBeenCalled();
     });
+});
+
+afterAll(() => {
+    mock.module('@logger/index', () => realLoggerModule);
 });

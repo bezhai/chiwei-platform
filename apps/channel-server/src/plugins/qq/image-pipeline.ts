@@ -10,7 +10,7 @@
 // 不在本插件范围（不碰 agent-service）。message_id 用全局 common message id（与
 // agent-service ImageRegistry 的 key 口径一致，见 workers/image-registry-key.ts）。
 
-import type { InboundMessage } from '@core/channels/contracts';
+import type { InboundMessage } from '@inner/shared/channel';
 import { laneRouter } from '@infrastructure/lane-router';
 
 export function enqueueQqImagePipeline(

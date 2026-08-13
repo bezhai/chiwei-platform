@@ -1,0 +1,140 @@
+{
+  "_note": [
+    "出站队列按 channel 分区之后的命名与队列参数，TS 与 Python 共用的一份向量。",
+    "生产者是 agent-service（Python），消费者是 channel-server / lark-service（TS）。",
+    "两边各写各的 expected 时，'实现和本地 expected 一起被改' 或 'CI 只跑了一侧'",
+    "都会同时变绿，而失效的表现是两个服务静默守着对方不知道的队列 —— 没人消费，",
+    "或者两个人都消费。改这里的任何一个值，两侧测试都必须一起转红。",
+    "",
+    "读它的是测试，不是生产代码：共享包不认识任何具体渠道（spec 决策五），所以",
+    "channel 名字只出现在这份测试资产里。",
+    "",
+    "读取方：",
+    "  packages/ts-shared/src/mq/channel-route.test.ts",
+    "  apps/agent-service/tests/unit/infra/test_channel_routes.py",
+    "",
+    "命名口径：channel 揉进 base 名，泳道后缀继续加在最后。",
+    "  chat_response → chat_response_lark → chat_response_lark_{lane}",
+    "  chat.response → chat.response.lark → chat.response.lark.{lane}"
+  ],
+  "exchanges": {
+    "main": "post_processing",
+    "dead_letter": "post_processing_dlx"
+  },
+  "base_routes": {
+    "chat_response": { "queue": "chat_response", "rk": "chat.response" },
+    "recall": { "queue": "recall", "rk": "action.recall" }
+  },
+  "channels": ["lark", "qq"],
+  "lanes": [null, "ppe-x"],
+  "cases": [
+    {
+      "name": "chat_response/lark/prod",
+      "base": "chat_response",
+      "channel": "lark",
+      "lane": null,
+      "expect": {
+        "queue": "chat_response_lark",
+        "rk": "chat.response.lark",
+        "queue_args": { "x-dead-letter-exchange": "post_processing_dlx" }
+      }
+    },
+    {
+      "name": "chat_response/lark/ppe-x",
+      "base": "chat_response",
+      "channel": "lark",
+      "lane": "ppe-x",
+      "expect": {
+        "queue": "chat_response_lark_ppe-x",
+        "rk": "chat.response.lark.ppe-x",
+        "queue_args": {
+          "x-message-ttl": 10000,
+          "x-dead-letter-exchange": "post_processing",
+          "x-dead-letter-routing-key": "chat.response.lark",
+          "x-expires": 86400000
+        }
+      }
+    },
+    {
+      "name": "chat_response/qq/prod",
+      "base": "chat_response",
+      "channel": "qq",
+      "lane": null,
+      "expect": {
+        "queue": "chat_response_qq",
+        "rk": "chat.response.qq",
+        "queue_args": { "x-dead-letter-exchange": "post_processing_dlx" }
+      }
+    },
+    {
+      "name": "chat_response/qq/ppe-x",
+      "base": "chat_response",
+      "channel": "qq",
+      "lane": "ppe-x",
+      "expect": {
+        "queue": "chat_response_qq_ppe-x",
+        "rk": "chat.response.qq.ppe-x",
+        "queue_args": {
+          "x-message-ttl": 10000,
+          "x-dead-letter-exchange": "post_processing",
+          "x-dead-letter-routing-key": "chat.response.qq",
+          "x-expires": 86400000
+        }
+      }
+    },
+    {
+      "name": "recall/lark/prod",
+      "base": "recall",
+      "channel": "lark",
+      "lane": null,
+      "expect": {
+        "queue": "recall_lark",
+        "rk": "action.recall.lark",
+        "queue_args": { "x-dead-letter-exchange": "post_processing_dlx" }
+      }
+    },
+    {
+      "name": "recall/lark/ppe-x",
+      "base": "recall",
+      "channel": "lark",
+      "lane": "ppe-x",
+      "expect": {
+        "queue": "recall_lark_ppe-x",
+        "rk": "action.recall.lark.ppe-x",
+        "queue_args": {
+          "x-message-ttl": 10000,
+          "x-dead-letter-exchange": "post_processing",
+          "x-dead-letter-routing-key": "action.recall.lark",
+          "x-expires": 86400000
+        }
+      }
+    },
+    {
+      "name": "recall/qq/prod",
+      "base": "recall",
+      "channel": "qq",
+      "lane": null,
+      "expect": {
+        "queue": "recall_qq",
+        "rk": "action.recall.qq",
+        "queue_args": { "x-dead-letter-exchange": "post_processing_dlx" }
+      }
+    },
+    {
+      "name": "recall/qq/ppe-x",
+      "base": "recall",
+      "channel": "qq",
+      "lane": "ppe-x",
+      "expect": {
+        "queue": "recall_qq_ppe-x",
+        "rk": "action.recall.qq.ppe-x",
+        "queue_args": {
+          "x-message-ttl": 10000,
+          "x-dead-letter-exchange": "post_processing",
+          "x-dead-letter-routing-key": "action.recall.qq",
+          "x-expires": 86400000
+        }
+      }
+    }
+  ]
+}

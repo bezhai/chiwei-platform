@@ -7,7 +7,7 @@
 
 import { sendPost, replyPost } from '@lark/basic/message';
 import { uploadImage, deleteMessage } from '@lark-client';
-import { hgetall } from '@cache/redis-client';
+import { getRedisClient } from '@inner/shared/cache';
 import { Readable } from 'node:stream';
 import type { PostContent } from 'types/content-types';
 import type { LarkOutboundDeps } from './outbound-capabilities';
@@ -31,7 +31,7 @@ export const defaultLarkOutboundDeps: LarkOutboundDeps = {
         return (await uploadImage(Readable.from(image))) ?? undefined;
     },
     async getImageRegistry(key: string) {
-        return hgetall(key);
+        return getRedisClient().hgetall(key);
     },
     async resolveMentionsForGroup(content: string, chatId: string) {
         return resolveLarkMentionsForGroup(content, chatId);

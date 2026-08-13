@@ -5,8 +5,8 @@
 // context store。RuleMessage 保持纯平台无关视图：runRules 看到的是 isDirect、
 // clearText 和 common mention ids。
 
-import type { ContentItem, InboundMessage } from '@core/channels/contracts';
-import type { RuleMessage } from '@core/rules/rule-message';
+import type { ContentItem, InboundMessage } from '@inner/shared/channel';
+import type { RuleMessage } from '@inner/shared/rules';
 
 function textOf(content: ContentItem[]): string {
     return content

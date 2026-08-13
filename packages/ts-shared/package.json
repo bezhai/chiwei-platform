@@ -13,7 +13,15 @@
     "./entities": "./src/entities/index.ts",
     "./middleware": "./src/middleware/index.ts",
     "./lane-router": "./src/lane-router/index.ts",
-    "./protocols": "./src/protocols/index.ts"
+    "./protocols": "./src/protocols/index.ts",
+    "./channel": "./src/channel/index.ts",
+    "./rules": "./src/rules/index.ts",
+    "./bot": "./src/bot/index.ts",
+    "./persistence": "./src/persistence/index.ts",
+    "./mq": "./src/mq/client.ts",
+    "./mq-context": "./src/mq/context.ts",
+    "./lane-policy": "./src/lane-policy.ts",
+    "./lane-binding": "./src/lane-binding/index.ts"
   },
   "scripts": {
     "build": "tsc",
@@ -31,16 +39,21 @@
     "winston": "^3.11.0"
   },
   "devDependencies": {
+    "@types/amqplib": "^0.10.6",
     "@types/node": "^18.0.0",
     "@types/uuid": "^10.0.0",
     "typescript": "^5.6.3"
   },
   "peerDependencies": {
+    "amqplib": "^0.10.5",
     "hono": "^4.0.0",
     "typeorm": "^0.3.17",
     "pg": "^8.11.3"
   },
   "peerDependenciesMeta": {
+    "amqplib": {
+      "optional": true
+    },
     "hono": {
       "optional": true
     },

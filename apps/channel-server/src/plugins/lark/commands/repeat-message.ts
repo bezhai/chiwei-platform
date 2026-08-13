@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { get, setWithExpire } from 'infrastructure/cache/redis-client';
+import { getRedisClient } from '@inner/shared/cache';
 import { BaseChatInfoRepository } from 'infrastructure/dal/repositories/repositories';
 import { Message } from 'core/models/message';
 import { sendSticker, replyMessage, sendPost } from '@lark/basic/message';
 import { createPostContentFromText } from '../post-content-processor';
-import type { RuleMessage } from 'core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from '../lark-context-store';
 import { renderLarkMentionText } from '../mention-renderer';
 
@@ -22,7 +22,7 @@ async function addRepeatMsgAndCheck(chatId: string, msg: string): Promise<boolea
     const hashedMsg = createHash('md5').update(msg).digest('hex');
 
     // 从 Redis 获取当前的消息记录
-    const existingData = await get(redisKey);
+    const existingData = await getRedisClient().get(redisKey);
     let msgBody: RepeatMsg;
 
     if (existingData) {
@@ -50,7 +50,7 @@ async function addRepeatMsgAndCheck(chatId: string, msg: string): Promise<boolea
     }
 
     // 更新 Redis 数据，设置过期时间为 7 天
-    await setWithExpire(redisKey, JSON.stringify(msgBody), 7 * 24 * 60 * 60);
+    await getRedisClient().setWithExpire(redisKey, JSON.stringify(msgBody), 7 * 24 * 60 * 60);
 
     // 返回是否达到重复次数 3 的条件
     return msgBody.repeatTime === 3;

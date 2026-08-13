@@ -6,7 +6,7 @@ import { traceMiddleware } from '@middleware/trace';
 import { botContextMiddleware } from '@middleware/bot-context';
 import { createContextPropagationMiddleware } from '@inner/shared/middleware';
 import { metricsMiddleware, metricsApp } from '@middleware/metrics';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 import laneBindingsRoutes from '@api/routes/lane-bindings.route';
 import '@plugins/index';
 import { registerChannelHttpIngresses } from '@plugins/runtime';
@@ -56,7 +56,7 @@ export class HttpServerManager {
     private registerHealthCheck(): void {
         this.app.get('/api/health', (c) => {
             try {
-                const allBots = multiBotManager.getAllBotConfigs();
+                const allBots = botDirectory.getAllBotConfigs();
                 return c.json({
                     status: 'ok',
                     timestamp: new Date().toISOString(),
@@ -95,7 +95,7 @@ export class HttpServerManager {
         // 实际流量是否进入 channel-server 由 api-gateway / 泳道路由决定。
         await registerChannelHttpIngresses(
             this.app,
-            multiBotManager.getBotsByInitType('http'),
+            botDirectory.getBotsByInitType('http'),
         );
 
         // 启动服务器

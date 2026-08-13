@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import type { InboundMessage } from '@core/channels/contracts';
+import type { InboundMessage } from '@inner/shared/channel';
 import { larkAddressing } from './addressing';
 
 // NeedRobotMention equivalence: respond iff p2p (direct) OR bot mentioned in group.

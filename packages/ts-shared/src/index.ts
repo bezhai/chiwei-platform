@@ -59,16 +59,17 @@ export type {
 export { StateMachine, RateLimiter, TextUtils } from './utils';
 
 // Entity exports (requires typeorm as peer dependency)
-export {
-    CommonUser,
-    CommonConversation,
-    CommonMessage,
-    CommonAgentResponse,
-} from './entities';
+export { CommonUser, CommonConversation, CommonMessage, CommonAgentResponse } from './entities';
 
 // MongoDB exports
 export type { MongoConfig, IndexDefinition, BulkWriteResult } from './mongo';
-export { MongoService, getMongoService, resetMongoService, createMongoService, MongoCollection } from './mongo';
+export {
+    MongoService,
+    getMongoService,
+    resetMongoService,
+    createMongoService,
+    MongoCollection,
+} from './mongo';
 
 // LaneRouter exports
 export type { ServiceInfo, LaneRouterOptions } from './lane-router';

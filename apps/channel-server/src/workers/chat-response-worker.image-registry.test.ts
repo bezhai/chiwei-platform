@@ -1,11 +1,15 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 import { imageRegistryLookupId } from './image-registry-key';
 
 const larkMessages = new Map<string, { om_id: string; common_message_id: string }>();
 const larkChats = new Map<string, { chat_id: string; common_conversation_id: string }>();
 
+// 同 chat-response-worker.field-mapping.test.ts：mock.module 整模块替换 + 进程级
+// 全局，先抓真身只覆盖 default，afterAll 放回，别把假 DataSource 漏给后续文件。
+const realOrmconfig = { ...(await import('ormconfig')) };
 mock.module('ormconfig', () => ({
+    ...realOrmconfig,
     default: {
         getRepository: (entity: { name?: string }) => {
             if (entity.name === 'LarkMessage') {
@@ -31,6 +35,10 @@ mock.module('ormconfig', () => ({
         },
     },
 }));
+
+afterAll(() => {
+    mock.module('ormconfig', () => realOrmconfig);
+});
 
 const { reverseResolveOutbound } = await import('../plugins/lark/outbound-reverse-resolve');
 

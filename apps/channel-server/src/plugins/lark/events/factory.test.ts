@@ -1,9 +1,13 @@
-import { describe, it, expect, mock } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 
-// Mock heavy dependencies that factory.ts imports but tests don't need
-mock.module('@plugins/lark/message-factory', () => ({
-    createLarkMessageFromEvent: mock(),
-}));
+// 这里只测 MessageTransferer.getContentFactory —— 纯解析，不碰
+// createLarkMessageFromEvent（那条路在 transfer() 里，本文件没有用例走到）。
+// factory.ts 顶层 import 了 @plugins/lark/message-factory，但那个模块 import 期
+// 只建 repository 句柄、不连库，所以不需要 mock。
+//
+// 之前这里 mock.module 了它：bun 的 mock.module 是**整模块替换 + 进程级全局**，
+// 只写 createLarkMessageFromEvent 会把 createLarkMessageFromHistory 抹掉，
+// 同进程后跑的 @lark/basic/message 直接 SyntaxError。stub 无用而有害，删掉。
 
 import { ContentType } from '@core/models/message-content';
 import { MessageTransferer } from './factory';

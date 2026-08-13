@@ -1,6 +1,6 @@
 import { AxiosResponse } from 'axios';
 import { Message } from '@core/models/message';
-import type { RuleMessage } from 'core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from '../../lark-context-store';
 import { Meme } from 'types/meme';
 import { Readable } from 'node:stream';
@@ -8,7 +8,7 @@ import { uploadImage, downloadResource } from '@lark-client';
 import FormData from 'form-data';
 import { replyImage, replyMessage } from '@lark/basic/message';
 import { GroupChatInfoRepository } from '@infrastructure/dal/repositories/repositories';
-import { cache } from '@cache/cache-decorator';
+import { cache } from '@inner/shared/cache';
 import http from '@http/client';
 
 // 缓存过期时间（10分钟）

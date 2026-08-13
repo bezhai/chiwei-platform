@@ -1,9 +1,9 @@
 import { In } from 'typeorm';
 import AppDataSource from 'ormconfig';
-import type { BotConfig } from '@entities/bot-config';
+import type { BotConfig } from '@inner/shared/entities';
 import { BotPersona } from '@entities/bot-persona';
 import { context } from '@middleware/context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 
 export const LARK_CHANNEL = 'lark';
 
@@ -57,7 +57,7 @@ function getCurrentLarkBotConfig(): BotConfig {
     if (!botName) {
         throw new Error('Bot name is not set in the context');
     }
-    const botConfig = multiBotManager.getBotConfig(botName);
+    const botConfig = botDirectory.getBotConfig(botName);
     if (!botConfig) {
         throw new Error(`Bot configuration not found for bot: ${botName}`);
     }
@@ -76,7 +76,7 @@ export function getCurrentLarkBotUnionId(): string {
 }
 
 export function getLarkBotConfigByAppId(appId: string): BotConfig | null {
-    for (const bot of multiBotManager.getAllBotConfigs()) {
+    for (const bot of botDirectory.getAllBotConfigs()) {
         if (bot.channel !== LARK_CHANNEL) continue;
         if (larkCredentials(bot).app_id === appId) return bot;
     }
@@ -84,7 +84,7 @@ export function getLarkBotConfigByAppId(appId: string): BotConfig | null {
 }
 
 export function getLarkBotConfigByUnionId(unionId: string): BotConfig | null {
-    for (const bot of multiBotManager.getAllBotConfigs()) {
+    for (const bot of botDirectory.getAllBotConfigs()) {
         if (bot.channel !== LARK_CHANNEL) continue;
         if (larkCredentials(bot).robot_union_id === unionId) return bot;
     }
@@ -92,7 +92,7 @@ export function getLarkBotConfigByUnionId(unionId: string): BotConfig | null {
 }
 
 export function getLarkBotConfigByCommonUserId(commonUserId: string): BotConfig | null {
-    for (const bot of multiBotManager.getAllBotConfigs()) {
+    for (const bot of botDirectory.getAllBotConfigs()) {
         if (bot.channel !== LARK_CHANNEL) continue;
         if (bot.common_user_id === commonUserId) return bot;
     }
@@ -101,7 +101,7 @@ export function getLarkBotConfigByCommonUserId(commonUserId: string): BotConfig 
 
 export async function loadLarkDisplayNames(): Promise<void> {
     appIdToDisplayName.clear();
-    const bots = multiBotManager
+    const bots = botDirectory
         .getAllBotConfigs()
         .filter((bot) => bot.channel === LARK_CHANNEL && bot.persona_id);
     const personaIds = bots.map((bot) => bot.persona_id!);
@@ -125,7 +125,7 @@ export function getLarkDisplayNameByAppId(appId: string): string | null {
 }
 
 export function getLarkBotMentionAliases(): Array<{ union_id: string; name: string }> {
-    return multiBotManager
+    return botDirectory
         .getAllBotConfigs()
         .filter((bot) => bot.channel === LARK_CHANNEL)
         .map((bot) => {

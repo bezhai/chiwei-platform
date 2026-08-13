@@ -44,29 +44,47 @@ function requireNonEmptyString(obj: Record<string, unknown>, field: string, ctx:
 }
 
 /** 校验一个可选字符串字段；不存在返回 undefined。 */
-function optionalString(obj: Record<string, unknown>, field: string, ctx: string): string | undefined {
+function optionalString(
+    obj: Record<string, unknown>,
+    field: string,
+    ctx: string,
+): string | undefined {
     const value = obj[field];
     if (value === undefined) return undefined;
     if (typeof value !== 'string') {
-        throw new Error(`${ctx}: optional field "${field}" must be a string when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "${field}" must be a string when present, got ${describe(value)}`,
+        );
     }
     return value;
 }
 
-function optionalNumber(obj: Record<string, unknown>, field: string, ctx: string): number | undefined {
+function optionalNumber(
+    obj: Record<string, unknown>,
+    field: string,
+    ctx: string,
+): number | undefined {
     const value = obj[field];
     if (value === undefined) return undefined;
     if (typeof value !== 'number' || Number.isNaN(value)) {
-        throw new Error(`${ctx}: optional field "${field}" must be a number when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "${field}" must be a number when present, got ${describe(value)}`,
+        );
     }
     return value;
 }
 
-function optionalBoolean(obj: Record<string, unknown>, field: string, ctx: string): boolean | undefined {
+function optionalBoolean(
+    obj: Record<string, unknown>,
+    field: string,
+    ctx: string,
+): boolean | undefined {
     const value = obj[field];
     if (value === undefined) return undefined;
     if (typeof value !== 'boolean') {
-        throw new Error(`${ctx}: optional field "${field}" must be a boolean when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "${field}" must be a boolean when present, got ${describe(value)}`,
+        );
     }
     return value;
 }
@@ -82,7 +100,9 @@ function requireBoolean(obj: Record<string, unknown>, field: string, ctx: string
 function requireChatType(obj: Record<string, unknown>, ctx: string): CustomChatType {
     const value = obj['chatType'];
     if (typeof value !== 'string' || !CHAT_TYPES.includes(value as CustomChatType)) {
-        throw new Error(`${ctx}: field "chatType" must be one of ${CHAT_TYPES.join(' | ')}, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: field "chatType" must be one of ${CHAT_TYPES.join(' | ')}, got ${describe(value)}`,
+        );
     }
     return value as CustomChatType;
 }
@@ -118,7 +138,9 @@ function validateAttachments(
     const value = obj[field];
     if (value === undefined) return undefined;
     if (!Array.isArray(value)) {
-        throw new Error(`${ctx}: optional field "${field}" must be an array when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "${field}" must be an array when present, got ${describe(value)}`,
+        );
     }
     return value.map((item, i) => validateAttachment(item, `${ctx}.${field}[${i}]`));
 }
@@ -137,11 +159,16 @@ function validateMention(value: unknown, ctx: string): CustomInboundMention {
     };
 }
 
-function validateMentions(obj: Record<string, unknown>, ctx: string): CustomInboundMention[] | undefined {
+function validateMentions(
+    obj: Record<string, unknown>,
+    ctx: string,
+): CustomInboundMention[] | undefined {
     const value = obj['mentions'];
     if (value === undefined) return undefined;
     if (!Array.isArray(value)) {
-        throw new Error(`${ctx}: optional field "mentions" must be an array when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "mentions" must be an array when present, got ${describe(value)}`,
+        );
     }
     return value.map((item, i) => validateMention(item, `${ctx}.mentions[${i}]`));
 }
@@ -150,7 +177,9 @@ function validateQuote(obj: Record<string, unknown>, ctx: string): CustomInbound
     const value = obj['quote'];
     if (value === undefined) return undefined;
     if (!isPlainObject(value)) {
-        throw new Error(`${ctx}: optional field "quote" must be an object when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "quote" must be an object when present, got ${describe(value)}`,
+        );
     }
     const quoteCtx = `${ctx}.quote`;
     return {
@@ -171,11 +200,15 @@ function validateStringArray(
     const value = obj[field];
     if (value === undefined) return undefined;
     if (!Array.isArray(value)) {
-        throw new Error(`${ctx}: optional field "${field}" must be an array when present, got ${describe(value)}`);
+        throw new Error(
+            `${ctx}: optional field "${field}" must be an array when present, got ${describe(value)}`,
+        );
     }
     value.forEach((item, i) => {
         if (typeof item !== 'string') {
-            throw new Error(`${ctx}: field "${field}[${i}]" must be a string, got ${describe(item)}`);
+            throw new Error(
+                `${ctx}: field "${field}[${i}]" must be a string, got ${describe(item)}`,
+            );
         }
     });
     return value as string[];

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 
 import { createLarkOutboundCapabilities } from './outbound-capabilities';
 import type { LarkOutboundDeps } from './outbound-capabilities';
-import type { ContentItem, ThreadRef } from '@core/channels/contracts';
+import type { ContentItem, ThreadRef } from '@inner/shared/channel';
 import type { PostContent } from 'types/content-types';
 
 // B3：plugins/lark 的 OutboundCapabilities 实现。把现状 chat-response-worker

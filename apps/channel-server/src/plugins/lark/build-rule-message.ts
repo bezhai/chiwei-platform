@@ -1,5 +1,5 @@
 import type { Message } from '@core/models/message';
-import type { RuleMessage } from '@core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from './lark-context-store';
 
 // 飞书 Message 富对象 → 平台无关 RuleMessage。B2 从 core/rules/rule-message.ts

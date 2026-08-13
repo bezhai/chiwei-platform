@@ -1,8 +1,8 @@
-import { describe, it, expect, mock } from 'bun:test';
+import { describe, it, expect, mock, afterAll } from 'bun:test';
 import {
     assertValidInboundMessage,
     type InboundMessage,
-} from '@core/channels/contracts';
+} from '@inner/shared/channel';
 import type { LarkReceiveMessage } from 'types/lark';
 
 const registeredLarkBots = new Map([
@@ -10,7 +10,13 @@ const registeredLarkBots = new Map([
     ['on_bot2', { channel: 'lark', credentials: { app_id: 'cli_bot2' } }],
 ]);
 
+// bot-identity 的真身要靠 botDirectory + DB 才能答出 persona 展示名，这里直接把
+// 那四个查询打桩。但 mock.module 是进程级整模块替换：先抓真身铺底（别的文件还要
+// 用 getLarkBotMentionAliases / getCurrentLarkBot* 等导出），跑完再原样装回去。
+const realBotIdentity = { ...(await import('./bot-identity')) };
+
 mock.module('./bot-identity', () => ({
+    ...realBotIdentity,
     getLarkBotConfigByAppId: (appId: string) =>
         [...registeredLarkBots.values()].find((bot) => bot.credentials.app_id === appId) ?? null,
     getLarkBotConfigByUnionId: (unionId: string) => registeredLarkBots.get(unionId) ?? null,
@@ -18,6 +24,10 @@ mock.module('./bot-identity', () => ({
         ({ cli_bot1: '赤尾', cli_bot2: '绫奈' })[appId] ?? null,
     larkCredentials: (bot: { credentials: { app_id: string } }) => bot.credentials,
 }));
+
+afterAll(() => {
+    mock.module('./bot-identity', () => realBotIdentity);
+});
 
 const { larkInbound } = await import('./inbound');
 

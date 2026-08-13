@@ -6,7 +6,7 @@ import type {
     OutboundResolvedTarget,
     OutboundTargetResolveInput,
     ConversationRef,
-} from '@core/ports/channel-plugin';
+} from '@inner/shared/channel';
 
 // chat-response-worker 出站反查决策（平台无关策略）。
 //

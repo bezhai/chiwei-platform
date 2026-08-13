@@ -16,7 +16,11 @@ export interface LockOptions {
  */
 export interface RedisLockOperations {
     setWithExpire(key: string, value: string, seconds: number): Promise<'OK'>;
-    evalScript(script: string, numKeys: number, ...keysAndArgs: (string | number)[]): Promise<unknown>;
+    evalScript(
+        script: string,
+        numKeys: number,
+        ...keysAndArgs: (string | number)[]
+    ): Promise<unknown>;
 }
 
 const UNLOCK_SCRIPT = `
@@ -32,11 +36,7 @@ end`;
  * @param options Lock options
  */
 export function createRedisLock(redisOps: RedisLockOperations, options: LockOptions = {}) {
-    return function (
-        target: unknown,
-        propertyKey: string,
-        descriptor: PropertyDescriptor,
-    ) {
+    return function (target: unknown, propertyKey: string, descriptor: PropertyDescriptor) {
         const originalMethod = descriptor.value;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

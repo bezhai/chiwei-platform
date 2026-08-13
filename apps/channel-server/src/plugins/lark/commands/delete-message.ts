@@ -2,7 +2,7 @@ import { getMessageInfo, deleteMessage } from '@lark-client';
 import { Message } from 'core/models/message';
 import { getCurrentLarkBotAppId } from '@plugins/lark/bot-identity';
 import { replyMessage } from '@lark/basic/message';
-import type { RuleMessage } from 'core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 import { larkContextStore } from '../lark-context-store';
 
 // lark-only handler：入口适配 RuleMessage → 从 lark 私有 store 取回飞书 Message

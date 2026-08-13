@@ -1,11 +1,17 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { ContentType } from '@core/models/message-content';
 
 let baseChatInfo: any = null;
 let groupChatInfo: any = null;
 let senderInfo: any = null;
 
+// 仓储模块导出十来个 TypeORM Repository，本文件只需要打三个的 findOne。
+// mock.module 是进程级整模块替换，直接给三个等于把其余仓储从同进程后续文件
+// 眼里删掉：先抓真身铺底（import 只是 getRepository，不连库），跑完装回去。
+const realRepositories = { ...(await import('@infrastructure/dal/repositories/repositories')) };
+
 mock.module('@infrastructure/dal/repositories/repositories', () => ({
+    ...realRepositories,
     BaseChatInfoRepository: {
         findOne: mock(async () => baseChatInfo),
     },
@@ -16,6 +22,10 @@ mock.module('@infrastructure/dal/repositories/repositories', () => ({
         findOne: mock(async () => senderInfo),
     },
 }));
+
+afterAll(() => {
+    mock.module('@infrastructure/dal/repositories/repositories', () => realRepositories);
+});
 
 const { createLarkMessageFromEvent, createLarkMessageFromHistory } = await import(
     './message-factory'

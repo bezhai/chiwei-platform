@@ -1,5 +1,5 @@
-import type { RuleMessage } from '@core/rules/rule-message';
-import type { ChatRequestEnrichment } from '@core/services/ai/reply';
+import type { RuleMessage } from '@inner/shared/rules';
+import type { ChatRequestEnrichment } from '@inner/shared/rules';
 import { getQqBotConfigByCommonUserId } from './bot-identity';
 
 // QQ 侧 chat.request 富化（对飞书 chat-request-enricher）。被 @ 的本 bot 在投影阶段

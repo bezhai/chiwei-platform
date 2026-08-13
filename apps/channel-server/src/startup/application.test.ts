@@ -13,8 +13,11 @@ const initializeCrontabs = mock(() => {});
 const startInboundLaneConsumer = mock(async () => {});
 const startChannelDirectIngresses = mock(async () => {});
 
-// application.ts 独占的依赖：直接 mock，不必还原（也就不会真的连 PG / Mongo，
-// 不会把 crontab 的一堆服务模块拖进来）。
+// 下面两个是 application.ts 独占的模块（按解析路径查过：src/startup/database.ts
+// 和 src/infrastructure/crontab/index.ts 全仓只有 application.ts 一个 import 方，
+// crontab 的其他代码走 ./registry 和 @crontab/decorators），进程里没有第二个消费者
+// 会被残缺 namespace 打到，所以直接 mock、不还原。反过来说也不能还原：抓真身要
+// await import，那正好会把 crontab 的一堆服务模块和真实 DB 连接拖进来，等于白 mock。
 mock.module('./database', () => ({
     DatabaseManager: {
         initialize: async () => {},
@@ -23,8 +26,8 @@ mock.module('./database', () => ({
 }));
 mock.module('@crontab/index', () => ({ initializeCrontabs }));
 
-const realRabbitmq = { ...(await import('@integrations/rabbitmq')) };
-mock.module('@integrations/rabbitmq', () => ({
+const realRabbitmq = { ...(await import('@inner/shared/mq')) };
+mock.module('@inner/shared/mq', () => ({
     ...realRabbitmq,
     rabbitmqClient: {
         connect: async () => {},
@@ -47,15 +50,15 @@ mock.module('@plugins/runtime', () => ({
     startChannelDirectIngresses,
 }));
 
-const { multiBotManager } = await import('@core/services/bot/multi-bot-manager');
-const botManagerInitialize = multiBotManager.initialize;
-multiBotManager.initialize = async () => {};
+const { botDirectory } = await import('@inner/shared/bot');
+const botDirectoryLoad = botDirectory.load;
+botDirectory.load = async () => {};
 
 const { ApplicationManager, createDefaultConfig } = await import('./application');
 
 afterAll(() => {
-    multiBotManager.initialize = botManagerInitialize;
-    mock.module('@integrations/rabbitmq', () => realRabbitmq);
+    botDirectory.load = botDirectoryLoad;
+    mock.module('@inner/shared/mq', () => realRabbitmq);
     mock.module('@integrations/inbound-lane-consumer', () => realInboundLaneConsumer);
     mock.module('@plugins/runtime', () => realPluginRuntime);
 });
@@ -72,6 +75,7 @@ describe('ApplicationManager.initialize：crontab 只在 prod 部署起', () => 
     beforeEach(() => {
         initializeCrontabs.mockClear();
         startChannelDirectIngresses.mockClear();
+        startInboundLaneConsumer.mockClear();
     });
 
     afterAll(() => {
@@ -98,5 +102,29 @@ describe('ApplicationManager.initialize：crontab 只在 prod 部署起', () => 
     test('LANE=coe-y → 不起 crontab', async () => {
         await initializeWithLane('coe-y');
         expect(initializeCrontabs).not.toHaveBeenCalled();
+    });
+
+    // 装配层交出去的是"本进程**能**处理哪些 channel"（注册面），而不是"拥有哪些"。
+    // 两者在 cutover 窗口内必然不等：lark 的代码还在（能处理），入站流量已经移交给
+    // lark-service（不该处理）。装配层写死拥有集合的话，收窄就只能靠 Task F 删代码，
+    // 而整个窗口里两个服务都在抢同一条分区队列。
+    test('LANE=ppe-x → 消费者拿到的是已注册 runtime 的处理面', async () => {
+        await initializeWithLane('ppe-x');
+        expect(startInboundLaneConsumer).toHaveBeenCalledTimes(1);
+        const [lane, , options] = startInboundLaneConsumer.mock.calls[0] as unknown as [
+            string,
+            unknown,
+            { handles: string[]; loadOwnedChannels?: unknown },
+        ];
+        expect(lane).toBe('ppe-x');
+        expect([...options.handles].sort()).toEqual(['lark', 'qq']);
+        // 拥有集合留给消费者按 dynamic config 现读，装配层不许在这里钉死。
+        expect(options.loadOwnedChannels).toBeUndefined();
+    });
+
+    // prod 不消费入站信封队列，它是投递方（§4.2）。
+    test('LANE=prod → 不起入站信封消费者', async () => {
+        await initializeWithLane('prod');
+        expect(startInboundLaneConsumer).not.toHaveBeenCalled();
     });
 });

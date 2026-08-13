@@ -12,22 +12,19 @@
 
 import AppDataSource from 'ormconfig';
 import { LoggerFactory } from '@inner/shared';
-import { CommonAgentResponse } from '@entities/common-agent-response';
-import {
-    rabbitmqClient,
-    RECALL,
-    getLane,
-    laneQueue,
-} from '@integrations/rabbitmq';
-import { laneFromMessage, traceIdFromMessage } from '@integrations/amqp-context';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { CommonAgentResponse } from '@inner/shared/entities';
+import { rabbitmqClient, RECALL, getLane, channelRoute } from '@inner/shared/mq';
+import { loadOwnedChannels } from './outbound-channels';
+import { OutboundSubscriptions } from './outbound-subscriptions';
+import { laneFromMessage, traceIdFromMessage } from '@inner/shared/mq-context';
+import { botDirectory } from '@inner/shared/bot';
 import { context } from '@middleware/context';
-import { getChannelRegistry } from '@core/registry/channel-registry';
+import { getChannelRegistry } from '@inner/shared/channel';
 import '@plugins/index';
 import { initializeChannelPlugins } from '@plugins/initialize';
 import { recallReplies } from './recall-outbound';
 import type { Repository } from 'typeorm';
-import type { OutboundCapabilities } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // 撤回走渠道能力端口：worker 只按 payload.channel 取插件，common id 反查和
@@ -38,6 +35,9 @@ const DEFAULT_CHANNEL = 'lark';
 const MAX_RETRY = 3;
 const RETRY_DELAYS = [5000, 10000, 15000];
 
+// 拥有集合变化的检查间隔，与 chat-response-worker 同口径。
+const RECONCILE_INTERVAL_MS = 15_000;
+
 interface RecallPayload {
     channel?: string;
     session_id: string;
@@ -46,17 +46,25 @@ interface RecallPayload {
     reason: string;
     detail?: string;
     // 上游仍在 body 里带 lane，但**判 lane 不看这里**：lane 只认 AMQP header，
-    // 口径见 @integrations/amqp-context 的 laneFromMessage。
+    // 口径见 @inner/shared/mq-context 的 laneFromMessage。
     lane?: string;
 }
 
 // handler 的可注入依赖。main 灌真实实现，测试灌 spy。
 export interface RecallHandlerDeps {
     repo: Repository<CommonAgentResponse>;
+    /**
+     * 这条 channel 归不归本进程管。撤回写的 safety_status / safety_result 正是写入
+     * 矩阵里那处字段级重叠（recall worker 与 agent-service 双向写、表上没有 channel
+     * 列），越界处理写脏的是另一个服务的台账。
+     */
+    ownsChannel: (channel: string) => boolean;
     getCapabilities: (channel: string) => OutboundCapabilities;
-    // replies 还没落库时延时重投一条 recall。lane 由 handler 按入站 header 决定，
+    // replies 还没落库时延时重投一条 recall。重投回**同 channel** 的队列（换队列之后
+    // 投回旧队列等于把消息倒退回共享队列）。lane 由 handler 按入站 header 决定，
     // 'prod' 表示投回 prod 队列。
     republish: (
+        channel: string,
         payload: Record<string, unknown>,
         delayMs: number,
         headers: Record<string, unknown>,
@@ -68,7 +76,7 @@ export interface RecallHandlerDeps {
 
 export async function handleRecall(deps: RecallHandlerDeps, msg: ConsumeMessage): Promise<void> {
     // 整条处理都跑在入站消息的上下文里：lane 和 trace_id 都从 AMQP header 恢复
-    // （口径见 @integrations/amqp-context）。
+    // （口径见 @inner/shared/mq-context）。
     //
     // 为什么必须是整条、而不是只包住撤回那一段：重投走 rabbitmq.ts::publish，而
     // publish 的 trace_id 取自 AsyncLocalStorage —— 重投分支跑在 context 之外时写进
@@ -90,10 +98,25 @@ async function runRecall(
     lane: string | undefined,
     traceId: string,
 ): Promise<void> {
-    const { repo, getCapabilities, republish, ack, nack } = deps;
+    const { repo, ownsChannel, getCapabilities, republish, ack, nack } = deps;
 
     const payload: RecallPayload = JSON.parse(msg.content.toString());
     const { session_id, reason, detail, channel = DEFAULT_CHANNEL } = payload;
+
+    // fail-closed 先于任何副作用（见 deps.ownsChannel）。nack 不 requeue：prod 队列
+    // 挂着 DLX，进 dead_letters 可查可重放；requeue 会让两个服务互相推诿到活锁。
+    if (!ownsChannel(channel)) {
+        console.error(
+            JSON.stringify({
+                event: 'recall_foreign_channel',
+                channel,
+                session_id,
+                consumer_tag: msg.fields?.consumerTag ?? null,
+            }),
+        );
+        nack(msg, false);
+        return;
+    }
 
     console.info(
         `[RecallWorker] Processing recall: session_id=${session_id}, channel=${channel}, lane=${lane ?? 'prod'}, reason=${reason}`,
@@ -131,6 +154,7 @@ async function runRecall(
             // 随行 header 只写重试计数：lane header 由 publish 按上面这个 lane 参数
             // 统一注入（连同 trace_id），调用点不重复写一份。
             await republish(
+                channel,
                 payload as unknown as Record<string, unknown>,
                 delayMs,
                 { 'x-retry-count': retryCount + 1 },
@@ -225,7 +249,7 @@ async function main(): Promise<void> {
     console.info('[RecallWorker] Database connected');
 
     // 2. 初始化 channel 插件客户端
-    await multiBotManager.initialize();
+    await botDirectory.load();
     await initializeChannelPlugins();
     console.info('[RecallWorker] Channel plugins initialized');
 
@@ -234,20 +258,39 @@ async function main(): Promise<void> {
     await rabbitmqClient.declareTopology();
     console.info('[RecallWorker] RabbitMQ connected');
 
-    // 4. 开始消费（按泳道）
-    const deps: RecallHandlerDeps = {
+    // 4. 开始消费（按泳道 + 按 channel）：旧的 recall 和每个拥有渠道的
+    //    recall_{channel} 同时订阅，生产者切 rk 的时刻不在关键路径上（决策九）。
+    const buildDeps = (ownsChannel: (channel: string) => boolean): RecallHandlerDeps => ({
         repo: AppDataSource.getRepository(CommonAgentResponse),
+        ownsChannel,
         getCapabilities: (channel) => getChannelRegistry().get(channel).capabilities,
-        republish: (payload, delayMs, headers, lane) =>
-            rabbitmqClient.publish(RECALL, payload, delayMs, headers, lane),
+        republish: (channel, payload, delayMs, headers, lane) =>
+            rabbitmqClient.publish(channelRoute(RECALL, channel), payload, delayMs, headers, lane),
         ack: (msg) => rabbitmqClient.ack(msg),
         nack: (msg, requeue) => rabbitmqClient.nack(msg, requeue),
-    };
+    });
 
-    const lane = getLane();
-    const queue = laneQueue(RECALL.queue, lane);
-    await rabbitmqClient.consume(queue, (msg) => handleRecall(deps, msg));
-    console.info(`[RecallWorker] Consuming queue: ${queue}, waiting for messages...`);
+    const subscriptions = new OutboundSubscriptions({
+        base: RECALL,
+        lane: getLane(),
+        port: {
+            declareRoute: (route) => rabbitmqClient.declareRoute(route),
+            consume: (queue, handler) => rabbitmqClient.consume(queue, handler),
+            drainConsumer: (queue) => rabbitmqClient.drainConsumer(queue),
+        },
+        handlerFor: (accepts) => {
+            const deps = buildDeps(accepts);
+            return (msg) => handleRecall(deps, msg);
+        },
+        loadChannels: loadOwnedChannels,
+    });
+    await subscriptions.start();
+
+    setInterval(() => {
+        subscriptions.reconcile().catch((err) => {
+            console.error('[RecallWorker] reconcile failed:', err);
+        });
+    }, RECONCILE_INTERVAL_MS).unref();
 }
 
 // 只有作为进程入口（bun src/workers/recall-worker.ts / 编译产物 recall-worker）

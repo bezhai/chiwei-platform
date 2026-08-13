@@ -20,7 +20,7 @@ import type {
     InboundAdapter,
     InboundMessage,
     ThreadRef,
-} from '@core/channels/contracts';
+} from '@inner/shared/channel';
 
 export const QQ_CHANNEL = 'qq';
 

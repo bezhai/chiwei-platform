@@ -1,5 +1,5 @@
 import * as lark from '@larksuiteoapi/node-sdk';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 import { larkCredentials } from '@plugins/lark/bot-identity';
 import { context } from '@middleware/context';
 import { register } from '@middleware/metrics';
@@ -44,7 +44,7 @@ class LarkClientManager {
     async initialize(): Promise<void> {
         if (this.initialized) return;
 
-        const allBots = multiBotManager.getAllBotConfigs();
+        const allBots = botDirectory.getAllBotConfigs();
         this.clientPool.clear();
 
         for (const bot of allBots) {

@@ -3,7 +3,7 @@ import { describe, it, expect } from 'bun:test';
 import { handleRecall } from './recall-worker';
 import type { RecallHandlerDeps } from './recall-worker';
 import { context } from '@middleware/context';
-import type { OutboundCapabilities, MessageRef } from '@core/ports/channel-plugin';
+import type { OutboundCapabilities, MessageRef } from '@inner/shared/channel';
 import type { ConsumeMessage } from 'amqplib';
 
 // recall-worker 的 lane 恢复口径，与 chat-response-handler 同源（见那边的长注释）：
@@ -100,8 +100,9 @@ function makeHarness(hasReplies: boolean): Harness {
         republishes,
         deps: {
             repo,
+            ownsChannel: () => true,
             getCapabilities: () => cap,
-            republish: async (payload, delayMs, headers, lane) => {
+            republish: async (_channel, payload, delayMs, headers, lane) => {
                 republishes.push({ payload, delayMs, headers, lane });
             },
             ack: () => {},

@@ -30,6 +30,13 @@ class X(Data):
     xid: Annotated[str, Key]
 
 
+class ChannelledM(Data):
+    """按 channel 分区的出站队列要求 Data 自己说得出 channel。"""
+
+    mid: Annotated[str, Key]
+    channel: str = "lark"
+
+
 class TMsg(Data):
     """Transient Data: no pg table. Used by the durable+transient mutual-exclusion test."""
 
@@ -223,11 +230,38 @@ def test_layer4_rejects_wire_with_consumers_in_different_apps():
 
 
 def test_compile_graph_accepts_wire_with_sink_mq_in_all_routes():
-    """Sink.mq("recall") is in ALL_ROUTES → compile_graph accepts it."""
+    """Sink.mq("chat_request") is in ALL_ROUTES → compile_graph accepts it."""
     @node
     async def f(m: M) -> None: ...
 
-    wire(M).to(f, Sink.mq("recall"))  # recall is in ALL_ROUTES
+    wire(M).to(f, Sink.mq("chat_request"))  # chat_request is in ALL_ROUTES
+
+    g = compile_graph()
+    assert any(s.kind == "mq" for w in g.wires for s in w.sinks)
+
+
+def test_compile_graph_rejects_channel_partitioned_sink_on_channel_less_data():
+    """chat_response / recall 按 channel 分区，Data 不带 channel 就无从分流。
+
+    没有这条守卫的话，错误要等到第一条真实消息 emit 时才在 dispatch 里炸 —— 那时
+    已经在 prod。
+    """
+    @node
+    async def f(m: M) -> None: ...
+
+    wire(M).to(f, Sink.mq("chat_response"))  # M 没有 channel 字段
+
+    with pytest.raises(GraphError) as excinfo:
+        compile_graph()
+    assert "chat_response" in str(excinfo.value)
+    assert "channel" in str(excinfo.value)
+
+
+def test_compile_graph_accepts_channel_partitioned_sink_when_data_has_channel():
+    @node
+    async def f(c: ChannelledM) -> None: ...
+
+    wire(ChannelledM).to(f, Sink.mq("recall"))
 
     g = compile_graph()
     assert any(s.kind == "mq" for w in g.wires for s in w.sinks)

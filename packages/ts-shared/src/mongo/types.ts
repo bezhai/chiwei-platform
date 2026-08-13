@@ -43,8 +43,17 @@ export function createDefaultMongoConfig(database: string = 'chiwei'): MongoConf
  * 根据配置生成 MongoDB 连接 URL
  */
 export function buildMongoUrl(config: MongoConfig): string {
-    const { host, port, username, password, database, authSource, connectTimeoutMS, socketTimeoutMS, options } =
-        config;
+    const {
+        host,
+        port,
+        username,
+        password,
+        database,
+        authSource,
+        connectTimeoutMS,
+        socketTimeoutMS,
+        options,
+    } = config;
 
     let url = 'mongodb://';
 

@@ -5,7 +5,7 @@
 //   flag on + lane==本进程lane → local（prod 消息本地处理，绝不投 inbound_lane.prod）
 //   flag on + lane!=本进程lane → dispatch（投 inbound_lane.{lane}，本地不再处理）
 //
-// resolveLane 由调用方注入（生产=getLaneRouter().resolveLane），决策只看平台无关
+// resolveLane 由调用方注入（生产=getLaneBindingResolver().resolveLane），决策只看渠道无关
 // 的 channel + common conversation + 全局 bot 标识（§3.2 平台无关红线）。
 
 export interface InboundDispatchInput {

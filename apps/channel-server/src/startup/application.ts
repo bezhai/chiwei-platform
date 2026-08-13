@@ -1,12 +1,13 @@
 import { DatabaseManager } from './database';
 import { HttpServerManager, ServerConfig } from './server';
-import { multiBotManager } from '@core/services/bot/multi-bot-manager';
+import { botDirectory } from '@inner/shared/bot';
 import { initializeCrontabs } from '@crontab/index';
-import { isProdDeployment } from '@infrastructure/lane-policy';
-import { rabbitmqClient, getLane } from '@integrations/rabbitmq';
+import { isProdDeployment } from '@inner/shared/lane-policy';
+import { rabbitmqClient, getLane } from '@inner/shared/mq';
 import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
 import '@plugins/index';
 import {
+    channelRuntimes,
     handleInboundLaneEnvelope,
     initializeChannelRuntimes,
     runChannelInitializers,
@@ -42,9 +43,9 @@ export class ApplicationManager {
         // 1. 初始化数据库
         await DatabaseManager.initialize();
 
-        // 2. 初始化多机器人管理器
-        await multiBotManager.initialize();
-        console.info('Multi-bot manager initialized!');
+        // 2. 加载本服务负责的 bot 身份
+        await botDirectory.load();
+        console.info('Bot directory loaded!');
 
         // 3. 初始化各 channel runtime（平台 SDK client 等）
         await initializeChannelRuntimes();
@@ -59,19 +60,29 @@ export class ApplicationManager {
         await rabbitmqClient.declareTopology();
         console.info('RabbitMQ connected!');
 
-        // 5.5 lane channel-server 起 inbound_lane.{lane} 消费者（处理层分流接收端）。
-        // 仅 lane 部署（getLane() 非空）才起：消费 prod channel-server 投来的本 lane
-        // 消息，走与现状一致的入站后半段。prod 部署不起（prod 不消费 inbound_lane.*，
-        // §4.2）。与 flag 无关——flag 控制 prod 是否分流，消费端只要是 lane 部署就该
-        // 待命（flag off 时队列为空，消费者空转无害）。
+        // 5.5 lane channel-server 起入站信封消费者（处理层分流接收端）。
+        // 仅 lane 部署（getLane() 非空）才起：消费 prod 投来的本 lane 消息，走与现状
+        // 一致的入站后半段。prod 部署不起（prod 不消费 inbound_lane.*，§4.2）。与
+        // dispatch flag 无关——那个 flag 控制 prod 是否分流，消费端只要是 lane 部署就
+        // 该待命（flag off 时队列为空，消费者空转无害）。
+        //
+        // 传进去的是"本进程**能**处理哪些 channel"（注册了入站信封处理的 runtime），
+        // 不是"拥有哪些"。拥有集合由消费者在这个范围内按 dynamic config 收窄——飞书的
+        // 入站要在 Task F 删代码之前就能移交出去，而那时 lark runtime 还注册着。
         const lane = getLane();
         if (lane) {
-            await startInboundLaneConsumer(lane, handleInboundLaneEnvelope);
-            console.info(`[inbound-lane] consumer started for lane=${lane}`);
+            const handles = channelRuntimes()
+                .filter((runtime) => runtime.handleInboundLaneEnvelope)
+                .map((runtime) => runtime.channel);
+            await startInboundLaneConsumer(lane, handleInboundLaneEnvelope, { handles });
+            console.info(
+                `[inbound-lane] consumer started for lane=${lane} ` +
+                    `handles=${handles.join(',') || '(none)'}`,
+            );
         }
 
         // 5.6 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
-        await startChannelDirectIngresses(multiBotManager.getBotsByInitType('websocket'));
+        await startChannelDirectIngresses(botDirectory.getBotsByInitType('websocket'));
 
         // 6. 启动所有定时任务：仅 prod 部署。crontab 的副作用是全局的（daily-photo
         // 往写死的真实飞书群发消息、emoji 每小时全量覆写共享表），没有按泳道隔离
@@ -128,7 +139,7 @@ export class ApplicationManager {
      * 记录机器人配置信息
      */
     private logBotConfigurations(): void {
-        const allBots = multiBotManager.getAllBotConfigs();
+        const allBots = botDirectory.getAllBotConfigs();
         console.info(`Loaded ${allBots.length} bot configurations:`);
         allBots.forEach((bot) => {
             const appId = (bot.credentials?.app_id as string | undefined) ?? '-';

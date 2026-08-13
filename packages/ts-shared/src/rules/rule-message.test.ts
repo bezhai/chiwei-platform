@@ -1,0 +1,60 @@
+import { describe, it, expect } from 'bun:test';
+
+import type { RuleMessage } from './rule-message';
+
+// RuleMessage 是 InboundMessage 派生的**纯平台无关视图**（B2 杀掉 #228 的
+// 渠道原始对象旁挂之后）。它只承载渠道无关字段（channel / 全局 common_*_id /
+// isDirect / common mention list / bot common user id / createTime / 文本&媒体工具）。
+// 任何渠道原始对象都不在 RuleMessage 上 —— 渠道数据全部走该渠道插件的私有
+// context store。
+
+function neutralMsg(over: Partial<RuleMessage> = {}): RuleMessage {
+    return {
+        channel: 'channel-y',
+        botName: 'bot-x',
+        commonUserId: 'U1',
+        commonConversationId: 'C1',
+        commonMessageId: 'M1',
+        commonRootMessageId: undefined,
+        isDirect: false,
+        botCommonUserId: 'BOT-U',
+        mentionedUserIds: [],
+        createTime: 100,
+        clearText: () => '',
+        text: () => '',
+        withoutEmojiText: () => '',
+        isTextOnly: () => true,
+        isStickerOnly: () => false,
+        stickerKey: () => '',
+        imageKeys: () => [],
+        ...over,
+    };
+}
+
+describe('RuleMessage platform-neutral view', () => {
+    it('carries channel + global ids + neutral text/media tools without any channel binding', () => {
+        const m = neutralMsg({
+            clearText: () => '余额',
+            isTextOnly: () => true,
+            botCommonUserId: 'BOT-U',
+            mentionedUserIds: ['BOT-U', 'OTHER-U'],
+            isDirect: true,
+        });
+        expect(m.channel).toBe('channel-y');
+        expect(m.commonUserId).toBe('U1');
+        expect(m.clearText()).toBe('余额');
+        expect(m.isTextOnly()).toBe(true);
+        expect(m.botCommonUserId).toBe('BOT-U');
+        expect(m.mentionedUserIds).toEqual(['BOT-U', 'OTHER-U']);
+        expect(m.isDirect).toBe(true);
+    });
+
+    it('has no channel side-channel field (no raw-message escape hatch)', () => {
+        const m = neutralMsg();
+        // 灵魂检查：RuleMessage 类型上根本没有取回渠道原始对象的逃生口。
+        expect('channelContext' in m).toBe(false);
+        // RuleMessage 与 Record<string, unknown> 无足够结构重叠，按 TS 提示经
+        // unknown 中转再断言成索引字典，用于运行期确认渠道私有逃生口不存在。
+        expect((m as unknown as Record<string, unknown>).rawMessage).toBeUndefined();
+    });
+});

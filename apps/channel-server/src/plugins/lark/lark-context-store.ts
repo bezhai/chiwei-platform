@@ -1,5 +1,5 @@
 import type { Message } from '@core/models/message';
-import type { RuleMessage } from '@core/rules/rule-message';
+import type { RuleMessage } from '@inner/shared/rules';
 
 export type LarkContextKey = Pick<RuleMessage, 'botName' | 'commonMessageId'>;
 
