@@ -1,11 +1,11 @@
 import { describe, it, expect, mock, afterAll } from 'bun:test';
 
 // qq 插件 import 期自注册：进 ChannelRegistry / 运行时 registry / CommandRegistry(空指令)。
-// 镜像 lark-plugin.test.ts 的最小副作用依赖 mock。
+// 下面只桩 import 期真会产生副作用的那几个模块，其余一律走真身。
 
-// 注：这里曾有一个 @aliyun/oss 的桩（照抄 lark-plugin.test.ts）。qq 插件的 import
-// 图里没有任何一环碰 @aliyun/*（全仓 getOss() 零生产调用方），桩是多余的 —— 而
-// mock.module 是进程级全局，多余的桩只会白白污染别的文件，已删。
+// 注：这里曾有一个 @aliyun/oss 的桩。qq 插件的 import 图里没有任何一环碰
+// @aliyun/*（全仓 getOss() 零生产调用方），桩是多余的 —— 而 mock.module 是进程级
+// 全局，多余的桩只会白白污染别的文件，已删。
 
 const redisMock = {
     get: mock(async () => null),
@@ -26,10 +26,9 @@ mock.module('@inner/shared/cache', () => ({
     getRedisClient: () => redisStub,
 }));
 // laneRouter 必须桩：真身在模块作用域 new LaneRouter(...)，构造函数立刻 fetch
-// lite-registry 并起 30s 轮询 timer，单测不该碰网络。同样先抓真身（这一步会构造
-// 真 LaneRouter，但全仓 file-pipeline.test.ts 早就这么加载了，不是新增行为），
-// afterAll 注回去 —— 它被 jieba / image-pipeline / default-outbound-deps 等多处
-// 生产代码 import，留个只有 createClient 的假身会污染后续文件。
+// lite-registry 并起 30s 轮询 timer，单测不该碰网络。先抓真身、afterAll 再注回去
+// —— 它被 image-pipeline / default-outbound-deps 等生产代码 import，留个只有
+// createClient 的假身会污染后续文件。
 const realLaneRouter = { ...(await import('@infrastructure/lane-router')) };
 mock.module('@infrastructure/lane-router', () => ({
     ...realLaneRouter,

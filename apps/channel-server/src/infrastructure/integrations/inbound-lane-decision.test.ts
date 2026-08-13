@@ -10,7 +10,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         const r = await resolveInboundDispatch({
             flagEnabled: false,
             currentLane: 'prod',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async () => {
@@ -26,7 +26,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         const r = await resolveInboundDispatch({
             flagEnabled: true,
             currentLane: 'prod',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async () => 'prod',
@@ -39,7 +39,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         const r = await resolveInboundDispatch({
             flagEnabled: true,
             currentLane: 'prod',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async () => 'ppe-foo',
@@ -52,7 +52,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         const r = await resolveInboundDispatch({
             flagEnabled: true,
             currentLane: 'ppe-foo',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async () => 'ppe-foo',
@@ -65,7 +65,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         const r = await resolveInboundDispatch({
             flagEnabled: true,
             currentLane: 'ppe-foo',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async () => {
@@ -83,7 +83,7 @@ describe('resolveInboundDispatch（入站分流决策）', () => {
         await resolveInboundDispatch({
             flagEnabled: true,
             currentLane: 'prod',
-            channel: 'lark',
+            channel: 'qq',
             botGlobalId: 'bot-1',
             commonConversationId: '018f-chat',
             resolveLane: async (_channel, _bot, commonConversationId) => {

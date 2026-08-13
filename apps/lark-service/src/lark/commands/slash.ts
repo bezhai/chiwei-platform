@@ -17,11 +17,10 @@
 // 拍板删掉（spec 已知缺陷四）。后果是敲 `/config …` 不再被这条规则接住，落进人格聊天 ——
 // 与"敲一句赤尾不认识的话"一样。这是删掉一条指令唯一可观测的变化。
 //
-// ## 分发表来自账本本身
+// ## 分发表来自清单本身
 //
 // `larkSlashDispatch` 直接拿 LARK_SLASH_COMMANDS 编表（见 ../rules/commands.ts），所以
-// "清单里有、本体没接上"是装配期一声炸，不是线上才发现的静默失配。整组还没搬时它返回
-// null，这一格就不产出规则 —— 两边同进同退。
+// "清单里有、本体没接上"是装配期一声炸，不是线上才发现的静默失配。
 
 import { NeedRobotMention, TextMessageLimit } from '@inner/shared/rules';
 import type { RuleMessage } from '@inner/shared/rules';
@@ -43,20 +42,9 @@ export function matchesSlashKey(text: string, key: string): boolean {
     }
 }
 
-/**
- * 这一格的本体。
- *
- * 整组还没搬过来时返回 null —— 调用方（清单）据此不产出规则。今天九条都在，所以它总是
- * 返回一条规则；留着这条分支是因为它同时是 `larkSlashDispatch` 半搬状态那声炸的出口。
- */
+/** 这一格的本体：装配期编好分发表，之后每条消息按前缀挑子指令。 */
 export function slashCommand(deps: LarkCommandDeps): LarkCommand {
     const table = larkSlashDispatch(deps);
-    if (table === null) {
-        throw new Error(
-            'lark-service: the slash command group has no handlers at all, but the ' +
-                '「指令处理」 slot is filled. Fill LARK_SLASH_COMMANDS or empty this slot.',
-        );
-    }
     const keys = Object.keys(table);
 
     return (context) => ({

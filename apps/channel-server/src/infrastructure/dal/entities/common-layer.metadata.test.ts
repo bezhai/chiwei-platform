@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { getMetadataArgsStorage } from 'typeorm';
-import { LarkBaseChatInfo, LarkMessage, LarkUserOpenId } from './index';
+import { QqGroupChatInfo, QqMessage, QqUserOpenId } from './index';
 
 // 本服务独占的表如何挂到公共层。公共层自身的表名/列名契约在
 // packages/ts-shared/src/entities/common-layer.metadata.test.ts。
@@ -16,10 +16,10 @@ function columnNames(target: Function): string[] {
 }
 
 describe('service-owned entity metadata', () => {
-    it('keeps lark native mapping in lark-owned tables', () => {
-        expect(tableName(LarkMessage)).toBe('lark_message');
-        expect(columnNames(LarkMessage)).toContain('common_message_id');
-        expect(columnNames(LarkUserOpenId)).toContain('common_user_id');
-        expect(columnNames(LarkBaseChatInfo)).toContain('common_conversation_id');
+    it('keeps qq native mapping in qq-owned tables', () => {
+        expect(tableName(QqMessage)).toBe('qq_message');
+        expect(columnNames(QqMessage)).toContain('common_message_id');
+        expect(columnNames(QqUserOpenId)).toContain('common_user_id');
+        expect(columnNames(QqGroupChatInfo)).toContain('common_conversation_id');
     });
 });

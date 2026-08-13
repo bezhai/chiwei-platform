@@ -6,19 +6,22 @@
 // 加新渠道时两边都要改。
 //
 // 收窄走 Dynamic Config 而不是 env：Release env 会被 deploy 的 POST 清空，长期开关
-// 放那里会在某次部署之后悄悄失效，而这个开关失效的表现是「channel-server 又开始抢
-// lark-service 的消息」——RabbitMQ 轮询把流量随机劈成两半，不报错、不留痕。
+// 放那里会在某次部署之后悄悄失效，而这个开关失效的表现是「两个服务同时守着同一条
+// 出站队列」——RabbitMQ 轮询把流量随机劈成两半，不报错、不留痕。
 
 import { DynamicConfig } from '@inner/shared';
 
 /**
- * cutover 窗口里 channel-server 出站消费拥有的渠道。
+ * channel-server 出站消费能拥有的渠道。
  *
- * lark 还在这里，是因为清理必须在切换稳定之后：代码删了就只能回滚镜像版本，
- * 而那会连带回滚 common 层的其他改动。Task F 关闭窗口时把 lark 从这里删掉 ——
- * 那一刻起，下面那条「首次读不到就拥有全部」的回落本身也不再危险。
+ * 飞书移交给 lark-service 之后只剩 QQ —— 本服务连飞书的出站能力都没有了（插件、
+ * 渲染、映射表全在 lark-service），所以这份清单不只是"不该收"，是"收了也发不出去"。
+ *
+ * 只剩一个渠道意味着下面那套收窄逻辑当前只有一种可能的输出。留着它是因为它是
+ * OutboundSubscriptions 的运行期输入：下一次把某个渠道拆出去时，移交仍然要能在不
+ * 重启进程的前提下做（先摘认领、再 drain 屏障）。
  */
-export const CHANNEL_SERVER_CHANNELS = ['lark', 'qq'] as const;
+export const CHANNEL_SERVER_CHANNELS = ['qq'] as const;
 
 export const OUTBOUND_CHANNELS_KEY = 'channel_server_outbound_channels';
 
@@ -58,14 +61,15 @@ export function parseOwnedChannels(raw: string): string[] | null {
 /**
  * 「我拥有哪些 channel」的权威解析，带 last-known-good。
  *
- * 「读不到就拥有全部」只在**移交之前**成立。lark 交给 lark-service 之后，一次
- * Dynamic Config 瞬断就会让这个 worker 重新订阅 lark 的出站队列——两个消费者守着
- * 同一条队列，RabbitMQ 轮询把流量随机劈成两半，不报错、不留痕。所以时序上分两种：
+ * 「读不到就拥有全部」的兜底目标是 CHANNEL_SERVER_CHANNELS，也就是**本进程有能力
+ * 消费的全部**。飞书从这份清单里删掉之后，兜底再宽也宽不到别的服务的队列上 ——
+ * 它不再是"最危险的一次回落"，而是"没拿到指令就守住自己的全部"。时序上分两种：
  *
- * - **从没成功读到过**：没有可依据的结论，保持现状行为（拥有全部）。首次部署时
- *   配置还没建、或者操作者压根没打算收窄，回落到空集等于 worker 变砖。
- * - **成功读到过之后再读不到**：记得上次的结论，绝不自己变宽。变宽是危险方向，
- *   必须由一次显式且有效的配置来驱动 —— 把 channel 加回来照常有效（回滚路径）。
+ * - **从没成功读到过**：没有可依据的结论，拥有全部。首次部署时配置还没建、或者
+ *   操作者压根没打算收窄，回落到空集等于 worker 变砖。
+ * - **成功读到过之后再读不到**：记得上次的结论，绝不自己变宽。移交进行中时，一次
+ *   Dynamic Config 瞬断不该让这个 worker 把已经交出去的队列重新订回来 —— 那是两个
+ *   消费者守着同一条队列，RabbitMQ 轮询把流量随机劈成两半，不报错、不留痕。
  *
  * DynamicConfig.get 把 fetch 失败吞成默认值（dynamic-config/index.ts::fetchSnapshot
  * catch 之后 return {}），所以「读失败」和「没配这个 key」在这层是同一个信号：空串。
@@ -74,8 +78,8 @@ export function parseOwnedChannels(raw: string): string[] | null {
  *
  * 残留风险，写在这里免得下次有人以为它被解决了：last-known-good 只活在进程内存里。
  * 进程重启 + 恰好那一刻 Dynamic Config 读不到，就会退回 bootstrap 回落（拥有全部），
- * 直到下一次 reconcile 读到配置为止。真正关掉这个窗口的是 Task F —— lark 从
- * CHANNEL_SERVER_CHANNELS 里删掉之后，bootstrap 回落再宽也宽不到 lark 上。
+ * 直到下一次 reconcile 读到配置为止。清单里只剩一个渠道的时候这没有后果；再拆渠道
+ * 时它会重新变成一个真实的窗口。
  */
 export class ChannelOwnership {
     private lastGood: string[] | null = null;
@@ -109,7 +113,7 @@ export class ChannelOwnership {
 
         console.warn(
             `[OutboundChannels] outbound_channels_bootstrap_default: ${why}; ` +
-                `never read a valid value, owning all of ` +
+                `never read a valid value, owning everything this process can consume ` +
                 `[${CHANNEL_SERVER_CHANNELS.join(', ')}]`,
         );
         return [...CHANNEL_SERVER_CHANNELS];

@@ -1,8 +1,9 @@
 // 入站 lane 消费者去重单测（§4.4 point 5）。按 channel + event_type + globalMessageId
 // + lane 幂等：命中已处理直接跳过整条入站处理（MQ at-least-once 重投不重复）。
 //
-// 另一半是切换期的双订阅：队列正在从「只按 lane 分」迁到「按 channel + lane 分」，
-// 消费侧要先同时订阅新旧两条队列，生产者才能切（决策九）。
+// 另一半是分区迁移：队列要从「只按 lane 分」迁到「按 channel + lane 分」，消费侧要先
+// 同时订上共享队列和分区队列，生产者才能切。这场迁移还停在这一步——两个 flag 在 prod
+// 都没建，所以下面凡是 channelQueueEnabled: true 的用例跑的都是"开关翻开之后"的形态。
 
 import { describe, it, expect, mock, afterAll } from 'bun:test';
 import type { InboundLaneEnvelope } from './inbound-lane';
@@ -131,7 +132,9 @@ mock.module('@middleware/context', () => ({
 
 const { consumeInboundLaneEnvelope, startInboundLaneConsumer } =
     await import('./inbound-lane-consumer');
-const { createInboundLaneStore } = await import('./inbound-lane-claim');
+const { createInboundLaneClaims } = await import('@inner/shared/inbound-lane-claim');
+// 动态 import 与上面同理：静态 import 会在 mock.module 装好之前把 @inner/shared/mq 拉进来。
+const { inboundDedupeKey } = await import('./inbound-lane');
 
 const env: InboundLaneEnvelope = {
     channel: 'lark',
@@ -143,19 +146,21 @@ const env: InboundLaneEnvelope = {
     params: { message: { message_id: 'm1' } },
 };
 
-/** 这条信封的幂等 key。lark-service 会算出逐字相同的一个（跨服务契约）。 */
-const KEY = 'inbound_lane:lark:im.message.receive_v1:gmid-42:ppe-foo';
+// 这条信封的幂等 key。**算出来而不是抄一遍字面量**：格式是跨服务契约，只钉在共享包
+// （packages/ts-shared/src/inbound-lane-claim.test.ts）一处；本文件测的是"这个消费者怎么
+// 用这把 key"，抄一份字面量只会让格式变更在这里也炸一次，还得改两个地方。
+const KEY = inboundDedupeKey(env);
 
-// 幂等分叉一律跑在**真的 store**（上面那份带值的假 redis）上，不用串行的假 store：
-// 换手和并发这两个坑全在协议的值和原子性上，串行的假 store 一个都碰不到。
-const store = createInboundLaneStore(() => fakeRedis);
+// 幂等分叉一律跑在**真的协议实现**（上面那份带值的假 redis）上，不用串行的假替身：
+// 换手和并发这两个坑全在协议的值和原子性上，串行的假替身一个都碰不到。
+const claims = createInboundLaneClaims(() => fakeRedis);
 
 describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
     it('首次占到位：处理一次，成功后落完成标记', async () => {
         redisKeys.clear();
         let processed = 0;
         const outcome = await consumeInboundLaneEnvelope(env, {
-            store,
+            claims,
             process: async () => {
                 processed += 1;
             },
@@ -170,7 +175,7 @@ describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
         redisKeys.set(KEY, 'done');
         let processed = 0;
         const outcome = await consumeInboundLaneEnvelope(env, {
-            store,
+            claims,
             process: async () => {
                 processed += 1;
             },
@@ -186,7 +191,7 @@ describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
         redisKeys.set(KEY, 'in-flight');
         let processed = 0;
         const outcome = await consumeInboundLaneEnvelope(env, {
-            store,
+            claims,
             process: async () => {
                 processed += 1;
             },
@@ -201,7 +206,7 @@ describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
 
         await expect(
             consumeInboundLaneEnvelope(env, {
-                store,
+                claims,
                 process: async () => {
                     processed += 1;
                     throw new Error('handler down');
@@ -212,7 +217,7 @@ describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
         expect(redisKeys.has(KEY)).toBe(false);
 
         await consumeInboundLaneEnvelope(env, {
-            store,
+            claims,
             process: async () => {
                 processed += 1;
             },
@@ -228,8 +233,8 @@ describe('consumeInboundLaneEnvelope（原子占位幂等）', () => {
             processed += 1;
         };
 
-        await consumeInboundLaneEnvelope(env, { store, process: count });
-        await consumeInboundLaneEnvelope(env, { store, process: count });
+        await consumeInboundLaneEnvelope(env, { claims, process: count });
+        await consumeInboundLaneEnvelope(env, { claims, process: count });
 
         expect(processed).toBe(1);
     });
@@ -241,35 +246,60 @@ const SHARED_QUEUE = 'inbound_lane.ppe-foo';
 const LARK_QUEUE = 'inbound_lane.lark.ppe-foo';
 const QQ_QUEUE = 'inbound_lane.qq.ppe-foo';
 
-/** 按队列分开记消费者：双订阅时同一条 amqp channel 上挂着好几个。 */
-function laneBroker() {
+/**
+ * 按队列分开记消费者：双订阅时同一条 amqp channel 上挂着好几个。
+ *
+ * `redeliveries` 打开之后，退回队列的消息会真的被重投（RabbitMQ 把 requeue 的消息放回
+ * 队头，prefetch=1 的消费者立刻又拿到同一条）。热循环只有在这种重投形态下才看得见：
+ * 数 nack 的次数分不出「立即重投」和「延迟重投」——两者的 nack 参数一模一样，差别
+ * 全在中间等没等。所以 ack / nack / 投递 / 等待按发生顺序记进 timeline。
+ */
+function laneBroker({ redeliveries = 0 }: { redeliveries?: number } = {}) {
     redisKeys.clear();
     const consumers = new Map<string, (msg: { content: Buffer } | null) => Promise<void>>();
     const asserted: string[] = [];
     const acks: number[] = [];
     const nacks: Array<{ allUpTo: boolean; requeue: boolean }> = [];
+    const timeline: string[] = [];
     rabbitChannel = {
         assertQueue: async (queue) => void asserted.push(queue),
         prefetch: async () => {},
         consume: async (queue, cb) => {
             consumers.set(queue, cb);
         },
-        ack: () => void acks.push(1),
-        nack: (_msg, allUpTo, requeue) => void nacks.push({ allUpTo, requeue }),
+        ack: () => {
+            acks.push(1);
+            timeline.push('ack');
+        },
+        nack: (_msg, allUpTo, requeue) => {
+            nacks.push({ allUpTo, requeue });
+            timeline.push(requeue ? 'nack:requeue' : 'nack:drop');
+        },
+    };
+    const pushBytes = async (queue: string, content: Buffer, redelivered: boolean) => {
+        const consumer = consumers.get(queue);
+        if (!consumer) throw new Error(`nothing is consuming ${queue}`);
+        let redeliveredNow = redelivered;
+        for (let round = 0; ; round += 1) {
+            const nackedBefore = nacks.length;
+            timeline.push(redeliveredNow ? 'redeliver' : 'deliver');
+            await consumer({ content, fields: { redelivered: redeliveredNow } } as never);
+            const requeued = nacks.length > nackedBefore && nacks[nacks.length - 1]!.requeue;
+            if (!requeued || round >= redeliveries) return;
+            redeliveredNow = true;
+        }
     };
     return {
         asserted,
         acks,
         nacks,
+        timeline,
         subscribed: () => [...consumers.keys()],
-        push: async (queue: string, payload: unknown, redelivered = false) => {
-            const consumer = consumers.get(queue);
-            if (!consumer) throw new Error(`nothing is consuming ${queue}`);
-            await consumer({
-                content: Buffer.from(JSON.stringify(payload)),
-                fields: { redelivered },
-            } as never);
-        },
+        push: (queue: string, payload: unknown, redelivered = false) =>
+            pushBytes(queue, Buffer.from(JSON.stringify(payload)), redelivered),
+        /** 投递原始字节，用来喂根本不是 JSON 的报文。 */
+        pushRaw: (queue: string, raw: string, redelivered = false) =>
+            pushBytes(queue, Buffer.from(raw), redelivered),
     };
 }
 
@@ -355,14 +385,16 @@ describe('跨服务换手的幂等协议', () => {
     });
 });
 
-describe('cutover 期间「我拥有哪些 channel」的运行期收窄', () => {
-    // 决策八要的是"不同 owner 不共享队列"。只按 runtime 注册面推导订阅，收窄就只能靠
-    // Task F 删代码——而 cutover 的整个窗口里两边都在抢，分区等于没做。
+// 移交进行中的形态：本进程还注册着那个 channel 的 runtime（代码还没删），但流量已经
+// 交出去了。这一组用飞书那次真实移交当场景——它是这套机制唯一跑过的一次。
+describe('移交进行中「我拥有哪些 channel」的运行期收窄', () => {
+    // 要的是"不同 owner 不共享队列"。只按 runtime 注册面推导订阅，收窄就只能等代码删掉
+    // ——而删代码之前的整段时间里两边都在抢，分区等于没做。
     it('收窄之后不再跟 lark-service 抢同一条分区队列', async () => {
         const broker = laneBroker();
 
         await startInboundLaneConsumer('ppe-foo', async () => {}, {
-            // 本进程仍然注册着 lark runtime（Task F 之前删不掉）。
+            // 本进程仍然注册着 lark runtime（代码还没删）。
             handles: ['lark', 'qq'],
             // 但入站的飞书流量已经移交出去了。
             loadOwnedChannels: async () => ['qq'],
@@ -472,6 +504,58 @@ describe('startInboundLaneConsumer 失败重投', () => {
         await broker.push(SHARED_QUEUE, env);
 
         expect(broker.nacks).toEqual([{ allUpTo: false, requeue: true }]);
+        rabbitChannel = undefined;
+    });
+
+    // prefetch=1：一条退回队头的消息会被立刻重新投给同一个消费者。所以"退回去"这个
+    // 处置只对**可能会好**的失败成立；对永远好不了的失败它就是热循环，整条泳道的后
+    // 续消息永远排不上。下面两条钉的就是这个区别。
+    it('报文不是合法 JSON 时丢掉，不许在队列里空转', async () => {
+        const broker = laneBroker({ redeliveries: 3 });
+        const handled: InboundLaneEnvelope[] = [];
+
+        await startInboundLaneConsumer('ppe-foo', async (e) => void handled.push(e), {
+            ...OWNS_EVERYTHING,
+            wait: async (ms) => void broker.timeline.push(`wait:${ms}`),
+        });
+        // 报文被截断了：重投一万次也还是解析不了。
+        await broker.pushRaw(SHARED_QUEUE, '{"channel":"lark","event_type":');
+
+        expect(handled).toEqual([]);
+        // 投一次、丢掉、结束。留在队列里的话（哪怕慢速重投）泳道就永远堵在它上面。
+        expect(broker.timeline).toEqual(['deliver', 'nack:drop']);
+        expect(broker.acks).toHaveLength(0);
+        rabbitChannel = undefined;
+    });
+
+    it('处理失败重投，但重投过的先等一下再退回去', async () => {
+        const broker = laneBroker({ redeliveries: 2 });
+
+        await startInboundLaneConsumer(
+            'ppe-foo',
+            async () => {
+                // 下游一直挂：失败是确定性的，直接 nack 就是全速原地打转。
+                throw new Error('handler down');
+            },
+            {
+                ...OWNS_EVERYTHING,
+                wait: async (ms) => void broker.timeline.push(`wait:${ms}`),
+            },
+        );
+        await broker.push(SHARED_QUEUE, env);
+
+        // 消息始终留在队列里（requeue=true，不丢），但重投过的那几次先等 —— 热循环
+        // 被压成慢轮询。第一次不背延迟成本：瞬时错误该立刻重试。
+        expect(broker.timeline).toEqual([
+            'deliver',
+            'nack:requeue',
+            'redeliver',
+            'wait:1000',
+            'nack:requeue',
+            'redeliver',
+            'wait:1000',
+            'nack:requeue',
+        ]);
         rabbitChannel = undefined;
     });
 });
@@ -589,23 +673,47 @@ describe('startInboundLaneConsumer 分区切换期的双订阅', () => {
         rabbitChannel = undefined;
     });
 
-    // 老信封没有 channel 字段，那个年代只有飞书在用这个队列 —— 落在飞书的分区队列上
-    // 不算越界。
-    it('没有 channel 字段的老信封算飞书的', async () => {
+    // 说不出自己是哪个 channel 的信封曾经被算成飞书的 —— 那个年代只有飞书在用这个
+    // 队列。现在猜出来的渠道会替 lark-service 写下"这条处理过了"，比丢了还糟：本进程
+    // 没有飞书的入站 runtime，真处理不了。所以不猜。
+    //
+    // 两条队列上"不猜"的处置不同，跟"不是我的 channel"完全一样：
+    it('说不出 channel 的信封落在共享队列上：退回去等认得出它的人', async () => {
         const broker = laneBroker();
         const handled: InboundLaneEnvelope[] = [];
         await startInboundLaneConsumer('ppe-foo', async (e) => void handled.push(e), {
-            handles: ['lark'],
-            loadOwnedChannels: async () => ['lark'],
+            handles: ['qq'],
+            loadOwnedChannels: async () => ['qq'],
             channelQueueEnabled: async () => true,
         });
 
-        const legacy = { ...env };
-        delete legacy.channel;
-        await broker.push(LARK_QUEUE, legacy);
+        const { channel: _channel, ...noChannel } = env;
+        await broker.push(SHARED_QUEUE, noChannel);
 
-        expect(handled).toHaveLength(1);
-        expect(broker.acks).toHaveLength(1);
+        expect(handled).toHaveLength(0);
+        expect(broker.acks).toHaveLength(0);
+        expect(broker.nacks).toEqual([{ allUpTo: false, requeue: true }]);
+        rabbitChannel = undefined;
+    });
+
+    // 分区队列上它是不变量被破坏：这条队列没有第二个消费者，退回去只会永远弹，而
+    // prefetch=1 会让它把整条泳道堵死。所以丢，但要吼出来 —— 跟收到别人的 channel
+    // 一个处置。
+    it('说不出 channel 的信封落在分区队列上：丢掉，不许堵住泳道', async () => {
+        const broker = laneBroker();
+        const handled: InboundLaneEnvelope[] = [];
+        await startInboundLaneConsumer('ppe-foo', async (e) => void handled.push(e), {
+            handles: ['qq'],
+            loadOwnedChannels: async () => ['qq'],
+            channelQueueEnabled: async () => true,
+        });
+
+        const { channel: _channel, ...noChannel } = env;
+        await broker.push(QQ_QUEUE, noChannel);
+
+        expect(handled).toHaveLength(0);
+        expect(broker.acks).toHaveLength(0);
+        expect(broker.nacks).toEqual([{ allUpTo: false, requeue: false }]);
         rabbitChannel = undefined;
     });
 });

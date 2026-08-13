@@ -31,18 +31,9 @@ const EXPECTED_TABLES = [
     'lane_routing',
     'user_blacklist',
     // 本服务自己的表
-    'bot_persona',
-    'lark_base_chat_info',
-    'lark_emoji',
-    'lark_group_chat_info',
-    'lark_group_member',
-    'lark_message',
-    'lark_user',
-    'lark_user_open_id',
     'qq_group_chat_info',
     'qq_message',
     'qq_user_open_id',
-    'user_group_binding',
 ].sort();
 
 let probe: DataSource;

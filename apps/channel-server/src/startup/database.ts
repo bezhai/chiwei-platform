@@ -1,4 +1,3 @@
-import { mongoInitPromise } from '@dal/mongo/client';
 import AppDataSource from '@ormconfig';
 
 /**
@@ -9,7 +8,7 @@ export class DatabaseManager {
      * 初始化所有数据库连接
      */
     static async initialize(): Promise<void> {
-        await Promise.all([mongoInitPromise(), AppDataSource.initialize()]);
+        await AppDataSource.initialize();
         console.info('Database connections established!');
     }
 

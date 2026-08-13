@@ -1,12 +1,14 @@
-// 出站消费的双订阅与运行期收窄。
+// 出站消费的订阅面与运行期收窄。
 //
-// 换队列的协议是「消费侧先双订阅 → 切生产者 → 旧队列排空 → drain 屏障移交」。这里
-// 负责第一步和最后一步：worker 同时守着旧的 chat_response 和新的 chat_response_{channel}，
-// 于是 agent-service 什么时候切 rk 都不在关键路径上；移交某个 channel 时先把它从
-// 拥有集合里摘掉（旧队列上再收到它就 fail-closed），再对它自己的队列走 drain 屏障。
+// 本进程拥有哪些 channel，就订哪几条 {base}_{channel} 队列。移交某个 channel 时先把
+// 它从认领集合里摘掉，再对它自己的队列走 drain 屏障。
 //
 // 移交必须是 drain 而不是「停旧起新」：旧 worker 已经调完平台 API、还没 ACK 的那一
 // 瞬间被杀，消息 requeue 换个消费者再发一次，真人看到两条。
+//
+// 外来渠道的 fixture 用 `telegram`：它从来不是本服务的渠道，所以「这条不归我管」这个
+// 语义不依赖清单当下有几个渠道 —— 拿正在被移交的渠道当 fixture，移交完成那天用例就
+// 悄悄退化成了「自己的渠道」的重复覆盖。
 
 import { describe, it, expect } from 'bun:test';
 import type { ConsumeMessage } from 'amqplib';
@@ -108,87 +110,79 @@ function makeSubs(
     return { subs, handled };
 }
 
-describe('start — 双订阅', () => {
-    it('prod：同时订阅旧队列和每个拥有渠道的新队列', async () => {
+describe('start — 只订自己拥有的队列', () => {
+    it('prod：每个拥有的 channel 一条队列，先声明再订阅', async () => {
         const port = new FakePort();
-        const { subs } = makeSubs(port, async () => ['lark', 'qq']);
+        const { subs } = makeSubs(port, async () => ['qq', 'telegram']);
 
         await subs.start();
 
-        expect(port.queues()).toEqual(['chat_response', 'chat_response_lark', 'chat_response_qq']);
+        expect(port.queues()).toEqual(['chat_response_qq', 'chat_response_telegram']);
         expect(port.declared.map((r) => r.queue)).toEqual([
-            'chat_response_lark',
             'chat_response_qq',
+            'chat_response_telegram',
         ]);
+    });
+
+    // 不拥有的 channel 一条队列都不订：订上就等于跟它真正的 owner 分摊消息。
+    it('没被认领的 channel 的队列一条都不订', async () => {
+        const port = new FakePort();
+        const { subs } = makeSubs(port, async () => ['qq']);
+
+        await subs.start();
+
+        expect(port.queues()).toEqual(['chat_response_qq']);
     });
 
     it('泳道：泳道后缀加在 channel 之后', async () => {
         const port = new FakePort();
-        const { subs } = makeSubs(port, async () => ['lark', 'qq'], 'ppe-x');
+        const { subs } = makeSubs(port, async () => ['qq', 'telegram'], 'ppe-x');
 
         await subs.start();
 
         expect(port.queues()).toEqual([
-            'chat_response_ppe-x',
-            'chat_response_lark_ppe-x',
             'chat_response_qq_ppe-x',
-        ]);
-    });
-
-    it('新旧两套队列各投一条都能被处理', async () => {
-        const port = new FakePort();
-        const { subs, handled } = makeSubs(port, async () => ['lark', 'qq']);
-        await subs.start();
-
-        await port.handlerOn('chat_response')(makeMsg('lark'));
-        await port.handlerOn('chat_response_lark')(makeMsg('lark'));
-
-        expect(handled).toEqual([
-            { channel: 'lark', accepted: true },
-            { channel: 'lark', accepted: true },
+            'chat_response_telegram_ppe-x',
         ]);
     });
 
     it('每条 channel 队列只认自己的 channel', async () => {
         // 队列绑定和 payload 打架时以队列为准：生产者分流错了要立刻暴露。
+        // 落到 handler 之后的处置（nack 到 DLQ + 告警）见 outbound-foreign-channel.test.ts。
         const port = new FakePort();
-        const { subs, handled } = makeSubs(port, async () => ['lark', 'qq']);
+        const { subs, handled } = makeSubs(port, async () => ['qq', 'telegram']);
         await subs.start();
 
-        await port.handlerOn('chat_response_lark')(makeMsg('qq'));
+        await port.handlerOn('chat_response_qq')(makeMsg('telegram'));
 
-        expect(handled).toEqual([{ channel: 'qq', accepted: false }]);
+        expect(handled).toEqual([{ channel: 'telegram', accepted: false }]);
     });
 
-    it('旧队列按当前拥有集合判定（它上面什么 channel 都可能来）', async () => {
+    it('自己队列上的自己的 channel 照常放行', async () => {
         const port = new FakePort();
-        const { subs, handled } = makeSubs(port, async () => ['lark', 'qq']);
+        const { subs, handled } = makeSubs(port, async () => ['qq']);
         await subs.start();
 
-        await port.handlerOn('chat_response')(makeMsg('wechat'));
+        await port.handlerOn('chat_response_qq')(makeMsg('qq'));
 
-        expect(handled).toEqual([{ channel: 'wechat', accepted: false }]);
+        expect(handled).toEqual([{ channel: 'qq', accepted: true }]);
     });
 });
 
 describe('reconcile — 运行期收窄', () => {
     it('移交某个 channel：先不再拥有它，再 drain 它自己的队列', async () => {
         const port = new FakePort();
-        let owned = ['lark', 'qq'];
-        const { subs, handled } = makeSubs(port, async () => owned);
+        let owned = ['qq', 'telegram'];
+        const { subs } = makeSubs(port, async () => owned);
         await subs.start();
-        expect(subs.owns('lark')).toBe(true);
+        expect(subs.owns('telegram')).toBe(true);
 
         owned = ['qq'];
         await subs.reconcile();
 
-        expect(subs.owns('lark')).toBe(false);
-        expect(port.drained).toEqual(['chat_response_lark']);
-        expect(port.queues()).toEqual(['chat_response', 'chat_response_qq']);
-
-        // 旧队列上再来一条 lark 就不再被认领 —— 这正是「收窄早了」的告警信号。
-        await port.handlerOn('chat_response')(makeMsg('lark'));
-        expect(handled).toEqual([{ channel: 'lark', accepted: false }]);
+        expect(subs.owns('telegram')).toBe(false);
+        expect(port.drained).toEqual(['chat_response_telegram']);
+        expect(port.queues()).toEqual(['chat_response_qq']);
     });
 
     it('回滚：把 channel 加回来会重新声明并订阅', async () => {
@@ -197,20 +191,20 @@ describe('reconcile — 运行期收窄', () => {
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
-        owned = ['qq', 'lark'];
+        owned = ['qq', 'telegram'];
         await subs.reconcile();
 
-        expect(subs.owns('lark')).toBe(true);
-        expect(port.queues()).toEqual(['chat_response', 'chat_response_qq', 'chat_response_lark']);
+        expect(subs.owns('telegram')).toBe(true);
+        expect(port.queues()).toEqual(['chat_response_qq', 'chat_response_telegram']);
         expect(port.declared.map((r) => r.queue)).toEqual([
             'chat_response_qq',
-            'chat_response_lark',
+            'chat_response_telegram',
         ]);
     });
 
     it('没变化时不重复订阅、不 drain', async () => {
         const port = new FakePort();
-        const { subs } = makeSubs(port, async () => ['lark', 'qq']);
+        const { subs } = makeSubs(port, async () => ['qq', 'telegram']);
         await subs.start();
         const before = port.queues().length;
 
@@ -222,14 +216,14 @@ describe('reconcile — 运行期收窄', () => {
 
     it('drain 失败时拥有集合不回退（消息已经不该由我处理了），错误抛给调用方', async () => {
         const port = new FakePort();
-        port.failDrainOn = 'chat_response_lark';
-        let owned = ['lark', 'qq'];
+        port.failDrainOn = 'chat_response_telegram';
+        let owned = ['qq', 'telegram'];
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
         owned = ['qq'];
         await expect(subs.reconcile()).rejects.toThrow('drain timed out');
-        expect(subs.owns('lark')).toBe(false);
+        expect(subs.owns('telegram')).toBe(false);
     });
 });
 
@@ -239,22 +233,22 @@ describe('reconcile — 运行期收窄', () => {
 
 describe('reconcile — 失败的那一步下次还会做', () => {
     it('订阅抛错：下一次 reconcile 补上它，而不是把失败永久固化', async () => {
-        // 认领集合是 diff 的来源，也是旧队列 fail-closed 的依据。它要是在真的订上
-        // 之前就提交，失败之后算出来的 diff 就是空的 —— 这条 channel 的队列从此
-        // 没有消费者，而它已经被认领，没有任何一侧会再管它。
+        // 认领集合是 diff 的来源。它要是在真的订上之前就提交，失败之后算出来的 diff
+        // 就是空的 —— 这条 channel 的队列从此没有消费者，而它已经被认领，没有任何
+        // 一侧会再管它。
         const port = new FakePort();
         let owned = ['qq'];
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
-        port.failConsumeOn = 'chat_response_lark';
-        owned = ['qq', 'lark'];
-        await expect(subs.reconcile()).rejects.toThrow('broker refused chat_response_lark');
+        port.failConsumeOn = 'chat_response_telegram';
+        owned = ['qq', 'telegram'];
+        await expect(subs.reconcile()).rejects.toThrow('broker refused chat_response_telegram');
 
         port.failConsumeOn = undefined;
         await subs.reconcile();
 
-        expect(port.queues()).toContain('chat_response_lark');
+        expect(port.queues()).toContain('chat_response_telegram');
     });
 
     it('订阅抛错、端口重连把它订回来：重订之前先摘干净，broker 上只留一个消费者', async () => {
@@ -266,17 +260,17 @@ describe('reconcile — 失败的那一步下次还会做', () => {
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
-        port.failConsumeOn = 'chat_response_lark';
-        owned = ['qq', 'lark'];
+        port.failConsumeOn = 'chat_response_telegram';
+        owned = ['qq', 'telegram'];
         await expect(subs.reconcile()).rejects.toThrow('broker refused');
-        expect(port.queues()).not.toContain('chat_response_lark');
+        expect(port.queues()).not.toContain('chat_response_telegram');
 
         port.reconnect();
         port.failConsumeOn = undefined;
         await subs.reconcile();
 
-        expect(port.drained).toEqual(['chat_response_lark']);
-        expect(port.queues().filter((q) => q === 'chat_response_lark')).toHaveLength(1);
+        expect(port.drained).toEqual(['chat_response_telegram']);
+        expect(port.queues().filter((q) => q === 'chat_response_telegram')).toHaveLength(1);
     });
 
     it('订阅抛错之后那条 channel 又被移交：照样 drain 掉它', async () => {
@@ -287,23 +281,23 @@ describe('reconcile — 失败的那一步下次还会做', () => {
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
-        port.failConsumeOn = 'chat_response_lark';
-        owned = ['qq', 'lark'];
+        port.failConsumeOn = 'chat_response_telegram';
+        owned = ['qq', 'telegram'];
         await expect(subs.reconcile()).rejects.toThrow('broker refused');
 
         port.failConsumeOn = undefined;
         owned = ['qq'];
         await subs.reconcile();
 
-        expect(port.drained).toEqual(['chat_response_lark']);
+        expect(port.drained).toEqual(['chat_response_telegram']);
     });
 
     it('drain 抛错：下一次 reconcile 再排一次，不是就此认定交出去了', async () => {
         // drain 超时抛错时 basic.cancel 已经发了，但在途 handler 还没跑完 —— 交接
         // 屏障没有真正完成。下一次要继续等它归零，而不是当作已经交割。
         const port = new FakePort();
-        port.failDrainOn = 'chat_response_lark';
-        let owned = ['lark', 'qq'];
+        port.failDrainOn = 'chat_response_telegram';
+        let owned = ['qq', 'telegram'];
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
@@ -313,16 +307,16 @@ describe('reconcile — 失败的那一步下次还会做', () => {
         port.failDrainOn = undefined;
         await subs.reconcile();
 
-        expect(port.drained).toEqual(['chat_response_lark', 'chat_response_lark']);
-        expect(subs.owns('lark')).toBe(false);
+        expect(port.drained).toEqual(['chat_response_telegram', 'chat_response_telegram']);
+        expect(subs.owns('telegram')).toBe(false);
     });
 
     it('drain 抛错之后那条 channel 又被加回来：重新订上', async () => {
         // basic.cancel 已经发出去了，broker 侧不再投递。记成"还订着"的话，回滚路径
         // 上看不出 diff —— 这条队列从此没有任何消费者。
         const port = new FakePort();
-        port.failDrainOn = 'chat_response_lark';
-        let owned = ['lark', 'qq'];
+        port.failDrainOn = 'chat_response_telegram';
+        let owned = ['qq', 'telegram'];
         const { subs } = makeSubs(port, async () => owned);
         await subs.start();
 
@@ -330,10 +324,10 @@ describe('reconcile — 失败的那一步下次还会做', () => {
         await expect(subs.reconcile()).rejects.toThrow('drain timed out');
 
         port.failDrainOn = undefined;
-        owned = ['qq', 'lark'];
+        owned = ['qq', 'telegram'];
         await subs.reconcile();
 
-        expect(port.queues()).toContain('chat_response_lark');
-        expect(subs.owns('lark')).toBe(true);
+        expect(port.queues()).toContain('chat_response_telegram');
+        expect(subs.owns('telegram')).toBe(true);
     });
 });

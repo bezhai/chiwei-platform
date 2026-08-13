@@ -29,7 +29,7 @@ endef
 # 一镜像多服务映射：deploy/release 时自动连同 sibling 服务一起处理。
 # 镜像 → 同步服务清单（不含主 APP 自身）。映射表单一来源，见 CLAUDE.md 镜像与服务映射表。
 # （vectorize-worker 随 v4 记忆整机删除，agent-service 不再有 sibling。）
-SIBLINGS_channel-server := recall-worker chat-response-worker
+SIBLINGS_channel-server := chat-response-worker
 # lark-service 的入口进程持飞书 WS 长连（单副本 + Recreate），出站是竞争消费（可多副本、
 # 可滚动更新）—— 两种部署策略天然冲突，所以出站是自己的 Deployment。
 SIBLINGS_lark-service := lark-outbound
@@ -148,7 +148,7 @@ self-deploy:
 
 ## 仅发布（不构建），用于切换泳道/回滚
 ## 用法: make release APP=xxx LANE=yyy VERSION=1.0.0.5
-## 注：channel-server 类多服务镜像会同步 release sibling（recall-worker / chat-response-worker）。
+## 注：一镜像多服务会同步 release sibling（channel-server → chat-response-worker，lark-service → lark-outbound）。
 release:
 	@$(call require_app)
 	$(if $(VERSION),,$(error VERSION 未指定。用法: make release APP=<app> LANE=<lane> VERSION=<version>))

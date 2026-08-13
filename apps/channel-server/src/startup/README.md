@@ -8,7 +8,7 @@
 startup/
 ├── application.ts      # 应用程序管理器（生命周期编排）
 ├── database.ts         # 数据库初始化/关闭
-├── server.ts           # Koa HTTP 服务器管理
+├── server.ts           # Hono HTTP 服务器管理
 └── README.md
 ```
 
@@ -18,24 +18,25 @@ startup/
 sequenceDiagram
   participant App as ApplicationManager
   participant DB as DatabaseManager
-  participant MBot as multiBotManager
+  participant Bot as botDirectory
   participant Runtime as ChannelRuntimes
-  participant Cron as Crontab
+  participant MQ as RabbitMQ
   participant HTTP as HttpServerManager
 
   App->>DB: initialize()
-  App->>MBot: initialize()
+  App->>Bot: load()
   App->>Runtime: initializeChannelRuntimes()
   App->>Runtime: runChannelInitializers()
-  App->>Cron: initializeCrontabs()
+  App->>MQ: connect() + declareTopology()
+  App->>MQ: startInboundLaneConsumer()（仅泳道部署）
+  App->>Runtime: startDirectIngresses()（按 channel 策略）
   App-->>App: start()
   App->>HTTP: start() (各 channel runtime 注册 http ingress)
-  App->>Runtime: startDirectIngresses()（按 channel 策略）
 ```
 
 ## 关键职责
 
-- 初始化：数据库、多机器人管理器、各 channel runtime
+- 初始化：数据库、bot 目录（`botDirectory`）、各 channel runtime、RabbitMQ
 - 启动：各 channel 的主动入口（按策略）、HTTP 服务（由 runtime 注册 ingress）
 - 关闭：处理 SIGINT/SIGTERM，优雅释放资源（DB/Redis 等）
 - 可观察性：打印当前加载的机器人配置与路由列表

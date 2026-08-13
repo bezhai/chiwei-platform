@@ -1,13 +1,13 @@
-// 飞书专属指令清单。规则序列的前半段，也是 Task D 的迁移账本 —— 每个槽位要么已经填上
-// 本服务里的规则，要么记着还欠谁一条。
+// 飞书专属指令清单。规则序列的前半段：十条顶层指令，其中「指令处理」那一格背后还有九条
+// 斜杠子指令。
 //
 // ## 顺序是契约，不是排版
 //
 // 拼在这批指令后面的是人格聊天，而它的谓词只有 `NeedRobotMention` —— 一条 @ 赤尾的消息
 // 它必然命中。所以指令必须先获得匹配机会，否则所有 @bot 的消息都会先落进聊天、指令永远
-// 轮不到（channel-server 那份清单的头注释写的就是这个理由，照它来）。
+// 轮不到（拆分前 channel-server 那份清单的头注释写的就是这个理由，照它来）。
 //
-// 清单**内部**的先后同样照抄 channel-server：`Meme` 的谓词只有 `NeedRobotMention` 加一条
+// 清单**内部**的先后同样照抄拆分前那份：`Meme` 的谓词只有 `NeedRobotMention` 加一条
 // async 判定，本身就近似 catch-all，它排到那几条 `EqualText` 前面会把它们全吃掉。
 //
 // ## 一条指令有两个阶段，不是一个
@@ -22,15 +22,6 @@
 //
 // **每条消息**收 `LarkCommandContext`：om_id、被 @ 的人、is_admin、会话开关。理由与形状
 // 见 command-context.ts 的文件头。两个阶段不要合并 —— 合了就必须二选一地牺牲掉其中一样。
-//
-// ## 账本已经填满（D4 收尾，2026-08-12）
-//
-// 十格顶层、九条斜杠子指令全部有本体，规则序列因而与拆分前逐条对得上。`pendingIn` 那个
-// 分支从此**没有用户** —— 它连同 `LarkCommandBatch`、以及 commands.test.ts 里那两条跨
-// 服务对账（它们读的是 channel-server 的源码，Task F 一删就没了参照物）都是 Task D 期间
-// 的脚手架，该在 Task F 一起删掉。留着不碍事，但它不再表达任何还没做完的事。
-//
-// 空槽位不产出任何指令，这条规则本身保留：它是"半搬状态"能被编译期抓住的地基。
 //
 // ## `/config` 没有槽位，这是决定不是遗漏
 //
@@ -145,18 +136,6 @@ export interface LarkCommandDeps {
 // 清单
 // ---------------------------------------------------------------------------
 
-/**
- * 哪一批迁移任务负责把这个槽位填上。
- *
- * - `D2` 发图与卡片回调与图片日报
- * - `D3` emoji 与复读
- * - `D4` 其余指令
- *
- * D1（入站附件管线）不碰指令，所以不在这里。全部填满之后这个类型连同 `pendingIn` 那个
- * 分支一起删 —— 它是 Task D 期间的脚手架，不是长期结构。
- */
-export type LarkCommandBatch = 'D2' | 'D3' | 'D4';
-
 /** 一条指令：拿这条消息的事实，造出它在规则引擎里的样子。 */
 export type LarkCommand = (context: LarkCommandContext) => RuleConfig;
 
@@ -165,7 +144,7 @@ export type LarkCommand = (context: LarkCommandContext) => RuleConfig;
  *
  * 两个参数各管一半：`message` 是规则引擎给的渠道无关视图（子指令要从 `clearText()` 里
  * 切自己的参数），`context` 是这条消息的飞书事实（om_id / 被 @ 的人 / is_admin）。参数
- * 怎么切是 D4 的事，这里只保证两样都在手上。
+ * 怎么切是每条子指令自己的事，这一层只保证两样都在手上。
  */
 export type LarkSlashCommand = (
     message: RuleMessage,
@@ -173,22 +152,19 @@ export type LarkSlashCommand = (
 ) => Promise<void>;
 
 /**
- * 清单里的一格。`name` 是跨服务对账的键，取的是 channel-server 那份清单里同一条指令的
- * `comment`。
- *
- * 联合类型本身就是双向校验：**要么有本体、要么记着谁来填，不可能两个都有、也不可能两个
- * 都没有** —— 编译期拦住，不需要运行期再查一遍。
+ * 清单里的一格：`name` 是这条指令在规则引擎里的 `comment`，`command` 在装配期把依赖绑上
+ * 得到指令本体。
  */
-export type LarkCommandSlot =
-    /** 已经搬过来了：装配期把依赖绑上，得到这条指令。 */
-    | { readonly name: string; readonly command: (deps: LarkCommandDeps) => LarkCommand }
-    /** 还欠着：记着谁负责填，不参与规则序列。 */
-    | { readonly name: string; readonly pendingIn: LarkCommandBatch };
+export interface LarkCommandSlot {
+    readonly name: string;
+    readonly command: (deps: LarkCommandDeps) => LarkCommand;
+}
 
-/** 斜杠子指令的一格。形状与顶层同构，同样靠联合类型双向校验。 */
-export type LarkSlashSlot =
-    | { readonly key: string; readonly run: (deps: LarkCommandDeps) => LarkSlashCommand }
-    | { readonly key: string; readonly pendingIn: 'D4' };
+/** 斜杠子指令的一格。形状与顶层同构，`key` 是 `/xxx` 里的那个 xxx。 */
+export interface LarkSlashSlot {
+    readonly key: string;
+    readonly run: (deps: LarkCommandDeps) => LarkSlashCommand;
+}
 
 /** 飞书专属指令，先后即优先级。 */
 export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
@@ -206,7 +182,7 @@ export const LARK_COMMANDS: readonly LarkCommandSlot[] = [
 
 /**
  * 「指令处理」那个槽位背后的斜杠指令组。这一格是一条规则、九个子指令，所以子指令另立
- * 一份清单 —— 否则"少搬了一条"在顶层清单上看不出来。
+ * 一份清单 —— 否则少掉一条在顶层清单上看不出来。
  *
  * 这不是一串给测试看的名字：`larkSlashDispatch` 直接拿它编分发表，所以"清单里有、本体
  * 没接上"没法混过去。
@@ -231,7 +207,7 @@ export const DROPPED_SLASH_COMMANDS: readonly string[] = ['config'];
 // ---------------------------------------------------------------------------
 
 /**
- * 清单里已经填好的那些指令，依赖绑上，保持清单里的先后。
+ * 清单里的每条指令，依赖绑上，保持清单里的先后。
  *
  * **在装配期调一次**：返回的每条指令内部已经握着依赖，之后每条消息只走 `LarkCommand`
  * 那一跳。每条消息重跑一遍这里，等于每条消息重建一次客户端池。
@@ -240,26 +216,19 @@ export function larkCommands(
     deps: LarkCommandDeps,
     slots: readonly LarkCommandSlot[] = LARK_COMMANDS,
 ): readonly LarkCommand[] {
-    return slots.flatMap((slot) => ('command' in slot ? [slot.command(deps)] : []));
+    return slots.map((slot) => slot.command(deps));
 }
 
 /**
  * 把斜杠清单编成分发表，`key` → 本体。
  *
- * 三种结果，对应账本的三种状态：
- *
- *   - **一条都还没搬** → `null`。「指令处理」那一格因此也还是空的，两边同进同退。
- *   - **全搬完了** → 分发表。
- *   - **搬了一半** → 抛。这是最坏的一种，而且是静默的：没搬的那几条既不分发也不报错，
- *     敲 `/block` 的人会掉进人格聊天、看到赤尾开始闲聊。清单直接驱动分发之后，它从
- *     "线上才发现"变成装配期一声炸。
- *
- * 同一个 key 出现两次也抛 —— 后一个会静默盖掉前一个，而两条都还在账本上。
+ * 同一个 key 出现两次就抛 —— 后一个会静默盖掉前一个，而两条在清单上都还在，谁也看不出
+ * 少了一条。
  */
 export function larkSlashDispatch(
     deps: LarkCommandDeps,
     slots: readonly LarkSlashSlot[] = LARK_SLASH_COMMANDS,
-): Readonly<Record<string, LarkSlashCommand>> | null {
+): Readonly<Record<string, LarkSlashCommand>> {
     const duplicates = slots
         .map((slot) => slot.key)
         .filter((key, at, all) => all.indexOf(key) !== at);
@@ -270,19 +239,9 @@ export function larkSlashDispatch(
         );
     }
 
-    const pending = slots.filter((slot) => 'pendingIn' in slot).map((slot) => slot.key);
-    if (pending.length === slots.length) return null;
-    if (pending.length > 0) {
-        throw new Error(
-            `lark-service: the slash command group is half migrated — ${pending.join(', ')} ` +
-                'still have no handler, so they would fall through to the persona chat instead ' +
-                'of answering. Migrate the whole group or none of it.',
-        );
-    }
-
     const table: Record<string, LarkSlashCommand> = {};
     for (const slot of slots) {
-        if ('run' in slot) table[slot.key] = slot.run(deps);
+        table[slot.key] = slot.run(deps);
     }
     return table;
 }

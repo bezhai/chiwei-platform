@@ -79,9 +79,9 @@ class ChatResponseSegment(Data):
     """chat_node 产出的回复段，经 sink.mq(chat_response) 出 graph。
 
     (message_id, persona_id, part_index) 联合 Key 用于段内去重；
-    lane 必须显式带在 body —— sink dispatch 不注入 header lane，
-    chat-response-worker 直接读 payload.lane 路由飞书回复。
-    transient=True：段是事件流，不落 agent-service 自己的表。
+    lane 必须显式带在 body —— sink dispatch 拿它当 ``outbound_context`` 的
+    fallback，最终写进 AMQP header，而消费侧（chat_response_{channel} 的订阅方）
+    只认 header。transient=True：段是事件流，不落 agent-service 自己的表。
 
     两类来源对 ``message_id`` 的契约不同：
 

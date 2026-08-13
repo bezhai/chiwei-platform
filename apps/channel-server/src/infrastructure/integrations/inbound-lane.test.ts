@@ -1,12 +1,14 @@
 // 入站 lane 分发 MQ（fail-closed）单测。验证：
 //  - 队列按 channel + lane 分区：inbound_lane.{channel}.{lane}，分区前的
-//    inbound_lane.{lane} 在切换窗口内仍然可用
+//    inbound_lane.{lane} 仍然可用（分区那场迁移的两个开关还没打开，泳道信封目前
+//    全部走它）
 //  - 队列声明 fail-closed：durable:true、无 x-message-ttl、无 dead-letter 回 prod
 //    （绝不复用现状 lane 队列的 10s TTL + DLX-to-prod，§4.6）；新队列同样如此
 //  - publish 失败抛错、不静默吞（fail-closed 可观测）
-//  - 幂等 key 带 channel，且与 lark-service 逐字相同
+//  - 幂等 key 由信封的哪几个字段拼成（格式本身钉在共享包里）
 
 import { describe, it, expect } from 'bun:test';
+import { inboundLaneClaimKey } from '@inner/shared/inbound-lane-claim';
 import {
     inboundLaneQueueName,
     sharedInboundLaneQueueName,
@@ -44,10 +46,10 @@ const envelope: InboundLaneEnvelope = {
     params: { hello: 'world' },
 };
 
+/** 队列里可能还躺着不带 channel 的旧信封 —— 线格式不受类型系统保护。 */
 function withoutChannel(): InboundLaneEnvelope {
-    const legacy = { ...envelope };
-    delete legacy.channel;
-    return legacy;
+    const { channel: _channel, ...rest } = envelope;
+    return rest as InboundLaneEnvelope;
 }
 
 describe('inbound_lane MQ（fail-closed 入站分发）', () => {
@@ -95,7 +97,7 @@ describe('inbound_lane MQ（fail-closed 入站分发）', () => {
         expect(JSON.parse(ch.sent[0].content)).toEqual(envelope as never);
     });
 
-    // 决策九第二步：消费侧双订阅上线之后才切生产者。
+    // 分区迁移第二步：消费侧先订上分区队列，生产者才能切过去。
     it('开关打开后 publish 投按 channel 分区的队列', async () => {
         const ch = new FakeChannel();
         await publishInboundLane(ch as never, envelope, true);
@@ -109,10 +111,14 @@ describe('inbound_lane MQ（fail-closed 入站分发）', () => {
         expect(ch.sent[0].queue).toBe('inbound_lane.qq.ppe-foo');
     });
 
-    it('老信封没有 channel 字段时按飞书算（那个年代只有飞书在用这个队列）', async () => {
+    // 本服务已经不处理飞书了。没有 channel 的信封曾经被当成飞书，那在飞书还归本服务
+    // 的时候是对的；现在它只会把信封投到一条本服务永远不消费的队列上，而且是静默的。
+    it('信封没有 channel 时抛错，不猜一个渠道出来', async () => {
         const ch = new FakeChannel();
-        await publishInboundLane(ch as never, withoutChannel(), true);
-        expect(ch.sent[0].queue).toBe('inbound_lane.lark.ppe-foo');
+        await expect(publishInboundLane(ch as never, withoutChannel(), true)).rejects.toThrow(
+            /carries no channel/,
+        );
+        expect(ch.sent.length).toBe(0);
     });
 
     it('assertQueue 失败 → 抛错（fail-closed，不静默吞）', async () => {
@@ -128,31 +134,22 @@ describe('inbound_lane MQ（fail-closed 入站分发）', () => {
         await expect(publishInboundLane(ch as never, envelope, false)).rejects.toThrow();
     });
 
-    // ⚠️ 跨服务契约，同上：lark-service 的 inboundLaneDedupeKey 拼的是逐字相同的串。
-    // 不统一的后果是同一条消息重投时换了消费者就认不出自己处理过 —— 处理两遍。
-    it('幂等 key = channel + event_type + globalMessageId + lane', () => {
+    // key 的格式钉在共享包里（packages/ts-shared/src/inbound-lane-claim.test.ts），两个
+    // 服务用的是同一份实现。这里只钉本服务自己的那一半：线格式的字段落进 key 的哪一段。
+    // 字段错位不会报错，只会算出一把没人认识的锁。
+    it('幂等 key 由信封的 channel + event_type + globalMessageId + lane 拼成', () => {
         expect(inboundDedupeKey(envelope)).toBe(
-            'inbound_lane:lark:im.message.receive_v1:gmid-1:ppe-foo',
+            inboundLaneClaimKey({
+                channel: 'lark',
+                eventType: 'im.message.receive_v1',
+                globalMessageId: 'gmid-1',
+                lane: 'ppe-foo',
+            }),
         );
     });
 
-    // 分区之后两个服务各守一个 channel，key 里的 channel 段就是它们不重叠的依据。
-    it('两个 channel 的同名事件不再互相顶掉完成标记', () => {
-        expect(inboundDedupeKey({ ...envelope, channel: 'qq' })).not.toBe(
-            inboundDedupeKey(envelope),
-        );
-    });
-
-    it('老信封没有 channel 字段时算成飞书的 key', () => {
-        expect(inboundDedupeKey(withoutChannel())).toBe(inboundDedupeKey(envelope));
-    });
-
-    // key 不含队列名：双订阅期间同一条消息可能从旧队列来、也可能从新队列来，认队列的
-    // 话两边各算一次，用户看到两条回复。
-    it('幂等 key 不掺队列名', () => {
-        expect(inboundDedupeKey(envelope)).not.toContain(sharedInboundLaneQueueName('ppe-foo'));
-        expect(inboundDedupeKey(envelope)).not.toContain(
-            inboundLaneQueueName('lark', 'ppe-foo'),
-        );
+    // 猜出来的 key 比算不出 key 危险得多：猜错了就是替另一个服务写下「这条处理过了」。
+    it('信封没有 channel 时算不出 key，直接抛', () => {
+        expect(() => inboundDedupeKey(withoutChannel())).toThrow(/carries no channel/);
     });
 });

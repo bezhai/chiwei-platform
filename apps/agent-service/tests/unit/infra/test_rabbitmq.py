@@ -185,6 +185,7 @@ class TestRouteConstants:
         # 随 v4 记忆整机删除。
         # chat_response / recall 的 channel 分区队列也在这里 —— declare_topology 只
         # 遍历 ALL_ROUTES，漏掉就等于队列压根没被声明，而声明缺失是静默的。
+        # 两条 base 也在，理由不是"要声明"而是"Sink.mq 认这个名字"，见 rabbitmq.py。
         from app.infra.rabbitmq import CHANNEL_ROUTES
 
         expected = {

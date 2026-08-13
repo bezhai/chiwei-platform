@@ -5,13 +5,17 @@
 //
 // ## 为什么两条队列共用一把开关
 //
-// 释放侧就是共用的：channel-server 的 chat-response-worker 和 recall-worker 各构造
-// 一个 OutboundSubscriptions，但两者的 loadChannels 读的是**同一把** Dynamic Config
-// key，所以运维把 lark 从那份清单里摘掉时，`chat_response_lark` 和 `recall_lark` 是
-// 同时被释放的。接管侧要是用两把独立开关，就会出现「只翻了一把，另一条队列没有任何
-// 消费者」的窗口 —— 而那个窗口是安静的：队列在涨，两个服务全部健康。
+// 释放侧就是共用的：channel-server 那边 `chat_response_lark` 和 `recall_lark` 的认领
+// 读的是**同一把** Dynamic Config key（`channel_server_outbound_channels`），所以运维
+// 把 lark 从那份清单里摘掉时，两条队列是同时被释放的。接管侧要是用两把独立开关，就会
+// 出现「只翻了一把，另一条队列没有任何消费者」的窗口 —— 而那个窗口是安静的：队列在涨，
+// 两个服务全部健康。
 //
 // 一把开关同时接两个队列，才和释放侧对称。
+//
+// 移交已经完成：channel-server 的 CHANNEL_SERVER_CHANNELS 里已经没有 lark，它连飞书的
+// 出站能力都删掉了。所以这把开关现在**没有对称的另一侧**——关掉它不再是"交还给
+// channel-server"，是"这两条队列没有任何消费者"。
 //
 // ## 为什么不能在启动时读一次开关
 //

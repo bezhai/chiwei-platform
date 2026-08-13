@@ -9,7 +9,8 @@
                                               ↓ N × emit(ChatResponseSegment)
        ─[wire ChatResponseSegment, in-process]─→  Sink.mq("chat_response")
                                               ↓
-                                  channel-server / chat-response-worker → 飞书
+                       chat_response_{channel} → 拥有该 channel 的渠道服务
+                       （飞书 → lark-service，QQ → channel-server）
 
 ChatTrigger 用 transient=True，幂等去重在 ChatRequest 上由 (message_id,
 persona_id) 联合 Key 完成；ChatRequest 持久化所以走 ``.durable()``，

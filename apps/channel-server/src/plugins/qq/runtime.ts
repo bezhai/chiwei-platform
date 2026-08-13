@@ -1,8 +1,9 @@
-// QQ ChannelRuntime（对飞书 plugins/lark/runtime.ts）。
+// QQ ChannelRuntime：本服务当前唯一的 runtime。
 //
 // 入站入口是内网 HTTP：qq-gateway 把归一化好的 CustomInboundMessage POST 到
 // POST /api/internal/qq/inbound（内网 Bearer 鉴权，与现有 /api/internal/* 一致）。
-// 没有飞书那种 SDK 长连 / webhook 握手；验签 / 握手都在网关侧做完。
+// 验签 / 握手都在网关侧做完，所以这里不需要飞书那种 webhook 握手或 SDK 长连
+//（飞书那套现在在 apps/lark-service/src/lark/ingress/ 里，不是一个进程了）。
 
 import type { Hono } from 'hono';
 import type { BotConfig } from '@inner/shared/entities';

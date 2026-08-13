@@ -13,22 +13,12 @@
       "name": "channel-server",
       "version": "1.0.0",
       "dependencies": {
-        "@inner/pixiv-client": "workspace:*",
         "@inner/shared": "workspace:*",
-        "@larksuiteoapi/node-sdk": "^1.23.0",
         "@volcengine/tos-sdk": "^0.0.0-preview-2.7.7-20251211024611",
-        "ali-oss": "^6.23.0",
         "amqplib": "^0.10.5",
         "async-mutex": "^0.5.0",
-        "axios": "^1.6.2",
         "dayjs": "^1.11.13",
-        "feishu-card": "1.0.1",
-        "form-data": "^4.0.5",
         "hono": "^4.7.0",
-        "lodash": "^4.17.23",
-        "minio": "^8.0.1",
-        "mongodb": "^5.8.0",
-        "node-cron": "^4.2.1",
         "pg": "^8.11.3",
         "pg-cloudflare": "^1.2.7",
         "prom-client": "^15.1.0",
@@ -38,11 +28,8 @@
         "winston": "^3.11.0",
       },
       "devDependencies": {
-        "@types/ali-oss": "^6.16.11",
         "@types/amqplib": "^0.10.6",
         "@types/bun": "latest",
-        "@types/lodash": "^4.17.13",
-        "@types/node-cron": "^3.0.11",
         "@types/supertest": "^6.0.3",
         "@types/uuid": "^10.0.0",
         "@typescript-eslint/eslint-plugin": "^8.38.0",
@@ -493,8 +480,6 @@
     "@sqltools/formatter": ["@sqltools/formatter@1.2.5", "https://bnpm.byted.org/@sqltools/formatter/-/formatter-1.2.5.tgz", {}, "sha512-Uy0+khmZqUrUGm5dmMqVlnvufZRSK0FbYzVgp0UMstm+F5+W2/jnEEQyc9vo1ZR/E5ZI/B1WjjoTqBqwJL6Krw=="],
 
     "@tootallnate/quickjs-emscripten": ["@tootallnate/quickjs-emscripten@0.23.0", "https://bnpm.byted.org/@tootallnate/quickjs-emscripten/-/quickjs-emscripten-0.23.0.tgz", {}, "sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA=="],
-
-    "@types/ali-oss": ["@types/ali-oss@6.23.3", "https://bnpm.byted.org/@types/ali-oss/-/ali-oss-6.23.3.tgz", {}, "sha512-huSf6njkqhSeR37OMJTGMCyUg2d9Zp2AioefhYuUMeh0vNM+WybctrBor7bO/RcCbLCQI6sHn6NtPBIWALYVJg=="],
 
     "@types/amqplib": ["@types/amqplib@0.10.8", "https://bnpm.byted.org/@types/amqplib/-/amqplib-0.10.8.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-vtDp8Pk1wsE/AuQ8/Rgtm6KUZYqcnTgNvEHwzCkX8rL7AGsC6zqAfKAAJhUZXFhM/Pp++tbnUHiam/8vVpPztA=="],
 
@@ -978,7 +963,7 @@
 
     "is-typed-array": ["is-typed-array@1.1.15", "https://bnpm.byted.org/is-typed-array/-/is-typed-array-1.1.15.tgz", { "dependencies": { "which-typed-array": "^1.1.16" } }, "sha512-p3EcsicXjit7SaskXHs1hA91QxgTw46Fv6EFKKGS5DRFLD8yKnohjF3hxoju94b/OcMZoQukzpPpBE9uLVKzgQ=="],
 
-    "isarray": ["isarray@1.0.0", "https://bnpm.byted.org/isarray/-/isarray-1.0.0.tgz", {}, "sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ=="],
+    "isarray": ["isarray@2.0.5", "https://bnpm.byted.org/isarray/-/isarray-2.0.5.tgz", {}, "sha512-xHjhDr3cNBK0BzdUJSPXZntQUx/mwMS5Rw4A7lPJ90XGAO6ISP/ePDNuo0vhqOZU+UD5JoodwCAAoZQd3FeAKw=="],
 
     "isexe": ["isexe@2.0.0", "https://bnpm.byted.org/isexe/-/isexe-2.0.0.tgz", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
@@ -1570,8 +1555,6 @@
 
     "bun-types/@types/node": ["@types/node@22.19.19", "https://bnpm.byted.org/@types/node/-/node-22.19.19.tgz", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew=="],
 
-    "channel-server/mongodb": ["mongodb@5.9.2", "https://bnpm.byted.org/mongodb/-/mongodb-5.9.2.tgz", { "dependencies": { "bson": "^5.5.0", "mongodb-connection-string-url": "^2.6.0", "socks": "^2.7.1" }, "optionalDependencies": { "@mongodb-js/saslprep": "^1.1.0" }, "peerDependencies": { "@aws-sdk/credential-providers": "^3.188.0", "@mongodb-js/zstd": "^1.0.0", "kerberos": "^1.0.0 || ^2.0.0", "mongodb-client-encryption": ">=2.3.0 <3", "snappy": "^7.2.2" }, "optionalPeers": ["@aws-sdk/credential-providers", "@mongodb-js/zstd", "kerberos", "mongodb-client-encryption", "snappy"] }, "sha512-H60HecKO4Bc+7dhOv4sJlgvenK4fQNqqUIlXxZYQNbfEWSALGAwGoyJd/0Qwk4TttFXUOHJ2ZJQe/52ScaUwtQ=="],
-
     "cli-truncate/string-width": ["string-width@7.2.0", "https://bnpm.byted.org/string-width/-/string-width-7.2.0.tgz", { "dependencies": { "emoji-regex": "^10.3.0", "get-east-asian-width": "^1.0.0", "strip-ansi": "^7.1.0" } }, "sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ=="],
 
     "cliui/strip-ansi": ["strip-ansi@6.0.1", "https://bnpm.byted.org/strip-ansi/-/strip-ansi-6.0.1.tgz", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
@@ -1622,8 +1605,6 @@
 
     "tinyglobby/picomatch": ["picomatch@4.0.3", "https://bnpm.byted.org/picomatch/-/picomatch-4.0.3.tgz", {}, "sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q=="],
 
-    "to-buffer/isarray": ["isarray@2.0.5", "https://bnpm.byted.org/isarray/-/isarray-2.0.5.tgz", {}, "sha512-xHjhDr3cNBK0BzdUJSPXZntQUx/mwMS5Rw4A7lPJ90XGAO6ISP/ePDNuo0vhqOZU+UD5JoodwCAAoZQd3FeAKw=="],
-
     "typeorm/reflect-metadata": ["reflect-metadata@0.2.2", "https://bnpm.byted.org/reflect-metadata/-/reflect-metadata-0.2.2.tgz", {}, "sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q=="],
 
     "typeorm/uuid": ["uuid@11.1.0", "https://bnpm.byted.org/uuid/-/uuid-11.1.0.tgz", { "bin": { "uuid": "dist/esm/bin/uuid" } }, "sha512-0/A9rDy9P7cJ+8w1c9WD9V//9Wj15Ce2MPz8Ri6032usz+NfePxx5AcN3bN+r6ZL6jEo066/yNYB3tn4pQEx+A=="],
@@ -1646,15 +1627,13 @@
 
     "bun-types/@types/node/undici-types": ["undici-types@6.21.0", "https://bnpm.byted.org/undici-types/-/undici-types-6.21.0.tgz", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
-    "channel-server/mongodb/bson": ["bson@5.5.1", "https://bnpm.byted.org/bson/-/bson-5.5.1.tgz", {}, "sha512-ix0EwukN2EpC0SRWIj/7B5+A6uQMQy6KMREI9qQqvgpkV2frH63T0UDVd1SYedL6dNCmDBYB3QtXi4ISk9YT+g=="],
-
-    "channel-server/mongodb/mongodb-connection-string-url": ["mongodb-connection-string-url@2.6.0", "https://bnpm.byted.org/mongodb-connection-string-url/-/mongodb-connection-string-url-2.6.0.tgz", { "dependencies": { "@types/whatwg-url": "^8.2.1", "whatwg-url": "^11.0.0" } }, "sha512-WvTZlI9ab0QYtTYnuMLgobULWhokRjtC7db9LtcVfJ+Hsnyr5eo6ZtNAt3Ly24XZScGMelOcGtm7lSn0332tPQ=="],
-
     "cli-truncate/string-width/emoji-regex": ["emoji-regex@10.6.0", "https://bnpm.byted.org/emoji-regex/-/emoji-regex-10.6.0.tgz", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
     "cliui/strip-ansi/ansi-regex": ["ansi-regex@5.0.1", "https://bnpm.byted.org/ansi-regex/-/ansi-regex-5.0.1.tgz", {}, "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ=="],
 
     "color/color-convert/color-name": ["color-name@2.1.0", "https://bnpm.byted.org/color-name/-/color-name-2.1.0.tgz", {}, "sha512-1bPaDNFm0axzE4MEAzKPuqKWeRaT43U/hyxKPBdqTfmPF+d6n7FSoTFxLVULUJOmiLp01KjhIPPH+HrXZJN4Rg=="],
+
+    "duplexer2/readable-stream/isarray": ["isarray@1.0.0", "https://bnpm.byted.org/isarray/-/isarray-1.0.0.tgz", {}, "sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ=="],
 
     "duplexer2/readable-stream/safe-buffer": ["safe-buffer@5.1.2", "https://bnpm.byted.org/safe-buffer/-/safe-buffer-5.1.2.tgz", {}, "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g=="],
 
@@ -1670,6 +1649,8 @@
 
     "media-sync-worker/node-cron/uuid": ["uuid@8.3.2", "https://bnpm.byted.org/uuid/-/uuid-8.3.2.tgz", { "bin": { "uuid": "dist/bin/uuid" } }, "sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg=="],
 
+    "stream-http/readable-stream/isarray": ["isarray@1.0.0", "https://bnpm.byted.org/isarray/-/isarray-1.0.0.tgz", {}, "sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ=="],
+
     "stream-http/readable-stream/safe-buffer": ["safe-buffer@5.1.2", "https://bnpm.byted.org/safe-buffer/-/safe-buffer-5.1.2.tgz", {}, "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g=="],
 
     "stream-http/readable-stream/string_decoder": ["string_decoder@1.1.1", "https://bnpm.byted.org/string_decoder/-/string_decoder-1.1.1.tgz", { "dependencies": { "safe-buffer": "~5.1.0" } }, "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg=="],
@@ -1684,12 +1665,6 @@
 
     "@typescript-eslint/typescript-estree/minimatch/brace-expansion/balanced-match": ["balanced-match@4.0.4", "https://bnpm.byted.org/balanced-match/-/balanced-match-4.0.4.tgz", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
 
-    "channel-server/mongodb/mongodb-connection-string-url/@types/whatwg-url": ["@types/whatwg-url@8.2.2", "https://bnpm.byted.org/@types/whatwg-url/-/whatwg-url-8.2.2.tgz", { "dependencies": { "@types/node": "*", "@types/webidl-conversions": "*" } }, "sha512-FtQu10RWgn3D9U4aazdwIE2yzphmTJREDqNdODHrbrZmmMqI0vMheC/6NE/J1Yveaj8H+ela+YwWTjq5PGmuhA=="],
-
-    "channel-server/mongodb/mongodb-connection-string-url/whatwg-url": ["whatwg-url@11.0.0", "https://bnpm.byted.org/whatwg-url/-/whatwg-url-11.0.0.tgz", { "dependencies": { "tr46": "^3.0.0", "webidl-conversions": "^7.0.0" } }, "sha512-RKT8HExMpoYx4igMiVMY83lN6UeITKJlBQ+vR/8ZJ8OCdSiN3RwCq+9gH0+Xzj0+5IrM6i4j/6LuvzbZIQgEcQ=="],
-
     "glob/minimatch/brace-expansion/balanced-match": ["balanced-match@4.0.4", "https://bnpm.byted.org/balanced-match/-/balanced-match-4.0.4.tgz", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
-
-    "channel-server/mongodb/mongodb-connection-string-url/whatwg-url/tr46": ["tr46@3.0.0", "https://bnpm.byted.org/tr46/-/tr46-3.0.0.tgz", { "dependencies": { "punycode": "^2.1.1" } }, "sha512-l7FvfAHlcmulp8kr+flpQZmVwtu7nfRV7NZujtN0OqES8EL4O4e0qqzL0DC5gAvx/ZC/9lk6rhcUwYvkBnBnYA=="],
   }
 }

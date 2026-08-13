@@ -31,7 +31,7 @@ import type { ConsumeMessage } from 'amqplib';
 //       提交的中性字段口径正确（root/reply 都不挂 proactive 伪 id）；
 //   (5) session_id 为空时绝不查 agent_response、绝不写 replies / status。
 
-// ---- 可注入的 cap spy（不碰真实 DB / lark 映射表）----
+// ---- 可注入的 cap spy（不碰真实 DB / 渠道私有映射表）----
 function makeCap(): {
     cap: OutboundCapabilities;
     calls: {
@@ -54,15 +54,15 @@ function makeCap(): {
     const cap: OutboundCapabilities = {
         async resolveOutboundTarget(input) {
             calls.resolveOutboundTarget.push(input);
-            // 主动发拿伪 message_id 来这里反查 = bug；模拟真实 lark fail-loud。
+            // 主动发拿伪 message_id 来这里反查 = bug；模拟真实渠道插件 fail-loud。
             throw new Error(
-                `lark outbound cannot resolve common_message_id=${input.commonMessageId}`,
+                `channel outbound cannot resolve common_message_id=${input.commonMessageId}`,
             );
         },
         async resolveMessageRef(input) {
             calls.resolveMessageRef.push(input);
             throw new Error(
-                `lark outbound cannot resolve common_message_id=${input.commonMessageId}`,
+                `channel outbound cannot resolve common_message_id=${input.commonMessageId}`,
             );
         },
         async resolveConversationRef(commonConversationId) {
@@ -120,7 +120,7 @@ function makeMsg(payload: Record<string, unknown>): ConsumeMessage {
 // 接近真实 MQ 的主动发 payload（agent-service emit 口径）。
 function proactivePayload() {
     return {
-        channel: 'lark',
+        channel: 'qq',
         is_proactive: true,
         message_id: 'proactive:550e8400-e29b-41d4-a716-446655440000',
         chat_id: '018f-real-p2p-conversation',
@@ -230,11 +230,11 @@ describe('handleChatResponse — 主动发端到端', () => {
 });
 
 describe('handleChatResponse — 出站失败显眼日志', () => {
-    it('发飞书失败：记 error 级显眼日志（带 chat_id / bot_name / persona_id），仍 ack 不 nack', async () => {
+    it('出站发送失败：记 error 级显眼日志（带 chat_id / bot_name / persona_id），仍 ack 不 nack', async () => {
         const { cap } = makeCap();
-        // 让 sendText 抛错模拟发飞书失败
+        // 让 sendText 抛错模拟出站发送失败
         cap.sendText = async () => {
-            throw new Error('lark send failed: rate limited');
+            throw new Error('channel send failed: rate limited');
         };
 
         const errorLogs: unknown[][] = [];

@@ -1,8 +1,8 @@
 // 入站所有权收窄的解析语义。
 //
-// 这个 key 决定 cutover 期间飞书的入站信封归谁：配错的后果是两个服务继续抢同一条
-// 队列（不报错、不留痕），或者本服务连 QQ 都不收（队列静默堆积）。所以每条兜底都要
-// 有断言，不能只测 happy path。
+// 这个 key 决定移交进行中某个 channel 的入站信封归谁：配错的后果是两个服务继续抢同
+// 一条队列（不报错、不留痕），或者本服务连自己的 channel 都不收（队列静默堆积）。所以
+// 每条兜底都要有断言，不能只测 happy path。飞书的入站就是靠它交给 lark-service 的。
 
 import { describe, expect, it } from 'bun:test';
 
@@ -16,8 +16,8 @@ const HANDLED = ['lark', 'qq'];
 
 describe('INBOUND_LANE_CHANNELS_KEY', () => {
     // ⚠️ 出站是另一个 key（workers/outbound-channels.ts 的 channel_server_outbound_channels）。
-    // 决策九要求三条队列各自走一遍移交，共用一个 key 就没法表达"入站已移交、出站还没"
-    // 这个必然出现的中间态。
+    // 入站和出站各自走一遍移交，共用一个 key 就没法表达"入站已移交、出站还没"这个必然
+    // 出现的中间态。
     it('is not the outbound ownership key', () => {
         expect(INBOUND_LANE_CHANNELS_KEY).toBe('channel_server_inbound_channels');
         expect(INBOUND_LANE_CHANNELS_KEY).not.toBe('channel_server_outbound_channels');
@@ -53,9 +53,10 @@ describe('parseInboundLaneChannels', () => {
     });
 });
 
-// 「读不到就拥有全部」只在**移交之前**成立。飞书交给 lark-service 之后，一次 Dynamic
-// Config 瞬断就会让本服务重新认领飞书的信封——而 cutover 窗口里 lark runtime 还注册
-// 着，抢到就**真的处理掉**，不报错、不留痕，切流永远做不干净。
+// 「读不到就拥有全部」的"全部"是 handled，宽不到本进程处理不了的 channel 上。但移交
+// 进行中（对方已经接手、本进程的 runtime 还在）不一样：一次 Dynamic Config 瞬断就会让
+// 本服务重新认领已经交出去的信封，抢到就**真的处理掉**，不报错、不留痕，切流永远做不
+// 干净。
 describe('InboundChannelOwnership', () => {
     it('owns everything it can handle before it has ever read a valid value', async () => {
         const ownership = new InboundChannelOwnership(async () => '');

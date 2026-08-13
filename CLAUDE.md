@@ -14,7 +14,9 @@ Monorepo，所有应用在 `apps/` 下。部署在 K8s `prod` namespace。
 apps/
   paas-engine/    # PaaS 引擎 (Go) - 管理应用构建和蓝绿部署
   lite-registry/  # 泳道注册表 (Go) - Watch K8s Services，提供泳道路由数据
-  channel-server/ # 飞书 webhook 入口 + 消息处理 (Bun/TS) - 同一镜像产出 3 个独立 Deployment（见下方映射表）
+  lark-service/   # 飞书渠道服务 (Bun/TS) - 入站 + 出站，同一镜像产出 2 个独立 Deployment（见下方映射表）
+  channel-server/ # QQ 渠道服务 (Bun/TS) - 同一镜像产出 2 个独立 Deployment（见下方映射表）
+  qq-gateway/     # QQ 官方 bot 适配 (Bun/TS) - QQ 协议 ↔ channel-server 通用协议
   agent-service/  # AI 对话引擎 (Python)
   api-gateway/    # 反向代理入口 (Go)
 ```
@@ -25,23 +27,39 @@ apps/
 
 | 镜像（ImageRepo） | 产出的 K8s Deployment | 角色 |
 |---|---|---|
-| channel-server | **channel-server** | HTTP 服务，处理飞书消息 |
-| channel-server | **recall-worker** | 消费 RabbitMQ recall 队列 |
-| channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，发飞书消息 |
+| lark-service | **lark-service** | 飞书入站：websocket 长连 + webhook 路由 + 泳道信封消费 + 三个定时任务（daily-photo / daily-new-photo / emoji-sync） |
+| lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
+| channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
+| channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
 | agent-service | **agent-service** | HTTP 服务，AI 对话 + world/life 引擎 |
 
-**常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 recall-worker 也是独立服务。
+**常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`。
 
 ## 核心数据流
 
 ### 飞书消息处理
 
+入站走 websocket 长连，**不经 api-gateway**：lark-service 主动连飞书开放平台，事件由飞书推过来。
+长连对同一 app_id 是随机投递，所以持连的是单副本 Deployment，且只有 prod 部署 + `LARK_DIRECT_INGRESS=true` 才连（泳道部署不连，靠泳道信封收消息）。
+`/webhook/{bot}/{event,card}` 路由仍然注册着，走 api-gateway 进来，是长连之外的被动入口。
+
 ```
-飞书 → api-gateway
-     → channel-server:3000 (webhook 入口 + 消息处理, 按 common 口径决定 lane)
+飞书 --websocket 长连--> lark-service:3000 (投影 common 口径 + 规则引擎 + 决定 lane)
+     → RabbitMQ: chat_request 队列
      → agent-service:8000 (AI 对话, 工具调用)
-     → RabbitMQ: chat_response / recall 队列
-     → chat-response-worker / recall-worker → 飞书
+     → RabbitMQ: chat_response_lark / recall_lark 队列
+     → lark-outbound → 飞书
+```
+
+### QQ 消息处理
+
+```
+QQ → api-gateway → qq-gateway:3000 (QQ 协议 → CustomInboundMessage)
+   → channel-server:3000 (POST /api/internal/qq/inbound)
+   → RabbitMQ: chat_request 队列
+   → agent-service:8000
+   → RabbitMQ: chat_response_qq 队列
+   → chat-response-worker → qq-gateway (POST /qq/outbound) → QQ
 ```
 
 未部署泳道的服务自动 fallback 到 prod（基于 K8s Service DNS，不依赖 Istio）。
@@ -158,7 +176,7 @@ make latest-build APP=<app>                                        # 最近成�
 1. **禁止未经泳道验证直接部署到 prod。** 任何代码改动，无论多小（"就改了一行"不是理由），必须先部署到泳道、用真实流量或 rebuild 验证通过，再走 `/ship` 上线。唯一例外：用户明确说"直接上"。
 2. **部署 = 杀 Pod = 中断所有异步任务。** 部署前必须确认没有正在跑的后台任务（rebuild、afterthought 等）。如果有，要么等它跑完，要么告知用户会中断。
 3. **rebuild 等批量操作的参数（persona、chat_id、时间范围）必须由用户指定。** 不要自己填默认值，不要"顺便"扩大范围。
-4. **一镜像多服务同步。** 部署 channel-server 后必须同步 release recall-worker 和 chat-response-worker。
+4. **一镜像多服务同步。** 部署 channel-server 后必须同步 release chat-response-worker；部署 lark-service 后必须同步 release lark-outbound。
 
 ## AI 行为约束
 

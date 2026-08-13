@@ -114,6 +114,26 @@ def channel_route_for(base_queue: str, channel: str) -> Route:
         )
     return route
 
+
+def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
+    """Resolve the partitioned Route for ``base_queue`` off the payload's channel.
+
+    分区队列的 rk 只有消息自己知道，所以一律现算。出站（sink dispatch）和 DLQ 重放
+    共用这一条规则 —— 重放要是照着 base 名发，消息会落在一条没有消费者的队列上静默
+    滞留，而审计写着 published 成功。
+
+    缺 channel / 未注册的 channel 一律抛，不挑默认值：猜错的下场是回复从另一个渠道
+    发出去，比明确失败糟得多。
+    """
+    channel = payload.get("channel") if isinstance(payload, dict) else None
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(
+            f"queue={base_queue!r} is channel-partitioned but the payload carries "
+            f"no channel ({channel!r}); refusing to guess a routing key."
+        )
+    return channel_route_for(base_queue, channel)
+
+
 # runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
 # APP_NAME so an envelope published from agent-service is consumed only
 # by an agent-service runtime (preserving emit()'s in-process / cross-
@@ -149,10 +169,25 @@ def trigger_route_for(app: str) -> Route:
             return r
     raise RuntimeError(f"trigger route for {app!r} not registered")  # unreachable
 
+# ALL_ROUTES 身兼两职，删东西之前先看清是哪一职：
+#
+#   声明面   declare_topology 遍历它建队列 + 绑定
+#   注册面   Sink.mq(name) / Source.mq(name) 的合法队列名从它来
+#            （compile_graph 的 known_queues、sink_dispatch._route_by_queue、
+#            dlq_admin 的重放目标查表）
+#
+# base 的 chat_response / recall 在声明面上已经是死的：出站早就按 channel 分区，
+# 生产者只发 chat.response.{channel} / action.recall.{channel}，消费者也只订
+# {queue}_{channel}，两条 base 队列没有生产者也没有消费者。
+#
+# 但它们在注册面上是活的：wiring 里写的是 Sink.mq("chat_response") /
+# Sink.mq("recall")，**base 名就是逻辑 sink 的标识**，真实 rk 由 _dispatch_mq_sink
+# 按 payload 的 channel 现算（channel_route_for）。从 ALL_ROUTES 里摘掉它们，
+# compile_graph 会在启动时直接 GraphError（"queue not in ALL_ROUTES"），进程起不来。
+#
+# 所以这两条留着，代价是两条空队列。要真正去掉得先把注册面从声明面里拆出来。
 ALL_ROUTES = [
     CHAT_REQUEST,
-    # base 的 chat_response / recall 在 cutover 窗口里仍要声明：消费侧双订阅新旧
-    # 两套队列，生产者切 rk 的那一刻才不在关键路径上。Task F 关闭窗口时删。
     CHAT_RESPONSE,
     RECALL,
     *CHANNEL_ROUTES,

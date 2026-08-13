@@ -1,7 +1,7 @@
 // 「指令处理」那一格：谓词、分发、以及 `/blocklist` 一次跑两条那个既有形态。
 //
-// 这里跑的是**真的规则引擎和真的账本**，所以顺带钉住了"九条子指令都接上了"——
-// 少接一条 `larkSlashDispatch` 在装配期就炸（半搬状态），账本和本体没法各说各话。
+// 这里跑的是**真的规则引擎和真的清单**，所以顺带钉住了"九条子指令都接上了"——
+// 谓词那一组直接遍历 LARK_SLASH_COMMANDS，清单和分发表没法各说各话。
 
 import { describe, expect, it } from 'bun:test';
 import { runRulesWith } from '@inner/shared/rules';

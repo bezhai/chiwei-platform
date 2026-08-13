@@ -20,13 +20,14 @@ import { resolveChatResponseOutboundRefs } from './chat-response-resolve';
 
 // 出站走渠道能力端口：worker 只按 payload.channel 取插件，common id 反查、
 // 平台富文本渲染、发送、outbound 映射落库都由当前 channel 的 capabilities 完成。
-// 旧 MQ/outbox 残留不带 channel 的 payload 仍按 lark 处理。
-const DEFAULT_CHANNEL = 'lark';
 
 const SEND_DELAY_MS = 2500;
 
 export interface ChatResponsePayload {
-    channel?: string;
+    // 出站分流的唯一依据，必填。生产者（agent-service 的
+    // rabbitmq.channel_route_for_payload）同样 fail-closed，缺 channel 的 payload
+    // 压根发不出来 —— 正常出站和 DLQ 重放都走这一条。
+    channel: string;
     // 主动发（is_proactive）没有 agent_response 记录，session_id 为 null。
     session_id: string | null;
     message_id: string;
@@ -102,7 +103,23 @@ export async function handleChatResponse(
     // fail-closed 先于任何副作用：不属于自己的 channel 一行库都不查、一个插件都不取。
     // 拒绝 = nack(requeue=false)，prod 队列挂着 DLX，消息进 dead_letters 可查可重放；
     // requeue 会让两个服务互相把同一条消息推来推去，压成活锁。
-    const channel = payload.channel ?? DEFAULT_CHANNEL;
+    //
+    // 缺 channel 跟「别人的 channel」同一个处置。这里曾经回落到飞书 —— 本服务已经没有
+    // 飞书的出站能力，回落只会让消息被认领之后死在 getCapabilities 上，而 DLQ 里留下的
+    // 是一条指向插件注册表的错误，看不出来源头是生产者少发了字段。
+    const channel = payload.channel;
+    if (typeof channel !== 'string' || channel.length === 0) {
+        console.error(
+            JSON.stringify({
+                event: 'chat_response_channel_missing',
+                session_id: payload.session_id ?? null,
+                message_id: payload.message_id ?? null,
+                consumer_tag: msg.fields?.consumerTag ?? null,
+            }),
+        );
+        nack(msg, false);
+        return;
+    }
     if (!ownsChannel(channel)) {
         console.error(
             JSON.stringify({
@@ -222,21 +239,20 @@ export async function handleChatResponse(
             // dispatch 据 part_index/proactive 选 reply(回复触发/root) 还是
             // sendText(新发)，返回新消息的渠道裸 id。
             //
-            // 【已知残留 — MQ redeliver 不做发送级去重（codex 必改 3 worker 层）】
+            // 【已知残留 — MQ redeliver 不做发送级去重】
             // 主动发的 message_id（payload.message_id = 'proactive:<uuid5>'）在
             // agent-service 侧已是**整轮重投稳定**的派生键（life send_message 从本轮
             // act_id + 序号 uuid5 派生、life_wake 用 max_retries=1 关整轮重放 → 同一件
             // 主动发重投得同一段、(message_id, part_index) 稳定）。但本 worker 对 MQ
-            // **redeliver** 不按这个稳定键做发送前去重：消息落库以飞书返回的新 om_id 为
-            // 主键（storeLarkOutboundMessage 的 orIgnore 只挡同 om_id 的重复），发送本身
-            // 没有「这个 proactive: 键我已发过吗」的前置查重。handleChatResponse 末尾
-            // **无条件 ack**（连出站失败也 ack），所以唯一的 redeliver 窗口是 worker 在
-            // sendText 之后、ack 之前**崩溃**——重启重投会再 sendText 一次、真人收到两条。
+            // **redeliver** 不按这个稳定键做发送前去重：落库以平台返回的新消息 id 为主键
+            //（recordOutboundMessage 的写入只挡同一个平台 id 的重复），发送本身没有「这个
+            // proactive: 键我已发过吗」的前置查重。handleChatResponse 末尾**无条件 ack**
+            //（连出站失败也 ack），所以唯一的 redeliver 窗口是 worker 在发送之后、ack
+            // 之前**崩溃**——重启重投会再发一次、真人收到两条。
             // 这是 chat_response 链路**系统级**的 at-least-once 属性，**真人回复路径同样
-            // 存在**（不是主动发独有、不是本次改动引入）。本刀**不修**它：要修需引入发送级
-            // 幂等（从 proactive uuid5 派生确定性 common_message_id + 发送前存在性查重 +
-            // 强制该 id 落库），跨服务、动共享写路径、有 cutover 风险，留作后续。这里如实
-            // 标注为已知残留，不假装做了。
+            // 存在**。这里不修：要修需引入发送级幂等（从 proactive uuid5 派生确定性
+            // common_message_id + 发送前存在性查重 + 强制该 id 落库），跨服务、动共享写
+            // 路径、有 cutover 风险，留作后续。
             const tSend0 = Date.now();
             const sentRef = await dispatchChatResponseOutbound(capabilities, {
                 content,

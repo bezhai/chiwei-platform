@@ -12,6 +12,8 @@
 
 import type { Hono } from 'hono';
 
+import type { InboundLaneClaims } from '@inner/shared/inbound-lane-claim';
+
 import { createLarkBotLookup, type LarkBotRoster, type LarkPersonaName } from './bot-lookup';
 import { LARK_CHANNEL } from './channel';
 import { larkCredentials } from './credentials';
@@ -22,7 +24,6 @@ import {
     type LarkEvent,
     type LarkEventHandlers,
 } from './ingress/lark-event';
-import { type InboundLaneStore } from './ingress/lane-claim';
 import { startInboundLaneConsumer, type LaneChannel } from './ingress/lane-queue';
 import { registerLarkWebhook } from './ingress/webhook';
 import {
@@ -74,7 +75,7 @@ export interface LarkInbound {
         lane: string,
         deps?: {
             amqp?: LaneChannel;
-            store?: InboundLaneStore;
+            claims?: InboundLaneClaims;
             wait?: (ms: number) => Promise<void>;
             channelQueueEnabled?: () => Promise<boolean>;
         },

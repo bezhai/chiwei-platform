@@ -4,13 +4,13 @@
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
+import type { LaneClaim } from '@inner/shared/inbound-lane-claim';
 import { context } from '@inner/shared/middleware';
 import type { BotConfig } from '@inner/shared/entities';
 import type { EventDispatcher } from '@larksuiteoapi/node-sdk';
 
 import { createLarkInbound, type LarkInboundPorts } from './inbound';
 import type { LarkEvent } from './ingress/lark-event';
-import type { LaneClaim } from './ingress/lane-claim';
 import type { InboundLaneEnvelope, LaneChannel } from './ingress/lane-queue';
 import type { LarkWebSocketClient } from './ingress/websocket';
 import type { LarkMessageReading } from './message/read-message-event';
@@ -252,7 +252,7 @@ async function throughLane(
     const keys = new Map<string, 'in-flight' | 'done'>();
     await built.inbound.consumeLane('ppe-x', {
         amqp: mq.amqp,
-        store: {
+        claims: {
             claim: async (k): Promise<LaneClaim> => {
                 const held = keys.get(k);
                 if (held) return held;

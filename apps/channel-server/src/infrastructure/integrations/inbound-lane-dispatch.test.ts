@@ -53,7 +53,7 @@ const { dispatchInboundIfNeeded } = await import('./inbound-lane-dispatch');
 
 const baseInput = {
     currentLane: 'prod',
-    channel: 'lark',
+    channel: 'qq',
     botGlobalId: 'chiwei',
     commonConversationId: '018f-chat',
     eventType: 'im.message.receive_v1',
@@ -102,7 +102,7 @@ describe('dispatchInboundIfNeeded', () => {
         expect(dispatched).toBe(true);
         expect(publishCalls.length).toBe(1);
         expect(publishCalls[0]).toEqual({
-            channel: 'lark',
+            channel: 'qq',
             event_type: 'im.message.receive_v1',
             global_message_id: 'gmid-1',
             trace_id: 'trace-1',

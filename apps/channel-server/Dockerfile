@@ -27,10 +27,9 @@ COPY apps/channel-server/src ./apps/channel-server/src
 # ④ 并行编译为独立二进制
 WORKDIR /repo/apps/channel-server
 RUN bun build src/index.ts --compile --outfile=server & \
-    bun build src/workers/recall-worker.ts --compile --outfile=recall-worker & \
     bun build src/workers/chat-response-worker.ts --compile --outfile=chat-response-worker & \
     wait && \
-    test -f server && test -f recall-worker && test -f chat-response-worker
+    test -f server && test -f chat-response-worker
 
 # --- Runtime（同样基于 Debian/glibc，预装 ca-certificates/tzdata）---
 FROM harbor.local:30002/inner-bot/lark-server-runtime:bookworm-slim
@@ -42,7 +41,6 @@ ENV GIT_SHA=${GIT_SHA}
 
 WORKDIR /app
 COPY --from=builder /repo/apps/channel-server/server ./server
-COPY --from=builder /repo/apps/channel-server/recall-worker ./recall-worker
 COPY --from=builder /repo/apps/channel-server/chat-response-worker ./chat-response-worker
 
 RUN mkdir -p /var/log/channel-server && chmod 777 /var/log/channel-server

@@ -1,14 +1,14 @@
-// 出站消费的双订阅与运行期收窄。
+// 出站消费的订阅面：本进程拥有哪些 channel，就按传进来的基础路由订哪几条
+// {route}_{channel} 队列。当前唯一的调用点传的是 CHAT_RESPONSE —— 撤回归 lark-service
+// 自己消费，本服务不再起 recall 消费者。
 //
-// 换队列的协议是「消费侧先双订阅 → 切生产者 → 旧队列排空 → drain 屏障移交」，四步
-// 都不能省：生产者和消费者在不同的 Deployment 里，不可能原子发布。先切生产者，旧
-// 消费者守着空队列；先切消费者，新队列没有生产者。消费侧同时守着新旧两套队列，
-// agent-service 什么时候切 rk 就不在关键路径上了。
+// 出站队列按 channel 分区，因为 owner 按 channel 拆成了两个服务。共用一条队列意味着
+// RabbitMQ 轮询把回复随机劈成两半，两个服务各发一半 —— 不报错、不留痕。
 //
-// 移交某个 channel 时顺序是：先把它从拥有集合里摘掉（旧队列上再收到它就走
-// fail-closed，是「收窄早了」的告警信号），再对它自己的队列走 drain 屏障
-// （basic.cancel → 等在途归零）。反过来做会留下一个「已经不订阅了、但还认领」的
-// 窗口。
+// 把某个 channel 移交给另一个服务时顺序是：先把它从认领集合里摘掉，再对它自己的队列
+// 走 drain 屏障（basic.cancel → 等在途归零）。反过来做会留下一个「已经不订阅了、但还
+// 认领」的窗口。移交必须是 drain 而不是「停旧起新」：已经调完平台 API、还没 ACK 的那
+// 一瞬间被杀，消息 requeue 换个消费者再发一次，真人看到两条。
 //
 // 认领集合和「哪条队列已经订上」是**两本账**。合成一本的话，认领集合既要在 drain
 // 之前提交（上面那条顺序），又是 diff 的唯一来源 —— 于是 subscribe / drain 任何一步
@@ -25,13 +25,13 @@ export interface OutboundSubscriptionPort {
 }
 
 export interface OutboundSubscriptionsOptions {
-    /** 渠道无关的基础路由（CHAT_RESPONSE / RECALL）。 */
+    /** 渠道无关的基础路由（当前只有 CHAT_RESPONSE）。 */
     base: Route;
     lane?: string;
     port: OutboundSubscriptionPort;
     /**
-     * 造一个 handler，它只处理 accepts 放行的 channel。
-     * 旧队列拿到的是「当前拥有集合」，channel 队列拿到的是「只认自己那个」。
+     * 造一个 handler，它只处理 accepts 放行的 channel。每条 channel 队列拿到的都是
+     * 「只认自己那个」——队列绑定和 payload 打架时以队列为准。
      */
     handlerFor: (accepts: (channel: string) => boolean) => MessageHandler;
     loadChannels: () => Promise<string[]>;
@@ -54,7 +54,7 @@ type QueueState = 'consuming' | 'released' | 'mayBeConsuming' | 'mayBeReleased';
 
 export class OutboundSubscriptions {
     private readonly options: OutboundSubscriptionsOptions;
-    /** 认领集合：旧队列 fail-closed 判定的依据，移交时**先于 drain** 提交。 */
+    /** 认领集合：该订哪几条队列的依据，移交时**先于 drain** 提交。 */
     private owned = new Set<string>();
     /** 订阅账，按队列名记。跟认领集合分开的理由见文件头。 */
     private readonly state = new Map<string, QueueState>();
@@ -71,11 +71,6 @@ export class OutboundSubscriptions {
         return [...this.owned];
     }
 
-    /** 旧的、不带 channel 维度的队列。cutover 窗口内它上面什么 channel 都可能来。 */
-    legacyQueue(): string {
-        return laneQueue(this.options.base.queue, this.options.lane);
-    }
-
     queueFor(channel: string): string {
         return laneQueue(channelRoute(this.options.base, channel).queue, this.options.lane);
     }
@@ -83,18 +78,12 @@ export class OutboundSubscriptions {
     async start(): Promise<void> {
         this.owned = new Set(await this.options.loadChannels());
 
-        // 旧队列按「当前拥有集合」判定，所以它读的是活的 this.owned，不是启动时的快照。
-        await this.options.port.consume(
-            this.legacyQueue(),
-            this.options.handlerFor((channel) => this.owns(channel)),
-        );
-
         for (const channel of this.owned) {
             await this.subscribeChannel(channel);
         }
         console.info(
             `[OutboundSubscriptions] ${this.options.base.queue}: owning ` +
-                `[${this.ownedChannels().join(', ')}], legacy queue ${this.legacyQueue()}`,
+                `[${this.ownedChannels().join(', ')}]`,
         );
     }
 
@@ -103,9 +92,9 @@ export class OutboundSubscriptions {
         const added = [...next].filter((c) => !this.owned.has(c));
         const removed = [...this.owned].filter((c) => !next.has(c));
 
-        // 先换认领集合：从这一刻起旧队列上的 removed channel 不再被认领。这一步
-        // 必须先于下面的 drain，而且它不再是 diff 的来源 —— 下面两个循环读的是
-        // 订阅账（真的订上 / 真的排空才动），所以任何一步抛错下次都会重做。
+        // 先换认领集合：removed 的 channel 从这一刻起不再归本进程。这一步必须先于
+        // 下面的 drain，而且它不是 diff 的来源 —— 下面两个循环读的是订阅账（真的订上
+        // / 真的排空才动），所以任何一步抛错下次都会重做。
         this.owned = next;
         if (added.length > 0 || removed.length > 0) {
             console.info(
