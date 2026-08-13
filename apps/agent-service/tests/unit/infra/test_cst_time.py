@@ -180,3 +180,51 @@ def test_now_cst_iso_roundtrips_close_to_now():
     parsed = cst_time.parse(cst_time.now_cst_iso())
     after = datetime.now(timezone.utc)
     assert before - timedelta(seconds=5) <= parsed <= after + timedelta(seconds=5)
+
+
+# ---------------------------------------------------------------------------
+# to_cst_dated —— 跨天的时刻要带日期
+#
+# prod 事故 2026-08-03：信箱没有时间窗也没有 TTL，昨晚积压的未读会原样进 stimulus，
+# 而渲染只给 ``20:47:12 CST`` —— 昨晚 20:47 和今晚 20:47 在 prompt 里长得一模一样，
+# agent 无从分辨。同一天的保持简洁（省 token、不干扰阅读），跨天的补上日期。
+# ---------------------------------------------------------------------------
+
+
+def test_to_cst_dated_same_day_omits_date():
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=cst_time.CST)
+    assert cst_time.to_cst_dated("2026-06-03T09:05:07+08:00", now=now) == "09:05:07 CST"
+
+
+def test_to_cst_dated_other_day_carries_date():
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=cst_time.CST)
+    assert (
+        cst_time.to_cst_dated("2026-06-02T20:47:12+08:00", now=now)
+        == "06-02 20:47:12 CST"
+    )
+
+
+def test_to_cst_dated_compares_in_cst_not_utc():
+    """跨天判定按 CST 日历日，不按 UTC —— CST 次日 00:30 的 UTC 还停在前一天 16:30。"""
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=cst_time.CST)
+    # UTC 2026-06-02T16:30Z == CST 2026-06-03 00:30，跟 now 是同一个 CST 日历日
+    assert cst_time.to_cst_dated("2026-06-02T16:30:00Z", now=now) == "00:30:00 CST"
+
+
+def test_to_cst_dated_passthrough_on_unparseable():
+    """无法解析的脏串原样回显（同 to_cst_hm / to_cst_full 的兜底，不静默吞）。"""
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=cst_time.CST)
+    assert "这不是时间" in cst_time.to_cst_dated("这不是时间", now=now)
+
+
+def test_to_cst_dated_without_seconds():
+    """聊天记录只到分钟（秒对读对话没有意义），跨天照样补日期。"""
+    now = datetime(2026, 6, 3, 13, 16, tzinfo=cst_time.CST)
+    assert (
+        cst_time.to_cst_dated("2026-06-03T09:05:07+08:00", now=now, seconds=False)
+        == "09:05 CST"
+    )
+    assert (
+        cst_time.to_cst_dated("2026-06-02T20:47:12+08:00", now=now, seconds=False)
+        == "06-02 20:47 CST"
+    )

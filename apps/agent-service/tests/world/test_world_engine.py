@@ -3322,9 +3322,9 @@ async def test_world_round_carries_today_daylight_anchor(monkeypatch):
 
     从 Dynamic Config 的坐标一路走到 prompt（不桩中间的渲染函数）：坐标配上 → 时刻
     段里出现**当天真实**的日出 / 日落。期望值用同一个纯函数算（它本身由
-    ``tests/world/test_world_daylight.py`` 对着 prod 那天的真实日落钉死）。
+    ``tests/unit/infra/test_daylight.py`` 对着 prod 那天的真实日落钉死）。
     """
-    from app.world import daylight as daylight_mod
+    from app.infra import daylight as daylight_mod
 
     monkeypatch.setattr(
         daylight_mod.dynamic_config,

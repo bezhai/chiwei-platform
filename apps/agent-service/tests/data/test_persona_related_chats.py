@@ -28,6 +28,7 @@ from app.data.models import (
     CommonMessage,
 )
 from app.data.queries.messages import find_persona_related_chats_recent
+from app.infra import cst_time
 from app.life import feed_whitelist as fw
 
 _CHAT_GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "rel-chat-group")
@@ -241,7 +242,7 @@ async def test_private_chat_returned_with_self_and_other(chat_db, allow_all_grou
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -275,7 +276,7 @@ async def test_whitelisted_group_returned_non_whitelisted_excluded(chat_db, monk
     await _seed_bot_message(_CHAT_GROUP_2, event_time=1000, text="同学群我也说了", persona_id="akao")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     chat_ids = {c.chat_id for c in got}
@@ -290,7 +291,7 @@ async def test_passive_presence_chat_excluded(chat_db, allow_all_groups):
     await _seed_user_message(_CHAT_GROUP, event_time=1000, text="群里热闹但她没说话")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert got == []
@@ -303,7 +304,7 @@ async def test_recency_window_excludes_old_chats(chat_db, allow_all_groups):
     await _seed_bot_message(_CHAT_GROUP, event_time=100, text="很久以前说的", persona_id="akao")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=1000, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=1000, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert got == [], "她只在 since_ms 之前发过言的会话不算最近活跃"
@@ -318,7 +319,7 @@ async def test_per_chat_limit_keeps_most_recent_ascending(chat_db, allow_all_gro
         await _seed_user_message(_CHAT_GROUP, event_time=2000 + i, text=f"第{i}条")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=3
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=3, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -341,7 +342,7 @@ async def test_max_conversations_caps_number_of_chats(chat_db, allow_all_groups)
     await _seed_bot_message(_CHAT_DIRECT, event_time=3000, text="最新", persona_id="akao", scope="direct")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=2, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=2, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 2, "会话数上限=2"
@@ -359,7 +360,7 @@ async def test_other_persona_speech_does_not_make_chat_hers(chat_db, allow_all_g
     await _seed_bot_message(_CHAT_GROUP, event_time=2000, text="我在", persona_id="chinagi")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert got == []
@@ -381,7 +382,7 @@ async def test_proactive_only_private_chat_qualifies(chat_db, monkeypatch):
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1, "她只发过 proactive 的私聊也算她相关会话"
@@ -403,7 +404,7 @@ async def test_user_row_with_bot_name_not_marked_self(chat_db, allow_all_groups)
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -439,7 +440,7 @@ async def test_file_candidates_from_same_boundary(chat_db, allow_all_groups):
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
     assert len(got) == 1
     cands = got[0].file_candidates
@@ -470,7 +471,7 @@ async def test_file_candidate_tos_ref_derived_without_backfill(chat_db, allow_al
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
     cands = got[0].file_candidates
     assert len(cands) == 1
@@ -498,7 +499,7 @@ async def test_media_video_excluded_from_file_candidates(chat_db, allow_all_grou
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
     cands = got[0].file_candidates
     names = {c.file_name for c in cands}
@@ -513,7 +514,7 @@ async def test_no_file_messages_means_empty_candidates(chat_db, allow_all_groups
         _CHAT_DIRECT, event_time=2000, text="在的", persona_id="akao", scope="direct"
     )
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
     assert got[0].file_candidates == []
 
@@ -546,7 +547,7 @@ async def test_direct_counterpart_named_with_id(chat_db, allow_all_groups):
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -576,7 +577,7 @@ async def test_counterpart_resolved_from_full_history_outside_window(
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=1000, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=1000, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -603,7 +604,7 @@ async def test_proactive_outbound_row_not_mistaken_as_counterpart(chat_db, monke
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -625,7 +626,7 @@ async def test_no_human_row_in_full_history_means_no_counterpart(chat_db, monkey
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -640,7 +641,7 @@ async def test_group_conversation_counterparts_empty(chat_db, allow_all_groups):
     await _seed_user_message(_CHAT_GROUP, event_time=2000, text="哈喽")
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     assert len(got) == 1
@@ -665,7 +666,7 @@ async def test_dirty_direct_chat_lists_all_humans(chat_db, allow_all_groups):
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     cps = got[0].counterparts
@@ -698,7 +699,7 @@ async def test_counterpart_display_name_prefers_named_row(chat_db, allow_all_gro
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     by_id = {c.user_id: c for c in got[0].counterparts}
@@ -732,7 +733,11 @@ async def test_counterpart_aggregation_batched_not_per_chat(chat_db, allow_all_g
         sa_event.listen(chat_db.sync_engine, "before_cursor_execute", _capture)
         try:
             await find_persona_related_chats_recent(
-                persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+                persona_id="akao",
+                since_ms=0,
+                max_conversations=10,
+                per_chat_limit=50,
+                now=cst_time.now_cst(),
             )
         finally:
             sa_event.remove(chat_db.sync_engine, "before_cursor_execute", _capture)
@@ -775,8 +780,56 @@ async def test_proactive_trigger_pseudo_messages_excluded(chat_db, allow_all_gro
     )
 
     got = await find_persona_related_chats_recent(
-        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
     )
 
     texts = [m.text for m in got[0].messages]
     assert not any("伪消息" in t for t in texts)
+
+
+@pytest.mark.integration
+async def test_cross_day_chat_message_carries_date(chat_db, allow_all_groups):
+    """不是今天发的群/私聊消息，时间戳要带日期。
+
+    线上事故 2026-08-03 的一条：喂给 life 的对话每条只标 ``23:41 CST``，冷启回退的
+    6 小时窗口经常跨夜，她读到一屏深夜时间戳却分不清那是昨晚还是刚才。当天的仍旧只
+    给时分（省 token、不干扰阅读），跨天的补上 ``MM-DD``。
+    """
+    import datetime as _dt
+
+    now = cst_time.now_cst()
+    yesterday = now - _dt.timedelta(days=1)
+    await _seed_conversation(_CHAT_DIRECT, scope="direct", name=None)
+    await _seed_user_message(
+        _CHAT_DIRECT,
+        event_time=int(yesterday.timestamp() * 1000),
+        text="昨晚说的话",
+        scope="direct",
+        username="贝壳",
+    )
+    await _seed_user_message(
+        _CHAT_DIRECT,
+        event_time=int(now.timestamp() * 1000),
+        text="刚才说的话",
+        scope="direct",
+        username="贝壳",
+    )
+    await _seed_bot_message(
+        _CHAT_DIRECT,
+        event_time=int(now.timestamp() * 1000) + 1,
+        text="在的",
+        persona_id="akao",
+        scope="direct",
+    )
+
+    got = await find_persona_related_chats_recent(
+        persona_id="akao", since_ms=0, max_conversations=10, per_chat_limit=50, now=cst_time.now_cst()
+    )
+
+    by_text = {m.text: m.cst_time for m in got[0].messages}
+    assert by_text["昨晚说的话"].startswith(yesterday.strftime("%m-%d")), (
+        f"跨天消息要带日期，实际 {by_text['昨晚说的话']!r}"
+    )
+    assert not by_text["刚才说的话"].startswith(now.strftime("%m-%d")), (
+        f"当天消息保持简洁不带日期，实际 {by_text['刚才说的话']!r}"
+    )

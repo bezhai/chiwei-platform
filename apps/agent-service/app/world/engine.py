@@ -115,7 +115,7 @@ from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 from app.runtime.single_flight import SingleFlightConflict, single_flight
 from app.world.arc import read_world_arc  # module-level so tests can monkeypatch
-from app.world.daylight import (  # module-level so tests can monkeypatch
+from app.infra.daylight import (  # module-level so tests can monkeypatch
     today_daylight_text,
 )
 from app.world.npc_roster import (  # module-level so tests can monkeypatch
@@ -936,7 +936,7 @@ def _world_loop_messages(
     判断是这条规则划定清楚的唯一例外，靠 :func:`_sisters_section` 加回的 ``observed_at``
     做时间外推（见该函数 docstring）。
 
-    ``daylight_text``：今天的日照锚点（:func:`app.world.daylight.today_daylight_text`
+    ``daylight_text``：今天的日照锚点（:func:`app.infra.daylight.today_daylight_text`
     渲染的「（今天日出 HH:MM、日落 HH:MM）」），**直接贴在【现实此刻】那一行的时刻
     后面**——它跟时刻是同一件事（今天这个时刻处在昼夜的哪一段），拆成独立一段反而
     要模型自己去连。prod 实证 07-24：真实日落 19:13，world 17:01 就写「傍晚前段」、
