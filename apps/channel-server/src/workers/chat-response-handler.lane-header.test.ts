@@ -38,7 +38,7 @@ function makeMsg(
 // 用最小依赖把整条链跑到 context.run 内部。
 function payloadWithBodyLane(bodyLane?: string) {
     return {
-        channel: 'lark',
+        channel: 'qq',
         is_proactive: true,
         message_id: 'proactive:550e8400-e29b-41d4-a716-446655440000',
         chat_id: '018f-conversation',

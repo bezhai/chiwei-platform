@@ -1,8 +1,6 @@
 import { DatabaseManager } from './database';
 import { HttpServerManager, ServerConfig } from './server';
 import { botDirectory } from '@inner/shared/bot';
-import { initializeCrontabs } from '@crontab/index';
-import { isProdDeployment } from '@inner/shared/lane-policy';
 import { rabbitmqClient, getLane } from '@inner/shared/mq';
 import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
 import '@plugins/index';
@@ -67,8 +65,8 @@ export class ApplicationManager {
         // 该待命（flag off 时队列为空，消费者空转无害）。
         //
         // 传进去的是"本进程**能**处理哪些 channel"（注册了入站信封处理的 runtime），
-        // 不是"拥有哪些"。拥有集合由消费者在这个范围内按 dynamic config 收窄——飞书的
-        // 入站要在 Task F 删代码之前就能移交出去，而那时 lark runtime 还注册着。
+        // 不是"拥有哪些"。拥有集合由消费者在这个范围内按 dynamic config 现读收窄——
+        // 移交一个 channel 不必等它的代码删掉，也不必重启进程。
         const lane = getLane();
         if (lane) {
             const handles = channelRuntimes()
@@ -84,17 +82,7 @@ export class ApplicationManager {
         // 5.6 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
         await startChannelDirectIngresses(botDirectory.getBotsByInitType('websocket'));
 
-        // 6. 启动所有定时任务：仅 prod 部署。crontab 的副作用是全局的（daily-photo
-        // 往写死的真实飞书群发消息、emoji 每小时全量覆写共享表），没有按泳道隔离
-        // 的口径，泳道部署跑起来就是重复发群消息 + 写脏 prod 数据。
-        if (isProdDeployment()) {
-            initializeCrontabs();
-            console.info('All crontab tasks initialized!');
-        } else {
-            console.info(`[crontab] skipped on lane=${lane} (prod only)`);
-        }
-
-        // 7. 显示当前加载的机器人配置
+        // 6. 显示当前加载的机器人配置
         this.logBotConfigurations();
 
         console.info('Application initialization completed!');

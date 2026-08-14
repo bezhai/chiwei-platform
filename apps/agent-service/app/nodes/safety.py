@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Post-safety 节点入口的"已完成"短路集合（Phase 2 §3.2 / §4.4）。
 # - passed / blocked: agent-service 写的（"blocked" 是迁移期遗留瞬态）
-# - recalled / recall_failed: channel-server recall-worker 写的终态
+# - recalled / recall_failed: 消费 recall_{channel} 的渠道服务写的终态
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"passed", "blocked", "recalled", "recall_failed"}
 )
@@ -307,7 +307,7 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
       - 已 ``TERMINAL_STATUSES``（passed/blocked/recalled/recall_failed） → return None
       - pending → 跑 audit；blocked 路径 return Recall（@node 自动 emit -> sink），
         passed 路径写 status="passed"
-    blocked 路径**不写 status**——recall-worker 会写最终 recalled / recall_failed，
+    blocked 路径**不写 status**——撤回的消费方会写最终 recalled / recall_failed，
     避免 race（spec §3.2）。
     """
     current = await get_safety_status(req.session_id)

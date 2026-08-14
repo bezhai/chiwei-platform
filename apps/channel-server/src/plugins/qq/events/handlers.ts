@@ -1,10 +1,14 @@
-// QQ 入站编排（对飞书 plugins/lark/events/handlers.ts）。顺序与副作用分界与飞书
-// 钉死一致，复用 core / 共享通用函数（lane dispatch / runRules / store / publish /
-// 去重锁）；QQ 专属只有 custom→InboundMessage（adapter）、qq projector、qq rule message。
+// QQ 入站编排。复用 @inner/shared 的通用函数（lane dispatch / runRules / store /
+// publish / 去重锁）；QQ 专属只有 custom→InboundMessage（adapter）、qq projector、
+// qq rule message。
+//
+// 顺序与副作用分界当初是照着飞书那条链定的。飞书拆走之后它自己的编排在
+// apps/lark-service/src/lark/receive-message.ts，两边不再共用代码，也不再要求一致
+//（那个文件开头写了它为什么故意改了顺序）。
 //
 // 钉死的渠道契约链（顺序不可调换，直面 PR #228 副作用前移翻车）：
-//   adapter.parse → AddressingPolicy.decide + enforceDecision(仅记 skip 原因，
-//     与飞书一致不早退，非 @bot 群消息照常入库、由 runRules 的 NeedRobotMention gate)
+//   adapter.parse → AddressingPolicy.decide + enforceDecision(仅记 skip 原因、
+//     不早退，非 @bot 群消息照常入库、由 runRules 的 NeedRobotMention gate)
 //   → qq projector(换 common_*_id)
 //   → lane dispatch(非本进程 lane 投 inbound_lane.{lane}，本地到此为止)
 //   ──── 分界：以下副作用仅在实际处理 lane 执行 ────

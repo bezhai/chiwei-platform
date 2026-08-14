@@ -37,9 +37,13 @@
 // 在这条泳道处理"的消息，过期跑回 prod 就是拿泳道的改动去污染线上。
 
 import { DynamicConfig } from '@inner/shared';
+import {
+    inboundLaneClaimKey,
+    inboundLaneClaims,
+    type InboundLaneClaims,
+} from '@inner/shared/inbound-lane-claim';
 import { getRabbitChannel } from '@inner/shared/mq';
 
-import { laneClaimStore, type InboundLaneStore } from './lane-claim';
 import { UnprocessableLarkEvent, type LarkEvent } from './lark-event';
 
 /**
@@ -114,23 +118,18 @@ export function sharedInboundLaneQueueName(lane: string): string {
 }
 
 /**
- * 渠道 + 事件类型 + 全局消息 id + 泳道，唯一确定"这条事件在这条泳道上处理了一次"。
+ * 信封 → 幂等 key。
  *
- * **不含队列名**，这是刻意的：双订阅期间同一条消息可能从旧队列来、也可能从新队列来，
- * key 认队列的话两边各算一次，用户就会看到两条回复。
- *
- * channel 必须在 key 里：分区之前队列是共享的，两个渠道的同名事件不带 channel 会互相
- * 顶掉对方的完成标记；分区之后它是两个服务的 key 不重叠的依据。channel-server 用的是
- * 逐字相同的格式，换手重投才认得出自己处理过。
+ * key 的格式是跨服务契约，只有 `@inner/shared/inbound-lane-claim` 一处实现；本函数只负责
+ * 把线格式的字段名喂给它，外加"老信封算飞书"这条本服务自己的策略（见 envelopeChannel）。
  */
 export function inboundLaneDedupeKey(envelope: InboundLaneEnvelope): string {
-    return [
-        QUEUE_PREFIX,
-        envelopeChannel(envelope),
-        envelope.event_type,
-        envelope.global_message_id,
-        envelope.lane,
-    ].join(':');
+    return inboundLaneClaimKey({
+        channel: envelopeChannel(envelope),
+        eventType: envelope.event_type,
+        globalMessageId: envelope.global_message_id,
+        lane: envelope.lane,
+    });
 }
 
 /** 这条消息永远处理不了，退回去也没用。 */
@@ -219,13 +218,13 @@ export async function startInboundLaneConsumer(
     deliver: (event: LarkEvent) => Promise<void>,
     deps: {
         amqp?: LaneChannel;
-        store?: InboundLaneStore;
+        claims?: InboundLaneClaims;
         wait?: (ms: number) => Promise<void>;
         channelQueueEnabled?: () => Promise<boolean>;
     } = {},
 ): Promise<void> {
     const amqp = deps.amqp ?? (getRabbitChannel() as unknown as LaneChannel);
-    const store = deps.store ?? laneClaimStore;
+    const claims = deps.claims ?? inboundLaneClaims;
     const wait = deps.wait ?? realWait;
     const channelQueueEnabled = deps.channelQueueEnabled ?? inboundLaneChannelConsumeEnabled;
 
@@ -287,7 +286,7 @@ export async function startInboundLaneConsumer(
                 checkScope(envelope, scope);
 
                 key = inboundLaneDedupeKey(envelope);
-                const claim = await store.claim(key);
+                const claim = await claims.claim(key);
                 if (claim === 'done') {
                     console.info(`[lane-queue] already handled, skipping: ${key}`);
                     amqp.ack(msg);
@@ -302,12 +301,12 @@ export async function startInboundLaneConsumer(
                 }
 
                 await deliver(larkEventOf(envelope));
-                await store.complete(key);
+                await claims.complete(key);
                 amqp.ack(msg);
             } catch (error) {
                 // 认领过就要还回去，否则重投的那一条会白等一个租约周期。
                 if (key) {
-                    await store.release(key).catch((releaseError) => {
+                    await claims.release(key).catch((releaseError) => {
                         console.error(`[lane-queue] failed to release ${key}:`, releaseError);
                     });
                 }

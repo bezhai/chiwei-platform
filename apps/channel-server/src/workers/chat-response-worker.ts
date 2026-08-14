@@ -88,8 +88,8 @@ async function main(): Promise<void> {
     await rabbitmqClient.declareTopology();
     console.info('[ChatResponseWorker] RabbitMQ connected');
 
-    // 4. 开始消费：旧的 chat_response 和每个拥有渠道的 chat_response_{channel} 同时
-    //    订阅，agent-service 切 rk 的时刻因此不在关键路径上（决策九）。
+    // 4. 开始消费：每个拥有渠道一条 chat_response_{channel}。出站队列按 channel 分区，
+    //    别的渠道的队列本进程一条都不订。
     const subscriptions = new OutboundSubscriptions({
         base: CHAT_RESPONSE,
         lane: getLane(),

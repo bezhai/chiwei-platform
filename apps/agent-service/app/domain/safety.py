@@ -39,28 +39,37 @@ class PreSafetyVerdict(Data):
 
 
 class PostSafetyRequest(Data):
-    """Post-safety check request keyed by response session_id."""
+    """Post-safety check request keyed by response session_id.
+
+    ``channel`` 必填。它一路传给 ``Recall``，最终决定撤回投哪个队列；
+    默认值会让缺 channel 的请求静默变成飞书，而 sink dispatch 的
+    fail-closed 校验在 pydantic 填完默认值之后才跑，拦不住。
+    """
     session_id: Annotated[str, Key]
     trigger_message_id: str
     chat_id: str
     response_text: str
-    channel: str = "lark"
+    channel: str
 
     class Meta:
         transient = True
 
 
 class Recall(Data):
-    """撤回事件，通过 Sink.mq("recall") 出 graph 给 channel-server recall-worker。
+    """撤回事件，通过 Sink.mq("recall") 出 graph 给拥有该 channel 的渠道服务。
 
-    payload schema 与旧 ``mq.publish(RECALL, ...)`` 一致；lane 字段
-    被 recall-worker.ts 从 payload 直接读取，必须显式带。
+    实际投的是 ``recall_{channel}``（sink dispatch 按 ``channel`` 现算 rk），
+    飞书那条由 lark-service 消费。payload schema 与旧 ``mq.publish(RECALL, ...)``
+    一致；``lane`` 必须显式带 —— sink dispatch 拿它当 ``outbound_context`` 的
+    fallback，最终写进 AMQP header，而消费侧只认 header。
+
+    ``channel`` 必填：它直接决定 routing key，猜错就把撤回投到别的渠道去了。
     """
     session_id: Annotated[str, Key]
     chat_id: str
     trigger_message_id: str
     reason: str
-    channel: str = "lark"
+    channel: str
     detail: str | None = None
     lane: str | None = None
 

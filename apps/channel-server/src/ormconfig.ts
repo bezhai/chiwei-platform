@@ -16,20 +16,7 @@ import {
     LaneRouting,
     UserBlacklist,
 } from '@inner/shared/entities';
-import {
-    LarkEmoji,
-    LarkUser,
-    LarkGroupMember,
-    LarkBaseChatInfo,
-    LarkGroupChatInfo,
-    UserGroupBinding,
-    LarkUserOpenId,
-    BotPersona,
-    LarkMessage,
-    QqUserOpenId,
-    QqMessage,
-    QqGroupChatInfo,
-} from './infrastructure/dal/entities';
+import { QqUserOpenId, QqMessage, QqGroupChatInfo } from './infrastructure/dal/entities';
 
 const AppDataSource = createPostgresDataSource({
     entities: [
@@ -43,15 +30,6 @@ const AppDataSource = createPostgresDataSource({
         LaneRouting,
         CommonBotPresence,
         // 本服务自己的表
-        BotPersona,
-        UserGroupBinding,
-        LarkEmoji,
-        LarkUser,
-        LarkGroupMember,
-        LarkBaseChatInfo,
-        LarkGroupChatInfo,
-        LarkUserOpenId,
-        LarkMessage,
         QqUserOpenId,
         QqMessage,
         QqGroupChatInfo,

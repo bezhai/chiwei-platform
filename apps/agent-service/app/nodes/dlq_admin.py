@@ -31,7 +31,13 @@ from app.domain.dlq_admin_events import (
     DlqRequeueRequest,
     DlqRequeueResponse,
 )
-from app.infra.rabbitmq import ALL_ROUTES, current_lane, mq
+from app.infra.rabbitmq import (
+    ALL_ROUTES,
+    CHANNEL_PARTITIONED_ROUTES,
+    channel_route_for_payload,
+    current_lane,
+    mq,
+)
 from app.runtime import node
 
 logger = logging.getLogger(__name__)
@@ -124,11 +130,23 @@ async def dlq_dry_run_impl(body: dict[str, Any]) -> dict[str, Any]:
             payload_obj = json.loads(m.get("payload", "{}"))
         except Exception:
             payload_obj = {}
-        plan.append({
+        base = payload_obj.get("origin_queue") or queue.replace("-dlx", "")
+        entry: dict[str, Any] = {
             "message_id": (m.get("properties") or {}).get("message_id"),
             "will_clear_idempotent": True,
-            "target_queue": payload_obj.get("origin_queue") or queue.replace("-dlx", ""),
-        })
+            "target_queue": base,
+        }
+        # 预览必须走跟 requeue 同一条解析：报 base 名而实际投分区队列（或实际会被
+        # 拒绝），等于在运维决定要不要重放的那一刻给错信息。
+        if base in CHANNEL_PARTITIONED_ROUTES:
+            try:
+                entry["target_queue"] = channel_route_for_payload(
+                    base, payload_obj.get("data") or payload_obj.get("payload") or {}
+                ).queue
+            except ValueError as exc:
+                entry["target_queue"] = None
+                entry["blocked_reason"] = str(exc)
+        plan.append(entry)
     return {"plan": plan}
 
 
@@ -189,17 +207,38 @@ async def dlq_requeue_impl(body: dict[str, Any], *, operator: str | None) -> dic
                 continue
 
         # step 4: publish-with-confirm to original queue
+        #
+        # 出站队列按 channel 分区之后，origin_queue 记的 base 名（chat_response /
+        # recall）不再是投递目标：base Route 仍在 ALL_ROUTES 里（它兼作 Sink.mq(name)
+        # 的合法名字白名单），照着它发 publish 会成功，但那条队列没有任何消费者——
+        # 消息静默滞留，审计还写着 requeued。所以重放跟正常出站走同一条规则：按被重放
+        # payload 自己的 channel 现算真实的分区 route。
         target_queue = envelope.get("origin_queue") or queue.replace("-dlx", "")
-        route = next((r for r in ALL_ROUTES if r.queue == target_queue), None)
-        if route is None:
-            await _cap.update_audit(
-                audit_id, status=AuditStatus.PUBLISH_FAILED,
-                recovery_hint=f"no Route for target_queue={target_queue!r}",
-            )
-            await msg.nack(requeue=True)
-            publish_failed += 1
-            continue
         body_payload = envelope.get("data") or envelope.get("payload")
+        if target_queue in CHANNEL_PARTITIONED_ROUTES:
+            try:
+                route = channel_route_for_payload(target_queue, body_payload)
+            except ValueError as exc:
+                # 分区之前进 DLQ 的老消息可能根本没有 channel 字段。不猜渠道：猜错是
+                # 把回复从另一个渠道发出去，发 base 队列是没人消费的静默滞留，两者都
+                # 比明确失败糟。消息 nack 回 DLQ，改完可以再放。
+                await _cap.update_audit(
+                    audit_id, status=AuditStatus.PUBLISH_FAILED,
+                    recovery_hint=f"cannot resolve a partitioned route: {exc}",
+                )
+                await msg.nack(requeue=True)
+                publish_failed += 1
+                continue
+        else:
+            route = next((r for r in ALL_ROUTES if r.queue == target_queue), None)
+            if route is None:
+                await _cap.update_audit(
+                    audit_id, status=AuditStatus.PUBLISH_FAILED,
+                    recovery_hint=f"no Route for target_queue={target_queue!r}",
+                )
+                await msg.nack(requeue=True)
+                publish_failed += 1
+                continue
         confirmed = await mq.publish_with_confirm(
             route, body_payload,
             headers=envelope.get("headers") or {},

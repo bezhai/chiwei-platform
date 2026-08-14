@@ -9,13 +9,15 @@ apps/
   agent-service/         # AI 对话 + world/life 自主生活引擎 (Python)：自研 agent 工具循环 + dataflow runtime
   alert-webhook/         # Prometheus 告警转飞书 (Go)
   api-gateway/           # 外部流量统一入口，按规则分流并注入泳道 header (Go)
-  channel-server/        # 消息渠道服务：webhook 入口 + 平台无关 core + Lark 插件 (Bun/TS)
+  channel-server/        # QQ 渠道服务：内网入站入口 + 平台无关 core + QQ 插件 (Bun/TS)
   lane-sidecar/          # 注入到每个业务 Pod 的透明代理容器，改写出站服务名做泳道路由 (Go)；非独立部署
+  lark-service/          # 飞书渠道服务：websocket 长连入站 + common 投影 + 规则指令 + 出站发送撤回 (Bun/TS)
   lite-registry/         # 泳道注册表：watch K8s Services，提供泳道路由真值表 (Go)
   media-sync-worker/     # Pixiv / Bangumi 媒体素材定时同步 (Bun/TS)
   monitor-dashboard/     # 运维后台 BFF + 审计落库 (Bun/TS)
   monitor-dashboard-web/ # 运维后台前端 SPA (React)
   paas-engine/           # 自建 PaaS：Kaniko 构建、部署、网关规则、配置管理 (Go)
+  qq-gateway/            # QQ 官方 bot 适配：QQ 协议 ↔ channel-server 通用协议 (Bun/TS)
   sandbox-worker/        # 隔离环境执行 bash / 技能脚本，agent 的工具后端 (Python)
   tagger-service/        # Pixiv 图片 GPU 打标管线 (Python)；裸机 systemd 部署，不进 PaaS/K8s
   tool-service/          # 图像管道 + 关键词提取，agent 的工具后端 (Python)
@@ -26,7 +28,7 @@ packages/
   ts-shared/             # TS 共享基建（中间件 / 缓存 / 日志 / HTTP / LaneRouter SDK）
 ```
 
-一个镜像可以产出多个独立的 K8s Deployment（如 channel-server 一镜像出 channel-server / recall-worker / chat-response-worker 三个服务），查日志和排查必须按实际服务名来；映射表以 [CLAUDE.md](CLAUDE.md) 为单一来源。
+一个镜像可以产出多个独立的 K8s Deployment（lark-service 一镜像出 lark-service / lark-outbound，channel-server 一镜像出 channel-server / chat-response-worker），查日志和排查必须按实际服务名来；映射表以 [CLAUDE.md](CLAUDE.md) 为单一来源。
 
 ## 文档
 

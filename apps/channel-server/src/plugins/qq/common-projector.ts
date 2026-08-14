@@ -37,7 +37,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 // 同一条 QQ 消息可能被 HTTP / MQ 重投并发处理。按 QQ msg_id 串行到 store 完成，
-// 避免重复造 common_message。镜像飞书 withLarkInboundProjectionLock。
+// 避免重复造 common_message。飞书那边同一职责的实现是 lark-service 的
+// larkMessageLock（apps/lark-service/src/lark/projection/message-lock.ts）。
 export async function withQqInboundProjectionLock<T>(
     qqMessageId: string,
     task: () => Promise<T>,

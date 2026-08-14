@@ -153,8 +153,10 @@ class TestKnownChannelsRegistry:
             for route in by_channel.values():
                 assert route in ALL_ROUTES, f"{route.queue} would never be declared"
 
-    def test_legacy_base_routes_still_declared_during_cutover(self):
-        # 双订阅窗口里旧队列仍要存在，Task F 才删。
+    def test_partitioned_base_names_stay_registered(self):
+        # base 名是 Sink.mq("chat_response") / Sink.mq("recall") 的标识：不在
+        # ALL_ROUTES 里 compile_graph 就会在启动时 GraphError，进程起不来。真实 rk
+        # 由 dispatch 按 payload 的 channel 现算，跟这两条 Route 的 rk 无关。
         assert CHAT_RESPONSE in ALL_ROUTES
         assert RECALL in ALL_ROUTES
 

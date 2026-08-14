@@ -67,7 +67,7 @@ logger.error('错误日志', { code: 'E_BAD' });
 
 - 不建议在全局强制替换业务代码的 `console.*` 为 `logger.*`：交由 override 统一处理即可
 - 在关键路径（如错误处理、外部调用失败）可使用 `logger.error` 提供结构化字段，便于检索与告警
-- 确保 `traceMiddleware` 在 Koa 中靠前执行，以便日志中包含正确的 traceId
+- 确保 `traceMiddleware` 在 Hono 中靠前执行，以便日志中包含正确的 traceId
 - 文件日志目录需可写；容器环境中建议挂载日志目录或使用标准输出结合采集
 
 ## 常见问题

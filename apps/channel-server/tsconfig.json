@@ -17,7 +17,6 @@
         "baseUrl": "src",
         "paths": {
             "@/*": ["./*"],
-            "@core/*": ["core/*"],
             "@plugins/*": ["plugins/*"],
             "@api/*": ["api/*"],
             "@middleware/*": ["middleware/*"],
@@ -29,15 +28,8 @@
             "@dal/*": ["infrastructure/dal/*"],
             "@entities": ["infrastructure/dal/entities"],
             "@entities/*": ["infrastructure/dal/entities/*"],
-            "@repositories/*": ["infrastructure/dal/repositories/*"],
             "@logger/*": ["infrastructure/logger/*"],
-            "@http/*": ["infrastructure/http/*"],
             "@integrations/*": ["infrastructure/integrations/*"],
-            "@crontab/*": ["infrastructure/crontab/*"],
-            "@lark/*": ["infrastructure/integrations/lark/*"],
-            "@lark-client": ["infrastructure/integrations/lark-client"],
-            "@aliyun/*": ["infrastructure/integrations/aliyun/*"],
-            "@volcengine/*": ["infrastructure/integrations/volcengine/*"],
             "@config/*": ["config/*"]
         }
     },

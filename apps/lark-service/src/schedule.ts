@@ -9,10 +9,9 @@
 // lark/rules/inbound-rules.ts 的规则序列），职责没变但形状必须变 —— 清单是**一份普通
 // 数据**，任务本体由装配根递进来，进程里没有共享可变状态。
 //
-// ## 清单是账本，任务本体不在清单里
+// ## 清单只记事实，任务本体不在清单里
 //
-// 清单只记事实：任务名、cron 表达式、以谁的身份跑、还欠谁一条。这三样从 channel-server
-// 那份还活着的实现里逐条对得上（schedule.test.ts 直接读对面的源码比），而任务本体要
+// 清单记的是任务名、cron 表达式、以谁的身份跑，这三样与拆分前逐条相同。而任务本体要
 // 飞书客户端、图库、emoji 仓储这些只有装配根才拿得到的东西，所以它从 `runs` 那一侧进来，
 // 按任务名对上。**对不上就抛** —— key 拼错的症状本来是任务静默不挂，到点没发日报才有
 // 人发现。
@@ -37,26 +36,20 @@ import { schedule as nodeCron } from 'node-cron';
 import { context } from '@inner/shared/middleware';
 import { isProdDeployment } from '@inner/shared/lane-policy';
 
-/** 哪一批迁移负责把这个槽位填上。填好之后连同 `pendingIn` 一起删。 */
-export type LarkScheduleBatch = 'D2' | 'D3';
-
 /** 清单里的一格。全是事实，没有任务本体。 */
 export interface LarkScheduleSlot {
-    /** 任务名。日志里的标识，也是 `runs` 对上来的 key 和跨服务对账的键。 */
+    /** 任务名。日志里的标识，也是 `runs` 对上来的 key。 */
     readonly name: string;
     /** cron 表达式，五段：分 时 日 月 周。 */
     readonly cron: string;
     /** 以哪个 bot 的身份跑。它决定这次执行拿到哪套飞书凭据。 */
     readonly botName: string;
-    /** 还欠着：记着谁负责填。填上本体的同时必须删掉这一项。 */
-    readonly pendingIn?: LarkScheduleBatch;
 }
 
 /**
- * 飞书专属定时任务，三个。名字 / 表达式 / botName 与 channel-server 那份逐条相同。
+ * 飞书专属定时任务，三个。名字 / 表达式 / botName 与拆分前逐条相同。
  *
- * 填一个槽位是两步：删掉这里的 `pendingIn`，往装配根的 `runs` 里加一个同名的本体。
- * 一存一无会在装配期抛（见 reconcile）。
+ * 每一格都必须在装配根的 `runs` 里有一个同名的本体，少一个会在装配期抛（见 reconcile）。
  */
 export const LARK_SCHEDULES: readonly LarkScheduleSlot[] = [
     // 每天 18:00：随机取一张已上传的图，发到订阅群，再往另一个群补一条带卡片的回复。
@@ -101,7 +94,7 @@ export interface LarkSchedules {
  */
 export function startLarkSchedules(wiring: LarkScheduleWiring): LarkSchedules {
     const roster = wiring.roster ?? LARK_SCHEDULES;
-    // 账本校验排在 lane gate 前面：泳道本来就不挂任务，接错了在那边永远看不见，
+    // 清单校验排在 lane gate 前面：泳道本来就不挂任务，接错了在那边永远看不见，
     // 等切到 prod 才第一次暴露 —— 那时它已经是线上问题了。
     reconcile(roster, wiring.runs);
 
@@ -116,8 +109,8 @@ export function startLarkSchedules(wiring: LarkScheduleWiring): LarkSchedules {
     const jobs: CronJob[] = [];
     const running: string[] = [];
     for (const slot of roster) {
-        const run = wiring.runs[slot.name];
-        if (!run) continue;
+        // reconcile 已经保证每一格都有本体。
+        const run = wiring.runs[slot.name]!;
         jobs.push(wiring.schedule(slot.cron, () => void fire(slot, run)));
         running.push(slot.name);
         console.info(`[lark-service] scheduled ${slot.name} at "${slot.cron}" as ${slot.botName}`);
@@ -133,9 +126,8 @@ export function startLarkSchedules(wiring: LarkScheduleWiring): LarkSchedules {
 }
 
 /**
- * 清单与本体必须一一对上：`run` 存在 ⇔ `pendingIn` 不存在。两个方向都会静默失效
- * ——多出来的 key 是任务名拼错了（本体永远不跑），少掉的是槽位被谁清了 `pendingIn`
- * 却没接上本体（账本说搬完了，实际没有）。
+ * 清单与本体必须一一对上。两个方向都会静默失效 —— 多出来的 key 是任务名拼错了（本体
+ * 永远不跑），少掉的是清单上有这一格却没人接本体（到点没发日报才有人发现）。
  */
 function reconcile(
     roster: readonly LarkScheduleSlot[],
@@ -143,13 +135,7 @@ function reconcile(
 ): void {
     const problems: string[] = [];
     for (const slot of roster) {
-        const hasRun = Boolean(runs[slot.name]);
-        if (hasRun && slot.pendingIn) {
-            problems.push(`${slot.name} has a run but is still marked pending in ${slot.pendingIn}`);
-        }
-        if (!hasRun && !slot.pendingIn) {
-            problems.push(`${slot.name} has no run and no pendingIn`);
-        }
+        if (!runs[slot.name]) problems.push(`${slot.name} has no run`);
     }
     const names = new Set(roster.map((slot) => slot.name));
     for (const name of Object.keys(runs)) {

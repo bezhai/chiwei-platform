@@ -14,6 +14,7 @@
 // 队列不动，本模块只加 inbound_lane.{lane} 这一类「lane 间投递」队列。
 
 import type { Channel } from 'amqplib';
+import { inboundLaneClaimKey } from '@inner/shared/inbound-lane-claim';
 import { getRabbitChannel } from '@inner/shared/mq';
 
 import { isInboundLaneChannelPublishEnabled } from './inbound-lane-flag';
@@ -22,8 +23,8 @@ import { isInboundLaneChannelPublishEnabled } from './inbound-lane-flag';
 // lane 写进信封（不是 HTTP header，跨 lane 是 MQ），lane channel-server 消费时从
 // 信封读出 lane 注入 context（§6）。
 export interface InboundLaneEnvelope {
-    // 目标 channel。旧队列信封可能没有该字段，消费侧按 lark 兼容。
-    channel?: string;
+    // 目标 channel。队列名和幂等 key 都从它来，所以它必填 —— 见 envelopeChannel。
+    channel: string;
     event_type: string;
     global_message_id: string;
     // 当前请求 traceId。跨 lane 走 MQ 时不能靠 HTTP header 透传，必须写进信封，
@@ -42,17 +43,32 @@ export interface InboundLaneEnvelope {
 
 const QUEUE_PREFIX = 'inbound_lane';
 
-// 老信封没有 channel 字段：那个年代只有飞书在用这个队列。
-const LEGACY_ENVELOPE_CHANNEL = 'lark';
-
-// 信封的归属渠道。队列名和幂等 key 都从它来，兜底只在这一处。
+/**
+ * 信封的归属渠道。队列名和幂等 key 都从它来，所以缺了它**只能抛**。
+ *
+ * 这里曾经在缺字段时按飞书算——飞书还归本服务的时候那是对的，那个年代只有飞书在用
+ * 这个队列。飞书移交给 lark-service 之后本服务连 lark runtime 都没有了，猜出来的
+ * 渠道要么把信封投到一条自己永远不消费的队列上，要么替 lark-service 写下「这条处理
+ * 过了」的完成标记——两种都不报错，都是静默丢消息。
+ *
+ * 类型上它是必填字段，但信封是**线格式**（JSON.parse 出来的），类型系统管不到，所以
+ * 运行期这道校验不能省。
+ */
 export function envelopeChannel(env: InboundLaneEnvelope): string {
-    return env.channel ?? LEGACY_ENVELOPE_CHANNEL;
+    const channel = env.channel;
+    if (typeof channel !== 'string' || channel.length === 0) {
+        throw new Error(
+            `inbound lane envelope carries no channel ` +
+                `(event=${env.event_type} gmid=${env.global_message_id}); ` +
+                `refusing to guess which channel owns it`,
+        );
+    }
+    return channel;
 }
 
-// 分区后的队列名。队列的分区维度必须和消费者的所有权维度一致：拆分后 owner 是
-// channel + lane（飞书归 lark-service，QQ 归本服务），队列也就按 channel + lane 分。
-// 只按 lane 分的话两个服务竞争消费同一条队列，信封被谁抢到全看运气。
+// 分区后的队列名。队列的分区维度必须和消费者的所有权维度一致：owner 是 channel + lane
+//（飞书归 lark-service，QQ 归本服务），队列也就按 channel + lane 分。只按 lane 分的话
+// 两个服务竞争消费同一条队列，信封被谁抢到全看运气。
 //
 // ⚠️ 跨服务契约：lark-service 的 ingress/lane-queue.ts 必须拼出逐字相同的名字。两个
 // app 是两个包，编译期对不上，只能两边各钉一条断言。
@@ -60,40 +76,36 @@ export function inboundLaneQueueName(channel: string, lane: string): string {
     return `${QUEUE_PREFIX}.${channel}.${lane}`;
 }
 
-// 分区前的队列名。切换窗口内消费侧仍要订阅它（决策九：消费侧先双订阅 → 切生产者 →
-// 旧队列排空 → 移交），把旧队列里的存量收干净之前不能删。
+// 分区前的队列名。**当前泳道信封走的就是这一条**：按 channel 分区那场迁移的两个开关
+// （enable_inbound_lane_channel_publish / _consume）都还没打开，投递和消费都在这里。
 export function sharedInboundLaneQueueName(lane: string): string {
     return `${QUEUE_PREFIX}.${lane}`;
 }
 
-// 幂等 key：channel + event_type + globalMessageId + lane 唯一确定一次入站处理。消费
-// 侧据此去重，重复投递的同一条信封直接跳过整条入站处理。
+// 信封 → 幂等 key。消费侧据此去重，重复投递的同一条信封直接跳过整条入站处理。
 //
-// **不含队列名**，这是刻意的：双订阅期间同一条消息可能从旧队列来、也可能从新队列来，
-// key 认队列的话两条各算一次，用户看到两条回复。
-//
-// channel 必须在 key 里，而且格式要与 lark-service 逐字相同（⚠️ 跨服务契约）：同一条
-// 消息重投时换了消费者，认不出自己处理过就是处理两遍。
+// key 的格式是跨服务契约，只有 @inner/shared/inbound-lane-claim 一处实现；这里只负责把
+// 线格式的字段名喂给它，外加"说不出 channel 的信封直接抛"这条本服务自己的策略
+//（见 envelopeChannel）。
 export function inboundDedupeKey(env: InboundLaneEnvelope): string {
-    return [
-        QUEUE_PREFIX,
-        envelopeChannel(env),
-        env.event_type,
-        env.global_message_id,
-        env.lane,
-    ].join(':');
+    return inboundLaneClaimKey({
+        channel: envelopeChannel(env),
+        eventType: env.event_type,
+        globalMessageId: env.global_message_id,
+        lane: env.lane,
+    });
 }
 
 // fail-closed 队列声明：只 durable，**不设** x-message-ttl、**不设** dead-letter。
-// 与 rabbitmq.ts 的 lane 队列（带 10s TTL + DLX 回 prod）刻意不同。新旧两条队列同样
-// 对待——分区队列里装的还是"已经判定该在这条泳道处理"的消息。
+// 与 rabbitmq.ts 的 lane 队列（带 10s TTL + DLX 回 prod）刻意不同。共享队列和分区队列
+// 同样对待——两条里装的都是"已经判定该在这条泳道处理"的消息。
 export async function assertInboundLaneQueue(ch: Channel, queue: string): Promise<void> {
     await ch.assertQueue(queue, { durable: true });
 }
 
 // 投递：声明 + 发送，任一步失败直接抛错（fail-closed，调用方记错误日志/告警，
-// 绝不静默回 prod）。投哪条队列由调用方给的开关决定——决策九要求消费侧的双订阅先
-// 上线、生产者后切，两个动作不能共用一个开关。
+// 绝不静默回 prod）。投哪条队列由调用方给的开关决定——消费侧要先订上分区队列、生产者
+// 才能切过去，两个动作不能共用一个开关。
 export async function publishInboundLane(
     ch: Channel,
     env: InboundLaneEnvelope,

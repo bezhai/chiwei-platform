@@ -1,11 +1,13 @@
-// 定时任务基座：清单对账、lane gate、挂任务、账本自洽，以及"注册器真的接在入口进程上"。
+// 定时任务基座：清单内容、lane gate、挂任务、清单与本体自洽，以及"注册器真的接在入口
+// 进程上"。
 //
-// 后面三组的共同点是**失效的时候没有任何运行期症状**：
+// 共同点是**失效的时候没有任何运行期症状**：
 //
+//   * 清单被改了 —— cron 表达式打错一位，任务照挂，只是换了个时间跑。
 //   * lane gate 破了 —— 泳道部署会往写死的真实飞书群再发一遍日报、按小时全量覆写
 //     共享的 lark_emoji 表。两边都不报错，prod 那份照常跑。
-//   * 账本接错了（run 的 key 拼错、槽位填了却忘了删 pendingIn）—— 任务静默不挂，
-//     日志里连"少了一个"都看不出来，只有到点没发日报才会有人发现。
+//   * 清单与本体接错了（run 的 key 拼错）—— 任务静默不挂，日志里连"少了一个"都看不
+//     出来，只有到点没发日报才会有人发现。
 //   * 注册器被从 index.ts 摘掉 —— 本文件其余每一条都还是绿的，因为它们测的是
 //     startLarkSchedules 自己，而没人调用它。
 //
@@ -25,60 +27,6 @@ import {
     type CronScheduler,
     type LarkScheduleSlot,
 } from './schedule';
-
-// ---------------------------------------------------------------------------
-// 对面那份还活着的定时任务
-// ---------------------------------------------------------------------------
-
-const CHANNEL_SERVER_CRONTAB = resolve(
-    import.meta.dir,
-    '../../channel-server/src/infrastructure/crontab',
-);
-
-function readUpstream(relativePath: string): string {
-    const path = resolve(CHANNEL_SERVER_CRONTAB, relativePath);
-    try {
-        return readFileSync(path, 'utf8');
-    } catch {
-        throw new Error(
-            `读不到 ${path}。如果是 Task F 已经把 channel-server 的飞书代码删了，` +
-                `那本文件的跨服务对账已经没有参照物 —— 确认三个槽位都填满之后把它删掉。`,
-        );
-    }
-}
-
-interface UpstreamTask {
-    name: string;
-    cron: string;
-    botName: string;
-}
-
-/**
- * channel-server 那边有几个定时任务，是**数出来的**不是写死的：先从 services/index.ts
- * 取服务文件清单，再从每个文件里取 `@Crontab` 装饰器。对面新加一个而这边没跟上，
- * 上面那条对账就红。
- */
-function upstreamTasks(): UpstreamTask[] {
-    const modules = [...readUpstream('services/index.ts').matchAll(/from\s+'\.\/([\w-]+)'/g)].map(
-        (m) => m[1]!,
-    );
-    return modules.flatMap((module) => {
-        const source = readUpstream(`services/${module}.ts`);
-        return [...source.matchAll(/@Crontab\(\s*'([^']*)'\s*,\s*\{([^}]*)\}/g)].map((match) => {
-            const options = match[2]!;
-            return {
-                cron: match[1]!,
-                name: /taskName:\s*'([^']*)'/.exec(options)![1]!,
-                // 装饰器的 botName 有默认值（decorators.ts 里是 'chiwei'），不写也算数。
-                botName: /botName:\s*'([^']*)'/.exec(options)?.[1] ?? 'chiwei',
-            };
-        });
-    });
-}
-
-function byName<T extends { name: string }>(tasks: readonly T[]): T[] {
-    return [...tasks].sort((a, b) => a.name.localeCompare(b.name));
-}
 
 // ---------------------------------------------------------------------------
 // 调度器替身。绝不等时间流逝 —— 记下挂了什么，要跑就自己调。
@@ -130,7 +78,7 @@ afterAll(() => {
     onLane(originalLane);
 });
 
-// 小清单，测挂载行为用；对账那组用真的 LARK_SCHEDULES。
+// 小清单，测挂载行为用；清单内容那组用真的 LARK_SCHEDULES。
 const ALPHA: LarkScheduleSlot = { name: 'alpha', cron: '0 18 * * *', botName: 'tool' };
 const BETA: LarkScheduleSlot = { name: 'beta', cron: '0 * * * *', botName: 'chiwei' };
 /** 一格，配 `runs: { alpha }`。 */
@@ -140,21 +88,15 @@ const TWO: LarkScheduleSlot[] = [ALPHA, BETA];
 
 // ---------------------------------------------------------------------------
 
-describe('清单对账：定时任务与 channel-server 那份逐条对上', () => {
-    // 先后不是契约（三个任务互不相干，cron 各跑各的），所以按名字排序比。
-    it('任务名、cron 表达式、botName 逐条对上', () => {
-        expect(byName(LARK_SCHEDULES).map(({ name, cron, botName }) => ({ name, cron, botName })))
-            .toEqual(byName(upstreamTasks()));
-    });
-
-    // 槽位填没填**在行为上看不出来**：还欠着的槽位不挂任务，而"到点没跑"要等一整个
-    // cron 周期才有人察觉。所以填充状态本身要有断言。三个都填满之后，`pendingIn` 这套
-    // 脚手架在真清单上就没有用户了 —— 它连同跨服务对账一起在 Task F 删。
-    it('三个槽位都搬过来了，没有还欠着的', () => {
-        expect(LARK_SCHEDULES.map((slot) => [slot.name, slot.pendingIn])).toEqual([
-            ['daily-photo', undefined],
-            ['daily-new-photo', undefined],
-            ['emoji-sync', undefined],
+describe('清单内容', () => {
+    // 这三样与拆分前逐条相同，改动它们都是**改线上行为**，不是改测试固定装置：cron 打
+    // 错一位任务照挂、只是换了个时间跑；botName 换一个是换一套飞书凭据，任务照跑、发
+    // 消息那一步才炸。先后不是契约（三个任务互不相干，cron 各跑各的）。
+    it('三个任务的名字、cron 表达式、botName', () => {
+        expect(LARK_SCHEDULES).toEqual([
+            { name: 'daily-photo', cron: '0 18 * * *', botName: 'tool' },
+            { name: 'daily-new-photo', cron: '30 19 * * *', botName: 'tool' },
+            { name: 'emoji-sync', cron: '0 * * * *', botName: 'chiwei' },
         ]);
     });
 });
@@ -193,17 +135,17 @@ describe('lane gate：非 prod 部署一个都不起', () => {
 });
 
 describe('挂任务', () => {
-    it('只挂有本体的槽位，cron 表达式原样交给调度器', () => {
+    it('每一格都挂上去，cron 表达式原样交给调度器', () => {
         const cron = fakeCron();
 
         const schedules = startLarkSchedules({
-            runs: { beta: async () => {} },
+            runs: { alpha: async () => {}, beta: async () => {} },
             schedule: cron.schedule,
-            roster: [{ ...ALPHA, pendingIn: 'D2' }, BETA],
+            roster: TWO,
         });
 
-        expect(schedules.running).toEqual(['beta']);
-        expect(cron.scheduled.map((s) => s.cron)).toEqual(['0 * * * *']);
+        expect(schedules.running).toEqual(['alpha', 'beta']);
+        expect(cron.scheduled.map((s) => s.cron)).toEqual(['0 18 * * *', '0 * * * *']);
     });
 
     // botName 决定这次执行拿哪套飞书凭据。丢了它，任务照跑、发消息那一步才炸。
@@ -264,7 +206,7 @@ describe('挂任务', () => {
     });
 });
 
-describe('账本自洽：填错了要炸，不许静默不挂', () => {
+describe('清单与本体自洽：接错了要炸，不许静默不挂', () => {
     it('run 的 key 不在清单里 → 抛（拼错任务名的症状本来是任务永远不跑）', () => {
         const cron = fakeCron();
 
@@ -277,7 +219,7 @@ describe('账本自洽：填错了要炸，不许静默不挂', () => {
         ).toThrow(/alhpa/);
     });
 
-    it('槽位既没有本体也没记着谁来填 → 抛', () => {
+    it('清单上的一格没人接本体 → 抛', () => {
         const cron = fakeCron();
 
         expect(() =>
@@ -289,21 +231,9 @@ describe('账本自洽：填错了要炸，不许静默不挂', () => {
         ).toThrow(/alpha/);
     });
 
-    it('槽位填上了却忘了删 pendingIn → 抛（账本还欠着，实际已经在跑）', () => {
-        const cron = fakeCron();
-
-        expect(() =>
-            startLarkSchedules({
-                runs: { alpha: async () => {} },
-                schedule: cron.schedule,
-                roster: [{ ...ALPHA, pendingIn: 'D2' }],
-            }),
-        ).toThrow(/alpha/);
-    });
-
     // 校验排在 lane gate 前面：泳道本来就不挂任务，接错了在那边永远看不见，等切到
     // prod 才第一次暴露 —— 而那时它已经是线上问题了。
-    it('泳道部署也校验账本', () => {
+    it('泳道部署也校验清单', () => {
         onLane('ppe-x');
         const cron = fakeCron();
 
@@ -335,16 +265,12 @@ describe('装配：注册器接在入口进程上，且只接在入口进程上'
         expect(entry).toContain('startLarkSchedules(');
     });
 
-    // 账本对账（reconcile）只在真进程起来的那一刻才跑，而 index.ts 一 import 就要连
-    // PG / Redis / MQ，本套测试跑不到它。所以"已经填上的槽位在装配根真的有本体"这件
-    // 事只能从源码上钉：漏掉一个的症状是 prod 起不来（reconcile 抛），但那时已经是
-    // 线上问题了。
-    it.each(LARK_SCHEDULES.filter((slot) => !slot.pendingIn).map((slot) => slot.name))(
-        '%s 在装配根里真的接上了本体',
-        (name) => {
-            expect(code('index.ts')).toContain(`'${name}':`);
-        },
-    );
+    // reconcile 只在真进程起来的那一刻才跑，而 index.ts 一 import 就要连 PG / Redis /
+    // MQ，本套测试跑不到它。所以"每一格在装配根真的有本体"这件事只能从源码上钉：漏掉
+    // 一个的症状是 prod 起不来（reconcile 抛），但那时已经是线上问题了。
+    it.each(LARK_SCHEDULES.map((slot) => slot.name))('%s 在装配根里真的接上了本体', (name) => {
+        expect(code('index.ts')).toContain(`'${name}':`);
+    });
 
     // 决策十的那张进程表没写 cron 归谁。它必须待在单副本的那个进程里：出站可以多副本，
     // 每个副本各起一份 cron 就是往写死的真实飞书群发 N 遍日报。

@@ -1,4 +1,4 @@
-// 飞书指令清单：还没搬过来的那些槽位、它们与人格聊天的先后、以及依赖怎么进来。
+// 飞书指令清单：清单里有哪几条、它们与人格聊天的先后、以及依赖怎么进来。
 //
 // 三件事要钉住，而它们失效的时候都不会有任何运行期症状：
 //
@@ -7,21 +7,15 @@
 // 更糟：引擎遇到 category 对不上且非 fallthrough 的规则会**直接收敛成 no_match**，人格
 // 聊天排在前面等于让工具 bot 一条指令都跑不到。
 //
-// **完整性。** 少搬一条在行为上看不出来 —— 空槽位不产出规则，人格聊天照样兜底，赤尾照常
-// 回话。所以参照物只能来自本服务之外：channel-server 那份还活着的指令清单。照
-// queues.test.ts 的办法，expected 不写在本文件里、从对面的源码里取；两边各写各的 expected
-// 时，"改实现顺手改 expected"会让两边一起变绿。
+// **完整性。** 少一条在行为上看不出来 —— 人格聊天照样兜底，赤尾照常回话，日志干净。所以
+// 清单的内容本身要有断言：顶层钉的是真装出来的那串 `comment`（槽位填了个别的东西同样是
+// 静默的），斜杠那组钉的是 key 全集。
 //
-// **账本不许假绿。** 斜杠子指令那一组曾经只是一串字符串，用「迁移清单 ∪ 放弃清单 == 上游
-// 全集」加两条 `toContain` 校验 —— 把 `block` 从前者挪到后者，并集不变、`config` 照样在，
-// 全绿。现在放弃清单是**精确**断言，迁移清单是真正驱动分发的槽位。
-//
-// Task F 删掉 channel-server 那份清单的时候，本文件的对账用途也就结束了 —— 那时所有槽位
-// 应该都已经填满，跨服务对账连同 pendingIn 那个分支一起删。
+// **放弃清单不许假绿。** 斜杠子指令那一组曾经用「迁移清单 ∪ 放弃清单 == 全集」加两条
+// `toContain` 校验 —— 把 `block` 从前者挪到后者，并集不变、`config` 照样在，全绿。所以
+// 两份清单现在都是**精确**断言。
 
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
 import { context } from '@inner/shared/middleware';
 import { runRulesWith, type RuleConfig } from '@inner/shared/rules';
@@ -40,41 +34,8 @@ import {
     type LarkCommand,
     type LarkCommandDeps,
     type LarkCommandSlot,
-    type LarkSlashSlot,
 } from './commands';
 import { larkChatRules } from './inbound-rules';
-
-// ---------------------------------------------------------------------------
-// 对面那份清单
-// ---------------------------------------------------------------------------
-
-const CHANNEL_SERVER_LARK = resolve(import.meta.dir, '../../../../channel-server/src/plugins/lark');
-
-function readUpstream(relativePath: string): string {
-    const path = resolve(CHANNEL_SERVER_LARK, relativePath);
-    try {
-        return readFileSync(path, 'utf8');
-    } catch {
-        throw new Error(
-            `读不到 ${path}。如果是 Task F 已经把 channel-server 的飞书代码删了，` +
-                `那本文件的跨服务对账已经没有参照物 —— 确认所有槽位都填满之后把它删掉。`,
-        );
-    }
-}
-
-function matchAll(source: string, pattern: RegExp): string[] {
-    return [...source.matchAll(pattern)].map((m) => m[1]!);
-}
-
-/** channel-server 那份顶层指令的名字，按它在文件里的先后。 */
-function upstreamCommandNames(): string[] {
-    return matchAll(readUpstream('commands.ts'), /comment:\s*'([^']*)'/g);
-}
-
-/** channel-server 那个斜杠指令组里的子指令 key。 */
-function upstreamSlashKeys(): string[] {
-    return matchAll(readUpstream('commands/command-handler.ts'), /key:\s*'([^']*)'/g);
-}
 
 // ---------------------------------------------------------------------------
 // 跑规则序列用的固定装置
@@ -192,37 +153,14 @@ function runSequence(chatRules: RuleConfig[], botRole: string | undefined) {
 
 // ---------------------------------------------------------------------------
 
-describe('清单完整性：对账 channel-server 那份还活着的指令', () => {
-    // 删掉一个槽位、或者把顺序改了，这条就红。顺序也在断言里：Meme 的谓词只有
+describe('清单完整性', () => {
+    // 删掉一格、或者把顺序改了，这条就红。顺序也在断言里：Meme 的谓词只有
     // NeedRobotMention 加一条 async 判定，本身就近似 catch-all，排到 EqualText 那几条
     // 前面会把它们全吃掉。
-    it('顶层槽位逐条对上，先后也一样', () => {
-        expect(LARK_COMMANDS.map((slot) => slot.name)).toEqual(upstreamCommandNames());
-    });
-
-    // 槽位填没填**在行为上看不出来**：空槽位不产出规则，人格聊天照样兜底，于是"把一条
-    // 已经搬好的指令悄悄改回 pendingIn"能让整套测试全绿，线上表现只是那条指令不再响应
-    // （而且人设 bot 本来就跳过 utility，连"没反应"都不新鲜）。所以填充状态本身要有断言。
-    // 每批搬完更新这张表。
-    it('账本的填充状态：哪些搬完了、哪些还欠着', () => {
-        expect(
-            LARK_COMMANDS.map((slot) => [slot.name, 'command' in slot ? 'migrated' : slot.pendingIn]),
-        ).toEqual([
-            ['复读功能', 'migrated'],
-            ['发送余额信息', 'migrated'],
-            ['给用户发送帮助信息', 'migrated'],
-            ['撤回消息', 'migrated'],
-            ['生成水群历史卡片', 'migrated'],
-            ['开启复读', 'migrated'],
-            ['关闭复读', 'migrated'],
-            ['指令处理', 'migrated'],
-            ['发送图片', 'migrated'],
-            ['Meme', 'migrated'],
-        ]);
-    });
-
-    // 上一条只看账本，这一条看真的拼出来了什么 —— 槽位填了个别的东西同样是静默的。
-    it('真的拼出来的就是账本上那几条，先后也一样', () => {
+    //
+    // 断言的是**真的装出来的**那串 comment，不是清单上的 name —— 槽位填了个别的东西同样
+    // 是静默的（人格聊天照样兜底，线上表现只是那条指令不再响应）。
+    it('真的拼出来的就是清单上那十条，先后也一样', () => {
         expect(larkCommands(DEPS).map((command) => command(commandContext()).comment)).toEqual([
             '复读功能',
             '发送余额信息',
@@ -237,55 +175,38 @@ describe('清单完整性：对账 channel-server 那份还活着的指令', () 
         ]);
     });
 
-    it('斜杠指令组：要迁的加上拍板删掉的，正好是对面那一组子指令', () => {
-        expect(
-            [...LARK_SLASH_COMMANDS.map((slot) => slot.key), ...DROPPED_SLASH_COMMANDS].sort(),
-        ).toEqual([...upstreamSlashKeys()].sort());
-    });
-
-    // 已知缺陷四：/config 写进 lark_base_chat_info.gray_config，而 agent-service 读的是
-    // common_conversation.attachment_policy，这条链路本来就是断的。整组要迁、只有它不迁，
-    // 所以"对面有、这边没有"必须是被记下来的决定，不是漏掉。
+    // 斜杠那一组同理：少一条的症状是敲 `/block` 掉进人格聊天、看到赤尾开始闲聊。
     //
-    // **精确断言，不是 toContain**：并集那条对账对"把 block 从迁移清单挪进放弃清单"是
-    // 瞎的（并集不变），只有钉死"放弃的有且仅有 config"才拦得住。
-    it('放弃的子指令有且仅有 /config', () => {
+    // 已知缺陷四：/config 写进 lark_base_chat_info.gray_config，而 agent-service 读的是
+    // common_conversation.attachment_policy，这条链路本来就是断的。整组九条都在、只有它
+    // 不在，所以"没有它"必须是被记下来的决定，不是漏掉。
+    //
+    // **两份都是精确断言**：只钉「并集不变」对"把 block 从这份挪进放弃清单"是瞎的。
+    it('斜杠子指令有且仅有这九条，放弃的有且仅有 /config', () => {
+        expect(LARK_SLASH_COMMANDS.map((slot) => slot.key)).toEqual([
+            'chat_id',
+            'message_id',
+            'bind',
+            'unbind',
+            'block',
+            'unblock',
+            'blocklist',
+            'session',
+            'union_id',
+        ]);
         expect(DROPPED_SLASH_COMMANDS).toEqual(['config']);
-        expect(upstreamSlashKeys()).toContain('config');
-        expect(LARK_SLASH_COMMANDS.map((slot) => slot.key)).not.toContain('config');
-    });
-
-    // 「指令处理」那一格的本体**就是**斜杠分发。两边不同步的后果各有各的静默：顶层填了
-    // 而子指令还欠着 → 用户敲 /block 掉进人格聊天（赤尾开始闲聊）；顶层还欠着而子指令
-    // 填了 → 本体永远不跑，账本却说搬完了。
-    it('斜杠子指令与「指令处理」那一格同进同退', () => {
-        const group = LARK_COMMANDS.find((slot) => slot.name === '指令处理');
-        const filled = LARK_SLASH_COMMANDS.filter((slot) => 'run' in slot).length;
-
-        expect(group).toBeDefined();
-        expect('pendingIn' in group!).toBe(filled === 0);
-        expect(filled === 0 || filled === LARK_SLASH_COMMANDS.length).toBe(true);
     });
 });
 
-describe('斜杠账本直接驱动分发', () => {
-    const slash = (key: string, ran: string[]): LarkSlashSlot => ({
+describe('斜杠清单直接驱动分发', () => {
+    const slash = (key: string, ran: string[]) => ({
         key,
         run: () => async () => {
             ran.push(key);
         },
     });
 
-    it('全部还欠着时没有分发表 —— 「指令处理」那一格因此也是空的', () => {
-        expect(
-            larkSlashDispatch(DEPS, [
-                { key: 'bind', pendingIn: 'D4' },
-                { key: 'block', pendingIn: 'D4' },
-            ]),
-        ).toBeNull();
-    });
-
-    it('全部填好时按 key 编成分发表，本体拿到装配期那份依赖', async () => {
+    it('按 key 编成分发表，本体拿到装配期那份依赖', async () => {
         const ran: string[] = [];
         const seen: LarkCommandDeps[] = [];
         const table = larkSlashDispatch(DEPS, [
@@ -301,25 +222,11 @@ describe('斜杠账本直接驱动分发', () => {
             slash('block', ran),
         ]);
 
-        expect(Object.keys(table!)).toEqual(['bind', 'block']);
+        expect(Object.keys(table)).toEqual(['bind', 'block']);
         expect(seen).toEqual([DEPS]);
 
-        await table!['block']!(null as never, commandContext());
+        await table['block']!(null as never, commandContext());
         expect(ran).toEqual(['block']);
-    });
-
-    // 半填状态是最坏的一种：没填的那几条既不分发、也不报错，敲 /block 的人会看到赤尾
-    // 开始闲聊。清单驱动分发之后它变成装配期一声炸。
-    it('填了一半就抛，把还欠着的 key 全写在错误里', () => {
-        const ran: string[] = [];
-
-        expect(() =>
-            larkSlashDispatch(DEPS, [
-                slash('bind', ran),
-                { key: 'block', pendingIn: 'D4' },
-                { key: 'unblock', pendingIn: 'D4' },
-            ]),
-        ).toThrow(/block.*unblock|unblock.*block/s);
     });
 
     it('同一个 key 出现两次就抛（后一个会静默盖掉前一个）', () => {
@@ -331,13 +238,12 @@ describe('斜杠账本直接驱动分发', () => {
     });
 });
 
-describe('拼接：填了的槽位按清单顺序进规则序列，没填的不进', () => {
-    it('空槽位不产出指令，填好的保持清单里的先后', () => {
+describe('拼接：槽位按清单顺序进规则序列', () => {
+    // 先后即优先级（理由见 commands.ts 的文件头），所以装配这一跳不许重排。
+    it('保持清单里的先后', () => {
         const ran: string[] = [];
         const roster: LarkCommandSlot[] = [
-            { name: '还没搬的', pendingIn: 'D4' },
             { name: '第一条', command: () => probeCommand('第一条', ran) },
-            { name: '也还没搬的', pendingIn: 'D2' },
             { name: '第二条', command: () => probeCommand('第二条', ran) },
         ];
 
