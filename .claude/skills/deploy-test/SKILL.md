@@ -15,13 +15,14 @@ user_invocable: true
 ```
 
 可选传入 `APP`。不传则自动从 `git diff --name-only main...HEAD` 检测改动的 `apps/<APP>/`。
+可选传入 `LANE=<lane>` 显式指定泳道（如 `LANE=coe-<name>` 用于破坏性改动）。不传则自动生成。
 
 ## 执行流程
 
 ### 1. 自动检测
 
 - **APP**: 从参数获取，或从改动文件自动检测。涉及多个 app 且未指定时才问用户。
-- **LANE**: 从当前分支名生成（`/` → `-`，截前 20 字符）。
+- **LANE**: 显式传入则用传入值；否则从分支名生成 `ppe-<branch-derived>`（分支名小写、`/` → `-`、截前 16 字符，加 `ppe-` 前缀，总长 ≤ 20 字符）。
 - **分支**: `git branch --show-current`，禁止在 main 上执行。
 
 ### 2. 自动处理脏状态
