@@ -8,6 +8,8 @@ user_invocable: true
 
 一键完成：PR → 合码 → 部署生产。用户敲 `/ship` 即表示授权合并和部署。
 
+合码规则（等用户确认、列出所有改动、冲突展示）的单一事实来源是 `.claude/rules/merge-and-ship.md`，本文件只描述执行流程。
+
 ## 参数
 
 ```
@@ -77,16 +79,11 @@ git checkout main && git pull
 
 超时 10 分钟。
 
-**同步更新共享镜像的 worker**：如果 APP 是 `agent-service`，部署后必须同步 release 使用同一镜像的 worker：
-
-```bash
-make release APP=arq-worker LANE=prod VERSION=<新版本> GIT_REF=main
-make release APP=vectorize-worker LANE=prod VERSION=<新版本> GIT_REF=main
-```
+**一镜像多服务自动同步**：`make deploy` / `make release` 会按 Makefile 的 `SIBLINGS` 映射自动同步 release sibling 服务（channel-server → chat-response-worker，lark-service → lark-outbound），无需手动操作。agent-service 已无 sibling（vectorize-worker 随 v4 记忆整机删除）。
 
 ### 6. 清理当前分支的测试泳道
 
-只清理**当前分支对应的泳道**（即按分支名生成的 LANE：`/` → `-`，截前 20 字符），不要动其他泳道。
+只清理**当前分支对应的泳道**（与 deploy-test 相同的推导：`ppe-` + 分支名小写、`/` → `-`、截前 16 字符；或显式传入的 `LANE`），不要动其他泳道。
 
 ```bash
 make undeploy APP=<APP> LANE=<当前分支对应的泳道名>

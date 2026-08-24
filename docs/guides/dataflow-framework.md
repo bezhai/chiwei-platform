@@ -80,7 +80,7 @@ class SummaryFragment(Data):
 **Adoption mode** —— 接管**已存在的老表**(不想让 migrator 碰它)。写 `Meta.existing_table` + `Meta.dedup_column`(指向老表里的真实唯一列),runtime 的 `dedup_hash` / `version` 机制**整体让位**给老表的唯一约束。典型例子:
 
 ```python
-# app/domain/message.py
+# app/domain/example.py（示意，非真实文件）
 class Message(Data):
     message_id: Annotated[str, Key]
     user_id: str
@@ -175,7 +175,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 边在 `app/wiring/<topic>.py` 里声明,通过 side-effect import 生效:
 
 ```python
-# app/wiring/memory.py
+# app/wiring/example.py（示意，非真实文件）
 from app.domain.message import Message
 from app.domain.summary import SummaryFragment
 from app.nodes.summarize import summarize
@@ -216,7 +216,7 @@ durable(跨进程): emit Data ──RabbitMQ 发到 consumer 所在 App──▶
 
 经验规则:
 - 同一个 Deployment 内部的节点之间 → 默认边(省一次 MQ 跳转)。
-- 跨 Deployment(比如 vectorize-worker → chat-response-worker) → `.durable()`。
+- 跨 Deployment(比如 agent-service → chat-response-worker) → `.durable()`。
 - 做状态机、事件源、要回放、失败需进 DLQ 由运维 replay → `.durable()`。
 
 > **重试 + 失败终态（Phase 7a/7b 已上线）**：边级重试用 `.retry(...)`，framework 用 RabbitMQ delayed-message exchange 自己 republish，consumer 侧 `runtime_inflight` 状态机做 dedup + lease 续约。重试耗尽后按 `.on_error(...)` 决定走 DLQ / ignore / manual-review（详见 §2.7）。DLQ 不再是黑洞 —— `make dlq-replay` 一行重放，详见 `docs/runbooks/dlq-replay.md`。
@@ -376,7 +376,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 ### Step 3 — 声明 wire
 
 ```python
-# app/wiring/memory.py 追加:
+# app/wiring/example.py 追加（示意）:
 from app.domain.summary import SummaryFragment
 from app.nodes.summarize import summarize
 
@@ -395,10 +395,10 @@ wire(SummaryFragment).as_latest()                       # ← 不能省。没这
 # app/deployment.py 追加:
 from app.nodes.summarize import summarize
 
-bind(summarize).to_app("vectorize-worker")  # 和 vectorize/save_fragment 同 pod
+bind(summarize).to_app("agent-service")  # 默认部署，显式声明可读性
 ```
 
-普通业务作者只定义 Data / node / wire；placement 由 graph/framework owner 按既有域策略维护。不绑定 = 默认 `agent-service`(HTTP 主服务)。绑到 `vectorize-worker` 意味着在 worker pod 里跑,主 HTTP pod 不启动此 node。只有新增跨 Deployment 执行域或调整 worker 拓扑时才改 `app/deployment.py`。
+普通业务作者只定义 Data / node / wire；placement 由 graph/framework owner 按既有域策略维护。不绑定 = 默认 `agent-service`(HTTP 主服务)。当前所有 node 都跑在 agent-service 主进程；`to_app()` 机制保留给未来新增跨 Deployment 执行域时使用。只有调整 worker 拓扑时才改 `app/deployment.py`。
 
 ### Step 5 — 单元测试
 
@@ -451,7 +451,7 @@ async def test_summarize_returns_fragment():
 git push origin <branch>
 
 # 2. 部署(构建 + release)
-make deploy APP=vectorize-worker LANE=<your-lane> GIT_REF=<branch>
+make deploy APP=agent-service LANE=<your-lane> GIT_REF=<branch>
 
 # 3. 绑 dev bot 到泳道
 /ops bind bot dev <your-lane>
@@ -459,7 +459,7 @@ make deploy APP=vectorize-worker LANE=<your-lane> GIT_REF=<branch>
 # 4. 去飞书 dev bot 发消息
 
 # 5. 查日志验证 5 跳 + summarize 新跳
-make logs APP=vectorize-worker LANE=<your-lane> SINCE=5m
+make logs APP=agent-service LANE=<your-lane> SINCE=5m
 
 # 期望看到:
 # mq source received frame
@@ -929,14 +929,13 @@ async def vectorize(msg: Message) -> Fragment | None:
 
 | Pipeline | 入口 Source | wiring 文件 | 主要 @node | Deployment |
 |---|---|---|---|---|
-| **message → vectorize** | `Source.mq("vectorize")` | `wiring/memory.py` | hydrate_message → vectorize → save_fragment | vectorize-worker |
-| **chat 主链路** | `Source.mq("chat_request")` | `wiring/chat.py` | route_chat_node → chat_node (durable) → ChatResponseSegment Sink ← channel-server | agent-service |
+| **chat 主链路** | `Source.mq("chat_request")` | `wiring/chat.py` | route_chat_node → chat_node (durable) → ChatResponseSegment Sink → `chat_response_{channel}` | agent-service |
 | **safety check** | 由 chat_node 内部 emit | `wiring/safety.py` | run_pre_safety / run_post_safety (durable) → Recall Sink | agent-service |
-| **life cron 循环** | `Source.cron("* * * * *")` 等 | `wiring/life_dataflow.py` | MinuteTick / LightDayTick / GlimpseTick / HeavyReviewTick / DailyPlanTick → 各 fan_out → 业务 node | agent-service |
-| **memory debounce** | 由 chat 流程 emit | `wiring/memory_triggers.py` | DriftTrigger / AfterthoughtTrigger（`.debounce()` 合流） → drift_check / afterthought_check | agent-service |
-| **memory fragment/abstract vectorize** | `Source.mq("memory_fragment_vectorize")` / `Source.mq("memory_abstract_vectorize")` | `wiring/memory_vectorize.py` | vectorize_memory_fragment / vectorize_memory_abstract | vectorize-worker |
-| **agent tool events** | tool 调用触发 (transactional_emit) | `wiring/agent_tool_events.py` | AbstractMemoryCommitted → on_abstract_committed → MemoryAbstractRequest（再走 vectorize 队列） | agent-service |
-| **admin HTTP（运维触发）** | `Source.http("/admin/trigger-*")` | `wiring/admin.py` | trigger-life-engine-tick / trigger-glimpse / debug-glimpse / trigger-voice / trigger-schedule + Phase 7b 的 `/admin/dlq/*` | agent-service |
+| **world/life 闭环** | `Source.interval(10min)` + EventArrived | `wiring/life_dataflow.py` | WorldHeartbeatTick → world_tick；EventArrived (`.debounce()`) → life_wake_node；ScheduleReminderTick → life_schedule_reminder_node | agent-service |
+| **每日底料（眼睛）** | `Source.cron("0 4-23 * * *")` | `wiring/fetch_dataflow.py` | DailyMaterialsTick → daily_fetch_node（早退检查 → 跑眼睛 → 落 DailyMaterials） | agent-service |
+| **睡前回顾** | `Source.cron("0 5-10 * * *")` | `wiring/review_dataflow.py` | LifeDayReviewTick → day_review_sweep_node（逐 persona 对账「刚结束的生活日」） | agent-service |
+| **persona review** | `Source.cron("0 11 * * *")` | `wiring/persona_review_dataflow.py` | PersonaReviewTick → persona_review_sweep_node（周级幂等 + 每日补班） | agent-service |
+| **admin HTTP（运维触发）** | `Source.http("/admin/*")` | `wiring/admin.py` | admin_search + DLQ 端点（`/admin/dlq/inspect|requeue|dry-run|clear`） | agent-service |
 
 要看具体 wire / @node，去对应 `wiring/<file>.py` —— 每个文件就 30~80 行，wire 声明顺序 = 数据流顺序，读起来最快。
 
@@ -944,15 +943,14 @@ async def vectorize(msg: Message) -> Fragment | None:
 
 想快速建立体感,按下面顺序读(加起来 <200 行):
 
-1. `app/domain/message_request.py` —— 最简单的 Data(单字段)。
-2. `app/domain/message.py` —— adoption-mode Data + `from_cm` 模式。
-3. `app/domain/fragment.py` —— transient Data。
-4. `app/nodes/hydrate_message.py` —— 最短的 @node,只有 DB 查询 + 返回 Data。
-5. `app/nodes/vectorize.py` —— 标准 @node,两个 capability + 两次 early return。
-6. `app/nodes/save_fragment.py` —— 消费 transient Fragment、并行写两个 store。
-7. `app/wiring/memory.py` —— 整条 pipeline 的 wire 声明(18 行)。
-8. `app/deployment.py` —— 3 行 bind。
-9. `app/workers/runtime_entry.py` —— Worker 启动入口。
+1. `app/domain/chat_dataflow.py` —— ChatTrigger（transient）+ ChatRequest（durable，联合 Key 幂等）。
+2. `app/domain/safety.py` —— PreSafetyRequest / PostSafetyRequest / Recall，安全管线 Data。
+3. `app/nodes/chat_node.py` —— 主对话节点，标准 @node + LLM 调用。
+4. `app/nodes/safety.py` —— pre/post safety 节点，emit_and_wait + durable 混合模式。
+5. `app/wiring/chat.py` —— chat 主 pipeline 的 wire 声明（transient → durable → sink）。
+6. `app/wiring/life_dataflow.py` —— world/life 事件闭环，interval + debounce + cron 混合 Source。
+7. `app/deployment.py` —— placement bind（当前所有 node 默认 agent-service）。
+8. `app/workers/runtime_entry.py` —— Worker 启动入口。
 
 ### 源码参考点(不必记,需要时回查)
 

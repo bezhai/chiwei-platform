@@ -16,7 +16,7 @@
 
 ## 标准流程
 
-1. 部署改动的服务到独立泳道：`make deploy APP=<app> LANE=<lane>`（`<lane>` 按上方规则选 `ppe-<name>` 或 `coe-<name>`）
+1. 部署改动的服务到独立泳道：`make deploy APP=<app> LANE=<lane>`（`<lane>` 按上方规则选 `ppe-<name>` 或 `coe-<name>`）。lark-service 会自动同步 release lark-outbound 到同一泳道。
 2. 如果走 coe：确认 schema 已建 + 必要种子数据已复刻到 chiwei-test
 3. 绑定 dev bot：`/ops bind TYPE=bot KEY=dev LANE=<lane>`
 4. 在飞书 dev bot 发消息验证
@@ -26,24 +26,26 @@
 
 ## 消息流转链路
 
+飞书入站走 lark-service websocket 长连，**只有 prod 部署持连**（`LARK_DIRECT_INGRESS=true`）。泳道部署不连 websocket，靠泳道信封收消息：
+
 ```
-飞书消息
-  → channel-proxy-prod  (/webhook/{bot}/event, lane_routing 查询)
-  → channel-server-{lane}  (/api/internal/lark-event, x-lane 注入 context)
-  → agent-service-{lane} (POST /chat/sse, LaneRouter 根据 context lane 路由)
-  → chat_response_{lane} 队列
-  → chat-response-worker → 飞书回复
+飞书 --websocket--> lark-service(prod)
+  → LaneBindingResolver 查 lane_routing 表（chat 优先，bot 其次）
+  → 命中泳道：封装信封投递到 inbound_lane.lark.<lane> 队列
+  → lark-service(<lane>) 消费信封（不做审计落库，按 channel+事件+消息+lane 去重）
+  → agent-service(<lane>)（LaneRouter 按 context lane 路由）
+  → chat_response_lark_<lane> 队列
+  → lark-outbound(<lane>) → 飞书回复
 ```
 
-## channel-proxy 自身测试（特殊流程）
+未绑定泳道的消息（含未绑定时的 dev bot）走 prod 全链路。
 
-channel-proxy 是飞书 webhook 入口，无法通过泳道路由测试自身。**仅 channel-proxy 允许使用临时 Ingress 劫持流量测试，其他服务禁止。**
+## 泳道测不到的部分
 
-步骤：
-1. 部署到独立泳道
-2. 创建临时 Ingress（priority: 100）劫持 `/webhook/` 到测试泳道
-3. 飞书发消息验证
-4. **立即删除临时 Ingress**
-5. 下掉测试泳道
+泳道部署只覆盖**信封消费之后**的处理路径（事件处理、agent 调用、出站）。以下逻辑只在 prod 跑，泳道测不到：
 
-**风险**：劫持期间所有飞书 webhook 都走测试泳道，务必快速验证后立即切回。
+- websocket 接收与飞书开放平台的连接管理
+- 事件投影（原始报文 → 通用口径）
+- 泳道判定（LaneBindingResolver 的绑定查询与信封投递决策）
+
+改动这些入站逻辑时，泳道验证通过后仍需在 prod 灰度观察，不能只依赖泳道测试结论。

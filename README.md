@@ -39,7 +39,8 @@ packages/
 - [docs/build-convention.md](docs/build-convention.md) — 构建约定与新服务接入步骤
 - [docs/config-management.md](docs/config-management.md) — ConfigBundle、环境变量、Dynamic Config 与最终生效优先级
 - [docs/ci-pipeline-roadmap.md](docs/ci-pipeline-roadmap.md) — CI 流水线规划
-- `docs/guides/` 是 dataflow 框架文档，`docs/runbooks/` 是操作手册，`docs/archive/` 是历史存档（含旧版泳道路由设计）
+- [docs/plan/](docs/plan/README.md) — 设计文档索引（spec、plan、handoff）
+- `docs/specs/` 是已落地的功能 spec，`docs/guides/` 是 dataflow 框架文档，`docs/runbooks/` 是操作手册，`docs/archive/` 是历史存档（含旧版泳道路由设计）
 
 ## 快速开始
 

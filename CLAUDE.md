@@ -118,7 +118,9 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 
 ## 开发流程
 
-**禁止直接在 main 分支上修改代码。** 分支由用户切好递给 Claude（worktree 不归 Claude 管），Claude 接到需求后按下面主线推进：
+**禁止直接在 main 分支上修改代码。** 分支由用户切好递给主会话（worktree 不归 AI 管），主会话接到需求后按下面主线推进。
+
+以下流程以 Claude Code 机制描述，适用于所有 AI 工具。Codex 作为主会话时的机制映射（子 agent、slash command、安全 hook 等）见 `AGENTS.md`。
 
 0. **重活优先委派子 agent（判断性建议）**：主会话可以直接读写本仓库文件，但**重活应优先委派子 agent**——大范围探索、大量 grep / 读多文件、并行实现这类会大量消耗上下文的活，派子 agent 做、主会话只接结论与 diff + 证据，目的是保护主会话的上下文。轻活（看一两个文件、小改动）主会话自己动手即可。按规模和上下文成本判断，不是机械强制。
 1. **判断简单 / 复杂**：typo / rename / 一两行无行为变化的改动，主会话可直接做，跳过下面的 spec / review 流程。其他走完整流程。
@@ -147,7 +149,7 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 - **general-purpose 子 agent（并行）**：处理大批量 / 可并行的仓库文件修改的推荐工具。**要并行就先 map 再 parallel**：并行前先派一个 Explore 子 agent 按"各 task 方法实际能触达哪些文件"摸出真实分区图（不是按声明产出算），无文件冲突的 task **鼓励并行**派多个子 agent；有冲突 / 有依赖的串行。每个 agent 拿一条 task 自己想细节、自己走 TDD 红-绿-重构（先写测试再写实现）、自己跑验证、自己报产出。规模小的改动主会话也可以自己动手。
 - **应用 reviewer 反馈**：采纳 codex 反馈去改 spec 或代码，改动大就委派子 agent，改动小主会话自己改即可。
 - **跨需求并行**：用 worktree + 多会话，不在一个会话里塞多个独立 feature。
-- **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/codex-collaboration.md`。
+- **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/agent-collaboration.md`。
 
 ### 上线前必须完成的检查（TODO）
 
@@ -163,10 +165,10 @@ ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-
 部署命令必须显式写 `GIT_REF`，如 `make deploy APP=channel-server GIT_REF=main`，禁止省略。
 
 ```bash
-make deploy APP=<app> [LANE=dev] [BUMP=minor] [VERSION=2.0.0.1] [GIT_REF=main]  # 构建 → 等待 → 发布
+make deploy APP=<app> [LANE=ppe-<name>] [BUMP=minor] [VERSION=2.0.0.1] [GIT_REF=main]  # 构建 → 等待 → 发布
 make self-deploy [BUMP=minor]                                      # paas-engine 蓝绿自部署
 make release APP=<app> LANE=prod VERSION=1.0.0.5                   # 仅发布（不构建，用于回滚）
-make undeploy APP=<app> LANE=dev                                   # 删除 Release
+make undeploy APP=<app> LANE=ppe-<name>                            # 删除 Release
 make status [APP=xxx]                                              # 查看状态
 make latest-build APP=<app>                                        # 最近成功构建
 ```
@@ -176,7 +178,7 @@ make latest-build APP=<app>                                        # 最近成�
 1. **禁止未经泳道验证直接部署到 prod。** 任何代码改动，无论多小（"就改了一行"不是理由），必须先部署到泳道、用真实流量或 rebuild 验证通过，再走 `/ship` 上线。唯一例外：用户明确说"直接上"。
 2. **部署 = 杀 Pod = 中断所有异步任务。** 部署前必须确认没有正在跑的后台任务（rebuild、afterthought 等）。如果有，要么等它跑完，要么告知用户会中断。
 3. **rebuild 等批量操作的参数（persona、chat_id、时间范围）必须由用户指定。** 不要自己填默认值，不要"顺便"扩大范围。
-4. **一镜像多服务同步。** 部署 channel-server 后必须同步 release chat-response-worker；部署 lark-service 后必须同步 release lark-outbound。
+4. **一镜像多服务同步。** `make deploy` / `make release` 按 Makefile 的 `SIBLINGS` 映射自动同步 release sibling（channel-server → chat-response-worker，lark-service → lark-outbound），无需手动操作。
 
 ## AI 行为约束
 
