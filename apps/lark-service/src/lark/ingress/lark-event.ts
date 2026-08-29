@@ -19,6 +19,14 @@ export interface LarkEvent {
     traceId?: string;
     /** 这条事件该在哪条泳道处理。prod 不填。 */
     lane?: string;
+    /**
+     * 这条事件是另一个进程判定过泳道之后交接过来的。
+     *
+     * 只有泳道信封那条入口会把它置上，作用是让投影层跳过泳道判定：泳道的 Service 不
+     * 存在时 sidecar 会把交接打回 prod 自己，再判一次就会算出同一条泳道、再投一次，
+     * 无限自投。飞书直连的两个入口是第一次见到这条事件，不带这个标记。
+     */
+    handedOff?: boolean;
 }
 
 /**

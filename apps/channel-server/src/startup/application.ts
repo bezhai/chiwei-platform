@@ -1,12 +1,9 @@
 import { DatabaseManager } from './database';
 import { HttpServerManager, ServerConfig } from './server';
 import { botDirectory } from '@inner/shared/bot';
-import { rabbitmqClient, getLane } from '@inner/shared/mq';
-import { startInboundLaneConsumer } from '@integrations/inbound-lane-consumer';
+import { rabbitmqClient } from '@inner/shared/mq';
 import '@plugins/index';
 import {
-    channelRuntimes,
-    handleInboundLaneEnvelope,
     initializeChannelRuntimes,
     runChannelInitializers,
     shutdownChannelRuntimes,
@@ -58,31 +55,14 @@ export class ApplicationManager {
         await rabbitmqClient.declareTopology();
         console.info('RabbitMQ connected!');
 
-        // 5.5 lane channel-server 起入站信封消费者（处理层分流接收端）。
-        // 仅 lane 部署（getLane() 非空）才起：消费 prod 投来的本 lane 消息，走与现状
-        // 一致的入站后半段。prod 部署不起（prod 不消费 inbound_lane.*，§4.2）。与
-        // dispatch flag 无关——那个 flag 控制 prod 是否分流，消费端只要是 lane 部署就
-        // 该待命（flag off 时队列为空，消费者空转无害）。
+        // 6. 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
         //
-        // 传进去的是"本进程**能**处理哪些 channel"（注册了入站信封处理的 runtime），
-        // 不是"拥有哪些"。拥有集合由消费者在这个范围内按 dynamic config 现读收窄——
-        // 移交一个 channel 不必等它的代码删掉，也不必重启进程。
-        const lane = getLane();
-        if (lane) {
-            const handles = channelRuntimes()
-                .filter((runtime) => runtime.handleInboundLaneEnvelope)
-                .map((runtime) => runtime.channel);
-            await startInboundLaneConsumer(lane, handleInboundLaneEnvelope, { handles });
-            console.info(
-                `[inbound-lane] consumer started for lane=${lane} ` +
-                    `handles=${handles.join(',') || '(none)'}`,
-            );
-        }
-
-        // 5.6 各 channel runtime 自己决定是否启动主动入口（如平台 WS）。
+        // 泳道交接的接收端不在这里起：它是一条 HTTP 路由，由各 runtime 的
+        // registerHttpIngress 跟自己的原始入站端点一起挂上，**每个部署都挂**（prod 也
+        // 挂）—— 泳道的 Service 不存在时 sidecar 会把交接打回 prod 自己。
         await startChannelDirectIngresses(botDirectory.getBotsByInitType('websocket'));
 
-        // 6. 显示当前加载的机器人配置
+        // 7. 显示当前加载的机器人配置
         this.logBotConfigurations();
 
         console.info('Application initialization completed!');

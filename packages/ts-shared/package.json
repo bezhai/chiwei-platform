@@ -21,7 +21,6 @@
     "./mq": "./src/mq/client.ts",
     "./mq-context": "./src/mq/context.ts",
     "./lane-policy": "./src/lane-policy.ts",
-    "./inbound-lane-claim": "./src/inbound-lane-claim.ts",
     "./lane-binding": "./src/lane-binding/index.ts"
   },
   "scripts": {

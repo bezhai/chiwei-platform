@@ -354,10 +354,11 @@ async function project(
     tables: MemoryLarkTables,
     event: LarkMessageEvent = larkMessageEvent(),
     overrides: Partial<LarkInboundDeps> = {},
+    eventOverrides: Partial<LarkEvent> = {},
 ) {
     const wired = deps(tables, overrides);
     const outcome = await context.run(context.createContext('trace-1'), () =>
-        projectLarkInbound(wired.deps, reading(event), larkEvent(event)),
+        projectLarkInbound(wired.deps, reading(event), { ...larkEvent(event), ...eventOverrides }),
     );
     return { outcome, handedOff: wired.handedOff };
 }
@@ -1125,8 +1126,59 @@ describe('泳道分叉', () => {
                 lane: 'ppe-x',
                 bot_name: BOT_NAME,
                 params: event,
+                // 接收端认这个标记来停止二次判定。泳道缺席时 sidecar 把请求打回 prod
+                // 自己，不带这个标记就是无限自投。
+                handed_off: true,
             },
         ]);
+    });
+
+    // 落回 prod 的那一支：信封说 ppe-x，处理它的却是 prod 进程，绑定也还指向 ppe-x。
+    // 只有信封上的「已交接」标记能挡住第二次投递。
+    it('交接来的事件不再判泳道，即使本进程是 prod 且绑定仍指向那条泳道', async () => {
+        const tables = new MemoryLarkTables();
+        let asked = 0;
+        const { outcome, handedOff } = await project(
+            tables,
+            larkMessageEvent(),
+            {
+                laneDispatchEnabled: async () => true,
+                laneOf: async () => {
+                    asked += 1;
+                    return 'ppe-x';
+                },
+            },
+            { handedOff: true, lane: 'ppe-x' },
+        );
+
+        expect(asked).toBe(0);
+        expect(handedOff).toEqual([]);
+        expect(outcome).toMatchObject({ kind: 'recorded' });
+    });
+
+    // 交接是一次跨服务调用，而这把锁是 Redis 的、prod 与泳道共用同一个 Redis。在锁里
+    // 等交接返回的话，接收端重走投影去抢同一个 om_id 的锁，两边就互等到窗口超时。所以
+    // 锁只覆盖投影与判定，交接在锁外做。
+    it('交接发生在锁释放之后', async () => {
+        const tables = new MemoryLarkTables();
+        const trace: string[] = [];
+
+        await project(tables, larkMessageEvent(), {
+            ...toLane,
+            withMessageLock: async (omId, run) => {
+                trace.push(`acquire:${omId}`);
+                try {
+                    return await run();
+                } finally {
+                    trace.push(`release:${omId}`);
+                }
+            },
+            handOffToLane: async () => {
+                trace.push('hand-off');
+            },
+        });
+
+        expect(trace).toEqual(['acquire:om_1', 'release:om_1', 'hand-off']);
     });
 
     it('算出来的泳道就是本进程时留在本地', async () => {

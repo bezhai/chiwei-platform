@@ -1,14 +1,35 @@
-// 交接的投递侧。判断（该走哪条泳道）在 chooseInboundLane，投递（写进哪个队列）在
-// handOffToInboundLane —— 两件事分开测，因为一个是纯决策、一个是 MQ 的具体形态。
+// 交接的投递侧。判断（该走哪条泳道）在 chooseInboundLane，投递（打哪个端点、怎么算
+// 失败）在 handOffToInboundLane —— 两件事分开测，因为一个是纯决策、一个是 HTTP 的
+// 具体形态。
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
+import { context } from '@inner/shared/middleware';
 
+import { register } from '../../server/metrics';
+import { LARK_MESSAGE_LOCK } from '../projection/message-lock';
 import {
+    LANE_HANDOFF_TIMEOUT_MS,
     chooseInboundLane,
     handOffToInboundLane,
-    INBOUND_LANE_CHANNEL_PUBLISH_FLAG,
+    type LaneHandoffFetcher,
 } from './lane-handoff';
-import type { InboundLaneEnvelope } from './lane-queue';
+import { LANE_INBOUND_PATH } from './lane-inbound';
+import type { InboundLaneEnvelope } from './lane-envelope';
+
+// 指标快照：`{channel}/{target_lane}/{outcome}` → 计数。断言用前后差值，别的用例也
+// 会打点到同一个 registry。
+async function handoffCounts(): Promise<Record<string, number>> {
+    const metric = register.getSingleMetric('lane_handoff_total');
+    if (!metric) return {};
+    const snapshot = (await metric.get()) as unknown as {
+        values: { labels: Record<string, string>; value: number }[];
+    };
+    const out: Record<string, number> = {};
+    for (const v of snapshot.values) {
+        out[`${v.labels.channel}/${v.labels.target_lane}/${v.labels.outcome}`] = v.value;
+    }
+    return out;
+}
 
 function envelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnvelope {
     return {
@@ -19,14 +40,26 @@ function envelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLaneEnve
         lane: 'ppe-x',
         bot_name: 'chiwei',
         params: { message: { message_id: 'om_1' } },
+        handed_off: true,
         ...overrides,
     };
 }
+
+// 接收端收到信封后重走投影，第一件事就是抢同一条 om_id 的投影锁，最长能在锁上排
+// LARK_MESSAGE_LOCK.waitTimeoutMs 才轮到自己开始干活。投递方的超时如果小于这个窗口，
+// 只要接收端在排队（正常并发，或前一个持有者 release 失败留下的残留租约），投递方就
+// 必定先超时 —— 而交接不重试、飞书早已应答，这条消息就此静默消失。
+describe('交接超时必须盖得住接收端的锁等待窗口', () => {
+    it('投递超时严格大于投影锁的等待窗口', () => {
+        expect(LANE_HANDOFF_TIMEOUT_MS).toBeGreaterThan(LARK_MESSAGE_LOCK.waitTimeoutMs);
+    });
+});
 
 describe('chooseInboundLane', () => {
     it('开关关着时不算泳道，本地处理', async () => {
         let asked = 0;
         const choice = await chooseInboundLane({
+            handedOff: false,
             dispatchEnabled: false,
             currentLane: 'prod',
             laneOf: async () => {
@@ -40,10 +73,11 @@ describe('chooseInboundLane', () => {
     });
 
     // 泳道部署拿到的信封已经被 prod 判过一次，信封里的 lane 才是权威。再判一次会
-    // 在绑定刚改过时把消息二次转投，甚至投进没人消费的 inbound_lane.prod。
+    // 在绑定刚改过时把消息二次转投到别的泳道。
     it('本进程不是 prod 时不再判，直接本地处理', async () => {
         let asked = 0;
         const choice = await chooseInboundLane({
+            handedOff: false,
             dispatchEnabled: true,
             currentLane: 'ppe-x',
             laneOf: async () => {
@@ -58,6 +92,7 @@ describe('chooseInboundLane', () => {
 
     it('算出来就是本进程的泳道时本地处理，绝不投给自己', async () => {
         const choice = await chooseInboundLane({
+            handedOff: false,
             dispatchEnabled: true,
             currentLane: 'prod',
             laneOf: async () => 'prod',
@@ -68,6 +103,7 @@ describe('chooseInboundLane', () => {
 
     it('算出来是别的泳道时交出去', async () => {
         const choice = await chooseInboundLane({
+            handedOff: false,
             dispatchEnabled: true,
             currentLane: 'prod',
             laneOf: async () => 'ppe-x',
@@ -75,144 +111,216 @@ describe('chooseInboundLane', () => {
 
         expect(choice).toEqual({ handOff: true, lane: 'ppe-x' });
     });
-});
 
-// ⚠️ 跨服务契约：channel-server 的 inbound-lane-flag.ts 用同名 key（那边有一条同样
-// 写死字面量的断言）。改名只改一边的症状是切换期间一个服务投新队列、另一个投旧队列。
-describe('INBOUND_LANE_CHANNEL_PUBLISH_FLAG', () => {
-    it('是 channel-server 读的那个同名 key', () => {
-        expect(INBOUND_LANE_CHANNEL_PUBLISH_FLAG).toBe('enable_inbound_lane_channel_publish');
+    // 泳道的 Service 不存在时 sidecar 把请求打回 prod 自己，于是 currentLane 又是
+    // 'prod'、绑定又指向那条泳道。没有这个分支就是无限自投。
+    it('已经交接过的信封不再判泳道，哪怕本进程是 prod', async () => {
+        let asked = 0;
+        const choice = await chooseInboundLane({
+            handedOff: true,
+            dispatchEnabled: true,
+            currentLane: 'prod',
+            laneOf: async () => {
+                asked += 1;
+                return 'ppe-x';
+            },
+        });
+
+        expect(choice).toEqual({ handOff: false, lane: 'prod' });
+        expect(asked).toBe(0);
     });
 });
+
 
 describe('handOffToInboundLane', () => {
-    /** 默认自动确认；传 'manual' 时由测试自己决定什么时候确认。 */
-    function amqpDouble(mode: 'auto' | 'manual' = 'auto') {
-        const declared: Array<{ queue: string; options: unknown }> = [];
-        const sent: Array<{ queue: string; body: unknown; options: unknown }> = [];
-        let confirm: ((error: Error | null) => void) | undefined;
-        return {
-            declared,
-            sent,
-            confirm: (error: Error | null = null) => confirm!(error),
-            amqp: {
-                assertQueue: async (queue: string, options: unknown) => {
-                    declared.push({ queue, options });
-                },
-                sendToQueue: (
-                    queue: string,
-                    body: Buffer,
-                    options: unknown,
-                    confirmed: (error: Error | null) => void,
-                ) => {
-                    sent.push({ queue, body: JSON.parse(body.toString()), options });
-                    confirm = confirmed;
-                    if (mode === 'auto') confirmed(null);
-                    return true;
-                },
+    const SECRET = 'inner-secret';
+
+    /**
+     * LaneRouter 的替身。**必须在被调用的那一刻从 AsyncLocal context 读 lane**：真的
+     * LaneRouter 就是这么拼 `x-ctx-lane` 的，换成"构造时读一次"就测不出投递方有没有
+     * 把上下文切到目标泳道。
+     */
+    function router(respond: (init?: RequestInit) => Promise<Response>) {
+        const calls: Array<{
+            service: string;
+            path: string;
+            headers: Record<string, string>;
+            body: unknown;
+            signal?: AbortSignal | null;
+        }> = [];
+        const fetcher: LaneHandoffFetcher = {
+            fetch: async (service, path, init) => {
+                const lane = context.getLane();
+                calls.push({
+                    service,
+                    path,
+                    headers: {
+                        ...(lane ? { 'x-ctx-lane': lane } : {}),
+                        ...((init?.headers as Record<string, string>) ?? {}),
+                    },
+                    body: init?.body ? JSON.parse(init.body as string) : undefined,
+                    signal: init?.signal as AbortSignal | undefined,
+                });
+                return respond(init);
             },
         };
+        return { calls, fetcher };
     }
 
-    it('投进目标泳道的队列，信封原样序列化', async () => {
-        const { amqp, sent } = amqpDouble();
+    const handled = (lane: string) =>
+        new Response(JSON.stringify({ success: true, handled_by_lane: lane }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+        });
+
+    const ok = () => router(async () => handled('ppe-x'));
+
+    it('把信封 POST 到 lark-service 的交接端点，带内网 Bearer 口令', async () => {
+        const { calls, fetcher } = ok();
+
+        await handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope());
+
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.service).toBe('lark-service');
+        expect(calls[0]!.path).toBe(LANE_INBOUND_PATH);
+        expect(calls[0]!.headers.Authorization).toBe(`Bearer ${SECRET}`);
+    });
+
+    it('信封原样序列化，「已交接」标记一起过去', async () => {
+        const { calls, fetcher } = ok();
         const env = envelope();
 
-        await handOffToInboundLane(amqp, env, false);
+        await handOffToInboundLane({ fetcher, innerSecret: SECRET }, env);
 
-        expect(sent).toHaveLength(1);
-        expect(sent[0]!.queue).toBe('inbound_lane.ppe-x');
-        expect(sent[0]!.body).toEqual(env as unknown as Record<string, unknown>);
+        expect(calls[0]!.body).toEqual(env as unknown as Record<string, unknown>);
     });
 
-    // 决策九的第二步：消费侧双订阅上线之后才切生产者。切过来之后信封进按 channel
-    // 分区的队列，对面服务再也不会抢到它。
-    it('开关打开后投进按 channel 分区的队列', async () => {
-        const { amqp, sent, declared } = amqpDouble();
+    // 这一条是选路的全部：sidecar 只看 x-ctx-lane。投递方在 prod 上跑，本进程的上下文
+    // 说的是 prod —— 照它发就是把消息打给自己。语义与 qq-gateway 的 selfLane 相反。
+    it('x-ctx-lane 是目标泳道，不是本进程的泳道', async () => {
+        const { calls, fetcher } = ok();
 
-        await handOffToInboundLane(amqp, envelope(), true);
-
-        expect(sent[0]!.queue).toBe('inbound_lane.lark.ppe-x');
-        // 新队列同样 fail-closed：配了 TTL 就会过期跑回 prod。
-        expect(declared).toEqual([
-            { queue: 'inbound_lane.lark.ppe-x', options: { durable: true } },
-        ]);
-    });
-
-    it('按信封自己的 channel 分区，不是按写死的飞书', async () => {
-        const { amqp, sent } = amqpDouble();
-
-        await handOffToInboundLane(amqp, envelope({ channel: 'qq' }), true);
-
-        expect(sent[0]!.queue).toBe('inbound_lane.qq.ppe-x');
-    });
-
-    // 装在里面的是「已经判定该在这条泳道处理」的消息。配 TTL 就是让它过期跑回
-    // prod，等于拿泳道的改动去污染线上；配死信则会因为没有 prod 基队列直接丢。
-    it('队列是 durable 的，且不配 TTL、不配死信', async () => {
-        const { amqp, declared } = amqpDouble();
-
-        await handOffToInboundLane(amqp, envelope(), false);
-
-        expect(declared).toEqual([{ queue: 'inbound_lane.ppe-x', options: { durable: true } }]);
-    });
-
-    it('消息本身是持久化的', async () => {
-        const { amqp, sent } = amqpDouble();
-
-        await handOffToInboundLane(amqp, envelope(), false);
-
-        expect(sent[0]!.options).toEqual({ persistent: true });
-    });
-
-    // codex 指出的破口：persistent 只约束「broker 收到之后要落盘」，**不证明
-    // broker 收到了**。普通 channel 的 sendToQueue 写进本地缓冲就返回 true，连接在
-    // 那一刻断掉的话消息静默没了 —— 而分叉那一支紧接着 return，本地没有任何账可以
-    // 用来恢复。所以必须等 broker 的确认。
-    it('broker 确认之前不算投递成功', async () => {
-        const { amqp, confirm } = amqpDouble('manual');
-        let done = false;
-
-        const handedOff = handOffToInboundLane(amqp, envelope(), false).then(() => {
-            done = true;
-        });
-        await Bun.sleep(1);
-        expect(done).toBe(false);
-
-        confirm(null);
-        await handedOff;
-        expect(done).toBe(true);
-    });
-
-    // 确认失败要走可重试路径（往上抛），不能当成功。
-    it('broker 拒收或连接断掉时抛错', async () => {
-        const { amqp, confirm } = amqpDouble('manual');
-
-        const handedOff = handOffToInboundLane(amqp, envelope(), false);
-        // 队列声明先于发送，所以要等它落地才拿得到确认回调
-        await Bun.sleep(1);
-        confirm(new Error('channel closed'));
-
-        await expect(handedOff).rejects.toThrow(/inbound_lane\.ppe-x.*channel closed/);
-    });
-
-    // 声明失败就直接抛，绝不「先发了再说」—— 队列参数不对时消息会落进一个语义
-    // 不对的队列里。
-    it('队列声明失败时不发消息', async () => {
-        const { sent } = amqpDouble();
-        const amqp = {
-            assertQueue: async () => {
-                throw new Error('channel closed');
-            },
-            sendToQueue: () => {
-                sent.push({ queue: '', body: null, options: null });
-                return true;
-            },
-        };
-
-        await expect(handOffToInboundLane(amqp, envelope(), false)).rejects.toThrow(
-            'channel closed',
+        await context.run(context.createContext('trace-outer', { lane: 'prod' }), () =>
+            handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope({ lane: 'ppe-x' })),
         );
-        expect(sent).toEqual([]);
+
+        expect(calls[0]!.headers['x-ctx-lane']).toBe('ppe-x');
+    });
+
+    // 投递方不重试，"投出去了"必须等于"对面处理完了"。非 2xx 当成功就是一条静默丢失。
+    it('非 2xx 一律抛错，且说清楚是哪条消息、哪条泳道', async () => {
+        const { fetcher } = router(async () => new Response('boom', { status: 500 }));
+
+        await expect(
+            handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope()),
+        ).rejects.toThrow(/500.*ppe-x.*cm_1|ppe-x.*cm_1.*500/s);
+    });
+
+    it('4xx 同样算投递失败', async () => {
+        const { fetcher } = router(async () => new Response('nope', { status: 400 }));
+
+        await expect(
+            handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope()),
+        ).rejects.toThrow(/400/);
+    });
+
+    it('连接失败抛错', async () => {
+        const { fetcher } = router(async () => {
+            throw new Error('ECONNREFUSED');
+        });
+
+        await expect(
+            handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope()),
+        ).rejects.toThrow(/ECONNREFUSED/);
+    });
+
+    // 必须有显式上限：接收端是同步处理，卡住的话没有超时就是投递方跟着一起卡死。
+    it('超时抛错，而且请求真的被取消掉', async () => {
+        let aborted = false;
+        const { fetcher } = router(
+            (init) =>
+                new Promise<Response>((_resolve, reject) => {
+                    init?.signal?.addEventListener('abort', () => {
+                        aborted = true;
+                        reject((init.signal as AbortSignal).reason);
+                    });
+                }),
+        );
+
+        await expect(
+            handOffToInboundLane({ fetcher, innerSecret: SECRET, timeoutMs: 5 }, envelope()),
+        ).rejects.toThrow(/timed out after 5ms/);
+        expect(aborted).toBe(true);
+    });
+
+    // 落回 prod 与送达泳道在投递方眼里一模一样（都是 200），所以必须靠接收端回报的
+    // 泳道分辨。分不出来的话，"泳道漏部署了"这件事永远查不出来。
+    describe('投递结果可观测', () => {
+        it('送达目标泳道时记一条 info，不告警', async () => {
+            const info = spyOn(console, 'info').mockImplementation(() => {});
+            const warn = spyOn(console, 'warn').mockImplementation(() => {});
+            try {
+                const { fetcher } = router(async () => handled('ppe-x'));
+                await handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope());
+
+                expect(info.mock.calls.flat().join(' ')).toContain('ppe-x');
+                expect(warn).not.toHaveBeenCalled();
+            } finally {
+                info.mockRestore();
+                warn.mockRestore();
+            }
+        });
+
+        it('落回 prod 时告警，并说出信封本来要去哪条泳道', async () => {
+            const warn = spyOn(console, 'warn').mockImplementation(() => {});
+            try {
+                const { fetcher } = router(async () => handled('prod'));
+                await handOffToInboundLane({ fetcher, innerSecret: SECRET }, envelope());
+
+                const said = warn.mock.calls.flat().join(' ');
+                expect(said).toContain('ppe-x');
+                expect(said).toContain('prod');
+            } finally {
+                warn.mockRestore();
+            }
+        });
+
+        // 日志只能人去 grep，告不了警。三种结局各记一个 outcome，"绑定指向的泳道没
+        // 部署"才有可能变成一条告警规则而不是等人发现改动没生效。
+        it('三种结局各记一次 lane_handoff_total', async () => {
+            const info = spyOn(console, 'info').mockImplementation(() => {});
+            const warn = spyOn(console, 'warn').mockImplementation(() => {});
+            try {
+                const before = await handoffCounts();
+
+                await handOffToInboundLane(
+                    { fetcher: router(async () => handled('ppe-x')).fetcher, innerSecret: SECRET },
+                    envelope(),
+                );
+                await handOffToInboundLane(
+                    { fetcher: router(async () => handled('prod')).fetcher, innerSecret: SECRET },
+                    envelope(),
+                );
+                await expect(
+                    handOffToInboundLane(
+                        {
+                            fetcher: router(async () => new Response('nope', { status: 503 }))
+                                .fetcher,
+                            innerSecret: SECRET,
+                        },
+                        envelope(),
+                    ),
+                ).rejects.toThrow();
+
+                const after = await handoffCounts();
+                const rose = (key: string) => (after[key] ?? 0) - (before[key] ?? 0);
+                expect(rose('lark/ppe-x/lane')).toBe(1);
+                expect(rose('lark/ppe-x/fallback')).toBe(1);
+                expect(rose('lark/ppe-x/error')).toBe(1);
+            } finally {
+                info.mockRestore();
+                warn.mockRestore();
+            }
+        });
     });
 });

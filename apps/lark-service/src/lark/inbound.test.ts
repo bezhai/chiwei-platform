@@ -1,19 +1,31 @@
-// 三个入口，一层解析。本文件是这句话的判据：webhook、长连、泳道队列各走各的传输，
-// 但同一条飞书消息经过它们之后，交到下游手里的领域对象必须一模一样。
+// 三个入口，一层解析。本文件是这句话的判据：webhook、长连、泳道交接的 HTTP 各走各的
+// 传输，但同一条飞书消息经过它们之后，交到下游手里的领域对象必须一模一样。
 
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import type { LaneClaim } from '@inner/shared/inbound-lane-claim';
 import { context } from '@inner/shared/middleware';
 import type { BotConfig } from '@inner/shared/entities';
 import type { EventDispatcher } from '@larksuiteoapi/node-sdk';
 
 import { createLarkInbound, type LarkInboundPorts } from './inbound';
 import type { LarkEvent } from './ingress/lark-event';
-import type { InboundLaneEnvelope, LaneChannel } from './ingress/lane-queue';
+import { LANE_INBOUND_PATH } from './ingress/lane-inbound';
+import type { InboundLaneEnvelope } from './ingress/lane-envelope';
 import type { LarkWebSocketClient } from './ingress/websocket';
 import type { LarkMessageReading } from './message/read-message-event';
+
+const INNER_SECRET = 'inner-secret-for-tests';
+const originalSecret = process.env.INNER_HTTP_SECRET;
+
+beforeAll(() => {
+    process.env.INNER_HTTP_SECRET = INNER_SECRET;
+});
+
+afterAll(() => {
+    if (originalSecret === undefined) Reflect.deleteProperty(process.env, 'INNER_HTTP_SECRET');
+    else process.env.INNER_HTTP_SECRET = originalSecret;
+});
 
 // 生产上每个飞书应用都开了消息加密（larkCredentials 也要求 encrypt_key 非空），
 // 所以这里走的是真实形态：报文加密、由 SDK 解密。
@@ -90,6 +102,7 @@ function build(bots: BotConfig[] = [bot()]) {
     const recorded: unknown[] = [];
     const ports: LarkInboundPorts = {
         roster: { getAllBotConfigs: () => bots },
+        lane: 'ppe-x',
         personaName: (personaId) => (personaId === 'p_chiwei' ? '赤尾' : null),
         record: async (payload) => void recorded.push(payload),
         onMessage: async (reading, event) => {
@@ -174,8 +187,26 @@ function laneEnvelope(overrides: Partial<InboundLaneEnvelope> = {}): InboundLane
         lane: 'ppe-x',
         bot_name: 'chiwei',
         params: { ...LARK_MESSAGE, app_id: 'cli_chiwei', event_type: 'im.message.receive_v1' },
+        handed_off: true,
         ...overrides,
     };
+}
+
+/** 入口三：prod 交接过来的一次内部 HTTP。 */
+async function throughLaneHttp(env: unknown = laneEnvelope()) {
+    const built = build();
+    const app = new Hono();
+    built.inbound.registerLaneInbound(app);
+
+    const res = await app.request(LANE_INBOUND_PATH, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${INNER_SECRET}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(env),
+    });
+    return { ...built, status: res.status };
 }
 
 async function throughWebhook(bots?: BotConfig[]) {
@@ -215,61 +246,6 @@ async function throughWebSocket() {
     return built;
 }
 
-function laneChannel() {
-    const consumers = new Map<
-        string,
-        (msg: { content: Buffer; fields?: { redelivered?: boolean } } | null) => Promise<void>
-    >();
-    const acked: unknown[] = [];
-    const nacked: Array<{ requeue: boolean }> = [];
-    const amqp: LaneChannel = {
-        assertQueue: async () => {},
-        prefetch: async () => {},
-        consume: async (queue, handler) => {
-            consumers.set(queue, handler);
-            return {};
-        },
-        ack: (msg) => void acked.push(msg),
-        nack: (_msg, _allUpTo, requeue) => void nacked.push({ requeue }),
-    };
-    return {
-        amqp,
-        acked,
-        nacked,
-        subscribed: () => [...consumers.keys()],
-        push: async (env: unknown, queue = 'inbound_lane.ppe-x') => {
-            await consumers.get(queue)!({ content: Buffer.from(JSON.stringify(env)) });
-        },
-    };
-}
-
-async function throughLane(
-    env: unknown = laneEnvelope(),
-    options: { channelQueue?: boolean; queue?: string } = {},
-) {
-    const built = build();
-    const mq = laneChannel();
-    const keys = new Map<string, 'in-flight' | 'done'>();
-    await built.inbound.consumeLane('ppe-x', {
-        amqp: mq.amqp,
-        claims: {
-            claim: async (k): Promise<LaneClaim> => {
-                const held = keys.get(k);
-                if (held) return held;
-                keys.set(k, 'in-flight');
-                return 'claimed';
-            },
-            complete: async (k) => void keys.set(k, 'done'),
-            release: async (k) => void keys.delete(k),
-        },
-        wait: async () => {},
-        // 开关默认关，测试也显式注入：默认实现会去 paas-engine 拉一次动态配置。
-        channelQueueEnabled: async () => options.channelQueue === true,
-    });
-    await mq.push(env, options.queue);
-    return { ...built, acked: mq.acked, nacked: mq.nacked, subscribed: mq.subscribed() };
-}
-
 describe('createLarkInbound', () => {
     it('parses a webhook event', async () => {
         const { seen, status } = await throughWebhook();
@@ -284,23 +260,30 @@ describe('createLarkInbound', () => {
         expect(seen[0]!.reading.message.messageId).toBe('om_1');
     });
 
-    it('parses a lane envelope', async () => {
-        const { seen, acked } = await throughLane();
+    it('parses a lane envelope handed over by HTTP', async () => {
+        const { seen, status } = await throughLaneHttp();
+        expect(status).toBe(200);
         expect(seen).toHaveLength(1);
         expect(seen[0]!.reading.message.messageId).toBe('om_1');
-        expect(acked).toHaveLength(1);
     });
 
     // 这条是本段的核心：三个入口不是三条解析路径。
     it('produces the very same domain object no matter which entry it came through', async () => {
         const webhook = (await throughWebhook()).seen[0]!.reading;
         const websocket = (await throughWebSocket()).seen[0]!.reading;
-        const lane = (await throughLane()).seen[0]!.reading;
+        const laneHttp = (await throughLaneHttp()).seen[0]!.reading;
 
         expect(websocket.content).toEqual(webhook.content);
-        expect(lane.content).toEqual(webhook.content);
+        expect(laneHttp.content).toEqual(webhook.content);
         expect(websocket.inbound).toEqual(webhook.inbound);
-        expect(lane.inbound).toEqual(webhook.inbound);
+        expect(laneHttp.inbound).toEqual(webhook.inbound);
+    });
+
+    // 交接来的信封带着它自己的泳道，接收进程是 prod 还是泳道都不改写它 —— 落回 prod
+    // 时靠这一条，下游才会继续投泳道的队列。
+    it('carries the lane out of a handed-off envelope even on a prod process', async () => {
+        const { seen } = await throughLaneHttp(laneEnvelope({ lane: 'ppe-other' }));
+        expect(seen[0]!.lane).toBe('ppe-other');
     });
 
     it('resolves a mention of one of our bots to its persona name', async () => {
@@ -318,14 +301,14 @@ describe('createLarkInbound', () => {
     // 泳道信封是**另一个进程判定过**的重放，它自己带着该在哪条泳道处理。飞书直连的
     // 两个入口没有这个概念，走的是本进程自己的泳道。
     it('carries the lane out of the envelope, and only out of the envelope', async () => {
-        expect((await throughLane()).seen[0]!.lane).toBe('ppe-x');
+        expect((await throughLaneHttp()).seen[0]!.lane).toBe('ppe-x');
         expect((await throughWebhook()).seen[0]!.lane).toBe('');
     });
 
     it('names the handling bot on every entry', async () => {
         expect((await throughWebhook()).seen[0]!.botName).toBe('chiwei');
         expect((await throughWebSocket()).seen[0]!.botName).toBe('chiwei');
-        expect((await throughLane()).seen[0]!.botName).toBe('chiwei');
+        expect((await throughLaneHttp()).seen[0]!.botName).toBe('chiwei');
     });
 
     // 审计记的是"飞书发生了一件事"。泳道信封是重放，那件事在它第一次进来时已经记过
@@ -333,7 +316,7 @@ describe('createLarkInbound', () => {
     it('records the raw event from Lark but not a lane replay', async () => {
         expect((await throughWebhook()).recorded).toHaveLength(1);
         expect((await throughWebSocket()).recorded).toHaveLength(1);
-        expect((await throughLane()).recorded).toEqual([]);
+        expect((await throughLaneHttp()).recorded).toEqual([]);
     });
 
     it('routes webhooks only for bots that receive over HTTP', async () => {
@@ -386,47 +369,22 @@ describe('createLarkInbound', () => {
         expect((await throughCardWebhook()).recorded).toHaveLength(1);
     });
 
-    // 群成员变化这些还没人认领。ACK 掉就是静默丢失，所以队列那条路要明着拒绝。
-    it('refuses to acknowledge an event type nobody claims yet', async () => {
-        const { seen, acked, nacked } = await throughLane(
+    // 群成员变化这些还没人认领。认领面直接取处理表的键，所以装配层不会跟处理表脱节；
+    // 应答成功就是静默丢失，交接端点因此明着拒绝。422 而不是 400：报文本身是成立的，
+    // 只是装的东西本服务不认领（与 channel-server 的镜像端点同一口径）。
+    it('refuses an event type nobody claims yet', async () => {
+        const { seen, status } = await throughLaneHttp(
             laneEnvelope({ event_type: 'im.chat.updated_v1', params: { chat_id: 'oc_1' } }),
         );
+        expect(status).toBe(422);
         expect(seen).toEqual([]);
-        expect(acked).toEqual([]);
-        expect(nacked).toEqual([{ requeue: false }]);
     });
 
-    // 载荷根本不是一条消息（没有 message_id）：解析层交不出东西，重投也一样。以前
-    // 这里会被当成"处理成功"ACK 掉。
-    it('refuses to acknowledge a payload that is not a message', async () => {
-        const { seen, acked, nacked } = await throughLane(laneEnvelope({ params: { sender: {} } }));
+    // 载荷根本不是一条消息（没有 message_id）：解析层交不出东西，重发也一样。投递方
+    // 不重试，所以只能靠非 2xx 让它知道这条消息没人处理。
+    it('answers non-2xx for a payload that is not a message', async () => {
+        const { seen, status } = await throughLaneHttp(laneEnvelope({ params: { sender: {} } }));
+        expect(status).toBeGreaterThanOrEqual(500);
         expect(seen).toEqual([]);
-        expect(acked).toEqual([]);
-        expect(nacked).toEqual([{ requeue: false }]);
-    });
-
-    // 分区前的队列同时装着 QQ 和飞书的信封，两个服务竞争消费。抢到 QQ 的那一条时 ACK
-    // 就是把它吃掉 —— 对面永远收不到。
-    it('hands a QQ envelope back instead of eating it', async () => {
-        const { seen, acked, nacked } = await throughLane(laneEnvelope({ channel: 'qq' }));
-        expect(seen).toEqual([]);
-        expect(acked).toEqual([]);
-        expect(nacked).toEqual([{ requeue: true }]);
-    });
-
-    // 分区之后队列名从本服务的 channel 拼出来，装配层不该另外配一个"我是谁"。
-    it('subscribes the partitioned queue under its own channel', async () => {
-        const { subscribed } = await throughLane(laneEnvelope(), { channelQueue: true });
-        expect(subscribed).toEqual(['inbound_lane.ppe-x', 'inbound_lane.lark.ppe-x']);
-    });
-
-    it('parses a lane envelope off the partitioned queue exactly the same way', async () => {
-        const { seen, acked } = await throughLane(laneEnvelope(), {
-            channelQueue: true,
-            queue: 'inbound_lane.lark.ppe-x',
-        });
-        expect(seen).toHaveLength(1);
-        expect(seen[0]!.reading.message.messageId).toBe('om_1');
-        expect(acked).toHaveLength(1);
     });
 });

@@ -23,7 +23,12 @@ import { getRedisClient } from '@inner/shared/cache';
 import { QQ_SELF_MENTION_TARGET } from './inbound';
 
 const QQ_MESSAGE_PROJECTION_LOCK_TTL_SECONDS = 120;
-const QQ_MESSAGE_PROJECTION_LOCK_TIMEOUT_MS = 60_000;
+/**
+ * 抢不到锁时最长排多久。**导出是给交接的超时用的**：泳道交接的接收端第一件事就是抢这
+ * 把锁，投递方的超时必须严格大于这个窗口，否则接收端一排队投递方就先超时（见
+ * infrastructure/integrations/lane-handoff.ts，那条不等式有测试钉着）。
+ */
+export const QQ_MESSAGE_PROJECTION_LOCK_TIMEOUT_MS = 60_000;
 const QQ_MESSAGE_PROJECTION_LOCK_RETRY_MS = 25;
 const RELEASE_LOCK_SCRIPT = `
 if redis.call("GET", KEYS[1]) == ARGV[1] then
