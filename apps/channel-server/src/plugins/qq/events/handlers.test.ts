@@ -194,6 +194,19 @@ describe('QQ 入站：真失败必须上抛，不能让接收端谎报成功', (
         ).rejects.toThrow(/bot config not found/);
     });
 
+    // context 里没有 bot 身份时，编排在**开头**就停住：getBotName() 返回空串 → 不查
+    // botDirectory → botConfig 为 null → 上抛。编排后半段（投影、runRules、claim）因此
+    // 拿到的 botName 必然非空，那里不需要再查一次。
+    it('context 里没有 bot 身份时，在查 bot config 这一步就上抛', async () => {
+        await expect(
+            context.run(context.createContext(undefined, 'trace-1'), () =>
+                qqEventHandlers.handleInbound(inboundMessage()),
+            ),
+        ).rejects.toThrow(/bot config not found/);
+        // 停在第一道 guard 上：投影锁都没进过。
+        expect(trace).toEqual([]);
+    });
+
     it('bot 身份还没初始化（没有 common_user_id）时上抛', async () => {
         (botDirectory as unknown as MutableBotDirectory).botConfigs = new Map([
             [BOT_NAME, { ...qqBot(), common_user_id: undefined } as unknown as BotConfig],

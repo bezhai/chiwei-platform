@@ -86,6 +86,32 @@ async function post(
 }
 
 describe('QQ 泳道信封接收端', () => {
+    // 排查「交接为什么 404」时，第一件要确认的事是接收端到底挂上没有。启动日志是唯一
+    // 的凭据：这条路由不在健康检查里，也没有别的地方回报它的存在。
+    //
+    // 措辞与 lark-service 的 lark/ingress/lane-inbound.ts 逐字对齐（那边是
+    // `[lane-inbound] registered at ... on lane=...`），所以 `lane-inbound] registered at`
+    // 一条查询能同时捞到两个渠道。改这里的措辞就把那条查询拆成两条了。
+    it('注册时打一条启动日志，并且端点确实挂上了', async () => {
+        const lines: string[] = [];
+        const realInfo = console.info;
+        console.info = (...args: unknown[]) => {
+            lines.push(args.map(String).join(' '));
+        };
+        let app: Hono;
+        try {
+            ({ app } = buildApp({ processLane: 'ppe-foo' }));
+        } finally {
+            console.info = realInfo;
+        }
+
+        expect(lines).toContain(
+            `[qq lane-inbound] registered at ${QQ_LANE_INBOUND_PATH} on lane=ppe-foo`,
+        );
+        // 日志说挂上了就必须真挂上：同一条路径能收报文，不是 404。
+        expect((await post(app, envelope())).status).toBe(200);
+    });
+
     it('没带 Authorization → 401，不进处理', async () => {
         const { app, handled } = buildApp();
 

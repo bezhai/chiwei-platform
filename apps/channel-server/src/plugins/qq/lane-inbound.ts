@@ -124,4 +124,11 @@ export function registerQqLaneInbound(app: Hono, deps: QqLaneInboundDeps): void 
         }
         return c.json({ success: true, handled_by_lane: handledByLane });
     });
+
+    // 排查交接 404 时唯一能确认「接收端挂上了」的凭据。措辞与 lark-service 的
+    // lark/ingress/lane-inbound.ts 对齐，`lane-inbound] registered at` 一条查询同时覆盖
+    // 两个渠道。
+    console.info(
+        `[qq lane-inbound] registered at ${QQ_LANE_INBOUND_PATH} on lane=${deps.processLane()}`,
+    );
 }
