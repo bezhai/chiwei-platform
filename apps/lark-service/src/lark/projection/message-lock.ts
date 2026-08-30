@@ -29,7 +29,8 @@
 // 于是等到 t0 + 2*租约 + 余量：崩在"进场后第一次证明自己还活着"那一下的持有者，
 // 它留下的锁到这时一定已经过期，等待者接得住。再往后 token 仍是 T，说明它至少续了
 // 两轮 —— 那不是崩溃残留，是一个真在干活的长任务，这时候放弃才是对的，接着等只是把
-// 泳道消费者的 prefetch 占死。窗口因此**严格大于**租约（这条不等式有测试钉着）：
+// 交接那次 HTTP 一直挂着（投递方在 LANE_HANDOFF_TIMEOUT_MS 里干等，见
+// ingress/lane-handoff.ts）。窗口因此**严格大于**租约（这条不等式有测试钉着）：
 // 反过来（旧实现是租约 120s、等待 60s）会在持有者崩溃时丢消息 —— 崩溃留下的锁要等
 // 满租约才过期，同批到达的其他 bot 在那之前就全散了，而飞书入口早已 ACK。
 //
@@ -175,9 +176,9 @@ export function larkMessageLock(
                 deadline = now() + waitTimeoutMs;
             }
             if (now() >= deadline) {
-                // 抛出去而不是静默跳过。泳道那条路会 requeue 重试（不丢）；飞书直连
-                // 的两个入口早就 ACK 过了，只能留下这条错误 —— 所以它必须说清楚是
-                // 哪条消息、等了多久。
+                // 抛出去而不是静默跳过。这条消息没有自动重试可指望：泳道交接只会
+                // 变成非 2xx、投递方不再送第二次，飞书直连的两个入口早就 ACK 过了。
+                // 留下的只有这条错误，所以它必须说清楚是哪条消息、等了多久。
                 throw new Error(
                     `timeout acquiring the lark message projection lock for ${omId} ` +
                         `after ${now() - startedAt}ms; one handler has been holding it for ` +

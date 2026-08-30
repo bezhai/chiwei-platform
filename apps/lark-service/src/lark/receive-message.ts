@@ -14,8 +14,8 @@
 // 落账失败则规则根本不跑，用户什么也看不到。这更正确：一条没能留下记录的消息，赤尾
 // 也不该记得自己回过它。
 //
-// 投影抛错**照常往外抛**：泳道那条路据此重投，飞书那两个入口早已 ACK、只能留下一条
-// 可查错误（见 ingress/event-sink.ts）。在这里吞掉等于既没落库也没有任何信号。
+// 投影抛错**照常往外抛**：泳道交接靠它应答非 2xx，飞书那两个入口早已 ACK、只能留下
+// 一条可查错误（见 ingress/event-sink.ts）。在这里吞掉等于既没落库也没有任何信号。
 
 import type { LarkEvent } from './ingress/lark-event';
 import type { LarkMessageReading } from './message/read-message-event';

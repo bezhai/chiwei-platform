@@ -74,7 +74,7 @@ describe('deliverLarkEvent', () => {
             .toBeUndefined();
     });
 
-    // 报错必须往外抛：泳道消费者靠它决定要不要 nack 重投。想要"快速 ack、异步处理"
+    // 报错必须往外抛：泳道交接的接收端靠它应答非 2xx。想要"快速 ack、异步处理"
     // 的是飞书 SDK 那两个入口，那是它们自己的事（见 event-sink.ts），不是这里的。
     it('lets a handler failure reach the caller', async () => {
         await expect(
