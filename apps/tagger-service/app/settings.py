@@ -42,8 +42,6 @@ class Settings:
     sqlite_path: Path
     max_batch_paths: int
     queue_size: int
-    idle_unload_seconds: float
-    preload_local_qwen: bool
     local_infer_timeout_seconds: float
     exit_on_local_timeout: bool
     callback_retries: int
@@ -57,7 +55,13 @@ class Settings:
     remote_auth_token: str
     remote_timeout_seconds: float
     remote_retries: int
-    qwen_model_path: str
+    qwen_base_url: str
+    qwen_model: str
+    qwen_api_key: str
+    qwen_timeout_seconds: float
+    qwen_concurrency: int
+    qwen_max_new_tokens: int
+    qwen_max_vision_tokens: int
     wd14_model_dir: Path | None
     eva02_model_dir: Path | None
     minio_endpoint: str
@@ -76,9 +80,12 @@ def load_settings() -> Settings:
         sqlite_path=Path(os.getenv("TAGGER_SQLITE_PATH", "data/tagger_tasks.sqlite3")),
         max_batch_paths=_int_env("TAGGER_MAX_BATCH_PATHS", 64),
         queue_size=_int_env("TAGGER_QUEUE_SIZE", 16),
-        idle_unload_seconds=_float_env("TAGGER_IDLE_UNLOAD_SECONDS", 900.0),
-        preload_local_qwen=_bool_env("TAGGER_PRELOAD_LOCAL_QWEN", True),
-        local_infer_timeout_seconds=_float_env("TAGGER_LOCAL_INFER_TIMEOUT_SECONDS", 180.0),
+        # 整批 qwen 推理的死线，超时会 os._exit(1) 让 systemd 重启进程，所以要罩得住最大的一批。
+        # gpu2 llama-swap 实测：单图三次调用合计 12.41s；4 图 @并发2 墙钟 41.4s（每图 10.4s）。
+        # 按 max_batch_paths 上限 64 外推：64 * 10.4 ≈ 666s，加一次模型冷加载（显存里是别的模型时
+        # llama-swap 换入 Qwen3-VL 实测 28s）≈ 694s。再留出 minio 拉 64 张图和抖动的余量，取 1200s
+        # （约 1.7x）。改 TAGGER_MAX_BATCH_PATHS 或并发数时这个默认值要跟着重算。
+        local_infer_timeout_seconds=_float_env("TAGGER_LOCAL_INFER_TIMEOUT_SECONDS", 1200.0),
         exit_on_local_timeout=_bool_env("TAGGER_EXIT_ON_LOCAL_TIMEOUT", True),
         callback_retries=_int_env("TAGGER_CALLBACK_RETRIES", 5),
         callback_timeout_seconds=_float_env("TAGGER_CALLBACK_TIMEOUT_SECONDS", 10.0),
@@ -94,7 +101,15 @@ def load_settings() -> Settings:
         remote_auth_token=os.getenv("TAGGER_REMOTE_AUTH_TOKEN", ""),
         remote_timeout_seconds=_float_env("TAGGER_REMOTE_TIMEOUT_SECONDS", 120.0),
         remote_retries=_int_env("TAGGER_REMOTE_RETRIES", 2),
-        qwen_model_path=os.getenv("TAGGER_QWEN_MODEL_PATH", ""),
+        qwen_base_url=os.getenv("TAGGER_QWEN_BASE_URL", ""),
+        qwen_model=os.getenv("TAGGER_QWEN_MODEL", ""),
+        qwen_api_key=os.getenv("TAGGER_QWEN_API_KEY", ""),
+        qwen_timeout_seconds=_float_env("TAGGER_QWEN_TIMEOUT_SECONDS", 180.0),
+        # llama-server 起的是 -np 2（两个 slot），并发超过 slot 数只会在服务端排队
+        qwen_concurrency=_int_env("TAGGER_QWEN_CONCURRENCY", 2),
+        qwen_max_new_tokens=_int_env("TAGGER_QWEN_MAX_NEW_TOKENS", 512),
+        # 4096 vision token ≈ 4.2M 像素；要留在服务端单 slot 上下文（-c/-np）之内
+        qwen_max_vision_tokens=_int_env("TAGGER_QWEN_MAX_VISION_TOKENS", 4096),
         wd14_model_dir=_path_env("TAGGER_WD14_MODEL_DIR"),
         eva02_model_dir=_path_env("TAGGER_EVA02_MODEL_DIR"),
         minio_endpoint=os.getenv("MINIO_ENDPOINT", "minio.prod"),

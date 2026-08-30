@@ -1,34 +1,49 @@
-"""Qwen3-VL GPU 阶段：一个 vLLM 实例对整批图跑 describe(A/B)+ OCR 三轮，产出每 id 的合并能力。
+"""Qwen3-VL 阶段：通过 llama-swap 的 OpenAI 兼容接口，对整批图跑 describe(A/B) + OCR 三次调用。
 
-复用 qwen_vl_describe 的纯函数（parse_tool_call 等）和 ocr_clean 的退化清洗；本模块只新增 OCR
-prompt、单图结果组装、整批组装这几个纯函数。持有 vLLM 实例、load→三轮 generate→unload 的薄壳
-依赖 GPU，端到端在 .206 验（spike 已确认进程内 del llm + destroy_*_parallel 卸载干净、可方案 A）。
+模型不再由本进程加载：Qwen3-VL 交给 llama-swap 统一调度（GGUF Q8_0 ~11.5 GiB，按需换入换出），
+本服务只发 HTTP。因此本阶段既不占显存也没有"加载权重"这一步，load/unload 管的是 HTTP 连接池。
+
+三件实测出来的服务端行为，直接决定了这里的请求怎么发：
+1. describe 走 `tools` 参数拿 tool_calls，比让模型吐 JSON 文本再正则解析可靠——llama.cpp 会用语法
+   约束把 enum 卡在候选集内（自由输出时实测吐出过 enum 外的 flat_design）。
+2. 这是 thinking 模型，不显式关掉思考会把 token 预算全烧在 reasoning_content 上、content 拿回空串，
+   所以每个请求都带 chat_template_kwargs.enable_thinking=false。
+3. 服务端 -c 16384 -np 2（单 slot 8192 上下文、两个并发 slot），所以图片仍要在客户端降采样，
+   默认并发也对齐 slot 数。
+
+失败按"单能力"隔离：某次调用超时 / 500 / 返回体不是 JSON / 形状不认识 / 没有 tool_calls / OCR 被
+截断，都只让那一项能力带 error + raw_output 回去，整批其余结果照常产出（与 merge_row 的 errors
+语义一致）。发请求和解析响应都在同一个 try 里——解析异常逃出去会让整批 run() 抛异常、任务彻底
+失败且不回调任何部分结果，那正是这个设计要避免的。
 """
 from __future__ import annotations
 
-import gc
-import os
-from typing import Any
+import base64
+import io
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Any, Callable
 
+import httpx
 from PIL import Image, ImageOps
 
 from app.pipeline.ocr_clean import clean_ocr_text
 from app.qwen_vl_describe import (
-    build_image_size_constraint,
     build_tool,
     build_user_text,
     downscale_dims,
-    merge_alloc_conf,
-    parse_tool_call,
-    resolve_vision_token_cap,
+    max_pixels_for_vision_tokens,
+    parse_tool_arguments,
 )
+
+JPEG_QUALITY = 90
 
 
 def build_ocr_prompt() -> str:
     """OCR 指令：逐字原样转写图中所有文字、保留换行、无文字则空。
 
-    describe 走 tool calling 软约束 key/enum；OCR 是自由文本，另走纯文本 prompt（防退化靠
-    repetition_penalty + max_tokens + assemble_ocr_result 的相邻去重三层，见 spec decision 5）。
+    describe 走 tool calling 约束 key/enum；OCR 是自由文本，另走纯文本 prompt（防退化靠
+    max_tokens + assemble_ocr_result 的相邻行去重）。
     """
     return (
         "Transcribe all visible text in this image exactly as it appears, "
@@ -38,163 +53,283 @@ def build_ocr_prompt() -> str:
     )
 
 
-def assemble_describe_result(raw_a: str, raw_b: str) -> dict[str, dict[str, Any]]:
-    """两轮 describe 原始输出 → {describe_a, describe_b}，各走 parse_tool_call（解析失败保留 error+raw）。"""
+def encode_image_data_url(image: Image.Image, max_pixels: int) -> str:
+    """PIL 图 → OpenAI vision 格式要的 `data:image/jpeg;base64,...`。
+
+    先按 EXIF 摆正、压到像素上限再编码：服务端单 slot 上下文有限，大图不压会撑爆 vision token，
+    同时 base64 请求体也会大到离谱。
+    """
+    img = ImageOps.exif_transpose(image).convert("RGB")
+    nw, nh = downscale_dims(img.width, img.height, max_pixels)
+    if (nw, nh) != (img.width, img.height):
+        img = img.resize((nw, nh))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _vision_message(data_url: str, text: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": text},
+            ],
+        }
+    ]
+
+
+def build_describe_body(
+    model: str, data_url: str, group: str, *, max_new_tokens: int
+) -> dict[str, Any]:
     return {
-        "describe_a": parse_tool_call(raw_a, "a"),
-        "describe_b": parse_tool_call(raw_b, "b"),
+        "model": model,
+        "messages": _vision_message(data_url, build_user_text(group)),
+        "tools": [build_tool(group)],
+        "temperature": 0.0,
+        "max_tokens": max_new_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
 
+def build_ocr_body(model: str, data_url: str, *, max_new_tokens: int) -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": _vision_message(data_url, build_ocr_prompt()),
+        "temperature": 0.0,
+        "max_tokens": max_new_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _first_choice(payload: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """从任意形状的响应体里取第一个 choice 的 message + finish_reason，取不到就 (None, None)。
+
+    response.json() 可以回任意合法 JSON（代理页面被当 JSON、错误对象、裸列表、标量），所以每一层
+    都得先验形状再取值——这里崩了会炸穿单能力隔离，让整批任务失败且不回调任何部分结果。
+    """
+    if not isinstance(payload, dict):
+        return None, None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None, None
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return None, None
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return None, None
+    return message, choice.get("finish_reason")
+
+
+def _reasoning_of(message: dict[str, Any]) -> str:
+    """thinking 模型把思考放在 reasoning_content；正文为空时它就是最有用的诊断材料。"""
+    reasoning = message.get("reasoning_content")
+    return reasoning if isinstance(reasoning, str) else ""
+
+
+def parse_describe_response(payload: Any, group: str) -> dict[str, Any]:
+    """OpenAI 兼容响应 → describe 字段 dict；拿不到 tool_calls 就是失败，回 error + raw_output。
+
+    只认 tool_calls：`tools` 参数下服务端用语法约束把 enum 卡在候选集内，自由正文没有这层约束
+    （实测自由输出吐过 enum 外的 flat_design）。解析正文等于把绕过约束的脏值当成功结果送进
+    merge_row，所以这里不做正文回落。
+    """
+    message, finish_reason = _first_choice(payload)
+    if message is None:
+        return {"error": "malformed response: no choices", "raw_output": repr(payload)}
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        first = tool_calls[0]
+        function = first.get("function") if isinstance(first, dict) else None
+        if not isinstance(function, dict):
+            return {
+                "error": "malformed response: tool call without a function object",
+                "raw_output": repr(first),
+            }
+        arguments = function.get("arguments", "")
+        if not isinstance(arguments, str):
+            arguments = repr(arguments)
+        return parse_tool_arguments(arguments, group)
+    return {
+        "error": f"no tool calls (finish_reason={finish_reason})",
+        "raw_output": _describe_raw_output(message),
+    }
+
+
+def _describe_raw_output(message: dict[str, Any]) -> str:
+    """失败诊断素材：优先正文，正文为空时退到 reasoning_content（thinking 烧光预算的典型形态）。"""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    return _reasoning_of(message)
+
+
 def assemble_ocr_result(raw_ocr: str) -> dict[str, Any]:
-    """OCR 原始输出 → {ocr_text, ocr_len}：先去相邻重复行（防 vLLM 退化刷屏）再 strip。"""
+    """OCR 原始输出 → {ocr_text, ocr_len}：先去相邻重复行（防刷屏退化）再 strip。"""
     text = clean_ocr_text(raw_ocr).strip()
     return {"ocr_text": text, "ocr_len": len(text)}
 
 
-def assemble_stage_results(
-    ids: list[str],
-    raws_a: list[str],
-    raws_b: list[str],
-    raws_ocr: list[str],
-) -> dict[str, dict[str, dict[str, Any]]]:
-    """整批三轮 generate 的原始输出按 id 组装成 {id: {describe_a, describe_b, ocr}}，直接喂 merge_row。"""
-    out: dict[str, dict[str, dict[str, Any]]] = {}
-    for i, image_id in enumerate(ids):
-        out[image_id] = {
-            **assemble_describe_result(raws_a[i], raws_b[i]),
-            "ocr": assemble_ocr_result(raws_ocr[i]),
+def parse_ocr_response(payload: Any) -> dict[str, Any]:
+    """OpenAI 兼容响应 → {ocr_text, ocr_len}。
+
+    只有"正文是字符串 + 正常停止（finish_reason=stop）"才是完整转写：空正文加 stop 就是图里
+    没字，合法。其余都是失败——被 length 砍断的是半截转写、正文缺失或不是字符串是响应形状不对、
+    其他 finish_reason 是没见过的服务端状态。被截断时把已拿到的部分留在 ocr_text 里便于人工比对，
+    但必须同时带 error 让下游知道这条不完整。ocr_text / ocr_len 在所有分支上都在位（merge_row 依赖）。
+    """
+    message, finish_reason = _first_choice(payload)
+    if message is None:
+        return {
+            "error": "malformed response: no choices",
+            "raw_output": repr(payload),
+            "ocr_text": "",
+            "ocr_len": 0,
         }
-    return out
+    content = message.get("content")
+    if not isinstance(content, str):
+        return {
+            "error": f"malformed response: content is not a string (finish_reason={finish_reason})",
+            "raw_output": _reasoning_of(message) or repr(content),
+            "ocr_text": "",
+            "ocr_len": 0,
+        }
+    result = assemble_ocr_result(content)
+    if finish_reason == "stop":
+        return result
+    return {
+        "error": f"incomplete ocr output (finish_reason={finish_reason})",
+        "raw_output": _reasoning_of(message),
+        **result,
+    }
 
 
-class QwenVllmStage:
-    """持有一个 Qwen3-VL vLLM 实例，对整批图跑 describe(A/B)+ OCR 三轮 generate（共享实例、不额外占显存）。
+def request_error_result(exc: Exception) -> dict[str, Any]:
+    """调用异常 → 单能力 error dict；HTTP 状态错误顺带把服务端返回体留作 raw_output。"""
+    raw = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            raw = response.text
+        except Exception:  # pragma: no cover - 极端情况下响应体不可读
+            raw = ""
+    return {"error": f"{type(exc).__name__}: {exc}", "raw_output": raw}
 
-    load → run(整批) → unload 三段。GPU 重依赖（vllm/torch/transformers）在方法内 import，本机
-    import 本模块不触发 GPU。卸载序列经 spike 验证（del llm + destroy_*_parallel + empty_cache →
-    显存回 0、EngineCore 子进程干净退出、同进程可接下一阶段），故走方案 A 进程内 load-unload。
-    参数默认对齐 describe 全量（关 mm/prefix 缓存防 RSS 泄漏、size 约束防大图崩）。
+
+def _ocr_error_result(exc: Exception) -> dict[str, Any]:
+    return {**request_error_result(exc), "ocr_text": "", "ocr_len": 0}
+
+
+@dataclass(frozen=True)
+class QwenVlEndpoint:
+    """怎么连上 llama-swap、以什么参数驱动 Qwen3-VL。"""
+
+    base_url: str
+    model: str
+    api_key: str = ""
+    timeout_seconds: float = 180.0
+    concurrency: int = 2
+    max_new_tokens: int = 512
+    max_vision_tokens: int = 4096
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            raise ValueError("qwen endpoint base_url is required")
+        if not self.model:
+            raise ValueError("qwen endpoint model is required")
+
+    @property
+    def chat_completions_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/chat/completions"
+
+
+class QwenVlHttpStage:
+    """对整批 (id, PIL图) 逐图发三次请求（describe A/B + OCR），产出 merge_row 可直接吃的能力字典。
+
+    调度按图并发（默认 2，对齐服务端 slot 数）：每个 worker 编码一张图再串行发它的三次调用，
+    在途 base64 图片数因此被并发数钉住，不会像"整批编码再三轮发"那样把整批图片撑在内存里。
     """
 
-    def __init__(
-        self,
-        model_path: str,
-        *,
-        max_model_len: int = 16384,
-        gpu_mem_util: float = 0.88,
-        max_num_seqs: int = 2,
-        max_vision_tokens: int = 8192,
-        text_reserve: int = 2048,
-        max_new_tokens: int = 512,
-    ) -> None:
-        self.model_path = model_path
-        self.max_model_len = max_model_len
-        self.gpu_mem_util = gpu_mem_util
-        self.max_num_seqs = max_num_seqs
-        self.max_vision_tokens = max_vision_tokens
-        self.text_reserve = text_reserve
-        self.max_new_tokens = max_new_tokens
-        self.llm: Any = None
-        self.processor: Any = None
-        self.max_pixels: int = 0
-        self._describe_sp: Any = None
-        self._ocr_sp: Any = None
+    def __init__(self, endpoint: QwenVlEndpoint, *, transport: Any = None) -> None:
+        self.endpoint = endpoint
+        self.max_pixels = max_pixels_for_vision_tokens(endpoint.max_vision_tokens)
+        self._transport = transport
+        self._client: httpx.Client | None = None
+
+    @property
+    def client(self) -> httpx.Client | None:
+        return self._client
 
     def load(self) -> None:
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = merge_alloc_conf(
-            os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        """建 HTTP 连接池。这里没有权重加载，不占显存，失败也只是构造客户端失败。"""
+        headers = {"Content-Type": "application/json"}
+        if self.endpoint.api_key:
+            headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
+        self._client = httpx.Client(
+            timeout=self.endpoint.timeout_seconds,
+            headers=headers,
+            transport=self._transport,
         )
-        from transformers import AutoProcessor
-        from vllm import LLM, SamplingParams
-
-        self.processor = AutoProcessor.from_pretrained(self.model_path)
-        cap = resolve_vision_token_cap(self.max_vision_tokens, self.max_model_len, self.text_reserve)
-        size = build_image_size_constraint(cap)
-        self.max_pixels = size["longest_edge"]
-        self.llm = LLM(
-            model=self.model_path,
-            max_model_len=self.max_model_len,
-            limit_mm_per_prompt={"image": 1},
-            gpu_memory_utilization=self.gpu_mem_util,
-            max_num_seqs=self.max_num_seqs,
-            enforce_eager=True,
-            mm_processor_cache_gb=0,
-            enable_prefix_caching=False,
-            mm_processor_kwargs={"size": size},
-        )
-        # describe 和 OCR 都只保留 repetition_penalty 防自由文本退化、贪心解码；不带 no_repeat_ngram_size。
-        self._describe_sp = SamplingParams(
-            temperature=0.0, max_tokens=self.max_new_tokens, repetition_penalty=1.05
-        )
-        self._ocr_sp = SamplingParams(
-            temperature=0.0, max_tokens=self.max_new_tokens, repetition_penalty=1.05
-        )
-
-    def _prep_image(self, image: Image.Image) -> Image.Image:
-        img = ImageOps.exif_transpose(image).convert("RGB")
-        nw, nh = downscale_dims(img.width, img.height, self.max_pixels)
-        if (nw, nh) != (img.width, img.height):
-            img = img.resize((nw, nh))
-        return img
-
-    def _describe_inputs(self, images: list[Image.Image], group: str) -> list[dict[str, Any]]:
-        tool = build_tool(group)
-        question = build_user_text(group)
-        inputs: list[dict[str, Any]] = []
-        for image in images:
-            img = self._prep_image(image)
-            messages = [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": question},
-            ]}]
-            text = self.processor.apply_chat_template(
-                messages, tools=[tool], tokenize=False, add_generation_prompt=True
-            )
-            inputs.append({"prompt": text, "multi_modal_data": {"image": img}})
-        return inputs
-
-    def _ocr_inputs(self, images: list[Image.Image]) -> list[dict[str, Any]]:
-        question = build_ocr_prompt()
-        inputs: list[dict[str, Any]] = []
-        for image in images:
-            img = self._prep_image(image)
-            messages = [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": question},
-            ]}]
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            inputs.append({"prompt": text, "multi_modal_data": {"image": img}})
-        return inputs
-
-    def run(self, items: list[tuple[str, Image.Image]]) -> dict[str, dict[str, dict[str, Any]]]:
-        """对整批 (id, PIL图) 跑三轮 generate，返回 {id: {describe_a, describe_b, ocr}} 供 merge_row。
-
-        整批一次性构造输入并 generate（无内部 chunk 分块，对齐 spec「阶段内对整批循环推理」）：
-        调用方须控制单批大小——整批 PIL + 整批 prompt 驻留 host RAM，批过大会重蹈 describe 全量的
-        RAM 撑爆（见 notes.md，全量靠 chunk 50 才稳）。OOM/分块属 MVP 后系统级鲁棒性、本轮不做。
-        """
-        ids = [image_id for image_id, _ in items]
-        images = [image for _, image in items]
-        raws_a = [o.outputs[0].text for o in self.llm.generate(self._describe_inputs(images, "a"), self._describe_sp)]
-        raws_b = [o.outputs[0].text for o in self.llm.generate(self._describe_inputs(images, "b"), self._describe_sp)]
-        raws_ocr = [o.outputs[0].text for o in self.llm.generate(self._ocr_inputs(images), self._ocr_sp)]
-        return assemble_stage_results(ids, raws_a, raws_b, raws_ocr)
 
     def unload(self) -> None:
-        """spike 验证过的卸载序列：显存回 0、EngineCore 子进程干净退出、同进程可接下一阶段。"""
-        import torch
-        from vllm.distributed.parallel_state import (
-            destroy_distributed_environment,
-            destroy_model_parallel,
-        )
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
-        self.llm = None
-        self.processor = None
-        gc.collect()
-        destroy_model_parallel()
-        destroy_distributed_environment()
-        gc.collect()
-        torch.cuda.empty_cache()
+    def run(self, items: list[tuple[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+        if self._client is None:
+            raise RuntimeError("QwenVlHttpStage.run called before load()")
+        results = self._map(self._process_image, [image for _, image in items])
+        return {image_id: result for (image_id, _), result in zip(items, results)}
+
+    def _map(self, fn: Callable[[Any], Any], values: list[Any]) -> list[Any]:
+        if self.endpoint.concurrency <= 1 or len(values) <= 1:
+            return [fn(value) for value in values]
+        # ThreadPoolExecutor.map 按输入顺序回结果，所以并发下 id 与结果的配对仍然成立
+        with ThreadPoolExecutor(max_workers=self.endpoint.concurrency) as pool:
+            return list(pool.map(fn, values))
+
+    def _process_image(self, image: Any) -> dict[str, dict[str, Any]]:
+        try:
+            data_url = encode_image_data_url(image, self.max_pixels)
+        except Exception as exc:
+            # 图本身坏掉：三项能力一起标失败，不发请求
+            error = request_error_result(exc)
+            return {
+                "describe_a": dict(error),
+                "describe_b": dict(error),
+                "ocr": _ocr_error_result(exc),
+            }
+        return {
+            "describe_a": self._describe(data_url, "a"),
+            "describe_b": self._describe(data_url, "b"),
+            "ocr": self._ocr(data_url),
+        }
+
+    def _describe(self, data_url: str, group: str) -> dict[str, Any]:
+        body = build_describe_body(
+            self.endpoint.model, data_url, group, max_new_tokens=self.endpoint.max_new_tokens
+        )
+        try:
+            # 解析也在 try 内：单能力隔离要覆盖"响应拿回来了但解析炸了"，否则异常会逃出去让整批
+            # run() 抛异常、任务彻底失败且不回调任何部分结果。
+            return parse_describe_response(self._post(body), group)
+        except Exception as exc:
+            return request_error_result(exc)
+
+    def _ocr(self, data_url: str) -> dict[str, Any]:
+        body = build_ocr_body(
+            self.endpoint.model, data_url, max_new_tokens=self.endpoint.max_new_tokens
+        )
+        try:
+            return parse_ocr_response(self._post(body))
+        except Exception as exc:
+            return _ocr_error_result(exc)
+
+    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+        assert self._client is not None  # run() 已挡住未 load 的情况
+        response = self._client.post(self.endpoint.chat_completions_url, json=body)
+        response.raise_for_status()
+        return response.json()

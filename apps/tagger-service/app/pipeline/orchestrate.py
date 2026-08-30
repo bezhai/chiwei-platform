@@ -1,10 +1,10 @@
 """编排：一批 (id, 图) → 按模型阶段串行（每阶段 load→过整批→unload）→ 各阶段结果按 id 合并成一行。
 
 阶段（stage）统一协议 load() / run(items)->{id:{name:result}} / unload()：
-- QwenVllmStage（qwen_stage 模块）：一个 vLLM 实例独占显存跑 describe+OCR，跑完卸载释放。
+- QwenVlHttpStage（qwen_stage 模块）：HTTP 调 llama-swap 拿 describe+OCR，本进程不占显存。
 - TaggerStage：一组 .tag(image) 打标器（wd14/eva02/anime_rating/phash），工厂延迟构造——
-  占显存的 onnx 等到本阶段 load 才 load，不和 Qwen 抢显存。
-每阶段必 unload（即便 run 抛异常），保证显存不在阶段间泄漏。单打标器/单图异常隔离、不崩整批。
+  占显存的 onnx 等到本阶段 load 才 load。
+每阶段必 unload（即便 run 抛异常），保证资源不在阶段间泄漏。单打标器/单图异常隔离、不崩整批。
 """
 from __future__ import annotations
 

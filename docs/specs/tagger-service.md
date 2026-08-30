@@ -1,5 +1,13 @@
 # GPU 打标推理服务——双机异步、按需激活、文件名入参回调出
 
+> **状态：历史 spec，部分内容已被实现取代。** 这份 MVP spec 保留当时的设计过程，不再是当前实现的
+> 描述。最主要的偏差是 Qwen3-VL 的推理方式：服务不再在进程内加载模型，而是通过 HTTP 调 llama-swap
+> 的 OpenAI 兼容接口。因此文中的 `QwenVllmStage`（现为 `QwenVlHttpStage`）、
+> `TAGGER_QWEN_MODEL_PATH`（现为 `TAGGER_QWEN_BASE_URL` / `TAGGER_QWEN_MODEL` 等一组 HTTP 参数）
+> 和"qwen 空闲 15min 卸载释放显存"（显存现在由 llama-swap 按需换入换出，本服务的 load/unload
+> 只管 HTTP 连接池）都已不成立。当前实现以 `apps/tagger-service/README.md` 的 "Qwen3-VL Over HTTP"
+> 一节为准。
+
 ## Problem
 
 打标现在全靠手动 ssh .206 跑 `scripts/pipeline/run_mvp.py`、产物落本地 jsonl，一次性、靠人盯。要让打标能被平台编排 worker 自动调用、可远程触发、跑完异步回吐结果，需要把 MVP 打标器内核（`run_pipeline`）封成一个常驻、异步、双机协作的服务。

@@ -124,10 +124,13 @@ required = [
 if role == "entry":
     required += [
         "TAGGER_SQLITE_PATH",
-        "TAGGER_QWEN_MODEL_PATH",
+        "TAGGER_QWEN_BASE_URL",
+        "TAGGER_QWEN_MODEL",
         "TAGGER_REMOTE_URL",
         "TAGGER_REMOTE_AUTH_TOKEN",
         "TAGGER_CALLBACK_AUTH_TOKEN",
+        # 缺了会静默退回代码默认值，而超时会 os._exit(1) 重启进程
+        "TAGGER_LOCAL_INFER_TIMEOUT_SECONDS",
     ]
 else:
     required += ["TAGGER_WD14_MODEL_DIR", "TAGGER_EVA02_MODEL_DIR"]
@@ -143,11 +146,33 @@ if values.get("TAGGER_ROLE") != role:
 
 path_checks = ["UV_PROJECT_ENVIRONMENT"]
 if role == "entry":
-    path_checks += ["TAGGER_QWEN_MODEL_PATH"]
+    # 模型不再在本机磁盘上，只校验 base url 形状；能不能连通由真实调用决定
+    if "/v1" not in values["TAGGER_QWEN_BASE_URL"]:
+        print("fail: TAGGER_QWEN_BASE_URL should include the OpenAI path prefix (e.g. http://host:port/v1)")
+        sys.exit(1)
     sqlite_parent = Path(values["TAGGER_SQLITE_PATH"]).expanduser().parent
     if not sqlite_parent.exists():
         print("fail: TAGGER_SQLITE_PATH parent does not exist")
         sys.exit(1)
+    try:
+        batch_deadline = float(values["TAGGER_LOCAL_INFER_TIMEOUT_SECONDS"])
+    except ValueError:
+        print("fail: TAGGER_LOCAL_INFER_TIMEOUT_SECONDS is not a number")
+        sys.exit(1)
+    if batch_deadline <= 0:
+        print("fail: TAGGER_LOCAL_INFER_TIMEOUT_SECONDS must be positive")
+        sys.exit(1)
+    # 实测每图 10.4s @并发2，加一次 llama-swap 冷加载 28s；罩不住整批就会中途 os._exit(1) 重启进程
+    try:
+        max_paths = int(values.get("TAGGER_MAX_BATCH_PATHS") or 64)
+    except ValueError:
+        max_paths = 64
+    needed = max_paths * 10.4 + 28
+    if batch_deadline < needed:
+        print(
+            f"warn: TAGGER_LOCAL_INFER_TIMEOUT_SECONDS={batch_deadline:.0f} is below the "
+            f"{needed:.0f}s that {max_paths} images plus one model cold load need"
+        )
 else:
     path_checks += ["TAGGER_WD14_MODEL_DIR", "TAGGER_EVA02_MODEL_DIR"]
 

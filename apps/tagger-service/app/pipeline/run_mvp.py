@@ -1,9 +1,9 @@
 """MVP 打标 harness：从本地缓存图构造 (id, 图) → 按模型阶段串行跑 → 每 id 一行合并结果 jsonl。
 
 本地缓存当测试夹具（spec）：用 assets.jsonl 定位 local_path 加载图、pixiv_addr 作 id；打标器本身
-只收 (id, 图)、不碰 assets。阶段顺序：QwenVllmStage（GPU，describe+OCR 共享一个 vLLM 实例）→
-TaggerStage（wd14/eva02 onnx + anime_rating + phash）；Qwen 卸载后 tagger 阶段才 load、不抢显存。
-重依赖（vllm/onnx/imgutils）都在函数内 import，本机 import 本模块、跑 load_items 测试不触发 GPU。
+只收 (id, 图)、不碰 assets。阶段顺序：QwenVlHttpStage（HTTP 调 llama-swap 拿 describe+OCR）→
+TaggerStage（wd14/eva02 onnx + anime_rating + phash）。onnx/imgutils 这些重依赖在函数内 import，
+本机 import 本模块、跑 load_items 测试不触发 GPU。
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+from app.pipeline.qwen_stage import QwenVlEndpoint, QwenVlHttpStage
 
 
 def load_items(assets: list[dict[str, Any]], limit: int = 0) -> list[tuple[str, Image.Image]]:
@@ -41,21 +43,18 @@ def load_items(assets: list[dict[str, Any]], limit: int = 0) -> list[tuple[str, 
 
 
 def build_stages(
-    model_path: str,
     *,
-    with_qwen: bool = True,
+    qwen: QwenVlEndpoint | None,
     with_taggers: bool = True,
     wd14_model_dir: Path | None = None,
     eva02_model_dir: Path | None = None,
 ) -> list[Any]:
-    """组装阶段：Qwen（GPU describe+OCR）+ TaggerStage（onnx/CPU 打标器，工厂延迟构造）。"""
+    """组装阶段：Qwen（HTTP describe+OCR）+ TaggerStage（onnx/CPU 打标器，工厂延迟构造）。"""
     from app.pipeline.orchestrate import TaggerStage
 
     stages: list[Any] = []
-    if with_qwen:
-        from app.pipeline.qwen_stage import QwenVllmStage
-
-        stages.append(QwenVllmStage(model_path))
+    if qwen is not None:
+        stages.append(QwenVlHttpStage(qwen))
     if with_taggers:
         from app.pipeline.cpu_taggers import AnimeRatingTagger, PHashTagger
         from app.pipeline.wd14_tagger import Wd14Tagger
@@ -92,22 +91,42 @@ def main() -> int:
     parser.add_argument("--assets", type=Path, required=True, help="本地缓存图的 assets.jsonl（夹具）")
     parser.add_argument("--out", type=Path, default=Path("data/raw/mvp_pipeline.jsonl"))
     parser.add_argument(
-        "--model",
-        default=os.getenv("TAGGER_QWEN_MODEL_PATH", ""),
+        "--qwen-base-url",
+        default=os.getenv("TAGGER_QWEN_BASE_URL", ""),
+        help="llama-swap 的 OpenAI 兼容根地址，含 /v1 前缀",
     )
+    parser.add_argument("--qwen-model", default=os.getenv("TAGGER_QWEN_MODEL", ""))
+    parser.add_argument("--qwen-concurrency", type=int, default=2, help="并发图片数，对齐服务端 slot 数")
+    parser.add_argument("--qwen-timeout", type=float, default=180.0)
+    parser.add_argument("--qwen-max-vision-tokens", type=int, default=4096)
     parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument("--no-qwen", action="store_true", help="跳过 GPU describe/OCR 阶段（只验 tagger 阶段）")
+    parser.add_argument("--no-qwen", action="store_true", help="跳过 describe/OCR 阶段（只验 tagger 阶段）")
     parser.add_argument("--no-taggers", action="store_true", help="跳过 tagger 阶段（只验 Qwen 阶段）")
     args = parser.parse_args()
-    if not args.no_qwen and not args.model:
-        parser.error("--model or TAGGER_QWEN_MODEL_PATH is required unless --no-qwen is set")
+    if not args.no_qwen and not (args.qwen_base_url and args.qwen_model):
+        parser.error(
+            "--qwen-base-url/--qwen-model (or TAGGER_QWEN_BASE_URL/TAGGER_QWEN_MODEL) "
+            "are required unless --no-qwen is set"
+        )
 
     from app.pipeline.orchestrate import run_pipeline
 
+    qwen = (
+        None
+        if args.no_qwen
+        else QwenVlEndpoint(
+            base_url=args.qwen_base_url,
+            model=args.qwen_model,
+            api_key=os.getenv("TAGGER_QWEN_API_KEY", ""),
+            timeout_seconds=args.qwen_timeout,
+            concurrency=args.qwen_concurrency,
+            max_vision_tokens=args.qwen_max_vision_tokens,
+        )
+    )
     assets = read_jsonl(args.assets)
     items = load_items(assets, limit=args.limit)
     print(f"[load] {len(items)} images", file=sys.stderr, flush=True)
-    stages = build_stages(args.model, with_qwen=not args.no_qwen, with_taggers=not args.no_taggers)
+    stages = build_stages(qwen=qwen, with_taggers=not args.no_taggers)
     rows, dups = run_pipeline(items, stages)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as handle:
