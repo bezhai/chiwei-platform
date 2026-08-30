@@ -23,6 +23,7 @@
 5. 验证完毕后清理：
    - `/ops unbind TYPE=bot KEY=dev`
    - `make undeploy APP=<app> LANE=<lane>`
+   - **部过 lark-service 的话，还要再删一次 `APP=lark-outbound`**。`undeploy` 不像 `deploy` / `release` 那样遍历 sibling（Makefile 里只有那两个有循环），它只删你点名的那一个。漏掉的 `lark-outbound-<lane>` 会在下次测试时继续消费泳道的出站队列，把本该落回 prod 的验证变成假绿。
 
 ## 消息流转链路
 

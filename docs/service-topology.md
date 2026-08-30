@@ -24,7 +24,7 @@
 
 ## 二、服务全景
 
-外部流量(运维浏览器、开发机、QQ 回调)统一从 **api-gateway** 进集群,它按规则把请求分流到对应服务,并盖上泳道 header。**飞书入站是唯一的例外**:lark-service 主动持 websocket 长连到飞书开放平台,事件由飞书推过来,不经 api-gateway(webhook 路由仍然注册着,是长连之外的被动入口)。
+外部流量(运维浏览器、开发机)从 **api-gateway** 进集群,它按规则把请求分流到对应服务,并盖上泳道 header。**两个渠道的入站都不经它**:消息是各自主动持 websocket 长连收下来的——lark-service 连飞书开放平台,qq-gateway 连 QQ 的 bot gateway,平台把事件推过来。(飞书的 `/webhook/{bot}/...` 路由仍然注册着,走 api-gateway 进来,是长连之外的被动入口;QQ 侧在 api-gateway 里没有任何规则。)
 
 ```mermaid
 flowchart TB
@@ -186,7 +186,7 @@ flowchart TB
 
 ### 入站消息怎么进到泳道
 
-渠道消息只从 prod 入口进来(飞书的 websocket 长连只有 prod 部署持;QQ 的回调经 api-gateway 进来时不带泳道,同样落在 prod),所以要有一步把「这条消息属于泳道 X」的消息送到泳道的进程里。这一步就是上面那套路由的一个用例:prod 判出泳道 X 之后,带 `x-ctx-lane: X` 打一次内部 HTTP——飞书是 `POST /api/internal/lark/lane-inbound`,QQ 是 `/api/internal/qq/lane-inbound`,请求体是一个带 lane、bot、trace 和原始事件体的信封。业务代码打的目标就是自己的服务名 `lark-service:3000`,由 sidecar 改写成 `lark-service-ppe-x:3000`,代码里没有任何路由逻辑。
+渠道消息只从 prod 入口进来,两个渠道都是主动建 websocket 长连收下来的:飞书由 lark-service 自己连开放平台(只有 prod 部署持连),QQ 由 qq-gateway 连 QQ 的 gateway、归一化之后 POST 给 channel-server(两跳都在集群内,不经 api-gateway)。所以要有一步把「这条消息属于泳道 X」的消息送到泳道的进程里。这一步就是上面那套路由的一个用例:prod 判出泳道 X 之后,带 `x-ctx-lane: X` 打一次内部 HTTP——飞书是 `POST /api/internal/lark/lane-inbound`,QQ 是 `/api/internal/qq/lane-inbound`,请求体是一个带 lane、bot、trace 和原始事件体的信封。业务代码打的是**自己那个服务的基础服务名**(飞书打 `lark-service:3000`,QQ 打 `channel-server:3000`),由 sidecar 改写成带泳道后缀的名字,代码里没有任何路由逻辑。
 
 三条边界决定了它的失败形状:
 

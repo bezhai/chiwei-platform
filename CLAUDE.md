@@ -54,7 +54,7 @@ apps/
 ### QQ 消息处理
 
 ```
-QQ → api-gateway → qq-gateway:3000 (QQ 协议 → CustomInboundMessage)
+QQ bot gateway --websocket 长连--> qq-gateway (QQ 协议 → CustomInboundMessage)
    → channel-server:3000 (POST /api/internal/qq/inbound)
    → RabbitMQ: chat_request 队列
    → agent-service:8000
