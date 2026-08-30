@@ -28,10 +28,15 @@ class ChatTrigger(Data):
     route_chat_node 进入 graph 后的 (message_id, persona_id) 联合 Key
     在 ChatRequest 上完成。message_id 设 Optional 以容忍 channel-server
     偶发缺字段的 payload 反序列化失败。
+
+    ``channel`` 必填，不跟 message_id 走同一套容忍：它一路透传到
+    ``ChatResponseSegment``，最终决定回复投 ``chat_response_{channel}`` 的哪一条。
+    默认值会把「入站服务漏带 channel」变成静默的错渠道 —— 一条 QQ 消息记成 lark、
+    回复投进飞书队列，QQ 用户收不到，全程不报错。缺字段就在这里报
+    ValidationError，MQ source 会把这条报文打进 DLQ（可查、不重投）。
     """
-    # 来源 channel。agent-service 对它无感知、只透传；默认 "lark" 保证停机
-    # 迁移时 MQ/outbox 残留的旧 payload（不带 channel）反序列化不炸。
-    channel: str = "lark"
+    # 来源 channel。agent-service 对它无感知、只透传。
+    channel: str
     message_id: Annotated[str | None, Key] = None
     session_id: str | None = None
     chat_id: str | None = None
@@ -54,8 +59,12 @@ class ChatRequest(Data):
     transient=False（默认）：runtime 自动建 ``data_chat_request`` 表，
     (message_id, persona_id) 联合 Key 提供 in-graph durable redelivery
     去重。
+
+    ``channel`` 必填，理由同 :class:`ChatTrigger`：它由 route_chat_node 从
+    trigger 透传过来，再往下决定出站队列。这条 Data 走 ``.durable()``，缺
+    channel 的报文会在 durable consumer 反序列化时报 ValidationError 并进 DLQ。
     """
-    channel: str = "lark"
+    channel: str
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     session_id: str | None = None
@@ -94,8 +103,13 @@ class ChatResponseSegment(Data):
         主动发分支据 ``is_proactive`` **不反查来源消息**、直接用 ``chat_id``
         （= 真实 p2p ``common_conversation_id``）+ ``bot_name`` 投递（不靠伪 id，
         见 chat-response-worker 的 is_proactive 出站路径 / task 4）。
+
+    ``channel`` 必填：sink dispatch 按它现算 routing key（``chat_response_{channel}``）。
+    ``channel_route_for_payload`` 已经对缺字段 fail-closed，但那道校验跑在 pydantic
+    填完默认值之后 —— 有默认值时它永远看到 "lark"，拦不住错投，只有把默认值去掉
+    才真的生效（同 :class:`app.domain.safety.Recall`）。
     """
-    channel: str = "lark"
+    channel: str
     message_id: Annotated[str, Key] = ""
     persona_id: Annotated[str, Key] = ""
     part_index: Annotated[int, Key] = 0

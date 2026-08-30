@@ -83,6 +83,7 @@ def _request(*, is_p2p: bool, chat_id="chat-1") -> ChatRequest:
         message_id="m1",
         persona_id="akao",
         session_id="s1",
+        channel="lark",
         chat_id=chat_id,
         is_p2p=is_p2p,
         user_id="u1",
