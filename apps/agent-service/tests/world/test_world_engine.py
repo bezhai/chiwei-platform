@@ -4022,3 +4022,107 @@ def test_world_instruction_enumerates_update_outline_tool():
     assert "克制" in instruction, "必须写「从大纲的线上克制地长出客观事件」"
     # reminder 是软提醒：读完可以不改（决策 3 命门、与 _outline_reminder_text 呼应）。
     assert "提醒" in instruction, "必须说明会有「大纲该回看了」的软提醒"
+
+
+# ---------------------------------------------------------------------------
+# world 是世界事实的唯一来源：act / 自述里捎带的世界事实由 world 按自己的记录确立
+# ---------------------------------------------------------------------------
+
+
+def test_world_instruction_world_owns_facts_claimed_in_acts():
+    """world 引擎老把 life 在 act / 自述里捎带的世界事实（别人发烧、来了电话、门口多了
+    纸条）当既成事实照单吸收——因为纪律③写「act 最硬不能否认」。要分清：act 里「她做了
+    什么」是既成事实；动作里捎带的对世界事实的说法不是她做的事，由 world 回头看自己的
+    记录，有来由就落实、没来由就照世界真实的样子写。"""
+    instruction = engine_mod.world_loop_instruction()
+    assert "说法" in instruction, "指令必须把「她的动作」和「她的说法」分开"
+    assert "来由" in instruction, "指令必须说明捎带的世界事实要按 world 自己的记录看有没有来由"
+    assert "不等于" in instruction, "指令必须点明动作不等于说法"
+    assert ("只有你能确立" in instruction) or ("由你确立" in instruction), (
+        "指令必须点明世界的事实只有 world 能确立"
+    )
+
+
+def test_world_instruction_has_no_medical_examples():
+    """prompt 里「身体 / 客观线」的举例过去清一色是着凉 / 发烧 / 39 度 / 去医院，
+    模型照着例子往生病上编。举例换成非医疗的，指令里不再出现这些医疗字眼。"""
+    instruction = engine_mod.world_loop_instruction()
+    for word in (
+        "发烧", "医院", "急诊", "着凉", "重病", "39 度", "39度", "生病", "难受",
+        "体温", "睁眼", "39",
+    ):
+        assert word not in instruction, f"指令不该再拿医疗场景举例：{word!r}"
+
+
+def test_world_instruction_keeps_direct_results_of_acts():
+    """「动作不等于说法」不能误伤合法 act：她做的动作本身直接造成的结果（把饭端上桌 →
+    桌上有饭）仍是她做的事、照常反映；只有捎带的、不由动作直接产生的世界断言才由 world
+    按来由确立。指令必须把这两类分开写。"""
+    instruction = engine_mod.world_loop_instruction()
+    assert "直接造成的结果" in instruction, "指令必须点明动作直接造成的结果仍算她做的事"
+    assert "端上桌" in instruction, "指令必须给一个动作直接结果的例子（把饭端上桌）"
+
+
+def test_world_instruction_does_not_deny_subjective_feelings():
+    """纪律⑤过去写「没有来由，身体就是好端端的——哪怕她自己或姐妹嘴上说她怎么了」，
+    会让 world 否认她自己报的感受（她说头晕）。设计意图：感受认她的、不否认；感受不自动
+    确立病因 / 体征 / 读数这些客观身体状态。"""
+    instruction = engine_mod.world_loop_instruction()
+    assert "不否认" in instruction, "指令必须写明她自己报的感受不否认"
+    assert "感受" in instruction, "指令必须把「感受」和客观身体状态分开"
+    assert "身体就是好端端的" not in instruction, (
+        "不能再写「身体就是好端端的」——那会让 world 否认她的主观感受"
+    )
+
+
+def test_render_sisters_section_frames_states_as_self_report():
+    """三姐妹段是各人的**自述**：她在做什么、什么状态认她的；她自述里说到世界的事实
+    （别人的身体、发生了什么、有什么东西）以 world 自己的记录为准。原有的 idle 判断例外
+    文案要保住。"""
+    from app.world.engine import _sisters_section
+
+    section = _sisters_section(
+        [
+            (
+                "akao",
+                _life_state(
+                    persona_id="akao",
+                    current_state="在照顾发烧的妹妹",
+                    observed_at="2026-06-15T13:10:00+08:00",
+                ),
+            )
+        ]
+    )
+    assert "自述" in section, "三姐妹段必须框成她们各自的自述、不是世界事实"
+    assert "她自己的感受" in section, "她自己的感受认她的，不由 world 否认"
+    assert "以你自己的记录为准" in section, (
+        "自述里说到的世界事实必须以 world 自己的记录为准"
+    )
+    assert "idle 判断" in section
+    assert "这一个例外" in section
+
+
+def test_world_loop_messages_act_section_marks_claims_for_world_to_settle():
+    """有 act 批时，act 段的框架文案要点明：这里列的是她们各自做了什么；动作里捎带的
+    对世界事实的说法，由 world 按自己的规矩确立。断言落在 act 段内（段标题到动作清单
+    之间），避免命中 world_loop_instruction 正文里的相似措辞。"""
+    from app.world.engine import _sisters_section, _world_loop_messages
+
+    acts = "- akao：给妹妹量了体温，38.9 度。"
+    messages = _world_loop_messages(
+        detail="午后。",
+        detail_written_at="2026-06-10T12:00:00+08:00",
+        now_iso="2026-06-10T14:00:00+08:00",
+        wake_reason="例行看一眼世界。",
+        round_id="r1",
+        arc_narrative=None,
+        sisters_text=_sisters_section([]),
+        outline_narrative=None,
+        act_batch_text=acts,
+    )
+    user_blob = "".join(m.text() for m in messages if m.role == Role.USER)
+    i_header = user_blob.index("【这一批要你推演客观结果的动作")
+    i_acts = user_blob.index(acts)
+    act_frame = user_blob[i_header:i_acts]
+    assert "说法" in act_frame, "act 段框架文案必须点明动作里捎带的说法不是动作本身"
+    assert "由你确立" in act_frame, "act 段框架文案必须点明捎带的世界事实由 world 确立"

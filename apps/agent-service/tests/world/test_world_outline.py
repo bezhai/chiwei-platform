@@ -316,3 +316,11 @@ def test_update_outline_docstring_pins_content_contract():
     # ③ 整篇重写、不是追加、不写流水账
     assert "重写" in doc
     assert "流水账" in doc
+
+
+def test_update_outline_docstring_has_no_medical_example():
+    """update_outline 的边界举例过去是「多难受、什么心情、硬撑还是去医院」，模型照着
+    往生病上编。举例换成非医疗的。"""
+    doc = update_outline.definition.description
+    assert "医院" not in doc, "工具说明不该拿去医院举例"
+    assert "难受" not in doc, "工具说明不该拿难受举例"
