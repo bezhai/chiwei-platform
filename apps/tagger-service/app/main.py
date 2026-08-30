@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from app.pipeline.qwen_stage import QwenVlEndpoint
 from app.pipeline.run_mvp import build_stages
 from app.service.callbacks import callback_url_allowed
 from app.service.auth import bearer_token_allowed
@@ -21,8 +20,6 @@ from app.service.runner import PersistentStageRunner
 from app.service.task_manager import TaskManager
 from app.service.task_store import TaskStore
 from app.settings import Settings, load_settings
-
-logger = logging.getLogger(__name__)
 
 
 class SubmitRequest(BaseModel):
@@ -68,22 +65,34 @@ def _build_reader(settings: Settings) -> MinioObjectReader:
     )
 
 
-def _build_local_inference(settings: Settings, *, with_qwen: bool, with_taggers: bool) -> LocalInferenceService:
-    if with_qwen and not settings.qwen_model_path:
-        raise RuntimeError("TAGGER_QWEN_MODEL_PATH is required for entry role")
+def _build_qwen_endpoint(settings: Settings) -> QwenVlEndpoint:
+    if not settings.qwen_base_url or not settings.qwen_model:
+        raise RuntimeError("TAGGER_QWEN_BASE_URL and TAGGER_QWEN_MODEL are required for entry role")
+    return QwenVlEndpoint(
+        base_url=settings.qwen_base_url,
+        model=settings.qwen_model,
+        api_key=settings.qwen_api_key,
+        timeout_seconds=settings.qwen_timeout_seconds,
+        concurrency=settings.qwen_concurrency,
+        max_new_tokens=settings.qwen_max_new_tokens,
+        max_vision_tokens=settings.qwen_max_vision_tokens,
+    )
+
+
+def _build_local_inference(
+    settings: Settings, *, qwen: QwenVlEndpoint | None, with_taggers: bool
+) -> LocalInferenceService:
     if with_taggers and (settings.wd14_model_dir is None or settings.eva02_model_dir is None):
         raise RuntimeError("TAGGER_WD14_MODEL_DIR and TAGGER_EVA02_MODEL_DIR are required for backend role")
     stages = build_stages(
-        settings.qwen_model_path,
-        with_qwen=with_qwen,
+        qwen=qwen,
         with_taggers=with_taggers,
         wd14_model_dir=settings.wd14_model_dir,
         eva02_model_dir=settings.eva02_model_dir,
     )
-    idle_unload = settings.idle_unload_seconds if with_qwen else None
     return LocalInferenceService(
         reader=_build_reader(settings),
-        runner=PersistentStageRunner(stages, idle_unload_seconds=idle_unload),
+        runner=PersistentStageRunner(stages),
     )
 
 
@@ -97,7 +106,9 @@ async def lifespan(app: FastAPI):
 
     role = settings.role
     if role == "entry":
-        app.state.local_qwen = _build_local_inference(settings, with_qwen=True, with_taggers=False)
+        app.state.local_qwen = _build_local_inference(
+            settings, qwen=_build_qwen_endpoint(settings), with_taggers=False
+        )
         app.state.remote_tagger = RemoteTaggerClient(
             settings.remote_tagger_url,
             auth_token=settings.remote_auth_token,
@@ -116,11 +127,9 @@ async def lifespan(app: FastAPI):
             local_infer_timeout_seconds=settings.local_infer_timeout_seconds,
             exit_on_local_timeout=settings.exit_on_local_timeout,
         )
-        if settings.preload_local_qwen:
-            await _preload_local_qwen_or_exit(app.state.local_qwen, settings)
         await app.state.task_manager.start()
     elif role == "backend":
-        app.state.local_tagger = _build_local_inference(settings, with_qwen=False, with_taggers=True)
+        app.state.local_tagger = _build_local_inference(settings, qwen=None, with_taggers=True)
     else:
         raise RuntimeError(f"unsupported TAGGER_ROLE={role!r}, expected entry or backend")
 
@@ -140,32 +149,14 @@ app = FastAPI(title="tagger-service", version=os.getenv("GIT_SHA", "dev"), lifes
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    # 进程存活探针。模型不在本进程里，所以不再有 model_ready：能不能出结果取决于上游 llama-swap，
+    # 要探那个得往上游发真实推理请求，不适合挂在每次探活上。改成回报配置指向的模型名，
+    # 方便运维确认这台连的是哪个模型。
     settings: Settings = app.state.settings
-    model_ready = None
+    payload: dict[str, Any] = {"status": "ok", "role": settings.role}
     if settings.role == "entry":
-        model_ready = bool(getattr(app.state.local_qwen, "loaded", False))
-    return {"status": "ok", "role": settings.role, "model_ready": model_ready}
-
-
-async def _preload_local_qwen_or_exit(service: LocalInferenceService, settings: Settings) -> None:
-    timeout_seconds = settings.local_infer_timeout_seconds
-    logger.info("preloading local qwen model with timeout %.1fs", timeout_seconds)
-    start = time.perf_counter()
-    try:
-        if timeout_seconds > 0:
-            await asyncio.wait_for(service.preload(), timeout=timeout_seconds)
-        else:
-            await service.preload()
-    except asyncio.TimeoutError:
-        logger.critical(
-            "local qwen preload timed out after %.1fs; forcing process restart=%s",
-            timeout_seconds,
-            settings.exit_on_local_timeout,
-        )
-        if settings.exit_on_local_timeout:
-            os._exit(1)
-        raise
-    logger.info("local qwen model preloaded in %.1fs", time.perf_counter() - start)
+        payload["qwen_model"] = settings.qwen_model
+    return payload
 
 
 @app.post("/api/v1/tagger/submit", response_model=SubmitResponse)

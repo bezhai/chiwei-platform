@@ -11,52 +11,29 @@ logger = logging.getLogger(__name__)
 
 
 class PersistentStageRunner:
-    """Run sync GPU stages serially while keeping loaded models warm between batches."""
+    """串行跑同步阶段，并让已 load 的阶段在批次之间保持热。
 
-    def __init__(self, stages: list[Any], *, idle_unload_seconds: float | None) -> None:
+    第一批到达时才 load（懒加载），之后一直复用；只有 run 抛异常或进程退出时才 unload——
+    异常路径卸载是为了不把半死的阶段状态带进下一批。
+    """
+
+    def __init__(self, stages: list[Any]) -> None:
         self._stages = stages
-        self._idle_unload_seconds = idle_unload_seconds
         self._lock = asyncio.Lock()
         self._loaded = False
-        self._idle_task: asyncio.Task[None] | None = None
-        self._generation = 0
-
-    @property
-    def loaded(self) -> bool:
-        return self._loaded
-
-    async def preload(self) -> None:
-        async with self._lock:
-            self._cancel_idle_timer()
-            try:
-                await asyncio.to_thread(self._ensure_loaded_sync)
-            except Exception:
-                logger.exception("stage runner preload failed; unloading stages before surfacing error")
-                await asyncio.to_thread(self._unload_sync)
-                raise
-            finally:
-                self._generation += 1
-                self._schedule_idle_unload(self._generation)
 
     async def run(self, items: list[tuple[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
         async with self._lock:
-            self._cancel_idle_timer()
             try:
-                rows, dups = await asyncio.to_thread(self._run_sync, items)
+                return await asyncio.to_thread(self._run_sync, items)
             except Exception:
                 logger.exception("stage runner failed; unloading stages before surfacing error")
                 await asyncio.to_thread(self._unload_sync)
                 raise
-            finally:
-                self._generation += 1
-                self._schedule_idle_unload(self._generation)
-            return rows, dups
 
     async def unload(self) -> None:
         async with self._lock:
-            self._cancel_idle_timer()
             await asyncio.to_thread(self._unload_sync)
-            self._generation += 1
 
     def _run_sync(self, items: list[tuple[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
         kept, dups = dedup_ids(items)
@@ -91,22 +68,3 @@ class PersistentStageRunner:
             with contextlib.suppress(Exception):
                 stage.unload()
         self._loaded = False
-
-    def _cancel_idle_timer(self) -> None:
-        if self._idle_task is not None:
-            self._idle_task.cancel()
-            self._idle_task = None
-
-    def _schedule_idle_unload(self, generation: int) -> None:
-        if self._idle_unload_seconds is None or self._idle_unload_seconds <= 0:
-            return
-        self._idle_task = asyncio.create_task(self._idle_unload_after_delay(generation))
-
-    async def _idle_unload_after_delay(self, generation: int) -> None:
-        try:
-            await asyncio.sleep(self._idle_unload_seconds)
-            async with self._lock:
-                if generation == self._generation:
-                    await asyncio.to_thread(self._unload_sync)
-        except asyncio.CancelledError:
-            return

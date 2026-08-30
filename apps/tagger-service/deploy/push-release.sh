@@ -23,7 +23,7 @@ Optional environment:
   TAGGER_DEPLOY_UV_RUN_ARGS Extra arguments inserted after `uv run` in systemd ExecStart.
   TAGGER_DEPLOY_APP_COMMAND Command executed by `uv run`. Default: uvicorn app.main:app --host ${TAGGER_HOST} --port ${TAGGER_PORT}
   TAGGER_DEPLOY_LOCAL_UV_BIN Local uv binary to upload to TAGGER_DEPLOY_UV.
-  TAGGER_DEPLOY_EXTRA      uv extra when syncing deps. Default: qwen for entry, backend-gpu for backend
+  TAGGER_DEPLOY_EXTRA      uv extra when syncing deps. Default: none for entry, backend-gpu for backend
   TAGGER_DEPLOY_VENV       UV_PROJECT_ENVIRONMENT when syncing deps.
   TAGGER_DEPLOY_INSTALL_UNIT 1 to install and enable the systemd unit. Default: 0
   TAGGER_DEPLOY_UNIT_DIR   Remote systemd unit dir. Default: user dir when SYSTEMCTL contains --user.
@@ -67,13 +67,14 @@ if [[ -z "${APP_COMMAND}" ]]; then
   APP_COMMAND='uvicorn app.main:app --host ${TAGGER_HOST} --port ${TAGGER_PORT}'
 fi
 LOCAL_UV_BIN="${TAGGER_DEPLOY_LOCAL_UV_BIN:-}"
+# entry 不再有 GPU 运行时依赖（模型走 HTTP），只有 backend 需要 onnx runtime extra
 EXTRA="${TAGGER_DEPLOY_EXTRA:-}"
-if [[ -z "${EXTRA}" ]]; then
-  if [[ "${ROLE}" == "entry" ]]; then
-    EXTRA="qwen"
-  else
-    EXTRA="backend-gpu"
-  fi
+if [[ -z "${EXTRA}" && "${ROLE}" != "entry" ]]; then
+  EXTRA="backend-gpu"
+fi
+EXTRA_ARG=""
+if [[ -n "${EXTRA}" ]]; then
+  EXTRA_ARG="--extra ${EXTRA}"
 fi
 REMOTE_VENV="${TAGGER_DEPLOY_VENV:-}"
 INSTALL_UNIT="${TAGGER_DEPLOY_INSTALL_UNIT:-0}"
@@ -164,7 +165,7 @@ tagger-service deploy dry-run
   install unit:   ${INSTALL_UNIT}
   unit dir:       ${UNIT_DIR}
   sync deps:      ${SYNC_DEPS}
-  uv extra:       ${EXTRA}
+  uv extra:       ${EXTRA:-<none>}
   uv binary:      ${UV_BIN}
   uv index url:   ${UV_INDEX_URL:-<not set>}
   uv run args:    ${UV_RUN_ARGS:-<not set>}
@@ -264,9 +265,9 @@ if [[ "${SYNC_DEPS}" == "1" ]]; then
     UV_SYNC_ENV="UV_INDEX_URL=${UV_INDEX_URL}"
   fi
   if [[ -n "${REMOTE_VENV}" ]]; then
-    ssh ${SSH_OPTS} "${HOST}" "cd ${REMOTE_RELEASE} && UV_PROJECT_ENVIRONMENT=${REMOTE_VENV} ${UV_SYNC_ENV} ${UV_BIN} sync --extra ${EXTRA}"
+    ssh ${SSH_OPTS} "${HOST}" "cd ${REMOTE_RELEASE} && UV_PROJECT_ENVIRONMENT=${REMOTE_VENV} ${UV_SYNC_ENV} ${UV_BIN} sync ${EXTRA_ARG}"
   else
-    ssh ${SSH_OPTS} "${HOST}" "cd ${REMOTE_RELEASE} && ${UV_SYNC_ENV} ${UV_BIN} sync --extra ${EXTRA}"
+    ssh ${SSH_OPTS} "${HOST}" "cd ${REMOTE_RELEASE} && ${UV_SYNC_ENV} ${UV_BIN} sync ${EXTRA_ARG}"
   fi
 fi
 

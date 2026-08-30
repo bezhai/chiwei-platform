@@ -22,10 +22,6 @@ backend-gpu = [
     "nvidia-cudnn-cu12>=9,<10",
     "onnxruntime-gpu>=1.20.0",
 ]
-qwen = [
-    "transformers==4.57.1",
-    "vllm==0.11.0",
-]
 
 [build-system]
 requires = ["hatchling"]

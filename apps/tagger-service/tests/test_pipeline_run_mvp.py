@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from PIL import Image
 
-from app.pipeline.run_mvp import load_items
+from app.pipeline.qwen_stage import QwenVlEndpoint, QwenVlHttpStage
+from app.pipeline.run_mvp import build_stages, load_items
 
 
 def _make_img(path, color=(200, 100, 50)) -> None:
@@ -50,3 +51,15 @@ def test_load_items_skips_missing_and_corrupt(tmp_path) -> None:
     items = load_items(assets)
     # 坏图/缺图/缺路径都跳过、不崩，只留好图
     assert [image_id for image_id, _ in items] == ["good"]
+
+
+def test_build_stages_uses_http_qwen_stage() -> None:
+    endpoint = QwenVlEndpoint(base_url="http://llama-swap.invalid:8088/v1", model="qwen3-vl-8b")
+    stages = build_stages(qwen=endpoint, with_taggers=False)
+    assert len(stages) == 1
+    assert isinstance(stages[0], QwenVlHttpStage)
+    assert stages[0].endpoint is endpoint
+
+
+def test_build_stages_without_qwen_is_empty() -> None:
+    assert build_stages(qwen=None, with_taggers=False) == []

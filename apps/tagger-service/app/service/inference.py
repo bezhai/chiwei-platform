@@ -13,13 +13,6 @@ class LocalInferenceService:
         self._reader = reader
         self._runner = runner
 
-    @property
-    def loaded(self) -> bool:
-        return self._runner.loaded
-
-    async def preload(self) -> None:
-        await self._runner.preload()
-
     async def infer_paths(self, paths: list[str]) -> dict[str, Any]:
         unique_paths, dups = dedup_paths(paths)
         loaded = await asyncio.to_thread(load_images_from_paths, unique_paths, self._reader)

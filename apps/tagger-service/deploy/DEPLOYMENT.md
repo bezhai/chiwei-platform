@@ -166,4 +166,4 @@ TAGGER_DEPLOY_EXTRA=backend-gpu \
 apps/tagger-service/deploy/push-release.sh
 ```
 
-For entry, use `TAGGER_DEPLOY_EXTRA=qwen`. Keep CUDA/vLLM compatibility pinned in the host venv; do not rely on containers to hide driver mismatches.
+For entry, leave `TAGGER_DEPLOY_EXTRA` unset: the entry role only talks HTTP to llama-swap and needs no GPU runtime extra.
