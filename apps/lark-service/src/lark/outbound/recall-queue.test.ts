@@ -238,8 +238,8 @@ describe('fail-closed — 不是飞书的撤回一律拒绝', () => {
 
             await c.push(message('m1', payload({ channel })));
 
-            // requeue 会让两个服务把同一条消息推来推去，压成活锁；prod 队列挂着 DLX，
-            // 丢过去还能查、能重放。
+            // requeue 只是把消息原样退回这条队列，下一轮还是本进程拿到，在这里转圈；
+            // prod 队列挂着 DLX，丢过去还能查、能重放。
             expect(c.amqp.nacked).toEqual([{ id: 'm1', requeue: false }]);
             expect(c.amqp.acked).toEqual([]);
             expect(traced.touched).toEqual([]);
@@ -323,8 +323,8 @@ describe('延时重投', () => {
     const retrying: LarkRecallOutcome = { kind: 'retry', delayMs: 5000, retryCount: 1 };
 
     it('投回**同 channel** 的队列，带上延时，然后 ACK 原消息', async () => {
-        // 投回不带 channel 维度的老队列等于把消息倒退回共享队列，那边的消费者是
-        // channel-server。
+        // 投回不带 channel 维度的基础 `recall` 队列，消息就落在一条没有任何消费者的
+        // 队列上静默滞留 —— 撤回只有本服务消费，而它只订分区后的那条。
         const c = startConsumer(async () => retrying);
 
         await c.push(message('m1', payload()));

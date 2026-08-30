@@ -256,8 +256,8 @@ describe('消费开关 — 默认关，且读不到时不许自己变宽', () =>
     });
 
     it('配置读不到（抛异常）时按关处理 —— 绝不回落成"打开"', async () => {
-        // 变宽的后果是静默的：cutover 窗口里 channel-server 仍然订阅着同一条飞书
-        // 队列，两个消费者守着它，RabbitMQ 轮询把回复随机劈成两半。不报错、不留痕。
+        // 回落成"打开"等于让一次配置读取失败替操作者做决定：paas-engine 抖一下，
+        // 这个进程就自己开始消费出站队列了。不报错、不留痕。
         const c = await startConsumer({
             readConsumeSwitch: async () => {
                 throw new Error('paas-engine unreachable');
@@ -304,11 +304,9 @@ describe('消费开关 — 默认关，且读不到时不许自己变宽', () =>
 
 describe('开关翻动 — 原地增订 / 原地移交，不重启进程', () => {
     it('从关翻到开：同一个进程当场开始消费，队列里的消息立刻被处理', async () => {
-        // 决策九的交接是「旧消费者 drain → 新消费者接手」，中间既不能重叠也不能有
-        // 空窗。启动时读一次开关的话两条路都走不通：先起新的会和还没 drain 的
-        // channel-server 抢同一条队列；先 drain 再起新的，则新进程连 PG / bot 目录 /
-        // Redis / MQ 的这段时延就是空窗 —— 泳道队列带 10s TTL，堆过去就被 DLX 弹回
-        // prod，泳道的回复从 prod 实例发出去。
+        // 靠重启来订阅走不通：进程连 PG / bot 目录 / Redis / MQ 的这段初始化时延就是
+        // 队列没人消费的空窗 —— 泳道队列带 10s TTL，堆过去就被 DLX 弹回 prod，泳道的
+        // 回复从 prod 实例发出去。所以依赖先预热好、开关翻开之后原地开始消费。
         const c = await startConsumer({ switchValue: 'false' });
         expect(c.subscribed).toBeNull();
 
@@ -468,8 +466,8 @@ describe('fail-closed — 不是飞书的消息一律拒绝', () => {
 
         await c.push(message('m1', larkResponse({ channel: 'qq' })));
 
-        // requeue 会让两个服务把同一条消息推来推去，压成活锁；prod 队列挂着 DLX，
-        // 丢过去还能查、能重放。
+        // requeue 只是把消息原样退回这条队列，下一轮还是本进程拿到，在这里转圈；
+        // prod 队列挂着 DLX，丢过去还能查、能重放。
         expect(c.amqp.nacked).toEqual([{ id: 'm1', requeue: false }]);
         expect(c.amqp.acked).toEqual([]);
         expect(traced.touched).toEqual([]);
