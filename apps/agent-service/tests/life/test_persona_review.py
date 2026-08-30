@@ -1047,6 +1047,20 @@ def test_instruction_has_no_hardcoded_plot_facts():
     assert not any(ch.isdigit() for ch in instruction)
 
 
+def test_instruction_keeps_transient_states_out_of_identity():
+    """短期的事不是身份：一阵子的病、临时安排、还在等结果的事是日子里的事件，
+    不写进身份正文；底稿里还留着的短期状态要拿掉。实证：一次发烧被写进身份正文
+    后，每轮唤醒都当自我认知读，病情从事件固化成了身份。拿掉的依据只能是它本身
+    短期、或证据表明它已结束——不能把"这段日子没再提到"当成结束的证据；有期限
+    的人生阶段（一个学期、一个暑假）仍可能是身份。"""
+    instruction = pr_mod.persona_review_instruction()
+    assert "短期的事不是身份" in instruction
+    assert "拿掉" in instruction
+    assert "不是因为这段日子没再提到" in instruction
+    assert "仍可能是身份" in instruction
+    assert "没有它的下文就是它过去了" not in instruction
+
+
 # ---------------------------------------------------------------------------
 # diff 推送接线（Task 3）：核验成功之后才推；失败路径绝不推；push 异常不回传
 # ---------------------------------------------------------------------------

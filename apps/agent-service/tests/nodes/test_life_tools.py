@@ -1232,6 +1232,98 @@ def test_act_description_steers_online_to_real_hands():
     assert ("编" in desc) or ("假" in desc), "act 文案要点破用 act 假装上网是自己编的"
 
 
+def test_act_description_forbids_announcing_world_results():
+    """act 文案：act 里只说你做了什么，别替世界宣布结果。
+
+    实证问题：life 在 act 描述里把「量到多少度」「对方现在怎么样」这类世界事实一并写
+    进去，world 把它们当既成事实吸收。world 侧改成「动作里捎带的世界事实由 world 按自己
+    的记录确立」，life 侧文案对偶讲清：写进去了，世界也只认你做了的那件事。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    assert "替世界" in desc and "宣布" in desc, "act 文案应点明别替世界宣布结果"
+    assert "只认你做了" in desc, "act 文案应说明世界只认你做了的那件事"
+
+
+def test_act_description_keeps_direct_results_in_act():
+    """act 文案：动作本身直接造成的结果（把饭端上桌、把窗推开）是她做的事的一部分，
+    act 里应该说完整；只有不由动作直接产生的世界断言才不该写。
+
+    上一版「别替世界宣布结果」没分清这两层，会把她的动作描述掐得只剩半句。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    assert "直接造成的结果" in desc, "act 文案应点明动作直接造成的结果也算在 act 里"
+    assert "端上桌" in desc, "act 文案应给出「把饭端上桌」这类直接结果的例子"
+
+
+def test_act_description_no_longer_calls_whole_act_objective_fact():
+    """act 文案 first-landed-wins 段：world 推演依据的是首次落库的「动作描述」，
+    不再把整条 act 说成「客观事实」——那是旧口径，与「world 只认你做了的那件事」矛盾。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["act"].definition.description
+    assert "客观事实以首次落库" not in desc, "act 文案不该再把整条 act 当客观事实"
+    assert "动作描述以首次落库" in desc, "first-landed-wins 段应改成以首次落库的动作描述为准"
+
+
+def test_update_life_state_description_scopes_to_own_state():
+    """update_life_state 文案：这里记的是你自己的状态；别人怎么样、外面发生了什么不归你在这里记成事实。"""
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    desc = tools["update_life_state"].definition.description
+    assert "自己的状态" in desc
+    assert "别人怎么样" in desc
+    assert "不归你" in desc
+
+
+def test_life_tool_descriptions_have_no_medical_examples():
+    """守门：act / update_life_state / chat 文案不带医疗类示例（发烧 / 医院 / 急诊 / 生病）。
+
+    这类示例进了工具描述会被模型当成"世界里正常会发生的事"照着编，是「千凪姐发烧、
+    小奈打 120」这条脏剧情的输入源之一。
+    """
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3",
+            persona_id="akao",
+            act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    for name in ("act", "update_life_state", "chat"):
+        desc = tools[name].definition.description
+        for word in ("发烧", "医院", "急诊", "生病", "体温", "多少度"):
+            assert word not in desc, f"{name} 文案不该出现医疗示例词「{word}」"
+
+
 def lt_speech_kind() -> str:
     """speech event 的 kind 常量（让测试与实现共用同一来源，不硬编码字面量）。"""
     return lt.EVENT_KIND_SPEECH

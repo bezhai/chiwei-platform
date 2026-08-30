@@ -1074,3 +1074,14 @@ def test_world_tools_are_notify_update_world_update_outline_sense_npc_visit_slee
         npc_visit,
         sleep,
     ]
+
+
+def test_update_world_docstring_pins_world_owns_claimed_facts():
+    """update_world 的 docstring（喂给 LLM 的工具说明）必须钉死：动作里捎带的世界事实
+    （别人的身体状况、来电、物件、测出的数值）不是动作本身，由 world 按自己的记录确立
+    ——有来由就落实，没来由就写出世界真实的样子，她的说法留在她那里。"""
+    doc = update_world.definition.description
+    assert "来由" in doc, "必须写明捎带的世界事实要看 world 自己记录里有没有来由"
+    assert "说法" in doc, "必须把「她的说法」和「她做的事」分开"
+    assert "直接造成的结果" in doc, "动作直接造成的结果仍是动作的一部分、照常反映"
+    assert "物件" not in doc, "「物件」会把动作直接造成的结果（桌上有饭）也误伤成说法"
