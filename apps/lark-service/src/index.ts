@@ -1,5 +1,5 @@
 /**
- * lark-service 进程入口：把真实的基础设施单例接到启动序列上，然后开三个入口。
+ * lark-service 进程入口：把真实的基础设施单例接到启动序列上，然后开三个入站入口。
  *
  * 这个文件是唯一持有全局单例的地方。别的模块都只接口子（见 startup.ts 的
  * LarkBackends、server/app.ts 的 BotRoster、lark/inbound.ts 的 LarkInboundPorts），
@@ -27,7 +27,7 @@ import { postgresEmojiCatalog, type LarkEmojiCatalog } from './lark/emoji/catalo
 import { httpEmojiSource, syncLarkEmojis } from './lark/emoji/sync';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
 import {
-    handOffOverRabbit,
+    handOffToInboundLane,
     inboundLaneDispatchEnabled,
 } from './lark/ingress/lane-handoff';
 import { holdsLarkWebSockets, type LarkWebSockets } from './lark/ingress/websocket';
@@ -101,7 +101,15 @@ function realProjection(store: LarkStore): LarkInboundDeps {
         laneDispatchEnabled: inboundLaneDispatchEnabled,
         laneOf: (channel, botGlobalId, commonConversationId) =>
             getLaneBindingResolver().resolveLane(channel, botGlobalId, commonConversationId),
-        handOffToLane: handOffOverRabbit,
+        // 交接走内网 HTTP：路由器按目标泳道注 x-ctx-lane，sidecar 解析目标；泳道的
+        // Service 不存在时它把请求打回 prod 自己，那一支由本进程的交接端点接住。
+        // INNER_HTTP_SECRET 由 loadConfig 在启动期保证存在，这里不兜底 —— 兜成空串
+        // 只会让接收端回 401，比起不来更难查。
+        handOffToLane: (envelope) =>
+            handOffToInboundLane(
+                { fetcher: laneRouter(), innerSecret: process.env.INNER_HTTP_SECRET as string },
+                envelope,
+            ),
         withMessageLock: larkMessageLock(redisMessageLockStore(getRedisClient)),
     };
 }
@@ -231,6 +239,8 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise
 
     return createLarkInbound({
         roster: botDirectory,
+        // 本进程所在泳道。只用来在交接端点上回报"接住它的是谁"（见 lark/inbound.ts）。
+        lane: getLane() ?? 'prod',
         personaName,
         record: (payload) => eventLog.insertOne(payload as Document),
         onMessage: (reading, event) =>
@@ -310,20 +320,16 @@ async function main(): Promise<void> {
 
     // 入口一：webhook。被动 —— 路由注册上了不代表有流量，实际指向哪个服务由
     // api-gateway 的规则决定。
+    //
+    // 入口三：泳道交接的接收端点，跟 webhook 一起挂在这个 app 上（见 server/app.ts）。
+    // **每个部署都挂，prod 也挂** —— 泳道的 Service 不存在时 sidecar 把交接打回 prod
+    // 自己，那一支就由 prod 上的这个端点接住。
     const app = createLarkServiceApp({
         bots: botDirectory,
         inbound,
         ingress: () => sockets?.status() ?? NO_WEBSOCKETS,
     });
     Bun.serve({ port: config.port, fetch: app.fetch });
-
-    // 入口三：泳道信封队列。只有泳道部署才消费；prod 不消费（prod 是投递方）。
-    // ⚠️ RabbitMQ 是竞争消费：同一条泳道上如果 channel-server 也还订阅着这个队列，
-    // 消息会被两边各分走一半。谁订阅是切换动作的一部分，代码保证不了。
-    const lane = getLane();
-    if (lane) {
-        await inbound.consumeLane(lane);
-    }
 
     // 定时任务归这个进程，不归 lark-outbound：出站可以多副本，每个副本各起一份 cron
     // 就是往那个写死的飞书群发 N 遍日报、按小时重复覆写同一张共享表（见 schedule.ts）。

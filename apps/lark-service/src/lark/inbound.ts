@@ -1,18 +1,16 @@
 // 飞书入站的装配根：三个入口在这里接到同一层解析上。
 //
-//   webhook（被动，HTTP）─┐
-//   长连（主动，WS）     ─┼─▶ LarkEvent ─▶ 处理表 ─▶ 解析层 ─▶ onMessage
-//   泳道队列（重放，MQ） ─┘
+//   webhook（被动，HTTP）   ─┐
+//   长连（主动，WS）        ─┼─▶ LarkEvent ─▶ 处理表 ─▶ 解析层 ─▶ onMessage
+//   泳道信封（交接，HTTP）  ─┘
 //
-// 三条传输各有各的信封和各自的失败语义（见 ingress/ 下三个文件），但**解析只有一
+// 三条传输各有各的信封和各自的失败语义（见 ingress/ 下几个文件），但**解析只有一
 // 份**：同一条飞书消息不管从哪条路进来，交出去的领域对象逐字段相同。
 //
 // 处理表是这里建的一个普通对象。想认领新的事件类型（群成员变化、卡片回调……）就
 // 往表里加一项 —— 不需要装饰器、不需要注册表、不需要 import 顺序。
 
 import type { Hono } from 'hono';
-
-import type { InboundLaneClaims } from '@inner/shared/inbound-lane-claim';
 
 import { createLarkBotLookup, type LarkBotRoster, type LarkPersonaName } from './bot-lookup';
 import { LARK_CHANNEL } from './channel';
@@ -24,7 +22,7 @@ import {
     type LarkEvent,
     type LarkEventHandlers,
 } from './ingress/lark-event';
-import { startInboundLaneConsumer, type LaneChannel } from './ingress/lane-queue';
+import { registerLarkLaneInbound } from './ingress/lane-inbound';
 import { registerLarkWebhook } from './ingress/webhook';
 import {
     openLarkWebSockets,
@@ -41,6 +39,13 @@ import type { LarkMessageEvent } from './message/wire';
 export interface LarkInboundPorts {
     /** 本进程负责哪些 bot。 */
     roster: LarkBotRoster;
+    /**
+     * 本进程所在泳道（prod 部署是 'prod'）。
+     *
+     * **不参与任何路由决定** —— 交接来的信封带着自己的泳道，本进程只是执行者。它唯一
+     * 的用处是在接收端点上回报"接住这次交接的是谁"，投递方据此看出交接落回了 prod。
+     */
+    lane: string;
     /** persona_id → 人设展示名，启动时读一次（见 persona-names.ts）。 */
     personaName: LarkPersonaName;
     /** 原始报文落库，只为可追溯。 */
@@ -68,18 +73,10 @@ export interface LarkInbound {
      */
     openWebSockets(createClient?: LarkWebSocketClientFactory): Promise<LarkWebSockets>;
     /**
-     * 入口三：消费本泳道的信封队列。切换期间是两条队列（分区前的共享队列 + 按 channel
-     * 分区的新队列），订阅哪些见 ingress/lane-queue.ts。
+     * 入口三：接住 prod 交接过来的泳道信封。**每个部署都要挂**（prod 也挂）——
+     * 泳道的 Service 不存在时 sidecar 会把交接打回 prod 自己，那时接住它的就是这里。
      */
-    consumeLane(
-        lane: string,
-        deps?: {
-            amqp?: LaneChannel;
-            claims?: InboundLaneClaims;
-            wait?: (ms: number) => Promise<void>;
-            channelQueueEnabled?: () => Promise<boolean>;
-        },
-    ): Promise<void>;
+    registerLaneInbound(app: Hono): void;
 }
 
 export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
@@ -89,9 +86,9 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
         'im.message.receive_v1': async (event) => {
             const reading = readLarkMessageEvent(event.payload as LarkMessageEvent, bots);
             if (!reading) {
-                // 报文里没有 message_id：这个载荷不是一条消息，重试多少次都一样。
-                // 说成"永久失败"而不是静默跳过 —— 队列那条路要靠这个区分决定丢还是
-                // 重投，当成成功 ACK 掉就是又一条静默丢失。
+                // 报文里没有 message_id：这个载荷不是一条消息，重发多少次都一样。
+                // 抛出去而不是静默跳过 —— 交接那条路要靠它变成非 2xx，当成处理成功
+                // 应答就是又一条静默丢失。
                 throw new UnprocessableLarkEvent(
                     'lark event payload carries no message id; it is not a message event',
                 );
@@ -133,22 +130,17 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
             return openLarkWebSockets(wsBots, createClient);
         },
 
-        // 泳道信封不过 sinkFor：它是重放，审计在它第一次进来时就记过了，而且这条路上
-        // 失败要让 MQ 知道，不能像飞书那两个入口一样吞掉。
+        // 交接来的信封不过 sinkFor：它是重放，审计在它第一次进来时就记过了；而且这条
+        // 路上失败必须原样抛出去变成非 2xx，投递方据此判定投递失败 —— 像飞书那两个入口
+        // 那样"先应答再异步处理"就是一条静默丢失。
         //
-        // scope 同时是分区维度和防线（见 lane-queue.ts 顶部）：channel + lane 决定订
-        // 阅哪条分区队列，也决定共享队列上哪些信封该退回去。handles 直接取处理表的键，
-        // 所以"本服务认领了哪些事件"不会跟处理表脱节。
-        consumeLane(lane, deps) {
-            return startInboundLaneConsumer(
-                {
-                    channel: LARK_CHANNEL,
-                    lane,
-                    handles: (eventType) => handlers[eventType] !== undefined,
-                },
+        // handles 直接取处理表的键，所以"本服务认领了哪些事件"不会跟处理表脱节。
+        registerLaneInbound(app) {
+            registerLarkLaneInbound(app, {
+                lane: ports.lane,
+                handles: (eventType) => handlers[eventType] !== undefined,
                 deliver,
-                deps,
-            );
+            });
         },
     };
 }

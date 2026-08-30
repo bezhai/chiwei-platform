@@ -28,11 +28,14 @@ sequenceDiagram
   App->>Runtime: initializeChannelRuntimes()
   App->>Runtime: runChannelInitializers()
   App->>MQ: connect() + declareTopology()
-  App->>MQ: startInboundLaneConsumer()（仅泳道部署）
   App->>Runtime: startDirectIngresses()（按 channel 策略）
   App-->>App: start()
   App->>HTTP: start() (各 channel runtime 注册 http ingress)
 ```
+
+启动序列不按泳道分叉：泳道交接的接收端是一条 HTTP 路由，由各 channel runtime 的
+`registerHttpIngress` 跟自己的原始入站端点一起挂上，**每个部署都挂**（prod 也挂）——
+目标泳道的 Service 不存在时 lane-sidecar 会把交接打回 prod 自己。
 
 ## 关键职责
 

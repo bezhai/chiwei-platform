@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'bun:test';
 import type { BotConfig } from '@inner/shared/entities';
 
-import { createLarkServiceApp, type BotRoster, type IngressStatus, type WebhookMount } from './app';
+import { createLarkServiceApp, type BotRoster, type IngressStatus, type InboundRoutes } from './app';
 
-// webhook 路由由飞书入站装配根挂上来，HTTP 层只提供挂载点。
-function inboundThatMounts(paths: string[]): WebhookMount {
+// 入站路由由飞书入站装配根挂上来，HTTP 层只提供挂载点。
+function inboundThatMounts(paths: string[], lanePath = '/lane-inbound-probe'): InboundRoutes {
     return {
         registerWebhooks(app) {
             for (const path of paths) app.post(path, (c) => c.json({ mounted: path }));
+        },
+        registerLaneInbound(app) {
+            app.post(lanePath, (c) => c.json({ mounted: lanePath }));
         },
     };
 }
@@ -134,6 +137,13 @@ describe('the app is a mount point for the lark ingress routes', () => {
         expect((await app.request('/webhook/chiwei/card', { method: 'POST' })).status).toBe(200);
     });
 
+    // 泳道交接的接收端点跟 webhook 挂在同一层中间件之后：它也要 trace、错误处理和
+    // 指标，尤其是错误处理 —— 处理失败要变成 500，投递方据此判定投递失败。
+    it('lets the Lark inbound mount its lane handoff endpoint', async () => {
+        const app = appWith([]);
+
+        expect((await app.request('/lane-inbound-probe', { method: 'POST' })).status).toBe(200);
+    });
 });
 
 // 切流判据读的是这里。"进程起来了"和"真的在接飞书事件"必须分得开：SDK 的长连

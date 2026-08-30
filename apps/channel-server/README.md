@@ -43,15 +43,16 @@ There are two related plugin surfaces.
 - `parseCredentials`: interpret `bot_config.credentials` for that channel.
 
 `ChannelRuntime` (defined in `@plugins/runtime`) is the startup-facing runtime contract.
-Every member except `channel` is optional; the QQ runtime only implements the two marked
+Every member except `channel` is optional; the QQ runtime only implements the one marked
 below.
 
 - `initialize`: initialize platform SDK clients or other channel runtime state.
 - `runInitializers`: run optional channel data initializers on boot.
 - `registerHttpIngress` (QQ): register passive HTTP ingress routes for that channel's bots.
+  This is also where the lane handoff endpoint is mounted — every deployment mounts it,
+  prod included.
 - `startDirectIngress`: start active ingress such as WebSocket clients for that channel's
   WS bots.
-- `handleInboundLaneEnvelope` (QQ): consume lane-dispatched inbound events by channel.
 - `shutdown`: close runtime-owned long-lived resources.
 
 Each channel registers both surfaces from its plugin entrypoint. Startup imports
@@ -70,20 +71,22 @@ flowchart LR
   OutboundWorker --> Cap[ChannelPlugin capabilities]
   Cap --> Platform
 
-  Runtime -. lane envelope with channel .-> Lane[Inbound lane consumer]
-  Lane --> Runtime
+  Runtime -. lane envelope over internal HTTP .-> Sidecar[lane-sidecar]
+  Sidecar --> Runtime
 ```
 
 Outbound workers do not import any platform helper. They select the plugin by
 `payload.channel`, resolve common IDs through plugin capabilities, and let the channel
 implementation render rich content and record platform-specific mappings.
 
-Inbound lane envelopes must carry `channel`; an envelope without one is rejected rather
-than guessed at. Guessing used to default to `lark`, which was correct only while Feishu
-was the sole user of the queue — after the split a guessed channel would either park the
-envelope on a queue this service never consumes, or write `lark-service`'s "already
-handled" marker for it. Both fail silently. See `envelopeChannel` in
-`infrastructure/integrations/inbound-lane.ts`.
+When prod decides an inbound message belongs to lane X, it POSTs the envelope to
+`/api/internal/{channel}/lane-inbound` with `x-ctx-lane: X` and lets `lane-sidecar`
+resolve the target. Two rules on that path are load-bearing: the envelope's own `lane`
+(not the header) is what the receiver builds its context from, and an envelope without
+the `handed_off` marker is rejected — when the target lane has no Service the sidecar
+hands the request back to prod itself, so an unmarked envelope would be routed through
+lane resolution again, forever. See `infrastructure/integrations/lane-envelope.ts` for
+the wire shape and `plugins/qq/lane-inbound.ts` for the receiving end.
 
 ## Startup Flow
 
@@ -94,7 +97,6 @@ sequenceDiagram
   participant Bot as multiBotManager
   participant Runtime as ChannelRuntimes
   participant MQ as RabbitMQ
-  participant Lane as InboundLaneConsumer
   participant HTTP as HttpServerManager
 
   App->>DB: initialize()
@@ -102,7 +104,6 @@ sequenceDiagram
   App->>Runtime: initialize()
   App->>Runtime: runInitializers()
   App->>MQ: connect() + declareTopology()
-  App->>Lane: start when DEPLOYMENT_LANE is set
   App->>Runtime: startDirectIngress(websocket bots)
   App->>HTTP: start()
   HTTP->>Runtime: registerHttpIngress(http bots)

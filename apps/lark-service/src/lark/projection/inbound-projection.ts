@@ -13,7 +13,12 @@
 //        ├─ 2. 泳道分叉   这条该由哪条泳道处理        → 不是本进程就交出去，到此为止
 //        └─ 3. 落账       消息本身                    → common_message + lark_message（同事务）
 //
-// ## 顺序里两个不明显但要紧的点
+// ## 顺序里三个不明显但要紧的点
+//
+// **交接在锁外执行。** 锁只覆盖 1、2、3 —— 判定要 common_conversation_id，所以判定
+// 留在锁内；交出去这个动作本身不碰本进程的任何一张表，放在锁里只会白占租约。而这把
+// 锁在 Redis 上、prod 与泳道进程共用同一个（见 message-lock.ts），交接一旦是同步等待
+// 接收端返回的调用，接收端重走投影就会去抢同一个 om_id 的锁，两边互等到窗口超时。
 //
 // **身份对应在分叉之前。** 所以即使这条消息随后被交给泳道，本进程的库里也已经留下
 // 了用户行和会话行。这不是疏忽：分叉要按 common_conversation_id 查绑定，不先建
@@ -55,7 +60,7 @@ import { context } from '@inner/shared/middleware';
 
 import { LARK_CHANNEL } from '../channel';
 import { chooseInboundLane } from '../ingress/lane-handoff';
-import type { InboundLaneEnvelope } from '../ingress/lane-queue';
+import type { InboundLaneEnvelope } from '../ingress/lane-envelope';
 import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkMessageReading } from '../message/read-message-event';
 import type { LarkInboundMessage } from '../message/parse-message';
@@ -122,6 +127,14 @@ export type LarkInboundOutcome =
     | { kind: 'handed-off'; lane: string }
     | ({ kind: 'recorded' } & LarkRecordedInbound);
 
+/**
+ * 锁内那一段的产出。`hand-off` 是「判完了，信封已经备好，等着在锁外投出去」——
+ * 它不出这个文件，调用方看到的仍然是 LarkInboundOutcome 的 `handed-off`。
+ */
+type ProjectedInbound =
+    | { kind: 'hand-off'; envelope: InboundLaneEnvelope }
+    | ({ kind: 'recorded' } & LarkRecordedInbound);
+
 /** 落账之后交给规则段的东西：公共层那组 id，加上指令层要用的飞书事实。 */
 export interface LarkRecordedInbound {
     projection: LarkInboundProjection;
@@ -152,29 +165,51 @@ export async function projectLarkInbound(
     reading: LarkMessageReading,
     event: LarkEvent,
 ): Promise<LarkInboundOutcome> {
-    // 锁住整条投影而不只是落账那一段：并发的几个 bot 必须看到同一份"这条消息已经
-    // 有 common_message_id 了没有"，否则它们会各铸一个。
-    return deps.withMessageLock(reading.message.messageId, async () => {
-        // 飞书的消息事件里**没有发送者的名字**，也没有群名。两者都要回查飞书侧的
-        // 档案表（它们由群成员事件和定时同步维护）。查一次，身份对应和落账都用它。
-        const known = await lookUpKnownFacts(deps.store, reading.message);
-        const { projection, commands } = await registerCommonIdentities(
-            deps,
-            reading,
-            event,
-            known,
-        );
+    const projected = await deps.withMessageLock(reading.message.messageId, () =>
+        projectUnderLock(deps, reading, event),
+    );
+    if (projected.kind !== 'hand-off') return projected;
 
-        const choice = await chooseInboundLane({
-            dispatchEnabled: await deps.laneDispatchEnabled(),
-            currentLane: deps.currentLane,
-            laneOf: () =>
-                deps.laneOf(LARK_CHANNEL, event.botName, projection.commonConversationId),
-        });
-        if (choice.handOff) {
-            // 投递失败往上抛（fail-closed）：吞掉就是这条消息谁也没处理，而且没有
-            // 任何信号 —— 飞书那侧早就应答过了，平台不会再推一次。
-            await deps.handOffToLane({
+    // 锁已经还掉了才交出去，理由见文件顶部。投递失败往上抛（fail-closed）：吞掉就是
+    // 这条消息谁也没处理，而且没有任何信号 —— 飞书那侧早就应答过了，平台不会再推一次。
+    const { envelope } = projected;
+    await deps.handOffToLane(envelope);
+    console.info(
+        `[lark-projection] handed off to lane=${envelope.lane} ` +
+            `event=${event.type} message=${envelope.global_message_id}`,
+    );
+    return { kind: 'handed-off', lane: envelope.lane };
+}
+
+/**
+ * 锁内的那一段：投影、身份落账、以及"这条归谁"的判定。
+ *
+ * 锁住整条投影而不只是落账那一段：并发的几个 bot 必须看到同一份"这条消息已经有
+ * common_message_id 了没有"，否则它们会各铸一个。判定也在里面 —— 它要
+ * registerCommonIdentities 产出的 commonConversationId 才能查绑定。
+ */
+async function projectUnderLock(
+    deps: LarkInboundDeps,
+    reading: LarkMessageReading,
+    event: LarkEvent,
+): Promise<ProjectedInbound> {
+    // 飞书的消息事件里**没有发送者的名字**，也没有群名。两者都要回查飞书侧的
+    // 档案表（它们由群成员事件和定时同步维护）。查一次，身份对应和落账都用它。
+    const known = await lookUpKnownFacts(deps.store, reading.message);
+    const { projection, commands } = await registerCommonIdentities(deps, reading, event, known);
+
+    const choice = await chooseInboundLane({
+        // 交接来的事件已经判过一次了。落回 prod 时本进程仍然是 prod、绑定仍然指向那条
+        // 泳道，所以这个标记是拦住第二次投递的唯一东西。
+        handedOff: event.handedOff === true,
+        dispatchEnabled: await deps.laneDispatchEnabled(),
+        currentLane: deps.currentLane,
+        laneOf: () => deps.laneOf(LARK_CHANNEL, event.botName, projection.commonConversationId),
+    });
+    if (choice.handOff) {
+        return {
+            kind: 'hand-off',
+            envelope: {
                 channel: LARK_CHANNEL,
                 event_type: event.type,
                 global_message_id: projection.commonMessageId,
@@ -182,33 +217,25 @@ export async function projectLarkInbound(
                 lane: choice.lane,
                 bot_name: event.botName,
                 params: event.payload,
-            });
-            console.info(
-                `[lark-projection] handed off to lane=${choice.lane} ` +
-                    `event=${event.type} message=${projection.commonMessageId}`,
-            );
-            return { kind: 'handed-off', lane: choice.lane };
-        }
+                handed_off: true,
+            },
+        };
+    }
 
-        // 在场状态是旁路：agent-service 读它判断"这个 bot 还在这个会话里吗"。写不
-        // 进去不该让消息丢掉。
-        //
-        // 这里 await（拆分前是 fire-and-forget 加 .catch）。差别只在这一条 upsert
-        // 与后面那个事务是并发还是先后，最终库里的行完全一样；换来的是"这条消息
-        // 处理完了"有确定的边界，测试不必靠等一个游离的 Promise。
-        try {
-            await deps.store.markBotPresent(
-                projection.commonConversationId,
-                event.botName,
-                true,
-            );
-        } catch (error) {
-            console.warn('[lark-projection] failed to refresh bot presence:', error);
-        }
+    // 在场状态是旁路：agent-service 读它判断"这个 bot 还在这个会话里吗"。写不
+    // 进去不该让消息丢掉。
+    //
+    // 这里 await（拆分前是 fire-and-forget 加 .catch）。差别只在这一条 upsert
+    // 与后面那个事务是并发还是先后，最终库里的行完全一样；换来的是"这条消息
+    // 处理完了"有确定的边界，测试不必靠等一个游离的 Promise。
+    try {
+        await deps.store.markBotPresent(projection.commonConversationId, event.botName, true);
+    } catch (error) {
+        console.warn('[lark-projection] failed to refresh bot presence:', error);
+    }
 
-        await recordInboundMessage(deps.store, reading, event, projection, known);
-        return { kind: 'recorded', projection, commands };
-    });
+    await recordInboundMessage(deps.store, reading, event, projection, known);
+    return { kind: 'recorded', projection, commands };
 }
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ mock.module('@infrastructure/lane-router', () => ({
     laneRouter: { createClient: () => ({ post: mock(async () => ({ data: {} })) }) },
 }));
 
+const { Hono } = await import('hono');
 const { qqPlugin } = await import('./index');
 const { getChannelRegistry } = await import('@inner/shared/channel');
 const { getCommandRegistry } = await import('@inner/shared/rules');
@@ -48,11 +49,28 @@ describe('qq 插件自注册', () => {
         expect(qqPlugin.channel).toBe('qq');
     });
 
-    it('import 即把 qq runtime 注册进 runtime registry，带 http ingress + lane envelope 处理', () => {
+    it('import 即把 qq runtime 注册进 runtime registry，带 http ingress', () => {
         const runtime = getChannelRuntime('qq');
         expect(runtime.channel).toBe('qq');
         expect(typeof runtime.registerHttpIngress).toBe('function');
-        expect(typeof runtime.handleInboundLaneEnvelope).toBe('function');
+    });
+
+    // 两条端点，两份契约：/inbound 收 qq-gateway 投来的 CustomInboundMessage，
+    // /lane-inbound 收 prod 判过泳道之后交接来的信封。两条都在内网 Bearer 之后。
+    it('registerHttpIngress 同时挂上原始入站端点与泳道信封端点，都要鉴权', async () => {
+        const runtime = getChannelRuntime('qq');
+        const app = new Hono();
+
+        await runtime.registerHttpIngress!(app, []);
+
+        for (const path of ['/api/internal/qq/inbound', '/api/internal/qq/lane-inbound']) {
+            const res = await app.request(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}',
+            });
+            expect(res.status).toBe(401);
+        }
     });
 
     it('qq 没有平台指令（commands=[]），forChannel 只剩核心通用聊天主链路', () => {

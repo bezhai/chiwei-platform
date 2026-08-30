@@ -15,11 +15,14 @@ export interface BotRoster {
 }
 
 /**
- * 飞书 webhook 路由的挂载方。**必填**：这个进程存在的理由就是接飞书消息，
+ * 飞书入站的两条 HTTP 路由的挂载方。**必填**：这个进程存在的理由就是接飞书消息，
  * 让它变成可选就等于允许"服务起来了、健康检查绿的、但一条路由都没有"。
  */
-export interface WebhookMount {
+export interface InboundRoutes {
+    /** 飞书直投的 webhook。 */
     registerWebhooks(app: Hono): void;
+    /** prod 判出泳道之后交接过来的信封（见 lark/ingress/lane-inbound.ts）。 */
+    registerLaneInbound(app: Hono): void;
 }
 
 /**
@@ -34,7 +37,7 @@ export interface IngressStatus {
 
 export interface LarkServiceAppInput {
     bots: BotRoster;
-    inbound: WebhookMount;
+    inbound: InboundRoutes;
     ingress: () => IngressStatus;
 }
 
@@ -47,9 +50,11 @@ export function createLarkServiceApp(input: LarkServiceAppInput): Hono {
 
     app.route('', metricsRoutes);
 
-    // 飞书 webhook 挂在中间件之后：每个 bot 的入站路由自动继承 trace、错误处理和
-    // 指标采集，不必各自再接一遍。
+    // 两条入站路由都挂在中间件之后：自动继承 trace、错误处理和指标采集，不必各自再接
+    // 一遍。泳道交接那条尤其依赖错误处理 —— 处理失败必须变成 500，投递方据此判定投递
+    // 失败；被路由自己吞成 200 就是一条静默丢失。
     input.inbound.registerWebhooks(app);
+    input.inbound.registerLaneInbound(app);
 
     // 存活。**一直 200** —— 长连抖一下不该让 Pod 被重启掉。能不能接飞书事件是另一个
     // 问题，问 /api/ready。

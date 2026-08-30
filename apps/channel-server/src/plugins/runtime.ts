@@ -1,6 +1,5 @@
 import type { Hono } from 'hono';
 import type { BotConfig } from '@inner/shared/entities';
-import { envelopeChannel, type InboundLaneEnvelope } from '@integrations/inbound-lane';
 
 export interface ChannelRuntime {
     channel: string;
@@ -8,7 +7,6 @@ export interface ChannelRuntime {
     runInitializers?(): Promise<void>;
     registerHttpIngress?(app: Hono, bots: BotConfig[]): Promise<void> | void;
     startDirectIngress?(bots: BotConfig[]): Promise<void>;
-    handleInboundLaneEnvelope?(env: InboundLaneEnvelope): Promise<void>;
     shutdown?(): Promise<void> | void;
 }
 
@@ -67,18 +65,6 @@ export async function startChannelDirectIngresses(bots: BotConfig[]): Promise<vo
             bots.filter((bot) => bot.channel === runtime.channel),
         );
     }
-}
-
-export async function handleInboundLaneEnvelope(env: InboundLaneEnvelope): Promise<void> {
-    // 缺 channel 时**不猜**：猜出来的渠道会让报错指向 runtime 注册表（"unknown channel
-    // runtime lark"），而真正的问题在信封。envelopeChannel 抛的错说的才是实情。
-    const runtime = getChannelRuntime(envelopeChannel(env));
-    if (!runtime.handleInboundLaneEnvelope) {
-        throw new Error(
-            `channel runtime "${runtime.channel}" cannot handle inbound lane envelopes`,
-        );
-    }
-    await runtime.handleInboundLaneEnvelope(env);
 }
 
 export async function shutdownChannelRuntimes(): Promise<void> {
