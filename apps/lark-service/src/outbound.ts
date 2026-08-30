@@ -227,8 +227,8 @@ async function main(): Promise<void> {
     // 声明用的泳道和订阅用的泳道必须同源：declareRoute 内部也读 env 的 LANE。
     // 声明的是 A、订阅的是 B 的话，两步都"成功"，就是一条消息都收不到。
     //
-    // 两条队列一把开关：channel-server 那侧释放它们用的就是同一把 key，接管侧分成两把
-    // 就会出现「只翻了一把，另一条队列没有任何消费者」的窗口（见 subscription.ts）。
+    // 两条队列一把开关：它们的消费者是同一个进程，分成两把就会出现「只翻了一把，另
+    // 一条队列没有任何消费者」的窗口（见 subscription.ts）。
     const subscription = new LarkOutboundSubscriptions({
         amqp,
         lane: getLane(),

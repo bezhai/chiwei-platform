@@ -5,12 +5,12 @@
 // fail-closed 让它立刻暴露而不是静默写脏另一个服务的台账。
 //
 // 「拒绝」= nack(requeue=false)：prod 队列挂着 DLX，消息进 dead_letters 可查可重放。
-// 绝不 requeue —— 两个服务互相推诿同一条消息会压成活锁（决策八）。
+// 绝不 requeue —— 消息只会原样退回这条队列，下一轮还是本进程拿到，在这里转圈。
 // 「告警」= 带稳定 event 名的 error 日志，可以用 make logs KEYWORD= 直接捞。
 //
-// 外来渠道的 fixture 用 `telegram`：它从来不在 CHANNEL_SERVER_CHANNELS 里，所以
-// 「这条不归我管」这个语义不依赖清单当下有几个渠道 —— 拿正在被移交的渠道当 fixture，
-// 移交完成那天这个用例就悄悄变成了「自己的渠道」的重复覆盖。
+// 外来渠道的 fixture 用 `telegram`：它从来不是本服务的渠道，所以「这条不归我管」这个
+// 语义不依赖本服务当下有几个渠道 —— 拿一个本服务真的消费过的渠道当 fixture，等它被
+// 拆出去那天这个用例就悄悄变成了「自己的渠道」的重复覆盖。
 
 import { describe, it, expect } from 'bun:test';
 import type { ConsumeMessage } from 'amqplib';
