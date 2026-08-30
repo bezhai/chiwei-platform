@@ -23,9 +23,13 @@ async def test_chat_request_idempotent_blocks_second_emit(test_db):
     """
     await migrate(ChatRequest, test_db)
 
-    r1 = ChatRequest(message_id="m1", persona_id="p1", session_id="s1")
+    r1 = ChatRequest(
+        message_id="m1", persona_id="p1", channel="lark", session_id="s1"
+    )
     # same Key, different non-Key field
-    r2 = ChatRequest(message_id="m1", persona_id="p1", session_id="s2")
+    r2 = ChatRequest(
+        message_id="m1", persona_id="p1", channel="lark", session_id="s2"
+    )
 
     n1 = await insert_idempotent(r1)
     n2 = await insert_idempotent(r2)
@@ -39,8 +43,8 @@ async def test_chat_request_dedup_per_persona_independent(test_db):
     """Different personas with same message_id should each insert successfully."""
     await migrate(ChatRequest, test_db)
 
-    r_p1 = ChatRequest(message_id="m1", persona_id="p1")
-    r_p2 = ChatRequest(message_id="m1", persona_id="p2")
+    r_p1 = ChatRequest(message_id="m1", persona_id="p1", channel="lark")
+    r_p2 = ChatRequest(message_id="m1", persona_id="p2", channel="lark")
 
     assert await insert_idempotent(r_p1) == 1
     assert await insert_idempotent(r_p2) == 1

@@ -132,7 +132,9 @@ class LarkP2PTarget:
     ``common_conversation_id`` —— 已有的 direct（p2p）会话 id，worker 反查 channel
         私有映射拿飞书裸会话地址。
     ``bot_name`` —— 这条私聊里的发送 bot 身份。
-    ``channel`` —— 渠道（当前只接飞书 = ``lark``）。
+    ``channel`` —— 渠道（当前解析只接飞书 = ``lark``）。**必填**：它透传成主动发
+        出站段的 ``ChatResponseSegment.channel``，决定回复投哪条出站队列；给默认值
+        等于让解析漏带 channel 时静默按飞书发出去。
     ``user_id`` —— 收件真人的 ``common_user_id``（透传，便于 task 3 拼出站 payload）。
 
     task 3 拿它走 chat-response-worker 既有 is_proactive 出站路径（is_p2p=true、
@@ -142,7 +144,7 @@ class LarkP2PTarget:
     common_conversation_id: str
     bot_name: str
     user_id: str
-    channel: str = "lark"
+    channel: str
 
 
 @dataclass(frozen=True)
@@ -157,7 +159,10 @@ class GroupTarget:
     ``display_name`` —— 群名（``common_conversation.display_name``）。proactive 渲染要把
         它当群场景的群名传进 inner_context（「在群聊『X』里说话」）；解析时顺手带出，
         免得 task 3 再查一次会话。群名可能为空（群没设名），渲染层自有缺席兜底。
-    ``channel`` —— 渠道（当前只接飞书 = ``lark``）。
+    ``channel`` —— 渠道（当前解析只接飞书 = ``lark``）。**必填**，理由同
+        :class:`LarkP2PTarget`：它决定出站队列，猜错就把消息发到别的渠道去了。
+        字段排在 ``display_name`` 之前，因为 dataclass 不允许必填字段跟在带默认值的
+        字段后面；两个构造点都用关键字传参，顺序不影响调用。
 
     task 3 拿它走 chat-response-worker 既有 is_proactive 出站路径（is_p2p=false、
     带 bot_name、chat_id=群 common_conversation_id），往群里发一条新消息。
@@ -165,8 +170,8 @@ class GroupTarget:
 
     common_conversation_id: str
     bot_name: str
+    channel: str
     display_name: str = ""
-    channel: str = "lark"
 
 
 def persona_uid(persona_id: str) -> str:
@@ -543,7 +548,10 @@ async def _resolve_user(
         common_conversation_id=str(row["conv_id"]),
         bot_name=row["bot_name"],
         user_id=user_id,
-        channel=row["channel"] or "lark",
+        # JOIN 条件已经把 cc.channel 钉死成 'lark'，MAX(cc.channel) 不可能为 NULL，
+        # 所以这里直接取行里的值、不再 `or "lark"` 兜底：一旦上面的查询口径改了
+        # （比如放开渠道限定），兜底会把口径变化悄悄压回飞书。
+        channel=row["channel"],
     )
 
 

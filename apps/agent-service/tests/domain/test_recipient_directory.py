@@ -64,6 +64,41 @@ _OTHER_P2P = uuid.uuid5(uuid.NAMESPACE_OID, "conv-other-p2p")
 _SOME_GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group")
 
 
+# ---------------------------------------------------------------------------
+# 投递目标的 channel 契约（不需要 DB）
+# ---------------------------------------------------------------------------
+# target.channel 直接透传成主动发出站段的 ChatResponseSegment.channel，而它决定
+# 回复投哪条出站队列。默认值会让「解析漏带 channel」静默变成飞书，所以两个目标
+# 的 channel 都必填 —— 解析方必须自己说清楚这条投递走哪个渠道。
+
+
+def test_lark_p2p_target_channel_is_required():
+    with pytest.raises(TypeError):
+        LarkP2PTarget(
+            common_conversation_id="c1", bot_name="chiwei", user_id="u1"
+        )
+    assert (
+        LarkP2PTarget(
+            common_conversation_id="c1",
+            bot_name="chiwei",
+            user_id="u1",
+            channel="lark",
+        ).channel
+        == "lark"
+    )
+
+
+def test_group_target_channel_is_required():
+    with pytest.raises(TypeError):
+        GroupTarget(common_conversation_id="c1", bot_name="chiwei")
+    assert (
+        GroupTarget(
+            common_conversation_id="c1", bot_name="chiwei", channel="lark"
+        ).channel
+        == "lark"
+    )
+
+
 # bot_config 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里。群里
 # 解析「赤尾该 persona 的 active bot_name」走 COALESCE(common_agent_response.persona_id,
 # bot_config.persona_id)（与 find_recent_chat_messages 同口径）；集成测试要手动建这张

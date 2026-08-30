@@ -27,7 +27,7 @@ apps/
 
 | 镜像（ImageRepo） | 产出的 K8s Deployment | 角色 |
 |---|---|---|
-| lark-service | **lark-service** | 飞书入站：websocket 长连 + webhook 路由 + 泳道信封消费 + 三个定时任务（daily-photo / daily-new-photo / emoji-sync） |
+| lark-service | **lark-service** | 飞书入站：websocket 长连 + webhook 路由 + 泳道交接接收端（`POST /api/internal/lark/lane-inbound`）+ 三个定时任务（daily-photo / daily-new-photo / emoji-sync） |
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
 | channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
@@ -40,7 +40,7 @@ apps/
 ### 飞书消息处理
 
 入站走 websocket 长连，**不经 api-gateway**：lark-service 主动连飞书开放平台，事件由飞书推过来。
-长连对同一 app_id 是随机投递，所以持连的是单副本 Deployment，且只有 prod 部署 + `LARK_DIRECT_INGRESS=true` 才连（泳道部署不连，靠泳道信封收消息）。
+长连对同一 app_id 是随机投递，所以持连的是单副本 Deployment，且只有 prod 部署 + `LARK_DIRECT_INGRESS=true` 才连（泳道部署不连，消息由 prod 带 `x-ctx-lane` 打一次内部 HTTP 交接过来，lane-sidecar 选路）。
 `/webhook/{bot}/{event,card}` 路由仍然注册着，走 api-gateway 进来，是长连之外的被动入口。
 
 ```
@@ -54,7 +54,7 @@ apps/
 ### QQ 消息处理
 
 ```
-QQ → api-gateway → qq-gateway:3000 (QQ 协议 → CustomInboundMessage)
+QQ bot gateway --websocket 长连--> qq-gateway (QQ 协议 → CustomInboundMessage)
    → channel-server:3000 (POST /api/internal/qq/inbound)
    → RabbitMQ: chat_request 队列
    → agent-service:8000

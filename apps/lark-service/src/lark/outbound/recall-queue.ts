@@ -12,12 +12,13 @@
 // 列，DB 层拦不住越界。隔离完全依赖「生产者的 rk 分对了」，这道校验让 rk 配错立刻
 // 暴露，而不是静默写脏另一个服务的台账。
 //
-// 拒绝用 `nack(requeue=false)`：requeue 会让两个服务把同一条消息推来推去，压成活锁；
-// prod 队列挂着 DLX，丢进 dead_letters 还能查、能重放。
+// 拒绝用 `nack(requeue=false)`：requeue 只是把消息原样退回这条队列，下一轮还是本进程
+// 拿到，同一条消息在这里转圈；prod 队列挂着 DLX，丢进 dead_letters 还能查、能重放。
 //
-// **没写 channel 的 payload 也拒绝**，跟 channel-server 那侧不同，是刻意的：那边守的
-// 是老队列，老信封确实没有 channel 字段，兜底成飞书是对历史的兼容；这条分区队列是新
-// 建的，兜底等于把分流错误重新变成静默错投。
+// **没写 channel 的 payload 一样拒绝，不兜底成飞书**：撤回也是 channel 分区的队列，
+// agent-service 那侧同样用 `channel_route_for_payload` 算 rk，payload 缺 channel 时
+// 直接抛、发不出来。所以真收到一条，只可能是有人绕过了那条路径，兜底等于把分流错误
+// 变成静默错投。
 //
 // ## 整条处理都跑在入站消息的上下文里
 //

@@ -102,7 +102,7 @@ export async function handleChatResponse(
 
     // fail-closed 先于任何副作用：不属于自己的 channel 一行库都不查、一个插件都不取。
     // 拒绝 = nack(requeue=false)，prod 队列挂着 DLX，消息进 dead_letters 可查可重放；
-    // requeue 会让两个服务互相把同一条消息推来推去，压成活锁。
+    // requeue 只是把消息原样退回这条队列，下一轮还是本进程拿到，同一条消息在这里转圈。
     //
     // 缺 channel 跟「别人的 channel」同一个处置。这里曾经回落到飞书 —— 本服务已经没有
     // 飞书的出站能力，回落只会让消息被认领之后死在 getCapabilities 上，而 DLQ 里留下的

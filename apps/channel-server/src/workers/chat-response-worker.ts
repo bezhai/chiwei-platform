@@ -19,9 +19,8 @@ LoggerFactory.createLogger({
 import { createServer } from 'http';
 import AppDataSource from 'ormconfig';
 import { CommonAgentResponse } from '@inner/shared/entities';
-import { rabbitmqClient, CHAT_RESPONSE, getLane } from '@inner/shared/mq';
-import { loadOwnedChannels } from './outbound-channels';
-import { OutboundSubscriptions } from './outbound-subscriptions';
+import { rabbitmqClient, getLane } from '@inner/shared/mq';
+import { subscribeChatResponse } from './chat-response-subscription';
 import { botDirectory } from '@inner/shared/bot';
 import { getChannelRegistry } from '@inner/shared/channel';
 import '@plugins/index';
@@ -51,10 +50,6 @@ const chatResponseQueueDelay = new Histogram({
     buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
     registers: [metricsRegistry],
 });
-
-// 拥有集合变化的检查间隔。移交是人工触发的操作步骤，秒级足够；短了纯属白打
-// paas-engine（DynamicConfig 自己还有 10s 缓存）。
-const RECONCILE_INTERVAL_MS = 15_000;
 
 // 把进程级真实依赖（DB repo / MQ ack-nack / 渠道插件 / metrics）灌进 handler。
 // 消息处理的全部业务逻辑在 chat-response-handler.ts，本入口只做装配。
@@ -88,31 +83,20 @@ async function main(): Promise<void> {
     await rabbitmqClient.declareTopology();
     console.info('[ChatResponseWorker] RabbitMQ connected');
 
-    // 4. 开始消费：每个拥有渠道一条 chat_response_{channel}。出站队列按 channel 分区，
-    //    别的渠道的队列本进程一条都不订。
-    const subscriptions = new OutboundSubscriptions({
-        base: CHAT_RESPONSE,
+    // 4. 开始消费：本服务出站只有 QQ，就订 chat_response_qq 这一条。出站队列按 channel
+    //    分区，别的渠道的队列本进程一条都不订。
+    const queue = await subscribeChatResponse({
         lane: getLane(),
         port: {
             declareRoute: (route) => rabbitmqClient.declareRoute(route),
-            consume: (queue, handler) => rabbitmqClient.consume(queue, handler),
-            drainConsumer: (queue) => rabbitmqClient.drainConsumer(queue),
+            consume: (name, handler) => rabbitmqClient.consume(name, handler),
         },
         handlerFor: (accepts) => {
             const deps = buildHandlerDeps(accepts);
             return (msg) => handleChatResponse(deps, msg);
         },
-        loadChannels: loadOwnedChannels,
     });
-    await subscriptions.start();
-
-    // 收窄 / 回滚在运行期生效：移交某个 channel 时不必重启进程，drain 屏障在
-    // reconcile 内部完成（basic.cancel → 等在途归零）。
-    setInterval(() => {
-        subscriptions.reconcile().catch((err) => {
-            console.error('[ChatResponseWorker] reconcile failed:', err);
-        });
-    }, RECONCILE_INTERVAL_MS).unref();
+    console.info(`[ChatResponseWorker] consuming ${queue}`);
 
     // 5. 暴露 Prometheus metrics
     const metricsPort = parseInt(process.env.METRICS_PORT || '9091', 10);

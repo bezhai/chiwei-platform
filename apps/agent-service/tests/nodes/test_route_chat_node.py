@@ -10,7 +10,7 @@ async def test_route_chat_node_raises_on_missing_message_id():
     """缺 message_id -> raise，不静默 fan-out 空 ChatRequest。"""
     from app.nodes.chat_node import route_chat_node
 
-    t = ChatTrigger()  # 全部默认值，message_id=None
+    t = ChatTrigger(channel="lark")  # 其余字段默认，message_id=None
     with pytest.raises((ValueError, AssertionError)):
         await route_chat_node(t)
 
@@ -35,7 +35,7 @@ async def test_route_chat_node_short_circuits_when_completed(monkeypatch):
     monkeypatch.setattr(chat_node_mod, "is_chat_request_completed", fake_completed)
     monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
 
-    t = ChatTrigger(message_id="m1", session_id="s1")
+    t = ChatTrigger(message_id="m1", session_id="s1", channel="lark")
     await chat_node_mod.route_chat_node(t)
 
     assert captured == {"session_id": "s1"}
@@ -61,7 +61,7 @@ async def test_route_chat_node_runs_router_when_not_completed(monkeypatch):
     monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
     monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _FakeRouter())
 
-    t = ChatTrigger(message_id="m1", session_id="s1")
+    t = ChatTrigger(message_id="m1", session_id="s1", channel="lark")
     await chat_node_mod.route_chat_node(t)  # 不抛异常即可
 
 
@@ -89,6 +89,7 @@ async def test_route_chat_node_single_persona_passes_session_id(monkeypatch):
     t = ChatTrigger(
         message_id="m1",
         session_id="s1",
+        channel="lark",
         chat_id="c1",
         bot_name="bot-x",
         lane="dev",
@@ -137,7 +138,13 @@ async def test_route_chat_node_multi_persona_regenerates_session_id(monkeypatch)
         fake_create_pending,
     )
 
-    t = ChatTrigger(message_id="m1", session_id="s1", chat_id="c1", bot_name="bot-x")
+    t = ChatTrigger(
+        message_id="m1",
+        session_id="s1",
+        channel="lark",
+        chat_id="c1",
+        bot_name="bot-x",
+    )
     await chat_node_mod.route_chat_node(t)
 
     assert len(emitted) == 3
@@ -182,7 +189,7 @@ async def test_route_chat_node_empty_persona_list_no_emit(monkeypatch):
     monkeypatch.setattr(chat_node_mod, "MessageRouter", lambda: _Router())
     monkeypatch.setattr(chat_node_mod, "emit", fake_emit)
 
-    t = ChatTrigger(message_id="m1", session_id="s1")
+    t = ChatTrigger(message_id="m1", session_id="s1", channel="lark")
     await chat_node_mod.route_chat_node(t)
     assert emitted == []
 
@@ -190,7 +197,9 @@ async def test_route_chat_node_empty_persona_list_no_emit(monkeypatch):
 @pytest.mark.asyncio
 async def test_route_chat_node_propagates_channel(monkeypatch):
     """channel 必须从 ChatTrigger 透传到 fan-out 的 ChatRequest。
-    缺失则非 lark 渠道被 Data 默认值静默改回 lark，多渠道直接击穿。
+
+    漏传会在构造 ChatRequest 时报 ValidationError（channel 无默认值），
+    传错则回复投到别的渠道去 —— 两种都不能悄悄发生。
     """
     from app.domain.chat_dataflow import ChatRequest
     from app.nodes import chat_node as chat_node_mod

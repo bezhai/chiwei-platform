@@ -116,17 +116,13 @@ export class QqEventHandlers {
         // 锁里做投影、泳道判定和本 lane 的副作用；判出「不归本进程」时只把信封
         // 带出来，交接在锁外做（见下方 handOffToLane 处）。
         const handoff = await withQqInboundProjectionLock(custom.messageId, async () => {
-            const projection = await prepareQqInboundProjection(
-                inbound,
-                botName ?? '',
-                botCommonUserId,
-            );
+            const projection = await prepareQqInboundProjection(inbound, botName, botCommonUserId);
 
             const pendingHandoff = await resolveInboundLaneHandoff({
                 handedOff: options.handedOff === true,
                 currentLane: getLane() ?? 'prod',
                 channel: botConfig.channel,
-                botGlobalId: botName ?? '',
+                botGlobalId: botName,
                 commonConversationId: projection.commonConversationId,
                 eventType: 'qq.message.receive',
                 globalMessageId: projection.commonMessageId,
@@ -143,7 +139,7 @@ export class QqEventHandlers {
             enqueueQqImagePipeline(inbound, projection.commonMessageId, botName);
 
             const ruleMessage = buildQqRuleMessage(inbound, {
-                botName: botName ?? '',
+                botName,
                 commonUserId: projection.commonUserId,
                 commonConversationId: projection.commonConversationId,
                 commonMessageId: projection.commonMessageId,
@@ -182,12 +178,8 @@ export class QqEventHandlers {
                     );
                     return null;
                 }
-                if (!botName) {
-                    throw new Error(
-                        `cannot claim common message ${projection.commonMessageId}: ` +
-                            'botName missing from context',
-                    );
-                }
+                // botName 到这里必然非空：开头 getBotName() 为空串时 botConfig 就是
+                // null，那一步已经上抛了。
                 await claimQqInboundMessageForBot({
                     commonMessageId: projection.commonMessageId,
                     botName,

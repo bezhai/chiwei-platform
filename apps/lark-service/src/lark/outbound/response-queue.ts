@@ -4,27 +4,20 @@
 // 飞书的是 deliver.ts，它不认识 RabbitMQ；什么时候订、什么时候交还在 subscription.ts，
 // 那一层不认识飞书（`recall` 那条队列共用它，也共用同一把开关）。
 //
-// ## 只订分区队列，不订老队列
-//
-// 换队列的协议是「消费侧先双订阅 → 切生产者 → 旧队列排空 → drain 屏障移交」，但
-// **双订阅那一步归 channel-server**：它守着不带 channel 维度的老 `chat_response`，
-// 直到窗口关闭。本服务只订 `chat_response_lark{_lane}`，一条崭新的、按所有权维度
-// 分好区的队列。本服务去订老队列的话，两个消费者会在同一条队列上分摊消息 ——
-// 而那正是分区要杀掉的东西。
-//
 // ## 拿到不是飞书的消息：拒绝，而且拒绝得很凶
 //
 // 共库方案下 `common_agent_response` 没有 channel 列，DB 层拦不住越界写入，隔离
 // 完全依赖「生产者的 rk 分对了」。rk 配错是配置问题，这道校验让它立刻暴露，而不是
 // 静默写脏另一个服务的台账。
 //
-// 拒绝用 `nack(requeue=false)`：requeue 会让两个服务把同一条消息推来推去，压成
-// 活锁；prod 队列挂着 DLX，丢进 dead_letters 还能查、能重放。
+// 拒绝用 `nack(requeue=false)`：requeue 只是把消息原样退回这条队列，下一轮还是本
+// 进程拿到，同一条消息在这里转圈；prod 队列挂着 DLX，丢进 dead_letters 还能查、
+// 能重放。
 //
-// **没写 channel 的 payload 也拒绝**，这一点跟 channel-server 那侧不同，是刻意的：
-// 那边守的是老队列，老信封确实没有 channel 字段，兜底成飞书是对历史的兼容；这条
-// 分区队列是新建的，而它唯一的生产者（agent-service 的 sink_dispatch）在 payload
-// 没有 channel 时**拒绝发布**。所以这里的"没有 channel"不是历史，是异常。
+// **没写 channel 的 payload 一样拒绝，不兜底成飞书**：这里的"没有 channel"不可能是
+// 历史遗留。这条队列唯一的生产者是 agent-service 的 sink_dispatch，它算 rk 走
+// `channel_route_for_payload`，payload 缺 channel 时那里直接抛、压根发不出来。所以
+// 真收到一条，只可能是有人绕过了那条路径，兜底等于把分流错误变成静默错投。
 //
 // ## ACK 策略：只有两种情况不 ACK
 //

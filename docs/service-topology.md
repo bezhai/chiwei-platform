@@ -1,6 +1,6 @@
 # 赤尾平台 · 服务拓扑现状
 
-> 最后更新:2026-08-13(飞书拆出 lark-service、recall-worker 下线)。
+> 最后更新:2026-08-30(入站泳道交接从 RabbitMQ 换成内部 HTTP + lane-sidecar)。
 > 范围:`apps/` 下 15 个应用目录 → 15 个 K8s Deployment(口径:lark-service 一镜像产出 2 个,channel-server 一镜像产出 2 个,lane-sidecar 与 tagger-service 不产出 Deployment,其余 11 个目录各 1 个)+ 1 个注入式 sidecar(lane-sidecar)+ 1 个裸机 GPU 服务(tagger-service,不进 K8s)+ `packages/` 4 个共享包。
 > 这是**现状**梳理,不含目标架构和改造方案。术语在文中随用随解释。
 
@@ -24,7 +24,7 @@
 
 ## 二、服务全景
 
-外部流量(运维浏览器、开发机、QQ 回调)统一从 **api-gateway** 进集群,它按规则把请求分流到对应服务,并盖上泳道 header。**飞书入站是唯一的例外**:lark-service 主动持 websocket 长连到飞书开放平台,事件由飞书推过来,不经 api-gateway(webhook 路由仍然注册着,是长连之外的被动入口)。
+外部流量(运维浏览器、开发机)从 **api-gateway** 进集群,它按规则把请求分流到对应服务,并盖上泳道 header。**两个渠道的入站都不经它**:消息是各自主动持 websocket 长连收下来的——lark-service 连飞书开放平台,qq-gateway 连 QQ 的 bot gateway,平台把事件推过来。(飞书的 `/webhook/{bot}/...` 路由仍然注册着,走 api-gateway 进来,是长连之外的被动入口;QQ 侧在 api-gateway 里没有任何规则。)
 
 ```mermaid
 flowchart TB
@@ -126,7 +126,7 @@ QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `C
 
 ## 四、RabbitMQ 队列地图
 
-跨服务的异步通信全靠 RabbitMQ。入站方是各渠道服务,出站方是 agent-service,消费方是各渠道自己的出站进程。
+跨服务的异步通信全靠 RabbitMQ。入站方是各渠道服务,出站方是 agent-service,消费方是各渠道自己的出站进程。**「把入站消息交给它该去的泳道」不在这张表里**:那一跳走内部 HTTP + lane-sidecar,不是队列(见第五节)。
 
 **出站队列按 channel 分区**:队列名和 routing key 都揉进 channel(`chat_response` → `chat_response_lark`,`chat.response` → `chat.response.lark`)。分区维度必须跟消费者的所有权维度一致——飞书的回复只能由持飞书凭证的 lark-outbound 发,一条都不能被别的服务领走。入站的 `chat_request` 不分区:消费者只有 agent-service 一个。
 
@@ -151,7 +151,6 @@ flowchart LR
 | `chat_response_lark` | agent-service | lark-outbound | 「这是赤尾的回复,帮我发飞书」 |
 | `recall_lark` | agent-service(安全审核后) | lark-outbound | 「刚那条要撤回」 |
 | `chat_response_qq` | agent-service | chat-response-worker | 「这是赤尾的回复,帮我发 QQ」 |
-| `inbound_lane.{channel}.{lane}` | 各渠道服务的 prod 实例 | 同渠道服务的泳道实例 | 「这条消息该归你那个泳道处理」 |
 
 agent-service 内部还有一批异步事件(比如 `CommonMessageContentSynced`——消息里的图片落 TOS 后回写消息记录)走 dataflow runtime 的 durable 节点,底下的 RabbitMQ 队列由 runtime 框架按 Data 类型声明和管理,不在上表逐一列出。另有 `proactive_eval` 队列声明了但**没有任何生产者和消费者**,是死队列。
 
@@ -184,6 +183,18 @@ flowchart TB
 - **lane-sidecar** 是被注入到**每个业务 pod** 里的透明代理(不是独立 Deployment,是个 sidecar 容器,由 paas-engine 在部署时注入)。它用 iptables 把 pod 所有出站 TCP 劫持到自己,读请求里的 `x-ctx-lane`,把目标服务名改写成带泳道后缀的名字。业务代码完全无感知。
 - **LaneRouter SDK**(在 `ts-shared` 和 `py-shared` 各一份)是应用层的配合件:负责在发请求时注入 `x-ctx-lane` header。有了 sidecar 之后,**真正的服务名改写挪到了 sidecar 的网络层**,SDK 不再自己拼泳道后缀,只管注 header。两者是互补,不是重复。
 - **api-gateway** 是从集群**外部**进来的反向代理入口(开发机到集群的唯一出口)。它轮询 paas-engine 下发的网关规则,按路径前缀匹配,选中目标后转发,并盖上 `x-ctx-lane` header。它管的是「外→内」的入口路由,sidecar 管的是「内→内」的服务间路由。
+
+### 入站消息怎么进到泳道
+
+渠道消息只从 prod 入口进来,两个渠道都是主动建 websocket 长连收下来的:飞书由 lark-service 自己连开放平台(只有 prod 部署持连),QQ 由 qq-gateway 连 QQ 的 gateway、归一化之后 POST 给 channel-server(两跳都在集群内,不经 api-gateway)。所以要有一步把「这条消息属于泳道 X」的消息送到泳道的进程里。这一步就是上面那套路由的一个用例:prod 判出泳道 X 之后,带 `x-ctx-lane: X` 打一次内部 HTTP——飞书是 `POST /api/internal/lark/lane-inbound`,QQ 是 `/api/internal/qq/lane-inbound`,请求体是一个带 lane、bot、trace 和原始事件体的信封。业务代码打的是**自己那个服务的基础服务名**(飞书打 `lark-service:3000`,QQ 打 `channel-server:3000`),由 sidecar 改写成带泳道后缀的名字,代码里没有任何路由逻辑。
+
+三条边界决定了它的失败形状:
+
+- **泳道的 Service 不存在时,sidecar 把请求原样打回 prod**。消息由 prod 的代码处理,但**保持泳道的 lane 上下文**,于是 `chat_request_{lane}` 照常投出去、下游泳道服务照常消费。这是设计要的行为:绑定指向一条没部署的泳道不会让 bot 静默变砖。代价是投递方从 HTTP 结果上看不出泳道在不在,所以接收端在响应里回报「接住它的是谁」,投递方据此打 `lane_handoff_total{channel,target_lane,outcome}` 指标(outcome ∈ `lane` / `fallback` / `error`)和 `[lark-handoff]` / `[lane-handoff]` 日志——否则「泳道里的改动怎么没生效」查不出来。
+- **落回 prod 只在 Service 不存在时发生,不是泳道不健康时**。lite-registry 只 watch Service、不看 ready endpoints,所以泳道 Service 在、Pod 没起来(部署中 / 崩溃 / OOM)时 sidecar 照转不误,拿到 502。而这一跳**不重试**(平台侧早已应答,重试等于同一条消息处理两遍),那条消息就此丢失。
+- 路由表有最长 30s 的轮询延迟,刚部署或刚下掉的泳道在这个窗口里 sidecar 的判断是旧的。
+
+出站方向没有这一跳:回复走 MQ,泳道队列的 10s TTL 到期后降级回 prod 队列,泳道没有出站进程时由 prod 的出站进程代发(见第四节)。
 
 ---
 
@@ -219,7 +230,7 @@ flowchart LR
 
 | 镜像 | 产出的 Deployment | 角色 |
 |---|---|---|
-| lark-service | **lark-service** | 飞书入站:websocket 长连 + webhook 路由 + 泳道信封消费 + 三个定时任务 |
+| lark-service | **lark-service** | 飞书入站:websocket 长连 + webhook 路由 + 泳道交接接收端 + 三个定时任务 |
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 |
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
