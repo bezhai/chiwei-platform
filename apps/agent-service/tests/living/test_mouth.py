@@ -309,6 +309,14 @@ async def test_an_empty_rendering_sends_nothing_instead_of_falling_back(
     assert spoken == [], "渲染没出内容却还是发了 —— 发出去的是空消息或者她的内部措辞"
     assert isinstance(outcome, dict), "该把「没发出去」喂回她自己处置"
 
+    # 回喂的话只报事实。「失败了」由 @tool_error 的前缀说完，这里只补为什么；
+    # 要不要重试、换不换说法、还是转头去干别的，是她的判断，工具不替她安排。
+    # 对照同文件里 emit 断掉那条的写法：发生了什么 / 什么不知道 / 系统补不补发。
+    assert "渲染没出内容" in outcome["message"], "得让她知道为什么没发出去"
+    assert not any(s in outcome["message"] for s in ("再试", "换个说法")), (
+        f"工具在指挥她下一步该干嘛：{outcome['message']!r}"
+    )
+
 
 @pytest.mark.integration
 async def test_a_conversation_she_is_not_in_is_refused_loudly(

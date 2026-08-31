@@ -642,11 +642,10 @@ def build_life_tools(
             rendered = rendered.replace("---split---", "\n\n").strip()
             if not rendered:
                 # 渲染没产出有效内容 → 不出站（绝不发空消息、更不回退发 life 原文），
-                # 把「没发出去」作为工具结果喂回 life，让她自己处置（重试 / 算了）。
-                raise RuntimeError(
-                    "这条想主动发的消息没能成形（渲染没出内容），没发出去——"
-                    "你可以待会儿再试，或者换个说法。"
-                )
+                # 把「没发出去」作为工具结果喂回 life，让她自己处置。只报事实：
+                # 「失败了」由 @tool_error("发消息失败") 的前缀说完了，这里补的是为什么，
+                # 接下来重试还是算了是她的判断，工具不替她安排。
+                raise RuntimeError("渲染没出内容")
 
             await emit(
                 ChatResponseSegment(

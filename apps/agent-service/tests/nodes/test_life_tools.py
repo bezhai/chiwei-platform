@@ -2785,6 +2785,41 @@ async def test_send_message_to_person_renders_through_chat_turn_then_emits(
 
 
 @pytest.mark.asyncio
+async def test_send_message_empty_rendering_reports_the_fact_without_instructing_her(
+    stub_handlers, stub_directory
+):
+    """渲染没出内容 → 回喂的话只报事实，不安排她下一步。
+
+    「失败了」由 ``@tool_error("发消息失败")`` 的前缀说完了，异常本身只补为什么。
+    要不要重试、换不换说法、还是转头去干别的，是她的判断。工具替她决定下一步，
+    就是拿确定性规则去填 agent 该做的选择。
+    """
+    stub_directory["resolve_result"] = stub_directory["_LarkP2PTarget"](
+        common_conversation_id="cc-direct-1",
+        bot_name="chiwei",
+        user_id="u-real-1",
+        channel="lark",
+    )
+    stub_directory["render_text"] = "   "
+    tools = _tools_by_name(
+        lt.build_life_tools(
+            lane="coe-t3", persona_id="akao", act_id="a-1",
+            observed_at="2026-06-03T12:30:00+00:00",
+        )
+    )
+    out = await tools["send_message"].invoke(
+        {"uid": "user:u-real-1", "content": "想问他周末有没有空一起吃饭"}
+    )
+
+    assert stub_directory["emitted"] == [], "渲染没出内容却还是发了"
+    assert isinstance(out, dict), "该把「没发出去」喂回她自己处置"
+    assert "渲染没出内容" in out["message"], "得让她知道为什么没发出去"
+    assert not any(s in out["message"] for s in ("再试", "换个说法")), (
+        f"工具在指挥她下一步该干嘛：{out['message']!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_message_to_person_delivers_own_reply_to_sender_mailbox(
     stub_handlers, stub_directory
 ):
