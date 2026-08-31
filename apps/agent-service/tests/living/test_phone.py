@@ -925,3 +925,26 @@ async def test_the_skipped_count_counts_the_sisters_words_too(
         seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
 
     assert "还有 3 条" in seen, f"跳过多少条算错了。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_address_sits_next_to_the_name_it_belongs_to(living_db):
+    """会话的地址要跟它的名字挨着，不能甩在一行末尾。
+
+    实测（coe-living，2026-08-31 20:21）：信封把标题摆在最显眼处、``channel_id``
+    挂在一长串属性的最后，她于是拿人名去调 ``look_at_phone``，被 fail-loud 顶回来，
+    白费一缝。**这不是她的错**——在她的认知里那条私聊就叫那个名字，uuid 是工程
+    产物；工具描述再喊「照抄别自己编」也是在跟这个错位对抗。名字和地址绑在一起，
+    她要指哪条会话时才有一个完整的东西可指。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+
+    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(20, 5))
+
+    line = next(ln for ln in envelope.splitlines() if "bezhai" in ln)
+    name_at = line.index("「bezhai」")
+    id_at = line.index(f"channel_id={_DM}")
+    assert id_at - name_at < 60, (
+        f"地址离名字太远，她会拿名字当地址用。这一行是：\n{line}"
+    )

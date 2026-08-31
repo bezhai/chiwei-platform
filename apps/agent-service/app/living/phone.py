@@ -525,14 +525,22 @@ def _clock(moment: datetime, *, now: datetime) -> str:
 
 
 def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
-    """把信封摆成她读得懂的样子。**正文一个字都不在这里。**"""
+    """把信封摆成她读得懂的样子。**正文一个字都不在这里。**
+
+    ``channel_id`` 紧跟在会话名后面，不甩到行尾。实测（coe-living，2026-08-31
+    20:21）她拿人名去调 :func:`look_at_phone`、被顶了回来：名字在最显眼处、地址挂
+    在七八个属性之后，而在她眼里那条私聊本来就叫那个名字，uuid 是工程产物。工具
+    描述里写「照抄别自己编」是在跟这个错位对抗，治不了。名字和地址绑成一个东西，
+    她要指哪条会话时才有个完整的可指之物。
+    """
     if not envelopes:
         return "手机上：（没动静）"
     lines = ["手机上（想知道说了什么，得自己拿起来看）："]
     for e in envelopes:
         where = "私聊" if e.scope == "direct" else "群"
         bits = [
-            f"- {where}「{e.title}」· {e.unread} 条没看",
+            f"- {where}「{e.title}」channel_id={e.channel_id} · "
+            f"{e.unread} 条没看",
             "、".join(e.senders) or "某人",
             f"{_clock(e.earliest, now=now)}–{_clock(e.latest, now=now)}",
         ]
@@ -543,7 +551,6 @@ def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
             if e.you_last_spoke_at is not None
             else "你还没在这儿说过话"
         )
-        bits.append(f"channel_id={e.channel_id}")
         lines.append(" · ".join(bits))
     return "\n".join(lines)
 
