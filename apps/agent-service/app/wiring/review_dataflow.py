@@ -22,6 +22,10 @@ ValidationError 杀 Pod（Sweep 无 ts、缺必填 lane），所以中间隔一�
 
 cron 时间源在非 prod 泳道默认不跑（lane_policy.time_sources_enabled_by_default），
 coe / ppe 验证对账班行为时用 DATAFLOW_ENABLE_TIME_SOURCES=1 显式打开。
+
+**这条 cron 在 living 实验泳道上不注册**（``app.living.experiment``）。coe 的
+ConfigBundle 把 ``DATAFLOW_ENABLE_TIME_SOURCES`` 覆盖成 1，所以"非 prod 默认不跑"
+在实验泳道上**不成立**——不加门它是真的会跑，逐 persona 写旧 life 的状态表。
 """
 from __future__ import annotations
 
@@ -31,13 +35,15 @@ from app.life.review_cron import (
     day_review_sweep_node,
     review_to_sweep_tick,
 )
+from app.living.experiment import on_the_living_experiment_lane
 from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
 
-# 清晨 05:00–10:00 对账窗口逐小时一班（钟挂 wiring 层，节拍器不进业务）。cron 喂
-# 单字段 LifeDayReviewTick，翻译节点补上进程级泳道后 emit LifeDayReviewSweep 接回
-# 对账节点。已成功的班由 marker 幂等挡住，失败的班下一小时自动补。
-wire(LifeDayReviewTick).from_(Source.cron("0 5-10 * * *", tz=TZ)).to(review_to_sweep_tick)
-# LifeDayReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
-wire(LifeDayReviewSweep).to(day_review_sweep_node)
+if not on_the_living_experiment_lane():
+    # 清晨 05:00–10:00 对账窗口逐小时一班（钟挂 wiring 层，节拍器不进业务）。cron 喂
+    # 单字段 LifeDayReviewTick，翻译节点补上进程级泳道后 emit LifeDayReviewSweep 接回
+    # 对账节点。已成功的班由 marker 幂等挡住，失败的班下一小时自动补。
+    wire(LifeDayReviewTick).from_(Source.cron("0 5-10 * * *", tz=TZ)).to(review_to_sweep_tick)
+    # LifeDayReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
+    wire(LifeDayReviewSweep).to(day_review_sweep_node)

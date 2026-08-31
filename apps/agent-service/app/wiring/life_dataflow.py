@@ -20,10 +20,16 @@ pull 范式：act 不再唤醒 world。life 做完一件事直接 insert_idempot
 （life_tick / glimpse / daily_plan / sync_life_state）；voice 的整条 cron 链
 随 voice 子系统拆除删除；v4 记忆的 light/heavy review cron 线随旧记忆机器
 整体删除。
+
+**下面这些 wire 在 living 实验泳道上一条都不注册**（``app.living.experiment``）。
+旧 world 心跳十分钟一拍、每拍一次模型；旧 life 一被投信箱就醒；读小说和日程提醒
+各自还有一条 durable 队列。实验泳道上新引擎在跑同一批人、写同一个库——两套一起跑
+就是双回复 + 写脏 chiwei-test + 白烧钱。门只加在声明上，旧引擎的业务逻辑一个字没动。
 """
 from __future__ import annotations
 
 from app.domain.world_events import EventArrived, event_knock_key
+from app.living.experiment import on_the_living_experiment_lane
 from app.nodes.life_wake import (
     ScheduleReminderTick,
     life_schedule_reminder_node,
@@ -46,55 +52,56 @@ from app.world.engine import (
 LIFE_WAKE_DEBOUNCE_SECONDS = 5
 LIFE_WAKE_DEBOUNCE_MAX_BUFFER = 20
 
-# world 发动机两源同一入口（world_tick），但时间源不直接喂 WorldTick：
-#   1) 保底心跳：interval 每 10 分钟喂一条单字段 WorldHeartbeatTick（满足框架
-#      时间源的单字段 ts 约定），翻译节点 heartbeat_to_world_tick 补上进程级
-#      泳道 + reason 后 emit WorldTick 接回 world_tick。WorldTick 直接挂时间源
-#      会在源循环 _build_payload(WorldTick(ts=...)) 处 ValidationError 杀 Pod
-#      （WorldTick 无 ts、且缺必填 lane），world 在生产里永远起不来。
-#   2) 自排提前卡点（主节奏）：world_tick 内部 emit_delayed(WorldTick(reason="self"))，
-#      到期 emit(WorldTick) 经下面的 in-process 边接回 world_tick。
-wire(WorldHeartbeatTick).from_(Source.interval(WORLD_HEARTBEAT_SECONDS)).to(
-    heartbeat_to_world_tick
-)
-# WorldTick 退回纯 in-process：承载心跳翻译 / 自排两种来源 emit 的 WorldTick，
-# 统一打到 world_tick。
-wire(WorldTick).to(world_tick)
+if not on_the_living_experiment_lane():
+    # world 发动机两源同一入口（world_tick），但时间源不直接喂 WorldTick：
+    #   1) 保底心跳：interval 每 10 分钟喂一条单字段 WorldHeartbeatTick（满足框架
+    #      时间源的单字段 ts 约定），翻译节点 heartbeat_to_world_tick 补上进程级
+    #      泳道 + reason 后 emit WorldTick 接回 world_tick。WorldTick 直接挂时间源
+    #      会在源循环 _build_payload(WorldTick(ts=...)) 处 ValidationError 杀 Pod
+    #      （WorldTick 无 ts、且缺必填 lane），world 在生产里永远起不来。
+    #   2) 自排提前卡点（主节奏）：world_tick 内部 emit_delayed(WorldTick(reason="self"))，
+    #      到期 emit(WorldTick) 经下面的 in-process 边接回 world_tick。
+    wire(WorldHeartbeatTick).from_(Source.interval(WORLD_HEARTBEAT_SECONDS)).to(
+        heartbeat_to_world_tick
+    )
+    # WorldTick 退回纯 in-process：承载心跳翻译 / 自排两种来源 emit 的 WorldTick，
+    # 统一打到 world_tick。
+    wire(WorldTick).to(world_tick)
 
-# pull 范式：act 不再唤醒 world。life 做完一件事在 perform_act 里直接
-# insert_idempotent(ActPerformed) 落 PG（不 emit、不走 RabbitMQ、不触发唤醒），
-# world 醒来按游标批量 pull list_recent_acts。所以 ActPerformed 没有任何 wire——
-# 频率主权完全交回 world 自己的 sleep，不再被每条 act 拽起来全量推演。
+    # pull 范式：act 不再唤醒 world。life 做完一件事在 perform_act 里直接
+    # insert_idempotent(ActPerformed) 落 PG（不 emit、不走 RabbitMQ、不触发唤醒），
+    # world 醒来按游标批量 pull list_recent_acts。所以 ActPerformed 没有任何 wire——
+    # 频率主权完全交回 world 自己的 sleep，不再被每条 act 拽起来全量推演。
 
-# 信箱来新 event → debounce 攒批唤醒对应 life（同构跑三姐妹，persona 由
-# EventArrived 决定）。key_by 复用 event_knock_key，每个 (lane, persona) 自己
-# 攒批，互不干扰，与信箱隔离口径一致。
-wire(EventArrived).debounce(
-    seconds=LIFE_WAKE_DEBOUNCE_SECONDS,
-    max_buffer=LIFE_WAKE_DEBOUNCE_MAX_BUFFER,
-    key_by=event_knock_key,
-).to(life_wake_node)
+    # 信箱来新 event → debounce 攒批唤醒对应 life（同构跑三姐妹，persona 由
+    # EventArrived 决定）。key_by 复用 event_knock_key，每个 (lane, persona) 自己
+    # 攒批，互不干扰，与信箱隔离口径一致。
+    wire(EventArrived).debounce(
+        seconds=LIFE_WAKE_DEBOUNCE_SECONDS,
+        max_buffer=LIFE_WAKE_DEBOUNCE_MAX_BUFFER,
+        key_by=event_knock_key,
+    ).to(life_wake_node)
 
-# 纯事件反应者（Task 2 删自设闹钟）：角色的自排执行腿（LifeWakeTick → life_self_wake_node）、
-# next_wake_at 意愿写入、被否的 fan-out 定时心跳（LifeHeartbeatTick / LifeHeartbeatSweep）
-# 整套已拆掉——唤醒只剩 world notify 一条腿（走上面的 EventArrived → life_wake_node）。
-# 她跑完一轮就等下一个事件、自己绝不排下次醒，没有自排回环 wire。
+    # 纯事件反应者（Task 2 删自设闹钟）：角色的自排执行腿（LifeWakeTick → life_self_wake_node）、
+    # next_wake_at 意愿写入、被否的 fan-out 定时心跳（LifeHeartbeatTick / LifeHeartbeatSweep）
+    # 整套已拆掉——唤醒只剩 world notify 一条腿（走上面的 EventArrived → life_wake_node）。
+    # 她跑完一轮就等下一个事件、自己绝不排下次醒，没有自排回环 wire。
 
-# 日程到点提醒（备忘录 & 日程 第三块）：她 note / edit_note 排了带 remind_at 的日程 →
-# 收口 fire_schedule_reminders 给每条各 emit_delayed(ScheduleReminderTick)，到期 emit
-# 经这条纯 in-process 边接回 life_schedule_reminder_node（每条日程各挂各的、独立一路）。
-# 日程是她真实生活里有内容的安排（到点提醒她去做），区别于已删的自设闹钟（空时间点维持
-# 运转）。节点走到点 gate（读 entry 最新一版判仍 active
-# 且 remind_at 未改期 / 未撤）后 deliver_event 把这条投进她信箱、复用敲门把她叫醒。
-# ScheduleReminderTick 是 transient（日程内容在 durable NotebookEntry 里），不挂时间源，
-# 只承载到点提醒回环这一种来源。
-wire(ScheduleReminderTick).to(life_schedule_reminder_node)
+    # 日程到点提醒（备忘录 & 日程 第三块）：她 note / edit_note 排了带 remind_at 的日程 →
+    # 收口 fire_schedule_reminders 给每条各 emit_delayed(ScheduleReminderTick)，到期 emit
+    # 经这条纯 in-process 边接回 life_schedule_reminder_node（每条日程各挂各的、独立一路）。
+    # 日程是她真实生活里有内容的安排（到点提醒她去做），区别于已删的自设闹钟（空时间点维持
+    # 运转）。节点走到点 gate（读 entry 最新一版判仍 active
+    # 且 remind_at 未改期 / 未撤）后 deliver_event 把这条投进她信箱、复用敲门把她叫醒。
+    # ScheduleReminderTick 是 transient（日程内容在 durable NotebookEntry 里），不挂时间源，
+    # 只承载到点提醒回环这一种来源。
+    wire(ScheduleReminderTick).to(life_schedule_reminder_node)
 
-# 异步读小说（读小说 Task 2）：她在 life 轮调 read_book 工具认准一本书 → emit 一个
-# durable ReadingTriggered（立即 emit、非定时器，仿 act 的 durable 范式）→ 这条 durable
-# wire 把它接到 reading_node，让异步阅读任务在 worker 进程消费（life 进程 emit、阅读
-# @node 进程跑昂贵的阅读 agent、读一程揉印象）。durable 让触发跨进程可达不丢（life 与
-# 阅读 @node 不在同一调用栈）。区别于 act 的 pull（ActPerformed 无 wire、world 自排 pull）：
-# 读书是她明确发起的一程任务、push 触发、有 wire。reading_node 内部走 turn 幂等查重 +
-# CAS 提交保证 durable 重投 / 整轮重试不重复跑 agent、不双推进页号（见 app/nodes/reading.py）。
-wire(ReadingTriggered).durable().to(reading_node)
+    # 异步读小说（读小说 Task 2）：她在 life 轮调 read_book 工具认准一本书 → emit 一个
+    # durable ReadingTriggered（立即 emit、非定时器，仿 act 的 durable 范式）→ 这条 durable
+    # wire 把它接到 reading_node，让异步阅读任务在 worker 进程消费（life 进程 emit、阅读
+    # @node 进程跑昂贵的阅读 agent、读一程揉印象）。durable 让触发跨进程可达不丢（life 与
+    # 阅读 @node 不在同一调用栈）。区别于 act 的 pull（ActPerformed 无 wire、world 自排 pull）：
+    # 读书是她明确发起的一程任务、push 触发、有 wire。reading_node 内部走 turn 幂等查重 +
+    # CAS 提交保证 durable 重投 / 整轮重试不重复跑 agent、不双推进页号（见 app/nodes/reading.py）。
+    wire(ReadingTriggered).durable().to(reading_node)

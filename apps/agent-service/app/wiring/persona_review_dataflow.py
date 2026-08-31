@@ -20,6 +20,10 @@ ValidationError 杀 Pod（Sweep 无 ts、缺必填 lane），所以中间隔一�
 
 cron 时间源在非 prod 泳道默认不跑（lane_policy.time_sources_enabled_by_default），
 coe / ppe 验证补班行为时用 DATAFLOW_ENABLE_TIME_SOURCES=1 显式打开。
+
+**这条 cron 在 living 实验泳道上不注册**（``app.living.experiment``）。它比别的更
+要紧：persona review 会给 ``bot_persona`` 盖一版新的，而新引擎**每一缝**都读这张表
+取 persona_core —— 实验跑到一半人设被旧引擎换掉，观察到的东西就再也说不清是什么造成的。
 """
 from __future__ import annotations
 
@@ -29,15 +33,17 @@ from app.life.persona_review_cron import (
     persona_review_sweep_node,
     persona_review_to_sweep_tick,
 )
+from app.living.experiment import on_the_living_experiment_lane
 from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
 
-# 每天 11:00 一班的补班（钟挂 wiring 层，节拍器不进业务）。cron 喂单字段
-# PersonaReviewTick，翻译节点补上进程级泳道后 emit PersonaReviewSweep 接回
-# sweep 节点。本周已成功的班由周级幂等挡住，失败的班次日自动补。
-wire(PersonaReviewTick).from_(Source.cron("0 11 * * *", tz=TZ)).to(
-    persona_review_to_sweep_tick
-)
-# PersonaReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
-wire(PersonaReviewSweep).to(persona_review_sweep_node)
+if not on_the_living_experiment_lane():
+    # 每天 11:00 一班的补班（钟挂 wiring 层，节拍器不进业务）。cron 喂单字段
+    # PersonaReviewTick，翻译节点补上进程级泳道后 emit PersonaReviewSweep 接回
+    # sweep 节点。本周已成功的班由周级幂等挡住，失败的班次日自动补。
+    wire(PersonaReviewTick).from_(Source.cron("0 11 * * *", tz=TZ)).to(
+        persona_review_to_sweep_tick
+    )
+    # PersonaReviewSweep 纯 in-process：只承载翻译节点 emit 的执行信号。
+    wire(PersonaReviewSweep).to(persona_review_sweep_node)

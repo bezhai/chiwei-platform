@@ -18,6 +18,9 @@ Graph topology（照搬 world heartbeat 的三层翻译）:
 
 cron / interval 时间源在非 prod 泳道默认不跑（lane_policy.time_sources_enabled_by_default），
 coe / ppe 验证眼睛行为时用 DATAFLOW_ENABLE_TIME_SOURCES=1 显式打开。
+
+**这条 cron 在 living 实验泳道上不注册**（``app.living.experiment``）。spec 的
+Non-goal 明写第一版不做上网查；而 coe 上时间源是打开的，不加门它每小时真的会去抓一次。
 """
 from __future__ import annotations
 
@@ -27,15 +30,17 @@ from app.fetch.node import (
     daily_fetch_node,
     fetch_to_materials_tick,
 )
+from app.living.experiment import on_the_living_experiment_lane
 from app.runtime import Source, wire
 
 TZ = "Asia/Shanghai"
 
-# 白天每小时打点（04:00 第一班，失败下一钟点自动重试；当天已有底料由 node 早退）。
-# cron 喂单字段 DailyMaterialsTick（满足时间源的单字段 ts 约定），翻译节点
-# fetch_to_materials_tick 补上进程级泳道后 emit DailyMaterialsFetch 接回 daily_fetch_node。
-wire(DailyMaterialsTick).from_(Source.cron("0 4-23 * * *", tz=TZ)).to(
-    fetch_to_materials_tick
-)
-# DailyMaterialsFetch 纯 in-process：只承载翻译节点 emit 的执行信号，打到眼睛节点。
-wire(DailyMaterialsFetch).to(daily_fetch_node)
+if not on_the_living_experiment_lane():
+    # 白天每小时打点（04:00 第一班，失败下一钟点自动重试；当天已有底料由 node 早退）。
+    # cron 喂单字段 DailyMaterialsTick（满足时间源的单字段 ts 约定），翻译节点
+    # fetch_to_materials_tick 补上进程级泳道后 emit DailyMaterialsFetch 接回 daily_fetch_node。
+    wire(DailyMaterialsTick).from_(Source.cron("0 4-23 * * *", tz=TZ)).to(
+        fetch_to_materials_tick
+    )
+    # DailyMaterialsFetch 纯 in-process：只承载翻译节点 emit 的执行信号，打到眼睛节点。
+    wire(DailyMaterialsFetch).to(daily_fetch_node)
