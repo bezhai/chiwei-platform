@@ -1,0 +1,415 @@
+"""chat 是她的嘴 —— 只有出口，没有入口。
+
+life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，发出去。
+
+**为什么嘴要单独一个模型。** 一缝用的 ``life-model`` 推理强、对话差；拿它写对外的话，
+出去的是一段推理稿（旧引擎实测：堆黑话、叫「主人」）。所以嘴用 ``main-chat-model`` +
+自己的一份 prompt，跟 life 那一缝彻底分开。
+
+**没有入口。** 这个模块里没有任何 ``@node``、没有 ``Source``、没有队列消费者，一次都
+不出现旧 chat 入站链的名字。「被 @ 不能触发 chat」不是靠哪个分支里的 if 拦住的——是
+**这里根本没有接消息的地方**。``tests/living/test_no_inbound.py`` 把这条钉死。
+
+**出站照主动发那条契约走**（:mod:`app.domain.chat_dataflow` 的注释是单一定义处）：
+``is_proactive=True``、``message_id`` 是 ``proactive:`` 前缀的本地派生键、``root_id``
+留空。worker 据 ``is_proactive`` 走**不反查来源消息**的分支，直接用 ``chat_id``
+（= 真实 ``common_conversation_id``）+ ``bot_name`` 投递。
+
+**去重必须挡在出站之前，不能指望下游。** 实测过 chat-response-worker
+（``apps/channel-server/src/workers/chat-response-handler.ts``）：
+
+  * ``:193-207`` 自述"MQ redeliver **不做发送级去重**"——同一个 ``message_id`` 投两次
+    就是真人收到两条；
+  * ``:332`` 整个 handler **无条件 ack**，连出站失败也 ack（``:299-329`` 的 catch 只
+    记日志）——所以那一侧既不会重投、也不会补发。
+
+而 ``ChatResponseSegment`` 在这边是 ``transient``，sink 只管 publish，本身也没有去重。
+所以稳定的派生 id 只解决了"两条长得一样"，没解决"发了两次"：真正那道闸是下面这张
+:class:`SpokenOutbound` 认领表——工具重试、整轮 ``@retry`` 重放、这一缝重跑，全撞同一
+个派生键、只出站一次。
+
+**「她说过」和「真交出去了」的先后语义（崩在中间时哪一边留下）。** 这一段跨了 broker
+和数据库，做不到原子；做得到的是**可预期、可查**。顺序钉死为：
+
+  1. 认领（``claimed``）→ 2. ``emit`` 交给投递 → 3. 落 ``Happening``（她的记忆）→
+  4. 收口（``handed_off``）。
+
+  * ``emit`` **返回**了 → 3、4 照走，收口成 ``handed_off``。
+  * 其余全部落进同一格：**结果未知**，行停在 ``claimed``、不留记忆、不重发。
+    :func:`unsettled_outbound` 一句查询就能捞出来给人看。
+
+**``emit`` 抛错不是「确定没发出去」，是「不知道」。** 这一条曾经判反过：抛错记
+``handoff_failed`` 然后允许重试。但 publisher confirm 超时、连接断在确认之前，
+**broker 都可能已经收件了**；而下游 chat-response-worker 出站失败照样 ack、MQ 重投
+也没有发送级去重（下面那两处行号）。所以"抛错就自动重试"= 可能重复发给真人。
+
+**重复发给真人比丢一条更糟**——这是设计决定，不是疏忽。所以未知的时候选不发：崩在
+2 和 4 之间是这样，``emit`` 抛错也是这样，同一格，同一个待遇。
+
+**不重发不等于把这句话判死。** ``outbound_id`` 从 ``(lane, persona, 这一缝, 会话,
+她那句意图)`` 派生 —— 下一缝是新的 ``moment_id``、就是新的 ``outbound_id``，认领表
+拦不住它。所以"要不要再说一次"这个决定回到了**她**手里，而不是系统替她按重试按钮。
+这也是为什么这里没有重试计数器、没有退避、没有超时阈值：那些东西是替她做决定。
+
+**她说出去的话要落一条 Happening。** 不落的话她下一缝不知道自己说过什么，于是对同一
+件事又说一遍——旧引擎在 prod 上实锤复现过：两条主动发相隔三分钟、对同一件事说法前后
+矛盾。落的是**真的发出去那句**（渲染后的），不是她那句内部意图。
+
+**渲染没出内容就不发。** 不回退发意图原文（那是她脑子里的措辞，不是人话），也不发空
+消息——把"没发出去"作为工具结果喂回她，她自己决定重说还是算了。
+
+**第一版是单次渲染。** 她一缝里可以调好几次说好几条，但不能自己接着聊下去（没有对话
+窗口自主权）——那是下一版的事。
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime
+from typing import Annotated
+
+from pydantic import Field, field_validator
+from sqlalchemy import text
+
+from app.agent.context import AgentContext
+from app.agent.core import AgentConfig
+from app.agent.neutral import Message, Role
+from app.agent.tooling import tool
+from app.agent.tools._common import tool_error
+from app.capabilities.agent import AgentRunner
+from app.data.queries.persona import find_persona
+from app.data.session import get_session
+from app.domain.chat_dataflow import (
+    PROACTIVE_MESSAGE_ID_PREFIX,
+    ChatResponseSegment,
+)
+from app.living.happening import record_happening
+from app.living.phone import (
+    conversation_as_she_knows_it,
+    medium_for,
+    reachable_conversation,
+)
+from app.living.records import KIND_SPEECH, _require_aware
+from app.living.scope import moment_scope, note_recorded
+from app.living.whereabouts import current_whereabouts
+from app.runtime.data import Data, Key, Version
+from app.runtime.emit import emit
+from app.runtime.migrator import _table_name
+from app.runtime.persist import insert_append, select_latest
+
+logger = logging.getLogger(__name__)
+
+# Langfuse prompt id（新 id，只发泳道 label，不碰 production）。
+LIVING_CHAT_VOICE_PROMPT_ID = "living_chat_voice"
+
+# main-chat-model：这一步要的**只有**对话能力——把一个意思说成她会说的那句话。
+# recursion_limit 1：嘴没有工具，一次生成就该收口。
+_VOICE_CFG = AgentConfig(
+    LIVING_CHAT_VOICE_PROMPT_ID,
+    "main-chat-model",
+    "living-chat-voice",
+    recursion_limit=1,
+)
+
+# 派生出站 id 的命名空间，随手换会让历史消息全部对不上。
+_ID_NS = uuid.UUID("d4a91f62-7c05-4b3e-9a18-2f6e8c07b5d1")
+
+# 认领记录的两种状态。**没有"确定没发出去"这一档**——投递这一步只可能"确定发过"
+# 或者"不知道"，没有第三种（见模块 docstring）。
+#   claimed     交给投递了、没等到收口。**结果未知：可能已经送到真人手上。**
+#   handed_off  交出去了、记忆也落了，这条收口了。
+STATE_CLAIMED = "claimed"
+STATE_HANDED_OFF = "handed_off"
+
+
+class SpokenOutbound(Data):
+    """她交给投递的一条消息：认领 → 交出去 → 收口。
+
+    **存在的理由只有一个：下游不去重。** chat-response-worker 对 MQ redeliver 不做
+    发送级去重（chat-response-handler.ts:193-207 的自述），而且无条件 ack
+    （同文件 :332）——同一段投两次，真人就收到两条。所以那道闸只能在这边，而且必须
+    挡在 ``emit`` **之前**。
+
+    自然键 ``(lane, outbound_id)``；``outbound_id`` 从 ``(lane, persona, 这一缝,
+    会话, 她那句意图)`` 派生，所以工具重试、整轮 ``@retry`` 重放、这一缝重跑全撞同
+    一条记录。
+
+    **有版本链**，因为它有真实的状态变化（认领 → 收口），跟
+    :class:`app.living.records.Upcoming` 同一个理由。
+
+    **认领过就不再交第二次，一种状态都不例外。** ``emit`` 抛错也算认领过 —— 抛错
+    只说明我们没等到确认，不说明 broker 没收到（见模块 docstring）。这一缝里她那句
+    意图从此只对应这一条记录；要再说一次，得是下一缝（新的 ``moment_id`` = 新的
+    ``outbound_id``），而那是**她**的决定。
+    """
+
+    lane: Annotated[str, Key]
+    outbound_id: Annotated[str, Key]
+    ver: Annotated[int, Version]
+    persona_id: str
+    channel_id: str
+    moment_id: str
+    said: str            # 真的交出去那句话（渲染后的），不是她那句内部意图
+    state: str
+    claimed_at: datetime
+    settled_at: datetime | None = None
+
+    @field_validator("claimed_at", "settled_at")
+    @classmethod
+    def _aware_instant(cls, v: datetime | None) -> datetime | None:
+        return _require_aware("claimed_at / settled_at", v)
+
+
+_OUTBOUND_TABLE = _table_name(SpokenOutbound)
+
+
+async def latest_outbound(
+    *, lane: str, moment_id: str
+) -> SpokenOutbound | None:
+    """这一缝里那条出站记录的最新一版（一缝一条时够用，测试和排查用）。"""
+    sql = (
+        f"SELECT * FROM ("
+        f"  SELECT DISTINCT ON (lane, outbound_id) * FROM {_OUTBOUND_TABLE} "
+        f"  WHERE lane = :lane AND moment_id = :moment_id "
+        f"  ORDER BY lane, outbound_id, ver DESC"
+        f") latest ORDER BY claimed_at DESC LIMIT 1"
+    )
+    async with get_session() as s:
+        row = (
+            await s.execute(text(sql), {"lane": lane, "moment_id": moment_id})
+        ).mappings().first()
+    if row is None:
+        return None
+    return SpokenOutbound(**{k: row[k] for k in SpokenOutbound.model_fields})
+
+
+async def unsettled_outbound(
+    *, lane: str, persona_id: str
+) -> list[SpokenOutbound]:
+    """交出去了但没收口的那些 —— **崩在中间时留下的就是它们**。
+
+    语义是"可能已经送到真人手上，而她可能不记得自己说过"。这一段跨了 broker 和数据
+    库、做不到原子；能做到的是让残留可查。日常盘点或者事后排查直接查这个函数。
+    """
+    sql = (
+        f"SELECT * FROM ("
+        f"  SELECT DISTINCT ON (lane, outbound_id) * FROM {_OUTBOUND_TABLE} "
+        f"  WHERE lane = :lane AND persona_id = :persona_id "
+        f"  ORDER BY lane, outbound_id, ver DESC"
+        f") latest WHERE state = :state ORDER BY claimed_at ASC"
+    )
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                text(sql),
+                {"lane": lane, "persona_id": persona_id, "state": STATE_CLAIMED},
+            )
+        ).mappings().all()
+    return [
+        SpokenOutbound(**{k: r[k] for k in SpokenOutbound.model_fields})
+        for r in rows
+    ]
+
+
+def build_voice_runner() -> AgentRunner:
+    """嘴的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
+    return AgentRunner(_VOICE_CFG, tools=None)
+
+
+def _scene(scope: str, title: str) -> str:
+    return f"你在群「{title}」里说话。" if scope != "direct" else f"你在跟「{title}」私聊。"
+
+
+@tool
+@tool_error("这条消息没发出去")
+async def send_message(
+    what: Annotated[
+        str,
+        Field(description="你想说的意思，一句话就行——措辞不用你操心"),
+    ],
+    channel_id: Annotated[
+        str, Field(description="发到哪条会话，用信封 / 看手机时那串 channel_id")
+    ],
+) -> str:
+    """给手机上的某条会话发一条消息。
+
+    你给的是**意思**，不是原话：怎么说出口这一步不用你操心。
+
+    只能发你手机上有的会话（信封上列着的那些），channel_id 照抄，别自己编。
+
+    一缝里可以发好几条。但发完就是发完了——对方回了什么，要等你下一次拿起手机才知道。
+
+    Args:
+        what: 你想说的意思。
+        channel_id: 发到哪条会话。
+
+    Returns:
+        这条的下场，附上真的说出口那句话。有时候只能告诉你"交出去了但不知道到没到"
+        —— 那就是真的不知道，别当成发出去了，也别当成没发。
+    """
+    lane, now, persona_id, moment_id = moment_scope()
+    intent = what.strip()
+    if not intent:
+        raise ValueError("说点什么：意思不能是空的。")
+
+    conv = await reachable_conversation(
+        persona_id=persona_id, channel_id=channel_id.strip()
+    )
+    if conv is None:
+        # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。
+        raise ValueError(
+            f"{channel_id!r} 不是你手机上的会话，发不了 —— 用信封上那串 "
+            f"channel_id，照抄。你能发的严格等于你能收到的那些会话。"
+        )
+
+    seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
+    # 派生自**意图**而不是渲染结果：模型每次措辞可能不同，而重放同一次发送必须落回
+    # 同一个 id，否则整轮重试会真的发出两条。
+    derived = uuid.uuid5(_ID_NS, seed)
+    outbound_id = derived.hex
+    message_id = f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}"
+
+    # **去重挡在渲染和出站之前。** 下游没有发送级去重（见模块 docstring 里 worker 那
+    # 两处行号），所以这条闸漏一次就是真人收到两条。放在渲染之前还顺手省掉一次白花的
+    # 模型调用。
+    tried = await select_latest(
+        SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
+    )
+    if tried is not None:
+        # 认领过就不再交第二次，**哪种状态都一样**：要么确定发过了，要么不知道发没
+        # 发。不知道的时候选不发 —— 重复打扰真人比少一条更糟。措辞照实分开，因为
+        # "说出去了"和"不知道到没到"是两件不同的事，把后者说成前者就是编。
+        if tried.state == STATE_HANDED_OFF:
+            return (
+                f"这句话你已经说出去了（「{tried.said}」），没有再发一遍 —— "
+                f"想说别的就换一句。"
+            )
+        return (
+            f"这句话你已经交出去了（「{tried.said}」），但没等到确认，"
+            f"不知道对方收没收到。没有再发一遍。"
+        )
+
+    persona = await find_persona(persona_id)
+    known = await conversation_as_she_knows_it(
+        lane=lane, persona_id=persona_id, channel_id=conv.channel_id, now=now
+    )
+    reply = await build_voice_runner().run(
+        [
+            Message(
+                role=Role.USER,
+                content=(
+                    f"{_scene(conv.scope, conv.title)}\n\n"
+                    f"这条会话上你已经知道的：\n{known}\n\n"
+                    f"你现在想说的意思：{intent}\n\n"
+                    f"把它说成你会说的那句话，直接给话，别解释。"
+                ),
+            )
+        ],
+        prompt_vars={
+            "persona_name": getattr(persona, "display_name", "") or persona_id,
+            "persona_core": (getattr(persona, "persona_core", "") or "").strip(),
+        },
+        context=AgentContext(
+            persona_id=persona_id,
+            session_id=f"living-mouth:{lane}:{persona_id}:{conv.channel_id}",
+        ),
+        max_retries=1,
+    )
+    said = reply.text().strip()
+    if not said:
+        raise RuntimeError(
+            "这句话没能成形（渲染没出内容），没发出去 —— 你可以待会儿再试，"
+            "或者换个说法。"
+        )
+
+    # 顺序钉死：认领 → 交出去 → 记忆 → 收口。每一步崩掉留下什么写在模块 docstring 里。
+    # 版本链只有两版：认领过就走不到这儿了（上面直接返回），所以这一条永远是从零起。
+    claim = SpokenOutbound(
+        lane=lane,
+        outbound_id=outbound_id,
+        ver=1,
+        persona_id=persona_id,
+        channel_id=conv.channel_id,
+        moment_id=moment_id,
+        said=said,
+        state=STATE_CLAIMED,
+        claimed_at=now,
+    )
+    await insert_append(claim, expected_current_ver=0)
+
+    try:
+        await emit(
+            ChatResponseSegment(
+                channel=conv.channel,
+                message_id=message_id,
+                persona_id=persona_id,
+                part_index=0,
+                session_id=None,          # 主动发没有 chat session
+                chat_id=conv.channel_id,  # 真实会话地址
+                is_p2p=conv.scope == "direct",
+                root_id=None,             # 没有来源消息，不伪造一条被回复的
+                user_id=None,
+                is_proactive=True,
+                bot_name=conv.bot_name,
+                lane=lane,                # sink 不注入 header lane，必须显式带
+                content=said,
+                status="success",
+                is_last=True,
+                full_content=said,
+            )
+        )
+    except Exception:
+        # **抛错 = 不知道，不是"确定没发出去"。** publisher confirm 超时、连接断在
+        # 确认之前，broker 都可能已经收件了；而下游出站失败照样 ack、MQ 重投也没有
+        # 发送级去重。所以这一格跟"崩在 emit 和收口之间"是同一件事：行停在
+        # ``claimed``（:func:`unsettled_outbound` 捞得出来）、不留记忆、不重发。
+        #
+        # 不重发不是把这句话判死：``outbound_id`` 从 ``moment_id`` 派生，下一缝就是
+        # 新的一条 —— 要不要再说一次是**她**的决定，不是系统替她按的重试按钮。
+        # 所以这里也没有计数器、没有退避、没有超时阈值。
+        logger.warning(
+            "living mouth lane=%s persona=%s outbound=%s 交给投递时断了，"
+            "结果未知（行停在 claimed，不重发）",
+            lane,
+            persona_id,
+            outbound_id,
+            exc_info=True,
+        )
+        # 如实说：不说"发失败了"（不知道），也不说"发出去了"（同样不知道），更不
+        # 叫她再试一次（那是替她做决定）。
+        return (
+            f"「{said}」—— 这句话交出去的时候断了，不知道对方收没收到。"
+            f"这一缝里不会再发一遍。"
+        )
+
+    # 落进她自己的记录里 —— 不落的话，她下一缝不知道自己说过这句话。
+    # 位置缺失不拦：手机隔着设备，旁边的人本来就一个字都感知不到，所以位置算不算得
+    # 出来都不影响谁听得见（跟当面说话不一样，那条必须有位置）。
+    where = await current_whereabouts(lane=lane, persona_id=persona_id)
+    happening_id = f"mouth:{outbound_id}"
+    await record_happening(
+        lane=lane,
+        happening_id=happening_id,
+        actor=persona_id,
+        place=where.place if where is not None else "",
+        kind=KIND_SPEECH,
+        content=said,
+        occurred_at=now,
+        audience=(),
+        medium=medium_for(conv.scope),
+        channel_id=conv.channel_id,
+    )
+    note_recorded(happening_id)
+    # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不
+    # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
+    await insert_append(
+        claim.model_copy(
+            update={"ver": 2, "state": STATE_HANDED_OFF, "settled_at": now}
+        ),
+        expected_current_ver=1,
+    )
+    return f"发出去了：「{said}」"
+
+
+MOUTH_TOOLS = [send_message]

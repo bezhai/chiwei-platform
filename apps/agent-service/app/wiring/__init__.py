@@ -5,6 +5,7 @@ from app.wiring import (  # noqa: F401
     chat,
     fetch_dataflow,
     life_dataflow,
+    living,
     persona_review_dataflow,
     review_dataflow,
     safety,
