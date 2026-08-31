@@ -238,7 +238,7 @@ async def insert_append(
     return 1
 
 
-async def insert_idempotent(obj: Data) -> int:
+async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
     """Insert ``obj`` if its dedup key has not been seen; return rows inserted.
 
     Uses ``ON CONFLICT (<dedup_target>) DO NOTHING RETURNING 1``. The dedup
@@ -252,6 +252,14 @@ async def insert_idempotent(obj: Data) -> int:
 
     We count ``len(fetchall())`` because asyncpg does not reliably populate
     ``rowcount`` for ``DO NOTHING``.
+
+    ``session`` runs the INSERT on a caller-supplied ``AsyncSession`` instead
+    of opening a private one, so the write commits **atomically with whatever
+    else the caller did on that session**. The one case that needs it: a
+    persistent read cursor whose advance must be in the same transaction as
+    the read it is a cursor for — advancing in a separate transaction lets a
+    crash in between skip messages nobody ever saw. Default ``None`` keeps
+    every existing caller on the private-session path unchanged.
     """
     cls = type(obj)
     table = _table_name(cls)
@@ -271,8 +279,12 @@ async def insert_idempotent(obj: Data) -> int:
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT ({conflict_target}) DO NOTHING RETURNING 1"
     )
+    params = _encode_params(obj, cols_map, jsonb_cols)
+    if session is not None:
+        r = await session.execute(text(sql), params)
+        return len(r.fetchall())
     async with get_session() as s:
-        r = await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
+        r = await s.execute(text(sql), params)
         return len(r.fetchall())
 
 
