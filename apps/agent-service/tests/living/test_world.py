@@ -437,3 +437,23 @@ async def test_what_the_round_expected_actually_comes_due(world_db, stub_round):
     assert [u.what for u in await list_due_upcoming(lane=LANE, until=_at(10, 31))] == [
         "快递送到门口"
     ]
+
+
+@pytest.mark.integration
+async def test_an_empty_ledger_still_says_what_time_it_is(world_db, stub_round):
+    """账上空着的时候，它更得知道现在几点。
+
+    账本非空时"现在"还能从各行的日子钟点加「已经发生 / 还没到」的记号反推个大概；
+    空账本渲染成「（账上现在什么都没有）」，这一轮就**一个时间线索都没有**了 ——
+    而恰恰是这种时候它最该判断"这个点该不该冒出点什么"，也最容易乱添。判断依据
+    跟一缝同源：都用这一轮自己的锚，不现取钟。
+    """
+    runner = stub_round()
+
+    await run_world_round(lane=LANE, now=_at(10))
+
+    (messages, _kwargs) = runner.runs[0]
+    said_to_it = "\n".join(m.content for m in messages if m.role is Role.USER)
+    assert "2026-07-25" in said_to_it and "10:00" in said_to_it, (
+        f"空账本这一轮没告诉它现在几点，它只能瞎猜。它看到的是：\n{said_to_it}"
+    )

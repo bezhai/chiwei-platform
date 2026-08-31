@@ -47,6 +47,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.agent import AgentRunner
 from app.data.session import get_session
+from app.infra.cst_time import to_cst_full
 from app.living.anchor import anchor_on_grid
 from app.living.records import _require_aware
 from app.living.serial import hold
@@ -57,8 +58,10 @@ from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
-# Langfuse prompt id（新 id，只发泳道 label，不碰 production）。它只吃 Agent 自动
-# 注入的 currDate / currTime 两个变量，账本走 USER 消息。
+# Langfuse prompt id（新 id，只发泳道 label，不碰 production）。正文**一个变量都不
+# 引用**：时刻和账本都走 USER 消息，用的是这一轮自己的锚。Agent 仍会无条件注入
+# currDate / currTime，但那取的是模型调用那一刻现取的钟、不是锚，两者跨午夜会打架
+# ——正文不引用它们，注入的就只是没人要的 kwargs。
 WORLD_ROUND_PROMPT_ID = "living_world_round"
 
 # offline-model：这一轮要的是对客观世界的推断（这个点该有什么事冒出来），不是
@@ -320,7 +323,19 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
             }
         )
         reply = await build_world_runner().run(
-            [Message(role=Role.USER, content=f"账上现在是这样：\n{ledger}")],
+            [
+                Message(
+                    role=Role.USER,
+                    content=(
+                        # 时刻必须自己给：账本非空时"现在"还能从各行的日子钟点加
+                        # 「已经发生 / 还没到」反推个大概，空账本就一个线索都没有
+                        # 了——而那正是它最该判断"这个点该不该冒出点什么"的时候。
+                        # 用这一轮的锚不现取钟，跟一缝、跟账本三者同源。
+                        f"现在 {to_cst_full(anchor.isoformat())}。\n\n"
+                        f"账上现在是这样：\n{ledger}"
+                    ),
+                )
+            ],
             context=context,
             max_retries=1,
         )
