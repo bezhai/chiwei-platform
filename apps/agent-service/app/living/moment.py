@@ -278,6 +278,8 @@ async def switch_to(
 
     别报时长——你不知道自己要做多久，也不用知道。
 
+    人挪了地方但手上还是同一件事（走廊走进教室、端着咖啡进阳台），那是 move_to。
+
     心里挂着什么是另一回事，走 keep_in_mind，跟换不换事没有关系。
 
     Args:
@@ -313,6 +315,60 @@ async def switch_to(
         {"doing": what, "because": because.strip()}
     )
     return f"你在 {where}，{what}。"
+
+
+@tool
+@tool_error("挪个地方失败")
+async def move_to(
+    place: Annotated[
+        str, Field(description="你现在人在哪，层级路径如「学校/二年三班教室」")
+    ],
+) -> str:
+    """我人换地方了，手上的事没变。
+
+    走到别处、但还在做同一件事的时候调它：从走廊走进教室、端着咖啡从厨房走到阳台。
+
+    你在哪，决定了谁看得见你、你看得见谁。人挪了而这里没挪，你在所有人眼里就还
+    待在原地——你说你回教室了，她们看到的你还在走廊上。
+
+    被别的事带走了、手上这件事本身换了，那是 switch_to；那只手也会顺带记下位置。
+
+    Args:
+        place: 你现在人在哪（层级路径）。
+
+    Returns:
+        一句确认文本。
+    """
+    lane, now, persona_id, moment_id = moment_scope()
+    where = place.strip()
+    if not where:
+        raise ValueError(
+            "place 不能是空的：位置是别人能不能感知到你的全部依据，"
+            "空位置会让你从此谁也听不见、也没人听得见你。写一个层级路径，"
+            "例如「家/客厅」。"
+        )
+
+    # 手上那件事原样带走 —— 这只手改的只有位置。没有"当前"就没有可带走的事：
+    # 她还没落过位置，这一步无从下脚（第一次落位走 switch_to）。
+    current = await current_whereabouts(lane=lane, persona_id=persona_id)
+    if current is None:
+        raise ValueError(
+            "你还没定下过自己在哪，也就没有一件'照旧做着'的事可以带到新地方去。"
+        )
+
+    # 自然键跟 switch_to 同款：同一缝里挪两次要落两行（最新那条才是"当前"），
+    # 而重放同样的内容仍然只落一行。
+    await note_whereabouts(
+        lane=lane,
+        persona_id=persona_id,
+        moment_id=f"{moment_id}:{_derive(current.doing, where)[:8]}",
+        place=where,
+        doing=current.doing,
+        noted_at=now,
+    )
+    # **不进 FEATURE_SWITCHES**：走一步不是"什么把你从这件事里带走了"。混进去会让
+    # 逐缝复盘里的换事率把单纯的走动也算成换事情。
+    return f"你在 {where}，还在{current.doing}。"
 
 
 @tool
@@ -502,6 +558,7 @@ async def look_around() -> str:
 # 拆两份工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想不到的差别。
 MOMENT_TOOLS = [
     switch_to,
+    move_to,
     keep_in_mind,
     say,
     act,

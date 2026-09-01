@@ -372,10 +372,12 @@ def test_the_moment_tool_descriptions_carry_no_medical_examples():
     剧情的输入源之一。所以上一条边界只能用**类目**说（"别人的身体怎么样""测出来是
     多少"），不能拿一个具体病例当例子——那等于一边立边界一边递剧本。
 
-    只守 :mod:`app.living.moment` 自己定义的五件工具；手机和嘴住在别的模块里，各自
+    只守 :mod:`app.living.moment` 自己定义的六件工具；手机和嘴住在别的模块里，各自
     的文案归各自的用例守。
     """
-    for t in (switch_to, keep_in_mind, say, act, look_around):
+    from app.living.moment import move_to
+
+    for t in (switch_to, move_to, keep_in_mind, say, act, look_around):
         desc = t.definition.description
         for word in ("发烧", "医院", "急诊", "生病", "体温", "多少度"):
             assert word not in desc, (
@@ -1175,3 +1177,103 @@ def test_the_life_records_refuse_a_naive_instant():
 def test_the_prompt_lives_in_langfuse_under_its_own_id():
     """新引擎用新 prompt id，只发泳道 label，绝不碰 production。"""
     assert LIFE_MOMENT_PROMPT_ID == "living_life_moment"
+
+
+# --------------------------------------------------------------------------
+# 六 · 人挪了，事情没变
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_moving_without_changing_what_she_is_doing_updates_where_she_is(
+    moment_db, stub_moment
+):
+    """走到别处但手上的事没变 —— 位置得跟着走，doing 原样留着。
+
+    实测（coe-living，2026-09-01 09:00–11:20）：绫奈的位置在「学校/教学楼走廊」
+    冻了 2 小时 20 分，``data_whereabouts`` 整个上午只有两行。她的 act 一直在写
+    「走回二年三班的教室，在靠窗位子坐下」——**至少写了 6 次**。因为位置只由
+    ``switch_to`` 写，而她手上那件事（找教室、等上课）从头到尾没变过，所以她一次
+    都没"换事情"，位置也就一次都没更新。
+    """
+    await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
+    stub_moment(("move_to", {"place": "学校/二年三班教室"}))
+
+    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+
+    where = await current_whereabouts(lane=LANE, persona_id="ayana")
+    assert where.place == "学校/二年三班教室", "人挪了位置没跟着"
+    assert where.doing == "等第一节课", "手上的事被这一步改掉了"
+
+
+@pytest.mark.integration
+async def test_moving_is_not_switching_to_something_else(moment_db, stub_moment):
+    """挪个地方不算「换了事情」。
+
+    ``switch_to`` 的语义是"什么把你从刚才那件事里带走了"，走动没有这回事。混进去
+    会让逐缝复盘里的"换事率"把单纯的走动也算成换事情。
+    """
+    await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
+    stub_moment(("move_to", {"place": "学校/二年三班教室"}))
+
+    moment = await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+
+    assert moment.switched is False, "走一步被算成了换事情"
+    assert moment.doing == "等第一节课"
+
+
+@pytest.mark.integration
+async def test_after_she_moves_the_others_can_reach_her_there(
+    moment_db, stub_moment, in_a_moment
+):
+    """位置是别人能不能感知到她的全部依据 —— 挪完，同处的人就该看得见她。
+
+    这条是上面那个 bug 真正的代价：绫奈叙述自己在教室里，而全家看到的她一直在
+    走廊。她不是"状态标签滞后"，是**两小时对所有人不可见**。
+    """
+    await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
+    await _stand("akao", "学校/二年三班教室", "趴桌上发呆", _at(9))
+    stub_moment(("move_to", {"place": "学校/二年三班教室"}))
+
+    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+
+    async with in_a_moment("ayana", lane=LANE, now=_at(9, 30)):
+        seen = await look_around.invoke({})
+
+    assert "akao" in seen, f"挪过来了却还是看不见同一个地方的人：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_moving_nowhere_is_refused_like_switching_nowhere(
+    moment_db, stub_moment
+):
+    """空位置一样得顶回去 —— 理由跟 switch_to 那条一模一样。"""
+    await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
+    runner = stub_moment(("move_to", {"place": "   "}))
+
+    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+
+    assert isinstance(runner.results[0], dict), "空位置被接受了"
+    where = await current_whereabouts(lane=LANE, persona_id="ayana")
+    assert where.place == "学校/教学楼走廊", "空位置把她挪走了"
+
+
+@pytest.mark.integration
+async def test_moving_before_she_ever_stood_anywhere_says_so(
+    moment_db, stub_moment
+):
+    """从没落过位置时挪不动 —— 没有"手上那件事"可以原样带走。"""
+    runner = stub_moment(("move_to", {"place": "学校/二年三班教室"}))
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(9, 20))
+
+    assert isinstance(runner.results[0], dict), "凭空挪了一个没有位置的人"
+    assert await current_whereabouts(lane=LANE, persona_id="akao") is None
+
+
+def test_moving_is_one_of_the_hands_she_actually_has():
+    """没注册 = 她永远调不到，症状跟原 bug 一模一样但更难查。"""
+    from app.living.moment import move_to
+
+    assert move_to in MOMENT_TOOLS
+    assert set(move_to.definition.parameters["properties"]) == {"place"}
