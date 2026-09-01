@@ -705,6 +705,125 @@ def _glance_text(*, title: str, rows: list, unread_before: int, now: datetime) -
     return head + "\n" + "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# 按名字找回一条会话的地址
+# ---------------------------------------------------------------------------
+
+# 匹配两边：群按会话标题（群基本都有名），私聊按**在里面说过话的人**
+# （``sender_display_name``，也正是信封上给她看的那个"谁"——她搜的名字和她见过的
+# 名字是同一个）。私聊会话本身多半没有标题：prod 实测 205 条私聊里 158 条
+# ``display_name`` 是空的，所以只查标题等于查不到人。
+#
+# 只在她手机上的会话里找（``common_bot_presence`` ＋ 她自己的 bot），跟
+# :data:`_REACHABLE_SQL` 同一条口径 —— 查出来的地址必须是她真能用的，否则这只手
+# 只是把 fail-loud 从"找不到"推迟到"发不出去"。
+#
+# **匹配的是 ``sender_display_name``，不是 ``common_user.display_name``。** 后者有索引、
+# 表也小（prod 12973 行），但她从来没见过那个名字：信封和会话正文给她看的"谁"全都是
+# ``sender_display_name``。两者在 prod 上 4652 组里有 2157 组不一致（46%），按 common_user
+# 搜等于让她搜一个自己没见过的名字。
+#
+# 代价是没有索引可用，只能扫。**过滤必须下推进扫描**（``WHERE ... ILIKE`` 在 matched
+# 里，不是先聚合再 FILTER）：prod 实测 akao 名下 323 条会话共 254 万条消息，下推之后
+# 是一次并行 seq scan，EXPLAIN ANALYZE 386ms。这只手她一天调不了几次、不在每一缝的
+# 路径上，386ms 换"她能主动找回一个人"是划算的——所以这里不加时间窗，加了她就再也
+# 找不回久没联系的人。
+_LOOK_UP_SQL = f"""
+WITH mine AS (
+  SELECT cc.common_conversation_id AS channel_id,
+         cc.scope                  AS scope,
+         COALESCE(cc.display_name, '') AS title
+    FROM common_bot_presence bp
+    JOIN bot_config bc
+      ON bc.bot_name = bp.bot_name
+     AND bc.persona_id = :persona_id
+     AND bc.is_active = true
+    JOIN common_conversation cc
+      ON cc.common_conversation_id = bp.common_conversation_id
+     AND cc.is_active = true
+   WHERE bp.is_active = true
+   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
+),
+matched AS (
+  SELECT cm.common_conversation_id AS channel_id,
+         COALESCE(cm.sender_display_name, '某人') AS who,
+         MAX(cm.event_time) AS latest
+    FROM common_message cm
+    JOIN mine m ON m.channel_id = cm.common_conversation_id
+   WHERE cm.sender_display_name ILIKE :like
+     AND NOT {_SAID_BY_HER}
+   GROUP BY 1, 2
+)
+SELECT m.channel_id AS channel_id,
+       m.scope      AS scope,
+       m.title      AS title,
+       ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.who IS NOT NULL) AS matched,
+       MAX(x.latest) AS latest
+  FROM mine m
+  LEFT JOIN matched x ON x.channel_id = m.channel_id
+ GROUP BY m.channel_id, m.scope, m.title
+HAVING m.title ILIKE :like OR COUNT(x.who) > 0
+ ORDER BY m.channel_id
+"""
+
+
+@tool
+@tool_error("找会话失败")
+async def look_up_contact(
+    name: Annotated[
+        str, Field(description="你要找的人或群的名字，记得多少写多少")
+    ],
+) -> str:
+    """报一个名字，找回他在你手机上的那条会话。
+
+    手机上每一缝给你的信封只列**有动静的**那些。一条会话你读完了、对方没再说话，
+    它就不在信封上了——想主动找回某个人的时候用这只手。
+
+    名字对得上的会话都列出来，各带一串 channel_id，拿它调 look_at_phone 或
+    send_message。哪一条是你要找的那个人，你自己认。
+
+    Args:
+        name: 你要找的人或群的名字。
+
+    Returns:
+        名字对得上的会话，每条带 channel_id；一条都没有时如实说明。
+    """
+    _, now, persona_id, _ = moment_scope()
+    wanted = name.strip()
+    if not wanted:
+        raise ValueError("name 不能是空的：写一个你要找的名字。")
+
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                text(_LOOK_UP_SQL),
+                {
+                    "persona_id": persona_id,
+                    "like": f"%{wanted}%",
+                    "own_bots": await _own_bot_names(persona_id=persona_id),
+                },
+            )
+        ).mappings().all()
+
+    if not rows:
+        return f"手机上没有叫「{wanted}」的人或群。"
+
+    lines = [f"手机上叫「{wanted}」的："]
+    for r in rows:
+        where = "私聊" if r["scope"] == "direct" else "群"
+        # 私聊的会话标题多半是空的，这时用对得上的那个人名当它的名字——在她眼里
+        # 那条私聊本来就叫那个人。地址紧跟名字，理由见 render_envelopes。
+        matched = list(r["matched"] or [])
+        label = r["title"] or "、".join(matched) or "（没名字）"
+        bits = [f"- {where}「{label}」channel_id={r['channel_id']}"]
+        if matched and r["title"]:
+            bits.append("、".join(matched) + " 在里面说过话")
+        if r["latest"] is not None:
+            bits.append(f"最近一次 {_clock(_instant(int(r['latest'])), now=now)}")
+        lines.append(" · ".join(bits))
+    return "\n".join(lines)
+
+
 @tool
 @tool_error("看手机失败")
 async def look_at_phone(
@@ -789,7 +908,7 @@ async def look_at_phone(
     return seen
 
 
-PHONE_TOOLS = [look_at_phone]
+PHONE_TOOLS = [look_at_phone, look_up_contact]
 
 
 # ---------------------------------------------------------------------------

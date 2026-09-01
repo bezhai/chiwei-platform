@@ -24,6 +24,7 @@ from app.living.phone import (
     conversation_as_she_knows_it,
     envelopes_for,
     look_at_phone,
+    look_up_contact,
     newest_unread_summons,
     phone_envelope,
     reachable_conversations,
@@ -948,3 +949,126 @@ async def test_the_address_sits_next_to_the_name_it_belongs_to(living_db):
     assert id_at - name_at < 60, (
         f"地址离名字太远，她会拿名字当地址用。这一行是：\n{line}"
     )
+
+
+# --------------------------------------------------------------------------
+# 找人 —— 读完了不等于这个人不存在
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_conversation_with_nothing_unread_can_still_be_found_by_name(
+    living_db, in_a_moment
+):
+    """读完最后一条之后，她还能不能找回这个人。
+
+    实测（coe-living，2026-09-01）：她挂了 13 小时的一条 LooseEnd 写着「想回他但
+    手机上找不到他会话，等下次有信封再试」。信封只列有未读的会话
+    （:func:`envelopes_for` 见到 ``unread=0`` 就 continue），而 ``look_at_phone`` /
+    ``send_message`` 都只认信封上那串 channel_id ——**她读完的那一刻，那个人从她
+    世界里消失了**，于是主动发起一次对话在这个引擎里根本不可能发生。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+    async with in_a_moment("akao"):
+        await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
+
+    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
+        "前提没成立：这条会话该已经从信封里消失了"
+    )
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "bezhai"})
+
+    assert str(_DM) in found, f"零未读就找不回这个人。拿到：\n{found}"
+
+
+@pytest.mark.integration
+async def test_a_looked_up_address_sits_next_to_the_name(living_db, in_a_moment):
+    """查出来的地址要跟名字挨着 —— 跟信封同一条教训，见上面那个用例。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "bezhai"})
+
+    line = next(ln for ln in found.splitlines() if str(_DM) in ln)
+    assert line.index(f"channel_id={_DM}") - line.index("bezhai") < 60, (
+        f"地址离名字太远，她会拿名字当地址用。这一行是：\n{line}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_group_is_found_by_its_own_name(living_db, in_a_moment):
+    """群按群名找得到（群会话有标题，私聊多半没有，两条路都得走通）。"""
+    await _seed_world()
+    await _incoming(_GROUP, text_body="今天几点", at=_at(20, 0))
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "宅居研究所"})
+
+    assert str(_GROUP) in found, f"群名查不到。拿到：\n{found}"
+
+
+@pytest.mark.integration
+async def test_a_conversation_that_is_not_on_her_phone_is_not_found(
+    living_db, in_a_moment
+):
+    """别人的私聊线不在她手机上，按名字也不该冒出来。
+
+    ``_OTHERS_DM`` 是同一个人跟**绫奈的 bot** 的私聊。查得到就等于给了她一个
+    发出去会串人设身份的地址。
+    """
+    await _seed_world()
+    await _incoming(_OTHERS_DM, text_body="绫奈在吗", at=_at(20, 0))
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "bezhai"})
+
+    assert str(_OTHERS_DM) not in found, (
+        f"把别人的私聊线给她了。拿到：\n{found}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_name_that_matches_nothing_says_so_without_telling_her_what_to_do(
+    living_db, in_a_moment
+):
+    """查不到就说查不到。下一步做什么是她的判断，工具不替她安排。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "查无此人"})
+
+    assert "查无此人" in found
+    assert not any(s in found for s in ("再试", "换个", "或者算了")), (
+        f"工具在指挥她下一步该干嘛：{found!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_every_match_is_listed_without_picking_one(living_db, in_a_moment):
+    """重名全列出来交给她挑：不排序、不筛、不取第一个。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+    await _incoming(_GROUP, text_body="在吗", at=_at(20, 1))
+
+    async with in_a_moment("akao"):
+        found = await look_up_contact.invoke({"name": "bezhai"})
+
+    assert str(_DM) in found and str(_GROUP) in found, (
+        f"两条都该在（私聊本身 + 他说过话的群）。拿到：\n{found}"
+    )
+
+
+@pytest.mark.integration
+async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
+    """这只手要真在她的工具集里。
+
+    没注册是**静默失败**：代码写好了、测试也绿，但她那一缝的工具列表里没有它，
+    于是永远不会调——症状跟"零未读就找不回这个人"一模一样，而且更难查。
+    """
+    from app.living.moment import MOMENT_TOOLS
+
+    assert look_up_contact in MOMENT_TOOLS, "她手里没有这只手"
