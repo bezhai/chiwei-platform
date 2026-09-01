@@ -45,7 +45,9 @@ from app.agent.neutral import Message, Role
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
+from app.domain.thinking_cost import record_round_cost
 from app.data.session import get_session
 from app.infra.cst_time import to_cst_full
 from app.living.anchor import anchor_on_grid
@@ -314,6 +316,7 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
         if last is not None and anchor - last.ran_at < interval:
             return None
 
+        round_id = anchor.isoformat(timespec="minutes")
         ledger = await world_ledger(lane=lane, now=anchor)
         context = AgentContext(
             features={
@@ -322,27 +325,38 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
                 FEATURE_WRITTEN: [],
             }
         )
-        reply = await build_world_runner().run(
-            [
-                Message(
-                    role=Role.USER,
-                    content=(
-                        # 时刻必须自己给：账本非空时"现在"还能从各行的日子钟点加
-                        # 「已经发生 / 还没到」反推个大概，空账本就一个线索都没有
-                        # 了——而那正是它最该判断"这个点该不该冒出点什么"的时候。
-                        # 用这一轮的锚不现取钟，跟一缝、跟账本三者同源。
-                        f"现在 {to_cst_full(anchor.isoformat())}。\n\n"
-                        f"账上现在是这样：\n{ledger}"
-                    ),
-                )
-            ],
-            context=context,
-            max_retries=1,
+        # 用量落 durable PG，理由同一缝（见 app.living.moment）：langfuse 会系统性
+        # 丢 trace，"这一天花了多少"只能从 PG 数。
+        with collect_usage() as usage:
+            reply = await build_world_runner().run(
+                [
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            # 时刻必须自己给：账本非空时"现在"还能从各行的日子钟点加
+                            # 「已经发生 / 还没到」反推个大概，空账本就一个线索都没有
+                            # 了——而那正是它最该判断"这个点该不该冒出点什么"的时候。
+                            # 用这一轮的锚不现取钟，跟一缝、跟账本三者同源。
+                            f"现在 {to_cst_full(anchor.isoformat())}。\n\n"
+                            f"账上现在是这样：\n{ledger}"
+                        ),
+                    )
+                ],
+                context=context,
+                max_retries=1,
+            )
+
+        await record_round_cost(
+            lane=lane,
+            actor="world",
+            round_id=round_id,
+            usage=usage,
+            observed_at=anchor.isoformat(),
         )
 
         round_ = WorldRound(
             lane=lane,
-            round_id=anchor.isoformat(timespec="minutes"),
+            round_id=round_id,
             ran_at=anchor,
             produced=len(set(context.features[FEATURE_WRITTEN])),
             said=reply.text().strip(),

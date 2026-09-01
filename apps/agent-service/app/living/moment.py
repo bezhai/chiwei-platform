@@ -70,8 +70,10 @@ from app.agent.neutral import Message, Role
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.queries.persona import find_persona
+from app.domain.thinking_cost import record_round_cost
 from app.data.session import get_session
 from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
@@ -797,21 +799,36 @@ async def run_moment(
                 FEATURE_GLANCES: [],
             },
         )
-        reply = await build_moment_runner().run(
-            [
-                Message(
-                    role=Role.USER,
-                    content=f"{snapshot.render()}\n\n{envelope}",
-                )
-            ],
-            prompt_vars={
-                "persona_name": getattr(persona, "display_name", "") or persona_id,
-                "persona_core": _persona_core_var(
-                    getattr(persona, "persona_core", None)
-                ),
-            },
-            context=context,
-            max_retries=1,
+        # **本轮用量落 durable PG，不指望 langfuse。** `app.agent.trace` 记着实测
+        # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 缝只到 125 条，丢
+        # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，
+        # 跟 langfuse 死活无关。
+        with collect_usage() as usage:
+            reply = await build_moment_runner().run(
+                [
+                    Message(
+                        role=Role.USER,
+                        content=f"{snapshot.render()}\n\n{envelope}",
+                    )
+                ],
+                prompt_vars={
+                    "persona_name": getattr(persona, "display_name", "") or persona_id,
+                    "persona_core": _persona_core_var(
+                        getattr(persona, "persona_core", None)
+                    ),
+                },
+                context=context,
+                max_retries=1,
+            )
+
+        # 记成本是旁路：落库失败只 log 不抛（swallow 在 record_round_cost 里），
+        # 绝不能因为记账失败把一缝真实的生活搞成失败。
+        await record_round_cost(
+            lane=lane,
+            actor=persona_id,
+            round_id=moment_id,
+            usage=usage,
+            observed_at=began_at.isoformat(),
         )
 
         switches = context.features[FEATURE_SWITCHES]

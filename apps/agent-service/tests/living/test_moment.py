@@ -1277,3 +1277,40 @@ def test_moving_is_one_of_the_hands_she_actually_has():
 
     assert move_to in MOMENT_TOOLS
     assert set(move_to.definition.parameters["properties"]) == {"place"}
+
+
+# --------------------------------------------------------------------------
+# 七 · 这一缝花了多少 token，得能查
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
+    moment_db, stub_moment
+):
+    """一缝的 token 用量要落 durable PG，不能只指望 langfuse。
+
+    ``app.agent.trace`` 里写着实测结论：langfuse **会系统性丢 trace**（这次实测
+    整夜 225 缝只到了 125 条，丢 44%），所以「真相在 PG」——旧引擎
+    (``app.world.engine``) 用 ``collect_usage`` 包住 run、``record_round_cost``
+    落库，新引擎一开始漏了这一刀，于是「一晚上花了多少」根本查不出来。
+    """
+    from app.domain.thinking_cost import ThinkingTokensSpent
+    from app.runtime.persist import select_all_versions
+    from tests.runtime.conftest import migrate
+
+    await migrate(ThinkingTokensSpent, moment_db)
+    await _stand("akao", "家/客厅", "看书", _at(13))
+    stub_moment(("act", {"what": "把胶片摊了一茶几"}))
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    spent = await select_all_versions(
+        ThinkingTokensSpent,
+        {
+            "lane": LANE,
+            "actor": "akao",
+            "round_id": _at(14).isoformat(timespec="minutes"),
+        },
+    )
+    assert spent, "这一缝没有留下任何用量记录 —— 成本无从统计"
