@@ -47,6 +47,9 @@
   * :func:`look_around`  够得着的地方现在怎么样
   * ``look_at_phone``    拿起手机看某条会话说了什么（:mod:`app.living.phone`）
   * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
+  * ``search_online`` / ``browse_online``  带着问题上网查 / 没事逛一圈刷一批
+    （:mod:`app.living.web`，跟 ``look_at_phone`` 是两件事：那只手看别人发给她的
+    消息，这两只手看网上的东西）
 
 prompt 在 Langfuse（:data:`LIFE_MOMENT_PROMPT_ID`，新 id、只发泳道 label），变量
 只有两个——``persona_name`` 和 ``persona_core``。**每缝都变的东西一律走 USER 消息**：
@@ -109,6 +112,7 @@ from app.living.scope import (
 )
 from app.living.serial import hold
 from app.living.snapshot import all_whereabouts, read_snapshot
+from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 
 # 这两个 ambient key 是整个 living 包共用的一份定义（world 的轮次也从这里取
@@ -576,9 +580,13 @@ async def look_around() -> str:
     return "\n".join(lines)
 
 
-# 手上的事 + 手机 + 嘴，三样合在一起才是"她这一缝能做的全部"。手机和嘴住在自己的
-# 模块里（:mod:`app.living.phone` / :mod:`app.living.mouth`），只在这里汇成一份——
-# 拆两份工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想不到的差别。
+# 手上的事 + 手机 + 嘴 + 上网，合在一起才是"她这一缝能做的全部"。后三样各住在自己的
+# 模块里（:mod:`app.living.phone` / :mod:`app.living.mouth` / :mod:`app.living.web`），
+# 只在这里汇成一份——拆成几份工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想
+# 不到的差别。
+#
+# 每个模块导出自己那一份、由这里 splat，是为了让加一只手不必动别人的文件：模块自己
+# 管签名、描述和测试，这里只管"她手上有哪些"。
 MOMENT_TOOLS = [
     switch_to,
     move_to,
@@ -588,6 +596,7 @@ MOMENT_TOOLS = [
     look_around,
     *PHONE_TOOLS,
     *MOUTH_TOOLS,
+    *WEB_TOOLS,
 ]
 
 
