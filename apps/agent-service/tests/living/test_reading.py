@@ -374,6 +374,37 @@ async def test_two_files_with_the_same_name_are_handed_back_for_her_to_pick(
     assert [p.attachment_id for p in picked_up] == [group_one]
 
 
+@pytest.mark.integration
+async def test_she_can_point_back_with_the_handle_exactly_as_it_was_shown(
+    reading_db, in_a_moment, picked_up
+):
+    """回问里怎么写的，她照抄回来就得认。
+
+    实测她照抄的是整串 ``file=<id>``（回问正文里就是这么印的），而不是剥掉前缀
+    的裸 id —— 只认裸 id 的话这条回问是死路：摊开候选、她指了、被告知"没有名字
+    对得上"。所以这里不手搓 id，直接从回问正文里把她会看到的那一串抠出来。
+    """
+    import re
+
+    async with in_a_moment("akao"):
+        outcome = await read_a_bit.invoke({"which": "斜阳"})
+
+    assert isinstance(outcome, dict), "同名两份，她被替着选了一个"
+    # 正文末尾那句提示里也有一个占位的 "file=…"，它不是可指之物。按**真实身份的形状**
+    # 排（``derive_attachment_id`` 派生的是 ``<消息 id>:<file_key>``，必带冒号），
+    # 不按占位符怎么写来排 —— 后者改一次措辞这条测试就失灵。
+    handles = [h for h in re.findall(r"file=\S+", outcome["message"]) if ":" in h]
+    assert len(handles) == 2, f"回问里没给出可指之物：{outcome['message']}"
+
+    async with in_a_moment("akao"):
+        said = await read_a_bit.invoke({"which": handles[1]})
+
+    assert isinstance(said, str), said
+    assert [p.attachment_id for p in picked_up] == [
+        handles[1].removeprefix("file=")
+    ]
+
+
 # --------------------------------------------------------------------------
 # 二 · 同一缝里拿起同一个文件，只读一程
 # --------------------------------------------------------------------------

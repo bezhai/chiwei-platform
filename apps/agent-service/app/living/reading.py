@@ -10,7 +10,7 @@
 是**两个不同的东西**：附件实例身份由「收到它那一次」派生（``derive_attachment_id``
 = 消息 id + file_key），重发一次就是另一条印象链，两份印象不合并。所以一个名字对上
 好几份时，工具把候选连着来路（谁发的、什么时候、发在哪条会话）一起摊开让她指，
-**绝不排个序取第一个** —— 读哪一份是她的事。回问里给的那串 ``file=...`` 再报一次
+**绝不排个序取第一个** —— 读哪一份是她的事。回问里给的那串 ``file=<id>`` 原样抄回来
 就能开读，所以"让她指"是真指得动的，不是一句空话。
 
 **一程是异步的：她拿起来，然后这一缝就过去了。** 工具只 emit 一个 durable
@@ -77,6 +77,10 @@ FILE_LIST_LIMIT = 10
 
 # 派生一程身份的命名空间。换掉它 == 同一缝里重复拿起会派生出两程。
 _ID_NS = uuid.UUID("6f2a5d38-9b41-4c07-a5e2-3d81b6f0c974")
+
+# 回问里给她指的那串东西长什么样。**印出去和认回来共用这一处**：两边各写一遍的话，
+# 印的是 ``file=<id>``、认的是裸 id，回问就成了死路。
+_HANDLE_PREFIX = "file="
 
 
 class FileRead(Data):
@@ -325,13 +329,13 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
 async def look_for_something_to_read() -> str:
     """看看有人给你发过什么能读的东西，还有你读过的那些现在在你心里是什么样。
 
-    别人发到你手机上的文件都在这儿，每个带一串 file=...，拿它调 read_a_bit 就能
+    别人发到你手机上的文件都在这儿，每个带一串 file=…，拿它调 read_a_bit 就能
     读一程。你读过的那些会连着你读到哪了、它在你心里留下了什么一起给你。
 
     没翻开过的一次只列最近那些；你读过的一个都不会少。
 
     Returns:
-        有人发给你的那些文件，各带一串 file=...；一个都没有时如实说明。
+        有人发给你的那些文件，各带一串 file=…；一个都没有时如实说明。
     """
     lane, now, persona_id, _moment_id = moment_scope()
     files = await files_sent_to(persona_id=persona_id)
@@ -364,7 +368,7 @@ async def read_a_bit(
         str,
         Field(
             description="你要读的那个文件叫什么，记得多少写多少；"
-            "也可以直接写清单里那串 file=... 后面的东西"
+            "也可以把清单里那串 file=… 原样抄进来"
         ),
     ],
 ) -> str:
@@ -372,7 +376,7 @@ async def read_a_bit(
 
     报名字就行，记得多少写多少。名字对上好几份（同一本书两个人各发过一次）时，
     它会把这几份连着谁发的、什么时候发的一起摆给你，**它不会替你挑**——你自己认
-    哪一份，把那串 file=... 报回来。
+    哪一份，把那一行末尾那串 file=… 原样抄回来。
 
     读读停停都随你：这一程读到哪儿是你自己停下的地方，下次拿起同一个文件就从那儿
     接着往下。
@@ -381,7 +385,7 @@ async def read_a_bit(
     调 look_for_something_to_read。
 
     Args:
-        which: 你要读的那个文件的名字，或者那串 file=... 后面的东西。
+        which: 你要读的那个文件的名字，或者原样抄回来的那串 file=…。
 
     Returns:
         你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份时一句如实说明。
@@ -389,16 +393,21 @@ async def read_a_bit(
     lane, now, persona_id, moment_id = moment_scope()
     wanted = which.strip()
     if not wanted:
-        raise ValueError("你没说要读哪个：写一个名字，或者那串 file=... 后面的东西。")
+        raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")
 
     files = await files_sent_to(persona_id=persona_id)
     # 一条判据两条腿：报的是那串身份（照抄回来的），或者是名字的一部分。**不排序、
     # 不取第一个** —— 命中几个就是几个，认不准由她自己认。
+    #
+    # 身份那条腿要连 ``file=`` 前缀一起认：回问正文里印的就是 ``file=<id>``，她照抄
+    # 回来的也是整串。只认剥了前缀的裸 id 的话，这条回问是死路 —— 摊开候选、她照着
+    # 指了、却被告知"没有名字对得上"（2026-09-02 在 coe-living 上实测到）。
+    handle = wanted.removeprefix(_HANDLE_PREFIX)
     needle = wanted.casefold()
     hit = [
         f
         for f in files
-        if f.attachment_id == wanted or (f.title and needle in f.title.casefold())
+        if f.attachment_id == handle or (f.title and needle in f.title.casefold())
     ]
 
     if not hit:
@@ -412,12 +421,12 @@ async def read_a_bit(
         spread = "\n".join(
             f"- {_name_of(f)} {f.who} "
             f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
-            f"发在{f.where} file={f.attachment_id}"
+            f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
             for f in hit
         )
         raise ValueError(
             f"「{wanted}」对上了好几份，它们是不同的东西：\n{spread}\n"
-            f"你要读哪一份？把那串 file=... 后面的东西报回来。我不替你挑。"
+            f"你要读哪一份？把那一行末尾那串 {_HANDLE_PREFIX}… 原样抄回来。我不替你挑。"
         )
 
     picked = hit[0]
