@@ -174,8 +174,15 @@ class SentFile:
 # 会话集合跟 :data:`app.living.phone._REACHABLE_SQL` 同一条口径（她自己的 bot 还在
 # 的那些）：她读得到的严格等于她收得到的。
 #
+# 文件项的字段名是 ``kind`` / ``key``（``meta.file_name`` 放原始文件名），跟渠道投影
+# 写进 ``common_message.content`` 的形状一致 —— 见
+# ``tests/living/test_reading.py`` 里那份照抄真实记录的常量。**曾经写成
+# ``type`` / ``value``**：SQL 和测试数据用了同一份臆造形状、彼此自洽所以全绿，而线上
+# 一个文件都查不出来，她永远只会说"没有谁给你发过什么可以读的东西"。改这几个字段名
+# 之前先去库里看一条真实记录。
+#
 # **不加时间窗。** 加了她就再也读不到上个月别人发来的那本书 —— 那正是"阈值替她
-# 遗忘"。代价是全表扫，用 ``content @> '[{"type":"file"}]'`` 先把绝大多数消息挡在
+# 遗忘"。代价是全表扫，用 ``content @> '[{"kind":"file"}]'`` 先把绝大多数消息挡在
 # 展开之前（jsonb 包含判断，比逐条展开数组便宜得多）。展开时仍要挡一次
 # ``jsonb_typeof = 'array'``：content 不是数组的历史行会让 jsonb_array_elements 直接
 # 报错，同 phone 里那几条查询的写法。
@@ -200,7 +207,7 @@ WITH hers AS (
 )
 SELECT DISTINCT
        CAST(cm.common_message_id AS text)       AS message_id,
-       it->>'value'                             AS file_key,
+       it->>'key'                               AS file_key,
        COALESCE(it->'meta'->>'file_name', '')   AS file_name,
        COALESCE(cm.sender_display_name, '某人') AS who,
        cm.event_time                            AS at_ms,
@@ -212,9 +219,9 @@ SELECT DISTINCT
        CASE WHEN jsonb_typeof(cm.content) = 'array'
             THEN cm.content ELSE '[]'::jsonb END
  ) AS it
- WHERE cm.content @> '[{"type": "file"}]'::jsonb
-   AND it->>'type' = 'file'
-   AND COALESCE(it->>'value', '') <> ''
+ WHERE cm.content @> '[{"kind": "file"}]'::jsonb
+   AND it->>'kind' = 'file'
+   AND COALESCE(it->>'key', '') <> ''
  ORDER BY at_ms DESC, message_id DESC
 """
 

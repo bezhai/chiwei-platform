@@ -76,9 +76,13 @@ async def _someone_sent(
     file_key: str,
     file_name: str,
 ) -> None:
-    """往会话里落一条"有人发了个文件"的消息（file 项的真实形状）。"""
+    """往会话里落一条"有人发了个文件"的消息。
+
+    形状跟 :data:`_REAL_FILE_ITEM_FROM_LARK` 同源（``kind`` / ``key`` /
+    ``meta.file_name``），只是 key 和文件名由用例给。想改这里先去看那份常量。
+    """
     content = json.dumps(
-        [{"type": "file", "value": file_key, "meta": {"file_name": file_name}}]
+        [{"kind": "file", "key": file_key, "meta": {"file_name": file_name}}]
     )
     async with session_mod.get_session() as s:
         await s.execute(
@@ -230,6 +234,55 @@ def _trigger(*, attachment_id: str, round_id: str = "r-1", title: str = "斜阳.
 # --------------------------------------------------------------------------
 # 一 · 她能读的，严格等于她收到过的
 # --------------------------------------------------------------------------
+
+
+# 飞书投影写进 common_message.content 的文件项 —— **键名和嵌套层次照着库里一条真实
+# 记录来**，只把 key 和文件名换成了不含真实信息的等形值（真实的那两个是私人文件，
+# 不进仓库）。
+#
+# **字段名是 kind / key**，不是 type / value。这一条曾经写错过：SQL 和测试数据一起
+# 用了臆造的 type/value，两边自洽所以全绿，而线上一个文件都查不出来，她永远只会说
+# "没有谁给你发过什么可以读的东西"。这份常量就是防它再漂的锚：要改文件项的形状，
+# 先去库里看一条真实记录，别照着实现改。
+_REAL_FILE_ITEM_FROM_LARK = {
+    "key": "file_v3_00000_00000000-0000-0000-0000-00000000000g",
+    "kind": "file",
+    "meta": {"file_name": "斜阳.epub", "lark_type": "file"},
+}
+
+
+@pytest.mark.integration
+async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
+    """按飞书真实写入的形状落一条文件消息，她必须能查到它。
+
+    只断言"查得到 + 名字对"，不碰任何工具文案 —— 这条测的是查询和真实数据的
+    对齐，不是渲染。
+    """
+    from app.living.reading import files_sent_to
+
+    message_id = uuid.uuid5(uuid.NAMESPACE_OID, "msg-real-shape")
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_message (common_message_id, channel,"
+                " common_conversation_id, sender_display_name, role, content,"
+                " scope, event_time)"
+                " VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), '主人',"
+                " 'user', CAST(:content AS jsonb), 'direct', :at)"
+            ),
+            {
+                "m": str(message_id),
+                "c": str(_DM),
+                "content": json.dumps([_REAL_FILE_ITEM_FROM_LARK]),
+                "at": _ms(_at(21, 40)),
+            },
+        )
+
+    found = await files_sent_to(persona_id="akao")
+
+    assert [f.title for f in found if f.title == "斜阳.epub"] == [
+        "斜阳.epub"
+    ], f"飞书真实形状的文件项没被查出来，查到的是 {[f.title for f in found]}"
 
 
 @pytest.mark.integration
