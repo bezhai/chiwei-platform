@@ -1,4 +1,4 @@
-"""living 三张表的建表契约：进得了 registry，而且列的形状是钉死的。
+"""living 几张表的建表契约：进得了 registry，而且列的形状是钉死的。
 
 两件事都是"错了就静默"：
 
@@ -20,6 +20,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
+from app.living.reading import FilePickedUp, FileRead
 from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
@@ -66,6 +67,26 @@ _VALID: dict[type, dict] = {
         "place": None,
         "consumed_at": _AWARE,
     },
+    FileRead: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "attachment_id": "msg-1:key-a",
+        "ver": 1,
+        "title": "斜阳.txt",
+        "impression": "读着有点上头。",
+        "pages_read": 7,
+        "finished": False,
+        "read_at": _AWARE,
+        "round_id": "r-1",
+    },
+    FilePickedUp: {
+        "lane": "coe-x",
+        "round_id": "r-1",
+        "persona_id": "akao",
+        "attachment_id": "msg-1:key-a",
+        "title": "斜阳.txt",
+        "tos_file": "files/key-a",
+    },
 }
 
 # 列名 -> pg 类型。改这张表 == 改一张已经落地的表的形状，先想清楚怎么迁。
@@ -102,6 +123,29 @@ _PINNED: dict[type, dict[str, str]] = {
         "place": "TEXT",
         "consumed_at": "TIMESTAMPTZ",
     },
+    FileRead: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "attachment_id": "TEXT",
+        "ver": "BIGINT",
+        "title": "TEXT",
+        "impression": "TEXT",
+        "pages_read": "BIGINT",
+        "finished": "BOOLEAN",
+        "read_at": "TIMESTAMPTZ",
+        "round_id": "TEXT",
+    },
+    # durable 边落地的那条信号行（``(lane, round_id)`` 就是它的去重键）。它没有
+    # 时刻列 —— 一程真正的时刻是**读完**那一版写下的 ``FileRead.read_at``，
+    # 而不是她按下那一下；在信号上再放一个时刻只会多出一个没人该信的口径。
+    FilePickedUp: {
+        "lane": "TEXT",
+        "round_id": "TEXT",
+        "persona_id": "TEXT",
+        "attachment_id": "TEXT",
+        "title": "TEXT",
+        "tos_file": "TEXT",
+    },
 }
 
 
@@ -119,7 +163,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
     )
     assert proc.returncode == 0, proc.stderr
     registered = proc.stdout
-    for name in ("Happening", "Whereabouts", "Upcoming"):
+    for name in ("Happening", "Whereabouts", "Upcoming", "FileRead", "FilePickedUp"):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
             f"registry: {registered}"
@@ -159,6 +203,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
                 cls(**{**_VALID[cls], name: _NAIVE})
 
     assert sorted(checked) == [
+        ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
         ("Upcoming", "consumed_at"),
         ("Upcoming", "due_at"),

@@ -41,15 +41,20 @@
 工具：
 
   * :func:`switch_to`    我现在改去做 X、在哪、什么把我带走的
+  * :func:`move_to`      人挪了地方，手上的事没变
   * :func:`keep_in_mind` 我心里挂着没了结的事，全部（哪一缝都能调；每条可以带一个
     "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
   * :func:`say` / :func:`act`  跟姐妹说话 / 做一个她们看得见的动作
   * :func:`look_around`  够得着的地方现在怎么样
   * ``look_at_phone``    拿起手机看某条会话说了什么（:mod:`app.living.phone`）
+  * ``look_up_contact``  找一个她读到过的人（:mod:`app.living.phone`）
   * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
   * ``search_online`` / ``browse_online``  带着问题上网查 / 没事逛一圈刷一批
     （:mod:`app.living.web`，跟 ``look_at_phone`` 是两件事：那只手看别人发给她的
     消息，这两只手看网上的东西）
+  * ``look_for_something_to_read`` 有人发过什么能读的、她读到哪了
+    （:mod:`app.living.reading`）
+  * ``read_a_bit``       拿起其中一个往下读一程（:mod:`app.living.reading`）
 
 prompt 在 Langfuse（:data:`LIFE_MOMENT_PROMPT_ID`，新 id、只发泳道 label），变量
 只有两个——``persona_name`` 和 ``persona_core``。**每缝都变的东西一律走 USER 消息**：
@@ -91,6 +96,7 @@ from app.living.loose_ends import (
 from app.living.mouth import MOUTH_TOOLS
 from app.living.phone import PHONE_TOOLS, commit_glances, phone_envelope
 from app.living.place import Reach, reach_between_people
+from app.living.reading import READING_TOOLS
 from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
@@ -580,10 +586,10 @@ async def look_around() -> str:
     return "\n".join(lines)
 
 
-# 手上的事 + 手机 + 嘴 + 上网，合在一起才是"她这一缝能做的全部"。后三样各住在自己的
-# 模块里（:mod:`app.living.phone` / :mod:`app.living.mouth` / :mod:`app.living.web`），
-# 只在这里汇成一份——拆成几份工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想
-# 不到的差别。
+# 手上的事 + 手机 + 嘴 + 上网 + 读东西，合在一起才是"她这一缝能做的全部"。后四样各
+# 住在自己的模块里（:mod:`app.living.phone` / :mod:`app.living.mouth` /
+# :mod:`app.living.web` / :mod:`app.living.reading`），只在这里汇成一份——拆成几份
+# 工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想不到的差别。
 #
 # 每个模块导出自己那一份、由这里 splat，是为了让加一只手不必动别人的文件：模块自己
 # 管签名、描述和测试，这里只管"她手上有哪些"。
@@ -597,6 +603,7 @@ MOMENT_TOOLS = [
     *PHONE_TOOLS,
     *MOUTH_TOOLS,
     *WEB_TOOLS,
+    *READING_TOOLS,
 ]
 
 

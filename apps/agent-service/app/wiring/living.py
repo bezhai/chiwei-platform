@@ -16,10 +16,14 @@ Pod**，所以这四个 Data 的形状由 ``tests/living/test_clock.py``、
 可调的业务参数（Dynamic Config），只能让钟拍得比最密的间隔更密、然后在节点里判
 "够不够久"。
 
-**这里没有、也不会有任何入站边。** 四条全是 interval，一条 ``Source.mq`` /
+**这里没有、也不会有任何入站边。** 四条钟全是 interval，一条 ``Source.mq`` /
 ``Source.http`` 都没有：新引擎的 chat 是嘴，没有耳朵，而这件事靠"根本没有接消息的
 地方"来保证，不靠哪个分支里的 if（``tests/living/test_no_inbound.py``）。她收消息走
 的是每一缝直接查 ``common_message``（``app.living.phone``），不碰队列。
+
+除四条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
+读一程）。它**同样不是入站口**：``.durable()`` 只是 ``WireBuilder`` 上的标志位，不
+产生任何 ``Source``，边上跑的只有她自己刚在某一缝里 emit 的那个信号。
 
 **四条钟只在实验泳道上注册**（``app.living.experiment``）。这是实验的边界，不是行为
 开关（不违反"不用工程思维解决 agent 的不确定性"——它管的是"这批代码允许在哪个环境里
@@ -40,7 +44,8 @@ main、prod 一发版，world 加三个 life 立刻在 prod 库上开跑：建�
 ``app.wiring`` 的 side-effect import 链拉到才会进 ``DATA_REGISTRY``，否则
 ``Runtime.migrate_schema()`` 静默不建表、一路跑到真读写才炸。``WorldRound`` 由
 ``clock`` -> ``world`` 的 import 链带进来，``LooseEnd`` 由 ``moment`` ->
-``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` -> ``phone`` 带进来。注册 Data
+``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` -> ``phone`` 带进来，
+``FileRead`` / ``FilePickedUp`` 由下面那行 ``living.reading`` 直接带进来。注册 Data
 和挂钟是两件事，别绑一起。
 """
 from __future__ import annotations
@@ -67,6 +72,7 @@ from app.living.nudge import (
     PhoneNudgeTick,
     phone_nudge_tick,
 )
+from app.living.reading import FilePickedUp, read_a_round
 from app.runtime import Source, wire
 from app.runtime.lane_policy import current_deployment_lane
 
@@ -83,6 +89,15 @@ if on_the_living_experiment_lane():
     wire(PhoneNudgeTick).from_(Source.interval(PHONE_NUDGE_TICK_SECONDS)).to(
         phone_nudge_tick
     )
+    # 读一程：她在某一缝拿起一个文件 → emit 一个 durable ``FilePickedUp`` → 这条边
+    # 把它接给 ``read_a_round`` 去读（取字节、解码、几轮模型调用，塞进一缝里会把她
+    # 卡在网络上）。durable 让它跨进程可达且不丢，并按 ``(lane, round_id)`` 去重。
+    #
+    # **这条边不是入站口。** ``.durable()`` 只是 ``WireBuilder`` 上的一个标志位，
+    # 不往 ``WireSpec.sources`` 里放任何东西 —— 上面那条"这里没有、也不会有任何入
+    # 站边"照旧成立（``tests/living/test_no_inbound.py``）。这条边上跑的只有她自己
+    # 刚拿起的那个文件，投递方和消费方都在这个进程里。
+    wire(FilePickedUp).durable().to(read_a_round)
 else:
     logger.warning(
         "living: 泳道 %r 不是实验泳道，日历 / world 轮次 / life 一缝 / 提前一缝"
