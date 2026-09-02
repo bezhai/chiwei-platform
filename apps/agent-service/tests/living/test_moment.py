@@ -563,6 +563,118 @@ async def test_keeping_nothing_in_mind_is_a_thing_she_can_say(moment_db, stub_mo
     assert third.open_ends == 0
 
 
+# --------------------------------------------------------------------------
+# 五 bis · 她挂的事可以带一个「该在几点」
+# --------------------------------------------------------------------------
+
+
+def _what_she_read(run) -> str:
+    """她那一缝真正读到的 USER 消息（快照 + 手机信封）。"""
+    return "\n".join(m.content for m in run[0] if m.role is Role.USER)
+
+
+@pytest.mark.integration
+async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
+    moment_db, stub_moment
+):
+    """**验收正条**：她挂一件该在几点的事，下一缝显示还没到，到点之后那一缝显示到点了。
+
+    她的安排不进 ``Upcoming``——那是世界的客观时刻表（快递到门口、天黑），到期交付
+    一次就被消费掉。"我该去开的那个会"在她真的去之前不会因为时间过了就不算数，而且
+    把她的安排塞进世界的账本等于 life 单方面替世界宣布将要发生什么。
+    """
+    await _stand("akao", "家/客厅", "看书", _at(13))
+    stub_moment(
+        ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00] 家属谈话会"]})
+    )
+    first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    assert first.open_ends == 1
+
+    quiet = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    before = _what_she_read(quiet.runs[-1])
+    assert "[2026-07-25 15:00] 家属谈话会" in before, (
+        f"她眼前那条没带上该在几点。拿到：\n{before}"
+    )
+    assert "还没到" in before
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
+    after = _what_she_read(quiet.runs[-1])
+    assert "到点了" in after, f"到点了她眼前没有任何变化。拿到：\n{after}"
+
+
+@pytest.mark.integration
+async def test_rescheduling_is_just_listing_a_different_hour(moment_db, stub_moment):
+    """改期不需要第二只手：整份重写里这次列的时刻不一样，就是改期。"""
+    await _stand("akao", "家/客厅", "看书", _at(13))
+    runner = stub_moment(
+        ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00] 家属谈话会"]})
+    )
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    assert "[2026-07-25 15:00] 家属谈话会" in runner.results[0], (
+        "当场那句确认没把时刻回给她 —— 她无从知道自己写的时刻收下了没有"
+    )
+
+    stub_moment(
+        ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 17:30] 家属谈话会"]})
+    )
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+
+    ends = await list_open_loose_ends(lane=LANE, persona_id="akao")
+    assert len(ends) == 1, "改期开出了第二条线头"
+    assert ends[0].due_at == _at(17, 30)
+
+
+@pytest.mark.integration
+async def test_an_hour_she_wrote_wrong_is_handed_back_instead_of_swallowed(
+    moment_db, stub_moment
+):
+    """写不成时刻时报错喂回去让她改，不静默当成"这条没有时刻"。"""
+    await _stand("akao", "家/客厅", "看书", _at(13))
+    runner = stub_moment(
+        ("keep_in_mind", {"still_on_my_mind": ["[明天下午三点] 家属谈话会"]})
+    )
+
+    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    assert isinstance(runner.results[0], dict), "写不成的时刻被静默吞掉了"
+    assert await list_open_loose_ends(lane=LANE, persona_id="akao") == []
+    assert moment.open_ends == 0
+
+
+@pytest.mark.integration
+async def test_writing_only_a_time_does_not_empty_what_she_keeps_in_mind(
+    moment_db, stub_moment
+):
+    """她漏写了那件事本身，心里挂着的东西不许因此被一次性清空。
+
+    ``keep_in_mind`` 是**整份重写**：一条只有时刻、没有正文的条目要是被当成空行跳过，
+    这一份就成了空清单——她上一缝挂着的全部走进关闭流程，而她收到的是一句成功。
+    """
+    await _stand("akao", "家/客厅", "看书", _at(13))
+    stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    runner = stub_moment(("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00]"]}))
+    second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+
+    assert isinstance(runner.results[0], dict), "写了一半的条目被当成成功收下了"
+    assert [
+        e.what for e in await list_open_loose_ends(lane=LANE, persona_id="akao")
+    ] == ["洗的衣服还在阳台"], "她心里挂着的被静默清空了"
+    assert second.open_ends == 1
+
+
+def test_the_shape_she_is_taught_to_write_is_the_shape_that_parses():
+    """工具文案里那个例子必须真的解析得出来 —— 教的和收的是同一个形状。"""
+    from app.living.loose_ends import DUE_EXAMPLE, parse_entry
+
+    assert DUE_EXAMPLE in keep_in_mind.definition.description, (
+        "工具描述里没有那个可照抄的例子 —— 她只能猜时刻该怎么写"
+    )
+    assert parse_entry(f"{DUE_EXAMPLE} 家属谈话会")[1] is not None
+
+
 @pytest.mark.integration
 async def test_a_moment_only_sees_what_happened_since_the_last_one(
     moment_db, stub_moment
@@ -1117,6 +1229,9 @@ def test_the_life_column_shapes_are_pinned():
         "thread_id": "TEXT",
         "ver": "BIGINT",
         "what": "TEXT",
+        # 她自己挂的「该在几点」。可空列、additive —— 加列之前的行留 NULL，读出来
+        # 就是"这条没有时刻"，跟她本来就没写时刻是同一个意思。
+        "due_at": "TIMESTAMPTZ",
         "opened_at": "TIMESTAMPTZ",
         "opened_moment_id": "TEXT",
         "closed_at": "TIMESTAMPTZ",

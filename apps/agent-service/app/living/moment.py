@@ -41,7 +41,8 @@
 工具：
 
   * :func:`switch_to`    我现在改去做 X、在哪、什么把我带走的
-  * :func:`keep_in_mind` 我心里挂着没了结的事，全部（哪一缝都能调）
+  * :func:`keep_in_mind` 我心里挂着没了结的事，全部（哪一缝都能调；每条可以带一个
+    "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
   * :func:`say` / :func:`act`  跟姐妹说话 / 做一个她们看得见的动作
   * :func:`look_around`  够得着的地方现在怎么样
   * ``look_at_phone``    拿起手机看某条会话说了什么（:mod:`app.living.phone`）
@@ -79,7 +80,11 @@ from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
 from app.living.clock import living_lane
 from app.living.happening import record_happening
-from app.living.loose_ends import list_open_loose_ends, rewrite_loose_ends
+from app.living.loose_ends import (
+    format_entry,
+    list_open_loose_ends,
+    rewrite_loose_ends,
+)
 from app.living.mouth import MOUTH_TOOLS
 from app.living.phone import PHONE_TOOLS, commit_glances, phone_envelope
 from app.living.place import Reach, reach_between_people
@@ -379,7 +384,11 @@ async def keep_in_mind(
     still_on_my_mind: Annotated[
         list[str],
         Field(
-            description="你现在还挂着没了结的事，**全部**列出来（一件都没有就传空数组）"
+            description=(
+                "你现在还挂着没了结的事，**全部**列出来（一件都没有就传空数组）。"
+                "有该在的时刻就写成「[2026-07-25 15:00] 家属谈话会」，"
+                "没有时刻就直接写那件事"
+            )
         ),
     ],
 ) -> str:
@@ -393,6 +402,16 @@ async def keep_in_mind(
 
     你没主动记下来的东西，过几缝就真的没了——你眼前那份"刚发生过什么"只有最近一小
     段，滚出去就找不回来了。
+
+    **有的事该在几点**（约好的谈话、说了要打的电话、几点出门）。那就把时刻写在这件
+    事前面：「[2026-07-25 15:00] 家属谈话会」。年月日 + 时分，今天几号看你眼前第一
+    行。没有时刻的事直接写，别写方括号。
+
+    到点之后你眼前那条会写着「到点了」，但它**不会自己消失**——去没去、算不算完是你
+    说了算，你不再列它才是了结。
+
+    想改时间就这次写一个不一样的时刻，不想要那个时刻了就这次别写方括号；都不用再调
+    别的东西。
 
     Args:
         still_on_my_mind: 你现在还挂着没了结的事，全部。
@@ -408,7 +427,9 @@ async def keep_in_mind(
         now=now,
         still_on_my_mind=still_on_my_mind,
     )
-    carried = "、".join(e.what for e in open_now) or "没有"
+    # 连时刻一起回给她：确认里只有事情没有时刻的话，她当场无从知道自己写的那个时刻
+    # 收下了没有（下一缝才在快照里看得见，那时已经隔了十分钟）。
+    carried = "、".join(format_entry(e.what, e.due_at) for e in open_now) or "没有"
     return f"心里挂着：{carried}"
 
 

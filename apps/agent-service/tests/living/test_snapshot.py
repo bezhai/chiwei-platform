@@ -122,6 +122,78 @@ async def test_things_on_her_mind_ride_into_the_snapshot(snap_db):
     )
 
 
+async def _keep(*items: str, at: dt.datetime, persona: str = "akao") -> None:
+    await rewrite_loose_ends(
+        lane=LANE,
+        persona_id=persona,
+        moment_id=at.isoformat(timespec="minutes"),
+        now=at,
+        still_on_my_mind=items,
+    )
+
+
+@pytest.mark.integration
+async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(snap_db):
+    """没有时刻的那条一个字都不该变 —— 她眼前绝大多数线头都是这一种。"""
+    await _keep("周末陪绫奈去祭典", at=_at(12))
+
+    snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(20))
+
+    assert (
+        "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一缝起挂着"
+        in snap.render()
+    )
+
+
+@pytest.mark.integration
+async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(snap_db):
+    """那一行整个钉住：她既要读得出「该在几点、到了没有」，又要抄得回原样。"""
+    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
+    text = snap.render()
+
+    assert (
+        "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
+        "从 2026-07-25T12:00+08:00 那一缝起挂着" in text
+    ), f"她读不出这条该在几点、也抄不回那个形状。拿到：\n{text}"
+
+
+@pytest.mark.integration
+async def test_when_the_hour_has_come_the_snapshot_says_so(snap_db):
+    """「到点了」是渲染时当场跟 ``now`` 比出来的，库里没有任何人替她改过状态。"""
+    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    early = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
+    due = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(15))
+
+    assert "还没到" in early.render() and "到点了" not in early.render()
+    assert "到点了" in due.render() and "还没到" not in due.render()
+
+
+@pytest.mark.integration
+async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
+    """到期交付一次就被消费掉是 ``Upcoming`` 的语义。
+
+    她自己的安排不是那样：时间过了，那个会她还是没去开。所以到点之后那条继续挂在她
+    眼前，直到她自己不再列它——了结与否是她的判断，不是钟的。
+    """
+    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    for hour in (16, 20, 23):
+        later = await read_snapshot(
+            lane=LANE, persona_id="akao", after_seq=0, now=_at(hour)
+        )
+        assert "到点了" in later.render(), f"{hour} 点那一缝它自己消失了"
+
+    await _keep(at=_at(23, 10))
+
+    gone = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 20)
+    )
+    assert "家属谈话会" not in gone.render()
+
+
 @pytest.mark.integration
 async def test_another_sisters_mind_never_leaks_into_hers(snap_db):
     await rewrite_loose_ends(

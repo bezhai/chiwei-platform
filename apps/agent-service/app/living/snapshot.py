@@ -28,6 +28,11 @@
 **裁剪不在这里重做。** 谁感知得到什么由 T1 的读取路径说了算；这里只负责把已经裁好
 的东西摆成她读得懂的样子。只听见动静的那条 ``content`` 本来就是 ``None``，渲染层
 再怎么写也漏不出原话。
+
+唯一一处在这里**算**出来的东西是第二层的「到点了 / 还没到」：她给线头挂的时刻当场跟
+``now`` 比，库里没有这个状态（:func:`_open_end_line`）。这不是压缩，是把同一个事实
+换算成她读得懂的说法——比她自己拿第一行的钟点去减更不容易错，而"这件事算不算了结"
+仍然只有她能答。
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from app.data.session import get_session
 from app.infra.cst_time import to_cst_dated, to_cst_full
 from app.living.calendar import WORLD_ACTOR
 from app.living.happening import Perceived, PerceivedWindow, read_perceived_by
-from app.living.loose_ends import LooseEnd, list_open_loose_ends
+from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
 from app.living.records import KIND_SPEECH, Happening, Whereabouts
 from app.living.whereabouts import current_whereabouts
 from app.runtime.migrator import _table_name
@@ -108,12 +113,7 @@ class MomentSnapshot:
     def _render_open_ends(self) -> str:
         if not self.open_ends:
             return "心里挂着没了结的：（没有）"
-        # 带上 ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一缝"分不清
-        # 是哪一天，而这条正是"指得出它是从哪一缝带过来的"这个验收的落点。
-        lines = [
-            f"- {e.what} · 从 {e.opened_moment_id} 那一缝起挂着"
-            for e in self.open_ends
-        ]
+        lines = [f"- {_open_end_line(e, now=self.now)}" for e in self.open_ends]
         return "心里挂着没了结的：\n" + "\n".join(lines)
 
     def _render_own_recent(self) -> str:
@@ -134,6 +134,28 @@ class MomentSnapshot:
             for p in self.perceived.items
         ]
         return "这段时间你感知到的：\n" + "\n".join(lines)
+
+
+def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
+    """她心上一条线头的样子：这件事（可能带该在几点）· 到了没有 · 从哪一缝带过来的。
+
+    **前半段走** :func:`~app.living.loose_ends.format_entry`，所以她读到的形状就是她
+    下一缝该照抄回 ``keep_in_mind`` 的形状（整份重写意味着她每一缝都要抄一遍）。抄回
+    来解析不出同一件事的话，那条会在她眼皮底下被关掉、再以另一个身份重开。
+
+    **"到点了"在这里当场算，库里没有这个状态。** 有个东西替她把"挂着"改成"到点了"
+    就是替她做决定；而且到点之后这条**继续显示**，直到她自己不再列它——时间过了，那个
+    会她还是没去开。这跟 :class:`~app.living.records.Upcoming` 到期交付一次就被消费
+    掉是两种东西，理由见 :mod:`app.living.loose_ends`。
+
+    ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一缝"分不清是哪一天，而这条
+    正是"指得出它是从哪一缝带过来的"这个验收的落点。
+    """
+    parts = [format_entry(end.what, end.due_at)]
+    if end.due_at is not None:
+        parts.append("到点了" if end.due_at <= now else "还没到")
+    parts.append(f"从 {end.opened_moment_id} 那一缝起挂着")
+    return " · ".join(parts)
 
 
 def _clock(moment: datetime, *, now: datetime) -> str:
