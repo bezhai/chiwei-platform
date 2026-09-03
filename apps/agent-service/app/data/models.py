@@ -13,6 +13,7 @@ from datetime import datetime
 from uuid import UUID as PyUUID
 
 from sqlalchemy import (
+    ARRAY,
     JSON,
     UUID,
     BigInteger,
@@ -102,6 +103,15 @@ class CommonMessage(Base):
     )
     common_reply_message_id: Mapped[PyUUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
+    )
+    # 这条消息点了谁的名，按公共层 id（由飞书投影在落账时算好写入）。
+    #
+    # NULL 和 [] 是两件事：NULL = 没人算过（加列前的存量行、QQ 的行、飞书新写入方
+    # 上线前的行），[] = 算过、确实谁都没点。读的一侧把 NULL 当"不知道"，也就是不
+    # 算被点名。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就把"没算过"和
+    # "算过没人"合并了，而且合并之后再也分不开。
+    mentioned_common_user_ids: Mapped[list[PyUUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
     )
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
     message_type: Mapped[str | None] = mapped_column(String(30), nullable=True)

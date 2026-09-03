@@ -24,6 +24,14 @@ function columnNames(target: Function): string[] {
         .map((c) => (c.options.name as string | undefined) ?? c.propertyName);
 }
 
+function columnOptions(target: Function, name: string) {
+    return getMetadataArgsStorage().columns.find(
+        (c) =>
+            c.target === target &&
+            ((c.options.name as string | undefined) ?? c.propertyName) === name,
+    )?.options;
+}
+
 describe('common layer entity metadata', () => {
     it('registers common layer tables', () => {
         expect(tableName(CommonUser)).toBe('common_user');
@@ -58,5 +66,22 @@ describe('common layer entity metadata', () => {
         expect(commonMessageColumns).not.toContain('om_id');
         expect(commonMessageColumns).not.toContain('chat_id');
         expect(commonMessageColumns).not.toContain('open_id');
+    });
+
+    it('common_message keeps "who did this message name" as nullable common ids', () => {
+        const options = columnOptions(CommonMessage, 'mentioned_common_user_ids');
+        expect(options).toBeDefined();
+
+        // 被 @ 的人存公共层 id。渠道 id（union_id / open_id）不许进这一列 ——
+        // 那正是上一条用例守着的边界。
+        expect(options?.type).toBe('uuid');
+        expect(options?.array).toBe(true);
+
+        // NULL 和 [] 不是一回事：NULL = 没人算过（改动前的存量行、QQ 行、
+        // 新写入方上线前的飞书行），[] = 算过、确实没人被 @。读的一侧把 NULL
+        // 当"不知道"。加上 NOT NULL 或者给个默认值，这两件事就被合并了，
+        // 而且合并之后再也分不开 —— 存量行会凭空变成"确认没人被 @"。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
     });
 });

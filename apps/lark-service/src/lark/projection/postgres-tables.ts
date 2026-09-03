@@ -262,6 +262,7 @@ function tablesOn(manager: EntityManager): LarkTables {
                     content_text: row.content_text,
                     common_root_message_id: row.common_root_message_id,
                     common_reply_message_id: row.common_reply_message_id,
+                    mentioned_common_user_ids: row.mentioned_common_user_ids,
                     scope: row.scope,
                     message_type: row.message_type,
                     bot_name: row.bot_name,

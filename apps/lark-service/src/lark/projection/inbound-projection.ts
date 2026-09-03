@@ -550,6 +550,10 @@ async function recordInboundMessage(
             content_text: summarize(reading.inbound.content),
             common_root_message_id: projection.commonRootMessageId,
             common_reply_message_id: projection.commonReplyMessageId,
+            // @ 在投影时被内联回了正文（公共层的内容契约里没有 mention 这种片段），
+            // 所以"点了谁的名"只在这一刻还认得出来。不落下去，下游就只能对着一段
+            // 文本猜 —— agent-service 判断"群里叫的是不是我"正是靠这一列。
+            mentioned_common_user_ids: projection.mentionedCommonUserIds,
             scope: reading.inbound.conversation_scope,
             message_type: message.messageType,
             bot_name: event.botName,

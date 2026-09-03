@@ -194,6 +194,13 @@ export interface CommonMessageRow {
     content_text?: string;
     common_root_message_id: string;
     common_reply_message_id?: string;
+    /**
+     * 这条消息点了谁的名，按公共层 id。**必填，没点名就是空数组。**
+     *
+     * 可选的话，漏传和"确实没人被点"在库里长得一样（都是 NULL），而读的一侧靠
+     * NULL 区分"没人算过"和"算过没人"—— 那个区分是这一列存在的意义。
+     */
+    mentioned_common_user_ids: string[];
     scope: string;
     message_type: string;
     bot_name: string;

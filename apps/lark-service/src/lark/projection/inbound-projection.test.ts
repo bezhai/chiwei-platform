@@ -863,6 +863,7 @@ describe('落账：common_message + lark_message', () => {
             content_text: 'hi',
             common_root_message_id: 'id_3',
             common_reply_message_id: undefined,
+            mentioned_common_user_ids: [],
             scope: 'group',
             message_type: 'text',
             bot_name: BOT_NAME,
@@ -927,6 +928,56 @@ describe('落账：common_message + lark_message', () => {
         await project(tables, larkMessageEvent({ content: '{"text":"  "}' }));
 
         expect(tables.commonMessages.get('id_3')?.content_text).toBeUndefined();
+    });
+
+    // 「这条消息点了谁的名」必须**跟着消息一起落库**，不能只交给规则引擎。
+    // 公共层的内容契约里没有 mention 这种片段，@ 在投影时被内联回了正文，出了这一次
+    // 请求就再也认不出来 —— 而 agent-service 判断"群里叫的是不是我"是异步的、晚得多。
+    const BOT_MENTION = {
+        key: '@_user_1',
+        id: { union_id: 'on_bot_chiwei' },
+        name: 'chiwei-raw',
+        mentioned_type: 'bot',
+        bot_info: { app_id: APP_ID },
+    };
+    const HUMAN_MENTION = {
+        key: '@_user_2',
+        id: { union_id: 'on_li', open_id: 'ou_li' },
+        name: '李四',
+        mentioned_type: 'user',
+    };
+
+    it('点了她的名，记下的是她在公共层的 id', async () => {
+        const tables = new MemoryLarkTables();
+        await project(
+            tables,
+            larkMessageEvent({ content: '{"text":"@_user_1 在吗"}', mentions: [BOT_MENTION] }),
+        );
+
+        expect(tables.commonMessages.get('id_3')?.mentioned_common_user_ids).toEqual([
+            BOT_COMMON_USER_ID,
+        ]);
+    });
+
+    it('点的是别人，记下的就只有别人', async () => {
+        const tables = new MemoryLarkTables();
+        const { outcome } = await project(
+            tables,
+            larkMessageEvent({ content: '{"text":"@_user_2 帮个忙"}', mentions: [HUMAN_MENTION] }),
+        );
+
+        const stored = tables.commonMessages.get(recorded(outcome).commonMessageId);
+        expect(stored?.mentioned_common_user_ids).toEqual(['id_2']);
+        expect(stored?.mentioned_common_user_ids).not.toContain(BOT_COMMON_USER_ID);
+    });
+
+    // 空数组和留空在读的一侧是两件事：空数组 = 算过、确实谁都没点；留空（库里的
+    // NULL）= 没人算过这条消息。后者绝不能被当成"确认没人被点"。
+    it('谁都没点时记空数组，不是留空', async () => {
+        const tables = new MemoryLarkTables();
+        await project(tables);
+
+        expect(tables.commonMessages.get('id_3')?.mentioned_common_user_ids).toEqual([]);
     });
 });
 
@@ -1072,6 +1123,7 @@ describe('两张表同事务', () => {
                     role: 'user',
                     content: [],
                     content_text: undefined,
+                    mentioned_common_user_ids: [],
                     common_root_message_id: 'cm_x',
                     common_reply_message_id: undefined,
                     scope: 'group',

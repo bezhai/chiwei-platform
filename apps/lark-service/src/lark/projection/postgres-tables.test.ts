@@ -556,7 +556,11 @@ describe('认领：自然键首写者成为 canonical', () => {
     });
 
     // 重放的地基：同一条消息第二次进来时这条语句必须是静默的 no-op。
-    it('common_message 是 insert-or-ignore', async () => {
+    //
+    // 顺带把 mentioned_common_user_ids 钉进这条语句：它要是没进 INSERT，投影层算好
+    // 的"谁被点了名"就在这一层悄悄掉了 —— 上游 tests 全绿、下游只看见一列 NULL，
+    // 表现成"群里 @ 她不管用"，跟这次要修的 bug 一模一样。
+    it('common_message 是 insert-or-ignore，被点名的人一起落', async () => {
         await h.store.insertCommonMessage({
             common_message_id: 'cm_1',
             channel: 'lark',
@@ -568,6 +572,7 @@ describe('认领：自然键首写者成为 canonical', () => {
             content_text: 'hi',
             common_root_message_id: 'cm_1',
             common_reply_message_id: undefined,
+            mentioned_common_user_ids: ['cu_bot', 'cu_2'],
             scope: 'group',
             message_type: 'text',
             bot_name: 'chiwei',
@@ -576,6 +581,7 @@ describe('认领：自然键首写者成为 canonical', () => {
 
         const insert = h.sqlOf('INSERT INTO "common_message"');
         expect(insert.sql).toContain('ON CONFLICT DO NOTHING');
+        expect(insert.sql).toContain('"mentioned_common_user_ids"');
         expect(insert.params).toEqual([
             'cm_1',
             'lark',
@@ -586,11 +592,35 @@ describe('认领：自然键首写者成为 canonical', () => {
             '[{"kind":"text","text":"hi"}]',
             'hi',
             'cm_1',
+            ['cu_bot', 'cu_2'],
             'group',
             'text',
             'chiwei',
             '1700000000000',
         ]);
+    });
+
+    // 没人被点名时落的是空数组，不是留空。库里那一列的 NULL 有专门的含义（"没人
+    // 算过这条消息"），漏写和"确实谁都没点"必须长得不一样。
+    it('谁都没点名时落空数组，不是把这一列留空', async () => {
+        await h.store.insertCommonMessage({
+            common_message_id: 'cm_2',
+            channel: 'lark',
+            common_conversation_id: 'cc_1',
+            common_user_id: 'cu_1',
+            role: 'user',
+            content: [],
+            common_root_message_id: 'cm_2',
+            mentioned_common_user_ids: [],
+            scope: 'group',
+            message_type: 'text',
+            bot_name: 'chiwei',
+            event_time: '1700000000000',
+        });
+
+        const insert = h.sqlOf('INSERT INTO "common_message"');
+        expect(insert.sql).toContain('"mentioned_common_user_ids"');
+        expect(insert.params).toContainEqual([]);
     });
 
     // 反过来：lark_message 撞主键必须炸。忽略掉就等于让一条飞书消息映射到两个
@@ -642,6 +672,7 @@ describe('事务', () => {
                 role: 'user',
                 content: [],
                 common_root_message_id: 'cm_1',
+                mentioned_common_user_ids: [],
                 scope: 'group',
                 message_type: 'text',
                 bot_name: 'chiwei',
@@ -674,6 +705,7 @@ describe('事务', () => {
                     role: 'user',
                     content: [],
                     common_root_message_id: 'cm_1',
+                    mentioned_common_user_ids: [],
                     scope: 'group',
                     message_type: 'text',
                     bot_name: 'chiwei',
