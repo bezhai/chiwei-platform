@@ -153,7 +153,7 @@ async def _seed_world() -> None:
 async def _incoming(
     conv: uuid.UUID,
     *,
-    text_body: str,
+    text_body: str = "",
     at: dt.datetime,
     sender: uuid.UUID = _BEZHAI,
     sender_name: str = "bezhai",
@@ -161,18 +161,28 @@ async def _incoming(
     scope: str | None = None,
     bot_name: str = "chiwei",
     message_id: uuid.UUID | None = None,
+    items: list[dict] | None = None,
+    content_text: str | None = None,
 ) -> str:
-    """真人发来的一条消息。``names_bot`` 不为空 = 这条 @ 了那个 bot。"""
-    items: list[dict] = []
-    if names_bot is not None:
-        items.append(
-            {
-                "type": "mention",
-                "value": "赤尾",
-                "meta": {"bot_common_user_id": str(names_bot)},
-            }
-        )
-    items.append({"type": "text", "value": text_body})
+    """真人发来的一条消息。``names_bot`` 不为空 = 这条 @ 了那个 bot。
+
+    ``items`` / ``content_text`` 给了就照原样落库。附件消息上这两列是**两份互不
+    等价的事实**：投影层把每个非文本项都拼成字面的 ``[kind]`` 写进 ``content_text``
+    （lark-service ``inbound-projection.ts`` 的 ``summarize``、channel-server
+    ``common-projector.ts`` 的 ``textProjection``），文件名只留在 items 的
+    ``meta.file_name`` 里。要验她看不看得出发来的是什么，就得能分别摆布这两边。
+    """
+    if items is None:
+        items = []
+        if names_bot is not None:
+            items.append(
+                {
+                    "type": "mention",
+                    "value": "赤尾",
+                    "meta": {"bot_common_user_id": str(names_bot)},
+                }
+            )
+        items.append({"type": "text", "value": text_body})
     mid = message_id or uuid.uuid4()
     resolved_scope = scope or ("direct" if conv in (_DM, _OTHERS_DM) else "group")
     async with session_mod.get_session() as s:
@@ -191,7 +201,7 @@ async def _incoming(
                 "u": str(sender),
                 "sn": sender_name,
                 "body": json.dumps(items, ensure_ascii=False),
-                "txt": text_body,
+                "txt": text_body if content_text is None else content_text,
                 "sc": resolved_scope,
                 "bn": bot_name,
                 "et": _ms(at),
@@ -1072,3 +1082,180 @@ async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
     from app.living.moment import MOMENT_TOOLS
 
     assert look_up_contact in MOMENT_TOOLS, "她手里没有这只手"
+
+
+# --------------------------------------------------------------------------
+# 十 · 别人发来的东西，她得看得出那是什么
+# --------------------------------------------------------------------------
+#
+# ``content_text`` 不是正文，是**投影层拼给人扫一眼的摘要**：文本项原样，其余每一项
+# 一律拼成字面的 ``[kind]``（lark-service ``inbound-projection.ts`` 的 ``summarize``、
+# channel-server ``common-projector.ts`` 的 ``textProjection``）。所以一条文件消息的
+# ``content_text`` 就是 ``"[file]"`` —— 优先信它，等于永远不看 items 里的
+# ``meta.file_name``。
+#
+# 实测（coe-living，2026-09-02 22:27）：她看到「某某：[file]」，只知道有个东西、
+# 不知道是什么，于是回了一句「发来看看」—— 而那个文件早就发过来了。
+#
+# 渲染口径跟聊天那条路（``app.chat.content_parser`` 的 ``ParsedContent.render``）
+# 对齐，但两边各写各的：living 是独立一层。
+
+# 飞书文件消息的真实形状（lark-service ``inbound-message.ts`` 的 toContentItem）。
+_FILE_ITEM = {
+    "kind": "file",
+    "key": "file_v3_0d1a",
+    "meta": {"file_name": "三体.epub", "lark_type": "file"},
+}
+
+
+@pytest.mark.integration
+async def test_a_file_someone_sent_carries_its_name(living_db, in_a_moment):
+    """别人发来一个文件，她该看得见它叫什么。"""
+    await _seed_world()
+    await _incoming(_DM, at=_at(22, 27), items=[_FILE_ITEM], content_text="[file]")
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "[文件: 三体.epub]" in seen, (
+        f"她只知道有个附件、不知道是什么，于是回一句「发来看看」，"
+        f"而那东西早就发过来了。拿到：\n{seen}"
+    )
+    assert "[file]" not in seen, f"渠道内部的类型名摆到了她眼前。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("content_text", ["看看这个[file]", "看看这个"])
+async def test_a_note_that_comes_with_a_file_shows_both(
+    living_db, in_a_moment, content_text
+):
+    """一条消息同时带文字和附件，两样都得在，顺序跟 items 一致。
+
+    先信 ``content_text`` 的话，附件在她眼里**整个不存在**：她照着那段文字回，
+    完全不知道对方还发了个东西过来。
+
+    两种 ``content_text`` 都摆一遍 —— 投影层今天写的是 ``看看这个[file]``，库里
+    也见过只剩那段文字的。**哪一种都不该改变她看到什么**：正文以 items 为准，
+    这一列只是兜底。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 27),
+        items=[{"kind": "text", "text": "看看这个"}, _FILE_ITEM],
+        content_text=content_text,
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "看看这个[文件: 三体.epub]" in seen, (
+        f"文字和附件不是二选一，她两样都收到了。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_picture_and_a_sticker_read_as_themselves(living_db, in_a_moment):
+    """图片和表情包在她眼里是「图片」「表情包」，不是 ``[image]``、``[sticker]``。
+
+    这两类占了她手机上绝大多数的非文本消息（prod 近两天 image 1081、sticker 725）。
+    摆一个渠道内部的类型名给她，她要多绕一道才认得出那是什么东西。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 20),
+        items=[{"kind": "image", "key": "img_v3_aa"}],
+        content_text="[image]",
+    )
+    await _incoming(
+        _DM,
+        at=_at(22, 21),
+        items=[{"kind": "sticker", "key": "stk_bb"}],
+        content_text="[sticker]",
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "[图片]" in seen and "[表情包]" in seen, f"拿到：\n{seen}"
+    assert "[image]" not in seen and "[sticker]" not in seen, f"拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_a_kind_this_channel_does_not_render_keeps_its_placeholder(
+    living_db, in_a_moment
+):
+    """``unsupported`` 项带的是给人看的中文占位串，不能被换成类型名。
+
+    这是改成"以 items 为准"最容易顺手弄坏的一处：``unsupported`` 要是落进"不认识
+    的 kind"那一档，她看到的就从「[合并转发]」退成「[unsupported]」—— 比改之前
+    还糟（原来这一档正是 ``content_text`` 兜住的）。占位串由投影层写死
+    （lark-service ``parse-message.ts``），是线上历史的一部分。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 27),
+        items=[
+            {
+                "kind": "unsupported",
+                "text": "[合并转发]",
+                "meta": {"original_type": "merge_forward"},
+            }
+        ],
+        content_text="[合并转发]",
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "[合并转发]" in seen and "[unsupported]" not in seen, f"拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_older_type_value_shape_still_reads(living_db, in_a_moment):
+    """少数历史行用 ``type``/``value`` 而不是 ``kind`` —— 两套都得继续认。
+
+    prod 近两天：``kind`` 那套 text 13528 / image 1081 / sticker 725 /
+    unsupported 94 / file 16，``type`` 那套 image 17 / text 5。后者条数少，但她读到
+    的是同一条会话，漏认就是中间凭空少一句。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 27),
+        items=[
+            {"type": "text", "value": "旧消息"},
+            {"type": "image", "value": "img_old"},
+        ],
+        content_text="旧消息[image]",
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "旧消息[图片]" in seen, f"拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_tail_she_speaks_from_carries_the_file_name_too(
+    living_db, in_a_moment
+):
+    """她开口前读的那段会话尾巴同样要带文件名。
+
+    看手机和渲染措辞是两个读取方、同一份正文。只修一边的话，她在手机上看见
+    「[文件: 三体.epub]」、转头开口时上下文里又变回「[file]」—— 同一个东西在
+    一缝之内长了两副样子，她会当成两件事。
+    """
+    await _seed_world()
+    await _incoming(_DM, at=_at(22, 27), items=[_FILE_ITEM], content_text="[file]")
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})  # 读过了才进她已知范围
+
+    known = await conversation_as_she_knows_it(
+        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(22, 30)
+    )
+
+    assert "[文件: 三体.epub]" in known, f"拿到：\n{known}"

@@ -666,25 +666,67 @@ SELECT COUNT(*) FROM common_message cm
 """
 
 
+# 附件在她眼里叫什么。口径跟聊天那条路（``app.chat.content_parser`` 的
+# ``ParsedContent.render``）一致，**但两边各写各的**：living 是独立一层，共用一份
+# 代码换来的是改一处炸两处。
+#
+# 名字能带就带：她要判断"这东西我看没看过、值不值得打开"，靠的是文件名，不是
+# ``file_v3_...`` 那串 key。图片、表情包、语音本来就没有文件名，自然落回没名字那档。
+_ATTACHMENT_LABEL = {
+    "image": "图片",
+    "sticker": "表情包",
+    "audio": "语音",
+    "file": "文件",
+    "media": "视频",
+}
+
+
 def _body_of(row) -> str:
-    """一条消息的正文。优先 ``content_text``，没有就从 items 拼。"""
-    body = (row["content_text"] or "").strip()
-    if body:
-        return body
+    """一条消息的正文。**以 items 为准，``content_text`` 只是兜底。**
+
+    反过来（先信 ``content_text``）她就永远看不出附件是什么东西：那一列不是正文，
+    是投影层拼给人扫一眼的摘要 —— 文本项原样，其余每一项一律拼成字面的 ``[kind]``
+    （lark-service ``inbound-projection.ts`` 的 ``summarize``、channel-server
+    ``common-projector.ts`` 的 ``textProjection``）。所以一条文件消息的
+    ``content_text`` 就是 ``"[file]"``，非空、于是 items 里的 ``meta.file_name``
+    一眼都没被看过。实测（coe-living，2026-09-02 22:27）她看到「某某：[file]」，
+    只知道有个东西、不知道是什么，回了一句「发来看看」—— 那文件早就发过来了。
+    图文混排更狠：文字非空就直接返回，附件在她眼里整个不存在。
+
+    ``content_text`` 仍然留着当兜底 —— ``content`` 不是数组、或者一条 item 都渲染
+    不出东西的历史行，还有这一列可以指望。
+    """
     items = row["content"]
     if isinstance(items, str):
         items = json.loads(items)
+    if not isinstance(items, list):
+        # jsonb 里存的不保证是数组（同一条防线在 :data:`_UNREAD_SUMMARY_SQL` 的
+        # ``jsonb_typeof`` 那儿）。认不出形状就整条交给 ``content_text``。
+        items = []
     parts: list[str] = []
-    for item in items or []:
+    for item in items:
+        # 两套形状都得认：现在的写入方用 ``kind``，少数历史行用 ``type``/``value``。
         kind = item.get("type") or item.get("kind")
         value = item.get("value", item.get("text", ""))
-        if kind == "text":
+        if kind in ("text", "unsupported"):
+            # ``unsupported`` 带的是投影层给人看的中文占位串（``[合并转发]``、
+            # ``[分享个人名片]``），不是类型名 —— 当成不认识的 kind 处理，她看到的
+            # 就退成「[unsupported]」，比什么都不改还糟。
             parts.append(str(value))
         elif kind == "mention":
             parts.append(f"@{value}")
+        elif kind in _ATTACHMENT_LABEL:
+            name = (item.get("meta") or {}).get("file_name")
+            label = _ATTACHMENT_LABEL[kind]
+            parts.append(f"[{label}: {name}]" if name else f"[{label}]")
         elif kind:
+            # 认不出的 kind 照样留个印子：一条消息静悄悄地少掉，比看到一个陌生
+            # 类型名更难查。
             parts.append(f"[{kind}]")
-    return "".join(parts).strip() or "（没有内容）"
+    body = "".join(parts).strip()
+    if body:
+        return body
+    return (row["content_text"] or "").strip() or "（没有内容）"
 
 
 def _one_message(row, *, now: datetime) -> str:
