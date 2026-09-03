@@ -29,6 +29,7 @@ from app.living.phone import (
     phone_envelope,
     reachable_conversations,
     read_through,
+    render_envelopes,
 )
 
 LANE = "coe-living"
@@ -158,13 +159,24 @@ async def _incoming(
     sender: uuid.UUID = _BEZHAI,
     sender_name: str = "bezhai",
     names_bot: uuid.UUID | None = None,
+    names_others: tuple[uuid.UUID, ...] = (),
+    mention_unrecorded: bool = False,
     scope: str | None = None,
     bot_name: str = "chiwei",
     message_id: uuid.UUID | None = None,
     items: list[dict] | None = None,
     content_text: str | None = None,
 ) -> str:
-    """真人发来的一条消息。``names_bot`` 不为空 = 这条 @ 了那个 bot。
+    """真人发来的一条消息。
+
+    ``names_bot`` / ``names_others`` 写进 ``mentioned_common_user_ids`` ——
+    「这条消息点了谁的名」是这一列上的事实，**不在 ``content`` 里**。公共层的内容
+    契约只有 text/image/audio/file/sticker/unsupported 六种片段，@ 在飞书投影时被
+    内联回了正文，所以往 ``content`` 里塞一条 mention item 是造不存在的形状。
+
+    ``mention_unrecorded`` 写 NULL：加列之前的存量行、QQ 的行、飞书新写入方上线
+    之前的行都长这样。**NULL 不等于空数组** —— 空数组是"算过、确实谁都没点"，
+    NULL 是"没人算过"，后者不能被当成确认没点名。
 
     ``items`` / ``content_text`` 给了就照原样落库。附件消息上这两列是**两份互不
     等价的事实**：投影层把每个非文本项都拼成字面的 ``[kind]`` 写进 ``content_text``
@@ -173,16 +185,8 @@ async def _incoming(
     ``meta.file_name`` 里。要验她看不看得出发来的是什么，就得能分别摆布这两边。
     """
     if items is None:
-        items = []
-        if names_bot is not None:
-            items.append(
-                {
-                    "type": "mention",
-                    "value": "赤尾",
-                    "meta": {"bot_common_user_id": str(names_bot)},
-                }
-            )
-        items.append({"type": "text", "value": text_body})
+        items = [{"kind": "text", "text": text_body}]
+    named = [str(u) for u in ((names_bot,) if names_bot else ()) + names_others]
     mid = message_id or uuid.uuid4()
     resolved_scope = scope or ("direct" if conv in (_DM, _OTHERS_DM) else "group")
     async with session_mod.get_session() as s:
@@ -191,9 +195,10 @@ async def _incoming(
                 "INSERT INTO common_message "
                 "(common_message_id, channel, common_conversation_id, common_user_id,"
                 " sender_display_name, role, content, content_text, scope, bot_name,"
-                " event_time) "
+                " event_time, mentioned_common_user_ids) "
                 "VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), CAST(:u AS uuid),"
-                " :sn, 'user', CAST(:body AS jsonb), :txt, :sc, :bn, :et)"
+                " :sn, 'user', CAST(:body AS jsonb), :txt, :sc, :bn, :et,"
+                " CAST(:named AS text[])::uuid[])"
             ),
             {
                 "m": str(mid),
@@ -205,6 +210,7 @@ async def _incoming(
                 "sc": resolved_scope,
                 "bn": bot_name,
                 "et": _ms(at),
+                "named": None if mention_unrecorded else named,
             },
         )
     return str(mid)
@@ -548,6 +554,65 @@ async def test_being_named_by_someone_elses_bot_is_not_her_business(living_db):
 
 
 @pytest.mark.integration
+async def test_a_group_message_nobody_scanned_does_not_call_her(living_db):
+    """**没人算过 ≠ 确认没点她。**
+
+    这一列是 NULL 的行有三种来源：加列之前的存量行、QQ 的行（那侧的投影不写这一
+    列）、飞书新写入方上线之前那段时间的行。这些行里到底有没有 @ 她，库里没有答案。
+
+    没有答案的时候不叫醒她 —— 反过来（当成点了她）会让她被一整批历史消息轮流叫起
+    来。代价是那段窗口里真的 @ 了她的消息她收不到，这是明知的取舍，不是遗漏。
+    """
+    await _seed_world()
+    await _incoming(
+        _GROUP,
+        text_body="@赤尾 在吗",
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name="路人",
+        mention_unrecorded=True,
+    )
+
+    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None
+
+
+@pytest.mark.integration
+async def test_a_direct_message_calls_her_even_when_nobody_scanned_it(living_db):
+    """私聊不看这一列 —— 私聊来的任意一条本来就是在叫她。
+
+    这条钉的是"NULL 不算数"那条规则**不能溢出到私聊**：真溢出的话，改动前的所有
+    私聊未读会一起变成叫不动她，比它想修的问题严重得多。
+    """
+    await _seed_world()
+    mid = await _incoming(
+        _DM, text_body="在吗", at=_at(21, 30), mention_unrecorded=True
+    )
+
+    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+
+    assert summons is not None and summons.message_id == mid
+
+
+@pytest.mark.integration
+async def test_naming_her_alongside_others_still_calls_her(living_db):
+    """一条消息里点了好几个人，其中一个是她 —— 照样算在叫她。"""
+    await _seed_world()
+    mid = await _incoming(
+        _GROUP,
+        text_body=" 你们俩谁来",
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name="路人",
+        names_bot=_AKAO_BOT_UID,
+        names_others=(_AYANA_BOT_UID, _BEZHAI),
+    )
+
+    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+
+    assert summons is not None and summons.message_id == mid
+
+
+@pytest.mark.integration
 async def test_a_message_she_already_read_stops_calling_her(living_db, in_a_moment):
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
@@ -857,6 +922,57 @@ async def test_a_real_person_naming_her_in_the_group_still_calls_her(living_db):
     summons = await newest_unread_summons(lane=LANE, persona_id="akao")
 
     assert summons is not None and summons.message_id == mid
+
+
+@pytest.mark.integration
+async def test_the_envelope_says_someone_named_her(living_db):
+    """信封上那句「有人点了你的名」得真的出现。
+
+    **这条是整个改动的另一半**，跟召唤判定分开算：把 ``_UNREAD_SUMMARY_SQL`` 的
+    ``named_you`` 恒置成假，上面那批召唤用例照样全绿，而她拿起手机时看到的仍然是
+    一条平平无奇的群消息 —— 原来那个 bug 就是这样活了很久的。
+    """
+    await _seed_world()
+    await _incoming(
+        _GROUP,
+        text_body=" 这个你怎么看",
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name="路人",
+        names_bot=_AKAO_BOT_UID,
+    )
+
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+
+    assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(True, True)], (
+        f"群里点了她的名，信封却没认出来。拿到：{envelopes}"
+    )
+    assert "有人点了你的名" in render_envelopes(envelopes, now=_at(21, 31))
+
+
+@pytest.mark.integration
+async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(living_db):
+    """信封上的「有人点了你的名」同样受 NULL 约束。
+
+    ``BOOL_OR`` 在整批行都是 NULL 时返回的是 NULL、不是 false，靠 Python 那侧
+    ``bool(None)`` 才收成假。这条钉的就是那一步 —— 少了它，信封会把"没人算过"
+    当成一个真值展示出去，她会拿着一条不存在的点名去翻会话。
+    """
+    await _seed_world()
+    await _incoming(
+        _GROUP,
+        text_body="@赤尾 在吗",
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name="路人",
+        mention_unrecorded=True,
+    )
+
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+
+    assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(False, False)], (
+        f"没人算过这条消息，信封却说她被点名了。拿到：{envelopes}"
+    )
 
 
 @pytest.mark.integration

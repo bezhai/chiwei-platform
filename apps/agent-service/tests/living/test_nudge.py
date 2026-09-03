@@ -108,17 +108,14 @@ async def _incoming(
     sender: uuid.UUID = _BEZHAI,
     sender_name: str = "bezhai",
     names_bot: uuid.UUID | None = None,
+    mention_unrecorded: bool = False,
 ) -> str:
-    items: list[dict] = []
-    if names_bot is not None:
-        items.append(
-            {
-                "type": "mention",
-                "value": "赤尾",
-                "meta": {"bot_common_user_id": str(names_bot)},
-            }
-        )
-    items.append({"type": "text", "value": body})
+    """``names_bot`` 写进 ``mentioned_common_user_ids``，不是往 ``content`` 里塞
+    一条 mention item —— 公共层的内容契约没有那种片段（见 test_phone 的同名夹具）。
+
+    ``mention_unrecorded`` 写 NULL：没人算过这条消息（存量行、QQ 的行）。
+    """
+    items = [{"kind": "text", "text": body}]
     mid = uuid.uuid4()
     async with session_mod.get_session() as s:
         await s.execute(
@@ -126,9 +123,10 @@ async def _incoming(
                 "INSERT INTO common_message "
                 "(common_message_id, channel, common_conversation_id, common_user_id,"
                 " sender_display_name, role, content, content_text, scope, bot_name,"
-                " event_time) "
+                " event_time, mentioned_common_user_ids) "
                 "VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), CAST(:u AS uuid),"
-                " :sn, 'user', CAST(:body AS jsonb), :txt, :sc, 'chiwei', :et)"
+                " :sn, 'user', CAST(:body AS jsonb), :txt, :sc, 'chiwei', :et,"
+                " CAST(:named AS text[])::uuid[])"
             ),
             {
                 "m": str(mid),
@@ -139,6 +137,9 @@ async def _incoming(
                 "txt": body,
                 "sc": "direct" if conv == _DM else "group",
                 "et": _ms(at),
+                "named": None if mention_unrecorded else (
+                    [str(names_bot)] if names_bot else []
+                ),
             },
         )
     return str(mid)

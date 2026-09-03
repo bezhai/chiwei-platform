@@ -370,6 +370,24 @@ async def _own_bot_names(*, persona_id: str) -> list[str]:
 # 信封
 # ---------------------------------------------------------------------------
 
+# 「这条消息点了她的名」的唯一判据。
+#
+# 读的是 ``common_message.mentioned_common_user_ids`` —— 投影层在落账时算好写下的
+# 那一列，不是 ``content``。公共层的内容契约里没有 mention 这种片段（只有
+# text/image/audio/file/sticker/unsupported 六种），@ 在投影时就被内联回了正文，
+# 所以从 ``content`` 里根本认不出被点的是谁。
+#
+# **列是 NULL 时这个表达式是 NULL，不是 false**，而 NULL 在 WHERE 和 BOOL_OR 里都
+# 不算真。这正是要的：NULL = 没人算过这条消息（加列前的存量行、QQ 的行、飞书新写入
+# 方上线前的行），既然没算过，就不能当成"确认点了她"，也不能当成"确认没点她"。往
+# 这上面套 COALESCE 会把这个区分抹平。
+#
+# 两边都转成 text[] 再比：绑定进来的是一串 uuid 字符串（``_bot_user_ids`` 那边
+# ``str()`` 出来的），跟本仓库其他 ``CAST(:x AS text[])`` 用同一种绑定形状。
+_NAMED_HER = (
+    "cm.mentioned_common_user_ids::text[] && CAST(:bot_user_ids AS text[])"
+)
+
 # 未读 = 不是她自己说的、event_time 在她这条会话的水位之后。她自己发出去的那些不算
 # 未读——那是她说的话，落在 Happening 里。**姐姐说的算**：同一个群里的动静她本该
 # 感知到。
@@ -377,15 +395,7 @@ _UNREAD_SUMMARY_SQL = f"""
 SELECT COUNT(*)                          AS unread,
        MIN(cm.event_time)                AS earliest,
        MAX(cm.event_time)                AS latest,
-       BOOL_OR(EXISTS (
-           SELECT 1 FROM jsonb_array_elements(
-               CASE WHEN jsonb_typeof(cm.content) = 'array'
-                    THEN cm.content ELSE '[]'::jsonb END
-           ) AS it
-            WHERE it->>'type' = 'mention'
-              AND it->'meta'->>'bot_common_user_id'
-                  = ANY(CAST(:bot_user_ids AS text[]))
-       ))                                AS named_you
+       BOOL_OR({_NAMED_HER})             AS named_you
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
@@ -418,9 +428,12 @@ SELECT MAX(occurred_at) FROM {_HAPPENING_TABLE}
 async def _bot_user_ids(*, persona_id: str) -> list[str]:
     """她自己那些 bot 的 ``common_user_id`` —— 群里"点的是不是她"的全部依据。
 
-    群消息里的 @ 在 ``common_message.content`` 里是一条 mention item，meta 上带着
-    被点那个 bot 的 common_user_id（channel-server 写入时就解析好了）。所以"被点名"
-    是**库里的客观事实**，不需要模型判断，也不需要从 MQ 拿 ``persona_ids``。
+    拿它跟 ``common_message.mentioned_common_user_ids`` 比（见 :data:`_NAMED_HER`）。
+    那一列由飞书投影在落账时写下，装的是被 @ 的人在公共层的 id。所以"被点名"是
+    **库里的客观事实**，不需要模型判断，也不需要从 MQ 拿 ``persona_ids``。
+
+    查不到就是空列表，那意味着她的 bot 一个都没回填 common_user_id —— 此时
+    :data:`_NAMED_HER` 恒为假，群里谁都叫不动她，但私聊不受影响。
     """
     async with get_session() as s:
         rows = (
@@ -582,18 +595,7 @@ SELECT cm.common_message_id AS message_id,
    AND NOT {_SAID_BY_HER}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
-   AND (
-        :is_direct
-        OR EXISTS (
-            SELECT 1 FROM jsonb_array_elements(
-                CASE WHEN jsonb_typeof(cm.content) = 'array'
-                     THEN cm.content ELSE '[]'::jsonb END
-            ) AS it
-             WHERE it->>'type' = 'mention'
-               AND it->'meta'->>'bot_common_user_id'
-                   = ANY(CAST(:bot_user_ids AS text[]))
-        )
-   )
+   AND (:is_direct OR {_NAMED_HER})
  ORDER BY cm.event_time DESC, cm.common_message_id DESC
  LIMIT 1
 """
