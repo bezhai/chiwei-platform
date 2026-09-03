@@ -142,6 +142,19 @@ class SpokenOutbound(Data):
     只说明我们没等到确认，不说明 broker 没收到（见模块 docstring）。这一缝里她那句
     意图从此只对应这一条记录；要再说一次，得是下一缝（新的 ``moment_id`` = 新的
     ``outbound_id``），而那是**她**的决定。
+
+    **落地是独立的一根轴，不是 ``state`` 上的第三档。** 本地认领（``claimed`` /
+    ``handed_off``）说的是"这个进程走到哪一步了"，落地说的是"渠道上真的写下了哪一
+    行"。两件事都真、也都可能单独发生：交出去了、渠道写下了、而进程崩在记忆那一步
+    之前——这一条的事实就是 ``claimed`` **且**已落地。把落地压进 ``state`` 就会用一
+    个 ``delivered`` 盖掉 ``claimed``，:func:`unsettled_outbound` 从此捞不出它，"她
+    可能不记得自己说过"这件事再没人看得见。所以是两个独立字段。
+
+    **这条链上有两个写者。** 一个是 :func:`send_message`（认领 → 收口），另一个是
+    :mod:`app.living.landing` 那条对账钟（补落地那两列）。两边各写自己那根轴，但
+    追的是同一条版本链，所以谁都可能先到 —— 每一次 append 都必须看 CAS 的返回值，
+    并且**输了的那一方要把自己那根轴合到最新一版上**，不是照着手里那份过期的重写
+    （见 :func:`_settle`）。
     """
 
     lane: Annotated[str, Key]
@@ -154,11 +167,22 @@ class SpokenOutbound(Data):
     state: str
     claimed_at: datetime
     settled_at: datetime | None = None
+    # 这次开口落地成了公共层的哪一行（``common_message.common_message_id``），由
+    # :mod:`app.living.landing` 事后按 ``outbound_id`` 对账补上。
+    #
+    # **必须可空、且不能有 DB 默认值**：migrator 加列生成的是可空无默认的
+    # ``ADD COLUMN``，已有行读回来就是 NULL；声明成不可空的话，加列之后这张表上每
+    # 一条旧记录一读就 ValidationError。NULL 的含义只有一个：还没对上账 —— 可能是
+    # 渠道还没写、可能是那次 ``emit`` 的结果本来就未知。
+    landed_common_message_id: str | None = None
+    # 渠道那一行自己的 ``event_time``（即她那句话真正落地的时刻），不是对账这一拍
+    # 跑的时刻——后者只是钟的节拍，不是关于她那句话的事实。
+    landed_at: datetime | None = None
 
-    @field_validator("claimed_at", "settled_at")
+    @field_validator("claimed_at", "settled_at", "landed_at")
     @classmethod
     def _aware_instant(cls, v: datetime | None) -> datetime | None:
-        return _require_aware("claimed_at / settled_at", v)
+        return _require_aware("claimed_at / settled_at / landed_at", v)
 
 
 _OUTBOUND_TABLE = _table_name(SpokenOutbound)
@@ -210,6 +234,94 @@ async def unsettled_outbound(
         SpokenOutbound(**{k: r[k] for k in SpokenOutbound.model_fields})
         for r in rows
     ]
+
+
+def _already_claimed(tried: SpokenOutbound) -> str:
+    """这句话已经在认领表上了 —— 回给她的那句话。
+
+    **哪种状态都不再交第二次**：要么确定发过了，要么不知道发没发。不知道的时候选
+    不发 —— 重复打扰真人比少一条更糟。措辞照实分开，因为"说出去了"和"不知道到没
+    到"是两件不同的事，把后者说成前者就是编。
+
+    两个地方用同一份措辞：出站前的预检查，和认领 CAS 被人抢走那一格。两格的事实
+    是同一件（这一句已经有人交出去了、这一缝不会再发），所以话也只写一遍。
+    """
+    if tried.state == STATE_HANDED_OFF:
+        return (
+            f"这句话你已经说出去了（「{tried.said}」），没有再发一遍 —— "
+            f"想说别的就换一句。"
+        )
+    return (
+        f"这句话你已经交出去了（「{tried.said}」），但没等到确认，"
+        f"不知道对方收没收到。没有再发一遍。"
+    )
+
+
+async def _settle(claim: SpokenOutbound, *, at: datetime) -> None:
+    """收口：把 ``state`` 这一轴合到版本链**最新那一版**上。
+
+    :mod:`app.living.landing` 那条对账钟是这条链上的第二个写者，而且下面这个时序
+    是可达的：认领写下 v1 → ``emit`` → 渠道落账 → **对账钟先跑**，基于 v1 追了 v2
+    （补上落地那两列，``state`` 仍是 ``claimed``）→ 收口这才走到，手里那个版本号
+    已经过期。
+
+    收口写不进去的后果不是"少记一笔"，是这条记录**永久停在「已落地、未收口」**：
+    对账下一拍看它已经有落地标识、不再碰它，而 :func:`unsettled_outbound` 一直把
+    它当"她可能不记得自己说过"捞出来。全程零报错。
+
+    所以撞上了就重读最新一版，把 ``state`` / ``settled_at`` 合上去再写 —— 落地那
+    两列照最新一版原样带走，绝不用手里那份过期的把已知事实抹回 NULL。
+
+    **这是 CAS 循环，不是重试计数。** 没有次数上限、没有退避、没有"失败 N 次就放
+    弃"：另一个写者在这条链上只推得动一版（落地补上之后这条就不在它的待办里了），
+    所以循环一定收敛，而"放弃"在这里根本没有对应的事实 —— 话已经交出去了，收口这
+    一笔要么写下，要么这条记录就永远是错的。
+
+    **一个字都不许往外抛。** 走到这里 ``emit`` 已经返回了，抛出去会被
+    :func:`tool_error` 转成"这条消息没发出去"喂回给她 —— 那是假话，而且会让她重
+    发。丢一个状态比重复打扰真人轻。
+    """
+    current = claim
+    while True:
+        # 走构造函数而不是 ``model_copy(update=...)``：后者在 pydantic v2 上完全
+        # 跳过校验，naive 的 ``settled_at`` 会从这条缝里溜进 TIMESTAMPTZ 列。
+        # ``ver`` 由 ``insert_append`` 按 ``expected_current_ver`` 赋值。
+        written = await insert_append(
+            SpokenOutbound(
+                **{
+                    **current.model_dump(),
+                    "state": STATE_HANDED_OFF,
+                    "settled_at": at,
+                }
+            ),
+            expected_current_ver=current.ver,
+        )
+        if written == 1:
+            return
+        latest = await select_latest(
+            SpokenOutbound,
+            {"lane": current.lane, "outbound_id": current.outbound_id},
+        )
+        if latest is None:
+            # CAS 说这个键上已经有别的版本了，所以这里一定读得回来；真读不回来只
+            # 能是有人把整条链删了。没有可以合并的对象，说出来就停 —— 不抛。
+            logger.error(
+                "living mouth lane=%s outbound=%s 收口时整条认领链读不回来了，"
+                "这次开口的状态就此丢失",
+                current.lane,
+                current.outbound_id,
+            )
+            return
+        assert isinstance(latest, SpokenOutbound)
+        logger.info(
+            "living mouth lane=%s outbound=%s 收口时版本被对账抢先了（ver %d → %d），"
+            "合到最新一版上重写",
+            current.lane,
+            current.outbound_id,
+            current.ver,
+            latest.ver,
+        )
+        current = latest
 
 
 def build_voice_runner() -> AgentRunner:
@@ -277,18 +389,8 @@ async def send_message(
         SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
     )
     if tried is not None:
-        # 认领过就不再交第二次，**哪种状态都一样**：要么确定发过了，要么不知道发没
-        # 发。不知道的时候选不发 —— 重复打扰真人比少一条更糟。措辞照实分开，因为
-        # "说出去了"和"不知道到没到"是两件不同的事，把后者说成前者就是编。
-        if tried.state == STATE_HANDED_OFF:
-            return (
-                f"这句话你已经说出去了（「{tried.said}」），没有再发一遍 —— "
-                f"想说别的就换一句。"
-            )
-        return (
-            f"这句话你已经交出去了（「{tried.said}」），但没等到确认，"
-            f"不知道对方收没收到。没有再发一遍。"
-        )
+        assert isinstance(tried, SpokenOutbound)
+        return _already_claimed(tried)
 
     persona = await find_persona(persona_id)
     known = await conversation_as_she_knows_it(
@@ -323,7 +425,8 @@ async def send_message(
         raise RuntimeError("渲染没出内容")
 
     # 顺序钉死：认领 → 交出去 → 记忆 → 收口。每一步崩掉留下什么写在模块 docstring 里。
-    # 版本链只有两版：认领过就走不到这儿了（上面直接返回），所以这一条永远是从零起。
+    # 认领永远是这条链的第一版：认领过就走不到这儿（上面直接返回），所以从零起。
+    # 之后这条链上还会有对账钟写的版本，收口不能假定自己写的就是 v2（见 :func:`_settle`）。
     claim = SpokenOutbound(
         lane=lane,
         outbound_id=outbound_id,
@@ -335,7 +438,28 @@ async def send_message(
         state=STATE_CLAIMED,
         claimed_at=now,
     )
-    await insert_append(claim, expected_current_ver=0)
+    if await insert_append(claim, expected_current_ver=0) != 1:
+        # **认领没抢到就绝对不能 ``emit``。** 有人在预检查之后、这一步之前认领了
+        # 同一句话（同一缝的重入、同一泳道的两个进程），而他可能已经交出去了 ——
+        # 下游没有发送级去重，这里照发就是真人收到两条。这道闸存在的全部意义就是
+        # 挡住这一格，所以返回值必须看。
+        taken = await select_latest(
+            SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
+        )
+        if taken is None:
+            # CAS 说这个键上已经有版本了，所以一定读得回来。真读不回来只能是有人
+            # 把整条链删了 —— 那一格还没走到 ``emit``，说"没发出去"是真话，照抛。
+            raise RuntimeError(
+                f"认领 {outbound_id} 被别人抢走了，但抢走的那一版又读不回来"
+            )
+        assert isinstance(taken, SpokenOutbound)
+        logger.info(
+            "living mouth lane=%s persona=%s outbound=%s 认领被抢先了，不再交一次",
+            lane,
+            persona_id,
+            outbound_id,
+        )
+        return _already_claimed(taken)
 
     try:
         await emit(
@@ -402,12 +526,8 @@ async def send_message(
     note_recorded(happening_id)
     # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不
     # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
-    await insert_append(
-        claim.model_copy(
-            update={"ver": 2, "state": STATE_HANDED_OFF, "settled_at": now}
-        ),
-        expected_current_ver=1,
-    )
+    # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。
+    await _settle(claim, at=now)
     return f"发出去了：「{said}」"
 
 

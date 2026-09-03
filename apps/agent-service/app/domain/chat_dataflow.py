@@ -18,6 +18,13 @@ from app.runtime import Data, Key
 # is_proactive 分支据 is_proactive 走不反查的路径，这个前缀只是让 message_id 在语义
 # 上明确「非来源消息 id」。单一定义处（宪法「禁止重复定义」），write 端（life_tools
 # 派生）与读端（本模块 Data 契约文档 / 测试）都从这里取。
+#
+# 它同时是一个**跨语言线格式**：出站投递方 lark-service（TS）剥掉这个前缀取出 uuid，
+# 落进 common_message.agent_outbound_id。跨语言没法共享一个运行时定义（两个镜像都不
+# COPY contracts/），所以线格式落在一份两侧测试共读的向量上：
+# contracts/proactive-message-id.json。改这个字面量而不改那份向量，
+# tests/domain/test_proactive_message_id_contract.py 立刻转红 —— 没有这道闸的话，
+# 只改一边的症状是投递方静默认不出主动消息、那次开口在库里永久失联，全程零报错。
 PROACTIVE_MESSAGE_ID_PREFIX = "proactive:"
 
 

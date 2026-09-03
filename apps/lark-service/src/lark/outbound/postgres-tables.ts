@@ -60,6 +60,7 @@ function tablesOn(manager: EntityManager): LarkOutboundTables {
                     bot_name: row.bot_name,
                     event_time: row.event_time,
                     response_id: row.response_id,
+                    agent_outbound_id: row.agent_outbound_id,
                 })
                 // 重投同一段回复时静默 no-op。
                 .orIgnore()

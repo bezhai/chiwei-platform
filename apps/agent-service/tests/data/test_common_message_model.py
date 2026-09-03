@@ -38,3 +38,28 @@ def test_mentioned_common_user_ids_keeps_unknown_apart_from_nobody():
     assert col.nullable is True
     assert col.default is None
     assert col.server_default is None
+
+
+def test_agent_outbound_id_is_a_uuid_column_not_the_wire_string():
+    """这一行是她哪一次主动开口的产物，存的是那个 uuid。
+
+    渠道服务写进来的是 ``proactive:<uuid>`` **去掉前缀之后**那一段，列是 uuid 类型
+    （TS 侧 ``@Column({ type: 'uuid', nullable: true })``）。这边映射成 text 的话，
+    引擎按 uuid 反查时两边类型不一致，比对在数据库那层静默退化成字符串比较 ——
+    表现是永远对不上账，一句报错都没有。
+    """
+    col = _column("agent_outbound_id")
+    assert isinstance(col.type, type(_column("common_message_id").type))
+
+
+def test_agent_outbound_id_keeps_unrecorded_apart_from_not_proactive():
+    """**NULL 不能被消掉。**
+
+    三种行都落在 NULL 上：加列之前的存量行、QQ 渠道写的行、以及所有被动回复的行。
+    NOT NULL 或者给了默认值，就把"没记过"和"确实不是主动发的"合并了，而且合并之后
+    再也分不开 —— 那正是这一列存在的理由被抹掉。
+    """
+    col = _column("agent_outbound_id")
+    assert col.nullable is True
+    assert col.default is None
+    assert col.server_default is None

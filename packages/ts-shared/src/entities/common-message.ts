@@ -9,6 +9,7 @@ export interface CommonMessageContent {
 @Index('idx_common_message_conversation_time', ['common_conversation_id', 'event_time'])
 @Index('idx_common_message_user_time', ['common_user_id', 'event_time'])
 @Index('idx_common_message_response_id', ['response_id'])
+@Index('idx_common_message_agent_outbound_id', ['agent_outbound_id'])
 export class CommonMessage {
     @PrimaryColumn({ type: 'uuid' })
     common_message_id!: string;
@@ -65,6 +66,28 @@ export class CommonMessage {
 
     @Column({ type: 'varchar', length: 100, nullable: true })
     response_id?: string;
+
+    /**
+     * 这一行是赤尾**哪一次主动开口**的产物。
+     *
+     * 她在生活引擎里自己发起说话时，agent-service 先派生一个稳定唯一的 id，再以
+     * `proactive:<uuid>` 的形式放在出站信封的 message_id 上。渠道服务落这条
+     * assistant 行时，把**前缀之后那个 uuid** 记在这里 —— 前缀是线格式的命名空间
+     * 标记，列是 uuid 类型，整串进不来。
+     *
+     * 没有这一列时，主动发的行上 response_id 和 common_reply_message_id 都是空、
+     * common_root_message_id 回落成它自己，于是「库里这一行」和「她哪一次开口」之间
+     * 一个可用的关联键都没有，只能靠内容加时间戳猜。发送前的安全检查、以及她自己
+     * 撤回说过的话，都要按这一列做等值反查。
+     *
+     * **NULL = 没记过这行是哪次开口的产物。** 三种情况都落在 NULL 上：加列之前的
+     * 存量行、QQ 渠道写的行、以及所有被动回复的行（被动回复本来就不是任何一次
+     * 主动开口）。所以这一列既不能 NOT NULL，也不能给默认值：给了就把「没记过」和
+     * 「确实不是主动发的」合并了，而且合并之后再也分不开。这张表三个服务共写，
+     * 这段注释是这条契约唯一的载体。
+     */
+    @Column({ type: 'uuid', nullable: true })
+    agent_outbound_id?: string;
 
     @Column({ type: 'bigint' })
     event_time!: string;

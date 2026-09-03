@@ -38,6 +38,11 @@ _DM = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
 _GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-lab")
 _NOT_HERS = uuid.uuid5(uuid.NAMESPACE_OID, "conv-not-hers")
 
+# ``in_a_moment`` 的默认缝。写出来是因为下面几条用例要在缝**外面**按 moment_id
+# 把那条认领记录捞回来。
+_MOMENT = "2026-07-25T21:30+08:00"
+
+
 def _at(hour: int, minute: int = 0) -> dt.datetime:
     return dt.datetime(2026, 7, 25, hour, minute, tzinfo=_CST)
 
@@ -535,23 +540,206 @@ async def test_a_crash_after_handoff_leaves_a_row_that_says_so(
 async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     mouth_db, in_a_moment, spoken, voice, monkeypatch
 ):
-    """未收口 = **不重发**。重复打扰真人比少一条更糟，而且那条记录会告诉人去看。"""
+    """未收口 = **不重发**。重复打扰真人比少一条更糟，而且那条记录会告诉人去看。
+
+    **只还原 ``record_happening`` 这一个符号，不许 ``monkeypatch.undo()``。**
+    ``test_db`` 那份 session 注入用的是同一个 function-scoped monkeypatch 实例
+    （``spoken`` / ``voice`` 两个替身也是），``undo()`` 会把它们一起撤掉：第二次调
+    用于是打向真 DSN、连不上，异常被 ``@tool_error`` 转成一个 dict，而"旧列表还是
+    一条"照样成立 —— 这条用例要守的防重路径**一次都没被执行过**。所以下面断言的是
+    第二次拿到「已经认领过、不再发」那句正常回话，不是一个被吞掉的异常。
+    """
     from app.living import mouth as mouth_mod
+    from app.living.mouth import STATE_CLAIMED, SpokenOutbound, latest_outbound
+    from app.runtime.persist import select_all_versions
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
 
+    real_record_happening = mouth_mod.record_happening
     monkeypatch.setattr(mouth_mod, "record_happening", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
     )
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", moment_id=_MOMENT):
         await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
     assert len(spoken) == 1
 
-    monkeypatch.undo()
-    async with in_a_moment("akao"):
-        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
+    monkeypatch.setattr(mouth_mod, "record_happening", real_record_happening)
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        again = await send_message.invoke(
+            {"what": "问问他", "channel_id": str(_DM)}
+        )
 
     assert len(spoken) == 1, "同一件事重跑时又发了一次 —— 真人收到两条"
+    # 下面这几条是"真的走到了防重路径"的凭据：拿到的是那句正常回话（不是异常被
+    # 吞成的 dict），话里说了没再发一遍，而且这一次一个字都没往库里写。
+    assert isinstance(again, str), (
+        f"第二次调用炸在了防重之前 —— 这条路径根本没跑到。拿到：{again!r}"
+    )
+    assert "没有再发一遍" in again and voice.said in again, (
+        f"回的不是「已经认领过、不再发」那句。拿到：{again!r}"
+    )
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert row.state == STATE_CLAIMED, (
+        f"第二次调用把这条记录往前推了 —— 它该在防重那一步就返回。拿到：{row}"
+    )
+    versions = await select_all_versions(
+        SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
+    )
+    assert [v.ver for v in versions] == [1], (
+        f"第二次调用又认领了一版。拿到：{[v.ver for v in versions]}"
+    )
+
+
+# --------------------------------------------------------------------------
+# 六 · 这条认领链上不止她一个写者
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_send_reconciled_before_it_settles_still_gets_settled(
+    mouth_db, in_a_moment, spoken, voice, monkeypatch
+):
+    """对账钟抢在收口之前追了一版 —— 收口要合到那一版上，不是被它挤掉。
+
+    :mod:`app.living.landing` 那条钟是这条认领链上的**第二个写者**。时序是可达的：
+
+      1. ``send_message`` 写 v1 认领、把话交出去；
+      2. 渠道那边落了账；
+      3. 对账钟先跑，基于 v1 追了 v2（补上落地标识，``state`` 还是 ``claimed``）；
+      4. 收口这才走到，而它手里那个版本号已经过期，CAS 写不进去。
+
+    写不进去的后果是这条记录**永久停在「已落地、未收口」**：对账下一拍看它已经有
+    落地标识、不再碰它，:func:`unsettled_outbound` 却一直把它当"她可能不记得自己
+    说过"捞出来。全程零报错。
+
+    所以这里把那一拍真的插进认领和收口之间 —— 造出真实的版本链，而不是让替身报一
+    个假的 CAS 失败。
+    """
+    from app.living import mouth as mouth_mod
+    from app.living.landing import reconcile_landings
+    from app.living.mouth import (
+        STATE_HANDED_OFF,
+        SpokenOutbound,
+        latest_outbound,
+        unsettled_outbound,
+    )
+    from app.runtime.persist import select_all_versions
+
+    # 「投递方在公共层落下的那一行」只在 test_landing 里定义一次，这边照用。
+    from tests.living.test_landing import _the_channel_wrote
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    real_record_happening = mouth_mod.record_happening
+    landed: list[uuid.UUID] = []
+
+    async def the_channel_lands_and_the_clock_ticks(**kw):
+        """记忆那一步之后、收口之前：渠道落账 + 对账真的跑一拍。"""
+        await real_record_happening(**kw)
+        claimed = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+        landed.append(
+            await _the_channel_wrote(
+                outbound_id=claimed.outbound_id, at=_at(21, 31)
+            )
+        )
+        assert await reconcile_landings(lane=LANE) == 1, "对账那一拍没补上落地标识"
+
+    monkeypatch.setattr(
+        mouth_mod, "record_happening", the_channel_lands_and_the_clock_ticks
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        outcome = await send_message.invoke(
+            {"what": "问问他", "channel_id": str(_DM)}
+        )
+
+    assert isinstance(outcome, str) and voice.said in outcome, outcome
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert row.state == STATE_HANDED_OFF, (
+        "收口被对账那一版挤掉了 —— 这条永久停在「已落地、未收口」，对账下一拍也"
+        f"不会再碰它，而且一句报错都没有。拿到：{row}"
+    )
+    assert row.settled_at is not None, "收口时刻没落下"
+    assert row.landed_common_message_id == str(landed[0]), (
+        "收口把对账补上的落地标识覆盖掉了 —— 那一版记的是已知事实，不能被抹回 NULL"
+    )
+    assert row.landed_at == _at(21, 31), "落地时刻被收口顺手改了"
+    versions = await select_all_versions(
+        SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
+    )
+    assert [v.ver for v in versions] == [1, 2, 3], (
+        f"版本链不是「认领 → 对账 → 收口」三版："
+        f"{[(v.ver, v.state, v.landed_common_message_id) for v in versions]}"
+    )
+    assert await unsettled_outbound(lane=LANE, persona_id="akao") == [], (
+        "收口了却还被当成「她可能不记得」捞出来"
+    )
+
+
+@pytest.mark.integration
+async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
+    mouth_db, in_a_moment, spoken, voice, monkeypatch
+):
+    """认领没抢到 = **绝对不能 emit**。抢赢的那个可能已经交出去了。
+
+    认领那一版的 CAS 是这张表存在的全部意义。下游没有发送级去重
+    （chat-response-handler.ts:193-207 的自述 + :332 的无条件 ack），抢输了还照发
+    就是真人收到两条 —— 而 CAS 的返回值不被看的话，这件事一句报错都不会有。
+
+    这里让**另一次真的 ``send_message``** 插在预检查和认领之间（渲染那一步就是那
+    条缝），版本链真的往前走了一版，不是让替身报一个假的失败。
+    """
+    from app.agent.neutral import Message, Role
+    from app.living import mouth as mouth_mod
+    from app.living.mouth import SpokenOutbound, latest_outbound
+    from app.runtime.persist import select_all_versions
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    someone_else_went_first: list[bool] = []
+
+    class RacingVoice:
+        """渲染这一步里，另一个跑同一缝同一句话的执行先认领、先交出去了。"""
+
+        async def run(self, messages, **kwargs):
+            if not someone_else_went_first:
+                someone_else_went_first.append(True)
+                await send_message.invoke(
+                    {"what": "问问他", "channel_id": str(_DM)}
+                )
+            return Message(role=Role.ASSISTANT, content=voice.said)
+
+    monkeypatch.setattr(mouth_mod, "build_voice_runner", lambda: RacingVoice())
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        outcome = await send_message.invoke(
+            {"what": "问问他", "channel_id": str(_DM)}
+        )
+
+    assert someone_else_went_first, "并发那一次没跑起来，这条用例什么都没验"
+    assert len(spoken) == 1, (
+        f"认领抢输了还是交了一次 —— 下游不去重，真人收到两条。交了 {len(spoken)} 次"
+    )
+    assert isinstance(outcome, str), f"抢输不是工具坏了，别报成错。拿到：{outcome!r}"
+    assert "没有再发一遍" in outcome, (
+        f"没告诉她这一句已经有人交出去了。拿到：{outcome!r}"
+    )
+    assert len(await recent_own_happenings(lane=LANE, persona_id="akao")) == 1, (
+        "同一句话落了两条记忆 —— 她下一缝会以为自己说了两遍"
+    )
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    versions = await select_all_versions(
+        SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
+    )
+    assert [v.ver for v in versions] == [1, 2], (
+        f"抢输那一次也往认领链上写了。拿到：{[v.ver for v in versions]}"
+    )

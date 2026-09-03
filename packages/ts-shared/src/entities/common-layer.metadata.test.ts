@@ -84,4 +84,31 @@ describe('common layer entity metadata', () => {
         expect(options?.nullable).toBe(true);
         expect(options?.default).toBeUndefined();
     });
+
+    it('common_message keeps "which time she opened her mouth" as a nullable uuid', () => {
+        const options = columnOptions(CommonMessage, 'agent_outbound_id');
+        expect(options).toBeDefined();
+
+        // 存的是 agent-service 那次开口的派生 id 本身（uuid），不是带
+        // `proactive:` 前缀的整串 —— 前缀是线格式的命名空间标记，不进列。
+        expect(options?.type).toBe('uuid');
+        expect(options?.array).toBeFalsy();
+
+        // NULL = 没记过这行是哪次开口的产物：加列之前的存量行、QQ 渠道的行、
+        // 以及所有被动回复的行，全是 NULL。给 NOT NULL 或者默认值，就把"没记过"
+        // 和"确实不是主动发的"合并了，合并之后再也分不开。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
+    });
+
+    it('common_message indexes agent_outbound_id — 它会被按等值反查', () => {
+        const indices = getMetadataArgsStorage()
+            .indices.filter((i) => i.target === CommonMessage)
+            .map((i) => ({ name: i.name, columns: i.columns }));
+
+        expect(indices).toContainEqual({
+            name: 'idx_common_message_agent_outbound_id',
+            columns: ['agent_outbound_id'],
+        });
+    });
 });

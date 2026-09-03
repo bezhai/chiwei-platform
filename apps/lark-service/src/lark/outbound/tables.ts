@@ -41,6 +41,16 @@ export interface LarkAssistantMessageRow {
     event_time: string;
     /** 挂回台账（common_agent_response）那一行。主动发没有台账，留空。 */
     response_id?: string;
+    /**
+     * 这一行是她哪一次**主动开口**的产物：信封 message_id 去掉 `proactive:` 前缀
+     * 之后那个 uuid。被动回复是 undefined —— 它不是任何一次主动开口的产物。
+     *
+     * **故意不写成可选（`?`）。** 漏传和被动回复在库里长得一模一样（都是 NULL），
+     * 而这一列存在的全部理由，就是让主动发的行能被反查到；漏传的表现是那次开口
+     * 静默失联，没有任何报错。写成必填，将来任何一个新的 assistant 行写入方都得
+     * 显式说出"这一路有没有对应的一次开口"，而不是默默继承 undefined。
+     */
+    agent_outbound_id: string | undefined;
 }
 
 /**

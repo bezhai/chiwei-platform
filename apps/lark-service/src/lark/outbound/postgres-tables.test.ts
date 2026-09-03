@@ -45,6 +45,8 @@ const ASSISTANT_ROW = {
     bot_name: 'chiwei',
     event_time: '1700000000000',
     response_id: 'sess-1',
+    // 被动回复留空；主动发那一路由下面那条用例单独钉。
+    agent_outbound_id: undefined,
 };
 
 const MAPPING_ROW = {
@@ -114,6 +116,18 @@ describe('写：assistant 行', () => {
         expect(insert.params).toContain('sess-1');
         // event_time 是 bigint 列，字符串原样落。
         expect(insert.params).toContain('1700000000000');
+    });
+
+    it('主动发那次开口的 id 真的进了 SQL —— 不是只留在行类型上', async () => {
+        await h.store.insertCommonMessage({
+            ...ASSISTANT_ROW,
+            response_id: undefined,
+            agent_outbound_id: '550e8400-e29b-41d4-a716-446655440000',
+        });
+
+        const insert = h.sqlOf('INSERT INTO "common_message"');
+        expect(insert.sql).toContain('"agent_outbound_id"');
+        expect(insert.params).toContain('550e8400-e29b-41d4-a716-446655440000');
     });
 
     it('content 作为 jsonb 整包落，不被拍平成字符串', async () => {

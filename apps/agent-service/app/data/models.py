@@ -113,6 +113,20 @@ class CommonMessage(Base):
     mentioned_common_user_ids: Mapped[list[PyUUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=True
     )
+    # 这一行是赤尾**哪一次主动开口**的产物。
+    #
+    # 她在生活引擎里自己发起说话时先派生一个稳定唯一的 id，再以 ``proactive:<uuid>``
+    # 的形式放在出站信封的 message_id 上；渠道服务落这条 assistant 行时把**前缀之后
+    # 那个 uuid** 记在这里（前缀是线格式的命名空间标记，列是 uuid 类型，整串进不来）。
+    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.landing``）。
+    #
+    # NULL 和"确实不是主动发的"是两件事：NULL = 没记过（加列前的存量行、QQ 的行、
+    # 飞书新写入方上线前的行）。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就
+    # 把两者合并了，而且合并之后再也分不开。这张表三个服务共写，TS 侧那一列的注释
+    # （packages/ts-shared/src/entities/common-message.ts）是同一条契约的另一半。
+    agent_outbound_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
     message_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)

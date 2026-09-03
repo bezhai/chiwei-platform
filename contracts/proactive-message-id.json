@@ -1,0 +1,24 @@
+{
+  "_note": [
+    "AI 角色主动发起的消息，其出站段 message_id 的命名空间前缀 —— TS 与 Python 共用的一份向量。",
+    "线上的形状是 `proactive:<uuid>`：前缀标记「这不是来源消息 id、别反查」，uuid 是「哪一次开口」。",
+    "",
+    "生产方是 agent-service（Python）：app/domain/chat_dataflow.py 定义常量，",
+    "app/living/mouth.py 用它拼出 message_id。",
+    "消费方是 lark-service（TS）：apps/lark-service/src/lark/outbound/deliver.ts 剥掉前缀取出 uuid，",
+    "落进 common_message.agent_outbound_id。",
+    "",
+    "两边各写各的字面量时，只改一边不会有任何测试变红 —— 投递方静默认不出主动消息，",
+    "那次开口在库里永久失联，全程零报错。两侧测试读同一份文件之后，要骗过测试就得改共享的",
+    "这一份，而改了这一份，两侧一起转红。",
+    "",
+    "读它的是测试，不是生产代码：两个镜像的 Dockerfile 都不 COPY contracts/，且 lark-service 是",
+    "`bun build --compile` 出来的独立二进制（运行时 import.meta.dir = /$bunfs/root），运行时读不到",
+    "这份文件。跟 contracts/mq-channel-routes.json 是同一套做法。",
+    "",
+    "读取方：",
+    "  apps/lark-service/src/lark/outbound/proactive-message-id.test.ts",
+    "  apps/agent-service/tests/domain/test_proactive_message_id_contract.py"
+  ],
+  "message_id_prefix": "proactive:"
+}

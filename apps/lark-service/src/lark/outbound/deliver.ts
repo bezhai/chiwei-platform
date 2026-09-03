@@ -55,6 +55,39 @@ const SEGMENT_GAP_MS = 2_500;
 /** 出站消息的类型。只发富文本。 */
 const OUTBOUND_MESSAGE_TYPE = 'post';
 
+/**
+ * 主动发的伪 message_id 前缀。
+ *
+ * 线格式那一侧由 agent-service 的 `PROACTIVE_MESSAGE_ID_PREFIX`
+ * （app/domain/chat_dataflow.py）产出。跨语言没法共享一个运行时定义（这个服务是
+ * `bun build --compile` 出来的独立二进制，镜像里只有二进制、没有仓库），所以线格式
+ * 落在一份两侧测试共读的向量上：`contracts/proactive-message-id.json`。
+ *
+ * 改这个字面量而不改那份向量，本文件的 proactive-message-id.test.ts 立刻转红 ——
+ * 没有这道闸的话，只改一边的症状是主动发的 agent_outbound_id 静默变空、那次开口
+ * 在库里永久失联，全程零报错。
+ */
+export const PROACTIVE_MESSAGE_ID_PREFIX = 'proactive:';
+
+/** 标准 uuid 的形状。版本位不校验：pg 的 uuid 列本来就只认这个排布。 */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * 从主动发的伪 message_id 里取出「这是哪一次开口」那个 id。
+ *
+ * `proactive:<uuid>` → `<uuid>`（小写）。**列是 uuid 类型，带前缀的整串进不去。**
+ *
+ * 形状不对就返回 undefined，**绝不抛**：这个函数跑在飞书 API 已经调过之后，抛错
+ * 会让上游重投、真人收到第二条（见文件头「分界线」）。记不下"是哪次开口"的代价
+ * 是这一行退化成加列之前的样子，比重复打扰真人轻得多。
+ */
+function agentOutboundIdOf(messageId: string): string | undefined {
+    if (!messageId.startsWith(PROACTIVE_MESSAGE_ID_PREFIX)) return undefined;
+    const derived = messageId.slice(PROACTIVE_MESSAGE_ID_PREFIX.length);
+    if (!UUID_SHAPE.test(derived)) return undefined;
+    return derived.toLowerCase();
+}
+
 /** 观测点。名字与拆分前 chat-response-worker 的 stage 标签逐字一致。 */
 export type LarkDeliveryStage = 'db_query' | 'channel_send' | 'db_write' | 'total';
 
@@ -342,11 +375,33 @@ async function record(
     partIndex: number,
     isProactive: boolean,
 ): Promise<string> {
-    // 飞书偶尔返回 code=0 却不带 message_id。落库的主键只能自己合成一个 ——
-    // 主动发场景下 target.omId 是空串，合成结果长成 `_part0` 这样，而且两条都没
-    // 拿到 id 的主动发会撞上同一个键（靠 insertLarkMessage 的 or-ignore 兜住）。
-    // 这是拆分前就有的形态，照搬：改它要重新定义"没拿到 id 时用什么当主键"。
-    const omId = sentMessageId || `${target.omId}_part${partIndex}`;
+    // 主动发时把「这是她哪一次开口」记在行上。被动回复留空 —— 它不是任何一次
+    // 主动开口的产物，而这一列的 NULL 正是"没有对应的一次开口"。
+    const agentOutboundId = isProactive ? agentOutboundIdOf(response.message_id) : undefined;
+    if (isProactive && !agentOutboundId) {
+        // 静默留空会让那次开口在库里彻底失联，所以至少留一行能捞的记录。**不抛**：
+        // 消息此刻已经发出去了。
+        console.warn(
+            `[lark-outbound] proactive message_id is not proactive:<uuid>, ` +
+                `agent_outbound_id left null: ${response.message_id}`,
+        );
+    }
+
+    // 飞书偶尔返回 code=0 却不带 message_id。落库的主键只能自己合成一个，而合成的
+    // 东西必须能把**这一次发送**跟同一个会话里的下一次发送分开：
+    //
+    //   被动回复  锚点是触发消息的 om_id。它由信封里那个真实的公共层 message_id
+    //             反查而来，一条触发消息对应一次回复，本来就唯一
+    //   主动发    没有来源消息（target.omId 是空串），锚点是这次开口的 id。只用会话
+    //             和段序的话，同一个会话里两次都没拿到 id 的主动发会算出同一个键，
+    //             被下面那次反查复用成同一个 common_message_id、再被两条 or-ignore
+    //             一起吃掉 —— 第二句话在公共层连行都没有，全程零报错
+    //
+    // 伪 id 形状不对时退回整串：记不下是哪次开口是一回事，让第二条消息在库里彻底
+    // 消失是另一回事。om_id 列是 varchar(256)，锚点最长是 `proactive:<uuid>` 的 46 个
+    // 字符，加上 `_part{段序}` 远够不着上限。
+    const sendAnchor = isProactive ? agentOutboundId || response.message_id : target.omId;
+    const omId = sentMessageId || `${sendAnchor}_part${partIndex}`;
 
     // 重投时复用已经铸过的 id，别再铸一个 —— 同一条飞书消息在公共层有两个身份，
     // 引用链会从中间断开。
@@ -381,6 +436,7 @@ async function record(
             bot_name: botName,
             event_time: String(eventTime),
             response_id: response.session_id || undefined,
+            agent_outbound_id: agentOutboundId,
         });
 
         await tables.insertLarkMessage({

@@ -1,14 +1,15 @@
-"""Wiring: living 引擎的 Data 注册与四条时间源。
+"""Wiring: living 引擎的 Data 注册与五条时间源。
 
   interval 60s  -> CalendarTick    -> calendar_tick      （日历，不花模型钱）
   interval 300s -> WorldRoundTick  -> world_round_tick   （world 稀疏轮次，门在节点里）
   interval 60s  -> LifeMomentTick  -> life_moment_tick   （三个 life 的一缝，门在节点里）
   interval 60s  -> PhoneNudgeTick  -> phone_nudge_tick   （有人叫她就提前一缝）
+  interval 300s -> LandingTick     -> landing_tick       （她那次开口落地成哪一行）
 
-四条钟都直接挂在单字段 ``ts`` 的 tick 上，没有中间翻译节点：泳道由节点自己从进程
+五条钟都直接挂在单字段 ``ts`` 的 tick 上，没有中间翻译节点：泳道由节点自己从进程
 环境读（``app.living.clock.living_lane``），tick 本身不需要携带任何内容。挂时间源的
 Data 多一个必填字段就会在源循环 ``_build_payload`` 处 ValidationError **直接杀
-Pod**，所以这四个 Data 的形状由 ``tests/living/test_clock.py``、
+Pod**，所以这五个 Data 的形状由 ``tests/living/test_clock.py``、
 ``tests/living/test_moment.py`` 和 ``tests/living/test_no_inbound.py`` 钉住。
 
 后三条钟拍得都比它们真正的间隔密（world 五分钟拍、一小时跑一轮；life 一分钟拍、
@@ -16,16 +17,24 @@ Pod**，所以这四个 Data 的形状由 ``tests/living/test_clock.py``、
 可调的业务参数（Dynamic Config），只能让钟拍得比最密的间隔更密、然后在节点里判
 "够不够久"。
 
-**这里没有、也不会有任何入站边。** 四条钟全是 interval，一条 ``Source.mq`` /
+**这里没有、也不会有任何入站边。** 五条钟全是 interval，一条 ``Source.mq`` /
 ``Source.http`` 都没有：新引擎的 chat 是嘴，没有耳朵，而这件事靠"根本没有接消息的
-地方"来保证，不靠哪个分支里的 if（``tests/living/test_no_inbound.py``）。她收消息走
-的是每一缝直接查 ``common_message``（``app.living.phone``），不碰队列。
+地方"来保证，不靠哪个分支里的 if。她收消息走的是每一缝直接查 ``common_message``
+（``app.living.phone``），不碰队列。
 
-除四条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
+守这条的是 ``tests/living/test_no_inbound.py``，它判的是**这条来源通向谁**：时间源
+以外的每一种来源都算外部，消费者落在 ``app.living`` 里就红。所以"把一条已经放行的
+运维 HTTP 接到 living 的节点上"同样拦得住——那和新挂一个源一样是长耳朵。运维那几条
+要连消费者一起逐字命中白名单才放行。
+
+出站方向的回执也走这条口径：``LandingTick`` 那条钟是**自己去查**公共层对账，不是
+让渠道回调进来（那就是第一只耳朵）。
+
+除五条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
 读一程）。它**同样不是入站口**：``.durable()`` 只是 ``WireBuilder`` 上的标志位，不
 产生任何 ``Source``，边上跑的只有她自己刚在某一缝里 emit 的那个信号。
 
-**四条钟只在实验泳道上注册**（``app.living.experiment``）。这是实验的边界，不是行为
+**五条钟只在实验泳道上注册**（``app.living.experiment``）。这是实验的边界，不是行为
 开关（不违反"不用工程思维解决 agent 的不确定性"——它管的是"这批代码允许在哪个环境里
 自己跑起来"，不是"她该不该醒"）。同一个判据的**反面**挂在旧引擎那几个 wiring 模块上：
 实验泳道上旧引擎一条 wire 都不注册，两套引擎不会在同一个泳道上各干各的。
@@ -62,6 +71,11 @@ from app.living.clock import (
     world_round_tick,
 )
 from app.living.experiment import on_the_living_experiment_lane
+from app.living.landing import (
+    LANDING_TICK_SECONDS,
+    LandingTick,
+    landing_tick,
+)
 from app.living.moment import (
     LIFE_MOMENT_TICK_SECONDS,
     LifeMomentTick,
@@ -89,6 +103,11 @@ if on_the_living_experiment_lane():
     wire(PhoneNudgeTick).from_(Source.interval(PHONE_NUDGE_TICK_SECONDS)).to(
         phone_nudge_tick
     )
+    # 对账：把她说出去的那些跟公共层落下的那一行接回来。单独一条钟，不塞进上面任何
+    # 一条 —— 那几条钟各有各的节奏理由（日历的到期误差、world 的轮次分辨率、一缝的
+    # 提前延迟），把一件跟它们无关的事挂上去就是职责混淆，而且从此改不动其中任何
+    # 一个的频率。
+    wire(LandingTick).from_(Source.interval(LANDING_TICK_SECONDS)).to(landing_tick)
     # 读一程：她在某一缝拿起一个文件 → emit 一个 durable ``FilePickedUp`` → 这条边
     # 把它接给 ``read_a_round`` 去读（取字节、解码、几轮模型调用，塞进一缝里会把她
     # 卡在网络上）。durable 让它跨进程可达且不丢，并按 ``(lane, round_id)`` 去重。
@@ -100,8 +119,8 @@ if on_the_living_experiment_lane():
     wire(FilePickedUp).durable().to(read_a_round)
 else:
     logger.warning(
-        "living: 泳道 %r 不是实验泳道，日历 / world 轮次 / life 一缝 / 提前一缝"
-        " 四条钟一条都不注册 —— 这批代码是 coe 上的实验，不在 prod / ppe 上自己"
-        " 跑起来（表照建，空表无害）",
+        "living: 泳道 %r 不是实验泳道，日历 / world 轮次 / life 一缝 / 提前一缝 /"
+        " 出站对账 五条钟一条都不注册 —— 这批代码是 coe 上的实验，不在 prod / ppe"
+        " 上自己跑起来（表照建，空表无害）",
         current_deployment_lane() or "prod",
     )

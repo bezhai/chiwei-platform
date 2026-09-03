@@ -118,7 +118,7 @@ def test_the_outbound_mouth_stays_open_on_the_experiment_lane():
 
 
 def test_the_experiment_engine_is_the_one_that_runs_on_the_experiment_lane():
-    """反过来也要成立：实验泳道上新引擎四条钟一条不少。"""
+    """反过来也要成立：实验泳道上新引擎五条钟一条不少。"""
     out = _in_a_fresh_process(
         "from app.runtime.wire import WIRING_REGISTRY;"
         "print(sorted(s.data_type.__name__ for s in WIRING_REGISTRY"
@@ -130,6 +130,7 @@ def test_the_experiment_engine_is_the_one_that_runs_on_the_experiment_lane():
         "WorldRoundTick",
         "LifeMomentTick",
         "PhoneNudgeTick",
+        "LandingTick",
     ):
         assert f"'{name}'" in out, out
 
@@ -152,6 +153,7 @@ def test_the_new_engine_does_not_start_on_a_lane_that_is_not_the_experiment(lane
         "WorldRoundTick",
         "LifeMomentTick",
         "PhoneNudgeTick",
+        "LandingTick",
     ):
         assert f"'{name}'" not in out, (
             f"{name} 在 {lane} 上挂上了 —— 一个跟 living 无关的泳道被拉起了实验引擎。"
