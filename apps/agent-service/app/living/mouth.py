@@ -421,7 +421,7 @@ async def send_message(
         # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。
         raise ValueError(
             f"{channel_id!r} 不是你手机上的会话，发不了 —— 用信封上那串 "
-            f"channel_id，照抄。你能发的严格等于你能收到的那些会话。"
+            f"channel_id，照抄。你能发的严格等于你看得见的那些会话。"
         )
 
     seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"

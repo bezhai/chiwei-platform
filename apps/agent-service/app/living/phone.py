@@ -770,8 +770,8 @@ async def look_up_contact(
         raise ValueError("name 不能是空的：写一个你要找的名字。")
 
     # 会话集合从 reachable_conversations 来，跟信封那条路同一个来源 —— 这只手能搜
-    # 到的严格等于她能收到的，白名单收窄之后也一样（名单外那条会话的裸 channel_id
-    # 从这里漏出去，"不进她视野"这条规则就已经破了）。
+    # 到的严格等于她看得见的那些（名单外那条会话的裸 channel_id 从这里漏出去，
+    # "不进她视野"这条规则就已经破了）。
     rows = await search_conversations_by_name(
         conversations=[
             {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import subprocess
 import sys
 
@@ -168,6 +169,34 @@ def test_living_data_reaches_the_registry_via_app_wiring():
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
             f"registry: {registered}"
         )
+
+
+def test_the_package_doc_lists_every_module_in_it():
+    """``app/living/__init__.py`` 那份模块清单就是这个包里的全部模块。
+
+    这份清单是读这个包的人第一眼看到的地图。漏一个的后果跟漏一张表一样是**静默**
+    的：没有任何东西会因为它不在清单上而报错，于是清单慢慢变成一份只覆盖一半的名
+    单，而它看起来仍然像完整的。实际发生过——``anchor`` / ``reading`` / ``web`` /
+    ``takeback`` / ``landing`` 五个模块建起来之后，22 个里有 5 个从来没进过清单。
+
+    同 ``tests/unit/data/test_queries_split.py`` 里那条按磁盘文件核对 queries 的检查。
+    """
+    from pathlib import Path
+
+    import app.living as living_pkg
+
+    on_disk = {
+        p.stem
+        for p in Path(living_pkg.__file__).parent.glob("*.py")
+        if p.stem != "__init__"
+    }
+    listed = set(re.findall(r"app\.living\.([a-z_]+)", living_pkg.__doc__ or ""))
+    assert on_disk - listed == set(), (
+        f"这几个模块在包里但不在 __init__.py 的清单上：{sorted(on_disk - listed)}"
+    )
+    assert listed - on_disk == set(), (
+        f"清单上这几个模块已经不存在了：{sorted(listed - on_disk)}"
+    )
 
 
 def test_column_shapes_are_pinned_because_they_can_never_change():
