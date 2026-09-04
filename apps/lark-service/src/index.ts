@@ -46,6 +46,7 @@ import { postgresLarkTables } from './lark/projection/postgres-tables';
 import type { LarkStore } from './lark/projection/tables';
 import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
 import { receiveLarkMessage } from './lark/receive-message';
+import { receiveLarkRecall } from './lark/recall-message';
 import { redisRepeatCounter } from './lark/repeat/counter';
 import {
     larkCommands,
@@ -258,6 +259,9 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise
         // 卡片回调复用指令那份依赖：它要的飞书客户端、会话行、取图口径都在里面，
         // 而且必须是**同一个**客户端池（拆两份就是每个 bot 两套 tenant token）。
         onCardAction: (payload) => handleLarkCardAction(commands, payload),
+        // 撤回只要两条语句（按 om_id 查映射、标 recalled_at），所以只递库，不递
+        // 飞书客户端 —— 这条链一次都不用回头问飞书。
+        onRecall: (recall, receivedAt) => receiveLarkRecall({ store }, recall, receivedAt),
     });
 }
 

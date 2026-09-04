@@ -14,6 +14,7 @@ import { LANE_INBOUND_PATH } from './ingress/lane-inbound';
 import type { InboundLaneEnvelope } from './ingress/lane-envelope';
 import type { LarkWebSocketClient } from './ingress/websocket';
 import type { LarkMessageReading } from './message/read-message-event';
+import type { LarkRecallEvent } from './message/wire';
 
 const INNER_SECRET = 'inner-secret-for-tests';
 const originalSecret = process.env.INNER_HTTP_SECRET;
@@ -96,9 +97,15 @@ interface Pressed {
     botName: string;
 }
 
+interface Recalled {
+    recall: LarkRecallEvent;
+    receivedAt: Date;
+}
+
 function build(bots: BotConfig[] = [bot()]) {
     const seen: Seen[] = [];
     const pressed: Pressed[] = [];
+    const recalled: Recalled[] = [];
     const recorded: unknown[] = [];
     const ports: LarkInboundPorts = {
         roster: { getAllBotConfigs: () => bots },
@@ -116,8 +123,9 @@ function build(bots: BotConfig[] = [bot()]) {
         onCardAction: async (payload) => {
             pressed.push({ payload, botName: context.getBotName() });
         },
+        onRecall: async (recall, receivedAt) => void recalled.push({ recall, receivedAt }),
     };
-    return { inbound: createLarkInbound(ports), seen, pressed, recorded };
+    return { inbound: createLarkInbound(ports), seen, pressed, recalled, recorded };
 }
 
 // 同一条飞书消息，三种信封各包一遍。
@@ -170,6 +178,45 @@ async function throughCardWebhook() {
     built.inbound.registerWebhooks(app);
     const request = asLarkSends(CARD_ACTION);
     const res = await app.request('/webhook/chiwei/card', {
+        method: 'POST',
+        headers: request.headers,
+        body: request.body,
+    });
+    await Bun.sleep(2);
+    return { ...built, status: res.status };
+}
+
+/**
+ * 一次真人撤回。跟消息事件走同一条 webhook，但报文里只有几个可选字段 —— 没有发送者、
+ * 没有正文，也**没有撤回者的身份**（只有一个角色枚举）。
+ */
+const LARK_RECALL = {
+    message_id: 'om_1',
+    chat_id: 'oc_1',
+    recall_time: '1757573454',
+    recall_type: 'message_owner',
+};
+
+function recallBody() {
+    return {
+        schema: '2.0',
+        header: {
+            event_id: 'e2',
+            token: 'vtok',
+            create_time: '1700000000000',
+            event_type: 'im.message.recalled_v1',
+            app_id: 'cli_chiwei',
+        },
+        event: LARK_RECALL,
+    };
+}
+
+async function throughRecallWebhook() {
+    const built = build();
+    const app = new Hono();
+    built.inbound.registerWebhooks(app);
+    const request = asLarkSends(recallBody());
+    const res = await app.request('/webhook/chiwei/event', {
         method: 'POST',
         headers: request.headers,
         body: request.body,
@@ -367,6 +414,64 @@ describe('createLarkInbound', () => {
 
     it('records the raw card payload for audit, same as any other event', async () => {
         expect((await throughCardWebhook()).recorded).toHaveLength(1);
+    });
+
+    // 撤回是**第三条入站路径**：跟卡片回调一样不过解析层（报文里没有发送者、没有正文，
+    // 也不会进 common_message 建新行），它要做的只是把已经在库里的那一行标成撤回。
+    describe('撤回事件', () => {
+        it('把撤回报文交给认领它的人', async () => {
+            const { recalled, status } = await throughRecallWebhook();
+
+            expect(status).toBe(200);
+            expect(recalled).toHaveLength(1);
+            expect(recalled[0]!.recall).toMatchObject({
+                message_id: 'om_1',
+                chat_id: 'oc_1',
+                recall_time: '1757573454',
+                recall_type: 'message_owner',
+            });
+        });
+
+        // 库里落的撤回时刻**永远**是这个值——报文里那个 recall_time 的单位没有实证
+        // 样本可裁决，所以一个字都不解析（理由写在 recall-message.ts 文件头）。入口是
+        // 先应答、再异步处理，两者之间隔多久没有保证，所以它必须在应答那一刻就取好。
+        it('把应答那一刻的时间一起交出去，那就是落库的撤回时刻', async () => {
+            const before = Date.now();
+            const { recalled } = await throughRecallWebhook();
+            const after = Date.now();
+
+            expect(recalled[0]!.receivedAt).toBeInstanceOf(Date);
+            expect(recalled[0]!.receivedAt.getTime()).toBeGreaterThanOrEqual(before);
+            expect(recalled[0]!.receivedAt.getTime()).toBeLessThanOrEqual(after);
+        });
+
+        // **spec 决策 5：撤回事件不走泳道交接。** 交接的判定与投递整个长在消息投影里
+        // （projectLarkInbound 算出目标泳道、拼信封、打那一次内部 HTTP），而撤回事件
+        // 连解析层都不过，更进不了投影。所以"发送侧不会交接撤回事件"在这一层的判据
+        // 就是：它一次都没有走上消息那条路。
+        it('不走消息那条路，因此发送侧永远不会把它交接给泳道', async () => {
+            const { seen, recalled } = await throughRecallWebhook();
+
+            expect(seen).toEqual([]);
+            expect(recalled).toHaveLength(1);
+        });
+
+        // 认领面直接取处理表的键，所以认领了撤回之后，交接端点也跟着接受这种信封 ——
+        // 一个行为变化，登记在这里。实际上不会有人投：发送侧不产生撤回信封（上一条）。
+        // 真被投进来（比如以后有人开了那条路）也是对的：处理器只按 om_id 定位、只写
+        // recalled_at，跑在哪条泳道上都是同一件事。
+        it('认领之后，交接端点也不再拒收撤回信封', async () => {
+            const { recalled, status } = await throughLaneHttp(
+                laneEnvelope({ event_type: 'im.message.recalled_v1', params: LARK_RECALL }),
+            );
+
+            expect(status).toBe(200);
+            expect(recalled).toHaveLength(1);
+        });
+
+        it('审计照记，跟别的飞书事件一样', async () => {
+            expect((await throughRecallWebhook()).recorded).toHaveLength(1);
+        });
     });
 
     // 群成员变化这些还没人认领。认领面直接取处理表的键，所以装配层不会跟处理表脱节；

@@ -38,6 +38,12 @@
 印象是她的记忆，被条数上限截掉就是替她遗忘。而没翻开过的那摞被挤下去也不是永久
 丢失：报名字那条路一个上限都没有，很久以前收到的那个照样指得到。
 
+**撤回改变的是"现在还能不能拿到"，不是"有没有发生过"。** 那条文件消息被撤回之后，
+渠道上就再也取不到它的字节了 —— 所以她拿不起来它，报名字或者抄那串句柄都拿不起来。
+但她**读过的那部分照常在她眼前**：读到第几页、留下什么印象一条都不少，只是不再配可
+执行的句柄，并写明这份东西拿不到了。抹掉它就是替她遗忘一件真发生过的事。她**从没翻
+开过**的那些则相反，撤掉了就一条都不列 —— 她从没打开过它，撤掉了就等于没来过。
+
 取字节、解码、分页、跑一程阅读这几样在 :mod:`app.domain.reading_source` 和
 :mod:`app.agent.reading` 里，跟哪个引擎在跑没有关系，直接用。
 """
@@ -161,10 +167,15 @@ _READ_TABLE = _table_name(FileRead)
 
 @dataclass(frozen=True)
 class SentFile:
-    """有人发到她手机上的一个文件：叫什么、谁发的、什么时候、发在哪条会话。
+    """有人发到她手机上的一个文件：叫什么、谁发的、什么时候、发在哪条会话、还拿不拿得到。
 
     来路（``who`` / ``at`` / ``where``）不是装饰：同名多份时它们是她**唯一**能
     用来分辨"哪一份是哪一份"的东西。少了它们，回问就只能给两串一模一样的名字。
+
+    ``still_gettable`` 是"这一刻还取不取得到它的字节"：那条消息被撤回之后渠道上就
+    没有它了，谁都再也下载不到。**它不决定这个文件出不出现在她眼前** —— 她读过的
+    那些即使撤掉了也照常摆着（决策 6：撤回改变的是"现在还能不能拿到"，不是"有没有
+    发生过"），只是不再配可执行的句柄。决定"出不出现"的是调用方，这里只报事实。
     """
 
     attachment_id: str
@@ -173,6 +184,7 @@ class SentFile:
     who: str
     at: datetime
     where: str
+    still_gettable: bool
 
 
 # 会话集合跟 :data:`app.living.phone._REACHABLE_SQL` 同一条口径（她自己的 bot 还在
@@ -193,6 +205,21 @@ class SentFile:
 #
 # ``DISTINCT`` 是必需的：一个 persona 名下可能挂着好几个 bot（正式那个和 dev 那个），
 # 同一条会话会被 presence 匹配出好几行，不去重同一个文件就会列出来好几遍。
+#
+# ``recalled_at`` 在这里**不做过滤，只当一列事实读出来**（``still_gettable``）。撤回
+# 不删公共层那一行（那是消息记录，删行会打断历史），只在这一列上留个时刻，而这一列说的
+# 是"渠道上还有没有它"——也就是还取不取得到字节。
+#
+# 一度是 ``WHERE cm.recalled_at IS NULL``，那样查询就同时替调用方做了两个决定：拿不到
+# 的不给读（对），以及她读过它这件事也一并消失（错，违反决策 6）。她读过的那份印象是
+# 真发生过的事，撤回改变不了它。所以判定留给调用方：
+# :func:`read_a_bit` 只认拿得到的，:func:`look_for_something_to_read` 把她读过的照常
+# 摆出来、只是不给可执行的句柄。
+#
+# **不从 :mod:`app.living.phone` import 那个同名判据。** 那边「打开会话」那处的判据已经
+# 分化成"没撤掉的、或者是她自己说的"（她自己撤掉的那条要留在会话里当痕迹），跟这里要
+# 的不是同一件事。共享一个常量会让下一个改判据的人以为改一处两边都对。文件这边只有
+# 一种情况：撤掉了就拿不到了，谁撤的都一样。
 _SENT_FILES_SQL = """
 WITH hers AS (
   SELECT DISTINCT
@@ -216,7 +243,8 @@ SELECT DISTINCT
        COALESCE(cm.sender_display_name, '某人') AS who,
        cm.event_time                            AS at_ms,
        h.scope                                  AS scope,
-       h.title                                  AS where_title
+       h.title                                  AS where_title,
+       (cm.recalled_at IS NULL)                 AS still_gettable
   FROM common_message cm
   JOIN hers h ON h.channel_id = cm.common_conversation_id
  CROSS JOIN LATERAL jsonb_array_elements(
@@ -241,7 +269,11 @@ def _where_of(scope: str, title: str, who: str) -> str:
 
 
 async def files_sent_to(*, persona_id: str) -> list[SentFile]:
-    """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。"""
+    """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。
+
+    **撤回掉的也在里面**，带着 ``still_gettable=False``。谁看得到它、谁读得起它由
+    调用方定（理由写在 :data:`_SENT_FILES_SQL` 上）。
+    """
     async with get_session() as s:
         rows = (
             await s.execute(text(_SENT_FILES_SQL), {"persona_id": persona_id})
@@ -256,6 +288,7 @@ async def files_sent_to(*, persona_id: str) -> list[SentFile]:
             who=r["who"],
             at=datetime.fromtimestamp(int(r["at_ms"]) / 1000, tz=CST),
             where=_where_of(r["scope"], r["where_title"], r["who"]),
+            still_gettable=bool(r["still_gettable"]),
         )
         for r in rows
     ]
@@ -307,17 +340,31 @@ def _name_of(f: SentFile) -> str:
     return f"《{f.title}》" if f.title else "（一个没有名字的文件）"
 
 
+# 撤回掉的那份，摆在她眼前时说的那句。**说得出口的只有这件事**：这东西现在拿不到了。
+# 不说"谁撤的"——库里只有 ``recalled_at`` 一个时刻，没有操作者，跟
+# :mod:`app.living.phone` 那边渲染撤回痕迹是同一条理由。
+#
+# 印出去和拿不起来时回的那句共用这一处：两边各写一遍的话，她会以为是两回事。
+_NO_LONGER_GETTABLE = "已经撤回了，你现在拿不到它了"
+
+
 def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
     """一个文件在她眼里的样子：叫什么、谁什么时候发在哪儿、她读到哪了、记得什么。
 
     时刻走 :func:`app.infra.cst_time.to_cst_dated` 而不是裸时分：几个月前收到的
     文件和今天刚收到的，裸 ``20:10`` 长得一模一样。
+
+    **拿不到的那些不配句柄。** 撤回掉的文件只会出现在她读过的那批里（决策 6：印象
+    是真发生过的事，撤回改变不了它），而句柄是"拿这串去读一程"的意思 —— 印在一份
+    取不到字节的东西上就是给她一个指了会失败的东西。所以那儿改成如实说它拿不到了。
     """
     when = to_cst_dated(f.at.isoformat(), now=now, seconds=False)
-    head = (
-        f"- {_name_of(f)} {f.who} {when} 发在{f.where} "
+    tail = (
         f"file={f.attachment_id}"
+        if f.still_gettable
+        else f"这份东西{_NO_LONGER_GETTABLE}"
     )
+    head = f"- {_name_of(f)} {f.who} {when} 发在{f.where} {tail}"
     if mark is None:
         return head + "\n  （还没翻开过）"
     read = "你读完了" if mark.finished else f"你已经读了 {mark.pages_read} 页"
@@ -332,10 +379,13 @@ async def look_for_something_to_read() -> str:
     别人发到你手机上的文件都在这儿，每个带一串 file=…，拿它调 read_a_bit 就能
     读一程。你读过的那些会连着你读到哪了、它在你心里留下了什么一起给你。
 
+    你读过的东西里有些已经被撤回了 —— 那几个照样在这儿，因为你确实读过、它确实在
+    你心里，只是现在拿不到它了、也就没有 file=… 可用，读不下去了。
+
     没翻开过的一次只列最近那些；你读过的一个都不会少。
 
     Returns:
-        有人发给你的那些文件，各带一串 file=…；一个都没有时如实说明。
+        有人发给你的那些文件，能拿到的各带一串 file=…；一个都没有时如实说明。
     """
     lane, now, persona_id, _moment_id = moment_scope()
     files = await files_sent_to(persona_id=persona_id)
@@ -345,8 +395,15 @@ async def look_for_something_to_read() -> str:
     marks = await everything_read_so_far(lane=lane, persona_id=persona_id)
     # 读过的一条都不省，上限只管还没翻开过的那摞（见模块 docstring）。被挤下去的
     # 那些没有消失：报名字那条路没有上限。
+    #
+    # **撤回掉的分两种命运，分界是她有没有翻开过它**：读过的照常摆在这儿（决策 6，
+    # 只是不配句柄，见 :func:`_one_file`）—— 抹掉就是替她遗忘一件真发生过的事；
+    # 没翻开过的一条都不列 —— 她从没打开过它，撤掉了就等于没来过，摆出来只是给她
+    # 一个既读不了、也想不起来的东西。
     opened = [f for f in files if f.attachment_id in marks]
-    unopened = [f for f in files if f.attachment_id not in marks]
+    unopened = [
+        f for f in files if f.attachment_id not in marks and f.still_gettable
+    ]
     skipped = max(0, len(unopened) - FILE_LIST_LIMIT)
     shown = opened + unopened[:FILE_LIST_LIMIT]
 
@@ -381,6 +438,9 @@ async def read_a_bit(
     读读停停都随你：这一程读到哪儿是你自己停下的地方，下次拿起同一个文件就从那儿
     接着往下。
 
+    已经被撤回的那些拿不起来，报名字或者抄那串 file=… 都拿不起来 —— 它在渠道上已经
+    没有了，谁都取不到。你读过的那部分还在你心里，读不下去而已。
+
     你读完一程要过一会儿才在你心里 —— 想知道你读到哪了、它给你留下了什么，
     调 look_for_something_to_read。
 
@@ -388,7 +448,8 @@ async def read_a_bit(
         which: 你要读的那个文件的名字，或者原样抄回来的那串 file=…。
 
     Returns:
-        你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份时一句如实说明。
+        你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份 / 已经拿不到时一句
+        如实说明。
     """
     lane, now, persona_id, moment_id = moment_scope()
     wanted = which.strip()
@@ -404,13 +465,25 @@ async def read_a_bit(
     # 指了、却被告知"没有名字对得上"（2026-09-02 在 coe-living 上实测到）。
     handle = wanted.removeprefix(_HANDLE_PREFIX)
     needle = wanted.casefold()
-    hit = [
-        f
-        for f in files
-        if f.attachment_id == handle or (f.title and needle in f.title.casefold())
-    ]
+
+    def she_means_it(f: SentFile) -> bool:
+        return f.attachment_id == handle or (
+            bool(f.title) and needle in f.title.casefold()
+        )
+
+    # **撤回掉的不是候选**：取不到字节，读一程只会整程作废。但她指的那份**确实存在
+    # 过**（她读过的那些就摆在清单上），所以单独留一手回话 —— 回一句"没有对得上的"
+    # 是句假话，而她会拿着一份自己明明记得读过的东西反复重报。
+    hit = [f for f in files if f.still_gettable and she_means_it(f)]
+    gone = [f for f in files if not f.still_gettable and she_means_it(f)]
 
     if not hit:
+        if gone:
+            raise ValueError(
+                "、".join(_name_of(f) for f in gone)
+                + f"{_NO_LONGER_GETTABLE}。你读过的那部分还在你心里，"
+                f"用 look_for_something_to_read 看得到。"
+            )
         raise ValueError(
             f"没有谁给你发过名字对得上「{wanted}」的东西。换个说法，"
             f"或者用 look_for_something_to_read 看看你手上都有什么。"

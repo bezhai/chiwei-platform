@@ -288,6 +288,24 @@ export interface LarkTables {
     claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void>;
 
     /**
+     * 把这条公共层消息标成撤回，**首写保留**：已经写着撤回时刻的那些行一个字都不改，
+     * 返回 false。真的写进去了才返回 true。
+     *
+     * 首写保留不是可有可无的：飞书不保证撤回事件只推一次，而这条链上没有任何幂等键
+     * （撤回不走投影，拿不到锁，也没有队列去重）。无条件覆盖的话，同一条消息第二次
+     * 事件到达就会把撤回时刻往后挪 —— 事后"什么时候撤的"没有第二个地方能查。
+     *
+     * 与出站那条撤回链上的 markRecalled 语义不同（那条无条件写）：那边是"我们刚把它
+     * 从飞书上删掉"，写的是刚发生的事实；这边是"别人撤的，我们只是听说了"，先听说的
+     * 那次更接近真相。
+     *
+     * **一行都没改到不抛错。** 这里的 0 行有两种可能 —— 已经撤过了（正常）、或者这条
+     * 消息根本不在 common_message 里（调用方在此之前已经按 om_id 查过映射，所以基本
+     * 排除）。两种都不该让入站链断掉：飞书早已应答，抛出去也没人接得住。
+     */
+    markCommonMessageRecalled(commonMessageId: string, recalledAt: Date): Promise<boolean>;
+
+    /**
      * 建一条新的绑定，建出来就是生效的。
      *
      * **不是 upsert**：`(user_union_id, chat_id)` 上没有唯一约束，写 ON CONFLICT 会被

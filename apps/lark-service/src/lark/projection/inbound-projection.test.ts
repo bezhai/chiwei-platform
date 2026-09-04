@@ -267,6 +267,15 @@ class MemoryLarkTables implements LarkStore {
         row.common_user_id = claim.common_user_id;
     }
 
+    // 投影也不撤回 —— 那是入站撤回事件那条路的事（见 lark/recall-message.ts）。这里
+    // 实现它同样只是为了让这份替身完整地满足端口，语义照真身：首写保留。
+    async markCommonMessageRecalled(commonMessageId: string, recalledAt: Date): Promise<boolean> {
+        const row = this.commonMessages.get(commonMessageId);
+        if (!row || row.recalled_at) return false;
+        row.recalled_at = recalledAt;
+        return true;
+    }
+
     async markBotPresent(
         commonConversationId: string,
         botName: string,
@@ -323,7 +332,13 @@ function reading(event: LarkMessageEvent) {
 }
 
 function larkEvent(payload: LarkMessageEvent): LarkEvent {
-    return { type: 'im.message.receive_v1', payload, botName: BOT_NAME, traceId: 'trace-1' };
+    return {
+        type: 'im.message.receive_v1',
+        payload,
+        botName: BOT_NAME,
+        receivedAt: new Date('2026-09-04T06:50:54.000Z'),
+        traceId: 'trace-1',
+    };
 }
 
 function deps(

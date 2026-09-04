@@ -27,10 +27,14 @@ export interface LarkEventSink {
 
 export function createLarkEventSink(ports: LarkEventSinkPorts): LarkEventSink {
     const accept = (type: string, payload: unknown): LarkAck => {
+        // 应答之前就把时刻取好。处理跑在下面那个没人跟踪的 Promise 里，等它轮到自己
+        // 再取，拿到的是"我们什么时候腾出手"，不是"飞书什么时候把这件事送过来"——
+        // 撤回事件的撤回时刻在报文缺失时正是拿它兜底（见 lark/recall-message.ts）。
+        const receivedAt = new Date();
         ports.record(payload).catch((error) => {
             console.error('[lark-ingress] failed to record the raw event:', error);
         });
-        ports.deliver({ type, payload, botName: ports.botName }).catch((error) => {
+        ports.deliver({ type, payload, botName: ports.botName, receivedAt }).catch((error) => {
             // 应答早就发出去了，这里再抛只会变成 unhandled rejection 打死进程。
             // 能做的只有留下一条查得到的日志。
             console.error(

@@ -115,6 +115,7 @@ function larkEvent(botName = BOT_NAME): LarkEvent {
         type: 'im.message.receive_v1',
         payload: {},
         botName,
+        receivedAt: new Date('2026-09-04T06:50:54.000Z'),
         traceId: 'trace-1',
     };
 }

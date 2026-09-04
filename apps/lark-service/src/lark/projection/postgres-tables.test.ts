@@ -555,6 +555,35 @@ describe('认领：自然键首写者成为 canonical', () => {
         ).rejects.toThrow(/cm_missing/);
     });
 
+    // 真人在飞书撤回一条消息之后要写的那一列。这条语句写错的后果不会有任何报错：
+    // 她照样读得到一条对面已经撤掉的消息。
+    describe('标记撤回', () => {
+        it('只碰 recalled_at 一列，而且带着首写保留的条件', async () => {
+            h.reply([{ affected: 1 }]);
+            const at = new Date('2026-09-04T06:50:54.000Z');
+
+            expect(await h.store.markCommonMessageRecalled('cm_1', at)).toBe(true);
+
+            const update = h.sqlOf('UPDATE "common_message"');
+            expect(update.sql).toContain('"recalled_at" =');
+            // 这张表三个服务共写，多写一列就是覆盖别人写下的结论。
+            expect(update.sql).not.toContain('"bot_name" =');
+            expect(update.sql).not.toContain('"content" =');
+            // 首写保留就在这个条件上。少了它，重复到达的撤回事件会把撤回时刻往后挪。
+            expect(update.sql).toContain('"recalled_at" IS NULL');
+            expect(update.params).toEqual([at, 'cm_1']);
+        });
+
+        // 已经撤过了（或者那一行压根不在）都是 0 行。两种都不该让入站链断掉 ——
+        // 飞书早已应答，抛出去也没人接得住。
+        it('一行都没改到时返回 false，不炸', async () => {
+            h.reply([]);
+            expect(
+                await h.store.markCommonMessageRecalled('cm_1', new Date()),
+            ).toBe(false);
+        });
+    });
+
     // 重放的地基：同一条消息第二次进来时这条语句必须是静默的 no-op。
     //
     // 顺带把 mentioned_common_user_ids 钉进这条语句：它要是没进 INSERT，投影层算好

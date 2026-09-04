@@ -175,6 +175,8 @@ describe('处理', () => {
                 type: 'im.message.receive_v1',
                 payload: { message: { message_id: 'om_1' } },
                 botName: 'chiwei',
+                // 本进程收下这次交接的时刻，信封里没有这一项（见 lane-envelope.ts）。
+                receivedAt: expect.any(Date),
                 traceId: 'trace-1',
                 lane: 'ppe-x',
                 handedOff: true,

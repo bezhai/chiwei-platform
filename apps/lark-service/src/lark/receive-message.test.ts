@@ -37,6 +37,7 @@ const event: LarkEvent = {
     type: 'im.message.receive_v1',
     payload: {},
     botName: 'chiwei',
+    receivedAt: new Date('2026-09-04T06:50:54.000Z'),
     traceId: 'trace-1',
 };
 

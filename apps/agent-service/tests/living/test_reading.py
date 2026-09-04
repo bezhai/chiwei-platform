@@ -285,6 +285,100 @@ async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
     ], f"飞书真实形状的文件项没被查出来，查到的是 {[f.title for f in found]}"
 
 
+async def _taken_back(message_id: uuid.UUID, *, at: dt.datetime) -> None:
+    """渠道那边把这条消息撤掉了。
+
+    撤回**不删**公共层那一行（那是消息记录，删行会打断历史），只在 ``recalled_at``
+    上留个时刻。所以"这份东西还拿不拿得到"由这一列说了算。
+    """
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "UPDATE common_message SET recalled_at = :at"
+                " WHERE common_message_id = CAST(:m AS uuid)"
+            ),
+            {"at": at, "m": str(message_id)},
+        )
+
+
+@pytest.mark.integration
+async def test_a_file_she_never_opened_and_was_taken_back_is_gone_for_her(
+    reading_db, in_a_moment, picked_up
+):
+    """她从没翻开过、又被撤回的那份：清单上没有它，报名字也拿不起来。
+
+    她从没打开过它，撤掉了就等于没来过 —— 没有任何印象要保住，摆在清单上只是给她
+    一个指了会失败的东西。
+
+    判据写在"这一行在渠道上还在不在"上，不写在谁撤的它上面：她自己撤的和别人撤的是
+    同一件事，取字节那一侧没有理由分开对待。
+    """
+    message_id = uuid.uuid5(uuid.NAMESPACE_OID, "msg-dm-taken-back")
+    await _someone_sent(
+        message_id=message_id,
+        conversation=_DM,
+        who="主人",
+        at=_at(22, 10),
+        file_key="file-key-taken-back",
+        file_name="撤回了的那本.epub",
+    )
+    await _taken_back(message_id, at=_at(22, 20))
+
+    async with in_a_moment("akao"):
+        listed = await look_for_something_to_read.invoke({})
+        outcome = await read_a_bit.invoke({"which": "撤回了的那本"})
+
+    assert "撤回了的那本.epub" not in listed, (
+        f"她从没翻开过、又被撤掉的那份还列在她眼前：{listed}"
+    )
+    assert isinstance(outcome, dict), "她拿起了一个已经撤回的文件"
+    assert "拿不到" in outcome["message"], (
+        f"该如实说这份东西已经不在了，而不是说没有对得上的。拿到：{outcome['message']}"
+    )
+    assert picked_up == []
+
+
+@pytest.mark.integration
+async def test_a_file_taken_back_keeps_what_she_read_but_offers_no_handle(
+    reading_db, in_a_moment, one_round, picked_up
+):
+    """有人撤回一份她**读过**的文件：印象和读到第几页照常在她眼前，只是拿不到了。
+
+    撤回改变的是"现在还能不能拿到"，不是"有没有发生过"。她确实读了那 12 页、确实
+    留下了那句印象 —— 连着从她眼前抹掉就是替她遗忘一件真发生过的事。真人也一样：
+    对方撤回一份文件，你打不开它了，但你读过它这件事和读书笔记都还在。
+
+    **但不给可执行的 ``file=`` 句柄**，并写明这份东西已经拿不到了：留着句柄等于同时
+    说"这个拿不到了"和"拿这串去读它"，她照着指一次只会被顶回来。
+    """
+    dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
+    one_round.gives(impression="太宰那个调子，我读着有点上头。", pages_read=12)
+    await read_a_round(
+        _trigger(attachment_id=dm_one, round_id="r-1", title="斜阳.txt")
+    )
+    await _taken_back(_M_DM_SHAYANG, at=_at(22, 30))
+
+    async with in_a_moment("akao"):
+        listed = await look_for_something_to_read.invoke({})
+        outcome = await read_a_bit.invoke({"which": dm_one})
+
+    assert "太宰那个调子，我读着有点上头。" in listed, (
+        f"撤回把她读过的那份印象一起从她眼前抹掉了。拿到：\n{listed}"
+    )
+    assert "你已经读了 12 页" in listed, f"她读到哪了没告诉她。拿到：\n{listed}"
+    assert "拿不到" in listed, (
+        f"没写明这份东西已经拿不到了 —— 她会以为还能接着读。拿到：\n{listed}"
+    )
+    assert dm_one not in listed, (
+        f"撤回掉的那份还挂着可执行的句柄，她照它指一次只会被顶回来。拿到：\n{listed}"
+    )
+    assert isinstance(outcome, dict), "她拿起了一个已经被撤回的文件"
+    assert "拿不到" in outcome["message"], (
+        f"该如实说这份东西已经不在了。拿到：{outcome['message']}"
+    )
+    assert picked_up == []
+
+
 @pytest.mark.integration
 async def test_she_can_only_pick_up_files_from_conversations_that_are_hers(
     reading_db, in_a_moment, picked_up

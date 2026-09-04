@@ -311,6 +311,24 @@ function tablesOn(manager: EntityManager): LarkTables {
             }
         },
 
+        async markCommonMessageRecalled(commonMessageId, recalledAt): Promise<boolean> {
+            // 只碰 recalled_at 这一列：这张表三个服务共写，多写一列就是覆盖别人写下的
+            // 结论。
+            //
+            // `recalled_at IS NULL` 就是首写保留 —— 语句本身完成它，调用方不必先读一次
+            // 再判断（那样两个并发的撤回事件会各自读到空、后写的把先写的盖掉）。出站那条
+            // 撤回链上的 markRecalled 没有这个条件，因为那边写的是"我们刚刚删掉了它"，
+            // 是刚发生的事实；这边是"听说别人撤了它"，先听说的那次更接近真相。
+            const result = await manager
+                .createQueryBuilder()
+                .update(CommonMessage)
+                .set({ recalled_at: recalledAt })
+                .where('common_message_id = :commonMessageId', { commonMessageId })
+                .andWhere('recalled_at IS NULL')
+                .execute();
+            return Boolean(result.affected);
+        },
+
         async insertLarkGroupBinding(chatId, unionId): Promise<void> {
             // 普通 insert，**不加 onConflict**：(user_union_id, chat_id) 上没有唯一
             // 约束，PG 会直接拒绝一个指不到索引的冲突子句。判重靠调用方先读一次。
