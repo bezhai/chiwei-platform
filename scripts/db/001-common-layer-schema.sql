@@ -43,13 +43,30 @@ CREATE TABLE IF NOT EXISTS common_message (
   content_text text,
   common_root_message_id uuid,
   common_reply_message_id uuid,
+  -- 这条消息点了谁的名，按公共层 id。NULL 和 '{}' 是两件事：NULL = 没人算过，
+  -- '{}' = 算过、确实谁都没点。所以不能 NOT NULL、不能给默认值。
+  mentioned_common_user_ids uuid[],
   scope varchar(16) NOT NULL,
   message_type varchar(30),
   bot_name varchar(50),
   response_id varchar(100),
+  -- 这一行是赤尾哪一次主动开口的产物（出站信封 message_id 里 `proactive:` 前缀
+  -- 之后那个 uuid）。NULL = 没记过，跟"确实不是主动发的"是两件事。
+  agent_outbound_id uuid,
+  -- 这一行在渠道上被撤掉的时刻，撤成功才填。NULL = 没撤过或者还没撤掉。
+  recalled_at timestamptz,
   event_time bigint NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- 上面是 CREATE TABLE IF NOT EXISTS，对已经存在的表整段是 no-op。这三列是建表
+-- 之后加的，所以老库要靠下面这段补齐；新库执行到这里三列已经在了，也是 no-op。
+-- 两边的可空性和"无默认值"必须跟 CREATE TABLE 里逐字一致 —— 这三列的读法都是
+-- "NULL 表示没算过 / 没记过 / 没撤过"，给了默认值就再也分不开。
+ALTER TABLE common_message
+  ADD COLUMN IF NOT EXISTS mentioned_common_user_ids uuid[],
+  ADD COLUMN IF NOT EXISTS agent_outbound_id uuid,
+  ADD COLUMN IF NOT EXISTS recalled_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_common_message_conversation_time
   ON common_message(common_conversation_id, event_time);
@@ -59,6 +76,12 @@ CREATE INDEX IF NOT EXISTS idx_common_message_response_id
   ON common_message(response_id);
 CREATE INDEX IF NOT EXISTS idx_common_message_root_time
   ON common_message(common_root_message_id, event_time);
+-- 前缀是 ix_ 不是 idx_：物理表上已经存在的那个由 agent-service 的 SQLAlchemy
+-- `index=True` 建出来，默认命名是 ix_<表>_<列>。这里跟着它写，是为了让本脚本、
+-- 两侧 ORM 实体和已有的物理索引指的是同一个对象；写成 idx_ 就会在同一列上出现
+-- 第二个索引。
+CREATE INDEX IF NOT EXISTS ix_common_message_agent_outbound_id
+  ON common_message(agent_outbound_id);
 
 CREATE TABLE IF NOT EXISTS common_agent_response (
   response_id uuid PRIMARY KEY,

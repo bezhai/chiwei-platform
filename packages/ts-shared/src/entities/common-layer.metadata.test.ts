@@ -120,9 +120,18 @@ describe('common layer entity metadata', () => {
             .indices.filter((i) => i.target === CommonMessage)
             .map((i) => ({ name: i.name, columns: i.columns }));
 
+        // 名字必须是 `ix_` 前缀那个：物理表上已经存在的索引由 agent-service 侧的
+        // SQLAlchemy `index=True` 建出来，默认命名就是 `ix_<表>_<列>`。这里如果写
+        // 成别的名字，TypeORM 哪天跑迁移就会在同一列上再建第二个索引 —— 同一列、
+        // 两个索引、两份写放大，而且谁都看不出它们是同一件事。
         expect(indices).toContainEqual({
-            name: 'idx_common_message_agent_outbound_id',
+            name: 'ix_common_message_agent_outbound_id',
             columns: ['agent_outbound_id'],
         });
+
+        // 反过来也钉住：旧名字不能再出现，否则就是两个名字并存。
+        expect(indices.map((i) => i.name)).not.toContain(
+            'idx_common_message_agent_outbound_id',
+        );
     });
 });

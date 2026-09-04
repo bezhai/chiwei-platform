@@ -9,7 +9,7 @@ export interface CommonMessageContent {
 @Index('idx_common_message_conversation_time', ['common_conversation_id', 'event_time'])
 @Index('idx_common_message_user_time', ['common_user_id', 'event_time'])
 @Index('idx_common_message_response_id', ['response_id'])
-@Index('idx_common_message_agent_outbound_id', ['agent_outbound_id'])
+@Index('ix_common_message_agent_outbound_id', ['agent_outbound_id'])
 export class CommonMessage {
     @PrimaryColumn({ type: 'uuid' })
     common_message_id!: string;

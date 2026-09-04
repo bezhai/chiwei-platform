@@ -112,7 +112,7 @@ _UNCONFIRMED_RECALLS = (
 #
 # 参数形态跟 ``app.domain.recipient_directory`` 那处一致：**列侧裸用、参数侧给
 # ``uuid.UUID`` 对象**（PG 从 ``= ANY($n)`` 推出 uuid[]，asyncpg 直接编码 UUID）。
-# 列侧 CAST 成 text 会绕开 ``idx_common_message_agent_outbound_id`` 走全表扫。
+# 列侧 CAST 成 text 会绕开 ``ix_common_message_agent_outbound_id`` 走全表扫。
 _LANDED_IN = (
     "SELECT agent_outbound_id, common_message_id, event_time "
     "FROM common_message WHERE agent_outbound_id = ANY(:oids) "
