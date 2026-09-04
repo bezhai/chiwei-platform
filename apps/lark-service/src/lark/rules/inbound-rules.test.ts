@@ -1,37 +1,21 @@
-// 投影完成之后：这条消息要不要让赤尾开口，要的话把请求发给 agent-service。
+// 投影完成之后：这条消息命中哪条飞书指令。
 //
-// 本文件最重要的一条在「多个 bot，一条消息」那个 describe：同群多个 bot 会各自完整
-// 地处理同一条消息，而 chat.request 只能发一次。**保证它的不是按 om_id 取的那把投影
-// 锁**（那把锁只包住投影，规则段根本不在里面），而是 `make_reply:<commonMessageId>`
-// 这把独立的去重锁。所以那个 describe 里没有任何 om_id 锁 —— 两条流是真的并发跑完
-// 整个规则段的。
+// 「这条消息触发一次聊天请求」这个概念已经不存在了 —— 赤尾不从队列拿消息，她每一缝
+// 直接查 common_message、自己决定要不要开口。所以这一段**只剩指令**：跑规则、记一条
+// 终态、结束。没有去重锁、没有认领、没有 pending 行、没有 publish。
 //
-// 落 pending 行、认领 bot、publish 三者与去重锁的**先后顺序被专门排过**，理由见
-// inbound-rules.ts。顺序错了不会有任何测试之外的症状（照样能回话），但会留下孤儿
-// pending 行、或者在落库失败时让锁空占 60s，所以这里用一条 trace 钉死它。
-//
-// 跑起来会看到几行 `Failed to create common_agent_response: ...`：走真规则的用例用的
-// 是共享包那个真的 makeTextReply，它的 pending 行落库要连库，而测试进程没有库。这正是
-// 该看到的 —— pending 行是观测便利，落不进去也绝不该挡住 publish。
+// 落库不在这一段里（投影内部就做完了，见 receive-message.ts），所以这里删掉的东西一
+// 件都碰不到它。
 
 import { describe, expect, it } from 'bun:test';
 import { context } from '@inner/shared/middleware';
-import {
-    registerChatRequestEnricher,
-    resetChatRequestEnrichers,
-    type ChatRequestPayload,
-    type PendingChatTrigger,
-    type RuleConfig,
-    type RuleHandlerContext,
-    type RuleMessage,
-} from '@inner/shared/rules';
+import { EqualText, type RuleConfig, type RuleMessage } from '@inner/shared/rules';
 
 import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkBotLookup } from '../message/mentions';
 import { readLarkMessageEvent, type LarkMessageReading } from '../message/read-message-event';
 import type { LarkMessageEvent } from '../message/wire';
 import type { LarkRecordedInbound } from '../projection/inbound-projection';
-import { larkChatRequestEnricher } from './chat-request';
 import type { LarkCommandContext } from './command-context';
 import { applyLarkRules, larkChatRules, type LarkRulesDeps } from './inbound-rules';
 
@@ -71,10 +55,10 @@ function reading(overrides: Partial<LarkMessageEvent['message']> = {}): LarkMess
     return parsed;
 }
 
-/** 群里 @ 了赤尾。 */
-function atTheBot(): LarkMessageReading {
+/** 群里 @ 了赤尾，正文是一句普通的话（不是任何指令）。 */
+function atTheBot(text = '在吗'): LarkMessageReading {
     return reading({
-        content: '{"text":"@_user_1 在吗"}',
+        content: JSON.stringify({ text: `@_user_1 ${text}` }),
         mentions: [
             {
                 key: '@_user_1',
@@ -120,87 +104,46 @@ function larkEvent(botName = BOT_NAME): LarkEvent {
     };
 }
 
-interface Wired {
-    deps: LarkRulesDeps;
-    trace: string[];
-    published: Array<{ payload: ChatRequestPayload; lane: string | undefined }>;
-    claimed: Array<{ commonMessageId: string; botName: string; commonUserId: string }>;
-    /**
-     * 进程内共享的去重锁：key → 持有者 token。两条流跑同一条消息时抢的就是它。
-     * 释放**比对 token**，跟真身那段 Lua 一个道理 —— 不能无条件删掉别人的。
-     */
-    locks: Map<string, string>;
-}
-
-function wire(overrides: Partial<LarkRulesDeps> = {}, shared?: Partial<Wired>): Wired {
-    const trace = shared?.trace ?? [];
-    const published = shared?.published ?? [];
-    const claimed = shared?.claimed ?? [];
-    const locks = shared?.locks ?? new Map<string, string>();
-    let minted = 0;
-
+function wire(overrides: Partial<LarkRulesDeps> = {}): LarkRulesDeps {
     return {
-        trace,
-        published,
-        claimed,
-        locks,
-        deps: {
-            chatRules: larkChatRules([]),
-            botRoleOf: () => 'persona',
-            botCommonUserId: () => BOT_COMMON_USER_ID,
-            notBlocked: async () => true,
-            claimChatTrigger: async (key) => {
-                trace.push(`lock:${key}`);
-                if (locks.has(key)) return null;
-                const token = `token_${++minted}`;
-                locks.set(key, token);
-                return token;
-            },
-            releaseChatTrigger: async (key, token) => {
-                trace.push(`release:${key}`);
-                if (locks.get(key) === token) locks.delete(key);
-            },
-            claimMessageForBot: async (claim) => {
-                trace.push(`claim:${claim.botName}`);
-                claimed.push(claim);
-            },
-            publishChatRequest: async (payload, lane) => {
-                trace.push('publish');
-                published.push({ payload, lane });
-            },
-            ...overrides,
-        },
+        chatRules: larkChatRules([]),
+        botRoleOf: () => 'persona',
+        botCommonUserId: () => BOT_COMMON_USER_ID,
+        notBlocked: async () => true,
+        ...overrides,
     };
 }
 
 function run(
-    wired: Wired,
+    deps: LarkRulesDeps,
     r: LarkMessageReading = atTheBot(),
     recorded: LarkRecordedInbound = recordedOf([BOT_COMMON_USER_ID]),
     event: LarkEvent = larkEvent(),
 ) {
     return context.run(
         context.createContext('trace-1', { botName: event.botName, lane: undefined }),
-        () => applyLarkRules(wired.deps, r, recorded, event),
+        () => applyLarkRules(deps, r, recorded, event),
     );
 }
 
-/** 一条注入的规则：命中就登记一个可观测的待发意图，savePending 是探针。 */
-function spyRule(trace: string[], payload: Partial<ChatRequestPayload> = {}): RuleConfig {
+/**
+ * 一条会留下痕迹的假指令。
+ *
+ * **默认不声明 category**，与真身里的「撤回」同形：引擎只在规则声明了 category 时才
+ * 按 botRole 过滤，所以不声明的指令人设 bot 和工具 bot 都认（见 rule.ts / engine.ts）。
+ */
+function probe(
+    ran: string[],
+    comment = '探针',
+    rules: RuleConfig['rules'] = [],
+    category?: RuleConfig['category'],
+): RuleConfig {
     return {
-        rules: [],
-        comment: '探针',
-        handler: async (_message: RuleMessage, ctx?: RuleHandlerContext) => {
-            trace.push('handler');
-            const pending: PendingChatTrigger = {
-                payload: { session_id: 's_1', ...payload } as ChatRequestPayload,
-                lane: 'ppe-x',
-                dedupeKey: `make_reply:${COMMON_MESSAGE_ID}`,
-                savePending: async () => {
-                    trace.push('savePending');
-                },
-            };
-            ctx?.registerPendingChatTrigger(pending);
+        rules,
+        comment,
+        ...(category ? { category } : {}),
+        handler: async (_message: RuleMessage) => {
+            ran.push(comment);
         },
     };
 }
@@ -209,277 +152,170 @@ function spyRule(trace: string[], payload: Partial<ChatRequestPayload> = {}): Ru
 
 describe('装配：规则序列从参数进，不从进程级注册表取', () => {
     it('跑的是调用方给的那份规则', async () => {
-        const wired = wire();
-        wired.deps.chatRules = () => [spyRule(wired.trace)];
-
-        const terminal = await run(wired);
+        const ran: string[] = [];
+        const terminal = await run(wire({ chatRules: () => [probe(ran)] }));
 
         expect(terminal.matchedRule).toBe('探针');
-        expect(wired.trace).toContain('handler');
+        expect(ran).toEqual(['探针']);
     });
 
-    it('规则序列为空时谁也不响应，也不发任何东西', async () => {
-        const wired = wire({ chatRules: () => [] });
-
-        const terminal = await run(wired);
+    it('规则序列为空时谁也不响应', async () => {
+        const terminal = await run(wire({ chatRules: () => [] }));
 
         expect(terminal.kind).toBe('no_match');
-        expect(wired.published).toEqual([]);
     });
 
-    // botRole 原本由 runRules 从 bot 目录装配，现在由本模块接上。工具 bot 遇到
-    // persona 规则要跳过 —— 不然一条 @ 工具 bot 的消息会让赤尾开口。
-    it('bot 的角色参与过滤：工具 bot 不走人设主链路', async () => {
-        const wired = wire({ botRoleOf: () => 'utility' });
-
-        const terminal = await run(wired);
+    // botRole 原本由 runRules 从 bot 目录装配，现在由本模块接上。
+    it('bot 的角色参与过滤：工具 bot 不认 persona 规则', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({
+                botRoleOf: () => 'utility',
+                chatRules: () => [probe(ran, '人设的', [], 'persona')],
+            }),
+        );
 
         expect(terminal.kind).toBe('no_match');
-        expect(wired.published).toEqual([]);
+        expect(ran).toEqual([]);
     });
 
-    it('黑名单挡掉的用户不触发任何请求', async () => {
-        const wired = wire({ notBlocked: async () => false });
-
-        const terminal = await run(wired);
+    it('黑名单挡掉的用户，规则一条都不跑', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({ notBlocked: async () => false, chatRules: () => [probe(ran)] }),
+        );
 
         expect(terminal.kind).toBe('blocked');
-        expect(wired.published).toEqual([]);
-        expect(wired.claimed).toEqual([]);
+        expect(ran).toEqual([]);
     });
 });
 
-describe('聊天主链路', () => {
-    it('群里 @ 了赤尾就发 chat.request', async () => {
-        const wired = wire();
-
-        const terminal = await run(wired);
+describe('飞书指令照常工作', () => {
+    // 这一组是整个改动的落点：拆掉聊天主链路之后，指令这条路必须一个字都没变，
+    // 包括它对 botRole 的既有语义（下面 describe 专门钉那一条）。
+    it('工具 bot 收到 utility 指令照常命中并执行', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({
+                botRoleOf: () => 'utility',
+                chatRules: () => [probe(ran, '余额', [EqualText('余额')], 'utility')],
+            }),
+            atTheBot('余额'),
+        );
 
         expect(terminal.kind).toBe('responded');
-        expect(wired.published).toHaveLength(1);
-        expect(wired.published[0]!.payload).toMatchObject({
-            channel: 'lark',
-            message_id: COMMON_MESSAGE_ID,
-            chat_id: 'cc_1',
-            root_id: 'cm_root',
-            user_id: 'cu_sender',
-            bot_name: BOT_NAME,
-            is_p2p: false,
-            is_canary: false,
-        });
+        expect(terminal.matchedRule).toBe('余额');
+        expect(ran).toEqual(['余额']);
     });
 
-    // 群里没 @ 就不该回话。这条同时钉住"没 @ 也照样什么都不发"——落库已经在投影里
-    // 做完了，规则段对这条消息本来就只有"不响应"一个正确答案。
-    it('群里没 @ 赤尾就什么都不发', async () => {
-        const wired = wire();
+    // 「撤回」是真身十条里唯一没声明 category 的那条，所以人设 bot 也认它。
+    it('没声明 category 的指令，人设 bot 也认', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({ chatRules: () => [probe(ran, '撤回消息', [EqualText('撤回')])] }),
+            atTheBot('撤回'),
+        );
 
-        const terminal = await run(wired, reading(), recordedOf([]));
+        expect(terminal.kind).toBe('responded');
+        expect(terminal.matchedRule).toBe('撤回消息');
+        expect(ran).toEqual(['撤回消息']);
+    });
+
+    // 序列里排在前面的指令先拿到匹配机会，谁都没命中才走到 no_match。
+    it('没命中的指令逐条留痕，不静默跳过', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({
+                chatRules: () => [
+                    probe(ran, '余额', [EqualText('余额')]),
+                    probe(ran, '帮助', [EqualText('帮助')]),
+                ],
+            }),
+            atTheBot('随便说点什么'),
+        );
 
         expect(terminal.kind).toBe('no_match');
-        expect(wired.published).toEqual([]);
-        expect(wired.claimed).toEqual([]);
-        expect(wired.trace).toEqual([]);
-    });
-
-    it('私聊不需要 @ 就直通', async () => {
-        const wired = wire();
-
-        const terminal = await run(wired, reading({ chat_type: 'p2p' }), recordedOf([]));
-
-        expect(terminal.kind).toBe('responded');
-        expect(wired.published[0]!.payload.is_p2p).toBe(true);
-    });
-
-    // handler 抛错 = 没成功响应，绝不带着待发意图往下走。
-    it('handler 抛错时不发请求', async () => {
-        const wired = wire();
-        wired.deps.chatRules = () => [
-            {
-                rules: [],
-                comment: '会炸的规则',
-                handler: async () => {
-                    throw new Error('handler is on fire');
-                },
-            },
-        ];
-
-        const terminal = await run(wired);
-
-        expect(terminal.kind).toBe('handler_error');
-        expect(wired.published).toEqual([]);
-        expect(wired.trace).toEqual([]);
+        expect(ran).toEqual([]);
+        expect(terminal.skipped).toEqual([
+            '余额 (rules not satisfied)',
+            '帮助 (rules not satisfied)',
+        ]);
     });
 });
 
-describe('接线顺序：去重锁 → 认领 bot → 落 pending 行 → publish', () => {
-    it('四步紧邻，顺序不变', async () => {
-        const wired = wire();
-        wired.deps.chatRules = () => [spyRule(wired.trace)];
+// 这条语义是引擎的，拆分前后一个字没变，但拆掉 catch-all 之后它的**后果**变了，
+// 所以在这里钉一次。
+//
+// 引擎撞上「声明了 category='utility'、而当前 bot 是 persona」的规则时跳过并继续
+// （engine.ts 里那个 `botRole === 'persona' && category === 'utility'` 的分支）。
+// 真身十条指令里九条声明了 `category: 'utility'`，只有「撤回」没有。所以：
+//
+//   * 拆分前：赤尾跳过那九条 → 落到序列尾巴的聊天 catch-all → 发 chat.request。
+//   * 现在：  赤尾跳过那九条 → 序列走完 → `no_match`。
+//
+// 也就是说**赤尾从来就不响应那九条指令**，这不是本次改动造成的。变的只是她跳过之后
+// 落在哪儿：以前落在聊天上，现在什么都不落。
+describe('人设 bot 跳过 utility 指令（引擎既有语义，不是本次改动）', () => {
+    it('赤尾对着 utility 指令也走到 no_match，指令 handler 一次都不跑', async () => {
+        const ran: string[] = [];
+        const terminal = await run(
+            wire({
+                botRoleOf: () => 'persona',
+                chatRules: () => [probe(ran, '余额', [EqualText('余额')], 'utility')],
+            }),
+            atTheBot('余额'),
+        );
 
-        await run(wired);
-
-        expect(wired.trace).toEqual([
-            'handler',
-            `lock:make_reply:${COMMON_MESSAGE_ID}`,
-            `claim:${BOT_NAME}`,
-            'savePending',
-            'publish',
-        ]);
-    });
-
-    // 没抢到锁的 bot 到此为止：**不认领、不落 pending 行**。落了就是一条永不完成的
-    // 孤儿行（真正会有回复的是抢到锁的那个 bot 的 session）。
-    it('没抢到锁就地停住，不留任何痕迹', async () => {
-        const wired = wire();
-        wired.deps.chatRules = () => [spyRule(wired.trace)];
-        // 别的 bot 先到了。
-        wired.deps.claimChatTrigger = async (key) => {
-            wired.trace.push(`lock:${key}`);
-            return null;
-        };
-
-        const terminal = await run(wired);
-
-        // 终态仍是"响应了"——规则确实命中了，只是这一份被别人先发了。
-        expect(terminal.kind).toBe('responded');
-        expect(wired.trace).toEqual(['handler', `lock:make_reply:${COMMON_MESSAGE_ID}`]);
-        expect(wired.claimed).toEqual([]);
-        expect(wired.published).toEqual([]);
-    });
-
-    it('认领写的是当前 bot 与这条消息的发送者', async () => {
-        const wired = wire();
-
-        await run(wired);
-
-        expect(wired.claimed).toEqual([
-            {
-                commonMessageId: COMMON_MESSAGE_ID,
-                botName: BOT_NAME,
-                commonUserId: 'cu_sender',
-            },
-        ]);
-    });
-
-    // 去重锁的键是全局 common_message_id 口径（跨渠道唯一），不是飞书 om_id。
-    it('去重锁按公共层消息 id 取，不按飞书 om_id', async () => {
-        const wired = wire();
-
-        await run(wired);
-
-        expect(wired.trace[0]).toBe(`lock:make_reply:${COMMON_MESSAGE_ID}`);
-        expect(wired.trace.join()).not.toContain('om_1');
+        expect(terminal.kind).toBe('no_match');
+        expect(ran).toEqual([]);
+        expect(terminal.skipped).toEqual(['余额 (botRole=persona != category=utility)']);
     });
 });
 
-// 这把锁同时背着两个意思：「有人正在处理」和「已经发出去了」。抢到之后半路失败的那条
-// 流留下的是前者，而读它的人当成后者 —— 于是接手的那一次会走进"别人已经发过了"分支、
-// 正常返回，消息就此消失。入站没有自动重试，接手的人只可能是同群另一个 bot 或事后的
-// 人工重放，所以**失败路径必须把锁还回去**。成功路径不还：那时它表达的确实是"已经发
-// 出去了"。
-describe('半路失败：把锁还回去，让重投能重来', () => {
-    it('publish 失败时还锁，并把错误抛给调用方', async () => {
-        const wired = wire({
-            publishChatRequest: async () => {
-                throw new Error('broker is down');
-            },
-        });
+describe('聊天主链路已经不在这条序列上', () => {
+    // 拆掉之前：`larkChatRules` 在指令后面拼一条只有 NeedRobotMention 的 catch-all，
+    // 一条 @ 赤尾的消息必然命中它，终态是 responded / matched="聊天"，然后发 MQ。
+    //
+    // 现在这条 catch-all 没了。一条 @ 赤尾的普通消息走完序列**没有任何规则接住它**，
+    // 收敛成 no_match —— 这是正确的终态，不是漏了什么：她要不要回这条消息，由她自己
+    // 每一缝查 common_message 时决定，不再由入站这一段替她决定。
+    it('群里 @ 了赤尾的普通消息不再命中任何规则', async () => {
+        const terminal = await run(wire());
 
-        await expect(run(wired)).rejects.toThrow('broker is down');
-        expect(wired.locks.size).toBe(0);
+        expect(terminal.kind).toBe('no_match');
+        expect(terminal.matchedRule).toBeUndefined();
     });
 
-    it('认领消息失败时同样还锁', async () => {
-        const wired = wire({
-            claimMessageForBot: async () => {
-                throw new Error('common_message vanished');
-            },
-        });
+    it('私聊的普通消息同样不再命中任何规则', async () => {
+        const terminal = await run(wire(), reading({ chat_type: 'p2p' }), recordedOf([]));
 
-        await expect(run(wired)).rejects.toThrow('common_message vanished');
-        expect(wired.locks.size).toBe(0);
+        expect(terminal.kind).toBe('no_match');
     });
 
-    // 这条是整件事的落点：失败之后接手的那一次**必须真的能重来**，而不是撞上前一次
-    // 留下的锁。
-    it('失败之后重投能重新抢到锁并走完', async () => {
-        const shared: Partial<Wired> = {
-            trace: [],
-            published: [],
-            claimed: [],
-            locks: new Map<string, string>(),
-        };
-        const failing = wire(
-            {
-                publishChatRequest: async () => {
-                    throw new Error('broker is down');
-                },
-            },
-            shared,
-        );
-        await expect(run(failing)).rejects.toThrow('broker is down');
-
-        // 同一条消息被再处理一次（同一个 common_message_id、同一份锁存储）。
-        const retry = wire({}, shared);
-        const terminal = await run(retry);
-
-        expect(terminal.kind).toBe('responded');
-        expect(retry.published).toHaveLength(1);
+    // 空指令清单拼出来的序列必须是空的。多出任何一条都说明 catch-all 又长回来了。
+    it('larkChatRules 不再往序列尾巴上追加任何东西', () => {
+        expect(larkChatRules([])({} as LarkCommandContext)).toEqual([]);
     });
 
-    // 成功路径不能还锁：还了就等于把去重让了出去，同群另一个 bot 会再发一次。
-    it('成功走完之后锁留着，重投不会再发一次', async () => {
-        const shared: Partial<Wired> = {
-            trace: [],
-            published: [],
-            claimed: [],
-            locks: new Map<string, string>(),
-        };
-        const first = wire({}, shared);
-        await run(first);
-        expect(first.trace).not.toContain(`release:make_reply:${COMMON_MESSAGE_ID}`);
+    it('larkChatRules 的产出就是指令本身，一条不多', () => {
+        const ran: string[] = [];
+        const one = probe(ran, '余额');
+        const sequence = larkChatRules([() => one])({} as LarkCommandContext);
 
-        const retry = wire({}, shared);
-        await run(retry);
-
-        expect(retry.published).toHaveLength(1);
+        expect(sequence).toEqual([one]);
     });
+});
 
-    // 只删自己那把：锁有租期，这中间它可能已经过期、又被另一个 bot 抢走。无条件删就是
-    // 把别人正在用的去重删掉，那个 bot 的消息会被再发一遍。
-    it('还锁时比对持有者，绝不删掉别人的那把', async () => {
-        const locks = new Map<string, string>();
-        const wired = wire(
-            {
-                publishChatRequest: async () => {
-                    throw new Error('broker is down');
-                },
-            },
-            { trace: [], published: [], claimed: [], locks },
-        );
-        // 抢到之后、失败之前，锁过期并易主。
-        wired.deps.claimMessageForBot = async () => {
-            locks.set(`make_reply:${COMMON_MESSAGE_ID}`, 'another-bots-token');
-        };
-
-        await expect(run(wired)).rejects.toThrow('broker is down');
-
-        expect(locks.get(`make_reply:${COMMON_MESSAGE_ID}`)).toBe('another-bots-token');
-    });
-
-    // 还锁本身失败不该把原始错误盖掉 —— 调用方要看到的是"为什么没发出去"。
-    it('还锁失败时抛的仍是原始错误', async () => {
-        const wired = wire({
-            publishChatRequest: async () => {
-                throw new Error('broker is down');
-            },
-            releaseChatTrigger: async () => {
-                throw new Error('redis is also down');
-            },
-        });
-
-        await expect(run(wired)).rejects.toThrow('broker is down');
+describe('规则段的依赖里没有任何出队口', () => {
+    // 结构判据，不是纪律判据：这一段拿不到 broker、拿不到锁、拿不到认领口，所以它
+    // **没法**发 MQ —— 不是"我们记得别发"。多出任何一个键都要重新解释它凭什么在这里。
+    it('依赖只有规则序列与三件规则装配', () => {
+        expect(Object.keys(wire()).sort()).toEqual([
+            'botCommonUserId',
+            'botRoleOf',
+            'chatRules',
+            'notBlocked',
+        ]);
     });
 });
 
@@ -494,11 +330,9 @@ describe('指令上下文：拿到的是这一条消息的事实', () => {
 
     it('飞书事实与公共层 id 一起进指令，不经由 RuleMessage', async () => {
         const seen: LarkCommandContext[] = [];
-        const wired = wire();
-        wired.deps.chatRules = larkChatRules([spyContext(seen)]);
 
         await run(
-            wired,
+            wire({ chatRules: larkChatRules([spyContext(seen)]) }),
             atTheBot(),
             recordedOf([BOT_COMMON_USER_ID], {
                 isAdmin: true,
@@ -519,16 +353,8 @@ describe('指令上下文：拿到的是这一条消息的事实', () => {
     // 开关、对着别人的 om_id 回复 —— 而且不报错。
     it('两条消息并发跑时各拿各的事实，不串味', async () => {
         const seen: LarkCommandContext[] = [];
-        const shared: Partial<Wired> = {
-            trace: [],
-            published: [],
-            claimed: [],
-            locks: new Map<string, string>(),
-        };
-        const admin = wire({}, shared);
-        const stranger = wire({}, shared);
-        admin.deps.chatRules = larkChatRules([spyContext(seen)]);
-        stranger.deps.chatRules = larkChatRules([spyContext(seen)]);
+        const admin = wire({ chatRules: larkChatRules([spyContext(seen)]) });
+        const stranger = wire({ chatRules: larkChatRules([spyContext(seen)]) });
 
         await Promise.all([
             run(admin, atTheBot(), recordedOf([BOT_COMMON_USER_ID], { isAdmin: true })),
@@ -539,96 +365,31 @@ describe('指令上下文：拿到的是这一条消息的事实', () => {
     });
 });
 
-describe('多个 bot，一条消息', () => {
-    // 本批最重要的一条。
-    //
-    // 同群的两个 bot 会各自完整地处理同一条消息。这里**没有任何 om_id 锁** —— 两条
-    // 流是真的并发跑完整个规则段的，因为规则段本来就不在投影锁里面。唯一拦住第二次
-    // publish 的是 `make_reply:<commonMessageId>` 这把独立的去重锁。
-    async function twoBotsAtOnce(overrides: Partial<LarkRulesDeps> = {}) {
-        const shared: Partial<Wired> = {
-            trace: [],
-            published: [],
-            claimed: [],
-            locks: new Map<string, string>(),
-        };
-        const first = wire(overrides, shared);
-        const second = wire(overrides, shared);
-        // 两条流拿到的是同一条消息的同一份投影（同一个 common_message_id）。
+describe('同群多个 bot 各自跑自己的规则段', () => {
+    // 拆掉之前这里有一把 `make_reply:<commonMessageId>` 去重锁，保证的不变量是
+    // 「同群多个 bot，同一条消息只 publish 一次」。不 publish 了之后它什么也不保护：
+    // 指令从来就没有被它管过（锁只在拿到待发意图之后才取），两个 bot 各答各的指令
+    // 拆分前就是这样。所以锁跟着 publish 一起走。
+    it('两个 bot 各自命中自己的指令，互不阻塞', async () => {
+        const ran: string[] = [];
         const recorded = recordedOf([BOT_COMMON_USER_ID, 'cu_bot_second']);
 
-        await Promise.all([
-            run(first, atTheBot(), recorded, larkEvent('chiwei')),
-            run(second, atTheBot(), recorded, larkEvent('chiwei-second')),
-        ]);
-        return first;
-    }
-
-    it('只发一次 chat.request', async () => {
-        const shared = await twoBotsAtOnce();
-        expect(shared.published).toHaveLength(1);
-    });
-
-    it('只有抢到锁的那个 bot 认领这条消息', async () => {
-        const shared = await twoBotsAtOnce();
-        expect(shared.claimed).toHaveLength(1);
-    });
-
-    it('两条流都真的跑到了取锁那一步（不是其中一条压根没进来）', async () => {
-        const shared = await twoBotsAtOnce();
-        const attempts = shared.trace.filter((step) => step.startsWith('lock:'));
-        expect(attempts).toHaveLength(2);
-        expect(new Set(attempts).size).toBe(1);
-    });
-
-    it('落 pending 行的也只有抢到锁的那个', async () => {
-        const shared: Partial<Wired> = {
-            trace: [],
-            published: [],
-            claimed: [],
-            locks: new Map<string, string>(),
-        };
-        const first = wire({}, shared);
-        const second = wire({}, shared);
-        first.deps.chatRules = () => [spyRule(first.trace)];
-        second.deps.chatRules = () => [spyRule(second.trace)];
-        const recorded = recordedOf([BOT_COMMON_USER_ID]);
-
-        await Promise.all([
-            run(first, atTheBot(), recorded, larkEvent('chiwei')),
-            run(second, atTheBot(), recorded, larkEvent('chiwei-second')),
-        ]);
-
-        expect(first.trace.filter((step) => step === 'savePending')).toHaveLength(1);
-    });
-});
-
-describe('persona_ids 端到端', () => {
-    // 决策二：富化走共享包那个全局注册表，装配期写一次。这里连着规则一起跑，验的是
-    // "注册上了、而且 publish 出去的载荷里真的有人设"。
-    it('被 @ 的已注册 bot 的人设跟着 chat.request 一起发出去', async () => {
-        resetChatRequestEnrichers();
-        registerChatRequestEnricher(
-            'lark',
-            larkChatRequestEnricher((commonUserId) =>
-                commonUserId === BOT_COMMON_USER_ID ? 'p_chiwei' : undefined,
+        const terminals = await Promise.all([
+            run(
+                wire({ chatRules: () => [probe(ran, '余额', [EqualText('余额')])] }),
+                atTheBot('余额'),
+                recorded,
+                larkEvent('chiwei'),
             ),
-        );
-        const wired = wire();
+            run(
+                wire({ chatRules: () => [probe(ran, '余额', [EqualText('余额')])] }),
+                atTheBot('余额'),
+                recorded,
+                larkEvent('chiwei-second'),
+            ),
+        ]);
 
-        await run(wired, atTheBot(), recordedOf([BOT_COMMON_USER_ID, 'cu_human']));
-
-        expect(wired.published[0]!.payload.persona_ids).toEqual(['p_chiwei']);
-        resetChatRequestEnrichers();
-    });
-
-    // 没注册就是空数组 —— 群聊那侧读到空就是不回复，所以这条是"忘了注册"的哨兵。
-    it('没注册富化时 persona_ids 是空的', async () => {
-        resetChatRequestEnrichers();
-        const wired = wire();
-
-        await run(wired, atTheBot(), recordedOf([BOT_COMMON_USER_ID]));
-
-        expect(wired.published[0]!.payload.persona_ids).toEqual([]);
+        expect(terminals.map((t) => t.kind)).toEqual(['responded', 'responded']);
+        expect(ran).toEqual(['余额', '余额']);
     });
 });

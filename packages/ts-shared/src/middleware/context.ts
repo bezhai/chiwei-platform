@@ -8,8 +8,8 @@ import { v4 as uuidv4 } from 'uuid';
 export interface BaseRequestContext {
     traceId: string;
     // 处理这条请求/消息的 bot，以及它属于哪个泳道。两者都与渠道无关（任何
-    // 渠道的入站都要回答"谁在处理"和"走哪条泳道"），且被共享的规则引擎与
-    // chat.request 组装直接消费，所以取值口径只在这里定义一次。
+    // 渠道的入站都要回答"谁在处理"和"走哪条泳道"），且被共享的规则引擎直接
+    // 消费，所以取值口径只在这里定义一次。
     botName?: string;
     lane?: string;
     [key: string]: unknown;

@@ -76,8 +76,6 @@ async def lifespan(app: FastAPI):
         # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
-        # Phase 5a: chat_request 也改走 runtime durable consumer（chat_node），
-        # 旧 chat_consumer / pipeline.stream_chat 已删。
         from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
 

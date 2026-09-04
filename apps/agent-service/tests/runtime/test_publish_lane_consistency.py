@@ -39,7 +39,7 @@ LANE = "ppe-lanecheck"
 
 
 class _SourceMqProbe(Data):
-    """Rides ``chat_request``, a queue that really exists in ALL_ROUTES."""
+    """Rides ``runtime_delayed_trigger_agent-service``, a queue that really exists in ALL_ROUTES."""
 
     chat_id: Annotated[str, Key]
 
@@ -169,19 +169,24 @@ def assert_header_lane_drives_the_queue(broker, route: Route) -> str | None:
 
 @pytest.mark.asyncio
 async def test_emit_source_mq_header_lane_matches_queue_lane(broker, lane_env):
-    from app.infra.rabbitmq import CHAT_REQUEST
+    from app.infra.rabbitmq import trigger_route_for
 
     @node
     async def _remote_handler(r: _SourceMqProbe) -> None:
         pass
 
-    wire(_SourceMqProbe).to(_remote_handler).from_(Source.mq("chat_request"))
+    wire(_SourceMqProbe).to(_remote_handler).from_(Source.mq("runtime_delayed_trigger_agent-service"))
     bind(_remote_handler).to_app("some-other-app")
 
     async with bind_context(Context(trace_id=None, lane=None)):
         await emit(_SourceMqProbe(chat_id="c1"))
 
-    assert assert_header_lane_drives_the_queue(broker, CHAT_REQUEST) == LANE
+    assert (
+        assert_header_lane_drives_the_queue(
+            broker, trigger_route_for("agent-service")
+        )
+        == LANE
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,6 @@ import pytest
 
 from app.infra.rabbitmq import (
     ALL_ROUTES,
-    CHAT_REQUEST,
     CHAT_RESPONSE,
     DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
@@ -31,10 +30,10 @@ class TestLaneQueue:
     """lane_queue appends lane suffix when lane is non-None."""
 
     def test_prod_returns_base(self):
-        assert lane_queue("chat_request", None) == "chat_request"
+        assert lane_queue("chat_response", None) == "chat_response"
 
     def test_lane_appends_suffix(self):
-        assert lane_queue("chat_request", "dev") == "chat_request_dev"
+        assert lane_queue("chat_response", "dev") == "chat_response_dev"
 
     def test_lane_with_hyphen(self):
         assert lane_queue("recall", "feat-v2") == "recall_feat-v2"
@@ -44,10 +43,10 @@ class TestLaneRk:
     """_lane_rk appends lane as a dotted segment."""
 
     def test_prod_returns_base(self):
-        assert _lane_rk("chat.request", None) == "chat.request"
+        assert _lane_rk("chat.response", None) == "chat.response"
 
     def test_lane_appends_dot_segment(self):
-        assert _lane_rk("chat.request", "dev") == "chat.request.dev"
+        assert _lane_rk("chat.response", "dev") == "chat.response.dev"
 
     def test_lane_with_hyphen(self):
         assert _lane_rk("action.recall", "feat-v2") == "action.recall.feat-v2"
@@ -60,37 +59,37 @@ class TestBuildQueueArgs:
     """_build_queue_args returns correct DLX/TTL/expire args."""
 
     def test_prod_queue_has_dlx(self):
-        args = _build_queue_args("chat.request", None)
+        args = _build_queue_args("chat.response", None)
         assert args["x-dead-letter-exchange"] == DLX_NAME
 
     def test_prod_queue_no_ttl(self):
-        args = _build_queue_args("chat.request", None)
+        args = _build_queue_args("chat.response", None)
         assert "x-message-ttl" not in args
 
     def test_prod_queue_no_expires(self):
-        args = _build_queue_args("chat.request", None)
+        args = _build_queue_args("chat.response", None)
         assert "x-expires" not in args
 
     def test_lane_queue_has_ttl(self):
-        args = _build_queue_args("chat.request", "dev")
+        args = _build_queue_args("chat.response", "dev")
         assert args["x-message-ttl"] == 10_000
 
     def test_lane_queue_fallback_to_main_exchange(self):
-        args = _build_queue_args("chat.request", "dev")
+        args = _build_queue_args("chat.response", "dev")
         assert args["x-dead-letter-exchange"] == EXCHANGE_NAME
 
     def test_lane_queue_fallback_rk_is_prod(self):
         """Dead-lettered messages route back to the prod routing key."""
-        args = _build_queue_args("chat.request", "dev")
-        assert args["x-dead-letter-routing-key"] == "chat.request"
+        args = _build_queue_args("chat.response", "dev")
+        assert args["x-dead-letter-routing-key"] == "chat.response"
 
     def test_lane_queue_auto_expires(self):
-        args = _build_queue_args("chat.request", "dev")
+        args = _build_queue_args("chat.response", "dev")
         assert args["x-expires"] == 86_400_000
 
     def test_lane_queue_no_dlx_to_dlq(self):
         """Lane queues should NOT dead-letter to DLX (they fallback to prod)."""
-        args = _build_queue_args("chat.request", "dev")
+        args = _build_queue_args("chat.response", "dev")
         assert args["x-dead-letter-exchange"] != DLX_NAME
 
 
@@ -176,9 +175,23 @@ class TestRouteConstants:
     """Verify the pre-defined route constants."""
 
     def test_route_is_namedtuple(self):
-        assert isinstance(CHAT_REQUEST, Route)
-        assert CHAT_REQUEST.queue == "chat_request"
-        assert CHAT_REQUEST.rk == "chat.request"
+        assert isinstance(CHAT_RESPONSE, Route)
+        assert CHAT_RESPONSE.queue == "chat_response"
+        assert CHAT_RESPONSE.rk == "chat.response"
+
+    def test_chat_request_is_gone(self):
+        """「这条消息触发一次聊天请求」这个概念已经不存在了。
+
+        赤尾不从队列拿消息，她每一缝直接查 ``common_message``、自己决定要不要开口。
+        所以 ``chat_request`` 既没有生产者也没有消费者 —— 它不该再出现在声明面
+        （``declare_topology`` 遍历 ALL_ROUTES 建队列）或注册面（``Source.mq`` /
+        ``Sink.mq`` 的合法队列名从 ALL_ROUTES 来）的任何一侧。
+        """
+        import app.infra.rabbitmq as rabbitmq
+
+        assert not hasattr(rabbitmq, "CHAT_REQUEST")
+        assert all(r.queue != "chat_request" for r in ALL_ROUTES)
+        assert all(r.rk != "chat.request" for r in ALL_ROUTES)
 
     def test_all_routes_complete(self):
         # v4 vectorize 队列（memory_fragment_vectorize / memory_abstract_vectorize）
@@ -189,7 +202,6 @@ class TestRouteConstants:
         from app.infra.rabbitmq import CHANNEL_ROUTES
 
         expected = {
-            CHAT_REQUEST,
             CHAT_RESPONSE,
             RECALL,
             *CHANNEL_ROUTES,
@@ -198,12 +210,12 @@ class TestRouteConstants:
         assert set(ALL_ROUTES) == expected
 
     def test_all_routes_match_business_plus_delayed_trigger(self):
-        # 3 business routes + 每个 channel-partitioned base × 每个已知 channel
+        # 2 business routes + 每个 channel-partitioned base × 每个已知 channel
         # + one runtime_delayed_trigger route per KNOWN_APPS_FOR_DELAYED_TRIGGER
         # entry (Phase 7a Gap 9.1.2).
         from app.infra.rabbitmq import CHANNEL_ROUTES
 
-        assert len(ALL_ROUTES) == 3 + len(CHANNEL_ROUTES) + len(DELAYED_TRIGGER_ROUTES)
+        assert len(ALL_ROUTES) == 2 + len(CHANNEL_ROUTES) + len(DELAYED_TRIGGER_ROUTES)
 
     def test_delayed_trigger_only_for_agent_service(self):
         # vectorize-worker 已无任何节点，runtime_delayed_trigger 队列只剩

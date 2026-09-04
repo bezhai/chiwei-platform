@@ -36,7 +36,7 @@ export interface LarkReceiveDeps {
         event: LarkEvent,
     ) => void;
     /**
-     * 落账之后：跑规则，该发 chat.request 就发。
+     * 落账之后：跑规则，看这条消息命中哪条飞书指令。
      *
      * 收的是投影**整份**产出而不只是那组公共层 id —— 指令层要用的飞书事实（is_admin、
      * 会话开关、群资料）是投影顺路读出来的，在这里被截掉的话，指令就只能各自再查一遍。

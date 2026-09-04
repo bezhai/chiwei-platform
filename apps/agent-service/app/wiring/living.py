@@ -103,8 +103,8 @@ wire(FilePickedUp).durable().to(read_a_round)
 # 给拥有该 channel 的渠道服务（飞书 → lark-service，QQ → channel-server）。
 #
 # 这条边**是嘴的唯一出口**。它原先住在旧 chat 主 pipeline 的 wiring 里（那条链上
-# 还挂着 ``Source.mq("chat_request")`` 的入站边），旧实现删掉时跟着搬到这里——出口
-# 归说话的人管，不再寄居在别人的 pipeline 上。搬没搬到位由
+# 还挂着一条从消息队列进来的入站边），旧实现删掉时跟着搬到这里——出口归说话的人管，
+# 不再寄居在别人的 pipeline 上。搬没搬到位由
 # ``tests/wiring/test_outbound_wiring.py`` 按模块钉住。
 #
 # ``ChatResponseSegment`` 是 transient 且出 graph，不需要 ``.durable()``。

@@ -3,8 +3,7 @@
 // 一条消息进 runRules 前由各 channel adapter 派生成 RuleMessage。这里的字段
 // （isDirect / 文本工具 / common mention list / createTime / 媒体类型判断 /
 // common_*_id / channel / 当前 bot 的 common user id）足以支撑规则引擎里真正
-// 渠道无关的那些规则（聊天主链路 makeTextReply、EqualText、RegexpMatch、
-// OnlyGroup、文本限定等）。
+// 渠道无关的那些规则（EqualText、RegexpMatch、OnlyGroup、文本限定等）。
 //
 // 渠道 ORM / SDK 强绑的东西（渠道原生的会话元信息、权限配置、发言人角色、渠道
 // 裸 message id 等）**绝不进这个契约**，也**绝不旁挂任何渠道原始对象**——留一个

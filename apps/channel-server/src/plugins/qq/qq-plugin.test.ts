@@ -73,11 +73,13 @@ describe('qq 插件自注册', () => {
         }
     });
 
-    it('qq 没有平台指令（commands=[]），forChannel 只剩核心通用聊天主链路', () => {
+    // 拆掉之前 core 里还挂着一条聊天主链路 catch-all（NeedRobotMention + publish
+    // chat_request），所以这里的序列长度至少是 1。那条支线整条拆了 —— 赤尾不从队列拿
+    // 消息，她每一缝直接查 common_message、自己决定要不要开口。QQ 自己一条平台指令都
+    // 没注册，于是这条序列现在是**空的**：runRules 对每条 QQ 消息只留一条终态日志。
+    it('qq 没有平台指令，也没有任何核心兜底：forChannel 是空的', () => {
         expect(qqPlugin.commands).toEqual([]);
-        const out = getCommandRegistry().forChannel('qq');
-        expect(out.length).toBeGreaterThanOrEqual(1);
-        expect(out[out.length - 1].category).toBe('persona');
+        expect(getCommandRegistry().forChannel('qq')).toEqual([]);
     });
 
     it('qq 出站能力四件齐备', () => {

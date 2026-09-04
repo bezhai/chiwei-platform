@@ -2,17 +2,16 @@
 //
 // 新模型「归属 = 谁注册」：一条指令属于哪个 channel，由它在哪次 register 调用里
 // 登记决定，不再靠 RuleConfig.channels 这种 flag。平台插件在自注册时把自己的
-// 指令 register(channel, ...) 进来；核心只 registerCore 唯一真正平台无关的指令
-// （聊天主链路）。core 不知道任何具体平台指令的存在。
+// 指令 register(channel, ...) 进来；真正平台无关的指令走 registerCore。core 不
+// 知道任何具体平台指令的存在。
 //
-// forChannel 的顺序是契约：平台指令在前、核心通用指令在后。因为聊天主链路是
-// NeedRobotMention 的 catch-all，必须让 utility 指令先获得匹配机会，否则所有
-// @bot 消息都会先命中聊天、utility 永远轮不到。
+// forChannel 的顺序是契约：平台指令在前、核心通用指令在后 —— 核心指令是全渠道
+// 生效的，排在后面才不会盖住某个渠道自己的同名/更窄指令。
 
 import type { RuleConfig } from './rule';
 
 export class CommandRegistry {
-    // 平台无关的核心指令（当前只有聊天主链路）。
+    // 平台无关的核心指令（对所有 channel 生效）。
     private core: RuleConfig[] = [];
     // channel -> 该 channel 注册的平台指令。
     private byChannel = new Map<string, RuleConfig[]>();
@@ -40,10 +39,9 @@ export class CommandRegistry {
     }
 }
 
-// 进程级单例：core 在 engine 模块加载期 registerCore 聊天主链路；平台插件在
-// import 期 register(channel, ...) 自己的指令；runRules 用 getCommandRegistry()
-// .forChannel(channel) 读。与 channel-registry.ts 的单例取向一致——一个进程一张
-// 指令注册表，engine 与插件共享同一份。
+// 进程级单例：平台插件在 import 期 register(channel, ...) 自己的指令；runRules
+// 用 getCommandRegistry().forChannel(channel) 读。与 channel-registry.ts 的单例
+// 取向一致——一个进程一张指令注册表，engine 与插件共享同一份。
 const singleton = new CommandRegistry();
 
 export function getCommandRegistry(): CommandRegistry {

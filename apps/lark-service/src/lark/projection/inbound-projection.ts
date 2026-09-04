@@ -50,10 +50,9 @@
 //                          事件而不准，直接表现为"该投的没投"。每条消息一次幂等
 //                          upsert 换掉这个失效模式。
 //
-// 矩阵里属于飞书、但不在本文件的三处，各有各的触发条件，跟着它们的触发点走：
-//   common_message  update bot_name  → 抢到去重锁的那个 bot 才认领，跟规则引擎在一起
+// 矩阵里属于飞书、但不在本文件的两处，各有各的触发条件，跟着它们的触发点走：
 //   common_message  insert assistant → 出站
-//   common_agent_response            → chat.request 组装与出站
+//   common_agent_response            → 出站
 
 import type { ContentItem } from '@inner/shared/channel';
 import { context } from '@inner/shared/middleware';
@@ -75,7 +74,7 @@ import type {
     LarkUserProfile,
 } from './tables';
 
-/** 这条消息在公共层的那组 id。规则、指令、发 chat.request 都只认这些。 */
+/** 这条消息在公共层的那组 id。规则和指令都只认这些。 */
 export interface LarkInboundProjection {
     commonUserId: string;
     commonConversationId: string;

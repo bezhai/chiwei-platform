@@ -5,8 +5,8 @@
 // （唯一知道 TypeORM 和 SQL 的地方），测试实现是内存里的一组 Map。
 //
 // 绝大多数方法服务于投影（inbound-projection.ts），但端口的范围是整条入站链而不是
-// 投影一步：认领消息归谁处理发生在规则之后（矩阵里的 `common_message update bot_name`
-// 那一行），它同样是一条语句、同样属于这里 —— 让它自己去摸 TypeORM 才是破口。
+// 投影一步：撤回也走这里 —— 它同样是一条语句、同样属于这里，让它自己去摸 TypeORM
+// 才是破口。
 //
 // 字段名刻意用**物理列名**而不是驼峰属性名：这些结构描述的是"库里那一行长什么样"，
 // 用列名之后写入矩阵和测试断言可以逐字对上，不需要在两套命名之间来回翻译。
@@ -82,9 +82,9 @@ export interface LarkChatPermission {
     open_repeat_message?: boolean;
     allow_send_limit_photo?: boolean;
     /**
-     * 按群灰度。**当前没有读取方** —— 拆分前它进 chat.request 的 is_canary，而
-     * agent-service 的 ChatTrigger 上没有这个字段，在反序列化之前就被过滤掉了
-     * （见 rules/chat-request.ts 的注释）。列在这里是因为库里真的存着它。
+     * 按群灰度。**当前没有读取方** —— 它原先进的是入站请求报文的 is_canary，而那条
+     * 报文契约在 agent-service 那侧根本没有这个字段（反序列化前就被过滤掉），后来整条
+     * 入站请求支线也拆了。列在这里是因为库里真的存着它。
      */
     is_canary?: boolean;
 }
@@ -208,13 +208,6 @@ export interface CommonMessageRow {
     event_time: string;
 }
 
-/** 这条消息归谁处理。发送者一并重写：投影写进去的是同一个值，重写只是让它收敛。 */
-export interface CommonMessageClaim {
-    common_message_id: string;
-    bot_name: string;
-    common_user_id: string;
-}
-
 // ---- 端口 ----
 
 export interface LarkTables {
@@ -277,15 +270,6 @@ export interface LarkTables {
      * 有人并发写进来了，这时候必须让整个事务回滚而不是忽略。
      */
     insertLarkMessage(row: LarkMessageRow): Promise<void>;
-    /**
-     * 把这条消息记成某个 bot 的。同群多个 bot 里，只有抢到去重锁、真的要发
-     * chat.request 的那个才认领（见 rules/inbound-rules.ts 的顺序）。
-     *
-     * **一行都没改到就抛。** 那意味着 common_message 里根本没有这条消息，而下游
-     * agent-service 拿到请求后要按 message_id 回查它 —— 读空会直接走"未找到消息记录"
-     * 短路。与其发一个注定失败的请求，不如在这里炸。
-     */
-    claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void>;
 
     /**
      * 把这条公共层消息标成撤回，**首写保留**：已经写着撤回时刻的那些行一个字都不改，

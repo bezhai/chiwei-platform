@@ -1,10 +1,15 @@
-// QQ 入站编排。复用 @inner/shared 的通用函数（lane dispatch / runRules / store /
-// publish / 去重锁）；QQ 专属只有 custom→InboundMessage（adapter）、qq projector、
-// qq rule message。
+// QQ 入站编排。复用 @inner/shared 的通用函数（lane dispatch / runRules / store）；
+// QQ 专属只有 custom→InboundMessage（adapter）、qq projector、qq rule message。
 //
 // 顺序与副作用分界当初是照着飞书那条链定的。飞书拆走之后它自己的编排在
 // apps/lark-service/src/lark/receive-message.ts，两边不再共用代码，也不再要求一致
 //（那个文件开头写了它为什么故意改了顺序）。
+//
+// **入站到落库为止。** 「这条消息触发一次聊天请求」这个概念已经不存在了：赤尾不从队列
+// 拿消息，她每一缝直接查 common_message、自己决定要不要开口（见 agent-service 的
+// app/living）。所以这里既不发 MQ、也不抢去重锁、也不认领消息、也不落
+// common_agent_response 的 pending 行。runRules 留着是因为指令仍然走它 —— QQ 今天一条
+// 平台指令都没注册（plugins/qq/index.ts 的 commands=[]），所以它的产出只有一条终态日志。
 //
 // 钉死的渠道契约链（顺序不可调换，直面 PR #228 副作用前移翻车）：
 //   adapter.parse → AddressingPolicy.decide + enforceDecision(仅记 skip 原因、
@@ -13,8 +18,7 @@
 //   → lane 判定(非本进程 lane：备好信封，本地到此为止，投递在投影锁外做)
 //   ──── 分界：以下副作用仅在实际处理 lane 执行 ────
 //   → presence → 识图 → buildQqRuleMessage → runRules
-//   → storeQqInboundMessage(无条件，失败上抛：不 publish，也不让调用方回 2xx)
-//   → pendingChatTrigger 去重锁 → publish CHAT_REQUEST
+//   → storeQqInboundMessage(无条件，失败上抛：不让调用方回 2xx)
 import '@plugins/index';
 
 import type { CustomInboundMessage } from '@inner/shared/protocols';
@@ -24,15 +28,13 @@ import { botDirectory } from '@inner/shared/bot';
 import { getChannelRegistry } from '@inner/shared/channel';
 import { enforceDecision } from '@inner/shared/channel';
 import { runRules } from '@inner/shared/rules';
-import { rabbitmqClient, CHAT_REQUEST, getLane } from '@inner/shared/mq';
+import { getLane } from '@inner/shared/mq';
 import { handOffToLane, resolveInboundLaneHandoff } from '@integrations/lane-handoff';
-import { getRedisClient } from '@inner/shared/cache';
 import { CommonBotPresence } from '@inner/shared/entities';
 import { QQ_SELF_MENTION_TARGET } from '../inbound';
 import { buildQqRuleMessage } from '../build-rule-message';
 import { enqueueQqImagePipeline } from '../image-pipeline';
 import {
-    claimQqInboundMessageForBot,
     prepareQqInboundProjection,
     storeQqInboundMessage,
     withQqInboundProjectionLock,
@@ -77,8 +79,8 @@ export class QqEventHandlers {
         const botName = context.getBotName();
         const botConfig = botName ? botDirectory.getBotConfig(botName) : null;
         // 这三条都是"这条消息没人处理"，往上抛而不是记一条日志就 return：两个调用方都是
-        // HTTP 端点，return 会让它们回 200，投递方据此认定消息已处理完 —— 既没落库也没发
-        // ChatTrigger 的消息就此静默消失。getChannelRegistry().get 未知 channel 自己就抛。
+        // HTTP 端点，return 会让它们回 200，投递方据此认定消息已处理完 —— 而这条消息
+        // 根本没落库，就此静默消失。getChannelRegistry().get 未知 channel 自己就抛。
         if (!botConfig) {
             throw new Error(
                 `bot config not found for "${botName}"; cannot handle inbound ` +
@@ -148,10 +150,11 @@ export class QqEventHandlers {
                 mentionedUserIds: projection.mentionedUserIds,
             });
 
-            const terminal = await runRules(ruleMessage);
+            // 指令走这里。QQ 今天没有平台指令，所以它的产出只有一条终态日志。
+            await runRules(ruleMessage);
 
-            // 落库失败必须上抛。吞掉它只是不发 ChatTrigger，而调用方会照常回 2xx ——
-            // 投递方于是认为这条消息处理完了，实际它既不在库里也没进对话。
+            // 落库失败必须上抛。吞掉它的话调用方会照常回 2xx —— 投递方于是认为这条
+            // 消息处理完了，实际它根本不在库里，而她能读到的只有库里那份。
             try {
                 await storeQqInboundMessage(
                     inbound,
@@ -160,7 +163,7 @@ export class QqEventHandlers {
                 );
             } catch (storeErr) {
                 throw new Error(
-                    `storing the inbound qq message failed, ChatTrigger not published: ` +
+                    `storing the inbound qq message failed: ` +
                         `message=${projection.commonMessageId} ` +
                         `chat=${projection.commonConversationId}: ` +
                         `${(storeErr as Error).message}`,
@@ -168,36 +171,6 @@ export class QqEventHandlers {
                 );
             }
 
-            if (terminal.pendingChatTrigger) {
-                const { payload, lane, dedupeKey, savePending } = terminal.pendingChatTrigger;
-                const lock = await getRedisClient().setNx(dedupeKey, '1', 60);
-                if (lock === null) {
-                    console.info(
-                        `[qq inbound] duplicate ChatTrigger skipped (lock held): ` +
-                            `message=${projection.commonMessageId}`,
-                    );
-                    return null;
-                }
-                // botName 到这里必然非空：开头 getBotName() 为空串时 botConfig 就是
-                // null，那一步已经上抛了。
-                await claimQqInboundMessageForBot({
-                    commonMessageId: projection.commonMessageId,
-                    botName,
-                    commonUserId: projection.commonUserId,
-                });
-                await savePending();
-                await rabbitmqClient.publish(
-                    CHAT_REQUEST,
-                    payload as unknown as Record<string, unknown>,
-                    undefined,
-                    undefined,
-                    lane,
-                );
-                console.info(
-                    `[qq inbound] Published chat.request: session_id=${payload.session_id}, ` +
-                        `message=${projection.commonMessageId}, lane=${lane || 'prod'}`,
-                );
-            }
             return null;
         });
 

@@ -230,11 +230,15 @@ def test_layer4_rejects_wire_with_consumers_in_different_apps():
 
 
 def test_compile_graph_accepts_wire_with_sink_mq_in_all_routes():
-    """Sink.mq("chat_request") is in ALL_ROUTES → compile_graph accepts it."""
+    """A queue名 in ALL_ROUTES → compile_graph accepts it.
+
+    用一条**不按 channel 分区**的队列：分区队列的 sink 还要求 Data 带 channel
+    （见下一条用例），那是另一件事。
+    """
     @node
     async def f(m: M) -> None: ...
 
-    wire(M).to(f, Sink.mq("chat_request"))  # chat_request is in ALL_ROUTES
+    wire(M).to(f, Sink.mq("runtime_delayed_trigger_agent-service"))
 
     g = compile_graph()
     assert any(s.kind == "mq" for w in g.wires for s in w.sinks)

@@ -42,7 +42,6 @@ class Route(NamedTuple):
     lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
 
 
-CHAT_REQUEST = Route("chat_request", "chat.request")
 CHAT_RESPONSE = Route("chat_response", "chat.response")
 RECALL = Route("recall", "action.recall")
 
@@ -186,8 +185,11 @@ def trigger_route_for(app: str) -> Route:
 # compile_graph 会在启动时直接 GraphError（"queue not in ALL_ROUTES"），进程起不来。
 #
 # 所以这两条留着，代价是两条空队列。要真正去掉得先把注册面从声明面里拆出来。
+#
+# chat_request 两职都已经没了，所以它整条摘掉：她不从队列拿消息 —— 每一缝直接查
+# common_message、自己决定要不要开口（app/living），入站两个渠道服务也不再往它上面
+# 投。留着的话就是一条没有生产者、没有消费者、没有 TTL 也没有长度上限的队列。
 ALL_ROUTES = [
-    CHAT_REQUEST,
     CHAT_RESPONSE,
     RECALL,
     *CHANNEL_ROUTES,

@@ -49,21 +49,6 @@ export function createLarkBotLookup(
 }
 
 /**
- * 这个公共层用户是我们哪个 bot 的人设。
- *
- * chat.request 的 persona_ids 走这一跳：被 @ 的人在投影阶段已经换成 common_user_id
- * 了，这里回答其中哪些其实是我们自己的 bot、各自穿的是哪个人设。**不是我们的 bot、
- * 或者没绑人设的工具 bot，都是"没有"** —— 群里 @ 一个工具 bot 不该让任何人设开口。
- */
-export function larkPersonaIdOf(roster: LarkBotRoster, commonUserId: string): string | undefined {
-    for (const bot of roster.getAllBotConfigs()) {
-        if (bot.channel !== LARK_CHANNEL) continue;
-        if (bot.common_user_id === commonUserId) return bot.persona_id ?? undefined;
-    }
-    return undefined;
-}
-
-/**
  * 出站消息上署的名。
  *
  * 署的是**人设名**（"赤尾"），不是飞书后台那个应用名（"XX机器人"）—— 后者是运维

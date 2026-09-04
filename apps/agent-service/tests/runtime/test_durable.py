@@ -113,7 +113,7 @@ async def test_durable_roundtrip(durable_env):
 async def test_publish_durable_uses_data_lane_when_context_missing(monkeypatch):
     """Source.mq payloads carry lane in the body, not necessarily in
     contextvars. Durable publish must route by the Data.lane field so
-    chat_request_<lane> can fan out to durable_chat_request_*_<lane>.
+    a <queue>_<lane> source can fan out to durable_<data>_*_<lane>.
     """
     wire(LanePing).to(lane_ping_consumer).durable()
     w = next(ws for ws in WIRING_REGISTRY if ws.data_type is LanePing)

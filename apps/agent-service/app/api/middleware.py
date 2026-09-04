@@ -65,7 +65,7 @@ CHAT_TOKENS = Counter(
 
 CHAT_QUEUE_WAIT = Histogram(
     "chat_queue_wait_seconds",
-    "Time spent waiting in MQ queue (chat_request)",
+    "Time spent waiting in an MQ queue",
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
 )
 

@@ -296,21 +296,6 @@ function tablesOn(manager: EntityManager): LarkTables {
                 .execute();
         },
 
-        async claimCommonMessageForBot(claim): Promise<void> {
-            // role='user' 是护栏：一条消息在 common_message 里还会有 assistant 那一行，
-            // 认领说的只是"这条**用户消息**由谁处理"。
-            const result = await manager.getRepository(CommonMessage).update(
-                { common_message_id: claim.common_message_id, role: 'user' },
-                { bot_name: claim.bot_name, common_user_id: claim.common_user_id },
-            );
-            if (!result.affected) {
-                throw new Error(
-                    `no user message ${claim.common_message_id} to claim for ` +
-                        `bot ${claim.bot_name}; it was never written to common_message`,
-                );
-            }
-        },
-
         async markCommonMessageRecalled(commonMessageId, recalledAt): Promise<boolean> {
             // 只碰 recalled_at 这一列：这张表三个服务共写，多写一列就是覆盖别人写下的
             // 结论。

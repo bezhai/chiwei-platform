@@ -207,18 +207,13 @@ function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog): LarkCommand
 /**
  * 规则段的真实装配。接线本身在 lark/rules/inbound-rules.ts（那里能测），这里只负责
  * 把本进程的那几个单例递进去。
- *
- * 去重标记与投影锁共用同一份 Redis 实现：比对持有者再删的那段 Lua 全仓只写一次。
  */
-function realRules(commands: LarkCommandDeps, store: LarkStore): LarkRulesDeps {
+function realRules(commands: LarkCommandDeps): LarkRulesDeps {
     return assembleLarkRules({
         // 清单里填好的那些指令，依赖绑上。空槽位不产出规则，所以还欠着的那几批不影响
         // 这一行（见 lark/rules/commands.ts）。
         commands: larkCommands(commands),
         bots: botDirectory,
-        store,
-        marker: redisMessageLockStore(getRedisClient),
-        broker: rabbitmqClient,
         notBlocked: NotBlocked,
     });
 }
@@ -236,7 +231,7 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
     const projection = realProjection(store);
     const attachments = realAttachments();
-    const rules = realRules(commands, store);
+    const rules = realRules(commands);
 
     return createLarkInbound({
         roster: botDirectory,

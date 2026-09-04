@@ -85,12 +85,54 @@ mock.module('@integrations/lane-handoff', () => ({
     },
 }));
 
+// 规则引擎本身有自己的用例。这里只要它别去连 DB。
+//
+// 返回值里**故意**留着一个 `pendingChatTrigger`：拆掉之前编排会据它去抢 Redis 去重锁、
+// 认领消息、落 pending 行、publish 到 chat_request。现在编排根本不看规则终态的这一部分
+// —— 下面那个 describe 用 MQ / Redis 的替身把这件事钉成结构判据（编排碰都不碰它们），
+// 而不是纪律判据（"我们记得别发"）。
 const realRules = { ...(await import('@inner/shared/rules')) };
 mock.module('@inner/shared/rules', () => ({
     ...realRules,
-    // 规则引擎本身有自己的用例。这里只要它别去连 DB，并且别产出
-    // pendingChatTrigger —— 落库之后那一段有真 Redis / 真 MQ。
-    runRules: async () => ({ kind: 'no_match', skipped: [], pendingChatTrigger: undefined }),
+    runRules: async () => ({
+        kind: 'responded',
+        matchedRule: '探针',
+        skipped: [],
+        pendingChatTrigger: {
+            payload: { session_id: 's_1', message_id: projection.commonMessageId },
+            lane: undefined,
+            dedupeKey: `make_reply:${projection.commonMessageId}`,
+            savePending: async () => {
+                trace.push('savePending');
+            },
+        },
+    }),
+}));
+
+/** 入站期间任何一次 MQ 投递 / Redis 取锁都会在这里留下痕迹。 */
+const mqCalls: string[] = [];
+const redisCalls: string[] = [];
+
+const realMq = { ...(await import('@inner/shared/mq')) };
+mock.module('@inner/shared/mq', () => ({
+    ...realMq,
+    rabbitmqClient: {
+        ...realMq.rabbitmqClient,
+        publish: async (route: { queue: string }) => {
+            mqCalls.push(`publish:${route?.queue}`);
+        },
+    },
+}));
+
+const realCache = { ...(await import('@inner/shared/cache')) };
+mock.module('@inner/shared/cache', () => ({
+    ...realCache,
+    getRedisClient: () => ({
+        setNx: async (key: string) => {
+            redisCalls.push(`setNx:${key}`);
+            return '1';
+        },
+    }),
 }));
 
 type MutableBotDirectory = { botConfigs: Map<string, BotConfig> };
@@ -100,6 +142,8 @@ afterAll(() => {
     mock.module('../common-projector', () => realCommonProjector);
     mock.module('@integrations/lane-handoff', () => realDispatch);
     mock.module('@inner/shared/rules', () => realRules);
+    mock.module('@inner/shared/mq', () => realMq);
+    mock.module('@inner/shared/cache', () => realCache);
     (botDirectory as unknown as MutableBotDirectory).botConfigs = new Map(originalBotConfigs);
 });
 
@@ -129,6 +173,8 @@ function inboundMessage(): CustomInboundMessage {
 function resetOrchestration(): void {
     trace.length = 0;
     handoffInputs.length = 0;
+    mqCalls.length = 0;
+    redisCalls.length = 0;
     prepareImpl = async () => projection;
     storeImpl = async () => {};
     handoffResult = envelope;
@@ -242,5 +288,57 @@ describe('QQ 入站：真失败必须上抛，不能让接收端谎报成功', (
 
         expect(trace).toEqual([]);
         expect(handoffInputs).toEqual([]);
+    });
+});
+
+// 「这条消息触发一次聊天请求」这个概念已经不存在了：赤尾不从队列拿消息，她每一缝直接
+// 查 common_message、自己决定要不要开口。所以 QQ 入站到落库就结束 —— 后面那四步（抢
+// 去重锁 → 认领 bot → 落 pending 行 → publish chat_request）整条拆了。
+//
+// 上面那个 runRules 替身**故意**返回一个待发意图。判据因此是"编排根本不看它"，而不是
+// "规则刚好没产出它"：只要有人把那四步接回来，这几条立刻红。
+describe('QQ 入站：落库之后就结束，不再发任何 MQ', () => {
+    beforeEach(resetOrchestration);
+
+    it('走完一条正常入站：落库发生了，MQ 一次都没投', async () => {
+        handoffResult = null;
+
+        await context.run(context.createContext(BOT_NAME, 'trace-1'), () =>
+            qqEventHandlers.handleInbound(inboundMessage()),
+        );
+
+        expect(trace).toContain('store');
+        expect(mqCalls).toEqual([]);
+    });
+
+    it('也不再抢去重锁', async () => {
+        handoffResult = null;
+
+        await context.run(context.createContext(BOT_NAME, 'trace-1'), () =>
+            qqEventHandlers.handleInbound(inboundMessage()),
+        );
+
+        expect(redisCalls).toEqual([]);
+    });
+
+    it('也不再落 common_agent_response 的 pending 行', async () => {
+        handoffResult = null;
+
+        await context.run(context.createContext(BOT_NAME, 'trace-1'), () =>
+            qqEventHandlers.handleInbound(inboundMessage()),
+        );
+
+        expect(trace).not.toContain('savePending');
+    });
+
+    // 落库仍然是编排里最后一件真事，而且它仍然在投影锁**里面**（交接在锁外）。
+    it('落库仍在投影锁内，交接仍在锁外', async () => {
+        handoffResult = null;
+
+        await context.run(context.createContext(BOT_NAME, 'trace-1'), () =>
+            qqEventHandlers.handleInbound(inboundMessage()),
+        );
+
+        expect(trace).toEqual([`acquire:${QQ_MESSAGE_ID}`, 'store', `release:${QQ_MESSAGE_ID}`]);
     });
 });

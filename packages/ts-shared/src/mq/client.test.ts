@@ -1,6 +1,6 @@
 // publish 的 AMQP header 上下文注入单测。
 //
-// 背景：泳道信息此前只编码进队列名（chat_request_{lane}）和消息体，没有写进 AMQP
+// 背景：泳道信息此前只编码进队列名（chat_response_{lane}）和消息体，没有写进 AMQP
 // header。下游 agent-service 的 runtime/propagation.py::extract_context 只读 header
 // 的 "lane" / "trace_id" 两个 key，读不到就当 lane=None —— 处理泳道消息时所有出站
 // HTTP 不带 x-ctx-lane，被 sidecar 打回 prod。泳道队列 TTL 到期 DLX 降级回 prod 后
@@ -19,7 +19,7 @@ import type * as MqClientModule from './client';
 // 进程级全局：整套 bun test 跑起来时，直接 `import './client'` 拿到的可能是别人的桩
 //（publish 变成空实现，断言全落空）。带 query 的 specifier 是另一个模块 key，拿得到
 // 未被替换的真实实现和一个干净的单例。
-const { rabbitmqClient, CHAT_REQUEST } = (await import(
+const { rabbitmqClient, CHAT_RESPONSE } = (await import(
     // @ts-expect-error 带 query 的 specifier 只有 bun 运行时认，tsc 解析不到；类型由下面的断言给出
     '@inner/shared/mq?real'
 )) as typeof MqClientModule;
@@ -32,6 +32,8 @@ interface PublishCall {
 }
 
 const calls: PublishCall[] = [];
+/** declareTopology 声明过的队列名，按声明顺序。 */
+const declaredQueues: string[] = [];
 
 const fakeChannel = {
     publish: (
@@ -43,7 +45,11 @@ const fakeChannel = {
         calls.push({ exchange, rk, content, headers: options.headers });
         return true;
     },
-    assertQueue: async () => ({}),
+    assertExchange: async () => ({}),
+    assertQueue: async (name: string) => {
+        declaredQueues.push(name);
+        return {};
+    },
     bindQueue: async () => ({}),
 };
 
@@ -68,6 +74,7 @@ const originalLane = process.env.LANE;
 
 beforeEach(() => {
     calls.length = 0;
+    declaredQueues.length = 0;
     injectFakeChannel();
 });
 
@@ -85,7 +92,7 @@ describe('publish 注入 lane / trace_id header', () => {
         process.env.LANE = 'ppe-foo';
 
         await context.run(context.createContext('trace-lane-1'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, { hello: 'world' });
+            await rabbitmqClient.publish(CHAT_RESPONSE, { hello: 'world' });
         });
 
         expect(lastHeaders()).toEqual({ lane: 'ppe-foo', trace_id: 'trace-lane-1' });
@@ -95,7 +102,7 @@ describe('publish 注入 lane / trace_id header', () => {
         delete process.env.LANE;
 
         await context.run(context.createContext('trace-prod-1'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, { hello: 'world' });
+            await rabbitmqClient.publish(CHAT_RESPONSE, { hello: 'world' });
         });
 
         expect(lastHeaders()).toEqual({ lane: '', trace_id: 'trace-prod-1' });
@@ -104,7 +111,7 @@ describe('publish 注入 lane / trace_id header', () => {
     it('无 context 时 trace_id 写空串', async () => {
         delete process.env.LANE;
 
-        await rabbitmqClient.publish(CHAT_REQUEST, { hello: 'world' });
+        await rabbitmqClient.publish(CHAT_RESPONSE, { hello: 'world' });
 
         expect(lastHeaders()).toEqual({ lane: '', trace_id: '' });
     });
@@ -113,31 +120,31 @@ describe('publish 注入 lane / trace_id header', () => {
         process.env.LANE = 'ppe-foo';
 
         await context.run(context.createContext('trace-explicit'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, {}, undefined, undefined, 'ppe-bar');
+            await rabbitmqClient.publish(CHAT_RESPONSE, {}, undefined, undefined, 'ppe-bar');
         });
 
         const headers = lastHeaders();
         expect(headers.lane).toBe('ppe-bar');
-        expect(calls[0]!.rk).toBe('chat.request.ppe-bar');
+        expect(calls[0]!.rk).toBe('chat.response.ppe-bar');
     });
 
     it("显式传 lane='prod'：header lane 写空串，走 prod 队列", async () => {
         process.env.LANE = 'ppe-foo';
 
         await context.run(context.createContext('trace-explicit-prod'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, {}, undefined, undefined, 'prod');
+            await rabbitmqClient.publish(CHAT_RESPONSE, {}, undefined, undefined, 'prod');
         });
 
         const headers = lastHeaders();
         expect(headers.lane).toBe('');
-        expect(calls[0]!.rk).toBe('chat.request');
+        expect(calls[0]!.rk).toBe('chat.response');
     });
 
     it('调用方自带 header（x-retry-count）不被覆盖，且同样带上 lane / trace_id', async () => {
         process.env.LANE = 'ppe-foo';
 
         await context.run(context.createContext('trace-retry'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, {}, undefined, { 'x-retry-count': 3 });
+            await rabbitmqClient.publish(CHAT_RESPONSE, {}, undefined, { 'x-retry-count': 3 });
         });
 
         expect(lastHeaders()).toEqual({
@@ -152,7 +159,7 @@ describe('publish 注入 lane / trace_id header', () => {
 
         await context.run(context.createContext('trace-authoritative'), async () => {
             await rabbitmqClient.publish(
-                CHAT_REQUEST,
+                CHAT_RESPONSE,
                 {},
                 undefined,
                 { lane: 'ppe-caller', trace_id: 'trace-caller', 'x-retry-count': 3 },
@@ -161,7 +168,7 @@ describe('publish 注入 lane / trace_id header', () => {
         });
 
         // lane header 必须跟 routing key 同源：routing key 用的是 publish 内部算出的
-        // effectiveLane，header 让调用方改写就会出现「消息进 chat_request_ppe-bar
+        // effectiveLane，header 让调用方改写就会出现「消息进 chat_response_ppe-bar
         // 队列、header 却写着 ppe-caller」，下游按 header 判 lane 直接判错——这正是
         // header 注入要消灭的那类不一致。trace_id 同理，只认当前 context。
         expect(lastHeaders()).toEqual({
@@ -169,14 +176,14 @@ describe('publish 注入 lane / trace_id header', () => {
             trace_id: 'trace-authoritative',
             'x-retry-count': 3,
         });
-        expect(calls[0]!.rk).toBe('chat.request.ppe-bar');
+        expect(calls[0]!.rk).toBe('chat.response.ppe-bar');
     });
 
     it('delayMs 与上下文 header 并存', async () => {
         process.env.LANE = 'ppe-foo';
 
         await context.run(context.createContext('trace-delay'), async () => {
-            await rabbitmqClient.publish(CHAT_REQUEST, {}, 5000);
+            await rabbitmqClient.publish(CHAT_RESPONSE, {}, 5000);
         });
 
         expect(lastHeaders()).toEqual({
@@ -184,5 +191,32 @@ describe('publish 注入 lane / trace_id header', () => {
             lane: 'ppe-foo',
             trace_id: 'trace-delay',
         });
+    });
+});
+
+// 「这条消息触发一次聊天请求」这个概念已经不存在了：赤尾不从队列拿消息，而是每一缝
+// 直接查 common_message、自己决定要不要开口。所以 chat_request 既没有生产者也没有
+// 消费者 —— 它不该再被任何一个进程声明出来。
+//
+// 判的是**声明面**而不是常量是否存在：常量删掉但 ALL_ROUTES 里漏了别的引用，或者
+// 哪天有人按名字重新加回来，这条都会红。
+describe('拓扑声明里没有 chat_request', () => {
+    it('declareTopology 声明的队列里不出现 chat_request', async () => {
+        delete process.env.LANE;
+
+        await rabbitmqClient.declareTopology();
+
+        expect(declaredQueues).not.toContain('chat_request');
+        // 反证这次声明真的跑了（不是因为一条队列都没声明才没命中）。
+        expect(declaredQueues).toContain('chat_response');
+    });
+
+    it('泳道进程同理：没有 chat_request_{lane}', async () => {
+        process.env.LANE = 'ppe-foo';
+
+        await rabbitmqClient.declareTopology();
+
+        expect(declaredQueues.filter((q) => q.startsWith('chat_request'))).toEqual([]);
+        expect(declaredQueues).toContain('chat_response_ppe-foo');
     });
 });

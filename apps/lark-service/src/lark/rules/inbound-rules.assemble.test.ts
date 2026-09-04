@@ -1,37 +1,22 @@
 // 组装根那几行接线本身。
 //
 // 为什么单独有这一层：规则段的逻辑由 inbound-rules.test.ts 用手工拼的依赖验，那份
-// 测试**永远发现不了"接线接错了"** —— 它自己就是接线人。而这里最要命的两个错法都是
-// 静默的：
+// 测试**永远发现不了"接线接错了"** —— 它自己就是接线人。而这里的错法是静默的：指令
+// 清单漏接、bot 角色接错，症状都是"某些消息不响应"，日志干净。
 //
-//   * **富化漏注册**：共享包 buildChatRequestPayload 找不到 lark 的 enricher 会悄悄
-//     退回中性默认，persona_ids 恒空。agent-service 那侧群聊 persona_ids 为空就是不
-//     回复 —— 赤尾在所有群里全哑，而每一条测试都是绿的。
-//   * **lane 没接上**：publish 的 lane 是第 5 个位置参数，漏了它消息就发进 prod 队列。
-//     泳道验证会"看起来正常"，实际跑的是线上那份代码。
-//
-// 所以这里跑的是**真的装配出来的那份依赖** + 真的 applyLarkRules，只有基础设施是替身。
+// 所以这里跑的是**真的装配出来的那份依赖** + 真的 applyLarkRules，只有 bot 目录是替身。
 
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import type { BotConfig } from '@inner/shared/entities';
 import { context } from '@inner/shared/middleware';
-import { CHAT_REQUEST, type Route } from '@inner/shared/mq';
-import { resetChatRequestEnrichers, type ChatRequestPayload } from '@inner/shared/rules';
 
 import type { LarkEvent } from '../ingress/lark-event';
 import type { LarkBotLookup } from '../message/mentions';
 import { readLarkMessageEvent, type LarkMessageReading } from '../message/read-message-event';
 import type { LarkMessageEvent } from '../message/wire';
-import type { CommonMessageClaim } from '../projection/tables';
 import type { LarkRecordedInbound } from '../projection/inbound-projection';
 import { larkCommands, type LarkCommandDeps, type LarkCommandSlot } from './commands';
-import {
-    applyLarkRules,
-    assembleLarkRules,
-    type ChatTriggerMarkerStore,
-    type LarkRequestBroker,
-    type LarkRulesInfra,
-} from './inbound-rules';
+import { applyLarkRules, assembleLarkRules, type LarkRulesInfra } from './inbound-rules';
 
 const APP_ID = 'cli_chiwei';
 const BOT_NAME = 'chiwei';
@@ -69,51 +54,14 @@ function directory(bots: BotConfig[]) {
     };
 }
 
-interface BrokerCall {
-    route: Route;
-    body: Record<string, unknown>;
-    delayMs: number | undefined;
-    headers: Record<string, unknown> | undefined;
-    lane: string | undefined;
-}
-
 function infrastructure(bots: BotConfig[] = [botConfig()]) {
-    const sent: BrokerCall[] = [];
-    const claimed: CommonMessageClaim[] = [];
-    const markers = new Map<string, string>();
-    const markerCalls: string[] = [];
-
-    const broker: LarkRequestBroker = {
-        publish: async (route, body, delayMs, headers, lane) => {
-            sent.push({ route, body, delayMs, headers, lane });
-        },
-    };
-    const marker: ChatTriggerMarkerStore = {
-        acquire: async (key, token, leaseSeconds) => {
-            markerCalls.push(`acquire:${key}:${leaseSeconds}`);
-            if (markers.has(key)) return false;
-            markers.set(key, token);
-            return true;
-        },
-        release: async (key, token) => {
-            markerCalls.push(`release:${key}`);
-            if (markers.get(key) === token) markers.delete(key);
-        },
-    };
     const infra: LarkRulesInfra = {
-        // 今天一个槽位都没填，所以序列里只有人格聊天 —— 与拆分前一致。
+        // 今天一个槽位都没填，所以序列是空的。
         commands: [],
         bots: directory(bots),
-        store: {
-            claimCommonMessageForBot: async (claim) => {
-                claimed.push(claim);
-            },
-        },
-        marker,
-        broker,
         notBlocked: async () => true,
     };
-    return { infra, sent, claimed, markers, markerCalls };
+    return { infra };
 }
 
 const lookup: LarkBotLookup = {
@@ -125,7 +73,7 @@ const lookup: LarkBotLookup = {
 };
 
 /** 群里 @ 了赤尾。 */
-function atTheBot(): LarkMessageReading {
+function atTheBot(text = '在吗'): LarkMessageReading {
     const event: LarkMessageEvent = {
         app_id: APP_ID,
         sender: { sender_type: 'user', sender_id: { open_id: 'ou_user', union_id: 'on_user' } },
@@ -135,7 +83,7 @@ function atTheBot(): LarkMessageReading {
             chat_type: 'group',
             create_time: '1700000000000',
             message_type: 'text',
-            content: '{"text":"@_user_1 在吗"}',
+            content: JSON.stringify({ text: `@_user_1 ${text}` }),
             mentions: [
                 {
                     key: '@_user_1',
@@ -170,107 +118,76 @@ const event: LarkEvent = {
     traceId: 'trace-1',
 };
 
-/** 真实装配 + 真实 applyLarkRules，只有基础设施是替身。泳道上下文照三个入口那样设。 */
-function runAssembled(wired: ReturnType<typeof infrastructure>, lane?: string) {
+/** 真实装配 + 真实 applyLarkRules，只有 bot 目录是替身。泳道上下文照三个入口那样设。 */
+function runAssembled(
+    wired: ReturnType<typeof infrastructure>,
+    reading: LarkMessageReading = atTheBot(),
+    lane?: string,
+) {
     const deps = assembleLarkRules(wired.infra);
     return context.run(context.createContext('trace-1', { botName: BOT_NAME, lane }), () =>
-        applyLarkRules(deps, atTheBot(), recorded, event),
+        applyLarkRules(deps, reading, recorded, event),
     );
 }
 
-beforeEach(() => {
-    // 富化注册表是进程级的。不清掉的话，别的用例注册过的 lark 富化会让"漏注册"这条
-    // 测试假绿 —— 那正是本文件要抓的东西。
-    resetChatRequestEnrichers();
-});
+describe('装配出来的依赖里没有任何出队口', () => {
+    // 结构判据。装配根拿不到 broker、拿不到锁、拿不到认领口，所以这一段**没法**发 MQ
+    // —— 不是"我们记得别发"。多出任何一个键都要重新解释它凭什么在这里。
+    it('装配产出只有规则序列与三件规则装配', () => {
+        const { infra } = infrastructure();
 
-describe('装配出来的 chat.request 出口', () => {
-    it('发到 chat_request 路由，lane 走 publish 的泳道参数而不是 header', async () => {
-        const wired = infrastructure();
-
-        await runAssembled(wired, 'ppe-x');
-
-        expect(wired.sent).toHaveLength(1);
-        expect(wired.sent[0]).toMatchObject({
-            route: CHAT_REQUEST,
-            delayMs: undefined,
-            headers: undefined,
-            lane: 'ppe-x',
-        });
+        expect(Object.keys(assembleLarkRules(infra)).sort()).toEqual([
+            'botCommonUserId',
+            'botRoleOf',
+            'chatRules',
+            'notBlocked',
+        ]);
     });
 
-    it('载荷本身带的泳道与投递用的泳道是同一个', async () => {
-        const wired = infrastructure();
+    // 装配期也不该再有任何副作用（拆掉之前它在这里注册 chat.request 富化）。
+    it('装配是纯函数：同一份 infra 装两次得到等价依赖', () => {
+        const { infra } = infrastructure();
 
-        await runAssembled(wired, 'ppe-x');
-
-        const payload = wired.sent[0]!.body as unknown as ChatRequestPayload;
-        expect(payload.lane).toBe('ppe-x');
-        expect(payload.channel).toBe('lark');
-        expect(payload.message_id).toBe('cm_1');
-        expect(payload.bot_name).toBe(BOT_NAME);
-    });
-
-    // 漏注册富化不会报任何错，只会让群聊 persona_ids 恒空 = 赤尾在群里全哑。
-    it('富化跟着装配一起注册，persona_ids 真的填上了', async () => {
-        const wired = infrastructure();
-
-        await runAssembled(wired);
-
-        const payload = wired.sent[0]!.body as unknown as ChatRequestPayload;
-        expect(payload.persona_ids).toEqual([PERSONA_ID]);
+        expect(Object.keys(assembleLarkRules(infra)).sort()).toEqual(
+            Object.keys(assembleLarkRules(infra)).sort(),
+        );
     });
 });
 
-describe('装配出来的其余几根线', () => {
-    it('bot 的角色取自 bot 目录：工具 bot 不走人设主链路', async () => {
+describe('装配出来的几根线', () => {
+    it('bot 的角色取自 bot 目录：工具 bot 不认 persona 规则', async () => {
         const wired = infrastructure([botConfig({ bot_role: 'utility' })]);
+        wired.infra.commands = larkCommands({} as unknown as LarkCommandDeps, [
+            {
+                name: '人设的',
+                command: () => () => ({
+                    rules: [],
+                    comment: '人设的',
+                    category: 'persona',
+                    handler: async () => {},
+                }),
+            },
+        ]);
 
         const terminal = await runAssembled(wired);
 
         expect(terminal.kind).toBe('no_match');
-        expect(wired.sent).toEqual([]);
     });
 
-    it('认领消息落到 store 上，驼峰按列名翻译过去', async () => {
+    it('黑名单从装配进来', async () => {
         const wired = infrastructure();
+        wired.infra.notBlocked = async () => false;
 
-        await runAssembled(wired);
+        const terminal = await runAssembled(wired);
 
-        expect(wired.claimed).toEqual([
-            { common_message_id: 'cm_1', bot_name: BOT_NAME, common_user_id: 'cu_sender' },
-        ]);
-    });
-
-    it('去重标记带租期抢，抢到之后成功路径不还', async () => {
-        const wired = infrastructure();
-
-        await runAssembled(wired);
-
-        expect(wired.markerCalls).toEqual(['acquire:make_reply:cm_1:60']);
-        expect(wired.markers.size).toBe(1);
-    });
-
-    // 失败路径退回资格走的必须是同一份标记存储，否则退了个寂寞。
-    it('publish 失败时资格退回同一份标记存储', async () => {
-        const wired = infrastructure();
-        wired.infra.broker = {
-            publish: async () => {
-                throw new Error('broker is down');
-            },
-        };
-
-        await expect(runAssembled(wired)).rejects.toThrow('broker is down');
-
-        expect(wired.markerCalls).toEqual(['acquire:make_reply:cm_1:60', 'release:make_reply:cm_1']);
-        expect(wired.markers.size).toBe(0);
+        expect(terminal.kind).toBe('blocked');
     });
 });
 
 describe('装配出来的规则序列', () => {
-    // 装配根把 larkCommands(deps) 的产出递进来，这里验它真的排在人格聊天前面。漏了这根
-    // 线的症状与"顺序排反了"一模一样：赤尾照常回话，指令一条都不响应，日志干净。
-    it('指令清单从装配进来，排在人格聊天前面', async () => {
+    // 装配根把 larkCommands(deps) 的产出递进来。漏了这根线的症状是指令一条都不响应，
+    // 而日志干净。
+    it('指令清单从装配进来并真的跑起来', async () => {
         const ran: string[] = [];
         const roster: LarkCommandSlot[] = [
             {
@@ -293,7 +210,17 @@ describe('装配出来的规则序列', () => {
 
         expect(terminal.matchedRule).toBe('余额');
         expect(ran).toEqual(['余额']);
-        expect(wired.sent).toEqual([]);
+    });
+
+    // 一个指令都没填时序列是空的：一条 @ 赤尾的消息走完谁也不接，收敛成 no_match。
+    // 拆掉之前这里必然是 responded / matched="聊天"（那条 catch-all 接住了它）。
+    it('没有指令时，一条 @ 赤尾的消息收敛成 no_match', async () => {
+        const wired = infrastructure();
+
+        const terminal = await runAssembled(wired);
+
+        expect(terminal.kind).toBe('no_match');
+        expect(terminal.matchedRule).toBeUndefined();
     });
 
     // 依赖在装配期绑一次。每条消息重绑一次的话，客户端池、缓存这些东西会跟着消息一起

@@ -297,10 +297,11 @@ describe('拼接：槽位按清单顺序进规则序列', () => {
     });
 });
 
-describe('顺序契约：指令在前，人格聊天在后', () => {
-    // bot 没有 bot_role 时引擎不做 category 过滤，序列是纯粹按先后试。人格聊天排到前面
-    // 的话，这条 @ 赤尾的消息会先命中它 —— 指令一条都跑不到，而赤尾照常回话。
-    it('不过滤 category 时，指令先拿到匹配机会', async () => {
+describe('序列契约：只有指令，没有兜底', () => {
+    // 拆掉之前序列尾巴上还拼着一条只有 NeedRobotMention 的人格聊天 catch-all，
+    // 一条 @ 赤尾的消息必然命中它。那条支线整条拆了 —— 她要不要开口由她自己每一缝查
+    // common_message 时决定，不再由入站这一段替她决定。
+    it('指令按清单顺序拿到匹配机会', async () => {
         const ran: string[] = [];
         const sequence = larkChatRules([probeCommand('余额', ran)])(commandContext());
 
@@ -308,12 +309,9 @@ describe('顺序契约：指令在前，人格聊天在后', () => {
 
         expect(terminal.matchedRule).toBe('余额');
         expect(ran).toEqual(['余额']);
-        expect(terminal.pendingChatTrigger).toBeUndefined();
     });
 
-    // 工具 bot 那条路失效得更彻底：引擎撞上 category 对不上且非 fallthrough 的规则时直接
-    // return no_match，所以人格聊天只要排在前面，工具 bot 连第一条指令都到不了。
-    it('工具 bot 不会先撞上人格聊天而整条序列短路', async () => {
+    it('工具 bot 照样跑得到指令', async () => {
         const ran: string[] = [];
         const sequence = larkChatRules([probeCommand('余额', ran)])(commandContext());
 
@@ -323,11 +321,11 @@ describe('顺序契约：指令在前，人格聊天在后', () => {
         expect(ran).toEqual(['余额']);
     });
 
-    // 反过来钉一次：人格聊天确实是排在最后的那条 catch-all，没有指令命中时它接住。
-    it('没有指令命中时人格聊天兜底', async () => {
+    // 没有指令命中时**没有人接住它**，收敛成 no_match —— 这是正确终态，不是漏了什么。
+    it('没有指令命中时收敛成 no_match，没有兜底规则', async () => {
         const terminal = await runSequence(larkChatRules([])(commandContext()), undefined);
 
-        expect(terminal.matchedRule).toBe('聊天');
-        expect(terminal.pendingChatTrigger).toBeDefined();
+        expect(terminal.kind).toBe('no_match');
+        expect(terminal.matchedRule).toBeUndefined();
     });
 });

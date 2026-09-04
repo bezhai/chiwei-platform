@@ -637,8 +637,8 @@ class Runtime:
 
         try:
             # Passive fetch: the queue is owned by whoever publishes to
-            # it (channel-server for ``chat_request``, ``declare_topology``
-            # for the static ALL_ROUTES set). Trying to re-declare with our
+            # it (``declare_topology`` for the static ALL_ROUTES set).
+            # Trying to re-declare with our
             # own args would clash on DLX / TTL settings — see
             # ``_build_queue_args`` in ``app/infra/rabbitmq.py``. Mirror
             # ``mq.consume``'s ``get_queue`` for exactly that reason.
@@ -667,8 +667,7 @@ class Runtime:
             async with queue.iterator() as qit:
                 async for incoming in qit:
                     ctx = extract_context(incoming.headers)
-                    # Gap 11 mq-source fallback: external producers
-                    # (e.g. channel-server publishing CHAT_REQUEST) may not
+                    # Gap 11 mq-source fallback: external producers may not
                     # inject trace_id into the message header. Without a
                     # fallback the entire downstream chain runs with
                     # trace_id=None — runtime_inflight rows, langfuse

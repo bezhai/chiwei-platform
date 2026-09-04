@@ -1,6 +1,5 @@
 import { userBlacklistRepo } from '../persistence/repositories';
 import { type RuleMessage } from './rule-message';
-import type { RuleHandlerContext } from './engine';
 
 // 规则/处理器一律消费平台无关 RuleMessage（决策五）。本文件只保留**真正平台
 // 无关**的规则（EqualText/RegexpMatch/OnlyGroup/文本限定/NeedRobotMention/
@@ -14,16 +13,15 @@ type Rule = (message: RuleMessage) => boolean;
 
 type AsyncRule = (message: RuleMessage) => Promise<boolean>;
 
-// handler 第二参 ctx 可选（决策一）：persona 文本主链路用
-// ctx.registerPendingChatTrigger 把待发 ChatTrigger 意图回传引擎，由接线点
-// 在该渠道入站消息写入成功后再发 MQ。其余 handler 不声明此参即可。
-type Handler = (message: RuleMessage, ctx?: RuleHandlerContext) => Promise<void>;
+// handler 只收这条消息本身。它想回话就自己回，引擎不从它手里接任何"待发意图"
+// 往下传 —— 规则段的产出只有一个终态记录。
+type Handler = (message: RuleMessage) => Promise<void>;
 
 /** 规则分类：utility=工具功能, persona=拟人聊天 */
 export type RuleCategory = 'utility' | 'persona';
 
-// 定义规则和对应处理逻辑的结构。新增 channels 渠道声明字段（决策五范围收紧）：
-//   - 不声明 = 默认全平台（只有 persona 文本主链路这样，真正平台无关）。
+// 定义规则和对应处理逻辑的结构。channels 渠道声明字段：
+//   - 不声明 = 默认全平台。
 //   - 声明具体渠道 = 仅该渠道：runRules 按消息 channel 过滤，其他渠道的消息
 //     跳过（并入终态记录的 skipped）。
 //   注：新模型下"这条指令属于谁"优先靠 CommandRegistry.register(channel, ...)
