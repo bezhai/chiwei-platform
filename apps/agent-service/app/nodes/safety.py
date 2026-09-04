@@ -1,12 +1,13 @@
 """Safety pipeline @nodes + private helpers (Phase 2).
 
-合并 ``app/chat/safety.py`` 和 post safety chain 的所有逻辑：
-- module-level 私有 helpers：banned word + 4 个 LLM 检查 + ``_run_audit``
+- module-level 私有 helpers：3 个 pre-check LLM 检查 + ``_run_pre_audit``
 - module-level enum / config：``BlockReason`` / ``_GUARD_*``
 - @node：``run_pre_safety`` / ``run_post_safety``
 - 常量：``TERMINAL_STATUSES``
 
-节点 / wiring / 外部入口由后续 Task 6-9 添加；本 Task 只搬迁 helper 保留行为。
+**判一段输出安不安全那一块不在这里**，它在 :mod:`app.capabilities.output_safety`：
+她自己开口那条链（生活引擎的嘴）在**发出去之前**判同一件事，两条链共用一份判据。
+留在这个模块里就意味着另一条链要么 import 一个 ``_`` 开头的私有函数、要么再写一份。
 """
 from __future__ import annotations
 
@@ -20,8 +21,9 @@ from pydantic import BaseModel, Field
 from app.agent.core import Agent, AgentConfig
 from app.agent.trace import turn_trace
 from app.api.middleware import get_lane
-from app.capabilities import banned_words as _banned_words
+from app.capabilities import banned_words
 from app.capabilities.concurrency import fan_out_wait
+from app.capabilities.output_safety import audit_output
 from app.data.queries import get_safety_status, set_safety_status
 from app.domain.safety import (
     PostSafetyRequest,
@@ -56,7 +58,6 @@ _GUARD_POLITICS = AgentConfig(
     "guard_sensitive_politics", "guard-model", "pre-politics-check"
 )
 _GUARD_NSFW = AgentConfig("guard_nsfw_content", "guard-model", "pre-nsfw-check")
-_GUARD_OUTPUT = AgentConfig("guard_output_safety", "guard-model", "post-safety-check")
 
 
 # ---------------------------------------------------------------------------
@@ -83,13 +84,6 @@ class _PreCheckOutcome:
     detail: str | None = None
 
 
-@dataclass
-class _PostAuditOutcome:
-    is_blocked: bool = False
-    reason: str | None = None
-    detail: str | None = None
-
-
 # ---------------------------------------------------------------------------
 # Structured output schemas for LLM checks
 # ---------------------------------------------------------------------------
@@ -108,21 +102,6 @@ class _PoliticsResult(BaseModel):
 class _NsfwResult(BaseModel):
     is_nsfw: bool = Field(description="Contains NSFW / adult content")
     confidence: float = Field(ge=0, le=1)
-
-
-class _OutputSafetyResult(BaseModel):
-    is_unsafe: bool = Field(description="Response contains unsafe content")
-    confidence: float = Field(ge=0, le=1)
-
-
-# ---------------------------------------------------------------------------
-# Banned word check (shared by pre and post)
-# ---------------------------------------------------------------------------
-
-
-async def _check_banned_word(text: str) -> str | None:
-    """Return the matched banned word, or None if clean."""
-    return await _banned_words.contains(text)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +189,7 @@ async def _run_pre_audit(
     """
     # Fast path: banned word
     try:
-        banned = await _check_banned_word(message_content)
+        banned = await banned_words.contains(message_content)
         if banned:
             logger.warning("Banned word hit: %s", banned)
             return _PreCheckOutcome(
@@ -247,53 +226,6 @@ async def _run_pre_audit(
 
 
 # ---------------------------------------------------------------------------
-# Post-check helpers
-# ---------------------------------------------------------------------------
-
-
-async def _check_output(response_text: str) -> _PostAuditOutcome:
-    """LLM output safety audit。"""
-    try:
-        result: _OutputSafetyResult = await Agent(
-            _GUARD_OUTPUT,
-            model_kwargs={"reasoning_effort": "low"},
-            update_trace=False,
-        ).extract(
-            _OutputSafetyResult, messages=[], prompt_vars={"response": response_text}
-        )
-        if result.is_unsafe and result.confidence >= 0.7:
-            logger.warning("Output unsafe: confidence=%.2f", result.confidence)
-            return _PostAuditOutcome(
-                is_blocked=True,
-                reason="output_unsafe",
-                detail=f"confidence={result.confidence}",
-            )
-    except Exception as e:
-        logger.error("Output safety LLM check failed: %s", e)
-    return _PostAuditOutcome()
-
-
-async def _run_audit(response_text: str) -> _PostAuditOutcome:
-    """跑 banned word + LLM output audit；fail-open（跟旧 run_post_check 一致）。"""
-    if not response_text or not response_text.strip():
-        return _PostAuditOutcome()
-
-    # Step 1: banned word
-    try:
-        banned = await _check_banned_word(response_text)
-        if banned:
-            logger.warning("Output banned word hit: %s", banned)
-            return _PostAuditOutcome(
-                is_blocked=True, reason="output_banned_word", detail=banned
-            )
-    except Exception as e:
-        logger.error("Output banned word check failed: %s", e)
-
-    # Step 2: LLM audit
-    return await _check_output(response_text)
-
-
-# ---------------------------------------------------------------------------
 # Public @node entries
 # ---------------------------------------------------------------------------
 
@@ -324,22 +256,28 @@ async def run_post_safety(req: PostSafetyRequest) -> Recall | None:
         )
         return None
 
-    decision = await _run_audit(req.response_text)
+    # 事后审计这条链上不给期限：它跑在回复发出去之后的后台节点里，慢一点只是慢一
+    # 点，没有人在等它。（她自己开口那条链在一缝里同步等，必须给期限。）
+    verdict = await audit_output(req.response_text)
     checked_at = datetime.now(UTC).isoformat()
 
-    if decision.is_blocked:
+    if not verdict.ok:
         return Recall(
             session_id=req.session_id,
             channel=req.channel,
             chat_id=req.chat_id,
             trigger_message_id=req.trigger_message_id,
-            reason=decision.reason or "unknown",
-            detail=decision.detail,
+            reason=verdict.reason or "unknown",
+            detail=verdict.detail,
             lane=get_lane(),
         )
 
+    # ``checked`` 一起落库：这一关坏掉时是 fail-open 放行的，状态照样写 "passed"，
+    # 但那条其实没判过。不记下来的话，"那段时间漏了多少"事后答不出来。
     await set_safety_status(
-        req.session_id, "passed", {"checked_at": checked_at}
+        req.session_id,
+        "passed",
+        {"checked_at": checked_at, "checked": verdict.checked},
     )
     return None
 

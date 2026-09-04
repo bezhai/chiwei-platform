@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.capabilities.output_safety import OutputVerdict
 from app.domain.safety import (
     PostSafetyRequest,
     PreSafetyRequest,
@@ -18,12 +19,15 @@ def test_module_imports():
     """烟囱测试：模块能加载，含必要 helper / 常量。"""
     from app.nodes import safety as m
 
-    assert hasattr(m, "_check_banned_word")
     assert hasattr(m, "_check_injection")
     assert hasattr(m, "_check_politics")
     assert hasattr(m, "_check_nsfw")
-    assert hasattr(m, "_check_output")
-    assert hasattr(m, "_run_audit")
+    # 判一段输出安不安全那一块在能力层，两条链共用（她自己开口那条在发出去之前
+    # 判同一件事）。这里只留一个引用。
+    assert hasattr(m, "audit_output")
+    assert not hasattr(m, "_run_audit"), (
+        "旧的那份留在这儿就会有人接着用它，于是判据变成两份"
+    )
     assert hasattr(m, "BlockReason")
     assert hasattr(m, "TERMINAL_STATUSES")
     # TERMINAL_STATUSES 内容
@@ -48,7 +52,7 @@ def _make_req(session_id="sess-1", channel="lark") -> PostSafetyRequest:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["passed", "blocked", "recalled", "recall_failed"])
 async def test_run_post_safety_short_circuits_on_terminal_status(status):
-    """terminal 状态下短路 return None，不调 _run_audit / set_safety_status."""
+    """terminal 状态下短路 return None，不调 audit_output / set_safety_status."""
     from app.nodes import safety as m
 
     req = _make_req()
@@ -58,7 +62,7 @@ async def test_run_post_safety_short_circuits_on_terminal_status(status):
 
     with (
         patch.object(m, "get_safety_status", fake_get),
-        patch.object(m, "_run_audit", fake_audit),
+        patch.object(m, "audit_output", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
     ):
         result = await m.run_post_safety(req)
@@ -90,12 +94,12 @@ async def test_run_post_safety_passed_writes_status_and_returns_none():
     from app.nodes import safety as m
 
     fake_get = AsyncMock(return_value="pending")
-    fake_audit = AsyncMock(return_value=m._PostAuditOutcome(is_blocked=False))
+    fake_audit = AsyncMock(return_value=OutputVerdict(ok=True))
     fake_set = AsyncMock()
 
     with (
         patch.object(m, "get_safety_status", fake_get),
-        patch.object(m, "_run_audit", fake_audit),
+        patch.object(m, "audit_output", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
     ):
         result = await m.run_post_safety(_make_req("sess-pass"))
@@ -105,6 +109,32 @@ async def test_run_post_safety_passed_writes_status_and_returns_none():
     args = fake_set.await_args.args
     assert args[0] == "sess-pass"
     assert args[1] == "passed"
+    assert args[2]["checked"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_post_safety_records_that_a_broken_guard_checked_nothing():
+    """这一关坏掉时是 fail-open 放行的，状态照样写 passed —— 但那条没判过。
+
+    不把这一笔记下来，"那段时间漏了多少条没检查"事后就答不出来。
+    """
+    from app.nodes import safety as m
+
+    fake_get = AsyncMock(return_value="pending")
+    fake_audit = AsyncMock(return_value=OutputVerdict(ok=True, checked=False))
+    fake_set = AsyncMock()
+
+    with (
+        patch.object(m, "get_safety_status", fake_get),
+        patch.object(m, "audit_output", fake_audit),
+        patch.object(m, "set_safety_status", fake_set),
+    ):
+        result = await m.run_post_safety(_make_req("sess-unchecked"))
+
+    assert result is None
+    args = fake_set.await_args.args
+    assert args[1] == "passed", "放行就是放行，不因为没判成而改状态"
+    assert args[2]["checked"] is False
 
 
 @pytest.mark.asyncio
@@ -114,15 +144,15 @@ async def test_run_post_safety_blocked_returns_recall_without_writing_status():
 
     fake_get = AsyncMock(return_value="pending")
     fake_audit = AsyncMock(
-        return_value=m._PostAuditOutcome(
-            is_blocked=True, reason="output_unsafe", detail="confidence=0.9"
+        return_value=OutputVerdict(
+            ok=False, reason="output_unsafe", detail="confidence=0.9"
         )
     )
     fake_set = AsyncMock()
 
     with (
         patch.object(m, "get_safety_status", fake_get),
-        patch.object(m, "_run_audit", fake_audit),
+        patch.object(m, "audit_output", fake_audit),
         patch.object(m, "set_safety_status", fake_set),
         patch.object(m, "get_lane", MagicMock(return_value="dev")),
     ):
