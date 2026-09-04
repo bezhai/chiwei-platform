@@ -18,6 +18,13 @@
 约束：只按编号找会让一个从别处拿到的编号撤掉姐姐那条链 —— 那是替另一个人做决定，而
 且被撤的那个人一个字都感知不到。
 
+**撤回不过会话白名单那道闸。** 别处每一只手都只碰她视野里的会话
+（:func:`app.living.phone.reachable_conversations`），这里走的是未过滤的那份
+（:func:`app.living.phone.conversation_her_bot_is_in`）：判据只有"bot 还在不在那个会
+话里"。她撤的是自己已经发出去的话，用的是自己那张认领表上的编号（模型编不出别人
+的），跟"她现在还看不看得见那条会话"是两件事 —— 让一条发出去时在名单里、之后掉出名单
+的消息撤不回来，是纯粹的倒退：那句话还挂在真人眼前，而她眼睁睁没办法。
+
 **编号对不上就如实说没有这条，不替她挑。** 对不上的原因有好几种（编错了、那是姐姐那
 条、当面说的话本来就没有编号），这一刻分不出是哪一种，所以只说确定的那一件。绝不排个
 序取最近的顶上：撤掉一句她没想撤的话，比撤不掉更糟。
@@ -69,7 +76,7 @@ from app.data.session import get_session
 from app.domain.safety import Recall
 from app.living.happening import record_happening
 from app.living.mouth import SpokenOutbound
-from app.living.phone import medium_for, reachable_conversation
+from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.records import KIND_ACT
 from app.living.scope import moment_scope, note_recorded
 from app.living.whereabouts import current_whereabouts
@@ -276,12 +283,17 @@ async def take_back_message(
             f"后面的方括号里照抄 —— 当面说的话没有编号，也撤不了。"
         )
 
-    conv = await reachable_conversation(
+    # **这一处刻意走未过滤的那份可达性**：判据只有"bot 还在不在那个会话里"，不管这条
+    # 会话此刻在不在她视野里（:mod:`app.living.whitelist`）。她撤的是自己已经发出去
+    # 的话，用的是自己那张认领表上的编号 —— 跟"她现在还看不看得见那条会话"是两件事。
+    # 过白名单闸的话，一条发出去时在名单里、之后掉出名单的消息就撤不回来了，而那句话
+    # 还挂在真人眼前：那是纯粹的倒退。
+    conv = await conversation_her_bot_is_in(
         persona_id=persona_id, channel_id=line.channel_id
     )
     if conv is None:
-        # ``channel`` 决定撤回投哪条队列，猜一个就是投到别的渠道去。这条会话已经不在
-        # 她手机上（bot 被移出去了）的话，撤回本来也做不成，如实说。
+        # ``channel`` 决定撤回投哪条队列，猜一个就是投到别的渠道去。bot 已经被移出
+        # 那个会话的话，撤回本来也做不成，如实说。
         raise ValueError(
             f"「{line.said}」发在一条你现在够不着的会话上，撤不了。"
         )

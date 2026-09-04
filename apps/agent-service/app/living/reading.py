@@ -2,9 +2,9 @@
 
 **没有"书"这个注册物。** 她能读的严格等于她手机上收到过的文件（``common_message``
 里一条普通的 file 项，和图片走同一条媒体轨）。所以"读什么"这个问题的答案只能从她
-的会话里来：同一条口径的会话集合（``common_bot_presence`` + 她自己的 bot），跟
-:mod:`app.living.phone` 认"哪些会话在她手机上"是同一条 —— 她读得到的严格等于她收
-得到的。
+的会话里来，而且**就是** :func:`app.living.phone.reachable_conversations` 那一次调用
+的结果（不是"同一条口径的另一份实现"）：bot 还在、而且这条会话在她视野里
+（:mod:`app.living.whitelist`）—— 她读得到的严格等于她看得见的。
 
 **认不准是哪个文件就回问，不替她选。** 同一本书被两个人各发过一次是常事，而这两份
 是**两个不同的东西**：附件实例身份由「收到它那一次」派生（``derive_attachment_id``
@@ -199,12 +199,13 @@ def _where_of(scope: str, title: str, who: str) -> str:
     return f"群「{label}」" if scope != "direct" else f"私聊「{label}」"
 
 
-async def files_sent_to(*, persona_id: str) -> list[SentFile]:
+async def files_sent_to(*, persona_id: str, now: datetime) -> list[SentFile]:
     """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。
 
     会话集合**就是** :func:`app.living.phone.reachable_conversations` 那一份（不是
     "同一条口径的另一份实现"，是同一个调用的结果传进查询）：**她读得到的严格等于她
-    收得到的**。
+    看得见的** —— 白名单收窄之后一样，名单外那条会话里的文件连着文件名、谁发的、发在
+    哪个群，一个字都不该露出来。``now`` 是调用方的时间锚，名单按它算。
 
     **撤回掉的也在里面**，带着 ``still_gettable=False``。谁看得到它、谁读得起它由
     调用方定（理由写在
@@ -215,7 +216,7 @@ async def files_sent_to(*, persona_id: str) -> list[SentFile]:
     rows = await find_file_items_in_conversations(
         [
             {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
-            for c in await reachable_conversations(persona_id=persona_id)
+            for c in await reachable_conversations(persona_id=persona_id, now=now)
         ]
     )
     return [
@@ -328,7 +329,7 @@ async def look_for_something_to_read() -> str:
         有人发给你的那些文件，能拿到的各带一串 file=…；一个都没有时如实说明。
     """
     lane, now, persona_id, _moment_id = moment_scope()
-    files = await files_sent_to(persona_id=persona_id)
+    files = await files_sent_to(persona_id=persona_id, now=now)
     if not files:
         return "没有谁给你发过什么可以读的东西。"
 
@@ -396,7 +397,7 @@ async def read_a_bit(
     if not wanted:
         raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")
 
-    files = await files_sent_to(persona_id=persona_id)
+    files = await files_sent_to(persona_id=persona_id, now=now)
     # 一条判据两条腿：报的是那串身份（照抄回来的），或者是名字的一部分。**不排序、
     # 不取第一个** —— 命中几个就是几个，认不准由她自己认。
     #

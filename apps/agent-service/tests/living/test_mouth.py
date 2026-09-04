@@ -48,9 +48,46 @@ def _at(hour: int, minute: int = 0) -> dt.datetime:
     return dt.datetime(2026, 7, 25, hour, minute, tzinfo=_CST)
 
 
+async def _somebody_called_her(
+    conversation: uuid.UUID, *, at: dt.datetime, names_her: bool = False
+) -> None:
+    """真人在这条会话里叫了她一声（私聊里任意一条就算，群里要点她的名）。
+
+    判据跟 nudge 那条钟同一份，见 :mod:`app.living.whitelist`。
+    """
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_message (common_message_id, channel,"
+                " common_conversation_id, common_user_id, sender_display_name,"
+                " role, content, content_text, scope, event_time,"
+                " mentioned_common_user_ids)"
+                " VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid),"
+                " CAST(:u AS uuid), 'bezhai', 'user', CAST(:body AS jsonb), :txt,"
+                " :sc, :at, CAST(:named AS text[])::uuid[])"
+            ),
+            {
+                "m": str(uuid.uuid4()),
+                "c": str(conversation),
+                "u": str(_BEZHAI),
+                "body": '[{"kind": "text", "text": "在吗"}]',
+                "txt": "在吗",
+                "sc": "direct" if conversation == _DM else "group",
+                "at": int(at.timestamp() * 1000),
+                "named": [str(_AKAO_BOT_UID)] if names_her else [],
+            },
+        )
+
+
 @pytest.fixture
 async def mouth_db(living_db):
-    """两个 bot 身份、一条私聊、一个群、一个不是她的群 —— 嘴要发的地址都在这儿。"""
+    """两个 bot 身份、一条私聊、一个群、一个不是她的群 —— 嘴要发的地址都在这儿。
+
+    私聊和群里各有一条**有人在叫她**的消息：白名单收窄之后"bot 还在这个会话里"不再
+    等于"她看得见它"（:mod:`app.living.whitelist`），一条动静都没有的会话她根本发不
+    出去。这几条消息不改变下面任何一条用例要验的东西 —— 她没看过它们，所以既不进她
+    开口前读的那段上下文，也不影响出站的任何一样。
+    """
     async with session_mod.get_session() as s:
         await s.execute(
             text(
@@ -90,6 +127,8 @@ async def mouth_db(living_db):
                 ),
                 {"c": str(conv)},
             )
+    await _somebody_called_her(_DM, at=_at(21, 0))
+    await _somebody_called_her(_GROUP, at=_at(21, 0), names_her=True)
     return living_db
 
 
@@ -1046,3 +1085,128 @@ async def test_being_stopped_over_and_over_never_leaks_a_line(
         f"每个候选都该被判一次，实际判了 {len(guard.judged)} 次"
     )
     assert await recent_own_happenings(lane=LANE, persona_id="akao") == []
+
+
+# --------------------------------------------------------------------------
+# 十 · 会话白名单：她能发的严格等于她看得见的
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_conversation_out_of_sight_is_refused_even_though_her_bot_is_in_it(
+    mouth_db, in_a_moment, spoken, voice
+):
+    """bot 还在那个群里、但没人叫她 —— 她发不出去。
+
+    这是白名单主闸在嘴这一侧的样子：她能发的严格等于她能看见的那些会话
+    （:func:`app.living.phone.reachable_conversations`），而不是"bot 还在的那些"。
+    """
+    quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_conversation"
+                " (common_conversation_id, channel, scope, display_name, is_active)"
+                " VALUES (CAST(:c AS uuid), 'lark', 'group', '没人叫她的群', true)"
+            ),
+            {"c": str(quiet)},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO common_bot_presence"
+                " (common_conversation_id, bot_name, is_active)"
+                " VALUES (CAST(:c AS uuid), 'chiwei', true)"
+            ),
+            {"c": str(quiet)},
+        )
+
+    async with in_a_moment("akao"):
+        outcome = await send_message.invoke({"what": "喂", "channel_id": str(quiet)})
+
+    assert spoken == [], "名单外的会话她照样发出去了"
+    assert isinstance(outcome, dict)
+
+
+@pytest.mark.integration
+async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
+    mouth_db, in_a_moment, spoken, voice
+):
+    """发消息那一刻查的 presence 是**实时**的，不是这一缝开头那份快照。
+
+    这一道由两半组成，时效性刻意不同：名单读这一缝的锚（下一条用例验那半），
+    presence 每次重新查。"bot 还在不在那个会话里"是这句话能不能真的送到的物理前
+    提，读一份缝开头的快照等于这道保护不存在 —— bot 半路被移出会话，她还会照着过
+    期的判断把话交出去。
+    """
+    from app.living.phone import reachable_conversations
+
+    async with in_a_moment("akao"):
+        settled = {
+            c.channel_id
+            for c in await reachable_conversations(persona_id="akao", now=_at(21, 30))
+        }
+        assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
+
+        async with session_mod.get_session() as s:
+            await s.execute(
+                text(
+                    "DELETE FROM common_bot_presence"
+                    " WHERE common_conversation_id = CAST(:c AS uuid)"
+                ),
+                {"c": str(_DM)},
+            )
+
+        outcome = await send_message.invoke({"what": "喂", "channel_id": str(_DM)})
+
+    assert spoken == [], "bot 已经被移出去了，她还是把话交了出去"
+    assert isinstance(outcome, dict)
+
+
+@pytest.mark.integration
+async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_moment(
+    mouth_db, in_a_moment, spoken, voice
+):
+    """名单那一半读的是**这一缝的锚**：缝开头看得见，缝中途滑出时间窗照样答得上。
+
+    上一条用例验的是 presence 那一半实时重查。这一条钉的是另一半 —— 两半必须都被钉
+    住，否则"改成整条主闸都实时重算"和"改成整条主闸都读快照"这两个方向的回归各有一
+    条用例挡不住。
+
+    她这一缝要回的就是缝开头摆在她眼前的那些会话。时间窗是按 ``now`` 滑的，而模型想
+    一想、渲染一次话要花掉真实时间；名单在她张嘴那一刻重算的话，她会在"刚看完那条私
+    聊、正要回"的中途发现那条会话没了 —— 而消息还挂在真人眼前。
+    """
+    from app.data.queries.messages import count_summons_since
+    from app.living.phone import reachable_conversations
+
+    async with in_a_moment("akao"):
+        settled = {
+            c.channel_id
+            for c in await reachable_conversations(persona_id="akao", now=_at(21, 30))
+        }
+        assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
+
+        # 把让它进名单的那条消息删掉 —— 现在重算的话它一档都够不着。
+        async with session_mod.get_session() as s:
+            await s.execute(
+                text(
+                    "DELETE FROM common_message"
+                    " WHERE common_conversation_id = CAST(:c AS uuid)"
+                ),
+                {"c": str(_DM)},
+            )
+        counted = await count_summons_since(
+            conversations=[{"channel_id": str(_DM), "scope": "direct", "title": ""}],
+            bot_user_ids=[str(_AKAO_BOT_UID)],
+            own_bots=["chiwei"],
+            since_ms=[0],
+        )
+        assert [int(row["n"]) for row in counted] == [0], (
+            f"用例前提没成立：这条私聊现在重算该是一条都数不出来，拿到 {counted}"
+        )
+
+        outcome = await send_message.invoke({"what": "在", "channel_id": str(_DM)})
+
+    assert len(spoken) == 1, f"缝开头看得见的会话，她答不上了：{spoken}"
+    assert spoken[0].chat_id == str(_DM)
+    assert isinstance(outcome, str) and "发出去了" in outcome, outcome

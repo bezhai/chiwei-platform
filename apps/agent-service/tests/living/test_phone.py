@@ -27,6 +27,7 @@ from app.living.phone import (
     NEVER_LOOKED,
     PHONE_GLANCE_LIMIT,
     conversation_as_she_knows_it,
+    conversations_her_bot_is_in,
     envelopes_for,
     look_at_phone,
     look_up_contact,
@@ -369,13 +370,45 @@ async def _sister_said(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> s
 
 @pytest.mark.integration
 async def test_a_conversation_is_on_her_phone_when_her_own_bot_is_in_it(living_db):
+    """presence 那条判据（她自己的 bot 还在不在）—— **没过白名单那道闸**。
+
+    白名单收的是"哪些会话进她视野"，这一条问的是它前面那一步：bot 还在不在这个会话
+    里。两件事分开验，不然一条红了看不出是哪一层的问题。
+    """
     await _seed_world()
 
-    mine = {c.channel_id for c in await reachable_conversations(persona_id="akao")}
+    mine = {
+        c.channel_id for c in await conversations_her_bot_is_in(persona_id="akao")
+    }
 
     assert mine == {str(_DM), str(_GROUP)}, (
         "私聊和群用的是同一条规则：她自己的 bot 还在这个会话里。"
         "姐姐的私聊线不该出现在她手机上。"
+    )
+
+
+@pytest.mark.integration
+async def test_a_conversation_nobody_is_calling_her_in_is_not_on_her_phone(living_db):
+    """bot 还在、但没人找她的那些会话不在她手机上。
+
+    这是白名单的主闸：她挂在两百多个群里，绝大多数跟她没有关系。判据本身（几个窗口、
+    几条算够）在 ``test_whitelist.py``，这里钉的是"这道闸真的落在
+    :func:`reachable_conversations` 上" —— 落在别处的话，下面那些出口会各漏各的。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    mine = {
+        c.channel_id
+        for c in await reachable_conversations(persona_id="akao", now=_at(21, 35))
+    }
+
+    assert mine == {str(_DM)}, (
+        f"群里那条没人点她的名，不该进她视野。拿到：{mine}"
     )
 
 
@@ -401,9 +434,10 @@ async def test_the_envelope_never_leaks_a_single_word_of_the_message(living_db):
 
 
 @pytest.mark.integration
-async def test_the_envelope_says_when_she_last_spoke_there(living_db):
+async def test_the_envelope_says_when_she_last_spoke_there(living_db, pinned):
     """「跟她刚才干的事有没有牵连」是**事实**，不是我们替她算的权重。"""
     await _seed_world()
+    pinned(str(_GROUP))
     await _incoming(_GROUP, text_body="有人在吗", at=_at(21, 30), sender=_SOMEONE,
                     sender_name="路人")
 
@@ -502,9 +536,9 @@ async def test_a_conversation_with_nothing_unread_still_shows_the_recent_exchang
         await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
     await _her_own(_DM, text_body="去过呀", at=_at(21, 32))
 
-    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
-        "用例前提没成立：这条会话该已经没有未读了"
-    )
+    assert await envelopes_for(
+        lane=LANE, persona_id="akao", now=_at(21, 40)
+    ) == [], "用例前提没成立：这条会话该已经没有未读了"
 
     async with in_a_moment("akao", now=_at(21, 40)):
         seen = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -588,7 +622,9 @@ async def test_it_says_how_many_of_them_are_new(living_db, in_a_moment):
 
 
 @pytest.mark.integration
-async def test_her_own_words_take_up_room_in_the_window(living_db, in_a_moment):
+async def test_her_own_words_take_up_room_in_the_window(
+    living_db, in_a_moment, pinned
+):
     """窗口是"最近若干条"，她自己发的照样占位置，被挤出去的未读因此更多。
 
     这条把三件事同时钉住：窗口不分谁发的（10 条里有她 4 条）、「其中 N 条是新的」只
@@ -596,6 +632,7 @@ async def test_her_own_words_take_up_room_in_the_window(living_db, in_a_moment):
     的话，这里必然对不上。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     for i in range(8):
         await _incoming(
             _GROUP,
@@ -652,12 +689,16 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
         latest_unread = await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
     await _her_own(_DM, text_body="马上回你", at=_at(20, 12))
 
-    event.listen(living_db.sync_engine, "before_cursor_execute", record)
-    try:
-        async with in_a_moment("akao", now=_at(20, 20)):
+    async with in_a_moment("akao", now=_at(20, 20)):
+        # 先把这一缝的名单定下来 —— 真链路里这一步发生在信封那一眼（见
+        # ``run_moment``）。白名单那次统计也读 ``common_message``，不先定下来的话它
+        # 会混进下面这个数里，而这里要数的是"打开会话那一眼"发了几条。
+        await reachable_conversations(persona_id="akao", now=_at(20, 20))
+        event.listen(living_db.sync_engine, "before_cursor_execute", record)
+        try:
             seen = await look_at_phone.invoke({"channel_id": str(_DM)})
-    finally:
-        event.remove(living_db.sync_engine, "before_cursor_execute", record)
+        finally:
+            event.remove(living_db.sync_engine, "before_cursor_execute", record)
 
     assert len(read_common_message) == 1, (
         f"这一眼对库发了 {len(read_common_message)} 条读 common_message 的语句 —— "
@@ -717,6 +758,8 @@ async def test_the_handle_here_is_the_one_the_snapshot_already_printed(
     from app.living.snapshot import _own_line
 
     await _seed_world()
+    # 有人在跟她说话，这条私聊才在她视野里 —— 她自己说的那句一分都不算。
+    await _incoming(_DM, text_body="在吗", at=_at(21, 29))
     _, handle = await _her_own_proactive(
         _DM,
         text_body="在呢在呢",
@@ -814,7 +857,10 @@ async def test_a_moment_that_never_finished_did_not_read_anything(
 
     assert "在吗" in seen, "工具本身该正常返回"
     assert await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM)) == NEVER_LOOKED, "这一缝没跑完，游标却已经推过去了"
-    assert [e.unread for e in await envelopes_for(lane=LANE, persona_id="akao")] == [1]
+    assert [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    ] == [1]
 
 
 @pytest.mark.integration
@@ -850,8 +896,8 @@ async def test_sleeping_through_it_piles_the_messages_up_unread(living_db):
     await _incoming(_DM, text_body="第一条", at=_at(2, 0))
     await _incoming(_DM, text_body="第二条", at=_at(3, 0))
 
-    first = await envelopes_for(lane=LANE, persona_id="akao")
-    second = await envelopes_for(lane=LANE, persona_id="akao")
+    first = await envelopes_for(lane=LANE, persona_id="akao", now=_at(3, 30))
+    second = await envelopes_for(lane=LANE, persona_id="akao", now=_at(3, 30))
 
     assert [e.unread for e in first] == [2]
     assert [e.unread for e in second] == [2], "什么都没做，未读却变了"
@@ -890,7 +936,10 @@ async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
         again = await look_at_phone.invoke({"channel_id": str(_DM)})
     assert f"第{total - 1}条" in again and "其中 0 条是新的" in again
     assert "第0条" not in again, "被挤出窗口的那条又冒出来了"
-    assert [e.unread for e in await envelopes_for(lane=LANE, persona_id="akao")] == []
+    assert [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
+    ] == []
 
 
 # --------------------------------------------------------------------------
@@ -903,7 +952,9 @@ async def test_a_direct_message_is_someone_waiting_for_her(living_db):
     await _seed_world()
     mid = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
 
-    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+    summons = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
 
     assert summons is not None
     assert (summons.message_id, summons.channel_id) == (mid, str(_DM))
@@ -921,26 +972,40 @@ async def test_being_named_in_a_group_is_someone_calling_her(living_db):
         names_bot=_AKAO_BOT_UID,
     )
 
-    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+    summons = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
 
     assert summons is not None and summons.message_id == mid
 
 
 @pytest.mark.integration
-async def test_group_chatter_that_does_not_name_her_is_background_noise(living_db):
+async def test_group_chatter_that_does_not_name_her_is_background_noise(
+    living_db, pinned
+):
     await _seed_world()
+    # 群固定加白，所以它**在**她视野里 —— 下面那个 None 只能是这一节要验的那条判据
+    # 判出来的，不是白名单挡的。
+    pinned(str(_GROUP))
     await _incoming(
         _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
         sender_name="路人",
     )
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None
 
 
 @pytest.mark.integration
-async def test_being_named_by_someone_elses_bot_is_not_her_business(living_db):
+async def test_being_named_by_someone_elses_bot_is_not_her_business(
+    living_db, pinned
+):
     """群里点的是姐姐的名字 —— 跟她无关。"""
     await _seed_world()
+    # 群固定加白，所以它**在**她视野里 —— 下面那个 None 只能是这一节要验的那条判据
+    # 判出来的，不是白名单挡的。
+    pinned(str(_GROUP))
     await _incoming(
         _GROUP,
         text_body=" 你说呢",
@@ -950,11 +1015,13 @@ async def test_being_named_by_someone_elses_bot_is_not_her_business(living_db):
         names_bot=_AYANA_BOT_UID,
     )
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None
 
 
 @pytest.mark.integration
-async def test_a_group_message_nobody_scanned_does_not_call_her(living_db):
+async def test_a_group_message_nobody_scanned_does_not_call_her(living_db, pinned):
     """**没人算过 ≠ 确认没点她。**
 
     这一列是 NULL 的行有三种来源：加列之前的存量行、QQ 的行（那侧的投影不写这一
@@ -964,6 +1031,9 @@ async def test_a_group_message_nobody_scanned_does_not_call_her(living_db):
     来。代价是那段窗口里真的 @ 了她的消息她收不到，这是明知的取舍，不是遗漏。
     """
     await _seed_world()
+    # 群固定加白，所以它**在**她视野里 —— 下面那个 None 只能是这一节要验的那条判据
+    # 判出来的，不是白名单挡的。
+    pinned(str(_GROUP))
     await _incoming(
         _GROUP,
         text_body="@赤尾 在吗",
@@ -973,7 +1043,9 @@ async def test_a_group_message_nobody_scanned_does_not_call_her(living_db):
         mention_unrecorded=True,
     )
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None
 
 
 @pytest.mark.integration
@@ -988,7 +1060,9 @@ async def test_a_direct_message_calls_her_even_when_nobody_scanned_it(living_db)
         _DM, text_body="在吗", at=_at(21, 30), mention_unrecorded=True
     )
 
-    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+    summons = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
 
     assert summons is not None and summons.message_id == mid
 
@@ -1007,7 +1081,9 @@ async def test_naming_her_alongside_others_still_calls_her(living_db):
         names_others=(_AYANA_BOT_UID, _BEZHAI),
     )
 
-    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+    summons = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
 
     assert summons is not None and summons.message_id == mid
 
@@ -1020,7 +1096,9 @@ async def test_a_message_she_already_read_stops_calling_her(living_db, in_a_mome
     async with in_a_moment("akao"):
         await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None
 
 
 # --------------------------------------------------------------------------
@@ -1052,7 +1130,10 @@ async def test_a_message_landing_in_the_same_millisecond_is_not_skipped(
     # 同一毫秒、晚一步落库（uuidv7 更大）。
     await _incoming(_DM, text_body="第二句", at=same, message_id=_UUID7_B)
 
-    assert [e.unread for e in await envelopes_for(lane=LANE, persona_id="akao")] == [1]
+    assert [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    ] == [1]
     async with in_a_moment("akao"):
         again = await look_at_phone.invoke({"channel_id": str(_DM)})
     assert "第二句" in again, (
@@ -1067,7 +1148,7 @@ async def test_a_message_landing_in_the_same_millisecond_is_not_skipped(
 
 @pytest.mark.integration
 async def test_the_conversation_that_is_calling_her_is_always_in_the_envelope(
-    living_db,
+    living_db, pinned
 ):
     """在叫她的那条会话**一定**在信封里，多少群在刷屏都挤不掉它。
 
@@ -1079,11 +1160,14 @@ async def test_the_conversation_that_is_calling_her_is_always_in_the_envelope(
 
     await _seed_world()
     # 私聊最旧 —— 按"最近有动静"排序它会被排到最后。
-    await _incoming(_DM, text_body="在吗", at=_at(8, 0))
-    # 一堆群在刷屏，全都比私聊新。
+    await _incoming(_DM, text_body="在吗", at=_at(20, 35))
+    # 一堆群在刷屏，全都比私聊新。刷屏的群没人点她的名，本来一个都进不了她的视野
+    # —— 这条用例验的是信封的条数上限，所以把它们固定加白按住：**能挤掉她的东西
+    # 必须真的在**，否则这条用例什么都没证明。
     noisy = await _seed_noisy_groups(ENVELOPE_LIMIT + 3, at_from=_at(21, 0))
+    pinned(*noisy)
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
     channels = [e.channel_id for e in envelopes]
 
     assert str(_DM) in channels, (
@@ -1123,13 +1207,16 @@ async def test_an_overnight_pile_says_which_day_it_came_from(living_db):
 
 
 @pytest.mark.integration
-async def test_when_she_last_spoke_there_is_dated_across_the_night(living_db):
+async def test_when_she_last_spoke_there_is_dated_across_the_night(
+    living_db, pinned
+):
     """「你上次在这儿开口是什么时候」跨了夜就必须说是哪天。
 
     裸时分下"昨晚 21:25 说过"和"五分钟前说过"一个形状，而这条事实存在的全部意义
     就是让她分得清这两者。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     await _incoming(
         _GROUP, text_body="有人在吗", at=_at(9, 0), sender=_SOMEONE,
         sender_name="路人",
@@ -1254,13 +1341,14 @@ async def test_the_tail_stays_undated_within_the_same_day(living_db):
 
 @pytest.mark.integration
 async def test_a_sister_speaking_in_the_same_group_is_something_she_can_see(
-    living_db,
+    living_db, pinned
 ):
     """姐姐在同一个群里说的话，是她本该感知到的动静。"""
     await _seed_world()
+    pinned(str(_GROUP))
     await _sister_said(_GROUP, text_body="今晚吃什么", at=_at(21, 30))
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.channel_id, e.unread) for e in envelopes] == [(str(_GROUP), 1)], (
         "同群姐姐说的话被 role 一刀切排除出未读了 —— 她们明明在一个群里，"
@@ -1272,18 +1360,21 @@ async def test_a_sister_speaking_in_the_same_group_is_something_she_can_see(
 
 
 @pytest.mark.integration
-async def test_her_own_words_in_the_group_are_never_unread_to_her(living_db):
+async def test_her_own_words_in_the_group_are_never_unread_to_her(living_db, pinned):
     """她自己发出去的那句不是"未读" —— 那是她说的话，不是动静。"""
     await _seed_world()
+    # 群固定加白，所以它**在**她视野里 —— 下面那个空信封只能是"她自己的话不算未读"
+    # 判出来的，不是白名单挡的。
+    pinned(str(_GROUP))
     await _her_own(_GROUP, text_body="我在", at=_at(21, 30))
 
-    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
+    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
         "她自己刚说的话被算成了未读 —— 她会把自己的回声当成别人在说话"
     )
 
 
 @pytest.mark.integration
-async def test_a_sister_chatting_in_the_group_does_not_summon_her(living_db):
+async def test_a_sister_chatting_in_the_group_does_not_summon_her(living_db, pinned):
     """姐姐在群里聊天是**动静**，不是**召唤**。
 
     信封里看得见，但不提前把她带到那一刻 —— 群里的召唤只认 mention item 里那个
@@ -1295,12 +1386,17 @@ async def test_a_sister_chatting_in_the_group_does_not_summon_her(living_db):
     永远停不下来。同一个屋檐下的姐妹在群里聊天，不该比陌生人更有召唤力。
     """
     await _seed_world()
+    # 群固定加白，所以它**在**她视野里 —— 下面那个 None 只能是"群里不点名不算召唤"
+    # 判出来的，不是白名单挡的。
+    pinned(str(_GROUP))
     await _sister_said(_GROUP, text_body="@赤尾 今晚吃什么", at=_at(21, 30))
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None, (
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None, (
         "姐姐在群里随口一句就把她召唤过去了 —— 两个 agent 会互相叫醒，停不下来"
     )
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
     assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(False, False)], (
         f"姐姐的群聊发言被当成在叫她 —— 它连信封的条数上限都挤不掉了。拿到：{envelopes}"
     )
@@ -1319,7 +1415,9 @@ async def test_a_real_person_naming_her_in_the_group_still_calls_her(living_db):
         names_bot=_AKAO_BOT_UID,
     )
 
-    summons = await newest_unread_summons(lane=LANE, persona_id="akao")
+    summons = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
 
     assert summons is not None and summons.message_id == mid
 
@@ -1342,7 +1440,7 @@ async def test_the_envelope_says_someone_named_her(living_db):
         names_bot=_AKAO_BOT_UID,
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(True, True)], (
         f"群里点了她的名，信封却没认出来。拿到：{envelopes}"
@@ -1351,7 +1449,9 @@ async def test_the_envelope_says_someone_named_her(living_db):
 
 
 @pytest.mark.integration
-async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(living_db):
+async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(
+    living_db, pinned
+):
     """信封上的「有人点了你的名」同样受 NULL 约束。
 
     ``BOOL_OR`` 在整批行都是 NULL 时返回的是 NULL、不是 false，靠 Python 那侧
@@ -1359,6 +1459,9 @@ async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(liv
     当成一个真值展示出去，她会拿着一条不存在的点名去翻会话。
     """
     await _seed_world()
+    # 群固定加白：没人算过 mention 的那条消息在四个窗口里同样不算数，不按住这道闸
+    # 这个群会整个掉出她的视野，下面那对 False 就成了白名单判的，不是这一列判的。
+    pinned(str(_GROUP))
     await _incoming(
         _GROUP,
         text_body="@赤尾 在吗",
@@ -1368,7 +1471,7 @@ async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(liv
         mention_unrecorded=True,
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(False, False)], (
         f"没人算过这条消息，信封却说她被点名了。拿到：{envelopes}"
@@ -1397,7 +1500,7 @@ async def test_a_sister_word_she_has_not_read_is_not_something_she_knows(living_
 
 @pytest.mark.integration
 async def test_a_sister_word_she_did_read_is_attributed_to_the_sister(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """她看过之后那句在上下文里，署的是**姐姐的名字**，不是"你"。
 
@@ -1405,6 +1508,7 @@ async def test_a_sister_word_she_did_read_is_attributed_to_the_sister(
     的话当成自己说的"。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     await _sister_said(_GROUP, text_body="今晚吃什么", at=_at(21, 30))
 
     async with in_a_moment("akao"):
@@ -1436,7 +1540,7 @@ async def test_her_own_words_stay_hers_in_what_she_knows(living_db):
 
 @pytest.mark.integration
 async def test_the_skipped_count_counts_the_sisters_words_too(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """"前面还有 N 条你没往回翻"这个数也得把姐姐的话算进去。
 
@@ -1444,6 +1548,7 @@ async def test_the_skipped_count_counts_the_sisters_words_too(
     不然她看到的数跟她读到的东西对不上。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     total = PHONE_GLANCE_LIMIT + 3
     for i in range(total):
         await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
@@ -1496,14 +1601,14 @@ async def test_a_conversation_with_nothing_unread_can_still_be_found_by_name(
     """
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(20, 0))
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
 
-    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
-        "前提没成立：这条会话该已经从信封里消失了"
-    )
+    assert await envelopes_for(
+        lane=LANE, persona_id="akao", now=_at(20, 30)
+    ) == [], "前提没成立：这条会话该已经从信封里消失了"
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         found = await look_up_contact.invoke({"name": "bezhai"})
 
     assert str(_DM) in found, f"零未读就找不回这个人。拿到：\n{found}"
@@ -1515,7 +1620,7 @@ async def test_a_looked_up_address_sits_next_to_the_name(living_db, in_a_moment)
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(20, 0))
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         found = await look_up_contact.invoke({"name": "bezhai"})
 
     line = next(ln for ln in found.splitlines() if str(_DM) in ln)
@@ -1525,12 +1630,13 @@ async def test_a_looked_up_address_sits_next_to_the_name(living_db, in_a_moment)
 
 
 @pytest.mark.integration
-async def test_a_group_is_found_by_its_own_name(living_db, in_a_moment):
+async def test_a_group_is_found_by_its_own_name(living_db, in_a_moment, pinned):
     """群按群名找得到（群会话有标题，私聊多半没有，两条路都得走通）。"""
     await _seed_world()
+    pinned(str(_GROUP))
     await _incoming(_GROUP, text_body="今天几点", at=_at(20, 0))
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         found = await look_up_contact.invoke({"name": "宅居研究所"})
 
     assert str(_GROUP) in found, f"群名查不到。拿到：\n{found}"
@@ -1574,13 +1680,16 @@ async def test_a_name_that_matches_nothing_says_so_without_telling_her_what_to_d
 
 
 @pytest.mark.integration
-async def test_every_match_is_listed_without_picking_one(living_db, in_a_moment):
+async def test_every_match_is_listed_without_picking_one(
+    living_db, in_a_moment, pinned
+):
     """重名全列出来交给她挑：不排序、不筛、不取第一个。"""
     await _seed_world()
+    pinned(str(_GROUP))
     await _incoming(_DM, text_body="在吗", at=_at(20, 0))
     await _incoming(_GROUP, text_body="在吗", at=_at(20, 1))
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         found = await look_up_contact.invoke({"name": "bezhai"})
 
     assert str(_DM) in found and str(_GROUP) in found, (
@@ -1871,6 +1980,8 @@ async def test_a_message_already_taken_back_does_not_offer_a_handle(
     留着编号等于同时告诉她"这条撤回了"和"拿这串去撤它"，而她照着再撤一次只会撤了个空。
     """
     await _seed_world()
+    # 有人在跟她说话，这条私聊才在她视野里（她自己说的那句一分都不算）。
+    await _incoming(_DM, text_body="在吗", at=_at(21, 29))
     took_back, handle = await _her_own_proactive(
         _DM, text_body="那家店周一不开", at=_at(21, 30)
     )
@@ -1887,7 +1998,7 @@ async def test_a_message_already_taken_back_does_not_offer_a_handle(
 
 @pytest.mark.integration
 async def test_what_someone_else_took_back_is_not_in_the_window_either(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """别人（真人、姐姐）撤掉的消息，她打开会话时一条都看不到。
 
@@ -1895,6 +2006,7 @@ async def test_what_someone_else_took_back_is_not_in_the_window_either(
     让她看到的会话跟对面看到的不是同一个。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     his = await _incoming(
         _GROUP,
         text_body="这个别说出去",
@@ -1924,7 +2036,7 @@ async def test_what_someone_else_took_back_is_not_in_the_window_either(
 
 @pytest.mark.integration
 async def test_a_sister_word_taken_back_is_gone_from_what_she_knows_too(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """姐姐撤掉的那句同样不在 —— 哪怕她之前已经读过。
 
@@ -1932,6 +2044,7 @@ async def test_a_sister_word_taken_back_is_gone_from_what_she_knows_too(
     进入她已知的那段（前一节那批用例），撤掉之后不该再进。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
     await _sister_said(_GROUP, text_body="七点楼下集合", at=_at(21, 31))
 
@@ -1951,7 +2064,7 @@ async def test_a_sister_word_taken_back_is_gone_from_what_she_knows_too(
 
 @pytest.mark.integration
 async def test_a_message_taken_back_before_she_looked_is_not_there_to_open(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """撤在她看之前 —— 信封上不算动静，拿起手机也没有它。
 
@@ -1959,16 +2072,17 @@ async def test_a_message_taken_back_before_she_looked_is_not_there_to_open(
     她只会以为自己漏看了。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
 
-    before = await envelopes_for(lane=LANE, persona_id="akao")
+    before = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
     assert [(e.channel_id, e.unread) for e in before] == [(str(_GROUP), 1)], (
         f"用例前提就没成立：撤回之前这条本该是一条未读。拿到：{before}"
     )
 
     await _recalled_on_the_channel(took_back, at=_at(21, 31))
 
-    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
+    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
         "撤掉的那条还在信封上算一条动静 —— 她会为一条不存在的消息拿起手机"
     )
     async with in_a_moment("akao"):
@@ -1978,7 +2092,7 @@ async def test_a_message_taken_back_before_she_looked_is_not_there_to_open(
 
 @pytest.mark.integration
 async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back(
-    living_db,
+    living_db, pinned
 ):
     """信封上点的名字里，没有"只说过一句、而且撤掉了"的那个人。
 
@@ -1986,6 +2100,7 @@ async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back
     她翻开会话根本找不到那个人说了什么。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
     await _incoming(
         _GROUP,
@@ -1996,7 +2111,7 @@ async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back
     )
     await _recalled_on_the_channel(took_back, at=_at(21, 32))
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.unread, e.senders) for e in envelopes] == [(1, ("路人",))], (
         f"信封上还点着一个只说过一句、而且已经撤掉了的人。拿到：{envelopes}"
@@ -2005,7 +2120,7 @@ async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back
 
 @pytest.mark.integration
 async def test_the_skipped_count_does_not_count_a_message_taken_back(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """"前面还有 N 条你没往回翻"里不算撤掉的那些。
 
@@ -2013,6 +2128,7 @@ async def test_the_skipped_count_does_not_count_a_message_taken_back(
     数就跟她读到的东西对不上。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     for i in range(PHONE_GLANCE_LIMIT + 3):
         mid = await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
         if i == 0:
@@ -2037,21 +2153,25 @@ async def test_a_message_taken_back_stops_calling_her(living_db):
     await _seed_world()
     mid = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
 
-    before = await newest_unread_summons(lane=LANE, persona_id="akao")
+    before = await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    )
     assert before is not None and before.message_id == mid, (
         f"用例前提就没成立：撤回之前这条私聊本该在叫她。拿到：{before}"
     )
 
     await _recalled_on_the_channel(mid, at=_at(21, 31))
 
-    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None, (
+    assert await newest_unread_summons(
+        lane=LANE, persona_id="akao", now=_at(21, 35)
+    ) is None, (
         "撤掉的那条还在叫她 —— 她会被提前带到一刻，为一句已经不在的话"
     )
 
 
 @pytest.mark.integration
 async def test_a_name_only_seen_in_a_taken_back_message_is_not_found(
-    living_db, in_a_moment
+    living_db, in_a_moment, pinned
 ):
     """按名字找回会话时，撤掉的那条不算"这个人在里面说过话"。
 
@@ -2059,6 +2179,7 @@ async def test_a_name_only_seen_in_a_taken_back_message_is_not_found(
     不在了，拿它把一条会话搜出来，等于让她按一句不存在的话去找人。
     """
     await _seed_world()
+    pinned(str(_GROUP))
     took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
 
     async with in_a_moment("akao"):
@@ -2073,4 +2194,158 @@ async def test_a_name_only_seen_in_a_taken_back_message_is_not_found(
         after = await look_up_contact.invoke({"name": "绫奈"})
     assert str(_GROUP) not in after, (
         f"撤掉的那条还把这个群摆进了搜索结果。拿到：\n{after}"
+    )
+
+
+# --------------------------------------------------------------------------
+# 十二 · 会话白名单：不在名单里的整个不进她视野
+# --------------------------------------------------------------------------
+#
+# 主闸落在 :func:`reachable_conversations` 上，手机这一侧的四个出口全都从它来：信封、
+# nudge 那条钟、看手机、按名字找会话。判据本身（几个窗口、几条算够、固定加白怎么读）
+# 在 ``test_whitelist.py``；这里逐个出口钉"闸真的管到了它"。
+#
+# **每个出口都要单独钉。** 「主闸落下去别处自动跟随」在收敛之前恰恰是假的：按名字找
+# 会话曾经自己内联一份会话集合，堵了主路它照样把集合外的裸 channel_id 摊出来。
+#
+# 撤回是唯一**刻意不跟随**的那条，用例在 ``test_takeback.py``。
+
+
+@pytest.mark.integration
+async def test_the_envelope_only_lists_conversations_in_sight(living_db):
+    """信封上只有名单里的那些，掉出名单的连"有动静"都不该露出来。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+
+    assert [e.channel_id for e in envelopes] == [str(_DM)], (
+        f"没人叫她的那个群还在信封上。拿到：{envelopes}"
+    )
+    assert "宅居研究所" not in render_envelopes(envelopes, now=_at(21, 35)), (
+        "群的名字露在信封上了 —— 不在名单里就是整个不进她视野"
+    )
+
+
+@pytest.mark.integration
+async def test_nothing_out_of_sight_can_call_her(living_db):
+    """掉出名单的会话不把她提前带到那一刻。
+
+    群里那条是**真的在叫她**（点了名、还没读），但这个群一小时内只有这一条、六小时
+    内也不够三条 —— 它不在她视野里，那这一次点名也到不了她眼前。
+    """
+    await _seed_world()
+    await _incoming(
+        _GROUP,
+        text_body=" 这个你怎么看",
+        at=_at(18, 0),
+        sender=_SOMEONE,
+        sender_name="路人",
+        names_bot=_AKAO_BOT_UID,
+    )
+
+    assert (
+        await newest_unread_summons(lane=LANE, persona_id="akao", now=_at(21, 30))
+    ) is None
+
+
+@pytest.mark.integration
+async def test_she_cannot_open_a_conversation_out_of_sight(living_db, in_a_moment):
+    """名单外那条会话，她拿着 channel_id 也打不开。"""
+    await _seed_world()
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        outcome = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+
+    assert isinstance(outcome, dict), (
+        f"名单外的会话她照样打开了。拿到：{outcome!r}"
+    )
+    assert "今天好热" not in str(outcome), "报错里把正文漏出去了"
+
+
+@pytest.mark.integration
+async def test_looking_up_a_name_never_hands_back_an_address_out_of_sight(
+    living_db, in_a_moment
+):
+    """按名字找会话不能把名单外那条的裸 channel_id 摊给她。
+
+    这条曾经是主闸挡不住的那个口子：那条查询自己内联一份会话集合，收窄了
+    :func:`reachable_conversations` 它照旧全量。拿到地址之后发消息会被挡下，但
+    "不进她视野"这条规则已经破了 —— 她知道了这个群存在、叫什么、谁在里面说话。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        found = await look_up_contact.invoke({"name": "宅居研究所"})
+        by_person = await look_up_contact.invoke({"name": "路人"})
+
+    assert str(_GROUP) not in found and str(_GROUP) not in by_person, (
+        f"名单外那条会话的地址被摊出来了。拿到：\n{found}\n{by_person}"
+    )
+
+
+def test_nothing_but_taking_back_reaches_around_the_gate():
+    """绕过白名单的那两条路各自只有一个正当调用方。
+
+    闸落在 :func:`reachable_conversations` 上，所以能绕开它的只有两种写法：
+
+    * 拿未过滤的那两个 helper（``conversations_her_bot_is_in`` /
+      ``conversation_her_bot_is_in``）—— 撤回**必须**能拿（她撤的是自己已经发出去的
+      话，跟"她现在还能不能看见那条会话"是两件事），别处一个都不许；
+    * 直接调底层那条 presence 查询 ``find_conversations_with_persona_bot`` —— 只有
+      ``phone.py`` 自己该碰它，别处碰上就是又拼了一份不过闸的可达性（T1 删掉的那份
+      手抄副本就是这么来的）。
+
+    两条各自钉死唯一的调用方，加一个就要么改这里、要么改回主闸。
+    """
+    import ast
+    from pathlib import Path
+
+    import app as app_pkg
+
+    # 名字 → 允许出现它的文件（``phone.py`` 是定义处，永远不算）。
+    only_for = {
+        "conversations_her_bot_is_in": "takeback.py",
+        "conversation_her_bot_is_in": "takeback.py",
+        "find_conversations_with_persona_bot": None,  # 除 phone.py 外谁都不许
+    }
+    trespassers: dict[str, list[str]] = {}
+    # 扫整个 ``app/``，不只是 ``app/living/``：绕过白名单不需要住在 living 里面。
+    for path in sorted(Path(app_pkg.__file__).parent.rglob("*.py")):
+        if path.name == "phone.py":  # 定义 / 唯一该碰底层查询的地方
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        used = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        } | {
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+        }
+        # ``app/data/queries/persona.py`` 是那条查询自己的定义处。
+        if path.name == "persona.py" and path.parent.name == "queries":
+            used -= {"find_conversations_with_persona_bot"}
+        offending = sorted(
+            name for name in used & set(only_for) if only_for[name] != path.name
+        )
+        if offending:
+            trespassers[path.name] = offending
+
+    assert trespassers == {}, (
+        f"白名单被绕过去了 —— 这些地方碰了只有撤回（或 phone.py 自己）该碰的东西："
+        f"{trespassers}"
     )

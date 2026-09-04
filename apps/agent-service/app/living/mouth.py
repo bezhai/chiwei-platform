@@ -405,8 +405,17 @@ async def send_message(
     if not intent:
         raise ValueError("说点什么：意思不能是空的。")
 
+    # 这一道是**这一缝定下的那份名单 ∩ 实时 presence**，两半的时效性刻意不同：
+    #
+    #   * 名单读的是这一缝的锚（:mod:`app.living.whitelist`）。她要回的就是这一缝开
+    #     头摆在她眼前的那些会话；中途因为时间窗滑过去而掉出名单，不该让她张嘴到一
+    #     半发现刚看的那条会话没了。
+    #   * presence 每次重新查（:func:`reachable_conversation` 里那次
+    #     ``find_conversations_with_persona_bot``）。"bot 还在不在那个会话里"是这句
+    #     话**能不能真的送到**的物理前提，读一份缝开头的快照等于这道保护不存在 ——
+    #     bot 半路被移出会话，她还会照着过期的判断把话交出去。
     conv = await reachable_conversation(
-        persona_id=persona_id, channel_id=channel_id.strip()
+        persona_id=persona_id, channel_id=channel_id.strip(), now=now
     )
     if conv is None:
         # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。

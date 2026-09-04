@@ -76,7 +76,7 @@ from sqlalchemy import text
 from app.agent.context import AgentContext
 from app.agent.core import AgentConfig
 from app.agent.neutral import Message, Role
-from app.agent.runtime_context import get_context
+from app.agent.runtime_context import agent_context, get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.agent.trace import collect_usage
@@ -818,11 +818,6 @@ async def run_moment(
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
-        # 手机上只给信封（谁、多少条、多密、你上次在那儿开口是什么时候）。内容要她
-        # 自己调 look_at_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
-        envelope = await phone_envelope(
-            lane=lane, persona_id=persona_id, now=began_at
-        )
         persona = await find_persona(persona_id)
         context = AgentContext(
             persona_id=persona_id,
@@ -838,6 +833,17 @@ async def run_moment(
                 FEATURE_GLANCES: [],
             },
         )
+        # 手机上只给信封（谁、多少条、多密、你上次在那儿开口是什么时候）。内容要她
+        # 自己调 look_at_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
+        #
+        # **信封在这一缝的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
+        # 一眼时就定下来，之后整缝（看手机、找人、发消息、找可读文件）用的都是那一份
+        # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
+        # 而两遍之间到达的消息会让一条会话半路出现在她眼前。
+        with agent_context(context):
+            envelope = await phone_envelope(
+                lane=lane, persona_id=persona_id, now=began_at
+            )
         # **本轮用量落 durable PG，不指望 langfuse。** `app.agent.trace` 记着实测
         # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 缝只到 125 条，丢
         # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，

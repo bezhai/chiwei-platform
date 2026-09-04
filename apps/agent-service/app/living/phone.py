@@ -69,10 +69,16 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 :mod:`app.data.queries.persona`，这里只调函数。留在本模块的库操作只有她自己那两张
 表（``PhoneRead`` 的游标、``Happening`` 的"上次在这儿开口"）。
 
-**哪些会话在她手机上**：她自己的 bot 还在的那些（``common_bot_presence`` +
-``bot_config.persona_id``），私聊和群同一条规则。用 presence 而不是"聊过天就算"，
-是因为 bot 被移出群之后历史还在、但她既收不到也发不出去。判据见
-:func:`app.data.queries.persona.find_conversations_with_persona_bot`。
+**哪些会话在她手机上**：两个条件都要。**一是她自己的 bot 还在**
+（``common_bot_presence`` + ``bot_config.persona_id``），私聊和群同一条规则 —— 用
+presence 而不是"聊过天就算"，是因为 bot 被移出群之后历史还在、但她既收不到也发不
+出去（判据见 :func:`app.data.queries.persona.find_conversations_with_persona_bot`）。
+**二是这条会话在她视野里**（:mod:`app.living.whitelist`）：bot 在不在回答不了"这条
+会话跟她有关系吗"，而她挂在两百多个群里，绝大多数没有人在找她。
+
+**这两个条件在 :func:`reachable_conversations` 上合成一处**，本模块和读文件那边的每
+一只手都从它来 —— 闸只有一道，别处不许自己拼一份。唯一的例外是撤回，它走未过滤的
+:func:`conversations_her_bot_is_in`，理由写在那个函数上。
 
 **"这话是不是她说的"认 bot，不认 role。** 三姐妹本来就挂在同一个群里（prod
 ``common_bot_presence`` 实测：一个群里同时有 ayana / chinagi / chiwei），她们的出站
@@ -134,6 +140,7 @@ from app.living.records import (
     _require_aware,
 )
 from app.living.scope import FEATURE_GLANCES, moment_scope
+from app.living.whitelist import channels_in_sight
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_idempotent
@@ -260,30 +267,68 @@ class Summons:
 # 她手机上有哪些会话
 # ---------------------------------------------------------------------------
 
-async def reachable_conversations(*, persona_id: str) -> list[Reachable]:
-    """她手机上的全部会话。查不到就是查不到，不猜、不兜底。
+def _as_reachable(row: dict) -> Reachable:
+    return Reachable(
+        channel_id=str(row["channel_id"]),
+        scope=row["scope"],
+        title=row["title"],
+        channel=row["channel"],
+        bot_name=row["bot_name"],
+    )
+
+
+async def conversations_her_bot_is_in(*, persona_id: str) -> list[Reachable]:
+    """她自己的 bot 还在的每一条会话 —— **没过白名单那道闸**。
 
     口径（presence + 她自己的 bot + 会话没归档）在
     :func:`app.data.queries.persona.find_conversations_with_persona_bot`。
+
+    **只有撤回走这一份**（:mod:`app.living.takeback`）：她撤的是自己已经发出去的话，
+    用的是自己那张认领表上的编号，跟"她现在还看不看得见那条会话"是两件事 —— 让一条
+    发出去时在名单里、之后掉出名单的消息撤不回来是纯粹的倒退。**别处一律用**
+    :func:`reachable_conversations`；多一个调用方就多一条绕过白名单的路，门禁是
+    ``tests/living/test_phone.py`` 里那条源码检查。
     """
-    rows = await find_conversations_with_persona_bot(persona_id)
     return [
-        Reachable(
-            channel_id=str(r["channel_id"]),
-            scope=r["scope"],
-            title=r["title"],
-            channel=r["channel"],
-            bot_name=r["bot_name"],
-        )
-        for r in rows
+        _as_reachable(r) for r in await find_conversations_with_persona_bot(persona_id)
     ]
 
 
-async def reachable_conversation(
+async def conversation_her_bot_is_in(
     *, persona_id: str, channel_id: str
 ) -> Reachable | None:
-    """她手机上的某一条会话；不在她手机上返回 ``None``。"""
-    for conv in await reachable_conversations(persona_id=persona_id):
+    """她的 bot 还在的某一条会话；bot 已经不在了返回 ``None``（同上，撤回专用）。"""
+    for conv in await conversations_her_bot_is_in(persona_id=persona_id):
+        if conv.channel_id == channel_id:
+            return conv
+    return None
+
+
+async def reachable_conversations(
+    *, persona_id: str, now: datetime
+) -> list[Reachable]:
+    """她此刻手机上的会话 —— **白名单那道主闸就在这儿**。
+
+    两个条件都要：她自己的 bot 还在（presence，实时查），而且这条会话在她视野里
+    （:func:`app.living.whitelist.channels_in_sight`）。信封、nudge 那条钟、看手机、
+    按名字找会话、发消息、找可读文件全从这一处来 —— 闸落在这里，它们自动跟随。
+
+    ``now`` 是**调用方的时间锚**（一缝里就是那一缝的 ``now``，nudge 那条钟就是那一拍
+    的时刻），不在这里现取钟：白名单按时间窗算，同一缝里两处各取各的"现在"，她看到的
+    会话集合就会在一缝中途变化。查不到就是查不到，不猜、不兜底。
+    """
+    rows = await find_conversations_with_persona_bot(persona_id)
+    in_sight = await channels_in_sight(
+        persona_id=persona_id, now=now, conversations=rows
+    )
+    return [_as_reachable(r) for r in rows if str(r["channel_id"]) in in_sight]
+
+
+async def reachable_conversation(
+    *, persona_id: str, channel_id: str, now: datetime
+) -> Reachable | None:
+    """她此刻手机上的某一条会话；不在她手机上返回 ``None``。"""
+    for conv in await reachable_conversations(persona_id=persona_id, now=now):
         if conv.channel_id == channel_id:
             return conv
     return None
@@ -404,18 +449,23 @@ def _instant(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=CST)
 
 
-async def envelopes_for(*, lane: str, persona_id: str) -> list[Envelope]:
+async def envelopes_for(
+    *, lane: str, persona_id: str, now: datetime
+) -> list[Envelope]:
     """她此刻手机上有动静的那些会话。**在叫她的那些一条都不会少。**
 
     条数上限只管**没在叫她的**那批（群里的背景噪音，本来就无上限）。这个区别不是
     美观问题：信封截掉的是"她知不知道有这回事"，比"她看多少条内容"严重一个量级——
     被挤出去的那条会话，她连它存在都不知道，也就永远不会想起去看。一屋子群在刷屏
     的时候，正在等她回话的那条私聊必须还在眼前，**谁值得先回是她判，不是这里判**。
+
+    会话集合是过了白名单的那份（:func:`reachable_conversations`）：名单外的会话连
+    "有动静"都不该露出来。``now`` 是这一缝的时间锚，名单按它算。
     """
     bot_uids = await find_bot_user_ids_for_persona(persona_id)
     own_bots = await find_bot_names_for_persona(persona_id)
     out: list[Envelope] = []
-    for conv in await reachable_conversations(persona_id=persona_id):
+    for conv in await reachable_conversations(persona_id=persona_id, now=now):
         after_ms, after_id = await effective_cursor(
             lane=lane, persona_id=persona_id, channel_id=conv.channel_id
         )
@@ -515,7 +565,7 @@ async def phone_envelope(*, lane: str, persona_id: str, now: datetime) -> str:
     ``now`` 是这一缝的时间锚，信封上每个时刻都拿它判跨没跨天（见 :func:`_clock`）。
     """
     return render_envelopes(
-        await envelopes_for(lane=lane, persona_id=persona_id), now=now
+        await envelopes_for(lane=lane, persona_id=persona_id, now=now), now=now
     )
 
 
@@ -525,17 +575,21 @@ async def phone_envelope(*, lane: str, persona_id: str, now: datetime) -> str:
 
 
 async def newest_unread_summons(
-    *, lane: str, persona_id: str
+    *, lane: str, persona_id: str, now: datetime
 ) -> Summons | None:
     """还没被她看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。
 
     "在叫她"= 私聊来的任意一条，或者群里点了她名字的那条，除此之外没有分级 ——
     判据在 :func:`app.data.queries.messages.find_newest_unread_summons`。
+
+    只看名单里的会话：名单外的那些整个不在她视野里，一次点名也把她带不到那一刻。
+    ``now`` 是这一拍的时刻 —— 这条钟不在任何一缝里面，它算出来的名单跟随后被唤醒的
+    那一缝是**两次独立计算**（中间隔着模型调用的时间），不是同一个快照。
     """
     bot_uids = await find_bot_user_ids_for_persona(persona_id)
     own_bots = await find_bot_names_for_persona(persona_id)
     newest: Summons | None = None
-    for conv in await reachable_conversations(persona_id=persona_id):
+    for conv in await reachable_conversations(persona_id=persona_id, now=now):
         after_ms, after_id = await read_through(
             lane=lane, persona_id=persona_id, channel_id=conv.channel_id
         )
@@ -716,11 +770,12 @@ async def look_up_contact(
         raise ValueError("name 不能是空的：写一个你要找的名字。")
 
     # 会话集合从 reachable_conversations 来，跟信封那条路同一个来源 —— 这只手能搜
-    # 到的严格等于她能收到的。
+    # 到的严格等于她能收到的，白名单收窄之后也一样（名单外那条会话的裸 channel_id
+    # 从这里漏出去，"不进她视野"这条规则就已经破了）。
     rows = await search_conversations_by_name(
         conversations=[
             {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
-            for c in await reachable_conversations(persona_id=persona_id)
+            for c in await reachable_conversations(persona_id=persona_id, now=now)
         ],
         name_like=f"%{wanted}%",
         own_bots=await find_bot_names_for_persona(persona_id),
@@ -774,7 +829,7 @@ async def look_at_phone(
     """
     lane, now, persona_id, moment_id = moment_scope()
     conv = await reachable_conversation(
-        persona_id=persona_id, channel_id=channel_id.strip()
+        persona_id=persona_id, channel_id=channel_id.strip(), now=now
     )
     if conv is None:
         raise ValueError(

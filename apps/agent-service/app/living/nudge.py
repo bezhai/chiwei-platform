@@ -13,6 +13,11 @@
 
 群里不点名的消息不提前——它在下一个常规缝照样被她看到，一条都不会丢。
 
+**这条钟只看她视野里的会话**（:mod:`app.living.whitelist`）：名单外的那些整个不进她
+视野，那里的一次点名也把她带不到那一刻。这一拍算出来的名单跟随后被唤醒的那一缝**是
+两次独立计算**（中间隔着模型调用的时间），不是同一个快照——这条钟只决定"要不要把她带
+到这一刻"，一缝之内那份锚由那一缝自己定。
+
 **"她刚才把注意力放在哪"不在这里算。** 五分钟前刚在群里说过话、还是三天没说话，这条
 事实原样摆进信封里给她看（见 :mod:`app.living.phone`），由她自己判算不算数。在这里
 算成一个分数，就是把她的判断搬到代码里。
@@ -70,7 +75,9 @@ async def nudge_once(
     返回值只回答"这一缝跑了没有"。**她回不回是她的输出**，不在这里判、也不该有人在
     这里判。
     """
-    summons = await newest_unread_summons(lane=lane, persona_id=persona_id)
+    summons = await newest_unread_summons(
+        lane=lane, persona_id=persona_id, now=now
+    )
     if summons is None:
         return None
     return await run_moment(

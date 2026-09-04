@@ -247,8 +247,11 @@ async def test_she_can_be_named_and_still_say_nothing_and_everything_is_fine(
 
 @pytest.mark.integration
 async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_moment(
-    nudge_db, stub_life
+    nudge_db, stub_life, pinned
 ):
+    # 群固定加白，所以这个群**在**她视野里：这条用例要验的是"不点名不提前、但下一个
+    # 常规缝看得见"，不是白名单挡没挡住它（:mod:`app.living.whitelist`）。
+    pinned(str(_GROUP))
     await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
     await _incoming(
         _GROUP, body="今天好热", at=_at(21, 31), sender=_SOMEONE, sender_name="路人"

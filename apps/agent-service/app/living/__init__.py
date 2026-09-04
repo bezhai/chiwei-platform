@@ -22,6 +22,7 @@
   * :mod:`app.living.loose_ends`  她自己挂着没了结的事
   * :mod:`app.living.moment`      一缝：默认「继续」，被带走时换的是一件事
   * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标
+  * :mod:`app.living.whitelist`   会话白名单：哪些会话进她的视野（手机那道主闸的判据）
   * :mod:`app.living.mouth`       嘴：把她的意思渲染成人话发出去（**没有入口**）
   * :mod:`app.living.nudge`       有人叫她就提前一缝，但不代她回复
 

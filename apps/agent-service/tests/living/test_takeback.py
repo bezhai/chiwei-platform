@@ -211,6 +211,33 @@ def _refused(outcome, *, saying: list[str]) -> None:
         )
 
 
+async def _somebody_said_something(*, at: dt.datetime) -> None:
+    """真人在那条私聊里说了一句 —— 她开口那条路要求这条会话在她视野里。
+
+    撤回不要它（那条路走的是未过滤的可达性），所以这个夹具只给真的要 ``send_message``
+    的那条用例用，别塞进 ``takeback_db``：本文件其余用例正好跑在"这条会话不在名单里"
+    的状态上，那是撤回不跟随白名单的实证。
+    """
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_message (common_message_id, channel,"
+                " common_conversation_id, common_user_id, sender_display_name,"
+                " role, content, content_text, scope, event_time)"
+                " VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid),"
+                " CAST(:u AS uuid), 'bezhai', 'user', CAST(:body AS jsonb), '在吗',"
+                " 'direct', :at)"
+            ),
+            {
+                "m": str(uuid.uuid4()),
+                "c": str(_DM),
+                "u": str(_BEZHAI),
+                "body": '[{"kind": "text", "text": "\u5728\u5417"}]',
+                "at": int(at.timestamp() * 1000),
+            },
+        )
+
+
 async def _she_is_home() -> None:
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -291,6 +318,9 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     收（:mod:`app.living.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
     """
     await _she_is_home()
+    # 她要**发**这一条，所以这条私聊得在她视野里 —— 撤回不过白名单闸，开口过
+    # （:mod:`app.living.whitelist`）。真人刚说过一句就够了。
+    await _somebody_said_something(at=_at(21, 0))
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         said = await send_message.invoke(
@@ -718,3 +748,84 @@ def test_taking_something_back_takes_the_message_id_she_was_shown():
     """
     props = set(take_back_message.definition.parameters["properties"])
     assert props == {"message_id"}, props
+
+
+# --------------------------------------------------------------------------
+# 六 · 撤回**刻意不过**会话白名单那道闸
+# --------------------------------------------------------------------------
+#
+# 她撤的是自己已经发出去的话，用的是自己那张认领表上的编号（模型编不出别人的）——
+# 跟"她现在还能不能看见那条会话"是两件事。一条发出去时在名单里、之后掉出名单的消息
+# 撤不回来，是纯粹的倒退：那句话还挂在真人眼前，而她眼睁睁没办法。
+#
+# 所以撤回走的是**未过滤**的可达性（bot 还在不在那个会话里），它也是全项目唯一一条
+# 走那份的路（门禁在 ``test_phone.py`` 那条源码检查上）。
+#
+# 上面那几节的用例其实全都跑在"这条会话不在名单里"的状态上（``takeback_db`` 一条
+# 消息都没种），这里再把三种情况明写出来，免得哪天有人把撤回接回主闸还全绿。
+
+
+@pytest.mark.integration
+async def test_she_can_take_back_a_line_in_a_conversation_out_of_sight(
+    takeback_db, in_a_moment, recalls
+):
+    """掉出白名单、但 bot 还在那个会话里 —— 撤得了。"""
+    from app.living.phone import reachable_conversations
+
+    line = await _she_spoke()
+    await _she_is_home()
+
+    assert await reachable_conversations(persona_id="akao", now=_at(21, 30)) == [], (
+        "用例前提没成立：这条会话本来就该在名单外"
+    )
+
+    async with in_a_moment("akao"):
+        outcome = await take_back_message.invoke({"message_id": line.outbound_id})
+
+    assert not isinstance(outcome, dict), f"名单外就撤不了了。拿到：{outcome!r}"
+    assert len(recalls) == 1
+    assert recalls[0].chat_id == str(_DM)
+
+
+@pytest.mark.integration
+async def test_she_cannot_take_back_a_line_from_a_conversation_her_bot_left(
+    takeback_db, in_a_moment, recalls
+):
+    """bot 已经被移出那个会话 —— 撤不了，如实说。
+
+    这一条跟上面那条的区别就是撤回该认的那条判据：``channel`` 从哪儿来、这条撤回还
+    做不做得成，靠的是 bot 在不在，不是这条会话在不在她视野里。
+    """
+    line = await _she_spoke()
+    await _she_is_home()
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "DELETE FROM common_bot_presence"
+                " WHERE common_conversation_id = CAST(:c AS uuid)"
+            ),
+            {"c": str(_DM)},
+        )
+
+    async with in_a_moment("akao"):
+        outcome = await take_back_message.invoke({"message_id": line.outbound_id})
+
+    _refused(outcome, saying=["够不着"])
+    assert recalls == []
+
+
+@pytest.mark.integration
+async def test_a_made_up_handle_takes_nothing_back(takeback_db, in_a_moment, recalls):
+    """编出来的编号撤不掉任何东西 —— 认领表是那件事的唯一依据。
+
+    撤回不过白名单闸，所以"她指的是自己说过的哪一句"这件事全靠那张表按等值找。这条
+    在闸拆掉之后仍然是硬边界：编号对不上就是没有这条，绝不排个序取最近的顶上。
+    """
+    await _she_spoke()
+    await _she_is_home()
+
+    async with in_a_moment("akao"):
+        outcome = await take_back_message.invoke({"message_id": uuid.uuid4().hex})
+
+    _refused(outcome, saying=["你没有编号"])
+    assert recalls == []

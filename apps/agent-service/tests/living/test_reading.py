@@ -104,8 +104,14 @@ async def _someone_sent(
 
 
 @pytest.fixture
-async def reading_db(living_db):
-    """她的两条会话 + 一条不是她的会话，外加读到哪了那张表。"""
+async def reading_db(living_db, pinned):
+    """她的两条会话 + 一条不是她的会话，外加读到哪了那张表。
+
+    两条会话都摆进她的视野：私聊里有人刚跟她说过话，群固定加白
+    （:mod:`app.living.whitelist`）。白名单收窄之后"bot 还在"不再等于"她看得见" ——
+    而这个文件里的用例验的是**她读得到的等于她收到过的**，不是白名单本身，所以那道
+    闸在这里按住。名单外那条会话里的文件她一个字都看不到，用例在本文件最后一节。
+    """
     from tests.runtime.conftest import migrate
 
     await migrate(FileRead, living_db)
@@ -149,6 +155,24 @@ async def reading_db(living_db):
                 {"c": str(conv)},
             )
 
+    pinned(str(_GROUP))
+    # 有人在这条私聊里刚说过话 —— 私聊里真人的任意一条就算在叫她。
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_message (common_message_id, channel,"
+                " common_conversation_id, sender_display_name, role, content,"
+                " content_text, scope, event_time)"
+                " VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), '千凪',"
+                " 'user', CAST(:body AS jsonb), '在吗', 'direct', :at)"
+            ),
+            {
+                "m": str(uuid.uuid5(uuid.NAMESPACE_OID, "msg-dm-hello")),
+                "c": str(_DM),
+                "body": json.dumps([{"kind": "text", "text": "在吗"}]),
+                "at": _ms(_at(21, 0)),
+            },
+        )
     await _someone_sent(
         message_id=_M_DM_SHAYANG,
         conversation=_DM,
@@ -278,7 +302,7 @@ async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
             },
         )
 
-    found = await files_sent_to(persona_id="akao")
+    found = await files_sent_to(persona_id="akao", now=_at(21, 30))
 
     assert [f.title for f in found if f.title == "斜阳.epub"] == [
         "斜阳.epub"
@@ -857,3 +881,71 @@ def test_both_hands_are_ones_she_actually_has():
 
     assert look_for_something_to_read in MOMENT_TOOLS, "她手里没有找东西读这只手"
     assert read_a_bit in MOMENT_TOOLS, "她手里没有往下读一程这只手"
+
+
+# --------------------------------------------------------------------------
+# 八 · 会话白名单：她读得到的严格等于她看得见的
+# --------------------------------------------------------------------------
+#
+# 这两条钉的是收敛之前那个口子：找可读文件的查询自己内联一份会话集合，所以主闸落在
+# 可达性上也管不到它 —— 一条掉出名单的会话里的文件仍然会连着文件名、发件人、会话
+# 标题一起摆到她眼前，拿起来还能读全文。
+
+
+async def _a_quiet_group_with_a_file() -> uuid.UUID:
+    """一个 bot 还在、但没人叫过她的群，里面有人发了个文件。"""
+    quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_conversation"
+                " (common_conversation_id, channel, scope, display_name, is_active)"
+                " VALUES (CAST(:c AS uuid), 'lark', 'group', '没人叫她的群', true)"
+            ),
+            {"c": str(quiet)},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO common_bot_presence"
+                " (common_conversation_id, bot_name, is_active)"
+                " VALUES (CAST(:c AS uuid), 'chiwei', true)"
+            ),
+            {"c": str(quiet)},
+        )
+    await _someone_sent(
+        message_id=uuid.uuid5(uuid.NAMESPACE_OID, "msg-quiet-group-file"),
+        conversation=quiet,
+        who="陌生人",
+        at=_at(20, 40),
+        file_key="key-quiet-group",
+        file_name="名单外的那本.txt",
+    )
+    return quiet
+
+
+@pytest.mark.integration
+async def test_a_file_from_a_conversation_out_of_sight_is_never_listed(
+    reading_db, in_a_moment
+):
+    await _a_quiet_group_with_a_file()
+
+    async with in_a_moment("akao"):
+        listed = await look_for_something_to_read.invoke({})
+
+    assert "名单外的那本" not in listed, (
+        f"名单外那条会话里的文件摆到了她眼前 —— 连着文件名、谁发的、发在哪个群。"
+        f"拿到：\n{listed}"
+    )
+
+
+@pytest.mark.integration
+async def test_she_cannot_pick_up_a_file_from_a_conversation_out_of_sight(
+    reading_db, in_a_moment, picked_up
+):
+    await _a_quiet_group_with_a_file()
+
+    async with in_a_moment("akao"):
+        outcome = await read_a_bit.invoke({"which": "名单外的那本"})
+
+    assert isinstance(outcome, dict), "她读起了名单外那条会话里的文件"
+    assert picked_up == []

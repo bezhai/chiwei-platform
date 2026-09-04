@@ -111,6 +111,39 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
 
 
 @pytest.fixture
+def pinned(monkeypatch):
+    """把几个群固定加白（走白名单读的那个 Dynamic Config key）。
+
+    用例验的**不是**"她看不看得见这个群"时用它。会话白名单按"最近有没有人叫她"算，
+    而群里不点名的消息一分都不算 —— 不按住这道闸的话，那些用例的群会从她视野里掉
+    出去，用例红在一个跟它想说的事无关的地方。私聊没有这条（固定加白只对群生效），
+    要让一条私聊在名单里就给它真的消息。
+
+    **只截白名单那一个 key**，其余的照旧走真实读取：``dynamic_config`` 是进程内的同
+    一个单例，整个 ``get`` 换掉的话这条用例里每一处配置读取（一缝多久、世界多久）拿
+    到的都是这份 JSON 数组，各自解析失败、各自静默降级成默认值 —— 用例照绿，而它验
+    的东西已经不是它以为的那个了。
+    """
+    import json
+
+    from app.living import whitelist as whitelist_mod
+
+    real_get = whitelist_mod.dynamic_config.get
+
+    def pin(*channel_ids: str) -> None:
+        payload = json.dumps(list(channel_ids))
+
+        def fake_get(key, *, default=""):
+            if key == whitelist_mod.LIVING_PINNED_GROUPS_KEY:
+                return payload
+            return real_get(key, default=default)
+
+        monkeypatch.setattr(whitelist_mod.dynamic_config, "get", fake_get)
+
+    return pin
+
+
+@pytest.fixture
 def in_a_moment():
     """把一个工具放进"她的某一缝"里跑 —— 绑上工具体要读的那四样 ambient 事实。
 

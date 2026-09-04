@@ -1429,3 +1429,41 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
         },
     )
     assert spent, "这一缝没有留下任何用量记录 —— 成本无从统计"
+
+
+@pytest.mark.integration
+async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_moment(
+    moment_db, stub_moment, monkeypatch
+):
+    """"她这一缝看得见哪些会话"在信封那一眼定下来，整缝共用那一份。
+
+    信封是她这一缝看到的第一样东西，所以名单也在那儿定（:mod:`app.living.whitelist`）。
+    信封摆在这一缝的 context 外面算的话会有两个后果：这份名单被算两遍（它是这个功能
+    最贵的一项），而且两遍之间到达的消息会让一条会话在信封上没有、她后半缝却搜得到、
+    发得出去。
+    """
+    from app.living import whitelist as whitelist_mod
+    from tests.living.test_phone import _DM, _incoming, _seed_world
+
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 0))
+
+    real = whitelist_mod.count_summons_since
+    counted: list[dict] = []
+
+    async def counting(**kw):
+        counted.append(kw)
+        return await real(**kw)
+
+    monkeypatch.setattr(whitelist_mod, "count_summons_since", counting)
+
+    stub_moment(
+        ("look_at_phone", {"channel_id": str(_DM)}),
+        ("look_up_contact", {"name": "bezhai"}),
+    )
+    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+
+    assert moment is not None
+    assert len(counted) == 1, (
+        f"这一缝把名单算了 {len(counted)} 遍 —— 信封和她手里的工具用的不是同一份"
+    )
