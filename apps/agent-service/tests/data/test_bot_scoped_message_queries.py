@@ -21,6 +21,7 @@ from sqlalchemy import text
 import app.data.session as session_mod
 from app.data.models import Base, CommonConversation, CommonMessage
 from app.data.queries.messages import (
+    count_summons_since,
     find_conversation_window,
     find_file_items_in_conversations,
     find_messages_by_outbound_ids,
@@ -71,6 +72,12 @@ def _ms(moment: dt.datetime) -> int:
 
 def _at(hour: int, minute: int = 0) -> dt.datetime:
     return dt.datetime(2026, 7, 25, hour, minute, tzinfo=_CST)
+
+
+def _counts(rows: list[dict], conv: uuid.UUID) -> list[int]:
+    """一条会话在各个时刻之后各有几条，按传进去的时刻顺序排。"""
+    mine = [r for r in rows if str(r["channel_id"]) == str(conv)]
+    return [r["n"] for r in sorted(mine, key=lambda r: r["window"])]
 
 
 @pytest.fixture
@@ -847,3 +854,149 @@ async def test_recall_state_reports_the_last_part_that_went_away(bot_db):
     rows = await find_recall_state_by_outbound_ids([oid])
     assert rows[0]["parts"] == rows[0]["parts_recalled"] == 2
     assert rows[0]["last_recalled_at"] == _at(9, 40)
+
+
+# ---------------------------------------------------------------------------
+# 有几条在叫她 —— 白名单那几档的原料
+# ---------------------------------------------------------------------------
+#
+# 这条查询只回答"在给定的几个时刻之后，每条会话里各有几条在叫她"。**它不知道
+# 1h / 6h / 24h / 7d 这些档位**，也不知道"多少条才算够" —— 那些是业务口径，住在
+# living 那边。时刻由调用方给，一个 0 就是"从头到现在"，也就是总数。
+
+
+async def test_a_mention_in_a_group_counts_as_calling_her(bot_db):
+    await _seed_her_phone()
+    await _message(_GROUP, at=_at(9), scope="group", mentions=[_AKAO_BOT_UID])
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _GROUP) == [1]
+
+
+async def test_a_group_message_that_does_not_name_her_does_not_count(bot_db):
+    """群里不点名的消息不算在叫她 —— 跟 nudge 那条钟同一个判据。"""
+    await _seed_her_phone()
+    await _message(_GROUP, at=_at(9), scope="group")
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _GROUP) == [0]
+
+
+async def test_any_message_in_a_direct_conversation_counts(bot_db):
+    """私聊本身就意味着有人在等她回，不需要点名。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9))
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _DM) == [1]
+
+
+async def test_what_she_said_herself_never_counts(bot_db):
+    """她自己说了多少，不说明有人在找她 —— 私聊和群里都一样。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), role="assistant", bot_name="chiwei")
+    await _message(
+        _GROUP, at=_at(9), scope="group", role="assistant",
+        bot_name="chiwei", mentions=[_AKAO_BOT_UID],
+    )
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _DM) == [0]
+    assert _counts(rows, _GROUP) == [0]
+
+
+async def test_a_recalled_call_stops_counting(bot_db):
+    """撤回掉的那条在渠道上已经没了，"有人叫她"这件事跟着没了。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), recalled_at=_at(9, 5))
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _DM) == [0]
+
+
+async def test_every_window_comes_back_from_one_call(bot_db):
+    """几个时刻一次问完，不是问几遍。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9))
+    await _message(_DM, at=_at(14))
+    await _message(_DM, at=_at(20))
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(19)), _ms(_at(13)), _ms(_at(8)), 0],
+    )
+    assert _counts(rows, _DM) == [1, 2, 3, 3]
+
+
+async def test_the_window_lower_bound_is_open(bot_db):
+    """恰好落在下界那一刻的不算 —— 跟未读游标同一个开闭口径。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9))
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(9))],
+    )
+    assert _counts(rows, _DM) == [0]
+
+
+async def test_a_conversation_with_nothing_in_it_still_reports_zero(bot_db):
+    """一条都没有的会话要给 0，不是不出现 —— 调用方按 channel_id 取值，缺行等于
+    要它自己兜一次底。"""
+    await _seed_her_phone()
+    rows = await count_summons_since(
+        conversations=await _her_conversations(),
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert _counts(rows, _DM) == [0]
+    assert _counts(rows, _GROUP) == [0]
+
+
+async def test_an_empty_set_counts_nothing(bot_db):
+    """空集合返回空，不是"不过滤"。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9))
+    rows = await count_summons_since(
+        conversations=[],
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert rows == []
+
+
+async def test_a_conversation_outside_the_set_is_not_counted(bot_db):
+    await _seed_her_phone()
+    await _message(_GROUP, at=_at(9), scope="group", mentions=[_AKAO_BOT_UID])
+    only_dm = [c for c in await _her_conversations() if str(c["channel_id"]) == str(_DM)]
+    rows = await count_summons_since(
+        conversations=only_dm,
+        bot_user_ids=[str(_AKAO_BOT_UID)],
+        own_bots=["chiwei", "chiwei-dev"],
+        since_ms=[_ms(_at(8))],
+    )
+    assert [str(r["channel_id"]) for r in rows] == [str(_DM)]

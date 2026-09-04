@@ -22,7 +22,7 @@ EXPECTED_FUNCTIONS = {
     "find_unread_summary", "find_unread_senders",
     "find_newest_unread_summons", "find_conversation_window",
     "find_messages_known_through", "search_conversations_by_name",
-    "find_file_items_in_conversations",
+    "find_file_items_in_conversations", "count_summons_since",
     "find_messages_by_outbound_ids", "find_recall_state_by_outbound_ids",
 }
 

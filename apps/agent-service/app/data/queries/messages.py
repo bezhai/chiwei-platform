@@ -32,6 +32,7 @@ __all__ = [
     "find_messages_known_through",
     "search_conversations_by_name",
     "find_file_items_in_conversations",
+    "count_summons_since",
     "find_messages_by_outbound_ids",
     "find_recall_state_by_outbound_ids",
 ]
@@ -620,6 +621,105 @@ async def find_file_items_in_conversations(
         rows = (
             await current_session().execute(
                 text(_SENT_FILES_SQL), _unzip_conversations(conversations)
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 有几条在叫她
+# ---------------------------------------------------------------------------
+
+# 「在叫她」的判据跟 :data:`_SUMMONS_SQL` 是同一条（私聊本身就算、群里要点名），差别
+# 只在这里**不带游标**：问的是"这段时间里有几条"，不是"她还没看的有几条"。她看过的
+# 那些照样算 —— 一个群里有人天天叫她、她天天都看了，那正是这个群该留在她视野里的
+# 理由。
+#
+# 三个条件的分工：
+#
+#   * :data:`_SAID_BY_HER` 取反 —— 她自己说了多少不说明有人在找她。**群里也要**：
+#     她 @ 了自己另一个 bot 的话，那不是有人在叫她。
+#   * ``scope = 'direct'`` 或 :data:`_NAMED_HER` —— 这一条就是
+#     :mod:`app.living.nudge` 论证过的那两条客观事实。
+#   * :data:`_STILL_IN_THE_CONVERSATION` —— 撤回掉的那条在渠道上已经没了，"有人叫过
+#     她"这件事跟着没了。
+#
+# **时刻由调用方给，一次给几个就一次答几个。** 这里不知道 1h / 6h / 24h / 7d 这些
+# 档位，也不知道多少条才算够 —— 那是业务口径。传一个 ``0`` 进来就是"从头到现在"，
+# 也就是总数，不需要另开一条查询。
+#
+# ``LEFT JOIN`` 而不是 ``JOIN``：一条消息都没有的会话也要给出 0。少一行的话调用方
+# 就得自己兜一次底，而"缺行"和"零条"在白名单那边是同一个意思、却是两种代码路径。
+#
+# 下界是**开区间**（``>``），跟 :data:`_STILL_UNREAD` 的游标同一个开闭口径。
+#
+# **``hits`` 这一层是性能的全部。** 直觉写法是把 ``event_time > w.since_ms`` 直接挂
+# 在 ``common_message`` 的 JOIN 上，一步到位。那样 planner 拿不到常量下界（下界来自
+# CROSS JOIN 出来的那张窗口表），只能 Hash Right Join 一次全表：prod 实测扫 308 万
+# 行、**1752ms**。先用最宽那个下界（``:earliest``，标量）把候选取出来，再在候选上分
+# 窗口，就走上了 ``idx_common_message_conversation_time``：同一批数据 **61ms**。
+#
+# 所以 ``:earliest`` 必须是 ``since_ms`` 里最早那个。调用方传一个 ``0`` 进来（要总
+# 数）时它就是 0，那一次就是全历史扫描 —— 代价在调用方那边，要清楚自己在要什么。
+_SUMMONS_COUNT_SQL = f"""
+WITH given AS (
+{_GIVEN_CONVERSATIONS_CTE}
+),
+hits AS (
+  SELECT g.channel_id AS channel_id,
+         cm.event_time AS event_time
+    FROM given g
+    JOIN common_message cm
+      ON cm.common_conversation_id = g.channel_id
+     AND cm.event_time > :earliest
+     AND NOT {_SAID_BY_HER}
+     AND (g.scope = 'direct' OR {_NAMED_HER})
+     AND {_STILL_IN_THE_CONVERSATION}
+),
+windows AS (
+  SELECT *
+    FROM UNNEST(CAST(:since_ms AS bigint[])) WITH ORDINALITY AS w(since_ms, idx)
+)
+SELECT g.channel_id      AS channel_id,
+       w.idx - 1        AS window,
+       COUNT(h.event_time) AS n
+  FROM given g
+ CROSS JOIN windows w
+  LEFT JOIN hits h
+    ON h.channel_id = g.channel_id
+   AND h.event_time > w.since_ms
+ GROUP BY g.channel_id, w.idx
+ ORDER BY g.channel_id, w.idx
+"""
+
+
+async def count_summons_since(
+    *,
+    conversations: list[dict],
+    bot_user_ids: list[str],
+    own_bots: list[str],
+    since_ms: list[int],
+) -> list[dict]:
+    """``conversations`` 里，每个时刻之后各有几条在叫她。
+
+    每条会话 × 每个时刻一行：``channel_id`` / ``window``（``since_ms`` 里的下标）/
+    ``n``。一条消息都没有的会话给 0，不是不出现。集合为空就返回空。
+
+    时刻传 ``0`` 就是"从头到现在"，**但那一次是全历史扫描**（理由见
+    :data:`_SUMMONS_COUNT_SQL`）：只在真要总数时传，别顺手跟四个窗口混在一次调用
+    里——混进去会把那四个窗口也拖成全表扫。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_SUMMONS_COUNT_SQL),
+                {
+                    **_unzip_conversations(conversations),
+                    "bot_user_ids": bot_user_ids,
+                    "own_bots": own_bots,
+                    "since_ms": since_ms,
+                    "earliest": min(since_ms) if since_ms else 0,
+                },
             )
         ).mappings().all()
     return [dict(r) for r in rows]
