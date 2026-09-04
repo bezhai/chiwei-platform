@@ -118,7 +118,7 @@ from app.data.queries.messages import (
     find_newest_unread_summons,
     find_unread_senders,
     find_unread_summary,
-    search_persona_conversations_by_name,
+    search_conversations_by_name,
 )
 from app.data.queries.persona import (
     find_bot_names_for_persona,
@@ -715,8 +715,13 @@ async def look_up_contact(
     if not wanted:
         raise ValueError("name 不能是空的：写一个你要找的名字。")
 
-    rows = await search_persona_conversations_by_name(
-        persona_id=persona_id,
+    # 会话集合从 reachable_conversations 来，跟信封那条路同一个来源 —— 这只手能搜
+    # 到的严格等于她能收到的。
+    rows = await search_conversations_by_name(
+        conversations=[
+            {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
+            for c in await reachable_conversations(persona_id=persona_id)
+        ],
         name_like=f"%{wanted}%",
         own_bots=await find_bot_names_for_persona(persona_id),
     )

@@ -22,14 +22,14 @@ import app.data.session as session_mod
 from app.data.models import Base, CommonConversation, CommonMessage
 from app.data.queries.messages import (
     find_conversation_window,
-    find_file_items_in_persona_conversations,
+    find_file_items_in_conversations,
     find_messages_by_outbound_ids,
     find_messages_known_through,
     find_newest_unread_summons,
     find_recall_state_by_outbound_ids,
     find_unread_senders,
     find_unread_summary,
-    search_persona_conversations_by_name,
+    search_conversations_by_name,
 )
 from app.data.queries.persona import (
     find_bot_names_for_persona,
@@ -604,12 +604,23 @@ async def test_a_recalled_line_is_gone_from_what_she_knows(bot_db):
 # ---------------------------------------------------------------------------
 # 按名字找回一条会话
 # ---------------------------------------------------------------------------
+#
+# 这两批查询**不自己算她有哪些会话**，集合由调用方给定。所以「不越出她的手机」这件
+# 事在这里表现为「集合里没有它就查不到」，而集合本身对不对由
+# ``find_conversations_with_persona_bot`` 那批用例管。
+
+
+async def _her_conversations() -> list[dict]:
+    """她手机上的会话集合——两批查询的入参，就是上面那个查询的出参。"""
+    return await find_conversations_with_persona_bot("akao")
 
 
 async def test_a_group_is_found_by_its_title(bot_db):
     await _seed_her_phone()
-    rows = await search_persona_conversations_by_name(
-        persona_id="akao", name_like="%实验%", own_bots=["chiwei", "chiwei-dev"]
+    rows = await search_conversations_by_name(
+        conversations=await _her_conversations(),
+        name_like="%实验%",
+        own_bots=["chiwei", "chiwei-dev"],
     )
     assert [str(r["channel_id"]) for r in rows] == [str(_GROUP)]
 
@@ -618,8 +629,10 @@ async def test_a_direct_conversation_is_found_by_who_spoke_in_it(bot_db):
     """私聊多半没有标题，只查标题等于查不到人。"""
     await _seed_her_phone()
     await _message(_DM, at=_at(9), who="bezhai")
-    rows = await search_persona_conversations_by_name(
-        persona_id="akao", name_like="%bezhai%", own_bots=["chiwei", "chiwei-dev"]
+    rows = await search_conversations_by_name(
+        conversations=await _her_conversations(),
+        name_like="%bezhai%",
+        own_bots=["chiwei", "chiwei-dev"],
     )
     assert [str(r["channel_id"]) for r in rows] == [str(_DM)]
     assert list(rows[0]["matched"]) == ["bezhai"]
@@ -631,17 +644,41 @@ async def test_her_own_name_does_not_match_a_conversation(bot_db):
     await _message(
         _DM, at=_at(9), role="assistant", bot_name="chiwei", who="赤尾"
     )
-    rows = await search_persona_conversations_by_name(
-        persona_id="akao", name_like="%赤尾%", own_bots=["chiwei", "chiwei-dev"]
+    rows = await search_conversations_by_name(
+        conversations=await _her_conversations(),
+        name_like="%赤尾%",
+        own_bots=["chiwei", "chiwei-dev"],
     )
     assert rows == []
 
 
-async def test_the_search_never_leaves_her_own_phone(bot_db):
+async def test_the_search_never_leaves_the_given_set(bot_db):
+    """集合外的会话查不到 —— 哪怕名字对得上、哪怕她的 bot 其实在里面。
+
+    这条是白名单能落住的前提：闸收窄了集合，这只手就必须跟着窄。
+    """
     await _seed_her_phone()
-    await _message(_NOT_HERS, at=_at(9), who="bezhai", scope="group")
-    rows = await search_persona_conversations_by_name(
-        persona_id="akao", name_like="%bezhai%", own_bots=["chiwei", "chiwei-dev"]
+    await _message(_GROUP, at=_at(9), who="bezhai")
+    await _message(_DM, at=_at(9), who="bezhai")
+    only_dm = [c for c in await _her_conversations() if str(c["channel_id"]) == str(_DM)]
+    rows = await search_conversations_by_name(
+        conversations=only_dm,
+        name_like="%bezhai%",
+        own_bots=["chiwei", "chiwei-dev"],
+    )
+    assert [str(r["channel_id"]) for r in rows] == [str(_DM)]
+
+
+async def test_an_empty_set_finds_nothing_rather_than_everything(bot_db):
+    """空集合是"一条都不许"，不是"不过滤"。
+
+    这条 fail-closed 是安全边界：写成"空集合=不加限制"的话，白名单算出空名单那一
+    刻她反而拿回了全部会话。
+    """
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), who="bezhai")
+    rows = await search_conversations_by_name(
+        conversations=[], name_like="%bezhai%", own_bots=["chiwei", "chiwei-dev"]
     )
     assert rows == []
 
@@ -663,7 +700,7 @@ _FILE_CONTENT = [
 async def test_a_file_sent_to_her_is_found_with_its_original_name(bot_db):
     await _seed_her_phone()
     await _message(_DM, at=_at(9), who="bezhai", content=_FILE_CONTENT)
-    rows = await find_file_items_in_persona_conversations("akao")
+    rows = await find_file_items_in_conversations(await _her_conversations())
     assert len(rows) == 1
     assert rows[0]["file_key"] == "file_v3_abc"
     assert rows[0]["file_name"] == "沉默的大多数.epub"
@@ -678,7 +715,7 @@ async def test_a_recalled_file_is_reported_not_filtered(bot_db):
     await _message(
         _DM, at=_at(9), content=_FILE_CONTENT, recalled_at=_at(9, 1)
     )
-    rows = await find_file_items_in_persona_conversations("akao")
+    rows = await find_file_items_in_conversations(await _her_conversations())
     assert len(rows) == 1
     assert rows[0]["still_gettable"] is False
 
@@ -686,21 +723,34 @@ async def test_a_recalled_file_is_reported_not_filtered(bot_db):
 async def test_a_message_without_a_file_item_is_not_a_file(bot_db):
     await _seed_her_phone()
     await _message(_DM, at=_at(9), content=[{"kind": "image", "key": "img_1"}])
-    assert await find_file_items_in_persona_conversations("akao") == []
+    assert await find_file_items_in_conversations(await _her_conversations()) == []
 
 
-async def test_files_from_conversations_that_are_not_hers_stay_out(bot_db):
+async def test_files_outside_the_given_set_stay_out(bot_db):
+    """集合外那条会话里的文件读不到 —— 连文件名和它发在哪都不该露出来。"""
     await _seed_her_phone()
-    await _message(_NOT_HERS, at=_at(9), content=_FILE_CONTENT, scope="group")
-    assert await find_file_items_in_persona_conversations("akao") == []
+    await _message(_GROUP, at=_at(9), content=_FILE_CONTENT, scope="group")
+    only_dm = [c for c in await _her_conversations() if str(c["channel_id"]) == str(_DM)]
+    assert await find_file_items_in_conversations(only_dm) == []
+
+
+async def test_an_empty_set_yields_no_files(bot_db):
+    """同上一条 fail-closed：空集合不是"不过滤"。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), content=_FILE_CONTENT)
+    assert await find_file_items_in_conversations([]) == []
 
 
 async def test_two_bots_in_one_conversation_do_not_double_a_file(bot_db):
-    """一个 persona 名下挂着好几个 bot，不去重同一个文件就会列好几遍。"""
+    """一个 persona 名下挂着好几个 bot，不去重同一个文件就会列好几遍。
+
+    集合由调用方给定之后这条仍要成立：``find_conversations_with_persona_bot`` 已经
+    按会话聚合过一次，所以传进来的集合里一条会话只有一行。
+    """
     await _seed_her_phone()
     await _present(_DM, "chiwei-dev")
     await _message(_DM, at=_at(9), content=_FILE_CONTENT)
-    assert len(await find_file_items_in_persona_conversations("akao")) == 1
+    assert len(await find_file_items_in_conversations(await _her_conversations())) == 1
 
 
 async def test_files_come_back_newest_first(bot_db):
@@ -713,7 +763,7 @@ async def test_files_come_back_newest_first(bot_db):
             {"kind": "file", "key": "file_v3_zzz", "meta": {"file_name": "新的.txt"}}
         ],
     )
-    rows = await find_file_items_in_persona_conversations("akao")
+    rows = await find_file_items_in_conversations(await _her_conversations())
     assert [r["file_key"] for r in rows] == ["file_v3_zzz", "file_v3_abc"]
 
 

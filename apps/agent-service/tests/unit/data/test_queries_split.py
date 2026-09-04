@@ -21,8 +21,8 @@ EXPECTED_FUNCTIONS = {
     # app.living 读公共层的那批查询收口进来的)
     "find_unread_summary", "find_unread_senders",
     "find_newest_unread_summons", "find_conversation_window",
-    "find_messages_known_through", "search_persona_conversations_by_name",
-    "find_file_items_in_persona_conversations",
+    "find_messages_known_through", "search_conversations_by_name",
+    "find_file_items_in_conversations",
     "find_messages_by_outbound_ids", "find_recall_state_by_outbound_ids",
 }
 

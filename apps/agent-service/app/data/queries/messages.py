@@ -30,8 +30,8 @@ __all__ = [
     "find_newest_unread_summons",
     "find_conversation_window",
     "find_messages_known_through",
-    "search_persona_conversations_by_name",
-    "find_file_items_in_persona_conversations",
+    "search_conversations_by_name",
+    "find_file_items_in_conversations",
     "find_messages_by_outbound_ids",
     "find_recall_state_by_outbound_ids",
 ]
@@ -129,24 +129,42 @@ _STILL_UNREAD = f"""(
 _VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
 
 
-# 她自己那些 bot 还在的那些会话。跟
-# :func:`app.data.queries.persona.find_conversations_with_persona_bot` 同一条口径，
-# 但**内联在语句里**：这两条查询各要一次单条语句（下面两处的理由各不相同），把会话
-# 集合拆出去查会变成两个快照。
-_HER_CONVERSATIONS_CTE = """
-  SELECT cc.common_conversation_id AS channel_id,
-         cc.scope                  AS scope,
-         COALESCE(cc.display_name, '') AS title
-    FROM common_bot_presence bp
-    JOIN bot_config bc
-      ON bc.bot_name = bp.bot_name
-     AND bc.persona_id = :persona_id
-     AND bc.is_active = true
-    JOIN common_conversation cc
-      ON cc.common_conversation_id = bp.common_conversation_id
-     AND cc.is_active = true
-   WHERE bp.is_active = true
+# 下面两条查询各自要在"某一批会话"里找东西。那批会话**由调用方给定**，不在这里算。
+#
+# 一度是在语句里内联一份 :func:`app.data.queries.persona.find_conversations_with_persona_bot`
+# 的手抄副本，理由是"一条语句一个快照"。代价是同一条口径有了两份实现，而**可达性有
+# 几个来源，白名单就要落几处闸** —— 收窄了主路而这两条照旧，她仍然能按名字搜出集合
+# 外的地址、读到集合外的文件。所以副本删掉，集合从外面传进来。
+#
+# 换来的代价是快照从一个变成两个：先定集合、再查消息，中间 bot 被移出会话的话结果里
+# 会多一条刚失效的。可以接受 —— bot 进出会话是人工操作、不是每秒发生的事，而且真要
+# 把话发出去还得再过一次实时校验。
+#
+# **空集合就是空结果**，不是"不加限制"。这条 fail-closed 由 ``UNNEST`` 天然给出（空
+# 数组展开成零行），但它是安全边界，所以两条查询各有一个用例钉着。
+_GIVEN_CONVERSATIONS_CTE = """
+  SELECT * FROM UNNEST(
+      CAST(:channel_ids AS uuid[]),
+      CAST(:scopes      AS text[]),
+      CAST(:titles      AS text[])
+  ) AS given(channel_id, scope, title)
 """
+
+
+def _unzip_conversations(
+    conversations: list[dict],
+) -> dict[str, list[str]]:
+    """把会话集合拆成三个平行数组，喂给 :data:`_GIVEN_CONVERSATIONS_CTE`。
+
+    入参的形状就是 :func:`app.data.queries.persona.find_conversations_with_persona_bot`
+    的出参（多余的键忽略）—— 两条查询的入口和那个查询的出口对得上，调用方不需要在
+    中间翻译一道。
+    """
+    return {
+        "channel_ids": [str(c["channel_id"]) for c in conversations],
+        "scopes": [str(c["scope"]) for c in conversations],
+        "titles": [str(c.get("title") or "") for c in conversations],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -457,8 +475,8 @@ async def find_messages_known_through(
 # 名字是同一个）。私聊会话本身多半没有标题：prod 实测 205 条私聊里 158 条
 # ``display_name`` 是空的，所以只查标题等于查不到人。
 #
-# 只在她手机上的会话里找（:data:`_HER_CONVERSATIONS_CTE`）—— 查出来的地址必须是她
-# 真能用的，否则这只手只是把 fail-loud 从"找不到"推迟到"发不出去"。
+# 只在调用方给的那批会话里找（:data:`_GIVEN_CONVERSATIONS_CTE`）—— 查出来的地址必须
+# 是她真能用的，否则这只手只是把 fail-loud 从"找不到"推迟到"发不出去"。
 #
 # **匹配的是 ``sender_display_name``，不是 ``common_user.display_name``。** 后者有索引、
 # 表也小（prod 12973 行），但她从来没见过那个名字：信封和会话正文给她看的"谁"全都是
@@ -472,8 +490,7 @@ async def find_messages_known_through(
 # 找不回久没联系的人。
 _LOOK_UP_SQL = f"""
 WITH mine AS (
-{_HER_CONVERSATIONS_CTE}
-   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
+{_GIVEN_CONVERSATIONS_CTE}
 ),
 matched AS (
   SELECT cm.common_conversation_id AS channel_id,
@@ -499,13 +516,18 @@ HAVING m.title ILIKE :name_like OR COUNT(x.who) > 0
 """
 
 
-async def search_persona_conversations_by_name(
+async def search_conversations_by_name(
     *,
-    persona_id: str,
+    conversations: list[dict],
     name_like: str,
     own_bots: list[str],
 ) -> list[dict]:
-    """这个 persona 手机上、名字对得上 ``name_like`` 的那些会话。
+    """``conversations`` 里名字对得上 ``name_like`` 的那些。
+
+    集合由调用方给定（形状同
+    :func:`app.data.queries.persona.find_conversations_with_persona_bot` 的出参），
+    这条查询**不自己算她有哪些会话** —— 理由见 :data:`_GIVEN_CONVERSATIONS_CTE`。
+    集合为空就返回空。
 
     ``name_like`` 是完整的 ``ILIKE`` 模式（调用方自己加 ``%``）。群按标题匹配，
     私聊按在里面说过话的人匹配 —— 私聊多半没有标题，只查标题等于查不到人。
@@ -516,7 +538,7 @@ async def search_persona_conversations_by_name(
             await current_session().execute(
                 text(_LOOK_UP_SQL),
                 {
-                    "persona_id": persona_id,
+                    **_unzip_conversations(conversations),
                     "name_like": name_like,
                     "own_bots": own_bots,
                 },
@@ -558,8 +580,7 @@ async def search_persona_conversations_by_name(
 # 到了，谁撤的都一样。
 _SENT_FILES_SQL = f"""
 WITH hers AS (
-{_HER_CONVERSATIONS_CTE}
-   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
+{_GIVEN_CONVERSATIONS_CTE}
 )
 SELECT DISTINCT
        CAST(cm.common_message_id AS text)       AS message_id,
@@ -583,10 +604,14 @@ SELECT DISTINCT
 """
 
 
-async def find_file_items_in_persona_conversations(
-    persona_id: str,
+async def find_file_items_in_conversations(
+    conversations: list[dict],
 ) -> list[dict]:
-    """这个 persona 手机上的会话里，别人发过的每一个文件项，最近的在前。
+    """``conversations`` 里别人发过的每一个文件项，最近的在前。
+
+    集合由调用方给定，这条查询不自己算她有哪些会话（同
+    :func:`search_conversations_by_name`）。集合为空就返回空 —— 一条会话不在集合里，
+    连它里面有什么文件、文件叫什么名字、发在哪都不该露出来。
 
     **撤回掉的也在里面**，带着 ``still_gettable=False`` —— 撤回改变的是"现在还能不能
     拿到"，不是"有没有发生过"。谁看得到它、谁读得起它由调用方定。
@@ -594,7 +619,7 @@ async def find_file_items_in_persona_conversations(
     async with auto_tx():
         rows = (
             await current_session().execute(
-                text(_SENT_FILES_SQL), {"persona_id": persona_id}
+                text(_SENT_FILES_SQL), _unzip_conversations(conversations)
             )
         ).mappings().all()
     return [dict(r) for r in rows]

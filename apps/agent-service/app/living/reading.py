@@ -63,11 +63,12 @@ from sqlalchemy import text
 from app.agent.reading import run_reading_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.data.queries.messages import find_file_items_in_persona_conversations
+from app.data.queries.messages import find_file_items_in_conversations
 from app.data.session import get_session
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
+from app.living.phone import reachable_conversations
 from app.living.records import _require_aware
 from app.living.scope import moment_scope
 from app.runtime.data import Data, Key, Version
@@ -201,8 +202,9 @@ def _where_of(scope: str, title: str, who: str) -> str:
 async def files_sent_to(*, persona_id: str) -> list[SentFile]:
     """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。
 
-    会话集合跟 :func:`app.living.phone.reachable_conversations` 同一条口径（她自己
-    的 bot 还在的那些）：**她读得到的严格等于她收得到的**。
+    会话集合**就是** :func:`app.living.phone.reachable_conversations` 那一份（不是
+    "同一条口径的另一份实现"，是同一个调用的结果传进查询）：**她读得到的严格等于她
+    收得到的**。
 
     **撤回掉的也在里面**，带着 ``still_gettable=False``。谁看得到它、谁读得起它由
     调用方定（理由写在
@@ -210,7 +212,12 @@ async def files_sent_to(*, persona_id: str) -> list[SentFile]:
     拿得到的，:func:`look_for_something_to_read` 把她读过的照常摆出来、只是不给可
     执行的句柄。
     """
-    rows = await find_file_items_in_persona_conversations(persona_id)
+    rows = await find_file_items_in_conversations(
+        [
+            {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
+            for c in await reachable_conversations(persona_id=persona_id)
+        ]
+    )
     return [
         SentFile(
             attachment_id=derive_attachment_id(
