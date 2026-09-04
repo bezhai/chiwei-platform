@@ -14,7 +14,7 @@ def _reload_admin_wiring():
 
     Reload the admin submodule directly: importlib.reload(parent_package)
     doesn't re-execute submodules because the names are already cached
-    in sys.modules. Mirrors the pattern in test_safety_wiring.py /
+    in sys.modules. Mirrors the pattern in test_outbound_wiring.py /
     test_memory.py.
     """
     import app.wiring.admin as a

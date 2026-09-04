@@ -5,7 +5,7 @@ live in ``tests/runtime/conftest.py``. pytest only auto-discovers conftest
 fixtures along the path from rootdir to the test file, so tests under
 ``tests/life/`` cannot see them directly. Re-export here keeps the fixture
 definition single-sourced under ``tests/runtime/`` while making it visible
-to life tests too (mirrors ``tests/world/conftest.py``).
+to life tests too.
 """
 from __future__ import annotations
 

@@ -24,7 +24,6 @@
   * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标
   * :mod:`app.living.mouth`       嘴：把她的意思渲染成人话发出去（**没有入口**）
   * :mod:`app.living.nudge`       有人叫她就提前一缝，但不代她回复
-  * :mod:`app.living.experiment`  这批代码允许在哪个泳道上自己跑起来
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 

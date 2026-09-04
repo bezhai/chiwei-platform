@@ -464,11 +464,10 @@ async def _complete_turn(
     flow below this call — the caller gets whatever ``Message`` the last
     attempt produced (possibly still empty), exactly as it always has. Only a
     warning log marks the exhaustion, so this never introduces a new exception
-    type or return shape: raising here would let the exception escape into
-    ``app.chat.render.render_chat_turn``'s broad ``except Exception`` (default
-    ``on_error="yield_text"``), which turns ANY non-``RenderFailed`` exception
-    into user-facing error text — exactly the "send something anyway" outcome
-    this fix exists to prevent.
+    type or return shape: raising here would let the exception escape into a
+    caller's broad ``except Exception``, which would turn it into user-facing
+    error text — exactly the "send something anyway" outcome this fix exists
+    to prevent.
     """
     last = await model.complete(convo, tools=tool_defs, **call_kwargs)
     attempts = 1

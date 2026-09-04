@@ -43,20 +43,21 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     import importlib
 
     import app.deployment as d
-    import app.wiring.chat as cw
+    import app.wiring.living as lw
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(cw)
+    importlib.reload(lw)
     importlib.reload(d)
 
     g = load_dataflow_graph()
-    # chat ingress nodes ride the production wiring
+    # living 的钟骑在生产 wiring 上
     assert {n.__name__ for n in g.nodes} >= {
-        "route_chat_node",
-        "chat_node",
+        "calendar_tick",
+        "world_round_tick",
+        "life_moment_tick",
     }
 
 
@@ -85,11 +86,10 @@ async def test_declare_durable_topology_declares_no_route_without_durable_wire()
 async def test_a_process_with_only_outbound_mq_can_still_publish():
     """A process whose every ``Source.mq`` is gone still needs its exchange.
 
-    This is not hypothetical. The living-engine experiment lane registers
-    four interval sources and zero MQ consumers, and its old-engine wires
-    are gated off -- so ``WIRING_REGISTRY`` holds no durable wire at all.
-    It still emits ``ChatResponseSegment`` to the channel worker, and
-    without the exchange every one of those publishes died with
+    This is not hypothetical. The living engine registers interval sources
+    and zero MQ consumers, so a process can end up holding no durable wire
+    at all. It still emits ``ChatResponseSegment`` to the channel worker,
+    and without the exchange every one of those publishes died with
     ``RuntimeError: must call declare_topology() first``: she could hear
     but not speak.
     """

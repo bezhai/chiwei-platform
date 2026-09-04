@@ -140,7 +140,7 @@ async def load_day_schedule() -> tuple[DaySlot, ...]:
     """读这个家的时刻表。
 
     Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免
-    缓存刷新那一次阻塞事件循环（与 :mod:`app.world.daylight` 同口径）。
+    缓存刷新那一次阻塞事件循环（与包里别处读 Dynamic Config 同口径）。
     """
     raw = await asyncio.to_thread(
         dynamic_config.get, LIVING_DAY_SCHEDULE_KEY, default=""

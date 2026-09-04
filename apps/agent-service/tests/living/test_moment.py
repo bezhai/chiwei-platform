@@ -1406,9 +1406,9 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
     """一缝的 token 用量要落 durable PG，不能只指望 langfuse。
 
     ``app.agent.trace`` 里写着实测结论：langfuse **会系统性丢 trace**（这次实测
-    整夜 225 缝只到了 125 条，丢 44%），所以「真相在 PG」——旧引擎
-    (``app.world.engine``) 用 ``collect_usage`` 包住 run、``record_round_cost``
-    落库，新引擎一开始漏了这一刀，于是「一晚上花了多少」根本查不出来。
+    整夜 225 缝只到了 125 条，丢 44%），所以「真相在 PG」——用 ``collect_usage``
+    包住 run、``record_round_cost`` 落库。这一刀一开始漏了，于是「一晚上花了多少」
+    根本查不出来。
     """
     from app.domain.thinking_cost import ThinkingTokensSpent
     from app.runtime.persist import select_all_versions

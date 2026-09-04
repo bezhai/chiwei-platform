@@ -1,9 +1,17 @@
 """Agent tool sets.
 
-Exports two tool lists:
+``BASE_TOOLS`` / ``ALL_TOOLS`` 两份工具清单随旧 chat 一起删除：装配它们的唯一
+调用方是旧 chat 的渲染层（``Agent(cfg, tools=ALL_TOOLS)``）。living 引擎
+不用成套的清单——它在每个场景各自 ``@tool`` 声明自己那一把（``app.living.moment``
+/ ``mouth`` / ``phone`` / ``web`` ...），要哪个给哪个。
 
-- ``BASE_TOOLS`` — available to all agents including sub-agents.
-- ``ALL_TOOLS`` — only for the main agent.
+包本身留着，而且不只为下面这几个：``_common`` / ``outcome`` / ``search`` 三个模块
+是 ``app.living`` 直接在用的（``tool_error``、``ToolOutcomeError``、``search_web``）。
+
+下面这几个具名工具**目前没有任何生产调用方**——它们原先只经上面那两份清单进旧
+chat 的主 agent。留着是因为它们是自成一体的能力（生图 / 找图 / 沙箱 / 转派 / 载入
+skill / 不回复），不是旧引擎的一部分；接进 living 只需要在用它的场景里 import。
+要是决定不接了，连同 ``app.capabilities`` 里对应的适配器一起删。
 """
 
 from app.agent.tools.delegation import deep_research
@@ -14,27 +22,7 @@ from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
 from app.agent.tools.skill import load_skill
 
-# Base tools: available to all agents (including sub-agents like research)
-BASE_TOOLS = [
-    search_web,
-    search_images,
-    generate_image,
-    read_images,
-]
-
-# All tools: only for the main agent.
-ALL_TOOLS = [
-    *BASE_TOOLS,
-    deep_research,
-    load_skill,
-    sandbox_bash,
-    no_reply,
-]
-
 __all__ = [
-    "BASE_TOOLS",
-    "ALL_TOOLS",
-    # Individual tools (for callers that need fine-grained control)
     "search_web",
     "search_images",
     "generate_image",

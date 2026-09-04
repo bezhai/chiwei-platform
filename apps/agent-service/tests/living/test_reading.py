@@ -822,7 +822,8 @@ def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
     那条"实验泳道上一条 mq / http 源都没有"照旧成立。这条边上跑的东西只有她自己
     刚刚在某一缝里拿起的那个文件，投递方和消费方都是这一个进程。
 
-    同时钉住这条边只在实验泳道上挂：新引擎的东西不许在别的泳道自己跑起来。
+    同时钉住这条边在每条泳道上都挂着：挂边跟泳道名无关（那道按泳道名分流的门随
+    旧实现一起删掉了）。
     """
     pairs = (
         "from app.runtime.wire import WIRING_REGISTRY;"
@@ -840,9 +841,8 @@ def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
     assert "FilePickedUp" not in sources, (
         f"读一程那条边挂上了 source —— 那就是个信箱了。拿到：{sources}"
     )
-    assert "FilePickedUp" not in off_lane, (
-        f"读一程在实验泳道之外挂上了 —— 新引擎不该在别的泳道自己跑起来。"
-        f"拿到：{off_lane}"
+    assert "('FilePickedUp', 'read_a_round')" in off_lane, (
+        f"读一程在别的泳道上不见了 —— 挂边不该看泳道名。拿到：{off_lane}"
     )
 
 

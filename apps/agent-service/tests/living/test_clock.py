@@ -70,38 +70,42 @@ def test_the_world_round_ledger_reaches_the_registry_via_app_wiring():
     )
 
 
-def test_both_clocks_are_wired_to_an_interval_source_on_a_coe_lane():
-    out = _in_a_fresh_process(_TICK_WIRES, lane="coe-living")
+def test_both_clocks_are_wired_to_an_interval_source():
+    out = _in_a_fresh_process(_TICK_WIRES)
     assert "CalendarTick" in out and "calendar_tick" in out, out
     assert "WorldRoundTick" in out and "world_round_tick" in out, out
     assert out.count("'interval'") == 3, (
-        f"coe 泳道上三条钟该全挂上时间源 —— 世界不会自己走。拿到：{out}"
+        f"三条钟该全挂上时间源 —— 世界不会自己走。拿到：{out}"
     )
 
 
 @pytest.mark.parametrize(
     "lane", [None, "prod", "ppe-something", "blue", "coe-somethingelse"]
 )
-def test_the_living_clocks_do_not_exist_outside_the_experiment_lane(lane):
-    """**这条是实验的边界，不是行为开关。**
+def test_the_living_clocks_are_wired_on_every_lane(lane):
+    """挂钟跟泳道无关：泳道是部署位置，不是功能身份。
 
-    runtime 在 prod 上默认**启用**时间源（``lane_policy.time_sources_enabled_by_
-    default``），而 ``living_lane()`` 又回落到 ``prod``。所以这三条 wire 一旦无条件
-    注册，这个分支合进 main、prod 一发版，world 加三个 life 就在 prod 库上直接开跑：
-    建表、写数据、烧模型钱 —— 正面违反 spec 的 Non-goal「不替换 prod」。
+    这里曾经是一道反向的门 —— 五条钟只在一条写死的实验泳道上注册，为的是让
+    重写前后的两套引擎不在同一个泳道上互相打架。旧实现删掉之后只剩一套代码，
+    那道门就没有存在理由了，连同它在 ``app/living/experiment.py`` 里的判据一起
+    删除。这条用例守的是它不要回来：源码里出现任何"当前泳道是不是 X"的分支来
+    决定钟挂不挂，这里就红。
 
-    表还是会被 ``migrate_schema()`` 在所有 lane 建出来，那个拦不住也无害（空表）；
-    拦得住的是**有没有人往里写**。
+    真正该按环境开关的是**时间源要不要转**，那由 framework 的
+    ``lane_policy.time_sources_enabled_by_default`` 管（非 prod 泳道默认不转，
+    防止和 prod 双跑），是部署配置，不是源码常量。
     """
     out = _in_a_fresh_process(_TICK_WIRES, lane=lane)
-    assert out.strip() == "[]", (
-        f"泳道 {lane!r} 上挂着 living 的时间源 —— prod 一发版她们就自己跑起来了。"
-        f"拿到：{out}"
+    assert "CalendarTick" in out and "WorldRoundTick" in out, (
+        f"泳道 {lane!r} 上 living 的时间源不见了 —— 挂钟不该看泳道名。拿到：{out}"
+    )
+    assert out.count("'interval'") == 3, (
+        f"泳道 {lane!r} 上三条钟没全挂上。拿到：{out}"
     )
 
 
-def test_the_living_data_still_reaches_the_registry_outside_the_experiment_lane():
-    """只拦钟，不拦建表：Data 注册跟泳道无关，别把两件事绑一起。"""
+def test_the_living_data_reaches_the_registry_on_every_lane():
+    """注册 Data 和挂钟是两件事，别绑一起。"""
     out = _in_a_fresh_process(
         "from app.runtime.data import DATA_REGISTRY;"
         "print(sorted(c.__name__ for c in DATA_REGISTRY))",
